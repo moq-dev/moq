@@ -15,7 +15,7 @@ import { isLeadingOnes, type StreamVersion } from "./stream.ts";
 /**
  * One relay's identity in a broadcast's hop chain: any 64-bit id.
  *
- * Names a *hop*, not an {@link !Origin | Origin} routing table: this is the id a relay
+ * Names a *hop*, not an `Origin` routing table: this is the id a relay
  * stamps into a chain as an announcement passes through, so a receiver can spot its own
  * id and reject a loop. The SETUP parameter that carries it session-wide is `Hop` too.
  *

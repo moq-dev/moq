@@ -32,7 +32,3 @@ Public API: additive, gauge fields on the `#[non_exhaustive]`
 `moq_uring::metrics::Snapshot`, whose docs stop calling every field
 cumulative, and matching `moq_relay_uring_*` gauges on the relay's
 `/metrics`. Wire: none.
-
-## Required
-
-- [Profile the io_uring workers](/quest/m2/perf/uring-profile.md) - the recipe this measures with

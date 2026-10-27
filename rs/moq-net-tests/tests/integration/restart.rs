@@ -526,6 +526,62 @@ retired_fetch_tests! {
 	retired_fetch_ietf22: "moq-transport-22",
 }
 
+/// An epochless SUBSCRIBE names no instance, so until the publisher answers it, it may have
+/// resolved whichever instance won the path. Unanswered when its instance is replaced, it is
+/// refused, even if the publisher had resolved it on the old one, rather than risk filling
+/// the old instance from the replacement.
+async fn unanswered_takeover(version: &str) {
+	let version: Version = version.parse().unwrap();
+	let publisher = produce_origin(1);
+	let viewer = produce_origin(2);
+	let _session = link(version, &publisher, &viewer).await;
+	let old = publisher.publish("live", origin::Route::default()).unwrap();
+	// Quiet, so the publisher has nothing to answer the SUBSCRIBE with yet.
+	let old_track = old.create_track("video", timed()).unwrap();
+	let mut announced = viewer.consume().announced();
+	assert!(matches!(next_event(&mut announced).await, announce::Event::Start(_)));
+	let (_held, mut subscription) = subscribe(&viewer, "live").await;
+	settle().await;
+	assert!(
+		old_track.subscription().is_some(),
+		"{version}: the SUBSCRIBE reached the old instance"
+	);
+
+	let replacement = publisher.publish("live", origin::Route::default()).unwrap();
+	let replacement_track = replacement.create_track("video", timed()).unwrap();
+	write(&replacement_track, "new:0");
+	expect_restart(version, &mut announced, "live").await;
+	write(&old_track, "old:0");
+
+	let next = moq_clock::timeout(Duration::from_secs(10), subscription.recv_group())
+		.await
+		.expect("subscription hung");
+	match next {
+		Err(err) => assert!(matches!(err, moq_net::Error::Unroutable), "{version}: {err}"),
+		Ok(group) => panic!(
+			"{version}: the replaced instance's SUBSCRIBE went on: {:?}",
+			group.map(|group| group.sequence)
+		),
+	}
+}
+
+macro_rules! unanswered_takeover_tests {
+	($($name:ident: $version:literal,)*) => { $(
+		#[moq_clock::test]
+		async fn $name() {
+			moq_clock::timeout(TEST_TIMEOUT, unanswered_takeover($version)).await.expect("timed out");
+		}
+	)* };
+}
+
+// moq-transport answers a SUBSCRIBE at once, before any group, and its subscriber already
+// waits for that answer.
+unanswered_takeover_tests! {
+	unanswered_takeover_lite05: "moq-lite-05",
+	unanswered_takeover_lite06: "moq-lite-06",
+	unanswered_takeover_lite07: "moq-lite-07-wip",
+}
+
 #[moq_clock::test]
 async fn retired_fetch_explicit_epoch_control() {
 	moq_clock::timeout(TEST_TIMEOUT, retired_fetch("moq-lite-07-wip", true))

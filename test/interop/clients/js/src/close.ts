@@ -32,21 +32,13 @@ export async function refused(relay: string): Promise<CloseState> {
 	);
 
 	// @moq/net only drives the handshake far enough for the relay to decide; the close it reports
-	// is not what this checks. It takes a supplied transport as already connected.
-	const admitted = transport.ready
+	// is not what this checks. A moq-lite session is established before the relay's verdict, so
+	// the verdict is the close alone, and a relay that admits the token leaves this to time out.
+	transport.ready
 		.then(() => Connection.connect({ url, transport }))
-		.then(
-			(session): CloseState => {
-				session.abort();
-				return { error: "the relay admitted a refused token" };
-			},
-			(err: unknown) => {
-				console.log(`connect failed: ${String(err)}`);
-				return closed;
-			},
-		);
+		.catch((err: unknown) => console.log(`connect failed: ${String(err)}`));
 
-	return Promise.race([closed, admitted]);
+	return closed;
 }
 
 /** A WebSocket refusal reaches the reconnecting handle as a terminal session error. */

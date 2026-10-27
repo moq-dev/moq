@@ -217,63 +217,32 @@ impl Server {
 		))
 	}
 
-	async fn handshake_lite(&self, runtime: Deadlines, mut session: Transport) -> Result<Handshake, Error> {
-		let (path, role, origin, peer_implementation, handshake) = match session.protocol() {
-			Some(alpn @ (ALPN_LITE_05 | ALPN_LITE_06 | ALPN_LITE_07_WIP)) => {
-				let version = match alpn {
-					ALPN_LITE_07_WIP => lite::Version::Lite07,
-					ALPN_LITE_06 => lite::Version::Lite06,
-					_ => lite::Version::Lite05,
-				};
-				self.versions.select(Version::Lite(version)).ok_or(Error::Version)?;
-				// Gate on the client's SETUP: read it before serving so the
-				// caller can scope by the advertised path. Seeded back into
-				// `start` on `ok()` so PROBE gating resolves without
-				// re-reading the (consumed) Setup Stream.
-				let client_setup = lite::accept_setup(&mut session, version).await?;
-				(
-					client_setup.setup.path.clone(),
-					client_setup.setup.role,
-					client_setup.setup.hop,
-					client_setup.setup.implementation.clone(),
-					PausedHandshake::LiteSetup {
-						session,
-						version,
-						client_setup,
-					},
-				)
-			}
-			Some(ALPN_LITE_04) => {
-				self.versions
-					.select(Version::Lite(lite::Version::Lite04))
-					.ok_or(Error::Version)?;
-				(
-					None,
-					None,
-					None,
-					None,
-					PausedHandshake::LiteBare {
-						session,
-						version: lite::Version::Lite04,
-					},
-				)
-			}
-			Some(ALPN_LITE_03) => {
-				self.versions
-					.select(Version::Lite(lite::Version::Lite03))
-					.ok_or(Error::Version)?;
-				(
-					None,
-					None,
-					None,
-					None,
-					PausedHandshake::LiteBare {
-						session,
-						version: lite::Version::Lite03,
-					},
-				)
-			}
-			_ => return Err(Error::Version),
+	async fn handshake_lite(
+		&self,
+		runtime: Deadlines,
+		mut session: Transport,
+		version: lite::Version,
+	) -> Result<Handshake, Error> {
+		self.versions.select(Version::Lite(version)).ok_or(Error::Version)?;
+		let (path, role, origin, peer_implementation, handshake) = if version.has_setup_stream() {
+			// Gate on the client's SETUP: read it before serving so the
+			// caller can scope by the advertised path. Seeded back into
+			// `start` on `ok()` so PROBE gating resolves without
+			// re-reading the (consumed) Setup Stream.
+			let client_setup = lite::accept_setup(&mut session, version).await?;
+			(
+				client_setup.setup.path.clone(),
+				client_setup.setup.role,
+				client_setup.setup.hop,
+				client_setup.setup.implementation.clone(),
+				PausedHandshake::LiteSetup {
+					session,
+					version,
+					client_setup,
+				},
+			)
+		} else {
+			(None, None, None, None, PausedHandshake::LiteBare { session, version })
 		};
 
 		let auth = crate::auth::Link::new(match &handshake {
@@ -380,8 +349,15 @@ impl Server {
 					.ok_or(Error::Version)?;
 				(v, v.into())
 			}
-			Some(ALPN_LITE_07_WIP | ALPN_LITE_06 | ALPN_LITE_05 | ALPN_LITE_04 | ALPN_LITE_03) => {
-				return self.handshake_lite(runtime, session).await;
+			Some(alpn @ (ALPN_LITE_07_WIP | ALPN_LITE_06 | ALPN_LITE_05 | ALPN_LITE_04 | ALPN_LITE_03)) => {
+				let version = match alpn {
+					ALPN_LITE_07_WIP => lite::Version::Lite07,
+					ALPN_LITE_06 => lite::Version::Lite06,
+					ALPN_LITE_05 => lite::Version::Lite05,
+					ALPN_LITE_04 => lite::Version::Lite04,
+					_ => lite::Version::Lite03,
+				};
+				return self.handshake_lite(runtime, session, version).await;
 			}
 			Some(ALPN_LITE) | None => {
 				let supported = self.versions.filter(&NEGOTIATED.into()).ok_or(Error::Version)?;
@@ -402,6 +378,22 @@ impl Server {
 			.flat_map(|v| Version::try_from(*v).ok())
 			.find(|v| supported.contains(v))
 			.ok_or(Error::Version)?;
+
+		// Answer, close the stream, and continue as that version's ALPN would. Waiting for the
+		// acknowledgement keeps the reply from being discarded by the reset a dropped stream sends.
+		if let Version::Lite(v) = version
+			&& version.hands_off()
+		{
+			let Stream { mut writer, .. } = stream;
+			writer
+				.encode(&setup::Server {
+					version: version.into(),
+					parameters: ietf::Parameters::default().encode_bytes(ietf::Version::Draft14)?,
+				})
+				.await?;
+			writer.close().await?;
+			return self.handshake_lite(runtime, session, v).await;
+		}
 
 		// Pull the request path and max request ID out now (IETF only) so `ok()`
 		// doesn't re-decode the consumed parameters. moq-transport carries the path

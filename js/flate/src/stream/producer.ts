@@ -106,8 +106,10 @@ export class Producer {
 	}
 }
 
+/** Producer options, including the destination track. */
 type Init = Config & { track: Moq.Track.Producer };
 
+/** Types for {@link Producer}. */
 export namespace Producer {
 	/** Stream producer options, including the destination track. */
 	export type Config = Init;

@@ -19,5 +19,4 @@ export interface Frame {
     timestamp: Micro;
 }
 
-
 ```

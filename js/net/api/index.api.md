@@ -20,7 +20,7 @@ import * as z from 'zod/mini';
 function accept(input: AcceptProps): Promise<Established>;
 
 interface AcceptProps {
-    consume?: Producer_5;
+    consume?: Producer_4;
     implementation?: string;
     publish?: Consumer_5;
     transport: WebTransport;
@@ -39,24 +39,16 @@ declare namespace Announce {
     export {
         Announce_2 as Announce,
         Consumer,
-        Event_2 as Event
+        Event_2 as Event,
+        Options
     }
 }
+export { Announce }
 
 interface Announce_2 {
-    captures: Path_2.Pattern[] | undefined;
-    prefix: Path_2.Valid;
+    captures: Path.Pattern[] | undefined;
+    prefix: Path.Valid;
     route: Route;
-}
-
-declare namespace Announce_3 {
-    export {
-        Announce_2 as Announce,
-        Event_2 as Event,
-        Options,
-        Producer_4 as Producer,
-        Consumer
-    }
 }
 
 declare namespace Auth {
@@ -68,16 +60,7 @@ declare namespace Auth {
         Credential_2 as Credential
     }
 }
-
-declare namespace Auth_2 {
-    export {
-        Duplicate,
-        Handle,
-        Unsupported,
-        Grant,
-        Credential_2 as Credential
-    }
-}
+export { Auth }
 
 declare namespace Bandwidth {
     export {
@@ -86,6 +69,7 @@ declare namespace Bandwidth {
         Reservation
     }
 }
+export { Bandwidth }
 
 type Bound = {
     included: number;
@@ -103,15 +87,7 @@ declare namespace Broadcast {
         Consumer_4 as Consumer
     }
 }
-
-declare namespace Broadcast_2 {
-    export {
-        Tracks,
-        TracksEvent,
-        Producer_3 as Producer,
-        Consumer_4 as Consumer
-    }
-}
+export { Broadcast }
 
 interface CertificateHash {
     algorithm?: "sha-256";
@@ -126,8 +102,8 @@ export class Connection {
     constructor(props?: ConnectionProps);
     static readonly accept: typeof accept;
     readonly allocator: Getter<Handle_2 | undefined>;
-    announced(scope?: Path_2.Pattern, options?: Announce_3.Options): Announce_3.Consumer;
-    readonly auth: Getter<Auth_2.Handle | undefined>;
+    announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
+    readonly auth: Getter<Auth.Handle | undefined>;
     static readonly certificateHash: typeof certificateHash;
     close(abort?: Error): void;
     get closed(): GetPromise<Error | null>;
@@ -135,7 +111,7 @@ export class Connection {
     enabled: Signal<boolean>;
     readonly error: Getter<Error | undefined>;
     static readonly isWebTransportSupported: typeof isWebTransportSupported;
-    readonly origin: Getter<Origin_3.Table | undefined>;
+    readonly origin: Getter<Origin_2.Table | undefined>;
     readonly probe: Getter<Probe | undefined>;
     stats(): Promise<Stats | undefined>;
     readonly status: Getter<ReloadStatus>;
@@ -163,11 +139,11 @@ export namespace Connection {
 }
 
 interface ConnectionProps {
-    consume?: Origin_3.Producer;
+    consume?: Origin_2.Producer;
     delay?: ReloadDelay;
     enabled?: boolean | Signal<boolean>;
     goaway?: GoawayProps;
-    publish?: Origin_3.Consumer;
+    publish?: Origin_2.Consumer;
     share?: boolean;
     signal?: never;
     timeout?: Milli;
@@ -180,8 +156,8 @@ interface ConnectionProps {
 }
 
 interface ConnectProps {
-    auth?: Auth_2.Handle;
-    consume?: Producer_5;
+    auth?: Auth.Handle;
+    consume?: Producer_4;
     implementation?: string;
     publish?: Consumer_5;
     signal?: AbortSignal;
@@ -240,18 +216,18 @@ class Consumer_4 {
     clone(): Consumer_4;
     close(): void;
     get closed(): GetPromise<null>;
-    get epoch(): Epoch_2.Valid | undefined;
-    get path(): Path_2.Valid;
+    get epoch(): Epoch.Valid | undefined;
+    get path(): Path.Valid;
     protected shareState(): never;
-    track(name: string): track.Consumer;
+    track(name: string): Track.Consumer;
     tracks(): Tracks;
 }
 
 class Consumer_5 {
-    announced(scope?: Path_2.Pattern, options?: Announce_3.Options): Announce_3.Consumer;
+    announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
     get closed(): GetPromise<Error | null>;
     get discovery(): Getter<boolean | undefined>;
-    request(path: Path_2.Valid, options?: RequestOptions): Requesting;
+    request(path: Path.Valid, options?: RequestOptions): Requesting;
 }
 
 type Cost = bigint;
@@ -292,7 +268,7 @@ class Duplicate extends Error {
 
 class Dynamic {
     close(): void;
-    readonly prefix: Path_2.Valid;
+    readonly prefix: Path.Valid;
     requested(): AsyncIterableIterator<Request_3>;
     get route(): Route;
 }
@@ -316,14 +292,7 @@ declare namespace Epoch {
         Valid_2 as Valid
     }
 }
-
-declare namespace Epoch_2 {
-    export {
-        parse,
-        mint,
-        Valid_2 as Valid
-    }
-}
+export { Epoch }
 
 declare namespace Error_2 {
     export {
@@ -341,11 +310,12 @@ declare namespace Error_2 {
         TooFarBehind
     }
 }
+export { Error_2 as Error }
 
 interface Established {
     abort(): void;
-    announced(scope?: Path_2.Pattern, options?: Announce_3.Options): Announce_3.Consumer;
-    readonly auth: Auth_2.Handle;
+    announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
+    readonly auth: Auth.Handle;
     close(): Promise<void>;
     closed: Promise<Error | null>;
     readonly peerImplementation: Promise<string | undefined>;
@@ -392,8 +362,8 @@ interface GoawayProps {
 
 interface Grant {
     expires?: number;
-    publish: Path_2.Patterns;
-    subscribe: Path_2.Patterns;
+    publish: Path.Patterns;
+    subscribe: Path.Patterns;
 }
 
 declare namespace Group {
@@ -407,6 +377,7 @@ declare namespace Group {
         Consumer_2 as Consumer
     }
 }
+export { Group }
 
 interface Groups {
     end?: Bound;
@@ -495,10 +466,10 @@ type Order = "ascending" | "descending";
 class Ordered {
     close(abort?: Error): void;
     get closed(): GetPromise<Error | null>;
-    end(): Position_2 | undefined;
-    finished(): Promise<Position_2>;
+    end(): Position | undefined;
+    finished(): Promise<Position>;
     info(): Promise<Info>;
-    largest(): Promise<Position_2 | undefined>;
+    largest(): Promise<Position | undefined>;
     readonly name: string;
     nextGroup(): Promise<Consumer_2 | undefined>;
     readBool(): Promise<boolean | undefined>;
@@ -520,10 +491,11 @@ declare namespace Origin_2 {
         Cost,
         Hop,
         Route,
+        HopSchema,
         isAnonymous,
         Table,
         RequestOptions,
-        Producer_5 as Producer,
+        Producer_4 as Producer,
         Requesting,
         Consumer_5 as Consumer,
         Dynamic,
@@ -532,24 +504,7 @@ declare namespace Origin_2 {
         Prepared
     }
 }
-
-declare namespace Origin_3 {
-    export {
-        Cost,
-        Hop,
-        Route,
-        isAnonymous,
-        Table,
-        RequestOptions,
-        Producer_5 as Producer,
-        Requesting,
-        Consumer_5 as Consumer,
-        Dynamic,
-        Request_3 as Request,
-        Publication,
-        Prepared
-    }
-}
+export { Origin_2 as Origin }
 
 function parse(text: string): Valid_2;
 
@@ -580,41 +535,16 @@ declare namespace Path {
         Specificity
     }
 }
+export { Path }
 
-declare namespace Path_2 {
-    export {
-        from,
-        parts,
-        decode,
-        encode,
-        hasPrefix,
-        stripPrefix,
-        join,
-        empty,
-        normalizeRelative,
-        resolve,
-        tryResolve,
-        relative,
-        Valid,
-        Relative,
-        MAX_PARTS,
-        compareSpecificity,
-        InvalidPattern,
-        Pattern,
-        Patterns,
-        Segment,
-        Specificity
-    }
-}
-
-interface Position_2 {
+interface Position {
     frame: number;
     group: number;
 }
 
 class Prepared {
     [Symbol.dispose](): void;
-    readonly broadcast: Broadcast_2.Producer;
+    readonly broadcast: Broadcast.Producer;
     close(): void;
     publish(): Publication;
 }
@@ -633,10 +563,10 @@ class Producer {
     get closed(): GetPromise<Error | null>;
     createGroup(sequence: number): Producer_2;
     demand(): Demand;
-    finishAt(end: Position_2): void;
+    finishAt(end: Position): void;
     info(): Promise<Info>;
     insertDatagram(sequence: number, timestamp: Timestamp | undefined, payload: Uint8Array): void;
-    largest(): Position_2 | undefined;
+    largest(): Position | undefined;
     readonly name: string;
     get priority(): number;
     subscribe(options?: Subscription): Subscriber;
@@ -659,29 +589,22 @@ class Producer_3 {
     close(): void;
     get closed(): GetPromise<null>;
     consume(): Consumer_4;
-    createTrack(name: string, info?: Partial<track.Info>): track.Producer;
+    createTrack(name: string, info?: Partial<Track.Info>): Track.Producer;
     removeTrack(name: string): void;
-    track(name: string): track.Consumer;
+    track(name: string): Track.Consumer;
 }
 
-class Producer_4 {
-    append(event: Event_2): void;
-    close(abort?: Error): void;
-    get closed(): GetPromise<Error | null>;
-    consume(): Consumer;
-}
-
-class Producer_5 implements Table {
+class Producer_4 implements Table {
     constructor();
-    announced(scope?: Path_2.Pattern, options?: Announce_3.Options): Announce_3.Consumer;
+    announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
     close(abort?: Error): void;
     get closed(): GetPromise<Error | null>;
     consume(): Consumer_5;
-    createBroadcast(path: Path_2.Valid): Publication;
+    createBroadcast(path: Path.Valid): Publication;
     get discovery(): Getter<boolean | undefined>;
-    dynamic(prefix: Path_2.Valid): Dynamic;
-    request(path: Path_2.Valid, options?: RequestOptions): Requesting;
-    scope(root: Path_2.Valid, patterns: Path_2.Patterns): Producer_5;
+    dynamic(prefix: Path.Valid): Dynamic;
+    request(path: Path.Valid, options?: RequestOptions): Requesting;
+    scope(root: Path.Valid, patterns: Path.Patterns): Producer_4;
 }
 
 class ProtocolViolation extends Error {
@@ -699,7 +622,7 @@ class Publication {
         cost?: Route["cost"];
         auth?: Route["auth"];
     }): void;
-    readonly broadcast: Broadcast_2.Producer;
+    readonly broadcast: Broadcast.Producer;
     get route(): Route | undefined;
     unannounce(): void;
 }
@@ -740,21 +663,21 @@ class Request_2 {
 }
 
 class Request_3 {
-    readonly path: Path_2.Valid;
-    prepare(epoch: Epoch_2.Valid): Prepared;
+    readonly path: Path.Valid;
+    prepare(epoch: Epoch.Valid): Prepared;
     reject(err: Error): void;
 }
 
 class Requesting {
-    readonly active: Getter<Broadcast_2.Consumer | undefined>;
+    readonly active: Getter<Broadcast.Consumer | undefined>;
     close(): void;
     readonly closed: GetPromise<Error | null>;
-    readonly path: Path_2.Valid;
+    readonly path: Path.Valid;
 }
 
 interface RequestOptions {
     announced?: boolean;
-    epoch?: Epoch_2.Valid;
+    epoch?: Epoch.Valid;
 }
 
 class Reservation implements Disposable {
@@ -770,14 +693,14 @@ function resolve(base: Valid, rel: Relative): Valid;
 interface Route {
     auth?: Credential_2;
     cost: Cost;
-    epoch?: Epoch_2.Valid;
+    epoch?: Epoch.Valid;
     hops: Hop[];
 }
 
 const Route: {
     default: Route;
     normalize(route?: Route | {
-        epoch?: Epoch_2.Valid;
+        epoch?: Epoch.Valid;
         hops?: readonly Hop[];
         cost?: Cost;
         auth?: Credential_2;
@@ -875,10 +798,10 @@ function stripPrefix(prefix: Valid, path: Valid): Valid | null;
 class Subscriber {
     close(abort?: Error): void;
     get closed(): GetPromise<Error | null>;
-    end(): Position_2 | undefined;
-    finished(): Promise<Position_2>;
+    end(): Position | undefined;
+    finished(): Promise<Position>;
     info(): Promise<Info>;
-    largest(): Promise<Position_2 | undefined>;
+    largest(): Promise<Position | undefined>;
     readonly name: string;
     ordered(): Ordered;
     recvDatagram(): Promise<Datagram | undefined>;
@@ -897,12 +820,12 @@ interface Subscription {
 }
 
 interface Table {
-    announced(scope?: Path_2.Pattern, options?: Announce_3.Options): Announce_3.Consumer;
+    announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
     readonly closed: GetPromise<Error | null>;
-    createBroadcast(path: Path_2.Valid): Publication;
+    createBroadcast(path: Path.Valid): Publication;
     readonly discovery: Getter<boolean | undefined>;
-    dynamic(prefix: Path_2.Valid): Dynamic;
-    request(path: Path_2.Valid, options?: RequestOptions): Requesting;
+    dynamic(prefix: Path.Valid): Dynamic;
+    request(path: Path.Valid, options?: RequestOptions): Requesting;
 }
 
 declare namespace Time {
@@ -911,6 +834,7 @@ declare namespace Time {
         Timestamp
     }
 }
+export { Time }
 
 export interface Timed<T> {
     at?: Timestamp;
@@ -957,7 +881,7 @@ declare namespace Track {
     export {
         infoDefaults,
         Datagram,
-        Position_2 as Position,
+        Position,
         Info,
         Bound,
         Groups,
@@ -972,26 +896,7 @@ declare namespace Track {
         Ordered
     }
 }
-
-declare namespace track {
-    export {
-        infoDefaults,
-        Datagram,
-        Position_2 as Position,
-        Info,
-        Bound,
-        Groups,
-        Subscription,
-        Order,
-        Request_2 as Request,
-        FetchGroupOptions,
-        Consumer_3 as Consumer,
-        Demand,
-        Producer,
-        Subscriber,
-        Ordered
-    }
-}
+export { Track }
 
 class Tracks {
     [Symbol.asyncIterator](): AsyncGenerator<TracksEvent, void, undefined>;
@@ -1002,7 +907,7 @@ class Tracks {
 type TracksEvent = {
     kind: "added";
     name: string;
-    info: track.Info;
+    info: Track.Info;
 } | {
     kind: "synced";
 } | {
@@ -1046,6 +951,7 @@ declare namespace Varint {
         MAX_U53
     }
 }
+export { Varint }
 
 interface WebSocketProps {
     delay?: Milli;
@@ -1057,6 +963,5 @@ interface WebTransportProps extends Omit<WebTransportOptions, "serverCertificate
     serverCertificate?: string | BufferSource;
     serverCertificateHashes?: CertificateHash[];
 }
-
 
 ```

@@ -35,32 +35,42 @@ export interface Stats {
 // TODO support signals?
 /** Encoder tuning knobs. All optional; the encoder auto-sizes anything left unset. */
 export interface Config {
-	// If not provided, the encoder will select the best codec.
+	/** If not provided, the encoder will select the best codec. */
 	codec?: string;
 
-	// Constrain the encoded width/height in pixels. If unset, source width.max and height.max
-	// constraints provide the cap when both are present; otherwise screens default to logical pixels.
+	/**
+	 * Constrain the encoded width/height in pixels. If unset, source width.max and height.max
+	 * constraints provide the cap when both are present; otherwise screens default to logical pixels.
+	 */
 	maxPixels?: number;
 
-	// Cap the encoded resolution to this fraction of the source pixel count.
-	// For example 0.25 yields a quarter of the pixels (half the width and height),
-	// scaling with the source instead of assuming a fixed resolution.
-	// When combined with maxPixels, the smaller resulting cap wins.
+	/**
+	 * Cap the encoded resolution to this fraction of the source pixel count.
+	 * For example 0.25 yields a quarter of the pixels (half the width and height),
+	 * scaling with the source instead of assuming a fixed resolution.
+	 * When combined with maxPixels, the smaller resulting cap wins.
+	 */
 	maxScale?: number;
 
-	// The longest interval between keyframes. A joining subscriber forces one sooner once the
-	// group's deltas outweigh the track's refresh ratio. (default: 2000 milliseconds)
+	/**
+	 * The longest interval between keyframes. A joining subscriber forces one sooner once the
+	 * group's deltas outweigh the track's refresh ratio. (default: 2000 milliseconds)
+	 */
 	keyframeInterval?: Milli;
 
-	// If not provided, the encoder will use the best bitrate for the given width, height, and framerate.
+	/** If not provided, the encoder will use the best bitrate for the given width, height, and framerate. */
 	maxBitrate?: number;
 
-	// Multiply the number of pixels by this value to get the bitrate. (default: 0.07)
-	// NOTE: This is multiplied by the codecScale (1.0 for h264) to get the final scale.
+	/**
+	 * Multiply the number of pixels by this value to get the bitrate. (default: 0.07)
+	 * NOTE: This is multiplied by the codecScale (1.0 for h264) to get the final scale.
+	 */
 	bitrateScale?: number;
 
-	// Cap the encoded frame rate. If set below the captured rate, frames are dropped to hit this target.
-	// Also feeds the bitrate calculation and the encoder config. If unset, the captured track's rate is used.
+	/**
+	 * Cap the encoded frame rate. If set below the captured rate, frames are dropped to hit this target.
+	 * Also feeds the bitrate calculation and the encoder config. If unset, the captured track's rate is used.
+	 */
 	frameRate?: number;
 }
 
@@ -89,7 +99,8 @@ export type EncoderProps = Inputs<EncoderInput> & {
 	config?: Config | Signal<Config | undefined>;
 };
 
-type EncoderOutput = {
+/** Signals the encoder derives. */
+export type EncoderOutput = {
 	/** The encoder failure, cleared only by a new capture source or format, or new encoder settings. */
 	error: Signal<Error | undefined>;
 	// The catalog config published for this rendition, `enabled: false` while disabled, or undefined

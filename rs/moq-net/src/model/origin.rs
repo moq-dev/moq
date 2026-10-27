@@ -4159,6 +4159,10 @@ struct Selected {
 	prefix: PathOwned,
 	/// The selection period, closed when the peer stops selecting the instance.
 	current: Option<kio::Producer<()>>,
+	/// Open until another instance of the peer takes the path, which may answer a
+	/// request still unanswered. A withdrawal alone leaves it open, and a period the
+	/// instance wins again keeps it.
+	answering: Option<kio::Producer<()>>,
 	/// The [`Release`] that ends `current`: the peer replaced the instance with a
 	/// route without an epoch, whose `Restart` is held until then.
 	retiring: Option<Release>,
@@ -4174,39 +4178,59 @@ enum Change {
 	Retire(Release),
 	/// The peer no longer selects the instance, effective at once.
 	End,
+	/// Another instance of the peer took the path, effective at once.
+	Replace,
 }
 
 impl Selected {
 	/// How the period changes now that the peer's best route is `best`, if it does.
 	fn change(&self, best: Option<&RouteEntry>, hold: &Hold) -> Option<Change> {
-		if best.is_some_and(|entry| entry.instance() == self.instance) {
+		let replaced = self.retiring.as_ref().is_some_and(Release::released);
+		let Some(best) = best else {
+			// A released replacement already took the path before this withdrawal.
+			self.current.as_ref()?;
+			return Some(if replaced { Change::Replace } else { Change::End });
+		};
+		if best.instance() == self.instance {
 			return match (&self.current, &self.retiring) {
 				(Some(_), None) => None,
-				(Some(_), Some(release)) if !release.released() => Some(Change::Continue),
+				(Some(_), Some(_)) if !replaced => Some(Change::Continue),
 				_ => Some(Change::Start),
 			};
 		}
-		self.current.as_ref()?;
+		if self.current.is_none() {
+			// Withdrawn earlier: the instance taking the path now may answer what is left.
+			return self.answering.is_some().then_some(Change::Replace);
+		}
 		// Announce cursors hold a restart at the same prefix onto a route without an
 		// epoch, so the period lasts as long. Anything else they deliver at once.
-		let held = best.is_some_and(|entry| entry.epoch.is_none() && entry.prefix == self.prefix);
+		let held = best.epoch.is_none() && best.prefix == self.prefix;
 		match (held, &self.retiring) {
 			(true, Some(_)) => None,
-			(true, None) => Some(hold.release().map_or(Change::End, Change::Retire)),
-			(false, _) => Some(Change::End),
+			(true, None) => Some(hold.release().map_or(Change::Replace, Change::Retire)),
+			(false, _) => Some(Change::Replace),
 		}
 	}
 
 	fn apply(&mut self, change: Change) {
 		match change {
 			Change::Start => {
+				// Past a released replacement, the instance that answered in between
+				// was the replacement.
+				if self.retiring.take().is_some() || self.answering.is_none() {
+					self.answering = Some(kio::Producer::default());
+				}
 				self.current = Some(kio::Producer::default());
-				self.retiring = None;
 			}
 			Change::Continue => self.retiring = None,
 			Change::Retire(release) => self.retiring = Some(release),
 			Change::End => {
 				self.current = None;
+				self.retiring = None;
+			}
+			Change::Replace => {
+				self.current = None;
+				self.answering = None;
 				self.retiring = None;
 			}
 		}
@@ -4228,6 +4252,17 @@ impl Selection {
 		self.signal
 			.read()
 			.current
+			.as_ref()
+			.map(kio::Producer::consume)
+			.unwrap_or_else(|| kio::Producer::new(()).consume())
+	}
+
+	/// Closed once another instance takes the path, for a request already sent.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn answering(&self) -> kio::Consumer<()> {
+		self.signal
+			.read()
+			.answering
 			.as_ref()
 			.map(kio::Producer::consume)
 			.unwrap_or_else(|| kio::Producer::new(()).consume())
@@ -5432,6 +5467,7 @@ impl Dynamic {
 			instance,
 			prefix,
 			current: active.then(kio::Producer::default),
+			answering: active.then(kio::Producer::default),
 			retiring: None,
 		});
 		let signal = producer.consume();
@@ -7177,6 +7213,49 @@ impl ProduceTest for Config {
 impl ProduceTest for Hop {
 	fn produce(self) -> Producer {
 		Config::new(self).produce()
+	}
+}
+
+/// Test-only: one peer's route selected for `room/a`, which a test withdraws or
+/// replaces to drive the [`broadcast::RequestValidity`](crate::model::broadcast::RequestValidity)
+/// it hands out.
+#[cfg(all(test, feature = "async"))]
+pub(crate) struct TestSelection {
+	origin: Producer,
+	route: Option<Dynamic>,
+	replacement: Option<Dynamic>,
+}
+
+#[cfg(all(test, feature = "async"))]
+impl TestSelection {
+	const PEER: u64 = 2;
+
+	pub(crate) fn new() -> Self {
+		let origin = Hop::new(1).unwrap().produce();
+		let route = origin
+			.dynamic_route("room", Route::default().with_via(Hop::new(Self::PEER).unwrap()))
+			.unwrap();
+		Self {
+			origin,
+			route: Some(route),
+			replacement: None,
+		}
+	}
+
+	/// What a request for `room/a` through the selected route must still hold.
+	pub(crate) fn validity(&self) -> crate::model::broadcast::RequestValidity {
+		crate::model::broadcast::RequestValidity::for_source(self.route.as_ref().unwrap(), &Path::new("room/a"))
+	}
+
+	/// The peer withdraws the route.
+	pub(crate) fn withdraw(&mut self) {
+		self.route = None;
+	}
+
+	/// Another instance of the peer takes the path.
+	pub(crate) fn replace(&mut self) {
+		let route = Route::default().with_via(Hop::new(Self::PEER).unwrap());
+		self.replacement = Some(self.origin.dynamic_route("room/a", route).unwrap());
 	}
 }
 
@@ -13050,6 +13129,43 @@ mod tests {
 		assert!(!fresh.is_closed());
 		drop(broad);
 		assert!(fresh.is_closed());
+	}
+
+	/// The answering lease outlives a withdrawal, since the peer still answers for the
+	/// instance it retracted, and ends once another instance takes the path.
+	#[moq_clock::test]
+	async fn source_selection_answering_ends_only_on_a_replacement() {
+		let producer = origin(1).produce();
+		let path = Path::new("room/a");
+		let first = producer
+			.dynamic_route("room", Route::default().with_via(origin(2)))
+			.unwrap();
+		let selected = first.request_validity(&path).unwrap();
+		let answering = selected.answering();
+		// A route that loses to the selected one replaces nothing.
+		let worse = producer
+			.dynamic_route("room", Route::default().with_via(origin(2)).with_cost(Cost::from(7)))
+			.unwrap();
+		assert!(!answering.is_closed());
+		drop(worse);
+
+		let replacement = producer
+			.dynamic_route("room/a", Route::default().with_via(origin(2)))
+			.unwrap();
+		assert!(answering.is_closed());
+		// Winning again opens a new lease, which a withdrawal leaves open.
+		drop(replacement);
+		let answering = selected.answering();
+		assert!(!answering.is_closed());
+		drop(first);
+		assert!(selected.current().is_closed());
+		assert!(!answering.is_closed());
+
+		// Announced again, the path has a new instance: a replacement.
+		let _again = producer
+			.dynamic_route("room", Route::default().with_via(origin(2)))
+			.unwrap();
+		assert!(answering.is_closed());
 	}
 
 	#[moq_clock::test]

@@ -11,11 +11,13 @@ export type Dispose = () => void;
 
 const noop: Dispose = () => {};
 
-type Subscriber<T> = (value: T) => void;
+/** Receives a value each time it changes. */
+export type Subscriber<T> = (value: T) => void;
 
 // Symbols to identify our instances across different package versions.
-// SIGNAL_BRAND is Signal only (it implies a write side); GETTER_BRAND is every readable we ship.
+/** Marks a {@link Signal}, even one from another copy of this package; it implies a write side. */
 const SIGNAL_BRAND = Symbol.for("@moq/signals");
+/** Marks every readable this package ships, even one from another copy of it. */
 const GETTER_BRAND = Symbol.for("@moq/signals.getter");
 const CHANGE_LISTEN = Symbol.for("@moq/signals.change.listen");
 
@@ -65,8 +67,9 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 	#hasCapturedOldValue = false;
 	#forceNotify = false;
 
-	// Brands to identify this as a Signal (and a readable) across package instances.
+	/** Marks this as a Signal across package instances. */
 	readonly [SIGNAL_BRAND] = true;
+	/** Marks this as a readable across package instances. */
 	readonly [GETTER_BRAND] = true;
 
 	constructor(value: T) {
@@ -182,8 +185,9 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 		return () => this.#subscribers.delete(fn);
 	}
 
-	/** Resolves with the value the next time it changes, or calls `fn` once on the next change. */
+	/** Resolves with the value the next time it changes. */
 	changed(): Promise<T>;
+	/** Calls `fn` once the next time the value changes. Returns a function to cancel. */
 	changed(fn: Subscriber<T>): Dispose;
 	changed(fn?: Subscriber<T>): Promise<T> | Dispose {
 		if (fn) {
@@ -329,7 +333,7 @@ class Changed<T> implements GetPromise<Awaited<T>> {
 export class Once<T> implements GetPromise<T> {
 	#signal = new Signal<T | undefined>(undefined);
 
-	// Brand to identify this as a readable across package instances.
+	/** Marks this as a readable across package instances. */
 	readonly [GETTER_BRAND] = true;
 
 	/** Settle the value. Throws if it has already settled. */
@@ -345,8 +349,9 @@ export class Once<T> implements GetPromise<T> {
 		return this.#signal.peek();
 	}
 
-	/** Resolves when it settles, or calls `fn` once when it settles. */
+	/** Resolves when it settles. */
 	changed(): Promise<T | undefined>;
+	/** Calls `fn` once when it settles. Returns a function to cancel. */
 	changed(fn: (value: T | undefined) => void): Dispose;
 	changed(fn?: (value: T | undefined) => void): Promise<T | undefined> | Dispose {
 		return fn ? this.#signal.changed(fn) : this.#signal.changed();
@@ -490,7 +495,8 @@ export function race<const T extends readonly unknown[]>(values: T): Promise<Awa
 	return raceUntil(values);
 }
 
-type SetterType<S> = S extends Setter<infer T> ? T : never;
+/** The value type a {@link Setter} accepts, e.g. `number` for `Signal<number>`. */
+export type SetterType<S> = S extends Setter<infer T> ? T : never;
 
 /** The value type a {@link Getter} yields, e.g. `number` for `Getter<number>`. */
 export type GetterType<G> = G extends Getter<infer T> ? T : never;
@@ -592,10 +598,6 @@ function getterShaped(value: unknown): boolean {
  * ```
  */
 export type Inputs<I extends SignalMap> = { [K in keyof I]?: GetterInit<GetterType<I[K]>> };
-
-// Excludes common falsy values from a type
-type Falsy = false | 0 | "" | null | undefined;
-type Truthy<T> = Exclude<T, Falsy>;
 
 /**
  * Runs a function that reads signals via `effect.get(...)` and reruns whenever
@@ -931,14 +933,14 @@ export class Effect {
 	/** Reads and tracks several signals, returning their values or `undefined` if any is falsy. */
 	getAll<S extends readonly Getter<unknown>[]>(
 		signals: [...S],
-	): { [K in keyof S]: Truthy<GetterType<S[K]>> } | undefined {
+	): { [K in keyof S]: Exclude<GetterType<S[K]>, false | 0 | "" | null | undefined> } | undefined {
 		const values: unknown[] = [];
 		for (const signal of signals) {
 			const value = this.get(signal);
 			if (!value) return undefined;
 			values.push(value);
 		}
-		return values as { [K in keyof S]: Truthy<GetterType<S[K]>> };
+		return values as { [K in keyof S]: Exclude<GetterType<S[K]>, false | 0 | "" | null | undefined> };
 	}
 
 	/** Runs `fn` with the signal's value now and again whenever it changes, scoped to this effect. */
@@ -955,61 +957,70 @@ export class Effect {
 		});
 	}
 
-	/** Adds an event listener that is removed automatically when the effect reruns or closes. */
+	/** Adds an {@link HTMLElement} listener, removed automatically when the effect reruns or closes. */
 	event<K extends keyof HTMLElementEventMap>(
 		target: HTMLElement,
 		type: K,
 		listener: (this: HTMLElement, ev: HTMLElementEventMap[K]) => void,
 		options?: boolean | AddEventListenerOptions,
 	): void;
+	/** Adds a typed SVGElement listener, removed when the effect reruns or closes. */
 	event<K extends keyof SVGElementEventMap>(
 		target: SVGElement,
 		type: K,
 		listener: (this: SVGElement, ev: SVGElementEventMap[K]) => void,
 		options?: boolean | AddEventListenerOptions,
 	): void;
+	/** Adds a typed Document listener, removed when the effect reruns or closes. */
 	event<K extends keyof DocumentEventMap>(
 		target: Document,
 		type: K,
 		listener: (this: Document, ev: DocumentEventMap[K]) => void,
 		options?: boolean | AddEventListenerOptions,
 	): void;
+	/** Adds a typed Window listener, removed when the effect reruns or closes. */
 	event<K extends keyof WindowEventMap>(
 		target: Window,
 		type: K,
 		listener: (this: Window, ev: WindowEventMap[K]) => void,
 		options?: boolean | AddEventListenerOptions,
 	): void;
+	/** Adds a typed WebSocket listener, removed when the effect reruns or closes. */
 	event<K extends keyof WebSocketEventMap>(
 		target: WebSocket,
 		type: K,
 		listener: (this: WebSocket, ev: WebSocketEventMap[K]) => void,
 		options?: boolean | AddEventListenerOptions,
 	): void;
+	/** Adds a typed XMLHttpRequest listener, removed when the effect reruns or closes. */
 	event<K extends keyof XMLHttpRequestEventMap>(
 		target: XMLHttpRequest,
 		type: K,
 		listener: (this: XMLHttpRequest, ev: XMLHttpRequestEventMap[K]) => void,
 		options?: boolean | AddEventListenerOptions,
 	): void;
+	/** Adds a typed MediaQueryList listener, removed when the effect reruns or closes. */
 	event<K extends keyof MediaQueryListEventMap>(
 		target: MediaQueryList,
 		type: K,
 		listener: (this: MediaQueryList, ev: MediaQueryListEventMap[K]) => void,
 		options?: boolean | AddEventListenerOptions,
 	): void;
+	/** Adds a typed Animation listener, removed when the effect reruns or closes. */
 	event<K extends keyof AnimationEventMap>(
 		target: Animation,
 		type: K,
 		listener: (this: Animation, ev: AnimationEventMap[K]) => void,
 		options?: boolean | AddEventListenerOptions,
 	): void;
+	/** Adds a typed EventSource listener, removed when the effect reruns or closes. */
 	event<K extends keyof EventSourceEventMap>(
 		target: EventSource,
 		type: K,
 		listener: (this: EventSource, ev: EventSourceEventMap[K]) => void,
 		options?: boolean | AddEventListenerOptions,
 	): void;
+	/** Adds a listener for any event on any target, removed when the effect reruns or closes. */
 	event(
 		target: EventTarget,
 		type: string,
@@ -1159,7 +1170,7 @@ export class Computed<T> implements Getter<T | undefined> {
 	#signal = new Signal<T | undefined>(undefined);
 	#effect: Effect;
 
-	// Brand to identify this as a readable across package instances.
+	/** Marks this as a readable across package instances. */
 	readonly [GETTER_BRAND] = true;
 
 	/** Creates a computed that derives its value from `fn`, rerunning when dependencies change. */
@@ -1174,8 +1185,9 @@ export class Computed<T> implements Getter<T | undefined> {
 		return this.#signal.peek();
 	}
 
-	/** Resolves the next time the derived value changes, or calls `fn` once on the next change. */
+	/** Resolves the next time the derived value changes. */
 	changed(): Promise<T | undefined>;
+	/** Calls `fn` once the next time the derived value changes. Returns a function to cancel. */
 	changed(fn: Subscriber<T | undefined>): Dispose;
 	changed(fn?: Subscriber<T | undefined>): Promise<T | undefined> | Dispose {
 		return fn ? this.#signal.changed(fn) : this.#signal.changed();
@@ -1225,7 +1237,7 @@ export class Derived<const S extends readonly Getter<unknown>[], T> implements G
 	#sources: S;
 	#fn: (...values: GetterValues<S>) => T;
 
-	// Brand to identify this as a readable across package instances.
+	/** Marks this as a readable across package instances. */
 	readonly [GETTER_BRAND] = true;
 
 	/** Creates a view deriving its value from `sources` via `fn`, recomputed on every read. */
@@ -1244,8 +1256,9 @@ export class Derived<const S extends readonly Getter<unknown>[], T> implements G
 		return this.#watch(fn);
 	}
 
-	/** Resolves the next time the derived value changes, or calls `fn` once on the next change. */
+	/** Resolves the next time the derived value changes. */
 	changed(): Promise<T>;
+	/** Calls `fn` once the next time the derived value changes. Returns a function to cancel. */
 	changed(fn: Subscriber<T>): Dispose;
 	changed(fn?: Subscriber<T>): Promise<T> | Dispose {
 		if (fn) return this.#once(fn);

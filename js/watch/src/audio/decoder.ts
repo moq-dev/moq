@@ -49,7 +49,8 @@ export type DecoderProps = Inputs<DecoderInput> & {
 	sync: Sync;
 };
 
-type DecoderOutput = {
+/** Signals the decoder derives. */
+export type DecoderOutput = {
 	/** Fatal decode failure, cleared when another source is selected. */
 	error: Signal<Error | undefined>;
 	context: Signal<AudioContext | undefined>;
@@ -914,6 +915,7 @@ export class Decoder {
 	static supported = supported;
 }
 
+/** Whether the WebCodecs audio decoder can play this config. */
 async function supported(config: Catalog.AudioConfig): Promise<boolean> {
 	if (!Catalog.containerSupported(config.container)) {
 		// `kind` is the literal "unknown" tag; the container the publisher actually named is in `raw`.

@@ -1,9 +1,9 @@
 import * as Moq from "@moq/net";
 
-import { type ConsumerConfig as CodecConfig, Decoder, type Event, type Group } from "./decoder.ts";
+import { Decoder, type DecoderConfig, type Event, type Group } from "./decoder.ts";
 
 /** Window consumer options, including the source track. */
-export type ConsumerConfig = CodecConfig & { track: Moq.Track.Subscriber };
+export type ConsumerConfig = DecoderConfig & { track: Moq.Track.Subscriber };
 
 // A group that ended early rather than failing: the next one restates the window, so a gap is
 // something to resync from. Old and Evicted are how the publisher says it dropped a group it was

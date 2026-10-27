@@ -15,5 +15,4 @@ export default MoqWatchSupport;
 
 export { Show }
 
-
 ```
