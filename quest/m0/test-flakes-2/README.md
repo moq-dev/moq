@@ -54,3 +54,4 @@ Public API: none. Wire: none.
 - [IETF22 fallback](/quest/m0/test-flakes-2/ietf22-fallback.md) - an IETF22 browser viewer follows a fallback within the media lane's bound, keeping its session and its audio
 - [Stuck-window eviction test on macOS](/quest/m0/test-flakes-2/stuck-window-evicts.md) - the evicted writer reliably sees its stop on macOS, fixed at the race
 - [Swapped Rust to JS Opus](/quest/m0/test-flakes-2/swapped-js-opus.md) - the `rust-swapped -> js` interop cell stops timing out under load
+- [JS host-task yields follow the clock](/quest/m0/test-flakes-2/js-host-yields.md) - `Budget` and `nextTask` yield through the injected clock, so `Manual` tests stop racing them

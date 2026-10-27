@@ -32,8 +32,7 @@ Decided 2026-10-26 (maintainer):
   runner is deregistered. Rollback is re-registering it.
 - `nix/runner` (the persistent-VM module, rejected 2026-10-25) is deleted,
   with its `runner-vm` recipes and flake checks. It can land ahead as its own
-  PR. Then check whether `quest/m0/ci/check-without-userns.md` is still
-  needed, and update `quest/m2/gpu-ci.md`, which assumes the VM module.
+  PR. Then update `quest/m2/gpu-ci.md`, which assumes the VM module.
 - Independent of `quest land`: the host only changes which machine answers
   `vars.MOQ_QUEUE_RUNNER`.
 - If entries are slower than home, step up the host (more cores, or an OVH
