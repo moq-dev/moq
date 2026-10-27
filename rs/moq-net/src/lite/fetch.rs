@@ -12,7 +12,7 @@ use super::{Message, Version};
 /// Lite03+ only.
 #[derive(Clone, Debug)]
 pub struct Fetch<'a> {
-	pub broadcast: Path<'a>,
+	pub broadcast: Path,
 	/// The publisher instance the subscriber expects; see [`crate::origin::Route::epoch`].
 	/// Lite07+ only.
 	pub epoch: Option<crate::Epoch>,
@@ -29,7 +29,7 @@ pub struct Fetch<'a> {
 }
 
 impl Message for Fetch<'_> {
-	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Fetch);
+	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Fetch);
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Lite01 | Version::Lite02 => {
@@ -112,7 +112,7 @@ mod test {
 	fn fetch_sample() -> Fetch<'static> {
 		Fetch {
 			epoch: None,
-			broadcast: Path::new("room").to_owned(),
+			broadcast: Path::from_static("room"),
 			track: Cow::Borrowed("video"),
 			priority: 3,
 			max_delay: None,
@@ -157,7 +157,7 @@ mod test {
 	fn fetch_roundtrips() {
 		for version in [Version::Lite03, Version::Lite04, Version::Lite05] {
 			let got = fetch_roundtrip(version, &fetch_sample());
-			assert_eq!(got.broadcast, Path::new("room"));
+			assert_eq!(got.broadcast, Path::from_static("room"));
 			assert_eq!(got.track, "video");
 			assert_eq!(got.priority, 3);
 			assert_eq!(got.group, 7);

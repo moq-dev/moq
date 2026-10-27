@@ -29,14 +29,13 @@ const PAYLOAD: &[u8] = b"frame";
 /// How long a subscriber waits for a group it cannot account for, with no max delay set.
 const GRACE: Duration = Duration::from_secs(1);
 
-/// moq-lite drafts with and without SUBSCRIBE_END, and IETF drafts over the control stream
-/// adapter (14), on their own streams (17), and with subscription fills (22).
+/// moq-lite drafts with and without SUBSCRIBE_END, and IETF drafts with a joining
+/// FETCH (18) and with subscription fills (22).
 const VERSIONS: &[&str] = &[
 	"moq-lite-03",
 	"moq-lite-05",
 	"moq-lite-07-wip",
-	"moq-transport-14",
-	"moq-transport-17",
+	"moq-transport-18",
 	"moq-transport-22",
 ];
 
@@ -257,9 +256,8 @@ async fn lite07_empty_track_ends_without_the_grace() {
 	assert!(outcome.elapsed < GRACE / 10, "ended after {:?}", outcome.elapsed);
 }
 
-/// IETF drafts over the control stream adapter (14), on their own streams (17), and with
-/// subscription fills (22).
-const IETF: &[&str] = &["moq-transport-14", "moq-transport-17", "moq-transport-22"];
+/// IETF drafts with a joining FETCH (18) and with subscription fills (22).
+const IETF: &[&str] = &["moq-transport-18", "moq-transport-22"];
 
 /// A subscriber that leaves while END_OF_TRACK waits for stream credit ends the publisher's
 /// request, instead of parking it until credit that may never come.

@@ -16,7 +16,7 @@ use crate::track::Order;
 #[derive(Clone, Debug)]
 pub struct Subscribe<'a> {
 	pub id: u64,
-	pub broadcast: Path<'a>,
+	pub broadcast: Path,
 	/// The publisher instance the subscriber expects; see [`crate::origin::Route::epoch`].
 	/// Lite07+ only.
 	pub epoch: Option<crate::Epoch>,
@@ -105,7 +105,7 @@ impl Version {
 }
 
 impl Message for Subscribe<'_> {
-	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Subscribe);
+	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Subscribe);
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let id = r.varint()?;
 		let broadcast = Path::decode(r, version)?;
@@ -425,7 +425,7 @@ pub struct SubscribeOk {
 }
 
 impl Message for SubscribeOk {
-	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Subscribe);
+	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Subscribe);
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Lite01 => {
@@ -495,7 +495,7 @@ pub struct SubscribeStart {
 }
 
 impl Message for SubscribeStart {
-	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Subscribe);
+	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Subscribe);
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_track_stream() {
 			return Err(DecodeError::Version);
@@ -540,7 +540,7 @@ pub struct SubscribeEnd {
 }
 
 impl Message for SubscribeEnd {
-	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Subscribe);
+	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Subscribe);
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_track_stream() {
 			return Err(DecodeError::Version);
@@ -574,7 +574,7 @@ pub struct SubscribeUpdate {
 }
 
 impl Message for SubscribeUpdate {
-	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Subscribe);
+	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Subscribe);
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Lite01 | Version::Lite02 => {
@@ -670,7 +670,7 @@ impl SubscribeDrop {
 }
 
 impl Message for SubscribeDrop {
-	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Subscribe);
+	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Subscribe);
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Lite01 | Version::Lite02 => {
@@ -913,7 +913,7 @@ mod test {
 			order: crate::track::Order::Descending,
 			epoch: None,
 			id: 1,
-			broadcast: Path::new("room").to_owned(),
+			broadcast: Path::from_static("room"),
 			track: Cow::Borrowed("video"),
 			priority: 3,
 			max_delay: std::time::Duration::from_millis(250),
@@ -1046,7 +1046,7 @@ mod test {
 		let mut buf = Vec::new();
 		let mut w = Encoder::new(&mut buf, version.into());
 		w.varint(1).unwrap();
-		Path::new("room").encode(&mut w, version).unwrap();
+		Path::from_static("room").encode(&mut w, version).unwrap();
 		w.string("video").unwrap();
 		w.u8(0);
 		w.varint(0).unwrap(); // max delay

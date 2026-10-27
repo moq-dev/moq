@@ -6,8 +6,6 @@ import { $brand } from "@zod/mini";
 import { $loose } from "zod/v4/core";
 import { $strip } from "zod/v4/core";
 import { Micro } from "@moq/clock";
-import { ReferenceEpoch } from "@moq/hang/catalog";
-import { RelativeBroadcast } from "@moq/hang/catalog";
 import { Window } from "@moq/json";
 import { ZodMiniNullable } from "@zod/mini";
 import { ZodMiniNumber } from "@zod/mini";
@@ -200,6 +198,39 @@ export namespace Health {
 	}>, thresholds?: Health.Thresholds): Health.Health;
 }
 
+export namespace Hls {
+	export class Consumer implements AsyncIterable<Hls.Event> {
+		[asyncIterator](): AsyncIterator<Hls.Event>;
+		close(): void;
+		next(): Promise<Hls.Event | undefined>;
+		static subscribe(broadcast: Net.Broadcast.Consumer, hls: {
+			duration: number & $brand<"u53">;
+			track: string;
+		}): Hls.Consumer;
+	}
+	export type Entry = Omit<Hls.Record, "pts" | "duration"> & {
+		duration?: Micro;
+		pts: Micro;
+	};
+	export type Event = {
+		push: {
+			entry: Hls.Entry;
+			index: number;
+		};
+	} | {
+		pop: Window.Span;
+	} | {
+		skip: Window.Span;
+	};
+	export interface Record {
+		duration?: number;
+		group: number;
+		pts: number;
+		sequence: number;
+	}
+	export const SUFFIX: ".hls";
+}
+
 export * as Net from "@moq/net";
 
 export * as Signals from "@moq/signals";
@@ -238,51 +269,5 @@ export namespace Stats {
 		rate: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
 		rtt: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
 	}, $strip>;
-}
-
-export namespace Timeline {
-	export class Consumer implements AsyncIterable<Timeline.Event> {
-		[asyncIterator](): AsyncIterator<Timeline.Event>;
-		close(): void;
-		next(): Promise<Timeline.Event | undefined>;
-		static subscribe(broadcast: Net.Broadcast.Consumer, archive: {
-			replay?: RelativeBroadcast;
-			replayEpoch?: ReferenceEpoch;
-			store?: string;
-			timelines: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-				duration: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-				track: ZodMiniString<string>;
-			}, $strip>>;
-			timescale: number & $brand<"u53">;
-			version?: number & $brand<"u53">;
-		}, track: string): Timeline.Consumer;
-	}
-	export type Entry = Omit<Timeline.Record, "pts" | "duration"> & {
-		duration: Micro;
-		pts: Micro;
-	};
-	export type Event = {
-		push: {
-			entry: Timeline.Entry;
-			index: number;
-		};
-	} | {
-		pop: Window.Span;
-	} | {
-		skip: Window.Span;
-	};
-	export interface Position {
-		frame?: number;
-		group: number;
-	}
-	export interface Record {
-		duration?: number;
-		end: Timeline.Position;
-		keyframe?: boolean;
-		pts?: number;
-		sequence: number;
-		start: Timeline.Position;
-	}
-	export const SUFFIX: ".timeline.z";
 }
 ```

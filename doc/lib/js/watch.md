@@ -30,7 +30,7 @@ in sync at the latency you ask for.
 | Attribute | |
 | --- | --- |
 | `url`, `name` | Relay URL (with `?jwt=` if needed) and broadcast name. |
-| `versions` | Protocol versions to offer, most preferred first, comma-separated like `moq-transport-14,moq-lite-06`. Every stable version by default. |
+| `versions` | Protocol versions to offer, most preferred first, comma-separated like `moq-transport-18,moq-lite-06`. Every stable version by default. |
 | `paused`, `muted`, `volume` | The usual player controls. |
 | `delay` | How far playback trails the live edge: `"auto"` (the default, sized from how late frames arrive; see [audio jitter](/concept/audio-jitter)), a duration like `"300ms"`, or `"instant"` to paint video as it decodes, with no audio. |
 | `buffer` | How far ahead of the live edge media may run; see [buffered playback](#buffered-playback). |
@@ -40,7 +40,10 @@ in sync at the latency you ask for.
 | `announced` | Wait for the broadcast to be announced before subscribing (default on), so a player can mount before the stream exists. |
 | `catalog-format` | `hang`, `hangz`, `msf`, or `manual`; detected from the name by default. |
 
-Every attribute is also a reactive property. The
+Every attribute is also a reactive property, and property or UI changes reflect
+back into the attributes. An invalid value is refused rather than defaulted: the
+property setter throws, and invalid markup reports a browser `error` event and
+suspends the element until corrected or removed. The
 [README](https://www.npmjs.com/package/@moq/watch) lists types and defaults.
 The overlay adds play/pause, volume, fullscreen, a quality selector, a
 buffering indicator, and a stats panel.

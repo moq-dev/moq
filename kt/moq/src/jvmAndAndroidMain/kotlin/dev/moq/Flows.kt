@@ -23,6 +23,9 @@ fun dev.moq.audio.Consumer.reads(): Flow<dev.moq.audio.Read> = pull({ cancel() }
 fun dev.moq.video.Consumer.reads(): Flow<dev.moq.video.Read> = pull({ cancel() }) { next() }
 
 
+/** Stream of encoded media frames, gaps, and encoder ends in delivery order. */
+fun dev.moq.media.TrackConsumer.reads(): Flow<dev.moq.media.Read> = pull({ cancel() }) { next() }
+
 /** Stream of groups in sequence order, skipping forward if the reader falls behind. */
 fun TrackConsumer.groups(): Flow<GroupConsumer> = pull({ cancel() }) { nextGroup() }
 
@@ -40,13 +43,13 @@ fun TrackConsumer.frames(): Flow<Frame> = pull({ cancel() }) { readFrame() }
 fun TrackConsumer.datagrams(): Flow<Datagram> = pull({ cancel() }) { recvDatagram() }
 
 /** Stream of tracks requested by subscribers. */
-fun BroadcastDynamic.requestedTracks(): Flow<TrackRequest> = pull({ cancel() }) { requestedTrack() }
+fun BroadcastRequests.requestedTracks(): Flow<TrackRequest> = pull({ cancel() }) { requestedTrack() }
 
 /** Stream of the fills readers of one track need. */
-fun TrackDynamic.requestedFills(): Flow<Fill> = pull({ cancel() }) { requestedFill() }
+fun TrackRequests.requestedFills(): Flow<Fill> = pull({ cancel() }) { requestedFill() }
 
 /** Stream of broadcasts requested by consumers. */
-fun OriginDynamic.requestedBroadcasts(): Flow<BroadcastRequest> = pull({ cancel() }) { requestedBroadcast() }
+fun OriginRequests.requestedBroadcasts(): Flow<BroadcastRequest> = pull({ cancel() }) { requestedBroadcast() }
 
 /** Stream of timestamped raw frames within a group. */
 fun GroupConsumer.frames(): Flow<Frame> = pull({ cancel() }) { readFrame() }
@@ -59,24 +62,25 @@ fun GroupConsumer.frames(): Flow<Frame> = pull({ cancel() }) { readFrame() }
 fun AnnounceConsumer.updates(): Flow<AnnounceEvent> = pull { next() }.onCompletion { cancel() }
 
 /**
- * The session's grant: the current one, then each change, null while there is none.
+ * The session's grant, as `grants().updates()`: the current one, then each change, null
+ * while there is none.
  *
- * Collections of one [Auth] share its place in the changes, so a second watcher takes
- * its own from [Moq.auth]. Completes when the session shuts down, and throws its close reason otherwise.
+ * Collect it once: the consumer is cancelled when collection ends, however it ends.
+ * Completes when the session shuts down, and throws its close reason otherwise.
  */
-fun Auth.grants(): Flow<Grant?> = flow {
+fun GrantConsumer.updates(): Flow<Grant?> = flow {
     emit(grant())
     while (true) {
         currentCoroutineContext().ensureActive()
         val grant = try {
-            grantChanged()
+            changed()
         } catch (e: MoqException) {
             if (e.isShutdown) break
             throw e
         }
         emit(grant)
     }
-}
+}.onCompletion { cancel() }
 
 /** Emits [next] until it returns null, checking for cancellation before each pull. */
 private fun <T : Any> pull(next: suspend () -> T?): Flow<T> = flow {

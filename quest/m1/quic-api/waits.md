@@ -68,7 +68,7 @@ Public API: moq-quic gains `poll_*` methods taking `&kio::Waiter`,
 `poll_transmit` changes shape, and `StreamEvent` and the waiting `Event`
 variants go. The drivers' and qmux's public APIs are unchanged here; the
 driver poll forms come in [poll](/quest/m1/quic-api/poll.md). Update
-moq-quic's README fork list and MIGRATE.md. Wire: none.
+moq-quic's README fork list and describe migration in the PR's Impact section. Wire: none.
 
 ## Required
 

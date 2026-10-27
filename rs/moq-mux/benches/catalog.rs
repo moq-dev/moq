@@ -49,7 +49,7 @@ struct Fanout {
 impl Fanout {
 	async fn new(tracks: usize, subscribers: usize, references: bool) -> Self {
 		let mut info = moq_net::broadcast::Info::new();
-		info.path = "room/catalog".into();
+		info.path = moq_net::Path::from_static("room/catalog");
 		let mut broadcast = info.produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 		let tracks = (0..tracks)
@@ -58,7 +58,7 @@ impl Fanout {
 				let track = broadcast.create_track(format!("v{index}"), info).unwrap();
 				let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 				if references {
-					config.broadcast = Some(format!("./source-{index}").into());
+					config.broadcast = Some(moq_net::path::Relative::new(&format!("./source-{index}")).unwrap());
 				}
 				catalog.video(track, Container::Legacy(Kind::Video), config).unwrap()
 			})
@@ -111,7 +111,7 @@ impl Fanout {
 					black_box(rendition.jitter);
 					if let Some(reference) = &rendition.broadcast {
 						assert!(
-							moq_net::Path::new("room/catalog")
+							moq_net::Path::from_static("room/catalog")
 								.try_resolve(reference)
 								.unwrap()
 								.as_str()
@@ -222,8 +222,8 @@ fn bench_unresolved_teardown(c: &mut Criterion) {
 	group.finish();
 }
 
-/// Tracks interleaving frames on one catalog, up to the most renditions it can hold.
-const ORDERED: [usize; 3] = [1, 16, hang::catalog::MAX_RENDITIONS];
+/// Tracks interleaving frames on one catalog.
+const ORDERED: [usize; 3] = [1, 16, 64];
 
 /// Frames each track writes per iteration.
 const FRAMES: u64 = 100;

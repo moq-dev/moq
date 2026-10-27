@@ -69,6 +69,10 @@ export namespace Legacy {
 			description?: string;
 			enabled?: boolean;
 			epoch?: ReferenceEpoch;
+			hls?: {
+				duration: number & $brand<"u53">;
+				track: string;
+			};
 			jitter?: number & $brand<"u53">;
 			label?: string;
 			layout?: string;
@@ -133,6 +137,10 @@ export namespace Legacy {
 			enabled?: boolean;
 			epoch?: ReferenceEpoch;
 			framerate?: number;
+			hls?: {
+				duration: number & $brand<"u53">;
+				track: string;
+			};
 			interlaced?: boolean;
 			jitter?: number & $brand<"u53">;
 			label?: string;

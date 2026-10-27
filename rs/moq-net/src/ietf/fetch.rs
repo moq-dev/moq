@@ -4,8 +4,8 @@ use crate::{
 	Path,
 	coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder},
 	ietf::{
-		Filter, GroupOrder, Location, Opaque, Parameters, RequestId,
-		namespace::{decode_track, encode_namespace},
+		Filter, GroupOrder, Location, Opaque, RequestId,
+		namespace::{decode_track, encode_track},
 	},
 };
 
@@ -22,7 +22,7 @@ use super::Version;
 pub enum FetchType<'a> {
 	/// An inclusive range of a track, through draft-18.
 	Standalone {
-		namespace: Path<'a>,
+		namespace: Path,
 		track: Cow<'a, str>,
 		start: Location,
 		end: Location,
@@ -38,7 +38,7 @@ pub enum FetchType<'a> {
 	/// A track, with the range as a LOCATION_FILTER, from draft-22 on. Unfiltered is
 	/// everything from `{0, 0}` up to Largest Object.
 	Filtered {
-		namespace: Path<'a>,
+		namespace: Path,
 		track: Cow<'a, str>,
 		filter: Filter,
 	},
@@ -54,8 +54,7 @@ impl Encode<Version> for FetchType<'_> {
 				end,
 			} => {
 				w.u8(1);
-				encode_namespace(w, namespace)?;
-				w.string(track)?;
+				encode_track(w, namespace, track)?;
 				start.encode(w, version)?;
 				end.encode(w, version)?;
 			}
@@ -136,7 +135,7 @@ pub struct Fetch<'a> {
 	/// Whether the requester wants Track Properties in FETCH_OK (INCLUDE_PROPERTIES,
 	/// draft-22). Always `true` before draft-22, which has no way to opt out.
 	pub properties_wanted: bool,
-	/// The publisher instance the requester expects (MoQ Epoch, draft-17+). Only on a
+	/// The publisher instance the requester expects (MoQ Epoch). Only on a
 	/// request that names its track: a joining FETCH takes its subscription's.
 	pub epoch: Option<crate::Epoch>,
 }
@@ -150,20 +149,11 @@ impl Message for Fetch<'_> {
 		let group_order = (self.group_order != GroupOrder::Any).then_some(self.group_order);
 
 		self.request_id.encode(w, version)?;
-		if version == Version::Draft17 {
-			w.varint(0)?; // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
-		}
 
 		match version {
-			Version::Draft14 => {
-				w.u8(self.subscriber_priority);
-				self.group_order.encode(w, version)?;
+			Version::Draft18 => {
 				self.fetch_type.encode(w, version)?;
-				w.u8(0); // no parameters
-			}
-			Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18 => {
-				self.fetch_type.encode(w, version)?;
-				let epoch = self.epoch.clone().filter(|_| epoch::supported(version));
+				let epoch = self.epoch.clone();
 				encode_params!(w, version,
 					0x20 => self.subscriber_priority,
 					0x22 => group_order,
@@ -180,8 +170,7 @@ impl Message for Fetch<'_> {
 				else {
 					return Err(EncodeError::Version);
 				};
-				encode_namespace(w, namespace)?;
-				w.string(track)?;
+				encode_track(w, namespace, track)?;
 				// INCLUDE_PROPERTIES defaults to 1, so only the opt-out is worth bytes.
 				let include_properties = (!self.properties_wanted).then_some(false);
 				encode_params!(w, version,
@@ -198,36 +187,18 @@ impl Message for Fetch<'_> {
 
 	fn decode_msg(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(buf, version)?;
-		if version == Version::Draft17 {
-			let _required_request_id_delta = buf.varint()?;
-		}
 
 		// The token decodes but grants nothing: the session's grant is what authorizes the request.
 		let (fetch_type, subscriber_priority, group_order, range_filters, fill_timeout, properties_wanted, epoch) =
 			match version {
-				Version::Draft14 => {
-					let subscriber_priority = buf.u8()?;
-					let group_order = GroupOrder::decode(buf, version)?;
-					let fetch_type = FetchType::decode(buf, version)?;
-					super::token::single(Parameters::skip_request(buf)?)?;
-					(
-						fetch_type,
-						Some(subscriber_priority),
-						Some(group_order),
-						false,
-						false,
-						true,
-						None,
-					)
-				}
-				Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18 => {
+				Version::Draft18 => {
 					let fetch_type = FetchType::decode(buf, version)?;
 					decode_params!(buf, version,
 						0x03 => authorization_token: Vec<super::token::RequestToken>,
-						0x0A => fill_timeout: Option<u64> where !matches!(version, Version::Draft15 | Version::Draft16 | Version::Draft17),
+						0x0A => fill_timeout: Option<u64>,
 						0x20 => subscriber_priority: Option<u8>,
 						0x22 => group_order: Option<GroupOrder>,
-						epoch::EPOCH_PARAM => epoch: Option<crate::Epoch> where epoch::supported(version),
+						epoch::EPOCH_PARAM => epoch: Option<crate::Epoch>,
 					);
 					super::token::single(authorization_token)?;
 
@@ -312,147 +283,41 @@ impl Message for Fetch<'_> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchOk {
-	pub request_id: Option<RequestId>,
-	pub group_order: GroupOrder,
 	pub end_of_track: bool,
-	/// Drafts 14-18 use the last object plus one, or Object 0 for the whole End Group;
+	/// Draft 18 uses the last object plus one, or Object 0 for the whole End Group;
 	/// draft 22 and later use an inclusive End Location.
 	pub end_location: Location,
-	/// The track's properties, as SUBSCRIBE_OK carries them: MAX_CACHE_DURATION from the
-	/// draft-14/15 parameters, the Track Properties block from draft-16 on.
+	/// The track's properties, as SUBSCRIBE_OK carries them.
 	pub properties: super::Properties,
 }
 impl Message for FetchOk {
 	const ID: u64 = 0x18;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
-			self.request_id
-				.expect("request_id required for draft14-16")
-				.encode(w, version)?;
-		} else {
-			assert!(self.request_id.is_none(), "request_id must be None for draft17+");
-		}
-
-		match version {
-			Version::Draft14 => {
-				self.group_order.encode(w, version)?;
-				w.bool(self.end_of_track);
-				self.end_location.encode(w, version)?;
-				w.u8(0); // no parameters
-			}
-			_ => {
-				// GROUP_ORDER is not a legal FETCH_OK parameter in any draft after 14; the order
-				// of the response is whatever the FETCH asked for.
-				w.bool(self.end_of_track);
-				self.end_location.encode(w, version)?;
-				encode_params!(w, version,);
-				// Track Properties are the final field, so nothing may follow.
-				self.properties.encode(w, version)?;
-			}
-		}
+		// GROUP_ORDER is not a legal FETCH_OK parameter; the order of the response is
+		// whatever the FETCH asked for.
+		w.bool(self.end_of_track);
+		self.end_location.encode(w, version)?;
+		encode_params!(w, version,);
+		// Track Properties are the final field, so nothing may follow.
+		self.properties.encode(w, version)?;
 		Ok(())
 	}
 
 	fn decode_msg(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		let request_id = if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
-			Some(RequestId::decode(buf, version)?)
-		} else {
-			None
-		};
+		let end_of_track = buf.bool()?;
+		let end_location = Location::decode(buf, version)?;
+		// FETCH_OK lists no parameters, so any closes the session.
+		decode_params!(buf, version,);
+		// The timescale is read but not surfaced yet: a fetched object without its
+		// own units arrives untimed.
+		let properties = super::Properties::decode(buf, version)?;
 
-		match version {
-			Version::Draft14 => {
-				let group_order = GroupOrder::decode(buf, version)?;
-				let end_of_track = buf.bool()?;
-				let end_location = Location::decode(buf, version)?;
-				let properties = super::Properties {
-					max_cache_duration: Parameters::skip_response(buf)?.map(std::time::Duration::from_millis),
-					..Default::default()
-				};
-				Ok(Self {
-					request_id,
-					group_order,
-					end_of_track,
-					end_location,
-					properties,
-				})
-			}
-			_ => {
-				let end_of_track = buf.bool()?;
-				let end_location = Location::decode(buf, version)?;
-				// MAX_CACHE_DURATION and GROUP_ORDER are legal on FETCH_OK only in draft-15.
-				// Draft-16 still knows GROUP_ORDER, so one here is ignored. From draft-17
-				// it closes the session.
-				decode_params!(buf, version,
-					0x04 => max_cache_duration: Option<u64> where version == Version::Draft15,
-					0x22 => group_order: Option<GroupOrder> where version == Version::Draft15,
-				);
-				// The timescale is read but not surfaced yet: a fetched object without its
-				// own units arrives untimed.
-				let mut properties = super::Properties::decode(buf, version)?;
-				if version == Version::Draft15 {
-					properties.max_cache_duration = max_cache_duration.map(std::time::Duration::from_millis);
-				}
-
-				let group_order = group_order.unwrap_or(GroupOrder::Descending);
-
-				Ok(Self {
-					request_id,
-					group_order,
-					end_of_track,
-					end_location,
-					properties,
-				})
-			}
-		}
-	}
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FetchError<'a> {
-	pub request_id: RequestId,
-	pub error_code: u64,
-	pub reason_phrase: Cow<'a, str>,
-}
-
-impl Message for FetchError<'_> {
-	const ID: u64 = 0x19;
-
-	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		self.request_id.encode(w, version)?;
-		w.varint(self.error_code)?;
-		w.string(&self.reason_phrase)?;
-		Ok(())
-	}
-
-	fn decode_msg(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		let request_id = RequestId::decode(buf, version)?;
-		let error_code = buf.varint()?;
-		let reason_phrase = Cow::Owned(buf.string()?);
 		Ok(Self {
-			request_id,
-			error_code,
-			reason_phrase,
+			end_of_track,
+			end_location,
+			properties,
 		})
-	}
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FetchCancel {
-	pub request_id: RequestId,
-}
-impl Message for FetchCancel {
-	const ID: u64 = 0x17;
-
-	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		self.request_id.encode(w, version)?;
-		Ok(())
-	}
-
-	fn decode_msg(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		let request_id = RequestId::decode(buf, version)?;
-		Ok(Self { request_id })
 	}
 }
 
@@ -696,185 +561,13 @@ mod tests {
 	}
 
 	#[test]
-	fn test_fetch_v14_round_trip() {
-		let msg = Fetch {
-			request_id: RequestId(1),
-			subscriber_priority: 128,
-			group_order: GroupOrder::Descending,
-			fetch_type: FetchType::Standalone {
-				namespace: Path::new("test"),
-				track: "video".into(),
-				start: Location { group: 0, object: 0 },
-				end: Location { group: 10, object: 5 },
-			},
-			range_filters: false,
-			fill_timeout: false,
-			properties_wanted: true,
-			epoch: None,
-		};
-
-		let encoded = encode_message(&msg, Version::Draft14);
-		let decoded: Fetch = decode_message(&encoded, Version::Draft14).unwrap();
-
-		assert_eq!(decoded.request_id, RequestId(1));
-		assert_eq!(decoded.subscriber_priority, 128);
-	}
-
-	#[test]
-	fn test_fetch_v15_round_trip() {
-		let msg = Fetch {
-			request_id: RequestId(1),
-			subscriber_priority: 128,
-			group_order: GroupOrder::Descending,
-			fetch_type: FetchType::Standalone {
-				namespace: Path::new("test"),
-				track: "video".into(),
-				start: Location { group: 0, object: 0 },
-				end: Location { group: 10, object: 5 },
-			},
-			range_filters: false,
-			fill_timeout: false,
-			properties_wanted: true,
-			epoch: None,
-		};
-
-		let encoded = encode_message(&msg, Version::Draft15);
-		let decoded: Fetch = decode_message(&encoded, Version::Draft15).unwrap();
-
-		assert_eq!(decoded.request_id, RequestId(1));
-		assert_eq!(decoded.subscriber_priority, 128);
-	}
-
-	#[test]
-	fn test_fetch_ok_v14_round_trip() {
-		let msg = FetchOk {
-			request_id: Some(RequestId(2)),
-			group_order: GroupOrder::Descending,
-			end_of_track: false,
-			end_location: Location { group: 5, object: 3 },
-			properties: Default::default(),
-		};
-
-		let encoded = encode_message(&msg, Version::Draft14);
-		let decoded: FetchOk = decode_message(&encoded, Version::Draft14).unwrap();
-
-		assert_eq!(decoded.request_id, Some(RequestId(2)));
-		assert!(!decoded.end_of_track);
-		assert_eq!(decoded.end_location, Location { group: 5, object: 3 });
-	}
-
-	#[test]
-	fn test_fetch_v16_round_trip() {
-		let msg = Fetch {
-			request_id: RequestId(1),
-			subscriber_priority: 128,
-			group_order: GroupOrder::Descending,
-			fetch_type: FetchType::Standalone {
-				namespace: Path::new("test"),
-				track: "video".into(),
-				start: Location { group: 0, object: 0 },
-				end: Location { group: 10, object: 5 },
-			},
-			range_filters: false,
-			fill_timeout: false,
-			properties_wanted: true,
-			epoch: None,
-		};
-
-		let encoded = encode_message(&msg, Version::Draft16);
-		let decoded: Fetch = decode_message(&encoded, Version::Draft16).unwrap();
-
-		assert_eq!(decoded.request_id, RequestId(1));
-		assert_eq!(decoded.subscriber_priority, 128);
-	}
-
-	#[test]
-	fn test_fetch_v17_round_trip() {
-		let msg = Fetch {
-			request_id: RequestId(1),
-			subscriber_priority: 128,
-			group_order: GroupOrder::Descending,
-			fetch_type: FetchType::Standalone {
-				namespace: Path::new("test"),
-				track: "video".into(),
-				start: Location { group: 0, object: 0 },
-				end: Location { group: 10, object: 5 },
-			},
-			range_filters: false,
-			fill_timeout: false,
-			properties_wanted: true,
-			epoch: None,
-		};
-
-		let encoded = encode_message(&msg, Version::Draft17);
-		let decoded: Fetch = decode_message(&encoded, Version::Draft17).unwrap();
-
-		assert_eq!(decoded.request_id, RequestId(1));
-		assert_eq!(decoded.subscriber_priority, 128);
-	}
-
-	#[test]
-	fn test_fetch_ok_v15_round_trip() {
-		let msg = FetchOk {
-			request_id: Some(RequestId(2)),
-			group_order: GroupOrder::Descending,
-			end_of_track: false,
-			end_location: Location { group: 5, object: 3 },
-			properties: Default::default(),
-		};
-
-		let encoded = encode_message(&msg, Version::Draft15);
-		let decoded: FetchOk = decode_message(&encoded, Version::Draft15).unwrap();
-
-		assert_eq!(decoded.request_id, Some(RequestId(2)));
-		assert!(!decoded.end_of_track);
-		assert_eq!(decoded.end_location, Location { group: 5, object: 3 });
-	}
-
-	#[test]
-	fn test_fetch_ok_v16_round_trip() {
-		let msg = FetchOk {
-			request_id: Some(RequestId(2)),
-			group_order: GroupOrder::Descending,
-			end_of_track: false,
-			end_location: Location { group: 5, object: 3 },
-			properties: Default::default(),
-		};
-
-		let encoded = encode_message(&msg, Version::Draft16);
-		let decoded: FetchOk = decode_message(&encoded, Version::Draft16).unwrap();
-
-		assert_eq!(decoded.request_id, Some(RequestId(2)));
-		assert!(!decoded.end_of_track);
-		assert_eq!(decoded.end_location, Location { group: 5, object: 3 });
-	}
-
-	#[test]
-	fn test_fetch_ok_v17_round_trip() {
-		let msg = FetchOk {
-			request_id: None,
-			group_order: GroupOrder::Descending,
-			end_of_track: false,
-			end_location: Location { group: 5, object: 3 },
-			properties: Default::default(),
-		};
-
-		let encoded = encode_message(&msg, Version::Draft17);
-		let decoded: FetchOk = decode_message(&encoded, Version::Draft17).unwrap();
-
-		assert_eq!(decoded.request_id, None);
-		assert!(!decoded.end_of_track);
-		assert_eq!(decoded.end_location, Location { group: 5, object: 3 });
-	}
-
-	#[test]
 	fn test_fetch_v18_round_trip() {
 		let msg = Fetch {
 			request_id: RequestId(1),
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
 			fetch_type: FetchType::Standalone {
-				namespace: Path::new("test"),
+				namespace: Path::from_static("test"),
 				track: "video".into(),
 				start: Location { group: 0, object: 0 },
 				end: Location { group: 10, object: 5 },
@@ -895,8 +588,6 @@ mod tests {
 	#[test]
 	fn test_fetch_ok_v18_round_trip() {
 		let msg = FetchOk {
-			request_id: None,
-			group_order: GroupOrder::Descending,
 			end_of_track: false,
 			end_location: Location { group: 5, object: 3 },
 			properties: Default::default(),
@@ -905,19 +596,15 @@ mod tests {
 		let encoded = encode_message(&msg, Version::Draft18);
 		let decoded: FetchOk = decode_message(&encoded, Version::Draft18).unwrap();
 
-		assert_eq!(decoded.request_id, None);
 		assert!(!decoded.end_of_track);
 		assert_eq!(decoded.end_location, Location { group: 5, object: 3 });
 	}
 
-	/// GROUP_ORDER (0x22) has never been a legal FETCH_OK parameter outside draft-14, where
-	/// it was a plain field. A draft-15+ peer closes the session with PROTOCOL_VIOLATION when
-	/// it sees one, so the response carries no parameters at all.
+	/// GROUP_ORDER (0x22) is not a legal FETCH_OK parameter; a peer closes the session with
+	/// PROTOCOL_VIOLATION when it sees one, so the response carries no parameters at all.
 	#[test]
 	fn test_fetch_ok_v18_omits_group_order() {
 		let msg = FetchOk {
-			request_id: None,
-			group_order: GroupOrder::Descending,
 			end_of_track: false,
 			end_location: Location { group: 5, object: 3 },
 			properties: Default::default(),
@@ -967,7 +654,7 @@ mod tests {
 		assert_eq!(
 			fetch.fetch_type,
 			FetchType::Filtered {
-				namespace: Path::new("live"),
+				namespace: Path::from_static("live"),
 				track: "video".into(),
 				filter: Filter::Absolute {
 					start: Location { group: 128, object: 0 },
@@ -989,7 +676,7 @@ mod tests {
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
 			fetch_type: FetchType::Filtered {
-				namespace: Path::new("live"),
+				namespace: Path::from_static("live"),
 				track: "video".into(),
 				filter: Filter::Unfiltered,
 			},
@@ -1032,8 +719,7 @@ mod tests {
 		);
 	}
 
-	/// FILL_TIMEOUT arrived in draft-18, and the Range Filters are still an unknown
-	/// parameter on a draft-18 FETCH.
+	/// The Range Filters arrived in draft-22, so they are still unknown parameters on draft 18.
 	#[test]
 	fn test_fetch_parameters_follow_their_draft() {
 		#[rustfmt::skip]
@@ -1047,8 +733,7 @@ mod tests {
 		let range_filter = joining(&[0x01, 0x25, 0x00]);
 
 		for (version, body, ok) in [
-			(Version::Draft15, &token, true),
-			(Version::Draft16, &fill_timeout, false),
+			(Version::Draft18, &token, true),
 			(Version::Draft18, &fill_timeout, true),
 			(Version::Draft18, &range_filter, false),
 		] {
@@ -1070,7 +755,7 @@ mod tests {
 			0x02, 0x03, 0x00, // Relative Joining: subscription 3, offset 0
 			0x00, // no parameters
 		];
-		let fetch = decode_message::<Fetch>(&body, Version::Draft16).unwrap();
+		let fetch = decode_message::<Fetch>(&body, Version::Draft18).unwrap();
 		assert_eq!(fetch.subscriber_priority, 128);
 	}
 }
@@ -1197,7 +882,7 @@ mod object_tests {
 	/// desync the rest of the stream.
 	#[test]
 	fn an_undefined_value_is_refused() {
-		// 0x8D, one past End of Non-Existent Range, in the draft-17+ leading-ones form.
+		// 0x8D, one past End of Non-Existent Range, in the leading-ones form.
 		let mut bytes = bytes::Bytes::from_static(&[0x80, 0x8D, 0x00, 0x00]);
 		assert!(crate::coding::decode_buf(&mut bytes, VERSION, FetchObject::decode).is_err());
 	}
@@ -1212,21 +897,9 @@ mod cache_duration_tests {
 	/// subscription still learns its retention window.
 	#[test]
 	fn max_cache_duration_is_read_in_each_drafts_field() {
-		for version in [
-			Version::Draft14,
-			Version::Draft15,
-			Version::Draft16,
-			Version::Draft17,
-			Version::Draft18,
-			Version::Draft22,
-		] {
+		for version in [Version::Draft18, Version::Draft22] {
 			for age in [0u64, 30_000] {
-				let mut payload = match version {
-					Version::Draft14 => vec![0, 1, 0, 0, 0, 1, 4],
-					Version::Draft15 => vec![0, 0, 0, 0, 1, 4],
-					Version::Draft16 => vec![0, 0, 0, 0, 0, 4],
-					_ => vec![0, 0, 0, 0, 4],
-				};
+				let mut payload = vec![0, 0, 0, 0, 4];
 				Encoder::new(&mut payload, version.into()).varint(age).unwrap();
 				let got = FetchOk::decode_msg(&mut Decoder::new(&payload, version.into()), version).unwrap();
 				assert_eq!(

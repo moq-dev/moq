@@ -58,8 +58,9 @@ built; if it is tagged to its stream, a foreign one is the only error left.
 zero-copy split, so one generic write covers owned and borrowed data. Send:
 `write(&mut impl Buf) -> usize`, `write_all(impl Buf)`, `AsyncWrite`. Recv:
 `read(&mut impl BufMut)`, `read_exact`, `read_chunk(max) -> Bytes`,
-`read_to_end(limit)`, `lease`, `AsyncRead`. `write_chunk`, `write_chunks`,
-`write_all_chunks`, and `read_chunks` go; moq-quic's `write` and
+`read_to_end(limit)`, `lease`, `AsyncRead`. `write_chunk`, `write_chunks`, and
+`write_all_chunks` go (`read_chunks` already went in
+[moq-dev/moq#6809](https://github.com/moq-dev/moq/pull/6809)); moq-quic's `write` and
 `write_chunks` become one `write(&mut impl Buf)`. Confirm on
 `benches/streams.rs` that owned writes stay zero-copy. A buffer pool is out
 of scope: [QUIC I/O boundary](/quest/m2/quic-io-boundary.md) owns it after a
@@ -95,10 +96,11 @@ in the drivers").
 for unordered reads, and a four-level match in `session.rs`; collapse it onto
 `send::Error` and `recv::Error`.
 
-**Acked.** Both drivers match `StreamEvent::Acked` explicitly instead of
-moq-tokio's `_ => {}` catch-all, so a new event is a compile error until
-[waits](/quest/m1/quic-api/waits.md) deletes the events. The driver's waiter
-method arrives with [poll_acked](/quest/m2/quic-ack-hook.md).
+**Acked.** The driver's waiter method arrives with
+[poll_acked](/quest/m2/quic-ack-hook.md). Decided 2026-10-27 (maintainer):
+the drivers do not match `StreamEvent::Acked` explicitly here, since
+[waits](/quest/m1/quic-api/waits.md) deletes `StreamEvent` right after, so it
+would be throwaway work.
 
 **moq-uring.** Its driver gets the same names and signatures and passes
 `send::Options` to the open, as moq-tokio's does, instead of applying them

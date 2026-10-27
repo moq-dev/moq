@@ -8,7 +8,7 @@ use crate::support::{
 };
 use moq_net::{
 	Timescale, Timestamp, origin,
-	stats::{Control, Registry, Tier},
+	stats::{Message, Registry, Tier},
 };
 
 fn origin() -> origin::Producer {
@@ -19,21 +19,13 @@ fn origin() -> origin::Producer {
 
 #[moq_clock::test]
 async fn control_classes_cross_lite_and_ietf_sessions_without_counting_payload() {
-	for version in [
-		"moq-lite-03",
-		"moq-lite-06",
-		"moq-lite-07-wip",
-		"moq-transport-14",
-		"moq-transport-15",
-		"moq-transport-16",
-		"moq-transport-22",
-	] {
+	for version in ["moq-lite-03", "moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
 		let publisher = origin();
 		let subscriber = origin();
 		let registry = Registry::new(Default::default());
-		let tier = Tier::new("internal");
+		let tier = Tier::new(moq_net::Path::from_static("internal"));
 		let mut options = MockConnectOptions::new(version.parse().unwrap());
-		options.server_stats = registry.tier(tier.clone()).session("");
+		options.server_stats = registry.tier(tier.clone()).session(moq_net::Path::from_static(""));
 		options.client_publish = Some(publisher.consume());
 		options.server_subscribe = Some(subscriber.clone());
 		let _pair = connect_mock(options).await;
@@ -57,7 +49,7 @@ async fn control_classes_cross_lite_and_ietf_sessions_without_counting_payload()
 		let mut group = sub.recv_group().await.unwrap().unwrap();
 		assert_eq!(group.read_frame().await.unwrap().unwrap().payload.len(), 64 * 1024);
 		let rows = registry.snapshot().control();
-		for class in [Control::Announce, Control::Subscribe] {
+		for class in [Message::Announce, Message::Subscribe] {
 			assert!(
 				rows.iter()
 					.any(|(row_tier, row_class, bytes)| *row_tier == tier && *row_class == class && bytes.tx > 0),
@@ -76,16 +68,16 @@ async fn control_classes_cross_lite_and_ietf_sessions_without_counting_payload()
 /// admitted with, even for a session with neither origin.
 #[moq_clock::test]
 async fn setup_counts_under_the_admitted_stats() {
-	for version in ["moq-lite-07-wip", "moq-transport-14", "moq-transport-22"] {
+	for version in ["moq-lite-07-wip", "moq-transport-22"] {
 		let version: moq_net::Version = version.parse().unwrap();
 		let registry = Registry::new(Default::default());
-		let tier = Tier::new("internal");
+		let tier = Tier::new(moq_net::Path::from_static("internal"));
 		let mut transport = moq_net::transport::memory::Config::default();
 		transport.protocol = Some(version.alpn().to_string());
 		let (client_transport, server_transport) = create_mock_session_pair(transport);
 		let client = moq_net::Client::new().with_versions(version.into());
 		let server = moq_net::Server::new().with_versions(version.into());
-		let stats = registry.tier(tier.clone()).session("");
+		let stats = registry.tier(tier.clone()).session(moq_net::Path::from_static(""));
 		let client = async {
 			let (session, driver) = client.connect(now(), client_transport).await.unwrap();
 			spawn(driver);
@@ -103,7 +95,7 @@ async fn setup_counts_under_the_admitted_stats() {
 		assert!(
 			rows.iter()
 				.any(|(row_tier, class, bytes)| *row_tier == tier
-					&& *class == Control::Session
+					&& *class == Message::Session
 					&& bytes.tx > 0 && bytes.rx > 0),
 			"{version}: {rows:?}"
 		);

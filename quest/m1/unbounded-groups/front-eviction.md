@@ -6,7 +6,7 @@ A group grows without a frame-count or byte cap. When the cache pool is over
 budget and the group can't go whole, because it is the live edge or is being
 read, it sheds whole frames from its front. A reader that needs an evicted
 frame gets it refilled in place. The refill comes from upstream over a
-frame-precise range, or from the publisher's `track::Dynamic` handler, and
+frame-precise range, or from the publisher's `track::Requests` handler, and
 the reader gets `Error::Evicted` only when neither exists.
 `MAX_GROUP_FRAMES` and the group byte cap are removed. The frame cap stays
 until [Byte holes](/quest/m1/unbounded-groups/byte-holes.md). A moq-json
@@ -18,19 +18,16 @@ records".
 
 See the [epic](/quest/m1/unbounded-groups/README.md) for the decisions.
 
-- Storage is the lock-free
-  append-only log (`kio::log`) (decided 2026-10-24
-  by the maintainer over the group storage benchmark,
-  [moq-dev/moq#6627](https://github.com/moq-dev/moq/pull/6627): land the
-  end-state storage now rather than a mutex layout swapped later; numbers in
-  the [kio contention epic](/quest/m2/perf/kio-channel-contention/README.md)).
-  Frames keep absolute indices. The log is the tail run, from a base that
-  only advances: front eviction raises its base. Refilled frames go into
-  sorted runs below the base, behind their own mutex, and never rejoin the
-  log. Readers keep one absolute cursor, read the log lock-free, and search
-  the refill runs only when the cursor falls below the base. Prototyped this
-  way, the log cost 10 to 40% less per reader across cores and about 15 ns
-  more per append.
+- Storage is the lock-free append-only log (`kio::log`), which landed in
+  [moq-dev/moq#6782](https://github.com/moq-dev/moq/pull/6782) (decided
+  2026-10-24 by the maintainer over the group storage benchmark,
+  [moq-dev/moq#6627](https://github.com/moq-dev/moq/pull/6627)). Frames keep
+  absolute indices. The log is the tail run, from a base that only advances:
+  front eviction raises its base through `log::Writer::evict`, which already
+  exists (`rs/kio/src/log.rs`). Refilled frames go into sorted runs below
+  the base, behind their own mutex, and never rejoin the log. Readers keep
+  one absolute cursor, read the log lock-free, and search the refill runs
+  only when the cursor falls below the base.
 - Pool debt evicts whole cold groups first (`pay_debt` in
   `model/track.rs`, as today). Front frames are shed only from a group
   that is protected or being read.
@@ -58,7 +55,7 @@ See the [epic](/quest/m1/unbounded-groups/README.md) for the decisions.
   the first victim, so merging would also thrash under steady pressure.
 - A refill must not evict what it was fetched for before the waiting reader
   takes it: hand its first demanded frame to that reader. Test a
-  `track::Dynamic` handler that writes more than the pool synchronously, so
+  `track::Requests` handler that writes more than the pool synchronously, so
   the reader still progresses.
 - A refill of frames `0..N` refreshes the recency of the group's frames from
   `N+1` on (decided 2026-10-24, maintainer). Pressure then sheds the
@@ -70,7 +67,7 @@ See the [epic](/quest/m1/unbounded-groups/README.md) for the decisions.
 - When nothing serves the hole, the reader gets `Error::Evicted`, and a
   join onto a group whose first frame is evicted asks for a new group as if
   it were over the `Info::refresh` ratio, on tracks that opt into
-  refresh (decided 2026-10-24, maintainer). The origin's `track::Dynamic`
+  refresh (decided 2026-10-24, maintainer). The origin's `track::Requests`
   handler decides whether to serve old content; refresh is the fallback.
 - The live edge is paced by its fastest reader (decided 2026-10-25,
   maintainer, superseding 2026-10-24's "never paced by a reader"):
@@ -86,7 +83,7 @@ See the [epic](/quest/m1/unbounded-groups/README.md) for the decisions.
   allocated. Storing a group as flat header and payload bytes was rejected:
   it copies every small frame, and lite and IETF encode headers
   differently.
-- Refill goes through a `track::Dynamic` fill. Over
+- Refill goes through a `track::Requests` fill. Over
   moq-transport, a hole that covers whole objects refills; one inside an
   object is `Evicted`.
 - Downstream encoders that roll groups by the removed constants (moq-json,

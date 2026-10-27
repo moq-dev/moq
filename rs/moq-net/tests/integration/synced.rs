@@ -72,8 +72,6 @@ async fn an_exact_boundary_catches_up_with_the_initial_set() {
 		"moq-lite-05",
 		"moq-lite-06",
 		"moq-lite-07-wip",
-		"moq-transport-16",
-		"moq-transport-17",
 		"moq-transport-18",
 		"moq-transport-22",
 	] {
@@ -84,7 +82,7 @@ async fn an_exact_boundary_catches_up_with_the_initial_set() {
 /// Versions without a boundary still sync, so nothing waiting on it hangs.
 #[moq_clock::test]
 async fn a_best_effort_boundary_still_catches_up() {
-	for version in ["moq-lite-03", "moq-lite-04", "moq-transport-14", "moq-transport-15"] {
+	for version in ["moq-lite-03", "moq-lite-04"] {
 		synced(version).await;
 	}
 }

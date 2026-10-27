@@ -87,14 +87,14 @@ fn origin(config: moq_net::origin::Config) -> moq_net::origin::Producer {
 	origin
 }
 
-/// One publisher run of a broadcast: a catalog and a single VP8 rendition whose timeline the
+/// One publisher run of a broadcast: a catalog and a single VP8 rendition whose HLS records the
 /// catalog advertises.
 pub struct Publisher {
 	/// The broadcast, which announces its path while it lives.
 	pub broadcast: moq_net::origin::Publication,
 	/// The catalog.
 	pub catalog: moq_mux::catalog::Producer,
-	/// The media track, recording its timeline as it is written.
+	/// The media track, recording its HLS records as it is written.
 	pub media: moq_mux::container::Producer<moq_mux::catalog::hang::Container, hang::catalog::VideoConfig>,
 }
 
@@ -103,10 +103,8 @@ impl Publisher {
 	pub fn new(origin: &moq_net::origin::Producer, path: &str, route: moq_net::origin::Route) -> Self {
 		let broadcast = origin.create_broadcast(path).expect("publish");
 		broadcast.announce(route).expect("announce");
-		// A hinted timeline is advertised before any media, so a recorder can start first.
-		let timeline = moq_mux::timeline::Config::default().with_duration_hint(Duration::from_secs(2));
-		let config = moq_mux::catalog::Config::default().with_timeline(timeline);
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config).expect("catalog");
+		let catalog =
+			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), catalog_config()).expect("catalog");
 		let reserved = catalog.reserve();
 		let track = broadcast.create_track(TRACK, timed()).expect("track");
 		let media = reserved
@@ -138,6 +136,13 @@ impl Publisher {
 		self.media.finish().expect("finish media");
 		self.catalog.finish().expect("finish catalog");
 	}
+}
+
+/// A catalog config publishing HLS records, hinted so they are advertised before any media and a
+/// recorder can start first.
+pub fn catalog_config() -> moq_mux::catalog::Config {
+	let hls = moq_mux::hls::Config::default().with_duration_hint(Duration::from_secs(2));
+	moq_mux::catalog::Config::default().with_hls(hls)
 }
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -258,4 +263,14 @@ pub async fn media_uri(app: &axum::Router, path: &str) -> String {
 		.find(|line| line.ends_with(&format!("/{}/{TRACK}/media.m3u8", Kind::Video.as_str())))
 		.unwrap_or_else(|| panic!("no {TRACK} variant in {master}"));
 	format!("/{path}/{line}")
+}
+
+/// The URI `playlist` lists for segment `n`.
+pub fn segment(playlist: &str, n: u64) -> String {
+	let suffix = format!(".{n}.m4s");
+	playlist
+		.lines()
+		.find(|line| line.starts_with("seg/") && line.ends_with(&suffix))
+		.unwrap_or_else(|| panic!("no segment {n} in {playlist}"))
+		.to_string()
 }

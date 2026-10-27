@@ -142,6 +142,10 @@ export class Broadcast {
 		description?: string;
 		enabled?: boolean;
 		epoch?: Hang.Catalog.ReferenceEpoch;
+		hls?: {
+			duration: number & $brand<"u53">;
+			track: string;
+		};
 		jitter?: number & $brand<"u53">;
 		label?: string;
 		layout?: string;
@@ -236,6 +240,10 @@ export class Broadcast {
 		enabled?: boolean;
 		epoch?: Hang.Catalog.ReferenceEpoch;
 		framerate?: number;
+		hls?: {
+			duration: number & $brand<"u53">;
+			track: string;
+		};
 		interlaced?: boolean;
 		jitter?: number & $brand<"u53">;
 		label?: string;
@@ -278,17 +286,6 @@ export class CatalogProducer {
 	constructor();
 	mutate(fn: (catalog: {
 		[key: string]: unknown;
-		archive?: {
-			replay?: Hang.Catalog.RelativeBroadcast;
-			replayEpoch?: Hang.Catalog.ReferenceEpoch;
-			store?: string;
-			timelines: Record<string, {
-				duration?: number & $brand<"u53">;
-				track: string;
-			}>;
-			timescale: number & $brand<"u53">;
-			version?: number & $brand<"u53">;
-		};
 		audio?: {
 			renditions: {
 				[key: string]: {
@@ -313,6 +310,10 @@ export class CatalogProducer {
 					description?: string;
 					enabled?: boolean;
 					epoch?: Hang.Catalog.ReferenceEpoch;
+					hls?: {
+						duration: number & $brand<"u53">;
+						track: string;
+					};
 					jitter?: number & $brand<"u53">;
 					label?: string;
 					layout?: string;
@@ -345,6 +346,10 @@ export class CatalogProducer {
 				description?: string;
 				enabled?: boolean;
 				epoch?: Hang.Catalog.ReferenceEpoch;
+				hls?: {
+					duration: number & $brand<"u53">;
+					track: string;
+				};
 				jitter?: number & $brand<"u53">;
 				label?: string;
 				layout?: string;
@@ -484,6 +489,10 @@ export class CatalogProducer {
 					enabled?: boolean;
 					epoch?: Hang.Catalog.ReferenceEpoch;
 					framerate?: number;
+					hls?: {
+						duration: number & $brand<"u53">;
+						track: string;
+					};
 					interlaced?: boolean;
 					jitter?: number & $brand<"u53">;
 					label?: string;
@@ -571,6 +580,10 @@ export class CatalogProducer {
 				enabled?: boolean;
 				epoch?: Hang.Catalog.ReferenceEpoch;
 				framerate?: number;
+				hls?: {
+					duration: number & $brand<"u53">;
+					track: string;
+				};
 				interlaced?: boolean;
 				jitter?: number & $brand<"u53">;
 				label?: string;

@@ -37,7 +37,7 @@ publication does not retract on its own).
   the prepared fill is the broadcast it prepared.
 - Wrappers: py, swift, kt, dart, `go/wrapper`, `cpp/moq`, and `cpp/obs`, with
   their tests, READMEs, `doc/lib/{py,swift,kt,go,dart,c,cpp}`, `doc/bin/obs.md`,
-  and a `MIGRATE.md` entry in each package. Regenerate bindings from source.
+  and an Impact migration note for each package. Regenerate bindings from source.
 
 Test in each layer: clone/drop, explicit unannounce, prepared
 admission (including a mismatched fill), and a stale publication against a

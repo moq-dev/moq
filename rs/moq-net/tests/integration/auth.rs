@@ -31,8 +31,8 @@ const LITE_07: &str = "moq-lite-07-wip";
 const LITE_06: &str = "moq-lite-06";
 /// The lite Auth Stream's type byte.
 const AUTH_STREAM: u8 = 0x7;
-/// The first draft that negotiates MoQ Auth, and the newest.
-const MOQT_17: &str = "moq-transport-17";
+/// The oldest draft we speak, which negotiates MoQ Auth, and the newest.
+const MOQT_18: &str = "moq-transport-18";
 const MOQT_22: &str = "moq-transport-22";
 
 /// Run each case on every version that exchanges AUTH.
@@ -41,8 +41,8 @@ macro_rules! cases {
 		mod lite_07 {
 			$(#[moq_clock::test] async fn $case() { super::$case(super::LITE_07).await })*
 		}
-		mod moqt_17 {
-			$(#[moq_clock::test] async fn $case() { super::$case(super::MOQT_17).await })*
+		mod moqt_18 {
+			$(#[moq_clock::test] async fn $case() { super::$case(super::MOQT_18).await })*
 		}
 		mod moqt_22 {
 			$(#[moq_clock::test] async fn $case() { super::$case(super::MOQT_22).await })*
@@ -88,8 +88,8 @@ async fn lite_07_presents_a_transiently_refused_token_again() {
 
 /// moq-transport's u16 message size is the one a test can overflow quickly.
 #[moq_clock::test]
-async fn moqt_17_a_grant_too_large_for_one_message_is_unsupported() {
-	a_grant_too_large_for_one_message_is_unsupported(MOQT_17).await
+async fn moqt_18_a_grant_too_large_for_one_message_is_unsupported() {
+	a_grant_too_large_for_one_message_is_unsupported(MOQT_18).await
 }
 
 #[moq_clock::test]
@@ -126,35 +126,9 @@ async fn lite_05_has_no_grant() {
 	older_versions_have_no_grant("moq-lite-05").await
 }
 
-/// The #6566 matrix's drafts: one without MoQ Auth, and one with it.
-#[moq_clock::test]
-async fn moqt_16_admits_exact_and_subtree_grants() {
-	exact_and_subtree_grants_admit_their_broadcast("moq-transport-16").await
-}
-
-#[moq_clock::test]
-async fn moqt_18_admits_exact_and_subtree_grants() {
-	exact_and_subtree_grants_admit_their_broadcast("moq-transport-18").await
-}
-
-#[moq_clock::test]
-async fn moqt_16_has_no_grant() {
-	older_versions_have_no_grant("moq-transport-16").await
-}
-
-#[moq_clock::test]
-async fn moqt_16_route_auth_renews_its_announce() {
-	a_route_auth_renews_its_announce("moq-transport-16").await
-}
-
 #[moq_clock::test]
 async fn moqt_22_route_auth_renews_its_announce() {
 	a_route_auth_renews_its_announce(MOQT_22).await
-}
-
-#[moq_clock::test]
-async fn moqt_16_route_auth_survives_a_reconnect() {
-	a_route_auth_survives_a_reconnect("moq-transport-16").await
 }
 
 #[moq_clock::test]
@@ -1128,10 +1102,7 @@ async fn exact_and_subtree_grants_admit_their_broadcast(version: &'static str) {
 			let mut sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
 			sub.recv_group().await.unwrap().expect("a group");
 
-			match version == "moq-transport-16" {
-				true => assert_eq!(pair.client.auth().grant().peek(), None),
-				false => assert_eq!(granted(&pair.client).await.subscribe, scope),
-			}
+			assert_eq!(granted(&pair.client).await.subscribe, scope);
 			assert_eq!(pair.client_transport.close_reason(), None);
 		})
 		.await
@@ -1549,11 +1520,8 @@ macro_rules! limit_cases {
 		mod limit_lite_07 {
 			$(#[moq_clock::test] async fn $case() { super::$case(super::LITE_07).await })*
 		}
-		mod limit_moqt_16 {
-			$(#[moq_clock::test] async fn $case() { super::$case("moq-transport-16").await })*
-		}
-		mod limit_moqt_17 {
-			$(#[moq_clock::test] async fn $case() { super::$case(super::MOQT_17).await })*
+		mod limit_moqt_18 {
+			$(#[moq_clock::test] async fn $case() { super::$case(super::MOQT_18).await })*
 		}
 	};
 }
@@ -1582,7 +1550,7 @@ async fn lite_07_narrowing_resets_a_fetch_in_flight() {
 
 /// Whether `version` exchanges AUTH, so the peer also hears of a narrowing.
 fn speaks_auth(version: &str) -> bool {
-	matches!(version, LITE_07 | MOQT_17 | MOQT_22)
+	matches!(version, LITE_07 | MOQT_18 | MOQT_22)
 }
 
 /// A revocation as the reader sees it: the local gate's own error, or the peer's

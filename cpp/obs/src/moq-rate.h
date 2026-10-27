@@ -22,8 +22,8 @@ public:
 	uint64_t Max() const { return max; }
 
 	// Feed a grant, returning the new target when it moved enough to apply.
-	// A missing grant (no estimate, or no subscriber) holds the target: losing
-	// the estimate is not evidence the uplink got better.
+	// A missing grant (no estimate) holds the target: losing the estimate is not
+	// evidence the uplink got better.
 	std::optional<uint64_t> Update(std::optional<uint64_t> grant, Clock::time_point now)
 	{
 		if (!grant)

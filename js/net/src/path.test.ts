@@ -4,16 +4,17 @@ import * as Path from "./path.ts";
 /** Brand a literal as a relative reference; the tests feed raw strings on purpose. */
 const asRel = (s: string) => s as Path.Relative;
 
-test("Path constructor trims leading and trailing slashes", () => {
-	expect(Path.from("/foo/bar/")).toBe("foo/bar" as Path.Valid);
-	expect(Path.from("///foo/bar///")).toBe("foo/bar" as Path.Valid);
+test("from refuses empty segments", () => {
+	for (const raw of ["/foo", "foo/", "/foo/bar/", "foo//bar", "/", "//"]) {
+		expect(() => Path.from(raw)).toThrow("empty segment");
+		expect(() => Path.from("ok", raw)).toThrow("empty segment");
+	}
 	expect(Path.from("foo/bar")).toBe("foo/bar" as Path.Valid);
 });
 
-test("Path constructor handles empty paths", () => {
-	expect(Path.from("")).toBe("" as Path.Valid);
-	expect(Path.from("/")).toBe("" as Path.Valid);
-	expect(Path.from("///")).toBe("" as Path.Valid);
+test("from treats the empty path as the root", () => {
+	expect(Path.from("")).toBe(Path.empty());
+	expect(Path.from()).toBe(Path.empty());
 });
 
 test("hasPrefix matches exact paths", () => {
@@ -38,12 +39,6 @@ test("hasPrefix does not match partial segment prefixes", () => {
 test("hasPrefix handles empty prefix", () => {
 	const path = Path.from("foo/bar");
 	expect(Path.hasPrefix(Path.empty(), path)).toBe(true);
-});
-
-test("hasPrefix ignores trailing slashes in prefix", () => {
-	const path = Path.from("foo/bar");
-	expect(Path.hasPrefix(Path.from("foo/"), path)).toBe(true);
-	expect(Path.hasPrefix(Path.from("foo/bar/"), path)).toBe(true);
 });
 
 test("stripPrefix strips valid prefixes", () => {
@@ -111,49 +106,6 @@ test("join handles multiple joins", () => {
 	expect(path).toBe("api/v1/users/123" as Path.Valid);
 });
 
-test("equals checks correctly", () => {
-	const path1 = Path.from("foo/bar");
-	const path2 = Path.from("/foo/bar/");
-	const path3 = Path.from("foo/baz");
-
-	expect(path1 === path2).toBe(true);
-	expect(path1 === path3).toBe(false);
-});
-
-test("handles paths with multiple consecutive slashes", () => {
-	const path = Path.from("foo//bar///baz");
-	// Multiple consecutive slashes are collapsed to single slashes
-	expect(path).toBe("foo/bar/baz" as Path.Valid);
-});
-
-test("removes multiple slashes comprehensively", () => {
-	// Test various multiple slash scenarios
-	expect(Path.from("foo//bar")).toBe("foo/bar" as Path.Valid);
-	expect(Path.from("foo///bar")).toBe("foo/bar" as Path.Valid);
-	expect(Path.from("foo////bar")).toBe("foo/bar" as Path.Valid);
-
-	// Multiple occurrences of double slashes
-	expect(Path.from("foo//bar//baz")).toBe("foo/bar/baz" as Path.Valid);
-	expect(Path.from("a//b//c//d")).toBe("a/b/c/d" as Path.Valid);
-
-	// Mixed slash counts
-	expect(Path.from("foo//bar///baz////qux")).toBe("foo/bar/baz/qux" as Path.Valid);
-
-	// With leading and trailing slashes
-	expect(Path.from("//foo//bar//")).toBe("foo/bar" as Path.Valid);
-	expect(Path.from("///foo///bar///")).toBe("foo/bar" as Path.Valid);
-
-	// Edge case: only slashes
-	expect(Path.from("//")).toBe("" as Path.Valid);
-	expect(Path.from("////")).toBe("" as Path.Valid);
-
-	// Test that operations work correctly with normalized paths
-	const pathWithSlashes = Path.from("foo//bar///baz");
-	expect(Path.hasPrefix(Path.from("foo/bar"), pathWithSlashes)).toBe(true);
-	expect(Path.stripPrefix(Path.from("foo"), pathWithSlashes)).toBe("bar/baz" as Path.Valid);
-	expect(Path.join(pathWithSlashes, Path.from("qux"))).toBe("foo/bar/baz/qux" as Path.Valid);
-});
-
 test("handles special characters", () => {
 	const path = Path.from("foo-bar_baz.txt");
 	expect(path).toBe("foo-bar_baz.txt" as Path.Valid);
@@ -169,11 +121,6 @@ test("from accepts multiple arguments", () => {
 test("from handles empty strings in arguments", () => {
 	expect(Path.from("foo", "", "bar")).toBe("foo/bar" as Path.Valid);
 	expect(Path.from("", "foo", "bar", "")).toBe("foo/bar" as Path.Valid);
-});
-
-test("from sanitizes multiple arguments with slashes", () => {
-	expect(Path.from("/foo/", "/bar/", "/baz/")).toBe("foo/bar/baz" as Path.Valid);
-	expect(Path.from("foo//", "//bar", "baz")).toBe("foo/bar/baz" as Path.Valid);
 });
 
 test("resolve replaces the base name", () => {
@@ -295,7 +242,7 @@ test("normalizeRelative preserves an all-dot reference", () => {
 test("parts splits a path into its components", () => {
 	expect(Path.parts(Path.from(""))).toEqual([]);
 	expect(Path.parts(Path.from("foo"))).toEqual(["foo"]);
-	expect(Path.parts(Path.from("/foo//bar/"))).toEqual(["foo", "bar"]);
+	expect(Path.parts(Path.from("foo/bar"))).toEqual(["foo", "bar"]);
 });
 
 test("decode enforces the max part count", () => {
@@ -305,14 +252,14 @@ test("decode enforces the max part count", () => {
 });
 
 test("decode never allocates per slash of a hostile path", () => {
-	// A peer can send a path as large as a control message; splitting it would hold one entry per
-	// slash, so decode must count separators and stop at the limit instead.
-	const slashes = "/".repeat(1024 * 1024);
-	const parts = "a/".repeat(1024 * 1024);
+	// Splitting a path would hold one entry per slash, so decode must count separators and stop at
+	// the limit instead, even for the most slashes MAX_BYTES admits.
+	const slashes = "/".repeat(Path.MAX_BYTES);
+	const parts = `${"a/".repeat(Path.MAX_BYTES / 2 - 1)}a`;
 	const split = spyOn(String.prototype, "split");
 	const indexOf = spyOn(String.prototype, "indexOf");
 	try {
-		expect(Path.decode(slashes)).toBe(Path.empty());
+		expect(() => Path.decode(slashes)).toThrow("empty segment");
 		indexOf.mockClear();
 		let error: unknown;
 		try {
@@ -335,4 +282,18 @@ test("encode enforces the max part count", () => {
 	const atLimit = Array.from({ length: Path.MAX_PARTS }, (_, i) => `${i}`).join("/") as Path.Valid;
 	expect(Path.encode(atLimit)).toBe(atLimit);
 	expect(() => Path.encode(`${atLimit}/extra` as Path.Valid)).toThrow();
+});
+
+test("encode and decode enforce the max byte length in UTF-8", () => {
+	const atLimit = "a".repeat(Path.MAX_BYTES) as Path.Valid;
+	expect(Path.encode(atLimit)).toBe(atLimit);
+	expect(Path.decode(atLimit)).toBe(atLimit);
+	expect(() => Path.encode(`${atLimit}b` as Path.Valid)).toThrow();
+	expect(() => Path.decode(`${atLimit}b`)).toThrow();
+
+	// One UTF-16 unit of "é" is two UTF-8 bytes, so half as many units reach the limit.
+	const wide = "é".repeat(Math.floor(Path.MAX_BYTES / 2)) as Path.Valid;
+	expect(Path.encode(wide)).toBe(wide);
+	expect(() => Path.encode(`${wide}é` as Path.Valid)).toThrow();
+	expect(() => Path.decode(`${wide}é`)).toThrow();
 });

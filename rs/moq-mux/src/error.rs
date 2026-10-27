@@ -180,46 +180,29 @@ pub enum Error {
 		composition_time_ms: i32,
 	},
 
-	/// [`timeline::Producer::push`](crate::timeline::Producer::push) received a record out of order.
-	#[error("timeline record {actual} pushed where {expected} was next")]
-	TimelineSequence {
+	/// An HLS record did not land at its window's next index: pushed out of order, or read where
+	/// its `sequence` differs from its window index.
+	#[error("HLS record {actual} where {expected} was next")]
+	HlsSequence {
 		/// The window's next index.
 		expected: u64,
-		/// The pushed record's sequence.
+		/// The record's sequence.
 		actual: u64,
 	},
 
-	/// A timeline frame report did not advance past the previous one.
-	#[error("timeline report at {position:?} does not advance past {last:?}")]
-	TimelinePosition {
-		/// The rejected report's position.
-		position: hang::timeline::Position,
-		/// The previous report's position.
-		last: hang::timeline::Position,
+	/// An HLS frame report named a group before the previous report's.
+	#[error("HLS report for group {group} after group {last}")]
+	HlsGroup {
+		/// The rejected report's group.
+		group: u64,
+		/// The previous report's group.
+		last: u64,
 	},
-
-	/// The catalog's `archive` entry indexes no timeline for this track.
-	#[error("no timeline for track {0}")]
-	TimelineMissing(String),
-
-	/// A timeline frame report is timed differently from the track's earlier ones: a track is all
-	/// timed or all untimed.
-	#[error("timeline report at {0:?} does not match the track's timing")]
-	TimelineTiming(hang::timeline::Position),
-
-	/// A timeline record has no `pts` or `duration` to decode, as on an untimed track.
-	#[error("timeline record {0} is untimed")]
-	TimelineUntimed(u64),
 
 	/// Error from a muxer/demuxer that reports via `anyhow` (currently the MPEG-TS demuxer).
 	/// Boxed in an `Arc` so the enum stays `Clone` (`anyhow::Error` is not).
 	#[error("{0}")]
 	Other(std::sync::Arc<anyhow::Error>),
-
-	/// A timeline catalog section declared a timescale that isn't a valid
-	/// [`moq_net::Timescale`] (zero, or too large).
-	#[error("invalid timeline timescale: {0}")]
-	InvalidTimescale(u32),
 
 	/// A timestamp cannot be mapped between the broadcast clock and the wall: PTS zero would land
 	/// before the moq epoch (2020) or after now, the host's wall clock was unset so the clock has no
@@ -341,6 +324,16 @@ impl Error {
 	/// The error for a rendition whose container this build does not recognize.
 	pub(crate) fn unsupported_container(container: &hang::catalog::UnknownContainer) -> Self {
 		Self::UnsupportedContainer(container.kind().unwrap_or("<missing>").to_string())
+	}
+
+	/// The reason a track this error aborts gives its subscribers. Only a transport error has a
+	/// wire code; anything else reaches them as a generic failure while the cause stays here.
+	pub(crate) fn reason(&self) -> moq_net::Error {
+		match self {
+			Self::Moq(err) => err.clone(),
+			Self::Json(moq_json::Error::Net(err)) => err.clone(),
+			_ => moq_net::StreamError::Internal.into(),
+		}
 	}
 }
 

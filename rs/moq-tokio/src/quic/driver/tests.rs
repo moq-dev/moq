@@ -1907,16 +1907,16 @@ async fn stuck_window_evicts_the_lower_priority() {
 		async { endpoint.accept().await.unwrap().await }
 	)
 	.unwrap();
-	let writers = [
+	let streams = [
 		client.open_uni(Default::default()).await.unwrap(),
 		client.open_uni(Default::default()).await.unwrap(),
-	]
-	.map(|mut send| {
+	];
+	let low_id = streams[0].id();
+	let writers = streams.map(|mut send| {
 		let id = send.id();
 		let writer = tokio::spawn(async move {
-			// Queuing the whole write and FIN can succeed before the peer evicts the stream.
-			// Only the peer's final outcome proves whether it was stopped.
-			if send.write_all(&[7; WINDOW]).await.is_ok() {
+			// Keep the low stream open: an acknowledged FIN wins over a later STOP_SENDING.
+			if send.write_all(&[7; WINDOW]).await.is_ok() && id != low_id {
 				send.finish().unwrap();
 			}
 			send.stopped().await.unwrap()
@@ -1926,6 +1926,9 @@ async fn stuck_window_evicts_the_lower_priority() {
 
 	let mut low = server.accept_uni().await.unwrap();
 	let mut high = server.accept_uni().await.unwrap();
+	if low.id() != low_id {
+		std::mem::swap(&mut low, &mut high);
+	}
 	low.set_priority(-1);
 	high.set_priority(1);
 	let leased = tokio::join!(
@@ -1939,7 +1942,6 @@ async fn stuck_window_evicts_the_lower_priority() {
 	);
 	assert_eq!(leased, (Err(ReadError::Evicted), Ok(WINDOW)));
 
-	let low_id = low.id();
 	// The peer hears of the eviction once the stream is stopped. Drain the survivor to FIN
 	// instead of dropping unread data, which would stop that stream too.
 	drop(low);

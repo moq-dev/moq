@@ -51,6 +51,10 @@ export namespace Audio {
 			description?: string;
 			enabled?: boolean;
 			epoch?: Hang.Catalog.ReferenceEpoch;
+			hls?: {
+				duration: number & $brand<"u53">;
+				track: string;
+			};
 			jitter?: number & $brand<"u53">;
 			label?: string;
 			layout?: string;
@@ -373,6 +377,10 @@ export namespace Video {
 			enabled?: boolean;
 			epoch?: Hang.Catalog.ReferenceEpoch;
 			framerate?: number;
+			hls?: {
+				duration: number & $brand<"u53">;
+				track: string;
+			};
 			interlaced?: boolean;
 			jitter?: number & $brand<"u53">;
 			label?: string;

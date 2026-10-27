@@ -16,8 +16,8 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdarg>
 #include <cmath>
-#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -111,26 +111,40 @@ uint32_t g_obs_sample_rate = 48000;
 // as a leak.
 std::atomic<long> g_live_allocs{0};
 
-// Candidate resolve and subscribe failures, logged under the source lock as the candidate
-// is released, so taking that lock afterwards observes the release.
+// Watch one attempt, not whichever replacement a later catalog snapshot may start.
+// The logger runs under the source lock, before the failed attempt is released.
+struct CandidateFailure {
+	std::weak_ptr<Track> track;
+	bool failed = false;
+};
 std::mutex g_candidate_mutex;
-std::condition_variable g_candidate_failed;
-int g_candidate_failures = 0;
+CandidateFailure g_candidate;
 } // namespace
 
 extern "C" {
 
 // Deliberately silent: stdio locking would create happens-before edges between
-// the test thread and the source's worker and mask the races we're after. Only a
-// candidate's resolve or subscribe failure synchronizes, so a scenario can wait on it.
+// the test thread and the source's worker and mask the races we're after. Match
+// the watched role while its attempt is alive; playback identity checks below
+// distinguish an active-track error from the candidate's failure.
 void blog(int, const char *format, ...)
 {
-	if (!strstr(format, "Failed to resolve") && !strstr(format, "Failed to subscribe") &&
-	    !strstr(format, "Audio track error"))
+	const char *kind = nullptr;
+	if (strstr(format, "Audio track error") || strstr(format, "Failed to subscribe to Audio track")) {
+		kind = "Audio";
+	} else if (strstr(format, "Failed to subscribe to %s track")) {
+		va_list args;
+		va_start(args, format);
+		kind = va_arg(args, const char *);
+		va_end(args);
+	}
+	if (!kind)
 		return;
 	std::lock_guard<std::mutex> lock(g_candidate_mutex);
-	g_candidate_failures++;
-	g_candidate_failed.notify_all();
+	auto candidate = g_candidate.track.lock();
+	if (!candidate || strcmp(candidate->kind, kind) != 0)
+		return;
+	g_candidate.failed = true;
 }
 
 void *bmalloc(size_t size)
@@ -726,6 +740,67 @@ int main()
 	}
 	report("plays video and audio");
 
+	// Gaps reset references immediately. An encoder end keeps old non-key tail packets
+	// decodable until a fresh frame reaches its endpoint, or until EOF drains the tail.
+	for (int boundary : {0, 1, 2}) {
+		const bool gap = boundary == 0;
+		const bool eof = boundary == 2;
+		TestRelay relay;
+		reset(relay.Url());
+		g_reorder_delay = 2;
+		Publisher publisher(relay, "obs/test", true, false);
+		void *source = createSource();
+		CHECK(publisher.WriteUntil([] { return g_output_frames > 0; }));
+		auto *ctx = static_cast<moq_source *>(source);
+		std::shared_ptr<Track> held;
+		{
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			const auto &conn = ctx->connection;
+			held = conn->video;
+			CHECK(held != nullptr);
+			const int frames = g_output_frames;
+			const auto *state = static_cast<DecodeState *>(held->video_decoder->codec_ctx->opaque);
+			const auto pending = state->held.size();
+			CHECK(pending > 0);
+			const uint64_t end = static_cast<uint64_t>(state->last_pts) + 1'000'000;
+			auto inject = [&](moq::MediaRead read) {
+				moq_source_on_frame(ctx, conn, held, std::optional<moq::MediaRead>{std::move(read)});
+			};
+			if (gap) {
+				inject(moq::MediaRead{moq::MediaRead::kGap{123456, std::chrono::microseconds(78901)}});
+				CHECK(g_output_frames == frames + static_cast<int>(pending));
+				CHECK(!held->video_decoder->got_keyframe);
+			} else {
+				inject(moq::MediaRead{moq::MediaRead::kEnd{end}});
+				CHECK(held->video_decoder->got_keyframe);
+				// Non-key tail packets below the endpoint still depend on the old references.
+				inject(moq::MediaRead{
+					moq::MediaRead::kFrame{moq::MediaFrame{TestH264Keyframe(), end - 1, false}}});
+				CHECK(state->last_pts == static_cast<int64_t>(end - 1));
+				if (eof) {
+					moq_source_on_frame(ctx, conn, held, std::optional<moq::MediaRead>{});
+				} else {
+					inject(moq::MediaRead{moq::MediaRead::kFrame{
+						moq::MediaFrame{TestH264Keyframe(), end, true}}});
+					CHECK(state->last_pts == static_cast<int64_t>(end));
+					CHECK(state->held.size() == 1);
+				}
+				CHECK(g_output_frames == frames + static_cast<int>(pending) + 1);
+				std::lock_guard<std::mutex> output_lock(g_video_mutex);
+				CHECK(std::count(g_video_timestamps.begin(), g_video_timestamps.end(),
+						 (end - 1) * 1000) == 1);
+			}
+			CHECK(conn->video == held);
+		}
+		if (gap) {
+			const int frames = g_output_frames;
+			CHECK(publisher.WriteUntil([&] { return g_output_frames > frames; }));
+		}
+		held.reset();
+		destroySource(source);
+	}
+	report("media breaks preserve decoder tail and subscription ownership");
+
 	// H.264 with B-frames arrives in decode order. Each picture reaches OBS with its own
 	// presentation timestamp, and the pictures the decoder still holds when the track
 	// ends cleanly are drained rather than dropped.
@@ -1065,10 +1140,11 @@ int main()
 		Publisher publisher(relay, "obs/test");
 		void *source = createSource();
 		CHECK(publisher.WriteUntil([] { return g_output_audio > 0; }));
-		int failures = 0;
+		auto *ctx = static_cast<moq_source *>(source);
+		std::weak_ptr<Track> active;
 		{
-			std::lock_guard<std::mutex> lock(g_candidate_mutex);
-			failures = g_candidate_failures;
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			active = ctx->connection->audio;
 		}
 		moq::AudioInit init{};
 		init.format = moq::AudioFormat::kOpus;
@@ -1077,16 +1153,27 @@ int main()
 			moq::MediaTrackProducer::audio(publisher.broadcast,
 						       moq::MediaTarget::kNamed{std::string("!replacement")}, init),
 			"replacement audio");
+		std::weak_ptr<Track> candidate;
+		CHECK(publisher.WriteUntil([&] {
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			const auto &pending = ctx->connection->pending_audio;
+			if (!pending || !pending->audio_consumer)
+				return false;
+			candidate = pending;
+			std::lock_guard<std::mutex> failure_lock(g_candidate_mutex);
+			g_candidate = {candidate, false};
+			return true;
+		}));
 		CHECK(publisher.WriteUntil([&] {
 			TestOk(replacement->write_frame(moq::Frame{BAD_OPUS, 1'000'000'000}), "replacement frame");
 			TestOk(replacement->cut(), "replacement audio cut");
 			std::lock_guard<std::mutex> lock(g_candidate_mutex);
-			return g_candidate_failures > failures;
+			return g_candidate.failed && candidate.expired();
 		}));
-		auto *ctx = static_cast<moq_source *>(source);
 		{
 			std::lock_guard<std::mutex> lock(ctx->mutex);
-			CHECK(ctx->connection->audio && !ctx->connection->pending_audio);
+			auto playing = active.lock();
+			CHECK(playing && ctx->connection->audio == playing);
 		}
 		const int audio = g_output_audio;
 		CHECK(publisher.WriteUntil([&] { return g_output_audio >= audio + 3; }));
@@ -1187,15 +1274,16 @@ int main()
 		snapshot->video.clear();
 		snapshot->video.emplace("!unavailable", config);
 		auto *ctx = static_cast<moq_source *>(source);
-		int failures = 0;
-		{
-			std::lock_guard<std::mutex> lock(g_candidate_mutex);
-			failures = g_candidate_failures;
-		}
+		std::weak_ptr<Track> candidate;
+		std::weak_ptr<Track> active;
 		{
 			std::lock_guard<std::mutex> lock(ctx->mutex);
+			active = ctx->connection->video;
 			moq_source_subscribe_video(ctx, ctx->connection, *snapshot);
 			CHECK(ctx->connection->pending_video != nullptr);
+			candidate = ctx->connection->pending_video;
+			std::lock_guard<std::mutex> failure_lock(g_candidate_mutex);
+			g_candidate = {candidate, false};
 		}
 		if (hidden) {
 			// An unannounced sibling stays pending, without interrupting current playback.
@@ -1206,13 +1294,15 @@ int main()
 			route.epoch = "01900000-0000-7000-8000-000000000002";
 			TestOk(hidden->announce(route), "announce mismatched sibling");
 		}
-		{
-			std::unique_lock<std::mutex> lock(g_candidate_mutex);
-			g_candidate_failed.wait(lock, [&] { return g_candidate_failures > failures; });
-		}
+		CHECK(WaitFor([] {
+			std::lock_guard<std::mutex> lock(g_candidate_mutex);
+			return g_candidate.failed;
+		}));
 		{
 			std::lock_guard<std::mutex> lock(ctx->mutex);
-			CHECK(ctx->connection && !ctx->connection->pending_video);
+			auto playing = active.lock();
+			CHECK(ctx->connection && playing && ctx->connection->video == playing);
+			CHECK(candidate.expired());
 		}
 		const int frames = g_output_frames;
 		CHECK(publisher.WriteUntil([&] { return g_output_frames >= frames + 3; }));

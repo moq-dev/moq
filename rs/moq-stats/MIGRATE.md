@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `moq_net::Path` has no lifetime
+
+Functions that took `impl AsPath` take `impl Into<Path>`, so pass a `Path` rather than a string, and fields and returns that were `PathOwned` are `moq_net::Path`. See moq-net's migration for the rest.
+
 ### `Refusal` is `RefusalKind` (#6510)
 
 The re-exported `moq_stats::Refusal` follows moq-net's rename: use `moq_stats::RefusalKind`.

@@ -15,7 +15,7 @@ export namespace Announce {
 	}
 	export class Consumer {
 		[asyncIterator](): AsyncGenerator<Announce.Event, void, undefined>;
-		close(abort?: Error): void;
+		close(): void;
 		get closed(): Signals.GetPromise<Error | null>;
 		next(): Promise<Announce.Event | undefined>;
 		get synced(): Signals.Getter<boolean>;
@@ -29,7 +29,7 @@ export namespace Announce {
 }
 
 export namespace Auth {
-	export interface Auth {
+	export interface Credential {
 		close(): void;
 		readonly closed: PromiseLike<Error | null>;
 		readonly grant: Signals.Getter<Auth.Grant | undefined>;
@@ -45,7 +45,7 @@ export namespace Auth {
 	export class Handle {
 		constructor();
 		abort(err?: Error): void;
-		add(token: string | Uint8Array<ArrayBufferLike>): Promise<Auth.Auth>;
+		add(token: string | Uint8Array<ArrayBufferLike>): Promise<Auth.Credential>;
 		get grant(): Signals.Getter<Auth.Grant | undefined>;
 	}
 	export class Unsupported extends Error {
@@ -67,8 +67,8 @@ export namespace Bandwidth {
 	export class Reservation implements Disposable {
 		[dispose](): void;
 		close(): void;
-		get grant(): Signals.Getter<number | undefined>;
 		peek(): number | undefined;
+		get rate(): Signals.Getter<number | undefined>;
 		update(max: number): void;
 	}
 }
@@ -119,6 +119,8 @@ export namespace Connection {
 		consume?: Origin.Producer;
 		implementation?: string;
 		publish?: Origin.Consumer;
+		signal?: AbortSignal;
+		timeout?: Milli;
 		transport: WebTransport;
 		url: URL;
 		version?: number;
@@ -217,10 +219,11 @@ export namespace Connection {
 export class Connection {
 	constructor(props?: Connection.Props);
 	static readonly accept: ({ ... }: Connection.AcceptProps) => Promise<Connection.Established>;
+	readonly allocator: Signals.Getter<Bandwidth.Handle | undefined>;
 	announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 	readonly auth: Signals.Getter<Auth.Handle | undefined>;
-	readonly bandwidth: Signals.Getter<Bandwidth.Handle | undefined>;
 	static readonly certificateHash: (cert: string | BufferSource) => Promise<Uint8Array<ArrayBuffer>>;
+	static readonly checkVersions: (versions: readonly string[]) => string[];
 	close(abort?: Error): void;
 	get closed(): Signals.GetPromise<Error | null>;
 	static readonly connect: ({ ... }: Connection.ConnectProps) => Promise<Connection.Established>;
@@ -307,7 +310,7 @@ export namespace Error {
 
 export namespace Group {
 	export class Consumer {
-		close(abort?: Error): void;
+		close(): void;
 		get closed(): Signals.GetPromise<Error | null>;
 		get done(): boolean;
 		get frameCount(): number;
@@ -337,9 +340,10 @@ export namespace Group {
 	export const MAX_GROUP_FRAMES: 8192;
 	export class Producer {
 		constructor(sequence: number);
-		close(abort?: Error): void;
+		abort(error: Error): void;
 		get closed(): Signals.GetPromise<Error | null>;
 		consume(): Group.Consumer;
+		finish(): void;
 		get isClosed(): boolean;
 		readonly sequence: number;
 		writeFrame(frame: Group.Frame): void;
@@ -362,12 +366,6 @@ export namespace Origin {
 		zero: bigint;
 	};
 	export type Cost = bigint;
-	export class Dynamic {
-		close(): void;
-		readonly prefix: Path.Valid;
-		requested(): AsyncIterableIterator<Origin.Request>;
-		get route(): Origin.Route;
-	}
 	export type Hop = infer<typeof Origin.HopSchema>;
 	export const HopSchema: $ZodBranded<ZodMiniBigInt<bigint>, "Hop", "out">;
 	export class Prepared {
@@ -384,13 +382,13 @@ export namespace Origin {
 		consume(): Origin.Consumer;
 		createBroadcast(path: Path.Valid): Origin.Publication;
 		get discovery(): Signals.Getter<boolean | undefined>;
-		dynamic(prefix: Path.Valid): Origin.Dynamic;
 		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
+		requests(prefix: Path.Valid): Origin.Requests;
 		scope(root: Path.Valid, patterns: Path.Patterns): Origin.Producer;
 	}
 	export class Publication {
 		announce(route?: Origin.Route | {
-			auth?: Auth.Auth;
+			auth?: Auth.Credential;
 			cost?: bigint;
 			epoch?: Epoch.Valid;
 			hops?: (bigint & $brand<"Hop">)[];
@@ -414,8 +412,14 @@ export namespace Origin {
 		readonly closed: Signals.GetPromise<Error | null>;
 		readonly path: Path.Valid;
 	}
+	export class Requests {
+		close(): void;
+		readonly prefix: Path.Valid;
+		requested(): AsyncIterableIterator<Origin.Request>;
+		get route(): Origin.Route;
+	}
 	export interface Route {
-		auth?: Auth.Auth;
+		auth?: Auth.Credential;
 		cost: bigint;
 		epoch?: Epoch.Valid;
 		hops: (bigint & $brand<"Hop">)[];
@@ -423,7 +427,7 @@ export namespace Origin {
 	export type Route = {
 		default: Origin.Route;
 		normalize(route?: Origin.Route | {
-			auth?: Auth.Auth;
+			auth?: Auth.Credential;
 			cost?: bigint;
 			epoch?: Epoch.Valid;
 			hops?: readonly (bigint & $brand<"Hop">)[];
@@ -434,14 +438,15 @@ export namespace Origin {
 		readonly closed: Signals.GetPromise<Error | null>;
 		createBroadcast(path: Path.Valid): Origin.Publication;
 		readonly discovery: Signals.Getter<boolean | undefined>;
-		dynamic(prefix: Path.Valid): Origin.Dynamic;
 		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
+		requests(prefix: Path.Valid): Origin.Requests;
 	}
 	export function isAnonymous(route: Origin.Route): boolean;
 }
 
 export namespace Path {
 	export { InvalidPattern } from "@moq/pattern";
+	export const MAX_BYTES: 4096;
 	export const MAX_PARTS: 32;
 	export { Pattern } from "@moq/pattern";
 	export { Patterns } from "@moq/pattern";
@@ -591,7 +596,6 @@ export namespace Track {
 	export class Ordered {
 		close(abort?: Error): void;
 		get closed(): Signals.GetPromise<Error | null>;
-		end(): Track.Position | undefined;
 		finished(): Promise<Track.Position>;
 		info(): Promise<Track.Info>;
 		largest(): Promise<Track.Position | undefined>;
@@ -616,12 +620,15 @@ export namespace Track {
 	}
 	export class Producer {
 		constructor(name: string);
+		abort(error: Error): void;
 		accept(info?: Partial<Track.Info>): this;
 		appendDatagram(timestamp: Time.Timestamp | undefined, payload: Uint8Array): number;
 		appendGroup(): Group.Producer;
-		close(abort?: Error): void;
+		close(): void;
 		get closed(): Signals.GetPromise<Error | null>;
+		createGroup(sequence: number): Group.Producer;
 		demand(): Track.Demand;
+		finish(): void;
 		finishAt(end: Track.Position): void;
 		info(): Promise<Track.Info>;
 		insertDatagram(sequence: number, timestamp: Time.Timestamp | undefined, payload: Uint8Array): void;
@@ -631,7 +638,6 @@ export namespace Track {
 		subscribe(options?: Track.Subscription): Track.Subscriber;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
 		writeFrame(frame: Group.Frame): void;
-		writeGroup(group: Group.Producer): void;
 	}
 	export class Request {
 		accept(info?: Partial<Track.Info>): Track.Producer;
@@ -644,7 +650,6 @@ export namespace Track {
 	export class Subscriber {
 		close(abort?: Error): void;
 		get closed(): Signals.GetPromise<Error | null>;
-		end(): Track.Position | undefined;
 		finished(): Promise<Track.Position>;
 		info(): Promise<Track.Info>;
 		largest(): Promise<Track.Position | undefined>;

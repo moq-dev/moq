@@ -424,7 +424,7 @@ export class Encoder {
 
 			// A dead encoder can't serve anyone, so the current subscriber and every later one get
 			// the real error rather than a track that stays silent.
-			if (fatal) track?.close(fatal);
+			if (fatal) track?.abort(fatal);
 
 			effect.set(this.#out.active, enabled && !!format && !!track && !fatal, false);
 		});
@@ -746,7 +746,7 @@ export class Encoder {
 		const cause = error instanceof Error ? error : new Error(String(error));
 		this.#failure.peek().set(cause);
 		this.#out.error.set(cause);
-		this.#live?.track.close(cause);
+		this.#live?.track.abort(cause);
 	}
 
 	/** Stop and release everything this holds. */

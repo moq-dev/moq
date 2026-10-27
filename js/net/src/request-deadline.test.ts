@@ -2,16 +2,12 @@ import { expect, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
 import { SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
 import { HopSchema } from "./hop.ts";
-import { NativeSession } from "./ietf/adapter.ts";
-import { Publisher } from "./ietf/publisher.ts";
-import { SubscribeNamespace } from "./ietf/subscribe_namespace.ts";
+import { NativeSession } from "./ietf/session.ts";
 import { Subscriber as IetfSubscriber } from "./ietf/subscriber.ts";
 import { Version as Ietf } from "./ietf/version.ts";
 import { Subscriber as LiteSubscriber } from "./lite/subscriber.ts";
 import { Version as Lite } from "./lite/version.ts";
-import { Producer as Origin } from "./origin.ts";
 import * as Path from "./path.ts";
-import { Stream } from "./stream.ts";
 
 // Zero stream credit can be rejected immediately or queued by a transport that ignores
 // waitUntilAvailable. Once a slot returns, observe both resets and any unwanted bytes.
@@ -51,7 +47,7 @@ function limited(mode: "refuse" | "queue" | "open") {
 	};
 }
 
-for (const protocol of ["lite", "ietf-17"] as const) {
+for (const protocol of ["lite", "ietf"] as const) {
 	for (const mode of ["refuse", "queue", "open"] as const) {
 		test(`${protocol}: ${mode} has one fatal request deadline`, async () => {
 			const clock = new Manual();
@@ -60,7 +56,7 @@ for (const protocol of ["lite", "ietf-17"] as const) {
 			const subscriber =
 				protocol === "lite"
 					? new LiteSubscriber(transport.quic, Lite.DRAFT_07, HopSchema.parse(1n))
-					: new IetfSubscriber({ session: new NativeSession(transport.quic, Ietf.DRAFT_17, true) });
+					: new IetfSubscriber({ session: new NativeSession(transport.quic, Ietf.DRAFT_18, true) });
 			const broadcast = subscriber.consume(Path.from("room"));
 			const track = broadcast.track("video").subscribe();
 			try {
@@ -94,67 +90,6 @@ for (const protocol of ["lite", "ietf-17"] as const) {
 				track.close();
 				broadcast.close();
 				subscriber.close();
-				installed.close();
-			}
-		});
-	}
-}
-
-for (const legacy of [false, true]) {
-	for (const mode of ["refuse", "queue", "open"] as const) {
-		test(`${legacy ? "solicited draft-15" : "unsolicited draft-17"} advertisement: ${mode} is terminal`, async () => {
-			const clock = new Manual();
-			const installed = clock.install();
-			const transport = limited(mode);
-			const version = legacy ? Ietf.DRAFT_15 : Ietf.DRAFT_17;
-			const origin = new Origin();
-			const publisher = new Publisher({
-				quic: transport.quic,
-				session: new NativeSession(transport.quic, version, true),
-				publish: origin.consume(),
-				requiresSolicitation: legacy,
-			});
-			const subscription = new Stream({
-				readable: new ReadableStream<Uint8Array>(),
-				writable: new WritableStream<Uint8Array>(),
-				version,
-			});
-			origin.createBroadcast(Path.from("room")).announce();
-			const loop = legacy
-				? publisher.runSubscribeNamespace(
-						new SubscribeNamespace({ requestId: 0n, namespace: Path.empty() }),
-						subscription,
-					)
-				: publisher.runPublishNamespaces();
-			try {
-				await transport.created;
-				await clock.advance(Nano.fromMilli(Milli(9_999)));
-				let aborted = false;
-				void transport.aborted.then(() => {
-					aborted = true;
-				});
-				expect(aborted).toBe(false);
-				await clock.advance(Nano.fromMilli(Milli(1)));
-				if (mode === "queue") transport.release();
-				if (mode !== "refuse") {
-					const reset = await transport.aborted;
-					await transport.cancelled;
-					if (mode === "open") expect((reset as Error).message).toContain("request timed out after 10000ms");
-					else expect(transport.written).toEqual([]);
-				}
-				await clock.advance(Nano.fromMilli(Milli(30_000)));
-				// An unrelated change wakes reconciliation, but cannot revive the failed offer.
-				origin.createBroadcast(Path.from("another")).announce();
-				await clock.advance(Nano.zero);
-				expect(transport.options).toEqual([
-					{ sendOrder: undefined, waitUntilAvailable: false },
-					{ sendOrder: undefined, waitUntilAvailable: false },
-				]);
-			} finally {
-				subscription.close();
-				origin.close();
-				await loop;
-				publisher.close();
 				installed.close();
 			}
 		});
@@ -199,7 +134,7 @@ for (const operation of ["info", "fetch"] as const) {
 	}
 }
 
-for (const protocol of ["lite", "ietf-17"] as const) {
+for (const protocol of ["lite", "ietf"] as const) {
 	for (const mode of ["refuse", "queue", "open"] as const) {
 		test(`${protocol} discovery: ${mode} bounds only the create`, async () => {
 			const clock = new Manual();
@@ -208,7 +143,7 @@ for (const protocol of ["lite", "ietf-17"] as const) {
 			const subscriber =
 				protocol === "lite"
 					? new LiteSubscriber(transport.quic, Lite.DRAFT_07, HopSchema.parse(1n))
-					: new IetfSubscriber({ session: new NativeSession(transport.quic, Ietf.DRAFT_17, true) });
+					: new IetfSubscriber({ session: new NativeSession(transport.quic, Ietf.DRAFT_18, true) });
 			const announced = subscriber.announced();
 			try {
 				await transport.created;
@@ -234,7 +169,7 @@ for (const protocol of ["lite", "ietf-17"] as const) {
 	}
 }
 
-for (const protocol of ["lite", "ietf-17"] as const) {
+for (const protocol of ["lite", "ietf"] as const) {
 	test(`${protocol}: credit granted in the deadline task cannot send a late request`, async () => {
 		const clock = new Manual();
 		const installed = clock.install();
@@ -242,7 +177,7 @@ for (const protocol of ["lite", "ietf-17"] as const) {
 		const subscriber =
 			protocol === "lite"
 				? new LiteSubscriber(transport.quic, Lite.DRAFT_07, HopSchema.parse(1n))
-				: new IetfSubscriber({ session: new NativeSession(transport.quic, Ietf.DRAFT_17, true) });
+				: new IetfSubscriber({ session: new NativeSession(transport.quic, Ietf.DRAFT_18, true) });
 		const broadcast = subscriber.consume(Path.from("room"));
 		const track = broadcast.track("video").subscribe();
 		try {
@@ -262,7 +197,7 @@ for (const protocol of ["lite", "ietf-17"] as const) {
 	});
 }
 
-for (const protocol of ["lite", "ietf-17"] as const) {
+for (const protocol of ["lite", "ietf"] as const) {
 	test(`${protocol}: a create the closed session fails reports the session`, async () => {
 		const quic = {
 			closed: Promise.resolve({ closeCode: SessionCode.Unauthorized, reason: "bye" }),
@@ -274,7 +209,7 @@ for (const protocol of ["lite", "ietf-17"] as const) {
 		const subscriber =
 			protocol === "lite"
 				? new LiteSubscriber(quic, Lite.DRAFT_07, HopSchema.parse(1n))
-				: new IetfSubscriber({ quic, session: new NativeSession(quic, Ietf.DRAFT_17, true) });
+				: new IetfSubscriber({ quic, session: new NativeSession(quic, Ietf.DRAFT_18, true) });
 		const broadcast = subscriber.consume(Path.from("room"));
 		const track = broadcast.track("video").subscribe();
 		try {

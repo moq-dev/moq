@@ -158,6 +158,14 @@ impl Import {
 		Ok(())
 	}
 
+	/// Advertise whether this rendition is being produced, as the catalog's
+	/// [`enabled`](hang::catalog::VideoConfig::enabled): a publisher that stops encoding it
+	/// disables it, so viewers select another rendition rather than wait for frames.
+	pub fn set_enabled(&mut self, enabled: bool) -> Result<()> {
+		self.catalog.set_enabled(&mut self.track, enabled)?;
+		Ok(())
+	}
+
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		self.track.seek(sequence)?;
@@ -390,6 +398,46 @@ mod tests {
 		let color = keyframe(80, &[SPS_BT709, PPS, idr]);
 		assert_eq!(color.primaries, Some(1));
 		assert_eq!((color.mastering, color.content_light), (None, None));
+	}
+
+	/// A disabled rendition stays disabled across a new SPS, and enabling it republishes.
+	#[tokio::test(start_paused = true)]
+	async fn a_disabled_rendition_survives_a_new_sps() {
+		use crate::codec::h264::fixtures::{PPS, SPS_BT709, SPS_HDR10};
+
+		let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
+		let (track, catalog) = setup("video");
+		let mut import = Import::new(track, catalog.reserve(), Default::default()).unwrap();
+		let mut split = Split::new();
+		let mut keyframe = |import: &mut Import, ms: u64, sps: &[u8]| {
+			let mut annexb = BytesMut::new();
+			for nal in [sps, PPS, idr] {
+				annexb.extend_from_slice(&[0, 0, 0, 1]);
+				annexb.extend_from_slice(nal);
+			}
+			let pts = moq_net::Timestamp::from_millis(ms).unwrap();
+			let mut frames = split.decode(&annexb, pts).expect("split keyframe");
+			frames.extend(split.flush(pts).expect("flush keyframe"));
+			import.decode(frames).expect("decode keyframe");
+		};
+		let enabled = || catalog.snapshot().video.renditions["video"].enabled;
+
+		keyframe(&mut import, 0, SPS_HDR10);
+		assert!(enabled());
+		import.set_enabled(false).unwrap();
+		assert!(!enabled());
+		keyframe(&mut import, 40, SPS_BT709);
+		assert_eq!(
+			catalog.snapshot().video.renditions["video"]
+				.color
+				.as_ref()
+				.unwrap()
+				.primaries,
+			Some(1)
+		);
+		assert!(!enabled(), "a reconfiguration keeps the rendition disabled");
+		import.set_enabled(true).unwrap();
+		assert!(enabled());
 	}
 
 	/// A frame-only SPS declares its reorder depth, which holds for the track's life: a later SPS

@@ -53,8 +53,8 @@ pub(crate) struct FrameHeader {
 /// The parts of a VP9 key-frame header we surface to the catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct KeyFrame {
-	pub width: u16,
-	pub height: u16,
+	pub width: u32,
+	pub height: u32,
 	pub profile: u8,
 	pub bit_depth: u8,
 	/// `vpcC` chroma subsampling enum (0 = 4:2:0 vertical, 1 = 4:2:0 colocated,
@@ -137,8 +137,8 @@ impl FrameHeader {
 		}
 
 		// frame_size (VP9 spec §6.2.3): each field is `value - 1`.
-		let width = (r.read(16)? + 1) as u16;
-		let height = (r.read(16)? + 1) as u16;
+		let width = r.read(16)? + 1;
+		let height = r.read(16)? + 1;
 
 		Ok(Self {
 			keyframe: true,
@@ -202,8 +202,8 @@ pub(crate) fn config_from_keyframe(data: &[u8]) -> Result<Option<hang::catalog::
 	let vp9 = key.to_catalog();
 	let mut config = hang::catalog::VideoConfig::new(vp9.clone());
 	config.color = color(&vp9);
-	config.coded_width = Some(width as u32);
-	config.coded_height = Some(height as u32);
+	config.coded_width = Some(width);
+	config.coded_height = Some(height);
 	Ok(Some(config))
 }
 
@@ -236,7 +236,7 @@ fn matrix_coefficients(color_space: u8) -> u8 {
 /// The lowest VP9 level whose `MaxLumaPictureSize` fits `width * height` (VP9
 /// spec Annex A). Framerate and bitrate aren't known from the header, so this
 /// is a picture-size lower bound rather than the exact encoded level.
-fn level_for(width: u16, height: u16) -> u8 {
+fn level_for(width: u32, height: u32) -> u8 {
 	let area = width as u64 * height as u64;
 	// (level, MaxLumaPictureSize), ascending.
 	const LEVELS: &[(u8, u64)] = &[
@@ -324,6 +324,28 @@ mod tests {
 		assert_eq!(key.chroma_subsampling, 1); // 4:2:0
 		assert_eq!(key.matrix_coefficients, 5); // CS_BT_601 -> BT.470BG
 		assert!(!key.full_range);
+	}
+
+	#[test]
+	fn dimensions_keep_the_complete_sixteen_bit_plus_one_range() {
+		for (width, height) in [
+			(1u32, 65_536u32),
+			(65_536, 1),
+			(65_535, 65_536),
+			(65_536, 65_535),
+			(65_536, 65_536),
+		] {
+			let mut frame = KEYFRAME_320X240.to_vec();
+			for (start, value) in [(36, width - 1), (52, height - 1)] {
+				for bit in 0..16 {
+					let position = start + bit;
+					let mask = 1 << (7 - position % 8);
+					frame[position / 8] = (frame[position / 8] & !mask) | (((value >> (15 - bit)) & 1) as u8 * mask);
+				}
+			}
+			let config = config_from_keyframe(&frame).unwrap().unwrap();
+			assert_eq!((config.coded_width, config.coded_height), (Some(width), Some(height)));
+		}
 	}
 
 	#[test]

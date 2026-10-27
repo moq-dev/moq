@@ -37,7 +37,3 @@ parts-only check.
   unpublished, so this changes no published version).
 
 Public API: none. Wire: one receiver rule in the lite-07 draft.
-
-## Related
-
-- [A route too large to re-encode is skipped](/quest/m1/cut-audit/announce-reencode.md) - the same size bound on the send side

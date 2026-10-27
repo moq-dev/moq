@@ -2,7 +2,7 @@
 
 use std::task::{Poll, ready};
 
-use moq_net::PathOwned;
+use moq_net::Path;
 use serde::de::DeserializeOwned;
 
 use super::Catalog;
@@ -12,7 +12,7 @@ use crate::Result;
 pub struct Consumer<E = ()> {
 	// Decoded in two steps, so a catalog needing a newer reader fails with a typed error.
 	inner: moq_json::snapshot::Consumer<serde_json::Value>,
-	base: PathOwned,
+	base: Path,
 	_ext: std::marker::PhantomData<E>,
 }
 
@@ -75,7 +75,7 @@ impl<E: DeserializeOwned + Default> Consumer<E> {
 ///
 /// Every section carrying a relative broadcast path must be included here; a section left out
 /// silently exempts its paths from the containment check.
-fn check_resolvable<E>(base: &PathOwned, catalog: &Catalog<E>) -> Result<()> {
+fn check_resolvable<E>(base: &Path, catalog: &Catalog<E>) -> Result<()> {
 	let video = catalog.video.renditions.iter();
 	let audio = catalog.audio.renditions.iter();
 	let text = catalog.text.renditions.iter();
@@ -110,13 +110,13 @@ mod test {
 
 	#[test]
 	fn echo_prefix_cannot_escape_the_catalog_root() {
-		let base = moq_net::PathOwned::from("room/live");
+		let base = moq_net::Path::from_static("room/live");
 		let mut catalog = Catalog::<()>::from_str(include_str!("../../fixtures/catalog-stats-echo.json")).unwrap();
 		assert!(check_resolvable(&base, &catalog).is_ok());
 		let echo = catalog.echo.as_mut().unwrap();
-		echo.path = moq_net::path::RelativeOwned::from("../viewers");
+		echo.path = moq_net::path::Relative::new("../viewers").unwrap();
 		assert!(check_resolvable(&base, &catalog).is_ok());
-		catalog.echo.as_mut().unwrap().path = moq_net::path::RelativeOwned::from("../../viewers");
+		catalog.echo.as_mut().unwrap().path = moq_net::path::Relative::new("../../viewers").unwrap();
 		assert!(matches!(
 			check_resolvable(&base, &catalog),
 			Err(crate::Error::EscapingBroadcast(_))
@@ -127,7 +127,7 @@ mod test {
 	async fn subscribe_validates_echo_prefix_before_yielding() {
 		for (reference, accepted) in [("viewers", true), ("../../viewers", false)] {
 			let mut info = moq_net::broadcast::Info::new();
-			info.path = "room/live".into();
+			info.path = moq_net::Path::from_static("room/live");
 			let broadcast = info.produce();
 			let track = broadcast
 				.create_track(Catalog::DEFAULT_NAME, Catalog::default_track_info())

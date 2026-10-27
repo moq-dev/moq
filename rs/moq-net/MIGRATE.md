@@ -4,6 +4,76 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Paths fit moq-transport's 4096-byte namespace ([#6927](https://github.com/moq-dev/moq/pull/6927))
+
+`Path::MAX_BYTES` is 4096, moq-transport's namespace limit, so every path fits every wire and building a longer one fails with `path::Invalid::TooLong`. Keep broadcast paths within 4096 bytes.
+A moq-transport namespace whose escaped path would exceed it is refused when decoded, and a SUBSCRIBE, TRACK\_STATUS, FETCH, or PUBLISH whose namespace and track name exceed 4096 bytes together fails that request with `Error::Encode` instead of being sent.
+
+### Building a `Path` refuses empty segments ([#6648](https://github.com/moq-dev/moq/pull/6648))
+
+`Path::new` and `TryFrom` fail with `path::Invalid::EmptySegment` on a leading, trailing, or doubled `/` instead of collapsing it, so a path has one spelling; the empty path is still the root. Origin entry points report it as `Error::EmptySegment`, and `Path::from_static` panics on it.
+Pass a prefix without a trailing `/`: `Path::from_static("room")` covers `room/cam`. Build a path from pieces with `Path::join` rather than `format!`, since an empty piece is the root and adds no segment.
+`Path::from_escaped` is gone, and `path::TooLong` is `path::Invalid::TooLong`. `Path::head(n)` returns the path's first `n` segments.
+moq-lite decoding refuses a path with an empty segment as a protocol violation, and moq-transport decoding refuses a namespace field ending in `/`, which escapes to one.
+
+### moq-transport drafts 14 through 17 are removed ([#6753](https://github.com/moq-dev/moq/pull/6753))
+
+`ietf::Version::Draft14` through `Draft17` are gone, and a peer offering only those versions, by ALPN or in the moql SETUP, fails the handshake.
+Peers must speak moq-transport draft 18 or later, or moq-lite.
+The moql SETUP (no ALPN, or `moql`) now negotiates only moq-lite versions.
+`session::Limits::requests` is removed: stream credit bounds every peer request, so drop the field and keep `announces`.
+
+### `Path` and `Relative` have no lifetime
+
+There is one owned `Path` type: a short path is stored inline and a long one shares a reference-counted buffer, so cloning stays cheap. Every path is at most `Path::MAX_BYTES`.
+
+- `PathOwned`, `Path<'a>`, and `Path<'static>` are all `Path`; `RelativeOwned` and `Relative<'a>` are `Relative`.
+- `Path::{to_owned, into_owned, borrow}` and the `Relative` equivalents are gone: drop the call, or `clone()` a `&Path` you need to keep.
+- `Path::new`, `Relative::new`, `Path::join`, and `Path::resolve` return `Result<_, path::Invalid>`, failing on a path longer than `Path::MAX_BYTES`. `Path::new` copies its argument; use `Path::from_static("room")` for a literal, which borrows it and panics if it is too long.
+- `From<&str>`, `From<&String>`, and `From<String>` for `Path` and `Relative` are `TryFrom`, with `path::Invalid` as the error.
+- `AsPath` is gone. Origin entry points such as `publish`, `create_broadcast`, `scope`, `mount`, and `routed` take `impl TryInto<Path, Error: Into<Error>>`, so `&str`, `String`, `Path`, and `&Path` still work and a too-long string fails with `Error::BoundsExceeded`. Other functions that took `impl AsPath`, such as `stats::Tier::new`, take `impl Into<Path>`: pass a `Path` or `&Path`.
+- `origin::{Producer, Consumer}::absolute` and `announce::Consumer::absolute` return `Result<Path, Error>`.
+- `Path::{has_prefix, strip_prefix, join, relative}` take `&Path`: write `path.has_prefix(&Path::from_static("room"))`.
+- Decoding a path longer than `Path::MAX_BYTES` fails with `BoundsExceeded`, like one deeper than `Path::MAX_PARTS`.
+
+### Request handlers are `requests()` ([#6752](https://github.com/moq-dev/moq/pull/6752))
+
+Rename `origin::Producer::dynamic(prefix)`, `broadcast::Producer::dynamic()`, `track::Producer::dynamic()`, and `track::Request::dynamic()` to `requests`.
+Their handles `origin::Dynamic`, `broadcast::Dynamic`, and `track::Dynamic` are `origin::Requests`, `broadcast::Requests`, and `track::Requests`; their methods are unchanged.
+
+### Names say one thing ([#6751](https://github.com/moq-dev/moq/pull/6751))
+
+Rename these, which kept their behavior:
+
+| Before | After |
+|---|---|
+| `Session::bandwidth()` | `Session::allocator()` |
+| `Client::with_bandwidth` | `Client::with_allocator` |
+| `auth::Auth` | `auth::Credential` |
+| `track::Consumer::query()`, `track::Querying` | `track::Consumer::info()`, `track::Resolving` |
+| `bandwidth::Reservation::consumer()` | `bandwidth::Reservation::consume()` |
+| `bandwidth::Reservation::peek()` | `bandwidth::Reservation::rate()` |
+| `stats::Control` | `stats::Message` |
+| `stats::Bytes` | `stats::Totals` |
+| `transport::Stats`, `transport::poll::Session::stats()` | `transport::Metrics`, `transport::poll::Session::metrics()` |
+
+`group::Demand` reads like `track::Demand`: replace `is_used()` with `wanted()`, and `used()`, `unused()`, `poll_used`, and `poll_unused` with a loop over `wanted_changed()` (or `poll_wanted_changed`), which returns the new value each time it changes and errors once the group closes.
+`transport::Metrics` drops `bytes_sent` and `bytes_received`: a transport reports them through the `transport::Wire` it returns from `wire()`, which `session::Stats` now reads.
+`transport::StatsUnavailable` is gone: `metrics()` defaults to reporting nothing, so delete an implementation that returned it.
+
+### One lifecycle vocabulary ([#6750](https://github.com/moq-dev/moq/pull/6750))
+
+`closed()` on `group::Producer`, `group::Demand`, `track::Producer`, and `track::Demand` now waits for the outcome and returns `Result<()>`: `Ok(())` once the end settles (a finished group; a track whose declared end was reached with every group below it finished), or the abort error. Match on the result where you awaited `()` or treated `Error::Dropped` as a clean end; `poll_closed` returns `Poll<Result<()>>`.
+`group::Producer::abort` after `finish` only releases the cache: readers keep the clean end.
+A session closing locally aborts its copies with `Error::Stream(StreamError::Session(SessionError::Cancel))`, so their readers end with that error instead of a clean end.
+`track::Producer::end()` is `finished()`.
+
+### An idle reservation reads the share it would get
+
+`bandwidth::Reservation::rate()` and its `consume()` report the slice the track would get back while nothing subscribes to it, instead of `None`; it still claims nothing from the other tracks.
+`None` now means only that the connection has no estimate or the reservation is gone.
+A sender that relied on `None` to hold its rate while unwatched should check its track's demand instead.
+
 ### Exports without a consumer are gone
 
 These had no caller outside tests; replace them as follows.
@@ -45,7 +115,7 @@ Path normalization, relative references, and subscription paths retain their sem
 
 ### `Version::uses_setup_negotiation` is removed ([#6483](https://github.com/moq-dev/moq/pull/6483))
 
-Match the version yourself: lite-01, lite-02, and moq-transport draft 14 negotiate the version in SETUP; every other version negotiates it through ALPN.
+Match the version yourself: lite-01 and lite-02 negotiate the version in SETUP; every other version negotiates it through ALPN.
 
 ### Sessions box their transport (#6176)
 
@@ -451,7 +521,7 @@ Treat both like `NotFound` if you match on errors.
 ### Sessions cap peer requests (#4820)
 
 A peer past the session's announce bound loses the session with `TooManyRequests`.
-Stream credit bounds its subscriptions and FETCHes, except on moq-transport drafts 14 to 16, where the request window sized by `announces` and `requests` does.
+Stream credit bounds its subscriptions and FETCHes.
 Raise the defaults for a large relay mesh.
 
 ```rust

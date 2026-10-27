@@ -18,7 +18,7 @@
 //! codecs (MP3 / AC-3 / E-AC-3) carry their config in band, so they configure from
 //! the first frame instead. Sample bytes already match the codec payload, so no codec
 //! transform is needed before the selected media container wraps them. FLAC (`fLaC`)
-//! enhanced audio, and any other codec, are logged and dropped.
+//! enhanced audio, and any other unsupported codec, fail the import.
 
 use std::collections::BTreeMap;
 
@@ -51,7 +51,7 @@ const MAX_DATA_OFFSET: usize = 64 * 1024;
 ///
 /// Supports legacy H.264 + AAC and the enhanced-RTMP FourCC codecs (HEVC, AV1,
 /// VP9, Opus, AC-3, E-AC-3), the payloads produced by RTMP encoders and
-/// `ffmpeg -f flv`. Unsupported codecs, plus `onMetaData` script tags, are logged
+/// `ffmpeg -f flv`. Unsupported codecs fail the import; `onMetaData` script tags are logged
 /// and dropped.
 ///
 /// Legacy and single-track enhanced tags carry one video and one audio track;
@@ -212,8 +212,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let frame_type = first >> 4;
 		let codec_id = first & 0x0f;
 		if codec_id != VIDEO_CODEC_AVC {
-			tracing::warn!(codec_id, "unsupported FLV video codec, dropping");
-			return Ok(());
+			return Err(crate::Error::UnknownFormat(format!("FLV video CodecID {codec_id}")).into());
 		}
 
 		anyhow::ensure!(body.len() >= 5, "AVC video tag too short");
@@ -289,6 +288,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		payload: &[u8],
 		timestamp: u64,
 	) -> anyhow::Result<()> {
+		if !matches!(fourcc, b"avc1" | b"hvc1" | b"av01" | b"vp09") {
+			return Err(crate::Error::UnknownFormat(format!("FLV video FourCC {fourcc:?}")).into());
+		}
 		match packet_type {
 			VIDEO_PACKET_SEQUENCE_START => {
 				let config = match fourcc {
@@ -299,8 +301,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					// redundant with the key-frame header we configure from.
 					b"vp09" => return Ok(()),
 					other => {
-						tracing::warn!(fourcc = ?other, "unsupported enhanced FLV video codec, dropping");
-						return Ok(());
+						return Err(crate::Error::UnknownFormat(format!("FLV video FourCC {other:?}")).into());
 					}
 				};
 				self.init_video(track_id, config)
@@ -356,8 +357,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			return self.write_audio(DEFAULT_TRACK_ID, frame, timestamp);
 		}
 		if sound_format != AUDIO_FORMAT_AAC {
-			tracing::warn!(sound_format, "unsupported FLV audio format, dropping");
-			return Ok(());
+			return Err(crate::Error::UnknownFormat(format!("FLV audio SoundFormat {sound_format}")).into());
 		}
 
 		anyhow::ensure!(body.len() >= 2, "AAC audio tag too short");
@@ -420,6 +420,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		payload: &[u8],
 		timestamp: u64,
 	) -> anyhow::Result<()> {
+		if !matches!(fourcc, b"Opus" | b"mp4a" | b".mp3" | b"ac-3" | b"ec-3") {
+			return Err(crate::Error::UnknownFormat(format!("FLV audio FourCC {fourcc:?}")).into());
+		}
 		match packet_type {
 			AUDIO_PACKET_SEQUENCE_START => {
 				let config = match fourcc {
@@ -428,8 +431,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					// MP3 / AC-3 / E-AC-3 are verbatim with no sequence header; they
 					// configure from the first frame. Anything else is unsupported.
 					other => {
-						tracing::warn!(fourcc = ?other, "unsupported enhanced FLV audio codec, dropping");
-						return Ok(());
+						return Err(crate::Error::UnknownFormat(format!("FLV audio FourCC {other:?}")).into());
 					}
 				};
 				self.init_audio(track_id, config)

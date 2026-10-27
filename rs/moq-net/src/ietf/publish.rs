@@ -101,7 +101,6 @@ The endpoint does not support the PUBLISH method.
 UNINTERESTED (0x4):
 The namespace or track is not of interest to the endpoint.
 
-
 */
 
 use std::borrow::Cow;
@@ -110,8 +109,8 @@ use crate::{
 	Path,
 	coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder},
 	ietf::{
-		Filter, GroupOrder, Location, Parameters, Properties, RequestId,
-		namespace::{decode_track, encode_namespace},
+		Filter, GroupOrder, Location, Properties, RequestId,
+		namespace::{decode_track, encode_track},
 	},
 };
 
@@ -133,24 +132,14 @@ pub(crate) enum PublishDoneStatus {
 }
 
 impl PublishDoneStatus {
-	/// Return the registered wire code for every supported draft.
-	pub(crate) const fn code(self, version: Version) -> u64 {
-		match version {
-			// Draft-14 registers no UPDATE_FAILED; its 0x8 is unassigned.
-			Version::Draft14 if matches!(self, Self::UpdateFailed) => 0x0,
-			Version::Draft14
-			| Version::Draft15
-			| Version::Draft16
-			| Version::Draft17
-			| Version::Draft18
-			// Draft-22 removed SUBSCRIPTION_ENDED (0x3), which this implementation never
-			// emitted, and left the rest of the registry alone.
-			| Version::Draft22 => match self {
-				Self::InternalError => 0x0,
-				Self::Unauthorized => 0x1,
-				Self::TrackEnded => 0x2,
-				Self::UpdateFailed => 0x8,
-			},
+	/// Return the registered wire code. Draft-22 removed SUBSCRIPTION_ENDED (0x3), which
+	/// this implementation never emitted, and left the rest of the registry alone.
+	pub(crate) const fn code(self) -> u64 {
+		match self {
+			Self::InternalError => 0x0,
+			Self::Unauthorized => 0x1,
+			Self::TrackEnded => 0x2,
+			Self::UpdateFailed => 0x8,
 		}
 	}
 }
@@ -158,7 +147,6 @@ impl PublishDoneStatus {
 /// Used to be called SubscribeDone
 #[derive(Clone, Debug)]
 pub struct PublishDone<'a> {
-	pub request_id: Option<RequestId>,
 	pub status_code: u64,
 	pub stream_count: u64,
 	pub reason_phrase: Cow<'a, str>,
@@ -168,17 +156,11 @@ impl PublishDone<'_> {
 	/// How the publisher ended the subscription: cleanly, or with the error its status names.
 	pub(crate) fn end(&self, version: Version) -> Result<(), crate::Error> {
 		match self.status_code {
-			code if code == PublishDoneStatus::TrackEnded.code(version) => Ok(()),
-			code if code == PublishDoneStatus::Unauthorized.code(version) => Err(crate::Error::Unauthorized),
+			code if code == PublishDoneStatus::TrackEnded.code() => Ok(()),
+			code if code == PublishDoneStatus::Unauthorized.code() => Err(crate::Error::Unauthorized),
 			// SUBSCRIPTION_ENDED: the subscription reached the end its filter asked for.
 			// Draft-22 removed it and left 0x3 unassigned.
-			0x3 if matches!(
-				version,
-				Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18
-			) =>
-			{
-				Ok(())
-			}
+			0x3 if matches!(version, Version::Draft18) => Ok(()),
 			code => Err(crate::Error::Remote(u32::try_from(code).unwrap_or(u32::MAX))),
 		}
 	}
@@ -187,32 +169,19 @@ impl PublishDone<'_> {
 impl Message for PublishDone<'_> {
 	const ID: u64 = 0x0b;
 
-	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
-			self.request_id
-				.expect("request_id required for draft14-16")
-				.encode(w, version)?;
-		} else {
-			assert!(self.request_id.is_none(), "request_id must be None for draft17+");
-		}
+	fn encode_msg(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
 		w.varint(self.status_code)?;
 		w.varint(self.stream_count)?;
 		w.string(&self.reason_phrase)?;
 		Ok(())
 	}
 
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		let request_id = if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
-			Some(RequestId::decode(r, version)?)
-		} else {
-			None
-		};
+	fn decode_msg(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
 		let status_code = r.varint()?;
 		let stream_count = r.varint()?;
 		let reason_phrase = Cow::Owned(r.string()?);
 
 		Ok(Self {
-			request_id,
 			status_code,
 			stream_count,
 			reason_phrase,
@@ -223,13 +192,13 @@ impl Message for PublishDone<'_> {
 #[derive(Debug)]
 pub struct Publish<'a> {
 	pub request_id: RequestId,
-	pub track_namespace: Path<'a>,
+	pub track_namespace: Path,
 	pub track_name: Cow<'a, str>,
 	pub track_alias: u64,
 	pub largest_location: Option<Location>,
 	pub forward: bool,
 
-	/// Metadata about the track, sent as Track Properties (draft-17+).
+	/// Metadata about the track, sent as Track Properties.
 	pub properties: Properties,
 	/// The subscription's SUBSCRIBER_PRIORITY (draft-22), `None` when absent: 128.
 	pub subscriber_priority: Option<u8>,
@@ -244,150 +213,73 @@ impl Message for Publish<'_> {
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
-		if version == Version::Draft17 {
-			w.varint(0)?; // required_request_id_delta = 0
-		}
-		encode_namespace(w, &self.track_namespace)?;
-		w.string(&self.track_name)?;
+		encode_track(w, &self.track_namespace, &self.track_name)?;
 		w.varint(self.track_alias)?;
 
-		match version {
-			Version::Draft14 => {
-				self.properties
-					.group_order
-					.unwrap_or(GroupOrder::Ascending)
-					.encode(w, version)?;
-				if let Some(location) = &self.largest_location {
-					w.bool(true);
-					location.encode(w, version)?;
-				} else {
-					w.bool(false);
-				}
+		// GROUP_ORDER is illegal on PUBLISH on draft-18 (a peer closes the session with
+		// PROTOCOL_VIOLATION), and from draft-22 one of the subscription's parameters, which
+		// moved here. The publisher's preference is a DEFAULT_PUBLISHER_GROUP_ORDER track
+		// property instead.
+		let draft22 = Filter::is_draft22(version);
+		encode_params!(w, version,
+			0x09 => self.largest_location,
+			0x10 => self.forward,
+			0x20 => self.subscriber_priority.filter(|_| draft22),
+			0x21 => self.filter.filter(|_| draft22),
+			0x22 => self.group_order.filter(|_| draft22),
+		);
 
-				w.bool(self.forward);
-				// parameters
-				w.u8(0);
-			}
-			_ => {
-				// GROUP_ORDER is the publisher's preference on a draft-15 PUBLISH, illegal from
-				// draft-16 to draft-18 (a peer closes the session with PROTOCOL_VIOLATION), and
-				// from draft-22 one of the subscription's parameters, which moved here. The
-				// publisher's preference is a DEFAULT_PUBLISHER_GROUP_ORDER track property
-				// instead, which we write from draft-17 on. Draft-16 gets neither form; see
-				// Properties::encode.
-				let draft22 = Filter::is_draft22(version);
-				let group_order = match version {
-					Version::Draft15 => self.properties.group_order,
-					_ if draft22 => self.group_order,
-					_ => None,
-				};
-
-				encode_params!(w, version,
-					0x09 => self.largest_location,
-					0x10 => self.forward,
-					0x20 => self.subscriber_priority.filter(|_| draft22),
-					0x21 => self.filter.filter(|_| draft22),
-					0x22 => group_order,
-				);
-
-				// Track Properties are the final field, so nothing may follow.
-				self.properties.encode(w, version)?;
-			}
-		}
+		// Track Properties are the final field, so nothing may follow.
+		self.properties.encode(w, version)?;
 
 		Ok(())
 	}
 
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
-		if version == Version::Draft17 {
-			let _required_request_id_delta = r.varint()?;
-		}
 		let (track_namespace, track_name) = decode_track(r)?;
 		let track_name = Cow::Owned(track_name);
 		let track_alias = r.varint()?;
 
-		match version {
-			Version::Draft14 => {
-				let group_order = GroupOrder::decode(r, version)?.any_to_descending();
-				let content_exists = r.bool()?;
-				let largest_location = match content_exists {
-					true => Some(Location::decode(r, version)?),
-					false => None,
-				};
-				let forward = r.bool()?;
-				// parameters
-				super::token::single(Parameters::skip_request(r)?)?;
+		// GROUP_ORDER is legal on PUBLISH from draft-22, when the subscription parameters
+		// moved here; before that it closes the session.
+		//
+		// The draft-22 parameters have to parse even though reverse publishing is
+		// unsupported: an unlisted parameter fails the whole message, which would kill the
+		// session instead of letting the request reach NOT_SUPPORTED. The timeouts are
+		// dropped.
+		decode_params!(r, version,
+			0x02 => _object_delivery_timeout: Option<u64> where Filter::is_draft22(version),
+			0x03 => authorization_token: Vec<super::token::RequestToken>,
+			0x06 => _subgroup_delivery_timeout: Option<u64> where Filter::is_draft22(version),
+			0x08 => _expires: Option<u64>,
+			0x09 => largest_location: Option<Location>,
+			0x10 => forward: Option<bool>,
+			0x20 => subscriber_priority: Option<u8> where Filter::is_draft22(version),
+			0x21 => filter: Option<Filter> where Filter::is_draft22(version),
+			0x22 => group_order: Option<GroupOrder> where Filter::is_draft22(version),
+		);
+		let properties = Properties::decode(r, version)?;
+		// Last, so a malformed field closes the session before a token refusal.
+		super::token::single(authorization_token)?;
 
-				Ok(Self {
-					request_id,
-					track_namespace,
-					track_name,
-					track_alias,
-					largest_location,
-					forward,
-					properties: Properties {
-						group_order: Some(group_order),
-						..Default::default()
-					},
-					subscriber_priority: None,
-					group_order: None,
-					filter: None,
-				})
-			}
-			_ => {
-				// GROUP_ORDER is legal on PUBLISH in draft-15 and again from draft-22, when
-				// the subscription parameters moved here. Draft-16 still knows the id, so one
-				// on this message is ignored. Draft-17 and draft-18 close the session.
-				//
-				// The draft-22 parameters have to parse even though reverse publishing is
-				// unsupported: an unlisted parameter fails the whole message, which would
-				// kill the session instead of letting the request reach NOT_SUPPORTED.
-				// OBJECT_DELIVERY_TIMEOUT is also legal in draft-15. The timeouts are dropped.
-				decode_params!(r, version,
-					0x02 => _object_delivery_timeout: Option<u64> where version == Version::Draft15 || Filter::is_draft22(version),
-					0x03 => authorization_token: Vec<super::token::RequestToken>,
-					0x06 => _subgroup_delivery_timeout: Option<u64> where Filter::is_draft22(version),
-					0x08 => _expires: Option<u64>,
-					0x09 => largest_location: Option<Location>,
-					0x10 => forward: Option<bool>,
-					0x20 => subscriber_priority: Option<u8> where Filter::is_draft22(version),
-					0x21 => filter: Option<Filter> where Filter::is_draft22(version),
-					0x22 => group_order: Option<GroupOrder> where version == Version::Draft15 || Filter::is_draft22(version),
-				);
-				let mut properties = Properties::decode(r, version)?;
-				// Last, so a malformed field closes the session before a token refusal.
-				super::token::single(authorization_token)?;
-				// Draft-15's GROUP_ORDER is the publisher's preference; draft-22's is the
-				// subscription's.
-				let (publisher_order, group_order) = match version {
-					Version::Draft15 => (group_order, None),
-					_ => (None, group_order),
-				};
-				properties.group_order = properties.group_order.or(publisher_order);
-
-				let forward = forward.unwrap_or(true);
-
-				Ok(Self {
-					request_id,
-					track_namespace,
-					track_name,
-					track_alias,
-					largest_location,
-					forward,
-					properties,
-					subscriber_priority,
-					group_order,
-					filter,
-				})
-			}
-		}
+		Ok(Self {
+			request_id,
+			track_namespace,
+			track_name,
+			track_alias,
+			largest_location,
+			forward: forward.unwrap_or(true),
+			properties,
+			subscriber_priority,
+			group_order,
+			filter,
+		})
 	}
 }
 
 #[derive(Debug)]
 pub struct PublishOk {
-	pub request_id: Option<RequestId>,
 	pub forward: bool,
 	/// SUBSCRIBER_PRIORITY, `None` when absent: the subscription keeps the one it had.
 	pub subscriber_priority: Option<u8>,
@@ -395,7 +287,7 @@ pub struct PublishOk {
 	pub group_order: Option<GroupOrder>,
 	/// The Location Filter (through draft-18), `None` when absent.
 	pub filter: Option<Filter>,
-	/// NEW_GROUP_REQUEST (drafts 16 to 18), which a dynamic track judges as a join.
+	/// NEW_GROUP_REQUEST (through draft-18), which a dynamic track judges as a join.
 	pub new_group: Option<u64>,
 }
 
@@ -403,40 +295,17 @@ impl Message for PublishOk {
 	const ID: u64 = 0x1E;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
-			self.request_id
-				.expect("request_id required for draft14-16")
-				.encode(w, version)?;
-		} else {
-			assert!(self.request_id.is_none(), "request_id must be None for draft17+");
-		}
-
 		match version {
-			Version::Draft14 => {
-				w.bool(self.forward);
-				w.u8(self.subscriber_priority.unwrap_or(super::priority::DEFAULT_WIRE));
-				self.group_order.unwrap_or(GroupOrder::Descending).encode(w, version)?;
-				// Same as SUBSCRIBE: the Location an absolute filter carries is dropped on
-				// decode, so encoding one would truncate the message.
-				self.filter.unwrap_or(Filter::Unfiltered).encode(w, version)?;
-				// no parameters
-				w.u8(0);
-			}
 			// Draft-22 moved the subscription parameters out of PUBLISH_OK; they belong to
 			// PUBLISH and REQUEST_UPDATE now, so a PUBLISH_OK carries none of them.
 			_ if Filter::is_draft22(version) => encode_params!(w, version,),
 			_ => {
 				// GROUP_ORDER left PUBLISH_OK in draft-22. Sending it there is a parameter
 				// on the wrong message, which closes the session.
-				let group_order = matches!(
-					version,
-					Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18
-				)
-				.then_some(self.group_order)
-				.flatten();
-				let new_group = matches!(version, Version::Draft16 | Version::Draft17 | Version::Draft18)
-					.then_some(self.new_group)
+				let group_order = matches!(version, Version::Draft18)
+					.then_some(self.group_order)
 					.flatten();
+				let new_group = matches!(version, Version::Draft18).then_some(self.new_group).flatten();
 				encode_params!(w, version,
 					0x10 => self.forward,
 					0x20 => self.subscriber_priority,
@@ -451,83 +320,27 @@ impl Message for PublishOk {
 	}
 
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		let request_id = if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
-			Some(RequestId::decode(r, version)?)
-		} else {
-			None
-		};
+		// EXPIRES is ignored, as in SUBSCRIBE_OK. Delivery timeouts are legal on the drafts
+		// that list them and dropped: nothing here acts on a publisher's timeout. Draft-22
+		// moved the subscription parameters off PUBLISH_OK, GROUP_ORDER
+		// included.
+		decode_params!(r, version,
+			0x02 => _delivery_timeout: Option<u64> where !Filter::is_draft22(version),
+			0x06 => _subgroup_delivery_timeout: Option<u64> where matches!(version, Version::Draft18),
+			0x08 => _expires: Option<u64>,
+			0x10 => forward: Option<bool> where !Filter::is_draft22(version),
+			0x20 => subscriber_priority: Option<u8> where !Filter::is_draft22(version),
+			0x21 => filter: Option<Filter> where !Filter::is_draft22(version),
+			0x22 => group_order: Option<GroupOrder> where matches!(version, Version::Draft18),
+			0x32 => new_group: Option<u64> where matches!(version, Version::Draft18),
+		);
 
-		match version {
-			Version::Draft14 => {
-				let forward = r.bool()?;
-				let subscriber_priority = r.u8()?;
-				let group_order = GroupOrder::decode(r, version)?;
-				let filter = Filter::decode(r, version)?;
-
-				// no parameters
-				Parameters::skip_response(r)?;
-
-				Ok(Self {
-					request_id,
-					forward,
-					subscriber_priority: Some(subscriber_priority),
-					group_order: Some(group_order),
-					filter: Some(filter),
-					new_group: None,
-				})
-			}
-			_ => {
-				// EXPIRES is ignored, as in SUBSCRIBE_OK. Delivery timeouts are legal on the
-				// drafts that list them and dropped: nothing here acts on a publisher's timeout. Draft-22 moved the
-				// subscription parameters, GROUP_ORDER included, off PUBLISH_OK.
-				decode_params!(r, version,
-					0x02 => _delivery_timeout: Option<u64> where !Filter::is_draft22(version),
-					0x06 => _subgroup_delivery_timeout: Option<u64> where matches!(version, Version::Draft18),
-					0x08 => _expires: Option<u64>,
-					0x10 => forward: Option<bool> where !Filter::is_draft22(version),
-					0x20 => subscriber_priority: Option<u8> where !Filter::is_draft22(version),
-					0x21 => filter: Option<Filter> where !Filter::is_draft22(version),
-					0x22 => group_order: Option<GroupOrder> where matches!(version, Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18),
-					0x32 => new_group: Option<u64> where matches!(version, Version::Draft16 | Version::Draft17 | Version::Draft18),
-				);
-
-				Ok(Self {
-					request_id,
-					forward: forward.unwrap_or(true),
-					subscriber_priority,
-					group_order,
-					filter,
-					new_group,
-				})
-			}
-		}
-	}
-}
-
-#[derive(Debug)]
-pub struct PublishError<'a> {
-	pub request_id: RequestId,
-	pub error_code: u64,
-	pub reason_phrase: Cow<'a, str>,
-}
-impl Message for PublishError<'_> {
-	const ID: u64 = 0x1F;
-
-	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		self.request_id.encode(w, version)?;
-		w.varint(self.error_code)?;
-		w.string(&self.reason_phrase)?;
-		Ok(())
-	}
-
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		let request_id = RequestId::decode(r, version)?;
-		let error_code = r.varint()?;
-		let reason_phrase = Cow::Owned(r.string()?);
 		Ok(Self {
-			request_id,
-			error_code,
-			reason_phrase,
+			forward: forward.unwrap_or(true),
+			subscriber_priority,
+			group_order,
+			filter,
+			new_group,
 		})
 	}
 }
@@ -545,8 +358,7 @@ mod tests {
 		let mut body = Vec::new();
 		let w = &mut Encoder::new(&mut body, version.into());
 		RequestId(1).encode(w, version)?;
-		super::super::namespace::encode_namespace(w, &crate::Path::new("broadcast"))?;
-		w.string("video")?;
+		super::super::namespace::encode_track(w, &crate::Path::from_static("broadcast"), "video")?;
 		w.varint(1u64)?; // track alias
 
 		// SUBSCRIBER_PRIORITY then LOCATION_FILTER, delta encoded from 0.
@@ -568,8 +380,7 @@ mod tests {
 		let mut body = Vec::new();
 		let w = &mut Encoder::new(&mut body, version.into());
 		RequestId(1).encode(w, version)?;
-		super::super::namespace::encode_namespace(w, &crate::Path::new("broadcast"))?;
-		w.string("video")?;
+		super::super::namespace::encode_track(w, &crate::Path::from_static("broadcast"), "video")?;
 		w.varint(1u64)?;
 		encode_params!(w, version, 0x20 => 128u8);
 		Properties::default().encode(w, version)?;
@@ -590,159 +401,11 @@ mod tests {
 		crate::coding::decode_buf(&mut buf, version, M::decode_msg)
 	}
 
-	#[test]
-	fn test_publish_v14_round_trip() {
-		let msg = Publish {
-			request_id: RequestId(1),
-			track_namespace: Path::new("test/ns"),
-			track_name: "video".into(),
-			track_alias: 42,
-			largest_location: Some(Location { group: 10, object: 5 }),
-			forward: true,
-			properties: Properties {
-				group_order: Some(GroupOrder::Descending),
-				..Default::default()
-			},
-			subscriber_priority: None,
-			group_order: None,
-			filter: None,
-		};
-
-		let encoded = encode_message(&msg, Version::Draft14);
-		let decoded: Publish = decode_message(&encoded, Version::Draft14).unwrap();
-
-		assert_eq!(decoded.request_id, RequestId(1));
-		assert_eq!(decoded.track_namespace.as_str(), "test/ns");
-		assert_eq!(decoded.track_name, "video");
-		assert_eq!(decoded.track_alias, 42);
-		assert_eq!(decoded.largest_location, Some(Location { group: 10, object: 5 }));
-		assert!(decoded.forward);
-	}
-
-	#[test]
-	fn test_publish_v15_round_trip() {
-		let msg = Publish {
-			request_id: RequestId(1),
-			track_namespace: Path::new("test/ns"),
-			track_name: "video".into(),
-			track_alias: 42,
-			largest_location: Some(Location { group: 10, object: 5 }),
-			forward: true,
-			properties: Properties {
-				group_order: Some(GroupOrder::Descending),
-				..Default::default()
-			},
-			subscriber_priority: None,
-			group_order: None,
-			filter: None,
-		};
-
-		let encoded = encode_message(&msg, Version::Draft15);
-		let decoded: Publish = decode_message(&encoded, Version::Draft15).unwrap();
-
-		assert_eq!(decoded.request_id, RequestId(1));
-		assert_eq!(decoded.track_namespace.as_str(), "test/ns");
-		assert_eq!(decoded.track_name, "video");
-		assert_eq!(decoded.track_alias, 42);
-		assert_eq!(decoded.largest_location, Some(Location { group: 10, object: 5 }));
-		assert!(decoded.forward);
-	}
-
-	#[test]
-	fn test_publish_ok_v14_round_trip() {
-		let msg = PublishOk {
-			request_id: Some(RequestId(7)),
-			forward: true,
-			subscriber_priority: Some(128),
-			group_order: Some(GroupOrder::Descending),
-			filter: Some(Filter::NextObject),
-			new_group: None,
-		};
-
-		let encoded = encode_message(&msg, Version::Draft14);
-		let decoded: PublishOk = decode_message(&encoded, Version::Draft14).unwrap();
-
-		assert_eq!(decoded.request_id, Some(RequestId(7)));
-		assert!(decoded.forward);
-		assert_eq!(decoded.subscriber_priority, Some(128));
-	}
-
-	#[test]
-	fn test_publish_ok_v15_round_trip() {
-		let msg = PublishOk {
-			request_id: Some(RequestId(7)),
-			forward: true,
-			subscriber_priority: Some(128),
-			group_order: Some(GroupOrder::Descending),
-			filter: Some(Filter::NextObject),
-			new_group: None,
-		};
-
-		let encoded = encode_message(&msg, Version::Draft15);
-		let decoded: PublishOk = decode_message(&encoded, Version::Draft15).unwrap();
-
-		assert_eq!(decoded.request_id, Some(RequestId(7)));
-		assert!(decoded.forward);
-		assert_eq!(decoded.subscriber_priority, Some(128));
-	}
-
-	#[test]
-	fn test_publish_v17_round_trip() {
-		let msg = Publish {
-			request_id: RequestId(1),
-			track_namespace: Path::new("test/ns"),
-			track_name: "video".into(),
-			track_alias: 42,
-			largest_location: Some(Location { group: 10, object: 5 }),
-			forward: true,
-			properties: Properties {
-				group_order: Some(GroupOrder::Descending),
-				..Default::default()
-			},
-			subscriber_priority: None,
-			group_order: None,
-			filter: None,
-		};
-
-		let encoded = encode_message(&msg, Version::Draft17);
-		let decoded: Publish = decode_message(&encoded, Version::Draft17).unwrap();
-
-		assert_eq!(decoded.request_id, RequestId(1));
-		assert_eq!(decoded.track_namespace.as_str(), "test/ns");
-		assert_eq!(decoded.track_name, "video");
-		assert_eq!(decoded.track_alias, 42);
-		assert_eq!(decoded.largest_location, Some(Location { group: 10, object: 5 }));
-		assert!(decoded.forward);
-	}
-
-	#[test]
-	fn test_publish_ok_v17_round_trip() {
-		let msg = PublishOk {
-			request_id: None,
-			forward: true,
-			subscriber_priority: Some(128),
-			group_order: Some(GroupOrder::Descending),
-			filter: Some(Filter::NextObject),
-			new_group: None,
-		};
-
-		let encoded = encode_message(&msg, Version::Draft17);
-		let decoded: PublishOk = decode_message(&encoded, Version::Draft17).unwrap();
-
-		assert_eq!(decoded.request_id, None);
-		assert!(decoded.forward);
-		assert_eq!(decoded.subscriber_priority, Some(128));
-	}
-
 	fn publish_with_param(version: Version, key: u64, value: u64) -> Vec<u8> {
 		let mut buf = Vec::new();
 		let w = &mut Encoder::new(&mut buf, version.into());
 		RequestId(1).encode(w, version).unwrap();
-		if version == Version::Draft17 {
-			w.varint(0).unwrap();
-		}
-		encode_namespace(w, &Path::new("t")).unwrap();
-		w.string("v").unwrap();
+		encode_track(w, &Path::from_static("t"), "v").unwrap();
 		w.varint(1).unwrap();
 		w.varint(1).unwrap();
 		w.varint(key).unwrap();
@@ -753,34 +416,29 @@ mod tests {
 	fn publish_ok_with_param(version: Version, key: u64, value: u64) -> Vec<u8> {
 		let mut buf = Vec::new();
 		let w = &mut Encoder::new(&mut buf, version.into());
-		if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
-			RequestId(1).encode(w, version).unwrap();
-		}
 		w.varint(1).unwrap();
 		w.varint(key).unwrap();
 		w.varint(value).unwrap();
 		buf
 	}
 
-	/// SUBSCRIBER_PRIORITY is known in draft-16 but not defined for PUBLISH until draft-22.
-	/// OBJECT_DELIVERY_TIMEOUT is legal on PUBLISH again from draft-22.
+	/// SUBSCRIBER_PRIORITY is not defined for PUBLISH until draft-22. OBJECT_DELIVERY_TIMEOUT
+	/// is legal on PUBLISH again from draft-22.
 	#[test]
 	fn publish_parameters_follow_the_draft() {
-		decode_message::<Publish>(&publish_with_param(Version::Draft16, 0x20, 1), Version::Draft16)
-			.expect("draft-16 ignores SUBSCRIBER_PRIORITY");
 		assert!(decode_message::<Publish>(&publish_with_param(Version::Draft18, 0x20, 1), Version::Draft18).is_err());
 		decode_message::<Publish>(&publish_with_param(Version::Draft22, 0x02, 1), Version::Draft22)
 			.expect("draft-22 accepts OBJECT_DELIVERY_TIMEOUT");
 	}
 
-	/// PUBLISH_OK carries the delivery timeout through draft-18, and NEW_GROUP_REQUEST from
-	/// draft-16 through draft-18. Draft-22 no longer carries FORWARD.
+	/// PUBLISH_OK carries the delivery timeout and NEW_GROUP_REQUEST through draft-18.
+	/// Draft-22 no longer carries FORWARD.
 	#[test]
 	fn publish_ok_parameters_follow_the_draft() {
 		decode_message::<PublishOk>(&publish_ok_with_param(Version::Draft18, 0x02, 1), Version::Draft18)
 			.expect("draft-18 accepts DELIVERY_TIMEOUT");
-		decode_message::<PublishOk>(&publish_ok_with_param(Version::Draft16, 0x32, 1), Version::Draft16)
-			.expect("draft-16 accepts NEW_GROUP_REQUEST");
+		decode_message::<PublishOk>(&publish_ok_with_param(Version::Draft18, 0x32, 1), Version::Draft18)
+			.expect("draft-18 accepts NEW_GROUP_REQUEST");
 		assert!(
 			decode_message::<PublishOk>(&publish_ok_with_param(Version::Draft22, 0x10, 0), Version::Draft22).is_err()
 		);
@@ -788,23 +446,15 @@ mod tests {
 
 	#[test]
 	fn test_publish_done_registered_statuses_all_versions() {
-		for version in [
-			Version::Draft14,
-			Version::Draft15,
-			Version::Draft16,
-			Version::Draft17,
-			Version::Draft18,
-		] {
+		for version in [Version::Draft18] {
 			for (status, expected) in [
 				(PublishDoneStatus::InternalError, 0x0),
 				(PublishDoneStatus::TrackEnded, 0x2),
 			] {
-				assert_eq!(status.code(version), expected);
+				assert_eq!(status.code(), expected);
 
 				let msg = PublishDone {
-					request_id: matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
-						.then_some(RequestId(7)),
-					status_code: status.code(version),
+					status_code: status.code(),
 					stream_count: 5,
 					reason_phrase: "done".into(),
 				};
@@ -823,13 +473,12 @@ mod tests {
 	#[test]
 	fn publish_done_end_follows_the_status() {
 		let done = |status_code| PublishDone {
-			request_id: None,
 			status_code,
 			stream_count: 0,
 			reason_phrase: "".into(),
 		};
 
-		for version in [Version::Draft14, Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft22] {
 			assert!(done(0x2).end(version).is_ok(), "{version:?}");
 			assert!(
 				matches!(done(0x1).end(version), Err(crate::Error::Unauthorized)),
@@ -853,7 +502,7 @@ mod tests {
 	fn test_publish_v18_round_trip() {
 		let msg = Publish {
 			request_id: RequestId(1),
-			track_namespace: Path::new("test/ns"),
+			track_namespace: Path::from_static("test/ns"),
 			track_name: "video".into(),
 			track_alias: 42,
 			largest_location: Some(Location { group: 10, object: 5 }),
@@ -880,17 +529,10 @@ mod tests {
 
 	#[test]
 	fn publish_priority_property_bytes_on_every_draft() {
-		for version in [
-			Version::Draft14,
-			Version::Draft15,
-			Version::Draft16,
-			Version::Draft17,
-			Version::Draft18,
-			Version::Draft22,
-		] {
+		for version in [Version::Draft18, Version::Draft22] {
 			let mut msg = Publish {
 				request_id: RequestId(1),
-				track_namespace: Path::new("ns"),
+				track_namespace: Path::from_static("ns"),
 				track_name: "video".into(),
 				track_alias: 42,
 				largest_location: None,
@@ -903,30 +545,26 @@ mod tests {
 			let baseline = encode_message(&msg, version);
 			msg.properties.priority = Some(37);
 			let encoded = encode_message(&msg, version);
-			if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
-				assert_eq!(encoded, baseline, "{version}");
-			} else {
-				assert_eq!(encoded, [baseline, vec![0x0e, 37]].concat(), "{version}");
-				assert_eq!(
-					decode_message::<Publish>(&encoded, version)
-						.unwrap()
-						.properties
-						.priority,
-					Some(37)
-				);
-			}
+			assert_eq!(encoded, [baseline, vec![0x0e, 37]].concat(), "{version}");
+			assert_eq!(
+				decode_message::<Publish>(&encoded, version)
+					.unwrap()
+					.properties
+					.priority,
+				Some(37)
+			);
 		}
 	}
 
-	/// GROUP_ORDER (0x22) is only a legal PUBLISH *message parameter* through draft-15; a
-	/// draft-16+ peer closes the session with PROTOCOL_VIOLATION when it sees one. The
-	/// publisher's preference belongs in the DEFAULT_PUBLISHER_GROUP_ORDER track property,
+	/// GROUP_ORDER (0x22) is not a legal PUBLISH *message parameter*; a peer closes the
+	/// session with PROTOCOL_VIOLATION when it sees one. The publisher's preference
+	/// belongs in the DEFAULT_PUBLISHER_GROUP_ORDER track property,
 	/// which shares the number 0x22 in the separate property registry.
 	#[test]
 	fn test_publish_v18_group_order_is_a_property() {
 		let msg = Publish {
 			request_id: RequestId(1),
-			track_namespace: Path::new("ns"),
+			track_namespace: Path::from_static("ns"),
 			track_name: "video".into(),
 			track_alias: 42,
 			largest_location: None,
@@ -962,77 +600,9 @@ mod tests {
 		assert_eq!(decoded.properties.group_order, Some(GroupOrder::Descending));
 	}
 
-	/// Draft-15 is the last version that takes it as a message parameter, and has no track
-	/// properties to put it in.
-	#[test]
-	fn test_publish_v15_group_order_is_a_parameter() {
-		let msg = Publish {
-			request_id: RequestId(1),
-			track_namespace: Path::new("ns"),
-			track_name: "video".into(),
-			track_alias: 42,
-			largest_location: None,
-			forward: true,
-			properties: Properties {
-				unknown: Default::default(),
-				dynamic_groups: false,
-				compress: false,
-				max_cache_duration: None,
-				timescale: None,
-				priority: None,
-				group_order: Some(GroupOrder::Descending),
-			},
-			subscriber_priority: None,
-			group_order: None,
-			filter: None,
-		};
-
-		#[rustfmt::skip]
-		let expected = vec![
-			1,                            // request id
-			1,                            // namespace tuple count
-			2, b'n', b's',                // "ns"
-			5, b'v', b'i', b'd', b'e', b'o', // "video"
-			42,                           // track alias
-			2,                            // two message parameters
-			0x10, 0x01,                   // FORWARD = true
-			0x22, 0x02,                   // GROUP_ORDER = descending
-		];
-		assert_eq!(encode_message(&msg, Version::Draft15), expected);
-
-		let decoded: Publish = decode_message(&expected, Version::Draft15).unwrap();
-		assert_eq!(decoded.properties.group_order, Some(GroupOrder::Descending));
-	}
-
-	/// Draft-18 drops the required_request_id_delta varint (#1615).
-	/// For Publish (#1D) the field is a single zero varint = 1 byte.
-	#[test]
-	fn test_publish_v18_is_one_byte_shorter_than_v17() {
-		let msg = Publish {
-			request_id: RequestId(1),
-			track_namespace: Path::new("test/ns"),
-			track_name: "video".into(),
-			track_alias: 42,
-			largest_location: None,
-			forward: true,
-			properties: Properties {
-				group_order: Some(GroupOrder::Descending),
-				..Default::default()
-			},
-			subscriber_priority: None,
-			group_order: None,
-			filter: None,
-		};
-
-		let v17 = encode_message(&msg, Version::Draft17);
-		let v18 = encode_message(&msg, Version::Draft18);
-		assert_eq!(v17.len(), v18.len() + 1);
-	}
-
 	#[test]
 	fn test_publish_ok_v18_round_trip() {
 		let msg = PublishOk {
-			request_id: None,
 			forward: true,
 			subscriber_priority: Some(128),
 			group_order: Some(GroupOrder::Descending),
@@ -1043,7 +613,6 @@ mod tests {
 		let encoded = encode_message(&msg, Version::Draft18);
 		let decoded: PublishOk = decode_message(&encoded, Version::Draft18).unwrap();
 
-		assert_eq!(decoded.request_id, None);
 		assert!(decoded.forward);
 		assert_eq!(decoded.subscriber_priority, Some(128));
 	}
@@ -1051,10 +620,9 @@ mod tests {
 	/// Draft-18 lets PUBLISH_OK carry EXPIRES; it is ignored rather than rejected.
 	#[test]
 	fn test_publish_ok_ignores_expires() {
-		let bytes = [0x04, 0x01, 0x08, 0x05];
+		let bytes = [0x01, 0x08, 0x05];
 
-		let decoded: PublishOk = decode_message(&bytes, Version::Draft16).unwrap();
-		assert_eq!(decoded.request_id, Some(RequestId(4)));
+		let decoded: PublishOk = decode_message(&bytes, Version::Draft18).unwrap();
 		assert!(decoded.forward);
 	}
 
@@ -1076,7 +644,6 @@ mod tests {
 	fn test_publish_ok_carries_new_group_request() {
 		let version = Version::Draft18;
 		let msg = PublishOk {
-			request_id: None,
 			forward: true,
 			subscriber_priority: None,
 			group_order: None,
@@ -1091,7 +658,6 @@ mod tests {
 	fn test_publish_done_preserves_unknown_status() {
 		const UNKNOWN: u64 = 0xface;
 		let msg = PublishDone {
-			request_id: None,
 			status_code: UNKNOWN,
 			stream_count: 5,
 			reason_phrase: "extension".into(),

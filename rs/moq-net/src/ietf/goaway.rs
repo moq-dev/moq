@@ -1,4 +1,4 @@
-//! IETF moq-transport-14 goaway message
+//! The moq-transport GOAWAY message.
 
 use std::borrow::Cow;
 
@@ -12,7 +12,7 @@ use super::Version;
 #[derive(Clone, Debug)]
 pub struct GoAway<'a> {
 	pub new_session_uri: Cow<'a, str>,
-	/// Draft-17: timeout in milliseconds before closing the session
+	/// Timeout in milliseconds before closing the session.
 	pub timeout: u64,
 	/// Draft-18 only: the smallest of the receiver's Request IDs the sender has not
 	/// processed. Required on the control stream and absent on a request stream.
@@ -24,10 +24,7 @@ impl Message for GoAway<'_> {
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		w.string(&self.new_session_uri)?;
-		// Draft-17+ adds a timeout field.
-		if !matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
-			w.varint(self.timeout)?;
-		}
+		w.varint(self.timeout)?;
 		// Draft-18 (#1559) added the Request ID; draft-22 removed it again (#1623).
 		if version == Version::Draft18
 			&& let Some(request_id) = self.request_id
@@ -45,7 +42,6 @@ impl Message for GoAway<'_> {
 			return Err(DecodeError::InvalidValue);
 		}
 		let (timeout, request_id) = match version {
-			Version::Draft14 | Version::Draft15 | Version::Draft16 => (0, None),
 			// The Request ID is present only on the control stream; each caller checks it
 			// against the stream it read from.
 			Version::Draft18 => {
@@ -72,14 +68,14 @@ mod tests {
 
 	fn encode_message<M: Message>(msg: &M) -> Vec<u8> {
 		let mut buf = Vec::new();
-		msg.encode_msg(&mut Encoder::new(&mut buf, Version::Draft14.into()), Version::Draft14)
+		msg.encode_msg(&mut Encoder::new(&mut buf, Version::Draft22.into()), Version::Draft22)
 			.unwrap();
 		buf.to_vec()
 	}
 
 	fn decode_message<M: Message>(bytes: &[u8]) -> Result<M, DecodeError> {
 		let mut buf = bytes::Bytes::from(bytes.to_vec());
-		crate::coding::decode_buf(&mut buf, Version::Draft14, M::decode_msg)
+		crate::coding::decode_buf(&mut buf, Version::Draft22, M::decode_msg)
 	}
 
 	#[test]
@@ -111,25 +107,6 @@ mod tests {
 	}
 
 	#[test]
-	fn test_goaway_v17_timeout() {
-		let msg = GoAway {
-			new_session_uri: "https://example.com/new".into(),
-			timeout: 5000,
-			request_id: None,
-		};
-
-		let mut buf = Vec::new();
-		msg.encode_msg(&mut Encoder::new(&mut buf, Version::Draft17.into()), Version::Draft17)
-			.unwrap();
-
-		let mut bytes = bytes::Bytes::from(buf.to_vec());
-		let decoded: GoAway = crate::coding::decode_buf(&mut bytes, Version::Draft17, GoAway::decode_msg).unwrap();
-
-		assert_eq!(decoded.new_session_uri, "https://example.com/new");
-		assert_eq!(decoded.timeout, 5000);
-	}
-
-	#[test]
 	fn test_goaway_v18_timeout() {
 		let msg = GoAway {
 			new_session_uri: "moqt://relay.example/".into(),
@@ -142,11 +119,11 @@ mod tests {
 			.unwrap();
 
 		// Draft-18 requires a trailing Request ID on the control stream, so the
-		// v18 body must be exactly one varint longer than the v17 body.
-		let mut buf17 = Vec::new();
-		msg.encode_msg(&mut Encoder::new(&mut buf17, Version::Draft17.into()), Version::Draft17)
+		// v18 body must be exactly one varint longer than the v19 body.
+		let mut buf19 = Vec::new();
+		msg.encode_msg(&mut Encoder::new(&mut buf19, Version::Draft22.into()), Version::Draft22)
 			.unwrap();
-		assert_eq!(buf.len(), buf17.len() + 1, "v18 must append the Request ID varint");
+		assert_eq!(buf.len(), buf19.len() + 1, "v18 must append the Request ID varint");
 
 		let mut bytes = bytes::Bytes::from(buf.to_vec());
 		let decoded: GoAway = crate::coding::decode_buf(&mut bytes, Version::Draft18, GoAway::decode_msg).unwrap();

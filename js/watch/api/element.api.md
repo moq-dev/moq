@@ -19,27 +19,16 @@ export default class extends HTMLElement {
 	get announced(): boolean;
 	set announced(value: boolean);
 	attributeChangedCallback(name: "delay" | "buffer" | "url" | "name" | "announced" | "volume" | "muted" | "paused" | "visible" | "backend" | "versions" | "catalog-format" | "captions", oldValue: string | null, newValue: string | null): void;
-	audio: Audio.Decoder;
+	readonly audio: Audio.Decoder;
 	get backend(): Video.Backend;
 	set backend(value: Video.Backend);
-	broadcast: Broadcast;
+	readonly broadcast: Broadcast;
 	get buffer(): Clock.Milli;
 	set buffer(value: Clock.Milli);
 	get captions(): string | undefined;
 	set captions(value: string | undefined);
 	get catalog(): {
 		[key: string]: unknown;
-		archive?: {
-			replay?: Hang.Catalog.RelativeBroadcast;
-			replayEpoch?: Hang.Catalog.ReferenceEpoch;
-			store?: string;
-			timelines: Record<string, {
-				duration?: number & $brand<"u53">;
-				track: string;
-			}>;
-			timescale: number & $brand<"u53">;
-			version?: number & $brand<"u53">;
-		};
 		audio?: {
 			renditions: {
 				[key: string]: {
@@ -64,6 +53,10 @@ export default class extends HTMLElement {
 					description?: string;
 					enabled?: boolean;
 					epoch?: Hang.Catalog.ReferenceEpoch;
+					hls?: {
+						duration: number & $brand<"u53">;
+						track: string;
+					};
 					jitter?: number & $brand<"u53">;
 					label?: string;
 					layout?: string;
@@ -96,6 +89,10 @@ export default class extends HTMLElement {
 				description?: string;
 				enabled?: boolean;
 				epoch?: Hang.Catalog.ReferenceEpoch;
+				hls?: {
+					duration: number & $brand<"u53">;
+					track: string;
+				};
 				jitter?: number & $brand<"u53">;
 				label?: string;
 				layout?: string;
@@ -235,6 +232,10 @@ export default class extends HTMLElement {
 					enabled?: boolean;
 					epoch?: Hang.Catalog.ReferenceEpoch;
 					framerate?: number;
+					hls?: {
+						duration: number & $brand<"u53">;
+						track: string;
+					};
 					interlaced?: boolean;
 					jitter?: number & $brand<"u53">;
 					label?: string;
@@ -322,6 +323,10 @@ export default class extends HTMLElement {
 				enabled?: boolean;
 				epoch?: Hang.Catalog.ReferenceEpoch;
 				framerate?: number;
+				hls?: {
+					duration: number & $brand<"u53">;
+					track: string;
+				};
 				interlaced?: boolean;
 				jitter?: number & $brand<"u53">;
 				label?: string;
@@ -349,17 +354,6 @@ export default class extends HTMLElement {
 	} | undefined;
 	set catalog(value: {
 		[key: string]: unknown;
-		archive?: {
-			replay?: Hang.Catalog.RelativeBroadcast;
-			replayEpoch?: Hang.Catalog.ReferenceEpoch;
-			store?: string;
-			timelines: Record<string, {
-				duration?: number & $brand<"u53">;
-				track: string;
-			}>;
-			timescale: number & $brand<"u53">;
-			version?: number & $brand<"u53">;
-		};
 		audio?: {
 			renditions: {
 				[key: string]: {
@@ -384,6 +378,10 @@ export default class extends HTMLElement {
 					description?: string;
 					enabled?: boolean;
 					epoch?: Hang.Catalog.ReferenceEpoch;
+					hls?: {
+						duration: number & $brand<"u53">;
+						track: string;
+					};
 					jitter?: number & $brand<"u53">;
 					label?: string;
 					layout?: string;
@@ -416,6 +414,10 @@ export default class extends HTMLElement {
 				description?: string;
 				enabled?: boolean;
 				epoch?: Hang.Catalog.ReferenceEpoch;
+				hls?: {
+					duration: number & $brand<"u53">;
+					track: string;
+				};
 				jitter?: number & $brand<"u53">;
 				label?: string;
 				layout?: string;
@@ -555,6 +557,10 @@ export default class extends HTMLElement {
 					enabled?: boolean;
 					epoch?: Hang.Catalog.ReferenceEpoch;
 					framerate?: number;
+					hls?: {
+						duration: number & $brand<"u53">;
+						track: string;
+					};
 					interlaced?: boolean;
 					jitter?: number & $brand<"u53">;
 					label?: string;
@@ -642,6 +648,10 @@ export default class extends HTMLElement {
 				enabled?: boolean;
 				epoch?: Hang.Catalog.ReferenceEpoch;
 				framerate?: number;
+				hls?: {
+					duration: number & $brand<"u53">;
+					track: string;
+				};
 				interlaced?: boolean;
 				jitter?: number & $brand<"u53">;
 				label?: string;
@@ -701,17 +711,17 @@ export default class extends HTMLElement {
 	get paused(): boolean;
 	set paused(value: boolean);
 	readonly player: Player;
-	renderer: Video.Renderer;
+	readonly renderer: Video.Renderer;
 	reset(): void;
 	readonly signals: Signals.Effect;
-	sync: Sync;
+	readonly sync: Sync;
 	text: Text.Source;
 	textRenderer: Text.Renderer;
 	get url(): URL | undefined;
 	set url(value: string | URL | undefined);
 	get versions(): readonly string[] | undefined;
 	set versions(value: readonly string[] | undefined);
-	video: Video.Decoder;
+	readonly video: Video.Decoder;
 	get visible(): Video.Visible;
 	set visible(value: Video.Visible);
 	get volume(): number;

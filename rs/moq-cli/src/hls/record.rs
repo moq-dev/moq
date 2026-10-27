@@ -3,9 +3,10 @@
 //! The layout mirrors the served one without the instance: `master.m3u8`, then
 //! `{kind}/{rendition}/media.m3u8` with its `init.{n}.mp4` and `{segment}.m4s` files. Each
 //! rendition keeps one continuous media playlist across decoder reconfigurations, so the whole
-//! recording stays playable from its master playlist.
+//! recording stays playable from its master playlist. Its segments are numbered from the first
+//! one recorded, so a replacement reading another record track continues the numbering.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque, btree_map};
+use std::collections::{BTreeMap, VecDeque, btree_map};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,9 +32,6 @@ type Key = (Kind, String);
 pub struct Recording {
 	dir: PathBuf,
 	slots: BTreeMap<Key, Slot>,
-	/// Segments where a rendition switched to a reconfigured decoder. Every playlist marks a
-	/// discontinuity there, so their discontinuity sequences stay matched.
-	transitions: BTreeSet<u64>,
 	/// The master playlist as last written.
 	master: Option<String>,
 }
@@ -52,8 +50,9 @@ struct Slot {
 	playlist: Playlist,
 	/// The instance being recorded, if its cursor is in flight.
 	recording: Option<Instance>,
-	/// Replacements whose cursors wait for the current instance to drain, oldest first.
-	queued: VecDeque<segments::Consumer>,
+	/// Replacements whose cursors wait for the current instance to drain, oldest first, each
+	/// with the record track it reads.
+	queued: VecDeque<(Arc<str>, segments::Consumer)>,
 	/// How many instances started, which numbers their init files.
 	instances: u64,
 	/// The last segment recorded, by any instance.
@@ -85,6 +84,8 @@ struct Instance {
 	index: u64,
 	/// The init file name, once written.
 	init: Option<String>,
+	/// The record track its segment numbers come from.
+	track: Arc<str>,
 	/// The last segment the previous instance recorded, which this one must continue.
 	after: Option<Last>,
 	/// It yielded the segment `after` names, so its next one directly follows.
@@ -93,8 +94,10 @@ struct Instance {
 	started: bool,
 }
 
-#[derive(Clone, Copy)]
+/// The source of the last segment recorded.
+#[derive(Clone)]
 struct Last {
+	track: Arc<str>,
 	segment: u64,
 	discontinuity: u64,
 }
@@ -109,30 +112,33 @@ enum Admit {
 }
 
 impl Instance {
-	/// Admit the next segment. A replacement repeats the rows its predecessor recorded, since
-	/// its cursor starts at the oldest row retained, so those are discarded. The numbers name the
-	/// same span on every rendition and only increase within a broadcaster run, so a repeated
-	/// number with a newer discontinuity is a source reset, and a jump past the next number is a
-	/// gap nothing recorded.
+	/// Admit the next segment. A replacement reading its predecessor's record track may repeat
+	/// the rows its predecessor recorded, since its cursor can start at the oldest row retained,
+	/// so those are discarded. Those numbers name the same span in both and only increase within
+	/// a broadcaster run, so a repeated number with a newer discontinuity is a source reset, and
+	/// a jump past the next number is a gap nothing recorded. Another record track's numbers name
+	/// other content, so all of it is recorded.
 	fn admit(&mut self, segment: u64, discontinuity: u64) -> anyhow::Result<Admit> {
-		let Some(after) = self.after.filter(|_| !self.started) else {
+		let Some(after) = self.after.as_ref().filter(|_| !self.started) else {
 			self.started = true;
 			return Ok(Admit::Record { transition: false });
 		};
-		if segment <= after.segment {
+		if after.track == self.track {
+			if segment <= after.segment {
+				anyhow::ensure!(
+					discontinuity <= after.discontinuity,
+					"the source restarted its timeline at segment {segment}"
+				);
+				self.overlapped |= segment == after.segment;
+				return Ok(Admit::Discard);
+			}
 			anyhow::ensure!(
-				discontinuity <= after.discontinuity,
-				"the source restarted its timeline at segment {segment}"
+				self.overlapped || segment == after.segment + 1,
+				"missed segments {} to {}",
+				after.segment + 1,
+				segment - 1
 			);
-			self.overlapped |= segment == after.segment;
-			return Ok(Admit::Discard);
 		}
-		anyhow::ensure!(
-			self.overlapped || segment == after.segment + 1,
-			"missed segments {} to {}",
-			after.segment + 1,
-			segment - 1
-		);
 		self.started = true;
 		Ok(Admit::Record { transition: true })
 	}
@@ -183,7 +189,6 @@ impl Recording {
 		Ok(Self {
 			dir,
 			slots: BTreeMap::new(),
-			transitions: BTreeSet::new(),
 			master: None,
 		})
 	}
@@ -214,6 +219,7 @@ impl Recording {
 		let key = (rendition.kind, rendition.name.clone());
 		// Subscribe now: the cursor starts at the oldest row retained when it is created.
 		let cursor = rendition.segments();
+		let track = Arc::from(rendition.hls().track.as_str());
 		let slot = match self.slots.entry(key.clone()) {
 			btree_map::Entry::Occupied(entry) => entry.into_mut(),
 			btree_map::Entry::Vacant(entry) => {
@@ -238,7 +244,7 @@ impl Recording {
 			}
 		};
 		slot.rendition = Some(rendition);
-		slot.queued.push_back(cursor);
+		slot.queued.push_back((track, cursor));
 		Ok(match slot.recording {
 			Some(_) => None,
 			None => slot.begin(key),
@@ -275,16 +281,11 @@ impl Recording {
 				return Ok(Some(Read { key, cursor, init }));
 			}
 			Admit::Record { transition: false } => {}
-			Admit::Record { transition: true } => {
-				self.transitions.insert(segment.segment);
-				for slot in self.slots.values_mut() {
-					slot.playlist.passed(segment.segment);
-				}
-			}
+			Admit::Record { transition: true } => slot.playlist.transition(),
 		}
 
-		let slot = self.slots.get_mut(&key).expect("a cursor's slot outlives it");
 		let instance = slot.recording.as_mut().expect("a cursor in flight is recording");
+		let number = slot.playlist.next(segment.segment);
 		let mut map = None;
 		if let Some(media) = &segment.media {
 			if instance.init.is_none() {
@@ -294,18 +295,20 @@ impl Recording {
 				instance.init = Some(file.clone());
 				map = Some(file);
 			}
-			write(&slot.dir.join(format!("{}.m4s", segment.segment)), media).await?;
+			write(&slot.dir.join(format!("{number}.m4s")), media).await?;
 		}
 		let init = instance.init.is_none();
 		slot.last = Some(Last {
+			track: instance.track.clone(),
 			segment: segment.segment,
 			discontinuity: segment.discontinuity,
 		});
 		slot.playlist.push(Entry {
-			segment: segment.segment,
+			segment: number,
 			duration: segment.duration,
 			gap: segment.media.is_none(),
 			discontinuity: segment.discontinuity,
+			program_date_time: segment.program_date_time,
 			map,
 		});
 
@@ -316,7 +319,7 @@ impl Recording {
 	/// Write every playlist that changed, then the master playlist if its listing did.
 	async fn flush(&mut self) -> anyhow::Result<()> {
 		for slot in self.slots.values_mut() {
-			slot.playlist.flush(&slot.dir, &self.transitions).await?;
+			slot.playlist.flush(&slot.dir).await?;
 		}
 		let master = self.render_master();
 		if self.master.as_ref() != Some(&master) {
@@ -373,11 +376,12 @@ impl Slot {
 	/// Start recording the next queued instance of `key`, continuing after the last segment
 	/// recorded.
 	fn begin(&mut self, key: Key) -> Option<Read> {
-		let cursor = self.queued.pop_front()?;
+		let (track, cursor) = self.queued.pop_front()?;
 		self.recording = Some(Instance {
 			index: self.instances,
 			init: None,
-			after: self.last,
+			track,
+			after: self.last.clone(),
 			overlapped: false,
 			started: false,
 		});
@@ -400,6 +404,11 @@ struct Playlist {
 	target: u64,
 	/// What the file holds: its header and how many entries.
 	written: Option<(Header, usize)>,
+	/// Added to each entry's source sequence, so a switch to another instance is a discontinuity
+	/// past the last entry whatever that instance's own sequence starts at.
+	offset: u64,
+	/// The next entry comes from another instance.
+	switching: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -411,43 +420,43 @@ struct Header {
 }
 
 struct Entry {
+	/// The recording's number for the segment, which names its file.
 	segment: u64,
 	duration: Duration,
 	gap: bool,
-	/// The broadcast's discontinuity sequence for the segment.
+	/// The rendition's discontinuity sequence for the segment; the playlist adds its offset.
 	discontinuity: u64,
+	/// Written on the first entry and after each discontinuity.
+	program_date_time: Option<moq_clock::Wall>,
 	/// The init file the instance's first media segment maps.
 	map: Option<String>,
 }
 
-impl Entry {
-	/// The recording's discontinuity sequence: the broadcast's, plus every transition at or
-	/// before this segment.
-	fn discontinuity(&self, transitions: &BTreeSet<u64>) -> u64 {
-		self.discontinuity + transitions.range(..=self.segment).count() as u64
-	}
-}
-
 impl Playlist {
-	fn push(&mut self, entry: Entry) {
+	/// The number of the next entry: the source's for the first, then consecutive.
+	fn next(&self, source: u64) -> u64 {
+		self.entries.last().map_or(source, |last| last.segment + 1)
+	}
+
+	fn push(&mut self, mut entry: Entry) {
 		self.version = self.version.max(if entry.gap { VERSION_GAP } else { VERSION });
 		// Every EXTINF, rounded up to whole seconds, must fit the target duration.
 		self.target = self.target.max(entry.duration.as_secs_f64().ceil() as u64).max(1);
+		if std::mem::take(&mut self.switching)
+			&& let Some(last) = self.entries.last()
+		{
+			self.offset = (last.discontinuity + 1).saturating_sub(entry.discontinuity);
+		}
+		entry.discontinuity += self.offset;
 		self.entries.push(entry);
 	}
 
-	/// A transition starts at `segment`: rewrite the file if it already lists that segment.
-	fn passed(&mut self, segment: u64) {
-		if let Some((_, written)) = self.written
-			&& self.entries[..written]
-				.last()
-				.is_some_and(|entry| entry.segment >= segment)
-		{
-			self.written = None;
-		}
+	/// The next entry comes from a reconfigured instance, under a new init: a discontinuity.
+	fn transition(&mut self) {
+		self.switching = true;
 	}
 
-	async fn flush(&mut self, dir: &Path, transitions: &BTreeSet<u64>) -> anyhow::Result<()> {
+	async fn flush(&mut self, dir: &Path) -> anyhow::Result<()> {
 		let Some(first) = self.entries.first() else {
 			return Ok(());
 		};
@@ -455,13 +464,13 @@ impl Playlist {
 			version: self.version,
 			target: self.target,
 			sequence: first.segment,
-			discontinuity: first.discontinuity(transitions),
+			discontinuity: first.discontinuity,
 		};
 		let path = dir.join("media.m3u8");
 		match self.written {
 			Some((written, count)) if written == header => {
 				if count < self.entries.len() {
-					append(&path, &self.render(count, transitions)).await?;
+					append(&path, &self.render(count)).await?;
 				}
 			}
 			_ => {
@@ -472,7 +481,7 @@ impl Playlist {
 				if header.discontinuity > 0 {
 					out += &format!("#EXT-X-DISCONTINUITY-SEQUENCE:{}\n", header.discontinuity);
 				}
-				out += &self.render(0, transitions);
+				out += &self.render(0);
 				write(&path, out.as_bytes()).await?;
 			}
 		}
@@ -481,20 +490,25 @@ impl Playlist {
 	}
 
 	/// The lines of the entries from `from` on.
-	fn render(&self, from: usize, transitions: &BTreeSet<u64>) -> String {
+	fn render(&self, from: usize) -> String {
 		let mut out = String::new();
-		let mut previous = from
-			.checked_sub(1)
-			.map(|index| self.entries[index].discontinuity(transitions));
+		let mut previous = from.checked_sub(1).map(|index| self.entries[index].discontinuity);
 		for entry in &self.entries[from..] {
-			let discontinuity = entry.discontinuity(transitions);
+			let discontinuity = entry.discontinuity;
 			// A skipped discontinuity still counts, so playlists starting anywhere agree.
 			for _ in previous.unwrap_or(discontinuity)..discontinuity {
 				out += "#EXT-X-DISCONTINUITY\n";
 			}
+			let restart = previous.is_none_or(|previous| previous != discontinuity);
 			previous = Some(discontinuity);
 			if let Some(map) = &entry.map {
 				out += &format!("#EXT-X-MAP:URI=\"{map}\"\n");
+			}
+			if restart && let Some(pdt) = entry.program_date_time {
+				out += &format!(
+					"#EXT-X-PROGRAM-DATE-TIME:{}\n",
+					humantime::format_rfc3339_millis(pdt.into())
+				);
 			}
 			if entry.gap {
 				out += "#EXT-X-GAP\n";
@@ -576,10 +590,10 @@ mod tests {
 		fn new(names: &[&str]) -> Self {
 			let origin = moq_tokio::origin::spawn();
 			let broadcast = origin.create_broadcast("live").unwrap();
-			// A hinted timeline is advertised before any media, so every rendition is recorded
+			// Hinted records are advertised before any media, so every rendition is recorded
 			// from its first segment.
-			let hinted = moq_mux::timeline::Config::default().with_duration_hint(Duration::from_secs(2));
-			let config = moq_mux::catalog::Config::default().with_timeline(hinted);
+			let hinted = moq_mux::hls::Config::default().with_duration_hint(Duration::from_secs(2));
+			let config = moq_mux::catalog::Config::default().with_hls(hinted);
 			let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config).unwrap();
 			let reserved = catalog.reserve();
 			let video = names
@@ -684,6 +698,22 @@ mod tests {
 		.unwrap_or_else(|_| panic!("{name} never recorded a segment: {:?}", walk(dir)));
 	}
 
+	/// The segment numbers a media playlist lists as `EXT-X-GAP`.
+	fn gaps(playlist: &str) -> Vec<u64> {
+		let mut gap = false;
+		let mut gaps = Vec::new();
+		for line in playlist.lines() {
+			if line == "#EXT-X-GAP" {
+				gap = true;
+			} else if let Some(segment) = line.strip_suffix(".m4s")
+				&& std::mem::take(&mut gap)
+			{
+				gaps.push(segment.parse().unwrap());
+			}
+		}
+		gaps
+	}
+
 	fn consecutive(segments: &[u64], first: u64) -> bool {
 		segments.iter().copied().eq(first..first + segments.len() as u64)
 	}
@@ -732,12 +762,22 @@ mod tests {
 			assert_eq!(duration(&playlist), Duration::from_secs(6), "{playlist}");
 			assert!(playlist.contains("\n#EXT-X-MEDIA-SEQUENCE:0\n"), "{playlist}");
 			assert!(
-				playlist.contains("#EXT-X-MAP:URI=\"init.0.mp4\"\n#EXTINF:"),
+				playlist.contains("#EXT-X-MAP:URI=\"init.0.mp4\"\n#EXT-X-PROGRAM-DATE-TIME:"),
 				"{playlist}"
 			);
 			assert!(playlist.ends_with(".m4s\n#EXT-X-ENDLIST\n"), "{playlist}");
 			assert!(!playlist.contains("DISCONTINUITY"), "{playlist}");
-			let files = segments.iter().map(|segment| format!("{segment}.m4s"));
+			// The finish's stop is listed as a gap, with no file.
+			let gaps = gaps(&playlist);
+			assert_eq!(
+				gaps,
+				segments.last().copied().into_iter().collect::<Vec<_>>(),
+				"{playlist}"
+			);
+			let files = segments
+				.iter()
+				.filter(|segment| !gaps.contains(segment))
+				.map(|segment| format!("{segment}.m4s"));
 			for file in files.chain(["init.0.mp4".to_string()]) {
 				assert!(
 					!std::fs::read(rendition.join(&file)).unwrap().is_empty(),
@@ -750,8 +790,8 @@ mod tests {
 	}
 
 	/// A reconfigured rendition keeps one playlist: the replacement continues after the last
-	/// segment its predecessor recorded, under its own init, and every playlist marks the switch
-	/// at the same segment.
+	/// segment its predecessor recorded, under its own init, behind a discontinuity only its own
+	/// playlist marks.
 	#[tokio::test]
 	async fn a_reconfigured_rendition_continues_its_playlist() {
 		let mut publisher = Publisher::new(&["video0", "video1"]);
@@ -759,7 +799,7 @@ mod tests {
 		let dir = tempfile::tempdir().unwrap();
 		let recording = spawn(dir.path(), &broadcaster);
 
-		// A sibling resolves a segment once its own timeline passes the segment's end.
+		// A sibling resolves a segment once its own records pass the segment's end.
 		for n in 0..5 {
 			publisher.gop(n);
 		}
@@ -789,11 +829,7 @@ mod tests {
 			switched.starts_with("#EXT-X-MAP:URI=\"init.1.mp4\"\n"),
 			"{reconfigured}"
 		);
-		let marked = sibling
-			.split("#EXT-X-DISCONTINUITY\n")
-			.nth(1)
-			.expect("the sibling marks it");
-		assert_eq!(listed(marked)[0], listed(switched)[0], "{sibling}");
+		assert!(!sibling.contains("#EXT-X-DISCONTINUITY"), "{sibling}");
 		assert!(dir.path().join("video/video1/init.1.mp4").exists());
 		let master = read(dir.path().join("master.m3u8"));
 		assert!(master.contains("RESOLUTION=640x240"), "{master}");
@@ -807,7 +843,7 @@ mod tests {
 		let broadcaster = publisher.broadcaster();
 		let dir = tempfile::tempdir().unwrap();
 		let recording = spawn(dir.path(), &broadcaster);
-		// A sibling resolves a segment once its own timeline passes the segment's end.
+		// A sibling resolves a segment once its own records pass the segment's end.
 		for n in 0..5 {
 			publisher.gop(n);
 		}
@@ -822,6 +858,7 @@ mod tests {
 			})
 			.unwrap();
 		publisher.gop(5);
+		publisher.gop(6);
 		moq_clock::timeout(TIMEOUT, async {
 			while removed.strong_count() > 0 {
 				tokio::task::yield_now().await;
@@ -830,7 +867,7 @@ mod tests {
 		.await
 		.expect("the drained rendition was released");
 
-		publisher.gop(6);
+		publisher.gop(7);
 		publisher.finish();
 		moq_clock::timeout(TIMEOUT, recording)
 			.await
@@ -904,7 +941,12 @@ mod tests {
 		Instance {
 			index: 1,
 			init: None,
-			after: after.map(|(segment, discontinuity)| Last { segment, discontinuity }),
+			track: "video.hls".into(),
+			after: after.map(|(segment, discontinuity)| Last {
+				track: "video.hls".into(),
+				segment,
+				discontinuity,
+			}),
 			overlapped: false,
 			started: false,
 		}
@@ -927,6 +969,25 @@ mod tests {
 		assert_eq!(first.admit(40, 3).unwrap(), Admit::Record { transition: false });
 	}
 
+	/// Another record track numbers other content, so its numbers repeat nothing recorded.
+	#[test]
+	fn a_replacement_on_another_record_track_records_everything() {
+		let mut replacement = Instance {
+			track: "video-640.hls".into(),
+			..instance(Some((5, 0)))
+		};
+		assert_eq!(replacement.admit(0, 0).unwrap(), Admit::Record { transition: true });
+		assert_eq!(replacement.admit(1, 0).unwrap(), Admit::Record { transition: false });
+
+		// The recording numbers its segments on from the predecessor's.
+		let mut playlist = Playlist::default();
+		for source in 3..=5 {
+			let number = playlist.next(source);
+			playlist.push(entry(number, 0));
+		}
+		assert_eq!(playlist.next(0), 6);
+	}
+
 	#[test]
 	fn a_replacement_refuses_a_gap_or_a_reset() {
 		// Rows evicted before the replacement subscribed are missing from both cursors.
@@ -946,33 +1007,78 @@ mod tests {
 			duration: Duration::from_secs(2),
 			gap: false,
 			discontinuity,
+			program_date_time: None,
 			map: (segment == 0).then(|| "init.0.mp4".to_string()),
 		}
 	}
 
-	/// A switch at a segment a playlist already wrote rewrites it, so every playlist marks the
-	/// switch at the same place; otherwise it only appends.
+	/// The wall clock is written on the first entry and after each discontinuity, where the
+	/// running sum of durations no longer gives it.
+	#[test]
+	fn a_discontinuity_restates_the_program_date_time() {
+		let at = |secs| Some(moq_clock::Wall::UNIX_EPOCH + Duration::from_secs(secs));
+		let mut playlist = Playlist::default();
+		for (segment, discontinuity, secs) in [(0, 0, 0), (1, 0, 2), (2, 1, 10), (3, 1, 12)] {
+			playlist.push(Entry {
+				program_date_time: at(secs),
+				..entry(segment, discontinuity)
+			});
+		}
+		let text = playlist.render(0);
+		assert!(
+			text.starts_with("#EXT-X-MAP:URI=\"init.0.mp4\"\n#EXT-X-PROGRAM-DATE-TIME:1970-01-01T00:00:00.000Z\n"),
+			"{text}"
+		);
+		assert!(
+			text.contains("1.m4s\n#EXT-X-DISCONTINUITY\n#EXT-X-PROGRAM-DATE-TIME:1970-01-01T00:00:10.000Z\n#EXTINF:"),
+			"{text}"
+		);
+		assert_eq!(text.matches("PROGRAM-DATE-TIME").count(), 2, "{text}");
+		// An append continuing the same run restates nothing.
+		assert!(!playlist.render(3).contains("PROGRAM-DATE-TIME"));
+	}
+
+	/// A switch follows the last entry with a discontinuity even when the new instance's own
+	/// sequence starts below the recording's.
+	#[test]
+	fn a_switch_to_a_lower_sequence_is_a_discontinuity() {
+		let mut playlist = Playlist::default();
+		playlist.push(entry(0, 0));
+		playlist.push(entry(1, 2));
+		playlist.transition();
+		playlist.push(entry(2, 0));
+		playlist.push(entry(3, 0));
+		let sequences: Vec<_> = playlist.entries.iter().map(|entry| entry.discontinuity).collect();
+		assert_eq!(sequences, [0, 2, 3, 3]);
+		let text = playlist.render(0);
+		assert!(
+			text.contains("1.m4s\n#EXT-X-DISCONTINUITY\n#EXTINF:2.00000,\n2.m4s\n#EXTINF:"),
+			"{text}"
+		);
+	}
+
+	/// A switch to a reconfigured instance and the rendition's own break are each a
+	/// discontinuity, appended; only a raised header rewrites the playlist.
 	#[tokio::test]
-	async fn a_late_transition_rewrites_the_playlist() {
+	async fn a_transition_appends_a_discontinuity() {
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("media.m3u8");
-		let mut transitions = BTreeSet::new();
 		let mut playlist = Playlist::default();
 		for segment in 0..3 {
 			playlist.push(entry(segment, 0));
-			playlist.flush(dir.path(), &transitions).await.unwrap();
+			playlist.flush(dir.path()).await.unwrap();
 		}
 		assert_eq!(listed(&read(path.clone())), [0, 1, 2]);
 
-		transitions.insert(2);
-		playlist.passed(2);
-		playlist.push(entry(3, 1));
-		playlist.flush(dir.path(), &transitions).await.unwrap();
+		playlist.transition();
+		playlist.push(entry(3, 0));
+		playlist.push(entry(4, 1));
+		playlist.flush(dir.path()).await.unwrap();
 		let text = read(path.clone());
-		assert_eq!(listed(&text), [0, 1, 2, 3]);
-		// The switch at 2, then the source's own discontinuity at 3.
+		assert_eq!(listed(&text), [0, 1, 2, 3, 4]);
+		// The switch at 3, then the rendition's own discontinuity at 4.
 		assert!(
-			text.contains("1.m4s\n#EXT-X-DISCONTINUITY\n#EXTINF:2.00000,\n2.m4s\n#EXT-X-DISCONTINUITY\n"),
+			text.contains("2.m4s\n#EXT-X-DISCONTINUITY\n#EXTINF:2.00000,\n3.m4s\n#EXT-X-DISCONTINUITY\n"),
 			"{text}"
 		);
 
@@ -980,15 +1086,15 @@ mod tests {
 		playlist.push(Entry {
 			duration: Duration::from_millis(4_500),
 			gap: true,
-			..entry(4, 1)
+			..entry(5, 1)
 		});
-		playlist.flush(dir.path(), &transitions).await.unwrap();
+		playlist.flush(dir.path()).await.unwrap();
 		let text = read(path);
 		assert!(
 			text.starts_with("#EXTM3U\n#EXT-X-VERSION:8\n#EXT-X-TARGETDURATION:5\n"),
 			"{text}"
 		);
-		assert!(text.ends_with("#EXT-X-GAP\n#EXTINF:4.50000,\n4.m4s\n"), "{text}");
+		assert!(text.ends_with("#EXT-X-GAP\n#EXTINF:4.50000,\n5.m4s\n"), "{text}");
 		assert_eq!(text.matches("#EXT-X-DISCONTINUITY\n").count(), 2, "{text}");
 	}
 }

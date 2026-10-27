@@ -295,7 +295,7 @@ export interface SessionOptions extends WebTransportOptions {
 	 *    {@link SessionOptions.versions} and emits the prefixed wire form
 	 *    `{version}.{alpn}` (e.g. `"qmux-01.moq-lite-04"`).
 	 *  - An explicit pair already prefixed with a QMux version
-	 *    (e.g. `"qmux-00.moq-transport-17"`). Advertised as-is.
+	 *    (e.g. `"qmux-00.moq-transport-18"`). Advertised as-is.
 	 *
 	 * Bare entries that have no matching `versions` entry throw at
 	 * construction time.
@@ -473,8 +473,8 @@ export function resolveSubprotocols(
  * @example
  * ```ts
  * const protocol = selectSubprotocol(req.headers.get("sec-websocket-protocol"), {
- *   protocols: ["moq-transport-17"],
- *   versions: { "moq-transport-17": null },
+ *   protocols: ["moq-transport-18"],
+ *   versions: { "moq-transport-18": null },
  * });
  * if (!protocol) return new Response("no supported protocol", { status: 400 });
  * const { socket, response } = Deno.upgradeWebSocket(req, { protocol });
@@ -639,7 +639,7 @@ export default class Session implements WebTransport {
 	 * application-level ALPNs in `options.protocols` plus a `versions`
 	 * map saying which QMux wire-format version each bare ALPN rides on. The
 	 * wire form `{qmux-VV}.{alpn}` is built automatically; entries already in
-	 * pair form (e.g. `"qmux-00.moq-transport-17"`) pass through unchanged.
+	 * pair form (e.g. `"qmux-00.moq-transport-18"`) pass through unchanged.
 	 *
 	 * Once the handshake completes, the QMux wire-format version is derived
 	 * from the negotiated `Sec-WebSocket-Protocol`. `.protocol` exposes the

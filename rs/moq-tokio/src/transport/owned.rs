@@ -20,17 +20,11 @@ impl<E: wt::Error> moq::Error for Error<E> {
 	}
 }
 
-struct Stats<S> {
+struct Metrics<S> {
 	inner: S,
 	streams_evicted: Option<u64>,
 }
-impl<S: wt::Stats> moq::Stats for Stats<S> {
-	fn bytes_sent(&self) -> Option<u64> {
-		self.inner.bytes_sent()
-	}
-	fn bytes_received(&self) -> Option<u64> {
-		self.inner.bytes_received()
-	}
+impl<S: wt::Stats> moq::Metrics for Metrics<S> {
 	fn bytes_lost(&self) -> Option<u64> {
 		self.inner.bytes_lost()
 	}
@@ -139,14 +133,24 @@ impl<S: super::Grouped<SendStream: 'static, RecvStream: 'static>> poll::Session 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
 		backend::Session::poll_closed(self, cx).map(Error)
 	}
-	fn stats(&self) -> impl moq::Stats {
-		Stats {
-			inner: backend::Session::stats(self),
+	fn metrics(&self) -> impl moq::Metrics {
+		let inner = backend::Session::stats(self);
+		// Reading the metrics refreshes the polled wire, which moq-net reads right after.
+		if super::Grouped::wire(&self.session).is_none() {
+			if let Some(sent) = wt::Stats::bytes_sent(&inner) {
+				self.polled_wire.set_sent_bytes(sent);
+			}
+			if let Some(received) = wt::Stats::bytes_received(&inner) {
+				self.polled_wire.set_received_bytes(received);
+			}
+		}
+		Metrics {
+			inner,
 			streams_evicted: super::Grouped::streams_evicted(&self.session),
 		}
 	}
 	fn wire(&self) -> Option<moq::Wire> {
-		super::Grouped::wire(&self.session)
+		super::Grouped::wire(&self.session).or_else(|| Some(self.polled_wire.clone()))
 	}
 	fn probe(&self) -> Option<moq::Probe> {
 		super::Grouped::probe(&self.session)

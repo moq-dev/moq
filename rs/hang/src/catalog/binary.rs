@@ -71,7 +71,7 @@ pub struct BinaryConfig {
 	/// broadcast that served this catalog (e.g. `./source`). If unset, the track lives in the same
 	/// broadcast as the catalog.
 	#[serde(default)]
-	pub broadcast: Option<moq_net::path::RelativeOwned>,
+	pub broadcast: Option<moq_net::path::Relative>,
 
 	/// The track's name in its broadcast, when it differs from this entry's ID: its key in the
 	/// catalog. Absent means the ID is the track name, as in every catalog before this field.

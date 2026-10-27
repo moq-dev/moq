@@ -75,7 +75,8 @@ async fn run(target: &ImportTarget, client: &moq_rtsp::Client, published: &mut b
 		.context("failed to create broadcast")?;
 	let config = moq_mux::catalog::Config::default()
 		.with_max_age(target.max_age)
-		.with_bandwidth(target.bandwidth.clone());
+		.with_bandwidth(target.bandwidth.clone())
+		.with_hls(target.hls.then(moq_mux::hls::Config::default));
 	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config)?;
 
 	// A relay asks for a broadcast's tracks the moment it is announced, so wait for the

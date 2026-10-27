@@ -388,7 +388,7 @@ interface TransportErrorOptions {
 export function toStreamCode(err: unknown, options?: TransportErrorOptions): StreamCode {
 	const code = localStreamCode(err);
 	if (options?.version === undefined) return code;
-	return sharedStreamCode(code, options.version) ? code : StreamCode.Internal;
+	return sharedStreamCode(code) ? code : StreamCode.Internal;
 }
 
 /** The moq-lite code for a local failure, before any draft has a say. */
@@ -453,9 +453,8 @@ export function unauthorized(broadcast: string): Stream {
  * the same `instanceof` as one raised here.
  *
  * On an IETF stream a code keeps its value unless moq-lite claims that number for something
- * the draft does not: `0x4` is GOING_AWAY here but UNKNOWN_OBJECT_STATUS on draft-16 and 17,
- * and reading one back as the other would retire a session that is not going anywhere. Those
- * read as {@link StreamCode | StreamCode.Internal} with the wire value kept in the message, since
+ * the draft does not, such as its own 48-63 range. Those read as
+ * {@link StreamCode | StreamCode.Internal} with the wire value kept in the message, since
  * {@link StreamCode} is one numeric space and cannot hold a foreign code without lying about
  * it. A code moq-lite names nothing for survives intact: nothing can misread it.
  *
@@ -464,7 +463,7 @@ export function unauthorized(broadcast: string): Stream {
 export function fromTransport(err: unknown, options?: TransportErrorOptions): Error {
 	const code = streamCode(err);
 	if (code === undefined) return error(err);
-	if (options?.version !== undefined && !sharedStreamCode(code, options.version) && claimedLocally(code)) {
+	if (options?.version !== undefined && !sharedStreamCode(code) && claimedLocally(code)) {
 		return new Stream(StreamCode.Internal, { cause: err, message: `remote error: ${code}` });
 	}
 	if (code === StreamCode.TooFarBehind) return new TooFarBehind({ cause: err });

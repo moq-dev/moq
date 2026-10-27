@@ -11,6 +11,7 @@ import { ZodMiniDiscriminatedUnion } from "@zod/mini";
 import { ZodMiniEnum } from "@zod/mini";
 import { ZodMiniInt } from "@zod/mini";
 import { ZodMiniLiteral } from "@zod/mini";
+import { ZodMiniNever } from "@zod/mini";
 import { ZodMiniNumber } from "@zod/mini";
 import { ZodMiniObject } from "@zod/mini";
 import { ZodMiniOptional } from "@zod/mini";
@@ -135,6 +136,7 @@ export const Key: {
 		kid?: string;
 		kty: "RSA";
 		n: string;
+		oth?: undefined;
 		p?: string;
 		q?: string;
 		qi?: string;
@@ -212,6 +214,7 @@ export const Key: {
 		kid?: string;
 		kty: "RSA";
 		n: string;
+		oth?: undefined;
 		p?: string;
 		q?: string;
 		qi?: string;
@@ -289,6 +292,7 @@ export const Key: {
 		kid?: string;
 		kty: "RSA";
 		n: string;
+		oth?: undefined;
 		p?: string;
 		q?: string;
 		qi?: string;
@@ -366,6 +370,7 @@ export const Key: {
 		kid?: string;
 		kty: "RSA";
 		n: string;
+		oth?: undefined;
 		p?: string;
 		q?: string;
 		qi?: string;
@@ -540,6 +545,7 @@ export const KeySchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 	kid: ZodMiniOptional<ZodMiniString<string>>;
 	kty: ZodMiniLiteral<"RSA">;
 	n: ZodMiniString<string>;
+	oth: ZodMiniOptional<ZodMiniNever>;
 	p: ZodMiniOptional<ZodMiniString<string>>;
 	q: ZodMiniOptional<ZodMiniString<string>>;
 	qi: ZodMiniOptional<ZodMiniString<string>>;
@@ -695,6 +701,7 @@ export const KeySet: {
 			kid?: string;
 			kty: "RSA";
 			n: string;
+			oth?: undefined;
 			p?: string;
 			q?: string;
 			qi?: string;
@@ -772,6 +779,7 @@ export const KeySet: {
 		kid?: string;
 		kty: "RSA";
 		n: string;
+		oth?: undefined;
 		p?: string;
 		q?: string;
 		qi?: string;
@@ -850,6 +858,7 @@ export const KeySet: {
 			kid?: string;
 			kty: "RSA";
 			n: string;
+			oth?: undefined;
 			p?: string;
 			q?: string;
 			qi?: string;
@@ -929,6 +938,7 @@ export const KeySet: {
 			kid?: string;
 			kty: "RSA";
 			n: string;
+			oth?: undefined;
 			p?: string;
 			q?: string;
 			qi?: string;
@@ -1008,6 +1018,7 @@ export const KeySet: {
 			kid?: string;
 			kty: "RSA";
 			n: string;
+			oth?: undefined;
 			p?: string;
 			q?: string;
 			qi?: string;
@@ -1099,6 +1110,7 @@ export const KeySet: {
 			kid?: string;
 			kty: "RSA";
 			n: string;
+			oth?: undefined;
 			p?: string;
 			q?: string;
 			qi?: string;
@@ -1242,6 +1254,7 @@ export const KeySetSchema: ZodMiniObject<{
 		kid: ZodMiniOptional<ZodMiniString<string>>;
 		kty: ZodMiniLiteral<"RSA">;
 		n: ZodMiniString<string>;
+		oth: ZodMiniOptional<ZodMiniNever>;
 		p: ZodMiniOptional<ZodMiniString<string>>;
 		q: ZodMiniOptional<ZodMiniString<string>>;
 		qi: ZodMiniOptional<ZodMiniString<string>>;

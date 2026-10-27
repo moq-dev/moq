@@ -19,7 +19,7 @@ a producer would need per-track memory of its last number.
   Frames inside a group stay in decode order and their PTS may go backwards
   (B-frames).
 - **Starts strictly increase.** An equal start is refused loudly like a
-  rewind; `Neighbors::admit` (`model/track.rs:491`) allows ties today.
+  rewind; `Neighbors::admit` (`model/track.rs`, about line 502) allows ties today.
 - **Three ways a group ends**: `finish(end)` with an exclusive end timestamp
   (the group is whole), `close()` (incomplete, but every frame written
   arrives), and `abort(err)` (reset). A relay closes an expired or partial
@@ -51,6 +51,13 @@ a producer would need per-track memory of its last number.
   [moq-dev/moq#6780](https://github.com/moq-dev/moq/pull/6780); the cut
   removes its sequence half, leaving a re-created track to keep its PTS
   moving forward.
+- **What it waits on** (decided 2026-10-27, maintainer): only the
+  subscribe-ranges children that put sequence ranges into the model and the
+  wire, [Fetch as a range](/quest/m1/subscribe-ranges/fetch-range.md),
+  [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md), and
+  [Delete the old start bookkeeping](/quest/m1/subscribe-ranges/start-bookkeeping.md),
+  not the whole epic. [Drop set](/quest/m1/drop-set.md) lands first too: its
+  runs keyed by group sequence convert mechanically to starts.
 - **Old relays** (decided 2026-10-26, maintainer): a released relay fills a
   hole over lite-05/06 with one FETCH per integer ID, so sparse IDs cost it
   one FETCH per tick in the hole. Accepted: "This was a lingering problem.
@@ -94,12 +101,13 @@ moq-transport-18, direct and through a relay, against a contiguous baseline
   arithmetic, delivering `[6000]` and then parking instead of
   `[4000, 6000]`.
 
-Update `doc/concept`, the lite draft's legacy mapping, `MIGRATE.md`, and the
+Update `doc/concept`, the lite draft's legacy mapping, and the
 Rust half of every consumer the API change breaks to compile;
 [consumers](/quest/m1/time-addressing/consumers.md) and
 [bindings](/quest/m1/time-addressing/bindings.md) own the behavior changes.
 Test the legacy mapping both ways on every wire, with the
 [resume model](/quest/m1/resume-model-test.md) as the oracle for resume.
+The PR's Impact section says how to migrate.
 
 Public API: breaking. `group::Info`, `create_group`, `append_group`,
 `Position`, `Range` ends, `fetch_group`, `Subscriber::floor`, datagrams, and
@@ -108,8 +116,11 @@ Wire: no format change; legacy and lite-07-wip group IDs become start ticks.
 
 ## Required
 
-- [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - the range ends and drops this rework moves onto times
+- [Fetch as a range](/quest/m1/subscribe-ranges/fetch-range.md) - the one-range reads this rework moves onto times
+- [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the range ends and drops this rework moves onto times
+- [Delete the old start bookkeeping](/quest/m1/subscribe-ranges/start-bookkeeping.md) - the lite cursor state lives in the model before the cut rekeys it
 - [Lite-05/06 timestamps pass through](/quest/m1/lite-timestamps-through.md) - lite-05/06 tracks stay timed, so their ingest keeps real starts
+- [Drop set](/quest/m1/drop-set.md) - its dropped and expired runs convert mechanically from sequences to starts
 
 ## Related
 

@@ -48,10 +48,9 @@ async function measure(readers: number, swaps: number | undefined, fork = false)
 		const track = broadcast.createTrack("seq");
 		// Every route's copy holds the same groups under the same sequences.
 		const write = () => {
-			const group = new GroupProducer(sequence);
-			track.writeGroup(group);
+			const group = track.createGroup(sequence);
 			group.writeFrame({ payload });
-			group.close();
+			group.finish();
 		};
 		sources.push({ broadcast, write });
 		return broadcast;
@@ -171,7 +170,7 @@ async function measureFlaps(readers: number, flaps: number): Promise<number> {
 	for (const group of held) group.close();
 	for (const subscriber of subscribers) subscriber.close();
 	front.consumer.close();
-	for (const group of groups) group.close();
+	for (const group of groups) group.finish();
 	for (const handle of handles) handle.close();
 	for (const source of sources) source.close();
 	await flush();
@@ -215,7 +214,7 @@ async function measureReplay(readers: number, replayed: number): Promise<number>
 			}),
 		});
 	}
-	producer.close(new Error("route failed"));
+	producer.abort(new Error("route failed"));
 	const start = performance.now();
 	await Promise.all(consumers.map((consumer) => consumer.readable()));
 	const elapsed = performance.now() - start;
@@ -225,7 +224,7 @@ async function measureReplay(readers: number, replayed: number): Promise<number>
 		checksum += frame.payload.byteLength;
 		consumer.close();
 	}
-	replacement.close();
+	replacement.finish();
 	await flush();
 	return (elapsed * 1000) / readers;
 }

@@ -634,7 +634,7 @@ mod tests {
 		let closed = tokio::time::timeout(Duration::from_secs(1), demand.closed())
 			.await
 			.expect("producer closed");
-		assert!(matches!(closed, moq_net::Error::Dropped));
+		assert!(closed.is_ok(), "{closed:?}");
 	}
 
 	/// A finished publication may live as long as its broadcast; the codec and input

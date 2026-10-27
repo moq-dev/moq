@@ -5,7 +5,7 @@ import { hasRangeFilters, isDraft22 } from "./filter.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { Parameters } from "./parameters.ts";
-import { type IetfVersion, Version } from "./version.ts";
+import type { IetfVersion } from "./version.ts";
 
 /**
  * The header that begins a fetch stream (draft-22 section 11.4), naming the request it
@@ -79,14 +79,6 @@ export class Fetch {
 
 	static async #decode(r: Reader, version: IetfVersion): Promise<Fetch> {
 		const requestId = await r.u62();
-		if (version === Version.DRAFT_17) {
-			await r.u62(); // required_request_id_delta
-		}
-
-		if (version === Version.DRAFT_14) {
-			await r.u8(); // subscriber_priority
-			await r.u8(); // group_order
-		}
 
 		let trackNamespace: Path.Valid | undefined;
 		if (isDraft22(version)) {
@@ -123,39 +115,5 @@ export class Fetch {
 		}
 
 		return new Fetch({ requestId, rangeFilters: params.rangeFilters, trackNamespace, epoch });
-	}
-}
-
-export class FetchError {
-	static id = 0x19;
-
-	requestId: bigint;
-	errorCode: number;
-	reasonPhrase: string;
-
-	constructor({
-		requestId,
-		errorCode,
-		reasonPhrase,
-	}: { requestId: bigint; errorCode: number; reasonPhrase: string }) {
-		this.requestId = requestId;
-		this.errorCode = errorCode;
-		this.reasonPhrase = reasonPhrase;
-	}
-
-	async #encode(_w: Writer): Promise<void> {
-		throw new Error("FETCH_ERROR messages are not supported");
-	}
-
-	async encode(w: Writer, _version: IetfVersion): Promise<void> {
-		return Message.encode(w, this.#encode.bind(this));
-	}
-
-	static async decode(r: Reader, _version: IetfVersion): Promise<FetchError> {
-		return Message.decode(r, FetchError.#decode);
-	}
-
-	static async #decode(_r: Reader): Promise<FetchError> {
-		throw new Error("FETCH_ERROR messages are not supported");
 	}
 }

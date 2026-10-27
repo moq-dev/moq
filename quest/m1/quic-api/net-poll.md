@@ -47,7 +47,7 @@ that keeps per-handle progress across polls today moves it into shared state
 or into the handle it returns; list them in the PR.
 
 Public API: breaking for every `transport::poll` implementor and for callers
-that relied on `Session: Clone`. Add a moq-net MIGRATE entry with a
+that relied on `Session: Clone`. The PR's Impact migration note includes a
 before/after impl. Wire: none.
 
 ## Related

@@ -263,7 +263,7 @@ function subscribe(wire: BroadcastWire, name: string, subscription: track.Subscr
 		return wire.subscribe(name, subscription);
 	} catch (err) {
 		const failed = new track.Producer(name);
-		failed.close(err instanceof Error ? err : new Error(String(err)));
+		failed.abort(err instanceof Error ? err : new Error(String(err)));
 		return failed.subscribe(subscription);
 	}
 }
@@ -313,7 +313,7 @@ class Reader implements ResumeSource {
 	/** The logical track ended cleanly: the reader drains what its copies hold and follows no route. */
 	#ended = false;
 	/** The serving copy's largest when the track ended, kept once that copy goes. */
-	#last?: { largest?: track.Position; ended: true };
+	#last?: { largest?: track.Position; object?: track.Position; ended: true };
 	/** The first end any copy declared: the logical track's, whichever copy serves. */
 	#declared?: track.Position;
 	/** The subscriber's record of groups handed out, as the last read passed it. */
@@ -549,6 +549,15 @@ class Reader implements ResumeSource {
 			if (copy !== except && hooks.holdsGroup(copy.sub, sequence)) holding.push(copy);
 		}
 		return holding;
+	}
+
+	cachedGroup(sequence: number): GroupConsumer | undefined {
+		for (let index = this.#copies.length - 1; index >= 0; index--) {
+			const copy = this.#copies[index];
+			const group = hooks.cachedGroup(copy.sub, sequence);
+			if (group) return this.#handOut(copy, group);
+		}
+		return undefined;
 	}
 
 	/**
@@ -788,7 +797,11 @@ class Reader implements ResumeSource {
 		if (serving) this.#boundAtEnd(serving);
 		if (this.#letGo(this.#delivered) || this.#closed) return false;
 		this.#ended = true;
-		this.#last = { largest: serving && hooks.peekLargest(serving.sub).largest, ended: true };
+		this.#last = {
+			largest: serving && hooks.peekLargest(serving.sub).largest,
+			object: serving && hooks.objectLargest(serving.sub),
+			ended: true,
+		};
 		this.#shell.close();
 		this.route.leave(this);
 		this.#letGo(this.#delivered);
@@ -1006,7 +1019,7 @@ class Reader implements ResumeSource {
 	// refuses an end below what it received.
 	#learnEnd(): track.Position | undefined {
 		for (const copy of this.#copies) {
-			const end = copy.sub.end();
+			const end = hooks.subscriberEnd(copy.sub);
 			if (end) this.#declare(end);
 		}
 		const declared = this.#declared;
@@ -1096,6 +1109,12 @@ class Reader implements ResumeSource {
 		return serving && hooks.bufferedLargest(serving.sub);
 	}
 
+	objectLargest(): track.Position | undefined {
+		this.sync();
+		const serving = this.#serving();
+		return serving ? hooks.objectLargest(serving.sub) : this.#last?.object;
+	}
+
 	peekLargest(): { largest?: track.Position; ended: boolean } {
 		this.sync();
 		const serving = this.#serving();
@@ -1158,7 +1177,7 @@ class Reader implements ResumeSource {
 		for (const dispose of this.#dispose) dispose();
 		this.#dispose = [];
 		// A recovery in flight settles with the group rather than adopting a replacement.
-		for (const group of this.#open) group.close(abort);
+		for (const group of this.#open) hooks.releaseGroupReader(group, abort);
 		this.#open.clear();
 		for (const copy of this.#copies) this.#drop(copy, abort);
 		this.#copies = [];

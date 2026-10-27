@@ -3,7 +3,7 @@
 	"version": "0.0.0",
 	"private": true,
 	"type": "module",
-	"//": "The documented packages are the @moq/* dependencies, so changing one checks the site. TypeDoc itself is a root dependency, shared with the API reports.",
+	"//": "The documented packages are the @moq/* dependencies, so changing one checks the site. TypeDoc does not support TypeScript 7 yet (TypeStrong/typedoc#3098), so this workspace pins the 6.0 it resolves, for the reference and every package's API report.",
 	"devDependencies": {
 		"@moq/auth": "workspace:*",
 		"@moq/boy": "workspace:*",
@@ -23,8 +23,10 @@
 		"@moq/ui": "workspace:*",
 		"@moq/video": "workspace:*",
 		"@moq/watch": "workspace:*",
+		"typedoc": "^0.28.20",
 		"typedoc-plugin-markdown": "^4.14.1",
 		"typedoc-plugin-mdn-links": "^5.1.1",
-		"typedoc-vitepress-theme": "^1.1.4"
+		"typedoc-vitepress-theme": "^1.1.4",
+		"typescript": "6.0.3"
 	}
 }

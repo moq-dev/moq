@@ -25,8 +25,8 @@ enum Sent {
 
 const PACKET: usize = 1200;
 
-/// How far two equally entitled groups may drift apart: each round robin may
-/// overdraw by a frame, at both the group and the domain tier.
+/// How far two equally entitled groups may drift apart: a drain can stop between their
+/// turns, one quantum (a packet) apart, and a turn may overdraw by up to a frame.
 const SLACK: u64 = 2 * PACKET as u64;
 
 /// A PING frame's one byte, standing in for the control frames ahead of the streams.

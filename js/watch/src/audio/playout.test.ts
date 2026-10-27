@@ -1,7 +1,7 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import { Micro, Milli } from "@moq/clock";
 import * as Container from "@moq/hang/container";
-import { Group, Time, Track, Varint } from "@moq/net";
+import { Time, Track, Varint } from "@moq/net";
 import { AUTO_MAX_DELAY, target } from "./latency";
 import { AudioRingBuffer } from "./ring-buffer";
 
@@ -98,10 +98,9 @@ async function measure(t: Arrival[], budget: (target: Milli) => Milli): Promise<
 			clock = t[next].arrival;
 			for (; next < t.length && t[next].arrival === clock; next++) {
 				const media = Micro.fromMilli(t[next].media as Milli);
-				const group = new Group.Producer(next);
+				const group = track.createGroup(next);
 				group.writeFrame({ payload: encode(media), timestamp: Time.Timestamp.fromMicros(media) });
-				group.close();
-				track.writeGroup(group);
+				group.finish();
 			}
 
 			// A macrotask boundary, so the group readers have observed everything written above.
@@ -112,6 +111,7 @@ async function measure(t: Arrival[], budget: (target: Milli) => Milli): Promise<
 			subscriber.update({ maxDelay: budget(current) });
 		}
 	} finally {
+		track.finish();
 		track.close();
 		consumer.close();
 		await reader;

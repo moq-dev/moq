@@ -4,6 +4,19 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
+
+Publishing, serving, or requesting a broadcast at a path with a leading, trailing, or doubled `/` throws instead of collapsing it. Pass the canonical path, such as `room/cam`.
+
+### Request handlers are `requests()` ([#6752](https://github.com/moq-dev/moq/pull/6752))
+
+Rename `dynamic_()` on `OriginProducer`, `BroadcastProducer`, `TrackProducer`, and `TrackRequest` to `requests()`.
+Their handles `OriginDynamic`, `BroadcastDynamic`, and `TrackDynamic` are `OriginRequests`, `BroadcastRequests`, and `TrackRequests`; their methods are unchanged.
+
+### `Allocator` ([#6751](https://github.com/moq-dev/moq/pull/6751))
+
+`Bandwidth` is `Allocator`, `bandwidth()` is `allocator()`, and `Reservation.grant()` is `rate()`. The producers' `bandwidth` option keeps its name.
+
 ### Decoders read gaps and ends
 
 `audio.Consumer.next()` and `video.Consumer.next()` return a `Read` instead of a frame. Take `read.frame` from a `ReadFrame` where you used the frame; `ReadGap` marks lost media and `ReadEnd` where the publisher stopped its encoder, and what follows either does not continue what came before.
@@ -38,7 +51,7 @@ the matching generated bindings and native library.
 ### Cancelling a stream cancels its pending read
 
 `await subscription.cancel()` on announcements, authorization grants, and server requests now waits for the pending native operation to release, even when no event arrives.
-Announcement subscriptions still own and release their cursor; cancelling a grant or request subscription keeps its shared `Auth` or `Server` usable.
+Announcement and grant subscriptions own and release their consumer; cancelling a request subscription keeps its shared `Server` usable.
 The generated async methods now return `UniffiRustFuture<T>`, a `Future<T>` with `cancel()`; existing `await` and `Future<T>` assignments work unchanged.
 Custom implementations of generated interfaces must return `UniffiRustFuture<T>` instead of a plain `Future<T>`.
 

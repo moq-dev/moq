@@ -245,7 +245,8 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 			fin.enable();
 			const last = producer.appendGroup();
 			last.writeFrame(textFrame("last"));
-			last.close();
+			last.finish();
+			producer.finish();
 			producer.close();
 			const closing = server.close();
 
@@ -287,7 +288,7 @@ async function servedRawSubscription() {
 
 	const group = producer.appendGroup();
 	group.writeFrame(textFrame("last"));
-	group.close();
+	group.finish();
 
 	const subscriber = await Stream.open(pair.client, { version });
 	await subscriber.writer.u53(StreamId.Subscribe);
@@ -302,6 +303,7 @@ async function servedRawSubscription() {
 
 	// Finish the track only once it is served: a track closed before anyone subscribed is gone.
 	expect("start" in (await decodeSubscribeResponse(subscriber.reader, version))).toBe(true);
+	producer.finish();
 	producer.close();
 	// SUBSCRIBE_END, then the publisher's FIN.
 	await subscriber.reader.readAll();
@@ -389,7 +391,7 @@ test("close waits for a served FETCH to be acknowledged", async () => {
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const group = producer.appendGroup();
 	group.writeFrame(textFrame("last"));
-	group.close();
+	group.finish();
 	const server = new Connection({
 		url: new URL("https://relay.example/"),
 		quic: pair.server,
@@ -442,7 +444,7 @@ test("close waits for a request served while withdrawals are in flight", async (
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const group = producer.appendGroup();
 	group.writeFrame(textFrame("last"));
-	group.close();
+	group.finish();
 	const url = new URL("https://localhost/test");
 	const [client, server] = await Promise.all([
 		connect({ url, transport: pair.client, consume: destination }),
@@ -471,6 +473,7 @@ test("close waits for a request served while withdrawals are in flight", async (
 			startGroup: 0,
 		}).encode(subscriber.writer, version);
 		expect("start" in (await decodeSubscribeResponse(subscriber.reader, version))).toBe(true);
+		producer.finish();
 		producer.close();
 		await subscriber.reader.readAll();
 

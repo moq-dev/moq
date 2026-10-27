@@ -6,7 +6,7 @@
 const char *audio_codecs[] = {"aac", "opus", nullptr};
 const char *video_codecs[] = {"h264", "hevc", "av1", nullptr};
 
-MoQService::MoQService(obs_data_t *settings, obs_service_t *) : server(), path()
+MoQService::MoQService(obs_data_t *settings, obs_service_t *) : server(), path(), token()
 {
 	Update(settings);
 }
@@ -15,6 +15,7 @@ void MoQService::Update(obs_data_t *settings)
 {
 	server = obs_data_get_string(settings, "server");
 	path = obs_data_get_string(settings, "key");
+	token = obs_data_get_string(settings, "bearer_token");
 }
 
 obs_properties_t *MoQService::Properties()
@@ -58,6 +59,8 @@ const char *MoQService::GetConnectInfo(enum obs_service_connect_info type)
 		return server.c_str();
 	case OBS_SERVICE_CONNECT_INFO_STREAM_KEY:
 		return path.c_str();
+	case OBS_SERVICE_CONNECT_INFO_BEARER_TOKEN:
+		return token.empty() ? nullptr : token.c_str();
 	default:
 		return nullptr;
 	}

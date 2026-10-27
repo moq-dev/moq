@@ -8,9 +8,9 @@ use crate::{coding, ietf, lite};
 ///
 /// Ordered by preference, with the client's preference taking priority. Lite03 and newer
 /// hand off (see [`Version::hands_off`]).
-/// Draft15 and newer have no version list in SETUP, so they negotiate only by ALPN.
+/// moq-transport negotiates only by ALPN.
 #[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-pub(crate) const NEGOTIATED: [Version; 8] = [
+pub(crate) const NEGOTIATED: [Version; 7] = [
 	Version::Lite(lite::Version::Lite07),
 	Version::Lite(lite::Version::Lite06),
 	Version::Lite(lite::Version::Lite05),
@@ -18,7 +18,6 @@ pub(crate) const NEGOTIATED: [Version; 8] = [
 	Version::Lite(lite::Version::Lite03),
 	Version::Lite(lite::Version::Lite02),
 	Version::Lite(lite::Version::Lite01),
-	Version::Ietf(ietf::Version::Draft14),
 ];
 
 /// ALPN strings for supported versions, most-preferred first. `ALPNS[0]` is the
@@ -35,10 +34,6 @@ pub const ALPNS: &[&str] = &[
 	ALPN_LITE,
 	ALPN_22,
 	ALPN_18,
-	ALPN_17,
-	ALPN_16,
-	ALPN_15,
-	ALPN_14,
 ];
 
 // ALPN constants
@@ -48,14 +43,10 @@ pub(crate) const ALPN_LITE_04: &str = "moq-lite-04";
 pub(crate) const ALPN_LITE_05: &str = "moq-lite-05";
 pub(crate) const ALPN_LITE_06: &str = "moq-lite-06";
 pub(crate) const ALPN_LITE_07_WIP: &str = "moq-lite-07-wip";
-pub(crate) const ALPN_14: &str = "moq-00";
-pub(crate) const ALPN_15: &str = "moqt-15";
-pub(crate) const ALPN_16: &str = "moqt-16";
-pub(crate) const ALPN_17: &str = "moqt-17";
 pub(crate) const ALPN_18: &str = "moqt-18";
 pub(crate) const ALPN_22: &str = "moqt-22";
 
-const ALL: [Version; 13] = [
+const ALL: [Version; 9] = [
 	Version::Lite(lite::Version::Lite07),
 	Version::Lite(lite::Version::Lite06),
 	Version::Lite(lite::Version::Lite05),
@@ -65,10 +56,6 @@ const ALL: [Version; 13] = [
 	Version::Lite(lite::Version::Lite01),
 	Version::Ietf(ietf::Version::Draft22),
 	Version::Ietf(ietf::Version::Draft18),
-	Version::Ietf(ietf::Version::Draft17),
-	Version::Ietf(ietf::Version::Draft16),
-	Version::Ietf(ietf::Version::Draft15),
-	Version::Ietf(ietf::Version::Draft14),
 ];
 
 /// A MoQ protocol version.
@@ -110,10 +97,6 @@ impl Version {
 			Self::Lite(lite::Version::Lite05) => "moq-lite-05",
 			Self::Lite(lite::Version::Lite06) => "moq-lite-06",
 			Self::Lite(lite::Version::Lite07) => "moq-lite-07-wip",
-			Self::Ietf(ietf::Version::Draft14) => "moq-transport-14",
-			Self::Ietf(ietf::Version::Draft15) => "moq-transport-15",
-			Self::Ietf(ietf::Version::Draft16) => "moq-transport-16",
-			Self::Ietf(ietf::Version::Draft17) => "moq-transport-17",
 			Self::Ietf(ietf::Version::Draft18) => "moq-transport-18",
 			Self::Ietf(ietf::Version::Draft22) => "moq-transport-22",
 		}
@@ -129,10 +112,6 @@ impl Version {
 			0xff0dad05 => Some(Self::Lite(lite::Version::Lite05)),
 			0xff0dad06 => Some(Self::Lite(lite::Version::Lite06)),
 			0xff0dad07 => Some(Self::Lite(lite::Version::Lite07)),
-			0xff00000e => Some(Self::Ietf(ietf::Version::Draft14)),
-			0xff00000f => Some(Self::Ietf(ietf::Version::Draft15)),
-			0xff000010 => Some(Self::Ietf(ietf::Version::Draft16)),
-			0xff000011 => Some(Self::Ietf(ietf::Version::Draft17)),
 			0xff000012 => Some(Self::Ietf(ietf::Version::Draft18)),
 			0xff000016 => Some(Self::Ietf(ietf::Version::Draft22)),
 			_ => None,
@@ -149,10 +128,6 @@ impl Version {
 			Self::Lite(lite::Version::Lite05) => 0xff0dad05,
 			Self::Lite(lite::Version::Lite06) => 0xff0dad06,
 			Self::Lite(lite::Version::Lite07) => 0xff0dad07,
-			Self::Ietf(ietf::Version::Draft14) => 0xff00000e,
-			Self::Ietf(ietf::Version::Draft15) => 0xff00000f,
-			Self::Ietf(ietf::Version::Draft16) => 0xff000010,
-			Self::Ietf(ietf::Version::Draft17) => 0xff000011,
 			Self::Ietf(ietf::Version::Draft18) => 0xff000012,
 			Self::Ietf(ietf::Version::Draft22) => 0xff000016,
 		}
@@ -167,10 +142,6 @@ impl Version {
 			Self::Lite(lite::Version::Lite04) => ALPN_LITE_04,
 			Self::Lite(lite::Version::Lite03) => ALPN_LITE_03,
 			Self::Lite(lite::Version::Lite01 | lite::Version::Lite02) => ALPN_LITE,
-			Self::Ietf(ietf::Version::Draft14) => ALPN_14,
-			Self::Ietf(ietf::Version::Draft15) => ALPN_15,
-			Self::Ietf(ietf::Version::Draft16) => ALPN_16,
-			Self::Ietf(ietf::Version::Draft17) => ALPN_17,
 			Self::Ietf(ietf::Version::Draft18) => ALPN_18,
 			Self::Ietf(ietf::Version::Draft22) => ALPN_22,
 		}

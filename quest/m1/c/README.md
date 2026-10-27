@@ -18,7 +18,7 @@ twice (0.6 to 0.7, then to the generated 0.8); that is the accepted cost.
 
 - moq-c is not frozen: it takes the same breaks as moq-ffi and the other
   bindings. Every m1 quest or PR that changes the binding API changes
-  `rs/moq-c` in the same PR, with its `MIGRATE.md` entry and `doc/lib/c`
+  `rs/moq-c` in the same PR, with its Impact migration note and `doc/lib/c`
   update; none waits on the generated package.
 - Before the cut, diff the moq-ffi exports against `moq.h` and add any m1
   binding feature still missing, so parity is checked rather than assumed.

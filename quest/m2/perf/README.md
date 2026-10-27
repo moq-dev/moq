@@ -82,6 +82,7 @@ revisions on the same host and worker count, and profiles with
 - [kio channel contention](/quest/m2/perf/kio-channel-contention/README.md) - workers spend less time blocked on kio channel-state mutexes (up to 215% of worker CPU on chat at 16 tokio workers), via a version counter, per-thread spikes, and an append-only log
 - [Stream transports](/quest/m2/perf/stream/README.md) - qmux drives its own WebSocket and TCP sockets in one task, measured end to end, then serves them from the io_uring workers
 - [Relay allocations](/quest/m2/perf/relay-allocs.md) - fewer allocations per delivered frame, starting with per-stream session clones
+- [Ring storage for sent and lost packets](/quest/m2/perf/sent-packets.md) - moq-quic's sent and lost packet tracking moves from `BTreeMap` to ring storage bounded against a never-ACKing peer, picked by spiking split rings against quinn #2942's chunks
 - [QUIC lock contention](/quest/m2/perf/quic-lock-contention.md) - a measured verdict on the tokio driver's connection-wide mutex and per-packet endpoint-to-connection hop, with levers built only on evidence
 - [Borrow-free QUIC state](/quest/m2/perf/quic-borrow-free.md) - a prototyped report on sharing connection state with stream handles without `RefCell` or `Mutex`: context passing vs driver-owned state with per-stream channels
 - [Run to quiescence](/quest/m2/perf/uring-quiescence.md) - a received packet's reply is staged in the same turn, under a pass and train budget that keeps the fairness rule

@@ -69,9 +69,9 @@ public final class BroadcastProducer: Sendable {
     }
 
     /// Accept subscriptions to tracks that are not published yet. Hold and iterate
-    /// the returned `BroadcastDynamic` while such requests should be served.
-    public func dynamic() throws -> BroadcastDynamic {
-        BroadcastDynamic(try ffi.dynamic())
+    /// the returned `BroadcastRequests` while such requests should be served.
+    public func requests() throws -> BroadcastRequests {
+        BroadcastRequests(try ffi.requests())
     }
 
     /// Advertise this broadcast's exact path as a route.

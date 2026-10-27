@@ -212,7 +212,11 @@ fn multiplex(programs: u16, extra: Extra, bitrate: u64) -> Vec<u8> {
 /// A fresh importer, with the origin driver it needs kept alive but unpolled.
 fn setup() -> (moq_mux::container::ts::Programs, impl Sized) {
 	let (origin, driver) = moq_net::origin::Producer::new(Default::default());
-	let programs = moq_mux::container::ts::Programs::new(origin, "bench.hang", moq_mux::catalog::Config::default());
+	let programs = moq_mux::container::ts::Programs::new(
+		origin,
+		moq_net::Path::from_static("bench.hang"),
+		moq_mux::catalog::Config::default(),
+	);
 	(programs, driver)
 }
 

@@ -1204,6 +1204,7 @@ export class Computed<T> implements Getter<T | undefined> {
 	 */
 	close(): void {
 		this.#effect.close();
+		this.#signal.set(undefined);
 	}
 }
 
