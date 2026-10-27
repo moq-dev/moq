@@ -220,7 +220,7 @@ async fn a_recording_round_trips() {
 
 	let (broadcast, _run) = serve(&store).await;
 	let served = broadcast.consume().track("video").unwrap();
-	let info = served.query().await.unwrap();
+	let info = served.info().await.unwrap();
 	assert_eq!(info.priority, 3);
 	assert_eq!(info.timescale, Some(Timescale::MILLI));
 	assert_eq!(info.max_age, None);
@@ -240,7 +240,7 @@ async fn a_recording_round_trips() {
 	assert_eq!(reader.finished().await.unwrap(), Position::group(6));
 
 	// The untimed track keeps its datagram a datagram.
-	let info = broadcast.consume().track("log").unwrap().query().await.unwrap();
+	let info = broadcast.consume().track("log").unwrap().info().await.unwrap();
 	assert_eq!((info.priority, info.timescale), (9, None));
 	assert_eq!(fetch(&broadcast, "log", 0).await.unwrap(), ["a"]);
 	assert!(matches!(
@@ -431,7 +431,7 @@ async fn a_growing_archive_is_followed() {
 	assert_eq!(next(&mut b).await.unwrap(), (51, expected(true, 51, 0..2)));
 
 	assert!(matches!(
-		broadcast.consume().track("c").unwrap().query().await,
+		broadcast.consume().track("c").unwrap().info().await,
 		Err(moq_net::Error::NotFound)
 	));
 	archive.track("c", 0, false).await;

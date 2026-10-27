@@ -700,7 +700,7 @@ export class Encoder {
 		const reservation = effect.get(this.#reservation);
 		if (reservation) {
 			const grant = reservation.peek();
-			effect.get(reservation.grant);
+			effect.get(reservation.rate);
 			if (grant != null) bitrate = Math.min(bitrate, grant);
 		}
 

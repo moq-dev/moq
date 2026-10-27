@@ -243,7 +243,7 @@ export interface ConnectProps {
 
 	/**
 	 * Build the session on `auth`, so it presents every token the handle holds and a route
-	 * naming one of its `Auth`s keeps it across a reconnect. Omit to give the session a handle
+	 * naming one of its `Credential`s keeps it across a reconnect. Omit to give the session a handle
 	 * of its own, which ends with it.
 	 *
 	 * The handle backs one active session at a time, plus the ones draining after a GOAWAY or a

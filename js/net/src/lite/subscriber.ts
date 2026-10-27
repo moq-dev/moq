@@ -1654,7 +1654,7 @@ export class Subscriber {
 		}
 
 		const { track, timescale, tail } = entry;
-		const producer = new netGroup.Producer(group.sequence);
+		let producer: netGroup.Producer | undefined;
 		const read = tail.open(group.sequence);
 
 		try {
@@ -1674,7 +1674,7 @@ export class Subscriber {
 				track.abort(violation);
 				throw violation;
 			}
-			track.writeGroup(producer);
+			producer = track.createGroup(group.sequence);
 
 			await readFrames(stream, producer, {
 				scale: timescale,
@@ -1688,11 +1688,11 @@ export class Subscriber {
 			// A violation ends the session, which the connection does once it escapes; anything
 			// else ends only this group.
 			if (err instanceof ProtocolViolation) {
-				producer.abort(err);
+				producer?.abort(err);
 				throw err;
 			}
 			const e = await sessionCause(this.#quic, err);
-			producer.abort(e);
+			producer?.abort(e);
 			stream.stop(e);
 		} finally {
 			read();

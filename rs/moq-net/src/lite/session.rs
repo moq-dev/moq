@@ -24,7 +24,7 @@ pub(crate) struct SessionStart {
 	/// The session's AUTH tokens and grants, stored on the public [`crate::Session`].
 	pub auth: crate::auth::Link,
 	/// The connection credential presented on `auth`, stored on the public [`crate::Session`].
-	pub credential: Option<crate::auth::Auth>,
+	pub credential: Option<crate::auth::Credential>,
 	/// The implementation the peer's SETUP advertised, stored on the public [`crate::Session`].
 	pub peer_implementation: crate::setup::PeerImplementation,
 }
@@ -523,7 +523,7 @@ struct Present {
 	/// Whether the first poll decided who answers the peer's tokens.
 	started: bool,
 	/// The connection's own credential, held for the life of the session.
-	_setup: Option<crate::auth::Auth>,
+	_setup: Option<crate::auth::Credential>,
 }
 
 impl Present {
@@ -1032,7 +1032,7 @@ mod tests {
 
 	/// Run a client session on a shared handle over `transport` for five simulated seconds,
 	/// presenting one token, and return it after checking the session still runs.
-	async fn present_on_shared_handle(transport: ScriptedSession) -> crate::auth::Auth {
+	async fn present_on_shared_handle(transport: ScriptedSession) -> crate::auth::Credential {
 		let handle = crate::auth::Handle::new();
 		let start = start(Config {
 			runtime: crate::time::sim(),

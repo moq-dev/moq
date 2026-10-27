@@ -16,7 +16,7 @@ fn grant(prefix: &str) -> Grant {
 
 struct Fixture {
 	_connections: Vec<moq_tokio::Connection>,
-	_tokens: Vec<moq_net::auth::Auth>,
+	_tokens: Vec<moq_net::auth::Credential>,
 	producers: Vec<lease::Producer>,
 	selected: usize,
 	watch: moq_net::auth::Watch,

@@ -448,7 +448,7 @@ struct Side {
 	bidi_types: StreamTypes,
 	/// Stream resets sent by this side.
 	resets: Resets,
-	/// What [`poll::Session::stats`] reports.
+	/// What [`poll::Session::metrics`] reports.
 	stats: Mutex<MockStats>,
 	/// How many times the stats were read.
 	stats_reads: AtomicUsize,
@@ -467,7 +467,7 @@ pub struct MockStats {
 	pub rtt: Option<Duration>,
 }
 
-impl moq_net::transport::Stats for MockStats {
+impl moq_net::transport::Metrics for MockStats {
 	fn estimated_send_rate(&self) -> Option<u64> {
 		self.estimated_send_rate
 	}
@@ -640,7 +640,7 @@ impl poll::Session for MockSession {
 		self.inner.poll_closed(cx)
 	}
 
-	fn stats(&self) -> impl moq_net::transport::Stats {
+	fn metrics(&self) -> impl moq_net::transport::Metrics {
 		assert!(
 			!self.side.panic_on_stats.load(Ordering::Relaxed),
 			"injected transport panic"

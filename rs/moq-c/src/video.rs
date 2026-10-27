@@ -125,7 +125,7 @@ pub struct moq_video_encoder_output {
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct moq_video_encode_options {
-	/// A handle from [`crate::moq_session_bandwidth`] whose grant the encoder follows,
+	/// A handle from [`crate::moq_session_allocator`] whose grant the encoder follows,
 	/// or 0 to hold the configured bitrate.
 	pub bandwidth: u32,
 	/// The [`moq_encode_video`] handle of the next lower rendition of the same source,
@@ -717,7 +717,7 @@ impl Video {
 			tokio::select! {
 				biased;
 				_ = closed => {}
-				_ = follow_reservation(follower, lower, reservation.consumer(), ceiling) => {}
+				_ = follow_reservation(follower, lower, reservation.consume(), ceiling) => {}
 			}
 			Ok(())
 		});

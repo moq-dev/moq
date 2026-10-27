@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Allocator` ([#6751](https://github.com/moq-dev/moq/pull/6751))
+
+`moq.Bandwidth` is `moq.Allocator`, `Session.bandwidth()` is `allocator()`, and `Reservation.grant()` is `rate()`. `Bandwidth.Consumer`, returned by `recv_bandwidth()`, is the top-level `moq.BandwidthConsumer`. The producers' `bandwidth=` argument keeps its name.
+
 ### Decoders read gaps and ends
 
 `audio.Consumer` yields `audio.Read` (`audio.Frame | audio.Gap | audio.End`) and `video.Consumer` yields `video.Read` (`VideoDecodedFrame | video.Gap | video.End`). Check `isinstance(read, audio.Frame)` (or `VideoDecodedFrame`) where you used each item as a frame; a `Gap` marks lost media and an `End` where the publisher stopped its encoder, and what follows either does not continue what came before.

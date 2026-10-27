@@ -65,8 +65,7 @@ window.runRecovery = async (packets) => {
 	for (const packet of packets) {
 		if (group?.sequence !== packet.group) {
 			group?.finish();
-			group = new Moq.Group.Producer(packet.group);
-			track.writeGroup(group);
+			group = track.createGroup(packet.group);
 		}
 		const timestamp = Micro(packet.timestamp);
 		const payload = Uint8Array.from(atob(packet.data), (c) => c.charCodeAt(0));

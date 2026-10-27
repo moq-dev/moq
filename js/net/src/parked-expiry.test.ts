@@ -1,7 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
 import { StreamCode } from "./error.ts";
-import { Producer as Group } from "./group.ts";
 import { randomHop } from "./hop.ts";
 import { NativeSession } from "./ietf/adapter.ts";
 import { Publisher as IetfPublisher } from "./ietf/publisher.ts";
@@ -36,10 +35,9 @@ for (const protocol of protocols) {
 			broadcastPublication.announce();
 			const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 			const write = (sequence: number) => {
-				const group = new Group(sequence);
+				const group = track.createGroup(sequence);
 				group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(0) });
 				group.finish();
-				track.writeGroup(group);
 			};
 
 			write(0);
@@ -160,12 +158,11 @@ for (const protocol of protocols) {
 		broadcastPublication.announce();
 		const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 		const write = (sequence: number, frames: number) => {
-			const group = new Group(sequence);
+			const group = track.createGroup(sequence);
 			for (let frame = 0; frame < frames; frame++) {
 				group.writeFrame({ payload: new Uint8Array([frame]), timestamp: Timestamp.fromMillis(0) });
 			}
 			group.finish();
-			track.writeGroup(group);
 		};
 
 		// Two frames, so the second is still unread while the stream's first write waits on credit.

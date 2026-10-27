@@ -19,7 +19,7 @@ import {
 	sessionCause,
 	unauthorized,
 } from "../error.ts";
-import * as netGroup from "../group.ts";
+import type * as netGroup from "../group.ts";
 import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import {
 	finalSequence,
@@ -1617,8 +1617,7 @@ export class Subscriber {
 						`group ${group.groupId} is at or past the declared end ${subscription.end}`,
 					);
 				}
-				producer = new netGroup.Producer(group.groupId);
-				track.writeGroup(producer);
+				producer = track.createGroup(group.groupId);
 			}
 			return producer;
 		};

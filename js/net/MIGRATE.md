@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Names say one thing ([#6751](https://github.com/moq-dev/moq/pull/6751))
+
+`Auth.Auth` is `Auth.Credential`, and `Reservation.grant` is `Reservation.rate`.
+A connection's `bandwidth` allocator is `allocator`, mirroring Rust's `Session::allocator()`.
+`Track.Producer.writeGroup(group)` is `createGroup(sequence)`, which creates the group and returns it like `appendGroup()`: replace `const group = new Group.Producer(n); track.writeGroup(group);` with `const group = track.createGroup(n);`.
+A group can no longer be written before it joins a track, or join more than one track.
+
 ### One lifecycle vocabulary ([#6750](https://github.com/moq-dev/moq/pull/6750))
 
 `Group.Producer.close(abort?)` and `Track.Producer.close(abort?)` split by meaning: call `finish()` for a clean end and `abort(err)` for an error. On a group, `finish()` is terminal and an `abort` after it is a no-op. On a track, `finish()` only declares the end, so groups below it stay writable; then call `close()` to release the producer, which aborts with a `Cancel` stream error if no end was declared. Replace `track.close()` with `track.finish(); track.close();`.

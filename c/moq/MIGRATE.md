@@ -6,6 +6,10 @@ How to update your code for each breaking change, newest first.
 
 The hand-written crate never published as moq-c: a libmoq 0.6 user applies these entries before moving to the generated API.
 
+### Session allocator ([#6751](https://github.com/moq-dev/moq/pull/6751))
+
+`moq_session_bandwidth` is `moq_session_allocator`, `moq_bandwidth_reserve` is `moq_allocator_reserve`, and `moq_bandwidth_close` is `moq_allocator_close`, matching `moq_net::bandwidth::Allocator`. `moq_reservation_grant` is `moq_reservation_rate`, matching `moq_net::bandwidth::Reservation::rate()`. Signatures are unchanged. The receive estimate keeps its names (`moq_session_recv_bandwidth`, `moq_bandwidth_consumer_*`).
+
 ### Sessions report a lifecycle snapshot
 
 `moq_session_connect` and `moq_session_request_accept` take a `moq_state_callback` instead of a `moq_status_callback`: `void on_state(void *user_data, const moq_connection_state *state)`.

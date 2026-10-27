@@ -307,7 +307,7 @@ struct SessionCounters {
 	bytes: Mutex<SessionBytes>,
 	wire_tx: AtomicU64,
 	wire_rx: AtomicU64,
-	control: [[AtomicU64; 2]; Control::ALL.len()],
+	control: [[AtomicU64; 2]; Message::ALL.len()],
 }
 
 impl SessionCounters {
@@ -346,7 +346,7 @@ impl SessionCounters {
 		(presence, empty)
 	}
 
-	fn control(&self, totals: &mut [[u64; 2]; Control::ALL.len()]) {
+	fn control(&self, totals: &mut [[u64; 2]; Message::ALL.len()]) {
 		for (total, counters) in totals.iter_mut().zip(&self.control) {
 			for (total, counter) in total.iter_mut().zip(counters) {
 				*total += counter.load(Ordering::Relaxed);
@@ -873,10 +873,10 @@ impl Role {
 	}
 }
 
-/// Cumulative bytes sent and received, returned per [`Control`] class by [`Snapshot::control`].
+/// Cumulative bytes sent and received, returned per [`Message`] class by [`Snapshot::control`].
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct Bytes {
+pub struct Totals {
 	/// Bytes successfully encoded for sending, counted even if the stream later fails.
 	pub tx: u64,
 	/// Bytes of complete messages decoded and consumed.
@@ -890,7 +890,7 @@ pub struct Bytes {
 /// framing decodes, before request validation. Shared reply IDs use [`Self::Other`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum Control {
+pub enum Message {
 	/// Session setup and information.
 	Session,
 	/// Namespace advertisements and listings.
@@ -911,7 +911,7 @@ pub enum Control {
 	Other,
 }
 
-impl Control {
+impl Message {
 	const ALL: [Self; 9] = [
 		Self::Session,
 		Self::Announce,
@@ -958,20 +958,20 @@ pub struct Snapshot {
 	traffic: HashMap<Tier, [Traffic; 2]>,
 	/// Session presence per tier; read via [`Self::sessions`].
 	sessions: HashMap<Tier, Presence>,
-	control: HashMap<Tier, [[u64; 2]; Control::ALL.len()]>,
+	control: HashMap<Tier, [[u64; 2]; Message::ALL.len()]>,
 }
 
 impl Snapshot {
 	/// The `(tier, class, totals)` control-message rows with any traffic, sorted by tier and class.
 	/// Includes prefixes inside complete codec values, but excludes separately coded type selectors,
 	/// media payload, and transport framing, acknowledgements, and retransmissions.
-	pub fn control(&self) -> Vec<(Tier, Control, Bytes)> {
+	pub fn control(&self) -> Vec<(Tier, Message, Totals)> {
 		let mut rows = Vec::new();
 		for (tier, totals) in &self.control {
-			for class in Control::ALL {
+			for class in Message::ALL {
 				let [tx, rx] = totals[class as usize];
 				if tx != 0 || rx != 0 {
-					rows.push((tier.clone(), class, Bytes { tx, rx }));
+					rows.push((tier.clone(), class, Totals { tx, rx }));
 				}
 			}
 		}
@@ -1621,7 +1621,7 @@ struct Viewer {
 
 impl Session {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn control(&self, class: Control, bytes: usize, received: bool) {
+	pub(crate) fn control(&self, class: Message, bytes: usize, received: bool) {
 		let Some(inner) = &self.inner else { return };
 		let current = inner.current.lock().unwrap_or_else(PoisonError::into_inner);
 		if let Some(counters) = &current.presence {
@@ -2562,12 +2562,12 @@ mod tests {
 		let first = Tier::new("internal");
 		let second = Tier::new("edge");
 		let context = registry.tier(first.clone()).session("");
-		context.control(Control::Announce, 17, false);
+		context.control(Message::Announce, 17, false);
 		context.retag(second.clone(), "");
-		context.control(Control::TrackInfo, 23, true);
+		context.control(Message::TrackInfo, 23, true);
 		let expected = vec![
-			(second, Control::TrackInfo, Bytes { tx: 0, rx: 23 }),
-			(first, Control::Announce, Bytes { tx: 17, rx: 0 }),
+			(second, Message::TrackInfo, Totals { tx: 0, rx: 23 }),
+			(first, Message::Announce, Totals { tx: 17, rx: 0 }),
 		];
 		assert_eq!(registry.snapshot().control(), expected);
 		drop(context);

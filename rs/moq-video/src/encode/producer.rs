@@ -776,7 +776,7 @@ async fn capture_loop<S: CaptureSource>(
 		// so the policy's ceiling is that rate and the target starts there. A
 		// reopened camera starts optimistic again rather than inheriting the
 		// backed-off rate from whatever the link was doing last time.
-		let mut rate = Some(rate::Follower::new(reservation.consumer(), rate::Policy::new(ceiling)));
+		let mut rate = Some(rate::Follower::new(reservation.consume(), rate::Policy::new(ceiling)));
 		// Per encoder, since a fresh one opens with a keyframe that serves every earlier ask.
 		let mut forced = Cuts::new(served);
 

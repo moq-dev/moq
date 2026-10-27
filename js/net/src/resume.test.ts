@@ -51,8 +51,7 @@ function copy(source: BroadcastProducer) {
 	return {
 		producer,
 		write(sequence: number, frames = 1, close = true) {
-			const group = new GroupProducer(sequence);
-			producer.writeGroup(group);
+			const group = producer.createGroup(sequence);
 			for (let frame = 0; frame < frames; frame++)
 				group.writeFrame({ payload: enc.encode(`${sequence}.${frame}`) });
 			if (close) group.finish();
@@ -349,8 +348,7 @@ test("a lagging same-epoch replica resumes from one publisher's bytes exactly on
 				for (;;) {
 					const group = await input.recvGroup();
 					if (!group) return;
-					const copy = new GroupProducer(group.sequence);
-					output.writeGroup(copy);
+					const copy = output.createGroup(group.sequence);
 					try {
 						for (let index = 0; ; index++) {
 							const frame = await group.readFrame();
@@ -616,12 +614,10 @@ test("a fetched group continued from an empty, already-closed copy releases that
 		const sub = front.consumer.track("seq").subscribe();
 
 		// Group 5 is empty: the first route fails it, the next holds it closed.
-		const failing = new GroupProducer(5);
-		a.createTrack("fetch").writeGroup(failing);
+		const failing = a.createTrack("fetch").createGroup(5);
 		const group = await front.consumer.track("fetch").fetchGroup(5);
 		const read = group.readFrame();
-		const whole = new GroupProducer(5);
-		b.createTrack("fetch").writeGroup(whole);
+		const whole = b.createTrack("fetch").createGroup(5);
 		whole.finish();
 		front.serve(b.consume());
 		await settle();
@@ -660,8 +656,7 @@ test("a fetched group failing as it is handed out releases its route once", asyn
 		expect(drain(sub)).toEqual([0]);
 
 		const fa = a.createTrack("fetch");
-		const failing = new GroupProducer(5);
-		fa.writeGroup(failing);
+		const failing = fa.createGroup(5);
 		failing.writeFrame({ payload: enc.encode("5.0") });
 		const fetching = front.consumer.track("fetch").fetchGroup(5);
 		for (let turn = 0; turn < turns; turn++) await Promise.resolve();
@@ -671,8 +666,7 @@ test("a fetched group failing as it is handed out releases its route once", asyn
 		// The next route holds the fetched group whole; the old one still feeds the reader a
 		// group the new route never has.
 		const fb = b.createTrack("fetch");
-		const whole = new GroupProducer(5);
-		fb.writeGroup(whole);
+		const whole = fb.createGroup(5);
 		whole.writeFrame({ payload: enc.encode("5.0") });
 		whole.writeFrame({ payload: enc.encode("5.1") });
 		whole.finish();
@@ -1258,8 +1252,7 @@ test("a failed group on a route whose replacement was refused ends with the refu
 	b.createTrack("seq", { priority: 2 });
 	front.serve(a.consume());
 	const sub = front.consumer.track("seq").subscribe();
-	const stalled = new GroupProducer(0);
-	ta.writeGroup(stalled);
+	const stalled = ta.createGroup(0);
 	stalled.writeFrame({ payload: enc.encode("0.0") });
 	const group = sub.tryRecvGroup();
 	if (!group) throw new Error("expected group 0");
@@ -1377,8 +1370,7 @@ test("a fetch never reads a replacement refused for its track properties", async
 	const b = new BroadcastProducer();
 	a.createTrack("seq", { priority: 1 });
 	const tb = b.createTrack("seq", { priority: 2 });
-	const group = new GroupProducer(0);
-	tb.writeGroup(group);
+	const group = tb.createGroup(0);
 	group.writeFrame({ payload: enc.encode("b") });
 	group.finish();
 	front.serve(a.consume());
@@ -1400,8 +1392,7 @@ test("the first fetch of a track says what the track is for later routes", async
 		[b, 2],
 	] as const) {
 		const producer = source.createTrack("seq", { priority });
-		const group = new GroupProducer(0);
-		producer.writeGroup(group);
+		const group = producer.createGroup(0);
 		group.writeFrame({ payload: enc.encode(`${priority}`) });
 		group.finish();
 	}
@@ -1799,8 +1790,7 @@ test("a fetch waits for the copy being read to say what the track is", async () 
 	// a answers what the track is only when told to.
 	const requests = wireOf(a).requested();
 	const tb = b.createTrack("seq", { priority: 2 });
-	const group = new GroupProducer(0);
-	tb.writeGroup(group);
+	const group = tb.createGroup(0);
 	group.writeFrame({ payload: enc.encode("b") });
 	group.finish();
 	front.serve(a.consume());

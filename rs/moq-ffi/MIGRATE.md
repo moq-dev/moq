@@ -5,9 +5,13 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### `MoqAllocator` ([#6751](https://github.com/moq-dev/moq/pull/6751))
+
+`MoqBandwidth` is `MoqAllocator`, and `MoqSession::bandwidth()` is `allocator()`, matching `moq_net::bandwidth::Allocator`. `MoqReservation::grant()` is `rate()`, matching `moq_net::bandwidth::Reservation::rate()`. The `bandwidth` option field on audio and video producers keeps its name.
+
 ### An idle reservation reads the share it would get
 
-`MoqReservation::grant` reports the slice the track would get back while nothing subscribes to it, instead of `None`; it still claims nothing from the other tracks.
+`MoqReservation::rate` reports the slice the track would get back while nothing subscribes to it, instead of `None`; it still claims nothing from the other tracks.
 A sender that relied on `None` to hold its rate while unwatched should check the track's demand instead.
 
 ### Decoders read gaps and ends

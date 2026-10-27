@@ -925,10 +925,11 @@ impl MoqGroupProducer {
 
 #[cfg(test)]
 impl MoqGroupProducer {
-	/// Wait until a consumer has this group.
-	pub(crate) async fn used(&self) -> Result<(), MoqError> {
-		let demand = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.demand();
-		Ok(demand.used().await?)
+	/// Wait until a consumer wants this group.
+	pub(crate) async fn wanted(&self) -> Result<(), MoqError> {
+		let mut demand = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.demand();
+		while !demand.wanted_changed().await? {}
+		Ok(())
 	}
 }
 

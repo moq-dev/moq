@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Allocator` ([#6751](https://github.com/moq-dev/moq/pull/6751))
+
+`Bandwidth` is `Allocator`, `bandwidth()` is `allocator()`, and `Reservation.grant()` is `rate()`. The producers' `bandwidth` option keeps its name.
+
 ### Decoders read gaps and ends
 
 `dev.moq.audio.Consumer.next()` and `dev.moq.video.Consumer.next()` return a `Read` instead of a frame, and their `frames()` flows become `reads()`. Take `(read as? ReadFrame)?.frame` where you used the frame; `ReadGap` marks lost media and `ReadEnd` where the publisher stopped its encoder, and what follows either does not continue what came before.

@@ -13,7 +13,7 @@ pub struct Goaway<'a> {
 }
 
 impl Message for Goaway<'_> {
-	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Goaway);
+	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Goaway);
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Lite01 | Version::Lite02 | Version::Lite03 => {

@@ -129,7 +129,7 @@ async fn wait_for_config_error(
 
 /// Wait until `read_frame` has taken `group` off the ordered cursor.
 async fn wait_group_acquired(group: &MoqGroupProducer) {
-	tokio::time::timeout(TIMEOUT, group.used())
+	tokio::time::timeout(TIMEOUT, group.wanted())
 		.await
 		.expect("timed out waiting for the group to be acquired")
 		.unwrap();
@@ -493,7 +493,7 @@ async fn media_track_reserves_through_its_demand() {
 	estimate
 		.set(Some(moq_net::bandwidth::Rate::from_bps(3_000_000)))
 		.unwrap();
-	let bandwidth = crate::bandwidth::MoqBandwidth::new(moq_net::bandwidth::Allocator::new(estimate.consume()));
+	let bandwidth = crate::bandwidth::MoqAllocator::new(moq_net::bandwidth::Allocator::new(estimate.consume()));
 
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let audio = |name: &str| {
@@ -514,12 +514,12 @@ async fn media_track_reserves_through_its_demand() {
 	let reservation = bandwidth.reserve(&demand, 4_000_000);
 	let sibling_reservation = bandwidth.reserve(&sibling_demand, 4_000_000);
 	// No subscriber yet: it claims nothing from its sibling, and reads what it would get.
-	assert_eq!(sibling_reservation.grant(), Some(3_000_000));
-	assert_eq!(reservation.grant(), Some(1_500_000));
+	assert_eq!(sibling_reservation.rate(), Some(3_000_000));
+	assert_eq!(reservation.rate(), Some(1_500_000));
 
 	let _sub = subscribe(&broadcast, &demand.name()).await;
-	assert_eq!(sibling_reservation.grant(), Some(1_500_000));
-	assert_eq!(reservation.grant(), Some(1_500_000));
+	assert_eq!(sibling_reservation.rate(), Some(1_500_000));
+	assert_eq!(reservation.rate(), Some(1_500_000));
 }
 
 #[tokio::test]
@@ -6942,11 +6942,11 @@ async fn cancelled_state_wait_does_not_swallow_the_next_transition() {
 #[cfg(feature = "video")]
 #[tokio::test]
 async fn video_encoder_follows_a_shrinking_grant() {
-	use crate::bandwidth::MoqBandwidth;
+	use crate::bandwidth::MoqAllocator;
 	use crate::video::*;
 
 	let estimate = moq_net::bandwidth::Producer::new();
-	let bandwidth = std::sync::Arc::new(MoqBandwidth::new(moq_net::bandwidth::Allocator::new(
+	let bandwidth = std::sync::Arc::new(MoqAllocator::new(moq_net::bandwidth::Allocator::new(
 		estimate.consume(),
 	)));
 
@@ -6977,7 +6977,7 @@ async fn video_encoder_follows_a_shrinking_grant() {
 	.unwrap();
 
 	let reservation = video.reservation().expect("published against an allocator");
-	assert_eq!(reservation.grant(), None, "no estimate yet");
+	assert_eq!(reservation.rate(), None, "no estimate yet");
 
 	let consumer = broadcast.consume().unwrap();
 	let _sub = consumer.subscribe_track("camera".into(), None).await.unwrap();
@@ -6985,12 +6985,12 @@ async fn video_encoder_follows_a_shrinking_grant() {
 	estimate
 		.set(Some(moq_net::bandwidth::Rate::from_bps(4_000_000)))
 		.unwrap();
-	assert_eq!(reservation.grant(), Some(4_000_000));
+	assert_eq!(reservation.rate(), Some(4_000_000));
 
 	estimate
 		.set(Some(moq_net::bandwidth::Rate::from_bps(1_000_000)))
 		.unwrap();
-	assert_eq!(reservation.grant(), Some(1_000_000));
+	assert_eq!(reservation.rate(), Some(1_000_000));
 
 	let deadline = moq_clock::Instant::now() + TIMEOUT;
 	loop {
@@ -7036,10 +7036,10 @@ fn software_camera(bitrate: u64) -> (crate::video::MoqVideoEncoderInput, crate::
 #[cfg(feature = "video")]
 #[tokio::test]
 async fn dropping_a_video_producer_stops_the_rate_follower() {
-	use crate::bandwidth::MoqBandwidth;
+	use crate::bandwidth::MoqAllocator;
 
 	let estimate = moq_net::bandwidth::Producer::new();
-	let bandwidth = std::sync::Arc::new(MoqBandwidth::new(moq_net::bandwidth::Allocator::new(
+	let bandwidth = std::sync::Arc::new(MoqAllocator::new(moq_net::bandwidth::Allocator::new(
 		estimate.consume(),
 	)));
 	let broadcast = MoqBroadcastProducer::new().unwrap();
@@ -7066,10 +7066,10 @@ async fn dropping_a_video_producer_stops_the_rate_follower() {
 #[cfg(feature = "video")]
 #[tokio::test]
 async fn set_bitrate_caps_a_later_bandwidth_grant() {
-	use crate::bandwidth::MoqBandwidth;
+	use crate::bandwidth::MoqAllocator;
 
 	let estimate = moq_net::bandwidth::Producer::new();
-	let bandwidth = std::sync::Arc::new(MoqBandwidth::new(moq_net::bandwidth::Allocator::new(
+	let bandwidth = std::sync::Arc::new(MoqAllocator::new(moq_net::bandwidth::Allocator::new(
 		estimate.consume(),
 	)));
 	let broadcast = MoqBroadcastProducer::new().unwrap();
@@ -7092,16 +7092,16 @@ async fn set_bitrate_caps_a_later_bandwidth_grant() {
 	estimate
 		.set(Some(moq_net::bandwidth::Rate::from_bps(4_000_000)))
 		.unwrap();
-	assert_eq!(reservation.grant(), Some(4_000_000));
+	assert_eq!(reservation.rate(), Some(4_000_000));
 
 	video.set_bitrate(1_000_000).unwrap();
-	assert_eq!(reservation.grant(), Some(1_000_000));
+	assert_eq!(reservation.rate(), Some(1_000_000));
 	assert_eq!(video.applied_bitrate(), 1_000_000);
 
 	estimate
 		.set(Some(moq_net::bandwidth::Rate::from_bps(3_000_000)))
 		.unwrap();
-	assert_eq!(reservation.grant(), Some(1_000_000));
+	assert_eq!(reservation.rate(), Some(1_000_000));
 	assert_eq!(video.applied_bitrate(), 1_000_000);
 
 	video.finish().unwrap();

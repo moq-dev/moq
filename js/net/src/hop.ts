@@ -8,7 +8,7 @@
  * @module
  */
 import * as z from "zod/mini";
-import type { Auth } from "./auth.ts";
+import type { Credential } from "./auth.ts";
 import type * as Epoch from "./epoch.ts";
 import { isLeadingOnes, type StreamVersion } from "./stream.ts";
 
@@ -116,7 +116,7 @@ export interface Route {
 	 * Swapping it renews the request with REQUEST_UPDATE from draft 16, or ends and makes it
 	 * again before. Local: a relay never forwards it. Mirrors `Route::auth` in rs/moq-net.
 	 */
-	auth?: Auth;
+	auth?: Credential;
 }
 
 /** Constructors and helpers for {@link Route}. */
@@ -125,7 +125,9 @@ export const Route = {
 	default: { hops: [], cost: Cost.zero } as Route,
 
 	/** Fill route defaults and saturate the static price at the wire ceiling. */
-	normalize(route: Route | { epoch?: Epoch.Valid; hops?: readonly Hop[]; cost?: Cost; auth?: Auth } = {}): Route {
+	normalize(
+		route: Route | { epoch?: Epoch.Valid; hops?: readonly Hop[]; cost?: Cost; auth?: Credential } = {},
+	): Route {
 		const cost = route.cost ?? Cost.zero;
 		if (typeof cost !== "bigint" || cost < 0n) throw new RangeError("route cost must be a non-negative bigint");
 		const max = 2n ** 62n - 1n;

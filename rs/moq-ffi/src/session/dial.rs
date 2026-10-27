@@ -67,7 +67,7 @@ impl Dial {
 		let recv = moq_net::bandwidth::Producer::new();
 		let bandwidth = moq_net::bandwidth::Allocator::new(send.consume());
 		let auth = moq_net::auth::Handle::new();
-		let client = client.with_bandwidth(bandwidth.clone()).with_auth(auth.clone());
+		let client = client.with_allocator(bandwidth.clone()).with_auth(auth.clone());
 		let dial = Self {
 			state: state.clone(),
 			bandwidth,
@@ -188,7 +188,7 @@ impl Dial {
 		}
 	}
 
-	pub fn bandwidth(&self) -> moq_net::bandwidth::Allocator {
+	pub fn allocator(&self) -> moq_net::bandwidth::Allocator {
 		self.bandwidth.clone()
 	}
 

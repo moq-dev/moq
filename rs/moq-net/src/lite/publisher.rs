@@ -1797,7 +1797,7 @@ impl<R: Request> Drop for RequestServe<R> {
 /// The open stream is interest in the track: the query that answered it stays until the
 /// requester closes its side, so demand holds while the requester moves on to SUBSCRIBE.
 struct TrackInfoServe {
-	querying: track::Querying,
+	querying: track::Resolving,
 }
 
 impl Request for TrackInfoServe {
@@ -1816,7 +1816,7 @@ impl Request for TrackInfoServe {
 	}
 
 	fn start(_: &Shared, msg: Self::Message, broadcast: crate::broadcast::Consumer) -> Result<Self, Error> {
-		let querying = broadcast.track(&msg.track)?.query().into_inner();
+		let querying = broadcast.track(&msg.track)?.info().into_inner();
 		Ok(Self { querying })
 	}
 
@@ -1918,7 +1918,7 @@ enum SubscribeServe {
 		/// Boxed: the request is far larger than the other states' handles.
 		msg: Box<lite::Subscribe<'static>>,
 		track: track::Consumer,
-		querying: track::Querying,
+		querying: track::Resolving,
 		/// The newest group when the SUBSCRIBE arrived; see [`cursor_floor`].
 		latest: Option<u64>,
 		update: Option<lite::SubscribeUpdate>,
@@ -1967,7 +1967,7 @@ impl Request for SubscribeServe {
 		let track = broadcast.track(&msg.track)?;
 		let latest = track.latest_sequence();
 		if Bounds::has_time(&msg.ranges) {
-			let querying = track.query().into_inner();
+			let querying = track.info().into_inner();
 			return Ok(Self::Query {
 				msg: Box::new(msg),
 				track,

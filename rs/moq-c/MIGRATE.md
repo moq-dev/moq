@@ -4,11 +4,15 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Session allocator ([#6751](https://github.com/moq-dev/moq/pull/6751))
+
+`moq_session_bandwidth` is `moq_session_allocator`, `moq_bandwidth_reserve` is `moq_allocator_reserve`, and `moq_bandwidth_close` is `moq_allocator_close`, matching `moq_net::bandwidth::Allocator`. `moq_reservation_grant` is `moq_reservation_rate`, matching `moq_net::bandwidth::Reservation::rate()`. Signatures are unchanged. The receive estimate keeps its names (`moq_session_recv_bandwidth`, `moq_bandwidth_consumer_*`).
+
 ### `moq_encode_video` takes a `moq_video_encode_options`
 
 `moq_encode_video`'s fourth argument is a `const moq_video_encode_options *` instead of a `uint32_t bandwidth`: pass `NULL` where you passed `0`, or `&(moq_video_encode_options){.bandwidth = bandwidth}`.
 Its `lower` field takes the handle of the next lower rendition's encoder, to disable this one while its bandwidth grant cannot fund it; that needs a `bandwidth` and a bitrate above the lower encoder's.
-`moq_reservation_grant` reports the slice the track would get back while nothing subscribes to it, instead of no grant.
+`moq_reservation_rate` reports the slice the track would get back while nothing subscribes to it, instead of no grant.
 
 ### Decoders deliver reads
 

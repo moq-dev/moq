@@ -18,7 +18,7 @@ Decided with the maintainer on 2026-10-26; see the
 - Key generation (HMAC, RSA-2048, P-256, P-384, Ed25519) and PKCS#8/PKCS#1
   conversion move from aws-lc-rs and `p256`/`p384` to rind, keeping the DER
   encoding through `pkcs1`/`pkcs8` that
-  [auth-no-rsa](/quest/m1/auth-no-rsa.md) adds. Never hand-roll the encoding.
+  [moq-dev/moq#6898](https://github.com/moq-dev/moq/pull/6898) added. Never hand-roll the encoding.
 - reqwest switches to its no-provider feature.
 - The released-token compatibility tests keep passing unchanged.
 
@@ -28,4 +28,3 @@ Public API: moq-auth's error conversions from aws-lc-rs types change
 ## Required
 
 - [rind covers MoQ](/quest/m2/rind/covered.md) - the rind release this switches to
-- [moq-auth without the rsa crate](/quest/m1/auth-no-rsa.md) - lands first, so this moves aws-lc-rs calls rather than the `rsa` crate

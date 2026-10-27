@@ -41,7 +41,7 @@ from .publish import (
     TrackRequest,
 )
 from .server import Request, Server, Transport
-from .session import Bandwidth, GrantConsumer, Reservation, Session, Tokens
+from .session import Allocator, BandwidthConsumer, GrantConsumer, Reservation, Session, Tokens
 from .subscribe import (
     BroadcastConsumer,
     GroupConsumer,
@@ -81,6 +81,7 @@ from .types import (
 )
 
 __all__ = [
+    "Allocator",
     "Anchor",
     "Announce",
     "AnnounceConsumer",
@@ -95,7 +96,7 @@ __all__ = [
     "AudioEncoderInput",
     "AudioSampleFormat",
     "Backoff",
-    "Bandwidth",
+    "BandwidthConsumer",
     "BroadcastConsumer",
     "BroadcastDynamic",
     "BroadcastPrepared",

@@ -5,12 +5,12 @@
 //! setup, and learns the [`Grant`] it earned. `Session::auth`
 //! returns the [`Handle`]: [`grant`](Handle::grant) is the union of every token
 //! this side presented, and `add` presents another without
-//! reconnecting. The returned [`Auth`] is cloneable; dropping its last clone withdraws it.
+//! reconnecting. The returned [`Credential`] is cloneable; dropping its last clone withdraws it.
 //! A [`Route`](crate::origin::Route) can name it, so the request advertising the route
 //! carries it too, and swapping it renews that request in place.
 //!
 //! A handle passed to `Client::with_auth` outlives its sessions: each session built on it
-//! presents every token it holds, so a route naming one of its [`Auth`]s keeps it across a
+//! presents every token it holds, so a route naming one of its [`Credential`]s keeps it across a
 //! reconnect. Only the peer's verdict ends such a token; a session ending leaves it for the
 //! next. It backs one active session at a time, plus the ones draining after a GOAWAY.
 //!
@@ -255,7 +255,7 @@ struct Slot {
 	retry: Option<Duration>,
 	/// Why the token ended on this session, once it has.
 	ended: Option<Error>,
-	/// The last [`Auth`] clone dropped: the driver closes the stream.
+	/// The last [`Credential`] clone dropped: the driver closes the stream.
 	withdrawn: bool,
 }
 
@@ -353,7 +353,7 @@ impl Attached {
 		self.recompute();
 	}
 
-	/// The last [`Auth`] clone for token `id` dropped.
+	/// The last [`Credential`] clone for token `id` dropped.
 	fn withdraw(&mut self, id: u64) {
 		let Some(slot) = self.slots.get_mut(&id) else {
 			return;
@@ -558,7 +558,7 @@ impl Permit {
 ///
 /// A session made without one creates its own, returned by `Session::auth`, which ends
 /// with that session. Pass one to `Client::with_auth` instead and it outlives its
-/// sessions: each presents every token the handle holds, so an [`Auth`] it issued keeps
+/// sessions: each presents every token the handle holds, so a [`Credential`] it issued keeps
 /// riding a route's announcements across a reconnect. It backs one active session at a
 /// time, plus the ones draining after a GOAWAY.
 ///
@@ -584,7 +584,7 @@ impl Handle {
 	/// Present another token on every session of this handle, resolving once a peer accepts it
 	/// with how it did.
 	///
-	/// The grant joins the union while any clone of the returned [`Auth`] lives. With no
+	/// The grant joins the union while any clone of the returned [`Credential`] lives. With no
 	/// session live it waits for the next one. A refusal that may pass, such as an
 	/// unreachable auth server, is presented again after a backoff, and so is a token whose
 	/// stream the peer drops without a verdict. On moq-transport
@@ -598,14 +598,14 @@ impl Handle {
 	/// (moq-lite without AUTH, or a peer that takes no tokens in band), the peer's refusal
 	/// as [`Error::Session`], or the handle's end.
 	#[cfg(feature = "async")]
-	pub async fn add(&self, token: impl Into<Bytes>) -> Result<(Auth, Answer)> {
+	pub async fn add(&self, token: impl Into<Bytes>) -> Result<(Credential, Answer)> {
 		let auth = self.present(token.into())?;
 		let answer = kio::wait(|waiter| auth.poll_answered(waiter)).await?;
 		Ok((auth, answer))
 	}
 
 	/// Register a token and queue it on every open session.
-	pub(crate) fn present(&self, token: Bytes) -> Result<Auth> {
+	pub(crate) fn present(&self, token: Bytes) -> Result<Credential> {
 		let mut guard = self.state.lock();
 		let state = &mut *guard;
 		if let Some(err) = &state.closed {
@@ -616,7 +616,7 @@ impl Handle {
 			return Err(Error::GoingAway);
 		}
 		let id = state.present(token);
-		Ok(Auth {
+		Ok(Credential {
 			presented: std::sync::Arc::new(Presented {
 				state: self.state.clone(),
 				id,
@@ -879,7 +879,7 @@ impl Link {
 
 	/// Present a token: the session's own credential at setup, presented on this session
 	/// alone, or else one of the handle's, presented on every session.
-	pub(crate) fn present(&self, token: Bytes, setup: bool) -> Result<Auth> {
+	pub(crate) fn present(&self, token: Bytes, setup: bool) -> Result<Credential> {
 		if !setup {
 			return self.handle.present(token);
 		}
@@ -901,7 +901,7 @@ impl Link {
 			state.next_id += 1;
 			Ok(id)
 		})?;
-		Ok(Auth {
+		Ok(Credential {
 			presented: std::sync::Arc::new(Presented {
 				state: self.state().clone(),
 				id,
@@ -913,7 +913,7 @@ impl Link {
 	/// The token a request carries for `auth`, or `None` when the request goes out unnamed
 	/// under the session's scope: `auth` came from another handle, it ended here, or
 	/// requests carry no token on this version.
-	pub(crate) fn token(&self, auth: &Auth) -> Option<Bytes> {
+	pub(crate) fn token(&self, auth: &Credential) -> Option<Bytes> {
 		if !auth.presented.state.same_channel(self.state()) {
 			return None;
 		}
@@ -1347,19 +1347,19 @@ fn attached(links: &mut BTreeMap<u64, Attached>, id: u64) -> &mut Attached {
 /// removes its grant from the union. A [`Route`](crate::origin::Route) holding one keeps
 /// it presented while the route stands, across the handle's sessions.
 #[derive(Clone)]
-pub struct Auth {
+pub struct Credential {
 	presented: std::sync::Arc<Presented>,
 }
 
 #[cfg(test)]
-impl Auth {
+impl Credential {
 	/// The id the session presents this credential under.
 	pub(crate) fn id(&self) -> u64 {
 		self.presented.id
 	}
 }
 
-/// The token every clone of one [`Auth`] shares, withdrawn when the last drops.
+/// The token every clone of one [`Credential`] shares, withdrawn when the last drops.
 struct Presented {
 	state: kio::Shared<State>,
 	id: u64,
@@ -1377,7 +1377,7 @@ impl Presented {
 	}
 }
 
-impl Auth {
+impl Credential {
 	/// This credential's own grant on the live session: `None` until its peer answers,
 	/// while no session is live, forever on moq-transport without AUTH, and again once
 	/// the credential ends.
@@ -1419,18 +1419,18 @@ impl Auth {
 	}
 }
 
-impl PartialEq for Auth {
+impl PartialEq for Credential {
 	fn eq(&self, other: &Self) -> bool {
 		std::sync::Arc::ptr_eq(&self.presented, &other.presented)
 	}
 }
 
-impl Eq for Auth {}
+impl Eq for Credential {}
 
-impl std::fmt::Debug for Auth {
+impl std::fmt::Debug for Credential {
 	// Never the token: routes are logged, and a credential must not be.
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.debug_tuple("Auth").field(&self.presented.id).finish()
+		f.debug_tuple("Credential").field(&self.presented.id).finish()
 	}
 }
 
@@ -1490,7 +1490,7 @@ impl Selector {
 
 /// Watches a grant: the live session's union, or one credential's.
 ///
-/// Created by [`Handle::grant`] and [`Auth::grant`].
+/// Created by [`Handle::grant`] and [`Credential::grant`].
 pub struct Watch {
 	state: kio::Shared<State>,
 	selector: Selector,

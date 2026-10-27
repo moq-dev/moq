@@ -78,7 +78,7 @@ class GroupState {
 	// The first frame's timestamp, retained after reads. Media time only: an untimed group
 	// never has one, so it says nothing about whether a frame was written.
 	timestamp?: Timestamp;
-	// The newest frame's timestamp: where a reader that has taken every frame sits.
+	// The highest frame PTS, including when the decode-order tail presents earlier.
 	latest?: Timestamp;
 	// Accepted below the track's eviction watermark, where nothing proves where it starts,
 	// so this mirror drives no media-time expiry.
@@ -104,7 +104,8 @@ function appendFrame(state: GroupState, frame: Frame) {
 	if (state.closed.peek() !== undefined) throw new Error("group is closed");
 
 	state.timestamp ??= frame.timestamp;
-	state.latest = frame.timestamp;
+	if (frame.timestamp === undefined) state.latest = undefined;
+	else if (state.latest === undefined || state.latest.isBefore(frame.timestamp)) state.latest = frame.timestamp;
 	state.cacheBytes += stored(frame)?.payload.length ?? frame.payload.byteLength;
 	state.frames.mutate((frames) => {
 		frames.push(frame);
@@ -237,7 +238,6 @@ export class Producer {
 			group.#admits ??= [];
 			group.#admits.push(admit);
 		};
-		hooks.groupStart = (group) => (group.#state.total.peek() > 0 ? group.#state.timestamp : undefined);
 		hooks.overRefresh = (group, ratio) => {
 			const state = group.#state;
 			const first = state.frames.peek()[0];

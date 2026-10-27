@@ -7809,7 +7809,7 @@ mod tests {
 		Subscriber,
 		crate::lite::test_transport::Log,
 		crate::auth::Link,
-		Vec<crate::auth::Auth>,
+		Vec<crate::auth::Credential>,
 		crate::util::TaskSet,
 	) {
 		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
@@ -7982,7 +7982,7 @@ mod tests {
 
 	/// A subscriber whose grant from the peer covers everything until `auth.ended(0, ..)`
 	/// revokes it, with the token handle to hold meanwhile.
-	fn revocable_auth() -> (crate::auth::Link, crate::auth::Auth) {
+	fn revocable_auth() -> (crate::auth::Link, crate::auth::Credential) {
 		let auth = crate::auth::Link::new(true);
 		let cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
 		auth.granted(0, crate::auth::Grant::all());
@@ -9168,7 +9168,7 @@ mod tests {
 						if fetching {
 							track.fetch_group(0, None).await.map(|_| ())
 						} else {
-							track.query().await.map(|_| ())
+							track.info().await.map(|_| ())
 						}
 					});
 					assert!(futures::poll!(pending.as_mut()).is_pending());
@@ -9251,7 +9251,7 @@ mod tests {
 			let consumer = producer.consume();
 			let track = consumer.track("video").unwrap();
 			// Demand with nobody subscribing learns the track from TRACK_STATUS.
-			let mut query = std::pin::pin!(track.query());
+			let mut query = std::pin::pin!(track.info());
 			assert!(futures::poll!(query.as_mut()).is_pending());
 			let request = dynamic.requested_track().await.expect("no track requested");
 
@@ -11245,7 +11245,7 @@ mod tests {
 	) -> (
 		Subscriber,
 		crate::auth::Requests,
-		crate::auth::Auth,
+		crate::auth::Credential,
 		origin::Consumer,
 		crate::lite::test_transport::ScriptedSession,
 	) {
@@ -11263,7 +11263,7 @@ mod tests {
 	) -> (
 		Subscriber,
 		crate::auth::Requests,
-		crate::auth::Auth,
+		crate::auth::Credential,
 		origin::Consumer,
 		S,
 	) {

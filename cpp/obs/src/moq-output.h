@@ -191,7 +191,7 @@ private:
 	std::map<obs_encoder_t *, Track> audio_tracks;
 	// The session's allocator once it connects. It survives reconnects: grants
 	// read empty while disconnected and resume on the next connection.
-	std::shared_ptr<moq::Bandwidth> bandwidth;
+	std::shared_ptr<moq::Allocator> allocator;
 
 	// `closed()` of retired sessions still draining, which the destructor waits
 	// out. Guarded by signal_mutex.

@@ -453,6 +453,19 @@ test("verify - private to public key", async () => {
 	expect(publicKey.key_ops.indexOf("verify") >= 0).toBeTruthy();
 });
 
+test("RSA imports refuse partial private parameters and other primes", () => {
+	const original = Key.parse(INSECURE_TEST_RSA_KEYS.RS256.private);
+	if (original.kty !== "RSA") throw new Error("expected RSA fixture");
+	for (const field of ["d", "p", "q", "dp", "dq", "qi"] as const) {
+		const partial = { ...original };
+		delete partial[field];
+		expect(() => Key.parse(encodeJwk(partial))).toThrow();
+	}
+	for (const oth of [[], [{ r: "AQ", d: "AQ", t: "AQ" }], null]) {
+		expect(() => Key.parse(encodeJwk({ ...original, oth }))).toThrow();
+	}
+});
+
 test("RSA algorithms - sign and verify", async () => {
 	for (const alg of ["RS256", "RS384", "RS512"] as const) {
 		const key = Key.parse(INSECURE_TEST_RSA_KEYS[alg].private);

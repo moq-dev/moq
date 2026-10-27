@@ -1,11 +1,11 @@
 import { expect, jest, onTestFinished, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
 import { Signal } from "@moq/signals";
-import type { Auth, Grant } from "../auth.ts";
+import type { Credential, Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
 import * as Epoch from "../epoch.ts";
 import { error, ProtocolViolation, SessionCode, SessionError, StreamCode, unauthorized } from "../error.ts";
-import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "../group.ts";
+import { MAX_GROUP_FRAMES } from "../group.ts";
 import { type Hop, HopSchema } from "../hop.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair, SessionBroadcast } from "../mock.ts";
@@ -278,10 +278,9 @@ test("TRACK_STATUS is answered on every draft without subscribing", async () => 
 				maxAge: Milli(5000),
 				priority: 2,
 			});
-			const group = new GroupProducer(4);
+			const group = track.createGroup(4);
 			group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(0) });
 			group.writeFrame({ payload: new Uint8Array([2]), timestamp: Timestamp.fromMillis(1) });
-			track.writeGroup(group);
 			const subscribed = spyOn(track, "subscribe");
 
 			const { stream, wire } = requestStream(version);
@@ -791,24 +790,21 @@ test("a blocked group header is reset when the group expires", async () => {
 			server,
 		);
 
-		const old = new GroupProducer(0);
+		const old = track.createGroup(0);
 		old.writeFrame({ payload: new TextEncoder().encode("old"), timestamp: Timestamp.fromMillis(0) });
 		old.finish();
-		track.writeGroup(old);
 		await headerStarted;
 
-		const edge = new GroupProducer(1);
+		const edge = track.createGroup(1);
 		edge.writeFrame({ payload: new TextEncoder().encode("edge"), timestamp: Timestamp.fromMillis(10_000) });
 		edge.finish();
-		track.writeGroup(edge);
 
 		// A group beyond the edge, so group 0's reach (10s, where group 1 begins) is
 		// provably past the budget. A group is bounded by where its successor starts, so
 		// the successor alone never convicts it: nothing yet proves group 0 ends sooner.
-		const later = new GroupProducer(2);
+		const later = track.createGroup(2);
 		later.writeFrame({ payload: new TextEncoder().encode("later"), timestamp: Timestamp.fromMillis(20_000) });
 		later.finish();
-		track.writeGroup(later);
 
 		const resetBeforeRelease = await Promise.race([
 			streamReset.then(() => true),
@@ -877,10 +873,9 @@ test("a group stream whose FIN never completes is reset when the group expires",
 		);
 
 		const write = (sequence: number) => {
-			const group = new GroupProducer(sequence);
+			const group = track.createGroup(sequence);
 			group.writeFrame({ payload: new TextEncoder().encode("frame"), timestamp: Timestamp.fromMillis(0) });
 			group.finish();
-			track.writeGroup(group);
 		};
 
 		write(0);
@@ -962,10 +957,9 @@ test("a group stream whose FIN never completes is reset after the cache evicts i
 
 		// Frozen timestamps, so only the wall clock since group 1 arrived convicts group 0.
 		const write = (sequence: number) => {
-			const group = new GroupProducer(sequence);
+			const group = track.createGroup(sequence);
 			group.writeFrame({ payload: new TextEncoder().encode("frame"), timestamp: Timestamp.fromMillis(0) });
 			group.finish();
-			track.writeGroup(group);
 		};
 
 		write(0);
@@ -1048,10 +1042,9 @@ test("a group that goes stale while its stream opens writes nothing", async () =
 		);
 
 		const write = (sequence: number, ms: number) => {
-			const group = new GroupProducer(sequence);
+			const group = track.createGroup(sequence);
 			group.writeFrame({ payload: new TextEncoder().encode("frame"), timestamp: Timestamp.fromMillis(ms) });
 			group.finish();
-			track.writeGroup(group);
 		};
 		write(0, 0);
 		await opening;
@@ -1965,10 +1958,10 @@ function republish(origin: OriginProducer, old: BroadcastProducer) {
 /** The tokens one session issued, each carried as its own bytes. */
 class Tokens {
 	readonly ended = new Signal(0);
-	#issued = new Map<Auth, Uint8Array>();
+	#issued = new Map<Credential, Uint8Array>();
 
-	issue(value: string): Auth {
-		const token: Auth = {
+	issue(value: string): Credential {
+		const token: Credential = {
 			grant: new Signal<Grant | undefined>(undefined),
 			closed: new Promise(() => {}),
 			close: () => {
@@ -1980,7 +1973,7 @@ class Tokens {
 		return token;
 	}
 
-	carried(token: Auth | undefined): Uint8Array | undefined {
+	carried(token: Credential | undefined): Uint8Array | undefined {
 		return token && this.#issued.get(token);
 	}
 }
@@ -3283,8 +3276,7 @@ test.each(["ascending", "descending"] as const)("draft-22: a sparse fill serves 
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	for (const sequence of [0, 3, 9]) {
-		const group = new GroupProducer(sequence);
-		track.writeGroup(group);
+		const group = track.createGroup(sequence);
 		for (let i = 0; i < 2; i++)
 			group.writeFrame({ payload: new TextEncoder().encode(`${sequence}.${i}`), timestamp: Timestamp.now() });
 		group.finish();
@@ -3353,8 +3345,7 @@ async function subscribeOkLargest(version: IetfVersion): Promise<SubscribeOk["la
 	const fx = fixture(version);
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
-	const group = new GroupProducer(5);
-	track.writeGroup(group);
+	const group = track.createGroup(5);
 	for (let i = 0; i < 4; i++) {
 		group.writeFrame({ payload: new TextEncoder().encode(`5.${i}`), timestamp: Timestamp.now() });
 	}
@@ -3529,8 +3520,7 @@ test.each([false, true])("draft-22: exact terminal 5/5 survives group FIN=%s", a
 		}),
 	);
 	try {
-		const group = new GroupProducer(5);
-		track.writeGroup(group);
+		const group = track.createGroup(5);
 		for (let i = 0; i < 5; i++) group.writeFrame({ payload: new Uint8Array([i]) });
 		const uni = await fx.uni.read();
 		if (!uni.value) throw new Error("missing group stream");
@@ -3597,8 +3587,7 @@ test("draft-22: an inline terminal reset after its FIN falls back to a standalon
 		}),
 	);
 	try {
-		const group = new GroupProducer(5);
-		track.writeGroup(group);
+		const group = track.createGroup(5);
 		for (let i = 0; i < 5; i++) group.writeFrame({ payload: new Uint8Array([i]) });
 		const uni = await fx.uni.read();
 		if (!uni.value) throw new Error("missing group stream");

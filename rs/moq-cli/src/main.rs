@@ -476,7 +476,7 @@ async fn spawn_moq(
 		// Read before the handle moves into the task. This allocator is persistent: it
 		// survives reconnects, granting `None` while down, so it can be wired up before
 		// anything connects, and every session probes for its reservations.
-		bandwidth = reconnect.bandwidth();
+		bandwidth = reconnect.allocator();
 		let closed = reconnect.clone();
 		tasks.spawn(async move { Ok(closed.closed().await?) });
 		connection = Some(reconnect);

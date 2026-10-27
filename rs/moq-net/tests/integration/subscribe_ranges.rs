@@ -694,8 +694,8 @@ async fn unresolved_time_reader_never_changes_sibling_demand() {
 			.unwrap();
 
 			let track = fixture.remote.track("quiet").unwrap();
-			// Pin the public track instance through a query before creating the pending reader.
-			let query = track.query();
+			// Pin the public track instance through an info request before creating the pending reader.
+			let query = track.info();
 			let track = query.track();
 
 			let mut refused = Some(track.subscribe(Subscription::default().with_ranges([Range {

@@ -2,7 +2,7 @@ import { expect, setSystemTime, test } from "bun:test";
 import { Milli } from "@moq/clock";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { GroupTooLarge, NotFound } from "./error.ts";
-import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
+import { MAX_GROUP_FRAMES } from "./group.ts";
 import { hooks } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { Timescale, Timestamp } from "./time.ts";
@@ -85,8 +85,7 @@ test("a replacement producer starts over", async () => {
 	const firstRequest = await firstPull;
 	if (!firstRequest) throw new Error("expected first request");
 	const first = firstRequest.accept({ timescale: Timescale.MILLI });
-	const group = new GroupProducer(8);
-	first.writeGroup(group);
+	const group = first.createGroup(8);
 	group.writeFrame(textFrame("a", Timestamp.fromMillis(1000)));
 	group.finish();
 	firstSubscriber.close();

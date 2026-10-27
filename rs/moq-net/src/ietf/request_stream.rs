@@ -592,7 +592,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn request_stream_messages_count_without_their_type() {
 		use crate::lite::test_transport::ScriptedSession;
-		use crate::stats::{Control, Registry, Tier};
+		use crate::stats::{Message, Registry, Tier};
 		let registry = Registry::new(Default::default());
 		let stats = registry.tier(Tier::default()).session("");
 		let version = Version::Draft22;
@@ -610,8 +610,8 @@ mod tests {
 			let rows = registry.snapshot().control();
 			rows.into_iter().find(|row| row.1 == class).map(|row| row.2.rx)
 		};
-		assert_eq!(rx(Control::Goaway), Some(4));
-		assert_eq!(rx(Control::Other), Some(2));
+		assert_eq!(rx(Message::Goaway), Some(4));
+		assert_eq!(rx(Message::Other), Some(2));
 	}
 
 	#[moq_clock::test]

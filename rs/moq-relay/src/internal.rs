@@ -549,12 +549,12 @@ fn render_metrics(
 		(
 			"moq_relay_control_tx_bytes_total",
 			"Control-message bytes encoded for sending, including codec prefixes; excludes transport overhead.",
-			(|b: &moq_net::stats::Bytes| b.tx) as fn(&moq_net::stats::Bytes) -> u64,
+			(|b: &moq_net::stats::Totals| b.tx) as fn(&moq_net::stats::Totals) -> u64,
 		),
 		(
 			"moq_relay_control_rx_bytes_total",
 			"Control-message bytes decoded, including codec prefixes; excludes transport overhead.",
-			(|b: &moq_net::stats::Bytes| b.rx) as fn(&moq_net::stats::Bytes) -> u64,
+			(|b: &moq_net::stats::Totals| b.rx) as fn(&moq_net::stats::Totals) -> u64,
 		),
 	] {
 		let _ = writeln!(out, "# HELP {name} {help}");

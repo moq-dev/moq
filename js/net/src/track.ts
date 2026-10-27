@@ -1294,10 +1294,9 @@ export class Producer {
 		this.#pruneTimerAt = at;
 	}
 
-	// Retain a source group and fan it out to every live sink. A group that already holds
-	// frame 0 passes its checked `start` and whether it is `late`; any other checks frame 0
+	// Retain a source group and fan it out to every live sink; its frame 0 is checked
 	// against this track when it lands.
-	#publish(group: GroupProducer, start?: Timestamp, late = false): void {
+	#publish(group: GroupProducer): void {
 		this.#settle();
 		const entry: CachedGroup = { group, mirrors: new Map<TrackState, GroupConsumer>(), arrived: now() };
 		this.#undrop(group.sequence);
@@ -1311,8 +1310,6 @@ export class Producer {
 		const sequence = group.sequence;
 		if (this.#unchecked()) {
 			// Its timestamps may rewind, so they are not checked.
-		} else if (start) {
-			this.#record(entry, start, late);
 		} else {
 			hooks.admitGroupStart(group, (start) => {
 				const late = this.#admit(sequence, start);
@@ -1397,7 +1394,7 @@ export class Producer {
 	 *
 	 * The broadcast remembers nothing of an earlier producer of the name, so a replacement
 	 * starts at 0. Since a name always means the same content, a replacement continues past
-	 * its predecessor's groups with {@link writeGroup}.
+	 * its predecessor's groups with {@link createGroup}.
 	 *
 	 * Its frames must match the track's {@link Info.timescale}: a timestamp on every frame of
 	 * a timed track and none on an untimed one, or the write throws {@link TimestampMismatch}.
@@ -1413,35 +1410,31 @@ export class Producer {
 	}
 
 	/**
-	 * Insert an existing group into the track.
+	 * Create a new group with the given sequence number.
 	 *
 	 * Throws on a sequence that is still cached: a live duplicate would fan out to every
 	 * subscriber twice. An aborted incarnation is evicted so a fresh group can serve the
 	 * sequence again. Best effort (mirrors Rust): nothing remembers a sequence whose cache
-	 * entry is already gone, so a long-evicted sequence is accepted as new. Throws
-	 * {@link TimestampMismatch} if the group already holds a frame whose timedness
-	 * disagrees with the track's {@link Info.timescale}, or whose first frame starts before
-	 * the group below it or after the one above it.
+	 * entry is already gone, so a long-evicted sequence is accepted as new. Its frames are
+	 * checked like {@link appendGroup}'s.
 	 */
-	writeGroup(group: GroupProducer) {
-		this.#writable(group.sequence);
-		this.#bind(group);
-		this.#cap(group);
-		const existing = this.#cached.get(group.sequence);
+	createGroup(sequence: number): GroupProducer {
+		this.#writable(sequence);
+		const existing = this.#cached.get(sequence);
 		if (existing) {
 			if (!(existing.group.closed.peek() instanceof Error)) {
-				throw new Error(`duplicate group: sequence=${group.sequence}`);
+				throw new Error(`duplicate group: sequence=${sequence}`);
 			}
 			// Subscribers may have seen the aborted incarnation's start, so it stays a watermark.
 			this.#evict(existing);
 			this.#uncache(existing, true);
 		}
 
-		// A group written before it joined is checked here, before it is cached or fanned out.
-		const start = this.#unchecked() ? undefined : hooks.groupStart(group);
-		const late = start !== undefined && this.#admit(group.sequence, start);
-
-		this.#publish(group, start, late);
+		const group = new GroupProducer(sequence);
+		this.#bind(group);
+		this.#cap(group);
+		this.#publish(group);
+		return group;
 	}
 
 	// Whether this track's timestamps may rewind (see {@link Info.ietf}).

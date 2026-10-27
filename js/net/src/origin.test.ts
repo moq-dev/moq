@@ -4,7 +4,6 @@ import { announcedView } from "./announced.test-util";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import * as Epoch from "./epoch.ts";
 import { StreamCode, StreamError } from "./error.ts";
-import { Producer as GroupProducer } from "./group.ts";
 import { HopSchema, Route } from "./hop.ts";
 import { hooks, spreadHash } from "./internal.ts";
 import { SessionBroadcast, textFrame } from "./mock.ts";
@@ -2254,7 +2253,7 @@ test("demand held across an epoch change asks again, unless it named the old epo
 	const track = next.createTrack("video");
 	hooks.acceptRequest((await it.next()).value, next);
 	const subscription = (await unpinned)?.track("video").subscribe();
-	track.writeGroup(new GroupProducer(7));
+	track.createGroup(7);
 	expect((await subscription?.recvGroup())?.sequence).toBe(7);
 
 	subscription?.close();
@@ -2302,7 +2301,7 @@ test("demand held across an epoch round trip still asks again", async () => {
 	const track = next.createTrack("video");
 	hooks.acceptRequest((await it.next()).value, next);
 	const subscription = (await demanded)?.track("video").subscribe();
-	track.writeGroup(new GroupProducer(7));
+	track.createGroup(7);
 	expect((await subscription?.recvGroup())?.sequence).toBe(7);
 
 	subscription?.close();
@@ -2467,7 +2466,7 @@ test.each([
 	expect(fresh.active.peek()?.epoch).toBe(to);
 	const subscription = fresh.active.peek()?.track("video").subscribe();
 	const forwarded = (await demanded)?.track("video").subscribe();
-	nextTrack.writeGroup(new GroupProducer(7));
+	nextTrack.createGroup(7);
 	expect((await subscription?.recvGroup())?.sequence).toBe(7);
 	expect((await forwarded?.recvGroup())?.sequence).toBe(7);
 
@@ -2562,7 +2561,7 @@ test("a session's re-request after an epoch update asks the handler again", asyn
 	const track = next.createTrack("video");
 	hooks.acceptRequest((await requests.next()).value, next);
 	const subscription = (await after)?.track("video").subscribe();
-	track.writeGroup(new GroupProducer(7));
+	track.createGroup(7);
 	expect((await subscription?.recvGroup())?.sequence).toBe(7);
 
 	subscription?.close();
@@ -2599,7 +2598,7 @@ test("an update does not override route selection: another claim at the epoch ke
 	expect(held.active.peek()?.epoch).toBe(EPOCH);
 	expect(fresh.active.peek()?.epoch).toBe(EPOCH);
 	const subscription = fresh.active.peek()?.track("video").subscribe();
-	track.writeGroup(new GroupProducer(7));
+	track.createGroup(7);
 	expect((await subscription?.recvGroup())?.sequence).toBe(7);
 
 	subscription?.close();

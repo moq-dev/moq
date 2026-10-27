@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from moq_ffi import (
-    MoqBandwidth,
+    MoqAllocator,
     MoqBandwidthConsumer,
     MoqGrantConsumer,
     MoqReservation,
@@ -116,12 +116,12 @@ class Session:
         inner = self._inner.tokens()
         return None if inner is None else Tokens(inner)
 
-    def recv_bandwidth(self) -> Bandwidth.Consumer | None:
+    def recv_bandwidth(self) -> BandwidthConsumer | None:
         """Hold an owned receive-estimate consumer; releasing the last one stops PROBE."""
         inner = self._inner.recv_bandwidth()
-        return None if inner is None else Bandwidth.Consumer(inner)
+        return None if inner is None else BandwidthConsumer(inner)
 
-    def bandwidth(self) -> Bandwidth:
+    def allocator(self) -> Allocator:
         """The session's bandwidth allocator.
 
         Every call returns a handle to the same registry, so reservations made
@@ -129,7 +129,7 @@ class Session:
         reconnects: the grant is ``None`` while disconnected and resumes on the
         next connection.
         """
-        return Bandwidth(self._inner.bandwidth())
+        return Allocator(self._inner.allocator())
 
 
 class GrantConsumer:
@@ -213,31 +213,32 @@ class Tokens:
         await self._inner.answered()
 
 
-class Bandwidth:
+class BandwidthConsumer:
+    """An owned bandwidth estimate, in bits per second, returned by :meth:`Session.recv_bandwidth`."""
+
+    def __init__(self, inner: MoqBandwidthConsumer) -> None:
+        self._inner = inner
+
+    def rate(self) -> int | None:
+        """The current estimate, or None while unavailable."""
+        return self._inner.rate()
+
+    async def rate_changed(self) -> int | None:
+        """Wait for the estimate to change and return the new rate, raising when its producer closes."""
+        return await self._inner.rate_changed()
+
+    def cancel(self) -> None:
+        """Release this consumer's demand, including a pending wait."""
+        self._inner.cancel()
+
+
+class Allocator:
     """Divides one connection's send estimate among the tracks sharing it.
 
-    Minted by :meth:`Session.bandwidth`. Clones share one reservation registry.
+    Minted by :meth:`Session.allocator`. Clones share one reservation registry.
     """
 
-    class Consumer:
-        """An owned bandwidth estimate, in bits per second."""
-
-        def __init__(self, inner: MoqBandwidthConsumer) -> None:
-            self._inner = inner
-
-        def rate(self) -> int | None:
-            """The current estimate, or None while unavailable."""
-            return self._inner.rate()
-
-        async def rate_changed(self) -> int | None:
-            """Wait for the estimate to change and return the new rate, raising when its producer closes."""
-            return await self._inner.rate_changed()
-
-        def cancel(self) -> None:
-            """Release this consumer's demand, including a pending wait."""
-            self._inner.cancel()
-
-    def __init__(self, inner: MoqBandwidth) -> None:
+    def __init__(self, inner: MoqAllocator) -> None:
         self._inner = inner
 
     def reserve(self, demand: TrackDemand, max_bps: int) -> Reservation:
@@ -251,19 +252,19 @@ class Bandwidth:
 
 
 class Reservation:
-    """One track's standing claim on a :class:`Bandwidth`.
+    """One track's standing claim on an :class:`Allocator`.
 
-    :meth:`grant` is a snapshot: ``None`` means no estimate, so hold the
-    current rate, and ``0`` is a real zero grant. While nothing subscribes it
+    :meth:`rate` is a snapshot: ``None`` means no estimate, so hold the
+    current rate, and ``0`` is a real zero rate. While nothing subscribes it
     is the share the track would get.
     """
 
     def __init__(self, inner: MoqReservation) -> None:
         self._inner = inner
 
-    def grant(self) -> int | None:
+    def rate(self) -> int | None:
         """This reservation's slice right now, in bits per second."""
-        return self._inner.grant()
+        return self._inner.rate()
 
     def update(self, max_bps: int) -> None:
         """Change the ceiling, keeping the same claim."""

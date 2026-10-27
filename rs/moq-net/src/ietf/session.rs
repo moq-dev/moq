@@ -140,7 +140,7 @@ impl std::future::Future for Driver {
 	}
 }
 
-pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle, Option<crate::auth::Auth>), Error> {
+pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle, Option<crate::auth::Credential>), Error> {
 	let Config {
 		runtime,
 		stats,
@@ -1494,7 +1494,7 @@ async fn read_goaways<R: crate::transport::poll::RecvStream>(
 		let msg: ietf::GoAway = body.message(version)?;
 		reader
 			.stats()
-			.control(crate::stats::Control::Goaway, body.0.len() + 2, true);
+			.control(crate::stats::Message::Goaway, body.0.len() + 2, true);
 		tracing::info!(message = ?msg, "received GOAWAY");
 
 		// Draft-18 names the first of our own Request IDs it did not process: even for a

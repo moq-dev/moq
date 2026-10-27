@@ -570,7 +570,7 @@ impl PausedIetfModern {
 			version,
 			peer_setup,
 		} = self;
-		server.stats.control(stats::Control::Session, peer_setup.size, true);
+		server.stats.control(stats::Message::Session, peer_setup.size, true);
 		let (publish, subscribe) = server.stat_tagged_origins();
 		let peer_implementation = setup::PeerImplementation::known(peer_setup.implementation);
 
@@ -656,7 +656,7 @@ impl PausedLegacy {
 			client_setup_size,
 		} = self;
 		let mut stream = stream.with_stats(&server.stats);
-		server.stats.control(stats::Control::Session, client_setup_size, true);
+		server.stats.control(stats::Message::Session, client_setup_size, true);
 		let (publish, subscribe) = server.stat_tagged_origins();
 
 		// Encode parameters using the version-appropriate type.
@@ -936,7 +936,7 @@ impl Handshake {
 					version,
 					client_setup,
 				} => {
-					server.stats.control(stats::Control::Session, client_setup.size, true);
+					server.stats.control(stats::Message::Session, client_setup.size, true);
 					server.start_lite(runtime, session, version, Some(client_setup), peer_hop, auth)
 				}
 				PausedHandshake::IetfModern(paused) => paused.ok(server, runtime, peer_hop, auth),
@@ -1188,9 +1188,6 @@ mod tests {
 		}
 		fn poll_closed(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Error> {
 			std::task::Poll::Pending
-		}
-		fn stats(&self) -> impl crate::transport::Stats {
-			crate::transport::StatsUnavailable
 		}
 	}
 
