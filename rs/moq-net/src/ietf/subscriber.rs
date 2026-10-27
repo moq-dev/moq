@@ -3813,18 +3813,30 @@ impl Subscriber {
 						Ok(bounds) => *bounds,
 						Err(err) => return Poll::Ready(End::Invalid(err.clone())),
 					};
-					let ranges = if bounds != sent_bounds {
-						// The prior head must be handed off before another fill can own it.
-						let ready = fill.poll(waiter, |fill| {
-							if fill.outstanding() {
-								Poll::Pending
-							} else {
-								Poll::Ready(())
-							}
-						});
-						if Filter::is_draft22(self.version) && ready.is_pending() {
-							return Poll::Pending;
-						}
+					let widened = match (bounds.0, sent_bounds.0) {
+						(None, Some(_)) => true,
+						(Some(start), Some(prior)) => start < prior,
+						_ => false,
+					} || match (bounds.1, sent_bounds.1) {
+						(None, Some(_)) => true,
+						(Some(end), Some(prior)) => end > prior,
+						_ => false,
+					};
+					// A widening's fill would own the head, so it waits for the prior fill to hand
+					// its head off. Nothing else does: a fill stream reset before its header names
+					// no request, so that fill never settles.
+					let deferred = widened
+						&& Filter::is_draft22(self.version)
+						&& fill
+							.poll(waiter, |fill| {
+								if fill.outstanding() {
+									Poll::Pending
+								} else {
+									Poll::Ready(())
+								}
+							})
+							.is_pending();
+					let ranges = if bounds != sent_bounds && !deferred {
 						let mut join = if Filter::is_draft22(self.version) {
 							match subscribe_join(bounds.0, bounds.1, self.version) {
 								Ok(join) => join,
@@ -3847,15 +3859,6 @@ impl Subscriber {
 								fill: None,
 								fetch: false,
 							}
-						};
-						let widened = match (bounds.0, sent_bounds.0) {
-							(None, Some(_)) => true,
-							(Some(start), Some(prior)) => start < prior,
-							_ => false,
-						} || match (bounds.1, sent_bounds.1) {
-							(None, Some(_)) => true,
-							(Some(end), Some(prior)) => end > prior,
-							_ => false,
 						};
 						if widened && Filter::is_draft22(self.version) {
 							join.fill = Some(ietf::Fill {
@@ -18135,6 +18138,44 @@ mod new_group_tests {
 		assert_eq!(sent, Some(6));
 		accept(&mut stream, true, 5).await;
 		quiet(&mut stream).await;
+		relay.serving.abort();
+	}
+
+	/// A fill whose stream reset before its header never settles. It holds back only a
+	/// widening, whose own fill would take the head; a narrowing still goes up.
+	#[moq_clock::test]
+	async fn an_unsettled_fill_holds_back_only_a_widening() {
+		let (mut relay, mut first) = relay().await;
+		let (mut stream, _) = relay.accept().await;
+		accept(&mut stream, false, 5).await;
+		let fill = relay
+			.probe
+			.state
+			.lock()
+			.subscribes
+			.values()
+			.next()
+			.unwrap()
+			.fill
+			.clone();
+		*fill.write().ok().unwrap() = Fill::Serving(None);
+
+		first.update(track::Subscription::default().with_range(6..)).unwrap();
+		let (id, body) = read(&mut stream).await;
+		assert_eq!(id, ietf::SubscribeUpdate::ID);
+		let msg = ietf::SubscribeUpdate::decode_msg(&mut body.decoder(VERSION), VERSION).unwrap();
+		assert!(msg.filter.is_some(), "the narrowing went up");
+		assert!(msg.fill.is_none());
+		answer(&mut stream).await;
+
+		first.update(track::Subscription::default()).unwrap();
+		quiet(&mut stream).await;
+
+		*fill.write().ok().unwrap() = Fill::Done;
+		let (id, body) = read(&mut stream).await;
+		assert_eq!(id, ietf::SubscribeUpdate::ID);
+		let msg = ietf::SubscribeUpdate::decode_msg(&mut body.decoder(VERSION), VERSION).unwrap();
+		assert!(msg.fill.is_some(), "the widening went up once the fill settled");
 		relay.serving.abort();
 	}
 }
