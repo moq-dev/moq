@@ -151,9 +151,8 @@ lite-07; bitrate enforcement is not part of this release.
 - [poll_acked on moq-net's send stream](/quest/m2/quic-ack-hook.md) - the
   backend-neutral hook on moq-net's own transport trait that awaits an
   acknowledged stream offset, implemented by the moq-tokio and moq-uring adapters
-- [Starvation at frame granularity](/quest/m2/starvation-frames.md) - the
-  acknowledged frontier moves at every frame boundary through `poll_acked`,
-  with a delivery-delay histogram for jitter
+- [Delivery delay](/quest/m2/delivery-delay.md) - a per-frame
+  delivery-delay histogram from `poll_acked`, so viewer jitter is visible
 - [#3199](/quest/m2/3199-moq-uring-remove-sq-indirection-and-per-enter-ring-fd.md) - moq-uring: remove SQ indirection and per-enter ring fd lookup, if a profile shows the win
 - [#3200](/quest/m2/3200-moq-uring-batch-completion-wakeups-with-min-timeout.md) - moq-uring: batch completion wakeups with MIN_TIMEOUT
 - [Browser media report](/quest/m2/rs2ts-browser-report.md) - compare Rust-backed and handwritten @moq/net through full media workloads, supplementing the pre-adoption comparisons

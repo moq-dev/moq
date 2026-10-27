@@ -81,6 +81,7 @@ export class Consumer<T> {
 	}
 }
 
+/** Types for {@link Consumer}. */
 export namespace Consumer {
 	/** Stream consumer options, including the source track. */
 	export type Config<T> = CodecConfig<T> & { track: Moq.Track.Subscriber };

@@ -36,6 +36,7 @@ declare namespace Audio_2 {
         Codec,
         Encoder,
         EncoderInput,
+        EncoderOutput,
         EncoderProps,
         Opus,
         OpusConfig,
@@ -45,6 +46,7 @@ declare namespace Audio_2 {
         Format,
         CaptureInput,
         CaptureProps,
+        CaptureOutput,
         Capture,
         isSampleSource,
         sourceKind,
@@ -59,37 +61,7 @@ declare namespace Audio_2 {
         TrackSettings
     }
 }
-
-declare namespace Audio_3 {
-    export {
-        Aac,
-        AacConfig,
-        Codec,
-        Encoder,
-        EncoderInput,
-        EncoderProps,
-        Opus,
-        OpusConfig,
-        Stats,
-        Rendition_2 as Rendition,
-        AudioFrame,
-        Format,
-        CaptureInput,
-        CaptureProps,
-        Capture,
-        isSampleSource,
-        sourceKind,
-        normalizeSource,
-        Kind_2 as Kind,
-        CodecMime,
-        Source_2 as Source,
-        SourceConfig,
-        SampleSource,
-        Constraints,
-        StreamTrack,
-        TrackSettings
-    }
-}
+export { Audio_2 as Audio }
 
 interface AudioFrame {
     channels: Float32Array[];
@@ -126,8 +98,8 @@ export type BroadcastInput = {
 class Camera {
     constructor(props?: CameraProps);
     close(): void;
-    constraints: Signal<Encoder_2.Constraints | undefined>;
-    static readonly DEFAULT_CONSTRAINTS: Encoder_2.Constraints;
+    constraints: Signal<Video.Constraints | undefined>;
+    static readonly DEFAULT_CONSTRAINTS: Video.Constraints;
     readonly device: Device<"video">;
     readonly in: Readonlys<CameraInput>;
     readonly out: Readonlys<CameraOutput>;
@@ -144,7 +116,7 @@ type CameraOutput = {
 };
 
 interface CameraProps extends Inputs<CameraInput> {
-    constraints?: Encoder_2.Constraints | Signal<Encoder_2.Constraints | undefined>;
+    constraints?: Video.Constraints | Signal<Video.Constraints | undefined>;
     device?: DeviceProps;
 }
 
@@ -263,28 +235,7 @@ class Encoder {
     volume: Signal<number>;
 }
 
-declare namespace Encoder_2 {
-    export {
-        Rendition_3 as Rendition,
-        CaptureInput_2 as CaptureInput,
-        Capture_2 as Capture,
-        Stats_2 as Stats,
-        Config,
-        EncoderInput_2 as EncoderInput,
-        EncoderProps_2 as EncoderProps,
-        Encoder_3 as Encoder,
-        normalizeSource_2 as normalizeSource,
-        isStreamTrack,
-        Source_3 as Source,
-        SourceConfig_2 as SourceConfig,
-        FrameSource,
-        StreamTrack_2 as StreamTrack,
-        TrackSettings_2 as TrackSettings,
-        Constraints_2 as Constraints
-    }
-}
-
-class Encoder_3 {
+class Encoder_2 {
     constructor(name: string, props?: EncoderProps_2);
     get capture(): Capture_2 | undefined;
     close(): void;
@@ -335,13 +286,13 @@ type EncoderProps_2 = Inputs<EncoderInput_2> & {
     config?: Config | Signal<Config | undefined>;
 };
 
-class Fanout<T> {
+export class Fanout<T> {
     constructor(source: ReadableStream<T>, props?: FanoutProps<T>);
     close(): void;
     subscribe(effect: Effect, queue?: number): ReadableStream<T>;
 }
 
-interface FanoutProps<T> {
+export interface FanoutProps<T> {
     clone?: (value: T) => T;
     queue?: number;
     release?: (value: T) => void;
@@ -389,14 +340,14 @@ export type Kind = "video" | "audio" | "text";
 type Kind_2 = "voice" | "music" | "auto";
 
 type Media = {
-    video?: Encoder_2.Source;
-    audio?: Audio_3.Source;
+    video?: Video.Source;
+    audio?: Audio_2.Source;
 };
 
 class Microphone {
     constructor(props?: MicrophoneProps);
     close(): void;
-    constraints: Signal<Audio_3.Constraints | undefined>;
+    constraints: Signal<Audio_2.Constraints | undefined>;
     readonly device: Device<"audio">;
     readonly in: Readonlys<MicrophoneInput>;
     readonly out: Readonlys<MicrophoneOutput>;
@@ -412,7 +363,7 @@ type MicrophoneOutput = {
 };
 
 interface MicrophoneProps extends Inputs<MicrophoneInput> {
-    constraints?: Audio_3.Constraints | Signal<Audio_3.Constraints | undefined>;
+    constraints?: Audio_2.Constraints | Signal<Audio_2.Constraints | undefined>;
     device?: DeviceProps;
 }
 
@@ -444,9 +395,11 @@ declare namespace Preview {
         Renderer,
         TranscodeInput,
         TranscodeProps,
+        TranscodeOutput,
         Transcode
     }
 }
+export { Preview }
 
 class Renderer {
     constructor(props?: RendererProps);
@@ -466,7 +419,7 @@ type RendererInput = {
     } | undefined>;
     flip: Getter<boolean>;
     rotation: Getter<number>;
-    encoder: Getter<Encoder_2.Encoder | undefined>;
+    encoder: Getter<Video.Encoder | undefined>;
     mode: Getter<Mode>;
     enabled: Getter<boolean>;
     backend: Getter<Video_2.Backend>;
@@ -495,11 +448,11 @@ interface SampleSource {
 
 class Screen_2 {
     constructor(props?: ScreenProps);
-    audio: Signal<Audio_3.Constraints | boolean | undefined>;
+    audio: Signal<Audio_2.Constraints | boolean | undefined>;
     close(): void;
     readonly in: Readonlys<ScreenInput>;
     readonly out: Readonlys<ScreenOutput>;
-    video: Signal<Encoder_2.Constraints | boolean | undefined>;
+    video: Signal<Video.Constraints | boolean | undefined>;
 }
 
 type ScreenInput = {
@@ -511,8 +464,8 @@ type ScreenOutput = {
 };
 
 interface ScreenProps extends Inputs<ScreenInput> {
-    audio?: Audio_3.Constraints | boolean | Signal<Audio_3.Constraints | boolean | undefined>;
-    video?: Encoder_2.Constraints | boolean | Signal<Encoder_2.Constraints | boolean | undefined>;
+    audio?: Audio_2.Constraints | boolean | Signal<Audio_2.Constraints | boolean | undefined>;
+    video?: Video.Constraints | boolean | Signal<Video.Constraints | boolean | undefined>;
 }
 
 export { Signals }
@@ -521,22 +474,28 @@ declare namespace Source {
     export {
         CameraInput,
         CameraProps,
+        CameraOutput,
         Camera,
         DeviceInput,
         DeviceProps,
+        DeviceOutput,
         Device,
         FileInput,
         FileProps,
+        FileOutput,
         File_2 as File,
         MicrophoneInput,
         MicrophoneProps,
+        MicrophoneOutput,
         Microphone,
         ScreenInput,
         ScreenProps,
+        ScreenOutput,
         Screen_2 as Screen,
         Media
     }
 }
+export { Source }
 
 type Source_2 = StreamTrack | SourceConfig | SampleSource;
 
@@ -609,7 +568,7 @@ class Transcode {
 type TranscodeInput = {
     source: Getter<Fanout<VideoFrame> | undefined>;
     config: Getter<VideoEncoderConfig | undefined>;
-    settings: Getter<Encoder_2.Config | undefined>;
+    settings: Getter<Video.Config | undefined>;
 };
 
 type TranscodeOutput = {
@@ -622,12 +581,14 @@ declare namespace Video {
     export {
         Rendition_3 as Rendition,
         CaptureInput_2 as CaptureInput,
+        CaptureOutput_2 as CaptureOutput,
         Capture_2 as Capture,
         Stats_2 as Stats,
         Config,
         EncoderInput_2 as EncoderInput,
         EncoderProps_2 as EncoderProps,
-        Encoder_3 as Encoder,
+        EncoderOutput_2 as EncoderOutput,
+        Encoder_2 as Encoder,
         normalizeSource_2 as normalizeSource,
         isStreamTrack,
         Source_3 as Source,
@@ -638,6 +599,6 @@ declare namespace Video {
         Constraints_2 as Constraints
     }
 }
-
+export { Video }
 
 ```

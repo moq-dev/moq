@@ -1254,6 +1254,7 @@ impl Publisher {
 		.compression(self.peer_setup.get().await.flate)
 		.ranked(self.priority.clone());
 		serve.dynamic = dynamic;
+		serve.filter = params.filter;
 		if let Some(value) = how.new_group {
 			serve.request_new_group(value);
 		}
@@ -1294,7 +1295,8 @@ impl Publisher {
 			let streams = serve.opened.clone();
 			let fill = async {
 				if let Some(fill) = fill {
-					self.run_fill(fill, &ranking, track.clone(), timescale, &streams).await;
+					self.run_fill(fill, &ranking, track.clone(), timescale, &streams, request_id)
+						.await;
 				}
 			};
 			let serving = self.run_subscription(stream, &mut serve, finished, goaways, fill, None);

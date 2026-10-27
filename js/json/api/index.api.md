@@ -61,13 +61,9 @@ class Consumer_3<T> {
     get offset(): number;
 }
 
-type ConsumerConfig = ConsumerConfig_2 & {
+type ConsumerConfig = DecoderConfig & {
     track: Moq.Track.Subscriber;
 };
-
-interface ConsumerConfig_2 {
-    compression?: boolean;
-}
 
 class Decoder<T> {
     constructor(config?: Pick<Config<T>, "schema" | "compression">);
@@ -84,10 +80,14 @@ class Decoder_2<T> {
 }
 
 class Decoder_3<T> {
-    constructor(config?: ConsumerConfig_2);
+    constructor(config?: DecoderConfig);
     group(): Group;
     next(): Event_2<T> | undefined;
     get offset(): number;
+}
+
+interface DecoderConfig {
+    compression?: boolean;
 }
 
 export function deepEqual(a: unknown, b: unknown): boolean;
@@ -232,6 +232,7 @@ declare namespace Snapshot {
         Producer
     }
 }
+export { Snapshot }
 
 interface Span {
     end: number;
@@ -250,12 +251,14 @@ declare namespace Stream {
         Producer_2 as Producer
     }
 }
+export { Stream }
 
 declare namespace Window_2 {
     export {
         Consumer_3 as Consumer,
         ConsumerConfig,
         Decoder_3 as Decoder,
+        DecoderConfig,
         Event_2 as Event,
         Group,
         Span,
@@ -267,6 +270,6 @@ declare namespace Window_2 {
         ProducerConfig
     }
 }
-
+export { Window_2 as Window }
 
 ```

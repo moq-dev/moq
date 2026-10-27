@@ -26,7 +26,7 @@ typealias ReadEnd = uniffi.moq.MoqAudioRead.End
 /** One encoded payload from an [Encoder]. */
 typealias Packet = uniffi.moq.MoqAudioPacket
 /** The packets an [Encoder] drains on finish and the padded samples to discard. */
-typealias EncoderFinish = uniffi.moq.MoqAudioEncoderFinish
+typealias EncoderFinish = uniffi.moq.MoqAudioEncoderFinished
 /** The audio codec: `Codec.opus()` or `Codec.aac()`. */
 typealias Codec = uniffi.moq.MoqAudioCodec
 /** A raw PCM sample layout. */

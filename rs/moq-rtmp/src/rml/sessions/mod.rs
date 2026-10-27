@@ -31,8 +31,7 @@ pub use self::server::ServerSessionError;
 pub use self::server::ServerSessionEvent;
 pub use self::server::ServerSessionResult;
 
-use crate::rml::amf0::Amf0Value;
-use std::collections::HashMap;
+use crate::rml::amf0::Properties;
 
 /// Contains the metadata information a stream may advertise on publishing
 #[derive(PartialEq, Debug, Clone)]
@@ -68,12 +67,12 @@ impl StreamMetadata {
 		}
 	}
 
-	/// Iterates through the passed in hashmap and uses their values to set the metadata
+	/// Reads the borrowed properties and uses their values to set the metadata
 	/// properties. The keys are based on standard metadata property names seen from existing
 	/// RTMP encoders.
-	pub fn apply_metadata_values(&mut self, mut properties: HashMap<String, Amf0Value>) {
-		for (key, value) in properties.drain() {
-			match key.as_ref() {
+	pub fn apply_metadata_values(&mut self, properties: Properties<'_>) {
+		for (key, value) in properties {
+			match key {
 				"width" => match value.get_number() {
 					Some(x) => self.video_width = Some(x as u32),
 					None => (),
@@ -125,7 +124,7 @@ impl StreamMetadata {
 				},
 
 				"encoder" => match value.get_string() {
-					Some(x) => self.encoder = Some(x),
+					Some(x) => self.encoder = Some(x.to_owned()),
 					None => (),
 				},
 

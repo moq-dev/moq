@@ -10,6 +10,7 @@ on:
     branches: [release]
     paths:
       - "rs/**"
+      - "c/**"
       - "cpp/**"
       - "swift/**"
       - "infra/moq-sh/**"
@@ -53,6 +54,7 @@ jobs:
       needed: ${{ steps.scope.outputs.needed }}
       rs: ${{ steps.scope.outputs.rs }}
       swift: ${{ steps.scope.outputs.swift }}
+      c: ${{ steps.scope.outputs.c }}
       cpp: ${{ steps.scope.outputs.cpp }}
       obs: ${{ steps.scope.outputs.obs_compile }}
       moq_sh: ${{ steps.scope.outputs.moq_sh }}
@@ -71,7 +73,7 @@ jobs:
   windows:
     name: Windows
     needs: scope
-    if: needs.scope.outputs.rs == 'true' || needs.scope.outputs.cpp == 'true' || needs.scope.outputs.obs == 'true'
+    if: needs.scope.outputs.rs == 'true' || needs.scope.outputs.c == 'true' || needs.scope.outputs.cpp == 'true' || needs.scope.outputs.obs == 'true'
     # OBS uses the Visual Studio 17 2022 CMake generator.
     runs-on: windows-2022
     # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
@@ -103,7 +105,7 @@ jobs:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
       - name: Install uniffi-bindgen-cpp
-        if: needs.scope.outputs.cpp == 'true' || needs.scope.outputs.obs == 'true'
+        if: needs.scope.outputs.c == 'true' || needs.scope.outputs.cpp == 'true' || needs.scope.outputs.obs == 'true'
         shell: bash
         run: cargo install uniffi-bindgen-cpp --locked --git https://github.com/kixelated/uniffi-bindgen-cpp --tag v0.11.0-kixelated.7+v0.32.2
       - name: Rust compile and tests
@@ -114,6 +116,10 @@ jobs:
         run: |
           just rs windows "$CI_BASE"
           just rs windows-test
+      - name: C
+        if: needs.scope.outputs.c == 'true'
+        shell: bash
+        run: just c check
       - name: C++
         if: needs.scope.outputs.cpp == 'true'
         shell: bash

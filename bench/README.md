@@ -118,14 +118,25 @@ or `heap` (jemalloc retained heap and allocation churn):
 ```bash
 nix develop --command just bench-profile lock
 nix develop --command just bench-profile "cpu heap" fanout-heavy "4 16"
+nix develop --command just bench-profile "cpu heap" audio "4 16" io-uring-workers
+nix develop --command just bench-profile cpu chat 4 io-uring-workers origin/main
 ```
 
 This builds the relay with `[profile.profiling]` and frame pointers, then runs
-the workload on Tokio workers at each count twice per mode: an unprofiled
-control, then a profiled run, so the throughput and CPU difference shows the
-profiler's overhead. Each mode captures only the relay process, never the load
+the workload on the selected runtime (`tokio-workers` by default, or
+`io-uring-workers`) at each count twice per mode: an unprofiled control, then a
+profiled run, so the throughput and CPU difference shows the profiler's overhead. Each mode captures only the relay process, never the load
 generator, during the profiled run's 5 s steady window, the same window as the
-summary's throughput. Linux only.
+summary's throughput. Linux only. Both runtimes use the runtime comparison's
+feature build; io\_uring uses its kernel support check too. Readiness verifies the
+selected backend and exact worker count from the relay's actual thread names,
+retained as `runtime.json`, before the generator starts.
+
+The optional final argument selects a base revision. The current harness builds
+it in a temporary worktree and drives both revisions with the current generator,
+sampler, workload and capture settings. This also works when the base's own
+profiling harness has no runtime selector. Results live under `relay/base/` and
+`relay/current/`, with one unprofiled control per revision, worker count and mode.
 
 ### Lock wait
 
@@ -236,7 +247,8 @@ source files. The retained path is printed at the end, including on failure.
 Choose an evidence parent outside disposable worktrees when the report must survive
 worktree removal. Criterion case discovery uses isolated short measurements and
 their full JSON IDs, since `--list` truncates display names; discovery samples
-are retained separately and never used in the comparison.
+are retained separately and never used in the comparison. A target that writes
+no Criterion samples, such as one that prints its own table, is listed as skipped.
 
 Each comparison reports the median of the paired percentage deltas, their median
 absolute deviation and range, and flags fewer than three observations or a sign

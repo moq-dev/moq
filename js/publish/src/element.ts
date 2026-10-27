@@ -35,8 +35,8 @@ function parseVersions(value: string | null): string[] | undefined {
 	return versions?.length ? versions : undefined;
 }
 
+/** The attributes the element observes. */
 const OBSERVED = ["url", "versions", "name", "muted", "invisible", "source", "preview", "backend", "announce"] as const;
-type Observed = (typeof OBSERVED)[number];
 
 /** The built-in capture sources selectable via the `source` attribute. */
 export type SourceType = "camera" | "screen" | "file";
@@ -101,7 +101,8 @@ function parseBackend(value: string | null): Preview.Backend {
 
 /** The `<moq-publish>` element: captures a source and publishes it as a broadcast. */
 export default class MoqPublish extends HTMLElement {
-	static observedAttributes = OBSERVED;
+	/** The attributes the browser reports changes to. */
+	static observedAttributes: typeof OBSERVED = OBSERVED;
 
 	/**
 	 * The mutable user controls. As the top of the tree, this element owns the writable Signals
@@ -331,15 +332,18 @@ export default class MoqPublish extends HTMLElement {
 		this.signals.run(this.#runSource.bind(this));
 	}
 
+	/** Called by the browser when the element joins a document. */
 	connectedCallback() {
 		this.#enabled.set(true);
 	}
 
+	/** Called by the browser when the element leaves its document. */
 	disconnectedCallback() {
 		this.#enabled.set(false);
 	}
 
-	attributeChangedCallback(name: Observed, oldValue: string | null, newValue: string | null) {
+	/** Called by the browser when an observed attribute changes. */
+	attributeChangedCallback(name: (typeof OBSERVED)[number], oldValue: string | null, newValue: string | null) {
 		if (oldValue === newValue) return;
 
 		if (name === "url") {

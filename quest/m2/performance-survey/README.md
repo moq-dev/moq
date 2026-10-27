@@ -143,10 +143,11 @@ No duplicate quest or workflow edit belongs here.
 
 ### Existing ownership and deliberately deferred work
 
-- [Release performance](/quest/m1/release-perf/README.md) fixed sparse gaps,
-  resume duplicates, idle GC, stats drain, FETCH fan-out, JS frame regressions,
-  and paired comparison correctness; its remaining work is the final
-  main-against-release comparison.
+- [Release performance](/quest/m1/release-perf/README.md) owns the main
+  against release comparison for this cut, including the sparse read slope;
+  it already fixed or accepted resume duplicates, idle GC, stats drain, FETCH
+  fan-out, JS frame regressions, and paired comparison correctness. The
+  [performance audit](/quest/m2/audit-perf.md) repeats it before later cuts.
 - [Perf](/quest/m2/perf/README.md) owns measured channel contention, relay
   allocations, ingest batching, worker quiescence and runtime selection.
 - The [release audit](/quest/m1/release-audit/README.md) bounded the media
