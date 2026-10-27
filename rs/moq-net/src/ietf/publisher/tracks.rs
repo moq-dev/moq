@@ -289,7 +289,6 @@ impl Publisher {
 			return super::super::request_stream::reject(stream, error).await;
 		}
 		let refuse = |error_code, reason: &'static str| ietf::RequestError {
-			request_id: None,
 			error_code,
 			reason_phrase: reason.into(),
 			retry_interval: 0,
@@ -341,7 +340,6 @@ impl Publisher {
 		stream
 			.writer
 			.encode_message(&ietf::RequestOk {
-				request_id: None,
 				active: None,
 				largest: None,
 			})
@@ -539,7 +537,6 @@ impl Publisher {
 					stream.writer.buffer_message(
 						ietf::RequestError::ID,
 						&ietf::RequestError {
-							request_id: None,
 							error_code: code,
 							reason_phrase: reason.into(),
 							retry_interval: 0,
@@ -870,22 +867,16 @@ impl Publisher {
 		let dynamic = properties.dynamic_groups;
 		let absolute = self.origin.root().rejoin(&namespace);
 
-		// Every wait on the peer, for a Request ID or the PUBLISH's bytes, lasts only while
-		// the track is listed and the request stands. A Request ID abandoned unsent leaves a
-		// gap, which the drafts with SUBSCRIBE_TRACKS allow: none has MAX_REQUEST_ID.
+		// Every wait on the peer for the PUBLISH's bytes lasts only while the track is listed
+		// and the request stands.
 		let mut session = self.session.clone();
-		let mut stream = super::super::request_stream::with_stats(stream, self.stats(), self.version);
-		let allocated = kio::wait(|waiter| {
-			if listed.poll_closed(waiter).is_ready() || live.poll_closed(waiter).is_ready() {
-				return Poll::Ready(None);
-			}
-			self.control.poll_next_request_id(waiter).map(Some)
-		})
-		.await;
+		let mut stream = stream.with_stats(self.stats());
 		// Dropped unwritten, the stream is reset before its header, which the peer ignores.
-		let Some(request_id) = allocated else {
+		let noop = kio::Waiter::noop();
+		if listed.poll_closed(&noop).is_ready() || live.poll_closed(&noop).is_ready() {
 			return Ok(());
-		};
+		}
+		let request_id = self.control.next_request_id();
 
 		// A joining FETCH needs the subscription forwarding.
 		let join = (!Filter::is_draft22(self.version)).then(|| self.register_join(request_id));
@@ -989,7 +980,7 @@ impl Publisher {
 
 		if let Some(done) = refused {
 			drop(join);
-			return self.write_publish_done(stream, request_id, done, 0, None).await;
+			return self.write_publish_done(stream, done, 0, None).await;
 		}
 
 		// Group streams opened over every time the subscription forwarded, which
@@ -1020,7 +1011,7 @@ impl Publisher {
 				{
 					Ok(Served::Paused(_)) => {
 						self.pause_join(join.as_ref());
-						self.write_request_ok(&mut stream.writer, request_id, None).await?;
+						self.write_request_ok(&mut stream.writer, None).await?;
 						// Unlisted while it forwarded: it ends now that it is idle.
 						if listed.is_closed() {
 							break unlisted(&listed);
@@ -1099,8 +1090,7 @@ impl Publisher {
 				None => None,
 			};
 			if let Some((reason, err)) = refusal {
-				self.write_subscribe_error(&mut stream.writer, update.request_id, &err, reason)
-					.await?;
+				self.write_subscribe_error(&mut stream.writer, &err, reason).await?;
 				break Served::UpdateFailed(Error::Unsupported);
 			}
 			if let Some(priority) = update.priority {
@@ -1120,12 +1110,12 @@ impl Publisher {
 						answer: true,
 					})
 				}
-				_ => self.write_request_ok(&mut stream.writer, request_id, None).await?,
+				_ => self.write_request_ok(&mut stream.writer, None).await?,
 			}
 		};
 
 		drop(join);
-		self.write_publish_done(stream, request_id, done, opened, None).await
+		self.write_publish_done(stream, done, opened, None).await
 	}
 
 	/// Mark a paused subscription for joining FETCHes: draft-18 section 5.1 refuses one
@@ -1142,14 +1132,13 @@ impl Publisher {
 	async fn resume_failed(
 		&self,
 		stream: &mut Stream<Transport, Version>,
-		request_id: RequestId,
 		answer: bool,
 		err: Error,
 	) -> Result<Served, ()> {
 		if !answer {
 			return Ok(Served::Track(Err(err)));
 		}
-		self.write_subscribe_error(&mut stream.writer, request_id, &err, "resume failed")
+		self.write_subscribe_error(&mut stream.writer, &err, "resume failed")
 			.await
 			.map_err(|_| ())?;
 		Ok(Served::UpdateFailed(err))
@@ -1212,11 +1201,9 @@ impl Publisher {
 		.await?;
 		let mut subscriber = match subscribed {
 			Some(Ok(subscriber)) => subscriber,
-			Some(Err(err)) => return self.resume_failed(stream, request_id, how.answer, err).await,
+			Some(Err(err)) => return self.resume_failed(stream, how.answer, err).await,
 			None => {
-				return self
-					.resume_failed(stream, request_id, how.answer, Error::NotFound)
-					.await;
+				return self.resume_failed(stream, how.answer, Error::NotFound).await;
 			}
 		};
 		let live = kio::wait(|waiter| {
@@ -1230,19 +1217,14 @@ impl Publisher {
 		})
 		.await?;
 		if !live {
-			return self
-				.resume_failed(stream, request_id, how.answer, Error::NotFound)
-				.await;
+			return self.resume_failed(stream, how.answer, Error::NotFound).await;
 		}
 
 		let edge = live_edge(track);
 		let range = subscribe_range(params.filter, edge, self.version);
 		range.apply(&mut subscription);
 		let _ = subscriber.update(subscription);
-		let timescale = subscriber
-			.info()
-			.timescale
-			.filter(|_| ietf::Properties::sends_timescale(self.version));
+		let timescale = subscriber.info().timescale;
 		let mut serve = TrackServe::new(
 			self.session.clone(),
 			subscriber,
@@ -1281,12 +1263,7 @@ impl Publisher {
 			.filter(|_| Filter::is_draft22(self.version))
 			.map(|fill| fill_range(fill, params.filter, edge.largest));
 
-		if how.answer
-			&& self
-				.write_request_ok(&mut stream.writer, request_id, edge.largest)
-				.await
-				.is_err()
-		{
+		if how.answer && self.write_request_ok(&mut stream.writer, edge.largest).await.is_err() {
 			return Err(());
 		}
 
@@ -1391,7 +1368,7 @@ mod tests {
 			crate::time::sim(),
 			crate::driver::Transport::new(session.clone()),
 			origin.consume(),
-			Control::new(None, false),
+			Control::new(false),
 			None,
 			setup,
 			version,
@@ -1489,7 +1466,6 @@ mod tests {
 		stream
 			.writer
 			.encode(&ietf::PublishOk {
-				request_id: None,
 				forward: false,
 				subscriber_priority: Some(128),
 				group_order: Some(GroupOrder::Ascending),
@@ -1503,9 +1479,6 @@ mod tests {
 	fn update(request_id: u64, forward: bool) -> ietf::SubscribeUpdate {
 		ietf::SubscribeUpdate {
 			request_id: RequestId(request_id),
-			subscription_request_id: None,
-			start_location: Location { group: 0, object: 0 },
-			end_group: 0,
 			subscriber_priority: None,
 			forward: Some(forward),
 			// Join at the live edge: draft-22 moved the filter off PUBLISH_OK.
@@ -1585,7 +1558,7 @@ mod tests {
 			let done: ietf::PublishDone = body.message(version).unwrap();
 			assert_eq!(
 				done.status_code,
-				ietf::PublishDoneStatus::TrackEnded.code(version),
+				ietf::PublishDoneStatus::TrackEnded.code(),
 				"{version}"
 			);
 		}
@@ -1621,7 +1594,7 @@ mod tests {
 					let (id, body) = next(published.get_mut(name).unwrap()).await;
 					assert_eq!(id, ietf::PublishDone::ID, "{case}: {name}");
 					let done: ietf::PublishDone = body.message(version).unwrap();
-					assert_eq!(done.status_code, status.code(version), "{case}: {name}");
+					assert_eq!(done.status_code, status.code(), "{case}: {name}");
 				}
 				drop(video);
 			}
@@ -2027,7 +2000,6 @@ mod tests {
 		stream
 			.writer
 			.encode(&ietf::PublishOk {
-				request_id: None,
 				forward: true,
 				subscriber_priority: None,
 				group_order: None,
@@ -2060,7 +2032,6 @@ mod tests {
 			stream
 				.writer
 				.encode(&ietf::PublishOk {
-					request_id: None,
 					forward: true,
 					subscriber_priority: Some(128),
 					group_order: Some(GroupOrder::Ascending),
@@ -2526,7 +2497,7 @@ mod tests {
 				crate::time::sim(),
 				crate::driver::Transport::new(h.session.clone()),
 				h._origin.consume(),
-				Control::new(None, false),
+				Control::new(false),
 				None,
 				setup,
 				version,

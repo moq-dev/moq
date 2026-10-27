@@ -112,10 +112,9 @@ pub struct Info {
 	/// carries a timestamp, none on an untimed one does, and a write that doesn't match
 	/// is refused with [`Error::TimestampMismatch`]. Defaults to `None` (untimed). On
 	/// Lite05+ it is reported in TRACK_INFO and the publisher zigzag-delta encodes
-	/// per-frame timestamps at this scale on the wire; on moq-transport draft 17 and
-	/// later it is the TIMESCALE Track Property. A track received without one
-	/// (pre-Lite05 moq-lite, moq-transport drafts 14-16, or moq-transport without
-	/// TIMESCALE) is untimed.
+	/// per-frame timestamps at this scale on the wire; on moq-transport it is the
+	/// TIMESCALE Track Property. A track received without one (pre-Lite05 moq-lite, or
+	/// moq-transport without TIMESCALE) is untimed.
 	pub timescale: Option<Timescale>,
 	/// How long a superseded group stays fresh. The newest group is never stale.
 	///
@@ -151,7 +150,7 @@ pub struct Info {
 	///
 	/// Writers and readers see plain frames either way: the producer compresses each
 	/// frame as it is written and the cache stores the compressed form. A moq-lite-07 peer or a
-	/// moq-transport draft-17+ peer negotiating the Flate extension receives the compressed
+	/// moq-transport peer negotiating the Flate extension receives the compressed
 	/// bytes and the flag. Other sessions receive one shared inflated copy per group,
 	/// unless a sealed compression declaration makes that fallback unsupported.
 	/// Worth it for small, repetitive payloads like JSON; wasted on media.

@@ -31,7 +31,7 @@ pub(super) type TrackKey = (Path, Arc<str>);
 /// status, INTERNAL_ERROR included, fails the listing, so it asks again rather than hide a
 /// track that may still be live.
 pub(super) fn listing_end(done: &ietf::PublishDone, version: Version) -> Result<(), Error> {
-	match done.status_code == ietf::PublishDoneStatus::TrackEnded.code(version) {
+	match done.status_code == ietf::PublishDoneStatus::TrackEnded.code() {
 		true => Ok(()),
 		false => Err(done
 			.end(version)
@@ -425,9 +425,8 @@ impl Subscriber {
 		let Some(stream) = opened else {
 			return Ok(());
 		};
-		let mut stream = request_stream::with_stats(stream?, self.origin.stats(), self.version);
-		// No draft with SUBSCRIBE_TRACKS has MAX_REQUEST_ID, so this never waits on credit.
-		let request_id = kio::wait(|waiter| self.control.poll_next_request_id(waiter)).await;
+		let mut stream = stream?.with_stats(self.origin.stats());
+		let request_id = self.control.next_request_id();
 		stream.writer.buffer_message(
 			ietf::SubscribeTracks::ID,
 			&ietf::SubscribeTracks {
@@ -622,8 +621,8 @@ impl Subscriber {
 		let Some(stream) = opened else {
 			return Ok(None);
 		};
-		let mut stream = request_stream::with_stats(stream?, self.origin.stats(), self.version);
-		let request_id = kio::wait(|waiter| self.control.poll_next_request_id(waiter)).await;
+		let mut stream = stream?.with_stats(self.origin.stats());
+		let request_id = self.control.next_request_id();
 		self.state.lock().subscribes.insert(
 			request_id,
 			TrackState {
@@ -674,7 +673,7 @@ impl Subscriber {
 			Ok(Some(accepted)) => accepted,
 			Ok(None) => {
 				self.remove_subscribe(request_id);
-				self.cancel_subscribe(stream, request_id).await;
+				self.cancel_subscribe(stream).await;
 				return Ok(None);
 			}
 			Err(err) => {
@@ -684,12 +683,12 @@ impl Subscriber {
 		};
 		if let Some(err) = refused(&accepted.properties, self.version, self.peer_setup.get().await.flate) {
 			self.remove_subscribe(request_id);
-			self.cancel_subscribe(stream, request_id).await;
+			self.cancel_subscribe(stream).await;
 			return Err(err);
 		}
 		if let Err(err) = self.bind_alias(request_id, accepted.alias) {
 			self.remove_subscribe(request_id);
-			self.cancel_subscribe(stream, request_id).await;
+			self.cancel_subscribe(stream).await;
 			return Err(err);
 		}
 		let info = accepted_info(&accepted.properties, self.version);
@@ -709,7 +708,7 @@ impl Subscriber {
 		};
 		if !listed {
 			self.remove_subscribe(request_id);
-			self.cancel_subscribe(stream, request_id).await;
+			self.cancel_subscribe(stream).await;
 			return Ok(None);
 		}
 		Ok(Some(Upstream {
@@ -828,7 +827,6 @@ impl Subscriber {
 			Offer::Refuse(code, reason) => {
 				tracing::debug!(broadcast = %key.0, track = %key.1, reason, "refusing publish");
 				let error = ietf::RequestError {
-					request_id: None,
 					error_code: code,
 					reason_phrase: reason.into(),
 					retry_interval: 0,
@@ -857,7 +855,6 @@ impl Subscriber {
 			stream.writer.buffer_message(
 				id,
 				&ietf::PublishOk {
-					request_id: None,
 					forward: false,
 					subscriber_priority: None,
 					group_order: None,
@@ -939,12 +936,12 @@ impl Subscriber {
 						}
 					};
 					self.remove_subscribe(upstream.request_id);
-					self.cancel_subscribe(upstream.stream, upstream.request_id).await;
+					self.cancel_subscribe(upstream.stream).await;
 					return;
 				}
 				Step::Gone => {
 					self.remove_subscribe(upstream.request_id);
-					self.cancel_subscribe(upstream.stream, upstream.request_id).await;
+					self.cancel_subscribe(upstream.stream).await;
 					return;
 				}
 				Step::Message(Ok(Some(Framed(id, body)))) => match id {
@@ -1074,7 +1071,7 @@ impl Subscriber {
 				true => this.watch(key, upstream, handoff).await,
 				false => {
 					this.remove_subscribe(upstream.request_id);
-					this.cancel_subscribe(upstream.stream, upstream.request_id).await;
+					this.cancel_subscribe(upstream.stream).await;
 				}
 			}
 		});
@@ -1136,14 +1133,11 @@ impl Subscriber {
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 		forward: &Forward,
 	) -> Result<(), Error> {
-		let request_id = self.control.next_request_id(&self.runtime).await?;
+		let request_id = self.control.next_request_id();
 		writer
 			.encode_message(&ietf::SubscribeUpdate {
 				max_age: forward.max_age,
 				request_id,
-				subscription_request_id: None,
-				start_location: ietf::Location { group: 0, object: 0 },
-				end_group: 0,
 				subscriber_priority: forward.priority.map(super::super::priority::to_wire),
 				forward: Some(forward.forward),
 				filter: forward.filter,
@@ -1269,7 +1263,7 @@ mod tests {
 			crate::time::sim(),
 			crate::driver::Transport::new(session.clone()),
 			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
-			Control::new(None, false),
+			Control::new(false),
 			None,
 			peer::PeerSetup::declared(peer::Peer::default()),
 			crate::Hop::new(1).unwrap(),
@@ -1337,7 +1331,6 @@ mod tests {
 			assert_eq!(msg.prefix.as_str(), "bcast");
 			assert!(!msg.forward, "the listing asks for every track's objects");
 			let ok = ietf::RequestOk {
-				request_id: None,
 				active: None,
 				largest: None,
 			};
@@ -1393,7 +1386,6 @@ mod tests {
 			let resume: ietf::SubscribeUpdate = body.message(self.version).unwrap();
 			assert_eq!(resume.forward, Some(true));
 			let ok = ietf::RequestOk {
-				request_id: None,
 				active: None,
 				largest: None,
 			};
@@ -1493,8 +1485,7 @@ mod tests {
 		assert_eq!(event(&mut h.tracks).as_deref(), Some("+video"));
 
 		let done = ietf::PublishDone {
-			request_id: None,
-			status_code: ietf::PublishDoneStatus::TrackEnded.code(version),
+			status_code: ietf::PublishDoneStatus::TrackEnded.code(),
 			stream_count: 0,
 			reason_phrase: "".into(),
 		};
@@ -1518,8 +1509,7 @@ mod tests {
 			assert_eq!(event(&mut h.tracks).as_deref(), Some("+video"));
 
 			let done = ietf::PublishDone {
-				request_id: None,
-				status_code: status.code(version),
+				status_code: status.code(),
 				stream_count: 0,
 				reason_phrase: "".into(),
 			};
@@ -1546,7 +1536,6 @@ mod tests {
 
 		// SUBSCRIPTION_ENDED, which draft 18 registers.
 		let done = ietf::PublishDone {
-			request_id: None,
 			status_code: 0x3,
 			stream_count: 0,
 			reason_phrase: "".into(),
@@ -1589,7 +1578,6 @@ mod tests {
 			assert!(!msg.forward, "{version}: the SUBSCRIBE forwards");
 
 			let ok = ietf::SubscribeOk {
-				request_id: None,
 				track_alias: 3,
 				largest: None,
 				properties: ietf::Properties {
@@ -1622,7 +1610,6 @@ mod tests {
 		.unwrap();
 		let _ = read(&mut stream).await;
 		let refused = ietf::RequestError {
-			request_id: None,
 			error_code: 0x3,
 			reason_phrase: "".into(),
 			retry_interval: 0,
@@ -1705,8 +1692,7 @@ mod tests {
 			Some(true)
 		);
 		let done = ietf::PublishDone {
-			request_id: None,
-			status_code: ietf::PublishDoneStatus::TrackEnded.code(version),
+			status_code: ietf::PublishDoneStatus::TrackEnded.code(),
 			stream_count: 0,
 			reason_phrase: "".into(),
 		};
@@ -1739,8 +1725,7 @@ mod tests {
 		assert!(!serving.is_finished(), "the copy did not linger");
 
 		let done = ietf::PublishDone {
-			request_id: None,
-			status_code: ietf::PublishDoneStatus::InternalError.code(version),
+			status_code: ietf::PublishDoneStatus::InternalError.code(),
 			stream_count: 0,
 			reason_phrase: "".into(),
 		};
@@ -1793,7 +1778,6 @@ mod tests {
 			let _held = match case {
 				"refused" => {
 					let refused = ietf::RequestError {
-						request_id: None,
 						error_code: 0x3,
 						reason_phrase: "".into(),
 						retry_interval: 0,
@@ -1832,7 +1816,6 @@ mod tests {
 			let msg: ietf::Subscribe = body.message(version).unwrap();
 			assert!(msg.forward, "{case}: a paused SUBSCRIBE");
 			let ok = ietf::SubscribeOk {
-				request_id: None,
 				track_alias: 7,
 				largest: None,
 				properties: ietf::Properties::default(),

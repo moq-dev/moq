@@ -36,15 +36,8 @@ fn ietf_range_updates_interop() {
 		responses: Vec<Vec<u8>>,
 		streams: Vec<Vec<u8>>,
 	}
-	for version in [
-		ietf::Version::Draft15,
-		ietf::Version::Draft16,
-		ietf::Version::Draft17,
-		ietf::Version::Draft18,
-		ietf::Version::Draft22,
-	] {
+	for version in [ietf::Version::Draft18, ietf::Version::Draft22] {
 		let draft22 = Filter::is_draft22(version);
-		let legacy = matches!(version, ietf::Version::Draft15 | ietf::Version::Draft16);
 		let range = |start, end: Option<u64>| Filter::Absolute {
 			start: Location {
 				group: start,
@@ -80,9 +73,6 @@ fn ietf_range_updates_interop() {
 			w.varint(ietf::SubscribeUpdate::ID).unwrap();
 			ietf::SubscribeUpdate {
 				request_id: RequestId(id),
-				subscription_request_id: legacy.then_some(RequestId(0)),
-				start_location: Location { group: 0, object: 0 },
-				end_group: 0,
 				subscriber_priority: None,
 				forward: None,
 				filter: Some(filter),
@@ -127,7 +117,6 @@ fn ietf_range_updates_interop() {
 			} else {
 				assert_eq!(r.varint().unwrap(), ietf::RequestOk::ID);
 				let ok = ietf::RequestOk::decode(&mut r, version).unwrap();
-				assert_eq!(ok.request_id, legacy.then_some(RequestId(index as u64 * 2)));
 				assert_eq!(
 					ok.largest,
 					if draft22 {
@@ -224,7 +213,7 @@ fn varint_interop() {
 	values.push(varint::MAX_QUIC);
 
 	let quic = Form::Quic;
-	let leading_ones = Form::from(ietf::Version::Draft17);
+	let leading_ones = Form::from(ietf::Version::Draft18);
 	let encode = |v: u64, form: Form| {
 		let mut buf = Vec::new();
 		Encoder::new(&mut buf, form).varint(v).unwrap();
@@ -440,23 +429,11 @@ fn ietf_datagram_interop() {
 	use crate::coding::Decode;
 	use crate::{Timescale, Timestamp};
 
-	let all = [
-		ietf::Version::Draft14,
-		ietf::Version::Draft15,
-		ietf::Version::Draft16,
-		ietf::Version::Draft17,
-		ietf::Version::Draft18,
-		ietf::Version::Draft22,
-	];
-	for version in all {
-		let draft = crate::Version::from(version).code() & 0xff;
-		let legacy = matches!(
-			version,
-			ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16
-		);
+	let all = [ietf::Version::Draft18, ietf::Version::Draft22];
+	for (draft, version) in [18, 22].into_iter().zip(all) {
 		let mut properties = Vec::new();
 		let mut w = Encoder::new(&mut properties, version.into());
-		ietf::encode_object_time(&mut w, Timestamp::from_millis(1234).unwrap(), Timescale::MILLI, version).unwrap();
+		ietf::encode_object_time(&mut w, Timestamp::from_millis(1234).unwrap(), Timescale::MILLI).unwrap();
 
 		// What a publisher sends: Object 0, explicit priority, ending its group, stamped.
 		let mut datagrams = vec![ietf::ObjectDatagram {
@@ -477,28 +454,15 @@ fn ietf_datagram_interop() {
 			properties: None,
 			body: ietf::DatagramBody::Status(0),
 		});
-		if version != ietf::Version::Draft14 {
-			datagrams.push(ietf::ObjectDatagram {
-				track_alias: (1 << 40) + 1,
-				group_id: (1 << 50) + 1,
-				object_id: Some(1 << 20),
-				publisher_priority: None,
-				end_of_group: true,
-				properties: None,
-				body: ietf::DatagramBody::Payload(bytes::Bytes::new()),
-			});
-		}
-		if legacy {
-			datagrams.push(ietf::ObjectDatagram {
-				track_alias: 1,
-				group_id: 2,
-				object_id: Some(0),
-				publisher_priority: Some(0),
-				end_of_group: false,
-				properties: Some(properties.clone()),
-				body: ietf::DatagramBody::Status(3),
-			});
-		}
+		datagrams.push(ietf::ObjectDatagram {
+			track_alias: (1 << 40) + 1,
+			group_id: (1 << 50) + 1,
+			object_id: Some(1 << 20),
+			publisher_priority: None,
+			end_of_group: true,
+			properties: None,
+			body: ietf::DatagramBody::Payload(bytes::Bytes::new()),
+		});
 		let encoded: Vec<Vec<u8>> = datagrams
 			.iter()
 			.map(|datagram| datagram.encode_bytes(version).unwrap().to_vec())
@@ -630,20 +594,8 @@ fn ietf_track_status_interop() {
 	use crate::coding::Decode;
 	use crate::ietf::error::request;
 
-	let all = [
-		ietf::Version::Draft14,
-		ietf::Version::Draft15,
-		ietf::Version::Draft16,
-		ietf::Version::Draft17,
-		ietf::Version::Draft18,
-		ietf::Version::Draft22,
-	];
-	for version in all {
-		let draft = crate::Version::from(version).code() & 0xff;
-		let legacy = matches!(
-			version,
-			ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16
-		);
+	let all = [ietf::Version::Draft18, ietf::Version::Draft22];
+	for (draft, version) in [18, 22].into_iter().zip(all) {
 		let request = |id: u64, namespace: &str, wanted: bool| {
 			let mut buf = Vec::new();
 			let mut w = Encoder::new(&mut buf, version.into());
@@ -669,17 +621,15 @@ fn ietf_track_status_interop() {
 
 		for (index, wanted) in [true, false].into_iter().enumerate() {
 			let mut r = Decoder::new(&responses[index], version.into());
-			assert_eq!(r.varint().unwrap(), ietf::TrackStatusOk::id(version), "{version}");
+			assert_eq!(
+				r.varint().unwrap(),
+				<ietf::TrackStatusOk as ietf::Message>::ID,
+				"{version}"
+			);
 			let ok = ietf::TrackStatusOk::decode(&mut r, version).unwrap();
 			assert!(r.is_empty(), "{version}: trailing bytes");
 
 			let expected = match version {
-				// GROUP_ORDER is a field on draft-14 and a parameter on draft-15.
-				ietf::Version::Draft14 | ietf::Version::Draft15 => ietf::Properties {
-					group_order: Some(ietf::GroupOrder::Descending),
-					..Default::default()
-				},
-				ietf::Version::Draft16 | ietf::Version::Draft17 => ietf::Properties::default(),
 				// Only draft-22 can carry the opt-out.
 				_ if !wanted && ietf::Filter::is_draft22(version) => ietf::Properties::default(),
 				_ => ietf::Properties {
@@ -696,7 +646,6 @@ fn ietf_track_status_interop() {
 			assert_eq!(
 				ok,
 				ietf::TrackStatusOk {
-					request_id: legacy.then_some(ietf::RequestId(1 + 2 * index as u64)),
 					largest: Some(ietf::Location { group: 4, object: 1 }),
 					properties: expected,
 				},
@@ -706,10 +655,7 @@ fn ietf_track_status_interop() {
 
 		let mut r = Decoder::new(&responses[2], version.into());
 		let code = match r.varint().unwrap() {
-			ietf::TRACK_STATUS_ERROR_14 if version == ietf::Version::Draft14 => {
-				ietf::SubscribeError::decode(&mut r, version).unwrap().error_code
-			}
-			id if id == <ietf::RequestError as ietf::Message>::ID && version != ietf::Version::Draft14 => {
+			id if id == <ietf::RequestError as ietf::Message>::ID => {
 				ietf::RequestError::decode(&mut r, version).unwrap().error_code
 			}
 			id => panic!("{version}: unexpected refusal type {id}"),

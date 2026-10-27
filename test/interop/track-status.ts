@@ -1,8 +1,8 @@
 // Answer Rust-encoded TRACK_STATUS requests with the JS publisher, returning each response.
 import assert from "node:assert/strict";
 import { Milli } from "@moq/clock";
-import { NativeSession } from "../../js/net/src/ietf/adapter.ts";
 import { Publisher } from "../../js/net/src/ietf/publisher.ts";
+import { NativeSession } from "../../js/net/src/ietf/session.ts";
 import { TrackStatusRequest } from "../../js/net/src/ietf/track.ts";
 import type { IetfVersion } from "../../js/net/src/ietf/version.ts";
 import { createMockTransportPair } from "../../js/net/src/mock.ts";
@@ -38,7 +38,7 @@ const responses: number[][] = [];
 for (const request of input.requests) {
 	const written: number[] = [];
 	const stream = new Stream({
-		// The requester holds its side open until answered: a FIN cancels on drafts 14-18.
+		// The requester holds its side open until answered: a FIN cancels on draft 18.
 		readable: new ReadableStream<Uint8Array>({
 			start(controller) {
 				controller.enqueue(Uint8Array.from(request));

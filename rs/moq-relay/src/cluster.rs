@@ -990,9 +990,9 @@ struct LanAuth {
 #[derive(Default)]
 #[non_exhaustive]
 pub struct Options {
-	/// Request caps for ordinary client sessions.
+	/// Session limits for ordinary client sessions.
 	pub session: crate::limits::Client,
-	/// Request caps and QUIC limits for authenticated peers and outbound cluster links.
+	/// Session and QUIC limits for authenticated peers and outbound cluster links.
 	pub peer: crate::limits::Peer,
 	/// Cluster identity, peers, and discovery.
 	pub config: Config,
@@ -2327,14 +2327,12 @@ mod tests {
 	use crate::Config as RelayConfig;
 
 	#[tokio::test]
-	async fn request_limits_follow_the_admitted_grant() {
+	async fn session_limits_follow_the_admitted_grant() {
 		let mut options = Options::default();
 		options.session.announces = 2;
-		options.session.requests = 3;
 		options.peer.announces = 20;
-		options.peer.requests = 30;
 		let cluster = Cluster::new(options).unwrap();
-		for (peer, upstream, expected) in [(false, false, (2, 3)), (true, false, (20, 30)), (true, true, (20, 30))] {
+		for (peer, upstream, expected) in [(false, false, 2), (true, false, 20), (true, true, 20)] {
 			let mut grant = moq_auth::Grant::new(moq_auth::Patterns::new(), moq_auth::Patterns::new());
 			grant.peer = peer;
 			grant.upstream = upstream;
@@ -2342,7 +2340,7 @@ mod tests {
 			// A cluster-looking path alone never selects the peer policy.
 			let lease = auth::Lease::new("/.cluster/untrusted", consumer).unwrap();
 			let limits = cluster.limits(&lease);
-			assert_eq!((limits.announces, limits.requests), expected);
+			assert_eq!(limits.announces, expected);
 		}
 	}
 

@@ -183,7 +183,7 @@ delivers them as minted: a publisher is granted its exact broadcast, a subscribe
 `--versions` runs the matrix and the tails once per version, against the same
 relay. `auto`, the default, is everything above. Any other version pins every
 client in its pass to offer that version alone, and `ietf` expands to the even
-drafts `moq-transport-14` through `moq-transport-22`. A pinned pass keeps the
+drafts `moq-transport-18` through `moq-transport-22`. A pinned pass keeps the
 media cells, the relay close check, the CLI FETCH of group 0, and the finite
 tails. The grant, refusal, close-code, and drop cases are moq-lite's and run in
 `auto` alone.
@@ -202,14 +202,8 @@ The in-tree control lanes also run with `--tail`:
   rather than best-effort burst capacity. The publisher stays open until the read is
   acknowledged, keeping a reliable track end from overtaking the datagrams.
 - A JS wire requester gets the Rust publisher's exact largest location through
-  TRACK\_STATUS on every draft. From draft 18, Rust also queries the JS publisher's
+  TRACK\_STATUS on every draft. Rust also queries the JS publisher's
   non-default priority before subscribing, when the answer can describe a track.
-- On drafts 14 and 16, a JS publisher advertises one usable track slot beyond namespace discovery, holds the first
-  Rust subscription open through a data round trip while a second is queued, and
-  grants credit when the first is cancelled. Sending the second without waiting
-  violates the peer adapter's live-request limit. A JS subscriber runs the same
-  held-first/queued-second exchange over QMux against a controlled JS peer, whose
-  grant and replenishment codecs are also exercised by the Rust subscriber.
 - On drafts 18, 20, and 22, a Rust GOAWAY names a second WebSocket endpoint serving
   the same publisher epoch. The JS reconnect loop retains its reader across the
   move. A separate read through the replacement proves it serves data before the
@@ -217,13 +211,9 @@ The in-tree control lanes also run with `--tail`:
   The reverse JS-server-to-Rust-client case uses a marker broadcast excluded from
   the old endpoint's scope, then cuts that endpoint before publishing the final
   group. Both directions use the original publisher stream.
-- Drafts 14 and 16 carry no epoch, so nothing proves the replacement is the same
-  publisher. The same GOAWAY lanes there check that the held reader ends with the
-  original transport instead, and that requesting the path again subscribes
-  through the new URI and reads the final group.
 
 The standalone control endpoints use OS-assigned ports and production QMux,
-SETUP codecs, and request adapters. They verify their negotiated version directly.
+SETUP codecs, and request sessions. They verify their negotiated version directly.
 The datagram and query lanes through moq-relay use its usual version-log check.
 
 Some cases change shape on moq-transport:
@@ -232,7 +222,7 @@ Some cases change shape on moq-transport:
   so a tail reader started before the publisher's groups may begin past group 0.
   The tails take any contiguous run of groups through group 3, each verified
   byte for byte, and still require the clean end at 4.
-- The AUTH extension (draft-17 on) carries prefixes alone, and a relay refuses a
+- The AUTH extension carries prefixes alone, and a relay refuses a
   grant narrower than a subtree, closing the session as Unauthorized. Pinned
   passes mint `name/**` for both roles instead of the exact and `**/name`
   patterns above.
@@ -263,7 +253,7 @@ just test interop --tail
 just test interop --all --versions ietf
 
 # Or pick the versions, `auto` being the default moq-lite run.
-just test interop --versions auto,moq-transport-14,moq-transport-22
+just test interop --versions auto,moq-transport-18,moq-transport-22
 
 # Subscription termination: Rust/JS response bytes over in-memory transports.
 just test bare-fin
@@ -455,7 +445,7 @@ playback delay, and one page sample plus one driver poll. Publisher preparation
 is not part of it.
 
 The CLI integration suite's `epochs` cases exercise the real QUIC relay with
-lite-07, lite-06, and IETF drafts 14 and 22. Held catalog snapshots and media
+lite-07, lite-06, and IETF draft 22. Held catalog snapshots and media
 subscriptions keep A while fresh catalog handles resolve B with fresh sibling
 pins. Later metadata and FETCH work cannot join B through A's retired handle;
 withdrawing B reveals the still-live A to fresh readers. Announcement followers
@@ -520,7 +510,7 @@ clients/
 
 `.github/workflows/interop.yml` runs the full matrix nightly (and on demand, and on
 release PRs that touch `test/interop/`), then again with `--versions ietf`. A
-release PR's moq-transport step runs only drafts 14 and 22 between Rust and native
+release PR's moq-transport step runs only drafts 18 and 22 between Rust and native
 JS. A red cell means a real interop break in the current tree.
 
 The scheduled run on `main` publishes its report to <https://git.moq.dev/interop/>;

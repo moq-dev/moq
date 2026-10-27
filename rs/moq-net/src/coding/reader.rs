@@ -421,11 +421,6 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		Poll::Ready(Ok(bytes))
 	}
 
-	/// Read exactly the given number of bytes from the stream.
-	pub async fn read_exact(&mut self, size: usize) -> Result<Bytes, Error> {
-		std::future::poll_fn(|cx| self.poll_read_exact(cx, size)).await
-	}
-
 	/// Poll until the stream is closed, erroring if there are any additional bytes.
 	pub fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
 		if ready!(self.poll_has_more(cx))? {
@@ -782,31 +777,15 @@ mod tests {
 		refuses_frame::<lite::Setup, _>(&[0], lite::Version::Lite05, false);
 		refuses_frame::<lite::Goaway, _>(&[0], lite::Version::Lite05, false);
 		refuses_frame::<ietf::GoAway, _>(&[0, 0], ietf::Version::Draft22, false);
-		for version in [
-			Version::Lite(lite::Version::Lite01),
-			Version::Lite(lite::Version::Lite02),
-			Version::Ietf(ietf::Version::Draft14),
-		] {
-			let prefix: &'static [u8] = if version.is_lite() { &[0x20, 0] } else { &[0x20, 0, 0] };
-			refuses_frame::<setup::Client, _>(prefix, version, false);
-			let prefix: &'static [u8] = if version.is_lite() { &[0x21, 0] } else { &[0x21, 0, 0] };
-			refuses_frame::<setup::Server, _>(prefix, version, false);
+		for version in [lite::Version::Lite01, lite::Version::Lite02] {
+			refuses_frame::<setup::Client, _>(&[0x20, 0, 0], Version::Lite(version), false);
+			refuses_frame::<setup::Server, _>(&[0x21, 0, 0], Version::Lite(version), false);
 		}
 	}
 
 	#[test]
 	fn oversized_setup_is_refused_at_the_prefix() {
-		use crate::{Version, lite, setup};
-		for version in [lite::Version::Lite01, lite::Version::Lite02] {
-			for size in [65536u64, (1 << 40) + 1] {
-				let mut prefix = vec![0x20];
-				Encoder::new(&mut prefix, version.into()).varint(size).unwrap();
-				let client: &'static [u8] = prefix.clone().leak();
-				refuses_frame::<setup::Client, _>(client, Version::Lite(version), true);
-				prefix[0] = 0x21;
-				refuses_frame::<setup::Server, _>(prefix.leak(), Version::Lite(version), true);
-			}
-		}
+		use crate::lite;
 		for version in [lite::Version::Lite05, lite::Version::Lite06] {
 			let mut prefix = Vec::new();
 			Encoder::new(&mut prefix, version.into()).varint(65536).unwrap();

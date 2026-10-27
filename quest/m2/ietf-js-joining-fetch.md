@@ -2,7 +2,7 @@
 
 ## Goal
 
-Before draft 22, the JS publisher answers a joining FETCH that arrives after
+On draft 18, the JS publisher answers a joining FETCH that arrives after
 its subscription finished cleanly, from the subscription's saved Largest
 group, as the Rust publisher will. The `tail` interop cells with a native JS
 or browser publisher pass on a track that finishes right after

@@ -7,7 +7,7 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 use crate::{
 	Path,
 	coding::*,
-	ietf::{Filter, GroupOrder, Location, Properties, RequestId, Subscribe, SubscribeOk},
+	ietf::{Filter, Location, Properties, RequestId, Subscribe},
 };
 
 use super::Message;
@@ -15,9 +15,8 @@ use super::namespace::encode_namespace;
 
 use super::Version;
 
-/// TrackStatus message (0x0d)
-/// v14: own format (TrackStatusRequest-like with subscribe fields)
-/// v15: same wire format as SUBSCRIBE. Response is REQUEST_OK.
+/// TrackStatus message (0x0d), with the same wire format as SUBSCRIBE. The response is
+/// REQUEST_OK.
 #[derive(Clone, Debug)]
 pub struct TrackStatus<'a> {
 	pub request_id: RequestId,
@@ -26,7 +25,7 @@ pub struct TrackStatus<'a> {
 	/// Whether the requester wants Track Properties on the answer (INCLUDE_PROPERTIES,
 	/// draft-22).
 	pub properties_wanted: bool,
-	/// The publisher instance the requester expects (MoQ Epoch, draft-17+).
+	/// The publisher instance the requester expects (MoQ Epoch).
 	pub epoch: Option<crate::Epoch>,
 }
 
@@ -35,31 +34,17 @@ impl Message for TrackStatus<'_> {
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
-		if version == Version::Draft17 {
-			w.varint(0)?; // required_request_id_delta = 0
-		}
 		encode_namespace(w, &self.track_namespace)?;
 		w.string(&self.track_name)?;
 
-		match version {
-			Version::Draft14 => {
-				w.u8(0); // subscriber priority
-				GroupOrder::Descending.encode(w, version)?;
-				w.bool(false); // forward
-				Filter::NextObject.encode(w, version)?; // filter
-				w.u8(0); // no parameters
-			}
-			_ => {
-				// Only the opt-out is worth bytes, and an older peer would read the
-				// parameter as unknown, which is a protocol violation.
-				let include_properties = (!self.properties_wanted && Filter::is_draft22(version)).then_some(false);
-				let epoch = self.epoch.clone().filter(|_| super::epoch::supported(version));
-				encode_params!(w, version,
-					0x35 => include_properties,
-					super::epoch::EPOCH_PARAM => epoch,
-				);
-			}
-		}
+		// Only the opt-out is worth bytes, and an older peer would read the
+		// parameter as unknown, which is a protocol violation.
+		let include_properties = (!self.properties_wanted && Filter::is_draft22(version)).then_some(false);
+		let epoch = self.epoch.clone();
+		encode_params!(w, version,
+			0x35 => include_properties,
+			super::epoch::EPOCH_PARAM => epoch,
+		);
 		Ok(())
 	}
 
@@ -78,132 +63,41 @@ impl Message for TrackStatus<'_> {
 	}
 }
 
-/// TRACK_STATUS_OK: what a SUBSCRIBE_OK would say about the track, with no subscription.
-///
-/// Draft-14 gives it its own type ([`Self::ID_14`]) and the SUBSCRIBE_OK body, with a
-/// Track Alias of 0. Later drafts answer with a REQUEST_OK, which gained Track Properties
-/// in draft-18; before that only the message parameters carry anything.
+/// TRACK_STATUS_OK: what a SUBSCRIBE_OK would say about the track, with no subscription,
+/// sent as a REQUEST_OK with Track Properties.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrackStatusOk {
-	/// Present on drafts 14-16 only.
-	pub request_id: Option<RequestId>,
-
 	/// The largest Location in the track (LARGEST_OBJECT), absent while it has no content.
 	pub largest: Option<Location>,
 
-	/// The Track Properties, on the drafts whose answer has room for them.
+	/// The Track Properties.
 	pub properties: Properties,
 }
 
-/// TRACK_STATUS_ERROR on draft-14, with the SUBSCRIBE_ERROR body. Later drafts refuse
-/// with REQUEST_ERROR.
-pub const TRACK_STATUS_ERROR_14: u64 = 0x0F;
-
-impl TrackStatusOk {
-	/// The draft-14 message type.
-	pub const ID_14: u64 = 0x0E;
-
-	/// The message type on `version`.
-	pub fn id(version: Version) -> u64 {
-		match version {
-			Version::Draft14 => Self::ID_14,
-			_ => Self::ID,
-		}
-	}
-
-	/// Whether this answer describes the track as fully as SUBSCRIBE_OK on `version`.
-	/// Draft-17 is the gap: SUBSCRIBE_OK declares TIMESCALE, but REQUEST_OK has no
-	/// properties block to say whether the track is timed.
-	pub(crate) fn describes_track(version: Version) -> bool {
-		Self::has_properties(version) || !super::Properties::sends_timescale(version)
-	}
-
-	/// Whether the answer carries a Track Properties block on `version`.
-	fn has_properties(version: Version) -> bool {
-		!matches!(
-			version,
-			Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17
-		)
-	}
-}
-
 impl Message for TrackStatusOk {
-	/// REQUEST_OK; see [`Self::id`].
+	/// REQUEST_OK.
 	const ID: u64 = 0x07;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		if version == Version::Draft14 {
-			return SubscribeOk {
-				request_id: self.request_id,
-				track_alias: 0,
-				largest: self.largest,
-				properties: self.properties.clone(),
-			}
-			.encode_msg(w, version);
-		}
-
-		if matches!(version, Version::Draft15 | Version::Draft16) {
-			self.request_id
-				.expect("request_id required for draft14-16")
-				.encode(w, version)?;
-		} else {
-			assert!(self.request_id.is_none(), "request_id must be None for draft17+");
-		}
-
-		// The parameters SUBSCRIBE_OK carries: GROUP_ORDER is one only on draft-15, and a
-		// Track Property after.
-		let group_order = match version {
-			Version::Draft15 => self.properties.group_order,
-			_ => None,
-		};
+		// The parameters SUBSCRIBE_OK carries.
 		encode_params!(w, version,
 			0x09 => self.largest,
-			0x22 => group_order,
 		);
 
 		// Track Properties are the final field, so nothing may follow.
-		if Self::has_properties(version) {
-			self.properties.encode(w, version)?;
-		}
+		self.properties.encode(w, version)?;
 		Ok(())
 	}
 
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		if version == Version::Draft14 {
-			let ok = SubscribeOk::decode_msg(r, version)?;
-			return Ok(Self {
-				request_id: ok.request_id,
-				largest: ok.largest,
-				properties: ok.properties,
-			});
-		}
-
-		let request_id = match version {
-			Version::Draft15 | Version::Draft16 => Some(RequestId::decode(r, version)?),
-			_ => None,
-		};
-		// Read as SUBSCRIBE_OK's are: EXPIRES is ignored, and MAX_CACHE_DURATION is a
-		// parameter only on draft-15.
+		// Read as SUBSCRIBE_OK's are: EXPIRES is ignored.
 		decode_params!(r, version,
-			0x04 => max_cache_duration: Option<u64> where version == Version::Draft15,
 			0x08 => _expires: Option<u64>,
 			0x09 => largest: Option<Location>,
-			0x22 => group_order: Option<GroupOrder> where version == Version::Draft15,
 		);
-		let mut properties = match Self::has_properties(version) {
-			true => Properties::decode(r, version)?,
-			false => Properties::default(),
-		};
-		properties.group_order = properties.group_order.or(group_order);
-		if version == Version::Draft15 {
-			properties.max_cache_duration = max_cache_duration.map(std::time::Duration::from_millis);
-		}
+		let properties = Properties::decode(r, version)?;
 
-		Ok(Self {
-			request_id,
-			largest,
-			properties,
-		})
+		Ok(Self { largest, properties })
 	}
 }
 
@@ -232,6 +126,7 @@ impl Decode<Version> for TrackStatusCode {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::ietf::GroupOrder;
 
 	fn encode_message<M: Message>(msg: &M, version: Version) -> Vec<u8> {
 		let mut buf = Vec::new();
@@ -240,18 +135,9 @@ mod tests {
 		buf.to_vec()
 	}
 
-	/// GROUP_ORDER and MAX_CACHE_DURATION are TRACK_STATUS_OK parameters only on draft-15,
-	/// as on SUBSCRIBE_OK. Draft-16 ignores a GROUP_ORDER it defines elsewhere, even with a
-	/// value no field could hold, and rejects 0x04, which it does not define at all. Draft-18
-	/// rejects a known parameter on a message that does not define it.
+	/// TRACK_STATUS_OK rejects a known parameter on a message that does not define it.
 	#[test]
 	fn track_status_ok_parameters_follow_the_draft() {
-		// Request 1, then GROUP_ORDER as the varint 256.
-		let ok = decode_message::<TrackStatusOk>(&[0x01, 0x01, 0x22, 0x41, 0x00], Version::Draft16)
-			.expect("draft-16 ignores GROUP_ORDER");
-		assert_eq!(ok.properties.group_order, None);
-		// Request 1, then MAX_CACHE_DURATION of 5.
-		assert!(decode_message::<TrackStatusOk>(&[0x01, 0x01, 0x04, 0x05], Version::Draft16).is_err());
 		// GROUP_ORDER = Ascending, then an empty properties block.
 		assert!(decode_message::<TrackStatusOk>(&[0x01, 0x22, 0x01], Version::Draft18).is_err());
 	}
@@ -259,78 +145,6 @@ mod tests {
 	fn decode_message<M: Message>(bytes: &[u8], version: Version) -> Result<M, DecodeError> {
 		let mut buf = bytes::Bytes::from(bytes.to_vec());
 		crate::coding::decode_buf(&mut buf, version, M::decode_msg)
-	}
-
-	#[test]
-	fn test_track_status_v14_round_trip() {
-		let msg = TrackStatus {
-			request_id: RequestId(1),
-			track_namespace: Path::from_static("test/ns"),
-			track_name: "video".into(),
-			properties_wanted: true,
-			epoch: None,
-		};
-
-		let encoded = encode_message(&msg, Version::Draft14);
-		let decoded: TrackStatus = decode_message(&encoded, Version::Draft14).unwrap();
-
-		assert_eq!(decoded.request_id, RequestId(1));
-		assert_eq!(decoded.track_namespace.as_str(), "test/ns");
-		assert_eq!(decoded.track_name, "video");
-	}
-
-	#[test]
-	fn test_track_status_v15_round_trip() {
-		let msg = TrackStatus {
-			request_id: RequestId(1),
-			track_namespace: Path::from_static("test/ns"),
-			track_name: "video".into(),
-			properties_wanted: true,
-			epoch: None,
-		};
-
-		let encoded = encode_message(&msg, Version::Draft15);
-		let decoded: TrackStatus = decode_message(&encoded, Version::Draft15).unwrap();
-
-		assert_eq!(decoded.request_id, RequestId(1));
-		assert_eq!(decoded.track_namespace.as_str(), "test/ns");
-		assert_eq!(decoded.track_name, "video");
-	}
-
-	#[test]
-	fn test_track_status_v17_round_trip() {
-		let msg = TrackStatus {
-			request_id: RequestId(1),
-			track_namespace: Path::from_static("test/ns"),
-			track_name: "video".into(),
-			properties_wanted: true,
-			epoch: None,
-		};
-
-		let encoded = encode_message(&msg, Version::Draft17);
-		let decoded: TrackStatus = decode_message(&encoded, Version::Draft17).unwrap();
-
-		assert_eq!(decoded.request_id, RequestId(1));
-		assert_eq!(decoded.track_namespace.as_str(), "test/ns");
-		assert_eq!(decoded.track_name, "video");
-	}
-
-	#[test]
-	fn test_track_status_v16_round_trip() {
-		let msg = TrackStatus {
-			request_id: RequestId(1),
-			track_namespace: Path::from_static("test/ns"),
-			track_name: "video".into(),
-			properties_wanted: true,
-			epoch: None,
-		};
-
-		let encoded = encode_message(&msg, Version::Draft16);
-		let decoded: TrackStatus = decode_message(&encoded, Version::Draft16).unwrap();
-
-		assert_eq!(decoded.request_id, RequestId(1));
-		assert_eq!(decoded.track_namespace.as_str(), "test/ns");
-		assert_eq!(decoded.track_name, "video");
 	}
 
 	#[test]
@@ -351,14 +165,7 @@ mod tests {
 		assert_eq!(decoded.track_name, "video");
 	}
 
-	const ALL: [Version; 6] = [
-		Version::Draft14,
-		Version::Draft15,
-		Version::Draft16,
-		Version::Draft17,
-		Version::Draft18,
-		Version::Draft22,
-	];
+	const ALL: [Version; 2] = [Version::Draft18, Version::Draft22];
 
 	/// INCLUDE_PROPERTIES only exists from draft-22, so the opt-out is dropped before it,
 	/// and the default (1) is never written.
@@ -381,9 +188,8 @@ mod tests {
 		}
 	}
 
-	/// TRACK_STATUS_OK carries what SUBSCRIBE_OK would, as far as each draft's answer
-	/// has room: draft-14 is a SUBSCRIBE_OK, drafts 15-17 a REQUEST_OK with only
-	/// parameters, and from draft-18 the REQUEST_OK ends with the Track Properties.
+	/// TRACK_STATUS_OK carries what SUBSCRIBE_OK would: a REQUEST_OK ending with the Track
+	/// Properties.
 	#[test]
 	fn test_track_status_ok_round_trip() {
 		let properties = Properties {
@@ -399,48 +205,16 @@ mod tests {
 
 		for version in ALL {
 			let msg = TrackStatusOk {
-				request_id: matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
-					.then_some(RequestId(3)),
 				largest,
 				properties: properties.clone(),
 			};
 			let decoded: TrackStatusOk =
 				decode_message(&encode_message(&msg, version), version).unwrap_or_else(|e| panic!("{version}: {e}"));
 
-			let expected = match version {
-				Version::Draft14 | Version::Draft15 => Properties {
-					group_order: Some(GroupOrder::Descending),
-					..Default::default()
-				},
-				Version::Draft16 | Version::Draft17 => Properties::default(),
-				_ => properties.clone(),
-			};
-			assert_eq!(decoded.request_id, msg.request_id, "{version}");
+			let expected = properties.clone();
 			assert_eq!(decoded.largest, largest, "{version}");
 			assert_eq!(decoded.properties, expected, "{version}");
 		}
-	}
-
-	/// Draft-14's TRACK_STATUS_OK is a SUBSCRIBE_OK with Track Alias 0, under its own type.
-	#[test]
-	fn test_track_status_ok_draft_14_is_a_subscribe_ok() {
-		let msg = TrackStatusOk {
-			request_id: Some(RequestId(3)),
-			largest: None,
-			properties: Properties::default(),
-		};
-		assert_eq!(TrackStatusOk::id(Version::Draft14), 0x0E);
-		assert_eq!(TrackStatusOk::id(Version::Draft15), 0x07);
-		let subscribe_ok = SubscribeOk {
-			request_id: Some(RequestId(3)),
-			track_alias: 0,
-			largest: None,
-			properties: Properties::default(),
-		};
-		assert_eq!(
-			encode_message(&msg, Version::Draft14),
-			encode_message(&subscribe_ok, Version::Draft14)
-		);
 	}
 
 	/// TRACK_STATUS is identical to SUBSCRIBE on every draft, so it carries whatever
@@ -454,19 +228,7 @@ mod tests {
 		];
 
 		#[rustfmt::skip]
-		let cases: [(Version, &[u8]); 3] = [
-			(Version::Draft14, &[
-				0x80, // Subscriber Priority
-				0x02, // Group Order
-				0x00, // Forward
-				0x03, 0x05, 0x01, // Filter Type AbsoluteStart, at {5, 1}
-				0x00, // Number of Parameters
-			]),
-			(Version::Draft15, &[
-				0x02, // Number of Parameters
-				0x10, 0x00, // FORWARD = 0
-				0x20, 0x01, // SUBSCRIBER_PRIORITY = 1
-			]),
+		let cases: [(Version, &[u8]); 1] = [
 			(Version::Draft22, &[
 				0x02, // Number of Parameters
 				0x03, 0x03, 0x03, 0x00, 0xAA, // AUTHORIZATION TOKEN

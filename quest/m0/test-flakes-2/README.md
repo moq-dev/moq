@@ -24,7 +24,7 @@ Rules every child keeps:
   clock, drive the timers with a `moq_clock::Manual` clock or the sim (every
   crate's timers run on `moq-clock`), or move the test off real sockets.
 - A mocked clock still flakes when the code jitters its timers with `rand`
-  (the draft-16 cancel race was a retry sweep jittered past a fixed settle
+  (one cancel race was a retry sweep jittered past a fixed settle
   budget). Wait out the jitter's whole window, not a count of small steps.
 
 This README's own work, after the children: run `just check --all` several

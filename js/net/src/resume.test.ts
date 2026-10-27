@@ -5,7 +5,7 @@ import * as Epoch from "./epoch.ts";
 import { NotFound, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
 import { type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { Route } from "./hop.ts";
-import type { Session as IetfSession } from "./ietf/adapter.ts";
+import type { Session as IetfSession } from "./ietf/session.ts";
 import { Subscriber as IetfSubscriber } from "./ietf/subscriber.ts";
 import { hooks, MAX_DATAGRAMS } from "./internal.ts";
 import type { Lister } from "./listing.ts";

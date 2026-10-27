@@ -117,14 +117,7 @@ pub fn decode_track(r: &mut Decoder<'_>) -> Result<(Path, String), DecodeError> 
 
 /// Session namespaces belong to the transport, and none of our extensions defines one.
 pub(super) fn refusal(namespace: &Path, version: super::Version) -> Option<super::RequestError<'static>> {
-	if matches!(
-		version,
-		super::Version::Draft14
-			| super::Version::Draft15
-			| super::Version::Draft16
-			| super::Version::Draft17
-			| super::Version::Draft18
-	) {
+	if matches!(version, super::Version::Draft18) {
 		return None;
 	}
 	// Reserved literals contain no escapes. Comparing the first escaped field keeps
@@ -133,7 +126,6 @@ pub(super) fn refusal(namespace: &Path, version: super::Version) -> Option<super
 		return None;
 	}
 	Some(super::RequestError {
-		request_id: None,
 		error_code: super::error::request::to_code(
 			&crate::Error::NotFound,
 			super::error::request::Kind::Subscribe,
@@ -170,7 +162,7 @@ mod tests {
 	}
 	use crate::coding::Form;
 
-	const FORM: Form = Form::LeadingOnes { seven: false };
+	const FORM: Form = Form::LeadingOnes;
 
 	fn encode_ns(path: &str) -> Vec<u8> {
 		encode_path(&crate::Path::try_from(path.to_string()).unwrap())

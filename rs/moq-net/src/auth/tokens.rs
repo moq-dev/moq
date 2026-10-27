@@ -892,7 +892,7 @@ mod tests {
 		let url: Url = "https://relay.example.com/room".parse().unwrap();
 		let (dialed, setup, connection) = credential(
 			&url,
-			&versions(&["moq-lite-07-wip", "moq-transport-17"]),
+			&versions(&["moq-lite-07-wip", "moq-transport-18"]),
 			&tokens(&["a", "b"]),
 		);
 		assert_eq!(dialed, url);

@@ -598,7 +598,7 @@ mod tests {
 	#[test]
 	fn a_tie_stays_literal_where_hop_100_sizes_differ() {
 		let quic = Form::Quic;
-		let leading = Form::LeadingOnes { seven: true };
+		let leading = Form::LeadingOnes;
 		assert_eq!(varint_size(100, quic), 2);
 		assert_eq!(varint_size(100, leading), 1);
 

@@ -154,7 +154,7 @@ test("malformed SETUP closes the accepted transport", async () => {
 		const writer = stream.writable.getWriter();
 		try {
 			await writer.write(new Uint8Array([0]));
-			expect(await pending).toEqual(new Error("unexpected client message type: 0x0"));
+			expect(await pending).toEqual(new Error("unexpected SETUP message type: 0x0"));
 			expect((await pair.client.closed).closeCode).toBe(0);
 		} finally {
 			writer.releaseLock();

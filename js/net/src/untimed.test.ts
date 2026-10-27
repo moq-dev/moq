@@ -30,10 +30,7 @@ const WIRES: Wire[] = [
 	{ name: "lite-05", protocol: Lite.ALPN_05, declares: false },
 	{ name: "lite-06", protocol: Lite.ALPN_06, declares: false },
 	{ name: "lite-07-wip", protocol: Lite.ALPN_07_WIP, declares: true },
-	{ name: "ietf-14", protocol: "", version: Ietf.Version.DRAFT_14, declares: false },
-	{ name: "ietf-16", protocol: Ietf.ALPN.DRAFT_16, declares: false },
-	{ name: "ietf-17", protocol: Ietf.ALPN.DRAFT_17, declares: true },
-	{ name: "ietf-20", protocol: Ietf.ALPN.DRAFT_22, declares: true },
+	{ name: "ietf-22", protocol: Ietf.ALPN.DRAFT_22, declares: true },
 ];
 
 /** Serve one group of `timestamps` on a track with `timescale`, and read it back over `wire`. */

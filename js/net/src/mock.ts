@@ -323,7 +323,7 @@ export interface MockTransportOptions {
 /**
  * Creates a pair of connected MockTransport instances.
  *
- * @param protocol - The WebTransport protocol identifier (e.g. "moqt-17", "moql", "")
+ * @param protocol - The WebTransport protocol identifier (e.g. "moqt-18", "moql", "")
  * @param options - Optional behavior toggles for datagram availability
  * @returns An object containing `client` and `server` transports
  */

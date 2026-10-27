@@ -174,11 +174,6 @@ harness = false
 required-features = ["async"]
 
 [[bench]]
-name = "request-ids"
-harness = false
-required-features = ["fuzz"]
-
-[[bench]]
 name = "refresh"
 harness = false
 

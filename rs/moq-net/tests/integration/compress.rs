@@ -19,10 +19,6 @@ const VERSIONS: &[&str] = &[
 	"moq-lite-07-wip",
 	"moq-lite-06",
 	"moq-lite-03",
-	"moq-transport-14",
-	"moq-transport-15",
-	"moq-transport-16",
-	"moq-transport-17",
 	"moq-transport-18",
 	"moq-transport-22",
 ];
@@ -119,14 +115,8 @@ async fn relay(published: Published, hops: [&str; 2], subscription: moq_net::tra
 	}
 }
 
-/// Hops that carry a start group and negotiate compression: lite-07, and moq-transport
-/// draft-17 and later.
-const RANGED: &[&str] = &[
-	"moq-lite-07-wip",
-	"moq-transport-17",
-	"moq-transport-18",
-	"moq-transport-22",
-];
+/// Hops that carry a start group and negotiate compression: lite-07 and moq-transport.
+const RANGED: &[&str] = &["moq-lite-07-wip", "moq-transport-18", "moq-transport-22"];
 
 /// A subscription starting at a group delivers it whole from its first frame across every
 /// pair of hops, compressed or not, whether the group began before it subscribed or after.
@@ -198,10 +188,7 @@ async fn relay_serves_every_version() {
 			let mut fixture = connect("moq-lite-07-wip", version).await;
 			assert_eq!(
 				fixture.subscriber.info().compress,
-				!matches!(
-					version,
-					"moq-lite-06" | "moq-lite-03" | "moq-transport-14" | "moq-transport-15" | "moq-transport-16"
-				),
+				!matches!(version, "moq-lite-06" | "moq-lite-03"),
 				"{version}: compression declared"
 			);
 
@@ -246,13 +233,7 @@ async fn relay_serves_every_version() {
 /// compressed or inflated.
 #[moq_clock::test]
 async fn datagrams_serve_every_version() {
-	for &version in &[
-		"moq-lite-07-wip",
-		"moq-lite-06",
-		"moq-transport-16",
-		"moq-transport-17",
-		"moq-transport-22",
-	] {
+	for &version in &["moq-lite-07-wip", "moq-lite-06", "moq-transport-18", "moq-transport-22"] {
 		moq_clock::timeout(TIMEOUT, async {
 			let mut fixture = connect("moq-lite-07-wip", version).await;
 			fixture
@@ -347,20 +328,11 @@ async fn datagrams_meter_the_bytes_on_the_wire() {
 /// Negotiated IETF ingress stays compressed across a relay to IETF or lite-07 egress.
 #[moq_clock::test]
 async fn ietf_ingress_stays_compressed_across_protocols() {
-	for upstream in ["moq-transport-17", "moq-transport-18", "moq-transport-22"] {
-		for downstream in [
-			"moq-lite-07-wip",
-			"moq-transport-16",
-			"moq-transport-22",
-			"moq-transport-14",
-		] {
+	for upstream in ["moq-transport-18", "moq-transport-22"] {
+		for downstream in ["moq-lite-07-wip", "moq-transport-22"] {
 			moq_clock::timeout(TIMEOUT, async {
 				let mut fixture = connect(upstream, downstream).await;
-				assert_eq!(
-					fixture.subscriber.info().compress,
-					!matches!(downstream, "moq-transport-14" | "moq-transport-16"),
-					"{upstream} -> {downstream}"
-				);
+				assert!(fixture.subscriber.info().compress, "{upstream} -> {downstream}");
 				let mut group = fixture.track.append_group().unwrap();
 				for index in 0..3 {
 					group
@@ -401,7 +373,7 @@ async fn ietf_ingress_stays_compressed_across_protocols() {
 /// A finished compressed track remains fetchable without subscribing to its live feed.
 #[moq_clock::test]
 async fn ietf_fetch_keeps_the_stored_form() {
-	for version in ["moq-transport-16", "moq-transport-18", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22"] {
 		moq_clock::timeout(TIMEOUT, async {
 			let publisher = produce_origin(1);
 			let broadcast = publisher.create_broadcast("bcast").unwrap();
@@ -423,7 +395,7 @@ async fn ietf_fetch_keeps_the_stored_form() {
 			origin.consume().routed("bcast").await.unwrap();
 			let remote = origin.consume().request_broadcast("bcast", None).await.unwrap();
 			let consumer = remote.track("data").unwrap();
-			assert_eq!(consumer.info().await.unwrap().compress, version != "moq-transport-16");
+			assert!(consumer.info().await.unwrap().compress, "{version}");
 			let mut fetched = consumer.fetch_group(0, moq_net::group::Fetch::default()).await.unwrap();
 			for index in 0..3 {
 				assert_eq!(

@@ -44,9 +44,8 @@
 //! Nothing else happens, so it measures the sessions' own work. Paused time skips waiting.
 //!
 //! `session_churn_*` times one request opened and closed by a session that already
-//! holds others open, swept over sessions and requests held per session. On
-//! moq-transport 14 every close is credited back through the MAX_REQUEST_ID window,
-//! so a slope here is that bookkeeping growing with the sessions or the requests.
+//! holds others open, swept over sessions and requests held per session, so a slope
+//! here is per-request bookkeeping growing with the sessions or the requests.
 //!
 //! Everything runs on one current-thread runtime, so the only work measured is
 //! protocol and relay work, never scheduling across threads.
@@ -1214,9 +1213,8 @@ fn allocations<B: Backend>() {
 	}
 }
 
-/// Versions for the churn sweep: the one draft with a MAX_REQUEST_ID window, the
-/// newest draft without it, and lite.
-const CHURN_VERSIONS: [&str; 3] = ["moq-transport-14", "moq-transport-22", "moq-lite-06"];
+/// Versions for the churn sweep: the newest moq-transport draft and lite.
+const CHURN_VERSIONS: [&str; 2] = ["moq-transport-22", "moq-lite-06"];
 
 /// Sessions on one relay, each holding `held` subscriptions open while it churns one more.
 #[derive(Clone, Copy)]
@@ -1371,7 +1369,7 @@ impl IdleRoom {
 
 pub(crate) fn idle(c: &mut Criterion) {
 	let mut group = c.benchmark_group("session_idle");
-	for version in ["moq-lite-06", "moq-transport-16", "moq-transport-22"] {
+	for version in ["moq-lite-06", "moq-transport-22"] {
 		for sessions in [1, 64, 1024] {
 			for consumers in [0, 1, 8] {
 				group.throughput(Throughput::Elements(sessions as u64));

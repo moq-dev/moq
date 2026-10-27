@@ -114,7 +114,7 @@ test("sessions sharing an auth handle present each configured token once", async
 	expect(closed).toEqual([]);
 });
 
-test("a draft-17+ client presents its token in SETUP", async () => {
+test("an IETF client presents its token in SETUP", async () => {
 	const version = Ietf.Version.DRAFT_18;
 	const pair = createMockTransportPair(Ietf.ALPN.DRAFT_18);
 	const token = new TextEncoder().encode("credential");
@@ -127,7 +127,7 @@ test("a draft-17+ client presents its token in SETUP", async () => {
 	const reader = new Reader(next.value, undefined, version);
 	expect(await reader.u53()).toBe(Ietf.Setup.id);
 	const setup = await Ietf.Setup.decode(reader, version);
-	const presented = Ietf.tokenFromSetup(setup.parameters, version);
+	const presented = Ietf.tokenFromSetup(setup.parameters);
 	expect(presented?.kind).toBe(Ietf.TOKEN_OUT_OF_BAND);
 	expect(new TextDecoder().decode(presented?.value)).toBe("credential");
 	pair.client.close();

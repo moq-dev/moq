@@ -507,10 +507,9 @@ pub struct Route {
 	///
 	/// Only a session built on the handle that issued it carries it, as the token on its
 	/// moq-transport PUBLISH_NAMESPACE: any other session, the inline NAMESPACE answering a
-	/// solicited SUBSCRIBE_NAMESPACE from draft 16 on (drafts 14 and 15 answer with a
-	/// PUBLISH_NAMESPACE, which carries it), and moq-lite (which rides the session's scope)
+	/// solicited SUBSCRIBE_NAMESPACE, and moq-lite (which rides the session's scope)
 	/// advertise the route unnamed. Swapping it is an update that renews the request with
-	/// REQUEST_UPDATE from draft 16, or ends and makes it again before. A handle passed to
+	/// REQUEST_UPDATE. A handle passed to
 	/// `Client::with_auth` presents it on every session it backs, so the route keeps it
 	/// across a reconnect. Local, like [`Self::source`]: a relay never forwards it.
 	pub auth: Option<crate::auth::Credential>,
@@ -1696,7 +1695,7 @@ impl TableCursor {
 
 	/// Whether the hidden rule lets this cursor discover a route at `prefix`.
 	fn discovers(&self, prefix: &Path) -> bool {
-		self.hidden.discovers(&self.heads, prefix)
+		self.hidden.reaches(&self.heads, prefix)
 	}
 }
 
@@ -1868,35 +1867,20 @@ pub(super) struct Hidden {
 	include: bool,
 	/// Measure visibility from the request prefix instead of authorization heads.
 	from: Option<Path>,
-	/// Report only what a feed scoped to these heads hides, for a stream that tops
-	/// up a feed already carrying everything visible from them.
-	beyond: Option<Vec<Path>>,
 }
 
 impl Hidden {
-	/// Whether a cursor hanging at `heads` reports a route at `prefix`.
-	fn discovers(&self, heads: &[Path], prefix: &Path) -> bool {
-		self.reaches(heads, prefix) && self.beyond.as_ref().is_none_or(|outer| hides(outer, prefix))
-	}
-
-	/// Whether a cursor hanging at `heads` could report a route at or beneath `prefix`.
-	/// A hidden segment hides everything beneath it, while a top-up feed's rule turns
-	/// on the rest of the path, so only the first can rule a prefix out.
+	/// Whether a cursor hanging at `heads` reports a route at or beneath `prefix`. A hidden
+	/// segment hides everything beneath it.
 	fn reaches(&self, heads: &[Path], prefix: &Path) -> bool {
 		self.include || !hides(self.from.as_ref().map(std::slice::from_ref).unwrap_or(heads), prefix)
 	}
 
-	/// This rule for a cursor reading through `mount`, whose heads sit on the
-	/// target: a feed it tops up hid everything under the mount, or hid what it
-	/// hides under the target.
+	/// This rule for a cursor reading through `mount`, whose heads sit on the target.
 	fn translate(&self, mount: &Mount) -> Self {
-		let beyond = self.beyond.as_ref().and_then(|outer| {
-			(!hides(outer, &mount.at)).then(|| outer.iter().filter_map(|head| mount.translate_head(head)).collect())
-		});
 		Self {
 			include: self.include,
 			from: self.from.as_ref().and_then(|head| mount.translate_head(head)),
-			beyond,
 		}
 	}
 }
@@ -6179,21 +6163,6 @@ impl Consumer {
 		self
 	}
 
-	/// A clone whose [`announced`](Self::announced) reports only the routes a feed
-	/// from `outer` hides, for a stream topping up that feed.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn beyond(mut self, outer: &Consumer) -> Self {
-		self.hidden.beyond = Some(
-			outer
-				.hidden
-				.from
-				.clone()
-				.map(|head| vec![head])
-				.unwrap_or_else(|| interest_prefixes(&outer.scope.allowed)),
-		);
-		self
-	}
-
 	/// Set wire discovery visibility relative to this consumer's requested root.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn discovery(mut self, hidden: bool) -> Self {
@@ -7726,20 +7695,6 @@ mod tests {
 		announced.assert_next_wait();
 		let mut announced = consumer.scope("", &scopes(&["room/.internal"])).unwrap().announced();
 		announced.expect_next_active("room/.internal").await;
-		announced.assert_next_wait();
-
-		// A top-up feed reports only what a feed from the root hid, filtered by its own
-		// prefix and opt-in.
-		let mut announced = consumer.clone().with_hidden(true).beyond(&consumer).announced();
-		announced.expect_next_active(".stats/node").await;
-		announced.expect_next_active("room/.internal").await;
-		announced.assert_next_wait();
-		let room = consumer.scope("", &scopes(&["room"])).unwrap().beyond(&consumer);
-		let mut announced = room.announced();
-		announced.assert_next_wait();
-		let stats = consumer.scope("", &scopes(&[".stats"])).unwrap().beyond(&consumer);
-		let mut announced = stats.announced();
-		announced.expect_next_active(".stats/node").await;
 		announced.assert_next_wait();
 	}
 

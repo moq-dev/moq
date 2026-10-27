@@ -376,7 +376,7 @@ async fn hidden_broadcasts_need_a_lite07_opt_in() {
 /// `--server-version` applies to the WebSocket fallback as well as QUIC.
 #[tokio::test]
 async fn relay_websocket_honors_server_version() {
-	let allowed: moq_net::Version = "moq-transport-16".parse().expect("parse allowed version");
+	let allowed: moq_net::Version = "moq-transport-18".parse().expect("parse allowed version");
 	let excluded = newest_lite_version();
 	let (port, web_handle) = spawn_versioned_relay(vec![allowed]).await;
 	let url: url::Url = format!("ws://127.0.0.1:{port}/smoke").parse().expect("parse url");
@@ -792,21 +792,13 @@ async fn internal_unix_round_trip() {
 }
 
 /// Every version whose SETUP carries a request path the server reads: moq-lite-05/06
-/// (Setup Stream) and moq-transport 14-18 (the `Path` SETUP parameter, in-band on
-/// the bidi stream for 14-16 and the uni Setup Stream for 17-18).
+/// (Setup Stream) and moq-transport 18 (the `Path` SETUP parameter on the uni Setup
+/// Stream).
 fn path_versions() -> Vec<moq_net::Version> {
-	[
-		"moq-lite-05",
-		"moq-lite-06",
-		"moq-transport-14",
-		"moq-transport-15",
-		"moq-transport-16",
-		"moq-transport-17",
-		"moq-transport-18",
-	]
-	.iter()
-	.map(|alpn| alpn.parse().expect("parse version alpn"))
-	.collect()
+	["moq-lite-05", "moq-lite-06", "moq-transport-18"]
+		.iter()
+		.map(|alpn| alpn.parse().expect("parse version alpn"))
+		.collect()
 }
 
 /// Publisher and subscriber (both pinned to `version`) that announce/observe

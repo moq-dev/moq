@@ -1,9 +1,9 @@
 /** Sweep request restart and cancellation over independent origin and waiter dimensions. */
 import { Producer as Broadcast } from "../src/broadcast";
 import * as Epoch from "../src/epoch";
-import { NativeSession } from "../src/ietf/adapter";
 import { Publisher as IetfPublisher } from "../src/ietf/publisher";
 import { RequestOk } from "../src/ietf/request";
+import { NativeSession } from "../src/ietf/session";
 import {
 	SubscribeNamespace,
 	SubscribeNamespaceEntry,

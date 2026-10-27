@@ -105,6 +105,7 @@ pub(crate) struct SendStream(Box<dyn ErasedSend>);
 
 impl SendStream {
 	/// Box a stream, keeping its own send-group type behind the boundary.
+	#[cfg(test)]
 	pub(crate) fn new(stream: impl poll::SendStream<Group: MaybeSend + MaybeSync> + MaybeSend + MaybeSync) -> Self {
 		Self(Box::new(stream))
 	}
@@ -114,6 +115,7 @@ impl SendStream {
 pub(crate) struct RecvStream(Box<dyn ErasedRecv>);
 
 impl RecvStream {
+	#[cfg(test)]
 	pub(crate) fn new(stream: impl poll::RecvStream + MaybeSend + MaybeSync) -> Self {
 		Self(Box::new(stream))
 	}

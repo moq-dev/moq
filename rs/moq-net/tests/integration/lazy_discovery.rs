@@ -359,17 +359,8 @@ async fn serving_the_peer_asks_nothing() {
 	}
 }
 
-/// Every moq-transport draft. Not every one marks where an initial set ends (draft-14 and
-/// 15 answer with PUBLISH_NAMESPACE requests after the OK), so these read what arrived once
-/// everything in flight has.
-const IETF: &[&str] = &[
-	"moq-transport-14",
-	"moq-transport-15",
-	"moq-transport-16",
-	"moq-transport-17",
-	"moq-transport-18",
-	"moq-transport-22",
-];
+/// Every moq-transport draft. These read what arrived once everything in flight has.
+const IETF: &[&str] = &["moq-transport-18", "moq-transport-22"];
 
 /// Apply what `announced` reports once everything in flight has arrived to `held`, and
 /// say whether any of it ended a prefix.

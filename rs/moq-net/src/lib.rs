@@ -34,7 +34,7 @@
 //! keeping it small rather than polluting it with half-baked features.
 //!
 //! The library is forwards-compatible with the full IETF specification and supports
-//! moq-transport drafts 14+ via version negotiation. Everything will work perfectly,
+//! moq-transport drafts 18+ via version negotiation. Everything will work perfectly,
 //! so long as your application uses the API as defined above.
 //!
 //! For example, there's no concept of "sub-group". When connecting to a moq-transport

@@ -2,8 +2,8 @@
 
 import { Milli } from "@moq/clock";
 import { randomHop } from "../src/hop.ts";
-import { NativeSession } from "../src/ietf/adapter.ts";
 import { Publisher as IetfPublisher } from "../src/ietf/publisher.ts";
+import { NativeSession } from "../src/ietf/session.ts";
 import { Subscribe as IetfSubscribe } from "../src/ietf/subscribe.ts";
 import { ALPN, Version as IetfVersion } from "../src/ietf/version.ts";
 import { Publisher as LitePublisher } from "../src/lite/publisher.ts";

@@ -11,6 +11,13 @@ Pass a prefix without a trailing `/`: `Path::from_static("room")` covers `room/c
 `Path::from_escaped` is gone, and `path::TooLong` is `path::Invalid::TooLong`. `Path::head(n)` returns the path's first `n` segments.
 moq-lite decoding refuses a path with an empty segment as a protocol violation, and moq-transport decoding refuses a namespace field ending in `/`, which escapes to one.
 
+### moq-transport drafts 14 through 17 are removed ([#6753](https://github.com/moq-dev/moq/pull/6753))
+
+`ietf::Version::Draft14` through `Draft17` are gone, and a peer offering only those versions, by ALPN or in the moql SETUP, fails the handshake.
+Peers must speak moq-transport draft 18 or later, or moq-lite.
+The moql SETUP (no ALPN, or `moql`) now negotiates only moq-lite versions.
+`session::Limits::requests` is removed: stream credit bounds every peer request, so drop the field and keep `announces`.
+
 ### `Path` and `Relative` have no lifetime
 
 There is one owned `Path` type: a short path is stored inline and a long one shares a reference-counted buffer, so cloning stays cheap. Every path is at most `Path::MAX_BYTES` (16 KiB).
@@ -103,7 +110,7 @@ Path normalization, relative references, and subscription paths retain their sem
 
 ### `Version::uses_setup_negotiation` is removed ([#6483](https://github.com/moq-dev/moq/pull/6483))
 
-Match the version yourself: lite-01, lite-02, and moq-transport draft 14 negotiate the version in SETUP; every other version negotiates it through ALPN.
+Match the version yourself: lite-01 and lite-02 negotiate the version in SETUP; every other version negotiates it through ALPN.
 
 ### Sessions box their transport (#6176)
 
@@ -509,7 +516,7 @@ Treat both like `NotFound` if you match on errors.
 ### Sessions cap peer requests (#4820)
 
 A peer past the session's announce bound loses the session with `TooManyRequests`.
-Stream credit bounds its subscriptions and FETCHes, except on moq-transport drafts 14 to 16, where the request window sized by `announces` and `requests` does.
+Stream credit bounds its subscriptions and FETCHes.
 Raise the defaults for a large relay mesh.
 
 ```rust

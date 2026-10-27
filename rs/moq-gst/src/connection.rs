@@ -128,10 +128,10 @@ mod tests {
 				element.set_property(name, value);
 				assert_eq!(element.property::<u64>(name), value);
 			}
-			element.set_property("connect-version", " moq-transport-14 , moq-lite-06 ");
+			element.set_property("connect-version", " moq-transport-18 , moq-lite-06 ");
 			assert_eq!(
 				element.property::<String>("connect-version"),
-				" moq-transport-14 , moq-lite-06 "
+				" moq-transport-18 , moq-lite-06 "
 			);
 		}
 	}
@@ -140,7 +140,7 @@ mod tests {
 	fn properties_reach_versions_tls_and_quic_config() {
 		let mut settings = Settings::default();
 		for (name, value) in [
-			("connect-version", " moq-transport-14 , moq-lite-06 ".to_value()),
+			("connect-version", " moq-transport-18 , moq-lite-06 ".to_value()),
 			("tls-disable-verify", true.to_value()),
 			("quic-idle-timeout", 15_000u64.to_value()),
 			("quic-keep-alive", 0u64.to_value()),
@@ -151,7 +151,7 @@ mod tests {
 		let (connect, quic) = settings.resolve().unwrap();
 		assert_eq!(
 			connect.version,
-			["moq-transport-14".parse().unwrap(), "moq-lite-06".parse().unwrap()]
+			["moq-transport-18".parse().unwrap(), "moq-lite-06".parse().unwrap()]
 		);
 		assert_eq!(connect.tls.insecure, Some(true));
 		assert_eq!(connect.backoff.timeout, Some(Duration::ZERO.into()));

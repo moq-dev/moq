@@ -42,6 +42,11 @@ These land with the next breaking release.
   hang's media priorities now sit above that default rather than below it.
   Mixed versions only differ in how an unset priority ranks against a set one,
   so upgrade publishers and players in either order.
+- **moq-transport drafts 14 through 17 are dropped.** Rust and JavaScript
+  speak moq-transport drafts 18 through 22 only, and the `moql` SETUP
+  negotiates moq-lite only. A peer that offers nothing newer fails
+  to connect instead of falling back, so move such peers to draft 18 or a
+  moq-lite version before upgrading what they connect to.
 - **WebSocket needs a QMux subprotocol** (#6231). Relays answer a WebSocket
   upgrade that offers no `qmux-NN` subprotocol with 400 instead of falling back
   to the legacy `webtransport` format, so upgrade such clients before relays.
@@ -63,8 +68,8 @@ These land with the next breaking release.
   their readers upgraded together.
 - **Announce restarts.** moq-lite 07 adds `ANNOUNCE_RESTART` (0x3): another
   publisher instance now serves the prefix. lite-06's `ANNOUNCE_RESTART` is
-  named `ANNOUNCE_UPDATE`, as it always meant. moq-transport draft 17 and later
-  with the epoch extension advertise another epoch before withdrawing the old
+  named `ANNOUNCE_UPDATE`, as it always meant. moq-transport with the epoch
+  extension advertise another epoch before withdrawing the old
   one. Elsewhere, a restart is still an end then a start.
 - **Publisher epochs ride the route** (#4942). moq-lite 07 carries the epoch
   after the path in `ANNOUNCE_START`, `TRACK`, `SUBSCRIBE`, and `FETCH`.
@@ -77,7 +82,7 @@ These land with the next breaking release.
   tie-break and ends once the fleet is upgraded.
 - **A track is timed or untimed, and nothing fills in a timestamp on
   receive.** Tracks from moq-lite before 05, and moq-transport tracks without
-  `TIMESCALE` (every track on drafts 14 to 16), arrive untimed instead of
+  `TIMESCALE` arrive untimed instead of
   stamped with their arrival time. moq-lite 05 and 06 can't encode absence and
   carry a send time instead, so their receivers drop every timestamp and those
   tracks arrive untimed too: read media time from the payload. moq-transport

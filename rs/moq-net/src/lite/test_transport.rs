@@ -689,14 +689,6 @@ impl SinkSession {
 		}
 	}
 
-	/// Write this prefix on each bidi stream before holding its remaining bytes.
-	pub fn gated_bi_prefix(prefix: usize, gate: kio::Consumer<bool>) -> Self {
-		Self {
-			bi_prefix: prefix,
-			..Self::gated_bi(gate)
-		}
-	}
-
 	/// Accept bidi streams from the peer, holding every write until `gate` flips to true.
 	///
 	/// The accepted half of a control stream carries the answers (track info,

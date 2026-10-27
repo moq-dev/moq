@@ -80,6 +80,6 @@ async fn epochless_replacement_refuses_pending_catalog() {
 #[moq_clock::test]
 async fn same_epoch_replacement_acquires_pending_catalog() {
 	acquisition("moq-lite-07-wip", true).await;
-	acquisition("moq-transport-17", true).await;
+	acquisition("moq-transport-18", true).await;
 	acquisition("moq-transport-22", true).await;
 }

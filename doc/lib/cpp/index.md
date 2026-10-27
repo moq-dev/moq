@@ -211,7 +211,7 @@ Obtain a dynamic track request’s `demand()` before accepting it to watch subsc
 
 ## Authorization
 
-On `moq-lite-07-wip` (opt in with `ClientConfig::versions`) and on moq-transport draft-17+ with the [MoQ Auth extension](/draft/moq-auth), `session->grants()` returns a `GrantConsumer`: `grant()` is the `Grant` the relay sent back, empty until it answers and while a client session reconnects, and `changed()` waits for the next one until `cancel()`.
+On `moq-lite-07-wip` (opt in with `ClientConfig::versions`) and on moq-transport draft-18+ with the [MoQ Auth extension](/draft/moq-auth), `session->grants()` returns a `GrantConsumer`: `grant()` is the `Grant` the relay sent back, empty until it answers and while a client session reconnects, and `changed()` waits for the next one until `cancel()`.
 
 Set `ClientConfig::tokens` instead of putting the credential in the URL. The first is the connection credential, sent in SETUP and, while an offered version can't carry it there (lite before 07), as the URL's `?jwt=`; each other token widens the grant over AUTH. `session->tokens()->set(...)` replaces them before they expire: the next dial presents them, a live AUTH session at once, and after an authorization refusal the session redials only if they changed. `answered()` resolves once the relay accepts them, or to an `Error` carrying its refusal code. A server-accepted session's `tokens()` is null. A `?jwt=` already in the URL stays the connection credential, which is how to reach a relay older than this release.
 

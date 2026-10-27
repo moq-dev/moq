@@ -161,7 +161,7 @@ async fn sigint_drains_sessions_before_exiting_inner() {
 	.expect("no GOAWAY within 5s of SIGINT")
 	.expect("session closed without a GOAWAY");
 	// Empty URI: the relay is restarting, not moving. The window itself is the
-	// sender's own timer here (only moq-transport draft-17+ puts it on the wire),
+	// sender's own timer here (only moq-transport puts it on the wire),
 	// so it is the elapsed time below that proves it was honored.
 	assert_eq!(goaway.uri(), "", "expected a reconnect-to-me GOAWAY");
 
@@ -303,9 +303,9 @@ async fn a_session_arriving_mid_drain_gets_what_is_left_inner() {
 	let port = relay.tcp_addr().expect("TCP listener bound").port();
 	let trigger = relay.shutdown_trigger().clone();
 	let run = tokio::spawn(relay.run());
-	// moq-transport-17 is the first version whose GOAWAY carries its deadline on
-	// the wire, which is what this test reads.
-	let client = client(vec!["moq-transport-17".parse().expect("parse version")]);
+	// moq-transport's GOAWAY carries its deadline on the wire, which is what this
+	// test reads.
+	let client = client(vec!["moq-transport-18".parse().expect("parse version")]);
 
 	let established = connect(&client, port).await;
 	let draining = established.draining().expect("connected");

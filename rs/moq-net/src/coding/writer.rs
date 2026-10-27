@@ -328,10 +328,6 @@ mod tests {
 	async fn raw_payload_stop_uses_the_negotiated_registry() {
 		for (version, expected) in [
 			(
-				crate::Version::Ietf(crate::ietf::Version::Draft17),
-				Error::Stream(crate::StreamError::Unknown(0x4)),
-			),
-			(
 				crate::Version::Ietf(crate::ietf::Version::Draft22),
 				Error::Stream(crate::StreamError::GoingAway),
 			),
@@ -399,7 +395,7 @@ mod tests {
 
 		// A control message's type goes with its body: a bare type would make the next
 		// message, or a FIN, a torn one.
-		let mut writer = Writer::new(SinkSend::new(Log::default()), crate::ietf::Version::Draft17);
+		let mut writer = Writer::new(SinkSend::new(Log::default()), crate::ietf::Version::Draft18);
 		writer.buffer_varint(5).unwrap();
 		writer.buffer_message(0x2, &Poison).unwrap_err();
 		writer.buffer_varint(7).unwrap();

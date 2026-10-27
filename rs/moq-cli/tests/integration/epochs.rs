@@ -201,10 +201,7 @@ async fn replacement(version: &str) {
 		(changed(&mut catalog_follow).await, changed(&mut media_follow).await)
 	})
 	.await;
-	assert_eq!(
-		catalog_restart,
-		version != "moq-lite-06" && version != "moq-transport-14"
-	);
+	assert_eq!(catalog_restart, version != "moq-lite-06");
 	assert_eq!(media_restart, catalog_restart);
 	println!(
 		"{version}: relay replacement observed in {:?} of {:?} (publisher already connected)",
@@ -307,6 +304,5 @@ macro_rules! versions {
 versions! {
 	lite07: "moq-lite-07-wip",
 	lite06: "moq-lite-06",
-	ietf14: "moq-transport-14",
 	ietf22: "moq-transport-22",
 }

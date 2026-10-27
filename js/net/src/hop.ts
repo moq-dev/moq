@@ -111,10 +111,8 @@ export interface Route {
 	 * The token the request advertising this route carries, from `auth.add()`, or undefined
 	 * for the session's own credential. Only the session that issued it carries it, as the
 	 * token on its moq-transport PUBLISH_NAMESPACE: any other session, the inline NAMESPACE
-	 * answering a solicited SUBSCRIBE_NAMESPACE from draft 16 on (drafts 14 and 15 answer
-	 * with a PUBLISH_NAMESPACE, which carries it), and moq-lite advertise the route unnamed.
-	 * Swapping it renews the request with REQUEST_UPDATE from draft 16, or ends and makes it
-	 * again before. Local: a relay never forwards it. Mirrors `Route::auth` in rs/moq-net.
+	 * answering a solicited SUBSCRIBE_NAMESPACE, and moq-lite advertise the route unnamed.
+	 * Swapping it renews the request with REQUEST_UPDATE. Local: a relay never forwards it. Mirrors `Route::auth` in rs/moq-net.
 	 */
 	auth?: Credential;
 }

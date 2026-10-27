@@ -76,14 +76,14 @@ async fn routing(version: &str, cluster: bool) {
 
 #[moq_clock::test]
 async fn conformance_namespaces_route_through_one_relay() {
-	for version in ["moq-transport-16", "moq-transport-18"] {
+	for version in ["moq-transport-18"] {
 		routing(version, false).await;
 	}
 }
 
 #[moq_clock::test]
 async fn conformance_namespaces_route_through_a_lite_cluster() {
-	for version in ["moq-transport-16", "moq-transport-18"] {
+	for version in ["moq-transport-18"] {
 		routing(version, true).await;
 	}
 }

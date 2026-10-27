@@ -8008,7 +8008,7 @@ async fn answered(session: &MoqSession) -> Result<(), MoqError> {
 /// unsupported.
 #[tokio::test]
 async fn auth_reads_the_peer_grant() {
-	for version in ["moq-lite-07-wip", "moq-transport-17"] {
+	for version in ["moq-lite-07-wip", "moq-transport-18"] {
 		auth_reads_the_peer_grant_on(version).await;
 	}
 }
@@ -8041,11 +8041,11 @@ async fn auth_reads_the_peer_grant_on(version: &str) {
 	server.cancel();
 }
 
-/// moq-transport without the Auth extension carries a token only on a request that names it,
-/// which no binding can, so the answer is that the session cannot carry it.
+/// A live session without AUTH (moq-lite before 07) has nothing to carry a new token on, so the
+/// answer is that the session cannot carry it.
 #[tokio::test]
 async fn auth_refuses_a_token_nothing_carries() {
-	let (server, client, accepted) = tokio::time::timeout(TIMEOUT, session_pair("moq-transport-14"))
+	let (server, client, accepted) = tokio::time::timeout(TIMEOUT, session_pair("moq-lite-06"))
 		.await
 		.expect("pair");
 	client.tokens().unwrap().set(vec!["extra".into()]).unwrap();
