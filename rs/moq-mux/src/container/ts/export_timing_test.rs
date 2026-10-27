@@ -84,6 +84,8 @@ struct Live {
 	audio_lag: i64,
 	/// Video is a B-pyramid: see [`Self::reorder`].
 	reorder: bool,
+	/// Payload bytes in each non-key video frame.
+	delta_size: usize,
 	start: Instant,
 	tick: u64,
 	audio_index: u64,
@@ -147,6 +149,7 @@ impl Live {
 			rate: MUX_RATE,
 			audio_lag,
 			reorder: false,
+			delta_size: 400,
 			start: moq_clock::now(),
 			tick: 0,
 			audio_index: 0,
@@ -254,7 +257,7 @@ impl Live {
 					let slice = if keyframe {
 						vec![0x65u8; 3_000]
 					} else {
-						vec![0x41u8; 400]
+						vec![0x41u8; self.delta_size]
 					};
 					let presented = match self.reorder {
 						true => (tick - tick % GOP + PYRAMID[(tick % GOP) as usize] + PYRAMID_DELAY) * VIDEO_US,
@@ -639,35 +642,146 @@ async fn frames_held_through_a_silence_drop_as_late() {
 	let jitter = Duration::from_millis(300);
 	// The frames presented within the jitter of the last one read before the silence.
 	let held = jitter.as_micros() as u64 / VIDEO_US + 1;
-	for lag in [0, LAGS[0], LAGS[1]] {
-		let mut live = Live::new(1.0, lag).await;
-		live.declare_video_jitter(jitter);
-		let mut leg = live.join(Duration::ZERO).await;
-		live.run(8 * GOP + 5, &mut [&mut leg], |_| false).await;
-		live.fall_silent(Duration::from_secs(3), &mut [&mut leg]).await;
-		let resumed = moq_clock::now();
-		live.run(live.tick + 8 * GOP, &mut [&mut leg], |_| false).await;
+	for declared in [false, true] {
+		for lag in [0, LAGS[0], LAGS[1]] {
+			let mut live = Live::new(1.0, lag).await;
+			if declared {
+				live.reorder();
+			} else {
+				live.declare_video_jitter(jitter);
+			}
+			let mut leg = live.join(Duration::ZERO).await;
+			let tail = if declared { 2 } else { 5 };
+			live.run(8 * GOP + tail, &mut [&mut leg], |_| false).await;
+			live.fall_silent(Duration::from_secs(3), &mut [&mut leg]).await;
+			let resumed = moq_clock::now();
+			live.run(live.tick + 8 * GOP, &mut [&mut leg], |_| false).await;
 
-		let dropped = leg.export.dropped();
-		assert!(
-			(1..=held).contains(&dropped),
-			"lag {lag}: {dropped} dropped, where {held} were held through the silence"
-		);
-		let after: Vec<Unit> = leg.units().into_iter().filter(|unit| unit.sent >= resumed).collect();
-		let late: Vec<f64> = after
-			.iter()
-			.filter(|unit| unit.lead < 0.0)
-			.map(|unit| unit.lead)
-			.collect();
-		assert!(
-			late.is_empty(),
-			"lag {lag}: units went out after they decode, by {late:?} ms"
-		);
-		let video = after.iter().filter(|unit| unit.pid == VIDEO_PID).count() as u64;
-		assert!(
-			video >= 6 * GOP,
-			"lag {lag}: only {video} video units after the silence"
-		);
+			let dropped = leg.export.dropped();
+			assert!(
+				(1..=held).contains(&dropped),
+				"lag {lag}: {dropped} dropped, where {held} were held through the silence"
+			);
+			let after: Vec<Unit> = leg.units().into_iter().filter(|unit| unit.sent >= resumed).collect();
+			let late: Vec<f64> = after
+				.iter()
+				.filter(|unit| unit.lead < 0.0)
+				.map(|unit| unit.lead)
+				.collect();
+			assert!(
+				late.is_empty(),
+				"lag {lag}: units went out after they decode, by {late:?} ms"
+			);
+			let video = after.iter().filter(|unit| unit.pid == VIDEO_PID).count() as u64;
+			assert!(
+				video >= 6 * GOP,
+				"lag {lag}: only {video} video units after the silence"
+			);
+		}
+	}
+}
+
+/// A loss noticed after a silence releases held video against the loss time, while a
+/// prompt eviction preserves on-time frames, for both decode clocks.
+#[tokio::test(start_paused = true)]
+async fn a_cut_judges_held_video_when_the_loss_is_observed() {
+	for declared in [false, true] {
+		for silence in [Duration::ZERO, Duration::from_secs(3)] {
+			// A PCR slot of audio skew puts held video at the schedule's next slot.
+			let mut live = Live::new(1.0, 25_000).await;
+			live.delta_size = 1_000;
+			if declared {
+				live.reorder();
+			} else {
+				live.declare_video_jitter(Duration::from_millis(400));
+			}
+			let mut leg = live.join(Duration::ZERO).await;
+			// The declared clock holds only the group's first depth frames.
+			let tail = if declared { 2 } else { 8 };
+			live.run(8 * GOP + tail, &mut [&mut leg], |_| false).await;
+			live.fall_silent(silence, &mut [&mut leg]).await;
+			let observed = moq_clock::now();
+			live.group.take().unwrap().abort(moq_net::Error::Unroutable).unwrap();
+			leg.poll_now();
+			live.run(live.tick + 8 * GOP, &mut [&mut leg], |_| false).await;
+			assert_eq!(
+				leg.export.dropped() > 0,
+				!silence.is_zero(),
+				"declared {declared}, silence {silence:?}"
+			);
+			let after: Vec<_> = leg
+				.units()
+				.into_iter()
+				.filter(|unit| unit.pid == VIDEO_PID && unit.sent >= observed)
+				.collect();
+			assert!(after.len() >= (6 * GOP) as usize, "video resumes after the cut");
+			assert!(
+				after.iter().all(|unit| unit.lead >= 0.0),
+				"video never goes out after its decode time"
+			);
+		}
+	}
+}
+
+/// A resumed frame supplies the settling arrival across either a skipped group or a
+/// declared restart, including when both boundaries are read in the same poll.
+#[tokio::test(start_paused = true)]
+async fn a_successor_settles_held_video_across_a_skip_or_restart() {
+	for declared in [false, true] {
+		for restart in [false, true] {
+			let mut live = Live::new(1.0, 25_000).await;
+			if declared {
+				live.reorder();
+			} else {
+				live.declare_video_jitter(Duration::from_millis(400));
+			}
+			let mut leg = live.join(Duration::ZERO).await;
+			let tail = if declared { 2 } else { 8 };
+			live.run(8 * GOP + tail, &mut [&mut leg], |_| false).await;
+			live.fall_silent(Duration::from_secs(3), &mut [&mut leg]).await;
+			if restart {
+				live.group.take().unwrap().finish().unwrap();
+				let mut marker = live.video.append_group().unwrap();
+				HangContainer::Legacy(crate::container::Kind::Video)
+					.write(
+						&mut marker,
+						&[crate::container::test_util::raw_frame(live.tick * VIDEO_US, b"", true)],
+					)
+					.unwrap();
+				marker.finish().unwrap();
+			} else {
+				// Leave the old group blocked so the successor makes the consumer skip it.
+				live.stalling = true;
+			}
+			// Deliver the successor with its boundary, so no clean-end Pending flush
+			// runs before the new frame can settle the held tail.
+			live.run(live.tick + 1, &mut [], |_| false).await;
+			leg.poll_now();
+			live.run(live.tick + 8 * GOP, &mut [&mut leg], |_| false).await;
+			assert!(leg.export.dropped() > 0, "declared {declared}, restart {restart}");
+		}
+	}
+}
+
+/// A clean group end followed by Pending settles its tail immediately, before a later
+/// silence, under either decode clock.
+#[tokio::test(start_paused = true)]
+async fn a_clean_group_end_settles_held_video_before_a_silence() {
+	for declared in [false, true] {
+		let mut live = Live::new(1.0, 25_000).await;
+		if declared {
+			live.reorder();
+		} else {
+			live.declare_video_jitter(Duration::from_millis(400));
+		}
+		let mut leg = live.join(Duration::ZERO).await;
+		let tail = if declared { 2 } else { 8 };
+		live.run(8 * GOP + tail, &mut [&mut leg], |_| false).await;
+		live.group.take().unwrap().finish().unwrap();
+		leg.poll_now();
+		live.fall_silent(Duration::from_secs(3), &mut [&mut leg]).await;
+		live.run(live.tick + 8 * GOP, &mut [&mut leg], |_| false).await;
+		assert_eq!(leg.export.dropped(), 0, "declared {declared}");
 	}
 }
 
@@ -689,18 +803,24 @@ async fn video_held_for_most_of_the_delay_drops_nothing() {
 /// the stream is not a missed deadline, so they go out rather than drop.
 #[tokio::test(start_paused = true)]
 async fn the_video_held_at_the_end_goes_out() {
-	for lag in [0, LAGS[0], LAGS[1]] {
-		let mut live = Live::new(1.0, lag).await;
-		live.declare_video_jitter(Duration::from_millis(300));
-		let mut leg = live.join(Duration::ZERO).await;
-		let last = 8 * GOP + 5;
-		live.run(last, &mut [&mut leg], |_| false).await;
-		live.run_audio((last + 3 * GOP) * VIDEO_US, &mut [&mut leg]).await;
-		live.finish(&mut [&mut leg]).await;
+	for declared in [false, true] {
+		for lag in [0, LAGS[0], LAGS[1]] {
+			let mut live = Live::new(1.0, lag).await;
+			if declared {
+				live.reorder();
+			} else {
+				live.declare_video_jitter(Duration::from_millis(300));
+			}
+			let mut leg = live.join(Duration::ZERO).await;
+			let last = 8 * GOP + if declared { 2 } else { 5 };
+			live.run(last, &mut [&mut leg], |_| false).await;
+			live.run_audio((last + 3 * GOP) * VIDEO_US, &mut [&mut leg]).await;
+			live.finish(&mut [&mut leg]).await;
 
-		assert_eq!(leg.export.dropped(), 0, "lag {lag}: frames dropped");
-		let video = leg.units().iter().filter(|unit| unit.pid == VIDEO_PID).count() as u64;
-		assert_eq!(video, last, "lag {lag}: {video} of {last} video units went out");
+			assert_eq!(leg.export.dropped(), 0, "lag {lag}: frames dropped");
+			let video = leg.units().iter().filter(|unit| unit.pid == VIDEO_PID).count() as u64;
+			assert_eq!(video, last, "lag {lag}: {video} of {last} video units went out");
+		}
 	}
 }
 

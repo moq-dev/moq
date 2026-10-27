@@ -16,13 +16,15 @@ export type CodecMime = "opus" | "aac";
 /**
  * Where audio comes from: a live capture track, or a stream of samples we decoded ourselves.
  * A bare track is accepted for backwards compatibility and treated as kind="auto".
- * Prefer the { track, kind } object form so the encoder can pick the right Opus settings.
+ * Prefer the `{ track, kind }` object form so the encoder can pick the right Opus settings.
  */
 export type Source = StreamTrack | SourceConfig | SampleSource;
 
 /** A capture track plus the kind of audio it carries. */
 export interface SourceConfig {
+	/** The track to capture. */
 	track: StreamTrack;
+	/** What kind of audio the track carries, driving the Opus defaults. */
 	kind: Kind;
 }
 
@@ -72,8 +74,11 @@ export type Constraints = Omit<
 
 /** Stronger typing for the MediaStreamTrack interface. */
 export interface StreamTrack extends MediaStreamTrack {
+	/** Always audio. */
 	kind: "audio";
+	/** A new track on the same source, with its own settings and lifetime. */
 	clone(): StreamTrack;
+	/** The settings the track currently runs with. */
 	getSettings(): TrackSettings;
 }
 
@@ -82,16 +87,24 @@ export interface StreamTrack extends MediaStreamTrack {
  * This is a fork of the MediaTrackSettings interface with properties required for audio or video.
  */
 export interface TrackSettings {
+	/** The capture device. */
 	deviceId: string;
+	/** The physical device the capture device belongs to. */
 	groupId: string;
 
 	// Seems to be available on all browsers.
+	/** The sample rate in Hz. */
 	sampleRate: number;
 
 	// The rest is optional unfortunately.
+	/** Whether automatic gain control is on. */
 	autoGainControl?: boolean;
-	channelCount?: number; // ugh Safari why
+	/** The channel count; Safari omits it. */
+	channelCount?: number;
+	/** Whether echo cancellation is on. */
 	echoCancellation?: boolean;
+	/** Whether noise suppression is on. */
 	noiseSuppression?: boolean;
+	/** The bits per sample. */
 	sampleSize?: number;
 }

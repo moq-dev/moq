@@ -122,6 +122,7 @@ export class Consumer {
 	}
 }
 
+/** Types for {@link Consumer}. */
 export namespace Consumer {
 	/** Snapshot consumer options, including the source track. */
 	export type Config = CodecConfig & { track: Moq.Track.Subscriber };

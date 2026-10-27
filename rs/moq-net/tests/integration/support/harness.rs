@@ -13,7 +13,7 @@ use std::sync::{
 };
 use std::task::Poll;
 
-use moq_net::{Client, Server, Session, Version, origin};
+use moq_net::{Client, Server, Session, Version, kio, origin};
 
 use super::mock::{MockSession, MockStats, create_mock_session_pair};
 

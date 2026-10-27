@@ -15,5 +15,4 @@ export default MoqPublishSupport;
 
 export { Show }
 
-
 ```

@@ -18,7 +18,7 @@ export interface Config {
     streamReceiveWindow?: bigint;
 }
 
-class Datagrams implements WebTransportDatagramDuplexStream {
+export class Datagrams implements WebTransportDatagramDuplexStream {
     constructor(send: (data: Uint8Array) => void);
     close(err?: Error): void;
     incomingHighWaterMark: number;
@@ -41,7 +41,7 @@ export interface InstallOptions {
 
 export function selectSubprotocol(offered: string | readonly string[] | null | undefined, options?: Pick<SessionOptions, "protocols" | "versions" | "requireProtocol">): string | undefined;
 
-type SendStreamOptions = WebTransportSendStreamOptions & {
+export type SendStreamOptions = WebTransportSendStreamOptions & {
     waitUntilAvailable?: boolean;
 };
 
@@ -113,17 +113,17 @@ export interface WebSocketLike {
     readonly url?: string;
 }
 
-interface WebSocketStreamCloseEvent {
+export interface WebSocketStreamCloseEvent {
     closeCode: number;
     reason: string;
 }
 
-interface WebSocketStreamCloseInfo {
+export interface WebSocketStreamCloseInfo {
     closeCode?: number;
     reason?: string;
 }
 
-type WebSocketStreamData = Uint8Array | string;
+export type WebSocketStreamData = Uint8Array | string;
 
 export interface WebSocketStreamLike {
     close(closeInfo?: WebSocketStreamCloseInfo): void;
@@ -133,7 +133,7 @@ export interface WebSocketStreamLike {
     readonly url: string;
 }
 
-interface WebSocketStreamOpenEvent {
+export interface WebSocketStreamOpenEvent {
     extensions: string;
     protocol: string;
     readable: ReadableStream<WebSocketStreamData>;

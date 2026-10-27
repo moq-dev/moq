@@ -771,13 +771,10 @@ prepare_gst() {
         return
     fi
     GST_PLUGIN_DIR="$TARGET_BASE/$PROFILE"
-    # gst-inspect exits 0 even when the .so fails to load, so grep for the
-    # factory. Isolate discovery to our dir + a temp registry so a system-wide moq
-    # plugin can't shadow it (mirrors rs/moq-gst/smoke.sh).
-    if ! GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" GST_PLUGIN_SYSTEM_PATH_1_0="" \
-        GST_REGISTRY_1_0="$HARNESS_RUN/gst-registry.bin" \
-        gst-inspect-1.0 moq 2>/dev/null | grep -qE '^[[:space:]]+moqsrc:'; then
+    # Use the packaging smoke check's isolated discovery and factory assertions.
+    if ! "$WORKSPACE/rs/moq-gst/smoke.sh" "$GST_PLUGIN_DIR" >"$HARNESS_RUN/gst-inspect.log" 2>&1; then
         mark_broken gst "moqsrc not exposed (plugin failed to load against this GStreamer)"
+        sed 's/^/        /' "$HARNESS_RUN/gst-inspect.log" >&2 || true
         return
     fi
     # The audio check decodes through these, from the system's plugins.
@@ -1114,7 +1111,7 @@ run_native() {
     local out
     out=$( (cd "$NATIVE_DIR" && "$@") 2>&1) || true
     printf '%s\n' "$out" >&2
-    printf '%s\n' "$out" | grep -q '^received '
+    grep -q '^received ' <<<"$out"
 }
 
 # Write a track name and the group the compat client's live subscription saw on it to

@@ -41,10 +41,6 @@ settled once; registering buffers stays with #3204, which measures whether
 it pays. Report relay CPU per Gbps before and after on
 the same workloads.
 
-## Required
-
-- [Profile the io_uring workers](/quest/m2/perf/uring-profile.md) - the ring profile that ranks the candidates
-
 ## Related
 
 - [Relay egress profile](/quest/m2/quic-egress-profile.md) - its send-buffer pool lever touches the same `SendBuffer` seam

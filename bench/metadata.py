@@ -29,7 +29,7 @@ metadata = {"untracked": untracked, "revision": command("git", "rev-parse", "HEA
  "affinity": sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None,
  "environment": {key: value for key, value in os.environ.items() if key.startswith(("BENCH_", "MOQ_BENCH_", "CARGO_PROFILE_")) or key in ("RUSTFLAGS", "CARGO_BUILD_TARGET", "CARGO_BUILD_RUSTFLAGS", "TOKIO_WORKER_THREADS", "LD_PRELOAD", "MALLOC_CONF", "GLIBC_TUNABLES", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "SESSION_CPU")},
  "profile": "profiling" if mode == "--profile" else "release",
- "features": {"--runtime": "default + moq-relay/io-uring,moq-bench/uring", "--profile": "default; heap adds moq-relay/jemalloc",
+ "features": {"--runtime": "default + moq-relay/io-uring,moq-bench/uring", "--profile": "default + moq-relay/io-uring,moq-bench/uring; heap adds moq-relay/jemalloc",
               "--criterion": "see criterion-command.json"}.get(mode, "default"),
  "mode": mode, "runtime_workers": sys.argv[4] if len(sys.argv) > 4 else None,
  "rounds": int(sys.argv[5]) if len(sys.argv) > 5 else None,
