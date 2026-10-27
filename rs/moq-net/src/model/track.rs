@@ -464,10 +464,11 @@ pub(crate) struct TrackState {
 	// The error that caused the track to be aborted, if any.
 	abort: Option<Error>,
 
-	// Whether the declared end settled before a write that could reopen it or an abort:
-	// every group below it was produced and finished then, so the clean end stands for
-	// good. See [`Self::latch_settled`].
-	settled: bool,
+	// Whether the declared end settled before a write that could reopen it or an abort, or
+	// `closed()` reported it: every group below it was produced and finished then, so the
+	// clean end stands for good. Atomic so reporting it latches through a read guard. See
+	// [`Self::latch_settled`].
+	settled: AtomicBool,
 
 	// Active subscriptions, in their own [`kio::Lock`] so a read-only `Consumer`
 	// registers under that lock instead of writing back into the track state.
@@ -1080,7 +1081,7 @@ impl TrackState {
 		// Once nothing more is in range: an abort before the end settled cut the track
 		// off. One after it is a clean end (see `is_complete`), as is reaching the end.
 		let end = || match &self.abort {
-			Some(err) if !self.settled => Err(err.clone()),
+			Some(err) if !self.settled.load(Ordering::Relaxed) => Err(err.clone()),
 			_ => Ok(None),
 		};
 
@@ -2276,7 +2277,7 @@ impl TrackState {
 			|| self
 				.final_sequence()
 				.is_some_and(|fin| self.reaches(fin) && !self.awaits_tail(fin));
-		reached && (self.abort.is_none() || self.settled)
+		reached && (self.abort.is_none() || self.settled.load(Ordering::Relaxed))
 	}
 
 	/// Whether the live edge reached `fin`, or a received copy's tail decides it instead:
@@ -2376,8 +2377,8 @@ impl TrackState {
 	/// then stands, and a later abort ends readers cleanly. A late group or a wider
 	/// subscription is still served; it just cannot turn the outcome into an error.
 	fn latch_settled(&mut self) {
-		if !self.settled && self.abort.is_none() && self.is_settled() {
-			self.settled = true;
+		if self.abort.is_none() && self.is_settled() {
+			self.settled.store(true, Ordering::Relaxed);
 		}
 	}
 
@@ -2527,8 +2528,11 @@ impl TrackState {
 
 	/// The track's outcome once final: `Ok` once its declared end is reached with every
 	/// cached group below it finished, which a later abort keeps, or the abort error.
+	///
+	/// A clean outcome latches once reported: a received copy's tail grace is judged when
+	/// polled, and a later subscription asking for a longer one must not reopen it.
 	fn poll_outcome(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		if self.settled {
+		if self.settled.load(Ordering::Relaxed) {
 			return Poll::Ready(Ok(()));
 		}
 		if self.is_complete() {
@@ -2545,6 +2549,7 @@ impl TrackState {
 					}
 				}
 			}
+			self.settled.store(true, Ordering::Relaxed);
 			Poll::Ready(Ok(()))
 		} else if let Some(err) = &self.abort {
 			Poll::Ready(Err(err.clone()))
@@ -13512,6 +13517,33 @@ mod test {
 			cut.poll_closed(&kio::Waiter::noop()),
 			Poll::Ready(Err(Error::Cancel))
 		));
+	}
+
+	/// A received end whose tail grace passed is final once `closed()` reports it: a later
+	/// subscription with a longer grace, and an abort within it, leave the clean outcome.
+	#[test]
+	fn a_reported_end_survives_a_longer_grace() {
+		let waiter = kio::Waiter::noop();
+		let mut producer = track_producer("test", None);
+		producer.received();
+		let _short = producer.subscribe(None);
+		producer.start_at(0).unwrap();
+		producer.finish_at(Position::group(3)).unwrap();
+		for sequence in [0, 2] {
+			producer
+				.create_group(group::Info { sequence })
+				.unwrap()
+				.finish()
+				.unwrap();
+		}
+		assert!(producer.poll_closed(&waiter).is_pending(), "held at the hole");
+		elapse(&producer, ledger::GRACE);
+		assert!(matches!(producer.poll_closed(&waiter), Poll::Ready(Ok(()))));
+
+		let _long = producer.subscribe(Subscription::default().with_max_delay(ledger::GRACE * 10));
+		assert!(matches!(producer.poll_closed(&waiter), Poll::Ready(Ok(()))));
+		producer.clone().abort(Error::Cancel).unwrap();
+		assert!(matches!(producer.poll_closed(&waiter), Poll::Ready(Ok(()))));
 	}
 
 	/// A settled end is final: a late group below it and a later abort leave the outcome
