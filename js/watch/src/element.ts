@@ -206,6 +206,9 @@ export default class MoqWatch extends HTMLElement {
 	#enabled = new Signal(false);
 	#connected = false;
 	#invalid = new Signal<ReadonlySet<string>>(new Set());
+	// Whether clearing the last invalid attribute re-enables media: false when the page had
+	// already disabled the connection, so recovery does not override that.
+	#resume = false;
 	#reflecting = false;
 
 	/**
@@ -343,7 +346,8 @@ export default class MoqWatch extends HTMLElement {
 	/** Called by the browser when the element joins a document. */
 	connectedCallback() {
 		this.#connected = true;
-		this.#enabled.set(this.#invalid.peek().size === 0);
+		if (this.#invalid.peek().size) this.#resume = true;
+		else this.#enabled.set(true);
 		this.style.display = "block";
 		this.style.position = "relative";
 
@@ -390,6 +394,7 @@ export default class MoqWatch extends HTMLElement {
 				throw new Error(`Invalid attribute: ${exhaustive}`);
 			}
 		} catch (error) {
+			if (this.#invalid.peek().size === 0) this.#resume = this.#enabled.peek();
 			this.#invalid.update((previous) => new Set(previous).add(name));
 			this.#enabled.set(false);
 			throw error;
@@ -404,7 +409,9 @@ export default class MoqWatch extends HTMLElement {
 			next.delete(name);
 			return next;
 		});
-		this.#enabled.set(this.#connected && this.#invalid.peek().size === 0);
+		if (this.#invalid.peek().size || !this.#resume) return;
+		this.#resume = false;
+		this.#enabled.set(this.#connected);
 	}
 
 	#reflect(effect: Effect, name: (typeof OBSERVED)[number], value: string | undefined) {

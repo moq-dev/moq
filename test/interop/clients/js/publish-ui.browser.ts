@@ -227,6 +227,28 @@ test("invalid attributes and properties refuse, retain bad markup, and recover",
 			return { stillBlocked, recovered };
 		});
 		expect(blocked).toEqual({ stillBlocked: true, recovered: true });
+		const disabled = await page.evaluate(() =>
+			(["moq-watch", "moq-publish"] as const).map((tag) => {
+				const element = document.createElement(tag);
+				document.body.append(element);
+				// Recovery must not override a connection the page disabled first.
+				element.connection.enabled.set(false);
+				element.setAttribute("backend", "bad");
+				element.removeAttribute("backend");
+				const kept = element.connection.enabled.peek();
+				element.connection.enabled.set(true);
+				element.setAttribute("backend", "bad");
+				element.removeAttribute("backend");
+				const resumed = element.connection.enabled.peek();
+				element.remove();
+				element.signals.close();
+				return { tag, kept, resumed };
+			}),
+		);
+		expect(disabled).toEqual([
+			{ tag: "moq-watch", kept: false, resumed: true },
+			{ tag: "moq-publish", kept: false, resumed: true },
+		]);
 	} finally {
 		await browser.close();
 		await server.close();
