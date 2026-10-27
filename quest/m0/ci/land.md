@@ -88,6 +88,9 @@ Work in this repository, once [the bump](/quest/m0/ci/land-bump.md) lands:
 - `check.yml` and `alert.yml` stop listing `merge_group`, and Check runs
   inside the gate. `.github/actions/rust-cache`, `.github/actionlint.yaml`,
   and `sh/gh/queue.test.ts` follow, and the test asserts the new event policy.
+- `dependabot.yml` requests landing through the gate instead of
+  `gh pr merge --auto`, which the new ruleset leaves with no path to `main`,
+  and keeps its coupled smoke update guard.
 - Docs that describe the queue: `CONTRIBUTING.md` (its merge queue section
   and priority rule), `README.md`, `doc/setup/dev.md`, `infra/README.md`,
   `justfile`, `sh/kt/check.sh`, and `test/drill/README.md`.
