@@ -10931,6 +10931,84 @@ mod test {
 		);
 	}
 
+	/// A batch must notify expiry at its highest PTS even when its decode-order tail is lower.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_reordered_batch_wakes_the_group_pts_drift_deadline() {
+		let mut producer = track_producer("test", Info::timed());
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(10)));
+		let mut head = producer.append_group().unwrap();
+		head.write_frame(Timestamp::from_millis(0).unwrap(), bytes::Bytes::new())
+			.unwrap();
+		append_at(&mut producer, 1000);
+		let mut edge = producer.append_group().unwrap();
+		edge.write_frame(Timestamp::from_millis(2000).unwrap(), bytes::Bytes::new())
+			.unwrap();
+		let mut held = subscriber.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert!(held.read_frame().now_or_never().unwrap().unwrap().is_some());
+		let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let waker = futures::task::waker(Arc::new(FlagWake(woken.clone())));
+		let mut cx = std::task::Context::from_waker(&waker);
+		let mut next = std::pin::pin!(held.read_frame());
+		assert!(next.as_mut().poll(&mut cx).is_pending());
+		let mut frames = crate::frame::Buffer::<2>::new();
+		for ms in [11_000, 10_000] {
+			frames
+				.push(crate::frame::Frame::new(
+					Timestamp::from_millis(ms).unwrap(),
+					bytes::Bytes::new(),
+				))
+				.unwrap();
+		}
+		edge.write_frames(&mut frames).unwrap();
+		assert!(
+			woken.load(Ordering::SeqCst),
+			"the batch's highest PTS reaches the deadline"
+		);
+		assert!(matches!(next.as_mut().poll(&mut cx), Poll::Ready(Err(Error::Old))));
+		head.finish().unwrap();
+		edge.finish().unwrap();
+	}
+
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_adopted_high_pts_wakes_the_group_drift_deadline() {
+		let mut producer = track_producer("test", Info::timed());
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(10)));
+		let mut old = producer.append_group().unwrap();
+		old.write_frame(Timestamp::from_millis(0).unwrap(), bytes::Bytes::new())
+			.unwrap();
+		append_at(&mut producer, 1000);
+		let mut edge = producer.append_group().unwrap();
+		edge.start_at(2).unwrap();
+		edge.write_frame(Timestamp::from_millis(2000).unwrap(), bytes::Bytes::new())
+			.unwrap();
+		let mut held = subscriber.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert!(held.read_frame().now_or_never().unwrap().unwrap().is_some());
+		let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let waker = futures::task::waker(Arc::new(FlagWake(woken.clone())));
+		let mut cx = std::task::Context::from_waker(&waker);
+		let mut next = std::pin::pin!(held.read_frame());
+		assert!(next.as_mut().poll(&mut cx).is_pending());
+		let mut prefix = group::Info { sequence: 2 }.produce();
+		for ms in [1500, 11_000] {
+			prefix
+				.write_frame(Timestamp::from_millis(ms).unwrap(), bytes::Bytes::new())
+				.unwrap();
+		}
+		let head = prefix.consume().handoff().head().unwrap();
+		edge.handle().adopt_head(&head);
+		assert_eq!(edge.handle().latest(), Some(Timestamp::from_millis(11_000).unwrap()));
+		assert!(
+			woken.load(Ordering::SeqCst),
+			"the adopted prefix reaches the drift deadline"
+		);
+		assert!(matches!(next.as_mut().poll(&mut cx), Poll::Ready(Err(Error::Old))));
+		old.finish().unwrap();
+		edge.finish().unwrap();
+		prefix.finish().unwrap();
+	}
+
 	/// An aborted edge hands the edge to a group between it and the successor, and neither
 	/// the abort nor that group's frames touch the track, so the read must still wake.
 	#[test]
@@ -11292,6 +11370,40 @@ mod test {
 		}
 
 		assert_eq!(read, vec![(0, 2), (1, 2), (2, 2), (3, 2)], "every frame of every group");
+	}
+
+	/// Decode-order B-frames cannot rewind the presentation edge and re-admit an old group.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_reordered_tail_keeps_the_group_pts_drift_verdict() {
+		for reordered in [false, true] {
+			let producer = track_producer("test", Info::timed());
+			let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(80)));
+			for ms in [0, 100] {
+				let mut group = producer.append_group().unwrap();
+				group
+					.write_frame(Timestamp::from_millis(ms).unwrap(), bytes::Bytes::new())
+					.unwrap();
+				group.finish().unwrap();
+			}
+			let mut edge = producer.append_group().unwrap();
+			for ms in [150, 200] {
+				edge.write_frame(Timestamp::from_millis(ms).unwrap(), bytes::Bytes::new())
+					.unwrap();
+			}
+			if reordered {
+				edge.write_frame(Timestamp::from_millis(160).unwrap(), bytes::Bytes::new())
+					.unwrap();
+			}
+			edge.finish().unwrap();
+			// Group 0 can reach 100ms: 100ms behind the 200ms edge, past its 80ms budget.
+			// Group 1 can reach 150ms and stays within the same budget.
+			assert_eq!(
+				subscriber.recv_group().await.unwrap().unwrap().sequence,
+				1,
+				"reordered {reordered}"
+			);
+		}
 	}
 
 	/// A budget is spent from where the reader stands, not from where its group opened.
