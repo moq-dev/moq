@@ -71,6 +71,9 @@ pub(crate) mod qlog;
 mod send_buffer;
 
 mod sent_packets;
+#[cfg(feature = "fuzz")]
+pub use sent_packets::Bench as BenchSentPackets;
+mod slots;
 mod spaces;
 #[cfg(any(test, feature = "fuzz"))]
 pub(crate) use spaces::Retransmits;
@@ -1571,19 +1574,20 @@ impl Connection {
 		if ack.largest >= self.spaces[space].next_packet_number {
 			return Err(TransportError::PROTOCOL_VIOLATION("unsent packet acked"));
 		}
-		let new_largest = {
+		// Whether the largest acknowledged packet is new, and whether we still know when it was
+		// sent. A forgotten ACK-only packet, or one declared lost, has no send time, so it yields
+		// no RTT sample.
+		let (new_largest, largest_tracked) = {
 			let space = &mut self.spaces[space];
 			if space.largest_acked_packet.is_none_or(|pn| ack.largest > pn) {
 				space.largest_acked_packet = Some(ack.largest);
-				if let Some(info) = space.sent_packets.get(ack.largest) {
-					// This should always succeed, but a misbehaving peer might ACK a packet we
-					// haven't sent. At worst, that will result in us spuriously reducing the
-					// congestion window.
+				let info = space.sent_packets.get(ack.largest);
+				if let Some(info) = info {
 					space.largest_acked_packet_sent = info.time_sent;
 				}
-				true
+				(true, info.is_some())
 			} else {
-				false
+				(false, false)
 			}
 		};
 
@@ -1609,7 +1613,7 @@ impl Connection {
 		let mut acked = mem::take(&mut self.acked);
 		acked.clear();
 		for packet in newly_acked.elts() {
-			if let Some(info) = self.spaces[space].take(packet) {
+			if let Some(info) = self.spaces[space].sent_packets.remove(packet) {
 				if let Some(acked) = info.largest_acked {
 					// Assume ACKs for all packets below the largest acknowledged in `packet` have
 					// been received. This can cause the peer to spuriously retransmit if some of
@@ -1633,7 +1637,7 @@ impl Connection {
 			}
 		}
 
-		if new_largest && ack_eliciting_acked {
+		if largest_tracked && ack_eliciting_acked {
 			let ack_delay = if space != SpaceId::Data {
 				Duration::from_micros(0)
 			} else {
@@ -1696,14 +1700,10 @@ impl Connection {
 		}
 
 		for range in ack.iter() {
-			let spurious_losses: Vec<u64> = lost_packets
-				.range(range.clone())
-				.map(|(pn, _info)| pn)
-				.copied()
-				.collect();
+			let spurious_losses: Vec<u64> = lost_packets.range(range.clone()).map(|(pn, _info)| pn).collect();
 
 			for pn in spurious_losses {
-				lost_packets.remove(&pn);
+				lost_packets.remove(pn);
 			}
 		}
 
@@ -1721,8 +1721,13 @@ impl Connection {
 	fn drain_lost_packets(&mut self, now: Instant, space: SpaceId) {
 		let two_pto = 2 * self.path.rtt.pto_base();
 
+		// Packets are sent, and so declared lost, in send-time order.
 		let lost_packets = &mut self.spaces[space].lost_packets;
-		lost_packets.retain(|_pn, info| now.saturating_duration_since(info.time_sent) <= two_pto);
+		while let Some((_, info)) = lost_packets.first()
+			&& now.saturating_duration_since(info.time_sent) > two_pto
+		{
+			lost_packets.pop_first();
+		}
 	}
 
 	/// Process a new ECN block from an in-order ACK
@@ -1937,7 +1942,7 @@ impl Connection {
 			trace!("packets lost: {:?}, bytes lost: {}", lost_packets, size_of_lost_packets);
 
 			for &packet in &lost_packets {
-				let info = self.spaces[pn_space].take(packet).unwrap(); // safe: lost_packets is populated just above
+				let info = self.spaces[pn_space].sent_packets.remove(packet).unwrap(); // safe: lost_packets is populated just above
 				// A packet from another path carries another controller's state.
 				if let Some(state) = info
 					.congestion
@@ -1945,7 +1950,7 @@ impl Connection {
 				{
 					let new_burst = packet
 						.checked_sub(1)
-						.is_none_or(|prev| !self.spaces[pn_space].lost_packets.contains_key(&prev));
+						.is_none_or(|prev| self.spaces[pn_space].lost_packets.get(prev).is_none());
 					lost.push(congestion::Lost {
 						sent: info.time_sent,
 						bytes: info.size,
@@ -1995,7 +2000,7 @@ impl Connection {
 
 		// Handle a lost MTU probe
 		if let Some(packet) = lost_mtu_probe {
-			let info = self.spaces[SpaceId::Data].take(packet).unwrap(); // safe: lost_mtu_probe is omitted from lost_packets, and therefore must not have been removed yet
+			let info = self.spaces[SpaceId::Data].sent_packets.remove(packet).unwrap(); // safe: lost_mtu_probe is omitted from lost_packets, and therefore must not have been removed yet
 			self.remove_in_flight(&info);
 			self.path.mtud.on_probe_lost();
 			self.stats.path.lost_plpmtud_probes += 1;
@@ -2675,7 +2680,7 @@ impl Connection {
 				self.rem_handshake_cid = rem_cid;
 
 				let space = &mut self.spaces[SpaceId::Initial];
-				if let Some(info) = space.take(0)
+				if let Some(info) = space.sent_packets.remove(0)
 					&& let Some(acked) = self.on_packet_acked(info)
 				{
 					self.path.congestion.on_ack(congestion::Ack {
@@ -3746,6 +3751,14 @@ impl Connection {
 	#[cfg(test)]
 	pub(crate) fn bytes_in_flight(&self) -> u64 {
 		self.path.in_flight.bytes
+	}
+
+	/// Forget the newest packet sent in the Data space, as making room for an ACK-only packet does.
+	#[cfg(test)]
+	pub(crate) fn forget_newest_sent_packet(&mut self) {
+		let sent = &mut self.spaces[SpaceId::Data].sent_packets;
+		let packet = sent.remove(sent.last().expect("a packet sent")).unwrap();
+		self.path.remove_in_flight(&packet);
 	}
 
 	/// Number of bytes worth of non-ack-only packets that may be sent
