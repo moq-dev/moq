@@ -1640,6 +1640,7 @@ mod timebase_tests {
 					keyframe: true,
 					duration: Some(moq_net::Timestamp::from_millis(20).unwrap()),
 				}],
+				None,
 			)
 			.unwrap()
 	}

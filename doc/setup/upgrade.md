@@ -61,11 +61,11 @@ These land with the next breaking release.
   or `subscribe` carries a `rate` cap encodes that role as an object, which
   released verifiers reject, so upgrade every auth server and verifier before
   issuing capped tokens.
-- **Archive timelines declare a duration** (#5715). Each catalog
-  `archive.timelines` entry is an object instead of a track name. Neither side
-  reads the other's shape, and a catalog it can't read keeps its live media but
-  drops the archive, so seeking, recording, and HLS history need publishers and
-  their readers upgraded together.
+- **HLS records replace archive timelines.** The hang catalog's root `archive`
+  section is gone. A video or audio rendition opts in to HLS with its own `hls`
+  field naming a `<track>.hls` record track, and nothing publishes one by
+  default. Neither side reads the other's shape, so upgrade HLS exporters and
+  their publishers together, and opt the publishers in (`moq import --hls`).
 - **Announce restarts.** moq-lite 07 adds `ANNOUNCE_RESTART` (0x3): another
   publisher instance now serves the prefix. lite-06's `ANNOUNCE_RESTART` is
   named `ANNOUNCE_UPDATE`, as it always meant. moq-transport with the epoch

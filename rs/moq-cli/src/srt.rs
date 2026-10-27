@@ -100,6 +100,7 @@ pub async fn listen_import(
 		name,
 		max_age,
 		linger,
+		hls: _,
 		bandwidth,
 	} = target;
 	let name = moq_net::Path::new(&name)?;

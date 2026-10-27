@@ -71,6 +71,7 @@ pub async fn listen_import(target: ImportTarget, addr: SocketAddr) -> anyhow::Re
 		name,
 		max_age,
 		linger,
+		hls: _,
 		bandwidth,
 	} = target;
 	let name = moq_net::Path::new(&name)?;

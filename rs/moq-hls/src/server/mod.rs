@@ -7,8 +7,8 @@
 //! GET /{broadcast}/manifest.mpd
 //! GET /{broadcast}/@{instance}/{kind}/{rendition}/media.m3u8
 //! GET /{broadcast}/@{instance}/{kind}/{rendition}/init.{hash}.mp4
-//! GET /{broadcast}/@{instance}/{kind}/{rendition}/seg/{reference}.{segment}.m4s
-//! GET /{broadcast}/@{instance}/{kind}/{rendition}/seg/{reference}.t{pts}.m4s
+//! GET /{broadcast}/@{instance}/{kind}/{rendition}/seg/{tag}.{segment}.m4s
+//! GET /{broadcast}/@{instance}/{kind}/{rendition}/seg/{tag}.t{pts}.m4s
 //! ```
 //!
 //! The master playlist and manifest list the publisher instance serving the broadcast now,
@@ -20,11 +20,11 @@
 //!
 //! `{kind}` is `video` or `audio`, so a video and an audio rendition that share a
 //! name address distinct resources. The two `seg/` forms name the same bytes: HLS
-//! playlists address a segment by its aligned number, the DASH manifest by its
-//! timeline `pts` (`$Time$`). `{hash}` is a hash of the init segment's bytes, so a
+//! playlists address a segment by its number, the DASH manifest by its
+//! `pts` in milliseconds (`$Time$`). `{hash}` is a hash of the init segment's bytes, so a
 //! reconfigured rendition gets a new init URL. A broadcaster given a generation
 //! ([`Broadcaster::set_generation`](crate::export::Broadcaster::set_generation))
-//! prefixes every segment file with it (`seg/{generation}.{reference}.{segment}.m4s`), and
+//! prefixes every segment file with it (`seg/{generation}.{tag}.{segment}.m4s`), and
 //! refuses segment URLs carrying any other.
 //!
 //! Every request is served. To gate access, wrap [`Server::router`] in your own

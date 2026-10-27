@@ -168,13 +168,15 @@ pub async fn import(target: ImportTarget, args: ImportArgs, epoch: moq_net::Epoc
 		name,
 		max_age,
 		linger,
+		hls,
 		bandwidth,
 	} = target;
 	let producer = origin.create_broadcast(&name).context("failed to create broadcast")?;
 
 	let config = moq_mux::catalog::Config::default()
 		.with_max_age(max_age)
-		.with_bandwidth(bandwidth);
+		.with_bandwidth(bandwidth)
+		.with_hls(hls.then(moq_mux::hls::Config::default));
 	let catalog = moq_mux::catalog::Producer::new(&mut producer.broadcast().clone(), config)?;
 	// Announced once the catalog first goes out, which waits for every rendition's init: a
 	// relay queries a broadcast's tracks the moment it is announced, and keeps the refusals of a
@@ -499,7 +501,7 @@ mod test {
 				payload: bytes::Bytes::from_static(&[0x78, 0x00, 0x00, 0x00]),
 				keyframe: true,
 			};
-			let fragment = muxer.fragment(index as u32, &[frame]).unwrap();
+			let fragment = muxer.fragment(index as u32, &[frame], None).unwrap();
 			std::fs::write(dir.path().join(format!("{index}.m4s")), fragment).unwrap();
 		}
 		let live = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:1,\n0.m4s\n";
@@ -514,6 +516,7 @@ mod test {
 			name: "hls".to_string(),
 			max_age: None,
 			linger: moq_mux::Linger::DEFAULT,
+			hls: false,
 			bandwidth: Default::default(),
 		};
 		let args = ImportArgs {

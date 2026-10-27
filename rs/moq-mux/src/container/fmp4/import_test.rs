@@ -1414,44 +1414,44 @@ async fn test_msf_catalog_roundtrip() {
 	assert!(matches!(audio.container, Container::Cmaf { .. }));
 }
 
-/// Subscribe to `track`'s timeline as `section` advertises it.
-async fn subscribe(
-	consumer: &moq_net::broadcast::Consumer,
-	section: &hang::catalog::Archive,
-	track: &str,
-) -> crate::timeline::Consumer {
-	let mut section = section.clone();
-	section
-		.timelines
-		.entry(track.to_string())
-		.or_insert_with(|| hang::catalog::Timeline::new(hang::timeline::default_name(track), 0));
-	crate::timeline::Consumer::<()>::subscribe(consumer, &section, track)
-		.await
-		.unwrap()
+/// A catalog publishing HLS records.
+fn hls() -> crate::catalog::Config {
+	crate::catalog::Config::default().with_hls(crate::hls::Config::default())
 }
 
-/// Every record a finished timeline published, as `(start group, end group)`.
-async fn groups(timeline: &mut crate::timeline::Consumer) -> Vec<(u64, u64)> {
-	let mut out = Vec::new();
-	while let Some(event) = timeline.next().await.unwrap() {
-		if let crate::timeline::Event::Push { entry, .. } = event {
-			assert_eq!(entry.start.frame, 0, "fragments never split a group here");
-			assert_eq!(entry.end.frame, 0, "fragments never split a group here");
-			out.push((entry.start.group, entry.end.group));
+/// Subscribe to `track`'s HLS records, before the catalog may advertise them.
+async fn subscribe(consumer: &moq_net::broadcast::Consumer, track: &str) -> crate::hls::Consumer {
+	let hls = hang::catalog::Hls::new(hang::hls::default_name(track), std::time::Duration::ZERO);
+	crate::hls::Consumer::subscribe(consumer, &hls).await.unwrap()
+}
+
+/// Every segment a finished track's records listed, as `(first group, next segment's group)`.
+async fn groups(records: &mut crate::hls::Consumer) -> Vec<(u64, u64)> {
+	let mut entries = Vec::new();
+	while let Some(event) = records.next().await.unwrap() {
+		if let crate::hls::Event::Push { entry, .. } = event {
+			entries.push(entry);
 		}
 	}
-	out
+	assert!(
+		entries.last().is_some_and(|entry| entry.is_stop()),
+		"the track's end stops the last segment"
+	);
+	entries
+		.windows(2)
+		.filter(|pair| !pair[0].is_stop())
+		.map(|pair| (pair[0].group, pair[1].group))
+		.collect()
 }
 
-/// Passthrough writes groups by hand (no `container::Producer`), so the timeline recorders are fed
-/// directly. This guards that the import advertises both renditions' timelines at the catalog root
-/// and actually records their groups, the index the VOD/playlist export reads. Regression for the
-/// missing-timeline break that skipped VOD renditions.
+/// Passthrough writes groups by hand (no `container::Producer`), so the HLS recorders are fed
+/// directly. This guards that the import advertises both renditions' records in their entries and
+/// actually records their groups, the index the playlist export reads.
 #[tokio::test]
-async fn import_populates_the_broadcast_timeline() {
+async fn import_populates_the_hls_records() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, hls()).unwrap();
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 
 	let data = include_bytes!("test_data/bbb.mp4");
@@ -1466,16 +1466,22 @@ async fn import_populates_the_broadcast_timeline() {
 	let video_name = snapshot.video.renditions.keys().next().unwrap().clone();
 	let audio_name = snapshot.audio.renditions.keys().next().unwrap().clone();
 
-	// This short fixture ends before the four-second estimation record closes, so finishing the
-	// import flushes it and declares the minimum while the catalog stays live.
-	let section = snapshot.archive.clone().expect("the import advertises its timelines");
-	assert_eq!(section.timelines[&video_name].duration, Some(4_000));
-	assert_eq!(section.timelines[&audio_name].duration, Some(4_000));
+	// This short fixture ends before the first four-second segment closes, so finishing the import
+	// stops it and declares the minimum while the catalog stays live.
+	let four = std::time::Duration::from_secs(4);
+	assert_eq!(
+		snapshot.video.renditions[&video_name].hls.as_ref().unwrap().duration,
+		four
+	);
+	assert_eq!(
+		snapshot.audio.renditions[&audio_name].hls.as_ref().unwrap().duration,
+		four
+	);
 
-	// Subscribe while the producer is alive, then finish so the timeline groups close and the
+	// Subscribe while the producer is alive, then finish so the record tracks close and the
 	// readers terminate rather than blocking.
-	let mut video = subscribe(&consumer, &section, &video_name).await;
-	let mut audio = subscribe(&consumer, &section, &audio_name).await;
+	let mut video = subscribe(&consumer, &video_name).await;
+	let mut audio = subscribe(&consumer, &audio_name).await;
 	catalog.finish().unwrap();
 
 	assert_eq!(groups(&mut video).await[0].0, 0, "the first video group is sequence 0");
@@ -1791,8 +1797,8 @@ async fn segmented_source_groups_per_segment_in(passthrough: bool) {
 	);
 }
 
-/// Each declared segment is one group per track, and each track's timeline indexes it as one
-/// record. With audio grouping per fragment those records spanned many short groups, one FETCH
+/// Each declared segment is one group per track, and each track's HLS records list it as one
+/// segment. With audio grouping per fragment those records spanned many short groups, one FETCH
 /// round-trip each.
 #[tokio::test]
 async fn segmented_source_indexes_one_group_per_record() {
@@ -1806,18 +1812,17 @@ async fn segmented_source_indexes_one_group_per_record_in(passthrough: bool) {
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, hls()).unwrap();
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve()).with_passthrough(passthrough);
 	fmp4.decode(&init).unwrap();
 
 	let snapshot = catalog.snapshot();
 	let video_name = snapshot.video.renditions.keys().next().unwrap().clone();
 	let audio_name = snapshot.audio.renditions.keys().next().unwrap().clone();
-	let section = snapshot.archive.clone().expect("the import advertises its timelines");
 
 	// Subscribe while the producer is alive so the readers terminate on finish rather than blocking.
-	let mut video = subscribe(&consumer, &section, &video_name).await;
-	let mut audio = subscribe(&consumer, &section, &audio_name).await;
+	let mut video = subscribe(&consumer, &video_name).await;
+	let mut audio = subscribe(&consumer, &audio_name).await;
 
 	for segment in 0..3u64 {
 		let base = segment * 1_000_000;
@@ -1852,8 +1857,8 @@ async fn segmented_source_indexes_one_group_per_record_in(passthrough: bool) {
 }
 
 /// Audio and video rarely start a segment at exactly the same timestamp: the boundary is nominal
-/// and each track begins at its own nearest sample. Each track cuts its own timeline where it opens
-/// its group for a declared segment, so a skew between them moves no group into another record.
+/// and each track begins at its own nearest sample. Each track starts its own HLS segment where it
+/// opens its group for a declared segment, so a skew between them moves no group into another one.
 ///
 /// `video_offset_us` shifts video relative to audio, so the same source is exercised with audio
 /// leading and lagging. Returns each track's records as `(start group, end group)`.
@@ -1862,16 +1867,15 @@ async fn records_with_skew(video_offset_us: i64, passthrough: bool) -> (Vec<(u64
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, hls()).unwrap();
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve()).with_passthrough(passthrough);
 	fmp4.decode(&init).unwrap();
 
 	let snapshot = catalog.snapshot();
 	let video_name = snapshot.video.renditions.keys().next().unwrap().clone();
 	let audio_name = snapshot.audio.renditions.keys().next().unwrap().clone();
-	let section = snapshot.archive.clone().unwrap();
-	let mut video = subscribe(&consumer, &section, &video_name).await;
-	let mut audio = subscribe(&consumer, &section, &audio_name).await;
+	let mut video = subscribe(&consumer, &video_name).await;
+	let mut audio = subscribe(&consumer, &audio_name).await;
 
 	for segment in 0..3u64 {
 		let base = segment * 1_000_000;
@@ -2301,7 +2305,7 @@ struct Imported {
 	/// The root clock the catalog advertised.
 	clock: hang::catalog::Clock,
 	arrival: std::ops::RangeInclusive<moq_clock::Wall>,
-	/// The first record the video timeline published, the index an archive replays from.
+	/// Where the video's first HLS segment starts.
 	record: moq_net::Timestamp,
 	/// Why a chunk was refused, if one was.
 	refused: Option<crate::Error>,
@@ -2313,14 +2317,13 @@ async fn import_session(chunks: &[Vec<u8>]) -> Imported {
 	let (init, _, _) = bbb_init();
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, hls()).unwrap();
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 	fmp4.decode(&init).unwrap();
 
 	let snapshot = catalog.snapshot();
 	let video = snapshot.video.renditions.keys().next().unwrap().clone();
-	let section = snapshot.archive.clone().expect("the import advertises its timelines");
-	let mut timeline = subscribe(&consumer, &section, &video).await;
+	let mut records = subscribe(&consumer, &video).await;
 
 	let before = moq_clock::wall();
 	let mut after = before;
@@ -2337,9 +2340,9 @@ async fn import_session(chunks: &[Vec<u8>]) -> Imported {
 	fmp4.finish().unwrap();
 	catalog.finish().unwrap();
 
-	let event = timeline.next().await.unwrap().expect("a recorded span");
-	let crate::timeline::Event::Push { entry, .. } = event else {
-		panic!("the first timeline event was not a record");
+	let event = records.next().await.unwrap().expect("a record");
+	let crate::hls::Event::Push { entry, .. } = event else {
+		panic!("the first event was not a record");
 	};
 
 	let snapshot = catalog.snapshot();
@@ -2355,7 +2358,7 @@ async fn import_session(chunks: &[Vec<u8>]) -> Imported {
 
 /// A feed an hour into its own decode timeline publishes that hour verbatim (the `tfdt` a
 /// decoder reads is untouched), and the catalog clock maps its first fragment to the arrival
-/// time. The archive index records the same times, so a replay names each segment's wall time.
+/// time. The HLS records list the same times, so a playlist names each segment's wall time.
 #[tokio::test]
 async fn import_publishes_decode_times_on_an_arrival_clock() {
 	let start = 3_600_000_000;
@@ -2367,7 +2370,7 @@ async fn import_publishes_decode_times_on_an_arrival_clock() {
 	assert_eq!(
 		import.record.as_micros(),
 		first,
-		"the archive indexes the source's time"
+		"the HLS records list the source's time"
 	);
 
 	// The advertised clock is micros, so allow its rounding.

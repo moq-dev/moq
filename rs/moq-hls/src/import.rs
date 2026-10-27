@@ -654,7 +654,7 @@ impl TrackState {
 			importer.seek(group_sequence)?;
 		}
 		// Every playlist entry is a source segment boundary, so declare it even when the media
-		// carries no styp. Every rendition declares the same ones; the timeline drops a cut
+		// carries no styp. Every rendition declares the same ones; the HLS segmenter drops a cut
 		// that would land inside its minimum segment duration, so the duplicates cost nothing.
 		importer.cut()?;
 		importer.decode(&bytes).map_err(|err| match err {
@@ -2236,7 +2236,7 @@ mod tests {
 				payload: Bytes::from_static(&[0x78, 0x00, 0x00, 0x00]),
 				keyframe: true,
 			};
-			let fragment = muxer.fragment(index as u32, &[frame]).unwrap();
+			let fragment = muxer.fragment(index as u32, &[frame], None).unwrap();
 			std::fs::write(dir.join(format!("{prefix}{index}.m4s")), fragment).unwrap();
 		}
 	}

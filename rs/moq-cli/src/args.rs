@@ -358,6 +358,12 @@ impl Invocation {
 				}
 			}
 			if let Command::Import(import) = command
+				&& import.hls
+				&& let Some(reason) = import.source.hls_refusal()
+			{
+				anyhow::bail!("--hls records the segments of the catalog the import builds, but {reason}");
+			}
+			if let Command::Import(import) = command
 				&& import.linger.is_some()
 				&& let Some(reason) = import.source.linger_refusal()
 			{
@@ -789,8 +795,8 @@ pub struct Import {
 	/// live, it caps how far back a FETCH can still reach (and how long a subscriber may ask to
 	/// wait for a late group). The default suits a segmented egress (HLS/DASH), which may only
 	/// advertise segments that are still fetchable; lower it when nothing reads history and the
-	/// memory matters. Media tracks only -- the catalog and timeline are read at the live edge,
-	/// which is retained unconditionally.
+	/// memory matters. Media tracks only -- the catalog and HLS records are read at the live
+	/// edge, which is retained unconditionally.
 	#[usage(long)]
 	pub max_age: Option<moq_tokio::cli::Duration>,
 
@@ -807,6 +813,12 @@ pub struct Import {
 	/// The released spelling of [`Self::max_age`].
 	#[usage(long = "latency-max", hide = true)]
 	latency_max: Option<moq_tokio::cli::Duration>,
+
+	/// Publish HLS segment records for every video and audio rendition, so `export hls` (or
+	/// any HLS/DASH edge) can serve the broadcast. The source must align keyframes across its
+	/// renditions. Not for `import rtmp`, `srt`, `rtc`, or `archive`.
+	#[usage(long)]
+	pub hls: bool,
 
 	/// Name a media report track in the catalog's `stats` section and fill it with what each
 	/// track has written, about once a second while subscribed. The stdin imports only.
@@ -910,6 +922,19 @@ impl ImportSource {
 			return Some("`import capture` encodes, and its encoders do not count yet");
 		}
 		self.catalog_refusal()
+	}
+
+	/// Why `--hls` can't apply to this source, or `None` when it can: only a catalog the CLI
+	/// builds itself records segments.
+	fn hls_refusal(&self) -> Option<&'static str> {
+		match self {
+			Self::Rtmp(_) | Self::Srt(_) => Some("the gateway builds its own catalog"),
+			Self::Rtc(_) => Some("`import rtc` builds its own catalog"),
+			Self::Archive(_) => Some("`import archive` replays the catalog it recorded"),
+			#[cfg(feature = "capture")]
+			Self::Capture(_) => None,
+			Self::Avc3 | Self::Fmp4(_) | Self::Ts(_) | Self::Flv | Self::Hls(_) | Self::Rtsp(_) => None,
+		}
 	}
 
 	/// Why `--linger` can't apply to this source, or `None` when it can: only a source with a

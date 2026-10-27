@@ -69,9 +69,9 @@ archive (per-track `.timeline.z` records named by the catalog's root
   ([Subscribe ranges](/quest/m1/subscribe-ranges/README.md)) is resolved by
   whoever holds the track, the cache or an archive consumer. DVR seeks with it.
 - **`hls` is for HLS only, and opt-in.** A per-rendition catalog field names a
-  track whose (first group, pts) records mark each HLS segment, and a publisher
-  enabling it aligns segments across renditions
-  ([Catalog HLS field](/quest/m1/archive/catalog-hls.md)). The root `archive`
+  track whose (first group, pts) records mark each HLS segment, each rendition
+  cutting its own on a pts grid so they line up wherever keyframes do
+  (Catalog HLS field, landed). The root `archive`
   section is deleted everywhere. Rejected: always-on timelines.
 
 Protected broadcasts stay out of scope. Recording keying, retention policy,
@@ -84,7 +84,6 @@ from a host. Each child fixes the stale docs it touches.
 
 ## Required
 
-- [Catalog HLS field](/quest/m1/archive/catalog-hls.md) - the root `archive` section is gone; an opt-in per-rendition `hls` field marks each aligned HLS segment's first group and pts and declares its nominal duration
 - [Fixed HLS target duration](/quest/m1/archive/hls-target.md) - one `EXT-X-TARGETDURATION` for the run, from the declared `hls` duration; an overrun is listed with a warning
 
 ## Related

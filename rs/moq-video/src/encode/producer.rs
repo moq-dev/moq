@@ -103,7 +103,7 @@ impl Producer {
 	/// Publish a track carrying `rendition` into `broadcast`, registering it under
 	/// `reserved`, a [`catalog::Producer::reserve`](moq_mux::catalog::Producer::reserve)
 	/// that carries any per-track hint such as the encoder's GOP duration
-	/// ([`Reserved::with_timeline_hint`](moq_mux::catalog::Reserved::with_timeline_hint)).
+	/// ([`Reserved::with_hls_hint`](moq_mux::catalog::Reserved::with_hls_hint)).
 	/// The frames fed to [`publish`](Self::publish) must be in that
 	/// codec's framing, which is what the [`Encoder`](super::Encoder) the
 	/// rendition was probed from emits.
@@ -496,7 +496,7 @@ impl<E: CatalogExt> Driver<E> {
 			}
 		};
 
-		let mut producer = Producer::with_track(track, catalog.reserve().with_timeline_hint(gop), rendition)?;
+		let mut producer = Producer::with_track(track, catalog.reserve().with_hls_hint(gop), rendition)?;
 		let demand = producer.demand();
 
 		let result = tokio::select! {
@@ -881,9 +881,7 @@ mod tests {
 
 		let mut producer = Producer::new(
 			broadcast,
-			catalog
-				.reserve()
-				.with_timeline_hint(config.gop.duration(config.framerate)),
+			catalog.reserve().with_hls_hint(config.gop.duration(config.framerate)),
 			config.probe().await.unwrap(),
 		)
 		.unwrap();
@@ -954,9 +952,7 @@ mod tests {
 		config.kind = encoder::Kind::Software;
 		let mut producer = Producer::with_track(
 			track,
-			catalog
-				.reserve()
-				.with_timeline_hint(config.gop.duration(config.framerate)),
+			catalog.reserve().with_hls_hint(config.gop.duration(config.framerate)),
 			config.probe().await.unwrap(),
 		)
 		.unwrap();
@@ -986,9 +982,7 @@ mod tests {
 		initial.kind = encoder::Kind::Software;
 		let mut producer = Producer::new(
 			broadcast,
-			catalog
-				.reserve()
-				.with_timeline_hint(initial.gop.duration(initial.framerate)),
+			catalog.reserve().with_hls_hint(initial.gop.duration(initial.framerate)),
 			initial.probe().await.unwrap(),
 		)
 		.unwrap();
@@ -1059,9 +1053,7 @@ mod tests {
 		config.kind = encoder::Kind::Software;
 		let _producer = Producer::new(
 			broadcast,
-			catalog
-				.reserve()
-				.with_timeline_hint(config.gop.duration(config.framerate)),
+			catalog.reserve().with_hls_hint(config.gop.duration(config.framerate)),
 			config.probe().await.unwrap(),
 		)
 		.unwrap();
@@ -1107,9 +1099,7 @@ mod tests {
 		let mut subscriber = track.subscribe(None);
 		let mut producer = Producer::with_track(
 			track,
-			catalog
-				.reserve()
-				.with_timeline_hint(config.gop.duration(config.framerate)),
+			catalog.reserve().with_hls_hint(config.gop.duration(config.framerate)),
 			config.probe().await.unwrap(),
 		)
 		.unwrap();
@@ -1204,7 +1194,8 @@ mod tests {
 				let consumer = broadcast.consume();
 				let config = moq_mux::catalog::Config::default()
 					.with_clock(clock)
-					.with_max_age(RETAIN);
+					.with_max_age(RETAIN)
+					.with_hls(moq_mux::hls::Config::default());
 				let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
 				let track = broadcast
 					.create_track(
@@ -1217,9 +1208,7 @@ mod tests {
 				probe.kind = encoder::Kind::Software;
 				let mut producer = Producer::with_track(
 					track,
-					catalog
-						.reserve()
-						.with_timeline_hint(probe.gop.duration(probe.framerate)),
+					catalog.reserve().with_hls_hint(probe.gop.duration(probe.framerate)),
 					probe.probe().await.unwrap(),
 				)
 				.unwrap();
@@ -1474,22 +1463,21 @@ mod tests {
 				.await
 		}
 
-		/// A recording replays what the live edge published: the archive's records
-		/// carry the live timestamps across an idle restart, with the idle gap left in.
+		/// HLS lists what the live edge published: the records carry the live timestamps across an
+		/// idle restart, with the idle gap left out of every segment.
 		#[tokio::test]
-		async fn retained_archive_playback_keeps_the_live_timestamps() {
+		async fn hls_records_keep_the_live_timestamps() {
 			tokio::task::LocalSet::new()
 				.run_until(async {
 					let fixture = Fixture::start(Duration::from_secs(1), moq_clock::wall()).await;
-					let section = fixture
-						.catalog
-						.snapshot()
-						.archive
-						.expect("the video track enrolls an archive");
-					let mut timeline =
-						moq_mux::timeline::Consumer::<()>::subscribe(&fixture.consumer, &section, "video")
-							.await
-							.unwrap();
+					// The encoder's GOP hint declares the duration up front.
+					let hls = fixture.catalog.snapshot().video.renditions["video"]
+						.hls
+						.clone()
+						.expect("the video track advertises its HLS records");
+					let mut records = moq_mux::hls::Consumer::subscribe(&fixture.consumer, &hls)
+						.await
+						.unwrap();
 
 					let mut live = Vec::new();
 					for _ in 0..2 {
@@ -1501,29 +1489,30 @@ mod tests {
 						fixture.assert_acquired(published, captured);
 						live.push(published);
 						drop(track);
-						// Idle past the minimum segment, so each run is archived as its own record.
-						tokio::time::sleep(moq_mux::timeline::DEFAULT_DURATION_MIN + Duration::from_millis(100)).await;
+						// Idle past the minimum segment, so each run is listed as its own segment.
+						tokio::time::sleep(moq_mux::hls::DEFAULT_DURATION + Duration::from_millis(100)).await;
 					}
 
-					let (catalog, _consumer) = fixture.finish().await;
-					catalog.timeline().finish();
-					let mut archived = Vec::new();
-					while let Some(event) = timeline.next().await.unwrap() {
+					let (mut catalog, _consumer) = fixture.finish().await;
+					catalog.finish().unwrap();
+					let mut listed = Vec::new();
+					while let Some(event) = records.next().await.unwrap() {
 						match event {
-							moq_mux::timeline::Event::Push { entry, .. } => archived.push(entry),
-							other => panic!("unexpected timeline event {other:?}"),
+							moq_mux::hls::Event::Push { entry, .. } => listed.push(entry),
+							other => panic!("unexpected record event {other:?}"),
 						}
 					}
 
-					assert_eq!(archived.len(), live.len(), "one record per capture run: {archived:?}");
-					for (entry, live) in archived.iter().zip(&live) {
-						// The archive keeps millisecond precision.
-						assert_eq!(entry.pts.as_micros() / 1000, u128::from(*live / 1000), "{archived:?}");
+					// Each run is one segment, stopped where its content reached.
+					assert_eq!(listed.len(), 2 * live.len(), "a segment and a stop per run: {listed:?}");
+					for (pair, live) in listed.chunks(2).zip(&live) {
+						assert!(!pair[0].is_stop() && pair[1].is_stop(), "{listed:?}");
+						// The records keep millisecond precision.
+						assert_eq!(pair[0].pts.as_micros() / 1000, u128::from(*live / 1000), "{listed:?}");
 					}
-					let first = &archived[0];
 					assert!(
-						archived[1].pts.as_micros() >= first.pts.as_micros() + first.duration.as_micros(),
-						"the resumed record overlaps the one before it: {archived:?}"
+						listed[2].pts.as_micros() >= listed[1].pts.as_micros(),
+						"the resumed segment overlaps the one before it: {listed:?}"
 					);
 				})
 				.await
@@ -1863,7 +1852,7 @@ mod tests {
 				track,
 				catalog
 					.reserve()
-					.with_timeline_hint(rendition.gop.duration(rendition.framerate)),
+					.with_hls_hint(rendition.gop.duration(rendition.framerate)),
 				rendition.probe().await.unwrap(),
 			)
 			.unwrap();

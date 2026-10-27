@@ -55,6 +55,12 @@ function delayMillis(value: number): ReturnType<typeof u53> | undefined {
 	return u53(Math.ceil(value));
 }
 
+// Hang stores jitter as whole milliseconds; round MSF's fractional value up. A negative value goes
+// to u53 unrounded, so it is rejected even between -1 and 0, where rounding up would give -0.
+function jitterMillis(value: number): ReturnType<typeof u53> {
+	return u53(value < 0 ? value : Math.ceil(value));
+}
+
 function toVideoConfig(track: Msf.Track): Catalog.VideoConfig | undefined {
 	if (!track.codec) return undefined;
 
@@ -69,7 +75,7 @@ function toVideoConfig(track: Msf.Track): Catalog.VideoConfig | undefined {
 		codedHeight: track.height != null ? u53(track.height) : undefined,
 		framerate: track.framerate,
 		bitrate: track.bitrate != null ? u53(track.bitrate) : undefined,
-		jitter: track.jitter != null ? u53(track.jitter) : undefined,
+		jitter: track.jitter != null ? jitterMillis(track.jitter) : undefined,
 		delay: track.delay != null ? delayMillis(track.delay) : undefined,
 	};
 }
@@ -95,7 +101,7 @@ function toAudioConfig(track: Msf.Track): Catalog.AudioConfig | undefined {
 		bitrate: track.bitrate != null ? u53(track.bitrate) : undefined,
 		// MSF cannot advertise decoder warmup, so derive Opus's seek pre-roll.
 		warmup: track.codec === "opus" ? u53(Util.Opus.WARMUP) : undefined,
-		jitter: track.jitter != null ? u53(track.jitter) : undefined,
+		jitter: track.jitter != null ? jitterMillis(track.jitter) : undefined,
 		delay: track.delay != null ? delayMillis(track.delay) : undefined,
 	};
 }

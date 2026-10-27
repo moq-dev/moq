@@ -44,8 +44,7 @@ Rules every child follows:
 Already gated elsewhere, so not a child: the binary-to-flate fold is followed
 by flate's removal ([compress migrate](/quest/m1/compress/migrate.md)), in m1,
 so the cut waits for it. hang's
-`Archive::replay_epoch` goes with the root `archive` section in
-[catalog HLS](/quest/m1/archive/catalog-hls.md).
+`Archive::replay_epoch` went with the root `archive` section in catalog HLS.
 
 Kept public though only moq-transport uses them (decided 2026-10-23), so an
 audit skips them:
@@ -80,6 +79,8 @@ Rejected in planning:
 - [One lifecycle vocabulary in @moq/e2ee](/quest/m1/api-audit/lifecycle.md) - @moq/e2ee ends tracks and groups with finish and abort, as @moq/net does
 - [Demand is wanted, everywhere](/quest/m1/api-audit/wanted.md) - every `used`/`unused` pair becomes `wanted()` and `wanted_changed()`, and unused ones go
 - [One meaning for Credential](/quest/m1/api-audit/dial-credential.md) - the internal dial type gets its own name in JS and moq-tokio, and the `Presented` alias goes
+- [One strict path rule](/quest/m1/api-audit/strict-paths.md) - `Relative` refuses empty segments, the error is `path::Error`, and auth mints only strict paths
+- [Unix sockets accept through the allowlist](/quest/m1/api-audit/unix-accept.md) - the public pre-allowlist `unix::Listener::accept` becomes crate-private
 
 ## Related
 

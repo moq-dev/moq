@@ -50,6 +50,10 @@ const AudioConfigSchema: z.ZodMiniObject<{
     jitter: z.ZodMiniOptional<z.ZodMiniPipe<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">, z.ZodMiniTransform<(number & z.$brand<"u53">) | undefined, number & z.$brand<"u53">>>>;
     warmup: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
     delay: z.ZodMiniOptional<z.ZodMiniPipe<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">, z.ZodMiniTransform<(number & z.$brand<"u53">) | undefined, number & z.$brand<"u53">>>>;
+    hls: z.ZodMiniCatch<z.ZodMiniOptional<z.ZodMiniObject<{
+        track: z.ZodMiniString<string>;
+        duration: z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">;
+    }, z.core.$strip>>>;
 }, z.core.$strip>;
 
 export interface BufferedRange {
@@ -269,6 +273,10 @@ const VideoConfigSchema: z.ZodMiniObject<{
     jitter: z.ZodMiniOptional<z.ZodMiniPipe<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">, z.ZodMiniTransform<(number & z.$brand<"u53">) | undefined, number & z.$brand<"u53">>>>;
     warmup: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
     delay: z.ZodMiniOptional<z.ZodMiniPipe<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">, z.ZodMiniTransform<(number & z.$brand<"u53">) | undefined, number & z.$brand<"u53">>>>;
+    hls: z.ZodMiniCatch<z.ZodMiniOptional<z.ZodMiniObject<{
+        track: z.ZodMiniString<string>;
+        duration: z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">;
+    }, z.core.$strip>>>;
 }, z.core.$strip>;
 
 ```
