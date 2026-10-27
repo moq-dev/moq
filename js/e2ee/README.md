@@ -66,7 +66,7 @@ Groups already created remain writable until they finish or the track is release
 cancels the unfinished track. Use `abort(error)` on a group or track to end it with an
 error, and await its `closed` outcome to observe completion. A group finish drains its
 queued writes unless the track aborts. A track's declared end remains abortable until
-its outcome settles.
+its outcome settles or the producer is released.
 
 A grouped authentication failure ends the track with `Failure` code `authentication`; a
 datagram that fails to open is dropped as an `identity`, `oversize`, or `authentication`
