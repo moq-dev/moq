@@ -88,10 +88,12 @@ Decided 2026-10-16 (maintainer interview):
   rather than refetching. Only whole-object holes refill.
 - `GroupTooLarge` and `FrameTooLarge` stay, raised only when an allocation
   can't be satisfied.
-- The byte offset goes on lite-07-wip (decided 2026-10-27, maintainer,
-  replacing "the next unpublished lite version after lite-07"), so
+- The byte offset goes on the current lite wip version (lite-07-wip today);
+  the lite-07 cut does not wait on it. Decided 2026-10-27 (maintainer): wire
+  quests target whichever wip is current when they land, so
   [Byte holes](/quest/m1/unbounded-groups/byte-holes.md) waits only on Front
-  eviction. Frame-boundary holes refill over lite-07's frame offsets once
+  eviction. If lite-07 is cut first, lite-07 peers refill only at frame
+  boundaries. Frame-boundary holes refill over lite-07's frame offsets once
   [transport frame offsets](/quest/m1/transport-frame-offsets.md) lets a
   refill start at a frame the relay no longer holds below (decided
   2026-10-25, maintainer: the application API stays whole-group).
@@ -113,7 +115,7 @@ moq-transport, with memory held near the pool size.
 
 - [Front eviction](/quest/m1/unbounded-groups/front-eviction.md) - groups shed whole frames from their front under pressure and refill them in place; the group caps go
 - [Fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md) - every hop buffers at most a window past its fastest reader and pushes back through QUIC flow control
-- [Byte holes](/quest/m1/unbounded-groups/byte-holes.md) - segments inside a frame evict and refill by `(frame, byte)` on lite-07; the frame cap goes
+- [Byte holes](/quest/m1/unbounded-groups/byte-holes.md) - segments inside a frame evict and refill by `(frame, byte)` on the current lite wip; the frame cap goes
 - [JS unbounded groups](/quest/m1/unbounded-groups/js.md) - `@moq/net` drops its caps and matches front eviction
 - [JS byte holes](/quest/m1/unbounded-groups/js-byte-holes.md) - `@moq/net` reads a huge frame as chunks and mirrors the byte-offset wire
 - [Log lock profile](/quest/m1/unbounded-groups/log-lock-profile.md) - a lock profile on a perf host confirms the epoch-based `kio::log` cut `GroupState` contention
