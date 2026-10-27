@@ -21,7 +21,7 @@ these exclusions and failure sensitivity, and refuse a changed script anchor.
 
 The publisher advertises the `moq-test-00` prefix. The client subscribes to
 16-field namespaces below it. Mock-clock integration tests in
-[`ietf_conformance.rs`](../../rs/moq-net/tests/integration/ietf_conformance.rs)
+[`ietf_conformance.rs`](../../rs/moq-net-tests/tests/integration/ietf_conformance.rs)
 prove this routing path on both drafts, through one relay and through two
 relays joined with native lite-07. The live harness waits for that prefix at the
 relay before starting

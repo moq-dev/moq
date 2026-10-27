@@ -36,6 +36,9 @@ target, and `nix build .#moq-c` produces the release layout. A bare
 pkg-config file, and omits the OpenH264 software fallback unless given
 `--features openh264`.
 
+`moq-c` and the C++ package each link in their own copy of the Rust core, so a
+program links one of the two, never both.
+
 ## Connect
 
 ```c
@@ -51,7 +54,7 @@ if (session < 0)
     return fail(moq_error());
 ```
 
-Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Publication track names stay separate from codec settings.
+Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Publication track names stay separate from codec settings. For simulcast, give each rendition the next one down as the `lower` handle in its `moq_video_encode_options`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers. A rung only disables while the session probes for bandwidth, which on native transports takes moq-quic with BBR3.
 
 ## Things to know
 

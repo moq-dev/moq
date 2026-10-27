@@ -33,6 +33,7 @@ declare namespace Audio_2 {
         Codec,
         Encoder_2 as Encoder,
         EncoderInput_2 as EncoderInput,
+        EncoderOutput_2 as EncoderOutput,
         EncoderProps_2 as EncoderProps,
         Opus,
         OpusConfig,
@@ -42,6 +43,7 @@ declare namespace Audio_2 {
         Format,
         CaptureInput_2 as CaptureInput,
         CaptureProps,
+        CaptureOutput_2 as CaptureOutput,
         Capture_2 as Capture,
         isSampleSource,
         sourceKind,
@@ -363,7 +365,7 @@ class MoqPublish extends HTMLElement {
     constructor();
     get announce(): AnnounceMode | undefined;
     set announce(value: AnnounceMode);
-    attributeChangedCallback(name: Observed, oldValue: string | null, newValue: string | null): void;
+    attributeChangedCallback(name: (typeof OBSERVED)[number], oldValue: string | null, newValue: string | null): void;
     audio: Audio_2.Encoder;
     get backend(): Preview.Backend;
     set backend(value: Preview.Backend);
@@ -385,7 +387,7 @@ class MoqPublish extends HTMLElement {
     set muted(value: boolean);
     get name(): Moq.Path.Valid;
     set name(value: string | Moq.Path.Valid);
-    static observedAttributes: readonly ["url", "versions", "name", "muted", "invisible", "source", "preview", "backend", "announce"];
+    static observedAttributes: typeof OBSERVED;
     get preview(): Preview.Mode;
     set preview(value: Preview.Mode);
     readonly signals: Effect;
@@ -410,8 +412,6 @@ function normalizeSource_2(source: StreamTrack_2 | SourceConfig_2): SourceConfig
 
 const OBSERVED: readonly ["url", "versions", "name", "muted", "invisible", "source", "preview", "backend", "announce"];
 
-type Observed = (typeof OBSERVED)[number];
-
 type Opus = "opus" | OpusConfig;
 
 type OpusConfig = {
@@ -432,6 +432,7 @@ declare namespace Preview {
         Renderer,
         TranscodeInput,
         TranscodeProps,
+        TranscodeOutput,
         Transcode
     }
 }
@@ -511,18 +512,23 @@ declare namespace Source_3 {
     export {
         CameraInput,
         CameraProps,
+        CameraOutput,
         Camera,
         DeviceInput,
         DeviceProps,
+        DeviceOutput,
         Device,
         FileInput,
         FileProps,
+        FileOutput,
         File_2 as File,
         MicrophoneInput,
         MicrophoneProps,
+        MicrophoneOutput,
         Microphone,
         ScreenInput,
         ScreenProps,
+        ScreenOutput,
         Screen_2 as Screen,
         Media
     }
@@ -610,11 +616,13 @@ declare namespace Video {
     export {
         Rendition,
         CaptureInput,
+        CaptureOutput,
         Capture,
         Stats,
         Config,
         EncoderInput,
         EncoderProps,
+        EncoderOutput,
         Encoder,
         normalizeSource,
         isStreamTrack,
@@ -626,6 +634,5 @@ declare namespace Video {
         Constraints
     }
 }
-
 
 ```

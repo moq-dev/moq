@@ -2,9 +2,12 @@
 
 ## Goal
 
-The generated C header gives every moq-ffi item its own name. Today the method
-`MoqAudioEncoder::finish` and the record `MoqAudioEncoderFinish` both map to
-`moq_audio_encoder_finish`. Waiting on
+The generated C header gives every moq-ffi item its own name. Under the current
+generator the method `MoqAudioEncoder::finish` and the record
+`MoqAudioEncoderFinish` both map to `moq_audio_encoder_finish`, so
+[moq-dev/moq#6052](https://github.com/moq-dev/moq/pull/6052) renamed the record
+to `MoqAudioEncoderFinished`; revert that rename once the fix reaches moq's
+generator pin. Waiting on
 [kixelated/rust2#66](https://github.com/kixelated/rust2/pull/66), which
 implements the rule below; delete this quest once it merges.
 
@@ -54,10 +57,8 @@ line must close.
 
 moq still builds C++ from `kixelated/uniffi-bindgen-cpp`; the rule reaches
 moq's build through [Switch to rust2's UniFFI](/quest/m2/uniffi-fork.md), which
-owns the pin, and the generated C line's CI build checks the header. The
-generated moq-c package
-([moq-dev/moq#6052](https://github.com/moq-dev/moq/pull/6052)) adopts these
-names then.
+owns the pin, and `just c check` builds the header. The generated `moq-c`
+package (`c/moq`) adopts these names then.
 
 Public API: generated C type names become CamelCase; function names are
 unchanged. Wire: none.

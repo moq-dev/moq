@@ -47,6 +47,7 @@ m4's upstream waits in here and moved m2 work with no consumer.
 - [moq-transport cluster peers](/quest/m3/ietf-cluster-peers.md) - the cluster draft carries the route layer, so moq-transport relays peer again, once a moq-transport relay operator asks
 - [The moq.pro mesh runs lite-07](/quest/m3/lite07-mesh.md) - the deployment that makes the exemption dead code
 - [Drop the hidden cluster exemption](/quest/m3/hidden-exemption.md) - relays stop forcing hidden broadcasts on cluster peers once every peer opts in on the wire
+- [Pure-Rust crypto for moq-relay](/quest/m3/pure-crypto/README.md) - moq-relay's release builds use graviola and compile no C, once upstream graviola and ACME releases make the switch cheap
 - [Robot teleoperation primitive](/quest/m3/teleop-robot.md) - a `moq-robot` crate for video down and control up, once a robotics consumer appears
 - [Operator arbitration](/quest/m3/teleop-arbitration.md) - one operator holds control at a time
 - [MAVLink bridge](/quest/m3/teleop-mavlink.md) - a `moq-mavlink` gateway
@@ -73,3 +74,5 @@ m4's upstream waits in here and moved m2 work with no consumer.
 - [Safari WebTransport](/quest/m3/safari-webtransport.md) - WebKit browsers return to WebTransport once WebKit 319818 ships fixed
 - [Studio](/quest/m3/studio/README.md) - a native and wasm streaming studio on moq-scene, moq-video, and moq-audio for creators and teams who rely on OBS today
 - [Mesh keys](/quest/m3/mesh-keys.md) - parked: encrypted and HMAC-authenticated mesh broadcasts through a wrapped `.keys` track
+- [A gate host is rented](/quest/m3/ci-host-rented.md) - condition: the maintainer rents a host for the public merge gates
+- [Gate on a rented host](/quest/m3/ci-host.md) - moq, quest, and rust2 gate on one rented box with a warm disk cache instead of the home host

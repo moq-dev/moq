@@ -38,6 +38,7 @@ export default class MoqPublishUi extends HTMLElement {
 		this.#observer = new MutationObserver(() => this.#updatePublish());
 	}
 
+	/** Called by the browser when the element joins a document. */
 	connectedCallback() {
 		this.#updatePublish();
 		this.#observer.observe(this, { childList: true });
@@ -47,6 +48,7 @@ export default class MoqPublishUi extends HTMLElement {
 		signals.run(this.#render.bind(this));
 	}
 
+	/** Called by the browser when the element leaves its document. */
 	disconnectedCallback() {
 		this.#observer.disconnect();
 		this.#signals?.close();

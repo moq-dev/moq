@@ -116,10 +116,13 @@ authorization and hidden names work exactly as without one.
   without an epoch keeps its subscriptions until that route goes, and a track
   that fails ends instead of resuming, so request the path again.
 - **Another instance restarts.** A newer epoch, or, without one, another route
-  winning the path, is announced as a restart. Subscriptions already open stay
-  on the old instance until dropped or none of its routes remain, which ends
-  them with an error, while new requests get the new one, so a player follows
-  the restart by requesting the path again.
+  winning the path, is announced as a restart. Subscriptions already answered
+  stay on the old instance until dropped or none of its routes remain, which
+  ends them with an error, while new requests get the new one, so a player
+  follows the restart by requesting the path again. Without an epoch, a request
+  still unanswered when another instance takes the path, even after a
+  withdrawal, ends the same way, since that instance may be the one answering
+  it. A withdrawal alone leaves it to its answer.
   Held handles can still read their old cached content while a subscription
   on the old instance stays open, but cannot open new epochless requests once
   the restart is delivered. Request the path again for
@@ -288,9 +291,12 @@ evicted after the subscriber saw it cached, but before it read it, is skipped. A
 moq-lite-07 carries range by range and older wire versions as the single span
 covering them. A relative or time anchor resolves on the hop that publishes the
 track, and over moq-lite-07, which carries a relative or time start upstream and
-reports the live edge and media time, so a copy resolves the ends itself. Over an older lite or any moq-transport version, a subscriber gets every
-anchor but the live and default starts refused as unsupported, and an untimed
-track refuses a time anchor. At the live edge, a time end
+reports the live edge and media time, so a copy resolves the ends itself. A Rust
+moq-transport copy on draft 17 and later accepts anchors its cache can already
+resolve and sends group bounds upstream; it refuses an unknown time end. Older
+wires accept absolute anchors but refuse time anchors and relative anchors other
+than the live and default starts. An untimed track refuses a time anchor. At the live
+edge, a time end
 may let one group through before its first frame shows it starts past the end:
 the first group that has yet to start is handed out without waiting for that
 frame, and the next one waits on it. A datagram is judged by its own timestamp.

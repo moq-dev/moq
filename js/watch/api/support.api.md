@@ -39,5 +39,4 @@ export type Video = {
     av1: Codec;
 };
 
-
 ```

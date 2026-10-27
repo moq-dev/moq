@@ -454,3 +454,23 @@ describe("Source rendition preference", () => {
 		source.close();
 	});
 });
+
+describe("conflicting rendition metadata", () => {
+	it("keeps the first ranking's best picture when bitrate metadata has no common name", async () => {
+		const source = new Source({
+			broadcast: mockBroadcast({
+				picture: config("avc1.640028", { codedWidth: 640, codedHeight: 360 }),
+				bitrate: config("avc1.640028", { bitrate: 500000 }),
+			}),
+			target: { width: 640, height: 360, bitrate: 1000000 },
+			supported: async () => true,
+		});
+		try {
+			if (!source.pending.peek()) await source.pending.changed();
+			while (source.pending.peek()) await source.pending.changed();
+			expect(source.out.track.peek()).toBe("picture");
+		} finally {
+			source.close();
+		}
+	});
+});

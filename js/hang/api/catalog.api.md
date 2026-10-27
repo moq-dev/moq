@@ -1660,5 +1660,4 @@ export function wallClockTime(clock: Clock, pts: number, ptsTimescale: number): 
 
 export function watch(broadcast: Moq.Broadcast.Consumer): AsyncIterable<Root>;
 
-
 ```

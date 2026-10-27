@@ -93,8 +93,14 @@ class Producer:
         *,
         track: str | None = None,
         bandwidth: Bandwidth | None = None,
+        lower: Producer | None = None,
     ) -> None:
-        """Open a video track on the catalog's broadcast and register its rendition."""
+        """Open a video track on the catalog's broadcast and register its rendition.
+
+        Pass ``lower``, the next rendition down a simulcast ladder, to disable this
+        one while the bandwidth grant cannot fund it; it resumes once the grant
+        recovers. Needs ``bandwidth`` and a bitrate above the lower rendition's.
+        """
         self._inner = MoqVideoProducer(
             catalog._inner,
             MoqVideoProducerOptions(
@@ -102,6 +108,7 @@ class Producer:
                 output=output,
                 track=track,
                 bandwidth=None if bandwidth is None else bandwidth._inner,
+                lower=None if lower is None else lower._inner,
             ),
         )
 
