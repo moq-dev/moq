@@ -263,7 +263,7 @@ function subscribe(wire: BroadcastWire, name: string, subscription: track.Subscr
 		return wire.subscribe(name, subscription);
 	} catch (err) {
 		const failed = new track.Producer(name);
-		failed.close(err instanceof Error ? err : new Error(String(err)));
+		failed.abort(err instanceof Error ? err : new Error(String(err)));
 		return failed.subscribe(subscription);
 	}
 }
@@ -1019,7 +1019,7 @@ class Reader implements ResumeSource {
 	// refuses an end below what it received.
 	#learnEnd(): track.Position | undefined {
 		for (const copy of this.#copies) {
-			const end = copy.sub.end();
+			const end = hooks.subscriberEnd(copy.sub);
 			if (end) this.#declare(end);
 		}
 		const declared = this.#declared;
@@ -1177,7 +1177,7 @@ class Reader implements ResumeSource {
 		for (const dispose of this.#dispose) dispose();
 		this.#dispose = [];
 		// A recovery in flight settles with the group rather than adopting a replacement.
-		for (const group of this.#open) group.close(abort);
+		for (const group of this.#open) hooks.releaseGroupReader(group, abort);
 		this.#open.clear();
 		for (const copy of this.#copies) this.#drop(copy, abort);
 		this.#copies = [];

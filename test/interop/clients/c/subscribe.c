@@ -59,6 +59,7 @@ struct ctx {
     pthread_mutex_t mu;
     pthread_cond_t cv;
     int got; // a non-empty frame arrived
+    const char *error; // the first video gap or audio failure, which fails the run
     finish_t finish;
     int32_t origin;
     int32_t session;
@@ -67,13 +68,11 @@ struct ctx {
     int32_t catalog;
     int32_t video_track; // handle from moq_consume_video (0 until on_catalog starts it)
 
-    // The audio decoders, started together by the first catalog with audio. `audio_error`
-    // names why they could not all start.
+    // The audio decoders, started together by the first catalog with audio.
     audio_t audio[MAX_AUDIO];
     uint32_t audio_count;
     const char *audio_out;
     uint64_t audio_ms;
-    const char *audio_error;
 
     // One flag per registration handed &ctx, set by that registration's terminal
     // (<= 0) callback. main returns only once every registration is done: that terminal is
@@ -122,18 +121,22 @@ static void on_frame(void *ud, int32_t frame) {
         done(c, &c->done_frame);
         return;
     }
-    moq_frame f;
-    memset(&f, 0, sizeof(f));
-    int32_t read = moq_consume_frame((uint32_t)frame, &f);
+    moq_media_read item = {0};
+    int32_t read = moq_consume_read((uint32_t)frame, &item);
     pthread_mutex_lock(&c->mu);
     if (read < 0 && c->finish.enabled) c->finish.failed = 1;
-    if (read == 0 && f.payload_size > 0) {
+    // Lost media fails the run; an encoder end only precedes fresh media.
+    if (read == 0 && item.kind == MOQ_DECODE_READ_GAP) {
+        if (c->finish.enabled) c->finish.failed = 1;
+        if (!c->error) c->error = "media gap";
+    }
+    if (read == 0 && item.kind == MOQ_DECODE_READ_FRAME && item.frame.payload_size > 0) {
         c->got = 1;
         if (c->finish.enabled && ++c->finish.frames > c->finish.expected) c->finish.failed = 1;
     }
     pthread_cond_broadcast(&c->cv);
     pthread_mutex_unlock(&c->mu);
-    moq_consume_frame_free((uint32_t)frame);
+    moq_consume_read_free((uint32_t)frame);
 }
 
 // Writes each decoded audio frame to its rendition's files for tone.py, until enough has arrived.
@@ -152,8 +155,8 @@ static void on_audio(void *ud, int32_t id) {
     int32_t status = moq_decode_audio_read((uint32_t)id, &read);
     if (status == 0 && read.kind != MOQ_DECODE_READ_FRAME && a->samples < a->want) {
         pthread_mutex_lock(&c->mu);
-        if (!c->audio_error) {
-            c->audio_error = read.kind == MOQ_DECODE_READ_GAP ? "audio gap" : "audio track ended early";
+        if (!c->error) {
+            c->error = read.kind == MOQ_DECODE_READ_GAP ? "audio gap" : "audio track ended early";
         }
         pthread_cond_broadcast(&c->cv);
         pthread_mutex_unlock(&c->mu);
@@ -247,7 +250,7 @@ static void start_audio(ctx_t *c, int32_t catalog) {
     }
     if (error) {
         pthread_mutex_lock(&c->mu);
-        c->audio_error = error;
+        c->error = error;
         pthread_cond_broadcast(&c->cv);
         pthread_mutex_unlock(&c->mu);
     }
@@ -658,14 +661,14 @@ int main(int argc, char **argv) {
     if (finish_mode) finish(&c, &deadline);
     else {
         pthread_mutex_lock(&c.mu);
-        while ((!c.got || !audio_got(&c)) && !c.audio_error) {
+        while ((!c.got || !audio_got(&c)) && !c.error) {
             if (pthread_cond_timedwait(&c.cv, &c.mu, &deadline) != 0) break; // timed out
         }
         int got = c.got, audio = audio_got(&c);
-        const char *audio_error = c.audio_error;
+        const char *error = c.error;
         pthread_mutex_unlock(&c.mu);
 
-        if (audio_error) fail("error: %s\n", audio_error);
+        if (error) fail("error: %s\n", error);
         if (!got || !audio) {
             fail("error: timed out waiting for data (video=%d audio=%d)\n", got, audio);
         }

@@ -193,7 +193,7 @@ impl Tokens {
 		}
 	}
 
-	fn connect(&self, credential: Option<&super::Auth>) {
+	fn connect(&self, credential: Option<&super::Credential>) {
 		let mut state = self.handle.state.lock();
 		state.record();
 		let connected = match credential {
@@ -530,7 +530,7 @@ mod tests {
 	use super::*;
 	use crate::{
 		SessionError,
-		auth::{Auth, Grant, Link},
+		auth::{Credential, Grant, Link},
 	};
 
 	fn tokens(names: &[&str]) -> Vec<Token> {
@@ -549,7 +549,7 @@ mod tests {
 	/// requests when `requests`.
 	struct Session {
 		link: Link,
-		credential: Option<Auth>,
+		credential: Option<Credential>,
 	}
 
 	fn dial(set: &Tokens, supported: bool, requests: bool) -> Session {
@@ -892,7 +892,7 @@ mod tests {
 		let url: Url = "https://relay.example.com/room".parse().unwrap();
 		let (dialed, setup, connection) = credential(
 			&url,
-			&versions(&["moq-lite-07-wip", "moq-transport-17"]),
+			&versions(&["moq-lite-07-wip", "moq-transport-18"]),
 			&tokens(&["a", "b"]),
 		);
 		assert_eq!(dialed, url);

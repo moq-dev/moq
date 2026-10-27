@@ -572,7 +572,7 @@ export class Encoder {
 		const cause = error instanceof Error ? error : new Error(String(error));
 		this.#failure.peek().set(cause);
 		this.#out.error.set(cause);
-		track.close(cause);
+		track.abort(cause);
 	}
 
 	// Publishes the catalog for the probe: its codec string, the coded-size ceiling, and the bitrate and
@@ -700,7 +700,7 @@ export class Encoder {
 		const reservation = effect.get(this.#reservation);
 		if (reservation) {
 			const grant = reservation.peek();
-			effect.get(reservation.grant);
+			effect.get(reservation.rate);
 			if (grant != null) bitrate = Math.min(bitrate, grant);
 		}
 

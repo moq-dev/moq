@@ -33,10 +33,10 @@ int32_t moq_log_level(const char *level, uintptr_t level_len);
 int32_t moq_session_connect(const char *url, uintptr_t url_len, const moq_client_config *config, uint32_t origin_publish, uint32_t origin_consume, moq_state_callback on_state, void *user_data);
 moq_client_config moq_client_defaults(void);
 int32_t moq_session_close(uint32_t session);
-int32_t moq_session_bandwidth(uint32_t session);
-int32_t moq_bandwidth_reserve(uint32_t bandwidth, uint32_t track, uint64_t max_bps);
-int32_t moq_bandwidth_close(uint32_t bandwidth);
-int32_t moq_reservation_grant(uint32_t reservation, uint64_t *bps, bool *present);
+int32_t moq_session_allocator(uint32_t session);
+int32_t moq_allocator_reserve(uint32_t allocator, uint32_t track, uint64_t max_bps);
+int32_t moq_allocator_close(uint32_t allocator);
+int32_t moq_reservation_rate(uint32_t reservation, uint64_t *bps, bool *present);
 int32_t moq_reservation_update(uint32_t reservation, uint64_t max_bps);
 int32_t moq_reservation_close(uint32_t reservation);
 
@@ -92,10 +92,10 @@ int32_t moq_publish_demand_cancel(uint32_t watcher);
 int32_t moq_publish_demand_wanted(uint32_t watcher, uint64_t *group, bool *present);
 
 // Publishing: Requests
-int32_t moq_publish_dynamic(uint32_t broadcast, moq_status_callback on_request, void *user_data);
-int32_t moq_publish_track_dynamic(uint32_t track, moq_status_callback on_group, void *user_data);
-int32_t moq_track_request_dynamic(uint32_t request, moq_status_callback on_group, void *user_data);
-int32_t moq_publish_dynamic_cancel(uint32_t dynamic);
+int32_t moq_publish_requests(uint32_t broadcast, moq_status_callback on_request, void *user_data);
+int32_t moq_publish_track_requests(uint32_t track, moq_status_callback on_group, void *user_data);
+int32_t moq_track_request_requests(uint32_t request, moq_status_callback on_group, void *user_data);
+int32_t moq_publish_requests_cancel(uint32_t dynamic);
 int32_t moq_track_request_name(uint32_t request, moq_string *dst);
 int32_t moq_track_request_accept(uint32_t request, const moq_track_info *info);
 int32_t moq_track_request_video(uint32_t request, const moq_video_init *config);

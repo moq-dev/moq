@@ -3,8 +3,8 @@
 ## Goal
 
 The interop tone check (`test/interop/tone.py`, "timestamp gap") stops
-failing for FFI publishers: `python -> c` and the `cpp ->` cells seen in
-[moq-dev/moq#6464](https://github.com/moq-dev/moq/pull/6464) and
+failing for FFI publishers: `python -> c`, `go -> c`, and the `cpp ->`
+cells seen in [moq-dev/moq#6464](https://github.com/moq-dev/moq/pull/6464) and
 [moq-dev/moq#6648](https://github.com/moq-dev/moq/pull/6648).
 
 ## Plan

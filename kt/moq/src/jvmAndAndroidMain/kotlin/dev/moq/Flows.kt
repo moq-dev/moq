@@ -23,6 +23,9 @@ fun dev.moq.audio.Consumer.reads(): Flow<dev.moq.audio.Read> = pull({ cancel() }
 fun dev.moq.video.Consumer.reads(): Flow<dev.moq.video.Read> = pull({ cancel() }) { next() }
 
 
+/** Stream of encoded media frames, gaps, and encoder ends in delivery order. */
+fun dev.moq.media.TrackConsumer.reads(): Flow<dev.moq.media.Read> = pull({ cancel() }) { next() }
+
 /** Stream of groups in sequence order, skipping forward if the reader falls behind. */
 fun TrackConsumer.groups(): Flow<GroupConsumer> = pull({ cancel() }) { nextGroup() }
 
@@ -40,13 +43,13 @@ fun TrackConsumer.frames(): Flow<Frame> = pull({ cancel() }) { readFrame() }
 fun TrackConsumer.datagrams(): Flow<Datagram> = pull({ cancel() }) { recvDatagram() }
 
 /** Stream of tracks requested by subscribers. */
-fun BroadcastDynamic.requestedTracks(): Flow<TrackRequest> = pull({ cancel() }) { requestedTrack() }
+fun BroadcastRequests.requestedTracks(): Flow<TrackRequest> = pull({ cancel() }) { requestedTrack() }
 
 /** Stream of the fills readers of one track need. */
-fun TrackDynamic.requestedFills(): Flow<Fill> = pull({ cancel() }) { requestedFill() }
+fun TrackRequests.requestedFills(): Flow<Fill> = pull({ cancel() }) { requestedFill() }
 
 /** Stream of broadcasts requested by consumers. */
-fun OriginDynamic.requestedBroadcasts(): Flow<BroadcastRequest> = pull({ cancel() }) { requestedBroadcast() }
+fun OriginRequests.requestedBroadcasts(): Flow<BroadcastRequest> = pull({ cancel() }) { requestedBroadcast() }
 
 /** Stream of timestamped raw frames within a group. */
 fun GroupConsumer.frames(): Flow<Frame> = pull({ cancel() }) { readFrame() }

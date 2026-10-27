@@ -642,7 +642,7 @@ mod tests {
 		let muxer = video_muxer();
 		let frame = tick_frame(5_000, true);
 
-		let batch = muxer.fragment(0, std::slice::from_ref(&frame)).unwrap();
+		let batch = muxer.fragment(0, std::slice::from_ref(&frame), None).unwrap();
 		let pushed = one(muxer.fragmenter(Default::default()).push(frame).unwrap());
 		assert_eq!(pushed.data, batch);
 	}

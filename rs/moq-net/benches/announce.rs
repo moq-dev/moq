@@ -18,7 +18,7 @@
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use moq_net::{
-	Hop, Hops, PathOwned, announce,
+	Hop, Hops, Path, announce,
 	fuzz::{AnnounceWriter, Announced, decode_announces, encode_announces},
 };
 
@@ -52,7 +52,7 @@ fn initial(c: &mut Criterion) {
 				.flat_map(|cost| {
 					(0..routes).map(move |route| {
 						announce::Event::Update(announce::Announce {
-							prefix: format!("route/{route}").into(),
+							prefix: moq_net::Path::new(&format!("route/{route}")).unwrap(),
 							captures: None,
 							route: moq_net::origin::Route::default().with_cost(cost),
 						})
@@ -106,7 +106,7 @@ fn hops(ids: &[u64]) -> Hops {
 }
 
 /// Announce `routes` routes, then replace `churn` of them, oldest first.
-fn stream(routes: u64, churn: u64, route: impl Fn(u64) -> (PathOwned, Hops)) -> Vec<Announced> {
+fn stream(routes: u64, churn: u64, route: impl Fn(u64) -> (Path, Hops)) -> Vec<Announced> {
 	let mut announced: Vec<_> = (0..routes)
 		.map(|n| {
 			let (path, hops) = route(n);
@@ -121,7 +121,7 @@ fn stream(routes: u64, churn: u64, route: impl Fn(u64) -> (PathOwned, Hops)) -> 
 	announced
 }
 
-fn health(n: u64) -> (PathOwned, Hops) {
+fn health(n: u64) -> (Path, Hops) {
 	let origin = n % ORIGINS;
 	let path = format!(
 		"{:x}/private/channel_{}/stream-health-{}",
@@ -129,17 +129,17 @@ fn health(n: u64) -> (PathOwned, Hops) {
 		n % 16,
 		1_700_000_000 + n
 	);
-	(path.into(), hops(&[id(origin), id(100), id(101)]))
+	(Path::new(&path).unwrap(), hops(&[id(origin), id(100), id(101)]))
 }
 
-fn unique(n: u64) -> (PathOwned, Hops) {
+fn unique(n: u64) -> (Path, Hops) {
 	(
-		format!("{:x}", id(n)).into(),
+		moq_net::Path::new(&format!("{:x}", id(n))).unwrap(),
 		hops(&[id(n + 1_000_000), id(n + 2_000_000)]),
 	)
 }
 
-type Workload = (&'static str, fn(u64) -> (PathOwned, Hops));
+type Workload = (&'static str, fn(u64) -> (Path, Hops));
 const WORKLOADS: [Workload; 2] = [("health", health), ("unique", unique)];
 
 fn report() {

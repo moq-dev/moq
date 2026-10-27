@@ -121,21 +121,11 @@ impl Probe {
 	}
 }
 
-/// Connection-level statistics.
+/// Connection-level metrics a transport reports, beyond the byte counts its [`Wire`] holds.
 ///
 /// Methods return `Option`: `None` means the implementation doesn't track
 /// this metric, while `Some(0)` means actually zero.
-pub trait Stats {
-	/// Total bytes sent over the connection, including retransmissions and overhead.
-	fn bytes_sent(&self) -> Option<u64> {
-		None
-	}
-
-	/// Total bytes received over the connection, including duplicate and overhead.
-	fn bytes_received(&self) -> Option<u64> {
-		None
-	}
-
+pub trait Metrics {
 	/// Total bytes lost (detected via retransmission or acknowledgement).
 	fn bytes_lost(&self) -> Option<u64> {
 		None
@@ -172,9 +162,9 @@ pub trait Stats {
 	}
 }
 
-/// Default stats implementation that returns `None` for all metrics.
-pub struct StatsUnavailable;
-impl Stats for StatsUnavailable {}
+/// The metrics of a transport that tracks none.
+struct Untracked;
+impl Metrics for Untracked {}
 
 /// The smallest connection receive window a transport that leases may offer.
 ///
@@ -185,7 +175,7 @@ impl Stats for StatsUnavailable {}
 pub const MIN_RECEIVE_WINDOW: u64 = {
 	// A type and a size prefix, each a varint of at most 8 bytes.
 	const PREFIXES: u64 = 16;
-	let message = <crate::lite::AnnounceInit<'static> as crate::lite::Message>::MAX_SIZE as u64 + PREFIXES;
+	let message = <crate::lite::AnnounceInit as crate::lite::Message>::MAX_SIZE as u64 + PREFIXES;
 	let segment = crate::frame::SEGMENT as u64;
 	if message > segment { message } else { segment }
 };
@@ -233,7 +223,7 @@ pub mod poll {
 
 	use std::collections::VecDeque;
 
-	use super::{Error, MaybeSend, MaybeSync, Stats};
+	use super::{Error, MaybeSend, MaybeSync, Metrics, Untracked};
 	use bytes::{Buf, Bytes, BytesMut};
 
 	/// A cloneable transport session with independent progress on each handle.
@@ -346,11 +336,10 @@ pub mod poll {
 		/// Poll until the connection is closed by either side.
 		fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error>;
 
-		/// Return connection-level statistics.
-		///
-		/// Return [`super::StatsUnavailable`] if the transport does not track them. Required
-		/// rather than defaulted for the same reason as [`protocol`](Self::protocol).
-		fn stats(&self) -> impl Stats;
+		/// Return connection-level metrics; by default, none are tracked.
+		fn metrics(&self) -> impl Metrics {
+			Untracked
+		}
 
 		/// Return the wire counters this transport updates, or `None` when it tracks none.
 		fn wire(&self) -> Option<super::Wire> {

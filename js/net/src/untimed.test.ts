@@ -30,10 +30,7 @@ const WIRES: Wire[] = [
 	{ name: "lite-05", protocol: Lite.ALPN_05, declares: false },
 	{ name: "lite-06", protocol: Lite.ALPN_06, declares: false },
 	{ name: "lite-07-wip", protocol: Lite.ALPN_07_WIP, declares: true },
-	{ name: "ietf-14", protocol: "", version: Ietf.Version.DRAFT_14, declares: false },
-	{ name: "ietf-16", protocol: Ietf.ALPN.DRAFT_16, declares: false },
-	{ name: "ietf-17", protocol: Ietf.ALPN.DRAFT_17, declares: true },
-	{ name: "ietf-20", protocol: Ietf.ALPN.DRAFT_22, declares: true },
+	{ name: "ietf-22", protocol: Ietf.ALPN.DRAFT_22, declares: true },
 ];
 
 /** Serve one group of `timestamps` on a track with `timescale`, and read it back over `wire`. */
@@ -57,7 +54,7 @@ async function roundTrip(wire: Wire, timescale: Timescale | undefined, timestamp
 			for (const [i, timestamp] of timestamps.entries()) {
 				group.writeFrame({ payload: new Uint8Array([i]), timestamp });
 			}
-			group.close();
+			group.finish();
 		}
 	})();
 
@@ -87,13 +84,14 @@ async function republish(input: BroadcastConsumer): Promise<BroadcastProducer> {
 			for (let group = await groups.nextGroup(); group; group = await groups.nextGroup()) {
 				const out = video.appendGroup();
 				for (let frame = await group.readFrame(); frame; frame = await group.readFrame()) out.writeFrame(frame);
-				out.close();
+				out.finish();
 			}
 			// Closing the broadcast does not end a track inserted into it.
+			video.finish();
 			video.close();
 		} catch (err) {
 			// An upstream abort goes downstream as an abort, never as a clean end.
-			video.close(err instanceof Error ? err : new Error(String(err)));
+			video.abort(err instanceof Error ? err : new Error(String(err)));
 		} finally {
 			copy.close();
 		}
@@ -124,13 +122,13 @@ test("a forwarded untimed track stays untimed", async () => {
 			if (!request) break;
 			const group = request.accept({ timescale: Timescale.MICRO }).appendGroup();
 			group.writeFrame({ payload: new Uint8Array([7]), timestamp: Timestamp.fromMicros(1_234) });
-			group.close();
+			group.finish();
 		}
 	})();
 
 	// Serve the downstream session from the upstream one. A JS origin refuses to serve a
 	// broadcast a session delivered, so the forwarding node republishes a copy it produced.
-	const dynamic = relay.dynamicRoute(Path.from("test"));
+	const dynamic = relay.requestsRoute(Path.from("test"));
 	const inputs: BroadcastConsumer[] = [];
 	const forwarding = (async () => {
 		for await (const request of dynamic.requested()) {
@@ -200,7 +198,7 @@ for (const wire of WIRES.filter((wire) => wire.name === "lite-06" || wire.name =
 		// Datagrams aren't cached, so a group read back first proves the subscription is live.
 		const group = producer.appendGroup();
 		group.writeFrame({ payload: new Uint8Array([0]) });
-		group.close();
+		group.finish();
 		expect(await subscriber.recvGroup()).toBeDefined();
 
 		producer.appendDatagram(undefined, new Uint8Array([7]));

@@ -3,7 +3,7 @@
 ## Goal
 
 Waiting on upstream Moxygen. test/smoke's Moxygen lane passes all six
-cases through moq-relay on WebTransport and raw QUIC at draft-16, and its
+cases through moq-relay on WebTransport and raw QUIC at draft-18, and its
 `continue-on-error` exception is removed.
 
 Check by running `just test smoke moxygen`, or by reading the latest
@@ -14,13 +14,13 @@ is gone.
 
 The failure is Moxygen's, not moq-relay's. The interop client builds every
 SUBSCRIBE with `SubscribeRequest::make`, whose default `locType` is Moxygen's
-`LocationType::LargestGroup` (0xFA). Draft-16 section 5.1.2 registers Filter
+`LocationType::LargestGroup` (0xFA). The draft registers Filter
 Types 0x1-0x4 only and says an endpoint receiving any other "MUST close the
 session with PROTOCOL_VIOLATION", which moq-relay does. The reduced
-reproducer is the draft-16 SUBSCRIBE body
-`00 01 0b "nonexistent" 0d "no-such-track" 01 21 02 40 fa`: one
+reproducer is the draft-18 SUBSCRIBE body
+`00 01 0b "nonexistent" 0d "no-such-track" 01 21 02 80 fa`: one
 SUBSCRIPTION_FILTER parameter whose Filter Type varint is 250.
-`test_subscribe_v16_rejects_unregistered_filter_type` in
+`test_subscribe_rejects_unregistered_filter_type` in
 `rs/moq-net/src/ietf/subscribe.rs` pins that refusal.
 
 `subscribe-error` and `subscribe-before-announce` report `ok` only because

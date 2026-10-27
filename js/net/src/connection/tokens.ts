@@ -1,4 +1,4 @@
-import { type Auth, type Handle, Unsupported } from "../auth.ts";
+import { type Handle, type Credential as Presented, Unsupported } from "../auth.ts";
 import type { Established } from "./established.ts";
 
 /** What one dial presents, decided from its URL, the offered versions, and the tokens. @internal */
@@ -56,7 +56,7 @@ export function extra(credential: Credential, tokens: readonly string[]): string
 }
 
 interface Entry {
-	auth?: Auth;
+	auth?: Presented;
 	pending: boolean;
 	retired: boolean;
 }

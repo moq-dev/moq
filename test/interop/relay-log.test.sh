@@ -31,8 +31,8 @@ printf '%s\n' 'WARN conn{id=1 remote=localhost}: refused' 'INFO conn{id=4 remote
 
 # A pinned round fails on any connection that negotiated another version, and only counts its own.
 printf '%s\n' 'INFO conn{id=5 remote=localhost session="a"}: moq_relay::connection: negotiated version=moq-lite-06 transport=quic' \
-    'INFO conn{id=6 remote=localhost session="b"}: moq_relay::connection: negotiated version=moq-transport-14 transport=webtransport' >>"$HARNESS_RUN/relay.log"
-check_versions pinned 13 moq-transport-14
-if check_versions pinned 12 moq-transport-14 >"$HARNESS_RUN/result"; then exit 1; fi
-grep -x '  FAIL  pinned round: relay connection 5 negotiated moq-lite-06, not moq-transport-14' "$HARNESS_RUN/result"
+    'INFO conn{id=6 remote=localhost session="b"}: moq_relay::connection: negotiated version=moq-transport-18 transport=webtransport' >>"$HARNESS_RUN/relay.log"
+check_versions pinned 13 moq-transport-18
+if check_versions pinned 12 moq-transport-18 >"$HARNESS_RUN/result"; then exit 1; fi
+grep -x '  FAIL  pinned round: relay connection 5 negotiated moq-lite-06, not moq-transport-18' "$HARNESS_RUN/result"
 echo 'relay log regression passed'

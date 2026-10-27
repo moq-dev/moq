@@ -631,7 +631,6 @@ async fn hop_limit_bounds_receive_and_send() {
 		"moq-lite-05",
 		"moq-lite-06",
 		"moq-lite-07-wip",
-		"moq-transport-17",
 		"moq-transport-18",
 		"moq-transport-22",
 	] {
@@ -697,13 +696,7 @@ async fn hop_limit_bounds_receive_and_send() {
 #[moq_clock::test]
 async fn hop_limit_falls_back_to_a_forwardable_route() {
 	// Only wires carrying a route cost can rank a longer route first.
-	for name in [
-		"moq-lite-06",
-		"moq-lite-07-wip",
-		"moq-transport-17",
-		"moq-transport-18",
-		"moq-transport-22",
-	] {
+	for name in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
 		let version = name.parse().unwrap();
 		let near = produce_origin(1);
 		let far = produce_origin(4);

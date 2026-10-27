@@ -740,6 +740,67 @@ int main()
 	}
 	report("plays video and audio");
 
+	// Gaps reset references immediately. An encoder end keeps old non-key tail packets
+	// decodable until a fresh frame reaches its endpoint, or until EOF drains the tail.
+	for (int boundary : {0, 1, 2}) {
+		const bool gap = boundary == 0;
+		const bool eof = boundary == 2;
+		TestRelay relay;
+		reset(relay.Url());
+		g_reorder_delay = 2;
+		Publisher publisher(relay, "obs/test", true, false);
+		void *source = createSource();
+		CHECK(publisher.WriteUntil([] { return g_output_frames > 0; }));
+		auto *ctx = static_cast<moq_source *>(source);
+		std::shared_ptr<Track> held;
+		{
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			const auto &conn = ctx->connection;
+			held = conn->video;
+			CHECK(held != nullptr);
+			const int frames = g_output_frames;
+			const auto *state = static_cast<DecodeState *>(held->video_decoder->codec_ctx->opaque);
+			const auto pending = state->held.size();
+			CHECK(pending > 0);
+			const uint64_t end = static_cast<uint64_t>(state->last_pts) + 1'000'000;
+			auto inject = [&](moq::MediaRead read) {
+				moq_source_on_frame(ctx, conn, held, std::optional<moq::MediaRead>{std::move(read)});
+			};
+			if (gap) {
+				inject(moq::MediaRead{moq::MediaRead::kGap{123456, std::chrono::microseconds(78901)}});
+				CHECK(g_output_frames == frames + static_cast<int>(pending));
+				CHECK(!held->video_decoder->got_keyframe);
+			} else {
+				inject(moq::MediaRead{moq::MediaRead::kEnd{end}});
+				CHECK(held->video_decoder->got_keyframe);
+				// Non-key tail packets below the endpoint still depend on the old references.
+				inject(moq::MediaRead{
+					moq::MediaRead::kFrame{moq::MediaFrame{TestH264Keyframe(), end - 1, false}}});
+				CHECK(state->last_pts == static_cast<int64_t>(end - 1));
+				if (eof) {
+					moq_source_on_frame(ctx, conn, held, std::optional<moq::MediaRead>{});
+				} else {
+					inject(moq::MediaRead{moq::MediaRead::kFrame{
+						moq::MediaFrame{TestH264Keyframe(), end, true}}});
+					CHECK(state->last_pts == static_cast<int64_t>(end));
+					CHECK(state->held.size() == 1);
+				}
+				CHECK(g_output_frames == frames + static_cast<int>(pending) + 1);
+				std::lock_guard<std::mutex> output_lock(g_video_mutex);
+				CHECK(std::count(g_video_timestamps.begin(), g_video_timestamps.end(),
+						 (end - 1) * 1000) == 1);
+			}
+			CHECK(conn->video == held);
+		}
+		if (gap) {
+			const int frames = g_output_frames;
+			CHECK(publisher.WriteUntil([&] { return g_output_frames > frames; }));
+		}
+		held.reset();
+		destroySource(source);
+	}
+	report("media breaks preserve decoder tail and subscription ownership");
+
 	// H.264 with B-frames arrives in decode order. Each picture reaches OBS with its own
 	// presentation timestamp, and the pictures the decoder still holds when the track
 	// ends cleanly are drained rather than dropped.

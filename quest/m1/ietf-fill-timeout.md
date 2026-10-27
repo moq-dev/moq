@@ -4,8 +4,8 @@
 
 Rust and JS use IETF FILL_TIMEOUT to bound waiting for missing FETCH
 objects on drafts 18 and 22, and return the draft's timeout-gap disposition
-without hanging or discarding objects that are available. Drafts 14-17
-keep their existing wire; local FETCH age enforcement works on all versions.
+without hanging or discarding objects that are available. Local FETCH age
+enforcement works on all versions.
 
 ## Plan
 

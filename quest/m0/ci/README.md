@@ -137,4 +137,3 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [First shared FFI release](/quest/m0/ci/nightly-ffi-reuse.md) - condition: the backport merges and the next `moq-ffi-v*` tag runs `Release FFI`; verify the wrappers
 - [Fewer BTreeMap instantiations](/quest/m0/ci/btree-keys.md) - moq-net shares BTreeMap key and value types, kept only if its CPU time drops
 - [Halve the slowest tests' CPU](/quest/m0/ci/slow-tests.md) - the slowest 1% of tests take under half their 289 CPU-seconds, with coverage kept
-- [Measure moving unit tests out](/quest/m0/ci/test-layout.md) - deprioritized: keep inline unit tests unless a profile shows moq-net's second library build is worth a migration

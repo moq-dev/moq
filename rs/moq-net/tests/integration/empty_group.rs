@@ -1,8 +1,6 @@
 #![cfg(feature = "async")]
 
-//! A group finished with no frames reaches the subscriber as an empty group. On drafts 14
-//! to 17 its stream is a bare header with no FIRST_OBJECT bit, which must not read as a
-//! group missing its head.
+//! A group finished with no frames reaches the subscriber as an empty group.
 
 use crate::support;
 
@@ -18,13 +16,7 @@ fn timed() -> moq_net::track::Info {
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-const VERSIONS: &[&str] = &[
-	"moq-lite-06",
-	"moq-transport-14",
-	"moq-transport-16",
-	"moq-transport-17",
-	"moq-transport-22",
-];
+const VERSIONS: &[&str] = &["moq-lite-06", "moq-transport-18", "moq-transport-22"];
 
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));

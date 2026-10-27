@@ -980,7 +980,7 @@ impl Connection {
 		let send_bandwidth = send_bw.consume();
 		let recv_bandwidth = recv_bw.weak();
 		let bandwidth = moq_net::bandwidth::Allocator::new(send_bandwidth.clone());
-		let client = client.with_bandwidth(bandwidth.clone());
+		let client = client.with_allocator(bandwidth.clone());
 
 		let closed: CloseGuard = Default::default();
 		let task_closed = closed.clone();
@@ -1546,12 +1546,12 @@ impl Connection {
 	}
 
 	/// Divides [`send_bandwidth`](Self::send_bandwidth) among this connection's senders,
-	/// mirroring [`moq_net::Session::bandwidth`].
+	/// mirroring [`moq_net::Session::allocator`].
 	///
 	/// Persistent like the estimate: every session the loop dials probes for these
 	/// reservations, so they survive reconnects. Reservations report `None` while
 	/// disconnected, telling a sender to hold its rate.
-	pub fn bandwidth(&self) -> moq_net::bandwidth::Allocator {
+	pub fn allocator(&self) -> moq_net::bandwidth::Allocator {
 		self.bandwidth.clone()
 	}
 

@@ -24,10 +24,10 @@ public final class OriginProducer: Sendable {
     ///
     /// A route claims `prefix` and every path beneath it (`""` claims every path).
     /// A service that only serves some of them rejects the rest as they are
-    /// requested. Create, `dynamic` if tracks are served on demand, populate,
+    /// requested. Create, `requests` if tracks are served on demand, populate,
     /// then `BroadcastProducer.announce`.
-    public func dynamic(prefix: String) throws -> OriginDynamic {
-        OriginDynamic(try ffi.dynamic(prefix: prefix))
+    public func requests(prefix: String) throws -> OriginRequests {
+        OriginRequests(try ffi.requests(prefix: prefix))
     }
 
     /// Create a broadcast at `path`, returning the producer that feeds it.
@@ -85,15 +85,15 @@ public final class BroadcastPrepared: Sendable {
 }
 
 /// A stream of broadcasts requested by consumers. Iterate directly:
-/// `for try await request in dynamic { ... }`. Hold this while missing
+/// `for try await request in requests { ... }`. Hold this while missing
 /// broadcasts should be served; cancelling the consuming task stops serving.
-public final class OriginDynamic: AsyncSequence, Sendable {
+public final class OriginRequests: AsyncSequence, Sendable {
     /// The broadcast request emitted by this sequence.
     public typealias Element = BroadcastRequest
 
-    let ffi: MoqOriginDynamic
+    let ffi: MoqOriginRequests
 
-    init(_ ffi: MoqOriginDynamic) {
+    init(_ ffi: MoqOriginRequests) {
         self.ffi = ffi
     }
 

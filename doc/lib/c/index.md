@@ -39,6 +39,13 @@ pkg-config file, and omits the OpenH264 software fallback unless given
 `moq-c` and the C++ package each link in their own copy of the Rust core, so a
 program links one of the two, never both.
 
+Encoded media callbacks from `moq_consume_audio` and `moq_consume_video` deliver read
+handles. Inspect each with `moq_consume_read` and match `moq_media_read.kind`, using the
+same frame/gap/end tags as decoded audio and video. Release every kind with
+`moq_consume_read_free`; frame payload pointers borrow that handle. A gap breaks
+continuity. An encoder end is not callback EOF: frames before its endpoint are the old
+encoder's drain, and the first at or past it starts fresh. Callback 0 ends the stream.
+
 ## Connect
 
 ```c

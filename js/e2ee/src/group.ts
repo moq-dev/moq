@@ -96,14 +96,14 @@ export class Producer {
 		}
 		this.#closed = true;
 		void this.#writer.pump.run(() => {
-			if (!this.#aborted) this.#inner.close();
+			if (!this.#aborted) this.#inner.finish();
 		});
 	}
 
 	#abort(error: Error): void {
 		this.#closed = true;
 		this.#aborted ??= error;
-		this.#inner.close(error);
+		this.#inner.abort(error);
 	}
 }
 
@@ -171,7 +171,8 @@ export class Consumer {
 			return { timestamp: frame.timestamp, plaintext };
 		} catch (err) {
 			if (err instanceof Failure && (err.code === "authentication" || err.code === "identity")) {
-				this.#inner.close(this.#reader.terminal.fail());
+				this.#reader.terminal.fail();
+				this.#inner.close();
 			}
 			throw err;
 		}
@@ -181,7 +182,7 @@ export class Consumer {
 	#check(): void {
 		const failed = this.#reader.terminal.failed;
 		if (!failed) return;
-		this.#inner.close(failed);
+		this.#inner.close();
 		throw failed;
 	}
 

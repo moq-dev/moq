@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use tokio::sync::oneshot;
 
-use crate::bandwidth::{MoqBandwidth, MoqReservation};
+use crate::bandwidth::{MoqAllocator, MoqReservation};
 use crate::consumer::MoqBroadcastConsumer;
 use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
@@ -151,7 +151,7 @@ pub struct MoqVideoProducerOptions {
 	pub track: Option<String>,
 	/// Session bandwidth allocator; absent keeps the configured bitrate.
 	#[uniffi(default = None)]
-	pub bandwidth: Option<Arc<MoqBandwidth>>,
+	pub bandwidth: Option<Arc<MoqAllocator>>,
 	/// The next lower rendition of the same source, when this one is encoded beside it.
 	///
 	/// Makes this rendition a simulcast rung: when the bandwidth grant can no longer fund
@@ -507,7 +507,7 @@ pub struct MoqVideoProducer {
 	/// Last bitrate applied by the follow loop or [`set_bitrate`](Self::set_bitrate).
 	applied: Arc<AtomicU64>,
 	/// Held so the reservation's registry outlives extra bandwidth handles.
-	_bandwidth: Option<Arc<MoqBandwidth>>,
+	_bandwidth: Option<Arc<MoqAllocator>>,
 	children: crate::producer::Children,
 }
 
@@ -616,7 +616,7 @@ impl MoqVideoProducer {
 	/// [`bitrate`](MoqVideoEncoderOutput::bitrate) to the highest you will ask for
 	/// and adapt downwards from there.
 	///
-	/// When this producer was published against a [`MoqBandwidth`], the reservation
+	/// When this producer was published against a [`MoqAllocator`], the reservation
 	/// and follower ceiling move with it, so a later grant cannot retune above this
 	/// value.
 	///
@@ -648,7 +648,7 @@ impl MoqVideoProducer {
 	}
 
 	/// This encoder's bandwidth reservation, if it was published against a
-	/// [`MoqBandwidth`]. Dropping the handle does not release the claim; the
+	/// [`MoqAllocator`]. Dropping the handle does not release the claim; the
 	/// producer holds it until [`finish`](Self::finish).
 	pub fn reservation(&self) -> Option<Arc<MoqReservation>> {
 		self.reservation.lock().unwrap().clone()
@@ -772,7 +772,7 @@ impl MoqVideoProducer {
 			};
 			Ok(moq_video::encode::Producer::with_track(
 				track,
-				state.catalog.reserve().with_timeline_hint(gop),
+				state.catalog.reserve().with_hls_hint(gop),
 				rendition,
 			)?)
 		})?;
@@ -802,7 +802,7 @@ impl MoqVideoProducer {
 			spawn_follow(Followed {
 				inner: inner.clone(),
 				lower,
-				consumer: reservation.consumer(),
+				consumer: reservation.consume(),
 				ceiling,
 				applied: applied.clone(),
 			})
@@ -1416,7 +1416,7 @@ mod finish_tests {
 	#[tokio::test]
 	async fn finish_ends_the_track_after_a_rate_follower_panic() {
 		let estimate = moq_net::bandwidth::Producer::new();
-		let bandwidth = Arc::new(MoqBandwidth::new(moq_net::bandwidth::Allocator::new(
+		let bandwidth = Arc::new(MoqAllocator::new(moq_net::bandwidth::Allocator::new(
 			estimate.consume(),
 		)));
 		let broadcast = crate::producer::MoqBroadcastProducer::new().unwrap();
@@ -1646,7 +1646,7 @@ mod rung_tests {
 
 	fn ladder() -> Ladder {
 		let estimate = moq_net::bandwidth::Producer::new();
-		let bandwidth = Arc::new(MoqBandwidth::new(moq_net::bandwidth::Allocator::new(
+		let bandwidth = Arc::new(MoqAllocator::new(moq_net::bandwidth::Allocator::new(
 			estimate.consume(),
 		)));
 		let broadcast = crate::producer::MoqBroadcastProducer::new().unwrap();
@@ -1706,7 +1706,7 @@ mod rung_tests {
 				input: input(),
 				output: output(400_000),
 				track: Some("below".into()),
-				bandwidth: Some(Arc::new(MoqBandwidth::new(moq_net::bandwidth::Allocator::unlimited()))),
+				bandwidth: Some(Arc::new(MoqAllocator::new(moq_net::bandwidth::Allocator::unlimited()))),
 				lower: Some(ladder.low.clone()),
 			},
 		);

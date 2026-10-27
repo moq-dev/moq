@@ -238,7 +238,7 @@ void main() {
       ),
     ).timeout(timeout);
     final serverSession = await accepted;
-    expect(client.bandwidth(), isA<MoqBandwidth>());
+    expect(client.allocator(), isA<MoqAllocator>());
 
     final announcement = client.announced().updates().firstWhere(
       (event) => event is AnnounceEventStart,
@@ -497,7 +497,7 @@ void main() {
 
   test('dynamic serves a request under a prefix', () async {
     final origin = MoqOriginProducer(config: MoqOriginConfig());
-    final dynamic = origin.dynamic_(prefix: 'live');
+    final dynamic = origin.requests(prefix: 'live');
     final pending = origin.consume().requestBroadcast(path: 'live/cam');
     final request = await dynamic.requestedBroadcast().timeout(timeout);
     expect(request.path(), 'live/cam');

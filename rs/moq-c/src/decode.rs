@@ -1,16 +1,16 @@
-//! What [`crate::moq_decode_audio`] and [`crate::moq_decode_video`] deliver besides frames.
+//! The tagged reads encoded and decoded media consumers deliver.
 //!
-//! Both decoders hand over the same three kinds of read as `moq_audio::decode::Read` and
-//! `moq_video::decode::Read`, so a C player handles loss and ends alike for every media type.
+//! Encoded media and both decoders hand over the same three kinds of read, so a C player
+//! handles loss and encoder ends alike for every media type.
 
 use crate::Error;
 
-/// Which kind of read a decoder delivered: a decoded frame, or a break between frames.
+/// Which kind of media read was delivered: a frame, or a break between frames.
 #[repr(C)]
 #[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum moq_decode_read_kind {
-	/// A decoded frame.
+	/// A media frame.
 	MOQ_DECODE_READ_FRAME = 0,
 	/// Media after what was already read was lost: a group was skipped or never arrived.
 	/// What follows does not continue what came before.

@@ -2815,8 +2815,8 @@ mod tests {
 		let read = read_past_frames(&mut consumer).await;
 		assert!(matches!(read, Err(crate::Error::UnknownFormat(_))), "{read:?}");
 		assert!(track.demand().wanted().is_none(), "the ended reader still subscribes");
-		assert!(!malformed.demand().is_used(), "the ended reader still holds its group");
-		assert!(!later.demand().is_used(), "the ended reader still holds a later group");
+		assert!(!malformed.demand().wanted(), "the ended reader still holds its group");
+		assert!(!later.demand().wanted(), "the ended reader still holds a later group");
 	}
 
 	/// A malformed object mid-group, found while looking ahead past a blocked group, ends the

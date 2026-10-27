@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Connection::allocator` ([#6751](https://github.com/moq-dev/moq/pull/6751))
+
+`Connection::bandwidth()` is `Connection::allocator()`, mirroring `moq_net::Session::allocator()`.
+
 ### QUIC connections wait for the handshake
 
 Await `quic::driver::Connecting` instead of calling `into_0rtt()`.

@@ -22,7 +22,9 @@ async fn routing(version: &str, cluster: bool) {
 	let publisher = origin(1);
 	let relay = origin(2);
 	let reader = origin(4);
-	let prefix = Arc::new(moq_net::fuzz::dynamic_route(&publisher, PREFIX, Default::default()).unwrap());
+	let prefix = Arc::new(
+		moq_net::fuzz::requests_route(&publisher, moq_net::Path::new(PREFIX).unwrap(), Default::default()).unwrap(),
+	);
 	let broadcast = broadcast::Info::new().produce();
 	let track = broadcast.create_track("test", moq_net::track::Info::default()).unwrap();
 	let serving = prefix.clone();
@@ -74,14 +76,14 @@ async fn routing(version: &str, cluster: bool) {
 
 #[moq_clock::test]
 async fn conformance_namespaces_route_through_one_relay() {
-	for version in ["moq-transport-16", "moq-transport-18"] {
+	for version in ["moq-transport-18"] {
 		routing(version, false).await;
 	}
 }
 
 #[moq_clock::test]
 async fn conformance_namespaces_route_through_a_lite_cluster() {
-	for version in ["moq-transport-16", "moq-transport-18"] {
+	for version in ["moq-transport-18"] {
 		routing(version, true).await;
 	}
 }

@@ -431,21 +431,21 @@ mod tests {
 
 	#[test]
 	fn supported_subprotocols_only_lists_configured_alpns() {
-		let list = supported_subprotocols(&["moqt-16"]);
+		let list = supported_subprotocols(&["moqt-18"]);
 
-		assert!(list.contains(&"qmux-01.moqt-16".to_string()));
-		assert!(list.contains(&"qmux-00.moqt-16".to_string()));
+		assert!(list.contains(&"qmux-01.moqt-18".to_string()));
+		assert!(!list.contains(&"qmux-00.moqt-18".to_string()));
 		assert!(list.iter().all(|entry| !entry.contains("moq-lite")));
 		assert!(list.iter().all(|entry| !entry.contains("moqt-22")));
 	}
 
 	#[test]
 	fn supported_subprotocols_preserves_moq_preference_across_qmux_versions() {
-		let list = supported_subprotocols(&["moqt-16", "moqt-18"]);
+		let list = supported_subprotocols(&["moq-lite-06", "moqt-18"]);
 		let preferred = list
 			.iter()
-			.position(|entry| entry == "qmux-00.moqt-16")
-			.expect("missing preferred moqt-16 pair");
+			.position(|entry| entry == "qmux-00.moq-lite-06")
+			.expect("missing preferred moq-lite-06 pair");
 		let newer_qmux = list
 			.iter()
 			.position(|entry| entry == "qmux-01.moqt-18")

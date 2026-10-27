@@ -46,9 +46,9 @@ Every interview prompt and the selected answer (✅) are in the planning PR.
   built on first demand, shared across readers, billed to the cache pool, and
   dropped with its group. A thousand old-lite viewers cost one inflate.
 - **Signaling:** lite-07 TrackInfo carries the codec id and the frame header the
-  size; IETF draft-17+ carries them only
+  size; IETF carries them only
   after both peers advertise a setup parameter, because unknown track
-  properties are discarded. Lite-01..06, IETF draft-14/15/16, and IETF peers without the
+  properties are discarded. Lite-01..06 and IETF peers without the
   parameter get the inflated copy, with no flag. A sealed compression
   declaration is preserved, so delivery is refused when plain fallback would
   remove it.
@@ -74,7 +74,7 @@ Every interview prompt and the selected answer (✅) are in the planning PR.
 This README owns the end-to-end proof and the guide once every child lands:
 
 - A Rust publisher's compressed `catalog.json` reaches a JS player over
-  lite-07 compressed, and a lite-06 and an IETF draft-14 subscriber through
+  lite-07 compressed, and a lite-06 and a plain IETF subscriber through
   moq-relay inflated, from one inflate on the relay.
 - A short guide under `doc/` on when to set `compress`, what each protocol
   version receives, and the cost on the relay.

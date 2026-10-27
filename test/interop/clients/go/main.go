@@ -343,13 +343,21 @@ func finishSubscribe(ctx context.Context, client *moq.Client, broadcast string, 
 	defer media.Cancel()
 	count := 0
 	for {
-		frame, err := media.Next(ctx)
+		read, err := media.Next(ctx)
 		if err != nil {
 			return err
 		}
-		if frame == nil {
+		if read == nil {
 			break
 		}
+		if _, gap := read.(moqmedia.ReadGap); gap {
+			return errors.New("media gap")
+		}
+		value, frameRead := read.(moqmedia.ReadFrame)
+		if !frameRead {
+			continue
+		}
+		frame := value.Frame
 		// Empty payloads carry endpoint metadata, not codec frames.
 		if len(frame.Payload) == 0 {
 			continue
@@ -559,13 +567,21 @@ func subscribe(ctx context.Context, url, broadcast string, opts dialOptions, tim
 
 	total := 0
 	for total == 0 {
-		frame, err := media.Next(ctx)
+		read, err := media.Next(ctx)
 		if err != nil {
 			return err
 		}
-		if frame == nil {
+		if read == nil {
 			break
 		}
+		if _, gap := read.(moqmedia.ReadGap); gap {
+			return errors.New("media gap")
+		}
+		value, frameRead := read.(moqmedia.ReadFrame)
+		if !frameRead {
+			continue
+		}
+		frame := value.Frame
 		total += len(frame.Payload)
 	}
 	if total == 0 {

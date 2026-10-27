@@ -1440,7 +1440,7 @@ mod tests {
 		assert_eq!(report.traffic.len(), 2);
 		assert_eq!(report.sessions.len(), 2);
 		for label in ["first", "second"] {
-			let tier = Tier::new(label);
+			let tier = Tier::new(moq_net::Path::from_static(label));
 			let traffic = report.traffic.iter().find(|entry| entry.tier == tier).unwrap();
 			assert_eq!(traffic.path.as_str(), "room");
 			assert_eq!(

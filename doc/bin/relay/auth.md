@@ -146,13 +146,13 @@ cannot receive it. Each further token is presented
 carries a `?jwt=`, such as a cluster peer's, keeps it as the connection
 credential, and every configured token then rides in band. Dialing
 `?jwt=<token>` directly still works, and reaches relays that predate SETUP
-tokens; a query carrying two `jwt` parameters is refused. HMAC, RSA, ECDSA, and EdDSA keys all work. A
+tokens; a query carrying two `jwt` parameters is refused. HMAC, RSA, ECDSA, and EdDSA keys all work. A private RSA key must be a complete two-prime JWK (see [moq-auth](/lib/rs/moq-auth) for its fields); export one from your provider, or generate one with `moq auth generate --algorithm RS256`. A
 key can itself be **scoped** at generation (`--root`, `--publish`,
 `--subscribe`), after which it can never sign a broader token.
 
 ### In-band renewal
 
-On moq-lite-07-wip or moq-transport draft-17 and later with MoQ Auth negotiated,
+On moq-lite-07-wip or moq-transport draft-18 and later with MoQ Auth negotiated,
 a client can present another JWT without reconnecting. Present its replacement
 before the current grant expires and keep the returned token handle alive.
 The auth handle a reconnecting connection owns (native `Connection::auth()`,

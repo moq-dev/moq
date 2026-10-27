@@ -3,9 +3,9 @@ use crate::origin;
 use crate::time::{Deadlines, Instant};
 use crate::transport::poll::Session as _;
 use crate::{
-	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_22, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05,
-	ALPN_LITE_06, ALPN_LITE_07_WIP, Consume, Error, NEGOTIATED, Session, Version, Versions,
-	coding::{self, Decode, Encode, Stream},
+	ALPN_18, ALPN_22, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05, ALPN_LITE_06, ALPN_LITE_07_WIP, Consume,
+	Error, NEGOTIATED, Session, Version, Versions,
+	coding::{self, Encode, Stream},
 	ietf, lite, setup, stats,
 };
 
@@ -23,7 +23,7 @@ pub struct Client {
 	limits: crate::session::Limits,
 	extensions: setup::Extensions,
 	auth: Option<crate::auth::Handle>,
-	bandwidth: Option<crate::bandwidth::Allocator>,
+	allocator: Option<crate::bandwidth::Allocator>,
 	implementation: Option<String>,
 }
 
@@ -72,20 +72,20 @@ impl Client {
 		self
 	}
 
-	/// Share `bandwidth`'s reservations with every session this client dials.
+	/// Share `allocator`'s reservations with every session this client dials.
 	///
 	/// Each session probes for what they add up to, and its
-	/// [`Session::bandwidth`](crate::Session::bandwidth) reserves into the same registry,
+	/// [`Session::allocator`](crate::Session::allocator) reserves into the same registry,
 	/// so a reservation taken on one session still counts after a reconnect. Without
 	/// one, each session starts an empty registry of its own.
-	pub fn with_bandwidth(mut self, bandwidth: crate::bandwidth::Allocator) -> Self {
-		self.bandwidth = Some(bandwidth);
+	pub fn with_allocator(mut self, allocator: crate::bandwidth::Allocator) -> Self {
+		self.allocator = Some(allocator);
 		self
 	}
 
 	/// The registry the next session probes for.
-	fn bandwidth(&self) -> crate::bandwidth::Allocator {
-		self.bandwidth.clone().unwrap_or_default()
+	fn allocator(&self) -> crate::bandwidth::Allocator {
+		self.allocator.clone().unwrap_or_default()
 	}
 
 	/// Restrict which protocol versions to offer, in preference order.
@@ -170,7 +170,7 @@ impl Client {
 	}
 
 	/// Build every session on `auth`, so each presents the tokens it holds and a route
-	/// naming one of its [`Auth`](crate::auth::Auth)s keeps it across a reconnect. Omit to
+	/// naming one of its [`Credential`](crate::auth::Credential)s keeps it across a reconnect. Omit to
 	/// give each session a handle of its own, which ends with it.
 	///
 	/// The handle backs one active session at a time, plus the ones draining after a
@@ -202,7 +202,7 @@ impl Client {
 	}
 
 	/// Price this link, in the units the rest of the mesh uses (moq-lite-06+, and
-	/// `moqt-17`+ via the MoQ Cluster extension).
+	/// moq-transport via the MoQ Cluster extension).
 	///
 	/// The dialer is the side that knows what a link costs, because it chose the peer:
 	/// use `0` for a sibling in the same datacenter and something large for another
@@ -344,7 +344,7 @@ impl Client {
 				auth: start.auth,
 				credential: start.credential,
 				estimate: Some(start.estimate),
-				bandwidth: self.bandwidth(),
+				bandwidth: self.allocator(),
 				peer_implementation: start.peer_implementation,
 			},
 		))
@@ -367,19 +367,16 @@ impl Client {
 		let peer_hop = self.assigned_hop();
 		let (publish, subscribe) = self.origins(peer_hop);
 
-		// If ALPN was used to negotiate the version, use the appropriate encoding.
-		// Default to IETF 14 if no ALPN was used and we'll negotiate the version later.
-		let (encoding, supported) = match session.protocol() {
-			Some(alpn @ (ALPN_22 | ALPN_18 | ALPN_17)) => {
+		let supported = match session.protocol() {
+			Some(alpn @ (ALPN_22 | ALPN_18)) => {
 				let draft = match alpn {
 					ALPN_22 => ietf::Version::Draft22,
-					ALPN_18 => ietf::Version::Draft18,
-					_ => ietf::Version::Draft17,
+					_ => ietf::Version::Draft18,
 				};
 
 				let v = self.versions.select(Version::Ietf(draft)).ok_or(Error::Version)?;
 
-				// Draft-17+: SETUP is exchanged by the connection driver.
+				// SETUP is exchanged by the connection driver.
 				// We advertise the request path in our SETUP for URL-less transports.
 				// The peer's SETUP decides whether AUTH is negotiated. A handle that does not
 				// offer it keeps the option out of our SETUP and presents no credential.
@@ -390,8 +387,6 @@ impl Client {
 					stats: self.stats.clone(),
 					limits: self.limits,
 					session: session.clone(),
-					setup: None,
-					request_id_max: None,
 					client: true,
 					publish: publish.clone(),
 					subscribe: subscribe.clone(),
@@ -423,31 +418,10 @@ impl Client {
 						auth,
 						credential,
 						estimate: None,
-						bandwidth: self.bandwidth(),
+						bandwidth: self.allocator(),
 						peer_implementation,
 					},
 				));
-			}
-			Some(ALPN_16) => {
-				let v = self
-					.versions
-					.select(Version::Ietf(ietf::Version::Draft16))
-					.ok_or(Error::Version)?;
-				(v, v.into())
-			}
-			Some(ALPN_15) => {
-				let v = self
-					.versions
-					.select(Version::Ietf(ietf::Version::Draft15))
-					.ok_or(Error::Version)?;
-				(v, v.into())
-			}
-			Some(ALPN_14) => {
-				let v = self
-					.versions
-					.select(Version::Ietf(ietf::Version::Draft14))
-					.ok_or(Error::Version)?;
-				(v, v.into())
 			}
 			Some(alpn @ (ALPN_LITE_05 | ALPN_LITE_06 | ALPN_LITE_07_WIP)) => {
 				let version = match alpn {
@@ -470,49 +444,19 @@ impl Client {
 					.ok_or(Error::Version)?;
 				return self.start_lite(runtime, session, lite::Version::Lite03, peer_hop);
 			}
-			Some(ALPN_LITE) | None => {
-				let supported = self.versions.filter(&NEGOTIATED.into()).ok_or(Error::Version)?;
-				(Version::Ietf(ietf::Version::Draft14), supported)
-			}
+			// No ALPN, or `moql`: negotiate moq-lite in a bidi SETUP.
+			Some(ALPN_LITE) | None => self.versions.filter(&NEGOTIATED.into()).ok_or(Error::Version)?,
 			Some(p) => return Err(Error::UnknownAlpn(p.to_string())),
 		};
 
-		let mut stream = Stream::open(&mut session, encoding).await?.with_stats(&self.stats);
-
-		// The encoding is always an IETF version for SETUP negotiation.
-		let ietf_encoding = ietf::Version::try_from(encoding).map_err(|_| Error::Version)?;
-
-		let mut parameters = ietf::Parameters::default();
-		// The server's requests, admitted up to our limits and granted back as they close.
-		parameters.set_varint(
-			ietf::ParameterVarInt::MaxRequestId,
-			ietf::initial_max_request_id(self.limits.window(), false),
-		);
-		if let Some(implementation) = self.implementation() {
-			parameters.set_bytes(ietf::ParameterBytes::Implementation, implementation.into_bytes());
-		}
-		// Advertise the request path in-band (draft 14-16), same as the lite-05 SETUP.
-		if let Some(path) = self.setup_path(session.address()) {
-			parameters.set_bytes(ietf::ParameterBytes::Path, path.into_bytes());
-		}
-		if let Some(authority) = self.setup_authority(session.address()) {
-			parameters.set_bytes(ietf::ParameterBytes::Authority, authority.into_bytes());
-		}
-		if let Some(token) = &self.setup_token {
-			ietf::token::into_setup(&mut parameters, token, ietf_encoding)?;
-		}
-		if self.extensions.solicit {
-			ietf::solicit::into_setup(&mut parameters, ietf_encoding);
-		}
-		ietf::hidden::into_setup(&mut parameters, ietf_encoding);
-		ietf::max_age::into_setup(&mut parameters, ietf_encoding);
-		ietf::active_count::into_setup(&mut parameters, ietf_encoding);
-		ietf::flate::into_setup(&mut parameters, ietf_encoding);
-		let parameters = parameters.encode_bytes(ietf_encoding)?;
+		// The SETUP keeps lite-01's framing whichever version it offers.
+		let mut stream = Stream::open(&mut session, Version::Lite(lite::Version::Lite01))
+			.await?
+			.with_stats(&self.stats);
 
 		let client = setup::Client {
 			versions: supported.clone().into(),
-			parameters,
+			parameters: lite::Parameters::default().encode_bytes(lite::Version::Lite01)?,
 		};
 
 		stream.writer.encode(&client).await?;
@@ -524,122 +468,51 @@ impl Client {
 			.find(|v| coding::Version::from(**v) == server.version)
 			.copied()
 			.ok_or(Error::Version)?;
+		let Version::Lite(v) = version else {
+			return Err(Error::Version);
+		};
 
 		// The server ends the stream after its SETUP. Reading to the end first keeps the drop
 		// from stopping a reply the server is still waiting to have acknowledged.
-		if let Version::Lite(v) = version
-			&& version.hands_off()
-		{
+		if version.hands_off() {
 			std::future::poll_fn(|cx| stream.reader.poll_closed(cx)).await?;
 			drop(stream);
 			return self.start_lite(runtime, session, v, peer_hop);
 		}
 
-		let (recv_bw, protocol, goaway, auth, credential, estimate, peer_implementation) = match version {
-			Version::Lite(v) => {
-				let stream = stream.with_version(v);
-				let start = lite::start(lite::Config {
-					runtime: runtime.clone(),
-					stats: self.stats.clone(),
-					client: true,
-					limits: self.limits,
-					session: session.clone(),
-					setup_stream: Some(stream),
-					publish: publish.clone(),
-					subscribe: subscribe.clone(),
-					peer_hop: Some(peer_hop),
-					version: v,
-					// Lite 01/02 continue on the bidi SETUP stream and have no Setup Stream.
-					our_setup: lite::Setup::default(),
-					peer_setup: None,
-					// Negotiated over the bidi SETUP: lite 01/02, which carry no AUTH.
-					auth: self.link(v.has_auth(), false)?,
-				})?;
-
-				(
-					start.recv_bandwidth,
-					crate::driver::Protocol::Lite(Box::new(start.driver)),
-					start.goaway,
-					start.auth,
-					start.credential,
-					Some(start.estimate),
-					start.peer_implementation,
-				)
-			}
-			Version::Ietf(v) => {
-				// Decode the parameters to get the initial request ID and what the server
-				// requires of us.
-				let (parameters, _) = ietf::Parameters::decode_slice(&server.parameters, v)?;
-				let request_id_max = parameters
-					.get_varint(ietf::ParameterVarInt::MaxRequestId)
-					.map(ietf::RequestId);
-				let peer_declared = ietf::peer::Peer {
-					solicit: ietf::solicit::from_setup(&parameters, v)?,
-					hidden: ietf::hidden::from_setup(&parameters, v),
-					max_age: ietf::max_age::from_setup(&parameters, v),
-					active_count: ietf::active_count::from_setup(&parameters, v),
-					flate: ietf::flate::from_setup(&parameters, v)?,
-					..Default::default()
-				};
-				let peer_implementation = setup::PeerImplementation::known(setup::decode_implementation(
-					parameters.get_bytes(ietf::ParameterBytes::Implementation),
-				)?);
-
-				let stream = stream.with_version(v);
-				// Draft 14-16 carry no AUTH, but the session is still limited through this handle.
-				let auth = self.link(false, true)?;
-				// Draft 14-16: the path rode in the bidi SETUP above, not the uni one.
-				let (protocol, goaway, credential) = ietf::start(ietf::Config {
-					runtime: runtime.clone(),
-					stats: self.stats.clone(),
-					limits: self.limits,
-					session: session.clone(),
-					setup: Some(stream),
-					request_id_max,
-					client: true,
-					publish: publish.clone(),
-					subscribe: subscribe.clone(),
-					peer_hop: Some(peer_hop),
-					cost: self.cost,
-					version: v,
-					path: None,
-					authority: None,
-					token: None,
-					peer_setup_stream: None,
-					peer_declared: Some(peer_declared),
-					auth: auth.clone(),
-					early_unis: Vec::new(),
-					extensions: self.extensions,
-					// Already sent on the bidi SETUP above.
-					implementation: None,
-					peer_implementation: peer_implementation.clone(),
-				})?;
-				(
-					None,
-					crate::driver::Protocol::Ietf(protocol),
-					goaway,
-					auth,
-					credential,
-					None,
-					peer_implementation,
-				)
-			}
-		};
+		let stream = stream.with_version(v);
+		let start = lite::start(lite::Config {
+			runtime: runtime.clone(),
+			stats: self.stats.clone(),
+			client: true,
+			limits: self.limits,
+			session: session.clone(),
+			setup_stream: Some(stream),
+			publish: publish.clone(),
+			subscribe: subscribe.clone(),
+			peer_hop: Some(peer_hop),
+			version: v,
+			// Lite 01/02 continue on the bidi SETUP stream and have no Setup Stream.
+			our_setup: lite::Setup::default(),
+			peer_setup: None,
+			// Lite 01/02 carry no AUTH.
+			auth: self.link(v.has_auth(), false)?,
+		})?;
 
 		Ok(Session::new(
 			runtime,
 			session,
 			version,
-			recv_bw,
-			protocol,
+			start.recv_bandwidth,
+			crate::driver::Protocol::Lite(Box::new(start.driver)),
 			crate::session::Handles {
 				stats: self.stats.clone(),
-				goaway,
-				auth,
-				credential,
-				estimate,
-				bandwidth: self.bandwidth(),
-				peer_implementation,
+				goaway: start.goaway,
+				auth: start.auth,
+				credential: start.credential,
+				estimate: Some(start.estimate),
+				bandwidth: self.allocator(),
+				peer_implementation: start.peer_implementation,
 			},
 		))
 	}
@@ -698,7 +571,7 @@ mod tests {
 		close_events: kio::Shared<Vec<(u32, String)>>,
 		control_writes: Arc<Mutex<Vec<u8>>>,
 		send_rate: Mutex<Option<u64>>,
-		bytes_sent: Mutex<Option<u64>>,
+		wire: crate::transport::Wire,
 	}
 
 	fn any_close(events: &kio::Ref<'_, Vec<(u32, String)>>) -> Poll<()> {
@@ -722,7 +595,7 @@ mod tests {
 				close_events: kio::Shared::default(),
 				control_writes: writes,
 				send_rate: Mutex::new(None),
-				bytes_sent: Mutex::new(None),
+				wire: crate::transport::Wire::new(),
 			};
 			Self {
 				state: Arc::new(state),
@@ -746,8 +619,8 @@ mod tests {
 			self.probe.as_ref().expect("built with_probe").target().as_bps()
 		}
 
-		fn set_bytes_sent(&self, bytes: Option<u64>) {
-			*self.state.bytes_sent.lock().unwrap() = bytes;
+		fn set_sent_bytes(&self, bytes: u64) {
+			self.state.wire.set_sent_bytes(bytes);
 		}
 
 		fn control_writes(&self) -> Vec<u8> {
@@ -846,11 +719,14 @@ mod tests {
 			Poll::Ready(FakeError)
 		}
 
-		fn stats(&self) -> impl crate::transport::Stats {
-			FakeStats {
+		fn metrics(&self) -> impl crate::transport::Metrics {
+			FakeMetrics {
 				send_rate: *self.state.send_rate.lock().unwrap(),
-				bytes_sent: *self.state.bytes_sent.lock().unwrap(),
 			}
+		}
+
+		fn wire(&self) -> Option<crate::transport::Wire> {
+			Some(self.state.wire.clone())
 		}
 
 		fn probe(&self) -> Option<crate::transport::Probe> {
@@ -858,18 +734,13 @@ mod tests {
 		}
 	}
 
-	struct FakeStats {
+	struct FakeMetrics {
 		send_rate: Option<u64>,
-		bytes_sent: Option<u64>,
 	}
 
-	impl crate::transport::Stats for FakeStats {
+	impl crate::transport::Metrics for FakeMetrics {
 		fn estimated_send_rate(&self) -> Option<u64> {
 			self.send_rate
-		}
-
-		fn bytes_sent(&self) -> Option<u64> {
-			self.bytes_sent
 		}
 	}
 
@@ -933,8 +804,8 @@ mod tests {
 		};
 		server
 			.encode(
-				&mut crate::coding::Encoder::new(&mut encoded, (Version::Ietf(ietf::Version::Draft14)).into()),
-				Version::Ietf(ietf::Version::Draft14),
+				&mut crate::coding::Encoder::new(&mut encoded, negotiated.into()),
+				negotiated,
 			)
 			.unwrap();
 
@@ -954,7 +825,6 @@ mod tests {
 				Version::Lite(lite::Version::Lite03),
 				Version::Lite(lite::Version::Lite02),
 				Version::Lite(lite::Version::Lite01),
-				Version::Ietf(ietf::Version::Draft14),
 			]
 			.into(),
 		);
@@ -963,11 +833,11 @@ mod tests {
 		let (_session, driver) = client.connect(moq_clock::now(), fake.clone()).await.unwrap();
 		moq_clock::sim::spawn(crate::time::run(driver));
 
-		// Verify the client setup was encoded using Draft14 framing (ALPN_LITE fallback path).
+		// Verify the client offered every configured moq-lite version over the `moql` SETUP.
 		let mut setup_bytes = Bytes::from(fake.control_writes());
 		let setup = crate::coding::decode_buf(
 			&mut setup_bytes,
-			Version::Ietf(ietf::Version::Draft14),
+			Version::Lite(lite::Version::Lite02),
 			setup::Client::decode,
 		)
 		.unwrap();
@@ -978,7 +848,6 @@ mod tests {
 				Version::Lite(lite::Version::Lite03),
 				Version::Lite(lite::Version::Lite02),
 				Version::Lite(lite::Version::Lite01),
-				Version::Ietf(ietf::Version::Draft14),
 			]
 		);
 
@@ -1020,46 +889,6 @@ mod tests {
 		.await
 		.expect("connect waited on a peer that never announced")
 		.expect("connect failed");
-	}
-
-	/// The client SETUP on the bidi control stream (the pre-draft-17 framing) carries the
-	/// AUTHORITY next to the PATH.
-	#[moq_clock::test]
-	async fn draft14_setup_carries_the_authority_and_token() {
-		let token = setup::Token {
-			kind: setup::Token::OUT_OF_BAND,
-			value: b"connection-credential".to_vec(),
-		};
-		let fake = FakeSession::new(Some(ALPN_LITE), mock_server_setup(Version::Lite(lite::Version::Lite01)));
-		let client = Client::new()
-			.with_versions(
-				[
-					Version::Lite(lite::Version::Lite01),
-					Version::Ietf(ietf::Version::Draft14),
-				]
-				.into(),
-			)
-			.with_url("moqt://relay.example.com:4443/anon".parse().unwrap())
-			.with_token(token.clone());
-
-		let (_session, driver) = client.connect(moq_clock::now(), fake.clone()).await.unwrap();
-		moq_clock::sim::spawn(crate::time::run(driver));
-
-		let (setup, _) =
-			setup::Client::decode_slice(&fake.control_writes(), Version::Ietf(ietf::Version::Draft14)).unwrap();
-		let (parameters, _) = ietf::Parameters::decode_slice(&setup.parameters, ietf::Version::Draft14).unwrap();
-		assert_eq!(
-			parameters.get_bytes(ietf::ParameterBytes::Authority),
-			Some(b"relay.example.com:4443".as_ref())
-		);
-		assert_eq!(
-			parameters.get_bytes(ietf::ParameterBytes::Path),
-			Some(b"/anon".as_ref())
-		);
-		assert_eq!(
-			ietf::token::from_setup(&parameters, ietf::Version::Draft14).unwrap(),
-			Some(token)
-		);
 	}
 
 	fn dialed(url: &str) -> Client {
@@ -1137,12 +966,12 @@ mod tests {
 	}
 
 	#[moq_clock::test]
-	async fn alpn_lite_falls_back_to_draft14_and_switches_version_post_setup() {
+	async fn alpn_lite_falls_back_to_moql_setup_and_switches_version_post_setup() {
 		run_alpn_lite_fallback_case(Some(ALPN_LITE)).await;
 	}
 
 	#[moq_clock::test]
-	async fn no_alpn_falls_back_to_draft14_and_switches_version_post_setup() {
+	async fn no_alpn_falls_back_to_moql_setup_and_switches_version_post_setup() {
 		run_alpn_lite_fallback_case(None).await;
 	}
 
@@ -1212,7 +1041,7 @@ mod tests {
 			let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
 			let client = Client::new()
 				.with_versions(Version::Lite(lite::Version::Lite04).into())
-				.with_stats(registry.tier(Tier::default()).session("root"));
+				.with_stats(registry.tier(Tier::default()).session(crate::Path::from_static("root")));
 			let runtime = crate::time::Deadlines::new(crate::time::Instant::now());
 			let (session, mut driver) = futures::executor::block_on(client.connect(runtime.now(), fake)).unwrap();
 			session.abort(abort);
@@ -1244,7 +1073,7 @@ mod tests {
 		let registry = Registry::new(Default::default());
 		let client = Client::new()
 			.with_versions(Version::Lite(lite::Version::Lite04).into())
-			.with_stats(registry.tier(Tier::default()).session("root"));
+			.with_stats(registry.tier(Tier::default()).session(crate::Path::from_static("root")));
 		let runtime = crate::time::Deadlines::new(crate::time::Instant::now());
 		let mut task = Transport::new(FakeSession::new(Some(ALPN_LITE_04), Vec::new()));
 		let (session, mut driver) =
@@ -1346,7 +1175,7 @@ mod tests {
 	async fn stats_capture_the_final_counters() {
 		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
 		fake.set_send_rate(None);
-		fake.set_bytes_sent(Some(0));
+		fake.set_sent_bytes(0);
 
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
 		let (session, driver) = client.connect(moq_clock::now(), fake.clone()).await.unwrap();
@@ -1356,7 +1185,7 @@ mod tests {
 			"no send-rate estimate, so nothing samples on its own"
 		);
 
-		fake.set_bytes_sent(Some(4242));
+		fake.set_sent_bytes(4242);
 
 		session.abort(Error::Cancel);
 		session.closed().await;
@@ -1423,7 +1252,7 @@ mod tests {
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
 		let (session, driver) = client.connect(moq_clock::now(), fake.clone()).await.unwrap();
 		moq_clock::sim::spawn(crate::time::run(driver));
-		let bandwidth = session.bandwidth();
+		let bandwidth = session.allocator();
 
 		let (_watched_broadcast, watched) = reservable();
 		let _sub = watched.subscribe(None);
@@ -1451,7 +1280,7 @@ mod tests {
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
 		let (session, driver) = client.connect(moq_clock::now(), fake.clone()).await.unwrap();
 		moq_clock::sim::spawn(crate::time::run(driver));
-		let bandwidth = session.bandwidth();
+		let bandwidth = session.allocator();
 
 		let (_broadcast, track) = reservable();
 		let _reserved = bandwidth.reserve(&track.demand(), crate::bandwidth::Rate::from_bps(4_000_000));
@@ -1474,7 +1303,7 @@ mod tests {
 		let bandwidth = crate::bandwidth::Allocator::default();
 		let client = Client::new()
 			.with_versions(Version::Lite(lite::Version::Lite04).into())
-			.with_bandwidth(bandwidth.clone());
+			.with_allocator(bandwidth.clone());
 
 		let (_broadcast, track) = reservable();
 		let reserved = bandwidth.reserve(&track.demand(), crate::bandwidth::Rate::from_bps(4_000_000));

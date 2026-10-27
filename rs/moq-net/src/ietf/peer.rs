@@ -34,7 +34,7 @@ pub(crate) struct Peer {
 	/// publisher's epoch in both directions.
 	pub epoch: bool,
 
-	/// Whether this draft-17+ peer offered DEFLATE-compressed tracks.
+	/// Whether this peer offered DEFLATE-compressed tracks.
 	pub flate: bool,
 }
 

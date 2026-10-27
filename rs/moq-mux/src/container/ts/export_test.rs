@@ -6420,6 +6420,8 @@ struct SiCadenceRig {
 	si_track: moq_net::track::Producer,
 	exporter: Export<crate::catalog::Consumer<tscat::Ext>>,
 	catalog: crate::catalog::Producer<tscat::Ext>,
+	/// Held so the SI track stays routable.
+	_broadcast: moq_net::broadcast::Producer,
 }
 
 async fn si_cadence_rig(pid: u16, table_id: u8, interval: Duration) -> SiCadenceRig {
@@ -6476,6 +6478,7 @@ async fn si_cadence_rig(pid: u16, table_id: u8, interval: Duration) -> SiCadence
 		si_track,
 		exporter,
 		catalog,
+		_broadcast: broadcast,
 	}
 }
 
@@ -9312,7 +9315,7 @@ async fn a_follower_awaits_a_replacement_catalog_past_the_follow() {
 			moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()),
 		)
 		.unwrap();
-	let unanswered = second.dynamic();
+	let unanswered = second.requests();
 	assert!(
 		tokio::time::timeout(follow * 3, follower.next()).await.is_err(),
 		"awaiting the replacement's catalog past the follow"
@@ -9382,7 +9385,7 @@ async fn a_follower_keeps_following_when_a_return_goes_before_it_resolves() {
 	let second = origin
 		.publish("live", moq_net::origin::Route::default().with_epoch(epoch))
 		.unwrap();
-	let unanswered = second.dynamic();
+	let unanswered = second.requests();
 	assert!(
 		tokio::time::timeout(Duration::from_secs(1), follower.next())
 			.await
@@ -9404,7 +9407,7 @@ fn publish_refusing(origin: &moq_net::origin::Producer, epoch: &moq_net::Epoch) 
 	let broadcast = origin
 		.publish("live", moq_net::origin::Route::default().with_epoch(epoch.clone()))
 		.unwrap();
-	let mut dynamic = broadcast.dynamic();
+	let mut dynamic = broadcast.requests();
 	tokio::spawn(async move {
 		let _broadcast = broadcast;
 		while let Ok(request) = dynamic.requested_track().await {
@@ -9498,7 +9501,7 @@ async fn a_follower_stitches_onto_the_next_replacement_when_one_goes_before_it_r
 
 	// Replaced, but the replacement's catalog request is never answered before it goes.
 	let second = origin.publish("live", route()).unwrap();
-	let unanswered = second.dynamic();
+	let unanswered = second.requests();
 	assert!(
 		tokio::time::timeout(Duration::from_secs(1), follower.next())
 			.await
@@ -9560,7 +9563,7 @@ async fn a_follower_keeps_a_return_awaiting_its_catalog_when_a_stitch_goes() {
 			moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()),
 		)
 		.unwrap();
-	let unanswered = third.dynamic();
+	let unanswered = third.requests();
 	assert!(
 		tokio::time::timeout(Duration::from_secs(1), follower.next())
 			.await
@@ -9865,10 +9868,10 @@ async fn a_follower_ignores_a_covering_prefix_while_the_exact_route_serves() {
 	let mut follower = super::Follower::new(open_export(source).await.unwrap()).unwrap();
 	let quiet = Duration::from_secs(1);
 
-	let pool = origin.dynamic("pool").unwrap();
+	let pool = origin.requests("pool").unwrap();
 	assert!(tokio::time::timeout(quiet, follower.next()).await.is_err(), "a start");
 	drop(pool);
-	let pool = origin.dynamic("pool").unwrap();
+	let pool = origin.requests("pool").unwrap();
 	assert!(tokio::time::timeout(quiet, follower.next()).await.is_err(), "a restart");
 	drop(pool);
 	assert!(tokio::time::timeout(quiet, follower.next()).await.is_err(), "an end");
@@ -9931,7 +9934,7 @@ async fn a_midstream_stitch_keeps_the_old_instance_playing_until_it_switches() {
 			moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()),
 		)
 		.unwrap();
-	let _unanswered = second.dynamic();
+	let _unanswered = second.requests();
 	for ms in (0..200).step_by(20) {
 		write_aac(&mut track, ms);
 	}
@@ -9968,7 +9971,7 @@ async fn a_nested_stitch_keeps_awaiting_the_pending_replacement() {
 			moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()),
 		)
 		.unwrap();
-	let unanswered = third.dynamic();
+	let unanswered = third.requests();
 	assert!(
 		tokio::time::timeout(Duration::from_secs(1), follower.next())
 			.await

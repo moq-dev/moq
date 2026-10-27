@@ -80,7 +80,7 @@ export class Producer<T> {
 
 		const group = this.#group;
 		this.#group = undefined;
-		group.close();
+		group.finish();
 	}
 
 	/**
@@ -111,7 +111,7 @@ export class Producer<T> {
 		if (encoded.keyframe) {
 			// The previous group is complete; no more frames will be appended to it. Drop the handle
 			// before opening the next one, so a failure below doesn't leave a closed group behind.
-			this.#group?.close();
+			this.#group?.finish();
 			this.#group = undefined;
 
 			const group = this.#track.appendGroup();
@@ -122,7 +122,7 @@ export class Producer<T> {
 				// The group carries no frames, so close it rather than leaving it open on the track. A
 				// rejected frame doesn't close the track, and a consumer that already advanced into this
 				// group would otherwise block until some later update opened a newer one.
-				group.close();
+				group.finish();
 				throw err;
 			}
 
@@ -131,7 +131,7 @@ export class Producer<T> {
 				this.#group = group;
 			} else {
 				// Deltas disabled: one frame per group, identical to a plain JSON track.
-				group.close();
+				group.finish();
 				this.#group = undefined;
 			}
 			return;
@@ -186,14 +186,19 @@ export class Producer<T> {
 	#close(abort?: Error): void {
 		this.#unwatch?.();
 		this.#unwatch = undefined;
-		this.#group?.close(abort);
+		if (abort) this.#group?.abort(abort);
+		else this.#group?.finish();
 		this.#group = undefined;
 
 		// The open group goes with the track, so the encoder must not keep emitting deltas into it.
 		// Any further update fails on the closed track, but it has to fail as a track error rather
 		// than as a delta with nowhere to put it.
 		this.#encoder.reset();
-		this.#track.close(abort);
+		if (abort) this.#track.abort(abort);
+		else {
+			this.#track.finish();
+			this.#track.close();
+		}
 	}
 }
 

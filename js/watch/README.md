@@ -65,7 +65,7 @@ The simplest way to watch a stream:
 |------------------|----------------------------|---------------|------------------------------------------|
 | `url`            | string                     | required      | Relay server URL                         |
 | `name`           | string                     | required      | Broadcast name/path                      |
-| `versions`       | comma-separated list       | stable versions | Protocol versions to offer, most preferred first, like `moq-transport-14,moq-lite-06` |
+| `versions`       | comma-separated list       | stable versions | Protocol versions to offer, most preferred first, like `moq-transport-18,moq-lite-06` |
 | `paused`         | boolean                    | false         | Pause playback                           |
 | `muted`          | boolean                    | false         | Mute audio without changing volume       |
 | `visible`        | never, distance, or always | `20%`         | When to download video (see below)       |

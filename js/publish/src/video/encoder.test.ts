@@ -116,7 +116,10 @@ test("encoding tracks encoder config in its child effect", async () => {
 	const rendition = {
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
-		close: () => track.close(),
+		close: () => {
+			track.finish();
+			track.close();
+		},
 	};
 	const broadcast = { video: () => rendition, order: new Order() };
 	const capture = {
@@ -154,7 +157,10 @@ test("a demand gap marks a discontinuity and leaves the broadcast-owned track op
 	const rendition = {
 		config: new Signal(undefined),
 		track: live,
-		close: () => track.close(),
+		close: () => {
+			track.finish();
+			track.close();
+		},
 	};
 	const capture = {
 		in: { source: new Signal(undefined) },
@@ -181,11 +187,13 @@ test("a demand gap marks a discontinuity and leaves the broadcast-owned track op
 		expect(track.closed.peek()).toBeUndefined();
 
 		discontinuity.mockClear();
+		track.finish();
 		track.close();
 		encoder.close();
 		expect(discontinuity).not.toHaveBeenCalled();
 	} finally {
 		encoder.close();
+		track.finish();
 		track.close();
 		discontinuity.mockRestore();
 	}
@@ -203,7 +211,10 @@ test("a bandwidth estimate updates the bitrate without blanking the config or re
 	const rendition = {
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
-		close: () => track.close(),
+		close: () => {
+			track.finish();
+			track.close();
+		},
 	};
 	const capture = {
 		in: {
@@ -285,7 +296,10 @@ test("every published config fits a probe for its own codec", async () => {
 	const rendition = {
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
-		close: () => track.close(),
+		close: () => {
+			track.finish();
+			track.close();
+		},
 	};
 	const capture = {
 		in: {
@@ -615,7 +629,10 @@ test("disabling encodes one black keyframe and keeps the rendition with enabled:
 	const rendition = {
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
-		close: () => track.close(),
+		close: () => {
+			track.finish();
+			track.close();
+		},
 	};
 	const source = new Signal<unknown>({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) });
 	const capture = {
@@ -671,6 +688,7 @@ test("disabling encodes one black keyframe and keeps the rendition with enabled:
 	} finally {
 		encoder.close();
 		fanout.close();
+		track.finish();
 		track.close();
 		if (original) Object.defineProperty(globalThis, "VideoEncoder", original);
 		else Reflect.deleteProperty(globalThis, "VideoEncoder");
@@ -778,7 +796,10 @@ test("the probe encodes with the frame rate and bitrate ceiling", async () => {
 	const rendition = {
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
-		close: () => track.close(),
+		close: () => {
+			track.finish();
+			track.close();
+		},
 	};
 	const capture = {
 		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) }) },
@@ -951,7 +972,10 @@ async function recordKeyframes(
 	const rendition = {
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
-		close: () => track.close(),
+		close: () => {
+			track.finish();
+			track.close();
+		},
 	};
 	const capture = {
 		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) } as never) },
@@ -975,6 +999,7 @@ async function recordKeyframes(
 	} finally {
 		encoder.close();
 		fanout.close();
+		track.finish();
 		track.close();
 		if (original) Object.defineProperty(globalThis, "VideoEncoder", original);
 		else Reflect.deleteProperty(globalThis, "VideoEncoder");
@@ -1222,7 +1247,10 @@ test("a shrinking capture resizes in band below the advertised ceiling", async (
 	const rendition = {
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
-		close: () => track.close(),
+		close: () => {
+			track.finish();
+			track.close();
+		},
 	};
 	const capture = {
 		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) } as never) },
@@ -1273,6 +1301,7 @@ test("a shrinking capture resizes in band below the advertised ceiling", async (
 	} finally {
 		encoder.close();
 		fanout.close();
+		track.finish();
 		track.close();
 		if (original) Object.defineProperty(globalThis, "VideoEncoder", original);
 		else Reflect.deleteProperty(globalThis, "VideoEncoder");
@@ -1290,7 +1319,10 @@ test("the catalog bitrate and frame rate only rise", async () => {
 	const rendition = {
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
-		close: () => track.close(),
+		close: () => {
+			track.finish();
+			track.close();
+		},
 	};
 	const capture = {
 		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) }) },

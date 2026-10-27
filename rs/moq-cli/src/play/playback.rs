@@ -17,7 +17,7 @@ pub(super) enum Kind {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct Track {
 	/// Resolved rather than as written, since several references name one broadcast.
-	broadcast: Option<hang::moq_net::PathOwned>,
+	broadcast: Option<hang::moq_net::Path>,
 	name: String,
 }
 

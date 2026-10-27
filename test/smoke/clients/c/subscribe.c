@@ -38,15 +38,14 @@ static void on_state(void *ud, const moq_connection_state *state) {
 static void on_frame(void *ud, int32_t frame) {
     ctx_t *c = (ctx_t *)ud;
     if (frame <= 0) return; // 0 = ended, negative = error
-    moq_frame f;
-    memset(&f, 0, sizeof(f));
-    if (moq_consume_frame((uint32_t)frame, &f) == 0 && f.payload_size > 0) {
+    moq_media_read item = {0};
+    if (moq_consume_read((uint32_t)frame, &item) == 0 && item.kind == MOQ_DECODE_READ_FRAME && item.frame.payload_size > 0) {
         pthread_mutex_lock(&c->mu);
         c->got = 1;
         pthread_cond_signal(&c->cv);
         pthread_mutex_unlock(&c->mu);
     }
-    moq_consume_frame_free((uint32_t)frame);
+    moq_consume_read_free((uint32_t)frame);
 }
 
 // Delivers the broadcast handle once it's announced, then once more with a

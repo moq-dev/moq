@@ -154,6 +154,12 @@ moq --connect https://relay.example.com/anon --broadcast camera.hang \
     import rtsp --connect rtsp://admin:secret@192.168.1.64/stream1
 ```
 
+`--hls` publishes [HLS segment records](/bin/hls#how-export-works) beside each
+video and audio rendition, which `export hls` needs to serve the broadcast.
+Renditions' segments line up wherever the source's keyframes share timestamps.
+The stdin formats, `hls`, `rtsp`, and `capture` take it; the other gateways build their
+own catalog and refuse it.
+
 ## Export
 
 The `fmp4`, `mkv`, `flv`, `h264`, and `h265` exports pick renditions with
@@ -360,7 +366,7 @@ over one connection:
 
 ```bash
 moq --connect https://relay.example.com/anon \
-    import --broadcast event.hang srt --listen 0.0.0.0:9000 \
+    import --broadcast event.hang --hls rtsp --connect rtsp://camera.local/stream1 \
     -- export --broadcast event.hang hls --listen 0.0.0.0:8080 \
     -- export --broadcast event.hang archive file:///recordings
 ```
@@ -375,7 +381,7 @@ rtsp` one per RTSP session, and `import ts --program all` one per program.
 A restarted process takes the name at once: viewers see the broadcast restart,
 and their next subscribe reaches the new run instead of waiting for its group
 numbers to catch up. Epochs cross a connection only on moq-lite 07, which is
-opt-in, and on moq-transport draft 17 and later, and order by the host's clock
+opt-in, and on moq-transport, and order by the host's clock
 there, so a host whose clock runs behind the old run's waits for it to close.
 Other versions carry no epoch, so a restart from another session is the newest
 route at an equal cost, or a better one.
@@ -484,7 +490,7 @@ the break. A stitch waits for the replacement's first catalog snapshot until it
 arrives or the replacement goes, keeping the old publisher playing meanwhile,
 so even the default `--follow 0s` switches to a replacement that is still
 starting. Without `--stitch` the export stays on the old publisher while it is
-up. Only lite-07 and moq-transport draft 17+ sessions carry epochs, so on the
+up. Only lite-07 and moq-transport sessions carry epochs, so on the
 default version every return is a replacement. A failure other than the
 publisher leaving, such as a codec TS cannot carry, exits 1 at once. Only `ts`
 can mark a break, so the other formats refuse `--linger`, the released spelling

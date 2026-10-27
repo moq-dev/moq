@@ -472,18 +472,6 @@ async fn transport_fetch_roundtrip(version: &str) {
 
 #[tracing_test::traced_test]
 #[tokio::test]
-async fn fetch_moq_transport_14() {
-	transport_fetch_roundtrip("moq-transport-14").await;
-}
-
-#[tracing_test::traced_test]
-#[tokio::test]
-async fn fetch_moq_transport_16() {
-	transport_fetch_roundtrip("moq-transport-16").await;
-}
-
-#[tracing_test::traced_test]
-#[tokio::test]
 async fn fetch_moq_transport_18() {
 	transport_fetch_roundtrip("moq-transport-18").await;
 }
@@ -673,13 +661,10 @@ async fn broadcast_moq_lite_05_untimed_track() {
 		.expect("announce timeout")
 		.expect("origin closed");
 	assert!(active, "expected announce");
-	let bc = tokio::time::timeout(
-		TIMEOUT,
-		sub_consumer.request_broadcast(moq_net::Path::new(update.prefix.as_str()), None),
-	)
-	.await
-	.expect("request timed out")
-	.expect("announced broadcast resolves");
+	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast(&update.prefix, None))
+		.await
+		.expect("request timed out")
+		.expect("announced broadcast resolves");
 
 	let mut track_sub = bc
 		.track("video")
@@ -771,13 +756,10 @@ async fn broadcast_moq_transport_22_current_group_join() {
 	let (announced, announced_active) = next_announce(&mut announcements).await;
 	assert_eq!(announced.prefix.as_str(), "test");
 	assert!(announced_active, "expected an announce");
-	let remote = tokio::time::timeout(
-		TIMEOUT,
-		sub_consumer.request_broadcast(moq_net::Path::new(announced.prefix.as_str()), None),
-	)
-	.await
-	.expect("request timed out")
-	.expect("announced broadcast resolves");
+	let remote = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast(&announced.prefix, None))
+		.await
+		.expect("request timed out")
+		.expect("announced broadcast resolves");
 
 	let mut subscriber = tokio::time::timeout(TIMEOUT, async { remote.track("video").unwrap().subscribe(None).await })
 		.await
@@ -1568,30 +1550,6 @@ async fn broadcast_moq_lite_07() {
 
 #[tracing_test::traced_test]
 #[tokio::test]
-async fn broadcast_moq_transport_14() {
-	broadcast_test("moqt", Some("moq-transport-14"), Some("moq-transport-14")).await;
-}
-
-#[tracing_test::traced_test]
-#[tokio::test]
-async fn broadcast_moq_transport_15() {
-	broadcast_test("moqt", Some("moq-transport-15"), Some("moq-transport-15")).await;
-}
-
-#[tracing_test::traced_test]
-#[tokio::test]
-async fn broadcast_moq_transport_16() {
-	broadcast_test("moqt", Some("moq-transport-16"), Some("moq-transport-16")).await;
-}
-
-#[tracing_test::traced_test]
-#[tokio::test]
-async fn broadcast_moq_transport_17() {
-	broadcast_test("moqt", Some("moq-transport-17"), Some("moq-transport-17")).await;
-}
-
-#[tracing_test::traced_test]
-#[tokio::test]
 async fn broadcast_moq_transport_18() {
 	broadcast_test("moqt", Some("moq-transport-18"), Some("moq-transport-18")).await;
 }
@@ -1624,30 +1582,6 @@ async fn broadcast_negotiate_server_all_client_lite_03() {
 
 #[tracing_test::traced_test]
 #[tokio::test]
-async fn broadcast_negotiate_server_all_client_transport_14() {
-	broadcast_test("moqt", Some("moq-transport-14"), None).await;
-}
-
-#[tracing_test::traced_test]
-#[tokio::test]
-async fn broadcast_negotiate_server_all_client_transport_15() {
-	broadcast_test("moqt", Some("moq-transport-15"), None).await;
-}
-
-#[tracing_test::traced_test]
-#[tokio::test]
-async fn broadcast_negotiate_server_all_client_transport_16() {
-	broadcast_test("moqt", Some("moq-transport-16"), None).await;
-}
-
-#[tracing_test::traced_test]
-#[tokio::test]
-async fn broadcast_negotiate_server_all_client_transport_17() {
-	broadcast_test("moqt", Some("moq-transport-17"), None).await;
-}
-
-#[tracing_test::traced_test]
-#[tokio::test]
 async fn broadcast_negotiate_server_all_client_transport_18() {
 	broadcast_test("moqt", Some("moq-transport-18"), None).await;
 }
@@ -1670,30 +1604,6 @@ async fn broadcast_negotiate_client_all_server_lite_02() {
 #[tokio::test]
 async fn broadcast_negotiate_client_all_server_lite_03() {
 	broadcast_test("moqt", None, Some("moq-lite-03")).await;
-}
-
-#[tracing_test::traced_test]
-#[tokio::test]
-async fn broadcast_negotiate_client_all_server_transport_14() {
-	broadcast_test("moqt", None, Some("moq-transport-14")).await;
-}
-
-#[tracing_test::traced_test]
-#[tokio::test]
-async fn broadcast_negotiate_client_all_server_transport_15() {
-	broadcast_test("moqt", None, Some("moq-transport-15")).await;
-}
-
-#[tracing_test::traced_test]
-#[tokio::test]
-async fn broadcast_negotiate_client_all_server_transport_16() {
-	broadcast_test("moqt", None, Some("moq-transport-16")).await;
-}
-
-#[tracing_test::traced_test]
-#[tokio::test]
-async fn broadcast_negotiate_client_all_server_transport_17() {
-	broadcast_test("moqt", None, Some("moq-transport-17")).await;
 }
 
 #[tracing_test::traced_test]
@@ -1784,7 +1694,6 @@ async fn broadcast_max_age() {
 		"moq-lite-05",
 		"moq-lite-06",
 		"moq-lite-07-wip",
-		"moq-transport-17",
 		"moq-transport-18",
 		"moq-transport-22",
 	] {
@@ -1796,12 +1705,7 @@ async fn broadcast_max_age() {
 
 #[tokio::test]
 async fn broadcast_max_age_legacy_omits_property() {
-	for version in [
-		"moq-lite-01",
-		"moq-transport-14",
-		"moq-transport-15",
-		"moq-transport-16",
-	] {
+	for version in ["moq-lite-01"] {
 		assert_eq!(
 			max_age_test(version, Some(Duration::from_secs(30))).await,
 			None,
@@ -1838,30 +1742,6 @@ async fn broadcast_webtransport_moq_lite_03() {
 
 #[tracing_test::traced_test]
 #[tokio::test]
-async fn broadcast_webtransport_moq_transport_14() {
-	broadcast_test("https", Some("moq-transport-14"), Some("moq-transport-14")).await;
-}
-
-#[tracing_test::traced_test]
-#[tokio::test]
-async fn broadcast_webtransport_moq_transport_15() {
-	broadcast_test("https", Some("moq-transport-15"), Some("moq-transport-15")).await;
-}
-
-#[tracing_test::traced_test]
-#[tokio::test]
-async fn broadcast_webtransport_moq_transport_16() {
-	broadcast_test("https", Some("moq-transport-16"), Some("moq-transport-16")).await;
-}
-
-#[tracing_test::traced_test]
-#[tokio::test]
-async fn broadcast_webtransport_moq_transport_17() {
-	broadcast_test("https", Some("moq-transport-17"), Some("moq-transport-17")).await;
-}
-
-#[tracing_test::traced_test]
-#[tokio::test]
 async fn broadcast_webtransport_moq_transport_18() {
 	broadcast_test("https", Some("moq-transport-18"), Some("moq-transport-18")).await;
 }
@@ -1894,30 +1774,6 @@ async fn broadcast_webtransport_negotiate_server_all_client_lite_03() {
 
 #[tracing_test::traced_test]
 #[tokio::test]
-async fn broadcast_webtransport_negotiate_server_all_client_transport_14() {
-	broadcast_test("https", Some("moq-transport-14"), None).await;
-}
-
-#[tracing_test::traced_test]
-#[tokio::test]
-async fn broadcast_webtransport_negotiate_server_all_client_transport_15() {
-	broadcast_test("https", Some("moq-transport-15"), None).await;
-}
-
-#[tracing_test::traced_test]
-#[tokio::test]
-async fn broadcast_webtransport_negotiate_server_all_client_transport_16() {
-	broadcast_test("https", Some("moq-transport-16"), None).await;
-}
-
-#[tracing_test::traced_test]
-#[tokio::test]
-async fn broadcast_webtransport_negotiate_server_all_client_transport_17() {
-	broadcast_test("https", Some("moq-transport-17"), None).await;
-}
-
-#[tracing_test::traced_test]
-#[tokio::test]
 async fn broadcast_webtransport_negotiate_server_all_client_transport_18() {
 	broadcast_test("https", Some("moq-transport-18"), None).await;
 }
@@ -1940,30 +1796,6 @@ async fn broadcast_webtransport_negotiate_client_all_server_lite_02() {
 #[tokio::test]
 async fn broadcast_webtransport_negotiate_client_all_server_lite_03() {
 	broadcast_test("https", None, Some("moq-lite-03")).await;
-}
-
-#[tracing_test::traced_test]
-#[tokio::test]
-async fn broadcast_webtransport_negotiate_client_all_server_transport_14() {
-	broadcast_test("https", None, Some("moq-transport-14")).await;
-}
-
-#[tracing_test::traced_test]
-#[tokio::test]
-async fn broadcast_webtransport_negotiate_client_all_server_transport_15() {
-	broadcast_test("https", None, Some("moq-transport-15")).await;
-}
-
-#[tracing_test::traced_test]
-#[tokio::test]
-async fn broadcast_webtransport_negotiate_client_all_server_transport_16() {
-	broadcast_test("https", None, Some("moq-transport-16")).await;
-}
-
-#[tracing_test::traced_test]
-#[tokio::test]
-async fn broadcast_webtransport_negotiate_client_all_server_transport_17() {
-	broadcast_test("https", None, Some("moq-transport-17")).await;
 }
 
 #[tracing_test::traced_test]
@@ -2371,13 +2203,10 @@ async fn quic_driver_task_inherits_connection_span() {
 		.expect("announce timed out")
 		.expect("origin closed");
 	assert!(active, "expected announce, got retraction");
-	let bc = tokio::time::timeout(
-		TIMEOUT,
-		sub_consumer.request_broadcast(moq_net::Path::new(update.prefix.as_str()), None),
-	)
-	.await
-	.expect("request timed out")
-	.expect("announced broadcast resolves");
+	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast(&update.prefix, None))
+		.await
+		.expect("request timed out")
+		.expect("announced broadcast resolves");
 
 	// Triggers `lite/publisher.rs`'s "subscribed started" log on the server,
 	// from inside the driver task the runtime hands to `tokio::spawn`.
@@ -2597,7 +2426,9 @@ async fn idle_subscription_releases_the_viewer_count() {
 
 	// The publisher counts viewers through a stats context, exactly like the relay.
 	let registry = moq_net::stats::Registry::new(moq_net::stats::Config::new());
-	let stats = registry.tier(moq_net::stats::Tier::default()).session("");
+	let stats = registry
+		.tier(moq_net::stats::Tier::default())
+		.session(moq_net::Path::empty());
 
 	let sub_origin = moq_tokio::origin::spawn();
 	let sub_consumer = sub_origin.consume();
@@ -2628,13 +2459,10 @@ async fn idle_subscription_releases_the_viewer_count() {
 		.expect("announce timeout")
 		.expect("origin closed");
 	assert!(active, "expected announce");
-	let bc = tokio::time::timeout(
-		TIMEOUT,
-		sub_consumer.request_broadcast(moq_net::Path::new(update.prefix.as_str()), None),
-	)
-	.await
-	.expect("request timed out")
-	.expect("announced broadcast resolves");
+	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast(&update.prefix, None))
+		.await
+		.expect("request timed out")
+		.expect("announced broadcast resolves");
 
 	let mut sub = bc.track("video").unwrap().subscribe(None).await.expect("subscribe");
 	let mut g = tokio::time::timeout(TIMEOUT, sub.recv_group())
@@ -3300,7 +3128,7 @@ fn expect_connect_err(result: moq_tokio::Result<(moq_tokio::Client, moq_tokio::C
 /// observes the URI (and the deadline on versions that carry one) and keeps an
 /// existing subscription flowing before leaving.
 ///
-/// Real-QUIC coverage matters beyond the mock: on draft-17+ the GOAWAY rides
+/// Real-QUIC coverage matters beyond the mock: on moq-transport the GOAWAY rides
 /// the SETUP uni streams, where dropping the reader mid-session would emit a
 /// STOP_SENDING a strict peer treats as a protocol violation.
 async fn goaway_test(scheme: &str, version: &str, expect_wire_timeout: bool) {
@@ -3419,7 +3247,7 @@ async fn goaway_test(scheme: &str, version: &str, expect_wire_timeout: bool) {
 		assert_eq!(
 			goaway.timeout(),
 			Some(Duration::from_secs(5)),
-			"draft-17+ carries the deadline"
+			"moq-transport carries the deadline"
 		);
 	} else {
 		assert_eq!(goaway.timeout(), None, "no wire timeout on this version");
@@ -3443,16 +3271,6 @@ async fn goaway_moq_lite_04_quic() {
 #[tokio::test]
 async fn goaway_moq_lite_05_webtransport() {
 	goaway_test("https", "moq-lite-05", false).await;
-}
-
-#[tokio::test]
-async fn goaway_moq_transport_14_quic() {
-	goaway_test("moqt", "moq-transport-14", false).await;
-}
-
-#[tokio::test]
-async fn goaway_moq_transport_17_quic() {
-	goaway_test("moqt", "moq-transport-17", true).await;
 }
 
 #[tokio::test]

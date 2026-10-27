@@ -3,43 +3,23 @@ use bytes::Bytes;
 use super::Version;
 use crate::{
 	Error, Timescale, Timestamp,
-	coding::{Decoder, Encoder, Form},
+	coding::{Decoder, Encoder},
 	model::object::{Properties, Property, Value},
 };
 
-/// Whether `version` serializes property IDs as they are, rather than as deltas.
-fn absolute(version: Version) -> bool {
-	matches!(version, Version::Draft14 | Version::Draft15)
-}
-
-/// Whether lists from drafts `a` and `b` are the same bytes: the same keys and varints.
-pub(crate) fn same_bytes(a: Version, b: Version) -> bool {
-	let form = |version| (absolute(version), Form::from(version));
-	form(a) == form(b)
-}
-
 /// Draft-22 assigns property 0x06 to SUBGROUP_DELIVERY_TIMEOUT.
 pub(crate) fn has_delivery_timeout(version: Version) -> bool {
-	!matches!(
-		version,
-		Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18
-	)
+	!matches!(version, Version::Draft18)
 }
 
-/// Object status: the object does not exist, defined by drafts 14 and 15 only.
-pub(crate) const DOES_NOT_EXIST: u64 = 0x1;
 /// Object status: no object at or past this location in the group exists.
 pub(crate) const END_OF_GROUP: u64 = 0x3;
 /// Object status: no object at or past this location exists (every implemented draft).
 pub(crate) const END_OF_TRACK: u64 = 0x4;
 
-/// Whether `version` defines the Object Status `status`, 0 being Normal.
-pub(crate) fn status_defined(status: u64, version: Version) -> bool {
-	match status {
-		0 | END_OF_GROUP | END_OF_TRACK => true,
-		DOES_NOT_EXIST => matches!(version, Version::Draft14 | Version::Draft15),
-		_ => false,
-	}
+/// Whether the Object Status `status` is defined, 0 being Normal.
+pub(crate) fn status_defined(status: u64) -> bool {
+	matches!(status, 0 | END_OF_GROUP | END_OF_TRACK)
 }
 
 /// Refuse the properties of an object with a frame on a track in `timescale` if they
@@ -52,16 +32,10 @@ pub(crate) fn check_frame(properties: &Properties, timescale: Option<Timescale>)
 	}
 }
 
-/// Only draft-14 lets a status object, such as END_OF_GROUP, carry properties.
+/// Refuse properties on a status object, such as END_OF_GROUP, which may not carry any.
 #[cfg(feature = "async")]
-pub(crate) fn status_has_properties(version: Version) -> bool {
-	version == Version::Draft14
-}
-
-/// Refuse properties on a status object where its draft forbids them.
-#[cfg(feature = "async")]
-pub(super) fn check_status(version: Version, properties: &Properties) -> Result<(), Error> {
-	match status_has_properties(version) || properties.is_empty() {
+pub(super) fn check_status(properties: &Properties) -> Result<(), Error> {
+	match properties.is_empty() {
 		true => Ok(()),
 		false => Err(Error::Session(crate::SessionError::ProtocolViolation)),
 	}
@@ -88,7 +62,7 @@ pub(crate) fn max_block(timescale: Option<Timescale>) -> usize {
 	}
 	// A Timestamp's value is a QUIC varint at most, and its key, a delta of at most 0x10,
 	// only shrinks the key of the property after it.
-	let largest = [Version::Draft14, Version::Draft16, Version::Draft17, Version::Draft18]
+	let largest = [Version::Draft18]
 		.into_iter()
 		.map(|version| {
 			let form = version.into();
@@ -128,10 +102,7 @@ fn list(data: &Bytes, version: Version, immutable: bool, lift: bool) -> Result<L
 	let mut previous = 0u64;
 	while !decoder.is_empty() {
 		let key = decoder.varint()?;
-		let id = match absolute(version) {
-			true => key,
-			false => previous.checked_add(key).ok_or(Error::MalformedTrack)?,
-		};
+		let id = previous.checked_add(key).ok_or(Error::MalformedTrack)?;
 		previous = id;
 		let value = if id % 2 == 0 {
 			let value = decoder.varint()?;
@@ -191,10 +162,7 @@ fn serialize<'a>(values: impl IntoIterator<Item = &'a Property>, version: Versio
 	let mut encoder = Encoder::new(&mut out, version.into());
 	let mut previous = 0;
 	for property in sorted {
-		encoder.varint(match absolute(version) {
-			true => property.id,
-			false => property.id - previous,
-		})?;
+		encoder.varint(property.id - previous)?;
 		previous = property.id;
 		match &property.value {
 			Value::Int(value) => encoder.varint(*value)?,
@@ -317,8 +285,7 @@ fn values(block: &crate::model::object::Block, version: Version) -> Result<Vec<P
 /// Read an object's property list on a track in `timescale`. A timed track's frame holds
 /// the object's time, its mutable Timestamp or else a sealed one, so the block does not.
 ///
-/// The caller applies [`check_frame`] once the object has a frame: a draft-14 status
-/// object, whose list arrives before its status, may fill the whole block.
+/// The caller applies [`check_frame`] once the object has a frame.
 pub(crate) fn read(data: &Bytes, version: Version, timescale: Option<Timescale>) -> Result<Decoded, Error> {
 	decode(data, version, timescale, true)
 }
@@ -408,14 +375,11 @@ pub(crate) fn write(
 		return serialize(&timestamp, version);
 	};
 	let source = source.ok_or(Error::MalformedTrack)?;
-	if block.immutable && !same_bytes(source, version) {
-		return Err(Error::Unsupported);
-	}
 	// Between draft-18 and draft-22, forwarding 0x06 would give it a different meaning.
 	// A mutable one is dropped; a sealed one is refused.
 	let flipped = has_delivery_timeout(source) != has_delivery_timeout(version);
 	// The common case: the block is already what this draft would send.
-	if timestamp.is_none() && !flipped && same_bytes(source, version) {
+	if timestamp.is_none() && !flipped {
 		return Ok(block.bytes.to_vec());
 	}
 	let values = values(block, source)?;
@@ -455,14 +419,7 @@ mod tests {
 
 	#[test]
 	fn key_six_is_opaque_on_every_draft() {
-		for version in [
-			Version::Draft14,
-			Version::Draft15,
-			Version::Draft16,
-			Version::Draft17,
-			Version::Draft18,
-			Version::Draft22,
-		] {
+		for version in [Version::Draft18, Version::Draft22] {
 			for bytes in [
 				Bytes::from_static(&[0x06, 42]),
 				Bytes::from_static(&[0x0b, 2, 0x06, 42]),
@@ -543,16 +500,6 @@ mod tests {
 			.unwrap(),
 			bytes
 		);
-		assert!(matches!(
-			write(
-				&decoded.properties,
-				Some(Version::Draft22),
-				decoded.timestamp,
-				Version::Draft17,
-				milli
-			),
-			Err(Error::Unsupported)
-		));
 		// Its units cannot follow the egress's, or vanish with them, without rewriting the block.
 		for timescale in [Some(Timescale::MICRO), None] {
 			assert!(matches!(
@@ -719,30 +666,18 @@ mod tests {
 	fn a_status_object_keeps_its_timestamp() {
 		let milli = Some(Timescale::MILLI);
 		let list = Bytes::from_static(&[0x10, 7, 0x3e, 1]);
-		let framed = read(&list, Version::Draft14, milli).unwrap();
+		let framed = read(&list, Version::Draft18, milli).unwrap();
 		assert_eq!(framed.timestamp, Some(Timestamp::new(7, Timescale::MILLI).unwrap()));
-		let status = unframed(&list, Version::Draft14, milli).unwrap();
+		let status = unframed(&list, Version::Draft18, milli).unwrap();
 		assert_eq!(
-			write(&status, Some(Version::Draft14), None, Version::Draft14, None).unwrap(),
+			write(&status, Some(Version::Draft18), None, Version::Draft18, None).unwrap(),
 			list.to_vec()
 		);
 
 		// Over the lite hop, only a status block may hold it.
 		let block = status.block.unwrap().bytes;
-		assert!(check(&block, Version::Draft14, milli, false).is_ok());
-		assert!(check(&block, Version::Draft14, milli, true).is_err());
-	}
-
-	/// A draft-14 block crosses the lite hop in ascending order, as ingress sorts it, so
-	/// one whose absolute IDs descend is malformed. Its Immutable Properties may not ascend.
-	#[test]
-	fn a_draft14_block_ascends() {
-		let milli = Some(Timescale::MILLI);
-		assert!(check(&Bytes::from_static(&[0x02, 1, 0x20, 1]), Version::Draft14, milli, true).is_ok());
-		assert!(check(&Bytes::from_static(&[0x02, 1, 0x02, 2]), Version::Draft14, milli, true).is_ok());
-		assert!(check(&Bytes::from_static(&[0x20, 1, 0x02, 1]), Version::Draft14, milli, true).is_err());
-		let sealed = Bytes::from_static(&[0x02, 1, 0x0b, 4, 0x20, 1, 0x02, 1]);
-		assert!(check(&sealed, Version::Draft14, milli, true).is_ok());
+		assert!(check(&block, Version::Draft18, milli, false).is_ok());
+		assert!(check(&block, Version::Draft18, milli, true).is_err());
 	}
 
 	/// Draft-22 assigns 0x06 to SUBGROUP_DELIVERY_TIMEOUT, so it cannot cross that boundary.
@@ -835,7 +770,7 @@ mod tests {
 		for bytes in [&[0x0b, 2, 0x0b, 0][..], &[0x0b, 0, 0, 0][..], &[0x0b, 1, 2][..]] {
 			assert!(read(&Bytes::copy_from_slice(bytes), Version::Draft22, None).is_err());
 		}
-		// Draft-18 permits this nonminimal seven-byte value; draft-17 cannot read it.
+		// Draft-18 permits this nonminimal seven-byte value.
 		let bytes = Bytes::from_static(&[0x0b, 8, 2, 0xfc, 0, 0, 0, 0, 0, 1]);
 		let decoded = read(&bytes, Version::Draft18, None).unwrap();
 		assert_eq!(
@@ -849,17 +784,6 @@ mod tests {
 			.unwrap(),
 			bytes
 		);
-		assert!(read(&bytes, Version::Draft17, None).is_err());
-		assert!(matches!(
-			write(
-				&decoded.properties,
-				Some(Version::Draft18),
-				decoded.timestamp,
-				Version::Draft17,
-				None
-			),
-			Err(Error::Unsupported)
-		));
 	}
 }
 
@@ -892,7 +816,7 @@ mod compression_tests {
 	}
 	#[test]
 	fn sizes_are_known_and_unknown_properties_survive() {
-		for version in [Version::Draft17, Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft22] {
 			let unknown = property(0x8800, 7);
 			let wire = compression(serialize([&unknown], version).unwrap(), version, Some(123)).unwrap();
 			let decoded = read(&wire.into(), version, None).unwrap();
@@ -905,7 +829,7 @@ mod compression_tests {
 	}
 	#[test]
 	fn a_status_cannot_declare_an_inflated_size() {
-		for version in [Version::Draft17, Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft22] {
 			let size = property(super::super::flate::INFLATED, 0);
 			for value in [
 				size.clone(),
@@ -925,7 +849,7 @@ mod compression_tests {
 
 	#[test]
 	fn sealed_sizes_are_forwarded_or_refused_without_rewriting() {
-		for version in [Version::Draft17, Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft22] {
 			let sealed = Property {
 				id: 0x0b,
 				value: Value::Bytes(

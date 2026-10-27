@@ -15,7 +15,7 @@ skip in `run_finishes` and its README note.
 Observed on 2026-10-22 with `just test interop --finish --all --versions ietf`
 (lite passes 45/45):
 
-- Drafts 14 to 18: late readers see the finished catalog end empty, a short
+- Draft 18: late readers see the finished catalog end empty, a short
   tail, or a refused joining FETCH (`publish done: internal error`). This is
   the pre-draft-22 join after a finish, which
   [join after a quick finish](/quest/m2/ietf-join-after-finish.md) fixes; rerun
@@ -33,4 +33,4 @@ its draft.
 
 ## Required
 
-- [Join after a quick finish](/quest/m2/ietf-join-after-finish.md) - the pre-draft-22 half of this, without which drafts 14 to 18 cannot pass
+- [Join after a quick finish](/quest/m2/ietf-join-after-finish.md) - the pre-draft-22 half of this, without which draft 18 cannot pass

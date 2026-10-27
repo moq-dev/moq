@@ -410,7 +410,10 @@ meta.run((effect) => {
 		timescale: Net.Time.Timescale.MILLI,
 		maxAge: Milli(86_400_000),
 	});
-	effect.cleanup(() => track.close());
+	effect.cleanup(() => {
+		track.finish();
+		track.close();
+	});
 
 	const producer = new Json.Snapshot.Producer<unknown>({ track });
 	producer.update({ value: currentMeta, at: Net.Time.Timestamp.now() });

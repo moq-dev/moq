@@ -8,8 +8,8 @@
 /// gone.
 ///
 /// Declared per track rather than by raising that default, so the tracks that do NOT index history
-/// keep the cheap default: the catalog is snapshot mode and the timeline is a single never-rolled
-/// group, and in both the useful value is the live edge, which is retained unconditionally.
+/// keep the cheap default: the catalog is snapshot mode and an HLS record track restates its window
+/// in each new group, so in both the useful value is the live edge, which is retained unconditionally.
 pub const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
 
 mod frame;

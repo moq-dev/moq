@@ -5,6 +5,14 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
+
+A session dialed at a URL path with a trailing or doubled `/`, such as `/room/` or `/room//cam`, is refused as a bad request instead of collapsed; dial `/room`. An auth grant whose `root`, `mounts`, `tier`, or `label` has one is refused as forbidden, and `stats.prefix`, `stats.node`, and `--cluster-tier` with one refuse to start.
+
+### `moq_net::Path` has no lifetime
+
+`auth` token fields that were `PathOwned` are `moq_net::Path`. `auth::Token::new` and `auth::Lease::new` return `Result`, refusing a grant whose root, mount, tier, or label is longer than `moq_net::Path::MAX_BYTES`. See moq-net's migration for the rest.
+
 ### Tiers are metric-safe names (#6778)
 
 `--cluster-tier` and the auth server's grant and refusal `tier` must be `/`-joined segments of ASCII letters, digits, `.`, `_`, and `-`.

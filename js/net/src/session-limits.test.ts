@@ -79,7 +79,7 @@ test.each(["lite", "ietf"] as const)("%s closes on the first advertisement beyon
 						version: IetfVersion.DRAFT_22,
 						client: false,
 						nextRequestId: async () => 0n,
-						spendRequest: () => {},
+						checkRequestId: () => {},
 						openBi: async () => new Stream({ version, readable, writable }),
 						acceptBi: async () => undefined,
 						close: () => pair.server.close(),

@@ -167,6 +167,7 @@ test("subscriber demand hands the producer to the rendition and clears it when t
 
 	// Closing the producer (encoder error / teardown) clears the signal, with no lingering per-subscription
 	// effect watching it.
+	track?.finish();
 	track?.close();
 	await settle();
 	expect(rendition.track.peek()).toBeUndefined();
@@ -281,7 +282,7 @@ test("a rendition keeps its track across rendition changes", async () => {
 	await settle();
 	const track = video.track.peek();
 	if (!track) throw new Error("expected the demanded track");
-	track.appendGroup().close();
+	track.appendGroup().finish();
 
 	// Registering another rendition leaves this one's track alone.
 	const audio = broadcast.audio("audio");
@@ -340,8 +341,8 @@ test("replacing a closed rendition track keeps the broadcast and publishes a fre
 	if (!track) throw new Error("expected the demanded track");
 
 	// The encoder wrote, then failed.
-	track.appendGroup().close();
-	track.close(new Error("encoder failed"));
+	track.appendGroup().finish();
+	track.abort(new Error("encoder failed"));
 	video.close();
 	await settle();
 
@@ -437,7 +438,7 @@ test("registering a sibling after an encoder failure keeps the network broadcast
 		await settle();
 		const track = video.track.peek();
 		if (!track) throw new Error("expected demanded video track");
-		track.close(new Error("encoder failed"));
+		track.abort(new Error("encoder failed"));
 		await settle();
 		broadcast.audio("audio/new").config.set(audioConfig);
 		await settle();
@@ -477,7 +478,7 @@ test("a served decoder identity change moves the rendition to a fresh track name
 		await settle();
 		const track = video.track.peek();
 		if (!track) throw new Error("expected the demanded track");
-		track.appendGroup().close();
+		track.appendGroup().finish();
 
 		// Bitrate, frame rate, and coded size move either way on the served track.
 		for (const update of [
@@ -604,7 +605,7 @@ test("a replacement track name is never reused, even one never served", async ()
 	const fail = async (name: string) => {
 		const sub = net.track(name).subscribe();
 		await settle();
-		video.track.peek()?.close(new Error("encoder failed"));
+		video.track.peek()?.abort(new Error("encoder failed"));
 		video.close();
 		await settle();
 		sub.close();
