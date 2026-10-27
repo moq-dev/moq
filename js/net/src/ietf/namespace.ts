@@ -22,9 +22,18 @@ function toTuple(namespace: Path.Valid): string[] {
 	return parts;
 }
 
-/** Convert IETF namespace tuple fields into the escaped moq-net path representation. */
+/**
+ * Convert IETF namespace tuple fields into the escaped moq-net path representation.
+ *
+ * Throws when a field ends in `/`, which escapes to a path with an empty segment.
+ */
 export function fromTuple(parts: string[]): Path.Valid {
-	return parts.map((part) => part.replaceAll("\\", "\\\\").replaceAll("/", "\\/")).join("/") as Path.Valid;
+	const escaped = parts.map((part) => part.replaceAll("\\", "\\\\").replaceAll("/", "\\/")).join("/");
+	try {
+		return Path.from(escaped);
+	} catch (cause) {
+		throw new ProtocolViolation("namespace field escapes to an empty path segment", { cause });
+	}
 }
 
 /** Encode a moq-net namespace as an IETF namespace tuple. */

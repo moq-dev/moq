@@ -7,7 +7,7 @@
 ///
 /// `root` is the room prefix, `subscribe` is `**` (everything under the room),
 /// and `publish` is `<identity>/**` so a participant cannot publish at anyone
-/// else's paths. An identity that is empty after normalization or contains `*` is
+/// else's paths. An identity that is empty or contains `*` is
 /// refused, since a wildcard would let the participant publish as someone else, and
 /// so is a room or identity longer than [`moq_net::Path::MAX_BYTES`].
 pub fn claims(
@@ -36,9 +36,7 @@ mod tests {
 
 	#[test]
 	fn rejects_empty_identity() {
-		for identity in ["", "/", "///"] {
-			assert!(matches!(claims("room", identity), Err(crate::Error::EmptyIdentity)));
-		}
+		assert!(matches!(claims("room", ""), Err(crate::Error::EmptyIdentity)));
 	}
 
 	#[test]
@@ -57,11 +55,6 @@ mod tests {
 		assert_eq!(c.root, "meet/demo");
 		assert_eq!(c.subscribe, patterns(&["**"]));
 		assert_eq!(c.publish, patterns(&["alice/**"]));
-	}
-
-	#[test]
-	fn claims_does_not_double_a_trailing_slash() {
-		assert_eq!(claims("meet/demo", "alice/").unwrap().publish, patterns(&["alice/**"]));
 	}
 
 	#[test]

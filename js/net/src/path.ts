@@ -4,26 +4,24 @@
  * This module provides path-aware operations that respect delimiter boundaries,
  * preventing issues like "foo" matching "foobar".
  *
- * Paths are automatically trimmed of leading and trailing slashes on creation,
- * making all slashes implicit at boundaries. A path names a point in the origin's
- * tree from its root; a leading slash never escapes that root. The same type names
- * an exact broadcast and the prefix a route or announcement covers, so a broadcast's
- * own path is the prefix it announces. See {@link Relative} for `..`-style references.
+ * A path is a run of non-empty segments separated by `/`, so it has exactly one spelling:
+ * {@link from} throws on a leading, trailing, or doubled slash rather than collapsing it.
+ * The empty path is the root, which prefixes every path; a prefix needs no trailing slash.
+ * A path names a point in the origin's tree from its root. The same type names an exact
+ * broadcast and the prefix a route or announcement covers, so a broadcast's own path is
+ * the prefix it announces. See {@link Relative} for `..`-style references.
  *
  * {@link Pattern} and {@link Patterns} are re-exported from `@moq/pattern`, the owner of
- * the v1 grammar and algebra. Literal path construction and wire decoding retain
- * their existing behavior.
+ * the v1 grammar and algebra.
  *
  * @example
  * ```typescript
- * // Creation automatically trims slashes
- * const path1 = Path.from("/foo/bar/");
- * const path2 = Path.from("foo/bar");
- * console.log(path1 === path2); // true
+ * // Multiple arguments are joined with "/", and an empty one is the root
+ * const path = Path.from("api", "", "v1/users");
+ * console.log(path); // "api/v1/users"
  *
- * // Multiple arguments are joined with "/"
- * const path3 = Path.from("api", "v1", "users");
- * console.log(path3); // "api/v1/users"
+ * // A slash at a boundary or a doubled one is an empty segment
+ * Path.from("/api/v1"); // throws
  *
  * // Safe prefix matching
  * const base = Path.from("api/v1");
@@ -36,7 +34,7 @@
  * @module
  */
 
-/** A normalized broadcast path. */
+/** A broadcast path: non-empty segments separated by `/`, or the empty root. */
 export type Valid = string & { __brand: "Name" };
 
 /**
@@ -61,11 +59,18 @@ export const MAX_BYTES = 16384;
 
 const utf8 = new TextEncoder();
 
-/** Build a path from one or more components, joining with "/" and trimming redundant slashes. */
+/**
+ * Build a path by joining components with "/", where an empty component is the root.
+ *
+ * Throws when a component has a leading, trailing, or doubled `/`.
+ */
 export function from(...paths: string[]): Valid {
-	// Join paths with "/" and then remove leading and trailing slashes, and collapse multiple slashes into one.
-	const joined = paths.join("/");
-	return joined.replace(/\/+/g, "/").replace(/^\/+/, "").replace(/\/+$/, "") as Valid;
+	for (const path of paths) {
+		if (path.startsWith("/") || path.endsWith("/") || path.includes("//")) {
+			throw new Error("path contains an empty segment");
+		}
+	}
+	return paths.filter((path) => path !== "").join("/") as Valid;
 }
 
 /** Split a path into its slash-separated parts. The empty path has no parts. */
@@ -76,16 +81,10 @@ export function parts(path: Valid): string[] {
 /**
  * Validate an untrusted wire string as a path, enforcing {@link MAX_PARTS} and {@link MAX_BYTES}.
  *
- * Throws when the path is too deep or too long; use at wire decode sites.
+ * Throws when the path has an empty segment or is too deep or too long; use at wire decode sites.
  */
 export function decode(raw: string): Valid {
-	// Measured before normalization, so redundant slashes can't smuggle a longer string.
-	// A UTF-16 unit is at least one UTF-8 byte, so a long string fails without encoding it.
-	if (raw.length > MAX_BYTES || utf8.encode(raw).length > MAX_BYTES) {
-		throw new Error(`path is longer than ${MAX_BYTES} bytes`);
-	}
-	const path = from(raw);
-	return encode(path);
+	return encode(from(raw));
 }
 
 /**
@@ -127,7 +126,6 @@ export function check(path: Valid): string | undefined {
  * ```typescript
  * const path = Path.from("foo/bar");
  * console.log(Path.hasPrefix(Path.from("foo"), path)); // true
- * console.log(Path.hasPrefix(Path.from("foo/"), path)); // true (trailing slash ignored)
  * console.log(Path.hasPrefix(Path.from("fo"), path)); // false
  *
  * const path2 = Path.from("foobar");
@@ -162,9 +160,6 @@ export function hasPrefix(prefix: Valid, path: Valid): boolean {
  * const path = Path.from("foo/bar/baz");
  * const suffix = Path.stripPrefix(Path.from("foo"), path);
  * console.log(suffix); // "bar/baz"
- *
- * const suffix2 = Path.stripPrefix(Path.from("foo/"), path);
- * console.log(suffix2); // "bar/baz"
  *
  * const noMatch = Path.stripPrefix(Path.from("notfound"), path);
  * console.log(noMatch); // null
@@ -205,7 +200,7 @@ export function join(path: Valid, other: Valid): Valid {
 	} else if (other === "") {
 		return path;
 	} else {
-		// Since paths are trimmed, we always need to add a slash
+		// Neither side has a boundary slash, so exactly one joins them
 		return `${path}/${other}` as Valid;
 	}
 }

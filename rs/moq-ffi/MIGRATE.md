@@ -5,6 +5,10 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
+
+Every method taking a path, such as `MoqOriginProducer::create_broadcast` and `MoqOriginConsumer::request_broadcast`, returns an error for a path with a leading, trailing, or doubled `/` instead of collapsing it. Pass the canonical path, such as `room/cam`.
+
 ### Request handlers are `requests()` ([#6752](https://github.com/moq-dev/moq/pull/6752))
 
 Rename `dynamic()` on `MoqOriginProducer`, `MoqBroadcastProducer`, `MoqTrackProducer`, and `MoqTrackRequest` to `requests()`.

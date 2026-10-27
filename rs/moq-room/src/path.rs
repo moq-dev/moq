@@ -4,7 +4,7 @@
 //! `alice/camera`, `alice/camera.hang`, and `guest/uuid/screen` are all valid.
 //! A `.hang` suffix on the kind is optional and equivalent.
 
-use moq_net::{Path, path::TooLong};
+use moq_net::{Path, path::Invalid};
 
 /// The two broadcasts each participant may publish.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -60,7 +60,7 @@ pub fn parse(path: impl Into<Path>) -> Option<Parsed> {
 }
 
 /// The broadcast path a participant publishes for `kind`, failing if it is too long.
-pub fn broadcast_path(identity: impl Into<Path>, kind: Kind) -> Result<Path, TooLong> {
+pub fn broadcast_path(identity: impl Into<Path>, kind: Kind) -> Result<Path, Invalid> {
 	let identity: Path = identity.into();
 	identity.join(&Path::new(&format!("{}.hang", kind.as_str()))?)
 }

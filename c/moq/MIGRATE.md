@@ -6,6 +6,10 @@ How to update your code for each breaking change, newest first.
 
 The hand-written crate never published as moq-c: a libmoq 0.6 user applies these entries before moving to the generated API.
 
+### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
+
+`moq_origin_create_broadcast`, `moq_origin_requests`, `moq_origin_announced_broadcast`, and `moq_origin_request` return an error for a path with a leading, trailing, or doubled `/` instead of collapsing it. Pass the canonical path, such as `room/cam`. The generated API refuses the same paths.
+
 ### Session allocator ([#6751](https://github.com/moq-dev/moq/pull/6751))
 
 `moq_session_bandwidth` is `moq_session_allocator`, `moq_bandwidth_reserve` is `moq_allocator_reserve`, and `moq_bandwidth_close` is `moq_allocator_close`, matching `moq_net::bandwidth::Allocator`. `moq_reservation_grant` is `moq_reservation_rate`, matching `moq_net::bandwidth::Reservation::rate()`. Signatures are unchanged. The receive estimate keeps its names (`moq_session_recv_bandwidth`, `moq_bandwidth_consumer_*`).

@@ -172,10 +172,9 @@ impl Producer {
 			depth,
 			linger,
 		} = config;
-		// An empty path after normalization is indistinguishable from "no node
-		// set"; collapse it so downstream code only sees a single representation.
-		// We do this here (not in `with_node`) so a directly-assigned
-		// `config.node` is normalized too.
+		// An empty node is indistinguishable from "no node set"; collapse it so
+		// downstream code only sees a single representation. We do this here
+		// (not in `with_node`) so a directly-assigned `config.node` is covered too.
 		let node = node.filter(|p| !p.is_empty());
 
 		let Some(origin) = origin else {
@@ -863,8 +862,8 @@ fn group_info() -> track::Info {
 }
 
 impl GroupTrack {
-	fn create(broadcast: &broadcast::Producer, group: &str) -> Result<Self, moq_net::Error> {
-		let name = crate::group_track(Path::new(group)?);
+	fn create(broadcast: &broadcast::Producer, group: &Path) -> Result<Self, moq_net::Error> {
+		let name = crate::group_track(group);
 		let track = broadcast.create_track(name.as_str(), group_info())?;
 		Ok(Self {
 			name,
@@ -990,7 +989,7 @@ impl NodePublisher {
 	/// Announce the node's broadcast with its totals track and, at depth 0, the
 	/// one group's track, which both live for the producer's life.
 	fn create(task: &Task) -> Option<Self> {
-		let advertised = advertised_path(&task.prefix, task.node.as_ref().map(Path::as_str))
+		let advertised = advertised_path(&task.prefix, task.node.as_ref())
 			.inspect_err(|err| tracing::warn!(%err, "stats: node path too long"))
 			.ok()?;
 		// A fresh epoch per announcement: a restart is a new broadcast, so no relay
@@ -1019,7 +1018,7 @@ impl NodePublisher {
 
 		let mut groups = HashMap::new();
 		if task.depth == 0 {
-			match GroupTrack::create(&broadcast, "") {
+			match GroupTrack::create(&broadcast, &Path::empty()) {
 				Ok(track) => {
 					groups.insert(String::new(), track);
 				}
@@ -1102,14 +1101,14 @@ impl NodePublisher {
 			slots.seen = tick;
 			let publisher = slots.publisher.observe(entry.publisher);
 			let subscriber = slots.subscriber.observe(entry.subscriber);
-			let key = group_key(entry.path.as_str(), depth);
-			if let Some(track) = Self::group(broadcast, groups, key) {
+			let key = group_key(&entry.path, depth);
+			if let Some(track) = Self::group(broadcast, groups, &key) {
 				track.add_traffic(entry, publisher, subscriber);
 			}
 		}
 		for entry in &report.sessions {
-			let key = group_key(entry.label.as_str(), depth);
-			if let Some(track) = Self::group(broadcast, groups, key) {
+			let key = group_key(&entry.label, depth);
+			if let Some(track) = Self::group(broadcast, groups, &key) {
 				track.add_sessions(&entry.label, &entry.tier, entry.presence, entry.closed);
 			}
 		}
@@ -1119,20 +1118,20 @@ impl NodePublisher {
 	fn group<'a>(
 		broadcast: &broadcast::Producer,
 		groups: &'a mut HashMap<String, GroupTrack>,
-		key: &str,
+		key: &Path,
 	) -> Option<&'a mut GroupTrack> {
-		if !groups.contains_key(key) {
+		if !groups.contains_key(key.as_str()) {
 			match GroupTrack::create(broadcast, key) {
 				Ok(track) => {
 					groups.insert(key.to_string(), track);
 				}
 				Err(err) => {
-					tracing::warn!(?err, group = key, "stats: failed to create group track");
+					tracing::warn!(?err, group = %key, "stats: failed to create group track");
 					return None;
 				}
 			}
 		}
-		groups.get_mut(key)
+		groups.get_mut(key.as_str())
 	}
 
 	/// End group tracks that lingered empty, publish the pending frames, then
@@ -1340,27 +1339,19 @@ struct SideSlots {
 }
 
 /// The leading `depth` segments of `path`, the group it publishes under.
-fn group_key(path: &str, depth: usize) -> &str {
-	if depth == 0 {
-		return "";
-	}
-	match path.match_indices('/').nth(depth - 1) {
-		Some((end, _)) => &path[..end],
-		None => path,
-	}
+fn group_key(path: &Path, depth: usize) -> Path {
+	path.head(depth).unwrap_or_else(|| path.clone())
 }
 
 /// `<prefix>/node/<node>`, or `<prefix>/node` without a node. The fixed `node`
 /// category leaves room for sibling categories (e.g. `<prefix>/cluster` for
 /// relay-mesh stats) under the same prefix.
-fn advertised_path(prefix: &Path, node: Option<&str>) -> Result<Path, moq_net::path::TooLong> {
-	let mut out = prefix.as_str().to_string();
-	out.push_str("/node");
-	if let Some(node) = node {
-		out.push('/');
-		out.push_str(node);
+fn advertised_path(prefix: &Path, node: Option<&Path>) -> Result<Path, moq_net::path::Invalid> {
+	let path = prefix.join(&Path::from_static("node"))?;
+	match node {
+		Some(node) => path.join(node),
+		None => Ok(path),
 	}
-	Path::new(&out)
 }
 
 #[cfg(test)]
@@ -1864,15 +1855,15 @@ mod tests {
 		group.read_frame().now_or_never()?.expect("ok")
 	}
 
-	/// The advertised path normalizes a messy node suffix and drops an
-	/// all-empty one. Observed through the announced path, since the task
-	/// announces at construction.
+	/// The advertised path appends a multi-segment node and drops an empty
+	/// one. Observed through the announced path, since the task announces at
+	/// construction.
 	#[tokio::test(start_paused = true)]
-	async fn new_normalizes_and_drops_empty_node() {
-		let (_producer, origin) = test_producer(Some("/sjc//1/"));
+	async fn new_drops_empty_node() {
+		let (_producer, origin) = test_producer(Some("sjc/1"));
 		assert_eq!(announced(&origin).await.0, ".stats/node/sjc/1");
 
-		let (_producer, origin) = test_producer(Some("///"));
+		let (_producer, origin) = test_producer(Some(""));
 		assert_eq!(announced(&origin).await.0, ".stats/node");
 	}
 
@@ -2760,16 +2751,20 @@ mod tests {
 	fn advertised_path_with_and_without_node() {
 		let prefix = Path::from_static(".stats");
 		assert_eq!(
-			advertised_path(&prefix, Some("sjc")).unwrap().as_str(),
+			advertised_path(&prefix, Some(&Path::from_static("sjc")))
+				.unwrap()
+				.as_str(),
 			".stats/node/sjc"
 		);
 		assert_eq!(
-			advertised_path(&prefix, Some("sjc/1")).unwrap().as_str(),
+			advertised_path(&prefix, Some(&Path::from_static("sjc/1")))
+				.unwrap()
+				.as_str(),
 			".stats/node/sjc/1"
 		);
 		assert_eq!(advertised_path(&prefix, None).unwrap().as_str(), ".stats/node");
 		assert_eq!(
-			advertised_path(&Path::from_static("metrics"), Some("lon"))
+			advertised_path(&Path::from_static("metrics"), Some(&Path::from_static("lon")))
 				.unwrap()
 				.as_str(),
 			"metrics/node/lon"
@@ -2778,10 +2773,11 @@ mod tests {
 
 	#[test]
 	fn group_key_uses_leading_segments() {
-		assert_eq!(group_key("acme/room/cam", 0), "");
-		assert_eq!(group_key("acme/room/cam", 1), "acme");
-		assert_eq!(group_key("acme/room/cam", 2), "acme/room");
-		assert_eq!(group_key("acme/room", 3), "acme/room");
+		let key = |path, depth| group_key(&Path::from_static(path), depth);
+		assert_eq!(key("acme/room/cam", 0), Path::empty());
+		assert_eq!(key("acme/room/cam", 1), Path::from_static("acme"));
+		assert_eq!(key("acme/room/cam", 2), Path::from_static("acme/room"));
+		assert_eq!(key("acme/room", 3), Path::from_static("acme/room"));
 	}
 
 	/// A name no tier could produce is still rejected.

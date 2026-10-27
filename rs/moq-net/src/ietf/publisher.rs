@@ -9251,7 +9251,11 @@ mod serve_tests {
 			let mut buf = Decoder::new(&wire, version.into());
 			assert_eq!(buf.varint().unwrap(), ietf::RequestError::ID, "{version}");
 			let code = ietf::RequestError::decode(&mut buf, version).unwrap().error_code;
-			let expected = request::to_code(&Error::from(crate::path::TooLong), request::Kind::Subscribe, version);
+			let expected = request::to_code(
+				&Error::from(crate::path::Invalid::TooLong),
+				request::Kind::Subscribe,
+				version,
+			);
 			assert_eq!(code, expected, "{version}");
 			assert!(h.log.closes().is_empty(), "{version}");
 		}

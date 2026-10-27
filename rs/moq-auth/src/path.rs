@@ -3,8 +3,9 @@
 //! A token's root and a connection's path are literal paths, so overlapping them is
 //! prefix arithmetic; everything beneath is a pattern from `moq-pattern`, re-exported
 //! from this crate so a token minting service does not pull in the wire stack. The
-//! normalization and boundary rules must stay identical to `moq_net::Path`, which the
-//! relay applies to the same strings.
+//! boundary rules must stay identical to `moq_net::Path`, which the relay applies to
+//! the same strings. `moq_net::Path` refuses the empty segments [`normalize`] drops, so
+//! a string spelled with one is refused there rather than read as another path.
 //!
 //! Every function below assumes its arguments are already [`normalize`]d.
 

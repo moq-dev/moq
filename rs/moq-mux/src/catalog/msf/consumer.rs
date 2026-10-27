@@ -130,10 +130,6 @@ pub(crate) fn from_msf<E: CatalogExt>(msf: &moq_msf::Catalog<E>, base: &moq_net:
 					namespace: namespace.clone(),
 				};
 				let target = moq_net::Path::new(namespace).map_err(|_| unresolvable())?;
-				// An MSF namespace names content; normalizing it must not select another namespace.
-				if target.as_str() != namespace {
-					return Err(unresolvable());
-				}
 				if super::names_catalog(&target, base) {
 					return Ok(None);
 				}
