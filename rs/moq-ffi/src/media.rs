@@ -187,8 +187,8 @@ pub struct MoqAudio {
 /// A payload and the time it should be presented.
 ///
 /// The unit of both writing and raw reading: every producer write takes one of these, and a
-/// raw (non-media) read returns one. Media reads return a [`MoqMediaFrame`] instead, which
-/// adds the codec-derived keyframe flag.
+/// raw (non-media) read returns one. Media reads carry a [`MoqMediaFrame`] in their frame
+/// variant, which adds the codec-derived keyframe flag.
 #[derive(Clone, uniffi::Record)]
 pub struct MoqFrame {
 	/// The frame payload.
@@ -1322,10 +1322,12 @@ fn media_frame(mut frame: moq_mux::container::Frame) -> Result<MoqMediaFrame, Mo
 	})
 }
 
-fn media_container(container: MoqContainer) -> Result<moq_mux::catalog::hang::Container, MoqError> {
+fn media_container(
+	container: MoqContainer,
+	kind: moq_mux::container::Kind,
+) -> Result<moq_mux::catalog::hang::Container, MoqError> {
 	let container: hang::catalog::Container = container.into();
-	// This byte-oriented API has no media-kind configuration.
-	moq_mux::catalog::hang::Container::new(&container, moq_mux::container::Kind::Data).map_err(|e| MoqError::Codec {
+	moq_mux::catalog::hang::Container::new(&container, kind).map_err(|e| MoqError::Codec {
 		reason: format!("invalid container: {e}"),
 	})
 }
@@ -1425,15 +1427,31 @@ mod read_tests {
 			.create_track("encoded", hang::container::track_info(0))
 			.unwrap();
 		let format = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio);
-		let reader = Media {
-			inner: moq_mux::container::Consumer::new(
-				track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::ZERO)),
-				format(),
-			),
-		};
-		let reader = MoqMediaTrackConsumer {
-			task: Task::new(reader),
-		};
+		let reader = MoqMediaTrackConsumer::subscribe(
+			&MoqBroadcastConsumer::new(broadcast.consume()),
+			MoqMediaTrackConfig {
+				rendition: MoqRendition::Audio {
+					id: "encoded".into(),
+					config: MoqAudio {
+						label: None,
+						broadcast: None,
+						epoch: None,
+						track: None,
+						codec: "opus".into(),
+						description: None,
+						sample_rate: 48_000,
+						channel_count: 2,
+						bitrate: None,
+						enabled: true,
+						container: MoqContainer::Legacy,
+						jitter: None,
+					},
+				},
+				subscription: None,
+			},
+		)
+		.await
+		.unwrap();
 		let timestamp = |us| moq_net::Timestamp::from_micros(us).unwrap();
 		let mut first = track.create_group(0u64.into()).unwrap();
 		format()
@@ -1621,10 +1639,14 @@ impl MoqMediaTrackConsumer {
 			rendition,
 			subscription,
 		} = config;
+		let kind = match &rendition {
+			MoqRendition::Audio { .. } => moq_mux::container::Kind::Audio,
+			MoqRendition::Video { .. } => moq_mux::container::Kind::Video,
+		};
 		let (reference, epoch, name, container) = rendition.into_parts();
 		// Parse the container before resolving or subscribing so we don't leave a dangling
 		// subscription if init parsing fails.
-		let media = media_container(container)?;
+		let media = media_container(container, kind)?;
 		let resolved = broadcast.resolve_inner(reference.as_deref(), epoch.as_deref()).await?;
 		let subscription = subscription
 			.map(moq_net::track::Subscription::try_from)
@@ -1653,7 +1675,7 @@ impl MoqMediaGroupConsumer {
 	#[uniffi::constructor]
 	pub fn new(group: &MoqGroupConsumer, container: MoqContainer) -> Result<Arc<Self>, MoqError> {
 		// Parse the container first, so a bad init leaves the raw group readable.
-		let media = media_container(container)?;
+		let media = media_container(container, moq_mux::container::Kind::Data)?;
 		let (group, driver) = group.take()?;
 		Ok(Arc::new(Self::from_inner(group, media, driver)))
 	}
@@ -1675,7 +1697,7 @@ impl MoqMediaGroupConsumer {
 		let (reference, epoch, name, container) = rendition.into_parts();
 		// Parse the container before fetching so invalid CMAF init data does not leave a
 		// dynamic group request waiting for a consumer that can never read it.
-		let media = media_container(container)?;
+		let media = media_container(container, moq_mux::container::Kind::Data)?;
 		let resolved = broadcast.resolve_inner(reference.as_deref(), epoch.as_deref()).await?;
 		let options = options.map(moq_net::group::Fetch::from);
 		let group = broadcast
