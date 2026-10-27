@@ -213,7 +213,7 @@ async fn follow_catalog(mut consumer: moq_mux::catalog::Consumer<()>, tx: watch:
 	}
 }
 
-fn valid_reference(source: &moq_mux::Source, broadcast: Option<&moq_net::path::Relative<'_>>) -> bool {
+fn valid_reference(source: &moq_mux::Source, broadcast: Option<&moq_net::path::Relative>) -> bool {
 	source.resolve_reference(broadcast).is_some()
 }
 
@@ -338,7 +338,7 @@ fn pick_audio<'a>(
 /// must be, and the track's name there. A catalog update that changes it moves the rendition.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Target {
-	path: Option<moq_net::PathOwned>,
+	path: Option<moq_net::Path>,
 	epoch: Option<moq_net::Epoch>,
 	track: String,
 }
@@ -626,7 +626,7 @@ mod tests {
 		let mut catalog = Catalog::default();
 
 		let mut escaped_audio = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
-		escaped_audio.broadcast = Some(Relative::new("../../source").to_owned());
+		escaped_audio.broadcast = Some(Relative::new("../../source").unwrap());
 		catalog.audio.renditions.insert("opus".to_string(), escaped_audio);
 
 		let mut escaped_video = VideoConfig::new(H264 {
@@ -635,11 +635,11 @@ mod tests {
 			level: 0x1e,
 			inline: false,
 		});
-		escaped_video.broadcast = Some(Relative::new("../../source").to_owned());
+		escaped_video.broadcast = Some(Relative::new("../../source").unwrap());
 		catalog.video.renditions.insert("h264".to_string(), escaped_video);
 
 		let mut valid_video = VideoConfig::new(VideoCodec::VP8);
-		valid_video.broadcast = Some(Relative::new("./source").to_owned());
+		valid_video.broadcast = Some(Relative::new("./source").unwrap());
 		catalog.video.renditions.insert("vp8".to_string(), valid_video);
 
 		let (writes_tx, writes_rx) = mpsc::channel(1);
@@ -767,7 +767,7 @@ mod tests {
 
 		// A higher-bitrate Opus this source cannot reach loses to the best one it can.
 		let mut escaped = opus(Some(512_000));
-		escaped.broadcast = Some(Relative::new("../../source").to_owned());
+		escaped.broadcast = Some(Relative::new("../../source").unwrap());
 		catalog.audio.renditions.insert("d".to_string(), escaped);
 		let (name, _) = pick_audio(&source, &catalog).unwrap();
 		assert_eq!(name, "c");
@@ -919,7 +919,7 @@ mod tests {
 			let mut config = VideoConfig::new(VideoCodec::VP8);
 			config.container = hang::catalog::Container::Legacy;
 			config.track = Some(track.to_string());
-			config.broadcast = broadcast.map(|broadcast| Relative::new(broadcast).into_owned());
+			config.broadcast = broadcast.map(|rel| Relative::new(rel).unwrap());
 			catalog
 				.modify()
 				.unwrap()
@@ -1249,7 +1249,7 @@ mod tests {
 		config.container = hang::catalog::Container::Legacy;
 		config.coded_width = Some(1920);
 		config.coded_height = Some(1080);
-		config.broadcast = Some(Relative::new("./missing").to_owned());
+		config.broadcast = Some(Relative::new("./missing").unwrap());
 		catalog
 			.modify()
 			.unwrap()

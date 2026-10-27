@@ -41,9 +41,9 @@ pub struct AdvertParams {
 /// PublishNamespace message (0x06)
 /// Sent by the publisher to announce the availability of a namespace.
 #[derive(Clone, Debug)]
-pub struct PublishNamespace<'a> {
+pub struct PublishNamespace {
 	pub request_id: RequestId,
-	pub track_namespace: Path<'a>,
+	pub track_namespace: Path,
 
 	/// The extension parameters, which a session that negotiated none leaves empty.
 	pub params: AdvertParams,
@@ -53,7 +53,7 @@ pub struct PublishNamespace<'a> {
 	pub authorization_token: Option<RequestToken>,
 }
 
-impl PublishNamespace<'_> {
+impl PublishNamespace {
 	/// Decode the message body, expecting the parameters of the extensions the session
 	/// negotiated.
 	///
@@ -87,7 +87,7 @@ impl PublishNamespace<'_> {
 	}
 }
 
-impl Message for PublishNamespace<'_> {
+impl Message for PublishNamespace {
 	const ID: u64 = 0x06;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -261,7 +261,7 @@ mod tests {
 	fn test_announce_round_trip() {
 		let msg = PublishNamespace {
 			request_id: RequestId(1),
-			track_namespace: Path::new("test/broadcast"),
+			track_namespace: Path::from_static("test/broadcast"),
 			params: Default::default(),
 			authorization_token: None,
 		};
@@ -276,7 +276,7 @@ mod tests {
 	fn test_publish_namespace_v18_round_trip() {
 		let msg = PublishNamespace {
 			request_id: RequestId(5),
-			track_namespace: Path::new("v18/broadcast"),
+			track_namespace: Path::from_static("v18/broadcast"),
 			params: Default::default(),
 			authorization_token: None,
 		};

@@ -79,7 +79,11 @@ impl Publisher {
 		// it. `ts::Programs` mints one per program likewise.
 		let mut epoch = None;
 		let importer = match program {
-			Some(Program::All) => Importer::All(Box::new(ts::Programs::new(origin.clone(), path, config))),
+			Some(Program::All) => Importer::All(Box::new(ts::Programs::new(
+				origin.clone(),
+				moq_net::Path::new(path).map_err(moq_net::Error::from)?,
+				config,
+			))),
 			Some(Program::One(_)) | None => {
 				let route = moq_net::origin::Route::default().with_epoch(epoch.insert(moq_net::Epoch::mint()).clone());
 				let broadcast = origin.publish(path, route)?;

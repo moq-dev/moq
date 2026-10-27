@@ -376,7 +376,7 @@ mod tests {
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 		let reserved = catalog.reserve();
 		let mut config = video_config();
-		config.broadcast = Some(moq_net::path::Relative::new("./secret").to_owned());
+		config.broadcast = Some(moq_net::path::Relative::new("./secret").to_owned().unwrap());
 		let mut video = reserved
 			.video(
 				secret.create_track("video0", timed()).unwrap(),
@@ -603,7 +603,7 @@ mod tests {
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 		let reserved = catalog.reserve();
 		let mut config = video_config();
-		config.broadcast = Some(moq_net::path::Relative::new("./source").to_owned());
+		config.broadcast = Some(moq_net::path::Relative::new("./source").unwrap());
 		let mut allowed = reserved
 			.video(
 				source.create_track("video0", timed()).unwrap(),
@@ -612,7 +612,7 @@ mod tests {
 			)
 			.unwrap();
 		let mut config = video_config();
-		config.broadcast = Some(moq_net::path::Relative::new("./secret").to_owned());
+		config.broadcast = Some(moq_net::path::Relative::new("./secret").unwrap());
 		let mut denied = reserved
 			.video(
 				secret.create_track("video1", timed()).unwrap(),
@@ -671,7 +671,7 @@ mod tests {
 		// restricted server's export into using them.
 		let broad = moq_mux::Source::new(origin.consume(), broadcast.consume());
 		let referenced = broad
-			.resolve(Some(&moq_net::path::Relative::new("./secret")), None)
+			.resolve(Some(&moq_net::path::Relative::new("./secret").unwrap()), None)
 			.await
 			.unwrap();
 		let mut group = referenced.track("video1").unwrap().fetch_group(0, None).await.unwrap();

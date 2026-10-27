@@ -181,7 +181,7 @@ async fn a_sibling_resolves_through_a_client_session() {
 		let source = moq_mux::Source::new(origin, broadcast);
 		let sibling = moq_clock::timeout(
 			TIMEOUT,
-			source.resolve(Some(&moq_net::path::Relative::new("./source")), None),
+			source.resolve(Some(&moq_net::path::Relative::new("./source").unwrap()), None),
 		)
 		.await
 		.expect("sibling resolve timed out")
@@ -204,7 +204,7 @@ async fn a_disconnected_sibling_publisher_answers_404() {
 		moq_mux::catalog::Producer::new(&mut catalog_broadcast.broadcast().clone(), Default::default()).unwrap();
 	let reserved = catalog.reserve();
 	let mut config = video_config();
-	config.broadcast = Some(moq_net::path::Relative::new("./source").to_owned());
+	config.broadcast = Some(moq_net::path::Relative::new("./source").unwrap());
 	let track = media_broadcast.create_track(TRACK, timed()).unwrap();
 	let mut media = reserved
 		.video(

@@ -97,7 +97,7 @@ async fn main() -> anyhow::Result<()> {
 			// instead. This also makes the subscriber reconnect-aware.
 			tracing::info!(broadcast = %config.broadcast, "waiting for broadcast to be online");
 
-			let path: moq_net::Path<'_> = config.broadcast.into();
+			let path = moq_net::Path::new(&config.broadcast)?;
 			let scope =
 				moq_net::Patterns::from(moq_net::Pattern::subtree(path.as_str()).context("invalid broadcast name")?);
 			let consumer = origin

@@ -56,6 +56,11 @@ export type Relative = string & { __brand: "Relative" };
  */
 export const MAX_PARTS = 32;
 
+/** Maximum UTF-8 length of a path in bytes, leaving room in a 64 KiB moq-lite message for its other fields. */
+export const MAX_BYTES = 16384;
+
+const utf8 = new TextEncoder();
+
 /** Build a path from one or more components, joining with "/" and trimming redundant slashes. */
 export function from(...paths: string[]): Valid {
 	// Join paths with "/" and then remove leading and trailing slashes, and collapse multiple slashes into one.
@@ -69,30 +74,44 @@ export function parts(path: Valid): string[] {
 }
 
 /**
- * Validate an untrusted wire string as a path, enforcing {@link MAX_PARTS}.
+ * Validate an untrusted wire string as a path, enforcing {@link MAX_PARTS} and {@link MAX_BYTES}.
  *
- * Throws when the path has too many parts; use at wire decode sites.
+ * Throws when the path is too deep or too long; use at wire decode sites.
  */
 export function decode(raw: string): Valid {
+	// Measured before normalization, so redundant slashes can't smuggle a longer string.
+	// A UTF-16 unit is at least one UTF-8 byte, so a long string fails without encoding it.
+	if (raw.length > MAX_BYTES || utf8.encode(raw).length > MAX_BYTES) {
+		throw new Error(`path is longer than ${MAX_BYTES} bytes`);
+	}
 	const path = from(raw);
 	return encode(path);
 }
 
 /**
- * Validate a path before writing it to the wire, enforcing {@link MAX_PARTS}.
+ * Validate a path before writing it to the wire, enforcing {@link MAX_PARTS} and {@link MAX_BYTES}.
  *
- * Throws when the path has too many parts; use at wire encode sites so we never
+ * Throws when the path is too deep or too long; use at wire encode sites so we never
  * emit a path the remote side is required to reject.
  */
 export function encode(path: Valid): Valid {
+	const error = check(path);
+	if (error) throw new Error(error);
+	return path;
+}
+
+/** Why `path` breaks the wire limits, or undefined when it fits. @internal */
+export function check(path: Valid): string | undefined {
 	// Count separators with an early exit instead of splitting, so a hostile path never allocates per part.
 	let count = path === "" ? 0 : 1;
 	for (let i = path.indexOf("/"); i !== -1; i = path.indexOf("/", i + 1)) {
-		if (++count > MAX_PARTS) {
-			throw new Error(`path exceeds ${MAX_PARTS} parts`);
-		}
+		if (++count > MAX_PARTS) return `path exceeds ${MAX_PARTS} parts`;
 	}
-	return path;
+	// A UTF-16 unit is at most 3 UTF-8 bytes, so only a long path needs encoding to measure.
+	if (path.length > MAX_BYTES / 3 && utf8.encode(path).length > MAX_BYTES) {
+		return `path exceeds ${MAX_BYTES} bytes`;
+	}
+	return undefined;
 }
 
 /**

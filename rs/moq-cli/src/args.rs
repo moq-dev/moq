@@ -338,14 +338,20 @@ impl Invocation {
 				}
 				// A reader refuses the whole catalog over a path it cannot resolve.
 				let broadcast = command.broadcast(&self.moq);
-				let rel = hang::moq_net::path::Relative::new(path);
-				let Some(prefix) = hang::moq_net::Path::new(&broadcast).try_resolve(&rel) else {
+				let rel = hang::moq_net::path::Relative::new(path)
+					.map_err(|err| anyhow::anyhow!("invalid --echo-path: {err}"))?;
+				let broadcast = hang::moq_net::Path::new(&broadcast)
+					.map_err(|err| anyhow::anyhow!("invalid --broadcast: {err}"))?;
+				let Some(prefix) = broadcast.try_resolve(&rel) else {
 					anyhow::bail!("--echo-path `{path}` walks above the connection root from broadcast `{broadcast}`");
 				};
 				// An origin refuses a broadcast a pattern could not name, so no viewer could
 				// publish its `<NAME>.echo` beneath this.
-				let feedback = prefix.join("viewer.echo");
-				if let Err(err) = hang::moq_net::Pattern::literal(feedback.as_str()) {
+				let feedback = prefix.join(&hang::moq_net::Path::from_static("viewer.echo"));
+				let literal = feedback
+					.map_err(anyhow::Error::from)
+					.and_then(|feedback| Ok(hang::moq_net::Pattern::literal(feedback.as_str())?));
+				if let Err(err) = literal {
 					anyhow::bail!(
 						"--echo-path `{path}` resolves to `{prefix}`, where no viewer can publish its feedback: {err}"
 					);

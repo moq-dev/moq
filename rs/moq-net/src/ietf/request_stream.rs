@@ -333,12 +333,12 @@ impl Decode<Version> for Update {
 #[derive(Debug)]
 pub(super) struct NamespaceUpdate<const TRACKS: bool = false> {
 	pub(super) request_id: super::RequestId,
-	pub(super) prefix: Option<crate::PathOwned>,
+	pub(super) prefix: Option<crate::Path>,
 	pub(super) refused: Option<Error>,
 }
 
 #[derive(Debug)]
-struct NamespacePrefix(crate::PathOwned);
+struct NamespacePrefix(crate::Path);
 
 impl super::parameters::Param for NamespacePrefix {
 	fn param_encode(&self, w: &mut crate::coding::Encoder<'_>, _: Version) -> Result<(), crate::coding::EncodeError> {
@@ -412,7 +412,7 @@ mod tests {
 		use crate::lite::test_transport::ScriptedSession;
 		use crate::stats::{Message, Registry, Tier};
 		let registry = Registry::new(Default::default());
-		let stats = registry.tier(Tier::default()).session("");
+		let stats = registry.tier(Tier::default()).session(crate::Path::from_static(""));
 		let version = Version::Draft22;
 		let session = ScriptedSession::new(vec![0x10, 0, 2, 0, 0, 0x07, 0, 0]);
 		let mut stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)

@@ -17,7 +17,7 @@ use crate::transport::poll::SendGroup as _;
 use crate::transport::poll::{GroupOf, SendOptions};
 
 use crate::{
-	AsPath, DecodeError, Error, Timescale, Timestamp,
+	DecodeError, Error, Timescale, Timestamp,
 	coding::{Encode as _, Encoder, Stream, Writer},
 	ietf::{self, Control, EndLocation, FetchHeader, FetchType, Filter, GroupOrder, Location, RequestId},
 	priority::{Priority, PriorityHandle, PriorityQueue},
@@ -635,18 +635,18 @@ struct Namespaces {
 	peer: cluster::Peer,
 	target: Target,
 	/// Every announced broadcast under this loop's prefix.
-	watched: HashMap<crate::PathOwned, Watched>,
+	watched: HashMap<crate::Path, Watched>,
 	/// The open PUBLISH_NAMESPACE request carrying each advertised namespace. Empty when
 	/// the entries ride a SUBSCRIBE_NAMESPACE stream inline.
-	requests: HashMap<crate::PathOwned, NamespaceRequest>,
+	requests: HashMap<crate::Path, NamespaceRequest>,
 	/// Requests with an update to send, in the order they asked for a request ID. Each
 	/// waits for credit beside the loop's other work and computes its update when it gets
 	/// one, so a later change supersedes an earlier one that is still waiting.
-	updates: VecDeque<crate::PathOwned>,
+	updates: VecDeque<crate::Path>,
 	/// Requests with an update in flight, each answered on its own stream, by when each
 	/// gives up. Sent in order with one timeout, so the front is the earliest; an entry
 	/// whose request moved on is skipped when it reaches the front.
-	inflight: VecDeque<(crate::time::Instant, crate::PathOwned)>,
+	inflight: VecDeque<(crate::time::Instant, crate::Path)>,
 	/// Requests whose stream woke the loop, so a wake polls those rather than every
 	/// update in flight.
 	woken: Arc<Woken>,
@@ -770,7 +770,7 @@ enum NamespaceEvent {
 	/// The queued update at the front got this request ID.
 	Renew(RequestId),
 	/// What came back for an update in flight.
-	Answered(crate::PathOwned, Result<Answer, Error>),
+	Answered(crate::Path, Result<Answer, Error>),
 }
 
 /// What came back for a PUBLISH_NAMESPACE or an update in flight.
@@ -786,14 +786,14 @@ enum Answer {
 /// The requests whose stream woke an announce loop since it last looked.
 #[derive(Default)]
 struct Woken {
-	suffixes: std::sync::Mutex<Vec<crate::PathOwned>>,
+	suffixes: std::sync::Mutex<Vec<crate::Path>>,
 	/// The loop, woken in turn.
 	owner: std::sync::Mutex<Option<std::task::Waker>>,
 }
 
 impl Woken {
 	/// A waker that marks `suffix` woken.
-	fn waker(self: &Arc<Self>, suffix: crate::PathOwned) -> std::task::Waker {
+	fn waker(self: &Arc<Self>, suffix: crate::Path) -> std::task::Waker {
 		std::task::Waker::from(Arc::new(RequestWaker {
 			woken: self.clone(),
 			suffix,
@@ -803,7 +803,7 @@ impl Woken {
 
 struct RequestWaker {
 	woken: Arc<Woken>,
-	suffix: crate::PathOwned,
+	suffix: crate::Path,
 }
 
 impl std::task::Wake for RequestWaker {
@@ -881,7 +881,7 @@ enum Joined<G> {
 		end: Location,
 		cache: track::Consumer,
 		/// The subscription's namespace, which the fetch is held to the grant on.
-		namespace: crate::PathOwned,
+		namespace: crate::Path,
 		/// The subscription's own request token authorized it, so the limit does not bound
 		/// the fetch either.
 		token: bool,
@@ -1074,7 +1074,7 @@ impl Publisher {
 				tracing::debug!(message = ?msg, "received subscribe");
 				let gate = crate::auth::Gate::new(
 					this.auth.clone(),
-					msg.track_namespace.to_owned(),
+					msg.track_namespace.clone(),
 					crate::auth::Direction::Publish,
 				);
 				let task = this.serve_subscribe_stream(stream, msg, gate);
@@ -1131,7 +1131,7 @@ impl Publisher {
 				tracing::debug!(message = ?msg, "received subscribe_namespace");
 				let gate = crate::auth::Gate::new(
 					this.auth.clone(),
-					msg.namespace.to_owned(),
+					msg.namespace.clone(),
 					crate::auth::Direction::Publish,
 				);
 				async move {
@@ -1191,7 +1191,7 @@ impl Publisher {
 				tracing::debug!(message = ?msg, "received track_status");
 				let gate = crate::auth::Gate::new(
 					this.auth.clone(),
-					msg.track_namespace.to_owned(),
+					msg.track_namespace.clone(),
 					crate::auth::Direction::Publish,
 				);
 				async move {
@@ -1237,7 +1237,7 @@ impl Publisher {
 	) -> impl std::future::Future<Output = Result<(), Error>> {
 		let gate = crate::auth::Gate::new(
 			self.auth.clone(),
-			msg.track_namespace.to_owned(),
+			msg.track_namespace.clone(),
 			crate::auth::Direction::Publish,
 		);
 		self.serve_subscribe_stream(stream, msg, gate)
@@ -1277,9 +1277,11 @@ impl Publisher {
 			};
 			let request_id = msg.request_id;
 			let track_name = msg.track_name.clone();
-			let absolute = self.origin.absolute(&msg.track_namespace).to_owned();
-
-			tracing::debug!(id = %request_id, broadcast = %absolute, track = %track_name, "subscribe started");
+			// Logged beside the root rather than joined, so a namespace too long under it is
+			// refused by the lookup, on this request alone.
+			let (root, namespace) = (self.origin.root().clone(), msg.track_namespace.clone());
+			let broadcast = || crate::path::Rooted(&root, &namespace);
+			tracing::debug!(id = %request_id, broadcast = %broadcast(), track = %track_name, "subscribe started");
 
 			// Serve only what our grant lets us publish (MoQ Auth), and stop once it no
 			// longer does. Checked before resolving, so a denied request never reaches the
@@ -1347,7 +1349,7 @@ impl Publisher {
 						&self.runtime,
 						verdict,
 						verified,
-						msg.track_namespace.to_owned(),
+						msg.track_namespace.clone(),
 						crate::auth::RequestKind::Subscribe,
 						Some(slot.clone()),
 					);
@@ -1433,7 +1435,7 @@ impl Publisher {
 					// the same boundary used by the subscription so the two streams never overlap,
 					// again on every resume.
 					let filter = msg.filter;
-					let namespace = msg.track_namespace.to_owned();
+					let namespace = msg.track_namespace.clone();
 					let token = request_grant.is_some();
 					let save_join = |largest: Option<Location>,
 					                 cache: &crate::track::Consumer,
@@ -1593,11 +1595,11 @@ impl Publisher {
 					{
 						// PUBLISH_DONE carries a fixed reason per status, so only the code reaches
 						// the peer once SUBSCRIBE_OK went out.
-						tracing::info!(broadcast = %absolute, track = %track_name, err = %refusal.error, reason = %refusal.reason, "request token grant ended");
+						tracing::info!(broadcast = %broadcast(), track = %track_name, err = %refusal.error, reason = %refusal.reason, "request token grant ended");
 						return Poll::Ready(refusal);
 					}
 					if gate.poll_denied(waiter).is_ready() {
-						tracing::info!(broadcast = %absolute, track = %track_name, "subscription no longer authorized");
+						tracing::info!(broadcast = %broadcast(), track = %track_name, "subscription no longer authorized");
 						return Poll::Ready(Error::Unauthorized.into());
 					}
 					Poll::Pending
@@ -2736,7 +2738,7 @@ impl Publisher {
 	fn fetch_gate(&self, msg: &ietf::Fetch<'_>) -> FetchGate {
 		match &msg.fetch_type {
 			FetchType::Standalone { namespace, .. } | FetchType::Filtered { namespace, .. } => FetchGate::Standalone(
-				crate::auth::Gate::new(self.auth.clone(), namespace.to_owned(), crate::auth::Direction::Publish),
+				crate::auth::Gate::new(self.auth.clone(), namespace.clone(), crate::auth::Direction::Publish),
 			),
 			FetchType::RelativeJoining {
 				subscriber_request_id, ..
@@ -3195,7 +3197,7 @@ impl Publisher {
 			(
 				Location,
 				track::Consumer,
-				crate::PathOwned,
+				crate::Path,
 				Ranking<GroupOf<Transport>>,
 				bool,
 			),
@@ -3270,7 +3272,7 @@ impl Publisher {
 	) -> impl std::future::Future<Output = Result<(), Error>> {
 		let gate = crate::auth::Gate::new(
 			self.auth.clone(),
-			msg.track_namespace.to_owned(),
+			msg.track_namespace.clone(),
 			crate::auth::Direction::Publish,
 		);
 		self.serve_track_status_stream(stream, msg, gate)
@@ -3395,12 +3397,7 @@ impl Publisher {
 	/// PUBLISH_NAMESPACE request: an update is a REQUEST_UPDATE **on the stream that
 	/// already carries it**, since a second stream would leave two claiming one
 	/// namespace, and a withdrawal cancels the request.
-	async fn sync_namespace(
-		&self,
-		ns: &mut Namespaces,
-		suffix: &crate::PathOwned,
-		path: &crate::PathOwned,
-	) -> Result<(), Error> {
+	async fn sync_namespace(&self, ns: &mut Namespaces, suffix: &crate::Path, path: &crate::Path) -> Result<(), Error> {
 		let Some((advert, auth)) = self.offer(ns, suffix, path) else {
 			return Ok(());
 		};
@@ -3465,7 +3462,7 @@ impl Publisher {
 			return Ok(());
 		}
 
-		let absolute = self.origin.absolute(path).to_owned();
+		let absolute = self.origin.root().rejoin(path);
 		// Only a PUBLISH_NAMESPACE request or an update to one can be refused; everything
 		// else below either rides a stream the peer already accepted or says nothing at all.
 		let mut refused = watch.refused;
@@ -3525,16 +3522,14 @@ impl Publisher {
 							tracing::debug!(broadcast = %absolute, "namespace_done for an epoch gained or lost");
 							stream
 								.writer
-								.encode_message(&ietf::NamespaceDone {
-									suffix: suffix.as_path(),
-								})
+								.encode_message(&ietf::NamespaceDone { suffix: suffix.clone() })
 								.await?;
 						}
 						tracing::debug!(broadcast = %absolute, "namespace");
 						stream
 							.writer
 							.encode_message(&ietf::Namespace {
-								suffix: suffix.as_path(),
+								suffix: suffix.clone(),
 								params: negotiated.extended().then(|| advert.params()),
 							})
 							.await?;
@@ -3543,9 +3538,7 @@ impl Publisher {
 						tracing::debug!(broadcast = %absolute, "namespace_done");
 						stream
 							.writer
-							.encode_message(&ietf::NamespaceDone {
-								suffix: suffix.as_path(),
-							})
+							.encode_message(&ietf::NamespaceDone { suffix: suffix.clone() })
 							.await?;
 					}
 					// Never advertised and still not advertisable: nothing to say.
@@ -3576,10 +3569,10 @@ impl Publisher {
 	/// Returns what the refusal, if any, said about coming back.
 	async fn advertise_namespace(
 		&self,
-		requests: &mut HashMap<crate::PathOwned, NamespaceRequest>,
+		requests: &mut HashMap<crate::Path, NamespaceRequest>,
 		watch: &mut Watched,
-		path: &crate::PathOwned,
-		suffix: crate::PathOwned,
+		path: &crate::Path,
+		suffix: crate::Path,
 		params: ietf::AdvertParams,
 		auth: Option<crate::auth::Credential>,
 	) -> Result<Refused, Error> {
@@ -3589,7 +3582,7 @@ impl Publisher {
 		// Giving up records nothing and spends no request ID, so the namespace is simply
 		// retried later.
 		let Some(mut request) = self.open_request().await? else {
-			tracing::debug!(broadcast = %self.origin.absolute(path), "no stream for the advertisement");
+			tracing::debug!(broadcast = %crate::path::Rooted(self.origin.root(), path), "no stream for the advertisement");
 			return Ok(Refused::No);
 		};
 		let request_id = self.control.next_request_id();
@@ -3599,7 +3592,7 @@ impl Publisher {
 			.writer
 			.encode_message(&ietf::PublishNamespace {
 				request_id,
-				track_namespace: path.as_path(),
+				track_namespace: path.clone(),
 				params,
 				authorization_token: auth.as_ref().and_then(|auth| self.request_token(auth)),
 			})
@@ -3609,7 +3602,7 @@ impl Publisher {
 			Err(err) => Err(err),
 		};
 
-		let absolute = self.origin.absolute(path);
+		let absolute = self.origin.root().rejoin(path);
 		let super::request_stream::Framed(type_id, body) = match answer {
 			Ok(Answer::Message(framed)) => framed,
 			Ok(Answer::Late) => {
@@ -3678,8 +3671,8 @@ impl Publisher {
 	fn offer(
 		&self,
 		ns: &Namespaces,
-		suffix: &crate::PathOwned,
-		path: &crate::PathOwned,
+		suffix: &crate::Path,
+		path: &crate::Path,
 	) -> Option<(Advert, Option<crate::auth::Credential>)> {
 		let watch = ns.watched.get(suffix)?;
 		let advert = match ns.permitted(path) {
@@ -3709,13 +3702,13 @@ impl Publisher {
 
 	/// Drop queued updates that no longer have anything to send, so the next one to take
 	/// a request ID is one that will use it: drafts before 17 require the next ID.
-	fn prune_updates(&self, ns: &mut Namespaces, prefix: &crate::PathOwned) {
+	fn prune_updates(&self, ns: &mut Namespaces, prefix: &crate::Path) {
 		while let Some(suffix) = ns.updates.front() {
 			let wants = ns.requests.get(suffix).is_some_and(|request| {
 				request.queued
 					&& request.pending.is_none()
 					&& ns.watched.get(suffix).is_some_and(|watch| {
-						self.offer(ns, suffix, &prefix.join(suffix))
+						self.offer(ns, suffix, &prefix.rejoin(suffix))
 							.is_some_and(|(advert, auth)| {
 								advert.wanted() && (advert != watch.sent || auth != request.auth)
 							})
@@ -3739,14 +3732,9 @@ impl Publisher {
 	/// peer set without reading it. A different original publisher is an update like any
 	/// other: the receiver drains what it already serves from the old one and never splices
 	/// the two.
-	async fn send_update(
-		&self,
-		ns: &mut Namespaces,
-		prefix: &crate::PathOwned,
-		request_id: RequestId,
-	) -> Result<(), Error> {
+	async fn send_update(&self, ns: &mut Namespaces, prefix: &crate::Path, request_id: RequestId) -> Result<(), Error> {
 		let suffix = ns.updates.pop_front().expect("allocated for a queued update");
-		let Some((advert, auth)) = self.offer(ns, &suffix, &prefix.join(&suffix)) else {
+		let Some((advert, auth)) = self.offer(ns, &suffix, &prefix.rejoin(&suffix)) else {
 			return Ok(());
 		};
 		let (Some(request), Some(watch)) = (ns.requests.get_mut(&suffix), ns.watched.get_mut(&suffix)) else {
@@ -3765,7 +3753,7 @@ impl Publisher {
 		if auth != request.auth {
 			update.authorization_token = auth.as_ref().and_then(|auth| self.request_token(auth));
 		}
-		tracing::debug!(broadcast = %self.origin.absolute(&request.path), "publish_namespace update");
+		tracing::debug!(broadcast = %crate::path::Rooted(self.origin.root(), &request.path), "publish_namespace update");
 		let written = request.stream.writer.encode_message(&update).await;
 		if let Err(err) = written {
 			// The peer ended the request before the update reached it, which ends only this
@@ -3795,12 +3783,12 @@ impl Publisher {
 
 	/// What came back for an update in flight, polling only the requests that woke.
 	fn poll_answer(
-		requests: &mut HashMap<crate::PathOwned, NamespaceRequest>,
-		inflight: &mut VecDeque<(crate::time::Instant, crate::PathOwned)>,
+		requests: &mut HashMap<crate::Path, NamespaceRequest>,
+		inflight: &mut VecDeque<(crate::time::Instant, crate::Path)>,
 		woken: &Arc<Woken>,
 		now: crate::time::Instant,
 		cx: &mut std::task::Context<'_>,
-	) -> Poll<(crate::PathOwned, Result<Answer, Error>)> {
+	) -> Poll<(crate::Path, Result<Answer, Error>)> {
 		// Registered before the take, so a wake landing between them is not lost.
 		*woken.owner.lock().unwrap() = Some(cx.waker().clone());
 		let mut suffixes = std::mem::take(&mut *woken.suffixes.lock().unwrap());
@@ -3847,15 +3835,15 @@ impl Publisher {
 	async fn answered(
 		&self,
 		ns: &mut Namespaces,
-		prefix: &crate::PathOwned,
-		suffix: crate::PathOwned,
+		prefix: &crate::Path,
+		suffix: crate::Path,
 		answer: Result<Answer, Error>,
 	) -> Result<(), Error> {
 		let Some(request) = ns.requests.get_mut(&suffix) else {
 			return Ok(());
 		};
 		let idle = request.pending.take().is_none();
-		let absolute = self.origin.absolute(&request.path).to_owned();
+		let absolute = self.origin.root().rejoin(&request.path);
 
 		// A reset stream ends only this request, like a FIN; a malformed answer is the peer's
 		// violation and still ends the loop.
@@ -3904,7 +3892,7 @@ impl Publisher {
 						}
 						tracing::debug!(message = ?msg, "publish_namespace update ok");
 						// Whatever changed while it was in flight goes out next.
-						return self.sync_namespace(ns, &suffix, &prefix.join(&suffix)).await;
+						return self.sync_namespace(ns, &suffix, &prefix.rejoin(&suffix)).await;
 					}
 					ietf::RequestError::ID => {
 						let msg: ietf::RequestError = body.message(self.version)?;
@@ -4007,8 +3995,8 @@ impl Publisher {
 	async fn withdraw_namespace(
 		&self,
 		target: &mut Target,
-		requests: &mut HashMap<crate::PathOwned, NamespaceRequest>,
-		suffix: crate::PathOwned,
+		requests: &mut HashMap<crate::Path, NamespaceRequest>,
+		suffix: crate::Path,
 	) -> Result<(), Error> {
 		match target {
 			Target::Requests => {
@@ -4019,9 +4007,7 @@ impl Publisher {
 			Target::Inline(stream) => {
 				stream
 					.writer
-					.encode_message(&ietf::NamespaceDone {
-						suffix: suffix.as_path(),
-					})
+					.encode_message(&ietf::NamespaceDone { suffix: suffix.clone() })
 					.await?;
 			}
 		}
@@ -4030,8 +4016,8 @@ impl Publisher {
 
 	/// Close out every open PUBLISH_NAMESPACE request. A no-op for a loop whose entries
 	/// ride the SUBSCRIBE_NAMESPACE stream itself, which retracts them by ending.
-	async fn withdraw_requests(&self, target: &mut Target, requests: &mut HashMap<crate::PathOwned, NamespaceRequest>) {
-		let suffixes: Vec<crate::PathOwned> = requests.keys().cloned().collect();
+	async fn withdraw_requests(&self, target: &mut Target, requests: &mut HashMap<crate::Path, NamespaceRequest>) {
+		let suffixes: Vec<crate::Path> = requests.keys().cloned().collect();
 		for suffix in suffixes {
 			let _ = self.withdraw_namespace(target, requests, suffix).await;
 		}
@@ -4065,7 +4051,7 @@ impl Publisher {
 
 		let mut ns = Namespaces::new(peer, Target::Requests);
 		ns.epochs = self.peer_setup.get().await.epoch;
-		self.run_namespaces(origin.announced(), crate::Path::empty().to_owned(), ns, Vec::new())
+		self.run_namespaces(origin.announced(), crate::Path::empty(), ns, Vec::new())
 			.await
 	}
 
@@ -4079,11 +4065,11 @@ impl Publisher {
 	async fn run_subscribe_namespace_stream(
 		self,
 		stream: Stream<Transport, Version>,
-		msg: ietf::SubscribeNamespace<'_>,
+		msg: ietf::SubscribeNamespace,
 	) -> Result<(), Error> {
 		let gate = crate::auth::Gate::new(
 			self.auth.clone(),
-			msg.namespace.to_owned(),
+			msg.namespace.clone(),
 			crate::auth::Direction::Publish,
 		);
 		self.serve_subscribe_namespace_stream(stream, msg, gate).await
@@ -4092,15 +4078,15 @@ impl Publisher {
 	async fn serve_subscribe_namespace_stream(
 		self,
 		mut stream: Stream<Transport, Version>,
-		msg: ietf::SubscribeNamespace<'_>,
+		msg: ietf::SubscribeNamespace,
 		gate: crate::auth::Gate,
 	) -> Result<(), Error> {
 		if let Some(error) = super::namespace::refusal(&msg.namespace, self.version) {
 			return super::request_stream::reject(stream, error).await;
 		}
-		let prefix = msg.namespace.to_owned();
+		let prefix = msg.namespace.clone();
 
-		tracing::debug!(prefix = %self.origin.absolute(&prefix), "subscribe_namespace stream");
+		tracing::debug!(prefix = %crate::path::Rooted(self.origin.root(), &prefix), "subscribe_namespace stream");
 
 		// A prefix outside our scope (empty origin, or a token that doesn't grant it)
 		// just means we have nothing to announce; respond with an empty set rather than
@@ -4148,7 +4134,7 @@ impl Publisher {
 				let initial = Self::snapshot(&mut announced);
 				let count = initial
 					.iter()
-					.filter(|update| permit.matches(prefix.join(&update.prefix).as_str()))
+					.filter(|update| permit.matches(prefix.rejoin(&update.prefix).as_str()))
 					.filter(|update| self.select(&update.route, &peer, declared.epoch).wanted())
 					.count();
 				(initial, Some(count as u64))
@@ -4215,7 +4201,7 @@ impl Publisher {
 	async fn run_namespaces(
 		&self,
 		mut announced: crate::announce::Consumer,
-		mut prefix: crate::PathOwned,
+		mut prefix: crate::Path,
 		mut ns: Namespaces,
 		initial: Vec<crate::announce::Announce>,
 	) -> Result<(), Error> {
@@ -4395,7 +4381,7 @@ impl Publisher {
 					// A minimum wait the peer named is enforced by `sync_namespace`, which
 					// every path goes through, so a namespace still inside one simply
 					// makes no offer this turn. The next sweep is at most RETRY_MAX away.
-					let deferred: Vec<crate::PathOwned> = ns
+					let deferred: Vec<crate::Path> = ns
 						.watched
 						.iter()
 						.filter(|(_, watch)| watch.deferred)
@@ -4403,15 +4389,15 @@ impl Publisher {
 						.collect();
 
 					for suffix in deferred {
-						let path = prefix.join(&suffix);
+						let path = prefix.rejoin(&suffix);
 						self.sync_namespace(&mut ns, &suffix, &path).await?;
 					}
 				}
 				NamespaceEvent::Regrant(permit) => {
 					ns.permit = permit;
-					let suffixes: Vec<crate::PathOwned> = ns.watched.keys().cloned().collect();
+					let suffixes: Vec<crate::Path> = ns.watched.keys().cloned().collect();
 					for suffix in suffixes {
-						let path = prefix.join(&suffix);
+						let path = prefix.rejoin(&suffix);
 						self.sync_namespace(&mut ns, &suffix, &path).await?;
 					}
 				}
@@ -4460,12 +4446,12 @@ impl Publisher {
 	async fn apply_update(
 		&self,
 		ns: &mut Namespaces,
-		prefix: &crate::PathOwned,
+		prefix: &crate::Path,
 		update: crate::announce::Announce,
 		active: bool,
 	) -> Result<(), Error> {
 		let suffix = update.prefix;
-		let path = prefix.join(&suffix);
+		let path = prefix.rejoin(&suffix);
 
 		if active {
 			// A repeat for a live suffix is a metadata update: keep the
@@ -4481,7 +4467,7 @@ impl Publisher {
 			// Only close out namespaces the peer actually saw.
 			let held = ns.watched.remove(&suffix).is_some_and(|watch| watch.sent.wanted());
 			if held {
-				tracing::debug!(route = %self.origin.absolute(&path), "namespace_done");
+				tracing::debug!(route = %crate::path::Rooted(self.origin.root(), &path), "namespace_done");
 				self.withdraw_namespace(&mut ns.target, &mut ns.requests, suffix)
 					.await?;
 			}
@@ -5853,7 +5839,7 @@ fn buffer_object<W: crate::transport::poll::SendStream>(
 
 /// One advertisement: the PUBLISH_NAMESPACE request stream it rides on.
 struct NamespaceRequest {
-	path: crate::PathOwned,
+	path: crate::Path,
 	stream: Stream<Transport, Version>,
 	messages: super::request_stream::Messages,
 	/// The auth the peer holds the request under: the one it opened with, or the one
@@ -6893,7 +6879,7 @@ mod serve_tests {
 		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
 			.await
 			.unwrap();
-		let suffix: crate::PathOwned = "room".into();
+		let suffix = crate::Path::from_static("room");
 		let mut requests = HashMap::new();
 		requests.insert(
 			suffix.clone(),
@@ -7176,12 +7162,12 @@ mod serve_tests {
 				// Draft-22 dropped the Fetch Type tag, leaving only the filtered form.
 				fetch_type: match version {
 					Version::Draft22 => FetchType::Filtered {
-						namespace: crate::Path::new("missing"),
+						namespace: crate::Path::from_static("missing"),
 						track: "video".into(),
 						filter: Filter::Unfiltered,
 					},
 					_ => FetchType::Standalone {
-						namespace: crate::Path::new("missing"),
+						namespace: crate::Path::from_static("missing"),
 						track: "video".into(),
 						start: Location { group: 0, object: 0 },
 						end: Location { group: 0, object: 1 },
@@ -8391,7 +8377,7 @@ mod serve_tests {
 			.unwrap();
 		let msg = ietf::SubscribeNamespace {
 			request_id: RequestId(0),
-			namespace: crate::Path::new("room"),
+			namespace: crate::Path::from_static("room"),
 			hidden: false,
 		};
 		let mut running = std::pin::pin!(h.publisher.clone().run_subscribe_namespace_stream(stream, msg));
@@ -8435,7 +8421,7 @@ mod serve_tests {
 				.unwrap();
 			let msg = ietf::SubscribeNamespace {
 				request_id: RequestId(0),
-				namespace: crate::Path::new("old"),
+				namespace: crate::Path::from_static("old"),
 				hidden: false,
 			};
 			let mut running = std::pin::pin!(h.publisher.clone().run_subscribe_namespace_stream(stream, msg));
@@ -8487,7 +8473,7 @@ mod serve_tests {
 				.unwrap();
 			let msg = ietf::SubscribeNamespace {
 				request_id: RequestId(0),
-				namespace: crate::Path::new(""),
+				namespace: crate::Path::from_static(""),
 				hidden: false,
 			};
 			let mut run = std::pin::pin!(h.publisher.clone().run_subscribe_namespace_stream(stream, msg));
@@ -8507,7 +8493,7 @@ mod serve_tests {
 			max_age: None,
 			new_group: None,
 			request_id: RequestId(REQUEST_ID),
-			track_namespace: crate::Path::new("room"),
+			track_namespace: crate::Path::from_static("room"),
 			track_name: "video".into(),
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
@@ -8568,7 +8554,7 @@ mod serve_tests {
 				.unwrap();
 
 			let mut msg = subscribe(Filter::NextObject, None);
-			msg.track_namespace = crate::Path::new("absent");
+			msg.track_namespace = crate::Path::from_static("absent");
 
 			h.publisher.clone().run_subscribe_stream(stream, msg).await.unwrap();
 
@@ -8640,7 +8626,7 @@ mod serve_tests {
 		};
 		let status = ietf::TrackStatus {
 			request_id: RequestId(REQUEST_ID),
-			track_namespace: crate::Path::new("room"),
+			track_namespace: crate::Path::from_static("room"),
 			track_name: "video".into(),
 			properties_wanted: true,
 			epoch: Some(epoch.clone()),
@@ -8723,7 +8709,7 @@ mod serve_tests {
 				let encode = |body: &mut Vec<u8>| -> Result<(), crate::coding::EncodeError> {
 					let w = &mut Encoder::new(body, version.into());
 					RequestId(REQUEST_ID).encode(w, version)?;
-					super::super::namespace::encode_namespace(w, &crate::Path::new("room"))?;
+					super::super::namespace::encode_namespace(w, &crate::Path::from_static("room"))?;
 					w.string("video")?;
 					encode_params!(w, version,
 						0x04 => 7u64,
@@ -8779,7 +8765,7 @@ mod serve_tests {
 	fn track_status(namespace: &str, wanted: bool, version: Version) -> Vec<u8> {
 		let msg = ietf::TrackStatus {
 			request_id: RequestId(REQUEST_ID),
-			track_namespace: crate::Path::new(namespace),
+			track_namespace: crate::Path::new(namespace).unwrap(),
 			track_name: "video".into(),
 			properties_wanted: wanted,
 			epoch: None,
@@ -8982,7 +8968,7 @@ mod serve_tests {
 				stream,
 				ietf::TrackStatus {
 					request_id: RequestId(REQUEST_ID),
-					track_namespace: crate::Path::new("room"),
+					track_namespace: crate::Path::from_static("room"),
 					track_name: "video".into(),
 					properties_wanted: true,
 					epoch: None,
@@ -9130,13 +9116,13 @@ mod serve_tests {
 								group_order: GroupOrder::Descending,
 								fetch_type: if Filter::is_draft22(version) {
 									FetchType::Filtered {
-										namespace: crate::Path::new("room"),
+										namespace: crate::Path::from_static("room"),
 										track: "video".into(),
 										filter: Filter::Unfiltered,
 									}
 								} else {
 									FetchType::Standalone {
-										namespace: crate::Path::new("room"),
+										namespace: crate::Path::from_static("room"),
 										track: "video".into(),
 										start: Location { group: 0, object: 0 },
 										end: Location { group: 0, object: 0 },
@@ -9174,7 +9160,7 @@ mod serve_tests {
 					let mut body = Vec::new();
 					let mut w = Encoder::new(&mut body, version.into());
 					RequestId(REQUEST_ID).encode(&mut w, version).unwrap();
-					super::super::namespace::encode_namespace(&mut w, &crate::Path::new(namespace)).unwrap();
+					super::super::namespace::encode_namespace(&mut w, &crate::Path::new(namespace).unwrap()).unwrap();
 					w.string(track).unwrap();
 					w.varint(u64::from(wait.is_some())).unwrap();
 					if let Some(wait) = wait {
@@ -9221,6 +9207,48 @@ mod serve_tests {
 			assert!(done.is_ready(), "{version}: {path} was left waiting");
 			assert_eq!(refusal_code(&h.log.writes.lock().unwrap()[mark..], version), Some(0x10));
 			assert!(h.log.closes().is_empty());
+		}
+	}
+
+	/// A namespace that overflows `Path::MAX_BYTES` under a deep root is refused per
+	/// request, and the session stays open.
+	#[moq_clock::test]
+	async fn a_namespace_too_long_under_the_root_is_refused_per_request() {
+		for version in ALL_VERSIONS {
+			let h = serve(version);
+			let root = "r".repeat(crate::Path::MAX_BYTES - 2);
+			let scoped = h
+				._origin
+				.consume()
+				.scope(root.as_str(), &crate::Patterns::from(crate::Pattern::all()))
+				.unwrap();
+			let peer_setup = peer::PeerSetup::default();
+			peer_setup.set(peer::Peer::default());
+			let publisher = Publisher::new(
+				crate::time::sim(),
+				crate::driver::Transport::new(h.session.clone()),
+				scoped,
+				Control::new(false),
+				None,
+				peer_setup,
+				version,
+			);
+			let stream = Stream::open(&mut crate::driver::Transport::new(h.session.clone()), version)
+				.await
+				.unwrap();
+			let mark = h.log.writes.lock().unwrap().len();
+			publisher
+				.run_subscribe_stream(stream, subscribe(Filter::NextObject, None))
+				.await
+				.unwrap();
+
+			let wire = h.log.writes.lock().unwrap()[mark..].to_vec();
+			let mut buf = Decoder::new(&wire, version.into());
+			assert_eq!(buf.varint().unwrap(), ietf::RequestError::ID, "{version}");
+			let code = ietf::RequestError::decode(&mut buf, version).unwrap().error_code;
+			let expected = request::to_code(&Error::from(crate::path::TooLong), request::Kind::Subscribe, version);
+			assert_eq!(code, expected, "{version}");
+			assert!(h.log.closes().is_empty(), "{version}");
 		}
 	}
 
@@ -9291,7 +9319,7 @@ mod serve_tests {
 		let mut w = Encoder::new(&mut body, version.into());
 		ietf::SubscribeNamespace {
 			request_id: RequestId(REQUEST_ID),
-			namespace: crate::Path::new(""),
+			namespace: crate::Path::from_static(""),
 			hidden: false,
 		}
 		.encode_msg(&mut w, version)
@@ -10562,7 +10590,7 @@ mod serve_tests {
 
 	/// A standalone FETCH of `room/<track>`, spelled as [`standalone_fetch`] describes.
 	fn fetch_range(version: Version, track: &'static str, start: Location, end: Location) -> FetchType<'static> {
-		let namespace = crate::Path::new("room");
+		let namespace = crate::Path::from_static("room");
 		let track = track.into();
 		match Filter::is_draft22(version) {
 			true => FetchType::Filtered {
@@ -11296,7 +11324,7 @@ mod serve_tests {
 					settle().await;
 
 					let fetch_type = FetchType::Filtered {
-						namespace: crate::Path::new("room"),
+						namespace: crate::Path::from_static("room"),
 						track: "video".into(),
 						filter,
 					};
@@ -11629,7 +11657,7 @@ mod serve_tests {
 					subscriber_priority: 128,
 					group_order: GroupOrder::Ascending,
 					fetch_type: FetchType::Standalone {
-						namespace: crate::Path::new("room"),
+						namespace: crate::Path::from_static("room"),
 						track: "video".into(),
 						start: location,
 						end: Location { group: 0, object: 1 },
@@ -11712,7 +11740,7 @@ mod serve_tests {
 				subscriber_priority: 128,
 				group_order: GroupOrder::Ascending,
 				fetch_type: FetchType::Standalone {
-					namespace: crate::Path::new("room"),
+					namespace: crate::Path::from_static("room"),
 					track: "video".into(),
 					start: Location { group: 3, object: 0 },
 					end: Location { group: 4, object: 0 },
@@ -14470,7 +14498,7 @@ mod tests {
 			.unwrap();
 		let msg = ietf::SubscribeNamespace {
 			request_id: RequestId(1),
-			namespace: crate::Path::new(""),
+			namespace: crate::Path::from_static(""),
 			hidden: false,
 		};
 		let mut run = std::pin::pin!(publisher.run_subscribe_namespace_stream(stream, msg));
@@ -14541,7 +14569,7 @@ mod tests {
 			.unwrap();
 		let msg = ietf::SubscribeNamespace {
 			request_id: RequestId(1),
-			namespace: crate::Path::new(""),
+			namespace: crate::Path::from_static(""),
 			hidden: false,
 		};
 		let mut run = std::pin::pin!(publisher.run_subscribe_namespace_stream(stream, msg));
@@ -15005,7 +15033,7 @@ mod tests {
 			.unwrap();
 		let msg = ietf::SubscribeNamespace {
 			request_id: RequestId(1),
-			namespace: crate::Path::new(prefix),
+			namespace: crate::Path::new(prefix).unwrap(),
 			hidden,
 		};
 		let mut solicited = std::pin::pin!(publisher.clone().run_subscribe_namespace_stream(stream, msg));
@@ -15135,7 +15163,7 @@ mod tests {
 				.unwrap();
 			let msg = ietf::SubscribeNamespace {
 				request_id: RequestId(1),
-				namespace: crate::Path::new(""),
+				namespace: crate::Path::from_static(""),
 				hidden: false,
 			};
 			let mut run = std::pin::pin!(publisher.run_subscribe_namespace_stream(stream, msg));
@@ -15301,7 +15329,7 @@ mod tests {
 
 		// The state a refused or failed offer leaves behind: the peer holds nothing, and
 		// the loop is coming back to it on a timer.
-		let suffix: crate::PathOwned = crate::Path::new("from/peer").to_owned();
+		let suffix: crate::Path = crate::Path::from_static("from/peer");
 		let mut watch = Watched::new(crate::origin::Route::default().with_hops(hops));
 		watch.deferred = true;
 
@@ -16552,7 +16580,7 @@ mod tests {
 					max_age: None,
 					new_group: None,
 					request_id: RequestId(1),
-					track_namespace: crate::Path::new("nothing/here"),
+					track_namespace: crate::Path::from_static("nothing/here"),
 					track_name: "video".into(),
 					subscriber_priority: 128,
 					group_order: GroupOrder::Descending,
@@ -16630,7 +16658,7 @@ mod tests {
 				(
 					"standalone",
 					FetchType::Standalone {
-						namespace: crate::Path::new("nothing/here"),
+						namespace: crate::Path::from_static("nothing/here"),
 						track: "video".into(),
 						start: Location { group: 0, object: 0 },
 						end: Location { group: 1, object: 0 },
@@ -16639,7 +16667,7 @@ mod tests {
 				(
 					"empty range",
 					FetchType::Standalone {
-						namespace: crate::Path::new("nothing/here"),
+						namespace: crate::Path::from_static("nothing/here"),
 						track: "video".into(),
 						start: Location { group: 2, object: 0 },
 						end: Location { group: 1, object: 0 },
@@ -17009,7 +17037,7 @@ mod range_tests {
 			max_age: None,
 			new_group: None,
 			request_id: RequestId(1),
-			track_namespace: crate::Path::new("broadcast"),
+			track_namespace: crate::Path::from_static("broadcast"),
 			track_name: "video".into(),
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,

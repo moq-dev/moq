@@ -1481,7 +1481,7 @@ mod test {
 			let mut producer = Producer::new(&mut broadcast, Config::default()).unwrap();
 			let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
 			config.container = Container::Loc;
-			config.broadcast = Some("./left".into());
+			config.broadcast = Some(moq_net::path::Relative::new("./left").unwrap());
 			producer
 				.modify()
 				.unwrap()
@@ -1642,7 +1642,7 @@ mod test {
 
 	#[test]
 	fn cross_broadcast_renditions_round_trip_through_msf() {
-		let base = moq_net::Path::new("room/catalog");
+		let base = moq_net::Path::from_static("room/catalog");
 		let catalog = hang::Catalog::<()>::from_str(r#"{
 			"video": {"renditions": {"view": {"broadcast": "./left", "track": "video", "codec": "vp8", "container": {"kind": "loc"}}}},
 			"audio": {"renditions": {"sound": {"broadcast": "./right", "track": "audio", "codec": "opus", "sampleRate": 48000, "numberOfChannels": 2, "container": {"kind": "loc"}}}},
@@ -1654,25 +1654,25 @@ mod test {
 		let restored = crate::catalog::msf::from_msf(&msf, &base).unwrap();
 		assert_eq!(
 			base.try_resolve(restored.video.renditions["video"].broadcast.as_ref().unwrap()),
-			Some("room/left".into())
+			Some(moq_net::Path::from_static("room/left"))
 		);
 		assert_eq!(
 			base.try_resolve(restored.audio.renditions["audio"].broadcast.as_ref().unwrap()),
-			Some("room/right".into())
+			Some(moq_net::Path::from_static("room/right"))
 		);
 		assert_eq!(
 			base.try_resolve(restored.text.renditions["text"].broadcast.as_ref().unwrap()),
-			Some("captions".into())
+			Some(moq_net::Path::from_static("captions"))
 		);
 	}
 
 	#[test]
 	fn msf_refuses_unresolvable_broadcast_references() {
-		let base = moq_net::Path::new("room/catalog");
+		let base = moq_net::Path::from_static("room/catalog");
 		for reference in ["../../left", "../../../left"] {
 			let mut catalog = hang::Catalog::<()>::default();
 			let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
-			config.broadcast = Some(reference.into());
+			config.broadcast = Some(moq_net::path::Relative::new(reference).unwrap());
 			catalog.video.renditions.insert("video".into(), config);
 			assert!(to_msf_media::<()>(&catalog, &base).tracks.is_empty());
 			assert!(to_msf_media::<()>(&catalog, &moq_net::Path::empty()).tracks.is_empty());
@@ -1683,12 +1683,12 @@ mod test {
 	/// reference to such a broadcast is refused rather than read from the catalog's broadcast.
 	#[test]
 	fn msf_refuses_references_readers_would_take_as_the_catalog() {
-		let base = moq_net::Path::new("room/catalog");
+		let base = moq_net::Path::from_static("room/catalog");
 		for reference in ["../catalog", "./catalog/room/catalog"] {
 			let mut catalog = hang::Catalog::<()>::default();
 			let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
 			config.container = Container::Loc;
-			config.broadcast = Some(reference.into());
+			config.broadcast = Some(moq_net::path::Relative::new(reference).unwrap());
 			catalog.video.renditions.insert("video".into(), config);
 			assert!(to_msf_media::<()>(&catalog, &base).tracks.is_empty(), "{reference}");
 		}
@@ -1698,12 +1698,12 @@ mod test {
 	/// the later of two same-named tracks wins there.
 	#[test]
 	fn msf_names_are_unique_per_namespace_and_the_last_wins_a_hang_id() {
-		let base = moq_net::Path::new("room/catalog");
+		let base = moq_net::Path::from_static("room/catalog");
 		let mut catalog = hang::Catalog::<()>::default();
 		for (id, broadcast) in [("left", "./left"), ("right", "./right")] {
 			let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
 			config.track = Some("video".into());
-			config.broadcast = Some(broadcast.into());
+			config.broadcast = Some(moq_net::path::Relative::new(broadcast).unwrap());
 			catalog.video.renditions.insert(id.into(), config);
 		}
 		let msf = to_msf_media::<()>(&catalog, &base);
@@ -1714,7 +1714,7 @@ mod test {
 		assert_eq!(restored.video.renditions.len(), 1);
 		assert_eq!(
 			base.try_resolve(restored.video.renditions["video"].broadcast.as_ref().unwrap()),
-			Some("room/right".into())
+			Some(moq_net::Path::from_static("room/right"))
 		);
 	}
 

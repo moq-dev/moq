@@ -2505,7 +2505,11 @@ mod tests {
 			quic: None,
 			deadline,
 		}
-		.with_stats(registry.tier(Default::default()).session("room"));
+		.with_stats(
+			registry
+				.tier(Default::default())
+				.session(moq_net::Path::from_static("room")),
+		);
 		let Err(err) = request.ok().await else {
 			panic!("a reply the peer never took completed");
 		};

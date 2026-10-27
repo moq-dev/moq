@@ -37,7 +37,9 @@ struct Link {
 
 async fn dial(version: Version, dialer: &origin::Producer, edge: &origin::Producer) -> Link {
 	let registry = stats::Registry::new(stats::Config::new());
-	let session_stats = registry.tier(stats::Tier::default()).session("");
+	let session_stats = registry
+		.tier(stats::Tier::default())
+		.session(moq_net::Path::from_static(""));
 	let mut mock = moq_net::transport::memory::Config::default();
 	mock.protocol = Some(version.alpn().to_string());
 	let (client_transport, server_transport) = create_mock_session_pair(mock);

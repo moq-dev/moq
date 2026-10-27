@@ -432,7 +432,9 @@ async fn an_unknown_lite_range_abort_is_unspecified_on_every_wire() {
 async fn ended(version: &str, close: impl FnOnce(&MockPair)) -> (Error, moq_net::stats::Failures) {
 	let registry = moq_net::stats::Registry::new(Default::default());
 	let mut options = MockConnectOptions::new(version.parse().unwrap());
-	options.server_stats = registry.tier(Default::default()).session("room");
+	options.server_stats = registry
+		.tier(Default::default())
+		.session(moq_net::Path::from_static("room"));
 	let pair = connect_mock(options).await;
 	close(&pair);
 	let err = moq_clock::timeout(TIMEOUT, pair.server.closed())

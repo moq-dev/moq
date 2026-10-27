@@ -189,7 +189,7 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
-	let path = moq_net::Path::new(update.prefix.as_str()).to_owned();
+	let path = update.prefix.clone();
 	assert!(active, "expected announce, got retraction");
 	// Auth root for `/smoke` is "smoke"; the broadcast "test" announces underneath.
 	assert_eq!(path.as_str(), "test");
@@ -522,7 +522,7 @@ async fn relay_websocket_root_path_upgrades() {
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
-	let path = moq_net::Path::new(update.prefix.as_str()).to_owned();
+	let path = update.prefix.clone();
 	assert!(active, "expected announce, got retraction");
 	assert_eq!(path.as_str(), "test");
 	let bc = sub_consumer
@@ -660,7 +660,7 @@ async fn internal_tcp_round_trip() {
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
-	let path = moq_net::Path::new(update.prefix.as_str()).to_owned();
+	let path = update.prefix.clone();
 	assert!(active, "expected announce, got retraction");
 	assert_eq!(path.as_str(), "test");
 	let bc = sub_consumer
@@ -836,7 +836,7 @@ async fn path_round_trip(version: moq_net::Version, pub_url: url::Url, sub_url: 
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
-	let path = moq_net::Path::new(update.prefix.as_str()).to_owned();
+	let path = update.prefix.clone();
 
 	drop(track);
 	drop(bc);

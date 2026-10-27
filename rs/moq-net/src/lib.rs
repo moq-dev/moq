@@ -140,7 +140,7 @@ pub use driver::Driver;
 pub use epoch::{Epoch, InvalidEpoch};
 pub use error::*;
 pub use model::*;
-pub use path::{AsPath, InvalidPattern, Path, PathOwned, Pattern, Patterns};
+pub use path::{InvalidPattern, Path, Pattern, Patterns};
 #[cfg(feature = "async")]
 pub use server::Server;
 #[cfg(feature = "async")]

@@ -9,7 +9,7 @@
 diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.rs
 --- a/rs/moq-net/src/lite/subscriber.rs
 +++ b/rs/moq-net/src/lite/subscriber.rs
-@@ -3515 +3515 @@ fn withdraw(&mut self, path: &PathOwned) {
+@@ -3515 +3515 @@ fn withdraw(&mut self, path: &Path) {
 -			entry.dynamic.withdrawn();
 +			std::mem::ManuallyDrop::into_inner(entry.dynamic).withdrawn();
 @@ -3568,7 +3568,8 @@

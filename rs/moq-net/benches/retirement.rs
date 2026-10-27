@@ -32,7 +32,7 @@ fn retirement(c: &mut Criterion) {
 										if selected {
 											let watch = RequestValidity::new(
 												route,
-												&Path::new(&format!("route/{i}/jobs/{reader}")),
+												&Path::new(&format!("route/{i}/jobs/{reader}")).unwrap(),
 											);
 											pending.push(watch.start());
 											watches.push(watch);

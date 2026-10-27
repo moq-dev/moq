@@ -625,14 +625,14 @@ mod test {
 
 		let epoch: moq_net::Epoch = crate::origin::moq_mint_epoch().parse().unwrap();
 		let mut video = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
-		video.broadcast = Some(moq_net::path::Relative::new("./source").into_owned());
+		video.broadcast = Some(moq_net::path::Relative::new("./source").unwrap());
 		video.epoch = Some(epoch.clone());
 		catalog.video.renditions.insert("video".to_string(), video);
 		let local = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		catalog.video.renditions.insert("local".to_string(), local);
 
 		let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
-		audio.broadcast = Some(moq_net::path::Relative::new("../elsewhere").into_owned());
+		audio.broadcast = Some(moq_net::path::Relative::new("../elsewhere").unwrap());
 		catalog.audio.renditions.insert("audio".to_string(), audio);
 
 		let converted = convert_catalog(&catalog);

@@ -52,7 +52,7 @@ pub struct Archive {
 
 	/// The MoQ broadcast the archive is served back from, relative to this catalog, if any.
 	#[serde(default)]
-	pub replay: Option<moq_net::path::RelativeOwned>,
+	pub replay: Option<moq_net::path::Relative>,
 
 	/// The publisher instance [`replay`](Self::replay) names, when known. Absent accepts the
 	/// first one a reader resolves; see [`Reference::epoch`](super::Reference::epoch).
@@ -122,7 +122,7 @@ mod test {
 	#[test]
 	fn recording_roundtrips_replay_store_and_version() {
 		let mut archive = live();
-		archive.replay = Some(moq_net::path::RelativeOwned::new("./recordings/clip"));
+		archive.replay = Some(moq_net::path::Relative::new("./recordings/clip").unwrap());
 		archive.store = Some("https://objects.example/rec/".parse().unwrap());
 		archive.version = Some(Archive::VERSION);
 

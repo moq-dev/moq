@@ -106,19 +106,19 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 	};
 	config.resize.output = args.frames.0;
 
-	let source_path = moq_net::PathOwned::from(
+	let source_path = moq_net::Path::try_from(
 		moq.broadcast
 			.clone()
 			.context("`transcode` requires the source broadcast: pass --broadcast <name>")?,
-	);
+	)?;
 	if source_path.is_empty() {
 		anyhow::bail!("`transcode` requires the source broadcast: pass --broadcast <name>");
 	}
-	let output_path = moq_net::PathOwned::from(
+	let output_path = moq_net::Path::try_from(
 		args.output
 			.clone()
 			.unwrap_or_else(|| format!("{source_path}/transcode.hang")),
-	);
+	)?;
 
 	// Publish the derivative through one origin and consume the source through
 	// another, over a single auto-reconnecting session.
@@ -138,7 +138,10 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 	// Point the derivative catalog at the source renditions so players fetch them from the
 	// source directly. An empty reference would name the derivative broadcast itself, which
 	// publishes the rungs and nothing else.
-	config.source = source_path.relative(&output_path).filter(|rel| !rel.is_empty());
+	let source = source_path
+		.relative(&output_path)
+		.with_context(|| format!("`{output_path}` cannot reference the source broadcast `{source_path}`"))?;
+	config.source = Some(source).filter(|rel| !rel.is_empty());
 
 	let following = Following {
 		origin: remote.consume(),
@@ -158,8 +161,8 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 struct Following {
 	origin: moq_net::origin::Consumer,
 	publish: moq_net::origin::Producer,
-	source_path: moq_net::PathOwned,
-	output_path: moq_net::PathOwned,
+	source_path: moq_net::Path,
+	output_path: moq_net::Path,
 	config: moq_transcode::Config,
 }
 
@@ -232,8 +235,8 @@ mod tests {
 		let following = Following {
 			origin: origin.consume(),
 			publish: publish.clone(),
-			source_path: "source".into(),
-			output_path: "derived".into(),
+			source_path: hang::moq_net::Path::from_static("source"),
+			output_path: hang::moq_net::Path::from_static("derived"),
 			config: Default::default(),
 		};
 		let task = tokio::spawn(following.run());
@@ -279,8 +282,8 @@ mod tests {
 		let following = Following {
 			origin: origin.consume(),
 			publish: publish.clone(),
-			source_path: "source".into(),
-			output_path: "derived".into(),
+			source_path: hang::moq_net::Path::from_static("source"),
+			output_path: hang::moq_net::Path::from_static("derived"),
 			config: Default::default(),
 		};
 		let task = tokio::spawn(following.run());

@@ -1858,7 +1858,7 @@ mod tests {
 		let source = moq_mux::Source::new(origin.consume(), broadcast.consume());
 		let mut config = AudioConfig::new(AudioCodec::Pcm, SAMPLE_RATE, 1);
 		let absent = Track::of(&source, &config, "audio");
-		config.broadcast = Some(moq_net::path::RelativeOwned::new(""));
+		config.broadcast = Some(moq_net::path::Relative::new("").unwrap());
 		assert_eq!(Track::of(&source, &config, "audio"), absent);
 	}
 

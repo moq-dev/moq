@@ -95,7 +95,7 @@ fn publish(origin: &origin::Producer, epoch: &Epoch, tag: &str) -> Published {
 	catalog
 		.mutate(|catalog| {
 			let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
-			audio.broadcast = Some(moq_net::path::Relative::new("./media").into_owned());
+			audio.broadcast = Some(moq_net::path::Relative::new("./media").unwrap());
 			audio.epoch = Some(epoch.clone());
 			catalog.audio.renditions.insert("audio".into(), audio);
 		})

@@ -277,7 +277,9 @@ async fn datagrams_meter_the_bytes_on_the_wire() {
 			let mut options = MockConnectOptions::new("moq-lite-07-wip".parse::<Version>().unwrap());
 			options.client_publish = Some(publisher.consume());
 			options.server_subscribe = Some(relay.clone());
-			options.server_stats = ingress.tier(Default::default()).session("ingress");
+			options.server_stats = ingress
+				.tier(Default::default())
+				.session(moq_net::Path::from_static("ingress"));
 			let upstream = connect_mock(options).await;
 
 			let origin = produce_origin(3);
@@ -285,7 +287,9 @@ async fn datagrams_meter_the_bytes_on_the_wire() {
 			let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
 			options.server_publish = Some(relay.consume());
 			options.client_subscribe = Some(origin.clone());
-			options.server_stats = egress.tier(Default::default()).session("egress");
+			options.server_stats = egress
+				.tier(Default::default())
+				.session(moq_net::Path::from_static("egress"));
 			let downstream = connect_mock(options).await;
 
 			let consumer = origin.consume();

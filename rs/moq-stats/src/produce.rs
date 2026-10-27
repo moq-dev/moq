@@ -8,7 +8,7 @@ use std::task::Poll;
 
 use moq_clock::Instant;
 use moq_net::stats::{Presence, Registry, Report, Tier, Traffic, TrafficEntry};
-use moq_net::{Epoch, Path, PathOwned, broadcast, kio, origin, track};
+use moq_net::{Epoch, Path, broadcast, kio, origin, track};
 use serde::Serialize;
 use web_async::spawn;
 
@@ -36,13 +36,13 @@ pub struct Config {
 	/// `node` is unset), announced under a fresh [`Epoch`] each time. Also the
 	/// registry's exclude prefix, so serving a stats broadcast doesn't generate
 	/// more stats.
-	pub prefix: PathOwned,
+	pub prefix: Path,
 	/// Node suffix that disambiguates broadcasts from different relays sharing a
 	/// cluster origin. Set this on every node in multi-relay deployments. May be
 	/// multi-segment (e.g. `sjc/1`, `sjc/2`) so a region with multiple hosts can
 	/// nest under a shared region key. An empty path is treated as unset.
 	/// Default none.
-	pub node: Option<PathOwned>,
+	pub node: Option<Path>,
 	/// How long the publish task waits between drains. Default 1s. Non-zero:
 	/// it is the timescale of every track's group numbers, so a track opens at
 	/// most one group per interval.
@@ -79,7 +79,7 @@ impl Config {
 	pub fn new() -> Self {
 		Self {
 			origin: None,
-			prefix: PathOwned::from(".stats"),
+			prefix: Path::from_static(".stats"),
 			node: None,
 			interval: Duration::from_secs(1),
 			depth: 0,
@@ -95,7 +95,7 @@ impl Config {
 	}
 
 	/// Override the top-level prefix (default `.stats`).
-	pub fn with_prefix(mut self, prefix: impl Into<PathOwned>) -> Self {
+	pub fn with_prefix(mut self, prefix: impl Into<Path>) -> Self {
 		self.prefix = prefix.into();
 		self
 	}
@@ -107,7 +107,7 @@ impl Config {
 	}
 
 	/// Set the node suffix (default none). An empty path is treated as unset.
-	pub fn with_node(mut self, node: impl Into<Option<PathOwned>>) -> Self {
+	pub fn with_node(mut self, node: impl Into<Option<Path>>) -> Self {
 		self.node = node.into();
 		self
 	}
@@ -218,8 +218,8 @@ impl Producer {
 struct Task {
 	registry: Registry,
 	origin: origin::Producer,
-	prefix: PathOwned,
-	node: Option<PathOwned>,
+	prefix: Path,
+	node: Option<Path>,
 	depth: usize,
 	linger: Duration,
 	interval: Duration,
@@ -351,7 +351,7 @@ pub mod bench;
 /// [`PresenceFrame`](crate::PresenceFrame), or
 /// [`PrefixFrame`](crate::PrefixFrame) once sorted.
 struct Frame<V> {
-	entries: Vec<(PathOwned, V)>,
+	entries: Vec<(Path, V)>,
 }
 
 impl<V> Default for Frame<V> {
@@ -612,10 +612,10 @@ struct NodePublisher {
 	/// presence or prefix track parks until the next drain serves it instead
 	/// of being rejected `NotFound` on the spot.
 	dynamic: broadcast::Requests,
-	local: HashMap<PathOwned, HashMap<Tier, SideSlots>>,
+	local: HashMap<Path, HashMap<Tier, SideSlots>>,
 	totals: TotalsTrack,
 	/// Held presence tracks, keyed by stats label.
-	presence: HashMap<PathOwned, PresenceTrack>,
+	presence: HashMap<Path, PresenceTrack>,
 	/// Held prefix tracks, keyed by broadcast prefix. A `String` key, so a
 	/// drain looks each row's ancestors up by `&str` without allocating.
 	prefixes: HashMap<String, PrefixTrack>,
@@ -706,7 +706,7 @@ struct PresenceTrack {
 	sums: Cumulative<Presence>,
 	/// Wire collection starts at the current reading on every hold. Other presence
 	/// fields keep their existing live-session seeding behavior.
-	wire_start: HashMap<PathOwned, (u64, u64)>,
+	wire_start: HashMap<Path, (u64, u64)>,
 }
 
 impl PresenceTrack {
@@ -864,7 +864,7 @@ fn group_info() -> track::Info {
 
 impl GroupTrack {
 	fn create(broadcast: &broadcast::Producer, group: &str) -> Result<Self, moq_net::Error> {
-		let name = crate::group_track(group);
+		let name = crate::group_track(Path::new(group)?);
 		let track = broadcast.create_track(name.as_str(), group_info())?;
 		Ok(Self {
 			name,
@@ -930,7 +930,7 @@ impl GroupTrack {
 	/// or request holds its counters, plus its final readout, so every row is
 	/// listed: a label held by an idle request must not drop out and return
 	/// looking reset.
-	fn add_sessions(&mut self, label: &PathOwned, tier: &Tier, presence: Presence, closed: bool) {
+	fn add_sessions(&mut self, label: &Path, tier: &Tier, presence: Presence, closed: bool) {
 		let tier = self.tier(tier);
 		tier.totals.sessions.add(presence);
 		if closed {
@@ -990,7 +990,9 @@ impl NodePublisher {
 	/// Announce the node's broadcast with its totals track and, at depth 0, the
 	/// one group's track, which both live for the producer's life.
 	fn create(task: &Task) -> Option<Self> {
-		let advertised = advertised_path(&task.prefix, task.node.as_ref().map(PathOwned::as_str));
+		let advertised = advertised_path(&task.prefix, task.node.as_ref().map(Path::as_str))
+			.inspect_err(|err| tracing::warn!(%err, "stats: node path too long"))
+			.ok()?;
 		// A fresh epoch per announcement: a restart is a new broadcast, so no relay
 		// resumes it from groups cached under the old one.
 		let route = origin::Route::default().with_epoch(Epoch::mint());
@@ -1191,8 +1193,8 @@ impl NodePublisher {
 
 		// Pop everything queued, grouping the two flavors of one plain name so
 		// a pair is built from the actual requests where present.
-		let mut labels: HashMap<PathOwned, PendingPair> = HashMap::new();
-		let mut paths: HashMap<PathOwned, PendingPair> = HashMap::new();
+		let mut labels: HashMap<Path, PendingPair> = HashMap::new();
+		let mut paths: HashMap<Path, PendingPair> = HashMap::new();
 		let noop = kio::Waiter::noop();
 		while let Poll::Ready(Ok(request)) = self.dynamic.poll_requested_track(&noop) {
 			let keyed = match parse_presence_track(request.name()) {
@@ -1223,7 +1225,7 @@ impl NodePublisher {
 
 	/// Hold a requested label's presence track, publishing its current counters
 	/// so the subscription resolves at once. Cumulative from here on.
-	fn adopt_presence(&mut self, report: &Report, label: PathOwned, pending: PendingPair, stamp: Stamp) {
+	fn adopt_presence(&mut self, report: &Report, label: Path, pending: PendingPair, stamp: Stamp) {
 		// A request for a live track is served by the broadcast itself, so a
 		// live pair here means the requested flavor ended and cannot update.
 		if self.presence.contains_key(&label) {
@@ -1256,7 +1258,7 @@ impl NodePublisher {
 
 	/// Hold a requested prefix track, publishing its current counters so the
 	/// subscription resolves at once. Cumulative from here on.
-	fn adopt_prefix(&mut self, report: &Report, path: PathOwned, pending: PendingPair, tick: u64, stamp: Stamp) {
+	fn adopt_prefix(&mut self, report: &Report, path: Path, pending: PendingPair, tick: u64, stamp: Stamp) {
 		// Defensive only, as in `adopt_presence`.
 		if self.prefixes.contains_key(path.as_str()) {
 			pending.reject(moq_net::Error::NotFound);
@@ -1351,14 +1353,14 @@ fn group_key(path: &str, depth: usize) -> &str {
 /// `<prefix>/node/<node>`, or `<prefix>/node` without a node. The fixed `node`
 /// category leaves room for sibling categories (e.g. `<prefix>/cluster` for
 /// relay-mesh stats) under the same prefix.
-fn advertised_path(prefix: &Path, node: Option<&str>) -> PathOwned {
+fn advertised_path(prefix: &Path, node: Option<&str>) -> Result<Path, moq_net::path::TooLong> {
 	let mut out = prefix.as_str().to_string();
 	out.push_str("/node");
 	if let Some(node) = node {
 		out.push('/');
 		out.push_str(node);
 	}
-	PathOwned::from(out)
+	Path::new(&out)
 }
 
 #[cfg(test)]
@@ -1384,7 +1386,7 @@ mod tests {
 		let track = broadcast.create_track("t.json.z", compressed_info()).unwrap();
 		let mut snapshot = Snapshot::<Frame<u64>>::new(track.clone(), moq_json::snapshot::Config::default());
 		let frame = |n| Frame {
-			entries: vec![(PathOwned::from("a"), n)],
+			entries: vec![(Path::from_static("a"), n)],
 		};
 		let wanted = |track: &track::Producer| track.demand().wanted();
 
@@ -1478,7 +1480,7 @@ mod tests {
 				let mut drain = Drain::new(Task {
 					registry: registry.clone(),
 					origin: origin.clone(),
-					prefix: ".stats".into(),
+					prefix: moq_net::Path::from_static(".stats"),
 					node: None,
 					depth: 0,
 					linger: DEFAULT_LINGER,
@@ -1492,7 +1494,9 @@ mod tests {
 					link(&origin, &middle, version).await,
 					link(&middle, &edge, version).await,
 				];
-				let session = registry.tier(Tier::default()).session("room");
+				let session = registry
+					.tier(Tier::default())
+					.session(moq_net::Path::from_static("room"));
 				let counters = moq_net::transport::Wire::new();
 				let _wire = session.wire(counters.clone());
 				let store = |n: u64| {
@@ -1508,7 +1512,7 @@ mod tests {
 				assert!(active);
 				assert_eq!(route.prefix.as_str(), ".stats/node");
 				let broadcast = consumer.request_broadcast(".stats/node", None).await.unwrap();
-				let name = presence_track("room", encoding);
+				let name = presence_track(moq_net::Path::from_static("room"), encoding);
 				let mut config = moq_json::snapshot::consumer::Config::default();
 				config.compression = encoding.compression();
 				let mut previous = None;
@@ -1607,11 +1611,11 @@ mod tests {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let mut pair = TrackPair::<u64>::create(&broadcast, "t.json").unwrap();
-		let mut publish = |key: &str, value: u64| {
-			pair.frame.entries.push((PathOwned::from(key.to_string()), value));
+		let mut publish = |keys: Vec<Path>, value: u64| {
+			pair.frame.entries.extend(keys.into_iter().map(|key| (key, value)));
 			pair.publish("t.json", stamp(value));
 		};
-		publish("small", 1);
+		publish(vec![Path::from_static("small")], 1);
 
 		let read = |name: &str, compression| {
 			let track = consumer
@@ -1638,14 +1642,22 @@ mod tests {
 		assert_eq!(next(&mut plain).unwrap(), Some(small.clone()));
 		assert_eq!(next(&mut compressed).unwrap(), Some(small));
 
-		let huge = "a".repeat(moq_net::group::MAX_CACHE_BYTES as usize);
-		publish(&huge, 2);
+		publish(oversized_paths(""), 2);
 		for reader in [&mut plain, &mut compressed] {
 			assert!(matches!(
 				next(reader),
 				Err(moq_json::Error::Net(moq_net::Error::FrameTooLarge))
 			));
 		}
+	}
+
+	/// Distinct paths under `prefix` whose JSON overflows a group's cache, since one
+	/// path holds at most [`Path::MAX_BYTES`].
+	fn oversized_paths(prefix: &str) -> Vec<Path> {
+		let filler = "a".repeat(Path::MAX_BYTES - 16);
+		(0..=moq_net::group::MAX_CACHE_BYTES as usize / filler.len())
+			.map(|i| Path::new(&format!("{prefix}{i}/{filler}")).unwrap())
+			.collect()
 	}
 
 	/// Build an origin producer, spawning its driver on the ambient runtime.
@@ -1684,7 +1696,7 @@ mod tests {
 		let producer = Producer::new(
 			Config::new()
 				.with_origin(origin.clone())
-				.with_node(node.map(|s| PathOwned::from(s.to_string()))),
+				.with_node(node.map(|s| Path::try_from(s.to_string()).unwrap())),
 		);
 		(producer, origin)
 	}
@@ -1713,7 +1725,7 @@ mod tests {
 		frames: usize,
 		frame_size: usize,
 	) -> Feed {
-		let ctx = registry.tier(tier).session("feed");
+		let ctx = registry.tier(tier).session(moq_net::Path::from_static("feed"));
 		let origin = produce_origin();
 		// Egress (publisher side) is tagged; the local publisher stays untagged.
 		let egress = origin.consume().with_stats(ctx);
@@ -1768,7 +1780,7 @@ mod tests {
 		assert!(active);
 		let broadcast = origin
 			.consume()
-			.request_broadcast(moq_net::Path::new(update.prefix.as_str()), None)
+			.request_broadcast(&update.prefix, None)
 			.await
 			.expect("resolve");
 		(update.prefix.as_str().to_string(), broadcast)
@@ -1787,7 +1799,7 @@ mod tests {
 	/// The latest buffered frame on group `group`'s track.
 	async fn read_group(broadcast: &moq_net::broadcast::Consumer, group: &str) -> crate::GroupFrame {
 		let track = broadcast
-			.track(&crate::group_track(group))
+			.track(&crate::group_track(moq_net::Path::new(group).unwrap()))
 			.expect("track")
 			.subscribe(None)
 			.await
@@ -1875,7 +1887,10 @@ mod tests {
 
 		let origin = produce_origin();
 		let producer = node_producer(&origin);
-		let session = producer.registry().tier(Tier::default()).session("acme/live");
+		let session = producer
+			.registry()
+			.tier(Tier::default())
+			.session(moq_net::Path::from_static("acme/live"));
 		let counters = moq_net::transport::Wire::new();
 		let _wire = session.wire(counters.clone());
 		let step = async |millis: u64| {
@@ -1921,7 +1936,7 @@ mod tests {
 		let drain = Drain::new(Task {
 			registry: Registry::new(moq_net::stats::Config::new()),
 			origin: produce_origin(),
-			prefix: ".stats".into(),
+			prefix: moq_net::Path::from_static(".stats"),
 			node: None,
 			depth: 0,
 			linger: DEFAULT_LINGER,
@@ -1944,7 +1959,7 @@ mod tests {
 		Producer::new(
 			Config::new()
 				.with_origin(origin.clone())
-				.with_node(PathOwned::from("sjc")),
+				.with_node(Path::from_static("sjc")),
 		)
 	}
 
@@ -1995,7 +2010,7 @@ mod tests {
 			.request_broadcast(path.as_str(), None)
 			.await
 			.expect("resolve");
-		let mut old = subscribe(&stats, &crate::group_track("")).await;
+		let mut old = subscribe(&stats, &crate::group_track(moq_net::Path::from_static(""))).await;
 		while try_next_frame(&mut old).is_some() {}
 
 		let second = node_producer(&origin);
@@ -2111,13 +2126,19 @@ mod tests {
 		let data = produce_origin();
 		let source = data
 			.clone()
-			.with_stats(registry.tier(Tier::default()).session("publisher"))
+			.with_stats(
+				registry
+					.tier(Tier::default())
+					.session(moq_net::Path::from_static("publisher")),
+			)
 			.publish("foo/bar", origin::Route::default())
 			.expect("publish");
 		let mut video = source.create_track("video", timed()).expect("create_track");
-		let egress = data
-			.consume()
-			.with_stats(registry.tier(Tier::default()).session("viewer"));
+		let egress = data.consume().with_stats(
+			registry
+				.tier(Tier::default())
+				.session(moq_net::Path::from_static("viewer")),
+		);
 
 		async fn view(egress: &origin::Consumer, video: &mut track::Producer, size: usize) {
 			let broadcast = egress.request_broadcast("foo/bar", None).await.expect("resolve");
@@ -2181,7 +2202,7 @@ mod tests {
 		let producer = Producer::new(
 			Config::new()
 				.with_origin(origin.clone())
-				.with_node(PathOwned::from("sjc"))
+				.with_node(Path::from_static("sjc"))
 				.with_depth(1)
 				.with_linger(linger),
 		);
@@ -2203,9 +2224,18 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn session_track_surfaces_by_root() {
 		let (producer, origin) = test_producer(Some("sjc"));
-		let _a = producer.registry().tier(Tier::default()).session("acme");
-		let _b = producer.registry().tier(Tier::default()).session("acme");
-		let _c = producer.registry().tier(Tier::new("region/sjc")).session("peer");
+		let _a = producer
+			.registry()
+			.tier(Tier::default())
+			.session(moq_net::Path::from_static("acme"));
+		let _b = producer
+			.registry()
+			.tier(Tier::default())
+			.session(moq_net::Path::from_static("acme"));
+		let _c = producer
+			.registry()
+			.tier(Tier::new(moq_net::Path::from_static("region/sjc")))
+			.session(moq_net::Path::from_static("peer"));
 
 		drive_tick().await;
 
@@ -2230,11 +2260,14 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn request_root_stays_in_the_frame_while_held() {
 		let (producer, origin) = test_producer(Some("sjc"));
-		let first = producer.registry().tier(Tier::default()).request("acme");
+		let first = producer
+			.registry()
+			.tier(Tier::default())
+			.request(moq_net::Path::from_static("acme"));
 		drive_tick().await;
 		let (_, broadcast) = announced(&origin).await;
 		let track = broadcast
-			.track(&crate::group_track(""))
+			.track(&crate::group_track(moq_net::Path::from_static("")))
 			.expect("track")
 			.subscribe(None)
 			.await
@@ -2260,7 +2293,10 @@ mod tests {
 		drive_tick().await;
 		assert!(!drain(&mut track).contains(&None), "an idle request stays");
 
-		let second = producer.registry().tier(Tier::default()).request("acme");
+		let second = producer
+			.registry()
+			.tier(Tier::default())
+			.request(moq_net::Path::from_static("acme"));
 		drive_tick().await;
 		assert_eq!(drain(&mut track), [Some(2)]);
 
@@ -2274,9 +2310,18 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn totals_split_sessions_by_tier() {
 		let (producer, origin) = test_producer(Some("sjc"));
-		let _a = producer.registry().tier(Tier::default()).session("acme");
-		let b = producer.registry().tier(Tier::default()).session("beta");
-		let _c = producer.registry().tier(Tier::new("region/sjc")).session("peer");
+		let _a = producer
+			.registry()
+			.tier(Tier::default())
+			.session(moq_net::Path::from_static("acme"));
+		let b = producer
+			.registry()
+			.tier(Tier::default())
+			.session(moq_net::Path::from_static("beta"));
+		let _c = producer
+			.registry()
+			.tier(Tier::new(moq_net::Path::from_static("region/sjc")))
+			.session(moq_net::Path::from_static("peer"));
 
 		drive_tick().await;
 		let (_, broadcast) = announced(&origin).await;
@@ -2299,7 +2344,7 @@ mod tests {
 	/// the producer adopts the request.
 	async fn hold_presence(broadcast: &moq_net::broadcast::Consumer, label: &str) -> track::Ordered {
 		let subscribing = broadcast
-			.track(&presence_track(label, Encoding::Plain))
+			.track(&presence_track(moq_net::Path::new(label).unwrap(), Encoding::Plain))
 			.expect("track")
 			.subscribe(None);
 		drive_tick().await;
@@ -2313,9 +2358,15 @@ mod tests {
 	async fn presence_track_is_cumulative_while_held() {
 		let (producer, origin) = test_producer(Some("sjc"));
 		let registry = producer.registry();
-		let first = registry.tier(Tier::default()).session("acme/live");
-		let _other = registry.tier(Tier::new("rtmp")).session("acme/live");
-		let _unrelated = registry.tier(Tier::default()).session("beta");
+		let first = registry
+			.tier(Tier::default())
+			.session(moq_net::Path::from_static("acme/live"));
+		let _other = registry
+			.tier(Tier::new(moq_net::Path::from_static("rtmp")))
+			.session(moq_net::Path::from_static("acme/live"));
+		let _unrelated = registry
+			.tier(Tier::default())
+			.session(moq_net::Path::from_static("beta"));
 		drive_tick().await;
 		let (_, broadcast) = announced(&origin).await;
 
@@ -2339,7 +2390,9 @@ mod tests {
 		assert_eq!(frame[""].active(), 0);
 
 		// A new session under the label continues the count.
-		let _again = registry.tier(Tier::default()).session("acme/live");
+		let _again = registry
+			.tier(Tier::default())
+			.session(moq_net::Path::from_static("acme/live"));
 		drive_tick().await;
 		let mut last = None;
 		while let Some(frame) = try_presence(&mut track) {
@@ -2359,7 +2412,7 @@ mod tests {
 		let mut drain = Drain::new(Task {
 			registry: registry.clone(),
 			origin: origin.clone(),
-			prefix: PathOwned::from(".stats"),
+			prefix: Path::from_static(".stats"),
 			node: None,
 			depth: 0,
 			linger: DEFAULT_LINGER,
@@ -2379,7 +2432,7 @@ mod tests {
 
 		// Let the request reach the stats broadcast's queue before the drain.
 		let subscribing = broadcast
-			.track(&presence_track("", Encoding::Plain))
+			.track(&presence_track(moq_net::Path::from_static(""), Encoding::Plain))
 			.expect("track")
 			.subscribe(None);
 		for _ in 0..8 {
@@ -2390,7 +2443,7 @@ mod tests {
 		assert_eq!(try_presence(&mut track), Some(PresenceFrame::new()), "held at zero");
 
 		// The label records while held: the same subscription carries it.
-		let _session = registry.tier(Tier::default()).session("");
+		let _session = registry.tier(Tier::default()).session(moq_net::Path::from_static(""));
 		tokio::time::advance(Duration::from_secs(1)).await;
 		tick();
 		assert_eq!(try_presence(&mut track).expect("recorded")[""].active(), 1);
@@ -2419,7 +2472,7 @@ mod tests {
 		let pending: Vec<_> = ["beta", "acme/0", "acme/1"]
 			.into_iter()
 			.map(|label| {
-				acme.track(&presence_track(label, Encoding::Plain))
+				acme.track(&presence_track(moq_net::Path::new(label).unwrap(), Encoding::Plain))
 					.expect("track")
 					.subscribe(None)
 			})
@@ -2432,7 +2485,10 @@ mod tests {
 
 		// A held label's compressed flavor shares the live pair.
 		let subscribing = acme
-			.track(&presence_track("acme/0", Encoding::Compressed))
+			.track(&presence_track(
+				moq_net::Path::from_static("acme/0"),
+				Encoding::Compressed,
+			))
 			.expect("track")
 			.subscribe(None);
 		drive_tick().await;
@@ -2443,7 +2499,7 @@ mod tests {
 	/// producer adopts the request.
 	async fn hold_prefix(broadcast: &moq_net::broadcast::Consumer, path: &str) -> track::Ordered {
 		let subscribing = broadcast
-			.track(&prefix_track(path, Encoding::Plain))
+			.track(&prefix_track(moq_net::Path::new(path).unwrap(), Encoding::Plain))
 			.expect("track")
 			.subscribe(None);
 		drive_tick().await;
@@ -2484,7 +2540,15 @@ mod tests {
 		let _own = feed(registry, Tier::default(), "acme", true, 1, 1).await;
 		let _live = feed(registry, Tier::default(), "acme/live", true, 1, 10).await;
 		let _cam = feed(registry, Tier::default(), "acme/live/cam", true, 1, 100).await;
-		let _rtmp = feed(registry, Tier::new("rtmp"), "acme/vod", true, 1, 1000).await;
+		let _rtmp = feed(
+			registry,
+			Tier::new(moq_net::Path::from_static("rtmp")),
+			"acme/vod",
+			true,
+			1,
+			1000,
+		)
+		.await;
 		let _other = feed(registry, Tier::default(), "beta/live", true, 1, 5).await;
 		drive_tick().await;
 		let (_, acme) = announced(&origin).await;
@@ -2514,7 +2578,10 @@ mod tests {
 		assert_eq!(frame[""].publisher.bytes, 5);
 		let deep = ["acme"; Path::MAX_PARTS + 1].join("/");
 		let subscribing = acme
-			.track(&prefix_track(deep.as_str(), Encoding::Plain))
+			.track(&prefix_track(
+				moq_net::Path::new(deep.as_str()).unwrap(),
+				Encoding::Plain,
+			))
 			.expect("track")
 			.subscribe(None);
 		drive_tick().await;
@@ -2532,13 +2599,19 @@ mod tests {
 		let data = produce_origin();
 		let source = data
 			.clone()
-			.with_stats(registry.tier(Tier::default()).session("publisher"))
+			.with_stats(
+				registry
+					.tier(Tier::default())
+					.session(moq_net::Path::from_static("publisher")),
+			)
 			.publish("acme/live", origin::Route::default())
 			.expect("publish");
 		let video = source.create_track("video", timed()).expect("create_track");
-		let egress = data
-			.consume()
-			.with_stats(registry.tier(Tier::default()).session("viewer"));
+		let egress = data.consume().with_stats(
+			registry
+				.tier(Tier::default())
+				.session(moq_net::Path::from_static("viewer")),
+		);
 		let broadcast = egress.request_broadcast("acme/live", None).await.expect("resolve");
 		let mut subs = Vec::new();
 		for _ in 0..300 {
@@ -2616,7 +2689,7 @@ mod tests {
 		let mut drain = Drain::new(Task {
 			registry: registry.clone(),
 			origin: origin.clone(),
-			prefix: PathOwned::from(".stats"),
+			prefix: Path::from_static(".stats"),
 			node: None,
 			depth: 0,
 			linger: DEFAULT_LINGER,
@@ -2635,7 +2708,7 @@ mod tests {
 			.expect("resolve");
 
 		let subscribing = broadcast
-			.track(&prefix_track("acme", Encoding::Plain))
+			.track(&prefix_track(moq_net::Path::from_static("acme"), Encoding::Plain))
 			.expect("track")
 			.subscribe(None);
 		for _ in 0..8 {
@@ -2685,12 +2758,20 @@ mod tests {
 
 	#[test]
 	fn advertised_path_with_and_without_node() {
-		let prefix = Path::new(".stats");
-		assert_eq!(advertised_path(&prefix, Some("sjc")).as_str(), ".stats/node/sjc");
-		assert_eq!(advertised_path(&prefix, Some("sjc/1")).as_str(), ".stats/node/sjc/1");
-		assert_eq!(advertised_path(&prefix, None).as_str(), ".stats/node");
+		let prefix = Path::from_static(".stats");
 		assert_eq!(
-			advertised_path(&Path::new("metrics"), Some("lon")).as_str(),
+			advertised_path(&prefix, Some("sjc")).unwrap().as_str(),
+			".stats/node/sjc"
+		);
+		assert_eq!(
+			advertised_path(&prefix, Some("sjc/1")).unwrap().as_str(),
+			".stats/node/sjc/1"
+		);
+		assert_eq!(advertised_path(&prefix, None).unwrap().as_str(), ".stats/node");
+		assert_eq!(
+			advertised_path(&Path::from_static("metrics"), Some("lon"))
+				.unwrap()
+				.as_str(),
 			"metrics/node/lon"
 		);
 	}
@@ -2728,7 +2809,7 @@ mod tests {
 		let mut frame = Frame::default();
 		let mut map = BTreeMap::new();
 		for (path, bytes) in [("room/b", 2), ("room/a", 1), ("other", 3), ("room/a/cam", 4)] {
-			frame.entries.push((PathOwned::from(path), traffic(bytes)));
+			frame.entries.push((Path::try_from(path).unwrap(), traffic(bytes)));
 			map.insert(path.to_string(), traffic(bytes));
 		}
 		frame.entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
@@ -2750,12 +2831,12 @@ mod tests {
 			publisher: None,
 			subscriber: Some(usage.subscriber),
 		};
-		tier.paths.entries.push((PathOwned::from("acme/live"), side));
-		tier.labels.entries.push((PathOwned::from("acme"), presence));
+		tier.paths.entries.push((Path::from_static("acme/live"), side));
+		tier.labels.entries.push((Path::from_static("acme"), presence));
 		let body = GroupBody {
 			epoch: Epoch::mint(),
 			tiers: Frame {
-				entries: vec![(PathOwned::from(""), tier)],
+				entries: vec![(Path::from_static(""), tier)],
 			},
 		};
 
@@ -2825,7 +2906,7 @@ mod tests {
 				for t in 0..tiers {
 					let tier = match t {
 						0 => Tier::default(),
-						t => Tier::new(format!("tier{t}")),
+						t => Tier::new(moq_net::Path::new(&format!("tier{t}")).unwrap()),
 					};
 					for b in 0..broadcasts {
 						feeds.push(feed(&registry, tier.clone(), &format!("room{b}/cam"), true, 1, 8).await);
@@ -2835,7 +2916,7 @@ mod tests {
 				let mut drain = Drain::new(Task {
 					registry,
 					origin: produce_origin(),
-					prefix: PathOwned::from(".stats"),
+					prefix: Path::from_static(".stats"),
 					node: None,
 					depth,
 					linger: DEFAULT_LINGER,
@@ -2854,7 +2935,7 @@ mod tests {
 					let stamp = drain.stamp(moq_clock::now());
 					drain.node.adopt_prefix(
 						&drain.report,
-						PathOwned::from("room0"),
+						Path::from_static("room0"),
 						PendingPair::default(),
 						tick,
 						stamp,
@@ -2923,7 +3004,7 @@ mod tests {
 		let mut drain = Drain::new(Task {
 			registry: registry.clone(),
 			origin: origin.clone(),
-			prefix: ".stats".into(),
+			prefix: moq_net::Path::from_static(".stats"),
 			node: None,
 			depth: 1,
 			linger: Duration::from_secs(10),
@@ -2934,7 +3015,9 @@ mod tests {
 		let _link = link(&origin, &edge, "moq-lite-07-wip".parse().unwrap()).await;
 		let start = Instant::now();
 
-		let acme = registry.tier(Tier::default()).session("acme/live");
+		let acme = registry
+			.tier(Tier::default())
+			.session(moq_net::Path::from_static("acme/live"));
 		drain.collect();
 		drain.publish(start);
 		let consumer = edge.consume().with_hidden(true);
@@ -2946,14 +3029,18 @@ mod tests {
 		let mut tracks = broadcast.tracks().unwrap();
 		assert_eq!(next_listed(&mut drain, start, &mut tracks).await, ("acme".into(), true));
 
-		let beta = registry.tier(Tier::default()).session("beta");
+		let beta = registry
+			.tier(Tier::default())
+			.session(moq_net::Path::from_static("beta"));
 		assert_eq!(next_listed(&mut drain, start, &mut tracks).await, ("beta".into(), true));
 
 		// Empty, acme lingers: still listed, its totals keeping the ended session.
 		drop(acme);
 		let lingering = start + Duration::from_secs(9);
 		let stats = crate::Consumer::new(broadcast.clone(), Default::default());
-		let mut acme = pumping_at(&mut drain, lingering, stats.group("acme")).await.unwrap();
+		let mut acme = pumping_at(&mut drain, lingering, stats.group(moq_net::Path::from_static("acme")))
+			.await
+			.unwrap();
 		let mut frame = pumping_at(&mut drain, lingering, acme.next()).await.unwrap().unwrap();
 		while !frame.tiers[""].labels.is_empty() {
 			frame = pumping_at(&mut drain, lingering, acme.next()).await.unwrap().unwrap();
@@ -2967,7 +3054,9 @@ mod tests {
 			("acme".into(), false)
 		);
 		assert!(pumping_at(&mut drain, lingered, acme.next()).await.unwrap().is_none());
-		let mut beta_reader = pumping_at(&mut drain, lingered, stats.group("beta")).await.unwrap();
+		let mut beta_reader = pumping_at(&mut drain, lingered, stats.group(moq_net::Path::from_static("beta")))
+			.await
+			.unwrap();
 		let frame = pumping_at(&mut drain, lingered, beta_reader.next())
 			.await
 			.unwrap()
@@ -2975,7 +3064,9 @@ mod tests {
 		assert_eq!(frame.tiers[""].labels.keys().collect::<Vec<_>>(), ["beta"]);
 
 		// A return is listed again on the same broadcast, with no announce.
-		let _acme = registry.tier(Tier::default()).session("acme/live");
+		let _acme = registry
+			.tier(Tier::default())
+			.session(moq_net::Path::from_static("acme/live"));
 		assert_eq!(
 			next_listed(&mut drain, lingered, &mut tracks).await,
 			("acme".into(), true)
@@ -3001,9 +3092,11 @@ mod tests {
 			track.next_group().await.unwrap().unwrap().sequence
 		};
 
-		let session = registry.tier(Tier::default()).session("acme/live");
+		let session = registry
+			.tier(Tier::default())
+			.session(moq_net::Path::from_static("acme/live"));
 		drive_tick().await;
-		let mut reader = stats.group("acme").await.expect("listed");
+		let mut reader = stats.group(moq_net::Path::from_static("acme")).await.expect("listed");
 		let first = reader.next().await.unwrap().unwrap();
 		assert_eq!(first.tiers[""].sessions.sessions_started, 1);
 		let old_sequence = sequence(&broadcast).await;
@@ -3018,10 +3111,12 @@ mod tests {
 		assert_eq!(last.epoch, first.epoch);
 		assert_eq!(last.tiers[""].sessions.sessions_ended, 1);
 
-		let _session = registry.tier(Tier::default()).session("acme/live");
+		let _session = registry
+			.tier(Tier::default())
+			.session(moq_net::Path::from_static("acme/live"));
 		drive_tick().await;
 		let second = stats
-			.group("acme")
+			.group(moq_net::Path::from_static("acme"))
 			.await
 			.expect("listed again")
 			.next()
@@ -3054,7 +3149,7 @@ mod tests {
 		let mut drain = Drain::new(Task {
 			registry: registry.clone(),
 			origin: produce_origin(),
-			prefix: ".stats".into(),
+			prefix: moq_net::Path::from_static(".stats"),
 			node: None,
 			depth: 1,
 			linger: Duration::ZERO,
@@ -3063,15 +3158,25 @@ mod tests {
 		.unwrap();
 		let stats = crate::Consumer::new(drain.node.broadcast.consume(), Default::default());
 
-		let _acme = registry.tier(Tier::default()).session("acme");
-		let _big = registry.tier(Tier::default()).session("big");
-		let mut acme = pumping(&mut drain, stats.group("acme")).await.unwrap();
-		let mut big = pumping(&mut drain, stats.group("big")).await.unwrap();
+		let _acme = registry
+			.tier(Tier::default())
+			.session(moq_net::Path::from_static("acme"));
+		let _big = registry
+			.tier(Tier::default())
+			.session(moq_net::Path::from_static("big"));
+		let mut acme = pumping(&mut drain, stats.group(moq_net::Path::from_static("acme")))
+			.await
+			.unwrap();
+		let mut big = pumping(&mut drain, stats.group(moq_net::Path::from_static("big")))
+			.await
+			.unwrap();
 		assert!(pumping(&mut drain, acme.next()).await.unwrap().is_some());
 		assert!(pumping(&mut drain, big.next()).await.unwrap().is_some());
 
-		let huge = format!("big/{}", "a".repeat(moq_net::group::MAX_CACHE_BYTES as usize));
-		let _huge = registry.tier(Tier::default()).session(huge.as_str());
+		let _huge: Vec<_> = oversized_paths("big/")
+			.into_iter()
+			.map(|path| registry.tier(Tier::default()).session(path))
+			.collect();
 		let (end, _) = pumping(&mut drain, drain_group(&mut big)).await;
 		assert!(
 			matches!(
@@ -3081,7 +3186,9 @@ mod tests {
 			"{end:?}"
 		);
 
-		let _more = registry.tier(Tier::default()).session("acme/more");
+		let _more = registry
+			.tier(Tier::default())
+			.session(moq_net::Path::from_static("acme/more"));
 		let mut frame = pumping(&mut drain, acme.next()).await.unwrap().unwrap();
 		while frame.tiers[""].labels.len() < 2 {
 			frame = pumping(&mut drain, acme.next()).await.unwrap().unwrap();
@@ -3103,18 +3210,39 @@ mod tests {
 		let _beta = feed(registry, Tier::default(), "beta/live", true, 1, 50).await;
 		drive_tick().await;
 
-		let frame = stats.group("acme").await.unwrap().next().await.unwrap().unwrap();
+		let frame = stats
+			.group(moq_net::Path::from_static("acme"))
+			.await
+			.unwrap()
+			.next()
+			.await
+			.unwrap()
+			.unwrap();
 		let acme = &frame.tiers[""];
 		assert_eq!(acme.paths.keys().collect::<Vec<_>>(), ["acme/live"]);
 		assert_eq!(acme.paths["acme/live"].publisher.bytes, 100);
 		assert_eq!(acme.publisher.bytes, 100, "the totals are the group's alone");
 		assert!(acme.labels.is_empty());
 
-		let frame = stats.group("beta").await.unwrap().next().await.unwrap().unwrap();
+		let frame = stats
+			.group(moq_net::Path::from_static("beta"))
+			.await
+			.unwrap()
+			.next()
+			.await
+			.unwrap()
+			.unwrap();
 		assert_eq!(frame.tiers[""].paths.keys().collect::<Vec<_>>(), ["beta/live"]);
 		assert_eq!(frame.tiers[""].publisher.bytes, 50);
 
-		let frame = stats.group("feed").await.unwrap().next().await.unwrap().unwrap();
+		let frame = stats
+			.group(moq_net::Path::from_static("feed"))
+			.await
+			.unwrap()
+			.next()
+			.await
+			.unwrap()
+			.unwrap();
 		assert!(frame.tiers[""].paths.is_empty());
 		assert_eq!(frame.tiers[""].labels["feed"].sessions_started, 2);
 

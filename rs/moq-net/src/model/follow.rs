@@ -2,7 +2,7 @@ use std::task::{Poll, ready};
 
 use super::WeakEntry;
 use super::origin_impl::{Announce, AnnounceConsumer, AnnounceEvent, Consumer, Routing};
-use crate::{Epoch, Error, PathOwned, broadcast};
+use crate::{Epoch, Error, Path, broadcast};
 
 /// The announcements covering one path, as one broadcast coming online, being replaced, and
 /// going offline. Created by [`Consumer::follow`](crate::origin::Consumer::follow).
@@ -15,7 +15,7 @@ use crate::{Epoch, Error, PathOwned, broadcast};
 /// ignored.
 pub struct Follow {
 	announced: AnnounceConsumer,
-	path: PathOwned,
+	path: Path,
 	/// Every route standing over the path.
 	covering: Vec<Standing>,
 	/// How many events the cursor has delivered.
@@ -40,7 +40,7 @@ struct Standing {
 }
 
 impl Follow {
-	pub(super) fn new(announced: AnnounceConsumer, path: PathOwned) -> Self {
+	pub(super) fn new(announced: AnnounceConsumer, path: Path) -> Self {
 		Self {
 			announced,
 			path,
@@ -195,7 +195,7 @@ impl Follow {
 /// [`Consumer::announced_broadcast`](crate::origin::Consumer::announced_broadcast).
 pub struct AnnouncedBroadcast {
 	consumer: Consumer,
-	path: PathOwned,
+	path: Path,
 	/// The only instance handed out, if pinned.
 	epoch: Option<Epoch>,
 	follow: Follow,
@@ -209,7 +209,7 @@ pub struct AnnouncedBroadcast {
 }
 
 impl AnnouncedBroadcast {
-	pub(super) fn new(consumer: Consumer, path: PathOwned, epoch: Option<Epoch>, follow: Follow) -> Self {
+	pub(super) fn new(consumer: Consumer, path: Path, epoch: Option<Epoch>, follow: Follow) -> Self {
 		Self {
 			consumer,
 			path,

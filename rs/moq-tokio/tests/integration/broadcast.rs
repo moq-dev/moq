@@ -661,13 +661,10 @@ async fn broadcast_moq_lite_05_untimed_track() {
 		.expect("announce timeout")
 		.expect("origin closed");
 	assert!(active, "expected announce");
-	let bc = tokio::time::timeout(
-		TIMEOUT,
-		sub_consumer.request_broadcast(moq_net::Path::new(update.prefix.as_str()), None),
-	)
-	.await
-	.expect("request timed out")
-	.expect("announced broadcast resolves");
+	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast(&update.prefix, None))
+		.await
+		.expect("request timed out")
+		.expect("announced broadcast resolves");
 
 	let mut track_sub = bc
 		.track("video")
@@ -759,13 +756,10 @@ async fn broadcast_moq_transport_22_current_group_join() {
 	let (announced, announced_active) = next_announce(&mut announcements).await;
 	assert_eq!(announced.prefix.as_str(), "test");
 	assert!(announced_active, "expected an announce");
-	let remote = tokio::time::timeout(
-		TIMEOUT,
-		sub_consumer.request_broadcast(moq_net::Path::new(announced.prefix.as_str()), None),
-	)
-	.await
-	.expect("request timed out")
-	.expect("announced broadcast resolves");
+	let remote = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast(&announced.prefix, None))
+		.await
+		.expect("request timed out")
+		.expect("announced broadcast resolves");
 
 	let mut subscriber = tokio::time::timeout(TIMEOUT, async { remote.track("video").unwrap().subscribe(None).await })
 		.await
@@ -2209,13 +2203,10 @@ async fn quic_driver_task_inherits_connection_span() {
 		.expect("announce timed out")
 		.expect("origin closed");
 	assert!(active, "expected announce, got retraction");
-	let bc = tokio::time::timeout(
-		TIMEOUT,
-		sub_consumer.request_broadcast(moq_net::Path::new(update.prefix.as_str()), None),
-	)
-	.await
-	.expect("request timed out")
-	.expect("announced broadcast resolves");
+	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast(&update.prefix, None))
+		.await
+		.expect("request timed out")
+		.expect("announced broadcast resolves");
 
 	// Triggers `lite/publisher.rs`'s "subscribed started" log on the server,
 	// from inside the driver task the runtime hands to `tokio::spawn`.
@@ -2435,7 +2426,9 @@ async fn idle_subscription_releases_the_viewer_count() {
 
 	// The publisher counts viewers through a stats context, exactly like the relay.
 	let registry = moq_net::stats::Registry::new(moq_net::stats::Config::new());
-	let stats = registry.tier(moq_net::stats::Tier::default()).session("");
+	let stats = registry
+		.tier(moq_net::stats::Tier::default())
+		.session(moq_net::Path::empty());
 
 	let sub_origin = moq_tokio::origin::spawn();
 	let sub_consumer = sub_origin.consume();
@@ -2466,13 +2459,10 @@ async fn idle_subscription_releases_the_viewer_count() {
 		.expect("announce timeout")
 		.expect("origin closed");
 	assert!(active, "expected announce");
-	let bc = tokio::time::timeout(
-		TIMEOUT,
-		sub_consumer.request_broadcast(moq_net::Path::new(update.prefix.as_str()), None),
-	)
-	.await
-	.expect("request timed out")
-	.expect("announced broadcast resolves");
+	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast(&update.prefix, None))
+		.await
+		.expect("request timed out")
+		.expect("announced broadcast resolves");
 
 	let mut sub = bc.track("video").unwrap().subscribe(None).await.expect("subscribe");
 	let mut g = tokio::time::timeout(TIMEOUT, sub.recv_group())

@@ -56,7 +56,7 @@ pub struct Info {
 	///
 	/// Empty (the default) for a standalone broadcast with no origin, which is then its own
 	/// root: any `..` reference escapes.
-	pub path: crate::PathOwned,
+	pub path: crate::Path,
 
 	/// The epoch of the route a [`Consumer`] was resolved through, naming the publisher
 	/// instance it reads.
@@ -75,7 +75,7 @@ impl Default for Info {
 		Self {
 			pool: cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY)),
 			cache_duration: std::time::Duration::MAX,
-			path: crate::PathOwned::default(),
+			path: crate::Path::default(),
 			epoch: None,
 			frames: Default::default(),
 		}
@@ -892,7 +892,7 @@ impl Consumer {
 	/// references resolve against is where the *reader* found the broadcast, not where its
 	/// producer happened to create it. Free when the two already agree, which is the case
 	/// for a broadcast created at the path an unrooted cursor asks for.
-	pub(super) fn with_path(mut self, path: crate::PathOwned) -> Self {
+	pub(super) fn with_path(mut self, path: crate::Path) -> Self {
 		if self.info.path != path {
 			let mut info = (*self.info).clone();
 			info.path = path;

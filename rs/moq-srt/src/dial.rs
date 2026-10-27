@@ -151,8 +151,8 @@ impl Client {
 	}
 
 	/// Push a MoQ broadcast out to the remote as MPEG-TS until the broadcast ends.
-	pub async fn publish(&self, origin: &origin::Consumer, path: impl moq_net::AsPath) -> Result<()> {
-		let path = path.as_path();
+	pub async fn publish(&self, origin: &origin::Consumer, path: impl Into<moq_net::Path>) -> Result<()> {
+		let path: moq_net::Path = path.into();
 		let socket = self.call(Mode::Publish).await?;
 		let options = crate::ts::Options {
 			latency: self.max_delay,
@@ -166,8 +166,8 @@ impl Client {
 	///
 	/// The finished broadcast then stays up for the [linger](Self::with_linger), as
 	/// [`Publish::accept`](crate::Publish::accept) describes, and the future resolves after that.
-	pub async fn pull(&self, origin: &origin::Producer, path: impl moq_net::AsPath) -> Result<()> {
-		let path = path.as_path();
+	pub async fn pull(&self, origin: &origin::Producer, path: impl Into<moq_net::Path>) -> Result<()> {
+		let path: moq_net::Path = path.into();
 		let socket = self.call(Mode::Request).await?;
 		let ingest = crate::server::Ingest {
 			config: moq_mux::catalog::Config::default()
@@ -265,7 +265,7 @@ mod tests {
 				// Runs until the caller disconnects, then closes at once.
 				publish
 					.with_linger(Duration::ZERO)
-					.accept(&origin, "ingested/cam0")
+					.accept(&origin, moq_net::Path::from_static("ingested/cam0"))
 					.await
 					.ok();
 			}
@@ -306,7 +306,10 @@ mod tests {
 			let resource = request.resource().to_string();
 			let is_subscribe = matches!(request, Request::Subscribe(_));
 			if let Request::Subscribe(subscribe) = request {
-				subscribe.accept(&consumer, "live/cam0").await.ok();
+				subscribe
+					.accept(&consumer, moq_net::Path::from_static("live/cam0"))
+					.await
+					.ok();
 			}
 			(resource, is_subscribe)
 		});

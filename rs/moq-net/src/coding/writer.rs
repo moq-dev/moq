@@ -412,7 +412,9 @@ mod tests {
 			stats::{Message, Registry, Tier, Totals},
 		};
 		let stats = Registry::new(Default::default());
-		let session = stats.tier(Tier::new("internal")).session("");
+		let session = stats
+			.tier(Tier::new(crate::Path::from_static("internal")))
+			.session(crate::Path::from_static(""));
 		let gate = kio::Producer::new(false);
 		let mut writer =
 			Writer::new(SinkSend::gated(Log::default(), gate.consume()), lite::Version::Lite07).with_stats(&session);
@@ -428,11 +430,15 @@ mod tests {
 		assert!(writer.poll_flush(&mut Context::from_waker(Waker::noop())).is_pending());
 		assert_eq!(
 			stats.snapshot().control(),
-			vec![(Tier::new("internal"), Message::Probe, Totals { tx: size, rx: 0 })]
+			vec![(
+				Tier::new(crate::Path::from_static("internal")),
+				Message::Probe,
+				Totals { tx: size, rx: 0 }
+			)]
 		);
 		writer
 			.buffer(&lite::Track {
-				broadcast: "test".into(),
+				broadcast: crate::Path::from_static("test"),
 				epoch: None,
 				track: "video".into(),
 			})

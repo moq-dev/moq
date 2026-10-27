@@ -804,7 +804,7 @@ mod tests {
 			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
-			source: Some(moq_net::path::RelativeOwned::from(".".to_string())),
+			source: Some(moq_net::path::Relative::new(".").unwrap()),
 			..Default::default()
 		};
 
@@ -1121,7 +1121,7 @@ mod tests {
 			.unwrap(),
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
-			source: Some(moq_net::path::RelativeOwned::from(".".to_string())),
+			source: Some(moq_net::path::Relative::new(".").unwrap()),
 			..Default::default()
 		};
 

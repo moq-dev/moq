@@ -50,7 +50,7 @@ fn ietf_range_updates_interop() {
 		w.varint(ietf::Subscribe::ID).unwrap();
 		ietf::Subscribe {
 			request_id: RequestId(0),
-			track_namespace: crate::Path::new("room"),
+			track_namespace: crate::Path::from_static("room"),
 			track_name: "video".into(),
 			subscriber_priority: 127,
 			group_order: ietf::GroupOrder::Ascending,
@@ -533,7 +533,7 @@ fn lite_tracks_interop() {
 
 	let version = lite::Version::Lite07;
 	let request = lite::Tracks {
-		broadcast: crate::Path::new("room"),
+		broadcast: crate::Path::from_static("room"),
 		epoch: None,
 	}
 	.encode_bytes(version)
@@ -602,7 +602,7 @@ fn ietf_track_status_interop() {
 			w.varint(<ietf::TrackStatus as ietf::Message>::ID).unwrap();
 			ietf::TrackStatus {
 				request_id: ietf::RequestId(id),
-				track_namespace: crate::Path::new(namespace),
+				track_namespace: crate::Path::new(namespace).unwrap(),
 				track_name: "video".into(),
 				properties_wanted: wanted,
 				epoch: None,

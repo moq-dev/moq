@@ -598,7 +598,7 @@ async fn a_moved_tier_retags_the_live_session() {
 	let (port, relay) = spawn_relay_with(build_auth(script.spawn().await), cluster).await;
 	let url = room_url("tcp", port);
 
-	let moved = stats::Tier::new("moved");
+	let moved = stats::Tier::new(moq_net::Path::from_static("moved"));
 	let active = |tier: &stats::Tier| {
 		registry
 			.snapshot()

@@ -179,7 +179,9 @@ async fn wire_collection_never_arms_the_idle_sampler() {
 		let registry = moq_net::stats::Registry::new(Default::default());
 		let polls = Arc::new(AtomicUsize::new(0));
 		let mut options = MockConnectOptions::new(version.parse().unwrap());
-		options.server_stats = registry.tier(Default::default()).session("room");
+		options.server_stats = registry
+			.tier(Default::default())
+			.session(moq_net::Path::from_static("room"));
 		options.server_polls = Some(polls.clone());
 		let pair = connect_mock(options).await;
 		moq_clock::sleep(Duration::from_secs(1)).await;

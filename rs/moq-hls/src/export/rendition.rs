@@ -1494,11 +1494,11 @@ mod tests {
 		let dynamic = origin.requests("room/secret").unwrap();
 		let source = moq_mux::Source::new(origin.consume(), broadcast.consume());
 		let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
-		config.broadcast = Some(moq_net::path::Relative::new("./secret").to_owned());
+		config.broadcast = Some(moq_net::path::Relative::new("./secret").unwrap());
 		let rendition = Arc::new(Rendition::video("video".into(), &config, &source, Archive::default(), None).unwrap());
 		let request = dynamic.requested_broadcast().await.unwrap();
 		let other = origin.requests("room/hidden").unwrap();
-		config.broadcast = Some(moq_net::path::Relative::new("./hidden").to_owned());
+		config.broadcast = Some(moq_net::path::Relative::new("./hidden").unwrap());
 		let resolving = Arc::new(Rendition::video("video".into(), &config, &source, Archive::default(), None).unwrap());
 		let other_request = other.requested_broadcast().await.unwrap();
 		let row = |reference: &str| segments::Row {

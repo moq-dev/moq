@@ -1020,7 +1020,12 @@ mod test {
 		}
 		let catalog = Catalog::<()>::from_str(r#"{"stats":{"track":"stats.json"},"echo":{"path":"viewers"}}"#).unwrap();
 		assert_eq!(catalog.stats, Some(crate::catalog::Stats::new("stats.json")));
-		assert_eq!(catalog.echo, Some(crate::catalog::Echo::new("viewers")));
+		assert_eq!(
+			catalog.echo,
+			Some(crate::catalog::Echo::new(
+				moq_net::path::Relative::new("viewers").unwrap()
+			))
+		);
 	}
 
 	#[test]
@@ -1096,7 +1101,7 @@ mod test {
 			"video".to_string(),
 			crate::catalog::Timeline::new("video.timeline.z", 2_000),
 		);
-		archive.replay = Some(moq_net::path::RelativeOwned::new("recordings/clip"));
+		archive.replay = Some(moq_net::path::Relative::new("recordings/clip").unwrap());
 		archive.version = Some(crate::catalog::Archive::VERSION);
 
 		let catalog = Catalog::<()> {
@@ -1192,7 +1197,7 @@ mod test {
 		chat.schema = Some("https://example.com/chat.schema.json".to_string());
 
 		let mut status = JsonConfig::new(Mode::Snapshot);
-		status.broadcast = Some(moq_net::path::RelativeOwned::new("source"));
+		status.broadcast = Some(moq_net::path::Relative::new("source").unwrap());
 
 		let mut thumbnail = BinaryConfig::new(Mode::Snapshot);
 		thumbnail.mime = Some("image/jpeg".to_string());

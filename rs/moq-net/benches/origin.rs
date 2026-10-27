@@ -168,7 +168,12 @@ fn bench_withdraw(c: &mut Criterion) {
 						.unwrap();
 					let routes: Vec<_> = (0..publishers)
 						.map(|i| {
-							moq_net::fuzz::requests_route(&producer, format!("room/{i}"), peer_route(9, 1)).unwrap()
+							moq_net::fuzz::requests_route(
+								&producer,
+								moq_net::Path::new(&format!("room/{i}")).unwrap(),
+								peer_route(9, 1),
+							)
+							.unwrap()
 						})
 						.collect();
 					let mut cursors: Vec<_> = (0..subscribers).map(|_| producer.consume().announced()).collect();
@@ -224,13 +229,22 @@ fn bench_withdraw_wave(c: &mut Criterion) {
 							.unwrap();
 						let near: Vec<_> = (0..broadcasts)
 							.map(|i| {
-								moq_net::fuzz::requests_route(&producer, format!("room/{i}"), route(&[9, 2])).unwrap()
+								moq_net::fuzz::requests_route(
+									&producer,
+									moq_net::Path::new(&format!("room/{i}")).unwrap(),
+									route(&[9, 2]),
+								)
+								.unwrap()
 							})
 							.collect();
 						let far: Vec<_> = (0..broadcasts)
 							.map(|i| {
-								moq_net::fuzz::requests_route(&producer, format!("room/{i}"), route(&[9, 3, 4]))
-									.unwrap()
+								moq_net::fuzz::requests_route(
+									&producer,
+									moq_net::Path::new(&format!("room/{i}")).unwrap(),
+									route(&[9, 3, 4]),
+								)
+								.unwrap()
 							})
 							.collect();
 						let mut cursors: Vec<_> = (0..subscribers).map(|_| producer.consume().announced()).collect();
@@ -275,13 +289,29 @@ fn bench_route_churn(c: &mut Criterion) {
 			group.bench_function(id, |b| {
 				let (producer, _driver) = origin::Producer::new(origin::Config::default());
 				let _routes: Vec<_> = (0..broadcasts)
-					.map(|i| moq_net::fuzz::requests_route(&producer, format!("room/{i}"), peer_route(1, 1)).unwrap())
+					.map(|i| {
+						moq_net::fuzz::requests_route(
+							&producer,
+							moq_net::Path::new(&format!("room/{i}")).unwrap(),
+							peer_route(1, 1),
+						)
+						.unwrap()
+					})
 					.collect();
 				let mut cursors: Vec<_> = (0..subscribers).map(|_| producer.consume().announced()).collect();
 				for cursor in &mut cursors {
 					while cursor.try_next().is_some() {}
 				}
-				b.iter(|| drop(moq_net::fuzz::requests_route(&producer, "room/0", peer_route(2, 5)).unwrap()));
+				b.iter(|| {
+					drop(
+						moq_net::fuzz::requests_route(
+							&producer,
+							moq_net::Path::from_static("room/0"),
+							peer_route(2, 5),
+						)
+						.unwrap(),
+					)
+				});
 				for cursor in &mut cursors {
 					assert!(cursor.try_next().is_none(), "the winner is unchanged");
 				}
@@ -406,7 +436,12 @@ fn bench_announce_duplicate(c: &mut Criterion) {
 			// the entries are distinct routes rather than one re-priced in place.
 			let _routes: Vec<_> = (1..=duplicates)
 				.map(|peer| {
-					moq_net::fuzz::requests_route(&producer, PATH, peer_route(peer as u64, INCUMBENT_COST)).unwrap()
+					moq_net::fuzz::requests_route(
+						&producer,
+						moq_net::Path::new(PATH).unwrap(),
+						peer_route(peer as u64, INCUMBENT_COST),
+					)
+					.unwrap()
 				})
 				.collect();
 			let mut cursors: Vec<announce::Consumer> = (0..subscribers)
@@ -419,7 +454,7 @@ fn bench_announce_duplicate(c: &mut Criterion) {
 			b.iter(|| {
 				let handle = moq_net::fuzz::requests_route(
 					&producer,
-					PATH,
+					moq_net::Path::new(PATH).unwrap(),
 					peer_route(duplicates as u64 + 1, INCUMBENT_COST - 1),
 				)
 				.unwrap();
@@ -457,12 +492,21 @@ fn bench_reprice_duplicate(c: &mut Criterion) {
 								&Patterns::from(Pattern::subtree(&format!("{PATH}/p{}", (peer - 1) % 2)).unwrap()),
 							)
 							.unwrap();
-						moq_net::fuzz::requests_route(&scoped, PATH, peer_route(peer as u64, incumbent_cost)).unwrap()
+						moq_net::fuzz::requests_route(
+							&scoped,
+							moq_net::Path::new(PATH).unwrap(),
+							peer_route(peer as u64, incumbent_cost),
+						)
+						.unwrap()
 					})
 					.collect();
 				let challenger = duplicates as u64 + 1;
-				let route =
-					moq_net::fuzz::requests_route(&producer, PATH, peer_route(challenger, incumbent_cost + 1)).unwrap();
+				let route = moq_net::fuzz::requests_route(
+					&producer,
+					moq_net::Path::new(PATH).unwrap(),
+					peer_route(challenger, incumbent_cost + 1),
+				)
+				.unwrap();
 				let mut cursors: Vec<announce::Consumer> = (0..subscribers)
 					.map(|peer| {
 						producer
@@ -718,10 +762,18 @@ fn bench_unroutable_churn(c: &mut Criterion) {
 					group.bench_function(id, |b| {
 						let (producer, mut driver) = origin::Producer::new(origin::Config::default());
 						let consumer = producer.consume();
-						let server =
-							moq_net::fuzz::requests_route(&producer, "room", origin::Route::default()).unwrap();
-						let unrelated =
-							moq_net::fuzz::requests_route(&producer, "other", origin::Route::default()).unwrap();
+						let server = moq_net::fuzz::requests_route(
+							&producer,
+							moq_net::Path::from_static("room"),
+							origin::Route::default(),
+						)
+						.unwrap();
+						let unrelated = moq_net::fuzz::requests_route(
+							&producer,
+							moq_net::Path::from_static("other"),
+							origin::Route::default(),
+						)
+						.unwrap();
 						let mut waiting = Waiting::new(
 							(0..requesters)
 								.map(|i| {
@@ -845,7 +897,14 @@ fn pool(members: usize, paths: usize, cursors: usize) -> Pool {
 	let consumer = producer.consume();
 	let cursors = (0..cursors).map(|_| consumer.announced()).collect();
 	let members: Vec<_> = (0..members)
-		.map(|i| moq_net::fuzz::requests_route(&producer, "pool", pool_route(POOL_HOP + i as u64)).unwrap())
+		.map(|i| {
+			moq_net::fuzz::requests_route(
+				&producer,
+				moq_net::Path::from_static("pool"),
+				pool_route(POOL_HOP + i as u64),
+			)
+			.unwrap()
+		})
 		.collect();
 	let waiter = kio::Waiter::noop();
 
@@ -904,7 +963,12 @@ fn bench_pool_churn(c: &mut Criterion) {
 				let waiter = kio::Waiter::noop();
 				let hop = POOL_HOP + members as u64;
 				b.iter(|| {
-					let joined = moq_net::fuzz::requests_route(&pool.producer, "pool", pool_route(hop)).unwrap();
+					let joined = moq_net::fuzz::requests_route(
+						&pool.producer,
+						moq_net::Path::from_static("pool"),
+						pool_route(hop),
+					)
+					.unwrap();
 					pool.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
 					drop(joined);
 					pool.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
@@ -932,7 +996,12 @@ fn bench_pool_cursors(c: &mut Criterion) {
 				let waiter = kio::Waiter::noop();
 				let hop = POOL_HOP + members as u64;
 				b.iter(|| {
-					let joined = moq_net::fuzz::requests_route(&pool.producer, "pool", pool_route(hop)).unwrap();
+					let joined = moq_net::fuzz::requests_route(
+						&pool.producer,
+						moq_net::Path::from_static("pool"),
+						pool_route(hop),
+					)
+					.unwrap();
 					pool.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
 					drop(joined);
 					pool.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();

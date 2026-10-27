@@ -630,8 +630,8 @@ impl<S: Stream> Publish<S> {
 	/// stays up for the [linger](Self::with_linger), and the future resolves after that.
 	/// Dropping the future ends the linger early. A connection that drops without
 	/// unpublishing closes the broadcast at once.
-	pub async fn accept(mut self, origin: &origin::Producer, path: impl moq_net::AsPath) -> Result<()> {
-		let path = path.as_path();
+	pub async fn accept(mut self, origin: &origin::Producer, path: impl Into<moq_net::Path>) -> Result<()> {
+		let path: moq_net::Path = path.into();
 		// Reserve the broadcast path before telling the client the publish succeeded:
 		// if the origin refuses `path`, reject cleanly instead of accepting and then
 		// dropping the connection a moment later.
@@ -789,8 +789,8 @@ impl<S: Stream> Play<S> {
 	/// before the publisher), cancelling cleanly if the viewer disconnects first.
 	/// This future resolves when playback ends, so callers usually run it on its
 	/// own task.
-	pub async fn accept(mut self, origin: &origin::Consumer, path: impl moq_net::AsPath) -> Result<()> {
-		let path = path.as_path();
+	pub async fn accept(mut self, origin: &origin::Consumer, path: impl Into<moq_net::Path>) -> Result<()> {
+		let path: moq_net::Path = path.into();
 		// Wait for the broadcast before telling the client playback started. Feed the
 		// client's bytes through the session (not discard them) so its deserializer
 		// stays in sync for everything `play_pump` parses next.
@@ -1740,7 +1740,11 @@ mod tests {
 		let Some(Request::Publish(publish)) = accept_stream(stream, peer).await.unwrap() else {
 			panic!("expected a publish request");
 		};
-		publish.with_linger(linger).accept(&origin, "live/cam0").await.unwrap();
+		publish
+			.with_linger(linger)
+			.accept(&origin, moq_net::Path::from_static("live/cam0"))
+			.await
+			.unwrap();
 	}
 
 	/// An unpublish is a clean end: the finished broadcast stays up for the linger, then
@@ -2137,7 +2141,9 @@ mod tests {
 			let Request::Play(play) = request else {
 				panic!("expected a play request");
 			};
-			play.accept(&consumer, "live/cam0").await.unwrap();
+			play.accept(&consumer, moq_net::Path::from_static("live/cam0"))
+				.await
+				.unwrap();
 		});
 
 		let stream = TcpStream::connect(addr).await.unwrap();
@@ -2203,7 +2209,7 @@ mod tests {
 			let Some(Request::Play(play)) = server.accept().await else {
 				panic!("expected a play request");
 			};
-			play.accept(&play_origin, "live/cam0").await
+			play.accept(&play_origin, moq_net::Path::from_static("live/cam0")).await
 		});
 		let (tx, mut media) = tokio::sync::mpsc::unbounded_channel();
 		let client = tokio::spawn(play_client(TcpStream::connect(addr).await.unwrap(), 0, &[], tx));
@@ -2271,7 +2277,9 @@ mod tests {
 			let Request::Play(play) = request else {
 				panic!("expected a play request");
 			};
-			play.accept(&consumer, "live/cam0").await.unwrap();
+			play.accept(&consumer, moq_net::Path::from_static("live/cam0"))
+				.await
+				.unwrap();
 		});
 
 		let stream = TcpStream::connect(addr).await.unwrap();
@@ -2546,7 +2554,9 @@ mod tests {
 			let Request::Play(play) = request else {
 				panic!("expected a play request");
 			};
-			play.accept(&consumer, "live/cam0").await.unwrap();
+			play.accept(&consumer, moq_net::Path::from_static("live/cam0"))
+				.await
+				.unwrap();
 		});
 
 		// The player advertises multitrack; collect the four video messages (two
@@ -2602,7 +2612,9 @@ mod tests {
 
 		tokio::time::pause();
 		let server_task = tokio::spawn(async move {
-			play.accept(&consumer, "live/missing").await.unwrap();
+			play.accept(&consumer, moq_net::Path::from_static("live/missing"))
+				.await
+				.unwrap();
 		});
 
 		tokio::task::yield_now().await;
@@ -2664,7 +2676,7 @@ mod tests {
 					panic!("expected a publish request");
 				};
 				let origin = origin.clone();
-				tokio::spawn(async move { publish.accept(&origin, "live/cam0").await });
+				tokio::spawn(async move { publish.accept(&origin, moq_net::Path::from_static("live/cam0")).await });
 			}
 		});
 

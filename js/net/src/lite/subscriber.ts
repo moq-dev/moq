@@ -368,6 +368,8 @@ export class Subscriber {
 					// ANNOUNCE_OK, so nothing names the publisher.
 					for (const suffix of init.suffixes) {
 						const path = Path.join(prefix, suffix);
+						const error = Path.check(path);
+						if (error) throw new ProtocolViolation(error);
 						if (advertised.has(path)) {
 							throw new ProtocolViolation(`duplicate announce for ${path}`);
 						}
@@ -493,6 +495,11 @@ export class Subscriber {
 					case "skipped":
 						continue;
 				}
+
+				// Each suffix fits the wire limits alone, but the interest prefix can push the
+				// joined path past them, which the draft makes a violation too.
+				const error = Path.check(path);
+				if (error) throw new ProtocolViolation(error);
 
 				// One current advertisement per path per stream, decided before anything below
 				// can skip this announcement. A second ANNOUNCE_START for a path the peer

@@ -172,7 +172,7 @@ impl Moving {
 		config.description =
 			Some(crate::codec::h264::build_avcc(&[Bytes::from_static(sps)], &[Bytes::from_static(PPS)]).unwrap());
 		config.track = Some(track.to_string());
-		config.broadcast = broadcast.map(|broadcast| moq_net::path::Relative::new(broadcast).into_owned());
+		config.broadcast = broadcast.map(|rel| moq_net::path::Relative::new(rel).unwrap());
 		config
 	}
 }
