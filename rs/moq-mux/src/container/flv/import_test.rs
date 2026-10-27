@@ -463,6 +463,69 @@ async fn import_multitrack_video_many_codecs() {
 	assert_eq!(catalog.snapshot().video.renditions.len(), 2);
 }
 
+/// A publisher that keeps changing its audio and video config replaces each track under a fresh
+/// name, so the importer must retire what it replaced: the HLS records it holds stay those of
+/// the live renditions.
+#[tokio::test(start_paused = true)]
+async fn config_churn_keeps_flat_state() {
+	let mut out = flv_header(0x05);
+	// AAC-LC stereo at 44.1 kHz, then at 48 kHz.
+	let ascs = [ASC, [0x11, 0x90]];
+	let avccs = [avcc_level(0x1f), avcc_level(0x1e)];
+	for round in 0..100u32 {
+		let config = round as usize % 2;
+		let timestamp = round * 40;
+
+		let mut vseq = vec![
+			(super::FRAME_TYPE_KEY << 4) | super::VIDEO_CODEC_AVC,
+			super::AVC_SEQUENCE_HEADER,
+			0,
+			0,
+			0,
+		];
+		vseq.extend_from_slice(&avccs[config]);
+		write_tag(&mut out, super::TAG_VIDEO, timestamp, &vseq);
+
+		let mut aseq = vec![super::AAC_AUDIO_TAG_HEADER, super::AAC_SEQUENCE_HEADER];
+		aseq.extend_from_slice(&ascs[config]);
+		write_tag(&mut out, super::TAG_AUDIO, timestamp, &aseq);
+
+		let vframe = [
+			(super::FRAME_TYPE_KEY << 4) | super::VIDEO_CODEC_AVC,
+			super::AVC_NALU,
+			0,
+			0,
+			0,
+			0,
+			0,
+			0,
+			5,
+			0x65,
+			0x88,
+			0x84,
+			0x21,
+			0x00,
+		];
+		write_tag(&mut out, super::TAG_VIDEO, timestamp, &vframe);
+		write_tag(
+			&mut out,
+			super::TAG_AUDIO,
+			timestamp,
+			&[super::AAC_AUDIO_TAG_HEADER, super::AAC_RAW, 0x21, 0x00],
+		);
+	}
+
+	let mut producer = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
+	let mut importer = Import::new(producer, catalog.reserve());
+	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
+
+	let snap = catalog.snapshot();
+	assert_eq!(snap.video.renditions.len(), 1);
+	assert_eq!(snap.audio.renditions.len(), 1);
+	assert_eq!(catalog.hls_tracks(), 2, "only the live renditions keep records");
+}
+
 #[tokio::test(start_paused = true)]
 async fn import_enhanced_av1() {
 	let mut out = flv_header(0x01);
