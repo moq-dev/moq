@@ -363,6 +363,15 @@ struct State {
 	terminal: Option<Error>,
 }
 
+impl State {
+	/// PipeWire freed a buffer of the pool: a lease still out on it must not be
+	/// queued back, and the retained frame may point into it.
+	fn buffer_removed(&mut self) {
+		self.generation = self.generation.wrapping_add(1);
+		self.last = None;
+	}
+}
+
 /// A retained frame for the static-screen pacing tick.
 enum Last {
 	I420(I420),
@@ -820,6 +829,10 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 		Kind::Screen => ("moq-screen", "Screen"),
 		Kind::Camera => ("moq-camera", "Camera"),
 	};
+	// When the producer's node goes (the user stopped sharing from the
+	// compositor, the output or camera went away), the stream only pauses, so
+	// the node's removal is what ends the capture.
+	let registry = core.get_registry_rc().map_err(|e| err("pipewire registry", e))?;
 	let stream = pw::stream::StreamRc::new(
 		core,
 		name,
@@ -848,6 +861,7 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 		}
 	});
 
+	let removed_selection = selection.clone();
 	let _listener = stream
 		.add_local_listener::<()>()
 		.state_changed({
@@ -1213,8 +1227,37 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 				}
 			}
 		})
+		.remove_buffer({
+			let state = state.clone();
+			move |_, _, _| state.borrow_mut().buffer_removed()
+		})
 		.register()
 		.map_err(|e| err("pipewire listener", e))?;
+
+	let _node_listener = registry
+		.add_listener_local()
+		.global_remove({
+			let mainloop = mainloop.downgrade();
+			let state = state.clone();
+			move |id| {
+				if id != node_id {
+					return;
+				}
+				// As for `Unconnected` above: the producer ended it.
+				if let Some(selection) = &removed_selection {
+					selection.replace_restore(None);
+				}
+				state.borrow_mut().terminal = Some(Error::SourceUnavailable(format!(
+					"the selected {} is no longer available",
+					role.to_lowercase()
+				)));
+				tracing::debug!(?kind, node = id, "capture node removed");
+				if let Some(mainloop) = mainloop.upgrade() {
+					mainloop.quit();
+				}
+			}
+		})
+		.register();
 
 	// DMA-BUF formats come first so PipeWire prefers them. Each has a matching
 	// shared-memory offer without a modifier as the required fallback.
@@ -1998,6 +2041,41 @@ mod tests {
 		};
 		assert_eq!(lease.current(1), None);
 		assert_eq!(lease.current(2), Some(buffer));
+	}
+
+	/// A buffer PipeWire removes is freed, so a lease taken from it before must
+	/// not be queued back, and the retained frame is dropped with it.
+	#[test]
+	fn removed_buffer_retires_its_leases_and_the_retained_frame() {
+		let frame = nv12_to_i420(
+			&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+			FrameLayout {
+				stride: 4,
+				width: 4,
+				height: 2,
+				source_height: 2,
+			},
+		)
+		.unwrap();
+		let mut state = State {
+			format: VideoInfoRaw::default(),
+			geometry: None,
+			color: None,
+			geo_tx: None,
+			last: Some(Last::I420(frame)),
+			fresh: false,
+			generation: 1,
+			dmabuf_modifier: None,
+			terminal: None,
+		};
+		let buffer = std::ptr::dangling_mut::<pw::sys::pw_buffer>();
+		let lease = Lease {
+			buffer: buffer as usize,
+			generation: state.generation,
+		};
+		state.buffer_removed();
+		assert_eq!(lease.current(state.generation), None);
+		assert!(state.last.is_none());
 	}
 
 	#[test]
