@@ -83,9 +83,13 @@ for (const [version, alpn] of [
 		const server = new LiteConnection({ ...props, quic: pair.server });
 		const dispose = client.probe.subscribe(() => {});
 		try {
-			await clock.advance(Nano.zero);
-			// The publisher samples on its existing 100ms PROBE cadence.
-			await clock.advance(Nano.fromMilli(Milli(100)));
+			// The publisher samples on its 100ms PROBE cadence, and a shared write budget may
+			// yield a host task mid-delivery, so drive time until the estimate actually lands.
+			await clock.drive(
+				(async () => {
+					while (client.probe.peek().estimatedRecvRate === undefined) await client.probe.changed();
+				})(),
+			);
 			expect(client.probe.peek().estimatedRecvRate).toBe(8_000_000);
 			expect(client.probe.peek().rtt).toBe(version === Version.DRAFT_03 ? undefined : Milli(12));
 		} finally {
