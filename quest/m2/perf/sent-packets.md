@@ -8,8 +8,11 @@ bounded by design against a peer that never ACKs, with no timer or cap whose
 only job is refusal. A `SentPackets` micro-bench and `just bench` show the
 win. A measured no-win against `BTreeMap` abandons the quest.
 
-Loss detection, RTT sampling, and congestion semantics stay as RFC 9002 says.
-How ACK-only packets are retained may change.
+Loss detection, RTT sampling, and congestion semantics stay as RFC 9002 says,
+except where ACK-only retention changes them. The Plan accepts two deviations
+from evicting ACK-only records. Persistent congestion can be under-declared
+after 256 unACKed ACK-only packets. An RTT sample is skipped when the peer's
+largest ACK names an evicted record.
 
 ## Plan
 
@@ -97,6 +100,10 @@ Guidance:
   Decided 2026-10-27: accept and document it. Skipped packet numbers and
   today's forgotten tail make the same gaps already, and the error only
   under-declares persistent congestion after 256 unACKed ACK-only packets.
+- `on_ack_received` must skip the RTT sample when the largest acked record
+  is gone. Today it leaves `largest_acked_packet_sent` stale and still
+  samples if another newly acked packet is ack-eliciting, which inflates RTT.
+  The forgotten tail can already trigger this.
 - Correctness tests cover padded ACK-only packets, both ACKed and lost,
   including after a path migration, so congestion feedback and in-flight
   bytes stay exact. The bound test includes a padded, never-ACKed receiver

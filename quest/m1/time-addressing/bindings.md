@@ -4,7 +4,7 @@
 
 moq-ffi, `moq-c`, and every language binding expose groups by start
 timestamp instead of sequence number, including `seek` for GOP-aligned
-failover, with each `doc/lib` page and `MIGRATE.md` saying how to migrate.
+failover, with each `doc/lib` page and the PR's Impact section saying how to migrate.
 
 ## Plan
 

@@ -94,12 +94,13 @@ moq-transport-18, direct and through a relay, against a contiguous baseline
   arithmetic, delivering `[6000]` and then parking instead of
   `[4000, 6000]`.
 
-Update `doc/concept`, the lite draft's legacy mapping, `MIGRATE.md`, and the
+Update `doc/concept`, the lite draft's legacy mapping, and the
 Rust half of every consumer the API change breaks to compile;
 [consumers](/quest/m1/time-addressing/consumers.md) and
 [bindings](/quest/m1/time-addressing/bindings.md) own the behavior changes.
 Test the legacy mapping both ways on every wire, with the
 [resume model](/quest/m1/resume-model-test.md) as the oracle for resume.
+The PR's Impact section says how to migrate.
 
 Public API: breaking. `group::Info`, `create_group`, `append_group`,
 `Position`, `Range` ends, `fetch_group`, `Subscriber::floor`, datagrams, and

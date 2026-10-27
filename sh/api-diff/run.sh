@@ -10,7 +10,8 @@
 #
 # --deny exits 1 on any break, for backports into `release`. Without it the run
 # only reports, as the cut PR does: release-plz bumps Rust versions after the cut
-# lands, so a break there is expected and needs a MIGRATE.md entry instead.
+# lands, so a break there is expected. Feature PRs record migration in their
+# Impact section; the breaking cut writes the MIGRATE.md version sections.
 # For JS and FFI, a removed or changed line is a break, and so is a line added
 # inside an existing declaration; only new declarations are additions.
 set -euo pipefail
@@ -244,7 +245,7 @@ done
 {
     echo "# Public API diff"
     echo
-    echo "Each surface against its last published release. A break needs a MIGRATE.md entry; a backport must have none."
+    echo "Each surface against its last published release. Feature PRs mark breaks with ! and describe migration in Impact; the breaking cut writes MIGRATE.md sections. A backport must have no API breaks."
     echo
     cat "$summary"
     if [[ -s "$details" ]]; then

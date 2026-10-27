@@ -36,7 +36,8 @@ Baseline, measured 2026-10-26 over 2026-10-23 to 10-26 (414 queue merges,
 A simulation of one-runner batching with bisection gave 1.25 merged PRs per
 CI run at a 12.7% failure rate (best batch near 4), against 0.88 serial. At
 5% it gave about 2.4. The failure rate is the lever, which is why the flake
-epic moved to m0 and [MIGRATE.md stops conflicting](/quest/m0/ci/migrate-unreleased.md).
+epic moved to m0 and migration notes stay in PR Impact sections until the
+[release migration audit](/quest/m2/release/migrate-audit.md).
 
 Decided 2026-10-26 (maintainer):
 
