@@ -133,7 +133,7 @@ export class Backpressure {
 		this.#release();
 	}
 
-	/** Note that the decoder closed, dropping every frame still decoding. */
+	/** Note that the decoder closed or reset, dropping every frame still decoding. */
 	dropped(): void {
 		this.#decoding = [];
 		this.#release();
@@ -344,7 +344,7 @@ export class AudioBuffer {
 		this.#backpressure.decoded(end, landed);
 	}
 
-	/** Note that the decoder closed, dropping every frame still decoding. */
+	/** Note that the decoder closed or reset, dropping every frame still decoding. */
 	dropped(): void {
 		this.#backpressure.dropped();
 	}
