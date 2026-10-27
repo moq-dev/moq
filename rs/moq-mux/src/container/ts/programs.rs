@@ -452,12 +452,14 @@ impl Programs {
 
 /// The broadcast one program of `name` publishes on: `event.hang` becomes `event/2.hang`.
 fn program_broadcast(name: &str, program: u16) -> String {
-	match catalog::CatalogFormat::detect(name) {
-		Some(format) => {
-			let stem = &name[..name.len() - format.extension().len()];
-			format!("{stem}/{program}{}", format.extension())
-		}
-		None => format!("{name}/{program}"),
+	let (stem, extension) = match catalog::CatalogFormat::detect(name) {
+		Some(format) => (&name[..name.len() - format.extension().len()], format.extension()),
+		None => (name, ""),
+	};
+	// A final segment that is only the extension (`room/.hang`) leaves the stem's separator behind.
+	match stem.strip_suffix('/').unwrap_or(stem) {
+		"" => format!("{program}{extension}"),
+		stem => format!("{stem}/{program}{extension}"),
 	}
 }
 
@@ -501,6 +503,9 @@ mod test {
 		assert_eq!(program_broadcast("event.hang", 2), "event/2.hang");
 		assert_eq!(program_broadcast("demo/event.msf", 7), "demo/event/7.msf");
 		assert_eq!(program_broadcast("event", 1), "event/1");
+		assert_eq!(program_broadcast("", 1), "1");
+		assert_eq!(program_broadcast(".hang", 2), "2.hang");
+		assert_eq!(program_broadcast("room/.msf", 2), "room/2.msf");
 	}
 
 	/// The first whole PAT in a buffer, as the parser reads it.

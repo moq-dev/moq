@@ -149,6 +149,48 @@ where
 	true
 }
 
+/// Assert the invariant every path holds once built: its spelling parses back to it under
+/// the strict constructor, and so does every run of its leading segments, which is what
+/// stats grouping and announce compression derive from it.
+fn assert_strict(path: &Path) {
+	let reparsed = Path::new(path.as_str()).unwrap_or_else(|err| panic!("{path:?} is refused: {err}"));
+	assert_eq!(reparsed, *path, "{path:?} did not parse back to itself");
+	let count = path.parts().count();
+	for n in 0..=count {
+		let head = path.head(n).expect("a path has a head per segment");
+		assert!(
+			Path::new(head.as_str()).is_ok(),
+			"{path:?} has an invalid head {head:?}"
+		);
+	}
+	assert!(path.head(count + 1).is_none(), "{path:?} has a head past its segments");
+}
+
+/// Read the input as a moq-lite path, whatever its kind, and hold it to [`assert_strict`].
+fn lite_path(data: &[u8], version: lite::Version) {
+	if let Ok((path, _)) = Path::decode_slice(data, version) {
+		assert_strict(&path);
+	}
+}
+
+/// Read the input as a namespace tuple and as a Full Track Name, whatever its kind, and
+/// hold each path to [`assert_strict`] and the namespace to the wire round trip.
+fn ietf_paths(data: &[u8], version: ietf::Version) {
+	let form: Form = version.into();
+	if let Ok(path) = ietf::namespace::decode_namespace(&mut Decoder::new(data, form)) {
+		assert_strict(&path);
+		let mut encoded = Vec::new();
+		if ietf::namespace::encode_namespace(&mut Encoder::new(&mut encoded, form), &path).is_ok() {
+			let echo = ietf::namespace::decode_namespace(&mut Decoder::new(&encoded, form))
+				.expect("could not decode our own namespace");
+			assert_eq!(echo, path, "namespace did not survive a round trip");
+		}
+	}
+	if let Ok((path, _)) = ietf::namespace::decode_track(&mut Decoder::new(data, form)) {
+		assert_strict(&path);
+	}
+}
+
 /// [`roundtrip`] for a datagram body, which runs to the end of its buffer.
 fn datagram(data: &[u8], version: lite::Version) -> bool {
 	// The body doesn't say whether it carries a timestamp or an inflated size, whether the
@@ -199,6 +241,7 @@ pub fn lite_wire(data: &[u8]) -> bool {
 	};
 	let version = LITE_VERSIONS[version];
 	let kind = kind % LITE_KINDS;
+	lite_path(rest, version);
 
 	match kind {
 		0 => roundtrip::<lite::Setup, _>(rest, version),
@@ -610,6 +653,11 @@ impl LiteSample {
 /// Returns whether anything resolved.
 pub fn announce_stream(data: &[u8]) -> bool {
 	let resolved = decode_announces(data, true);
+	for announced in &resolved {
+		if let Announced::Start(suffix, _) = announced {
+			assert_strict(suffix);
+		}
+	}
 	let echo = decode_announces(&encode_announces(&resolved, true), true);
 	assert_eq!(echo, resolved, "compression did not survive a round trip");
 	!resolved.is_empty()
@@ -625,6 +673,7 @@ pub fn ietf_wire(data: &[u8]) -> bool {
 	};
 	let version = IETF_VERSIONS[version];
 	let kind = kind % IETF_KINDS;
+	ietf_paths(rest, version);
 
 	match kind {
 		0 => roundtrip::<ietf::GoAway<'static>, _>(rest, version),
@@ -914,29 +963,26 @@ pub fn path(data: &[u8]) -> bool {
 	};
 
 	let (target, base) = text.split_once('\n').unwrap_or((text, ""));
-	// Only a path over the limit is refused, and the limit applies after normalizing.
-	let (Ok(target), Ok(base)) = (Path::new(target), Path::new(base)) else {
-		let normalized = |s: &str| {
-			s.split('/')
-				.filter(|part| !part.is_empty())
-				.collect::<Vec<_>>()
-				.join("/")
-				.len()
+
+	// A spelling is refused exactly when it is over the limit or has an empty segment, so
+	// each path has one spelling.
+	for s in [target, base] {
+		let expected = if s.len() > Path::MAX_BYTES {
+			Err(crate::path::Invalid::TooLong)
+		} else if !s.is_empty() && s.split('/').any(str::is_empty) {
+			Err(crate::path::Invalid::EmptySegment)
+		} else {
+			Ok(())
 		};
-		assert!(
-			normalized(target).max(normalized(base)) > Path::MAX_BYTES,
-			"a path within the limit was refused"
-		);
+		assert_eq!(Path::new(s).map(|_| ()), expected, "{s:?} was judged wrongly");
+	}
+	let (Ok(target), Ok(base)) = (Path::new(target), Path::new(base)) else {
 		return true;
 	};
 
-	// Normalization is a fixed point: re-parsing what `as_str` printed changes nothing,
-	// or every path that made a round trip through the wire would drift.
-	assert_eq!(
-		Path::new(target.as_str()),
-		Ok(target.clone()),
-		"normalization is not idempotent"
-	);
+	// A path's own spelling parses back to it, or every path that made a round trip
+	// through the wire would drift.
+	assert_strict(&target);
 	assert_eq!(target.parts().collect::<Vec<_>>().join("/"), target.as_str());
 
 	// A prefix is a prefix whichever way you ask.

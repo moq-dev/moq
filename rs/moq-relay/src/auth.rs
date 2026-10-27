@@ -452,24 +452,30 @@ impl Token {
 	/// pattern union, so `alice`, `*/chat`, and `alice/**` each mean exactly what
 	/// they say.
 	///
-	/// Fails if the dialed path, or a root, mount, tier, or label the grant names, is
-	/// longer than [`Path::MAX_BYTES`].
+	/// The dialed path is a URL path, whose one leading `/` is syntax rather than a
+	/// segment. Fails with [`Error::Request`] if the rest of it is not a valid path,
+	/// and with [`Error::Forbidden`] if a root, mount, tier, or label the grant names
+	/// is not: one with an empty segment or longer than [`Path::MAX_BYTES`].
 	pub fn new(path: &str, grant: &Grant) -> Result<Self, Error> {
-		let too_long = |err: moq_net::path::TooLong| Error::Forbidden(err.to_string());
-		let root = grant.root.as_deref().unwrap_or(path);
+		let invalid = |err: moq_net::path::Invalid| Error::Forbidden(err.to_string());
+		let root = match &grant.root {
+			Some(root) => Path::new(root).map_err(invalid)?,
+			None => Path::new(path.strip_prefix('/').unwrap_or(path))
+				.map_err(|err| Error::Request(format!("path {path:?}: {err}")))?,
+		};
 		Ok(Self {
 			path: path.to_string(),
-			root: Path::new(root).map_err(too_long)?,
+			root,
 			mounts: grant
 				.mounts
 				.iter()
 				.map(|(at, target)| Ok((Path::new(at)?, Path::new(target)?)))
 				.collect::<Result<_, _>>()
-				.map_err(too_long)?,
+				.map_err(invalid)?,
 			subscribe: grant.subscribe.clone(),
 			publish: grant.publish.clone(),
-			tier: crate::configured_tier(grant.tier.clone()).map_err(too_long)?,
-			label: Path::new(grant.label.as_deref().unwrap_or_default()).map_err(too_long)?,
+			tier: crate::configured_tier(grant.tier.clone()).map_err(invalid)?,
+			label: Path::new(grant.label.as_deref().unwrap_or_default()).map_err(invalid)?,
 			peer: grant.peer,
 			upstream: grant.upstream,
 		})
@@ -1455,6 +1461,21 @@ mod tests {
 			token.label.is_empty(),
 			"an absent label is the empty label, not the root"
 		);
+	}
+
+	#[test]
+	fn token_refuses_empty_segments() {
+		let all = || Grant::new(patterns(&["**"]), patterns(&["**"]));
+		// The dialed URL path's one leading `/` is syntax; any other empty segment is the client's.
+		assert_eq!(Token::new("/room", &all()).unwrap().root, Path::from_static("room"));
+		for dialed in ["/room/", "//room", "/room//cam"] {
+			assert!(matches!(Token::new(dialed, &all()), Err(Error::Request(_))), "{dialed}");
+		}
+
+		// A grant naming one is the auth server's.
+		let mut grant = all();
+		grant.root = Some("room/".into());
+		assert!(matches!(Token::new("/room", &grant), Err(Error::Forbidden(_))));
 	}
 
 	#[test]

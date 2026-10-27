@@ -1031,7 +1031,7 @@ mod tests {
 	fn announce_request_carries_hidden_from_lite07() {
 		for hidden in [false, true] {
 			let msg = AnnounceRequest {
-				prefix: Path::from_static("room/"),
+				prefix: Path::from_static("room"),
 				exclude_hop: Hop::UNKNOWN,
 				hidden,
 			};
@@ -1061,7 +1061,7 @@ mod tests {
 	#[test]
 	fn announce_request_carries_exclude_hop_on_lite05() {
 		let msg = AnnounceRequest {
-			prefix: Path::from_static("room/"),
+			prefix: Path::from_static("room"),
 			exclude_hop: Hop::new(42).unwrap(),
 			hidden: false,
 		};
@@ -1073,7 +1073,7 @@ mod tests {
 	#[test]
 	fn announce_request_drops_exclude_hop_on_lite06() {
 		let msg = AnnounceRequest {
-			prefix: Path::from_static("room/"),
+			prefix: Path::from_static("room"),
 			exclude_hop: Hop::new(42).unwrap(),
 			hidden: false,
 		};

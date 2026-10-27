@@ -49,6 +49,9 @@ Beyond "does not panic":
   iteration order differs per instance (moq-lite SETUP).
 - A lite-07 announce stream our decoder accepts, recompressed by our encoder, resolves
   to the same announcements.
+- Every path decoded from the wire (a moq-lite path, an IETF namespace or Full Track
+  Name) or resolved from an announce stream parses back to itself under the strict
+  constructor, and so does each run of its leading segments.
 - Setup Options a client accepts from its server, a server accepts from its client: only
   PATH and AUTHORITY are one-sided.
 - `Path::relative` inverts `Path::resolve`, and never produces a reference that walks

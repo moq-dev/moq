@@ -278,12 +278,8 @@ fn parse_keyed_track(name: &str, kind: &str) -> Option<(Path, Encoding)> {
 		"" => "",
 		rest => rest.strip_suffix('/').filter(|key| !key.is_empty())?,
 	};
-	// Only a normalized key round-trips, so each key has exactly one name.
-	let path = Path::new(key).ok()?;
-	if path.as_str() != key {
-		return None;
-	}
-	Some((path, encoding))
+	// Only a valid key round-trips, so each key has exactly one name.
+	Some((Path::new(key).ok()?, encoding))
 }
 
 /// The node a stats broadcast path names: `<prefix>/node/<node>` yields
@@ -382,7 +378,7 @@ mod tests {
 			}
 		}
 
-		// Names no label produces, including unnormalized ones, which would give
+		// Names no label produces, including ones with an empty segment, which would give
 		// one label two names.
 		for name in [
 			"publisher.json",

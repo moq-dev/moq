@@ -29,6 +29,11 @@ carries [publisher epochs](#publisher-epochs).
 | **Frame** | A sized chunk of bytes. | Object |
 | **Datagram** | One unreliable frame sent as a QUIC datagram instead of a group. | Datagram |
 
+A broadcast is named by a path: non-empty segments joined by `/`, such as
+`room/alice`. A path never starts or ends with `/` or doubles one, so each name
+has one spelling, and every API and peer refuses one that does. The empty path
+is the root, which prefixes every path.
+
 ## Discovery
 
 A session can ask for announcements matching a path prefix. The peer replies

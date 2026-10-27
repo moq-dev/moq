@@ -435,12 +435,17 @@ test("Namespace: literal backslash round trips", async () => {
 	expect(await encodeNamespace(decoded)).toEqual(tuple);
 });
 
-test("Namespace: slashes at tuple part boundaries round trip", async () => {
-	const tuple = await encodeNamespaceTuple(["/foo", "bar/", "/baz/"]);
+test("Namespace: slashes at tuple part boundaries", async () => {
+	// A leading slash escapes to a non-empty `\` segment.
+	const tuple = await encodeNamespaceTuple(["/foo", "/bar"]);
 	const decoded = await decodeNamespace(tuple);
-
-	expect(decoded).toBe("\\/foo/bar\\//\\/baz\\/" as Path.Valid);
+	expect(decoded).toBe("\\/foo/\\/bar" as Path.Valid);
 	expect(await encodeNamespace(decoded)).toEqual(tuple);
+
+	// A trailing slash escapes to an empty segment, which every later path operation assumes away.
+	for (const fields of [["/foo", "bar/", "/baz/"], ["foo/", "bar"], ["/"], ["a//"]]) {
+		await expect(decodeNamespace(await encodeNamespaceTuple(fields))).rejects.toThrow(ProtocolViolation);
+	}
 });
 
 test("Namespace: Subscribe with empty namespace round trip", async () => {

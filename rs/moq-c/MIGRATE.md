@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
+
+Every function taking a path, such as `moq_origin_create_broadcast` and `moq_origin_request`, returns an error for a path with a leading, trailing, or doubled `/` instead of collapsing it. Pass the canonical path, such as `room/cam`.
+
 ### Request handlers are named requests ([#6752](https://github.com/moq-dev/moq/pull/6752))
 
 The request-handler functions are renamed to match moq-net's `requests()`; their arguments and callbacks are unchanged:

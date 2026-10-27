@@ -9,6 +9,10 @@ How to update your invocation and config for each breaking change, newest first.
 Imports no longer publish HLS records by default, so `export hls` lists nothing for a broadcast published without them.
 Pass `--hls` to `import` (the stdin formats, `hls`, `rtsp`, and `capture`); renditions' segments line up wherever their keyframes share timestamps.
 
+### `--broadcast` refuses empty segments ([#6648](https://github.com/moq-dev/moq/pull/6648))
+
+A broadcast name or prefix with a leading, trailing, or doubled `/` is an error instead of being collapsed: pass `--broadcast room/cam`, not `/room/cam/`.
+
 ### Unknown `MOQ_*` environment variables stop startup ([#6633](https://github.com/moq-dev/moq/pull/6633))
 
 A `MOQ_*` variable `moq` does not read, such as a misspelling, a removed name, or one meant for another binary, now stops startup with the variable named instead of being ignored.

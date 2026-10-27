@@ -1,4 +1,4 @@
-use crate::{Path, coding::*, path::TooLong};
+use crate::{Path, coding::*, path::Invalid};
 
 fn to_tuple(namespace: &Path) -> Vec<String> {
 	let path = namespace.as_str();
@@ -28,7 +28,8 @@ fn to_tuple(namespace: &Path) -> Vec<String> {
 	parts
 }
 
-fn from_tuple(parts: &[&str]) -> Result<Path, TooLong> {
+// A field ending in `/` escapes to a path with an empty segment, so it is refused.
+fn from_tuple(parts: &[&str]) -> Result<Path, Invalid> {
 	// Sized for the common case of no escapes, so building it rarely grows.
 	let mut path = String::with_capacity(parts.iter().map(|part| part.len() + 1).sum());
 	for (i, part) in parts.iter().enumerate() {
@@ -44,7 +45,7 @@ fn from_tuple(parts: &[&str]) -> Result<Path, TooLong> {
 		}
 	}
 
-	Path::from_escaped(path)
+	Path::try_from(path)
 }
 
 /// Helper function to encode namespace as tuple of strings
@@ -69,7 +70,7 @@ const MAX_BYTES: usize = 4096;
 /// Decode a namespace tuple, along with the sum of its field lengths.
 ///
 /// Every limit here closes the session as a PROTOCOL_VIOLATION (draft-22 section 8.7):
-/// more than 32 fields, an empty field, or more than 4096 bytes.
+/// more than 32 fields, an empty field, a field ending in `/`, or more than 4096 bytes.
 fn decode_fields(r: &mut Decoder<'_>) -> Result<(Path, usize), DecodeError> {
 	let count = r.varint()?;
 
@@ -120,7 +121,7 @@ pub(super) fn refusal(namespace: &Path, version: super::Version) -> Option<super
 		return None;
 	}
 	// Reserved literals contain no escapes. Comparing the first escaped field keeps
-	// a slash within a field and an empty first field from becoming a reserved name.
+	// a slash within a field from becoming a reserved name.
 	if !matches!(namespace.as_str().split('/').next(), Some("." | ".session")) {
 		return None;
 	}
@@ -147,7 +148,6 @@ mod tests {
 			(vec![".session"], true),
 			(vec![".session", "extension"], true),
 			(vec![".session/extension"], false),
-			(vec!["", ".session"], false),
 			(vec![".application"], false),
 			(vec![".sessionish"], false),
 		] {
@@ -245,11 +245,20 @@ mod tests {
 	}
 
 	#[test]
-	fn slashes_at_part_boundaries_round_trip() {
-		let tuple = encode_tuple(&["/foo", "bar/", "/baz/"]);
+	fn slashes_at_part_boundaries() {
+		// A leading `/` escapes to a non-empty `\` segment.
+		let tuple = encode_tuple(&["/foo", "/bar"]);
 		let decoded = decode_ns(&tuple);
-		assert_eq!(decoded.as_str(), r"\/foo/bar\//\/baz\/");
+		assert_eq!(decoded.as_str(), r"\/foo/\/bar");
 		assert_eq!(encode_path(&decoded), tuple);
+
+		// A trailing `/` escapes to an empty segment, which every later `Path` operation
+		// assumes away, such as stats grouping a path by its leading segments.
+		for fields in [&["/foo", "bar/", "/baz/"][..], &["foo/", "bar"], &["/"], &["a//"]] {
+			let tuple = encode_tuple(fields);
+			let err = decode_namespace(&mut Decoder::new(&tuple, FORM)).unwrap_err();
+			assert!(matches!(err, DecodeError::InvalidValue), "{fields:?}: {err:?}");
+		}
 	}
 
 	/// Draft-22 section 8.7: every field holds a byte, and a namespace or a whole Full Track

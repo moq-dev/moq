@@ -306,9 +306,5 @@ impl Discovery {
 
 /// `path` and every prefix above it, up to the root, narrowest first.
 fn covering(path: &Path) -> Vec<Path> {
-	std::iter::successors(Some(path.as_str()), |path| {
-		(!path.is_empty()).then(|| path.rfind('/').map_or("", |slash| &path[..slash]))
-	})
-	.map(|prefix| Path::new(prefix).expect("a prefix of a path fits"))
-	.collect()
+	(0..=path.parts().count()).rev().filter_map(|n| path.head(n)).collect()
 }

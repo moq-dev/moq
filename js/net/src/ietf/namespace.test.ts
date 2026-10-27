@@ -9,7 +9,6 @@ test("reserved namespaces preserve tuple fields and draft boundaries", () => {
 		[[".session"], true],
 		[[".session", "extension"], true],
 		[[".session/extension"], false],
-		[["", ".session"], false],
 		[[".application"], false],
 		[[".sessionish"], false],
 	] as [string[], boolean][]) {
