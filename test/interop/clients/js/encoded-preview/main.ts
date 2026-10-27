@@ -25,8 +25,11 @@ globalThis.VideoDecoder = class extends NativeDecoder {
 const canvas = document.createElement("canvas");
 canvas.width = 64;
 canvas.height = 64;
-const context = canvas.getContext("2d");
-if (!context) throw new Error("missing canvas context");
+const context = (() => {
+	const context = canvas.getContext("2d");
+	if (!context) throw new Error("missing canvas context");
+	return context;
+})();
 context.fillStyle = "red";
 context.fillRect(0, 0, canvas.width, canvas.height);
 let push!: (frame: VideoFrame) => void;
