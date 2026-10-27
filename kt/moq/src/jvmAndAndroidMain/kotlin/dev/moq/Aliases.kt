@@ -150,17 +150,15 @@ typealias VideoEncoderOutput = uniffi.moq.MoqVideoEncoderOutput
 /** Which encoder implementation to use: automatic, hardware, software, or one named backend. */
 typealias VideoEncoderKind = uniffi.moq.MoqVideoEncoderKind
 /** Divides one connection's send estimate among the tracks sharing it. */
-typealias Bandwidth = uniffi.moq.MoqBandwidth
+typealias Allocator = uniffi.moq.MoqAllocator
 /** An owned bandwidth estimate; release it to stop receive PROBE demand. */
 typealias BandwidthConsumer = uniffi.moq.MoqBandwidthConsumer
-/** One track's standing claim on a [Bandwidth]. */
+/** One track's standing claim on an [Allocator]. */
 typealias Reservation = uniffi.moq.MoqReservation
 /** A snapshot of transport connection statistics. */
 typealias ConnectionStats = uniffi.moq.MoqConnectionStats
-/** A session's authorization: the grant its peer gave it, and more tokens to present. */
-typealias Auth = uniffi.moq.MoqAuth
-/** One token presented with [Auth.add]; cancel it to withdraw the token. */
-typealias AuthToken = uniffi.moq.MoqAuthToken
+/** Follows the grant a session's peer gave it; cancel it to release a pending wait. */
+typealias GrantConsumer = uniffi.moq.MoqGrantConsumer
 /** What the peer lets this side do: publish and subscribe patterns, and an expiry. */
 typealias Grant = uniffi.moq.MoqGrant
 /** A connection lifecycle transition reported by [Session.state]. */

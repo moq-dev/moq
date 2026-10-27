@@ -23,7 +23,7 @@ pub struct Client {
 	limits: crate::session::Limits,
 	extensions: setup::Extensions,
 	auth: Option<crate::auth::Handle>,
-	bandwidth: Option<crate::bandwidth::Allocator>,
+	allocator: Option<crate::bandwidth::Allocator>,
 	implementation: Option<String>,
 }
 
@@ -72,20 +72,20 @@ impl Client {
 		self
 	}
 
-	/// Share `bandwidth`'s reservations with every session this client dials.
+	/// Share `allocator`'s reservations with every session this client dials.
 	///
 	/// Each session probes for what they add up to, and its
-	/// [`Session::bandwidth`](crate::Session::bandwidth) reserves into the same registry,
+	/// [`Session::allocator`](crate::Session::allocator) reserves into the same registry,
 	/// so a reservation taken on one session still counts after a reconnect. Without
 	/// one, each session starts an empty registry of its own.
-	pub fn with_bandwidth(mut self, bandwidth: crate::bandwidth::Allocator) -> Self {
-		self.bandwidth = Some(bandwidth);
+	pub fn with_allocator(mut self, allocator: crate::bandwidth::Allocator) -> Self {
+		self.allocator = Some(allocator);
 		self
 	}
 
 	/// The registry the next session probes for.
-	fn bandwidth(&self) -> crate::bandwidth::Allocator {
-		self.bandwidth.clone().unwrap_or_default()
+	fn allocator(&self) -> crate::bandwidth::Allocator {
+		self.allocator.clone().unwrap_or_default()
 	}
 
 	/// Restrict which protocol versions to offer, in preference order.
@@ -170,7 +170,7 @@ impl Client {
 	}
 
 	/// Build every session on `auth`, so each presents the tokens it holds and a route
-	/// naming one of its [`Auth`](crate::auth::Auth)s keeps it across a reconnect. Omit to
+	/// naming one of its [`Credential`](crate::auth::Credential)s keeps it across a reconnect. Omit to
 	/// give each session a handle of its own, which ends with it.
 	///
 	/// The handle backs one active session at a time, plus the ones draining after a
@@ -342,8 +342,9 @@ impl Client {
 				stats: self.stats.clone(),
 				goaway: start.goaway,
 				auth: start.auth,
+				credential: start.credential,
 				estimate: Some(start.estimate),
-				bandwidth: self.bandwidth(),
+				bandwidth: self.allocator(),
 				peer_implementation: start.peer_implementation,
 			},
 		))
@@ -384,7 +385,7 @@ impl Client {
 				// offer it keeps the option out of our SETUP and presents no credential.
 				let auth = self.link(self.extensions.auth, true)?;
 				let peer_implementation = setup::PeerImplementation::default();
-				let (protocol, goaway) = ietf::start(ietf::Config {
+				let (protocol, goaway, credential) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
 					stats: self.stats.clone(),
 					limits: self.limits,
@@ -420,8 +421,9 @@ impl Client {
 						stats: self.stats.clone(),
 						goaway,
 						auth,
+						credential,
 						estimate: None,
-						bandwidth: self.bandwidth(),
+						bandwidth: self.allocator(),
 						peer_implementation,
 					},
 				));
@@ -533,7 +535,7 @@ impl Client {
 			return self.start_lite(runtime, session, v, peer_hop);
 		}
 
-		let (recv_bw, protocol, goaway, auth, estimate, peer_implementation) = match version {
+		let (recv_bw, protocol, goaway, auth, credential, estimate, peer_implementation) = match version {
 			Version::Lite(v) => {
 				let stream = stream.with_version(v);
 				let start = lite::start(lite::Config {
@@ -559,6 +561,7 @@ impl Client {
 					crate::driver::Protocol::Lite(Box::new(start.driver)),
 					start.goaway,
 					start.auth,
+					start.credential,
 					Some(start.estimate),
 					start.peer_implementation,
 				)
@@ -586,7 +589,7 @@ impl Client {
 				// Draft 14-16 carry no AUTH, but the session is still limited through this handle.
 				let auth = self.link(false, true)?;
 				// Draft 14-16: the path rode in the bidi SETUP above, not the uni one.
-				let (protocol, goaway) = ietf::start(ietf::Config {
+				let (protocol, goaway, credential) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
 					stats: self.stats.clone(),
 					limits: self.limits,
@@ -616,6 +619,7 @@ impl Client {
 					crate::driver::Protocol::Ietf(protocol),
 					goaway,
 					auth,
+					credential,
 					None,
 					peer_implementation,
 				)
@@ -632,8 +636,9 @@ impl Client {
 				stats: self.stats.clone(),
 				goaway,
 				auth,
+				credential,
 				estimate,
-				bandwidth: self.bandwidth(),
+				bandwidth: self.allocator(),
 				peer_implementation,
 			},
 		))
@@ -693,7 +698,7 @@ mod tests {
 		close_events: kio::Shared<Vec<(u32, String)>>,
 		control_writes: Arc<Mutex<Vec<u8>>>,
 		send_rate: Mutex<Option<u64>>,
-		bytes_sent: Mutex<Option<u64>>,
+		wire: crate::transport::Wire,
 	}
 
 	fn any_close(events: &kio::Ref<'_, Vec<(u32, String)>>) -> Poll<()> {
@@ -717,7 +722,7 @@ mod tests {
 				close_events: kio::Shared::default(),
 				control_writes: writes,
 				send_rate: Mutex::new(None),
-				bytes_sent: Mutex::new(None),
+				wire: crate::transport::Wire::new(),
 			};
 			Self {
 				state: Arc::new(state),
@@ -741,8 +746,8 @@ mod tests {
 			self.probe.as_ref().expect("built with_probe").target().as_bps()
 		}
 
-		fn set_bytes_sent(&self, bytes: Option<u64>) {
-			*self.state.bytes_sent.lock().unwrap() = bytes;
+		fn set_sent_bytes(&self, bytes: u64) {
+			self.state.wire.set_sent_bytes(bytes);
 		}
 
 		fn control_writes(&self) -> Vec<u8> {
@@ -841,11 +846,14 @@ mod tests {
 			Poll::Ready(FakeError)
 		}
 
-		fn stats(&self) -> impl crate::transport::Stats {
-			FakeStats {
+		fn metrics(&self) -> impl crate::transport::Metrics {
+			FakeMetrics {
 				send_rate: *self.state.send_rate.lock().unwrap(),
-				bytes_sent: *self.state.bytes_sent.lock().unwrap(),
 			}
+		}
+
+		fn wire(&self) -> Option<crate::transport::Wire> {
+			Some(self.state.wire.clone())
 		}
 
 		fn probe(&self) -> Option<crate::transport::Probe> {
@@ -853,18 +861,13 @@ mod tests {
 		}
 	}
 
-	struct FakeStats {
+	struct FakeMetrics {
 		send_rate: Option<u64>,
-		bytes_sent: Option<u64>,
 	}
 
-	impl crate::transport::Stats for FakeStats {
+	impl crate::transport::Metrics for FakeMetrics {
 		fn estimated_send_rate(&self) -> Option<u64> {
 			self.send_rate
-		}
-
-		fn bytes_sent(&self) -> Option<u64> {
-			self.bytes_sent
 		}
 	}
 
@@ -1341,7 +1344,7 @@ mod tests {
 	async fn stats_capture_the_final_counters() {
 		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
 		fake.set_send_rate(None);
-		fake.set_bytes_sent(Some(0));
+		fake.set_sent_bytes(0);
 
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
 		let (session, driver) = client.connect(moq_clock::now(), fake.clone()).await.unwrap();
@@ -1351,7 +1354,7 @@ mod tests {
 			"no send-rate estimate, so nothing samples on its own"
 		);
 
-		fake.set_bytes_sent(Some(4242));
+		fake.set_sent_bytes(4242);
 
 		session.abort(Error::Cancel);
 		session.closed().await;
@@ -1418,7 +1421,7 @@ mod tests {
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
 		let (session, driver) = client.connect(moq_clock::now(), fake.clone()).await.unwrap();
 		moq_clock::sim::spawn(crate::time::run(driver));
-		let bandwidth = session.bandwidth();
+		let bandwidth = session.allocator();
 
 		let (_watched_broadcast, watched) = reservable();
 		let _sub = watched.subscribe(None);
@@ -1446,7 +1449,7 @@ mod tests {
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
 		let (session, driver) = client.connect(moq_clock::now(), fake.clone()).await.unwrap();
 		moq_clock::sim::spawn(crate::time::run(driver));
-		let bandwidth = session.bandwidth();
+		let bandwidth = session.allocator();
 
 		let (_broadcast, track) = reservable();
 		let _reserved = bandwidth.reserve(&track.demand(), crate::bandwidth::Rate::from_bps(4_000_000));
@@ -1469,7 +1472,7 @@ mod tests {
 		let bandwidth = crate::bandwidth::Allocator::default();
 		let client = Client::new()
 			.with_versions(Version::Lite(lite::Version::Lite04).into())
-			.with_bandwidth(bandwidth.clone());
+			.with_allocator(bandwidth.clone());
 
 		let (_broadcast, track) = reservable();
 		let reserved = bandwidth.reserve(&track.demand(), crate::bandwidth::Rate::from_bps(4_000_000));

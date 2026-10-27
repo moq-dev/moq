@@ -183,25 +183,27 @@ void main() {
 
     expectEverything(
       await client
-          .auth()
           .grants()
+          .updates()
           .firstWhere((g) => g != null)
           .timeout(timeout),
     );
     expectEverything(
       await serverSession
-          .auth()
           .grants()
+          .updates()
           .firstWhere((g) => g != null)
           .timeout(timeout),
     );
+    expect(serverSession.tokens(), isNull);
 
     // A peer that verifies no tokens of its own refuses another one.
+    client.tokens().set_(tokens: ['extra']);
     await expectLater(
-      client.auth().add(token: 'extra').timeout(timeout),
+      client.tokens().answered().timeout(timeout),
       throwsA(isA<UnsupportedMoqException>()),
     );
-    expectEverything(client.auth().grant());
+    expectEverything(client.grants().grant());
 
     // The client drains first: cancelling the server session would fail its shutdown.
     await client.close();
@@ -236,7 +238,7 @@ void main() {
       ),
     ).timeout(timeout);
     final serverSession = await accepted;
-    expect(client.bandwidth(), isA<MoqBandwidth>());
+    expect(client.allocator(), isA<MoqAllocator>());
 
     final announcement = client.announced().updates().firstWhere(
       (event) => event is AnnounceEventStart,

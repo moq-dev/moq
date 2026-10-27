@@ -45,7 +45,7 @@ use std::task::{Poll, ready};
 use std::time::Duration;
 
 use crate::time::Instant;
-use crate::{Error, Result, StreamError, group, stats, track};
+use crate::{Error, Result, SessionError, StreamError, group, stats, track};
 
 use super::delivered::Delivered;
 use super::subscription::{Anchor, Position, Resolved, Subscription, Unheld, Window};
@@ -271,9 +271,6 @@ impl Consumer {
 	pub(super) fn subscribe(&self, subscription: track::Preferences) -> Subscriber {
 		let mirrored = subscription.read().clone();
 		let window = Window::new(&mirrored.ranges, None, &Unheld).expect("an unheld hop refuses nothing");
-		// An absolute floor holds from the start, as on a plain cursor; a relative one
-		// counts back from an edge, so the reported largest is never below it.
-		let floor = window.floor().unwrap_or(0);
 		let reader = Arc::new_cyclic(|this| {
 			Mutex::new(Reader {
 				this: this.clone(),
@@ -285,7 +282,7 @@ impl Consumer {
 				newest: None,
 				window,
 				datagrams: Datagrams::default(),
-				groups: (floor, None),
+				groups: (0, None),
 				groups_read: false,
 				out: Vec::new(),
 				drops: RangeMap::new(),
@@ -752,7 +749,11 @@ impl Subscriber {
 
 	/// The local group filter, as [`track::Subscriber::poll_largest`] reports within it.
 	pub(super) fn bounds(&self) -> track::Bounds {
-		let (start, end) = self.reader().groups;
+		let mut reader = self.reader();
+		reader.sync(&kio::Waiter::noop());
+		let (start, end) = reader.groups;
+		// Requested ranges move independently of the explicit local cursor bounds.
+		let start = start.max(reader.window().floor().unwrap_or(0));
 		track::Bounds { start, end }
 	}
 
@@ -1430,7 +1431,9 @@ impl Reader {
 			// ending retains its session error.
 			Some(None) => match serving.map(&done) {
 				None => return Some(Poll::Ready(Err(Error::Unroutable))),
-				Some(Some(Ok(()) | Err(Error::Closed))) => return Some(Poll::Ready(Ok(None))),
+				Some(Some(Ok(()) | Err(Error::Stream(StreamError::Session(SessionError::Cancel))))) => {
+					return Some(Poll::Ready(Ok(None)));
+				}
 				Some(Some(Err(err))) => return Some(Poll::Ready(Err(err))),
 				Some(None) => {}
 			},

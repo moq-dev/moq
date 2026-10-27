@@ -29,7 +29,7 @@ pub struct Fetch<'a> {
 }
 
 impl Message for Fetch<'_> {
-	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Fetch);
+	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Fetch);
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Lite01 | Version::Lite02 => {

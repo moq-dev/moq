@@ -938,7 +938,7 @@ mod tests {
 		moq_net::Session,
 		moq_net::Session,
 		super::super::Lease,
-		moq_net::auth::Auth,
+		moq_net::auth::Credential,
 	) {
 		let (auth, mut admissions) = super::super::Auth::embedded("test");
 		let (owner, consumer) = lease::Producer::new(grant("a/**", 3));

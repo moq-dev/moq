@@ -111,6 +111,7 @@ window.checkTransport = async () => {
 		client?.abort();
 		server?.abort();
 		transport.close();
+		track.finish();
 		track.close();
 		broadcast.close();
 		publishing.close();

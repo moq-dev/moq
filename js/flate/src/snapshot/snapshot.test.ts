@@ -151,11 +151,12 @@ test("latest lets a newer group preempt an open one", async () => {
 	// A complete newer value arrives while the previous group is still open.
 	const fresh = track.appendGroup();
 	fresh.writeFrame({ payload: bytes(2), timestamp: Time.Timestamp.now() });
-	fresh.close();
+	fresh.finish();
 
 	expect((await consumer.latest())?.value).toEqual(bytes(2));
 
-	stale.close();
+	stale.finish();
+	track.finish();
 	track.close();
 });
 
@@ -181,7 +182,7 @@ test("an aborted track surfaces its error instead of spinning", async () => {
 	const consumer = new Consumer({ track: track.subscribe() });
 
 	const boom = new Error("subscription aborted");
-	track.close(boom);
+	track.abort(boom);
 
 	await expect(consumer.next()).rejects.toThrow("subscription aborted");
 });

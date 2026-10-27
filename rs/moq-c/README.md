@@ -33,10 +33,10 @@ int32_t moq_log_level(const char *level, uintptr_t level_len);
 int32_t moq_session_connect(const char *url, uintptr_t url_len, const moq_client_config *config, uint32_t origin_publish, uint32_t origin_consume, moq_state_callback on_state, void *user_data);
 moq_client_config moq_client_defaults(void);
 int32_t moq_session_close(uint32_t session);
-int32_t moq_session_bandwidth(uint32_t session);
-int32_t moq_bandwidth_reserve(uint32_t bandwidth, uint32_t track, uint64_t max_bps);
-int32_t moq_bandwidth_close(uint32_t bandwidth);
-int32_t moq_reservation_grant(uint32_t reservation, uint64_t *bps, bool *present);
+int32_t moq_session_allocator(uint32_t session);
+int32_t moq_allocator_reserve(uint32_t allocator, uint32_t track, uint64_t max_bps);
+int32_t moq_allocator_close(uint32_t allocator);
+int32_t moq_reservation_rate(uint32_t reservation, uint64_t *bps, bool *present);
 int32_t moq_reservation_update(uint32_t reservation, uint64_t max_bps);
 int32_t moq_reservation_close(uint32_t reservation);
 

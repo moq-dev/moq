@@ -7,6 +7,7 @@ import { Allocator } from "../bandwidth.ts";
 import { error, reason, SessionCode, SessionError } from "../error.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
+import { closeUnwanted } from "../util/announce.ts";
 import { Follow } from "../util/observed.ts";
 import { wireOf } from "../wire.ts";
 import {
@@ -221,7 +222,7 @@ export class Reload {
 	 * estimate is `undefined` while disconnected, which tells a sender to hold
 	 * its rate rather than encode at zero.
 	 */
-	readonly bandwidth: Allocator;
+	readonly allocator: Allocator;
 
 	/**
 	 * The auth handle every session of the loop is built on, spanning reconnects.
@@ -405,8 +406,8 @@ export class Reload {
 			effect.set(this.#probeSource, effect.get(this.established)?.probe, undefined);
 		});
 
-		this.bandwidth = new Allocator(this.#estimate);
-		this.#signals.cleanup(() => this.bandwidth.close());
+		this.allocator = new Allocator(this.#estimate);
+		this.#signals.cleanup(() => this.allocator.close());
 
 		// The transport has no event for the send-rate estimate, so sample on our
 		// own schedule and skip a tick while the previous snapshot is outstanding.
@@ -854,7 +855,8 @@ export class Reload {
 		});
 
 		this.#signals.cleanup(() => pump.close());
-		void consumer.closed.then(() => pump.close());
+		closeUnwanted(producer);
+		void producer.closed.then(() => pump.close());
 
 		return consumer;
 	}

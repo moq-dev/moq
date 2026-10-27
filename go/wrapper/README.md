@@ -71,7 +71,7 @@ pinning a generated self-signed certificate.
 `Client.Session().Stats()` returns a connection stats snapshot. Fields are nil
 when the transport backend does not report that metric yet.
 
-An encoder you manage can claim a share of `Client.Session().Bandwidth()` with
+An encoder you manage can claim a share of `Client.Session().Allocator()` with
 `Reserve(demand, maxBps)`, using the track's `Demand()`. Keep one reservation and change its ceiling
 with `Update(maxBps)`. Call `Update(0)` before abandoning or replacing it to
 return its share and automatic probe ceiling immediately, even while the track

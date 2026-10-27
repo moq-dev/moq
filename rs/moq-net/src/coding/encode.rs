@@ -59,7 +59,7 @@ pub trait Encode<V> {
 pub struct Encoder<'a> {
 	buf: &'a mut Vec<u8>,
 	form: Form,
-	pub(crate) control: Option<crate::stats::Control>,
+	pub(crate) control: Option<crate::stats::Message>,
 }
 
 impl<'a> Encoder<'a> {

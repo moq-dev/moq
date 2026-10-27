@@ -86,7 +86,7 @@ async fn withdrawn_broadcast_releases_track_info(version: &str, answered: bool, 
 	options.client_subscribe = Some(reader.clone());
 	let pair = connect_mock(options).await;
 	let remote = reader.consume().routed_broadcast("room").await.unwrap();
-	let mut query = remote.track("video").unwrap().query();
+	let mut query = remote.track("video").unwrap().info();
 	let request = match futures::future::select(std::pin::pin!(dynamic.requested_track()), &mut query).await {
 		futures::future::Either::Left((request, _)) => request.expect("TRACK reaches the publisher"),
 		futures::future::Either::Right(_) => panic!("nothing answered TRACK"),

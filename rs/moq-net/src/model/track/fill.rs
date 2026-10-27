@@ -881,10 +881,10 @@ impl Fill {
 			.map(drop)
 	}
 
-	/// Poll until the track closes, with its abort error.
+	/// Poll until the track is aborted, with its abort error.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
-		TrackState::poll_closed(&self.inner.state, waiter)
+	pub(crate) fn poll_aborted(&self, waiter: &kio::Waiter) -> Poll<Error> {
+		TrackState::poll_aborted(&self.inner.state, waiter)
 	}
 
 	/// The track the fill serves.

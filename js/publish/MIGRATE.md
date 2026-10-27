@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Element reflection and invalid configuration
+
+Property and built-in UI changes now reflect into attributes. Invalid source/preview/backend/announce modes, URLs, and version lists throw instead of selecting defaults; remove an attribute to use its default.
+Catch those property setter errors. A browser reports malformed markup through its normal `error` event, and the element suspends media until those invalid attributes are corrected or removed. A valid property assignment also corrects that attribute. An empty, duplicate, or unsupported `versions` list now throws from the setter instead of failing on `el.connection.error`; check a list up front with `Net.Connection.checkVersions`.
+A `File` source reflects as `source="file"` while retaining the selected `File`; reflection does not reopen the picker or replace it with a source selector.
+
 ### `announce="never"` is gone
 
 A broadcast that is never announced has no route at the relay, so nobody could subscribe to it.

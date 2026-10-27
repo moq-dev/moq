@@ -125,7 +125,7 @@ struct Media {
 struct Handle {
 	binding: Arc<moq_mux::Binding>,
 	/// The query holding the track instance alive without subscribing to its media.
-	track: Option<moq_net::track::Querying>,
+	track: Option<moq_net::track::Resolving>,
 	/// The bound sibling ended, so only its retained rows drain.
 	ended: bool,
 }
@@ -137,7 +137,7 @@ impl Handle {
 		{
 			// The lookup is lazy: the query installs the instance, and reads pin to it through
 			// the query, since End may refuse any lookup made after this one.
-			self.track = Some(track.query().into_inner());
+			self.track = Some(track.info().into_inner());
 		}
 	}
 }

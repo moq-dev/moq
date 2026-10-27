@@ -299,7 +299,7 @@ pub fn received(track: &track::Producer) {
 /// Fill the `groups` of `track` its cache misses, a run per FETCH, as a publisher answers a
 /// range FETCH, for the session bench. The returned guard keeps the filled groups cached.
 pub async fn fill_groups(track: &track::Consumer, groups: std::ops::Range<u64>) -> crate::Result<impl Sized> {
-	track.query().await?;
+	track.info().await?;
 	Ok(track.fill_groups(groups, 0).await)
 }
 

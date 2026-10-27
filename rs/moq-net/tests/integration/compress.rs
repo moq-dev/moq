@@ -419,7 +419,7 @@ async fn ietf_fetch_keeps_the_stored_form() {
 			origin.consume().routed("bcast").await.unwrap();
 			let remote = origin.consume().request_broadcast("bcast", None).await.unwrap();
 			let consumer = remote.track("data").unwrap();
-			assert_eq!(consumer.query().await.unwrap().compress, version != "moq-transport-16");
+			assert_eq!(consumer.info().await.unwrap().compress, version != "moq-transport-16");
 			let mut fetched = consumer.fetch_group(0, moq_net::group::Fetch::default()).await.unwrap();
 			for index in 0..3 {
 				assert_eq!(

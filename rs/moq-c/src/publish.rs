@@ -201,7 +201,7 @@ impl Abort for Kept<Box<import::Track>> {
 impl Abort for Kept<moq_net::track::Producer> {
 	fn abort(self, err: moq_net::Error) {
 		// A track with a declared end ends there, as when its last producer drops.
-		if self.inner.end().is_none() {
+		if self.inner.finished().is_none() {
 			let _ = self.inner.abort(err);
 		}
 	}
@@ -1101,7 +1101,7 @@ impl Publish {
 	pub fn track_finish(&mut self, track: Id) -> Result<(), Error> {
 		let id = track;
 		let track = self.tracks.remove(id).ok_or(Error::TrackNotFound)?;
-		if track.end().is_none() {
+		if track.finished().is_none() {
 			track.finish()?;
 		}
 		track.keep(Child::Track(id));

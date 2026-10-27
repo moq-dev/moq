@@ -239,17 +239,16 @@ final class Moq {
 
   /// The session's bandwidth allocator.
   ///
-  /// Every call returns a handle to the same registry. [Bandwidth.reserve]
+  /// Every call returns a handle to the same registry. [Allocator.reserve]
   /// a share for an app-owned encoder; dropping the [Reservation] hands
   /// the room back.
-  Bandwidth bandwidth() => session.bandwidth();
+  Allocator allocator() => session.allocator();
 
-  /// The session's authorization: the grant its peer gave it, and more tokens to present.
+  /// Follow the grant the peer gave this session.
   ///
-  /// Listen to [AuthGrants.grants] to follow the grant, and [Auth.add] a fresh
-  /// token before the current one expires; each added token is presented again
-  /// on every reconnect.
-  Auth auth() => session.auth();
+  /// Listen to [GrantConsumerUpdates.updates] for the current grant and each
+  /// change. Every call returns an independent consumer.
+  GrantConsumer grants() => session.grants();
 
   /// The credentials every dial presents ([ConnectOptions.tokens]), to
   /// replace while running.
@@ -258,9 +257,9 @@ final class Moq {
   /// next dial presents them, and a live session with in-band AUTH presents
   /// them at once, withdrawing each replaced token once its replacements are
   /// answered, even when one is refused. After an authorization refusal the
-  /// client redials only if they changed. An empty token throws
-  /// `ConfigMoqException`.
-  Tokens tokens() => _client.tokens();
+  /// session redials only if they changed. An empty token throws
+  /// `ConfigMoqException`. Await [Tokens.answered] for the relay's verdict.
+  Tokens tokens() => session.tokens()!;
 
   /// Drain within one second, then stop the client.
   ///
@@ -278,13 +277,13 @@ final class Moq {
 }
 
 /// A [Stream] view over a session's grant.
-extension AuthGrants on Auth {
+extension GrantConsumerUpdates on GrantConsumer {
   /// The current grant, then each change, null while there is none.
   ///
-  /// Listens on one [Auth] share its place in the changes, so a second watcher
-  /// takes its own from [Moq.auth]. Cancelling releases only its pending read.
-  /// Ends when the session shuts down, and errors with its close reason otherwise.
-  Stream<Grant?> grants() => _Grants(this);
+  /// Listen once: the consumer is cancelled and released when the subscription
+  /// ends. Ends when the session shuts down, and errors with its close reason
+  /// otherwise.
+  Stream<Grant?> updates() => _Grants(this);
 }
 
 /// A [Stream] view over an announcement cursor.
@@ -297,18 +296,27 @@ extension AnnounceConsumerUpdates on AnnounceConsumer {
 }
 
 final class _Grants extends NativeStream<Grant?> {
-  final Auth auth;
-  _Grants(this.auth);
+  final GrantConsumer grants;
+  _Grants(this.grants);
 
   @override
-  Iterable<Grant?> initial() => [auth.grant()];
+  Iterable<Grant?> initial() => [grants.grant()];
 
   @override
-  UniffiRustFuture<Grant?> read() => auth.grantChanged();
+  UniffiRustFuture<Grant?> read() => grants.changed();
 
   @override
   bool ended(Object error) =>
       error is CancelledMoqException || error is ClosedMoqException;
+
+  @override
+  void release() {
+    try {
+      grants.cancel();
+    } finally {
+      grants.dispose();
+    }
+  }
 }
 
 final class _Updates extends NativeStream<AnnounceEvent?> {

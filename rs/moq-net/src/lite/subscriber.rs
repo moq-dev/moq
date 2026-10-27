@@ -565,7 +565,9 @@ impl SubscriptionCleanup {
 		for (_, entry) in self.0.lock().drain() {
 			let _ = match entry.tail.read().is_ended() {
 				true => entry.producer.finish(),
-				false => entry.producer.close(),
+				false => entry
+					.producer
+					.abort(Error::Stream(crate::StreamError::Session(crate::SessionError::Cancel))),
 			};
 		}
 	}
@@ -1059,10 +1061,10 @@ impl GroupRecv {
 					// The track or group dying cancels the stream; the peer's own close
 					// arrives through the ingest's reads.
 					let res = 'serve: {
-						if let Poll::Ready(err) = track.poll_closed(waiter) {
+						if let Poll::Ready(err) = track.poll_aborted(waiter) {
 							break 'serve Err(err);
 						}
-						if let Poll::Ready(err) = group.handle().poll_closed(waiter) {
+						if let Poll::Ready(err) = group.handle().poll_aborted(waiter) {
 							break 'serve Err(err);
 						}
 						match ingest.poll(&mut self.reader, group, waiter) {
@@ -3023,7 +3025,10 @@ mod tests {
 				}
 				_ => {
 					assert!(matches!(res, Err(Error::ProtocolViolation)), "{version:?}: {res:?}");
-					assert!(matches!(track.closed().now_or_never(), Some(Error::ProtocolViolation)));
+					assert!(matches!(
+						track.closed().now_or_never(),
+						Some(Err(Error::ProtocolViolation))
+					));
 				}
 			}
 		}

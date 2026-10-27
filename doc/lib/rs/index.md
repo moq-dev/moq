@@ -95,7 +95,8 @@ URLs may be `https://` (QUIC or WebTransport, with a WebSocket fallback),
 `moql://`/`moqt://` (raw QUIC), or `iroh://`. Put credentials in
 `connect::Config::tokens` rather than the URL: the first rides SETUP (and
 `?jwt=` while an offered version needs it), each other widens the grant in band,
-and `Client::tokens().set(...)` replaces them before they expire. A `?jwt=`
+and `Connection::tokens().set(...)` replaces them before they expire, with
+`answered().await` reporting the relay's verdict. A `?jwt=`
 already in the URL stays the connection credential, which reaches an older
 relay. `http://` is for a relay on localhost only: it fetches the certificate
 fingerprint unauthenticated, so never send a token over it. QUIC tuning shares

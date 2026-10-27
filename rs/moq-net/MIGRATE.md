@@ -4,10 +4,43 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Request handlers are `requests()` (#6752)
+### Request handlers are `requests()` ([#6752](https://github.com/moq-dev/moq/pull/6752))
 
 Rename `origin::Producer::dynamic(prefix)`, `broadcast::Producer::dynamic()`, `track::Producer::dynamic()`, and `track::Request::dynamic()` to `requests`.
 Their handles `origin::Dynamic`, `broadcast::Dynamic`, and `track::Dynamic` are `origin::Requests`, `broadcast::Requests`, and `track::Requests`; their methods are unchanged.
+
+### Names say one thing ([#6751](https://github.com/moq-dev/moq/pull/6751))
+
+Rename these, which kept their behavior:
+
+| Before | After |
+|---|---|
+| `Session::bandwidth()` | `Session::allocator()` |
+| `Client::with_bandwidth` | `Client::with_allocator` |
+| `auth::Auth` | `auth::Credential` |
+| `track::Consumer::query()`, `track::Querying` | `track::Consumer::info()`, `track::Resolving` |
+| `bandwidth::Reservation::consumer()` | `bandwidth::Reservation::consume()` |
+| `bandwidth::Reservation::peek()` | `bandwidth::Reservation::rate()` |
+| `stats::Control` | `stats::Message` |
+| `stats::Bytes` | `stats::Totals` |
+| `transport::Stats`, `transport::poll::Session::stats()` | `transport::Metrics`, `transport::poll::Session::metrics()` |
+
+`group::Demand` reads like `track::Demand`: replace `is_used()` with `wanted()`, and `used()`, `unused()`, `poll_used`, and `poll_unused` with a loop over `wanted_changed()` (or `poll_wanted_changed`), which returns the new value each time it changes and errors once the group closes.
+`transport::Metrics` drops `bytes_sent` and `bytes_received`: a transport reports them through the `transport::Wire` it returns from `wire()`, which `session::Stats` now reads.
+`transport::StatsUnavailable` is gone: `metrics()` defaults to reporting nothing, so delete an implementation that returned it.
+
+### One lifecycle vocabulary ([#6750](https://github.com/moq-dev/moq/pull/6750))
+
+`closed()` on `group::Producer`, `group::Demand`, `track::Producer`, and `track::Demand` now waits for the outcome and returns `Result<()>`: `Ok(())` once the end settles (a finished group; a track whose declared end was reached with every group below it finished), or the abort error. Match on the result where you awaited `()` or treated `Error::Dropped` as a clean end; `poll_closed` returns `Poll<Result<()>>`.
+`group::Producer::abort` after `finish` only releases the cache: readers keep the clean end.
+A session closing locally aborts its copies with `Error::Stream(StreamError::Session(SessionError::Cancel))`, so their readers end with that error instead of a clean end.
+`track::Producer::end()` is `finished()`.
+
+### An idle reservation reads the share it would get
+
+`bandwidth::Reservation::rate()` and its `consume()` report the slice the track would get back while nothing subscribes to it, instead of `None`; it still claims nothing from the other tracks.
+`None` now means only that the connection has no estimate or the reservation is gone.
+A sender that relied on `None` to hold its rate while unwatched should check its track's demand instead.
 
 ### Exports without a consumer are gone
 

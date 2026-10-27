@@ -57,16 +57,10 @@ declare namespace Auth {
         Handle,
         Unsupported,
         Grant,
-        Auth_2 as Auth
+        Credential_2 as Credential
     }
 }
 export { Auth }
-
-interface Auth_2 {
-    close(): void;
-    readonly closed: PromiseLike<Error | null>;
-    readonly grant: Getter<Grant | undefined>;
-}
 
 declare namespace Bandwidth {
     export {
@@ -102,15 +96,18 @@ interface CertificateHash {
 
 function certificateHash(cert: string | BufferSource): Promise<Uint8Array<ArrayBuffer>>;
 
+function checkVersions(versions: readonly string[]): string[];
+
 function connect(input: ConnectProps): Promise<Established>;
 
 export class Connection {
     constructor(props?: ConnectionProps);
     static readonly accept: typeof accept;
+    readonly allocator: Getter<Handle_2 | undefined>;
     announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
     readonly auth: Getter<Auth.Handle | undefined>;
-    readonly bandwidth: Getter<Handle_2 | undefined>;
     static readonly certificateHash: typeof certificateHash;
+    static readonly checkVersions: typeof checkVersions;
     close(abort?: Error): void;
     get closed(): GetPromise<Error | null>;
     static readonly connect: typeof connect;
@@ -183,14 +180,14 @@ class ConnectTimeout extends Error {
 
 class Consumer {
     [Symbol.asyncIterator](): AsyncGenerator<Event_2, void, undefined>;
-    close(abort?: Error): void;
+    close(): void;
     get closed(): GetPromise<Error | null>;
     next(): Promise<Event_2 | undefined>;
     get synced(): Getter<boolean>;
 }
 
 class Consumer_2 {
-    close(abort?: Error): void;
+    close(): void;
     get closed(): GetPromise<Error | null>;
     get done(): boolean;
     get frameCount(): number;
@@ -241,6 +238,12 @@ type Cost = bigint;
 const Cost: {
     zero: bigint;
 };
+
+interface Credential_2 {
+    close(): void;
+    readonly closed: PromiseLike<Error | null>;
+    readonly grant: Getter<Grant | undefined>;
+}
 
 interface Datagram {
     payload: Uint8Array;
@@ -386,7 +389,7 @@ class GroupTooLarge extends Stream {
 class Handle {
     constructor();
     abort(err?: Error): void;
-    add(token: string | Uint8Array): Promise<Auth_2>;
+    add(token: string | Uint8Array): Promise<Credential_2>;
     get grant(): Getter<Grant | undefined>;
 }
 
@@ -459,7 +462,6 @@ type Order = "ascending" | "descending";
 class Ordered {
     close(abort?: Error): void;
     get closed(): GetPromise<Error | null>;
-    end(): Position | undefined;
     finished(): Promise<Position>;
     info(): Promise<Info>;
     largest(): Promise<Position | undefined>;
@@ -549,12 +551,15 @@ interface Probe {
 
 class Producer {
     constructor(name: string);
+    abort(error: Error): void;
     accept(info?: Partial<Info>): this;
     appendDatagram(timestamp: Timestamp | undefined, payload: Uint8Array): number;
     appendGroup(): Producer_2;
-    close(abort?: Error): void;
+    close(): void;
     get closed(): GetPromise<Error | null>;
+    createGroup(sequence: number): Producer_2;
     demand(): Demand;
+    finish(): void;
     finishAt(end: Position): void;
     info(): Promise<Info>;
     insertDatagram(sequence: number, timestamp: Timestamp | undefined, payload: Uint8Array): void;
@@ -564,14 +569,14 @@ class Producer {
     subscribe(options?: Subscription): Subscriber;
     get subscription(): Getter<Subscription | undefined>;
     writeFrame(frame: Frame): void;
-    writeGroup(group: Producer_2): void;
 }
 
 class Producer_2 {
     constructor(sequence: number);
-    close(abort?: Error): void;
+    abort(error: Error): void;
     get closed(): GetPromise<Error | null>;
     consume(): Consumer_2;
+    finish(): void;
     get isClosed(): boolean;
     readonly sequence: number;
     writeFrame(frame: Frame): void;
@@ -683,15 +688,15 @@ class Requests {
 class Reservation implements Disposable {
     [Symbol.dispose](): void;
     close(): void;
-    get grant(): Getter<number | undefined>;
     peek(): number | undefined;
+    get rate(): Getter<number | undefined>;
     update(max: number): void;
 }
 
 function resolve(base: Valid, rel: Relative): Valid;
 
 interface Route {
-    auth?: Auth_2;
+    auth?: Credential_2;
     cost: Cost;
     epoch?: Epoch.Valid;
     hops: Hop[];
@@ -703,7 +708,7 @@ const Route: {
         epoch?: Epoch.Valid;
         hops?: readonly Hop[];
         cost?: Cost;
-        auth?: Auth_2;
+        auth?: Credential_2;
     }): Route;
 };
 
@@ -798,7 +803,6 @@ function stripPrefix(prefix: Valid, path: Valid): Valid | null;
 class Subscriber {
     close(abort?: Error): void;
     get closed(): GetPromise<Error | null>;
-    end(): Position | undefined;
     finished(): Promise<Position>;
     info(): Promise<Info>;
     largest(): Promise<Position | undefined>;

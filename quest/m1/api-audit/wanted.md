@@ -10,8 +10,8 @@ instead of renamed.
 
 ## Plan
 
-Decided 2026-10-25 (maintainer), extending
-[moq-net names](/quest/m1/api-audit/net-names.md)'s "Demand says `wanted`":
+Decided 2026-10-25 (maintainer), extending the `wanted` shape that
+[#6751](https://github.com/moq-dev/moq/pull/6751) gave `group::Demand`:
 
 - Yes/no demand returns `bool`; `track::Demand::wanted() -> Option<u64>`
   keeps its meaning.
@@ -20,9 +20,7 @@ Decided 2026-10-25 (maintainer), extending
   `Broadcast.Demand` (read only by tests and a bench) goes too. The origin
   closes a superseded producer explicitly instead of a publisher watching
   demand.
-- `group::Demand` has no production consumer in Rust; delete it rather than
-  convert it, unless net-names lands the conversion first. The JS group
-  demand stays internal.
+- `group::Demand` already says `wanted`. The JS group demand stays internal.
 - `bandwidth::Producer` gets a `demand()` handle with `wanted() -> bool` and
   `wanted_changed()`, like track.
 - `track::Fill` merges `is_used()` and `next()` into
@@ -43,5 +41,4 @@ Public API: breaking renames and deletions in every language. Wire: none.
 
 ## Required
 
-- [moq-net names say one thing](/quest/m1/api-audit/net-names.md) - lands group demand's first `wanted` shape
 - [One lifecycle vocabulary](/quest/m1/api-audit/lifecycle.md) - settles close and demand semantics this renames

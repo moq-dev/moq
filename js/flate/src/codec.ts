@@ -9,19 +9,6 @@ export const DEFAULT_LEVEL = 6;
 // The trailing bytes of a DEFLATE sync flush, stripped on the wire and re-appended to decode.
 const SYNC_FLUSH_TAIL = new Uint8Array([0x00, 0x00, 0xff, 0xff]);
 
-// Concatenate chunks into one tight buffer (a single chunk passes through untouched). Safe only for
-// output that is consumed before the next push, since a single chunk is pako's own reused buffer.
-function concat(chunks: Uint8Array[], total: number): Uint8Array {
-	if (chunks.length === 1) return chunks[0];
-	const out = new Uint8Array(total);
-	let offset = 0;
-	for (const chunk of chunks) {
-		out.set(chunk, offset);
-		offset += chunk.length;
-	}
-	return out;
-}
-
 /** Options for an {@link Encoder}. */
 export interface EncoderOptions {
 	/** DEFLATE level, `0..=9` (higher is smaller and slower). Defaults to {@link DEFAULT_LEVEL}. */
@@ -115,10 +102,10 @@ export class Decoder {
 			this.#total += bytes.length;
 			this.#inflated += bytes.length;
 			// Bound the inflated output as it is produced; a tiny slice can expand enormously. Stop
-			// retaining past the budget, then reject once the push returns.
+			// inside push rather than inflating the rest of a hostile slice.
 			if (this.#inflated > Group.MAX_GROUP_CACHE_BYTES) {
 				this.#tooLarge = true;
-				return;
+				throw new Error(`decompressed group exceeded ${Group.MAX_GROUP_CACHE_BYTES} bytes`);
 			}
 			this.#chunks.push(bytes);
 		};
@@ -130,19 +117,29 @@ export class Decoder {
 	 * budget.
 	 */
 	frame(slice: Uint8Array): Uint8Array {
-		if (slice.length === 0) return slice;
 		if (this.#tooLarge) throw new Error(`decompressed group exceeded ${Group.MAX_GROUP_CACHE_BYTES} bytes`);
+		if (slice.length === 0) return new Uint8Array();
 
 		this.#chunks = [];
 		this.#total = 0;
 
 		// Feed the slice then the re-appended sync-flush marker as two pushes, so no combined buffer is
 		// allocated. The marker delimits the frame and flushes its last bytes out of the inflate buffer.
-		this.#inflate.push(slice, false);
-		this.#inflate.push(SYNC_FLUSH_TAIL, pako.Z_SYNC_FLUSH);
-		if (this.#inflate.err) throw new Error(`decompression failed: ${this.#inflate.msg}`);
-		if (this.#tooLarge) throw new Error(`decompressed group exceeded ${Group.MAX_GROUP_CACHE_BYTES} bytes`);
+		try {
+			this.#inflate.push(slice, false);
+			this.#inflate.push(SYNC_FLUSH_TAIL, pako.Z_SYNC_FLUSH);
+			if (this.#inflate.err) throw new Error(`decompression failed: ${this.#inflate.msg}`);
 
-		return concat(this.#chunks, this.#total);
+			// Retained frames must own tight buffers rather than pinning pako's scratch storage.
+			const out = new Uint8Array(this.#total);
+			let offset = 0;
+			for (const chunk of this.#chunks) {
+				out.set(chunk, offset);
+				offset += chunk.length;
+			}
+			return out;
+		} finally {
+			this.#chunks = [];
+		}
 	}
 }

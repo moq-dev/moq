@@ -240,7 +240,7 @@ async fn replacement(version: &str) {
 	let mut cached = media.fetch_group(0, None).await.unwrap();
 	assert_eq!(cached.read_frame().await.unwrap().unwrap().payload.as_ref(), b"A:0");
 	if let Ok(late) = pinned.track("late")
-		&& let Ok(info) = late.query().await
+		&& let Ok(info) = late.info().await
 	{
 		assert_ne!(info.priority, 17, "retired handle resolved B's metadata");
 	}

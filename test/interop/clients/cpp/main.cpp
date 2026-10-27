@@ -138,10 +138,10 @@ std::shared_ptr<moq::Session> connect(const std::string &url, const Dial &dial, 
     auto client = ok(moq::Client::init(config), "client init");
     open_session = until(client->connect(url), deadline, "connect");
     if (dial.grant) {
-        auto auth = open_session->auth();
-        auto grant = auth->grant();
+        auto grants = open_session->grants();
+        auto grant = grants->grant();
         while (!grant) {
-            grant = until(auth->grant_changed(), deadline, "grant");
+            grant = until(grants->changed(), deadline, "grant");
         }
         std::fprintf(
             stderr, "auth granted publish=%s subscribe=%s\n", patterns(grant->publish).c_str(),

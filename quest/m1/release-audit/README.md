@@ -97,5 +97,4 @@ work, because obs-moq ships on its own schedule.
 - [Transport performance audit](/quest/m2/audit-perf.md) - congestion-control coverage remains outstanding
 - [Binding timestamps](/quest/m1/binding-timestamps.md) - exact timestamps across language APIs
 - [Dependency audit](/quest/m2/audit-deps.md) - existing advisory inventory
-- [Release gates](/quest/m0/ci/release-gates.md) - post-cut ruleset verification
 - [Publish and adopt](/quest/m2/release/README.md) - API/feature review, merge order, candidate checks, publication, and installed-artifact proof

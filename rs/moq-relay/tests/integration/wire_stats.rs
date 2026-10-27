@@ -68,7 +68,7 @@ async fn wire_sources(io_uring: bool) {
 					&& row.wire_tx > 0
 					&& row.wire_rx > 0
 					&& registry.snapshot().control().iter().any(|(_, class, bytes)| {
-						*class == moq_net::stats::Control::Announce && bytes.tx > 0 && bytes.rx > 0
+						*class == moq_net::stats::Message::Announce && bytes.tx > 0 && bytes.rx > 0
 					}) {
 					break row;
 				}

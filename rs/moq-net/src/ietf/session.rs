@@ -140,7 +140,7 @@ impl std::future::Future for Driver {
 	}
 }
 
-pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
+pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle, Option<crate::auth::Credential>), Error> {
 	let Config {
 		runtime,
 		stats,
@@ -202,7 +202,7 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 	// What the peer declared in its SETUP. Seeded now when that stream was already
 	// read (the legacy handshake, or a gated server accept), and filled by the uni
 	// loop otherwise.
-	let peer_setup = peer::PeerSetup::new(extensions).with_implementation(peer_implementation);
+	let mut peer_setup = peer::PeerSetup::new(extensions).with_implementation(peer_implementation);
 	let setup_read = peer_declared.is_some();
 	match peer_declared {
 		Some(declared) => peer_setup.set(declared),
@@ -210,9 +210,13 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 		// settle the slot rather than leave the announce loops waiting on a value
 		// that is never coming.
 		None if !cluster::supported(version) => peer_setup.set(peer::Peer::default()),
+		// A client is live before the server's SETUP, which follows its check of the
+		// credential.
+		None if client => peer_setup = peer_setup.accepting(auth.clone()),
 		None => {}
 	}
 
+	let credential = setup_token.clone();
 	let driver = async move {
 		// Held for the life of the session.
 		let _setup_token = setup_token;
@@ -629,6 +633,7 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 			future: driver,
 		},
 		goaway_handle,
+		credential,
 	))
 }
 
@@ -1489,7 +1494,7 @@ async fn read_goaways<R: crate::transport::poll::RecvStream>(
 		let msg: ietf::GoAway = body.message(version)?;
 		reader
 			.stats()
-			.control(crate::stats::Control::Goaway, body.0.len() + 2, true);
+			.control(crate::stats::Message::Goaway, body.0.len() + 2, true);
 		tracing::info!(message = ?msg, "received GOAWAY");
 
 		// Draft-18 names the first of our own Request IDs it did not process: even for a
@@ -1597,7 +1602,7 @@ mod tests {
 			};
 			// SETUP already owns its stream; subsequent requests have no credit.
 			let _ = scripted.without_credit();
-			let (driver, _goaway) = start(Config {
+			let (driver, _goaway, _) = start(Config {
 				runtime: crate::time::sim(),
 				stats: Default::default(),
 				session,
@@ -1694,7 +1699,7 @@ mod tests {
 					let session =
 						crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(incoming);
 					let log = session.log.clone();
-					let (driver, _) = start(Config {
+					let (driver, _, _) = start(Config {
 						runtime: crate::time::sim(),
 						stats: Default::default(),
 						session: crate::driver::Transport::new(session.clone()),
@@ -1753,7 +1758,7 @@ mod tests {
 				script.extend(body);
 				let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![script]);
 				let log = session.log.clone();
-				let (driver, _) = start(Config {
+				let (driver, _, _) = start(Config {
 					runtime: crate::time::sim(),
 					stats: Default::default(),
 					session: crate::driver::Transport::new(session.clone()),
@@ -1807,7 +1812,7 @@ mod tests {
 		));
 		let log = session.log.clone();
 		let handle = crate::auth::Handle::new();
-		let (driver, _) = start(Config {
+		let (driver, _, _) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -1863,7 +1868,7 @@ mod tests {
 		));
 		let log = session.log.clone();
 		let handle = crate::auth::Handle::new();
-		let (driver, _) = start(Config {
+		let (driver, _, _) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -1912,7 +1917,7 @@ mod tests {
 				let session =
 					crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![script]);
 				let log = session.log.clone();
-				let (driver, _) = start(Config {
+				let (driver, _, _) = start(Config {
 					runtime: crate::time::sim(),
 					stats: Default::default(),
 					session: crate::driver::Transport::new(session.clone()),
@@ -2019,7 +2024,7 @@ mod tests {
 		let session = crate::lite::test_transport::ScriptedSession::new(namespace_without_hop_path(VERSION).await);
 		let log = session.log.clone();
 
-		let (driver, _goaway) = start(Config {
+		let (driver, _goaway, _) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -2087,7 +2092,7 @@ mod tests {
 		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
 		let log = session.log.clone();
 
-		let (driver, _goaway) = start(Config {
+		let (driver, _goaway, _) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -2204,7 +2209,7 @@ mod tests {
 			_ => None,
 		};
 
-		let (driver, _goaway) = start(Config {
+		let (driver, _goaway, _) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session,
@@ -2466,7 +2471,7 @@ mod tests {
 		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
 		let log = session.log.clone();
 
-		let (driver, _goaway) = start(Config {
+		let (driver, _goaway, _) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -2573,7 +2578,7 @@ mod tests {
 		let log = session.log.clone();
 
 		let handle = crate::auth::Link::ietf(true);
-		let (driver, goaway) = start(Config {
+		let (driver, goaway, _) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -2662,7 +2667,7 @@ mod tests {
 
 		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
 		let log = session.log.clone();
-		let (driver, _goaway) = start(Config {
+		let (driver, _goaway, _) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -2762,7 +2767,7 @@ mod tests {
 		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new())
 			.with_incoming_bidis(vec![auth_request(VERSION).await]);
 		let log = session.log.clone();
-		let (driver, _goaway) = start(Config {
+		let (driver, _goaway, _) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -2855,7 +2860,7 @@ mod tests {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let log = session.log.clone();
 
-		let (driver, _goaway) = start(Config {
+		let (driver, _goaway, _) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -2904,7 +2909,7 @@ mod tests {
 		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
 		let log = session.log.clone();
 
-		let (driver, _goaway) = start(Config {
+		let (driver, _goaway, _) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -3320,7 +3325,7 @@ mod tests {
 				let session =
 					crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![payload]);
 				let log = session.log.clone();
-				let (driver, _goaway) = start(Config {
+				let (driver, _goaway, _) = start(Config {
 					runtime: crate::time::sim(),
 					stats: Default::default(),
 					session: crate::driver::Transport::new(session.clone()),
@@ -3392,7 +3397,7 @@ mod tests {
 				let session =
 					crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![payload]);
 				let log = session.log.clone();
-				let (driver, _goaway) = start(Config {
+				let (driver, _goaway, _) = start(Config {
 					runtime: crate::time::sim(),
 					stats: Default::default(),
 					session: crate::driver::Transport::new(session.clone()),
@@ -3502,7 +3507,7 @@ mod tests {
 			.await
 			.expect("open the control stream");
 
-		let (driver, _goaway) = start(Config {
+		let (driver, _goaway, _) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session,
@@ -3633,7 +3638,7 @@ mod tests {
 					_ => None,
 				};
 				let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-				let (driver, _goaway) = start(Config {
+				let (driver, _goaway, _) = start(Config {
 					runtime: crate::time::sim(),
 					stats: Default::default(),
 					session,
@@ -3878,7 +3883,7 @@ mod tests {
 		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new())
 			.with_incoming_unis(vec![setup_stream(VERSION, params, &[])]);
 		let log = session.log.clone();
-		let (driver, _goaway) = start(Config {
+		let (driver, _goaway, _) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -3986,7 +3991,7 @@ mod tests {
 		// The peer FINs each stream after its script, so a message it cuts short is malformed.
 		session.close(crate::lite::test_transport::Close::Fin);
 		let log = session.log.clone();
-		let (driver, _goaway) = start(Config {
+		let (driver, _goaway, _) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),

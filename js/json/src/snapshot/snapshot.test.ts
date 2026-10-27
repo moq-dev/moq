@@ -637,7 +637,7 @@ test("snapshot consumer skips a group the publisher dropped mid-read", async () 
 	expect((await consumer.latest())?.value).toEqual({ v: 0 });
 
 	const next = consumer.latest();
-	first.close(new NetError.Stream(StreamCode.Old));
+	first.abort(new NetError.Stream(StreamCode.Old));
 	const second = track.appendGroup();
 	second.writeFrame({ payload: new TextEncoder().encode('{"v":1}'), timestamp: Time.Timestamp.now() });
 	expect((await next)?.value).toEqual({ v: 1 });
@@ -650,7 +650,7 @@ test("snapshot consumer propagates a non-gap frame failure", async () => {
 	const group = track.appendGroup();
 	group.writeFrame({ payload: new TextEncoder().encode('{"ok":true}'), timestamp: Time.Timestamp.now() });
 	expect((await consumer.next())?.value).toEqual({ ok: true });
-	group.close(new NetError.Stream(StreamCode.Internal));
+	group.abort(new NetError.Stream(StreamCode.Internal));
 	await expect(consumer.next()).rejects.toMatchObject({ code: StreamCode.Internal });
 });
 

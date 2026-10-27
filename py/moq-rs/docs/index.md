@@ -44,8 +44,8 @@ asyncio.run(main())
    Session
    Request
    Transport
-   Auth
-   AuthToken
+   GrantConsumer
+   Tokens
    Grant
 ```
 

@@ -89,7 +89,12 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 			drop(fetched);
 
 			// The publisher stops serving the group: nobody reads it any more.
-			moq_clock::timeout(Duration::from_secs(5), group.demand().unused())
+			let mut demand = group.demand();
+			let unwanted = async move {
+				while demand.wanted_changed().await? {}
+				Ok::<_, moq_net::Error>(())
+			};
+			moq_clock::timeout(Duration::from_secs(5), unwanted)
 				.await
 				.unwrap_or_else(|_| panic!("{ctx}: the publisher still serves the fetch"))
 				.unwrap();

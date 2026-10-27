@@ -585,7 +585,7 @@ impl poll::Session for DeadStreamSession {
 		self.log.poll_closed(self.park.hold(cx))
 	}
 
-	fn stats(&self) -> impl crate::transport::Stats {
+	fn metrics(&self) -> impl crate::transport::Metrics {
 		SinkStats::default()
 	}
 }
@@ -842,7 +842,7 @@ impl poll::Session for SinkSession {
 		self.log.poll_closed(self.park.hold(cx))
 	}
 
-	fn stats(&self) -> impl crate::transport::Stats {
+	fn metrics(&self) -> impl crate::transport::Metrics {
 		*self.stats.lock().unwrap()
 	}
 
@@ -873,7 +873,7 @@ impl SinkStats {
 	}
 }
 
-impl crate::transport::Stats for SinkStats {
+impl crate::transport::Metrics for SinkStats {
 	fn estimated_send_rate(&self) -> Option<u64> {
 		self.estimated_send_rate
 	}
@@ -1249,7 +1249,7 @@ impl poll::Session for ScriptedSession {
 		self.log.poll_closed(self.park.hold(cx))
 	}
 
-	fn stats(&self) -> impl crate::transport::Stats {
+	fn metrics(&self) -> impl crate::transport::Metrics {
 		self.stats
 	}
 }

@@ -754,6 +754,16 @@ impl GroupState {
 		}
 	}
 
+	/// The group's outcome once final: `Ok` once finished, which a later abort only frees
+	/// the cache of, or the abort error.
+	fn poll_outcome(&self) -> Poll<Result<()>> {
+		match (self.fin, &self.abort) {
+			(Some(_), _) => Poll::Ready(Ok(())),
+			(None, Some(err)) => Poll::Ready(Err(err.clone())),
+			(None, None) => Poll::Pending,
+		}
+	}
+
 	/// Resolve whether a reader at `index` can still make progress, answering the same
 	/// question as a read without consuming anything.
 	fn poll_end(&self, index: usize) -> Poll<Result<()>> {
@@ -1658,6 +1668,9 @@ impl Producer {
 	/// Consumes the writer. Drops the cached frames so a stale [`Consumer`] can't pin
 	/// their buffers in memory forever; consumers that haven't drained yet surface the
 	/// abort error instead of the leftover cache.
+	///
+	/// After [`finish`](Self::finish) the outcome is already settled, so this only releases
+	/// the cache: the group stays finished, and a reader that drained it ends cleanly.
 	pub fn abort(self, err: Error) -> Result<()> {
 		self.handle.close_aborted(err)
 	}
@@ -1669,9 +1682,10 @@ impl Producer {
 		Error::GroupTooLarge
 	}
 
-	/// Block until the group is aborted, including by eviction. Finishing does not close it.
+	/// Block until the group's outcome is final: `Ok` once finished, or the abort error,
+	/// including eviction.
 	#[cfg(feature = "async")]
-	pub async fn closed(&self) -> Error {
+	pub async fn closed(&self) -> Result<()> {
 		kio::wait(|waiter| self.handle.poll_closed(waiter)).await
 	}
 	/// The non-writing observer used by the cache and built-in sessions.
@@ -1705,9 +1719,9 @@ impl Producer {
 		self.handle.consume()
 	}
 
-	/// Poll until the group is aborted, including by eviction; ready with the cause.
-	/// Finishing does not close it.
-	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
+	/// Poll until the group's outcome is final: `Ok` once finished, or the abort error,
+	/// including eviction.
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
 		self.handle.poll_closed(waiter)
 	}
 
@@ -1855,13 +1869,17 @@ impl Handle {
 
 	fn commit_abort(&self, mut guard: kio::Mut<'_, GroupState>, err: Error) {
 		let policy = matches!(err, Error::Old | Error::Timeout | Error::Evicted);
+		// A finished group's outcome is settled: an abort only releases its cache, so it
+		// neither failed nor was cut.
+		let settled = guard.fin.is_some();
 		// Cache policy frees the frames, as does an oversized group whichever write found
 		// it; a copy that failed or was given up lends them on.
 		let salvage = !policy && !matches!(err, Error::GroupTooLarge);
 		// A reset carrying a policy code is the upstream's cache policy, a cancel is a reader
 		// no longer wanting the group, and a fill refused as unfetchable abandons backfill:
 		// deliberate holes, never a cut readers see. The publisher giving the group up is.
-		let cut = !policy
+		let cut = !settled
+			&& !policy
 			&& !matches!(
 				err,
 				Error::Cancel
@@ -1877,7 +1895,7 @@ impl Handle {
 		if cut {
 			let _ = self.alive.cut.set(err.clone());
 		}
-		if !policy {
+		if !settled && !policy {
 			self.alive.failed.store(true, Ordering::Release);
 		}
 		guard.abort = Some(err);
@@ -2140,10 +2158,16 @@ impl Handle {
 		}
 	}
 
-	/// Poll until the group is aborted, including by eviction; ready with the cause.
-	/// Finishing does not close it.
+	/// Poll until the group's outcome is final: `Ok` once finished, or the abort error.
 	// Sessions observe a group while its sole writer belongs to a frame.
-	pub(crate) fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
+	pub(crate) fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+		settle(self.state.poll_ref(waiter, |state| state.poll_outcome()))
+	}
+
+	/// Poll until the group is aborted, including by eviction and after it finished; ready
+	/// with the cause. Finishing alone does not end it.
+	// Sessions and track scans watch for an abort that frees a group, finished or not.
+	pub(crate) fn poll_aborted(&self, waiter: &kio::Waiter) -> Poll<Error> {
 		self.state.poll_closed(waiter).map(|()| self.abort_reason())
 	}
 
@@ -2153,6 +2177,7 @@ impl Handle {
 		Demand {
 			sequence: self.info.sequence,
 			state: self.state.weak(),
+			prev: None,
 		}
 	}
 
@@ -2168,14 +2193,39 @@ impl Handle {
 	}
 }
 
+/// The outcome of a group's state polled from a handle: the channel closing short of one
+/// (every writer gone without a finish or abort) reads as [`Error::Dropped`].
+fn settle(poll: Poll<std::result::Result<Result<()>, kio::Ref<'_, GroupState>>>) -> Poll<Result<()>> {
+	Poll::Ready(match ready!(poll) {
+		Ok(outcome) => outcome,
+		Err(closed) => match closed.poll_outcome() {
+			Poll::Ready(outcome) => outcome,
+			Poll::Pending => Err(Error::Dropped),
+		},
+	})
+}
+
 /// A cloneable, watch-only handle to a group's readers.
 ///
-/// A finished or dropped group ends waits with [`Error::Dropped`]; an aborted one keeps
-/// its abort reason.
-#[derive(Clone)]
+/// Once every handle to a finished group is gone, demand waits end with
+/// [`Error::Dropped`]; an aborted group's keep its abort reason. Each clone watches on
+/// its own, so its first [`poll_wanted_changed`](Self::poll_wanted_changed) reports the
+/// current value.
 pub struct Demand {
 	sequence: u64,
 	state: kio::ProducerWeak<GroupState>,
+	// The value `poll_wanted_changed` last returned, or `None` before it returned any.
+	prev: Option<bool>,
+}
+
+impl Clone for Demand {
+	fn clone(&self) -> Self {
+		Self {
+			sequence: self.sequence,
+			state: self.state.clone(),
+			prev: None,
+		}
+	}
 }
 
 impl Demand {
@@ -2185,37 +2235,45 @@ impl Demand {
 	}
 
 	/// Whether the group is open and has readers right now.
-	pub fn is_used(&self) -> bool {
+	pub fn wanted(&self) -> bool {
 		!self.state.is_closed() && self.state.is_used()
 	}
 
-	/// Wait until at least one reader needs the group.
+	/// Return [`wanted`](Self::wanted) once it differs from what this handle last returned:
+	/// immediately on the first call, then on each change. Errors once the group is closed.
 	#[cfg(feature = "async")]
-	pub async fn used(&self) -> Result<()> {
-		kio::wait(|waiter| self.poll_used(waiter)).await
+	pub async fn wanted_changed(&mut self) -> Result<bool> {
+		kio::wait(|waiter| self.poll_wanted_changed(waiter)).await
 	}
 
-	/// Wait until no reader needs the group.
+	/// Poll for [`wanted`](Self::wanted) to differ from what this handle last returned.
+	pub fn poll_wanted_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<bool>> {
+		loop {
+			if self.state.is_closed() {
+				return Poll::Ready(Err(self.abort_reason()));
+			}
+			let wanted = self.state.is_used();
+			if self.prev != Some(wanted) {
+				self.prev = Some(wanted);
+				return Poll::Ready(Ok(wanted));
+			}
+			// Wait for the opposite; closing fails either wait, which errors above.
+			let _ = ready!(match wanted {
+				true => self.state.poll_unused(waiter),
+				false => self.state.poll_used(waiter),
+			});
+		}
+	}
+
+	/// Wait until the group's outcome is final: `Ok` once finished, or the abort error.
 	#[cfg(feature = "async")]
-	pub async fn unused(&self) -> Result<()> {
-		kio::wait(|waiter| self.poll_unused(waiter)).await
+	pub async fn closed(&self) -> Result<()> {
+		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
-	/// Poll until at least one reader needs the group.
-	pub fn poll_used(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		self.state.poll_used(waiter).map_err(|_| self.abort_reason())
-	}
-
-	/// Poll until no reader needs the group.
-	pub fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		self.state.poll_unused(waiter).map_err(|_| self.abort_reason())
-	}
-
-	/// Wait until the group closes, returning its cause.
-	#[cfg(feature = "async")]
-	pub async fn closed(&self) -> Error {
-		self.state.closed().await;
-		self.abort_reason()
+	/// Poll until the group's outcome is final: `Ok` once finished, or the abort error.
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+		settle(self.state.consume_weak().poll(waiter, |state| state.poll_outcome()))
 	}
 
 	fn abort_reason(&self) -> Error {
@@ -3473,22 +3531,34 @@ mod test {
 	}
 
 	#[test]
-	#[cfg(feature = "async")]
 	fn demand_watches_readers_without_keeping_the_group_alive() {
+		let waiter = kio::Waiter::noop();
 		let producer = Info { sequence: 7 }.produce();
-		let demand = producer.demand();
+		let mut demand = producer.demand();
 		assert_eq!(demand.sequence(), 7);
-		assert!(!demand.is_used());
+		assert!(!demand.wanted());
+		assert!(matches!(demand.poll_wanted_changed(&waiter), Poll::Ready(Ok(false))));
+		assert!(demand.poll_wanted_changed(&waiter).is_pending());
+
 		let first = producer.consume();
 		let second = first.clone();
-		assert!(demand.is_used());
+		assert!(demand.wanted());
+		assert!(matches!(demand.poll_wanted_changed(&waiter), Poll::Ready(Ok(true))));
 		drop(first);
-		assert!(demand.poll_unused(&kio::Waiter::noop()).is_pending());
+		assert!(demand.poll_wanted_changed(&waiter).is_pending());
+
+		// A clone reports the current value first, whatever the original last returned.
+		let mut clone = demand.clone();
+		assert!(matches!(clone.poll_wanted_changed(&waiter), Poll::Ready(Ok(true))));
+
 		drop(second);
-		assert!(matches!(demand.poll_unused(&kio::Waiter::noop()), Poll::Ready(Ok(()))));
+		assert!(matches!(demand.poll_wanted_changed(&waiter), Poll::Ready(Ok(false))));
 		drop(producer);
-		assert!(!demand.is_used());
-		assert!(matches!(demand.used().now_or_never(), Some(Err(Error::Dropped))));
+		assert!(!demand.wanted());
+		assert!(matches!(
+			demand.poll_wanted_changed(&waiter),
+			Poll::Ready(Err(Error::Dropped))
+		));
 	}
 
 	/// The fixed overhead covers the first segment of frame slots, and each later segment
@@ -4713,7 +4783,7 @@ mod test {
 		let group = frame.group();
 		assert_eq!(group.sequence, 3);
 		assert_eq!(group.frame_count(), 2, "the open frame counts");
-		assert!(group.demand().is_used());
+		assert!(group.demand().wanted());
 		assert!(group.poll_closed(&kio::Waiter::noop()).is_pending());
 
 		frame.write(Bytes::from_static(b"b")).unwrap();
@@ -4735,8 +4805,51 @@ mod test {
 		));
 		assert!(matches!(
 			handle.poll_closed(&kio::Waiter::noop()),
-			Poll::Ready(Error::FrameTooLarge)
+			Poll::Ready(Err(Error::FrameTooLarge))
 		));
+	}
+
+	/// `closed` settles on a finish, and an abort after it only frees the cache: the
+	/// outcome stays clean, a drained reader ends cleanly, and nothing records a cut.
+	#[test]
+	fn abort_after_finish_keeps_the_clean_outcome() {
+		let mut producer = Info { sequence: 0 }.produce();
+		let handle = producer.handle();
+		let demand = producer.demand();
+		let mut consumer = producer.consume();
+		let waiter = kio::Waiter::noop();
+		assert!(producer.poll_closed(&waiter).is_pending());
+		assert!(demand.poll_closed(&waiter).is_pending());
+
+		producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"a")).unwrap();
+		producer.finish().unwrap();
+		assert!(matches!(producer.poll_closed(&waiter), Poll::Ready(Ok(()))));
+		assert!(matches!(demand.poll_closed(&waiter), Poll::Ready(Ok(()))));
+		assert!(
+			handle.poll_aborted(&waiter).is_pending(),
+			"a finish alone frees nothing"
+		);
+		assert!(matches!(consumer.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
+
+		producer.abort(Error::Cancel).unwrap();
+		assert!(matches!(handle.poll_closed(&waiter), Poll::Ready(Ok(()))));
+		assert!(matches!(demand.poll_closed(&waiter), Poll::Ready(Ok(()))));
+		assert!(matches!(handle.poll_aborted(&waiter), Poll::Ready(Error::Cancel)));
+		assert!(handle.cut_error().is_none());
+		assert!(!handle.fate().failed());
+		assert!(matches!(consumer.poll_read_frame(&waiter), Poll::Ready(Ok(None))));
+	}
+
+	/// An abort before the finish is the outcome, on every observer.
+	#[test]
+	fn abort_before_finish_is_the_outcome() {
+		let producer = Info { sequence: 0 }.produce();
+		let handle = producer.handle();
+		let demand = producer.demand();
+		producer.abort(Error::Timeout).unwrap();
+		let waiter = kio::Waiter::noop();
+		assert!(matches!(handle.poll_closed(&waiter), Poll::Ready(Err(Error::Timeout))));
+		assert!(matches!(demand.poll_closed(&waiter), Poll::Ready(Err(Error::Timeout))));
 	}
 
 	/// Completing a frame charges whatever it wrote since the last notify.

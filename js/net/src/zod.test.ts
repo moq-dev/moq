@@ -9,7 +9,7 @@ test("read validates each frame and ends only at the end of the group", async ()
 	const consumer = producer.consume();
 	// Falsy values are frames like any other, not the end of the stream.
 	for (const json of ["0", "false", "null", '"ok"']) producer.writeFrame(textFrame(json));
-	producer.close();
+	producer.finish();
 
 	const schema = z.union([z.number(), z.boolean(), z.null(), z.string()]);
 	expect(await Zod.read(consumer, schema)).toBe(0);
@@ -23,7 +23,7 @@ test("read rejects a frame the schema refuses", async () => {
 	const producer = new Producer(0);
 	const consumer = producer.consume();
 	producer.writeFrame(textFrame('{"count":"three"}'));
-	producer.close();
+	producer.finish();
 
 	await expect(Zod.read(consumer, z.object({ count: z.number() }))).rejects.toThrow();
 });

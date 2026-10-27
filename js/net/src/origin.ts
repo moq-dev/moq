@@ -29,6 +29,7 @@ import {
 } from "./internal.ts";
 import * as Path from "./path.ts";
 import { Front } from "./resume.ts";
+import { closeUnwanted } from "./util/announce.ts";
 import {
 	type Advertised,
 	type Advertisements,
@@ -481,6 +482,19 @@ function publishPath(path: Path.Valid): void {
 	}
 }
 
+// A broadcast created through the origin: its producer, and the handle the origin routes.
+interface Created {
+	producer: broadcast.Producer;
+	front: broadcast.Consumer;
+}
+
+// End a created broadcast the origin no longer routes. Consumer handles never end a produced
+// broadcast, so the origin closes its producer; tracks already subscribed keep serving.
+function retire({ producer, front }: Created): void {
+	front.close();
+	producer.close();
+}
+
 /** Reactive backing state shared by origin producers and consumers. */
 class OriginState {
 	// Both tables decouple the application producing into the origin from the
@@ -494,7 +508,7 @@ class OriginState {
 	// newest first. Local and routes stay separate so a session can never announce a
 	// received entry back to a peer, which is what makes an origin shared by both
 	// directions echo-free.
-	created: Map<Path.Valid, broadcast.Consumer> | undefined = new Map();
+	created: Map<Path.Valid, Created> | undefined = new Map();
 	local = new VersionedSignal<Map<Path.Valid, broadcast.Consumer> | undefined>(new Map());
 	advertisedLocal = new VersionedSignal<Map<Path.Valid, Route> | undefined>(new Map());
 	routes = new VersionedSignal<Map<Path.Valid, RouteEntry[]> | undefined>(new Map());
@@ -1189,8 +1203,8 @@ export class Producer implements Table {
 	 * withdraws it from everyone again.
 	 *
 	 * Close the producer to drop it. Creating a path again supersedes the previous
-	 * broadcast: the origin drops its handle on the old one, which closes it unless the
-	 * application still holds a consumer clone. Announce with a {@link Route.epoch}
+	 * broadcast: the origin retracts and closes the old one, and tracks already subscribed
+	 * keep serving until they end. Announce with a {@link Route.epoch}
 	 * (`Epoch.mint()` per run) so a restart replaces the old broadcast rather than resuming
 	 * into it; at the same epoch, a local broadcast competes on cost and wins ties.
 	 */
@@ -1215,20 +1229,21 @@ export class Producer implements Table {
 		};
 		hooks.attachAnnouncer(producer, announcer);
 
+		const entry = { producer, front };
 		const previous = created.get(path);
-		created.set(path, front);
+		created.set(path, entry);
 		if (previous) {
-			this.#retractExact(path, previous);
-			previous.close();
+			this.#retractExact(path, previous.front);
+			retire(previous);
 		}
 
 		// Drop it when the broadcast closes, unless a recreate already replaced it: a stale
 		// broadcast closing must not unpublish the live one. Clearing `created` also stops a
-		// later announce, since a consumer clone can keep the broadcast open past this close.
+		// later announce.
 		const release = this.#hold(() => {
 			this.#retractExact(path, front);
-			if (this.#state.created?.get(path) === front) this.#state.created.delete(path);
-			front.close();
+			if (this.#state.created?.get(path) === entry) this.#state.created.delete(path);
+			retire(entry);
 		});
 		void front.closed.then(release);
 
@@ -1237,7 +1252,7 @@ export class Producer implements Table {
 
 	#advertiseExact(path: Path.Valid, front: broadcast.Consumer, route: Route): void {
 		if (!this.#state.local.peek()) throw new Error("origin is closed");
-		if (this.#state.created?.get(path) !== front) throw new Error("broadcast is closed");
+		if (this.#state.created?.get(path)?.front !== front) throw new Error("broadcast is closed");
 		// Both maps move together, so every reader sees the broadcast and its route at once.
 		this.#state.local.mutate((broadcasts) => {
 			broadcasts?.set(path, front);
@@ -1489,9 +1504,7 @@ export class Producer implements Table {
 		if (this.#state.closed.peek() !== undefined) return;
 		this.#state.closed.set(abort ?? null);
 		for (const watch of this.#state.watchers.values()) watch.version.update((n) => n + 1);
-		for (const front of this.#state.created?.values() ?? []) {
-			front.close();
-		}
+		for (const created of this.#state.created?.values() ?? []) retire(created);
 		this.#state.created = undefined;
 		this.#state.local.update(() => undefined);
 		this.#state.advertisedLocal.update(() => undefined);
@@ -1957,7 +1970,10 @@ export class Consumer {
 		const patterns = this.#scope.patterns(scope);
 		void producer.closed.then(this.#state.watch([...patterns].map(scopeHead)));
 		void this.#runAnnounced(producer, patterns, options?.hidden ?? false);
-		return producer.consume();
+		const consumer = producer.consume();
+		// The last reader leaving ends the stream and its watch.
+		closeUnwanted(producer);
+		return consumer;
 	}
 
 	/** The routes visible to one announcement watcher. */
