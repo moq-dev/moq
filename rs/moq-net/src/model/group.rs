@@ -1097,6 +1097,33 @@ pub(crate) struct Handle {
 	alive: Arc<Alive>,
 }
 
+/// A group the track no longer caches, held without keeping it open or allocated, so a
+/// track abort can still end it while its writer adds to it.
+pub(super) struct Detached {
+	state: kio::Weak<GroupState>,
+	info: Info,
+	track: track::Info,
+	cache: Arc<cache::Track>,
+	alive: Arc<Alive>,
+}
+
+impl Detached {
+	/// The group, while it is neither finished nor aborted.
+	pub(super) fn writing(&self) -> Option<Handle> {
+		let state = self.state.upgrade()?;
+		if state.read().fin.is_some() {
+			return None;
+		}
+		Some(Handle {
+			state,
+			info: self.info,
+			track: self.track.clone(),
+			cache: self.cache.clone(),
+			alive: self.alive.clone(),
+		})
+	}
+}
+
 /// Whether a group failed, without holding it open or pinning its frames.
 pub(super) struct Fate(Arc<Alive>);
 
@@ -2228,6 +2255,17 @@ impl Handle {
 	/// Reads the mirror, like [`Self::is_aborted`], so a track scan never takes the group lock.
 	pub(super) fn cut_error(&self) -> Option<&Error> {
 		self.alive.cut.get()
+	}
+
+	/// This group as [`Detached`], for the track to end once it stops caching it.
+	pub(super) fn detach(&self) -> Detached {
+		Detached {
+			state: self.state.downgrade(),
+			info: self.info,
+			track: self.track.clone(),
+			cache: self.cache.clone(),
+			alive: self.alive.clone(),
+		}
 	}
 
 	/// This group's [`Fate`], readable after the group and its frames are gone.
