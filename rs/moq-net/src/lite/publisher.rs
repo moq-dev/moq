@@ -5899,9 +5899,11 @@ mod serve_group_test {
 					};
 					let _track = broadcast.create_track("test", info).unwrap();
 					let registry = crate::stats::Registry::new(Default::default());
-					let tagged = origin
-						.consume()
-						.with_stats(registry.tier(Default::default()).session("egress"));
+					let tagged = origin.consume().with_stats(
+						registry
+							.tier(Default::default())
+							.session(crate::Path::from_static("egress")),
+					);
 					let served = tagged.request_broadcast("room", None).await.unwrap();
 					let copy = served.track("test").unwrap();
 					let subscriber = copy.subscribe(None).await.unwrap();
