@@ -1,13 +1,18 @@
+import { Milli, Nano } from "@moq/clock";
+import { race } from "@moq/signals";
+import { ConnectTimeout, error, fromClose, ProtocolViolation } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
 import * as Message from "../ietf/message.ts";
 import { IMPLEMENTATION } from "../implementation.ts";
 import * as Lite from "../lite/index.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import { Stream } from "../stream.ts";
+import { untilAborted } from "../util/abort.ts";
+import { after } from "../util/timer.ts";
 import type { Established } from "./established.ts";
 import * as Extensions from "./extensions.ts";
 import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
-import { exchangeSetup, handsOff, legacyPeerImplementation } from "./handshake.ts";
+import { DEFAULT_TIMEOUT, exchangeSetup, handsOff, legacyPeerImplementation } from "./handshake.ts";
 
 /** Options for {@link accept}. */
 export interface AcceptProps {
@@ -15,6 +20,11 @@ export interface AcceptProps {
 	transport: WebTransport;
 	/** The request URL associated with the transport. */
 	url: URL;
+
+	/** Bound SETUP in milliseconds (default: 30000; zero waits until aborted). Throws ConnectTimeout. */
+	timeout?: Milli;
+	/** Abort the handshake and release the transport; ignored after acceptance completes. */
+	signal?: AbortSignal;
 
 	/** Version to select during SETUP negotiation (for non-ALPN paths). */
 	version?: number;
@@ -63,9 +73,39 @@ type SessionProps = {
  */
 export async function accept({ transport, url, ...props }: AcceptProps): Promise<Established> {
 	if ("discovery" in props) throw new TypeError(DISCOVERY_REMOVED);
-	const connection = await acceptInner(transport, url, props);
-	if (props.consume) forwardAnnounced(connection, props.consume);
-	return connection;
+	props.signal?.throwIfAborted();
+	const limit = props.timeout ?? DEFAULT_TIMEOUT;
+	const duration = Nano.fromMilli(Milli(limit));
+	const deadline = new AbortController();
+	const signal = props.signal ? AbortSignal.any([props.signal, deadline.signal]) : deadline.signal;
+	const disarm = limit > 0 ? after(duration, () => deadline.abort(new ConnectTimeout(limit))) : () => {};
+	const pending = acceptInner(transport, url, props);
+	// As on connect, a dead transport must end a SETUP whose peer sends nothing more.
+	const terminal = transport.closed.then(fromClose, error).then((cause) => {
+		throw cause ?? new Error("session closed during SETUP");
+	});
+	try {
+		const connection = await untilAborted(race([pending, terminal]), signal);
+		if (signal.aborted) throw signal.reason;
+		if (props.consume) forwardAnnounced(connection, props.consume);
+		return connection;
+	} catch (failure) {
+		try {
+			transport.close(
+				failure instanceof ProtocolViolation ? { closeCode: failure.code, reason: failure.message } : undefined,
+			);
+		} catch {
+			/* Already closed. */
+		}
+		// A handshake that resolves after cancellation must release its connection too.
+		void pending.then(
+			(connection) => connection.abort(),
+			() => {},
+		);
+		throw props.signal?.aborted ? props.signal.reason : failure;
+	} finally {
+		disarm();
+	}
 }
 
 async function acceptInner(

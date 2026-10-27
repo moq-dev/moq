@@ -215,6 +215,7 @@ export class Producer {
 		};
 		hooks.writeGroupFrame = (group, frame, inflated) => group.#writeFrame(frame, inflated);
 		hooks.groupCacheBytes = (group) => group.#state.flate?.bytes ?? group.#state.cacheBytes;
+		hooks.groupFrameCount = (group) => group.#state.total.peek();
 		hooks.groupProgress = (group, fn) => {
 			const state = group.#state;
 			fn(state.total.peek());
@@ -271,7 +272,7 @@ export class Producer {
 
 	/** A read handle for this group. */
 	consume(): Consumer {
-		return makeConsumer(this.#state);
+		return this.mirror();
 	}
 
 	/**
@@ -1000,13 +1001,16 @@ export class Consumer {
 	/** Reads the next frame and parses its payload as JSON. */
 	async readJson(): Promise<unknown | undefined> {
 		const frame = await this.readString();
-		return frame ? JSON.parse(frame) : undefined;
+		return frame !== undefined ? JSON.parse(frame) : undefined;
 	}
 
 	/** Reads the next frame and decodes its payload as a one-byte boolean. */
 	async readBool(): Promise<boolean | undefined> {
 		const frame = await this.readFrame();
-		return frame ? frame.payload[0] === 1 : undefined;
+		if (!frame) return undefined;
+		const payload = frame.payload;
+		if (payload.byteLength !== 1 || !(payload[0] === 0 || payload[0] === 1)) throw new Error("invalid bool frame");
+		return payload[0] === 1;
 	}
 
 	/** Closes the group, optionally with an error to abort readers. Idempotent. */

@@ -1008,13 +1008,10 @@ test("closing the loop keeps the tokens until the session drains", async () => {
 test("closing an announce consumer during upstream teardown does not append retractions", async () => {
 	const { Producer } = await import("../announced.ts");
 	const upstream = new Producer();
-	const reload = new Reload({ enabled: false });
-	reload.established.set({
-		probe: new Signal(undefined),
-		announced: () => upstream.consume(),
-		stats: async () => undefined,
-	} as unknown as import("./established.ts").Established);
-	const consumer = reload.announced();
+	const producer = new Producer();
+	const pump = new Effect((effect) => pumpAnnounced(effect, upstream.consume(), producer));
+	const consumer = producer.consume();
+	void consumer.closed.then(() => pump.close());
 	const errors = spyOn(console, "error").mockImplementation(() => {});
 	try {
 		upstream.append({
@@ -1032,18 +1029,19 @@ test("closing an announce consumer during upstream teardown does not append retr
 		expect(errors.mock.calls).toEqual([]);
 	} finally {
 		consumer.close();
-		reload.close();
+		pump.close();
+		producer.close();
 		errors.mockRestore();
 	}
 });
 
 test("announced accepts a non-prefix scope before any session exists", () => {
-	const reload = new Reload({ enabled: false });
+	const connection = new Connection({ enabled: false });
 	try {
-		const announced = reload.announced(Path.Pattern.parse("room/*"));
+		const announced = connection.announced(Path.Pattern.parse("room/*"));
 		announced.close();
 	} finally {
-		reload.close();
+		connection.close();
 	}
 });
 
@@ -1076,14 +1074,15 @@ test("a watcher syncs with the server's initial set, and again after a reconnect
 		globalThis.WebTransport = stub as unknown as typeof WebTransport;
 
 		const clientOrigin = new OriginProducer();
-		const reload = new Reload({
+		const props = {
 			enabled: true,
 			url,
 			websocket: { enabled: false },
 			delay: { initial: Milli(10), multiplier: 1, max: Milli(10) },
-			consume: viaOrigin ? clientOrigin : undefined,
-		});
-		const watching = viaOrigin ? clientOrigin.announced() : reload.announced();
+		};
+		const reload = viaOrigin ? new Reload({ ...props, consume: clientOrigin }) : undefined;
+		const connection = viaOrigin ? undefined : new Connection({ ...props, share: false });
+		const watching = connection ? connection.announced() : clientOrigin.announced();
 		const seen = new Set<string>();
 		void (async () => {
 			for await (const event of watching) {
@@ -1104,7 +1103,8 @@ test("a watcher syncs with the server's initial set, and again after a reconnect
 			expect([...seen].sort()).toEqual(["a", "b"]);
 		} finally {
 			watching.close();
-			reload.close();
+			reload?.close();
+			connection?.close();
 			clientOrigin.close();
 			for (const broadcast of published) broadcast.close();
 			serverOrigin.close();

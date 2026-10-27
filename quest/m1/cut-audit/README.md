@@ -80,7 +80,6 @@ leaving JS-only redesigns of `js/net` to [rs2ts](/quest/m2/rs2ts/README.md).
 - [The Unix-socket allowlist is checked first](/quest/m1/cut-audit/uds-allowlist-first.md) - refused local users never reach the qmux parser
 - [A route's terminal state is one phase](/quest/m1/cut-audit/route-phase.md) - three resume flags collapse into one check
 - [Lite's version gates, refusals, and draft text agree](/quest/m1/cut-audit/lite-wire-nits.md) - small wire and draft mismatches fixed
-- [Small @moq/net divergences from Rust are fixed](/quest/m1/cut-audit/js-net-cleanups.md) - lite-04 probes, group consumers, accept deadlines, empty JSON
 - [Signals and the encoded preview keep their promises](/quest/m1/cut-audit/js-media-cleanups.md) - `Computed.close()` and the encoded preview behave as documented
 
 ## Related

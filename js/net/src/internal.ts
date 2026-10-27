@@ -487,6 +487,8 @@ export const hooks: {
 	writeGroupFrame: (group: GroupProducer, frame: Frame, inflated?: number) => void;
 	/** Payload footprint including a shared inflated copy, for measurements. */
 	groupCacheBytes: (group: GroupProducer) => number;
+	/** Frame count without creating a read handle. */
+	groupFrameCount: (group: GroupProducer) => number;
 	/**
 	 * Cap a group at `frames` for a track end inside it, so later writes past it throw.
 	 * Throws `ProtocolViolation` if a frame at or past the cap already exists.
@@ -664,6 +666,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupCacheBytes: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupFrameCount: () => {
 		throw new Error("group.ts not loaded");
 	},
 	bindGroupTimed: () => {

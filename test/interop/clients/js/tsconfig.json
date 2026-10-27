@@ -4,6 +4,8 @@
 		"types": ["bun", "vite/client"]
 	},
 	"include": [
+		"net-cleanups.browser.ts",
+		"net-cleanups",
 		"close.ts",
 		"driver.ts",
 		"harness.ts",

@@ -1171,7 +1171,7 @@ export class Producer {
 
 		let largest: Position | undefined;
 		for (const { group } of this.#cache) {
-			const count = group.consume().frameCount;
+			const count = hooks.groupFrameCount(group);
 			if (count > 0 && (largest === undefined || group.sequence > largest.group)) {
 				largest = { group: group.sequence, frame: count - 1 };
 			}
@@ -2806,7 +2806,7 @@ export class Subscriber {
 	/** Reads the next frame and parses it as JSON. */
 	async #readJson(): Promise<unknown | undefined> {
 		const next = await this.#readString();
-		if (!next) return undefined;
+		if (next === undefined) return undefined;
 		return JSON.parse(next);
 	}
 

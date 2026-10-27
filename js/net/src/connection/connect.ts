@@ -17,14 +17,11 @@ import { isWebTransportSupported } from "./browser.ts";
 import type { Established } from "./established.ts";
 import * as Extensions from "./extensions.ts";
 import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
-import { exchangeSetup, handsOff, legacyPeerImplementation } from "./handshake.ts";
+import { DEFAULT_TIMEOUT, exchangeSetup, handsOff, legacyPeerImplementation } from "./handshake.ts";
 import { type Credential, credential, fallback, hold } from "./tokens.ts";
 
 // Default head start for WebTransport before attempting the WebSocket fallback.
 const DEFAULT_WEBSOCKET_DELAY_MS = Milli(500);
-
-// Default bound on one connect, the dial and the MoQ handshake; matches the Rust client.
-const DEFAULT_TIMEOUT = Milli(30_000);
 
 // How long the first WebTransport dial may stay unopened before a second one dials alongside
 // it. The same moment as the WebSocket's default head start, so a fresh WebTransport flow

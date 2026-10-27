@@ -1,55 +1,13 @@
 /** Sweep compressed publishers x plain readers, reporting one shared inflated copy per group, then compressed datagram retention. */
 import { gzipSync } from "node:zlib";
 import { Encoder } from "../src/flate/encoder.ts";
-import type { Producer as Group } from "../src/group.ts";
 import { hooks } from "../src/internal.ts";
 import { Producer as Track } from "../src/track.ts";
+import { fanout } from "./compression-fanout.ts";
 
-const payload = new TextEncoder().encode('{"value":123,"status":"unchanged"}\n'.repeat(64));
-const frames = 32;
-const rounds = 10;
 console.log("publishers,readers,phase,us,size_bytes");
-for (const publishers of [1, 4, 16]) {
-	for (const readers of [1, 4, 16]) {
-		let publish = 0;
-		let read = 0;
-		let stored = 0;
-		let inflated = 0;
-		for (let round = 0; round < rounds; round++) {
-			const tracks = Array.from({ length: publishers }, () => new Track("bench").accept({ compress: true }));
-			const groups: Group[] = tracks.map((track) => track.appendGroup());
-			const consumers = groups.map((group) => Array.from({ length: readers }, () => group.mirror()));
-			let started = performance.now();
-			for (const group of groups) {
-				for (let index = 0; index < frames; index++) group.writeFrame({ payload });
-				group.close();
-			}
-			publish += performance.now() - started;
-			stored = groups.reduce((bytes, group) => bytes + hooks.groupCacheBytes(group), 0);
-			started = performance.now();
-			for (const subscribers of consumers) {
-				let shared: Uint8Array | undefined;
-				for (const consumer of subscribers) {
-					for (let index = 0; index < frames; index++) {
-						const frame = consumer.tryReadFrame();
-						if (!frame || frame.payload.length !== payload.length) throw new Error("missing payload");
-						if (index === 0) {
-							if (shared && shared !== frame.payload) throw new Error("fanout duplicated inflation");
-							shared = frame.payload;
-						}
-					}
-					consumer.close();
-				}
-			}
-			read += performance.now() - started;
-			inflated = groups.reduce((bytes, group) => bytes + hooks.groupCacheBytes(group), 0) - stored;
-			if (inflated !== publishers * frames * payload.length) throw new Error("inflated bytes scale with readers");
-			for (const track of tracks) track.close();
-		}
-		console.log([publishers, readers, "publish", ((publish * 1000) / rounds).toFixed(1), stored].join(","));
-		console.log([publishers, readers, "read", ((read * 1000) / rounds).toFixed(1), inflated].join(","));
-	}
-}
+for (const row of fanout())
+	console.log([row.publishers, row.readers, row.phase, row.us.toFixed(1), row.size_bytes].join(","));
 
 // Received compressed datagrams of zeros, each inflating to the largest payload, swept over
 // tracks x queued datagrams. A fast reader takes each one while a slow reader never reads, so
