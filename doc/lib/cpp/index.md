@@ -51,7 +51,8 @@ an explicit directory, a release pin in `cpp/moq/FFI_VERSION` selects the defaul
 input; `just cpp package` fetches it with the checked-in SHA-256 hashes and fails
 if it cannot verify it. Direct CMake builds and `just cpp check` build the
 current checkout unless given an explicit native directory. The package is
-`moq-cpp`, so it installs beside the C package, `moq-c`, without colliding.
+`moq-cpp`. It and the C package, `moq-c`, each link in their own copy of the
+Rust core, so a program links one of the two, never both.
 
 ## Example
 

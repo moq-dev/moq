@@ -100,6 +100,7 @@ export class Producer<T> {
 	}
 }
 
+/** Types for {@link Producer}. */
 export namespace Producer {
 	/** Stream producer options, including the destination track. */
 	export type Config<T> = CodecConfig<T> & { track: Moq.Track.Producer };

@@ -12,8 +12,8 @@ import type { GameConfig } from "./game.ts";
 import { Game } from "./game.ts";
 import { BoyUI } from "./ui/element.tsx";
 
+/** The attributes the element observes. */
 const OBSERVED = ["url", "prefix", "prefix-game", "prefix-viewer"] as const;
-type Observed = (typeof OBSERVED)[number];
 
 const DEFAULT_PREFIX = "boy";
 
@@ -26,11 +26,12 @@ const cleanup = new FinalizationRegistry<Moq.Signals.Effect>((signals) => signal
  * Attributes:
  *   - `url` — MoQ relay URL
  *   - `prefix` — Base path prefix (default: "boy"). Derives prefix-game and prefix-viewer.
- *   - `prefix-game` — Path prefix for game broadcasts (default: "{prefix}/game")
- *   - `prefix-viewer` — Path prefix for viewer broadcasts (default: "{prefix}/viewer")
+ *   - `prefix-game` — Path prefix for game broadcasts (default: `{prefix}/game`)
+ *   - `prefix-viewer` — Path prefix for viewer broadcasts (default: `{prefix}/viewer`)
  */
 export default class MoqBoy extends HTMLElement {
-	static observedAttributes = OBSERVED;
+	/** The attributes the browser reports changes to. */
+	static observedAttributes: typeof OBSERVED = OBSERVED;
 
 	/** The relay connection, shared by every game. */
 	readonly connection: Moq.Connection;
@@ -69,6 +70,7 @@ export default class MoqBoy extends HTMLElement {
 		this.#signals.run(this.#runDiscovery.bind(this));
 	}
 
+	/** Called by the browser when the element joins a document. */
 	connectedCallback() {
 		this.#enabled.set(true);
 
@@ -77,13 +79,15 @@ export default class MoqBoy extends HTMLElement {
 		this.#dispose = render(() => <BoyUI boy={this} />, shadow);
 	}
 
+	/** Called by the browser when the element leaves its document. */
 	disconnectedCallback() {
 		this.#enabled.set(false);
 		this.#dispose?.();
 		this.#dispose = undefined;
 	}
 
-	attributeChangedCallback(name: Observed, _oldValue: string | null, newValue: string | null) {
+	/** Called by the browser when an observed attribute changes. */
+	attributeChangedCallback(name: (typeof OBSERVED)[number], _oldValue: string | null, newValue: string | null) {
 		switch (name) {
 			case "url":
 				this.connection.url.set(newValue ? new URL(newValue) : undefined);

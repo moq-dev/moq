@@ -14,7 +14,8 @@ mod kt
 mod swift
 mod go
 mod dart
-# The C++ package over moq-ffi.
+# The C and C++ packages over moq-ffi.
+mod c
 mod cpp
 # OBS Studio plugin (C++). See doc/bin/obs.md.
 mod obs 'cpp/obs'
@@ -69,8 +70,8 @@ bench-shard $SHARDS="0 1 4 16" $CONNECTIONS="16 64 256":
 
 # Profile the relay at each worker count: std mutex waits by stack (lock), CPU
 # stacks (cpu), or jemalloc heap and churn (heap). Example: `just bench-profile "cpu heap" fanout-heavy 4`.
-bench-profile $MODES $WORKLOAD="fanout" $WORKERS="1 4 16":
-    BENCH_PROFILE_MODES="$MODES" BENCH_PROFILE_WORKLOAD="$WORKLOAD" BENCH_PROFILE_WORKERS="$WORKERS" bench/run.sh --profile
+bench-profile $MODES $WORKLOAD="fanout" $WORKERS="1 4 16" $RUNTIME="tokio-workers" $BASE="":
+    BENCH_PROFILE_MODES="$MODES" BENCH_PROFILE_WORKLOAD="$WORKLOAD" BENCH_PROFILE_WORKERS="$WORKERS" BENCH_PROFILE_RUNTIME="$RUNTIME" BENCH_BASE="$BASE" bench/run.sh --profile
 
 # Real-browser transport, CMAF, and publish/watch costs, optionally against a base:
 # `just bench-browser origin/main`. `--smoke` is the bounded correctness lane.

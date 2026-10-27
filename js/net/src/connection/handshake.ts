@@ -2,6 +2,7 @@ import { closeReason, ProtocolViolation, SessionCode, StreamError } from "../err
 import { type Hop, randomHop } from "../hop.ts";
 import * as Ietf from "../ietf/index.ts";
 import * as Message from "../ietf/message.ts";
+import * as Lite from "../lite/index.ts";
 import { Reader, Stream, UnexpectedEnd, Writer } from "../stream.ts";
 import * as Extensions from "./extensions.ts";
 
@@ -183,4 +184,13 @@ export function legacyPeerImplementation(transport: WebTransport, params: Ietf.S
 			transport.close({ closeCode: err.code, reason: closeReason(err.message) });
 		throw err;
 	}
+}
+
+/** Whether SETUP selecting `version` ends the SETUP stream, the session continuing as its ALPN would. */
+export function handsOff(version: number): version is Lite.Version {
+	return (
+		Object.values(Lite.Version).includes(version as Lite.Version) &&
+		version !== Lite.Version.DRAFT_01 &&
+		version !== Lite.Version.DRAFT_02
+	);
 }

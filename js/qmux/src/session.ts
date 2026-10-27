@@ -20,7 +20,7 @@ import {
 export type Version = WireFormat;
 
 /** Options for a new outgoing stream. `@types/web` doesn't declare `waitUntilAvailable` yet. */
-type SendStreamOptions = WebTransportSendStreamOptions & {
+export type SendStreamOptions = WebTransportSendStreamOptions & {
 	/** Wait for the peer to grant stream credit (the default) instead of rejecting at once. */
 	waitUntilAvailable?: boolean;
 };
@@ -119,12 +119,18 @@ function configToTransportParams(config: Required<Config>): TransportParams {
  * silently discarded, matching the W3C WebTransport semantics.
  */
 export class Datagrams implements WebTransportDatagramDuplexStream {
+	/** Inbound datagrams the readable queues before dropping more; fixed at construction. */
 	incomingHighWaterMark = 1024;
+	/** Part of the WebTransport interface; unused, since a datagram never expires here. */
 	incomingMaxAge: number | null = null;
+	/** Part of the WebTransport interface; unused, since a datagram is sent once written. */
 	outgoingHighWaterMark = 1024;
+	/** Part of the WebTransport interface; unused, since a datagram never expires here. */
 	outgoingMaxAge: number | null = null;
 
+	/** The datagrams the peer sends. */
 	readonly readable: ReadableStream<Uint8Array>;
+	/** The datagrams to send to the peer. */
 	readonly writable: WritableStream<Uint8Array>;
 
 	#incoming!: ReadableStreamDefaultController<Uint8Array>;
@@ -133,7 +139,7 @@ export class Datagrams implements WebTransportDatagramDuplexStream {
 	#maxDatagramSize = 0;
 	#send: (data: Uint8Array) => void;
 
-	/** @param send Enqueue a datagram payload onto the wire (best-effort). */
+	/** @param send - Enqueue a datagram payload onto the wire (best-effort). */
 	constructor(send: (data: Uint8Array) => void) {
 		this.#send = send;
 		// A bounded queue: `pull` is a no-op, so `desiredSize` reflects the
@@ -158,6 +164,7 @@ export class Datagrams implements WebTransportDatagramDuplexStream {
 		});
 	}
 
+	/** The largest payload a datagram can carry, or 0 before the peer allows any. */
 	get maxDatagramSize(): number {
 		return this.#maxDatagramSize;
 	}
@@ -285,7 +292,7 @@ export interface SessionOptions extends WebTransportOptions {
 	 *
 	 * Each entry is either:
 	 *  - A bare ALPN (e.g. `"moq-lite-04"`). The polyfill resolves it via
-	 *    [[SessionOptions.versions]] and emits the prefixed wire form
+	 *    {@link SessionOptions.versions} and emits the prefixed wire form
 	 *    `{version}.{alpn}` (e.g. `"qmux-01.moq-lite-04"`).
 	 *  - An explicit pair already prefixed with a QMux version
 	 *    (e.g. `"qmux-00.moq-transport-17"`). Advertised as-is.
@@ -334,7 +341,7 @@ export interface SessionOptions extends WebTransportOptions {
 /** Options for accepting a QMux Session on an already-negotiated socket.
  *
  * The handshake is done by the time [[Session.accept]] is called, so the
- * subprotocol options ([[SessionOptions.protocols]], `versions`,
+ * subprotocol options ({@link SessionOptions.protocols}, `versions`,
  * `requireProtocol`) don't apply — see [[selectSubprotocol]], which consumes
  * them during the upgrade instead.
  */
@@ -537,7 +544,7 @@ export default class Session implements WebTransport {
 	// [[AcceptOptions.protocol]]: stands in for `socket.protocol` when the host
 	// doesn't expose the negotiated subprotocol.
 	#protocolOverride?: string;
-	// [[SessionOptions.requireProtocol]] on a dial: the server must pick one of
+	// `SessionOptions.requireProtocol` on a dial: the server must pick one of
 	// our application protocols, not answer with none.
 	#requireProtocol = false;
 	#closed?: Error;

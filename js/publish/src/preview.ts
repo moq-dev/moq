@@ -198,7 +198,8 @@ export type TranscodeInput = {
 /** Constructor options for {@link Transcode}. */
 export type TranscodeProps = Inputs<TranscodeInput>;
 
-type TranscodeOutput = {
+/** Signals the transcoder derives. */
+export type TranscodeOutput = {
 	// The decoded output frame. Owned here, closed on each update and on close().
 	frame: Signal<VideoFrame | undefined>;
 };

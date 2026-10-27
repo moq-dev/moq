@@ -12,11 +12,11 @@ import { connect } from "./connect.ts";
 const url = new URL("https://localhost/test");
 
 /** Connect a mock pair over `protocol`, each side advertising what it is given. */
-async function session(protocol: string, client: string | undefined, server: string | undefined) {
+async function session(protocol: string, client: string | undefined, server: string | undefined, version?: number) {
 	const pair = createMockTransportPair(protocol);
 	const [dialed, accepted] = await Promise.all([
 		connect({ url, transport: pair.client, implementation: client }),
-		accept({ url, transport: pair.server, implementation: server }),
+		accept({ url, transport: pair.server, implementation: server, version }),
 	]);
 	const peers = await Promise.all([dialed.peerImplementation, accepted.peerImplementation]);
 	dialed.abort();
@@ -37,9 +37,15 @@ for (const protocol of [Lite.ALPN_06, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_16]) {
 }
 
 // lite-02 negotiates in a compat SETUP that carries it, but only lite-05+ reads it.
-for (const protocol of [Lite.ALPN_04, Lite.ALPN]) {
+for (const [protocol, version] of [
+	[Lite.ALPN_04, undefined],
+	[Lite.ALPN, Lite.Version.DRAFT_02],
+] as const) {
 	test(`a lite version before 05 reads no implementation over ${protocol}`, async () => {
-		expect(await session(protocol, "client/1", "server/2")).toEqual({ client: undefined, server: undefined });
+		expect(await session(protocol, "client/1", "server/2", version)).toEqual({
+			client: undefined,
+			server: undefined,
+		});
 	});
 }
 
