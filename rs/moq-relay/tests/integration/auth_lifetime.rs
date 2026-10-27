@@ -451,34 +451,38 @@ async fn forwards_the_setup_token() {
 			spawn_relay(auth).await
 		};
 
-		// Draft-16 CLIENT_SETUP: AUTHORIZATION TOKEN (3), USE_VALUE (3), Token Type 0.
+		// Draft-18 SETUP (0x2F00): AUTHORIZATION TOKEN (3), USE_VALUE (3), Token Type 0.
 		let encoded = [&[0x03, 0x00][..], &value].concat();
-		let params = [&[0x01, 0x03, encoded.len() as u8][..], &encoded].concat();
-		let setup = [&[0x20][..], &(params.len() as u16).to_be_bytes(), &params].concat();
+		let params = [&[0x03, encoded.len() as u8][..], &encoded].concat();
+		let setup = [&[0xaf, 0x00][..], &(params.len() as u16).to_be_bytes(), &params].concat();
 		let mut session = if websocket {
 			qmux::ws::Client::new()
-				.with_protocol("moqt-16", &[qmux::Version::QMux01])
+				.with_protocol("moqt-18", &[qmux::Version::QMux01])
 				.connect(&format!("ws://127.0.0.1:{port}/room?source=setup"))
 				.await
 				.expect("connect WebSocket")
 		} else {
 			qmux::tcp::connect(("127.0.0.1", port), {
 				let mut config = qmux::Config::new(qmux::Version::QMux01);
-				config.protocol = qmux::Protocol::Negotiate(vec!["moqt-16".into()]);
+				config.protocol = qmux::Protocol::Negotiate(vec!["moqt-18".into()]);
 				config
 			})
 			.await
 			.expect("connect TCP")
 		};
-		let (mut send, mut recv) = session
-			.open_bi(Default::default())
+		let mut send = session
+			.open_uni(Default::default())
 			.await
-			.expect("open the control stream");
+			.expect("open the setup stream");
 		write_all(&mut send, &setup).await;
+		let mut recv = tokio::time::timeout(TIMEOUT, session.accept_uni())
+			.await
+			.expect("SETUP timeout")
+			.expect("the server's setup stream");
 		let reply = tokio::time::timeout(TIMEOUT, recv.read_chunk(1))
 			.await
-			.expect("SERVER_SETUP timeout")
-			.expect("SERVER_SETUP");
+			.expect("SETUP timeout")
+			.expect("SETUP");
 		assert_eq!(reply.map(|chunk| chunk.len()), Some(1));
 		let seen = script.seen.lock().unwrap().clone();
 		let connect = seen.iter().find(|r| r.event == Event::Connect).expect("a connect");
@@ -490,7 +494,7 @@ async fn forwards_the_setup_token() {
 			// Plain `ws://` has no SNI; the `Host` header never stands in for one.
 			assert_eq!(connect.server_name, None);
 			assert!(connect.remote.is_some_and(|addr| addr.ip().is_loopback()));
-			assert_eq!(connect.alpn.as_deref(), Some("qmux-01.moqt-16"));
+			assert_eq!(connect.alpn.as_deref(), Some("qmux-01.moqt-18"));
 		}
 		relay.abort();
 	}
@@ -594,7 +598,7 @@ async fn a_moved_tier_retags_the_live_session() {
 	let (port, relay) = spawn_relay_with(build_auth(script.spawn().await), cluster).await;
 	let url = room_url("tcp", port);
 
-	let moved = stats::Tier::new("moved");
+	let moved = stats::Tier::new(moq_net::Path::from_static("moved"));
 	let active = |tier: &stats::Tier| {
 		registry
 			.snapshot()

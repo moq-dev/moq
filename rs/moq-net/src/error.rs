@@ -38,9 +38,8 @@ pub enum SessionError {
 	#[error("key-value formatting error")]
 	KeyValueFormatting,
 
-	/// The peer went past what the session allows: more announcements than its
-	/// `crate::session::Limits`, or on moq-transport drafts 14 to 16, a request ID at or past
-	/// the MAX_REQUEST_ID we advertised or more live requests than the window.
+	/// The peer went past what the session allows, such as more announcements than its
+	/// `crate::session::Limits`.
 	#[error("too many requests")]
 	TooManyRequests,
 
@@ -378,6 +377,10 @@ pub enum Error {
 	#[error("broadcast path contains a navigation segment")]
 	NavigationSegment,
 
+	/// A path was spelled with a leading, trailing, or doubled `/`.
+	#[error("path contains an empty segment")]
+	EmptySegment,
+
 	/// A duplicate ID was used
 	// The broadcast/track is a duplicate
 	#[error("duplicate")]
@@ -456,8 +459,8 @@ pub enum Error {
 	#[error(transparent)]
 	Encode(#[from] coding::EncodeError),
 
-	/// The peer went past this session's `crate::session::Limits`: too many announcements, or
-	/// too many requests on moq-transport drafts 14 to 16.
+	/// The peer went past this session's `crate::session::Limits`, such as too many
+	/// announcements.
 	#[error("too many requests")]
 	TooManyRequests,
 
@@ -616,6 +619,13 @@ impl From<StreamError> for Error {
 	}
 }
 
+/// Lets an entry point taking `impl TryInto<Path, Error: Into<Error>>` accept a `Path` too.
+impl From<std::convert::Infallible> for Error {
+	fn from(never: std::convert::Infallible) -> Self {
+		match never {}
+	}
+}
+
 /// Which session code to send for a local error.
 ///
 /// Lossy on purpose: [`Error`] describes what went wrong locally, while the registry is what
@@ -646,7 +656,8 @@ impl From<&Error> for SessionError {
 			| Error::WrongSize
 			| Error::BoundsExceeded(_)
 			| Error::InvalidPath(_)
-			| Error::NavigationSegment => Self::ProtocolViolation,
+			| Error::NavigationSegment
+			| Error::EmptySegment => Self::ProtocolViolation,
 			Error::App(app) => Self::App(*app),
 			// A code we did not recognize, so we cannot say which space it came from.
 			// Forwarding it into this one risks landing on a value that IS registered here
@@ -711,6 +722,7 @@ impl From<&Error> for StreamError {
 			| Error::BoundsExceeded(_)
 			| Error::InvalidPath(_)
 			| Error::NavigationSegment
+			| Error::EmptySegment
 			| Error::MalformedTrack => Self::MalformedTrack,
 			Error::App(app) => Self::App(*app),
 			// See the SessionError impl: an unregistered code carries no registry, so

@@ -2,8 +2,10 @@ import { expect, jest, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano, sleep } from "@moq/clock";
 import { ConnectTimeout, SessionCode, SessionError } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
-import { ALPN, ALPN_05, ALPN_06, ALPN_07_WIP, Version as LiteVersion } from "../lite/version.ts";
+import { ClientSetup, ServerSetup } from "../lite/compat.ts";
+import { ALPN, ALPN_05, ALPN_06, ALPN_07_WIP, Version as Lite } from "../lite/version.ts";
 import { createMockTransportPair } from "../mock.ts";
+import { Stream } from "../stream.ts";
 import { accept } from "./accept.ts";
 import { type ConnectProps, connect as connectSession } from "./connect.ts";
 
@@ -334,7 +336,7 @@ test("SETUP preserves a delayed session close code", async () => {
 });
 
 test("versions map to WebTransport ALPNs in order", async () => {
-	const versions = ["moq-lite-07-wip", "moq-lite-06", "moq-transport-22", "moq-lite-02", "moq-transport-14"];
+	const versions = ["moq-lite-07-wip", "moq-lite-06", "moq-transport-22", "moq-lite-02", "moq-lite-01"];
 	expect((await offered(ALPN_07_WIP, { versions })).protocols).toEqual([
 		ALPN_07_WIP,
 		ALPN_06,
@@ -344,7 +346,15 @@ test("versions map to WebTransport ALPNs in order", async () => {
 });
 
 test("versions reject empty, duplicate, unsupported and ALPN spellings", async () => {
-	for (const versions of [[], ["moq-lite-06", "moq-lite-06"], ["moq-lite-99"], ["toString"], [Ietf.ALPN.DRAFT_22]]) {
+	for (const versions of [
+		[],
+		["moq-lite-06", "moq-lite-06"],
+		["moq-lite-99"],
+		["moq-transport-14"],
+		["moq-transport-17"],
+		["toString"],
+		[Ietf.ALPN.DRAFT_22],
+	]) {
 		expect(await connect(url, { versions }).catch((err: unknown) => err)).toBeInstanceOf(TypeError);
 	}
 });
@@ -388,8 +398,8 @@ for (const protocol of ["", undefined]) {
 	test(`SETUP negotiates the named versions with a peer whose protocol is ${JSON.stringify(protocol)}`, async () => {
 		for (const [versions, want] of [
 			[["moq-lite-07-wip", "moq-lite-06"], "moq-lite-07-wip"],
-			[["moq-lite-06", "moq-transport-14"], "moq-lite-06"],
-			[["moq-transport-14", "moq-lite-06"], "moq-transport-14"],
+			[["moq-lite-06", "moq-lite-02"], "moq-lite-06"],
+			[["moq-lite-01", "moq-lite-06"], "moq-lite-01"],
 			[["moq-lite-04"], "moq-lite-04"],
 		] as const) {
 			const pair = createMockTransportPair("");
@@ -415,10 +425,10 @@ test("SETUP refuses a version the client did not name", async () => {
 	const pair = createMockTransportPair("");
 	const restore = stubWebTransport(pair.client);
 	try {
-		const server = accept({ url, transport: pair.server, version: LiteVersion.DRAFT_05 }).catch(() => undefined);
+		const server = accept({ url, transport: pair.server, version: Lite.DRAFT_05 }).catch(() => undefined);
 		await expect(
 			connect(url, { versions: ["moq-lite-07-wip", "moq-lite-06"], websocket: { enabled: false } }),
-		).rejects.toThrow("server selected an unoffered version: 0xff0dad05");
+		).rejects.toThrow("unsupported server version: 0xff0dad05");
 		(await server)?.abort();
 	} finally {
 		restore();
@@ -435,6 +445,32 @@ test("a peer without an ALPN is refused when no named version negotiates in SETU
 	} finally {
 		restore();
 	}
+});
+
+// The moq-transport draft-14 version code, which the `moql` SETUP once also negotiated.
+const DRAFT_14 = 0xff00000e;
+
+test("a client refuses an IETF version selected in the moql SETUP", async () => {
+	const pair = createMockTransportPair("");
+	const restore = stubWebTransport(pair.client);
+	try {
+		const connecting = connect(url, { websocket: { enabled: false } });
+		const stream = await Stream.accept(pair.server, Lite.DRAFT_02);
+		if (!stream) throw new Error("no SETUP stream");
+		await ClientSetup.decode(stream.reader);
+		await new ServerSetup(DRAFT_14).encode(stream.writer);
+		await expect(connecting).rejects.toThrow("unsupported server version: 0xff00000e");
+	} finally {
+		restore();
+	}
+});
+
+test("a server refuses a client offering only IETF versions in the moql SETUP", async () => {
+	const pair = createMockTransportPair("");
+	const accepting = accept({ url, transport: pair.server });
+	const stream = await Stream.open(pair.client, { version: Lite.DRAFT_02 });
+	await new ClientSetup([DRAFT_14]).encode(stream.writer);
+	await expect(accepting).rejects.toThrow("no common version found; client offered: ff00000e");
 });
 
 // The WebSocket subprotocols one connect() attempt asks a server for.

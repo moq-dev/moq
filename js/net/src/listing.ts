@@ -14,6 +14,7 @@
  */
 import { type GetPromise, type Getter, Signal } from "@moq/signals";
 import { StreamCode, StreamError } from "./error.ts";
+import { hooks } from "./internal.ts";
 import type * as track from "./track.ts";
 
 /**
@@ -34,9 +35,13 @@ export type TracksEvent =
 	| { kind: "removed"; name: string }
 	| { kind: "finished"; name: string };
 
-/** Whether `own` closed cleanly, so its track leaves the listing as finished. */
+/**
+ * Whether `own` leaves the listing as finished: it closed cleanly, or it declared its end and is
+ * still open, as the Rust listing counts a producer that finished but still holds its track.
+ */
 function finished(own: track.Producer): boolean {
-	return own.closed.peek() === null;
+	const released = hooks.trackReleased(own).peek();
+	return released === null || (released === undefined && hooks.trackFinished(own));
 }
 
 /** One listed track and who lists it. */
@@ -429,8 +434,8 @@ export class Lister {
 		return this.#listing.used;
 	}
 
-	/** Settles once the broadcast ended. */
-	get ended(): GetPromise<null> {
+	/** Settles once the broadcast ended, as every listing of it does. */
+	get closed(): GetPromise<null> {
 		return this.#listing.closed;
 	}
 

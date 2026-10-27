@@ -88,15 +88,7 @@ fn frames(sequence: u64) -> Vec<Vec<u8>> {
 	(0..2).map(|frame| format!("{sequence}-{frame}").into_bytes()).collect()
 }
 
-/// Draft-17 is absent: its TRACK_STATUS answer cannot say whether the track is timed,
-/// so it still SUBSCRIBEs to learn the track.
-const VERSIONS: &[&str] = &[
-	"moq-transport-14",
-	"moq-transport-15",
-	"moq-transport-16",
-	"moq-transport-18",
-	"moq-transport-22",
-];
+const VERSIONS: &[&str] = &["moq-transport-18", "moq-transport-22"];
 
 async fn direct(version: &str) {
 	let version: Version = version.parse().unwrap();
@@ -180,7 +172,7 @@ async fn a_subscribe_after_track_status_keeps_timestamps() {
 
 			let remote = resolve(&client).await;
 			let copy = remote.track("video").unwrap();
-			let info = copy.query().await.expect("TRACK_STATUS resolves the track");
+			let info = copy.info().await.expect("TRACK_STATUS resolves the track");
 			assert!(info.timescale.is_some(), "{version}: the copy is untimed");
 			assert!(track.subscription().is_none(), "{version}: the query subscribed");
 

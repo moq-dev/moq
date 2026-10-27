@@ -9,13 +9,13 @@ import { createMockTransportPair } from "../mock.ts";
 import { Producer as Origin } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
-import { NativeSession } from "./adapter.ts";
 import * as Message from "./message.ts";
 import { Group } from "./object.ts";
 import { Parameters } from "./parameters.ts";
 import { Publish, PublishDone, PublishDoneStatus } from "./publish.ts";
 import { Publisher } from "./publisher.ts";
 import { RequestError, RequestOk } from "./request.ts";
+import { NativeSession } from "./session.ts";
 import { Subscribe } from "./subscribe.ts";
 import { PublishSkipped, SubscribeTracks } from "./subscribe_tracks.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
@@ -151,7 +151,7 @@ for (const version of drafts) {
 		const track = broadcast.createTrack("video");
 		const group = track.appendGroup();
 		group.writeFrame({ payload: new Uint8Array([1]) });
-		group.close();
+		group.finish();
 		const listing = await fx.list();
 		await ok(listing, version);
 		const { stream, publish } = await fx.offered();
@@ -199,6 +199,7 @@ for (const version of drafts) {
 			const listing = await fx.list();
 			await ok(listing, version);
 			const { stream } = await fx.offered();
+			if (finished) track.finish();
 			if (finished) track.close();
 			broadcast.removeTrack("video");
 			expect(await stream.reader.u53()).toBe(PublishDone.id);
@@ -221,6 +222,7 @@ for (const version of drafts) {
 		const listing = await fx.list();
 		await ok(listing, version);
 		const { stream } = await fx.offered(false);
+		track.finish();
 		track.close();
 		broadcast.removeTrack("video");
 		await clock.advance(Nano.zero);
@@ -257,6 +259,7 @@ for (const version of drafts) {
 		const listing = await fx.list();
 		await ok(listing, version);
 		const { stream } = await fx.offered(false);
+		track.finish();
 		track.close();
 		broadcast.removeTrack("video");
 		await clock.advance(Nano.zero);
@@ -292,6 +295,7 @@ for (const version of drafts) {
 					published.set(publish.trackName, stream);
 				}
 				await clock.advance(Nano.zero);
+				video.finish();
 				video.close();
 				if (remove) broadcast.removeTrack("video");
 				broadcast.close();
@@ -513,7 +517,7 @@ for (const version of [Version.DRAFT_22]) {
 		for (let i = 0; i < 2; i++) {
 			const group = track.appendGroup();
 			group.writeFrame({ payload: new Uint8Array([i]) });
-			group.close();
+			group.finish();
 		}
 		await ok(await fx.list(), version);
 		const { stream } = await fx.offered();
@@ -532,7 +536,7 @@ for (const version of [Version.DRAFT_22]) {
 		await update(stream, version, 4n, true);
 		const fresh = track.appendGroup();
 		fresh.writeFrame({ payload: new Uint8Array([2]) });
-		fresh.close();
+		fresh.finish();
 		const uni = fx.pair.client.incomingUnidirectionalStreams.getReader();
 		const next = await uni.read();
 		if (!next.value) throw new Error("missing filtered group");
@@ -546,7 +550,7 @@ for (const version of [Version.DRAFT_22]) {
 		while (track.subscription.peek() !== undefined) await track.subscription.changed();
 		const paused = track.appendGroup();
 		paused.writeFrame({ payload: new Uint8Array([3]) });
-		paused.close();
+		paused.finish();
 		await update(stream, version, 8n, true);
 		const resumed = (await uni.read()).value;
 		if (!resumed) throw new Error("missing group selected while paused");

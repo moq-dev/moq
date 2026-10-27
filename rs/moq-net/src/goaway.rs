@@ -39,7 +39,7 @@ pub struct Goaway {
 	/// How long the sender waits before force-closing with
 	/// [`Error::GoawayTimeout`]. `None` means no deadline.
 	///
-	/// Only moq-transport draft-17+ carries this on the wire. Elsewhere it still
+	/// Only moq-transport carries this on the wire. Elsewhere it still
 	/// applies locally, so the sender enforces a deadline the peer cannot see.
 	pub(crate) timeout: Option<Duration>,
 }

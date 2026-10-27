@@ -559,7 +559,7 @@ impl Consumer {
 	}
 }
 
-/// A handler's answer to the broadcast's listings, from [`Dynamic::lister`](super::Dynamic::lister).
+/// A handler's answer to the broadcast's listings, from [`Requests::lister`](super::Requests::lister).
 ///
 /// A broadcast has at most one. While it exists, readers wait for it to
 /// [`sync`](Self::synced) before reporting [`TracksEvent::Synced`]. Answer while [`poll_used`](Self::poll_used): list what the
@@ -797,7 +797,7 @@ mod tests {
 	#[test]
 	fn a_lister_finishes_or_removes_a_track() {
 		let broadcast = Info::new().produce();
-		let lister = broadcast.dynamic().lister().unwrap();
+		let lister = broadcast.requests().lister().unwrap();
 		lister.add("up", track::Info::default()).unwrap();
 		lister.add("gone", track::Info::default()).unwrap();
 		lister.synced();
@@ -829,7 +829,7 @@ mod tests {
 
 		// The producer's finished track is what a handler's answer of its name served.
 		let broadcast = Info::new().produce();
-		let lister = broadcast.dynamic().lister().unwrap();
+		let lister = broadcast.requests().lister().unwrap();
 		lister.add("a", track::Info::default()).unwrap();
 		lister.synced();
 		let a = broadcast.create_track("a", None).unwrap();
@@ -842,7 +842,7 @@ mod tests {
 		// A handler's end is clean too, and its abort is not.
 		for abort in [false, true] {
 			let broadcast = Info::new().produce();
-			let lister = broadcast.dynamic().lister().unwrap();
+			let lister = broadcast.requests().lister().unwrap();
 			lister.add("up", track::Info::default()).unwrap();
 			lister.synced();
 			let mut tracks = broadcast.consume().tracks().unwrap();
@@ -900,7 +900,7 @@ mod tests {
 	#[test]
 	fn a_track_served_on_request_is_never_listed() {
 		let broadcast = Info::new().produce();
-		let mut dynamic = broadcast.dynamic();
+		let mut dynamic = broadcast.requests();
 		let consumer = broadcast.consume();
 		let mut tracks = consumer.tracks().unwrap();
 		assert_eq!(drain(&mut tracks), ["synced"]);
@@ -983,7 +983,7 @@ mod tests {
 	fn readers_wait_for_the_lister_to_sync() {
 		let broadcast = Info::new().produce();
 		let _own = broadcast.create_track("own", None).unwrap();
-		let lister = broadcast.dynamic().lister().unwrap();
+		let lister = broadcast.requests().lister().unwrap();
 		let waiter = kio::Waiter::noop();
 		assert!(lister.poll_used(&waiter).is_pending());
 
@@ -1011,7 +1011,7 @@ mod tests {
 	fn a_name_listed_by_both_is_reported_once() {
 		let broadcast = Info::new().produce();
 		let own = broadcast.create_track("a", None).unwrap();
-		let lister = broadcast.dynamic().lister().unwrap();
+		let lister = broadcast.requests().lister().unwrap();
 		lister.add("a", track::Info::default()).unwrap();
 		lister.synced();
 		let mut tracks = broadcast.consume().tracks().unwrap();
@@ -1025,7 +1025,7 @@ mod tests {
 	#[test]
 	fn an_aborted_answer_fails_its_readers_and_a_later_reader_asks_again() {
 		let broadcast = Info::new().produce();
-		let lister = broadcast.dynamic().lister().unwrap();
+		let lister = broadcast.requests().lister().unwrap();
 		let waiter = kio::Waiter::noop();
 		let mut tracks = broadcast.consume().tracks().unwrap();
 		lister.add("up", track::Info::default()).unwrap();
@@ -1051,7 +1051,7 @@ mod tests {
 	#[test]
 	fn a_dropped_lister_withdraws_its_answer_and_syncs() {
 		let broadcast = Info::new().produce();
-		let lister = broadcast.dynamic().lister().unwrap();
+		let lister = broadcast.requests().lister().unwrap();
 		lister.add("up", track::Info::default()).unwrap();
 		let mut tracks = broadcast.consume().tracks().unwrap();
 		assert_eq!(drain(&mut tracks), ["+up"]);
@@ -1118,16 +1118,16 @@ mod tests {
 	#[test]
 	fn a_broadcast_has_one_lister() {
 		let broadcast = Info::new().produce();
-		let lister = broadcast.dynamic().lister().unwrap();
-		assert!(matches!(broadcast.dynamic().lister(), Err(Error::Duplicate)));
+		let lister = broadcast.requests().lister().unwrap();
+		assert!(matches!(broadcast.requests().lister(), Err(Error::Duplicate)));
 		drop(lister);
-		broadcast.dynamic().lister().expect("the first lister left");
+		broadcast.requests().lister().expect("the first lister left");
 	}
 
 	#[test]
 	fn an_ended_answer_ends_its_readers_and_a_later_reader_asks_again() {
 		let broadcast = Info::new().produce();
-		let lister = broadcast.dynamic().lister().unwrap();
+		let lister = broadcast.requests().lister().unwrap();
 		let waiter = kio::Waiter::noop();
 		let mut tracks = broadcast.consume().tracks().unwrap();
 		lister.add("up", track::Info::default()).unwrap();
@@ -1145,7 +1145,7 @@ mod tests {
 	#[test]
 	fn a_cleared_answer_unsyncs_a_reader_still_waiting() {
 		let broadcast = Info::new().produce();
-		let lister = broadcast.dynamic().lister().unwrap();
+		let lister = broadcast.requests().lister().unwrap();
 		let _a = broadcast.create_track("a", None).unwrap();
 		let _b = broadcast.create_track("b", None).unwrap();
 		lister.synced();
@@ -1160,7 +1160,7 @@ mod tests {
 	#[test]
 	fn a_lister_sees_the_broadcast_end() {
 		let broadcast = Info::new().produce();
-		let lister = broadcast.dynamic().lister().unwrap();
+		let lister = broadcast.requests().lister().unwrap();
 		broadcast.close();
 		assert!(matches!(
 			lister.poll_used(&kio::Waiter::noop()),

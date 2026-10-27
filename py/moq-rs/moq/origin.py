@@ -12,8 +12,8 @@ from moq_ffi import (
     MoqBroadcastRequest,
     MoqOriginConfig,
     MoqOriginConsumer,
-    MoqOriginDynamic,
     MoqOriginProducer,
+    MoqOriginRequests,
 )
 
 from ._stream import _Stream
@@ -138,13 +138,13 @@ class BroadcastPrepared:
         return BroadcastProducer._from_inner(self._inner.publish())
 
 
-class OriginDynamic(_Stream[BroadcastRequest]):
+class OriginRequests(_Stream[BroadcastRequest]):
     """A served route: advertises a prefix and yields requests beneath it.
 
     Usable as an async context manager that cancels the route on exit.
     """
 
-    def __init__(self, inner: MoqOriginDynamic) -> None:
+    def __init__(self, inner: MoqOriginRequests) -> None:
         self._inner = inner
 
     async def _next(self) -> BroadcastRequest:
@@ -202,8 +202,8 @@ class OriginProducer:
     """The publishing side of an origin: announce broadcasts for consumers to discover.
 
     Call :meth:`create_broadcast` to publish at a path, :meth:`consume` for a
-    matching :class:`OriginConsumer`, or :meth:`dynamic` to advertise a prefix
-    and serve on-demand requests. Create, :meth:`dynamic` if tracks are served
+    matching :class:`OriginConsumer`, or :meth:`requests` to advertise a prefix
+    and serve on-demand requests. Create, :meth:`requests` if tracks are served
     on demand, populate, then :meth:`BroadcastProducer.announce`.
     """
 
@@ -221,7 +221,7 @@ class OriginProducer:
         """Create a consumer that discovers the broadcasts this origin publishes."""
         return OriginConsumer(self._inner.consume())
 
-    def dynamic(self, prefix: str) -> OriginDynamic:
+    def requests(self, prefix: str) -> OriginRequests:
         """Advertise ``prefix`` and serve the requests beneath it.
 
         A route claims ``prefix`` and every path beneath it (``""`` claims every
@@ -229,7 +229,7 @@ class OriginProducer:
         are requested. Hold the returned handle while the route should stay
         advertised.
         """
-        return OriginDynamic(self._inner.dynamic(prefix))
+        return OriginRequests(self._inner.requests(prefix))
 
     def create_broadcast(self, path: str) -> BroadcastProducer:
         """Create a broadcast at ``path``, returning the producer that feeds it.
@@ -237,7 +237,7 @@ class OriginProducer:
         The broadcast is invisible and unroutable, for this origin's consumers
         and peers alike, until :meth:`BroadcastProducer.announce`. Announce it
         after populating tracks. Create,
-        :meth:`dynamic` if tracks are served on demand, populate, then announce.
+        :meth:`requests` if tracks are served on demand, populate, then announce.
         :meth:`BroadcastProducer.close` ends it for good; dropping the last
         handle does the same.
         """

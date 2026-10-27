@@ -728,30 +728,6 @@ void MoQDock::PeelJwtFromRelayUrl()
 	urlEdit->setText(url.toString());
 }
 
-QString MoQDock::ConnectUrl() const
-{
-	QString text = urlEdit->text().trimmed();
-	const QString token = tokenEdit->text().trimmed();
-	if (token.isEmpty())
-		return text;
-
-	QUrl url(text);
-	if (!url.isValid() || url.scheme().isEmpty()) {
-		// Cannot confirm the transport is encrypted, so do not attach the token.
-		return text;
-	}
-
-	// Never put a JWT on cleartext network dial URLs.
-	if (MoQDial::IsCleartext(url.scheme().toStdString()))
-		return text;
-
-	QUrlQuery query(url);
-	query.removeAllQueryItems("jwt");
-	query.addQueryItem("jwt", token);
-	url.setQuery(query);
-	return url.toString();
-}
-
 void MoQDock::OnEncodingChanged(int mode)
 {
 	const bool enabled = mode == 1;
@@ -1098,7 +1074,7 @@ void MoQDock::StartStream()
 		}
 	}
 
-	const std::string url = ConnectUrl().toStdString();
+	const std::string url = relayText.toStdString();
 	const std::string path = pathEdit->text().toStdString();
 	tokenEdited = false;
 	tokenNotice.clear();
@@ -1113,6 +1089,7 @@ void MoQDock::StartStream()
 	obs_data_apply(serviceSettings, advanced);
 	obs_data_set_string(serviceSettings, "server", url.c_str());
 	obs_data_set_string(serviceSettings, "key", path.c_str());
+	obs_data_set_string(serviceSettings, "bearer_token", token.toStdString().c_str());
 	service =
 		OBSServiceAutoRelease(obs_service_create("moq_service", "moq_dock_service", serviceSettings, nullptr));
 	if (!service) {

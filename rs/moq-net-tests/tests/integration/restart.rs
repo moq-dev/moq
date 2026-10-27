@@ -174,14 +174,17 @@ relay_chain_tests! {
 /// the hidden `fuzz` module as a session lands it, so its answers carry no exact route.
 struct Worker {
 	origin: origin::Producer,
-	_claim: Rc<origin::Dynamic>,
+	_claim: Rc<origin::Requests>,
 	_outputs: Rc<RefCell<Vec<(broadcast::Producer, track::Producer)>>>,
 }
 
 impl Worker {
 	fn new(hop: u64) -> Self {
 		let origin = produce_origin(hop);
-		let claim = Rc::new(moq_net::fuzz::dynamic_route(&origin, "pool", origin::Route::default()).unwrap());
+		let claim = Rc::new(
+			moq_net::fuzz::requests_route(&origin, moq_net::Path::from_static("pool"), origin::Route::default())
+				.unwrap(),
+		);
 		let outputs = Rc::new(RefCell::new(Vec::new()));
 		let (handler, served) = (claim.clone(), outputs.clone());
 		drop(moq_clock::sim::spawn(async move {
@@ -258,7 +261,7 @@ async fn prefix_pool_lite07() {
 /// claim carries an epoch or re-prices, so it lands through the hidden `fuzz` module as
 /// a session lands it.
 struct Claim {
-	dynamic: Rc<origin::Dynamic>,
+	dynamic: Rc<origin::Requests>,
 	outputs: Rc<RefCell<Vec<(broadcast::Producer, track::Producer)>>>,
 }
 
@@ -266,7 +269,8 @@ impl Claim {
 	fn new(origin: &origin::Producer, epoch: Option<Epoch>) -> Self {
 		let mut route = origin::Route::default();
 		route.epoch = epoch;
-		let dynamic = Rc::new(moq_net::fuzz::dynamic_route(origin, "live", route).unwrap());
+		let dynamic =
+			Rc::new(moq_net::fuzz::requests_route(origin, moq_net::Path::from_static("live"), route).unwrap());
 		let outputs = Rc::new(RefCell::new(Vec::new()));
 		let (handler, served) = (dynamic.clone(), outputs.clone());
 		drop(moq_clock::sim::spawn(async move {
@@ -483,12 +487,12 @@ async fn retired_fetch(version: &str, explicit: bool) {
 	write(&old_track, "old:1");
 	assert_eq!(read(&mut subscription).await, "old:1");
 	if let Ok(late) = held.track("late")
-		&& let Ok(info) = late.query().await
+		&& let Ok(info) = late.info().await
 	{
 		assert_ne!(info.priority, 17, "{version}: late track resolved replacement");
 	}
 	// A held query keeps reading the retired instance; a bare handle would not.
-	let _reading = track.query();
+	let _reading = track.info();
 	drop(subscription);
 	settle().await;
 	let resumed = track.subscribe(None).await;
@@ -518,10 +522,6 @@ retired_fetch_tests! {
 	retired_fetch_lite05: "moq-lite-05",
 	retired_fetch_lite06: "moq-lite-06",
 	retired_fetch_lite07: "moq-lite-07-wip",
-	retired_fetch_ietf14: "moq-transport-14",
-	retired_fetch_ietf15: "moq-transport-15",
-	retired_fetch_ietf16: "moq-transport-16",
-	retired_fetch_ietf17: "moq-transport-17",
 	retired_fetch_ietf18: "moq-transport-18",
 	retired_fetch_ietf22: "moq-transport-22",
 }
@@ -591,13 +591,7 @@ async fn retired_fetch_explicit_epoch_control() {
 
 #[moq_clock::test]
 async fn withdrawal_refuses_new_fetches_but_keeps_open_reads() {
-	for version in [
-		"moq-lite-05",
-		"moq-lite-06",
-		"moq-lite-07-wip",
-		"moq-transport-14",
-		"moq-transport-22",
-	] {
+	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
 		let version: Version = version.parse().unwrap();
 		let publisher = produce_origin(1);
 		let viewer = produce_origin(2);
@@ -620,13 +614,7 @@ async fn withdrawal_refuses_new_fetches_but_keeps_open_reads() {
 
 #[moq_clock::test]
 async fn a_more_specific_source_cannot_fill_a_held_covering_track() {
-	for name in [
-		"moq-lite-05",
-		"moq-lite-06",
-		"moq-lite-07-wip",
-		"moq-transport-14",
-		"moq-transport-22",
-	] {
+	for name in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
 		let version: Version = name.parse().unwrap();
 		let publisher = produce_origin(1);
 		let viewer = produce_origin(2);
@@ -655,14 +643,14 @@ async fn a_more_specific_source_cannot_fill_a_held_covering_track() {
 /// A worker claiming `pool` through the public API: each request is prepared under a
 /// fresh epoch and published at its exact path, and `outputs[path]` holds the latest.
 struct Pool {
-	_claim: Rc<origin::Dynamic>,
+	_claim: Rc<origin::Requests>,
 	outputs: Rc<RefCell<std::collections::HashMap<String, (origin::Publication, track::Producer)>>>,
 	answered: Rc<RefCell<usize>>,
 }
 
 impl Pool {
 	fn new(origin: &origin::Producer) -> Self {
-		let claim = Rc::new(origin.dynamic("pool").unwrap());
+		let claim = Rc::new(origin.requests("pool").unwrap());
 		let outputs = Rc::new(RefCell::new(std::collections::HashMap::new()));
 		let answered = Rc::new(RefCell::new(0));
 		let (handler, served, count) = (claim.clone(), outputs.clone(), answered.clone());
@@ -765,7 +753,6 @@ claim_restart_tests! {
 	claim_restart_lite05: "moq-lite-05",
 	claim_restart_lite06: "moq-lite-06",
 	claim_restart_lite07: "moq-lite-07-wip",
-	claim_restart_ietf14: "moq-transport-14",
-	claim_restart_ietf16: "moq-transport-16",
+	claim_restart_ietf18: "moq-transport-18",
 	claim_restart_ietf22: "moq-transport-22",
 }

@@ -83,6 +83,7 @@ async def test_server_client_roundtrip():
                     media.write_frame(payload, timedelta(microseconds=1_000_000))
 
                     async for frame in media_consumer:
+                        assert isinstance(frame, moq.media.MediaFrame)
                         assert frame.payload == payload
                         assert frame.timestamp // timedelta(microseconds=1) == 1_000_000
                         break
@@ -556,10 +557,12 @@ async def test_client_context_keeps_the_body_error():
                 broadcast.close()
 
 
-async def _await_grant(auth: moq.Auth, want: moq.Grant) -> None:
+async def _await_grant(session: moq.Session, want: moq.Grant) -> None:
     async def follow() -> None:
-        while auth.grant() != want:
-            await auth.grant_changed()
+        async with session.grants() as grants:
+            async for grant in grants:
+                if grant == want:
+                    return
 
     await asyncio.wait_for(follow(), timeout=5.0)
 
@@ -584,13 +587,17 @@ async def test_session_auth_reads_the_grant():
                 session = client.session
                 assert session is not None
                 everything = moq.Grant(publish=("**",), subscribe=("**",))
-                await _await_grant(session.auth(), everything)
+                await _await_grant(session, everything)
                 await asyncio.wait_for(accepted.wait(), timeout=5.0)
-                await _await_grant(sessions[0].auth(), everything)
+                await _await_grant(sessions[0], everything)
+                assert sessions[0].tokens() is None
 
+                tokens = session.tokens()
+                assert tokens is not None
+                tokens.set(["extra"])
                 with pytest.raises(moq.Error.Unsupported):
-                    await asyncio.wait_for(session.auth().add("extra"), timeout=5.0)
-                assert session.auth().grant() == everything
+                    await asyncio.wait_for(tokens.answered(), timeout=5.0)
+                assert session.grants().grant() == everything
         finally:
             accept_task.cancel()
             try:

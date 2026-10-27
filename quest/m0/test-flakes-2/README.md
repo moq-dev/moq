@@ -24,7 +24,7 @@ Rules every child keeps:
   clock, drive the timers with a `moq_clock::Manual` clock or the sim (every
   crate's timers run on `moq-clock`), or move the test off real sockets.
 - A mocked clock still flakes when the code jitters its timers with `rand`
-  (the draft-16 cancel race was a retry sweep jittered past a fixed settle
+  (one cancel race was a retry sweep jittered past a fixed settle
   budget). Wait out the jitter's whole window, not a count of small steps.
 
 This README's own work, after the children: run `just check --all` several
@@ -50,7 +50,7 @@ Public API: none. Wire: none.
 
 - [moq-cli relay tests under load](/quest/m0/test-flakes-2/cli-relay-load.md) - the fetch and announced tests wait on events, not timing
 - [FFI publisher audio gaps](/quest/m0/test-flakes-2/ffi-audio-gap.md) - interop tone checks stop finding gaps from FFI publishers
-- [moq-uring allocations under load](/quest/m0/test-flakes-2/uring-alloc-load.md) - the steady-state send test and MEMLOCK users pass in a parallel check
 - [IETF22 fallback](/quest/m0/test-flakes-2/ietf22-fallback.md) - an IETF22 browser viewer follows a fallback within the media lane's bound, keeping its session and its audio
 - [Stuck-window eviction test on macOS](/quest/m0/test-flakes-2/stuck-window-evicts.md) - the evicted writer reliably sees its stop on macOS, fixed at the race
 - [Swapped Rust to JS Opus](/quest/m0/test-flakes-2/swapped-js-opus.md) - the `rust-swapped -> js` interop cell stops timing out under load
+- [JS host-task yields follow the clock](/quest/m0/test-flakes-2/js-host-yields.md) - `Budget` and `nextTask` yield through the injected clock, so `Manual` tests stop racing them

@@ -2,7 +2,6 @@ import * as Json from "@moq/json";
 import type * as Moq from "@moq/net";
 import { Path } from "@moq/net";
 import * as z from "@zod/mini";
-import { ArchiveSchema } from "./archive";
 import { AudioSchema } from "./audio";
 import { BinarySchema } from "./binary";
 import { ClockSchema } from "./clock";
@@ -46,8 +45,8 @@ const VersionSchema = z.number().check(
 /**
  * The root catalog: the base sections every hang broadcast carries.
  *
- * The media sections are `video`, `audio`, and `text`, alongside the broadcast's `archive`
- * (the segment index and any durable recording) and its `clock` (the one wall-clock mapping);
+ * The media sections are `video`, `audio`, and `text`, alongside the broadcast's `clock` (the
+ * one wall-clock mapping);
  * `json` and `binary` list application data tracks that aren't media. A section is omitted
  * when it holds no tracks. `stats` names the publisher's media snapshot track, and `echo`
  * solicits viewer feedback under a relative broadcast prefix.
@@ -66,10 +65,7 @@ export const RootSchema = z.looseObject({
 	version: z.optional(VersionSchema),
 	video: z.optional(VideoSchema),
 	audio: z.optional(AudioSchema),
-	// An incompatible archive disables seeking/recording, not the rest of the catalog.
-	archive: z.catch(z.optional(ArchiveSchema), undefined),
-	// The broadcast's one continuous clock, if the publisher exposes one. Independent of
-	// `archive`: a live-only publisher exposes its mapping without creating a segment index.
+	// The broadcast's one continuous clock, if the publisher exposes one.
 	clock: z.optional(ClockSchema),
 	// Decoded leniently like `text` below: a value without a string `track` or `path` is someone
 	// else's and decodes as absent. See `named`.
@@ -85,7 +81,7 @@ export const RootSchema = z.looseObject({
 	binary: section(BinarySchema, "tracks"),
 });
 
-/** The root catalog object: the media and archive sections, the data track sections, plus any app extensions. */
+/** The root catalog object: the media sections, the clock, the data track sections, plus any app extensions. */
 export type Root = z.infer<typeof RootSchema>;
 
 /**

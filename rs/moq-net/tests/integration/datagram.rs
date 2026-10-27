@@ -124,12 +124,7 @@ async fn datagrams_reach_the_subscriber_in_order() {
 /// datagram with its sequence, alongside the groups on streams.
 #[moq_clock::test]
 async fn ietf_delivers_datagrams() {
-	for version in [
-		"moq-transport-14",
-		"moq-transport-16",
-		"moq-transport-17",
-		"moq-transport-22",
-	] {
+	for version in ["moq-transport-18", "moq-transport-22"] {
 		moq_clock::timeout(TEST_TIMEOUT, ietf_delivers_datagrams_on(version))
 			.await
 			.unwrap_or_else(|_| panic!("{version}: timed out"));
@@ -160,15 +155,8 @@ async fn ietf_delivers_datagrams_on(version: &str) {
 		.unwrap();
 	let mut before = subscriber.recv_group().await.unwrap().unwrap();
 	assert_eq!(before.sequence, 0, "{version}");
-	// Drafts 14 to 16 can't carry TIMESCALE, so the track arrives untimed, datagrams
-	// included.
-	let timed = !matches!(version, "moq-transport-14" | "moq-transport-16");
 	let first = before.next_frame().await.unwrap().unwrap().timestamp;
-	assert_eq!(
-		first.map(|timestamp| timestamp.is_zero()),
-		timed.then_some(true),
-		"{version}"
-	);
+	assert_eq!(first.map(|timestamp| timestamp.is_zero()), Some(true), "{version}");
 
 	producer
 		.insert_datagram(
@@ -185,7 +173,7 @@ async fn ietf_delivers_datagrams_on(version: &str) {
 		datagram
 			.timestamp
 			.map(|timestamp| timestamp.convert(expected.scale()).unwrap()),
-		timed.then_some(expected),
+		Some(expected),
 		"{version}"
 	);
 

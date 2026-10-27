@@ -15,25 +15,10 @@ import {
 } from "./token.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
-const VERSIONS: IetfVersion[] = [
-	Version.DRAFT_14,
-	Version.DRAFT_15,
-	Version.DRAFT_16,
-	Version.DRAFT_17,
-	Version.DRAFT_18,
-	Version.DRAFT_22,
-];
+const VERSIONS: IetfVersion[] = [Version.DRAFT_18, Version.DRAFT_22];
 
 // A kind past one varint byte and a value that is not text, matching the Rust tests.
 const TOKEN: Token = { kind: 300n, value: new Uint8Array([0x00, 0xff, 0x03, 0x80, 0x6a]) };
-
-function leadingOnes(version: IetfVersion): boolean {
-	return version !== Version.DRAFT_14 && version !== Version.DRAFT_15 && version !== Version.DRAFT_16;
-}
-
-function varint(v: bigint, version: IetfVersion): Uint8Array {
-	return leadingOnes(version) ? Varint.encodeLeadingOnes(v) : Varint.encode(v);
-}
 
 /** The option as it arrives, after a trip through the SETUP parameter block. */
 async function received(params: SetupOptions, version: IetfVersion): Promise<SetupOptions> {
@@ -46,7 +31,7 @@ async function received(params: SetupOptions, version: IetfVersion): Promise<Set
 		}),
 		version,
 	);
-	await params.encode(writer, version);
+	await params.encode(writer);
 	writer.close();
 	await writer.closed;
 
@@ -56,12 +41,12 @@ async function received(params: SetupOptions, version: IetfVersion): Promise<Set
 		bytes.set(chunk, offset);
 		offset += chunk.byteLength;
 	}
-	return SetupOptions.decode(new Reader(undefined, bytes, version), version);
+	return SetupOptions.decode(new Reader(undefined, bytes, version));
 }
 
 /** A raw Token structure: varint fields then a value. */
-function raw(version: IetfVersion, fields: bigint[], value: Uint8Array = new Uint8Array()): Uint8Array {
-	const parts = [...fields.map((field) => varint(field, version)), value];
+function raw(fields: bigint[], value: Uint8Array = new Uint8Array()): Uint8Array {
+	const parts = [...fields.map((field) => Varint.encodeLeadingOnes(field)), value];
 	const out = new Uint8Array(parts.reduce((total, part) => total + part.length, 0));
 	let offset = 0;
 	for (const part of parts) {
@@ -72,9 +57,9 @@ function raw(version: IetfVersion, fields: bigint[], value: Uint8Array = new Uin
 }
 
 /** The Token structure as a SETUP option. */
-function structure(version: IetfVersion, fields: bigint[], value: Uint8Array = new Uint8Array()): SetupOptions {
+function structure(fields: bigint[], value: Uint8Array = new Uint8Array()): SetupOptions {
 	const params = new SetupOptions();
-	params.setBytes(SetupOption.AuthorizationToken, raw(version, fields, value));
+	params.setBytes(SetupOption.AuthorizationToken, raw(fields, value));
 	return params;
 }
 
@@ -91,122 +76,93 @@ function sessionCode(fn: () => unknown): SessionCode | undefined {
 test("USE_VALUE round trips on every draft", async () => {
 	for (const version of VERSIONS) {
 		const params = new SetupOptions();
-		tokenIntoSetup(params, TOKEN, version);
-		expect(tokenFromSetup(await received(params, version), version)).toEqual(TOKEN);
+		tokenIntoSetup(params, TOKEN);
+		expect(tokenFromSetup(await received(params, version))).toEqual(TOKEN);
 	}
 });
 
 test("a request carries an out-of-band token by value on every draft", () => {
 	const value = new Uint8Array([0x6a, 0x77, 0x74]);
-	for (const version of VERSIONS) {
-		const params = new Parameters();
-		tokenIntoRequest(params, value, version);
-		const raw = params.bytes.get(AUTHORIZATION_TOKEN);
-		expect(raw).toBeDefined();
-		expect(tokenFromRequest(raw ?? new Uint8Array(), version)).toEqual({ kind: TOKEN_OUT_OF_BAND, value });
-	}
+	const params = new Parameters();
+	tokenIntoRequest(params, value);
+	const raw = params.bytes.get(AUTHORIZATION_TOKEN);
+	expect(raw).toBeDefined();
+	expect(tokenFromRequest(raw ?? new Uint8Array())).toEqual({ kind: TOKEN_OUT_OF_BAND, value });
 });
 
 /** The same bytes `rs/moq-net/src/ietf/token.rs` asserts, so the two agree on the wire. */
 test("the encoding matches the cross-language vector", () => {
 	const token: Token = { kind: 300n, value: new Uint8Array([0x00, 0xff]) };
-	for (const [version, expected] of [
-		[Version.DRAFT_14, [0x03, 0x41, 0x2c, 0x00, 0xff]],
-		[Version.DRAFT_17, [0x03, 0x81, 0x2c, 0x00, 0xff]],
-	] as const) {
-		const params = new SetupOptions();
-		tokenIntoSetup(params, token, version);
-		expect(params.getBytes(SetupOption.AuthorizationToken)).toEqual(new Uint8Array(expected));
-	}
+	const params = new SetupOptions();
+	tokenIntoSetup(params, token);
+	expect(params.getBytes(SetupOption.AuthorizationToken)).toEqual(new Uint8Array([0x03, 0x81, 0x2c, 0x00, 0xff]));
 });
 
 test("an absent option is no token", () => {
-	for (const version of VERSIONS) {
-		expect(tokenFromSetup(new SetupOptions(), version)).toBeUndefined();
-	}
+	expect(tokenFromSetup(new SetupOptions())).toBeUndefined();
 });
 
 test("an empty value is a token", () => {
-	for (const version of VERSIONS) {
-		const params = structure(version, [0x3n, TOKEN_OUT_OF_BAND]);
-		expect(tokenFromSetup(params, version)).toEqual({ kind: TOKEN_OUT_OF_BAND, value: new Uint8Array() });
-	}
+	const params = structure([0x3n, TOKEN_OUT_OF_BAND]);
+	expect(tokenFromSetup(params)).toEqual({ kind: TOKEN_OUT_OF_BAND, value: new Uint8Array() });
 });
 
 /** We advertise no cache, so a registration is the draft's own USE_VALUE. */
 test("REGISTER is a value", () => {
-	for (const version of VERSIONS) {
-		const params = structure(version, [0x1n, 7n, TOKEN.kind], TOKEN.value);
-		expect(tokenFromSetup(params, version)).toEqual(TOKEN);
-	}
+	const params = structure([0x1n, 7n, TOKEN.kind], TOKEN.value);
+	expect(tokenFromSetup(params)).toEqual(TOKEN);
 });
 
 /** Section 9.1.4: nothing can have been registered before SETUP, so an alias there is a violation. */
 test("a SETUP alias reference is a protocol violation", () => {
-	for (const version of VERSIONS) {
-		for (const aliasType of [0x0n, 0x2n]) {
-			const params = structure(version, [aliasType, 7n]);
-			expect(sessionCode(() => tokenFromSetup(params, version))).toBe(SessionCode.ProtocolViolation);
-		}
+	for (const aliasType of [0x0n, 0x2n]) {
+		const params = structure([aliasType, 7n]);
+		expect(sessionCode(() => tokenFromSetup(params))).toBe(SessionCode.ProtocolViolation);
 	}
 });
 
 test("an undecodable structure is a formatting error", () => {
-	for (const version of VERSIONS) {
-		for (const fields of [[], [0x3n], [0x1n], [0x1n, 7n], [0x0n], [0x2n], [0x4n, 0n]]) {
-			const params = structure(version, fields);
-			expect(sessionCode(() => tokenFromSetup(params, version))).toBe(SessionCode.KeyValueFormatting);
-		}
+	for (const fields of [[], [0x3n], [0x1n], [0x1n, 7n], [0x0n], [0x2n], [0x4n, 0n]]) {
+		const params = structure(fields);
+		expect(sessionCode(() => tokenFromSetup(params))).toBe(SessionCode.KeyValueFormatting);
 	}
 });
 
 /** One credential per connection: a second token is refused, not unioned or dropped. */
 test("two tokens are refused", async () => {
+	const varint = Varint.encodeLeadingOnes;
 	for (const version of VERSIONS) {
-		const value = [...varint(0x3n, version), ...varint(TOKEN_OUT_OF_BAND, version)];
-		const key = SetupOption.AuthorizationToken;
-		// Delta-encoded from draft-16, so the repeat is a delta of zero.
-		const repeat = version === Version.DRAFT_14 || version === Version.DRAFT_15 ? key : 0n;
-		const count = leadingOnes(version) ? [] : [...varint(2n, version)];
-		const entry = (k: bigint) => [...varint(k, version), ...varint(BigInt(value.length), version), ...value];
-		const bytes = new Uint8Array([...count, ...entry(key), ...entry(repeat)]);
+		const value = [...varint(0x3n), ...varint(TOKEN_OUT_OF_BAND)];
+		// Keys are delta-encoded, so the repeat is a delta of zero.
+		const entry = (k: bigint) => [...varint(k), ...varint(BigInt(value.length)), ...value];
+		const bytes = new Uint8Array([...entry(SetupOption.AuthorizationToken), ...entry(0n)]);
 
-		await expect(SetupOptions.decode(new Reader(undefined, bytes, version), version)).rejects.toThrow(
-			/duplicate parameter/,
-		);
+		await expect(SetupOptions.decode(new Reader(undefined, bytes, version))).rejects.toThrow(/duplicate parameter/);
 	}
 });
 
 test("a request token by value decodes", () => {
-	for (const version of VERSIONS) {
-		expect(tokenFromRequest(raw(version, [0x3n, TOKEN.kind], TOKEN.value), version)).toEqual(TOKEN);
-	}
+	expect(tokenFromRequest(raw([0x3n, TOKEN.kind], TOKEN.value))).toEqual(TOKEN);
 });
 
 /** Only SETUP falls back to a value: on a request, a registration overflows the cache. */
 test("a request registration overflows the cache", () => {
-	for (const version of VERSIONS) {
-		const token = raw(version, [0x1n, 7n, TOKEN.kind], TOKEN.value);
-		expect(sessionCode(() => tokenFromRequest(token, version))).toBe(SessionCode.AuthTokenCacheOverflow);
-	}
+	const token = raw([0x1n, 7n, TOKEN.kind], TOKEN.value);
+	expect(sessionCode(() => tokenFromRequest(token))).toBe(SessionCode.AuthTokenCacheOverflow);
 });
 
 test("a request alias reference is an unknown alias", () => {
-	for (const version of VERSIONS) {
-		for (const aliasType of [0x0n, 0x2n]) {
-			const token = raw(version, [aliasType, 7n]);
-			expect(sessionCode(() => tokenFromRequest(token, version))).toBe(SessionCode.UnknownAuthTokenAlias);
-		}
+	for (const aliasType of [0x0n, 0x2n]) {
+		const token = raw([aliasType, 7n]);
+		expect(sessionCode(() => tokenFromRequest(token))).toBe(SessionCode.UnknownAuthTokenAlias);
 	}
 });
 
 test("an undecodable request token is a formatting error", () => {
-	for (const version of VERSIONS) {
-		// A registration, deletion, or alias use missing a field it names, or an alias use
-		// carrying a token type.
-		for (const fields of [[], [0x3n], [0x1n], [0x1n, 7n], [0x0n], [0x2n], [0x2n, 7n, 0n], [0x4n, 0n]]) {
-			const token = raw(version, fields);
-			expect(sessionCode(() => tokenFromRequest(token, version))).toBe(SessionCode.KeyValueFormatting);
-		}
+	// A registration, deletion, or alias use missing a field it names, or an alias use
+	// carrying a token type.
+	for (const fields of [[], [0x3n], [0x1n], [0x1n, 7n], [0x0n], [0x2n], [0x2n, 7n, 0n], [0x4n, 0n]]) {
+		const token = raw(fields);
+		expect(sessionCode(() => tokenFromRequest(token))).toBe(SessionCode.KeyValueFormatting);
 	}
 });

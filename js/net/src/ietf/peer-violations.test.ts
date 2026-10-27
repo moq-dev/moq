@@ -6,12 +6,12 @@ import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Stream, Writer } from "../stream.ts";
 import { Slots } from "../util/limits.ts";
-import { NativeSession } from "./adapter.ts";
 import { Connection } from "./connection.ts";
 import { Parameters } from "./parameters.ts";
 import { PublishNamespace } from "./publish_namespace.ts";
 import { Publisher } from "./publisher.ts";
 import { RequestOk } from "./request.ts";
+import { NativeSession } from "./session.ts";
 import { Subscribe, SubscribeOk } from "./subscribe.ts";
 import { SubscribeNamespaceEntry, SubscribeNamespaceEntryDone } from "./subscribe_namespace.ts";
 import { SubscribeTracks } from "./subscribe_tracks.ts";
@@ -36,7 +36,6 @@ for (const [version, alpn] of versions) {
 				url: new URL("https://example.com"),
 				quic: pair.server,
 				control: serverControl,
-				maxRequestId: 100n,
 				version,
 				client: false,
 				solicit: true,
@@ -45,7 +44,6 @@ for (const [version, alpn] of versions) {
 				url: new URL("https://example.com"),
 				quic: pair.client,
 				control: clientControl,
-				maxRequestId: 100n,
 				version,
 				client: true,
 				solicit: true,
@@ -90,9 +88,9 @@ for (const [version, alpn] of versions) {
 				const peer = await Stream.accept(pair.client, version);
 				if (!peer) throw new Error("missing subscription");
 				expect(await peer.reader.u53()).toBe(Subscribe.id);
-				const request = await Subscribe.decode(peer.reader, version);
+				await Subscribe.decode(peer.reader, version);
 				await peer.writer.u53(SubscribeOk.id);
-				await new SubscribeOk({ requestId: request.requestId, trackAlias: 7n }).encode(peer.writer, version);
+				await new SubscribeOk({ trackAlias: 7n }).encode(peer.writer, version);
 				await track.info();
 			}
 			expect((await pair.client.closed).closeCode).toBe(SessionCode.ProtocolViolation);

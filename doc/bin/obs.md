@@ -25,10 +25,10 @@ Enter a relay URL explicitly. On the shared anonymous relay, use a unique path
 such as `https://cdn.moq.dev/anon/your-stream`. A URL with `?jwt=` fills the
 token field. Editing the token while live presents the new one without
 reconnecting, on a session that carries in-band authorization: a
-`moq-transport` draft-17 or later version pinned under Advanced settings, with
+`moq-transport` draft-18 or later version pinned under Advanced settings, with
 a relay that negotiates the MoQ Auth extension. The default protocol does not
 yet, so there the dock reports the new token as refused and it applies on the
-next Go Live.
+next reconnect or Go Live.
 
 By default the dock tunes the encoder for low latency on this stream only:
 no B-frames or lookahead on the encoders that support turning them off. This

@@ -458,6 +458,7 @@ test("an encoder resuming on a still source encodes a keyframe of the current pi
 	} finally {
 		encoder.close();
 		capture.close();
+		track.finish();
 		track.close();
 		clock.mockRestore();
 		if (original) Object.defineProperty(globalThis, "VideoEncoder", original);
@@ -556,6 +557,7 @@ test("an encoder torn down while a frame is in flight closes that frame", async 
 	} finally {
 		encoder.close();
 		capture.close();
+		track.finish();
 		track.close();
 		if (original) Object.defineProperty(globalThis, "VideoEncoder", original);
 		else Reflect.deleteProperty(globalThis, "VideoEncoder");

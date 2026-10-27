@@ -42,50 +42,9 @@ impl Decode<Version> for RequestId {
 	}
 }
 
-#[derive(Clone, Debug)]
-pub struct MaxRequestId {
-	pub request_id: RequestId,
-}
-
-impl Message for MaxRequestId {
-	const ID: u64 = 0x15;
-
-	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		self.request_id.encode(w, version)?;
-		Ok(())
-	}
-
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		let request_id = RequestId::decode(r, version)?;
-		Ok(Self { request_id })
-	}
-}
-
-#[derive(Clone, Debug)]
-pub struct RequestsBlocked {
-	pub request_id: RequestId,
-}
-
-impl Message for RequestsBlocked {
-	const ID: u64 = 0x1a;
-
-	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		self.request_id.encode(w, version)?;
-		Ok(())
-	}
-
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		let request_id = RequestId::decode(r, version)?;
-		Ok(Self { request_id })
-	}
-}
-
-/// REQUEST_OK (0x07 in v15) - Generic success response for any request.
-/// Replaces PublishNamespaceOk, SubscribeNamespaceOk in v15.
-/// Also used as response to SubscribeUpdate and TrackStatus in v15.
+/// REQUEST_OK (0x07): the generic success response for any request, on its own stream.
 #[derive(Clone, Debug)]
 pub struct RequestOk {
-	pub request_id: Option<RequestId>,
 	/// MoQ Active Count: how many NAMESPACE messages follow before the subscription is
 	/// synced. Only on the answer to a SUBSCRIBE_NAMESPACE, when negotiated.
 	pub active: Option<u64>,
@@ -98,13 +57,6 @@ impl Message for RequestOk {
 	const ID: u64 = 0x07;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
-			self.request_id
-				.expect("request_id required for draft14-16")
-				.encode(w, version)?;
-		} else {
-			assert!(self.request_id.is_none(), "request_id must be None for draft17+");
-		}
 		encode_params!(w, version,
 			0x09 => self.largest,
 			ACTIVE_COUNT_PARAM => self.active,
@@ -113,11 +65,6 @@ impl Message for RequestOk {
 	}
 
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		let request_id = if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
-			Some(RequestId::decode(r, version)?)
-		} else {
-			None
-		};
 		// A REQUEST_UPDATE_OK may refresh EXPIRES, which is ignored like SUBSCRIBE_OK's.
 		// LARGEST_OBJECT is a MUST on a REQUEST_UPDATE_OK or TRACK_STATUS_OK once the track
 		// has objects.
@@ -126,59 +73,34 @@ impl Message for RequestOk {
 			0x09 => largest: Option<Location>,
 			ACTIVE_COUNT_PARAM => active: Option<u64>,
 		);
-		Ok(Self {
-			request_id,
-			active,
-			largest,
-		})
+		Ok(Self { active, largest })
 	}
 }
 
-/// REQUEST_ERROR (0x05 in v15) - Generic error response for any request.
-/// Replaces SubscribeError, PublishError, PublishNamespaceError,
-/// SubscribeNamespaceError, FetchError in v15.
+/// REQUEST_ERROR (0x05): the generic error response for any request, on its own stream.
 #[derive(Clone, Debug)]
 pub struct RequestError<'a> {
-	pub request_id: Option<RequestId>,
 	pub error_code: u64,
 	pub reason_phrase: Cow<'a, str>,
-	/// v16+: retry interval in milliseconds
+	/// Retry interval in milliseconds.
 	pub retry_interval: u64,
 }
 
 impl Message for RequestError<'_> {
 	const ID: u64 = 0x05;
 
-	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
-			self.request_id
-				.expect("request_id required for draft14-16")
-				.encode(w, version)?;
-		} else {
-			assert!(self.request_id.is_none(), "request_id must be None for draft17+");
-		}
+	fn encode_msg(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
 		w.varint(self.error_code)?;
-		if !matches!(version, Version::Draft14 | Version::Draft15) {
-			w.varint(self.retry_interval)?;
-		}
+		w.varint(self.retry_interval)?;
 		w.string(&self.reason_phrase)?;
 		Ok(())
 	}
 
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		let request_id = if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
-			Some(RequestId::decode(r, version)?)
-		} else {
-			None
-		};
+	fn decode_msg(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
 		let error_code = r.varint()?;
-		let retry_interval = match version {
-			Version::Draft14 | Version::Draft15 => 0,
-			_ => r.varint()?,
-		};
+		let retry_interval = r.varint()?;
 		let reason_phrase = Cow::Owned(r.string()?);
 		Ok(Self {
-			request_id,
 			error_code,
 			reason_phrase,
 			retry_interval,
@@ -202,58 +124,25 @@ mod tests {
 		crate::coding::decode_buf(&mut buf, version, M::decode_msg)
 	}
 
-	#[test]
-	fn test_request_ok_round_trip() {
-		let msg = RequestOk {
-			largest: None,
-			request_id: Some(RequestId(42)),
-			active: None,
-		};
-
-		let encoded = encode_message(&msg, Version::Draft15);
-		let decoded: RequestOk = decode_message(&encoded, Version::Draft15).unwrap();
-
-		assert_eq!(decoded.request_id, Some(RequestId(42)));
-	}
-
-	/// A REQUEST_UPDATE_OK may refresh EXPIRES; it is ignored rather than rejected.
-	#[test]
-	fn test_request_ok_ignores_expires() {
-		let bytes = [0x07, 0x01, 0x08, 0x05];
-
-		let decoded: RequestOk = decode_message(&bytes, Version::Draft16).unwrap();
-		assert_eq!(decoded.request_id, Some(RequestId(7)));
-	}
-
-	/// A REQUEST_UPDATE_OK or TRACK_STATUS_OK carries LARGEST_OBJECT; it is ignored rather
-	/// than rejected. Draft-14 has no REQUEST_OK, and the Location is length-prefixed until
-	/// draft-17.
+	/// A REQUEST_UPDATE_OK may refresh EXPIRES, and a REQUEST_UPDATE_OK or TRACK_STATUS_OK
+	/// carries LARGEST_OBJECT; neither is rejected.
 	#[test]
 	fn test_request_ok_ignores_largest_object() {
-		for version in [
-			Version::Draft15,
-			Version::Draft16,
-			Version::Draft17,
-			Version::Draft18,
-			Version::Draft22,
-		] {
-			let bytes: &[u8] = match version {
-				Version::Draft15 | Version::Draft16 => &[0x07, 0x01, 0x09, 0x02, 0x05, 0x03],
-				_ => &[0x01, 0x09, 0x05, 0x03],
-			};
-			let mut buf = Decoder::new(bytes, version.into());
-			RequestOk::decode_msg(&mut buf, version).unwrap_or_else(|e| panic!("{version}: {e}"));
-			assert!(buf.is_empty(), "{version}: trailing bytes");
+		for version in [Version::Draft18, Version::Draft22] {
+			for bytes in [&[0x01, 0x08, 0x05][..], &[0x01, 0x09, 0x05, 0x03]] {
+				let mut buf = Decoder::new(bytes, version.into());
+				RequestOk::decode_msg(&mut buf, version).unwrap_or_else(|e| panic!("{version}: {e}"));
+				assert!(buf.is_empty(), "{version}: trailing bytes");
+			}
 		}
 	}
 
 	#[test]
 	fn test_request_ok_active_round_trips() {
-		for (version, request_id) in [(Version::Draft16, Some(RequestId(3))), (Version::Draft22, None)] {
+		for version in [Version::Draft18, Version::Draft22] {
 			for count in [None, Some(0), Some(7)] {
 				let msg = RequestOk {
 					largest: None,
-					request_id,
 					active: count,
 				};
 				let decoded: RequestOk = decode_message(&encode_message(&msg, version), version).unwrap();
@@ -265,103 +154,6 @@ mod tests {
 	#[test]
 	fn test_request_error_round_trip() {
 		let msg = RequestError {
-			request_id: Some(RequestId(99)),
-			error_code: 500,
-			reason_phrase: "Internal error".into(),
-			retry_interval: 0,
-		};
-
-		let encoded = encode_message(&msg, Version::Draft15);
-		let decoded: RequestError = decode_message(&encoded, Version::Draft15).unwrap();
-
-		assert_eq!(decoded.request_id, Some(RequestId(99)));
-		assert_eq!(decoded.error_code, 500);
-		assert_eq!(decoded.reason_phrase, "Internal error");
-		assert_eq!(decoded.retry_interval, 0);
-	}
-
-	#[test]
-	fn test_request_error_v16_retry_interval() {
-		let msg = RequestError {
-			request_id: Some(RequestId(99)),
-			error_code: 500,
-			reason_phrase: "Internal error".into(),
-			retry_interval: 5000,
-		};
-
-		let encoded = encode_message(&msg, Version::Draft16);
-		let decoded: RequestError = decode_message(&encoded, Version::Draft16).unwrap();
-
-		assert_eq!(decoded.request_id, Some(RequestId(99)));
-		assert_eq!(decoded.error_code, 500);
-		assert_eq!(decoded.reason_phrase, "Internal error");
-		assert_eq!(decoded.retry_interval, 5000);
-	}
-
-	#[test]
-	fn test_request_ok_v17_round_trip() {
-		let msg = RequestOk {
-			largest: None,
-			request_id: None,
-			active: None,
-		};
-
-		let encoded = encode_message(&msg, Version::Draft17);
-		let decoded: RequestOk = decode_message(&encoded, Version::Draft17).unwrap();
-
-		assert_eq!(decoded.request_id, None);
-	}
-
-	#[test]
-	fn test_request_error_v17_round_trip() {
-		let msg = RequestError {
-			request_id: None,
-			error_code: 500,
-			reason_phrase: "Internal error".into(),
-			retry_interval: 3000,
-		};
-
-		let encoded = encode_message(&msg, Version::Draft17);
-		let decoded: RequestError = decode_message(&encoded, Version::Draft17).unwrap();
-
-		assert_eq!(decoded.request_id, None);
-		assert_eq!(decoded.error_code, 500);
-		assert_eq!(decoded.reason_phrase, "Internal error");
-		assert_eq!(decoded.retry_interval, 3000);
-	}
-
-	#[test]
-	fn test_request_ok_v18_round_trip() {
-		let msg = RequestOk {
-			largest: None,
-			request_id: None,
-			active: None,
-		};
-
-		let encoded = encode_message(&msg, Version::Draft18);
-		let decoded: RequestOk = decode_message(&encoded, Version::Draft18).unwrap();
-
-		assert_eq!(decoded.request_id, None);
-	}
-
-	/// Regression: pre-fix, the `version != Draft17` check caused Draft18 to be
-	/// treated as Draft14-16 and panic in the encoder.
-	#[test]
-	fn test_request_ok_v18_wire_matches_v17() {
-		let msg = RequestOk {
-			largest: None,
-			request_id: None,
-			active: None,
-		};
-		let v17 = encode_message(&msg, Version::Draft17);
-		let v18 = encode_message(&msg, Version::Draft18);
-		assert_eq!(v17, v18);
-	}
-
-	#[test]
-	fn test_request_error_v18_round_trip() {
-		let msg = RequestError {
-			request_id: None,
 			error_code: 500,
 			reason_phrase: "Internal error".into(),
 			retry_interval: 3000,
@@ -370,7 +162,6 @@ mod tests {
 		let encoded = encode_message(&msg, Version::Draft18);
 		let decoded: RequestError = decode_message(&encoded, Version::Draft18).unwrap();
 
-		assert_eq!(decoded.request_id, None);
 		assert_eq!(decoded.error_code, 500);
 		assert_eq!(decoded.reason_phrase, "Internal error");
 		assert_eq!(decoded.retry_interval, 3000);

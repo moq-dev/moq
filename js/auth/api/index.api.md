@@ -219,6 +219,7 @@ export const KeySchema: z.ZodMiniDiscriminatedUnion<[z.ZodMiniObject<{
     dp: z.ZodMiniOptional<z.ZodMiniString<string>>;
     dq: z.ZodMiniOptional<z.ZodMiniString<string>>;
     qi: z.ZodMiniOptional<z.ZodMiniString<string>>;
+    oth: z.ZodMiniOptional<z.ZodMiniNever>;
 }, z.core.$strip>, z.ZodMiniObject<{
     alg: z.ZodMiniEnum<{
         ES256: "ES256";
@@ -431,6 +432,7 @@ export const KeySetSchema: z.ZodMiniObject<{
         dp: z.ZodMiniOptional<z.ZodMiniString<string>>;
         dq: z.ZodMiniOptional<z.ZodMiniString<string>>;
         qi: z.ZodMiniOptional<z.ZodMiniString<string>>;
+        oth: z.ZodMiniOptional<z.ZodMiniNever>;
     }, z.core.$strip>, z.ZodMiniObject<{
         alg: z.ZodMiniEnum<{
             ES256: "ES256";

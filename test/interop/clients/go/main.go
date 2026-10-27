@@ -115,10 +115,11 @@ func dial(ctx context.Context, url string, opts dialOptions, timeout time.Durati
 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	auth := client.Session().Auth()
-	grant := auth.Grant()
+	grants := client.Session().Grants()
+	defer grants.Close()
+	grant := grants.Grant()
 	for grant == nil {
-		if grant, err = auth.GrantChanged(ctx); err != nil {
+		if grant, err = grants.Changed(ctx); err != nil {
 			client.Close()
 			return nil, fmt.Errorf("grant: %w", err)
 		}
@@ -342,13 +343,21 @@ func finishSubscribe(ctx context.Context, client *moq.Client, broadcast string, 
 	defer media.Cancel()
 	count := 0
 	for {
-		frame, err := media.Next(ctx)
+		read, err := media.Next(ctx)
 		if err != nil {
 			return err
 		}
-		if frame == nil {
+		if read == nil {
 			break
 		}
+		if _, gap := read.(moqmedia.ReadGap); gap {
+			return errors.New("media gap")
+		}
+		value, frameRead := read.(moqmedia.ReadFrame)
+		if !frameRead {
+			continue
+		}
+		frame := value.Frame
 		// Empty payloads carry endpoint metadata, not codec frames.
 		if len(frame.Payload) == 0 {
 			continue
@@ -558,13 +567,21 @@ func subscribe(ctx context.Context, url, broadcast string, opts dialOptions, tim
 
 	total := 0
 	for total == 0 {
-		frame, err := media.Next(ctx)
+		read, err := media.Next(ctx)
 		if err != nil {
 			return err
 		}
-		if frame == nil {
+		if read == nil {
 			break
 		}
+		if _, gap := read.(moqmedia.ReadGap); gap {
+			return errors.New("media gap")
+		}
+		value, frameRead := read.(moqmedia.ReadFrame)
+		if !frameRead {
+			continue
+		}
+		frame := value.Frame
 		total += len(frame.Payload)
 	}
 	if total == 0 {

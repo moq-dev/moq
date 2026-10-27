@@ -30,6 +30,45 @@ pub trait SocketStats: Send + Sync + 'static {
 /// A shared handle to a transport's statistics.
 pub type SharedSocketStats = Arc<dyn SocketStats>;
 
+/// Windowed maximum of delivery-rate samples, like BBR's bandwidth filter.
+///
+/// A live publisher is usually application-limited: it has one frame to send every
+/// few milliseconds, so most kernel samples measure the sender's own rate rather
+/// than the path's. Such a sample may only raise the estimate. A sample that is not
+/// app-limited is a real measurement and replaces older maxima once they leave the
+/// window. With no new usable sample the last estimate stands: an app-limited flow
+/// is no evidence that the path got slower. A zero rate is no sample at all.
+#[derive(Debug, Default)]
+#[cfg(any(target_os = "linux", test))]
+pub(crate) struct RateFilter {
+	/// Strictly decreasing rates from front to back; the front is the maximum.
+	samples: std::collections::VecDeque<(moq_clock::Instant, u64)>,
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl RateFilter {
+	/// About ten round trips on a WAN path, as in BBR.
+	pub(crate) const WINDOW: Duration = Duration::from_secs(10);
+
+	/// Fold in one sample and return the current estimate, if there is one yet.
+	pub(crate) fn update(&mut self, now: moq_clock::Instant, rate: u64, app_limited: bool) -> Option<u64> {
+		let expired = |at: &moq_clock::Instant| now.saturating_duration_since(*at) > Self::WINDOW;
+		let usable = rate > 0 && (!app_limited || self.samples.front().is_none_or(|(_, max)| rate >= *max));
+		// A rejected sample changes nothing, not even expiry: it is no evidence the
+		// path got slower, so only a usable sample may retire an old maximum.
+		if usable {
+			while self.samples.front().is_some_and(|(at, _)| expired(at)) {
+				self.samples.pop_front();
+			}
+			while self.samples.back().is_some_and(|(_, r)| *r <= rate) {
+				self.samples.pop_back();
+			}
+			self.samples.push_back((now, rate));
+		}
+		self.samples.front().map(|(_, max)| *max)
+	}
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use unix::TcpStats;
 
@@ -52,14 +91,15 @@ mod unix {
 	#[derive(Debug)]
 	pub struct TcpStats {
 		fd: OwnedFd,
+		/// Delivery-rate samples, filtered so app-limited ones cannot lower the estimate.
+		#[cfg(target_os = "linux")]
+		rate: std::sync::Mutex<RateFilter>,
 	}
 
 	impl TcpStats {
 		/// Duplicate `socket`'s descriptor and read statistics from the copy.
 		pub fn new<S: AsFd>(socket: &S) -> io::Result<Self> {
-			Ok(Self {
-				fd: socket.as_fd().try_clone_to_owned()?,
-			})
+			Ok(Self::from_fd(socket.as_fd().try_clone_to_owned()?))
 		}
 
 		/// Take ownership of an already-duplicated descriptor.
@@ -67,7 +107,11 @@ mod unix {
 		/// Use this when the socket itself has been moved somewhere unreachable (a
 		/// type-erased HTTP upgrade, for instance) and only the descriptor was kept.
 		pub fn from_fd(fd: OwnedFd) -> Self {
-			Self { fd }
+			Self {
+				fd,
+				#[cfg(target_os = "linux")]
+				rate: Default::default(),
+			}
 		}
 
 		fn borrow(&self) -> BorrowedFd<'_> {
@@ -254,11 +298,16 @@ mod unix {
 			{
 				let (info, len) = sys::tcp_info(self.borrow())?;
 				let offset = std::mem::offset_of!(sys::TcpInfo, delivery_rate);
-				if !sys::has_field(len, offset, size_of::<u64>()) || info.delivery_rate == 0 {
+				if !sys::has_field(len, offset, size_of::<u64>()) {
 					return None;
 				}
+				// Bit 0 of this byte is `tcpi_delivery_rate_app_limited`; the others hold
+				// `tcpi_fastopen_client_fail`.
+				let app_limited = info.app_limited & 1 != 0;
 				// The kernel reports bytes per second; the trait wants bits.
-				Some(info.delivery_rate.saturating_mul(8))
+				let rate = info.delivery_rate.saturating_mul(8);
+				let mut filter = self.rate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+				filter.update(moq_clock::now(), rate, app_limited)
 			}
 
 			#[cfg(not(target_os = "linux"))]
@@ -289,5 +338,79 @@ mod unix {
 		fn macos_tcp_connection_info_layout() {
 			assert_eq!(std::mem::offset_of!(super::sys::TcpInfo, srtt), 44);
 		}
+	}
+}
+
+#[cfg(test)]
+mod rate_filter_tests {
+	use super::*;
+	use moq_clock::Instant;
+
+	fn at(start: Instant, ms: u64) -> Instant {
+		start + Duration::from_millis(ms)
+	}
+
+	#[test]
+	fn app_limited_samples_do_not_lower_the_estimate() {
+		let t = moq_clock::now();
+		let mut f = RateFilter::default();
+		assert_eq!(f.update(t, 80_000_000, true), Some(80_000_000));
+		// A live stream mostly trickles: these samples measure the sender, not the path.
+		assert_eq!(f.update(at(t, 100), 1_000_000, true), Some(80_000_000));
+		// Even after the window, an app-limited flow keeps the last estimate.
+		assert_eq!(f.update(at(t, 20_000), 1_000_000, true), Some(80_000_000));
+	}
+
+	#[test]
+	fn app_limited_samples_can_raise_the_estimate() {
+		let t = moq_clock::now();
+		let mut f = RateFilter::default();
+		assert_eq!(f.update(t, 1_000_000, true), Some(1_000_000));
+		assert_eq!(f.update(at(t, 100), 50_000_000, true), Some(50_000_000));
+	}
+
+	#[test]
+	fn measured_samples_lower_it_after_the_window() {
+		let t = moq_clock::now();
+		let mut f = RateFilter::default();
+		assert_eq!(f.update(t, 80_000_000, false), Some(80_000_000));
+		// A real, lower measurement waits for the older maximum to expire.
+		assert_eq!(f.update(at(t, 1_000), 5_000_000, false), Some(80_000_000));
+		assert_eq!(f.update(at(t, 10_500), 5_000_000, false), Some(5_000_000));
+	}
+
+	#[test]
+	fn app_limited_samples_do_not_expire_the_maximum() {
+		let t = moq_clock::now();
+		let mut f = RateFilter::default();
+		f.update(t, 80_000_000, false);
+		f.update(at(t, 1_000), 5_000_000, false);
+		// Both measurements have expired, but an app-limited sample cannot retire them.
+		assert_eq!(f.update(at(t, 20_000), 1_000_000, true), Some(80_000_000));
+		assert_eq!(f.update(at(t, 30_000), 1_000_000, true), Some(80_000_000));
+		// The next real measurement does.
+		assert_eq!(f.update(at(t, 31_000), 4_000_000, false), Some(4_000_000));
+	}
+
+	#[test]
+	fn the_window_keeps_the_largest_recent_measurement() {
+		let t = moq_clock::now();
+		let mut f = RateFilter::default();
+		f.update(t, 30_000_000, false);
+		f.update(at(t, 4_000), 20_000_000, false);
+		f.update(at(t, 8_000), 10_000_000, false);
+		assert_eq!(f.update(at(t, 10_500), 9_000_000, false), Some(20_000_000));
+		assert_eq!(f.update(at(t, 14_500), 9_000_000, false), Some(10_000_000));
+		assert_eq!(f.update(at(t, 18_500), 9_000_000, false), Some(9_000_000));
+	}
+
+	#[test]
+	fn zero_rate_keeps_the_estimate() {
+		let t = moq_clock::now();
+		let mut f = RateFilter::default();
+		// The kernel reports zero until it has a sample.
+		assert_eq!(f.update(t, 0, false), None);
+		assert_eq!(f.update(at(t, 100), 80_000_000, false), Some(80_000_000));
+		assert_eq!(f.update(at(t, 20_000), 0, false), Some(80_000_000));
 	}
 }

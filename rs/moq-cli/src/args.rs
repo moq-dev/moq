@@ -338,18 +338,30 @@ impl Invocation {
 				}
 				// A reader refuses the whole catalog over a path it cannot resolve.
 				let broadcast = command.broadcast(&self.moq);
-				let rel = hang::moq_net::path::Relative::new(path);
-				let Some(prefix) = hang::moq_net::Path::new(&broadcast).try_resolve(&rel) else {
+				let rel = hang::moq_net::path::Relative::new(path)
+					.map_err(|err| anyhow::anyhow!("invalid --echo-path: {err}"))?;
+				let broadcast = hang::moq_net::Path::new(&broadcast)
+					.map_err(|err| anyhow::anyhow!("invalid --broadcast: {err}"))?;
+				let Some(prefix) = broadcast.try_resolve(&rel) else {
 					anyhow::bail!("--echo-path `{path}` walks above the connection root from broadcast `{broadcast}`");
 				};
 				// An origin refuses a broadcast a pattern could not name, so no viewer could
 				// publish its `<NAME>.echo` beneath this.
-				let feedback = prefix.join("viewer.echo");
-				if let Err(err) = hang::moq_net::Pattern::literal(feedback.as_str()) {
+				let feedback = prefix.join(&hang::moq_net::Path::from_static("viewer.echo"));
+				let literal = feedback
+					.map_err(anyhow::Error::from)
+					.and_then(|feedback| Ok(hang::moq_net::Pattern::literal(feedback.as_str())?));
+				if let Err(err) = literal {
 					anyhow::bail!(
 						"--echo-path `{path}` resolves to `{prefix}`, where no viewer can publish its feedback: {err}"
 					);
 				}
+			}
+			if let Command::Import(import) = command
+				&& import.hls
+				&& let Some(reason) = import.source.hls_refusal()
+			{
+				anyhow::bail!("--hls records the segments of the catalog the import builds, but {reason}");
 			}
 			if let Command::Import(import) = command
 				&& import.linger.is_some()
@@ -783,8 +795,8 @@ pub struct Import {
 	/// live, it caps how far back a FETCH can still reach (and how long a subscriber may ask to
 	/// wait for a late group). The default suits a segmented egress (HLS/DASH), which may only
 	/// advertise segments that are still fetchable; lower it when nothing reads history and the
-	/// memory matters. Media tracks only -- the catalog and timeline are read at the live edge,
-	/// which is retained unconditionally.
+	/// memory matters. Media tracks only -- the catalog and HLS records are read at the live
+	/// edge, which is retained unconditionally.
 	#[usage(long)]
 	pub max_age: Option<moq_tokio::cli::Duration>,
 
@@ -801,6 +813,12 @@ pub struct Import {
 	/// The released spelling of [`Self::max_age`].
 	#[usage(long = "latency-max", hide = true)]
 	latency_max: Option<moq_tokio::cli::Duration>,
+
+	/// Publish HLS segment records for every video and audio rendition, so `export hls` (or
+	/// any HLS/DASH edge) can serve the broadcast. The source must align keyframes across its
+	/// renditions. Not for `import rtmp`, `srt`, `rtc`, or `archive`.
+	#[usage(long)]
+	pub hls: bool,
 
 	/// Name a media report track in the catalog's `stats` section and fill it with what each
 	/// track has written, about once a second while subscribed. The stdin imports only.
@@ -904,6 +922,19 @@ impl ImportSource {
 			return Some("`import capture` encodes, and its encoders do not count yet");
 		}
 		self.catalog_refusal()
+	}
+
+	/// Why `--hls` can't apply to this source, or `None` when it can: only a catalog the CLI
+	/// builds itself records segments.
+	fn hls_refusal(&self) -> Option<&'static str> {
+		match self {
+			Self::Rtmp(_) | Self::Srt(_) => Some("the gateway builds its own catalog"),
+			Self::Rtc(_) => Some("`import rtc` builds its own catalog"),
+			Self::Archive(_) => Some("`import archive` replays the catalog it recorded"),
+			#[cfg(feature = "capture")]
+			Self::Capture(_) => None,
+			Self::Avc3 | Self::Fmp4(_) | Self::Ts(_) | Self::Flv | Self::Hls(_) | Self::Rtsp(_) => None,
+		}
 	}
 
 	/// Why `--linger` can't apply to this source, or `None` when it can: only a source with a

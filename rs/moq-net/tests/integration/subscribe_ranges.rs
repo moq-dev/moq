@@ -15,7 +15,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 
 const LITE: &[&str] = &["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"];
 
-const TRANSPORT: &[&str] = &["moq-transport-14", "moq-transport-17", "moq-transport-22"];
+const TRANSPORT: &[&str] = &["moq-transport-18", "moq-transport-22"];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let (producer, driver) =
@@ -265,7 +265,7 @@ async fn range_fixture_history(version: &str, relay: bool, history: u64) -> Rang
 /// Mixed fixed and live ranges retain history for both live and finished cached sources.
 #[moq_clock::test]
 async fn initial_mixed_ranges_keep_the_absolute_history() {
-	for version in ["moq-transport-17", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22"] {
 		for relay in [false, true] {
 			for finished in [false, true] {
 				let fixture = range_fixture_version(version, relay).await;
@@ -457,83 +457,77 @@ async fn draft22_can_widen_while_the_current_group_is_quiet() {
 	}
 }
 
-/// Legacy peers already join live and fetch the head. Their supported filters can
-/// narrow that established subscription and widen it over groups published meanwhile.
+/// Draft-18 peers already join live and fetch the head. Their filters can narrow that
+/// established subscription and widen it over groups published meanwhile.
 #[moq_clock::test]
-async fn legacy_updates_narrow_then_widen() {
-	for version in [
-		"moq-transport-15",
-		"moq-transport-16",
-		"moq-transport-17",
-		"moq-transport-18",
-	] {
-		for relay in [false, true] {
-			let mut fixture = range_fixture_version(version, relay).await;
-			let initial = Subscription::default().with_range(0..).with_max_delay(None);
-			let mut reader = subscribe(&fixture.remote, initial.clone()).await;
-			let mut seen = Vec::new();
-			for _ in 0..6 {
-				seen.push(next(&mut reader).await.expect("initial history"));
-			}
-			seen.sort_unstable();
-			assert_eq!(seen, [0, 1, 2, 3, 4, 5], "{version} relay={relay}");
-			reader.update(initial.clone().with_range(4..5)).unwrap();
-			moq_clock::timeout(
-				TIMEOUT,
-				kio::wait(|waiter| {
-					assert!(reader.poll_recv_group(waiter).is_pending());
-					loop {
-						if fixture
-							.track
-							.subscription()
-							.is_some_and(|subscription| subscription.ranges == [Range::groups(4..5)])
-						{
-							return std::task::Poll::Ready(());
-						}
-						if fixture.track.poll_subscription_changed(waiter).is_pending() {
-							return std::task::Poll::Pending;
-						}
-					}
-				}),
-			)
-			.await
-			.unwrap_or_else(|_| panic!("{version} relay={relay}: narrowing did not reach the publisher"));
-			for sequence in 6..8 {
-				let mut group = fixture.track.create_group(moq_net::group::Info { sequence }).unwrap();
-				group
-					.write_frame(
-						Timestamp::from_millis(sequence * 1000).unwrap(),
-						sequence.to_be_bytes().as_slice(),
-					)
-					.unwrap();
-				group.finish().unwrap();
-			}
-			reader.update(initial).unwrap();
-			let mut seen = Vec::new();
-			for _ in 0..2 {
-				let mut group = moq_clock::timeout(TIMEOUT, reader.recv_group())
-					.await
-					.unwrap_or_else(|_| panic!("{version} relay={relay}: widening lost history; got {seen:?}"))
-					.unwrap()
-					.unwrap();
-				seen.push(group.sequence);
-				let frame = moq_clock::timeout(TIMEOUT, group.read_frame())
-					.await
-					.unwrap()
-					.unwrap()
-					.unwrap();
-				assert_eq!(frame.payload, group.sequence.to_be_bytes().as_slice());
-				assert!(
-					moq_clock::timeout(TIMEOUT, group.read_frame())
-						.await
-						.unwrap()
-						.unwrap()
-						.is_none()
-				);
-			}
-			seen.sort_unstable();
-			assert_eq!(seen, [6, 7], "{version} relay={relay}");
+async fn draft18_updates_narrow_then_widen() {
+	let version = "moq-transport-18";
+	for relay in [false, true] {
+		let mut fixture = range_fixture_version(version, relay).await;
+		let initial = Subscription::default().with_range(0..).with_max_delay(None);
+		let mut reader = subscribe(&fixture.remote, initial.clone()).await;
+		let mut seen = Vec::new();
+		for _ in 0..6 {
+			seen.push(next(&mut reader).await.expect("initial history"));
 		}
+		seen.sort_unstable();
+		assert_eq!(seen, [0, 1, 2, 3, 4, 5], "{version} relay={relay}");
+		reader.update(initial.clone().with_range(4..5)).unwrap();
+		moq_clock::timeout(
+			TIMEOUT,
+			kio::wait(|waiter| {
+				assert!(reader.poll_recv_group(waiter).is_pending());
+				loop {
+					if fixture
+						.track
+						.subscription()
+						.is_some_and(|subscription| subscription.ranges == [Range::groups(4..5)])
+					{
+						return std::task::Poll::Ready(());
+					}
+					if fixture.track.poll_subscription_changed(waiter).is_pending() {
+						return std::task::Poll::Pending;
+					}
+				}
+			}),
+		)
+		.await
+		.unwrap_or_else(|_| panic!("{version} relay={relay}: narrowing did not reach the publisher"));
+		for sequence in 6..8 {
+			let mut group = fixture.track.create_group(moq_net::group::Info { sequence }).unwrap();
+			group
+				.write_frame(
+					Timestamp::from_millis(sequence * 1000).unwrap(),
+					sequence.to_be_bytes().as_slice(),
+				)
+				.unwrap();
+			group.finish().unwrap();
+		}
+		reader.update(initial).unwrap();
+		let mut seen = Vec::new();
+		for _ in 0..2 {
+			let mut group = moq_clock::timeout(TIMEOUT, reader.recv_group())
+				.await
+				.unwrap_or_else(|_| panic!("{version} relay={relay}: widening lost history; got {seen:?}"))
+				.unwrap()
+				.unwrap();
+			seen.push(group.sequence);
+			let frame = moq_clock::timeout(TIMEOUT, group.read_frame())
+				.await
+				.unwrap()
+				.unwrap()
+				.unwrap();
+			assert_eq!(frame.payload, group.sequence.to_be_bytes().as_slice());
+			assert!(
+				moq_clock::timeout(TIMEOUT, group.read_frame())
+					.await
+					.unwrap()
+					.unwrap()
+					.is_none()
+			);
+		}
+		seen.sort_unstable();
+		assert_eq!(seen, [6, 7], "{version} relay={relay}");
 	}
 }
 
@@ -541,7 +535,7 @@ async fn legacy_updates_narrow_then_widen() {
 /// the copy and joins the new live group, without disturbing a sibling reader.
 #[moq_clock::test]
 async fn empty_ranges_retire_the_wire_and_can_widen_again() {
-	for version in ["moq-transport-14", "moq-transport-17", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22"] {
 		for relay in [false, true] {
 			let mut fixture = range_fixture_version(version, relay).await;
 			let live = Subscription::default().with_ranges([Range::live()]);
@@ -666,7 +660,7 @@ async fn draft22_cold_widening_finishes_every_filled_group() {
 /// A pending refusal is local to the new reader even before it is awaited.
 #[moq_clock::test]
 async fn unresolved_time_reader_never_changes_sibling_demand() {
-	for version in ["moq-transport-17", "moq-transport-18", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22"] {
 		for relay in [false, true] {
 			let mut fixture = range_fixture_version(version, relay).await;
 			let mut healthy = subscribe(&fixture.remote, Subscription::default()).await;
@@ -694,8 +688,8 @@ async fn unresolved_time_reader_never_changes_sibling_demand() {
 			.unwrap();
 
 			let track = fixture.remote.track("quiet").unwrap();
-			// Pin the public track instance through a query before creating the pending reader.
-			let query = track.query();
+			// Pin the public track instance through an info request before creating the pending reader.
+			let query = track.info();
 			let track = query.track();
 
 			let mut refused = Some(track.subscribe(Subscription::default().with_ranges([Range {

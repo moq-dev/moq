@@ -269,8 +269,8 @@ async fn refused_only_stats_depth_one_has_root_totals_and_shared_embedder_metric
 	.expect("refusal-only root totals");
 	relay
 		.stats
-		.tier(Tier::new("gateway"))
-		.refuse("tenant", RefusalKind::Forbidden);
+		.tier(Tier::new(moq_net::Path::from_static("gateway")))
+		.refuse(moq_net::Path::from_static("tenant"), RefusalKind::Forbidden);
 	assert_eq!(
 		relay.refused("forbidden").await,
 		1,

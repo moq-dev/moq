@@ -40,13 +40,7 @@ const TAG_ABSOLUTE_RANGE = 0x4n;
  * that follow, so the value carries no Length, and added the parameters that ride with it.
  */
 export function isDraft22(version: IetfVersion): boolean {
-	return (
-		version !== Version.DRAFT_14 &&
-		version !== Version.DRAFT_15 &&
-		version !== Version.DRAFT_16 &&
-		version !== Version.DRAFT_17 &&
-		version !== Version.DRAFT_18
-	);
+	return version !== Version.DRAFT_18;
 }
 
 /** The Location Filter Type of draft-22. */
@@ -62,22 +56,8 @@ export function hasRangeFilters(version: IetfVersion): boolean {
 	return isDraft22(version);
 }
 
-/**
- * Draft-17 replaced QUIC's two-bit-length varint with a leading-1-bits one. The two agree
- * below 64 and diverge above it, so getting this wrong is invisible until group or object
- * ids grow past that.
- */
-function usesLeadingOnes(version: IetfVersion): boolean {
-	return version !== Version.DRAFT_14 && version !== Version.DRAFT_15 && version !== Version.DRAFT_16;
-}
-
-function varint(v: bigint, version: IetfVersion): Uint8Array {
-	return usesLeadingOnes(version) ? Varint.encodeLeadingOnes(v) : Varint.encode(v);
-}
-
-function unvarint(buf: Uint8Array, version: IetfVersion): [bigint, Uint8Array] {
-	return usesLeadingOnes(version) ? Varint.decodeLeadingOnes(buf) : Varint.decodeBigInt(buf);
-}
+const varint = Varint.encodeLeadingOnes;
+const unvarint = Varint.decodeLeadingOnes;
 
 function endDelta(startGroup: bigint, endGroup: bigint): bigint {
 	if (endGroup < startGroup) {
@@ -88,14 +68,14 @@ function endDelta(startGroup: bigint, endGroup: bigint): bigint {
 
 /** Encode a filter as its raw parameter value, without the Length that frames it before draft-22. */
 export function encode(filter: Filter, version: IetfVersion): Uint8Array {
-	return isDraft22(version) ? encodeTyped(filter, version) : encodeTag(filter, version);
+	return isDraft22(version) ? encodeTyped(filter) : encodeTag(filter);
 }
 
 /** Encode LOCATION_FILTER's value as it follows the parameter type from draft-17 on. */
 export function encodeParam(filter: Filter, version: IetfVersion): Uint8Array {
 	const value = encode(filter, version);
 	// Draft-22's Location Filter Type says where the value ends, so it needs no Length.
-	return isDraft22(version) ? value : encodeLengthPrefixed(value, version);
+	return isDraft22(version) ? value : encodeLengthPrefixed(value);
 }
 
 /** Read LOCATION_FILTER's value as it follows the parameter type from draft-17 on. */
@@ -111,14 +91,14 @@ export async function decodeParam(r: Reader, version: IetfVersion): Promise<Filt
 	return fromTyped(type, fields);
 }
 
-function encodeTyped(filter: Filter, version: IetfVersion): Uint8Array {
+function encodeTyped(filter: Filter): Uint8Array {
 	switch (filter.kind) {
 		case "unfiltered":
-			return varint(TYPE_NONE, version);
+			return varint(TYPE_NONE);
 		case "nextObject":
-			return varint(TYPE_NEXT_OBJECT, version);
+			return varint(TYPE_NEXT_OBJECT);
 		case "relative":
-			return concat([varint(TYPE_RELATIVE_START, version), varint(filter.groups, version)]);
+			return concat([varint(TYPE_RELATIVE_START), varint(filter.groups)]);
 		case "absolute": {
 			const type =
 				filter.endGroup === undefined
@@ -126,15 +106,11 @@ function encodeTyped(filter: Filter, version: IetfVersion): Uint8Array {
 					: filter.endObject === undefined
 						? TYPE_ABSOLUTE_GROUP_END
 						: TYPE_ABSOLUTE_RANGE;
-			const parts = [
-				varint(type, version),
-				varint(filter.startGroup, version),
-				varint(filter.startObject, version),
-			];
+			const parts = [varint(type), varint(filter.startGroup), varint(filter.startObject)];
 			if (filter.endGroup !== undefined) {
-				parts.push(varint(endDelta(filter.startGroup, filter.endGroup), version));
+				parts.push(varint(endDelta(filter.startGroup, filter.endGroup)));
 				if (filter.endObject !== undefined) {
-					parts.push(varint(filter.endObject, version));
+					parts.push(varint(filter.endObject));
 				}
 			}
 			return concat(parts);
@@ -182,31 +158,31 @@ function fromTyped(type: bigint, fields: bigint[]): Filter {
 }
 
 /** Read a draft-22 filter from the front of `data`, returning what follows it. */
-function readTyped(data: Uint8Array, version: IetfVersion): [Filter, Uint8Array] {
-	let [type, rest] = unvarint(data, version);
+function readTyped(data: Uint8Array): [Filter, Uint8Array] {
+	let [type, rest] = unvarint(data);
 	const fields: bigint[] = [];
 	for (let i = typedFieldCount(type); i > 0; i--) {
-		const [field, next] = unvarint(rest, version);
+		const [field, next] = unvarint(rest);
 		fields.push(field);
 		rest = next;
 	}
 	return [fromTyped(type, fields), rest];
 }
 
-function encodeTag(filter: Filter, version: IetfVersion): Uint8Array {
+function encodeTag(filter: Filter): Uint8Array {
 	switch (filter.kind) {
 		case "unfiltered":
 			// No tag means "everything", which only the absolute spelling can say.
-			return concat([varint(TAG_ABSOLUTE_START, version), varint(0n, version), varint(0n, version)]);
+			return concat([varint(TAG_ABSOLUTE_START), varint(0n), varint(0n)]);
 		case "nextObject":
-			return varint(TAG_LARGEST_OBJECT, version);
+			return varint(TAG_LARGEST_OBJECT);
 		case "relative":
 			if (filter.groups !== 0n) {
 				// Only draft-22 can name a start further back than the next group without
 				// knowing Largest Object, so there is no honest tag to fall back to.
 				throw new Error(`relative filter ${filter.groups} needs draft-22`);
 			}
-			return varint(TAG_NEXT_GROUP, version);
+			return varint(TAG_NEXT_GROUP);
 		case "absolute": {
 			// Draft-18's AbsoluteRange ends on a group, so an object-bounded range has no
 			// spelling. Refuse rather than widen the range the caller asked for.
@@ -214,12 +190,12 @@ function encodeTag(filter: Filter, version: IetfVersion): Uint8Array {
 				throw new Error("an object-bounded range needs draft-22");
 			}
 			const parts = [
-				varint(filter.endGroup === undefined ? TAG_ABSOLUTE_START : TAG_ABSOLUTE_RANGE, version),
-				varint(filter.startGroup, version),
-				varint(filter.startObject, version),
+				varint(filter.endGroup === undefined ? TAG_ABSOLUTE_START : TAG_ABSOLUTE_RANGE),
+				varint(filter.startGroup),
+				varint(filter.startObject),
 			];
 			if (filter.endGroup !== undefined) {
-				parts.push(varint(endDelta(filter.startGroup, filter.endGroup), version));
+				parts.push(varint(endDelta(filter.startGroup, filter.endGroup)));
 			}
 			return concat(parts);
 		}
@@ -229,19 +205,19 @@ function encodeTag(filter: Filter, version: IetfVersion): Uint8Array {
 /** Decode a filter from its raw parameter value, which must be consumed whole. */
 export function decode(data: Uint8Array, version: IetfVersion): Filter {
 	if (isDraft22(version)) {
-		const [filter, rest] = readTyped(data, version);
+		const [filter, rest] = readTyped(data);
 		expectEmpty(rest);
 		return filter;
 	}
-	return decodeTag(data, version);
+	return decodeTag(data);
 }
 
-function decodeTag(data: Uint8Array, version: IetfVersion): Filter {
-	const [tag, afterTag] = unvarint(data, version);
+function decodeTag(data: Uint8Array): Filter {
+	const [tag, afterTag] = unvarint(data);
 
 	const readLocation = (buf: Uint8Array): [bigint, bigint, Uint8Array] => {
-		const [group, afterGroup] = unvarint(buf, version);
-		const [object, rest] = unvarint(afterGroup, version);
+		const [group, afterGroup] = unvarint(buf);
+		const [object, rest] = unvarint(afterGroup);
 		return [group, object, rest];
 	};
 
@@ -259,7 +235,7 @@ function decodeTag(data: Uint8Array, version: IetfVersion): Filter {
 		}
 		case TAG_ABSOLUTE_RANGE: {
 			const [startGroup, startObject, afterLocation] = readLocation(afterTag);
-			const [delta, rest] = unvarint(afterLocation, version);
+			const [delta, rest] = unvarint(afterLocation);
 			expectEmpty(rest);
 			return { kind: "absolute", startGroup, startObject, endGroup: startGroup + delta };
 		}
@@ -358,14 +334,14 @@ const FILL_ALLOWED = new Map<bigint, Framing>([
  * The value is a nested parameter scope, encoded like a message's parameters.
  */
 export function encodeFill(fill: Fill, version: IetfVersion): Uint8Array {
-	const parts = [varint(BigInt(Number(fill.filter !== undefined) + Number(fill.groupOrder !== undefined)), version)];
+	const parts = [varint(BigInt(Number(fill.filter !== undefined) + Number(fill.groupOrder !== undefined)))];
 	if (fill.filter !== undefined) {
-		parts.push(varint(FILL_LOCATION_FILTER, version), encodeParam(fill.filter, version));
+		parts.push(varint(FILL_LOCATION_FILTER), encodeParam(fill.filter, version));
 	}
 	if (fill.groupOrder !== undefined) {
 		// Parameters sort by id; GROUP_ORDER follows LOCATION_FILTER by one.
 		parts.push(
-			varint(fill.filter !== undefined ? 1n : 0x22n, version),
+			varint(fill.filter !== undefined ? 1n : 0x22n),
 			new Uint8Array([fill.groupOrder === "ascending" ? 1 : 2]),
 		);
 	}
@@ -374,7 +350,7 @@ export function encodeFill(fill: Fill, version: IetfVersion): Uint8Array {
 
 /** Decode FILL_PARAMETERS, including its inherited or explicit group order. */
 export function decodeFill(data: Uint8Array, version: IetfVersion): Fill {
-	const [count, afterCount] = unvarint(data, version);
+	const [count, afterCount] = unvarint(data);
 	if (count > 64n) {
 		throw new Error("too many parameters in FILL_PARAMETERS");
 	}
@@ -385,7 +361,7 @@ export function decodeFill(data: Uint8Array, version: IetfVersion): Fill {
 	let rangeFilters = false;
 	let prev = 0n;
 	for (let i = 0n; i < count; i++) {
-		const [delta, afterType] = unvarint(rest, version);
+		const [delta, afterType] = unvarint(rest);
 		const key = i === 0n ? delta : prev + delta;
 		prev = key;
 		rest = afterType;
@@ -396,10 +372,10 @@ export function decodeFill(data: Uint8Array, version: IetfVersion): Fill {
 				throw new Error("duplicate LOCATION_FILTER inside FILL_PARAMETERS");
 			}
 			if (isDraft22(version)) {
-				[filter, rest] = readTyped(rest, version);
+				[filter, rest] = readTyped(rest);
 			} else {
 				let value: Uint8Array;
-				[value, rest] = readLengthPrefixed(rest, version);
+				[value, rest] = readLengthPrefixed(rest);
 				filter = decode(value, version);
 			}
 			continue;
@@ -416,7 +392,7 @@ export function decodeFill(data: Uint8Array, version: IetfVersion): Fill {
 
 		// Each parameter must consume its own value or the remaining keys desync.
 		if (framing === "varint") {
-			[, rest] = unvarint(rest, version);
+			[, rest] = unvarint(rest);
 			continue;
 		}
 		if (framing === "byte") {
@@ -432,7 +408,7 @@ export function decodeFill(data: Uint8Array, version: IetfVersion): Fill {
 			continue;
 		}
 
-		[, rest] = readLengthPrefixed(rest, version);
+		[, rest] = readLengthPrefixed(rest);
 	}
 
 	if (rest.length !== 0) {
@@ -443,14 +419,14 @@ export function decodeFill(data: Uint8Array, version: IetfVersion): Fill {
 }
 
 /** Split a length-prefixed value off the front of `data`, returning it and what follows. */
-function readLengthPrefixed(data: Uint8Array, version: IetfVersion): [Uint8Array, Uint8Array] {
-	const [length, afterLength] = unvarint(data, version);
+function readLengthPrefixed(data: Uint8Array): [Uint8Array, Uint8Array] {
+	const [length, afterLength] = unvarint(data);
 	if (BigInt(afterLength.length) < length) {
 		throw new Error("truncated value inside FILL_PARAMETERS");
 	}
 	return [afterLength.slice(0, Number(length)), afterLength.slice(Number(length))];
 }
 
-function encodeLengthPrefixed(value: Uint8Array, version: IetfVersion): Uint8Array {
-	return concat([varint(BigInt(value.length), version), value]);
+function encodeLengthPrefixed(value: Uint8Array): Uint8Array {
+	return concat([varint(BigInt(value.length)), value]);
 }

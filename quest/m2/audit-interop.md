@@ -64,14 +64,14 @@ each turned green:
   WebTransport on that port; a raw-QUIC-only relay stays unsupported, since
   JS has no raw QUIC. The JS client's red5 WebTransport cells still time out
   connecting, which m0's one-write control messages target.
-- `subscribe-namespace-lifecycle`: released JS withdraws a draft-17+
+- `subscribe-namespace-lifecycle`: released JS withdraws a draft-18+
   PUBLISH_NAMESPACE with FIN, which six relays ignore, so it waits for
   NAMESPACE_DONE. `main` resets the request
   ([moq-dev/moq#5483](https://github.com/moq-dev/moq/pull/5483)) and passes
   against Cloudflare draft-18;
   [moq-dev/moq#6518](https://github.com/moq-dev/moq/pull/6518) backports it
   to `release`. Released Rust never sees the NAMESPACE itself from quic-zig
-  or moxygen (docker, and draft-14 over raw QUIC); the client built on
+  or moxygen (docker); the client built on
   `main` passes against both, so it gets no backport: the runner client bump
   fixes it.
 - Our relay through third-party clients: `rendezvous-timeout` 0x10
@@ -99,9 +99,6 @@ Still red from `main`, ours:
   end, while moq-dev-rs passes. Not yet traced.
 - Every `js-web` publisher cell behind a joining FETCH (imquic, MOQtail
   draft-22, aiomoqt, red5) waits on [JavaScript FETCH](/quest/m1/js-fetch.md).
-  moxygen draft-14 over raw QUIC discovered nothing, since the CLI asked
-  draft-14 for no namespace; it passed live once Rust asked for the watched
-  prefixes ([moq-dev/moq#6530](https://github.com/moq-dev/moq/pull/6530)).
 
 Theirs, reported or waiting on others:
 
@@ -122,9 +119,7 @@ Theirs, reported or waiting on others:
   [JS subgroup data through imquic](/quest/m1/interop-coverage/js-imquic-objects.md).
   [Eyevinn/moqlivemock#157](https://github.com/Eyevinn/moqlivemock/issues/157)
   is fixed and green.
-- Drafted in this run, posted only if the maintainer approved: Cloudflare's
-  draft-16 relay forwards END_OF_TRACK as a Normal empty object, so the Rust
-  subscriber reads an extra object (3, 0); MOQtail draft-18 never forwards
+- Drafted in this run, posted only if the maintainer approved: MOQtail draft-18 never forwards
   NAMESPACE for a later matching PUBLISH_NAMESPACE; moq-go dials only the
   IPv6 address of `cdn.moq.dev` and needs an explicit port in an `https://`
   URL; and the runner lists moqxr as not run for lack of a published image.
@@ -132,14 +127,14 @@ Theirs, reported or waiting on others:
 - Not reported, lower value: red5 subscribes the published prefix instead
   of the requested tuple namespace (no public repo); moqlivemock's relay
   refuses a SUBSCRIBE under an announced prefix; libquicr answers
-  SUBSCRIBE_OK for an unpublished namespace; xquic ignores our draft-14
-  SUBSCRIBE_ERROR, sends `moq-test/interop` as one tuple field, and its
-  WebTransport never reaches our relay.
+  SUBSCRIBE_OK for an unpublished namespace; xquic sends `moq-test/interop`
+  as one tuple field, and its WebTransport never reaches our relay.
 
 Unsupported or down, not worth rechecking unless something changes:
 PUBLISH and SUBSCRIBE_TRACKS cases (`publish-track-*`, `namespace-discovery`,
 Cloudflare's PUBLISH cases), relays without namespace discovery, which
-moq-net needs before a SUBSCRIBE (Cloudflare draft-14, xquic-draft-18),
+moq-net needs before a SUBSCRIBE (xquic-draft-18), peers speaking only
+moq-transport drafts 14 to 17 (Cloudflare's draft-14 and draft-16 relays),
 quiche-moq (connect idle timeout), xquic's docker relay (binds loopback),
 and moqtopus and xquic-draft-18 over WebTransport (raw QUIC only).
 

@@ -1,8 +1,8 @@
 /** Serve Rust-encoded range updates with the JS publisher and return its actual wire bytes. */
 import assert from "node:assert/strict";
-import { NativeSession } from "../../js/net/src/ietf/adapter.ts";
 import { Publisher } from "../../js/net/src/ietf/publisher.ts";
 import { RequestOk } from "../../js/net/src/ietf/request.ts";
+import { NativeSession } from "../../js/net/src/ietf/session.ts";
 import { Subscribe } from "../../js/net/src/ietf/subscribe.ts";
 import type { IetfVersion } from "../../js/net/src/ietf/version.ts";
 import { createMockTransportPair } from "../../js/net/src/mock.ts";
@@ -34,7 +34,7 @@ const streams: number[][] = [];
 function publishGroup() {
 	const group = track.appendGroup();
 	for (let object = 0; object < 2; object++) group.writeFrame({ payload: new Uint8Array([group.sequence, object]) });
-	group.close();
+	group.finish();
 }
 async function response(expected: number) {
 	const type = await client.reader.u53();
@@ -80,7 +80,7 @@ try {
 	assert(narrowing);
 	await client.writer.write(Uint8Array.from(narrowing));
 	await response(RequestOk.id);
-	// Legacy drafts must replay both groups skipped below the old floor, rather than silently
+	// Draft-18 must replay both groups skipped below the old floor, rather than silently
 	// joining only the newest cached group. Draft-22 also verifies subsequent live delivery.
 	if (input.draft === 22) for (let i = 5; i < 9; i++) publishGroup();
 	for (let i = 0; i < 2; i++) await stream();

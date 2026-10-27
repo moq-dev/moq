@@ -62,82 +62,87 @@ func (s *Session) Stats() ConnectionStats {
 	return connectionStatsFromFFI(s.inner.Stats())
 }
 
-// Bandwidth is the session's bandwidth allocator. Every call returns a handle
+// Allocator is the session's bandwidth allocator. Every call returns a handle
 // to the same registry, so reservations made through one are visible to the
 // others. A client handle survives reconnects: the grant is nil while
 // disconnected and resumes on the next connection.
-func (s *Session) Bandwidth() *Bandwidth {
-	return &Bandwidth{inner: s.inner.Bandwidth()}
+func (s *Session) Allocator() *Allocator {
+	return &Allocator{inner: s.inner.Allocator()}
 }
 
-// Auth is the session's authorization: the grant its peer gave it, and more
-// tokens to present. Each call returns an independent watcher of the grant. A
-// client session's handle survives reconnects, presenting each added token again
-// on every new connection.
-func (s *Session) Auth() *Auth {
-	return &Auth{inner: s.inner.Auth()}
+// Grants follows the grant the peer gave this session. Each call returns an
+// independent consumer; close it when done. A client session's grant follows
+// each reconnect, reading nil while offline.
+func (s *Session) Grants() *GrantConsumer {
+	return &GrantConsumer{inner: s.inner.Grants()}
 }
 
-// Auth reads a session's grant and presents more tokens.
+// GrantConsumer follows the grant a session's peer gave it: the union of every
+// token the session presented.
 //
 // AUTH is only on moq-lite-07-wip and on moq-transport sessions that negotiate
 // the MoQ Auth extension; elsewhere the grant stays nil.
-type Auth struct {
-	inner *ffi.MoqAuth
+type GrantConsumer struct {
+	inner *ffi.MoqGrantConsumer
 }
 
-// Grant returns the union of every token's grant, or nil until the peer first
-// answers one. A client session reads nil while it reconnects.
-func (a *Auth) Grant() *Grant {
-	return grantFromFFI(a.inner.Grant())
+// Grant returns the grant now, or nil until the peer first answers a token. A
+// client session reads nil while it reconnects.
+func (g *GrantConsumer) Grant() *Grant {
+	return grantFromFFI(g.inner.Grant())
 }
 
-// GrantChanged blocks until the grant differs from the one this handle last
-// reported, or held when it was made, and returns it. It errors once a client's
-// connection or a server's session ends; a reconnect is not an end.
-func (a *Auth) GrantChanged(ctx context.Context) (*Grant, error) {
-	grant, err := bridge.Call(ctx, nil, a.inner.GrantChanged)
+// Changed blocks until the grant differs from the one this last returned, or
+// held when it was made, and returns it. It errors once a client's connection
+// or a server's session ends, or after Close; a reconnect is not an end.
+func (g *GrantConsumer) Changed(ctx context.Context) (*Grant, error) {
+	grant, err := bridge.Call(ctx, nil, g.inner.Changed)
 	return grantFromFFI(grant), err
 }
 
-// Add presents another token, returning once the peer accepts it. Its grant
-// joins the union until the token is closed. The peer's refusal is a
-// ProtocolError carrying its code; a session that cannot carry another token
-// returns an error for which errors.Is(err, ErrUnsupported) holds. Cancelling ctx
-// withdraws the token.
-func (a *Auth) Add(ctx context.Context, token string) (*AuthToken, error) {
-	inner, err := bridge.CallHandle(ctx, nil, func(ctx context.Context) (*ffi.MoqAuthToken, error) {
-		return a.inner.Add(ctx, token)
-	})
-	if err != nil {
-		return nil, err
+// Close ends every current and future Changed call.
+func (g *GrantConsumer) Close() { g.inner.Cancel() }
+
+// Tokens returns the credentials a native client session presents, to replace
+// while it runs, or nil for a server-accepted session, which presents none.
+func (s *Session) Tokens() *Tokens {
+	inner := s.inner.Tokens()
+	if inner == nil {
+		return nil
 	}
-	return &AuthToken{inner: inner}, nil
+	return &Tokens{inner: *inner}
 }
 
-// AuthToken is one token presented with Auth.Add.
-type AuthToken struct {
-	inner *ffi.MoqAuthToken
+// Tokens are the credentials a client session presents, replaceable while it runs.
+type Tokens struct {
+	inner *ffi.MoqTokens
 }
 
-// Grant returns this token's own grant, or nil after it ended.
-func (t *AuthToken) Grant() *Grant {
-	return grantFromFFI(t.inner.Grant())
+// Set replaces the credentials every dial presents, such as before the current
+// ones expire. The first is the connection credential, unless the URL carries
+// its own ?jwt=; each other one widens the grant over in-band AUTH. The next
+// dial presents them, and a live session with in-band AUTH presents them at
+// once, withdrawing each replaced token once its replacements are answered,
+// even when one is refused. After an authorization refusal the session redials
+// only if they changed. An empty token is refused.
+func (t *Tokens) Set(tokens ...string) error {
+	return t.inner.Set(append([]string(nil), tokens...))
 }
 
-// Closed blocks until the token ends, returning the peer's revocation or the end
-// of a client's connection or a server's session, or nil when the peer closed it
-// without an error. A reconnect does not end it.
-func (t *AuthToken) Closed(ctx context.Context) error {
-	return bridge.CallErr(ctx, nil, t.inner.Closed)
+// Answered blocks until the peer's first verdict on the tokens the last Set
+// newly presented: nil once each is granted, in band or as a later dial's
+// connection credential. A token the set kept counts only once refused, and
+// nothing is re-checked after the answer. It returns the peer's refusal as a
+// ProtocolError carrying its code, an error for which
+// errors.Is(err, ErrUnsupported) holds when the session cannot carry an
+// in-band token, or the connection's close reason.
+func (t *Tokens) Answered(ctx context.Context) error {
+	return bridge.CallErr(ctx, nil, t.inner.Answered)
 }
 
-// Close withdraws the token, removing its grant from the union.
-func (t *AuthToken) Close() { t.inner.Cancel() }
-
-// Bandwidth divides one connection's send estimate among the tracks sharing it.
-type Bandwidth struct {
-	inner *ffi.MoqBandwidth
+// Allocator divides one connection's send estimate among the tracks sharing it.
+type Allocator struct {
+	inner *ffi.MoqAllocator
 }
 
 // Reserve claims up to maxBps for the track demand watches; every track
@@ -145,23 +150,23 @@ type Bandwidth struct {
 // reserve the most the track can ever send. Reuse Reservation.Update to change
 // the ceiling, or call Update(0) before abandoning or replacing the reservation
 // to hand the room back without waiting for garbage collection.
-func (b *Bandwidth) Reserve(demand *TrackDemand, maxBps uint64) *Reservation {
-	return &Reservation{inner: b.inner.Reserve(demand.inner, maxBps)}
+func (a *Allocator) Reserve(demand *TrackDemand, maxBps uint64) *Reservation {
+	return &Reservation{inner: a.inner.Reserve(demand.inner, maxBps)}
 }
 
-// Reservation is one track's standing claim on a Bandwidth.
+// Reservation is one track's standing claim on an Allocator.
 //
-// Grant is a snapshot: nil means no estimate, so hold the current rate, and 0 is
-// a real zero grant. While nothing subscribes it is the share the track would get.
+// Rate is a snapshot: nil means no estimate, so hold the current rate, and 0 is
+// a real zero rate. While nothing subscribes it is the share the track would get.
 // Update(0) relinquishes the allocation while the track stays subscribed; the
 // handle remains usable and a later Update can claim bandwidth again.
 type Reservation struct {
 	inner *ffi.MoqReservation
 }
 
-// Grant returns this reservation's slice right now, in bits per second.
-func (r *Reservation) Grant() *uint64 {
-	return r.inner.Grant()
+// Rate returns this reservation's slice right now, in bits per second.
+func (r *Reservation) Rate() *uint64 {
+	return r.inner.Rate()
 }
 
 // Update changes the ceiling, keeping the same claim. Zero immediately gives

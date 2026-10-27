@@ -62,10 +62,10 @@ impl ProbeLevel {
 	/// both qualify: their RTT comes from the handshake, which has already happened.
 	#[cfg(feature = "async")]
 	pub fn detect(session: &crate::driver::Transport) -> Self {
-		use crate::transport::Stats as _;
+		use crate::transport::Metrics as _;
 		use crate::transport::poll::Session as _;
-		let stats = session.stats();
-		match stats.estimated_send_rate().is_some() || stats.rtt().is_some() {
+		let metrics = session.metrics();
+		match metrics.estimated_send_rate().is_some() || metrics.rtt().is_some() {
 			true => Self::Report,
 			false => Self::None,
 		}
@@ -203,7 +203,7 @@ pub struct Setup {
 }
 
 impl Message for Setup {
-	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Session);
+	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Session);
 	const MAX_SIZE: usize = crate::setup::MAX_SETUP_SIZE;
 
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
@@ -267,7 +267,7 @@ pub(super) struct ReceivedSetup {
 }
 
 impl Message for ReceivedSetup {
-	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Session);
+	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Session);
 	const MAX_SIZE: usize = Setup::MAX_SIZE;
 
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
@@ -351,6 +351,8 @@ struct PeerSetupState {
 	setup: Option<Setup>,
 	/// Where the peer's advertised implementation is published for the session handle.
 	implementation: crate::setup::PeerImplementation,
+	/// The session's auth link to tell once the peer's SETUP accepts the connection.
+	accept: Option<crate::auth::Link>,
 }
 
 impl PeerSetup {
@@ -362,7 +364,15 @@ impl PeerSetup {
 			seen: false,
 			setup: None,
 			implementation: Default::default(),
+			accept: None,
 		}))
+	}
+
+	/// Tell `link` once the peer's SETUP arrives that it accepted the connection credential.
+	pub fn accepting(self, link: crate::auth::Link) -> Self {
+		link.await_setup();
+		self.0.lock().accept = Some(link);
+		self
 	}
 
 	/// Publish the peer's advertised implementation to `slot` once its SETUP arrives.
@@ -381,6 +391,11 @@ impl PeerSetup {
 		state.seen = true;
 		state.implementation.set(received.setup.implementation.clone());
 		state.setup = Some(received.setup);
+		let accept = state.accept.take();
+		drop(state);
+		if let Some(link) = accept {
+			link.accepted();
+		}
 		Ok(())
 	}
 

@@ -2,8 +2,8 @@
 import assert from "node:assert/strict";
 import { offered } from "../../js/net/src/connection/extensions.ts";
 import { exchangeSetup } from "../../js/net/src/connection/handshake.ts";
-import { NativeSession } from "../../js/net/src/ietf/adapter.ts";
 import { Group } from "../../js/net/src/ietf/object.ts";
+import { NativeSession } from "../../js/net/src/ietf/session.ts";
 import { Setup } from "../../js/net/src/ietf/setup.ts";
 import { Subscribe, SubscribeOk } from "../../js/net/src/ietf/subscribe.ts";
 import { Subscriber } from "../../js/net/src/ietf/subscriber.ts";
@@ -44,7 +44,7 @@ try {
 			}),
 			version,
 		);
-		await setup.parameters.encode(writer, version);
+		await setup.parameters.encode(writer);
 		await writer.close();
 		console.log(JSON.stringify(bytes));
 	} else {

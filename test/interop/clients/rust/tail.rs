@@ -134,7 +134,7 @@ async fn main() -> anyhow::Result<()> {
 			if status {
 				// Query before subscribing so draft-18+ must use TRACK_STATUS,
 				// rather than learn metadata from SUBSCRIBE_OK as a side effect.
-				let info = remote.query().await?;
+				let info = remote.info().await?;
 				ensure!(info.timescale.is_none(), "IETF track should be untimed");
 				ensure!(info.priority == 2, "TRACK_STATUS lost publisher priority");
 				eprintln!("track status answered");

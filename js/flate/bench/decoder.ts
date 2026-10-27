@@ -40,7 +40,8 @@ for (const excess of [64 * 1024, 1024 * 1024, 8 * 1024 * 1024]) {
 	const track = new Track.Producer("overflow-bench").accept({});
 	const group = track.appendGroup();
 	group.writeFrame({ payload: slice });
-	group.close();
+	group.finish();
+	track.finish();
 	track.close();
 	const samples: number[] = [];
 	for (let sample = 0; sample < 4; sample++) {

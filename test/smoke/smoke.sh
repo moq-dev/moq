@@ -839,7 +839,7 @@ negotiated() {
     # negotiated <log>: the wire version a client reported, or nothing. The Rust
     # and native-JS clients log `connected version=moq-transport-18`; the browser page logs the
     # WebTransport subprotocol it was handed (see clients/js/jsdelivr/setup.js),
-    # whose `moqt-16` ALPN spelling is normalized to match.
+    # whose `moqt-18` ALPN spelling is normalized to match.
     [[ -f "$1" ]] || return 0
     sed 's/\x1b\[[0-9;]*m//g' "$1" |
         grep -oE 'connected version=[^ ]+|negotiated protocol: [^ ]+' | tail -1 |

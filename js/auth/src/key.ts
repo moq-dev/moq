@@ -74,6 +74,8 @@ const RsaKeySchema = z
 		dp: z.optional(Base64FieldSchema),
 		dq: z.optional(Base64FieldSchema),
 		qi: z.optional(Base64FieldSchema),
+		// Multi-prime RSA is unsupported by the shared key contract.
+		oth: z.optional(z.never()),
 	})
 	.check(
 		z.superRefine((data, ctx) => {

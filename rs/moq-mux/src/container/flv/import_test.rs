@@ -89,8 +89,8 @@ fn synth_flv() -> Vec<u8> {
 
 /// A rendition must never be advertised when its media producer could not be built.
 ///
-/// Publishing the media producer is fallible (it enrolls the track in the broadcast timeline, minting the
-/// shared `timeline.z` track, which can collide), so publishing the catalog entry first would
+/// Publishing the media producer is fallible (with HLS records enabled it mints the track's record
+/// track, which can collide), so publishing the catalog entry first would
 /// leave consumers a rendition that is announced but has no producer behind it and is therefore
 /// never served.
 #[tokio::test(start_paused = true)]
@@ -99,27 +99,25 @@ async fn rendition_is_not_published_when_the_media_track_fails() {
 
 	// Control: the same fixture publishes a video rendition when nothing collides, so the
 	// assertion below cannot pass merely because the fixture stopped reaching track import.
-	{
+	let name = {
 		let mut producer = moq_net::broadcast::Info::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 		let mut importer = Import::new(producer, catalog.reserve());
 		importer.decode(&bytes::BytesMut::from(data.as_slice())).unwrap();
-		assert_eq!(
-			catalog.snapshot().video.renditions.len(),
-			1,
-			"fixture must publish a rendition"
-		);
-	}
+		let renditions = catalog.snapshot().video.renditions;
+		assert_eq!(renditions.len(), 1, "fixture must publish a rendition");
+		renditions.into_keys().next().unwrap()
+	};
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let config = crate::catalog::Config::default().with_hls(crate::hls::Config::default());
+	let catalog = crate::catalog::Producer::new(&mut broadcast, config).unwrap();
 
-	// Squat the catalog's timeline track, so enrolling the first rendition (which enrolls the catalog
-	// too, and with it building its media producer) fails. The handle must stay alive: the broadcast tracks names weakly, so
-	// dropping it frees the name.
-	let _squat = broadcast
-		.create_track(hang::timeline::default_name(hang::Catalog::DEFAULT_NAME), None)
-		.unwrap();
+	// Squat the rendition's HLS record track, so enrolling it (and with it building its media
+	// producer) fails. The handle must stay alive: the broadcast tracks names weakly, so
+	// dropping it frees the name. Unique names are per broadcast, so the track is named as in
+	// the control.
+	let _squat = broadcast.create_track(hang::hls::default_name(&name), None).unwrap();
 
 	let mut importer = Import::new(broadcast, catalog.reserve());
 	// A track it cannot build surfaces in the catalog rather than in this result.
@@ -874,4 +872,50 @@ fn script_metadata_drops_warn_once() {
 			Err(format!("expected one metadata warning, got {warnings}"))
 		}
 	});
+}
+
+#[test]
+fn unsupported_codecs_fail_at_the_public_importer_boundary() {
+	let mut cases = vec![(super::TAG_VIDEO, vec![0x12, 0]), (super::TAG_AUDIO, vec![0xb0, 0])];
+	for (tag, packets) in [
+		(super::TAG_VIDEO, &[0, 1, 2, 3, 4][..]),
+		(super::TAG_AUDIO, &[0, 1, 2, 4][..]),
+	] {
+		for packet in packets {
+			cases.push((tag, vec![0x90 | packet, b'n', b'o', b'p', b'e']));
+			// OneTrack enhanced framing carries the same codec after its framing byte.
+			cases.push((tag, vec![0x95, *packet, b'n', b'o', b'p', b'e', 0]));
+		}
+	}
+
+	for (tag, payload) in cases {
+		let mut data = synth_flv();
+		write_tag(&mut data, tag, 0, &payload);
+		for initial in [false, true] {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+			let init = crate::import::ContainerInit::new(
+				crate::import::ContainerFormat::Flv,
+				if initial {
+					bytes::Bytes::copy_from_slice(&data)
+				} else {
+					bytes::Bytes::new()
+				},
+			);
+			let result = (|| -> crate::Result<()> {
+				let mut import: crate::import::Container =
+					crate::import::Container::new(broadcast, catalog.reserve(), &init)?;
+				if !initial {
+					for chunk in data.chunks(7) {
+						import.decode(chunk)?;
+					}
+				}
+				import.finish()
+			})();
+			assert!(
+				matches!(result, Err(crate::Error::UnknownFormat(_))),
+				"tag {tag}, initial {initial}: {result:?}"
+			);
+		}
+	}
 }

@@ -39,7 +39,7 @@ SUBSCRIBE_OK's Largest to `{G, 0}`. The two parts below only work together;
 [moq-dev/moq#6407](https://github.com/moq-dev/moq/pull/6407) made a refused
 joining FETCH cost the Rust subscriber only that group's head.
 
-1. **Honor Largest Object before draft 22.** `subscribeRange` serves the
+1. **Honor Largest Object on draft 18.** `subscribeRange` serves the
    `nextObject` filter from `edge.next`, as draft 22 already does, and
    SUBSCRIBE_OK reports the true Largest on every draft. Otherwise the
    FETCH's head duplicates the subscription's first objects, and the Rust
@@ -57,15 +57,13 @@ joining FETCH cost the Rust subscriber only that group's head.
    FETCH_OK. Then it writes FETCH_OK (end `{G, k + 1}`, not end of track) and
    a fetch stream named by the FETCH's own request ID, reusing
    `#writeFillGroup`. It is not one of the subscription's counted streams.
-   Codec work: `Fetch` keeps the joining fields; a `FetchOk` encoder for
-   drafts 14 to 18 (request ID through 16, GROUP_ORDER on 14, empty
-   parameters, Track Properties from 15); `FetchFrame` writes draft-14's
-   explicit object layout and the status after an empty payload on 14 and 15.
+   Codec work: `Fetch` keeps the joining fields, and a `FetchOk` encoder for
+   draft 18 writes empty parameters and Track Properties.
 
 Joining tests: unit tests per draft for each refusal and for a served head
 (bytes the Rust subscriber stitches), and the tail cells
 `just test interop --tail --publishers js-native-node,js-native-bun --subscribers rust --versions ietf`
-plus the browser publisher on drafts before 22, except a track that finishes
+plus the browser publisher on draft 18, except a track that finishes
 right after SUBSCRIBE_OK, which the m2 quest covers.
 
 Verify with an in-memory application responder: a browser publisher serves a

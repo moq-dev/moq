@@ -188,7 +188,7 @@ pub struct VideoConfig {
 	/// Resolve it with [`Path::resolve`](moq_net::Path::resolve): a reference that walks
 	/// above the root names no broadcast, so the catalog is rejected.
 	#[serde(default)]
-	pub broadcast: Option<moq_net::path::RelativeOwned>,
+	pub broadcast: Option<moq_net::path::Relative>,
 
 	/// The track's name in its broadcast, when it differs from this entry's ID: its key in the
 	/// catalog. Absent means the ID is the track name, as in every catalog before this field.
@@ -351,6 +351,11 @@ pub struct VideoConfig {
 	#[serde_as(as = "MillisCeil")]
 	#[serde(default)]
 	pub delay: Option<std::time::Duration>,
+	/// This rendition's HLS segment records, when the publisher opted in. Without it the rendition
+	/// is not HLS-renderable. An undecodable value is absent, so it can never reject the media.
+	#[serde(default)]
+	#[serde_as(as = "serde_with::DefaultOnError<_>")]
+	pub hls: Option<crate::catalog::Hls>,
 }
 
 impl VideoConfig {
@@ -386,6 +391,7 @@ impl VideoConfig {
 			jitter: None,
 			warmup: None,
 			delay: None,
+			hls: None,
 		}
 	}
 }

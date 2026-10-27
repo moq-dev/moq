@@ -171,10 +171,10 @@ async fn epoch_lite07() {
 		.expect("timed out");
 }
 
-/// moq-transport carries the epoch with the MoQ Epoch extension, from draft-17.
+/// moq-transport carries the epoch with the MoQ Epoch extension.
 #[moq_clock::test]
 async fn epoch_ietf() {
-	for version in ["moq-transport-17", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22"] {
 		moq_clock::timeout(TEST_TIMEOUT, replace(version, Some(epoch())))
 			.await
 			.expect("timed out");

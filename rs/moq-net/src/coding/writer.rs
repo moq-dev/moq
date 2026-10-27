@@ -328,10 +328,6 @@ mod tests {
 	async fn raw_payload_stop_uses_the_negotiated_registry() {
 		for (version, expected) in [
 			(
-				crate::Version::Ietf(crate::ietf::Version::Draft17),
-				Error::Stream(crate::StreamError::Unknown(0x4)),
-			),
-			(
 				crate::Version::Ietf(crate::ietf::Version::Draft22),
 				Error::Stream(crate::StreamError::GoingAway),
 			),
@@ -376,7 +372,7 @@ mod tests {
 
 	impl<V> Encode<V> for Poison {
 		fn encode(&self, w: &mut Encoder<'_>, _: V) -> Result<(), EncodeError> {
-			w.control = Some(crate::stats::Control::Probe);
+			w.control = Some(crate::stats::Message::Probe);
 			w.slice(b"junk");
 			Err(EncodeError::BoundsExceeded)
 		}
@@ -399,7 +395,7 @@ mod tests {
 
 		// A control message's type goes with its body: a bare type would make the next
 		// message, or a FIN, a torn one.
-		let mut writer = Writer::new(SinkSend::new(Log::default()), crate::ietf::Version::Draft17);
+		let mut writer = Writer::new(SinkSend::new(Log::default()), crate::ietf::Version::Draft18);
 		writer.buffer_varint(5).unwrap();
 		writer.buffer_message(0x2, &Poison).unwrap_err();
 		writer.buffer_varint(7).unwrap();
@@ -413,10 +409,12 @@ mod tests {
 	fn control_body_counts_successful_encodes_once_before_transport_delivery() {
 		use crate::{
 			lite,
-			stats::{Bytes, Control, Registry, Tier},
+			stats::{Message, Registry, Tier, Totals},
 		};
 		let stats = Registry::new(Default::default());
-		let session = stats.tier(Tier::new("internal")).session("");
+		let session = stats
+			.tier(Tier::new(crate::Path::from_static("internal")))
+			.session(crate::Path::from_static(""));
 		let gate = kio::Producer::new(false);
 		let mut writer =
 			Writer::new(SinkSend::gated(Log::default(), gate.consume()), lite::Version::Lite07).with_stats(&session);
@@ -432,11 +430,15 @@ mod tests {
 		assert!(writer.poll_flush(&mut Context::from_waker(Waker::noop())).is_pending());
 		assert_eq!(
 			stats.snapshot().control(),
-			vec![(Tier::new("internal"), Control::Probe, Bytes { tx: size, rx: 0 })]
+			vec![(
+				Tier::new(crate::Path::from_static("internal")),
+				Message::Probe,
+				Totals { tx: size, rx: 0 }
+			)]
 		);
 		writer
 			.buffer(&lite::Track {
-				broadcast: "test".into(),
+				broadcast: crate::Path::from_static("test"),
 				epoch: None,
 				track: "video".into(),
 			})
@@ -446,7 +448,7 @@ mod tests {
 				.snapshot()
 				.control()
 				.into_iter()
-				.find(|(_, class, _)| *class == Control::TrackInfo)
+				.find(|(_, class, _)| *class == Message::TrackInfo)
 				.unwrap()
 				.2
 				.tx

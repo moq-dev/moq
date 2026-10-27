@@ -23,7 +23,7 @@ export function captions() {
 		const track = producer.createTrack(name);
 		const group = track.appendGroup();
 		group.writeFrame({ payload: Legacy.encodeFrame(new TextEncoder().encode(text), Micro(1_000_000)) });
-		group.close();
+		group.finish();
 	}
 	producerPublication.announce();
 	const broadcast = new Broadcast({ origin, name: Path.from("captions"), catalogFormat: "manual", catalog });

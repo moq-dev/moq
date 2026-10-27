@@ -2,8 +2,7 @@
 //!
 //! The moq-transport binding of the lite Auth Stream (see [`crate::auth`]): each
 //! token rides a request stream of its own, answered with the patterns it grants,
-//! encoded as lite's AUTH_OK encodes them. Negotiated with the AUTH Setup Option on
-//! draft-17+ only, where SETUP is a Key-Value-Pair block.
+//! encoded as lite's AUTH_OK encodes them. Negotiated with the AUTH Setup Option.
 
 #[cfg(feature = "async")]
 use crate::driver::Transport;
@@ -18,7 +17,7 @@ use crate::{Error, Patterns, SessionError};
 
 #[cfg(feature = "async")]
 use super::Control;
-use super::{Message, RequestId, Version, cluster, peer};
+use super::{Message, RequestId, Version, peer};
 #[cfg(feature = "async")]
 use crate::coding::Stream;
 
@@ -27,33 +26,15 @@ use crate::coding::Stream;
 /// negotiates it.
 pub const AUTH: u64 = 0x40B70;
 
-/// Whether a version negotiates this extension: draft-17+, like MoQ Cluster.
-pub fn supported(version: Version) -> bool {
-	cluster::supported(version)
-}
-
 /// What the peer declared: `None` for no option, otherwise whether it offered the
 /// extension. Only an explicit 1 negotiates it.
-pub fn from_setup(params: &super::Parameters, version: Version) -> Option<bool> {
-	if !supported(version) {
-		return None;
-	}
+pub fn from_setup(params: &super::Parameters) -> Option<bool> {
 	params.get_varint(super::ParameterVarInt::Auth).map(|value| value == 1)
 }
 
-/// Offer the extension, on the versions that negotiate it.
-pub fn into_setup(params: &mut super::Parameters, version: Version) {
-	if supported(version) {
-		params.set_varint(super::ParameterVarInt::Auth, 1);
-	}
-}
-
-/// Refuse a message on a version that cannot negotiate the extension.
-fn check_version(version: Version) -> Result<(), DecodeError> {
-	match supported(version) {
-		true => Ok(()),
-		false => Err(DecodeError::Version),
-	}
+/// Offer the extension.
+pub fn into_setup(params: &mut super::Parameters) {
+	params.set_varint(super::ParameterVarInt::Auth, 1);
 }
 
 /// AUTH: the first message on an Auth request stream, presenting a token.
@@ -68,13 +49,11 @@ impl Message for Auth {
 	const ID: u64 = 0x40B61;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		check_version(version).map_err(|_| EncodeError::Version)?;
 		self.request_id.encode(w, version)?;
 		w.bytes(&self.token)
 	}
 
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		check_version(version)?;
 		Ok(Self {
 			request_id: RequestId::decode(r, version)?,
 			token: Bytes::copy_from_slice(r.bytes()?),
@@ -100,7 +79,6 @@ impl Message for AuthOk {
 	const ID: u64 = 0x40B62;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		check_version(version).map_err(|_| EncodeError::Version)?;
 		self.publish.encode(w, version)?;
 		self.subscribe.encode(w, version)?;
 		// 0 means never, so a grant that has already lapsed rounds up to the smallest
@@ -113,7 +91,6 @@ impl Message for AuthOk {
 	}
 
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		check_version(version)?;
 		let publish = Patterns::decode(r, version)?;
 		let subscribe = Patterns::decode(r, version)?;
 		let expires = match r.varint()? {
@@ -144,8 +121,7 @@ const MAX_REASON: usize = 8192;
 impl Message for AuthError {
 	const ID: u64 = 0x40B63;
 
-	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		check_version(version).map_err(|_| EncodeError::Version)?;
+	fn encode_msg(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
 		if self.reason.len() > MAX_REASON {
 			return Err(EncodeError::TooLarge);
 		}
@@ -153,8 +129,7 @@ impl Message for AuthError {
 		w.string(&self.reason)
 	}
 
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		check_version(version)?;
+	fn decode_msg(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
 		let code = r.varint()?;
 		if code > u32::MAX as u64 {
 			return Err(DecodeError::InvalidValue);
@@ -173,7 +148,6 @@ const UNAUTHORIZED: u64 = 0x1;
 const NOT_SUPPORTED: u64 = 0x3;
 const MALFORMED_AUTH_TOKEN: u64 = 0x4;
 const EXPIRED_AUTH_TOKEN: u64 = 0x5;
-/// Draft-17 assigned it, the first draft this extension negotiates on.
 const GOING_AWAY: u64 = 0x6;
 
 /// The AUTH_ERROR code for a refusal. The public API speaks session codes, and the
@@ -349,11 +323,8 @@ impl Present {
 			Ok(stream) => stream,
 			Err(err) => return err,
 		};
-		stream = super::request_stream::with_stats(stream, &self.stats, self.version);
-		let request_id = match self.control.next_request_id(&self.runtime).await {
-			Ok(id) => id,
-			Err(err) => return err,
-		};
+		stream = stream.with_stats(&self.stats);
+		let request_id = self.control.next_request_id();
 		if let Err(err) = stream.writer.encode_message(&Auth { request_id, token }).await {
 			return err;
 		}
@@ -626,10 +597,10 @@ mod tests {
 	#[cfg(feature = "async")]
 	#[moq_clock::test]
 	async fn auth_refused_without_credit_spends_no_request_id() {
-		for version in [Version::Draft17, Version::Draft18] {
+		for version in [Version::Draft18] {
 			for client in [false, true] {
 				let first = if client { 0 } else { 1 };
-				let control = Control::new(Some(RequestId(first + 1)), client);
+				let control = Control::new(client);
 				let present = Present {
 					runtime: crate::time::sim(),
 					stats: Default::default(),
@@ -645,15 +616,12 @@ mod tests {
 					present.run(Bytes::new(), &mut false).await,
 					Error::NoStreamCredit
 				));
-				assert_eq!(
-					control.poll_next_request_id(&kio::Waiter::noop()),
-					Poll::Ready(RequestId(first))
-				);
+				assert_eq!(control.next_request_id(), RequestId(first));
 			}
 		}
 	}
 
-	const VERSION: Version = Version::Draft17;
+	const VERSION: Version = Version::Draft18;
 
 	fn patterns(texts: &[&str]) -> Patterns {
 		texts.iter().map(|text| Pattern::try_from(*text).unwrap()).collect()
@@ -673,21 +641,14 @@ mod tests {
 		got
 	}
 
-	/// Every draft that negotiates the extension round-trips the option; the drafts
-	/// before the unified SETUP carry none.
+	/// Every draft that negotiates the extension round-trips the option.
 	#[test]
 	fn setup_option_round_trips_on_supported_drafts() {
-		for version in [Version::Draft17, Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft22] {
 			let mut params = super::super::Parameters::default();
-			assert_eq!(from_setup(&params, version), None);
-			into_setup(&mut params, version);
-			assert_eq!(from_setup(&params, version), Some(true), "{version:?}");
-		}
-		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
-			let mut params = super::super::Parameters::default();
-			into_setup(&mut params, version);
-			assert_eq!(params.get_varint(super::super::ParameterVarInt::Auth), None);
-			assert_eq!(from_setup(&params, version), None, "{version:?}");
+			assert_eq!(from_setup(&params), None);
+			into_setup(&mut params);
+			assert_eq!(from_setup(&params), Some(true), "{version:?}");
 		}
 	}
 
@@ -697,7 +658,7 @@ mod tests {
 	fn only_one_negotiates() {
 		let mut params = super::super::Parameters::default();
 		params.set_varint(super::super::ParameterVarInt::Auth, 0);
-		assert_eq!(from_setup(&params, VERSION), Some(false));
+		assert_eq!(from_setup(&params), Some(false));
 	}
 
 	#[test]
@@ -764,21 +725,6 @@ mod tests {
 		w.varint(MAX_REASON as u64 + 1).unwrap();
 		let err = AuthError::decode_msg(&mut Decoder::new(&buf, VERSION.into()), VERSION).unwrap_err();
 		assert!(matches!(err, DecodeError::InvalidValue), "{err:?}");
-	}
-
-	#[test]
-	fn older_drafts_have_no_auth() {
-		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
-			let msg = Auth {
-				request_id: RequestId(0),
-				token: Bytes::new(),
-			};
-			assert!(matches!(encode_msg(&msg, version), Err(EncodeError::Version)));
-			assert!(matches!(
-				Auth::decode_msg(&mut Decoder::new(&[0, 0], version.into()), version),
-				Err(DecodeError::Version)
-			));
-		}
 	}
 
 	/// A reply with bytes past its message is refused, like any other framed message.

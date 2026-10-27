@@ -1,8 +1,8 @@
 /** Sweep frame and chunk size for a group stream decoded into a group and drained by a reader. */
 import type { Consumer as GroupConsumer } from "../src/group.ts";
 import { Producer } from "../src/group.ts";
-import { NativeSession } from "../src/ietf/adapter.ts";
 import { Group as IetfGroup } from "../src/ietf/object.ts";
+import { NativeSession } from "../src/ietf/session.ts";
 import { Subscribe, SubscribeOk } from "../src/ietf/subscribe.ts";
 import { Subscriber as IetfSubscriber } from "../src/ietf/subscriber.ts";
 import { ALPN, Version as IetfVersion } from "../src/ietf/version.ts";
@@ -54,7 +54,7 @@ const lite: Protocol = {
 			const producer = new Producer(0);
 			const done = readFrames(new Reader(stream, undefined, LiteVersion.DRAFT_06), producer, {
 				scale: 1_000_000,
-			}).then(() => producer.close());
+			}).then(() => producer.finish());
 			return { group: Promise.resolve(producer.consume()), done };
 		};
 		return { open, close: () => {} };
@@ -91,12 +91,9 @@ const ietf: Protocol = {
 		const peer = await Stream.accept(pair.client, IETF_VERSION);
 		if (!peer) throw new Error("the subscriber never subscribed");
 		await peer.reader.u53();
-		const request = await Subscribe.decode(peer.reader, IETF_VERSION);
+		await Subscribe.decode(peer.reader, IETF_VERSION);
 		await peer.writer.u53(SubscribeOk.id);
-		await new SubscribeOk({ requestId: request.requestId, trackAlias: IETF_ALIAS }).encode(
-			peer.writer,
-			IETF_VERSION,
-		);
+		await new SubscribeOk({ trackAlias: IETF_ALIAS }).encode(peer.writer, IETF_VERSION);
 
 		const ordered = track.ordered();
 		let groupId = 0;

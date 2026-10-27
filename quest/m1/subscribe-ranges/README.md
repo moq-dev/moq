@@ -34,7 +34,7 @@ relay bounds a sparse FETCH only if the model can request ranges:
   publisher delivers what it has and fills the rest as upstream answers.
 - **Model.** `Subscription` gains `ranges` beside its `order`, mirroring the wire;
   `request_groups` as a separate API was rejected. A publisher's
-  `track::Dynamic` receives a `track::Fill` per run of misses (landed), and
+  `track::Requests` receives a `track::Fill` per run of misses (landed), and
   `fetch_group` becomes a one-range subscription or is removed. This breaks published moq-net APIs.
 - **moq-transport.** Some deployments use non-contiguous group numbers, so a
   relay never probes upstream one group at a time. Upstream, each run of
@@ -64,7 +64,7 @@ relay bounds a sparse FETCH only if the model can request ranges:
 - **Time ends** (maintainer, 2026-10-17, for DVR seek in the
   [archive line](/quest/m1/archive/README.md)). A range end may also be
   `Time(pts)`, in the track's timescale. Whoever holds the track resolves it:
-  the cache from its groups' timestamps, or a `track::Dynamic` handler such as
+  the cache from its groups' timestamps, or a `track::Requests` handler such as
   an archive consumer. A start resolves to the group containing pts, and an
   end to just after that group. A lite-07 relay that cannot resolve one
   forwards it upstream unchanged. An untimed track refuses a time end, and a

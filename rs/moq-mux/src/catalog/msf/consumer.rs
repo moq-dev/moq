@@ -125,15 +125,11 @@ pub(crate) fn from_msf<E: CatalogExt>(msf: &moq_msf::Catalog<E>, base: &moq_net:
 			.namespace
 			.as_ref()
 			.map(|namespace| {
-				let target = moq_net::Path::new(namespace);
 				let unresolvable = || Error::UnresolvableNamespace {
 					name: track.name.clone(),
 					namespace: namespace.clone(),
 				};
-				// An MSF namespace names content; normalizing it must not select another namespace.
-				if target.as_str() != namespace {
-					return Err(unresolvable());
-				}
+				let target = moq_net::Path::new(namespace).map_err(|_| unresolvable())?;
 				if super::names_catalog(&target, base) {
 					return Ok(None);
 				}
@@ -521,7 +517,7 @@ mod test {
 
 	#[test]
 	fn namespace_must_be_expressible_as_a_relative_broadcast() {
-		let base = moq_net::Path::new("room/catalog");
+		let base = moq_net::Path::from_static("room/catalog");
 		for (namespace, expected) in [("room/catalog", None), ("", Some(".."))] {
 			let mut track = moq_msf::Track::new("video", moq_msf::Packaging::Loc);
 			track.namespace = Some(namespace.into());
@@ -582,7 +578,7 @@ mod test {
 			"conference123/alice",
 			"alice",
 		] {
-			let catalog = from_msf(&msf, &moq_net::Path::new(base)).unwrap();
+			let catalog = from_msf(&msf, &moq_net::Path::new(base).unwrap()).unwrap();
 			assert!(catalog.video.renditions["1080p-video"].broadcast.is_none(), "{base}");
 			assert!(catalog.audio.renditions["audio"].broadcast.is_none(), "{base}");
 		}

@@ -1305,7 +1305,7 @@ mod tests {
 				.iter_mut()
 				.zip(&reservations)
 				.map(|(control, reservation)| {
-					control.update(reservation.peek(), at);
+					control.update(reservation.rate(), at);
 					control.target()
 				})
 				.collect()

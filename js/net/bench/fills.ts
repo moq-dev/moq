@@ -1,11 +1,11 @@
 /** Sweep cached groups against independent peers requesting draft-22 fills. */
 import { Milli } from "@moq/clock";
-import { NativeSession } from "../src/ietf/adapter";
 import { FetchHeader } from "../src/ietf/fetch";
 import * as Filter from "../src/ietf/filter";
 import { Parameters } from "../src/ietf/parameters";
 import { Publisher } from "../src/ietf/publisher";
 import { RequestOk } from "../src/ietf/request";
+import { NativeSession } from "../src/ietf/session";
 import { Subscribe, SubscribeOk, SubscribeUpdate } from "../src/ietf/subscribe";
 import { ALPN, Version } from "../src/ietf/version";
 import { createMockTransportPair } from "../src/mock";
@@ -25,7 +25,7 @@ for (const groups of [2, 16, 128]) {
 		for (let i = 0; i < groups; i++) {
 			const group = track.appendGroup();
 			group.writeFrame({ payload: new Uint8Array([i % 256]) });
-			group.close();
+			group.finish();
 		}
 		const peers = await Promise.all(
 			Array.from({ length: subscribers }, async () => {

@@ -15,18 +15,21 @@ import * as Source from "./source";
 import { clearSourceState } from "./source-state";
 import * as Video from "./video";
 
+function invalidAttribute(name: string, value: unknown, expected: string): Error {
+	return new Error(`moq-publish: invalid ${name}="${value}", expected ${expected}`);
+}
+
 function parseUrl(value: string | null): URL | undefined {
-	if (!value) return undefined;
+	if (value === null) return undefined;
 	try {
 		return new URL(value);
 	} catch {
-		console.warn(`moq-publish: invalid url="${value}", expected an absolute URL`);
-		return undefined;
+		throw invalidAttribute("url", value, "an absolute URL");
 	}
 }
 
 // Parse the `versions` attribute: a comma-separated list, or the defaults when absent or empty.
-// The connection checks the names and reports an unsupported one on `connection.error`.
+// The setter refuses an unsupported or duplicate name.
 function parseVersions(value: string | null): string[] | undefined {
 	const versions = value
 		?.split(",")
@@ -62,41 +65,29 @@ function parseBoolean(value: string | null, defaultValue: boolean): boolean {
 	return normalized !== "false" && normalized !== "0";
 }
 
-// Invalid attribute values warn and fall back rather than throwing: attributeChangedCallback runs
-// from the browser, where a throw surfaces as an unhandled error and leaves the element
-// half-configured.
 function parseSource(value: string | null): SourceType | undefined {
 	if (value === null) return undefined;
 	if (value === "camera" || value === "screen" || value === "file") return value;
-	console.warn(`moq-publish: invalid source="${value}", expected "camera", "screen", or "file"`);
-	return undefined;
+	throw invalidAttribute("source", value, '"camera", "screen", or "file"');
 }
 
-// Unlike the others, an invalid announce refuses (undefined) instead of falling back: a fallback
-// would publish a broadcast the page configured differently, such as a removed `never`.
-function parseAnnounce(value: string | null): AnnounceMode | undefined {
+function parseAnnounce(value: string | null): AnnounceMode {
 	if (value === null) return "source";
 	if (value === "source" || value === "always") return value;
-	return undefined;
-}
-
-function invalidAnnounce(value: unknown): Error {
-	return new Error(`moq-publish: invalid announce="${value}", expected "source" or "always"`);
+	throw invalidAttribute("announce", value, '"source" or "always"');
 }
 
 function parsePreview(value: string | null): Preview.Mode {
 	if (value === null) return "source";
 	if (value === "encoded" || value === "source" || value === "none") return value;
-	console.warn(`moq-publish: invalid preview="${value}", expected "encoded", "source", or "none"`);
-	return "source";
+	throw invalidAttribute("preview", value, '"encoded", "source", or "none"');
 }
 
 function parseBackend(value: string | null): Preview.Backend {
-	const trimmed = value?.trim();
-	if (!trimmed) return "auto";
+	if (value === null) return "auto";
+	const trimmed = value.trim();
 	if (trimmed === "auto" || trimmed === "webgpu" || trimmed === "2d") return trimmed;
-	console.warn(`moq-publish: invalid backend="${value}", expected "auto", "webgpu", or "2d"`);
-	return "auto";
+	throw invalidAttribute("backend", value, '"auto", "webgpu", or "2d"');
 }
 
 /** The `<moq-publish>` element: captures a source and publishes it as a broadcast. */
@@ -173,6 +164,12 @@ export default class MoqPublish extends HTMLElement {
 
 	// Set when the element is connected to the DOM.
 	#enabled = new Signal(false);
+	#connected = false;
+	#invalid = new Signal<ReadonlySet<string>>(new Set());
+	// Whether clearing the last invalid attribute re-enables media: false when the page had
+	// already disabled the connection, so recovery does not override that.
+	#resume = false;
+	#reflecting = false;
 
 	// Whether to advertise the broadcast, driven by the `announce` mode.
 	#announcing = new Signal(false);
@@ -233,7 +230,7 @@ export default class MoqPublish extends HTMLElement {
 			broadcast: this.broadcast,
 			capture: this.#capture,
 			enabled: this.#videoEnabled,
-			bandwidth: this.connection.bandwidth,
+			bandwidth: this.connection.allocator,
 		});
 		this.signals.cleanup(() => this.video.close());
 
@@ -241,7 +238,7 @@ export default class MoqPublish extends HTMLElement {
 			broadcast: this.broadcast,
 			enabled: this.#audioEnabled,
 			capture: audioCapture,
-			bandwidth: this.connection.bandwidth,
+			bandwidth: this.connection.allocator,
 		});
 		this.signals.cleanup(() => this.audio.close());
 
@@ -328,46 +325,88 @@ export default class MoqPublish extends HTMLElement {
 			console.warn('moq-publish: preview="encoded" requires a <canvas> element; showing the raw source.');
 		});
 
+		// Reflect state without replaying its setters through attributeChangedCallback.
+		this.signals.run((effect) => this.#reflect(effect, "url", effect.get(this.connection.url)?.toString()));
+		this.signals.run((effect) =>
+			this.#reflect(effect, "versions", effect.get(this.connection.versions)?.join(",")),
+		);
+		this.signals.run((effect) => this.#reflect(effect, "name", effect.get(this.#name).toString()));
+		this.signals.run((effect) => this.#reflect(effect, "muted", effect.get(this.controls.muted) ? "" : undefined));
+		this.signals.run((effect) =>
+			this.#reflect(effect, "invisible", effect.get(this.controls.invisible) ? "" : undefined),
+		);
+		this.signals.run((effect) => {
+			const source = effect.get(this.controls.source);
+			this.#reflect(effect, "source", source instanceof File ? "file" : source);
+		});
+		this.signals.run((effect) => this.#reflect(effect, "preview", effect.get(this.controls.preview)));
+		this.signals.run((effect) => this.#reflect(effect, "backend", effect.get(this.controls.backend)));
+		this.signals.run((effect) => this.#reflect(effect, "announce", effect.get(this.controls.announce)));
 		this.signals.run(this.#runSource.bind(this));
 	}
 
 	/** Called by the browser when the element joins a document. */
 	connectedCallback() {
-		this.#enabled.set(true);
+		this.#connected = true;
+		if (this.#invalid.peek().size) this.#resume = true;
+		else this.#enabled.set(true);
 	}
 
 	/** Called by the browser when the element leaves its document. */
 	disconnectedCallback() {
+		this.#connected = false;
 		this.#enabled.set(false);
 	}
 
 	/** Called by the browser when an observed attribute changes. */
 	attributeChangedCallback(name: (typeof OBSERVED)[number], oldValue: string | null, newValue: string | null) {
-		if (oldValue === newValue) return;
+		if (this.#reflecting || oldValue === newValue) return;
+		try {
+			if (name === "url") this.url = parseUrl(newValue);
+			else if (name === "versions") this.versions = parseVersions(newValue);
+			else if (name === "name") this.name = newValue ?? "";
+			else if (name === "source") this.source = parseSource(newValue);
+			else if (name === "announce") this.announce = parseAnnounce(newValue);
+			else if (name === "muted") this.muted = parseBoolean(newValue, false);
+			else if (name === "invisible") this.invisible = parseBoolean(newValue, false);
+			else if (name === "preview") this.preview = parsePreview(newValue);
+			else if (name === "backend") this.backend = parseBackend(newValue);
+			else {
+				const exhaustive: never = name;
+				throw new Error(`Invalid attribute: ${exhaustive}`);
+			}
+		} catch (error) {
+			if (this.#invalid.peek().size === 0) this.#resume = this.#enabled.peek();
+			if (name === "announce") this.controls.announce.set(undefined);
+			this.#invalid.update((previous) => new Set(previous).add(name));
+			this.#enabled.set(false);
+			throw error;
+		}
+	}
 
-		if (name === "url") {
-			this.connection.url.set(parseUrl(newValue));
-		} else if (name === "versions") {
-			this.connection.versions.set(parseVersions(newValue));
-		} else if (name === "name") {
-			this.#name.set(Moq.Path.from(newValue ?? ""));
-		} else if (name === "source") {
-			this.controls.source.set(parseSource(newValue));
-		} else if (name === "announce") {
-			const mode = parseAnnounce(newValue);
-			this.controls.announce.set(mode);
-			if (mode === undefined) throw invalidAnnounce(newValue);
-		} else if (name === "muted") {
-			this.controls.muted.set(parseBoolean(newValue, false));
-		} else if (name === "invisible") {
-			this.controls.invisible.set(parseBoolean(newValue, false));
-		} else if (name === "preview") {
-			this.controls.preview.set(parsePreview(newValue));
-		} else if (name === "backend") {
-			this.controls.backend.set(parseBackend(newValue));
-		} else {
-			const exhaustive: never = name;
-			throw new Error(`Invalid attribute: ${exhaustive}`);
+	#accept(name: string) {
+		// Ordinary edits must preserve an explicitly disabled connection.
+		if (!this.#invalid.peek().has(name)) return;
+		this.#invalid.update((previous) => {
+			const next = new Set(previous);
+			next.delete(name);
+			return next;
+		});
+		if (this.#invalid.peek().size || !this.#resume) return;
+		this.#resume = false;
+		this.#enabled.set(this.#connected);
+	}
+
+	#reflect(effect: Effect, name: (typeof OBSERVED)[number], value: string | undefined) {
+		// Keep refused markup observable until corrected. An echo must never reconfigure a File
+		// source or another control whose serialized value omits some of its state.
+		if (effect.get(this.#invalid).size) return;
+		this.#reflecting = true;
+		try {
+			if (value === undefined) this.removeAttribute(name);
+			else if (this.getAttribute(name) !== value) this.setAttribute(name, value);
+		} finally {
+			this.#reflecting = false;
 		}
 	}
 
@@ -466,7 +505,8 @@ export default class MoqPublish extends HTMLElement {
 	}
 
 	set url(value: string | URL | undefined) {
-		this.connection.url.set(value ? new URL(value) : undefined);
+		this.connection.url.set(parseUrl(value instanceof URL ? value.toString() : (value ?? null)));
+		this.#accept("url");
 	}
 
 	/** The protocol versions to offer, most preferred first; undefined offers the defaults. */
@@ -475,7 +515,8 @@ export default class MoqPublish extends HTMLElement {
 	}
 
 	set versions(value: readonly string[] | undefined) {
-		this.connection.versions.set(value);
+		this.connection.versions.set(value === undefined ? undefined : Moq.Connection.checkVersions(value));
+		this.#accept("versions");
 	}
 
 	/** The broadcast name, mirrored by the `name` attribute. */
@@ -485,6 +526,7 @@ export default class MoqPublish extends HTMLElement {
 
 	set name(value: string | Moq.Path.Valid) {
 		this.#name.set(Moq.Path.from(value));
+		this.#accept("name");
 	}
 
 	/** What to capture: a built-in source, a file, or nothing. Mirrored by the `source` attribute. */
@@ -493,7 +535,8 @@ export default class MoqPublish extends HTMLElement {
 	}
 
 	set source(value: SourceType | File | undefined) {
-		this.controls.source.set(value);
+		this.controls.source.set(value instanceof File ? value : parseSource(value ?? null));
+		this.#accept("source");
 	}
 
 	/** Whether audio is muted, mirrored by the `muted` attribute. */
@@ -503,6 +546,7 @@ export default class MoqPublish extends HTMLElement {
 
 	set muted(value: boolean) {
 		this.controls.muted.set(value);
+		this.#accept("muted");
 	}
 
 	/** Whether video is disabled, mirrored by the `invisible` attribute. */
@@ -512,6 +556,7 @@ export default class MoqPublish extends HTMLElement {
 
 	set invisible(value: boolean) {
 		this.controls.invisible.set(value);
+		this.#accept("invisible");
 	}
 
 	/** What a <canvas> preview renders, mirrored by the `preview` attribute. */
@@ -520,16 +565,18 @@ export default class MoqPublish extends HTMLElement {
 	}
 
 	set preview(value: Preview.Mode) {
-		this.controls.preview.set(value);
+		this.controls.preview.set(parsePreview(value));
+		this.#accept("preview");
 	}
 
-	/** Which graphics API draws a <canvas> preview. */
+	/** Which graphics API draws a <canvas> preview, mirrored by the `backend` attribute. */
 	get backend(): Preview.Backend {
 		return this.controls.backend.peek();
 	}
 
 	set backend(value: Preview.Backend) {
-		this.controls.backend.set(value);
+		this.controls.backend.set(parseBackend(value));
+		this.#accept("backend");
 	}
 
 	/** When to announce the broadcast, mirrored by the `announce` attribute; undefined while that attribute is invalid. */
@@ -538,8 +585,8 @@ export default class MoqPublish extends HTMLElement {
 	}
 
 	set announce(value: AnnounceMode) {
-		if (value !== "source" && value !== "always") throw invalidAnnounce(value);
-		this.controls.announce.set(value);
+		this.controls.announce.set(parseAnnounce(value));
+		this.#accept("announce");
 	}
 }
 

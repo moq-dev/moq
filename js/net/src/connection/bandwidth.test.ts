@@ -46,7 +46,7 @@ test("a connection samples the send rate onto the allocator", async () => {
 	const connection = new Connection({ url });
 	try {
 		await waitUntil(() => connection.status.peek() === "connected");
-		const allocator = connection.bandwidth.peek();
+		const allocator = connection.allocator.peek();
 		if (!allocator) throw new Error("missing allocator");
 
 		const track = new TrackProducer("video").accept({ priority: 60 });
@@ -68,8 +68,8 @@ test("two publishers on one connection split the estimate by priority", async ()
 		await waitUntil(() => first.status.peek() === "connected");
 		await waitUntil(() => second.status.peek() === "connected");
 
-		const allocator = first.bandwidth.peek();
-		expect(allocator).toBe(second.bandwidth.peek());
+		const allocator = first.allocator.peek();
+		expect(allocator).toBe(second.allocator.peek());
 		if (!allocator) throw new Error("missing allocator");
 
 		const audio = new TrackProducer("audio").accept({ priority: 80 });
@@ -97,7 +97,7 @@ test("an idle track on a live connection claims nothing", async () => {
 	const handle = new Connection({ url });
 	try {
 		await waitUntil(() => handle.status.peek() === "connected");
-		const allocator = handle.bandwidth.peek();
+		const allocator = handle.allocator.peek();
 		if (!allocator) throw new Error("missing allocator");
 
 		const watched = new TrackProducer("watched").accept({ priority: 60 });
@@ -125,7 +125,7 @@ test("a private connection still exposes an allocator", async () => {
 	});
 	try {
 		await waitUntil(() => connection.status.peek() === "connected");
-		const allocator = connection.bandwidth.peek();
+		const allocator = connection.allocator.peek();
 		if (!allocator) throw new Error("missing allocator");
 
 		const track = new TrackProducer("video").accept({ priority: 60 });
