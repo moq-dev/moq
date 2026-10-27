@@ -19,6 +19,11 @@ A group start drops every cut at or before its start, and cuts only arrive at
 or before the latest frame, so only the latest pending cut can ever matter.
 Replace the queue with a single `Option<Timestamp>`, after confirming that
 equivalence with a test of several cuts before one group start.
+The equivalence rests on the production callers' invariant that each `cut(pts)`
+arrives in rising order at or before the latest reported frame, so establish it
+from those callers rather than assume it for arbitrary `cut()` calls. The
+existing `explicit_cuts_override_the_grid` test stays as a regression guard: it
+declares both cuts before any group, so it needs both boundaries.
 
 Public API: none. Wire: none.
 
