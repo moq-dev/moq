@@ -37,13 +37,13 @@ pub(crate) fn adopt(stream: &TcpStream) -> std::io::Result<Option<crate::SharedS
 	// rate) from the TCP handshake, so the session can report both immediately
 	// rather than waiting on its own QX_PING round trip. A socket we can't read
 	// stats from just leaves them unreported.
-	#[cfg(unix)]
+	#[cfg(any(target_os = "linux", target_os = "macos"))]
 	{
 		Ok(crate::TcpStats::new(stream)
 			.ok()
 			.map(|s| std::sync::Arc::new(s) as crate::SharedSocketStats))
 	}
-	#[cfg(not(unix))]
+	#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 	{
 		Ok(None)
 	}

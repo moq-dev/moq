@@ -25,6 +25,7 @@
 		"pako": "^3.0.2"
 	},
 	"devDependencies": {
+		"@microsoft/api-extractor": "7.59.4",
 		"@moq/clock": "workspace:^",
 		"@types/bun": "^1.4.3",
 		"fflate": "^0.8.2",
