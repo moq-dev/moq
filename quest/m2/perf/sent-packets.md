@@ -36,7 +36,7 @@ Decided 2026-10-27:
     and each costs one entry, as in today's `BTreeMap`. Once the peer ACKs,
     anything more than `packet_threshold` below its largest ACK is lost, so
     tombstones stay near the front. A second ring holds every ACK-only
-    packet, capped at 128 and forgetting its oldest, which RFC 9000
+    packet, capped at 256 and forgetting its oldest, which RFC 9000
     allows since those packets carry nothing to retransmit. It keeps full
     records, because `pad_to_mtu` pads ACK-only packets without a cwnd gate
     and `finish_and_track` gives them `congestion` state. Evicting one
@@ -51,11 +51,15 @@ Decided 2026-10-27:
   they can carry new STREAM data that must be requeued if lost, and an ACK
   that newly acknowledges only an untracked probe would return early from
   `on_ack_received` without resetting the PTO backoff.
-- The ACK-only cap drops from 1000 to 128 in both designs. A peer's largest
-  ACK almost always names our newest packet, and our ack-eliciting packets
-  carry ACK frames that already prune `pending_acks`, so older ACK-only
-  records rarely give an RTT sample or prune anything. That cuts the worst
-  case from about 136 KB to 17 KB per connection.
+- The ACK-only cap drops from 1000 to 256 in both designs. A dropped record
+  costs only the RTT sample when the peer's largest ACK names it, since our
+  ack-eliciting packets carry ACK frames that already prune `pending_acks`.
+  The peer names a packet sent one RTT plus its ack delay before the ACK
+  arrives. The cap therefore needs our ACK rate times (RTT +
+  `max_ack_delay`). At one ACK per two 1200-byte packets and 25 ms delay,
+  256 covers about 40 Mbps of receive at 100 ms RTT, typical moq viewing.
+  1000 covered about 150 Mbps. The worst case drops from about 128 KB to
+  32 KB per connection.
 - Pick the winner this way. First, it must keep storage bounded by live
   packets under a never-ACKing peer (a unit test). Among the designs that
   pass, the fastest on the micro-bench wins. Within noise, the one with the
@@ -92,7 +96,7 @@ Guidance:
   "an intervening packet was acknowledged" and resets persistent congestion.
   Decided 2026-10-27: accept and document it. Skipped packet numbers and
   today's forgotten tail make the same gaps already, and the error only
-  under-declares persistent congestion after 128 unACKed ACK-only packets.
+  under-declares persistent congestion after 256 unACKed ACK-only packets.
 - Correctness tests cover padded ACK-only packets, both ACKed and lost,
   including after a path migration, so congestion feedback and in-flight
   bytes stay exact. The bound test includes a padded, never-ACKed receiver
