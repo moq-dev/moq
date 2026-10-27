@@ -20,10 +20,6 @@ and record the numbers in the PR that closes this:
   job pays that rebuild.
 - Bucket size and request counts after a month, against the 30-day expiry in
   `infra/mbx/lifecycle.json`. Shorten or lengthen it from that.
-- Across jobs: which compilations one job misses although another job built
-  the same crate at the same version, grouped by what differs (features,
-  profile, `RUSTFLAGS`, target). This is the baseline for
-  [unifying dependency features](/quest/m0/ci/hakari.md).
 
 Use scheduled Nightly runs on `main` only (`gh run list --workflow
 nightly.yml --branch main --event schedule`), never a dispatch on a branch.
@@ -47,22 +43,30 @@ Evidence so far, from the platform jobs of scheduled Nightlies
   effective read-write`. That proves credentials and policy, not reuse.
 - macOS refuses task manifests written past the reader's 16 MiB bound
   (`a90076a4...` at 17204435 bytes, then `5cb8fb79...` and `b0310ce4...`), so
-  those tasks get no remote predictions. No macOS summary downloads more than
+  those tasks get no remote predictions. Two more were refused before the
+  bump, both under mbx 1.25.0: `2ed9df47...` (17218002 bytes) on 2026-10-25
+  ([40192013303](https://github.com/moq-dev/moq/actions/runs/40192013303))
+  and 2026-10-26, and `0d4f4e3f...` (17290876 bytes) on 2026-10-26
+  ([40332938121](https://github.com/moq-dev/moq/actions/runs/40332938121)). No macOS summary downloads more than
   15 KiB. Reported as
   [jdx/mr-boxington#792](https://github.com/jdx/mr-boxington/issues/792) and
   fixed by [jdx/mr-boxington#798](https://github.com/jdx/mr-boxington/pull/798),
   which keeps the read bound and caps the writer instead. The Rust cache
   now pins 1.28.0, the first release carrying the fix. It does not repair
   manifests already oversized on R2: if task identities carry over, the
-  three known digests may still refuse until about 2026-11-22, when the
-  30-day lifecycle deletes them. A refusal for any other digest means the
-  fix did not hold.
+  five known digests may still refuse until the 30-day lifecycle deletes
+  them, about 2026-11-22 for the first three and 2026-11-26 for the last
+  two. A refusal for any other digest means the fix did not hold.
 - Windows logs no refusal but still no reuse. Its first build reports 0 hits
   and 1084 of 1091 compilations "not looked up" for want of a matching
   prediction on 2026-10-22, after a 1.25.0 Nightly wrote the day before, and
   1091 of 1098 on 1.26.0. The manifest fix does not explain this. If it
   persists after the bump, find why before timing builds.
 - No release pull request has run with the R2 cache yet.
+
+Decided 2026-10-27 (maintainer): the cross-job miss report moved to
+[unifying dependency features](/quest/m0/ci/hakari.md), which measures its own
+before and after baseline and no longer waits on this quest.
 
 ## Related
 

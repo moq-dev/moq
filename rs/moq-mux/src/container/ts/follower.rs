@@ -325,7 +325,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 		target: &moq_net::broadcast::Consumer,
 		catalog: crate::catalog::Consumer<E>,
 	) -> crate::Result<()> {
-		self.export.followed(target, catalog)?;
+		self.export.followed(target, catalog, self.follow)?;
 		self.serving = Serving::Ours;
 		self.failed = None;
 		tracing::info!(
@@ -428,7 +428,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 
 /// Whether a failure says the publisher left rather than the export failing: the route serving
 /// the broadcast was lost, the session carrying it ended, or a moq-transport peer named no cause.
-fn left(err: &crate::Error) -> bool {
+pub(super) fn left(err: &crate::Error) -> bool {
 	let (crate::Error::Moq(err) | crate::Error::Hang(hang::Error::Moq(err))) = err else {
 		return false;
 	};

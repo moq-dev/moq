@@ -43,6 +43,11 @@ export class Producer {
 		return new Producer(inner, writer);
 	}
 
+	/** The group's final outcome after finish drains queued writes, or an abort. */
+	get closed(): NetGroup.Producer["closed"] {
+		return this.#inner.closed;
+	}
+
 	/**
 	 * Encrypt `plaintext` at the next frame index and write the ciphertext.
 	 *
@@ -84,20 +89,20 @@ export class Producer {
 	}
 
 	/**
-	 * Close the group: cleanly after every pending write, or at once with `abort`, which
-	 * rejects the pending writes. Idempotent.
+	 * Finish the group after every pending write. Idempotent; no new writes are accepted.
 	 */
-	close(abort?: Error): void {
-		// The first close decides the outcome: a later abort cannot cancel a promised drain.
+	finish(): void {
 		if (this.#closed) return;
-		if (abort) {
-			this.#abort(abort);
-			return;
-		}
 		this.#closed = true;
 		void this.#writer.pump.run(() => {
 			if (!this.#aborted) this.#inner.finish();
 		});
+	}
+
+	/** Abort at once, rejecting pending writes; a finished or aborted group keeps its outcome. */
+	abort(error: Error): void {
+		if (this.#closed) return;
+		this.#abort(error);
 	}
 
 	#abort(error: Error): void {

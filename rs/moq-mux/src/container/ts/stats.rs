@@ -306,6 +306,7 @@ pub struct Release {
 
 impl Release {
 	pub(crate) fn of<K: Ord + Clone, T>(jitter: &crate::jitter::Buffer<K, T>) -> Self {
+		let jitter = jitter.reporting();
 		let millis = |seconds: f64| (seconds * 1e3).round() as i64;
 		Self {
 			dropped: jitter.dropped(),

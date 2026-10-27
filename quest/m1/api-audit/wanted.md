@@ -28,17 +28,12 @@ Decided 2026-10-25 (maintainer), extending the `wanted` shape that
   replacing `unused()`. Check that it returns `None` once no reader is left.
 - kio `Producer`/`ProducerWeak` rename too: `wanted() -> bool` and
   `wanted_changed()`; delete the test-only async variants.
-- The Announce consumer count from
-  [lifecycle](/quest/m1/api-audit/lifecycle.md) is a `wanted`-shaped signal,
-  not a new `unused()`.
+- The Announce consumer count is a `wanted`-shaped signal, not a new `unused()`.
 - moq-c's `MOQ_DEMAND_USED/UNUSED` become `WANTED/UNWANTED`; moq-c takes the
   break with every binding.
 
-Fix the stale `is_used()` advice in the Go wrapper README. The Impact note
+Fix the stale `Used`/`Unused` advice in the Go wrapper README
+(`go/wrapper/README.md`, about line 143). The Impact note
 corrects the `rs/moq-json` and `rs/moq-flate` Unreleased advice for the cut.
 
 Public API: breaking renames and deletions in every language. Wire: none.
-
-## Required
-
-- [One lifecycle vocabulary](/quest/m1/api-audit/lifecycle.md) - settles close and demand semantics this renames

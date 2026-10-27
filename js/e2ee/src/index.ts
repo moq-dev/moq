@@ -21,7 +21,9 @@
  *
  * const group = video.appendGroup();
  * await group.writeFrame(timestamp, frame);
- * group.close();
+ * group.finish();
+ * video.finish();
+ * video.close();
  * ```
  *
  * WebCrypto AES-GCM is asynchronous, so writes return promises and run through a serial pump

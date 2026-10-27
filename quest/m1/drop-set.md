@@ -14,6 +14,12 @@ narrower budget is served after a widening, as a cold relay would.
 
 ## Plan
 
+Decided 2026-10-27 (maintainer): this runs after
+[Linear fill path](/quest/m1/subscribe-ranges/fill-linear.md), since both edit
+`given_up` in `rs/moq-net/src/model/track/miss.rs`, and before
+[Rust groups by start](/quest/m1/time-addressing/model.md), which requires it
+because runs keyed by group sequence convert mechanically to starts.
+
 Decided by the maintainer on 2026-10-19, splitting this from the widened
 max age re-offer
 ([moq-dev/moq#6717](https://github.com/moq-dev/moq/pull/6717)), which keeps
@@ -258,7 +264,7 @@ unchanged.
 Besides memory, run fragmentation costs CPU today, new on main: every
 SUBSCRIBE_DROP bumps `drops_revision`, and each reader's `DropCursor::next`
 rescans the overlapping runs (`rs/moq-net/src/model/track.rs` about lines
-5574-5609), so N fragmented runs and R downstream readers cost O(R*N) per
+5802-5870), so N fragmented runs and R downstream readers cost O(R*N) per
 6-byte DROP. JS `insertDrop` (`js/net/src/internal.ts:136`) copies the whole
 run array once for the track and once per sink (`track.ts:914`). The
 replacement keeps the per-cursor walk incremental in both languages, with a

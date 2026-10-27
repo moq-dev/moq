@@ -2149,7 +2149,7 @@ impl Producer {
 	/// producer may publish under (after [`scope`](Self::scope)) or beneath a
 	/// [`mount`](Self::mount),
 	/// [`Error::BoundsExceeded`] if the full rooted path exceeds
-	/// [`Path::MAX_PARTS`] or 16 KiB, [`Error::InvalidPath`] if it holds a segment no
+	/// [`Path::MAX_PARTS`] or [`Path::MAX_BYTES`], [`Error::InvalidPath`] if it holds a segment no
 	/// pattern can spell (`*` or `**`), [`Error::NavigationSegment`] for a literal `.` or `..`,
 	/// or [`Error::Closed`] once the origin's
 	/// [`Driver`] has been dropped.
@@ -2446,7 +2446,7 @@ impl Producer {
 	/// `at` or `target` overlaps a mount point this producer already has, or `at`
 	/// overlaps an existing target or its own: mounts never chain, in whatever order they are added,
 	/// so a target is always read as the origin holds it. Mounts may share a target.
-	/// [`Error::BoundsExceeded`] if either rooted path exceeds [`Path::MAX_PARTS`] or 16 KiB,
+	/// [`Error::BoundsExceeded`] if either rooted path exceeds [`Path::MAX_PARTS`] or [`Path::MAX_BYTES`],
 	/// and [`Error::InvalidPath`] if `at` holds a segment no pattern can spell.
 	pub fn mount(
 		&self,

@@ -184,6 +184,11 @@ refused rather than reported.
 sudo sysctl -w kernel.perf_event_paranoid=-1
 ```
 
+The maintainer's 24-core `desktop` workstation is the profiling host: it
+keeps `kernel.perf_event_paranoid=-1`. Profile there only while it is quiet,
+with no other agents running and load near zero, since other work on the
+host shows up as lock waits and CPU the relay did not cause.
+
 ### Heap
 
 The heap mode builds the relay with `moq-relay/jemalloc` (the other modes keep

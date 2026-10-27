@@ -10144,6 +10144,41 @@ pub(super) mod test {
 		}
 	}
 
+	/// Each reset stimulus has eight PES packets of two 72 ms MP2 frames.
+	const RESET_PES: u64 = 8;
+	const RESET_PES_TICKS: u64 = 2 * 72 * 90;
+	const RESET_LEAP_TICKS: u64 = 30 * 90_000;
+
+	/// Drain queued media on its existing deadlines, stopping when the live export is idle.
+	async fn exported_discontinuities(
+		exporter: &mut crate::container::ts::Export<crate::catalog::Consumer>,
+	) -> (usize, usize) {
+		let waiter = kio::Waiter::noop();
+		let mut frames = 0;
+		let mut flagged = 0;
+		loop {
+			match exporter.poll_next(&waiter) {
+				std::task::Poll::Ready(Ok(Some(frame))) => {
+					frames += 1;
+					flagged += frame
+						.payload
+						.as_chunks::<188>()
+						.0
+						.iter()
+						.filter(|p| p[3] & 0x20 != 0 && p[4] > 0 && p[5] & 0x80 != 0)
+						.count();
+				}
+				std::task::Poll::Ready(Ok(None)) => break,
+				std::task::Poll::Ready(Err(err)) => panic!("exporter error: {err}"),
+				std::task::Poll::Pending => {
+					let Some(deadline) = exporter.next_due() else { break };
+					moq_clock::sleep_until(deadline).await;
+				}
+			}
+		}
+		(frames, flagged)
+	}
+
 	/// Import `before`, re-export the broadcast to MPEG-TS until it has gone out, then import
 	/// `after` and count the exported packets whose adaptation field sets
 	/// `discontinuity_indicator`.
@@ -10154,37 +10189,24 @@ pub(super) mod test {
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 		import.decode(&bytes::BytesMut::from(before)).unwrap();
 
-		// `import` and `catalog` stay alive so the exporter can subscribe to the retained
-		// tracks. A generous delay, since the default of zero would shed the earlier groups
-		// and the boundary with them. The paused clock runs out the delay and every gap in
-		// the media without a real wait.
-		let delay = std::time::Duration::from_secs(3600);
+		// Retain the complete stimulus span, the 30 s leap included: less sheds earlier
+		// groups and their boundary. Queued media is drained on its deadlines, without
+		// generating output through an arbitrary silence before feeding the next phase.
+		let delay = std::time::Duration::from_millis((RESET_LEAP_TICKS + RESET_PES * RESET_PES_TICKS) / 90);
 		let mut exporter = crate::container::ts::export_test::open_export(crate::source::announced(&consumer).await)
 			.await
 			.unwrap()
 			.with_delay(delay)
 			.with_replay();
-		let flags = |frame: crate::container::Frame| {
-			frame
-				.payload
-				.as_chunks::<188>()
-				.0
-				.iter()
-				.filter(|p| p[3] & 0x20 != 0 && p[4] > 0 && p[5] & 0x80 != 0)
-				.count()
-		};
 		// A discontinuity before anything went out moves no clock, so the media before the
 		// boundary goes out first, as it would live.
-		let mut flagged = 0;
-		while let Ok(Ok(Some(frame))) = tokio::time::timeout(2 * delay, exporter.next()).await {
-			flagged += flags(frame);
-		}
+		let (frames, before_flags) = exported_discontinuities(&mut exporter).await;
+		assert!(frames > 0, "media before the boundary must reach the output");
 		import.decode(&bytes::BytesMut::from(after)).unwrap();
 		import.finish().unwrap();
-		while let Ok(Ok(Some(frame))) = tokio::time::timeout(2 * delay, exporter.next()).await {
-			flagged += flags(frame);
-		}
-		flagged
+		let (frames, after_flags) = exported_discontinuities(&mut exporter).await;
+		assert!(frames > 0, "media after the boundary must reach the output");
+		before_flags + after_flags
 	}
 
 	/// The end-to-end shape the #2833 stimulus campaign graded: source, MoQ frames, exported
@@ -10196,12 +10218,10 @@ pub(super) mod test {
 	#[tokio::test(start_paused = true)]
 	async fn a_signalled_reset_reaches_the_exported_clock() {
 		const PID: u16 = 0x0061;
-		// One PES is two 72 ms MP2 frames.
-		const PES_TICKS: u64 = 2 * 72 * 90;
 
 		let media = |ts: &mut Vec<u8>, cc: &mut u8, base: u64| {
-			for i in 0..8 {
-				ts.extend_from_slice(&mp2_pes(PID, *cc, base + i * PES_TICKS, [0xAA, 0xBB]));
+			for i in 0..RESET_PES {
+				ts.extend_from_slice(&mp2_pes(PID, *cc, base + i * RESET_PES_TICKS, [0xAA, 0xBB]));
 				*cc = (*cc + 1) & 0x0f;
 			}
 		};
@@ -10212,8 +10232,8 @@ pub(super) mod test {
 		let mut signalled = clock_break_packet(PID);
 		let mut unsignalled = Vec::new();
 		let mut peer_cc = cc;
-		media(&mut signalled, &mut cc, 31 * 90_000);
-		media(&mut unsignalled, &mut peer_cc, 31 * 90_000);
+		media(&mut signalled, &mut cc, 90_000 + RESET_LEAP_TICKS);
+		media(&mut unsignalled, &mut peer_cc, 90_000 + RESET_LEAP_TICKS);
 
 		assert_eq!(
 			export_discontinuities(&before, &signalled).await,
@@ -10231,16 +10251,14 @@ pub(super) mod test {
 	/// generation, so the clock flags it once however many tracks declared the marker.
 	#[tokio::test(start_paused = true)]
 	async fn a_shared_forward_boundary_resets_once_per_rendition() {
-		const PES_TICKS: u64 = 2 * 72 * 90;
-
 		let mut stimulus = synth_pmt(
 			&[(StreamType::Mpeg1Audio, PCR_PID), (StreamType::Mpeg1Audio, PEER_PID)],
 			false,
 		);
 		let media = |ts: &mut Vec<u8>, cc: &mut u8, base: u64| {
-			for i in 0..8 {
+			for i in 0..RESET_PES {
 				for pid in [PCR_PID, PEER_PID] {
-					ts.extend_from_slice(&mp2_pes(pid, *cc, base + i * PES_TICKS, [0xAA, 0xBB]));
+					ts.extend_from_slice(&mp2_pes(pid, *cc, base + i * RESET_PES_TICKS, [0xAA, 0xBB]));
 				}
 				*cc = (*cc + 1) & 0x0f;
 			}
@@ -10249,7 +10267,7 @@ pub(super) mod test {
 		let mut cc = 0;
 		media(&mut stimulus, &mut cc, 90_000);
 		let mut after = clock_break_packet(PCR_PID);
-		media(&mut after, &mut cc, 31 * 90_000);
+		media(&mut after, &mut cc, 90_000 + RESET_LEAP_TICKS);
 
 		assert_eq!(
 			export_discontinuities(&stimulus, &after).await,

@@ -127,8 +127,8 @@ The historical samples locate candidates; they are not controlled benchmarks.
 ## Required
 
 - [Land main through quest land](/quest/m0/ci/land.md) - one self-hosted runner tests every queued PR as a squash chain and fast-forwards `main` to the longest passing prefix
-- [Bump quest to quest land](/quest/m0/ci/land-bump.md) - condition: kixelated/quest ships `quest land`; then bump the flake input
-- [Measure nightly compiler levers](/quest/m0/ci/nightly-levers.md) - the parallel frontend and Cranelift, adopted only if the numbers beat their risks
+- [Bump quest to quest land](/quest/m0/ci/land-bump.md) - kixelated/quest shipped `quest land` in kixelated/quest#229; bump the flake input
+- [Measure the parallel frontend](/quest/m0/ci/nightly-levers.md) - a pinned nightly's parallel frontend, adopted only if the numbers beat its risks; Cranelift is ruled out
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - measure the hosted Nightly jobs' hits, restore time, and expiry once the bump lands
 - [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - confirm CI and releases use `nix.moq.dev` and retire Cachix
 - [Unify dependency features](/quest/m0/ci/hakari.md) - a cargo-hakari workspace-hack so every job compiles each dependency alike and mbx hits across jobs

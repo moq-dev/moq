@@ -1,16 +1,19 @@
-# [L] Serve IETF FETCH in JavaScript
+# [L] Serve cached IETF FETCH in JavaScript
 
 ## Goal
 
-A JavaScript publisher answers IETF FETCH from a native subscriber, including
-groups that are no longer in its live cache, through the on-demand request
-surface `@moq/net` gains in [JS ranges](/quest/m1/subscribe-ranges/js.md).
+A JavaScript publisher answers IETF FETCH from a native subscriber for groups
+in its cache, standalone and joining, and honors the draft-18 Largest Object.
 
 ## Plan
 
-Decided in the 2026-10-05 audit: the producer-side request surface folded
-into [JS ranges](/quest/m1/subscribe-ranges/js.md), so it takes range
-requests from the start. This quest keeps only IETF FETCH dispatch onto it.
+Decided 2026-10-27 (maintainer): split in two. This half, cached and joining
+FETCH with the draft-18 Largest fix, starts now: the JS IETF publisher refuses
+every FETCH today (`#runFetch` in `js/net/src/ietf/publisher.ts`), while the
+JS lite publisher already serves cached FETCH. Serving evicted or uncached
+groups through the on-demand request surface `@moq/net` gains in
+[JS ranges](/quest/m1/subscribe-ranges/js.md) moved to
+[on-demand JavaScript FETCH](/quest/m1/js-fetch-on-demand.md).
 
 Implement IETF FETCH dispatch and codecs across the supported draft versions.
 Cover standalone and relative joining requests, subscription lifetime
@@ -22,7 +25,7 @@ forms must receive the protocol's explicit refusal rather than hang.
 Datagrams are never fetchable (#4982): Rust answers an IETF FETCH that
 reaches a datagram with DOES_NOT_EXIST; match it. Decided 2026-10-08: JS adds
 no `NotFetchable` code, since nothing would send it. Only lite-07 has the
-code, and lite-07 drops FETCH for [ranges](/quest/m1/subscribe-ranges/js.md);
+code, and lite-07 drops FETCH for [ranges](/quest/m1/subscribe-ranges/lite07-fetch.md);
 lite-05 and lite-06 answer `NotFound`.
 
 The JS publisher already answers the TRACK_STATUS a native fetch-only request
@@ -66,20 +69,15 @@ Joining tests: unit tests per draft for each refusal and for a served head
 plus the browser publisher on draft 18, except a track that finishes
 right after SUBSCRIBE_OK, which the m2 quest covers.
 
-Verify with an in-memory application responder: a browser publisher serves a
-native IETF subscriber after a group is evicted or was never cached. Run the
-supported-draft matrix and `just test interop --all` through CI.
+Run the supported-draft matrix and `just test interop --all` through CI.
 
-Public API: none beyond JS ranges' surface. Wire: implement the existing
+Public API: none. Wire: implement the existing
 supported IETF FETCH formats, including the joining FETCH, and serve a
 Largest Object subscription from past Largest; update relevant documentation
 and any MoQ draft claims that change.
 
-## Required
-
-- [JS ranges](/quest/m1/subscribe-ranges/js.md) - the on-demand request surface this dispatches onto
-
 ## Related
 
-- [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - native timeout budgets and gap dispositions build on this responder
+- [On-demand JavaScript FETCH](/quest/m1/js-fetch-on-demand.md) - serves evicted and uncached groups once JS ranges lands
+- [JS FETCH fill timeout](/quest/m1/ietf-fill-timeout-js.md) - JS timeout budgets and gap dispositions build on this responder
 - [JS join after a quick finish](/quest/m2/ietf-js-joining-fetch.md) - answers a joining FETCH that arrives after its subscription ended

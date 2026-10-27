@@ -1,8 +1,8 @@
 use std::{
 	cmp,
-	collections::{BTreeMap, VecDeque},
+	collections::VecDeque,
 	mem,
-	ops::{Bound, Index, IndexMut, Range},
+	ops::{Index, IndexMut, Range},
 };
 
 use rand::{Rng, RngExt};
@@ -11,6 +11,7 @@ use tracing::trace;
 
 use super::assembler::Assembler;
 use super::sent_packets::SentPackets;
+use super::slots::Slots;
 use crate::{
 	Dir, Duration, Instant, SocketAddr, StreamId, TransportError, cid_queue::CidQueue, congestion,
 	connection::StreamsState, crypto::Keys, frame, packet::SpaceId, range_set::ArrayRangeSet, shared::IssuedCid,
@@ -33,15 +34,11 @@ pub(super) struct PacketSpace {
 	/// The largest packet number the remote peer acknowledged in an ACK frame.
 	pub(super) largest_acked_packet: Option<u64>,
 	pub(super) largest_acked_packet_sent: Instant,
-	/// The highest-numbered ACK-eliciting packet we've sent
-	pub(super) largest_ack_eliciting_sent: u64,
-	/// Number of packets in `sent_packets` with numbers above `largest_ack_eliciting_sent`
-	pub(super) unacked_non_ack_eliciting_tail: u64,
 	/// Transmitted but not acked
 	pub(super) sent_packets: SentPackets,
 	/// Packets that were deemed lost
 	// Older packets are regularly removed in `Connection::drain_lost_packets`.
-	pub(super) lost_packets: BTreeMap<u64, LostPacket>,
+	pub(super) lost_packets: Slots<LostPacket>,
 	/// Number of explicit congestion notification codepoints seen on incoming packets
 	pub(super) ecn_counters: frame::EcnCounts,
 	/// Recent ECN counters sent by the peer in ACK frames
@@ -84,10 +81,8 @@ impl PacketSpace {
 			next_packet_number: 0,
 			largest_acked_packet: None,
 			largest_acked_packet_sent: now,
-			largest_ack_eliciting_sent: 0,
-			unacked_non_ack_eliciting_tail: 0,
 			sent_packets: SentPackets::default(),
-			lost_packets: BTreeMap::new(),
+			lost_packets: Slots::default(),
 			ecn_counters: frame::EcnCounts::ZERO,
 			ecn_feedback: frame::EcnCounts::ZERO,
 
@@ -216,51 +211,6 @@ impl PacketSpace {
 		// congestion check obvious.
 		self.ecn_feedback = ecn;
 		Ok(ce_increase != 0)
-	}
-
-	/// Stop tracking sent packet `number`, and return what we knew about it
-	pub(super) fn take(&mut self, number: u64) -> Option<SentPacket> {
-		let packet = self.sent_packets.remove(number)?;
-		if !packet.ack_eliciting && number > self.largest_ack_eliciting_sent {
-			self.unacked_non_ack_eliciting_tail = self.unacked_non_ack_eliciting_tail.checked_sub(1).unwrap();
-		}
-		Some(packet)
-	}
-
-	/// May return a packet that should be forgotten
-	pub(super) fn sent(&mut self, number: u64, packet: SentPacket) -> Option<SentPacket> {
-		// Retain state for at most this many non-ACK-eliciting packets sent after the most recently
-		// sent ACK-eliciting packet. We're never guaranteed to receive an ACK for those, and we
-		// can't judge them as lost without an ACK, so to limit memory in applications which receive
-		// packets but don't send ACK-eliciting data for long periods use we must eventually start
-		// forgetting about them, although it might also be reasonable to just kill the connection
-		// due to weird peer behavior.
-		const MAX_UNACKED_NON_ACK_ELICTING_TAIL: u64 = 1_000;
-
-		let mut forgotten = None;
-		if packet.ack_eliciting {
-			self.unacked_non_ack_eliciting_tail = 0;
-			self.largest_ack_eliciting_sent = number;
-		} else if self.unacked_non_ack_eliciting_tail > MAX_UNACKED_NON_ACK_ELICTING_TAIL {
-			let oldest_after_ack_eliciting = self
-				.sent_packets
-				.range((Bound::Excluded(self.largest_ack_eliciting_sent), Bound::Unbounded))
-				.next()
-				.unwrap()
-				.0;
-			// Per https://www.rfc-editor.org/rfc/rfc9000.html#name-frames-and-frame-types,
-			// non-ACK-eliciting packets must only contain PADDING, ACK, and CONNECTION_CLOSE
-			// frames, which require no special handling on ACK or loss beyond removal from
-			// in-flight counters if padded.
-			let packet = self.sent_packets.remove(oldest_after_ack_eliciting).unwrap();
-			debug_assert!(!packet.ack_eliciting);
-			forgotten = Some(packet);
-		} else {
-			self.unacked_non_ack_eliciting_tail += 1;
-		}
-
-		self.sent_packets.insert(number, packet);
-		forgotten
 	}
 
 	/// Whether any congestion-controlled packets in this space are not yet acknowledged or lost
