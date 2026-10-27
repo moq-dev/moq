@@ -1,6 +1,8 @@
 # `@moq/signals`
 
 ```ts
+import { Nano } from "@moq/clock";
+
 export class Computed<T> implements Getter<T | undefined> {
 	constructor(fn: (effect: Effect) => T);
 	readonly [GETTER_BRAND]: true;

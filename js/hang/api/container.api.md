@@ -1,6 +1,14 @@
 # `@moq/hang/container`
 
 ```ts
+import { $brand } from "@zod/mini";
+import { Micro } from "@moq/clock";
+import { Milli } from "@moq/clock";
+import { Net } from "@moq/hang";
+import { ReferenceEpoch } from "@moq/hang/catalog";
+import { RelativeBroadcast } from "@moq/hang/catalog";
+import { Signals } from "@moq/hang";
+
 export interface BufferedRange {
 	end: Milli;
 	start: Milli;
@@ -9,21 +17,21 @@ export interface BufferedRange {
 export type BufferedRanges = BufferedRange[];
 
 export class Consumer {
-	constructor(track: Subscriber, props: ConsumerProps);
-	readonly buffered: Getter<BufferedRanges>;
+	constructor(track: Net.Track.Subscriber, props: ConsumerProps);
+	readonly buffered: Signals.Getter<BufferedRanges>;
 	close(): void;
 	next(): Promise<Read | undefined>;
-	readonly spread: Getter<Milli>;
+	readonly spread: Signals.Getter<Milli>;
 }
 
 export interface ConsumerProps {
 	format: Format;
-	maxDelay?: GetterInit<Milli>;
+	maxDelay?: Signals.GetterInit<Milli>;
 	predecessor?: Consumer;
 }
 
 export interface Format {
-	decode(payload: Uint8Array, timestamp: Timestamp | undefined): Frame[];
+	decode(payload: Uint8Array, timestamp: Net.Time.Timestamp | undefined): Frame[];
 	end?(frame: Frame): Micro | undefined;
 	readonly kind?: "video" | "audio" | "data";
 }
@@ -149,21 +157,21 @@ export namespace Legacy {
 		} | "video" | "audio" | "data");
 		decode(frame: Uint8Array): Frame[];
 		end(frame: Frame): Micro | undefined;
-		finishGroup(group: Producer, end?: Micro): void;
+		finishGroup(group: Net.Group.Producer, end?: Micro): void;
 		readonly kind: "video" | "audio" | "data";
 	}
 	export { Frame };
 	export class Producer {
-		constructor(track: Producer, format: Format);
+		constructor(track: Net.Track.Producer, format: Legacy.Format);
 		close(err?: Error): void;
 		discontinuity(end?: Micro): void;
-		encode(data: Uint8Array<ArrayBufferLike> | Source, timestamp: Micro, keyframe: boolean): void;
+		encode(data: Uint8Array<ArrayBufferLike> | Legacy.Source, timestamp: Micro, keyframe: boolean): void;
 	}
 	export interface Source {
 		byteLength: number;
 		copyTo(buffer: Uint8Array): void;
 	}
-	export function encodeFrame(source: Uint8Array<ArrayBufferLike> | Source, timestamp: Micro): Uint8Array;
+	export function encodeFrame(source: Uint8Array<ArrayBufferLike> | Legacy.Source, timestamp: Micro): Uint8Array;
 }
 
 export * as Loc from "@moq/loc";
@@ -193,5 +201,5 @@ export type TrackInfoOptions = {
 
 export function mergeBufferedRanges(a: BufferedRanges, b: BufferedRanges): BufferedRanges;
 
-export function trackInfo(options: TrackInfoOptions): Partial<Track.Info>;
+export function trackInfo(options: TrackInfoOptions): Partial<Net.Track.Info>;
 ```

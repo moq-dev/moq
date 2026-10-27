@@ -10,8 +10,8 @@ export namespace InvalidPattern {
 }
 
 export class InvalidPattern extends Error {
-	constructor(code: Code, message: string);
-	readonly code: Code;
+	constructor(code: InvalidPattern.Code, message: string);
+	readonly code: InvalidPattern.Code;
 }
 
 export class Pattern {

@@ -1,6 +1,11 @@
 # `@moq/video`
 
 ```ts
+import { Getter } from "@moq/signals";
+import { Inputs } from "@moq/signals";
+import { Readonlys } from "@moq/signals";
+import { Signal } from "@moq/signals";
+
 export type Backend = "auto" | "webgpu" | "2d";
 
 export type Canvas = HTMLCanvasElement | OffscreenCanvas;

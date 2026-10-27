@@ -1,6 +1,12 @@
 # `@moq/json`
 
 ```ts
+import { $ZodTypeInternals } from "zod/v4/core";
+import { Time } from "@moq/net";
+import { Timed } from "@moq/net";
+import { Track } from "@moq/net";
+import { ZodMiniType } from "@zod/mini";
+
 export type Compression = "none" | "deflate";
 
 export class Desync extends Error {
@@ -28,18 +34,18 @@ export namespace Snapshot {
 		schema?: ZodMiniType<T, unknown, $ZodTypeInternals<T, unknown>>;
 	}
 	export namespace Consumer {
-		export type Config<T> = Pick<Config<T>, "schema" | "compression"> & {
-			track: Moq.Track.Subscriber;
+		export type Config<T> = Pick<Snapshot.Config<T>, "schema" | "compression"> & {
+			track: Track.Subscriber;
 		};
 	}
 	export class Consumer<T> {
-		constructor(config: Config<T>);
+		constructor(config: Snapshot.Consumer.Config<T>);
 		[asyncIterator](): AsyncIterator<Timed<T>>;
 		latest(): Promise<Timed<T> | undefined>;
 		next(): Promise<Timed<T> | undefined>;
 	}
 	export class Decoder<T> {
-		constructor(config?: Pick<Config<T>, "schema" | "compression">);
+		constructor(config?: Pick<Snapshot.Config<T>, "schema" | "compression">);
 		decode(): T | undefined;
 		delta(payload: Uint8Array): void;
 		snapshot(payload: Uint8Array): void;
@@ -50,26 +56,26 @@ export namespace Snapshot {
 		payload: Uint8Array;
 	}
 	export class Encoder<T> {
-		constructor(config?: Config<T>);
+		constructor(config?: Snapshot.Config<T>);
 		reset(): void;
-		snapshot(): Pending | undefined;
-		update(value: T): Pending | undefined;
+		snapshot(): Snapshot.Pending | undefined;
+		update(value: T): Snapshot.Pending | undefined;
 		get value(): T | undefined;
 	}
 	export { MissingSnapshot };
-	export interface Pending extends Encoded {
+	export interface Pending extends Snapshot.Encoded {
 		commit(): void;
 	}
 	export namespace Producer {
-		export type Config<T> = Config<T> & {
-			track: Moq.Track.Producer;
+		export type Config<T> = Snapshot.Config<T> & {
+			track: Track.Producer;
 		};
 	}
 	export class Producer<T> {
-		constructor(config: Config<T>);
+		constructor(config: Snapshot.Producer.Config<T>);
 		cut(): void;
 		finish(): void;
-		mutate(fn: (value: T) => void, at?: Timestamp): void;
+		mutate(fn: (value: T) => void, at?: Time.Timestamp): void;
 		update({ ... }: Timed<T>): void;
 	}
 }
@@ -80,24 +86,24 @@ export namespace Stream {
 		schema?: ZodMiniType<T, unknown, $ZodTypeInternals<T, unknown>>;
 	}
 	export namespace Consumer {
-		export type Config<T> = Config<T> & {
-			track: Moq.Track.Subscriber;
+		export type Config<T> = Stream.Config<T> & {
+			track: Track.Subscriber;
 		};
 	}
 	export class Consumer<T> {
-		constructor(config: Config<T>);
+		constructor(config: Stream.Consumer.Config<T>);
 		[asyncIterator](): AsyncIterator<Timed<T>>;
 		next(): Promise<Timed<T> | undefined>;
 	}
 	export class Decoder<T> {
-		constructor(config?: Config<T>);
+		constructor(config?: Stream.Config<T>);
 		decode(payload: Uint8Array): T;
 		reset(): void;
 	}
 	export { Desync };
 	export class Encoder<T> {
-		constructor(config?: Config<T>);
-		encode(value: T): Pending;
+		constructor(config?: Stream.Config<T>);
+		encode(value: T): Stream.Pending;
 		reset(): void;
 	}
 	export interface Pending {
@@ -105,12 +111,12 @@ export namespace Stream {
 		payload: Uint8Array;
 	}
 	export namespace Producer {
-		export type Config<T> = Config<T> & {
-			track: Moq.Track.Producer;
+		export type Config<T> = Stream.Config<T> & {
+			track: Track.Producer;
 		};
 	}
 	export class Producer<T> {
-		constructor(config: Config<T>);
+		constructor(config: Stream.Producer.Config<T>);
 		append({ ... }: Timed<T>): void;
 		finish(): void;
 	}
@@ -126,18 +132,18 @@ export namespace Window {
 		ops?: boolean;
 	}
 	export class Consumer<T> {
-		constructor(config: ConsumerConfig);
-		[asyncIterator](): AsyncIterator<Timed<Event<T>>>;
-		next(): Promise<Timed<Event<T>> | undefined>;
+		constructor(config: Window.ConsumerConfig);
+		[asyncIterator](): AsyncIterator<Timed<Window.Event<T>>>;
+		next(): Promise<Timed<Window.Event<T>> | undefined>;
 		get offset(): number;
 	}
-	export type ConsumerConfig = DecoderConfig & {
-		track: Moq.Track.Subscriber;
+	export type ConsumerConfig = Window.DecoderConfig & {
+		track: Track.Subscriber;
 	};
 	export class Decoder<T> {
-		constructor(config?: DecoderConfig);
-		group(): Group;
-		next(): Event<T> | undefined;
+		constructor(config?: Window.DecoderConfig);
+		group(): Window.Group;
+		next(): Window.Event<T> | undefined;
 		get offset(): number;
 	}
 	export interface DecoderConfig {
@@ -148,13 +154,13 @@ export namespace Window {
 		payload: Uint8Array;
 	}
 	export class Encoder<T> {
-		constructor(config?: Config);
+		constructor(config?: Window.Config);
 		get end(): number;
 		get offset(): number;
-		pop(count: number): Pending | undefined;
-		push(value: T): Pending;
+		pop(count: number): Window.Pending | undefined;
+		push(value: T): Window.Pending;
 		reset(): void;
-		snapshot(): Pending;
+		snapshot(): Window.Pending;
 		get window(): T[];
 	}
 	export type Event<T> = {
@@ -163,27 +169,27 @@ export namespace Window {
 			value: T;
 		};
 	} | {
-		pop: Span;
+		pop: Window.Span;
 	} | {
-		skip: Span;
+		skip: Window.Span;
 	};
 	export interface Group {
 		decode(payload: Uint8Array): void;
 	}
-	export interface Pending extends Encoded {
+	export interface Pending extends Window.Encoded {
 		commit(): void;
 	}
 	export class Producer<T> {
-		constructor(config: ProducerConfig);
+		constructor(config: Window.ProducerConfig);
 		cut(): void;
 		finish(): void;
 		get offset(): number;
-		pop(count: number, at?: Timestamp): void;
+		pop(count: number, at?: Time.Timestamp): void;
 		push({ ... }: Timed<T>): void;
 		get window(): T[];
 	}
-	export type ProducerConfig = Config & {
-		track: Moq.Track.Producer;
+	export type ProducerConfig = Window.Config & {
+		track: Track.Producer;
 	};
 	export interface Span {
 		end: number;

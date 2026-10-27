@@ -27,13 +27,16 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import {
 	Application,
+	type Context,
 	Converter,
 	type DeclarationReflection,
 	type ParameterReflection,
-	type ProjectReflection,
+	ProjectReflection,
 	ReferenceReflection,
+	ReferenceType,
 	type Reflection,
 	ReflectionKind,
+	type ReflectionSymbolId,
 	type SignatureReflection,
 	type SomeType,
 	type TypeParameterReflection,
@@ -122,6 +125,9 @@ async function reports(dir: string, declarations: string, check: boolean): Promi
 			validation: { notExported: false, invalidLink: false, invalidPath: false, rewrittenLink: false },
 			// Comments are not part of the API; the reference checks them.
 			logLevel: "Error",
+			// No limit: TypeDoc otherwise cuts a type nested past 10 levels to `...`, which would hide a
+			// change in it. The option is parsed as an integer, so `Infinity` would read as 0.
+			maxTypeConversionDepth: Number.MAX_SAFE_INTEGER,
 		});
 		const own = (file: string) => !relative(root, file).startsWith("..");
 		const errors: string[] = [];
@@ -155,6 +161,47 @@ async function reports(dir: string, declarations: string, check: boolean): Promi
 				constants.add(reflection);
 			}
 		});
+		// Where the declared dependencies export each of their declarations, which names a reference
+		// to one as a consumer would: `Audio.Decoder` from `@moq/watch`, not a bare `Decoder`. The
+		// walk is breadth-first, so the shortest path is found first.
+		const exported = new Map<string, Location>();
+		app.converter.on(Converter.EVENT_END, (context) => {
+			const [program] = context.programs;
+			if (!program) return;
+			context.setActiveProgram(program);
+			const checker = program.getTypeChecker();
+			const queue: { symbol: TsSymbol; specifier: string; path: string[] }[] = [];
+			const seen = new Set<TsSymbol>();
+			for (const dependency of dependencies(manifest)) {
+				for (const specifier of entrypoints(dir, dependency)) {
+					const resolved = ts.resolveModuleName(
+						specifier,
+						join(root, "package.json"),
+						program.getCompilerOptions(),
+						ts.sys,
+					).resolvedModule;
+					const source = resolved && program.getSourceFile(resolved.resolvedFileName);
+					const symbol = source && checker.getSymbolAtLocation(source);
+					if (symbol && !seen.has(symbol)) {
+						seen.add(symbol);
+						queue.push({ symbol, specifier, path: [] });
+					}
+				}
+			}
+			for (const { symbol, specifier, path } of queue) {
+				for (const child of checker.getExportsOfModule(symbol)) {
+					const target = context.resolveAliasedSymbol(child);
+					const at = [...path, child.name];
+					const id = key(context.createSymbolId(target));
+					if (!exported.has(id)) exported.set(id, { specifier, path: at.join(".") });
+					if (target.flags & ts.SymbolFlags.Module && !seen.has(target)) {
+						seen.add(target);
+						queue.push({ symbol: target, specifier, path: at });
+					}
+				}
+			}
+			context.setActiveProgram(undefined);
+		});
 		const project = await app.convert();
 		if (!project || app.logger.hasErrors()) {
 			throw new Error(`TypeDoc failed on ${manifest.name}`);
@@ -172,7 +219,8 @@ async function reports(dir: string, declarations: string, check: boolean): Promi
 			modules.set(module, subpath === "." ? manifest.name : `${manifest.name}/${subpath.replace(/^\.\//, "")}`);
 		}
 
-		const renderer = new Renderer({ project, name: manifest.name, modules, constants, dir });
+		locate(project, modules, exported);
+		const renderer = new Renderer({ project, name: manifest.name, modules, constants, exported, dir });
 		const found = new Map<string, string>();
 		for (const [module, specifier] of modules) {
 			const subpath = specifier.slice(manifest.name.length + 1) || "index";
@@ -184,12 +232,84 @@ async function reports(dir: string, declarations: string, check: boolean): Promi
 	}
 }
 
-// The TypeScript TypeDoc compiles with, for its diagnostics and node flags.
+type Program = Context["programs"][number];
+type TsSymbol = ReturnType<Context["resolveAliasedSymbol"]>;
+
+// The TypeScript TypeDoc compiles with, for its diagnostics, node flags, and module resolution.
 const ts: {
 	flattenDiagnosticMessageText(text: unknown, newline: string): string;
 	getCombinedNodeFlags(node: unknown): number;
+	resolveModuleName(
+		name: string,
+		containingFile: string,
+		options: ReturnType<Program["getCompilerOptions"]>,
+		host: unknown,
+	): { resolvedModule?: { resolvedFileName: string } };
+	sys: unknown;
 	NodeFlags: { Const: number };
+	SymbolFlags: { Module: number };
 } = createRequire(import.meta.resolve("typedoc"))("typescript");
+
+// Where a declaration is exported: an entrypoint's import specifier, and its dotted path there.
+interface Location {
+	specifier: string;
+	path: string;
+}
+
+// A declaration's identity, the same for TypeDoc's reference to it and the symbol it came from.
+function key(id: ReflectionSymbolId): string {
+	return `${id.packageName}\0${id.packagePath}\0${id.qualifiedName}`;
+}
+
+// Names every reference by where it is exported, as a placeholder `report` resolves once it knows
+// which names its module imports. The standard library is global, and a type parameter is local.
+function locate(project: ProjectReflection, modules: Map<Reflection, string>, exported: Map<string, Location>) {
+	const find = (type: ReferenceType): Location | undefined => {
+		if (type.refersToTypeParameter) return undefined;
+		const target = type.reflection;
+		if (target) {
+			let module: Reflection | undefined = target;
+			while (module && !modules.has(module)) module = module.parent;
+			const specifier = module && modules.get(module);
+			if (!module || !specifier) return undefined;
+			return { specifier, path: target.getFullName().slice(module.getFullName().length + 1) };
+		}
+		const id = type.symbolId;
+		if (!id) return undefined;
+		if (id.packageName === "typescript") return { specifier: "", path: type.name };
+		// A declaration its package does not export is named by its file, which is still exact.
+		return exported.get(key(id)) ?? { specifier: `${id.packageName}/${id.packagePath}`, path: id.qualifiedName };
+	};
+	// Types hang off reflections in many places, so walk everything the project holds.
+	const seen = new Set<object>();
+	const visit = (value: unknown) => {
+		if (!value || typeof value !== "object" || seen.has(value) || value instanceof ProjectReflection) return;
+		seen.add(value);
+		if (value instanceof ReferenceType) {
+			const at = find(value);
+			if (at) value.name = `\0${at.specifier}\0${at.path}\0`;
+		}
+		for (const [field, child] of Object.entries(value)) if (field !== "parent") visit(child);
+	};
+	for (const reflection of Object.values(project.reflections)) visit(reflection);
+}
+
+// Every package the manifest depends on.
+function dependencies(manifest: Manifest): string[] {
+	const fields = ["dependencies", "peerDependencies", "optionalDependencies"] as const;
+	return [...new Set(fields.flatMap((field) => Object.keys(manifest[field] ?? {})))];
+}
+
+// The import specifier of each entrypoint of package `name`, as installed for `dir`.
+function entrypoints(dir: string, name: string): string[] {
+	const installed = installation(dir, name);
+	if (!installed) return [];
+	const manifest: Manifest = JSON.parse(readFileSync(join(installed, "package.json"), "utf8"));
+	if (!manifest.exports) return [name];
+	return Object.keys(manifest.exports)
+		.filter((subpath) => subpath.startsWith(".") && !subpath.includes("*"))
+		.map((subpath) => (subpath === "." ? name : `${name}/${subpath.slice(2)}`));
+}
 
 // Every reference to a declaration of this package that the report cannot name, since no
 // entrypoint exports it: a consumer could not name it either. Another package's declarations are
@@ -218,12 +338,7 @@ function unexported(app: Application, project: ProjectReflection, name: string):
 // Install each declared dependency where the copy resolves it, linked to the workspace's own
 // install. Anything undeclared stays unresolvable, as it is for a consumer.
 function linkDependencies(dir: string, root: string, manifest: Manifest) {
-	const names = new Set(
-		(["dependencies", "peerDependencies", "optionalDependencies"] as const).flatMap((field) =>
-			Object.keys(manifest[field] ?? {}),
-		),
-	);
-	for (const name of names) {
+	for (const name of dependencies(manifest)) {
 		const installed = installation(dir, name);
 		if (!installed) throw new Error(`${name} is declared but not installed`);
 		const link = join(root, "node_modules", name);
@@ -249,6 +364,8 @@ class Renderer {
 	#name: string;
 	#modules: Map<Reflection, string>;
 	#constants: Set<Reflection>;
+	// Where the dependencies export their declarations.
+	#exported: Map<string, Location>;
 	// Where the package is installed, which resolves its dependencies.
 	#dir: string;
 
@@ -257,18 +374,41 @@ class Renderer {
 		name: string;
 		modules: Map<Reflection, string>;
 		constants: Set<Reflection>;
+		exported: Map<string, Location>;
 		dir: string;
 	}) {
 		this.#project = scope.project;
 		this.#name = scope.name;
 		this.#modules = scope.modules;
 		this.#constants = scope.constants;
+		this.#exported = scope.exported;
 		this.#dir = scope.dir;
 	}
 
 	report(module: DeclarationReflection): string {
+		const specifier = this.#modules.get(module);
 		const body = this.children(module, "").join("\n\n");
-		return `# \`${this.#modules.get(module)}\`\n\n\`\`\`ts\n${body}\n\`\`\`\n`;
+		// A reference elsewhere is imported by the first name of its path, unless that name is
+		// declared here or comes from two places, when it is spelled with `import()` instead.
+		const placeholder = /\0([^\0]*)\0([^\0]*)\0/g;
+		const sources = new Map<string, Set<string>>();
+		for (const child of module.children ?? []) sources.set(child.name, new Set([specifier ?? ""]));
+		for (const [, from = "", path = ""] of body.matchAll(placeholder)) {
+			const [head = ""] = path.split(".");
+			sources.set(head, (sources.get(head) ?? new Set()).add(from));
+		}
+		const imported = (from: string, head: string) =>
+			from !== specifier && from !== "" && head !== "default" && sources.get(head)?.size === 1;
+		const imports = new Set<string>();
+		const text = body.replace(placeholder, (_, from: string, path: string) => {
+			const [head = ""] = path.split(".");
+			if (from === specifier || from === "") return path;
+			if (!imported(from, head)) return `import("${from}").${path}`;
+			imports.add(`import { ${head} } from "${from}";`);
+			return path;
+		});
+		const header = [...imports].sort().join("\n");
+		return `# \`${specifier}\`\n\n\`\`\`ts\n${header ? `${header}\n\n` : ""}${text}\n\`\`\`\n`;
 	}
 
 	// Each child's declaration, once: a merged class and namespace from another package are two
@@ -365,10 +505,19 @@ class Renderer {
 	private foreign(item: Reflection, name = item.name): string | undefined {
 		const id = this.#project.getSymbolIdFromReflection(item);
 		if (!id || id.packageName === this.#name) return undefined;
-		const specifier = this.specifier(id.packageName, id.packagePath);
 		// A whole module has no name of its own.
-		if (!id.qualifiedName) return `export * as ${name} from "${specifier}";`;
-		return `export { ${alias(id.qualifiedName, name)} } from "${specifier}";`;
+		if (!id.qualifiedName) return `export * as ${name} from "${this.specifier(id.packageName, id.packagePath)}";`;
+		const at = this.#exported.get(key(id));
+		if (!at)
+			throw new Error(
+				`${item.getFullName()} re-exports ${id.qualifiedName}, which ${id.packageName} does not export`,
+			);
+		if (at.path.includes(".")) {
+			throw new Error(
+				`${item.getFullName()} re-exports ${at.path} from ${at.specifier}, which the report cannot spell`,
+			);
+		}
+		return `export { ${alias(at.path, name)} } from "${at.specifier}";`;
 	}
 
 	// The entrypoint of package `name` whose file is `path`, or the package itself.
@@ -526,7 +675,9 @@ function print(type: SomeType | undefined, indent: string, at: Position = "top")
 				"operand",
 			]);
 		case "intrinsic":
+			return type.name;
 		case "unknown":
+			if (type.name === "...") throw new Error("TypeDoc cut a type short");
 			return type.name;
 		case "literal":
 			return type.toString();
@@ -548,10 +699,8 @@ function print(type: SomeType | undefined, indent: string, at: Position = "top")
 			const args = type.typeArguments?.length
 				? `<${type.typeArguments.map((arg) => print(arg, indent)).join(", ")}>`
 				: "";
-			// A reference to a declaration an alias re-exports, such as with `@reexport`, uses the alias.
-			const target = type.reflection;
-			const name = target && !`.${type.name}`.endsWith(`.${target.name}`) ? target.name : type.name;
-			return `${name}${args}`;
+			// `locate` named it by where it is exported, such as through an `@reexport` alias.
+			return `${type.name}${args}`;
 		}
 		case "reflection": {
 			const { declaration } = type;

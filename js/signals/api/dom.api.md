@@ -1,6 +1,8 @@
 # `@moq/signals/dom`
 
 ```ts
+import { Effect } from "@moq/signals";
+
 export interface ArrayElement extends Array<Element> {
 	[n: number]: Element;
 }

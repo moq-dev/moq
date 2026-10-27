@@ -135,7 +135,9 @@ export declare class Reader {
 		{ exports: { ".": { types: "./index.d.ts" }, "./reader": { types: "./reader.d.ts" } } },
 	);
 	await checkReports(directory);
-	expect(report(directory, "reader.api.md")).toBe(`export interface ReadOptions {
+	expect(report(directory, "reader.api.md")).toBe(`import { AccessInput } from "@moq/example";
+
+export interface ReadOptions {
 	wait: boolean;
 }
 
@@ -159,6 +161,57 @@ test("another package's declarations are reported as the re-export that brings t
 
 export { Value as Thing } from "dep";
 `);
+});
+
+test("a reference names its declaration by where its package exports it", async () => {
+	const directory = fixture(
+		{
+			"node_modules/dep/package.json": JSON.stringify({
+				name: "dep",
+				version: "0.0.0",
+				exports: { ".": { types: "./index.d.ts" } },
+			}),
+			"node_modules/dep/index.d.ts": `export * as Audio from "./audio";\nexport * as Video from "./video";\n`,
+			"node_modules/dep/audio.d.ts": "export interface Decoder {\n\trate: number;\n}\n",
+			"node_modules/dep/video.d.ts": "export interface Decoder {\n\tframe: number;\n}\n",
+			"dist/index.d.ts": `import type { Audio as A, Video } from "dep";
+/** An audio track. */
+export interface Audio {
+	/** Decodes it. */
+	decoder: A.Decoder;
+}
+/** A member. */
+export interface Member {
+	/** Its audio. */
+	audio: A.Decoder;
+	/** Its video. */
+	video: Video.Decoder;
+}
+`,
+		},
+		{ dependencies: { dep: "^0.0.0" } },
+	);
+	await checkReports(directory);
+	// \`Audio\` is declared here too, so the other one cannot be imported by that name.
+	expect(report(directory)).toBe(`import { Video } from "dep";
+
+export interface Audio {
+	decoder: import("dep").Audio.Decoder;
+}
+
+export interface Member {
+	audio: import("dep").Audio.Decoder;
+	video: Video.Decoder;
+}
+`);
+});
+
+test("a deeply nested type is reported in full", async () => {
+	const depth = 12;
+	const type = `${"{ a: ".repeat(depth)}number${" }".repeat(depth)}`;
+	const directory = fixture({ "dist/index.d.ts": `/** A nested value. */\nexport declare const nested: ${type};\n` });
+	await checkReports(directory);
+	expect(report(directory)).toContain(`${"\t".repeat(depth)}a: number;`);
 });
 
 test("a declaration resolves types from declared dependencies only", async () => {

@@ -1,6 +1,8 @@
 # `@moq/hang/util`
 
 ```ts
+import { Signals } from "@moq/hang";
+
 export namespace Aac {
 	export const SAMPLE_RATES: readonly number[];
 	export function audioSpecificConfig(sampleRate: number, channelCount: number): Uint8Array;
@@ -10,7 +12,7 @@ export namespace Aac {
 }
 
 export namespace Gesture {
-	export function unlock(effect: Effect, context: AudioContext): Getter<boolean>;
+	export function unlock(effect: Signals.Effect, context: AudioContext): Signals.Getter<boolean>;
 }
 
 export namespace Hacks {

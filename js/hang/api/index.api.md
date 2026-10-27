@@ -1,96 +1,114 @@
 # `@moq/hang`
 
 ```ts
+import { $ZodBranded } from "zod/v4/core";
+import { $brand } from "@zod/mini";
+import { $loose } from "zod/v4/core";
+import { $strip } from "zod/v4/core";
+import { Micro } from "@moq/clock";
+import { ReferenceEpoch } from "@moq/hang/catalog";
+import { RelativeBroadcast } from "@moq/hang/catalog";
+import { Window } from "@moq/json";
+import { ZodMiniNullable } from "@zod/mini";
+import { ZodMiniNumber } from "@zod/mini";
+import { ZodMiniObject } from "@zod/mini";
+import { ZodMiniOptional } from "@zod/mini";
+import { ZodMiniPipe } from "@zod/mini";
+import { ZodMiniRecord } from "@zod/mini";
+import { ZodMiniString } from "@zod/mini";
+import { ZodMiniTransform } from "@zod/mini";
+import { infer } from "@zod/mini";
+
 export * as Catalog from "@moq/hang/catalog";
 
 export * as Container from "@moq/hang/container";
 
 export namespace Echo {
-	export type Arrival = z.infer<typeof ArrivalSchema>;
-	export const ArrivalSchema: z.ZodMiniObject<{
-		timestamp: z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">;
-		wall: z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">;
-	}, z.core.$strip>;
-	export type Rendition = z.infer<typeof RenditionSchema>;
-	export const RenditionSchema: z.ZodMiniObject<{
-		arrival: z.ZodMiniOptional<z.ZodMiniPipe<z.ZodMiniNullable<z.ZodMiniObject<{
-			timestamp: z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">;
-			wall: z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">;
-		}, z.core.$strip>>, z.ZodMiniTransform<{
-			timestamp: number & z.$brand<"u53">;
-			wall: number & z.$brand<"u53">;
+	export type Arrival = infer<typeof Echo.ArrivalSchema>;
+	export const ArrivalSchema: ZodMiniObject<{
+		timestamp: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
+		wall: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
+	}, $strip>;
+	export type Rendition = infer<typeof Echo.RenditionSchema>;
+	export const RenditionSchema: ZodMiniObject<{
+		arrival: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<ZodMiniObject<{
+			timestamp: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
+			wall: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
+		}, $strip>>, ZodMiniTransform<{
+			timestamp: number & $brand<"u53">;
+			wall: number & $brand<"u53">;
 		} | undefined, {
-			timestamp: number & z.$brand<"u53">;
-			wall: number & z.$brand<"u53">;
+			timestamp: number & $brand<"u53">;
+			wall: number & $brand<"u53">;
 		} | null>>>;
-		bytes: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
-		decoded: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
-		errors: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
-		frames: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
-		late: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
-		latency: z.ZodMiniOptional<z.ZodMiniPipe<z.ZodMiniNullable<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>, z.ZodMiniTransform<number & z.$brand<"u53"> | undefined, number & z.$brand<"u53"> | null>>>;
-		stalled: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
-		stalls: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
-		underruns: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
-	}, z.core.$strip>;
+		bytes: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
+		decoded: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
+		errors: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
+		frames: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
+		late: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
+		latency: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
+		stalled: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
+		stalls: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
+		underruns: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
+	}, $strip>;
 	export const SUFFIX: ".echo";
-	export type Snapshot = z.infer<typeof SnapshotSchema>;
-	export const SnapshotSchema: z.ZodMiniObject<{
-		renditions: z.ZodMiniOptional<z.ZodMiniRecord<z.ZodMiniString<string>, z.ZodMiniObject<{
-			arrival: z.ZodMiniOptional<z.ZodMiniPipe<z.ZodMiniNullable<z.ZodMiniObject<{
-				timestamp: ...;
-				wall: ...;
-			}, z.core.$strip>>, z.ZodMiniTransform<{
-				timestamp: ...;
-				wall: ...;
+	export type Snapshot = infer<typeof Echo.SnapshotSchema>;
+	export const SnapshotSchema: ZodMiniObject<{
+		renditions: ZodMiniOptional<ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
+			arrival: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<ZodMiniObject<{
+				timestamp: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
+				wall: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
+			}, $strip>>, ZodMiniTransform<{
+				timestamp: number & $brand<"u53">;
+				wall: number & $brand<"u53">;
 			} | undefined, {
-				timestamp: ...;
-				wall: ...;
+				timestamp: number & $brand<"u53">;
+				wall: number & $brand<"u53">;
 			} | null>>>;
-			bytes: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
-			decoded: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
-			errors: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
-			frames: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
-			late: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
-			latency: z.ZodMiniOptional<z.ZodMiniPipe<z.ZodMiniNullable<z.core.$ZodBranded<z.ZodMiniNumber<...>, "u53", "out">>, z.ZodMiniTransform<... | undefined, ... | null>>>;
-			stalled: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
-			stalls: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
-			underruns: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
-		}, z.core.$strip>>>;
-		transport: z.ZodMiniOptional<z.ZodMiniObject<{
-			age: z.ZodMiniOptional<z.ZodMiniPipe<z.ZodMiniNullable<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>, z.ZodMiniTransform<... & ... | undefined, ... & ... | null>>>;
-			lostBytes: z.ZodMiniOptional<z.ZodMiniPipe<z.ZodMiniNullable<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>, z.ZodMiniTransform<... & ... | undefined, ... & ... | null>>>;
-			lostPackets: z.ZodMiniOptional<z.ZodMiniPipe<z.ZodMiniNullable<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>, z.ZodMiniTransform<... & ... | undefined, ... & ... | null>>>;
-			rate: z.ZodMiniOptional<z.ZodMiniPipe<z.ZodMiniNullable<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>, z.ZodMiniTransform<... & ... | undefined, ... & ... | null>>>;
-			rtt: z.ZodMiniOptional<z.ZodMiniPipe<z.ZodMiniNullable<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>, z.ZodMiniTransform<... & ... | undefined, ... & ... | null>>>;
-		}, z.core.$strip>>;
-	}, z.core.$loose>;
+			bytes: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
+			decoded: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
+			errors: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
+			frames: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
+			late: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
+			latency: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
+			stalled: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
+			stalls: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
+			underruns: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
+		}, $strip>>>;
+		transport: ZodMiniOptional<ZodMiniObject<{
+			age: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
+			lostBytes: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
+			lostPackets: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
+			rate: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
+			rtt: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
+		}, $strip>>;
+	}, $loose>;
 	export const TRACK: "feedback.json";
-	export function isEcho(path: Valid): boolean;
+	export function isEcho(path: Net.Path.Valid): boolean;
 }
 
 export namespace Health {
 	export interface Connection {
-		evidence: Evidence[];
+		evidence: Health.Evidence[];
 		lostBytes?: number;
 		lostPackets?: number;
 		stale?: true;
-		verdict: Verdict;
+		verdict: Health.Verdict;
 	}
 	export interface Evidence {
-		input: Input;
+		input: Health.Input;
 		value?: number;
-		verdict: Verdict;
+		verdict: Health.Verdict;
 	}
 	export interface Health {
 		interval?: number;
-		observer: Observer;
-		renditions: Record<string, Rendition>;
-		reset?: Reset;
-		role: Role;
+		observer: Health.Observer;
+		renditions: Record<string, Health.Rendition>;
+		reset?: Health.Reset;
+		role: Health.Role;
 		stale?: true;
-		transport: Connection;
-		verdict: Verdict;
+		transport: Health.Connection;
+		verdict: Health.Verdict;
 	}
 	export type Input = "rtt" | "loss" | "headroom" | "skipped" | "late" | "errors" | "stalled";
 	export interface Limits {
@@ -98,47 +116,47 @@ export namespace Health {
 		unhealthy: number;
 	}
 	export interface Observer {
-		epoch?: Valid;
-		path: Valid;
+		epoch?: Net.Epoch.Valid;
+		path: Net.Path.Valid;
 	}
 	export interface Rendition {
 		bitrate?: number;
 		bytes?: number;
-		evidence: Evidence[];
+		evidence: Health.Evidence[];
 		frames?: number;
-		verdict: Verdict;
+		verdict: Health.Verdict;
 	}
 	export interface Report<S> {
-		observer: Observer;
+		observer: Health.Observer;
 		snapshot: S;
 	}
 	export type Reset = "decrease" | "replaced";
 	export type Role = "publisher" | "viewer";
 	export interface Sample<S> {
 		age: number;
-		current: Report<S>;
+		current: Health.Report<S>;
 		interval: number;
-		previous?: Report<S>;
+		previous?: Health.Report<S>;
 	}
 	export interface Thresholds {
 		publisher: {
-			skipped: Limits;
+			skipped: Health.Limits;
 		};
 		stale: number;
 		transport: {
-			headroom: Limits;
-			loss: Limits;
-			rtt: Limits;
+			headroom: Health.Limits;
+			loss: Health.Limits;
+			rtt: Health.Limits;
 		};
 		viewer: {
-			errors: Limits;
-			late: Limits;
-			stalled: Limits;
+			errors: Health.Limits;
+			late: Health.Limits;
+			stalled: Health.Limits;
 		};
 	}
 	export type Verdict = "unknown" | "healthy" | "degraded" | "unhealthy";
-	export function defaultThresholds(): Thresholds;
-	export function publisher(sample: Sample<{
+	export function defaultThresholds(): Health.Thresholds;
+	export function publisher(sample: Health.Sample<{
 		[key: string]: unknown;
 		renditions?: Record<string, {
 			bitrate?: number & $brand<"u53">;
@@ -154,8 +172,8 @@ export namespace Health {
 			rate?: number & $brand<"u53">;
 			rtt?: number & $brand<"u53">;
 		};
-	}>, thresholds?: Thresholds): Health;
-	export function viewer(sample: Sample<{
+	}>, thresholds?: Health.Thresholds): Health.Health;
+	export function viewer(sample: Health.Sample<{
 		[key: string]: unknown;
 		renditions?: Record<string, {
 			arrival?: {
@@ -179,7 +197,7 @@ export namespace Health {
 			rate?: number & $brand<"u53">;
 			rtt?: number & $brand<"u53">;
 		};
-	}>, thresholds?: Thresholds): Health;
+	}>, thresholds?: Health.Thresholds): Health.Health;
 }
 
 export * as Net from "@moq/net";
@@ -187,71 +205,71 @@ export * as Net from "@moq/net";
 export * as Signals from "@moq/signals";
 
 export namespace Stats {
-	export type Rendition = z.infer<typeof RenditionSchema>;
-	export const RenditionSchema: z.ZodMiniObject<{
-		bitrate: z.ZodMiniOptional<z.ZodMiniPipe<z.ZodMiniNullable<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>, z.ZodMiniTransform<number & z.$brand<"u53"> | undefined, number & z.$brand<"u53"> | null>>>;
-		bytes: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
-		frames: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
-		keyframes: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
-		skipped: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
-	}, z.core.$strip>;
-	export type Snapshot = z.infer<typeof SnapshotSchema>;
-	export const SnapshotSchema: z.ZodMiniObject<{
-		renditions: z.ZodMiniOptional<z.ZodMiniRecord<z.ZodMiniString<string>, z.ZodMiniObject<{
-			bitrate: z.ZodMiniOptional<z.ZodMiniPipe<z.ZodMiniNullable<z.core.$ZodBranded<z.ZodMiniNumber<...>, "u53", "out">>, z.ZodMiniTransform<... | undefined, ... | null>>>;
-			bytes: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
-			frames: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
-			keyframes: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
-			skipped: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
-		}, z.core.$strip>>>;
-		transport: z.ZodMiniOptional<z.ZodMiniObject<{
-			age: z.ZodMiniOptional<z.ZodMiniPipe<z.ZodMiniNullable<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>, z.ZodMiniTransform<... & ... | undefined, ... & ... | null>>>;
-			lostBytes: z.ZodMiniOptional<z.ZodMiniPipe<z.ZodMiniNullable<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>, z.ZodMiniTransform<... & ... | undefined, ... & ... | null>>>;
-			lostPackets: z.ZodMiniOptional<z.ZodMiniPipe<z.ZodMiniNullable<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>, z.ZodMiniTransform<... & ... | undefined, ... & ... | null>>>;
-			rate: z.ZodMiniOptional<z.ZodMiniPipe<z.ZodMiniNullable<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>, z.ZodMiniTransform<... & ... | undefined, ... & ... | null>>>;
-			rtt: z.ZodMiniOptional<z.ZodMiniPipe<z.ZodMiniNullable<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>, z.ZodMiniTransform<... & ... | undefined, ... & ... | null>>>;
-		}, z.core.$strip>>;
-	}, z.core.$loose>;
-	export type Transport = z.infer<typeof TransportSchema>;
-	export const TransportSchema: z.ZodMiniObject<{
-		age: z.ZodMiniOptional<z.ZodMiniPipe<z.ZodMiniNullable<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>, z.ZodMiniTransform<number & z.$brand<"u53"> | undefined, number & z.$brand<"u53"> | null>>>;
-		lostBytes: z.ZodMiniOptional<z.ZodMiniPipe<z.ZodMiniNullable<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>, z.ZodMiniTransform<number & z.$brand<"u53"> | undefined, number & z.$brand<"u53"> | null>>>;
-		lostPackets: z.ZodMiniOptional<z.ZodMiniPipe<z.ZodMiniNullable<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>, z.ZodMiniTransform<number & z.$brand<"u53"> | undefined, number & z.$brand<"u53"> | null>>>;
-		rate: z.ZodMiniOptional<z.ZodMiniPipe<z.ZodMiniNullable<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>, z.ZodMiniTransform<number & z.$brand<"u53"> | undefined, number & z.$brand<"u53"> | null>>>;
-		rtt: z.ZodMiniOptional<z.ZodMiniPipe<z.ZodMiniNullable<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>, z.ZodMiniTransform<number & z.$brand<"u53"> | undefined, number & z.$brand<"u53"> | null>>>;
-	}, z.core.$strip>;
+	export type Rendition = infer<typeof Stats.RenditionSchema>;
+	export const RenditionSchema: ZodMiniObject<{
+		bitrate: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
+		bytes: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
+		frames: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
+		keyframes: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
+		skipped: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
+	}, $strip>;
+	export type Snapshot = infer<typeof Stats.SnapshotSchema>;
+	export const SnapshotSchema: ZodMiniObject<{
+		renditions: ZodMiniOptional<ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
+			bitrate: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
+			bytes: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
+			frames: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
+			keyframes: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
+			skipped: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
+		}, $strip>>>;
+		transport: ZodMiniOptional<ZodMiniObject<{
+			age: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
+			lostBytes: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
+			lostPackets: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
+			rate: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
+			rtt: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
+		}, $strip>>;
+	}, $loose>;
+	export type Transport = infer<typeof Stats.TransportSchema>;
+	export const TransportSchema: ZodMiniObject<{
+		age: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
+		lostBytes: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
+		lostPackets: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
+		rate: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
+		rtt: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
+	}, $strip>;
 }
 
 export namespace Timeline {
-	export class Consumer implements AsyncIterable<Event> {
-		[asyncIterator](): AsyncIterator<Event>;
+	export class Consumer implements AsyncIterable<Timeline.Event> {
+		[asyncIterator](): AsyncIterator<Timeline.Event>;
 		close(): void;
-		next(): Promise<Event | undefined>;
-		static subscribe(broadcast: Consumer, archive: {
+		next(): Promise<Timeline.Event | undefined>;
+		static subscribe(broadcast: Net.Broadcast.Consumer, archive: {
 			replay?: RelativeBroadcast;
 			replayEpoch?: ReferenceEpoch;
 			store?: string;
-			timelines: z.ZodMiniRecord<z.ZodMiniString<string>, z.ZodMiniObject<{
-				duration: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
-				track: z.ZodMiniString<string>;
-			}, z.core.$strip>>;
+			timelines: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
+				duration: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
+				track: ZodMiniString<string>;
+			}, $strip>>;
 			timescale: number & $brand<"u53">;
 			version?: number & $brand<"u53">;
-		}, track: string): Consumer;
+		}, track: string): Timeline.Consumer;
 	}
-	export type Entry = Omit<Record, "pts" | "duration"> & {
+	export type Entry = Omit<Timeline.Record, "pts" | "duration"> & {
 		duration: Micro;
 		pts: Micro;
 	};
 	export type Event = {
 		push: {
-			entry: Entry;
+			entry: Timeline.Entry;
 			index: number;
 		};
 	} | {
-		pop: Json.Window.Span;
+		pop: Window.Span;
 	} | {
-		skip: Json.Window.Span;
+		skip: Window.Span;
 	};
 	export interface Position {
 		frame?: number;
@@ -259,11 +277,11 @@ export namespace Timeline {
 	}
 	export interface Record {
 		duration?: number;
-		end: Position;
+		end: Timeline.Position;
 		keyframe?: boolean;
 		pts?: number;
 		sequence: number;
-		start: Position;
+		start: Timeline.Position;
 	}
 	export const SUFFIX: ".timeline.z";
 }

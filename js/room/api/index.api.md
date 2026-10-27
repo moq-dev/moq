@@ -1,22 +1,37 @@
 # `@moq/room`
 
 ```ts
+import { Audio } from "@moq/watch";
+import { Connection } from "@moq/net";
+import { Effect } from "@moq/signals";
+import { Getter } from "@moq/signals";
+import { GetterInit } from "@moq/signals";
+import { Path } from "@moq/net";
+import { Player } from "@moq/watch";
+import { Readonlys } from "@moq/signals";
+import { Root } from "@moq/hang/catalog";
+import { Signal } from "@moq/signals";
+import { Source } from "@moq/publish";
+import { Timed } from "@moq/net";
+import { Track } from "@moq/net";
+import { Window } from "@moq/json";
+
 export namespace Chat {
-	export type Event = Json.Window.Event<string>;
-	export const HISTORY: Nano;
+	export type Event = Window.Event<string>;
+	export const HISTORY: Clock.Nano;
 	export const PRIORITY: 10;
 	export class Publisher {
-		constructor(track: Producer);
-		static create(broadcast: Producer): Publisher;
+		constructor(track: Track.Producer);
+		static create(broadcast: import("@moq/net").Broadcast.Producer): Chat.Publisher;
 		expire(): void;
 		finish(): void;
 		send(text: string): void;
 	}
 	export class Subscriber {
-		constructor(track: Subscriber);
+		constructor(track: Track.Subscriber);
 		close(): void;
-		recv(): Promise<Timed<Event> | undefined>;
-		static subscribe(broadcast: Consumer): Subscriber;
+		recv(): Promise<Timed<Chat.Event> | undefined>;
+		static subscribe(broadcast: import("@moq/net").Broadcast.Consumer): Chat.Subscriber;
 	}
 	export const TRACK: "chat";
 	export function info(): Pick<Track.Info, "priority" | "timescale">;
@@ -36,7 +51,7 @@ export type Consumed = {
 	user: Readonlys<UserInput>;
 };
 
-export type ExtendedCatalog = CatalogRoot & {
+export type ExtendedCatalog = Root & {
 	hang?: HangCatalog;
 };
 
@@ -56,50 +71,50 @@ export type Kind = typeof KIND[keyof typeof KIND];
 
 export class Local {
 	constructor(props: LocalProps);
-	readonly camera: Broadcast;
-	readonly cameraCapture: Capture;
+	readonly camera: import("@moq/publish").Broadcast;
+	readonly cameraCapture: import("@moq/publish").Video.Capture;
 	readonly cameraEnabled: Signal<boolean>;
 	readonly chatting: Signal<boolean>;
 	close(): void;
 	readonly enabled: Signal<boolean>;
-	readonly identity: Getter<Valid>;
-	readonly microphone: Microphone;
+	readonly identity: Getter<Path.Valid>;
+	readonly microphone: Source.Microphone;
 	readonly microphoneEnabled: Signal<boolean>;
 	get preview(): Getter<Preview>;
-	readonly screen: Broadcast;
-	readonly screenCapture: Capture;
+	readonly screen: import("@moq/publish").Broadcast;
+	readonly screenCapture: import("@moq/publish").Video.Capture;
 	readonly screenEnabled: Signal<boolean>;
-	readonly share: Screen;
+	readonly share: Source.Screen;
 	readonly typing: Signal<boolean>;
 	readonly user: UserFields;
-	readonly webcam: Camera;
+	readonly webcam: Source.Camera;
 }
 
 export interface LocalProps {
 	cameraEnabled?: GetterInit<boolean>;
 	connection: Connection;
 	enabled?: GetterInit<boolean>;
-	identity: GetterInit<Valid>;
+	identity: GetterInit<Path.Valid>;
 	microphoneEnabled?: GetterInit<boolean>;
 	screenEnabled?: GetterInit<boolean>;
 	user?: UserProps;
 }
 
 export class Member {
-	constructor(kind: Kind, path: Valid, connection: Connection);
-	readonly audio: Decoder;
-	readonly broadcast: Broadcast;
+	constructor(kind: Kind, path: Path.Valid, connection: Connection);
+	readonly audio: Audio.Decoder;
+	readonly broadcast: import("@moq/watch").Broadcast;
 	readonly canvas: Signal<HTMLCanvasElement | undefined>;
 	close(): void;
-	readonly emitter: Emitter;
+	readonly emitter: Audio.Emitter;
 	readonly kind: Kind;
 	readonly muted: Signal<boolean>;
-	readonly path: Valid;
+	readonly path: Path.Valid;
 	readonly player: Player;
 	readonly preview: Getter<Preview>;
-	readonly renderer: Renderer;
+	readonly renderer: import("@moq/watch").Video.Renderer;
 	readonly user: Readonlys<UserInput>;
-	readonly video: Decoder;
+	readonly video: import("@moq/watch").Video.Decoder;
 	readonly volume: Signal<number>;
 }
 
@@ -122,12 +137,12 @@ export type Preview = {
 
 export class Remote {
 	constructor(props: RemoteProps);
-	attach(kind: Kind, path: Valid): void;
+	attach(kind: Kind, path: Path.Valid): void;
 	readonly camera: Getter<Member | undefined>;
 	close(): void;
 	detach(kind: Kind): void;
 	empty(): boolean;
-	readonly identity: Valid;
+	readonly identity: Path.Valid;
 	readonly preview: Getter<Preview>;
 	readonly screen: Getter<Member | undefined>;
 	readonly user: Readonlys<UserInput>;
@@ -135,7 +150,7 @@ export class Remote {
 
 export interface RemoteProps {
 	connection: Connection;
-	identity: Valid;
+	identity: Path.Valid;
 }
 
 export class Room {
@@ -143,16 +158,16 @@ export class Room {
 	close(): void;
 	readonly connection: Connection;
 	readonly enabled: Getter<boolean>;
-	readonly identity: Getter<Valid | undefined>;
-	readonly prefix: Getter<Valid | undefined>;
-	get remotes(): Getter<Map<Valid, Remote>>;
+	readonly identity: Getter<Path.Valid | undefined>;
+	readonly prefix: Getter<Path.Valid | undefined>;
+	get remotes(): Getter<Map<Path.Valid, Remote>>;
 }
 
 export interface RoomProps {
 	connection: Connection;
 	enabled?: GetterInit<boolean>;
-	identity?: GetterInit<Valid | undefined>;
-	prefix?: GetterInit<Valid | undefined>;
+	identity?: GetterInit<Path.Valid | undefined>;
+	prefix?: GetterInit<Path.Valid | undefined>;
 }
 
 export const TRACK: {
@@ -194,19 +209,19 @@ export type UserProps = {
 	name?: string | Signal<string | undefined>;
 };
 
-export function broadcastPath(identity: Valid, kind: Kind): Valid;
+export function broadcastPath(identity: Path.Valid, kind: Kind): Path.Valid;
 
 export function claims(room: string, identity: string): Claims;
 
-export function consume(broadcast: Broadcast): Consumed;
+export function consume(broadcast: import("@moq/watch").Broadcast): Consumed;
 
 export function isKind(value: string): value is Kind;
 
 export function kindFromSegment(segment: string): Kind | undefined;
 
-export function parse(path: Valid): Parsed | undefined;
+export function parse(path: Path.Valid): Parsed | undefined;
 
-export function serve(broadcast: Broadcast, user: UserInput, preview: Getter<Preview>, effect: Effect): void;
+export function serve(broadcast: import("@moq/publish").Broadcast, user: UserInput, preview: Getter<Preview>, effect: Effect): void;
 
 export function userFields(props?: UserProps): UserFields;
 ```

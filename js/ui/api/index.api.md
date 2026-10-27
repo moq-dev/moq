@@ -1,6 +1,9 @@
 # `@moq/ui`
 
 ```ts
+import { Effect } from "@moq/signals";
+import { Signal } from "@moq/signals";
+
 export interface Graph {
 	el: HTMLElement;
 	push(value: number | undefined): void;

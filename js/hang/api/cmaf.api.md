@@ -1,9 +1,12 @@
 # `@moq/hang/cmaf`
 
 ```ts
-export class Format implements Format {
+import { Frame } from "@moq/hang/container";
+import { Net } from "@moq/hang";
+
+export class Format implements import("@moq/hang/container").Format {
 	constructor(init: InitSegment);
-	decode(payload: Uint8Array, timestamp: Timestamp | undefined): Frame[];
+	decode(payload: Uint8Array, timestamp: Net.Time.Timestamp | undefined): Frame[];
 }
 
 export interface InitSegment {
@@ -23,7 +26,7 @@ export interface Sample {
 	timestamp: number;
 }
 
-export function decodeDataSegment(segment: Uint8Array, init: InitSegment, timestamp: Timestamp | undefined): Sample[];
+export function decodeDataSegment(segment: Uint8Array, init: InitSegment, timestamp: Net.Time.Timestamp | undefined): Sample[];
 
 export function decodeInitSegment(init: Uint8Array): InitSegment;
 ```

@@ -1,6 +1,9 @@
 # `@moq/flate`
 
 ```ts
+import { Timed } from "@moq/net";
+import { Track } from "@moq/net";
+
 export type Compression = "none" | "deflate";
 
 export const DEFAULT_LEVEL: 6;
@@ -25,23 +28,23 @@ export namespace Snapshot {
 		compression?: Compression;
 	}
 	export namespace Consumer {
-		export type Config = Config & {
-			track: Moq.Track.Subscriber;
+		export type Config = Snapshot.Config & {
+			track: Track.Subscriber;
 		};
 	}
 	export class Consumer {
-		constructor(config: Config);
+		constructor(config: Snapshot.Consumer.Config);
 		[asyncIterator](): AsyncIterator<Timed<Uint8Array<ArrayBufferLike>>>;
 		latest(): Promise<Timed<Uint8Array<ArrayBufferLike>> | undefined>;
 		next(): Promise<Timed<Uint8Array<ArrayBufferLike>> | undefined>;
 	}
 	export namespace Producer {
-		export type Config = Config & {
-			track: Moq.Track.Producer;
+		export type Config = Snapshot.Config & {
+			track: Track.Producer;
 		};
 	}
 	export class Producer {
-		constructor(config: Config);
+		constructor(config: Snapshot.Producer.Config);
 		finish(): void;
 		update({ ... }: Timed<Uint8Array<ArrayBufferLike>>): void;
 	}
@@ -52,22 +55,22 @@ export namespace Stream {
 		compression?: Compression;
 	}
 	export namespace Consumer {
-		export type Config = Config & {
-			track: Moq.Track.Subscriber;
+		export type Config = Stream.Config & {
+			track: Track.Subscriber;
 		};
 	}
 	export class Consumer {
-		constructor(config: Config);
+		constructor(config: Stream.Consumer.Config);
 		[asyncIterator](): AsyncIterator<Timed<Uint8Array<ArrayBufferLike>>>;
 		next(): Promise<Timed<Uint8Array<ArrayBufferLike>> | undefined>;
 	}
 	export namespace Producer {
-		export type Config = Config & {
-			track: Moq.Track.Producer;
+		export type Config = Stream.Config & {
+			track: Track.Producer;
 		};
 	}
 	export class Producer {
-		constructor(config: Config);
+		constructor(config: Stream.Producer.Config);
 		append({ ... }: Timed<Uint8Array<ArrayBufferLike>>): void;
 		finish(): void;
 	}

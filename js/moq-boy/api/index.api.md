@@ -1,23 +1,32 @@
 # `@moq/boy`
 
 ```ts
+import { $strip } from "zod/v4/core";
+import { ZodMiniArray } from "@zod/mini";
+import { ZodMiniNumber } from "@zod/mini";
+import { ZodMiniObject } from "@zod/mini";
+import { ZodMiniOptional } from "@zod/mini";
+import { ZodMiniRecord } from "@zod/mini";
+import { ZodMiniString } from "@zod/mini";
+import { infer } from "@zod/mini";
+
 export class Game {
 	constructor(config: GameConfig);
-	readonly active: Signal<boolean>;
-	readonly audioDecoder: Decoder;
-	readonly audioEmitter: Emitter;
-	readonly audioSource: Source;
-	readonly broadcast: Broadcast;
-	readonly canvas: Signal<HTMLCanvasElement | undefined>;
+	readonly active: Moq.Signals.Signal<boolean>;
+	readonly audioDecoder: Watch.Audio.Decoder;
+	readonly audioEmitter: Watch.Audio.Emitter;
+	readonly audioSource: Watch.Audio.Source;
+	readonly broadcast: Watch.Broadcast;
+	readonly canvas: Moq.Signals.Signal<HTMLCanvasElement | undefined>;
 	close(): void;
-	readonly delay: Signal<Delay>;
-	readonly expanded: Signal<string | undefined>;
+	readonly delay: Moq.Signals.Signal<Watch.Delay>;
+	readonly expanded: Moq.Signals.Signal<string | undefined>;
 	readonly heldButtons: Set<string>;
-	readonly hovered: Signal<boolean>;
+	readonly hovered: Moq.Signals.Signal<boolean>;
 	sendButtons(): void;
 	sendCommand(cmd: Record<string, unknown>): void;
 	readonly sessionId: string;
-	readonly status: Signal<{
+	readonly status: Moq.Signals.Signal<{
 		buttons: string[];
 		latency: Record<string, {
 			label: string;
@@ -31,49 +40,49 @@ export class Game {
 			wall_secs: number;
 		};
 	} | undefined>;
-	readonly sync: Sync;
-	readonly userMuted: Signal<boolean>;
-	readonly videoDecoder: Decoder;
-	readonly videoRenderer: Renderer;
-	readonly videoSource: Source;
-	readonly viewerId: Signal<string | undefined>;
-	readonly volume: Signal<number>;
+	readonly sync: Watch.Sync;
+	readonly userMuted: Moq.Signals.Signal<boolean>;
+	readonly videoDecoder: Watch.Video.Decoder;
+	readonly videoRenderer: Watch.Video.Renderer;
+	readonly videoSource: Watch.Video.Source;
+	readonly viewerId: Moq.Signals.Signal<string | undefined>;
+	readonly volume: Moq.Signals.Signal<number>;
 }
 
 export interface GameConfig {
-	connection: Connection;
-	expanded: Signal<string | undefined>;
+	connection: Moq.Connection;
+	expanded: Moq.Signals.Signal<string | undefined>;
 	gamePrefix: string;
-	origin: Producer;
+	origin: Moq.Origin.Producer;
 	sessionId: string;
 	viewerPrefix: string;
 }
 
-export type GameStats = z.infer<typeof GameStatsSchema>;
+export type GameStats = infer<typeof GameStatsSchema>;
 
-export const GameStatsSchema: z.ZodMiniObject<{
-	audio_secs: z.ZodMiniNumber<number>;
-	emulation_secs: z.ZodMiniNumber<number>;
-	video_secs: z.ZodMiniNumber<number>;
-	wall_secs: z.ZodMiniNumber<number>;
-}, z.core.$strip>;
+export const GameStatsSchema: ZodMiniObject<{
+	audio_secs: ZodMiniNumber<number>;
+	emulation_secs: ZodMiniNumber<number>;
+	video_secs: ZodMiniNumber<number>;
+	wall_secs: ZodMiniNumber<number>;
+}, $strip>;
 
-export type GameStatus = z.infer<typeof GameStatusSchema>;
+export type GameStatus = infer<typeof GameStatusSchema>;
 
-export const GameStatusSchema: z.ZodMiniObject<{
-	buttons: z.ZodMiniArray<z.ZodMiniString<string>>;
-	latency: z.ZodMiniRecord<z.ZodMiniString<string>, z.ZodMiniArray<z.ZodMiniObject<{
-		label: z.ZodMiniString<string>;
-		ms: z.ZodMiniNumber<number>;
-	}, z.core.$strip>>>;
-	location: z.ZodMiniOptional<z.ZodMiniString<string>>;
-	stats: z.ZodMiniOptional<z.ZodMiniObject<{
-		audio_secs: z.ZodMiniNumber<number>;
-		emulation_secs: z.ZodMiniNumber<number>;
-		video_secs: z.ZodMiniNumber<number>;
-		wall_secs: z.ZodMiniNumber<number>;
-	}, z.core.$strip>>;
-}, z.core.$strip>;
+export const GameStatusSchema: ZodMiniObject<{
+	buttons: ZodMiniArray<ZodMiniString<string>>;
+	latency: ZodMiniRecord<ZodMiniString<string>, ZodMiniArray<ZodMiniObject<{
+		label: ZodMiniString<string>;
+		ms: ZodMiniNumber<number>;
+	}, $strip>>>;
+	location: ZodMiniOptional<ZodMiniString<string>>;
+	stats: ZodMiniOptional<ZodMiniObject<{
+		audio_secs: ZodMiniNumber<number>;
+		emulation_secs: ZodMiniNumber<number>;
+		video_secs: ZodMiniNumber<number>;
+		wall_secs: ZodMiniNumber<number>;
+	}, $strip>>;
+}, $strip>;
 
 export const KEY_MAP: Record<string, string>;
 

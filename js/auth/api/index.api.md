@@ -1,9 +1,31 @@
 # `@moq/auth`
 
 ```ts
-export type Algorithm = z.infer<typeof AlgorithmSchema>;
+import { $strict } from "zod/v4/core";
+import { $strip } from "zod/v4/core";
+import { ZodMiniArray } from "@zod/mini";
+import { ZodMiniBoolean } from "@zod/mini";
+import { ZodMiniCatch } from "@zod/mini";
+import { ZodMiniDefault } from "@zod/mini";
+import { ZodMiniDiscriminatedUnion } from "@zod/mini";
+import { ZodMiniEnum } from "@zod/mini";
+import { ZodMiniInt } from "@zod/mini";
+import { ZodMiniLiteral } from "@zod/mini";
+import { ZodMiniNumber } from "@zod/mini";
+import { ZodMiniObject } from "@zod/mini";
+import { ZodMiniOptional } from "@zod/mini";
+import { ZodMiniPipe } from "@zod/mini";
+import { ZodMiniRecord } from "@zod/mini";
+import { ZodMiniString } from "@zod/mini";
+import { ZodMiniTransform } from "@zod/mini";
+import { ZodMiniUnion } from "@zod/mini";
+import { ZodMiniUnknown } from "@zod/mini";
+import { infer } from "@zod/mini";
+import { output } from "@zod/mini";
 
-export const AlgorithmSchema: z.ZodMiniEnum<{
+export type Algorithm = infer<typeof AlgorithmSchema>;
+
+export const AlgorithmSchema: ZodMiniEnum<{
 	ES256: "ES256";
 	ES384: "ES384";
 	EdDSA: "EdDSA";
@@ -22,28 +44,28 @@ export type AsymmetricKey = Exclude<Key, {
 	kty: "oct";
 }>;
 
-export type Bytes = z.infer<typeof BytesSchema>;
+export type Bytes = infer<typeof BytesSchema>;
 
-export const BytesSchema: z.ZodMiniObject<{
-	received: z.ZodMiniInt;
-	sent: z.ZodMiniInt;
-}, z.core.$strip>;
+export const BytesSchema: ZodMiniObject<{
+	received: ZodMiniInt;
+	sent: ZodMiniInt;
+}, $strip>;
 
-export type Claims = z.output<typeof ClaimsSchema>;
+export type Claims = output<typeof ClaimsSchema>;
 
-export const ClaimsSchema: z.ZodMiniPipe<z.ZodMiniObject<{
-	exp: z.ZodMiniOptional<z.ZodMiniInt>;
-	get: z.ZodMiniOptional<z.ZodMiniUnion<readonly [z.ZodMiniString<string>, z.ZodMiniArray<z.ZodMiniString<string>>]>>;
-	iat: z.ZodMiniOptional<z.ZodMiniInt>;
-	iss: z.ZodMiniOptional<z.ZodMiniUnknown>;
-	jti: z.ZodMiniOptional<z.ZodMiniUnknown>;
-	nbf: z.ZodMiniOptional<z.ZodMiniInt>;
-	publish: z.ZodMiniOptional<z.ZodMiniArray<z.ZodMiniString<string>>>;
-	put: z.ZodMiniOptional<z.ZodMiniUnion<readonly [z.ZodMiniString<string>, z.ZodMiniArray<z.ZodMiniString<string>>]>>;
-	root: z.ZodMiniDefault<z.ZodMiniString<string>>;
-	sub: z.ZodMiniOptional<z.ZodMiniUnknown>;
-	subscribe: z.ZodMiniOptional<z.ZodMiniArray<z.ZodMiniString<string>>>;
-}, z.core.$strict>, z.ZodMiniTransform<Omit<{
+export const ClaimsSchema: ZodMiniPipe<ZodMiniObject<{
+	exp: ZodMiniOptional<ZodMiniInt>;
+	get: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniString<string>, ZodMiniArray<ZodMiniString<string>>]>>;
+	iat: ZodMiniOptional<ZodMiniInt>;
+	iss: ZodMiniOptional<ZodMiniUnknown>;
+	jti: ZodMiniOptional<ZodMiniUnknown>;
+	nbf: ZodMiniOptional<ZodMiniInt>;
+	publish: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+	put: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniString<string>, ZodMiniArray<ZodMiniString<string>>]>>;
+	root: ZodMiniDefault<ZodMiniString<string>>;
+	sub: ZodMiniOptional<ZodMiniUnknown>;
+	subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+}, $strict>, ZodMiniTransform<Omit<{
 	exp?: number;
 	get?: string | string[];
 	iat?: number;
@@ -69,20 +91,20 @@ export const ClaimsSchema: z.ZodMiniPipe<z.ZodMiniObject<{
 	subscribe?: string[];
 }>>;
 
-export type Grant = z.infer<typeof GrantSchema>;
+export type Grant = infer<typeof GrantSchema>;
 
-export const GrantSchema: z.ZodMiniObject<{
-	expires: z.ZodMiniOptional<z.ZodMiniInt>;
-	label: z.ZodMiniOptional<z.ZodMiniString<string>>;
-	mounts: z.ZodMiniOptional<z.ZodMiniRecord<z.ZodMiniString<string>, z.ZodMiniString<string>>>;
-	peer: z.ZodMiniOptional<z.ZodMiniBoolean<boolean>>;
-	publish: z.ZodMiniOptional<z.ZodMiniArray<z.ZodMiniString<string>>>;
-	revalidate: z.ZodMiniOptional<z.ZodMiniInt>;
-	root: z.ZodMiniOptional<z.ZodMiniString<string>>;
-	subscribe: z.ZodMiniOptional<z.ZodMiniArray<z.ZodMiniString<string>>>;
-	tier: z.ZodMiniOptional<z.ZodMiniString<string>>;
-	upstream: z.ZodMiniOptional<z.ZodMiniBoolean<boolean>>;
-}, z.core.$strip>;
+export const GrantSchema: ZodMiniObject<{
+	expires: ZodMiniOptional<ZodMiniInt>;
+	label: ZodMiniOptional<ZodMiniString<string>>;
+	mounts: ZodMiniOptional<ZodMiniRecord<ZodMiniString<string>, ZodMiniString<string>>>;
+	peer: ZodMiniOptional<ZodMiniBoolean<boolean>>;
+	publish: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+	revalidate: ZodMiniOptional<ZodMiniInt>;
+	root: ZodMiniOptional<ZodMiniString<string>>;
+	subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+	tier: ZodMiniOptional<ZodMiniString<string>>;
+	upstream: ZodMiniOptional<ZodMiniBoolean<boolean>>;
+}, $strip>;
 
 export { InvalidPattern } from "@moq/pattern";
 
@@ -94,11 +116,11 @@ export const Key: {
 		kid?: string;
 		kty: "oct";
 		scope?: Omit<{
-			get?: ...[];
-			publish?: ...[];
-			put?: ...[];
+			get?: string[];
+			publish?: string[];
+			put?: string[];
 			root: string;
-			subscribe?: ...[];
+			subscribe?: string[];
 		}, "put" | "get"> & {
 			publish?: string[];
 			subscribe?: string[];
@@ -117,11 +139,11 @@ export const Key: {
 		q?: string;
 		qi?: string;
 		scope?: Omit<{
-			get?: ...[];
-			publish?: ...[];
-			put?: ...[];
+			get?: string[];
+			publish?: string[];
+			put?: string[];
 			root: string;
-			subscribe?: ...[];
+			subscribe?: string[];
 		}, "put" | "get"> & {
 			publish?: string[];
 			subscribe?: string[];
@@ -134,11 +156,11 @@ export const Key: {
 		kid?: string;
 		kty: "EC";
 		scope?: Omit<{
-			get?: ...[];
-			publish?: ...[];
-			put?: ...[];
+			get?: string[];
+			publish?: string[];
+			put?: string[];
 			root: string;
-			subscribe?: ...[];
+			subscribe?: string[];
 		}, "put" | "get"> & {
 			publish?: string[];
 			subscribe?: string[];
@@ -153,11 +175,11 @@ export const Key: {
 		kid?: string;
 		kty: "OKP";
 		scope?: Omit<{
-			get?: ...[];
-			publish?: ...[];
-			put?: ...[];
+			get?: string[];
+			publish?: string[];
+			put?: string[];
 			root: string;
-			subscribe?: ...[];
+			subscribe?: string[];
 		}, "put" | "get"> & {
 			publish?: string[];
 			subscribe?: string[];
@@ -438,14 +460,14 @@ export const Key: {
 	}>;
 };
 
-export type Key = z.infer<typeof KeySchema>;
+export type Key = infer<typeof KeySchema>;
 
-export type KeyId = z.infer<typeof KeyIdSchema>;
+export type KeyId = infer<typeof KeyIdSchema>;
 
-export const KeyIdSchema: z.ZodMiniString<string>;
+export const KeyIdSchema: ZodMiniString<string>;
 
-export const KeySchema: z.ZodMiniDiscriminatedUnion<[z.ZodMiniObject<{
-	alg: z.ZodMiniEnum<{
+export const KeySchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
+	alg: ZodMiniEnum<{
 		ES256: "ES256";
 		ES384: "ES384";
 		EdDSA: "EdDSA";
@@ -459,27 +481,27 @@ export const KeySchema: z.ZodMiniDiscriminatedUnion<[z.ZodMiniObject<{
 		RS384: "RS384";
 		RS512: "RS512";
 	}>;
-	k: z.ZodMiniString<string>;
-	key_ops: z.ZodMiniDefault<z.ZodMiniArray<z.ZodMiniEnum<{
+	k: ZodMiniString<string>;
+	key_ops: ZodMiniDefault<ZodMiniArray<ZodMiniEnum<{
 		decrypt: "decrypt";
 		encrypt: "encrypt";
 		sign: "sign";
 		verify: "verify";
 	}>>>;
-	kid: z.ZodMiniOptional<z.ZodMiniString<string>>;
-	kty: z.ZodMiniLiteral<"oct">;
-	scope: z.ZodMiniOptional<z.ZodMiniPipe<z.ZodMiniObject<{
-		get: z.ZodMiniOptional<z.ZodMiniArray<z.ZodMiniString<...>>>;
-		publish: z.ZodMiniOptional<z.ZodMiniArray<z.ZodMiniString<...>>>;
-		put: z.ZodMiniOptional<z.ZodMiniArray<z.ZodMiniString<...>>>;
-		root: z.ZodMiniDefault<z.ZodMiniString<string>>;
-		subscribe: z.ZodMiniOptional<z.ZodMiniArray<z.ZodMiniString<...>>>;
-	}, z.core.$strict>, z.ZodMiniTransform<Omit<{
-		get?: ... | ...;
-		publish?: ... | ...;
-		put?: ... | ...;
+	kid: ZodMiniOptional<ZodMiniString<string>>;
+	kty: ZodMiniLiteral<"oct">;
+	scope: ZodMiniOptional<ZodMiniPipe<ZodMiniObject<{
+		get: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+		publish: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+		put: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+		root: ZodMiniDefault<ZodMiniString<string>>;
+		subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+	}, $strict>, ZodMiniTransform<Omit<{
+		get?: string[];
+		publish?: string[];
+		put?: string[];
 		root: string;
-		subscribe?: ... | ...;
+		subscribe?: string[];
 	}, "get" | "put"> & {
 		publish?: string[];
 		subscribe?: string[];
@@ -490,8 +512,8 @@ export const KeySchema: z.ZodMiniDiscriminatedUnion<[z.ZodMiniObject<{
 		root: string;
 		subscribe?: string[];
 	}>>>;
-}, z.core.$strip>, z.ZodMiniObject<{
-	alg: z.ZodMiniEnum<{
+}, $strip>, ZodMiniObject<{
+	alg: ZodMiniEnum<{
 		ES256: "ES256";
 		ES384: "ES384";
 		EdDSA: "EdDSA";
@@ -505,34 +527,34 @@ export const KeySchema: z.ZodMiniDiscriminatedUnion<[z.ZodMiniObject<{
 		RS384: "RS384";
 		RS512: "RS512";
 	}>;
-	d: z.ZodMiniOptional<z.ZodMiniString<string>>;
-	dp: z.ZodMiniOptional<z.ZodMiniString<string>>;
-	dq: z.ZodMiniOptional<z.ZodMiniString<string>>;
-	e: z.ZodMiniString<string>;
-	key_ops: z.ZodMiniDefault<z.ZodMiniArray<z.ZodMiniEnum<{
+	d: ZodMiniOptional<ZodMiniString<string>>;
+	dp: ZodMiniOptional<ZodMiniString<string>>;
+	dq: ZodMiniOptional<ZodMiniString<string>>;
+	e: ZodMiniString<string>;
+	key_ops: ZodMiniDefault<ZodMiniArray<ZodMiniEnum<{
 		decrypt: "decrypt";
 		encrypt: "encrypt";
 		sign: "sign";
 		verify: "verify";
 	}>>>;
-	kid: z.ZodMiniOptional<z.ZodMiniString<string>>;
-	kty: z.ZodMiniLiteral<"RSA">;
-	n: z.ZodMiniString<string>;
-	p: z.ZodMiniOptional<z.ZodMiniString<string>>;
-	q: z.ZodMiniOptional<z.ZodMiniString<string>>;
-	qi: z.ZodMiniOptional<z.ZodMiniString<string>>;
-	scope: z.ZodMiniOptional<z.ZodMiniPipe<z.ZodMiniObject<{
-		get: z.ZodMiniOptional<z.ZodMiniArray<z.ZodMiniString<...>>>;
-		publish: z.ZodMiniOptional<z.ZodMiniArray<z.ZodMiniString<...>>>;
-		put: z.ZodMiniOptional<z.ZodMiniArray<z.ZodMiniString<...>>>;
-		root: z.ZodMiniDefault<z.ZodMiniString<string>>;
-		subscribe: z.ZodMiniOptional<z.ZodMiniArray<z.ZodMiniString<...>>>;
-	}, z.core.$strict>, z.ZodMiniTransform<Omit<{
-		get?: ... | ...;
-		publish?: ... | ...;
-		put?: ... | ...;
+	kid: ZodMiniOptional<ZodMiniString<string>>;
+	kty: ZodMiniLiteral<"RSA">;
+	n: ZodMiniString<string>;
+	p: ZodMiniOptional<ZodMiniString<string>>;
+	q: ZodMiniOptional<ZodMiniString<string>>;
+	qi: ZodMiniOptional<ZodMiniString<string>>;
+	scope: ZodMiniOptional<ZodMiniPipe<ZodMiniObject<{
+		get: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+		publish: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+		put: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+		root: ZodMiniDefault<ZodMiniString<string>>;
+		subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+	}, $strict>, ZodMiniTransform<Omit<{
+		get?: string[];
+		publish?: string[];
+		put?: string[];
 		root: string;
-		subscribe?: ... | ...;
+		subscribe?: string[];
 	}, "get" | "put"> & {
 		publish?: string[];
 		subscribe?: string[];
@@ -543,8 +565,8 @@ export const KeySchema: z.ZodMiniDiscriminatedUnion<[z.ZodMiniObject<{
 		root: string;
 		subscribe?: string[];
 	}>>>;
-}, z.core.$strip>, z.ZodMiniObject<{
-	alg: z.ZodMiniEnum<{
+}, $strip>, ZodMiniObject<{
+	alg: ZodMiniEnum<{
 		ES256: "ES256";
 		ES384: "ES384";
 		EdDSA: "EdDSA";
@@ -558,31 +580,31 @@ export const KeySchema: z.ZodMiniDiscriminatedUnion<[z.ZodMiniObject<{
 		RS384: "RS384";
 		RS512: "RS512";
 	}>;
-	crv: z.ZodMiniEnum<{
+	crv: ZodMiniEnum<{
 		P-256: "P-256";
 		P-384: "P-384";
 	}>;
-	d: z.ZodMiniOptional<z.ZodMiniString<string>>;
-	key_ops: z.ZodMiniDefault<z.ZodMiniArray<z.ZodMiniEnum<{
+	d: ZodMiniOptional<ZodMiniString<string>>;
+	key_ops: ZodMiniDefault<ZodMiniArray<ZodMiniEnum<{
 		decrypt: "decrypt";
 		encrypt: "encrypt";
 		sign: "sign";
 		verify: "verify";
 	}>>>;
-	kid: z.ZodMiniOptional<z.ZodMiniString<string>>;
-	kty: z.ZodMiniLiteral<"EC">;
-	scope: z.ZodMiniOptional<z.ZodMiniPipe<z.ZodMiniObject<{
-		get: z.ZodMiniOptional<z.ZodMiniArray<z.ZodMiniString<...>>>;
-		publish: z.ZodMiniOptional<z.ZodMiniArray<z.ZodMiniString<...>>>;
-		put: z.ZodMiniOptional<z.ZodMiniArray<z.ZodMiniString<...>>>;
-		root: z.ZodMiniDefault<z.ZodMiniString<string>>;
-		subscribe: z.ZodMiniOptional<z.ZodMiniArray<z.ZodMiniString<...>>>;
-	}, z.core.$strict>, z.ZodMiniTransform<Omit<{
-		get?: ... | ...;
-		publish?: ... | ...;
-		put?: ... | ...;
+	kid: ZodMiniOptional<ZodMiniString<string>>;
+	kty: ZodMiniLiteral<"EC">;
+	scope: ZodMiniOptional<ZodMiniPipe<ZodMiniObject<{
+		get: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+		publish: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+		put: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+		root: ZodMiniDefault<ZodMiniString<string>>;
+		subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+	}, $strict>, ZodMiniTransform<Omit<{
+		get?: string[];
+		publish?: string[];
+		put?: string[];
 		root: string;
-		subscribe?: ... | ...;
+		subscribe?: string[];
 	}, "get" | "put"> & {
 		publish?: string[];
 		subscribe?: string[];
@@ -593,10 +615,10 @@ export const KeySchema: z.ZodMiniDiscriminatedUnion<[z.ZodMiniObject<{
 		root: string;
 		subscribe?: string[];
 	}>>>;
-	x: z.ZodMiniString<string>;
-	y: z.ZodMiniString<string>;
-}, z.core.$strip>, z.ZodMiniObject<{
-	alg: z.ZodMiniEnum<{
+	x: ZodMiniString<string>;
+	y: ZodMiniString<string>;
+}, $strip>, ZodMiniObject<{
+	alg: ZodMiniEnum<{
 		ES256: "ES256";
 		ES384: "ES384";
 		EdDSA: "EdDSA";
@@ -610,28 +632,28 @@ export const KeySchema: z.ZodMiniDiscriminatedUnion<[z.ZodMiniObject<{
 		RS384: "RS384";
 		RS512: "RS512";
 	}>;
-	crv: z.ZodMiniLiteral<"Ed25519">;
-	d: z.ZodMiniOptional<z.ZodMiniString<string>>;
-	key_ops: z.ZodMiniDefault<z.ZodMiniArray<z.ZodMiniEnum<{
+	crv: ZodMiniLiteral<"Ed25519">;
+	d: ZodMiniOptional<ZodMiniString<string>>;
+	key_ops: ZodMiniDefault<ZodMiniArray<ZodMiniEnum<{
 		decrypt: "decrypt";
 		encrypt: "encrypt";
 		sign: "sign";
 		verify: "verify";
 	}>>>;
-	kid: z.ZodMiniOptional<z.ZodMiniString<string>>;
-	kty: z.ZodMiniLiteral<"OKP">;
-	scope: z.ZodMiniOptional<z.ZodMiniPipe<z.ZodMiniObject<{
-		get: z.ZodMiniOptional<z.ZodMiniArray<z.ZodMiniString<...>>>;
-		publish: z.ZodMiniOptional<z.ZodMiniArray<z.ZodMiniString<...>>>;
-		put: z.ZodMiniOptional<z.ZodMiniArray<z.ZodMiniString<...>>>;
-		root: z.ZodMiniDefault<z.ZodMiniString<string>>;
-		subscribe: z.ZodMiniOptional<z.ZodMiniArray<z.ZodMiniString<...>>>;
-	}, z.core.$strict>, z.ZodMiniTransform<Omit<{
-		get?: ... | ...;
-		publish?: ... | ...;
-		put?: ... | ...;
+	kid: ZodMiniOptional<ZodMiniString<string>>;
+	kty: ZodMiniLiteral<"OKP">;
+	scope: ZodMiniOptional<ZodMiniPipe<ZodMiniObject<{
+		get: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+		publish: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+		put: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+		root: ZodMiniDefault<ZodMiniString<string>>;
+		subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+	}, $strict>, ZodMiniTransform<Omit<{
+		get?: string[];
+		publish?: string[];
+		put?: string[];
 		root: string;
-		subscribe?: ... | ...;
+		subscribe?: string[];
 	}, "get" | "put"> & {
 		publish?: string[];
 		subscribe?: string[];
@@ -642,8 +664,8 @@ export const KeySchema: z.ZodMiniDiscriminatedUnion<[z.ZodMiniObject<{
 		root: string;
 		subscribe?: string[];
 	}>>>;
-	x: z.ZodMiniString<string>;
-}, z.core.$strip>], "kty">;
+	x: ZodMiniString<string>;
+}, $strip>], "kty">;
 
 export const KeySet: {
 	find: (set: {
@@ -654,14 +676,14 @@ export const KeySet: {
 			kid?: string;
 			kty: "oct";
 			scope?: Omit<{
-				get?: ... | ...;
-				publish?: ... | ...;
-				put?: ... | ...;
+				get?: string[];
+				publish?: string[];
+				put?: string[];
 				root: string;
-				subscribe?: ... | ...;
+				subscribe?: string[];
 			}, "put" | "get"> & {
-				publish?: ...[];
-				subscribe?: ...[];
+				publish?: string[];
+				subscribe?: string[];
 			};
 		} | {
 			alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
@@ -677,14 +699,14 @@ export const KeySet: {
 			q?: string;
 			qi?: string;
 			scope?: Omit<{
-				get?: ... | ...;
-				publish?: ... | ...;
-				put?: ... | ...;
+				get?: string[];
+				publish?: string[];
+				put?: string[];
 				root: string;
-				subscribe?: ... | ...;
+				subscribe?: string[];
 			}, "put" | "get"> & {
-				publish?: ...[];
-				subscribe?: ...[];
+				publish?: string[];
+				subscribe?: string[];
 			};
 		} | {
 			alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
@@ -694,14 +716,14 @@ export const KeySet: {
 			kid?: string;
 			kty: "EC";
 			scope?: Omit<{
-				get?: ... | ...;
-				publish?: ... | ...;
-				put?: ... | ...;
+				get?: string[];
+				publish?: string[];
+				put?: string[];
 				root: string;
-				subscribe?: ... | ...;
+				subscribe?: string[];
 			}, "put" | "get"> & {
-				publish?: ...[];
-				subscribe?: ...[];
+				publish?: string[];
+				subscribe?: string[];
 			};
 			x: string;
 			y: string;
@@ -713,14 +735,14 @@ export const KeySet: {
 			kid?: string;
 			kty: "OKP";
 			scope?: Omit<{
-				get?: ... | ...;
-				publish?: ... | ...;
-				put?: ... | ...;
+				get?: string[];
+				publish?: string[];
+				put?: string[];
 				root: string;
-				subscribe?: ... | ...;
+				subscribe?: string[];
 			}, "put" | "get"> & {
-				publish?: ...[];
-				subscribe?: ...[];
+				publish?: string[];
+				subscribe?: string[];
 			};
 			x: string;
 		})[];
@@ -809,14 +831,14 @@ export const KeySet: {
 			kid?: string;
 			kty: "oct";
 			scope?: Omit<{
-				get?: ... | ...;
-				publish?: ... | ...;
-				put?: ... | ...;
+				get?: string[];
+				publish?: string[];
+				put?: string[];
 				root: string;
-				subscribe?: ... | ...;
+				subscribe?: string[];
 			}, "put" | "get"> & {
-				publish?: ...[];
-				subscribe?: ...[];
+				publish?: string[];
+				subscribe?: string[];
 			};
 		} | {
 			alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
@@ -832,14 +854,14 @@ export const KeySet: {
 			q?: string;
 			qi?: string;
 			scope?: Omit<{
-				get?: ... | ...;
-				publish?: ... | ...;
-				put?: ... | ...;
+				get?: string[];
+				publish?: string[];
+				put?: string[];
 				root: string;
-				subscribe?: ... | ...;
+				subscribe?: string[];
 			}, "put" | "get"> & {
-				publish?: ...[];
-				subscribe?: ...[];
+				publish?: string[];
+				subscribe?: string[];
 			};
 		} | {
 			alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
@@ -849,14 +871,14 @@ export const KeySet: {
 			kid?: string;
 			kty: "EC";
 			scope?: Omit<{
-				get?: ... | ...;
-				publish?: ... | ...;
-				put?: ... | ...;
+				get?: string[];
+				publish?: string[];
+				put?: string[];
 				root: string;
-				subscribe?: ... | ...;
+				subscribe?: string[];
 			}, "put" | "get"> & {
-				publish?: ...[];
-				subscribe?: ...[];
+				publish?: string[];
+				subscribe?: string[];
 			};
 			x: string;
 			y: string;
@@ -868,14 +890,14 @@ export const KeySet: {
 			kid?: string;
 			kty: "OKP";
 			scope?: Omit<{
-				get?: ... | ...;
-				publish?: ... | ...;
-				put?: ... | ...;
+				get?: string[];
+				publish?: string[];
+				put?: string[];
 				root: string;
-				subscribe?: ... | ...;
+				subscribe?: string[];
 			}, "put" | "get"> & {
-				publish?: ...[];
-				subscribe?: ...[];
+				publish?: string[];
+				subscribe?: string[];
 			};
 			x: string;
 		})[];
@@ -888,14 +910,14 @@ export const KeySet: {
 			kid?: string;
 			kty: "oct";
 			scope?: Omit<{
-				get?: ... | ...;
-				publish?: ... | ...;
-				put?: ... | ...;
+				get?: string[];
+				publish?: string[];
+				put?: string[];
 				root: string;
-				subscribe?: ... | ...;
+				subscribe?: string[];
 			}, "put" | "get"> & {
-				publish?: ...[];
-				subscribe?: ...[];
+				publish?: string[];
+				subscribe?: string[];
 			};
 		} | {
 			alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
@@ -911,14 +933,14 @@ export const KeySet: {
 			q?: string;
 			qi?: string;
 			scope?: Omit<{
-				get?: ... | ...;
-				publish?: ... | ...;
-				put?: ... | ...;
+				get?: string[];
+				publish?: string[];
+				put?: string[];
 				root: string;
-				subscribe?: ... | ...;
+				subscribe?: string[];
 			}, "put" | "get"> & {
-				publish?: ...[];
-				subscribe?: ...[];
+				publish?: string[];
+				subscribe?: string[];
 			};
 		} | {
 			alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
@@ -928,14 +950,14 @@ export const KeySet: {
 			kid?: string;
 			kty: "EC";
 			scope?: Omit<{
-				get?: ... | ...;
-				publish?: ... | ...;
-				put?: ... | ...;
+				get?: string[];
+				publish?: string[];
+				put?: string[];
 				root: string;
-				subscribe?: ... | ...;
+				subscribe?: string[];
 			}, "put" | "get"> & {
-				publish?: ...[];
-				subscribe?: ...[];
+				publish?: string[];
+				subscribe?: string[];
 			};
 			x: string;
 			y: string;
@@ -947,14 +969,14 @@ export const KeySet: {
 			kid?: string;
 			kty: "OKP";
 			scope?: Omit<{
-				get?: ... | ...;
-				publish?: ... | ...;
-				put?: ... | ...;
+				get?: string[];
+				publish?: string[];
+				put?: string[];
 				root: string;
-				subscribe?: ... | ...;
+				subscribe?: string[];
 			}, "put" | "get"> & {
-				publish?: ...[];
-				subscribe?: ...[];
+				publish?: string[];
+				subscribe?: string[];
 			};
 			x: string;
 		})[];
@@ -967,14 +989,14 @@ export const KeySet: {
 			kid?: string;
 			kty: "oct";
 			scope?: Omit<{
-				get?: ... | ...;
-				publish?: ... | ...;
-				put?: ... | ...;
+				get?: string[];
+				publish?: string[];
+				put?: string[];
 				root: string;
-				subscribe?: ... | ...;
+				subscribe?: string[];
 			}, "put" | "get"> & {
-				publish?: ...[];
-				subscribe?: ...[];
+				publish?: string[];
+				subscribe?: string[];
 			};
 		} | {
 			alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
@@ -990,14 +1012,14 @@ export const KeySet: {
 			q?: string;
 			qi?: string;
 			scope?: Omit<{
-				get?: ... | ...;
-				publish?: ... | ...;
-				put?: ... | ...;
+				get?: string[];
+				publish?: string[];
+				put?: string[];
 				root: string;
-				subscribe?: ... | ...;
+				subscribe?: string[];
 			}, "put" | "get"> & {
-				publish?: ...[];
-				subscribe?: ...[];
+				publish?: string[];
+				subscribe?: string[];
 			};
 		} | {
 			alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
@@ -1007,14 +1029,14 @@ export const KeySet: {
 			kid?: string;
 			kty: "EC";
 			scope?: Omit<{
-				get?: ... | ...;
-				publish?: ... | ...;
-				put?: ... | ...;
+				get?: string[];
+				publish?: string[];
+				put?: string[];
 				root: string;
-				subscribe?: ... | ...;
+				subscribe?: string[];
 			}, "put" | "get"> & {
-				publish?: ...[];
-				subscribe?: ...[];
+				publish?: string[];
+				subscribe?: string[];
 			};
 			x: string;
 			y: string;
@@ -1026,14 +1048,14 @@ export const KeySet: {
 			kid?: string;
 			kty: "OKP";
 			scope?: Omit<{
-				get?: ... | ...;
-				publish?: ... | ...;
-				put?: ... | ...;
+				get?: string[];
+				publish?: string[];
+				put?: string[];
 				root: string;
-				subscribe?: ... | ...;
+				subscribe?: string[];
 			}, "put" | "get"> & {
-				publish?: ...[];
-				subscribe?: ...[];
+				publish?: string[];
+				subscribe?: string[];
 			};
 			x: string;
 		})[];
@@ -1058,14 +1080,14 @@ export const KeySet: {
 			kid?: string;
 			kty: "oct";
 			scope?: Omit<{
-				get?: ... | ...;
-				publish?: ... | ...;
-				put?: ... | ...;
+				get?: string[];
+				publish?: string[];
+				put?: string[];
 				root: string;
-				subscribe?: ... | ...;
+				subscribe?: string[];
 			}, "put" | "get"> & {
-				publish?: ...[];
-				subscribe?: ...[];
+				publish?: string[];
+				subscribe?: string[];
 			};
 		} | {
 			alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
@@ -1081,14 +1103,14 @@ export const KeySet: {
 			q?: string;
 			qi?: string;
 			scope?: Omit<{
-				get?: ... | ...;
-				publish?: ... | ...;
-				put?: ... | ...;
+				get?: string[];
+				publish?: string[];
+				put?: string[];
 				root: string;
-				subscribe?: ... | ...;
+				subscribe?: string[];
 			}, "put" | "get"> & {
-				publish?: ...[];
-				subscribe?: ...[];
+				publish?: string[];
+				subscribe?: string[];
 			};
 		} | {
 			alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
@@ -1098,14 +1120,14 @@ export const KeySet: {
 			kid?: string;
 			kty: "EC";
 			scope?: Omit<{
-				get?: ... | ...;
-				publish?: ... | ...;
-				put?: ... | ...;
+				get?: string[];
+				publish?: string[];
+				put?: string[];
 				root: string;
-				subscribe?: ... | ...;
+				subscribe?: string[];
 			}, "put" | "get"> & {
-				publish?: ...[];
-				subscribe?: ...[];
+				publish?: string[];
+				subscribe?: string[];
 			};
 			x: string;
 			y: string;
@@ -1117,14 +1139,14 @@ export const KeySet: {
 			kid?: string;
 			kty: "OKP";
 			scope?: Omit<{
-				get?: ... | ...;
-				publish?: ... | ...;
-				put?: ... | ...;
+				get?: string[];
+				publish?: string[];
+				put?: string[];
 				root: string;
-				subscribe?: ... | ...;
+				subscribe?: string[];
 			}, "put" | "get"> & {
-				publish?: ...[];
-				subscribe?: ...[];
+				publish?: string[];
+				subscribe?: string[];
 			};
 			x: string;
 		})[];
@@ -1143,11 +1165,11 @@ export const KeySet: {
 	}>;
 };
 
-export type KeySet = z.infer<typeof KeySetSchema>;
+export type KeySet = infer<typeof KeySetSchema>;
 
-export const KeySetSchema: z.ZodMiniObject<{
-	keys: z.ZodMiniArray<z.ZodMiniDiscriminatedUnion<[z.ZodMiniObject<{
-		alg: z.ZodMiniEnum<{
+export const KeySetSchema: ZodMiniObject<{
+	keys: ZodMiniArray<ZodMiniDiscriminatedUnion<[ZodMiniObject<{
+		alg: ZodMiniEnum<{
 			ES256: "ES256";
 			ES384: "ES384";
 			EdDSA: "EdDSA";
@@ -1161,30 +1183,39 @@ export const KeySetSchema: z.ZodMiniObject<{
 			RS384: "RS384";
 			RS512: "RS512";
 		}>;
-		k: z.ZodMiniString<string>;
-		key_ops: z.ZodMiniDefault<z.ZodMiniArray<z.ZodMiniEnum<{
-			decrypt: ...;
-			encrypt: ...;
-			sign: ...;
-			verify: ...;
+		k: ZodMiniString<string>;
+		key_ops: ZodMiniDefault<ZodMiniArray<ZodMiniEnum<{
+			decrypt: "decrypt";
+			encrypt: "encrypt";
+			sign: "sign";
+			verify: "verify";
 		}>>>;
-		kid: z.ZodMiniOptional<z.ZodMiniString<string>>;
-		kty: z.ZodMiniLiteral<"oct">;
-		scope: z.ZodMiniOptional<z.ZodMiniPipe<z.ZodMiniObject<{
-			get: ...;
-			publish: ...;
-			put: ...;
-			root: ...;
-			subscribe: ...;
-		}, z.core.$strict>, z.ZodMiniTransform<... & ..., {
-			get?: ...;
-			publish?: ...;
-			put?: ...;
-			root: ...;
-			subscribe?: ...;
+		kid: ZodMiniOptional<ZodMiniString<string>>;
+		kty: ZodMiniLiteral<"oct">;
+		scope: ZodMiniOptional<ZodMiniPipe<ZodMiniObject<{
+			get: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+			publish: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+			put: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+			root: ZodMiniDefault<ZodMiniString<string>>;
+			subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+		}, $strict>, ZodMiniTransform<Omit<{
+			get?: string[];
+			publish?: string[];
+			put?: string[];
+			root: string;
+			subscribe?: string[];
+		}, "get" | "put"> & {
+			publish?: string[];
+			subscribe?: string[];
+		}, {
+			get?: string[];
+			publish?: string[];
+			put?: string[];
+			root: string;
+			subscribe?: string[];
 		}>>>;
-	}, z.core.$strip>, z.ZodMiniObject<{
-		alg: z.ZodMiniEnum<{
+	}, $strip>, ZodMiniObject<{
+		alg: ZodMiniEnum<{
 			ES256: "ES256";
 			ES384: "ES384";
 			EdDSA: "EdDSA";
@@ -1198,37 +1229,46 @@ export const KeySetSchema: z.ZodMiniObject<{
 			RS384: "RS384";
 			RS512: "RS512";
 		}>;
-		d: z.ZodMiniOptional<z.ZodMiniString<string>>;
-		dp: z.ZodMiniOptional<z.ZodMiniString<string>>;
-		dq: z.ZodMiniOptional<z.ZodMiniString<string>>;
-		e: z.ZodMiniString<string>;
-		key_ops: z.ZodMiniDefault<z.ZodMiniArray<z.ZodMiniEnum<{
-			decrypt: ...;
-			encrypt: ...;
-			sign: ...;
-			verify: ...;
+		d: ZodMiniOptional<ZodMiniString<string>>;
+		dp: ZodMiniOptional<ZodMiniString<string>>;
+		dq: ZodMiniOptional<ZodMiniString<string>>;
+		e: ZodMiniString<string>;
+		key_ops: ZodMiniDefault<ZodMiniArray<ZodMiniEnum<{
+			decrypt: "decrypt";
+			encrypt: "encrypt";
+			sign: "sign";
+			verify: "verify";
 		}>>>;
-		kid: z.ZodMiniOptional<z.ZodMiniString<string>>;
-		kty: z.ZodMiniLiteral<"RSA">;
-		n: z.ZodMiniString<string>;
-		p: z.ZodMiniOptional<z.ZodMiniString<string>>;
-		q: z.ZodMiniOptional<z.ZodMiniString<string>>;
-		qi: z.ZodMiniOptional<z.ZodMiniString<string>>;
-		scope: z.ZodMiniOptional<z.ZodMiniPipe<z.ZodMiniObject<{
-			get: ...;
-			publish: ...;
-			put: ...;
-			root: ...;
-			subscribe: ...;
-		}, z.core.$strict>, z.ZodMiniTransform<... & ..., {
-			get?: ...;
-			publish?: ...;
-			put?: ...;
-			root: ...;
-			subscribe?: ...;
+		kid: ZodMiniOptional<ZodMiniString<string>>;
+		kty: ZodMiniLiteral<"RSA">;
+		n: ZodMiniString<string>;
+		p: ZodMiniOptional<ZodMiniString<string>>;
+		q: ZodMiniOptional<ZodMiniString<string>>;
+		qi: ZodMiniOptional<ZodMiniString<string>>;
+		scope: ZodMiniOptional<ZodMiniPipe<ZodMiniObject<{
+			get: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+			publish: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+			put: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+			root: ZodMiniDefault<ZodMiniString<string>>;
+			subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+		}, $strict>, ZodMiniTransform<Omit<{
+			get?: string[];
+			publish?: string[];
+			put?: string[];
+			root: string;
+			subscribe?: string[];
+		}, "get" | "put"> & {
+			publish?: string[];
+			subscribe?: string[];
+		}, {
+			get?: string[];
+			publish?: string[];
+			put?: string[];
+			root: string;
+			subscribe?: string[];
 		}>>>;
-	}, z.core.$strip>, z.ZodMiniObject<{
-		alg: z.ZodMiniEnum<{
+	}, $strip>, ZodMiniObject<{
+		alg: ZodMiniEnum<{
 			ES256: "ES256";
 			ES384: "ES384";
 			EdDSA: "EdDSA";
@@ -1242,36 +1282,45 @@ export const KeySetSchema: z.ZodMiniObject<{
 			RS384: "RS384";
 			RS512: "RS512";
 		}>;
-		crv: z.ZodMiniEnum<{
+		crv: ZodMiniEnum<{
 			P-256: "P-256";
 			P-384: "P-384";
 		}>;
-		d: z.ZodMiniOptional<z.ZodMiniString<string>>;
-		key_ops: z.ZodMiniDefault<z.ZodMiniArray<z.ZodMiniEnum<{
-			decrypt: ...;
-			encrypt: ...;
-			sign: ...;
-			verify: ...;
+		d: ZodMiniOptional<ZodMiniString<string>>;
+		key_ops: ZodMiniDefault<ZodMiniArray<ZodMiniEnum<{
+			decrypt: "decrypt";
+			encrypt: "encrypt";
+			sign: "sign";
+			verify: "verify";
 		}>>>;
-		kid: z.ZodMiniOptional<z.ZodMiniString<string>>;
-		kty: z.ZodMiniLiteral<"EC">;
-		scope: z.ZodMiniOptional<z.ZodMiniPipe<z.ZodMiniObject<{
-			get: ...;
-			publish: ...;
-			put: ...;
-			root: ...;
-			subscribe: ...;
-		}, z.core.$strict>, z.ZodMiniTransform<... & ..., {
-			get?: ...;
-			publish?: ...;
-			put?: ...;
-			root: ...;
-			subscribe?: ...;
+		kid: ZodMiniOptional<ZodMiniString<string>>;
+		kty: ZodMiniLiteral<"EC">;
+		scope: ZodMiniOptional<ZodMiniPipe<ZodMiniObject<{
+			get: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+			publish: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+			put: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+			root: ZodMiniDefault<ZodMiniString<string>>;
+			subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+		}, $strict>, ZodMiniTransform<Omit<{
+			get?: string[];
+			publish?: string[];
+			put?: string[];
+			root: string;
+			subscribe?: string[];
+		}, "get" | "put"> & {
+			publish?: string[];
+			subscribe?: string[];
+		}, {
+			get?: string[];
+			publish?: string[];
+			put?: string[];
+			root: string;
+			subscribe?: string[];
 		}>>>;
-		x: z.ZodMiniString<string>;
-		y: z.ZodMiniString<string>;
-	}, z.core.$strip>, z.ZodMiniObject<{
-		alg: z.ZodMiniEnum<{
+		x: ZodMiniString<string>;
+		y: ZodMiniString<string>;
+	}, $strip>, ZodMiniObject<{
+		alg: ZodMiniEnum<{
 			ES256: "ES256";
 			ES384: "ES384";
 			EdDSA: "EdDSA";
@@ -1285,36 +1334,45 @@ export const KeySetSchema: z.ZodMiniObject<{
 			RS384: "RS384";
 			RS512: "RS512";
 		}>;
-		crv: z.ZodMiniLiteral<"Ed25519">;
-		d: z.ZodMiniOptional<z.ZodMiniString<string>>;
-		key_ops: z.ZodMiniDefault<z.ZodMiniArray<z.ZodMiniEnum<{
-			decrypt: ...;
-			encrypt: ...;
-			sign: ...;
-			verify: ...;
+		crv: ZodMiniLiteral<"Ed25519">;
+		d: ZodMiniOptional<ZodMiniString<string>>;
+		key_ops: ZodMiniDefault<ZodMiniArray<ZodMiniEnum<{
+			decrypt: "decrypt";
+			encrypt: "encrypt";
+			sign: "sign";
+			verify: "verify";
 		}>>>;
-		kid: z.ZodMiniOptional<z.ZodMiniString<string>>;
-		kty: z.ZodMiniLiteral<"OKP">;
-		scope: z.ZodMiniOptional<z.ZodMiniPipe<z.ZodMiniObject<{
-			get: ...;
-			publish: ...;
-			put: ...;
-			root: ...;
-			subscribe: ...;
-		}, z.core.$strict>, z.ZodMiniTransform<... & ..., {
-			get?: ...;
-			publish?: ...;
-			put?: ...;
-			root: ...;
-			subscribe?: ...;
+		kid: ZodMiniOptional<ZodMiniString<string>>;
+		kty: ZodMiniLiteral<"OKP">;
+		scope: ZodMiniOptional<ZodMiniPipe<ZodMiniObject<{
+			get: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+			publish: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+			put: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+			root: ZodMiniDefault<ZodMiniString<string>>;
+			subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+		}, $strict>, ZodMiniTransform<Omit<{
+			get?: string[];
+			publish?: string[];
+			put?: string[];
+			root: string;
+			subscribe?: string[];
+		}, "get" | "put"> & {
+			publish?: string[];
+			subscribe?: string[];
+		}, {
+			get?: string[];
+			publish?: string[];
+			put?: string[];
+			root: string;
+			subscribe?: string[];
 		}>>>;
-		x: z.ZodMiniString<string>;
-	}, z.core.$strip>], "kty">>;
-}, z.core.$strip>;
+		x: ZodMiniString<string>;
+	}, $strip>], "kty">>;
+}, $strip>;
 
-export type Operation = z.infer<typeof OperationSchema>;
+export type Operation = infer<typeof OperationSchema>;
 
-export const OperationSchema: z.ZodMiniEnum<{
+export const OperationSchema: ZodMiniEnum<{
 	decrypt: "decrypt";
 	encrypt: "encrypt";
 	sign: "sign";
@@ -1323,18 +1381,18 @@ export const OperationSchema: z.ZodMiniEnum<{
 
 export { Pattern } from "@moq/pattern";
 
-export const PatternListSchema: z.ZodMiniArray<z.ZodMiniString<string>>;
+export const PatternListSchema: ZodMiniArray<ZodMiniString<string>>;
 
 export { Patterns } from "@moq/pattern";
 
-export type Peer = z.infer<typeof PeerSchema>;
+export type Peer = infer<typeof PeerSchema>;
 
-export const PeerSchema: z.ZodMiniObject<{
-	expires: z.ZodMiniOptional<z.ZodMiniInt>;
-	fingerprint: z.ZodMiniString<string>;
-	issuer: z.ZodMiniString<string>;
-	name: z.ZodMiniString<string>;
-}, z.core.$strip>;
+export const PeerSchema: ZodMiniObject<{
+	expires: ZodMiniOptional<ZodMiniInt>;
+	fingerprint: ZodMiniString<string>;
+	issuer: ZodMiniString<string>;
+	name: ZodMiniString<string>;
+}, $strip>;
 
 export interface Permissions {
 	publish: Patterns;
@@ -1347,47 +1405,47 @@ export interface PublicKeySet {
 	keys: PublicKey[];
 }
 
-export type Refusal = z.infer<typeof RefusalSchema>;
+export type Refusal = infer<typeof RefusalSchema>;
 
-export const RefusalSchema: z.ZodMiniObject<{
-	reason: z.ZodMiniPipe<z.ZodMiniString<string>, z.ZodMiniCatch<z.ZodMiniEnum<{
+export const RefusalSchema: ZodMiniObject<{
+	reason: ZodMiniPipe<ZodMiniString<string>, ZodMiniCatch<ZodMiniEnum<{
 		expired: "expired";
 		forbidden: "forbidden";
 		malformed: "malformed";
 		refused: "refused";
 	}>>>;
-	root: z.ZodMiniOptional<z.ZodMiniString<string>>;
-	tier: z.ZodMiniOptional<z.ZodMiniString<string>>;
-}, z.core.$strip>;
+	root: ZodMiniOptional<ZodMiniString<string>>;
+	tier: ZodMiniOptional<ZodMiniString<string>>;
+}, $strip>;
 
-export type Request = z.infer<typeof RequestSchema>;
+export type Request = infer<typeof RequestSchema>;
 
-export const RequestSchema: z.ZodMiniDiscriminatedUnion<[z.ZodMiniObject<{
-	alpn: z.ZodMiniOptional<z.ZodMiniString<string>>;
-	event: z.ZodMiniLiteral<"connect">;
-	id: z.ZodMiniString<string>;
-	implementation: z.ZodMiniOptional<z.ZodMiniString<string>>;
-	local: z.ZodMiniOptional<z.ZodMiniString<string>>;
-	node: z.ZodMiniString<string>;
-	path: z.ZodMiniString<string>;
-	query: z.ZodMiniOptional<z.ZodMiniString<string>>;
-	remote: z.ZodMiniOptional<z.ZodMiniString<string>>;
-	role: z.ZodMiniOptional<z.ZodMiniEnum<{
+export const RequestSchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
+	alpn: ZodMiniOptional<ZodMiniString<string>>;
+	event: ZodMiniLiteral<"connect">;
+	id: ZodMiniString<string>;
+	implementation: ZodMiniOptional<ZodMiniString<string>>;
+	local: ZodMiniOptional<ZodMiniString<string>>;
+	node: ZodMiniString<string>;
+	path: ZodMiniString<string>;
+	query: ZodMiniOptional<ZodMiniString<string>>;
+	remote: ZodMiniOptional<ZodMiniString<string>>;
+	role: ZodMiniOptional<ZodMiniEnum<{
 		publisher: "publisher";
 		subscriber: "subscriber";
 	}>>;
-	server_name: z.ZodMiniOptional<z.ZodMiniString<string>>;
-	tls: z.ZodMiniOptional<z.ZodMiniObject<{
-		expires: z.ZodMiniOptional<z.ZodMiniInt>;
-		fingerprint: z.ZodMiniString<string>;
-		issuer: z.ZodMiniString<string>;
-		name: z.ZodMiniString<string>;
-	}, z.core.$strip>>;
-	token: z.ZodMiniOptional<z.ZodMiniObject<{
-		kind: z.ZodMiniInt;
-		value: z.ZodMiniString<string>;
-	}, z.core.$strip>>;
-	transport: z.ZodMiniPipe<z.ZodMiniString<string>, z.ZodMiniCatch<z.ZodMiniEnum<{
+	server_name: ZodMiniOptional<ZodMiniString<string>>;
+	tls: ZodMiniOptional<ZodMiniObject<{
+		expires: ZodMiniOptional<ZodMiniInt>;
+		fingerprint: ZodMiniString<string>;
+		issuer: ZodMiniString<string>;
+		name: ZodMiniString<string>;
+	}, $strip>>;
+	token: ZodMiniOptional<ZodMiniObject<{
+		kind: ZodMiniInt;
+		value: ZodMiniString<string>;
+	}, $strip>>;
+	transport: ZodMiniPipe<ZodMiniString<string>, ZodMiniCatch<ZodMiniEnum<{
 		http: "http";
 		iroh: "iroh";
 		quic: "quic";
@@ -1400,32 +1458,32 @@ export const RequestSchema: z.ZodMiniDiscriminatedUnion<[z.ZodMiniObject<{
 		websocket: "websocket";
 		webtransport: "webtransport";
 	}>>>;
-}, z.core.$strip>, z.ZodMiniObject<{
-	alpn: z.ZodMiniOptional<z.ZodMiniString<string>>;
-	event: z.ZodMiniLiteral<"revalidate">;
-	id: z.ZodMiniString<string>;
-	implementation: z.ZodMiniOptional<z.ZodMiniString<string>>;
-	local: z.ZodMiniOptional<z.ZodMiniString<string>>;
-	node: z.ZodMiniString<string>;
-	path: z.ZodMiniString<string>;
-	query: z.ZodMiniOptional<z.ZodMiniString<string>>;
-	remote: z.ZodMiniOptional<z.ZodMiniString<string>>;
-	role: z.ZodMiniOptional<z.ZodMiniEnum<{
+}, $strip>, ZodMiniObject<{
+	alpn: ZodMiniOptional<ZodMiniString<string>>;
+	event: ZodMiniLiteral<"revalidate">;
+	id: ZodMiniString<string>;
+	implementation: ZodMiniOptional<ZodMiniString<string>>;
+	local: ZodMiniOptional<ZodMiniString<string>>;
+	node: ZodMiniString<string>;
+	path: ZodMiniString<string>;
+	query: ZodMiniOptional<ZodMiniString<string>>;
+	remote: ZodMiniOptional<ZodMiniString<string>>;
+	role: ZodMiniOptional<ZodMiniEnum<{
 		publisher: "publisher";
 		subscriber: "subscriber";
 	}>>;
-	server_name: z.ZodMiniOptional<z.ZodMiniString<string>>;
-	tls: z.ZodMiniOptional<z.ZodMiniObject<{
-		expires: z.ZodMiniOptional<z.ZodMiniInt>;
-		fingerprint: z.ZodMiniString<string>;
-		issuer: z.ZodMiniString<string>;
-		name: z.ZodMiniString<string>;
-	}, z.core.$strip>>;
-	token: z.ZodMiniOptional<z.ZodMiniObject<{
-		kind: z.ZodMiniInt;
-		value: z.ZodMiniString<string>;
-	}, z.core.$strip>>;
-	transport: z.ZodMiniPipe<z.ZodMiniString<string>, z.ZodMiniCatch<z.ZodMiniEnum<{
+	server_name: ZodMiniOptional<ZodMiniString<string>>;
+	tls: ZodMiniOptional<ZodMiniObject<{
+		expires: ZodMiniOptional<ZodMiniInt>;
+		fingerprint: ZodMiniString<string>;
+		issuer: ZodMiniString<string>;
+		name: ZodMiniString<string>;
+	}, $strip>>;
+	token: ZodMiniOptional<ZodMiniObject<{
+		kind: ZodMiniInt;
+		value: ZodMiniString<string>;
+	}, $strip>>;
+	transport: ZodMiniPipe<ZodMiniString<string>, ZodMiniCatch<ZodMiniEnum<{
 		http: "http";
 		iroh: "iroh";
 		quic: "quic";
@@ -1438,38 +1496,38 @@ export const RequestSchema: z.ZodMiniDiscriminatedUnion<[z.ZodMiniObject<{
 		websocket: "websocket";
 		webtransport: "webtransport";
 	}>>>;
-}, z.core.$strip>, z.ZodMiniObject<{
-	alpn: z.ZodMiniOptional<z.ZodMiniString<string>>;
-	bytes: z.ZodMiniObject<{
-		received: z.ZodMiniInt;
-		sent: z.ZodMiniInt;
-	}, z.core.$strip>;
-	duration: z.ZodMiniNumber<number>;
-	event: z.ZodMiniLiteral<"end">;
-	id: z.ZodMiniString<string>;
-	implementation: z.ZodMiniOptional<z.ZodMiniString<string>>;
-	local: z.ZodMiniOptional<z.ZodMiniString<string>>;
-	node: z.ZodMiniString<string>;
-	path: z.ZodMiniString<string>;
-	query: z.ZodMiniOptional<z.ZodMiniString<string>>;
-	reason: z.ZodMiniString<string>;
-	remote: z.ZodMiniOptional<z.ZodMiniString<string>>;
-	role: z.ZodMiniOptional<z.ZodMiniEnum<{
+}, $strip>, ZodMiniObject<{
+	alpn: ZodMiniOptional<ZodMiniString<string>>;
+	bytes: ZodMiniObject<{
+		received: ZodMiniInt;
+		sent: ZodMiniInt;
+	}, $strip>;
+	duration: ZodMiniNumber<number>;
+	event: ZodMiniLiteral<"end">;
+	id: ZodMiniString<string>;
+	implementation: ZodMiniOptional<ZodMiniString<string>>;
+	local: ZodMiniOptional<ZodMiniString<string>>;
+	node: ZodMiniString<string>;
+	path: ZodMiniString<string>;
+	query: ZodMiniOptional<ZodMiniString<string>>;
+	reason: ZodMiniString<string>;
+	remote: ZodMiniOptional<ZodMiniString<string>>;
+	role: ZodMiniOptional<ZodMiniEnum<{
 		publisher: "publisher";
 		subscriber: "subscriber";
 	}>>;
-	server_name: z.ZodMiniOptional<z.ZodMiniString<string>>;
-	tls: z.ZodMiniOptional<z.ZodMiniObject<{
-		expires: z.ZodMiniOptional<z.ZodMiniInt>;
-		fingerprint: z.ZodMiniString<string>;
-		issuer: z.ZodMiniString<string>;
-		name: z.ZodMiniString<string>;
-	}, z.core.$strip>>;
-	token: z.ZodMiniOptional<z.ZodMiniObject<{
-		kind: z.ZodMiniInt;
-		value: z.ZodMiniString<string>;
-	}, z.core.$strip>>;
-	transport: z.ZodMiniPipe<z.ZodMiniString<string>, z.ZodMiniCatch<z.ZodMiniEnum<{
+	server_name: ZodMiniOptional<ZodMiniString<string>>;
+	tls: ZodMiniOptional<ZodMiniObject<{
+		expires: ZodMiniOptional<ZodMiniInt>;
+		fingerprint: ZodMiniString<string>;
+		issuer: ZodMiniString<string>;
+		name: ZodMiniString<string>;
+	}, $strip>>;
+	token: ZodMiniOptional<ZodMiniObject<{
+		kind: ZodMiniInt;
+		value: ZodMiniString<string>;
+	}, $strip>>;
+	transport: ZodMiniPipe<ZodMiniString<string>, ZodMiniCatch<ZodMiniEnum<{
 		http: "http";
 		iroh: "iroh";
 		quic: "quic";
@@ -1482,24 +1540,24 @@ export const RequestSchema: z.ZodMiniDiscriminatedUnion<[z.ZodMiniObject<{
 		websocket: "websocket";
 		webtransport: "webtransport";
 	}>>>;
-}, z.core.$strip>], "event">;
+}, $strip>], "event">;
 
-export type Role = z.infer<typeof RoleSchema>;
+export type Role = infer<typeof RoleSchema>;
 
-export const RoleSchema: z.ZodMiniEnum<{
+export const RoleSchema: ZodMiniEnum<{
 	publisher: "publisher";
 	subscriber: "subscriber";
 }>;
 
-export type Scope = z.output<typeof ScopeSchema>;
+export type Scope = output<typeof ScopeSchema>;
 
-export const ScopeSchema: z.ZodMiniPipe<z.ZodMiniObject<{
-	get: z.ZodMiniOptional<z.ZodMiniArray<z.ZodMiniString<string>>>;
-	publish: z.ZodMiniOptional<z.ZodMiniArray<z.ZodMiniString<string>>>;
-	put: z.ZodMiniOptional<z.ZodMiniArray<z.ZodMiniString<string>>>;
-	root: z.ZodMiniDefault<z.ZodMiniString<string>>;
-	subscribe: z.ZodMiniOptional<z.ZodMiniArray<z.ZodMiniString<string>>>;
-}, z.core.$strict>, z.ZodMiniTransform<Omit<{
+export const ScopeSchema: ZodMiniPipe<ZodMiniObject<{
+	get: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+	publish: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+	put: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+	root: ZodMiniDefault<ZodMiniString<string>>;
+	subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+}, $strict>, ZodMiniTransform<Omit<{
 	get?: string[];
 	publish?: string[];
 	put?: string[];
@@ -1524,16 +1582,16 @@ export type SymmetricKey = Extract<Key, {
 	kty: "oct";
 }>;
 
-export type Token = z.infer<typeof TokenSchema>;
+export type Token = infer<typeof TokenSchema>;
 
-export const TokenSchema: z.ZodMiniObject<{
-	kind: z.ZodMiniInt;
-	value: z.ZodMiniString<string>;
-}, z.core.$strip>;
+export const TokenSchema: ZodMiniObject<{
+	kind: ZodMiniInt;
+	value: ZodMiniString<string>;
+}, $strip>;
 
-export type Transport = z.infer<typeof TransportSchema>;
+export type Transport = infer<typeof TransportSchema>;
 
-export const TransportSchema: z.ZodMiniPipe<z.ZodMiniString<string>, z.ZodMiniCatch<z.ZodMiniEnum<{
+export const TransportSchema: ZodMiniPipe<ZodMiniString<string>, ZodMiniCatch<ZodMiniEnum<{
 	http: "http";
 	iroh: "iroh";
 	quic: "quic";
