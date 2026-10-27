@@ -50,6 +50,7 @@ side by side and fix any name or signature that still differs, and check
 - [Streams](/quest/m1/quic-api/streams.md) - `send::`/`recv::` namespaces, one error per direction, `finish(self) -> send::Finished`, consuming `reset`/`stop`, `Buf` writes, both drivers mirrored
 - [Crypto](/quest/m1/quic-api/crypto.md) - crypto traits sealed to rustls, concrete peer identity and handshake data
 - [Config](/quest/m1/quic-api/config.md) - plain config structs, `Limits` as the one spelling, one endpoint constructor and `connect` that own the socket, v1-only `Version`, a local-close event
+- [Incoming is not a future](/quest/m1/quic-api/incoming-future.md) - moq-tokio's `Incoming` drops `IntoFuture`, so no `futures` type is public
 - [Waits](/quest/m1/quic-api/waits.md) - moq-quic owns every wait as a `poll_*` on `&kio::Waiter`, deleting `StreamEvent` and the drivers' and qmux's waiter tables
 - [Poll forms](/quest/m1/quic-api/poll.md) - both drivers' waits poll as `&self, &kio::Waiter` forwards to moq-quic, the async forms wrap them, and `send::Finished` is a future
 - [moq-net polls on kio waiters](/quest/m1/quic-api/net-poll.md) - moq-net's `transport::poll` traits take `&kio::Waiter`, `Session` ops take `&self`, and `Session` drops `Clone`
