@@ -85,7 +85,17 @@ anyhow = "1"
 ash = "0.38"
 async-trait = "0.1"
 aws-lc-rs = "1"
-axum = { version = "0.8", features = ["tokio"] }
+# Keep axum's defaults except tower-log, which enables tracing-to-log macros workspace-wide.
+axum = { version = "0.8", default-features = false, features = [
+    "form",
+    "http1",
+    "json",
+    "matched-path",
+    "original-uri",
+    "query",
+    "tokio",
+    "tracing",
+] }
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 base64 = "0.23"
 bitflags = "2"

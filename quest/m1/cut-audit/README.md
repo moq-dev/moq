@@ -54,7 +54,7 @@ leaving JS-only redesigns of `js/net` to [rs2ts](/quest/m2/rs2ts/README.md).
 
 ## Required
 
-- [One fMP4 sample resolver](/quest/m1/cut-audit/fmp4-sample-resolver.md) - zero-size samples cannot cost gigabytes, and `base_data_offset` input imports or is refused
+- [Counted field-less `trun` entries](/quest/m1/cut-audit/fmp4-sample-resolver.md) - a moof of field-less runs cannot materialize millions of sample entries
 - [A compressed announce path never outgrows its literal form](/quest/m1/cut-audit/announce-path-bytes.md) - lite-07 announce compression cannot build multi-MiB paths
 - [A route too large to re-encode is skipped](/quest/m1/cut-audit/announce-reencode.md) - one oversized route never resets a downstream announce stream
 - [A reserved group survives a route returning](/quest/m1/cut-audit/reserved-route-return.md) - a route flip A to B to A no longer panics a peeked reader
@@ -71,7 +71,6 @@ leaving JS-only redesigns of `js/net` to [rs2ts](/quest/m2/rs2ts/README.md).
 - [The export jitter buffer admits only frames due within its window](/quest/m1/cut-audit/jitter-admission.md) - a fast track is backpressured, not buffered without bound
 - [Peer-driven receive loops yield on a per-message budget](/quest/m1/cut-audit/peer-loop-budget.md) - small-message floods cannot monopolize a session driver
 - [Removing a stale front is O(1)](/quest/m1/cut-audit/weak-cache-remove.md) - a restart wave is linear under the origin lock
-- [One bad rendition never leaves the player with nothing](/quest/m1/cut-audit/watch-source-robust.md) - malformed audio and conflicting video filters degrade gracefully
 - [Media element attributes reflect their state](/quest/m1/cut-audit/element-attributes.md) - attributes track property and UI changes before the API ships
 - [Rust and JS accept the same catalogs](/quest/m1/cut-audit/catalog-parity.md) - one strictness, per rendition, with a shared fixture corpus
 - [Lite datagrams obey one size limit](/quest/m1/cut-audit/datagram-size.md) - no datagram one hop accepts is dropped by the next for size

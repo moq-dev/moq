@@ -433,8 +433,7 @@ pub struct SubscribeUpdate {
 	pub new_group: Option<u64>,
 	/// Subscriber max age in milliseconds (MoQ Timestamp), if negotiated.
 	pub max_age: Option<u64>,
-	/// FILL_PARAMETERS (0x23, draft-22): the backfill a paused PUBLISH subscription takes as
-	/// it resumes (draft-22 section 3.6.2).
+	/// FILL_PARAMETERS (0x23, draft-22): the backfill requested with this update.
 	pub fill: Option<Fill>,
 }
 

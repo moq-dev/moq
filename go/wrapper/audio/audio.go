@@ -26,7 +26,7 @@ type EncoderInput = ffi.MoqAudioEncoderInput
 type Packet = ffi.MoqAudioPacket
 
 // EncoderFinish holds the packets Encoder.Finish drains and the padded samples to discard.
-type EncoderFinish = ffi.MoqAudioEncoderFinish
+type EncoderFinish = ffi.MoqAudioEncoderFinished
 
 // EncoderOutput configures the codec side: codec, rate, channels, bitrate, and frame duration (0 takes the codec's own frame; 10 ms Opus halves the packetization delay).
 type EncoderOutput struct {

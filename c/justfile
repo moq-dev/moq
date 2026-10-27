@@ -1,0 +1,27 @@
+#!/usr/bin/env just --justfile
+#
+# The moq C package over rs/moq-ffi. Invoked from the repo root as `just c <recipe>` via the
+# `mod c` import.
+
+set working-directory := '.'
+
+default: check
+
+# Build the package, or check an archive, and run its installed consumers.
+[no-cd]
+[positional-arguments]
+check *args:
+    {{ quote(justfile_directory() / "sh/c/check.sh") }} "$@"
+
+# Runs in the caller's directory, so a relative `--output` means what it would
+# to the script itself.
+
+# Build and package the C package for release.
+[no-cd]
+[positional-arguments]
+package *args:
+    {{ quote(justfile_directory() / "c/moq/build.sh") }} "$@"
+
+# Remove the package builds.
+clean:
+    rm -rf moq/build

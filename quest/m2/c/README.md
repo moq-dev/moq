@@ -34,10 +34,11 @@ Decided earlier, still standing:
 - Docs change inline: the consumer quest rewrites `doc/lib/c`, and its Impact
   bullet carries the move for the package's `MIGRATE.md`.
 
-Generation drifted while unbuilt: the backend refuses the
-`#[uniffi(default = Some(0))]` that #6171 added in `rs/moq-ffi/src/consumer.rs`.
-Build the generated header in CI as soon as this line starts so drift fails
-loud.
+The `moq-c` package (`c/moq`, `just c check`) builds the generated header and
+its probe in CI, so drift fails loud. Until name-clash lands, it renames the
+record `MoqAudioEncoderFinish` to `MoqAudioEncoderFinished` so the current
+generator emits the header; the generator fix can revert that rename. No
+`c-v*` tag ships before the cut.
 
 The line owns the pre-publication check: every `doc/lib/c` sample and the C
 interop client build and run against the built release archive.
@@ -48,6 +49,5 @@ publication; [old-crate retirement](/quest/m2/release/c-retire.md) follows.
 
 - [Switch to rust2's UniFFI](/quest/m2/uniffi-fork.md) - the C generator comes from rust2's fork
 - [One C name per moq-ffi item](/quest/m2/c/name-clash.md) - rust2's C generator names types in CamelCase and functions in snake_case, so the record `MoqAudioEncoderFinish` and the method `moq_audio_encoder_finish` never share a name
-- [moq-c package](/quest/m2/c/package.md) - the generated header ships as `moq-c` 0.8.0 with `moq::c`, pkg-config, and a release workflow
 - [C consumers](/quest/m2/c/consumers.md) - the C interop client and `doc/lib/c` samples move onto the generated API
 - [Async failure contract](/quest/m2/c/async-failure-contract.md) - a generated async call that fails early fires no callback, and one that started always delivers its terminal callback

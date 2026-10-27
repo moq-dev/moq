@@ -5459,6 +5459,7 @@ dependencies = [
  "mp4-atom",
  "mpeg2ts",
  "num_enum",
+ "proptest",
  "roxmltree",
  "rustc-hash 2.1.3",
  "scuffle-av1",
@@ -10861,7 +10862,6 @@ dependencies = [
  "tokio",
  "tower-layer",
  "tower-service",
- "tracing",
 ]
 
 [[package]]

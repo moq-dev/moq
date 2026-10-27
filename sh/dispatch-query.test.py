@@ -159,7 +159,7 @@ class QueryTests(unittest.TestCase):
     def test_platform_rust_change_rebuilds_external_consumers(self):
         self.change("rs/moq-net/src/lib.rs")
         result = self.platform()
-        for suite in ("rs", "swift", "cpp", "obs_compile", "needed"):
+        for suite in ("rs", "swift", "c", "cpp", "obs_compile", "needed"):
             self.assertEqual(result[suite], "true", suite)
         self.assertEqual(result["moq_sh"], "false")
 
@@ -191,6 +191,7 @@ class QueryTests(unittest.TestCase):
                      "shfmt", "taplo", "nixfmt", "actionlint", "quest", "nix",
                      "c++", "clang-format", "cmake", "dart", "dash", "gersemi", "go",
                      "gradle", "java", "kramdown-rfc", "pkg-config", "uniffi-bindgen-cpp",
+                     "clippy-driver", "dpkg-deb", "nfpm", "rpm",
                      "uniffi-bindgen-go", "uniffi_bindgen_dart", "uv", "xml2rfc"):
             path = self.bin / tool
             path.write_text("#!/bin/sh\nexit 0\n")
@@ -216,37 +217,130 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return (self.root / "calls").read_text().splitlines()
 
-    def test_failure_cancels_running_lanes_and_names_its_phase(self):
-        # rs's tests and cpp's check run until killed, and gh's tests fail only
-        # once both are running, so the run ends only if the failure cancels
-        # both lanes.
+    def test_failure_keeps_running_lanes_and_starts_remaining_modules(self):
+        # The failed lane finishes before go releases the two parked lanes.
+        # No timing assumption can make cancellation look like completion.
         blocked = {}
         for name, call in (("rs", '"rs test-changed "*'), ("cpp", '"cpp check"')):
             started = self.root / f"{name}.started"
+            released = self.root / f"{name}.released"
             os.mkfifo(started)
-            pid = self.root / f"{name}.pid"
-            blocked[name] = (call, started, pid)
-        stub = "".join(f'    {call}) echo $$ >"{pid}"; echo >"{started}"; exec sleep 600 ;;\n'
-                       for call, started, pid in blocked.values())
+            os.mkfifo(released)
+            blocked[name] = (call, started, released)
+        stub = "".join(f'    {call}) echo >"{started}"; read -r <"{released}" ;;\n'
+                       for call, started, released in blocked.values())
         reads = "; ".join(f'read -r <"{started}"' for _, started, _ in blocked.values())
-        self.stub_ci(f'case "$*" in\n{stub}    "gh test") {reads}; exit 3 ;;\nesac\n')
+        releases = "; ".join(f'echo >"{released}"' for _, _, released in blocked.values())
+        self.stub_ci(f'case "$*" in\n{stub}    "gh test") {reads}; exit 3 ;;\n'
+                     f'    "go check") {releases} ;;\nesac\n')
         self.change("rs/moq-ffi/src/lib.rs")
+        self.change("js/net/src/index.ts")
         result = subprocess.run(["bash", "sh/dispatch.sh", "ci", "origin/main"], cwd=self.repo,
                                 env=self.env, text=True, capture_output=True, timeout=60)
         self.assertEqual(result.returncode, 3, result.stderr)
         self.assertIn("ci: test gh failed", result.stderr)
         self.assertRegex(result.stderr, r"\d+  test gh \(failed\)")
-        self.assertRegex(result.stderr, r"\d+  test rs \(cancelled\)")
-        self.assertRegex(result.stderr, r"\d+  check cpp \(cancelled\)")
-        for _, _, pid in blocked.values():
-            with self.assertRaises(ProcessLookupError):
-                os.kill(int(pid.read_text()), 0)
-        # go's lane ran beside the blocked ones, but a cancelled lane starts no
-        # more of its modules, and no lane starts after the failure.
+        self.assertNotIn("(cancelled)", result.stderr)
         calls = (self.root / "calls").read_text().splitlines()
         self.assertIn("go check", calls)
-        self.assertNotIn("obs compile", calls)
-        self.assertNotIn("dart check", calls)
+        self.assertIn("obs compile", calls)
+        self.assertIn("dart check", calls)
+
+    def test_failure_continues_independent_modules_in_the_same_lane(self):
+        for jobs in ("1", "3"):
+            with self.subTest(jobs=jobs):
+                self.stub_ci('case "$*" in "js check-changed "*) exit 3 ;; "gh check") exit 4 ;; esac\n')
+                self.change("js/net/src/index.ts")
+                self.change("dart/example.dart")
+                result = subprocess.run(["bash", "sh/dispatch.sh", "ci", "origin/main"], cwd=self.repo,
+                                        env=dict(self.env, CHECK_JOBS=jobs), text=True, capture_output=True)
+                self.assertEqual(result.returncode, 3, result.stderr)
+                self.assertIn("ci: check js failed", result.stderr)
+                self.assertIn("ci: check gh failed", result.stderr)
+                calls = (self.root / "calls").read_text().splitlines()
+                self.assertIn("gh check", calls)
+                self.assertIn("dart check", calls)
+                self.assertFalse(any(call.startswith("js test-changed ") for call in calls))
+                self.assertNotIn("gh test", calls)
+
+    @unittest.skipUnless(sys.platform == "linux" and os.uname().machine == "x86_64", "Linux VM checks only")
+    def test_local_flake_namespace_refusal_is_reported_as_skipped(self):
+        self.stub_ci()
+        self.change("flake.nix")
+        nix = self.bin / "nix"
+        nix.write_text(nix.read_text() + 'case "$*" in "build "*) echo MOQ_USERNS_UNAVAILABLE >&2; exit 1 ;; esac\n')
+        self.env.pop("CI_STRICT")
+        nonces = []
+        for _ in range(2):
+            (self.root / "calls").unlink(missing_ok=True)
+            result = subprocess.run(["bash", "sh/dispatch.sh", "check", "origin/main"], cwd=self.repo,
+                                    env=self.env, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("local Nix builder cannot create user namespaces", result.stdout + result.stderr)
+            self.assertRegex(result.stderr, r"\d+  check flake \(skipped\)")
+            calls = (self.root / "calls").read_text().splitlines()
+            self.assertNotIn("nix flake check", calls)
+            self.assertIn("gh test", calls)
+            probe, = [call for call in calls if call.startswith("nix build ")]
+            self.assertIn("--builders  --max-jobs 1", probe)
+            self.assertIn("--no-link", probe)
+            nonces.append(probe.split("--argstr nonce ")[1].split()[0])
+        self.assertNotEqual(*nonces)
+
+    @unittest.skipUnless(sys.platform == "linux" and os.uname().machine == "x86_64", "Linux VM checks only")
+    def test_local_capable_builder_runs_the_full_flake(self):
+        self.stub_ci()
+        self.change("flake.nix")
+        self.env.pop("CI_STRICT")
+        result = subprocess.run(["bash", "sh/dispatch.sh", "check", "origin/main"], cwd=self.repo,
+                                env=self.env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("(skipped)", result.stderr)
+        calls = (self.root / "calls").read_text().splitlines()
+        self.assertIn("nix flake check", calls)
+        self.assertEqual(sum(call.startswith("nix build ") for call in calls), 1)
+
+    @unittest.skipUnless(sys.platform == "linux" and os.uname().machine == "x86_64", "Linux VM checks only")
+    def test_local_flake_check_exiting_77_fails_instead_of_skipping(self):
+        self.stub_ci()
+        self.change("flake.nix")
+        nix = self.bin / "nix"
+        nix.write_text(nix.read_text() + 'case "$*" in "flake check") exit 77 ;; esac\n')
+        self.env.pop("CI_STRICT")
+        result = subprocess.run(["bash", "sh/dispatch.sh", "check", "origin/main"], cwd=self.repo,
+                                env=self.env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertNotIn("(skipped)", result.stderr)
+        self.assertIn("check: check flake failed", result.stderr)
+
+    @unittest.skipUnless(sys.platform == "linux" and os.uname().machine == "x86_64", "Linux VM checks only")
+    def test_local_flake_probe_errors_are_failures_without_cancelling_other_modules(self):
+        self.stub_ci()
+        self.change("flake.nix")
+        nix = self.bin / "nix"
+        nix.write_text(nix.read_text() + 'case "$*" in "build "*) echo "evaluation failed" >&2; exit 1 ;; esac\n')
+        self.env.pop("CI_STRICT")
+        result = subprocess.run(["bash", "sh/dispatch.sh", "check", "origin/main"], cwd=self.repo,
+                                env=self.env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("check: check flake failed", result.stderr)
+        self.assertNotIn("(skipped)", result.stderr)
+        calls = (self.root / "calls").read_text().splitlines()
+        self.assertNotIn("nix flake check", calls)
+        self.assertIn("gh test", calls)
+
+    def test_strict_ci_runs_the_full_flake_without_a_probe(self):
+        self.change("flake.nix")
+        calls = self.run_ci()
+        self.assertIn("nix flake check", calls)
+        self.assertFalse(any(call.startswith("nix build ") for call in calls))
+        nix = self.bin / "nix"
+        nix.write_text(nix.read_text() + 'exit 77\n')
+        result = subprocess.run(["bash", "sh/dispatch.sh", "ci", "origin/main"], cwd=self.repo,
+                                env=self.env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 77, result.stderr)
+        self.assertNotIn("(skipped)", result.stderr)
+        self.assertIn("ci: check flake failed", result.stderr)
 
     def test_terminating_the_run_stops_the_running_phase(self):
         started = self.root / "started"
