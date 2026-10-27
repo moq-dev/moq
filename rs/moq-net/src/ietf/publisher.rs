@@ -18985,11 +18985,11 @@ mod range_tests {
 
 	/// Anything received past the upstream's last reported Largest Object outdates it, a
 	/// later object of its group or a newer group, even once the cache evicted what arrived,
-	/// so the edge never moves back to the report. A report that lands after a newer group
+	/// so the edge never moves back to the report. A report that lands after a frame past it
 	/// arrived is stale on arrival.
 	#[test]
 	fn received_objects_outdate_the_report_after_eviction() {
-		for (sequence, frames, reported_first) in [(3, 6, true), (9, 1, true), (9, 1, false)] {
+		for (sequence, frames, reported_first) in [(3, 6, true), (3, 6, false), (9, 1, true), (9, 1, false)] {
 			let track = track::Producer::new(
 				std::sync::Arc::new(crate::broadcast::Info::default()),
 				"video",

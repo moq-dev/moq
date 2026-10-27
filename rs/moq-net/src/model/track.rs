@@ -3158,8 +3158,13 @@ impl Producer {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn report_object(&self, group: u64, object: u64) {
 		if let Ok(mut state) = self.modify() {
-			// A newer group already received outdates the report on arrival.
-			if state.cache.largest().is_some_and(|largest| largest.group > group) {
+			// A frame received past the report outdates it on arrival. A frame's ordinal never
+			// exceeds its Object ID, so one past the reported object proves the report stale.
+			if state
+				.cache
+				.largest()
+				.is_some_and(|largest| largest > Position { group, frame: object })
+			{
 				return;
 			}
 			let edge = state.object_edge().max(Some((group, object)));
