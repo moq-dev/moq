@@ -3097,7 +3097,7 @@ impl Producer {
 	}
 
 	/// Let readers use only anchors this cache can already translate to group bounds.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn anchored_cached(&self) {
 		if let Ok(mut state) = self.modify() {
 			state.anchored = true;
@@ -3155,7 +3155,7 @@ impl Producer {
 	}
 
 	/// Record the upstream Object ID separately from the frame ordinal readers count.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn report_object(&self, group: u64, object: u64) {
 		if let Ok(mut state) = self.modify() {
 			// A newer group already received outdates the report on arrival.
@@ -3170,7 +3170,7 @@ impl Producer {
 	}
 
 	/// Resolve cached time anchors before sending a wire that can name only groups.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn resolve_subscription(&self, subscription: &Subscription) -> Result<Subscription> {
 		if !subscription.ranges.iter().any(|range| !range.is_wire()) {
 			return Ok(subscription.clone());
@@ -4301,7 +4301,7 @@ impl Consumer {
 	}
 
 	/// The upstream publisher's Largest Object, independently of which groups are cached.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn reported_object(&self) -> Option<(u64, u64)> {
 		if let Some(serving) = self.serving() {
 			return serving.reported_object();
@@ -6852,7 +6852,7 @@ impl Subscriber {
 	}
 
 	/// Read this subscription's track cache without sharing its cursor.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn consume(&self) -> Consumer {
 		let state = match &self.inner {
 			Inner::Plain(cursor) => cursor.state.weak(),
