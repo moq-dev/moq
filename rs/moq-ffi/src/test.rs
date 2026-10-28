@@ -2746,6 +2746,41 @@ async fn video_publish_named_track() {
 	assert!(catalog.video.contains_key("hd"), "catalog: {:?}", catalog.video.keys());
 }
 
+/// A keyframe whose SPS names another level is a new decoder identity, so the track producer moves
+/// to a new track, and its demand follows rather than watching the one that ended.
+#[tokio::test]
+async fn video_track_demand_follows_a_new_level() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let hd = MoqMediaTrackProducer::video(
+		&broadcast,
+		MoqMediaTarget::Named {
+			name: Some("hd".into()),
+		},
+		video_init(MoqVideoFormat::Avc3, h264_init()),
+	)
+	.unwrap();
+	let keyframe = |level: u8| {
+		let mut bytes = h264_init();
+		// The SPS's level_idc, after its NAL header, profile, and constraint bytes.
+		bytes[7] = level;
+		bytes.extend_from_slice(&[0, 0, 0, 1, 0x65, 0x88, 0x84, 0x21]);
+		bytes
+	};
+	hd.write_frame(MoqFrame {
+		payload: keyframe(0x1f),
+		timestamp_us: Some(0),
+	})
+	.unwrap();
+	assert_eq!(hd.demand().unwrap().name(), "hd");
+	hd.write_frame(MoqFrame {
+		payload: keyframe(0x28),
+		timestamp_us: Some(40_000),
+	})
+	.unwrap();
+	assert_eq!(hd.demand().unwrap().name(), "hd/1");
+	hd.finish().unwrap();
+}
+
 /// The raw-stream producer frames Annex-B written in arbitrary chunks, and
 /// `finish` publishes the last access unit even with no start code after it.
 #[tokio::test]
