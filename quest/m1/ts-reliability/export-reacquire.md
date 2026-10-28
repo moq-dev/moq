@@ -31,7 +31,3 @@ Tests: a forward and a backward unmarked step each re-acquire and keep
 emitting. The #5564 startup cases still pass unchanged.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [A timebase step restarts the TS import](/quest/m1/ts-reliability/step-restart.md) - the importer-side fix, under which `moq import` never forwards such a step

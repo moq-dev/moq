@@ -99,7 +99,6 @@ catalog linger (#5305).
 
 ## Required
 
-- [A timebase step restarts the TS import](/quest/m1/ts-reliability/step-restart.md) - an unflagged step or a rewind republishes under a new epoch instead of ending the import and every subscriber's export
 - [Export re-acquires a step](/quest/m1/ts-reliability/export-reacquire.md) - `moq export ts` re-acquires an unmarked timeline step instead of exiting on fake drift
 - [A restart keeps its catalog](/quest/m1/ts-reliability/restart-catalog.md) - a restarted import publishes its catalog with its first media
 - [PAT changes](/quest/m1/ts-reliability/pat-lifecycle.md) - a running export follows a moved PMT PID
