@@ -944,6 +944,37 @@ fn pool_route(hop: u64) -> origin::Route {
 	peer_route(hop, 3)
 }
 
+/// Re-requesting an epoch's stale fronts, swept over the cache around them and the
+/// number restarted. Setup, route updates, and teardown stay outside the measurement.
+fn bench_restart_fronts(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/restart_fronts");
+	for fronts in [100, 1_000, 10_000] {
+		for restarting in [1, 10, 100] {
+			group.throughput(Throughput::Elements(restarting));
+			group.bench_function(format!("{fronts}f_{restarting}r"), |b| {
+				b.iter_batched_ref(
+					|| {
+						let pool = pool(1, fronts, 0);
+						moq_net::fuzz::update_route(&pool._members[0], pool_route(POOL_HOP).with_epoch(Epoch::mint()))
+							.unwrap();
+						let paths: Vec<_> = (0..restarting).map(|i| format!("pool/job-{i}")).collect();
+						(pool, paths)
+					},
+					|(pool, paths)| {
+						let consumer = pool.producer.consume();
+						paths
+							.iter()
+							.map(|path| consumer.request_broadcast(path, None))
+							.collect::<Vec<_>>()
+					},
+					BatchSize::PerIteration,
+				);
+			});
+		}
+	}
+	group.finish();
+}
+
 /// A member joining and leaving a pool that already serves `paths` paths.
 ///
 /// Every front under the prefix watches the routes covering it, so each one
@@ -1755,6 +1786,7 @@ criterion_group!(
 	bench_request,
 	bench_unroutable_churn,
 	bench_retire,
+	bench_restart_fronts,
 	bench_pool_churn,
 	bench_pool_cursors,
 	bench_handoff,
