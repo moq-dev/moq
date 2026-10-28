@@ -1,9 +1,7 @@
 use std::{fmt, sync::Arc};
 
 use crate::{
-	ConfigError, Duration, INITIAL_MTU, MAX_UDP_PAYLOAD, VarInt,
-	cid_generator::{ConnectionIdGenerator, HashedConnectionIdGenerator},
-	crypto::HmacKey,
+	ConfigError, Duration, INITIAL_MTU, MAX_UDP_PAYLOAD, VarInt, cid_generator::ConnectionIdGenerator, crypto::HmacKey,
 	server,
 };
 
@@ -121,6 +119,8 @@ impl Config {
 		use rand::Rng;
 		#[cfg(feature = "ring")]
 		use ring::{hkdf, hmac};
+
+		use crate::cid_generator::HashedConnectionIdGenerator;
 
 		struct Len(usize);
 		impl hkdf::KeyType for Len {

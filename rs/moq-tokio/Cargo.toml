@@ -27,7 +27,6 @@ quic = [
     "driver",
     "dep:http",
     "dep:kio",
-    "dep:rustls-native-certs",
     "dep:web-transport-proto",
     "dep:reqwest",
     "watch",
@@ -101,8 +100,6 @@ rcgen = { workspace = true, optional = true }
 reqwest = { version = "0.13", default-features = false, optional = true }
 rustc-hash = { workspace = true, optional = true }
 rustls = "0.23"
-# The WebTransport client trusts the OS store alongside its custom roots.
-rustls-native-certs = { version = "0.8", optional = true }
 # OS-native server-cert verifier for the rustls backend.
 rustls-platform-verifier = "0.7"
 rustls-webpki = { version = "0.103", features = ["aws-lc-rs"], optional = true }

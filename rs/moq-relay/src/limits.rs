@@ -132,7 +132,7 @@ impl Quic {
 		let min = moq_net::transport::MIN_RECEIVE_WINDOW;
 		anyhow::ensure!(
 			self.receive_window.get() >= min,
-			"invalid [limits.peer.quic]: receive_window must be at least {min}"
+			"invalid [limits.peer.quic]: receive_window must be at least {min} bytes to fit the largest message"
 		);
 		Ok(())
 	}

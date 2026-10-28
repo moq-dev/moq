@@ -20,10 +20,6 @@ mod backend;
 pub use backend::Error;
 #[cfg(feature = "quic")]
 pub(crate) use backend::{Client, Closer, Options, Server, accept};
-/// The flow-control limits a live QUIC connection can change; see [`driver::Connection::set_limits`].
-#[cfg(feature = "driver")]
-pub use moq_quic::{Limits, LimitsError};
-
 #[cfg(feature = "driver")]
 pub mod driver;
 

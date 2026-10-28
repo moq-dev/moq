@@ -10,7 +10,7 @@ use std::{
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
-use rand::{Rng, RngExt, SeedableRng, rngs::StdRng};
+use rand::{Rng, RngExt, rngs::StdRng};
 use rustc_hash::FxHashMap;
 use slab::Slab;
 use thiserror::Error;
@@ -72,6 +72,8 @@ impl Endpoint {
 	/// seeded from the operating system random source.
 	#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 	pub fn new(config: Config, allow_mtud: bool) -> Result<Self, ConfigError> {
+		use rand::SeedableRng;
+
 		let (resolved, cid_generator) = config.resolve()?;
 		Ok(Self {
 			rng: match config.rng_seed {

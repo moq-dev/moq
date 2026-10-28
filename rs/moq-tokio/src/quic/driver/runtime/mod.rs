@@ -11,10 +11,10 @@ use moq_sock::udp::{RecvMeta, Transmit};
 
 use crate::quic::driver::Instant;
 
-/// A UDP socket an [`Endpoint`](super::Endpoint) runs on, for a runtime or transport of your own
+/// A UDP socket an [`Endpoint`](super::endpoint::Endpoint) runs on, for a runtime or transport of your own
 ///
 /// The endpoint owns it: every connection sends through the endpoint, so dropping the endpoint
-/// or awaiting its [`close`](super::Endpoint::close) releases the socket.
+/// or awaiting its [`close`](super::endpoint::Endpoint::close) releases the socket.
 pub trait AsyncUdpSocket: Send + Sync + Debug + 'static {
 	/// Receive UDP datagrams, or register to be woken if receiving may succeed in the future
 	///

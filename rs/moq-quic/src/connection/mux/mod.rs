@@ -2,12 +2,12 @@
 //!
 //! [`Connection`] multiplexes QUIC streams, flow control, and datagrams over one reliable,
 //! ordered transport such as TCP, TLS, or a WebSocket (draft-ietf-quic-qmux). It drives the
-//! same stream state machine as a QUIC [`crate::Connection`], through the same receive and
+//! same stream state machine as a QUIC [`crate::connection::Connection`], through the same receive and
 //! write entry points. The draft has acknowledgment happen "as soon as data is passed to the
 //! underlying transport", so every frame counts as acknowledged the moment it is serialized
 //! into a record, and nothing is retransmitted.
 //!
-//! Like [`crate::Connection`], it performs no I/O. Feed it each record (each frame on
+//! Like [`crate::connection::Connection`], it performs no I/O. Feed it each record (each frame on
 //! draft-00) the transport delimits with [`Connection::handle_record`], write out what
 //! [`Connection::poll_transmit`] returns, run [`Connection::handle_timeout`] at
 //! [`Connection::poll_timeout`], and drain [`Connection::poll`] for events.

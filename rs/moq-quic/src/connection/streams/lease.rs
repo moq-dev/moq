@@ -16,7 +16,7 @@ use crate::connection::assembler::Assembler;
 ///
 /// They keep their connection flow control credit until released, so the connection receive
 /// window bounds what every lease on the connection holds together. Borrowed with
-/// [`RecvStream::lease()`] or [`Connection::leased()`](crate::Connection::leased).
+/// [`RecvStream::lease()`] or [`Connection::leased()`](crate::connection::Connection::leased).
 #[derive(Debug, Default)]
 pub struct Leased {
 	chunks: VecDeque<Bytes>,
@@ -233,7 +233,7 @@ pub enum LeaseError {
 
 impl RecvStream<'_> {
 	/// Lease the stream's unreleased bytes once at least `want` have arrived in order, or the
-	/// stream ended, then read them with [`Connection::leased()`](crate::Connection::leased).
+	/// stream ended, then read them with [`Connection::leased()`](crate::connection::Connection::leased).
 	///
 	/// The bytes stay buffered, with their connection credit, until [`Self::advance()`] or
 	/// [`Self::take()`] moves past them, and keep that credit until [`Self::release()`]; leasing
