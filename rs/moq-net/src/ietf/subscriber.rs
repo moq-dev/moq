@@ -3686,7 +3686,16 @@ impl Subscriber {
 							requested,
 							timescale,
 						);
-						group_fetches.push(fetch);
+						// A join asks for the head of the group it lands in, which this
+						// subscription's own fill is already bringing. A FETCH racing it can
+						// cache that group first, and then the tail stream, which is what
+						// ends the group for live readers, is refused as a duplicate. So the
+						// miss waits for the head, and the cache answers it once that lands.
+						let heading = fill.clone();
+						group_fetches.push(async move {
+							kio::wait(|waiter| poll_headed(&heading, waiter)).await;
+							fetch.await
+						});
 					}
 					End::Idle => {
 						tracing::debug!(broadcast = %crate::path::Rooted(self.origin.root(), broadcast_path), track = %track_name, "subscribe cancelled (idle)");
@@ -15144,6 +15153,35 @@ mod joining_fetch_tests {
 			assert!(!run.fill_outstanding(), "{version}: no head is coming");
 			assert!(run.session.log.closes().is_empty(), "{version}: the session stays up");
 		}
+	}
+
+	/// A reader missing the head of the group the subscription joined waits for the
+	/// subscription's own fill, which is bringing that head. A cache-miss FETCH racing it
+	/// could cache the group first, refusing the tail that ends it for live readers. Only a
+	/// fill that settled without the head leaves the miss to a FETCH.
+	#[moq_clock::test]
+	async fn a_miss_waits_for_the_subscriptions_own_fill() {
+		let version = Version::Draft22;
+		let largest = Some(ietf::Location { group: 4, object: 1 });
+		let run = JoinRun::start(version, None, subscribe_ok(version, largest), fetch_ok(version)).await;
+		let fetches = || {
+			decode_messages(&run.session.log, version)
+				.iter()
+				.filter(|(id, _)| *id == ietf::Fetch::ID)
+				.count()
+		};
+		assert!(run.fill_outstanding(), "the subscription asked for a fill");
+
+		let mut fetch = Box::pin(run._hold.1.fetch_group(4, None));
+		assert!(futures::poll!(fetch.as_mut()).is_pending());
+		settle().await;
+		assert_eq!(fetches(), 0, "the miss waits for the subscription's fill");
+
+		// The fill fails, so the head is the miss's to fetch after all.
+		let fill = run.subscriber.state.lock().subscribes.values().next().unwrap().fill.clone();
+		*fill.write().ok().unwrap() = Fill::Done;
+		settle().await;
+		assert_eq!(fetches(), 1, "a settled fill leaves the miss to a FETCH");
 	}
 
 	/// A malformed answer to the joining FETCH is not a refusal: the peer broke the
