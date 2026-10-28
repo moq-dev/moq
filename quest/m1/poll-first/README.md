@@ -48,6 +48,17 @@ and their alternatives:
   [semantic API hash quest](https://github.com/kixelated/rust2/blob/main/quest/m3/api-cutoff.md)
   replays moq-net's history with and without the wrappers, to report the build
   effect.
+- **Adopt `#[kio::machine]` for straight-line code only**, decided with the
+  maintainer on 2026-10-28 from the spike in
+  [moq-dev/moq#7057](https://github.com/moq-dev/moq/pull/7057). It lands with its
+  first users; loop support waits until conversions show it's needed. The spike
+  converted TrackInfoFetch (108 to 78 lines, no `mem::replace` transitions). Its
+  type-check and borrow-check cost matches hand-written code; it adds about 1.5 ms
+  of expansion per machine plus a one-time 1.3 s build of `kio-macros`, below what
+  async costs. The cost is a dialect: stored locals need type annotations and are
+  `&mut` inside a wait's poll, and a `!Send` error doesn't name the wait. Its users
+  are moq-net's 23 straight-line multi-await `async fn` bodies and 12 straight-line
+  hand-written machines; 59 bodies await in loops or selects.
 
 ## Required
 
