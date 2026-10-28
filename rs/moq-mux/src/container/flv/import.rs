@@ -634,16 +634,15 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// generic [`moq_net::Error::Dropped`] a bare drop surfaces. The counterpart to
 	/// [`Self::finish`] for a failed teardown (e.g. the RTMP client disconnected).
 	/// Consumes the importer.
+	///
+	/// Unlike a drop, this leaves the tracks' HLS records to the catalog, whose abort fails them
+	/// rather than ending them as a complete recording.
 	pub fn abort(mut self, err: moq_net::Error) {
 		for stream in std::mem::take(&mut self.video).into_values() {
-			let name = stream.track.name().to_string();
 			stream.track.abort(err.clone());
-			self.catalog.retire_dropped(&name);
 		}
 		for stream in std::mem::take(&mut self.audio).into_values() {
-			let name = stream.track.name().to_string();
 			stream.track.abort(err.clone());
-			self.catalog.retire_dropped(&name);
 		}
 	}
 }

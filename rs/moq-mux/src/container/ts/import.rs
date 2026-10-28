@@ -1880,14 +1880,13 @@ impl<E: catalog::Catalog> Import<E> {
 	/// Abort every track with `err` instead of finishing, so subscribers see the
 	/// real cause rather than [`moq_net::Error::Dropped`]. Buffered PES is discarded.
 	/// Consumes the importer.
+	///
+	/// Unlike a drop, this leaves the tracks' HLS records to the catalog, whose abort fails them
+	/// rather than ending them as a complete recording.
 	pub fn abort(mut self, err: moq_net::Error) {
 		self.finished = true;
 		for stream in std::mem::take(&mut self.streams).into_values() {
-			let name = stream.track_name();
 			stream.abort(err.clone());
-			if let Some(name) = name {
-				self.catalog.retire_dropped(&name);
-			}
 		}
 		for section in std::mem::take(&mut self.sections).into_values() {
 			section.abort(err.clone());

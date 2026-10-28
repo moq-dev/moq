@@ -632,14 +632,15 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	/// Abort all tracks with `err` instead of finishing, so subscribers see the real
 	/// cause rather than [`moq_net::Error::Dropped`]. Consumes the importer.
+	///
+	/// Unlike a drop, this leaves the tracks' HLS records to the catalog, whose abort fails them
+	/// rather than ending them as a complete recording.
 	pub fn abort(mut self, err: moq_net::Error) {
 		for mut track in std::mem::take(&mut self.tracks).into_values() {
 			if let Some(g) = track.group.take() {
 				let _ = g.abort(err.clone());
 			}
-			let name = track.track.name().to_string();
 			track.track.abort(err.clone());
-			self.catalog.retire_dropped(&name);
 		}
 	}
 }
