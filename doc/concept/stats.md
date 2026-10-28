@@ -1,6 +1,6 @@
 ---
 title: Stats
-description: The stats broadcasts a relay publishes, their tracks, and both JSON encodings
+description: The stats broadcasts a relay publishes, their tracks, and their JSON encoding
 ---
 
 # Stats
@@ -198,8 +198,7 @@ but a group's comes in two encodings:
 | `[<label>/]presence.json` | tier | [Presence](#presence): sessions under one stats label |
 | `[<path>/]prefix.json` | tier | [Prefix](#prefix) traffic under one broadcast prefix |
 
-Appending `.z` selects the [compressed](#compressed) encoding of the same
-track: `totals.json.z`. `totals.json` always exists.
+Every track uses the one [encoding](#encoding). `totals.json` always exists.
 
 ### Group tracks
 
@@ -247,9 +246,8 @@ The producer drains its counters every interval (one second by default) and
 writes only when a track's frame changed, so silence means nothing moved, not
 that the producer is gone. The track ends when the producer does, or when its
 group track is unlisted; the group may return later as a new track instance. A
-frame too large to cache (32 MB) ends its track with a `FRAME_TOO_LARGE` error.
-The `.z` flavor meets the same limit by its
-uncompressed size, since a reader inflates the whole group.
+frame too large to cache (32 MB) ends its track with a `FRAME_TOO_LARGE` error,
+measured by its uncompressed size, since a reader inflates the whole group.
 
 A group's number is its publish's scheduled time divided by the interval, so
 the interval is its timescale. Publishes are scheduled at least an interval
@@ -349,8 +347,7 @@ real sums. Started minus ended stays exact. A child appears while a broadcast
 under it has counters, and leaves after the frame carrying its last one; its
 tail stays in the rollup, and a child that returns starts over. Children are
 never capped, so roughly ten thousand across four tiers outgrow the 32 MB frame
-limit: both encodings' tracks then end with `FRAME_TOO_LARGE` instead of going
-stale.
+limit: the track then ends with `FRAME_TOO_LARGE` instead of going stale.
 
 ## Entries
 
@@ -487,36 +484,21 @@ than moq-lite 07), a counter going down also means the node restarted.
 A reader ignores unknown fields, so a newer relay can add counters, and
 defaults a missing field to zero, so it can read an older relay.
 
-## Encodings
+## Encoding
 
-Both encodings carry identical frames; pick by bandwidth. Only the track name
-says which one a track uses: the payload has no marker. A group track has one
-name and no `.z` sibling: it sets the track's
-[compressed](/concept/moq-lite#subscriptions) flag, so a session that can
-signal compression carries it DEFLATEd and every other reads an inflated copy.
-Its frames read like the compressed encoding's after inflating: a snapshot
-opening each group, then merge patches.
+Every stats track is a [moq-json](/lib/rs/moq-json) snapshot track that sets
+the track's [compressed](/concept/moq-lite#subscriptions) flag, so a session
+that can signal compression carries it DEFLATEd and every other reads an
+inflated copy. Stats frames change little between ticks, so the deltas and
+compression together cost a fraction of the full objects' bytes.
 
-### Plain
+- **Groups.** A group's first frame is the full object as UTF-8 JSON. Each
+  later frame is an [RFC 7396](https://www.rfc-editor.org/rfc/rfc7396) merge
+  patch against the value so far: it carries only the changed counters, and
+  `null` removes a dropped entry. A joiner who finds the group's patches
+  outweighing eight snapshots asks for a fresh group, which opens within an
+  interval.
 
-On a `.json` track each changed frame is its own group holding one frame, the
-full object as UTF-8 JSON. A reader takes the newest group.
-
-### Compressed
-
-A `.json.z` track is a [moq-json](/lib/rs/moq-json) snapshot track with
-compression on. Stats frames change little between ticks, so it costs a
-fraction of the plain track's bytes.
-
-- **Groups.** A group's first frame is the full object. Each later frame is an
-  [RFC 7396](https://www.rfc-editor.org/rfc/rfc7396) merge patch against the
-  value so far: it carries only the changed counters, and `null` removes a
-  dropped entry.
-- **DEFLATE.** Each group's frames form one raw DEFLATE stream, sync flushed
-  per frame with the trailing `00 00 ff ff` stripped, as
-  [moq-flate](/draft/moq-flate) specifies. The window starts cold at every
-  group and never spans two.
-
-To read one, jump to the newest group, inflate and parse its first frame,
-then inflate and apply each following frame as a merge patch, in order. A
-reader missing a frame abandons the group and waits for the next.
+To read one, jump to the newest group, parse its first frame, then apply each
+following frame as a merge patch, in order. A reader missing a frame abandons
+the group and waits for the next.

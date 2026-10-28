@@ -500,9 +500,9 @@ async def test_fetch_group_and_serve_dynamic_miss():
 
 async def test_json_snapshot_roundtrip():
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000_000))
-    producer = moq.json.SnapshotProducer(broadcast, track, compression=True)
-    consumer = moq.json.SnapshotConsumer(await broadcast.consume().subscribe_track("status"), compression=True)
+    track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000_000, compress=True))
+    producer = moq.json.SnapshotProducer(broadcast, track)
+    consumer = moq.json.SnapshotConsumer(await broadcast.consume().subscribe_track("status"))
 
     for viewers in range(1, 5):
         producer.update({"viewers": viewers}, timestamp=timedelta(milliseconds=viewers))
@@ -534,9 +534,9 @@ async def test_json_stream_roundtrip():
 
 async def test_json_window_roundtrip():
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("log", moq.TrackInfo(timescale=1_000_000))
-    producer = moq.json.WindowProducer(track, compression=True)
-    consumer = moq.json.WindowConsumer(await broadcast.consume().subscribe_track("log"), compression=True)
+    track = broadcast.publish_track("log", moq.TrackInfo(timescale=1_000_000, compress=True))
+    producer = moq.json.WindowProducer(track)
+    consumer = moq.json.WindowConsumer(await broadcast.consume().subscribe_track("log"))
     demand = producer.demand()
     await asyncio.wait_for(until_wanted(demand), timeout=5.0)
 
@@ -619,7 +619,7 @@ async def test_json_window_skips_records_outside_the_checkpoint():
 
 async def test_json_producers_report_demand():
     broadcast = moq.BroadcastProducer()
-    snapshot = moq.json.SnapshotProducer(broadcast, broadcast.publish_track("status"), compression=True)
+    snapshot = moq.json.SnapshotProducer(broadcast, broadcast.publish_track("status", moq.TrackInfo(compress=True)))
     stream = moq.json.StreamProducer(broadcast, broadcast.publish_track("events"))
     snapshot_demand = snapshot.demand()
     stream_demand = stream.demand()
@@ -627,7 +627,7 @@ async def test_json_producers_report_demand():
     assert snapshot_demand.wanted() is None
 
     consumer = broadcast.consume()
-    snapshot_consumer = moq.json.SnapshotConsumer(await consumer.subscribe_track("status"), compression=True)
+    snapshot_consumer = moq.json.SnapshotConsumer(await consumer.subscribe_track("status"))
     stream_consumer = moq.json.StreamConsumer(await consumer.subscribe_track("events"))
     await asyncio.wait_for(until_wanted(snapshot_demand), timeout=5.0)
     await asyncio.wait_for(until_wanted(stream_demand), timeout=5.0)

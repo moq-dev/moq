@@ -27,7 +27,7 @@ in advance, so it does not wait on
   logical role, then put media roles, codecs, quality, timelines, and
   custom-track mappings only inside the encrypted catalog.
 - Encrypt the single Hang `catalog.json` left by the
-  [m1 compression migration](/quest/m1/compress/migrate.md), and encrypt or
+  [m1 compression migration](/quest/m1/compress/README.md), and encrypt or
   suppress the MSF catalog. Set logical `compress` on protected catalog
   tracks; the [e2ee wrapper](/quest/m2/net-wrap/e2ee.md) compresses before
   encryption. Retain ordinary plaintext publication unchanged outside E2EE mode.

@@ -18,7 +18,7 @@ use moq_net::track::Subscribing;
 use moq_net::{Epoch, Path, broadcast, origin};
 
 use crate::{
-	Encoding, Group, GroupFrame, Prefix, PrefixFrame, PresenceFrame, Result, Totals, TotalsFrame, Usage, group_track,
+	Group, GroupFrame, Prefix, PrefixFrame, PresenceFrame, Result, Totals, TotalsFrame, Usage, group_track,
 	parse_node_path, prefix_track, presence_track, totals_track,
 };
 
@@ -35,11 +35,6 @@ pub struct Config {
 	/// Top-level path stats are published under (default `.stats`). Must match
 	/// the producer's prefix.
 	pub prefix: Path,
-	/// Which encoding of the totals, presence, and prefix tracks to read.
-	/// [`Encoding::Compressed`] carries the same data for a fraction of the
-	/// bytes. Defaults to [`Encoding::Plain`]. A group's track compresses
-	/// itself, so this does not apply to it.
-	pub encoding: Encoding,
 	/// How long a departed node's traffic waits for its path to return before
 	/// folding into the retired total (default 10 minutes). A return within it
 	/// under the same epoch (or again without one) resumes the node's own
@@ -49,8 +44,7 @@ pub struct Config {
 }
 
 impl Config {
-	/// A config with default settings: the `.stats` prefix and the plain
-	/// `.json` tracks.
+	/// A config with default settings: the `.stats` prefix.
 	pub fn new() -> Self {
 		Self::default()
 	}
@@ -58,12 +52,6 @@ impl Config {
 	/// Override the top-level prefix (default `.stats`). Must match the producer.
 	pub fn with_prefix(mut self, prefix: impl Into<Path>) -> Self {
 		self.prefix = prefix.into();
-		self
-	}
-
-	/// Read the totals, presence, and prefix tracks in `encoding`.
-	pub fn with_encoding(mut self, encoding: Encoding) -> Self {
-		self.encoding = encoding;
 		self
 	}
 
@@ -78,7 +66,6 @@ impl Default for Config {
 	fn default() -> Self {
 		Self {
 			prefix: Path::from_static(".stats"),
-			encoding: Encoding::Plain,
 			// Well above reconnect times; a longer grace only costs memory.
 			grace: Duration::from_secs(600),
 		}
@@ -143,7 +130,7 @@ impl Consumer {
 	/// without a handshake.
 	pub fn totals(&self) -> TotalsConsumer {
 		TotalsConsumer {
-			inner: self.merged(totals_track(self.config.encoding), self.config.encoding),
+			inner: self.merged(totals_track()),
 		}
 	}
 
@@ -151,7 +138,7 @@ impl Consumer {
 	/// lists it; see [`Self::totals`].
 	pub fn group(&self, group: impl Into<Path>) -> GroupConsumer {
 		GroupConsumer {
-			inner: self.merged(group_track(group), Encoding::Plain),
+			inner: self.merged(group_track(group)),
 		}
 	}
 
@@ -159,7 +146,7 @@ impl Consumer {
 	/// node broadcast; see [`Self::totals`].
 	pub fn presence(&self, label: impl Into<Path>) -> PresenceConsumer {
 		PresenceConsumer {
-			inner: self.merged(presence_track(label, self.config.encoding), self.config.encoding),
+			inner: self.merged(presence_track(label)),
 		}
 	}
 
@@ -167,12 +154,12 @@ impl Consumer {
 	/// every node broadcast; see [`Self::totals`].
 	pub fn prefix(&self, path: impl Into<Path>) -> PrefixConsumer {
 		PrefixConsumer {
-			inner: self.merged(prefix_track(path, self.config.encoding), self.config.encoding),
+			inner: self.merged(prefix_track(path)),
 		}
 	}
 
-	fn merged<S: Shape>(&self, name: String, encoding: Encoding) -> Merged<S> {
-		Merged::new(self.origin.clone(), &self.config, name, encoding)
+	fn merged<S: Shape>(&self, name: String) -> Merged<S> {
+		Merged::new(self.origin.clone(), &self.config, name)
 	}
 }
 
@@ -798,18 +785,14 @@ struct Merged<S: Shape> {
 }
 
 impl<S: Shape> Merged<S> {
-	fn new(origin: origin::Consumer, config: &Config, name: String, encoding: Encoding) -> Self {
+	fn new(origin: origin::Consumer, config: &Config, name: String) -> Self {
 		Self {
 			// Stats live under a `.`-named prefix, which discovery hides by default.
 			announce: origin.clone().with_hidden(true).announced(),
 			origin,
 			prefix: config.prefix.clone(),
 			name,
-			config: {
-				let mut json = moq_json::snapshot::consumer::Config::default();
-				json.compression = encoding.compression();
-				json
-			},
+			config: Default::default(),
 			nodes: HashMap::new(),
 			last_announced: HashMap::new(),
 			grace: config.grace,
@@ -1578,8 +1561,7 @@ mod tests {
 		let b: Epoch = "01900000-0000-7000-8000-000000000002".parse().unwrap();
 		let c: Epoch = "01900000-0000-7000-8000-000000000003".parse().unwrap();
 		let d: Epoch = "01900000-0000-7000-8000-000000000004".parse().unwrap();
-		let mut merged =
-			Merged::<Keyed<Traffic>>::new(origin.consume(), &Config::new(), "traffic".into(), Encoding::Plain);
+		let mut merged = Merged::<Keyed<Traffic>>::new(origin.consume(), &Config::new(), "traffic".into());
 		let update = |epoch: Option<Epoch>| moq_net::announce::Announce {
 			prefix: path.clone(),
 			captures: None,
@@ -1696,7 +1678,7 @@ mod tests {
 			.unwrap();
 		old.publish("acme/room", 100);
 		let name = group_track(moq_net::Path::from_static("acme"));
-		let mut merged = Merged::<Grouped>::new(origin.consume(), &Config::new(), name.clone(), Encoding::Plain);
+		let mut merged = Merged::<Grouped>::new(origin.consume(), &Config::new(), name.clone());
 		let initial = futures::executor::block_on(kio::wait(|waiter| {
 			driver.poll(now, waiter).unwrap();
 			merged.poll_next(waiter)
@@ -2225,9 +2207,7 @@ mod tests {
 				.create_broadcast(format!(".stats/node/{node}").as_str())
 				.expect("create broadcast");
 			source.announce(origin::Route::default()).expect("announce");
-			let track = source
-				.create_track(totals_track(Encoding::Plain), timed())
-				.expect("create track");
+			let track = source.create_track(totals_track(), timed()).expect("create track");
 			let config = moq_json::snapshot::Config::default().with_deltas(false);
 			Self {
 				_source: source,
@@ -2277,7 +2257,7 @@ mod tests {
 	fn hand_merged<V: Mergeable>() -> (Merged<Keyed<V>>, (Path, Option<Epoch>)) {
 		let origin = produce_origin();
 		let path = Path::from_static(".stats/node/a");
-		let mut merged = Merged::<Keyed<V>>::new(origin.consume(), &Config::new(), "p".into(), Encoding::Plain);
+		let mut merged = Merged::<Keyed<V>>::new(origin.consume(), &Config::new(), "p".into());
 		merged.apply_announce(
 			moq_net::announce::Announce {
 				prefix: path.clone(),

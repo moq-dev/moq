@@ -75,7 +75,7 @@ The simplest way to watch a stream:
 | `delay`          | `auto`, duration, `instant` | `auto`       | Distance from the live edge. `instant` paints frames as they decode and disables audio. |
 | `buffer`         | duration                   | `0ms`         | Future-dated media held before playback skips ahead. |
 | `captions`       | string                     | off           | Text rendition to render. |
-| `catalog-format` | hang, hangz, msf, manual   | auto-detected | The catalog format; detected from the name suffix unless set. `hangz` (compressed) is opt-in. |
+| `catalog-format` | hang, msf, manual          | auto-detected | The catalog format; detected from the name suffix unless set. |
 
 Property and built-in UI changes reflect into attributes. Invalid URLs, numbers, durations,
 version lists, and rendering/catalog modes are refused: their property setters throw, and malformed markup

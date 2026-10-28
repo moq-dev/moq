@@ -14,6 +14,9 @@ import { type Config as CodecConfig, type Encoded, Encoder } from "./encoder.ts"
  * `refresh` ratio times the snapshot, a join asks for a group past the largest, and the producer
  * restates the value there at the newest timestamp written. Set the ratio when creating the
  * track, or joins never ask.
+ *
+ * Set `compress` on that track's info too: JSON is small and repetitive, and moq-net compresses each
+ * delta against the snapshot earlier in its group.
  */
 export class Producer<T> {
 	#track: Moq.Track.Producer;

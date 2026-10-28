@@ -226,8 +226,9 @@ subscriber waits. `.cut()` / `.seek(sequence)` draw group boundaries; `.finish()
 optional capture time. A window keeps a sliding run of records a reader can join at any point,
 and `.cut()` ends its open group so the next edit opens one restating the window; the catalog has
 no window mode, so `WindowProducer` takes only the track.
-`moq.flate.SnapshotProducer` and `moq.flate.StreamProducer` offer the same operations for bytes.
-Omitting time leaves data untimed; choose the track's `timescale` to match.
+Omitting time leaves data untimed; choose the track's `timescale` to match. Publish JSON tracks with
+`TrackInfo(compress=True)`: the track compresses each group on the wire, and consumers read it the
+same either way. Opaque bytes go on a plain `TrackProducer`.
 
 ### Subscribing
 

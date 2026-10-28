@@ -17,7 +17,7 @@ exporter reads one, without knowing.
   `import/`), `catalog/`, `timeline.rs`, `json.rs`,
   `source.rs`, and the TS exporter under `container/ts`. About 250 type
   references across these modules.
-- The [m1 compression migration](/quest/m1/compress/migrate.md) deletes
+- The [m1 compression migration](/quest/m1/compress/README.md) deleted
   `moq-mux::binary`; opaque bytes use plain tracks, so there is no binary
   helper to convert here.
 - Capture: `moq_video::encode::Producer::new` takes a concrete
