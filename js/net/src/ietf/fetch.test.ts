@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { Manual } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { error } from "../error.ts";
@@ -550,8 +551,14 @@ test("draft-18: a joining FETCH its subscription cannot answer is refused", asyn
 	{
 		using fx = serve(D18);
 		publishPairs(fx.track, 5);
-		// No such subscription.
-		expect(refused(await fetch(fx, joining()))).toBe(INVALID_JOINING_REQUEST_ID);
+		// A subscription that never arrives, once the FETCH has waited as long as a request may.
+		const clock = new Manual();
+		const installed = clock.install();
+		try {
+			expect(refused(await clock.drive(fetch(fx, joining())))).toBe(INVALID_JOINING_REQUEST_ID);
+		} finally {
+			installed.close();
+		}
 
 		const { client, serving } = await subscribe(fx);
 		// Only the subscription's own group, never a run of groups before it.
@@ -565,7 +572,13 @@ test("draft-18: a joining FETCH its subscription cannot answer is refused", asyn
 		// A FETCH arriving after its subscription ended has no edge to end at.
 		client.close();
 		await serving;
-		expect(refused(await fetch(fx, joining()))).toBe(INVALID_JOINING_REQUEST_ID);
+		const later = new Manual();
+		const reinstalled = later.install();
+		try {
+			expect(refused(await later.drive(fetch(fx, joining())))).toBe(INVALID_JOINING_REQUEST_ID);
+		} finally {
+			reinstalled.close();
+		}
 	}
 	{
 		// A subscription that does not start after Largest Object has no head to join.
@@ -592,4 +605,58 @@ test("draft-18: a joining FETCH its subscription cannot answer is refused", asyn
 		expect(refused(await fetch(fx, joining()))).toBe(DOES_NOT_EXIST);
 		client.close();
 	}
+});
+
+// Request streams race, so a joining FETCH can be read before the SUBSCRIBE it names, as when
+// the subscriber pipelines both: it waits for the subscription rather than being refused.
+test("draft-18: a joining FETCH waits for the subscription it names", async () => {
+	using fx = serve(D18);
+	writeGroup(fx.track, 5, ["5-0", "5-1"], false);
+	const request = requestStream(D18);
+	const task = fx.pub.runFetch(joining(), request.stream);
+	await flush();
+	const { client } = await subscribe(fx);
+
+	expect(await request.answer.u53()).toBe(FetchOk.id);
+	expect((await FetchOk.decode(request.answer, D18)).endLocation).toEqual(at(5, 2));
+	// The subscription's own stream for group 5 may open on either side of the fetch stream.
+	for (;;) {
+		const next = await fx.uni.read();
+		if (next.done) throw new Error("no fetch stream");
+		const reader = new Reader(next.value, undefined, D18);
+		if ((await reader.u53()) !== FetchHeader.type) continue;
+		await FetchHeader.decode(reader, D18);
+		expect(await readObjects(reader, "ascending")).toEqual(pairs([5]));
+		break;
+	}
+	await task;
+	client.close();
+});
+
+// A subscription refused while a joining FETCH waits on it answers the FETCH at once.
+test("draft-18: a joining FETCH whose subscription is refused is refused", async () => {
+	using fx = serve(D18);
+	publishPairs(fx.track, 5);
+	const request = requestStream(D18);
+	const task = fx.pub.runFetch(joining(), request.stream);
+	await flush();
+
+	const client = await Stream.open(fx.pair.client, { version: D18 });
+	const server = await Stream.accept(fx.pair.server, D18);
+	if (!server) throw new Error("publisher never accepted the subscribe stream");
+	const msg = new Subscribe({
+		requestId: SUBSCRIBE_ID,
+		trackNamespace: Path.from("room"),
+		trackName: "video",
+		subscriberPriority: 0,
+		filter: { kind: "nextObject" },
+		rangeFilters: true,
+	});
+	const serving = fx.pub.runSubscribe(msg, server);
+	expect(await client.reader.u53()).toBe(RequestError.id);
+	await serving;
+
+	expect(refused(await answer(fx, request.answer, "ascending"))).toBe(INVALID_JOINING_REQUEST_ID);
+	await task;
+	client.close();
 });

@@ -137,6 +137,9 @@ function sameHops(a: Hop[], b: Hop[]): boolean {
 const ADVERTISE_TIMEOUT_MS = REQUEST_TIMEOUT_MS;
 const ADVERTISE_TIMEOUT = Nano.fromMilli(Milli(ADVERTISE_TIMEOUT_MS));
 
+/** How long a joining FETCH waits for the subscription it names to arrive and resolve. */
+const JOIN_TIMEOUT = Nano.fromMilli(Milli(REQUEST_TIMEOUT_MS));
+
 /** Sleep `delay`, jittered, so a relay's namespaces don't all retry on the same tick. */
 function retryAfter(delay: number): Promise<void> {
 	return sleep(Nano.fromMilli(Milli(delay * (0.5 + Math.random() / 2))));
@@ -345,8 +348,12 @@ export class Publisher {
 	#requiresSolicitation: boolean;
 	#listings = new Set<Path.Valid>();
 	#trackClaims = new Map<string, "publish" | number>();
-	// What a joining FETCH needs from each draft-18 SUBSCRIBE, by its request ID, while it lasts.
-	#joins = new Map<bigint, Joinable>();
+	// What a joining FETCH needs from each draft-18 SUBSCRIBE, by its request ID, while it lasts:
+	// pending from its arrival until it resolves. Request streams race, so a joining FETCH can
+	// arrive before the subscription it names has.
+	#joins = new Map<bigint, Joinable | "pending">();
+	// Bumped on every change to #joins, which a waiting joining FETCH rechecks.
+	#joinsChanged = new Signal(0);
 
 	// The one writer for the outbound datagram stream, shared by every subscription since a
 	// second getWriter would throw. Undefined when the transport carries no datagrams, which
@@ -472,28 +479,35 @@ export class Publisher {
 
 	async #runSubscribe(msg: Subscribe, request: RequestStream) {
 		this.#pinned(msg.epoch);
-		if (Namespace.reserved(msg.trackNamespace, this.#session.version)) {
-			await refuseReserved(request);
-			return;
-		}
+		// Draft-22 replaced joining FETCH with fills.
+		const joinable = !Filter.isDraft22(this.#session.version);
+		if (joinable) this.#setJoin(msg.requestId, "pending");
 		const key = JSON.stringify([msg.trackNamespace, msg.trackName]);
 		const claimed = this.#session.version === Version.DRAFT_18;
-		if (claimed && this.#trackClaims.get(key) === "publish") {
-			await Message.write(
-				request.writer,
-				RequestError.id,
-				new RequestError({ errorCode: 0x19, reasonPhrase: "track already PUBLISHed" }),
-				this.#session.version,
-			);
-			return;
-		}
-		if (claimed) this.#trackClaims.set(key, ((this.#trackClaims.get(key) as number | undefined) ?? 0) + 1);
+		let held = false;
 		try {
+			if (Namespace.reserved(msg.trackNamespace, this.#session.version)) {
+				await refuseReserved(request);
+				return;
+			}
+			if (claimed && this.#trackClaims.get(key) === "publish") {
+				await Message.write(
+					request.writer,
+					RequestError.id,
+					new RequestError({ errorCode: 0x19, reasonPhrase: "track already PUBLISHed" }),
+					this.#session.version,
+				);
+				return;
+			}
+			if (claimed) {
+				this.#trackClaims.set(key, ((this.#trackClaims.get(key) as number | undefined) ?? 0) + 1);
+				held = true;
+			}
 			await this.#serveSubscribe(msg, request);
 		} finally {
 			// A joining FETCH arriving after the subscription ended has no edge to end at.
-			this.#joins.delete(msg.requestId);
-			if (claimed) {
+			if (joinable) this.#setJoin(msg.requestId, undefined);
+			if (held) {
 				const count = (this.#trackClaims.get(key) as number) - 1;
 				if (count) this.#trackClaims.set(key, count);
 				else this.#trackClaims.delete(key);
@@ -785,7 +799,7 @@ export class Publisher {
 			// subscription starts after, again on every resume, so a joining FETCH ends exactly
 			// where the subscription begins. Saved before the answer names it.
 			if (!published && !Filter.isDraft22(version)) {
-				this.#joins.set(
+				this.#setJoin(
 					msg.requestId,
 					msg.filter.kind === "nextObject"
 						? {
@@ -796,7 +810,6 @@ export class Publisher {
 								properties,
 								timescale,
 								ranking: ranked,
-								ended: request.ended,
 							}
 						: { kind: "unsupported" },
 				);
@@ -2949,10 +2962,8 @@ export class Publisher {
 			await request.refuse("fetch", { condition: "not_supported", reasonPhrase: "FILL_TIMEOUT not supported" });
 			return;
 		}
-		const join = joining && this.#joins.get(joining.subscription);
 		// A joining FETCH was authorized with its subscription; a standalone one is checked
 		// here, so a denied request never reaches the origin.
-		const namespace = named?.trackNamespace ?? (join?.kind === "join" ? join.namespace : undefined);
 		const denied: Refusal = { condition: "unauthorized", reasonPhrase: "not granted" };
 		if (named && !this.#gate.allows(named.trackNamespace)) {
 			await request.refuse("fetch", denied);
@@ -2970,11 +2981,33 @@ export class Publisher {
 			// The request ended, which the stop already heard.
 			() => undefined,
 		);
+
+		let join: Joinable | undefined;
+		if (joining) {
+			let found: Joinable | Refusal;
+			try {
+				found = await this.#joinOf(joining.subscription, stop.signal);
+			} catch (err: unknown) {
+				if (stop.signal.reason !== cancel) throw err;
+				request.abort(cancel);
+				return;
+			}
+			if ("condition" in found) {
+				await request.refuse("fetch", found);
+				return;
+			}
+			join = found;
+		}
+		const namespace = named?.trackNamespace ?? (join?.kind === "join" ? join.namespace : undefined);
 		// A resolved answer holds its head in memory, so a subscription that ends after it, as
 		// a track finishing right after SUBSCRIBE_OK does, still gets the head it joined.
 		let resolved = false;
 		const lapsed = new Error("subscription ended");
-		if (join?.kind === "join") void join.ended.then(() => resolved || stop.abort(lapsed));
+		const lapse =
+			joining &&
+			this.#joinsChanged.subscribe(() => {
+				if (!resolved && !this.#joins.has(joining.subscription)) stop.abort(lapsed);
+			});
 		const watch = namespace && this.#gate.watch(namespace, () => stop.abort(unauthorized(namespace)));
 		if (namespace && watch?.revoked()) stop.abort(unauthorized(namespace));
 
@@ -2982,7 +3015,7 @@ export class Publisher {
 		try {
 			try {
 				if (named) answer = await this.#fetchRange(msg, named, stop.signal);
-				else if (joining) answer = await this.#fetchJoin(joining, join, stop.signal);
+				else if (joining && join) answer = await this.#fetchJoin(joining, join, stop.signal);
 				else throw new Error("unknown FETCH type");
 			} catch (err: unknown) {
 				if (stop.signal.reason === cancel) {
@@ -3003,6 +3036,7 @@ export class Publisher {
 			resolved = true;
 			await this.#answerFetch(msg, request, answer, stop.signal);
 		} finally {
+			lapse?.();
 			watch?.dispose();
 			stop.abort();
 			if (answer && "owned" in answer && answer.owned) answer.cache.close();
@@ -3162,16 +3196,51 @@ export class Publisher {
 		}
 	}
 
+	/** Record what a joining FETCH finds for subscription `id`, or remove it when absent. */
+	#setJoin(id: bigint, join: Joinable | "pending" | undefined) {
+		if (join) this.#joins.set(id, join);
+		else this.#joins.delete(id);
+		this.#joinsChanged.update((n) => n + 1);
+	}
+
+	/**
+	 * Wait for the subscription a joining FETCH names to resolve, or the refusal to answer
+	 * with. One not yet arrived or still resolving is waited on, bounded like any request,
+	 * since the FETCH's stream can beat its SUBSCRIBE's.
+	 */
+	async #joinOf(id: bigint, signal: AbortSignal): Promise<Joinable | Refusal> {
+		const missing: Refusal = { condition: "invalid_joining_request_id", reasonPhrase: "no such subscription" };
+		const done = new AbortController();
+		const expired = sleep(JOIN_TIMEOUT, { signal: done.signal }).then(
+			() => "expired" as const,
+			() => "expired" as const,
+		);
+		let pending = false;
+		try {
+			for (;;) {
+				const join = this.#joins.get(id);
+				if (join === "pending") pending = true;
+				else if (join) return join;
+				// Seen pending and now gone: it ended, or was refused, before it resolved.
+				else if (pending) return missing;
+				if ((await untilAborted(race([Signal.race(this.#joinsChanged), expired]), signal)) === "expired")
+					return pending ? { condition: "timeout", reasonPhrase: "subscription not ready" } : missing;
+			}
+		} finally {
+			// Settles the deadline, which releases the change listener a cancelled wait left.
+			done.abort();
+		}
+	}
+
 	/**
 	 * Read the head of the group a joining FETCH's subscription starts in, every object up to
 	 * the Largest Object it saved, or the refusal to answer with.
 	 */
 	async #fetchJoin(
 		type: Extract<FetchType, { kind: "relativeJoining" | "absoluteJoining" }>,
-		join: Joinable | undefined,
+		join: Joinable,
 		signal: AbortSignal,
 	): Promise<FetchAnswer | Refusal> {
-		if (!join) return { condition: "invalid_joining_request_id", reasonPhrase: "no such subscription" };
 		if (join.kind === "unsupported")
 			return { condition: "not_supported", reasonPhrase: "joining filter not supported" };
 		const largest = join.largest;
@@ -3395,8 +3464,6 @@ type Joinable =
 			timescale?: Timescale;
 			/** The subscription's ranking, which the fetch stream joins as the group it heads. */
 			ranking: Priority;
-			/** Settles once the subscription ends, which ends the fetch too. */
-			ended: Promise<void>;
 	  };
 
 /** The span a FETCH answers, as a standalone FETCH spells it. */
