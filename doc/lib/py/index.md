@@ -27,9 +27,8 @@ A missing data timestamp stays untimed; the library never substitutes zero or no
 JSON consumers yield `moq.json.Timed(value, timestamp)`; a snapshot consumer yields each state in order,
 and `await consumer.latest()` skips to the newest. A window consumer's value is a `WindowPush`, `WindowPop`, or `WindowSkip`. Read timestamps are rounded down to a whole microsecond.
 Raw tracks with a `None` timescale are untimed on both publish and receive.
-`TrackInfo(compress=True)` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. `@moq/net` cannot read a compressed track yet.
-`moq.flate.SnapshotProducer` / `StreamProducer` publish opaque payloads; their `update` / `append`
-and the JSON producers accept `timestamp=timedelta(...)` (`None` for untimed).
+`TrackInfo(compress=True)` sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. Set it on JSON tracks.
+The JSON producers' `update` / `append` accept `timestamp=timedelta(...)` (`None` for untimed).
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
 Timed raw/data tracks require caller-supplied timestamps. Use `CatalogProducer.now()` to stamp a locally
 created event on the broadcast clock; reading it fixes that clock for later media producers.
@@ -94,7 +93,8 @@ async def main():
         # Raw bytes and JSON
         events = broadcast.publish_track("events")
         events.write_frame(b'{"cmd": "ready"}')
-        status = moq.json.SnapshotProducer(broadcast, broadcast.publish_track("status"), compression=True)
+        status_track = broadcast.publish_track("status", moq.TrackInfo(compress=True))
+        status = moq.json.SnapshotProducer(broadcast, status_track)
         status.update({"state": "live", "viewers": 42})
 
         publication.announce(moq.AnnounceRoute(epoch=moq.mint_epoch()))  # a fresh epoch per run

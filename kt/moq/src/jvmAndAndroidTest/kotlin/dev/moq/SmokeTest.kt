@@ -19,7 +19,6 @@ import kotlinx.coroutines.test.runTest
 import dev.moq.json.SnapshotConfig
 import dev.moq.json.SnapshotConsumer
 import dev.moq.json.SnapshotProducer
-import dev.moq.json.StreamConfig
 import dev.moq.json.Timed
 import dev.moq.json.WindowConfig
 import dev.moq.json.WindowConsumer
@@ -188,8 +187,7 @@ class SmokeTest {
             framerate = 60.0,
             optimizeForLatency = true,
         )
-        val snapshot: SnapshotConfig = SnapshotConfig(deltas = true, compression = false)
-        val stream: StreamConfig = StreamConfig(compression = false)
+        val snapshot: SnapshotConfig = SnapshotConfig(deltas = true)
         val properties: VideoProperties = VideoProperties(rotation = 315.0)
         val backoff: Backoff = Backoff(
             initial = java.time.Duration.ofMillis(500),
@@ -209,7 +207,6 @@ class SmokeTest {
         val status: ConnectionPhase = ConnectionPhase.CONNECTED
         assertEquals(4_000_000uL, hint.bitrate)
         assertEquals(true, snapshot.deltas)
-        assertEquals(false, stream.compression)
         assertNull(properties.display)
         assertNull(properties.flip)
         assertEquals(java.time.Duration.ofMillis(500), backoff.initial)
@@ -315,32 +312,6 @@ class SmokeTest {
     }
 
     @Test
-    fun `flate preserves optional timestamps`() = runTest {
-        for (timestamp in listOf(null, 123_456uL)) {
-            for (mode in listOf("snapshot", "stream")) {
-                BroadcastProducer().use { broadcast ->
-                    val info = if (timestamp == null) null else TrackInfo(timescale = 1_000_000uL)
-                    val track = broadcast.publishTrack("data", info)
-                    val consumer = track.consume(null)
-                    val payload = "payload".encodeToByteArray()
-                    if (mode == "snapshot") {
-                        val producer = dev.moq.flate.SnapshotProducer(broadcast, track, dev.moq.flate.Config())
-                        producer.update(payload, timestamp)
-                        producer.finish()
-                    } else {
-                        val producer = dev.moq.flate.StreamProducer(broadcast, track, dev.moq.flate.Config())
-                        producer.append(payload, timestamp)
-                        producer.finish()
-                    }
-                    val frame = consumer.readFrame()
-                    assertEquals("payload", frame?.payload?.decodeToString())
-                    assertEquals(timestamp, frame?.timestampUs)
-                }
-            }
-        }
-    }
-
-    @Test
     fun `raw writes without timestamps stay untimed`() = runTest {
         BroadcastProducer().use { broadcast ->
             val track = broadcast.publishTrack("untimed", null)
@@ -419,10 +390,10 @@ class SmokeTest {
     @Test
     fun `typed json snapshot round-trips a serializable value`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val config = SnapshotConfig(deltas = true, compression = false)
+            val config = SnapshotConfig(deltas = true)
             val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000_000uL))
             val producer = SnapshotProducer(broadcast, track, config)
-            val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null), config)
+            val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
             for (n in 1..4) producer.update(Status(state = "live$n"), timestampUs = n.toULong() * 1_000uL)
 
             // `next` yields every state in order; `latest` skips the buffered third.
@@ -435,10 +406,10 @@ class SmokeTest {
     @Test
     fun `json window yields pushes and pops in order`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val config = WindowConfig(compression = true)
-            val track = broadcast.publishTrack("log", TrackInfo(timescale = 1_000_000uL))
+            val config = WindowConfig()
+            val track = broadcast.publishTrack("log", TrackInfo(timescale = 1_000_000uL, compress = true))
             val producer = WindowProducer(track, config)
-            val consumer = WindowConsumer(broadcast.consume().subscribeTrack("log", null), config)
+            val consumer = WindowConsumer(broadcast.consume().subscribeTrack("log", null))
             for (n in 1..3) producer.push(Status(state = "live$n"), timestampUs = n.toULong() * 1_000uL)
             producer.pop(2uL, 4_000uL)
 
@@ -468,13 +439,13 @@ class SmokeTest {
     @Test
     fun `json producer demand follows subscribers`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val config = SnapshotConfig(deltas = false, compression = false)
+            val config = SnapshotConfig(deltas = false)
             val producer = SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
             val demand: TrackDemand = producer.demand()
             assertEquals("status", demand.name())
             assertEquals(null, demand.wanted())
 
-            val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null), config)
+            val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
             while (demand.wantedChanged() == null) {}
             consumer.cancel()
             while (demand.wantedChanged() != null) {}
@@ -484,12 +455,12 @@ class SmokeTest {
     @Test
     fun `cancelling a flow collection cancels its native handle`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val config = SnapshotConfig(deltas = false, compression = false)
+            val config = SnapshotConfig(deltas = false)
             val producer = SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
             val demand: TrackDemand = producer.demand()
             producer.update(Status(state = "live"))
 
-            val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null), config)
+            val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
             while (demand.wantedChanged() == null) {}
             // `first` cancels the collection, which must release the subscription without an explicit cancel.
             assertEquals(Status(state = "live"), consumer.valuesAs<Status>().first().value)
@@ -505,11 +476,11 @@ class SmokeTest {
     @Test
     fun `raw json string passes through unencoded`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val config = SnapshotConfig(deltas = false, compression = false)
+            val config = SnapshotConfig(deltas = false)
             val producer = SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
             producer.update("""{"state":"raw"}""")
 
-            val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null), config)
+            val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
             assertEquals(Timed(Status(state = "raw"), null), consumer.valuesAs<Status>().first())
         }
     }
