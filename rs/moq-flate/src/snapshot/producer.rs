@@ -12,7 +12,8 @@ pub use super::Config;
 /// Publishes an opaque value over a track, one value per group.
 ///
 /// Each [`update`](Self::update) rolls a new group holding the whole value, so a consumer only ever
-/// needs the newest group and older ones are dropped. For a log where every payload survives, use
+/// needs the newest group to reconstruct the value. A reader can retain earlier states within its
+/// drift budget. For a log where every payload survives, use
 /// [`stream`](crate::stream) instead.
 ///
 /// Cheaply clonable: clones share one underlying track, like other MoQ producers.
@@ -57,6 +58,17 @@ impl Producer {
 	pub fn finish(&mut self) -> Result<()> {
 		self.inner.lock().unwrap().finish()
 	}
+
+	/// Abort the track with the given error, which consumers see in place of any further value.
+	///
+	/// Consumes the handle, since nothing can be published afterwards. Clones sharing the track see
+	/// it closed: their next [`update`](Self::update) fails.
+	pub fn abort(self, err: moq_net::Error) -> Result<()> {
+		// Through a clone, since aborting consumes a handle and the state is shared. Idempotent: a
+		// track that is already closed keeps its first reason.
+		let _ = self.inner.lock().unwrap().track.clone().abort(err);
+		Ok(())
+	}
 }
 
 /// Shared publishing state behind [`Producer`]'s `Arc<Mutex>`.
@@ -70,23 +82,20 @@ impl Inner {
 		let timestamp = payload.at;
 		let payload = payload.value;
 
-		// One frame per group, so the window spans a single value and starts cold every time.
-		let payload = match self.compression {
-			true => {
-				// Compression can take a large value under the group's frame limit, but every consumer
-				// decodes with the default output cap, so publishing past it would advertise a
-				// value that always fails to read. Reject it here instead.
-				if payload.len() as u64 > crate::DEFAULT_MAX_FRAME_SIZE {
-					return Err(crate::Error::TooLarge(crate::DEFAULT_MAX_FRAME_SIZE));
-				}
-				crate::Encoder::new().frame(&payload)
-			}
-			false => payload,
-		};
-
 		// Check before opening a group. `append_group` publishes immediately, so discovering the limit
 		// inside `write_frame` would leave an empty newest group behind: a snapshot consumer jumps to
 		// the newest, so the previous value would be lost even though this update reported an error.
+		// A compressed value is held to the same budget by its inflated size, since that is what every
+		// consumer's decoder allows: compression saves bandwidth, never what a reader holds.
+		if payload.len() as u64 > moq_net::group::MAX_CACHE_BYTES {
+			return Err(moq_net::Error::FrameTooLarge.into());
+		}
+
+		// One frame per group, so the window spans a single value and starts cold every time.
+		let payload = match self.compression {
+			true => crate::Encoder::new().frame(&payload),
+			false => payload,
+		};
 		if payload.len() as u64 > moq_net::group::MAX_CACHE_BYTES {
 			return Err(moq_net::Error::FrameTooLarge.into());
 		}

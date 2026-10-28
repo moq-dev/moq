@@ -88,67 +88,15 @@ See the [concepts](/concept/) page for a breakdown of the layering, rationale, a
 | Real-time data | Chat, game state, telemetry, and control channels over the same relays with [`moq-net`](/lib/rs/moq-net) or [`@moq/net`](/lib/js/net). |
 | Interactive streams | Media down, input up. [MoQ Boy](/bin/demo) is a crowd-controlled Game Boy built this way. |
 
-## Setup
+## Start here
 
-Get up and running in seconds with [Nix](https://nixos.org/download.html) ([+Flakes](https://nixos.wiki/wiki/Flakes)), or be lame and [install stuff manually](/setup/install):
-
-```bash
-# Runs a relay, media publisher, and the web server
-nix develop -c just
-```
-
-If everything works, a browser window will pop up demoing how to both publish and watch content via the web.
-
-- Keep reading the [development guide](/setup/dev) to run more advanced demos.
-- Skip ahead to the [production guide](/setup/prod) to see what it takes to deploy this bad boy.
-- Using an AI coding agent? [Teach it MoQ](/setup/agent) with a one-line prompt, or point it at [llms.txt](/llms.txt).
-
-## Applications
-
-There are a bunch of MoQ binaries and plugins.
-
-Some highlights:
-
-- [moq-relay](/bin/relay/) - A server connecting publishers to subscribers, able to form a [self-hosted CDN cluster](/bin/relay/cluster).
-- [moq-cli](/bin/cli) - A CLI that can import and publish MoQ broadcasts from a variety of formats (fMP4, HLS, MPEG-TS, FLV, etc), including via ffmpeg.
-- [obs](/bin/obs) - An OBS plugin, able to publish a MoQ broadcast and/or use MoQ broadcasts as sources.
-- [gstreamer](/bin/gstreamer) - A gstreamer plugin, split into a source and a sink.
-- [rtmp](/bin/rtmp), [srt](/bin/srt), [rtc](/bin/rtc), [hls](/bin/hls) - Gateways to and from the protocols your existing tools speak.
-- [...and more](/bin/)
-
-## Rust Crates 🦀
-
-Integrate MoQ into your application without fear. Focused on native but with [WASM](/lib/rs/#webassembly) support.
-
-Some highlights:
-
-- [moq-net](/lib/rs/moq-net) - Real-time pub/sub with built-in caching, fan-out, and prioritization.
-- [hang](/lib/rs/hang) - The media catalog and container on top of moq-net.
-- [moq-mux](/lib/rs/moq-mux) - Media muxers/demuxers for fMP4, CMAF, MPEG-TS, and FLV.
-- [moq-video](/lib/rs/moq-video) and [moq-audio](/lib/rs/moq-audio) - Native capture, encode, decode, and render with hardware codecs.
-- [...and more](/lib/rs/)
-
-## TypeScript Packages
-
-Run MoQ in a web browser utilizing the latest Web tech.
-Or run on native with polyfills via Node/Bun/Deno.
-
-Some highlights:
-
-- [@moq/net](/lib/js/net) - Real-time pub/sub with built-in caching, fan-out, and prioritization.
-- [@moq/hang](/lib/js/hang) - Performs any media stuff: capture, encode, transmux, decode, render.
-- [@moq/watch](/lib/js/watch) - Subscribe to and render MoQ broadcasts, with an optional `<moq-watch>` UI.
-- [@moq/publish](/lib/js/publish) - Publish media to MoQ broadcasts, with an optional `<moq-publish>` UI.
-- [...and more](/lib/js/)
-
-## Other Languages
-
-FFI bindings around the Rust core, with idiomatic APIs in each language:
-
-- [C++](/lib/cpp/) - RAII objects and cancellable futures, `co_await`-able on C++20.
-- [C](/lib/c/) - `moq-c` static + shared library with an auto-generated header.
-- [Python](/lib/py/) - `asyncio`-friendly bindings, published to PyPI.
-- [Kotlin](/lib/kt/) - Coroutines and `Flow` for Android and the JVM.
-- [Swift](/lib/swift/) - Async sequences for iOS, iPadOS, and macOS.
-- [Go](/lib/go/) - cgo bindings resolved via `go get`.
-- [Dart](/lib/dart/) - Futures and streams for Flutter and the Dart VM.
+| Goal | Next step |
+| --- | --- |
+| Try MoQ locally | [Quick start](/setup/) starts a relay, publisher, and web player. |
+| Add MoQ to an application | [Choose a library](/lib/) and find an [example](/setup/examples) to adapt. |
+| Use existing media tools | [Applications](/bin/) covers the CLI, OBS, GStreamer, and gateways. |
+| Operate a relay | [Install](/setup/install), then [deploy](/setup/prod); [inspect](/bin/inspect) it when running. |
+| Understand a feature | [Concepts](/concept/) explains the layers and links to the [drafts](/draft/). |
+| Diagnose a problem | [Troubleshooting](/setup/troubleshooting) points to the relevant diagnostics. |
+| Contribute to MoQ | [Repository map](/setup/repository) locates source and tests; [Development](/setup/dev) covers the workflow. |
+| Use a coding agent | [Agent setup](/setup/agent) covers application and repository work. [llms.txt](/llms.txt) indexes the markdown docs. |

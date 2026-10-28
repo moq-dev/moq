@@ -16,8 +16,8 @@ one decoder exactly as today.
 Decided in the 2026-10-14 planning interview:
 
 - Replaces the freeze rule for players. Live with stripes is better than a
-  frozen picture. Rust players follow in
-  [native dual decoder](/quest/m2/intra-refresh/native-dual-decoder.md); only
+  frozen picture. Rust players do the same in `moq_video::decode::Consumer`
+  (`rs/moq-video/src/decode/select.rs` holds its switch rule); only
   the transcoder avoids stripes, by decoding history per
   [consumer warmup](/quest/m2/intra-refresh/consumer-warmup.md).
 - Budgets: the min-delay decoder skips at the app's latency target (today's
@@ -34,7 +34,8 @@ Decided in the 2026-10-14 planning interview:
   rounded-down or stale `warmup` only shrinks its budget and costs extra
   stripes, never a dirty frame the min-delay decoder wasn't also showing.
   This quest therefore does not wait on
-  [plan-boundary](/quest/m2/intra-refresh/plan-boundary.md).
+  [plan-boundary](/quest/m2/intra-refresh/plan-boundary.md); the warmup draft
+  amendment it needed landed in [#6494](https://github.com/moq-dev/moq/pull/6494).
 - Selection is a small frame selector over the two current candidates: show
   the max-delay frame when its timestamp is at or beyond the min-delay frame's,
   so it wins ties, else the min-delay frame. Separately, never display a
@@ -56,8 +57,9 @@ Decided in the 2026-10-14 planning interview:
   newest group in `Container.Consumer` first, and `DecoderTrack` then drops
   the earlier group as stale. That would leave the max-delay decoder starting
   mid-sweep. Its consumer must wait for the lower group within its budget
-  before emitting a newer one. Fix this at the source in `js/hang` or `js/net`
-  and test newest-first arrival.
+  before emitting a newer one, through the opt-in in
+  [join earlier group](/quest/m2/intra-refresh/join-earlier-group.md), which
+  fixes it at the source for Rust and `js/hang` alike.
 - H.264 recovery-point frames sent as `key` chunks pass Chromium's WebCodecs
   keyframe check (`ParseH264KeyFrame` accepts `is_sei_recovery_point`; WPT
   `videoDecoder-h264-sei`). Chromium rejects a non-IRAP H.265 frame sent as
@@ -78,8 +80,11 @@ Decided in the 2026-10-14 planning interview:
   dropped frames for one versus two decoders on a 1080p rendition, in a
   browser, recorded in the PR.
 
+## Required
+
+- [Join earlier group](/quest/m2/intra-refresh/join-earlier-group.md) - the `js/hang` opt-in the max-delay decoder joins with
+
 ## Related
 
 - [H.264 import](/quest/m2/intra-refresh/h264-import.md) - publishes the real `warmup` for an end-to-end x264 check
-- [Native dual decoder](/quest/m2/intra-refresh/native-dual-decoder.md) - the same behavior for Rust players
 - [Consumer warmup](/quest/m2/intra-refresh/consumer-warmup.md) - the transcoder decodes history so it never encodes stripes

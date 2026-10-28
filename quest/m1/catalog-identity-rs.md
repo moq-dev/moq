@@ -5,7 +5,7 @@
 No Rust publisher redefines a track it has published. A change to a
 rendition's identity, the fields a consumer cannot change without
 reinitializing its decoder or demuxer (`codec`, `description`, `container`,
-`display_aspect_width`/`display_aspect_height`, `sample_rate`,
+`display_aspect_width`/`display_aspect_height`, `interlaced`, `sample_rate`,
 `channel_count`), publishes a new rendition name, per the hang draft's
 [Track Identity](/drafts/draft-lcurley-moq-hang.md#identity) section. Every
 other field, including coded size, `bitrate`, and `framerate`, updates in
@@ -50,14 +50,16 @@ minting a name where the identity changes and updating in place otherwise:
   when the codec string differs.
 - `moq-video` reopening onto another camera mode or backend
   (`source_resize_updates_the_published_rendition` asserts the rewrite).
-- `moq-c` re-declaring a config under the same name, and `moq-gst` reusing an
-  explicit pad name after caps renegotiation.
+- `moq-c` re-declaring a config under the same name.
 - TS AAC/MP2/AC-3 and FLV legacy audio fix the config from the first header
   and silently ignore a later change; refuse or mint instead. A PMT that
-  changes a PID's stream type keeps the old importer.
+  changes a PID's stream type or descriptors already opens a new track.
 - `moq-audio`/`moq-ffi` `set_bitrate` should update the catalog's bitrate.
 
-FLV, fMP4, MKV, HLS import, and `moq-transcode` rungs already comply; keep
+FLV, fMP4, MKV, HLS import, `moq-transcode` rungs, and the `moq-gst` sink
+(since [moq-dev/moq#6780](https://github.com/moq-dev/moq/pull/6780), which
+keeps the live producer for caps that build the same importer and mints
+`<name>/<n>` otherwise) already comply; keep
 their tests. Update the tests that assert in-place identity rewrites
 (`tracks.rs`, `moq-video`, `moq-gst`, `moq-c`); a same-name resize, such as
 the transcode fixture's, is now allowed.
@@ -66,6 +68,15 @@ Later, at lower priority: watch and HLS export consumer coverage for in-band
 resolution changes, rendition switches, reconnects, and late joiners against
 the contract.
 
+Decided 2026-10-25 (maintainer), reversing the 2026-10-20 decision to wait
+on the generated C package: the hand-written `moq-c` ships at this cut with
+parity to moq-ffi for every m1 binding feature, so the moq-c fix lands there,
+and the generated C line follows after the cut.
+
+The branch checkpoint `origin/quest/m1/catalog-identity-rs` predates the
+2026-10-15 decision to mint a new rendition name, so rework it against that
+decision rather than resuming it as is.
+
 ## Related
 
-- [Archive](/quest/m1/archive/README.md) - storage and replay consume the identity contract
+- [Broadcast archives](/quest/m1/archive/README.md) - an archived catalog describes every stored group by the identity contract

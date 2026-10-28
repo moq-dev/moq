@@ -113,7 +113,9 @@ can_run_on_host() {
 # Build the library for a single target
 build_target() {
     local target="$1"
-    local cargo_args=(build --locked --release --package moq-ffi)
+    # Releases carry the OpenH264 software fallback, the only encoder on API-24
+    # Android and the Apple simulators; a no-op under --no-default-features.
+    local cargo_args=(build --locked --release --package moq-ffi --features openh264)
     if [[ "$NO_DEFAULT_FEATURES" == true ]]; then
         cargo_args+=(--no-default-features)
     fi
@@ -164,7 +166,7 @@ generate_bindings() {
 
     for lang in kotlin swift python; do
         echo "  Generating $lang bindings..."
-        cargo run --locked --release --package uniffi-bindgen --manifest-path "$WORKSPACE_DIR/Cargo.toml" -- \
+        cargo run --locked --release --package uniffi-bindgen --features cli --manifest-path "$WORKSPACE_DIR/Cargo.toml" -- \
             generate --library "$lib_path" \
             --language "$lang" --out-dir "$OUTPUT_DIR/bindings/$lang"
     done
@@ -190,7 +192,7 @@ generate_bindings() {
 
     # C++ uses a third-party bindgen too: a fork carrying LiveKit's async support
     # ported to uniffi 0.32, which upstream has not released. Install it with:
-    # cargo install --locked uniffi-bindgen-cpp --git https://github.com/kixelated/uniffi-bindgen-cpp --tag v0.11.0-kixelated.4+v0.32.2
+    # cargo install --locked uniffi-bindgen-cpp --git https://github.com/kixelated/uniffi-bindgen-cpp --tag v0.11.0-kixelated.7+v0.32.2
     if command -v uniffi-bindgen-cpp >/dev/null 2>&1; then
         echo "  Generating cpp bindings..."
         uniffi-bindgen-cpp --library "$lib_path" \

@@ -51,7 +51,7 @@ producer and 4,096 consumers on one channel, ns per consumer:
 Spreading the same consumers over more cores makes the whole cycle slower,
 not faster: each acquire that changes cores costs 50 to 500 ns.
 
-`just bench-lock`, mutex wait over worker CPU in the 5 s steady window, tokio
+`just bench-profile lock`, mutex wait over worker CPU in the 5 s steady window, tokio
 workers (`chat` is `bench/workloads/chat.toml`, pinned at 10 messages/s; its
 frame size, then rolled once per run from 200 to 400 bytes, is now pinned at 300):
 
@@ -78,14 +78,13 @@ Every hot site is a read or re-poll
 of a per-track channel that all of a track's subscribers share, which is the
 [version counter](/quest/m2/perf/kio-channel-contention/version.md)'s target.
 `GroupState` is not contended here because both shapes send one-frame
-groups; a multi-frame shape is unmeasured, so the
-[append-only log](/quest/m2/perf/kio-channel-contention/log.md) should measure
-one before naming `GroupState` frames as its target.
+groups; `group_contended` in `rs/moq-net/benches/group.rs` measures a
+multi-frame group instead.
 
 Decided (maintainer, 2026-10-07):
 
 - Decide the fix from the stacks. First run the
-  [profiling recipe](/quest/m2/perf/lock-profile.md)'s lock-wait mode to
+  profiling recipe's lock-wait mode (`just bench-profile lock`) to
   name the contended channels (track, group, broadcast, origin state) from
   the callers above these sites. Then bring the options back with numbers.
   Submitting staged io_uring SQEs before a blocking acquire only hides the
@@ -97,8 +96,8 @@ Decided (maintainer, 2026-10-14):
 
 - This became an epic: a contended micro-bench names the targets, then two
   independent fixes each land their own before and after. This README keeps
-  the end-to-end `just bench-lock` before and after once the children merge.
-- The lock-wait mode `just bench-lock` already shipped, so the epic no
+  the end-to-end `just bench-profile lock` before and after once the children merge.
+- The lock-wait mode `just bench-profile lock` already shipped, so the epic no
   longer waits on the rest of the profiling recipe (CPU and heap modes).
 - Scope is `Producer`/`Consumer` only. `Shared` and `Queue` mutate from both
   sides, so a reader-optimized design buys them little; they stay on the
@@ -108,7 +107,7 @@ Decided (maintainer, 2026-10-14):
 - Candidates kept: a version counter with split waiter lists
   ([Version counter](/quest/m2/perf/kio-channel-contention/version.md)) and
   an append-only log primitive with front eviction
-  ([Append-only log](/quest/m2/perf/kio-channel-contention/log.md)), which
+  (Append-only log (`kio::log`)), which
   much of moq-net could adopt
   ([Log adoption](/quest/m2/perf/kio-channel-contention/log-adoption.md)).
 - Rejected, so later sessions don't re-propose them:
@@ -126,8 +125,8 @@ Decided (maintainer, 2026-10-14, baseline follow-up):
 
 - `GroupExpiry::is_expired` gets its own quest, ranked ahead of the version
   counter, rather than waiting on it.
-- The append-only log measures a multi-frame (video-heavy) shape before it
-  picks targets, since both shapes above send one-frame groups.
+- The append-only log measures a multi-frame (video-heavy) shape first,
+  since both shapes above send one-frame groups.
 - The 10 messages/s pin lives only in `bench/workloads/chat.toml`;
   `rs/moq-bench/config/chat.toml` keeps its random rate and frame size.
 
@@ -135,7 +134,7 @@ Decided (maintainer, 2026-10-14, per-thread follow-up):
 
 - Per-worker sharding is no longer ruled out; two spikes decide. Both run on
   the thread-per-core workers (`--runtime-workers`, the default once
-  [Shard](/quest/m1/quic/shard.md) lands) and link workers over an
+  [Shard by default](/quest/m2/perf/shard-default.md) lands) and link workers over an
   in-memory transport (`moq_net::transport::memory`),
   never real QUIC. The
   [replica spike](/quest/m2/perf/kio-channel-contention/spike-replica.md)
@@ -147,8 +146,83 @@ Decided (maintainer, 2026-10-14, per-thread follow-up):
   land here. The in-memory transport merges for real.
 - Flow control throttles only the hop between workers, never the publisher:
   a slow worker lags and skips stale groups like any slow subscriber.
-- The append-only log waits on the spikes, since per-thread sessions would
-  leave each replica's mutex uncontended.
+- Log adoption waits on the spikes, since per-thread sessions would leave
+  each replica's mutex uncontended. The append-only log itself stopped
+  waiting on 2026-10-24 (below).
+
+Group storage benchmark (2026-10-24,
+[moq-dev/moq#6627](https://github.com/moq-dev/moq/pull/6627)): four
+prototypes of `GroupState`'s frame storage, behind its append, cursor read
+(eight frames per call, like `Prefetch`), park, front eviction, and refill
+only. The bench is
+[`rs/moq-net/benches/storage.rs` at `2cfc0a6`](https://github.com/moq-dev/moq/blob/2cfc0a666dd79d4dbf068ffb27b8059ecb3019e7/rs/moq-net/benches/storage.rs)
+and did not merge.
+
+- `deque`: today's `VecDeque` plus offset in the kio mutex.
+- `runs`: Front eviction's sorted runs, the tail run inline, in the mutex.
+- `log`: write-once slots in refcounted segments (4 doubling to 64 slots),
+  a Release-stored length, lock-free cursor reads, an atomic base, and
+  refills in a side run below the base behind its own mutex. Parking takes
+  a waiter mutex.
+- `ring`: a fixed ring of reused slots, each behind an `RwLock` (tokio's
+  broadcast design), since a reused slot can't be read lock-free without
+  epoch reclamation.
+
+Host: the same 24-core Core Ultra 7 270K Plus, never quiet (load average 29
+to 43, 6 to 110 runnable threads at a case's start, median 18). Each case
+runs every shape back to back, three passes; the table is the median pass's
+10th-percentile round, ns per reader, at 1,024 readers. Rows with 16
+readers are dominated by releasing the worker threads and are omitted.
+
+| workload | threads | deque | runs | log | ring |
+| --- | --- | --- | --- | --- | --- |
+| one-frame groups | 1 | 80 | 80 | 41 | 34 |
+| one-frame groups | 4 | 252 | 240 | 151 | 120 |
+| one-frame groups | 16 | 283 | 275 | 175 | 140 |
+| edge, 1 frame per round | 1 | 58 | 58 | 51 | 59 |
+| edge, 1 frame per round | 4 | 222 | 219 | 197 | 217 |
+| edge, 1 frame per round | 16 | 497 to 1,412 | 477 to 2,581 | 344 to 2,901 | 347 to 432 |
+| burst, 8 frames per round | 1 | 132 | 132 | 125 | 185 |
+| burst, 8 frames per round | 4 | 409 | 391 | 256 | 501 |
+| burst, 8 frames per round | 16 | 682 | 630 | 416 | 474 |
+| refill beside the tail | 1 | - | 58 | 65 | 68 |
+| refill beside the tail | 4 | - | 217 | 198 | 222 |
+| refill beside the tail | 16 | - | 472 | 358 | 358 |
+
+The 16-thread edge row varied that much between passes, so it ranks
+nothing. One thread appending a 60-frame group, ns per frame (Criterion
+median): deque 30, runs 30, log 46, ring 42. Draining it: 14, 15, 12, 19.
+
+- `runs` costs what `deque` does everywhere, so the shape is free. It is not
+  faster: refills and the tail share one mutex.
+- `log` costs 10 to 40% less per reader across cores, most when a reader
+  drains several frames, and within 15% either way on one thread. Its
+  writer pays about 15 ns more per append (the SeqCst fence before checking for parked
+  readers, and the slot's `OnceLock`). Parking still takes a mutex, so an
+  edge reader saves one of its two acquires per wake, not both.
+- `ring` is rejected. A group with no frame cap has no size to give it, and
+  growing stops every reader or needs epochs. Its per-slot locks cost 40%
+  more for a burst on one thread and lose to the log across cores. It wins
+  one-frame groups only because its reader holds no channel handle.
+- Not run: `just bench-profile lock` on a multi-frame shape
+  (`bench/workloads/video-heavy.toml` is one), which needs
+  `kernel.perf_event_paranoid=-1` and this host has 4. So a relay's share of
+  `GroupState` wait with multi-frame groups is still unmeasured.
+
+Decided (maintainer, 2026-10-24): Front eviction lands on the lock-free
+append-only log (`kio::log`) itself, a tail run from
+an advancing base with refilled runs below it, rather than the same layout
+under today's mutex with the log swapped in later. The maintainer preferred
+landing the end-state storage once. So the log moved to m1, ahead of Front
+eviction, scoped to `GroupState`'s frames with the above as its expected
+win, and no longer waits on the spikes: they change how much it wins, not
+the storage Front eviction needs. `TrackState` arrival order moved to
+[Log adoption](/quest/m2/perf/kio-channel-contention/log-adoption.md), which
+still waits on them.
+A 2026-10-22 staging CDN chat profile (default tokio runtime, `f57c0aad`,
+DWARF stacks, 36% incomplete) put waiter registration at 1.97% self-time, the
+fourth-largest site, on a 501-connection chat shape. It agrees with this
+epic's targets but carries no lock-wait split.
 
 ## Required
 
@@ -156,9 +230,4 @@ Decided (maintainer, 2026-10-14, per-thread follow-up):
 - [Version counter](/quest/m2/perf/kio-channel-contention/version.md) - an opted-in re-poll skips the mutex when nothing changed, and parking no longer contends with readers
 - [Replica spike](/quest/m2/perf/kio-channel-contention/spike-replica.md) - measures per-worker data-plane replicas linked over the in-memory transport, announcements shared
 - [Cluster spike](/quest/m2/perf/kio-channel-contention/spike-cluster.md) - measures a relay per thread clustered over the in-memory transport, nothing shared
-- [Append-only log](/quest/m2/perf/kio-channel-contention/log.md) - a kio log primitive with lock-free cursor reads and front eviction, if the shared model survives the spikes
 - [Log adoption](/quest/m2/perf/kio-channel-contention/log-adoption.md) - the rest of moq-net's log-shaped state moves onto the log where it measures as a win
-
-## Related
-
-- [Relay profiling](/quest/m2/perf/lock-profile.md) - the lock-wait recipe that measures before and after

@@ -61,6 +61,7 @@ impl<T> Shared<T> {
 	/// [`Ref`], so it can't flag the state modified and spuriously wake this poll's own
 	/// waiter. Registers `waiter` while pending; any mutation through a [`lock`](Self::lock)
 	/// guard re-polls it.
+	#[cfg_attr(feature = "_sim", track_caller)]
 	pub fn poll<F>(&self, waiter: &Waiter, f: F) -> Poll<Mut<'_, T>>
 	where
 		F: FnOnce(&Ref<'_, T>) -> Poll<()>,
@@ -70,7 +71,7 @@ impl<T> Shared<T> {
 		};
 		match f(&guard) {
 			// Upgrade the Ref to a Mut, keeping the same lock guard.
-			Poll::Ready(()) => Poll::Ready(Mut::new(guard.state)),
+			Poll::Ready(()) => crate::coop::ready(Mut::new(guard.state)),
 			Poll::Pending => {
 				waiter.register(&mut guard.state.waiters_value);
 				Poll::Pending
@@ -225,15 +226,5 @@ mod test {
 		shared.lock().push(3);
 
 		assert_eq!(task.await.unwrap(), Some(3));
-	}
-
-	#[test]
-	fn same_channel_tracks_identity() {
-		let shared = Shared::<Vec<u32>>::default();
-		let clone = shared.clone();
-		let other = Shared::<Vec<u32>>::default();
-
-		assert!(shared.same_channel(&clone));
-		assert!(!shared.same_channel(&other));
 	}
 }

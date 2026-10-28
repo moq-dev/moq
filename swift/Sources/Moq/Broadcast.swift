@@ -26,51 +26,35 @@ public final class BroadcastConsumer: Sendable {
         GroupConsumer(try await ffi.fetchGroup(name: name, sequence: sequence, options: options))
     }
 
-    /// Resolve a catalog rendition's `broadcast` reference to the broadcast serving its track.
+    /// Resolve a catalog rendition to the broadcast serving its track.
     ///
-    /// `reference` is `Media.Video.broadcast` / `Media.Audio.broadcast`: `nil` or empty names this
-    /// broadcast, anything else names a sibling relative to it (e.g. `./source`). Call it on a
-    /// rendition that carries one before `Media.TrackConsumer.subscribe`, `subscribeTrack`, `fetchGroup`, or
-    /// `Media.GroupConsumer.fetch`, which take a track name rather than a rendition: the rendition's
-    /// `track`, or its catalog key when `nil`. `decodeAudio` and `decodeVideo` resolve both themselves.
+    /// The rendition's `broadcast` reference, `nil` or empty, names this broadcast; anything else
+    /// names a sibling relative to it (e.g. `./source`). Its `epoch` is the publisher instance the
+    /// reference names: a broadcast proven to serve another instance throws instead of resolving,
+    /// and a route without an epoch cannot prove one, so there it is best effort. Call it on a
+    /// rendition that carries a reference before `subscribeTrack` or `fetchGroup`, which take a
+    /// track name rather than a rendition: the rendition's `track`, or its ID when `nil`. The
+    /// rendition-based `Media.TrackConsumer.subscribe`, `Media.GroupConsumer.fetch`,
+    /// `Audio.Consumer.subscribe`, and `Video.Consumer.subscribe` resolve it themselves.
     ///
     /// Throws if this broadcast came from a local producer rather than an origin, since a
     /// standalone broadcast has no sibling to name.
-    public func resolve(_ reference: String?) async throws -> BroadcastConsumer {
-        BroadcastConsumer(try await ffi.resolve(reference: reference))
+    public func resolve(_ rendition: Media.Rendition) async throws -> BroadcastConsumer {
+        BroadcastConsumer(try await ffi.resolve(rendition: rendition))
     }
 
-    /// Subscribe to a raw-audio track, decoding to PCM in the layout `output`
-    /// declares. `catalogAudio` is the matching rendition from the catalog.
-    public func decodeAudio(name: String, catalogAudio: Media.Audio, output: AudioDecoderOutput) async throws -> AudioConsumer {
-        AudioConsumer(try await ffi.decodeAudio(name: name, catalogAudio: catalogAudio, output: output))
-    }
-
-    /// Subscribe to a video track and decode it inside the bindings.
-    /// `catalogVideo` is the matching rendition from the catalog.
-    ///
-    /// Each frame converts to a packed CPU layout on demand via
-    /// `pixels(format:)`. `output.resize` is best effort, so read each frame's
-    /// own dimensions.
-    public func decodeVideo(
-        name: String,
-        catalogVideo: Media.Video,
-        output: VideoDecoderOutput = VideoDecoderOutput()
-    ) async throws -> VideoConsumer {
-        VideoConsumer(try await ffi.decodeVideo(name: name, catalogVideo: catalogVideo, output: output))
-    }
 }
 
-/// Write side of a broadcast: open tracks and publish frames.
+/// Write side of a broadcast: open tracks and publish frames. Its `Publication`,
+/// if any, announces it.
 ///
-/// Constructing one directly creates a standalone broadcast for serving dynamic
-/// requests (`BroadcastRequest.accept`) or local pub/sub. To publish at a path,
-/// use `OriginProducer.createBroadcast(path:)` instead.
+/// Constructing one directly creates a standalone broadcast for local pub/sub.
+/// To publish at a path, use `OriginProducer.createBroadcast(path:)` instead.
 public final class BroadcastProducer: Sendable {
     let ffi: MoqBroadcastProducer
 
-    /// Create a standalone broadcast for serving dynamic requests or local
-    /// pub/sub. To publish at a path, use `OriginProducer.createBroadcast(path:)`.
+    /// Create a standalone broadcast for local pub/sub. To publish at a path,
+    /// use `OriginProducer.createBroadcast(path:)`.
     public init() throws {
         ffi = try MoqBroadcastProducer()
     }
@@ -85,22 +69,9 @@ public final class BroadcastProducer: Sendable {
     }
 
     /// Accept subscriptions to tracks that are not published yet. Hold and iterate
-    /// the returned `BroadcastDynamic` while such requests should be served.
-    public func dynamic() throws -> BroadcastDynamic {
-        BroadcastDynamic(try ffi.dynamic())
-    }
-
-    /// Advertise this broadcast's exact path as a route.
-    ///
-    /// Announcing again re-prices the route in place. Until announced, the
-    /// broadcast is invisible and unroutable for local consumers and peers alike.
-    public func announce(route: Route = Route()) throws {
-        try ffi.announce(route: route)
-    }
-
-    /// Retract this broadcast's advertisement, if any, from local consumers and peers alike.
-    public func unannounce() throws {
-        try ffi.unannounce()
+    /// the returned `BroadcastRequests` while such requests should be served.
+    public func requests() throws -> BroadcastRequests {
+        BroadcastRequests(try ffi.requests())
     }
 
     /// Open a track for arbitrary byte payloads, with no codec or container.
@@ -109,41 +80,11 @@ public final class BroadcastProducer: Sendable {
         TrackProducer(try ffi.publishTrack(name: name, info: info))
     }
 
-    /// Open a raw-audio track. PCM written via `AudioProducer.write` is encoded
-    /// inside the FFI boundary per `input`/`output`. Select the codec with
-    /// `AudioCodec.opus()` or `AudioCodec.aac()`, placed in `output`.
-    ///
-    /// Pass `bandwidth` to reserve this track's bitrate against the session's
-    /// allocator so a co-resident video encoder sizes itself against what is left.
-    public func encodeAudio(
-        name: String,
-        input: AudioEncoderInput,
-        output: AudioEncoderOutput,
-        bandwidth: Bandwidth? = nil
-    ) throws -> AudioProducer {
-        AudioProducer(try ffi.encodeAudio(name: name, input: input, output: output, bandwidth: bandwidth?.ffi))
-    }
-
-    /// Open a raw-video track. Pixels written via `VideoProducer.write` are
-    /// encoded (H.264 or H.265) inside the FFI boundary per `input`/`output`.
-    ///
-    /// Set `output.track` to choose the track name; otherwise one is derived from
-    /// the codec (`.avc3` / `.hev1`). The catalog rendition is published
-    /// immediately so subscribers can discover it before the first frame exists.
-    ///
-    /// Pass `bandwidth` to reserve this track's configured bitrate and follow
-    /// the grant.
-    public func encodeVideo(
-        input: VideoEncoderInput,
-        output: VideoEncoderOutput,
-        bandwidth: Bandwidth? = nil
-    ) throws -> VideoProducer {
-        VideoProducer(try ffi.encodeVideo(input: input, output: output, bandwidth: bandwidth?.ffi))
-    }
-
     /// End the broadcast for good: retract it and serve no new tracks.
     ///
-    /// Tracks already subscribed carry on to their own end. Closing again is a no-op.
+    /// Tracks still open on it end with `Unroutable`, which readers take as the publisher
+    /// leaving, and their later calls throw `MoqError.Closed`; finish a track first to end it
+    /// cleanly. Closing again is a no-op.
     public func close() throws {
         try ffi.close()
     }

@@ -4,17 +4,20 @@
  *
  * @module
  */
+import { Instant, Nano, now, Second, sleep, sleepUntil } from "@moq/clock";
 
 /** Cancels a subscription, effect, or other registration when called. */
 export type Dispose = () => void;
 
 const noop: Dispose = () => {};
 
-type Subscriber<T> = (value: T) => void;
+/** Receives a value each time it changes. */
+export type Subscriber<T> = (value: T) => void;
 
 // Symbols to identify our instances across different package versions.
-// SIGNAL_BRAND is Signal only (it implies a write side); GETTER_BRAND is every readable we ship.
+/** Marks a {@link Signal}, even one from another copy of this package; it implies a write side. */
 const SIGNAL_BRAND = Symbol.for("@moq/signals");
+/** Marks every readable this package ships, even one from another copy of it. */
 const GETTER_BRAND = Symbol.for("@moq/signals.getter");
 const CHANGE_LISTEN = Symbol.for("@moq/signals.change.listen");
 
@@ -46,7 +49,7 @@ export interface Setter<T> {
 
 /**
  * The read side of a {@link Once}: observe it reactively ({@link Getter}, `undefined` while
- * pending) or await it ({@link PromiseLike}, resolves with the settled value, immediately if it
+ * pending) or await it (a `PromiseLike` that resolves with the settled value, immediately if it
  * already settled). Expose this to callers so they can peek/observe/await but not settle it.
  */
 export interface GetPromise<T> extends Getter<T | undefined>, PromiseLike<T> {}
@@ -64,8 +67,9 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 	#hasCapturedOldValue = false;
 	#forceNotify = false;
 
-	// Brands to identify this as a Signal (and a readable) across package instances.
+	/** Marks this as a Signal across package instances. */
 	readonly [SIGNAL_BRAND] = true;
+	/** Marks this as a readable across package instances. */
 	readonly [GETTER_BRAND] = true;
 
 	constructor(value: T) {
@@ -106,7 +110,8 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 		if (notify === true) this.#forceNotify = true;
 
 		// If there are no subscribers, don't queue a microtask.
-		// Reset all pending state since no flush will occur to clear it.
+		// Drop the capture since no listener saw the old value; a flush already queued finds
+		// nothing to deliver.
 		if (this.#subscribers.size === 0 && this.#changed.size === 0) {
 			this.#hasCapturedOldValue = false;
 			this.#oldValue = undefined;
@@ -123,6 +128,10 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 
 	#flush(): void {
 		this.#pending = false;
+
+		// A write while nobody listened dropped the capture, so any listener since then saw the
+		// current value when it subscribed and there is no change to deliver.
+		if (!this.#hasCapturedOldValue) return;
 		this.#hasCapturedOldValue = false;
 		const old = this.#oldValue;
 		this.#oldValue = undefined;
@@ -131,7 +140,6 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 		this.#forceNotify = false;
 
 		// Check if the net change is zero (value returned to what it was before).
-		// Use === for class instances, dequal for plain objects/primitives.
 		if (!force && isEqual(old as T, this.#value)) return;
 
 		const value = this.#value;
@@ -177,8 +185,9 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 		return () => this.#subscribers.delete(fn);
 	}
 
-	/** Resolves with the value the next time it changes, or calls `fn` once on the next change. */
+	/** Resolves with the value the next time it changes. */
 	changed(): Promise<T>;
+	/** Calls `fn` once the next time the value changes. Returns a function to cancel. */
 	changed(fn: Subscriber<T>): Dispose;
 	changed(fn?: Subscriber<T>): Promise<T> | Dispose {
 		if (fn) {
@@ -324,7 +333,7 @@ class Changed<T> implements GetPromise<Awaited<T>> {
 export class Once<T> implements GetPromise<T> {
 	#signal = new Signal<T | undefined>(undefined);
 
-	// Brand to identify this as a readable across package instances.
+	/** Marks this as a readable across package instances. */
 	readonly [GETTER_BRAND] = true;
 
 	/** Settle the value. Throws if it has already settled. */
@@ -340,8 +349,9 @@ export class Once<T> implements GetPromise<T> {
 		return this.#signal.peek();
 	}
 
-	/** Resolves when it settles, or calls `fn` once when it settles. */
+	/** Resolves when it settles. */
 	changed(): Promise<T | undefined>;
+	/** Calls `fn` once when it settles. Returns a function to cancel. */
 	changed(fn: (value: T | undefined) => void): Dispose;
 	changed(fn?: (value: T | undefined) => void): Promise<T | undefined> | Dispose {
 		return fn ? this.#signal.changed(fn) : this.#signal.changed();
@@ -485,7 +495,8 @@ export function race<const T extends readonly unknown[]>(values: T): Promise<Awa
 	return raceUntil(values);
 }
 
-type SetterType<S> = S extends Setter<infer T> ? T : never;
+/** The value type a {@link Setter} accepts, e.g. `number` for `Signal<number>`. */
+export type SetterType<S> = S extends Setter<infer T> ? T : never;
 
 /** The value type a {@link Getter} yields, e.g. `number` for `Getter<number>`. */
 export type GetterType<G> = G extends Getter<infer T> ? T : never;
@@ -588,10 +599,6 @@ function getterShaped(value: unknown): boolean {
  */
 export type Inputs<I extends SignalMap> = { [K in keyof I]?: GetterInit<GetterType<I[K]>> };
 
-// Excludes common falsy values from a type
-type Falsy = false | 0 | "" | null | undefined;
-type Truthy<T> = Exclude<T, Falsy>;
-
 /**
  * Runs a function that reads signals via `effect.get(...)` and reruns whenever
  * any of them change. Registers cleanup, timers, and event listeners that are
@@ -681,13 +688,14 @@ export class Effect {
 		// so anything that observes cancellation unwinds from here.
 		if (this.#async.size > 0) {
 			// Diagnostic only: a task that ignores cancellation stalls the rerun, so name it.
-			const warn = setTimeout(() => {
-				// A close() racing the timer disarms it, but the callback can already be
+			const warn = new AbortController();
+			sleep(Nano.fromSecond(Second(5)), { signal: warn.signal, ref: false }).then(() => {
+				// A close() racing the timer disarms it, but the wakeup can already be
 				// queued by then. There is nothing to warn about once the effect is gone.
 				if (this.#dispose === undefined) return;
 
 				console.warn("spawn is still running after 5s; the effect cannot rerun until it settles", this.#stack);
-			}, 5000);
+			}, noop);
 
 			try {
 				// A task can spawn another as it unwinds, so drain until nothing new is queued.
@@ -704,7 +712,7 @@ export class Effect {
 				console.error("async effect error", error);
 				if (this.#stack) console.error("stack", this.#stack);
 			} finally {
-				clearTimeout(warn);
+				warn.abort();
 			}
 		}
 
@@ -799,45 +807,40 @@ export class Effect {
 		void promise.then(() => tasks.delete(promise));
 	}
 
-	/** Runs `fn` after `ms` milliseconds, unless the effect reruns or closes first. */
-	timer(fn: () => void, ms: DOMHighResTimeStamp) {
+	/** Runs `fn` after `duration` on the installed clock, unless the effect reruns or closes first. */
+	timer(fn: () => void, duration: Nano) {
 		if (this.#dispose === undefined) {
 			console.warn("Effect.timer called when closed, ignoring");
 			return;
 		}
 
-		let timeout: ReturnType<typeof setTimeout> | undefined;
-		timeout = setTimeout(() => {
-			timeout = undefined;
-			fn();
-		}, ms);
-		this.cleanup(() => timeout !== undefined && clearTimeout(timeout));
+		const abort = new AbortController();
+		// The wakeup can already be queued when cleanup aborts, so check again before running.
+		void sleep(duration, { signal: abort.signal }).then(() => {
+			if (!abort.signal.aborted) fn();
+		}, noop);
+		this.cleanup(() => abort.abort());
 	}
 
 	/**
-	 * Runs `fn` as a nested effect, then closes that effect after `ms` milliseconds.
+	 * Runs `fn` as a nested effect, then closes that effect after `duration` on the installed clock.
 	 *
 	 * Shares {@link run}'s handling of a task that outlived its run: the child is closed at the
 	 * next teardown, not immediately.
 	 */
-	timeout(fn: (effect: Effect) => void, ms: DOMHighResTimeStamp) {
+	timeout(fn: (effect: Effect) => void, duration: Nano) {
 		if (this.#dispose === undefined) {
 			console.warn("Effect.timeout called when closed, ignoring");
 			return;
 		}
 
 		const effect = new Effect(fn);
-
-		let timeout: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
-			effect.close();
-			timeout = undefined;
-		}, ms);
+		const abort = new AbortController();
+		void sleep(duration, { signal: abort.signal }).then(() => effect.close(), noop);
 
 		this.#dispose.push(() => {
-			if (timeout !== undefined) {
-				clearTimeout(timeout);
-				effect.close();
-			}
+			abort.abort();
+			effect.close();
 		});
 	}
 
@@ -857,17 +860,35 @@ export class Effect {
 		});
 	}
 
-	/** Runs `fn` every `ms` milliseconds until the effect reruns or closes. */
-	interval(fn: () => void, ms: DOMHighResTimeStamp) {
+	/**
+	 * Runs `fn` every positive period until cleanup, arming the first deadline before returning.
+	 * Each period uses the clock installed then; a late callback delays the next by a full period.
+	 */
+	interval(fn: () => void, period: Nano) {
 		if (this.#dispose === undefined) {
 			console.warn("Effect.interval called when closed, ignoring");
 			return;
 		}
 
-		const interval = setInterval(() => {
-			fn();
-		}, ms);
-		this.cleanup(() => clearInterval(interval));
+		Instant.add(Instant.zero, period);
+		if (period === 0) throw new RangeError("interval period must be positive");
+		const abort = new AbortController();
+		let next = Instant.add(now(), period);
+		void (async () => {
+			for (;;) {
+				await sleepUntil(next, { signal: abort.signal });
+				if (abort.signal.aborted) return;
+				try {
+					fn();
+				} catch (error) {
+					console.error("effect interval error", error, this.#stack);
+				}
+				// A callback may install a clock with a different origin. A full Delay period
+				// starts from that clock's now, never from the previous clock's deadline.
+				next = Instant.add(now(), period);
+			}
+		})().catch(noop);
+		this.cleanup(() => abort.abort());
 	}
 
 	/**
@@ -912,14 +933,14 @@ export class Effect {
 	/** Reads and tracks several signals, returning their values or `undefined` if any is falsy. */
 	getAll<S extends readonly Getter<unknown>[]>(
 		signals: [...S],
-	): { [K in keyof S]: Truthy<GetterType<S[K]>> } | undefined {
+	): { [K in keyof S]: Exclude<GetterType<S[K]>, false | 0 | "" | null | undefined> } | undefined {
 		const values: unknown[] = [];
 		for (const signal of signals) {
 			const value = this.get(signal);
 			if (!value) return undefined;
 			values.push(value);
 		}
-		return values as { [K in keyof S]: Truthy<GetterType<S[K]>> };
+		return values as { [K in keyof S]: Exclude<GetterType<S[K]>, false | 0 | "" | null | undefined> };
 	}
 
 	/** Runs `fn` with the signal's value now and again whenever it changes, scoped to this effect. */
@@ -936,61 +957,70 @@ export class Effect {
 		});
 	}
 
-	/** Adds an event listener that is removed automatically when the effect reruns or closes. */
+	/** Adds an {@link HTMLElement} listener, removed automatically when the effect reruns or closes. */
 	event<K extends keyof HTMLElementEventMap>(
 		target: HTMLElement,
 		type: K,
 		listener: (this: HTMLElement, ev: HTMLElementEventMap[K]) => void,
 		options?: boolean | AddEventListenerOptions,
 	): void;
+	/** Adds a typed SVGElement listener, removed when the effect reruns or closes. */
 	event<K extends keyof SVGElementEventMap>(
 		target: SVGElement,
 		type: K,
 		listener: (this: SVGElement, ev: SVGElementEventMap[K]) => void,
 		options?: boolean | AddEventListenerOptions,
 	): void;
+	/** Adds a typed Document listener, removed when the effect reruns or closes. */
 	event<K extends keyof DocumentEventMap>(
 		target: Document,
 		type: K,
 		listener: (this: Document, ev: DocumentEventMap[K]) => void,
 		options?: boolean | AddEventListenerOptions,
 	): void;
+	/** Adds a typed Window listener, removed when the effect reruns or closes. */
 	event<K extends keyof WindowEventMap>(
 		target: Window,
 		type: K,
 		listener: (this: Window, ev: WindowEventMap[K]) => void,
 		options?: boolean | AddEventListenerOptions,
 	): void;
+	/** Adds a typed WebSocket listener, removed when the effect reruns or closes. */
 	event<K extends keyof WebSocketEventMap>(
 		target: WebSocket,
 		type: K,
 		listener: (this: WebSocket, ev: WebSocketEventMap[K]) => void,
 		options?: boolean | AddEventListenerOptions,
 	): void;
+	/** Adds a typed XMLHttpRequest listener, removed when the effect reruns or closes. */
 	event<K extends keyof XMLHttpRequestEventMap>(
 		target: XMLHttpRequest,
 		type: K,
 		listener: (this: XMLHttpRequest, ev: XMLHttpRequestEventMap[K]) => void,
 		options?: boolean | AddEventListenerOptions,
 	): void;
+	/** Adds a typed MediaQueryList listener, removed when the effect reruns or closes. */
 	event<K extends keyof MediaQueryListEventMap>(
 		target: MediaQueryList,
 		type: K,
 		listener: (this: MediaQueryList, ev: MediaQueryListEventMap[K]) => void,
 		options?: boolean | AddEventListenerOptions,
 	): void;
+	/** Adds a typed Animation listener, removed when the effect reruns or closes. */
 	event<K extends keyof AnimationEventMap>(
 		target: Animation,
 		type: K,
 		listener: (this: Animation, ev: AnimationEventMap[K]) => void,
 		options?: boolean | AddEventListenerOptions,
 	): void;
+	/** Adds a typed EventSource listener, removed when the effect reruns or closes. */
 	event<K extends keyof EventSourceEventMap>(
 		target: EventSource,
 		type: K,
 		listener: (this: EventSource, ev: EventSourceEventMap[K]) => void,
 		options?: boolean | AddEventListenerOptions,
 	): void;
+	/** Adds a listener for any event on any target, removed when the effect reruns or closes. */
 	event(
 		target: EventTarget,
 		type: string,
@@ -1140,7 +1170,7 @@ export class Computed<T> implements Getter<T | undefined> {
 	#signal = new Signal<T | undefined>(undefined);
 	#effect: Effect;
 
-	// Brand to identify this as a readable across package instances.
+	/** Marks this as a readable across package instances. */
 	readonly [GETTER_BRAND] = true;
 
 	/** Creates a computed that derives its value from `fn`, rerunning when dependencies change. */
@@ -1155,8 +1185,9 @@ export class Computed<T> implements Getter<T | undefined> {
 		return this.#signal.peek();
 	}
 
-	/** Resolves the next time the derived value changes, or calls `fn` once on the next change. */
+	/** Resolves the next time the derived value changes. */
 	changed(): Promise<T | undefined>;
+	/** Calls `fn` once the next time the derived value changes. Returns a function to cancel. */
 	changed(fn: Subscriber<T | undefined>): Dispose;
 	changed(fn?: Subscriber<T | undefined>): Promise<T | undefined> | Dispose {
 		return fn ? this.#signal.changed(fn) : this.#signal.changed();
@@ -1173,6 +1204,7 @@ export class Computed<T> implements Getter<T | undefined> {
 	 */
 	close(): void {
 		this.#effect.close();
+		this.#signal.set(undefined);
 	}
 }
 
@@ -1206,7 +1238,7 @@ export class Derived<const S extends readonly Getter<unknown>[], T> implements G
 	#sources: S;
 	#fn: (...values: GetterValues<S>) => T;
 
-	// Brand to identify this as a readable across package instances.
+	/** Marks this as a readable across package instances. */
 	readonly [GETTER_BRAND] = true;
 
 	/** Creates a view deriving its value from `sources` via `fn`, recomputed on every read. */
@@ -1225,8 +1257,9 @@ export class Derived<const S extends readonly Getter<unknown>[], T> implements G
 		return this.#watch(fn);
 	}
 
-	/** Resolves the next time the derived value changes, or calls `fn` once on the next change. */
+	/** Resolves the next time the derived value changes. */
 	changed(): Promise<T>;
+	/** Calls `fn` once the next time the derived value changes. Returns a function to cancel. */
 	changed(fn: Subscriber<T>): Dispose;
 	changed(fn?: Subscriber<T>): Promise<T> | Dispose {
 		if (fn) return this.#once(fn);
@@ -1254,10 +1287,10 @@ export class Derived<const S extends readonly Getter<unknown>[], T> implements G
 	}
 }
 
-// Deep equality for plain objects/arrays, === for class instances and primitives.
+// Deep equality for plain objects/arrays, SameValueZero for everything else.
 // Class instances have identity semantics (e.g. two different Broadcast instances are never equal).
 function isEqual(a: unknown, b: unknown): boolean {
-	if (a === b) return true;
+	if (a === b || (Number.isNaN(a) && Number.isNaN(b))) return true;
 	if (a === null || b === null || typeof a !== "object" || typeof b !== "object") return false;
 
 	const protoA = Object.getPrototypeOf(a);
@@ -1267,11 +1300,15 @@ function isEqual(a: unknown, b: unknown): boolean {
 	if (protoA !== protoB) return false;
 	if (protoA !== Object.prototype && protoA !== Array.prototype) return false;
 
-	const keysA = Object.keys(a as Record<string, unknown>);
-	const keysB = Object.keys(b as Record<string, unknown>);
-	if (keysA.length !== keysB.length) return false;
+	// Holes are not keys, so a sparse array's length is only visible here.
+	if (protoA === Array.prototype && (a as unknown[]).length !== (b as unknown[]).length) return false;
+
+	const keysA = Object.keys(a);
+	if (keysA.length !== Object.keys(b).length) return false;
 
 	for (const key of keysA) {
+		// Membership matters on its own: `{ a: undefined }` is not `{ b: undefined }`.
+		if (!Object.hasOwn(b, key)) return false;
 		if (!isEqual((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key])) return false;
 	}
 

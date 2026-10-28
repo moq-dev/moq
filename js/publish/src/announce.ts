@@ -1,8 +1,8 @@
 import type { Effect, Getter, Signal } from "@moq/signals";
-import type { AnnounceMode } from "./element";
+import type { AnnounceMode, SourceType } from "./element";
 
 // One captured track, as the announce gate sees it.
-export interface Track {
+interface Track {
 	enabled: Getter<boolean>;
 	source: Getter<unknown>;
 	// Whether the encoder's config resolved, or can't until something outside it changes.
@@ -10,9 +10,10 @@ export interface Track {
 }
 
 export interface Props {
-	mode: Getter<AnnounceMode>;
-	// A camera captures video and audio as one publication.
-	camera: Getter<boolean | undefined>;
+	// Undefined refuses to announce.
+	mode: Getter<AnnounceMode | undefined>;
+	// The selected source while the element is connected; it stays set across capture gaps.
+	source: Getter<SourceType | File | undefined>;
 	video: Track;
 	audio: Track;
 }
@@ -22,25 +23,34 @@ export interface Props {
 // In `source` mode the first announce also waits until every enabled, captured track settles. The
 // broadcast serves no catalog until it is announced, so its first snapshot lists every rendition: a
 // one-shot consumer (export, HLS, a recording) can't reinitialize for a track that joins later. Once
-// announced it stays announced while the source lives, so a later config drop (a device swap) only
-// edits the catalog.
+// a camera broadcast is announced it stays announced while that camera stays selected and connected,
+// so a capture gap (a device swap, mute, or retry) only edits the catalog.
 export function run(effect: Effect, announcing: Signal<boolean>, props: Props): void {
+	// The source the current announcement was made for; switching to another source must earn its own.
+	let latched: SourceType | File | undefined;
+
 	effect.run((effect) => {
 		const mode = effect.get(props.mode);
+		const source = effect.get(props.source);
 		const video = effect.get(props.video.source) !== undefined;
 		const audio = effect.get(props.audio.source) !== undefined;
 		const videoEnabled = effect.get(props.video.enabled);
 		const audioEnabled = effect.get(props.audio.enabled);
 
-		// A camera waits for every enabled track, so denying either permission can't advertise a
-		// partial broadcast.
-		const ready = !effect.get(props.camera) || ((!videoEnabled || video) && (!audioEnabled || audio));
+		// A camera captures video and audio as one publication, so it waits for every enabled track and
+		// denying either permission can't advertise a partial broadcast.
+		const camera = source === "camera";
+		const ready = !camera || ((!videoEnabled || video) && (!audioEnabled || audio));
 		const live = (video || audio) && ready;
+		const active = source !== undefined && (camera || live);
 
 		const settled =
 			(!videoEnabled || !video || !!effect.get(props.video.settled)) &&
 			(!audioEnabled || !audio || !!effect.get(props.audio.settled));
 
-		announcing.set(mode === "always" || (mode === "source" && live && (announcing.peek() || settled)));
+		const announced =
+			mode === "always" || (mode === "source" && active && (latched === source || (live && settled)));
+		latched = announced ? source : undefined;
+		announcing.set(announced);
 	});
 }

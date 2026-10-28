@@ -1,9 +1,11 @@
+import type { Milli } from "@moq/clock";
 import type * as Epoch from "../epoch.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import { decodeEpoch, encodeEpoch } from "./epoch.ts";
 import * as Message from "./message.ts";
-import { hasFrameBounds, Version } from "./version.ts";
+import { fromWire, toWire } from "./priority.ts";
+import { hasFetchMaxDelay, hasFrameBounds, Version } from "./version.ts";
 
 function guardFetch(version: Version) {
 	switch (version) {
@@ -21,6 +23,8 @@ export class Fetch {
 	epoch?: Epoch.Valid;
 	track: string;
 	priority: number;
+	/** Reader freshness budget. Lite-07+ only; omission uses publisher retention alone. */
+	maxDelay?: Milli;
 	group: number;
 
 	/** Index of the first frame to return; 0 is the start of the group. Lite-06+. */
@@ -37,6 +41,7 @@ export class Fetch {
 		epoch,
 		track,
 		priority,
+		maxDelay,
 		group,
 		startFrame = 0,
 		endFrame,
@@ -45,6 +50,7 @@ export class Fetch {
 		epoch?: Epoch.Valid;
 		track: string;
 		priority: number;
+		maxDelay?: Milli;
 		group: number;
 		startFrame?: number;
 		endFrame?: number;
@@ -53,6 +59,7 @@ export class Fetch {
 		this.epoch = epoch;
 		this.track = track;
 		this.priority = priority;
+		this.maxDelay = maxDelay;
 		this.group = group;
 		this.startFrame = startFrame;
 		this.endFrame = endFrame;
@@ -62,7 +69,9 @@ export class Fetch {
 		await w.string(Path.encode(this.broadcast));
 		await encodeEpoch(w, version, this.epoch);
 		await w.string(this.track);
-		await w.u8(this.priority);
+		await w.u8(toWire(this.priority));
+		if (hasFetchMaxDelay(version)) await w.u53(this.maxDelay === undefined ? 0 : this.maxDelay + 1);
+		else if (this.maxDelay !== undefined) throw new Error("fetch maxDelay not supported for this version");
 		await w.u53(this.group);
 
 		if (hasFrameBounds(version)) {
@@ -78,11 +87,13 @@ export class Fetch {
 		const broadcast = Path.decode(await r.string());
 		const epoch = await decodeEpoch(r, version);
 		const track = await r.string();
-		const priority = await r.u8();
+		const priority = fromWire(await r.u8());
+		const encodedMaxDelay = hasFetchMaxDelay(version) ? await r.u53() : 0;
+		const maxDelay = encodedMaxDelay > 0 ? ((encodedMaxDelay - 1) as Milli) : undefined;
 		const group = await r.u53();
 
 		if (!hasFrameBounds(version)) {
-			return new Fetch({ broadcast, epoch, track, priority, group });
+			return new Fetch({ broadcast, epoch, track, priority, maxDelay, group });
 		}
 
 		const startFrame = await r.u53();
@@ -96,6 +107,7 @@ export class Fetch {
 			epoch,
 			track,
 			priority,
+			maxDelay,
 			group,
 			startFrame,
 			endFrame: endFrame > 0 ? endFrame - 1 : undefined,

@@ -3,8 +3,9 @@
 use std::fmt;
 use std::sync::Arc;
 use std::task::Poll;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use moq_net::time::Instant;
 use rand::RngExt;
 
 use moq_mux::catalog::hang::CatalogExt;
@@ -13,7 +14,7 @@ use super::producer::Reserved;
 use super::{Input, Options, Producer};
 use crate::capture;
 use crate::resample::{Remix, Resampler};
-use crate::{Error, Format, Frame, Layout as PcmLayout};
+use crate::{Error, Format, Frame, Layout as PcmLayout, Level};
 
 /// Backoff bounds for reopening a capture source. The quick first retry covers
 /// a USB device re-enumerating; the ceiling keeps a missing device from spinning.
@@ -36,47 +37,6 @@ pub enum Status {
 	Failed,
 	/// The MoQ track ended, so the driver has stopped.
 	Ended,
-}
-
-/// The post-processing level of the most recently captured buffer.
-///
-/// Zero while the input is closed. Read it with [`Control::level`] at
-/// whatever rate the meter draws at.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Level {
-	rms: f32,
-	peak: f32,
-}
-
-impl Level {
-	/// Root mean square amplitude on a linear `0.0..=1.0` scale.
-	pub fn rms(&self) -> f32 {
-		self.rms
-	}
-
-	/// Peak absolute amplitude on a linear `0.0..=1.0` scale.
-	pub fn peak(&self) -> f32 {
-		self.peak
-	}
-
-	fn measure(samples: &[f32]) -> Self {
-		if samples.is_empty() {
-			return Self::default();
-		}
-
-		let mut squares = 0.0f64;
-		let mut peak = 0.0f32;
-		for &sample in samples {
-			let sample = sample.clamp(-1.0, 1.0);
-			squares += f64::from(sample) * f64::from(sample);
-			peak = peak.max(sample.abs());
-		}
-
-		Self {
-			rms: (squares / samples.len() as f64).sqrt() as f32,
-			peak,
-		}
-	}
 }
 
 /// A snapshot of a capture-backed publication's lifecycle.
@@ -202,7 +162,7 @@ impl Control {
 		broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer<E>,
 		options: Capture,
-	) -> Result<(Self, Driver<E>), Error> {
+	) -> Result<(Self, Driver), Error> {
 		Self::build(broadcast, catalog, options, Supervisor::default())
 	}
 
@@ -211,7 +171,7 @@ impl Control {
 		catalog: moq_mux::catalog::Producer<E>,
 		options: Capture,
 		supervisor: Supervisor,
-	) -> Result<(Self, Driver<E>), Error> {
+	) -> Result<(Self, Driver), Error> {
 		let clock = catalog.clock();
 		let reserved = Reserved::new(&mut broadcast, catalog, &options.encode)?;
 		let track_name: Arc<str> = reserved.name().into();
@@ -339,11 +299,11 @@ impl Control {
 /// The driver owns the broadcast producer so its identity remains alive through
 /// stop, failure, replacement, and restart. Dropping the final [`Control`]
 /// ends the driver and releases that identity.
-pub struct Driver<E: CatalogExt = ()> {
+pub struct Driver {
 	_broadcast: moq_net::broadcast::Producer,
 	// Held for the driver lifetime once the layout reveals the encoded rate.
 	_reservation: Option<moq_net::bandwidth::Reservation>,
-	track: Option<Track<E>>,
+	track: Option<Track>,
 	/// The codec settings the rendition is built from once the layout is known.
 	encode: Options,
 	/// The catalog's clock, so samples land on the mapping it advertises.
@@ -358,13 +318,13 @@ pub struct Driver<E: CatalogExt = ()> {
 	park_on_failure: bool,
 }
 
-impl<E: CatalogExt> fmt::Debug for Driver<E> {
+impl fmt::Debug for Driver {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct("Driver").finish_non_exhaustive()
 	}
 }
 
-impl<E: CatalogExt> Driver<E> {
+impl Driver {
 	/// Run capture until the final control handle drops or the MoQ track ends.
 	pub async fn run(self) -> Result<(), Error> {
 		self.run_with(DeviceSource).await
@@ -552,8 +512,8 @@ impl<E: CatalogExt> Driver<E> {
 		tokio::select! {
 			biased;
 			changed = desired_changed(&self.desired, revision) => changed.is_some(),
-			err = track.closed() => {
-				log_track_ended(err);
+			closed = track.closed() => {
+				log_track_ended(closed);
 				false
 			}
 		}
@@ -583,7 +543,7 @@ impl<E: CatalogExt> Driver<E> {
 		}
 	}
 
-	fn producer_mut(&mut self) -> &mut Producer<E> {
+	fn producer_mut(&mut self) -> &mut Producer {
 		self.track
 			.as_mut()
 			.and_then(Track::producer)
@@ -622,16 +582,19 @@ enum DriveEvent {
 ///
 /// One per publication, moved twice in its life, so the size difference between
 /// the variants never costs a copy worth an allocation to avoid.
-#[allow(clippy::large_enum_variant)]
-enum Track<E: CatalogExt = ()> {
+#[expect(
+	clippy::large_enum_variant,
+	reason = "one per publication and moved twice, so boxing the large variant saves nothing"
+)]
+enum Track {
 	/// Registered in the broadcast but not the catalog, because the rendition
 	/// describes a PCM layout no probe has returned yet.
-	Reserved(Reserved<E>),
+	Reserved(Reserved),
 	/// Probed, so the rendition is registered and samples can be encoded.
-	Encoding(Producer<E>),
+	Encoding(Producer),
 }
 
-impl<E: CatalogExt> Track<E> {
+impl Track {
 	fn track(&self) -> &moq_net::track::Producer {
 		match self {
 			Self::Reserved(reserved) => reserved.track(),
@@ -639,7 +602,7 @@ impl<E: CatalogExt> Track<E> {
 		}
 	}
 
-	fn producer(&mut self) -> Option<&mut Producer<E>> {
+	fn producer(&mut self) -> Option<&mut Producer> {
 		match self {
 			Self::Reserved(_) => None,
 			Self::Encoding(producer) => Some(producer),
@@ -734,7 +697,7 @@ pub async fn publish_capture<E: CatalogExt>(
 /// if the future ever regains a `!Send` component. macOS is exempt: the TCC
 /// prompt and ScreenCaptureKit both hold ObjC handles across an await.
 #[cfg(not(target_os = "macos"))]
-#[allow(dead_code)]
+#[allow(dead_code, reason = "a compile-time `Send` assertion, never called")]
 fn assert_publish_capture_send(
 	broadcast: moq_net::broadcast::Producer,
 	catalog: moq_mux::catalog::Producer,
@@ -792,21 +755,23 @@ trait Demand {
 
 impl Demand for moq_net::track::Demand {
 	async fn used(&mut self) -> bool {
-		match moq_net::track::Demand::used(self).await {
-			Ok(()) => true,
-			Err(err) => {
-				log_track_ended(err);
-				false
-			}
-		}
+		until_wanted(self, true).await
 	}
 
 	async fn unused(&mut self) -> bool {
-		match moq_net::track::Demand::unused(self).await {
-			Ok(()) => true,
+		until_wanted(self, false).await
+	}
+}
+
+/// Wait until some subscriber wants the track, or none does.
+async fn until_wanted(demand: &mut moq_net::track::Demand, wanted: bool) -> bool {
+	loop {
+		match demand.wanted_changed().await {
+			Ok(next) if next.is_some() == wanted => return true,
+			Ok(_) => {}
 			Err(err) => {
-				log_track_ended(err);
-				false
+				log_track_ended(Err(err));
+				return false;
 			}
 		}
 	}
@@ -824,8 +789,8 @@ trait Output {
 	fn write(&mut self, samples: capture::Samples, timestamp_us: u64) -> Result<(), Error>;
 }
 
-struct EncoderOutput<'a, E: CatalogExt> {
-	producer: &'a mut Producer<E>,
+struct EncoderOutput<'a> {
+	producer: &'a mut Producer,
 	clock: &'a moq_mux::Clock,
 	/// The source the supervisor was started with, so a published state can
 	/// never name an input this stream isn't actually reading.
@@ -835,7 +800,7 @@ struct EncoderOutput<'a, E: CatalogExt> {
 	device: Option<capture::Device>,
 }
 
-impl<E: CatalogExt> Output for EncoderOutput<'_, E> {
+impl Output for EncoderOutput<'_> {
 	fn waiting(&mut self) {
 		self.device = None;
 		self.silence();
@@ -896,7 +861,7 @@ impl<E: CatalogExt> Output for EncoderOutput<'_, E> {
 	}
 }
 
-impl<E: CatalogExt> EncoderOutput<'_, E> {
+impl EncoderOutput<'_> {
 	/// Levels ride their own channel: they change every buffer, so folding them
 	/// into [`State`] would wake every [`Control::changed`] waiter at the
 	/// capture rate and rebuild the whole snapshot to do it.
@@ -1053,7 +1018,7 @@ impl Supervisor {
 			};
 
 			tracing::warn!(error = %failure, "audio capture format unavailable");
-			tokio::time::sleep(self.advance()).await;
+			moq_clock::sleep(self.advance()).await;
 		}
 	}
 
@@ -1180,17 +1145,21 @@ impl Supervisor {
 						}
 						continue 'demand;
 					}
-					_ = tokio::time::sleep(wait) => {}
+					_ = moq_clock::sleep(wait) => {}
 				}
 			}
 		}
 	}
 }
 
-/// A dropped or closed track is the normal end of a publish; any other cause is
-/// a real abort (e.g. a transport reset) worth surfacing rather than treating as
-/// a clean exit.
-fn log_track_ended(err: moq_net::Error) {
+/// A finished track, or an application dropping or closing its producer, ends
+/// publishing normally; a specific abort (such as a transport reset) stays
+/// visible in diagnostics.
+fn log_track_ended(outcome: Result<(), moq_net::Error>) {
+	let Err(err) = outcome else {
+		tracing::debug!("audio track finished; stopping capture");
+		return;
+	};
 	if matches!(err, moq_net::Error::Dropped | moq_net::Error::Closed) {
 		tracing::debug!("audio track no longer announced; stopping capture");
 	} else {
@@ -1209,6 +1178,7 @@ fn frame(samples: &[f32], timestamp_us: u64) -> Result<Frame, Error> {
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use std::collections::VecDeque;
 	use std::future::Future;
@@ -1496,7 +1466,7 @@ mod tests {
 		let mut options = Capture::default();
 		options.capture.source = capture::Source::Microphone(Some("first".into()));
 		options.encode.track = Some("audio".into());
-		options.encode.settings.layout = PcmLayout::from_channels(channels).unwrap();
+		options.encode.config.layout = PcmLayout::from_channels(channels).unwrap();
 		let (control, driver) = Control::build(broadcast, catalog.clone(), options, Supervisor::exact()).unwrap();
 		let subscription = consumer.track("audio").unwrap().subscribe(None).await.unwrap();
 		(control, driver, source(opens, false), subscription, catalog)
@@ -2108,7 +2078,8 @@ mod tests {
 	/// the broadcast clock's own correlation, so the published timestamp is exactly that
 	/// instant however late the read happens.
 	mod clock {
-		use std::time::{Duration, Instant, SystemTime};
+		use moq_clock::Wall;
+		use std::time::Duration;
 
 		use super::*;
 
@@ -2129,7 +2100,7 @@ mod tests {
 
 		impl Fixture {
 			/// Run a publication over `opens` on a broadcast whose clock began `behind` ago, at `wall`.
-			fn start(behind: Duration, wall: SystemTime, opens: impl IntoIterator<Item = Open>) -> Self {
+			fn start(behind: Duration, wall: Wall, opens: impl IntoIterator<Item = Open>) -> Self {
 				let epoch = Instant::now()
 					.checked_sub(behind)
 					.expect("a monotonic clock that far back");
@@ -2222,7 +2193,7 @@ mod tests {
 		#[tokio::test]
 		async fn a_late_first_buffer_publishes_its_capture() {
 			let (samples, input) = stream(None);
-			let mut fixture = Fixture::start(Duration::from_secs(5), SystemTime::now(), [Open::Stream(input)]);
+			let mut fixture = Fixture::start(Duration::from_secs(5), moq_clock::wall(), [Open::Stream(input)]);
 			let mut track = fixture.subscribe().await;
 
 			let published = fixture.deliver(&samples, &mut track, &[]).await;
@@ -2235,7 +2206,7 @@ mod tests {
 		#[tokio::test]
 		async fn a_queued_buffer_publishes_its_capture_instant() {
 			let (samples, input) = stream(None);
-			let mut fixture = Fixture::start(Duration::from_secs(5), SystemTime::now(), [Open::Stream(input)]);
+			let mut fixture = Fixture::start(Duration::from_secs(5), moq_clock::wall(), [Open::Stream(input)]);
 			let mut track = fixture.subscribe().await;
 
 			let captured = Instant::now() - Duration::from_millis(40);
@@ -2253,7 +2224,7 @@ mod tests {
 		#[tokio::test]
 		async fn a_buffer_before_the_clock_began_clamps_to_zero() {
 			let (samples, input) = stream(None);
-			let mut fixture = Fixture::start(Duration::ZERO, SystemTime::now(), [Open::Stream(input)]);
+			let mut fixture = Fixture::start(Duration::ZERO, moq_clock::wall(), [Open::Stream(input)]);
 			let mut track = fixture.subscribe().await;
 
 			samples
@@ -2276,7 +2247,7 @@ mod tests {
 		#[tokio::test]
 		async fn a_buffer_captured_after_now_clamps_to_the_read() {
 			let (samples, input) = stream(None);
-			let mut fixture = Fixture::start(Duration::from_secs(1), SystemTime::now(), [Open::Stream(input)]);
+			let mut fixture = Fixture::start(Duration::from_secs(1), moq_clock::wall(), [Open::Stream(input)]);
 			let mut track = fixture.subscribe().await;
 
 			let pushed = fixture.at(Instant::now());
@@ -2301,7 +2272,7 @@ mod tests {
 		#[tokio::test]
 		async fn a_buffer_without_a_capture_instant_publishes_its_read() {
 			let (samples, input) = stream(None);
-			let mut fixture = Fixture::start(Duration::from_secs(1), SystemTime::now(), [Open::Stream(input)]);
+			let mut fixture = Fixture::start(Duration::from_secs(1), moq_clock::wall(), [Open::Stream(input)]);
 			let mut track = fixture.subscribe().await;
 
 			let pushed = fixture.at(Instant::now());
@@ -2322,7 +2293,7 @@ mod tests {
 		#[tokio::test]
 		async fn a_gap_reanchors_to_the_next_capture_instant() {
 			let (samples, input) = stream(None);
-			let mut fixture = Fixture::start(Duration::from_secs(1), SystemTime::now(), [Open::Stream(input)]);
+			let mut fixture = Fixture::start(Duration::from_secs(1), moq_clock::wall(), [Open::Stream(input)]);
 			let mut track = fixture.subscribe().await;
 
 			let second_at = Instant::now() - Duration::from_millis(20);
@@ -2348,7 +2319,7 @@ mod tests {
 			let (second, reopened) = stream(None);
 			let mut fixture = Fixture::start(
 				Duration::from_secs(1),
-				SystemTime::now(),
+				moq_clock::wall(),
 				[Open::Stream(failing), Open::Stream(reopened)],
 			);
 			let mut track = fixture.subscribe().await;
@@ -2379,7 +2350,7 @@ mod tests {
 			let (second, resumed) = stream(None);
 			let mut fixture = Fixture::start(
 				Duration::from_secs(1),
-				SystemTime::now(),
+				moq_clock::wall(),
 				[Open::Stream(input), Open::Stream(resumed)],
 			);
 
@@ -2405,8 +2376,8 @@ mod tests {
 		#[tokio::test]
 		async fn a_system_wall_adjustment_retimes_nothing() {
 			// Whole seconds, so the advertised mapping holds it exactly.
-			let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
-			let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(now.as_secs() - 3600);
+			let now = moq_clock::wall().checked_duration_since(Wall::UNIX_EPOCH).unwrap();
+			let wall = Wall::UNIX_EPOCH + Duration::from_secs(now.as_secs() - 3600);
 			let (samples, input) = stream(None);
 			let mut fixture = Fixture::start(Duration::from_secs(1), wall, [Open::Stream(input)]);
 			let advertised = fixture.catalog.snapshot().clock;
@@ -2424,62 +2395,63 @@ mod tests {
 			fixture.finish().await;
 		}
 
-		/// A recording replays what the live edge published: the archive's records
-		/// carry the live timestamps across an idle restart, with the idle gap left in.
+		/// HLS lists what the live edge published: the records carry the live timestamps across an
+		/// idle restart, with the idle gap left out of every segment.
 		#[tokio::test]
-		async fn retained_archive_playback_keeps_the_live_timestamps() {
+		async fn hls_records_keep_the_live_timestamps() {
 			let (first, input) = stream(None);
 			let (second, resumed) = stream(None);
 			let mut fixture = Fixture::start(
 				Duration::from_secs(1),
-				SystemTime::now(),
+				moq_clock::wall(),
 				[Open::Stream(input), Open::Stream(resumed)],
 			);
 			let mut live = Vec::new();
-			let mut timeline = None;
+			let mut records = None;
 
 			for samples in [&first, &second] {
 				let mut track = fixture.subscribe().await;
 				live.push(fixture.deliver(samples, &mut track, &live).await);
-				// The rendition, and with it the archive, registers once the input is discovered.
-				if timeline.is_none() {
-					let section = fixture
-						.catalog
-						.snapshot()
-						.archive
-						.expect("the audio track enrolls an archive");
-					timeline = Some(
-						moq_mux::timeline::Consumer::<()>::subscribe(&fixture.consumer, &section, "audio")
+				drop(track);
+				// The break is marked when the second run resumes, and its stop declares the unhinted
+				// duration.
+				if records.is_none() && live.len() > 1 {
+					let hls = fixture.catalog.snapshot().audio.renditions["audio"]
+						.hls
+						.clone()
+						.expect("the audio track declares its HLS records once the first run stops");
+					records = Some(
+						moq_mux::hls::Consumer::subscribe(&fixture.consumer, &hls)
 							.await
 							.unwrap(),
 					);
 				}
-				drop(track);
 				wait_for(&mut fixture.publication, Status::Waiting).await;
-				// Idle past the minimum segment, so each run is archived as its own record.
-				tokio::time::sleep(moq_mux::timeline::DEFAULT_DURATION_MIN + Duration::from_millis(100)).await;
+				// Idle past the minimum segment, so each run is listed as its own segment.
+				tokio::time::sleep(moq_mux::hls::DEFAULT_DURATION + Duration::from_millis(100)).await;
 			}
 
-			let (catalog, _consumer) = fixture.finish().await;
-			catalog.timeline().finish();
-			let mut timeline = timeline.unwrap();
-			let mut archived = Vec::new();
-			while let Some(event) = timeline.next().await.unwrap() {
+			let (mut catalog, _consumer) = fixture.finish().await;
+			catalog.finish().unwrap();
+			let mut records = records.unwrap();
+			let mut listed = Vec::new();
+			while let Some(event) = records.next().await.unwrap() {
 				match event {
-					moq_mux::timeline::Event::Push { entry, .. } => archived.push(entry),
-					other => panic!("unexpected timeline event {other:?}"),
+					moq_mux::hls::Event::Push { entry, .. } => listed.push(entry),
+					other => panic!("unexpected record event {other:?}"),
 				}
 			}
 
-			assert_eq!(archived.len(), live.len(), "one record per capture run: {archived:?}");
-			for (entry, live) in archived.iter().zip(&live) {
-				// The archive keeps millisecond precision.
-				assert_eq!(entry.pts.as_micros() / 1000, u128::from(*live / 1000), "{archived:?}");
+			// Each run is one segment, stopped where its content reached.
+			assert_eq!(listed.len(), 2 * live.len(), "a segment and a stop per run: {listed:?}");
+			for (pair, live) in listed.chunks(2).zip(&live) {
+				assert!(!pair[0].is_stop() && pair[1].is_stop(), "{listed:?}");
+				// The records keep millisecond precision.
+				assert_eq!(pair[0].pts.as_micros() / 1000, u128::from(*live / 1000), "{listed:?}");
 			}
-			let first = &archived[0];
 			assert!(
-				archived[1].pts.as_micros() >= first.pts.as_micros() + first.duration.as_micros(),
-				"the resumed record overlaps the one before it: {archived:?}"
+				listed[2].pts.as_micros() >= listed[1].pts.as_micros(),
+				"the resumed segment overlaps the one before it: {listed:?}"
 			);
 		}
 	}

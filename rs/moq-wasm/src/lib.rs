@@ -20,6 +20,7 @@
 
 // Browser-only crate. Empty on native so `cargo check --workspace` stays green.
 #![cfg(target_arch = "wasm32")]
+#![warn(missing_docs)]
 
 use std::cell::RefCell;
 use std::pin::pin;
@@ -97,8 +98,10 @@ impl Session {
 	/// Connect to a relay over the browser's WebTransport, using the system roots.
 	pub async fn connect(url: String) -> Result<Session, JsValue> {
 		let url = url::Url::parse(&url).map_err(js_err)?;
-		let transport = transport::connect(url, Default::default()).await.map_err(js_err)?;
-		Self::handshake(transport).await
+		let transport = transport::connect(url.clone(), Default::default())
+			.await
+			.map_err(js_err)?;
+		Self::handshake(url, transport).await
 	}
 
 	/// Connect trusting only the given sha-256 certificate hashes (serverless dev).
@@ -110,11 +113,11 @@ impl Session {
 			server_certificate_hashes: hashes,
 			..Default::default()
 		};
-		let transport = transport::connect(url, options).await.map_err(js_err)?;
-		Self::handshake(transport).await
+		let transport = transport::connect(url.clone(), options).await.map_err(js_err)?;
+		Self::handshake(url, transport).await
 	}
 
-	async fn handshake(transport: transport::Session) -> Result<Session, JsValue> {
+	async fn handshake(url: url::Url, transport: transport::Session) -> Result<Session, JsValue> {
 		// Wire a subscribe origin so the session has somewhere to insert the
 		// broadcasts the remote announces; keep a consumer to read them.
 		let (origin, origin_driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
@@ -122,11 +125,11 @@ impl Session {
 			moq_net::time::run(origin_driver).await;
 		});
 		let consumer = origin.consume();
-		let client = moq_net::Client::new().with_subscriber(origin);
+		let client = moq_net::Client::new().with_url(url).with_subscriber(origin);
 		// The driver holds no session clone, so dropping this `Session` still
 		// closes the transport and ends the spawned task.
 		let (inner, driver) = client
-			.connect(web_async::time::Instant::now(), transport)
+			.connect(moq_net::time::Instant::now(), transport)
 			.await
 			.map_err(js_err)?;
 		web_async::spawn(async move {
@@ -221,7 +224,7 @@ pub struct Track {
 
 #[wasm_bindgen]
 impl Track {
-	/// Receive the next group in arrival order, or `null` when the track ends.
+	/// Receive the next group in arrival order, or `undefined` when the track ends.
 	#[wasm_bindgen(js_name = recvGroup, unchecked_return_type = "Promise<Group | undefined>")]
 	pub fn recv_group(&self) -> Promise {
 		let cell = self.inner.clone();
@@ -257,12 +260,13 @@ pub struct Group {
 
 #[wasm_bindgen]
 impl Group {
+	/// The group's sequence number within its track.
 	#[wasm_bindgen(getter)]
 	pub fn sequence(&self) -> u64 {
 		self.sequence
 	}
 
-	/// Read the next frame in the group, or `null` at the end of the group.
+	/// Read the next frame in the group, or `undefined` at the end of the group.
 	#[wasm_bindgen(js_name = readFrame, unchecked_return_type = "Promise<Uint8Array | undefined>")]
 	pub fn read_frame(&self) -> Promise {
 		let cell = self.inner.clone();

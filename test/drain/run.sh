@@ -3,6 +3,10 @@
 # migrates to relay B when A drains, without a dropped group. See README.md.
 set -euo pipefail
 
+if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
+    exec bash "$(dirname "$0")/../../sh/local.sh" bash "$0" "$@"
+fi
+
 DRAIN_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 WORKSPACE=$(cd "$DRAIN_DIR/../.." && pwd)
 
@@ -119,7 +123,7 @@ if [[ $status -eq 0 ]]; then
     elif ! harness_wait "$A_PID"; then
         echo "error: relay A exited with a failure" >&2
         status=1
-    elif ! grep -q "drain ended with no established sessions; exiting" "$HARNESS_RUN/relay-a.log"; then
+    elif ! grep -q "drain ended with every session gone; exiting" "$HARNESS_RUN/relay-a.log"; then
         echo "error: relay A did not report that every session left on its own" >&2
         status=1
     else

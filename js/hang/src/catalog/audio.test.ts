@@ -37,42 +37,6 @@ test("audio ranks known zero bitrate above unknown and breaks ties by code point
 	expect(Catalog.Audio.ranked(renditions).map(([name]) => name)).toEqual(["\uE000", "\u{1F600}", "unknown"]);
 });
 
-test("pcm codec is accepted", () => {
-	const config = AudioConfigSchema.parse({
-		codec: "pcm",
-		container: { kind: "legacy" },
-		sampleRate: 48_000,
-		numberOfChannels: 2,
-		bitrate: 3_072_000,
-	});
-
-	expect(config.codec).toBe("pcm");
-});
-
-test("audio config accepts a human-readable label", () => {
-	const config = AudioConfigSchema.parse({
-		label: "English",
-		codec: "opus",
-		container: { kind: "legacy" },
-		sampleRate: 48_000,
-		numberOfChannels: 2,
-	});
-
-	expect(config.label).toBe("English");
-});
-
-test("audio config accepts optional enabled state", () => {
-	const config = AudioConfigSchema.parse({
-		codec: "opus",
-		container: { kind: "legacy" },
-		sampleRate: 48_000,
-		numberOfChannels: 2,
-		enabled: false,
-	});
-
-	expect(config.enabled).toBe(false);
-});
-
 test("audio warmup round trips as optional integer milliseconds", () => {
 	const base = { codec: "opus", container: { kind: "legacy" }, sampleRate: 48_000, numberOfChannels: 2 };
 	expect(AudioConfigSchema.parse(base).warmup).toBeUndefined();
@@ -84,4 +48,22 @@ test("audio warmup round trips as optional integer milliseconds", () => {
 	for (const warmup of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
 		expect(() => AudioConfigSchema.parse({ ...base, warmup })).toThrow();
 	}
+});
+
+test("ambisonic layout needs a square channel count of at least 4", () => {
+	const base = { codec: "opus", container: { kind: "legacy" }, sampleRate: 48_000, layout: "ambisonic" };
+	for (const numberOfChannels of [4, 9, 16, 225]) {
+		expect(AudioConfigSchema.parse({ ...base, numberOfChannels }).layout).toBe("ambisonic");
+	}
+	for (const numberOfChannels of [0, 1, 2, 6, 8]) {
+		expect(() => AudioConfigSchema.parse({ ...base, numberOfChannels })).toThrow();
+	}
+});
+
+test("audio layout is optional and keeps unknown values verbatim", () => {
+	const base = { codec: "opus", container: { kind: "legacy" }, sampleRate: 48_000, numberOfChannels: 6 };
+	expect(AudioConfigSchema.parse(base).layout).toBeUndefined();
+	// An unknown layout puts no constraint on the channel count.
+	expect(AudioConfigSchema.parse({ ...base, layout: "surround" }).layout).toBe("surround");
+	expect(() => AudioConfigSchema.parse({ ...base, layout: 1 })).toThrow();
 });

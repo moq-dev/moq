@@ -10,7 +10,7 @@ use moq_auth::serve::{Keys, Policy};
 use moq_auth::{Algorithm, Pattern, Permissions};
 
 /// Generate, sign, and verify the JWT tokens a relay authenticates with.
-#[derive(usage::Args, Clone, Debug)]
+#[derive(usage_rs::Args, Clone, Debug)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Args {
 	#[usage(subcommand)]
@@ -124,7 +124,7 @@ impl Args {
 	}
 }
 
-#[derive(usage::Subcommands, Clone, Debug)]
+#[derive(usage_rs::Subcommands, Clone, Debug)]
 enum Command {
 	/// Generate a new signing key.
 	///
@@ -140,19 +140,19 @@ enum Command {
 		id: Option<String>,
 
 		/// Write the key to a file path. Use `-` for stdout.
-		#[usage(long, value_hint = usage::ValueHint::FilePath, extensions("jwk", "json"))]
+		#[usage(long, value_hint = usage_rs::ValueHint::FilePath, extensions("jwk", "json"))]
 		out: Option<PathBuf>,
 
 		/// Write the key to a directory as {kid}.jwk.
-		#[usage(long, conflicts = "--out", value_hint = usage::ValueHint::DirPath)]
+		#[usage(long, conflicts = "--out", value_hint = usage_rs::ValueHint::DirPath)]
 		out_dir: Option<PathBuf>,
 
 		/// Write the public key to a file path (asymmetric algorithms only). Use `-` for stdout.
-		#[usage(long, value_hint = usage::ValueHint::FilePath, extensions("jwk", "json"))]
+		#[usage(long, value_hint = usage_rs::ValueHint::FilePath, extensions("jwk", "json"))]
 		public: Option<PathBuf>,
 
 		/// Write the public key to a directory as {kid}.jwk (asymmetric algorithms only).
-		#[usage(long, conflicts = "--public", value_hint = usage::ValueHint::DirPath)]
+		#[usage(long, conflicts = "--public", value_hint = usage_rs::ValueHint::DirPath)]
 		public_dir: Option<PathBuf>,
 
 		/// Root path for the optional key scope. Only applied alongside --publish or --subscribe.
@@ -171,7 +171,7 @@ enum Command {
 	/// Sign a token, writing it to stdout.
 	Sign {
 		/// Path to the signing key file. Use `-` for stdin.
-		#[usage(long, value_hint = usage::ValueHint::FilePath, extensions("jwk", "json"))]
+		#[usage(long, value_hint = usage_rs::ValueHint::FilePath, extensions("jwk", "json"))]
 		key: PathBuf,
 
 		/// The root path for the token.
@@ -207,17 +207,17 @@ enum Command {
 	/// Verify a token, writing the payload to stdout.
 	Verify {
 		/// Path to the key file. Use `-` for stdin (requires `--in` to be a file).
-		#[usage(long, value_hint = usage::ValueHint::FilePath, extensions("jwk", "json"))]
+		#[usage(long, value_hint = usage_rs::ValueHint::FilePath, extensions("jwk", "json"))]
 		key: PathBuf,
 
 		/// Path to read the token from. Use `-` for stdin.
-		#[usage(long = "in", default = "-", value_hint = usage::ValueHint::FilePath)]
+		#[usage(long = "in", default = "-", value_hint = usage_rs::ValueHint::FilePath)]
 		token: PathBuf,
 	},
 }
 
 /// Filter flags shared by `moq auth sessions` and `moq auth revalidate`.
-#[derive(usage::Args, Clone, Debug)]
+#[derive(usage_rs::Args, Clone, Debug)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct SessionFilter {
 	/// The relay's internal listener, e.g. `http://127.0.0.1:9101`.
@@ -358,7 +358,7 @@ impl SessionFilter {
 }
 
 /// The reference auth server: the policy a relay used to hold, behind `--auth-url`.
-#[derive(usage::Args, Clone, Debug)]
+#[derive(usage_rs::Args, Clone, Debug)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Serve {
 	/// Where to answer: a socket address, or `unix:<path>` for a unix socket.
@@ -370,15 +370,15 @@ pub struct Serve {
 	listen_public: bool,
 
 	/// The key file a `jwt` is verified against.
-	#[usage(long, conflicts = "--key-dir", value_hint = usage::ValueHint::FilePath, extensions("jwk", "json"))]
+	#[usage(long, conflicts("--key-dir", "--key-set"), value_hint = usage_rs::ValueHint::FilePath, extensions("jwk", "json"))]
 	key: Option<PathBuf>,
 
 	/// A directory of `{kid}.jwk` files, selected by the token's `kid`.
-	#[usage(long, conflicts = "--key", value_hint = usage::ValueHint::DirPath)]
+	#[usage(long, conflicts("--key", "--key-set"), value_hint = usage_rs::ValueHint::DirPath)]
 	key_dir: Option<PathBuf>,
 
 	/// A JWK Set file, selecting one verification key by the token's `kid`.
-	#[usage(long, value_hint = usage::ValueHint::FilePath, extensions("json", "jwks"))]
+	#[usage(long, conflicts("--key", "--key-dir"), value_hint = usage_rs::ValueHint::FilePath, extensions("json", "jwks"))]
 	key_set: Option<PathBuf>,
 
 	/// Patterns an anonymous session may publish, rooted at `/` (repeatable); `foo/**` for a subtree.
@@ -397,25 +397,27 @@ pub struct Serve {
 	#[usage(long)]
 	mtls_subscribe: Vec<Pattern>,
 
-	/// Mark sessions with a verified certificate as cluster peers: relays forwarding what entered elsewhere.
-	#[usage(long)]
-	mtls_peer: bool,
+	/// The role verified certificates have on cluster links: peer or upstream.
+	#[usage(long, choices("peer", "upstream"))]
+	mtls_link: Option<moq_auth::serve::Link>,
 
-	/// Mark those peers upstream: never offered a route learned from another upstream. Needs `--mtls-peer`.
-	#[usage(long)]
-	mtls_upstream: bool,
+	#[usage(long = "mtls-peer", hide = true, default_missing = "true", num_args = 0..=1, require_equals = true)]
+	mtls_peer: Option<bool>,
+	#[usage(long = "mtls-upstream", hide = true, default_missing = "true", num_args = 0..=1, require_equals = true)]
+	mtls_upstream: Option<bool>,
 
-	/// The tier label stamped on every grant, handed to the relay's stats.
+	/// The tier label stamped on every grant, handed to the relay's stats: `/`-joined
+	/// segments of ASCII letters, digits, `.`, `_`, and `-`.
 	#[usage(long)]
 	tier: Option<String>,
 
 	/// How often the relay re-checks each grant. Off by default; needs `--expires`.
 	#[usage(long)]
-	revalidate: Option<crate::duration::Duration>,
+	revalidate: Option<moq_tokio::cli::Duration>,
 
 	/// How long a grant with no bound of its own lasts: anonymous sessions, tokens without `exp`, certificates without one. Off by default.
 	#[usage(long)]
-	expires: Option<crate::duration::Duration>,
+	expires: Option<moq_tokio::cli::Duration>,
 
 	/// The most live sessions presenting one token. Needs `--revalidate`.
 	#[usage(long)]
@@ -429,8 +431,8 @@ pub struct Serve {
 impl Serve {
 	/// The policy these flags describe, refusing a cadence the relay would spin on.
 	fn policy(&self) -> anyhow::Result<Policy> {
-		let revalidate = self.revalidate.map(|cadence| cadence.into_std());
-		let expires = self.expires.map(|bound| bound.into_std());
+		let revalidate = self.revalidate.map(std::time::Duration::from);
+		let expires = self.expires.map(Into::into);
 		if revalidate.is_some_and(|cadence| cadence.is_zero()) {
 			anyhow::bail!("--revalidate must be longer than 0s; every client would re-check in a tight loop");
 		}
@@ -444,11 +446,11 @@ impl Serve {
 				"--limit-token and --limit-remote need --revalidate, which ages out the slots of dead relays"
 			);
 		}
-		if self.mtls_peer && self.mtls_publish.is_empty() && self.mtls_subscribe.is_empty() {
-			anyhow::bail!("--mtls-peer needs --mtls-publish or --mtls-subscribe, or every certificate is refused");
+		if self.mtls_peer.is_some() || self.mtls_upstream.is_some() {
+			anyhow::bail!("--mtls-peer and --mtls-upstream are removed; use --mtls-link peer or --mtls-link upstream");
 		}
-		if self.mtls_upstream && !self.mtls_peer {
-			anyhow::bail!("--mtls-upstream needs --mtls-peer; only a cluster peer can be upstream");
+		if self.mtls_link.is_some() && self.mtls_publish.is_empty() && self.mtls_subscribe.is_empty() {
+			anyhow::bail!("--mtls-link needs --mtls-publish or --mtls-subscribe, or every certificate is refused");
 		}
 		// 0.14 read `anon` as the prefix `anon/`, and a pattern reads it as exactly the
 		// broadcast `anon`, so either silent reading would mislead someone upgrading.
@@ -470,11 +472,11 @@ impl Serve {
 			}
 		}
 		let rules = |publish: &[Pattern], subscribe: &[Pattern]| {
-			Permissions::new(publish.iter().cloned().collect(), subscribe.iter().cloned().collect())
+			Permissions::new(
+				publish.iter().cloned().collect::<moq_auth::Patterns>(),
+				subscribe.iter().cloned().collect::<moq_auth::Patterns>(),
+			)
 		};
-		if self.key_set.is_some() && (self.key.is_some() || self.key_dir.is_some()) {
-			anyhow::bail!("--key-set conflicts with --key and --key-dir");
-		}
 		let mut policy = Policy::default();
 		policy.keys = match (&self.key, &self.key_dir, &self.key_set) {
 			(Some(key), _, _) => Some(Keys::File(key.clone())),
@@ -484,8 +486,7 @@ impl Serve {
 		};
 		policy.public = rules(&self.public_publish, &self.public_subscribe);
 		policy.mtls = rules(&self.mtls_publish, &self.mtls_subscribe);
-		policy.mtls_peer = self.mtls_peer;
-		policy.mtls_upstream = self.mtls_upstream;
+		policy.mtls_link = self.mtls_link;
 		policy.tier = self.tier.clone();
 		policy.revalidate = revalidate;
 		policy.expires = expires;
@@ -575,7 +576,7 @@ fn write_key(key: &moq_auth::Key, path: &std::path::Path) -> anyhow::Result<()> 
 fn read_key(path: &std::path::Path) -> anyhow::Result<moq_auth::Key> {
 	if is_dash(path) {
 		let contents = io::read_to_string(io::stdin())?;
-		moq_auth::Key::from_str(contents.trim()).context("failed to parse key from stdin")
+		contents.parse().context("failed to parse key from stdin")
 	} else {
 		moq_auth::Key::from_file(path).with_context(|| format!("failed to read key from {}", path.display()))
 	}
@@ -591,9 +592,9 @@ fn read_token(path: &std::path::Path) -> anyhow::Result<String> {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct UnixTimestamp(std::time::SystemTime);
+struct UnixTimestamp(moq_clock::Wall);
 
-impl From<UnixTimestamp> for std::time::SystemTime {
+impl From<UnixTimestamp> for moq_clock::Wall {
 	fn from(value: UnixTimestamp) -> Self {
 		value.0
 	}
@@ -605,13 +606,10 @@ impl std::str::FromStr for UnixTimestamp {
 	fn from_str(s: &str) -> Result<Self, Self::Err> {
 		let timestamp = s.parse::<i64>().context("expected unix timestamp")?;
 		let timestamp = timestamp.try_into().context("timestamp out of range")?;
-		// checked_add, because plain `+` panics on overflow and how far a SystemTime
-		// reaches is platform-dependent: a timespec holds i64 seconds, while Windows
-		// counts 100ns ticks and runs out far sooner.
-		let value = std::time::SystemTime::UNIX_EPOCH
-			.checked_add(std::time::Duration::from_secs(timestamp))
-			.context("timestamp out of range")?;
-		Ok(Self(value))
+		// Past 2554 saturates, like a decoded token time.
+		Ok(Self(
+			moq_clock::Wall::UNIX_EPOCH.saturating_add(std::time::Duration::from_secs(timestamp)),
+		))
 	}
 }
 
@@ -637,6 +635,25 @@ mod tests {
 		match parse(args).unwrap().command {
 			Command::Serve(serve) => serve,
 			other => panic!("expected serve, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn verification_key_sources_conflict_in_the_parser() {
+		let flags = ["--key", "--key-dir", "--key-set"];
+		for first in flags {
+			assert!(parse(&["moq", "auth", "serve", first, "unused"]).is_ok());
+			for second in flags {
+				if first == second {
+					continue;
+				}
+				let err = parse(&["moq", "auth", "serve", first, "unused", second, "unused"])
+					.expect_err("key sources must conflict before loading files");
+				assert!(
+					err.to_string().contains(first) && err.to_string().contains(second),
+					"{err}"
+				);
+			}
 		}
 	}
 
@@ -679,8 +696,8 @@ mod tests {
 			"**",
 			"--mtls-subscribe",
 			"**",
-			"--mtls-peer",
-			"--mtls-upstream",
+			"--mtls-link",
+			"upstream",
 			"--tier",
 			"internal",
 			"--revalidate",
@@ -701,7 +718,7 @@ mod tests {
 		);
 		assert!(policy.public.publish.is_empty());
 		assert_eq!(policy.mtls.publish, ["**".parse().unwrap()].into_iter().collect());
-		assert!(policy.mtls_peer && policy.mtls_upstream);
+		assert_eq!(policy.mtls_link, Some(moq_auth::serve::Link::Upstream));
 		assert_eq!(policy.tier.as_deref(), Some("internal"));
 		assert_eq!(policy.revalidate, Some(std::time::Duration::from_secs(30)));
 		assert_eq!(policy.expires, Some(std::time::Duration::from_secs(7200)));
@@ -712,18 +729,14 @@ mod tests {
 			.policy()
 			.unwrap();
 		assert!(matches!(&set.keys, Some(Keys::Set(path)) if path == std::path::Path::new("/keys.jwks")));
-		assert!(
-			serve(&["moq", "auth", "serve", "--key", "/key.jwk", "--key-set", "/keys.jwks"])
-				.policy()
-				.is_err()
-		);
+		assert!(parse(&["moq", "auth", "serve", "--key", "/key.jwk", "--key-set", "/keys.jwks"]).is_err());
 
 		// Nothing configured is a server that refuses everyone, and like 0.14, never
 		// re-checks or closes a session on its own.
 		let bare = serve(&["moq", "auth", "serve"]).policy().unwrap();
 		assert!(bare.keys.is_none());
 		assert!(bare.public.is_empty() && bare.mtls.is_empty());
-		assert!(!bare.mtls_peer && !bare.mtls_upstream);
+		assert_eq!(bare.mtls_link, None);
 		assert_eq!(bare.revalidate, None);
 		assert_eq!(bare.expires, None);
 
@@ -736,11 +749,10 @@ mod tests {
 			(&["--limit-token", "3"], "need --revalidate"),
 			(&["--limit-remote", "3", "--expires", "1h"], "need --revalidate"),
 			// A peer marking with nothing granted to certificates marks nobody.
-			(&["--mtls-peer"], "--mtls-peer needs"),
-			(
-				&["--mtls-subscribe", "**", "--mtls-upstream"],
-				"--mtls-upstream needs --mtls-peer",
-			),
+			(&["--mtls-link", "peer"], "--mtls-link needs"),
+			(&["--mtls-subscribe", "**", "--mtls-upstream"], "use --mtls-link"),
+			(&["--mtls-peer=false"], "use --mtls-link"),
+			(&["--mtls-upstream=false"], "use --mtls-link"),
 		] {
 			let argv: Vec<&str> = ["moq", "auth", "serve"].iter().chain(args).copied().collect();
 			let err = serve(&argv).policy().unwrap_err().to_string();
@@ -984,10 +996,11 @@ mod tests {
 		assert!("not-a-number".parse::<UnixTimestamp>().is_err());
 	}
 
-	// Whether the largest parseable timestamp is representable depends on the
-	// platform's SystemTime, so assert only that it never panics.
 	#[test]
-	fn timestamp_at_the_maximum_does_not_panic() {
-		let _ = i64::MAX.to_string().parse::<UnixTimestamp>();
+	fn timestamp_past_the_wall_range_saturates() {
+		let last = moq_clock::Wall::UNIX_EPOCH.saturating_add(std::time::Duration::MAX);
+		let parse = |text: &str| moq_clock::Wall::from(text.parse::<UnixTimestamp>().unwrap());
+		assert_eq!(parse(&i64::MAX.to_string()), last);
+		assert!(parse("18446744073") < last);
 	}
 }

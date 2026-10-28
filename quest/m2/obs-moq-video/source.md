@@ -11,16 +11,16 @@ The MoQ source loads and plays supported video without FFmpeg's video libraries 
 - Implement the macOS presentation probe immediately: retain VideoToolbox PixelBuffer/IOSurface storage, inspect OBS graphics import and rendering support, and convert to OBS's expected color format on the GPU if necessary. Adapt the source render path to import textures on the graphics thread; preserve source timing instead of simply drawing the newest frame. An asynchronous CPU source API alone does not prove native GPU delivery.
 - Bound decoded frames retained by the render thread. On import failure, switch to the existing I420 delivery path and show the reason in Stats. Keep fallback stable for the stream/device configuration rather than retrying every frame; re-probe on a relevant configuration change or restart. Device loss and resize must retire old surfaces only after rendering completes.
 - Preserve timestamps, range/primaries, stride and plane layout, catalog/rendition changes, reconnect, visibility/deactivation behavior, and existing source settings. Carry frame-generation identity so late callbacks cannot display frames from a replaced source.
-- Remove the video FFmpeg includes and swscale linkage. Audio still decodes through libavcodec until the audio playback quest replaces it, so whichever of the two lands second removes the remaining FFmpeg includes, CMake discovery/linkage, unit stubs, compile recipe requirements, and the unused swresample linkage. Update OBS build/install docs and `doc/lib/cpp` together. libobs/Qt and native OS/GPU dependencies remain.
-- Validate new code with decoded pixels and moving timestamps, GPU copy/readback traces, and p50/p95 decode-to-presentation delay. Exercise CPU fallback, unsupported codec, GPU import failure, device loss, repeated start/stop, rendition change, and delayed terminal completion. Verify no SWScale imports (and no AVCodec/AVUtil/SWResample imports once audio playback has landed) using platform binary inspection. Load the artifact against the oldest supported OBS release and current stable release, using the repo's supported version policy at implementation time.
+- Remove the FFmpeg includes, CMake discovery/linkage (including the unused swresample), unit stubs, and compile recipe requirements; audio already decodes through moq-audio. Update OBS build/install docs and `doc/lib/cpp` together. libobs/Qt and native OS/GPU dependencies remain.
+- Validate new code with decoded pixels and moving timestamps, GPU copy/readback traces, and p50/p95 decode-to-presentation delay. Exercise CPU fallback, unsupported codec, GPU import failure, device loss, repeated start/stop, rendition change, and delayed terminal completion. Verify no SWScale, AVCodec, AVUtil, or SWResample imports using platform binary inspection. Load the artifact against the oldest supported OBS release and current stable release, using the repo's supported version policy at implementation time.
 
-Decided 2026-10-08: [Codecs](/quest/m1/ffi-shape/codec.md) lands first, so the source consumes the `video` decoder once instead of the decoder on `BroadcastConsumer` it removes.
+The source consumes the `video` namespace decoder rather than the removed decoder on `BroadcastConsumer`.
 
-## Required
-
-- [Codecs](/quest/m1/ffi-shape/codec.md) - the video decoder lands once, in the `video` namespace
+The current FFmpeg path stamps each decoded picture with its own presentation
+timestamp, not the input packet's, and drains delayed pictures at clean media
+EOF; a reordered H.264 scenario in `cpp/obs/test/moq-source-test.cpp` covers
+both. The replacement keeps that behavior, covered with reordered video.
 
 ## Related
 
 - [VP8/VP9 in OBS](/quest/m2/obs-moq-video/vpx-obs.md) - restores deferred codec coverage once this lands
-- [Audio playback](/quest/m2/obs-moq-video/audio-playback.md) - removes the audio half of the FFmpeg linkage

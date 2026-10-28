@@ -26,20 +26,6 @@ on:
       - "sh/swift/verify.sh"
       - ".github/workflows/release-swift-lib.yml"
       - "sh/gh/release.sh"
-  pull_request:
-    branches: [release]
-    # `edited` catches a main PR retargeted to release.
-    types: [opened, synchronize, reopened, edited]
-    paths:
-      - "swift/VERSION"
-      - "swift/Package.swift.template"
-      - "swift/Sources/Moq/**"
-      - "swift/Tests/**"
-      - "sh/swift/package.sh"
-      - "sh/swift/publish.sh"
-      - "sh/swift/verify.sh"
-      - ".github/workflows/release-swift-lib.yml"
-      - "sh/gh/release.sh"
   workflow_call:
   workflow_dispatch:
   workflow_run:
@@ -60,13 +46,15 @@ jobs:
   ffi-release:
     name: Check FFI publisher
     runs-on: ubuntu-latest
-    # workflow_run is privileged. Preserve the owner, push and tag gates before
-    # reading the trusted upstream checkout or allowing wrapper publication.
+    # workflow_run is privileged. Preserve the owner, same-repo, push and tag
+    # gates before reading the trusted upstream checkout or allowing wrapper
+    # publication.
     if: >-
       github.repository_owner == 'moq-dev' &&
       (github.event_name != 'workflow_run' ||
        ((github.event.workflow_run.name == 'Release FFI' || github.event.workflow_run.conclusion == 'success') &&
         github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_repository.full_name == github.repository &&
         startsWith(github.event.workflow_run.head_branch, 'moq-ffi-v')))
     permissions:
       contents: read
@@ -160,7 +148,7 @@ jobs:
         run: just swift package --version "$BUILD_VERSION" --output release-out
 
       - name: Upload Swift package
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: swift-wrapper-package
           path: release-out/*
@@ -172,7 +160,8 @@ jobs:
     # failed) when the pinned moq-ffi version isn't mirrored yet, so the first
     # bootstrap doesn't deadlock on a not-yet-published FFI package.
     name: Verify staged package resolves
-    needs: [build]
+    # Directly on ffi-release: its gate is what makes the head_sha checkout trusted.
+    needs: [ffi-release, build]
     runs-on: macos-latest
 
     steps:
@@ -196,7 +185,7 @@ jobs:
 
       - name: Download staged package
         if: steps.ffi.outputs.exists == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: swift-wrapper-package
           path: artifacts
@@ -219,7 +208,8 @@ jobs:
 
   publish:
     name: Publish to Swift Package mirror
-    needs: [build, verify]
+    # Directly on ffi-release: its gate is what makes the head_sha checkout trusted.
+    needs: [ffi-release, build, verify]
     runs-on: ubuntu-latest
     if: ${{ needs.build.outputs.publish == 'true' }}
 
@@ -232,7 +222,7 @@ jobs:
       - uses: ./.github/actions/just
 
       - name: Generate moq-bot token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
         id: token
         with:
           client-id: ${{ secrets.APP_CLIENT_ID }}
@@ -243,7 +233,7 @@ jobs:
           permission-contents: write
 
       - name: Download package
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: swift-wrapper-package
           path: swift-out
@@ -271,7 +261,7 @@ jobs:
       - uses: ./.github/actions/just
 
       - name: Download package
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: swift-wrapper-package
           path: swift-out

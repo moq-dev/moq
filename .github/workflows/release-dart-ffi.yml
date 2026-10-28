@@ -12,17 +12,6 @@ on:
   # workflow this way so a broken build surfaces before the tag is cut.
   workflow_call:
   workflow_dispatch:
-  # Packaging changes only, like the other FFI release workflows. A change to
-  # the moq-ffi sources is covered on every platform by cheaper gates: check.yml
-  # compiles it and regenerates the Dart bindings, platform.yml compiles it for
-  # macOS, Windows, and iOS, and nightly runs this full matrix.
-  pull_request:
-    paths:
-      - ".github/workflows/release-dart-ffi.yml"
-      - ".github/workflows/release-ffi.yml"
-      - "dart/moq_ffi/**"
-      - "sh/dart/**"
-      - "rs/moq-ffi/build.sh"
 
 permissions:
   contents: read
@@ -43,9 +32,20 @@ jobs:
       language: dart
       # The raw bindings are checked in under dart/moq_ffi, so none here.
       bindings: false
-      default-features: false
-      # Full platform packaging remains nightly; PRs keep only Linux/Android.
-      targets: ${{ github.event_name == 'pull_request' && github.base_ref != 'release' && '["aarch64-linux-android", "armv7-linux-androideabi", "x86_64-linux-android", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]' || '["aarch64-linux-android", "armv7-linux-androideabi", "x86_64-linux-android", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-apple-ios", "aarch64-apple-ios-sim", "x86_64-apple-ios", "x86_64-pc-windows-msvc"]' }}
+      targets: >-
+        [
+          "aarch64-linux-android",
+          "armv7-linux-androideabi",
+          "x86_64-linux-android",
+          "x86_64-unknown-linux-gnu",
+          "aarch64-unknown-linux-gnu",
+          "aarch64-apple-darwin",
+          "x86_64-apple-darwin",
+          "aarch64-apple-ios",
+          "aarch64-apple-ios-sim",
+          "x86_64-apple-ios",
+          "x86_64-pc-windows-msvc"
+        ]
 
   # hook/build.dart downloads moq-ffi-<version>-<target>-<library> and its
   # .sha256 from the release, so each target's shared library is renamed flat.
@@ -56,7 +56,7 @@ jobs:
 
     steps:
       - name: Download per-target libs
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: libs-raw
           pattern: dart-lib-*
@@ -80,7 +80,7 @@ jobs:
           ls -la assets
 
       - name: Upload Native Assets
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: dart-assets
           path: assets/*
@@ -113,7 +113,7 @@ jobs:
           dart pub publish --dry-run
 
       - name: Upload pub package
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: dart-ffi-package
           path: release-out/*
@@ -139,7 +139,7 @@ jobs:
         run: just gh release prev-tag moq-ffi
 
       - name: Download Native Assets
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: dart-assets
           path: artifacts
@@ -165,7 +165,7 @@ jobs:
       id-token: write
 
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: dart-ffi-package
           path: package

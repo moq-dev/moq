@@ -13,7 +13,6 @@
 //!
 //! The semantics are the same ones moq-lite carries natively (see
 //! [`crate::origin::Route`]); this module is only the moq-transport binding.
-//! Negotiated on draft-17+ only, where SETUP is a Key-Value-Pair block.
 
 use crate::coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder};
 use crate::{Hop, Hops};
@@ -43,15 +42,6 @@ pub const ROUTE_COST: u64 = 0x40B58;
 /// makes that direction free, which is how a deployment describes two relays in the
 /// same datacenter.
 pub const DEFAULT_COST: u64 = 1;
-
-/// Whether a version negotiates this extension.
-///
-/// Draft-17 is the first with the unified SETUP: a bare Key-Value-Pair block that a
-/// new option slots into without touching the message shape. Earlier drafts exchange
-/// SETUP over the legacy control stream, which this extension does not cover.
-pub fn supported(version: Version) -> bool {
-	!matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
-}
 
 /// The ordered list of Hop IDs an advertisement has traversed, from the original
 /// publisher to the relay immediately upstream of the receiver.
@@ -221,16 +211,9 @@ pub fn link_cost(local: Option<u64>, peer: &Peer) -> u64 {
 }
 
 /// Read the cluster Setup Options out of a decoded SETUP parameter block.
-pub fn peer_from_setup(params: &super::Parameters, version: Version) -> Result<Peer, DecodeError> {
-	if !supported(version) {
-		return Ok(Peer::default());
-	}
-
+pub fn peer_from_setup(params: &super::Parameters) -> Result<Peer, DecodeError> {
 	// 0 is legal here: the peer speaks the extension but withholds its identity.
-	let hop = params
-		.get_varint(super::ParameterVarInt::HopId)
-		.map(Hop::from_wire)
-		.transpose()?;
+	let hop = params.get_varint(super::ParameterVarInt::HopId).map(Hop::from_wire);
 
 	Ok(Peer {
 		hop,
@@ -241,11 +224,7 @@ pub fn peer_from_setup(params: &super::Parameters, version: Version) -> Result<P
 /// Write our cluster Setup Options into a SETUP parameter block.
 ///
 /// `cost` is the price we put on this link, which only the dialing side declares.
-pub fn peer_into_setup(params: &mut super::Parameters, self_hop: Hop, cost: Option<u64>, version: Version) {
-	if !supported(version) {
-		return;
-	}
-
+pub fn peer_into_setup(params: &mut super::Parameters, self_hop: Hop, cost: Option<u64>) {
 	params.set_varint(super::ParameterVarInt::HopId, self_hop.id());
 
 	if let Some(cost) = cost {
@@ -257,7 +236,7 @@ pub fn peer_into_setup(params: &mut super::Parameters, self_hop: Hop, cost: Opti
 mod tests {
 	use super::*;
 
-	const VERSION: Version = Version::Draft19;
+	const VERSION: Version = Version::Draft18;
 
 	fn hop(id: u64) -> Hop {
 		Hop::new(id).unwrap()
@@ -285,14 +264,8 @@ mod tests {
 	}
 
 	#[test]
-	fn code_points() {
-		// The registry values are what other implementations key on; a typo here is
-		// invisible against ourselves and fatal against anyone else. The parity is
-		// load-bearing too: odd values are length-prefixed, even ones bare varints.
-		assert_eq!(HOP_ID, 0x40B54);
-		assert_eq!(RELAY_COST, 0x40B56);
-		assert_eq!(HOP_PATH, 0x40B57);
-		assert_eq!(ROUTE_COST, 0x40B58);
+	fn code_point_parity() {
+		// The parity is load-bearing: odd values are length-prefixed, even ones bare varints.
 		assert_eq!(HOP_ID % 2, 0);
 		assert_eq!(RELAY_COST % 2, 0);
 		assert_eq!(HOP_PATH % 2, 1);
@@ -497,18 +470,24 @@ mod tests {
 
 	#[test]
 	fn setup_options_round_trip() {
-		for (self_hop, cost) in [(hop(42), Some(0)), (hop(42), Some(9)), (Hop::UNKNOWN, None)] {
+		for (self_hop, cost) in [
+			(hop(42), Some(0)),
+			(hop(42), Some(9)),
+			(hop(u64::MAX), None),
+			(Hop::UNKNOWN, None),
+		] {
 			let mut params = super::super::Parameters::default();
-			peer_into_setup(&mut params, self_hop, cost, VERSION);
+			peer_into_setup(&mut params, self_hop, cost);
 
 			let mut buf = Vec::new();
 			params
 				.encode(&mut Encoder::new(&mut buf, VERSION.into()), VERSION)
 				.unwrap();
 			let mut bytes = bytes::Bytes::from(buf);
-			let decoded = crate::coding::decode_buf(&mut bytes, VERSION, super::super::Parameters::decode).unwrap();
+			let decoded =
+				crate::coding::decode_buf(&mut bytes, VERSION, |r, v| super::super::Parameters::decode(r, v)).unwrap();
 
-			let peer = peer_from_setup(&decoded, VERSION).unwrap();
+			let peer = peer_from_setup(&decoded).unwrap();
 			assert_eq!(peer.hop, Some(self_hop));
 			assert_eq!(peer.cost, cost);
 		}
@@ -519,7 +498,7 @@ mod tests {
 		// The key sits at delta 0x40B54 from the start of the block and the value follows
 		// it directly: a length byte here would make us unreadable to every -01 peer.
 		let mut params = super::super::Parameters::default();
-		peer_into_setup(&mut params, hop(42), None, VERSION);
+		peer_into_setup(&mut params, hop(42), None);
 
 		let mut buf = Vec::new();
 		params
@@ -531,7 +510,7 @@ mod tests {
 	#[test]
 	fn setup_without_hop_id_is_not_negotiated() {
 		let params = super::super::Parameters::default();
-		let peer = peer_from_setup(&params, VERSION).unwrap();
+		let peer = peer_from_setup(&params).unwrap();
 		assert!(!peer.negotiated());
 	}
 
@@ -548,19 +527,10 @@ mod tests {
 			.encode(&mut Encoder::new(&mut buf, VERSION.into()), VERSION)
 			.unwrap();
 		let mut bytes = bytes::Bytes::from(buf);
-		let decoded = crate::coding::decode_buf(&mut bytes, VERSION, super::super::Parameters::decode).unwrap();
+		let decoded =
+			crate::coding::decode_buf(&mut bytes, VERSION, |r, v| super::super::Parameters::decode(r, v)).unwrap();
 
-		let peer = peer_from_setup(&decoded, VERSION).unwrap();
+		let peer = peer_from_setup(&decoded).unwrap();
 		assert!(!peer.negotiated());
-	}
-
-	#[test]
-	fn setup_options_skipped_before_draft17() {
-		// Draft-14..16 exchange SETUP over the legacy control stream, which this
-		// extension does not cover; we neither send nor read the options there.
-		let mut params = super::super::Parameters::default();
-		peer_into_setup(&mut params, hop(42), Some(3), Version::Draft16);
-		assert!(params.get_varint(super::super::ParameterVarInt::HopId).is_none());
-		assert!(!peer_from_setup(&params, Version::Draft16).unwrap().negotiated());
 	}
 }

@@ -32,8 +32,15 @@ an untimed track has no timescale, and a timed track requires a timestamp on
 every write. A publisher that wants to stamp now samples its own clock.
 Writes return the encoded frame size.
 
-When upgrading, replace `Timed<P, T>` with `Timed<P>` and pass capture times
-explicitly instead of relying on a write-time default.
+Consumers return `Timed<T>`: read `.value` for the decoded value and `.at` for
+its optional frame timestamp, with the track's exact scale preserved. Snapshot
+`next()` yields states in order inside the subscription's `max_delay` budget;
+set that budget when following a playhead behind live. Use `latest()` to skip
+to the newest buffered state. Skipped states are gone, and a later `next()`
+continues after them.
+
+Upgrading from an older release: see moq-flate's
+[MIGRATE.md](https://github.com/moq-dev/moq/blob/main/rs/moq-flate/MIGRATE.md).
 
 A stream rides one group, so the whole log shares moq-net's group budget:
 32 MiB of payload and 8192 payloads. An `append` that might not fit returns

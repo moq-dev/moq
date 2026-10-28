@@ -6,6 +6,7 @@ import type MoqPublish from "@moq/publish/element";
 import type MoqWatch from "@moq/watch/element";
 import { refused, refusedWebSocket } from "./close";
 import { type CaptureState, FAULTS, type Fault, publish, SAMPLE_MS } from "./contract";
+import { finish } from "./finish";
 import { Fixture } from "./fixture";
 import { attach, watchResources } from "./probe";
 
@@ -13,6 +14,8 @@ const params = new URLSearchParams(location.search);
 const role = params.get("role");
 const url = params.get("url") ?? "";
 const broadcast = params.get("broadcast") ?? "";
+// The versions the element offers, or its defaults when absent.
+const versions = params.get("versions");
 
 function parseFault(value: string | null): Fault {
 	if (value === null) return "none";
@@ -21,13 +24,39 @@ function parseFault(value: string | null): Fault {
 	return fault;
 }
 
-if (role === "publish") {
+if (role === "finish-publish" || role === "finish-subscribe") {
+	finish(role, url, broadcast, versions, Number(params.get("frames") ?? 10), Number(params.get("timeout") ?? 60_000));
+} else if (role === "publish") {
 	const el = document.createElement("moq-publish") as MoqPublish;
 	el.setAttribute("url", url);
+	if (versions) el.setAttribute("versions", versions);
 	el.setAttribute("name", broadcast);
-	// Chromium's --use-fake-device-for-media-stream feeds getUserMedia fake
-	// camera and microphone input. Audio is encoded lazily when a player asks.
-	el.setAttribute("source", "camera");
+	// Media is encoded lazily when a player asks.
+	const media = params.get("media");
+	if (media) {
+		// The interop driver's file of the picture and test tone, decoded and looped rather than
+		// captured: a fake device splices the tone whenever the machine is short of CPU.
+		const response = await fetch(media);
+		if (!response.ok) throw new Error(`no publisher media at ${media}: ${response.status}`);
+		el.controls.source.set(new File([await response.blob()], "interop-media"));
+	} else {
+		// Chromium's --use-fake-device-for-media-stream feeds getUserMedia fake camera and microphone
+		// input, for the capture checks in media.ts.
+		el.setAttribute("source", "camera");
+		// Keep Chromium's voice processing off the microphone: that mixes stereo to mono and
+		// suppresses a steady tone as noise.
+		el.signals.run((effect) => {
+			const mic = effect.get(el.sources.audio);
+			if (mic && "constraints" in mic) {
+				mic.constraints.set({
+					channelCount: 2,
+					echoCancellation: false,
+					noiseSuppression: false,
+					autoGainControl: false,
+				});
+			}
+		});
+	}
 	document.body.appendChild(el);
 	// So the driver can wait for the session to close before closing the browser.
 	watchResources();
@@ -54,7 +83,13 @@ if (role === "publish") {
 	document.body.appendChild(host);
 
 	const fault = parseFault(params.get("fault"));
-	let fixture: Fixture | undefined = new Fixture(host, url, broadcast, fault);
+	let fixture: Fixture | undefined = new Fixture(host, {
+		url,
+		name: broadcast,
+		fault,
+		versions: versions?.split(","),
+		generation: Number(params.get("generation") ?? 0),
+	});
 
 	// The driver stops and restarts the publisher in place to exercise a same-path republish, which
 	// has to reuse this page so the audio context keeps its user activation.
@@ -65,15 +100,24 @@ if (role === "publish") {
 		},
 		start: () => {
 			fixture?.close();
-			fixture = new Fixture(host, url, broadcast, fault);
+			fixture = new Fixture(host, {
+				url,
+				name: broadcast,
+				fault,
+				versions: versions?.split(","),
+				generation: Number(params.get("generation") ?? 0),
+			});
 		},
 		disableVideo: () => fixture?.setVideo(false),
 		enableVideo: () => fixture?.setVideo(true),
+		changeVideoCodec: () => fixture?.changeVideoCodec(),
+		resizeVideo: () => fixture?.resizeVideo(),
 	});
 } else if (role === "subscribe") {
 	await customElements.whenDefined("moq-watch");
 	const el = document.createElement("moq-watch") as MoqWatch;
 	el.setAttribute("url", url);
+	if (versions) el.setAttribute("versions", versions);
 	el.setAttribute("name", broadcast);
 	if (params.get("muted") === "true") el.setAttribute("muted", "");
 	// A render target is what makes <moq-watch> actually subscribe to and decode
@@ -90,12 +134,26 @@ if (role === "publish") {
 	const delay = params.get("delay");
 	if (delay) el.setAttribute("delay", delay);
 
+	// The interop matrix checks each audio rendition in a page of its own, pinned by codec (the
+	// catalog's up to its first `.`). The target lands with the catalog, before the player has
+	// probed which renditions it can decode, so no other rendition ever plays here.
+	const codec = params.get("codec");
+	if (codec) {
+		el.signals.run((effect) => {
+			const renditions = effect.get(el.broadcast.out.catalog)?.audio?.renditions ?? {};
+			const name = Object.keys(renditions).find((name) => renditions[name].codec.split(".")[0] === codec);
+			if (name) el.controls.audio.target.set({ name });
+		});
+	}
+
 	const player = document.createElement("moq-watch-ui");
 	player.appendChild(el);
 	document.body.appendChild(player);
 
 	watchResources();
-	let stop = attach(el);
+	// The interop matrix names the tone each channel should carry; the media checks do not.
+	const tones = (params.get("tone") ?? "").split(",").filter(Boolean).map(Number);
+	let stop = attach(el, tones);
 
 	// Where the leaked-session control parks the player it refuses to tear down.
 	const leak = document.createElement("div");
@@ -126,7 +184,7 @@ if (role === "publish") {
 			const canvas = el.querySelector("canvas");
 			canvas?.getContext("2d")?.clearRect(0, 0, canvas.width, canvas.height);
 			player.appendChild(el);
-			stop = attach(el);
+			stop = attach(el, tones);
 		},
 	});
 } else if (role === "close") {

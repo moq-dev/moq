@@ -15,10 +15,11 @@ pub enum ControlType {
 	Goaway = 5,
 	Track = 6,
 	Auth = 7,
+	Tracks = 8,
 }
 
-impl Decode<Version> for ControlType {
-	fn decode(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for ControlType {
+	fn decode(r: &mut Decoder<'a>, _: Version) -> Result<Self, DecodeError> {
 		let t = r.varint()?;
 		t.try_into().map_err(|_| DecodeError::InvalidValue)
 	}
@@ -39,10 +40,12 @@ pub enum DataType {
 	Group = 0,
 	/// The lite-05+ SETUP stream: one SETUP message, then FIN.
 	Setup = 1,
+	/// Arbitrary bytes discarded by lite-07+ receivers.
+	Padding = 2,
 }
 
-impl Decode<Version> for DataType {
-	fn decode(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for DataType {
+	fn decode(r: &mut Decoder<'a>, _: Version) -> Result<Self, DecodeError> {
 		let t = r.varint()?;
 		t.try_into().map_err(|_| DecodeError::InvalidValue)
 	}

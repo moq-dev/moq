@@ -1,0 +1,11 @@
+{
+	"extends": "../../../js/tsconfig.json",
+	"compilerOptions": {
+		"module": "esnext",
+		"moduleResolution": "bundler",
+		"noEmit": true,
+		"allowImportingTsExtensions": true,
+		"types": ["bun"]
+	},
+	"include": ["src", "test", "vite.config.ts", "../../../js/common/worklet.d.ts"]
+}

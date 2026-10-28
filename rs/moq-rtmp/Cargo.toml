@@ -17,14 +17,14 @@ categories = ["multimedia", "network-programming", "web-programming"]
 
 [features]
 default = ["tls"]
-# RTMPS (RTMP over TLS): the `Conn::Tls` variant, `Server::with_tls`,
-# `Config::tls`, and the `pub use rustls`. Plaintext RTMP needs none of this, so
-# an embedder can drop TLS with `default-features = false`.
+# RTMPS (RTMP over TLS): the `Conn::Tls` variant, `Server::with_tls`, and the
+# `pub use rustls`. Plaintext RTMP needs none of this, so an embedder can drop
+# TLS with `default-features = false`.
 tls = ["dep:rustls", "dep:tokio-rustls"]
 
 # Pure library: the RTMP <-> MoQ gateway. The CLI lives in `moq-cli` (the `rtmp`
-# subcommand); a relay can also embed `moq_rtmp::run` / `Server` against its own
-# origin. Only rustls + tokio-rustls (RTMPS, the `tls` feature) are optional.
+# subcommand); a relay can also embed `moq_rtmp::Server` against its own origin.
+# Only rustls + tokio-rustls (RTMPS, the `tls` feature) are optional.
 [dependencies]
 anyhow = { workspace = true, features = ["backtrace"] }
 # Deps of the vendored `rml` module (our fork of the unmaintained rml_rtmp 0.8):
@@ -35,14 +35,14 @@ bytes = { workspace = true }
 futures = { workspace = true }
 hang = { workspace = true }
 hmac = "0.13"
+moq-clock = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 rand = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"], optional = true }
 sha2 = "0.11"
 # TCP keepalive on accepted sockets, so a half-open connection (a peer that
-# vanished without a FIN/RST) is reaped instead of pinning a broadcast and its
-# stream-key slot forever.
+# vanished without a FIN/RST) is reaped instead of pinning a broadcast forever.
 socket2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "time"] }
@@ -54,14 +54,18 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+moq-clock = { path = "../moq-clock", features = ["sim"] }
 # The RTMPS test borrows moq-tokio's self-signed cert generation to build a
 # `rustls::ServerConfig`. No transport feature: a QUIC backend here would be
 # unified into every other crate a `--workspace` build selects, which is exactly
 # what hid moq-tokio's backend-less build from the nightly feature matrix.
-moq-tokio = { path = "../moq-tokio", default-features = false, features = ["aws-lc-rs"] }
+moq-tokio = { path = "../moq-tokio", default-features = false, features = ["aws-lc-rs", "net"] }
 tokio = { workspace = true, features = ["test-util"] }
 tracing-test = { workspace = true, features = ["no-env-filter"] }
 
 [[bench]]
 name = "chunk_interleaving"
 harness = false
+
+[lints]
+workspace = true

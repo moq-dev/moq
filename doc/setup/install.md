@@ -59,7 +59,8 @@ nix run github:moq-dev/moq/release#moq-relay -- relay.toml
 nix run github:moq-dev/moq/release#moq -- --help
 
 # Docker (linux/amd64 and linux/arm64). The image is scratch (the package
-# closure only) and has no shell.
+# closure only), has no shell, and runs as uid 65532, which must be able to read
+# mounted files.
 docker run -p 4443:4443/udp -p 4443:4443/tcp -v "$PWD/relay.toml:/app/relay.toml:ro" moqdev/moq-relay /app/relay.toml
 docker run -i moqdev/moq --help
 ```
@@ -67,8 +68,9 @@ docker run -i moqdev/moq --help
 Static binaries for Linux (x86\_64, aarch64), macOS (Apple Silicon), and Windows
 (x64) are attached to every
 [GitHub release](https://github.com/moq-dev/moq/releases). The Nix cache at
-`kixelated.cachix.org` only holds tagged releases, so the `release` branch
-builds from source.
+`nix.moq.dev` only holds tagged releases, so the `release` branch builds from
+source. Nix asks before trusting it; `--accept-flake-config` says yes for one
+command.
 
 ## Debian and Ubuntu
 

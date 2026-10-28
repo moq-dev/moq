@@ -33,9 +33,7 @@ stamped `PRIORITY.video` today (`rs/moq-transcode/src/rung.rs`,
 before the next sees a bit, so that alone protects lower rungs' allocation.
 
 For send order, consume the publisher-priority tiebreak in `Priority::cmp`
-that [Scope track priority](/quest/m1/track-priority-scope.md) settles; that
-quest owns the code change and the doc fixes (decided in the 2026-10-06
-audit). The `BitrateUnsupported` fallback leans on it: without it, an
+([moq-dev/moq#6142](https://github.com/moq-dev/moq/pull/6142)). The `BitrateUnsupported` fallback leans on it: without it, an
 encoder that cannot retune degrades the whole ladder equally instead of
 protecting the bottom. A subscriber asking for a higher rendition ahead of a
 lower one still gets what it asked for.
@@ -67,12 +65,6 @@ bandwidth input preserving existing behavior exactly; and for send order,
 equal subscriber priority where the lower rung wins, conflicting subscriber
 priority where the subscriber's order wins, and a custom ladder order.
 
-## Required
-
-- [Scope track priority](/quest/m1/track-priority-scope.md) - settles the priority ranking the controller assigns before the encoder side reads it
-
 ## Related
 
 - [Encoder feedback](/quest/m3/stats-encoder-feedback.md) - viewer stalls for `moq import`; its `moq transcode --echo` leg, split out if revived, feeds this controller
-- [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - supplies the
-  fair subscription buckets beneath this rendition policy

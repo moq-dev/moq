@@ -2,8 +2,9 @@
 #include "moq-settings.h"
 #include "logger.h"
 
-#include <algorithm>
+#include <chrono>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -13,29 +14,31 @@ namespace {
 
 // Keys. These are stable: they land in scene collections and in the dock's settings
 // file, so renaming one silently drops whatever the user had configured.
+constexpr const char *VERSION = "version";
 constexpr const char *BIND = "bind";
+constexpr const char *CONNECT_TIMEOUT = "connect_timeout_ms";
+constexpr const char *FAILOVER_DELAY = "failover_delay_ms";
 
 constexpr const char *TLS_DISABLE_VERIFY = "tls_disable_verify";
 constexpr const char *TLS_FINGERPRINT = "tls_fingerprint";
 constexpr const char *TLS_ROOT = "tls_root";
+constexpr const char *TLS_HOST_NAME = "tls_host_name";
 
 constexpr const char *BACKOFF_INITIAL = "backoff_initial_ms";
 constexpr const char *BACKOFF_MAX = "backoff_max_ms";
 constexpr const char *BACKOFF_TIMEOUT = "backoff_timeout_ms";
 
+constexpr const char *QUIC_CONGESTION_CONTROL = "quic_congestion_control";
 constexpr const char *QUIC_MAX_STREAMS = "quic_max_streams";
+constexpr const char *QUIC_IDLE_TIMEOUT = "quic_idle_timeout_ms";
+constexpr const char *QUIC_KEEP_ALIVE = "quic_keep_alive_ms";
+constexpr const char *QUIC_GSO = "quic_gso";
+constexpr const char *QUIC_MTU_DISCOVERY = "quic_mtu_discovery";
+constexpr const char *QUIC_QLOG = "quic_qlog";
+constexpr const char *QUIC_KEYLOG = "quic_keylog";
 
 constexpr const char *WEBSOCKET_ENABLED = "websocket_enabled";
 constexpr const char *WEBSOCKET_DELAY = "websocket_delay_ms";
-
-// moq-ffi documents these defaults on MoqClientConfig but leaves each field null rather
-// than reporting it, so they are repeated here.
-constexpr long long BACKOFF_INITIAL_DEFAULT_MS = 1000;
-constexpr long long BACKOFF_MAX_DEFAULT_MS = 5000;
-constexpr long long BACKOFF_TIMEOUT_DEFAULT_MS = 10000;
-constexpr long long QUIC_MAX_STREAMS_DEFAULT = 1024;
-constexpr bool WEBSOCKET_ENABLED_DEFAULT = true;
-constexpr long long WEBSOCKET_DELAY_DEFAULT_MS = 200;
 
 // Read a string setting, returning nullptr when it's unset or empty, which leaves the
 // knob at the library default.
@@ -45,18 +48,64 @@ const char *OptionalString(obs_data_t *settings, const char *key)
 	return (value && *value) ? value : nullptr;
 }
 
-// Read an integer setting inside the range declared by its Field. Scene collections
-// are editable JSON, so the widget bounds alone do not protect the unsigned API.
-uint64_t Amount(obs_data_t *settings, const char *key)
+// Keep the first reason a setting can't be applied, so Configure reports the earliest.
+void Refuse(std::string &error, std::string reason)
+{
+	if (error.empty())
+		error = std::move(reason);
+}
+
+// Resolve a tri-state choice (AUTO / "on" / "off") into an override, or nothing to leave
+// the choice to the transport. Any other stored value is refused.
+std::optional<bool> TriState(obs_data_t *settings, const char *key, std::string &error)
+{
+	const char *value = OptionalString(settings, key);
+	if (!value)
+		return std::nullopt;
+	if (strcmp(value, "on") == 0)
+		return true;
+	if (strcmp(value, "off") == 0)
+		return false;
+	Refuse(error, std::string("unknown ") + key + ": " + value);
+	return std::nullopt;
+}
+
+// A library default as the milliseconds the UI edits. moq-ffi reports every duration
+// this table shows; one it stops reporting reads as zero and is logged.
+template<typename Duration> long long Millis(const std::optional<Duration> &duration, const char *key)
+{
+	if (!duration) {
+		LOG_ERROR("moq-ffi reported no default for %s", key);
+		return 0;
+	}
+	return static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(*duration).count());
+}
+
+// Read an integer setting, refusing one outside the range its Field declares. Scene
+// collections are editable JSON, so the widget bounds alone do not protect the unsigned
+// API, and clamping would turn a malformed value into a different setting: a negative
+// timeout into "wait forever".
+uint64_t Amount(obs_data_t *settings, const char *key, std::string &error)
 {
 	const long long value = obs_data_get_int(settings, key);
 	for (const Field &field : Fields()) {
-		if (strcmp(field.key, key) == 0)
-			return static_cast<uint64_t>(std::clamp(value, field.min, field.max));
+		if (strcmp(field.key, key) != 0)
+			continue;
+		if (value < field.min || value > field.max) {
+			Refuse(error, std::string(key) + " out of range: " + std::to_string(value));
+			return 0;
+		}
+		return static_cast<uint64_t>(value);
 	}
 
-	LOG_ERROR("Advanced integer setting has no Field: %s", key);
+	Refuse(error, std::string("advanced integer setting has no field: ") + key);
 	return 0;
+}
+
+// Read a millisecond setting through Amount.
+std::chrono::milliseconds Milliseconds(obs_data_t *settings, const char *key, std::string &error)
+{
+	return std::chrono::milliseconds(static_cast<std::chrono::milliseconds::rep>(Amount(settings, key, error)));
 }
 
 // Shorthands so the table below reads as data rather than aggregate initializers.
@@ -76,9 +125,38 @@ Field Text(const char *key, const char *label, const char *tooltip = nullptr)
 	return Field{key, label, tooltip, Kind::Text, 0, 0, 0, false, 0, "", {}, false, nullptr};
 }
 
+Field Choose(const char *key, const char *label, std::vector<Option> options, bool editable = false,
+	     const char *tooltip = nullptr)
+{
+	return Field{key, label, tooltip, Kind::Choice, 0, 0, 0, false, 0, AUTO, std::move(options), editable, nullptr};
+}
+
 Field File(const char *key, const char *label, const char *filter, const char *tooltip = nullptr)
 {
 	return Field{key, label, tooltip, Kind::File, 0, 0, 0, false, 0, "", {}, false, filter};
+}
+
+Field Directory(const char *key, const char *label, const char *tooltip = nullptr)
+{
+	return Field{key, label, tooltip, Kind::Directory, 0, 0, 0, false, 0, "", {}, false, nullptr};
+}
+
+// The tri-state used wherever the library default depends on the transport.
+std::vector<Option> AutoOnOff()
+{
+	return {{"Automatic", AUTO}, {"Enabled", "on"}, {"Disabled", "off"}};
+}
+
+// The protocol versions this build offers, so the menu can't drift from what a dial
+// accepts. Option borrows its pointers, so the names live as long as the field table.
+std::vector<Option> VersionOptions()
+{
+	static const std::vector<std::string> names = moq::versions();
+
+	std::vector<Option> options = {{"Automatic (offer all)", AUTO}};
+	for (const std::string &name : names)
+		options.push_back({name.c_str(), name.c_str()});
+	return options;
 }
 
 } // namespace
@@ -86,11 +164,24 @@ Field File(const char *key, const char *label, const char *filter, const char *t
 const std::vector<Field> &Fields()
 {
 	static const std::vector<Field> fields = [] {
+		// The library's own defaults, so the table doesn't repeat numbers that drift the
+		// moment one is retuned.
+		const moq::ClientConfig d = moq::client_defaults();
 		std::vector<Field> f;
 
+		// Protocol. Editable so a work-in-progress draft, which is never offered by
+		// default and so never listed, can still be typed in.
+		f.push_back(Choose(VERSION, "Protocol version", VersionOptions(), true,
+				   "Pin the handshake to one draft instead of offering every supported version."));
 		f.push_back(Text(BIND, "Bind address",
 				 "Local UDP address to send from, e.g. 192.0.2.7:0 to pin the outgoing "
 				 "interface. Leave empty for any."));
+		f.push_back(Number(CONNECT_TIMEOUT, "Connect timeout (ms)", Millis(d.timeout, CONNECT_TIMEOUT), 0,
+				   600000, 1000,
+				   "How long one connection attempt may take, dial and handshake together. "
+				   "0 waits forever."));
+		f.push_back(Number(FAILOVER_DELAY, "Happy Eyeballs delay (ms)", Millis(d.race, FAILOVER_DELAY), 0,
+				   10000, 50, "How long to wait before also trying the next address DNS returned."));
 
 		// TLS.
 		f.push_back(Toggle(TLS_DISABLE_VERIFY, "Skip certificate verification", false,
@@ -104,26 +195,58 @@ const std::vector<Field> &Fields()
 				 "ignoring this pin."));
 		f.push_back(File(TLS_ROOT, "Root certificate (PEM)", "PEM (*.pem *.crt);;All Files (*)",
 				 "Trust this CA instead of the system roots."));
+		f.push_back(Text(TLS_HOST_NAME, "Server name override (SNI)",
+				 "Validate the certificate against this name instead of the host in the "
+				 "URL, so a relay can be reached by IP."));
 
 		// Reconnect.
-		f.push_back(Number(BACKOFF_INITIAL, "Reconnect delay (ms)", BACKOFF_INITIAL_DEFAULT_MS, 1, 60000, 100,
-				   "Delay before the first reconnect attempt; it grows from here."));
-		f.push_back(Number(BACKOFF_MAX, "Reconnect delay cap (ms)", BACKOFF_MAX_DEFAULT_MS, 1, 600000, 1000,
-				   "Ceiling on the growing reconnect delay."));
-		f.push_back(Number(BACKOFF_TIMEOUT, "Give up after (ms)", BACKOFF_TIMEOUT_DEFAULT_MS, 0, 3600000, 1000,
-				   "Total time to keep retrying before the stream fails. Also how long the "
-				   "broadcast lingers for viewers across the gap. 0 retries forever."));
+		f.push_back(Number(BACKOFF_INITIAL, "Reconnect delay (ms)", Millis(d.backoff.initial, BACKOFF_INITIAL),
+				   1, 60000, 100, "Delay before the first reconnect attempt; it grows from here."));
+		f.push_back(Number(BACKOFF_MAX, "Reconnect delay cap (ms)", Millis(d.backoff.max, BACKOFF_MAX), 1,
+				   600000, 1000, "Ceiling on the growing reconnect delay."));
+		f.push_back(Number(BACKOFF_TIMEOUT, "Give up after (ms)", Millis(d.backoff.timeout, BACKOFF_TIMEOUT), 0,
+				   3600000, 1000,
+				   "Total time to keep retrying before the stream fails. 0 retries forever."));
 
 		// QUIC transport.
-		f.push_back(Number(QUIC_MAX_STREAMS, "Max concurrent streams", QUIC_MAX_STREAMS_DEFAULT, 1, 65536, 1,
+		f.push_back(Choose(
+			QUIC_CONGESTION_CONTROL, "Congestion control",
+			{{"Automatic", AUTO}, {"Delay-based (BBR)", "delay"}, {"Loss-based (CUBIC)", "loss"}}, false,
+			"Delay-based keeps queues short and the send rate steady enough for an "
+			"encoder to track. Loss-based chases throughput instead."));
+		f.push_back(Number(QUIC_MAX_STREAMS, "Max concurrent streams",
+				   static_cast<long long>(d.quic.max_streams.value_or(0)), 1, 65536, 1,
 				   "MoQ opens a stream per group, so a busy publisher wants this high."));
+		f.push_back(Number(QUIC_IDLE_TIMEOUT, "Idle timeout (ms)",
+				   Millis(d.quic.idle_timeout, QUIC_IDLE_TIMEOUT), 0, 600000, 1000,
+				   "How long an idle connection survives before it is dropped."));
+		f.push_back(Number(QUIC_KEEP_ALIVE, "Keep-alive interval (ms)",
+				   Millis(d.quic.keep_alive, QUIC_KEEP_ALIVE), 0, 60000, 100,
+				   "0 disables the keep-alive pings."));
+		f.push_back(Choose(QUIC_GSO, "UDP segmentation offload", AutoOnOff(), false,
+				   "Batches sends into one syscall. Turn it off if large sends vanish; some "
+				   "NICs and middleboxes mangle segmented packets."));
+		f.push_back(Choose(QUIC_MTU_DISCOVERY, "Path MTU discovery", AutoOnOff(), false,
+				   "Probe the path so packets use the largest size it allows. Turn it "
+				   "off if discovery itself causes drops."));
+		// Only when this build can capture: setting a directory without support fails
+		// the dial, so offering it would be a control that only breaks things.
+		if (moq::qlog_supported()) {
+			f.push_back(Directory(QUIC_QLOG, "qlog directory",
+					      "Write QUIC connection traces here for diagnosing stalls. Leave "
+					      "empty to disable; the files get large."));
+		}
+		f.push_back(Toggle(QUIC_KEYLOG, "TLS key log", false,
+				   "Write TLS session secrets to the file the SSLKEYLOGFILE environment "
+				   "variable names, to decrypt a packet capture. Anyone holding that file "
+				   "can read the stream. Going live fails if SSLKEYLOGFILE is unset."));
 
 		// WebSocket fallback.
-		f.push_back(Toggle(WEBSOCKET_ENABLED, "WebSocket fallback", WEBSOCKET_ENABLED_DEFAULT,
+		f.push_back(Toggle(WEBSOCKET_ENABLED, "WebSocket fallback", d.websocket.enabled.value_or(true),
 				   "Race a WebSocket connection against QUIC so a network that blocks UDP "
 				   "still goes live. Turn it off to measure the QUIC path alone."));
-		f.push_back(Number(WEBSOCKET_DELAY, "WebSocket fallback delay (ms)", WEBSOCKET_DELAY_DEFAULT_MS, 0,
-				   10000, 50,
+		f.push_back(Number(WEBSOCKET_DELAY, "WebSocket fallback delay (ms)",
+				   Millis(d.websocket.delay, WEBSOCKET_DELAY), 0, 10000, 50,
 				   "How long QUIC gets a head start before the WebSocket attempt joins in."));
 
 		return f;
@@ -196,13 +319,19 @@ void AddProperties(obs_properties_t *props)
 	obs_properties_add_group(props, ENABLED, "Advanced", OBS_GROUP_CHECKABLE, group);
 }
 
-void Configure(obs_data_t *settings, moq::ClientConfig &config)
+std::string Configure(obs_data_t *settings, moq::ClientConfig &config)
 {
 	if (!settings || !obs_data_get_bool(settings, ENABLED))
-		return; // advanced off: the client keeps the library defaults
+		return {}; // advanced off: the client keeps the library defaults
 
+	std::string error;
+
+	if (const char *version = OptionalString(settings, VERSION))
+		config.versions = {version};
 	if (const char *bind = OptionalString(settings, BIND))
 		config.bind = bind;
+	config.timeout = Milliseconds(settings, CONNECT_TIMEOUT, error);
+	config.race = Milliseconds(settings, FAILOVER_DELAY, error);
 
 	if (obs_data_get_bool(settings, TLS_DISABLE_VERIFY))
 		config.tls.insecure = true;
@@ -210,15 +339,42 @@ void Configure(obs_data_t *settings, moq::ClientConfig &config)
 		config.tls.fingerprints = {fingerprint};
 	if (const char *root = OptionalString(settings, TLS_ROOT))
 		config.tls.roots = {root};
+	if (const char *host_name = OptionalString(settings, TLS_HOST_NAME))
+		config.tls.host_name = host_name;
 
-	config.backoff.initial_us = Amount(settings, BACKOFF_INITIAL) * 1000;
-	config.backoff.max_us = Amount(settings, BACKOFF_MAX) * 1000;
-	config.backoff.timeout_us = Amount(settings, BACKOFF_TIMEOUT) * 1000;
+	config.backoff.initial = Milliseconds(settings, BACKOFF_INITIAL, error);
+	config.backoff.max = Milliseconds(settings, BACKOFF_MAX, error);
+	config.backoff.timeout = Milliseconds(settings, BACKOFF_TIMEOUT, error);
 
-	config.quic.max_streams = Amount(settings, QUIC_MAX_STREAMS);
+	// Automatic leaves the tri-states and the congestion family unset, which keeps the
+	// transport free to pick.
+	if (const char *family = OptionalString(settings, QUIC_CONGESTION_CONTROL)) {
+		if (strcmp(family, "delay") == 0)
+			config.quic.congestion_control = moq::CongestionControl::kDelay;
+		else if (strcmp(family, "loss") == 0)
+			config.quic.congestion_control = moq::CongestionControl::kLoss;
+		else
+			Refuse(error, std::string("unknown congestion control: ") + family);
+	}
+	config.quic.max_streams = Amount(settings, QUIC_MAX_STREAMS, error);
+	config.quic.idle_timeout = Milliseconds(settings, QUIC_IDLE_TIMEOUT, error);
+	config.quic.keep_alive = Milliseconds(settings, QUIC_KEEP_ALIVE, error);
+	config.quic.gso = TriState(settings, QUIC_GSO, error);
+	config.quic.mtu_discovery = TriState(settings, QUIC_MTU_DISCOVERY, error);
+	// A scene collection written by a qlog-capable build keeps the key even where the
+	// field is hidden. Refusing would block Go Live on a setting the user can no longer
+	// see, let alone clear, so the trace is skipped and the log says why.
+	if (const char *qlog = OptionalString(settings, QUIC_QLOG)) {
+		if (moq::qlog_supported())
+			config.quic.qlog = qlog;
+		else
+			LOG_WARNING("Skipping the qlog directory %s: this build cannot write qlog", qlog);
+	}
+	config.quic.keylog = obs_data_get_bool(settings, QUIC_KEYLOG);
 
 	config.websocket.enabled = obs_data_get_bool(settings, WEBSOCKET_ENABLED);
-	config.websocket.delay_us = Amount(settings, WEBSOCKET_DELAY) * 1000;
+	config.websocket.delay = Milliseconds(settings, WEBSOCKET_DELAY, error);
+	return error;
 }
 
 } // namespace MoQSettings

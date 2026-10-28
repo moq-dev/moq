@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, expect, jest, spyOn, test } from "bun:test";
 import { Once } from "@moq/signals";
 import * as Announce from "../announced.ts";
+import { AuthSession } from "../auth_session.ts";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "../broadcast.ts";
 import * as Epoch from "../epoch.ts";
 import { Route } from "../hop.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
+import { closeUnwanted } from "../util/announce.ts";
 import { registerWire, wireOf } from "../wire.ts";
 import type { Established } from "./established.ts";
 import { forwardAnnounced } from "./forward.ts";
@@ -42,11 +44,20 @@ class FakeSession {
 	 */
 	readonly consumed = new Map<Path.Valid, BroadcastProducer[]>();
 
+	/** Whether each request is synced as it opens, as one with no initial set to wait for is. */
+	syncedAtOnce = false;
+
 	closed: Promise<Error | null>;
 	#die!: (reason: Error | null) => void;
 
-	constructor() {
-		registerWire(this, { consume: (path) => this.consume(path), goaway: new Once() });
+	/** `exclusive` stands in for a peer that refuses overlapping requests. */
+	constructor({ exclusive = false } = {}) {
+		registerWire(this, {
+			consume: (path) => this.consume(path),
+			goaway: new Once(),
+			exclusive,
+			auth: new AuthSession({ peerGrant: { publish: new Path.Patterns(), subscribe: new Path.Patterns() } }),
+		});
 		this.closed = new Promise((resolve) => {
 			this.#die = resolve;
 		});
@@ -55,7 +66,11 @@ class FakeSession {
 	announced(scope: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Announce.Consumer {
 		const stream = new Announce.Producer();
 		this.requests.push({ scope: scope.text, hidden: options?.hidden, stream });
-		return stream.consume();
+		if (this.syncedAtOnce) stream.synced();
+		const consumer = stream.consume();
+		// The last reader leaving cancels the request, as a session's does.
+		closeUnwanted(stream);
+		return consumer;
 	}
 
 	/** The scopes of the announce requests still open. */
@@ -327,6 +342,48 @@ test("a narrower request stays open until the broader one covering it goes", asy
 	await settle();
 	expect(session.open()).toEqual([]);
 	expect(wireOf(origin).routes(Path.from("a/b/x"))).toBe(false);
+
+	session.die();
+	origin.close();
+});
+
+test("an exclusive session closes every request beneath a broader one before it opens", async () => {
+	const origin = new OriginProducer();
+	const session = new FakeSession({ exclusive: true });
+	forwardAnnounced(session.session, origin);
+
+	const narrow = origin.announced(Path.Pattern.subtree(Path.from("a/b")));
+	const lingering = origin.announced(Path.Pattern.subtree(Path.from("a/c")));
+	await settle();
+	start(session.stream("a/b/**"), "a/b/x");
+	lingering.close();
+	await settle();
+	expect(session.open()).toEqual(["a/b/**", "a/c/**"]);
+
+	// Watched or lingering, each narrower request closes for the broader one, on purpose: the
+	// session stays discovering, and the route returns once the broader request reports it.
+	const broad = origin.announced(Path.Pattern.subtree(Path.from("a")));
+	const events = record(broad);
+	await settle();
+	expect(session.open()).toEqual(["a/**"]);
+	expect(wireOf(origin).routes(Path.from("a/b/x"))).toBe(false);
+	start(session.stream("a/**"), "a/b/x");
+	await settle();
+	expect(events).toEqual(["start a/b/x", "end a/b/x", "start a/b/x"]);
+	expect(origin.discovery.peek()).toBe(true);
+
+	// The narrower watch rides the broader request from here on.
+	broad.close();
+	await settle();
+	jest.advanceTimersByTime(LINGER);
+	await settle();
+	expect(session.open()).toEqual(["a/**"]);
+	narrow.close();
+	await settle();
+	jest.advanceTimersByTime(LINGER);
+	await settle();
+	expect(session.open()).toEqual([]);
+	expect(session.requests.map(({ scope }) => scope)).toEqual(["a/b/**", "a/c/**", "a/**"]);
 
 	session.die();
 	origin.close();
@@ -608,5 +665,66 @@ test("one failed request leaves the other routes live until the session ends", a
 
 	a.close();
 	b.close();
+	origin.close();
+});
+
+test("an origin watcher syncs with the session's initial set, not before", async () => {
+	const origin = new OriginProducer();
+	const session = new FakeSession();
+	forwardAnnounced(session.session, origin);
+
+	const watch = origin.announced(Path.Pattern.subtree(Path.from("room")));
+	const events = record(watch);
+	await settle();
+	expect(watch.synced.peek()).toBe(false);
+
+	const stream = session.stream("room/**");
+	start(stream, "room/cam");
+	await settle();
+	// The route is in, but the peer has not said the set is complete.
+	expect(events).toEqual(["start room/cam"]);
+	expect(watch.synced.peek()).toBe(false);
+
+	stream.synced();
+	await settle();
+	expect(watch.synced.peek()).toBe(true);
+
+	watch.close();
+	session.die();
+	origin.close();
+});
+
+test("a session ending before its initial set lands stops holding the watcher", async () => {
+	const origin = new OriginProducer();
+	const session = new FakeSession();
+	forwardAnnounced(session.session, origin);
+
+	const watch = origin.announced();
+	record(watch);
+	await settle();
+	expect(watch.synced.peek()).toBe(false);
+
+	session.die();
+	await settle();
+	expect(watch.synced.peek()).toBe(true);
+
+	watch.close();
+	origin.close();
+});
+
+test("a request synced as it opens releases the watcher", async () => {
+	const origin = new OriginProducer();
+	const session = new FakeSession();
+	session.syncedAtOnce = true;
+	forwardAnnounced(session.session, origin);
+
+	const watch = origin.announced();
+	record(watch);
+	await settle();
+	expect(session.requests).toHaveLength(1);
+	expect(watch.synced.peek()).toBe(true);
+
+	watch.close();
+	session.die();
 	origin.close();
 });

@@ -1,3 +1,9 @@
+#![warn(missing_docs)]
+#![cfg_attr(
+	test,
+	expect(clippy::disallowed_methods, reason = "tests read the host clock directly")
+)]
+
 //! UniFFI bindings for [`moq_net`].
 //!
 //! Provides a Kotlin/Swift-compatible API for real-time pub/sub over QUIC.
@@ -7,8 +13,17 @@
 // `Rc`-backed, so clippy sees a pointlessly atomic `Arc` at every construction site. The
 // `Arc` is uniffi's ABI rather than our choice, and the target is single-threaded, so the
 // wasted atomics are what one type serving both targets costs.
-#![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
+#![cfg_attr(
+	target_arch = "wasm32",
+	expect(
+		clippy::arc_with_non_send_sync,
+		reason = "`Arc` is uniffi's ABI, and wasm is single-threaded"
+	)
+)]
 
+// Counts moq's heap for the host leak tests; see `moq_ffi_test_allocated`.
+#[cfg(all(feature = "testing", not(target_arch = "wasm32")))]
+mod alloc;
 #[cfg(target_os = "android")]
 mod android;
 // The QUIC server and moq-native's logger have no browser equivalent, and the
@@ -16,6 +31,7 @@ mod android;
 // since they are the heaviest thing in the dependency graph.
 #[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
 pub mod audio;
+pub mod auth;
 pub mod bandwidth;
 pub mod consumer;
 pub mod demand;
@@ -57,10 +73,40 @@ pub extern "C" fn moq_ffi_shutdown() {
 	ffi::shutdown();
 }
 
+/// Start the runtime on a clock that moves only by [`moq_ffi_test_clock_advance`].
+///
+/// Test builds only (the `testing` feature), for host test suites that keep native time in
+/// step with their own loop. Call it before anything else uses the bindings: false means the
+/// runtime already started on the host clock.
+#[cfg(all(feature = "testing", not(target_arch = "wasm32")))]
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_ffi_test_clock_start() -> bool {
+	ffi::start_test_clock()
+}
+
+/// Let `nanos` pass on the test clock, waking every timer due by then.
+///
+/// False without a test clock, or when the advance would run past the clock's range, which
+/// would otherwise panic across this boundary and abort the host.
+#[cfg(all(feature = "testing", not(target_arch = "wasm32")))]
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_ffi_test_clock_advance(nanos: u64) -> bool {
+	ffi::test_clock().is_some_and(|clock| clock.advance(std::time::Duration::from_nanos(nanos)).is_some())
+}
+
+/// The test clock's nanoseconds since it started, or `u64::MAX` without one.
+#[cfg(all(feature = "testing", not(target_arch = "wasm32")))]
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_ffi_test_clock_now() -> u64 {
+	ffi::test_clock().map_or(u64::MAX, |clock| {
+		clock.now().duration_since(moq_clock::Instant::ZERO).as_nanos() as u64
+	})
+}
+
 // The test suite drives a native relay over a tokio runtime.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test;
 
-// The binding benchmark's Rust baselines; ignored unless `just bench-ffi` asks for them.
+// The binding benchmark's Rust baselines; ignored unless a run asks for them (see bench/README.md).
 #[cfg(all(test, unix))]
 mod bench;

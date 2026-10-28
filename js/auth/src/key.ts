@@ -1,4 +1,4 @@
-import * as base64 from "@hexagon/base64";
+import { wall } from "@moq/clock";
 import * as z from "@zod/mini";
 import * as jose from "jose";
 import { type Algorithm, AlgorithmSchema } from "./algorithm.ts";
@@ -14,12 +14,14 @@ export const KeyIdSchema = z.string().check(
 		message: "Key ID must contain only alphanumeric characters, hyphens, and underscores",
 	}),
 );
+/** A value parsed by {@link KeyIdSchema}. */
 export type KeyId = z.infer<typeof KeyIdSchema>;
 
 /**
  * Key operations that can be performed
  */
 export const OperationSchema = z.enum(["sign", "verify", "decrypt", "encrypt"]);
+/** A value parsed by {@link OperationSchema}. */
 export type Operation = z.infer<typeof OperationSchema>;
 
 const MIN_HMAC_SECRET_BYTES = 32;
@@ -72,6 +74,8 @@ const RsaKeySchema = z
 		dp: z.optional(Base64FieldSchema),
 		dq: z.optional(Base64FieldSchema),
 		qi: z.optional(Base64FieldSchema),
+		// Multi-prime RSA is unsupported by the shared key contract.
+		oth: z.optional(z.never()),
 	})
 	.check(
 		z.superRefine((data, ctx) => {
@@ -107,10 +111,15 @@ const OkpKeySchema = z.extend(BaseKeySchema, {
 });
 
 const CanonicalKeySchema = z.discriminatedUnion("kty", [OctKeySchema, RsaKeySchema, EcKeySchema, OkpKeySchema]);
+/** A JSON Web Key of any supported type: oct, RSA, EC, or OKP. */
 export const KeySchema = CanonicalKeySchema;
+/** A value parsed by {@link KeySchema}. */
 export type Key = z.infer<typeof KeySchema>;
+/** An RSA, EC, or OKP key. */
 export type AsymmetricKey = Exclude<Key, { kty: "oct" }>;
+/** An oct (HMAC secret) key. */
 export type SymmetricKey = Extract<Key, { kty: "oct" }>;
+/** An asymmetric key without its private parameters. */
 export type PublicKey = Omit<AsymmetricKey, "d" | "p" | "q" | "dp" | "dq" | "qi">;
 
 /** Derive a verify-only copy of this key, dropping the private material. */
@@ -184,7 +193,7 @@ function parse(jwk: string): Key {
  * `iat` is written only when the claims carry one, so an unset field stays off the
  * wire rather than being stamped with the current time.
  */
-async function sign(key: Key, claims: Claims): Promise<string> {
+async function sign(key: Key, claims: z.input<typeof ClaimsSchema>): Promise<string> {
 	ensureOperationSupported(key, "sign");
 
 	// Scope-check and sign what the schema parsed, never the raw input: an untyped
@@ -210,27 +219,22 @@ async function sign(key: Key, claims: Claims): Promise<string> {
 	return jwt;
 }
 
-/** Decode a signed token, checking only signature, algorithm, and key ID. The payload is unvalidated. */
-async function decode(key: PublicKey | SymmetricKey, token: string): Promise<unknown> {
+/** Verify a token's signature and this crate's strict claims, expiry, not-before, and key scope. */
+async function verify(key: PublicKey | SymmetricKey, token: string): Promise<Claims> {
 	ensureOperationSupported(key, "verify");
 	const joseKey = await importJoseKey(key);
 	const { payload, protectedHeader } = await jose.compactVerify(token, joseKey, {
 		algorithms: [key.alg],
 	});
 	if (protectedHeader.kid !== key.kid) throw new Error("Token kid does not match key");
-	return JSON.parse(new TextDecoder().decode(payload));
-}
-
-/** Verify a token's signature and this crate's strict claims, expiry, not-before, and key scope. */
-async function verify(key: PublicKey | SymmetricKey, token: string): Promise<Claims> {
-	const payload = await decode(key, token);
+	const decoded = JSON.parse(new TextDecoder().decode(payload));
 	let claims: Claims;
 	try {
-		claims = ClaimsSchema.parse(payload);
+		claims = ClaimsSchema.parse(decoded);
 	} catch (error) {
 		throw new Error(`Failed to parse token claims: ${error instanceof Error ? error.message : "unknown error"}`);
 	}
-	const now = Date.now() / 1000;
+	const now = wall() / 1000;
 	if (claims.exp !== undefined && claims.exp <= now) throw new Error("Token has expired");
 	if (claims.nbf !== undefined && claims.nbf > now) throw new Error("Token is not yet valid");
 	ensureClaimsWithinScope(key, claims);
@@ -279,12 +283,10 @@ async function generateHmacKey(alg: Algorithm, byteLength: number, kid: KeyId): 
 	const bytes = new Uint8Array(byteLength);
 	crypto.getRandomValues(bytes);
 
-	const k = base64.fromArrayBuffer(bytes.buffer, true);
-
 	return {
 		kty: "oct",
 		alg,
-		k,
+		k: jose.base64url.encode(bytes),
 		kid,
 		key_ops: ["sign", "verify"],
 	};
@@ -409,8 +411,6 @@ export const Key = {
 	public: toPublic,
 	/** Sign the claims with this key, returning the encoded token. */
 	sign,
-	/** Decode a signed token with no payload policy. */
-	decode,
 	/** Verify a token's signature and this crate's claims policy. */
 	verify,
 	/** Generate a key for the given algorithm. A random key ID is assigned if none is provided. */
@@ -514,14 +514,9 @@ function decodeBase64Flexible(value: string): Uint8Array | null {
 	}
 
 	try {
-		// First decode as URL
-		return new Uint8Array(base64.toArrayBuffer(trimmed, true));
+		// Accept standard base64 too by mapping it onto the base64url alphabet.
+		return jose.base64url.decode(trimmed.replaceAll("+", "-").replaceAll("/", "_"));
 	} catch {
-		try {
-			// Fallback to standard base64
-			return new Uint8Array(base64.toArrayBuffer(trimmed, false));
-		} catch {
-			return null;
-		}
+		return null;
 	}
 }

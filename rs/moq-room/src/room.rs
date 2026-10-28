@@ -3,7 +3,7 @@
 use std::task::{Poll, ready};
 
 use moq_net::{
-	PathOwned, announce, broadcast,
+	Path, announce, broadcast,
 	origin::{self, Requesting},
 };
 
@@ -13,11 +13,11 @@ use crate::path::{Kind, parse};
 #[derive(Clone)]
 pub struct Event {
 	/// Participant identity (everything before `camera`/`screen`).
-	pub identity: PathOwned,
+	pub identity: Path,
 	/// `camera` or `screen`.
 	pub kind: Kind,
 	/// Broadcast path relative to the room prefix.
-	pub path: PathOwned,
+	pub path: Path,
 	/// The live broadcast, or `None` when it went offline.
 	pub broadcast: Option<broadcast::Consumer>,
 }
@@ -35,9 +35,9 @@ impl std::fmt::Debug for Event {
 
 /// An in-flight request for the broadcast an active announcement named.
 struct Inflight {
-	identity: PathOwned,
+	identity: Path,
 	kind: Kind,
-	path: PathOwned,
+	path: Path,
 	request: Requesting,
 }
 
@@ -48,7 +48,7 @@ struct Inflight {
 pub struct Room {
 	origin: origin::Consumer,
 	announced: announce::Consumer,
-	local: Option<PathOwned>,
+	local: Option<Path>,
 	inflight: Option<Inflight>,
 }
 
@@ -62,7 +62,7 @@ impl std::fmt::Debug for Room {
 
 impl Room {
 	/// Watch announcements on `origin`, skipping `local` when set.
-	pub fn new(origin: &origin::Consumer, local: Option<PathOwned>) -> Self {
+	pub fn new(origin: &origin::Consumer, local: Option<Path>) -> Self {
 		Self {
 			announced: origin.announced(),
 			origin: origin.clone(),
@@ -162,7 +162,7 @@ mod tests {
 		moq_tokio::origin::spawn()
 	}
 
-	fn publish(origin: &origin::Producer, path: &str) -> broadcast::Producer {
+	fn publish(origin: &origin::Producer, path: &str) -> origin::Publication {
 		let broadcast = origin.create_broadcast(path).expect(path);
 		broadcast.announce(Route::default()).expect("announce");
 		broadcast
@@ -171,7 +171,7 @@ mod tests {
 	#[tokio::test]
 	async fn yields_camera_and_skips_local_and_unknown() {
 		let origin = origin();
-		let local = Path::new("alice").to_owned();
+		let local = Path::from_static("alice");
 		let mut room = Room::new(&origin.consume(), Some(local));
 
 		let _alice = publish(&origin, "alice/camera");

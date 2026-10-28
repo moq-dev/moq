@@ -23,9 +23,9 @@ let
     filter = filterCargoSources;
   };
 
-  # rs/kio on its own, so the dependency layer below only rebuilds when kio does.
+  # rs/kio/src on its own, so the dependency layer below only rebuilds when kio does.
   kioSource = final.lib.cleanSourceWith {
-    src = ../rs/kio;
+    src = ../rs/kio/src;
     name = "kio-source";
     filter = filterCargoSources;
   };
@@ -34,7 +34,9 @@ let
   # registry crates (web-transport-iroh) at the workspace
   # member. crane's dependency-only stage stubs every workspace crate down to an
   # empty lib.rs, so those registry crates no longer find kio's API and fail to
-  # compile. Put kio's real source back into the dummy tree.
+  # compile. Put kio's real source back into the dummy tree, but keep crane's
+  # cleaned manifest: the real one inherits `workspace.lints`, which the dummy
+  # root manifest drops.
   #
   # Skip crane's check phase: `cargo test` runs a binary's tests as threads of
   # one process, so tests that pass CI's nextest (a process per test) can
@@ -46,9 +48,9 @@ let
       // {
         doCheck = false;
         extraDummyScript = ''
-          rm -rf $out/rs/kio
-          cp -r ${kioSource} --no-target-directory $out/rs/kio
-          chmod -R +w $out/rs/kio
+          rm -rf $out/rs/kio/src
+          cp -r ${kioSource} --no-target-directory $out/rs/kio/src
+          chmod -R +w $out/rs/kio/src
         '';
       }
     );
@@ -66,7 +68,7 @@ let
     src = cleanCargoSource;
     cargoExtraArgs = "-p moq-relay --features jemalloc";
     # Enable frame pointers for profiling support (negligible overhead on x86_64).
-    # This also ensures the CDN build matches what Cachix caches.
+    # This also ensures the CDN build matches what nix.moq.dev caches.
     RUSTFLAGS = "-C force-frame-pointers=yes";
     # jemalloc's configure uses -O0 test builds, which conflict with
     # Nix's _FORTIFY_SOURCE hardening (requires -O).
@@ -125,7 +127,8 @@ let
 
   moqCArgs = moqCInfo // {
     src = cleanCargoSource;
-    cargoExtraArgs = "-p moq-c";
+    # Releases carry the OpenH264 software fallback, which is opt-in.
+    cargoExtraArgs = "-p moq-c --features openh264";
     nativeBuildInputs = with final; [
       pkg-config
       # moq-c is the only nix-built package that pulls moq-video, and its `vaapi`
@@ -219,7 +222,7 @@ let
     '';
 
     # The flake output is meant to load against nix's GStreamer (in a
-    # `nix shell .#moq-gst` / cachix-pulled context). `/nix/store` refs
+    # `nix shell .#moq-gst` / binary-cache-pulled context). `/nix/store` refs
     # are correct there. The only thing we fix is the rustc-emitted
     # self-reference to /nix/var/nix/builds/.../libgstmoq.dylib (the
     # cargo build dir, gone post-build) which would break loading even
@@ -259,8 +262,8 @@ let
     '';
   };
 
-  # CI checks run via `just ci check` (clippy / doc) and `just ci test` (nextest), not
-  # through crane/`nix flake check`. Both reach mbx through the Cargo shim the
+  # CI checks run via `just ci` (lints, docs, and nextest), not
+  # through crane/`nix flake check`. It reaches mbx through the Cargo shim the
   # dev shell puts on PATH, so nothing spells a wrapper out. Which compiler
   # cache backs those runs is a workflow concern
   # (`.github/actions/rust-cache`), not configured here.
@@ -279,7 +282,8 @@ in
     crateInfo ../rs/moq-boy/Cargo.toml
     // {
       src = cleanCargoSource;
-      cargoExtraArgs = "-p moq-boy --features jemalloc";
+      # moq-boy encodes 160x144, below every hardware encoder's minimum.
+      cargoExtraArgs = "-p moq-boy --features jemalloc,openh264";
       nativeBuildInputs = with final; [
         pkg-config
         clang

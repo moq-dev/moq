@@ -11,19 +11,22 @@
 //! So every source catalog snapshot re-resolves the ladder and diffs it: rungs
 //! the new picture has no room for retire, rungs it makes room for are added,
 //! and the rest carry on untouched. A rung whose picture changed retires and its
-//! replacement is published under a fresh name, because a retired track ends for
-//! good (see [`catalog::Names`]).
+//! replacement is published under a fresh name, because a name always means the
+//! same content (see [`catalog::Names`]).
 
 use std::collections::HashMap;
 
 use hang::catalog::{Reference, Video, VideoConfig};
 
-/// Picture identity for ladder follow: enabling or disabling a rendition is not a source change.
+/// Picture identity for ladder follow: enabling, disabling, or re-ranking a rendition is not a
+/// source change.
 fn same_picture(a: &VideoConfig, b: &VideoConfig) -> bool {
 	let mut a = a.clone();
 	let mut b = b.clone();
 	a.enabled = true;
 	b.enabled = true;
+	a.preference = 0;
+	b.preference = 0;
 	a == b
 }
 
@@ -140,7 +143,7 @@ impl Pipeline {
 			};
 			published.push(Published { rung, entry });
 		}
-		catalog::inherit_enabled(&mut published, source);
+		catalog::inherit(&mut published, source);
 		Ok(published)
 	}
 
@@ -182,7 +185,7 @@ impl Pipeline {
 			}
 		};
 		if name == self.name && same_picture(&rendition, &self.rendition) {
-			catalog::inherit_enabled(&mut self.rungs, &rendition);
+			catalog::inherit(&mut self.rungs, &rendition);
 			self.rendition = rendition;
 			return Ok(());
 		}

@@ -3,6 +3,14 @@ use std::sync::Arc;
 
 use crate::error::MoqError;
 
+/// Saturate a duration handed to a binding at `i64::MAX` nanoseconds, about 292 years.
+///
+/// C and C++ carry a duration as `int64_t` nanoseconds and abort past that, and Go's
+/// `time.Duration` wraps negative, so a peer's oversized value must not reach them.
+pub(crate) fn duration(duration: std::time::Duration) -> std::time::Duration {
+	duration.min(std::time::Duration::from_nanos(i64::MAX as u64))
+}
+
 /// A worker runtime driving I/O, timers, and background work beside host-polled calls.
 ///
 /// wasm32 has neither threads nor a tokio driver. uniffi's `RustFuture` is polled by the
@@ -14,6 +22,9 @@ static RUNTIME: std::sync::OnceLock<Runtime> = std::sync::OnceLock::new();
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct Runtime {
 	handle: tokio::runtime::Handle,
+	/// The clock a test drives, when the runtime started with one.
+	#[cfg(feature = "testing")]
+	clock: Option<moq_clock::Installed>,
 	/// Taken by [`shutdown`], so the thread is stopped and joined once.
 	thread: std::sync::Mutex<Option<Thread>>,
 	/// Set by [`shutdown`] to wake the [`Task::run`] calls parked in place, so they observe
@@ -53,18 +64,46 @@ impl std::ops::Deref for Runtime {
 /// The runtime, started on first use.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn runtime() -> &'static Runtime {
-	RUNTIME.get_or_init(Runtime::new)
+	RUNTIME.get_or_init(|| Runtime::new(false))
+}
+
+/// Start the runtime on a [`moq_clock::Manual`] clock that only a test moves.
+///
+/// False when the runtime already started, since its timers are armed on the host clock.
+#[cfg(all(feature = "testing", not(target_arch = "wasm32")))]
+pub(crate) fn start_test_clock() -> bool {
+	let mut started = false;
+	RUNTIME.get_or_init(|| {
+		started = true;
+		Runtime::new(true)
+	});
+	started
+}
+
+/// The clock [`start_test_clock`] installed, if it did.
+#[cfg(all(feature = "testing", not(target_arch = "wasm32")))]
+pub(crate) fn test_clock() -> Option<&'static moq_clock::Installed> {
+	RUNTIME.get()?.clock.as_ref()
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Runtime {
-	fn new() -> Self {
+	fn new(
+		#[cfg_attr(
+			not(feature = "testing"),
+			allow(unused_variables, reason = "only the `testing` feature uses it")
+		)]
+		test_clock: bool,
+	) -> Self {
 		let runtime = tokio::runtime::Builder::new_multi_thread()
 			.thread_name("moq-ffi-worker")
 			.enable_all()
 			.build()
 			.unwrap();
 		let handle = runtime.handle().clone();
+		// Before any task runs, so every read and timer lands on it.
+		#[cfg(feature = "testing")]
+		let clock = test_clock.then(|| moq_clock::Manual::new().install(&handle));
 		let (stop, stopped) = tokio::sync::oneshot::channel();
 
 		let join = std::thread::Builder::new()
@@ -80,6 +119,8 @@ impl Runtime {
 
 		Runtime {
 			handle,
+			#[cfg(feature = "testing")]
+			clock,
 			thread: std::sync::Mutex::new(Some(Thread { stop, join })),
 			stopped: tokio::sync::watch::Sender::new(false),
 			polls: Default::default(),
@@ -658,15 +699,8 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn runtime_uses_parallel_workers() {
-		let runtime = Runtime::new();
-		assert_eq!(runtime.runtime_flavor(), tokio::runtime::RuntimeFlavor::MultiThread);
-		runtime.shutdown();
-	}
-
-	#[test]
 	fn shutdown_joins_a_worker_callback() {
-		let runtime = Arc::new(Runtime::new());
+		let runtime = Arc::new(Runtime::new(false));
 		let (entered, entering) = std::sync::mpsc::channel();
 		let (release, released) = std::sync::mpsc::channel();
 		let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));

@@ -13,11 +13,17 @@ Decided 2026-09-30: real stacks, not a mock. The loss recovery being measured
 belongs to the QUIC stack, so a mock transport with a made-up retransmit model would
 partly measure its own assumptions.
 
-- Publisher, then a seeded `moq-shaper` (loss and delay), then `moq-relay` over
-  QUIC, then a clean or rate-limited hop to the viewer. Reuse the shaper wiring
-  from `rs/moq-relay/tests/drills.rs`.
-- Sweep loss rate, frame size (audio-sized through a large I-frame), and egress
-  headroom (egress rate relative to the media rate).
+- Publisher, then `moq-shaper` with an ingress rate below the media bitrate
+  and a deep but finite queue whose overflow drops packets, then `moq-relay`
+  over QUIC, then a clean or rate-limited hop to the viewer. Reuse the shaper
+  wiring from `rs/moq-relay/tests/drills.rs` and the overflowing bufferbloat
+  profiles described in `test/ts/README.md`. Verify that the measured path
+  actually overflows its queue.
+- Sweep ingress rate, queue depth, frame size (audio-sized through a large
+  I-frame), and egress headroom (egress rate relative to the media rate).
+  The go or no-go verdict uses these bufferbloat runs. Seeded random loss
+  may check correctness, such as the payload-loss and header-loss cases
+  below, but never gates acceptance or performance.
 - Report per-frame completion at the viewer, from publish to last byte, p50 and
   p99. The opportunity is the drain time on this same two-hop path: per frame,
   the time from the relay's ingress hole filling to the frame completing at the

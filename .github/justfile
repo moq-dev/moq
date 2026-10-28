@@ -1,24 +1,48 @@
 set working-directory := '..'
 
+# Build and publish the development environment to nix.moq.dev.
+cache:
+    bash sh/gh/cache.sh
+
+# Build the runner image with a temporary policy on a disposable hosted runner.
+runner-vm-ci:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ "${GITHUB_ACTIONS:-}" != true || "${RUNNER_ENVIRONMENT:-}" != github-hosted ]]; then
+        echo "runner-vm-ci requires a disposable GitHub-hosted runner" >&2
+        exit 1
+    fi
+    profile="$(nix build --no-link --print-out-paths .#runner-userns-profile)"
+    sudo apparmor_parser --add "$profile"
+    trap 'sudo apparmor_parser --remove "$profile"' EXIT
+    just gh runner-vm
+
+# Build and test the persistent NixOS runner VM on x86_64 Linux.
+runner-vm:
+    bash sh/local.sh nix build --no-link .#checks.x86_64-linux.github-runner-vm .#checks.x86_64-linux.github-runner-vm-image .#checks.x86_64-linux.github-runner-vm-config --print-build-logs
+
 # Lint GitHub Actions workflows, their alert coverage, and that every step runs a recipe.
 check:
     actionlint
     sh/gh/alert.sh check-coverage
+    bun test sh/gh/alert.test.ts
     bun sh/gh/check-runs.ts
+    python3 bench/relay.test.py
 
-# Tests of repository tooling; nightly, not on every pull request.
+# Tests of repository tooling; every `just check` and `just ci` runs them.
 test:
+    python3 sh/local.test.py
+    python3 test/smoke/runner.test.py
+    python3 sh/coverage.test.py
     python3 sh/size/report.test.py
     python3 sh/size/release.test.py
     python3 sh/size/nightly.test.py
     python3 bench/compare.test.py
     python3 bench/summary.test.py
-    python3 bench/relay.test.py
     python3 bench/profile.test.py
-    python3 bench/ffi.test.py
     python3 sh/gh/gst-formula.test.py
-    python3 test/drill/pr.test.py
     python3 sh/changed.test.py
+    python3 sh/large-files.test.py
     python3 sh/dispatch-query.test.py
     python3 sh/dispatch-query.test.py --bench
     bun test sh/gh/setup.test.ts
@@ -26,12 +50,17 @@ test:
     python3 sh/gh/install-formula.test.py
     sh/gh/release.test.sh
     python3 sh/gh/ffi.test.py
-    bun test sh/gh/ffi.test.ts
+    bun test sh/gh/ffi.test.ts sh/gh/cpp.test.ts
     python3 sh/rs/package-rename.test.py
+    python3 sh/dart/build.test.py
     python3 sh/rs/select.test.py
     python3 sh/js/workspace.test.py
+    python3 sh/js/audit.test.py
     python3 sh/rs/test-lints.test.py
     python3 sh/gh/nightly.test.py
+    python3 sh/gh/pages-clean.test.py
+    python3 sh/gh/bench-report.test.py
+    python3 sh/gh/ts-paths.test.py
     sh/go/publish-wrapper.test.sh
     bash .claude/hooks/direnv.test.sh
     python3 sh/rs/uring.test.py
@@ -41,7 +70,7 @@ test:
 release *args:
     sh/gh/release.sh "$@"
 
-# Post a failed run to Discord, or check that alert.yml covers every workflow.
+# Post a failed run to Discord, or check cron and publishing alert coverage.
 [positional-arguments]
 alert *args:
     sh/gh/alert.sh "$@"
@@ -83,7 +112,30 @@ gst-formula *args:
 nightly group:
     sh/gh/nightly.sh {{ quote(group) }}
 
+# Measure selected Criterion targets through the existing benchmark lifecycle.
+[positional-arguments]
+criterion *args:
+    bench/run.sh --criterion "$@"
+
+# Convert, validate, and stage nightly benchmark history.
+[positional-arguments]
+benchmark-report *args:
+    python3 sh/gh/bench-report.py "$@"
+
 # Select shared native artifacts or check an upstream FFI publisher.
 [positional-arguments]
 ffi *args:
     python3 sh/gh/ffi.py "$@"
+
+# Prepare the shared history branch or publish its regression table.
+[positional-arguments]
+benchmark-publish *args:
+    sh/gh/bench-publish.sh "$@"
+
+# Commit a built report to gh-pages under one directory, leaving the branch checked out for the deploy.
+pages-publish directory report site:
+    sh/gh/pages-publish.sh {{ quote(directory) }} {{ quote(report) }} {{ quote(site) }}
+
+# Delete this run's Pages artifact before uploading a replacement on a rerun.
+pages-clean:
+    sh/gh/pages-clean.sh

@@ -6,15 +6,17 @@
 //! [draft-lcurley-moq-e2ee]: https://datatracker.ietf.org/doc/draft-lcurley-moq-e2ee/
 //!
 //! A [`Credential`] is what the application distributes out of band. Each publisher
-//! instance calls [`Credential::produce`] to mint a [`generation::Producer`], which derives
-//! opaque track names and protects `moq-net` tracks. Subscribers discover the epoch from the
-//! broadcast route and bind a [`generation::Consumer`] with [`Credential::consume`].
+//! instance calls [`Credential::produce`] to mint a [`generation::Producer`] and wraps its
+//! `moq-net` broadcast in a [`broadcast::Producer`]. Subscribers discover the epoch from the
+//! broadcast route, bind a [`generation::Consumer`] with [`Credential::consume`], and wrap the
+//! broadcast in a [`broadcast::Consumer`]. Both sides name tracks by their semantic names; only
+//! the derived physical names reach `moq-net`.
 //!
 //! A caller cannot reopen an explicit epoch for production:
 //!
-//! ```compile_fail
-//! fn reopen(credential: &moq_e2ee::Credential, epoch: moq_net::Epoch) {
-//!     let _ = credential.generation(epoch);
+//! ```compile_fail,E0624
+//! fn reopen(credential: moq_e2ee::Credential, epoch: moq_net::Epoch) {
+//!     let _ = moq_e2ee::generation::Producer::new(credential, epoch);
 //! }
 //! ```
 //!
@@ -23,6 +25,7 @@
 
 #![warn(missing_docs)]
 
+pub mod broadcast;
 pub mod credential;
 pub mod datagram;
 pub mod group;

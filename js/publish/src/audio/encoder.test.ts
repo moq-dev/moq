@@ -1,11 +1,11 @@
 import { describe, expect, mock, spyOn, test } from "bun:test";
+import { Micro, Milli } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
-import { Time } from "@moq/net";
 import { Signal } from "@moq/signals";
 import { Broadcast } from "../broadcast";
-import { Baseline } from "../jitter";
+import { Estimator, Order } from "../order";
 import type { AudioFrame, Format } from "./capture";
 import { type Codec, Encoder, resolve, toEncoderConfig } from "./encoder";
 
@@ -22,24 +22,22 @@ describe("resolve", () => {
 		expect(Audio.resolve).toBeUndefined();
 	});
 
-	test("defaults Opus to 20ms", () => {
-		const resolved = resolve(captured, "opus");
-		expect(resolved.frameDuration).toBe(Time.Micro(20_000));
-		expect(Number(resolved.catalog.warmup)).toBe(80);
-		expect(resolved.catalog.jitter).toBeUndefined();
+	test("the default Opus catalog declares the RFC 7845 preroll", () => {
+		// 80ms per RFC 7845 section 4.6, matching WARMUP in rs/moq-mux/src/codec/opus/mod.rs.
+		expect(Number(resolve(captured, "opus").catalog.warmup)).toBe(80);
 	});
 
-	// The exact frame duration does not imply encoder flush lateness.
+	// The exact frame duration is not a jitter hint.
 	test("keeps a 2.5ms Opus frame exact without a catalog hint", () => {
-		const resolved = resolve(captured, { mime: "opus", frameDuration: Time.Milli(2.5) });
-		expect(resolved.frameDuration).toBe(Time.Micro(2_500));
+		const resolved = resolve(captured, { mime: "opus", frameDuration: Milli(2.5) });
+		expect(resolved.frameDuration).toBe(Micro(2_500));
 		expect(resolved.catalog.jitter).toBeUndefined();
 	});
 
 	test("carries every Opus frame duration", () => {
 		for (const millis of [2.5, 5, 10, 20, 40, 60]) {
-			const resolved = resolve(captured, { mime: "opus", frameDuration: Time.Milli(millis) });
-			expect(resolved.frameDuration).toBe(Time.Micro(millis * 1000));
+			const resolved = resolve(captured, { mime: "opus", frameDuration: Milli(millis) });
+			expect(resolved.frameDuration).toBe(Micro(millis * 1000));
 		}
 	});
 
@@ -47,7 +45,7 @@ describe("resolve", () => {
 	// been advertised and the failure lands on a subscriber rather than the caller.
 	test("rejects a duration Opus cannot encode", () => {
 		for (const millis of [2.5005, 15, 0, -20]) {
-			expect(() => resolve(captured, { mime: "opus", frameDuration: Time.Milli(millis) })).toThrow();
+			expect(() => resolve(captured, { mime: "opus", frameDuration: Milli(millis) })).toThrow();
 		}
 	});
 
@@ -258,7 +256,7 @@ function configured(): Promise<AudioEncoderConfig> {
 
 // An Encoder wired to a fake capture feed, recording each written frame as [timestamp, payload bytes]
 // and how many frames each group carries.
-async function setup(baseline = new Baseline(), codec?: Codec, groupDuration?: Time.Milli) {
+async function setup(order = new Order(), codec?: Codec, groupDuration?: Milli) {
 	const configuring = configured();
 
 	const track = new Moq.Track.Producer("audio").accept({ timescale: Moq.Time.Timescale.MILLI });
@@ -285,7 +283,10 @@ async function setup(baseline = new Baseline(), codec?: Codec, groupDuration?: T
 	const rendition = {
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
-		close: () => track.close(),
+		close: () => {
+			track.finish();
+			track.close();
+		},
 	};
 
 	const feed = new Feed();
@@ -293,7 +294,7 @@ async function setup(baseline = new Baseline(), codec?: Codec, groupDuration?: T
 
 	const enabled = new Signal(true);
 	const encoder = new Encoder("audio", {
-		broadcast: { audio: () => rendition, baseline } as never,
+		broadcast: { audio: () => rendition, order } as never,
 		capture: capture as never,
 		enabled,
 		codec,
@@ -333,7 +334,7 @@ test("a demand gap marks where submitted audio ends and drops the chunks held ac
 	let index = 0;
 	const push = async (count: number) => {
 		for (let i = 0; i < count; i++, index++) {
-			await feed.push({ timestamp: Time.Micro(18_699.6 + index * 20_000), channels: [new Float32Array(960)] });
+			await feed.push({ timestamp: Micro(18_699.6 + index * 20_000), channels: [new Float32Array(960)] });
 		}
 		await feed.drain();
 	};
@@ -370,7 +371,7 @@ test("disabling with a subscriber attached marks where submitted audio ends", as
 	let index = 0;
 	const push = async (count: number) => {
 		for (let i = 0; i < count; i++, index++) {
-			await feed.push({ timestamp: Time.Micro(20_000 + index * 20_000), channels: [new Float32Array(960)] });
+			await feed.push({ timestamp: Micro(20_000 + index * 20_000), channels: [new Float32Array(960)] });
 		}
 		await feed.drain();
 	};
@@ -435,7 +436,7 @@ test("closing with a subscriber attached marks the end once before the track clo
 	const { encoder, track, feed, written } = env;
 
 	for (let i = 0; i < 4; i++) {
-		await feed.push({ timestamp: Time.Micro(20_000 + i * 20_000), channels: [new Float32Array(960)] });
+		await feed.push({ timestamp: Micro(20_000 + i * 20_000), channels: [new Float32Array(960)] });
 	}
 	await feed.drain(); // two written, two held
 
@@ -458,7 +459,7 @@ test("a push completing several frames keeps the encoder running", async () => {
 
 	// Two 20ms Opus frames per push.
 	for (let index = 0; index < 3; index++) {
-		await feed.push({ timestamp: Time.Micro(18_699.6 + index * 40_000), channels: [new Float32Array(1920)] });
+		await feed.push({ timestamp: Micro(18_699.6 + index * 40_000), channels: [new Float32Array(1920)] });
 	}
 	await feed.drain();
 
@@ -474,13 +475,13 @@ test("a push completing several frames keeps the encoder running", async () => {
 // so the first frame after it opens a fresh one.
 test("a group duration packs frames until the minimum and restarts after a break", async () => {
 	using _webcodecs = installFakeWebCodecs();
-	using env = await setup(new Baseline(), undefined, Time.Milli(100));
+	using env = await setup(new Order(), undefined, Milli(100));
 	const { enabled, feed, written, groups, appended, writes } = env;
 
 	let index = 0;
 	const push = async (count: number) => {
 		for (let i = 0; i < count; i++, index++) {
-			await feed.push({ timestamp: Time.Micro(20_000 + index * 20_000), channels: [new Float32Array(960)] });
+			await feed.push({ timestamp: Micro(20_000 + index * 20_000), channels: [new Float32Array(960)] });
 		}
 		await feed.drain();
 	};
@@ -521,13 +522,13 @@ test("default audio groups carry twenty milliseconds", async () => {
 		[2.5, 1, 0],
 	] as const) {
 		using env = await setup(
-			new Baseline(),
-			{ mime: "opus", frameDuration: Time.Milli(frameMs) },
-			groupMs === undefined ? undefined : Time.Milli(groupMs),
+			new Order(),
+			{ mime: "opus", frameDuration: Milli(frameMs) },
+			groupMs === undefined ? undefined : Milli(groupMs),
 		);
 		for (let index = 0; index < packets * 2 + LaggingAudioEncoder.LAG; index++) {
 			await env.feed.push({
-				timestamp: Time.Micro(20_000 + index * frameMs * 1000),
+				timestamp: Micro(20_000 + index * frameMs * 1000),
 				channels: [new Float32Array(frameMs * 48)],
 			});
 		}
@@ -541,14 +542,14 @@ test("default audio groups carry twenty milliseconds", async () => {
 // later audio earlier. A plain-JS caller passing the old knob must not reach the encoder.
 test("never enables Opus DTX", async () => {
 	using _webcodecs = installFakeWebCodecs();
-	using env = await setup(new Baseline(), { mime: "opus", usedtx: true } as Codec);
+	using env = await setup(new Order(), { mime: "opus", usedtx: true } as Codec);
 	expect(env.config.opus?.usedtx).toBeUndefined();
 });
 
 // The catalog bitrate is a maximum: lowering the knob retunes the encoder, raising it raises both.
 test("the catalog bitrate only rises", async () => {
 	using _webcodecs = installFakeWebCodecs();
-	using env = await setup(new Baseline(), { mime: "opus", bitrate: 64_000 });
+	using env = await setup(new Order(), { mime: "opus", bitrate: 64_000 });
 	const { encoder } = env;
 	expect(env.config.bitrate).toBe(64_000);
 	expect(encoder.out.catalog.peek()?.bitrate as number | undefined).toBe(64_000);
@@ -566,26 +567,26 @@ test("the catalog bitrate only rises", async () => {
 	expect(encoder.out.catalog.peek()?.bitrate as number | undefined).toBe(96_000);
 });
 
-// Another rendition on the same broadcast flushing with far less lateness leaves this one trailing
-// it, which the catalog advertises as `delay`.
-test("a rendition trailing the broadcast's earliest advertises delay", async () => {
+// Another rendition on the same broadcast that already wrote media ahead of this one's frames leaves
+// this one trailing it, which the catalog advertises as `delay`.
+test("a rendition written behind another advertises delay", async () => {
 	using _webcodecs = installFakeWebCodecs();
 	const clock = spyOn(performance, "now").mockReturnValue(200);
 
 	try {
-		const baseline = new Baseline();
-		using env = await setup(baseline);
+		const order = new Order();
+		using env = await setup(order);
 		const { encoder, feed } = env;
 
 		expect(encoder.out.catalog.peek()?.delay).toBeUndefined();
 
-		// A sibling that flushes each frame the instant it is captured.
-		baseline.observe(0, performance.now() * 1000);
+		// A sibling that already wrote media up to now.
+		new Estimator().write(performance.now() * 1000, order);
 
 		// Captured 100ms ago, with a clock origin that keeps timestamps nonnegative.
 		const start = performance.now() * 1000 - 100_000;
 		for (let index = 0; index < 4; index++) {
-			await feed.push({ timestamp: Time.Micro(start + index * 20_000), channels: [new Float32Array(960)] });
+			await feed.push({ timestamp: Micro(start + index * 20_000), channels: [new Float32Array(960)] });
 		}
 		await feed.drain();
 
@@ -615,7 +616,7 @@ test("settles when the codec settings can't resolve", async () => {
 	};
 	const encoder = new Encoder("audio", {
 		capture: capture as never,
-		codec: { mime: "opus", frameDuration: Time.Milli(15) },
+		codec: { mime: "opus", frameDuration: Milli(15) },
 	});
 
 	try {
@@ -626,55 +627,11 @@ test("settles when the codec settings can't resolve", async () => {
 
 		// A valid duration resolves, and the config keeps it settled.
 		const ready = encoder.out.catalog.changed();
-		encoder.codec.set({ mime: "opus", frameDuration: Time.Milli(20) });
+		encoder.codec.set({ mime: "opus", frameDuration: Milli(20) });
 		await ready;
 		await settle();
 		expect(encoder.out.catalog.peek()).toBeDefined();
 		expect(encoder.settled.peek()).toBe(true);
-	} finally {
-		encoder.close();
-		error.mockRestore();
-	}
-});
-
-// A fade the gain can't ramp over is refused like any other bad setting, rather than ramping wrong.
-test("refuses the rendition while the fade is invalid", async () => {
-	using _webcodecs = installFakeWebCodecs();
-	const error = spyOn(console, "error").mockImplementation(() => {});
-	const capture = {
-		in: { source: new Signal(undefined) },
-		out: {
-			root: new Signal(undefined),
-			format: new Signal<Format>({ sampleRate: 48_000, channelCount: 1 }),
-			frames: new Signal(undefined),
-		},
-		blocked: new Signal(false),
-	};
-	const encoder = new Encoder("audio", { capture: capture as never, fade: Time.Milli(-1) });
-
-	try {
-		await settle();
-		expect(encoder.out.catalog.peek()).toBeUndefined();
-		expect(encoder.settled.peek()).toBe(true);
-		expect(error).toHaveBeenCalled();
-
-		const ready = encoder.out.catalog.changed();
-		encoder.fade.set(Time.Milli(0));
-		await ready;
-		expect(encoder.out.catalog.peek()).toBeDefined();
-
-		encoder.fade.set(Time.Milli(Number.NaN));
-		await settle();
-		expect(encoder.out.catalog.peek()).toBeUndefined();
-
-		encoder.fade.set(Time.Milli(0));
-		await settle();
-		expect(encoder.out.catalog.peek()).toBeDefined();
-
-		// An endless ramp would never finish a mute.
-		encoder.fade.set(Time.Milli(Number.POSITIVE_INFINITY));
-		await settle();
-		expect(encoder.out.catalog.peek()).toBeUndefined();
 	} finally {
 		encoder.close();
 		error.mockRestore();
@@ -741,18 +698,20 @@ test("audio failure stays local through demand changes and capture format re-arm
 	const push = async (first: number, channels: number) => {
 		for (let i = 0; i < 3; i++) {
 			await feed.push({
-				timestamp: Time.Micro((first + i) * 20_000),
+				timestamp: Micro((first + i) * 20_000),
 				channels: Array.from({ length: channels }, () => new Float32Array(960)),
 			});
 		}
 		await feed.drain();
 	};
+	let announced: Moq.Origin.Requesting | undefined;
 	try {
 		await configuring;
 		await settle();
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected network broadcast");
-		const epoch = net.route?.epoch;
+		announced = broadcast.in.origin.peek()?.request(broadcast.in.name.peek(), { announced: true });
+		const epoch = announced?.active.peek()?.epoch;
 		const sibling = broadcast.video("video");
 		sibling.config.set({ codec: "avc1.640028", container: { kind: "legacy" } });
 		await settle();
@@ -763,7 +722,7 @@ test("audio failure stays local through demand changes and capture format re-arm
 		if (!siblingTrack) throw new Error("expected demanded sibling track");
 		expect(siblingTrack.appendGroup().sequence).toBe(0);
 		await push(0, 1);
-		expect(subscriber.latest()).toBe(0);
+		expect((await subscriber.largest())?.group).toBe(0);
 		catalogSubscriber = net.track(Broadcast.CATALOG_TRACK).subscribe();
 		const catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track: catalogSubscriber });
 		expect((await catalog.latest())?.value.audio?.renditions.audio?.enabled).not.toBe(false);
@@ -790,7 +749,7 @@ test("audio failure stays local through demand changes and capture format re-arm
 		expect(encoder.out.catalog.peek()?.enabled).toBe(false);
 		expect(LaggingAudioEncoder.instances).toHaveLength(instances);
 		expect(broadcast.net.peek()).toBe(net);
-		expect(net.route?.epoch).toBe(epoch);
+		expect(announced?.active.peek()?.epoch).toBe(epoch);
 		expect(siblingTrack.appendGroup().sequence).toBe(1);
 
 		const reconfiguring = configured();
@@ -806,11 +765,11 @@ test("audio failure stays local through demand changes and capture format re-arm
 		recovered = net.track(config.track).subscribe();
 		await settle();
 		await push(3, 2);
-		expect(recovered.latest()).toBe(0);
+		expect((await recovered.largest())?.group).toBe(0);
 		expect(encoder.out.active.peek()).toBe(true);
 		expect(recovered.closed.peek()).toBeUndefined();
 		expect(broadcast.net.peek()).toBe(net);
-		expect(net.route?.epoch).toBe(epoch);
+		expect(announced?.active.peek()?.epoch).toBe(epoch);
 		expect(siblingTrack.appendGroup().sequence).toBe(2);
 	} finally {
 		subscriber?.close();
@@ -819,6 +778,7 @@ test("audio failure stays local through demand changes and capture format re-arm
 		recovered?.close();
 		encoder.close();
 		bandwidth.close();
+		announced?.close();
 		broadcast.close();
 	}
 });
@@ -904,9 +864,9 @@ test.each(["failure first", "config first"])(
 test("Opus description is probed with the exact live config before advertising", async () => {
 	using _codecs = installFakeWebCodecs();
 	LaggingAudioEncoder.description = (config) => new TextEncoder().encode(JSON.stringify(config));
-	using env = await setup(new Baseline(), {
+	using env = await setup(new Order(), {
 		mime: "opus",
-		frameDuration: Time.Milli(2.5),
+		frameDuration: Milli(2.5),
 		complexity: 3,
 		packetlossperc: 7,
 		useinbandfec: true,

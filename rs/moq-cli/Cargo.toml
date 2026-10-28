@@ -26,18 +26,20 @@ path = "src/main.rs"
 doc = false
 
 [features]
-default = ["cluster-lan", "noq", "websocket", "nvidia", "s3", "gcs", "azure"]
+default = ["cluster-lan", "quic", "websocket", "nvidia", "s3", "gcs", "azure"]
 # Experimental transport with a heavy dependency tree, enabled only on request.
-iroh = ["moq-tokio/iroh"]
+iroh = ["moq-relay/iroh", "moq-tokio/iroh"]
 # LAN discovery and meshing (`--cluster-lan`).
 cluster-lan = ["moq-relay/cluster-lan"]
 jemalloc = ["moq-tokio/jemalloc"]
-noq = ["moq-tokio/noq"]
+quic = ["moq-tokio/quic"]
 # qlog trace capture (`--client-quic-qlog <DIR>`). Off by default: it compiles the
 # qlog machinery into the enabled backends and is only wanted for debugging or
 # congestion-control testing.
 qlog = ["moq-tokio/qlog"]
 websocket = ["moq-tokio/websocket"]
+# Native WebRTC data channels, for holding sessions with browser peers.
+webrtc = ["moq-tokio/webrtc"]
 # The cloud object stores `export archive` and `import archive` reach (`s3://`,
 # `gs://`, `az://`). Local `file://` URLs need none of them.
 s3 = ["object_store/aws"]
@@ -47,13 +49,15 @@ azure = ["object_store/azure"]
 # it pulls in moq-video + moq-audio capture: on Linux the microphone needs
 # ALSA/libasound at build time through cpal (the camera needs nothing, moq-v4l
 # checks its bindings in), plus binary size. macOS/Windows use OS frameworks, no
-# extra install. H.264 is vendored static (openh264), so no system ffmpeg/libav.
-# Enable with `cargo build -p moq-cli --features capture`, adding `pipewire` for
+# extra install. Encoding prefers the hardware codecs; add `openh264` for the
+# vendored software fallback (no system ffmpeg/libav either way). Enable with
+# `cargo build -p moq-cli --features capture,openh264`, adding `pipewire` for
 # display capture on Linux.
 capture = ["dep:moq-video", "dep:moq-audio", "moq-video/capture", "moq-audio/capture"]
 # Just-in-time transcoding (`moq ... transcode`). Off by default because it pulls
 # in moq-video and its codec dependencies. Enable with
-# `cargo build -p moq-cli --features transcode`.
+# `cargo build -p moq-cli --features transcode`, adding `openh264` for the
+# software fallback a GPU-less host needs.
 transcode = ["dep:moq-transcode", "dep:moq-video"]
 # Native playback (`moq ... play`): decode into a wgpu window and a cpal
 # speaker. Off by default because it pulls both graphics and audio device stacks
@@ -63,13 +67,12 @@ play = ["dep:moq-video", "moq-video/render", "dep:moq-audio", "moq-audio/playbac
 # the matching moq-video feature, so it only bites when something else pulls in
 # moq-video: `capture`, `transcode`, or `play`. For a build with no CUDA
 # dependencies, drop it:
-#   cargo build -p moq-cli --no-default-features --features "noq,websocket,capture"
+#   cargo build -p moq-cli --no-default-features --features "quic,websocket,capture"
 nvidia = ["moq-video?/nvidia", "moq-transcode?/nvidia"]
-# Compatibility aliases for the pre-consolidation names, kept so a manifest that
-# already asks for the old split still resolves. Undocumented on purpose: the
-# feature tables name only `nvidia`.
-nvenc = ["nvidia"]
-nvdec = ["nvidia"]
+# The vendored OpenH264 software H.264 fallback (C++), opt-in like the moq-video
+# feature it turns on. Only bites when `capture`, `transcode`, or `play` pulls in
+# moq-video.
+openh264 = ["moq-video?/openh264", "moq-transcode?/openh264"]
 # Intel/AMD VAAPI hardware encoding (Linux), opt-in like the moq-video feature
 # it turns on: libva is dlopen'd at runtime, but moq-vaapi's bindgen needs
 # libclang on the build host. Only bites when `capture`, `transcode`, or `play`
@@ -101,27 +104,31 @@ axum = { workspace = true }
 axum-server = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }
+futures = { workspace = true }
 hang = { workspace = true }
 humantime = { workspace = true }
 moq-archive = { workspace = true }
 moq-audio = { workspace = true, optional = true, features = ["aac"] }
 moq-auth = { workspace = true, features = ["serve"] }
+moq-clock = { workspace = true }
 # `server` enables the HTTP egress server for `moq export hls`; the importer is always available.
 moq-hls = { workspace = true, features = ["server"] }
-# Names the MSF catalog track `export archive` records.
-moq-msf = { workspace = true }
+# Writes and reads the stats and feedback snapshots.
+moq-json = { workspace = true }
 moq-mux = { workspace = true }
 # Cluster, LAN mesh, and inbound `/.cluster` auth. default-features off so the
-# CLI's own feature set (iroh, noq, cluster-lan) is what selects them.
+# CLI's own feature set (iroh, quic, cluster-lan) is what selects them.
 moq-relay = { workspace = true }
 moq-rtc = { workspace = true }
 moq-rtmp = { workspace = true }
+moq-rtsp = { workspace = true }
 moq-srt = { workspace = true }
 # Raw qmux listeners are part of the CLI surface. `uds` compiles only on Unix.
 moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs", "tcp", "uds"] }
-moq-transcode = { workspace = true, optional = true, features = ["openh264"] }
-moq-video = { workspace = true, optional = true, features = ["openh264"] }
+moq-transcode = { workspace = true, optional = true }
+moq-video = { workspace = true, optional = true }
 object_store = { workspace = true, features = ["fs"] }
+percent-encoding = { workspace = true }
 pollster = { workspace = true, optional = true }
 reqwest = { workspace = true, features = ["rustls", "json"] }
 rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }
@@ -132,25 +139,31 @@ tokio = { workspace = true, features = ["full"] }
 tower-http = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
-usage = { workspace = true, features = ["completions", "config"] }
+usage-rs = { workspace = true, features = ["completions", "config"] }
 winit = { version = "0.30.13", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 sd-notify = { workspace = true }
 
 [dev-dependencies]
-# Decodes the timeline the archive round-trip test checks.
-moq-json = { path = "../moq-json" }
+# Decodes the interop matrix's audio tone (the `interop-audio` example).
+moq-audio = { path = "../moq-audio" }
 # `test_relay` stands up a real relay for the `fetch` and `announced` tests to read through.
 moq-relay = { path = "../moq-relay", default-features = false, features = ["test-support"] }
+# The scripted RTSP server `import rtsp` pulls from.
+moq-rtsp = { path = "../moq-rtsp", features = ["test-support"] }
+# Applies the finite bufferbloat queue to redundant-ingest acceptance tests.
+moq-shaper = { path = "../moq-shaper" }
 # Writes the PAT and PMTs, CRCs included, of the two-program input `import ts --program all` splits.
 mpeg2ts = "0.6.0"
 tempfile = { workspace = true }
+# Runs the tests that need a variable set or unset in a child process given it.
+test-env = { path = "../test-env" }
 # `test-util` enables `tokio::time::pause` so the TS round-trip test simulates the
 # exporter drain timeouts instantly instead of waiting on the wall clock.
 tokio = { workspace = true, features = ["test-util"] }
 # Plays the `announced` view's frames on a virtual terminal, scrolling included.
-vt100 = "0.16.2"
+vt100 = "0.17.0"
 
 [target.'cfg(unix)'.dev-dependencies]
 # Sends the signals the `auth serve` shutdown test checks.
@@ -163,3 +176,26 @@ harness = false
 [[example]]
 name = "interop-tail"
 path = "../../test/interop/clients/rust/tail.rs"
+
+[[example]]
+name = "interop-goaway"
+path = "../../test/interop/clients/rust/goaway.rs"
+
+[[example]]
+name = "interop-control"
+path = "../../test/interop/clients/rust/control.rs"
+
+[[example]]
+name = "interop-goaway-client"
+path = "../../test/interop/clients/rust/goaway-client.rs"
+
+[[example]]
+name = "interop-finish"
+path = "../../test/interop/clients/rust/finish.rs"
+
+[[example]]
+name = "interop-audio"
+path = "../../test/interop/clients/rust/audio.rs"
+
+[lints]
+workspace = true

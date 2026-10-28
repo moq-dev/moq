@@ -1,4 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
+import { type Installed, Manual, Milli, Nano, now, Second } from "@moq/clock";
 import { Computed, type Dispose, Effect, type GetPromise, Once, race, Signal } from "./index.ts";
 
 const NO_SUBSCRIPTION_WARNING = "Effect did not subscribe to any signals; it will never rerun.";
@@ -80,6 +81,44 @@ describe("Signal", () => {
 		obj.set({ a: 2 });
 		await settle();
 		expect(seen).toEqual([{ a: 2 }]);
+		dispose();
+	});
+
+	test("deep equality sees structure that reads as undefined", async () => {
+		const signal = new Signal<unknown>(new Array(1));
+		let notified = 0;
+		const dispose = signal.subscribe(() => notified++);
+
+		// Each step against the previous value: whether a renamed key, a length, or a hole notifies.
+		const steps: [unknown, boolean][] = [
+			[new Array(2), true],
+			[[undefined, undefined], true],
+			[{ left: undefined }, true],
+			[{ right: undefined }, true],
+			[{ right: undefined }, false],
+			[Number.NaN, true],
+			[Number.NaN, false],
+		];
+		for (const [value, notifies] of steps) {
+			const before = notified;
+			signal.set(value);
+			await settle();
+			expect(notified - before, `set(${String(value)})`).toBe(notifies ? 1 : 0);
+		}
+		dispose();
+	});
+
+	test("a listener added after an unobserved write is not notified", async () => {
+		const signal = new Signal(0);
+		const first = signal.subscribe(() => {});
+		signal.set(1); // queues a flush
+		first();
+		signal.set(2); // nobody listens, so this drops the capture
+
+		const seen: number[] = [];
+		const dispose = signal.subscribe((v) => seen.push(v));
+		await settle();
+		expect(seen).toEqual([]); // it subscribed at 2, which never changed
 		dispose();
 	});
 
@@ -552,16 +591,8 @@ describe("Effect", () => {
 		let lateAbort: boolean | undefined;
 		let immediate: boolean | undefined;
 
-		// Fire the 5s timer by hand instead of waiting five real seconds for it.
-		let elapsed5s: (() => void) | undefined;
-		const realSetTimeout = globalThis.setTimeout;
-		const timer = spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number) => {
-			if (ms === 5000) {
-				elapsed5s = fn;
-				return 0 as unknown as ReturnType<typeof setTimeout>;
-			}
-			return realSetTimeout(fn, ms);
-		}) as typeof setTimeout);
+		const clock = new Manual();
+		const installed = clock.install();
 		const warn = spyOn(console, "warn").mockImplementation(() => {});
 
 		const effect = new Effect((e) => {
@@ -592,9 +623,7 @@ describe("Effect", () => {
 			expect(runs).toBe(1); // parked awaiting the task
 
 			// Five seconds pass. The warning fires, but the next run must stay shut.
-			expect(elapsed5s).toBeDefined();
-			elapsed5s?.();
-			await settle();
+			await clock.advance(Nano.fromSecond(Second(5)));
 			expect(runs).toBe(1);
 			expect(warn).toHaveBeenCalled();
 
@@ -610,7 +639,7 @@ describe("Effect", () => {
 			expect(runs).toBe(2);
 		} finally {
 			effect.close();
-			timer.mockRestore();
+			installed.close();
 			warn.mockRestore();
 		}
 	});
@@ -623,23 +652,8 @@ describe("Effect", () => {
 		const tick = new Signal(0);
 		const never = Promise.withResolvers<void>(); // deliberately never resolved
 
-		let elapsed5s: (() => void) | undefined;
-		let cleared = false;
-		const realSetTimeout = globalThis.setTimeout;
-		const realClearTimeout = globalThis.clearTimeout;
-		const TIMER = 987 as unknown as ReturnType<typeof setTimeout>;
-
-		const timer = spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number) => {
-			if (ms === 5000) {
-				elapsed5s = fn;
-				return TIMER;
-			}
-			return realSetTimeout(fn, ms);
-		}) as typeof setTimeout);
-		const clear = spyOn(globalThis, "clearTimeout").mockImplementation(((id?: unknown) => {
-			if (id === TIMER) cleared = true;
-			else realClearTimeout(id as never);
-		}) as typeof clearTimeout);
+		const clock = new Manual();
+		const installed = clock.install();
 		const warn = spyOn(console, "warn").mockImplementation(() => {});
 
 		const effect = new Effect((e) => {
@@ -652,23 +666,18 @@ describe("Effect", () => {
 		try {
 			await settle();
 			tick.set(1);
-			await settle();
-			expect(elapsed5s).toBeDefined(); // parked on the task, timer armed
+			await settle(); // parked on the task, timer armed
 
 			effect.close();
 			await settle();
 
-			// The wait let go, so the diagnostic timer was disarmed on the way out.
-			expect(cleared).toBe(true);
-
-			// Even if the timer had already been queued, a closed effect must not be warned about.
-			elapsed5s?.();
+			// The wait let go, so five seconds later a closed effect is not warned about.
+			await clock.advance(Nano.fromSecond(Second(5)));
 			const warned = warn.mock.calls.some((call) => String(call[0]).includes("spawn is still running"));
 			expect(warned).toBe(false);
 		} finally {
 			effect.close();
-			timer.mockRestore();
-			clear.mockRestore();
+			installed.close();
 			warn.mockRestore();
 		}
 	});
@@ -881,6 +890,37 @@ describe("Effect", () => {
 			warn.mockRestore();
 		}
 	});
+
+	test("timer, timeout, and interval run on the installed clock until cleanup", async () => {
+		const ms = (value: number) => Nano.fromMilli(Milli(value));
+		const clock = new Manual();
+		const installed = clock.install();
+		const fired: string[] = [];
+		const effect = new Effect();
+		try {
+			effect.timer(() => fired.push("timer"), ms(10));
+			effect.interval(() => fired.push("tick"), ms(4));
+			effect.timeout((child) => child.cleanup(() => fired.push("timeout")), ms(6));
+
+			await clock.advance(ms(3));
+			expect(fired).toEqual([]);
+			await clock.advance(ms(1));
+			expect(fired).toEqual(["tick"]);
+			await clock.advance(ms(2));
+			expect(fired).toEqual(["tick", "timeout"]);
+			await clock.advance(ms(2));
+			expect(fired).toEqual(["tick", "timeout", "tick"]);
+			await clock.advance(ms(2));
+			expect(fired).toEqual(["tick", "timeout", "tick", "timer"]);
+
+			effect.close();
+			await clock.advance(ms(20));
+			expect(fired).toEqual(["tick", "timeout", "tick", "timer"]);
+		} finally {
+			effect.close();
+			installed.close();
+		}
+	});
 });
 
 describe("Computed", () => {
@@ -983,6 +1023,28 @@ describe("Computed", () => {
 
 		plusOne.close();
 		timesTen.close();
+	});
+
+	test("close clears the value and notifies downstream readers once", async () => {
+		const input = new Signal(1);
+		const value = new Computed((effect) => effect.get(input) * 2);
+		await settle();
+		const seen: (number | undefined)[] = [];
+		const unsubscribe = value.subscribe((next) => seen.push(next));
+		try {
+			input.set(3); // A queued recompute must not resurrect a closed value.
+			value.close();
+			expect(value.peek()).toBeUndefined();
+			await settle();
+			expect(seen).toEqual([undefined]);
+			value.close();
+			await settle();
+			expect(value.peek()).toBeUndefined();
+			expect(seen).toEqual([undefined]);
+		} finally {
+			unsubscribe();
+			value.close();
+		}
 	});
 
 	test("close stops recomputing", async () => {
@@ -1411,4 +1473,75 @@ test("races from another package copy release their source listeners", async () 
 	const source = counted<number>();
 	expect(await race([copy.Signal.race(source), Promise.resolve("other")])).toBe("other");
 	expect(source.listeners).toBe(0);
+});
+
+test("an effect interval arms its first period synchronously and steps subsequent periods", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const effect = new Effect();
+	const at: number[] = [];
+	try {
+		effect.interval(() => at.push(clock.now()), Nano(10));
+		clock.jump(Nano(10));
+		await clock.advance(Nano.zero);
+		expect(at).toEqual([10]);
+		await clock.advance(Nano(30));
+		expect(at).toEqual([10, 20, 30, 40]);
+	} finally {
+		effect.close();
+		installed.close();
+	}
+});
+
+test("an effect interval refuses a zero period synchronously", () => {
+	const effect = new Effect();
+	try {
+		expect(() => effect.interval(() => {}, Nano.zero)).toThrow(RangeError);
+	} finally {
+		effect.close();
+	}
+});
+
+test("an effect interval delays a full period after a stalled event loop", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const effect = new Effect();
+	const at: number[] = [];
+	try {
+		effect.interval(() => at.push(clock.now()), Nano(10));
+		clock.jump(Nano(35));
+		await clock.advance(Nano.zero);
+		expect(at).toEqual([35]);
+		await clock.advance(Nano(9));
+		expect(at).toEqual([35]);
+		await clock.advance(Nano(1));
+		expect(at).toEqual([35, 45]);
+	} finally {
+		effect.close();
+		installed.close();
+	}
+});
+
+test("an effect interval starts its next period on a newly installed clock's origin", async () => {
+	const first = new Manual();
+	first.jump(Nano(1000));
+	const installedFirst = first.install();
+	const second = new Manual();
+	let installedSecond: Installed | undefined;
+	const effect = new Effect();
+	const at: number[] = [];
+	try {
+		effect.interval(() => {
+			at.push(now());
+			if (at.length === 1) installedSecond = second.install();
+		}, Nano(10));
+		await first.advance(Nano(10));
+		expect(at).toEqual([1010]);
+		await second.advance(Nano(10));
+		expect(at).toEqual([1010, 10]);
+	} finally {
+		effect.close();
+		installedSecond?.close();
+		installedFirst.close();
+	}
 });

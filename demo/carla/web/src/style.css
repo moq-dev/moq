@@ -1,0 +1,828 @@
+@import "./calibration.css";
+* {
+	box-sizing: border-box;
+	margin: 0;
+	padding: 0;
+}
+/* The same palette as the MoQ Boy demo. */
+:root {
+	color-scheme: dark;
+	--bg: #0a0a0a;
+	--panel: #141414;
+	--line: #333;
+	--text: #e0e0e0;
+	--muted: #888;
+	--dim: #555;
+	--accent: #8bac0f;
+	--accent-hover: #b4d63a;
+	--danger: #ed7169;
+	--ok: #8bac0f;
+	font-family: system-ui, sans-serif;
+}
+body {
+	background: var(--bg);
+	color: var(--text);
+	min-width: 320px;
+	min-height: 100vh;
+	display: flex;
+	flex-direction: column;
+}
+[hidden] {
+	/* biome-ignore lint/complexity/noImportantStyles: Hidden controls must override layout display rules. */
+	display: none !important;
+}
+button,
+summary,
+a {
+	-webkit-tap-highlight-color: transparent;
+}
+button {
+	font: inherit;
+	cursor: pointer;
+}
+button:focus-visible,
+a:focus-visible,
+summary:focus-visible {
+	outline: 2px solid var(--accent);
+	outline-offset: 4px;
+}
+button:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+}
+header {
+	padding: 0.75rem 1.5rem;
+	display: flex;
+	align-items: center;
+	gap: 1rem;
+	border-bottom: 1px solid var(--line);
+}
+header h1 {
+	font-size: 1.1rem;
+	font-weight: 600;
+	color: var(--accent);
+}
+
+.status {
+	margin-left: auto;
+	font:
+		12px ui-monospace,
+		monospace;
+	color: var(--muted);
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+.status::before,
+.status-dot {
+	content: "";
+	width: 6px;
+	height: 6px;
+	background: currentColor;
+	border-radius: 50%;
+	display: inline-block;
+}
+.status[data-state="connected"] {
+	color: var(--ok);
+}
+.status[data-state="disconnected"] {
+	color: var(--danger);
+}
+.wheel {
+	border: 1px solid var(--line);
+	background: transparent;
+	color: var(--text);
+	padding: 8px 12px;
+	border-radius: 5px;
+	font-size: 12px;
+}
+.wheel[data-driving="true"] {
+	border-color: var(--accent);
+	color: var(--accent);
+}
+main {
+	width: 100%;
+	max-width: 1760px;
+	padding: 1rem 1.5rem;
+	margin: 0 auto;
+	flex: 1;
+}
+
+.map-panel {
+	border: 1px solid var(--line);
+	border-radius: 8px;
+	overflow: hidden;
+}
+#map {
+	position: relative;
+	height: max(420px, calc(100dvh - 180px));
+	background-color: #202020;
+	background-image:
+		linear-gradient(#ffffff04 1px, transparent 1px), linear-gradient(90deg, #ffffff04 1px, transparent 1px),
+		radial-gradient(ellipse at 40% 60%, #292929, #191919);
+	background-size:
+		40px 40px,
+		40px 40px,
+		auto;
+}
+#roads,
+#markers {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+}
+#roads {
+	overflow: hidden;
+}
+#roads use {
+	fill: none;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+.road-shoulder {
+	stroke: #111111;
+	stroke-width: 6.5;
+}
+.road-surface {
+	stroke: #555555;
+	stroke-width: 4.2;
+}
+.road-line {
+	stroke: #aaaaaa;
+	stroke-width: 0.25;
+	stroke-dasharray: 2 3;
+	opacity: 0.55;
+}
+.compass {
+	position: absolute;
+	top: 20px;
+	right: 20px;
+	font:
+		10px ui-monospace,
+		monospace;
+	color: #dddddd;
+	text-align: center;
+}
+.compass span {
+	display: block;
+	font-size: 28px;
+}
+#scale {
+	position: absolute;
+	left: 20px;
+	bottom: 20px;
+	color: #c7c7c7;
+	font:
+		10px ui-monospace,
+		monospace;
+}
+.bar {
+	border: 1px solid currentColor;
+	border-top: none;
+	height: 5px;
+	margin-top: 6px;
+}
+
+#map-note {
+	position: absolute;
+	top: 50%;
+	left: 50%;
+	transform: translate(-50%, -50%);
+	font-size: 13px;
+	line-height: 1.7;
+	text-align: center;
+	width: min(80%, 320px);
+	color: var(--muted);
+}
+/* Anchor previews to the truck while leaving the marker available to click. */
+.truck {
+	--preview-width: 238px;
+}
+#markers .truck {
+	position: absolute;
+}
+.pin {
+	position: absolute;
+	transform: translate(-50%, -50%);
+	width: 28px;
+	height: 28px;
+	background: var(--accent);
+	color: #0a0a0a;
+	border: 2px solid #222222;
+	border-radius: 7px;
+	box-shadow:
+		0 0 0 3px #8bac0f30,
+		0 3px 12px #0008;
+	z-index: 1;
+}
+.pin:hover,
+.pin:focus-visible {
+	z-index: 3;
+	background: var(--accent-hover);
+}
+.arrow {
+	display: block;
+	margin: auto;
+	width: 15px;
+	height: 10px;
+	background: currentColor;
+	clip-path: polygon(0 0, 65% 0, 100% 50%, 65% 100%, 0 100%);
+}
+.pin-label {
+	position: absolute;
+	bottom: 35px;
+	left: 50%;
+	transform: translateX(-50%);
+	color: var(--text);
+	background: #151515ed;
+	padding: 5px 7px;
+	border: 1px solid var(--line);
+	border-radius: 3px;
+	font:
+		10px ui-monospace,
+		monospace;
+	white-space: nowrap;
+	pointer-events: none;
+	opacity: 0;
+}
+.pin:hover .pin-label,
+.pin:focus-visible .pin-label {
+	opacity: 1;
+}
+.camera-chooser {
+	margin: auto;
+	width: min(320px, 90vw);
+	padding: 16px;
+	border: 1px solid var(--line);
+	border-radius: 8px;
+	color: var(--text);
+	background: var(--panel);
+}
+.camera-chooser::backdrop {
+	background: #0009;
+}
+.camera-chooser button {
+	display: block;
+	width: 100%;
+	padding: 12px;
+	margin-top: 8px;
+	text-align: left;
+}
+.card {
+	background: var(--panel);
+	border: 1px solid var(--line);
+	border-radius: 8px;
+	overflow: hidden;
+}
+.truck:not([data-focused="true"]) .card {
+	position: absolute;
+	left: 50%;
+	bottom: 24px;
+	transform: translateX(-50%);
+	width: var(--preview-width);
+	z-index: 4;
+	box-shadow: 0 12px 36px #0006;
+}
+/* Bridge the gap so leaving the pin for its card never leaves the truck. */
+.truck[data-preview="true"]::before {
+	content: "";
+	position: absolute;
+	left: 50%;
+	bottom: 0;
+	width: var(--preview-width);
+	height: 24px;
+	transform: translateX(-50%);
+}
+.estop-btn {
+	color: #ffd8d4;
+	background: #4b211f;
+	border: 1px solid #bd5a52;
+}
+.estop-btn[data-reset="true"] {
+	color: var(--ok);
+	border-color: var(--ok);
+	background: #1c2408;
+}
+.truck:not([data-focused="true"]) .video-wrap > .estop-btn {
+	position: absolute;
+	top: 8px;
+	right: 8px;
+	z-index: 2;
+	padding: 5px 7px;
+	font-size: 10px;
+}
+#markers .truck[data-preview="true"] {
+	z-index: 4;
+}
+
+#backdrop {
+	position: fixed;
+	inset: 0;
+	background: #0a0a0ac9;
+	backdrop-filter: blur(5px);
+	z-index: 5;
+}
+.truck[data-focused="true"] .card {
+	position: fixed;
+	top: 50%;
+	left: 50%;
+	transform: translate(-50%, -50%);
+	width: min(1100px, 94vw, max(560px, calc((94dvh - 140px) * 16 / 9)));
+	max-height: 94dvh;
+	overflow-y: auto;
+	z-index: 6;
+	box-shadow: 0 28px 100px #0008;
+}
+.truck[data-active="true"] .card {
+	border-color: var(--accent);
+}
+.video-wrap {
+	position: relative;
+	aspect-ratio: 16 / 9;
+	background: #000;
+}
+.truck canvas {
+	display: block;
+	width: 100%;
+	height: 100%;
+	object-fit: contain;
+}
+.truck .overlay {
+	position: absolute;
+	inset: 0;
+	pointer-events: none;
+}
+.badge {
+	color: var(--muted);
+	font-size: 10px;
+	font-weight: 500;
+	text-transform: uppercase;
+	letter-spacing: 1px;
+}
+.badge[data-live="true"] {
+	color: var(--ok);
+}
+.badge[data-live="true"]::before {
+	content: "";
+	display: inline-block;
+	width: 5px;
+	height: 5px;
+	margin-right: 6px;
+	border-radius: 50%;
+	background: var(--ok);
+}
+.video-state {
+	position: absolute;
+	left: 50%;
+	top: 55%;
+	transform: translate(-50%, -50%);
+	font-size: 12px;
+	color: var(--muted);
+	text-align: center;
+	width: 80%;
+}
+.close-btn {
+	position: absolute;
+	right: 14px;
+	top: 14px;
+	width: 32px;
+	height: 32px;
+	border-radius: 50%;
+	background: #0a0a0acc;
+	border: 1px solid var(--muted);
+	color: white;
+	font-size: 22px;
+	z-index: 2;
+}
+.body {
+	padding: 16px 22px;
+}
+.name-row,
+.actions {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+.name {
+	font-size: 24px;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.5px;
+}
+.speed {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+	color: #fff;
+}
+.actions {
+	margin-left: auto;
+}
+.actions button {
+	border-radius: 4px;
+	font-size: 11px;
+	font-weight: 600;
+	padding: 10px 13px;
+	min-height: 36px;
+}
+.control-btn {
+	color: #0a0a0a;
+	background: var(--accent);
+	border: 1px solid var(--accent);
+}
+.respawn-btn {
+	background: transparent;
+	color: var(--text);
+	border: 1px solid var(--line);
+}
+.telemetry {
+	margin-top: 0;
+}
+.metric {
+	display: grid;
+	grid-template-columns: 1fr auto;
+	align-items: baseline;
+	gap: 5px 12px;
+}
+.metric > span:not(.pedal-track) {
+	font-size: 10px;
+	font-weight: 700;
+	letter-spacing: 1px;
+	text-transform: uppercase;
+	color: #ddd;
+}
+.metric strong {
+	font-size: 14px;
+	font-weight: 500;
+}
+meter {
+	display: block;
+	width: 100%;
+	height: 4px;
+	appearance: none;
+	border: 0;
+	background: var(--line);
+}
+meter::-webkit-meter-bar {
+	height: 4px;
+	border: 0;
+	background: var(--line);
+}
+meter::-webkit-meter-optimum-value {
+	background: var(--ok);
+}
+.brake-meter::-webkit-meter-optimum-value {
+	background: var(--danger);
+}
+.guide-key {
+	position: absolute;
+	bottom: 22px;
+	left: 50%;
+	transform: translateX(-50%);
+	display: flex;
+	gap: 16px;
+	font-size: 10px;
+	color: #ddd;
+	text-shadow: 0 1px 4px #000;
+}
+.actual-key::before,
+.request-key::before {
+	content: "";
+	display: inline-block;
+	width: 18px;
+	border-top: 2px solid var(--text);
+	vertical-align: middle;
+	margin-right: 6px;
+}
+.request-key::before {
+	border-top: 2px dashed #50c8ff;
+}
+.diagnostics {
+	margin-top: 10px;
+	font-size: 10px;
+	color: var(--muted);
+}
+summary {
+	cursor: pointer;
+}
+.row {
+	display: flex;
+	justify-content: space-between;
+	gap: 18px;
+	padding-top: 10px;
+	font-size: 11px;
+	overflow-wrap: anywhere;
+}
+.row span:last-child {
+	text-align: right;
+}
+.hint {
+	font-size: 11px;
+	color: var(--muted);
+	line-height: 1.6;
+	margin-top: 14px;
+}
+.mode.estopped,
+.collision {
+	color: var(--danger);
+}
+.truck:not([data-focused="true"]) .telemetry,
+.truck:not([data-focused="true"]) .hint,
+.truck:not([data-focused="true"]) .actions,
+.truck:not([data-focused="true"]) .close-btn {
+	display: none;
+}
+.truck:not([data-focused="true"]) .body {
+	padding: 12px;
+}
+.truck:not([data-focused="true"]) .name,
+.truck:not([data-focused="true"]) .speed {
+	font-size: 11px;
+}
+.truck[data-collision="recent"] .pin {
+	border-color: var(--danger);
+	box-shadow: 0 0 0 2px #ed716940;
+}
+.truck[data-collision="recent"] .card {
+	border-color: var(--danger);
+}
+footer {
+	padding: 0.75rem 1.5rem;
+	border-top: 1px solid var(--line);
+	display: flex;
+	justify-content: space-between;
+	align-items: start;
+	color: var(--dim);
+	font-size: 0.75rem;
+	line-height: 1.7;
+	gap: 24px;
+}
+footer a {
+	color: var(--accent);
+	text-decoration: none;
+}
+footer a:hover {
+	text-decoration: underline;
+}
+footer details {
+	max-width: 600px;
+	flex: 1;
+	color: var(--muted);
+}
+footer p {
+	margin-top: 10px;
+}
+#offline {
+	position: absolute;
+	inset: 0;
+	z-index: 2;
+	display: grid;
+	place-content: center;
+	gap: 0.75rem;
+	padding: 1.5rem;
+	text-align: center;
+	background: #0a0a0acc;
+	/* Announcements land a moment after the session connects; fading in late keeps a
+	   simulator that is online from flashing the offline message. */
+	animation: reveal 0.3s ease 1s both;
+}
+#offline h2 {
+	font-size: 1.1rem;
+	font-weight: 600;
+	color: var(--accent);
+}
+#offline p {
+	max-width: 420px;
+	font-size: 0.85rem;
+	line-height: 1.7;
+	color: var(--muted);
+}
+#offline a {
+	color: var(--accent);
+}
+@keyframes reveal {
+	from {
+		opacity: 0;
+	}
+	to {
+		opacity: 1;
+	}
+}
+kbd {
+	border: 1px solid var(--line);
+	border-radius: 3px;
+	padding: 1px 4px;
+	color: var(--text);
+}
+#preview-notice {
+	background: var(--panel);
+	color: var(--accent);
+	padding: 10px 14px;
+	border: 1px solid var(--line);
+	border-radius: 8px;
+	font:
+		10px ui-monospace,
+		monospace;
+	margin-bottom: 20px;
+}
+@media (max-width: 1000px) {
+	.truck {
+		--preview-width: 220px;
+	}
+}
+@media (max-width: 700px) {
+	header {
+		flex-wrap: wrap;
+		gap: 12px;
+		padding-inline: 1rem;
+	}
+	main {
+		padding: 1rem;
+	}
+
+	#map {
+		height: 380px;
+	}
+
+	.body {
+		padding: 16px;
+	}
+	.name-row {
+		flex-wrap: wrap;
+	}
+	.actions {
+		width: 100%;
+		margin: 6px 0 0;
+	}
+	.actions button {
+		flex: 1;
+	}
+
+	.metric:nth-child(-n + 2) {
+		border-bottom: 1px solid var(--line);
+	}
+	.guide-key {
+		flex-wrap: wrap;
+		gap: 10px;
+	}
+	footer {
+		flex-wrap: wrap;
+		gap: 14px;
+		padding-inline: 1rem;
+	}
+	footer details {
+		order: 3;
+		flex-basis: 100%;
+	}
+}
+
+.pedal-track {
+	position: relative;
+	display: block;
+	height: 4px;
+	margin-top: 3px;
+}
+.request-position {
+	position: absolute;
+	top: -3px;
+	height: 10px;
+	border-left: 2px solid #50c8ff;
+	transform: translateX(-1px);
+}
+
+#roads[data-aerial="true"] use {
+	display: none;
+}
+
+.hud-title {
+	position: absolute;
+	top: 22px;
+	left: 24px;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	text-shadow: 0 2px 8px #000;
+}
+.hud-pedals {
+	position: absolute;
+	bottom: 26px;
+	left: 24px;
+	width: 160px;
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+	text-shadow: 0 1px 6px #000;
+}
+.hud-motion {
+	position: absolute;
+	bottom: 22px;
+	right: 24px;
+	display: flex;
+	align-items: center;
+	gap: 18px;
+	text-shadow: 0 2px 8px #000;
+}
+.speed-value {
+	font-size: 64px;
+	line-height: 1;
+	font-weight: 700;
+	font-variant-numeric: tabular-nums;
+	letter-spacing: -2px;
+}
+.speed > span {
+	font-size: 11px;
+	color: #ddd;
+}
+.gear {
+	display: grid;
+	place-items: center;
+	width: 48px;
+	height: 54px;
+	border: 1px solid #ffffff70;
+	font-size: 28px;
+	color: var(--accent);
+	background: #1118;
+}
+.mode {
+	font-size: 12px;
+	text-transform: uppercase;
+	letter-spacing: 1px;
+	color: var(--muted);
+}
+.pedal-track {
+	grid-column: 1 / -1;
+}
+.video-wrap::after {
+	content: "";
+	position: absolute;
+	inset: 0;
+	background: linear-gradient(#0006, transparent 25%, transparent 60%, #0009);
+	pointer-events: none;
+}
+.hud-title,
+.hud-pedals,
+.hud-motion,
+.guide-key,
+.video-state {
+	z-index: 1;
+	pointer-events: none;
+}
+.truck:not([data-focused="true"]) .hud-pedals,
+.truck:not([data-focused="true"]) .hud-motion,
+.truck:not([data-focused="true"]) .body {
+	display: none;
+}
+.truck:not([data-focused="true"]) .hud-title {
+	top: 12px;
+	left: 12px;
+	right: 65px;
+}
+.truck:not([data-focused="true"]) .name {
+	font-size: 13px;
+}
+@media (max-width: 700px) {
+	.hud-title {
+		top: 14px;
+		left: 14px;
+	}
+	.name {
+		font-size: 17px;
+	}
+	.hud-pedals {
+		bottom: 16px;
+		left: 14px;
+		width: 95px;
+		gap: 8px;
+	}
+	.metric strong {
+		font-size: 11px;
+	}
+	.metric > span:not(.pedal-track) {
+		font-size: 8px;
+	}
+	.hud-motion {
+		bottom: 14px;
+		right: 14px;
+		gap: 8px;
+	}
+	.speed-value {
+		font-size: 38px;
+	}
+	.speed > span {
+		font-size: 8px;
+	}
+	.gear {
+		width: 28px;
+		height: 34px;
+		font-size: 20px;
+	}
+	.guide-key {
+		bottom: 5px;
+		font-size: 8px;
+		gap: 10px;
+	}
+	.body {
+		padding: 12px;
+	}
+}

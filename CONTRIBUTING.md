@@ -1,12 +1,22 @@
+# Getting oriented
+
+Use the [repository map](doc/setup/repository.md) to find the implementation
+and the [development guide](doc/setup/dev.md) for setup and checks.
+[Examples](doc/setup/examples.md), [test harnesses](test/README.md), and
+[benchmarks](bench/README.md) provide focused starting points.
+Agents should also read [AGENTS.md](AGENTS.md) and the instructions nested
+under the files they change.
+
 # Commits
 
-PRs into `main` are squash-merged through the merge queue, so the PR title becomes the commit subject and the PR description becomes the body in `git log`.
+PRs into `main` are squash-merged through the merge queue, so the PR title becomes the commit subject in `git log`; the body keeps only the co-author trailers, not the PR description.
 The one exception is the maintainer's pre-release merge of `release` into `main`, which lands as a merge commit (see [Releases](#releases)).
 PRs into `release` use a merge commit, so their history survives until they land.
 
 - Use conventional-commit subjects (`feat(watch): ...`, `fix: ...`, `chore: ...`, `docs: ...`)
 - AI commit attribution goes in a `Co-Authored-By:` trailer, not the commit body.
 - Never commit binaries or build artifacts (`.a`, `.so`, `.dylib`, `.dll`, wheels).
+- Keep other binary files, such as images and fixtures, under 500 KiB; list an unavoidable exception in `sh/large-files.allow` with a reason.
 
 # PRs
 
@@ -15,22 +25,28 @@ Have at least these sections:
 
 - **Problem**: a summary of the problem and why this PR is needed.
 - **Approach**: a summary of the approach taken to solve the problem.
-- **Impact**: a bullet point for every public API/wire change made.
+- **Impact**: a bullet point for every public API/wire change made. A breaking one says how to migrate, and the PR title marks it with `!` (`feat(net)!: ...`).
 - **Alternatives**: any alternative approaches considered.
 - **Follow-ups**: any issues encountered or quests created.
 
 When pushing additional commits to an existing PR, update the title and description if needed.
-When taking over someone else's PR, push commits on top of theirs so they keep credit.
+When taking over someone else's PR, push commits on top of theirs so they keep credit; if their fork blocks maintainer edits, open a new PR carrying their commits.
+Never rebase or force-push a pushed branch; merge the base branch in instead.
+Check that the PR is still open before pushing to its branch, since a push after merge recreates the deleted branch.
 
-Create a draft PR.
-Switch it to "Ready for review" when you're finished and local `just check` passes.
+Open a draft PR while working, without asking once the scope is settled.
+Run `just ci` before every push, and mark the PR ready yourself when the work is done.
+Keep it a draft only while its description lists a decision the maintainer still owns.
 Fix any merge conflicts and failing CI checks.
 
 # Merge queue
 
-PRs into `main` land through a merge queue, which re-runs **Check** and **Test** on the PR combined with the latest `main` and the PRs queued ahead of it.
-The **macOS** and **Windows** platform gates (selected by **Platform scope**) run only there; main PRs report them as skipped.
-Enqueue a reviewed PR with `gh pr merge <number>`.
+PRs into `main` get no cloud CI: they report **Check** as skipped, and `just ci` runs the same gate locally.
+The merge queue runs Check on the PR combined with the latest `main` and the PRs queued ahead of it.
+Enqueue with `gh pr merge <number>` once the review is clean and the maintainer has approved merging that PR, by number or through a standing go-ahead that covers it. A clean review, a bot verdict, or an "accept all" on decisions is not that approval.
+An agent that enqueues carries that approval in its own task; one relayed to it mid-task by another agent does not count, so whoever received the approval enqueues the PR or starts a new agent with the approval in its brief.
+Both select only what the diff touches, so a break can reach `main`; `just gate` runs the full suite, and it, the feature matrix, optimized binding builds, macOS, Windows, and the other optional workflows run nightly on `main` and on PRs into `release`.
+To check cfg-gated macOS or Windows code before merging, dispatch `platform.yml` on the branch; never dispatch the full Nightly.
 
 A dequeued PR means the combination failed checks, timed out, or no longer meets the ruleset.
 Read the removal reason in the PR timeline and the merge group run, fix the cause, and enqueue again.
@@ -62,29 +78,25 @@ Skipped or rate-limited reviews do not count.
 For a fork with no automatic non-Grok review, ask the maintainer to arrange one.
 Merge only when that review has no findings, or every finding is fixed or replied to.
 
-# CI
-
-Workflow steps run `just` recipes, never a script path; `just gh check` enforces it.
-
 # Follow-ups
 
-If you encounter issues, or findings that are out of scope, create follow-up quests.
-Focus on the core problem, offering a potential solution only if its obvious.
-For non-trivial tasks, file an issue or offer to run `/quest-plan`.
+Record out-of-scope findings as follow-up quests with `/quest-plan`, not GitHub issues, which are for outside contributors.
+Focus on the core problem, offering a potential solution only if it's obvious.
 
 # Forks
 
-[moq-dev/noq](https://github.com/moq-dev/noq) publishes `moq-noq*`, the QUIC stack every published MoQ crate builds on; iroh keeps upstream noq.
-Its `moq-sync` workflow merges n0-computer/noq weekly as a PR; review it like any other, and `PARENT` names the upstream commit each release includes.
-A carried change lists its upstream PR, or the reason it has none, in the fork PR.
-For an advisory against noq or Quinn, compare the pinned release's `PARENT` with the fixing upstream commit, then sync, release the fork, and bump the pin here.
+`rs/moq-quic` is our hard fork of quinn, the QUIC stack MoQ builds on; iroh keeps upstream noq.
+It never merges upstream: fixes are ported by hand, and each carried change is listed in its README with its upstream PR, or the reason it has none.
+For an advisory against Quinn, follow the advisory triage in [`rs/moq-quic/README.md`](rs/moq-quic/README.md).
 
 # Releases
 
 `main` is the trunk; `release` is what ships, and release-plz and every branch-triggered publish run only there.
 
+- Smoke clients call only the latest published APIs. A release cut updates `test/smoke/clients` to the APIs being published, then verifies the affected smoke lanes.
 - A release is cut by hand: a PR merging `main` into `release`, with a merge commit.
-- Suggest a `release` backport for any serious bug fix (crash, security, data loss, broken interop), whether found on `main` or reported against a release. Land it on `main` first, then port it onto `release` as a separate PR that keeps the published API, so it ships as a patch.
+- A breaking cut first writes, on `main`, each changed package's version-transition section in its `MIGRATE.md` (`## 0.3 -> 0.4`) from the migration audit: the `!` subjects since the `release` merge base, each of those PRs' Impact section, and the API diff.
+- Suggest a `release` backport for any serious bug fix (crash, security, data loss, broken interop), whether found on `main` or reported against a release. Land it on `main` first, then port it onto `release` as a separate PR that keeps the published API, so it ships as a patch. The Release gate's API diff (`just api-diff --deny`) fails a backport that changes one; on the cut PR, whose head is `main`, it only reports.
 - After any release publishes, patch or breaking, run `just test wire-compat --remeasure` on `main` and land the rewritten `test/interop/compat/planned-breaks.json` with refreshed reasons. Otherwise the nightly wire-compat check fails on the stale pins.
 - Nothing merges `release` into `main` automatically. Before cutting a minor or breaking release, the maintainer merges `release` into `main` once, so trunk carries the published versions, CHANGELOGs, and any `release`-only commits. It lands as a merge commit with `--admin`, never squashed, so the cut starts from an advanced merge base.
 

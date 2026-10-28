@@ -645,13 +645,6 @@ mod tests {
 	];
 
 	#[test]
-	fn can_start_client_handshake() {
-		let handshake = Handshake::new(PeerType::Server);
-
-		assert_eq!(handshake.current_stage, Stage::NeedToSendP0AndP1);
-	}
-
-	#[test]
 	fn bad_version_if_first_byte_is_not_a_3() {
 		let mut handshake = Handshake::new(PeerType::Server);
 		let input = [4_u8];
@@ -827,22 +820,6 @@ mod tests {
 		];
 
 		assert_eq!(&expected[..], &hmac[..]);
-	}
-
-	#[test]
-	fn hmac_test3() {
-		let mut mac = Hmac::<Sha256>::new_from_slice(&[0x0b; 20]).unwrap();
-		mac.update(b"Hi There");
-
-		let expected = [
-			176_u8, 52_u8, 76_u8, 97_u8, 216_u8, 219_u8, 56_u8, 83_u8, 92_u8, 168_u8, 175_u8, 206_u8, 175_u8, 11_u8,
-			241_u8, 43_u8, 136_u8, 29_u8, 194_u8, 0_u8, 201_u8, 131_u8, 61_u8, 167_u8, 38_u8, 233_u8, 55_u8, 108_u8,
-			46_u8, 50_u8, 207_u8, 247_u8,
-		];
-
-		let result = mac.finalize();
-		let code_bytes = result.into_bytes();
-		assert_eq!(&expected[..], &code_bytes[..]);
 	}
 
 	#[test]

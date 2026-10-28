@@ -50,8 +50,9 @@ window.checkTransport = async () => {
 	const publishing = new Moq.Origin.Producer();
 	const consuming = new Moq.Origin.Producer();
 	const path = Moq.Path.from("peer/data");
-	const broadcast = publishing.createBroadcast(path);
-	broadcast.announce();
+	const broadcastPublication = publishing.createBroadcast(path);
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	const track = broadcast.createTrack("data", { timescale: Moq.Time.Timescale.MILLI });
 	let client: Awaited<ReturnType<typeof Moq.Connection.connect>> | undefined;
 	let server: Awaited<ReturnType<typeof Moq.Connection.accept>> | undefined;
@@ -77,8 +78,8 @@ window.checkTransport = async () => {
 			if (!active) throw new Error("broadcast disappeared");
 			const subscriber = active.track("data").subscribe().ordered();
 			try {
-				const demand = track.demand().used;
-				while (!demand.peek()) await demand.changed();
+				const demand = track.demand().wanted;
+				while (demand.peek() === undefined) await demand.changed();
 				const payload = Uint8Array.from({ length: 256 * 1024 }, (_, i) => i % 251);
 				track.writeFrame({ payload, timestamp: Moq.Time.Timestamp.now() });
 				const frame = await subscriber.readFrame();
@@ -110,6 +111,7 @@ window.checkTransport = async () => {
 		client?.abort();
 		server?.abort();
 		transport.close();
+		track.finish();
 		track.close();
 		broadcast.close();
 		publishing.close();

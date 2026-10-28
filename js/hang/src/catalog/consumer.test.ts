@@ -6,9 +6,9 @@ import {
 	checkRenditions,
 	checkResolvable,
 	EscapingBroadcast,
-	MAX_RENDITIONS,
 	type Root,
-	TooManyRenditions,
+	UnsupportedVersion,
+	VERSION,
 	watch,
 } from "./root";
 
@@ -25,16 +25,8 @@ function catalog(count: number): Root {
 	} as Root;
 }
 
-test("the shared cap accepts 64 renditions and refuses 65 with a typed error", () => {
-	expect(checkRenditions(catalog(MAX_RENDITIONS))).toBeDefined();
-	expect(() => checkRenditions(catalog(MAX_RENDITIONS + 1))).toThrow(TooManyRenditions);
-	expect(() =>
-		checkRenditions({
-			...catalog(MAX_RENDITIONS - 1),
-			video: { renditions: { video: {} } },
-			text: { renditions: { captions: {} } },
-		} as unknown as Root),
-	).toThrow(TooManyRenditions);
+test("the rendition count is the publisher's to choose", () => {
+	expect(Object.keys(checkRenditions(catalog(1000)).audio?.renditions ?? {})).toHaveLength(1000);
 });
 
 test("the shared containment check covers every section carrying a broadcast reference", () => {
@@ -55,13 +47,25 @@ test("the shared containment check covers every section carrying a broadcast ref
 	}
 });
 
-test("watch refuses an oversized catalog update", async () => {
+test("watch yields a catalog with many renditions", async () => {
 	const broadcast = new Moq.Broadcast.Producer();
 	const track = broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI });
-	const producer = new Json.Snapshot.Producer<Root>({ track, deltaRatio: 0 });
+	const producer = new Json.Snapshot.Producer<Root>({ track, deltas: false });
 	const consumer = watch(broadcast.consume())[Symbol.asyncIterator]();
-	producer.update({ value: catalog(MAX_RENDITIONS + 1), at: Moq.Time.Timestamp.now() });
-	await expect(consumer.next()).rejects.toBeInstanceOf(TooManyRenditions);
+	producer.update({ value: catalog(1000), at: Moq.Time.Timestamp.now() });
+	const next = await consumer.next();
+	expect(Object.keys(next.value?.audio?.renditions ?? {})).toHaveLength(1000);
+	producer.finish();
+	broadcast.close();
+});
+
+test("watch refuses a catalog needing a newer reader", async () => {
+	const broadcast = new Moq.Broadcast.Producer();
+	const track = broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI });
+	const producer = new Json.Snapshot.Producer<Root>({ track, deltas: false });
+	const consumer = watch(broadcast.consume())[Symbol.asyncIterator]();
+	producer.update({ value: { version: VERSION + 1 }, at: Moq.Time.Timestamp.now() });
+	await expect(consumer.next()).rejects.toBeInstanceOf(UnsupportedVersion);
 	producer.finish();
 	broadcast.close();
 });
@@ -77,10 +81,11 @@ function referencing(broadcast: string): Root {
 // Watch the catalog of `room/alice`, published through an origin and requested from it.
 async function watchRequested(root: Root) {
 	const origin = new Moq.Origin.Producer();
-	const broadcast = origin.createBroadcast(Moq.Path.from("room/alice"));
+	const broadcastPublication = origin.createBroadcast(Moq.Path.from("room/alice"));
+	const broadcast = broadcastPublication.broadcast;
 	const track = broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI });
-	const producer = new Json.Snapshot.Producer<Root>({ track, deltaRatio: 0 });
-	broadcast.announce();
+	const producer = new Json.Snapshot.Producer<Root>({ track, deltas: false });
+	broadcastPublication.announce();
 	const request = origin.request(Moq.Path.from("room/alice"));
 	const active = request.active.peek();
 	if (!active) throw new Error("request did not resolve");
@@ -108,7 +113,7 @@ test("watch accepts a sibling reference under the same root and yields it unreso
 test("watch on a standalone broadcast refuses any parent reference", async () => {
 	const broadcast = new Moq.Broadcast.Producer();
 	const track = broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI });
-	const producer = new Json.Snapshot.Producer<Root>({ track, deltaRatio: 0 });
+	const producer = new Json.Snapshot.Producer<Root>({ track, deltas: false });
 	const consumer = watch(broadcast.consume())[Symbol.asyncIterator]();
 	producer.update({ value: referencing("../bob"), at: Moq.Time.Timestamp.now() });
 	await expect(consumer.next()).rejects.toBeInstanceOf(EscapingBroadcast);
@@ -119,11 +124,37 @@ test("watch on a standalone broadcast refuses any parent reference", async () =>
 test("watch subscribes and yields typed catalog updates", async () => {
 	const broadcast = new Moq.Broadcast.Producer();
 	const track = broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI });
-	const producer = new Json.Snapshot.Producer<Root>({ track, deltaRatio: 0 });
+	const producer = new Json.Snapshot.Producer<Root>({ track, deltas: false });
 	const consumer = watch(broadcast.consume())[Symbol.asyncIterator]();
 	producer.update({ value: catalog(1), at: Moq.Time.Timestamp.now() });
 	expect(await consumer.next()).toMatchObject({ value: catalog(1) });
 	await consumer.return?.();
 	producer.finish();
 	broadcast.close();
+});
+
+test("echo feedback prefix refuses root escape with the same URL resolution as renditions", () => {
+	for (const [base, reference, expected] of [
+		["room/live", "viewers", "room/viewers"],
+		["room/live", "live/viewers", "room/live/viewers"],
+		["room/live", "../viewers", "viewers"],
+		["room/live", "../../viewers", undefined],
+		["live", "../viewers", undefined],
+	] as const) {
+		const root = { echo: { path: Moq.Path.normalizeRelative(reference) } };
+		const path = Moq.Path.from(base);
+		if (expected === undefined) expect(() => checkResolvable(root, path)).toThrow(EscapingBroadcast);
+		else {
+			expect(checkResolvable(root, path)).toEqual(root);
+			expect(Moq.Path.tryResolve(path, root.echo.path)).toBe(Moq.Path.from(expected));
+		}
+	}
+});
+
+test("watch refuses an echo prefix escaping the requested broadcast root", async () => {
+	await expect(
+		watchRequested({ echo: { path: Moq.Path.normalizeRelative("../../viewers") } }),
+	).rejects.toBeInstanceOf(EscapingBroadcast);
+	const root = { echo: { path: Moq.Path.normalizeRelative("viewers") } };
+	expect(await watchRequested(root)).toMatchObject({ value: root });
 });

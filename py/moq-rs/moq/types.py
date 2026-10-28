@@ -1,28 +1,28 @@
 """Re-export moq-ffi record types without the Moq prefix.
 
-Records with duration fields are owned in `_records` instead, so they read as `timedelta`.
+Records the wrapper gives Python defaults or timestamp conversions are owned in `_records` instead.
 """
 
 from moq_ffi import (
-    MoqAudioCodec as AudioCodec,
+    MoqAnchor as Anchor,
 )
 from moq_ffi import (
-    MoqAudioDecoderOutput as AudioDecoderOutput,
+    MoqAnnounceRoute as AnnounceRoute,
+)
+from moq_ffi import (
+    MoqAudioCodec as AudioCodec,
 )
 from moq_ffi import (
     MoqAudioEncoderInput as AudioEncoderInput,
 )
 from moq_ffi import (
-    MoqAudioEncoderOutput as AudioEncoderOutput,
-)
-from moq_ffi import (
-    MoqAudioFrame as AudioFrame,
-)
-from moq_ffi import (
     MoqAudioSampleFormat as AudioSampleFormat,
 )
 from moq_ffi import (
-    MoqConnectionStatus as ConnectionStatus,
+    MoqConnectionPhase as ConnectionPhase,
+)
+from moq_ffi import (
+    MoqConnectionState as ConnectionState,
 )
 from moq_ffi import (
     MoqErrorScope as ErrorScope,
@@ -31,10 +31,16 @@ from moq_ffi import (
     MoqFetchGroupOptions as FetchGroupOptions,
 )
 from moq_ffi import (
+    MoqOrder as Order,
+)
+from moq_ffi import (
     MoqProtocolError as ProtocolError,
 )
 from moq_ffi import (
     MoqProtocolKind as ProtocolKind,
+)
+from moq_ffi import (
+    MoqRange as Range,
 )
 from moq_ffi import (
     MoqRoute as Route,
@@ -46,9 +52,6 @@ from moq_ffi import (
     MoqVideoDecodedFrame as VideoDecodedFrame,
 )
 from moq_ffi import (
-    MoqVideoDecoderOutput as VideoDecoderOutput,
-)
-from moq_ffi import (
     MoqVideoEncoderInput as VideoEncoderInput,
 )
 from moq_ffi import (
@@ -58,39 +61,55 @@ from moq_ffi import (
     MoqVideoEncoderOutput as VideoEncoderOutput,
 )
 from moq_ffi import (
-    MoqVideoFrame as VideoFrame,
+    MoqVideoGop as VideoGop,
 )
 from moq_ffi import (
     MoqVideoPixelFormat as VideoPixelFormat,
 )
 
-from ._records import Backoff, ConnectionStats, Datagram, Frame, Subscription, TrackInfo
+from ._records import (
+    Backoff,
+    ClientTls,
+    ConnectionStats,
+    Datagram,
+    Frame,
+    Grant,
+    QuicConfig,
+    Subscription,
+    TrackInfo,
+    WebSocketConfig,
+)
 
 __all__ = [
+    "AnnounceRoute",
+    "Anchor",
     "AudioCodec",
-    "AudioDecoderOutput",
     "AudioEncoderInput",
-    "AudioEncoderOutput",
     "AudioSampleFormat",
-    "AudioFrame",
     "Backoff",
+    "ClientTls",
     "ConnectionStats",
-    "ConnectionStatus",
+    "ConnectionPhase",
+    "ConnectionState",
     "Datagram",
     "ErrorScope",
     "Frame",
     "FetchGroupOptions",
+    "Grant",
+    "Order",
     "ProtocolError",
     "ProtocolKind",
+    "QuicConfig",
+    "Range",
     "Route",
     "Subscription",
     "TrackInfo",
     "VideoCodec",
     "VideoEncoderInput",
     "VideoEncoderKind",
+    "VideoGop",
     "VideoEncoderOutput",
-    "VideoFrame",
     "VideoDecodedFrame",
-    "VideoDecoderOutput",
     "VideoPixelFormat",
+    "WebSocketConfig",
 ]

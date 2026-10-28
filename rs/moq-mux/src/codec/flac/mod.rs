@@ -36,6 +36,7 @@ pub enum Error {
 	MissingStreamInfo,
 }
 
+/// A result using this module's error type.
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Typed FLAC configuration mirroring the fields of a STREAMINFO metadata block

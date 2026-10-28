@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, type Mock, spyOn } from "bun:test";
+import { Milli } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
-import { Time } from "@moq/net";
 import { type Arrival, type Options, QUANTUM, type Quantum, replay } from "./replay";
 
 const RATE = 48000;
@@ -8,7 +8,12 @@ const CONFIG = { codec: "opus", sampleRate: RATE, numberOfChannels: 1 } as Catal
 
 /** Twenty ms frames for `seconds`, one per group, each arriving `lateness(i)` ms after it was captured. */
 function paced(seconds: number, lateness: (i: number) => number): Arrival[] {
-	return Array.from({ length: seconds * 50 }, (_, i) => ({ at: i * 20 + lateness(i), timestamp: i * 20, group: i }));
+	return Array.from({ length: seconds * 50 }, (_, i) => ({
+		at: i * 20 + lateness(i),
+		timestamp: i * 20,
+		group: i,
+		duration: 20,
+	}));
 }
 
 /** How long {@link paced} observes `seconds` of frames: the frames, plus one more. */
@@ -29,7 +34,7 @@ async function underruns(trace: Arrival[], options: Options): Promise<number> {
 	return short;
 }
 
-describe.each(["shared", "post"] as const)("%s ring", (ring) => {
+describe("replay", () => {
 	// The consumer warns on every group it skips.
 	let warn: Mock<typeof console.warn>;
 	beforeEach(() => {
@@ -41,7 +46,7 @@ describe.each(["shared", "post"] as const)("%s ring", (ring) => {
 		expect(
 			await underruns(
 				paced(10, () => 30),
-				{ ring, rate: RATE, config: CONFIG, delay: Time.Milli(100), duration: observed(10) },
+				{ rate: RATE, config: CONFIG, delay: Milli(100), duration: observed(10) },
 			),
 		).toBe(0);
 	});
@@ -50,14 +55,13 @@ describe.each(["shared", "post"] as const)("%s ring", (ring) => {
 		// Five frames held and flushed at once: 80 ms of arrival spread.
 		const trace = paced(10, (i) => 30 + (4 - (i % 5)) * 20);
 		expect(
-			await underruns(trace, { ring, rate: RATE, config: CONFIG, delay: Time.Milli(40), duration: observed(10) }),
+			await underruns(trace, { rate: RATE, config: CONFIG, delay: Milli(40), duration: observed(10) }),
 		).toBeGreaterThan(50);
 		expect(
 			await underruns(trace, {
-				ring,
 				rate: RATE,
 				config: CONFIG,
-				delay: Time.Milli(150),
+				delay: Milli(150),
 				duration: observed(10),
 			}),
 		).toBe(0);
@@ -70,10 +74,9 @@ describe.each(["shared", "post"] as const)("%s ring", (ring) => {
 		const frame = Math.ceil((20 / 1000) * (RATE / QUANTUM));
 		expect(
 			await underruns(trace, {
-				ring,
 				rate: RATE,
 				config: CONFIG,
-				delay: Time.Milli(100),
+				delay: Milli(100),
 				duration: observed(10),
 			}),
 		).toBeGreaterThan(frame);
@@ -87,10 +90,9 @@ describe.each(["shared", "post"] as const)("%s ring", (ring) => {
 			.filter((_, i) => i !== 252);
 		expect(
 			await underruns(trace, {
-				ring,
 				rate: RATE,
 				config: CONFIG,
-				delay: Time.Milli(100),
+				delay: Milli(100),
 				duration: observed(10),
 			}),
 		).toBeGreaterThan(0);
@@ -102,10 +104,9 @@ describe.each(["shared", "post"] as const)("%s ring", (ring) => {
 		for await (const { at, output } of replay(
 			paced(10, () => 30),
 			{
-				ring,
 				rate: RATE,
 				config: CONFIG,
-				delay: Time.Milli(100),
+				delay: Milli(100),
 				duration: 15_000,
 			},
 		)) {
@@ -117,16 +118,16 @@ describe.each(["shared", "post"] as const)("%s ring", (ring) => {
 	});
 });
 
-describe.each(["shared", "post"] as const)("%s ring at auto", (ring) => {
+describe("replay at auto", () => {
 	/** The delay the replay resolved once `seconds` of {@link paced} frames played out. */
 	async function settled(seconds: number, lateness: (i: number) => number): Promise<number> {
 		let delay = 0;
-		const options: Options = { ring, rate: RATE, config: CONFIG, delay: "auto", duration: observed(seconds) };
+		const options: Options = { rate: RATE, config: CONFIG, delay: "auto", duration: observed(seconds) };
 		for await (const quantum of replay(paced(seconds, lateness), options)) delay = quantum.delay;
 		return delay;
 	}
 
-	// A minute, so the estimator's startup ramp hands over to its steady forget factor.
+	// A minute, so the estimator has long since spent its prior and settled.
 	it("sizes the target from the arrival spread, not a round trip", async () => {
 		// Evenly paced, the target is the estimator's 20 ms floor plus one frame.
 		expect(await settled(60, () => 30)).toBe(40);
@@ -135,16 +136,15 @@ describe.each(["shared", "post"] as const)("%s ring at auto", (ring) => {
 	});
 });
 
-describe.each(["shared", "post"] as const)("%s ingress diagnostics", (ring) => {
+describe("ingress diagnostics", () => {
 	it("keeps recorded arrival and lateness when delivery is held", async () => {
-		const trace = [0, 20, 40].map((timestamp) => ({ timestamp, at: timestamp + 1000, group: 0 }));
+		const trace = [0, 20, 40].map((timestamp) => ({ timestamp, at: timestamp + 1000, group: 0, duration: 20 }));
 		const run = async (decodeAfter?: number) => {
 			let window: Quantum["arrivals"] = [];
 			for await (const quantum of replay(trace, {
-				ring,
 				rate: RATE,
 				config: CONFIG,
-				delay: Time.Milli(100),
+				delay: Milli(100),
 				duration: 300,
 				decodeAfter,
 			}))
@@ -157,10 +157,108 @@ describe.each(["shared", "post"] as const)("%s ingress diagnostics", (ring) => {
 		expect(held).toEqual(
 			trace.map((entry) => ({
 				kind: "frame" as const,
-				timestamp: Time.Milli(entry.timestamp),
-				arrival: Time.Milli(entry.at),
+				timestamp: Milli(entry.timestamp),
+				arrival: Milli(entry.at),
 				late: false,
 			})),
 		);
 	});
+});
+
+describe("recorded frame durations", () => {
+	it("keeps missing packets out of the codec term even when most packets are absent", async () => {
+		const trace = Array.from({ length: 600 }, (_, i) => ({
+			at: i * 100,
+			timestamp: i * 100,
+			group: 0,
+			duration: 20,
+		}));
+		let delay = 0;
+		for await (const quantum of replay(trace, {
+			rate: RATE,
+			config: CONFIG,
+			delay: "auto",
+			duration: 60_000,
+		}))
+			delay = quantum.delay;
+		expect(delay).toBe(40);
+	});
+
+	it("updates the codec term when the packet duration changes", async () => {
+		const trace = Array.from({ length: 600 }, (_, i) => ({
+			at: i * 100,
+			timestamp: i * 100,
+			group: 0,
+			duration: i < 300 ? 20 : 10,
+		}));
+		const targets: number[] = [];
+		for await (const quantum of replay(trace, {
+			rate: RATE,
+			config: CONFIG,
+			delay: "auto",
+			duration: 60_000,
+		})) {
+			if (quantum.at >= 29_000 && quantum.at <= 29_100) targets.push(quantum.delay);
+			if (quantum.at >= 59_000) targets.push(quantum.delay);
+		}
+		expect(new Set(targets)).toEqual(new Set([40, 30]));
+	});
+
+	it("plays a single packet for its recorded duration", async () => {
+		const trace = [{ at: 0, timestamp: 0, group: 0, duration: 20 }];
+		let heard = 0;
+		for await (const { output } of replay(trace, {
+			rate: RATE,
+			config: CONFIG,
+			delay: Milli(20),
+			duration: 100,
+		}))
+			heard += output.filter((sample) => sample !== 0).length;
+		expect(heard).toBe(960);
+	});
+});
+
+it("replay refuses missing, non-finite or non-positive recorded durations", async () => {
+	for (const duration of [undefined, Number.NaN, Number.POSITIVE_INFINITY, 0, -20]) {
+		const trace = [{ at: 0, timestamp: 0, group: 0, duration }] as Arrival[];
+		const reader = replay(trace, {
+			rate: RATE,
+			config: CONFIG,
+			delay: "auto",
+			duration: 100,
+		});
+		await expect(reader.next()).rejects.toThrow("invalid recorded frame duration");
+	}
+});
+
+// Five seconds advertised is ten times what the ring holds decoded, so the rest waits encoded in the
+// consumer until the received media covers it, then plays at the advertised delay.
+it("plays an advertised flush span past the decoded floor at its delay without a gap", async () => {
+	const config = { ...CONFIG, jitter: 5000 } as Catalog.AudioConfig;
+	let start: number | undefined;
+	let short = 0;
+	let lag = 0;
+	let delay = 0;
+	for await (const quantum of replay(
+		paced(12, () => 30),
+		{
+			rate: RATE,
+			config,
+			delay: "auto",
+			duration: observed(12),
+		},
+	)) {
+		const filled = quantum.output.findLastIndex((v) => v !== 0) + 1;
+		if (start === undefined && filled > 0) start = quantum.at;
+		if (start !== undefined && filled < QUANTUM) short++;
+		lag = quantum.at - quantum.timestamp;
+		delay = quantum.delay;
+	}
+	expect(delay).toBe(5020);
+	// The first frame arrived 30 ms late, so it plays the target after its own capture plus that.
+	expect(start).toBeGreaterThanOrEqual(5020);
+	expect(start).toBeLessThan(5040);
+	expect(short).toBe(0);
+	expect(lag).toBeGreaterThanOrEqual(5020);
+	expect(lag).toBeLessThan(5040);
 });

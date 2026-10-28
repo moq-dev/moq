@@ -5,18 +5,18 @@
 //! ring (submitting inline when the queue is full), while completions are only
 //! reaped by the worker loop.
 
+use moq_clock::Instant;
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::io;
 use std::rc::Rc;
 use std::task::Poll;
-use std::time::Instant;
 
 use io_uring::{IoUring, opcode, squeue};
 
 use crate::metrics::Counters;
 use crate::park::Unpark;
-use crate::{timer, udp};
+use crate::{clock::Clock, udp};
 
 /// A spawned task: the plain poll-closure shape `kio::Tasks` drives.
 pub(crate) type Task = Box<dyn FnMut(&kio::Waiter) -> Poll<()>>;
@@ -54,12 +54,17 @@ pub(crate) enum Op {
 pub(crate) struct Shared {
 	pub ring: RefCell<IoUring>,
 	pub ops: RefCell<slab::Slab<Op>>,
-	/// Its own `Rc` so a [`crate::Timer`] holds just the heap, not the ring.
-	pub timers: Rc<RefCell<timer::Heap>>,
+	/// Where the worker's time comes from: read once per turn, and between turns.
+	pub clock: Clock,
+	/// The worker's timers, at the instant of its current turn. Entered as the
+	/// ambient clock while the worker polls.
+	pub deadlines: moq_clock::Deadlines,
+	/// Whether a turn is running, so `deadlines` already holds its instant.
+	pub turning: Cell<bool>,
 	/// Tasks handed to [`crate::Handle::spawn`], drained by the worker loop.
 	pub spawns: RefCell<Vec<Task>>,
 	pub unpark: std::sync::Arc<Unpark>,
-	/// This worker's counters, also held by its sockets, timer heap, and park
+	/// This worker's counters, also held by its sockets, timers, and park
 	/// word.
 	pub metrics: std::sync::Arc<Counters>,
 	/// The next provided-buffer group id; one per socket.
@@ -74,6 +79,15 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
+	/// The worker's time: the current turn's instant. Between turns the queue
+	/// still holds the last turn's, so it catches up to the clock first.
+	pub fn now(&self) -> Instant {
+		if !self.turning.get() {
+			self.deadlines.advance(self.clock.now());
+		}
+		self.deadlines.now()
+	}
+
 	/// The error every operation reports once the worker has been dropped.
 	pub fn gone_error() -> io::Error {
 		io::Error::new(io::ErrorKind::NotConnected, "the worker was dropped")
@@ -92,7 +106,7 @@ impl Shared {
 	fn push_inner(&self, entry: &squeue::Entry, deadline: Option<Instant>) -> io::Result<()> {
 		let mut ring = self.ring.borrow_mut();
 		loop {
-			if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+			if deadline.is_some_and(|deadline| self.clock.host_now() >= deadline) {
 				return Err(io::Error::new(
 					io::ErrorKind::TimedOut,
 					"io_uring submission deadline elapsed",

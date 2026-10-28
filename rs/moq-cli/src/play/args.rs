@@ -1,6 +1,7 @@
 //! The `play` verb's command-line surface.
 
 use std::fmt;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -57,7 +58,7 @@ impl fmt::Display for Delay {
 }
 
 /// Play one MoQ broadcast through a native window or an audio-only speaker.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Args {
 	/// Catalog format, detected from the broadcast suffix when omitted.
@@ -79,6 +80,15 @@ pub struct Args {
 	/// Rendition selection by track name or codec.
 	#[usage(flatten)]
 	pub select: SelectArgs,
+
+	/// Write what the speaker played to this file, one JSON sample per line every 250ms.
+	///
+	/// Each line has the playhead, the playout target, the render quanta the speaker played
+	/// and how many were quiet, and the gaps and stalls since the line before, in the metric
+	/// schema of `test/audio-quality`, whose analyzer reduces it to underruns, skips, and
+	/// silence. Audio only, so it needs `--no-video`.
+	#[usage(long, requires = "--no-video", value_name = "PATH", value_hint = usage_rs::ValueHint::FilePath, extensions("ndjson"))]
+	pub metrics: Option<PathBuf>,
 }
 
 impl Args {
@@ -144,7 +154,7 @@ impl Args {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	#[derive(usage::Cli)]
+	#[derive(usage_rs::Cli)]
 	struct Cli {
 		#[usage(flatten)]
 		args: Args,
@@ -191,6 +201,15 @@ mod tests {
 			let argv: Vec<&std::ffi::OsStr> = refused.iter().map(std::ffi::OsStr::new).collect();
 			assert!(Cli::parse_from(&argv).is_err(), "{refused:?} parsed");
 		}
+	}
+
+	/// The metrics count the speaker alone, so they need audio-only playback.
+	#[test]
+	fn metrics_need_audio_only_playback() {
+		let args = parse(&["--no-video", "--metrics", "play.ndjson"]);
+		assert_eq!(args.metrics, Some(PathBuf::from("play.ndjson")));
+		let argv: Vec<&std::ffi::OsStr> = ["--metrics", "play.ndjson"].iter().map(std::ffi::OsStr::new).collect();
+		assert!(Cli::parse_from(&argv).is_err(), "--metrics parsed without --no-video");
 	}
 
 	/// A fixed delay is the playout offset and the staleness budget at once.

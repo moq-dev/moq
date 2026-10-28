@@ -1,3 +1,4 @@
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use crate::{auth, cache, cluster, internal, stats, web};
@@ -7,26 +8,30 @@ use crate::{auth, cache, cluster, internal, stats, web};
 /// Loadable from CLI arguments, environment variables, or a TOML file.
 /// Precedence is CLI > env > file > defaults.
 ///
-/// `usage::Args` rather than `usage::Cli` on purpose: the program-level parts (a
+/// `usage_rs::Args` rather than `usage_rs::Cli` on purpose: the program-level parts (a
 /// name, a version, the completion command) belong to whichever binary owns the
 /// process, and a `Cli` cannot be `#[usage(flatten)]`ed into another one. Keeping
 /// them off this type is what lets an embedder put the relay's whole flag surface
-/// inside its own CLI -- moq.pro's `edge` does exactly that -- instead of
-/// re-declaring it and drifting on every flag added here. This binary wraps it in
+/// inside its own CLI instead of re-declaring it and drifting on every flag added
+/// here. This binary wraps it in
 /// a private `Cli` that adds those program-level parts; [`spec`] exposes the
 /// resulting command line.
-#[derive(usage::Args, Clone, Debug, Deserialize, Serialize)]
+#[derive(usage_rs::Args, Clone, Debug, Deserialize, Serialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
+#[derive(Default)]
 pub struct Config {
-	/// Request caps for ordinary client sessions.
+	/// Request and transport limits grouped by client and cluster-peer role.
 	#[usage(flatten)]
-	pub session: crate::limits::Session,
+	pub limits: crate::limits::Config,
 
-	/// Request caps for authenticated peers and outgoing cluster links.
-	#[usage(flatten)]
-	pub peer: crate::limits::Peer,
+	#[usage(skip)]
+	#[serde(rename = "session", skip_serializing)]
+	legacy_session: Option<serde::de::IgnoredAny>,
+	#[usage(skip)]
+	#[serde(rename = "peer", skip_serializing)]
+	legacy_peer: Option<serde::de::IgnoredAny>,
 
 	/// The QUIC/TLS configuration for the server.
 	#[usage(flatten)]
@@ -80,7 +85,13 @@ pub struct Config {
 	#[serde(default)]
 	pub web: web::Config,
 
-	/// Optional public STUN Binding listener for application-selected ICE servers.
+	/// Automatic certificates from an ACME directory. Disabled unless `acme.domains` is set.
+	#[usage(flatten)]
+	#[serde(default)]
+	pub acme: crate::acme::Config,
+
+	/// Optional public STUN Binding listener, available with the `stun` feature.
+	#[cfg(feature = "stun")]
 	#[usage(flatten)]
 	#[serde(default)]
 	pub stun: crate::stun::Config,
@@ -108,63 +119,30 @@ pub struct Config {
 	/// them, exiting as soon as they have all left; a second signal exits
 	/// immediately. Zero closes them at once, with no GOAWAY
 	/// they would have no time to act on. Defaults to 10 seconds.
-	#[usage(skip)]
-	#[serde(with = "crate::duration::serde_duration")]
-	pub drain_timeout: std::time::Duration,
-
 	#[usage(
 		name = "drain-timeout",
 		long = "drain-timeout",
 		env = "MOQ_DRAIN_TIMEOUT",
 		setting = "drain_timeout"
 	)]
-	#[serde(default, rename = "__cli_drain_timeout", skip_serializing_if = "Option::is_none")]
-	drain_timeout_arg: Option<crate::duration::Duration>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub drain_timeout: Option<moq_tokio::cli::Duration>,
 
 	/// If provided, load the configuration from this file.
 	#[serde(default)]
-	#[usage(value_hint = usage::ValueHint::FilePath, extensions("toml"))]
+	#[usage(value_hint = usage_rs::ValueHint::FilePath, extensions("toml"))]
 	pub file: Option<String>,
 
 	/// Provenance from the last load, skipped in TOML.
 	#[usage(skip)]
 	#[serde(skip)]
-	origins: Option<usage::config::Resolved>,
+	origins: Option<usage_rs::config::Resolved>,
 
 	/// Iroh specific configuration, used for both a client and server.
 	#[usage(flatten)]
 	#[serde(default)]
 	#[cfg(feature = "iroh")]
 	pub iroh: moq_tokio::iroh::Config,
-}
-
-impl Default for Config {
-	fn default() -> Self {
-		Self {
-			session: Default::default(),
-			peer: Default::default(),
-			listen: Default::default(),
-			server: None,
-			connect: Default::default(),
-			client: None,
-			quic: Default::default(),
-			log: Default::default(),
-			runtime: Default::default(),
-			cluster: Default::default(),
-			auth: Default::default(),
-			web: Default::default(),
-			stun: Default::default(),
-			stats: Default::default(),
-			cache: Default::default(),
-			internal: Default::default(),
-			drain_timeout: crate::DEFAULT_DRAIN_TIMEOUT,
-			drain_timeout_arg: None,
-			file: None,
-			origins: None,
-			#[cfg(feature = "iroh")]
-			iroh: Default::default(),
-		}
-	}
 }
 
 /// Top-level relay configuration, loadable from CLI arguments, environment
@@ -180,7 +158,7 @@ impl Default for Config {
 // binary: an embedder declares its own and flattens `Config` into it, so nothing
 // outside needs to name this one. What callers do need -- the program's spec,
 // for completions, docs, and the released-flag test -- is `spec`.
-#[derive(usage::Cli, Clone, Debug)]
+#[derive(usage_rs::Cli, Clone, Debug)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[usage(name = "moq-relay", version = env!("CARGO_PKG_VERSION"))]
 #[usage(completion, settings)]
@@ -196,21 +174,21 @@ struct Cli {
 /// the PROGRAM's, and `Config` is a composable fragment -- an embedder that
 /// flattens it has its own spec, so `Config::spec()` would hand back the wrong
 /// one and read as though it were theirs.
-pub fn spec() -> &'static usage::spec::Spec<'static> {
+pub fn spec() -> &'static usage_rs::spec::Spec<'static> {
 	Cli::spec()
 }
 
 impl Config {
 	/// Resolve the shutdown grace period after command-line overrides.
 	pub(crate) fn drain_timeout(&self) -> std::time::Duration {
-		self.drain_timeout_arg
-			.map(crate::duration::Duration::into_std)
-			.unwrap_or(self.drain_timeout)
+		self.drain_timeout
+			.map(Into::into)
+			.unwrap_or(crate::DEFAULT_DRAIN_TIMEOUT)
 	}
 
 	/// Parses configuration from CLI arguments, optionally merging with a
-	/// TOML file specified via the positional `file` argument. Also initializes
-	/// the logger.
+	/// TOML file specified via the positional `file` argument, and refuses any
+	/// `MOQ_*` variable the relay does not read. Also initializes the logger.
 	pub fn load() -> anyhow::Result<Self> {
 		let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
 		// `#[usage(completion)]` installs the `__complete_word__` interception in the
@@ -222,6 +200,7 @@ impl Config {
 			std::process::exit(0);
 		}
 		let config = Self::parse_and_merge(args)?;
+		moq_tokio::cli::check_env(&[Cli::spec()], &[])?;
 		config.log.init()?;
 		tracing::trace!(?config, "final config");
 		Ok(config)
@@ -261,8 +240,18 @@ impl Config {
 				anyhow::bail!("{}", answer.message());
 			}
 		};
-		let env = usage::config::EnvLayer::from_process();
-		let file_path = cli.config.file.clone();
+		let mut config = cli.config;
+		config.merge(&cli_layer)?;
+		Ok(config)
+	}
+
+	/// Load this relay's optional file, merge explicit CLI and environment values, and refuse obsolete settings.
+	///
+	/// Call once after the embedding CLI's `parse_from_with_settings`; only this relay
+	/// fragment is replaced, so the root's CLI-only fields retain their parsed values.
+	/// [`Self::source`] reports where each merged setting came from.
+	pub fn merge(&mut self, cli: &usage_rs::config::CliLayer) -> anyhow::Result<()> {
+		let file_path = self.file.clone();
 		let file_body = file_path
 			.as_ref()
 			.map(|path| std::fs::read_to_string(path).map(|source| (path.clone(), source)))
@@ -278,21 +267,25 @@ impl Config {
 				path: std::path::Path::new(path),
 				value,
 			});
-		let mut config = cli.config;
-		config.merge_into(&cli_layer, &env, file)?;
-		Ok(config)
+		self.merge_into(cli, &usage_rs::config::EnvLayer::from_process(), file)
 	}
 
 	/// Merge CLI, environment, and optional TOML values into this relay fragment.
 	///
 	/// An embedding binary can parse its own flattened CLI once, then merge only
 	/// its `relay` field. Other CLI-only fields remain untouched.
-	pub fn merge_into(
+	fn merge_into(
 		&mut self,
-		cli: &usage::config::CliLayer,
-		env: &usage::config::EnvLayer,
+		cli: &usage_rs::config::CliLayer,
+		env: &usage_rs::config::EnvLayer,
 		file: Option<moq_tokio::cli::FileSource<'_>>,
 	) -> anyhow::Result<()> {
+		#[cfg(not(feature = "stun"))]
+		anyhow::ensure!(
+			env.get("MOQ_STUN_BIND").is_none(),
+			"MOQ_STUN_BIND requires a moq-relay build with the stun feature"
+		);
+
 		#[cfg(not(feature = "iroh"))]
 		for name in [
 			"MOQ_IROH_ENABLED",
@@ -328,7 +321,7 @@ impl Config {
 		self.origins
 			.as_ref()
 			.and_then(|resolved| resolved.origin_key(key))
-			.map(usage::config::Origin::describe)
+			.map(usage_rs::config::Origin::describe)
 	}
 }
 
@@ -337,10 +330,18 @@ impl Config {
 	/// replaced it.
 	fn deprecated(&self) -> moq_tokio::cli::Deprecated {
 		let mut deprecated = self.quic.deprecated();
+		deprecated.extend(self.limits.legacy.deprecated());
+		if self.legacy_session.is_some() {
+			deprecated.toml("[session]", "[limits.client]", None);
+		}
+		if self.legacy_peer.is_some() {
+			deprecated.toml("[peer]", "[limits.peer]", None);
+		}
 		deprecated.extend(self.listen.deprecated());
 		deprecated.extend(self.connect.deprecated());
 		deprecated.extend(self.cluster.deprecated());
 		deprecated.extend(self.auth.deprecated());
+		deprecated.extend(self.acme.deprecated());
 		if let Some(server) = &self.server {
 			deprecated.toml("[server]", "[listen]", None);
 			deprecated.extend(server.deprecated());
@@ -361,12 +362,16 @@ impl Config {
 	pub(crate) fn resolve(&mut self) -> anyhow::Result<()> {
 		let deprecated = self.deprecated();
 		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
+		// Here rather than at an endpoint, since io_uring workers and lazily built
+		// dial clients would otherwise check `[quic]` late or never. `[limits.peer.quic]`
+		// is checked by `Cluster::new`, which embedders call directly.
+		self.quic.validate().context("invalid [quic]")?;
+		#[cfg(not(feature = "acme"))]
+		self.acme.refuse_unsupported()?;
 
 		self.quic
 			.max_streams
 			.get_or_insert(moq_tokio::quic::DEFAULT_MAX_STREAMS);
-		self.drain_timeout = self.drain_timeout();
-		self.drain_timeout_arg = None;
 		Ok(())
 	}
 }
@@ -374,11 +379,120 @@ impl Config {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::test_env::EnvGuard;
 
+	/// Each renamed setting: its old flag, old variable, a value equal to the old default,
+	/// and the replacement its refusal names.
+	const OBSOLETE_ROLE_SOURCES: [(&str, &str, &str, &str); 6] = [
+		(
+			"--session-announces",
+			"MOQ_SESSION_ANNOUNCES",
+			"1000",
+			"--limits-client-announces",
+		),
+		(
+			"--peer-announces",
+			"MOQ_PEER_ANNOUNCES",
+			"100000",
+			"--limits-peer-announces",
+		),
+		("--acme-dir", "MOQ_ACME_DIR", "cache", "--acme-cache"),
+		(
+			"--cluster-connect-api",
+			"MOQ_CLUSTER_CONNECT_API",
+			"peers.json",
+			"--cluster-api-url",
+		),
+		(
+			"--cluster-connect-api-tls-root",
+			"MOQ_CLUSTER_CONNECT_API_TLS_ROOT",
+			"api.pem",
+			"--cluster-api-tls-root",
+		),
+		(
+			"--auth-verifications",
+			"MOQ_AUTH_VERIFICATIONS",
+			"128",
+			"fixed per-session verification policy",
+		),
+	];
+
+	/// Renames refuse an explicit variable even when its value equals the old default.
 	#[test]
-	fn stun_binding_merges_file_environment_and_cli() {
-		let _env = EnvGuard::clear(&["MOQ_STUN_BIND"]);
+	fn role_config_refuses_obsolete_env() {
+		let env = OBSOLETE_ROLE_SOURCES
+			.iter()
+			.fold(test_env::Env::default(), |env, (_, var, value, _)| env.set(var, value));
+		if !env.isolate() {
+			return;
+		}
+		let error = Config::parse_and_merge(["moq-relay"]).unwrap_err().to_string();
+		for (_, var, _, replacement) in OBSOLETE_ROLE_SOURCES {
+			assert!(error.contains(var) && error.contains(replacement), "{var}: {error}");
+		}
+	}
+
+	/// Renames refuse an explicit flag or file setting even when its value equals the old default.
+	#[test]
+	fn role_config_refuses_obsolete_sources() {
+		if !test_env::Env::without(&OBSOLETE_ROLE_SOURCES.map(|(_, var, _, _)| var)).isolate() {
+			return;
+		}
+		for (flag, _, value, replacement) in OBSOLETE_ROLE_SOURCES {
+			let error = Config::parse_and_merge(["moq-relay", flag, value])
+				.unwrap_err()
+				.to_string();
+			assert!(error.contains(flag) && error.contains(replacement), "{error}");
+		}
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("obsolete.toml");
+		for (body, replacement) in [
+			("[session]\nannounces = 1000", "[limits.client]"),
+			("[peer]\nannounces = 100000", "[limits.peer]"),
+			("[acme]\ndir = 'cache'", "[acme] cache"),
+			("[cluster]\nconnect_api = 'peers.json'", "[cluster.api] url"),
+			("[cluster]\nconnect_api_tls_root = []", "[cluster.api.tls] root"),
+			("[auth]\nverifications = 128", "fixed per-session verification policy"),
+		] {
+			std::fs::write(&path, body).unwrap();
+			let error =
+				Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.clone().into()]).unwrap_err();
+			assert!(error.to_string().contains(replacement), "{body}: {error}");
+		}
+	}
+
+	#[cfg(not(feature = "acme"))]
+	#[test]
+	fn an_acme_free_build_refuses_configured_issuance() {
+		let mut config = Config::default();
+		config.resolve().unwrap();
+		config.acme.domains.push("relay.example.com".into());
+		let error = config.resolve().unwrap_err();
+		assert!(error.to_string().contains("acme feature"), "{error}");
+	}
+
+	/// The moq-transport extension choices are file-only, so the loader must carry them through.
+	#[test]
+	fn loader_keeps_toml_extension_settings() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("relay.toml");
+		std::fs::write(
+			&path,
+			"[listen.extensions]\nauth = false\n\n[connect.extensions]\nsolicit = false\n",
+		)
+		.unwrap();
+		let config = Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.into()]).unwrap();
+		assert!(!config.listen.extensions.auth);
+		assert!(config.listen.extensions.solicit);
+		assert!(!config.connect.extensions.solicit);
+		assert!(config.connect.extensions.auth);
+	}
+
+	#[cfg(feature = "stun")]
+	#[test]
+	fn stun_binding_merges_file_and_cli() {
+		if !test_env::Env::without(&["MOQ_STUN_BIND"]).isolate() {
+			return;
+		}
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("stun.toml");
 		std::fs::write(&path, "[stun]\nbind = \"127.0.0.1:3478\"\n").unwrap();
@@ -391,54 +505,129 @@ mod tests {
 		])
 		.unwrap();
 		assert_eq!(cli.stun.bind, Some("127.0.0.1:3479".parse().unwrap()));
-		// SAFETY: EnvGuard holds the shared lock until this variable is restored.
-		unsafe {
-			std::env::set_var("MOQ_STUN_BIND", "[::1]:3478");
+		assert!(toml::from_str::<Config>("[stun]\nrate = 10").is_err());
+	}
+
+	#[cfg(not(feature = "stun"))]
+	#[test]
+	fn a_stun_listener_requires_the_feature() {
+		assert!(toml::from_str::<Config>("[stun]\nbind = \"127.0.0.1:3478\"").is_err());
+		assert!(Config::parse_and_merge(["moq-relay", "--stun-bind=127.0.0.1:3478"]).is_err());
+		let cli = usage_rs::config::CliLayer::new(std::iter::empty::<(String, String)>());
+		let env = usage_rs::config::EnvLayer::new([("MOQ_STUN_BIND".to_string(), "127.0.0.1:3478".to_string())]);
+		let error = Config::default().merge_into(&cli, &env, None).unwrap_err();
+		assert!(error.to_string().contains("MOQ_STUN_BIND requires"), "{error}");
+	}
+
+	#[cfg(feature = "stun")]
+	#[test]
+	fn stun_binding_merges_the_environment() {
+		if !test_env::Env::default().set("MOQ_STUN_BIND", "[::1]:3478").isolate() {
+			return;
 		}
 		let config = Config::parse_and_merge(["moq-relay"]).unwrap();
 		assert_eq!(config.stun.bind, Some("[::1]:3478".parse().unwrap()));
-		assert!(toml::from_str::<Config>("[stun]\nrate = 10").is_err());
 	}
 
 	#[test]
 	fn session_limits_merge_without_crossing_peer_policy() {
-		let _env = EnvGuard::clear(&[
-			"MOQ_SESSION_ANNOUNCES",
-			"MOQ_SESSION_SUBSCRIPTIONS",
-			"MOQ_SESSION_FETCHES",
-			"MOQ_PEER_FETCHES",
-			"MOQ_PEER_ANNOUNCES",
-			"MOQ_PEER_SUBSCRIPTIONS",
-		]);
+		if !test_env::Env::without(&["MOQ_LIMITS_CLIENT_ANNOUNCES", "MOQ_LIMITS_PEER_ANNOUNCES"]).isolate() {
+			return;
+		}
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("limits.toml");
-		std::fs::write(
-			&path,
-			"[session]\nannounces = 7\nsubscriptions = 8\nfetches = 9\n[peer]\nannounces = 90\nsubscriptions = 91\nfetches = 92\n",
-		)
-		.unwrap();
+		std::fs::write(&path, "[limits.client]\nannounces = 7\n[limits.peer]\nannounces = 90\n").unwrap();
 		let config = Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.clone().into()]).unwrap();
-		assert_eq!(config.session.resolve().announces, 7);
-		assert_eq!(config.session.resolve().subscriptions, 8);
-		assert_eq!(config.peer.resolve().announces, 90);
-		assert_eq!(config.peer.resolve().subscriptions, 91);
-		assert_eq!(config.session.resolve().fetches, 9);
-		assert_eq!(config.peer.resolve().fetches, 92);
+		assert_eq!(config.limits.client.resolve().announces, 7);
+		assert_eq!(config.limits.peer.resolve().announces, 90);
 		let config = Config::parse_and_merge([
 			std::ffi::OsString::from("moq-relay"),
 			path.into(),
-			"--session-announces=0".into(),
-			"--peer-subscriptions=1000".into(),
-			"--session-fetches=0".into(),
-			"--peer-fetches=2000".into(),
+			"--limits-client-announces=0".into(),
 		])
 		.unwrap();
-		assert_eq!(config.session.resolve().announces, 0);
-		assert_eq!(config.session.resolve().subscriptions, 8);
-		assert_eq!(config.peer.resolve().announces, 90);
-		assert_eq!(config.peer.resolve().subscriptions, 1000);
-		assert_eq!(config.session.resolve().fetches, 0);
-		assert_eq!(config.peer.resolve().fetches, 2000);
+		assert_eq!(config.limits.client.resolve().announces, 0);
+		assert_eq!(config.limits.peer.resolve().announces, 90);
+	}
+
+	/// Sizing the removed request window refuses to start rather than run without the
+	/// setting.
+	#[test]
+	fn removed_request_limits_are_refused() {
+		if !test_env::Env::without(&["MOQ_LIMITS_CLIENT_REQUESTS", "MOQ_LIMITS_PEER_REQUESTS"]).isolate() {
+			return;
+		}
+		let error = Config::parse_and_merge(["moq-relay", "--limits-peer-requests=1000"]).unwrap_err();
+		assert!(error.to_string().contains("--limits-peer-requests"), "{error}");
+
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("limits.toml");
+		std::fs::write(&path, "[limits.client]\nrequests = 8\n").unwrap();
+		assert!(Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.into()]).is_err());
+	}
+
+	/// `[limits.peer.quic]` mirrors `[quic]`'s keys without touching `[quic]` itself.
+	#[test]
+	fn peer_quic_table_merges_with_flags() {
+		if !test_env::Env::without(&[
+			"MOQ_QUIC_MAX_STREAMS",
+			"MOQ_LIMITS_PEER_QUIC_MAX_STREAMS",
+			"MOQ_LIMITS_PEER_QUIC_RECEIVE_WINDOW",
+			"MOQ_LIMITS_PEER_QUIC_SEND_WINDOW",
+		])
+		.isolate()
+		{
+			return;
+		}
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("peer-quic.toml");
+		std::fs::write(
+			&path,
+			"[quic]\nmax_streams = 4\n[limits.peer.quic]\nmax_streams = 64\nsend_window = 1000\n",
+		)
+		.unwrap();
+		let config = Config::parse_and_merge([
+			std::ffi::OsString::from("moq-relay"),
+			path.into(),
+			"--limits-peer-quic-receive-window=2000".into(),
+		])
+		.unwrap();
+		assert_eq!(config.quic.max_streams, Some(4));
+		assert_eq!(config.limits.peer.quic.max_streams.get(), 64);
+		assert_eq!(config.limits.peer.quic.receive_window.get(), 2000);
+		assert_eq!(config.limits.peer.quic.send_window.get(), 1000);
+
+		assert!(toml::from_str::<Config>("[limits.peer]\nmax_streams = 64\n").is_err());
+	}
+
+	/// A zero peer stream limit or window would wedge the connection, so it never parses.
+	#[test]
+	fn zero_peer_quic_limits_are_refused() {
+		if !test_env::Env::without(&[
+			"MOQ_LIMITS_PEER_QUIC_MAX_STREAMS",
+			"MOQ_LIMITS_PEER_QUIC_RECEIVE_WINDOW",
+			"MOQ_LIMITS_PEER_QUIC_SEND_WINDOW",
+		])
+		.isolate()
+		{
+			return;
+		}
+		for key in ["max_streams", "receive_window", "send_window"] {
+			assert!(
+				toml::from_str::<Config>(&format!("[limits.peer.quic]\n{key} = 0\n")).is_err(),
+				"{key}"
+			);
+		}
+		for flag in [
+			"--limits-peer-quic-max-streams=0",
+			"--limits-peer-quic-receive-window=0",
+			"--limits-peer-quic-send-window=0",
+		] {
+			assert!(
+				Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), flag.into()]).is_err(),
+				"{flag} must be refused"
+			);
+		}
 	}
 
 	#[cfg(not(feature = "iroh"))]
@@ -452,8 +641,8 @@ mod tests {
 			"MOQ_IROH_DISABLE_RELAY",
 		] {
 			let mut config = Config::default();
-			let cli = usage::config::CliLayer::new(std::iter::empty::<(String, String)>());
-			let env = usage::config::EnvLayer::new([(name.to_string(), "false".to_string())]);
+			let cli = usage_rs::config::CliLayer::new(std::iter::empty::<(String, String)>());
+			let env = usage_rs::config::EnvLayer::new([(name.to_string(), "false".to_string())]);
 			let error = config.merge_into(&cli, &env, None).unwrap_err();
 			assert!(error.to_string().contains(name), "{error}");
 		}
@@ -480,7 +669,9 @@ mod tests {
 	/// The relay's own default still applies once the released spellings are gone.
 	#[test]
 	fn the_relay_default_applies() {
-		let _env = EnvGuard::clear(&["MOQ_QUIC_MAX_STREAMS", "MOQ_SERVER_QUIC_MAX_STREAMS"]);
+		if !test_env::Env::without(&["MOQ_QUIC_MAX_STREAMS", "MOQ_SERVER_QUIC_MAX_STREAMS"]).isolate() {
+			return;
+		}
 
 		let mut config = Cli::parse_from(&[std::ffi::OsStr::new("--quic-max-streams"), std::ffi::OsStr::new("4096")])
 			.unwrap()
@@ -500,12 +691,16 @@ mod tests {
 	/// deployment's certificate silently absent.
 	#[test]
 	fn released_listen_spellings_refuse_to_boot() {
-		let _env = EnvGuard::clear(&[
+		if !test_env::Env::without(&[
 			"MOQ_LISTEN",
 			"MOQ_SERVER_BIND",
 			"MOQ_LISTEN_TLS_CERT",
 			"MOQ_SERVER_TLS_CERT",
-		]);
+		])
+		.isolate()
+		{
+			return;
+		}
 
 		let mut config = Cli::parse_from(&[
 			std::ffi::OsStr::new("--server-bind"),
@@ -585,30 +780,42 @@ root = ["ca.pem"]
 		}
 	}
 
+	/// The released auth variables, each with the spelling its refusal names.
+	const RELEASED_AUTH_ENV: [(&str, &str); 7] = [
+		("MOQ_AUTH_KEY", "--auth-key / MOQ_AUTH_KEY"),
+		("MOQ_AUTH_KEY_DIR", "--auth-key-dir / MOQ_AUTH_KEY_DIR"),
+		("MOQ_AUTH_API", "--auth-api / MOQ_AUTH_API"),
+		("MOQ_AUTH_PUBLIC_API", "--auth-public-api / MOQ_AUTH_PUBLIC_API"),
+		("MOQ_AUTH_DOMAIN", "--auth-domain / MOQ_AUTH_DOMAIN"),
+		("MOQ_AUTH_MTLS_TIER", "--auth-mtls-tier / MOQ_AUTH_MTLS_TIER"),
+		("MOQ_AUTH_TLS_ROOT", "--auth-tls-* / MOQ_AUTH_TLS_*"),
+	];
+
 	/// The environment is the half a removed flag silently misses: a relay deployed
 	/// through it never typed the flag.
 	#[test]
 	fn released_auth_env_refuses_to_boot() {
-		let vars = [
-			("MOQ_AUTH_KEY", "--auth-key / MOQ_AUTH_KEY"),
-			("MOQ_AUTH_KEY_DIR", "--auth-key-dir / MOQ_AUTH_KEY_DIR"),
-			("MOQ_AUTH_API", "--auth-api / MOQ_AUTH_API"),
-			("MOQ_AUTH_PUBLIC_API", "--auth-public-api / MOQ_AUTH_PUBLIC_API"),
-			("MOQ_AUTH_DOMAIN", "--auth-domain / MOQ_AUTH_DOMAIN"),
-			("MOQ_AUTH_MTLS_TIER", "--auth-mtls-tier / MOQ_AUTH_MTLS_TIER"),
-			("MOQ_AUTH_TLS_ROOT", "--auth-tls-* / MOQ_AUTH_TLS_*"),
-		];
-		let _env = EnvGuard::clear(&vars.map(|(var, _)| var));
-		for (var, spelling) in vars {
-			unsafe { std::env::set_var(var, "x") };
-			let err = Config::parse_and_merge(["moq-relay", "--auth-public", "**"])
-				.expect_err("must refuse")
-				.to_string();
-			unsafe { std::env::remove_var(var) };
+		let env = RELEASED_AUTH_ENV
+			.iter()
+			.fold(test_env::Env::default(), |env, (var, _)| env.set(var, "x"));
+		if !env.isolate() {
+			return;
+		}
+		// One refusal names every variable, so the operator fixes them all in one pass.
+		let err = Config::parse_and_merge(["moq-relay", "--auth-public", "**"])
+			.expect_err("must refuse")
+			.to_string();
+		for (var, spelling) in RELEASED_AUTH_ENV {
 			assert!(err.contains(spelling), "{var}: {err}");
 		}
+	}
 
-		// 0.14 took the bare flag, so it has to parse to be refused by name.
+	/// 0.14 took the bare flag, so it has to parse to be refused by name.
+	#[test]
+	fn released_auth_flag_refuses_to_boot() {
+		if !test_env::Env::without(&RELEASED_AUTH_ENV.map(|(var, _)| var)).isolate() {
+			return;
+		}
 		let err = Config::parse_and_merge(["moq-relay", "--auth-public", "**", "--auth-tls-disable-verify"])
 			.expect_err("must refuse")
 			.to_string();
@@ -623,7 +830,9 @@ root = ["ca.pem"]
 	/// the operator fix one, rerun, and hit the other.
 	#[test]
 	fn released_spellings_refuse_across_the_merge() {
-		let _env = EnvGuard::clear(&["MOQ_LISTEN", "MOQ_SERVER_BIND"]);
+		if !test_env::Env::without(&["MOQ_LISTEN", "MOQ_SERVER_BIND"]).isolate() {
+			return;
+		}
 
 		let dir = std::env::temp_dir().join("moq-relay-config-test");
 		std::fs::create_dir_all(&dir).unwrap();
@@ -653,37 +862,72 @@ root = ["ca.pem"]
 		assert_eq!(config.quic.max_streams, Some(128));
 	}
 
-	/// Every config under `demo/relay/` still parses.
-	///
-	/// These are the configs a reader copies, and a rename that lands in the code
-	/// but not in them is invisible until someone's relay refuses to boot. A move
-	/// across tables (`[server.quic]` to a top-level `[quic]`) is the case serde
-	/// aliases cannot cover, which is exactly why this reads the real files.
+	/// Real relay examples, packaging and test fixtures use the same loader as an embedding CLI.
 	#[test]
-	fn demo_configs_parse() {
-		let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../demo/relay");
-		let mut checked = 0;
-		for entry in std::fs::read_dir(&dir).expect("demo/relay") {
-			let path = entry.expect("dir entry").path();
-			if path.extension().is_none_or(|ext| ext != "toml") {
-				continue;
+	fn repository_configs_load() {
+		let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+		// Only repository inputs belong here; installed clients and build output below
+		// test/ can contain unrelated TOML. Git's tracked list also includes new fixtures.
+		let tracked = std::process::Command::new("git")
+			.args(["ls-files", "-z", "--", "demo/relay", "packaging", "test"])
+			.current_dir(&root)
+			.output()
+			.expect("list repository fixtures");
+		assert!(tracked.status.success());
+		let tracked = String::from_utf8(tracked.stdout).unwrap();
+		for area in ["demo/relay", "packaging", "test"] {
+			let mut checked = 0;
+			for name in tracked.split('\0').filter(|name| name.starts_with(area)) {
+				let path = root.join(name);
+				if path.extension().is_none_or(|ext| ext != "toml")
+					|| matches!(
+						path.file_name().and_then(|name| name.to_str()),
+						Some("Cargo.toml" | "rust-toolchain.toml" | ".rustfmt.toml")
+					) {
+					continue;
+				}
+				let result = Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.clone().into()]);
+				if path.file_name().unwrap() == "smoke-legacy.toml" {
+					let error = result.expect_err("the published legacy fixture must be refused");
+					assert!(error.to_string().contains("[server]"), "{}: {error}", path.display());
+				} else {
+					result.unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+				}
+				checked += 1;
 			}
-			let toml = std::fs::read_to_string(&path).expect("read config");
-			toml::from_str::<Config>(&toml).unwrap_or_else(|err| panic!("{}: {err}", path.display()));
-			checked += 1;
+			assert!(checked > 0, "no relay fixtures found in {area}");
 		}
-		assert!(checked > 0, "no demo configs found in {}", dir.display());
+	}
+
+	/// Stats enabled from the CLI alone build at the producer's default interval:
+	/// the parser fills a field it skips with its type's zero, not `Default`.
+	#[tokio::test]
+	async fn cli_stats_build_without_an_interval() {
+		if !test_env::Env::without(&["MOQ_STATS_ENABLED", "MOQ_STATS_INTERVAL"]).isolate() {
+			return;
+		}
+
+		let args = [
+			std::ffi::OsString::from("moq-relay"),
+			std::ffi::OsString::from("--stats-enabled"),
+		];
+		let config = Config::parse_and_merge(args).expect("config load");
+		assert!(config.stats.enabled);
+		let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster");
+		config.stats.build(cluster.origin.clone()).expect("stats build");
 	}
 
 	/// Bare defaults loaded from TOML survive when the CLI does not mention them.
 	#[test]
 	fn cli_does_not_clobber_toml_stats_enabled() {
-		let _env = EnvGuard::clear(&["MOQ_STATS_ENABLED", "MOQ_STATS_DEPTH", "MOQ_STATS_LINGER"]);
+		if !test_env::Env::without(&["MOQ_STATS_ENABLED", "MOQ_STATS_DEPTH", "MOQ_STATS_LINGER"]).isolate() {
+			return;
+		}
 
 		let toml = r#"
 [stats]
 enabled = true
-interval = 5
+interval = "5s"
 node = "localhost"
 depth = 2
 linger = "2m"
@@ -700,7 +944,7 @@ linger = "2m"
 			config.stats.enabled,
 			"TOML's stats.enabled=true must not be clobbered by CLI defaults"
 		);
-		assert_eq!(config.stats.interval, 5);
+		assert_eq!(config.stats.interval(), Some(std::time::Duration::from_secs(5)));
 		assert_eq!(config.stats.node.as_deref(), Some("localhost"));
 		assert_eq!(config.stats.depth, 2);
 		assert_eq!(config.stats.linger(), Some(std::time::Duration::from_secs(120)));
@@ -709,21 +953,27 @@ linger = "2m"
 			std::ffi::OsString::from("moq-relay"),
 			std::ffi::OsString::from(&path),
 			std::ffi::OsString::from("--stats-linger=30s"),
+			std::ffi::OsString::from("--stats-interval=250ms"),
 		];
 		let config = Config::parse_and_merge(args).expect("config load");
 		assert_eq!(config.stats.linger(), Some(std::time::Duration::from_secs(30)));
+		assert_eq!(config.stats.interval(), Some(std::time::Duration::from_millis(250)));
 	}
 
 	/// Bare runtime defaults loaded from TOML survive when the CLI omits them.
 	#[test]
 	fn cli_does_not_clobber_toml_runtime() {
-		let _env = EnvGuard::clear(&[
+		if !test_env::Env::without(&[
 			"MOQ_RUNTIME_WORKERS",
 			"MOQ_RUNTIME_PIN",
 			"MOQ_RUNTIME_IO_URING",
 			"MOQ_WEB_WS",
 			"MOQ_CONNECT_WEBSOCKET_ENABLED",
-		]);
+		])
+		.isolate()
+		{
+			return;
+		}
 
 		let toml = r#"
 [runtime]
@@ -740,7 +990,7 @@ ws = false
 		let dir = std::env::temp_dir().join("moq-relay-config-test");
 		std::fs::create_dir_all(&dir).unwrap();
 		let path = dir.join("runtime-toml-wins.toml");
-		std::fs::write(&path, &toml).unwrap();
+		std::fs::write(&path, toml.as_bytes()).unwrap();
 
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
 		let config = Config::parse_and_merge(args).expect("config load");
@@ -774,44 +1024,13 @@ ws = false
 		assert_eq!(config.connect.websocket.enabled, Some(true));
 	}
 
-	#[test]
-	fn cli_does_not_clobber_toml_cache() {
-		let _env = EnvGuard::clear(&["MOQ_CACHE_CAPACITY", "MOQ_CACHE_HEADROOM", "MOQ_CACHE_DURATION"]);
-
-		let toml = r#"
-[cache]
-capacity = "8GiB"
-headroom = "10%"
-duration = "30s"
-"#;
-		let dir = std::env::temp_dir().join("moq-relay-config-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("cache-toml-wins.toml");
-		std::fs::write(&path, toml).unwrap();
-
-		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
-		let config = Config::parse_and_merge(args).expect("config load");
-
-		assert_eq!(
-			config.cache.capacity.as_deref(),
-			Some("8GiB"),
-			"TOML's cache.capacity must not be clobbered by the CLI re-parse"
-		);
-		assert_eq!(config.cache.headroom.as_deref(), Some("10%"));
-		assert_eq!(
-			config.cache.duration,
-			Some(std::time::Duration::from_secs(30)),
-			"TOML's cache.duration must not be clobbered by the CLI re-parse"
-		);
-	}
-
 	/// `cache.duration` is an `Option<Duration>` behind plain `humantime_serde`
 	/// (not `humantime_serde::option`), so pin both directions including the
-	/// `None` serialize path, which the merge test above never exercises.
+	/// `None` serialize path, which `provenance_merge_table` never exercises.
 	#[test]
 	fn cache_duration_serde_round_trip() {
 		let set: cache::Config = toml::from_str(r#"duration = "30s""#).expect("deserialize Some");
-		assert_eq!(set.duration, Some(std::time::Duration::from_secs(30)));
+		assert_eq!(set.duration, Some(std::time::Duration::from_secs(30).into()));
 
 		let unset: cache::Config = toml::from_str("").expect("deserialize absent");
 		assert_eq!(unset.duration, None);
@@ -821,375 +1040,6 @@ duration = "30s"
 		assert_eq!(decoded.duration, set.duration, "round trip must preserve the duration");
 
 		toml::to_string(&unset).expect("serialize None");
-	}
-
-	/// Preferred addresses loaded from TOML survive when the CLI omits them.
-	#[test]
-	fn cli_does_not_clobber_toml_preferred_addresses() {
-		let _env = EnvGuard::clear(&["MOQ_LISTEN_PREFERRED_V4", "MOQ_LISTEN_PREFERRED_V6"]);
-
-		// They are accept-only, so they live on `[listen]` rather than in the
-		// shared `[listen.quic]` tuning.
-		let toml = r#"
-[listen]
-preferred_v4 = "192.0.2.1:443"
-preferred_v6 = "[2001:db8::1]:443"
-"#;
-		let dir = std::env::temp_dir().join("moq-relay-config-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("preferred-toml-wins.toml");
-		std::fs::write(&path, toml).unwrap();
-
-		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
-		let config = Config::parse_and_merge(args).expect("config load");
-
-		assert_eq!(
-			config.listen.preferred_v4,
-			Some("192.0.2.1:443".parse().unwrap()),
-			"TOML's listen.preferred_v4 must not be clobbered by the CLI re-parse"
-		);
-		assert_eq!(
-			config.listen.preferred_v6,
-			Some("[2001:db8::1]:443".parse().unwrap()),
-			"TOML's listen.preferred_v6 must not be clobbered by the CLI re-parse"
-		);
-	}
-
-	/// Same clobbering hazard as the preferred addresses above, for the qlog
-	/// directory: a TOML-configured trace dir must survive the CLI re-parse.
-	#[test]
-	fn cli_does_not_clobber_toml_qlog() {
-		let _env = EnvGuard::clear(&["MOQ_SERVER_QUIC_QLOG"]);
-
-		let toml = r#"
-[quic]
-qlog = "/tmp/moq-qlog"
-"#;
-		let dir = std::env::temp_dir().join("moq-relay-config-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("qlog-toml-wins.toml");
-		std::fs::write(&path, toml).unwrap();
-
-		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
-		let config = Config::parse_and_merge(args).expect("config load");
-
-		assert_eq!(
-			config.quic.qlog.as_deref(),
-			Some(std::path::Path::new("/tmp/moq-qlog")),
-			"TOML's quic.qlog must not be clobbered by the CLI re-parse"
-		);
-	}
-
-	/// A backend-specific congestion-control choice loaded from TOML survives.
-	#[test]
-	fn cli_does_not_clobber_toml_congestion_control() {
-		let _env = EnvGuard::clear(&[
-			"MOQ_SERVER_QUIC_CONGESTION_CONTROL",
-			"MOQ_CLIENT_QUIC_CONGESTION_CONTROL",
-		]);
-
-		let toml = r#"
-[quic]
-congestion_control = "delay"
-"#;
-		let dir = std::env::temp_dir().join("moq-relay-config-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("congestion-toml-wins.toml");
-		std::fs::write(&path, toml).unwrap();
-
-		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
-		let config = Config::parse_and_merge(args).expect("config load");
-
-		// One value, shared by the dial and accept sides: the knob means the same
-		// thing whichever way the connection was opened.
-		assert_eq!(
-			config.quic.congestion_control,
-			Some(moq_tokio::quic::CongestionControl::Delay),
-			"TOML's quic.congestion_control must not be clobbered by the CLI re-parse"
-		);
-	}
-
-	/// Flow-control windows loaded from TOML survive the CLI re-parse.
-	#[test]
-	fn cli_does_not_clobber_toml_windows() {
-		let _env = EnvGuard::clear(&[
-			"MOQ_QUIC_RECEIVE_WINDOW",
-			"MOQ_QUIC_STREAM_RECEIVE_WINDOW",
-			"MOQ_QUIC_SEND_WINDOW",
-		]);
-
-		let toml = r#"
-[quic]
-receive_window = 67108864
-stream_receive_window = 8388608
-send_window = 33554432
-"#;
-		let dir = std::env::temp_dir().join("moq-relay-config-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("windows-toml-wins.toml");
-		std::fs::write(&path, toml).unwrap();
-
-		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
-		let config = Config::parse_and_merge(args).expect("config load");
-
-		assert_eq!(config.quic.receive_window, Some(67108864));
-		assert_eq!(config.quic.stream_receive_window, Some(8388608));
-		assert_eq!(
-			config.quic.send_window,
-			Some(33554432),
-			"TOML's quic window sizes must not be clobbered by the CLI re-parse"
-		);
-	}
-
-	/// The client connect timeout loaded from TOML replaces the built-in default.
-	#[test]
-	fn cli_does_not_clobber_toml_client_connect_timeout() {
-		let _env = EnvGuard::clear(&["MOQ_CLIENT_CONNECT_TIMEOUT"]);
-
-		let toml = r#"
-[connect]
-timeout = "2m"
-"#;
-		let dir = std::env::temp_dir().join("moq-relay-config-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("client-connect-timeout-toml-wins.toml");
-		std::fs::write(&path, toml).unwrap();
-
-		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
-		let config = Config::parse_and_merge(args).expect("config load");
-
-		assert_eq!(config.connect.timeout, Some(std::time::Duration::from_secs(120)));
-	}
-
-	#[test]
-	fn cli_does_not_clobber_toml_web_https_cert_arrays() {
-		let _env = EnvGuard::clear(&["MOQ_WEB_HTTPS_CERT", "MOQ_WEB_HTTPS_KEY"]);
-
-		let toml = r#"
-[web.https]
-listen = "127.0.0.1:4443"
-cert = ["cdn.pem", "moq-pro.pem"]
-key = ["cdn.key", "moq-pro.key"]
-"#;
-		let dir = std::env::temp_dir().join("moq-relay-config-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("web-https-certs-toml-wins.toml");
-		std::fs::write(&path, toml).unwrap();
-
-		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
-		let config = Config::parse_and_merge(args).expect("config load");
-
-		assert_eq!(
-			config.web.https.cert,
-			vec![
-				std::path::PathBuf::from("cdn.pem"),
-				std::path::PathBuf::from("moq-pro.pem")
-			]
-		);
-		assert_eq!(
-			config.web.https.key,
-			vec![
-				std::path::PathBuf::from("cdn.key"),
-				std::path::PathBuf::from("moq-pro.key")
-			]
-		);
-	}
-
-	/// Explicit CLI flags still override TOML defaults.
-	#[test]
-	fn cli_flag_overrides_toml_stats_enabled() {
-		let _env = EnvGuard::clear(&["MOQ_STATS_ENABLED"]);
-
-		let toml = "[stats]\nenabled = true\n";
-		let dir = std::env::temp_dir().join("moq-relay-config-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("cli-wins.toml");
-		std::fs::write(&path, toml).unwrap();
-
-		let args = vec![
-			std::ffi::OsString::from("moq-relay"),
-			std::ffi::OsString::from(&path),
-			std::ffi::OsString::from("--stats-enabled=false"),
-		];
-		let config = Config::parse_and_merge(args).expect("config load");
-		assert!(!config.stats.enabled);
-	}
-
-	/// An auth server loaded from TOML survives when the CLI omits it.
-	#[test]
-	fn cli_does_not_clobber_toml_auth_url() {
-		let _env = EnvGuard::clear(&["MOQ_AUTH_URL"]);
-
-		let toml = r#"
-[auth]
-url = "https://auth.example.com/"
-"#;
-		let dir = std::env::temp_dir().join("moq-relay-config-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("auth-url-toml-wins.toml");
-		std::fs::write(&path, toml).unwrap();
-
-		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
-		let config = Config::parse_and_merge(args).expect("config load");
-
-		assert_eq!(
-			config.auth.url.as_ref().map(url::Url::as_str),
-			Some("https://auth.example.com/"),
-			"TOML's auth.url must not be clobbered by the CLI re-parse",
-		);
-	}
-
-	/// The optional system-roots policy loaded from TOML survives when omitted on the CLI.
-	#[test]
-	fn cli_does_not_clobber_toml_system_roots() {
-		let _env = EnvGuard::clear(&["MOQ_CLIENT_TLS_SYSTEM_ROOTS"]);
-
-		let toml = r#"
-[connect.tls]
-system_roots = true
-"#;
-		let dir = std::env::temp_dir().join("moq-relay-config-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("system-roots-toml-wins.toml");
-		std::fs::write(&path, toml).unwrap();
-
-		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
-		let config = Config::parse_and_merge(args).expect("config load");
-
-		assert_eq!(
-			config.connect.tls.system_roots,
-			Some(true),
-			"TOML's connect.tls.system_roots must not be clobbered by the CLI re-parse"
-		);
-	}
-
-	/// A stable cluster id loaded from TOML survives when omitted on the CLI.
-	#[test]
-	fn cli_does_not_clobber_toml_cluster_id() {
-		let _env = EnvGuard::clear(&["MOQ_CLUSTER_ID"]);
-
-		let toml = r#"
-[cluster]
-id = 12345
-"#;
-		let dir = std::env::temp_dir().join("moq-relay-config-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("cluster-id-toml-wins.toml");
-		std::fs::write(&path, toml).unwrap();
-
-		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
-		let config = Config::parse_and_merge(args).expect("config load");
-
-		assert_eq!(
-			config.cluster.id,
-			Some(12345),
-			"TOML's cluster.id must not be clobbered by the CLI re-parse"
-		);
-	}
-
-	/// The per-site stats tier flags are `Option<String>`, so an absent CLI flag
-	/// must not wipe a TOML value during the `update_from` re-parse.
-	#[test]
-	fn cli_does_not_clobber_toml_tiers() {
-		let _env = EnvGuard::clear(&["MOQ_CLUSTER_TIER"]);
-
-		let toml = r#"
-[cluster]
-tier = "region"
-"#;
-		let dir = std::env::temp_dir().join("moq-relay-config-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("tiers-toml-wins.toml");
-		std::fs::write(&path, toml).unwrap();
-
-		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
-		let config = Config::parse_and_merge(args).expect("config load");
-
-		assert_eq!(
-			config.cluster.tier.as_deref(),
-			Some("region"),
-			"TOML cluster.tier must survive"
-		);
-	}
-
-	/// A Unix listener and its allowlist loaded from TOML survive together.
-	#[cfg(all(feature = "uds", unix))]
-	#[test]
-	fn cli_does_not_clobber_toml_server_unix() {
-		let _env = EnvGuard::clear(&["MOQ_SERVER_UNIX_BIND", "MOQ_SERVER_UNIX_ALLOW_UID"]);
-
-		let toml = r#"
-[listen]
-bind = "[::]:443"
-
-[listen.unix]
-bind = "/run/moq/internal.sock"
-
-[listen.unix.allow]
-uid = [1001]
-"#;
-		let dir = std::env::temp_dir().join("moq-relay-config-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("server-unix-toml-wins.toml");
-		std::fs::write(&path, toml).unwrap();
-
-		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
-		let config = Config::parse_and_merge(args).expect("config load");
-
-		assert_eq!(
-			config.listen.bind.as_ref().map(ToString::to_string).as_deref(),
-			Some("[::]:443")
-		);
-		assert_eq!(
-			config.listen.unix.bind.as_deref(),
-			Some(std::path::Path::new("/run/moq/internal.sock")),
-			"TOML's listen.unix.bind must not be clobbered by the CLI re-parse"
-		);
-		assert_eq!(
-			config.listen.unix.allow.uid,
-			vec![1001],
-			"TOML's server.unix.allow must not be clobbered by the CLI re-parse"
-		);
-	}
-
-	#[test]
-	fn cli_flag_overrides_toml_cluster_id() {
-		let _env = EnvGuard::clear(&["MOQ_CLUSTER_ID"]);
-
-		let toml = "[cluster]\nid = 12345\n";
-		let dir = std::env::temp_dir().join("moq-relay-config-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("cluster-id-cli-wins.toml");
-		std::fs::write(&path, toml).unwrap();
-
-		let args = vec![
-			std::ffi::OsString::from("moq-relay"),
-			std::ffi::OsString::from(&path),
-			std::ffi::OsString::from("--cluster-id=67890"),
-		];
-		let config = Config::parse_and_merge(args).expect("config load");
-		assert_eq!(config.cluster.id, Some(67890));
-	}
-
-	/// An internal listener loaded from TOML survives when omitted on the CLI.
-	#[test]
-	fn cli_does_not_clobber_toml_internal_listen() {
-		let _env = EnvGuard::clear(&["MOQ_INTERNAL_LISTEN"]);
-
-		let toml = "[internal]\nlisten = \"127.0.0.1:9101\"\n";
-		let dir = std::env::temp_dir().join("moq-relay-config-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("internal-listen-toml-wins.toml");
-		std::fs::write(&path, toml).unwrap();
-
-		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
-		let config = Config::parse_and_merge(args).expect("config load");
-
-		assert_eq!(
-			config.internal.listen,
-			Some("127.0.0.1:9101".parse().unwrap()),
-			"TOML's internal.listen must not be clobbered by the CLI re-parse"
-		);
 	}
 
 	/// Help and version are answered, not wrapped as failures.
@@ -1214,12 +1064,12 @@ uid = [1001]
 	/// This is the reason [`Config`] derives `Args` rather than `Cli`: a `Cli`
 	/// cannot be flattened, so declaring the program-level parts on it would force
 	/// every embedder to re-declare the relay's flags and drift on each one added
-	/// here. moq.pro's `edge` is the embedder this exists for.
+	/// here.
 	#[test]
 	fn the_config_can_be_embedded() {
 		/// A stand-in for an embedder's command line: the relay's flags plus one of
 		/// its own.
-		#[derive(usage::Cli, Clone, Debug)]
+		#[derive(usage_rs::Cli, Clone, Debug)]
 		#[usage(unknown_flags = "error", args_override_self = false)]
 		#[usage(name = "embedder", version = "0")]
 		#[usage(settings)]
@@ -1231,7 +1081,9 @@ uid = [1001]
 			own: Option<String>,
 		}
 
-		let _env = EnvGuard::clear(&["MOQ_LISTEN", "MOQ_SERVER_BIND"]);
+		if !test_env::Env::without(&["MOQ_LISTEN", "MOQ_SERVER_BIND"]).isolate() {
+			return;
+		}
 
 		// One argv carries both surfaces, which is the whole point: the embedder does
 		// not have to split the relay's flags out of its own.
@@ -1271,21 +1123,12 @@ uid = [1001]
 			"Top-level relay configuration, loadable from CLI arguments, environment variables, or a TOML file."
 		);
 		// The tell that a developer-facing doc comment reached this surface.
-		for leak in ["[`", "moq.pro", "implementation detail"] {
+		for leak in ["[`", "implementation detail"] {
 			assert!(
 				!shown.contains(leak),
 				"{leak:?} leaked into the help description: {shown}"
 			);
 		}
-	}
-
-	/// The spec is named for the binary, not for the struct that declares it.
-	///
-	/// Usage takes the program name from the type unless told otherwise, so an
-	/// undeclared name renders every usage line and completion as `config`.
-	#[test]
-	fn the_spec_is_named_for_the_binary() {
-		assert_eq!(Cli::spec().bin.unwrap_or(Cli::spec().name), "moq-relay");
 	}
 
 	/// The two declarations of every merged flag stay in step.
@@ -1295,10 +1138,41 @@ uid = [1001]
 		assert!(drift.is_empty(), "{drift:#?}");
 	}
 
+	/// The relay refuses to start on a `MOQ_*` variable it doesn't read, so a stale
+	/// name in the NixOS module would stop every NixOS relay; catch it here first.
+	#[test]
+	fn the_nixos_module_sets_only_known_variables() {
+		let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../nix/modules/moq-relay.nix");
+		let module = std::fs::read_to_string(path).unwrap();
+		let registry = crate::settings();
+
+		let mut unknown = Vec::new();
+		for (start, _) in module.match_indices("MOQ_") {
+			let rest = &module[start..];
+			let end = rest
+				.find(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
+				.unwrap_or(rest.len());
+			let name = &rest[..end];
+			let known = registry
+				.props
+				.iter()
+				.any(|prop| prop.deprecated.is_none() && prop.envs.contains(&name));
+			if !known {
+				unknown.push(name);
+			}
+		}
+		assert!(
+			unknown.is_empty(),
+			"{path} sets variables moq-relay doesn't read: {unknown:?}"
+		);
+	}
+
 	/// An embedder can merge its relay fragment without parsing the binary CLI again.
 	#[test]
 	fn merge_into_relay_fragment() {
-		let _env = EnvGuard::clear(&["MOQ_CLUSTER_ID"]);
+		if !test_env::Env::without(&["MOQ_CLUSTER_ID"]).isolate() {
+			return;
+		}
 		let (parsed, cli) =
 			Cli::parse_from_with_settings(&[std::ffi::OsStr::new("--cluster-id"), std::ffi::OsStr::new("9")]).unwrap();
 		let file = toml::from_str::<toml::Value>("[cluster]\nid = 7\n").unwrap();
@@ -1308,108 +1182,55 @@ uid = [1001]
 		};
 		let mut config = parsed.config;
 		config
-			.merge_into(&cli, &usage::config::EnvLayer::from_process(), Some(source))
+			.merge_into(&cli, &usage_rs::config::EnvLayer::from_process(), Some(source))
 			.unwrap();
 		assert_eq!(config.cluster.id, Some(9));
 		assert_eq!(config.source("cluster.id"), Some("--cluster-id"));
 	}
 
-	/// Presence comes from the source, never from whether a standing value looks empty.
-	#[test]
-	fn provenance_merge_table() {
-		struct Case {
-			name: &'static str,
-			toml: &'static str,
-			env: &'static [(&'static str, &'static str)],
-			cli: &'static [&'static str],
-			key: &'static str,
-			check: fn(&Config),
-			source: &'static str,
-		}
+	/// One source a merged setting is read from, and what it must end up as.
+	struct Case {
+		name: &'static str,
+		toml: &'static str,
+		cli: &'static [&'static str],
+		key: &'static str,
+		check: fn(&Config),
+		source: &'static str,
+	}
 
+	/// The variables a provenance case's setting could also be read from.
+	const PROVENANCE_ENV: &[&str] = &[
+		"MOQ_STATS_ENABLED",
+		"MOQ_STATS_PREFIX",
+		"MOQ_LISTEN_VERSION",
+		"MOQ_LISTEN_TLS_GENERATE",
+		"MOQ_RUNTIME_PIN",
+		"MOQ_CACHE_DURATION",
+		"MOQ_CONNECT_TIMEOUT",
+		"MOQ_CLUSTER_TIER",
+		"MOQ_CLUSTER_ID",
+		"MOQ_CLUSTER_MAX_HOPS",
+		"MOQ_QUIC_RECEIVE_WINDOW",
+		"MOQ_CONNECT_TLS_SYSTEM_ROOTS",
+		"MOQ_QUIC_CONGESTION_CONTROL",
+		"MOQ_QUIC_QLOG",
+		"MOQ_WEB_HTTPS_CERT",
+		"MOQ_WEB_HTTPS_KEY",
+		"MOQ_AUTH_URL",
+		"MOQ_INTERNAL_LISTEN",
+		"MOQ_LISTEN_PREFERRED_V4",
+		"MOQ_LISTEN_UNIX_BIND",
+		"MOQ_LISTEN_UNIX_ALLOW_UID",
+		"MOQ_CLUSTER_LAN",
+		"MOQ_CLUSTER_LAN_APP",
+	];
+
+	/// Merge each case's file and flags, then check the value and the source it names.
+	fn check_provenance(cases: &[Case]) {
 		let dir = std::env::temp_dir().join("moq-relay-provenance");
 		std::fs::create_dir_all(&dir).unwrap();
 
-		let cases = [
-			Case {
-				name: "empty-list-from-file",
-				toml: "[listen]\nversion = []\n",
-				env: &[],
-				cli: &[],
-				key: "listen.version",
-				check: |config| assert!(config.listen.version.is_empty(), "file empty list must survive"),
-				source: "version",
-			},
-			Case {
-				name: "false-bool-from-file",
-				toml: "[stats]\nenabled = false\n",
-				env: &[],
-				cli: &[],
-				key: "stats.enabled",
-				check: |config| assert!(!config.stats.enabled),
-				source: "enabled",
-			},
-			Case {
-				name: "declared-default-true-false-from-file",
-				toml: "[runtime]\npin = false\n",
-				env: &[],
-				cli: &[],
-				key: "runtime.pin",
-				check: |config| assert!(!config.runtime.pin, "file false must beat a declared true default"),
-				source: "pin",
-			},
-			Case {
-				name: "optional-with-default-from-file",
-				toml: "[stats]\nprefix = \".custom\"\n",
-				env: &[],
-				cli: &[],
-				key: "stats.prefix",
-				check: |config| assert_eq!(config.stats.prefix, ".custom"),
-				source: "prefix",
-			},
-			Case {
-				name: "nested-flatten-from-file",
-				toml: "[listen.tls]\ngenerate = [\"localhost\"]\n",
-				env: &[],
-				cli: &[],
-				key: "listen.tls.generate",
-				check: |config| {
-					assert_eq!(config.listen.tls.generate, vec!["localhost".to_string()]);
-				},
-				source: "generate",
-			},
-			Case {
-				name: "env-overrides-file",
-				toml: "[stats]\nenabled = false\n",
-				env: &[("MOQ_STATS_ENABLED", "true")],
-				cli: &[],
-				key: "stats.enabled",
-				check: |config| assert!(config.stats.enabled),
-				source: "MOQ_STATS_ENABLED",
-			},
-			Case {
-				name: "cli-overrides-env-and-file",
-				toml: "[stats]\nenabled = true\n",
-				env: &[("MOQ_STATS_ENABLED", "true")],
-				cli: &["--stats-enabled=false"],
-				key: "stats.enabled",
-				check: |config| assert!(!config.stats.enabled),
-				source: "--stats-enabled",
-			},
-		];
-
 		for case in cases {
-			let _guard = EnvGuard::clear(&[
-				"MOQ_STATS_ENABLED",
-				"MOQ_STATS_PREFIX",
-				"MOQ_LISTEN_VERSION",
-				"MOQ_LISTEN_TLS_GENERATE",
-				"MOQ_RUNTIME_PIN",
-			]);
-			for (key, value) in case.env {
-				// SAFETY: EnvGuard serializes env mutation across these tests.
-				unsafe { std::env::set_var(key, value) };
-			}
 			let path = dir.join(format!("{}.toml", case.name));
 			std::fs::write(&path, case.toml).unwrap();
 			let mut args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
@@ -1428,16 +1249,280 @@ uid = [1001]
 		}
 	}
 
-	/// The public patterns arrive from the CLI, the environment, and TOML alike, as
-	/// patterns rather than prefixes.
+	/// Presence comes from the source, never from whether a standing value looks empty.
+	#[test]
+	fn provenance_merge_table() {
+		if !test_env::Env::without(PROVENANCE_ENV).isolate() {
+			return;
+		}
+		check_provenance(&[
+			Case {
+				name: "empty-list-from-file",
+				toml: "[listen]\nversion = []\n",
+				cli: &[],
+				key: "listen.version",
+				check: |config| assert!(config.listen.version.is_empty(), "file empty list must survive"),
+				source: "version",
+			},
+			Case {
+				name: "false-bool-from-file",
+				toml: "[stats]\nenabled = false\n",
+				cli: &[],
+				key: "stats.enabled",
+				check: |config| assert!(!config.stats.enabled),
+				source: "enabled",
+			},
+			Case {
+				name: "declared-default-true-false-from-file",
+				toml: "[web]\nws = false\n",
+				cli: &[],
+				key: "web.ws",
+				check: |config| assert!(!config.web.ws, "file false must beat a declared true default"),
+				source: "ws",
+			},
+			Case {
+				name: "optional-with-default-from-file",
+				toml: "[stats]\nprefix = \".custom\"\n",
+				cli: &[],
+				key: "stats.prefix",
+				check: |config| assert_eq!(config.stats.prefix, ".custom"),
+				source: "prefix",
+			},
+			Case {
+				name: "nested-flatten-from-file",
+				toml: "[listen.tls]\ngenerate = [\"localhost\"]\n",
+				cli: &[],
+				key: "listen.tls.generate",
+				check: |config| {
+					assert_eq!(config.listen.tls.generate, vec!["localhost".to_string()]);
+				},
+				source: "generate",
+			},
+			// One row per value shape a file can carry past an absent flag.
+			Case {
+				name: "duration-from-file",
+				toml: "[cache]\nduration = \"30s\"\n",
+				cli: &[],
+				key: "cache.duration",
+				check: |config| assert_eq!(config.cache.duration, Some(std::time::Duration::from_secs(30).into())),
+				source: "duration",
+			},
+			Case {
+				name: "flattened-duration-from-file",
+				toml: "[connect]\ntimeout = \"2m\"\n",
+				cli: &[],
+				key: "connect.timeout",
+				check: |config| assert_eq!(config.connect.timeout, Some(std::time::Duration::from_secs(120).into())),
+				source: "timeout",
+			},
+			Case {
+				name: "optional-string-from-file",
+				toml: "[cluster]\ntier = \"region\"\n",
+				cli: &[],
+				key: "cluster.tier",
+				check: |config| assert_eq!(config.cluster.tier.as_deref(), Some("region")),
+				source: "tier",
+			},
+			Case {
+				name: "optional-int-from-file",
+				toml: "[cluster]\nid = 12345\n",
+				cli: &[],
+				key: "cluster.id",
+				check: |config| assert_eq!(config.cluster.id, Some(12345)),
+				source: "id",
+			},
+			Case {
+				name: "hop-limit-from-file",
+				toml: "[cluster]\nmax_hops = 8\n",
+				cli: &[],
+				key: "cluster.max_hops",
+				check: |config| assert_eq!(config.cluster.max_hops, Some(8)),
+				source: "max_hops",
+			},
+			Case {
+				name: "flattened-optional-int-from-file",
+				toml: "[quic]\nreceive_window = 67108864\n",
+				cli: &[],
+				key: "quic.receive_window",
+				check: |config| assert_eq!(config.quic.receive_window, Some(67108864)),
+				source: "receive_window",
+			},
+			Case {
+				name: "optional-bool-from-file",
+				toml: "[connect.tls]\nsystem_roots = true\n",
+				cli: &[],
+				key: "connect.tls.system_roots",
+				check: |config| assert_eq!(config.connect.tls.system_roots, Some(true)),
+				source: "system_roots",
+			},
+			Case {
+				name: "enum-from-file",
+				toml: "[quic]\ncongestion_control = \"delay\"\n",
+				cli: &[],
+				key: "quic.congestion_control",
+				check: |config| {
+					assert_eq!(
+						config.quic.congestion_control,
+						Some(moq_tokio::quic::CongestionControl::Delay)
+					)
+				},
+				source: "congestion_control",
+			},
+			Case {
+				name: "path-from-file",
+				toml: "[quic]\nqlog = \"/tmp/moq-qlog\"\n",
+				cli: &[],
+				key: "quic.qlog",
+				check: |config| assert_eq!(config.quic.qlog.as_deref(), Some(std::path::Path::new("/tmp/moq-qlog"))),
+				source: "qlog",
+			},
+			Case {
+				name: "path-list-from-file",
+				toml: "[web.https]\ncert = [\"a.pem\", \"b.pem\"]\nkey = [\"a.key\", \"b.key\"]\n",
+				cli: &[],
+				key: "web.https.cert",
+				check: |config| {
+					assert_eq!(
+						config.web.https.cert,
+						vec![std::path::PathBuf::from("a.pem"), std::path::PathBuf::from("b.pem")]
+					)
+				},
+				source: "cert",
+			},
+			Case {
+				name: "url-from-file",
+				toml: "[auth]\nurl = \"https://auth.example.com/\"\n",
+				cli: &[],
+				key: "auth.url",
+				check: |config| {
+					assert_eq!(
+						config.auth.url.as_ref().map(url::Url::as_str),
+						Some("https://auth.example.com/")
+					)
+				},
+				source: "url",
+			},
+			Case {
+				name: "socket-addr-from-file",
+				toml: "[internal]\nlisten = \"127.0.0.1:9101\"\n",
+				cli: &[],
+				key: "internal.listen",
+				check: |config| assert_eq!(config.internal.listen, Some("127.0.0.1:9101".parse().unwrap())),
+				source: "listen",
+			},
+			Case {
+				name: "flattened-socket-addr-from-file",
+				toml: "[listen]\npreferred_v4 = \"192.0.2.1:443\"\n",
+				cli: &[],
+				key: "listen.preferred_v4",
+				check: |config| assert_eq!(config.listen.preferred_v4, Some("192.0.2.1:443".parse().unwrap())),
+				source: "preferred_v4",
+			},
+			#[cfg(all(feature = "uds", unix))]
+			Case {
+				name: "int-list-from-file",
+				toml: "[listen.unix]\nbind = \"/run/moq/internal.sock\"\n\n[listen.unix.allow]\nuid = [1001]\n",
+				cli: &[],
+				key: "listen.unix.allow.uid",
+				check: |config| {
+					assert_eq!(
+						config.listen.unix.bind.as_deref(),
+						Some(std::path::Path::new("/run/moq/internal.sock"))
+					);
+					assert_eq!(config.listen.unix.allow.uid, vec![1001]);
+				},
+				source: "uid",
+			},
+			#[cfg(feature = "cluster-lan")]
+			Case {
+				name: "newtype-from-file",
+				toml: "[cluster.lan]\nenabled = true\napp = \"custom\"\n",
+				cli: &[],
+				key: "cluster.lan.app",
+				check: |config| {
+					assert_eq!(
+						config.cluster.lan.app.as_ref().map(ToString::to_string).as_deref(),
+						Some("custom")
+					)
+				},
+				source: "app",
+			},
+		]);
+	}
+
+	/// The environment beats the file and loses to the CLI.
+	#[test]
+	fn provenance_merge_from_the_environment() {
+		if !test_env::Env::without(PROVENANCE_ENV)
+			.set("MOQ_STATS_ENABLED", "true")
+			.isolate()
+		{
+			return;
+		}
+		check_provenance(&[
+			Case {
+				name: "env-overrides-file",
+				toml: "[stats]\nenabled = false\n",
+				cli: &[],
+				key: "stats.enabled",
+				check: |config| assert!(config.stats.enabled),
+				source: "MOQ_STATS_ENABLED",
+			},
+			Case {
+				name: "cli-overrides-env-and-file",
+				toml: "[stats]\nenabled = true\n",
+				cli: &["--stats-enabled=false"],
+				key: "stats.enabled",
+				check: |config| assert!(!config.stats.enabled),
+				source: "--stats-enabled",
+			},
+		]);
+	}
+
+	/// The hop limit follows the same precedence: environment over file, CLI over both.
+	#[test]
+	fn hop_limit_merges_from_the_environment() {
+		if !test_env::Env::without(PROVENANCE_ENV)
+			.set("MOQ_CLUSTER_MAX_HOPS", "6")
+			.isolate()
+		{
+			return;
+		}
+		check_provenance(&[
+			Case {
+				name: "hop-limit-env-overrides-file",
+				toml: "[cluster]\nmax_hops = 8\n",
+				cli: &[],
+				key: "cluster.max_hops",
+				check: |config| assert_eq!(config.cluster.max_hops, Some(6)),
+				source: "MOQ_CLUSTER_MAX_HOPS",
+			},
+			Case {
+				name: "hop-limit-cli-overrides-env-and-file",
+				toml: "[cluster]\nmax_hops = 8\n",
+				cli: &["--cluster-max-hops", "4"],
+				key: "cluster.max_hops",
+				check: |config| assert_eq!(config.cluster.max_hops, Some(4)),
+				source: "--cluster-max-hops",
+			},
+		]);
+	}
+
+	/// The variables the public patterns could also be read from.
+	const PUBLIC_ENV: &[&str] = &[
+		"MOQ_AUTH_PUBLIC",
+		"MOQ_AUTH_PUBLIC_SUBSCRIBE",
+		"MOQ_AUTH_PUBLIC_PUBLISH",
+		"MOQ_AUTH_URL",
+	];
+
+	/// The public patterns arrive from the CLI and TOML alike, as patterns rather
+	/// than prefixes.
 	#[test]
 	fn public_patterns_merge_from_every_source() {
-		let _env = EnvGuard::clear(&[
-			"MOQ_AUTH_PUBLIC",
-			"MOQ_AUTH_PUBLIC_SUBSCRIBE",
-			"MOQ_AUTH_PUBLIC_PUBLISH",
-			"MOQ_AUTH_URL",
-		]);
+		if !test_env::Env::without(PUBLIC_ENV).isolate() {
+			return;
+		}
 
 		let config = Config::parse_and_merge([
 			"moq-relay",
@@ -1462,14 +1547,6 @@ uid = [1001]
 			config.source("auth.public_subscribe")
 		);
 
-		unsafe { std::env::set_var("MOQ_AUTH_PUBLIC_SUBSCRIBE", "from-env/**,other/**") };
-		let config = Config::parse_and_merge(["moq-relay"]).expect("env load");
-		assert_eq!(
-			config.auth.public_subscribe,
-			vec!["from-env/**".parse().unwrap(), "other/**".parse().unwrap()]
-		);
-		unsafe { std::env::remove_var("MOQ_AUTH_PUBLIC_SUBSCRIBE") };
-
 		let toml = "[auth]\npublic = \"anon/**\"\n";
 		let dir = std::env::temp_dir().join("moq-relay-config-test");
 		std::fs::create_dir_all(&dir).unwrap();
@@ -1480,104 +1557,97 @@ uid = [1001]
 		assert_eq!(config.auth.public, vec!["anon/**".parse().unwrap()]);
 	}
 
-	/// A TOML `[cluster.lan] app` survives when the CLI omits the flag.
-	#[cfg(feature = "cluster-lan")]
+	/// The environment carries a list of public patterns, comma separated.
 	#[test]
-	fn cli_does_not_clobber_toml_cluster_lan_app() {
-		let _env = EnvGuard::clear(&["MOQ_CLUSTER_LAN", "MOQ_CLUSTER_LAN_SECRET", "MOQ_CLUSTER_LAN_APP"]);
-
-		let toml = "[cluster.lan]\nenabled = true\napp = \"custom\"\n";
-		let dir = std::env::temp_dir().join("moq-relay-config-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("cluster-lan-app-toml-wins.toml");
-		std::fs::write(&path, toml).unwrap();
-
-		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
-		let config = Config::parse_and_merge(args).expect("config load");
-
+	fn public_patterns_merge_from_the_environment() {
+		if !test_env::Env::without(PUBLIC_ENV)
+			.set("MOQ_AUTH_PUBLIC_SUBSCRIBE", "from-env/**,other/**")
+			.isolate()
+		{
+			return;
+		}
+		let config = Config::parse_and_merge(["moq-relay"]).expect("env load");
 		assert_eq!(
-			config.cluster.lan.app.as_ref().map(ToString::to_string).as_deref(),
-			Some("custom"),
-			"TOML's cluster.lan.app must not be clobbered by the CLI re-parse"
+			config.auth.public_subscribe,
+			vec!["from-env/**".parse().unwrap(), "other/**".parse().unwrap()]
 		);
 	}
 
-	/// A QUIC-LB nonce with no server id stops startup from TOML and the
-	/// environment, and `lb_id` no longer hides `load_balancer`.
+	/// The variables a QUIC-LB setting could also be read from.
+	const QUIC_LB_ENV: &[&str] = &["MOQ_LISTEN_QUIC_LB_ID", "MOQ_LISTEN_QUIC_LB_NONCE"];
+
+	/// Merge `body` as the config file named `name` with `cli`, and require that the
+	/// listener refuses to start with an error containing `needle`.
+	fn refuse_quic_lb(name: &str, body: &str, cli: &[&str], needle: &str) {
+		let dir = std::env::temp_dir().join("moq-relay-lb-refusals");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join(name);
+		std::fs::write(&path, body).unwrap();
+		let mut args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+		args.extend(cli.iter().copied().map(std::ffi::OsString::from));
+		let config = Config::parse_and_merge(args).unwrap_or_else(|err| panic!("{name} parsed: {err}"));
+		match config.listen.init(Default::default()) {
+			Err(err) => assert!(err.to_string().contains(needle), "{name}: {err}"),
+			Ok(_) => panic!("{name} started"),
+		}
+	}
+
+	/// A QUIC-LB nonce with no server id stops startup from TOML, and CLI
+	/// assignments override the same nested fields.
 	///
 	/// The CLI flag pair already requires `--listen-quic-lb-id`, so this does not
 	/// add a second command-line error for that spelling.
 	#[test]
 	fn quic_lb_nonce_and_conflicts_refuse_to_start() {
-		let _env = EnvGuard::clear(&["MOQ_LISTEN_QUIC_LB_ID", "MOQ_LISTEN_QUIC_LB_NONCE"]);
+		if !test_env::Env::without(QUIC_LB_ENV).isolate() {
+			return;
+		}
 
 		let err = Config::parse_and_merge(["moq-relay", "--listen-quic-lb-nonce", "8"])
 			.expect_err("the flag pair is already required");
 		assert!(err.to_string().contains("--listen-quic-lb-id"), "{err}");
 
-		unsafe { std::env::set_var("MOQ_LISTEN_QUIC_LB_NONCE", "8") };
-		let err = Config::parse_and_merge(["moq-relay"]).expect_err("env nonce without id");
-		assert!(err.to_string().contains("--listen-quic-lb-id"), "{err}");
-		unsafe { std::env::remove_var("MOQ_LISTEN_QUIC_LB_NONCE") };
-
-		let dir = std::env::temp_dir().join("moq-relay-lb-refusals");
-		std::fs::create_dir_all(&dir).unwrap();
-		let refuse = |name: &str, body: &str, env: &[(&str, &str)], cli: &[&str], needle: &str| {
-			for (key, value) in env {
-				// SAFETY: EnvGuard serializes env mutation across these tests.
-				unsafe { std::env::set_var(key, value) };
-			}
-			let path = dir.join(name);
-			std::fs::write(&path, body).unwrap();
-			let mut args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
-			args.extend(cli.iter().copied().map(std::ffi::OsString::from));
-			let config = Config::parse_and_merge(args).unwrap_or_else(|err| panic!("{name} parsed: {err}"));
-			match config.listen.init(Default::default()) {
-				Err(err) => assert!(err.to_string().contains(needle), "{name}: {err}"),
-				Ok(_) => panic!("{name} started"),
-			}
-			for (key, _) in env {
-				unsafe { std::env::remove_var(key) };
-			}
-		};
-
-		refuse(
+		refuse_quic_lb(
 			"nonce.toml",
-			"[listen]\nlb_nonce = 8\n",
-			&[],
+			"[listen.lb]\nnonce = 8\n",
 			&[],
 			"requires --listen-quic-lb-id",
 		);
-		refuse(
-			"both.toml",
-			"[listen]\nlb_id = \"ab\"\nload_balancer = { id = \"cd\", nonce = 4 }\n",
-			&[],
-			&[],
-			"cannot be combined",
-		);
-		refuse(
-			"env-id.toml",
-			"[listen]\nload_balancer = { id = \"cd\", nonce = 4 }\n",
-			&[("MOQ_LISTEN_QUIC_LB_ID", "ab")],
-			&[],
-			"cannot be combined",
-		);
-		refuse(
-			"cli-id.toml",
-			"[listen]\nload_balancer = { id = \"cd\", nonce = 4 }\n",
-			&[],
-			&["--listen-quic-lb-id", "ee"],
-			"cannot be combined",
-		);
 
-		#[cfg(feature = "noq")]
+		#[cfg(feature = "quic")]
 		{
+			let dir = std::env::temp_dir().join("moq-relay-lb-refusals");
+			std::fs::create_dir_all(&dir).unwrap();
 			let path = dir.join("typed.toml");
-			std::fs::write(&path, "[listen]\nload_balancer = { id = \"ab\", nonce = 8 }\n").unwrap();
-			let config = Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.into()]).expect("typed");
-			let load_balancer = config.listen.load_balancer().expect("typed load_balancer");
-			assert_eq!(load_balancer.id, "ab".parse().unwrap());
-			assert_eq!(load_balancer.nonce, 8);
+			std::fs::write(&path, "[listen.lb]\nid = \"ab\"\nnonce = 8\n").unwrap();
+			let config =
+				Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.clone().into()]).expect("typed");
+			let load_balancer = config.listen.lb;
+			assert_eq!(load_balancer.id, Some("ab".parse().unwrap()));
+			assert_eq!(load_balancer.nonce, Some(8));
+			let config = Config::parse_and_merge([
+				std::ffi::OsString::from("moq-relay"),
+				path.into(),
+				"--listen-quic-lb-id".into(),
+				"ee".into(),
+			])
+			.expect("CLI overrides the same nested config field");
+			let load_balancer = config.listen.lb;
+			assert_eq!(load_balancer.id, Some("ee".parse().unwrap()));
+			assert_eq!(load_balancer.nonce, Some(8));
 		}
+	}
+
+	/// A QUIC-LB nonce from the environment with no server id stops startup too.
+	#[test]
+	fn quic_lb_env_nonce_without_an_id_refuses_to_start() {
+		if !test_env::Env::without(QUIC_LB_ENV)
+			.set("MOQ_LISTEN_QUIC_LB_NONCE", "8")
+			.isolate()
+		{
+			return;
+		}
+		let err = Config::parse_and_merge(["moq-relay"]).expect_err("env nonce without id");
+		assert!(err.to_string().contains("--listen-quic-lb-id"), "{err}");
 	}
 }

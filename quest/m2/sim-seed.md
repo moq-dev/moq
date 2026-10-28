@@ -9,10 +9,5 @@ replays bit-exact.
 
 ## Plan
 
-Decided 2026-10-10: out of [controlled time](/quest/m1/time/README.md); with
-controlled time a test advances past the largest jitter, so seeding only adds
-exact replay. Production keeps its OS randomness.
-
-## Required
-
-- [moq-net on moq-clock](/quest/m1/time/net.md) - the sim and its first jitter consumer
+Decided 2026-10-10: with controlled time a test advances past the largest
+jitter, so seeding only adds exact replay. Production keeps its OS randomness.

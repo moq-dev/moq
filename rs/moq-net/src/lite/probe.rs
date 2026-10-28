@@ -12,8 +12,9 @@ pub struct Probe {
 	pub rtt: Option<u64>,
 }
 
-impl Message for Probe {
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a> Message<'a> for Probe {
+	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Probe);
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Lite01 | Version::Lite02 => {
 				return Err(DecodeError::Version);
@@ -66,7 +67,7 @@ mod tests {
 		msg.encode(&mut Encoder::new(&mut buf, version.into()), version)
 			.unwrap();
 		let mut slice = &buf[..];
-		let got = crate::coding::decode_buf(&mut slice, version, Probe::decode).unwrap();
+		let got = crate::coding::decode_buf(&mut slice, version, |r, v| Probe::decode(r, v)).unwrap();
 		assert!(bytes::Buf::remaining(&slice) == 0, "trailing bytes after decode");
 		got
 	}

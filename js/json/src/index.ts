@@ -23,7 +23,10 @@
 
 export type { Compression } from "./compression.ts";
 export { type Diff, deepEqual, diff, merge } from "./diff.ts";
-export { Desync, MissingSnapshot } from "./error.ts";
+export { Desync, DuplicateKey, MissingSnapshot } from "./error.ts";
+/** Lossy latest-value JSON publishing. */
 export * as Snapshot from "./snapshot/index.ts";
+/** Lossless append-log JSON publishing. */
 export * as Stream from "./stream/index.ts";
+/** Sliding-window JSON publishing. */
 export * as Window from "./window/index.ts";

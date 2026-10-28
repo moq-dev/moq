@@ -22,7 +22,9 @@ pub(super) fn decode_size(r: &mut Decoder<'_>, max: usize) -> Result<usize, Deco
 /// A trait for lite messages that are automatically size-prefixed during encoding/decoding.
 ///
 /// Lite messages use a varint size prefix.
-pub trait Message: Sized + std::fmt::Debug {
+pub trait Message<'a>: Sized + std::fmt::Debug {
+	/// The control metric class, or none for media headers.
+	const CONTROL: Option<crate::stats::Message> = None;
 	/// The largest body this receiver accepts for this message.
 	const MAX_SIZE: usize = MAX_MESSAGE_SIZE;
 
@@ -30,10 +32,10 @@ pub trait Message: Sized + std::fmt::Debug {
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError>;
 
 	/// Decode a message body (without size prefix).
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError>;
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError>;
 }
 
-impl<T: Message> Encode<Version> for T {
+impl<'a, T: Message<'a>> Encode<Version> for T {
 	fn encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		tracing::trace!(?self, "encoding");
 		let prefix = w.prefix_varint();
@@ -43,29 +45,43 @@ impl<T: Message> Encode<Version> for T {
 			w.discard(prefix);
 			return Err(EncodeError::TooLarge);
 		}
-		w.fill(prefix)
+		w.fill(prefix)?;
+		w.control = T::CONTROL;
+		Ok(())
 	}
 }
 
-impl<T: Message> Decode<Version> for T {
-	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		let size = decode_size(r, Self::MAX_SIZE)?;
-		let mut body = r.sub(size)?;
-
-		// The body is complete, so running short inside it is malformed, not a wait for more.
-		let result = Self::decode_msg(&mut body, version)
-			.map_err(DecodeError::complete)
-			.and_then(|msg| match body.is_empty() {
-				true => Ok(msg),
-				false => Err(DecodeError::Long),
-			});
-
-		match &result {
-			Ok(msg) => tracing::trace!(?msg, "decoded"),
-			Err(err) => tracing::warn!(%err, "decode failed"),
-		}
-		result
+impl<'a, T: Message<'a>> Decode<'a, Version> for T {
+	fn decode(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
+		decode_with(r, |body| T::decode_msg(body, version))
 	}
+}
+
+/// Decode a size-prefixed `T`, reading its body with `decode` in place of
+/// [`Message::decode_msg`], for a body whose bounds come from the session.
+pub(super) fn decode_with<'a, T: Message<'a>>(
+	r: &mut Decoder<'a>,
+	decode: impl FnOnce(&mut Decoder<'a>) -> Result<T, DecodeError>,
+) -> Result<T, DecodeError> {
+	let size = decode_size(r, T::MAX_SIZE)?;
+	let mut body = r.sub(size)?;
+
+	// The body is complete, so running short inside it is malformed, not a wait for more.
+	let result = decode(&mut body)
+		.map_err(DecodeError::complete)
+		.and_then(|msg| match body.is_empty() {
+			true => Ok(msg),
+			false => Err(DecodeError::Long),
+		});
+
+	match &result {
+		Ok(msg) => tracing::trace!(?msg, "decoded"),
+		Err(err) => tracing::warn!(%err, "decode failed"),
+	}
+	if result.is_ok() {
+		r.control = T::CONTROL;
+	}
+	result
 }
 
 #[cfg(test)]
@@ -75,7 +91,7 @@ mod tests {
 	#[derive(Debug)]
 	struct Empty;
 
-	impl Message for Empty {
+	impl Message<'_> for Empty {
 		fn encode_msg(&self, _: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
 			Ok(())
 		}

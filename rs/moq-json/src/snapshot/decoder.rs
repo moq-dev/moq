@@ -40,7 +40,7 @@ pub struct Decoder<T> {
 	plain: Vec<u8>,
 
 	/// Reused key buffers for validating remote patches before changing the baseline.
-	check: RefCell<crate::merge::CheckScratch>,
+	check: RefCell<crate::strict::Scratch>,
 
 	/// The reconstructed value, `None` until the first snapshot.
 	current: Option<Value>,
@@ -56,7 +56,7 @@ impl<T> Decoder<T> {
 			max_size: config.max_size,
 			flate: None,
 			plain: Vec::new(),
-			check: RefCell::new(crate::merge::CheckScratch::default()),
+			check: RefCell::new(crate::strict::Scratch::default()),
 			current: None,
 			_marker: PhantomData,
 		}
@@ -68,12 +68,8 @@ impl<T> Decoder<T> {
 	/// only the first.
 	pub fn snapshot(&mut self, payload: &[u8]) -> Result<()> {
 		self.current = None;
-		// Every group starts a new DEFLATE window; enforce the budget while inflating.
-		self.flate = self.compression.then(|| {
-			moq_flate::Decoder::with_max_frame_size(self.max_size.map_or(moq_flate::DEFAULT_MAX_FRAME_SIZE, |size| {
-				(size as u64).min(moq_flate::DEFAULT_MAX_FRAME_SIZE)
-			}))
-		});
+		// Every group starts a new DEFLATE window, which holds the whole group to the group budget.
+		self.flate = self.compression.then(moq_flate::Decoder::new);
 		let inflated = self.flate.as_mut().map(|flate| flate.frame(payload)).transpose()?;
 		let plain = inflated.as_deref().unwrap_or(payload);
 		if let Some(limit) = self.max_size
@@ -81,6 +77,7 @@ impl<T> Decoder<T> {
 		{
 			return Err(Error::TooLarge(limit));
 		}
+		crate::strict::check(plain, &self.check)?;
 		self.current = Some(serde_json::from_slice(plain)?);
 		self.check_size()
 	}
@@ -185,6 +182,7 @@ impl<T: DeserializeOwned> Decoder<T> {
 #[cfg(test)]
 mod test {
 	use super::super::consumer::Config as ConsumerConfig;
+	use super::super::encoder::MAX_DELTA_FRAMES;
 	use super::super::{Config, Encoder};
 	use super::*;
 	use crate::Compression;
@@ -226,6 +224,29 @@ mod test {
 		out
 	}
 
+	/// A frame that repeats a key is refused rather than resolved to the last copy, so a reader
+	/// can't be handed a different value than a stricter parser would see.
+	#[test]
+	fn duplicate_keys_are_refused() {
+		let vectors = crate::strict::test::vectors();
+		for payload in &vectors.refused {
+			let mut decoder = Decoder::<Value>::new(consume(Compression::None));
+			let err = decoder.snapshot(payload.as_bytes()).unwrap_err();
+			assert!(matches!(err, Error::DuplicateKey), "{payload}: {err}");
+			assert!(decoder.value().is_none());
+
+			decoder.snapshot(b"{}").unwrap();
+			let err = decoder.delta(payload.as_bytes()).unwrap_err();
+			assert!(matches!(err, Error::DuplicateKey), "{payload}: {err}");
+			assert!(decoder.value().is_none());
+		}
+		for payload in &vectors.accepted {
+			let mut decoder = Decoder::<Value>::new(consume(Compression::None));
+			decoder.snapshot(payload.as_bytes()).unwrap();
+			decoder.delta(payload.as_bytes()).unwrap();
+		}
+	}
+
 	#[test]
 	fn inflated_snapshots_and_patches_obey_the_budget() {
 		for snapshot in [true, false] {
@@ -247,7 +268,7 @@ mod test {
 			} else {
 				decoder.delta(&payload)
 			};
-			assert!(matches!(result, Err(Error::Flate(moq_flate::Error::TooLarge(1024)))));
+			assert!(matches!(result, Err(Error::TooLarge(1024))));
 			assert!(decoder.value().is_none());
 		}
 	}
@@ -320,14 +341,43 @@ mod test {
 		assert_eq!(roundtrip(deflate(), &values), values);
 	}
 
-	/// The window is per group, so a keyframe mid-stream has to restart it on both sides. A decoder
-	/// that kept the old window here would fail to inflate the new group's snapshot.
+	/// The window is per group, so a keyframe mid-stream has to restart it on both sides. An encoder
+	/// that kept the old window would emit frames a joiner starting at the new group can't inflate.
 	#[test]
 	fn compressed_roundtrip_across_a_group_boundary() {
-		// A tight ratio guarantees at least one roll partway through.
-		let values: Vec<Value> = (0..=40).map(|n| json!({ "n": n })).collect();
-		let config = deflate().with_delta_ratio(2);
-		assert_eq!(roundtrip(config, &values).last().unwrap(), &json!({ "n": 40 }));
+		let mut encoder = Encoder::<Value>::new(deflate().with_deltas(true));
+		// One decoder reads every group in turn, and a joiner starts cold at each group, as a late
+		// subscriber does. The joiner catches an encoder that carries its window across the boundary.
+		let mut decoder = Decoder::<Value>::new(consume(Compression::Deflate));
+		let mut joiner = Decoder::<Value>::new(consume(Compression::Deflate));
+
+		// The frame cap rolls the group partway through, and a restatement rolls it again.
+		let restate = MAX_DELTA_FRAMES + 10;
+		let mut keyframes = 0;
+		for n in 0..=2 * MAX_DELTA_FRAMES {
+			let value = json!({ "n": n });
+			let frame = if n == restate {
+				encoder.update(&value).unwrap().unwrap().commit();
+				encoder.snapshot().unwrap().unwrap()
+			} else {
+				encoder.update(&value).unwrap().unwrap()
+			};
+			if frame.keyframe {
+				keyframes += 1;
+				joiner = Decoder::<Value>::new(consume(Compression::Deflate));
+				decoder.snapshot(&frame.payload).unwrap();
+				joiner.snapshot(&frame.payload).unwrap();
+			} else {
+				decoder.delta(&frame.payload).unwrap();
+				joiner.delta(&frame.payload).unwrap();
+			}
+			frame.commit();
+			assert_eq!(decoder.decode().unwrap(), Some(value.clone()), "after update {n}");
+			assert_eq!(joiner.decode().unwrap(), Some(value), "a joiner after update {n}");
+		}
+
+		// The first group, the cap roll, and the restatement.
+		assert_eq!(keyframes, 3, "the stream has to cross group boundaries");
 	}
 
 	#[test]
@@ -347,7 +397,7 @@ mod test {
 	/// stale, and deserializing each one is exactly the cost the split exists to avoid.
 	#[test]
 	fn frames_apply_without_materializing() {
-		let mut encoder = Encoder::<Value>::new(Config::default().with_delta_ratio(100));
+		let mut encoder = Encoder::<Value>::new(Config::default().with_deltas(true));
 		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
 
 		for n in 0..=20 {
@@ -365,12 +415,12 @@ mod test {
 	#[test]
 	fn a_rejected_field_names_its_path() {
 		#[derive(serde::Deserialize, Debug)]
-		#[allow(dead_code)]
+		#[allow(dead_code, reason = "the test only checks that deserializing fails")]
 		struct Inner {
 			count: u8,
 		}
 		#[derive(serde::Deserialize, Debug)]
-		#[allow(dead_code)]
+		#[allow(dead_code, reason = "the test only checks that deserializing fails")]
 		struct Outer {
 			inner: Inner,
 		}

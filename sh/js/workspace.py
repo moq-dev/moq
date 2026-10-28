@@ -65,6 +65,8 @@ def selection(root, paths):
                           "inputs": inputs(root, directory)}
 
     selected = set()
+    # A workspace's `bench/` is no export, so no dependent can import it: only its owner checks it.
+    benched = set()
     fallback = paths is None
     for path in paths or []:
         owners = [(name, p["directory"]) for name, p in packages.items()
@@ -72,7 +74,8 @@ def selection(root, paths):
         if not owners:
             fallback = True
             break
-        selected.add(max(owners, key=lambda owner: len(owner[1]))[0])
+        name, directory = max(owners, key=lambda owner: len(owner[1]))
+        (benched if path.startswith(directory + "/bench/") else selected).add(name)
         # Manifests miss a package reading another tree's files, so add those readers too.
         selected |= {name for name, package in packages.items()
                      if any(reads(path, i) for i in package["inputs"])}
@@ -88,6 +91,7 @@ def selection(root, paths):
             if expanded == selected:
                 break
             selected = expanded
+        selected |= benched
 
     # A selected consumer can need an unchanged dependency's generated bindings.
     dependencies = set(selected)
@@ -134,17 +138,29 @@ def run(action, plan):
         filters = [f"--filter={name}" for name, package in packages.items()
                    if verb in package["manifest"].get("scripts", {})]
         if filters:
-            command("bun", "run", *filters, "--elide-lines=0", verb)
+            concurrency = [] if os.environ.get("GITHUB_ACTIONS") == "true" else ["--sequential"]
+            command("bun", "run", *concurrency, *filters, "--elide-lines=0", verb)
+
+    def reports():
+        # Each published package's API reports against its fresh build; `just fix` sets
+        # MOQ_API_REPORT=update to rewrite them. No package build runs this, so a consumer
+        # building one from source needs none of the report toolchain.
+        directories = [package["directory"] for package in packages.values()
+                       if "release" in package["manifest"].get("scripts", {})]
+        if directories:
+            command("bun", "js/common/api.ts", "check", *directories)
 
     command("bun", "install", "--frozen-lockfile")
     if action == "test":
-        command("bun", "test", "js/common/declarations.test.ts", "js/common/deps.test.ts",
-                "js/common/worklet.test.ts")
+        command("python3", "sh/js/playwright.test.py")
+        command("bun", "test", "js/common/api.test.ts", "js/common/deps.test.ts", "js/common/worklet.test.ts",
+                "js/common/release.test.ts")
         scripts("test")
         return
     if action == "build":
         # No build script reads the WASM bindings, and `just js wasm` builds them.
         scripts("build")
+        reports()
         return
 
     missing = unmapped(ROOT, plan["inputs"])
@@ -158,9 +174,10 @@ def run(action, plan):
                              r"import\.meta\.env", "js"])
     if result.returncode != 1:
         raise RuntimeError("import.meta.env scan found a reference or failed")
+    command("python3", "sh/js/playwright.py")
     command("bun", "js/common/deps.ts")
     if plan["wasm"]:
-        command("just", "js", "wasm")
+        command("just", "js", "wasm", "dev")
     scripts("check")
     if plan["all"]:
         command("bunx", "tsc", "--noEmit", "--project", "test/tsconfig.json")
@@ -179,11 +196,12 @@ def run(action, plan):
             command("bunx", "tsc", "--noEmit", "--project", name)
         finally:
             Path(name).unlink()
-    # The fallback covers files outside every workspace, like js/tsconfig.json and test/lib.
-    command("bun", "biome", "check", *(["js", "test"] if plan["all"] else
-                                       [p["directory"] for p in packages.values()
-                                        if p["directory"].startswith(("js/", "test/"))] + ["js/common"]))
+    # The fallback also covers unowned inputs, including demo/pub's Worker.
+    # Recommended rules default to warn, which Biome otherwise lets pass.
+    command("bun", "biome", "check", "--error-on-warnings", *(["js", "bench/browser", "test", "doc", "demo"] if plan["all"] else
+                                       [p["directory"] for p in packages.values()] + ["js/common"]))
     scripts("build")
+    reports()
     for name in ("@moq/watch", "@moq/publish"):
         if name in packages:
             path = "./" + packages[name]["directory"] + "/dist/index.js"
@@ -199,6 +217,9 @@ def main():
     if action == "plan":
         print(json.dumps(plan, default=sorted))
     else:
+        if plan["packages"] and os.environ.get("GITHUB_ACTIONS") != "true" and os.environ.get("LOCAL_SUPERVISED") != "1":
+            os.execvp("bash", ["bash", str(ROOT / "sh/local.sh"),
+                               sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]])
         started = time.monotonic()
         run(action, plan)
         print(f"js: {action} finished in {time.monotonic() - started:.2f}s", flush=True)

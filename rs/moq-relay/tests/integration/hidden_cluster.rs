@@ -1,0 +1,89 @@
+//! A cluster peer that predates the hidden opt-in still discovers the relay's
+//! `.`-named broadcasts, so a mixed-version mesh keeps its hidden paths.
+
+use std::time::Duration;
+
+use moq_relay::cluster::{self, Peer};
+
+const TEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Multi-transport client and session types make the test future large; give it a
+/// big stack, as `goaway_cluster.rs` does.
+fn run_cluster_test<F>(fut: F)
+where
+	F: std::future::Future<Output = ()> + Send + 'static,
+{
+	std::thread::Builder::new()
+		.stack_size(32 * 1024 * 1024)
+		.spawn(move || {
+			tokio::runtime::Builder::new_current_thread()
+				.enable_all()
+				.build()
+				.expect("build test runtime")
+				.block_on(fut);
+		})
+		.expect("spawn test thread")
+		.join()
+		.expect("test thread panicked");
+}
+
+/// A stream-only moq server listening on an ephemeral loopback TCP port,
+/// speaking only `version`, and that port.
+async fn listen_tcp(version: moq_net::Version) -> (u16, moq_tokio::Listener) {
+	let mut config = moq_tokio::listen::Config::default();
+	config.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
+	config.version = vec![version];
+	let server = config.init(Default::default()).expect("server init");
+	let listener = server.listen().await.expect("listen");
+	let port = listener.tcp_local_addr().expect("TCP listener is configured").port();
+	(port, listener)
+}
+
+#[test]
+fn old_peers_keep_hidden_paths() {
+	for version in ["moq-lite-05", "moq-lite-06", "moq-transport-18"] {
+		run_cluster_test(old_peer_keeps_hidden_paths(version.parse().unwrap()));
+	}
+}
+
+/// The relay dials a peer pinned to `version`. The peer's announce request cannot
+/// carry the opt-in below lite-07, yet it discovers the relay's hidden broadcast.
+async fn old_peer_keeps_hidden_paths(version: moq_net::Version) {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+	tokio::time::timeout(TEST_TIMEOUT, async {
+		let (port, mut server) = listen_tcp(version).await;
+		let peer_origin = moq_tokio::origin::spawn();
+		let mut discovered = peer_origin.consume().with_hidden(true).announced();
+		let accept = tokio::spawn(async move {
+			let request = server.accept().await.expect("cluster dial");
+			let session = request.with_subscriber(peer_origin).ok().await.expect("accept");
+			session.closed().await;
+		});
+
+		let mut client_config = moq_tokio::connect::Config::default();
+		client_config.tls.insecure = Some(true);
+		let mut cluster_config = cluster::Config::default();
+		cluster_config.connect = vec![Peer::new(format!("tcp://127.0.0.1:{port}/"))];
+		let cluster = cluster::Cluster::new(cluster::Options::new(cluster_config))
+			.expect("cluster init")
+			.with_connect(client_config, Default::default());
+		let node = cluster.origin.create_broadcast(".hidden/test").expect("create hidden");
+		node.announce(Default::default()).expect("announce hidden");
+		let cluster_run = tokio::spawn(cluster.clone().start().await.expect("cluster start").run());
+
+		loop {
+			if let moq_net::announce::Event::Start(announce) | moq_net::announce::Event::Update(announce) =
+				discovered.next().await.expect("peer origin closed")
+				&& announce.prefix.as_str() == ".hidden/test"
+			{
+				break;
+			}
+		}
+
+		cluster_run.abort();
+		accept.abort();
+	})
+	.await
+	.unwrap_or_else(|_| panic!("{version} peer never discovered the hidden path"));
+}

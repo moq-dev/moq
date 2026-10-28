@@ -92,9 +92,7 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
-          # py/moq-ffi/pyproject.toml drives the build; its [tool.maturin]
-          # block points at rs/moq-ffi/Cargo.toml.
-          working-directory: py/moq-ffi
+          # The root project includes all sources needed by the native package.
           args: --locked --release --out dist
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux || 'auto' }}
@@ -102,10 +100,10 @@ jobs:
           before-script-linux: yum install -y clang-devel
 
       - name: Upload wheels
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: python-${{ matrix.target }}
-          path: py/moq-ffi/dist/*.whl
+          path: dist/*.whl
 
   sdist:
     name: Build sdist
@@ -124,15 +122,27 @@ jobs:
       - name: Build sdist
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
-          working-directory: py/moq-ffi
           command: sdist
           args: --out dist
 
+      # Exercise an ordinary source install, including the generator. Cargo prunes
+      # the workspace lock graph when Maturin packages only the needed members.
+      - name: Build wheel from sdist
+        shell: bash
+        run: python -m pip wheel --no-deps --wheel-dir .tmp/sdist-wheels dist/*.tar.gz
+
+      - name: Install wheel from sdist
+        shell: bash
+        run: |
+          python -m pip install --no-deps .tmp/sdist-wheels/*.whl
+          cd .tmp
+          python -c 'import moq_ffi'
+
       - name: Upload sdist
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: python-sdist
-          path: py/moq-ffi/dist/*.tar.gz
+          path: dist/*.tar.gz
 
   publish:
     name: Publish to PyPI
@@ -147,7 +157,7 @@ jobs:
 
     steps:
       - name: Download wheels
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: python-*
           path: dist

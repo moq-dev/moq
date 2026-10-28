@@ -1,9 +1,9 @@
 import { expect, jest, spyOn, test } from "bun:test";
+import { Milli } from "@moq/clock";
 import { Effect } from "@moq/signals";
 import * as Ietf from "../ietf/index.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
-import * as Time from "../time.ts";
 import { type AcceptProps, accept as acceptSession, type ConnectProps, connect as connectSession } from "./index.ts";
 import { Reload } from "./reload.ts";
 import { type TransportStats, transportStats } from "./stats.ts";
@@ -33,7 +33,7 @@ test("transportStats maps the W3C dictionary and normalizes a null send rate", a
 			packetsLost: 6,
 		}),
 	);
-	expect(stats.rtt).toBe(Time.Milli(25));
+	expect(stats.rtt).toBe(Milli(25));
 	expect(stats.estimatedSendRate).toBeUndefined();
 	expect(stats.bytesSent).toBe(1);
 	expect(stats.bytesReceived).toBe(2);
@@ -103,7 +103,7 @@ test("probe starts empty and stays empty without PROBE support", async () => {
 	}
 });
 
-test("Reload reports stats and probe only while connected", async () => {
+test("Reload exposes its established session stats and probe only while connected", async () => {
 	const original = globalThis.WebTransport;
 	const pair = createMockTransportPair(Lite.ALPN_06, { stats: { bytesSent: 99 } });
 	// `new` on a function returning an object yields that object, handing connect() the mock.
@@ -118,7 +118,7 @@ test("Reload reports stats and probe only while connected", async () => {
 		while (!reload.established.peek()) {
 			await new Promise((resolve) => setTimeout(resolve, 0));
 		}
-		expect((await reload.stats())?.bytesSent).toBe(99);
+		expect((await reload.established.peek()?.stats())?.bytesSent).toBe(99);
 		expect(reload.probe.peek()).toEqual({});
 
 		server.abort();
@@ -126,7 +126,7 @@ test("Reload reports stats and probe only while connected", async () => {
 			await new Promise((resolve) => setTimeout(resolve, 0));
 		}
 		expect(reload.status.peek()).toBe("disconnected");
-		expect(await reload.stats()).toBeUndefined();
+		expect(await reload.established.peek()?.stats()).toBeUndefined();
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		expect(reload.probe.peek()).toBeUndefined();
 	} finally {

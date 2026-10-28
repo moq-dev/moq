@@ -24,24 +24,41 @@ The relay POSTs one JSON body per session event (`connect`, `revalidate`,
 `end`) to `--auth-url` and reads a grant back. The request carries everything
 the relay knows: a session id, its own `node` name, the transport, addresses,
 SNI and ALPN, the path and query exactly as dialed, a moq-transport SETUP
-token, the declared role, and the verified client certificate. Nothing is
-parsed on the server's behalf: the `jwt` query parameter is a convention of
+token, the declared role and implementation, and the verified client
+certificate. Nothing is parsed on the server's behalf: the `jwt` query parameter is a convention of
 `moq auth serve`, not of the relay. The grant answers with `publish` and
 `subscribe` pattern unions and optionally a `root` alias, read-only `mounts`,
-`expires`, a `revalidate` cadence, a stats `tier`, and `peer` / `upstream` to
+`expires`, a `revalidate` cadence, a stats `tier` and `label`, and `peer` / `upstream` to
 mark another relay and an [upstream link](/bin/relay/cluster#upstream-links).
+A `tier` is `/`-joined segments of ASCII letters, digits, `.`, `_`, and `-`, such as `region/sjc`,
+because it becomes a metrics label: a grant naming any other tier is an auth server error, and a refusal naming one reads as unattributed.
 The fields are documented on `moq_auth::Request` and `moq_auth::Grant`
 ([Rust](/lib/rs/moq-auth), [TypeScript](/lib/js/auth)).
 
-**Connect.** A 2xx with a grant admits. A 401 or 403 refuses. Anything else,
+`server_name` is the SNI that selected the relay's certificate. It is absent
+over plaintext, on the `tls://` TCP listener, and for an IP-literal dial, and
+never filled from a `Host` header or a WebTransport authority. The client still picks it among the names
+the relay serves, so a hostname-scoped server binds the tenant to the
+credential, not to `server_name` alone.
+
+**Connect.** A 2xx with a grant admits. A 403 can carry JSON such as
+`{"reason":"expired","root":"rooms/123","tier":"edge"}`. The reason is
+`refused`, `forbidden`, `expired`, or `malformed` (the token does not parse);
+unknown reason strings read as `refused`.
+A legacy plain-text 401 or 403 still reads as `refused`. Optional `root` and
+`tier` attribute refusal counters, with an absent tier using the default.
+Only name a root from a verified credential, including an expired token whose
+signature and key scope were verified. Never copy the unverified dialed path
+into `root`: that would let callers create unbounded stats entries.
+Anything else,
 including a timeout or an unparseable body, refuses and logs an error, so
 nothing is admitted because the server was down. A grant that names nothing
 refuses, and so does one already expired: expiry is exact, with no grace for
 clock skew, so keep the auth server's clock in sync. WebSocket admission
 happens after SETUP, just like QUIC, so auth never fails the upgrade: rejected
-credentials (401 or 403) close the session as `Unauthorized`, which stops the
-client's reconnect loop, and an unreachable auth server closes it with
-application code 502.
+credentials (401 or 403) close the session as `Unauthorized`, or as `Expired`
+or `MalformedAuthToken` for those reasons, which stops the client's reconnect
+loop, and an unreachable auth server closes it with application code 502.
 
 **Revalidate.** On the grant's cadence the relay asks again. A grant with the
 same `root` and `mounts` resizes the live session in place, narrower or wider,
@@ -52,18 +69,21 @@ flowing. A wider grant brings those paths back within the admitted root and
 SETUP role. A one-shot HTTP `/fetch` ends on a narrower grant instead. A
 changed `root`, `mounts`, `peer`, or `upstream`, or a 401 or 403, ends that
 credential's grant, which closes the session unless an
-[in-band](#in-band-renewal) credential still holds it. A changed `tier` keeps
-the session and moves its stats from then on. Any other failure retries with backoff and the session lives
+[in-band](#in-band-renewal) credential still holds it. A changed `tier` or
+`label` keeps the session and moves its later stats. Any other failure retries with backoff and the session lives
 until `expires`, so an outage always has the bound the server chose. A grant
-with `revalidate` must set `expires` for that reason.
+with `revalidate` must set `expires` for that reason. A session that
+reaches `expires` closes as `Expired` rather than `Unauthorized`, which also
+stops the reconnect loop: refresh the token, then reconnect with the new URL.
 
 **End.** Every close reports `end` with the reason, the duration, and the
-bytes sent and received.
+bytes sent and received. A shutdown waits for these reports before exiting.
 
 **The link.** `https://` presents the relay's `connect.tls` client certificate
 when one is configured, so a remote server can tell which relay is asking;
 `unix://` speaks HTTP over a socket; `http://` is accepted for a loopback host
-only. There is no shared secret.
+only. There is no shared secret. Redirects are not followed, since each request
+carries a credential: point `url` at the final address.
 
 ```toml
 [auth]
@@ -112,19 +132,36 @@ moq auth verify --key public.jwk --in alice.jwt
 moq auth serve --key public.jwk   # or --key-dir /etc/moq/keys/ or --key-set /etc/moq/keys.jwks
 ```
 
-The client dials `https://relay.example.com/rooms/123?jwt=<token>`. A
-moq-transport client can instead put the JWT in its SETUP's `AUTHORIZATION
-TOKEN` option with Token Type 0. HMAC, RSA, ECDSA, and EdDSA keys all work. A
+A native client passes it as `--connect-token <token>` (or `MOQ_CONNECT_TOKEN`)
+and dials `https://relay.example.com/rooms/123`. The first token is the
+connection credential, sent in SETUP: moq-lite-07-wip's Token parameter, or
+moq-transport's `AUTHORIZATION TOKEN` option with Token Type 0. While the client
+also offers a version that cannot carry it (moq-lite before 07), it sends the
+same value as `?jwt=`, which `moq auth serve` admits since they match; two
+different values are refused. A URL token can land in server and proxy access
+logs, so to keep it out, offer only versions that carry it in SETUP, such as
+`--connect-version moq-lite-07-wip`; a relay that predates SETUP tokens then
+cannot receive it. Each further token is presented
+[in band](#in-band-renewal) and widens the session's grant. A URL that already
+carries a `?jwt=`, such as a cluster peer's, keeps it as the connection
+credential, and every configured token then rides in band. Dialing
+`?jwt=<token>` directly still works, and reaches relays that predate SETUP
+tokens; a query carrying two `jwt` parameters is refused. HMAC, RSA, ECDSA, and EdDSA keys all work. A private RSA key must be a complete two-prime JWK (see [moq-auth](/lib/rs/moq-auth) for its fields); export one from your provider, or generate one with `moq auth generate --algorithm RS256`. A
 key can itself be **scoped** at generation (`--root`, `--publish`,
 `--subscribe`), after which it can never sign a broader token.
 
 ### In-band renewal
 
-On moq-lite-07-wip or moq-transport draft-17 and later with MoQ Auth negotiated,
+On moq-lite-07-wip or moq-transport draft-18 and later with MoQ Auth negotiated,
 a client can present another JWT without reconnecting. Present its replacement
 before the current grant expires and keep the returned token handle alive.
-The native `Connection::auth()` handle re-presents retained tokens after a
-reconnect; the JavaScript session's `auth.add()` presents one for that session.
+The auth handle a reconnecting connection owns (native `Connection::auth()`,
+JavaScript `connection.auth`) presents its tokens again on every reconnect.
+A native client can instead replace its configured tokens through its
+connection's tokens (`Connection::tokens()`, `session.tokens()` in the
+bindings): the next dial presents them, a live session presents them in band and
+withdraws each old one once its replacement is answered, `answered()` reports
+the relay's verdict, and a refusal redials only once the tokens have changed.
 Older versions refuse in-band tokens.
 
 Each accepted token adds its publish and subscribe patterns to the session's
@@ -148,16 +185,18 @@ cannot verify a presented token; both refuse it as unsupported. A moq-transport
 same way on any draft, but its grant authorizes only that request and ends with
 it; it never joins the union. A `PUBLISH_NAMESPACE` grant must cover the whole
 namespace: `room/**`, not just `room`. A session verifies at most
-`verifications` tokens at once (`--auth-verifications`, default 128), counting
+128 tokens at once, counting
 checks still running past the admission timeout. Later tokens wait their turn
-rather than being refused. A waiting token the peer withdraws never reaches the
+rather than being refused. Each HTTP request is admitted on its own, so an
+HTTP/2 connection carries at most as many requests at once, and the client
+queues the rest. A waiting token the peer withdraws never reaches the
 auth server. The ten-second admission timeout counts from a token's arrival, so
 one that times out while waiting is refused without being sent. A sent check
 always runs to completion, so the connection's `end` stays its last request and
 `--limit-token` counts stay exact. On moq-lite, an
 auth server that cannot answer, by timeout or outage, refuses a token as a
-transient error, and `Connection::auth()` presents it again on its reconnect
-backoff. On moq-transport the refusal is final and the token ends. Retrying
+transient error, and the client presents it again after a backoff of 1s
+doubling to 30s. On moq-transport the refusal is final and the token ends. Retrying
 never extends an accepted grant, so a session whose last grant expires during an
 outage still closes.
 
@@ -177,6 +216,10 @@ everything. Put application data somewhere other than the token.
 
 Tokens and key scopes from the older `moq-token` format still work: each `put`
 and `get` prefix `p` reads as the subtree `p/**`.
+
+Roles are pattern arrays. Object roles, including bitrate caps such as
+`{"path":["alice/**"],"rate":8000000}`, are refused in full by token and
+auth-server grant parsing. No transport currently enforces bitrate caps.
 
 ### Path matching
 
@@ -243,12 +286,14 @@ verifies client certificates, so a relay without `listen.bind` refuses
 `listen.tls.root` too.
 
 Cluster peers are admitted the same way, so a mesh runs
-`moq auth serve --mtls-publish '**' --mtls-subscribe '**' --mtls-peer` (or a
+`moq auth serve --mtls-publish '**' --mtls-subscribe '**' --mtls-link peer` (or a
 server granting its cluster CA everything with `peer: true`); see
-[Clustering](/bin/relay/cluster). `--mtls-peer` marks every certificate as
-another relay; leave it off when certificates identify clients.
-`--mtls-upstream`, which needs `--mtls-peer`, also marks them
-[upstream](/bin/relay/cluster#upstream-links). Changing either flag ends each
+[Clustering](/bin/relay/cluster). `--mtls-link peer` marks every certificate as
+another relay; leave it off when certificates identify clients. Without
+`peer`, a certificate is a client's: it routes like one and sees
+[hidden](/concept/moq-lite#hidden-broadcasts) routes only by asking.
+`--mtls-link upstream` also marks them
+[upstream](/bin/relay/cluster#upstream-links). Changing the link role ends each
 live mTLS session at its next re-check (the `--revalidate` cadence or a
 `moq auth revalidate` push), so the mesh redials once.
 
@@ -274,7 +319,7 @@ map future transport names to `unknown`, which your policy should handle explici
 moq auth serve --listen 127.0.0.1:4440 \
   --key-dir /etc/moq/keys \
   --public-subscribe 'anon/**' --public-publish 'anon/**' \
-  --mtls-publish '**' --mtls-subscribe '**' --mtls-peer \
+  --mtls-publish '**' --mtls-subscribe '**' --mtls-link peer \
   --tier edge --expires 1d --revalidate 1m --limit-remote 64
 ```
 
@@ -324,7 +369,7 @@ patterns: `--auth-public 'PREFIX/**'`.
 | `--auth-public-publish` / `--auth-public-subscribe` | `--public-publish` / `--public-subscribe`, as patterns |
 | `--auth-public-api URL` | your own server answering the contract |
 | `--auth-mtls-tier LABEL` | `--tier LABEL` (one tier per server) |
-| `listen.tls.root` alone admitting a peer unscoped | `--mtls-publish '**' --mtls-subscribe '**' --mtls-peer` |
+| `listen.tls.root` alone admitting a peer unscoped | `--mtls-publish '**' --mtls-subscribe '**' --mtls-link peer` |
 | `--auth-api` (token or proxy mode), `Cache-Control` | `--auth-url` pointed at any server answering the contract; `revalidate` and `expires` in the grant |
 | `--auth-domain` | your server reads `server_name` and decides |
 
@@ -341,13 +386,15 @@ An application that [embeds](/bin/relay/#embed) the relay can decide
 admissions itself, without the HTTP: leave `[auth]` empty and take
 `relay.admissions()` before `run`. Each `Admission` carries the same
 `moq_auth::Request` a server would read, and is answered with a lease or a
-refusal. A fixed lease never changes; a `lease::Producer` the application keeps
+refusal. Pass the shared `moq_auth::Refusal` in `auth::Error::Refused` to
+`Admission::refuse`, using the same verified-root rule as an HTTP server.
+A fixed lease never changes; a `lease::Producer` the application keeps
 re-checks, updates, and revokes on its own clock. The relay still closes the
-session at the grant's `expires`, and an admission left unanswered for ten
-seconds is refused. `Admission::attached()` marks a token presented
+session at the grant's `expires`, and a connection whose admission is still
+unanswered at its `listen.timeout` handshake deadline is closed; a token
+presented in band is refused after ten seconds. `Admission::attached()` marks a token presented
 [in band](#in-band-renewal) for a session already admitted under the same id,
-so count sessions only on the others. Gateway accept loops can call `Cluster::admit` for the same
-scoped session as a native connection. See
+so count sessions only on the others. See
 [docs.rs/moq-relay](https://docs.rs/moq-relay) and
 [moq-auth](/lib/rs/moq-auth).
 

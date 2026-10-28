@@ -6,7 +6,11 @@ function aborted(): DOMException {
 	return new DOMException("timer closed", "AbortError");
 }
 
-function wait(clock: Backend, at: Instant, signal?: AbortSignal): { promise: Promise<void>; cancel: () => void } {
+// `ref: false` lets a Node or Bun process exit while only this timer is pending; browsers ignore it.
+type Options = { signal?: AbortSignal; ref?: boolean };
+
+function wait(clock: Backend, at: Instant, options: Options = {}): { promise: Promise<void>; cancel: () => void } {
+	const { signal, ref = true } = options;
 	let cancel = () => {};
 	const promise = new Promise<void>((resolve, reject) => {
 		let done = false;
@@ -23,7 +27,7 @@ function wait(clock: Backend, at: Instant, signal?: AbortSignal): { promise: Pro
 		cancel = () => finish(aborted());
 		if (signal?.aborted) return abort();
 		signal?.addEventListener("abort", abort, { once: true });
-		disarm = clock.arm(at, () => finish());
+		disarm = clock.arm(at, () => finish(), ref);
 		if (done) disarm();
 	});
 	return { promise, cancel };
@@ -34,15 +38,15 @@ export function now(): Instant {
 	return Instant(backend().now());
 }
 
-/** Complete when the installed clock reaches an instant, or reject on abort. */
-export function sleepUntil(at: Instant, signal?: AbortSignal): Promise<void> {
-	return wait(backend(), Instant(at), signal).promise;
+/** Complete when the installed clock reaches an instant, or reject on abort; `ref: false` won't hold the process open. */
+export function sleepUntil(at: Instant, options?: { signal?: AbortSignal; ref?: boolean }): Promise<void> {
+	return wait(backend(), Instant(at), options).promise;
 }
 
-/** Complete after a duration on the installed clock, or reject on abort. */
-export function sleep(duration: Nano, signal?: AbortSignal): Promise<void> {
+/** Complete after a duration on the installed clock, or reject on abort; `ref: false` won't hold the process open. */
+export function sleep(duration: Nano, options?: { signal?: AbortSignal; ref?: boolean }): Promise<void> {
 	const clock = backend();
-	return wait(clock, Instant.add(Instant(clock.now()), duration), signal).promise;
+	return wait(clock, Instant.add(Instant(clock.now()), duration), options).promise;
 }
 
 /** A timeout expired before its operation completed. */
@@ -112,7 +116,7 @@ export class Interval {
 		if (this.#pending) throw new Error("interval tick already pending");
 		this.#pending = true;
 		try {
-			await wait(this.#clock, this.#next, this.#abort.signal).promise;
+			await wait(this.#clock, this.#next, { signal: this.#abort.signal }).promise;
 			const scheduled = this.#next;
 			const now = this.#clock.now();
 			let next = Instant.add(scheduled, this.#period);

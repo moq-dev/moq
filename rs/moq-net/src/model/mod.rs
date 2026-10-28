@@ -18,12 +18,15 @@ mod front;
 
 mod aborts;
 mod bytes;
-pub(crate) mod clock;
+mod clock;
 pub(crate) mod datagram;
 mod delivered;
 mod expiry;
+mod skipped;
+// The DEFLATE codec behind compressed tracks.
+mod flate;
 pub(crate) mod object;
-mod requests;
+mod request_queue;
 mod resume;
 mod subscription;
 mod time;
@@ -31,13 +34,12 @@ mod timed;
 mod weak_cache;
 
 #[cfg(test)]
-pub(crate) mod test_tracing;
+mod test_tracing;
 
-pub(crate) use requests::Requests;
-pub(crate) use weak_cache::{WeakCache, WeakEntry};
+use request_queue::RequestQueue;
+use weak_cache::{WeakCache, WeakEntry};
 
 pub use bytes::*;
-pub(crate) use subscription::Cap;
 // Datagram stays flat at the crate root (a small track-adjacent wire type),
 // not under a role module.
 pub use datagram::*;
@@ -46,9 +48,10 @@ pub use timed::Timed;
 
 /// Publishing broadcasts, announcing routes, and consuming both through an origin.
 pub mod origin {
+	pub use super::follow::AnnouncedBroadcast;
 	pub use super::origin_impl::{
-		Config, Consumer, Cost, DEFAULT_UPDATE_HOLD, Driver, Dynamic, Preference, Producer, Request, Requesting, Route,
-		Routing, Source,
+		Config, Consumer, Cost, Driver, HopLimit, Link, Preference, Prepared, Producer, Publication, Request,
+		Requesting, Requests, Route, Routing, Source,
 	};
 }
 
@@ -66,9 +69,17 @@ pub use origin_impl::{Consume, Hop, Hops, InvalidHop};
 #[cfg(feature = "async")]
 pub(crate) use origin_impl::interest_prefixes;
 
+// Held by a session while its peer's initial announcements arrive.
+#[cfg(feature = "async")]
+pub(crate) use origin_impl::Snapshot;
+
+// What a client session asks its peer to announce, as the origin's readers change.
+#[cfg(feature = "async")]
+pub(crate) use origin_impl::{InterestChange, Interests};
+
 // The advertise-only route guard, for tests shaping the route table.
 #[cfg(all(test, feature = "async"))]
 pub(crate) use origin_impl::AnnounceProducer;
 
 #[cfg(all(test, feature = "async"))]
-pub(crate) use origin_impl::ProduceTest;
+pub(crate) use origin_impl::{ProduceTest, TestSelection};

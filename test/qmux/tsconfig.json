@@ -1,0 +1,5 @@
+{
+	"extends": "../../js/tsconfig.json",
+	"compilerOptions": { "types": ["bun"], "noEmit": true },
+	"include": ["interop.test.ts"]
+}

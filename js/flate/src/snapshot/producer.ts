@@ -1,6 +1,6 @@
 import type { Timed } from "@moq/net";
 import * as Moq from "@moq/net";
-import { DEFAULT_MAX_FRAME_SIZE, Encoder as Flate } from "../codec.ts";
+import { Encoder as Flate } from "../codec.ts";
 
 import { type Compression, isDeflate } from "../compression.ts";
 
@@ -43,19 +43,16 @@ export class Producer {
 	 * untimed track: it is never filled in.
 	 */
 	update({ value: payload, at }: Timed<Uint8Array>): void {
-		// Consumers all decode with `@moq/flate`'s default cap, so publishing past it would advertise
-		// a value that always fails to read. Rejected before anything is published; unlike a stream
-		// this is not terminal, since the previous value still stands and the next update supersedes.
-		if (this.#compress && payload.byteLength > DEFAULT_MAX_FRAME_SIZE) {
-			throw new Error(`payload larger than the decoder's ${DEFAULT_MAX_FRAME_SIZE} byte limit`);
-		}
+		// Check before opening a group. `appendGroup` publishes immediately, so letting `writeFrame`
+		// reject the frame would leave an empty newest group behind: a snapshot consumer jumps to the
+		// newest, so the previous value would be lost even though this update threw. A compressed value
+		// is held to the same budget by its inflated size, since that is what every consumer's decoder
+		// allows: compression saves bandwidth, never what a reader holds.
+		if (payload.byteLength > Moq.Group.MAX_GROUP_CACHE_BYTES) throw new Moq.Error.FrameTooLarge();
 
 		// One frame per group, so the window spans a single value and starts cold every time.
 		const encoded = this.#compress ? new Flate().frame(payload) : payload;
 
-		// Check before opening a group. `appendGroup` publishes immediately, so letting `writeFrame`
-		// reject the frame would leave an empty newest group behind: a snapshot consumer jumps to the
-		// newest, so the previous value would be lost even though this update threw.
 		if (encoded.byteLength > Moq.Group.MAX_GROUP_CACHE_BYTES) throw new Moq.Error.FrameTooLarge();
 
 		const group = this.#track.appendGroup();
@@ -64,19 +61,22 @@ export class Producer {
 		} finally {
 			// The group is already visible on the track, so leaving it open on a failed write would
 			// strand a subscriber that advanced into it with nothing to read and no end.
-			group.close();
+			group.finish();
 		}
 	}
 
 	/** Finish the track. */
 	finish(): void {
+		this.#track.finish();
 		this.#track.close();
 	}
 }
 
+/** Producer options, including the destination track. */
 type Init = Config & { track: Moq.Track.Producer };
 
+/** Types for {@link Producer}. */
 export namespace Producer {
-	/** Snapshot producer options, including the destination track. */
+	/** Snapshot producer options, including the destination track. @reexport */
 	export type Config = Init;
 }

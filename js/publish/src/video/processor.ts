@@ -1,4 +1,4 @@
-import { Time } from "@moq/net";
+import { Micro, type Milli, Nano, now } from "@moq/clock";
 import { hostedAssets } from "../assets";
 import type { FromWorker, ToWorker } from "./capture-worker";
 // A blob: URL, or a hosted file when assets() is set; see vite-plugin-worklet.
@@ -51,7 +51,7 @@ class Epoch {
 	// Whether the source clock is stuck, decided on the second frame.
 	#stuck?: boolean;
 
-	// `at` is when the frame arrived, in milliseconds on our performance.now() timebase. For the
+	// `at` is when the frame arrived, in milliseconds on the installed clock. For the
 	// first frame it has to be measured as close to capture as possible: whatever delay sits between
 	// capture and the anchor becomes a permanent audio/video offset.
 	stamp(frame: VideoFrame, at: number): VideoFrame {
@@ -83,7 +83,7 @@ function rewrite(): TransformStream<VideoFrame, VideoFrame> {
 
 	return new TransformStream<VideoFrame>({
 		transform(frame, controller) {
-			controller.enqueue(epoch.stamp(frame, performance.now()));
+			controller.enqueue(epoch.stamp(frame, Nano.toMilli(Nano(now()))));
 		},
 	});
 }
@@ -119,7 +119,10 @@ async function workerProcessor(source: StreamTrack): Promise<ReadableStream<Vide
 			switch (msg.type) {
 				case "frame":
 					// Anchor on when the worker read the frame, not when we got around to handling
-					// the message, so a busy main thread can't skew video against audio.
+					// the message, so a busy main thread can't skew video against audio. The worker's
+					// realm has its own origin, so the shared Unix-anchored time origin translates it
+					// onto the host clock.
+					// biome-ignore lint/style/noRestrictedGlobals: a cross-realm origin, not a clock read.
 					controller.enqueue(epoch.stamp(msg.frame, msg.at - performance.timeOrigin));
 					return;
 				case "done":
@@ -240,10 +243,10 @@ function videoProcessor(track: StreamTrack): ReadableStream<VideoFrame> {
 			// performance.now() to whole milliseconds, which can't express a 33.333ms period.
 			await new Promise<void>((resolve) => {
 				handle = video.requestVideoFrameCallback((now, metadata) => {
-					// captureTime is the frame's capture instant; both it and now are on the
-					// performance.now() timebase, so audio and video stay on one epoch.
-					const timestamp = (metadata.captureTime ?? now) as Time.Milli;
-					controller.enqueue(new VideoFrame(video, { timestamp: Time.Micro.fromMilli(timestamp) }));
+					// captureTime is the frame's capture instant; both it and now are DOM timestamps,
+					// which the host clock shares, so audio and video stay on one epoch.
+					const timestamp = (metadata.captureTime ?? now) as Milli;
+					controller.enqueue(new VideoFrame(video, { timestamp: Micro.fromMilli(timestamp) }));
 					resolve();
 				});
 			});

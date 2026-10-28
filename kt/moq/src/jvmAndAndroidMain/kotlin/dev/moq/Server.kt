@@ -1,12 +1,7 @@
 package dev.moq
 
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.launch
 import uniffi.moq.MoqException
 import uniffi.moq.MoqServer
@@ -32,11 +27,11 @@ class Server internal constructor(
     /**
      * Create an unannounced broadcast at [path], served to incoming sessions once announced.
      *
-     * Advertise it with `announce` after populating tracks. `end()` ends it for
-     * good; `close()` (or `use`) releases the handle, which ends it once no
-     * `dynamic()` handle remains.
+     * Fill `broadcast()`, then advertise it with `announce`. The broadcast's `end()`
+     * ends it for good, as does releasing its last handle: the publication, each
+     * `broadcast()`, and `requests()`.
      */
-    fun createBroadcast(path: String): BroadcastProducer {
+    fun createBroadcast(path: String): Publication {
         val origin = publishOrigin ?: throw IllegalStateException("no publish origin configured")
         return origin.createBroadcast(path)
     }
@@ -56,14 +51,7 @@ class Server internal constructor(
      *
      * The Flow completes when the server stops accepting.
      */
-    fun requests(): Flow<Request> = flow {
-        while (true) {
-            currentCoroutineContext().ensureActive()
-            emit(server.accept() ?: break)
-        }
-    }.onCompletion { cause ->
-        if (cause is CancellationException) server.cancel()
-    }
+    fun requests(): Flow<Request> = pull({ server.cancel() }) { server.accept() }
 
     /**
      * Accept every session in a loop, holding each one alive in its own
@@ -109,11 +97,12 @@ class Server internal constructor(
          * visible to sessions publishing into it. Mirrors [Moq.connect].
          */
         suspend fun listen(config: ServerConfig): Server {
-            val wired = if (config.publish == null && config.consume == null) {
+            val named = config.copy(implementation = implementation(config.implementation))
+            val wired = if (named.publish == null && named.consume == null) {
                 val shared = OriginProducer(OriginConfig())
-                config.copy(publish = shared, consume = shared)
+                named.copy(publish = shared, consume = shared)
             } else {
-                config
+                named
             }
 
             val server = MoqServer(wired)

@@ -6,8 +6,11 @@ This directory contains two packages:
 - `moq` is the independently-versioned ergonomic API applications should use.
 
 Run `just dart check` from the repository root. The check rebuilds
-`moq-ffi` without optional codec features, verifies the generated source,
+`moq-ffi` in the dev profile with its default codec features, verifies the generated source,
 analyzes and tests both packages, and validates their publish layout.
+
+`just dart bench` pins an optimized native library through the hook's existing
+`library` user define. Published packages download optimized release libraries.
 
 `dart test` drives the Native Assets hook, so the round-trip tests in
 `moq/test/` exercise the same load path a Flutter application uses. There is no
@@ -20,14 +23,14 @@ WebAssembly. Browser applications should use the TypeScript packages.
 ## Generator
 
 Bindings use [`kixelated/uniffi-dart`](https://github.com/kixelated/uniffi-dart)
-tag `v0.3.1-kixelated.5+v0.32.0`, which carries the UniFFI 0.32 and
-library-mode CLI changes. The Nix development shell supplies that exact
-revision plus `nix/uniffi-dart-record-error.patch`. Without Nix, install it
-with:
+tag `v0.3.1-kixelated.6+v0.32.0`, which carries the UniFFI 0.32,
+library-mode CLI, and disposed-argument changes. The Nix development shell supplies that exact
+revision plus the `nix/uniffi-dart-*.patch` fixes. Without Nix, install it
+without those fixes:
 
 ```bash
 cargo install --git https://github.com/kixelated/uniffi-dart \
-  --tag 'v0.3.1-kixelated.5+v0.32.0' --features binary uniffi-dart
+  --tag 'v0.3.1-kixelated.6+v0.32.0' --features binary uniffi-dart
 ```
 
 ## Releases

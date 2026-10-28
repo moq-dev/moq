@@ -17,7 +17,7 @@ use bytes::{Bytes, BytesMut};
 
 use super::Error;
 use crate::Result;
-use crate::codec::annexb::{NalIterator, START_CODE};
+use crate::codec::annexb::{InBandCodec, NalIterator, ParameterSets, START_CODE};
 
 /// H.264 Annex-B stream splitter: bytes in, [`Frame`](crate::container::Frame)s out.
 ///
@@ -34,18 +34,24 @@ pub struct Split {
 	/// Retained SPS NALs from the latest keyframe that carried them, re-injected
 	/// on bare keyframes. Replaced (not accumulated) when a keyframe presents a
 	/// different set, so a mid-stream reinit drops the superseded ones.
-	sps: Vec<Bytes>,
+	sps: ParameterSets,
 	/// Retained PPS NALs. A keyframe may carry several (slices reference them by
 	/// id); all are kept and re-injected, but a new GOP's set supersedes them.
-	pps: Vec<Bytes>,
-	zero: Option<web_async::time::Instant>,
+	pps: ParameterSets,
+	zero: Option<moq_clock::Instant>,
 	pending: Vec<crate::container::Frame>,
 }
 
 /// A snapshot of [`Split`]'s retained parameter sets.
 pub(crate) struct Params {
-	sps: Vec<Bytes>,
-	pps: Vec<Bytes>,
+	sps: ParameterSets,
+	pps: ParameterSets,
+}
+
+impl Params {
+	pub(crate) fn nals(&self) -> impl Iterator<Item = &Bytes> {
+		self.sps.values().chain(self.pps.values())
+	}
 }
 
 #[derive(Default)]
@@ -58,9 +64,9 @@ struct Avc3Frame {
 	contains_recovery_point: bool,
 	contains_slice: bool,
 	/// SPS NALs already inline in this access unit, so re-injection skips them.
-	sps_seen: Vec<Bytes>,
+	sps_seen: ParameterSets,
 	/// PPS NALs already inline in this access unit.
-	pps_seen: Vec<Bytes>,
+	pps_seen: ParameterSets,
 }
 
 impl Default for Split {
@@ -75,8 +81,8 @@ impl Split {
 		Self {
 			tail: BytesMut::new(),
 			current: Avc3Frame::default(),
-			sps: Vec::new(),
-			pps: Vec::new(),
+			sps: ParameterSets::new(),
+			pps: ParameterSets::new(),
 			zero: None,
 			pending: Vec::new(),
 		}
@@ -135,11 +141,11 @@ impl Split {
 				self.maybe_start_frame(pts)?;
 				// Track only what this AU carries; the retained set is reconciled at
 				// the keyframe so a new GOP's set replaces (not accumulates onto) it.
-				crate::codec::annexb::push_distinct(&mut self.current.sps_seen, &nal);
+				InBandCodec::H264.insert_parameter_set(&mut self.current.sps_seen, &nal)?;
 			}
 			Some(Avc3NalType::Pps) => {
 				self.maybe_start_frame(pts)?;
-				crate::codec::annexb::push_distinct(&mut self.current.pps_seen, &nal);
+				InBandCodec::H264.insert_parameter_set(&mut self.current.pps_seen, &nal)?;
 			}
 			Some(Avc3NalType::Aud) => {
 				self.maybe_start_frame(pts)?;
@@ -261,7 +267,7 @@ impl Split {
 		if let Some(pts) = hint {
 			return Ok(pts);
 		}
-		let zero = self.zero.get_or_insert_with(web_async::time::Instant::now);
+		let zero = self.zero.get_or_insert_with(moq_clock::Instant::now);
 		Ok(moq_net::Timestamp::from_micros(zero.elapsed().as_micros() as u64)?)
 	}
 }
@@ -334,7 +340,7 @@ mod tests {
 	/// SPS+PPS are packaged ahead of the IDR slice and `keyframe` is set.
 	#[tokio::test(start_paused = true)]
 	async fn decode_packages_keyframe() {
-		let sps: &[u8] = &[0x67, 0x42, 0xc0, 0x1f];
+		let sps: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0xde];
 		let pps: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
 		let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
 
@@ -354,7 +360,7 @@ mod tests {
 	/// even when the stream never repeats its parameter sets inline.
 	#[tokio::test(start_paused = true)]
 	async fn params_then_bare_keyframe_self_contained() {
-		let sps: &[u8] = &[0x67, 0x42, 0xc0, 0x1f];
+		let sps: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0xde];
 		let pps: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
 		let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
 
@@ -375,7 +381,7 @@ mod tests {
 	/// until `flush`.
 	#[tokio::test(start_paused = true)]
 	async fn decode_emits_on_next_boundary() {
-		let sps: &[u8] = &[0x67, 0x42, 0xc0, 0x1f];
+		let sps: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0xde];
 		let pps: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
 		let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
 		// P-slice with first_mb_in_slice (byte 1 high bit) set, opening a new AU.
@@ -400,9 +406,9 @@ mod tests {
 	/// just the last one. Regression for the multi-PPS collapse.
 	#[tokio::test(start_paused = true)]
 	async fn reinjects_all_cached_pps_on_keyframe() {
-		let sps: &[u8] = &[0x67, 0x42, 0xc0, 0x1f];
+		let sps: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0xde];
 		let pps0: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
-		let pps1: &[u8] = &[0x68, 0xce, 0x3c, 0x81];
+		let pps1: &[u8] = &[0x68, 0x4e, 0x3c, 0x80];
 		let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
 
 		let mut split = Split::new();
@@ -427,7 +433,7 @@ mod tests {
 	/// mis-flagged as a keyframe.
 	#[tokio::test(start_paused = true)]
 	async fn bare_idr_after_delta_splits() {
-		let sps: &[u8] = &[0x67, 0x42, 0xc0, 0x1f];
+		let sps: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0xde];
 		let pps: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
 		let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
 		// P-slice with first_mb_in_slice set (byte 1 high bit), opening a new AU.
@@ -464,7 +470,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn recovery_point_islice_is_keyframe() {
 		let aud: &[u8] = &[0x09, 0x10];
-		let sps: &[u8] = &[0x67, 0x42, 0xc0, 0x1f];
+		let sps: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0xde];
 		let pps: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
 		// Non-IDR slice (type 1), first_mb_in_slice == 0: the recovery I-slice.
 		let islice: &[u8] = &[0x61, 0xe0, 0x12, 0x34];
@@ -483,7 +489,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn bare_recovery_point_reinjects_params() {
 		let aud: &[u8] = &[0x09, 0x10];
-		let sps: &[u8] = &[0x67, 0x42, 0xc0, 0x1f];
+		let sps: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0xde];
 		let pps: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
 		let islice: &[u8] = &[0x61, 0xe0, 0x12, 0x34];
 
@@ -519,14 +525,36 @@ mod tests {
 		assert!(!frames[0].keyframe, "a non-recovery SEI must not flag a keyframe");
 	}
 
+	/// A parameter set that redefines an id replaces the earlier one, as in a decoder, so a
+	/// bare keyframe re-injects one set per id. A changed SPS for the same id still reinits.
+	#[tokio::test(start_paused = true)]
+	async fn redefined_ids_replace_rather_than_accumulate() {
+		let sps: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0xde];
+		// The same id 0, at level 4.0 instead of 3.1.
+		let sps_b: &[u8] = &[0x67, 0x42, 0xc0, 0x28, 0xde];
+		let pps_a: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
+		let pps_b: &[u8] = &[0x68, 0xce, 0x38, 0x80];
+		let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
+
+		let mut split = Split::new();
+		let first = decode_one(&mut split, &mut annexb(&[sps, pps_a, pps_b, idr]), ts());
+		assert_eq!(first[0].payload.as_ref(), annexb(&[sps, pps_a, pps_b, idr]).as_ref());
+		let bare = decode_one(&mut split, &mut annexb(&[idr]), ts());
+		assert_eq!(bare[0].payload.as_ref(), annexb(&[sps, pps_b, idr]).as_ref());
+
+		let _ = decode_one(&mut split, &mut annexb(&[sps_b, idr]), ts());
+		let bare = decode_one(&mut split, &mut annexb(&[idr]), ts());
+		assert_eq!(bare[0].payload.as_ref(), annexb(&[sps_b, pps_b, idr]).as_ref());
+	}
+
 	/// A keyframe that presents a smaller parameter set than a prior one reinits
 	/// the retained set: the dropped PPS must not be re-injected on later bare
 	/// keyframes.
 	#[tokio::test(start_paused = true)]
 	async fn reinit_drops_superseded_pps_on_keyframe() {
-		let sps: &[u8] = &[0x67, 0x42, 0xc0, 0x1f];
+		let sps: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0xde];
 		let pps0: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
-		let pps1: &[u8] = &[0x68, 0xce, 0x3c, 0x81];
+		let pps1: &[u8] = &[0x68, 0x4e, 0x3c, 0x80];
 		let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
 
 		let mut split = Split::new();

@@ -1,29 +1,31 @@
-# [XS] Nightly after FFI reuse
+# [XS] First shared FFI release
 
 ## Goal
 
-Condition: a scheduled Nightly and the first `moq-ffi-v*` tag have completed
-since [#5549](https://github.com/moq-dev/moq/pull/5549) (shared FFI build)
-and [#5527](https://github.com/moq-dev/moq/pull/5527) (independent Nightly
-workloads) landed. Check with `gh run list --workflow nightly.yml --event schedule`
-and the FFI release runs for the tag. Then measure and verify the items
-below, fix or quest what fails, and delete this quest.
+Verify the first `moq-ffi-v*` tag that runs `Release FFI`. Condition: the
+backport [#6730](https://github.com/moq-dev/moq/pull/6730) has merged to
+`release`, and a `moq-ffi-v*` tag cut after it has run `Release FFI`. Check the
+tag with `git ls-tree <tag> .github/workflows/` and its runs with
+`gh run list --workflow release-shared-ffi.yml --event push`. Then verify the
+items below, fix or quest what fails, and delete this quest.
 
 ## Plan
 
-From the Nightly run:
+`moq-ffi-v0.4.16` through `moq-ffi-v0.4.18` were cut from a `release` without
+[#5549](https://github.com/moq-dev/moq/pull/5549), so they ran the per-language
+workflows. #6730 backports #5549, the attempt-scoped publisher check from
+[#5573](https://github.com/moq-dev/moq/pull/5573), and the wrapper gates from
+[#6084](https://github.com/moq-dev/moq/pull/6084), without the Shipping sizes
+and C++ parts `release` lacks.
 
-- Duration of each workload job and total runner-minutes, against the
-  sampled numbers in `.github/ffi.md`.
-- Every benchmark still runs, including the timebase and audio benchmarks
-  that landed beside the split.
-- No workload fails, and the Rust group fits its existing limit.
-- Size-history keys are stable across the change.
+The Nightly side is verified: run 38897397428 covered the dry-run jobs (see
+`.github/ffi.md`), and the Shipping sizes jobs of Nightlies 39779729461 and
+40090959108 keep the `release/go-lib-<target>/` keys, with the second compared
+against the prior history (a changed artifact set fails the report).
 
-From the first `moq-ffi-v*` release:
+From the first shared tag:
 
-- The nested coordinator job names match what the publisher check looks up.
-- The artifact patterns select the right libraries for each package.
-- The Swift wrapper dry run passes under the release's permissions.
-
-Don't dispatch Nightly on a branch to get these; wait for the scheduled run.
+- Each wrapper (`release-go.yml`, `release-kt-lib.yml`, `release-swift-lib.yml`)
+  sees its publisher through the jobs API under the `workflow_run` token and
+  releases or skips as its own publisher did.
+- The Go, Kotlin and Swift packages publish from the shared artifacts.

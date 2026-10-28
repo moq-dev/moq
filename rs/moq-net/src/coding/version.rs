@@ -18,9 +18,9 @@ impl From<Version> for u64 {
 	}
 }
 
-impl<V> Decode<V> for Version {
+impl<'a, V> Decode<'a, V> for Version {
 	/// Decode the version number.
-	fn decode(r: &mut Decoder<'_>, _: V) -> Result<Self, DecodeError> {
+	fn decode(r: &mut Decoder<'a>, _: V) -> Result<Self, DecodeError> {
 		Ok(Self(r.varint()?))
 	}
 }
@@ -40,12 +40,12 @@ impl fmt::Debug for Version {
 
 /// A list of versions in preferred order.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub struct Versions(Vec<Version>);
 
-impl<V: Copy> Decode<V> for Versions {
+impl<'a, V: Copy> Decode<'a, V> for Versions {
 	/// Decode the version list.
-	fn decode(r: &mut Decoder<'_>, version: V) -> Result<Self, DecodeError> {
+	fn decode(r: &mut Decoder<'a>, version: V) -> Result<Self, DecodeError> {
 		let count = r.varint()?;
 		let mut vs = Vec::new();
 

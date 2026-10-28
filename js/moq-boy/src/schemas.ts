@@ -9,7 +9,7 @@ export const GameStatsSchema = z.object({
 });
 
 /** A single latency component measurement. */
-export const LatencyEntrySchema = z.object({
+const LatencyEntrySchema = z.object({
 	label: z.string(),
 	ms: z.number().check(z.int(), z.nonnegative(), z.lte(4294967295)),
 });
@@ -22,5 +22,7 @@ export const GameStatusSchema = z.object({
 	stats: z.optional(GameStatsSchema),
 });
 
+/** Server-reported encoding and emulation performance stats. */
 export type GameStats = z.infer<typeof GameStatsSchema>;
+/** Per-frame status published by the emulator. */
 export type GameStatus = z.infer<typeof GameStatusSchema>;

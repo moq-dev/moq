@@ -3,7 +3,7 @@
 //!
 //! The decode counterpart to [`encode`](crate::encode), and the mirror of
 //! `moq_audio::decode::Consumer`. [`Consumer`] subscribes to a moq-mux video
-//! track and hands back decoded [`Frame`](crate::Frame)s; a native backend does the work
+//! track and hands back [`Read`] events carrying decoded [`Frame`](crate::Frame)s; a native backend does the work
 //! (VideoToolbox on macOS and iOS, Media Foundation / DXVA on Windows, NVDEC or VAAPI
 //! on Linux, OpenH264 as the optional software fallback for H.264, and libvpx as
 //! the optional software decoder for VP8 and VP9).
@@ -24,10 +24,12 @@ pub(crate) mod backend;
 mod conformance;
 mod consumer;
 mod decoder;
+mod select;
 mod sink;
+mod vui;
 
 pub use backend::{Codec, NAMES};
-pub use consumer::{Consumer, Options, Start};
+pub use consumer::{Consumer, Options, Read, Start};
 pub use decoder::{Config, Decoder, Kind};
 pub use sink::Sink;
 

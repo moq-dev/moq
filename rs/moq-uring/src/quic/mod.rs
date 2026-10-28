@@ -7,9 +7,9 @@
 //! connection's timeout, and wakes stream waiters. The returned
 //! [`Connection`] implements [`web_transport_trait::poll`], so
 //! wrapping it with `crate::transport::Session::new` and
-//! [`moq_net::transport::Binding::InBand`] lets
-//! `moq_net::Client::connect_lite` / `Server::accept_lite` run real moq-lite
-//! sessions on the worker; everything is `Rc`-shared and `!Send` by design.
+//! [`moq_net::transport::Address::Setup`], then `crate::transport::Local`, lets
+//! `moq_net::Client::connect` / `Server::accept` run real MoQ sessions on the
+//! worker; everything is `Rc`-shared and `!Send` by design.
 //!
 //! An [`Endpoint`] serves many connections on one socket, demuxed by
 //! connection id; [`client::connect`] and [`server::accept`] are its
@@ -18,7 +18,7 @@
 //! [`web`] layer's HTTP/3 CONNECT handshake on top of the same adapter, with
 //! [`web::Session`] as the one transport type covering both.
 //!
-//! Noq is the sans-IO QUIC stack underneath the worker.
+//! moq-quic is the sans-IO QUIC stack underneath the worker.
 
 pub mod client;
 pub mod endpoint;
@@ -28,14 +28,12 @@ pub mod qlog;
 pub mod server;
 pub mod web;
 
-mod noq;
+mod driver;
 
+pub use driver::{Connection, Lease, RecvStream, SendGroup, SendOptions, SendStream};
 pub use endpoint::Endpoint;
-pub use noq::{Connection, RecvStream, SendStream};
-
-/// The QUIC payload size every full datagram in a GSO train uses, and the
-/// stride GRO coalesces with.
-pub(crate) const SEGMENT: usize = 1350;
+/// The flow-control limits a live connection can change; see [`Connection::set_limits`].
+pub use moq_quic::{Limits, LimitsError};
 
 /// A TLS certificate chain and the private key that signs for it, as PEM.
 /// One value, so neither half can be configured alone.
@@ -77,7 +75,7 @@ impl Identity {
 		client_auth: server::ClientAuth,
 	) -> Result<std::sync::Arc<rustls::ServerConfig>, Error> {
 		let alpn = alpn.iter().map(|proto| proto.as_ref().as_bytes().to_vec()).collect();
-		noq::identity_server_config(self, alpn, &client_auth)
+		driver::identity_server_config(self, alpn, &client_auth)
 	}
 
 	/// The PEM certificate chain being presented, for a caller that publishes
@@ -115,14 +113,17 @@ pub struct Transport {
 	/// may have open at once. MoQ opens a stream per group, so busy endpoints
 	/// want this high.
 	pub max_streams: u64,
-	/// How much unread data one peer may have in flight across every stream,
-	/// in bytes. `None` leaves the 16 MiB default.
+	/// How much unread data and incomplete messages one peer may have in flight
+	/// across every stream, in bytes. `None` leaves the 128 MiB default. A moq
+	/// session needs it to fit the largest message it assembles,
+	/// [`MIN_RECEIVE_WINDOW`](moq_net::transport::MIN_RECEIVE_WINDOW), or a
+	/// partial one can stall the connection.
 	pub receive_window: Option<u64>,
 	/// How much unread data one peer may have in flight on a single stream,
 	/// in bytes. `None` leaves the 4 MiB default.
 	///
-	/// Keep it under [`receive_window`](Self::receive_window) so one stream
-	/// cannot fill the connection.
+	/// Stream credit returns as bytes are read, whether or not their message is
+	/// complete, so this only paces one stream.
 	pub stream_receive_window: Option<u64>,
 	/// How much unacknowledged outgoing data to buffer, in bytes, whatever
 	/// the peer allows. `None` leaves the 16 MiB default.
@@ -133,10 +134,15 @@ pub struct Transport {
 	/// connection, or `None` (the default) to send none and let the idle
 	/// timeout decide.
 	pub keep_alive: Option<std::time::Duration>,
+	/// Probe for a path MTU above the 1200-byte floor every QUIC path carries,
+	/// off by default. A probe the path drops costs only itself, and a path
+	/// that later shrinks falls back to the floor.
+	pub mtu_discovery: bool,
 	/// Where to write qlog traces, or `None` (the default) to write none.
 	///
-	/// Noq takes one sink per configuration and writes one file per connection,
-	/// named from that connection's Initial destination connection ID.
+	/// moq-quic takes one sink per transport config, so this writes one file
+	/// per endpoint on the accept side and per dial on the connect side, each
+	/// event tagged with the qlog `group_id` of the connection it belongs to.
 	///
 	/// Only compiled with the `qlog` feature, so a build without it cannot ask
 	/// for traces the backends would not produce.
@@ -154,6 +160,7 @@ impl Default for Transport {
 			send_window: None,
 			congestion: Congestion::default(),
 			keep_alive: None,
+			mtu_discovery: false,
 			#[cfg(feature = "qlog")]
 			qlog: None,
 		}
@@ -162,9 +169,9 @@ impl Default for Transport {
 
 /// The congestion control family a connection runs.
 ///
-/// Noq uses CUBIC for loss-based control and BBRv3 for delay-based control.
+/// CUBIC is used for loss-based control and BBRv3 for delay-based control.
 ///
-/// The default is [`Loss`](Self::Loss), which is what noq runs
+/// The default is [`Loss`](Self::Loss), which is what moq-quic runs
 /// unasked. An application carrying live media wants [`Delay`](Self::Delay)
 /// and should say so; the relay does.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -177,6 +184,8 @@ pub enum Congestion {
 	/// waiting for loss, which keeps queues short and the send rate steady
 	/// enough for an encoder to track.
 	Delay,
+	/// No congestion control and no pacing, for tests and controlled links.
+	None,
 }
 
 /// Why a connection could not be set up or has ended.
@@ -212,6 +221,15 @@ pub enum Error {
 	/// The peer told us to stop sending with this code.
 	#[error("stream stopped: {0}")]
 	Stop(u64),
+	/// The connection window was stuck and this stream was discarded to free
+	/// it. See [`RecvStream::poll_lease`]. The peer hears of it once the
+	/// stream is stopped, so call `stop` with your own code: dropping the
+	/// stream sends code 0.
+	#[error("stream evicted")]
+	Evicted,
+	/// A lease wanted more than the connection receive window can hold.
+	#[error("want exceeds the receive window")]
+	TooLarge,
 	/// The TLS material a connection needs could not be loaded.
 	#[error("tls error: {0}")]
 	Tls(String),
@@ -244,6 +262,12 @@ pub enum Error {
 	/// missing or unwritable, or the writer thread could not be started.
 	#[error("qlog error: {0}")]
 	Qlog(String),
+	/// This endpoint closed the connection locally.
+	#[error("locally closed")]
+	Closed,
+	/// The flow-control limits are ones a peer would refuse, so none were applied.
+	#[error("invalid quic limits: {0}")]
+	Limits(#[from] LimitsError),
 }
 
 impl web_transport_trait::Error for Error {

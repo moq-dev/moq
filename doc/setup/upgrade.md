@@ -1,437 +1,104 @@
 ---
 title: Upgrade
-description: Breaking changes between the 2026-09-17 releases and the 2026-09-23 release train, with the replacement for each
+description: The order to roll out a release across relays, auth servers, and clients, and each package's migration guide
 ---
 
 # Upgrade
 
-This page walks from the 2026-09-17 releases (moq-relay 0.14.18, moq-cli
-0.11.2, moq-net 0.2.22, @moq/net 0.3.5, moq-ffi 0.3.19) to the 2026-09-23
-release train (moq-relay 0.15.1, moq-cli 0.12.1, moq-net 0.3.0, @moq/net 0.4.0,
-moq-ffi 0.4.1). Each crate's `CHANGELOG.md` has the full list; this page is the
-subset that breaks a working setup.
+Every hand-written published package keeps a `MIGRATE.md` saying how to
+migrate past each breaking release, newest first. Its section is written when
+that release is cut, not as changes land on `main`, so a build from `main` can
+be ahead of its guide. The links below track `main`: apply the sections from the
+version you run up to the one you install. Most binding users install a
+wrapper, such as `moq-rs` on PyPI or `dev.moq:moq` on Maven, whose guide is in
+the index below. The raw UniFFI
+packages published as `moq-ffi` have no guide of their own:
+[moq-ffi's](https://github.com/moq-dev/moq/blob/main/rs/moq-ffi/MIGRATE.md)
+covers that layer, in UniFFI names. This page covers what spans packages: the
+wire changes that decide the order to upgrade a deployment.
 
 A released flag, environment variable, or config key that was renamed is
 refused at startup with its replacement named, rather than ignored. Fix what the
-error lists and rerun.
+error lists and rerun. Any other `MOQ_*` variable a binary does not read, such as
+moq-cli's removed `MOQ_HOP`, is refused at startup too; its guide says what
+replaces it.
+
+## Migration guides
+
+- **Binaries:** [moq-relay](https://github.com/moq-dev/moq/blob/main/rs/moq-relay/MIGRATE.md), [moq-cli (`moq`)](https://github.com/moq-dev/moq/blob/main/rs/moq-cli/MIGRATE.md), [moq-gst](https://github.com/moq-dev/moq/blob/main/rs/moq-gst/MIGRATE.md), [obs-moq](https://github.com/moq-dev/moq/blob/main/cpp/obs/MIGRATE.md)
+- **Bindings:** [moq-ffi (UniFFI)](https://github.com/moq-dev/moq/blob/main/rs/moq-ffi/MIGRATE.md), [moq-c (C)](https://github.com/moq-dev/moq/blob/main/rs/moq-c/MIGRATE.md), [Python](https://github.com/moq-dev/moq/blob/main/py/moq-rs/MIGRATE.md), [Go](https://github.com/moq-dev/moq/blob/main/go/wrapper/MIGRATE.md), [Swift](https://github.com/moq-dev/moq/blob/main/swift/MIGRATE.md), [Kotlin](https://github.com/moq-dev/moq/blob/main/kt/moq/MIGRATE.md), [Dart](https://github.com/moq-dev/moq/blob/main/dart/moq/MIGRATE.md), [C++](https://github.com/moq-dev/moq/blob/main/cpp/moq/MIGRATE.md)
+- **Rust:** [hang](https://github.com/moq-dev/moq/blob/main/rs/hang/MIGRATE.md), [kio](https://github.com/moq-dev/moq/blob/main/rs/kio/MIGRATE.md), [moq-archive](https://github.com/moq-dev/moq/blob/main/rs/moq-archive/MIGRATE.md), [moq-audio](https://github.com/moq-dev/moq/blob/main/rs/moq-audio/MIGRATE.md), [moq-auth](https://github.com/moq-dev/moq/blob/main/rs/moq-auth/MIGRATE.md), [moq-boy](https://github.com/moq-dev/moq/blob/main/rs/moq-boy/MIGRATE.md), [moq-clock](https://github.com/moq-dev/moq/blob/main/rs/moq-clock/MIGRATE.md), [moq-clock-macros](https://github.com/moq-dev/moq/blob/main/rs/moq-clock/macros/MIGRATE.md), [moq-e2ee](https://github.com/moq-dev/moq/blob/main/rs/moq-e2ee/MIGRATE.md), [moq-flate](https://github.com/moq-dev/moq/blob/main/rs/moq-flate/MIGRATE.md), [moq-hls](https://github.com/moq-dev/moq/blob/main/rs/moq-hls/MIGRATE.md), [moq-ice](https://github.com/moq-dev/moq/blob/main/rs/moq-ice/MIGRATE.md), [moq-json](https://github.com/moq-dev/moq/blob/main/rs/moq-json/MIGRATE.md), [moq-loc](https://github.com/moq-dev/moq/blob/main/rs/moq-loc/MIGRATE.md), [moq-msf](https://github.com/moq-dev/moq/blob/main/rs/moq-msf/MIGRATE.md), [moq-mux](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/MIGRATE.md), [moq-net](https://github.com/moq-dev/moq/blob/main/rs/moq-net/MIGRATE.md), [moq-nvenc](https://github.com/moq-dev/moq/blob/main/rs/moq-nvenc/MIGRATE.md), [moq-pattern](https://github.com/moq-dev/moq/blob/main/rs/moq-pattern/MIGRATE.md), [moq-quic](https://github.com/moq-dev/moq/blob/main/rs/moq-quic/MIGRATE.md), [moq-room](https://github.com/moq-dev/moq/blob/main/rs/moq-room/MIGRATE.md), [moq-rtc](https://github.com/moq-dev/moq/blob/main/rs/moq-rtc/MIGRATE.md), [moq-rtmp](https://github.com/moq-dev/moq/blob/main/rs/moq-rtmp/MIGRATE.md), [moq-sock](https://github.com/moq-dev/moq/blob/main/rs/moq-sock/MIGRATE.md), [moq-srt](https://github.com/moq-dev/moq/blob/main/rs/moq-srt/MIGRATE.md), [moq-stats](https://github.com/moq-dev/moq/blob/main/rs/moq-stats/MIGRATE.md), [moq-tokio](https://github.com/moq-dev/moq/blob/main/rs/moq-tokio/MIGRATE.md), [moq-transcode](https://github.com/moq-dev/moq/blob/main/rs/moq-transcode/MIGRATE.md), [moq-uring](https://github.com/moq-dev/moq/blob/main/rs/moq-uring/MIGRATE.md), [moq-v4l](https://github.com/moq-dev/moq/blob/main/rs/moq-v4l/MIGRATE.md), [moq-video](https://github.com/moq-dev/moq/blob/main/rs/moq-video/MIGRATE.md), [qmux](https://github.com/moq-dev/moq/blob/main/rs/qmux/MIGRATE.md)
+- **JavaScript:** [`@moq/auth`](https://github.com/moq-dev/moq/blob/main/js/auth/MIGRATE.md), [`@moq/boy`](https://github.com/moq-dev/moq/blob/main/js/moq-boy/MIGRATE.md), [`@moq/clock`](https://github.com/moq-dev/moq/blob/main/js/clock/MIGRATE.md), [`@moq/flate`](https://github.com/moq-dev/moq/blob/main/js/flate/MIGRATE.md), [`@moq/hang`](https://github.com/moq-dev/moq/blob/main/js/hang/MIGRATE.md), [`@moq/json`](https://github.com/moq-dev/moq/blob/main/js/json/MIGRATE.md), [`@moq/loc`](https://github.com/moq-dev/moq/blob/main/js/loc/MIGRATE.md), [`@moq/msf`](https://github.com/moq-dev/moq/blob/main/js/msf/MIGRATE.md), [`@moq/net`](https://github.com/moq-dev/moq/blob/main/js/net/MIGRATE.md), [`@moq/p2p`](https://github.com/moq-dev/moq/blob/main/js/p2p/MIGRATE.md), [`@moq/pattern`](https://github.com/moq-dev/moq/blob/main/js/pattern/MIGRATE.md), [`@moq/publish`](https://github.com/moq-dev/moq/blob/main/js/publish/MIGRATE.md), [`@moq/qmux`](https://github.com/moq-dev/moq/blob/main/js/qmux/MIGRATE.md), [`@moq/room`](https://github.com/moq-dev/moq/blob/main/js/room/MIGRATE.md), [`@moq/signals`](https://github.com/moq-dev/moq/blob/main/js/signals/MIGRATE.md), [`@moq/ui`](https://github.com/moq-dev/moq/blob/main/js/ui/MIGRATE.md), [`@moq/video`](https://github.com/moq-dev/moq/blob/main/js/video/MIGRATE.md), [`@moq/watch`](https://github.com/moq-dev/moq/blob/main/js/watch/MIGRATE.md)
 
 ## Unreleased
 
-These land with the next breaking release, not the 2026-09-23 train.
+These land with the next breaking release.
 
-- **moq-mux's catalog consumer is opaque.** Construct `catalog::Consumer` with
-  `Consumer::new(broadcast, format).await` or convert an existing
-  `catalog::hang::Consumer` with `.into()`, then read it through `catalog::Stream`.
-  Its `Hang`, `Msf`, and `Closed` variants and `catalog::msf::Consumer::track`
-  are private.
-- **JS catalog ranking names its media kind.** Replace `Catalog.ranked(renditions)`
-  with `Catalog.Video.ranked(renditions)`. `Catalog.Audio.ranked(renditions)`
-  orders audio by enabled state, bitrate, sample rate, channel count, and name.
-  Both helpers put disabled renditions last.
-- **moq-tokio config durations are optional.** Wrap durations in `Some(...)` for
-  connect `race`, `resolution_delay`, and `timeout`; listen `timeout`; QUIC
-  `idle_timeout` and `keep_alive`; backoff `initial`, `max`, and `timeout`;
-  GOAWAY `handover`; and WebSocket `delay`. `None` uses the default, while
-  `Some(Duration::ZERO)` keeps each knob's zero behavior. Values set in code
-  now take effect on parsed and merged configs unless the flag or environment
-  variable was actually given. TOML keys, C ABI, binding records, and wire
-  formats are unchanged.
-- **Max age and max delay count wall-clock time too.** A superseded group is
-  stale once its successor arrived a full budget ago, as well as by media time,
-  so an untimed track is no longer exempt: with the default zero `max_delay`,
-  an untimed subscriber starts at the latest group and skips each superseded
-  one. Give it a budget to replay or tolerate reordering.
-- **`cache::Pool::gc` takes a waiter.** In Rust, `gc(now)` is
-  `gc(now, waiter)`, like `Driver::poll`: call it again when the waiter wakes,
-  since a parked read can arm an earlier deadline than the one returned.
-- **Native background panics.** UniFFI reports `MoqError::Task` with a panic
-  reason, and C reports `MOQ_ERROR_PANIC`. Other objects keep running. Browser
-  WebAssembly still aborts on panic with the current toolchain.
-- **Accepted sessions return their driver task.** `moq_tokio::server::Request::ok()`
-  now returns `(session, driver)`. Await the supervised driver before classifying
-  the session close, so a driver panic reports `moq_tokio::Error::Panic` rather
-  than the cancellation its teardown leaves on a channel.
-- **A QUIC load-balancer nonce needs its server id.** `listen.lb_nonce`,
-  `--listen-quic-lb-nonce`, and `MOQ_LISTEN_QUIC_LB_NONCE` without `lb_id` stop
-  startup. Setting `lb_id` (or `lb_nonce`) and `load_balancer` together also
-  stops; `lb_id` used to win and the other value was ignored. Set one of them.
-- **A replaced broadcast restarts announce consumers, and subscriptions stay.**
-  Rust's `AnnounceEvent` gains `Restart`, `@moq/net`'s announce events gain the
-  `"restart"` kind, moq-ffi's `MoqAnnounceEvent` gains `Restart`, and libmoq's
-  `moq_announce_kind` gains `MOQ_ANNOUNCE_KIND_RESTART`: another publisher
-  instance now serves the prefix (a newer epoch, or another route without one,
-  including a reconnect), so request the path again. A newer epoch no longer
-  ends subscriptions with `Unroutable`; they stay on the old instance until
-  dropped or its route goes. A restart was an end then a start, and still is on
-  moq-lite 06 and older and moq-transport. moq-lite 07 adds `ANNOUNCE_RESTART`
-  (0x3), and lite-06's `ANNOUNCE_RESTART` is named `ANNOUNCE_UPDATE`, as it
-  always meant.
-- **@moq/net announced requests follow restarts, and `broadcasts()` is gone.**
-  An unpinned `request(path, { announced: true })` now stays open across
-  publisher instances: its `active` moves to each new instance's broadcast and
-  clears between them, instead of the request ending with `Unroutable`. Read
-  `active` reactively and close the request when done; add `epoch` to keep the
-  old single-instance behavior. `Origin.Producer` and `Origin.Consumer` drop
-  `broadcasts(scope)`; iterate `announced(scope)` and keep the entries you need.
-  `@moq/watch` with `announced` off no longer moves to a later publisher.
-- **@moq/net discovers only what something watches, and `discovery` is gone.**
-  A `consume` origin stays empty until a reader watches it with
-  `announced(scope)` or `request(path, { announced: true })`; the session then
-  asks the relay about those prefixes only. Code that peeked the table
-  (`request(path)` expecting a route) without watching should hold an
-  `announced(scope)` stream. The `discovery` option on `connect`, `accept`, and
-  `Connection` and `Established.discovery` are removed, and passing the option
-  throws a `TypeError`: drop it. A relay that refuses an announce request
-  downgrades that session to blind requests on its own.
-- **"Epoch" means only the publisher epoch.** The reconnect counter is
-  `connects()`: `moq_tokio::Connection::epoch()` and moq-ffi's
-  `MoqSession::epoch()` are `connects()`, which is Python's `connects()`, Go's
-  `Connects()`, Swift's and Kotlin's `connects()`, and Dart's `connects`. The
-  audio re-anchor is `reanchor()`: `moq_audio::encode::Producer::reset_epoch` and
-  moq-ffi's `MoqAudioProducer::reset_epoch` are `reanchor`, which is Python's
-  `reanchor()` (was `reset_epoch()`), Swift's, Kotlin's, and Dart `moq_ffi`'s
-  `reanchor()` (was `resetEpoch()`), and Go's `Reanchor()` (was `ResetEpoch()`).
-- **`moq export ts --linger` waits only for the same publisher instance.** A
-  restarted publisher (a new epoch, or any return on a version without one)
-  exits 1 unless `--stitch` follows it as a program switch. `export srt` takes
-  the same two flags. In Rust, moq-mux's `ts::Export::resume` is
-  `ts::Export::follow`, `Source::returned` is gone, and `ts::Follower` follows a
-  path's announcements the way both exports do.
-  `ts::Export::new(source, catalog)` now takes a catalog stream, like the other
-  container exporters. Subscribe with `source.catalog::<ts::Ext>(format).await?`
-  to retain MPEG-TS metadata, or use `()` for media only; select renditions on the
-  stream before passing it in. `follow(broadcast, catalog)` also takes the replacement
-  stream. Both methods are synchronous; `with_ts` and `with_catalog_format` are removed.
-- **moq-mux's `Source` is built from the resolved catalog broadcast.**
-  `Source::new(origin, path)` is `Source::new(origin, broadcast)`: resolve the
-  broadcast first (`origin.request_broadcast(path, None)`), and its path is
-  where catalog references resolve from. `Source::broadcast()` returns that
-  broadcast without awaiting. Every later request for a path, siblings
-  included, stays on the broadcast the source first held there and fails once
-  it ends, rather than reaching a replacement; `bind` included. Build a new
-  `Source` to follow a new instance. moq-hls's `Broadcaster::new` no longer
-  awaits or fails, and a rendition whose sibling broadcast ends now ends its
-  playlist instead of rebinding.
-- **fMP4 export of Annex-B H.264 and H.265 inits from the catalog.** When the
-  catalog codec string and dimensions are enough, `moq export fmp4` writes an
-  `avc3` or `hev1` init segment before the first keyframe and leaves SPS, PPS,
-  and VPS in the samples. High AVC profiles (110, 122, 244, and the rest whose
-  chroma or bit depth the string does not carry), HEVC beyond Main and Main
-  Still Picture, and a catalog missing dimensions still wait for the SPS. A
-  returning Annex-B rendition is matched on that catalog record, so an encoder
-  that restarts with a new SPS can return. A keyframe whose parameter sets never
-  appeared in the track ends the export instead of waiting 30 seconds.
-- **moq-binary is moq-flate, and @moq/binary is @moq/flate.** The opaque
-  `snapshot` and `stream` tracks moved beside the codec; the wire and the
-  catalog's `binary` section are unchanged. In Rust, `moq_binary::X` is
-  `moq_flate::X`, and `moq_binary::Error::Flate(e)` is the matching
-  `moq_flate::Error` variant (`Decompress`, `TooLarge`). `moq_flate::Error`
-  now carries `moq_net::Error`, so it is no longer `PartialEq`. moq-mux's
-  `Error::Binary` is `Error::Flate`. In TypeScript, import `Snapshot` and
-  `Stream` from `@moq/flate`.
-- **moq-ffi data tracks wrap a track.** The broadcast's
-  `publish_binary_*`, `publish_json_*`, and `subscribe_json_*` are gone.
-  Create the track with `publish_track` or `subscribe_track`, then construct
-  `MoqFlateSnapshotProducer` / `MoqFlateStreamProducer` (taking
-  `MoqFlateConfig`) or `MoqJsonSnapshotProducer` / `MoqJsonStreamProducer`
-  from the broadcast and the track, or `MoqJsonSnapshotConsumer` /
-  `MoqJsonStreamConsumer` from the track. The wrappers keep JSON under its own
-  namespace: `moq.json` in Python, `moq.dev/moq/json` in Go, `dev.moq.json` in
-  Kotlin, `package:moq/json.dart` in Dart, and `Json` in Swift. The C
-  `moq_publish_binary_*` calls are unchanged.
-- **moq-ffi clients and servers take a config record.** `MoqClient::new()` and
-  `MoqServer::new()` plus their setters are `MoqClient::new(MoqClientConfig)` and
-  `MoqServer::new(MoqServerConfig)`, with nested `tls`, `quic`, `websocket`, and
-  `backoff` records and a new `versions` list. A value the native side cannot use
-  fails construction with `MoqError::Config`, including a bad bind address that
-  used to fail later as `Bind`. The `subscribe` origin is `consume` everywhere:
-  Python's `Client(..., subscribe=)` is `consume=`, Go's `WithSubscribeOrigin` is
-  `WithConsumeOrigin`. A server request's `set_publish` / `set_consume` are
-  arguments to `accept(publish, consume)`, where null inherits the server's
-  origin (Go: `Accept(ctx, nil, nil)`). Go's `Requests(ctx)` iterators are
-  `All(ctx)`, and its `Status*` constants are `ConnectionStatus*`; Kotlin and
-  Dart read announcements as `announced(config).updates()`.
-- **moq-ffi media lives in a `media` namespace.** The broadcast's
-  `publish_audio`, `publish_video`, `publish_container`, their `_on_track` and
-  `_stream` variants, `set_video_properties`, `set_catalog_section`,
-  `subscribe_catalog`, `subscribe_media`, and `fetch_media_group` are gone.
-  Construct `MoqMediaTrackProducer::audio` / `video` (from the broadcast, a
-  `MoqMediaTarget::Named` or `Requested` target, and the init record),
-  `MoqMediaContainerProducer`, `MoqMediaCatalogProducer`,
-  `MoqMediaCatalogConsumer::subscribe`, `MoqMediaTrackConsumer::subscribe`,
-  or `MoqMediaGroupConsumer::fetch` instead. Producers drop `name`,
-  `used`, and `unused`; read them through `demand()`. The wrappers expose these
-  as `moq.media` in Python, `moq.dev/moq/media` in Go, `dev.moq.media` in
-  Kotlin, `package:moq/media.dart` in Dart, and `Media` in Swift. Go fetches a
-  group with `media.FetchGroup`; its `NewGroupConsumer` decodes
-  a raw group instead.
-- **moq-ffi error payloads are named.** `MoqError` cases that carried a
-  positional string (`Transport`, `Internal`, `Connect`, ...) name it
-  `reason` (`Reason` in Go, the `reason:` label in Swift). The Display text is
-  unchanged.
-- **Python and Go durations are native.** `Frame`, `Datagram`, `Subscription`,
-  `TrackInfo`, and `ConnectionStats` carry `timedelta` in Python and
-  `time.Duration` in Go instead of microsecond integers: `max_delay_us` is
-  `max_delay`, `timestamp_us` is `timestamp`, and `rtt_us` is `rtt`. A frame
-  timestamp read from an untimed track is `None` / `nil`. A Python string
-  passed where a list of strings belongs (`tls_roots="ca.pem"`) raises
-  `TypeError` instead of splitting into characters.
-- **Demand is read through `demand()`.** In Rust, `track::Producer`'s
-  `is_used`, `used`, `unused`, and `poll_unused` are `producer.demand().X`,
-  and so are `group::Producer`'s `used` and `unused`.
-  `track::Request::poll_unused`, `track::Dynamic::poll_unused`, and
-  `group::Request::poll_unused` are `demand().poll_unused`, which returns
-  `Poll<Result<()>>` instead of `Poll<()>`: an `Err` means the request closed,
-  so treat it as unused too. A `group::Request` no longer needs polling to be
-  withdrawn; the last `fetch_group` caller leaving does it, so a handler that
-  sees it unused just drops it. A fetch arriving after that queues a fresh
-  request instead of joining the abandoned one, so a handler that keeps serving
-  without watching `demand()` may see its `accept` return `Error::Duplicate`.
-  The moq-json snapshot and moq-flate `is_used()` is `demand().is_used()`.
-  In TypeScript, `Track.Producer`'s `used` and `unused()` are
-  `producer.demand().used` and `.unused()`, as are `Group.Producer`'s, and
-  `Allocator.reserve` takes `producer.demand()`, replacing the
-  `Bandwidth.Demand` interface.
-- **`request_broadcast` takes an epoch.** In Rust,
-  `origin::Consumer::request_broadcast(path)` is
-  `request_broadcast(path, None)`; pass an `Epoch` instead to refuse any other
-  publisher instance. In TypeScript, `RequestOptions.epoch` does the same. A
-  dynamic route updated to another epoch now refuses the requests its handler
-  still holds with `Unroutable`, so a handler answering them late sees its
-  answer dropped.
-- **`moq --hop` is removed; `--epoch` replaces it.** A redundant pair shares an
-  epoch, a UUIDv7 such as `uuidgen -7` prints, instead of a Hop ID: pass the
-  same `--epoch` (or `MOQ_EPOCH`) to both. Unlike a rename, `--hop` is now an
-  unknown flag and `MOQ_HOP` is silently ignored, so remove it from any
-  deployment: a pair still keyed on `MOQ_HOP` mints an epoch per process, and
-  whenever either member starts or restarts, its new epoch replaces the other's
-  broadcast and restarts its viewers. `--cluster-id` no longer falls
-  back to `--hop`, so a node that pinned its Hop ID with `--hop` passes
-  `--cluster-id`. Relays no longer put a random hop in front of a route that
-  names no publisher; it keeps its 0.
-- **The `"auto"` delay is measured, not derived from RTT** (#4162). It is sized
-  from how late frames arrive (see [audio jitter](/concept/audio-jitter)) in
-  `@moq/watch` and `moq play`, which now defaults `--delay` to `auto` instead of
-  `100ms`. A numeric `@moq/watch` delay is taken literally instead of having
-  the rendition's own delay added on top. `Sync.out.jitter` now always
-  equals `Sync.out.delay`, and `"auto"` with no decoder registered resolves to
-  0 rather than 100 ms.
-- **`moq export ts`, `flv`, and `mkv` take `--delay`** (#4645). Each frame is
-  written that long after its decode time, on a clock that follows the
-  source's; the older staleness spellings are refused with the new flag
-  named. In Rust, moq-mux's `ts::Export::with_max_age` and the FLV and MKV
-  exports' `with_max_age` are `with_delay`. moq-rtmp's FLV egress releases
-  frames on its `max_delay` the same way. `ts::stats::Export` gains the
-  dropped-frame count (late frames, and the video frames then dropped waiting
-  for a keyframe), measured drift and out-of-tolerance count beside its
-  `streams` rows. It is no longer `Eq`.
-- **moq-mux has no clock translators.** `clock::Anchor`, `clock::Lane`, and
-  `SourceMap` (#4667) are gone, along with the importers' `live()`. Publish the
-  source's own timestamps and let the catalog clock map them to wall time.
-  An importer whose first frame arrives once the clock is in use (taken with
-  `catalog.clock()`, published in a catalog, or pinned with
-  `Config::with_clock`) shifts its timestamps onto it, so its first frame lands
-  at now; a `with_clock` catalog no longer keeps an importer's timestamps
-  verbatim. Importers sharing a timestamp base reserve through one
-  `catalog.timebase()`.
-- **moq-net owns its transport traits.** `moq_net::web_transport_trait` is
-  gone, and `transport::poll::{Session, SendStream, RecvStream}` no longer
-  extend `web_transport_trait::poll`. They carry their own `poll_*` methods,
-  `transport::Error`, and `transport::Stats`, and `Error::from_transport` takes
-  a `transport::Error`. moq-tokio's `Client` and `Server` are unchanged. A
-  custom transport handed straight to moq-net implements these traits; a
-  `moq-uring` session is wrapped with `moq_uring::transport::Session::new`.
-  Each session must report `binding()`: `transport::Binding::Uri` when the
-  transport handshake carries the request URI, or `InBand` when SETUP carries
-  it. The moq-tokio and moq-uring adapter constructors take this binding
-  explicitly; browser WebTransport adapters always report `Uri`.
-- **`--cluster-mesh` and `--cluster-linger` are unknown flags.** moq-relay
-  0.17 refuses them by name; later relays reject them, and TOML `mesh` and
-  `linger`, like any unknown setting. `MOQ_CLUSTER_MESH` and
-  `MOQ_CLUSTER_LINGER` are no longer read, so drop them from the environment.
-  In Rust, `cluster::Config` has no `mesh` or `linger` field.
-- **Settings no listener reads stop startup.** A stream-only relay or `moq`
-  listener (TCP or Unix, no `--listen`) refuses the QUIC-only
-  `--listen-preferred-v4`/`-v6`, `--listen-quic-lb-id`, and pinned `tls.peers`,
-  and a `--listen-tls-cert`, `-key`, or `-generate` unless `--listen-tcp-tls`
-  serves it. `--listen-unix-allow-*` needs `--listen-unix-bind`, and
-  `web.https.cert`, `key`, and `root` need `web.https.listen`. `moq` without a
-  listener refuses `--listen-*` and `--auth-*` flags. Each used to be ignored;
-  drop it, or add the listener it configures.
-- **Data publishes preserve optional timestamps.** `moq_net::Timed<P>` drops
-  its clock type parameter. JSON and flate snapshot/stream producers and JSON
-  window `push` / `pop` publish `at: None` untimed, so their track must also be
-  untimed. Pass a timestamp explicitly on timed tracks. Snapshot `modify(at)`
-  and `mutate(at, f)` carry the caller's optional time through the edit guard.
-  moq-mux data timestamps use the broadcast clock; convert a capture `Instant`
-  with `.at(catalog.clock().capture(instant)?)`. FFI data operations take an
-  optional timestamp in microseconds, and raw track info's null timescale now
-  means untimed on publish as well as receive. Python/Swift raw writes no
-  longer default to zero. Whole-frame media writes now require caller time;
-  container imports keep their existing timeline handling. `media.CatalogProducer.now()` samples and fixes the
-  broadcast clock for explicit local-event stamps. A supplied timestamp ahead
-  of now is published rather than refused.
-- **Container byte-stream importers take an init record.** The bindings'
-  `ContainerStreamProducer` (moq-ffi's `MoqMediaContainerStreamProducer`) takes
-  a `ContainerStreamInit` holding the format instead of a bare format. Its
-  optional `timebase`, also on `ContainerInit`, shares one source's offset
-  across container imports; leave it unset for the previous independent offset.
-- **moq-mux importers publish the catalog at their first frame.** The fMP4,
-  MKV, and MPEG-TS importers used to publish it at their init segment (`moov`,
-  `Tracks`, or the first PMT) on a provisional clock, then re-anchor it on the
-  first frame. They now hold it until that frame, as FLV already did, so the
-  first snapshot carries the final root `clock`. A reader waiting for the
-  catalog now waits for media of a selected track, not just the init segment:
-  a track `with_select` deselects doesn't release it, even if its media
-  arrives first. A `moov` or `Tracks` decoded after `finish()` is refused with
-  `fmp4::Error::MoovAfterFinish` or `mkv::Error::TracksAfterFinish`, since the
-  tracks it declares could never finish.
-- **fMP4 export fixes its track set at the init segment.** moq-mux's
-  `fmp4::Error` drops `MissingVideoTrack`, `MissingAudioTrack`, and
-  `NoCatalogSnapshot`, and adds `TrackAdded`, `TrackChanged`, `TrackRewound`,
-  and `TrackUndescribed`. `fmp4::Export` and `moq export fmp4` now end with one
-  of these where they used to write a track missing from the moov, and a
-  broadcast that ends with media queued behind an undescribed track is an error
-  rather than an empty `Ok(None)`. Restart the export to pick up a new
-  rendition.
-- **Subscriber staleness is max delay.** How far a group may fall behind the
-  live edge before a subscriber skips it is now `max_delay`, so it no longer
-  shares a name with a publisher's retention, which keeps `max_age`. In Rust,
-  `track::Subscription::max_age` and `with_max_age` are `max_delay` and
-  `with_max_delay`; moq-mux's `container::Consumer::set_max_age` and the fMP4,
-  H.264, and H.265 exports' `with_max_age` are `set_max_delay` and
-  `with_max_delay`; moq-audio's and moq-video's `decode::Options::max_age` is
-  `max_delay`, as is moq-audio's `decode::Consumer::max_age()`; and moq-rtmp's
-  `Play::with_max_age`, `Client::with_export_max_age`,
-  `listen::Config::export_max_age`, and `DEFAULT_MAX_AGE` are `with_max_delay`,
-  `with_export_max_delay`, `export_max_delay`, and `DEFAULT_MAX_DELAY`. In
-  TypeScript, `Track.Subscription`'s `maxAge` is `maxDelay`, as are
-  `Container.Consumer`'s `maxAge` prop and `@moq/watch`'s `Sync.out.maxAge`;
-  JavaScript refuses a `maxAge` key in subscription options or container consumer
-  props with a `TypeError` naming `maxDelay`, including when both keys are supplied
-  or `maxAge` is `undefined`. Untyped callers must rename it.
-  moq-ffi's `MoqSubscription`, `MoqAudioDecoderOutput`, and
-  `MoqVideoDecoderOutput` take `max_delay_us` (each binding in its own casing),
-  and so do C's `moq_subscription`, `moq_audio_decoder_output`,
-  `moq_video_decoder_output`, `moq_consume_video`, and `moq_consume_audio`.
-  `moq export fmp4`, `h264`, `h265`, and `rtmp` take `--max-delay`, and
-  refuse `--max-age`. `track::Info::max_age`,
-  `MoqTrackInfo.max_age_us`, and `moq import --max-age` are unchanged, as is the wire.
-- **moq-relay auth takes the client-CA answer.** `auth::Config::validate` and
-  `init` take `client_ca: bool`, whether any listener verifies client
-  certificates, and `validate_client_ca` is gone. `moq --listen` with an
-  invalid auth config stops at startup instead of refusing every session.
-- **A client CA needs a QUIC listener.** A stream-only relay or `moq` listener
-  (TCP or Unix, no `--listen`) refuses to start with `listen.tls.root`, which
-  nothing verified; moq-tokio returns `Error::MtlsUnsupported` for it.
-- **moq-tokio's `Transport` names WebTransport.** `moq_tokio::server::Transport`
-  is `moq_tokio::Transport`, with no re-export. A WebTransport session reports
-  `Transport::WebTransport` (`"webtransport"` in logs) instead of `Quic`, which
-  now means raw QUIC only, and `Connection::transport()` reports the live
-  transport. The bindings' `MoqTransport` gains a `WebTransport` case, so an
-  exhaustive `switch` or `when` needs one more arm.
-- **moq-net has no `VarInt`.** Varints are plain `u64`s:
-  `VarInt::decode_quic(buf)?.into_inner()` is `moq_net::varint::decode_quic(buf)?`,
-  and `VarInt::try_from(v)?.encode_quic(buf)` is
-  `moq_net::varint::encode_quic(v, buf)`, which fails past
-  `varint::MAX_QUIC` (2^62 - 1).
-- **Opus mapping family lives only on `mapping`.**
-  `moq_mux::codec::opus::Config::mapping_family` is gone. Family 0 is
-  `mapping: None`; any other family is the mapping's own (`mapping.family()`).
-  Set `mapping` alone when building a surround head. The OpusHead bytes are
-  unchanged.
-- **moq-mux TS stats live in `ts::stats`.** `ts::Stats` is
-  `ts::stats::Snapshot` and `ts::StreamStats` is `ts::stats::Stream`, whose
-  `track` is an owned `String`. `ts::Export::stats` returns
-  `ts::stats::Export`; feed it to `stats::Log` with `.into()`. `ts::MultipleProgramsError` is
-  `#[non_exhaustive]`: recover it by downcast and read `programs`.
-- **@moq/publish drops `OpusConfig.usedtx`.** Chromium's DTX output shifts the
-  audio timeline, so Opus DTX is always off (the WebCodecs default). Remove the
-  field; a plain-JS caller still passing it is ignored.
-- **FLV export takes a catalog stream.** `flv::Export::new` is synchronous and
-  takes `(source, catalog)`, like `fmp4::Export` and `mkv::Export`.
-  `with_catalog_format` and `with_select` are gone. Open the catalog yourself
-  (`source.catalog(format)`) and narrow it with `catalog::Stream::select`
-  before constructing the export. `moq export flv` still applies the same
-  rendition flags.
+- **The default priority byte moves again.** Priorities are signed in every
+  API, -128 to 127 with 0 unset, so nobody has to know that 127 is the middle
+  of a byte. The wire keeps one byte and one urgency on both protocols, so an
+  unset priority now goes out as 128 on moq-lite (was 127) and 127 on
+  moq-transport (was 128); the previous release moved it to match moxygen.
+  hang's media priorities now sit above that default rather than below it.
+  Mixed versions only differ in how an unset priority ranks against a set one,
+  so upgrade publishers and players in either order.
+- **moq-transport drafts 14 through 17 are dropped.** Rust and JavaScript
+  speak moq-transport drafts 18 through 22 only, and the `moql` SETUP
+  negotiates moq-lite only. A peer that offers nothing newer fails
+  to connect instead of falling back, so move such peers to draft 18 or a
+  moq-lite version before upgrading what they connect to.
+- **WebSocket needs a QMux subprotocol** (#6231). Relays answer a WebSocket
+  upgrade that offers no `qmux-NN` subprotocol with 400 instead of falling back
+  to the legacy `webtransport` format, so upgrade such clients before relays.
+- **Data-track breaks are an object with no bytes** (#5815). A hang data
+  track (TS private PES, sections, `m2ts`, text) marks a discontinuity with a
+  group of one empty object instead of a skipped group. Older consumers fail
+  to decode it, so upgrade exporters and players before publishers.
+- **Auth requests name `webtransport`** (#5293). Relays report a WebTransport
+  session as `webtransport` instead of `quic`, and older auth servers reject the
+  new value, so upgrade auth servers before relays.
+- **Capped grants need upgraded verifiers** (#5697). A token whose `publish`
+  or `subscribe` carries a `rate` cap encodes that role as an object, which
+  released verifiers reject, so upgrade every auth server and verifier before
+  issuing capped tokens.
+- **HLS records replace archive timelines.** The hang catalog's root `archive`
+  section is gone. A video or audio rendition carries its own `hls` field
+  naming a `<track>.hls` record track, which Rust publishers write by default.
+  Neither side reads the other's shape, so upgrade HLS exporters and their
+  publishers together.
+- **Announce restarts.** moq-lite 07 adds `ANNOUNCE_RESTART` (0x3): another
+  publisher instance now serves the prefix. lite-06's `ANNOUNCE_RESTART` is
+  named `ANNOUNCE_UPDATE`, as it always meant. moq-transport with the epoch
+  extension advertise another epoch before withdrawing the old
+  one. Elsewhere, a restart is still an end then a start.
+- **Publisher epochs ride the route** (#4942). moq-lite 07 carries the epoch
+  after the path in `ANNOUNCE_START`, `TRACK`, `SUBSCRIBE`, and `FETCH`.
+  Routes without an epoch no longer resume across routes, so default lite-06
+  sessions, including cluster GOAWAY redials, lose seamless cross-route
+  failover until lite-07 is the default.
+- **Route cost is one value** (#4661). Upgraded nodes write lite-06's cold
+  cost at 2^62-1, so an older relay that still ranks on `(warm, cold)` breaks
+  equal-warm ties against routes that crossed an upgraded node. It is only a
+  tie-break and ends once the fleet is upgraded.
 - **A track is timed or untimed, and nothing fills in a timestamp on
-  receive.** An untimed track (no timescale) arrives untimed, except over
-  moq-lite 05 and later, which can't encode absence yet and carry a send time
-  instead; see [untimed tracks](/concept/moq-lite#subscriptions). A write whose
-  timedness doesn't match its track fails with `TimestampMismatch`.
-  - moq-net: `track::Info.timescale` is `Option<Timescale>`, `None` for an
-    untimed track (`with_timescale` takes `impl Into<Option<_>>`), and
-    `group::{Producer,Consumer}::timescale()` return `Option<Timescale>`.
-    `Frame.timestamp`, `frame::Info.timestamp`, and `Datagram.timestamp` are
-    `Option<Timestamp>`. The `write_frame`, `append_datagram`, and
-    `insert_datagram` calls take `impl Into<Option<Timestamp>>`, so passing a
-    `Timestamp` still compiles.
-    An undeclared timescale is untimed: `track::Info::default()`,
-    `create_track(name, None)`, and `accept(None)` no longer default to
-    milliseconds, and `Timescale` has no `Default`. A track you write
-    timestamps to declares one, such as
-    `Info::default().with_timescale(Timescale::MILLI)`.
-  - moq-e2ee: `Frame` and `Datagram` timestamps are optional, and its writers
-    take `impl Into<Option<Timestamp>>`.
-  - moq-archive: recording an untimed track fails with `Error::Untimed`, so
-    `moq export archive` over moq-lite before 05 or moq-transport drafts
-    14–16 now fails instead of recording arrival times.
-  - moq-ffi: `MoqFrame.timestamp_us` and `MoqDatagram.timestamp_us` are
-    optional, null on a frame read from an untimed track, and default to null.
-    A raw track you publish is timed, so a raw write without one now fails
-    with `TimestampMismatch` instead of going out at 0.
-    `MoqMediaProducer::write_frame` without one used to pass a PTS of 0; it
-    now passes none, so the importer derives the time itself (elapsed since
-    its first frame) or refuses a codec that needs one (avc1, hvc1).
-    `MoqTrackInfo.timescale` is null on a received untimed track. In Go,
-    `Frame.TimestampUs` and `Datagram.TimestampUs` are `*uint64`; in Kotlin
-    and Dart, `Frame.timestamp` and `Datagram.timestamp` are nullable.
-  - libmoq: `moq_frame` and `moq_datagram` gain `timestamp_present`, which
-    changes their size, so recompile against the new `moq.h`.
-  - Receivers: tracks from moq-lite before 05, and moq-transport tracks
-    without `TIMESCALE` (every track on drafts 14–16), arrive untimed instead
-    of stamped with their arrival time; an object-scope Timescale is ignored.
-    On a moq-transport track with `TIMESCALE`, an object without a Timestamp
-    is malformed. A new subscriber with no start on an untimed track starts at
-    the latest group.
-- **CMAF decodes at the frame timestamp.** A fragment's earliest sample
-  presents at its moq-net frame timestamp; `tfdt` only orders the samples. In
-  TypeScript, `Container.Format.decode` and `Cmaf.decodeDataSegment` take that
-  timestamp: pass `frame.timestamp` alongside `frame.payload`, or `undefined`
-  for an untimed frame, whose samples present at `tfdt`.
-  `Cmaf.decodeTimestamp` is gone; the frame timestamp is the fragment's time.
-  moq-mux's CMAF `Wire::write` refuses a track whose timescale isn't the init's
-  `mdhd` timescale with `fmp4::Error::TimescaleMismatch`. `import::Track` and
-  `TrackStream` accept a CMAF rendition's track at that timescale; a track you
-  create yourself declares it with `track::Info::with_timescale`. Both decoders refuse a `trun` whose
-  `data_offset` doesn't start at the next sample in the `mdat`.
-- **@moq/json and @moq/flate consumers return `Timed` values.** The snapshot
-  and stream consumers' `next()` and async iterator yield `{ value, at }`,
-  where `at` is the frame's timestamp and absent on an untimed track; read
-  `.value` for what they used to return. A snapshot consumer's `next()` now
-  yields every state in order. Call `latest()` for the old behavior, which
-  skips to the newest state. A caller that passes the result on as `any` or
-  `unknown` (logging, `JSON.stringify`, a generic setter) still compiles but
-  now gets the wrapper and every intermediate state, so search for each
-  `next()` and `for await` over a snapshot consumer rather than relying on
-  type errors. On an untimed track nothing marks a group stale, so a `next()`
-  reader that falls behind replays the whole backlog where it used to skip it.
-- **`moq export ts --delay` defaults to 1 s and includes the send-ahead.** Each
-  frame still goes out up to the delay ahead of its decode time, now no further
-  than its decoder buffer holds, and that comes out of the same budget: the
-  output trails a TS source by the delay instead of twice it. With a multiplex
-  rate, video whose HRD declares a longer buffer delay than `--delay` stops the
-  export with the delay it needs named, so a broadcast feed run at
-  `--delay 500ms` needs `--delay 1s`. A source that sends every track at its
-  decode time (RTMP, a browser) trails by the delay plus the video's
-  send-ahead: 2 s at the new default, where `--delay 500ms` keeps the 1 s it
-  had. moq-srt egress runs at its SRT latency or 1 s, whichever is longer.
+  receive.** Tracks from moq-lite before 05, and moq-transport tracks without
+  `TIMESCALE` arrive untimed instead of
+  stamped with their arrival time. moq-lite 05 and 06 can't encode absence and
+  carry a send time instead, so their receivers drop every timestamp and those
+  tracks arrive untimed too: read media time from the payload. moq-transport
+  timestamps are served to moq-lite untimed; see
+  [untimed tracks](/concept/moq-lite#subscriptions). A new subscriber with no
+  start on an untimed track starts at the latest group.
+- **Max age and max delay count wall-clock time too.** A superseded group is
+  stale once its successor arrived a full budget ago, as well as by media
+  time, so an untimed track is no longer exempt. With the default zero
+  `max_delay`, an untimed subscriber starts at the latest group and skips each
+  superseded one; give it a budget to replay or tolerate reordering.
 
-## Wire
+## Released
 
 Older protocol versions still negotiate, so relays and clients can be upgraded
-in any order, apart from [pattern-only token grants](#relay-and-cli) and two wire
-changes:
+in any order, apart from these:
 
 - The lite 06 ALPN is `moq-lite-06`, not `moq-lite-06-wip`. An explicit
   `moq-lite-06-wip` in a version list is refused (#3941).
@@ -439,202 +106,16 @@ changes:
   a root `clock: { wall, timescale }` (#3612, #3675). A new `moq export hls`
   finds no timeline in an old publisher's catalog, so upgrade publishers
   before the HLS gateway.
-
-## Relay and CLI
-
-The `moq-relay` and `moq` flags split into `--listen-*` (accepting),
-`--connect-*` (dialing), and a shared `--quic-*` section. Environment
-variables follow the flag (`MOQ_SERVER_BIND` is `MOQ_LISTEN`).
-
-| Before | After |
-| --- | --- |
-| `--server-bind` | `--listen` |
-| `--server-*`, `--tls-cert`, `--tls-key`, `--tls-generate` | `--listen-*`, `--listen-tls-cert`, `--listen-tls-key`, `--listen-tls-generate` |
-| `--client-connect` | `--connect` |
-| `--client-*` | `--connect-*` |
-| `--client-failover-delay` | `--connect-race` |
-| `--client-reconnect=false` | `--connect-once` (inverted) |
-| `--tls-disable-verify`, `--client-tls-disable-verify` | `--connect-tls-insecure` |
-| `--server-quic-*`, `--client-quic-*` | `--quic-*`, applied to both directions |
-| TOML `[server]`, `[client]` | `[listen]`, `[connect]` |
-| TOML `[server.quic]`, `[client.quic]` | `[quic]` |
-| TOML `listen`, `connect`, `failover_delay`, `reconnect`, `disable_verify` | `bind`, `url`, `race`, `once` (inverted), `insecure` |
-| `--cluster-linger` | removed; a broadcast closes when its last publisher is lost |
-| `--cluster-connect host:port` | a full URL, `https://host/?jwt=TOKEN` |
-| `--cluster-mesh`, TOML `mesh` | removed; list every peer with `--cluster-connect` or `--cluster-connect-api` |
-| `moq --origin`, `--name`, `--latency-max` | `--hop` (removed for `--epoch` after [Unreleased](#unreleased)), `--broadcast`, `--max-age` |
-| `moq publish`, `moq subscribe` | `moq import`, `moq export` |
-| `moq token`, the `moq-token` binary | `moq auth` |
-
-Other changes to a deployment:
-
-- **Auth is one contract** (#3688). The relay asks an auth server per session
-  (`--auth-url`) or applies a static anonymous grant (`--auth-public`); exactly
-  one is required. `--auth-key`, `--auth-key-dir`, `--auth-api`,
-  `--auth-api-mode`, `--auth-public-api`, `--auth-domain`, `--auth-mtls-tier`, and `--auth-tls-*`
-  are gone: run `moq auth serve --key-dir ...` next to the relay and point
-  `--auth-url` at it. The flag-by-flag mapping is in
-  [Migrating from the relay flags](/bin/relay/auth#migrating-from-the-relay-flags).
-- **Grants are patterns, not prefixes.** `anon` is now exactly the broadcast
-  `anon`; write `anon/**` for the subtree. This applies to `--auth-public`,
-  TOML `public`, and the `[auth.public]` table, which is now
-  `public_subscribe` / `public_publish`. A public or mTLS pattern with no
-  wildcard refuses to start, naming the subtree to write, rather than pick
-  one reading silently. The patterns are rooted at `/`, as in 0.14, so
-  `anon/**` admits a client dialed at `/anon` and refuses one dialed outside
-  `anon/`. Earlier 0.15 releases rooted them at the dialed path instead.
-- **Token grants are patterns.** JWT `publish` and `subscribe` claims are
-  patterns, so a token granting `alice` covers only `alice`; sign `alice/**`
-  instead. Existing `put`/`get` tokens and key scopes keep working as subtrees,
-  and subtree-only grants are still signed in that form, so a `moq-token`
-  deployment can upgrade issuers and verifiers in either order. Verifiers on
-  the pattern-only `moq-auth` 0.1.0/0.1.1 or `@moq/auth` 0.1.x/0.2.0 refuse
-  that form, so upgrade them before their issuers. Grants only a pattern can
-  express need an upgraded verifier.
-- **Removed auth settings refuse to start.** 0.14's `[auth]` `key`, `key_dir`,
-  `auth_api`, `domains`, `mtls_tier`, and `[auth.tls]`, and their flags and
-  `MOQ_AUTH_*` variables, stop the relay with the replacement named rather
-  than being ignored.
-- **Token claims.** `iss`, `sub`, and `jti` are ignored and `nbf` is enforced.
-  Any other claim refuses the token with its name, `aud` and `cluster`
-  included, where 0.14 ignored all but `aud`: an issuer adding app claims such
-  as `user_id` must drop them.
-- **Every credential is evaluated or refused.** A relay on `--auth-public`
-  refuses a session presenting a token, as 0.14 did, including peers sending
-  `cluster.token`, and refuses to start with a client CA. `moq auth serve`
-  refuses a session presenting both a JWT and a certificate, so a peer
-  presents one or the other.
-- **`moq auth serve` never re-checks or expires by default**, as 0.14 never
-  did. `--revalidate` needs `--expires`, and `--limit-*` needs `--revalidate`.
-- **mTLS admits nothing on its own.** A verified client certificate is reported
-  to the auth server, which grants it. `moq auth serve --mtls-publish '**' --mtls-subscribe '**' --mtls-peer` restores the old full access for every certificate
-  the relay's client CA verifies, as a cluster peer, so keep that CA to cluster peers.
-- **`moq --listen` needs auth.** A CLI listener refuses to start without
-  `--auth-url` or `--auth-public` instead of accepting everyone.
-- **Gossip discovery is removed.** A relay dials only the peers it lists or
-  finds on the LAN, never a URL learned from an announcement, and no longer
-  announces `.internal/origins`. The `/nodes` endpoint lists only peers this
-  relay dialed. Until every relay that ran `--cluster-mesh` is upgraded, keep
-  client grants off `.internal/`: an older relay still dials any URL announced
-  there with `cluster.token`, and an upgraded peer still forwards it.
-- **Other 0.14 auth differences kept.** Peers identify by certificate or LAN
-  path. An auth server's `root` alias may have any depth.
-  A path in `--cluster-connect` is not refused, although it shifts the mesh
-  frame. `moq auth serve --key` takes a file, not an https or JWKS URL.
-  `moq auth sign --root` is the token root and JS `verify --root` the dialed
-  path. `/.cluster*` roots are reserved. `--auth-public a,b` splits on commas.
-- **noq is the only QUIC stack** (#3811). The `quinn` and `quiche` cargo
-  features and the backend setting are gone.
-- **Stats counters** are `*_started` / `*_ended` (`sessions_started`,
-  `announces_ended`, ...). This release still writes the old `announced` /
-  `*_closed` names beside them, so move consumers now.
-
-## GStreamer
-
-- `moqsink` properties `estimated-send-bitrate` / `estimated-recv-bitrate` are
-  `estimated-send-rate` / `estimated-recv-rate`, with no alias; a `gst-launch`
-  line naming the old ones fails at runtime.
-
-## Rust
-
-- **moq-native is moq-tokio** (#2896). moq-native 0.20.0 is a stub that fails
-  to compile with the rename. `ClientConfig::default().init()?` is
-  `moq_tokio::connect::Config::default().init(quic)?`, and
-  `with_publisher(&origin).with_subscriber(origin)` is `with_origin(origin)`.
-  Names sit under their modules (`connection::Goaway`, `connection::Monitor`,
-  `transport::Session`; #3745).
-- **moq-token is moq-auth** (#3684). `Claims` holds `Patterns`, and
-  `Claims::authorize` returns pattern residuals.
-- **Origins** (#3400, #3804). `Origin::random().produce()` is
-  `moq_tokio::origin::spawn()`. `create_broadcast(path, route)` is
-  `origin.publish(path, route)`, or `create_broadcast(path)` then
-  `broadcast.announce(route)`. `with_root` plus `scope(prefixes)` is one
-  `scope(root, &patterns)` returning `Result`. `origin::Info` is
-  `origin::Config`.
-- **Announcements are prefix routes** (#3225, #3770). `announce::Update` is
-  `{ prefix, route, kind, captures }`: skip `!update.kind.is_active()` and
-  resolve the broadcast with `consumer.request_broadcast(&update.prefix, update.route.epoch)`.
-  Serve a subtree on demand with `origin.dynamic(prefix, route)`.
-- **Tracks.** `with_latency_max` / `latency_max` is `with_max_age` / `max_age`.
-  `write_datagram(Datagram)` is `insert_datagram(sequence, timestamp, payload)`
-  (#3666); `append_datagram` is unchanged. `track::SubscriberControl` is
-  `track::Control`, `track::GroupRequest` is `group::Request`, and
-  `ConnectionStats` is `session::Stats` with `estimated_send_rate` /
-  `estimated_recv_rate`.
-- **Oversized groups abort** with `GroupTooLarge` instead of shedding their head
-  (#3585).
-- **Catalog edits are fallible** (#3644, #3813). moq-mux and moq-json `lock()`
-  is `modify()?`, and a guard that fails to publish on drop aborts the
-  track. `timeline::Config::wall` is the broadcast `Clock`.
-- **moq-json config** (#3718). `compression: bool` is a `Compression` enum;
-  track-owning options are `producer::Config` / `consumer::Config`.
-- **moq-mux imports are typed.** `import::Init` splits into `AudioInit`,
-  `VideoInit`, and `ContainerInit`, with typed formats instead of strings, and
-  `Track::new` is `Track::audio` / `Track::video`.
-- **moq-relay embedding** (#3638). `Relay` fields are private: clone the
-  handles you need, mount routes, then call `Relay::run`.
-  `Cluster::with_cache` moved to `cluster::Options`.
-
-## JavaScript
-
-The JavaScript packages have no changelog; this list follows the breaking
-PRs, so a minor rename may be missing.
-
-- **@moq/token is @moq/auth.** `sign` / `verify` are `Key.sign` / `Key.verify`,
-  and claims are pattern unions (see [Token grants are patterns](#relay-and-cli)).
-- **One `Connection`** (#3614, #3636). `Connection.Reload` is
-  `new Moq.Connection({ url })`, which pools one connection per relay. `closed`
-  settles only on `close()`; the error that stopped retrying is `error`.
-- **Origins hold broadcasts** (#2705, #3225). `connection.publish(path,
-  broadcast)` is `origin.createBroadcast(path)` then `broadcast.announce()`, and
-  `connection.announced(prefix)` is `origin.announced(scope)` yielding
-  `{ prefix, kind, route }`. `ignoreSelf` is gone: reflected announces
-  are always dropped.
-- **Names mirror Rust** (#3710). `latencyMax` is `maxAge` (a `Time.Milli`),
-  `writeDatagram` is `insertDatagram`, and `RemoteError` is `Error.Stream` /
-  `Error.Session`.
-- **@moq/watch** (#3396, #3817). `latency`, `latency-min`, `latency-max`, and
-  `jitter` are `delay` and `buffer`, which need a unit (`delay="100ms"`,
-  `buffer="30s"`). `reload` is `announced`. `Watch.Broadcast({ connection })`
-  is `Watch.Player({ origin: connection.origin, ... })`.
-- **@moq/publish** takes `origin: connection.origin` instead of a
-  `connection` signal.
-- **@moq/json and @moq/binary** (now `@moq/flate`) take one options object (#3640):
-  `new Json.Snapshot.Consumer({ track })` instead of `(track, config)`.
-- **@moq/hang** reads the catalog `archive` entry instead of `timeline`.
-
-## Bindings
-
-Python (`moq-rs` 0.5.0), Swift (0.5.0), Kotlin (`dev.moq:moq` 0.5.0), and Go
-wrap moq-ffi 0.4. These are the moq-ffi names; each wrapper follows them in its
-own casing:
-
-- **Go module path** is `moq.dev/moq` (was `github.com/moq-dev/moq-go/moq`).
-- **Publish split by kind.** `publish_media*` is `publish_audio`,
-  `publish_video`, or `publish_container`, each taking its own init. The raw
-  encoder paths that used to be `publish_audio` / `publish_video` are
-  `encode_audio` / `encode_video`.
-- **Durations are microseconds** (`max_age_us`, `MoqBackoff.initial_us`), and
-  rate estimates are `estimated_send_rate` / `estimated_recv_rate`.
-- **Setters are fallible** (#3642). Client and server configuration setters
-  return an error (`Busy` during connect or listen) instead of dropping the
-  value. `set_tls_disable_verify(bool)` is `set_tls_verify(bool)`.
-- **Announcements.** `MoqAnnounced` is `MoqAnnounceConsumer` and
-  `MoqAnnouncement` is `MoqAnnounceUpdate`; `MoqBroadcastRequest::abort` is
-  `reject`, and `MoqOriginOptions` is `MoqOriginConfig`.
-- **`MoqAudioCodec`** is an `opus()` object (#3671).
-- **Errors.** `MoqError::Protocol` carries a `MoqProtocolError` (scope, wire
-  code, kind) instead of a flattened message.
-- **Track and group `finish()`** keeps the handle open so a later `abort()` can
-  still run.
-
-C (libmoq 0.6):
-
-- The 41 `moq_client_*` setters are one zero-initializable `moq_client_config`,
-  whose durations are `_us`.
-- `moq_publish_media` is `moq_publish_audio`, `moq_publish_video`, or
-  `moq_publish_container`; the raw encoders are `moq_encode_audio*` /
-  `moq_encode_video*`. Formats are enums instead of strings.
-- `moq_announced` is `moq_announce_update`, `moq_origin_consume_announced` is
-  `moq_origin_announced_broadcast`, and `moq_broadcast_request_abort` is
-  `moq_broadcast_request_reject`.
+- **Token grants are patterns.** Existing `put`/`get` tokens and key scopes
+  keep working as subtrees, and subtree-only grants are still signed in that
+  form, so a `moq-token` deployment can upgrade issuers and verifiers in either
+  order. Verifiers on the pattern-only `moq-auth` 0.1.0/0.1.1 or `@moq/auth`
+  0.1.x/0.2.0 refuse that form, so upgrade them before their issuers. Grants
+  only a pattern can express need an upgraded verifier.
+- **Gossip discovery is removed.** Until every relay that ran
+  `--cluster-mesh` is upgraded, keep client grants off `.internal/`: an older
+  relay still dials any URL announced there with `cluster.token`, and an
+  upgraded peer still forwards it.
+- **Stats counters were renamed.** Relays still write the legacy names beside
+  the new ones, so move consumers to the new names now; [Stats](/concept/stats#traffic)
+  lists both.

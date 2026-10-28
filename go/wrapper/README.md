@@ -33,7 +33,7 @@ import (
 
 ctx := context.Background()
 
-client, err := moq.Dial(ctx, "https://relay.example.com")
+client, err := moq.Dial(ctx, "https://relay.example.com", moq.ClientConfig{})
 if err != nil {
 	log.Fatal(err)
 }
@@ -62,13 +62,21 @@ for event, err := range announced.All(ctx) {
 
 ## Common APIs
 
-Client TLS can be configured with `WithTLSRoots`, `WithTLSSystemRoots`, and
-`WithTLSFingerprints`. Use `WithClientTLSCert` and `WithClientTLSKey` for mTLS.
+`Dial` takes a `ClientConfig` whose names and nesting mirror moq-ffi's
+`MoqClientConfig`. Client TLS is configured in `ClientConfig.TLS` with `Roots`,
+`SystemRoots`, and `Fingerprints`; set `Cert` and `Key` for mTLS.
 Use fingerprints with `Server.CertFingerprints()` when
 pinning a generated self-signed certificate.
 
 `Client.Session().Stats()` returns a connection stats snapshot. Fields are nil
 when the transport backend does not report that metric yet.
+
+An encoder you manage can claim a share of `Client.Session().Allocator()` with
+`Reserve(demand, maxBps)`, using the track's `Demand()`. Keep one reservation and change its ceiling
+with `Update(maxBps)`. Call `Update(0)` before abandoning or replacing it to
+return its share and automatic probe ceiling immediately, even while the track
+stays subscribed. A later update can resume the same claim. While the track
+stays open, dropping the Go reference alone leaves release to garbage collection.
 
 Incoming server requests expose the query-free `Path()` before `Accept()`. It
 is consistent across transports and returns an empty string for the root or
@@ -78,19 +86,20 @@ Media lives in `moq.dev/moq/media`. `NewAudioTrackProducer` / `NewVideoTrackProd
 take a broadcast, a `Named` or `Requested` target, and an `AudioInit` / `VideoInit`.
 A `Named` target chooses a track name or lets the importer derive one; a `Requested`
 target takes over a subscriber's pending request. A duplicate name fails.
-`VideoInit.Hint` seeds fields the bitstream cannot supply. `NewContainerProducer` /
-`NewContainerStreamProducer` demux whole chunks or a byte stream into their own tracks,
-using `ContainerInit` or `ContainerStreamInit`. Share `NewTimebase(broadcast)` in these
-records for containers on one source timeline; omitting it gives each an independent
-offset. Timebases belong to one broadcast and do not keep it open. Call `Close` to
+`VideoInit.Hint` seeds fields the bitstream cannot supply. `NewContainerProducer` demuxes
+a container from chunks split anywhere, such as a byte stream, into its own tracks.
+Share `NewTimebase(broadcast)` in its `ContainerInit` for containers on one source
+timeline; omitting it gives each an independent offset. Timebases belong to one broadcast and do not keep it open. Call `Close` to
 release the timebase handle on the calling goroutine.
 `NewCatalogProducer` holds its broadcast weakly and owns catalog properties and sections.
 `NewCatalogConsumer`, `NewTrackConsumer`, and `FetchGroup` read
-catalog snapshots, live media, and one fetched media group. `NewGroupConsumer`
+catalog snapshots, live media, and one fetched media group. The last two take a `Rendition`
+(`VideoRendition` or `AudioRendition`: a catalog ID and its config) and follow its broadcast
+and track themselves. `NewGroupConsumer`
 decodes a raw group, such as one from `moq.TrackConsumer.RecvGroup` for arrival-order reads.
 Frames and `Flush` use `time.Duration`; `Demand()` owns track names and subscriber waits.
 
-`BroadcastProducer.Dynamic()` accepts subscriber-requested tracks. Call
+`BroadcastProducer.Requests()` accepts subscriber-requested tracks. Call
 `TrackRequest.Accept()` for raw tracks, or pass the request as `media.Requested`
 so the media importer selects the timescale.
 
@@ -99,9 +108,11 @@ Import it under an alias next to `encoding/json`. Each type wraps a track:
 `NewSnapshotProducer` / `NewStreamProducer` take over a `TrackProducer` and advertise it
 in the broadcast's catalog, and `NewSnapshotConsumer` / `NewStreamConsumer` take over a
 `TrackConsumer` that has not read a group yet. Snapshots carry lossy latest state; streams
-carry every record in order. Producers accept any `encoding/json` value; consumers return
+carry every record in order. `NewWindowProducer` / `NewWindowConsumer` carry a sliding window
+of records a reader can join at any point; the catalog has no window mode, so the producer
+takes only the track. Producers accept any `encoding/json` value; consumers return
 `json.RawMessage` so callers choose their own decoded type.
-`Update` / `Append` take a final `*time.Duration` on the broadcast clock; nil publishes untimed.
+`Update` / `Append` / `Push` / `Pop` take a final `*time.Duration` on the broadcast clock; nil publishes untimed.
 Raw tracks with a nil timescale are untimed; timed tracks require matching timestamps.
 `media.CatalogProducer.Now()` samples and fixes the catalog clock for explicit local-event stamps.
 `moq.dev/moq/flate` provides the matching snapshot and stream producers for opaque bytes.
@@ -109,10 +120,12 @@ Raw tracks with a nil timescale are untimed; timed tracks require matching times
 ```go
 import moqjson "moq.dev/moq/json"
 
-broadcast, _ := client.CreateBroadcast("room")
+publication, _ := client.CreateBroadcast("room")
+broadcast := publication.Broadcast()
 track, _ := broadcast.PublishTrack("status", nil)
 status, _ := moqjson.NewSnapshotProducer(broadcast, track, moqjson.SnapshotOptions{Compression: true})
 _ = status.Update(map[string]any{"viewers": 42}, nil)
+_ = publication.Announce(moq.AnnounceRoute{})
 ```
 
 Producers take `SnapshotOptions` or `StreamOptions`; both consumers take
@@ -125,11 +138,11 @@ re-exported as sentinels (`moq.ErrClosed`, `moq.ErrUnauthorized`, ...) so you ca
 `errors.Is` against them without importing `moq.dev/moq-ffi`. Two helpers cover the
 common cases: `moq.IsShutdown(err)` (a stream ended because it was cancelled or
 the session closed, i.e. not a real failure) and `moq.IsAuthError(err)` (HTTP
-401/403).
+401/403 or an expired token).
 
 Every call that can block takes a `context.Context` and aborts cleanly when it is
 cancelled, leaving nothing running in the background. A one-shot call (a subscribe,
-a fetch, `RequestBroadcast`, `Resolve`, `Used`/`Unused`, `Server.Accept`) aborts on
+a fetch, `RequestBroadcast`, `Resolve`, `WantedChanged`, `Used`/`Unused`, `Server.Accept`) aborts on
 its own and leaves the object usable; a stream read cancels the stream it reads.
 See the package doc for details.
 

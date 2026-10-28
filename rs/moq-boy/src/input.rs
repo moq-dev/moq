@@ -129,11 +129,11 @@ async fn handle_viewer_commands(
 		moq_json::snapshot::Consumer::<RawCommand>::new(track, moq_json::snapshot::consumer::Config::default());
 
 	loop {
-		let command = match commands.next().await {
-			Ok(Some(command)) => command,
+		let command = match commands.latest().await {
+			Ok(Some(command)) => command.value,
 			Ok(None) => break,
 			// A malformed command is skipped; a track error ends the stream.
-			Err(moq_json::Error::Json(err)) => {
+			Err(err @ (moq_json::Error::Json(_) | moq_json::Error::DuplicateKey)) => {
 				tracing::warn!(%viewer_id, %err, "invalid command");
 				continue;
 			}
@@ -168,6 +168,7 @@ async fn handle_viewer_commands(
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use std::time::Duration;
 
@@ -183,7 +184,7 @@ mod tests {
 	}
 
 	/// Publish a viewer with a live command track.
-	fn viewer(origin: &moq_net::origin::Producer) -> (moq_net::broadcast::Producer, moq_net::track::Producer) {
+	fn viewer(origin: &moq_net::origin::Producer) -> (moq_net::origin::Publication, moq_net::track::Producer) {
 		let broadcast = origin.create_broadcast("alice").unwrap();
 		let track = broadcast
 			.create_track(
@@ -193,6 +194,41 @@ mod tests {
 			.unwrap();
 		broadcast.announce(moq_net::origin::Route::default()).unwrap();
 		(broadcast, track)
+	}
+
+	/// A viewer is untrusted: a malformed command, or a timestamp no Duration can
+	/// hold, is dropped without ending that viewer's command stream.
+	#[tokio::test(start_paused = true)]
+	async fn malformed_commands_are_skipped() {
+		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
+		tokio::spawn(moq_net::time::run(driver));
+		let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+		let consumer = origin.consume();
+		tokio::spawn(async move { handle_viewers(&consumer, &tx).await });
+
+		let (_viewer, track) = viewer(&origin);
+		tokio::time::sleep(Duration::from_secs(1)).await;
+		send(&track, "not json");
+		send(&track, r#"{"type":"explode"}"#);
+		send(&track, r#"{"type":"buttons","buttons":["turbo"]}"#);
+		send(
+			&track,
+			r#"{"type":"buttons","buttons":["a"],"timestamps":[{"label":"past","ts":-5},{"label":"far","ts":1e300},{"label":"ok","ts":1500}]}"#,
+		);
+
+		let Some(Command::Buttons {
+			buttons,
+			viewer_id,
+			timestamps,
+		}) = rx.recv().await
+		else {
+			panic!("the viewer's stream ended at a malformed command");
+		};
+		assert_eq!(buttons, vec![Button::A]);
+		assert_eq!(viewer_id, "alice");
+		assert_eq!(timestamps.len(), 1, "{timestamps:?}");
+		assert_eq!(timestamps[0].label, "ok");
+		assert_eq!(timestamps[0].ts, Duration::from_millis(1500));
 	}
 
 	/// Older versions send a restart as END then START while the old command track

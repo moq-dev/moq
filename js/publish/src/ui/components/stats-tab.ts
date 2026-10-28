@@ -1,11 +1,12 @@
+import { Milli, Nano, now } from "@moq/clock";
 import type { Effect, Getter } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
+import { graph } from "@moq/ui";
 import type MoqPublish from "../../element";
 import { formatBitrate, formatFps, formatHz } from "../format";
-import { graph } from "../graph";
 import { audio as audioIcon, icon, video as videoIcon, wifi as wifiIcon } from "../icons";
 
-const POLL_MS = 250;
+const POLL = Nano.fromMilli(Milli(250));
 
 type Kind = "network" | "video" | "audio";
 
@@ -113,13 +114,14 @@ export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 			reader.cancel().catch(() => {});
 		});
 
+		// Not raced against teardown, which would drop a frame whose read had already resolved.
 		effect.spawn(async () => {
 			for (;;) {
-				const next = await effect.race(reader.read());
-				if (!next?.value) break;
+				const { value: frame } = await reader.read();
+				if (!frame) break;
 
 				frames++;
-				next.value.close();
+				frame.close();
 			}
 		});
 	});
@@ -128,10 +130,11 @@ export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 
 	let prevFrames = 0;
 	let prevBytes = encoded();
-	let prevWhen = performance.now();
+	const at = () => Nano.toMilli(Nano(now()));
+	let prevWhen = at();
 
 	parent.interval(() => {
-		const now = performance.now();
+		const now = at();
 		const elapsed = now - prevWhen;
 		prevWhen = now;
 
@@ -143,7 +146,7 @@ export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 		const byteDelta = bytes - prevBytes;
 		prevBytes = bytes;
 		vBitrateGraph.push(elapsed > 0 && byteDelta > 0 ? (byteDelta * 8) / (elapsed / 1000) : undefined);
-	}, POLL_MS);
+	}, POLL);
 
 	return container;
 }

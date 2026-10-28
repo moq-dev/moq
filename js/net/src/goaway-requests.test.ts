@@ -1,10 +1,11 @@
 import { expect, test } from "bun:test";
+import { Manual, Milli, Nano } from "@moq/clock";
 import { Once } from "@moq/signals";
 import { accept } from "./connection/accept.ts";
 import { connect } from "./connection/connect.ts";
 import type { Drain } from "./connection/goaway.ts";
-import type { Session } from "./ietf/adapter.ts";
 import { GoAway } from "./ietf/goaway.ts";
+import type { Session } from "./ietf/session.ts";
 import { Subscriber } from "./ietf/subscriber.ts";
 import { ALPN, Version as IetfVersion } from "./ietf/version.ts";
 import { Goaway } from "./lite/goaway.ts";
@@ -36,7 +37,7 @@ async function waitUntil(pred: () => boolean): Promise<void> {
 	}
 }
 
-/** Bytes of one GOAWAY, framed the way the draft-17 setup stream carries it. */
+/** Bytes of one GOAWAY, framed the way the setup stream carries it. */
 async function encodeIetfGoaway(): Promise<Uint8Array> {
 	const chunks: Uint8Array[] = [];
 	const writable = new WritableStream<Uint8Array>({
@@ -44,9 +45,9 @@ async function encodeIetfGoaway(): Promise<Uint8Array> {
 			chunks.push(Uint8Array.from(chunk));
 		},
 	});
-	const writer = new Writer(writable, IetfVersion.DRAFT_17);
+	const writer = new Writer(writable, IetfVersion.DRAFT_22);
 	await writer.u53(GoAway.id);
-	await new GoAway({ newSessionUri: "" }).encode(writer, IetfVersion.DRAFT_17);
+	await new GoAway({ newSessionUri: "" }).encode(writer, IetfVersion.DRAFT_22);
 	const size = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
 	const bytes = new Uint8Array(size);
 	let offset = 0;
@@ -99,15 +100,16 @@ async function sendLiteGoaway(server: WebTransport): Promise<void> {
  * replacement is another instance: the request already open stays on the draining session.
  */
 async function handover(kind: "lite" | "ietf"): Promise<void> {
-	const protocol = kind === "lite" ? ALPN_06 : ALPN.DRAFT_17;
+	const protocol = kind === "lite" ? ALPN_06 : ALPN.DRAFT_22;
 	const pair = createMockTransportPair(protocol);
 	const inject = kind === "ietf" ? captureFirstUni(pair.server) : undefined;
 	const goawayBytes = kind === "ietf" ? await encodeIetfGoaway() : undefined;
 
 	const consume = new OriginProducer();
 	const publish = new OriginProducer();
-	const broadcast = publish.createBroadcast(Path.from("room"));
-	broadcast.announce();
+	const broadcastPublication = publish.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 
 	const served: TrackProducer[] = [];
 	let armVideo = true;
@@ -242,20 +244,17 @@ test("ietf: requests open on the draining session until the replacement wins", a
 	await handover("ietf");
 });
 
-test("announcing and subscribing after GOAWAY still open streams, on the adapter too", async () => {
-	for (const version of [IetfVersion.DRAFT_14, IetfVersion.DRAFT_16, IetfVersion.DRAFT_19]) {
+test("announcing and subscribing after GOAWAY still open streams", async () => {
+	for (const version of [IetfVersion.DRAFT_18, IetfVersion.DRAFT_22]) {
 		const goaway = new Once<Drain>();
 		goaway.set({ uri: "" });
 		let opened = false;
 		const session: Session = {
 			version,
+			client: true,
 			openBi() {
 				opened = true;
 				throw new Error("openBi");
-			},
-			openNativeBi() {
-				opened = true;
-				throw new Error("openNativeBi");
 			},
 			acceptBi() {
 				return Promise.resolve(undefined);
@@ -263,14 +262,13 @@ test("announcing and subscribing after GOAWAY still open streams, on the adapter
 			nextRequestId() {
 				return Promise.resolve(0n);
 			},
-			spendRequest() {
+			checkRequestId() {
 				throw new Error("unexpected incoming request");
 			},
 			close() {},
 		};
 
-		// A soliciting peer, so draft-14 still asks it for the empty namespace.
-		const subscriber = new Subscriber({ session, goaway, solicit: true });
+		const subscriber = new Subscriber({ session, goaway });
 		const track = subscriber.consume(Path.from("room")).track("video").subscribe();
 		await track.closed;
 		expect(opened).toBe(true);
@@ -282,3 +280,115 @@ test("announcing and subscribing after GOAWAY still open streams, on the adapter
 		subscriber.close();
 	}
 });
+
+/**
+ * A route change alone is never fatal, but a dead route is: once the replacement wins, the
+ * subscription already open on the draining session keeps going while the old publisher
+ * serves it, and that session closing ends the subscription with an error, never cleanly.
+ * The old session closes either before the `restart` reaches the viewer or after.
+ */
+async function routeDeath(kind: "lite" | "ietf", after: boolean): Promise<void> {
+	const clock = new Manual();
+	const installed = clock.install();
+	using _clock = { [Symbol.dispose]: () => installed.close() };
+	const protocol = kind === "lite" ? ALPN_06 : ALPN.DRAFT_22;
+	const pair = createMockTransportPair(protocol);
+	const inject = kind === "ietf" ? captureFirstUni(pair.server) : undefined;
+	const goawayBytes = kind === "ietf" ? await encodeIetfGoaway() : undefined;
+
+	const consume = new OriginProducer();
+	const publish = new OriginProducer();
+	const broadcastPublication = publish.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
+
+	const served: TrackProducer[] = [];
+	const serving = (async () => {
+		for (;;) {
+			const req = await wireOf(broadcast).requested();
+			if (!req) break;
+			const track = req.accept({ timescale: Timescale.MILLI });
+			track.writeFrame(textFrame("one"));
+			served.push(track);
+		}
+	})();
+
+	const [client, server] = await Promise.all([
+		connect({ url, transport: pair.client, consume }),
+		accept({ transport: pair.server, url, publish: publish.consume() }),
+	]);
+
+	const watching = consume.announced();
+	const request = consume.request(Path.from("room"));
+	let routes: ReturnType<typeof consume.announced> | undefined;
+	let replacement: Awaited<ReturnType<typeof connect>> | undefined;
+	let replacementServer: Awaited<ReturnType<typeof accept>> | undefined;
+
+	try {
+		expect((await watching.next())?.kind).toBe("start");
+		await waitUntil(() => request.active.peek() !== undefined);
+		const front = request.active.peek();
+		if (!front) throw new Error("no route");
+		const video = front.track("video").subscribe().ordered();
+		expect(await video.readString()).toBe("one");
+
+		if (inject && goawayBytes) await inject.inject(goawayBytes);
+		else await sendLiteGoaway(pair.server);
+		await wireOf(client).goaway;
+
+		routes = consume.announced();
+		expect((await routes.next())?.kind).toBe("start");
+		const pair2 = createMockTransportPair(protocol);
+		[replacement, replacementServer] = await Promise.all([
+			connect({ url, transport: pair2.client, consume }),
+			accept({ transport: pair2.server, url, publish: publish.consume() }),
+		]);
+		if (after) {
+			// Skip the drain cost reaching the route, if it lands after the start.
+			let event = await routes.next();
+			while (event?.kind === "update") event = await routes.next();
+			expect(event).toMatchObject({ prefix: Path.from("room"), kind: "restart" });
+		}
+
+		// The old publisher still serves the old instance, so its subscription carries on.
+		for (const producer of served) {
+			if (producer.closed.peek() === undefined) producer.writeFrame(textFrame("two"));
+		}
+		expect(await video.readString()).toBe("two");
+
+		// A draining close of a session still serving a live track gives up after its drain.
+		const closing = server.close().catch(() => {});
+		await clock.advance(Nano.fromMilli(Milli(1000)));
+		await closing;
+		await expect(
+			(async () => {
+				for (;;) {
+					if ((await video.readString()) === undefined) return "ended cleanly";
+				}
+			})(),
+		).rejects.toThrow();
+		video.close();
+	} finally {
+		watching.close();
+		routes?.close();
+		request.close();
+		replacement?.abort();
+		replacementServer?.abort();
+		client.abort();
+		server.abort();
+		broadcast.close();
+		await serving;
+		publish.close();
+		consume.close();
+	}
+}
+
+for (const kind of ["lite", "ietf"] as const) {
+	test(`${kind}: the draining session closing before the restart errors its subscription`, async () => {
+		await routeDeath(kind, false);
+	});
+
+	test(`${kind}: the draining session closing after the restart errors its subscription`, async () => {
+		await routeDeath(kind, true);
+	});
+}

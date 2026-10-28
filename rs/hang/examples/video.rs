@@ -82,11 +82,11 @@ fn create_track(broadcast: &mut moq_net::broadcast::Producer) -> anyhow::Result<
 async fn run_broadcast(origin: moq_net::origin::Producer) -> anyhow::Result<()> {
 	// Create a broadcast on the origin and announce its path.
 	// NOTE: The path is empty because we're using the URL to scope the broadcast.
-	let mut broadcast = origin.create_broadcast("").context("failed to create broadcast")?;
+	let broadcast = origin.create_broadcast("").context("failed to create broadcast")?;
 	broadcast
 		.announce(Default::default())
 		.context("failed to announce broadcast")?;
-	let track = create_track(&mut broadcast)?;
+	let track = create_track(&mut broadcast.broadcast().clone())?;
 
 	// Wrap in a Producer for keyframe-based group management.
 	let mut producer = moq_mux::container::Producer::new(
@@ -103,7 +103,7 @@ async fn run_broadcast(origin: moq_net::origin::Producer) -> anyhow::Result<()> 
 	};
 	producer.write(frame)?;
 
-	tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+	moq_clock::sleep(tokio::time::Duration::from_secs(1)).await;
 
 	let frame = moq_mux::container::Frame {
 		timestamp: moq_net::Timestamp::from_secs(2).unwrap(),
@@ -113,7 +113,7 @@ async fn run_broadcast(origin: moq_net::origin::Producer) -> anyhow::Result<()> 
 	};
 	producer.write(frame)?;
 
-	tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+	moq_clock::sleep(tokio::time::Duration::from_secs(1)).await;
 
 	// Marking this frame as a keyframe closes the current group and starts a new one.
 	let frame = moq_mux::container::Frame {
@@ -125,7 +125,7 @@ async fn run_broadcast(origin: moq_net::origin::Producer) -> anyhow::Result<()> 
 	producer.write(frame)?;
 
 	// Sleep before exiting and closing the broadcast.
-	tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+	moq_clock::sleep(tokio::time::Duration::from_secs(10)).await;
 
 	Ok(())
 }

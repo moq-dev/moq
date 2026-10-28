@@ -2,7 +2,7 @@
 
 ## Goal
 
-`emsg` boxes survive fMP4 import instead of being silently discarded, and export
+`emsg` boxes survive fMP4 import instead of being discarded with a warning, and export
 reproduces them. In-band ID3, SCTE-35 splice information, and DASH event
 messages reach a MoQ consumer. This is the first of the four timed-metadata
 carriers, so it also settles the contract they share: how an event's
@@ -34,9 +34,9 @@ The shared contract, recorded here and mirrored in the Hang draft:
 A new exported envelope shape needs maintainer agreement before the
 dependents implement against it; land the shared CI fixtures with it.
 
-`rs/moq-mux/src/container/fmp4/` does not mention `emsg` anywhere, so every
-event message in a fragmented MP4 is dropped without a log line. That is the
-one metadata path a DASH or CMAF ingest is most likely to use.
+`rs/moq-mux/src/container/fmp4/import.rs` counts discarded `emsg` boxes
+and warns on the first drop. Carriage and export remain unimplemented;
+logging the loss does not preserve the metadata.
 
 Carry the boxes byte-faithfully: scheme id URI, value, timescale, presentation
 time, duration, id, and the opaque message payload, for both version 0 and

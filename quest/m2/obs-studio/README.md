@@ -35,5 +35,3 @@ Open, for when the port starts:
 - [OBS multitrack](/quest/m2/obs-multitrack.md) - multitrack video renditions the native output should carry
 - [First C++ package release](/quest/m2/release/cpp-release.md) - the published C++ package the port would build on
 - [OBS native codecs](/quest/m2/obs-moq-video/README.md) - the plugin's codec work, which stays plugin-side
-- [Client settings parity](/quest/m1/obs-client-config.md) - the client settings a native service exposes
-- [Session report parity](/quest/m1/obs-session-report.md) - the session report a native output surfaces

@@ -1,6 +1,6 @@
 import type { Reader, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
-import { type IetfVersion, Version } from "./version.ts";
+import type { IetfVersion } from "./version.ts";
 
 // TIMESCALE (0x08), from the MOQ Properties registry shared with draft-ietf-moq-loc-04.
 // Track scope: it declares the units of every object Timestamp on the track, and its
@@ -30,7 +30,7 @@ export interface Properties {
 	/// `undefined` declares no timeline, so the track and its objects are untimed.
 	timescale?: Timescale;
 
-	/// Publisher priority for a group header without its priority flag. The wire default is 128.
+	/// Publisher priority for a group header without its priority flag. Omitted, it is the wire default 128, priority -1.
 	priority?: number;
 
 	/// The publisher's preference for prioritizing groups within a subscription,
@@ -40,24 +40,11 @@ export interface Properties {
 	groupOrder?: number;
 }
 
-/** Whether {@link encode} writes a TIMESCALE on this version.
- *
- * Drafts 14-16 do not. 14 and 15 have no properties block, and 16's Track Extensions
- * predate the TIMESCALE registration; an older peer rejects trailing bytes it does not
- * parse. A Timestamp on those drafts would have no units. Draft-16 is still read, so a
- * peer that sends the block is understood.
- */
-export function sendsTimescale(version: IetfVersion): boolean {
-	return version !== Version.DRAFT_14 && version !== Version.DRAFT_15 && version !== Version.DRAFT_16;
-}
-
 /// Write the block, which is the final field of the message: no count and no length, so
 /// the caller must not append anything after it.
 ///
 /// Properties are serialized in ascending order by type, delta-encoded.
-export async function encode(w: Writer, properties: Properties, version: IetfVersion): Promise<void> {
-	if (!sendsTimescale(version)) return;
-
+export async function encode(w: Writer, properties: Properties, _version: IetfVersion): Promise<void> {
 	let prevType = 0n;
 
 	if (properties.maxCacheDuration !== undefined) {
@@ -95,15 +82,7 @@ export async function encode(w: Writer, properties: Properties, version: IetfVer
 ///
 /// Unlike an unknown message parameter, an unknown property is skipped rather than fatal,
 /// which is what lets a relay forward properties it does not implement.
-///
-/// Drafts before 16 have no such block, so this reads nothing and leaves the reader alone.
-export async function decode(r: Reader, version: IetfVersion): Promise<Properties> {
-	// Draft-16 calls the block Track Extensions, draft-17+ Track Properties. Same encoding, so
-	// read either rather than faulting the message for trailing bytes.
-	if (version === Version.DRAFT_14 || version === Version.DRAFT_15) {
-		return {};
-	}
-
+export async function decode(r: Reader, _version: IetfVersion): Promise<Properties> {
 	const properties: Properties = {};
 	let prevType = 0n;
 	let i = 0;

@@ -13,7 +13,7 @@ use scuffle_h265::NALUnitType;
 
 use super::Error;
 use crate::Result;
-use crate::codec::annexb::{NalIterator, START_CODE};
+use crate::codec::annexb::{InBandCodec, NalIterator, ParameterSets, START_CODE};
 
 /// H.265 Annex-B stream splitter: bytes in, [`Frame`](crate::container::Frame)s out.
 ///
@@ -30,21 +30,27 @@ pub struct Split {
 	/// Retained VPS NALs from the latest keyframe that carried them, re-injected
 	/// on bare keyframes. Replaced (not accumulated) when a keyframe presents a
 	/// different set, so a mid-stream reinit drops the superseded ones.
-	vps: Vec<Bytes>,
+	vps: ParameterSets,
 	/// Retained SPS NALs. See [`vps`](Self::vps).
-	sps: Vec<Bytes>,
+	sps: ParameterSets,
 	/// Retained PPS NALs. A keyframe may carry several (slices reference them by
 	/// id); all are kept and re-injected, but a new GOP's set supersedes them.
-	pps: Vec<Bytes>,
-	zero: Option<web_async::time::Instant>,
+	pps: ParameterSets,
+	zero: Option<moq_clock::Instant>,
 	pending: Vec<crate::container::Frame>,
 }
 
 /// A snapshot of [`Split`]'s retained parameter sets.
 pub(crate) struct Params {
-	vps: Vec<Bytes>,
-	sps: Vec<Bytes>,
-	pps: Vec<Bytes>,
+	vps: ParameterSets,
+	sps: ParameterSets,
+	pps: ParameterSets,
+}
+
+impl Params {
+	pub(crate) fn nals(&self) -> impl Iterator<Item = &Bytes> {
+		self.vps.values().chain(self.sps.values()).chain(self.pps.values())
+	}
 }
 
 #[derive(Default)]
@@ -53,11 +59,11 @@ struct Au {
 	contains_idr: bool,
 	contains_slice: bool,
 	/// VPS NALs already inline in this access unit, so re-injection skips them.
-	vps_seen: Vec<Bytes>,
+	vps_seen: ParameterSets,
 	/// SPS NALs already inline in this access unit.
-	sps_seen: Vec<Bytes>,
+	sps_seen: ParameterSets,
 	/// PPS NALs already inline in this access unit.
-	pps_seen: Vec<Bytes>,
+	pps_seen: ParameterSets,
 }
 
 impl Default for Split {
@@ -72,9 +78,9 @@ impl Split {
 		Self {
 			tail: BytesMut::new(),
 			current: Au::default(),
-			vps: Vec::new(),
-			sps: Vec::new(),
-			pps: Vec::new(),
+			vps: ParameterSets::new(),
+			sps: ParameterSets::new(),
+			pps: ParameterSets::new(),
 			zero: None,
 			pending: Vec::new(),
 		}
@@ -135,15 +141,15 @@ impl Split {
 		match nal_type {
 			NALUnitType::VpsNut => {
 				self.maybe_start_frame(pts)?;
-				crate::codec::annexb::push_distinct(&mut self.current.vps_seen, &nal);
+				InBandCodec::H265.insert_parameter_set(&mut self.current.vps_seen, &nal)?;
 			}
 			NALUnitType::SpsNut => {
 				self.maybe_start_frame(pts)?;
-				crate::codec::annexb::push_distinct(&mut self.current.sps_seen, &nal);
+				InBandCodec::H265.insert_parameter_set(&mut self.current.sps_seen, &nal)?;
 			}
 			NALUnitType::PpsNut => {
 				self.maybe_start_frame(pts)?;
-				crate::codec::annexb::push_distinct(&mut self.current.pps_seen, &nal);
+				InBandCodec::H265.insert_parameter_set(&mut self.current.pps_seen, &nal)?;
 			}
 			// Access-unit openers: each precedes the next picture's VCL data, so any
 			// unit still open belongs to the previous picture and is emitted here.
@@ -268,7 +274,7 @@ impl Split {
 		if let Some(pts) = hint {
 			return Ok(pts);
 		}
-		let zero = self.zero.get_or_insert_with(web_async::time::Instant::now);
+		let zero = self.zero.get_or_insert_with(moq_clock::Instant::now);
 		Ok(moq_net::Timestamp::from_micros(zero.elapsed().as_micros() as u64)?)
 	}
 }
@@ -284,10 +290,9 @@ mod tests {
 
 	const SC4: &[u8] = &[0, 0, 0, 1];
 
+	// Real x265 parameter sets: the splitter keys each by the id it defines. Their PPS has id 0.
+	use crate::codec::h265::fixtures::{PPS, SPS, VPS};
 	// HEVC NAL headers: byte0 = nal_unit_type << 1 (forbidden bit 0, layer id 0).
-	const VPS: &[u8] = &[0x40, 0x01, 0x0c]; // type 32
-	const SPS: &[u8] = &[0x42, 0x01, 0x01]; // type 33
-	const PPS: &[u8] = &[0x44, 0x01, 0xc0]; // type 34
 	const IDR: &[u8] = &[0x26, 0x01, 0x80, 0xaa]; // type 19 (IdrWRadl)
 	// TrailR (type 1) with first_slice_segment_in_pic_flag set (byte 2 high bit).
 	const TRAIL: &[u8] = &[0x02, 0x01, 0x80, 0x33];
@@ -350,8 +355,6 @@ mod tests {
 	/// runs the same access units through [`Hvc1`](crate::codec::h265::Hvc1),
 	/// which parses the SPS to build the hvcC.
 	fn suffix_sei_cases() -> Vec<SeiCase> {
-		use crate::codec::h265::fixtures::{PPS, SPS, VPS};
-
 		vec![
 			(
 				"consecutive pictures",
@@ -462,7 +465,7 @@ mod tests {
 	/// last one. Regression for the multi-PPS collapse.
 	#[tokio::test(start_paused = true)]
 	async fn reinjects_all_cached_pps_on_keyframe() {
-		const PPS1: &[u8] = &[0x44, 0x01, 0xc1]; // second PPS, type 34
+		const PPS1: &[u8] = &[0x44, 0x01, 0x41]; // a second PPS, id 1
 
 		let mut split = Split::new();
 		let first = decode_one(&mut split, &mut annexb(&[VPS, SPS, PPS, PPS1, IDR]), ts());
@@ -511,7 +514,7 @@ mod tests {
 	/// keyframes.
 	#[tokio::test(start_paused = true)]
 	async fn reinit_drops_superseded_pps_on_keyframe() {
-		const PPS1: &[u8] = &[0x44, 0x01, 0xc1];
+		const PPS1: &[u8] = &[0x44, 0x01, 0x41]; // id 1
 
 		let mut split = Split::new();
 		let _ = decode_one(&mut split, &mut annexb(&[VPS, SPS, PPS, PPS1, IDR]), ts());

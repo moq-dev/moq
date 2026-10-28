@@ -1,23 +1,31 @@
 import { expect, mock, spyOn, test } from "bun:test";
+import { Manual, Milli, Nano } from "@moq/clock";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
-import { Baseline } from "../jitter";
+import { Order } from "../order";
 import type { StreamTrack } from "./types";
 
 mock.module("./capture-worker.ts?worklet", () => ({ default: async () => "blob:fake-worker" }));
 const { Capture } = await import("./capture");
 const { Encoder } = await import("./encoder");
+const { Renderer } = await import("../preview");
 
 class Frame {
 	// Every frame built, so a test can assert none is left open.
 	static all: Frame[] = [];
 
-	codedWidth = 1920;
-	codedHeight = 1080;
+	codedWidth: number;
+	codedHeight: number;
+	rotation?: number;
 	timestamp: number;
 	closed = false;
 
-	constructor(source?: Frame, init?: { timestamp: number }) {
+	constructor(source?: Frame, init?: { timestamp?: number; rotation?: number }) {
+		this.codedWidth = source?.codedWidth ?? 1920;
+		this.codedHeight = source?.codedHeight ?? 1080;
+		// Like WebCodecs, a constructor rotation adds to the source frame's own.
+		this.rotation =
+			init?.rotation === undefined ? source?.rotation : ((source?.rotation ?? 0) + init.rotation) % 360;
 		this.timestamp = init?.timestamp ?? source?.timestamp ?? 0;
 		Frame.all.push(this);
 	}
@@ -73,6 +81,88 @@ test("capture resamples live scale when frame dimensions stay unchanged", async 
 	}
 });
 
+// Let signal effects settle without waiting on the wall clock.
+async function settle(times = 20): Promise<void> {
+	for (let i = 0; i < times; i++) await new Promise<void>((resolve) => queueMicrotask(resolve));
+}
+
+function sized(width: number, height: number, rotation?: number): VideoFrame {
+	return Object.assign(new Frame(), { codedWidth: width, codedHeight: height, rotation }) as unknown as VideoFrame;
+}
+
+test("rotation follows the live frames, not the track's settings", async () => {
+	const processor = Object.getOwnPropertyDescriptor(globalThis, "MediaStreamTrackProcessor");
+	const videoFrame = Object.getOwnPropertyDescriptor(globalThis, "VideoFrame");
+	let controller!: ReadableStreamDefaultController<VideoFrame>;
+	const readable = new ReadableStream<VideoFrame>({
+		start: (value) => {
+			controller = value;
+		},
+	});
+	Object.defineProperty(globalThis, "MediaStreamTrackProcessor", {
+		configurable: true,
+		value: class {
+			readonly readable = readable;
+		},
+	});
+	Object.defineProperty(globalThis, "VideoFrame", { configurable: true, value: Frame });
+
+	// Safari reports the requested landscape size until the first frame, then delivers portrait.
+	const track = { getSettings: () => ({ width: 1280, height: 720 }) } as unknown as StreamTrack;
+	const orientation = new Signal(90);
+	const capture = new Capture({ source: track, orientation });
+	try {
+		const display = capture.out.display.changed();
+		controller.enqueue(sized(720, 1280));
+		expect(await display).toMatchObject({ width: 720, height: 1280 });
+		await settle();
+		expect(capture.out.rotation.peek()).toBe(0);
+
+		// A sideways landscape picture on a portrait screen takes the screen's turn.
+		let rotation = capture.out.rotation.changed();
+		controller.enqueue(sized(1280, 720));
+		expect(await rotation).toBe(90);
+
+		rotation = capture.out.rotation.changed();
+		orientation.set(270);
+		expect(await rotation).toBe(270);
+
+		rotation = capture.out.rotation.changed();
+		orientation.set(0);
+		expect(await rotation).toBe(0);
+
+		// A frame that declares its own rotation wins over the screen, and readers get it untagged so
+		// they turn it only once.
+		orientation.set(270);
+		expect(await capture.out.rotation.changed()).toBe(270);
+		rotation = capture.out.rotation.changed();
+		controller.enqueue(sized(1280, 720, 90));
+		expect(await rotation).toBe(90);
+
+		const effect = new Effect();
+		try {
+			const reader = capture.out.frames.peek()?.subscribe(effect).getReader();
+			const held = (await reader?.read())?.value as unknown as Frame | undefined;
+			expect(held?.rotation).toBe(0);
+			held?.close();
+		} finally {
+			effect.close();
+		}
+
+		// A browser that reports an upright frame is believed, even on a portrait screen.
+		rotation = capture.out.rotation.changed();
+		controller.enqueue(sized(1280, 720, 0));
+		expect(await rotation).toBe(0);
+	} finally {
+		capture.close();
+		if (processor) Object.defineProperty(globalThis, "MediaStreamTrackProcessor", processor);
+		else Reflect.deleteProperty(globalThis, "MediaStreamTrackProcessor");
+		if (videoFrame) Object.defineProperty(globalThis, "VideoFrame", videoFrame);
+		else Reflect.deleteProperty(globalThis, "VideoFrame");
+	}
+	expect(capture.out.rotation.peek()).toBe(0);
+});
+
 // Installs Frame as the global VideoFrame and returns a FrameSource fed by hand.
 function frameSource() {
 	const original = Object.getOwnPropertyDescriptor(globalThis, "VideoFrame");
@@ -96,8 +186,9 @@ function frameSource() {
 	};
 }
 
-// Let the capture pump drain everything pushed so far.
-const flush = () => new Promise((resolve) => setTimeout(resolve, 10));
+// Let the capture pump drain everything pushed so far. The pipeline runs on promises alone, so one
+// macrotask turn settles every microtask queued before it, with no wall-clock wait.
+const flush = () => new Promise((resolve) => setImmediate(resolve));
 
 const open = () => Frame.all.filter((frame) => !frame.closed);
 
@@ -132,6 +223,120 @@ test("a reader attaching to a still source starts with the current picture, stam
 		effect.close();
 		capture.close();
 		clock.mockRestore();
+	}
+
+	expect(open()).toEqual([]);
+});
+
+test("a reader attaching after another never starts below what that one read", async () => {
+	using input = frameSource();
+	// The capture clock runs 200ms ahead of performance.now(), as it does when the first frame,
+	// which anchors the capture clock, arrived late.
+	const clock = spyOn(performance, "now").mockReturnValue(1_000);
+	const capture = new Capture({ source: input.source });
+	const first = new Effect();
+	const second = new Effect();
+
+	try {
+		const fanout = capture.out.frames.peek() ?? (await capture.out.frames.changed());
+		if (!fanout) throw new Error("no fanout");
+
+		const before = fanout.subscribe(first).getReader();
+		input.push(1_200_000);
+		const read = (await before.read()).value as unknown as Frame;
+		expect(read.timestamp).toBe(1_200_000);
+		read.close();
+		first.close();
+
+		// A demand gap shorter than the clocks' offset.
+		clock.mockReturnValue(1_050);
+		const after = fanout.subscribe(second).getReader();
+		const resumed = (await after.read()).value as unknown as Frame;
+		expect(resumed.timestamp).toBe(1_250_000);
+		resumed.close();
+	} finally {
+		second.close();
+		capture.close();
+		clock.mockRestore();
+	}
+
+	expect(open()).toEqual([]);
+});
+
+test("a reader attaching to a frame held late still starts at now", async () => {
+	using input = frameSource();
+	// The frame reached the fanout 200ms after its stamp, as on a busy main thread.
+	const clock = spyOn(performance, "now").mockReturnValue(1_200);
+	const capture = new Capture({ source: input.source });
+	const first = new Effect();
+	const second = new Effect();
+
+	try {
+		const fanout = capture.out.frames.peek() ?? (await capture.out.frames.changed());
+		if (!fanout) throw new Error("no fanout");
+
+		const before = fanout.subscribe(first).getReader();
+		input.push(1_000_000);
+		(await before.read()).value?.close();
+		first.close();
+
+		clock.mockReturnValue(1_250);
+		const after = fanout.subscribe(second).getReader();
+		const resumed = (await after.read()).value as unknown as Frame;
+		expect(resumed.timestamp).toBe(1_250_000);
+		resumed.close();
+	} finally {
+		second.close();
+		capture.close();
+		clock.mockRestore();
+	}
+
+	expect(open()).toEqual([]);
+});
+
+test("a replay never starts below an earlier replay", async () => {
+	using input = frameSource();
+	const clock = new Manual();
+	const installed = clock.install();
+	const advance = (ms: number) => clock.jump(Nano.fromMilli(Milli(ms)));
+	const capture = new Capture({ source: input.source });
+	const watch = new Effect();
+	const first = new Effect();
+	const second = new Effect();
+
+	try {
+		const fanout = capture.out.frames.peek() ?? (await capture.out.frames.changed());
+		if (!fanout) throw new Error("no fanout");
+		// Reads every live frame, so awaiting it proves the fanout held that frame.
+		const live = fanout.subscribe(watch).getReader();
+
+		// Capture stamps 200ms ahead of the clock.
+		advance(1_000);
+		input.push(1_200_000);
+		(await live.read()).value?.close();
+
+		advance(50);
+		const before = fanout.subscribe(first).getReader();
+		const replayed = (await before.read()).value as unknown as Frame;
+		expect(replayed.timestamp).toBe(1_250_000);
+		replayed.close();
+		first.close();
+
+		// The next frame reaches the fanout late, so it holds a stamp below that replay.
+		advance(50);
+		input.push(1_210_000);
+		(await live.read()).value?.close();
+
+		advance(1);
+		const after = fanout.subscribe(second).getReader();
+		const resumed = (await after.read()).value as unknown as Frame;
+		expect(resumed.timestamp).toBe(1_250_000);
+		resumed.close();
+	} finally {
+		watch.close();
+		second.close();
+		capture.close();
+		installed.close();
 	}
 
 	expect(open()).toEqual([]);
@@ -232,7 +437,7 @@ test("an encoder resuming on a still source encodes a keyframe of the current pi
 	const rendition = { config: new Signal(undefined), track: live, close: () => {} };
 	const encoder = new Encoder("video", {
 		enabled: true,
-		broadcast: { video: () => rendition, baseline: new Baseline() } as never,
+		broadcast: { video: () => rendition, order: new Order() } as never,
 		capture,
 	});
 
@@ -253,9 +458,109 @@ test("an encoder resuming on a still source encodes a keyframe of the current pi
 	} finally {
 		encoder.close();
 		capture.close();
+		track.finish();
 		track.close();
 		clock.mockRestore();
 		if (original) Object.defineProperty(globalThis, "VideoEncoder", original);
 		else Reflect.deleteProperty(globalThis, "VideoEncoder");
 	}
+});
+
+// Detaches a reader at every microtask offset after a push, since a demand gap or a hidden preview can
+// land anywhere while a frame crosses the capture. A frame already read is the reader's to close, even
+// when the teardown wins, so only the capture's held picture stays open between readers.
+async function sweep(input: ReturnType<typeof frameSource>, attach: (attached: boolean) => void): Promise<void> {
+	let timestamp = 2_000_000;
+	for (let yields = 0; yields < 40; yields++) {
+		attach(true);
+		await flush();
+
+		timestamp += 100_000;
+		input.push(timestamp);
+		for (let i = 0; i < yields; i++) await Promise.resolve();
+		attach(false);
+		await flush();
+
+		expect({ yields, open: open().length }).toEqual({ yields, open: 1 });
+	}
+}
+
+test("a preview hidden while a frame is in flight closes that frame", async () => {
+	using input = frameSource();
+	const capture = new Capture({ source: input.source });
+	const enabled = new Signal(false);
+	const preview = new Renderer({ frames: capture.out.frames, enabled });
+
+	try {
+		input.push(1_000_000);
+		await flush();
+		await sweep(input, (attached) => enabled.set(attached));
+	} finally {
+		preview.close();
+		capture.close();
+	}
+	expect(open()).toEqual([]);
+});
+
+test("an encoder torn down while a frame is in flight closes that frame", async () => {
+	using input = frameSource();
+
+	class NullVideoEncoder {
+		state: CodecState = "unconfigured";
+		#output: VideoEncoderInit["output"];
+		#codec?: string;
+
+		constructor(init: VideoEncoderInit) {
+			this.#output = init.output;
+		}
+
+		static async isConfigSupported(config: VideoEncoderConfig): Promise<{ supported: boolean }> {
+			return { supported: config.codec.startsWith("avc1") };
+		}
+
+		configure(config: VideoEncoderConfig): void {
+			this.state = "configured";
+			this.#codec = config.codec;
+		}
+
+		encode(): void {}
+
+		// Only the probe flushes; report the configured codec, as Chrome does.
+		async flush(): Promise<void> {
+			const chunk = { type: "key", timestamp: 0, byteLength: 1, copyTo: () => {} };
+			this.#output(chunk as never, { decoderConfig: { codec: this.#codec } } as never);
+		}
+
+		close(): void {
+			this.state = "closed";
+		}
+	}
+	const original = Object.getOwnPropertyDescriptor(globalThis, "VideoEncoder");
+	Object.defineProperty(globalThis, "VideoEncoder", { configurable: true, value: NullVideoEncoder, writable: true });
+
+	const capture = new Capture({ source: input.source });
+	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MILLI });
+	const live = new Signal<Moq.Track.Producer | undefined>(undefined);
+	const rendition = { config: new Signal(undefined), track: live, close: () => {} };
+	const encoder = new Encoder("video", {
+		enabled: true,
+		broadcast: { video: () => rendition, order: new Order() } as never,
+		capture,
+	});
+
+	try {
+		input.push(1_000_000);
+		for (let i = 0; i < 50 && !encoder.out.resolved.peek(); i++) await flush();
+		expect(encoder.out.resolved.peek()).toBeDefined();
+
+		await sweep(input, (attached) => live.set(attached ? track : undefined));
+	} finally {
+		encoder.close();
+		capture.close();
+		track.finish();
+		track.close();
+		if (original) Object.defineProperty(globalThis, "VideoEncoder", original);
+		else Reflect.deleteProperty(globalThis, "VideoEncoder");
+	}
+	expect(open()).toEqual([]);
 });

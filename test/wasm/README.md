@@ -34,11 +34,10 @@ failing page, and CI uploads it; a passing run deletes its own. See
 ## Rust clock
 
 `moq-clock`'s browser backend also runs here, using `wasm-bindgen-test` and the
-same Playwright Chromium installation:
+same Chromium supplied by the root devShell:
 
 ```bash
 bun install --frozen-lockfile
-bunx playwright install chromium
 just rs wasm-test
 ```
 
@@ -72,7 +71,7 @@ One per protocol flavour, since negotiation is the part that broke:
 | name    | relay                            | negotiates                             |
 | ------- | -------------------------------- | -------------------------------------- |
 | `lite`  | defaults                         | `moq-lite-06`, over its own ALPN   |
-| `ietf`  | `--listen-version moq-transport-19` | `moq-transport-19`, over its own ALPN  |
+| `ietf`  | `--listen-version moq-transport-22` | `moq-transport-22`, over its own ALPN  |
 | `setup` | `--listen-version moq-lite-02`   | the `moql` ALPN, version chosen by SETUP |
 
 The `setup` relay is as close as a real relay gets to the SETUP fallback path.
@@ -87,11 +86,13 @@ uncovered here.
   over SETUP) and `ietf` (nothing left to negotiate).
 - **reads a published broadcast** -- announce, subscribe, and read two
   consecutive groups, checking every frame byte for byte. One frame is 128 KiB,
-  which is what exercises the chunked read path in the transport adapter.
+  which is what exercises the chunked read path in the transport adapter. The
+  reader asks for each next group, so the real-time subscription never drops one
+  superseded mid-read, which a timer-paced publisher on a loaded runner did.
 - **refuses a track the publisher does not serve** -- the refusal has to
-  surface, as a rejected `subscribe` (lite-06, which looks a track's info up
-  first) or as a track that yields no group (IETF, lite-02). A hang fails on the
-  case timeout.
+  surface as an error, from `subscribe` (lite-06, which looks a track's info up
+  first) or from `recvGroup` (IETF and lite-02 can accept first). A group or a
+  clean end fails, and a hang fails on the case timeout.
 - **free() rejects a pending consume** -- freeing a session closes it, so a
   `consume` still waiting on an unannounced path has to reject. A fresh session
   then has to connect, which a corrupted wasm heap would not.
@@ -127,3 +128,58 @@ this harness exists for. There is nothing left to assert about negotiation, so
 Firefox joins the matrix when Gecko implements the subprotocol, not before.
 `@moq/net` sidesteps this in the browser by routing Firefox below 153 to
 WebSocket; `@moq/wasm` has no such fallback.
+
+## Backend baseline
+
+```bash
+just test wasm-baseline
+```
+
+Runs the existing async consumer correctness cases first, then retains raw
+handwritten JS and Rust WASM consumer samples against the same real relays.
+Publisher and subscriber pages are separate. Publisher count and subscribers
+per publisher vary independently; payload sizes cover small audio-shaped
+frames through 128 KiB. Alternating and consecutive A/A runs expose variability.
+Every payload byte and group sequence is checked. The JS fallback runs with
+WebTransport disabled in its consumer page; WASM's missing fallback is an
+explicit gap, not a simulated result.
+
+`backend.json` in the retained harness run includes complete backend entrypoint
+assets and their gzip sizes, tool/source/browser/hardware provenance, raw
+module and first-frame times, consumer renderer CPU, and heap/WASM capacities.
+The neutral harness is listed separately. CPU uses CDP `threadTicks` and includes
+connection setup, protocol processing, binding copies and byte validation.
+Network waiting is reported as elapsed time, not CPU. Current bindings cannot
+attribute protocol and boundary CPU separately or count copies and GC; the
+report states those limits. Fresh contexts and no-store responses mean uncached
+page imports, with browser process and OS caches still warm.
+
+No timing threshold fails a shared runner. Bad bytes, negotiation, incomplete
+samples or an unavailable claimed CPU clock fail. Retain raw rounds and compare
+their range before drawing a performance conclusion. Nightly uploads the run
+for 45 days. This is a consume-path baseline, not approval to adopt WASM for the
+complete JS API.
+
+The independent integer fixtures retain decimal strings through `u64::MAX`.
+Leading-ones and QUIC encodings round-trip legal values exactly and refuse each
+format's overflow. Real group tests replay the safe 31-bit, 32-bit and near-53-bit
+boundaries from the original async cases in
+[#5337](https://github.com/moq-dev/moq/issues/5337), plus forced WASM memory
+growth. That contribution pins original async consumer source
+`bd2840874627d70fd5d33dddacec9ea5d77a7004`; its publisher prototype/Charon and
+WASM-to-JS measurements are separate, unverified results here. Full network
+sequences above 2^53 need a native publisher and a JS model that can represent
+them before adoption. WASM frame timestamps and complete publish/backpressure
+API parity remain explicit gaps too.
+
+## Generated bindings
+
+```bash
+just test wasm-baseline --uniffi
+```
+
+`--uniffi` adds moq-ffi, bound by UniFFI over ubrn's `wasm2` player, as a third
+baseline backend. It also runs parity cases and per-call timings in `uniffi/` against
+every relay, once normally and once under a strict CSP. It builds from a scratch
+checkout, since ubrn needs a UniFFI pin that does not land.
+[generator.md](generator.md) is the report that chose this binding.

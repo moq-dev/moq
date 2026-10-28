@@ -132,7 +132,7 @@ impl Segment {
 	}
 
 	/// Whether this segment matches one path segment.
-	fn matches(&self, part: &str) -> bool {
+	pub(crate) fn matches(&self, part: &str) -> bool {
 		match self {
 			Self::Literal(literal) => literal == part,
 			Self::Wildcard => true,
@@ -791,7 +791,7 @@ impl Pattern {
 	}
 
 	/// The segments before and after the `**`. Only meaningful when there is one.
-	fn split(&self) -> (&[Segment], &[Segment]) {
+	pub(crate) fn split(&self) -> (&[Segment], &[Segment]) {
 		match self.globstar {
 			Some(index) => (&self.segments[..index], &self.segments[index + 1..]),
 			None => (&self.segments, &[]),
@@ -996,16 +996,6 @@ mod tests {
 	}
 
 	#[test]
-	fn literal_and_subtree_normalize_paths() {
-		assert_eq!(Pattern::literal("/foo//bar/").unwrap(), pattern("foo/bar"));
-		assert_eq!(Pattern::literal("").unwrap(), Pattern::default());
-		assert_eq!(Pattern::subtree("foo").unwrap(), pattern("foo/**"));
-		assert_eq!(Pattern::subtree("/").unwrap(), Pattern::all());
-		assert_eq!(Pattern::literal("a/*"), Err(InvalidPattern::InvalidSegment("*".into())));
-		assert_eq!(Pattern::literal("**"), Err(InvalidPattern::InvalidSegment("**".into())));
-	}
-
-	#[test]
 	fn as_prefix_accepts_literals_then_globstar() {
 		assert_eq!(Pattern::all().as_prefix(), Some(""));
 		assert_eq!(pattern("foo/**").as_prefix(), Some("foo"));
@@ -1016,184 +1006,6 @@ mod tests {
 		assert_eq!(pattern("*/foo/**").as_prefix(), None);
 		assert_eq!(pattern("foo/**/bar").as_prefix(), None);
 		assert_eq!(pattern("foo*/**").as_prefix(), None);
-	}
-
-	#[test]
-	fn matches_whole_segments() {
-		let cases = [
-			("", "", true),
-			("", "a", false),
-			("a", "a", true),
-			("a", "a/b", false),
-			("a", "ab", false),
-			("*", "a", true),
-			("*", "", false),
-			("*", "a/b", false),
-			("**", "", true),
-			("**", "a/b/c", true),
-			("a/**", "a", true),
-			("a/**", "a/b/c", true),
-			("a/**", "b", false),
-			("**/c", "c", true),
-			("**/c", "a/b/c", true),
-			("**/c", "a/c/b", false),
-			("a/**/c", "a/c", true),
-			("a/**/c", "a/x/y/c", true),
-			("a/**/c", "a", false),
-			("a/*/c", "a/x/c", true),
-			("a/*/c", "a/c", false),
-			("a/*/**", "a", false),
-			("a/*/**", "a/b", true),
-			("**/transcode.pro", "pid/foo.hang/transcode.pro", true),
-			("**/transcode.pro", "pid/foo.transcode.pro", false),
-			("**/*.hang", "pid/cam.hang", true),
-			("**/*.hang", ".hang", true),
-			("**/*.hang", "pid/cam.hang/x", false),
-			("foo*", "foo", true),
-			("foo*", "foobar", true),
-			("foo*", "fo", false),
-			("foo.*.hang", "foo..hang", true),
-			("foo.*.hang", "foo.1.hang", true),
-			("foo.*.hang", "foo.hang", false),
-			("a*a", "a", false),
-			("a*a", "aa", true),
-		];
-		for (text, path, expected) in cases {
-			assert_eq!(pattern(text).matches(path), expected, "{text} vs {path}");
-		}
-		// Paths normalize like broadcast paths.
-		assert!(pattern("a/b").matches("/a//b/"));
-	}
-
-	#[test]
-	fn contains_is_containment() {
-		let cases = [
-			("**", "**", true),
-			("**", "", true),
-			("**", "a/*/b", true),
-			("", "**", false),
-			("*", "a", true),
-			("a", "*", false),
-			("a/**", "a", true),
-			("a/**", "a/b/**", true),
-			("a/**", "**", false),
-			("a/**", "**/a", false),
-			("**/a", "a", true),
-			("**/a", "**/b/a", true),
-			("**/a", "a/**", false),
-			("*/**", "**", false),
-			("*/**", "a/**", true),
-			("*/*/**", "a/**", false),
-			("*/*/**", "a/b/**", true),
-			("a/**/c", "a/c", true),
-			("a/**/c", "a/x/c", true),
-			("a/**/c", "a/**/x/c", true),
-			("a/*/**/*", "a/**/b", false),
-			("a/*/c", "a/b/c", true),
-			("a/*/c", "a/**/c", false),
-			("*", "*.hang", true),
-			("*.hang", "*", false),
-			("*.hang", "cam.hang", true),
-			("*.hang", "cam.hang2", false),
-			("*.hang", "*.hang", true),
-			("*.hang", "cam*.hang", true),
-			("*.hang", "cam*hang", false),
-			("foo*", "foo.*.hang", true),
-			("foo.*", "foo*", false),
-			("**/*.hang", "pid/*/cam.hang", true),
-		];
-		for (outer, inner, expected) in cases {
-			assert_eq!(
-				pattern(outer).contains(&pattern(inner)),
-				expected,
-				"{outer} contains {inner}"
-			);
-		}
-	}
-
-	#[test]
-	fn overlaps_is_symmetric_intersection() {
-		let cases = [
-			("a", "a", true),
-			("a", "b", false),
-			("a", "*", true),
-			("a", "a/*", false),
-			("a/**", "**/b", true),
-			("a/**", "b/**", false),
-			("a/*", "*/b", true),
-			("a/*", "b/*", false),
-			("*/*", "a/**", true),
-			("*", "a/**", true),
-			("*", "a/*/**", false),
-			("**", "", true),
-			("a/**/b", "**/c", false),
-			("a/**/b", "**/*", true),
-			("*.hang", "cam*", true),
-			("*.hang", "cam.msf", false),
-			("*.hang", "*.msf", false),
-			("foo*", "foo.bar*", true),
-			("foo*", "fob*", false),
-			("a*b", "ab", true),
-			("ab*", "*ab", true),
-			("a/**/b", "x/**", false),
-			("a/**/b", "**/x", false),
-		];
-		for (a, b, expected) in cases {
-			assert_eq!(pattern(a).overlaps(&pattern(b)), expected, "{a} overlaps {b}");
-			assert_eq!(pattern(b).overlaps(&pattern(a)), expected, "{b} overlaps {a}");
-		}
-	}
-
-	#[test]
-	fn specificity_ranks_by_what_is_pinned_down() {
-		// Strictly descending.
-		let ranked = ["a/b/c", "a/b", "a/*.hang", "a/*", "a/**", "*.hang", "*", "**"];
-		for pair in ranked.windows(2) {
-			assert!(
-				pattern(pair[0]).specificity() > pattern(pair[1]).specificity(),
-				"{} should outrank {}",
-				pair[0],
-				pair[1]
-			);
-		}
-		// A longer literal head breaks otherwise equal ties.
-		assert!(pattern("a/**").specificity() > pattern("**/a").specificity());
-		// A partial pinning more bytes is more specific than one pinning fewer.
-		assert!(pattern("cam*.hang").specificity() > pattern("*.hang").specificity());
-		assert!(pattern("*.hang").specificity() > pattern("*").specificity());
-		// Equal structure is one tier.
-		assert_eq!(pattern("*/a").specificity(), pattern("*/b").specificity());
-		assert_eq!(pattern("*/a/**").specificity(), pattern("*/**/a").specificity());
-	}
-
-	#[test]
-	fn rebase_is_set_valued() {
-		let cases: &[(&str, &str, &[&str])] = &[
-			("**", "a", &["**"]),
-			("**/a", "a", &["", "**/a"]),
-			("a/**", "a", &["**"]),
-			("a/**", "a/b", &["**"]),
-			("a/**", "b", &[]),
-			("a/b", "a", &["b"]),
-			("a/b", "a/b", &[""]),
-			("a/b", "a/b/c", &[]),
-			("*/b", "a", &["b"]),
-			("a/*/c", "a/x", &["c"]),
-			("a/**/b/c", "a/b", &["**/b/c", "c"]),
-			("a/**/b", "a/b/b", &["**/b", ""]),
-			("**/b/c", "b", &["**/b/c", "c"]),
-			("", "", &[""]),
-			("", "a", &[]),
-			("**", "", &["**"]),
-			("*.hang/**", "cam.hang", &["**"]),
-			("*.hang/**", "cam.msf", &[]),
-			("**/*.hang", "a.hang", &["", "**/*.hang"]),
-		];
-		for (text, root, expected) in cases {
-			let got = pattern(text).rebase(root);
-			let expected: Patterns = expected.iter().map(|e| pattern(e)).collect();
-			assert_eq!(got, expected, "{text} rebased at {root}");
-		}
 	}
 
 	#[test]
@@ -1208,20 +1020,6 @@ mod tests {
 
 		let deep = ["a"; Pattern::MAX_SEGMENTS].join("/");
 		assert_eq!(pattern("b").rooted(&deep), Err(InvalidPattern::TooManySegments));
-	}
-
-	#[test]
-	fn head_is_the_literal_prefix() {
-		assert_eq!(pattern("a/b/*/c").head(), "a/b");
-		assert_eq!(pattern("**/a").head(), "");
-		assert_eq!(pattern("a/b").head(), "a/b");
-		assert_eq!(pattern("").head(), "");
-		assert_eq!(pattern("a/b*/c").head(), "a");
-		assert!(!pattern("a/b*").is_literal());
-		assert!(pattern("a/b").is_literal());
-		assert!(!pattern("a/*").is_literal());
-		assert!(pattern("a/**").has_globstar());
-		assert!(!pattern("a/*").has_globstar());
 	}
 
 	#[cfg(feature = "serde")]

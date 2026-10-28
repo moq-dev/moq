@@ -34,20 +34,16 @@
  * A sync flush always ends in the fixed 4-byte marker `00 00 ff ff`. {@link Encoder.frame} drops it
  * and {@link Decoder.frame} re-appends it, saving 4 bytes per frame, the same trick
  * [RFC 7692](https://www.rfc-editor.org/rfc/rfc7692.html#section-7.2.1) (permessage-deflate) uses. A
- * small slice can still inflate enormously, so {@link Decoder.frame} caps the inflated output as it
- * is produced. pako is synchronous, so the whole codec is synchronous.
+ * small slice can still inflate enormously, so a {@link Decoder} holds its whole window to the group
+ * budget as output is produced: a compressed group never costs a reader more than a plain one, and
+ * the producers refuse before a group would. pako is synchronous, so the whole codec is synchronous.
  *
  * @module
  */
 
-export {
-	DEFAULT_LEVEL,
-	DEFAULT_MAX_FRAME_SIZE,
-	Decoder,
-	type DecoderOptions,
-	Encoder,
-	type EncoderOptions,
-} from "./codec.ts";
+export { DEFAULT_LEVEL, Decoder, Encoder, type EncoderOptions } from "./codec.ts";
 export type { Compression } from "./compression.ts";
+/** Lossy latest-value opaque publishing. */
 export * as Snapshot from "./snapshot/index.ts";
+/** Lossless append-log opaque publishing. */
 export * as Stream from "./stream/index.ts";

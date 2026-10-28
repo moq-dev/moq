@@ -9,11 +9,13 @@ export type DecoderConfig = Pick<
 	"codec" | "container" | "description" | "displayAspectWidth" | "displayAspectHeight"
 > & {
 	optimizeForLatency: boolean;
+	interlaced: boolean;
 };
 
 /** The routing and decoder state whose changes require a new playback pipeline. */
 export type PlaybackIdentity = {
 	broadcast: Catalog.VideoConfig["broadcast"];
+	epoch: Catalog.VideoConfig["epoch"];
 	track: Catalog.VideoConfig["track"];
 	decoder: DecoderConfig;
 };
@@ -22,6 +24,7 @@ export type PlaybackIdentity = {
 export function playbackIdentity(config: Catalog.VideoConfig): PlaybackIdentity {
 	return {
 		broadcast: config.broadcast,
+		epoch: config.epoch,
 		track: config.track,
 		decoder: {
 			codec: config.codec,
@@ -30,6 +33,7 @@ export function playbackIdentity(config: Catalog.VideoConfig): PlaybackIdentity 
 			displayAspectWidth: config.displayAspectWidth,
 			displayAspectHeight: config.displayAspectHeight,
 			optimizeForLatency: config.optimizeForLatency ?? true,
+			interlaced: config.interlaced ?? false,
 		},
 	};
 }

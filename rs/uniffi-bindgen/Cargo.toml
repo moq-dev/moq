@@ -11,6 +11,17 @@ description = "Generate the Kotlin, Swift, and Python bindings from the moq-ffi 
 [[bin]]
 name = "uniffi-bindgen"
 path = "src/main.rs"
+# Off by default so a workspace check skips the generator fork. Maturin passes
+# required features along when it runs this bin for the Python wheel.
+required-features = ["cli"]
+
+[features]
+cli = ["dep:uniffi"]
 
 [dependencies]
-uniffi = { workspace = true, features = ["cli"] }
+# Generator-only fork of UniFFI 0.32.2. moq-ffi stays on crates.io so its
+# published package has no git dependencies.
+uniffi = { git = "https://github.com/kixelated/uniffi-rs", rev = "88d835d", features = ["cli"], optional = true }
+
+[lints]
+workspace = true

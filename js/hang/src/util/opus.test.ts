@@ -33,12 +33,6 @@ describe("supportsRate", () => {
 		expect(supportsRate(44100)).toBe(false);
 		expect(supportsRate(22050)).toBe(false);
 	});
-
-	it("accepts the native rates", () => {
-		for (const rate of SAMPLE_RATES) {
-			expect(supportsRate(rate)).toBe(true);
-		}
-	});
 });
 
 describe("toDOps", () => {

@@ -31,9 +31,9 @@ After building, generate language bindings with the `uniffi-bindgen` package.
 The library extension depends on your platform: `.dylib` (macOS/iOS), `.so` (Linux/Android), `.dll` (Windows).
 
 ```bash
-cargo run --package uniffi-bindgen -- generate --library target/release/libmoq_ffi.{dylib,so} --language kotlin --out-dir out/
-cargo run --package uniffi-bindgen -- generate --library target/release/libmoq_ffi.{dylib,so} --language swift --out-dir out/
-cargo run --package uniffi-bindgen -- generate --library target/release/libmoq_ffi.{dylib,so} --language python --out-dir out/
+cargo run --package uniffi-bindgen --features cli -- generate --library target/release/libmoq_ffi.{dylib,so} --language kotlin --out-dir out/
+cargo run --package uniffi-bindgen --features cli -- generate --library target/release/libmoq_ffi.{dylib,so} --language swift --out-dir out/
+cargo run --package uniffi-bindgen --features cli -- generate --library target/release/libmoq_ffi.{dylib,so} --language python --out-dir out/
 uniffi_bindgen_dart --library target/release/libmoq_ffi.{dylib,so} --out-dir out/
 ```
 

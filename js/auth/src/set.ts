@@ -9,13 +9,13 @@
 
 import * as z from "@zod/mini";
 import * as jose from "jose";
-import type { Claims } from "./claims.ts";
+import type { Claims, ClaimsSchema } from "./claims.ts";
 import { Key, KeySchema, type PublicKey } from "./key.ts";
 
 /**
  * A JWK Set.
  *
- * See <https://datatracker.ietf.org/doc/html/rfc7517#section-5>.
+ * See {@link https://datatracker.ietf.org/doc/html/rfc7517#section-5 | RFC 7517, section 5}.
  */
 export const KeySetSchema = z.object({
 	/** The keys in the set, in preference order. */
@@ -58,7 +58,7 @@ function find(set: KeySet, kid: string): Key | undefined {
 }
 
 /** Sign the claims with the first key that permits signing and contains signing material. */
-async function sign(set: KeySet, claims: Claims): Promise<string> {
+async function sign(set: KeySet, claims: z.input<typeof ClaimsSchema>): Promise<string> {
 	const key = set.keys.find((key) => key.key_ops.includes("sign") && (key.kty === "oct" || key.d !== undefined));
 	if (!key) throw new Error("Cannot find signing key");
 	return await Key.sign(key, claims);

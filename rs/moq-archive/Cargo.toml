@@ -1,6 +1,6 @@
 [package]
 name = "moq-archive"
-description = "Versioned hang recording objects on any object_store::ObjectStore"
+description = "MoQ broadcast archives on any object_store::ObjectStore"
 authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
@@ -15,10 +15,8 @@ categories = ["multimedia", "filesystem"]
 [dependencies]
 bytes = { workspace = true }
 futures = { workspace = true }
-hang = { workspace = true }
 kio = { workspace = true }
-moq-json = { workspace = true }
-moq-mux = { workspace = true }
+moq-clock = { workspace = true }
 moq-net = { workspace = true }
 object_store = { workspace = true }
 percent-encoding = { workspace = true }
@@ -26,16 +24,21 @@ quick_cache = "0.7"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["macros", "sync", "time"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
-async-trait = "0.1"
+async-trait = { workspace = true }
+axum = { workspace = true }
 criterion = { workspace = true }
-object_store = { workspace = true, features = ["fs"] }
+object_store = { workspace = true, features = ["fs", "aws"] }
+s3s = "0.17"
+s3s-fs = "0.17"
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "test-util", "time"] }
 
 [[bench]]
-name = "writer"
+name = "producer"
 harness = false
+
+[lints]
+workspace = true

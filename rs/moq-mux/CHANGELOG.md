@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- [**breaking**] Declare per-track archive durations from GOP hints or the first completed record.
+
+### Fixed
+
+- fMP4 import applies each track's edit list to its frame timestamps and drops the samples before the edit, such as AAC priming, along with the video samples decoding from a dropped sync sample, and a passthrough init no longer carries the `edts`. A consumer that offsets AAC priming itself must stop, or it shifts the track twice. An edit list it can't reduce to one shift (several media edits, or a rate other than 1) is refused with `Error::UnsupportedEditList`.
+
 ## [0.10.11](https://github.com/moq-dev/moq/compare/moq-mux-v0.10.10...moq-mux-v0.10.11) - 2026-10-05
 
 ### Other

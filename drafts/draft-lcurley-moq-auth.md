@@ -18,14 +18,14 @@ author:
 
 normative:
   moqt: I-D.ietf-moq-transport
+  moq-lite: I-D.lcurley-moq-lite
 
 informative:
-  moq-lite: I-D.lcurley-moq-lite
 
 --- abstract
 
 This document defines an extension for MoQ Transport {{moqt}} that tells an endpoint what its peer will let it publish and subscribe to.
-Either endpoint presents a token on a request stream of its own, and the peer answers with the namespace prefixes the token grants and when that grant lapses.
+Either endpoint presents a token on a request stream of its own, and the peer answers with the namespace patterns the token grants and when that grant lapses.
 Tokens can be added and withdrawn for the life of the session, so a session can outlive the credential it started with.
 An endpoint that knows its grant can fail loudly on a publication that will never be accepted, instead of waiting for a subscription that never comes.
 
@@ -61,7 +61,7 @@ An endpoint that implements this extension sends the following Setup Option ({{m
 
 ~~~
 AUTH Setup Option {
-  Option Key (vi64) = 0x40B60
+  Option Key (vi64) = 0x40B70
   Option Value (vi64) = 1
 }
 ~~~
@@ -69,7 +69,7 @@ AUTH Setup Option {
 The extension is negotiated when both endpoints sent the option with a value of 1.
 An endpoint MUST NOT send AUTH on a session that did not negotiate it, and an endpoint that receives AUTH anyway MUST close the session with PROTOCOL_VIOLATION, as it would for any unknown message type.
 
-This extension is defined for the versions of {{moqt}} with the unified SETUP message, draft-17 and later.
+This extension is defined for the versions of {{moqt}} with the unified SETUP message, draft-18 and later.
 
 
 # Auth Requests {#requests}
@@ -105,14 +105,15 @@ When the union shrinks, the presenter SHOULD withdraw its advertisements and can
 A presenter that would advertise a namespace outside the union, once the tokens it presented at setup are answered, SHOULD close the session with UNAUTHORIZED instead of sending PUBLISH_NAMESPACE, since a subscription for it will never come.
 A publication that loses coverage because the union shrank is withdrawn, which is no reason to close the session.
 
-## Prefixes {#prefixes}
+## Patterns {#patterns}
 
-A grant names Track Namespace prefixes, encoded as the Track Namespace Prefix of SUBSCRIBE_NAMESPACE ({{moqt}}) and matched the same way: a prefix covers every namespace whose leading fields equal it.
-A prefix with no fields covers every namespace, and a count of zero grants none.
+A grant names Path Patterns of {{moq-lite}}, with the same grammar, canonical form, and encoding as its AUTH_OK.
+A pattern matches a Track Namespace as the path of the namespace's fields joined by `/`, where a `/` or `\` inside a field is preceded by a `\`.
+Patterns are relative to the session, as its Track Namespaces are, and a count of zero grants none.
+A pattern that breaks the grammar or is not canonical is a PROTOCOL_VIOLATION.
 
-An acceptor whose grant is not a union of prefixes, such as one exact namespace without its descendants, MUST NOT widen it to a prefix.
-It sends AUTH_ERROR with NOT_SUPPORTED instead: as the first reply this refuses the token, and after an AUTH_OK it revokes the earlier grant.
-The same holds for a grant too large to encode as one AUTH_OK: an acceptor MUST NOT trim it, and nothing of the AUTH_OK is written.
+An acceptor MUST NOT widen or trim a grant to fit one AUTH_OK.
+For a grant too large to encode, it writes nothing of the AUTH_OK and sends AUTH_ERROR with NOT_SUPPORTED instead: as the first reply this refuses the token, and after an AUTH_OK it revokes the earlier grant.
 Other tokens on the session are unaffected.
 
 
@@ -151,18 +152,23 @@ AUTH_OK Message {
   Type (vi64) = 0x40B62,
   Length (16),
   Publish Count (vi64),
-  Publish Prefix (Track Namespace) ...,
+  Publish Pattern (Pattern) ...,
   Subscribe Count (vi64),
-  Subscribe Prefix (Track Namespace) ...,
+  Subscribe Pattern (Pattern) ...,
   Expires (vi64),
+}
+
+Pattern {
+  Pattern Length (vi64),
+  Pattern (..),
 }
 ~~~
 
-**Publish Prefix**:
-A namespace prefix the presenter may advertise and serve ({{prefixes}}).
+**Publish Pattern**:
+A pattern matching the namespaces the presenter may advertise and serve ({{patterns}}).
 
-**Subscribe Prefix**:
-A namespace prefix the presenter may subscribe to and discover.
+**Subscribe Pattern**:
+A pattern matching the namespaces the presenter may subscribe to and discover.
 
 **Expires**:
 The number of milliseconds until the grant lapses, or 0 for never.
@@ -185,7 +191,8 @@ AUTH_ERROR Message {
 
 **Error Code**:
 A code MUST fit in 32 bits; a larger value is a PROTOCOL_VIOLATION.
-A code from the REQUEST_ERROR registry ({{moqt}}): UNAUTHORIZED, MALFORMED_AUTH_TOKEN, EXPIRED_AUTH_TOKEN, or NOT_SUPPORTED ({{prefixes}}).
+A code from the REQUEST_ERROR registry ({{moqt}}): UNAUTHORIZED, MALFORMED_AUTH_TOKEN, EXPIRED_AUTH_TOKEN, NOT_SUPPORTED ({{patterns}}), or GOING_AWAY.
+GOING_AWAY answers an AUTH the acceptor no longer admits after its GOAWAY ({{moqt}}); it refuses the request, not the token, so the token stays valid for another session.
 
 **Reason Phrase**:
 A human-readable reason, at most 8,192 bytes.
@@ -212,7 +219,7 @@ This document requests one registration in the "MOQT Setup Options" registry ({{
 
 | Value   | Name | Reference     |
 |:--------|:-----|:--------------|
-| 0x40B60 | AUTH | This Document |
+| 0x40B70 | AUTH | This Document |
 
 AUTH is even, so its value is a bare varint.
 
@@ -228,6 +235,15 @@ This document requests three registrations in the "MOQT Message Types" registry 
 
 
 --- back
+
+# Changelog
+
+## Since draft-lcurley-moq-auth-00 (in progress)
+
+- AUTH_ERROR can carry GOING_AWAY, refusing an AUTH past the acceptor's GOAWAY without refusing the token.
+- AUTH_OK carries moq-lite Path Patterns instead of Track Namespace prefixes, and a grant is refused only when too large for one AUTH_OK.
+- The AUTH Setup Option moves from 0x40B60 to 0x40B70.
+- Defined for {{moqt}} draft-18 and later, instead of draft-17 and later.
 
 # Acknowledgments
 {:numbered="false"}

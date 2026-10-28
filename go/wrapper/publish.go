@@ -3,14 +3,15 @@ package moq
 import (
 	"context"
 	"iter"
+	"time"
 
 	ffi "moq.dev/moq-ffi/moq"
 	"moq.dev/moq/internal/bridge"
 )
 
 // BroadcastProducer publishes a collection of tracks. Create one at a path with
-// [OriginProducer.CreateBroadcast] (or [Client.CreateBroadcast]), then publish
-// tracks onto it.
+// [OriginProducer.CreateBroadcast] (or [Client.CreateBroadcast]) and take it
+// from the [Publication], then publish tracks onto it.
 type BroadcastProducer struct {
 	inner *ffi.MoqBroadcastProducer
 }
@@ -26,64 +27,13 @@ func NewBroadcastProducer() (*BroadcastProducer, error) {
 	return &BroadcastProducer{inner: inner}, nil
 }
 
-// Dynamic accepts requests for tracks that are not published yet.
-func (b *BroadcastProducer) Dynamic() (*BroadcastDynamic, error) {
-	inner, err := b.inner.Dynamic()
+// Requests accepts requests for tracks that are not published yet.
+func (b *BroadcastProducer) Requests() (*BroadcastRequests, error) {
+	inner, err := b.inner.Requests()
 	if err != nil {
 		return nil, err
 	}
-	return &BroadcastDynamic{inner: inner}, nil
-}
-
-// Announce advertises this broadcast's exact path as a route.
-//
-// Announcing again re-prices the route in place. Until announced, the
-// broadcast is invisible and unroutable for local consumers and peers alike.
-func (b *BroadcastProducer) Announce(route Route) error {
-	return b.inner.Announce(route)
-}
-
-// Unannounce retracts this broadcast's exact-path advertisement, if any, from
-// local consumers and peers alike. Tracks already in flight carry on.
-func (b *BroadcastProducer) Unannounce() error {
-	return b.inner.Unannounce()
-}
-
-// EncodeAudio publishes a raw-audio track with an in-process encoder.
-//
-// Select the codec with OpusAudioCodec or AacAudioCodec.
-// Pass bandwidth to reserve this track's bitrate against the session's
-// allocator so a co-resident video encoder sizes itself against what is left.
-func (b *BroadcastProducer) EncodeAudio(name string, input AudioEncoderInput, output AudioEncoderOutput, bandwidth *Bandwidth) (*AudioProducer, error) {
-	var innerBw **ffi.MoqBandwidth
-	if bandwidth != nil {
-		innerBw = &bandwidth.inner
-	}
-	inner, err := b.inner.EncodeAudio(name, input, output, innerBw)
-	if err != nil {
-		return nil, err
-	}
-	return &AudioProducer{inner: inner}, nil
-}
-
-// EncodeVideo publishes a raw-video track with an in-process H.264/H.265
-// encoder.
-//
-// Set output.Track to choose the track name; otherwise one is derived from the
-// codec (.avc3 / .hev1). The catalog rendition is published immediately so
-// subscribers can discover it before the first frame exists.
-//
-// Pass bandwidth to reserve this track's configured bitrate and follow the grant.
-func (b *BroadcastProducer) EncodeVideo(input VideoEncoderInput, output VideoEncoderOutput, bandwidth *Bandwidth) (*VideoProducer, error) {
-	var innerBw **ffi.MoqBandwidth
-	if bandwidth != nil {
-		innerBw = &bandwidth.inner
-	}
-	inner, err := b.inner.EncodeVideo(input, output, innerBw)
-	if err != nil {
-		return nil, err
-	}
-	return &VideoProducer{inner: inner}, nil
+	return &BroadcastRequests{inner: inner}, nil
 }
 
 // PublishTrack creates a track that carries arbitrary byte payloads with no
@@ -111,18 +61,20 @@ func (b *BroadcastProducer) Consume() (*BroadcastConsumer, error) {
 }
 
 // Close ends the broadcast for good: it retracts and serves no new tracks.
-// Tracks already subscribed carry on to their own end. Closing again is a no-op.
+// Tracks still open on it end with Unroutable, which readers take as the
+// publisher leaving, and their later calls fail with ErrClosed; finish a track
+// first to end it cleanly. Closing again is a no-op.
 func (b *BroadcastProducer) Close() error {
 	return b.inner.Close()
 }
 
-// BroadcastDynamic is a stream of subscriber-requested tracks.
-type BroadcastDynamic struct {
-	inner *ffi.MoqBroadcastDynamic
+// BroadcastRequests is a stream of subscriber-requested tracks.
+type BroadcastRequests struct {
+	inner *ffi.MoqBroadcastRequests
 }
 
 // RequestedTrack waits for the next subscriber-requested track.
-func (d *BroadcastDynamic) RequestedTrack(ctx context.Context) (*TrackRequest, error) {
+func (d *BroadcastRequests) RequestedTrack(ctx context.Context) (*TrackRequest, error) {
 	inner, err := bridge.CallHandle(ctx, d.inner.Cancel, d.inner.RequestedTrack)
 	if err != nil {
 		return nil, err
@@ -131,12 +83,12 @@ func (d *BroadcastDynamic) RequestedTrack(ctx context.Context) (*TrackRequest, e
 }
 
 // All ranges over subscriber-requested tracks until the dynamic source ends.
-func (d *BroadcastDynamic) All(ctx context.Context) iter.Seq2[*TrackRequest, error] {
+func (d *BroadcastRequests) All(ctx context.Context) iter.Seq2[*TrackRequest, error] {
 	return bridge.Seq(ctx, d.RequestedTrack)
 }
 
 // Cancel stops the dynamic request stream.
-func (d *BroadcastDynamic) Cancel() {
+func (d *BroadcastRequests) Cancel() {
 	d.inner.Cancel()
 }
 
@@ -159,13 +111,13 @@ func (r *TrackRequest) Demand() (*TrackDemand, error) {
 	return &TrackDemand{inner: inner}, nil
 }
 
-// Dynamic creates a fetch handler before accepting this requested track.
-func (r *TrackRequest) Dynamic() (*TrackDynamic, error) {
-	inner, err := r.inner.Dynamic()
+// Requests creates a fetch handler before accepting this requested track.
+func (r *TrackRequest) Requests() (*TrackRequests, error) {
+	inner, err := r.inner.Requests()
 	if err != nil {
 		return nil, err
 	}
-	return &TrackDynamic{inner: inner}, nil
+	return &TrackRequests{inner: inner}, nil
 }
 
 // Accept accepts the request as a raw track. For media, pass the request as media.Requested to an importer constructor.
@@ -186,7 +138,7 @@ func (r *TrackRequest) Abort(errorCode uint16) error {
 	return r.inner.Abort(errorCode)
 }
 
-// TrackDemand watches whether a published track has subscribers.
+// TrackDemand watches the group a published track's subscribers want next.
 //
 // It is weak: holding it neither keeps the track open nor locks the producer, so
 // a wait can park here while the producer keeps publishing. Waits return
@@ -200,19 +152,15 @@ func (d *TrackDemand) Name() string {
 	return d.inner.Name()
 }
 
-// IsUsed reports whether the track has at least one active subscriber right now.
-func (d *TrackDemand) IsUsed() bool {
-	return d.inner.IsUsed()
+// Wanted is the group subscribers want next, or nil while nobody subscribes. A
+// value past the newest group asks for a new group now, typically a keyframe.
+func (d *TrackDemand) Wanted() *uint64 {
+	return d.inner.Wanted()
 }
 
-// Used blocks until the track has at least one active subscriber.
-func (d *TrackDemand) Used(ctx context.Context) error {
-	return d.inner.Used(ctx)
-}
-
-// Unused blocks until the track has no active subscribers.
-func (d *TrackDemand) Unused(ctx context.Context) error {
-	return d.inner.Unused(ctx)
+// WantedChanged blocks until Wanted changes and returns it. The first call returns at once.
+func (d *TrackDemand) WantedChanged(ctx context.Context) (*uint64, error) {
+	return d.inner.WantedChanged(ctx)
 }
 
 // TrackProducer writes arbitrary byte payloads with no codec required.
@@ -220,7 +168,7 @@ type TrackProducer struct {
 	inner *ffi.MoqTrackProducer
 }
 
-// Demand returns a watch-only handle to the track's name and whether it has subscribers.
+// Demand returns a watch-only handle to the track's name and the group its subscribers want.
 func (t *TrackProducer) Demand() (*TrackDemand, error) {
 	inner, err := t.inner.Demand()
 	if err != nil {
@@ -229,13 +177,13 @@ func (t *TrackProducer) Demand() (*TrackDemand, error) {
 	return &TrackDemand{inner: inner}, nil
 }
 
-// Dynamic serves fetches for groups that are not currently cached.
-func (t *TrackProducer) Dynamic() (*TrackDynamic, error) {
-	inner, err := t.inner.Dynamic()
+// Requests serves fetches for groups that are not currently cached.
+func (t *TrackProducer) Requests() (*TrackRequests, error) {
+	inner, err := t.inner.Requests()
 	if err != nil {
 		return nil, err
 	}
-	return &TrackDynamic{inner: inner}, nil
+	return &TrackRequests{inner: inner}, nil
 }
 
 // AppendGroup starts a new group; write frames into it, then Finish.
@@ -343,219 +291,110 @@ func (g *GroupProducer) Abort(errorCode uint16) error {
 	return g.inner.Abort(errorCode)
 }
 
-// TrackDynamic yields uncached groups requested by fetch consumers.
-type TrackDynamic struct {
-	inner *ffi.MoqTrackDynamic
+// TrackRequests yields the fills readers of one track need: runs of groups the cache lacks.
+type TrackRequests struct {
+	inner *ffi.MoqTrackRequests
 }
 
-// RequestedGroup waits for the next uncached group request.
-func (d *TrackDynamic) RequestedGroup(ctx context.Context) (*GroupRequest, error) {
-	inner, err := bridge.CallHandle(ctx, d.inner.Cancel, d.inner.RequestedGroup)
+// RequestedFill waits for the next fill.
+func (d *TrackRequests) RequestedFill(ctx context.Context) (*Fill, error) {
+	inner, err := bridge.CallHandle(ctx, d.inner.Cancel, d.inner.RequestedFill)
 	if err != nil {
 		return nil, err
 	}
-	return &GroupRequest{inner: inner}, nil
+	return &Fill{inner: inner}, nil
 }
 
-// All ranges over uncached group requests until the dynamic source ends.
-func (d *TrackDynamic) All(ctx context.Context) iter.Seq2[*GroupRequest, error] {
-	return bridge.Seq(ctx, d.RequestedGroup)
+// All ranges over fills until the dynamic source ends.
+func (d *TrackRequests) All(ctx context.Context) iter.Seq2[*Fill, error] {
+	return bridge.Seq(ctx, d.RequestedFill)
 }
 
-// Cancel stops current and future requested-group waits.
-func (d *TrackDynamic) Cancel() {
+// Cancel stops current and future requested-fill waits.
+func (d *TrackRequests) Cancel() {
 	d.inner.Cancel()
 }
 
-// GroupRequest requests one uncached group from a track producer.
-type GroupRequest struct {
-	inner *ffi.MoqGroupRequest
+// Fill is a run of groups readers miss, for a TrackRequests to serve.
+//
+// Accept each group you have and DropGroups the rest; Next names what is still
+// owed, in the fill's order. Releasing the fill names whatever is left as dropped
+// while a reader still wants it; once nobody does, it is withdrawn, so stop
+// serving it when Unused returns. Stop serving a single group when Unwanted
+// returns for it, and move on to Next.
+type Fill struct {
+	inner *ffi.MoqFill
 }
 
-// Sequence is the requested group sequence within the track.
-func (r *GroupRequest) Sequence() uint64 {
-	return r.inner.Sequence()
+// StartGroup is the first group to fill.
+func (f *Fill) StartGroup() uint64 {
+	return f.inner.StartGroup()
 }
 
-// Priority is the consumer's delivery priority for this fetch.
-func (r *GroupRequest) Priority() uint8 {
-	return r.inner.Priority()
+// StartFrame is the frame within the first group to start from.
+func (f *Fill) StartFrame() uint64 {
+	return f.inner.StartFrame()
 }
 
-// Demand returns a watch-only handle to whether any caller still wants the group.
-func (r *GroupRequest) Demand() (*GroupDemand, error) {
-	inner, err := r.inner.Demand()
-	if err != nil {
-		return nil, err
-	}
-	return &GroupDemand{inner: inner}, nil
+// EndGroup is the exclusive end group.
+func (f *Fill) EndGroup() uint64 {
+	return f.inner.EndGroup()
 }
 
-// Accept accepts the request and returns a producer for the group.
-func (r *GroupRequest) Accept() (*GroupProducer, error) {
-	inner, err := r.inner.Accept()
+// Priority is the most urgent delivery priority among the readers waiting on it.
+func (f *Fill) Priority() int8 {
+	return f.inner.Priority()
+}
+
+// MaxDelay is the most tolerant age budget among its readers, or nil for the
+// publisher's max age alone.
+func (f *Fill) MaxDelay() *time.Duration {
+	return f.inner.MaxDelay()
+}
+
+// Order is which end to fill first.
+func (f *Fill) Order() Order {
+	return f.inner.Order()
+}
+
+// Next is the next group still owed in the fill's order, or nil once every group is answered.
+func (f *Fill) Next() *uint64 {
+	return f.inner.Next()
+}
+
+// Accept inserts group sequence and returns a producer for it. The first group
+// starts at StartFrame, so its frames keep their indices.
+func (f *Fill) Accept(sequence uint64) (*GroupProducer, error) {
+	inner, err := f.inner.Accept(sequence)
 	if err != nil {
 		return nil, err
 	}
 	return &GroupProducer{inner: inner}, nil
 }
 
-// Abort rejects the fetch with an application error code.
-func (r *GroupRequest) Abort(errorCode uint16) error {
-	return r.inner.Abort(errorCode)
+// DropGroups names groups start up to the exclusive end as never to be delivered.
+func (f *Fill) DropGroups(start, end uint64) {
+	f.inner.DropGroups(start, end)
 }
 
-// GroupDemand watches the callers waiting on a requested group.
-//
-// It is weak: holding it does not keep the request alive. The last caller to
-// leave withdraws the request, so once unused, demand never returns: drop the
-// request. Waits fail with ErrClosed after the request is accepted or dropped,
-// and keep the rejection reason after it is rejected.
-type GroupDemand struct {
-	inner *ffi.MoqGroupDemand
+// IsUsed reports whether a reader still waits on this fill.
+func (f *Fill) IsUsed() bool {
+	return f.inner.IsUsed()
 }
 
-// Sequence is the sequence of the group this watches.
-func (d *GroupDemand) Sequence() uint64 {
-	return d.inner.Sequence()
+// Unused blocks until no reader waits on this fill.
+func (f *Fill) Unused(ctx context.Context) error {
+	return f.inner.Unused(ctx)
 }
 
-// IsUsed reports whether the group has at least one waiting caller right now.
-func (d *GroupDemand) IsUsed() bool {
-	return d.inner.IsUsed()
+// IsWanted reports whether a reader still waits for group sequence from this fill:
+// false once every reader took it or narrowed past it, or nobody waits on the fill.
+func (f *Fill) IsWanted(sequence uint64) bool {
+	return f.inner.IsWanted(sequence)
 }
 
-// Used blocks until the group has at least one waiting caller.
-func (d *GroupDemand) Used(ctx context.Context) error {
-	return d.inner.Used(ctx)
-}
-
-// Unused blocks until the group has no waiting callers.
-func (d *GroupDemand) Unused(ctx context.Context) error {
-	return d.inner.Unused(ctx)
-}
-
-// AudioProducer pushes raw PCM and lets libopus encode it on the way out.
-type AudioProducer struct {
-	inner *ffi.MoqAudioProducer
-}
-
-// Name returns the audio track's name.
-func (a *AudioProducer) Name() (string, error) {
-	return a.inner.Name()
-}
-
-// Demand returns a watch-only handle to whether the audio track has subscribers.
-func (a *AudioProducer) Demand() (*TrackDemand, error) {
-	inner, err := a.inner.Demand()
-	if err != nil {
-		return nil, err
-	}
-	return &TrackDemand{inner: inner}, nil
-}
-
-// Used blocks until the audio track has at least one active subscriber. Prefer Demand.
-func (a *AudioProducer) Used(ctx context.Context) error {
-	return a.inner.Used(ctx)
-}
-
-// Unused blocks until the audio track has no active subscribers. Prefer Demand.
-func (a *AudioProducer) Unused(ctx context.Context) error {
-	return a.inner.Unused(ctx)
-}
-
-// Reanchor re-anchors the timeline to the next frame after an idle gap.
-func (a *AudioProducer) Reanchor() error {
-	return a.inner.Reanchor()
-}
-
-// Write pushes one frame of PCM in the configured input format.
-func (a *AudioProducer) Write(frame AudioFrame) error {
-	return a.inner.Write(frame)
-}
-
-// Reservation returns this encoder's bandwidth reservation, or nil if it was
-// published without an allocator.
-func (a *AudioProducer) Reservation() *Reservation {
-	inner := a.inner.Reservation()
-	if inner == nil || *inner == nil {
-		return nil
-	}
-	return &Reservation{inner: *inner}
-}
-
-// Finish flushes pending samples and finalizes the track.
-func (a *AudioProducer) Finish() error {
-	return a.inner.Finish()
-}
-
-// VideoProducer pushes raw pictures and lets a native encoder compress them on
-// the way out.
-type VideoProducer struct {
-	inner *ffi.MoqVideoProducer
-}
-
-// Name returns the video track's name.
-func (v *VideoProducer) Name() (string, error) {
-	return v.inner.Name()
-}
-
-// Demand returns a watch-only handle to whether the video track has subscribers.
-func (v *VideoProducer) Demand() (*TrackDemand, error) {
-	inner, err := v.inner.Demand()
-	if err != nil {
-		return nil, err
-	}
-	return &TrackDemand{inner: inner}, nil
-}
-
-// Used blocks until the video track has at least one active subscriber. Prefer Demand.
-func (v *VideoProducer) Used(ctx context.Context) error {
-	return v.inner.Used(ctx)
-}
-
-// Unused blocks until the video track has no active subscribers. Prefer Demand.
-func (v *VideoProducer) Unused(ctx context.Context) error {
-	return v.inner.Unused(ctx)
-}
-
-// Write encodes and publishes one frame in the configured input format. A
-// hardware encoder pipelines, so a call that puts nothing on the wire is normal
-// rather than an error.
-func (v *VideoProducer) Write(frame VideoFrame) error {
-	return v.inner.Write(frame)
-}
-
-// Cut starts a new group at the next written frame.
-//
-// Optional: the encoder keyframes every Gop frames on its own, and each of
-// those cuts a group, so a subscriber can always join without this. Reach for it
-// only to place the boundaries yourself, aligning groups with something the
-// encoder can't see such as a scene change. An error means the selected encoder
-// cannot force a keyframe; nothing is queued and groups keep their interval.
-func (v *VideoProducer) Cut() error {
-	return v.inner.Cut()
-}
-
-// SetBitrate retunes the live encoder, in bits per second. Cheap enough to drive
-// from a congestion controller: no keyframe is forced. An error means this
-// backend can't retune while running, which is not fatal; the encoder keeps its
-// current rate.
-func (v *VideoProducer) SetBitrate(bitrate uint64) error {
-	return v.inner.SetBitrate(bitrate)
-}
-
-// Reservation returns this encoder's bandwidth reservation, or nil if it was
-// published without an allocator.
-func (v *VideoProducer) Reservation() *Reservation {
-	inner := v.inner.Reservation()
-	if inner == nil || *inner == nil {
-		return nil
-	}
-	return &Reservation{inner: *inner}
-}
-
-// Finish flushes any frames the codec is holding and finalizes the track.
-func (v *VideoProducer) Finish() error {
-	return v.inner.Finish()
+// Unwanted blocks until no reader waits for group sequence from this fill, so stop
+// serving it.
+func (f *Fill) Unwanted(ctx context.Context, sequence uint64) error {
+	return f.inner.Unwanted(ctx, sequence)
 }

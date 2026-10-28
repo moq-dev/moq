@@ -21,8 +21,7 @@ send stream offsets in any order.
 
 Decided 2026-10-02: the line moved from m2 to m3. It is a speculative
 optimization with no consumer asking for it, so it parks until one does and
-is deleted if it goes stale. The QUIC primitives land in `moq-quic`, the
-[hard fork](/quest/m1/quic/fork/README.md)'s stack.
+is deleted if it goes stale. The QUIC primitives land in `moq-quic`.
 
 Decided 2026-10-08: the four build quests were deleted. They churned with
 every frame-model and transport change while waiting on a verdict nobody had
@@ -72,10 +71,9 @@ stats field, which its quest documents inline.
 ## Required
 
 - [Loss delay](/quest/m3/cut-through/loss-delay.md) - relays report, per broadcast, the ingress bytes a loss held back by at least one RTT
-- [Bench](/quest/m3/cut-through/bench.md) - a lossy relay hop swept over loss, frame size, and egress headroom, measuring the post-hole drain time, with a go or no-go verdict
+- [Bench](/quest/m3/cut-through/bench.md) - a congested relay hop swept over ingress rate, queue depth, frame size, and egress headroom, measuring the post-hole drain time, with a go or no-go verdict
 
 ## Related
 
-- [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - orders streams; offset writes order ranges within one
-- [QoS](/quest/m1/qos/README.md) - the loss-delay counter follows its per-broadcast ingress row conventions
-- [Frame slots are cached for free](https://github.com/moq-dev/moq/pull/5239) - changes how the cache charges the in-flight frames a cut-through build would hold
+- [QoS](/quest/m2/qos/README.md) - the loss-delay counter follows its per-broadcast ingress row conventions
+- [Frame slot accounting](https://github.com/moq-dev/moq/pull/5239) - landed: the cache charges frame slot growth, which covers the in-flight frames a cut-through build would hold

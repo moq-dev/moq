@@ -36,10 +36,17 @@ asyncio.run(main())
 
    Client
    connect
+   ClientTls
+   QuicConfig
+   WebSocketConfig
+   Backoff
    Server
    Session
    Request
    Transport
+   GrantConsumer
+   Tokens
+   Grant
 ```
 
 ## Publishing
@@ -52,17 +59,14 @@ asyncio.run(main())
    :nosignatures:
 
    BroadcastProducer
-   BroadcastDynamic
+   BroadcastRequests
    BroadcastRequest
    TrackProducer
    TrackDemand
-   TrackDynamic
+   TrackRequests
    TrackRequest
    GroupProducer
-   GroupRequest
-   GroupDemand
-   AudioProducer
-   VideoProducer
+   Fill
 ```
 
 ## Subscribing
@@ -77,7 +81,32 @@ asyncio.run(main())
    BroadcastConsumer
    TrackConsumer
    GroupConsumer
-   AudioConsumer
+```
+
+## Native codecs
+
+```{eval-rst}
+.. currentmodule:: moq.audio
+
+.. autosummary::
+   :toctree: api
+   :nosignatures:
+
+   Producer
+   Encoder
+   Consumer
+```
+
+```{eval-rst}
+.. currentmodule:: moq.video
+
+.. autosummary::
+   :toctree: api
+   :nosignatures:
+
+   Producer
+   Encoder
+   Consumer
 ```
 
 ## Media
@@ -97,9 +126,7 @@ Every importer takes a broadcast; single-track imports choose a `Named` or `Requ
    TrackProducer
    TrackStreamProducer
    ContainerProducer
-   ContainerStreamProducer
    ContainerInit
-   ContainerStreamInit
    Timebase
    TrackConsumer
    GroupConsumer
@@ -125,6 +152,7 @@ broadcast, and producers advertise it in the catalog.
    StreamProducer
    SnapshotConsumer
    StreamConsumer
+   Timed
 ```
 
 ## Opaque data
@@ -151,7 +179,8 @@ broadcast, and producers advertise it in the catalog.
 
    OriginProducer
    OriginConsumer
-   OriginDynamic
+   OriginRequests
+   Publication
    AnnounceConsumer
    AnnouncedBroadcast
    Announce
@@ -183,23 +212,21 @@ Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
    media.Video
    media.VideoHint
    media.VideoProperties
-   VideoFrame
    VideoCodec
    VideoPixelFormat
+   video.FrameRate
    VideoEncoderInput
    VideoEncoderOutput
    VideoEncoderKind
    media.Dimensions
    media.Audio
-   AudioFrame
    AudioCodec
    media.AudioFormat
-   AudioDecoderOutput
    AudioEncoderInput
-   AudioEncoderOutput
    Subscription
    TrackInfo
    FetchGroupOptions
+   AnnounceRoute
    Route
    ConnectionStats
 ```
@@ -219,7 +246,6 @@ Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
    protocol_error
    log_level
    mint_epoch
-   epoch_time
 ```
 
 ```{toctree}

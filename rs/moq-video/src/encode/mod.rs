@@ -5,9 +5,7 @@
 //!
 //! Entry points, high to low level:
 //! - `publish_capture` captures and publishes a webcam (turnkey). Requires the
-//!   `capture` feature. `Control::new` is the same with a handle kept for
-//!   controlling it while it runs (asking for a keyframe), plus the `Driver`
-//!   that runs it.
+//!   `capture` feature.
 //! - [`Encoder`] encodes raw [`Frame`](crate::Frame)s you supply into
 //!   [`Encoded`] access units, and [`Producer`] publishes those (bring your own
 //!   frames). Build both for the same [`Codec`].
@@ -21,31 +19,35 @@
 //! discover a track nothing has encoded yet. That's what makes on-demand
 //! encoding possible at all.
 //!
-//! `Capture` / `Options` (with `capture`) / [`Kind`] / [`Config`] configure them.
+//! `Capture` (with `capture`) / [`Kind`] / [`Config`] configure them.
 //! [`Config::preset`] picks a [`Preset`], how the encoder trades latency for
-//! compression at the configured bitrate, and [`Encoder::applied`] reports the
-//! controls the backend actually applied for it. The decode/consume
+//! compression at the configured bitrate. The decode/consume
 //! counterpart (mirror of `moq-audio`'s consumer) lives in the sibling
 //! [`decode`](crate::decode) module.
 //!
 //! The shared [`moq_mux::rate`] policy maps a congestion-control bandwidth
 //! estimate onto the encoder's bitrate, which `publish_capture` drives for you.
 
-mod backend;
+pub(crate) mod backend;
+#[cfg_attr(
+	not(feature = "capture"),
+	allow(
+		dead_code,
+		reason = "compiled without `capture` so its tests stay in the default merge gate"
+	)
+)]
+mod cuts;
 mod encoded;
 mod encoder;
 mod producer;
 mod sink;
-// Compiled without `capture` so its tests stay in the default merge gate.
-#[cfg_attr(not(feature = "capture"), allow(dead_code))]
-mod cuts;
 
 pub use backend::NAMES;
 pub use encoded::Encoded;
-pub use encoder::{Applied, Codec, Config, Encoder, Gop, Kind, Preset};
+pub use encoder::{Codec, Config, Encoder, Gop, Kind, Preset};
 pub use producer::Producer;
 #[cfg(feature = "capture")]
-pub use producer::{Capture, Control, Driver, Options, publish_capture};
+pub use producer::{Capture, publish_capture};
 pub use sink::Sink;
 
 #[cfg(test)]

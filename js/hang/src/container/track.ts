@@ -6,12 +6,14 @@
  *
  * @module
  */
+
+import { Milli } from "@moq/clock";
 import { Time, type Track } from "@moq/net";
 
 // How long a media track asks its publisher (and, through TRACK_INFO, every relay) to keep a
 // non-latest group fetchable. Must match `hang::container::MAX_AGE` in
 // rs/hang/src/container/frame.rs.
-const MAX_AGE_MS = Time.Milli(30_000);
+const MAX_AGE_MS = Milli(30_000);
 
 /**
  * Track properties for a track carrying media frames, for `Request.accept`.
@@ -53,5 +55,5 @@ export type TrackInfoOptions = {
 	 * A RETENTION budget, not a delivery one, so it never makes anyone play further behind live
 	 * and lowering it does not reduce latency: it only shortens how far back a fetch can reach.
 	 */
-	maxAge?: Time.Milli;
+	maxAge?: Milli;
 };

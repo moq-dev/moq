@@ -18,9 +18,9 @@ ignored = ["getrandom"]
 [features]
 default = ["async"]
 # Runtime-backed helpers and Lite/IETF sessions; explicit-time model drivers stay available.
-async = ["dep:futures", "dep:web-async"]
+async = ["dep:futures", "moq-clock/runtime"]
 
-# Exposes the wire codecs to the `fuzz/` harness and the announce, codec, varint, and frame benches,
+# Exposes the wire codecs to the `fuzz/` harness and the announce, codec, path, varint, frame, and canonical storage benches,
 # and session views of an origin to the viewers bench, through the hidden `fuzz` module. Off by
 # default and hidden from the docs.
 fuzz = ["async"]
@@ -28,36 +28,39 @@ fuzz = ["async"]
 [dependencies]
 arrayvec = "0.7"
 bytes = { workspace = true }
+# zlib-rs, not the default miniz_oxide: miniz_oxide 0.9.1 can return from a sync flush with output
+# space left but the flush unfinished, silently truncating the frame.
+flate2 = { workspace = true, features = ["zlib-rs", "runtime_detection"] }
 futures = { workspace = true, optional = true }
+hashbrown = { workspace = true }
+hashlink = { workspace = true }
 kio = { workspace = true }
+moq-clock = { version = "0.11.0", path = "../moq-clock", default-features = false }
 moq-pattern = { workspace = true, features = ["serde"] }
 num_enum = { workspace = true }
 rand = { workspace = true }
+rangemap = { workspace = true }
 serde = { workspace = true }
 slab = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+url = { workspace = true }
 uuid = { workspace = true, features = ["js"] }
-web-async = { workspace = true, optional = true }
 
-# The browser instant shim is needed even by explicit-time drivers.
-[target.'cfg(target_family = "wasm")'.dependencies]
-web-async = { workspace = true }
+# Model-layer locks must yield to Loom whenever kio does. This is compiled only
+# by `just rs loom`, never in production builds.
+[target.'cfg(loom)'.dependencies]
+loom = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
 futures = { workspace = true }
 # The tests' executor, with simulated time.
-moq-net-sim = { path = "sim" }
+moq-clock = { path = "../moq-clock", features = ["sim"] }
 serde_json = { workspace = true }
 # The benches run on tokio. test-util (tokio::time::pause/advance) is test-only and
 # is NOT supported on wasm, so it must not leak into the normal dependency feature set.
 tokio = { workspace = true, features = ["rt", "test-util", "time"] }
-
-# Model checks for the kio-backed model layer (tests/loom.rs). `cfg(loom)` is only
-# set by `just rs loom`, and the whole test file compiles away without it.
-[target.'cfg(loom)'.dev-dependencies]
-loom = { workspace = true }
 
 # wasm model-layer tests (tests/wasm.rs). getrandom's wasm backend is enabled
 # only here (dev), so it isn't forced on downstream consumers. They select
@@ -65,10 +68,11 @@ loom = { workspace = true }
 [target.'cfg(target_family = "wasm")'.dev-dependencies]
 getrandom = { workspace = true }
 # Keep this in lockstep with rs/moq-wasm's pinned wasm-bindgen CLI schema.
-wasm-bindgen-test = "=0.3.77"
+wasm-bindgen-test = "=0.3.79"
 
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+# Optional per-thread CPU timing in the session benchmark.
+[target.'cfg(unix)'.dev-dependencies]
+libc = { workspace = true }
 
 # Writes the generated fuzzer corpus to disk. Needs the `fuzz` feature, so a default
 # `--all-targets` build skips it rather than failing to find the module.
@@ -77,10 +81,11 @@ name = "fuzz-seeds"
 path = "examples/fuzz-seeds.rs"
 required-features = ["fuzz"]
 
+# Lands peer claims through the hidden `fuzz` module, as a session does.
 [[bench]]
 name = "origin"
 harness = false
-required-features = ["async"]
+required-features = ["fuzz"]
 
 # Reaches the crate-private session view of an origin through the hidden `fuzz` module.
 [[bench]]
@@ -91,6 +96,18 @@ required-features = ["fuzz"]
 # Reaches the private announce codec through the hidden `fuzz` module.
 [[bench]]
 name = "announce"
+harness = false
+required-features = ["fuzz"]
+
+# Reaches the crate-private session snapshot through the hidden `fuzz` module.
+[[bench]]
+name = "synced"
+harness = false
+required-features = ["fuzz"]
+
+# Reaches the crate-private session interests through the hidden `fuzz` module.
+[[bench]]
+name = "interests"
 harness = false
 required-features = ["fuzz"]
 
@@ -123,19 +140,34 @@ harness = false
 required-features = ["async"]
 
 [[bench]]
+name = "tracks"
+harness = false
+
+[[bench]]
+name = "tail"
+harness = false
+required-features = ["fuzz"]
+
+[[bench]]
 name = "priority"
+harness = false
+required-features = ["async"]
+
+# Compiles moq-quic's send scheduler from source to compare it with the priority queue.
+[[bench]]
+name = "schedule"
 harness = false
 required-features = ["async"]
 
 [[bench]]
 name = "stats"
 harness = false
-required-features = ["async"]
+required-features = ["fuzz"]
 
 [[bench]]
 name = "session"
 harness = false
-required-features = ["async"]
+required-features = ["fuzz"]
 
 [[bench]]
 name = "admission"
@@ -143,7 +175,12 @@ harness = false
 required-features = ["async"]
 
 [[bench]]
-name = "request-ids"
+name = "refresh"
+harness = false
+
+# Follows the session's probe target through the hidden `fuzz` module.
+[[bench]]
+name = "bandwidth"
 harness = false
 required-features = ["fuzz"]
 
@@ -162,3 +199,17 @@ required-features = ["async"]
 name = "memory"
 harness = false
 required-features = ["async"]
+
+[[bench]]
+name = "path"
+harness = false
+required-features = ["fuzz"]
+
+# Uses private weak-index ownership rather than timing deferred log retirement.
+[[bench]]
+name = "canonical"
+harness = false
+required-features = ["fuzz"]
+
+[lints]
+workspace = true

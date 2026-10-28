@@ -21,7 +21,7 @@ pub(crate) async fn dial(
 	client: &Client,
 	url: Url,
 	origin: moq_net::origin::Consumer,
-	path: impl moq_net::AsPath,
+	path: impl TryInto<moq_net::Path, Error: Into<moq_net::Error>>,
 ) -> Result<()> {
 	let broadcast = origin.request_broadcast(path, None).await?;
 	let source = EgressSource::new(moq_mux::Source::new(origin, broadcast)).await?;
@@ -30,11 +30,11 @@ pub(crate) async fn dial(
 		return Err(Error::NoRenditions);
 	}
 
-	let (socket, candidates) = session::bind_udp(&client.config().ice_candidates).await?;
+	let socket = session::bind_udp(&client.config().ice_candidates).await?;
 	// Restrict to codecs the catalog can actually source so the remote
 	// answer doesn't pick a codec we have no rendition for.
 	let mut rtc = session::rtc_with_codecs(&codecs);
-	for addr in &candidates {
+	for addr in socket.locals() {
 		let cand = Candidate::host(*addr, "udp").map_err(Error::rtc)?;
 		rtc.add_local_candidate(cand);
 	}
@@ -75,18 +75,9 @@ pub(crate) async fn dial(
 	// The URL routinely carries the auth token in its query, or userinfo.
 	tracing::info!(url = %moq_tokio::RedactedUrl::new(&url), "whip client connected");
 
-	// 1:1 socket (no demux on the client): pump its datagrams into the session.
-	// The session tags each datagram with the advertised candidate matching its
-	// family (str0m matches the destination against a host candidate, not the bind).
-	let inbound = session::spawn_socket_reader(socket.clone());
-	let mut session = session::Session::egress(rtc, socket, candidates, inbound, source);
+	let mut session = session::Session::egress(rtc, socket, source)?;
 	for mid in mids {
 		session.open_media(mid)?;
 	}
-	tokio::spawn(async move {
-		let result = session.run().await;
-		session::log_session_end("whip client", &result);
-	});
-
-	Ok(())
+	session::end("whip client", session.run().await)
 }

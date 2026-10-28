@@ -1,12 +1,13 @@
 import { expect, test } from "bun:test";
-import { Time, Track } from "@moq/net";
+import { Milli } from "@moq/clock";
+import { Group, Error as NetError, Time, Track } from "@moq/net";
 import { Consumer, Producer } from "./index.ts";
 
 const bytes = (...values: number[]) => new Uint8Array(values);
 
 // Walking a finished track's groups inspects a complete timeline, so request a replay window
 // instead of the transport's live-edge default, which skips every superseded group.
-const REPLAY_LATENCY = Time.Milli(30_000);
+const REPLAY_LATENCY = Milli(30_000);
 
 // Drain every value `next()` yields from a fresh consumer over the (finished) track.
 async function drain(track: Track.Subscriber, compression: boolean): Promise<Uint8Array[]> {
@@ -84,6 +85,20 @@ test("compression shrinks the frame on the wire", async () => {
 	expect(frame?.payload.byteLength).toBeLessThan(payload.byteLength / 4);
 });
 
+// Compression doesn't lift the group limit: a reader inflates the whole value, so one past the budget
+// is refused however small it deflates, and the previous value stays readable.
+test("a compressed value past the group budget is refused", async () => {
+	const track = new Track.Producer("test");
+	const producer = new Producer({ track, compression: "deflate" });
+	producer.update({ value: bytes(1) });
+	expect(() => producer.update({ value: new Uint8Array(Group.MAX_GROUP_CACHE_BYTES + 1) })).toThrow(
+		NetError.FrameTooLarge,
+	);
+	producer.finish();
+
+	expect(await drain(track.subscribe(), true)).toEqual([bytes(1)]);
+});
+
 test("a finished track ends the consumer", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer({ track });
@@ -136,12 +151,27 @@ test("latest lets a newer group preempt an open one", async () => {
 	// A complete newer value arrives while the previous group is still open.
 	const fresh = track.appendGroup();
 	fresh.writeFrame({ payload: bytes(2), timestamp: Time.Timestamp.now() });
-	fresh.close();
+	fresh.finish();
 
 	expect((await consumer.latest())?.value).toEqual(bytes(2));
 
-	stale.close();
+	stale.finish();
+	track.finish();
 	track.close();
+});
+
+// Skipping to the head never widens the reader's range: a capped reader reads the newest value
+// below its cap, and a datagram past every group does not strand it.
+test("latest stays inside the reader's range", async () => {
+	const track = new Track.Producer("test");
+	const producer = new Producer({ track });
+	const subscriber = track.subscribe({ maxDelay: REPLAY_LATENCY }).withRange({ end: { excluded: 2 } });
+	const consumer = new Consumer({ track: subscriber });
+
+	for (let n = 0; n < 4; n++) producer.update({ value: bytes(n) });
+	track.appendDatagram(Time.Timestamp.now(), bytes(9));
+	expect((await consumer.latest())?.value).toEqual(bytes(1));
+	producer.finish();
 });
 
 test("an aborted track surfaces its error instead of spinning", async () => {
@@ -152,7 +182,7 @@ test("an aborted track surfaces its error instead of spinning", async () => {
 	const consumer = new Consumer({ track: track.subscribe() });
 
 	const boom = new Error("subscription aborted");
-	track.close(boom);
+	track.abort(boom);
 
 	await expect(consumer.next()).rejects.toThrow("subscription aborted");
 });

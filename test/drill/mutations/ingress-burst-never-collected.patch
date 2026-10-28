@@ -6,7 +6,7 @@
 diff --git a/rs/moq-shaper/src/lib.rs b/rs/moq-shaper/src/lib.rs
 --- a/rs/moq-shaper/src/lib.rs
 +++ b/rs/moq-shaper/src/lib.rs
-@@ -1021,7 +1021,9 @@
+@@ -1064,7 +1064,9 @@
  	/// Treat a datagram and queue it to leave by `socket` for `dest`.
  	fn push(&mut self, now: Instant, datagram: Vec<u8>, socket: &Arc<UdpSocket>, dest: SocketAddr, tally: &Tally) {
  		#[cfg(any(test, feature = "test"))]
@@ -14,6 +14,6 @@ diff --git a/rs/moq-shaper/src/lib.rs b/rs/moq-shaper/src/lib.rs
 +		if let Some(state) = self.ingress.selected(self.stream)
 +			&& false // MUTATION: forward normally without collecting the armed burst.
 +		{
- 			let Some(draw) = self.draw(now, tally) else {
- 				return;
- 			};
+ 			return self.gate(&state, now, datagram, socket, dest, tally);
+ 		}
+ 		self.forward(now, datagram, socket, dest, tally);

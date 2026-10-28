@@ -11,7 +11,12 @@ do not add speculative production code or choose arbitrary timing thresholds.
 
 The [line's decisions](/quest/m2/route-health/README.md) are settled. Start by
 reproducing a stall that transport failure and ordinary reconnect miss; if
-none exists, bring abandoning the line back to the maintainer. Preserve
+none exists, bring abandoning the line back to the maintainer. A killed relay
+in a same-epoch diamond qualifies until the idle timeout fires
+([#6062](https://github.com/moq-dev/moq/issues/6062)); measure the media it
+loses and how far a standby shortens that, starting from
+[#6183](https://github.com/moq-dev/moq/pull/6183)'s mock-time diamond in
+`rs/moq-net/tests/integration/route_change.rs`. Preserve
 application priorities, automatic health-driven switching and failback, a
 payload-free steady standby, and bounded payload overlap to verify delivery.
 The mechanism is entirely excluded for epochless broadcasts.
@@ -67,5 +72,4 @@ fixtures and retained-state/control-work measurements in existing CI lanes.
 ## Related
 
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - candidate identity, identity-named requests, and transit priority semantics
-- [Live largest location](/quest/m1/largest.md) - shared progress naming with distinct remote/local meaning
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - mode changes must preserve requested positions and demand

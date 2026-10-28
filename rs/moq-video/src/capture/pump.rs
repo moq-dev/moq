@@ -21,7 +21,7 @@ use std::thread::JoinHandle;
 
 use super::channel::FrameChannel;
 use crate::frame::Surface;
-use crate::{Error, Rate};
+use crate::{Error, FrameRate};
 
 /// The outcome of one device read.
 pub(super) enum Read {
@@ -31,7 +31,8 @@ pub(super) enum Read {
 	FrameAt(Surface, moq_net::Timestamp),
 	/// No frame this turn, but the source is still live: the pump re-checks its
 	/// stop flag and calls again. A backend uses this to hold a capture (a
-	/// minimized or mid-resize window) without ending the stream.
+	/// minimized or mid-resize window) without ending the stream. Only X11 holds one.
+	#[cfg(target_os = "linux")]
 	Idle,
 	/// The source stopped producing; the stream ends and the caller reopens.
 	Done,
@@ -41,7 +42,7 @@ pub(super) enum Read {
 pub(super) struct Geometry {
 	pub width: u32,
 	pub height: u32,
-	pub framerate: Option<Rate>,
+	pub framerate: Option<FrameRate>,
 	pub label: String,
 }
 
@@ -98,7 +99,8 @@ where
 				match read(&mut source) {
 					Ok(Read::Frame(frame)) => chan.push(frame),
 					Ok(Read::FrameAt(frame, timestamp)) => chan.push_native(frame, timestamp),
-					Ok(Read::Idle) => {}     // held: re-check the stop flag, then read again
+					#[cfg(target_os = "linux")]
+					Ok(Read::Idle) => {} // held: re-check the stop flag, then read again
 					Ok(Read::Done) => break, // device stopped producing frames
 					Err(err) => {
 						chan.fail(err);

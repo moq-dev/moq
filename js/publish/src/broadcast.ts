@@ -1,15 +1,23 @@
+import { Milli } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, Signal } from "@moq/signals";
+import { rotateVideoDimensions } from "@moq/video";
 import { CatalogProducer } from "./catalog";
 import { errors } from "./internal";
-import { Baseline } from "./jitter";
+import { Order } from "./order";
 import { type Kind, Rendition } from "./rendition";
 
-// Signals the broadcast reads. Whoever owns the backing Signal (the element, or another component
-// whose output is wired in, e.g. a Video.Capture's `display`) does the writing.
+// The refresh ratio video tracks advertise: a joiner forces a keyframe once a group's deltas
+// outweigh twice its keyframe. Matches moq-video's capture `REFRESH`; see it for the measurements.
+const VIDEO_REFRESH = 2;
+
+/**
+ * Signals the broadcast reads. Whoever owns the backing Signal (the element, or another component
+ * whose output is wired in, e.g. a Video.Capture's `display`) does the writing.
+ */
 export type BroadcastInput = {
 	// The origin to publish into. Independent of any connection: whichever sessions serve the
 	// origin announce the broadcast, and it survives their reconnects.
@@ -22,17 +30,22 @@ export type BroadcastInput = {
 	// see or subscribe to it. The flip rather than a gate on creating it: tracks can be
 	// populated while this is false, then announced once ready. The catalog is served from the
 	// first announce, so its first snapshot is the one current at announce time.
+	// Turning it off unannounces the broadcast.
 	announce: Getter<boolean>;
 
 	// The broadcast name.
 	name: Getter<Moq.Path.Valid>;
 
-	// Catalog video-section display size, shared by all video renditions. Usually wired from a
-	// Video.Capture's `display` output. Omitted from the catalog when undefined.
+	// The captured picture size, shared by all video renditions. Usually wired from a
+	// Video.Capture's `display` output. The catalog display swaps it for a quarter-turn `rotation`,
+	// since it is the size to render at. Omitted from the catalog when undefined.
 	display: Getter<{ width: number; height: number } | undefined>;
 
 	// Whether the video should be flipped horizontally on playback. Catalog video-section metadata.
 	flip: Getter<boolean>;
+
+	// Clockwise video rotation in degrees. Catalog video-section metadata.
+	rotation: Getter<number>;
 
 	/**
 	 * How long relays keep a non-latest group of this broadcast's media tracks fetchable, in
@@ -44,7 +57,7 @@ export type BroadcastInput = {
 	 * shortens how far back a fetch can reach. A track's retention is fixed when it is created,
 	 * so changing this publishes a new network broadcast.
 	 */
-	maxAge: Getter<Moq.Time.Milli | undefined>;
+	maxAge: Getter<Milli | undefined>;
 };
 
 /**
@@ -61,26 +74,33 @@ export class Broadcast {
 	/** The DEFLATE-compressed catalog track, served alongside {@link CATALOG_TRACK} with identical content. */
 	static readonly CATALOG_TRACK_COMPRESSED = Catalog.TRACK_COMPRESSED;
 
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<BroadcastInput>;
 
-	// The catalog, editable at any time regardless of whether anyone is subscribed. The base
-	// `video`/`audio` sections are folded from the registered renditions; an application adds its own
-	// root sections (e.g. `scte35`) by locking it too.
+	/**
+	 * The catalog, editable at any time regardless of whether anyone is subscribed. The base
+	 * `video`/`audio` sections are folded from the registered renditions; an application adds its own
+	 * root sections (e.g. `scte35`) by locking it too.
+	 */
 	readonly catalog = new CatalogProducer();
 
-	// The underlying network broadcast, recreated when the name, enabled state, or maxAge changes,
-	// and is `undefined` in between. It lives in the origin rather than any session, so it spans
-	// reconnects. Exposed so an application can serve its own tracks alongside the built-in
-	// catalog/audio/video, e.g. `net.createTrack("meta.json")` plus a matching `catalog` section.
-	// Names under a rendition's ID (`video/1`) are reserved for that rendition's replacement tracks.
-	// Reacquire it via an effect, since a rename swaps in a fresh producer.
-	readonly net = new Signal<Moq.Broadcast.Producer | undefined>(undefined);
+	readonly #net = new Signal<Moq.Broadcast.Producer | undefined>(undefined);
 
 	/**
-	 * @internal The recent minimum flush lateness across every rendition, which each encoder
-	 * measures its catalog `delay` against. Per broadcast, so a swapped one starts fresh.
+	 * The underlying network broadcast, recreated when the name, enabled state, or maxAge changes,
+	 * and is `undefined` in between. It lives in the origin rather than any session, so it spans
+	 * reconnects. Exposed so an application can serve its own tracks alongside the built-in
+	 * catalog/audio/video, e.g. `net.createTrack("meta.json")` plus a matching `catalog` section.
+	 * Names under a rendition's ID (`video/1`) are reserved for that rendition's replacement tracks.
+	 * Reacquire it via an effect, since a rename swaps in a fresh producer.
 	 */
-	readonly baseline = new Baseline();
+	readonly net: Getter<Moq.Broadcast.Producer | undefined> = this.#net;
+
+	/**
+	 * @internal The highest timestamp each rendition has written, which each encoder measures its
+	 * catalog `delay` against. Per broadcast, so a swapped one starts fresh.
+	 */
+	readonly order = new Order();
 
 	// The registered renditions keyed by full track name. A plain object so deep-equality detects a
 	// key add/remove; the Rendition values compare by identity, which is stable.
@@ -119,6 +139,7 @@ export class Broadcast {
 			name: getter(props?.name ?? Moq.Path.empty()),
 			display: getter(props?.display),
 			flip: getter(props?.flip ?? false),
+			rotation: getter(props?.rotation ?? 0),
 			maxAge: getter(props?.maxAge),
 		};
 
@@ -126,7 +147,12 @@ export class Broadcast {
 		this.#signals.run(this.#run.bind(this));
 	}
 
-	/** Register a video rendition under a full track name (e.g. `"video/hd"`). Throws if the name is taken. */
+	/**
+	 * Register a video rendition under a full track name (e.g. `"video/hd"`). Throws if the name is taken.
+	 *
+	 * Its track advertises a refresh ratio, so its producer opens a group with a keyframe whenever
+	 * `track.demand().wanted` passes the largest group, as the video `Encoder` does.
+	 */
 	video(name: string): Rendition<Catalog.VideoConfig> {
 		return this.#register<Catalog.VideoConfig>(name, "video");
 	}
@@ -142,7 +168,7 @@ export class Broadcast {
 	 *
 	 * Set the returned rendition's `config` to a {@link Catalog.TextConfig}, then write one cue per
 	 * group into its `track` with `Hang.Container.Legacy.Producer` (each cue is a keyframe, so it opens
-	 * its own group). See the module docs for the cue framing. Stamp cues with `performance.now()` in
+	 * its own group). See the module docs for the cue framing. Stamp cues with `@moq/clock`'s `now()` in
 	 * microseconds, the broadcast clock the catalog advertises.
 	 */
 	text(name: string): Rendition<Catalog.TextConfig> {
@@ -232,15 +258,18 @@ export class Broadcast {
 
 		const display = effect.get(this.in.display);
 		const flip = effect.get(this.in.flip);
+		const rotation = effect.get(this.in.rotation);
 
 		this.catalog.mutate((catalog) => {
 			if (Object.keys(video).length > 0) {
 				const section: Catalog.Video = { renditions: video };
 				// display is optional in the schema, so it gates only itself, not the whole section.
 				if (display) {
-					section.display = { width: Catalog.u53(display.width), height: Catalog.u53(display.height) };
+					const { width, height } = rotateVideoDimensions(display, rotation);
+					section.display = { width: Catalog.u53(width), height: Catalog.u53(height) };
 				}
 				if (flip) section.flip = true;
+				if (rotation) section.rotation = rotation;
 				catalog.video = section;
 			} else {
 				delete catalog.video;
@@ -314,16 +343,17 @@ export class Broadcast {
 
 		// Creating into the origin outlives any single session: a reconnect re-announces the
 		// broadcast and new subscriptions land on the same producer.
-		const broadcast = origin.createBroadcast(name);
+		const broadcastPublication = origin.createBroadcast(name);
+		const broadcast = broadcastPublication.broadcast;
 		effect.cleanup(() => broadcast.close());
 		// One publisher instance per broadcast, kept across unannounce and announce, so a
 		// restart is a new broadcast rather than a resume into the old one.
 		const epoch = Moq.Epoch.mint();
 
 		// Expose it before serving so an application reacting to `net` can insert its own tracks.
-		this.net.set(broadcast);
+		this.#net.set(broadcast);
 		effect.cleanup(() => {
-			if (this.net.peek() === broadcast) this.net.set(undefined);
+			if (this.#net.peek() === broadcast) this.#net.set(undefined);
 		});
 
 		// Each track lives as long as the broadcast: a track name always means the same content,
@@ -337,6 +367,7 @@ export class Broadcast {
 		const kinds = new Map<string, Kind>();
 		this.#kinds = kinds;
 		effect.cleanup(() => {
+			for (const { track } of tracks.values()) track.finish();
 			for (const { track } of tracks.values()) track.close();
 			if (this.#kinds === kinds) this.#kinds = new Map();
 		});
@@ -344,7 +375,7 @@ export class Broadcast {
 		let serving = false;
 		effect.run((inner) => {
 			if (!inner.get(this.in.announce)) {
-				broadcast.unannounce();
+				broadcastPublication.unannounce();
 				return;
 			}
 
@@ -365,15 +396,18 @@ export class Broadcast {
 					const track = broadcast.createTrack(name, {
 						// Each catalog snapshot is stamped when written.
 						timescale: Moq.Time.Timescale.MILLI,
-						maxAge: Moq.Time.Milli(Number.MAX_SAFE_INTEGER),
+						maxAge: Milli(Number.MAX_SAFE_INTEGER),
 						priority: Catalog.PRIORITY.catalog,
 					});
-					effect.cleanup(() => track.close());
+					effect.cleanup(() => {
+						track.finish();
+						track.close();
+					});
 					this.catalog.serve(track, effect, { compression });
 				}
 			}
 
-			broadcast.announce({ epoch });
+			broadcastPublication.announce({ epoch });
 		});
 
 		// Static tracks fan out to every subscriber. Keep the encoder-facing handle demand-gated
@@ -388,11 +422,12 @@ export class Broadcast {
 
 				let entry = tracks.get(rendition.name);
 				const cause = entry && errors.get(entry.owner)?.peek();
-				if (entry && cause) entry.track.close(cause);
+				if (entry && cause) entry.track.abort(cause);
 				const name = names[rendition.name] ?? rendition.name;
 				if (entry && entry.track.name !== name) {
 					// The catalog moved this rendition to a new name for new media. End the old track
 					// cleanly on its last identity, so its subscribers follow the catalog.
+					entry.track.finish();
 					entry.track.close();
 					entry = undefined;
 				} else if (entry && entry.owner !== rendition && entry.track.closed.peek() !== undefined) {
@@ -403,9 +438,10 @@ export class Broadcast {
 					continue;
 				}
 				if (!entry) {
+					const info = Container.trackInfo({ maxAge, priority: Catalog.PRIORITY[rendition.kind] });
 					const track = broadcast.createTrack(
 						name,
-						Container.trackInfo({ maxAge, priority: Catalog.PRIORITY[rendition.kind] }),
+						rendition.kind === "video" ? { ...info, refresh: VIDEO_REFRESH } : info,
 					);
 					entry = { track, owner: rendition };
 					tracks.set(rendition.name, entry);
@@ -418,16 +454,17 @@ export class Broadcast {
 				if (error) {
 					inner.run((failure) => {
 						const cause = failure.get(error);
-						if (cause) served.close(cause);
+						if (cause) served.abort(cause);
 					});
 				}
 				inner.run((demand) => {
-					demand.set(signal, demand.get(served.demand().used) ? served : undefined);
+					demand.set(signal, demand.get(served.demand().wanted) !== undefined ? served : undefined);
 				});
 			}
 		});
 	}
 
+	/** Stop and release everything this holds. */
 	close() {
 		this.#signals.close();
 	}

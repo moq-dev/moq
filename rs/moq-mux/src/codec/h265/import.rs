@@ -31,9 +31,9 @@ use crate::container::Frame;
 /// catalog rendition fills in lazily once the codec config is known (hvcC via
 /// [`initialize`](Self::initialize) for hvc1, the first SPS for hev1).
 pub struct Import {
-	/// True for the hvc1 shape: the codec config is out-of-band (hvcC), so
-	/// frame payloads are length-prefixed rather than Annex-B and are never scanned.
-	hvc1: bool,
+	/// The NALU length size for the hvc1 shape, whose codec config is out-of-band (hvcC), so
+	/// frame payloads are length-prefixed rather than Annex-B. `None` for Annex-B.
+	length_size: Option<usize>,
 	track: crate::container::Producer<crate::catalog::hang::Container, hang::catalog::VideoConfig>,
 	catalog: crate::codec::video::Catalog,
 	last_sps: Option<Bytes>,
@@ -56,7 +56,7 @@ impl Import {
 		let catalog = crate::codec::video::Catalog::new(hint);
 		let track = reserved.video(track, wire, None)?;
 		let mut import = Self {
-			hvc1: false,
+			length_size: None,
 			track,
 			catalog,
 			last_sps: None,
@@ -90,7 +90,9 @@ impl Import {
 		// Only switch to hvc1 mode once the hvcC actually parses, so a parse failure leaves the
 		// importer in hev1 mode where inline-SPS keyframes still self-initialize.
 		let config = super::config_from_hvcc(hvcc_bytes)?;
-		self.hvc1 = true;
+		// A new record starts a new coded sequence, whose HDR metadata the samples will carry.
+		self.catalog.hdr(&mut self.track, Default::default(), true)?;
+		self.length_size = Some(super::Hvcc::parse(hvcc_bytes)?.length_size);
 		self.apply_config(config)?;
 		Ok(())
 	}
@@ -101,14 +103,25 @@ impl Import {
 		let mut nals = NalIterator::new(&mut scan);
 		while let Some(nal) = nals.next().transpose()? {
 			if is_sps(&nal) {
-				self.configure_from_sps(&nal)?;
+				self.seed_sps(&nal)?;
 			}
 		}
 		if let Some(nal) = nals.flush()?
 			&& is_sps(&nal)
 		{
-			self.configure_from_sps(&nal)?;
+			self.seed_sps(&nal)?;
 		}
+		Ok(())
+	}
+
+	/// Configure from an SPS in a seed buffer. A new one starts a coded sequence, so the last one's
+	/// HDR metadata is dropped before the config publishes; the seed's own SEI arrives with its
+	/// keyframe through the splitter.
+	fn seed_sps(&mut self, sps: &Bytes) -> Result<()> {
+		if self.last_sps.as_ref() != Some(sps) {
+			self.catalog.hdr(&mut self.track, Default::default(), true)?;
+		}
+		self.configure_from_sps(sps)?;
 		Ok(())
 	}
 
@@ -134,8 +147,6 @@ impl Import {
 		self.track.abort(err);
 	}
 
-	/// Publish what the track measured (bitrate, jitter) into the catalog rendition, filling only
-	/// the fields its config didn't supply.
 	/// Cut the current group at `end` without finishing the track.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> Result<()> {
 		self.track.cut(end)?;
@@ -150,15 +161,18 @@ impl Import {
 		Ok(())
 	}
 
+	/// Advertise whether this rendition is being produced, as the catalog's
+	/// [`enabled`](hang::catalog::VideoConfig::enabled): a publisher that stops encoding it
+	/// disables it, so viewers select another rendition rather than wait for frames.
+	pub fn set_enabled(&mut self, enabled: bool) -> Result<()> {
+		self.catalog.set_enabled(&mut self.track, enabled)?;
+		Ok(())
+	}
+
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		self.track.seek(sequence)?;
 		Ok(())
-	}
-
-	/// Record a locally encoded frame's transport handoff for catalog jitter measurement.
-	pub fn flush(&mut self, timestamp: moq_net::Timestamp, now: std::time::Instant) -> crate::Result<()> {
-		self.track.flush(timestamp, now)
 	}
 
 	/// Record a frame's reorder delay (`PTS - DTS`) so the catalog `jitter` reflects the
@@ -175,8 +189,9 @@ impl Import {
 		if self.last_sps.as_ref() == Some(sps_nal) {
 			return Ok(());
 		}
-		let config = config_from_sps(sps_nal)?;
-		self.last_sps = Some(sps_nal.clone());
+		let config = super::config_from_sps(sps_nal, true)?;
+		// Own just the parameter set: the access unit it was found in is far larger.
+		self.last_sps = Some(Bytes::copy_from_slice(sps_nal));
 		self.apply_config(config)?;
 		Ok(())
 	}
@@ -191,14 +206,21 @@ impl Import {
 	/// keyframe's inline SPS and refining the catalog jitter as it goes.
 	fn write_frames(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
 		for frame in frames {
-			// hvc1 config arrives out-of-band via initialize(); hev1 carries SPS inline on
-			// keyframes. Scanning an hvc1 payload would misread a length prefix as a start
-			// code (a 322-byte NAL prefixes as `00 00 01 42`, an SPS NAL header).
-			if !self.hvc1
-				&& frame.keyframe
-				&& let Some(sps) = find_sps(&frame.payload)
-			{
-				self.configure_from_sps(&sps)?;
+			if frame.keyframe {
+				let hdr = crate::codec::color::access_unit(&frame.payload, self.length_size, 2, |h| {
+					nal_unit_type(h) == scuffle_h265::NALUnitType::PrefixSeiNut
+				});
+				// hvc1 config arrives out-of-band via initialize(); hev1 carries the SPS inline.
+				// Scanning an hvc1 payload as Annex-B would misread a length prefix as a start
+				// code (a 322-byte NAL prefixes as `00 00 01 42`, an SPS NAL header).
+				let sps = self.length_size.is_none().then(|| find_sps(&frame.payload)).flatten();
+				// A new SPS starts a coded sequence whose HDR metadata replaces the last one's. It goes
+				// first, so a keyframe that also configures publishes once.
+				let sequence = sps.as_ref().is_some_and(|sps| self.last_sps.as_ref() != Some(sps));
+				self.catalog.hdr(&mut self.track, hdr, sequence)?;
+				if let Some(sps) = sps {
+					self.configure_from_sps(&sps)?;
+				}
 			}
 
 			// A keyframe we still can't configure (no SPS) is undecodable.
@@ -229,39 +251,7 @@ pub fn config(buf: &[u8]) -> Result<hang::catalog::VideoConfig> {
 		return Ok(super::config_from_hvcc(buf)?);
 	}
 	let sps = find_sps(buf).ok_or(Error::NotInitialized)?;
-	config_from_sps(&sps)
-}
-
-/// The config an inline SPS describes (`in_band: true`, the hev1 shape). No `description`: the
-/// parameter sets ride with every keyframe.
-fn config_from_sps(sps_nal: &[u8]) -> Result<hang::catalog::VideoConfig> {
-	let super::Sps { head, full } = super::Sps::parse(sps_nal)?;
-	// The VUI (frame rate, aspect ratio) only comes with scuffle_h265's full parse.
-	let vui_data = full
-		.as_ref()
-		.and_then(|sps| sps.vui_parameters.as_ref())
-		.map(VuiData::new)
-		.unwrap_or_default();
-
-	let mut config = hang::catalog::VideoConfig::new(hang::catalog::H265 {
-		in_band: true, // An inline SPS is the hev1 shape; hvc1 configs come from `config_from_hvcc`.
-		profile_space: head.profile_space,
-		profile_idc: head.profile_idc,
-		profile_compatibility_flags: head.profile_compatibility_flags,
-		tier_flag: head.tier_flag,
-		level_idc: head.level_idc,
-		constraint_flags: head.constraint_flags,
-	});
-	config.coded_width = Some(head.width);
-	config.coded_height = Some(head.height);
-	config.framerate = full
-		.as_ref()
-		.and_then(super::sps_period)
-		.map(|(units, scale)| scale as f64 / units as f64);
-	let display_aspect = vui_data.display_aspect(head.width, head.height);
-	config.display_aspect_width = display_aspect.map(|(width, _)| width);
-	config.display_aspect_height = display_aspect.map(|(_, height)| height);
-	Ok(config)
+	Ok(super::config_from_sps(&sps, true)?)
 }
 
 fn is_sps(nal: &[u8]) -> bool {
@@ -281,86 +271,92 @@ fn find_sps(payload: &[u8]) -> Option<Bytes> {
 	nals.flush().ok().flatten().filter(|nal| is_sps(nal))
 }
 
-#[derive(Default)]
-struct VuiData {
-	sample_aspect_width: Option<u32>,
-	sample_aspect_height: Option<u32>,
-}
-
-impl VuiData {
-	fn new(vui: &scuffle_h265::VuiParameters) -> Self {
-		let (sample_aspect_width, sample_aspect_height) = match &vui.aspect_ratio_info {
-			// Extended SAR has explicit arbitrary values for width and height.
-			scuffle_h265::AspectRatioInfo::ExtendedSar { sar_width, sar_height } => {
-				(Some(*sar_width as u32), Some(*sar_height as u32))
-			}
-			// Predefined map to known values.
-			scuffle_h265::AspectRatioInfo::Predefined(idc) => aspect_ratio_from_idc(*idc)
-				.map(|(w, h)| (Some(w), Some(h)))
-				.unwrap_or((None, None)),
-		};
-
-		VuiData {
-			sample_aspect_width,
-			sample_aspect_height,
-		}
-	}
-
-	/// The aspect a `width` by `height` picture is shown at, or none when its samples are square.
-	fn display_aspect(&self, width: u32, height: u32) -> Option<(u32, u32)> {
-		let (Some(sample_width), Some(sample_height)) = (self.sample_aspect_width, self.sample_aspect_height) else {
-			return None;
-		};
-		if sample_width == 0 || sample_height == 0 || sample_width == sample_height {
-			return None;
-		}
-		let shown_width = u64::from(width) * u64::from(sample_width);
-		let shown_height = u64::from(height) * u64::from(sample_height);
-		let divisor = gcd(shown_width, shown_height);
-		Some((
-			u32::try_from(shown_width / divisor).ok()?,
-			u32::try_from(shown_height / divisor).ok()?,
-		))
-	}
-}
-
-fn gcd(mut a: u64, mut b: u64) -> u64 {
-	while b != 0 {
-		(a, b) = (b, a % b);
-	}
-	a
-}
-
-fn aspect_ratio_from_idc(idc: scuffle_h265::AspectRatioIdc) -> Option<(u32, u32)> {
-	match idc {
-		scuffle_h265::AspectRatioIdc::Unspecified => None,
-		scuffle_h265::AspectRatioIdc::Square => Some((1, 1)),
-		scuffle_h265::AspectRatioIdc::Aspect12_11 => Some((12, 11)),
-		scuffle_h265::AspectRatioIdc::Aspect10_11 => Some((10, 11)),
-		scuffle_h265::AspectRatioIdc::Aspect16_11 => Some((16, 11)),
-		scuffle_h265::AspectRatioIdc::Aspect40_33 => Some((40, 33)),
-		scuffle_h265::AspectRatioIdc::Aspect24_11 => Some((24, 11)),
-		scuffle_h265::AspectRatioIdc::Aspect20_11 => Some((20, 11)),
-		scuffle_h265::AspectRatioIdc::Aspect32_11 => Some((32, 11)),
-		scuffle_h265::AspectRatioIdc::Aspect80_33 => Some((80, 33)),
-		scuffle_h265::AspectRatioIdc::Aspect18_11 => Some((18, 11)),
-		scuffle_h265::AspectRatioIdc::Aspect15_11 => Some((15, 11)),
-		scuffle_h265::AspectRatioIdc::Aspect64_33 => Some((64, 33)),
-		scuffle_h265::AspectRatioIdc::Aspect160_99 => Some((160, 99)),
-		scuffle_h265::AspectRatioIdc::Aspect4_3 => Some((4, 3)),
-		scuffle_h265::AspectRatioIdc::Aspect3_2 => Some((3, 2)),
-		scuffle_h265::AspectRatioIdc::Aspect2_1 => Some((2, 1)),
-		scuffle_h265::AspectRatioIdc::ExtendedSar => None,
-		_ => None, // Reserved
-	}
-}
-
 #[cfg(test)]
 mod tests {
 	use bytes::BytesMut;
 
 	use super::*;
 	use crate::codec::h265::{Split, fixtures};
+
+	/// Seeding an Annex-B importer with a new SPS starts a new coded sequence, dropping the last
+	/// one's HDR metadata before the new config publishes.
+	#[tokio::test(start_paused = true)]
+	async fn a_new_seed_sps_drops_stale_hdr_metadata() {
+		let annexb = |nals: &[&[u8]]| {
+			let mut buf = BytesMut::new();
+			for nal in nals {
+				buf.extend_from_slice(&[0, 0, 0, 1]);
+				buf.extend_from_slice(nal);
+			}
+			buf
+		};
+		let (track, catalog) = setup("video");
+		let mut import = Import::new(track, catalog.reserve(), Default::default()).unwrap();
+		let mut split = Split::new();
+		let pts = moq_net::Timestamp::from_micros(0).unwrap();
+		let idr: &[u8] = &[0x26, 0x01, 0x80, 0xaa]; // IdrWRadl (19)
+		let au = annexb(&[
+			fixtures::VPS,
+			fixtures::SPS_HDR10,
+			fixtures::PPS,
+			fixtures::SEI_CONTENT_LIGHT,
+			fixtures::SEI_MASTERING,
+			idr,
+		]);
+		let mut frames = split.decode(&au, pts).unwrap();
+		frames.extend(split.flush(pts).unwrap());
+		import.decode(frames).unwrap();
+		let color = |name: &str| catalog.snapshot().video.renditions[name].color.clone();
+		assert!(color("video").unwrap().mastering.is_some());
+
+		// An SPS that signals no colour: nothing is left once the stale metadata goes. It is also a
+		// new profile and level, so it publishes a new track.
+		import
+			.initialize(&annexb(&[fixtures::VPS, fixtures::SPS, fixtures::PPS]))
+			.unwrap();
+		assert_eq!(import.name(), "video/1");
+		assert_eq!(color("video/1"), None);
+	}
+
+	/// An HDR10 keyframe publishes its VUI colour and the static HDR metadata its SEI carries.
+	#[tokio::test(start_paused = true)]
+	async fn hev1_keyframe_publishes_hdr10_color() {
+		let idr: &[u8] = &[0x26, 0x01, 0x80, 0xaa]; // IdrWRadl (19)
+		let mut annexb = BytesMut::new();
+		for nal in [
+			fixtures::VPS,
+			fixtures::SPS_HDR10,
+			fixtures::PPS,
+			fixtures::SEI_CONTENT_LIGHT,
+			fixtures::SEI_MASTERING,
+			idr,
+		] {
+			annexb.extend_from_slice(&[0, 0, 0, 1]);
+			annexb.extend_from_slice(nal);
+		}
+
+		let mut split = Split::new();
+		let (track, catalog) = setup("video");
+		let mut import = Import::new(track, catalog.reserve(), Default::default()).unwrap();
+		let pts = moq_net::Timestamp::from_micros(0).unwrap();
+		let mut frames = split.decode(&annexb, pts).expect("split keyframe");
+		frames.extend(split.flush(pts).expect("flush keyframe"));
+		import.decode(frames).expect("decode keyframe");
+
+		let color = catalog.snapshot().video.renditions["video"]
+			.color
+			.clone()
+			.expect("colour");
+		assert_eq!(
+			(color.primaries, color.transfer, color.matrix, color.range),
+			(Some(9), Some(16), Some(9), Some(hang::catalog::Range::Limited))
+		);
+		let hdr = crate::codec::color::test::hdr10();
+		assert_eq!(
+			(color.mastering, color.content_light),
+			(hdr.mastering, hdr.content_light)
+		);
+	}
 
 	fn setup(name: &str) -> (moq_net::track::Producer, crate::catalog::Producer) {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -382,6 +378,14 @@ mod tests {
 		let mut ceiling = vec![0, 0, 0, 1];
 		ceiling.extend_from_slice(fixtures::SPS);
 		assert_eq!(config(&ceiling).unwrap().framerate, None);
+	}
+
+	/// The SPS's reorder depth at its highest sub-layer becomes the catalog's declaration.
+	#[test]
+	fn config_declares_the_sps_reorder_depth() {
+		let mut pyramid = vec![0, 0, 0, 1];
+		pyramid.extend_from_slice(fixtures::SPS_PYRAMID);
+		assert_eq!(config(&pyramid).unwrap().reorder, Some(2));
 	}
 
 	/// Square samples carry no display aspect, so the picture is shown at its own size.
@@ -408,6 +412,23 @@ mod tests {
 			(config.display_aspect_width, config.display_aspect_height),
 			(Some(16), Some(9))
 		);
+	}
+
+	#[test]
+	fn hvcc_resolves_display_aspect() {
+		for (sps, expected) in [
+			(fixtures::SPS_NVENC, (None, None)),
+			(fixtures::SPS_ANAMORPHIC, (Some(16), Some(9))),
+		] {
+			let hvcc = super::super::build_hvcc(
+				&[Bytes::from_static(fixtures::VPS)],
+				&[Bytes::from_static(sps)],
+				&[Bytes::from_static(fixtures::PPS)],
+			)
+			.unwrap();
+			let config = config(&hvcc).unwrap();
+			assert_eq!((config.display_aspect_width, config.display_aspect_height), expected);
+		}
 	}
 
 	/// An hvcC initializer resolves a config with the hvcC stored as `description`.

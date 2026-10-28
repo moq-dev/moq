@@ -41,7 +41,7 @@ pub(super) struct State {
 	flow: Option<u64>,
 	bytes: u64,
 	held: Vec<Held>,
-	cancelled: bool,
+	pub(super) cancelled: bool,
 	pub(super) finished: bool,
 	done: Option<oneshot::Sender<()>>,
 }
@@ -54,16 +54,10 @@ impl State {
 	}
 
 	pub(super) fn hold(&mut self, rate: &Rate, packet: Held) -> Option<Released> {
-		if self.cancelled {
-			return Some(Released {
-				packets: vec![packet],
-				done: None,
-			});
-		}
 		self.bytes += packet.datagram.len() as u64;
 		self.held.push(packet);
-		// Loss has already acted. Even an initially full bucket cannot fit
-		// these surviving bytes, independent of how ingress was scheduled.
+		// Even an initially full bucket cannot fit these bytes, independent of
+		// how ingress was scheduled.
 		if rate.cost(self.bytes) <= rate.cost(rate.burst) + rate.queue {
 			return None;
 		}

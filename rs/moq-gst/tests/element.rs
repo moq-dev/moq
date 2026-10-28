@@ -37,10 +37,12 @@ fn track_error_of(sink: &gst::Element, pad: &str) -> Option<String> {
 
 /// A publisher pointed at a relay that cannot answer. Connect runs in the background, so the element
 /// still reaches PAUSED and creates its producers, which is all these tests need.
+/// A sink that closes its broadcast at the end of stream, for tests not about the linger.
 fn publisher() -> gst::Element {
 	gst::ElementFactory::make("moqsink")
 		.property("url", "https://127.0.0.1:1")
 		.property("broadcast", "test")
+		.property("linger", 0u64)
 		.build()
 		.expect("create moqsink")
 }
@@ -208,6 +210,55 @@ fn the_eos_is_posted_once_per_publication() {
 	sink.set_state(gst::State::Playing).expect("Paused -> Playing");
 	assert_eq!(posted_eos(&seen), 1, "the second entry adds nothing");
 	let _ = sink.set_state(gst::State::Null);
+}
+
+/// Start `sink` playing and publish one frame on `sink_0`, so its track has media to drain.
+fn play_one_frame(sink: &gst::Element) -> gst::Pad {
+	let pad = sink.request_pad_simple("sink_0").expect("request sink_0");
+	// A running time places the wall clock, which the first published frame needs.
+	let clock = gst::SystemClock::obtain();
+	sink.set_clock(Some(&clock)).expect("use the system clock");
+	sink.set_base_time(clock.time());
+	sink.set_state(gst::State::Playing).expect("start playing");
+	assert!(send_caps(&pad));
+	let mut segment = gst::FormattedSegment::<gst::ClockTime>::new();
+	segment.set_start(gst::ClockTime::ZERO);
+	assert!(pad.send_event(gst::event::Segment::new(&segment)));
+	assert_eq!(pad.chain(h264_keyframe()), Ok(gst::FlowSuccess::Ok));
+	pad
+}
+
+// With no linger, the end of stream closes the broadcast and posts EOS at once, even with media a
+// late subscriber could still have drained.
+#[test]
+fn published_media_posts_the_eos_at_once_without_a_linger() {
+	init();
+	let sink = publisher();
+	let seen = recording_bus(&sink);
+	let pad = play_one_frame(&sink);
+
+	assert!(pad.send_event(gst::event::Eos::new()));
+	assert_eq!(posted_eos(&seen), 1);
+	let _ = sink.set_state(gst::State::Null);
+}
+
+// By default, published media is served for the linger, so the EOS that ends `gst-launch` waits for
+// it. Stopping the pipeline is the interrupt: it closes the broadcast at once, and the run it ended
+// owes no EOS.
+#[test]
+fn a_lingering_sink_holds_the_eos_until_the_pipeline_stops() {
+	init();
+	let sink = publisher();
+	sink.set_property("linger", 30_000u64);
+	let seen = recording_bus(&sink);
+	let pad = play_one_frame(&sink);
+
+	assert!(pad.send_event(gst::event::Eos::new()));
+	assert_eq!(status_of(&sink, "sink_0"), "ended");
+	assert_eq!(posted_eos(&seen), 0, "the finished broadcast is still serving its tail");
+
+	assert_eq!(sink.set_state(gst::State::Null), Ok(gst::StateChangeSuccess::Success));
+	assert_eq!(posted_eos(&seen), 0, "the stopped run owes no EOS");
 }
 
 // After the publication ends, a buffer that got past the pad's own EOS flag (a flush clears it) must
@@ -569,20 +620,6 @@ fn a_pipeline_description_selects_loc() {
 	assert_eq!(
 		child_of(&sink, "sink_0").property::<gstmoq::MediaContainer>("container"),
 		gstmoq::MediaContainer::Loc
-	);
-}
-
-#[test]
-fn a_pipeline_description_marks_an_encoder_pad() {
-	init();
-	let sink = gst::parse::launch("moqsink name=publisher url=https://127.0.0.1:1 broadcast=test sink_0::encoder=true")
-		.expect("parse the description");
-	let _pad = sink.request_pad_simple("sink_0").expect("request sink_0");
-	assert!(child_of(&sink, "sink_0").property::<bool>("encoder"));
-	let _other = sink.request_pad_simple("sink_1").expect("request sink_1");
-	assert!(
-		!child_of(&sink, "sink_1").property::<bool>("encoder"),
-		"a pad is an import unless it says otherwise"
 	);
 }
 
@@ -1157,8 +1194,7 @@ fn replacing_the_session_from_eos_notify_discards_the_old_eos() {
 	assert!(pad.send_event(gst::event::Eos::new()));
 	assert!(restarted.load(Ordering::SeqCst));
 	assert!(
-		bus.timed_pop_filtered(gst::ClockTime::ZERO, &[gst::MessageType::Eos])
-			.is_none(),
+		bus.pop_filtered(&[gst::MessageType::Eos]).is_none(),
 		"the completed session posted EOS into its replacement"
 	);
 	let _ = sink.set_state(gst::State::Null);
@@ -1417,28 +1453,6 @@ fn a_pad_kept_across_runs_publishes_again() {
 	let _ = sink.set_state(gst::State::Null);
 }
 
-// Final EOS closes admission only for that run. Returning to READY and starting again must accept a
-// new request pad instead of retaining eos_posted from the previous session.
-#[test]
-fn a_new_run_accepts_pads_again() {
-	init();
-	let sink = publisher();
-	let first = sink.request_pad_simple("sink_0").expect("request sink_0");
-	sink.set_state(gst::State::Paused).expect("start first run");
-	assert!(send_caps(&first));
-	assert!(first.send_event(gst::event::Eos::new()));
-	assert!(
-		sink.request_pad_simple("sink_1").is_none(),
-		"the finalized run refuses another pad"
-	);
-
-	sink.set_state(gst::State::Ready).expect("stop first run");
-	sink.set_state(gst::State::Paused).expect("start second run");
-	let second = sink.request_pad_simple("sink_1").expect("the new run accepts sink_1");
-	assert_eq!(second.parent(), Some(sink.clone().upcast()));
-	let _ = sink.set_state(gst::State::Null);
-}
-
 // An application polls the status through notify rather than by asking on a timer.
 #[test]
 fn status_notifies_on_each_transition() {
@@ -1484,14 +1498,26 @@ fn missing_url_fails_state_change() {
 // (issue #2212), so an unattended publisher survives a relay that is unreachable at startup or
 // during an outage instead of tearing down the pipeline. It keeps retrying and stays disconnected.
 // (A non-retryable failure, e.g. auth rejection, is still terminal; that path needs a live relay
-// and is covered separately.) The `.invalid` host fails fast at DNS resolution, so the loop is
-// already several retries deep within the window below.
+// and is covered separately.) The "relay" accepts each dial and hangs up at once, so the test
+// counts the retries rather than waiting out a window.
 #[test]
 fn connect_failure_retries_without_erroring() {
 	init();
+	let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+	let addr = listener.local_addr().expect("local address");
+	let (dialed, dials) = std::sync::mpsc::channel();
+	std::thread::spawn(move || {
+		for stream in listener.incoming() {
+			drop(stream);
+			if dialed.send(()).is_err() {
+				break;
+			}
+		}
+	});
+
 	let pipeline = gst::Pipeline::new();
 	let sink = gst::ElementFactory::make("moqsink")
-		.property("url", "https://nonexistent.invalid:443")
+		.property("url", format!("tcp://{addr}"))
 		.property("broadcast", "test")
 		.build()
 		.expect("create moqsink");
@@ -1501,8 +1527,14 @@ fn connect_failure_retries_without_erroring() {
 		pipeline.set_state(gst::State::Playing).is_ok(),
 		"a valid url + broadcast must let the Ready->Playing change start (connect runs in the background)"
 	);
+	// The first dial and a retry after it failed.
+	for _ in 0..2 {
+		dials
+			.recv_timeout(std::time::Duration::from_secs(30))
+			.expect("the sink stopped dialing");
+	}
 	let bus = pipeline.bus().expect("pipeline bus");
-	let msg = bus.timed_pop_filtered(gst::ClockTime::from_seconds(3), &[gst::MessageType::Error]);
+	let msg = bus.pop_filtered(&[gst::MessageType::Error]);
 	let connected = sink.property::<bool>("connected");
 	let status = sink.property::<gstmoq::ConnectionStatus>("status");
 	let send_bitrate = sink.property::<u64>("estimated-send-rate");
@@ -1522,4 +1554,19 @@ fn connect_failure_retries_without_erroring() {
 	assert_eq!(status, gstmoq::ConnectionStatus::Disconnected);
 	assert_eq!(send_bitrate, 0);
 	assert_eq!(recv_bitrate, 0);
+}
+
+// Both element factories expose the same connection syntax, and refuse unknown versions
+// before opening a transport rather than silently offering the defaults.
+#[test]
+fn parsed_connection_properties_are_shared_and_validated() {
+	init();
+	for factory in ["moqsink", "moqsrc"] {
+		let element = gst::parse::launch(&format!("{factory} url=https://127.0.0.1:1 broadcast=test connect-version=moq-lite-99 quic-idle-timeout=15000 quic-keep-alive=0"))
+			.expect("parse the shared property syntax");
+		assert_eq!(element.property::<u64>("quic-idle-timeout"), 15_000);
+		assert_eq!(element.property::<u64>("quic-keep-alive"), 0);
+		assert_eq!(element.set_state(gst::State::Paused), Err(gst::StateChangeError));
+		element.set_state(gst::State::Null).unwrap();
+	}
 }

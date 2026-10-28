@@ -7,24 +7,13 @@ name: Release Go FFI
 
 on:
   # The tag coordinator supplies shared default-feature artifacts. Manual
-  # calls and Go PR dry-runs still build their own target subset.
+  # calls and release PR dry-runs still build their own target subset.
   workflow_call:
     inputs:
       reuse-native:
         type: boolean
         default: false
   workflow_dispatch:
-  pull_request:
-    paths:
-      - ".github/workflows/release-go-ffi.yml"
-      - ".github/workflows/release-ffi.yml"
-      - ".github/workflows/release-shared-ffi.yml"
-      - "sh/gh/ffi*"
-      - "sh/gh/release.sh"
-      - "go/ffi/**"
-      - "sh/go/package-ffi.sh"
-      - "sh/go/publish-ffi.sh"
-      - "rs/moq-ffi/build.sh"
 
 permissions:
   contents: read
@@ -72,7 +61,7 @@ jobs:
         run: just gh ffi pattern
 
       - name: Download per-target libs
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: libs-raw
           pattern: ${{ steps.native.outputs.pattern }}
@@ -84,7 +73,7 @@ jobs:
         run: just gh ffi stage
 
       - name: Download bindings
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: go-bindings
           path: bindings-raw
@@ -119,7 +108,7 @@ jobs:
             --output release-out
 
       - name: Upload Go module
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: go-package
           path: release-out/*
@@ -138,7 +127,7 @@ jobs:
       - uses: ./.github/actions/just
 
       - name: Generate moq-bot token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
         id: token
         with:
           client-id: ${{ secrets.APP_CLIENT_ID }}
@@ -149,7 +138,7 @@ jobs:
           permission-contents: write
 
       - name: Download package
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: go-package
           path: go-out
@@ -177,7 +166,7 @@ jobs:
       - uses: ./.github/actions/just
 
       - name: Download package
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: go-package
           path: go-out

@@ -2,9 +2,9 @@
 	"name": "moq",
 	"version": "0.0.0",
 	"devDependencies": {
-		"@babel/parser": "^8.0.6",
+		"@babel/parser": "^8.0.7",
 		"@biomejs/biome": "^2.5.15",
-		"concurrently": "^10.0.5",
+		"concurrently": "^10.0.6",
 		"markdown-extensions": "^2.0.0",
 		"publint": "^0.3.25",
 		"remark-cli": "^12.0.1",
@@ -17,21 +17,34 @@
 		"remark-preset-lint-recommended": "^7.0.1",
 		"remark-stringify": "^11.0.0"
 	},
+	"//overrides": "Drop these when upstream stops pinning vulnerable build dependencies.",
+	"overrides": {
+		"chokidar@3": "^4.0.3",
+		"postcss-selector-parser@6": "^7.1.7",
+		"undici@7": "^7.30.1",
+		"vite@5": "^6.4.5"
+	},
 	"private": true,
 	"scripts": {
 		"check": "bun run --filter='*' check",
+		"postinstall": "bun run --cwd js/libav build",
 		"fix": "bun run --filter='*' fix"
 	},
 	"type": "module",
 	"workspaces": [
+		"bench/browser",
 		"doc",
+		"doc/.vitepress/api",
 		"js/net",
 		"js/p2p",
+		"js/qmux",
 		"js/clock",
 		"js/pattern",
 		"js/auth",
+		"js/e2ee",
 		"js/flate",
 		"js/json",
+		"js/libav",
 		"js/hang",
 		"js/loc",
 		"js/msf",
@@ -40,16 +53,20 @@
 		"js/publish",
 		"js/room",
 		"js/signals",
+		"js/ui",
 		"js/wasm",
 		"demo/boy",
 		"demo/web",
+		"demo/carla/web",
 		"js/moq-boy",
 		"test/audio-quality/clients/js",
 		"test/interop/clients/js",
 		"test/interop/clients/js-native",
 		"test/drain",
+		"test/receive-credit",
 		"test/video",
 		"test/p2p",
+		"test/qmux",
 		"test/wasm"
 	]
 }

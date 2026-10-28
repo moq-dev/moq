@@ -1,7 +1,8 @@
 name: Dependabot
 
 # Enables auto-merge on Dependabot pull requests, so a bump lands on its own
-# once Check and Test pass. The main ruleset requires both, and dependabot.yml
+# once the merge queue's Check and Test pass. The main ruleset requires both
+# (a main PR reports them skipped, so auto-merge enqueues it), and dependabot.yml
 # holds every new version for 7 days, so nothing merges unreviewed by CI or the
 # moment it is published.
 #
@@ -9,12 +10,11 @@ name: Dependabot
 # read-only token and no access to secrets, so a `pull_request` run could
 # neither read APP_PRIVATE_KEY nor enable auto-merge. That trigger is only safe
 # because this job never checks out or executes the pull request's code; it
-# calls one `gh` command against the pull request number.
+# queries the pull request files and enables auto-merge through `gh`.
 #
 # The moq-bot token rather than GITHUB_TOKEN: a merge enabled by GITHUB_TOKEN
-# does not trigger further workflow runs, which would silently skip Cache
-# (the Rust cache warm keyed on Cargo.lock, exactly what the cargo group
-# changes), release-rs and release-js on every auto-merged bump.
+# does not trigger further workflow runs, which would silently skip
+# release-rs and release-js on every auto-merged bump.
 
 permissions: {}
 
@@ -25,6 +25,8 @@ on:
 jobs:
   auto-merge:
     name: Auto-merge
+    permissions:
+      pull-requests: read
     # head.repo guards the `pull_request_target` trigger: Dependabot pushes its
     # branches to this repository, so a pull request from a fork claiming to be
     # Dependabot is not one.
@@ -34,8 +36,20 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # Smoke's flake and npm Playwright pin move together through its updater.
+      # A lock-only Dependabot PR is discovery, not a change safe to auto-enqueue.
+      - name: Require a coupled smoke update
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: >-
+          gh pr view "$PR_URL" --json files --jq
+          'if any(.files[]; .path == "test/smoke/flake.lock") then
+          error("Use the Smoke toolchain update workflow for the coupled lock and Playwright bump")
+          else "Update can auto-merge" end'
+
       - name: Generate moq-bot token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
         id: token
         with:
           client-id: ${{ secrets.APP_CLIENT_ID }}

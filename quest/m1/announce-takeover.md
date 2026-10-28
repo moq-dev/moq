@@ -65,12 +65,24 @@ fallback, including the accepted cold-start reset before this lands.
   On older wires, translate this optimization into ordinary announcements
   and required Restart rather than changing published framing.
 
-Implement against lite-07-wip and reconcile the planned ROUTE/ANNOUNCE split:
-reuse its routing fields and identity model rather than adding a second one.
-Account for TAKEOVER in announcement IDs, compression bases, snapshot counts,
-route filtering, duplicate-advertisement rules and retirement. Update the
-lite draft and existing identity/compatibility docs in the implementation PR.
-The dedicated guide follows separately; it does not replace inline docs.
+Decided 2026-10-27 (maintainer): this no longer waits on
+[Routes and announces](/quest/m1/cluster-routing/routes.md), and needs no
+relay-minted route epochs, only the job's own epoch above: an epochless
+route stays ineligible for an epoch-bound request, as above. Takeover builds on
+what lite-07-wip and `main` already have: stream-local Announce IDs,
+ANNOUNCE_RESTART, Base compression, `Request::prepare`/`publish`, and the
+claim helpers. Its ANNOUNCE_START field layout overlaps with routes (hops
+become a Route ID), so whichever of the two lands second rebases onto the
+other.
+
+Implement against lite-07-wip, and reuse the routing fields and identity
+model of whichever ROUTE/ANNOUNCE shape is on `main` rather than adding a
+second one. Account for TAKEOVER in announcement IDs, compression bases,
+snapshot counts, route filtering, duplicate-advertisement rules and
+retirement. Update the lite draft and existing identity/compatibility docs in
+the implementation PR, and add a takeover section to the
+[identity and recovery guide](/quest/m1/identity-guide.md) if that has
+landed; the guide does not replace inline docs.
 
 Tests with controlled time: first view before/after takeover; absent reader;
 invalid/retired predecessor; same ID after Restart; two workers at one prefix;
@@ -79,6 +91,9 @@ takeover; conflicting epochs; equal clamped prefixes; independently ending
 parent/child; late snapshots; multi-hop and diamond relays; mixed versions;
 and held catalog/media pins. Include the actual players and composer-facing
 event, not only route-table checks. Measure route/readers fanout on both axes.
+Remove the cold-start warm-up reads that discard a claim's first subscription
+(`claimed` in `rs/moq-net-tests/tests/integration/restart.rs` and the
+`rs/moq-net/tests/integration/drained_claim.rs` helper) and assert that first subscription succeeds instead.
 Run `just check`, `just test interop --all`, and `just drafts check`; wire
 regressions and benchmarks into existing CI lanes.
 
@@ -86,14 +101,10 @@ Public API: a `Takeover` event, mirrored across languages and exposed
 bindings, on top of `Request::prepare` and `publish`. Wire: lite-07-wip gains
 ANNOUNCE_TAKEOVER; published versions retain their framing.
 
-## Required
-
-- [Claim answer epochs](/quest/m1/claim-answer-epochs.md) - `Request::prepare` then `publish` answers a claim at the exact path under a fresh epoch, the operation TAKEOVER continues
-- [Routes and announces](/quest/m1/cluster-routing/routes.md) - shared routing layer and per-stream identity
-
 ## Related
 
+- [Claim answer epochs](https://github.com/moq-dev/moq/pull/5678) - `Request::prepare` then `publish` answers a claim at the exact path under a fresh epoch, the operation TAKEOVER continues
+- [Routes and announces](/quest/m1/cluster-routing/routes.md) - the route layer whose ANNOUNCE_START layout overlaps this one's
 - [IETF takeover](/quest/m1/ietf-takeover.md) - negotiated IETF counterpart
-- [Catalog references](/quest/m0/broadcast-epoch/catalog-references.md) - a proven continuation preserves the same pin
 - [Retired requests](https://github.com/moq-dev/moq/pull/5294) - replacements never substitute content into held handles
 - [Identity and recovery guide](/quest/m1/identity-guide.md) - explains takeover alongside restart and legacy behavior

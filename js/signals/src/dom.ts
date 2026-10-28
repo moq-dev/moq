@@ -20,12 +20,10 @@ export type CreateOptions<T extends HTMLElement> = {
 /** Creates an HTML element, applying the given options and appending the given children. */
 export function create<K extends keyof HTMLElementTagNameMap>(
 	tagName: K,
-	options?: CreateOptions<HTMLElementTagNameMap[K] & HTMLElement>,
+	options: CreateOptions<HTMLElementTagNameMap[K] & HTMLElement> = {},
 	...children: (HTMLElement | string)[]
 ): HTMLElementTagNameMap[K] {
 	const element = document.createElement(tagName);
-
-	if (!options) return element;
 
 	const { style, classList, dataset, attributes, ...props } = options;
 
@@ -72,21 +70,25 @@ export function create<K extends keyof HTMLElementTagNameMap>(
 
 /** Renderable content: a node, array of nodes, primitive, or nullish. Matches solid.js's JSX.Element. */
 export type Element = Node | ArrayElement | (string & {}) | number | boolean | null | undefined;
-interface ArrayElement extends Array<Element> {}
+/** A nested list of {@link Element}s. */
+export interface ArrayElement extends Array<Element> {}
 
 /** Renders `element` into `parent`, removing it again when the effect reruns or closes. */
 export function render(effect: Effect, parent: Node, element: Element | ((effect: Effect) => Element)) {
 	const e = typeof element === "function" ? element(effect) : element;
 	if (e === undefined || e === null) return;
+	if (Array.isArray(e)) {
+		for (const child of e) render(effect, parent, child);
+		return;
+	}
+	if (e instanceof DocumentFragment) {
+		render(effect, parent, Array.from(e.childNodes));
+		return;
+	}
 
 	let node: Node;
 	if (e instanceof Node) {
 		node = e;
-	} else if (Array.isArray(e)) {
-		node = document.createDocumentFragment();
-		for (const child of e) {
-			render(effect, node, child);
-		}
 	} else if (typeof e === "number" || typeof e === "boolean" || typeof e === "string") {
 		node = document.createTextNode(e.toString());
 	} else {

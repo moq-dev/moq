@@ -89,7 +89,7 @@ impl Histogram {
 	}
 }
 
-/// The counters themselves, shared by the worker, its sockets, its timer heap,
+/// The counters themselves, shared by the worker, its sockets, its timers,
 /// and its park word.
 #[derive(Default)]
 pub(crate) struct Counters {

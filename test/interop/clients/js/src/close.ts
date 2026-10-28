@@ -1,5 +1,5 @@
 /**
- * The refused session: dial the relay with a token its public rules refuse, and report how the
+ * The refused session: dial the relay with a token that is not a JWT, and report how the
  * WebTransport session ended.
  *
  * The relay accepts the CONNECT, then refuses the token and closes the session with a code and a
@@ -22,7 +22,7 @@ export async function refused(relay: string): Promise<CloseState> {
 	const hash = Uint8Array.from(fingerprint.match(/../g) ?? [], (byte) => Number.parseInt(byte, 16));
 
 	url.protocol = "https:";
-	// Public rules verify nothing, so the relay refuses any token rather than ignoring it.
+	// Not a JWT, so the auth server refuses it as malformed rather than falling through to public.
 	url.searchParams.set("jwt", "refused");
 
 	const transport = new WebTransport(url, { serverCertificateHashes: [{ algorithm: "sha-256", value: hash }] });
@@ -32,21 +32,13 @@ export async function refused(relay: string): Promise<CloseState> {
 	);
 
 	// @moq/net only drives the handshake far enough for the relay to decide; the close it reports
-	// is not what this checks. It takes a supplied transport as already connected.
-	const admitted = transport.ready
+	// is not what this checks. A moq-lite session is established before the relay's verdict, so
+	// the verdict is the close alone, and a relay that admits the token leaves this to time out.
+	transport.ready
 		.then(() => Connection.connect({ url, transport }))
-		.then(
-			(session): CloseState => {
-				session.abort();
-				return { error: "the relay admitted a refused token" };
-			},
-			(err: unknown) => {
-				console.log(`connect failed: ${String(err)}`);
-				return closed;
-			},
-		);
+		.catch((err: unknown) => console.log(`connect failed: ${String(err)}`));
 
-	return Promise.race([closed, admitted]);
+	return closed;
 }
 
 /** A WebSocket refusal reaches the reconnecting handle as a terminal session error. */

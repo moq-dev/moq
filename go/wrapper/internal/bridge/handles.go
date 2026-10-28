@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"fmt"
 	"time"
 
 	ffi "moq.dev/moq-ffi/moq"
@@ -21,6 +22,14 @@ var (
 	GroupConsumer func(any) *ffi.MoqGroupConsumer
 	// TrackDemand wraps a handle as a *moq.TrackDemand.
 	TrackDemand func(*ffi.MoqTrackDemand) any
+	// Allocator returns the handle behind a *moq.Allocator.
+	Allocator func(any) *ffi.MoqAllocator
+	// Reservation wraps a native reservation as *moq.Reservation.
+	Reservation func(*ffi.MoqReservation) any
+	// CatalogProducer returns the handle behind a *media.CatalogProducer.
+	CatalogProducer func(any) *ffi.MoqMediaCatalogProducer
+	// VideoDecodedFrame wraps a decoded frame as a *moq.VideoDecodedFrame.
+	VideoDecodedFrame func(*ffi.MoqVideoDecodedFrame) any
 )
 
 // BroadcastConsumer returns the handle behind a *moq.BroadcastConsumer.
@@ -35,8 +44,31 @@ var Frame func(any) (ffi.MoqFrame, error)
 // Subscription converts a *moq.Subscription to the generated record.
 var Subscription func(any) (*ffi.MoqSubscription, error)
 
-// Duration converts a duration into nonnegative microseconds.
-var Duration func(time.Duration, string) (uint64, error)
+// Duration converts d to microseconds, refusing a negative duration rather
+// than letting it wrap when cast to uint64.
+func Duration(d time.Duration, name string) (uint64, error) {
+	if d < 0 {
+		return 0, fmt.Errorf("negative %s: %v", name, d)
+	}
+	return uint64(d.Microseconds()), nil
+}
+
+// NonNegative refuses a negative duration, which the generated converter
+// would panic on rather than return an error.
+func NonNegative(value *time.Duration, name string) error {
+	if value != nil && *value < 0 {
+		return fmt.Errorf("negative %s: %v", name, *value)
+	}
+	return nil
+}
+
+// Rendition refuses an audio rendition's negative jitter, for the same reason.
+func Rendition(rendition ffi.MoqRendition) error {
+	if audio, ok := rendition.(ffi.MoqRenditionAudio); ok {
+		return NonNegative(audio.Config.Jitter, "jitter")
+	}
+	return nil
+}
 
 // OptionalDuration converts a caller's time to microseconds, preserving absence.
 func OptionalDuration(value *time.Duration, name string) (*uint64, error) {

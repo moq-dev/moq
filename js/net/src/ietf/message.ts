@@ -1,56 +1,35 @@
-import { Reader, Writer } from "../stream.ts";
+import { concat, encodeVarint, Reader, type StreamVersion, Writer } from "../stream.ts";
 import { MalformedAuthToken } from "./token.ts";
+import type { IetfVersion } from "./version.ts";
 
-// Encodes a message with a u16 (16-bit) size prefix as per draft-14. A type `id` is written
-// only once the body fits, so an oversized message leaves nothing on the stream.
+// Encodes a message with a u16 (16-bit) size prefix as per draft-14, after its type `id` if
+// given. The whole message goes out in one write, so an oversized one leaves nothing on the stream.
 export async function encode(writer: Writer, f: (w: Writer) => Promise<void>, id?: number) {
-	let scratch = new Uint8Array();
-
-	const temp = new Writer(
-		new WritableStream<Uint8Array>({
-			write(chunk: Uint8Array) {
-				const needed = scratch.byteLength + chunk.byteLength;
-				if (needed > scratch.buffer.byteLength) {
-					// Resize the buffer to the needed size.
-					const capacity = Math.max(needed, scratch.buffer.byteLength * 2);
-					const newBuffer = new ArrayBuffer(capacity);
-					const newScratch = new Uint8Array(newBuffer, 0, needed);
-
-					// Copy the old data into the new buffer.
-					newScratch.set(scratch);
-
-					// Copy the new chunk into the new buffer.
-					newScratch.set(chunk, scratch.byteLength);
-
-					scratch = newScratch;
-				} else {
-					// Copy chunk data into buffer
-					scratch = new Uint8Array(scratch.buffer, 0, needed);
-					scratch.set(chunk, needed - chunk.byteLength);
-				}
-			},
-		}),
-		writer.version,
-	);
-
-	try {
-		await f(temp);
-	} finally {
-		temp.close();
+	const body = await Writer.collect(writer.version, f);
+	if (body.byteLength > 65535) {
+		throw new Error(`Message too large: ${body.byteLength} bytes (max 65535)`);
 	}
 
-	await temp.closed;
+	const size = new Uint8Array([body.byteLength >> 8, body.byteLength & 0xff]);
+	const parts = id === undefined ? [size, body] : [encodeVarint(id, writer.version), size, body];
+	await writer.write(concat(parts));
+}
 
-	// Check that message fits in u16
-	if (scratch.byteLength > 65535) {
-		throw new Error(`Message too large: ${scratch.byteLength} bytes (max 65535)`);
-	}
+/** A message that encodes everything but its type. */
+export interface Encode {
+	encode(w: Writer, version: IetfVersion): Promise<void>;
+}
 
-	if (id !== undefined) await writer.u53(id);
+// Writes `msg` after the type `id` the caller picked for it, in one write, so a message that
+// fails to encode leaves nothing on the stream.
+export async function write(writer: Writer, id: number, msg: Encode, version: IetfVersion) {
+	await writer.write(await frame(writer.version, id, msg, version));
+}
 
-	// Write u16 size (2 bytes, big-endian)
-	await writer.u16(scratch.byteLength);
-	await writer.write(scratch);
+// The one chunk `write` sends, for a caller that must tell a failed encode from a failed write.
+export async function frame(stream: StreamVersion, id: number, msg: Encode, version: IetfVersion) {
+	const body = await Writer.collect(stream, (w) => msg.encode(w, version));
+	return concat([encodeVarint(id, stream), body]);
 }
 
 // Reads a message with a u16 size prefix.

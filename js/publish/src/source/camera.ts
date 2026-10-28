@@ -4,7 +4,7 @@ import { Device, type DeviceProps } from "./device";
 import { Retry } from "./retry";
 import type { Media } from "./types";
 
-// Signals the camera reads.
+/** Signals the camera reads. */
 export type CameraInput = {
 	// Whether to hold the camera open. Defaults to true. When false the track is stopped and `out.source` clears.
 	enabled: Getter<boolean>;
@@ -18,22 +18,29 @@ export interface CameraProps extends Inputs<CameraInput> {
 	constraints?: Video.Constraints | Signal<Video.Constraints | undefined>;
 }
 
-type CameraOutput = {
+/** Signals the camera derives. */
+export type CameraOutput = {
 	// The live camera track, or undefined while disabled or denied.
 	source: Signal<Media | undefined>;
+	// Clockwise turn a landscape picture needs to appear upright on this screen: 90 or 270 while the
+	// screen is portrait, otherwise 0. Feed it to a Video.Capture, which checks the live frames.
+	orientation: Signal<number>;
 	/** A terminal capture failure, cleared when a new capture attempt begins. */
 	error: Signal<Error | undefined>;
 };
 
 /** Captures video from a camera, tracking the available devices. */
 export class Camera {
-	// The browser picks a low default resolution (often 640x480), so request 720p.
-	// Caller-supplied constraints take precedence per field.
+	/**
+	 * The browser picks a low default resolution (often 640x480), so request 720p.
+	 * Caller-supplied constraints take precedence per field.
+	 */
 	static readonly DEFAULT_CONSTRAINTS: Video.Constraints = {
 		width: { ideal: 1280 },
 		height: { ideal: 720 },
 	};
 
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<CameraInput>;
 
 	/** The available cameras and which one to use. */
@@ -49,8 +56,10 @@ export class Camera {
 
 	readonly #out: CameraOutput = {
 		source: new Signal<Media | undefined>(undefined),
+		orientation: new Signal(0),
 		error: new Signal<Error | undefined>(undefined),
 	};
+	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
 
 	#signals = new Effect();
@@ -64,6 +73,17 @@ export class Camera {
 		this.constraints = Signal.from(props?.constraints);
 
 		this.#signals.run(this.#run.bind(this));
+		this.#signals.run(this.#runOrientation.bind(this));
+	}
+
+	#runOrientation(effect: Effect): void {
+		if (!effect.get(this.in.enabled)) return;
+
+		const update = () => this.#out.orientation.set(screenOrientation());
+		const orientation = globalThis.screen?.orientation;
+		if (orientation) effect.event(orientation, "change", update);
+		effect.event(globalThis, "orientationchange", update);
+		effect.set(this.#out.orientation, screenOrientation(), 0);
 	}
 
 	#run(effect: Effect): void {
@@ -157,4 +177,20 @@ export class Camera {
 		this.#signals.close();
 		this.device.close();
 	}
+}
+
+// Camera sensors deliver landscape pictures, so a portrait screen needs a quarter turn.
+function screenOrientation(): number {
+	const type = globalThis.screen?.orientation?.type;
+	if (type === "portrait-primary") return 90;
+	if (type === "portrait-secondary") return 270;
+	if (type) return 0;
+
+	// Safari historically exposed only Window.orientation. Its portrait values are 0 and 180.
+	const angle = Reflect.get(globalThis, "orientation");
+	if (typeof angle !== "number") return 0;
+	const normalized = ((angle % 360) + 360) % 360;
+	if (normalized === 0) return 90;
+	if (normalized === 180) return 270;
+	return 0;
 }

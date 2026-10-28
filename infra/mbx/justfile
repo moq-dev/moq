@@ -1,0 +1,15 @@
+set fallback
+
+# No Worker config names the account here, so wrangler would ask.
+export CLOUDFLARE_ACCOUNT_ID := "dd618f5dbd5da77b8296f1613c301f5c"
+
+# Create the mbx-moq-dev R2 bucket and apply its lifecycle rules. Run once.
+create:
+    bun install --frozen-lockfile
+    bun wrangler r2 bucket create mbx-moq-dev
+    just lifecycle
+
+# Replace the bucket's lifecycle rules with lifecycle.json.
+lifecycle:
+    bun install --frozen-lockfile
+    bun wrangler r2 bucket lifecycle set mbx-moq-dev --file lifecycle.json --force

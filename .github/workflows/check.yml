@@ -4,39 +4,55 @@ permissions:
   id-token: write
   contents: read
 
+# Main PRs report Check as skipped; the merge queue runs the Linux gate once.
+# Release PRs run the same gate over every package. The maintainer must remove
+# Test from the main ruleset before this change enters the queue.
 on:
   pull_request:
-    # `closed` is here only so merging/closing a PR cancels its in-flight run
-    # via the concurrency group below; the job itself is skipped on close.
-    types: [opened, synchronize, reopened, closed]
+    # `closed` only cancels an in-flight run. `edited` runs the jobs when a main
+    # PR is retargeted to release. Any edit reruns them, since a skipped rerun
+    # would post a passing context over a failed one; on main PRs that is free.
+    types: [opened, synchronize, reopened, edited, closed]
   merge_group:
-    types: [checks_requested]
+    # `destroyed` only cancels the dead group's in-flight run, like `closed`.
+    # GitHub keeps that run queued when the group is rebuilt behind a departed
+    # entry, where it holds the queue runner ahead of the live groups until they
+    # time out. Actions delivers this type although its docs omit it.
+    types: [checks_requested, destroyed]
 
 # Cancel in-flight runs when a new commit lands on the same PR, or when the PR
 # is merged/closed (the close event shares this group and supersedes the build).
-# Each merge group has its own queue ref, separate from the PR ref.
+# Each merge group has its own queue ref, shared by its `destroyed` event and
+# separate from the PR ref.
 concurrency:
   group: check-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  # Test enforces default-feature clippy while compiling its binaries. Check
-  # runs the other lints, docs, and distinct feature/target builds in parallel.
+  # One checkout, dev shell, cache restore, and dispatcher for lints and tests.
   check:
     name: Check
-    # Skip the actual work on close/merge: this run exists only to cancel the
-    # superseded in-flight build via the concurrency group above.
-    if: github.event.action != 'closed'
-    runs-on: ubuntu-24.04-arm
+    # A close/merge or destroyed-group run exists only to cancel the superseded
+    # in-flight build via the concurrency group above.
+    if: github.event.action != 'closed' && github.event.action != 'destroyed' && (github.event_name != 'pull_request' || github.base_ref == 'release')
+    # Leave the variable unset until the local runner is online and verified.
+    runs-on: ${{ github.event_name == 'merge_group' && vars.MOQ_QUEUE_RUNNER || 'ubuntu-24.04-arm' }}
+    # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
+    environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
     # Backstop a hang instead of holding the runner for the 6-hour default.
     timeout-minutes: 60
+    env:
+      # Diff a merge group from main, not from the entry ahead of it: when the
+      # queue requires only a group's head to pass, that run vouches for every
+      # entry it merges. Building one entry at a time, the base is main anyway.
+      CI_BASE: ${{ github.base_ref == 'release' && '--all' || 'origin/main' }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # Full history so `just ci check` can diff against the PR or merge group base.
+          # Full history so `just ci` can diff against main.
           fetch-depth: 0
 
       - uses: ./.github/actions/just
@@ -45,162 +61,42 @@ jobs:
       # failure fails this job; an empty selection keeps its required name green.
       - name: Select work
         id: scope
-        run: just ci-select check "$CI_BASE" >> "$GITHUB_OUTPUT"
-        env:
-          CI_BASE: ${{ github.event.merge_group.base_sha }}
+        run: just ci-select "$CI_BASE" >> "$GITHUB_OUTPUT"
 
-      - name: Free disk space
-        if: steps.scope.outputs.needed == 'true'
-        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
-        with:
-          tool-cache: false
-
-      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
-        if: steps.scope.outputs.needed == 'true'
-        with:
-          determinate: false
-          # Trust the flake's cachix substituter. `nixConfig` in flake.nix is
-          # untrusted by default, so nix logs "ignoring untrusted flake
-          # configuration setting 'extra-substituters'" and rebuilds from
-          # source anything missing from the public nixpkgs cache. That was
-          # costing 678s per job for uniffi-bindgen-go alone, in every job that
-          # enters the dev shell.
-          extra-conf: |
-            extra-substituters = https://kixelated.cachix.org
-            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
+      - uses: ./.github/actions/nix
+        if: steps.scope.outputs.needed == 'true' && runner.environment != 'self-hosted'
       - uses: DeterminateSystems/flake-checker-action@786422608c7bded2bbc9741ad9f91356842bf520 # main
         if: steps.scope.outputs.needed == 'true'
 
-      # cache.yml warms the default-branch store on `main`. Pull requests restore
-      # it; the action refuses to publish from a pull request, and Actions would
-      # scope such an entry to the PR's own branch anyway, where no later PR
-      # could read it while it ate the repository's 10 GB budget.
+      # The merge queue writes what it compiles, so the cache follows what lands
+      # on `main` without a second build after it; release pull requests read.
+      # A selection of lints alone compiles no Rust, so it skips the cache.
       - name: Rust cache
-        if: steps.scope.outputs.needed == 'true'
+        if: steps.scope.outputs.rust == 'true'
         uses: ./.github/actions/rust-cache
+        with:
+          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
 
-      # The same recipe a developer runs locally. It diffs against
-      # the merge group base SHA (or origin/$GITHUB_BASE_REF for a PR) and touches
-      # only the changed packages plus their dependents, so a one-crate PR compiles one crate and a
-      # quest-only PR runs only the lints. The pre-setup query and execution use
-      # the same impact map in sh/dispatch.sh; a Test job with no work ends after
-      # the query while Check keeps its selected repository-wide lints.
-      #
-      # MOQ_STRICT turns every "tool missing, skipping" guard into an error.
-      # Locally an absent formatter means less gets checked; here it would mean
-      # a green run that checked nothing, which is the failure mode worth
-      # spending a preflight on.
+      # The pre-setup query and execution use the same impact map. A
+      # self-hosted runner keeps target/, so drop the previous job's build
+      # timings first.
       - name: Check
         if: steps.scope.outputs.needed == 'true'
-        run: nix develop --command just ci check "$CI_BASE"
-        env:
-          CI_BASE: ${{ github.event.merge_group.base_sha }}
-          MOQ_STRICT: 1
+        run: |
+          rm -rf target/cargo-timings
+          if [[ "$GITHUB_EVENT_NAME" == merge_group ]]; then
+            export NEXTEST_TEST_THREADS=24
+          fi
+          nix develop --command just ci "$CI_BASE"
 
-  test:
-    name: Test
-    if: github.event.action != 'closed'
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 60
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Cargo's per-crate timings for the Rust test builds, so a slow crate
+      # shows without rebuilding. The job summary has the per-module times.
+      - name: Upload build timings
+        if: ${{ !cancelled() && steps.scope.outputs.rust == 'true' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          persist-credentials: false
-          # Full history so `just ci test` can diff against the PR or merge group base.
-          fetch-depth: 0
-
-      - uses: ./.github/actions/just
-
-      # The dispatcher owns scope, including repository-wide lints. A query
-      # failure fails this job; an empty selection keeps its required name green.
-      - name: Select work
-        id: scope
-        run: just ci-select test "$CI_BASE" >> "$GITHUB_OUTPUT"
-        env:
-          CI_BASE: ${{ github.event.merge_group.base_sha }}
-
-      - name: Free disk space
-        if: steps.scope.outputs.needed == 'true'
-        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
-        with:
-          tool-cache: false
-
-      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
-        if: steps.scope.outputs.needed == 'true'
-        with:
-          determinate: false
-          # Trust the flake's cachix substituter. `nixConfig` in flake.nix is
-          # untrusted by default, so nix logs "ignoring untrusted flake
-          # configuration setting 'extra-substituters'" and rebuilds from
-          # source anything missing from the public nixpkgs cache. That was
-          # costing 678s per job for uniffi-bindgen-go alone, in every job that
-          # enters the dev shell.
-          extra-conf: |
-            extra-substituters = https://kixelated.cachix.org
-            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
-
-      # Restore only, same as the `check` job above.
-      - name: Rust cache
-        if: steps.scope.outputs.needed == 'true'
-        uses: ./.github/actions/rust-cache
-
-      # NEXTEST_PROFILE picks up the longer hang timeout in .config/nextest.toml;
-      # without it a runner under load could trip the local one.
-      - name: Test
-        if: steps.scope.outputs.needed == 'true'
-        run: nix develop --command just ci test "$CI_BASE"
-        env:
-          CI_BASE: ${{ github.event.merge_group.base_sha }}
-          MOQ_STRICT: 1
-          NEXTEST_PROFILE: ci
-
-  drill-sensitivity:
-    name: Drill sensitivity
-    if: github.event.action != 'closed'
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 60
-    # Socket timing is still uncontrolled. Keep this advisory until the drills
-    # use the controlled clock, then remove this and require the stable job name.
-    continue-on-error: true
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-
-      - uses: ./.github/actions/just
-
-      - name: Select mutations
-        id: scope
-        run: just test drill-pr select "$CI_BASE" >> "$GITHUB_OUTPUT"
-        env:
-          CI_BASE: ${{ github.event.merge_group.base_sha }}
-
-      - name: Free disk space
-        if: steps.scope.outputs.needed == 'true'
-        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
-        with:
-          tool-cache: false
-
-      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
-        if: steps.scope.outputs.needed == 'true'
-        with:
-          determinate: false
-          extra-conf: |
-            extra-substituters = https://kixelated.cachix.org
-            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
-
-      - name: Rust cache
-        if: steps.scope.outputs.needed == 'true'
-        uses: ./.github/actions/rust-cache
-
-      - name: Prove sensitivity
-        if: steps.scope.outputs.needed == 'true'
-        run: nix develop --command just test drill-pr run "$CI_BASE"
-        env:
-          CI_BASE: ${{ github.event.merge_group.base_sha }}
-          MOQ_SHAPER_SEED: "1"
-          NEXTEST_PROFILE: ci
+          name: cargo-timings
+          path: target/cargo-timings/cargo-timing-*.html
+          if-no-files-found: ignore
+          retention-days: 14

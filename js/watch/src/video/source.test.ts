@@ -60,7 +60,7 @@ describe("Source error signal", () => {
 			});
 
 			await settle();
-			expect(source.out.error.peek()).toBe("unsupported");
+			expect(source.out.error.peek()?.name).toBe("NotSupportedError");
 			expect(source.out.available.peek()).toEqual({});
 
 			source.close();
@@ -359,5 +359,118 @@ describe("Source rendition rank", () => {
 		await settle();
 		expect(source.out.track.peek()).toBe("b");
 		source.close();
+	});
+});
+
+describe("Source rendition preference", () => {
+	// An H.265 source beside its own H.264 compatibility transcode.
+	const renditions = () => ({
+		source: config("hvc1.1.6.L93.B0", { codedWidth: 1280, codedHeight: 720, bitrate: 2_000_000 }),
+		fallback: config("avc1.64001f", { codedWidth: 1280, codedHeight: 720, bitrate: 4_000_000, preference: -1 }),
+	});
+	const decodes = (prefix: string) => async (config: Catalog.VideoConfig) => !config.codec.startsWith(prefix);
+
+	it("selects a supported source over a lower preference with a higher bitrate", async () => {
+		const source = new Source({ broadcast: mockBroadcast(renditions()), supported: async () => true });
+
+		await settle();
+		expect(source.out.track.peek()).toBe("source");
+		source.close();
+	});
+
+	it("selects a supported source over a lower preference that fits the bitrate budget", async () => {
+		const source = new Source({
+			broadcast: mockBroadcast({
+				source: config("hvc1.1.6.L93.B0", { bitrate: 2_000_000 }),
+				fallback: config("avc1.64001f", { bitrate: 1_000_000, preference: -1 }),
+			}),
+			target: { bitrate: 1_500_000 },
+			supported: async () => true,
+		});
+
+		await settle();
+		expect(source.out.track.peek()).toBe("source");
+		source.close();
+	});
+
+	it("selects a lower preference when the source is unsupported", async () => {
+		const source = new Source({ broadcast: mockBroadcast(renditions()), supported: decodes("hvc1") });
+
+		await settle();
+		expect(source.out.track.peek()).toBe("fallback");
+		source.close();
+	});
+
+	it("resolves three tiers to the highest supported one", async () => {
+		const broadcast = mockBroadcast({
+			av1: config("av01.0.08M.08", { codedWidth: 1280, codedHeight: 720, preference: 1 }),
+			...renditions(),
+		});
+		const all = new Source({ broadcast, supported: async () => true });
+		const noAv1 = new Source({ broadcast, supported: decodes("av01") });
+
+		await settle();
+		expect(all.out.track.peek()).toBe("av1");
+		expect(noAv1.out.track.peek()).toBe("source");
+		all.close();
+		noAv1.close();
+	});
+
+	it("lets a manual target select a lower preference", async () => {
+		const source = new Source({
+			broadcast: mockBroadcast(renditions()),
+			target: { name: "fallback" },
+			supported: async () => true,
+		});
+
+		await settle();
+		expect(source.out.track.peek()).toBe("fallback");
+		source.close();
+	});
+
+	it("steps down a transcoded ladder that shares its source's preference", async () => {
+		const source = new Source({
+			broadcast: mockBroadcast({
+				video: config("hvc1.1.6.L93.B0", {
+					codedWidth: 1920,
+					codedHeight: 1080,
+					bitrate: 5_000_000,
+					preference: 1,
+				}),
+				"video/360p": config("avc1.64001e", {
+					codedWidth: 640,
+					codedHeight: 360,
+					bitrate: 600_000,
+					preference: 1,
+				}),
+				other: config("avc1.640028", { codedWidth: 1280, codedHeight: 720, bitrate: 900_000 }),
+			}),
+			target: { bitrate: 1_000_000 },
+			supported: async () => true,
+		});
+
+		await settle();
+		expect(source.out.track.peek()).toBe("video/360p");
+		source.close();
+	});
+});
+
+describe("conflicting rendition metadata", () => {
+	it("keeps the first ranking's best picture when bitrate metadata has no common name", async () => {
+		const source = new Source({
+			broadcast: mockBroadcast({
+				picture: config("avc1.640028", { codedWidth: 640, codedHeight: 360 }),
+				bitrate: config("avc1.640028", { bitrate: 500000 }),
+			}),
+			target: { width: 640, height: 360, bitrate: 1000000 },
+			supported: async () => true,
+		});
+		try {
+			if (!source.pending.peek()) await source.pending.changed();
+			while (source.pending.peek()) await source.pending.changed();
+			expect(source.out.track.peek()).toBe("picture");
+		} finally {
+			source.close();
+		}
 	});
 });

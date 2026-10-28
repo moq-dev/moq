@@ -16,7 +16,7 @@ use anyhow::Context;
 use chrono::prelude::*;
 use moq_net::*;
 
-#[derive(usage::Cli, Clone)]
+#[derive(usage_rs::Cli, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[usage(name = "clock")]
 #[usage(settings)]
@@ -42,7 +42,7 @@ struct Config {
 	role: Command,
 }
 
-#[derive(usage::Subcommands, Clone)]
+#[derive(usage_rs::Subcommands, Clone)]
 enum Command {
 	Publish,
 	Subscribe,
@@ -97,7 +97,7 @@ async fn main() -> anyhow::Result<()> {
 			// instead. This also makes the subscriber reconnect-aware.
 			tracing::info!(broadcast = %config.broadcast, "waiting for broadcast to be online");
 
-			let path: moq_net::Path<'_> = config.broadcast.into();
+			let path = moq_net::Path::new(&config.broadcast)?;
 			let scope =
 				moq_net::Patterns::from(moq_net::Pattern::subtree(path.as_str()).context("invalid broadcast name")?);
 			let consumer = origin
@@ -163,7 +163,7 @@ impl Publisher {
 			let next = next.with_second(0).unwrap().with_nanosecond(0).unwrap();
 
 			let delay = (next - now).to_std().unwrap();
-			tokio::time::sleep(delay).await;
+			moq_clock::sleep(delay).await;
 
 			now = next; // just assume we didn't undersleep
 		}
@@ -183,7 +183,7 @@ impl Publisher {
 			let next = next.with_nanosecond(0).unwrap();
 
 			let delay = (next - now).to_std().unwrap();
-			tokio::time::sleep(delay).await;
+			moq_clock::sleep(delay).await;
 
 			// Get the current time again to check if we overslept
 			let actual = Utc::now();

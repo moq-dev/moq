@@ -21,13 +21,23 @@ pub struct Sleep {
 }
 
 enum Timer {
+	Queue(crate::deadline::Timer),
 	Host(crate::runtime::Timer),
 	#[cfg(feature = "sim")]
 	Sim(crate::sim::Timer),
+	#[cfg(feature = "manual")]
+	Installed(crate::installed::Timer),
 }
 
 /// Complete once the ambient clock reaches `at`; at once if it already has.
 pub fn sleep_until(at: Instant) -> Sleep {
+	if let Some(deadlines) = crate::deadline::entered() {
+		return Sleep {
+			at: Some(at),
+			timer: Timer::Queue(crate::deadline::Timer::new(&deadlines, Some(at))),
+			parked: None,
+		};
+	}
 	#[cfg(feature = "sim")]
 	if let Some(timer) = crate::sim::Timer::new(at) {
 		return Sleep {
@@ -35,6 +45,10 @@ pub fn sleep_until(at: Instant) -> Sleep {
 			timer: Timer::Sim(timer),
 			parked: None,
 		};
+	}
+	#[cfg(feature = "manual")]
+	if let Some(clock) = crate::installed::current() {
+		return Sleep::installed(clock, at);
 	}
 	Sleep {
 		at: Some(at),
@@ -54,6 +68,16 @@ pub fn sleep(duration: Duration) -> Sleep {
 }
 
 impl Sleep {
+	/// A sleep on an installed clock, whichever thread polls it.
+	#[cfg(feature = "manual")]
+	pub(crate) fn installed(clock: crate::Installed, at: Instant) -> Self {
+		Self {
+			at: Some(at),
+			timer: Timer::Installed(crate::installed::Timer::new(clock, at)),
+			parked: None,
+		}
+	}
+
 	/// The instant this completes at, or the clock's last instant for one that never does.
 	pub fn deadline(&self) -> Instant {
 		self.at.unwrap_or(Instant::MAX)
@@ -67,12 +91,17 @@ impl Sleep {
 	/// Re-arm on the same backend, or never fire (`None`).
 	fn set(&mut self, at: Option<Instant>) {
 		self.at = at;
-		// A never-firing sleep parks its timer at the end of time, unpolled, so it arms nothing.
-		let at = at.unwrap_or(Instant::MAX);
+		// A never-firing sleep parks its timer at the end of time, unpolled, so it arms
+		// nothing. A queue's deadline disarms instead, so the queue's owner never parks
+		// on it.
+		let end = at.unwrap_or(Instant::MAX);
 		match &mut self.timer {
-			Timer::Host(timer) => timer.reset(at),
+			Timer::Queue(timer) => timer.set(at),
+			Timer::Host(timer) => timer.reset(end),
 			#[cfg(feature = "sim")]
-			Timer::Sim(timer) => timer.reset(at),
+			Timer::Sim(timer) => timer.reset(end),
+			#[cfg(feature = "manual")]
+			Timer::Installed(timer) => timer.reset(end),
 		}
 		// The reset may come from another task than the one parked here.
 		if let Some(parked) = self.parked.take() {
@@ -91,9 +120,12 @@ impl Future for Sleep {
 		}
 		// Each backend compares against its own clock, not the poller's.
 		match &mut self.timer {
+			Timer::Queue(timer) => timer.poll(cx),
 			Timer::Host(timer) => timer.poll(cx),
 			#[cfg(feature = "sim")]
 			Timer::Sim(timer) => timer.poll(cx),
+			#[cfg(feature = "manual")]
+			Timer::Installed(timer) => timer.poll(cx),
 		}
 	}
 }
@@ -126,7 +158,17 @@ pub fn timeout<F: IntoFuture>(duration: Duration, future: F) -> Timeout<F::IntoF
 	}
 }
 
-/// The future [`timeout`] returns.
+/// Run `future` until `deadline` on the ambient clock.
+///
+/// The future is polled first, so one that is already ready wins even past the deadline.
+pub fn timeout_at<F: IntoFuture>(deadline: Instant, future: F) -> Timeout<F::IntoFuture> {
+	Timeout {
+		future: Box::pin(future.into_future()),
+		sleep: sleep_until(deadline),
+	}
+}
+
+/// The future [`timeout`] and [`timeout_at`] return.
 pub struct Timeout<F> {
 	future: Pin<Box<F>>,
 	sleep: Sleep,
@@ -155,7 +197,7 @@ pub enum MissedTickBehavior {
 	Skip,
 }
 
-/// Ticks on the ambient clock every period, starting at once.
+/// Ticks on the ambient clock every period.
 pub struct Interval {
 	sleep: Sleep,
 	period: Duration,
@@ -168,9 +210,18 @@ pub struct Interval {
 ///
 /// When `period` is zero.
 pub fn interval(period: Duration) -> Interval {
+	interval_at(crate::now(), period)
+}
+
+/// Tick every `period` on the ambient clock, the first tick at `start`.
+///
+/// # Panics
+///
+/// When `period` is zero.
+pub fn interval_at(start: Instant, period: Duration) -> Interval {
 	assert!(!period.is_zero(), "interval period must be non-zero");
 	Interval {
-		sleep: sleep_until(crate::now()),
+		sleep: sleep_until(start),
 		period,
 		missed: MissedTickBehavior::default(),
 	}
@@ -264,7 +315,7 @@ mod tests {
 
 	/// An overflowed sleep keeps the backend it was created on, so resetting it
 	/// outside its runtime re-arms that runtime's timer.
-	#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
+	#[cfg(all(feature = "runtime", any(not(target_arch = "wasm32"), target_os = "wasi")))]
 	#[test]
 	fn an_overflowed_sleep_resets_on_its_own_clock() {
 		let runtime = tokio::runtime::Builder::new_current_thread()

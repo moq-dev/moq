@@ -1,0 +1,44 @@
+name: OSS Scanner
+
+# Builds .oss-scanner/ with Anthropic's own tools/check, so the image the
+# scanner builds from main keeps working. Nightly, because a new native
+# dependency in any in-scope crate or a rule change upstream breaks it without
+# touching these files; on release pull requests only when the files themselves
+# change.
+#
+# Outside Nix, like android.yml: the dev shell's store would compete for the
+# disk the ~20 GB scanner image needs, and the image brings its own toolchain.
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: oss-scanner-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Build
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/just
+
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: uv
+
+      # tools/check clones the repository anonymously, so point it at the pushed
+      # head: the PR's own repository and branch, or this branch on a schedule.
+      - name: tools/check
+        run: just oss-scanner "$REF" "$REPO"
+        env:
+          REF: ${{ github.head_ref || github.ref_name }}
+          REPO: ${{ github.event.pull_request.head.repo.html_url || format('{0}/{1}', github.server_url, github.repository) }}

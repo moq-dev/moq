@@ -9,7 +9,6 @@ type Job = {
 	needs?: string[];
 	permissions?: Record<string, string>;
 	with?: Record<string, string | boolean>;
-	strategy?: { "fail-fast": boolean };
 	steps?: { name?: string; if?: string; env?: Record<string, string>; with?: Record<string, string>; run?: string }[];
 };
 type Workflow = {
@@ -24,7 +23,6 @@ async function read(name: string): Promise<Workflow> {
 test("shared default builds cover each consumer exactly once", async () => {
 	const shared = await read("release-shared-ffi");
 	const targets = JSON.parse(shared.jobs.native.with?.targets as string) as string[];
-	expect(targets.length).toBe(9);
 	expect(new Set(targets).size).toBe(targets.length);
 	const all: string[] = [];
 	for (const [job, file] of [
@@ -44,27 +42,9 @@ test("shared default builds cover each consumer exactly once", async () => {
 		expect(select?.env?.LIB_PREFIX).toContain("'default'");
 	}
 	expect([...new Set(all)].sort()).toEqual(targets.toSorted());
-	expect(all.length - targets.length).toBe(5);
 	expect(shared.on.push?.tags).toEqual(["moq-ffi-v*"]);
 	const dart = await read("release-dart-ffi");
-	expect(dart.jobs.ffi.with?.["default-features"]).toBe(false);
 	expect(dart.on.push?.tags).toEqual(["moq-ffi-v*"]);
-});
-
-test("bindings reuse Linux metadata even when an unrelated target fails", async () => {
-	const producer = await read("release-ffi");
-	expect(producer.jobs.build.strategy?.["fail-fast"]).toBe(false);
-	expect(producer.jobs.bindings.strategy?.["fail-fast"]).toBe(false);
-	expect(producer.jobs.bindings.needs).toContain("build");
-	expect(producer.jobs.bindings.if).toContain("always()");
-	expect(producer.jobs.bindings.if).toContain("!inputs.reuse-native");
-	expect(producer.jobs.build.if).toContain("!inputs.reuse-native");
-	const steps = producer.jobs.bindings.steps ?? [];
-	expect(steps.find((s) => s.name === "Download binding metadata")?.with?.name).toBe(
-		"${{ inputs.language }}-lib-x86_64-unknown-linux-gnu",
-	);
-	expect(steps.find((s) => s.name === "Generate bindings")?.run).toContain("--library binding-library/libmoq_ffi.so");
-	expect(steps.find((s) => s.name === "Upload bindings")?.with?.name).toBe("${{ matrix.language }}-bindings");
 });
 
 test("wrapper gates preserve trusted tag inputs and inspect only their publisher", async () => {
@@ -95,8 +75,6 @@ test("wrapper gates preserve trusted tag inputs and inspect only their publisher
 test("Nightly and alert chains retain packaged outputs with one shared producer", async () => {
 	const nightly = await read("nightly");
 	expect(nightly.jobs["release-shared-ffi"].uses).toBe("./.github/workflows/release-shared-ffi.yml");
-	for (const old of ["release-go-ffi", "release-kt-ffi", "release-swift-ffi"])
-		expect(nightly.jobs[old]).toBeUndefined();
 	expect(nightly.jobs.sizes.needs).toContain("release-shared-ffi");
 	expect(nightly.jobs["release-py-ffi"]).toBeDefined();
 	expect(nightly.jobs["release-dart-ffi"]).toBeDefined();

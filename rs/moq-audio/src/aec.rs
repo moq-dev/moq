@@ -34,13 +34,14 @@
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
-use fixed_resample::{ResamplingChannelConfig, ResamplingCons, ResamplingProd, resampling_channel};
 use sonora::config::{EchoCanceller, GainController2, NoiseSuppression, NoiseSuppressionLevel};
 use sonora::{AudioProcessing, StreamConfig};
 
 use crate::Error;
 use crate::playback::{self, REFERENCE_CHANNELS};
+use crate::ring;
 
 /// Sample rate the echo reference is resampled to on its way out of the mixer.
 ///
@@ -59,10 +60,10 @@ const REFERENCE_RATE: u32 = 48_000;
 /// and a device that buffers less than the queue holds would see its echo
 /// arrive before the reference describing it, which is a reference the model
 /// cannot use at all.
-const REFERENCE_LATENCY: f64 = 0.01;
+const REFERENCE_LATENCY: Duration = Duration::from_millis(10);
 
 /// Ceiling on that queue, bounding what a closed microphone can pin.
-const REFERENCE_CAPACITY: f64 = 0.2;
+const REFERENCE_CAPACITY: Duration = Duration::from_millis(200);
 
 /// Samples per channel in one 10 ms reference frame.
 const REFERENCE_FRAME: usize = REFERENCE_RATE as usize / 100;
@@ -224,7 +225,7 @@ impl Control {
 		// whatever was playing back then. Feeding that in as if it were current
 		// would put the echo model seconds out.
 		if let Some(reference) = &mut state.reference {
-			reference.discard_frames(reference.available_frames());
+			reference.discard(reference.available());
 		}
 
 		drop(state);
@@ -288,7 +289,7 @@ impl Drop for Attachment {
 		let mut state = self.inner.state.lock().unwrap();
 		state.reset();
 		if let Some(reference) = &mut state.reference {
-			reference.discard_frames(reference.available_frames());
+			reference.discard(reference.available());
 		}
 		drop(state);
 		self.inner.attached.store(false, Ordering::Release);
@@ -331,7 +332,7 @@ struct State {
 	capture: StreamConfig,
 	/// Reference from the output mixer, replaced whenever the output stream is
 	/// rebuilt and `None` while none is running.
-	reference: Option<ResamplingCons<f32>>,
+	reference: Option<ring::Consumer>,
 
 	/// Whether the last callback cancelled, so a toggle can drop the buffers
 	/// that no longer line up.
@@ -434,7 +435,7 @@ impl State {
 			// what is playing then rather than on what filled the queue while
 			// nobody was reading it.
 			if let Some(reference) = reference {
-				reference.discard_frames(reference.available_frames());
+				reference.discard(reference.available());
 			}
 			return;
 		}
@@ -451,8 +452,13 @@ impl State {
 		// than the last output callback, so it leads the echo by however much
 		// the output device buffers, however little that is.
 		if let Some(reference) = reference {
-			while reference.available_frames() >= REFERENCE_FRAME {
-				reference.read_interleaved(reference_frame, false);
+			// The mixer's writes are discarded until this side is marked read.
+			// Waiting for a whole frame to read first never ends on a resampled
+			// tap: the resampler's delay leaves the priming silence a few samples
+			// short of one, and nothing is ever written to make up the rest.
+			reference.start();
+			while reference.available() >= REFERENCE_FRAME {
+				reference.read(reference_frame);
 				deinterleave(reference_frame, render_in, REFERENCE_CHANNELS);
 				let _ = process_render(processor, render_in, render_out);
 			}
@@ -556,7 +562,7 @@ pub(crate) struct Reference {
 	state: Arc<Mutex<State>>,
 	/// The producer waiting to be handed to a mixer, refilled by
 	/// [`rebuild`](Self::rebuild).
-	pending: Option<ResamplingProd<f32>>,
+	pending: Option<ring::Producer>,
 }
 
 impl Reference {
@@ -572,12 +578,12 @@ impl Reference {
 
 	/// The producer to hand to a running mixer, or `None` if one is already
 	/// there.
-	pub(crate) fn take(&mut self) -> Option<ResamplingProd<f32>> {
+	pub(crate) fn take(&mut self) -> Option<ring::Producer> {
 		self.pending.take()
 	}
 
 	/// Put back a producer the mixer refused, so the next attach retries.
-	pub(crate) fn restore(&mut self, prod: ResamplingProd<f32>) {
+	pub(crate) fn restore(&mut self, prod: ring::Producer) {
 		self.pending = Some(prod);
 	}
 
@@ -600,30 +606,33 @@ impl Reference {
 
 /// The tap itself: the mixer pushes the device's mix in at `rate` and the
 /// canceller reads it back at [`REFERENCE_RATE`].
-fn channel(rate: u32) -> (ResamplingProd<f32>, ResamplingCons<f32>) {
-	resampling_channel::<f32>(
+fn channel(rate: u32) -> (ring::Producer, ring::Consumer) {
+	ring::channel(
 		REFERENCE_CHANNELS,
 		rate,
 		REFERENCE_RATE,
-		true,
-		ResamplingChannelConfig {
-			latency_seconds: REFERENCE_LATENCY,
-			capacity_seconds: REFERENCE_CAPACITY,
+		ring::Config {
+			latency: REFERENCE_LATENCY,
+			capacity: REFERENCE_CAPACITY,
 			// A near-empty queue is the normal state here, not an underflow to
-			// correct: the microphone callback drains it every pass. Left on,
-			// the default would pad it back up to the target depth with silence
-			// the speaker never played, which is both a fabricated reference and
-			// the standing delay this is shaped to avoid.
-			underflow_autocorrect_percent_threshold: None,
-			..Default::default()
+			// correct: the microphone callback drains it every pass. Padding it
+			// back up to the target depth with silence the speaker never played
+			// would be both a fabricated reference and the standing delay this
+			// is shaped to avoid.
+			pad: false,
+			trim: true,
 		},
 	)
 }
 
 #[cfg(test)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use std::collections::VecDeque;
-	use std::time::Duration;
 
 	use super::*;
 
@@ -644,15 +653,15 @@ mod tests {
 
 	/// Give `canceller` a tap and hand back the end the mixer would push into,
 	/// built exactly as the driver builds it so the two can't drift.
-	fn tap(canceller: &Attachment) -> ResamplingProd<f32> {
+	fn tap(canceller: &Attachment) -> ring::Producer {
 		let (prod, cons) = channel(REFERENCE_RATE);
 		canceller.inner.state.lock().unwrap().reference = Some(cons);
 		prod
 	}
 
 	/// Push one 10 ms stereo frame of `value` into the tap.
-	fn play(prod: &mut ResamplingProd<f32>, value: f32) {
-		prod.push_interleaved(&vec![value; REFERENCE_FRAME * REFERENCE_CHANNELS]);
+	fn play(prod: &mut ring::Producer, value: f32) {
+		prod.push(&vec![value; REFERENCE_FRAME * REFERENCE_CHANNELS]);
 	}
 
 	#[test]
@@ -897,10 +906,30 @@ mod tests {
 			.unwrap()
 			.reference
 			.as_ref()
-			.map_or(0, |r| r.available_frames());
+			.map_or(0, |r| r.available());
 		assert!(
 			queued < REFERENCE_FRAME,
 			"{queued} reference frames were left queued as standing delay"
+		);
+	}
+
+	/// A 44.1 kHz output's tap resamples, which leaves its priming silence short
+	/// of one reference frame; the first pass must still open it to the mixer.
+	#[test]
+	fn a_resampled_tap_starts_flowing() {
+		let canceller = opened(48_000, 1);
+		let (mut prod, cons) = channel(44_100);
+		canceller.inner.state.lock().unwrap().reference = Some(cons);
+		let played = vec![0.5f32; frame(44_100) * REFERENCE_CHANNELS];
+
+		canceller.process(&mut vec![0.0f32; frame(48_000)]);
+		prod.push(&played);
+		canceller.process(&mut vec![0.0f32; frame(48_000)]);
+
+		assert_ne!(
+			prod.push(&played),
+			ring::Push::NotReady,
+			"the mixer's reference is still being discarded"
 		);
 	}
 
@@ -922,7 +951,7 @@ mod tests {
 	/// attenuated and delayed, with nobody talking over it.
 	struct Room {
 		canceller: Attachment,
-		prod: ResamplingProd<f32>,
+		prod: ring::Producer,
 		noise: Noise,
 		/// Frames played, newest last, so the delay can move mid-run.
 		history: VecDeque<Vec<f32>>,
@@ -981,7 +1010,7 @@ mod tests {
 				reference[i * REFERENCE_CHANNELS] = *sample;
 				reference[i * REFERENCE_CHANNELS + 1] = *sample;
 			}
-			self.prod.push_interleaved(&reference);
+			self.prod.push(&reference);
 
 			self.history.push_back(played);
 			if self.history.len() > MAX_DELAY + 1 {
@@ -1083,13 +1112,12 @@ mod tests {
 	/// The half of this that only a real device can prove: what a
 	/// [`playback::Engine`] plays reaches the tap.
 	///
-	/// Ignored by default, like the rest of the device round trips: CI has no
-	/// sound card. Run it on a machine with speakers via
-	/// `cargo test -p moq-audio --features aec -- --ignored`. Whether the
+	/// Ignored by default, like the rest of the device round trips, which
+	/// nightly runs against a null sink with `just rs audio-devices`. Whether the
 	/// microphone then stops hearing the speaker is an acoustic question about
 	/// the room, not something a test can assert.
 	#[tokio::test]
-	#[ignore]
+	#[ignore = "needs an output device; run by just rs audio-devices"]
 	async fn taps_a_real_output_device() {
 		let engine = playback::Engine::open(playback::Config::default())
 			.await
@@ -1119,17 +1147,23 @@ mod tests {
 		let mut energy = 0.0f64;
 		let mut buf = vec![0.0f32; REFERENCE_FRAME * REFERENCE_CHANNELS];
 
-		for _ in 0..20 {
+		// Until the tap hears it rather than for a fixed count: writes are dropped
+		// until the device first reads, and a device can take seconds to start
+		// (PulseAudio's idle null sink renders two seconds ahead).
+		let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+		while energy <= 1.0 && tokio::time::Instant::now() < deadline {
 			let _ = sink.write(&tone).expect("write");
 			tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
 			// Drain the tap the way the microphone callback would, and add up
 			// what the speaker was given.
 			let mut state = canceller.inner.state.lock().unwrap();
-			while let Some(reference) = state.reference.as_mut()
-				&& reference.available_frames() >= REFERENCE_FRAME
-			{
-				reference.read_interleaved(&mut buf, false);
+			let Some(reference) = state.reference.as_mut() else {
+				continue;
+			};
+			reference.start();
+			while reference.available() >= REFERENCE_FRAME {
+				reference.read(&mut buf);
 				energy += buf.iter().map(|s| (*s as f64).powi(2)).sum::<f64>();
 			}
 		}

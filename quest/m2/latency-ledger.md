@@ -33,10 +33,7 @@ probes, which was the right trade to get it running. This quest promotes them.
   so the sum-to-end-to-end identity (with its named `unaccounted`
   remainder) can be added once a spanning clock exists.
 
-## Required
-
-- [Media stats schema](/quest/m2/stats/schema.md) - adds the stats and feedback snapshots this extends
-
 ## Related
 
-- [QoS](/quest/m1/qos/README.md) - relay-side health, the same idea from the other end
+- [QoS](/quest/m2/qos/README.md) - relay-side health, the same idea from the other end
+- [Media stats](/quest/m2/stats/README.md) - the hang stats and `.echo` snapshots these stages join

@@ -36,7 +36,7 @@ impl Drop for Clear {
 /// with no subscriber, caches it as disabled, and this capture then sees nothing. One global
 /// subscriber keeps every thread's interest the same. The thread-local slot is what keeps another
 /// test's WARNs out of the count.
-pub(crate) fn count_drop_warnings(expected_message: &str, f: impl FnOnce()) -> usize {
+pub(super) fn count_drop_warnings(expected_message: &str, f: impl FnOnce()) -> usize {
 	static INSTALL: Once = Once::new();
 	INSTALL.call_once(|| {
 		tracing::subscriber::set_global_default(Warns).expect("no other global subscriber");

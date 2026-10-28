@@ -12,63 +12,27 @@
 
 use std::{ops::Range, task::Poll, time::Duration};
 
-use crate::time::{Deadline, Instant};
-
-/// How long a subscriber waits for a group stream it cannot account for once the
-/// publisher has ended the subscription.
-///
-/// Bounds the wait on IETF, and on moq-lite when the subscription has no max delay to bound
-/// it with. Matches `@moq/net`, so a reader cannot tell which side it is talking to.
-pub(crate) const GRACE: Duration = Duration::from_secs(1);
-
-/// The grace for a subscription with `max_delay`: how long the subscriber was willing to
-/// wait for a late group anyway, or [`GRACE`] without one.
-pub(crate) fn grace(max_delay: Duration) -> Duration {
-	match max_delay.is_zero() {
-		true => GRACE,
-		false => max_delay,
-	}
-}
-
-/// A run of accounted sequences.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Run {
-	groups: Range<u64>,
-	/// When the gap below this run opened, which is when its missing groups became late.
-	since: Instant,
-}
+pub(crate) use crate::ledger::{GRACE, grace};
+use crate::{
+	ledger::Ledger,
+	time::{Deadline, Instant},
+};
 
 /// The data streams a subscription has received, and the groups they account for.
 #[derive(Debug)]
 pub(crate) struct Tail {
-	// Disjoint, sorted, non-adjacent runs of accounted sequences. A gap older than the grace
-	// can no longer be waited for, so it folds into the runs around it, which bounds this by
-	// the gaps opened within the grace rather than every gap in the subscription. A fold is
-	// final: a later, longer grace or a lowered floor cannot reopen it.
-	runs: Vec<Run>,
-	grace: Duration,
+	ledger: Ledger,
 	streams: u64,
 	// Streams whose header arrived and that are still being read.
 	active: u64,
-	/// Fetches waiting on an accounted group, rather than every ledger write.
-	waiting: kio::Lock<Waiting>,
-}
-
-#[derive(Debug, Default)]
-struct Waiting {
-	groups: std::collections::BTreeMap<u64, kio::WaiterList>,
-	sweep: usize,
+	// The publisher ended the subscription, so the track is over even if the session
+	// dies before the tail settles.
+	ended: bool,
 }
 
 impl Default for Tail {
 	fn default() -> Self {
-		Self {
-			runs: Vec::new(),
-			grace: GRACE,
-			streams: 0,
-			active: 0,
-			waiting: Default::default(),
-		}
+		Self::new(GRACE)
 	}
 }
 
@@ -76,14 +40,26 @@ impl Tail {
 	/// A tail that gives up on a missing group after `grace`.
 	pub fn new(grace: Duration) -> Self {
 		Self {
-			grace,
-			..Self::default()
+			ledger: Ledger::new(grace),
+			streams: 0,
+			active: 0,
+			ended: false,
 		}
+	}
+
+	/// Record that the publisher ended the subscription.
+	pub fn end(&mut self) {
+		self.ended = true;
+	}
+
+	/// Whether the publisher ended the subscription.
+	pub fn is_ended(&self) -> bool {
+		self.ended
 	}
 
 	/// Change the grace, for a subscription whose max delay changed.
 	pub fn set_grace(&mut self, grace: Duration) {
-		self.grace = grace;
+		self.ledger.set_grace(grace);
 	}
 
 	/// Record groups as accounted for without a stream: dropped, or sent as a datagram.
@@ -91,136 +67,29 @@ impl Tail {
 		if groups.is_empty() {
 			return;
 		}
-
-		self.wake_groups(groups.clone());
-		// Every run the insert overlaps or touches merges with it into one.
-		let first = self.runs.partition_point(|run| run.groups.end < groups.start);
-		let last = self.runs.partition_point(|run| run.groups.start <= groups.end);
-		let merged = match &self.runs[first..last] {
-			[] => Run {
-				groups,
-				// Splitting a gap leaves both halves as late as it was. A run past every
-				// other one opens a new gap.
-				since: self.runs.get(first).map_or(now, |above| above.since),
-			},
-			[head, .., tail] => Run {
-				groups: head.groups.start.min(groups.start)..tail.groups.end.max(groups.end),
-				since: head.since,
-			},
-			[only] => Run {
-				groups: only.groups.start.min(groups.start)..only.groups.end.max(groups.end),
-				since: only.since,
-			},
-		};
-		self.runs.splice(first..last, [merged]);
+		self.ledger.account(groups, now);
 		self.expire(now);
 	}
 
 	/// Restart the age of every gap reaching into `groups`, which the demand newly asks for.
 	pub fn demand(&mut self, groups: Range<u64>, now: Instant) {
-		if groups.is_empty() {
-			return;
-		}
-		let mut below = 0;
-		for run in &mut self.runs {
-			if below < groups.end && groups.start < run.groups.start {
-				run.since = now;
-			}
-			below = run.groups.end;
-		}
+		self.ledger.demand(groups, now);
 	}
 
 	/// Fold every gap older than the grace into the runs around it.
 	pub fn expire(&mut self, now: Instant) {
-		let grace = self.grace;
-		for (gap, at) in self.folds() {
-			if at <= now {
-				self.wake_groups(gap);
-			}
-		}
-		self.runs.dedup_by(|run, below| {
-			let expired = now.duration_since(run.since) >= grace;
-			if expired {
-				below.groups.end = run.groups.end;
-			}
-			expired
-		});
+		self.ledger.expire(now);
 	}
 
-	/// Whether every group in `groups` is accounted for.
+	/// See [`Ledger::covers`].
 	pub fn covers(&self, groups: Range<u64>) -> bool {
-		// Runs merge on insert, so one run covers the span or none does.
-		groups.is_empty()
-			|| self
-				.runs
-				.get(self.runs.partition_point(|run| run.groups.end <= groups.start))
-				.is_some_and(|run| run.groups.start <= groups.start && groups.end <= run.groups.end)
+		self.ledger.covers(groups)
 	}
 
-	/// When the ledger gives up on a missing `group`: once the grace has passed since a later
-	/// group opened the gap below it. `None` while it is accounted for, or while no later
-	/// group has arrived, since nothing says it is late yet.
+	/// See [`Ledger::folds_at`].
+	#[cfg(test)]
 	pub fn folds_at(&self, group: u64) -> Option<Instant> {
-		let above = self
-			.runs
-			.get(self.runs.partition_point(|run| run.groups.end <= group))?;
-		match above.groups.start <= group {
-			true => None,
-			false => above.since.checked_add(self.grace),
-		}
-	}
-
-	/// Register only for this group's accounting, including an explicit drop.
-	pub fn watch_group(&self, group: u64, waiter: &kio::Waiter) {
-		let mut waiting = self.waiting.lock();
-		if waiting.groups.len() >= waiting.sweep {
-			waiting.groups.retain(|_, list| !list.is_empty());
-			waiting.sweep = (waiting.groups.len() * 2).max(16);
-		}
-		waiting.groups.entry(group).or_default().register(waiter);
-	}
-
-	fn wake_groups(&self, groups: Range<u64>) {
-		let mut woken = Vec::new();
-		{
-			let mut waiting = self.waiting.lock();
-			while let Some(at) = waiting.groups.range(groups.clone()).next().map(|(at, _)| *at) {
-				woken.extend(waiting.groups.remove(&at));
-			}
-		}
-		woken.iter_mut().for_each(kio::WaiterList::wake);
-	}
-
-	/// Gaps whose age bounds a held fetch, including the gap before the first arrival.
-	pub fn folds(&self) -> impl Iterator<Item = (Range<u64>, Instant)> + '_ {
-		let mut below = 0;
-		self.runs.iter().filter_map(move |run| {
-			let gap = below..run.groups.start;
-			below = run.groups.end;
-			if gap.is_empty() {
-				return None;
-			}
-			Some((gap, run.since.checked_add(self.grace)?))
-		})
-	}
-
-	/// The runs of `groups` not accounted for, in order.
-	pub fn gaps(&self, groups: Range<u64>) -> Vec<Range<u64>> {
-		let mut gaps = Vec::new();
-		let mut next = groups.start;
-		for run in &self.runs {
-			if next >= groups.end {
-				break;
-			}
-			if run.groups.start > next {
-				gaps.push(next..run.groups.start.min(groups.end));
-			}
-			next = next.max(run.groups.end);
-		}
-		if next < groups.end {
-			gaps.push(next..groups.end);
-		}
-		gaps
+		self.ledger.folds_at(group, self.ledger.grace())
 	}
 
 	/// Data streams received, whether they finished or were reset.
@@ -296,8 +165,8 @@ pub(crate) struct Settle {
 
 impl Settle {
 	/// Start waiting on `tail`, giving up on missing streams after its grace.
-	pub fn new(runtime: &crate::time::Clock, tail: kio::Consumer<Tail>) -> Self {
-		let grace = tail.read().grace;
+	pub fn new(runtime: &crate::time::Deadlines, tail: kio::Consumer<Tail>) -> Self {
+		let grace = tail.read().ledger.grace();
 		Self {
 			tail,
 			grace: Deadline::after(runtime, grace),
@@ -306,10 +175,13 @@ impl Settle {
 
 	/// Ready once no stream is being read and either `complete` holds or the grace
 	/// expired, or once the subscription is gone.
+	///
+	/// `complete` runs whenever no stream is being read, the grace notwithstanding, so a
+	/// caller recording what it found sees a stream that finished after the grace.
 	pub fn poll(&mut self, waiter: &kio::Waiter, mut complete: impl FnMut(&Tail) -> bool) -> Poll<()> {
 		let expired = self.grace.poll(waiter).is_ready();
 		self.tail
-			.poll(waiter, |tail| match tail.active == 0 && (expired || complete(tail)) {
+			.poll(waiter, |tail| match tail.active == 0 && (complete(tail) || expired) {
 				true => Poll::Ready(()),
 				false => Poll::Pending,
 			})
@@ -321,118 +193,17 @@ impl Settle {
 mod tests {
 	use super::*;
 
-	fn groups(tail: &Tail) -> Vec<Range<u64>> {
-		tail.runs.iter().map(|run| run.groups.clone()).collect()
-	}
-
-	#[test]
-	fn runs_merge_across_gaps() {
-		let now = Instant::now();
-		let mut tail = Tail::default();
-		tail.account(0..1, now);
-		tail.account(2..3, now);
-		assert!(!tail.covers(0..3), "group 1 is missing");
-		assert_eq!(groups(&tail), vec![0..1, 2..3]);
-
-		tail.account(1..2, now);
-		assert!(tail.covers(0..3) && tail.runs.len() == 1, "adjacent runs merge");
-
-		tail.account(5..7, now);
-		tail.account(9..10, now);
-		tail.account(4..9, now);
-		assert_eq!(groups(&tail), vec![0..3, 4..10], "one insert swallows several runs");
-		assert!(tail.covers(4..10));
-		assert!(!tail.covers(2..5));
-		assert!(tail.covers(7..7), "an empty range is always covered");
-	}
-
-	/// A gap older than the grace folds away, so a lossy track keeps only the gaps it can
-	/// still wait for.
-	#[test]
-	fn a_gap_past_the_grace_folds_away() {
-		let start = Instant::now();
-		let mut tail = Tail::new(GRACE);
-		tail.account(0..1, start);
-		tail.account(2..3, start);
-		tail.account(4..5, start + GRACE / 2);
-		assert_eq!(groups(&tail), vec![0..1, 2..3, 4..5]);
-
-		// Splitting the younger gap keeps it as late as it was.
-		tail.account(6..7, start + GRACE / 2);
-		tail.account(8..9, start + GRACE);
-		assert_eq!(
-			groups(&tail),
-			vec![0..3, 4..5, 6..7, 8..9],
-			"only the oldest gap expired"
-		);
-
-		tail.expire(start + GRACE * 2);
-		assert_eq!(groups(&tail), vec![0..9]);
-		assert!(tail.covers(0..9));
-	}
-
-	/// A missing group is given up on a grace after a later one opened its gap, and not
-	/// before anything later has arrived.
-	#[test]
-	fn a_missing_group_folds_a_grace_after_its_gap_opened() {
-		let start = Instant::now();
-		let mut tail = Tail::new(GRACE);
-		tail.account(0..1, start);
-		assert_eq!(tail.folds_at(0), None, "accounted for");
-		assert_eq!(tail.folds_at(1), None, "nothing later arrived");
-
-		tail.account(2..3, start + GRACE / 2);
-		assert_eq!(tail.folds_at(1), Some(start + GRACE / 2 + GRACE));
-		assert_eq!(tail.folds_at(3), None);
-	}
-
-	/// Splitting a gap leaves both halves with its age.
-	#[test]
-	fn a_split_gap_keeps_its_age() {
-		let start = Instant::now();
-		let mut tail = Tail::new(GRACE);
-		tail.account(0..1, start);
-		tail.account(9..10, start);
-		tail.account(5..6, start + GRACE / 2);
-		assert_eq!(groups(&tail), vec![0..1, 5..6, 9..10]);
-
-		tail.expire(start + GRACE);
-		assert_eq!(groups(&tail), vec![0..10], "both halves opened at the start");
-	}
-
-	/// A gap the demand newly asks for is late only from then, however old the run above it.
-	#[test]
-	fn a_lowered_floor_restarts_the_gap_age() {
-		let start = Instant::now();
-		let mut tail = Tail::new(GRACE);
-		tail.account(3..4, start);
-		tail.account(9..10, start);
-
-		let lowered = start + GRACE * 2;
-		tail.demand(1..3, lowered);
-		tail.account(1..2, lowered);
-		assert_eq!(
-			groups(&tail),
-			vec![1..2, 3..10],
-			"only the gap the floor reached restarts"
-		);
-		assert!(!tail.covers(1..4));
-
-		tail.expire(lowered + GRACE);
-		assert!(tail.covers(1..10));
-	}
-
 	/// The grace gives up on streams that never arrived, never on one still being read:
 	/// its group, or the END_OF_TRACK it carries, still belongs to the track.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn the_grace_waits_for_a_stream_being_read() {
-		let runtime = crate::time::Clock::sim();
+		let runtime = crate::time::sim();
 		let tail = kio::Producer::new(Tail::default());
 		let reading = Reading::open(&tail, Some(0), runtime.now());
 		let mut settle = Settle::new(&runtime, tail.consume());
 		let mut settled = std::pin::pin!(kio::wait(|waiter| settle.poll(waiter, |_| false)));
 
-		moq_net_sim::sleep(GRACE * 2).await;
+		moq_clock::sleep(GRACE * 2).await;
 		assert!(
 			futures::poll!(settled.as_mut()).is_pending(),
 			"a stream is still being read"
@@ -442,10 +213,31 @@ mod tests {
 		settled.await;
 	}
 
+	/// A stream that outlives the grace still reaches `complete` once it finishes.
+	#[moq_clock::test]
+	async fn completion_is_judged_after_the_grace() {
+		let runtime = crate::time::sim();
+		let tail = kio::Producer::new(Tail::default());
+		let reading = Reading::open(&tail, Some(0), runtime.now());
+		let mut settle = Settle::new(&runtime, tail.consume());
+		moq_clock::sleep(GRACE * 2).await;
+
+		drop(reading);
+		let mut complete = false;
+		kio::wait(|waiter| {
+			settle.poll(waiter, |tail| {
+				complete = tail.streams() == 1;
+				complete
+			})
+		})
+		.await;
+		assert!(complete);
+	}
+
 	/// A stream parked on another one does not hold the end open.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_parked_stream_does_not_hold_the_end() {
-		let runtime = crate::time::Clock::sim();
+		let runtime = crate::time::sim();
 		let tail = kio::Producer::new(Tail::default());
 		let mut reading = Reading::open(&tail, None, runtime.now());
 		reading.park();

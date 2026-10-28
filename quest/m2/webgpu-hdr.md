@@ -11,8 +11,8 @@ drawn as if it were SDR as today.
 ## Plan
 
 Decided 2026-10-08 in the WebGPU renderer `/quest-plan` interview: SDR and
-wide gamut first in the `@moq/video` WebGPU renderer (`js/video`), HDR here,
-both in m1.
+wide gamut first in the `@moq/video` WebGPU renderer (`js/video`). HDR
+follows here; the catalog colour fields it reads landed in #5846.
 
 Facts (2026-10):
 
@@ -29,7 +29,7 @@ Facts (2026-10):
   has less headroom.
 - `VideoFrame.colorSpace` gives primaries, transfer, matrix, and range
   (Chrome 94, Firefox 130, Safari 16.4). Mastering display and content light
-  levels come from [Catalog colour](/quest/m2/color-catalog.md).
+  levels come from the rendition's catalog `color`.
 
 Settle while building: whether the HDR path gives up zero copy (planes via
 `copyTo` and a custom conversion shader), and how the renderer detects
@@ -40,7 +40,3 @@ Tests: an HDR10 rendition renders extended on Chromium desktop and on Safari
 where extended output is unavailable, and an SDR rendition is unchanged.
 
 Public API: none beyond the renderer. Wire: none.
-
-## Required
-
-- [Catalog colour](/quest/m2/color-catalog.md) - the mastering display and content light levels

@@ -1,7 +1,7 @@
 //! The PR-4 ablation matrix at session level: a full moq-lite session pair on
 //! one worker, publisher to subscriber over loopback QUIC, toggling receive
 //! batching, GRO, and GSO exactly like the raw echo. Each iteration delivers
-//! one group of 32 x 32 KiB frames (1 MiB, matching `echo_noq`'s unit), so
+//! one group of 32 x 32 KiB frames (1 MiB, matching `echo_quic`'s unit), so
 //! the two matrices are directly comparable: the difference is the moq-net
 //! machine and container framing on top of the same wire path.
 //!
@@ -9,11 +9,15 @@
 
 use criterion::{criterion_group, criterion_main};
 
-#[cfg(all(target_os = "linux", feature = "noq"))]
-#[path = "../tests/support.rs"]
+#[cfg(all(target_os = "linux", feature = "quic"))]
+#[path = "../tests/integration/support.rs"]
 mod support;
 
-#[cfg(all(target_os = "linux", feature = "noq"))]
+#[cfg(all(target_os = "linux", feature = "quic"))]
+#[expect(
+	clippy::disallowed_methods,
+	reason = "benchmarks measure themselves on the host clock"
+)]
 mod linux {
 	use std::net::UdpSocket;
 	use std::time::Instant;
@@ -138,15 +142,15 @@ mod linux {
 					.expect("quic accept");
 				let (session, driver) = moq_net::Server::new()
 					.with_publisher(&pub_origin)
-					.accept_lite(
-						std::time::Instant::now(),
-						moq_uring::transport::Session::new(
+					.accept(
+						moq_net::time::Instant::now(),
+						moq_uring::transport::Local::new(moq_uring::transport::Session::new(
 							quic::web::Session::raw(conn),
-							moq_net::transport::Binding::InBand,
-						),
+							moq_net::transport::Address::Setup,
+						)),
 					)
 					.await
-					.expect("accept_lite");
+					.expect("accept");
 				let _ = server_handle.run(driver).await;
 				session.closed().await;
 			});
@@ -157,15 +161,15 @@ mod linux {
 					let conn = quic::client::connect(client_sock, &dial).await.expect("quic connect");
 					let (session, driver) = moq_net::Client::new()
 						.with_subscriber(sub_origin.clone())
-						.connect_lite(
-							std::time::Instant::now(),
-							moq_uring::transport::Session::new(
+						.connect(
+							moq_net::time::Instant::now(),
+							moq_uring::transport::Local::new(moq_uring::transport::Session::new(
 								quic::web::Session::raw(conn),
-								moq_net::transport::Binding::InBand,
-							),
+								moq_net::transport::Address::Setup,
+							)),
 						)
 						.await
-						.expect("connect_lite");
+						.expect("connect");
 					let task_handle = handle.clone();
 					handle.spawn(async move {
 						let _ = task_handle.run(driver).await;
@@ -235,10 +239,10 @@ mod linux {
 	}
 }
 
-#[cfg(all(target_os = "linux", feature = "noq"))]
+#[cfg(all(target_os = "linux", feature = "quic"))]
 use linux::benchmark;
 
-#[cfg(not(all(target_os = "linux", feature = "noq")))]
+#[cfg(not(all(target_os = "linux", feature = "quic")))]
 fn benchmark(_: &mut criterion::Criterion) {}
 
 criterion_group!(benches, benchmark);

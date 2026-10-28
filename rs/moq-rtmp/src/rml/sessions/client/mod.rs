@@ -17,15 +17,16 @@ pub use self::result::ClientSessionResult;
 pub use self::state::ClientState;
 
 use self::outstanding_transaction::{OutstandingTransaction, TransactionPurpose};
-use crate::rml::amf0::Amf0Value;
+use crate::rml::amf0::{Amf0Value, Value, Values};
 use crate::rml::chunk_io::{ChunkDeserializer, ChunkSerializer, Packet};
+use crate::rml::messages::Amf0Message;
 use crate::rml::messages::{RtmpMessage, UserControlEventType};
 use crate::rml::sessions::StreamMetadata;
 use crate::rml::time::RtmpTimestamp;
 use bytes::Bytes;
+use moq_clock::Instant;
 use std::collections::HashMap;
 use std::mem;
-use std::time::SystemTime;
 
 type ClientResult = Result<Vec<ClientSessionResult>, ClientSessionError>;
 
@@ -50,7 +51,7 @@ type ClientResult = Result<Vec<ClientSessionResult>, ClientSessionError>;
 /// Any violation of these points have a high probability of causing RTMP chunk parsing errors
 /// by either the `ClientSession` or the peer.
 pub struct ClientSession {
-	start_time: SystemTime,
+	start_time: Instant,
 	serializer: ChunkSerializer,
 	deserializer: ChunkDeserializer,
 	config: ClientSessionConfig,
@@ -72,7 +73,7 @@ impl ClientSession {
 	/// such as setting the outbound chunk size
 	pub fn new(config: ClientSessionConfig) -> Result<(ClientSession, Vec<ClientSessionResult>), ClientSessionError> {
 		let session = ClientSession {
-			start_time: SystemTime::now(),
+			start_time: Instant::now(),
 			serializer: ChunkSerializer::new(),
 			deserializer: ChunkDeserializer::new(),
 			next_transaction_id: 1,
@@ -117,25 +118,25 @@ impl ClientSession {
 			match self.deserializer.get_next_message(bytes_to_process)? {
 				None => break, // no more messages
 				Some(payload) => {
+					if let Some(amf0) = payload.amf0()? {
+						let mut events = match amf0 {
+							Amf0Message::Command {
+								name,
+								transaction_id,
+								object: _,
+								arguments,
+							} => self.handle_amf0_command(name, transaction_id, arguments)?,
+							Amf0Message::Data(values) => self.handle_amf0_data(values, payload.message_stream_id)?,
+						};
+						results.append(&mut events);
+						bytes_to_process = &[];
+						continue;
+					}
 					let message = payload.to_rtmp_message()?;
 					let mut message_results = match message {
 						RtmpMessage::Acknowledgement { sequence_number } => {
 							self.handle_acknowledgement(sequence_number)?
 						}
-
-						RtmpMessage::Amf0Command {
-							command_name,
-							transaction_id,
-							command_object,
-							additional_arguments,
-						} => self.handle_amf0_command(
-							command_name,
-							transaction_id,
-							command_object,
-							additional_arguments,
-						)?,
-
-						RtmpMessage::Amf0Data { values } => self.handle_amf0_data(values, payload.message_stream_id)?,
 
 						RtmpMessage::AudioData { data } => {
 							self.handle_audio_data(payload.message_stream_id, data, payload.timestamp)?
@@ -560,24 +561,24 @@ impl ClientSession {
 		Ok(vec![ClientSessionResult::RaisedEvent(event)])
 	}
 
-	fn handle_amf0_data(&mut self, data: Vec<Amf0Value>, stream_id: u32) -> ClientResult {
+	fn handle_amf0_data(&mut self, data: Values<'_>, stream_id: u32) -> ClientResult {
 		// Anything that isn't stream metadata is still raised, so the caller can
 		// account for script data it doesn't carry instead of losing it silently.
-		let event = match self.stream_metadata(&data, stream_id) {
+		let event = match self.stream_metadata(data, stream_id) {
 			Some(metadata) => ClientSessionEvent::StreamMetadataReceived { metadata },
-			None => ClientSessionEvent::UnhandleableAmf0Data { values: data },
+			None => ClientSessionEvent::UnhandleableAmf0Data {},
 		};
 
 		Ok(vec![ClientSessionResult::RaisedEvent(event)])
 	}
 
 	/// Parse `onMetaData({...})` sent on the active stream.
-	fn stream_metadata(&self, data: &[Amf0Value], stream_id: u32) -> Option<StreamMetadata> {
+	fn stream_metadata(&self, mut data: Values<'_>, stream_id: u32) -> Option<StreamMetadata> {
 		if self.active_stream_id != Some(stream_id) {
 			return None;
 		}
 
-		let [Amf0Value::Utf8String(name), Amf0Value::Object(properties), ..] = data else {
+		let (Some(Value::Utf8String(name)), Some(Value::Object(properties))) = (data.next(), data.next()) else {
 			return None;
 		};
 		if name != "onMetaData" {
@@ -585,27 +586,19 @@ impl ClientSession {
 		}
 
 		let mut metadata = StreamMetadata::new();
-		metadata.apply_metadata_values(properties.clone());
+		metadata.apply_metadata_values(properties);
 		Some(metadata)
 	}
 
-	fn handle_amf0_command(
-		&mut self,
-		name: String,
-		transaction_id: f64,
-		command_object: Amf0Value,
-		additional_args: Vec<Amf0Value>,
-	) -> ClientResult {
-		match name.as_str() {
-			"_result" => self.handle_amf0_command_success_result(transaction_id, command_object, additional_args),
-			"_error" => self.handle_amf0_command_failed_result(transaction_id, command_object, additional_args),
+	fn handle_amf0_command(&mut self, name: &str, transaction_id: f64, additional_args: Values<'_>) -> ClientResult {
+		match name {
+			"_result" => self.handle_amf0_command_success_result(transaction_id, additional_args),
+			"_error" => self.handle_amf0_command_failed_result(transaction_id, additional_args),
 			"onStatus" => self.handle_on_status_command(additional_args),
 
 			_ => {
 				let event = ClientSessionEvent::UnhandleableAmf0Command {
-					command_name: name,
-					additional_values: additional_args,
-					command_object,
+					command_name: name.to_owned(),
 					transaction_id,
 				};
 
@@ -617,17 +610,12 @@ impl ClientSession {
 	fn handle_amf0_command_failed_result(
 		&mut self,
 		transaction_id: f64,
-		command_object: Amf0Value,
-		mut additional_args: Vec<Amf0Value>,
+		mut additional_args: Values<'_>,
 	) -> ClientResult {
 		let outstanding_transaction = match self.outstanding_transactions.remove(&(transaction_id as u32)) {
 			Some(transaction) => transaction,
 			None => {
-				let event = ClientSessionEvent::UnknownTransactionResultReceived {
-					additional_values: additional_args,
-					command_object,
-					transaction_id,
-				};
+				let event = ClientSessionEvent::UnknownTransactionResultReceived { transaction_id };
 
 				return Ok(vec![ClientSessionResult::RaisedEvent(event)]);
 			}
@@ -636,9 +624,9 @@ impl ClientSession {
 		match outstanding_transaction {
 			OutstandingTransaction::ConnectionRequested { app_name: _ } => {
 				let description = if additional_args.len() > 0 {
-					if let Amf0Value::Object(mut properties) = additional_args.remove(0) {
-						if let Some(Amf0Value::Utf8String(value)) = properties.remove("description") {
-							value
+					if let Value::Object(properties) = additional_args.next().unwrap() {
+						if let Some(Value::Utf8String(value)) = properties.get("description") {
+							value.to_owned()
 						} else {
 							"".to_string()
 						}
@@ -662,17 +650,12 @@ impl ClientSession {
 	fn handle_amf0_command_success_result(
 		&mut self,
 		transaction_id: f64,
-		command_object: Amf0Value,
-		additional_args: Vec<Amf0Value>,
+		mut additional_args: Values<'_>,
 	) -> ClientResult {
 		let outstanding_transaction = match self.outstanding_transactions.remove(&(transaction_id as u32)) {
 			Some(transaction) => transaction,
 			None => {
-				let event = ClientSessionEvent::UnknownTransactionResultReceived {
-					additional_values: additional_args,
-					command_object,
-					transaction_id,
-				};
+				let event = ClientSessionEvent::UnknownTransactionResultReceived { transaction_id };
 
 				return Ok(vec![ClientSessionResult::RaisedEvent(event)]);
 			}
@@ -706,8 +689,8 @@ impl ClientSession {
 					return Err(ClientSessionError::CreateStreamResponseHadNoStreamNumber);
 				}
 
-				let stream_id = match additional_args[0] {
-					Amf0Value::Number(number) => number as u32,
+				let stream_id = match additional_args.next().unwrap() {
+					Value::Number(number) => number as u32,
 					_ => {
 						return Err(ClientSessionError::CreateStreamResponseHadNoStreamNumber);
 					}
@@ -776,20 +759,20 @@ impl ClientSession {
 		}
 	}
 
-	fn handle_on_status_command(&mut self, mut arguments: Vec<Amf0Value>) -> ClientResult {
+	fn handle_on_status_command(&mut self, mut arguments: Values<'_>) -> ClientResult {
 		if arguments.len() < 1 {
 			return Err(ClientSessionError::InvalidOnStatusArguments);
 		}
 
-		let mut properties = match arguments.remove(0) {
-			Amf0Value::Object(properties) => properties,
+		let properties = match arguments.next().unwrap() {
+			Value::Object(properties) => properties,
 			_ => {
 				return Err(ClientSessionError::InvalidOnStatusArguments);
 			}
 		};
 
-		let code = match properties.remove("code") {
-			Some(Amf0Value::Utf8String(code)) => code,
+		let code = match properties.get("code") {
+			Some(Value::Utf8String(code)) => code,
 
 			_ => {
 				return Err(ClientSessionError::InvalidOnStatusArguments);
@@ -889,22 +872,29 @@ impl ClientSession {
 	}
 
 	fn get_epoch(&self) -> RtmpTimestamp {
-		match self.start_time.elapsed() {
-			Ok(duration) => {
-				let milliseconds = (duration.as_secs() * 1000) + (duration.subsec_nanos() as u64 / 1_000_000);
-
-				// Casting to u32 should auto-wrap the value as expected.  If not a stream will probably
-				// break after 49 days but testing shows it should wrap
-				RtmpTimestamp::new(milliseconds as u32)
-			}
-
-			Err(_) => RtmpTimestamp::new(0), // Time went backwards, so just consider time as at epoch
-		}
+		// RTMP timestamps wrap every 2^32 milliseconds.
+		RtmpTimestamp::new(self.start_time.elapsed().as_millis() as u32)
 	}
 
 	fn get_next_transaction_id(&mut self) -> u32 {
 		let transaction_id = self.next_transaction_id;
 		self.next_transaction_id += 1;
 		transaction_id
+	}
+}
+
+#[cfg(test)]
+mod clock_tests {
+	use super::*;
+
+	#[moq_clock::test]
+	async fn session_epoch_uses_the_timer_clock() {
+		let (session, _) = ClientSession::new(ClientSessionConfig::new()).unwrap();
+		moq_clock::sleep(std::time::Duration::from_millis(12_345)).await;
+		assert_eq!(session.get_epoch(), RtmpTimestamp::new(12_345));
+		moq_clock::sim::step_wall(moq_clock::Wall::UNIX_EPOCH);
+		assert_eq!(session.get_epoch(), RtmpTimestamp::new(12_345));
+		moq_clock::sleep(std::time::Duration::from_millis(1 << 32)).await;
+		assert_eq!(session.get_epoch(), RtmpTimestamp::new(12_345));
 	}
 }

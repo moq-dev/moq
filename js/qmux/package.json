@@ -1,0 +1,39 @@
+{
+	"name": "@moq/qmux",
+	"type": "module",
+	"version": "0.3.3",
+	"description": "QMux protocol (draft-ietf-quic-qmux-02) over WebSockets",
+	"license": "(MIT OR Apache-2.0)",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/moq-dev/moq.git",
+		"directory": "js/qmux"
+	},
+	"sideEffects": false,
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"scripts": {
+		"build": "rimraf dist && tsc -b tsconfig.build.json && bun ../common/package.ts",
+		"check": "tsc --noEmit",
+		"test": "bun test --only-failures",
+		"release": "bun ../common/release.ts"
+	},
+	"dependencies": {
+		"@moq/clock": "workspace:^"
+	},
+	"devDependencies": {
+		"@types/bun": "^1.4.3",
+		"@typescript/lib-dom": "npm:@types/web@^0.0.358",
+		"rimraf": "^6.1.3",
+		"typescript": "7.0.2"
+	},
+	"keywords": [
+		"qmux",
+		"webtransport",
+		"websocket",
+		"polyfill",
+		"quic",
+		"streams"
+	]
+}

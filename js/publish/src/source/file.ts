@@ -1,11 +1,11 @@
+import { now as clockNow, sleepUntil as clockSleepUntil, Instant, Micro, Nano, Second } from "@moq/clock";
 import * as Util from "@moq/hang/util";
-import { Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { InputAudioTrack, InputVideoTrack, VideoSample } from "mediabunny";
 import { Timeline } from "./timeline";
 import type { Media } from "./types";
 
-// Signals the file source reads.
+/** Signals the file source reads. */
 export type FileInput = {
 	// Whether to decode the file. Defaults to true. When false the decode stops and `out.source` clears.
 	enabled: Getter<boolean>;
@@ -17,7 +17,8 @@ export interface FileProps extends Inputs<FileInput> {
 	file?: globalThis.File | Signal<globalThis.File | undefined>;
 }
 
-type FileOutput = {
+/** Signals the file source derives. */
+export type FileOutput = {
 	// The sources decoded from the file, undefined while disabled or undecodable.
 	source: Signal<Media | undefined>;
 };
@@ -40,6 +41,7 @@ const FRAME_RATE_SAMPLES = 100;
  * the window isn't composited.
  */
 export class File {
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<FileInput>;
 
 	/** The file to decode. Written by {@link prompt}, or set it directly. */
@@ -48,6 +50,7 @@ export class File {
 	readonly #out: FileOutput = {
 		source: new Signal<Media | undefined>(undefined),
 	};
+	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
 
 	#signals = new Effect();
@@ -106,8 +109,8 @@ export class File {
 
 		const frames = new ReadableStream<VideoFrame>({
 			async pull(controller) {
-				const offset = Time.Micro.fromSecond((index / IMAGE_FRAME_RATE) as Time.Second);
-				const timestamp = (zero + offset) as Time.Micro;
+				const offset = Micro.fromSecond((index / IMAGE_FRAME_RATE) as Second);
+				const timestamp = (zero + offset) as Micro;
 				index++;
 
 				await sleepUntil(timestamp, signal);
@@ -160,6 +163,11 @@ export class File {
 		// The encoder sizes its bitrate off this, and a file's real cadence beats assuming 30fps.
 		const frameRate =
 			video && videoOk ? (await video.computePacketStats(FRAME_RATE_SAMPLES)).averagePacketRate : undefined;
+		const toFrame = video && videoOk ? await converter(video) : undefined;
+		const format =
+			audio && audioOk
+				? { sampleRate: await audio.getSampleRate(), channelCount: await audio.getNumberOfChannels() }
+				: undefined;
 
 		// Pin the clock last. Probing the file takes a moment, and anchoring before that would leave
 		// the first samples already overdue, so playback would open with a catch-up burst.
@@ -169,19 +177,14 @@ export class File {
 
 		const source: Media = {
 			video:
-				video && videoOk
+				video && toFrame
 					? {
-							frames: pace(
-								new VideoSampleSink(video),
-								timeline,
-								video.rotation === 0 ? (sample) => sample.toVideoFrame() : rotator(video),
-								signal,
-							),
+							frames: pace(new VideoSampleSink(video), timeline, toFrame, signal),
 							frameRate,
 						}
 					: undefined,
 			audio:
-				audio && audioOk
+				audio && format
 					? {
 							samples: pace(
 								new AudioSampleSink(audio),
@@ -189,8 +192,7 @@ export class File {
 								(sample) => sample.toAudioData(),
 								signal,
 							),
-							sampleRate: audio.sampleRate,
-							channelCount: audio.numberOfChannels,
+							...format,
 							// A file is whatever the user picked, so leave the Opus tuning to the encoder.
 							kind: "auto",
 						}
@@ -266,7 +268,7 @@ function pace<S extends Sample, T>(
 				}
 
 				const sample = next.value;
-				const timestamp = timeline.at(sample.microsecondTimestamp as Time.Micro, loop);
+				const timestamp = timeline.at(sample.microsecondTimestamp as Micro, loop);
 
 				// A sample that's already late goes out immediately, letting a stalled reader catch up.
 				await sleepUntil(timestamp, signal);
@@ -278,7 +280,7 @@ function pace<S extends Sample, T>(
 
 				// Restamp onto our wall clock, the same epoch live capture uses, so a publish that
 				// mixes sources keeps one timeline.
-				sample.setTimestamp(Time.Second.fromMicro(timestamp));
+				sample.setTimestamp(Second.fromMicro(timestamp));
 				controller.enqueue(convert(sample));
 				sample.close();
 				return;
@@ -293,8 +295,10 @@ function pace<S extends Sample, T>(
 
 // Phone footage is usually stored sideways with rotation metadata, which toVideoFrame() ignores
 // because a VideoFrame can't carry it. Drawing through a canvas is the only way to bake it in.
-function rotator(track: InputVideoTrack): (sample: VideoSample) => VideoFrame {
-	const canvas = new OffscreenCanvas(track.displayWidth, track.displayHeight);
+async function converter(track: InputVideoTrack): Promise<(sample: VideoSample) => VideoFrame> {
+	if ((await track.getRotation()) === 0) return (sample) => sample.toVideoFrame();
+
+	const canvas = new OffscreenCanvas(await track.getDisplayWidth(), await track.getDisplayHeight());
 
 	const ctx = canvas.getContext("2d");
 	if (!ctx) throw new Error("Failed to create 2D canvas context");
@@ -312,32 +316,20 @@ async function decodable(track: InputVideoTrack | InputAudioTrack | null, file: 
 	if (await track.canDecode()) return true;
 
 	console.warn(
-		`Publishing "${file.name}" without its ${track.type} track: this browser can't decode ${track.codec}.`,
+		`Publishing "${file.name}" without its ${track.type} track: this browser can't decode ${await track.getCodec()}.`,
 	);
 	return false;
 }
 
-// Our wall clock in microseconds, the epoch capture stamps frames against (see video/processor.ts).
-function now(): Time.Micro {
-	return Time.Micro.fromMilli(performance.now() as Time.Milli);
+// The installed clock in microseconds, the epoch capture stamps frames against (see video/processor.ts).
+function now(): Micro {
+	return Nano.toMicro(Nano(clockNow()));
 }
 
-// Wait until the given wall clock time, or until the effect tears down.
+// Wait until the given clock time, or until the effect tears down.
 //
-// A raw timeout rather than effect.timer because this runs once per sample: effect.timer registers a
+// A plain sleep rather than effect.timer because this runs once per sample: effect.timer registers a
 // cleanup that only releases on teardown, which would pile up for as long as the file publishes.
-function sleepUntil(timestamp: Time.Micro, signal: AbortSignal): Promise<void> {
-	const delay = Time.Milli.fromMicro((timestamp - now()) as Time.Micro);
-	if (delay <= 0 || signal.aborted) return Promise.resolve();
-
-	return new Promise((resolve) => {
-		const done = () => {
-			clearTimeout(timeout);
-			signal.removeEventListener("abort", done);
-			resolve();
-		};
-
-		const timeout = setTimeout(done, delay);
-		signal.addEventListener("abort", done, { once: true });
-	});
+function sleepUntil(timestamp: Micro, signal: AbortSignal): Promise<void> {
+	return clockSleepUntil(Instant(Micro.toNano(timestamp)), { signal }).catch(() => {});
 }

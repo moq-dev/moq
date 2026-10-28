@@ -49,11 +49,6 @@ impl Import {
 		self.track.track().demand()
 	}
 
-	/// Record a locally encoded frame's transport handoff for catalog jitter measurement.
-	pub fn flush(&mut self, timestamp: moq_net::Timestamp, now: std::time::Instant) -> crate::Result<()> {
-		self.track.flush(timestamp, now)
-	}
-
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> crate::Result<()> {
 		self.track.finish()?;
@@ -66,8 +61,6 @@ impl Import {
 		self.track.abort(err);
 	}
 
-	/// Publish what the track measured (bitrate, jitter) into the catalog rendition, filling only
-	/// the fields its config didn't supply.
 	/// Record the media duration emitted together by the TS importer.
 	pub(crate) fn burst(&mut self, duration: std::time::Duration) -> crate::Result<()> {
 		self.track.burst(duration)

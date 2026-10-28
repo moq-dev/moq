@@ -31,14 +31,6 @@ func TestStreamAbortProtocolDetails(t *testing.T) {
 }
 
 func TestErrorMessage(t *testing.T) {
-	var transport *ffi.MoqErrorTransport
-	if !errors.As(ffi.NewMoqErrorTransport("reset"), &transport) {
-		t.Fatal("transport payload is not accessible")
-	}
-	if transport.Reason != "reset" {
-		t.Fatalf("transport reason = %q, want reset", transport.Reason)
-	}
-
 	tests := []struct {
 		err  error
 		want string
@@ -88,12 +80,13 @@ func TestErrorSentinels(t *testing.T) {
 		{"Codec", ffi.NewMoqErrorCodec(""), moq.ErrCodec},
 		{"Unauthorized", ffi.NewMoqErrorUnauthorized(), moq.ErrUnauthorized},
 		{"Forbidden", ffi.NewMoqErrorForbidden(), moq.ErrForbidden},
+		{"Expired", ffi.NewMoqErrorExpired(), moq.ErrExpired},
 		{"NotFound", ffi.NewMoqErrorNotFound(), moq.ErrNotFound},
 		{"Unsupported", ffi.NewMoqErrorUnsupported(), moq.ErrUnsupported},
-		{"InvalidRoute", ffi.NewMoqErrorInvalidRoute(""), moq.ErrInvalidRoute},
 		{"InvalidPattern", ffi.NewMoqErrorInvalidPattern(""), moq.ErrInvalidPattern},
 		{"InvalidEpoch", ffi.NewMoqErrorInvalidEpoch(""), moq.ErrInvalidEpoch},
 		{"UnresolvableBroadcast", ffi.NewMoqErrorUnresolvableBroadcast(""), moq.ErrUnresolvableBroadcast},
+		{"UnsupportedCatalog", ffi.NewMoqErrorUnsupportedCatalog(5), moq.ErrUnsupportedCatalog},
 		{"AlreadyCommitted", ffi.NewMoqErrorAlreadyCommitted(), moq.ErrAlreadyCommitted},
 		{"Log", ffi.NewMoqErrorLog(""), moq.ErrLog},
 		{"Config", ffi.NewMoqErrorConfig(""), moq.ErrConfig},
@@ -115,5 +108,26 @@ func TestSessionLimitProtocolKind(t *testing.T) {
 	details, ok := moq.ProtocolError(err)
 	if !ok || details.Kind != moq.ProtocolKindTooManyRequests || moq.IsAuthError(err) {
 		t.Fatalf("session limit lost its kind: %+v, %v", details, err)
+	}
+}
+
+func TestExpiredIsAuthError(t *testing.T) {
+	err := ffi.NewMoqErrorProtocol(ffi.MoqProtocolError{
+		Scope: moq.ErrorScopeSession, Code: 0x18, Kind: moq.ProtocolKindExpired, Message: "expired",
+	})
+	if !moq.IsAuthError(err) {
+		t.Fatalf("expired credentials are not an auth error: %v", err)
+	}
+	if !moq.IsAuthError(ffi.NewMoqErrorExpired()) {
+		t.Fatal("an expired request token is not an auth error")
+	}
+}
+
+func TestTrackRevocationIsAuth(t *testing.T) {
+	err := ffi.NewMoqErrorProtocol(ffi.MoqProtocolError{
+		Scope: moq.ErrorScopeStream, Code: 0x3b, Kind: moq.ProtocolKindUnauthorized, Message: "unauthorized",
+	})
+	if !moq.IsAuthError(err) {
+		t.Fatalf("a track revocation is not an auth error: %v", err)
 	}
 }

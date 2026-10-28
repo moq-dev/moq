@@ -7,8 +7,9 @@ import * as Path from "./path.ts";
 import { wireOf } from "./wire.ts";
 
 function publish(origin: OriginProducer, path: Path.Valid): BroadcastProducer {
-	const broadcast = origin.createBroadcast(path);
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(path);
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	return broadcast;
 }
 
@@ -63,6 +64,35 @@ test("closing resolves next with undefined", async () => {
 
 	producer.close();
 	expect(await consumer.next()).toBeUndefined();
+});
+
+test("closing a consumer releases only that handle", async () => {
+	const producer = new Announce.Producer();
+	expect(producer.wanted.peek()).toBe(false);
+	const first = producer.consume();
+	const second = producer.consume();
+	expect(producer.wanted.peek()).toBe(true);
+
+	// A reader parked on next() ends when its own handle closes, while another still wants it.
+	const early = first.next();
+	first.close();
+	first.close();
+	expect(await early).toBeUndefined();
+	expect(await first.next()).toBeUndefined();
+	expect(producer.wanted.peek()).toBe(true);
+	expect(producer.closed.peek()).toBeUndefined();
+
+	// The other reader keeps the stream: an event still reaches it.
+	const route = Route.default;
+	producer.append({ prefix: p("a"), captures: undefined, kind: "start", route });
+	expect((await second.next())?.prefix).toBe(p("a"));
+
+	// The last one leaving is what the producer watches for.
+	const unwanted = producer.wanted.changed();
+	second.close();
+	expect(await unwanted).toBe(false);
+	expect(producer.closed.peek()).toBeUndefined();
+	producer.close();
 });
 
 test("aborting rejects next", async () => {
@@ -127,4 +157,132 @@ test("the local route wins over a blind request on a no-discovery origin", async
 	detach();
 	broadcast.close();
 	origin.close();
+});
+
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+const start = (prefix: string): Announce.Event => ({
+	prefix: p(prefix),
+	captures: undefined,
+	kind: "start",
+	route: Route.default,
+});
+
+test("a stream syncs once the reader is past what was queued at the boundary", async () => {
+	const producer = new Announce.Producer();
+	const consumer = producer.consume();
+	producer.append(start("a"));
+	producer.append(start("b"));
+	expect(consumer.synced.peek()).toBe(false);
+
+	producer.synced();
+	// Appended after the boundary, so not owed.
+	producer.append(start("c"));
+	expect(consumer.synced.peek()).toBe(false);
+
+	await consumer.next();
+	await consumer.next();
+	// Still handling b.
+	expect(consumer.synced.peek()).toBe(false);
+	expect(await consumer.next()).toMatchObject({ prefix: p("c") });
+	expect(consumer.synced.peek()).toBe(true);
+});
+
+test("an event taken before the boundary is handled before syncing", async () => {
+	const producer = new Announce.Producer();
+	const consumer = producer.consume();
+	producer.append(start("a"));
+	await consumer.next();
+	producer.synced();
+	expect(consumer.synced.peek()).toBe(false);
+
+	void consumer.next();
+	expect(consumer.synced.peek()).toBe(true);
+	producer.close();
+});
+
+test("behind takes sync back, and closing hands it back for good", () => {
+	const producer = new Announce.Producer();
+	const consumer = producer.consume();
+	producer.synced();
+	expect(consumer.synced.peek()).toBe(true);
+	producer.behind();
+	expect(consumer.synced.peek()).toBe(false);
+	producer.close();
+	expect(consumer.synced.peek()).toBe(true);
+	producer.behind();
+	expect(consumer.synced.peek()).toBe(true);
+});
+
+test("an origin with no session delivering syncs on its own replay", async () => {
+	const origin = new OriginProducer();
+	const room = publish(origin, p("room"));
+	const announced = origin.consume().announced();
+	expect(await announced.next()).toMatchObject({ prefix: p("room"), kind: "start" });
+	void announced.next();
+	await tick();
+	expect(announced.synced.peek()).toBe(true);
+	room.close();
+	announced.close();
+});
+
+test("an origin stream waits on every overlapping initial set in flight", async () => {
+	const origin = new OriginProducer();
+	const wire = wireOf(origin);
+	const room = wire.snapshot(p("room"));
+	const other = wire.snapshot(p("other"));
+
+	const scoped = origin.consume().announced(Path.Pattern.subtree(p("room")));
+	const all = origin.consume().announced();
+	await tick();
+	expect(scoped.synced.peek()).toBe(false);
+	expect(all.synced.peek()).toBe(false);
+
+	other();
+	await tick();
+	// Still held by the room snapshot; the other one never held the scoped stream.
+	expect(scoped.synced.peek()).toBe(false);
+	expect(all.synced.peek()).toBe(false);
+
+	// The initial set lands, and so does its snapshot.
+	const route = wire.receive(p("room/cam"));
+	room();
+	expect(await scoped.next()).toMatchObject({ prefix: p("room/cam"), kind: "start" });
+	void scoped.next();
+	await tick();
+	expect(scoped.synced.peek()).toBe(true);
+
+	// A new session, as a reconnect makes, takes it back until its own set lands.
+	const second = wire.snapshot(p(""));
+	await tick();
+	expect(scoped.synced.peek()).toBe(false);
+	second();
+	await tick();
+	expect(scoped.synced.peek()).toBe(true);
+
+	route.close();
+	scoped.close();
+	all.close();
+});
+
+test("a snapshot elsewhere never holds a scoped stream", async () => {
+	const origin = new OriginProducer();
+	const other = wireOf(origin).snapshot(p("other"));
+	const scoped = origin.consume().announced(Path.Pattern.subtree(p("room")));
+	await tick();
+	expect(scoped.synced.peek()).toBe(true);
+	other();
+	scoped.close();
+});
+
+test("a snapshot under a hidden segment holds only a reader that opts in", async () => {
+	const origin = new OriginProducer();
+	const stats = wireOf(origin).snapshot(p(".stats"));
+	const all = origin.consume().announced();
+	const hidden = origin.consume().announced(Path.Pattern.all(), { hidden: true });
+	await tick();
+	expect(all.synced.peek()).toBe(true);
+	expect(hidden.synced.peek()).toBe(false);
+	stats();
+	all.close();
+	hidden.close();
 });

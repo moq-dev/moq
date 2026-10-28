@@ -31,14 +31,13 @@ remains separately scoped in m2.
 
 What the line still owes once Watch lands: its recorded trace replayed through
 the native decode path too, asserting the same target series the browser's
-`playout.test.ts` does. Grading native playback against the harness budgets is
-[Audio quality native](/quest/m2/audio-quality-native.md).
+`playout.test.ts` does. The audio quality harness's `pulse` rows already grade
+native playback against its budgets.
 
 ## Required
 
-- [Opus isolated-ring target](/quest/m1/audio-jitter-target/opus-isolated-target.md) - the isolated ring holds the target at near-zero jitter
 - [Watch](/quest/m1/audio-jitter-target/watch.md) - the browser's measured target, proven on Chrome and Safari against the public relay
-- [AAC bursty budgets](/quest/m1/audio-jitter-target/aac-bursty-budgets.md) - post-fix nightlies confirm AAC no longer re-stalls, and its budgets are tightened from them
+- [Capped budgets](/quest/m1/audio-jitter-target/capped-budgets.md) - post-cap nightlies confirm AAC bursty discards about as much audio as Opus bursty and the first row no longer stalls, and every browser row's budgets are re-measured from them
 
 ## Closes
 

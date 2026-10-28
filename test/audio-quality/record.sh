@@ -10,6 +10,10 @@
 # replay budgets after.
 set -euo pipefail
 
+if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
+    exec bash "$(dirname "$0")/../../sh/local.sh" bash "$0" "$@"
+fi
+
 AQ_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 WORKSPACE=$(cd "$AQ_DIR/../.." && pwd)
 CLIENT="$AQ_DIR/clients/js"
@@ -53,7 +57,6 @@ echo "building the pages..."
 (
     cd "$CLIENT"
     bun install --frozen-lockfile
-    bunx playwright install chromium
     bunx vite build --outDir "$HARNESS_RUN/page" --emptyOutDir
 )
 

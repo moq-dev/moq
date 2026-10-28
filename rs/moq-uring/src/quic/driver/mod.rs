@@ -1,0 +1,460 @@
+//! The rustls-backed moq-quic stack on the worker's UDP path.
+//!
+//! TLS goes through rustls, which is what the rest of this workspace speaks,
+//! so a build selecting this backend links one TLS stack instead of two.
+//!
+//! [`moq_quic::Endpoint`] holds the connection-id routing table, mints and
+//! retires ids, answers unsupported versions, and buffers half-open
+//! handshakes. So [`Endpoint`] here is mostly the socket plumbing around it,
+//! plus the parts that are ours: the accept backlog, shard steering, and the
+//! driver task per connection.
+
+mod connection;
+mod endpoint;
+mod group;
+mod stream;
+
+pub use connection::Connection;
+pub use endpoint::Endpoint;
+pub use group::{SendGroup, SendOptions};
+pub use stream::{Lease, RecvStream, SendStream};
+
+pub(crate) use connection::{End, Shared};
+
+use std::sync::Arc;
+
+use moq_quic::crypto::rustls::{QuicClientConfig, QuicServerConfig};
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+
+#[cfg(feature = "qlog")]
+use super::qlog;
+use super::{Congestion, Error, Identity, Transport, client, server};
+use crate::udp;
+
+/// Per-stream flow control credit, which returns as bytes are read, so it only paces a stream.
+const STREAM_WINDOW: u32 = 4 * 1024 * 1024;
+/// Per-connection flow control credit, which also bounds incomplete messages, so it has to fit
+/// the largest one: `MIN_RECEIVE_WINDOW` is the 64 MiB announcement cap plus framing. 128 MiB
+/// also holds two maximum-size frames at once.
+const CONNECTION_WINDOW: u32 = 128 * 1024 * 1024;
+const _: () = assert!(CONNECTION_WINDOW as u64 >= moq_net::transport::MIN_RECEIVE_WINDOW);
+/// Unacknowledged outgoing data to buffer, whatever the peer allows.
+const SEND_WINDOW: u32 = 16 * 1024 * 1024;
+/// Datagram bytes to buffer in each direction, about 64 full-size datagrams.
+const DATAGRAM_WINDOW: usize = 96 * 1024;
+
+fn ecn_to_quic(ecn: udp::Ecn) -> moq_quic::EcnCodepoint {
+	match ecn {
+		udp::Ecn::Ect0 => moq_quic::EcnCodepoint::Ect0,
+		udp::Ecn::Ect1 => moq_quic::EcnCodepoint::Ect1,
+		udp::Ecn::Ce => moq_quic::EcnCodepoint::Ce,
+	}
+}
+
+fn ecn_from_quic(ecn: moq_quic::EcnCodepoint) -> udp::Ecn {
+	match ecn {
+		moq_quic::EcnCodepoint::Ect0 => udp::Ecn::Ect0,
+		moq_quic::EcnCodepoint::Ect1 => udp::Ecn::Ect1,
+		moq_quic::EcnCodepoint::Ce => udp::Ecn::Ce,
+	}
+}
+
+impl From<moq_quic::ConnectionError> for Error {
+	fn from(err: moq_quic::ConnectionError) -> Self {
+		use moq_quic::ConnectionError;
+		match err {
+			ConnectionError::ApplicationClosed(close) => Self::App {
+				code: close.error_code.into_inner(),
+				reason: String::from_utf8_lossy(&close.reason).into_owned(),
+			},
+			ConnectionError::ConnectionClosed(close) => Self::Transport {
+				code: close.error_code.into(),
+				reason: String::from_utf8_lossy(&close.reason).into_owned(),
+			},
+			ConnectionError::TransportError(err) => Self::Transport {
+				code: err.code.into(),
+				reason: err.reason.clone(),
+			},
+			ConnectionError::TimedOut => Self::TimedOut,
+			ConnectionError::LocallyClosed => Self::Closed,
+			// The rest (a stateless reset, an unsupported version, exhausted
+			// ids) have no code to report.
+			err => Self::Quic(err.to_string()),
+		}
+	}
+}
+
+/// The crypto provider every config here is built from.
+///
+/// Built explicitly rather than read from the process-wide default, so a
+/// consumer that never installed one still gets working TLS.
+fn provider() -> Arc<rustls::crypto::CryptoProvider> {
+	static PROVIDER: std::sync::OnceLock<Arc<rustls::crypto::CryptoProvider>> = std::sync::OnceLock::new();
+	PROVIDER
+		.get_or_init(|| Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
+		.clone()
+}
+
+/// The endpoint-wide configuration: how connection ids are minted and the reset key.
+pub(crate) fn endpoint_config(
+	shard: Option<moq_sock::shard::Shard>,
+	reset_secret: Option<&[u8; 32]>,
+) -> Arc<moq_quic::EndpointConfig> {
+	let mut config = moq_quic::EndpointConfig::default();
+	// The random ids below validate a predecessor's too, so the reset reaches them.
+	if let Some(secret) = reset_secret {
+		config.reset_secret(secret);
+	}
+	// The steering filter recognizes short headers by their fixed bit.
+	config.grease_quic_bit(shard.is_none());
+	// moq-quic asks its generator for every id it issues, dials and rotations
+	// alike, so naming the shard here steers all of them. Random rather than
+	// hashed ids, so neither path gives up nonce bytes to a signature.
+	config.cid_generator(Arc::new(move || {
+		let mut cids = moq_quic::RandomConnectionIdGenerator::default();
+		if let Some(shard) = shard {
+			cids.set_shard(shard.index(), shard.count());
+		}
+		Box::new(cids)
+	}));
+	Arc::new(config)
+}
+
+/// Dial as `config` says.
+pub(crate) fn client_config(config: &client::Config) -> Result<moq_quic::ClientConfig, Error> {
+	let provider = provider();
+	let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
+		.with_protocol_versions(&[&rustls::version::TLS13])
+		.map_err(|err| Error::Tls(err.to_string()))?;
+
+	// Nothing is checked with verification off, so nothing is loaded: a root
+	// path that does not exist must not fail a connection that was never
+	// going to look at it.
+	let verifier: Arc<dyn rustls::client::danger::ServerCertVerifier> = match (config.verify, config.system_roots) {
+		(false, _) => Arc::new(NoVerify(provider.clone())),
+		// The platform verifier reads the OS trust store the way the OS means
+		// it, so extra roots go through it rather than around it.
+		(true, true) if config.roots.is_empty() => Arc::new(
+			rustls_platform_verifier::Verifier::new(provider.clone()).map_err(|err| Error::Tls(err.to_string()))?,
+		),
+		(true, true) => Arc::new(
+			rustls_platform_verifier::Verifier::new_with_extra_roots(read_roots(&config.roots)?, provider.clone())
+				.map_err(|err| Error::Tls(err.to_string()))?,
+		),
+		// Trusting only the configured roots means a store built from
+		// scratch, never the platform's with ours added on top.
+		(true, false) => rustls::client::WebPkiServerVerifier::builder_with_provider(
+			Arc::new(root_store(&config.roots)?),
+			provider.clone(),
+		)
+		.build()
+		.map_err(|err| Error::Tls(err.to_string()))?,
+	};
+	let builder = builder.dangerous().with_custom_certificate_verifier(verifier);
+
+	let mut tls = match &config.identity {
+		Some(identity) => {
+			let (chain, key) = keypair(identity)?;
+			builder
+				.with_client_auth_cert(chain, key)
+				.map_err(|err| Error::Tls(err.to_string()))?
+		}
+		None => builder.with_no_client_auth(),
+	};
+	tls.alpn_protocols = alpn(&config.alpn);
+
+	let crypto = QuicClientConfig::try_from(tls).map_err(|err| Error::Tls(err.to_string()))?;
+	let mut client = moq_quic::ClientConfig::new(Arc::new(crypto));
+	let transport = transport_config(&config.transport)?;
+	#[cfg(feature = "qlog")]
+	let transport = with_qlog(transport, &config.transport, qlog::Side::Client);
+	client.transport_config(Arc::new(transport));
+	Ok(client)
+}
+
+/// Serve as `config` says.
+pub(crate) fn server_config(config: &server::Config) -> Result<moq_quic::ServerConfig, Error> {
+	let crypto = QuicServerConfig::try_from(config.tls.clone()).map_err(|err| Error::Tls(err.to_string()))?;
+	let mut server = moq_quic::ServerConfig::with_crypto(Arc::new(crypto));
+	let transport = transport_config(&config.transport)?;
+	#[cfg(feature = "qlog")]
+	let transport = with_qlog(transport, &config.transport, qlog::Side::Server);
+	server.transport_config(Arc::new(transport));
+	Ok(server)
+}
+
+/// A TLS 1.3 policy presenting `identity`, speaking `alpn`, and checking clients as `auth` says.
+pub(crate) fn identity_server_config(
+	identity: &Identity,
+	alpn: Vec<Vec<u8>>,
+	auth: &server::ClientAuth,
+) -> Result<Arc<rustls::ServerConfig>, Error> {
+	let provider = provider();
+	let builder = rustls::ServerConfig::builder_with_provider(provider.clone())
+		.with_protocol_versions(&[&rustls::version::TLS13])
+		.map_err(|err| Error::Tls(err.to_string()))?;
+
+	let verifier = match auth.roots() {
+		None => rustls::server::WebPkiClientVerifier::no_client_auth(),
+		// An empty store rejects every chain, so asking for a certificate with
+		// nothing to check it against refuses exactly the clients that obey.
+		Some(([], _)) => {
+			return Err(Error::Tls(
+				"client authentication needs at least one root certificate".to_string(),
+			));
+		}
+		Some((roots, required)) => {
+			// Client certificates chain to the roots configured here, never to
+			// the platform store for public sites.
+			let builder =
+				rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(root_store(roots)?), provider);
+			let builder = match required {
+				true => builder,
+				false => builder.allow_unauthenticated(),
+			};
+			builder.build().map_err(|err| Error::Tls(err.to_string()))?
+		}
+	};
+
+	let (chain, key) = keypair(identity)?;
+	let mut tls = builder
+		.with_client_cert_verifier(verifier)
+		.with_single_cert(chain, key)
+		.map_err(|err| Error::Tls(err.to_string()))?;
+	tls.alpn_protocols = alpn;
+	Ok(Arc::new(tls))
+}
+
+/// Attach the configured qlog sink, if any.
+///
+/// moq-quic holds one sink per transport config, which is per endpoint on the
+/// accept side and per dial on the connect side; its events carry the
+/// connection's qlog `group_id` either way.
+#[cfg(feature = "qlog")]
+fn with_qlog(
+	mut transport: moq_quic::TransportConfig,
+	config: &Transport,
+	side: qlog::Side,
+) -> moq_quic::TransportConfig {
+	let Some(sink) = config.qlog.clone() else {
+		return transport;
+	};
+
+	let mut qlog = moq_quic::QlogConfig::default();
+	qlog.writer(sink.trace(side));
+	transport.qlog_stream(qlog.into_stream());
+
+	transport
+}
+
+/// The per-connection knobs both roles share.
+fn transport_config(config: &Transport) -> Result<moq_quic::TransportConfig, Error> {
+	use moq_quic::VarInt;
+
+	let idle = moq_quic::IdleTimeout::try_from(config.idle_timeout)
+		.map_err(|_| Error::Quic(format!("idle timeout out of range: {:?}", config.idle_timeout)))?;
+	let streams = VarInt::from_u64(config.max_streams)
+		.map_err(|_| Error::Quic(format!("stream limit out of range: {}", config.max_streams)))?;
+
+	let mut transport = moq_quic::TransportConfig::default();
+	transport.max_idle_timeout(Some(idle));
+	transport.keep_alive_interval(config.keep_alive);
+	transport.max_concurrent_bidi_streams(streams);
+	transport.max_concurrent_uni_streams(streams);
+	// A value that cannot go on the wire is an error: clamping it would ignore
+	// what was set.
+	let connection_window = match config.receive_window {
+		Some(window) => varint_window("receive window", window)?,
+		None => CONNECTION_WINDOW.into(),
+	};
+	let stream_window = match config.stream_receive_window {
+		Some(window) => varint_window("stream receive window", window)?,
+		None => STREAM_WINDOW.into(),
+	};
+	let send_window = config.send_window.unwrap_or(u64::from(SEND_WINDOW));
+	transport.stream_receive_window(stream_window);
+	transport.receive_window(connection_window);
+	transport.send_window(send_window);
+	transport.datagram_receive_buffer_size(Some(DATAGRAM_WINDOW));
+	transport.datagram_send_buffer_size(DATAGRAM_WINDOW);
+	// moq-quic probes by default; the 1200-byte floor reaches every path.
+	if !config.mtu_discovery {
+		transport.mtu_discovery_config(None);
+	}
+	transport.congestion_controller_factory(match config.congestion {
+		Congestion::Loss => {
+			Arc::new(moq_congestion::CubicConfig::default()) as Arc<dyn moq_congestion::ControllerFactory + Send + Sync>
+		}
+		Congestion::Delay => Arc::new(moq_congestion::Bbr3Config::default()),
+		Congestion::None => Arc::new(moq_congestion::Unlimited),
+	});
+	Ok(transport)
+}
+
+/// A receive window on the wire is a QUIC varint. One that does not fit cannot
+/// be applied, so it is an error rather than a smaller window than was asked.
+fn varint_window(name: &str, value: u64) -> Result<moq_quic::VarInt, Error> {
+	moq_quic::VarInt::from_u64(value).map_err(|_| Error::Quic(format!("{name} out of range: {value}")))
+}
+
+/// ALPN protocols on the wire, which is a length-prefixed list of byte
+/// strings rather than the `String`s a caller configures.
+fn alpn(protocols: &[String]) -> Vec<Vec<u8>> {
+	protocols.iter().map(|proto| proto.as_bytes().to_vec()).collect()
+}
+
+/// Split an [`Identity`] into the chain and key rustls wants.
+fn keypair(identity: &Identity) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), Error> {
+	let chain = CertificateDer::pem_slice_iter(identity.cert())
+		.collect::<Result<Vec<_>, _>>()
+		.map_err(|err| Error::Tls(format!("certificate: {err}")))?;
+	if chain.is_empty() {
+		return Err(Error::Tls("certificate chain holds no certificates".to_string()));
+	}
+	let key = PrivateKeyDer::from_pem_slice(identity.key()).map_err(|err| Error::Tls(format!("key: {err}")))?;
+	Ok((chain, key))
+}
+
+/// Read every PEM certificate in each root file, naming the one that fails.
+///
+/// A root is routinely a bundle of several CAs, and taking only the first
+/// would reject a peer chaining to any of the others while looking configured.
+/// A file holding none is an error rather than a store that trusts nothing.
+fn read_roots(paths: &[std::path::PathBuf]) -> Result<Vec<CertificateDer<'static>>, Error> {
+	let mut roots = Vec::new();
+	for path in paths {
+		let pem = std::fs::read(path).map_err(|err| Error::Tls(format!("{}: {err}", path.display())))?;
+		let certs = CertificateDer::pem_slice_iter(&pem)
+			.collect::<Result<Vec<_>, _>>()
+			.map_err(|err| Error::Tls(format!("{}: {err}", path.display())))?;
+		if certs.is_empty() {
+			return Err(Error::Tls(format!("{}: no certificates", path.display())));
+		}
+		roots.extend(certs);
+	}
+	Ok(roots)
+}
+
+/// A store holding exactly the roots `paths` names, and nothing else.
+fn root_store(paths: &[std::path::PathBuf]) -> Result<rustls::RootCertStore, Error> {
+	let mut store = rustls::RootCertStore::empty();
+	for root in read_roots(paths)? {
+		store.add(root).map_err(|err| Error::Tls(err.to_string()))?;
+	}
+	Ok(store)
+}
+
+/// Accepts any server certificate, for
+/// [`verify`](client::Config::verify) turned off.
+#[derive(Debug)]
+struct NoVerify(Arc<rustls::crypto::CryptoProvider>);
+
+impl rustls::client::danger::ServerCertVerifier for NoVerify {
+	fn verify_server_cert(
+		&self,
+		_end_entity: &CertificateDer<'_>,
+		_intermediates: &[CertificateDer<'_>],
+		_server_name: &rustls::pki_types::ServerName<'_>,
+		_ocsp: &[u8],
+		_now: rustls::pki_types::UnixTime,
+	) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+		Ok(rustls::client::danger::ServerCertVerified::assertion())
+	}
+
+	fn verify_tls12_signature(
+		&self,
+		message: &[u8],
+		cert: &CertificateDer<'_>,
+		dss: &rustls::DigitallySignedStruct,
+	) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+		rustls::crypto::verify_tls12_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+	}
+
+	fn verify_tls13_signature(
+		&self,
+		message: &[u8],
+		cert: &CertificateDer<'_>,
+		dss: &rustls::DigitallySignedStruct,
+	) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+		rustls::crypto::verify_tls13_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+	}
+
+	fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+		self.0.signature_verification_algorithms.supported_schemes()
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::{CONNECTION_WINDOW, SEND_WINDOW, STREAM_WINDOW, Transport, transport_config};
+
+	/// moq-quic keeps the windows private, but its `Debug` prints them. The leading
+	/// space keeps `receive_window` from matching `stream_receive_window`, and
+	/// the trailing comma keeps a shorter value from matching a longer one.
+	fn has_window(config: &moq_quic::TransportConfig, name: &str, value: u64) -> bool {
+		format!("{config:?}").contains(&format!(" {name}: {value},"))
+	}
+
+	#[test]
+	fn windows_default_to_the_fixed_credits() {
+		let transport = transport_config(&Transport::default()).expect("defaults");
+		assert!(has_window(
+			&transport,
+			"stream_receive_window",
+			u64::from(STREAM_WINDOW)
+		));
+		assert!(has_window(&transport, "receive_window", u64::from(CONNECTION_WINDOW)));
+		assert!(has_window(&transport, "send_window", u64::from(SEND_WINDOW)));
+	}
+
+	#[test]
+	fn configured_windows_replace_the_defaults() {
+		let config = Transport {
+			receive_window: Some(256 << 20),
+			stream_receive_window: Some(8 << 20),
+			send_window: Some(32 << 20),
+			..Default::default()
+		};
+
+		let transport = transport_config(&config).expect("windows");
+		assert!(has_window(&transport, "receive_window", 256 << 20));
+		assert!(has_window(&transport, "stream_receive_window", 8 << 20));
+		assert!(has_window(&transport, "send_window", 32 << 20));
+		assert!(!has_window(&transport, "receive_window", u64::from(CONNECTION_WINDOW)));
+	}
+
+	#[test]
+	fn the_largest_representable_windows_are_applied() {
+		let max_varint = (1u64 << 62) - 1;
+		// The send window is local bookkeeping, so it is not a varint.
+		let config = Transport {
+			receive_window: Some(max_varint),
+			stream_receive_window: Some(max_varint),
+			send_window: Some(u64::MAX),
+			..Default::default()
+		};
+
+		let transport = transport_config(&config).expect("max windows");
+		assert!(has_window(&transport, "receive_window", max_varint));
+		assert!(has_window(&transport, "stream_receive_window", max_varint));
+		assert!(has_window(&transport, "send_window", u64::MAX));
+	}
+
+	#[test]
+	fn a_receive_window_past_a_varint_is_an_error() {
+		let over = Transport {
+			receive_window: Some(1u64 << 62),
+			..Default::default()
+		};
+		let err = transport_config(&over).expect_err("past a varint");
+		assert!(err.to_string().contains("receive window"), "{err}");
+
+		let over = Transport {
+			stream_receive_window: Some(u64::MAX),
+			..Default::default()
+		};
+		let err = transport_config(&over).expect_err("past a varint");
+		assert!(err.to_string().contains("stream receive window"), "{err}");
+	}
+}

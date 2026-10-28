@@ -74,6 +74,39 @@ in
       };
     };
 
+    acme = {
+      domains = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ ];
+        example = [ "relay.example.com" ];
+        description = ''
+          Fetch and renew a certificate for these domains from an ACME directory
+          (Let's Encrypt by default), kept under `stateDir`. The directory validates
+          over HTTPS on `httpsPort`, which must be reachable as TCP port 443.
+        '';
+      };
+
+      contact = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ ];
+        example = [ "mailto:ops@example.com" ];
+        description = "Contact URLs registered with the ACME account";
+      };
+
+      directory = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "https://acme-staging-v02.api.letsencrypt.org/directory";
+        description = "ACME directory URL (Let's Encrypt production if null)";
+      };
+
+      httpsPort = lib.mkOption {
+        type = lib.types.port;
+        default = 443;
+        description = "HTTPS listener port, which answers the ACME challenge";
+      };
+    };
+
     auth = {
       enable = lib.mkOption {
         type = lib.types.bool;
@@ -120,14 +153,14 @@ in
       rootUrl = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
-        example = "localhost:4443";
-        description = "Root node URL to connect to (for leaf mode)";
+        example = "https://root.example.com:4443";
+        description = "Root node URL to connect to (for leaf mode); a full URL, since a bare `host:port` is refused";
       };
 
       nodeUrl = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
-        example = "localhost:4444";
+        example = "https://leaf.example.com:4443";
         description = "This node's advertised URL";
       };
 
@@ -175,6 +208,14 @@ in
         assertion = cfg.auth.enable || cfg.auth.publicPath != null;
         message = "services.moq-relay: set auth.enable or auth.publicPath; a relay admits nobody without one";
       }
+      {
+        assertion = cfg.acme.domains == [ ] || (cfg.tls.certs == [ ] && cfg.tls.generate == [ ]);
+        message = "services.moq-relay: acme.domains cannot be combined with tls.certs or tls.generate";
+      }
+      {
+        assertion = cfg.cluster.mode != "leaf" || cfg.cluster.rootUrl != null;
+        message = "services.moq-relay: cluster.mode = \"leaf\" needs cluster.rootUrl; a leaf without one runs standalone";
+      }
     ];
 
     # Create user and group
@@ -215,7 +256,7 @@ in
             "${pkgs.moq-cli}/bin/moq auth serve"
             "--listen 127.0.0.1:${toString cfg.auth.port}"
             "--key ${authKey}"
-            "--mtls-publish '**' --mtls-subscribe '**' --mtls-peer"
+            "--mtls-publish '**' --mtls-subscribe '**' --mtls-link peer"
           ]
           ++ lib.optionals (cfg.auth.publicPath != null) [
             "--public-publish '${publicPattern}' --public-subscribe '${publicPattern}'"
@@ -235,7 +276,13 @@ in
     systemd.services.moq-relay = {
       description = "Media over QUIC relay server";
       wantedBy = [ "multi-user.target" ];
-      after = [ "network.target" ] ++ lib.optional cfg.auth.enable "moq-auth.service";
+      # ACME validates inbound right away, so wait until the host is reachable.
+      after = [
+        "network.target"
+      ]
+      ++ lib.optional cfg.auth.enable "moq-auth.service"
+      ++ lib.optional (cfg.acme.domains != [ ]) "network-online.target";
+      wants = lib.optional (cfg.acme.domains != [ ]) "network-online.target";
 
       preStart = ''
         # Generate cluster token for leaf nodes
@@ -256,7 +303,8 @@ in
       '';
 
       serviceConfig = {
-        Type = "simple";
+        # The relay reports ready only once it serves, which with ACME waits for issuance.
+        Type = "notify";
         User = cfg.user;
         Group = cfg.group;
 
@@ -280,7 +328,9 @@ in
         ReadWritePaths = [ cfg.stateDir ];
 
         # Network capabilities for binding to ports < 1024
-        AmbientCapabilities = lib.optional (cfg.port < 1024) "CAP_NET_BIND_SERVICE";
+        AmbientCapabilities = lib.optional (
+          cfg.port < 1024 || (cfg.acme.domains != [ ] && cfg.acme.httpsPort < 1024)
+        ) "CAP_NET_BIND_SERVICE";
       };
 
       environment = {
@@ -304,6 +354,17 @@ in
       // lib.optionalAttrs (cfg.tls.certs != [ ]) {
         MOQ_LISTEN_TLS_KEY = lib.concatMapStringsSep "," (cert: "${cert.key}") cfg.tls.certs;
       }
+      // lib.optionalAttrs (cfg.acme.domains != [ ]) {
+        MOQ_ACME_DOMAINS = lib.concatStringsSep "," cfg.acme.domains;
+        MOQ_ACME_CACHE = "${cfg.stateDir}/acme";
+        MOQ_WEB_HTTPS_LISTEN = "[::]:${toString cfg.acme.httpsPort}";
+      }
+      // lib.optionalAttrs (cfg.acme.contact != [ ]) {
+        MOQ_ACME_CONTACT = lib.concatStringsSep "," cfg.acme.contact;
+      }
+      // lib.optionalAttrs (cfg.acme.directory != null) {
+        MOQ_ACME_DIRECTORY = cfg.acme.directory;
+      }
       // lib.optionalAttrs cfg.auth.enable {
         # The local auth server decides every session.
         MOQ_AUTH_URL = authUrl;
@@ -313,7 +374,7 @@ in
       }
       // lib.optionalAttrs (cfg.cluster.rootUrl != null) {
         # Cluster configuration
-        MOQ_CLUSTER_ROOT = cfg.cluster.rootUrl;
+        MOQ_CLUSTER_CONNECT = cfg.cluster.rootUrl;
       }
       # Public rules refuse a token, so a peer only presents one an auth server will read.
       //

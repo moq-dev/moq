@@ -13,18 +13,23 @@ use bytes::{Buf, Bytes};
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// The AudioSpecificConfig is shorter than its two-byte minimum.
 	#[error("AudioSpecificConfig must be at least 2 bytes")]
 	ConfigTooShort,
 
+	/// The extended audioObjectType is truncated.
 	#[error("extended audioObjectType requires 2 additional bytes")]
 	ExtendedConfigTooShort,
 
+	/// The AudioSpecificConfig ends before its required fields.
 	#[error("AudioSpecificConfig incomplete")]
 	IncompleteConfig,
 
+	/// The explicit sample rate is truncated.
 	#[error("explicit sample rate requires 3 additional bytes")]
 	ExplicitSampleRateTooShort,
 
+	/// The sample rate index is unsupported.
 	#[error("unsupported sample rate index: {0}")]
 	UnsupportedSampleRateIndex(u8),
 
@@ -58,6 +63,7 @@ pub enum Error {
 	ProgramConfigEmpty,
 }
 
+/// A result using this module's error type.
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Typed AAC configuration mirroring the relevant fields of an

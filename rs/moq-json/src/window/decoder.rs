@@ -1,5 +1,6 @@
 //! The track-free half of window consumption: frame payloads in, window events out.
 
+use std::cell::RefCell;
 use std::collections::VecDeque;
 
 use serde::de::DeserializeOwned;
@@ -102,6 +103,9 @@ pub struct Decoder<T> {
 
 	/// Events produced by the frames decoded so far, oldest first.
 	events: VecDeque<Queued<T>>,
+
+	/// Reused key buffers for refusing a frame that repeats a key.
+	check: RefCell<crate::strict::Scratch>,
 }
 
 impl<T> Decoder<T> {
@@ -113,6 +117,7 @@ impl<T> Decoder<T> {
 			len: 0,
 			delivered: None,
 			events: VecDeque::new(),
+			check: RefCell::default(),
 		}
 	}
 
@@ -159,6 +164,7 @@ impl<T: DeserializeOwned> Decoder<T> {
 			false => None,
 		};
 		let bytes = inflated.as_deref().unwrap_or(payload);
+		crate::strict::check(bytes, &self.check)?;
 
 		if !group.positioned {
 			let header: Header<T> = parse(bytes)?;

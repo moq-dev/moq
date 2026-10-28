@@ -40,31 +40,70 @@ and distinguish a MoQ group boundary from a decoder acquisition point. RAI,
 periodic cuts, and an intact object alone do not ensure available PAT/PMT,
 codec configuration, clock context, or references for every MPTS program.
 
-The README owns the guide and the final two-mode integration proof. Reuse the
-children's fixtures and CI recipes, including their known-bad controls. Publish
+The README owns the guide and integration proof for the modes present in
+m1: semantic remux and raw import/carriage. Raw export and its packet-level
+proof landed in #5856; the guide covers it too. Reuse the children's
+fixtures and CI recipes, including their known-bad controls. Publish
 a coverage table linking each supported profile and loss guarantee to its
 test; unsupported or unmeasured cells stay explicit. Keep CLI instructions
 and the MPEG-TS draft consistent in each feature change.
 
-The planning children settle catalog and clock contracts before production
-changes. Their output adds independently completable implementation quests to
-this line; an audit finding is not authorization to guess a public API.
+Private PES (decided 2026-10-16, #5718) landed in #5832 and #5921: a
+private PES rides whole as a timed `pesPacket` track, stamped with its
+program-clock placement, and the draft -00 `pes` framing is refused. The
+guide documents that contract and the clock fields that refuse a stream.
+
+The semantic fidelity audit (2026-10-20) maps each source mechanism to its
+contract in the semantic lane. The guide's profile table starts from it;
+each open row has a child quest, and an audit finding is not authorization
+to guess a public API. Preserved means carried through the catalog or a
+track and re-emitted; normalized means rebuilt with the stated meaning;
+refused means an error or a counted drop.
+
+| Mechanism | Contract | Owner |
+|:--|:--|:--|
+| H.264 (0x1B), H.265 (0x24) | Preserved: video rendition, PID and ES descriptors in `mpegts.tracks`; AUs cross PES boundaries with source or explicitly proportional POC-derived PTS; DTS normalized from decode order | landed |
+| AAC ADTS (0x0F), MP2, AC-3, E-AC-3, Opus (0x06 + `Opus`) | Preserved: audio rendition; Opus export labels mono and stereo, and 3 to 8 channels with an OpusHead in the Vorbis layout. Other mapping families (such as 255) refuse | landed |
+| Private and unknown PES types, LATM (0x11), metadata (0x15) | Preserved: `pesPacket`, PTS and DTS rebased | landed |
+| PES clock fields (ESCR, pack header, TREF), PES scrambling | Refused, counted in `refused` | landed |
+| Private sections (0x05), SCTE-35 (0x86 + `CUEI`) | Preserved: `verbatim` section, `pts_adjustment` rebased | landed |
+| MPEG-1/2 video (0x01/0x02) | Preserved: `pesPacket` grouped from one sequence header to the next, keeping its clock role | landed |
+| DSM-CC types (0x0A to 0x0D), 0x86 without `CUEI` | DSM-CC preserved as a `verbatim` section; 0x86 without `CUEI` refused, counted in `refused` | landed |
+| CAT, EMM/ECM, ATSC PSIP, other SI PIDs, unlisted PIDs, TS scrambling | Outside the profile, raw lane; counted in `refused`, unclaimed PIDs when the import reads every program | landed |
+| DVB SI on 0x0010, 0x0011, 0x0012, 0x0014 | Preserved: snapshot track per PID and `table_id` | landed |
+| Program identity, program and ES descriptors | Preserved: descriptors follow each PMT revision; an identity change refuses | landed |
+| PMT add, remove, retype; PID reuse | Normalized without a new epoch: a changed or reused PID ends its track and continues under a fresh name, and the export rebuilds the PMT at the next `version_number` | landed |
+| PAT changes: moved PMT PID, programs added or removed | Normalized: followed; a removed program retires, and returns as a new epoch. Today ignored, or the whole multiplex stops | [PAT changes](/quest/m1/ts-reliability/pat-lifecycle.md) |
+| Programs without video | Preserved when the PMT names a PCR PID; refused without one | landed |
+| PCR | Normalized: rebased, carried on the first video PID, else audio, else a dedicated PCR-only PID | landed |
+| Mux rate, null stuffing | Normalized: re-padded to `muxRate` while the source is CBR | landed |
+| PSI and SI repetition | Normalized: PAT/PMT every 500 ms and at keyframes, SI at DVB maxima | landed |
+| Media PES headers, TS packet layer | Normalized: rebuilt by export; the raw lane keeps them | landed |
+| PAT network PID entry | Preserved: listed on 0x0010 when a NIT is carried | landed |
+
+Decided in the 2026-10-22 root-cause audit: the rows above kept getting
+patched one at a time because two foundations were missing. Decode time is
+reconstructed from history instead of decode order, and import state has no
+owner that retires it. Those quests rank ahead of the remaining rows. Rejected: carrying
+decode time in every frame container, one shared ingest byte budget,
+and replacing the demux with GStreamer or another parser (it fixes neither
+cause). Out of scope for now: decoupling catalog publication from mux-rate
+measurement. Re-planned the same day: decode order covers MKV and FLV too and
+absorbs the release audit's export-reorder quest, and the shared parser lands
+before the open stream-routes and PAT drafts, which rebase onto it.
+
 PMT fragmentation (#5220), initial mux-rate measurement (#5287), and
-decoder-time admission (#5306) have landed; PSI runs and catalog linger
-remain with their current quests.
+decoder-time admission (#5306) have landed, as have PSI runs (#5606) and
+catalog linger (#5305).
 
 ## Required
 
-- [Plan: semantic fidelity](/quest/m1/ts-reliability/fidelity.md) - explicit profiles and PMT lifecycle contracts produce implementation quests
-- [Plan: PES timing and headers](/quest/m1/plan-ts-pes-untimed.md) - private PES semantics have a settled carriage and placement contract
-- [Loss and recovery tests](/quest/m1/ts-reliability/recovery.md) - actual MoQ omissions exercise reacquisition and unaffected tracks
-- [T-STD TS export](/quest/m1/tstd/README.md) - the semantic mux schedules the content it admits within its supported buffer models
+- [PAT changes](/quest/m1/ts-reliability/pat-lifecycle.md) - a revised PAT never leaves a broadcast meaning another program
+- [TS workflow passes](/quest/m1/ts-reliability/validation-green.md) - the scheduled TS lanes pass on main again, with no lane loosened
+- [Export SI order](/quest/m1/ts-reliability/export-si-order.md) - a TS export sends SI and media after its PMT and a PCR interval, so a hop keeps first emissions
+- [A stitched switch returns to --delay](/quest/m1/ts-reliability/stitch-catch-up.md) - `--stitch` drops the old program's tail once the replacement acquires, so latency settles back to `--delay`
 
 ## Related
 
-- [Epoch anchor](/quest/m1/epoch-anchor.md) - shared identity across importers requires one source coordinate per epoch, derived from the epoch
-- [TS over RTP legs](/quest/m2/ts-rtp-egress.md) - TS identity alone is not ST 2022-7, which also needs matching RTP headers
-- [TS health counters](/quest/m2/ts-health-stats.md) - ingress and egress evidence need distinct monitoring points
 - [MSFTS mapping](/quest/m3/msfts-convergence.md) - document the exact equivalence and differences between the carriage modes
 
-- [TS passthrough export](/quest/m2/ts-passthrough-export.md) - a new mode that does not gate correctness of existing TS modes

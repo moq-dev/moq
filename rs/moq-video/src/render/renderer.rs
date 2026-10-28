@@ -2,27 +2,7 @@
 
 use super::color::uniform;
 use super::source::{self, Layout, Source};
-use crate::{Color, Error, Frame, Size};
-
-/// How many consecutive zero-copy import failures retire the fast path.
-///
-/// One failure is usually transient (a pool ran dry, a surface arrived in an
-/// unexpected format). A driver that cannot do the import at all fails every
-/// time, and retrying it per frame forever costs an allocation and a log line at
-/// frame rate, so the path is retired and the CPU fallback takes over.
-const ZERO_COPY_STRIKES: u32 = 3;
-
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
-fn dma_buf_import_timed_out(error: &Error) -> bool {
-	let Error::Render(error) = error else {
-		return false;
-	};
-	error.chain().any(|cause| {
-		cause
-			.downcast_ref::<std::io::Error>()
-			.is_some_and(|error| error.kind() == std::io::ErrorKind::TimedOut)
-	})
-}
+use crate::{Color, Error, Frame, Size, Surface};
 
 /// Renderer configuration.
 ///
@@ -65,14 +45,6 @@ pub struct Config {
 	/// whenever it came off the wire: the authoritative answer is in the
 	/// bitstream's VUI and does not survive decoding.
 	pub color: Option<Color>,
-
-	/// Whether to import GPU frames zero-copy (aliasing the decoder's surface as
-	/// a texture) instead of downloading them to the CPU first. On by default.
-	///
-	/// A failing import path retires itself after a few strikes, so this is for
-	/// forcing the CPU path deliberately: comparing output, or working around a
-	/// driver without rebuilding.
-	pub zero_copy: bool,
 }
 
 impl Default for Config {
@@ -82,14 +54,13 @@ impl Default for Config {
 			format: wgpu::TextureFormat::Rgba8Unorm,
 			usage: wgpu::TextureUsages::empty(),
 			color: None,
-			zero_copy: true,
 		}
 	}
 }
 
 impl Config {
 	/// A default config: output at each frame's own size, `Rgba8Unorm`, inferred
-	/// color space, zero-copy on.
+	/// color space.
 	pub fn new() -> Self {
 		Self::default()
 	}
@@ -101,10 +72,11 @@ impl Config {
 /// [`render`](Self::render) hands back a plain [`wgpu::Texture`], so what draws
 /// it (a swapchain blit, an egui image, a bevy material) stays entirely yours.
 ///
-/// A GPU frame is imported without a round trip through the CPU where the
-/// platform allows it, and any frame the fast paths do not recognize falls back
-/// to uploading [`Surface::into_i420`](crate::Surface::into_i420). So which path
-/// a frame takes is a question of cost, not of whether it draws at all.
+/// A CPU frame ([`Surface::I420`](crate::Surface::I420)) is uploaded. A GPU
+/// frame is imported without a round trip through the CPU, and one this
+/// platform has no importer for is an error rather than a hidden download: ask
+/// the decoder or capture for [`output`](super::output) of the device and it
+/// only hands over frames that draw here.
 ///
 /// One renderer draws one video. It caches the pipeline, the plane textures and
 /// the output texture, so keep it alive across frames rather than rebuilding it
@@ -123,14 +95,6 @@ pub struct Renderer {
 
 	source: source::Cache,
 	output: Option<wgpu::Texture>,
-
-	/// Consecutive zero-copy import failures, up to [`ZERO_COPY_STRIKES`].
-	strikes: u32,
-	/// Set once the fast path is retired for the life of this renderer.
-	retired: bool,
-	/// Set once a frame has been imported rather than uploaded, so the line
-	/// saying so is logged once rather than per frame.
-	imported: bool,
 }
 
 /// The compiled pipeline, one variant per plane layout, and everything they share.
@@ -211,9 +175,9 @@ impl Renderer {
 	///
 	/// The device and queue are the application's: the renderer draws into
 	/// textures that application already owns, so it never creates a device of
-	/// its own. Both handles are cheap to clone and are kept. On Linux, request
-	/// [`wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF`] on the device to import
-	/// PipeWire DMA-BUFs instead of downloading them.
+	/// its own. Both handles are cheap to clone and are kept. On Linux, a device
+	/// that will be handed DMA-BUFs needs
+	/// [`wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF`].
 	pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, config: Config) -> Result<Self, Error> {
 		if let Some(size) = config.size {
 			size.validate_nonzero("render output")?;
@@ -238,9 +202,6 @@ impl Renderer {
 			color: None,
 			source: source::Cache::default(),
 			output: None,
-			strikes: 0,
-			retired: false,
-			imported: false,
 		})
 	}
 
@@ -249,6 +210,11 @@ impl Renderer {
 	/// The returned handle aliases a texture the renderer reuses, so the next
 	/// call overwrites what you are holding. Present or copy it before rendering
 	/// again.
+	///
+	/// Errors on a GPU frame this renderer cannot import: a surface kind with no
+	/// importer on this platform, a pixel format its importer cannot alias, a
+	/// device opened without the feature the import needs, or an import the
+	/// driver refuses. The message names the fix.
 	pub fn render(&mut self, frame: &Frame) -> Result<wgpu::Texture, Error> {
 		let mut source = self.source(frame)?;
 		if let Some(source_color) = source.color {
@@ -334,44 +300,13 @@ impl Renderer {
 		Ok(output)
 	}
 
-	/// Turn a frame into plane textures, preferring a zero-copy import and
-	/// falling back to a CPU upload.
+	/// Turn a frame into plane textures: an upload for a CPU frame, an import
+	/// for a GPU one.
 	fn source(&mut self, frame: &Frame) -> Result<Source, Error> {
-		if self.config.zero_copy && !self.retired {
-			match self.source.import(&self.device, &frame.surface) {
-				Ok(Some(source)) => {
-					self.strikes = 0;
-					// The one observable difference between a picture that
-					// reached the GPU untouched and one that went through system
-					// memory. Worth a line the first time it happens, because
-					// nothing else about a working renderer says which it was.
-					if !self.imported {
-						self.imported = true;
-						tracing::debug!(
-							layout = ?source.layout,
-							"drawing frames zero-copy; the picture reaches the GPU without a download"
-						);
-					}
-					return Ok(source);
-				}
-				// No import path for this surface on this platform. Not a
-				// failure, so it costs no strike: the CPU path is the answer
-				// for this surface and always will be.
-				Ok(None) => {}
-				#[cfg(all(target_os = "linux", feature = "dmabuf"))]
-				Err(err) if dma_buf_import_timed_out(&err) => return Err(err),
-				Err(err) => {
-					self.strikes += 1;
-					self.retired = self.strikes >= ZERO_COPY_STRIKES;
-					match self.retired {
-						true => tracing::warn!(%err, "zero-copy import failed repeatedly; using the CPU path"),
-						false => tracing::debug!(%err, "zero-copy import failed; falling back to the CPU"),
-					}
-				}
-			}
+		match &frame.surface {
+			Surface::I420(i420) => self.source.upload(&self.device, &self.queue, i420),
+			surface => self.source.import(&self.device, surface),
 		}
-
-		self.source.upload(&self.device, &self.queue, frame)
 	}
 
 	/// The output texture, recreated when the size it should have changes.
@@ -528,18 +463,71 @@ mod tests {
 	use moq_net::Timestamp;
 
 	use super::*;
-	use crate::Surface;
 
+	/// A GPU frame the renderer cannot import is an error that names the fix,
+	/// never a download. A DMA-BUF on a device opened without the import feature
+	/// is the case every Linux device can stage.
 	#[cfg(all(target_os = "linux", feature = "dmabuf"))]
-	#[test]
-	fn dma_buf_fence_timeout_is_terminal_for_the_frame() {
-		let timed_out = Error::Render(anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::TimedOut)));
-		let other = Error::Render(anyhow::Error::new(std::io::Error::from(
-			std::io::ErrorKind::PermissionDenied,
-		)));
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn an_unimportable_gpu_frame_is_refused() {
+		use crate::frame::{DmaBuf, DmaBufLayout, DmaBufPlane};
 
-		assert!(dma_buf_import_timed_out(&timed_out));
-		assert!(!dma_buf_import_timed_out(&other));
+		let (device, queue) = gpu().await;
+		assert!(
+			!device
+				.features()
+				.contains(wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF)
+		);
+		let mut renderer = Renderer::new(&device, &queue, Config::new()).expect("a renderer");
+
+		let layout = DmaBufLayout::new(
+			crate::DrmFormat::NV12,
+			Size::new(8, 8),
+			vec![DmaBufPlane::new(0, 8), DmaBufPlane::new(64, 8)],
+		);
+		let fd = std::fs::File::open("/dev/zero").expect("open /dev/zero").into();
+		let buffer = DmaBuf::new(fd, layout, ()).expect("a well-formed DMA-BUF");
+		let error = renderer
+			.render(&Frame::new(Surface::DmaBuf(buffer), Timestamp::ZERO))
+			.expect_err("a DMA-BUF this device cannot import");
+		assert!(
+			error.to_string().contains("VULKAN_EXTERNAL_MEMORY_DMA_BUF"),
+			"the error names the missing feature: {error}"
+		);
+
+		// The renderer is not poisoned: the next CPU frame still draws.
+		renderer
+			.render(&solid(Size::new(8, 8), [255, 0, 0, 255]))
+			.expect("a CPU frame after the refusal");
+	}
+
+	/// [`output`](super::super::output) keeps GPU frames only for a device that
+	/// imports them, so a source feeding a device without the import feature
+	/// decodes to the CPU instead of handing over DMA-BUFs it would refuse.
+	#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn the_output_follows_the_device() {
+		let instance = wgpu::Instance::default();
+		let adapter = instance
+			.request_adapter(&wgpu::RequestAdapterOptions::default())
+			.await
+			.expect("a GPU adapter");
+		let open = |features| {
+			adapter.request_device(&wgpu::DeviceDescriptor {
+				required_features: features,
+				..Default::default()
+			})
+		};
+
+		let (without, _queue) = open(wgpu::Features::empty()).await.expect("a GPU device");
+		assert_eq!(super::super::output(&without), crate::Output::Cpu);
+
+		let import = wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF;
+		assert!(adapter.features().contains(import), "the adapter imports DMA-BUFs");
+		let (with, _queue) = open(import).await.expect("a DMA-BUF-capable GPU device");
+		assert_eq!(super::super::output(&with), crate::Output::Render);
 	}
 
 	/// Capture packed PipeWire DMA-BUFs, import them through Vulkan, and turn
@@ -550,6 +538,7 @@ mod tests {
 	#[cfg(all(target_os = "linux", feature = "pipewire"))]
 	#[tokio::test]
 	#[ignore = "needs a PipeWire desktop and Vulkan GPU"]
+	#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 	async fn packed_dmabuf_renders_through_vulkan() {
 		let instance = wgpu::Instance::default();
 		let adapter = instance
@@ -577,7 +566,9 @@ mod tests {
 		let mut renderer = Renderer::new(&device, &queue, Config::new()).expect("a renderer");
 
 		let capture = crate::capture::Config {
-			source: crate::capture::Source::Display(None),
+			source: crate::capture::Source::Portal(crate::capture::portal::Selection::new(
+				crate::capture::portal::Kind::Screen,
+			)),
 			..Default::default()
 		};
 		let mut stream = crate::capture::open(&capture).await.expect("portal screen capture");
@@ -606,14 +597,11 @@ mod tests {
 			let imported = renderer
 				.source
 				.import(&device, &frame.surface)
-				.expect("Vulkan DMA-BUF import")
-				.expect("a DMA-BUF import path");
+				.expect("Vulkan DMA-BUF import");
 			assert_eq!(imported.layout, Layout::Rgba);
 			drop(imported);
 
 			let texture = renderer.render(&frame).expect("a zero-copy rendered frame");
-			assert_eq!(renderer.strikes, 0, "frame {index} fell back to the CPU");
-			assert!(!renderer.retired, "frame {index} retired the zero-copy path");
 			assert_eq!((texture.width(), texture.height()), (stream.width(), stream.height()));
 		}
 
@@ -725,10 +713,9 @@ mod tests {
 	/// is exactly the case `Surface::color` exists to report.
 	///
 	/// The sibling tests all run at 64x64, below the threshold where the guess
-	/// happens to agree. Ignored: needs a GPU, which CI lacks. Run with
-	/// `--ignored`.
+	/// happens to agree.
 	#[tokio::test]
-	#[ignore]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
 	async fn the_declared_color_space_beats_the_size_guess() {
 		let (device, queue) = gpu().await;
 		let size = Size::new(1280, 720);
@@ -757,13 +744,13 @@ mod tests {
 			// threshold. The samples stay BT.601 while the size now implies
 			// BT.709, so rendering by size alone skews this back.
 			let sd = solid(Size::new(640, 480), rgba);
-			assert_eq!(sd.surface.color(), Some(crate::Color::Bt601Limited));
+			assert_eq!(sd.surface.color(), Some(crate::Color::BT601));
 			let scaled = sd
 				.resize(size, &crate::resize::Config::default())
 				.expect("scale past 576 lines");
 			assert_eq!(
 				scaled.surface.color(),
-				Some(crate::Color::Bt601Limited),
+				Some(crate::Color::BT601),
 				"resize carries the space across rather than re-guessing"
 			);
 			assert_ne!(scaled.surface.color(), Some(crate::Color::infer(size)));
@@ -775,10 +762,9 @@ mod tests {
 	}
 
 	/// The universal path end to end: a CPU frame uploaded as three planes,
-	/// converted by the shader, read back. Ignored: needs a GPU, which CI lacks.
-	/// Run with `--ignored`.
+	/// converted by the shader, read back.
 	#[tokio::test]
-	#[ignore]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
 	async fn cpu_frames_survive_the_round_trip() {
 		let (device, queue) = gpu().await;
 		let size = Size::new(64, 64);
@@ -811,10 +797,9 @@ mod tests {
 	}
 
 	/// The output follows `Config::size` rather than the frame's, so a caller
-	/// can render straight into a fixed target. Ignored: needs a GPU. Run with
-	/// `--ignored`.
+	/// can render straight into a fixed target.
 	#[tokio::test]
-	#[ignore]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
 	async fn config_size_overrides_the_frame_size() {
 		let (device, queue) = gpu().await;
 		let config = Config {
@@ -874,9 +859,10 @@ mod tests {
 	/// they assert the space is limited before building a pattern.
 	#[cfg(all(target_os = "linux", feature = "vaapi"))]
 	fn to_yuv(color: Color, rgb: [u8; 3]) -> [u8; 3] {
-		let (kr, kb) = match color {
-			Color::Bt601Limited | Color::Bt601Full => (0.299f32, 0.114f32),
-			Color::Bt709Limited | Color::Bt709Full => (0.2126, 0.0722),
+		let (kr, kb) = match color.matrix {
+			crate::color::Matrix::Bt601 => (0.299f32, 0.114f32),
+			crate::color::Matrix::Bt709 => (0.2126, 0.0722),
+			crate::color::Matrix::Bt2020 => (0.2627, 0.0593),
 		};
 		let kg = 1.0 - kr - kb;
 		let [r, g, b] = rgb.map(|c| c as f32 / 255.0);
@@ -971,7 +957,7 @@ mod tests {
 	///
 	/// - The import returns a source at all and its layout is `expected`. Only
 	///   the DMA-BUF importer produces those layouts, so this says which branch
-	///   ran. Without it the CPU fallback would quietly satisfy everything below.
+	///   ran.
 	/// - Every pixel matches the CPU upload of the same samples. That is the one
 	///   that catches a swapped chroma pair, a plane at the wrong offset, an
 	///   ignored row pitch, and a mismatched matrix, all at once.
@@ -992,7 +978,7 @@ mod tests {
 		// Below the 576 lines the crate infers BT.709 above, so both paths land
 		// on BT.601 limited and the pattern is built for that.
 		let color = Color::infer(size);
-		assert_eq!(color, Color::Bt601Limited);
+		assert_eq!(color, Color::BT601);
 
 		let Some(buffer) = crate::render::dmabuf::fixture::surface(format, size, &pattern(format, size, color)) else {
 			return false;
@@ -1030,15 +1016,12 @@ mod tests {
 		let imported = renderer
 			.source
 			.import(device, &frame.surface)
-			.expect("import the DMA-BUF")
-			.expect("a DMA-BUF import path");
+			.expect("import the DMA-BUF");
 		assert_eq!(imported.layout, expected, "the frame imported as the wrong layout");
 		assert_eq!(imported.color, Some(color));
 		drop(imported);
 
 		let texture = renderer.render(&frame).expect("a rendered frame");
-		assert_eq!(renderer.strikes, 0, "the zero-copy import should not have failed");
-		assert!(!renderer.retired);
 		let zero_copy = readback(device, queue, &texture).await;
 
 		// Every pixel, not a sample of them: a shear from an ignored row pitch
@@ -1189,7 +1172,7 @@ mod tests {
 
 		let mut encoder = crate::encode::Encoder::new(&crate::encode::Config {
 			kind: crate::encode::Kind::Software,
-			..crate::encode::Config::new(width, height, crate::Rate::new(30, 1).unwrap())
+			..crate::encode::Config::new(width, height, crate::FrameRate::new(30, 1).unwrap())
 		})
 		.expect("a software H.264 encoder");
 
@@ -1251,13 +1234,11 @@ mod tests {
 			let source = importing
 				.source
 				.import(&device, &gpu.surface)
-				.expect("import the decoded surface")
-				.expect("a DMA-BUF import path");
+				.expect("import the decoded surface");
 			assert_eq!(source.layout, Layout::Nv12, "picture {index} did not import as NV12");
 			drop(source);
 
 			let texture = importing.render(gpu).expect("draw the imported picture");
-			assert_eq!(importing.strikes, 0, "picture {index} fell back to the CPU");
 			let zero_copy = readback(&device, &queue, &texture).await;
 
 			let texture = uploading.render(cpu).expect("draw the downloaded picture");
@@ -1348,7 +1329,7 @@ mod tests {
 		};
 		let mut encoder = crate::encode::Encoder::new(&crate::encode::Config {
 			kind: crate::encode::Kind::Software,
-			..crate::encode::Config::new(width, height, crate::Rate::new(30, 1).unwrap())
+			..crate::encode::Config::new(width, height, crate::FrameRate::new(30, 1).unwrap())
 		})
 		.expect("a software H.264 encoder");
 
@@ -1385,7 +1366,6 @@ mod tests {
 					drop((file, export));
 
 					let texture = importing.render(gpu).expect("draw the imported picture");
-					assert_eq!(importing.strikes, 0, "picture {index} fell back to the CPU");
 					let zero_copy = readback(&device, &queue, &texture).await;
 					let texture = uploading.render(cpu).expect("draw the downloaded picture");
 					let reference = readback(&device, &queue, &texture).await;
@@ -1437,7 +1417,7 @@ mod tests {
 	/// GPU. Run with `--ignored`.
 	#[cfg(apple)]
 	#[tokio::test]
-	#[ignore]
+	#[ignore = "needs a Metal GPU; run by just rs macos-test"]
 	async fn imports_survive_decoder_pool_recycling() {
 		let (device, queue) = gpu().await;
 		let size = Size::new(256, 256);
@@ -1451,23 +1431,24 @@ mod tests {
 		for round in 0..24 {
 			let rgba = colors[round % colors.len()];
 			// Built and dropped inside the loop, so its buffer returns to the
-			// pool the moment `render` returns.
+			// pool the moment `render` returns. A pixel buffer only renders by
+			// import, so `Ok` means the fast path ran.
+			let surface = pooled(size, rgba);
+			assert!(matches!(surface, crate::Surface::PixelBuffer(_)));
 			let texture = renderer
-				.render(&Frame::new(pooled(size, rgba), Timestamp::ZERO))
-				.expect("a rendered frame");
-			assert_eq!(renderer.strikes, 0, "round {round} fell back to the CPU");
+				.render(&Frame::new(surface, Timestamp::ZERO))
+				.unwrap_or_else(|err| panic!("round {round}: {err}"));
 
 			let pixels = readback(&device, &queue, &texture).await;
 			assert_close(pixels[128 * 256 + 128], rgba);
 		}
 	}
 
-	/// The zero-copy import has to produce the same pixels as the upload, or the
-	/// fallback would silently change what the user sees. Ignored: needs a GPU.
-	/// Run with `--ignored`.
+	/// The zero-copy import has to produce the same pixels as the upload of the
+	/// same picture. Ignored: needs a GPU. Run with `--ignored`.
 	#[cfg(apple)]
 	#[tokio::test]
-	#[ignore]
+	#[ignore = "needs a Metal GPU; run by just rs macos-test"]
 	async fn the_metal_import_matches_the_cpu_path() {
 		let (device, queue) = gpu().await;
 		let size = Size::new(64, 64);
@@ -1484,16 +1465,14 @@ mod tests {
 		};
 
 		// The surface a hardware decode hands back: NV12 and IOSurface-backed.
+		// A pixel buffer only renders by import, so `Ok` means the fast path ran.
 		let surface = pooled(size, rgba);
+		assert!(matches!(surface, crate::Surface::PixelBuffer(_)));
 
 		let mut renderer = Renderer::new(&device, &queue, config).expect("a renderer");
 		let texture = renderer
 			.render(&Frame::new(surface, Timestamp::ZERO))
-			.expect("a rendered frame");
-		// The point of the test: the fast path ran. Without this the CPU
-		// fallback would quietly satisfy every assertion below.
-		assert_eq!(renderer.strikes, 0, "the zero-copy import should not have failed");
-		assert!(!renderer.retired);
+			.expect("the Metal import");
 
 		let imported = readback(&device, &queue, &texture).await;
 		assert_eq!(uploaded.len(), imported.len());

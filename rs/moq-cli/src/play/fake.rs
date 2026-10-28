@@ -1,12 +1,12 @@
 //! A deviceless [`Output`] for tests: it records what the speaker would have
-//! played and when, on tokio's clock, so a paused runtime measures playback
+//! played and when, on the ambient clock, so a paused runtime measures playback
 //! without waiting on it.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use moq_audio::playback::Input;
-use tokio::time::Instant;
+use moq_clock::Instant;
 
 use super::output::{Output, Sink, Speaker};
 use super::window::Event;
@@ -34,16 +34,22 @@ pub(super) struct Recorder {
 #[derive(Default)]
 struct State {
 	played: Vec<Played>,
+	speakers: usize,
 	sinks: usize,
 	events: Vec<Event>,
 }
 
 impl Recorder {
+	/// How many times playback opened the speaker.
+	pub fn speakers(&self) -> usize {
+		self.state.lock().unwrap().speakers
+	}
+
 	/// Present the newest due frame, just as the window does on a redraw.
 	pub fn present(&self, media: &super::media::Media<Self>) -> Option<hang::moq_net::Timestamp> {
 		let mut video = media.video.lock().unwrap();
 		let presentation = media.presentation.lock().unwrap();
-		let now = Instant::now().into_std();
+		let now = moq_clock::now();
 		let mut shown = None;
 		while video
 			.front()
@@ -72,11 +78,16 @@ impl Output for Recorder {
 	type Speaker = Self;
 
 	async fn speaker(&self) -> anyhow::Result<Self> {
+		self.state.lock().unwrap().speakers += 1;
 		Ok(self.clone())
 	}
 
 	fn send(&self, event: Event) {
 		self.state.lock().unwrap().events.push(event);
+	}
+
+	async fn render(&self) -> moq_video::Output {
+		moq_video::Output::Cpu
 	}
 }
 
@@ -116,10 +127,10 @@ pub(super) struct FakeSink {
 
 impl Sink for FakeSink {
 	async fn finish(self) {
-		tokio::time::sleep_until(self.end).await;
+		moq_clock::sleep_until(self.end).await;
 	}
 
-	fn write(&mut self, samples: &[u8]) -> anyhow::Result<()> {
+	fn write(&mut self, samples: &[u8]) -> anyhow::Result<moq_audio::playback::Write> {
 		anyhow::ensure!(samples.len().is_multiple_of(self.stride), "misaligned write");
 		let now = Instant::now();
 		// The real ring pads an underflow back up to its latency in silence once it
@@ -142,7 +153,9 @@ impl Sink for FakeSink {
 			to: self.end + duration,
 		});
 		self.end += duration;
-		Ok(())
+		let mut written = moq_audio::playback::Write::default();
+		written.accepted_sample_frames = frames as usize;
+		Ok(written)
 	}
 
 	fn buffered(&self) -> Duration {

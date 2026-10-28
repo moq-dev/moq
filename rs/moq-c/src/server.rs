@@ -5,15 +5,15 @@ use std::ffi::c_char;
 use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;
+use crate::task::Task;
 use crate::{Error, Id, NonZeroSlab, State, moq_string};
 
-/// A listener task: `close` signals shutdown, `callback` delivers requests and the terminal status.
+/// A listener task, whose callback delivers requests and the terminal status.
 ///
 /// The task delivers one final terminal callback and then removes itself, so
 /// `user_data` and the borrowed `addr`/`fingerprints` stay valid until then.
 struct ServerEntry {
-	close: Option<oneshot::Sender<()>>,
-	callback: OnStatus,
+	task: Task,
 	addr: String,
 	fingerprints: Vec<String>,
 }
@@ -21,7 +21,7 @@ struct ServerEntry {
 #[derive(Default)]
 pub struct Server {
 	/// Listener tasks. Close signals shutdown; the task delivers a final callback, then removes itself.
-	task: NonZeroSlab<Option<ServerEntry>>,
+	task: NonZeroSlab<ServerEntry>,
 
 	/// Incoming sessions delivered to a listener callback, freed after accept/reject.
 	request: NonZeroSlab<moq_tokio::server::Request>,
@@ -32,22 +32,21 @@ impl Server {
 	pub fn listen(&mut self, server: moq_tokio::Server, callback: OnStatus) -> Result<Id, Error> {
 		let addr = server.local_addr()?.to_string();
 		let fingerprints = server.certificates().fingerprints();
-		let (close, closed) = oneshot::channel();
-		let id = self.task.insert(Some(ServerEntry {
-			close: Some(close),
-			callback,
+		let (task, closed) = Task::new(callback);
+		let id = self.task.insert(ServerEntry {
+			task,
 			addr,
 			fingerprints,
-		}))?;
+		})?;
 
 		tokio::spawn(async move {
 			let res = crate::ffi::run(Self::run(server, callback, closed)).await;
 
 			// Deliver one final terminal callback (code <= 0), then drop the entry.
 			// Pull it out from under the lock so the callback never runs while held.
-			let entry = State::lock().server.task.remove(id).flatten();
+			let entry = State::lock().server.task.remove(id);
 			if let Some(entry) = entry {
-				entry.callback.call(res);
+				entry.task.callback.call(res);
 			}
 		});
 
@@ -85,19 +84,13 @@ impl Server {
 		// Signal shutdown; the task delivers a final callback and removes itself.
 		self.task
 			.get_mut(server)
-			.and_then(|entry| entry.as_mut())
 			.ok_or(Error::NotFound)?
-			.close
-			.take()
-			.ok_or(Error::NotFound)?;
-		Ok(())
+			.task
+			.close(Error::NotFound)
 	}
 
 	fn entry(&self, server: Id) -> Result<&ServerEntry, Error> {
-		self.task
-			.get(server)
-			.and_then(|entry| entry.as_ref())
-			.ok_or(Error::NotFound)
+		self.task.get(server).ok_or(Error::NotFound)
 	}
 
 	pub fn addr(&self, server: Id, dst: &mut moq_string) -> Result<(), Error> {
@@ -126,6 +119,17 @@ impl Server {
 	pub fn request_query(&self, request: Id, dst: &mut moq_string) -> Result<(), Error> {
 		*dst = match self.request(request)?.query() {
 			Some(query) => borrow(query),
+			None => moq_string {
+				data: std::ptr::null(),
+				len: 0,
+			},
+		};
+		Ok(())
+	}
+
+	pub fn request_peer_implementation(&self, request: Id, dst: &mut moq_string) -> Result<(), Error> {
+		*dst = match self.request(request)?.peer_implementation() {
+			Some(implementation) => borrow(implementation),
 			None => moq_string {
 				data: std::ptr::null(),
 				len: 0,

@@ -1,15 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
 use std::io::Cursor;
 
 use crate::Result;
-use bytes::{Buf, Bytes, BytesMut};
-use hang::catalog::{AAC, AudioCodec, AudioConfig, H264, H265, VP9, VideoCodec, VideoConfig};
+use bytes::{Bytes, BytesMut};
+use hang::catalog::{AAC, AudioCodec, AudioConfig, H265, VP9, VideoCodec, VideoConfig};
 use moq_net::Timestamp;
 use mp4_atom::Atom;
-use webm_iterable::WebmIterator;
-use webm_iterable::errors::TagIteratorError;
-use webm_iterable::iterator::AllowableErrors;
 use webm_iterable::matroska_spec::{BlockLacing, Master, MatroskaSpec, SimpleBlock};
 
 use super::Error;
@@ -41,7 +38,7 @@ const DEFAULT_TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 ///
 /// Laced blocks require a positive TrackEntry DefaultDuration to timestamp each frame.
 ///
-/// Unsupported track roles and subtitle encodings are logged and dropped.
+/// Unsupported track roles are skipped; malformed tracks and unsupported codecs fail the import.
 pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	broadcast: moq_net::broadcast::Producer,
 	catalog: crate::catalog::Producer<E>,
@@ -58,11 +55,10 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 
 	/// Accumulated unparsed input.
 	buffer: BytesMut,
-	/// Bytes already dropped from the front of `buffer`, so a tag's offset in it is absolute.
-	consumed: u64,
-	/// Where the latest handled tag starts, as an absolute offset. A drain pass restarts from a
-	/// replay point, so any tag starting at or before it was already handled.
-	handled: Option<u64>,
+	/// Incremental element state; an incomplete master retains its own children across chunks.
+	decoder: ebml_iterable::TagDecoder<MatroskaSpec>,
+	/// Whether `finish()` ended the input, even if it failed before the decoder drained.
+	finished: bool,
 	/// Whether the Tracks element has been processed.
 	tracks_seen: bool,
 
@@ -85,7 +81,7 @@ enum TrackKind {
 impl TrackKind {
 	/// The publisher priority for this kind of media, so audio isn't stuck behind a
 	/// video backlog on a busy connection.
-	fn priority(&self) -> u8 {
+	fn priority(&self) -> i8 {
 		match self {
 			Self::Video => hang::catalog::PRIORITY.video,
 			Self::Audio => hang::catalog::PRIORITY.audio,
@@ -152,6 +148,14 @@ impl Media {
 		}
 	}
 
+	fn end(&mut self) -> crate::Result<()> {
+		match self {
+			Self::Video(track) => track.end(),
+			Self::Audio(track) => track.end(),
+			Self::Text(track) => track.end(),
+		}
+	}
+
 	fn abort(self, err: moq_net::Error) {
 		match self {
 			Self::Video(track) => track.abort(err),
@@ -159,9 +163,18 @@ impl Media {
 			Self::Text(track) => track.abort(err),
 		}
 	}
+
+	fn name(&self) -> &str {
+		match self {
+			Self::Video(track) => track.name(),
+			Self::Audio(track) => track.name(),
+			Self::Text(track) => track.name(),
+		}
+	}
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Import<E> {
+	/// Import a byte stream into the broadcast using its reserved catalog producer.
 	pub fn new(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
 		let container = hang::catalog::Container::default();
 		Self {
@@ -171,8 +184,16 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			timebase: reserved.timebase(),
 			initial_reservation: Some(reserved),
 			buffer: BytesMut::new(),
-			consumed: 0,
-			handled: None,
+			decoder: ebml_iterable::TagDecoder::new(&[
+				MatroskaSpec::Ebml(Master::Start),
+				MatroskaSpec::Info(Master::Start),
+				MatroskaSpec::Tracks(Master::Start),
+				MatroskaSpec::TrackEntry(Master::Start),
+				MatroskaSpec::Audio(Master::Start),
+				MatroskaSpec::Video(Master::Start),
+				MatroskaSpec::BlockGroup(Master::Start),
+			]),
+			finished: false,
 			tracks_seen: false,
 			timestamp_scale_ns: DEFAULT_TIMESTAMP_SCALE_NS,
 			cluster_timestamp: 0,
@@ -195,81 +216,23 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// scratch). Bytes that cannot yet form a complete top-level tag are retained
 	/// for the next call.
 	pub fn decode(&mut self, data: &[u8]) -> Result<()> {
-		// Move the input into our scratch buffer.
+		if self.finished && !data.is_empty() {
+			return Err(Error::TracksAfterFinish.into());
+		}
 		self.buffer.extend_from_slice(data);
 
 		self.drain()
 	}
 
-	/// Run the iterator over the buffered bytes, processing every fully-parsed top-level tag.
-	///
-	/// On each call, the iterator restarts from the beginning of the retained buffer, so tags
-	/// already handled are skipped by their absolute offset. After parsing stops (UnexpectedEOF or end of buffer), bytes up to the start
-	/// of the most-recently emitted top-level tag are discarded so memory does not grow
-	/// unboundedly.
+	/// Decode complete elements, leaving incomplete bytes and master state for the next chunk.
 	fn drain(&mut self) -> Result<()> {
-		// Buffer master tags that are bounded and convenient to handle atomically.
-		let buffered = [
-			MatroskaSpec::Ebml(Master::Start),
-			MatroskaSpec::Info(Master::Start),
-			MatroskaSpec::Tracks(Master::Start),
-			MatroskaSpec::TrackEntry(Master::Start),
-			MatroskaSpec::Audio(Master::Start),
-			MatroskaSpec::Video(Master::Start),
-			MatroskaSpec::BlockGroup(Master::Start),
-		];
-
-		if self.buffer.is_empty() {
-			return Ok(());
+		while let Some(tag) = self
+			.decoder
+			.decode(&mut self.buffer)
+			.map_err(|_| Error::MatroskaParse)?
+		{
+			self.handle_tag(tag.tag)?;
 		}
-
-		let snapshot = self.buffer.clone().freeze();
-		let mut cursor = Cursor::new(snapshot.as_ref());
-		let mut iter = WebmIterator::new(&mut cursor, &buffered);
-		// We restart the iterator from the beginning of the retained buffer on every
-		// drain pass. Once data is replayed mid-Segment, ebml-iterable would otherwise
-		// reject Segment children (Cluster, Tracks, etc.) as appearing without their
-		// parent. Allowing hierarchy problems plus skipping tags by offset gives us
-		// idempotent streaming behavior.
-		iter.allow_errors(&[AllowableErrors::HierarchyProblems]);
-		// Don't synthesize Master::End tags when the buffer ends mid-element.
-		iter.emit_master_end_when_eof(false);
-
-		let mut last_offset: usize = 0;
-
-		loop {
-			match iter.next() {
-				Some(Ok(tag)) => {
-					last_offset = iter.last_emitted_tag_offset();
-					// A Master::End reports its master's start, so it is skipped here too.
-					let start = self.consumed + last_offset as u64;
-					if self.handled.is_some_and(|handled| start <= handled) {
-						continue;
-					}
-					self.handled = Some(start);
-					self.handle_tag(tag)?;
-				}
-				Some(Err(TagIteratorError::UnexpectedEOF { .. })) => break,
-				Some(Err(_e)) => {
-					return Err(Error::MatroskaParse.into());
-				}
-				None => {
-					last_offset = snapshot.len();
-					break;
-				}
-			}
-		}
-
-		drop(iter);
-
-		// Retain bytes from the start of the last emitted tag (safe replay point) onward.
-		// At the very least, this lets us reuse partially-read tags as more data arrives.
-		// If we never emitted anything (very first call with too few bytes), keep everything.
-		if last_offset > 0 {
-			self.buffer.advance(last_offset);
-			self.consumed += last_offset as u64;
-		}
-
 		Ok(())
 	}
 
@@ -285,6 +248,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			MatroskaSpec::Info(Master::Full(children)) => {
 				for c in &children {
 					if let MatroskaSpec::TimestampScale(v) = c {
+						if *v == 0 {
+							return Err(Error::ValueOutOfRange("TimestampScale").into());
+						}
 						self.timestamp_scale_ns = *v;
 					}
 				}
@@ -335,20 +301,21 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	}
 
 	fn handle_tracks(&mut self, reserved: &crate::catalog::Reserved<E>, entries: Vec<MatroskaSpec>) -> Result<()> {
+		let mut numbers = HashSet::new();
 		for entry in entries {
-			if let MatroskaSpec::TrackEntry(Master::Full(children)) = entry
-				&& let Err(e) = self.add_track(reserved, children)
-			{
-				if matches!(e, crate::Error::Mkv(Error::InvalidSubtitle(_))) {
-					return Err(e);
-				}
-				tracing::warn!(error = ?e, "skipping MKV track");
+			if let MatroskaSpec::TrackEntry(Master::Full(children)) = entry {
+				self.add_track(reserved, children, &mut numbers)?;
 			}
 		}
 		Ok(())
 	}
 
-	fn add_track(&mut self, reserved: &crate::catalog::Reserved<E>, children: Vec<MatroskaSpec>) -> Result<()> {
+	fn add_track(
+		&mut self,
+		reserved: &crate::catalog::Reserved<E>,
+		children: Vec<MatroskaSpec>,
+		numbers: &mut HashSet<u64>,
+	) -> Result<()> {
 		let mut track_number: Option<u64> = None;
 		let mut track_type: Option<u64> = None;
 		let mut codec_id: Option<String> = None;
@@ -365,7 +332,11 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				MatroskaSpec::DefaultDuration(v) if v > 0 => {
 					default_duration = Some(std::time::Duration::from_nanos(v))
 				}
-				MatroskaSpec::TrackNumber(v) => track_number = Some(v),
+				MatroskaSpec::TrackNumber(v) => {
+					if track_number.replace(v).is_some() {
+						return Err(moq_net::Error::Duplicate.into());
+					}
+				}
 				MatroskaSpec::TrackType(v) => track_type = Some(v),
 				MatroskaSpec::CodecID(v) => codec_id = Some(v),
 				MatroskaSpec::Language(v) => language = Some(v),
@@ -379,6 +350,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		}
 
 		let track_number = track_number.ok_or(Error::MissingTrackNumber)?;
+		if track_number == 0 {
+			return Err(Error::ValueOutOfRange("TrackNumber").into());
+		}
+		if !numbers.insert(track_number) {
+			return Err(moq_net::Error::Duplicate.into());
+		}
 		let track_type = track_type.ok_or(Error::MissingTrackType)?;
 		let codec_id = codec_id.ok_or(Error::MissingCodecId)?;
 
@@ -387,10 +364,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			1 => (TrackKind::Video, ".mkv-v"),
 			2 => (TrackKind::Audio, ".mkv-a"),
 			17 if matches!(codec_id.as_str(), "S_TEXT/UTF8" | "S_TEXT/WEBVTT") => (TrackKind::Text, ".mkv-t"),
-			17 => {
-				tracing::warn!(codec_id, "unsupported MKV subtitle encoding, skipping");
-				return Ok(());
-			}
+			17 => return Err(crate::Error::UnknownFormat(format!("MKV subtitle codec {codec_id}"))),
 			other => {
 				tracing::warn!(track_type = other, codec_id, "unsupported MKV track type, skipping");
 				return Ok(());
@@ -526,12 +500,16 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 		// Compute PTS in MKV's native nanosecond units and stamp it on the
 		// timestamp at NANO scale so a passthrough re-emit preserves precision.
-		let block_ticks = (self.cluster_timestamp as i64) + (block.timestamp as i64);
-		if block_ticks < 0 {
-			return Err(Error::NegativeBlockTimestamp.into());
-		}
+		let block_ticks = self
+			.cluster_timestamp
+			.checked_add_signed(i64::from(block.timestamp))
+			.ok_or(if block.timestamp < 0 {
+				Error::NegativeBlockTimestamp
+			} else {
+				Error::TimestampOverflow
+			})?;
 
-		let pts_ns = (block_ticks as u64)
+		let pts_ns = block_ticks
 			.checked_mul(self.timestamp_scale_ns)
 			.ok_or(Error::TimestampOverflow)?;
 		if track.kind == TrackKind::Text {
@@ -621,7 +599,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		for track in self.tracks.values_mut() {
 			let sequence = match &track.track {
-				Media::Text(text) => sequence.max(text.track().latest().map_or(0, |latest| latest + 1)),
+				Media::Text(text) => sequence.max(text.next_sequence()),
 				_ => sequence,
 			};
 			track.track.seek(sequence)?;
@@ -631,10 +609,20 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	/// Finish all tracks, flushing current groups.
 	pub fn finish(&mut self) -> Result<()> {
+		self.finished = true;
+		while let Some(tag) = self
+			.decoder
+			.decode_eof(&mut self.buffer)
+			.map_err(|_| Error::MatroskaParse)?
+		{
+			self.handle_tag(tag.tag)?;
+		}
+		// Finished sources can remain owned after EOF; release the last element's allocation.
+		self.buffer = BytesMut::new();
 		// No frame follows to anchor the clock, so publish the declared track set now.
 		self.initial_reservation = None;
 		for track in self.tracks.values_mut() {
-			if let Some(g) = track.group.take() {
+			if let Some(mut g) = track.group.take() {
 				g.finish()?;
 			}
 			track.track.finish()?;
@@ -644,6 +632,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	/// Abort all tracks with `err` instead of finishing, so subscribers see the real
 	/// cause rather than [`moq_net::Error::Dropped`]. Consumes the importer.
+	///
+	/// Unlike a drop, this leaves the tracks' HLS records to the catalog, whose abort fails them
+	/// rather than ending them as a complete recording.
 	pub fn abort(mut self, err: moq_net::Error) {
 		for mut track in std::mem::take(&mut self.tracks).into_values() {
 			if let Some(g) = track.group.take() {
@@ -654,62 +645,229 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	}
 }
 
+impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {
+	/// End each track, then retire its HLS records: every track takes a fresh name, so nothing
+	/// publishes it again.
+	fn drop(&mut self) {
+		for mut track in std::mem::take(&mut self.tracks).into_values() {
+			let name = track.track.name().to_string();
+			let ended = track.track.end();
+			drop(track);
+			if let Err(err) = ended {
+				tracing::warn!(%err, "failed to end a dropped MKV track");
+			}
+			self.catalog.retire_dropped(&name);
+		}
+	}
+}
+
 fn build_video_config(
 	codec_id: &str,
 	codec_private: Option<&Bytes>,
 	video_children: Option<&[MatroskaSpec]>,
 ) -> Result<VideoConfig> {
-	let (width, height) = video_children
-		.map(|cs| {
-			let mut w = None;
-			let mut h = None;
-			for c in cs {
-				match c {
-					MatroskaSpec::PixelWidth(v) => w = Some(*v as u32),
-					MatroskaSpec::PixelHeight(v) => h = Some(*v as u32),
-					_ => {}
-				}
-			}
-			(w, h)
-		})
-		.unwrap_or((None, None));
-
 	let mut config = match codec_id {
-		"V_VP8" => {
-			let mut config = VideoConfig::new(VideoCodec::VP8);
-			config.coded_width = width;
-			config.coded_height = height;
-			config
-		}
-		"V_VP9" => {
-			let mut config = VideoConfig::new(VP9 {
-				profile: 0,
-				level: 0,
-				bit_depth: 8,
-				color_primaries: 1,
-				chroma_subsampling: 1,
-				transfer_characteristics: 1,
-				matrix_coefficients: 1,
-				full_range: false,
-			});
-			config.coded_width = width;
-			config.coded_height = height;
-			config
-		}
+		"V_VP8" => VideoConfig::new(VideoCodec::VP8),
+		"V_VP9" => VideoConfig::new(VP9 {
+			profile: 0,
+			level: 0,
+			bit_depth: 8,
+			color_primaries: 1,
+			chroma_subsampling: 1,
+			transfer_characteristics: 1,
+			matrix_coefficients: 1,
+			full_range: false,
+		}),
 		"V_MPEG4/ISO/AVC" => build_h264_config(codec_private)?,
 		"V_MPEGH/ISO/HEVC" => build_h265_config(codec_private)?,
 		"V_AV1" => build_av1_config(codec_private)?,
 		other => return Err(Error::UnsupportedVideoCodec(other.to_string()).into()),
 	};
 
+	let mut width = None;
+	let mut height = None;
+	for child in video_children.unwrap_or_default() {
+		match child {
+			MatroskaSpec::PixelWidth(v) => width = Some(*v),
+			MatroskaSpec::PixelHeight(v) => height = Some(*v),
+			_ => {}
+		}
+	}
+
+	let coded_width = width
+		.map(|v| u32::try_from(v).map_err(|_| Error::ValueOutOfRange("PixelWidth")))
+		.transpose()?;
+	let coded_height = height
+		.map(|v| u32::try_from(v).map_err(|_| Error::ValueOutOfRange("PixelHeight")))
+		.transpose()?;
 	if config.coded_width.is_none() {
-		config.coded_width = width;
+		config.coded_width = coded_width;
 	}
 	if config.coded_height.is_none() {
-		config.coded_height = height;
+		config.coded_height = coded_height;
+	}
+	// The codec config outranks the Colour element a muxer added, which only fills its gaps.
+	let colour = video_children
+		.and_then(|cs| {
+			cs.iter().find_map(|c| match c {
+				MatroskaSpec::Colour(Master::Full(colour)) => Some(colour),
+				_ => None,
+			})
+		})
+		.map(|colour| matroska_color(colour))
+		.transpose()?
+		.flatten();
+	crate::codec::color::fill(&mut config.color, colour.as_ref(), "Colour");
+	if let Some(children) = video_children
+		&& let Some(aspect) = matroska_aspect(children, (width, height))?
+	{
+		let coded = width
+			.zip(height)
+			.and_then(|(w, h)| crate::codec::video::reduce_aspect(w.into(), h.into()));
+		if Some(aspect) != coded || config.display_aspect_width.is_some() {
+			crate::codec::video::fill_display_aspect(&mut config, aspect, "Matroska");
+		}
 	}
 
 	Ok(config)
+}
+
+/// The whole picture's display aspect, or `None` when the samples are square by default.
+///
+/// `DisplayWidth`/`DisplayHeight` size the picture after `PixelCrop*`, but the catalog carries no
+/// crop and its aspect covers the whole decoded picture. So the cropped sample shape is applied to
+/// the full frame, as FFmpeg does, instead of squeezing the uncropped picture into the cropped ratio.
+fn matroska_aspect(children: &[MatroskaSpec], pixels: (Option<u64>, Option<u64>)) -> Result<Option<(u32, u32)>> {
+	let (mut width, mut height, mut unit) = (None, None, 0);
+	let (mut left, mut right, mut top, mut bottom) = (0, 0, 0, 0);
+	for child in children {
+		match child {
+			MatroskaSpec::DisplayWidth(v) => width = Some(*v),
+			MatroskaSpec::DisplayHeight(v) => height = Some(*v),
+			MatroskaSpec::DisplayUnit(v) => unit = *v,
+			MatroskaSpec::PixelCropLeft(v) => left = *v,
+			MatroskaSpec::PixelCropRight(v) => right = *v,
+			MatroskaSpec::PixelCropTop(v) => top = *v,
+			MatroskaSpec::PixelCropBottom(v) => bottom = *v,
+			_ => {}
+		}
+	}
+	// 0 pixels, 1 centimeters, 2 inches, 3 aspect ratio, 4 unknown; both fields share the unit.
+	if unit > 4 {
+		return Err(Error::InvalidAspect("unknown DisplayUnit").into());
+	}
+	if unit != 0 && (width.is_none() || height.is_none()) {
+		return Err(Error::InvalidAspect("non-pixel DisplayUnit without both display dimensions").into());
+	}
+	// A missing pixel-unit dimension defaults to the cropped size, which keeps samples square.
+	if width.is_none() && height.is_none() {
+		return Ok(None);
+	}
+
+	let (shown_width, shown_height) = if (left, right, top, bottom) == (0, 0, 0, 0) {
+		let width = width.or(pixels.0).ok_or(Error::InvalidAspect("missing PixelWidth"))?;
+		let height = height.or(pixels.1).ok_or(Error::InvalidAspect("missing PixelHeight"))?;
+		(u128::from(width), u128::from(height))
+	} else {
+		let frame_width = pixels.0.ok_or(Error::InvalidAspect("missing PixelWidth"))?;
+		let frame_height = pixels.1.ok_or(Error::InvalidAspect("missing PixelHeight"))?;
+		let cropped = |size: u64, first: u64, second: u64| {
+			size.checked_sub(first)
+				.and_then(|size| size.checked_sub(second))
+				.filter(|size| *size > 0)
+				.ok_or(Error::InvalidAspect("crop leaves no picture"))
+		};
+		let cropped_width = cropped(frame_width, left, right)?;
+		let cropped_height = cropped(frame_height, top, bottom)?;
+		// display / cropped is the sample shape; scale the whole frame by it.
+		let scale = |display: u64, frame: u64, cropped_other: u64| {
+			u128::from(display)
+				.checked_mul(u128::from(frame))
+				.and_then(|size| size.checked_mul(u128::from(cropped_other)))
+				.ok_or(Error::InvalidAspect("unrepresentable display dimensions"))
+		};
+		(
+			scale(width.unwrap_or(cropped_width), frame_width, cropped_height)?,
+			scale(height.unwrap_or(cropped_height), frame_height, cropped_width)?,
+		)
+	};
+	let aspect = crate::codec::video::reduce_aspect(shown_width, shown_height)
+		.ok_or(Error::InvalidAspect("invalid or unrepresentable display dimensions"))?;
+	Ok(Some(aspect))
+}
+
+/// The colour a Matroska `Colour` element signals. Its code points are H.273's, `Range` counts 0
+/// as unspecified, 1 as limited, and 2 as full, and a partial mastering display is dropped. A code
+/// point past 255 or a light level past 65535 has no representation, so it is refused.
+pub(super) fn matroska_color(children: &[MatroskaSpec]) -> Result<Option<hang::catalog::Color>> {
+	use hang::catalog::{Chromaticity, Color, ContentLight, Mastering};
+
+	let (mut primaries, mut transfer, mut matrix, mut full_range) = (2, 2, 2, None);
+	let (mut max_cll, mut max_fall) = (None, None);
+	let mut mastering = None;
+	let code = |value: u64| u8::try_from(value).map_err(|_| Error::InvalidColour("code point"));
+	let light = |value: u64| u16::try_from(value).map_err(|_| Error::InvalidColour("light level"));
+	for child in children {
+		match child {
+			MatroskaSpec::Primaries(v) => primaries = code(*v)?,
+			MatroskaSpec::TransferCharacteristics(v) => transfer = code(*v)?,
+			MatroskaSpec::MatrixCoefficients(v) => matrix = code(*v)?,
+			MatroskaSpec::Range(1) => full_range = Some(false),
+			MatroskaSpec::Range(2) => full_range = Some(true),
+			MatroskaSpec::MaxCLL(v) => max_cll = Some(light(*v)?),
+			MatroskaSpec::MaxFALL(v) => max_fall = Some(light(*v)?),
+			MatroskaSpec::MasteringMetadata(Master::Full(fields)) => {
+				// Red, green, blue, and white x and y, then the max and min luminance.
+				let mut v = [None; 10];
+				for field in fields {
+					let (i, value) = match field {
+						MatroskaSpec::PrimaryRChromaticityX(x) => (0, x),
+						MatroskaSpec::PrimaryRChromaticityY(x) => (1, x),
+						MatroskaSpec::PrimaryGChromaticityX(x) => (2, x),
+						MatroskaSpec::PrimaryGChromaticityY(x) => (3, x),
+						MatroskaSpec::PrimaryBChromaticityX(x) => (4, x),
+						MatroskaSpec::PrimaryBChromaticityY(x) => (5, x),
+						MatroskaSpec::WhitePointChromaticityX(x) => (6, x),
+						MatroskaSpec::WhitePointChromaticityY(x) => (7, x),
+						MatroskaSpec::LuminanceMax(x) => (8, x),
+						MatroskaSpec::LuminanceMin(x) => (9, x),
+						_ => continue,
+					};
+					// Chromaticities lie in 0..=1 and luminances are nonnegative (Matroska's ranges).
+					let valid = match i {
+						0..=7 => (0.0..=1.0).contains(value),
+						_ => value.is_finite() && *value >= 0.0,
+					};
+					if !valid {
+						return Err(Error::InvalidColour("mastering value").into());
+					}
+					v[i] = Some(*value);
+				}
+				let xy = |i: usize| Some(Chromaticity { x: v[i]?, y: v[i + 1]? });
+				mastering = (|| {
+					Some(Mastering {
+						red: xy(0)?,
+						green: xy(2)?,
+						blue: xy(4)?,
+						white: xy(6)?,
+						max_luminance: v[8]?,
+						min_luminance: v[9]?,
+					})
+				})();
+			}
+			_ => {}
+		}
+	}
+
+	let mut color = crate::codec::color::cicp(primaries, transfer, matrix, full_range).unwrap_or_default();
+	color.mastering = mastering;
+	if max_cll.is_some() || max_fall.is_some() {
+		color.content_light = Some(ContentLight {
+			max_cll: max_cll.unwrap_or(0),
+			max_fall: max_fall.unwrap_or(0),
+		});
+	}
+	Ok((color != Color::default()).then_some(color))
 }
 
 fn build_audio_config(
@@ -717,35 +875,17 @@ fn build_audio_config(
 	codec_private: Option<&Bytes>,
 	audio_children: Option<&[MatroskaSpec]>,
 ) -> Result<AudioConfig> {
-	let mut sample_rate: u32 = 0;
-	let mut channels: u32 = 0;
-
-	if let Some(cs) = audio_children {
-		for c in cs {
-			match c {
-				MatroskaSpec::SamplingFrequency(v) => sample_rate = *v as u32,
-				MatroskaSpec::Channels(v) => channels = *v as u32,
-				_ => {}
-			}
-		}
-	}
-
-	match codec_id {
+	// Reject an unsupported codec before interpreting its codec-specific fields.
+	let mut config = match codec_id {
 		"A_OPUS" => {
 			// The catalog describes the decoder's output: Opus always decodes at 48 kHz, whatever the
 			// informational input rate in the OpusHead or SamplingFrequency claims.
 			let mut config = match codec_private {
-				Some(head) => {
-					let mut config = crate::codec::opus::config(head)?;
-					if config.channel_count == 0 {
-						config.channel_count = channels;
-					}
-					config
-				}
-				None => crate::codec::opus::Config::new(48_000, channels).into(),
+				Some(head) => crate::codec::opus::config(head)?,
+				None => crate::codec::opus::Config::new(48_000, 0).into(),
 			};
 			config.description = codec_private.cloned();
-			Ok(config)
+			config
 		}
 		"A_AAC" => {
 			let priv_data = codec_private.ok_or(Error::MissingCodecPrivate {
@@ -754,22 +894,9 @@ fn build_audio_config(
 			})?;
 			let mut cursor = priv_data.clone();
 			let cfg = crate::codec::aac::Config::parse(&mut cursor)?;
-
-			let mut config = AudioConfig::new(
-				AAC { profile: cfg.profile },
-				if cfg.sample_rate > 0 {
-					cfg.sample_rate
-				} else {
-					sample_rate
-				},
-				if cfg.channel_count > 0 {
-					cfg.channel_count
-				} else {
-					channels
-				},
-			);
+			let mut config = AudioConfig::new(AAC { profile: cfg.profile }, cfg.sample_rate, cfg.channel_count);
 			config.description = Some(priv_data.clone());
-			Ok(config)
+			config
 		}
 		"A_FLAC" => {
 			// Matroska A_FLAC CodecPrivate is the FLAC header: the `fLaC` marker
@@ -782,30 +909,38 @@ fn build_audio_config(
 			})?;
 			let mut cursor = priv_data.clone();
 			let cfg = crate::codec::flac::Config::parse(&mut cursor)?;
-
-			let mut config = AudioConfig::new(
-				AudioCodec::Flac,
-				if cfg.sample_rate > 0 {
-					cfg.sample_rate
-				} else {
-					sample_rate
-				},
-				if cfg.channel_count > 0 {
-					cfg.channel_count
-				} else {
-					channels
-				},
-			);
+			let mut config = AudioConfig::new(AudioCodec::Flac, cfg.sample_rate, cfg.channel_count);
 			config.description = Some(priv_data.clone());
-			Ok(config)
+			config
 		}
-		"A_MPEG/L3" => {
-			// MP3 carries its config in band, so there's no codec private; the track
-			// header's SamplingFrequency/Channels are the only config source.
-			Ok(AudioConfig::new(AudioCodec::Mp3, sample_rate, channels))
+		// MP3 carries its config in band; the track header supplies rate and channels.
+		"A_MPEG/L3" => AudioConfig::new(AudioCodec::Mp3, 0, 0),
+		other => return Err(Error::UnsupportedAudioCodec(other.to_string()).into()),
+	};
+
+	let mut sample_rate = 0;
+	let mut channels = 0;
+	for child in audio_children.unwrap_or_default() {
+		match child {
+			MatroskaSpec::SamplingFrequency(v) => {
+				if !(0.0..=f64::from(u32::MAX)).contains(v) {
+					return Err(Error::ValueOutOfRange("SamplingFrequency").into());
+				}
+				sample_rate = *v as u32;
+			}
+			MatroskaSpec::Channels(v) => {
+				channels = u32::try_from(*v).map_err(|_| Error::ValueOutOfRange("Channels"))?;
+			}
+			_ => {}
 		}
-		other => Err(Error::UnsupportedAudioCodec(other.to_string()).into()),
 	}
+	if config.sample_rate == 0 {
+		config.sample_rate = sample_rate;
+	}
+	if config.channel_count == 0 {
+		config.channel_count = channels;
+	}
+	Ok(config)
 }
 
 fn build_h264_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
@@ -813,18 +948,7 @@ fn build_h264_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
 		codec_id: "V_MPEG4/ISO/AVC",
 		purpose: "AVCDecoderConfigurationRecord",
 	})?;
-	let avcc = crate::codec::h264::Avcc::parse(avcc_bytes)?;
-
-	let mut config = VideoConfig::new(H264 {
-		profile: avcc.profile,
-		constraints: avcc.constraints,
-		level: avcc.level,
-		inline: false,
-	});
-	config.description = Some(avcc_bytes.clone());
-	config.coded_width = avcc.coded_width;
-	config.coded_height = avcc.coded_height;
-	Ok(config)
+	crate::codec::h264::config(avcc_bytes)
 }
 
 fn build_h265_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
@@ -848,6 +972,7 @@ fn build_h265_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
 		constraint_flags: hvcc.general_constraint_indicator_flags,
 	});
 	config.description = Some(description.freeze());
+	crate::codec::h265::apply_hvcc_sps(&hvcc, &mut config)?;
 	Ok(config)
 }
 
@@ -863,6 +988,7 @@ fn build_av1_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
 	av1c.encode_body(&mut description)?;
 
 	let mut config = VideoConfig::new(crate::codec::av1::av1_from_av1c(&av1c));
+	config.color = crate::codec::av1::color(&av1c.config_obus);
 	config.description = Some(description.freeze());
 	Ok(config)
 }
@@ -990,4 +1116,106 @@ fn split_lacing<'a>(block: &'a SimpleBlock<'_>) -> std::result::Result<Vec<&'a [
 	}
 	frames.push(data);
 	Ok(frames)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use webm_iterable::{WebmWriter, WriteOptions};
+
+	#[test]
+	fn completed_live_elements_do_not_accumulate_a_metadata_prefix() {
+		let mut header = Vec::new();
+		{
+			let mut writer = WebmWriter::new(&mut header);
+			writer
+				.write(&MatroskaSpec::Ebml(Master::Full(vec![MatroskaSpec::DocType(
+					"webm".into(),
+				)])))
+				.unwrap();
+			writer
+				.write_advanced(
+					&MatroskaSpec::Segment(Master::Start),
+					WriteOptions::is_unknown_sized_element(),
+				)
+				.unwrap();
+			writer.flush().unwrap();
+		}
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut import = Import::new(broadcast, catalog.reserve());
+		import.decode(&header).unwrap();
+		let mut consumed = header.len();
+		for timestamp in [0, u8::MAX as u64, u16::MAX as u64, u32::MAX as u64] {
+			let mut cluster = Vec::new();
+			{
+				let mut writer = WebmWriter::new(&mut cluster);
+				writer
+					.write_advanced(
+						&MatroskaSpec::Cluster(Master::Start),
+						WriteOptions::is_unknown_sized_element(),
+					)
+					.unwrap();
+				// This fragment is received under the importer's already-open Segment.
+				writer.write_raw(0xe7, &timestamp.to_be_bytes()).unwrap();
+				writer.flush().unwrap();
+			}
+			for byte in &cluster {
+				import.decode(&[*byte]).unwrap();
+				consumed += 1;
+				assert_eq!(import.decoder.position() + import.buffer.len(), consumed);
+			}
+			assert!(import.buffer.is_empty(), "a complete cluster left its prefix buffered");
+			assert_eq!(import.decoder.position(), consumed);
+			assert_eq!(import.cluster_timestamp, timestamp);
+		}
+		import.finish().unwrap();
+		import.finish().unwrap();
+		assert!(matches!(
+			import.decode(&[0]),
+			Err(crate::Error::Mkv(Error::TracksAfterFinish))
+		));
+	}
+
+	#[test]
+	fn input_after_a_failed_finish_is_refused() {
+		// Unknown-size Tracks closes only at EOF, queueing Segment's end behind the refused track.
+		let mut data = Vec::new();
+		{
+			let mut writer = WebmWriter::new(&mut data);
+			writer
+				.write(&MatroskaSpec::Ebml(Master::Full(vec![MatroskaSpec::DocType(
+					"webm".into(),
+				)])))
+				.unwrap();
+			for master in [
+				MatroskaSpec::Segment(Master::Start),
+				MatroskaSpec::Tracks(Master::Start),
+			] {
+				writer
+					.write_advanced(&master, WriteOptions::is_unknown_sized_element())
+					.unwrap();
+			}
+			writer
+				.write(&MatroskaSpec::TrackEntry(Master::Full(vec![
+					MatroskaSpec::TrackNumber(0),
+					MatroskaSpec::TrackType(2),
+					MatroskaSpec::CodecID("A_OPUS".into()),
+				])))
+				.unwrap();
+			writer.flush().unwrap();
+		}
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut import = Import::new(broadcast, catalog.reserve());
+		import.decode(&data).unwrap();
+		assert!(matches!(
+			import.finish(),
+			Err(crate::Error::Mkv(Error::ValueOutOfRange("TrackNumber")))
+		));
+		assert!(matches!(
+			import.decode(&[0]),
+			Err(crate::Error::Mkv(Error::TracksAfterFinish))
+		));
+	}
 }

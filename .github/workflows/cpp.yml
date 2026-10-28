@@ -12,20 +12,7 @@ permissions:
   contents: read
 
 on:
-  pull_request:
-    # `closed` is here only so merging/closing a PR cancels its in-flight run
-    # via the concurrency group below; the job itself is skipped on close.
-    types: [opened, synchronize, reopened, closed]
-    paths:
-      - "cpp/moq/**"
-      - "cpp/justfile"
-      - "rs/moq-ffi/**"
-      - "sh/cpp/**"
-      - "rs/moq-c/native-libs/**"
-      - "doc/lib/cpp/**"
-      - "doc/lib/samples.sh"
-      - "Cargo.lock"
-      - ".github/workflows/cpp.yml"
+  workflow_call:
 
 concurrency:
   group: cpp-${{ github.ref }}
@@ -34,7 +21,6 @@ concurrency:
 jobs:
   clang:
     name: C++ (clang)
-    if: github.event.action != 'closed'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
 
@@ -50,7 +36,7 @@ jobs:
       - uses: ./.github/actions/just
 
       - name: Install uniffi-bindgen-cpp
-        run: cargo install uniffi-bindgen-cpp --locked --git https://github.com/kixelated/uniffi-bindgen-cpp --tag v0.11.0-kixelated.4+v0.32.2
+        run: cargo install uniffi-bindgen-cpp --locked --git https://github.com/kixelated/uniffi-bindgen-cpp --tag v0.11.0-kixelated.7+v0.32.2
 
       - name: Check
         run: just cpp check

@@ -24,8 +24,8 @@ export const FORGET = 0.983;
 /** Milliseconds of arrival time per resampled observation. */
 export const RESAMPLE = 500;
 
-/** Weight of the cold-start ramp, which holds the forget factor below FORGET early on. */
-export const RAMP = 2;
+/** The most weight one observation takes, which only the prior's weight can lift it toward. */
+export const FRESH_MAX = 0.1;
 
 /** Idle intervals folded at once, purely to bound the work. */
 export const IDLE_MAX = 1024;
@@ -38,6 +38,8 @@ export function prior(): Float64Array {
 	}
 	return out;
 }
+
+const PRIOR = prior();
 
 /** One frame as the receiver saw it, in milliseconds. */
 export interface Arrival {
@@ -73,8 +75,8 @@ export class Estimator {
 	#peak = 0;
 
 	#histogram = prior();
-	/** Observations folded in, which drives the cold-start ramp. */
-	#count = 0;
+	/** How much of the histogram is still the prior's rather than evidence. */
+	#prior = 1;
 
 	constructor(config: Config) {
 		this.#frame = config.frame;
@@ -148,20 +150,20 @@ export class Estimator {
 		return Math.max(measured, this.#advertised) + this.#frame;
 	}
 
-	// One observation is `h = f*h + (1-f)*x`, where x is the bucket that was observed,
-	// or the prior when the interval held no arrival at all. An idle interval therefore
-	// relaxes the estimate back toward cold start at the same time constant, rather than
-	// freezing it or renormalizing the decay away.
+	// Evidence decays by FORGET and the prior holds the rest, of which an observation
+	// takes up to FRESH_MAX. Once the prior is gone that is `h = f*h + (1-f)*x`. An
+	// interval that held no arrival takes nothing, so its share returns to the prior and
+	// the estimate relaxes toward cold start at the same time constant.
 	#fold(bucket: number | undefined): void {
-		this.#count += 1;
-		const forget = Math.min(FORGET, this.#count / (this.#count + RAMP));
-		const fresh = 1 - forget;
-		const seed = bucket === undefined ? prior() : undefined;
+		const rest = 1 - FORGET * (1 - this.#prior);
+		const fresh = bucket === undefined ? 0 : Math.min(FRESH_MAX, rest);
+		const left = rest - fresh;
+		const seed = left - FORGET * this.#prior;
 
 		for (let i = 0; i < BUCKETS; i++) {
-			this.#histogram[i] *= forget;
-			if (seed) this.#histogram[i] += fresh * seed[i];
+			this.#histogram[i] = FORGET * this.#histogram[i] + seed * PRIOR[i];
 		}
 		if (bucket !== undefined) this.#histogram[bucket] += fresh;
+		this.#prior = left;
 	}
 }

@@ -3,7 +3,9 @@
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use moq_clock::Instant;
 
 use anyhow::Context;
 use hang::moq_net;
@@ -63,6 +65,10 @@ pub fn run(
 	// Signals the decoder that the presenter took a frame, so it can hand over
 	// the next one instead of dropping it.
 	let drained = Arc::new(tokio::sync::Notify::new());
+	// Set once the window's device opens. The media task starts now anyway, so
+	// the broadcast resolves while the window does, and waits for it only to
+	// open a decoder.
+	let render = Arc::new(tokio::sync::SetOnce::new());
 
 	let media = tokio::spawn(
 		Media {
@@ -72,7 +78,10 @@ pub fn run(
 			video: video.clone(),
 			presentation: presentation.clone(),
 			drained: drained.clone(),
-			output: proxy.clone(),
+			output: Remote {
+				proxy: proxy.clone(),
+				render: render.clone(),
+			},
 		}
 		.run(),
 	);
@@ -91,7 +100,7 @@ pub fn run(
 	} else {
 		format!("moq play: {broadcast}")
 	};
-	let mut app = App::new(title, video, presentation, drained);
+	let mut app = App::new(title, video, presentation, drained, render);
 	let result = event_loop.run_app(&mut app).context("playback event loop failed");
 	media.abort();
 	network.abort();
@@ -104,7 +113,15 @@ pub fn run(
 	}
 }
 
-impl Output for EventLoopProxy<Event> {
+/// The window as the media task reaches it.
+#[derive(Clone)]
+struct Remote {
+	proxy: EventLoopProxy<Event>,
+	/// What the window's device draws, once it is open.
+	render: Arc<tokio::sync::SetOnce<moq_video::Output>>,
+}
+
+impl Output for Remote {
 	type Speaker = moq_audio::playback::Engine;
 
 	async fn speaker(&self) -> anyhow::Result<Self::Speaker> {
@@ -112,7 +129,11 @@ impl Output for EventLoopProxy<Event> {
 	}
 
 	fn send(&self, event: Event) {
-		let _ = self.send_event(event);
+		let _ = self.proxy.send_event(event);
+	}
+
+	async fn render(&self) -> moq_video::Output {
+		*self.render.wait().await
 	}
 }
 
@@ -134,6 +155,7 @@ struct App {
 	video: Arc<Mutex<VecDeque<moq_video::Frame>>>,
 	presentation: Arc<Mutex<Presentation>>,
 	drained: Arc<tokio::sync::Notify>,
+	render: Arc<tokio::sync::SetOnce<moq_video::Output>>,
 	display: Option<Display>,
 	next_redraw: Option<Instant>,
 	/// The media tasks are done. Keep presenting whatever they left queued, then
@@ -150,12 +172,14 @@ impl App {
 		video: Arc<Mutex<VecDeque<moq_video::Frame>>>,
 		presentation: Arc<Mutex<Presentation>>,
 		drained: Arc<tokio::sync::Notify>,
+		render: Arc<tokio::sync::SetOnce<moq_video::Output>>,
 	) -> Self {
 		Self {
 			title,
 			video,
 			presentation,
 			drained,
+			render,
 			display: None,
 			next_redraw: None,
 			ending: false,
@@ -240,6 +264,9 @@ impl ApplicationHandler<Event> for App {
 			// still resolving, rather than showing whatever was in the surface.
 			Ok(display) => {
 				display.window.request_redraw();
+				self.render
+					.set(moq_video::render::output(&display.device))
+					.expect("the display opens once");
 				self.display = Some(display);
 			}
 			Err(err) => self.fail(event_loop, err),
@@ -307,14 +334,16 @@ impl ApplicationHandler<Event> for App {
 			return;
 		}
 
+		let now = moq_clock::now();
 		match self.next_redraw {
-			Some(deadline) if deadline <= Instant::now() => {
+			Some(deadline) if deadline <= now => {
 				self.next_redraw = None;
 				if let Some(display) = &self.display {
 					display.window.request_redraw();
 				}
 			}
-			Some(deadline) => event_loop.set_control_flow(ControlFlow::WaitUntil(deadline)),
+			// winit waits on std's clock.
+			Some(deadline) => event_loop.set_control_flow(ControlFlow::WaitUntil(deadline.into_std())),
 			None => event_loop.set_control_flow(ControlFlow::Wait),
 		}
 	}
@@ -351,7 +380,7 @@ impl Display {
 			compatible_surface: Some(&surface),
 			apply_limit_buckets: false,
 		}))?;
-		let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))?;
+		let (device, queue) = pollster::block_on(moq_video::render::request_device(&adapter, &Default::default()))?;
 		let mut config = surface
 			.get_default_config(&adapter, size.width.max(1), size.height.max(1))
 			.context("the graphics adapter cannot present to this window")?;

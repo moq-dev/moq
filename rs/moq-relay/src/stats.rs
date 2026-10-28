@@ -6,7 +6,8 @@
 
 use std::time::Duration;
 
-use moq_net::PathOwned;
+use anyhow::Context;
+use moq_net::Path;
 use moq_net::origin;
 use serde::{Deserialize, Serialize};
 
@@ -15,12 +16,13 @@ use serde::{Deserialize, Serialize};
 /// Set `enabled = true` to attach a [`moq_stats::Producer`] to every session
 /// the relay accepts (and every cluster dial). The producer publishes a single
 /// `<prefix>/node/<node>` broadcast (or `<prefix>/node` when [`Self::node`] is
-/// unset) on the cluster origin, under a fresh epoch each run. Each broadcast
-/// carries plain `.json` tracks of cumulative counters (per-tier totals,
-/// per-path traffic, per-root sessions, and per-root presence on request) plus compressed
-/// `.json.z` siblings; see `moq_stats` for the wire format and per-field
-/// semantics.
-#[derive(usage::Args, Clone, Debug, Deserialize, Serialize)]
+/// unset) on the cluster origin, under a fresh epoch each run. The broadcast
+/// carries a `totals.json` track of per-tier totals, one compressed
+/// `<group>/group.json` track per [`Self::depth`] group with its per-path
+/// traffic and per-label sessions, and presence and prefix tracks on request,
+/// each JSON track with a compressed `.json.z` sibling; see `moq_stats` for the
+/// wire format and per-field semantics.
+#[derive(usage_rs::Args, Clone, Debug, Deserialize, Serialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
@@ -45,14 +47,11 @@ pub struct Config {
 	)]
 	pub prefix: String,
 
-	/// Interval (in seconds) between snapshot publishes. Defaults to 1.
-	#[usage(
-		long = "stats-interval",
-		env = "MOQ_STATS_INTERVAL",
-		default = "1",
-		setting = "stats.interval"
-	)]
-	pub interval: u64,
+	/// How often a snapshot is published, e.g. "1s" or "500ms". Defaults to 1
+	/// second.
+	#[usage(long = "stats-interval", env = "MOQ_STATS_INTERVAL", setting = "stats.interval")]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub interval: Option<moq_tokio::cli::Duration>,
 
 	/// Node identifier appended to the advertised stats path to disambiguate
 	/// broadcasts when multiple relays share a cluster origin. Without this,
@@ -66,11 +65,11 @@ pub struct Config {
 	pub node: Option<String>,
 
 	/// Number of leading broadcast-path segments to bucket stats by, one
-	/// broadcast per bucket at `<prefix>/<group>/node/<node>`. Defaults to 0: a
-	/// single `<prefix>/node/<node>` broadcast for the whole node. Set to 1 to
-	/// publish a per-first-segment broadcast (e.g. per tenant), so a consumer can
-	/// announce-scope to just that group rather than slurping every node's full
-	/// stats. See [`moq_stats::produce::Config::depth`].
+	/// `<group>/group.json` track per bucket on the node's broadcast. Defaults
+	/// to 0: a single `group.json` track for the whole node. Set to 1 to
+	/// publish a per-first-segment track (e.g. per tenant), so a consumer
+	/// subscribes to just that group rather than slurping every node's full
+	/// stats.
 	#[usage(
 		long = "stats-depth",
 		env = "MOQ_STATS_DEPTH",
@@ -79,19 +78,14 @@ pub struct Config {
 	)]
 	pub depth: usize,
 
-	/// How long a group's stats broadcast stays announced after the group's
-	/// last session and traffic leave, e.g. "5m" or "30s". Defaults to 5
-	/// minutes. A group that returns within it keeps its broadcast, so viewer
-	/// churn doesn't unannounce and re-announce it across the mesh; one that
-	/// returns after it announces under a new epoch. Only applies at `depth` 1
-	/// or more. See [`moq_stats::produce::Config::linger`].
-	#[usage(skip)]
-	#[serde(with = "crate::duration::serde_option")]
-	pub linger: Option<Duration>,
-
+	/// How long a group's stats track stays listed after the group's last
+	/// session and traffic leave, e.g. "5m" or "30s". Defaults to 5 minutes. A
+	/// group that returns within it keeps its track and counters; one that
+	/// returns after it is a new track instance counted from zero. Only applies
+	/// at `depth` 1 or more. See [`moq_stats::produce::Config::linger`].
 	#[usage(long = "stats-linger", env = "MOQ_STATS_LINGER", setting = "stats.linger")]
-	#[serde(default, rename = "__cli_linger", skip_serializing_if = "Option::is_none")]
-	pub(crate) linger_arg: Option<crate::duration::Duration>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub linger: Option<moq_tokio::cli::Duration>,
 }
 
 impl Default for Config {
@@ -99,19 +93,23 @@ impl Default for Config {
 		Self {
 			enabled: false,
 			prefix: ".stats".into(),
-			interval: 1,
+			interval: None,
 			node: None,
 			depth: 0,
 			linger: None,
-			linger_arg: None,
 		}
 	}
 }
 
 impl Config {
+	/// The publish interval; `None` keeps the producer's default.
+	pub(crate) fn interval(&self) -> Option<Duration> {
+		self.interval.map(Into::into)
+	}
+
 	/// The linger after command-line overrides; `None` keeps the producer's default.
-	pub(crate) fn linger(&self) -> Option<Duration> {
-		self.linger_arg.map(crate::duration::Duration::into_std).or(self.linger)
+	pub fn linger(&self) -> Option<Duration> {
+		self.linger.map(Into::into)
 	}
 
 	/// Build a [`moq_stats::Producer`] from this config, publishing on `origin`.
@@ -120,26 +118,34 @@ impl Config {
 	/// attach the result unconditionally. Hand it to
 	/// [`Cluster::with_stats`](crate::cluster::Cluster::with_stats), which takes over both
 	/// the registry and keeping the publish task alive (the task stops when the
-	/// last clone of the producer drops).
-	pub fn build(&self, origin: origin::Producer) -> moq_stats::Producer {
+	/// last clone of the producer drops). Fails on a zero interval.
+	pub fn build(&self, origin: origin::Producer) -> anyhow::Result<moq_stats::Producer> {
 		if !self.enabled {
-			return moq_stats::Producer::new(moq_stats::produce::Config::new());
+			return Ok(moq_stats::Producer::new(moq_stats::produce::Config::new()));
 		}
-		let prefix = self.prefix.clone();
-		let interval = Duration::from_secs(self.interval.max(1));
-		let node = self.node.clone().map(PathOwned::from);
+		let prefix = Path::new(&self.prefix).context("invalid stats.prefix")?;
+		let interval = self.interval();
+		anyhow::ensure!(interval != Some(Duration::ZERO), "stats.interval must be non-zero");
+		let node = self
+			.node
+			.as_deref()
+			.map(Path::new)
+			.transpose()
+			.context("invalid stats.node")?;
 		let depth = self.depth;
 		let linger = self.linger();
-		tracing::info!(prefix, interval_secs = interval.as_secs(), node = ?node, depth, ?linger, "stats publishing enabled");
+		tracing::info!(%prefix, ?interval, node = ?node, depth, ?linger, "stats publishing enabled");
 		let mut config = moq_stats::produce::Config::new()
 			.with_origin(origin)
 			.with_prefix(prefix)
-			.with_interval(interval)
 			.with_node(node)
 			.with_depth(depth);
+		if let Some(interval) = interval {
+			config = config.with_interval(interval);
+		}
 		if let Some(linger) = linger {
 			config = config.with_linger(linger);
 		}
-		moq_stats::Producer::new(config)
+		Ok(moq_stats::Producer::new(config))
 	}
 }

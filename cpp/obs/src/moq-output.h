@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include <obs-module.h>
+#include <obs.hpp>
 
 #include <moq/moq.hpp>
 
@@ -14,6 +15,7 @@
 #include <string>
 #include <vector>
 #include "logger.h"
+#include "moq-rate.h"
 #include "moq-worker.h"
 
 class MoQOutput {
@@ -51,7 +53,7 @@ public:
 	};
 	bool TryGetConnectionStats(ConnectionStats *out);
 
-	// Successful (re)connects after the first for this Start(); 0 until connects() >= 2.
+	// Successful (re)connects after the first for this Start(); 0 until state().connects >= 2.
 	int GetReconnectCount();
 
 	// True while the current Start() attempt has an open MoQ session.
@@ -62,8 +64,25 @@ public:
 	std::string GetEpoch();
 
 	// Most recent connect/reconnect failure for this Start(), or empty when none.
-	// Thread-safe; the dock polls this while reconnecting and on stop.
+	// Thread-safe; the dock polls this while connecting, while reconnecting, and on stop.
 	void CopyLastFailure(int *code, std::string *reason);
+
+	// The bitrate the video encoders follow the bandwidth grant at, summed over
+	// every encoder that follows, beside the configured rate that caps it.
+	// False when no video encoder follows the grant.
+	struct VideoRate {
+		uint64_t target_bps = 0;
+		uint64_t configured_bps = 0;
+	};
+	bool TryGetVideoRate(VideoRate *out);
+
+	// Replace the session's tokens with a fresh publish token, presented without
+	// reconnecting and on every reconnect; the one it replaces is withdrawn once the
+	// relay answers. False when there is no session yet. The answer is logged, and a
+	// refusal is kept for TokenRefusal(); a session without in-band AUTH refuses it.
+	bool PresentToken(const std::string &token);
+	// Why the relay refused the token PresentToken() last presented, or empty.
+	std::string TokenRefusal();
 
 private:
 	friend struct MoQOutputStatsTest;
@@ -81,14 +100,17 @@ private:
 		std::chrono::steady_clock::time_point started;
 		// Whether this attempt ever reached the server, which picks between telling
 		// OBS the connection failed and telling it the stream dropped.
+		uint64_t revision = 0;
 		bool connected = false;
 		// False while the session is between reconnects.
 		bool live = false;
+		// The wait for the relay's answer to the token PresentToken() set last.
+		std::optional<moq::Continuation> presenting;
 	};
 
 	void OnConnect(const std::shared_ptr<Attempt> &attempt, moq::expected<std::shared_ptr<moq::Session>> result);
-	void OnStatus(const std::shared_ptr<Attempt> &attempt, moq::expected<moq::ConnectionStatus> result);
-	void WatchStatus(const std::shared_ptr<Attempt> &attempt);
+	void OnState(const std::shared_ptr<Attempt> &attempt, moq::expected<moq::ConnectionState> result);
+	void WatchState(const std::shared_ptr<Attempt> &attempt);
 	void Fail(const std::shared_ptr<Attempt> &attempt, const moq::Error &error);
 
 	// Runs `callback` on the worker if `attempt` is still the current one once it
@@ -100,10 +122,25 @@ private:
 	// Tear down the publish state without telling OBS.
 	void Reset();
 
+	// One encoder's track. A null producer means its init failed, so it isn't retried.
+	struct Track {
+		std::shared_ptr<moq::MediaTrackProducer> producer;
+		// The configured bitrate this track reserves, or 0 to reserve nothing.
+		uint64_t bitrate_bps = 0;
+		// Claimed on the first frame after the session connects.
+		std::shared_ptr<moq::Reservation> reservation;
+		// Video only, when the encoder can retune: the grant it follows, and a
+		// weak ref so Reset() can hand the configured bitrate back.
+		std::optional<MoQRate> rate;
+		OBSWeakEncoder encoder;
+	};
+
 	void VideoInit(obs_encoder_t *encoder);
 	void VideoData(struct encoder_packet *packet);
 	void AudioInit(obs_encoder_t *encoder);
 	void AudioData(struct encoder_packet *packet);
+	// NOTE: Caller must hold media_mutex.
+	void Reserve(Track &track);
 
 	obs_output_t *output;
 
@@ -133,12 +170,14 @@ private:
 	// Guards the group below, which the dock reads from the UI thread.
 	std::mutex mutex;
 	std::shared_ptr<moq::Session> session;
+	std::shared_ptr<moq::BandwidthConsumer> recv_bandwidth;
 	bool connected = false;
 	bool live = false;
 	std::string url;
 	std::string epoch;
 	int last_failure_code = 0;
 	std::string last_failure_reason;
+	std::string token_refusal;
 
 	// Written on the worker, read by GetConnectTime().
 	std::atomic<int> connect_time_ms{0};
@@ -148,12 +187,14 @@ private:
 	std::mutex media_mutex;
 	std::shared_ptr<moq::OriginProducer> origin;
 	std::shared_ptr<moq::BroadcastProducer> broadcast;
-	// An encoder maps to null when its track failed to initialize, so it isn't retried.
-	std::map<obs_encoder_t *, std::shared_ptr<moq::MediaTrackProducer>> video_tracks;
-	std::map<obs_encoder_t *, std::shared_ptr<moq::MediaTrackProducer>> audio_tracks;
+	std::map<obs_encoder_t *, Track> video_tracks;
+	std::map<obs_encoder_t *, Track> audio_tracks;
+	// The session's allocator once it connects. It survives reconnects: grants
+	// read empty while disconnected and resume on the next connection.
+	std::shared_ptr<moq::Allocator> allocator;
 
-	// Retired sessions still draining their finished tracks, which the destructor
-	// waits out. Guarded by signal_mutex.
+	// `closed()` of retired sessions still draining, which the destructor waits
+	// out. Guarded by signal_mutex.
 	std::vector<moq::Future<void>> draining;
 
 	std::string path;

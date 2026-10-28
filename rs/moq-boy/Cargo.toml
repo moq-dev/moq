@@ -11,10 +11,21 @@ version = "0.5.12"
 edition = "2024"
 rust-version.workspace = true
 
+[[bin]]
+name = "moq-boy"
+path = "src/main.rs"
+required-features = ["openh264"]
+
 [features]
-default = ["noq", "websocket"]
+default = ["quic", "websocket"]
 jemalloc = ["moq-tokio/jemalloc"]
-noq = ["moq-tokio/noq"]
+# The software H.264 encoder. moq-boy needs it at runtime (a 160x144 frame is
+# below every hardware encoder's minimum), but it is vendored C++, so it stays
+# off for development builds; the binary requires it at build time. Defaulting it
+# on would turn it on for every workspace build through feature unification.
+# The nix package turns it on.
+openh264 = ["moq-video/openh264"]
+quic = ["moq-tokio/quic"]
 websocket = ["moq-tokio/websocket"]
 
 [dependencies]
@@ -23,16 +34,21 @@ boytacean = { version = "0.13", features = ["gen-mock"] }
 bytes = { workspace = true }
 hang = { workspace = true }
 moq-audio = { workspace = true }
+moq-clock = { workspace = true }
 moq-json = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
-moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
-# Select software H.264 plus the Linux NVIDIA and VAAPI codecs explicitly.
-moq-video = { workspace = true, features = ["nvidia", "openh264", "vaapi"] }
+moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs", "net"] }
+# Select the Linux NVIDIA and VAAPI codecs explicitly; software H.264 is the
+# `openh264` feature.
+moq-video = { workspace = true, features = ["nvidia", "vaapi"] }
 serde = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
-usage = { workspace = true, features = ["completions", "config"] }
+usage-rs = { workspace = true, features = ["completions", "config"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

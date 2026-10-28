@@ -1,10 +1,9 @@
 //! Lossy latest-value opaque publishing over [`moq-net`](moq_net) tracks.
 //!
-//! One opaque value updated over time, for consumers that only care about the current state (a
-//! poster image, a serialized state blob). This mode is **lossy** by design: a consumer yields only
-//! the most recent value. A late joiner (or a consumer that falls behind) jumps straight to the
-//! newest group, and older groups are dropped entirely. For an ordered log where every payload is
-//! preserved, use [`stream`](crate::stream) instead.
+//! One value updated over time. `Consumer::next` yields each state with its frame timestamp,
+//! in order within the subscription's drift budget; `Consumer::latest` skips to the newest
+//! state. Superseded groups may be lost, so use [`stream`](crate::stream) when every record
+//! must survive. A playhead reader sets `max_delay` to its distance behind the live edge.
 //!
 //! On the wire each value is one group holding one frame, so a group is self-contained and a
 //! consumer never needs an older one. With [`Config::compression`] set to
@@ -12,6 +11,8 @@
 //! there is no window to share across a single-frame group.
 
 use crate::Compression;
+#[cfg(test)]
+use futures::FutureExt;
 
 pub mod consumer;
 pub mod producer;
@@ -109,14 +110,40 @@ mod test {
 		Consumer::new(track, cfg(compression))
 	}
 
-	/// Drain every value currently available without blocking.
+	/// Drain newest states currently available without blocking.
 	fn drain(mut consumer: Consumer) -> Vec<Bytes> {
 		let waiter = kio::Waiter::noop();
 		let mut out = Vec::new();
-		while let Poll::Ready(Ok(Some(payload))) = consumer.poll_next(&waiter) {
-			out.push(payload);
+		while let Poll::Ready(Ok(Some(payload))) = consumer.poll_latest(&waiter) {
+			out.push(payload.value);
 		}
 		out
+	}
+
+	#[test]
+	fn next_preserves_intermediate_states() {
+		let (mut producer, mut track) = producer(true);
+		let mut subscription = track.subscription();
+		subscription.max_delay = None;
+		track.update(subscription).unwrap();
+		for value in [b"one".as_slice(), b"two", b"three"] {
+			producer.update(value).unwrap();
+		}
+		producer.finish().unwrap();
+		let mut consumer = consume(track, true);
+		let mut values = Vec::new();
+		while let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&kio::Waiter::noop()) {
+			assert_eq!(value.at, None);
+			values.push(value.value);
+		}
+		assert_eq!(
+			values,
+			vec![
+				Bytes::from_static(b"one"),
+				Bytes::from_static(b"two"),
+				Bytes::from_static(b"three")
+			]
+		);
 	}
 
 	/// A snapshot group the transport can no longer serve -- `Old` when the relay reclaims a
@@ -125,34 +152,37 @@ mod test {
 	/// replacement rather than ending the reader.
 	#[test]
 	fn a_lost_group_waits_for_its_replacement() {
-		let track = moq_net::broadcast::Info::new()
-			.produce()
-			.create_track("test", timed())
-			.unwrap();
-		let mut consumer = consume(track.subscribe(None), false);
-		let waiter = kio::Waiter::noop();
+		// Lost on this side, then reset by the publisher: the reader sees the same loss either way.
+		for lost in [moq_net::Error::Old, moq_net::Error::Stream(moq_net::StreamError::Old)] {
+			let track = moq_net::broadcast::Info::new()
+				.produce()
+				.create_track("test", timed())
+				.unwrap();
+			let mut consumer = consume(track.subscribe(None), false);
+			let waiter = kio::Waiter::noop();
 
-		// Group 0 delivers a value, then stays open with the reader parked on its next frame.
-		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
-		group
-			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(b"one"))
-			.unwrap();
-		assert!(matches!(consumer.poll_next(&waiter), Poll::Ready(Ok(Some(v))) if v == "one"));
-		assert!(consumer.poll_next(&waiter).is_pending());
+			// Group 0 delivers a value, then stays open with the reader parked on its next frame.
+			let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+			group
+				.write_frame(moq_net::Timestamp::now(), Bytes::from_static(b"one"))
+				.unwrap();
+			assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(Some(v))) if v.value == "one"));
+			assert!(consumer.poll_latest(&waiter).is_pending());
 
-		// The relay reclaims the group out from under the reader.
-		group.abort(moq_net::Error::Old).unwrap();
-		assert!(
-			consumer.poll_next(&waiter).is_pending(),
-			"a lost group must not end the reader"
-		);
+			// The group is lost out from under the reader.
+			group.abort(lost).unwrap();
+			assert!(
+				consumer.poll_latest(&waiter).is_pending(),
+				"a lost group must not end the reader"
+			);
 
-		// The replacement arrives and the reader picks up where the value now lives.
-		let mut group = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
-		group
-			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(b"two"))
-			.unwrap();
-		assert!(matches!(consumer.poll_next(&waiter), Poll::Ready(Ok(Some(v))) if v == "two"));
+			// The replacement arrives and the reader picks up where the value now lives.
+			let mut group = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+			group
+				.write_frame(moq_net::Timestamp::now(), Bytes::from_static(b"two"))
+				.unwrap();
+			assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(Some(v))) if v.value == "two"));
+		}
 	}
 
 	/// A stamped payload is written at its capture time, and the returned size is the encoded frame
@@ -182,13 +212,16 @@ mod test {
 
 	#[test]
 	fn one_group_per_update() {
-		let (mut producer, track) = producer(false);
+		let (mut producer, mut track) = producer(false);
 		producer.update(&b"first"[..]).unwrap();
 		producer.update(&b"second"[..]).unwrap();
 		producer.finish().unwrap();
 
 		// Two updates => two groups. A consumer that joins after both only sees the latest.
-		assert_eq!(track.latest(), Some(1));
+		assert_eq!(
+			track.largest().now_or_never().flatten().map(|position| position.group),
+			Some(1)
+		);
 		assert_eq!(drain(consume(track, false)), vec![Bytes::from_static(b"second")]);
 	}
 
@@ -200,21 +233,11 @@ mod test {
 
 		for n in 0..3u8 {
 			producer.update(vec![n]).unwrap();
-			match consumer.poll_next(&waiter) {
-				Poll::Ready(Ok(Some(payload))) => assert_eq!(&payload[..], &[n]),
+			match consumer.poll_latest(&waiter) {
+				Poll::Ready(Ok(Some(payload))) => assert_eq!(&payload.value[..], &[n]),
 				other => panic!("expected value, got {other:?}"),
 			}
 		}
-	}
-
-	#[test]
-	fn compressed_roundtrip() {
-		let (mut producer, track) = producer(true);
-		let payload = Bytes::from(b"the quick brown fox".repeat(64));
-		producer.update(payload.clone()).unwrap();
-		producer.finish().unwrap();
-
-		assert_eq!(drain(consume(track, true)), vec![payload]);
 	}
 
 	/// The compressed frame on the wire is much smaller than the value it carries, so a consumer
@@ -244,18 +267,24 @@ mod test {
 
 	/// `append_group` publishes immediately, so rejecting the frame inside `write_frame` would leave
 	/// an empty newest group behind. A snapshot consumer jumps to the newest, so the previous value
-	/// would vanish even though the update reported an error.
+	/// would vanish even though the update reported an error. Compression doesn't lift the limit: a
+	/// value that inflates past the group budget is refused even though it deflates to a few KiB.
 	#[test]
 	fn a_rejected_update_leaves_the_previous_value_readable() {
-		let (mut producer, track) = producer(false);
-		producer.update(&b"keep"[..]).unwrap();
+		for compression in [false, true] {
+			let (mut producer, track) = producer(compression);
+			producer.update(&b"keep"[..]).unwrap();
 
-		let oversized = Bytes::from(vec![0u8; moq_net::group::MAX_CACHE_BYTES as usize + 1]);
-		assert!(producer.update(oversized).is_err());
-		producer.finish().unwrap();
+			let oversized = Bytes::from(vec![0u8; moq_net::group::MAX_CACHE_BYTES as usize + 1]);
+			assert!(matches!(
+				producer.update(oversized),
+				Err(crate::Error::Net(moq_net::Error::FrameTooLarge))
+			));
+			producer.finish().unwrap();
 
-		// A reader arriving now still finds the last good value, not an empty superseding group.
-		assert_eq!(drain(consume(track, false)), vec![Bytes::from_static(b"keep")]);
+			// A reader arriving now still finds the last good value, not an empty superseding group.
+			assert_eq!(drain(consume(track, compression)), vec![Bytes::from_static(b"keep")]);
+		}
 	}
 
 	/// `finish` closes the underlying track, so a later update fails rather than being silently
@@ -280,7 +309,7 @@ mod test {
 
 		let mut consumer = consume(track, false);
 		let waiter = kio::Waiter::noop();
-		assert!(matches!(consumer.poll_next(&waiter), Poll::Ready(Ok(Some(_)))));
-		assert!(matches!(consumer.poll_next(&waiter), Poll::Ready(Ok(None))));
+		assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(Some(_)))));
+		assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(None))));
 	}
 }

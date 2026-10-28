@@ -26,7 +26,7 @@ const dispose = count.subscribe(n => console.log(n)); // subscribe to changes ma
 ```
 
 Updates are batched, coalescing multiple updates into a single microtask.
-The old and new values are then compared with deep equality ([dequal](https://github.com/lukeed/dequal)) to avoid unnecessary wakeups.
+The old and new values are then compared to avoid unnecessary wakeups: plain objects and arrays by their keys, length, and contents, everything else like a `Set` would (class instances by identity, `NaN` equal to itself).
 It's possible to skip this check, but please benchmark it first...
 
 ### Effect
@@ -153,8 +153,9 @@ const effect = new Effect((effect) => {
 Effects also provide lifecycle helpers that auto-cleanup:
 
 - **`effect.set(signal, value, cleanup)`** - temporarily set the value of a signal for the duration of the effect
-- **`effect.timer(fn, ms)`** - `setTimeout` that cancels on cleanup
-- **`effect.interval(fn, ms)`** - `setInterval` that cancels on cleanup
+- **`effect.timer(fn, duration)`** - run once after a `Nano` duration on the `@moq/clock` clock, cancelled on cleanup
+- **`effect.timeout(fn, duration)`** - run a nested effect until a `Nano` duration elapses
+- **`effect.interval(fn, period)`** - run every `Nano` period on the `@moq/clock` clock, cancelled on cleanup
 - **`effect.animate(fn)`** - `requestAnimationFrame` that cancels on cleanup
 - **`effect.event(target, type, fn)`** - `addEventListener` that removes on cleanup/rerun via `AbortSignal`
 - **`effect.subscribe(signal, fn)`** - shorthand: run `fn` each time `signal` changes

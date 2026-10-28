@@ -14,7 +14,7 @@ categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
 
 [features]
 # On by default: what costs the build nothing beyond cargo, which here is `aac`
-# (pure Rust). Off by default: the device features, because on Linux cpal links
+# and `bus` (pure Rust). Off by default: the device features, because on Linux cpal links
 # libasound at build time, the one system build dependency in this crate. macOS
 # and Windows would pay nothing, but a default is one setting for every host.
 # The features exist so a consumer can pick what it wants, not to hide code from
@@ -23,13 +23,16 @@ categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
 # `just rs macos`. Workspace consumers opt in at the root manifest
 # (`default-features = false`) per crate, which keeps cpal out of the language
 # bindings.
-default = ["aac"]
+default = ["aac", "bus"]
 # AAC-LC decode via symphonia. Pure Rust, so it costs no toolchain: the trade
 # this crate already refused for Opus. Only a subscriber to an ingest-sourced
 # broadcast needs it (RTMP, SRT/TS, fmp4, and gstreamer all publish AAC, while
 # this crate encodes in software is Opus or PCM), so a publish-only build can
 # drop it and the two crates it pulls.
 aac = ["dep:symphonia-codec-aac", "dep:symphonia-core"]
+# The program mixing bus. Pure Rust: it resamples and de-jitters each source
+# through the same ring the playback mixer uses.
+bus = ["dep:ringbuf"]
 # Device capture. Microphones go through cpal (pure-Rust: CoreAudio / WASAPI /
 # ALSA); macOS system audio goes through ScreenCaptureKit, which is where Apple
 # puts it. On Linux cpal links libasound, the one system build dependency in
@@ -54,7 +57,7 @@ capture = [
 # Device playback. Mixes any number of `playback::Sink`s into one cpal output
 # stream (CoreAudio / WASAPI / ALSA). Same libasound build dependency on Linux
 # as `capture`.
-playback = ["dep:cpal", "dep:fixed-resample", "dep:tokio", "dep:tracing"]
+playback = ["dep:cpal", "dep:kio", "dep:ringbuf", "dep:tokio", "dep:tracing"]
 # Reach devices through the Linux sound server rather than its ALSA plugin, for
 # the server's own device names and routing. These customize cpal only when
 # `capture` or `playback` activates it, so a host flag alone pulls no audio I/O.
@@ -71,22 +74,19 @@ bytes = { workspace = true }
 # `playback` features need it. Encode stays on unsafe-libopus, so a build
 # without either pulls no new dependency.
 cpal = { version = "0.18", optional = true }
-# The realtime SPSC channel between a caller thread and the audio callback: a
-# preallocated ring buffer that resamples the caller's rate to the device rate
-# and corrects for clock drift, so the callback never allocates or blocks. Not a
-# second resampler: it wraps the same `rubato` we already depend on. `channel`
-# is the ring buffer and `resampler` its rubato back end; the default
-# `fft-resampler` stays off, matching the sinc-only stance below.
-fixed-resample = { version = "0.13", optional = true, default-features = false, features = ["channel", "resampler"] }
 hang = { workspace = true }
 kio = { workspace = true, optional = true }
+moq-clock = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
-# We only use the sinc resampler (Async::new_sinc), so skip the default
-# fft_resampler feature and its RustFFT/realfft dependencies.
 rand = { workspace = true }
-# Fixed-capacity SPSC rings keep buffer handoff lock-free on the capture callback.
+# Fixed-capacity SPSC rings keep buffer handoff lock-free on the capture
+# callback, and carry PCM into the playback mixer and the bus.
 ringbuf = { version = "0.5.1", optional = true }
+# Decoded and captured audio converts through the sinc resampler, and the PCM
+# rings through the cubic one, which an audio callback can afford. Neither is
+# the FFT resampler, so skip the default fft_resampler feature and its
+# RustFFT/realfft dependencies.
 rubato = { version = "5.0", default-features = false }
 # Pure-Rust port of WebRTC's audio processing module (AEC3, noise suppression,
 # AGC2). The reason the `aec` feature can exist at all: every other option is a
@@ -112,13 +112,12 @@ thiserror = { workspace = true }
 tokio = { workspace = true, optional = true, features = ["rt", "macros", "sync", "time"] }
 # Only used by the device features, for stream-error logging.
 tracing = { workspace = true, optional = true }
-# Pure-Rust transpilation of libopus 1.3.1. No CMake toolchain, no C
-# linker hackery, and crucially still maintained, unlike the
-# `opus`/`audiopus_sys` combo which is stuck on a 5-year-old vendored
-# libopus that breaks under CMake 4 (RUSTSEC-2026-0150). Trade-off:
-# ~20% slower than the C version with intrinsics enabled, but for the
-# 20 ms Opus frames moq-audio publishes that's still well under any
-# real-time budget.
+# Pure-Rust transpilation of libopus 1.3.1: no CMake toolchain and no C
+# linker hackery. Upstream has been idle since 2024-11, while the `opus`
+# bindings moved to the maintained opusic-sys, so this is a build-cost
+# choice rather than a maintenance one. Trade-off: ~20% slower than the C
+# version with intrinsics enabled, but for the 20 ms Opus frames moq-audio
+# publishes that's still well under any real-time budget.
 unsafe-libopus = "0.2"
 
 # macOS-only, and only pulled in by the `capture` feature (see above); a no-op on
@@ -137,7 +136,16 @@ objc2-foundation = { workspace = true, optional = true }
 objc2-screen-capture-kit = { workspace = true, features = ["SCStream", "SCShareableContent"], optional = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 # Reads the jitter conformance corpus at doc/concept/audio-jitter/.
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+
+[[bench]]
+name = "bus"
+harness = false
+required-features = ["bus"]
+
+[lints]
+workspace = true

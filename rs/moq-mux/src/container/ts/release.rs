@@ -1,85 +1,14 @@
 //! Writes a [`Passthrough`](super::Passthrough) track back out as the multiplex it carries.
 
-use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::Poll;
 use std::time::Duration;
 
-use web_async::time::Instant;
+use moq_clock::Instant;
 
 use crate::catalog::{CatalogFormat, Stream};
+use crate::container::consumer::Event;
 use crate::container::{ExportSource, Frame};
 use crate::jitter::{self, Arrival, Push};
-
-/// Availability observed even while a sink leaves its source unpolled.
-struct Readable {
-	state: Mutex<Availability>,
-}
-
-struct Availability {
-	empty: Instant,
-	first: Option<Instant>,
-	polling: bool,
-	during: Option<Instant>,
-	// Weak registrations keep observing the source without keeping its caller alive.
-	waiters: kio::WaiterList,
-}
-
-impl Readable {
-	fn new() -> Self {
-		Self {
-			state: Mutex::new(Availability {
-				empty: Instant::now(),
-				first: None,
-				polling: false,
-				during: None,
-				waiters: kio::WaiterList::new(),
-			}),
-		}
-	}
-
-	fn begin(&self, waiter: &kio::Waiter) {
-		let mut state = self.state.lock().unwrap();
-		debug_assert!(!state.polling);
-		state.polling = true;
-		state.during = None;
-		waiter.register(&mut state.waiters);
-	}
-
-	fn end(&self, pending: bool) {
-		let mut state = self.state.lock().unwrap();
-		state.polling = false;
-		if pending {
-			// A notification racing the empty read belongs to the next batch.
-			state.first = state.during.take();
-			state.empty = Instant::now();
-		}
-		state.during = None;
-	}
-
-	fn arrived(&self) -> Instant {
-		let state = self.state.lock().unwrap();
-		state.first.unwrap_or(state.empty)
-	}
-}
-
-impl Wake for Readable {
-	fn wake(self: Arc<Self>) {
-		self.wake_by_ref();
-	}
-
-	fn wake_by_ref(self: &Arc<Self>) {
-		let mut waiters = {
-			let mut state = self.state.lock().unwrap();
-			let now = Instant::now();
-			state.first.get_or_insert(now);
-			if state.polling {
-				state.during.get_or_insert(now);
-			}
-			state.waiters.take()
-		};
-		waiters.wake();
-	}
-}
 
 /// Writes the multiplex a broadcast's [`m2ts`](hang::catalog::M2ts) track carries back out
 /// byte-identical, each object a fixed delay after its PCR time, like an SRT receiver.
@@ -91,18 +20,16 @@ impl Wake for Readable {
 /// releases fed the same objects write the same bytes. An object that arrives past its
 /// deadline is dropped and counted; the output shows a continuity error there, since nothing
 /// is rewritten, and carries on with the next object. A flagged forward jump, which the
-/// importer marks by skipping a group sequence, opens a new clock once it leaps further than
-/// the delay, so the output does not wait it out; the bytes carry the jump.
+/// importer declares with a discontinuity marker, opens a new clock, so the output does not
+/// wait it out; the bytes carry the jump.
 pub struct Release {
 	source: crate::Source,
 	catalog: Option<crate::catalog::Consumer<()>>,
 	/// The `m2ts` track, once a catalog names it.
 	track: Option<(String, ExportSource)>,
-	readable: Arc<Readable>,
-	/// Wakes `readable`, which forwards to the caller.
-	notify: Waker,
-	/// Keeps the source's registrations alive while a sink leaves it unpolled.
-	input: kio::Park,
+	/// When the track was subscribed. Nothing it delivers reached the release before then,
+	/// however long the cache held it.
+	subscribed: Instant,
 	finished: bool,
 	/// An object has gone out.
 	released: bool,
@@ -122,14 +49,11 @@ impl Release {
 			);
 		}
 		let catalog = source.catalog(catalog_format).await?;
-		let readable = Arc::new(Readable::new());
 		let mut release = Self {
 			source,
 			catalog: Some(catalog),
 			track: None,
-			notify: Waker::from(readable.clone()),
-			readable,
-			input: kio::Park::default(),
+			subscribed: moq_clock::now(),
 			finished: false,
 			released: false,
 			delay: Duration::ZERO,
@@ -182,6 +106,15 @@ impl Release {
 		self.jitter.out_of_tolerance()
 	}
 
+	/// Snapshot how the release clock is keeping up with the source.
+	pub fn stats(&self) -> super::stats::Release {
+		let mut stats = super::stats::Release::of(&self.jitter);
+		if let Some((_, track)) = &self.track {
+			stats.gaps = track.skips() - track.markers();
+		}
+		stats
+	}
+
 	/// How many objects are waiting in the jitter buffer.
 	#[cfg(test)]
 	pub(super) fn buffered(&self) -> usize {
@@ -194,6 +127,7 @@ impl Release {
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 
+	/// Poll for the next original MPEG-TS frame at its release time, or `None` at end.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Frame>>> {
 		while let Some(catalog) = self.catalog.as_mut() {
 			match catalog.poll_next(waiter)? {
@@ -210,13 +144,9 @@ impl Release {
 				if self.jitter.full(&()) {
 					break;
 				}
-				self.readable.begin(waiter);
-				// The park retires a waiter whose registrations overflowed its records.
-				let input = self.input.hold(&Context::from_waker(&self.notify));
-				let polled = track.poll_read(input);
-				self.readable.end(polled.is_pending());
-				let frame = match polled {
-					Poll::Ready(Ok(Some(frame))) => frame,
+				let (frame, arrived) = match track.poll_event(waiter) {
+					Poll::Ready(Ok(Some(Event::Frame { frame, arrived }))) => (frame, arrived),
+					Poll::Ready(Ok(Some(Event::GroupEnd | Event::FrameEnd { .. } | Event::Cut { .. }))) => continue,
 					Poll::Ready(Ok(None)) => {
 						self.finished = true;
 						break;
@@ -224,18 +154,19 @@ impl Release {
 					Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 					Poll::Pending => break,
 				};
-				// A sink can leave arrived objects unread. The first notification after
-				// an empty read distinguishes that backlog from a late network burst.
-				let read = Instant::now();
+				// Judged on when the object landed, so a sink that leaves arrived objects unread
+				// does not make them late, and a stall of the whole path does not hide that they are.
 				let arrival = Arrival {
-					arrived: self.readable.arrived().min(read),
-					read,
-					decode: frame.timestamp,
+					arrived: arrived.max(self.subscribed),
+					read: moq_clock::now(),
+					decode: frame.timestamp.into(),
 					restart: track.markers(),
 					skip: track.skips(),
+					cut: track.cuts(),
 					// The output opens on a group, at a random access point; from then on every
 					// object goes out on its own, so one dropped late is a gap of its packets only.
 					sync: frame.keyframe || self.released,
+					leading: false,
 					item: frame,
 				};
 				if self.jitter.push((), arrival)? == Push::Late {
@@ -277,6 +208,7 @@ impl Release {
 					false => source.live(),
 				};
 				self.track = Some((m2ts.track.clone(), source));
+				self.subscribed = moq_clock::now();
 			}
 			Some((name, _)) if *name != m2ts.track => {
 				return Err(anyhow::anyhow!("the `m2ts` track moved from `{name}` to `{}`", m2ts.track).into());
@@ -284,52 +216,5 @@ impl Release {
 			Some(_) => {}
 		}
 		Ok(())
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[tokio::test(start_paused = true)]
-	async fn a_notification_during_an_empty_read_is_kept() {
-		let readable = Arc::new(Readable::new());
-		let input = kio::Waiter::new(Waker::from(readable.clone()));
-		let caller = kio::Waiter::noop();
-		let start = Instant::now();
-		readable.begin(&caller);
-		tokio::time::advance(Duration::from_millis(20)).await;
-		input.waker().wake_by_ref();
-		tokio::time::advance(Duration::from_millis(20)).await;
-		readable.end(true);
-		assert_eq!(readable.arrived(), start + Duration::from_millis(20));
-		readable.begin(&caller);
-		readable.end(true);
-		assert_eq!(readable.arrived(), start + Duration::from_millis(40));
-	}
-
-	#[tokio::test(start_paused = true)]
-	async fn observing_a_stalled_sink_keeps_no_caller_alive() {
-		use std::sync::atomic::{AtomicUsize, Ordering};
-		struct Caller(AtomicUsize);
-		impl Wake for Caller {
-			fn wake(self: Arc<Self>) {
-				self.0.fetch_add(1, Ordering::Relaxed);
-			}
-		}
-		let readable = Arc::new(Readable::new());
-		let input = kio::Waiter::new(Waker::from(readable.clone()));
-		let wakes = Arc::new(Caller(AtomicUsize::new(0)));
-		let caller = kio::Waiter::new(Waker::from(wakes.clone()));
-		readable.begin(&caller);
-		readable.end(true);
-		drop(caller);
-		assert_eq!(Arc::strong_count(&wakes), 1);
-		tokio::time::advance(Duration::from_millis(20)).await;
-		let arrived = Instant::now();
-		input.waker().wake_by_ref();
-		tokio::time::advance(Duration::from_secs(1)).await;
-		assert_eq!(readable.arrived(), arrived);
-		assert_eq!(wakes.0.load(Ordering::Relaxed), 0);
 	}
 }

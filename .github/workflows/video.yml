@@ -4,10 +4,9 @@ name: Video
 # the WebGPU path, a lost device, and the Canvas2D fallback only exist in a real
 # browser. SwiftShader stands in for the GPU, so no GPU runner is needed.
 #
-# Narrow trigger, like wasm.yml: the renderer, the harness, and the two files that
-# wire the renderer into `<moq-publish>` (which the harness drives). `@moq/watch`
-# wires it the same way but needs a relay to drive, so its regressions surface
-# nightly instead.
+# Narrow trigger, like wasm.yml: the renderer, the harness, and what the harness
+# drives: the two files that wire the renderer into `<moq-publish>`, and the
+# `@moq/watch` playback path, fed from an in-memory origin so no relay is needed.
 
 permissions:
   contents: read
@@ -16,21 +15,7 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "0 8 * * *"
-  pull_request:
-    # `closed` is here only so merging/closing a PR cancels its in-flight run
-    # via the concurrency group below; the job itself is skipped on close.
-    types: [opened, synchronize, reopened, closed]
-    paths:
-      - "js/video/**"
-      - "js/publish/src/preview.ts"
-      - "js/publish/src/element.ts"
-      - "test/video/**"
-      - "test/justfile"
-      - "package.json"
-      - "bun.lock"
-      - "flake.nix"
-      - "flake.lock"
-      - ".github/workflows/video.yml"
+  workflow_call:
 
 concurrency:
   group: video-${{ github.ref }}
@@ -39,7 +24,6 @@ concurrency:
 jobs:
   video:
     name: Video
-    if: github.event.action != 'closed'
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -49,21 +33,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
-        with:
-          determinate: false
-          # Trust the flake's cachix substituter, so the dev shell substitutes
-          # instead of building from source. See check.yml for the full story.
-          extra-conf: |
-            extra-substituters = https://kixelated.cachix.org
-            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
-
-      # Playwright's Chromium isn't in the nix devShell. Install it plus its apt
-      # runtime libs (`--with-deps` needs the host package manager); the recipe's
-      # own `playwright install` then no-ops.
-      - name: Playwright Chromium
-        run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium"
-        shell: bash -leo pipefail {0}
+      - uses: ./.github/actions/nix
 
       - name: Video
         run: nix develop --command just test video

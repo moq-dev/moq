@@ -3,6 +3,7 @@ import { Decoder as Flate } from "@moq/flate";
 import { isDeflate } from "../compression.ts";
 import { merge } from "../diff.ts";
 import { MissingSnapshot } from "../error.ts";
+import { parse } from "../parse.ts";
 import type { Config } from "./encoder.ts";
 
 /**
@@ -78,7 +79,6 @@ export class Decoder<T> {
 
 	// Decompress a frame against the group's window when compressing, then parse it as JSON.
 	#parse(payload: Uint8Array): unknown {
-		const plain = this.#flate ? this.#flate.frame(payload) : payload;
-		return JSON.parse(new TextDecoder().decode(plain));
+		return parse(this.#flate ? this.#flate.frame(payload) : payload);
 	}
 }

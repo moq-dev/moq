@@ -12,7 +12,7 @@ The [hang media format](/concept/hang) on top of `moq-net`: the catalog that
 describes renditions with WebCodecs-style decoder configs, and the frame that
 carries a timestamp with each payload.
 
-- **Catalog.** `Catalog` types video, audio, and text renditions, the `json` and `binary` data tracks, and the `archive` entry. Add your own sections through its type parameter, or read unknown ones as raw JSON. `Catalog::subscribe(&broadcast)` follows it live.
+- **Catalog.** `Catalog` types video, audio, and text renditions, the `json` and `binary` data tracks, and the `archive` entry. Add your own sections through its type parameter, or read unknown ones as raw JSON. `Catalog::subscribe(&broadcast)` follows it live, failing with `Error::UnsupportedVersion` on a catalog that needs a newer moq-hang draft.
 - **Frames.** `container::Frame` encodes and decodes the `legacy` container, and `container::track_info` declares a media track. A rendition may instead declare `cmaf` or `loc`; an unknown container kind is kept rather than failing the catalog.
 - **Codecs described**: H.264, H.265, VP8, VP9, AV1, AAC, Opus, PCM, FLAC, MP3, MP2, AC-3, E-AC-3.
 

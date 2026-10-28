@@ -7,14 +7,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::Context;
+use moq_clock::Instant;
 use serde::{Deserialize, Serialize};
 use stun_types::attribute::XorMappedAddress;
 use stun_types::message::{BINDING, Message, MessageClass, MessageHeader, MessageWriteMutSlice};
 use stun_types::prelude::*;
-use tokio::time::Instant;
 
 /// Configuration for the optional public STUN Binding listener.
-#[derive(usage::Args, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(usage_rs::Args, Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct Config {
@@ -75,7 +75,8 @@ impl Counters {
 		{
 			let _ = writeln!(
 				out,
-				"moq_relay_stun_dropped_total{{reason=\"{reason}\"}} {}",
+				"moq_relay_stun_dropped_total{{reason=\"{}\"}} {}",
+				crate::internal::Label(reason),
 				count.load(Ordering::Relaxed)
 			);
 		}
@@ -218,7 +219,7 @@ pub(crate) struct Server {
 }
 
 impl Server {
-	#[cfg(test)]
+	#[cfg(all(test, feature = "stun"))]
 	pub(crate) fn addr(&self) -> SocketAddr {
 		self.socket.local_addr().unwrap()
 	}
@@ -274,6 +275,11 @@ impl Server {
 }
 
 #[cfg(test)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use super::*;
 	use stun_types::message::{MessageType, MessageWriteVec};

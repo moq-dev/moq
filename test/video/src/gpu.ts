@@ -16,6 +16,8 @@ declare global {
 		moqGpu: {
 			/** Lose every device and withhold every later adapter. */
 			lose(): void;
+			/** Devices still owned by renderers. */
+			readonly devices: number;
 			/** What a WebGPU canvas showed after its latest submit, or undefined for any other canvas. */
 			copy(canvas: HTMLCanvasElement): OffscreenCanvas | undefined;
 		};
@@ -24,6 +26,7 @@ declare global {
 
 Object.defineProperty(GPUAdapterInfo.prototype, "isFallbackAdapter", { get: () => false });
 
+let devices = 0;
 let withheld = false;
 const losers: (() => void)[] = [];
 
@@ -38,6 +41,14 @@ GPUAdapter.prototype.requestDevice = async function (
 	...args: Parameters<GPUAdapter["requestDevice"]>
 ) {
 	const device = await requestDevice.apply(this, args);
+	devices++;
+	const destroy = device.destroy.bind(device);
+	let destroyed = false;
+	device.destroy = () => {
+		if (!destroyed) devices--;
+		destroyed = true;
+		destroy();
+	};
 	const lost = Promise.withResolvers<GPUDeviceLostInfo>();
 	void device.lost.then(lost.resolve);
 	Object.defineProperty(device, "lost", { value: lost.promise });
@@ -66,6 +77,9 @@ GPUQueue.prototype.submit = function (this: GPUQueue, buffers: Iterable<GPUComma
 };
 
 window.moqGpu = {
+	get devices() {
+		return devices;
+	},
 	lose() {
 		withheld = true;
 		for (const lose of losers.splice(0)) lose();

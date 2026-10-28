@@ -7,9 +7,11 @@ under a name it already used, and bursts of small groups crossing a two-relay
 cluster, with its peer link steady, flapping, or on moq-transport.
 
 The drills themselves are ordinary Rust integration tests in
-`rs/moq-relay/tests/drills.rs`, so `just check` already runs them whenever
-moq-relay or anything under it changes. This directory holds the focused recipe
-and the sensitivity proof.
+`rs/moq-relay/tests/drills.rs`, so `just check` already runs their loopback
+lane whenever moq-relay or anything under it changes. The impaired lane is
+`#[ignore]`d there and runs nightly (see [Two lanes](#two-lanes)). This
+directory holds the focused recipe, which runs both lanes, and the sensitivity
+proof.
 
 ```bash
 just test drill                 # the drills, plus the negative control
@@ -31,7 +33,8 @@ checks that what the fault owned was released.
 | `interrupted_publisher_republishes_new_content` | A publisher vanishes with no finish and no unannounce, then a new one publishes the same name | the withdrawal of the dead publisher's broadcast | the name stops being announced, and the republished name serves the new publisher's content rather than the dead one's cache |
 | `bursts_cross_a_cluster` | Bursts of one-frame groups cross from an origin relay to a clustered edge relay; the subscriber reads newest-only and FETCHes every group it misses | how many groups missed the live subscription, which live groups were reset, the completed ingress burst and overflow count, and the slowest group's latency | every group arrives, live or by FETCH, within 10s of being written; a lost group fails by name (FETCH failed, FETCH unanswered, live group stalled), and the newest group comes live |
 | `bursts_cross_a_flapping_peer` | The same bursts, with the peer link cut as the second burst is written and restored once the edge withdraws the route | how long the link was down before the withdrawal, and the reads and FETCHes the flap failed | the route comes back and every group still arrives within 10s of being written, or of the route's return when it arrives after it; only a failure the flap caused is retried, on the restored route, so a hang on the dead one past the relays' idle timeout or a withdrawal with the link up still fails |
-| `bursts_cross_a_transport_peer` | The same bursts, with the relays peering over `moq-transport-19`, so the edge recovers gaps with IETF FETCHes | as `bursts_cross_a_cluster` | as `bursts_cross_a_cluster`: a group the origin still holds is served, never refused |
+| `bursts_cross_a_transport_peer` | The same bursts, with the relays peering over `moq-transport-22`, so the edge recovers gaps with IETF FETCHes | as `bursts_cross_a_cluster` | as `bursts_cross_a_cluster`: a group the origin still holds is served, never refused |
+| `ietf_subscriber_max_age_skips_bufferbloat`, `lite_subscriber_max_age_skips_bufferbloat` | moq-transport-22 or moq-lite-06 media at 5.12Mb/s crosses a 64kb/s link behind a finite 500ms queue, with no random loss | the propagated 100ms budget and forced queue overflow | superseded groups are skipped and the newest catalog snapshot survives its budget |
 | `no_publisher_never_delivers` | none: the negative control | - | with nothing publishing, nothing is announced and no broadcast resolves |
 
 A moq publisher is never blocked by a slow reader: `write_frame` is synchronous
@@ -47,8 +50,10 @@ drill does assert is the half of that behavior worth grading here.
 
 The impaired cluster drills arm a one-shot ingress burst once the origin has subscribed
 to the publisher, since the gate also holds the replies and credit that subscription needs.
-The shaper keeps seeded loss, then collects surviving datagrams on the publisher's
-upstream flow until they exceed the rate bucket's burst and queue allowance. It
+The shaper collects datagrams on the publisher's upstream flow until they exceed
+the rate bucket's burst and queue allowance, exempting them from seeded loss: the
+gate also holds the acknowledgments a sender needs to replace a lost datagram, so
+a gate waiting on survivors could idle the publisher out. It
 accounts that batch at one instant, so scheduling gaps cannot silently drain the
 fault away. Transport credit holds two bucket allowances but remains smaller than
 the application burst. The first burst's newest frame also fills that window, since
@@ -83,7 +88,9 @@ that port back fails every run.
 
 Every drill runs twice, as `<drill>::loopback` and `<drill>::impaired`. The
 `lanes!` macro generates both from one body, so a scenario cannot drift between
-them. In the impaired lane every client dials a `moq-shaper` in front of the
+them. The impaired lane draws a fresh seed on every run, which makes it a soak
+that explores the decision space rather than a merge gate, so pull requests run
+only loopback and Nightly runs `just test drill impaired`. In the impaired lane every client dials a `moq-shaper` in front of the
 relay instead of the relay itself. The shaper is a userspace UDP relay that
 forwards each datagram, both ways, after applying the same profile:
 
@@ -99,18 +106,19 @@ between the relays, and the subscriber's, each with that profile behind a
 100 kbit/s bottleneck with a 50ms queue, which a burst overruns. Its impaired
 lane also grants less QUIC credit than a burst needs at every endpoint: 16
 concurrent streams (each group is a stream, each FETCH another) and receive
-windows of a few groups, so senders wait on `MAX_STREAMS` and `MAX_DATA` that
-the path can lose. The bottleneck sits below the rate those windows allow, so
+windows of a few groups, so senders wait on `MAX_STREAMS` and `MAX_DATA` under
+congestion. The bottleneck sits below the rate those windows allow, so
 both bind, and the drill fails unless some burst overflowed a queue. Its
 loopback lane keeps the defaults.
 
 `bursts_cross_a_flapping_peer` cuts the peer link with `Shaper::cut`, which
 drops every datagram both ways until it is restored, so its loopback lane puts a
 shaper on that link too, one that forwards untouched. The cut lasts until the
-subscriber sees the route withdrawn, which the relays' default 10s idle timeout
-bounds, rather than for a fixed time. The relays keep that default because a
-short one also bounds their side of an impaired handshake, which can go quiet
-for seconds between a client's backed-off retransmits.
+subscriber sees the route withdrawn, which the relays' idle timeout bounds,
+rather than for a fixed time. In the impaired lane the relays keep the default
+10s, because a short one also bounds their side of an impaired handshake, which
+can go quiet for seconds between a client's backed-off retransmits. Loopback has
+no such silence, so its relays take the clients' 2s.
 
 It is a datagram relay, not an HTTP or TCP proxy, neither of which can impair
 QUIC. It needs no capabilities, works the same on macOS and Linux, and touches
@@ -137,6 +145,20 @@ would turn this lane into a second loopback run that passes for free.
 
 There are no retries: a drill that only passes on loopback is a finding.
 
+Random loss is not how real paths fail, so it may prove correctness but never
+judge quality, latency or throughput; those run on a congested path (see
+`test/ts/README.md`). Every drill here proves correctness: that a resource is
+released, a failure surfaces, a route or publisher comes back, or every group is
+recovered. The cluster drills' 10s bound on each group is a stall check, a third
+of the 30s stalls of #4349, not a latency target. The lifecycle drills keep their random correctness faults. The cluster drills
+instead use a fixed delay and finite rate-limit queue, with no random loss,
+jitter, or reordering: the forced overflow drops datagrams. Their overflow,
+credit, and per-group completion assertions establish that congestion acted
+without requiring a random impairment to be drawn. The [QUIC flow-control
+tests](../../rs/moq-quic/src/tests/mod.rs) separately drop the first
+`MAX_STREAMS`, `MAX_STREAM_DATA`, and `MAX_DATA` grants, prove the sender stays
+blocked, and require retransmitted grants to restore progress.
+
 The same shaper is a binary, for putting in front of a relay from another
 process. It applies one profile both ways, prints the seed at start and the
 counters at exit (Ctrl-C or SIGTERM), and exits nonzero if the profile never
@@ -156,19 +178,11 @@ protocol's reaction to loss and delay, not the kernel's rendering of them.
 The Nightly workflow runs all mutations, so patches that stop applying and drills
 that stop detecting their recovery failures fail CI. `just check` also runs
 `--apply-only` whenever Rust or this directory changes, so a patch that no longer
-applies fails the PR that moved its code rather than the next nightly.
+applies fails `just ci` and the merge queue for the PR that moved its code rather
+than the next nightly.
 
-The Check workflow's advisory `Drill sensitivity` job also runs on pull requests
-and merge groups. It selects mutations whose `+++ b/` target paths or patch files
-changed. Changing the drill tests, sensitivity harness, or selector runs them all.
-An unrelated change still reports a successful job without installing Nix or
-building snapshots. PR scope uses the PR base; merge-group scope uses its base SHA.
-
-The job pins `MOQ_SHAPER_SEED=1`, but sockets still run on the host clock, so
-load can change the outcome. Its job-level `continue-on-error` keeps the workflow
-advisory. Once the drills use controlled time, remove that flag and ask the
-maintainer to require `Drill sensitivity`; no repository setting changes here.
-The full nightly run remains independent of PR selection.
+Pull requests do not run the mutations: the drills' sockets still run on the host
+clock, so load can change the outcome.
 
 `sensitivity.sh` removes one recovery behavior at a time and requires the drill
 covering it to fail. Each mutation is a patch under `mutations/`, applied to a

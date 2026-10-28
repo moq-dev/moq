@@ -4,8 +4,8 @@
  * This file is the schema, not a description of one. The page emits {@link Sample}s, `analyze.ts`
  * reduces them to a {@link Summary}, and `grade.ts` reads that against `budgets.json`. {@link METRICS}
  * says for every graded number what it counts, which clock it sits on, and how a series became one
- * value. Another lane (native playout, the latency ledger) that emits the same {@link Summary} is
- * comparable to this one by construction.
+ * value. `moq play --metrics` writes the same {@link Sample}s natively, and any other lane that emits
+ * the same {@link Summary} is comparable to this one by construction.
  *
  * Conventions, stated once for everything below:
  *
@@ -233,22 +233,20 @@ export type Drift = {
 
 // ── the row ─────────────────────────────────────────────────────────────────
 
-/** Which ring the page ran, decided by whether the document is cross-origin isolated. */
-export type Ring = "isolated" | "plain";
-
 /** The audio codecs the matrix publishes. */
 export type Codec = "opus" | "aac";
 
 /**
- * Where a row played: a headless browser over the shaper, or a {@link Trace} replayed through the
- * player's rings on a simulated clock, whose profile is the trace's name.
+ * Where a row played: a headless browser over the shaper, the shipped native player (`moq play`)
+ * over the same shaper into a private PulseAudio null sink, or a {@link Trace} replayed through the
+ * browser player's ring on a simulated clock, whose profile is the trace's name.
  */
-export type Runtime = "chromium" | "replay";
+export type Runtime = "chromium" | "native" | "replay";
 
 /**
  * One matrix cell.
  *
- * A budget is keyed by the whole thing. The codec, its rate, and the ring each move the expected
+ * A budget is keyed by the whole thing. The runtime, the codec, and its rate each move the expected
  * floor as much as the profile does, so a profile-only key would grade one cell against another's
  * threshold.
  */
@@ -258,50 +256,47 @@ export type Row = {
 	/** Sample rate in Hz. */
 	rate: number;
 	profile: string;
-	ring: Ring;
 };
 
 /** The row as a flat string: a file name and a table label. */
-export const rowKey = (row: Row): string => `${row.runtime}-${row.codec}-${row.rate}-${row.profile}-${row.ring}`;
+export const rowKey = (row: Row): string => `${row.runtime}-${row.codec}-${row.rate}-${row.profile}`;
 
 /** Parse {@link rowKey}. The profile is the only field that may contain a dash. */
 export function parseRow(key: string): Row {
 	const parts = key.split("-");
 	const [runtime, codec, rate] = parts;
-	const ring = parts.at(-1);
-	const profile = parts.slice(3, -1).join("-");
+	const profile = parts.slice(3).join("-");
 	const hz = Number.parseInt(rate ?? "", 10);
 	if (
-		(runtime !== "chromium" && runtime !== "replay") ||
+		(runtime !== "chromium" && runtime !== "native" && runtime !== "replay") ||
 		(codec !== "opus" && codec !== "aac") ||
-		(ring !== "isolated" && ring !== "plain") ||
 		!Number.isFinite(hz) ||
 		profile === ""
 	) {
 		throw new Error(`not a row key: ${key}`);
 	}
-	return { runtime, codec, rate: hz, profile, ring };
+	return { runtime, codec, rate: hz, profile };
 }
 
 // ── what the recorder keeps ─────────────────────────────────────────────────
 
 /**
  * One audio frame reaching the viewer's container consumer: when, on the `viewer` clock; its
- * timestamp, on the `media` clock; and the group that carried it.
+ * timestamp, on the `media` clock; the group that carried it; and its encoded duration.
  */
-export type Arrival = [at: Ms, timestamp: Ms, group: number];
+export type Arrival = [at: Ms, timestamp: Ms, group: number, duration: Ms];
 
 /** A recorded arrival trace, as checked in under `traces/`. The file name is its profile. */
 export type Trace = {
 	/** Bumped when a field's meaning changes. */
-	version: 2;
+	version: 3;
 	/** Where it was recorded: the relay, the broadcast, its publisher, the date. */
 	source: string;
 	/** The shape it carries, and why it is kept. */
 	description: string;
 	/** The transport the session negotiated. */
 	transport: string;
-	/** The smallest round trip the connection's PROBE reported, which "auto" sizes from. */
+	/** The smallest round trip the connection's PROBE reported, retained as a diagnostic. */
 	rtt: Ms | null;
 	/** The audio rendition, as the catalog advertised it. */
 	config: {
@@ -347,36 +342,52 @@ export type Stall = {
 	stalled: boolean;
 };
 
-/** One probe sample: what the page could read at that instant, plus what the tap reported since. */
+/**
+ * One probe sample: what the player could read at that instant, plus what the tap reported since.
+ *
+ * The browser probe writes these from the page; `moq play --metrics` writes them natively, from its
+ * device callback, with the equivalents noted below and every field it cannot read left out.
+ */
 export type Sample = {
-	/** `performance.now()`: the `viewer` clock. */
+	/** `performance.now()`: the `viewer` clock. Natively, the process's monotonic clock. */
 	at: Ms;
-	/** `AudioContext.currentTime`, read at the same instant: the `render` clock. */
+	/**
+	 * `AudioContext.currentTime`, read at the same instant: the `render` clock. Natively, the frames
+	 * the output device pulled over its rate.
+	 */
 	render?: Ms;
 
-	/** `audio.out.timestamp`: the playhead on the `media` clock. Undefined while there is none. */
+	/**
+	 * `audio.out.timestamp`: the playhead on the `media` clock. Undefined while there is none.
+	 * Natively, projected from the last write into the speaker at the wall rate, held at its end.
+	 */
 	timestamp?: Ms;
-	/** `audio.out.stalled`: the ring is refilling rather than playing. */
+	/**
+	 * `audio.out.stalled`: the ring is refilling rather than playing. The native ring never refills
+	 * on its own (the player pads a dry ring with silence, which `silence` counts), so natively this
+	 * is only a sink with nothing written yet, or none at all.
+	 */
 	stalled?: boolean;
-	/** `sync.out.delay`: the resolved playout target. */
+	/** `sync.out.delay`: the resolved playout target. Natively, the target the speaker is held on. */
 	delay?: Ms;
-	/** The current connection PROBE round trip, before Sync keeps its minimum. */
+	/** The current connection PROBE round trip. */
 	rtt?: Ms;
-	/** `sync.out.jitter`: the network portion in auto mode, or the configured fixed delay. */
-	networkJitter?: Ms;
 	/** The selected rendition's advertised jitter at this sample. */
 	jitter?: Ms;
 	/** The selected rendition's advertised delay at this sample. */
 	renditionDelay?: Ms;
 
-	/** `AudioContext.outputLatency`. */
+	/** `AudioContext.outputLatency`. Natively, how far ahead of the speaker the host took the last buffer. */
 	outputLatency?: Ms;
 	/** `AudioContext.baseLatency`. */
 	baseLatency?: Ms;
 	/** `AudioContext.renderCapacity` average load, Chromium only. */
 	renderLoad?: number;
 
-	/** The tap's cumulative quanta rendered since the first audible one. */
+	/**
+	 * The tap's cumulative quanta rendered since the first audible one. Natively, 128-frame quanta at
+	 * the device rate, classified by what the ring supplied rather than read off the output.
+	 */
 	quanta?: number;
 	/** The tap's cumulative quanta under {@link SILENCE_RMS}. */
 	quiet?: number;
@@ -386,10 +397,8 @@ export type Sample = {
 	stalls?: Stall[];
 };
 
-/** What the page reports once the session is up. */
+/** What the page, or the native driver, reports once the session is up. */
 export type Environment = {
-	/** Whether the document is cross-origin isolated, and therefore which ring runs. */
-	crossOriginIsolated: boolean;
 	/** The transport the session negotiated. Anything but WebTransport never crossed the UDP shaper. */
 	transport?: string;
 	/** The audio rendition's codec string. */
@@ -400,7 +409,7 @@ export type Environment = {
 	jitter?: Ms;
 	/** The full audio configuration needed to replay a captured live row. */
 	config?: Trace["config"];
-	/** The AudioContext's rate, Hz, which the render clock counts in. */
+	/** The AudioContext's rate, Hz, which the render clock counts in. Natively, the output device's. */
 	contextRate?: number;
 };
 

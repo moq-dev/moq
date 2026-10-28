@@ -1,0 +1,28 @@
+{
+	"name": "@moq/demo-carla",
+	"private": true,
+	"type": "module",
+	"version": "0.1.0",
+	"description": "MoQ CARLA Demo - Drive simulated vehicles over MoQ",
+	"license": "(MIT OR Apache-2.0)",
+	"scripts": {
+		"dev": "vite --open",
+		"build": "vite build",
+		"check": "tsc --noEmit",
+		"test": "bun test"
+	},
+	"dependencies": {
+		"@moq/clock": "workspace:^",
+		"@moq/json": "workspace:^",
+		"@moq/net": "workspace:^",
+		"@moq/watch": "workspace:^",
+		"zod": "^4.6.7"
+	},
+	"devDependencies": {
+		"@types/bun": "^1.4.3",
+		"rolldown": "^1.2.12",
+		"typescript": "7.0.2",
+		"vite": "^8.3.2",
+		"wrangler": "^4.151.1"
+	}
+}

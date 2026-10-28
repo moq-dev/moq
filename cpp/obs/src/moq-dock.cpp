@@ -414,7 +414,9 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 	tokenEdit->setPlaceholderText("(optional) publish JWT");
 	tokenEdit->setEchoMode(QLineEdit::Password);
 	const QString tokenHelp = "Optional relay publish token. Leave empty for public relays such as /anon. "
-				  "Pasting a URL with ?jwt= into Relay URL fills this and strips it from the URL.";
+				  "Pasting a URL with ?jwt= into Relay URL fills this and strips it from the URL. "
+				  "Editing it while live presents the new token without reconnecting, on a session "
+				  "that carries in-band authorization.";
 	tokenEdit->setToolTip(tokenHelp);
 
 	pathEdit = new QLineEdit(streamPage);
@@ -438,7 +440,7 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 
 	advancedButton = new QPushButton("Advanced…", streamPage);
 	advancedButton->setCursor(Qt::PointingHandCursor);
-	advancedButton->setToolTip("TLS, reconnect, QUIC and WebSocket settings. "
+	advancedButton->setToolTip("Protocol pin, TLS, reconnect, QUIC and WebSocket settings. "
 				   "Opens them in a window. Changes apply on the next Go Live.");
 	connect(advancedButton, &QPushButton::clicked, this, &MoQDock::OpenAdvanced);
 
@@ -609,7 +611,8 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 	connect(pollTimer, &QTimer::timeout, this, &MoQDock::UpdateStatus);
 
 	connect(urlEdit, &QLineEdit::editingFinished, this, &MoQDock::OnRelayUrlEdited);
-	connect(tokenEdit, &QLineEdit::editingFinished, this, &MoQDock::SaveSettings);
+	connect(tokenEdit, &QLineEdit::textEdited, this, [this] { tokenEdited = true; });
+	connect(tokenEdit, &QLineEdit::editingFinished, this, &MoQDock::OnTokenEdited);
 	connect(pathEdit, &QLineEdit::editingFinished, this, &MoQDock::SaveSettings);
 	connect(encodingMode, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MoQDock::OnEncodingChanged);
 	connect(latencyMode, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MoQDock::SaveSettings);
@@ -675,6 +678,34 @@ void MoQDock::OnRelayUrlEdited()
 	SaveSettings();
 }
 
+void MoQDock::OnTokenEdited()
+{
+	SaveSettings();
+
+	const QString token = tokenEdit->text().trimmed();
+	if (!running || !output || token.isEmpty() || !tokenEdited)
+		return;
+
+	// The same refusal as Go Live: the URL is fixed while running, but the token
+	// may be new.
+	const QUrl dial(urlEdit->text().trimmed());
+	if (dial.isValid() && MoQDial::IsCleartext(dial.scheme().toStdString())) {
+		tokenNotice = "Publish token requires an encrypted relay URL (not http://, ws://, or tcp://)";
+		status->setText(tokenNotice);
+		return;
+	}
+
+	// Presented in band, so the stream keeps going while the relay checks it.
+	auto *moq = static_cast<MoQOutput *>(obs_obj_get_data(output));
+	if (!moq || !moq->PresentToken(token.toStdString())) {
+		tokenNotice = "Not connected yet; edit the token again once live";
+		status->setText(tokenNotice);
+		return;
+	}
+	tokenNotice.clear();
+	tokenEdited = false;
+}
+
 void MoQDock::PeelJwtFromRelayUrl()
 {
 	QString text = urlEdit->text().trimmed();
@@ -695,30 +726,6 @@ void MoQDock::PeelJwtFromRelayUrl()
 	url.setQuery(query);
 	QSignalBlocker block(urlEdit);
 	urlEdit->setText(url.toString());
-}
-
-QString MoQDock::ConnectUrl() const
-{
-	QString text = urlEdit->text().trimmed();
-	const QString token = tokenEdit->text().trimmed();
-	if (token.isEmpty())
-		return text;
-
-	QUrl url(text);
-	if (!url.isValid() || url.scheme().isEmpty()) {
-		// Cannot confirm the transport is encrypted, so do not attach the token.
-		return text;
-	}
-
-	// Never put a JWT on cleartext network dial URLs.
-	if (MoQDial::IsCleartext(url.scheme().toStdString()))
-		return text;
-
-	QUrlQuery query(url);
-	query.removeAllQueryItems("jwt");
-	query.addQueryItem("jwt", token);
-	url.setQuery(query);
-	return url.toString();
 }
 
 void MoQDock::OnEncodingChanged(int mode)
@@ -1067,8 +1074,10 @@ void MoQDock::StartStream()
 		}
 	}
 
-	const std::string url = ConnectUrl().toStdString();
+	const std::string url = relayText.toStdString();
 	const std::string path = pathEdit->text().toStdString();
+	tokenEdited = false;
+	tokenNotice.clear();
 
 	SaveSettings();
 
@@ -1080,6 +1089,7 @@ void MoQDock::StartStream()
 	obs_data_apply(serviceSettings, advanced);
 	obs_data_set_string(serviceSettings, "server", url.c_str());
 	obs_data_set_string(serviceSettings, "key", path.c_str());
+	obs_data_set_string(serviceSettings, "bearer_token", token.toStdString().c_str());
 	service =
 		OBSServiceAutoRelease(obs_service_create("moq_service", "moq_dock_service", serviceSettings, nullptr));
 	if (!service) {
@@ -1158,10 +1168,10 @@ void MoQDock::SetRunning(bool isRunning)
 				      .arg(isRunning ? "#e04434" : "#36a45e"));
 
 	urlEdit->setEnabled(!isRunning);
-	tokenEdit->setEnabled(!isRunning);
 	pathEdit->setEnabled(!isRunning);
 	// The settings are read once at connect, so editing them mid-stream would look
-	// like it applied when it hadn't.
+	// like it applied when it hadn't. The token stays editable: a new one is
+	// presented on the live session.
 	advancedButton->setEnabled(!isRunning);
 	encodingMode->setEnabled(!isRunning);
 	latencyMode->setEnabled(!isRunning);
@@ -1202,8 +1212,9 @@ void MoQDock::UpdateStatus()
 	const bool everConnected = moq && (moq->IsLiveSession() || obs_output_get_connect_time_ms(output) > 0);
 	if (!everConnected) {
 		if (!failText.isEmpty()) {
-			status->setText(QString("● %1").arg(failText));
-			status->setStyleSheet("color: #c0392b;");
+			// The first dial is still retrying; one that gave up stops the output instead.
+			status->setText(QString("● Connecting… · %1").arg(failText));
+			status->setStyleSheet("color: #d08b1d;");
 			statsBox->setText(failText);
 		} else {
 			status->setText("● Connecting…");
@@ -1259,18 +1270,33 @@ void MoQDock::UpdateStatus()
 		return;
 	}
 
-	status->setText(stats.reconnects > 0 ? QString("● Connected · reconnects %1").arg(stats.reconnects)
-					     : QString("● Connected"));
-	status->setStyleSheet("color: #36a45e;");
+	// Why the last token edit did not take, so the next refresh does not hide it.
+	QString tokenProblem = tokenNotice;
+	const QString tokenRefusal = QString::fromStdString(moq->TokenRefusal());
+	if (tokenProblem.isEmpty() && !tokenRefusal.isEmpty())
+		tokenProblem = QString("New publish token refused: %1").arg(tokenRefusal);
+	QString connectedText = stats.reconnects > 0 ? QString("● Connected · reconnects %1").arg(stats.reconnects)
+						     : QString("● Connected");
+	if (!tokenProblem.isEmpty())
+		connectedText += QStringLiteral(" · new token not in use");
+	status->setText(connectedText);
+	status->setStyleSheet(tokenProblem.isEmpty() ? "color: #36a45e;" : "color: #d08b1d;");
 
 	{
 		QStringList lines;
 		if (!publishSummary.isEmpty())
 			lines << publishSummary;
+		if (!tokenProblem.isEmpty())
+			lines << tokenProblem;
 		if (!stats.protocol.empty())
 			lines << QString("Protocol %1").arg(QString::fromStdString(stats.protocol));
 		if (!stats.dial.empty())
 			lines << QString("Dial %1").arg(QString::fromStdString(stats.dial));
+		MoQOutput::VideoRate rate;
+		if (moq->TryGetVideoRate(&rate))
+			lines << QString("Video target %1 of %2 configured")
+					 .arg(FormatBitrate(static_cast<double>(rate.target_bps)),
+					      FormatBitrate(static_cast<double>(rate.configured_bps)));
 		statsBox->setText(lines.isEmpty() ? QString("Connected.") : lines.join('\n'));
 	}
 

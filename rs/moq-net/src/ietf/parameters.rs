@@ -14,10 +14,8 @@ const MAX_KVP_VALUE_LEN: usize = (1 << 16) - 1;
 #[derive(Debug, Copy, Clone, FromPrimitive, IntoPrimitive, Eq, Hash, PartialEq)]
 #[repr(u64)]
 pub enum ParameterVarInt {
-	/// Removed in draft-17; only used in draft-14/15/16.
-	MaxRequestId = 2,
 	MaxAuthTokenCacheSize = 4,
-	/// MAX_REQUEST_UPDATES, added in draft-19.
+	/// MAX_REQUEST_UPDATES, added in draft-22.
 	MaxRequestUpdates = super::request_update::OPTION,
 	/// HOP_ID, from the MoQ Cluster extension.
 	HopId = super::cluster::HOP_ID,
@@ -31,6 +29,12 @@ pub enum ParameterVarInt {
 	Auth = super::auth::AUTH,
 	/// ACTIVE_COUNT, from the MoQ Active Count extension.
 	ActiveCount = super::active_count::ACTIVE_COUNT,
+	/// Subscriber max age, from the MoQ Timestamp extension.
+	MaxAge = super::max_age::OPTION,
+	/// EPOCH, from the MoQ Epoch extension.
+	Epoch = super::epoch::EPOCH,
+	/// DEFLATE-compressed tracks, from the MoQ Flate extension.
+	Flate = super::flate::OPTION,
 	#[num_enum(catch_all)]
 	Unknown(u64),
 }
@@ -55,31 +59,22 @@ pub struct Parameters {
 	bytes: Vec<(ParameterBytes, Vec<u8>)>,
 }
 
-impl Decode<Version> for Parameters {
-	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for Parameters {
+	fn decode(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let mut params = Self::default();
 
-		// Draft-14/15/16 count the pairs; draft-17+ reads them until the buffer is empty.
-		let count = match version {
-			Version::Draft14 | Version::Draft15 | Version::Draft16 => Some(r.varint()?),
-			_ => None,
-		};
-		if count.is_some_and(|count| count > MAX_PARAMS) {
-			return Err(DecodeError::TooMany);
-		}
-
-		// Draft-16+ delta-encodes the types; even is a varint value, odd is length-prefixed bytes.
-		let delta = !matches!(version, Version::Draft14 | Version::Draft15);
+		// No count: the pairs run to the end of the buffer. The types are delta-encoded;
+		// even is a varint value, odd is length-prefixed bytes.
 		let mut prev = 0u64;
 		let mut i = 0u64;
 
-		while count.map_or(!r.is_empty(), |count| i < count) {
+		while !r.is_empty() {
 			if i >= MAX_PARAMS {
 				return Err(DecodeError::TooMany);
 			}
 
 			let kind = r.varint()?;
-			let kind = match delta && i > 0 {
+			let kind = match i > 0 {
 				true => prev.checked_add(kind).ok_or(DecodeError::BoundsExceeded)?,
 				false => kind,
 			};
@@ -87,10 +82,10 @@ impl Decode<Version> for Parameters {
 			i += 1;
 
 			// Unknown SETUP options may repeat, including GREASE; their values still
-			// have to be well-formed Key-Value-Pairs (draft-21 section 9.1).
+			// have to be well-formed Key-Value-Pairs (draft-22 section 9.1).
 			if kind % 2 == 0 {
 				let kind = match ParameterVarInt::from(kind) {
-					// Undefined before draft 19, so there an unknown option that may repeat.
+					// Undefined before draft 22, so there an unknown option that may repeat.
 					ParameterVarInt::MaxRequestUpdates if !super::request_update::supported(version) => {
 						ParameterVarInt::Unknown(kind)
 					}
@@ -118,7 +113,7 @@ impl Decode<Version> for Parameters {
 }
 
 impl Encode<Version> for Parameters {
-	fn encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
+	fn encode(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
 		let count = self.vars.len() + self.bytes.len();
 		if count as u64 > MAX_PARAMS {
 			return Err(EncodeError::TooMany);
@@ -127,46 +122,24 @@ impl Encode<Version> for Parameters {
 			return Err(EncodeError::BoundsExceeded);
 		}
 
-		match version {
-			Version::Draft14 | Version::Draft15 => {
-				w.varint(count as u64)?;
+		// No count prefix; the types are delta-encoded in ascending order.
+		enum ParamRef<'a> {
+			Var(u64),
+			Bytes(&'a [u8]),
+		}
+		let mut all: Vec<(u64, ParamRef)> = Vec::with_capacity(count);
+		all.extend(self.vars.iter().map(|(k, v)| (u64::from(*k), ParamRef::Var(*v))));
+		all.extend(self.bytes.iter().map(|(k, v)| (u64::from(*k), ParamRef::Bytes(v))));
+		all.sort_by_key(|(k, _)| *k);
 
-				for (kind, value) in &self.vars {
-					w.varint(u64::from(*kind))?;
-					w.varint(*value)?;
-				}
+		let mut prev = 0u64;
+		for (kind, value) in all {
+			w.varint(kind - prev)?;
+			prev = kind;
 
-				for (kind, value) in &self.bytes {
-					w.varint(u64::from(*kind))?;
-					w.bytes(value)?;
-				}
-			}
-			_ => {
-				// Draft16: count prefix + delta encoding
-				// Draft17+: NO count prefix + delta encoding
-				if matches!(version, Version::Draft16) {
-					w.varint(count as u64)?;
-				}
-
-				enum ParamRef<'a> {
-					Var(u64),
-					Bytes(&'a [u8]),
-				}
-				let mut all: Vec<(u64, ParamRef)> = Vec::with_capacity(count);
-				all.extend(self.vars.iter().map(|(k, v)| (u64::from(*k), ParamRef::Var(*v))));
-				all.extend(self.bytes.iter().map(|(k, v)| (u64::from(*k), ParamRef::Bytes(v))));
-				all.sort_by_key(|(k, _)| *k);
-
-				let mut prev = 0u64;
-				for (kind, value) in all {
-					w.varint(kind - prev)?;
-					prev = kind;
-
-					match value {
-						ParamRef::Var(v) => w.varint(v)?,
-						ParamRef::Bytes(v) => w.bytes(v)?,
-					}
-				}
+			match value {
+				ParamRef::Var(v) => w.varint(v)?,
+				ParamRef::Bytes(v) => w.bytes(v)?,
 			}
 		}
 
@@ -175,63 +148,6 @@ impl Encode<Version> for Parameters {
 }
 
 impl Parameters {
-	/// Consume a draft-14 request's parameter block, returning every AUTHORIZATION TOKEN
-	/// (0x03), each decoded by [`super::token::RequestToken`]'s rules.
-	pub fn skip_request(r: &mut Decoder<'_>) -> Result<Vec<super::token::RequestToken>, DecodeError> {
-		let mut tokens = Vec::new();
-		Self::skip(r, Some(&mut tokens))?;
-		Ok(tokens)
-	}
-
-	/// Consume a draft-14 response's parameter block, returning its first
-	/// MAX_CACHE_DURATION (0x04), the one parameter we act on.
-	pub fn skip_response(r: &mut Decoder<'_>) -> Result<Option<u64>, DecodeError> {
-		Self::skip(r, None)
-	}
-
-	/// Draft-14 section 9.2 has a receiver ignore unrecognized parameters and allow their
-	/// duplicates, and lets AUTHORIZATION TOKEN repeat, so unlike [`Parameters::decode`],
-	/// which SETUP uses, a repeat is not refused. A request collects its tokens into `tokens`;
-	/// on a message that does not list them, a response, they are ignored like any other
-	/// parameter.
-	fn skip(
-		r: &mut Decoder<'_>,
-		mut tokens: Option<&mut Vec<super::token::RequestToken>>,
-	) -> Result<Option<u64>, DecodeError> {
-		let count = r.varint()?;
-		if count > MAX_PARAMS {
-			return Err(DecodeError::TooMany);
-		}
-
-		let mut cache_duration = None;
-		for _ in 0..count {
-			// Parity frames a Key-Value-Pair: even is one varint, odd is length prefixed.
-			let kind = r.varint()?;
-			match kind % 2 {
-				0 => {
-					let value = r.varint()?;
-					if kind == 0x04 {
-						cache_duration.get_or_insert(value);
-					}
-				}
-				_ if let Some(tokens) = tokens.as_deref_mut()
-					&& kind == u64::from(ParameterBytes::AuthorizationToken) =>
-				{
-					tokens.push(super::token::RequestToken::param_decode(r, Version::Draft14)?);
-				}
-				_ => {
-					let len = usize::try_from(r.varint()?).map_err(|_| DecodeError::BoundsExceeded)?;
-					if len > MAX_KVP_VALUE_LEN {
-						return Err(DecodeError::BoundsExceeded);
-					}
-					r.slice(len)?;
-				}
-			}
-		}
-
-		Ok(cache_duration)
-	}
-
 	pub fn get_varint(&self, kind: ParameterVarInt) -> Option<u64> {
 		self.vars.iter().find(|(k, _)| *k == kind).map(|(_, v)| *v)
 	}
@@ -257,13 +173,8 @@ impl Parameters {
 
 // ---- Message Parameter Value Encoding ----
 
-/// Trait for encoding/decoding parameter values with version-specific formats.
-///
-/// Parameter encoding differs from field encoding:
-/// - Draft-14/15/16: u8 and bool are encoded as varints (cast to u64)
-/// - Draft-17: type-specific encoding (u8 as raw byte, bool as raw byte, etc.)
-///
-/// Use `_ =>` for the newest draft behavior so future versions default forward.
+/// Encodes and decodes a Message Parameter value, whose format is type-specific
+/// (a u8 or bool is one raw byte, a Location two bare varints).
 pub trait Param: Sized {
 	fn param_encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError>;
 	fn param_decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError>;
@@ -283,44 +194,24 @@ pub trait Param: Sized {
 }
 
 impl Param for u8 {
-	fn param_encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		match version {
-			// Draft-14/15/16: u8 encoded as varint
-			Version::Draft14 | Version::Draft15 | Version::Draft16 => w.varint(u64::from(*self))?,
-			_ => w.u8(*self),
-		}
+	fn param_encode(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
+		w.u8(*self);
 		Ok(())
 	}
 
-	fn param_decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		match version {
-			Version::Draft14 | Version::Draft15 | Version::Draft16 => {
-				u8::try_from(r.varint()?).map_err(|_| DecodeError::InvalidValue)
-			}
-			_ => r.u8(),
-		}
+	fn param_decode(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+		r.u8()
 	}
 }
 
 impl Param for bool {
-	fn param_encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		match version {
-			// Draft-14/15/16: bool encoded as varint
-			Version::Draft14 | Version::Draft15 | Version::Draft16 => w.varint(u8::from(*self).into())?,
-			_ => w.bool(*self),
-		}
+	fn param_encode(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
+		w.bool(*self);
 		Ok(())
 	}
 
-	fn param_decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		match version {
-			Version::Draft14 | Version::Draft15 | Version::Draft16 => match r.varint()? {
-				0 => Ok(false),
-				1 => Ok(true),
-				_ => Err(DecodeError::InvalidValue),
-			},
-			_ => r.bool(),
-		}
+	fn param_decode(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+		r.bool()
 	}
 }
 
@@ -335,51 +226,19 @@ impl Param for u64 {
 	}
 }
 
-/// A Location parameter value, such as LARGEST_OBJECT (0x09).
-///
-/// Draft-16 section 9.2 serializes every Message Parameter as a Key-Value-Pair, and section
-/// 9.2.2.7 calls LARGEST_OBJECT "a length-prefixed Location structure", so the two varints
-/// sit inside a byte string there. Draft-17 section 9.3, and section 10.2 from draft-18 on,
-/// redefines a Message Parameter as `{ Type Delta (vi64), Value (..) }` with no Length at
-/// all, and lists "Location: Two consecutive varints (Group, Object)" as its own value
-/// encoding beside Length-prefixed. So from draft-17 the two varints are written bare.
+/// A Location parameter value, such as LARGEST_OBJECT (0x09): two bare varints, as a
+/// Message Parameter has no Length (draft-18 section 10.2).
 impl Param for Location {
-	fn param_encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		match version {
-			Version::Draft14 | Version::Draft15 | Version::Draft16 => {
-				// The drafts before 17 pin the inner varints to the draft-15 encoding,
-				// matching the other length-prefixed parameters.
-				let mut buf = Vec::new();
-				let mut inner = Encoder::new(&mut buf, Version::Draft15.into());
-				inner.varint(self.group)?;
-				inner.varint(self.object)?;
-				w.bytes(&buf)
-			}
-			_ => {
-				w.varint(self.group)?;
-				w.varint(self.object)?;
-				Ok(())
-			}
-		}
+	fn param_encode(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
+		w.varint(self.group)?;
+		w.varint(self.object)?;
+		Ok(())
 	}
 
-	fn param_decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		match version {
-			Version::Draft14 | Version::Draft15 | Version::Draft16 => {
-				let mut inner = Decoder::new(r.bytes()?, Version::Draft15.into());
-				let group = inner.varint()?;
-				let object = inner.varint()?;
-				if !inner.is_empty() {
-					return Err(DecodeError::TrailingBytes);
-				}
-				Ok(Location { group, object })
-			}
-			_ => {
-				let group = r.varint()?;
-				let object = r.varint()?;
-				Ok(Location { group, object })
-			}
-		}
+	fn param_decode(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+		let group = r.varint()?;
+		let object = r.varint()?;
+		Ok(Location { group, object })
 	}
 }
 
@@ -446,43 +305,6 @@ impl Param for Opaque {
 	}
 }
 
-/// Message parameter ids defined in draft-16. Sorted for `binary_search`.
-///
-/// A known id on a message that does not list it is ignored. An id outside this set
-/// is unknown and closes the session.
-const DRAFT16_MESSAGE_PARAMS: &[u64] = &[0x02, 0x03, 0x08, 0x09, 0x10, 0x20, 0x21, 0x22, 0x32];
-
-fn skip_kvp(r: &mut Decoder<'_>, key: u64) -> Result<(), DecodeError> {
-	if key.is_multiple_of(2) {
-		r.varint()?;
-	} else {
-		let value = r.bytes()?;
-		if value.len() > MAX_KVP_VALUE_LEN {
-			return Err(DecodeError::BoundsExceeded);
-		}
-	}
-	Ok(())
-}
-
-/// Consumes a parameter the message does not list, when that draft says to ignore it.
-///
-/// Draft-14 and draft-15 ignore an unrecognized parameter, including one defined for a
-/// different message. Draft-16 ignores a known parameter on the wrong message and closes
-/// on an unknown id. From draft-17 on both close the session, and a parameter value has
-/// no length to skip by, so this returns false and the caller fails the message.
-pub(crate) fn skip_unlisted(r: &mut Decoder<'_>, version: Version, key: u64) -> Result<bool, DecodeError> {
-	let ignore = match version {
-		Version::Draft14 | Version::Draft15 => true,
-		Version::Draft16 => DRAFT16_MESSAGE_PARAMS.binary_search(&key).is_ok(),
-		_ => false,
-	};
-	if !ignore {
-		return Ok(false);
-	}
-	skip_kvp(r, key)?;
-	Ok(true)
-}
-
 /// Encode message parameters with compile-time sorted keys.
 ///
 /// Keys must be listed in ascending order (enforced at compile time).
@@ -496,7 +318,7 @@ pub(crate) fn skip_unlisted(r: &mut Decoder<'_>, version: Version, key: u64) -> 
 /// ```
 macro_rules! encode_params {
 	($w:expr, $version:expr, $($key:expr => $val:expr),* $(,)?) => {{
-		#[allow(unused)]
+		#[allow(unused, reason = "a compile-time key order check")]
 		const _: () = {
 			let _keys: &[u64] = &[$($key),*];
 			let mut _i = 1;
@@ -508,23 +330,19 @@ macro_rules! encode_params {
 
 		let _version: $crate::ietf::Version = $version;
 
-		#[allow(unused_mut)]
+		#[allow(unused_mut, reason = "a call with no parameters never counts one")]
 		let mut _count: usize = 0;
 		$(_count += if $crate::ietf::Param::param_present(&$val) { 1 } else { 0 };)*
 		$w.varint(_count as u64)?;
 
-		#[allow(unused_mut, unused_assignments)]
+		#[allow(unused_mut, unused_assignments, reason = "a call with no parameters never tracks a key")]
 		let mut _prev_key: u64 = 0;
-		#[allow(unused_mut, unused_assignments)]
+		#[allow(unused_mut, unused_assignments, reason = "a call with no parameters never tracks a key")]
 		let mut _first: bool = true;
 		$(
 			if $crate::ietf::Param::param_present(&$val) {
 				let _key: u64 = $key;
-				let _wire = match _version {
-					$crate::ietf::Version::Draft14 | $crate::ietf::Version::Draft15 => _key,
-					_ if _first => _key,
-					_ => _key - _prev_key,
-				};
+				let _wire = if _first { _key } else { _key - _prev_key };
 				$w.varint(_wire)?;
 				_prev_key = _key;
 				_first = false;
@@ -541,9 +359,7 @@ macro_rules! encode_params {
 /// for parameters where `T::default()` is an acceptable fallback.
 ///
 /// A `where` gate takes the key off the list on versions where the expression is false.
-/// What remains unlisted is ignored on draft-14 and draft-15, ignored on draft-16 when
-/// the id is a message parameter of that draft used on the wrong message, and a
-/// `DecodeError::InvalidValue` otherwise (unknown id, or any unlisted id from draft-17 on).
+/// An unlisted key is a `DecodeError::InvalidValue`: a value has no length to skip by.
 /// Duplicate parameters cause `DecodeError::Duplicate`, unless the type allows a repeat
 /// (see [`Param::param_repeat`]), such as `Vec<T>`.
 ///
@@ -553,11 +369,11 @@ macro_rules! encode_params {
 ///     0x20 => subscriber_priority: Option<u8>,
 /// );
 /// // forward: Option<bool> and subscriber_priority: Option<u8> are now in scope
-/// let subscriber_priority = subscriber_priority.unwrap_or(128);
+/// let subscriber_priority = subscriber_priority.unwrap_or(super::priority::DEFAULT_WIRE);
 /// ```
 macro_rules! decode_params {
 	($r:expr, $version:expr, $($key:expr => $name:ident: $ty:ty $(where $gate:expr)?),* $(,)?) => {
-		#[allow(unused)]
+		#[allow(unused, reason = "a compile-time key order check")]
 		const _: () = {
 			let _keys: &[u64] = &[$($key),*];
 			let mut _i = 1;
@@ -568,7 +384,7 @@ macro_rules! decode_params {
 		};
 
 		// Use internal Option wrapper for duplicate detection, then shadow with Default.
-		$(#[allow(unused_mut, non_snake_case)] let mut $name: Option<$ty> = None;)*
+		$(#[allow(unused_mut, non_snake_case, reason = "names come from the call site, and an absent parameter is never assigned")] let mut $name: Option<$ty> = None;)*
 
 		{
 			let _version: $crate::ietf::Version = $version;
@@ -577,21 +393,21 @@ macro_rules! decode_params {
 				return Err($crate::coding::DecodeError::TooMany);
 			}
 
-			#[allow(unused_mut, unused_assignments)]
+			#[allow(unused_mut, unused_assignments, reason = "a call with no parameters never tracks a key")]
 			let mut _prev_key: u64 = 0;
 			for _i in 0.._count {
 				let _wire = $r.varint()?;
-				let _key: u64 = match _version {
-					$crate::ietf::Version::Draft14 | $crate::ietf::Version::Draft15 => _wire,
-					_ if _i == 0 => _wire,
-					_ => _prev_key.checked_add(_wire).ok_or($crate::coding::DecodeError::BoundsExceeded)?,
+				let _key: u64 = if _i == 0 {
+					_wire
+				} else {
+					_prev_key.checked_add(_wire).ok_or($crate::coding::DecodeError::BoundsExceeded)?
 				};
 				_prev_key = _key;
 
 				// An if-chain rather than a `match`, so a key can be a named constant:
 				// the macro captures it as an expression, which is not a legal pattern.
-				// A false `where` gate falls through, so the draft's ignore-or-close rule applies
-				// instead of validating a value the message is not allowed to carry.
+				// A false `where` gate falls through to the refusal instead of validating a
+				// value the message is not allowed to carry.
 				$(
 					if _key == $key $( && ($gate) )? {
 						let _value = <$ty as $crate::ietf::Param>::param_decode($r, _version)?;
@@ -602,15 +418,12 @@ macro_rules! decode_params {
 						continue;
 					}
 				)*
-				if $crate::ietf::parameters::skip_unlisted($r, _version, _key)? {
-					continue;
-				}
 				return Err($crate::coding::DecodeError::InvalidValue);
 			}
 		}
 
 		// Shadow with unwrap_or_default: Option<T> defaults to None, T defaults to T::default()
-		$(#[allow(unused_variables)] let $name: $ty = $name.unwrap_or_default();)*
+		$(#[allow(unused_variables, reason = "a caller may decode a parameter it never reads")] let $name: $ty = $name.unwrap_or_default();)*
 	};
 }
 
@@ -619,50 +432,32 @@ mod tests {
 	use super::super::Filter;
 	use super::*;
 
-	/// Before draft 19, 0x08 is an unknown SETUP option, so a peer may repeat it.
+	/// On draft 18, 0x08 is an unknown SETUP option, so a peer may repeat it.
 	#[test]
-	fn max_request_updates_is_unknown_before_draft_19() {
+	fn max_request_updates_is_unknown_on_draft_18() {
 		// Draft 18: no count prefix, delta-encoded types, so the repeat is a delta of 0.
 		let block = [0x08, 0x01, 0x00, 0x02];
 		let mut r = Decoder::new(&block, Version::Draft18.into());
 		let params = Parameters::decode(&mut r, Version::Draft18).expect("a repeated unknown option is legal");
 		assert_eq!(params.get_varint(ParameterVarInt::MaxRequestUpdates), None);
 
-		let mut r = Decoder::new(&block, Version::Draft19.into());
+		let mut r = Decoder::new(&block, Version::Draft22.into());
 		assert!(matches!(
-			Parameters::decode(&mut r, Version::Draft19),
+			Parameters::decode(&mut r, Version::Draft22),
 			Err(DecodeError::Duplicate)
 		));
 	}
 
 	#[test]
 	fn setup_allows_repeated_unknown_options() {
-		for version in [
-			Version::Draft14,
-			Version::Draft15,
-			Version::Draft16,
-			Version::Draft17,
-			Version::Draft18,
-			Version::Draft19,
-			Version::Draft20,
-			Version::Draft21,
-			Version::Draft22,
-		] {
+		for version in [Version::Draft18, Version::Draft22] {
 			for kind in [0x20, 0x21, 0x9d, 0x11c] {
 				let mut buf = Vec::new();
 				let mut w = Encoder::new(&mut buf, version.into());
-				if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
-					w.varint(2).unwrap();
-				}
 				w.varint(kind).unwrap();
 				for delta in [None, Some(0)] {
 					if let Some(delta) = delta {
-						w.varint(if matches!(version, Version::Draft14 | Version::Draft15) {
-							kind
-						} else {
-							delta
-						})
-						.unwrap();
+						w.varint(delta).unwrap();
 					}
 					if kind % 2 == 0 {
 						w.varint(1).unwrap();
@@ -677,7 +472,7 @@ mod tests {
 
 	#[test]
 	fn setup_rejects_repeated_known_options() {
-		for version in [Version::Draft18, Version::Draft21, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft22] {
 			for bytes in [&[4, 1, 0, 2][..], &[7, 1, b'a', 0, 1, b'b'][..]] {
 				assert!(matches!(
 					Parameters::decode_slice(bytes, version),
@@ -689,21 +484,14 @@ mod tests {
 
 	#[test]
 	fn setup_repeated_unknown_options_still_require_complete_values() {
-		for version in [Version::Draft18, Version::Draft21, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft22] {
 			assert!(Parameters::decode_slice(&[0x21, 1, b'a', 0, 2, b'b'], version).is_err());
 		}
 	}
 
 	#[test]
 	fn group_order_parameter_rejects_values_outside_one_and_two() {
-		for version in [
-			Version::Draft17,
-			Version::Draft18,
-			Version::Draft19,
-			Version::Draft20,
-			Version::Draft21,
-			Version::Draft22,
-		] {
+		for version in [Version::Draft18, Version::Draft22] {
 			for value in [0u8, 3, 255] {
 				let bytes = [value];
 				let mut r = Decoder::new(&bytes, version.into());
@@ -727,61 +515,7 @@ mod tests {
 	}
 
 	#[test]
-	fn legacy_group_order_zero_keeps_the_publisher_preference() {
-		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
-			let mut r = Decoder::new(&[0], version.into());
-			assert_eq!(
-				super::super::GroupOrder::param_decode(&mut r, version).unwrap(),
-				super::super::GroupOrder::Descending
-			);
-		}
-	}
-
-	// ---- Setup Parameters tests (unchanged) ----
-
-	#[test]
-	fn test_parameters_v16_delta_round_trip() {
-		let mut params = Parameters::default();
-		params.set_bytes(ParameterBytes::Path, b"/test".to_vec());
-		params.set_varint(ParameterVarInt::MaxRequestId, 100);
-		params.set_bytes(ParameterBytes::Implementation, b"test-impl".to_vec());
-
-		let mut buf = Vec::new();
-		params
-			.encode(&mut Encoder::new(&mut buf, Version::Draft16.into()), Version::Draft16)
-			.unwrap();
-
-		let mut bytes = bytes::Bytes::from(buf);
-		let decoded = crate::coding::decode_buf(&mut bytes, Version::Draft16, Parameters::decode).unwrap();
-
-		assert_eq!(decoded.get_bytes(ParameterBytes::Path), Some(b"/test".as_ref()));
-		assert_eq!(decoded.get_varint(ParameterVarInt::MaxRequestId), Some(100));
-		assert_eq!(
-			decoded.get_bytes(ParameterBytes::Implementation),
-			Some(b"test-impl".as_ref())
-		);
-	}
-
-	#[test]
-	fn test_parameters_v15_round_trip() {
-		let mut params = Parameters::default();
-		params.set_bytes(ParameterBytes::Path, b"/test".to_vec());
-		params.set_varint(ParameterVarInt::MaxRequestId, 100);
-
-		let mut buf = Vec::new();
-		params
-			.encode(&mut Encoder::new(&mut buf, Version::Draft15.into()), Version::Draft15)
-			.unwrap();
-
-		let mut bytes = bytes::Bytes::from(buf);
-		let decoded = crate::coding::decode_buf(&mut bytes, Version::Draft15, Parameters::decode).unwrap();
-
-		assert_eq!(decoded.get_bytes(ParameterBytes::Path), Some(b"/test".as_ref()));
-		assert_eq!(decoded.get_varint(ParameterVarInt::MaxRequestId), Some(100));
-	}
-
-	#[test]
-	fn test_parameters_v17_round_trip() {
+	fn setup_parameters_round_trip() {
 		let mut params = Parameters::default();
 		params.set_bytes(ParameterBytes::Path, b"/test".to_vec());
 		params.set_varint(ParameterVarInt::MaxAuthTokenCacheSize, 4096);
@@ -789,37 +523,18 @@ mod tests {
 
 		let mut buf = Vec::new();
 		params
-			.encode(&mut Encoder::new(&mut buf, Version::Draft17.into()), Version::Draft17)
+			.encode(&mut Encoder::new(&mut buf, Version::Draft18.into()), Version::Draft18)
 			.unwrap();
+		// No count prefix: the first byte is the first type, PATH (0x01).
+		assert_eq!(buf[0], 0x01);
 
-		let mut bytes = bytes::Bytes::from(buf);
-		let decoded = crate::coding::decode_buf(&mut bytes, Version::Draft17, Parameters::decode).unwrap();
-
+		let (decoded, _) = Parameters::decode_slice(&buf, Version::Draft18).unwrap();
 		assert_eq!(decoded.get_bytes(ParameterBytes::Path), Some(b"/test".as_ref()));
 		assert_eq!(decoded.get_varint(ParameterVarInt::MaxAuthTokenCacheSize), Some(4096));
 		assert_eq!(
 			decoded.get_bytes(ParameterBytes::Implementation),
 			Some(b"test-impl".as_ref())
 		);
-		assert!(bytes.is_empty());
-	}
-
-	#[test]
-	fn test_parameters_v17_no_count_prefix() {
-		let mut params = Parameters::default();
-		params.set_bytes(ParameterBytes::Path, b"/x".to_vec());
-
-		let mut buf15 = Vec::new();
-		params
-			.encode(&mut Encoder::new(&mut buf15, Version::Draft15.into()), Version::Draft15)
-			.unwrap();
-
-		let mut buf17 = Vec::new();
-		params
-			.encode(&mut Encoder::new(&mut buf17, Version::Draft17.into()), Version::Draft17)
-			.unwrap();
-
-		assert!(buf17.len() < buf15.len());
 	}
 
 	// ---- Message Parameter (encode_params!/decode_params!) tests ----
@@ -838,99 +553,73 @@ mod tests {
 
 	#[test]
 	fn test_param_u8_all_versions() {
-		for version in [
-			Version::Draft14,
-			Version::Draft15,
-			Version::Draft16,
-			Version::Draft17,
-			Version::Draft18,
-		] {
-			round_trip_params(
-				version,
-				|w, v| {
-					encode_params!(w, v, 0x20 => 200u8);
-					Ok(())
-				},
-				|r, v| {
-					decode_params!(r, v, 0x20 => val: Option<u8>);
-					assert_eq!(val, Some(200));
-					Ok(())
-				},
-			);
-		}
+		let version = Version::Draft18;
+		round_trip_params(
+			version,
+			|w, v| {
+				encode_params!(w, v, 0x20 => 200u8);
+				Ok(())
+			},
+			|r, v| {
+				decode_params!(r, v, 0x20 => val: Option<u8>);
+				assert_eq!(val, Some(200));
+				Ok(())
+			},
+		);
 	}
 
 	#[test]
 	fn test_param_u8_wire_vectors() -> Result<(), EncodeError> {
-		for (version, expected) in [
-			(Version::Draft16, &[0x01, 0x20, 0x40, 0xff][..]),
-			(Version::Draft17, &[0x01, 0x20, 0xff][..]),
-			(Version::Draft18, &[0x01, 0x20, 0xff][..]),
-			(Version::Draft19, &[0x01, 0x20, 0xff][..]),
-		] {
-			let mut buf = Vec::new();
-			encode_params!(&mut Encoder::new(&mut buf, version.into()), version, 0x20 => u8::MAX);
-			assert_eq!(&buf[..], expected, "{version}");
+		let version = Version::Draft18;
+		let expected = &[0x01, 0x20, 0xff][..];
+		let mut buf = Vec::new();
+		encode_params!(&mut Encoder::new(&mut buf, version.into()), version, 0x20 => u8::MAX);
+		assert_eq!(&buf[..], expected, "{version}");
 
-			let mut encoded = Decoder::new(expected, version.into());
-			let decoded = (|| -> Result<Option<u8>, DecodeError> {
-				decode_params!(&mut encoded, version, 0x20 => value: Option<u8>);
-				Ok(value)
-			})()
-			.expect("fixed uint8 vector should decode");
-			assert_eq!(decoded, Some(u8::MAX), "{version}");
-			assert!(encoded.is_empty(), "{version}");
-		}
+		let mut encoded = Decoder::new(expected, version.into());
+		let decoded = (|| -> Result<Option<u8>, DecodeError> {
+			decode_params!(&mut encoded, version, 0x20 => value: Option<u8>);
+			Ok(value)
+		})()
+		.expect("fixed uint8 vector should decode");
+		assert_eq!(decoded, Some(u8::MAX), "{version}");
+		assert!(encoded.is_empty(), "{version}");
 		Ok(())
 	}
 
 	#[test]
 	fn test_param_bool_all_versions() {
-		for version in [
-			Version::Draft14,
-			Version::Draft15,
-			Version::Draft16,
-			Version::Draft17,
-			Version::Draft18,
-		] {
-			round_trip_params(
-				version,
-				|w, v| {
-					encode_params!(w, v, 0x10 => true);
-					Ok(())
-				},
-				|r, v| {
-					decode_params!(r, v, 0x10 => val: Option<bool>);
-					assert_eq!(val, Some(true));
-					Ok(())
-				},
-			);
-		}
+		let version = Version::Draft18;
+		round_trip_params(
+			version,
+			|w, v| {
+				encode_params!(w, v, 0x10 => true);
+				Ok(())
+			},
+			|r, v| {
+				decode_params!(r, v, 0x10 => val: Option<bool>);
+				assert_eq!(val, Some(true));
+				Ok(())
+			},
+		);
 	}
 
 	#[test]
 	fn test_param_location_all_versions() {
 		let loc = Location { group: 5, object: 3 };
-		for version in [
-			Version::Draft14,
-			Version::Draft15,
-			Version::Draft16,
-			Version::Draft17,
-			Version::Draft18,
-		] {
-			round_trip_params(
-				version,
-				|w, v| {
-					encode_params!(w, v, 0x09 => loc.clone());
-					Ok(())
-				},
-				|r, v| {
-					decode_params!(r, v, 0x09 => val: Option<Location>);
-					assert_eq!(val, Some(Location { group: 5, object: 3 }));
-					Ok(())
-				},
-			);
-		}
+		let version = Version::Draft18;
+		round_trip_params(
+			version,
+			|w, v| {
+				encode_params!(w, v, 0x09 => loc.clone());
+				Ok(())
+			},
+			|r, v| {
+				decode_params!(r, v, 0x09 => val: Option<Location>);
+				assert_eq!(val, Some(Location { group: 5, object: 3 }));
+				Ok(())
+			},
+		);
 	}
 
 	#[test]
@@ -939,15 +628,10 @@ mod tests {
 			group: 255,
 			object: 128,
 		};
-		// Draft-16 wraps the two varints in a Key-Value-Pair Length; from draft-17 a
-		// Message Parameter has no Length and a Location value is two bare varints. The
-		// inner format differs too: QUIC-style before draft-17, leading-ones after.
+		// A Message Parameter has no Length, so a Location value is two bare varints.
 		for (version, expected) in [
-			(Version::Draft16, &[0x01, 0x09, 0x04, 0x40, 0xff, 0x40, 0x80][..]),
-			(Version::Draft17, &[0x01, 0x09, 0x80, 0xff, 0x80, 0x80][..]),
 			(Version::Draft18, &[0x01, 0x09, 0x80, 0xff, 0x80, 0x80][..]),
-			(Version::Draft19, &[0x01, 0x09, 0x80, 0xff, 0x80, 0x80][..]),
-			(Version::Draft20, &[0x01, 0x09, 0x80, 0xff, 0x80, 0x80][..]),
+			(Version::Draft22, &[0x01, 0x09, 0x80, 0xff, 0x80, 0x80][..]),
 		] {
 			let mut buf = Vec::new();
 			encode_params!(&mut Encoder::new(&mut buf, version.into()), version, 0x09 => location.clone());
@@ -967,289 +651,206 @@ mod tests {
 
 	#[test]
 	fn test_param_filter_all_versions() {
-		for version in [
-			Version::Draft14,
-			Version::Draft15,
-			Version::Draft16,
-			Version::Draft17,
-			Version::Draft18,
-		] {
-			round_trip_params(
-				version,
-				|w, v| {
-					encode_params!(w, v, 0x21 => Filter::NextObject);
-					Ok(())
-				},
-				|r, v| {
-					decode_params!(r, v, 0x21 => val: Option<Filter>);
-					assert_eq!(val, Some(Filter::NextObject));
-					Ok(())
-				},
-			);
-		}
+		let version = Version::Draft18;
+		round_trip_params(
+			version,
+			|w, v| {
+				encode_params!(w, v, 0x21 => Filter::NextObject);
+				Ok(())
+			},
+			|r, v| {
+				decode_params!(r, v, 0x21 => val: Option<Filter>);
+				assert_eq!(val, Some(Filter::NextObject));
+				Ok(())
+			},
+		);
 	}
 
 	#[test]
 	fn test_param_multiple_delta_encoding() {
-		for version in [
-			Version::Draft14,
-			Version::Draft15,
-			Version::Draft16,
-			Version::Draft17,
-			Version::Draft18,
-		] {
-			round_trip_params(
-				version,
-				|w, v| {
-					encode_params!(w, v,
-						0x10 => true,
-						0x20 => 200u8,
-						0x21 => Filter::NextObject,
-						0x22 => 2u8,
-					);
-					Ok(())
-				},
-				|r, v| {
-					decode_params!(r, v,
-						0x10 => forward: Option<bool>,
-						0x20 => sub_pri: Option<u8>,
-						0x21 => filter: Option<Filter>,
-						0x22 => group_order: Option<u8>,
-					);
-					assert_eq!(forward, Some(true));
-					assert_eq!(sub_pri, Some(200));
-					assert_eq!(filter, Some(Filter::NextObject));
-					assert_eq!(group_order, Some(2));
-					Ok(())
-				},
-			);
-		}
+		let version = Version::Draft18;
+		round_trip_params(
+			version,
+			|w, v| {
+				encode_params!(w, v,
+					0x10 => true,
+					0x20 => 200u8,
+					0x21 => Filter::NextObject,
+					0x22 => 2u8,
+				);
+				Ok(())
+			},
+			|r, v| {
+				decode_params!(r, v,
+					0x10 => forward: Option<bool>,
+					0x20 => sub_pri: Option<u8>,
+					0x21 => filter: Option<Filter>,
+					0x22 => group_order: Option<u8>,
+				);
+				assert_eq!(forward, Some(true));
+				assert_eq!(sub_pri, Some(200));
+				assert_eq!(filter, Some(Filter::NextObject));
+				assert_eq!(group_order, Some(2));
+				Ok(())
+			},
+		);
 	}
 
 	#[test]
 	fn test_param_empty_set() {
-		for version in [
-			Version::Draft14,
-			Version::Draft15,
-			Version::Draft16,
-			Version::Draft17,
-			Version::Draft18,
-		] {
-			round_trip_params(
-				version,
-				|w, v| {
-					encode_params!(w, v,);
-					Ok(())
-				},
-				|r, v| {
-					decode_params!(r, v,);
-					Ok(())
-				},
-			);
-		}
+		let version = Version::Draft18;
+		round_trip_params(
+			version,
+			|w, v| {
+				encode_params!(w, v,);
+				Ok(())
+			},
+			|r, v| {
+				decode_params!(r, v,);
+				Ok(())
+			},
+		);
 	}
 
 	#[test]
 	fn test_param_option_skip_none() {
-		for version in [
-			Version::Draft14,
-			Version::Draft15,
-			Version::Draft16,
-			Version::Draft17,
-			Version::Draft18,
-		] {
-			round_trip_params(
-				version,
-				|w, v| {
-					let loc: Option<Location> = None;
-					encode_params!(w, v,
-						0x09 => loc,
-						0x10 => true,
-					);
-					Ok(())
-				},
-				|r, v| {
-					decode_params!(r, v,
-						0x09 => loc: Option<Location>,
-						0x10 => forward: Option<bool>,
-					);
-					assert_eq!(loc, None);
-					assert_eq!(forward, Some(true));
-					Ok(())
-				},
-			);
-		}
+		let version = Version::Draft18;
+		round_trip_params(
+			version,
+			|w, v| {
+				let loc: Option<Location> = None;
+				encode_params!(w, v,
+					0x09 => loc,
+					0x10 => true,
+				);
+				Ok(())
+			},
+			|r, v| {
+				decode_params!(r, v,
+					0x09 => loc: Option<Location>,
+					0x10 => forward: Option<bool>,
+				);
+				assert_eq!(loc, None);
+				assert_eq!(forward, Some(true));
+				Ok(())
+			},
+		);
 	}
 
 	#[test]
 	fn test_param_option_encode_some() {
-		for version in [
-			Version::Draft14,
-			Version::Draft15,
-			Version::Draft16,
-			Version::Draft17,
-			Version::Draft18,
-		] {
-			round_trip_params(
-				version,
-				|w, v| {
-					let loc = Some(Location { group: 10, object: 5 });
-					encode_params!(w, v,
-						0x09 => loc,
-						0x10 => true,
-					);
-					Ok(())
-				},
-				|r, v| {
-					decode_params!(r, v,
-						0x09 => loc: Option<Location>,
-						0x10 => forward: Option<bool>,
-					);
-					assert_eq!(loc, Some(Location { group: 10, object: 5 }));
-					assert_eq!(forward, Some(true));
-					Ok(())
-				},
-			);
-		}
+		let version = Version::Draft18;
+		round_trip_params(
+			version,
+			|w, v| {
+				let loc = Some(Location { group: 10, object: 5 });
+				encode_params!(w, v,
+					0x09 => loc,
+					0x10 => true,
+				);
+				Ok(())
+			},
+			|r, v| {
+				decode_params!(r, v,
+					0x09 => loc: Option<Location>,
+					0x10 => forward: Option<bool>,
+				);
+				assert_eq!(loc, Some(Location { group: 10, object: 5 }));
+				assert_eq!(forward, Some(true));
+				Ok(())
+			},
+		);
 	}
 
 	#[test]
 	fn test_param_bare_type_defaults() {
 		// Bare types use T::default() when the parameter is absent
-		for version in [
-			Version::Draft14,
-			Version::Draft15,
-			Version::Draft16,
-			Version::Draft17,
-			Version::Draft18,
-		] {
-			round_trip_params(
-				version,
-				|w, v| {
-					// Encode only 0x10, not 0x20
-					encode_params!(w, v, 0x10 => true);
-					Ok(())
-				},
-				|r, v| {
-					decode_params!(r, v,
-						0x10 => forward: bool,
-						0x20 => priority: u8,
-					);
-					assert!(forward);
-					assert_eq!(priority, 0); // u8::default()
-					Ok(())
-				},
-			);
-		}
+		let version = Version::Draft18;
+		round_trip_params(
+			version,
+			|w, v| {
+				// Encode only 0x10, not 0x20
+				encode_params!(w, v, 0x10 => true);
+				Ok(())
+			},
+			|r, v| {
+				decode_params!(r, v,
+					0x10 => forward: bool,
+					0x20 => priority: u8,
+				);
+				assert!(forward);
+				assert_eq!(priority, 0); // u8::default()
+				Ok(())
+			},
+		);
 	}
 
 	#[test]
 	fn test_param_unknown_rejected() {
-		// 0x3E is not a message parameter in any of these drafts. Draft-14 and draft-15
-		// ignore it. Draft-16 on closes the session.
-		for version in [
-			Version::Draft14,
-			Version::Draft15,
-			Version::Draft16,
-			Version::Draft17,
-			Version::Draft18,
-		] {
-			let mut buf = Vec::new();
-			let mut w = Encoder::new(&mut buf, version.into());
-			w.varint(1).unwrap();
-			w.varint(0x3Eu64).unwrap();
-			1u64.param_encode(&mut w, version).unwrap();
+		// 0x3E is not a message parameter, which closes the session.
+		let version = Version::Draft18;
+		let mut buf = Vec::new();
+		let mut w = Encoder::new(&mut buf, version.into());
+		w.varint(1).unwrap();
+		w.varint(0x3Eu64).unwrap();
+		1u64.param_encode(&mut w, version).unwrap();
 
-			let mut bytes = Decoder::new(&buf, version.into());
-			let result: Result<Option<u8>, DecodeError> = (|| {
-				decode_params!(&mut bytes, version, 0x20 => val: Option<u8>);
-				Ok(val)
-			})();
-			match version {
-				Version::Draft14 | Version::Draft15 => {
-					assert_eq!(result.unwrap(), None, "{version} ignores an unrecognized parameter");
-					assert!(bytes.is_empty(), "{version}");
-				}
-				_ => assert!(
-					matches!(result, Err(DecodeError::InvalidValue)),
-					"expected InvalidValue for unknown param in {version}"
-				),
-			}
-		}
+		let mut bytes = Decoder::new(&buf, version.into());
+		let result: Result<Option<u8>, DecodeError> = (|| {
+			decode_params!(&mut bytes, version, 0x20 => val: Option<u8>);
+			Ok(val)
+		})();
+		assert!(
+			matches!(result, Err(DecodeError::InvalidValue)),
+			"expected InvalidValue for unknown param in {version}"
+		);
 	}
 
-	/// EXPIRES (0x08) is a draft-16 message parameter, but not for a message whose list is
-	/// only SUBSCRIBER_PRIORITY. Draft-16 ignores it and still reads the parameter after it.
-	/// Draft-18 closes the session on the same bytes.
+	/// EXPIRES (0x08) is a message parameter, but not for a message whose list is only
+	/// SUBSCRIBER_PRIORITY, so it closes the session.
 	#[test]
 	fn known_param_on_the_wrong_message() {
-		for version in [Version::Draft16, Version::Draft18] {
-			let mut buf = Vec::new();
-			let mut w = Encoder::new(&mut buf, version.into());
-			w.varint(2).unwrap();
-			w.varint(0x08u64).unwrap();
-			5u64.param_encode(&mut w, version).unwrap();
-			w.varint(0x18u64).unwrap(); // delta from 0x08 to 0x20
-			7u8.param_encode(&mut w, version).unwrap();
+		let version = Version::Draft18;
+		let mut buf = Vec::new();
+		let mut w = Encoder::new(&mut buf, version.into());
+		w.varint(2).unwrap();
+		w.varint(0x08u64).unwrap();
+		5u64.param_encode(&mut w, version).unwrap();
+		w.varint(0x18u64).unwrap(); // delta from 0x08 to 0x20
+		7u8.param_encode(&mut w, version).unwrap();
 
-			let mut bytes = Decoder::new(&buf, version.into());
-			let result: Result<Option<u8>, DecodeError> = (|| {
-				decode_params!(&mut bytes, version, 0x20 => val: Option<u8>);
-				Ok(val)
-			})();
-			match version {
-				Version::Draft16 => {
-					assert_eq!(result.unwrap(), Some(7));
-					assert!(bytes.is_empty());
-				}
-				Version::Draft18 => assert!(matches!(result, Err(DecodeError::InvalidValue))),
-				_ => unreachable!(),
-			}
-		}
+		let mut bytes = Decoder::new(&buf, version.into());
+		let result: Result<Option<u8>, DecodeError> = (|| {
+			decode_params!(&mut bytes, version, 0x20 => val: Option<u8>);
+			Ok(val)
+		})();
+		assert!(matches!(result, Err(DecodeError::InvalidValue)));
 	}
 
 	#[test]
 	fn test_param_duplicate_rejected() {
 		// Manually construct a buffer with duplicate key 0x20
-		for version in [
-			Version::Draft14,
-			Version::Draft15,
-			Version::Draft16,
-			Version::Draft17,
-			Version::Draft18,
-		] {
-			let mut buf = Vec::new();
-			let mut w = Encoder::new(&mut buf, version.into());
-			// Encode count = 2
-			w.varint(2).unwrap();
-			match version {
-				Version::Draft14 | Version::Draft15 => {
-					// Plain (non-delta) keys: first key=0x20, second key=0x20
-					w.varint(0x20u64).unwrap();
-					100u8.param_encode(&mut w, version).unwrap();
-					w.varint(0x20u64).unwrap();
-					200u8.param_encode(&mut w, version).unwrap();
-				}
-				_ => {
-					// Delta-encoded: first delta=0x20 (abs=0x20), second delta=0 (abs=0x20)
-					w.varint(0x20u64).unwrap();
-					100u8.param_encode(&mut w, version).unwrap();
-					w.varint(0).unwrap();
-					200u8.param_encode(&mut w, version).unwrap();
-				}
-			}
+		let version = Version::Draft18;
+		let mut buf = Vec::new();
+		let mut w = Encoder::new(&mut buf, version.into());
+		// Encode count = 2
+		w.varint(2).unwrap();
+		// Delta-encoded: first delta=0x20 (abs=0x20), second delta=0 (abs=0x20)
+		w.varint(0x20u64).unwrap();
+		100u8.param_encode(&mut w, version).unwrap();
+		w.varint(0).unwrap();
+		200u8.param_encode(&mut w, version).unwrap();
 
-			let mut bytes = Decoder::new(&buf, version.into());
-			let result: Result<(), DecodeError> = (|| {
-				decode_params!(&mut bytes, version, 0x20 => val: Option<u8>);
-				let _ = val;
-				Ok(())
-			})();
-			assert!(
-				matches!(result, Err(DecodeError::Duplicate)),
-				"expected Duplicate for {version}"
-			);
-		}
+		let mut bytes = Decoder::new(&buf, version.into());
+		let result: Result<(), DecodeError> = (|| {
+			decode_params!(&mut bytes, version, 0x20 => val: Option<u8>);
+			let _ = val;
+			Ok(())
+		})();
+		assert!(
+			matches!(result, Err(DecodeError::Duplicate)),
+			"expected Duplicate for {version}"
+		);
 	}
 
 	/// A parameter the draft lets repeat, such as AUTHORIZATION TOKEN, keeps every
@@ -1265,66 +866,22 @@ mod tests {
 				value: vec![0xAA],
 			})
 		};
-		for version in [Version::Draft15, Version::Draft16, Version::Draft17, Version::Draft20] {
-			let mut buf = Vec::new();
-			let mut w = Encoder::new(&mut buf, version.into());
-			w.varint(2).unwrap();
-			w.varint(0x03).unwrap();
-			token(0).param_encode(&mut w, version).unwrap();
-			// The second key: absolute before draft-16, a zero delta after.
-			let second: u64 = if version == Version::Draft15 { 0x03 } else { 0 };
-			w.varint(second).unwrap();
-			token(1).param_encode(&mut w, version).unwrap();
+		let version = Version::Draft22;
+		let mut buf = Vec::new();
+		let mut w = Encoder::new(&mut buf, version.into());
+		w.varint(2).unwrap();
+		w.varint(0x03).unwrap();
+		token(0).param_encode(&mut w, version).unwrap();
+		w.varint(0).unwrap();
+		token(1).param_encode(&mut w, version).unwrap();
 
-			let mut r = Decoder::new(&buf, version.into());
-			let tokens = (|| -> Result<Vec<RequestToken>, DecodeError> {
-				decode_params!(&mut r, version, 0x03 => tokens: Vec<RequestToken>);
-				Ok(tokens)
-			})()
-			.unwrap_or_else(|e| panic!("{version}: {e}"));
-			assert_eq!(tokens, vec![token(0), token(1)], "{version}");
-			assert!(r.is_empty(), "{version}");
-		}
-	}
-
-	/// Draft-14 lets AUTHORIZATION TOKEN repeat and has unknown parameters, duplicates
-	/// included, ignored. The block is consumed whole either way.
-	#[test]
-	fn test_skip_allows_draft14_repeats() {
-		#[rustfmt::skip]
-		let block = [
-			0x04, // Number of Parameters
-			0x03, 0x03, 0x03, 0x00, 0xAA, // AUTHORIZATION TOKEN: USE_VALUE, type 0
-			0x03, 0x03, 0x03, 0x01, 0xBB, // and again, type 1
-			0x3E, 0x05, // an unknown varint parameter
-			0x3E, 0x06, // and again
-		];
-		let mut r = Decoder::new(&block, Version::Draft14.into());
-		let tokens = Parameters::skip_request(&mut r).unwrap();
-		assert_eq!(tokens.len(), 2);
-		assert_eq!(tokens[1].0.kind, 1);
-		assert!(r.is_empty());
-	}
-
-	/// A draft-14 request decodes every token; a response ignores one, as section 9.2 has
-	/// for a parameter on a message that does not list it.
-	#[test]
-	fn test_skip_decodes_draft14_request_tokens() {
-		#[rustfmt::skip]
-		let block = [
-			0x02, // Number of Parameters
-			0x03, 0x03, 0x03, 0x00, 0xAA, // AUTHORIZATION TOKEN: USE_VALUE, type 0
-			0x03, 0x02, 0x02, 0x07, // and a USE_ALIAS, never registered
-		];
-		let mut r = Decoder::new(&block, Version::Draft14.into());
-		let err = Parameters::skip_request(&mut r).unwrap_err();
-		assert!(
-			matches!(err, DecodeError::Session(crate::SessionError::UnknownAuthTokenAlias)),
-			"{err:?}"
-		);
-
-		let mut r = Decoder::new(&block, Version::Draft14.into());
-		assert_eq!(Parameters::skip_response(&mut r).unwrap(), None);
-		assert!(r.is_empty());
+		let mut r = Decoder::new(&buf, version.into());
+		let tokens = (|| -> Result<Vec<RequestToken>, DecodeError> {
+			decode_params!(&mut r, version, 0x03 => tokens: Vec<RequestToken>);
+			Ok(tokens)
+		})()
+		.unwrap_or_else(|e| panic!("{version}: {e}"));
+		assert_eq!(tokens, vec![token(0), token(1)], "{version}");
+		assert!(r.is_empty(), "{version}");
 	}
 }

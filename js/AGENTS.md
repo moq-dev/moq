@@ -2,7 +2,7 @@ The `/js` TypeScript workspace. Extends the root `AGENTS.md`.
 
 # Packages
 
-Bun workspaces listed in the repo-root `package.json`, published as `@moq/<component>` after the root list. Run recipes via `just js <recipe>`. Beyond that list: `@moq/signals` is the reactive core every package uses, `@moq/wasm` wraps `rs/moq-wasm`, and `@moq/boy` is the only Solid/`.tsx` package.
+Bun workspaces listed in the repo-root `package.json`, published as `@moq/<component>`. Run recipes via `just js <recipe>`. `@moq/signals` is the reactive core every package uses, `@moq/wasm` wraps `rs/moq-wasm`, and `@moq/boy` is the only Solid/`.tsx` package.
 
 Entrypoints re-export deps under namespaces (`Net`, `Signals`, `Hang`). Only re-export what is part of the public API.
 
@@ -32,10 +32,11 @@ Every reactive component in `watch`/`publish` follows one shape:
 
 # Web components
 
-Plain custom elements on `@moq/signals`, no framework. Attributes are the public API and mirror into signals in `attributeChangedCallback`. An invalid attribute value warns and falls back; never throw. Booleans reflect as bare attributes. Attributes with a unit take one (`delay="100ms"`), since `parseFloat("30s")` is 30. Create the `Effect` in `connectedCallback`, close it in `disconnectedCallback`. Styles import as `?inline` into a `ShadowRoot`. The `./element`, `./ui`, `./support` subpaths are side-effectful and not re-exported from the main entry.
+Plain custom elements on `@moq/signals`, no framework. Attributes are the public API and mirror into signals in `attributeChangedCallback`. An invalid attribute value is refused, never replaced by a default: the property setter throws, and the element surfaces the error instead of running with a fallback. Booleans reflect as bare attributes. Attributes with a unit take one (`delay="100ms"`), since `parseFloat("30s")` is 30. Create the `Effect` in `connectedCallback`, close it in `disconnectedCallback`. Styles import as `?inline` into a `ShadowRoot`. The `./element`, `./ui`, `./support` subpaths are side-effectful and not re-exported from the main entry.
 
 # Conventions
 
+- Only browser performance counts. Node and bun benchmarks are proxies; accept a small regression that shows on one runtime only.
 - ESM only. Match the import style of the file you're editing.
 - Document every export and add a `@module` block to each entrypoint; JSR builds docs from them. Deprecated exports are marked `@internal` or dropped from the entrypoint, never annotated "use X".
 - `bun` for everything. Biome formats and lints (repo-root `biome.jsonc`). Tests are `*.test.ts` under `bun test`.

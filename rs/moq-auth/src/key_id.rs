@@ -75,15 +75,19 @@ impl TryFrom<String> for KeyId {
 	}
 }
 
+/// Why a string is not a valid key ID.
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum KeyIdError {
+	/// The key ID is empty.
 	#[error("key ID must not be empty")]
 	Empty,
 
+	/// The key ID is longer than 128 characters.
 	#[error("key ID exceeds maximum length of 128 characters")]
 	TooLong,
 
+	/// The key ID has a character other than an ASCII letter, digit, hyphen, or underscore.
 	#[error("key ID contains invalid characters (only alphanumeric, hyphens, underscores allowed)")]
 	Invalid,
 }

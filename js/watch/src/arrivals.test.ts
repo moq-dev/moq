@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
-import { Time } from "@moq/net";
+import { Milli } from "@moq/clock";
 import { Producer } from "./arrivals";
 
 const frame = (arrival: number) => ({
 	kind: "frame" as const,
-	timestamp: Time.Milli(arrival),
-	arrival: Time.Milli(arrival),
+	timestamp: Milli(arrival),
+	arrival: Milli(arrival),
 	late: false,
 });
 

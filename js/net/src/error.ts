@@ -4,6 +4,7 @@
  * @module
  */
 
+import type { Milli } from "@moq/clock";
 import { sharedStreamCode } from "./ietf/error.ts";
 import type { IetfVersion } from "./ietf/version.ts";
 import { TimeoutError } from "./util/timeout.ts";
@@ -34,14 +35,18 @@ export const SessionCode = Object.freeze(
 		Internal: 0x1 as SessionCode,
 		/** The credentials don't grant the requested path or operation. Retrying will fail again. */
 		Unauthorized: 0x2 as SessionCode,
+		/** The authorization token expired. Retrying with refreshed credentials may succeed. */
+		Expired: 0x18 as SessionCode,
 		/** A protocol rule was broken; the session is unusable. */
 		ProtocolViolation: 0x3 as SessionCode,
 		/** A request ID was reused or violated the negotiated draft’s order or parity rules. */
 		InvalidRequestId: 0x4 as SessionCode,
 		/** A key-value pair was malformed or repeated more than allowed. */
 		KeyValueFormatting: 0x6 as SessionCode,
-		/** The peer went past what the session allows: a request ID past MAX_REQUEST_ID, or too many announcements or subscriptions. */
+		/** The peer went past what the session allows: a request ID past MAX_REQUEST_ID, or too many announcements. */
 		TooManyRequests: 0x7 as SessionCode,
+		/** A PATH the peer may not send, such as a server sending one at all. */
+		InvalidPath: 0x8 as SessionCode,
 		/** The peer did not close within the GOAWAY drain deadline. */
 		GoawayTimeout: 0x10 as SessionCode,
 		/** A control message took too long. */
@@ -50,8 +55,12 @@ export const SessionCode = Object.freeze(
 		AuthTokenCacheOverflow: 0x13 as SessionCode,
 		/** No version could be negotiated. */
 		Version: 0x15 as SessionCode,
+		/** The token could not be parsed. Retrying with the same token will fail again. */
+		MalformedAuthToken: 0x16 as SessionCode,
 		/** A token named an alias that was never registered. */
 		UnknownAuthTokenAlias: 0x17 as SessionCode,
+		/** An AUTHORITY the peer may not send, such as a server sending one at all. */
+		InvalidAuthority: 0x19 as SessionCode,
 		/** The peer cannot support the requested feature; moq-lite only. */
 		Unsupported: 0x30 as SessionCode,
 		/** The peer left more request updates unanswered than MAX_REQUEST_UPDATES allows. */
@@ -69,7 +78,7 @@ export type StreamCode = number & { readonly [STREAM_CODE]: true };
  * Codes a peer sends when resetting a stream, mirroring the Rust `Stream`.
  *
  * The counterpart to {@link SessionCode}, and a disjoint space: a stream reset of 0 is
- * {@link StreamCode.Internal}, not a cancellation ({@link StreamCode.Cancel} is 1). Call
+ * `StreamCode.Internal`, not a cancellation (`StreamCode.Cancel` is 1). Call
  * `StreamCode(code)` to construct an application code in the 64+ range.
  *
  * Conditions the shared codes don't cover are assigned in moq-lite's own 48-63 range, so a
@@ -251,8 +260,8 @@ export class GroupTooLarge extends Stream {
 }
 
 /**
- * A frame's timedness doesn't match its track: a timestamp on a track with no timescale, or
- * none on a track that has one.
+ * A frame's timestamp doesn't fit its track: a timestamp on a track with no timescale, none
+ * on a track that has one, or a group's first frame starting before the group below it.
  *
  * Raised locally by a frame or datagram write, and decoded from a moq-lite peer's
  * `TIMESTAMP_MISMATCH` reset. Mirrors the Rust `Error::TimestampMismatch`.
@@ -263,7 +272,7 @@ export class TimestampMismatch extends Stream {
 	constructor(options?: { cause?: unknown }) {
 		super(StreamCode.TimestampMismatch, {
 			...options,
-			message: "frame timestamp doesn't match track timescale",
+			message: "frame timestamp doesn't fit its track",
 		});
 		this.name = "TimestampMismatch";
 	}
@@ -297,6 +306,24 @@ export class RefusedRedirect extends Error {
 }
 
 /**
+ * The dial and the MoQ handshake together outlived the connect's `timeout` option.
+ *
+ * A caller can retry it. Mirrors the Rust `Error::ConnectTimeout`.
+ *
+ * @public
+ */
+export class ConnectTimeout extends Error {
+	/** The timeout that elapsed. */
+	readonly timeout: Milli;
+
+	constructor(timeout: Milli) {
+		super(`connect timed out after ${timeout}ms`);
+		this.name = "ConnectTimeout";
+		this.timeout = timeout;
+	}
+}
+
+/**
  * A peer broke the protocol in a way the spec says must end the session.
  *
  * Thrown where the violation is detected, rather than handled there: a decoder has no session
@@ -318,8 +345,6 @@ export class ProtocolViolation extends Error {
 
 /** Package-internal compatibility names used by the wire implementation. */
 export { Session as SessionError, Stream as StreamError, TooFarBehind as Lagged };
-/** Package-internal compatibility name used by the wire implementation. */
-export type StreamErrorOptions = StreamOptions;
 
 /** The WebTransport-shaped fields a stream reset code arrives in. */
 type StreamErrorLike = { source?: unknown; streamErrorCode?: unknown };
@@ -347,9 +372,12 @@ interface TransportErrorOptions {
  * means. Mirrors the Rust `From<&Error> for Stream`.
  *
  * Lossy on purpose. An error describes what went wrong here, while the registry is what the peer
- * can act on, so anything without a code of its own degrades to {@link StreamCode.Internal}
- * rather than inventing one. A {@link Session} lands there too: the two registries are
- * disjoint, so forwarding its code onto a stream would mistranslate it.
+ * can act on, so anything without a code of its own degrades to {@link StreamCode | StreamCode.Internal}
+ * rather than inventing one. A {@link Session} is {@link StreamCode | StreamCode.Unroutable}: a stream that
+ * can still be reset outlived the session that failed, so that was the route it was served
+ * through, and forwarding the session's code would mistranslate it across disjoint registries.
+ * An application code is the exception, since both registries share the 64+ range. A session
+ * that failed at the transport, with no code at all, is {@link StreamCode | StreamCode.Unroutable} too.
  *
  * On an IETF stream the code has to be one the negotiated draft assigns the same meaning to,
  * so a condition it does not register degrades to INTERNAL_ERROR as well. See
@@ -360,7 +388,7 @@ interface TransportErrorOptions {
 export function toStreamCode(err: unknown, options?: TransportErrorOptions): StreamCode {
 	const code = localStreamCode(err);
 	if (options?.version === undefined) return code;
-	return sharedStreamCode(code, options.version) ? code : StreamCode.Internal;
+	return sharedStreamCode(code) ? code : StreamCode.Internal;
 }
 
 /** The moq-lite code for a local failure, before any draft has a say. */
@@ -369,14 +397,31 @@ function localStreamCode(err: unknown): StreamCode {
 	if (err instanceof TimeoutError) return StreamCode.DeliveryTimeout;
 	// Session-scoped: the peer learns which rule it broke from the session close, not from here.
 	if (err instanceof ProtocolViolation) return StreamCode.SessionClosed;
+	// App codes share the 64+ range in both registries.
+	if (err instanceof Session) return err.code >= 64 ? StreamCode(err.code) : StreamCode.Unroutable;
+	// A session that failed underneath without a close code, as on a network or idle failure.
+	const source = typeof err === "object" && err !== null ? (err as { source?: unknown }).source : undefined;
+	if (source === "session") return StreamCode.Unroutable;
 	return StreamCode.Internal;
 }
 
 /**
- * The {@link StreamCode.ControlTimeout} error for a control request the peer never answered.
+ * The transport refused a request stream or failed to grant stream credit before its deadline.
+ *
+ * This local failure is terminal and has no wire code. The request is not retried.
+ */
+export class NoStreamCredit extends Error {
+	constructor(options?: ErrorOptions) {
+		super("no stream credit", options);
+		this.name = "NoStreamCredit";
+	}
+}
+
+/**
+ * The {@link StreamCode | StreamCode.ControlTimeout} error for a control request the peer never answered.
  *
  * A control request that outlives its deadline is not late content, so it does not go out as
- * {@link StreamCode.DeliveryTimeout} the way a bare {@link TimeoutError} would. Callers that
+ * {@link StreamCode | StreamCode.DeliveryTimeout} the way a bare {@link TimeoutError} would. Callers that
  * bound a request's response build this instead.
  *
  * @internal
@@ -387,7 +432,7 @@ export function controlTimeout(cause: unknown): Stream {
 }
 
 /**
- * The {@link StreamCode.Unauthorized} error for a request the grant does not cover, naming
+ * The {@link StreamCode | StreamCode.Unauthorized} error for a request the grant does not cover, naming
  * the broadcast. Unlike {@link SessionCode.Unauthorized}, it ends only this stream.
  *
  * @internal
@@ -408,9 +453,8 @@ export function unauthorized(broadcast: string): Stream {
  * the same `instanceof` as one raised here.
  *
  * On an IETF stream a code keeps its value unless moq-lite claims that number for something
- * the draft does not: `0x4` is GOING_AWAY here but UNKNOWN_OBJECT_STATUS on draft-16 and 17,
- * and reading one back as the other would retire a session that is not going anywhere. Those
- * read as {@link StreamCode.Internal} with the wire value kept in the message, since
+ * the draft does not, such as its own 48-63 range. Those read as
+ * {@link StreamCode | StreamCode.Internal} with the wire value kept in the message, since
  * {@link StreamCode} is one numeric space and cannot hold a foreign code without lying about
  * it. A code moq-lite names nothing for survives intact: nothing can misread it.
  *
@@ -419,7 +463,7 @@ export function unauthorized(broadcast: string): Stream {
 export function fromTransport(err: unknown, options?: TransportErrorOptions): Error {
 	const code = streamCode(err);
 	if (code === undefined) return error(err);
-	if (options?.version !== undefined && !sharedStreamCode(code, options.version) && claimedLocally(code)) {
+	if (options?.version !== undefined && !sharedStreamCode(code) && claimedLocally(code)) {
 		return new Stream(StreamCode.Internal, { cause: err, message: `remote error: ${code}` });
 	}
 	if (code === StreamCode.TooFarBehind) return new TooFarBehind({ cause: err });
@@ -449,7 +493,7 @@ const legacyWebTransportErrors = new WeakSet<object>();
  *
  * Both the WebTransport spec and the WebSocket fallback take the reset code from a
  * `WebTransportError`'s `streamErrorCode` and send 0 for anything else, a plain `Error`
- * included. Since 0 is {@link StreamCode.Internal}, cancelling with a bare `Error` tells the
+ * included. Since 0 is {@link StreamCode | StreamCode.Internal}, cancelling with a bare `Error` tells the
  * peer we failed rather than that we are done.
  *
  * The native constructor exists exactly where native WebTransport does, which is where the
@@ -521,14 +565,22 @@ export function closeError(quic: WebTransport): Promise<Error> {
 }
 
 /**
+ * Whether a stream failed because its whole session closed, rather than on its own.
+ *
+ * @internal
+ */
+export function sessionClosed(err: unknown): boolean {
+	return typeof err === "object" && err !== null && (err as { source?: unknown }).source === "session";
+}
+
+/**
  * Report a failure the session's close caused as the session's own error, which carries the
  * peer's close code; any other failure passes through.
  *
  * @internal
  */
 export async function sessionCause(quic: WebTransport | undefined, err: unknown): Promise<Error> {
-	const source = typeof err === "object" && err !== null ? (err as { source?: unknown }).source : undefined;
-	if (quic && source === "session") return closeError(quic);
+	if (quic && sessionClosed(err)) return closeError(quic);
 	return error(err);
 }
 

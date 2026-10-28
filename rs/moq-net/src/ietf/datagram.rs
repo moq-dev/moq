@@ -1,9 +1,7 @@
-//! OBJECT_DATAGRAM: one Object carried in a QUIC datagram (draft-14 section 10.3.1 through
-//! draft-20 section 11.3.1).
+//! OBJECT_DATAGRAM: one Object carried in a QUIC datagram (draft-22 section 11.2.1).
 //!
 //! Public [`crate::Datagram`] writers emit Object ID 0; private relay metadata preserves
-//! other IDs, properties, and status. The Type is a set of flags; draft-14 lacks the
-//! DEFAULT_PRIORITY bit and a status with an omitted Object ID.
+//! other IDs, properties, and status. The Type is a set of flags.
 
 use bytes::Bytes;
 
@@ -38,7 +36,7 @@ pub struct ObjectDatagram {
 	pub group_id: u64,
 	/// The Object ID, or `None` when the ZERO_OBJECT_ID bit omits it (Object 0).
 	pub object_id: Option<u64>,
-	/// The Publisher Priority, or `None` to inherit the subscription's (draft-15+).
+	/// The Publisher Priority, or `None` to inherit the subscription's.
 	pub publisher_priority: Option<u8>,
 	/// No Object past this one exists in the group.
 	pub end_of_group: bool,
@@ -48,18 +46,13 @@ pub struct ObjectDatagram {
 }
 
 impl ObjectDatagram {
-	/// Whether `kind` is a Type this draft defines.
-	fn valid(kind: u64, version: Version) -> bool {
-		match version {
-			Version::Draft14 => kind <= 0x07 || kind == 0x20 || kind == 0x21,
-			// A status cannot also end the group.
-			_ => kind & !flag::ALL == 0 && !(kind & flag::STATUS != 0 && kind & flag::END_OF_GROUP != 0),
-		}
+	/// Whether `kind` is a defined Type. A status cannot also end the group.
+	fn valid(kind: u64) -> bool {
+		kind & !flag::ALL == 0 && !(kind & flag::STATUS != 0 && kind & flag::END_OF_GROUP != 0)
 	}
-}
 
-impl Encode<Version> for ObjectDatagram {
-	fn encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
+	/// The Type bits this datagram's fields set.
+	fn kind(&self) -> u64 {
 		let mut kind = 0;
 		if self.properties.is_some() {
 			kind |= flag::PROPERTIES;
@@ -76,7 +69,37 @@ impl Encode<Version> for ObjectDatagram {
 		if matches!(self.body, DatagramBody::Status(_)) {
 			kind |= flag::STATUS;
 		}
-		if !Self::valid(kind, version) {
+		kind
+	}
+}
+
+impl crate::model::datagram::Wire {
+	/// Whether a datagram of this shape is defined, as ingress checks one. Egress resolves
+	/// the Object ID and priority each draft needs.
+	pub(crate) fn defined(&self) -> bool {
+		let shape = ObjectDatagram {
+			track_alias: 0,
+			group_id: 0,
+			object_id: self.object_id,
+			publisher_priority: self.priority,
+			end_of_group: self.end_of_group,
+			properties: self.properties.block.is_some().then(Vec::new),
+			body: match self.status {
+				Some(status) => DatagramBody::Status(status),
+				None => DatagramBody::Payload(Bytes::new()),
+			},
+		};
+		ObjectDatagram::valid(shape.kind())
+			&& self.status.is_none_or(|status| {
+				super::object::status_defined(status) && (self.properties.block.is_none() || status == 0)
+			})
+	}
+}
+
+impl Encode<Version> for ObjectDatagram {
+	fn encode(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
+		let kind = self.kind();
+		if !Self::valid(kind) {
 			return Err(EncodeError::InvalidState);
 		}
 
@@ -99,9 +122,8 @@ impl Encode<Version> for ObjectDatagram {
 
 		match &self.body {
 			DatagramBody::Status(status) => {
-				// Draft-17 on: only a Normal Object may carry Properties.
-				let legacy = matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16);
-				if !legacy && *status != 0 && self.properties.is_some() {
+				// Only a Normal Object may carry properties.
+				if self.properties.is_some() && *status != 0 {
 					return Err(EncodeError::InvalidState);
 				}
 				w.varint(*status)?
@@ -115,10 +137,10 @@ impl Encode<Version> for ObjectDatagram {
 	}
 }
 
-impl Decode<Version> for ObjectDatagram {
-	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for ObjectDatagram {
+	fn decode(r: &mut Decoder<'a>, _: Version) -> Result<Self, DecodeError> {
 		let kind = r.varint()?;
-		if !Self::valid(kind, version) {
+		if !Self::valid(kind) {
 			return Err(DecodeError::InvalidValue);
 		}
 
@@ -146,9 +168,7 @@ impl Decode<Version> for ObjectDatagram {
 		let body = match kind & flag::STATUS != 0 {
 			true => {
 				let status = r.varint()?;
-				// Draft-17 on: only a Normal Object may carry Properties.
-				let legacy = matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16);
-				if !legacy && status != 0 && properties.is_some() {
+				if properties.is_some() && status != 0 {
 					return Err(DecodeError::InvalidValue);
 				}
 				if !r.is_empty() {
@@ -181,17 +201,7 @@ mod tests {
 		Ok(datagram)
 	}
 
-	const ALL: [Version; 9] = [
-		Version::Draft14,
-		Version::Draft15,
-		Version::Draft16,
-		Version::Draft17,
-		Version::Draft18,
-		Version::Draft19,
-		Version::Draft20,
-		Version::Draft21,
-		Version::Draft22,
-	];
+	const ALL: [Version; 2] = [Version::Draft18, Version::Draft22];
 
 	fn single(priority: Option<u8>) -> ObjectDatagram {
 		ObjectDatagram {
@@ -213,19 +223,6 @@ mod tests {
 			assert_eq!(buf[0], 0x07, "{version}: properties, end of group, object 0");
 			assert_eq!(decode(&buf, version).unwrap(), datagram, "{version}");
 		}
-	}
-
-	#[test]
-	fn default_priority_needs_draft15() {
-		assert!(matches!(
-			single(None).encode_bytes(Version::Draft14),
-			Err(EncodeError::InvalidState)
-		));
-		assert!(decode(&[0x0C, 0x01, 0x02], Version::Draft14).is_err());
-
-		let buf = single(None).encode_bytes(Version::Draft16).unwrap();
-		assert_eq!(buf[0], 0x0F);
-		assert_eq!(decode(&buf, Version::Draft16).unwrap(), single(None));
 	}
 
 	#[test]
@@ -275,17 +272,8 @@ mod tests {
 			body: DatagramBody::Status(3),
 		};
 		for version in ALL {
-			let legacy = matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16);
-			match datagram.encode_bytes(version) {
-				Ok(buf) => {
-					assert!(legacy, "{version}");
-					assert_eq!(decode(&buf, version).unwrap(), datagram);
-				}
-				Err(err) => {
-					assert!(!legacy, "{version}");
-					assert!(matches!(err, EncodeError::InvalidState));
-				}
-			}
+			let err = datagram.encode_bytes(version).unwrap_err();
+			assert!(matches!(err, EncodeError::InvalidState), "{version}");
 		}
 	}
 
@@ -294,7 +282,7 @@ mod tests {
 		// PROPERTIES and ZERO_OBJECT_ID, alias 1, group 2, priority 0, empty block.
 		let bytes = [0x05, 0x01, 0x02, 0x00, 0x00, b'x'];
 		assert!(matches!(
-			ObjectDatagram::decode_slice(&bytes, Version::Draft16),
+			ObjectDatagram::decode_slice(&bytes, Version::Draft18),
 			Err(DecodeError::InvalidValue)
 		));
 	}

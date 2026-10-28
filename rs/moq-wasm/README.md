@@ -53,9 +53,10 @@ What works today:
 
 ### Timestamp fallback
 
-`moq_net::time::Instant` is `std::time::Instant` on native and the
-wasmtimer-backed instant from `web_async::time` in the browser, where
-`std::time::Instant` panics. `model/time.rs` anchors its timestamps on it.
+`moq_net::time::Instant` is the logical `moq_clock::Instant` on every
+target. In the browser, moq-clock reads it from `performance.now()` through
+`web_async::time`, since `std::time::Instant` panics there. `model/time.rs`
+anchors its timestamps on it.
 
 ### Out of scope here: moq-mux
 

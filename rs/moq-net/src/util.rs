@@ -7,6 +7,16 @@
 
 use std::{collections::VecDeque, future::Future, pin::Pin, task::Poll};
 
+mod cell;
+mod wake;
+pub(crate) use cell::SendCell;
+pub(crate) use wake::QueueWake;
+
+/// Prove a future's native Send bound here rather than inside every caller's future.
+pub(crate) fn sendable<F: Future + kio::MaybeSend>(future: F) -> impl Future<Output = F::Output> + kio::MaybeSend {
+	future
+}
+
 #[cfg(not(target_family = "wasm"))]
 pub(crate) type MaybeSendBox<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 #[cfg(target_family = "wasm")]
@@ -46,11 +56,15 @@ fn future_task(mut task: MaybeSendBox<'static, ()>) -> MaybeSendTask {
 /// The building block for racing "watchdog" futures whose clean completion should
 /// not end the race (only their failure should).
 #[cfg(feature = "async")]
-pub(crate) async fn err_only<E>(fut: impl Future<Output = Result<(), E>>) -> E {
-	match fut.await {
-		Err(err) => err,
-		Ok(()) => std::future::pending().await,
-	}
+pub(crate) fn err_only<E>(
+	fut: impl Future<Output = Result<(), E>> + kio::MaybeSend,
+) -> impl Future<Output = E> + kio::MaybeSend {
+	sendable(async move {
+		if let Err(err) = fut.await {
+			return err;
+		}
+		std::future::pending().await
+	})
 }
 
 /// Cloneable handle for submitting futures to a driver-owned [`TaskSet`].
@@ -65,7 +79,7 @@ pub(crate) struct Tasks {
 }
 
 /// A claim on a [`TaskSet`]'s lifetime with no submission queue: what a
-/// broadcast published on an origin and an `origin::Dynamic` hold, so the
+/// broadcast published on an origin and an `origin::Requests` hold, so the
 /// driver outlives the producer handles a session was given and dropped.
 pub(crate) struct Keepalive {
 	_alive: kio::Producer<()>,
@@ -85,7 +99,7 @@ impl Tasks {
 	///
 	/// A task submitted after the set is gone is dropped: the driver has torn down,
 	/// so the task would have been cancelled anyway.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn push(&self, task: impl MaybeBoxedExt<'static, Output = ()>) {
 		let mut state = self.state.lock();
 		if !state.closed {
@@ -176,7 +190,7 @@ impl TaskSet {
 	}
 
 	/// Queue a future for polling by this set.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn push(&mut self, task: impl MaybeBoxedExt<'static, Output = ()>) {
 		self.active.push(future_task(task.maybe_boxed()));
 	}
@@ -260,6 +274,17 @@ impl Drop for TaskSet {
 			std::mem::take(&mut state.queued)
 		};
 		drop(queued);
+	}
+}
+
+/// Ready once nothing wants the track, or it closed; otherwise arm `waiter` for a change.
+#[cfg(feature = "async")]
+pub(crate) fn poll_unwanted(demand: &mut crate::track::Demand, waiter: &kio::Waiter) -> Poll<()> {
+	// Drain the changes so the waiter stays registered, then read where demand settled.
+	while let Poll::Ready(Ok(Some(_))) = demand.poll_wanted_changed(waiter) {}
+	match demand.wanted() {
+		None => Poll::Ready(()),
+		Some(_) => Poll::Pending,
 	}
 }
 

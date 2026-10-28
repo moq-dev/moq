@@ -48,6 +48,13 @@ func (r *Request) Query() *string {
 	return r.inner.Query()
 }
 
+// PeerImplementation is the implementation the client advertised, like
+// "moq-go/0.7.0 moq-ffi/0.4.12 moq-net-rs/0.3.10", or nil if it advertised none.
+// Peer-controlled: use it for logs and rollout counts, never to authorize.
+func (r *Request) PeerImplementation() *string {
+	return r.inner.PeerImplementation()
+}
+
 // Transport is the wire transport the request arrived over, e.g. TransportQUIC.
 func (r *Request) Transport() Transport {
 	return r.inner.Transport()
@@ -94,6 +101,7 @@ type serverConfig struct {
 	tlsGenerate    []string
 	versions       []string
 	quicMaxStreams *uint64
+	quicKeylog     *bool
 	publish        *OriginProducer
 	consume        *OriginProducer
 }
@@ -121,9 +129,15 @@ func WithServerVersions(versions ...string) ServerOption {
 }
 
 // WithServerQUICMaxStreams caps the concurrent QUIC streams each peer may open
-// toward this server (default 1024).
+// toward this server (default 10,000; 0 is refused).
 func WithServerQUICMaxStreams(maxStreams uint64) ServerOption {
 	return func(c *serverConfig) { c.quicMaxStreams = &maxStreams }
+}
+
+// WithServerQUICKeylog writes TLS session secrets to the file SSLKEYLOGFILE names, for
+// decrypting a capture. Off by default; on without SSLKEYLOGFILE fails Listen.
+func WithServerQUICKeylog(enabled bool) ServerOption {
+	return func(c *serverConfig) { c.quicKeylog = &enabled }
 }
 
 // WithServerPublishOrigin sets the origin whose broadcasts are served to
@@ -166,7 +180,8 @@ func Listen(ctx context.Context, bind string, opts ...ServerOption) (*Server, er
 			Key:      cfg.tlsKey,
 			Generate: cfg.tlsGenerate,
 		},
-		Quic: ffi.MoqQuicConfig{MaxStreams: cfg.quicMaxStreams},
+		Quic:           ffi.MoqQuicConfig{MaxStreams: cfg.quicMaxStreams, Keylog: cfg.quicKeylog},
+		Implementation: &implementation,
 	}
 	if cfg.publish != nil {
 		config.Publish = &cfg.publish.inner
@@ -205,7 +220,7 @@ func (s *Server) CertFingerprints() ([]string, error) {
 // CreateBroadcast creates an unannounced broadcast at path, invisible to everyone until announced. Announce it after populating tracks.
 //
 // See [OriginProducer.CreateBroadcast].
-func (s *Server) CreateBroadcast(path string) (*BroadcastProducer, error) {
+func (s *Server) CreateBroadcast(path string) (*Publication, error) {
 	if s.publishOrigin == nil {
 		return nil, ErrNoPublishOrigin
 	}
@@ -227,21 +242,7 @@ func (s *Server) Accept(ctx context.Context) (*Request, error) {
 // All ranges over incoming requests until the server stops or the loop
 // breaks. Each request must be answered with Accept or Reject.
 func (s *Server) All(ctx context.Context) iter.Seq2[*Request, error] {
-	return func(yield func(*Request, error) bool) {
-		for {
-			req, err := s.Accept(ctx)
-			if err != nil {
-				yield(nil, err)
-				return
-			}
-			if req == nil {
-				return
-			}
-			if !yield(req, nil) {
-				return
-			}
-		}
-	}
+	return bridge.Seq(ctx, s.Accept)
 }
 
 // Serve accepts every session in a loop, holding each one alive in its own
@@ -249,7 +250,7 @@ func (s *Server) All(ctx context.Context) iter.Seq2[*Request, error] {
 // returns when Accept stops (nil) or fails, after the in-flight sessions wind
 // down.
 //
-// To inspect or reject requests, range over Requests instead:
+// To inspect or reject requests, range over All instead:
 //
 //	for req, err := range server.All(ctx) {
 //	    if err != nil {

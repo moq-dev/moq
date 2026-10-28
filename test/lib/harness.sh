@@ -65,7 +65,7 @@ harness_argv() {
 # is exactly what a collision or a filesystem failure depends on.
 harness_env() {
     local name value
-    for name in MOQ_TEST_RUNS MOQ_TEST_PORTS MOQ_TEST_PORT_BASE MOQ_TEST_KEEP "$@"; do
+    for name in HARNESS_RUNS HARNESS_PORT_ROOT HARNESS_PORT_BASE HARNESS_KEEP "$@"; do
         value="${!name-}"
         [[ -n "$value" ]] || continue
         printf '%s=%q ' "$name" "$value"
@@ -77,10 +77,12 @@ harness_env() {
 harness_begin() {
     local name="$1" rerun="${2:-}"
 
-    local root="${MOQ_TEST_RUNS:-${TMPDIR:-/tmp}}"
+    local root="${HARNESS_RUNS:-${TMPDIR:-/tmp}}"
     root="${root%/}"
-    [[ -n "${MOQ_TEST_RUNS:-}" ]] || root="$root/moq-test-$(id -u)"
+    [[ -n "${HARNESS_RUNS:-}" ]] || root="$root/moq-test-$(id -u)"
     mkdir -p "$root"
+    # Harnesses change directory after this, so a relative root would move under them.
+    root=$(CDPATH='' cd -- "$root" && pwd)
     HARNESS_RUN=$(mktemp -d "$root/$name-XXXXXXXX")
     # A run directory holds relay configs and generated keys, so keep it to the
     # owner even where the temp root itself is world-readable.
@@ -88,7 +90,7 @@ harness_begin() {
     HARNESS_RERUN="$rerun"
     # The browser drivers cannot see a shell variable, and a Playwright trace has
     # to land beside the logs it explains, so the path rides the environment.
-    export MOQ_TEST_RUN="$HARNESS_RUN"
+    export HARNESS_RUN_DIR="$HARNESS_RUN"
 
     # Cancellation needs its own traps: children run in their own process groups
     # (see `harness_spawn`), so a ^C aimed at this shell's group never reaches
@@ -105,13 +107,13 @@ harness_begin() {
 # Where port reservations live. Shared across worktrees on purpose: the point is
 # that a run in one worktree cannot hand out a port another already took.
 #
-# Nix shells give TMPDIR a private directory, but their sockets still share the
-# host network. Keep claims in /tmp regardless of each shell's scratch root.
+# Shells may set different TMPDIRs, but their sockets still share the host
+# network. Keep claims in /tmp regardless of each shell's scratch root.
 # The user id avoids ownership conflicts with another user's harnesses.
 harness_port_root() {
-    local root="${MOQ_TEST_PORTS:-/tmp}"
+    local root="${HARNESS_PORT_ROOT:-/tmp}"
     root="${root%/}"
-    [[ -n "${MOQ_TEST_PORTS:-}" ]] || root="$root/moq-test-ports-$(id -u)"
+    [[ -n "${HARNESS_PORT_ROOT:-}" ]] || root="$root/moq-test-ports-$(id -u)"
     echo "$root"
 }
 
@@ -129,7 +131,7 @@ harness_valid_port() {
 #
 # `harness_port <label> [wanted]`. With `wanted` that exact port is taken or the
 # call fails, which is what an explicit INTEROP_PORT/WASM_PORT asks for; without it
-# the search walks up from MOQ_TEST_PORT_BASE.
+# the search walks up from HARNESS_PORT_BASE.
 #
 # The answer lands in a variable rather than on stdout because `$(harness_port)`
 # would run it in a subshell, where the reservation it just took is recorded into
@@ -170,11 +172,11 @@ harness_port() {
         return "$status"
     fi
 
-    port="${MOQ_TEST_PORT_BASE:-4500}"
+    port="${HARNESS_PORT_BASE:-4500}"
     # A base outside the port range would hand out numbers no socket can bind, and
     # the run would report it much later as a relay that never became ready.
     harness_valid_port "$port" || {
-        echo "error: MOQ_TEST_PORT_BASE must be 1024..65535 (got '$port')" >&2
+        echo "error: HARNESS_PORT_BASE must be 1024..65535 (got '$port')" >&2
         return 1
     }
     last=$((port + 500))
@@ -189,7 +191,7 @@ harness_port() {
         ((status == 1)) || return "$status"
         port=$((port + 1))
     done
-    echo "error: no free port for $label in ${MOQ_TEST_PORT_BASE:-4500}..$last (see $root)" >&2
+    echo "error: no free port for $label in ${HARNESS_PORT_BASE:-4500}..$last (see $root)" >&2
     return 1
 }
 
@@ -364,6 +366,45 @@ harness_reap_all() {
     done
 }
 
+# ── results ─────────────────────────────────────────────────────────────────
+
+# Record one case's outcome: `harness_result <outcome> suite=S case=C [field=value...]`.
+#
+# Appends a JSON line to HARNESS_RESULTS when it is set, and does nothing otherwise. The
+# fields are publisher, subscriber, transport, version (empty when the case has no such
+# axis, `auto` when the clients negotiate it), seconds, detail (why it failed), and log (a
+# file in this run's directory, recorded relative to the run root so it names the file
+# inside an uploaded copy of that root). The outcome is pass, fail, skip, or `not run`.
+#
+# A harness first records every case it will run as `not run`, before any shared setup, and
+# a later record for the same case replaces it. A run that dies in setup or mid-suite then
+# still names every case it never reached, instead of leaving them out of the report.
+harness_result() {
+    [[ -n "${HARNESS_RESULTS:-}" ]] || return 0
+    python3 -I - "$HARNESS_RESULTS" "$(dirname "$HARNESS_RUN")" "$@" <<'PY'
+import json, os, sys
+path, root, outcome, *fields = sys.argv[1:]
+if outcome not in ("pass", "fail", "skip", "not run"):
+    sys.exit(f"harness_result: unknown outcome {outcome!r}")
+record = {"suite": "", "case": "", "publisher": "", "subscriber": "", "transport": "", "version": "",
+          "outcome": outcome, "seconds": None, "detail": "", "log": ""}
+for field in fields:
+    key, sep, value = field.partition("=")
+    if not sep or key not in record or key == "outcome":
+        sys.exit(f"harness_result: unknown field {field!r}")
+    record[key] = value
+if not record["suite"] or not record["case"]:
+    sys.exit("harness_result: suite and case are required")
+if record["seconds"] is not None:
+    record["seconds"] = int(record["seconds"])
+if record["log"]:
+    record["log"] = os.path.relpath(record["log"], root)
+os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+with open(path, "a") as out:
+    out.write(json.dumps(record) + "\n")
+PY
+}
+
 # ── teardown ────────────────────────────────────────────────────────────────
 
 # Release everything this run owns: `harness_finish [status]`, where the status
@@ -398,8 +439,8 @@ harness_finish() {
     [[ -n "$HARNESS_RUN" ]] || return "$status"
 
     # A failing run is exactly when the logs matter, so keep it without asking;
-    # MOQ_TEST_KEEP does the same for a passing run you want to inspect.
-    if [[ "${MOQ_TEST_KEEP:-0}" == 0 && "$status" -eq 0 ]]; then
+    # HARNESS_KEEP does the same for a passing run you want to inspect.
+    if [[ "${HARNESS_KEEP:-0}" == 0 && "$status" -eq 0 ]]; then
         rm -rf "$HARNESS_RUN"
     else
         # The ports are already released and the children are gone, so a retained

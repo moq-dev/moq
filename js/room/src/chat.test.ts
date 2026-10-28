@@ -1,23 +1,29 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, test } from "bun:test";
+import { Manual, Nano } from "@moq/clock";
 import { Broadcast, Time } from "@moq/net";
 import { HISTORY, info, Publisher, Subscriber, TRACK } from "./chat.ts";
 
 test("chat expires ten-second history and late readers only see retained messages", async () => {
-	const clock = spyOn(performance, "now").mockReturnValue(0);
+	const clock = new Manual();
+	const installed = clock.install();
 	const broadcast = new Broadcast.Producer();
 	const publisher = Publisher.create(broadcast);
 	const subscriber = Subscriber.subscribe(broadcast.consume());
 	try {
 		publisher.send("first");
-		expect(await subscriber.recv()).toEqual({ push: { index: 0, value: "first" } });
-		clock.mockReturnValue(HISTORY - 1);
+		const first = await subscriber.recv();
+		expect(first?.value).toEqual({ push: { index: 0, value: "first" } });
+		// A sent message carries its send time.
+		expect(first?.at).toBeDefined();
+		await clock.advance(Nano(HISTORY - 1));
 		publisher.expire();
-		clock.mockReturnValue(HISTORY);
-		publisher.expire();
-		expect(await subscriber.recv()).toEqual({ pop: { start: 0, end: 1 } });
+		// The publisher's own timer retires the message once its history elapses.
+		const popped = subscriber.recv();
+		await clock.advance(Nano(1));
+		expect((await popped)?.value).toEqual({ pop: { start: 0, end: 1 } });
 		publisher.send("second");
 		const late = Subscriber.subscribe(broadcast.consume());
-		expect(await late.recv()).toEqual({ push: { index: 1, value: "second" } });
+		expect((await late.recv())?.value).toEqual({ push: { index: 1, value: "second" } });
 		publisher.finish();
 		expect(await late.recv()).toBeUndefined();
 		late.close();
@@ -25,7 +31,7 @@ test("chat expires ten-second history and late readers only see retained message
 		publisher.finish();
 		subscriber.close();
 		broadcast.close();
-		clock.mockRestore();
+		installed.close();
 	}
 });
 
@@ -39,7 +45,7 @@ test("chat rejects non-string window records and propagates track failures", asy
 			timestamp: Time.Timestamp.now(),
 		});
 		await expect(subscriber.recv()).rejects.toThrow("chat record must be a string");
-		track.close(new Error("chat aborted"));
+		track.abort(new Error("chat aborted"));
 		await expect(subscriber.recv()).rejects.toThrow("chat aborted");
 	} finally {
 		subscriber.close();

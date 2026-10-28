@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- [**breaking**] Declare a fixed nominal duration on each archive timeline and remove the shared duration bound.
+
 ## [0.21.11](https://github.com/moq-dev/moq/compare/hang-v0.21.10...hang-v0.21.11) - 2026-10-05
 
 ### Other
@@ -101,7 +105,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - [**breaking**] Replace the catalog root `timeline` entry with `archive`. The
-  flattened timeline fields (`track`, `timescale`, `durationMax`) stay;
+  flattened timeline fields stay;
   optional `replay`, `store`, and `version` advertise a durable recording.
 - [**breaking**] Replace the archive timeline `wall` field with a root `clock`
   section (`{wall, timescale}`). Wall time is one fixed broadcast mapping: PTS zero in the

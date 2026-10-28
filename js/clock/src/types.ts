@@ -59,7 +59,7 @@ export const Second = Object.assign((value: number): Second => checked(value) as
 	toMilli: (value: Second): Milli => Milli(value * 1_000),
 });
 
-/** Nanoseconds since this clock's first read, separate from durations and wall time. */
+/** Nanoseconds since this clock's origin, separate from durations and wall time. */
 export type Instant = number & { readonly _brand: "clock-instant" };
 
 /** Brand a logical instant or do arithmetic on its own clock's coordinates. */

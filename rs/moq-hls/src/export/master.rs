@@ -3,7 +3,8 @@
 //! Each variant carries its own URI, so a caller with a different layout (a VOD
 //! recorder writing `<name>/media.m3u8`, say) reuses the grouping and attribute
 //! rules. [`Broadcaster::master_playlist`](super::Broadcaster::master_playlist)
-//! renders the live layout, relative to `/<broadcast>/master.m3u8`.
+//! renders the live layout, relative to `/<broadcast>/master.m3u8`: each rendition under the
+//! publisher instance it lists (`@<instance>/<kind>/<rendition>/media.m3u8`).
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
@@ -21,11 +22,19 @@ const AUDIO_GROUP: &str = "aud";
 /// in both layouts.
 pub(crate) const PATH_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC.remove(b'-').remove(b'.').remove(b'_').remove(b'~');
 
-/// The live layout's media-playlist URI for a rendition, relative to the master, with an
-/// optional query (without the leading `?`) appended.
-pub(crate) fn rendition_uri(kind: Kind, name: &str, query: Option<&str>) -> String {
+/// Whether a rendition name can be addressed as one URL path segment.
+///
+/// A client resolves a `.` or `..` segment away, percent-encoded or not, and the router refuses
+/// an empty one, so renditions with those names are never admitted.
+pub(crate) fn is_path_segment(name: &str) -> bool {
+	!matches!(name, "" | "." | "..")
+}
+
+/// The live layout's media-playlist URI for a rendition of the publisher `instance`, relative to
+/// the master, with an optional query (without the leading `?`) appended.
+pub(crate) fn rendition_uri(instance: &str, kind: Kind, name: &str, query: Option<&str>) -> String {
 	let mut uri = format!(
-		"{}/{}/media.m3u8",
+		"@{instance}/{}/{}/media.m3u8",
 		kind.as_str(),
 		utf8_percent_encode(name, PATH_SEGMENT)
 	);
@@ -197,7 +206,7 @@ mod tests {
 
 	fn video(name: &str, width: Option<u32>, height: Option<u32>) -> VideoVariant {
 		VideoVariant {
-			uri: rendition_uri(Kind::Video, name, None),
+			uri: rendition_uri("run", Kind::Video, name, None),
 			bandwidth: 2_500_000,
 			width,
 			height,
@@ -208,7 +217,7 @@ mod tests {
 	fn audio(name: &str, bandwidth: u64, codec: &str) -> AudioVariant {
 		AudioVariant {
 			name: name.into(),
-			uri: rendition_uri(Kind::Audio, name, None),
+			uri: rendition_uri("run", Kind::Audio, name, None),
 			bandwidth,
 			codec: codec.into(),
 		}
@@ -222,12 +231,12 @@ mod tests {
 		);
 		assert!(out.starts_with("#EXTM3U\n#EXT-X-VERSION:9\n"));
 		assert!(out.contains(
-			"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"audio\",DEFAULT=YES,AUTOSELECT=YES,URI=\"audio/audio/media.m3u8\"\n"
+			"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"audio\",DEFAULT=YES,AUTOSELECT=YES,URI=\"@run/audio/audio/media.m3u8\"\n"
 		));
 		assert!(out.contains(
 			"#EXT-X-STREAM-INF:BANDWIDTH=2628000,RESOLUTION=1280x720,CODECS=\"avc1.42c01f,mp4a.40.2\",AUDIO=\"aud\"\n"
 		));
-		assert!(out.contains("\nvideo/video/media.m3u8\n"));
+		assert!(out.contains("\n@run/video/video/media.m3u8\n"));
 	}
 
 	#[test]
@@ -257,25 +266,25 @@ mod tests {
 		assert!(out.contains("GROUP-ID=\"aud-1\",NAME=\"opus\",DEFAULT=YES"));
 		assert!(out.contains("BANDWIDTH=2628000,RESOLUTION=1280x720,CODECS=\"avc1.42c01f,mp4a.40.2\",AUDIO=\"aud-0\""));
 		assert!(out.contains("BANDWIDTH=2660000,RESOLUTION=1280x720,CODECS=\"avc1.42c01f,opus\",AUDIO=\"aud-1\""));
-		assert_eq!(out.matches("\nvideo/video/media.m3u8\n").count(), 2);
+		assert_eq!(out.matches("\n@run/video/video/media.m3u8\n").count(), 2);
 	}
 
 	#[test]
 	fn audio_only_is_playable() {
 		let out = render(&[], &[audio("audio", 128_000, "opus")]);
 		assert!(out.contains("#EXT-X-STREAM-INF:BANDWIDTH=128000,CODECS=\"opus\"\n"));
-		assert!(out.contains("\naudio/audio/media.m3u8\n"));
+		assert!(out.contains("\n@run/audio/audio/media.m3u8\n"));
 	}
 
 	#[test]
 	fn rendition_names_are_percent_encoded_in_uris() {
 		assert_eq!(
-			rendition_uri(Kind::Video, "cam#1/main?alt", Some("jwt=abc.def")),
-			"video/cam%231%2Fmain%3Falt/media.m3u8?jwt=abc.def"
+			rendition_uri("run", Kind::Video, "cam#1/main?alt", Some("jwt=abc.def")),
+			"@run/video/cam%231%2Fmain%3Falt/media.m3u8?jwt=abc.def"
 		);
 		assert_eq!(
-			rendition_uri(Kind::Audio, "audio #1", None),
-			"audio/audio%20%231/media.m3u8"
+			rendition_uri("run", Kind::Audio, "audio #1", None),
+			"@run/audio/audio%20%231/media.m3u8"
 		);
 	}
 

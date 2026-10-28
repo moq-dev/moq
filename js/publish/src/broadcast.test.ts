@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
+import { Manual, Milli, Nano } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
-import { Origin, Path, Time, Track } from "@moq/net";
+import { Origin, Path, Track } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import { Broadcast } from "./broadcast.ts";
 
@@ -54,7 +55,13 @@ test("sibling broadcasts on one page advertise the same capture clock", async ()
 });
 
 test("folds video and audio renditions into the catalog by full track name", async () => {
-	const broadcast = new Broadcast({ enabled: true, display: { width: 1920, height: 1080 }, flip: true });
+	const rotation = new Signal(90);
+	const broadcast = new Broadcast({
+		enabled: true,
+		display: { width: 1920, height: 1080 },
+		flip: true,
+		rotation,
+	});
 
 	broadcast.video("video/hd").config.set(videoConfig);
 	broadcast.audio("audio/data").config.set(audioConfig);
@@ -62,10 +69,26 @@ test("folds video and audio renditions into the catalog by full track name", asy
 
 	const catalog = await readCatalog(broadcast);
 	expect(catalog?.video?.renditions["video/hd"]?.codec).toBe("avc1.640028");
-	expect(Number(catalog?.video?.display?.width)).toBe(1920);
-	expect(Number(catalog?.video?.display?.height)).toBe(1080);
+	// The catalog display is the size to render at, so a quarter turn swaps the captured size.
+	expect(Number(catalog?.video?.display?.width)).toBe(1080);
+	expect(Number(catalog?.video?.display?.height)).toBe(1920);
 	expect(catalog?.video?.flip).toBe(true);
+	expect(catalog?.video?.rotation).toBe(90);
 	expect(catalog?.audio?.renditions["audio/data"]?.codec).toBe("opus");
+
+	rotation.set(270);
+	await settle();
+	const turned = await readCatalog(broadcast);
+	expect(turned?.video?.rotation).toBe(270);
+	expect(Number(turned?.video?.display?.width)).toBe(1080);
+	expect(Number(turned?.video?.display?.height)).toBe(1920);
+
+	rotation.set(0);
+	await settle();
+	const upright = await readCatalog(broadcast);
+	expect(upright?.video?.rotation).toBeUndefined();
+	expect(Number(upright?.video?.display?.width)).toBe(1920);
+	expect(Number(upright?.video?.display?.height)).toBe(1080);
 
 	broadcast.close();
 });
@@ -144,6 +167,7 @@ test("subscriber demand hands the producer to the rendition and clears it when t
 
 	// Closing the producer (encoder error / teardown) clears the signal, with no lingering per-subscription
 	// effect watching it.
+	track?.finish();
 	track?.close();
 	await settle();
 	expect(rendition.track.peek()).toBeUndefined();
@@ -206,7 +230,8 @@ test("serves no catalog until announced, so the first snapshot is the one at ann
 });
 
 // Regression: a re-announce re-created the catalog track, restarting its group sequence under the
-// same epoch, so a resumed viewer mistook the new catalog for the old one.
+// same epoch, so a resumed viewer mistook the new catalog for the old one. Turning the announce off
+// unannounces at once and keeps the broadcast for the next announce.
 test("a re-announce continues the catalog's group sequence", async () => {
 	const announce = new Signal(true);
 	const broadcast = new Broadcast({
@@ -220,11 +245,13 @@ test("a re-announce continues the catalog's group sequence", async () => {
 
 	const net = broadcast.net.peek();
 	if (!net) throw new Error("expected a network producer once connected");
+	const announced = broadcast.in.origin.peek()?.request(broadcast.in.name.peek(), { announced: true });
 	const first = net.track(Broadcast.CATALOG_TRACK).subscribe().ordered();
 	expect((await first.nextGroup())?.sequence).toBe(0);
 
 	announce.set(false);
 	await settle();
+	expect(announced?.active.peek()).toBeUndefined();
 	broadcast.audio("audio").config.set(audioConfig);
 	await settle();
 	announce.set(true);
@@ -238,6 +265,7 @@ test("a re-announce continues the catalog's group sequence", async () => {
 	expect(Object.keys(catalog.audio?.renditions ?? {})).toEqual(["audio"]);
 
 	first.close();
+	announced?.close();
 	broadcast.close();
 });
 
@@ -254,7 +282,7 @@ test("a rendition keeps its track across rendition changes", async () => {
 	await settle();
 	const track = video.track.peek();
 	if (!track) throw new Error("expected the demanded track");
-	track.appendGroup().close();
+	track.appendGroup().finish();
 
 	// Registering another rendition leaves this one's track alone.
 	const audio = broadcast.audio("audio");
@@ -313,8 +341,8 @@ test("replacing a closed rendition track keeps the broadcast and publishes a fre
 	if (!track) throw new Error("expected the demanded track");
 
 	// The encoder wrote, then failed.
-	track.appendGroup().close();
-	track.close(new Error("encoder failed"));
+	track.appendGroup().finish();
+	track.abort(new Error("encoder failed"));
 	video.close();
 	await settle();
 
@@ -343,7 +371,7 @@ test("replacing a closed rendition track keeps the broadcast and publishes a fre
 });
 
 test("changing maxAge publishes a new network broadcast", async () => {
-	const maxAge = new Signal<Time.Milli | undefined>(Time.Milli(1000));
+	const maxAge = new Signal<Milli | undefined>(Milli(1000));
 	const broadcast = new Broadcast({
 		enabled: true,
 		origin: new Origin.Producer(),
@@ -355,20 +383,19 @@ test("changing maxAge publishes a new network broadcast", async () => {
 	const before = broadcast.net.peek();
 
 	// A track's retention is fixed at creation, so the tracks move to a fresh broadcast.
-	maxAge.set(Time.Milli(2000));
+	maxAge.set(Milli(2000));
 	await settle();
 	const after = broadcast.net.peek();
 	expect(after).toBeDefined();
 	expect(after).not.toBe(before);
-	expect((await after?.track("video").info())?.maxAge).toBe(Time.Milli(2000));
+	expect((await after?.track("video").info())?.maxAge).toBe(Milli(2000));
 
 	broadcast.close();
 });
 
 test("keeps the current catalog snapshot for a reconnecting viewer", async () => {
-	const real = performance.now.bind(performance);
-	let now = real();
-	performance.now = () => now;
+	const clock = new Manual();
+	const installed = clock.install();
 
 	try {
 		const broadcast = new Broadcast({
@@ -388,14 +415,14 @@ test("keeps the current catalog snapshot for a reconnecting viewer", async () =>
 
 		// A reconnect past the idle cache window must still receive the live track's newest
 		// snapshot instead of waiting forever for an edit that may never come.
-		now += 60_000;
+		await clock.advance(Nano.fromMilli(Milli(60_000)));
 		const second = net.track(Broadcast.CATALOG_TRACK).subscribe();
 		expect((await new Json.Snapshot.Consumer<Catalog.Root>({ track: second }).latest())?.value.video).toBeDefined();
 		second.close();
 
 		broadcast.close();
 	} finally {
-		performance.now = real;
+		installed.close();
 	}
 });
 
@@ -411,7 +438,7 @@ test("registering a sibling after an encoder failure keeps the network broadcast
 		await settle();
 		const track = video.track.peek();
 		if (!track) throw new Error("expected demanded video track");
-		track.close(new Error("encoder failed"));
+		track.abort(new Error("encoder failed"));
 		await settle();
 		broadcast.audio("audio/new").config.set(audioConfig);
 		await settle();
@@ -440,7 +467,8 @@ test("a served decoder identity change moves the rendition to a fresh track name
 
 	const net = broadcast.net.peek();
 	if (!net) throw new Error("expected a network producer once connected");
-	const epoch = net.route?.epoch;
+	const announced = broadcast.in.origin.peek()?.request(broadcast.in.name.peek(), { announced: true });
+	const epoch = announced?.active.peek()?.epoch;
 	const catalog = new Json.Snapshot.Consumer<Catalog.Root>({
 		track: net.track(Broadcast.CATALOG_TRACK).subscribe(),
 	});
@@ -450,7 +478,7 @@ test("a served decoder identity change moves the rendition to a fresh track name
 		await settle();
 		const track = video.track.peek();
 		if (!track) throw new Error("expected the demanded track");
-		track.appendGroup().close();
+		track.appendGroup().finish();
 
 		// Bitrate, frame rate, and coded size move either way on the served track.
 		for (const update of [
@@ -475,7 +503,7 @@ test("a served decoder identity change moves the rendition to a fresh track name
 		expect(track.closed.peek()).toBeNull();
 		expect(video.track.peek()).toBeUndefined();
 		expect(broadcast.net.peek()).toBe(net);
-		expect(net.route?.epoch).toBe(epoch);
+		expect(announced?.active.peek()?.epoch).toBe(epoch);
 
 		const second = net.track("video/1").subscribe();
 		await settle();
@@ -496,6 +524,7 @@ test("a served decoder identity change moves the rendition to a fresh track name
 		second.close();
 	} finally {
 		first.close();
+		announced?.close();
 		broadcast.close();
 	}
 });
@@ -576,7 +605,7 @@ test("a replacement track name is never reused, even one never served", async ()
 	const fail = async (name: string) => {
 		const sub = net.track(name).subscribe();
 		await settle();
-		video.track.peek()?.close(new Error("encoder failed"));
+		video.track.peek()?.abort(new Error("encoder failed"));
 		video.close();
 		await settle();
 		sub.close();

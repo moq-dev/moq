@@ -1,11 +1,24 @@
 #!/usr/bin/env bash
 # Compare this checkout with registry releases using the existing interop drivers.
 set -euo pipefail
+
+if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
+    exec bash "$(dirname "$0")/../../sh/local.sh" bash "$0" "$@"
+fi
 DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 WORKSPACE=$(cd "$DIR/../.." && pwd)
 # shellcheck source-path=SCRIPTDIR source=../lib/harness.sh
 source "$DIR/../lib/harness.sh"
 harness_begin wire-compat "just test wire-compat$(harness_argv "$@")"
+# The CI report's records (see harness_result). The token and catalog lanes are known up
+# front; the session cells depend on the resolved releases, so they are recorded as they run.
+record() {
+    harness_result "$1" suite=wire-compat "${@:2}"
+}
+for source in current released js-current js-released; do
+    record "not run" case=token publisher="$source"
+    record "not run" case=catalog/container publisher="$source"
+done
 # --remeasure runs the cells planned breaks cover, then rewrites planned-breaks.json
 # from the result: re-pinned to these releases if a cell still fails, else deleted.
 remeasure=
@@ -92,21 +105,12 @@ for source in current released js-current js-released; do
         if [[ "$verifier" == current ]]; then bin="$CURRENT"; else bin="$RELEASED"; fi
         "$bin" auth verify --key "$HARNESS_RUN/key.jwk" --in "$HARNESS_RUN/$source.jwt" >"$HARNESS_RUN/$source.$verifier.claims"
         # `auth verify` prints the claims' Rust Debug form, the CLI's only output.
-        python3 - "$HARNESS_RUN/$source.$verifier.claims" <<'PY'
-import re, sys
-text = re.sub(r"\s+", "", open(sys.argv[1]).read())
-def patterns(field):
-    block = re.search(field + r":Patterns\(\[(.*?)\]", text)
-    assert block, f"no {field} in {text}"
-    return re.findall(r'Pattern\("([^"]*)"\)', block.group(1))
-root = re.search(r'root:"([^"]*)"', text)
-claims = (root and root.group(1), patterns("publish"), patterns("subscribe"))
-assert claims == ("compat", ["video/**"], ["**"]), f"token scope changed: {claims}"
-PY
+        bun "$DIR/compat/claims.ts" "$HARNESS_RUN/$source.$verifier.claims"
     done
     bun "$DIR/compat/client.ts" verify "$HARNESS_RUN/key.jwk" "$HARNESS_RUN/$source.jwt"
     bun "$HARNESS_RUN/js/client.ts" verify "$HARNESS_RUN/key.jwk" "$HARNESS_RUN/$source.jwt"
     echo "PASS token signed by $source"
+    record pass case=token publisher="$source"
 done
 
 # Exercise the actual hang library release, independently of the version bundled
@@ -137,6 +141,7 @@ for source in current released js-current js-released; do
     bun "$DIR/compat/client.ts" decode "$HARNESS_RUN/$source.catalog" "$HARNESS_RUN/$source.frame"
     bun "$HARNESS_RUN/js/client.ts" decode "$HARNESS_RUN/$source.catalog" "$HARNESS_RUN/$source.frame"
     echo "PASS catalog/container written by $source"
+    record pass case=catalog/container publisher="$source"
 done
 
 # Every session cell runs, so one nightly names every break; the run fails at the
@@ -147,18 +152,27 @@ ran=0
 skipped=0
 : >"$HARNESS_RUN/measured"
 cell() {
-    local lane="$1" version="$2" relay_source="$3" source="$4" planned result
+    local lane="$1" version="$2" relay_source="$3" source="$4" planned result reader started=$SECONDS
     shift 4
     local name="$version relay=$relay_source publisher=$source $lane"
+    # A control reads its own source's output; every other cell reads the opposite one's.
+    case "$lane:$source" in
+        media-control:* | *:both) reader="$source" ;;
+        *:current) reader=released ;;
+        *) reader=current ;;
+    esac
+    local cell=(case="$lane relay=$relay_source" publisher="$source" subscriber="$reader" transport=auto version="$version")
     planned=$(bun "$DIR/compat/resolve.ts" skip "$DIR/compat/planned-breaks.json" "$lane" "$version" "$relay_source" "$source")
     if [[ -n "$planned" && -z "$remeasure" ]]; then
         echo "SKIP $name: planned break $planned"
+        record skip "${cell[@]}" detail="planned break $planned"
         skipped=$((skipped + 1))
         return
     fi
     ran=$((ran + 1))
     echo "=== $name${planned:+ (planned break $planned)} ==="
-    if "$@"; then
+    # The nested interop.sh runs are this cell, not cases of their own.
+    if (unset HARNESS_RESULTS && "$@"); then
         echo "PASS $name"
         result=pass
     else
@@ -166,12 +180,15 @@ cell() {
         result=fail
         [[ -n "$planned" ]] || failed+=("$name")
     fi
+    cell+=(seconds=$((SECONDS - started)))
+    [[ -z "$planned" ]] || cell+=(detail="planned break $planned")
+    record "$result" "${cell[@]}"
     [[ -z "$planned" ]] || printf '%s\t%s\t%s\n' "$planned" "$result" "$name" >>"$HARNESS_RUN/measured"
 }
 
 fetch() {
     local relay="$1" pub="$2" sub="$3" js="$4" version="$5"
-    RELAY_BIN="$relay" MOQ_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
+    RELAY_BIN="$relay" CLI_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
         INTEROP_COMPAT_CLIENT="$js" INTEROP_FETCH_TRACK=1 \
         bash "$DIR/interop.sh" --publishers rust --subscribers rust
 }
@@ -188,7 +205,7 @@ while read -r source version <&3; do
             exit 1
             ;;
     esac
-    cell media-control "$version" "$source" "$source" env RELAY_BIN="$relay" MOQ_BIN="$pub" INTEROP_SUB_MOQ="$pub" INTEROP_VERSION="$version" \
+    cell media-control "$version" "$source" "$source" env RELAY_BIN="$relay" CLI_BIN="$pub" INTEROP_SUB_MOQ="$pub" INTEROP_VERSION="$version" \
         INTEROP_COMPAT_CLIENT="$js" INTEROP_DECODE=1 bash "$DIR/interop.sh" --subscribers rust,js-native-node
 done 3<"$HARNESS_RUN/controls"
 
@@ -227,14 +244,14 @@ while read -r version <&3; do
             fi
             # One cell per reader, so a planned break in one reader's release keeps the other running.
             for reader in rust js-native-node; do
-                cell "media-$reader" "$version" "$relay_source" "$source" env RELAY_BIN="$relay" MOQ_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
+                cell "media-$reader" "$version" "$relay_source" "$source" env RELAY_BIN="$relay" CLI_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
                     INTEROP_COMPAT_CLIENT="$other_js" INTEROP_DECODE=1 bash "$DIR/interop.sh" --subscribers "$reader"
             done
             [[ "$released_fetch" == true && "$current_fetch" == true ]] || continue
             # Drive JS publication from actual subscriber demand: the publisher's own JS
             # subscribes and observes the group, which the opposite Rust CLI then
             # FETCHes by ID. Reading the newest group races its live delivery.
-            cell js-publish "$version" "$relay_source" "$source" env RELAY_BIN="$relay" MOQ_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
+            cell js-publish "$version" "$relay_source" "$source" env RELAY_BIN="$relay" CLI_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
                 INTEROP_COMPAT_CLIENT="$own_js" INTEROP_FETCH_DATA=1 bash "$DIR/interop.sh" --publishers js-native --subscribers rust
             # Both Rust sources fetch the same group and compare exact payloads. The
             # publisher's own JS finds the group, so a catalog break fails only the

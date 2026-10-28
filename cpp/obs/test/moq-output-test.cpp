@@ -54,7 +54,13 @@ std::atomic<bool> g_destroyed{false};
 
 std::string g_url;
 std::string g_rate_control = "CBR";
+uint32_t g_encoder_caps = OBS_ENCODER_CAP_DYN_BITRATE;
+// Every obs_encoder_update, as the encoder and the bitrate it was told in kbps.
+std::mutex g_updates_mutex;
+std::vector<std::pair<obs_encoder_t *, long long>> g_updates;
 std::atomic<bool> g_settings_ok{true};
+// A reason Configure reports itself, for a setting the config cannot express.
+std::string g_settings_error;
 // Lets a test run something inside obs_output_signal_stop, standing in for a
 // frontend that stops the output straight from the signal handler.
 std::function<void()> g_on_signal;
@@ -183,18 +189,66 @@ long long obs_data_get_int(obs_data_t *, const char *)
 	return 8000;
 }
 
+// The settings a retune builds carry only the bitrate, so the stub is that bitrate.
+struct obs_data {
+	long long bitrate = 0;
+};
+
+obs_data_t *obs_data_create()
+{
+	return new obs_data;
+}
+
+void obs_data_set_int(obs_data_t *data, const char *, long long value)
+{
+	data->bitrate = value;
+}
+
+uint32_t obs_encoder_get_caps(const obs_encoder_t *)
+{
+	return g_encoder_caps;
+}
+
+void obs_encoder_update(obs_encoder_t *encoder, obs_data_t *settings)
+{
+	std::lock_guard<std::mutex> lock(g_updates_mutex);
+	g_updates.emplace_back(encoder, settings->bitrate);
+	delete settings;
+}
+
+// Encoders outlive every test, so a weak ref is the encoder itself.
+obs_weak_encoder_t *obs_encoder_get_weak_encoder(obs_encoder_t *encoder)
+{
+	return reinterpret_cast<obs_weak_encoder_t *>(encoder);
+}
+
+obs_encoder_t *obs_weak_encoder_get_encoder(obs_weak_encoder_t *weak)
+{
+	return reinterpret_cast<obs_encoder_t *>(weak);
+}
+
+obs_encoder_t *obs_encoder_get_ref(obs_encoder_t *encoder)
+{
+	return encoder;
+}
+
+void obs_weak_encoder_addref(obs_weak_encoder_t *) {}
+void obs_weak_encoder_release(obs_weak_encoder_t *) {}
+void obs_encoder_release(obs_encoder_t *) {}
+
 } // extern "C"
 
 // Stands in for the advanced settings: reconnect fast, so a dropped session is
 // back within a test's patience. An unparseable bind address is what moq-ffi refuses
 // when it builds the client.
 namespace MoQSettings {
-void Configure(obs_data_t *, moq::ClientConfig &config)
+std::string Configure(obs_data_t *, moq::ClientConfig &config)
 {
 	if (!g_settings_ok)
 		config.bind = "not an address";
-	config.backoff.initial_us = 10'000;
-	config.backoff.max_us = 50'000;
+	config.backoff.initial = std::chrono::milliseconds(10);
+	config.backoff.max = std::chrono::milliseconds(50);
+	return g_settings_error;
 }
 } // namespace MoQSettings
 
@@ -241,7 +295,13 @@ void reset(std::string url)
 	g_on_signal = nullptr;
 	g_begin_capture = 0;
 	g_settings_ok = true;
+	g_settings_error.clear();
 	g_rate_control = "CBR";
+	g_encoder_caps = OBS_ENCODER_CAP_DYN_BITRATE;
+	{
+		std::lock_guard<std::mutex> lock(g_updates_mutex);
+		g_updates.clear();
+	}
 	g_stall_last_error = false;
 	g_in_report_window = false;
 	g_destroyed = false;
@@ -342,12 +402,58 @@ struct MoQOutputStatsTest {
 		std::lock_guard<std::mutex> lock(output.mutex);
 		output.live = false;
 	}
+	// A fast first connect and drop can coalesce before the UI observes Connected.
+	static bool ObserveCoalescedFirstConnect(MoQOutput &output)
+	{
+		std::lock_guard<std::recursive_mutex> signal_lock(output.signal_mutex);
+		auto current = output.attempt;
+		if (!current || !current->session)
+			return false;
+		current->pending.reset();
+		current->connected = false;
+		output.connect_time_ms = 0;
+		auto state = current->session->state();
+		state.phase = moq::ConnectionPhase::kDisconnected;
+		state.version.reset();
+		output.OnState(current, std::move(state));
+		return current->connected && !current->live && output.GetConnectTime() > 0;
+	}
+
+	// Whether every audio and video track holds a reservation.
+	static bool Reserved(MoQOutput &output)
+	{
+		std::lock_guard<std::mutex> lock(output.media_mutex);
+		for (const auto *tracks : {&output.video_tracks, &output.audio_tracks}) {
+			if (tracks->empty())
+				return false;
+			for (const auto &[encoder, track] : *tracks) {
+				if (!track.reservation)
+					return false;
+			}
+		}
+		return true;
+	}
+	// Drive every following video track to its floor, as a collapsed uplink would.
+	static void Collapse(MoQOutput &output)
+	{
+		std::lock_guard<std::mutex> lock(output.media_mutex);
+		for (auto &[encoder, track] : output.video_tracks) {
+			if (track.rate)
+				track.rate->Update(1, MoQRate::Clock::now());
+		}
+	}
 };
+
+std::vector<std::pair<obs_encoder_t *, long long>> updates()
+{
+	std::lock_guard<std::mutex> lock(g_updates_mutex);
+	return g_updates;
+}
 
 int main()
 {
 	{
-		TestRelay relay;
+		TestRelay relay(true, {"moq-transport-18"});
 		reset(relay.Url());
 		MoQOutput output(nullptr, OUTPUT);
 		CHECK(output.Start());
@@ -355,6 +461,8 @@ int main()
 		CHECK(first.has_value());
 		CHECK(first == output.GetEpoch());
 		CHECK(WaitFor([&] { return output.IsLiveSession() && relay.Accepted() == 1; }));
+		// The plugin names itself ahead of the C++ package, so a relay can tell it apart.
+		CHECK(relay.Advertised("moq-obs/dev moq-cpp/"));
 		relay.DropSessions();
 		CHECK(WaitFor([&] { return output.GetReconnectCount() == 1 && output.IsLiveSession(); }));
 		CHECK(MoQOutputStatsTest::Epoch(output) == first);
@@ -369,6 +477,17 @@ int main()
 		output.Stop();
 	}
 	printf("each start announces a fresh epoch, reconnect preserves it: ok\n");
+
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		MoQOutput output(nullptr, OUTPUT);
+		CHECK(output.Start());
+		CHECK(WaitFor([&] { return output.IsLiveSession(); }));
+		CHECK(MoQOutputStatsTest::ObserveCoalescedFirstConnect(output));
+		output.Stop();
+	}
+	printf("a coalesced first connection is remembered while offline: ok\n");
 
 	for (int retirement = 0; retirement < 3; ++retirement) {
 		TestRelay relay;
@@ -419,6 +538,7 @@ int main()
 			MoQOutput::ConnectionStats stats;
 			CHECK(o.TryGetConnectionStats(&stats));
 			CHECK(stats.dial == "http");
+			CHECK(!stats.protocol.empty());
 
 			auto keyframe = TestH264Keyframe();
 			std::vector<uint8_t> opus = {0xfc, 0xff, 0xfe};
@@ -452,6 +572,64 @@ int main()
 	}
 	printf("publishes, and only CBR hints its bitrate: ok\n");
 
+	// Video follows the grant only when the encoder retunes live and the bitrate
+	// drives it; every track reserves either way once the session connects.
+	struct FollowCase {
+		const char *rate_control;
+		uint32_t caps;
+		bool follows;
+	};
+	for (const auto &c : {FollowCase{"CBR", OBS_ENCODER_CAP_DYN_BITRATE, true},
+			      FollowCase{"vbr", OBS_ENCODER_CAP_DYN_BITRATE, true},
+			      FollowCase{"CQP", OBS_ENCODER_CAP_DYN_BITRATE, false}, FollowCase{"CBR", 0, false}}) {
+		TestRelay relay;
+		reset(relay.Url());
+		g_rate_control = c.rate_control;
+		g_encoder_caps = c.caps;
+		MoQOutput o(nullptr, OUTPUT);
+		CHECK(o.Start());
+		CHECK(WaitFor([&] { return o.IsLiveSession(); }));
+
+		auto keyframe = TestH264Keyframe();
+		std::vector<uint8_t> opus = {0xfc, 0xff, 0xfe};
+		auto video = videoPacket(keyframe, 0);
+		o.Data(&video);
+		auto audio = audioPacket(opus, 0);
+		o.Data(&audio);
+		CHECK(MoQOutputStatsTest::Reserved(o));
+
+		MoQOutput::VideoRate rate;
+		CHECK(o.TryGetVideoRate(&rate) == c.follows);
+		if (c.follows) {
+			CHECK(rate.configured_bps == 8'000'000);
+			CHECK(rate.target_bps <= rate.configured_bps);
+		}
+		o.Stop();
+	}
+	printf("video follows only a live-retunable, bitrate-driven encoder: ok\n");
+
+	// Stopping hands the configured bitrate back to an encoder the grant lowered,
+	// so the next Start() reads the user's rate rather than the last grant.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		MoQOutput o(nullptr, OUTPUT);
+		CHECK(o.Start());
+		CHECK(WaitFor([&] { return o.IsLiveSession(); }));
+		auto keyframe = TestH264Keyframe();
+		auto video = videoPacket(keyframe, 0);
+		o.Data(&video);
+		MoQOutputStatsTest::Collapse(o);
+		MoQOutput::VideoRate rate;
+		CHECK(o.TryGetVideoRate(&rate));
+		CHECK(rate.target_bps == 800'000);
+		o.Stop();
+		const auto applied = updates();
+		CHECK(!applied.empty());
+		CHECK(!applied.empty() && applied.back() == std::make_pair(VIDEO_ENCODER, 8000LL));
+	}
+	printf("stop restores the configured bitrate: ok\n");
+
 	// Stop drains the session, even when the output is destroyed straight after: a
 	// large frame written just before it still reaches the relay, and the track then
 	// ends cleanly instead of being cut off with the session.
@@ -474,18 +652,25 @@ int main()
 		CHECK(catalog.has_value());
 		if (catalog) {
 			const auto &[name, rendition] = *catalog->video.begin();
-			auto media =
-				TestOk(moq::MediaTrackConsumer::subscribe(broadcast, {name, rendition.container}).get(),
-				       "container consumer");
+			auto media = TestOk(
+				moq::MediaTrackConsumer::subscribe(broadcast, {moq::Rendition::kVideo{name, rendition}})
+					.get(),
+				"container consumer");
 			// Read a frame first, so the relay is subscribed before the last one is written.
 			auto next = media->next();
 			CHECK(next.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
 			auto first = TestOk(next.get(), "first frame");
 			CHECK(first.has_value());
+			const auto *first_frame = first ? std::get_if<moq::MediaRead::kFrame>(&first->get_variant())
+							: nullptr;
+			CHECK(first_frame != nullptr);
 
-			// Large enough that it is still in flight when Stop() runs.
+			// Large enough to be in flight when Stop() runs, so a Stop() that cancels
+			// rather than drains cuts it off (256 KiB can land first under TSan). Small
+			// enough to drain well inside moq-net's one-second drain deadline, which cuts
+			// the track off by design, even under TSan on a loaded host.
 			auto large = keyframe;
-			large.resize(large.size() + 16 * 1024 * 1024, 0xff);
+			large.resize(large.size() + 2 * 1024 * 1024, 0xff);
 			auto last = videoPacket(large, 1);
 			o->Data(&last);
 			// OBS may destroy the output right after stopping it.
@@ -499,7 +684,7 @@ int main()
 
 			// Everything up to the last frame, then the end of the track.
 			bool ended = false;
-			uint64_t last_timestamp = first ? first->timestamp_us : 0;
+			uint64_t last_timestamp = first_frame ? first_frame->frame.timestamp_us : 0;
 			for (;;) {
 				next = media->next();
 				if (next.wait_for(std::chrono::seconds(10)) != std::future_status::ready)
@@ -511,10 +696,12 @@ int main()
 					ended = true;
 					break;
 				}
-				last_timestamp = (*result)->timestamp_us;
+				CHECK(!std::holds_alternative<moq::MediaRead::kGap>((*result)->get_variant()));
+				if (const auto *frame = std::get_if<moq::MediaRead::kFrame>(&(*result)->get_variant()))
+					last_timestamp = frame->frame.timestamp_us;
 			}
 			CHECK(ended);
-			CHECK(first && last_timestamp > first->timestamp_us);
+			CHECK(first_frame && last_timestamp > first_frame->frame.timestamp_us);
 		}
 	}
 	printf("stop drains the session: ok\n");
@@ -529,6 +716,16 @@ int main()
 		CHECK(signalCount() == 1);
 		CHECK(signalAt(0).code == OBS_OUTPUT_CONNECT_FAILED);
 		CHECK(signalAt(0).last_error.find("bind") != std::string::npos);
+	}
+	{
+		reset(BAD_URL);
+		g_settings_error = "unknown congestion control: fast";
+		MoQOutput o(nullptr, OUTPUT);
+		CHECK(!o.Start());
+		CHECK(g_begin_capture == 0);
+		CHECK(signalCount() == 1);
+		CHECK(signalAt(0).code == OBS_OUTPUT_CONNECT_FAILED);
+		CHECK(signalAt(0).last_error.find("congestion") != std::string::npos);
 	}
 	printf("invalid advanced settings: ok\n");
 
@@ -568,6 +765,56 @@ int main()
 		o.Stop();
 	}
 	printf("reconnect after a drop: ok\n");
+
+	// While a dropped session redials, the dock names why it dropped instead of a
+	// bare "offline". The relay is gone, so nothing answers the redial.
+	{
+		auto relay = std::make_unique<TestRelay>();
+		reset(relay->Url());
+		MoQOutput o(nullptr, OUTPUT);
+		CHECK(o.Start());
+		CHECK(WaitFor([&] { return o.IsLiveSession(); }));
+		relay.reset();
+		MoQOutput::ConnectionStats stats;
+		CHECK(WaitFor([&] { return !o.TryGetConnectionStats(&stats); }));
+		// Still reconnecting rather than failed, so this is the reconnect path.
+		CHECK(o.IsLiveSession());
+		CHECK(signalCount() == 0);
+		int code = 0;
+		std::string reason;
+		o.CopyLastFailure(&code, &reason);
+		CHECK(!reason.empty());
+		CHECK(reason != "offline");
+		o.Stop();
+	}
+	printf("names the failure while reconnecting: ok\n");
+
+	// While the first dial keeps failing, the dock names why instead of a bare
+	// "Connecting…". The relay is gone before the start, so nothing answers.
+	{
+		std::string url;
+		{
+			TestRelay relay;
+			url = relay.Url();
+		}
+		reset(url);
+		MoQOutput o(nullptr, OUTPUT);
+		CHECK(o.Start());
+		std::string reason;
+		CHECK(WaitFor([&] {
+			int code = 0;
+			o.CopyLastFailure(&code, &reason);
+			return !reason.empty();
+		}));
+		// Still retrying rather than failed, so this is the first-dial path.
+		CHECK(!o.IsLiveSession());
+		CHECK(signalCount() == 0);
+		o.Stop();
+		int code = 0;
+		o.CopyLastFailure(&code, &reason);
+		CHECK(reason.empty());
+	}
+	printf("names the failure while the first dial retries: ok\n");
 
 	// Stopping while the connect is still pending cancels it: nothing but the stop
 	// reaches OBS, then or later.
@@ -630,6 +877,27 @@ int main()
 		CHECK(signalCount() == 2);
 	}
 	printf("OBS-driven restart: ok\n");
+
+	// A token edited mid-stream replaces the session's tokens, and presenting a
+	// newer one or stopping drops the wait on the relay's answer still in flight.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		MoQOutput o(nullptr, OUTPUT);
+		CHECK(!o.PresentToken("early"));
+		CHECK(o.Start());
+		CHECK(WaitFor([&] { return o.IsLiveSession(); }));
+		CHECK(o.PresentToken("fresh"));
+		CHECK(o.PresentToken("fresher"));
+		// The default protocol carries no in-band AUTH, so the relay's refusal is
+		// kept for the dock while the stream stays up.
+		CHECK(WaitFor([&] { return !o.TokenRefusal().empty(); }));
+		CHECK(o.IsLiveSession());
+		CHECK(signalCount() == 0);
+		o.Stop();
+		CHECK(!o.PresentToken("late"));
+	}
+	printf("present a token mid-stream: ok\n");
 
 	// Restarts and teardown racing failures still in flight, repeatedly. Whatever
 	// the order, each Start() reports at most once, and nothing reports once the

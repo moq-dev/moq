@@ -1,20 +1,28 @@
 /**
  * In-band authorization: present tokens to the peer and learn what they grant.
  *
- * Each side of a moq-lite-07 session, and of a moq-transport draft-17+ session when both
+ * Each side of a moq-lite-07 session, and of a moq-transport draft-18+ session when both
  * sides negotiate MoQ Auth, presents the credential its connection already carried (the
  * URL, or nothing) right after setup, and learns the {@link Grant} it earned. Older
  * versions, and peers that do not negotiate it, carry no AUTH exchange: the grant stays
- * undefined and {@link Auth.add} rejects with {@link Unsupported}. {@link Auth.grant} is
- * the union of every token this side presented, and {@link Auth.add} presents another
- * without reconnecting. Mirrors the Rust `moq_net::auth`.
+ * undefined. There {@link Handle.add} rejects with {@link Unsupported} on moq-lite, and on
+ * moq-transport keeps the token, with no grant, for the announcements whose route names it.
+ * {@link Handle.grant} is the union of every token this side presented, and {@link Handle.add}
+ * presents another without reconnecting, returning its {@link Credential}.
+ *
+ * A {@link Handle} passed to `connect` as `auth`, or the one a reconnecting `Connection` owns,
+ * outlives its sessions: each presents every token it holds, so a route naming one of its
+ * {@link Credential}s keeps it across a reconnect. Only the peer's verdict ends such a token; a
+ * session ending leaves it for the next. Mirrors the Rust `moq_net::auth`.
  *
  * @module
  */
 
-import { type Getter, Signal } from "@moq/signals";
-import { SessionCode } from "./error.ts";
+import type { Getter } from "@moq/signals";
+import type { SessionCode } from "./error.ts";
 import type * as Path from "./path.ts";
+
+export { Duplicate, Handle, Unsupported } from "./auth_session.ts";
 
 /**
  * What a peer lets this side do, in this side's own paths (relative to the session).
@@ -26,37 +34,35 @@ export interface Grant {
 	publish: Path.Patterns;
 	/** The broadcasts this side may subscribe to from the peer. */
 	subscribe: Path.Patterns;
-	/** When the grant lapses, in `Date.now()` milliseconds, or undefined for never. */
+	/** When the grant lapses, as `@moq/clock` wall time in Unix milliseconds, or undefined for never. */
 	expires?: number;
 }
 
-/** Whether two grants allow the same paths and lapse together. */
-export function grantsEqual(a: Grant | undefined, b: Grant | undefined): boolean {
-	if (a === undefined || b === undefined) return a === b;
-	return a.publish.equals(b.publish) && a.subscribe.equals(b.subscribe) && a.expires === b.expires;
-}
-
-/** The session or peer carries no AUTH exchange, or takes no tokens in band. */
-export class Unsupported extends Error {
-	/** The moq-lite session code for this condition. */
-	readonly code = SessionCode.Unsupported;
-	constructor(message = "auth unsupported") {
-		super(message);
-		this.name = "Unsupported";
-	}
-}
-
-/** A token this side presented. {@link Token.close} withdraws it. */
-export interface Token {
-	/** This token's own grant: undefined until the peer answers, and again once it ends. */
+/**
+ * A token this side presented, which a route can name, on every session of its handle.
+ * {@link Credential.close} withdraws it.
+ */
+export interface Credential {
+	/**
+	 * This token's own grant on the live session: undefined until its peer answers, while no
+	 * session is live, and again once it ends.
+	 */
 	readonly grant: Getter<Grant | undefined>;
-	/** Settles when the token ends: the peer's revocation, or its withdrawal. */
+	/**
+	 * Settles when the token ends for good: the peer's refusal or revocation, `null` when the
+	 * peer closed it without one or it was withdrawn, or the handle's end. A session ending is
+	 * not one: the next session presents it again.
+	 */
 	readonly closed: PromiseLike<Error | null>;
-	/** Withdraw the token, removing its grant from the union. */
+	/** Withdraw the token, removing its grant from the union and remaking any request that carries it without it. */
 	close(): void;
 }
 
-/** A token the peer presented, waiting for an answer. Answer every one. */
+/**
+ * A token the peer presented, waiting for an answer. Answer every one.
+ *
+ * @internal Answering tokens is for direct peer sessions, which have no consumer yet.
+ */
 export interface Request {
 	/** The token the peer presented. Empty means the credential its connection carried. */
 	readonly token: Uint8Array;
@@ -73,7 +79,11 @@ export interface Request {
 	reject(code: SessionCode, reason: string): void;
 }
 
-/** A grant issued to one of the peer's tokens. */
+/**
+ * A grant issued to one of the peer's tokens.
+ *
+ * @internal See {@link Request}.
+ */
 export interface Issued {
 	/** Replace the grant, such as with a lowered expiry. */
 	update(grant: Grant): void;
@@ -85,48 +95,14 @@ export interface Issued {
 	readonly closed: PromiseLike<Error | null>;
 }
 
-/** The tokens the peer presents, for an application that answers them itself. */
+/**
+ * The tokens the peer presents, for an application that answers them itself.
+ *
+ * @internal See {@link Request}.
+ */
 export interface Requests {
-	/** The next token the peer presents, or undefined once the session ends. */
+	/** The next token the peer presents, or undefined once the handle ends. */
 	next(): Promise<Request | undefined>;
 	/** Refuse every later token. */
 	close(): void;
-}
-
-/** A session's tokens and grants. See the module docs. */
-export interface Auth {
-	/** The union of every grant this side holds: undefined until the peer first answers. */
-	readonly grant: Getter<Grant | undefined>;
-
-	/**
-	 * Present another token, resolving once the peer answers it. Rejects with
-	 * {@link Unsupported} when the session or the peer takes no tokens in band, or with the
-	 * peer's refusal as an `Error.Session`.
-	 */
-	add(token: string | Uint8Array): Promise<Token>;
-
-	/**
-	 * Answer every token the peer presents, instead of the default: granting what this side
-	 * publishes and consumes for the connection's own credential and refusing any other.
-	 *
-	 * Call it as soon as connect or accept resolves, in the same task: whoever answers is
-	 * decided once, right after. Throws once that has happened.
-	 *
-	 * The peer's stream credit bounds how many tokens wait unanswered, since each holds its
-	 * stream open until answered or withdrawn. A withdrawn token leaves the queue.
-	 */
-	requests(): Requests;
-}
-
-/** The {@link Auth} of a session without AUTH: no grant, and no tokens. */
-export class None implements Auth {
-	readonly grant: Getter<Grant | undefined> = new Signal<Grant | undefined>(undefined);
-
-	add(_token: string | Uint8Array): Promise<Token> {
-		return Promise.reject(new Unsupported());
-	}
-
-	requests(): Requests {
-		return { next: async () => undefined, close: () => {} };
-	}
 }

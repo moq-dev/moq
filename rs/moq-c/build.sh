@@ -66,8 +66,10 @@ if [[ "$TARGET" == *"-windows-"* ]]; then
     echo "Building moq-c for $TARGET via cargo (Windows path)..."
     BUILD_LOG="$(mktemp)"
     trap 'rm -f "$BUILD_LOG"' EXIT
-    cargo build --locked --release --package moq-c --target "$TARGET" --manifest-path "$WORKSPACE_DIR/Cargo.toml" \
-        --message-format=json-render-diagnostics >"$BUILD_LOG"
+    # Releases carry the OpenH264 software fallback; nix/overlay.nix selects it
+    # for the other platforms.
+    cargo build --locked --release --package moq-c --features openh264 --target "$TARGET" \
+        --manifest-path "$WORKSPACE_DIR/Cargo.toml" --message-format=json-render-diagnostics >"$BUILD_LOG"
 
     TARGET_DIR="$WORKSPACE_DIR/target/$TARGET/release"
     LIB_FILE="moq.lib"

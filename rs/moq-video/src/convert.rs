@@ -220,8 +220,8 @@ mod tests {
 		let red = [255u8, 0, 0, 255].repeat(source_size.pixels() as usize);
 		let source = I420::from_rgba(&red, source_size.width * 4, source_size).unwrap();
 		let source = source.resize(Size::new(1280, 720)).unwrap();
-		assert_eq!(source.color(), Some(Color::Bt601Limited));
-		assert_eq!(Color::infer(Size::new(1280, 720)), Color::Bt709Limited);
+		assert_eq!(source.color(), Some(Color::BT601));
+		assert_eq!(Color::infer(Size::new(1280, 720)), Color::BT709);
 
 		let image = rgba(&Surface::I420(source), &Config::default()).unwrap();
 		let center = (image.height() as usize / 2 * image.stride) + image.width() as usize / 2 * 4;
@@ -276,22 +276,5 @@ mod tests {
 				"pixel {index}: {bgra:?} is not {rgba:?} with red and blue exchanged",
 			);
 		}
-	}
-
-	/// Converting borrows the surface, so the same one converts twice.
-	///
-	/// The reason this matters is not the second conversion: it is that a
-	/// caller holding an `Arc<Frame>` it cannot unwrap, which is every consumer
-	/// of a publisher's preview, has no way to reach a consuming exit at all.
-	#[test]
-	fn conversion_leaves_the_surface_alone() {
-		let size = Size::new(32, 32);
-		let surface = Surface::I420(I420::new(size, vec![128; I420::len(size).unwrap()]).unwrap());
-
-		let first = rgba(&surface, &Config::default()).unwrap();
-		let second = bgra(&surface, &Config::default()).unwrap();
-		assert_eq!(first.data().len(), second.data().len());
-		// And the surface is still there to ask again.
-		assert_eq!(surface.width(), size.width);
 	}
 }

@@ -16,8 +16,9 @@ excluded:
   ACKs, and retransmits.
 - **WebSocket:** the TCP stream's bytes, which include TLS, WebSocket, and
   qmux framing and retransmits.
-- **Gateways an embedder terminates:** SRT and WebRTC through moq-srt's and
-  moq-rtc's sources. An embedder terminating RTMP on its own socket
+- **Gateways an embedder terminates:** SRT through moq-srt's source. moq-rtc
+  exposes none since #6454 removed its unused one; it returns only with an
+  adapter a consumer registers. An embedder terminating RTMP on its own socket
   registers that socket's `TCP_INFO` counts; moq-rtmp's own `Server` and
   client expose no source until a consumer needs one.
 - **TCP receive:** bytes TCP delivered, so a peer's duplicate retransmits
@@ -44,6 +45,22 @@ depends on the workload. Measured wire/payload in moq.pro's bench:
 A provider bills the wire, so a relay operator needs per-root wire bytes to
 see cost per tenant.
 
+The shared core landed in #5773 (`778263c50`): `Presence` carries both
+counters, `stats::Handle::session(label)` then `stats::Session::wire`
+registers embedder sources (`Handle::wire` was removed in #6470), and
+the stats producer samples and preserves their final values. Native tokio
+and io_uring QUIC sources and their relay integration tests are already on
+`main`. Reuse that registry and accounting; do not create another one.
+
+The unused public RTC wire source was removed. Reintroduce one only with an
+adapter that registers it on the shared stats handle for a real consumer.
+
+Remaining here: finish the qmux and SRT adapter children, then verify their
+wire counters appear in the existing per-root presence and per-tier totals
+alongside native sessions, with final counts retained when a source closes.
+Confirm the stats documentation describes the supported adapters and their
+receive-side limitations.
+
 - **`Presence`, not `Traffic`.** `Presence` is already per (tier, root) and
   per session. `Traffic.bytes` stays payload, and its docs say so.
 - **Named `wire_tx` / `wire_rx`.** Rejected: `bytes_sent`, which reads like
@@ -51,23 +68,12 @@ see cost per tenant.
 - **Sampled on the stats tick.** Rejected: a once-only count at session end,
   which loses a crashed session and lags a long one.
 - **One source registry for sessions and embedders.** An embedder registers
-  a gateway connection's wire source against a (tier, root) on its stats
-  handle, the same path the relay's own sessions use, like
-  [session outcomes](/quest/m1/session-outcomes.md)' embedder refusals.
+  a gateway connection's wire source on a `stats::Session` from its stats
+  handle's `session(label)`, the same path the relay's own sessions use.
 
 ## Required
 
-- [Presence wire counters](/quest/m2/wire-stats/presence.md) - QUIC,
-  WebTransport, and WebSocket sessions and embedder sources count per
-  (tier, root)
 - [qmux byte counters](/quest/m2/wire-stats/qmux.md) - a WebSocket session
   reports its TCP bytes
 - [moq-srt wire source](/quest/m2/wire-stats/srt.md) - an SRT connection
   reports its wire bytes
-- [moq-rtc wire source](/quest/m2/wire-stats/rtc.md) - a WebRTC peer reports
-  its wire bytes
-
-## Related
-
-- [Session outcomes](/quest/m1/session-outcomes.md) - the other per-root
-  `Presence` counters and the embedder stats-handle pattern

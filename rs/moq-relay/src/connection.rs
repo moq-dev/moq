@@ -1,23 +1,24 @@
-use crate::{auth, cluster, refusals::Refusal};
+use crate::{auth, cluster, incoming::Incoming, refusals::RefusalKind};
 
-use axum::http;
-use moq_tokio::server::Request;
+use tracing::Instrument;
+#[cfg(all(target_os = "linux", feature = "_uring"))]
+use tracing::instrument::WithSubscriber;
 
-/// An error carrying the HTTP status to send when closing the request.
+/// An admission refusal carrying the session code to close the request with.
 ///
 /// Used only on the pre-accept auth path so the caller can close once with
 /// the right code instead of sprinkling close/return at each failure site.
-struct StatusError {
-	status: http::StatusCode,
-	refusal: Refusal,
-	source: anyhow::Error,
+pub(crate) struct Rejection {
+	pub(crate) code: moq_net::SessionError,
+	refusal: Option<RefusalKind>,
+	pub(crate) source: anyhow::Error,
 }
 
-impl From<auth::Error> for StatusError {
+impl From<auth::Error> for Rejection {
 	fn from(err: auth::Error) -> Self {
 		Self {
-			status: (&err).into(),
-			refusal: (&err).into(),
+			code: (&err).into(),
+			refusal: Some((&err).into()),
 			source: err.into(),
 		}
 	}
@@ -28,99 +29,97 @@ impl From<auth::Error> for StatusError {
 /// Build with [`new`](Self::new), attach the optional knobs, then call
 /// [`run`](Self::run) to admit the request through its lease, wire up
 /// publish/subscribe origins, and serve the session until it closes.
-pub struct Connection {
-	/// A numeric identifier for logging.
+///
+/// The request is a moq-tokio [`Request`](moq_tokio::server::Request), or an
+/// in-memory accepted session when the `test-support` feature is enabled.
+pub struct Connection<R: Incoming = moq_tokio::server::Request> {
+	request: R,
+	lifecycle: Lifecycle,
+}
+
+/// Shared owner of admission, supervision and the connection's log span.
+#[derive(Clone)]
+pub(crate) struct Lifecycle {
 	id: u64,
-	/// The transport request to accept or reject.
-	request: Request,
-	/// The cluster state used to resolve origins.
+	span: tracing::Span,
 	cluster: cluster::Cluster,
-	/// Where the session's grant comes from.
 	auth: auth::Auth,
-	/// Relay-wide shutdown broadcast: when it fires, the session is drained with
-	/// a GOAWAY instead of being cut off.
 	shutdown: crate::shutdown::Observer,
-	/// Live sessions on this node, so an operator can list and nudge this one.
 	sessions: Option<crate::session::Registry>,
 }
 
-impl Connection {
+impl<R: Incoming> Connection<R> {
 	/// Wrap an accepted request, resolving origins through `cluster` and
 	/// its grant through `auth`.
-	pub fn new(request: Request, cluster: cluster::Cluster, auth: auth::Auth) -> Self {
+	pub fn new(request: R, cluster: cluster::Cluster, auth: auth::Auth) -> Self {
 		Self {
-			id: 0,
+			lifecycle: Lifecycle::new(cluster, auth, 0, request.remote()),
 			request,
-			cluster,
-			auth,
-			shutdown: crate::shutdown::Observer::disabled(),
-			sessions: None,
 		}
 	}
 
 	/// Set the identifier this connection logs under. Defaults to 0.
 	pub fn with_id(mut self, id: u64) -> Self {
-		self.id = id;
+		self.lifecycle.id = id;
+		self.lifecycle.span = span(id, self.request.remote());
 		self
 	}
 
 	/// Attach the relay-wide shutdown broadcast so the session drains with a
 	/// GOAWAY when it fires. Without it the session is cut off on process exit.
 	pub fn with_shutdown(mut self, shutdown: crate::shutdown::Observer) -> Self {
-		self.shutdown = shutdown;
+		self.lifecycle = self.lifecycle.with_shutdown(shutdown);
 		self
 	}
 
 	/// Register this session in the node's live table after it is admitted.
 	/// Without it the session is served but cannot be listed or nudged.
 	pub fn with_sessions(mut self, sessions: crate::session::Registry) -> Self {
-		self.sessions = Some(sessions);
+		self.lifecycle = self.lifecycle.with_sessions(sessions);
 		self
 	}
 
 	/// Admits and serves this connection until it closes, then logs the close. A panic
 	/// ends only this connection, as an error.
-	#[tracing::instrument("conn", skip_all, fields(id = self.id, remote = self.request.remote_addr().map(tracing::field::display), session = tracing::field::Empty))]
 	pub async fn run(self) {
-		let id = self.id;
-		// Boxed: debug builds copy the session's large future through each wrapper's
-		// stack frame, which overflows a test thread.
-		let result = moq_tokio::panic::isolate(Box::pin(self.serve()))
-			.await
-			.unwrap_or_else(|| Err(anyhow::anyhow!("connection panicked")));
-		// Logged here, under the same target as the span's other lines, so every
-		// transport's `conn{id=...}` pairs with its close under one log filter.
-		match result {
-			Ok(()) => tracing::info!(id, "connection closed"),
-			Err(err) => tracing::warn!(id, %err, "connection closed"),
-		}
+		let Self { request, lifecycle } = self;
+		lifecycle.run(Self::serve(request, &lifecycle)).await;
 	}
 
-	async fn serve(self) -> anyhow::Result<()> {
+	async fn serve(request: R, lifecycle: &Lifecycle) -> anyhow::Result<()> {
 		// Abandoned at the drain deadline, so the deadline bounds this task and its
-		// socket like it bounds a session.
-		let admitted = self.shutdown.admit(self.admit()).await;
+		// socket like it bounds a session, and at the handshake deadline, so a peer
+		// cannot hold the connection open behind a decision that never comes.
+		// Boxed: the admission future is large, and nesting it inline overflows debug stacks.
+		let admitted = request
+			.within(Box::pin(lifecycle.admit(request.admission(&lifecycle.auth))))
+			.await
+			.inspect_err(|_| lifecycle.cluster.refusals.record(RefusalKind::Unavailable))
+			.map_err(|err| err.context("admission timed out"))?;
 		let (admitted, registration) = match admitted {
 			Ok(admitted) => admitted,
 			Err(err) => {
-				self.cluster.refusals.record(err.refusal);
-				let reject = match err.status {
-					http::StatusCode::UNAUTHORIZED => moq_tokio::server::Reject::Unauthorized,
-					http::StatusCode::FORBIDDEN => moq_tokio::server::Reject::Forbidden,
-					status => moq_tokio::server::Reject::App(status.as_u16()),
-				};
-				let _ = self.request.reject(reject).await;
+				request.reject(err.code).await;
 				return Err(err.source);
 			}
 		};
 
-		let transport = self.request.transport();
+		let transport = request.transport();
 		let cluster::Admitted {
 			lease,
 			publisher,
 			subscriber,
 			stats,
 		} = admitted;
+
+		// A peer's QUIC limits widen before SETUP OK, so its first requests see them.
+		// Other transports keep their own limits.
+		#[cfg(feature = "quic")]
+		if let Some(limits) = lifecycle.cluster.quic_limits(&lease)
+			&& let Some(quic) = request.quic()
+		{
+			quic.set_limits(limits)?;
+		}
 
 		// Accept the connection.
 		// NOTE: subscribe and publish seem backwards because of how relays work.
@@ -129,79 +128,231 @@ impl Connection {
 		//
 		// moq-net defaults the unset side to a fresh no-op origin, which is fine for a
 		// publish-only or subscribe-only session.
-		let mut request = self.request.with_stats(stats).with_limits(self.cluster.limits(&lease));
+		let mut request = request.with_stats(stats).with_limits(lifecycle.cluster.limits(&lease));
 		if let Some(subscriber) = subscriber {
 			request = request.with_publisher(subscriber);
 		}
 		if let Some(publisher) = publisher {
 			request = request.with_subscriber(publisher);
 		}
-		let lease = lease.preparing(request.auth(), request.role())?;
+		// A grant that no longer holds is refused, so the session records why it ended.
+		let lease = match lease.preparing(request.auth(), request.requests(), request.role()) {
+			Ok(lease) => lease,
+			Err(err) => {
+				request.reject(moq_net::SessionError::from(&err)).await;
+				return Err(err.into());
+			}
+		};
+		let serving = lifecycle.shutdown.serve();
 		// Bounded too: a peer that stalls the SETUP reply must not outlive the relay.
-		let (session, driver) = self
+		// Abandoning the reply refuses the session with the timeout code, which its stats count.
+		let (session, driver) = lifecycle
 			.shutdown
 			.until_deadline(request.ok())
 			.await
 			.ok_or_else(|| anyhow::anyhow!("the SETUP reply was still pending at the drain deadline"))??;
 
-		tracing::info!(version = %session.version(), %transport, "negotiated");
-
-		let result = supervise(session, lease, self.shutdown.clone(), registration).await;
-		driver.await??;
+		// Joined rather than awaited in turn, for a driver that runs only when polled. A
+		// spawned driver's panic still surfaces here, so it cannot look like cancellation.
+		let (result, driven) = futures::join!(
+			lifecycle.supervise(serving, session, lease, registration, transport),
+			R::drive(driver),
+		);
+		driven?;
 		result
 	}
+}
 
-	/// Admit this connection. Any failure is returned as a [`StatusError`] so
-	/// [`run`] can close the request with the mapped HTTP status exactly once.
-	///
-	/// Every transport goes through the same lease; the request the server sees
-	/// carries what the transport knows. A LAN mesh dial is the one exception: its
-	/// credential is a secret the relay minted for itself, checked locally.
-	async fn admit(&self) -> Result<(cluster::Admitted, Option<crate::session::Registration>), StatusError> {
-		// Checked first so a `/.cluster` request is never routed through the public
-		// grant, and a relay without LAN discovery refuses it instead of treating the
-		// path as a broadcast root.
-		if cluster::Cluster::is_lan_path(self.request.path()) {
-			return self.admit_lan();
+/// The span every line about one connection logs under, on whichever runtime emits it.
+fn span(id: u64, remote: Option<std::net::SocketAddr>) -> tracing::Span {
+	tracing::info_span!(
+		"conn",
+		id,
+		remote = remote.map(tracing::field::display),
+		session = tracing::field::Empty,
+		implementation = tracing::field::Empty
+	)
+}
+
+impl Lifecycle {
+	pub(crate) fn new(
+		cluster: cluster::Cluster,
+		auth: auth::Auth,
+		id: u64,
+		remote: Option<std::net::SocketAddr>,
+	) -> Self {
+		Self {
+			id,
+			span: span(id, remote),
+			cluster,
+			auth,
+			shutdown: crate::shutdown::Observer::disabled(),
+			sessions: None,
+		}
+	}
+
+	pub(crate) fn with_shutdown(mut self, shutdown: crate::shutdown::Observer) -> Self {
+		self.shutdown = shutdown;
+		self
+	}
+
+	pub(crate) fn with_sessions(mut self, sessions: crate::session::Registry) -> Self {
+		self.sessions = Some(sessions);
+		self
+	}
+
+	/// Run `task` in this connection's span, then log its close; a panic closes it as an error.
+	pub(crate) async fn run(&self, task: impl std::future::Future<Output = anyhow::Result<()>>) {
+		let result = self.isolate(task).await;
+		self.closed(result);
+	}
+
+	/// Run the ring worker's half, then supervise the started session on `runtime`, which logs
+	/// the close there: a worker stopped at shutdown drops its tasks, and the line with them.
+	#[cfg(all(target_os = "linux", feature = "_uring"))]
+	pub(crate) async fn start<S>(
+		&self,
+		runtime: &tokio::runtime::Handle,
+		start: impl std::future::Future<Output = anyhow::Result<S>>,
+	) where
+		S: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
+	{
+		match self.isolate(start).await {
+			Ok(supervise) => {
+				let lifecycle = self.clone();
+				runtime.spawn(async move { lifecycle.run(supervise).await }.with_current_subscriber());
+			}
+			Err(err) => self.closed(Err(err)),
+		}
+	}
+
+	async fn isolate<T>(&self, task: impl std::future::Future<Output = anyhow::Result<T>>) -> anyhow::Result<T> {
+		// Boxing keeps large protocol futures off nested debug-build stack frames.
+		moq_tokio::panic::isolate(Box::pin(task))
+			.instrument(self.span.clone())
+			.await
+			.unwrap_or_else(|| Err(anyhow::anyhow!("connection panicked")))
+	}
+
+	/// Logged here, under the span's own target, so every transport pairs its `conn{id=N}`
+	/// with its close under one log filter.
+	fn closed(&self, result: anyhow::Result<()>) {
+		let _span = self.span.enter();
+		match result {
+			Ok(()) => tracing::info!(id = self.id, "connection closed"),
+			Err(err) => tracing::warn!(id = self.id, %err, "connection closed"),
+		}
+	}
+
+	/// Keep the connection span across a worker-to-shared-runtime handoff and return panics to its owner.
+	/// Dropping the returned future aborts the task, so it never outlives its connection.
+	#[cfg(all(target_os = "linux", feature = "_uring"))]
+	pub(crate) async fn shared<T: Send + 'static>(
+		&self,
+		runtime: &tokio::runtime::Handle,
+		task: impl std::future::Future<Output = T> + Send + 'static,
+	) -> anyhow::Result<T> {
+		use anyhow::Context as _;
+
+		struct AbortOnDrop(tokio::task::AbortHandle);
+		impl Drop for AbortOnDrop {
+			fn drop(&mut self) {
+				self.0.abort();
+			}
 		}
 
-		let request = auth::request_for(&self.auth, &self.request);
-		tracing::Span::current().record("session", &request.id);
-		if self.request.peer_identity().is_some() {
+		let task = runtime.spawn(
+			moq_tokio::panic::isolate(task)
+				.instrument(self.span.clone())
+				.with_current_subscriber(),
+		);
+		let _abort = AbortOnDrop(task.abort_handle());
+		task.await
+			.context("connection task failed")?
+			.ok_or_else(|| anyhow::anyhow!("connection task panicked"))
+	}
+
+	pub(crate) async fn admit(
+		&self,
+		request: moq_auth::Request,
+	) -> Result<(cluster::Admitted, Option<crate::session::Registration>), Rejection> {
+		self.span.record("session", &request.id);
+		// Peer-controlled, so recorded escaped rather than displayed raw.
+		if let Some(implementation) = &request.implementation {
+			self.span
+				.record("implementation", tracing::field::debug(implementation));
+		}
+		let admitted = self.shutdown.admit(self.authorize(request)).await;
+		// Cluster admission records its own refusals; LAN and drain refusals are recorded here.
+		if let Err(err) = &admitted
+			&& let Some(refusal) = err.refusal
+		{
+			self.cluster.refusals.record(refusal);
+		}
+		admitted
+	}
+
+	async fn authorize(
+		&self,
+		request: moq_auth::Request,
+	) -> Result<(cluster::Admitted, Option<crate::session::Registration>), Rejection> {
+		if cluster::Cluster::is_lan_path(&request.path) {
+			let Some(presented) = cluster::Cluster::lan_credential(&request.path) else {
+				return Err(Rejection {
+					code: moq_net::SessionError::Unauthorized,
+					refusal: Some(RefusalKind::Lan),
+					source: anyhow::anyhow!("LAN peer did not present a membership proof"),
+				});
+			};
+			match self.cluster.verify_lan_credential(presented) {
+				Some(true) => {
+					tracing::info!("accepted LAN peer");
+					let lease = self.auth.admit_fixed("/", self.cluster.lan_peer_grant());
+					return Ok((self.cluster.scope(lease, &request)?, None));
+				}
+				Some(false) => {
+					return Err(Rejection {
+						code: moq_net::SessionError::Unauthorized,
+						refusal: Some(RefusalKind::Lan),
+						source: anyhow::anyhow!("LAN peer did not present this listener's membership proof"),
+					});
+				}
+				None => {
+					return Err(Rejection {
+						code: moq_net::SessionError::Unauthorized,
+						refusal: Some(RefusalKind::Lan),
+						source: anyhow::anyhow!("/.cluster request refused: LAN discovery is not enabled"),
+					});
+				}
+			}
+		}
+		if request.tls.is_some() {
 			tracing::debug!("client certificate verified; reported to the auth server");
 		}
-		let admitted = self.cluster.admit_session(&self.auth, request.clone()).await?;
+		let admitted = self
+			.cluster
+			.admit_session(&self.auth, request.clone())
+			.await
+			.map_err(|err| {
+				// Cluster admission owns this refusal; only local/drain refusals remain here.
+				let mut error = Rejection::from(err);
+				error.refusal = None;
+				error
+			})?;
 		let registration = self.sessions.as_ref().map(|sessions| sessions.register(request));
 		Ok((admitted, registration))
 	}
 
-	/// Authorize a `/.cluster/<credential>` dial against the live LAN advertisement.
-	fn admit_lan(&self) -> Result<(cluster::Admitted, Option<crate::session::Registration>), StatusError> {
-		let Some(presented) = cluster::Cluster::lan_credential(self.request.path()) else {
-			return Err(StatusError {
-				status: http::StatusCode::FORBIDDEN,
-				refusal: Refusal::Lan,
-				source: anyhow::anyhow!("LAN peer did not present a membership proof"),
-			});
-		};
-		match self.cluster.verify_lan_credential(presented) {
-			Some(true) => {
-				tracing::info!("accepted LAN peer");
-				let lease = self.auth.admit_fixed("/", self.cluster.lan_peer_grant());
-				let request = auth::request_for(&self.auth, &self.request);
-				Ok((self.cluster.scope(lease, &request)?, None))
-			}
-			Some(false) => Err(StatusError {
-				status: http::StatusCode::FORBIDDEN,
-				refusal: Refusal::Lan,
-				source: anyhow::anyhow!("LAN peer did not present this listener's membership proof"),
-			}),
-			None => Err(StatusError {
-				status: http::StatusCode::FORBIDDEN,
-				refusal: Refusal::Lan,
-				source: anyhow::anyhow!("/.cluster request refused: LAN discovery is not enabled"),
-			}),
-		}
+	pub(crate) async fn supervise(
+		&self,
+		serving: crate::shutdown::Serving,
+		session: moq_net::Session,
+		lease: auth::Lease,
+		registration: Option<crate::session::Registration>,
+		transport: impl std::fmt::Display,
+	) -> anyhow::Result<()> {
+		tracing::info!(version = %session.version(), %transport, "negotiated");
+		supervise(session, lease, serving, registration).await
 	}
 }
 
@@ -211,26 +362,31 @@ impl Connection {
 /// session the same way the relay does. Pass the [`session::Registration`](crate::session::Registration)
 /// from [`Registry::register`](crate::session::Registry::register) so a push on
 /// the internal listener re-checks this lease; `None` for a session that is
-/// not in the table.
+/// not in the table. Take `serving` with [`Observer::serve`](crate::shutdown::Observer::serve)
+/// before the SETUP reply.
 ///
 /// The lease is the decider's live word on the grant: a re-check re-authorizes the
 /// session in place, narrower or wider, and when it stops covering the session
 /// ([`auth::Lease::ended`]) the session closes with the reason. The session's own
-/// close is reported back through the lease as the `end` event. Either way, a relay
-/// shutdown drains the session with a GOAWAY instead of cutting it off, and does not
-/// exit before this returns or the drain deadline.
+/// close is reported back through the lease as the `end` event, and this returns only
+/// once the decider heard it (bounded by the auth client's request timeout). Either
+/// way, a relay shutdown drains the session with a GOAWAY instead of cutting it off,
+/// and its drain waits for this to return, past its deadline if the cleanup needs it.
 ///
 /// The session handle is `Send + Sync` whatever transport carries it, so this
 /// runs on the shared runtime even for sessions a pinned QUIC worker drives.
 pub async fn supervise(
 	session: moq_net::Session,
 	lease: auth::Lease,
-	mut shutdown: crate::shutdown::Observer,
+	serving: crate::shutdown::Serving,
 	registration: Option<crate::session::Registration>,
 ) -> anyhow::Result<()> {
 	let mut lease = lease.authorizing(&session);
-	let _serving = shutdown.serve();
-	loop {
+	let mut shutdown = serving.shutdown.clone();
+	// Held until the `end` is reported, so a drain past its deadline still waits for it.
+	let _serving = serving;
+	let reported = lease.reported();
+	let result = loop {
 		let nudged = async {
 			match &registration {
 				Some(registration) => registration.nudged().await,
@@ -238,32 +394,33 @@ pub async fn supervise(
 			}
 		};
 		tokio::select! {
+			// A close withdraws every in-band credential in the same step, so the lease
+			// can end with it; the close is the cause, not a revocation.
+			biased;
 			err = session.closed() => {
-				let reason = match &err {
-					moq_net::Error::Cancel => "closed".to_string(),
-					other => other.to_string(),
-				};
-				lease.close(reason, session_bytes(&session));
-				return Err(err.into());
+				lease.close_session(&err, session_bytes(&session));
+				break Err(err.into());
 			}
 			why = lease.ended() => {
 				tracing::info!(%why, "lease ended, closing session");
-				session.abort(moq_net::Error::Unauthorized);
+				session.abort(crate::auth::error(&why));
 				lease.close(why, session_bytes(&session));
-				return Ok(());
+				break Ok(());
 			}
 			_ = shutdown.started() => {
 				tracing::info!("relay shutting down; draining session");
 				// Empty URI: "reconnect to me" (the relay is restarting). The session's
 				// machine runs on its own, so the GOAWAY still reaches the wire while
-				// we wait here.
+				// we wait here, and the drain deadline closes it if the peer stays.
 				shutdown.drain_session(&session).await;
 				lease.close(moq_auth::lease::Reason::Shutdown, session_bytes(&session));
-				return Ok(());
+				break Ok(());
 			}
 			() = nudged => lease.revalidate(),
 		}
-	}
+	};
+	reported.await;
+	result
 }
 
 /// The transport's own totals, read once at the end so the `end` event carries
@@ -273,5 +430,53 @@ pub(crate) fn session_bytes(session: &moq_net::Session) -> moq_auth::Bytes {
 	moq_auth::Bytes {
 		sent: stats.bytes_sent.unwrap_or_default(),
 		received: stats.bytes_received.unwrap_or_default(),
+	}
+}
+
+#[cfg(all(test, target_os = "linux", feature = "_uring"))]
+#[path = "../tests/integration/logs.rs"]
+mod logs;
+
+#[cfg(all(test, target_os = "linux", feature = "_uring"))]
+mod tests {
+	use super::*;
+
+	/// A panic in the ring's supervision, after the worker handed it to the shared runtime, still
+	/// logs the connection's close.
+	#[tokio::test(start_paused = true)]
+	async fn shared_supervision_panic_logs_the_connection_close() {
+		use tracing_subscriber::layer::SubscriberExt;
+		let logs = super::logs::Logs::default();
+		let subscriber = tracing_subscriber::fmt()
+			.with_ansi(false)
+			.with_writer(logs.clone())
+			.finish()
+			.with(
+				tracing_subscriber::filter::Targets::new().with_target("moq_relay::connection", tracing::Level::INFO),
+			);
+		let _logging = tracing::subscriber::set_default(subscriber);
+		let cluster = cluster::Cluster::new(cluster::Options::default()).unwrap();
+		let (auth, _admissions) = auth::Auth::embedded("test");
+		let lifecycle = Lifecycle::new(cluster, auth, 42, None);
+		lifecycle
+			.start(&tokio::runtime::Handle::current(), async {
+				Ok::<_, anyhow::Error>(async {
+					panic!("injected supervision panic");
+					#[expect(
+						unreachable_code,
+						reason = "the panic is the point; the `Ok` names the future's output type"
+					)]
+					Ok::<_, anyhow::Error>(())
+				})
+			})
+			.await;
+		logs.wait_for("connection closed").await;
+		let text = logs.text();
+		assert!(text.contains("conn{id=42}"), "{text}");
+		assert!(
+			text.contains("connection closed id=42 err=connection panicked"),
+			"{text}"
+		);
+		assert_eq!(text.matches("connection closed").count(), 1, "{text}");
 	}
 }

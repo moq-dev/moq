@@ -34,8 +34,9 @@
 //! from an implementation that also ran on a Pi Zero 2 W and a Pi 3; those two
 //! have not been re-run with this port.
 
+use moq_clock::Instant;
 use std::collections::VecDeque;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use moq_net::Timestamp;
@@ -901,7 +902,7 @@ mod tests {
 	use super::*;
 
 	fn config(width: u32, height: u32, framerate: u32) -> Config {
-		Config::new(width, height, crate::Rate::new(framerate, 1).unwrap())
+		Config::new(width, height, crate::FrameRate::new(framerate, 1).unwrap())
 	}
 
 	fn micros(micros: u64) -> Timestamp {

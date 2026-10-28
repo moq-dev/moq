@@ -1,11 +1,10 @@
-// The moq C++ package: the generated moq-ffi bindings under short names, plus the
-// executor, shutdown, and coroutine glue they need. Every type and method is generated;
-// this header only renames and wires them.
+// The moq C++ package: the generated moq-ffi bindings, plus the executor, shutdown, and
+// coroutine glue they need. Every type and method is generated; this header only wires them.
 #pragma once
 
 #include <moq/ffi/moq.hpp>
+#include <moq/version.hpp>
 
-#include <chrono>
 #include <functional>
 #include <string>
 #include <utility>
@@ -22,138 +21,13 @@
 // Not a uniffi export, so the generated bindings do not declare it; see moq::shutdown.
 extern "C" void moq_ffi_shutdown(void);
 
-// uniffi::expected is std::expected or tl::expected depending on the standard, and the
-// generated sources (src/moq.cpp) and every includer must agree. The bindings define the
-// symbol for the type they saw and every includer references the one it sees, so a mismatch
-// fails to link instead of corrupting memory.
-#if defined(__cpp_lib_expected) && __cpp_lib_expected >= 202211L
-#define MOQ_ABI moq_abi_std_expected
-#define MOQ_ABI_NAME "moq_abi_std_expected"
-#else
-#define MOQ_ABI moq_abi_tl_expected
-#define MOQ_ABI_NAME "moq_abi_tl_expected"
-#endif
-extern "C" const int MOQ_ABI;
-#if defined(MOQ_IMPLEMENTATION)
-extern "C" const int MOQ_ABI = 1;
-#elif defined(_MSC_VER)
-#pragma comment(linker, "/include:" MOQ_ABI_NAME)
-#else
-namespace moq::detail {
-[[maybe_unused]] __attribute__((used)) static const int *const abi = &MOQ_ABI;
-} // namespace moq::detail
-#endif
-
 namespace moq {
 
-// Every generated `moq::MoqFoo` is also `moq::Foo`. `just cpp check` fails when one is missing.
-using AnnounceConsumer = MoqAnnounceConsumer;
-using AnnouncedBroadcast = MoqAnnouncedBroadcast;
-using AudioCodec = MoqAudioCodec;
-using AudioConsumer = MoqAudioConsumer;
-using AudioProducer = MoqAudioProducer;
-using Bandwidth = MoqBandwidth;
-using BroadcastConsumer = MoqBroadcastConsumer;
-using BroadcastDynamic = MoqBroadcastDynamic;
-using BroadcastProducer = MoqBroadcastProducer;
-using BroadcastRequest = MoqBroadcastRequest;
-using Client = MoqClient;
-using FlateSnapshotProducer = MoqFlateSnapshotProducer;
-using FlateStreamProducer = MoqFlateStreamProducer;
-using GroupConsumer = MoqGroupConsumer;
-using GroupDemand = MoqGroupDemand;
-using GroupProducer = MoqGroupProducer;
-using GroupRequest = MoqGroupRequest;
-using JsonSnapshotConsumer = MoqJsonSnapshotConsumer;
-using JsonSnapshotProducer = MoqJsonSnapshotProducer;
-using JsonStreamConsumer = MoqJsonStreamConsumer;
-using JsonStreamProducer = MoqJsonStreamProducer;
-using MediaCatalogConsumer = MoqMediaCatalogConsumer;
-using MediaCatalogProducer = MoqMediaCatalogProducer;
-/// Shares one source timestamp offset without keeping its broadcast open.
-using MediaTimebase = MoqMediaTimebase;
-using MediaTrackConsumer = MoqMediaTrackConsumer;
-using MediaGroupConsumer = MoqMediaGroupConsumer;
-using MediaContainerProducer = MoqMediaContainerProducer;
-using MediaContainerStreamProducer = MoqMediaContainerStreamProducer;
-using MediaTrackProducer = MoqMediaTrackProducer;
-using MediaTrackStreamProducer = MoqMediaTrackStreamProducer;
-using OriginConsumer = MoqOriginConsumer;
-using OriginDynamic = MoqOriginDynamic;
-using OriginProducer = MoqOriginProducer;
-using Request = MoqRequest;
-using Reservation = MoqReservation;
-using Server = MoqServer;
-using Session = MoqSession;
-using TrackConsumer = MoqTrackConsumer;
-using TrackDemand = MoqTrackDemand;
-using TrackDynamic = MoqTrackDynamic;
-using TrackProducer = MoqTrackProducer;
-using TrackRequest = MoqTrackRequest;
-using VideoConsumer = MoqVideoConsumer;
-using VideoProducer = MoqVideoProducer;
-using Announce = MoqAnnounce;
-using AnnounceConfig = MoqAnnounceConfig;
-using Audio = MoqAudio;
-using AudioDecoderOutput = MoqAudioDecoderOutput;
-using AudioEncoderInput = MoqAudioEncoderInput;
-using AudioEncoderOutput = MoqAudioEncoderOutput;
-using AudioFrame = MoqAudioFrame;
-using AudioInit = MoqAudioInit;
-using Backoff = MoqBackoff;
-using Catalog = MoqCatalog;
-using ClientConfig = MoqClientConfig;
-using ClientTls = MoqClientTls;
-using ConnectionStats = MoqConnectionStats;
-using ContainerInit = MoqContainerInit;
-/// A byte-stream container format and an optional shared source timebase.
-using ContainerStreamInit = MoqContainerStreamInit;
-using Datagram = MoqDatagram;
-using Dimensions = MoqDimensions;
-using FetchGroupOptions = MoqFetchGroupOptions;
-using FlateConfig = MoqFlateConfig;
-using Frame = MoqFrame;
-using JsonSnapshotConfig = MoqJsonSnapshotConfig;
-using JsonStreamConfig = MoqJsonStreamConfig;
-using MediaTrackConfig = MoqMediaTrackConfig;
-using MediaGroupConfig = MoqMediaGroupConfig;
-using MediaFrame = MoqMediaFrame;
-using OriginConfig = MoqOriginConfig;
-using ProtocolError = MoqProtocolError;
-using QuicConfig = MoqQuicConfig;
-using Route = MoqRoute;
-using ServerConfig = MoqServerConfig;
-using ServerTls = MoqServerTls;
-using Subscription = MoqSubscription;
-using TrackInfo = MoqTrackInfo;
-using Video = MoqVideo;
-using VideoDecodedFrame = MoqVideoDecodedFrame;
-using VideoDecoderOutput = MoqVideoDecoderOutput;
-using VideoEncoderInput = MoqVideoEncoderInput;
-using VideoEncoderOutput = MoqVideoEncoderOutput;
-using VideoFrame = MoqVideoFrame;
-using VideoHint = MoqVideoHint;
-using VideoInit = MoqVideoInit;
-using VideoProperties = MoqVideoProperties;
-using WebSocketConfig = MoqWebSocketConfig;
-using AnnounceEvent = MoqAnnounceEvent;
-using AudioFormat = MoqAudioFormat;
-using AudioSampleFormat = MoqAudioSampleFormat;
-using ConnectionStatus = MoqConnectionStatus;
-using Container = MoqContainer;
-using ContainerFormat = MoqContainerFormat;
-using Error = MoqError;
-using ErrorScope = MoqErrorScope;
-using MediaTarget = MoqMediaTarget;
-using ProtocolKind = MoqProtocolKind;
-using Transport = MoqTransport;
-using VideoCodec = MoqVideoCodec;
-using VideoEncoderKind = MoqVideoEncoderKind;
-using VideoFormat = MoqVideoFormat;
-using VideoPixelFormat = MoqVideoPixelFormat;
-using VideoSurface = MoqVideoSurface;
+// This package's product token. Every type is generated, so nothing sets it for you: put it in
+// ClientConfig::implementation and ServerConfig::implementation, after your own tokens.
+inline constexpr const char *IMPLEMENTATION = "moq-cpp/" MOQ_CPP_VERSION;
 
-// The value of a fallible call, or the Error that stopped it. std::expected on C++23.
+// The value of a fallible call, or the Error that stopped it. tl::expected at every standard.
 template <typename T>
 using expected = ::uniffi::expected<T, Error>;
 
@@ -190,29 +64,6 @@ inline void set_executor(Executor executor, std::function<void()> shutdown) noex
 inline void shutdown() noexcept {
     moq_ffi_shutdown();
     ::uniffi::shutdown_async_dispatcher();
-}
-
-// Sets the log level: "error", "warn", "info", "debug", "trace", or "". Errors if called twice.
-inline expected<void> log_level(const std::string &level) {
-    return moq_log_level(level);
-}
-
-// Mints a fresh publisher epoch, ordered newest last. Announce one per run in Route::epoch,
-// so viewers see a restart as a new broadcast instead of a stalled one.
-inline std::string mint_epoch() {
-    return moq_mint_epoch();
-}
-
-// The wall-clock time an epoch encodes, to the millisecond. Errors unless it is a UUIDv7.
-// Millisecond ticks hold every 48-bit UUIDv7 time, where system_clock's nanoseconds overflow in 2262.
-inline expected<std::chrono::time_point<std::chrono::system_clock, std::chrono::milliseconds>>
-epoch_time(const std::string &epoch) {
-    auto ms = moq_epoch_time_ms(epoch);
-    if (!ms) {
-        return unexpected(std::move(ms).error());
-    }
-    return std::chrono::time_point<std::chrono::system_clock, std::chrono::milliseconds>(
-        std::chrono::milliseconds(static_cast<std::chrono::milliseconds::rep>(*ms)));
 }
 
 #ifdef MOQ_COROUTINES

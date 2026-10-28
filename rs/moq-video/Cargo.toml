@@ -23,11 +23,12 @@ categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
 # from the default compile (`just check` lints default features only, so the
 # opt-in ones are compiled by nightly's `just rs features` and platform.yml's
 # `just rs macos`).
-# OpenH264 remains the default software fallback, but is optional so a hardware-
-# only consumer does not compile its vendored C++. Workspace consumers opt out
-# at the root manifest (`default-features = false`) and pick per crate, so the
-# relay and the language bindings never build device or rendering stacks.
-default = ["mediacodec", "nvidia", "openh264"]
+# Hardware codecs come first, so OpenH264 (vendored C++, the software fallback)
+# is opt-in: development and CI lint without it, and release builds turn it on
+# explicitly. Workspace consumers opt out at the root manifest
+# (`default-features = false`) and pick per crate, so the relay and the language
+# bindings never build device or rendering stacks.
+default = ["mediacodec", "nvidia"]
 # Native camera and screen capture. Costs the build nothing on any platform:
 # Linux goes through moq-v4l (bindings checked in), macOS and Windows use OS
 # frameworks (Windows display/window capture requires Windows 10 2004+ WGC).
@@ -46,8 +47,8 @@ mediacodec = ["dep:ndk"]
 # this on still links GPU-less and starts driverless, falling back to the next
 # encoder or decoder.
 nvidia = ["dep:ash", "dep:cudarc", "dep:moq-nvenc", "dep:libloading"]
-# Vendored, statically linked software H.264 encode/decode. Enabled by default,
-# but separable from native codecs for hardware-only and minimal builds.
+# Vendored, statically linked software H.264 encode/decode. Off by default:
+# release builds and CI's test jobs enable it; hardware-only builds leave it off.
 openh264 = ["dep:openh264", "dep:openh264-sys2"]
 # Software VP8 and VP9 decode through libvpx, on every platform. Off by default
 # because libvpx comes from the build host: libvpx-native-sys finds it through
@@ -82,12 +83,15 @@ v4l2 = ["dep:moq-v4l", "dep:libc"]
 # backend that can produce or consume one. It pulls no graphics API by itself.
 dmabuf = ["dep:libc", "dep:linux-raw-sys"]
 # GPU rendering of decoded frames (the `render` module): a wgpu pipeline that
-# converts a frame to RGBA and hands back a texture the caller presents. wgpu
-# loads Vulkan / Metal / D3D at runtime, so this costs compile time and nothing
-# else; a relay or headless publisher drops it. `dmabuf` adds the Linux surface
-# vocabulary; Vulkan itself still comes from wgpu.
+# converts a frame to RGBA and hands back a texture the caller presents, and the
+# export that hands a drawn texture to an encoder. wgpu loads Vulkan / Metal / D3D
+# at runtime, so this costs compile time and nothing else; a relay or headless
+# publisher drops it. `dmabuf` adds the Linux surface vocabulary; Vulkan itself
+# still comes from wgpu, and `ash` names the handles the export allocates on
+# wgpu's own Vulkan device.
 render = [
     "dmabuf",
+    "dep:ash",
     "dep:bytemuck",
     "dep:wgpu",
     "dep:objc2-metal",
@@ -113,6 +117,9 @@ bytes = { workspace = true }
 # CPU I420 resize (SIMD per-plane convolution), the software fallback for
 # Frame::resize; CUDA and macOS pixel-buffer frames resize on the GPU instead.
 fast_image_resize = "6"
+# Reading the color space an H.264 / H.265 SPS signals, to label decoded
+# pictures whose backend does not. The same versions moq-mux and the tests use.
+h264-reader = "0.9.0"
 # Catalog types (VideoConfig / VideoCodec) the decode consumer reads.
 hang = { workspace = true }
 # The capture publish's control handle.
@@ -120,10 +127,11 @@ kio = { workspace = true, optional = true }
 # libvpx bindings for the `vpx` feature. The library itself comes from the build
 # host; see the feature above.
 libvpx-native-sys = { version = "5.0.17", optional = true }
+moq-clock = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 # Vendored, statically linked software H.264 fallback (no system dependency).
-# Hardware encoders are preferred, but an OpenH264-enabled build falls back when
+# Hardware encoders are preferred, but an `openh264` build falls back when
 # none is usable (a GPU-less box, or a resolution a hardware encoder rejects).
 openh264 = { version = "0.9.8", optional = true }
 # For the raw `ENCODER_OPTION_BITRATE` set_option: openh264 takes a bitrate only
@@ -132,6 +140,7 @@ openh264 = { version = "0.9.8", optional = true }
 # features it needs; cargo unifies this on the same version it depends on, so the
 # raw API types stay identical.
 openh264-sys2 = { version = "0.9.8", default-features = false, optional = true }
+scuffle-h265 = "0.2.2"
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 tracing = { workspace = true }
@@ -233,7 +242,8 @@ objc2-screen-capture-kit = { workspace = true }
 # that feed a hardware encoder MFT zero-copy; without a GPU it falls back to CPU
 # NV12 deinterleaved to I420 for openh264. Links only system import libs, no
 # vendor SDK. The Direct3D11 / Dxgi features cover the shared D3D11 device and
-# the `IMFDXGIBuffer` surfaces wrapping each captured texture.
+# the `IMFDXGIBuffer` surfaces wrapping each captured texture; Direct3D12 and
+# Security cover the `render` export's textures shared from wgpu's device.
 windows = { version = "0.62", features = [
     "Foundation",
     "Foundation_Metadata",
@@ -243,9 +253,11 @@ windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_System_Com",
     "Win32_Media_MediaFoundation",
+    "Win32_Security",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D10",
     "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Direct3D12",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
@@ -268,7 +280,6 @@ cfg_aliases = "0.2.2"
 ash = { workspace = true }
 # `poll!`, to cancel an `encode::Sink` request exactly where a `select!` would.
 futures = { workspace = true }
-h264-reader = "0.9.0"
 # `clock_gettime`, so the GPU workload test can report CPU time next to wall
 # latency. std has no CPU clock and the dependency is optional at build time.
 libc = { workspace = true }
@@ -277,3 +288,6 @@ pollster = { workspace = true }
 # `start_paused`, so the capture driver tests run on mocked time.
 tokio = { workspace = true, features = ["test-util"] }
 tracing-test = { workspace = true }
+
+[lints]
+workspace = true

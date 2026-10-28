@@ -148,6 +148,26 @@ pub(super) fn negotiate(device: &cpal::Device) -> Result<cpal::SupportedStreamCo
 	})
 }
 
+/// The buffer size to open `device` with.
+///
+/// Every host's default is a period-sized buffer except PulseAudio's, a
+/// two-second buffer the server fills in bursts: the device pulls four seconds
+/// ahead, and a new sink's writes are dropped until the next burst reads it.
+/// Ask PulseAudio for 20 ms periods, its own default request size, instead.
+#[cfg_attr(
+	not(feature = "pulseaudio"),
+	expect(unused_variables, reason = "only the PulseAudio host needs a size")
+)]
+pub(super) fn buffer_size(device: &cpal::Device, supported: &cpal::SupportedStreamConfig) -> cpal::BufferSize {
+	#[cfg(feature = "pulseaudio")]
+	if let (Ok(id), cpal::SupportedBufferSize::Range { min, max }) = (device.id(), supported.buffer_size())
+		&& id.host() == cpal::HostId::PulseAudio
+	{
+		return cpal::BufferSize::Fixed((supported.sample_rate() / 50).clamp(*min, *max));
+	}
+	cpal::BufferSize::Default
+}
+
 /// Pick the best of the stream configurations a device reports.
 ///
 /// Split out from [`negotiate`] so it can be tested without a device: the

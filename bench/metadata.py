@@ -27,12 +27,16 @@ metadata = {"untracked": untracked, "revision": command("git", "rev-parse", "HEA
  "rustc": command("rustc", "-vV"), "cargo": command("cargo", "-V"),
  "os": platform.platform(), "machine": platform.machine(), "processor": platform.processor(),
  "affinity": sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None,
- "environment": {key: value for key, value in os.environ.items() if key.startswith(("MOQ_BENCH_", "CARGO_PROFILE_")) or key in ("RUSTFLAGS", "CARGO_BUILD_TARGET", "CARGO_BUILD_RUSTFLAGS", "TOKIO_WORKER_THREADS", "LD_PRELOAD", "MALLOC_CONF", "GLIBC_TUNABLES", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER")},
- "profile": "profiling" if mode == "--lock" else "release", "features": "default + moq-relay/io-uring,moq-bench/uring" if mode == "--runtime" else "default",
+ "environment": {key: value for key, value in os.environ.items() if key.startswith(("BENCH_", "MOQ_BENCH_", "CARGO_PROFILE_")) or key in ("RUSTFLAGS", "CARGO_BUILD_TARGET", "CARGO_BUILD_RUSTFLAGS", "TOKIO_WORKER_THREADS", "LD_PRELOAD", "MALLOC_CONF", "GLIBC_TUNABLES", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "SESSION_CPU")},
+ "profile": "profiling" if mode == "--profile" else "release",
+ "features": {"--runtime": "default + moq-relay/io-uring,moq-bench/uring", "--profile": "default + moq-relay/io-uring,moq-bench/uring; heap adds moq-relay/jemalloc",
+              "--criterion": "see criterion-command.json"}.get(mode, "default"),
  "mode": mode, "runtime_workers": sys.argv[4] if len(sys.argv) > 4 else None,
  "rounds": int(sys.argv[5]) if len(sys.argv) > 5 else None,
- "allocator": "system by build; preload and allocator tunables are recorded in environment",
- "workload": {"startup": "2s", "duration": "10s", "report": "500ms"}}
+ "allocator": "system by build; preload and allocator tunables are recorded in environment"
+ + ("; heap runs jemalloc, profiled per the MALLOC_CONF in harness/relay.sh" if mode == "--profile" else ""),
+ "profilers": {tool: command(tool, "--version").splitlines()[0] for tool in ("perf", "jeprof") if shutil.which(tool)} if mode == "--profile" else None,
+ "workload": None if mode == "--criterion" else {"startup": "2s", "duration": "10s", "report": "500ms"}}
 (out / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
 subprocess.run(["cargo", "tree", "--locked", "-p", "moq-relay", "-e", "features"], stdout=(out / "features.txt").open("w"), check=True)
 if Path("/proc/cpuinfo").exists():

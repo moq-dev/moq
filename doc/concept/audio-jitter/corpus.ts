@@ -204,6 +204,17 @@ const traces: Omit<Case, "target">[] = [
 		})(),
 	},
 	{
+		name: "straggler",
+		about: "Even audio with a single 300 ms stall 8 s in, once the prior is spent. One interval of evidence is not enough to move the target, so the stall costs that one refill instead of raising the target and then dropping it, which skips buffered audio.",
+		frame: FRAME,
+		...(() => {
+			const trace = paced(1500, FRAME, 50);
+			const arrival = [...trace.arrival];
+			for (let i = 400; i < 415; i++) arrival[i] = arrival[414];
+			return { arrival, media: trace.media };
+		})(),
+	},
+	{
 		name: "fixed",
 		about: "An explicit 250 ms target over the bursty trace. Adaptation is off: the target is what was asked for, whatever the arrivals say.",
 		frame: FRAME,

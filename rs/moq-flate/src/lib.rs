@@ -2,8 +2,8 @@
 //!
 //! Two track modes carry the payloads:
 //!
-//! - [`snapshot`]: **lossy**. One value updated over time; a consumer only gets the most recent
-//!   one. Older values are superseded and dropped.
+//! - [`snapshot`]: **lossy**. One value updated over time; `next` yields states inside the drift
+//!   budget, while `latest` skips to the newest state. Superseded groups may be lost.
 //! - [`stream`]: **lossless**. An ordered append-log of self-contained payloads, delivered in order
 //!   with nothing superseded. Bounded by the group budget: see [`stream`] for what happens once
 //!   it is spent.
@@ -31,7 +31,9 @@
 //! This is plain raw DEFLATE with a `Z_SYNC_FLUSH` after each frame, so any peer using the same
 //! primitive (zlib's sync flush, the browser's `deflate-raw`) interoperates on the wire. There is no
 //! length prefix: the caller is expected to frame each slice (moq-net already does). A small slice
-//! can still inflate to far more than its own size, so [`Decoder::frame`] bounds each frame's output.
+//! can still inflate to far more than its own size, so a [`Decoder`] holds its whole window to the
+//! group budget ([`MAX_CACHE_BYTES`](moq_net::group::MAX_CACHE_BYTES)): a compressed group never
+//! costs a reader more than a plain one, and the encoders refuse or roll before a group would.
 //!
 //! A sync flush always ends in the 4-byte empty-block marker `00 00 ff ff`. That marker is fixed, so
 //! [`Encoder::frame`] drops it from each slice and [`Decoder::frame`] re-appends it before inflating,
@@ -51,10 +53,7 @@
 //! [RFC 1951]: https://www.rfc-editor.org/rfc/rfc1951.html
 //! [RFC 7692]: https://www.rfc-editor.org/rfc/rfc7692.html#section-7.2.1
 
-// The browser transport is `!Send`, so on wasm the shared state behind the track modes' `Arc`s is
-// too and clippy suggests `Rc`. The same code is genuinely cross-thread on native, so `Arc` stays
-// and the lint is unactionable here.
-#![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
+#![warn(missing_docs)]
 
 pub mod snapshot;
 pub mod stream;
@@ -65,9 +64,6 @@ use flate2::{Compress, Decompress, FlushCompress, FlushDecompress, Status};
 /// The default DEFLATE level ([`Encoder::new`]): zlib's own default, a good size/speed balance for
 /// the small, repetitive payloads this targets.
 pub const DEFAULT_LEVEL: u32 = 6;
-
-/// The default per-frame decompressed-size cap ([`Decoder::new`]): 64 MiB.
-pub const DEFAULT_MAX_FRAME_SIZE: u64 = 64 * 1024 * 1024;
 
 /// The trailing bytes of a DEFLATE sync flush, stripped on the wire and re-appended to decode.
 const SYNC_FLUSH_TAIL: [u8; 4] = [0x00, 0x00, 0xff, 0xff];
@@ -100,8 +96,8 @@ pub enum Error {
 	#[error("decompression failed")]
 	Decompress,
 
-	/// A frame's decompressed size exceeded the configured limit (zip-bomb guard).
-	#[error("decompressed frame exceeded {0} bytes")]
+	/// A group inflated past the group budget, which no conforming encoder produces (zip-bomb guard).
+	#[error("decompressed group exceeded {0} bytes")]
 	TooLarge(u64),
 
 	/// An error from the underlying track.
@@ -197,34 +193,31 @@ impl Default for Encoder {
 
 /// Decodes a stream's frame slices back into the original payloads. Hold one per stream; feed slices
 /// in frame order (each frame builds on the earlier ones).
+///
+/// A peer could send tiny slices that inflate hugely, so the window's total output is held to the
+/// group budget, [`MAX_CACHE_BYTES`](moq_net::group::MAX_CACHE_BYTES): the most a plain group can
+/// carry. A compressed group then costs a reader no more than a plain one, however small its slices.
 pub struct Decoder {
 	inner: Box<Decompress>,
-	max_frame_size: u64,
+	/// The most bytes the whole window may inflate to. A field so a test can shrink it.
+	budget: u64,
 }
 
 impl Decoder {
-	/// Start a fresh decoder with a cold window and the [`DEFAULT_MAX_FRAME_SIZE`] cap.
+	/// Start a fresh decoder with a cold window.
 	pub fn new() -> Self {
-		Self::with_max_frame_size(DEFAULT_MAX_FRAME_SIZE)
-	}
-
-	/// Start a fresh decoder with a cold window and a custom per-frame decompressed-size cap.
-	///
-	/// A malicious or buggy peer could send a tiny slice that inflates hugely, so [`frame`](Self::frame)
-	/// stops and returns [`Error::TooLarge`] once a single frame's output would exceed `max_frame_size`.
-	pub fn with_max_frame_size(max_frame_size: u64) -> Self {
 		// `false`: raw DEFLATE, matching the encoder.
 		Self {
 			inner: Box::new(Decompress::new(false)),
-			max_frame_size,
+			budget: moq_net::group::MAX_CACHE_BYTES,
 		}
 	}
 
 	/// Decompress the next frame's `slice` back into its payload.
 	///
-	/// An empty slice yields an empty payload. Returns [`Error::TooLarge`] if the frame inflates past
-	/// the configured cap (checked as output is produced, not from any declared size), and
-	/// [`Error::Decompress`] on malformed input.
+	/// An empty slice yields an empty payload. Returns [`Error::TooLarge`] once the window's output,
+	/// counted across every frame so far, passes the group budget (checked as output is produced, not
+	/// from any declared size), and [`Error::Decompress`] on malformed input.
 	pub fn frame(&mut self, slice: &[u8]) -> Result<Bytes> {
 		let mut out = Vec::new();
 		self.frame_into(slice, &mut out)?;
@@ -254,9 +247,9 @@ impl Decoder {
 					.map_err(|_| Error::Decompress)?;
 				let consumed = (self.inner.total_in() - before_in) as usize;
 				let produced = (self.inner.total_out() - before_out) as usize;
-				// Bound the inflated output as it is produced; a tiny slice can expand enormously.
-				if out.len() as u64 + produced as u64 > self.max_frame_size {
-					return Err(Error::TooLarge(self.max_frame_size));
+				// Bound the window's inflated output as it is produced; a tiny slice can expand enormously.
+				if self.inner.total_out() > self.budget {
+					return Err(Error::TooLarge(self.budget));
 				}
 				out.extend_from_slice(&tmp[..produced]);
 				input = &input[consumed..];
@@ -424,13 +417,16 @@ mod test {
 	}
 
 	#[test]
-	fn enforces_max_frame_size() {
-		// A tiny slice of a highly compressible payload inflates past a small cap.
-		let payload = vec![0u8; 1024];
-		let slice = Encoder::new().frame(&payload);
+	fn the_budget_spans_the_whole_window() {
+		// Each frame fits on its own; together they inflate past the budget.
+		let mut enc = Encoder::new();
+		let first = enc.frame(&[0u8; 1024]);
+		let second = enc.frame(&[0u8; 1024]);
 
-		let mut dec = Decoder::with_max_frame_size(512);
-		assert!(matches!(dec.frame(&slice), Err(Error::TooLarge(512))));
+		let mut dec = Decoder::new();
+		dec.budget = 1536;
+		dec.frame(&first).unwrap();
+		assert!(matches!(dec.frame(&second), Err(Error::TooLarge(1536))));
 	}
 
 	#[test]

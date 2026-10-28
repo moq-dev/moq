@@ -17,10 +17,13 @@ anyhow = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }
 crc = "3"
+ebml-iterable = { workspace = true }
 h264-parser = { version = "0.4.2" }
+h264-reader = "0.9.0"
 hang = { workspace = true }
 kio = { workspace = true }
 memchr = "2"
+moq-clock = { workspace = true }
 moq-flate = { workspace = true }
 moq-json = { workspace = true }
 moq-loc = { workspace = true }
@@ -29,6 +32,8 @@ moq-net = { workspace = true }
 mp4-atom = { version = "0.16.2", features = ["tokio", "bytes", "serde"] }
 mpeg2ts = "0.6.0"
 num_enum = { workspace = true }
+roxmltree = "0.21.1"
+rustc-hash = { workspace = true }
 scuffle-av1 = { version = "0.1.4" }
 scuffle-h265 = { version = "0.2.2" }
 serde = { workspace = true }
@@ -38,14 +43,19 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros"] }
 tracing = { workspace = true }
 url = { workspace = true }
-web-async = { workspace = true }
 webm-iterable = "0.7"
 
 [dev-dependencies]
 criterion = { workspace = true }
 futures = { workspace = true }
+moq-clock = { workspace = true, features = ["sim"] }
+proptest = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tracing-test = { workspace = true, features = ["no-env-filter"] }
+
+# The ts_schedule bench pins glibc's heap.
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dev-dependencies]
+libc = { workspace = true }
 
 [[bench]]
 name = "catalog"
@@ -53,6 +63,10 @@ harness = false
 
 [[bench]]
 name = "ts_schedule"
+harness = false
+
+[[bench]]
+name = "ts_programs"
 harness = false
 
 [[bench]]
@@ -64,5 +78,20 @@ name = "jitter"
 harness = false
 
 [[bench]]
+name = "decode_clock"
+harness = false
+
+[[bench]]
 name = "containers"
 harness = false
+
+[[bench]]
+name = "ts_video"
+harness = false
+
+[[bench]]
+name = "parameter_sets"
+harness = false
+
+[lints]
+workspace = true

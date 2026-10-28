@@ -72,6 +72,15 @@ impl Producer {
 	pub fn finish(&mut self) -> Result<()> {
 		self.inner.lock().unwrap().finish()
 	}
+
+	/// Abort the track with the given error, which consumers see in place of a clean end.
+	///
+	/// Consumes the handle, since nothing can be appended afterwards. Clones sharing the track see
+	/// it closed: their next [`append`](Self::append) fails.
+	pub fn abort(self, err: moq_net::Error) -> Result<()> {
+		self.inner.lock().unwrap().abort(err);
+		Ok(())
+	}
 }
 
 /// Shared publishing state behind [`Producer`]'s `Arc<Mutex>`.
@@ -84,15 +93,12 @@ struct Inner {
 	/// The DEFLATE encoder, one window for the whole group, `Some` while compressing.
 	flate: Option<crate::Encoder>,
 
-	/// Frames and payload bytes written to the group, checked against moq-net's group budget before
-	/// each payload is encoded.
+	/// Frames and bytes charged to the group, checked against moq-net's group budget before each
+	/// payload is encoded. A compressed payload is charged its inflated size (or its slice, if
+	/// larger), the budget every consumer's [`Decoder`](crate::Decoder) holds its window to.
 	frames: usize,
 	bytes: u64,
 }
-
-// The budget check also stands in for the decoder's cap: a payload that fits the group is one every
-// consumer can inflate.
-const _: () = assert!(moq_net::group::MAX_CACHE_BYTES <= crate::DEFAULT_MAX_FRAME_SIZE);
 
 impl Inner {
 	fn append(&mut self, payload: Timed<Bytes>) -> Result<usize> {
@@ -101,8 +107,8 @@ impl Inner {
 
 		// A closed track refuses every append, so say so before the budget: `GroupTooLarge` promises
 		// the log is still writable.
-		if let Poll::Ready(err) = self.track.poll_closed(&kio::Waiter::noop()) {
-			return Err(err.into());
+		if let Poll::Ready(outcome) = self.track.poll_closed(&kio::Waiter::noop()) {
+			return Err(outcome.err().unwrap_or(moq_net::Error::Closed).into());
 		}
 
 		// A timestamp that doesn't match the track is refused before anything changes: found by
@@ -113,13 +119,13 @@ impl Inner {
 
 		// Check before compressing: encoding advances the window, so a payload refused afterwards
 		// would leave the encoder ahead of every reader. The worst case is checked rather than the
-		// actual size for the same reason. Also checked before the group is opened, so a refused
-		// first payload publishes nothing.
-		let size = payload.len() as u64;
+		// actual size for the same reason, and it covers the inflated size too. Also checked before
+		// the group is opened, so a refused first payload publishes nothing.
+		let plain = payload.len() as u64;
 		let bound = if self.flate.is_some() {
-			crate::Encoder::bound(size)
+			crate::Encoder::bound(plain)
 		} else {
-			size
+			plain
 		};
 		if self.frames >= moq_net::group::MAX_GROUP_FRAMES
 			|| self.bytes.saturating_add(bound) > moq_net::group::MAX_CACHE_BYTES
@@ -142,7 +148,7 @@ impl Inner {
 		let group = self.group.as_mut().expect("a group is open");
 		let Err(err) = group.write_frame(timestamp, payload) else {
 			self.frames += 1;
-			self.bytes += size as u64;
+			self.bytes += plain.max(size as u64);
 			return Ok(size);
 		};
 
@@ -181,7 +187,7 @@ impl Inner {
 		// second group, and (with compression) write into it from a window the consumer never
 		// received. That is exactly the split log ending the track exists to prevent.
 		let group = match self.group.take() {
-			Some(group) => group.finish(),
+			Some(mut group) => group.finish(),
 			None => Ok(()),
 		};
 		let track = self.track.finish();

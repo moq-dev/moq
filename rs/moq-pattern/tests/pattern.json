@@ -1,5 +1,5 @@
 {
-	"$comment": "Golden vectors shared by rs/moq-pattern (tests/pattern.rs) and js/pattern (src/index.test.ts). Both test suites read this file, so the two implementations cannot drift apart silently.",
+	"$comment": "Golden vectors shared by rs/moq-pattern (tests/integration/pattern.rs) and js/pattern (src/index.test.ts). Both test suites read this file, so the two implementations cannot drift apart silently.",
 	"parse": [
 		{
 			"text": "",
@@ -268,6 +268,11 @@
 		{
 			"pattern": "a",
 			"path": "/a/",
+			"expect": true
+		},
+		{
+			"pattern": "a/b",
+			"path": "/a//b/",
 			"expect": true
 		},
 		{

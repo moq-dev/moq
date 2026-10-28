@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { Milli } from "@moq/clock";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import { Fetch } from "./fetch.ts";
@@ -44,4 +45,29 @@ test("Fetch round-trips on draft-03/04/05", async () => {
 		expect(got.priority).toBe(3);
 		expect(got.group).toBe(42);
 	}
+});
+
+test("Fetch carries omitted and explicit maxDelay on draft-07", async () => {
+	expect((await roundtrip(Version.DRAFT_07, sample())).maxDelay).toBeUndefined();
+
+	for (const maxDelay of [Milli(0), Milli(250)]) {
+		const got = await roundtrip(
+			Version.DRAFT_07,
+			new Fetch({ broadcast: Path.from("room/1"), track: "video", priority: 3, maxDelay, group: 42 }),
+		);
+		expect(got.maxDelay).toBe(maxDelay);
+	}
+
+	await expect(
+		encode(
+			Version.DRAFT_06,
+			new Fetch({
+				broadcast: Path.from("room/1"),
+				track: "video",
+				priority: 3,
+				maxDelay: Milli(250),
+				group: 42,
+			}),
+		),
+	).rejects.toThrow("maxDelay");
 });

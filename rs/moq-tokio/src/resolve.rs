@@ -289,7 +289,7 @@ impl Candidates {
 	/// are handed out anyway so the dial surfaces the OS error instead of a
 	/// confusing "no DNS entries". See <https://github.com/moq-dev/moq/issues/1375>
 	/// for the Windows failure this family matching originally fixed.
-	#[cfg(any(feature = "noq", test))]
+	#[cfg(any(feature = "quic", test))]
 	pub(crate) fn with_local(mut self, local: SocketAddr, dual_stack: bool) -> Self {
 		self.local = Some((local, dual_stack));
 		self
@@ -329,7 +329,7 @@ impl Candidates {
 				// stagger between attempts dwarfs this.
 				if self.count == 0 && !self.delayed && self.full.pending() {
 					self.delayed = true;
-					let _ = tokio::time::timeout(self.delay, self.answer_full()).await;
+					let _ = moq_clock::timeout(self.delay, self.answer_full()).await;
 					continue;
 				}
 
@@ -588,7 +588,7 @@ impl Query {
 
 		Self {
 			call: Some(tokio::spawn(async move {
-				tokio::time::sleep(delay).await;
+				moq_clock::sleep(delay).await;
 				Ok(addrs)
 			})),
 			..Default::default()
@@ -597,6 +597,11 @@ impl Query {
 }
 
 #[cfg(test)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use super::*;
 

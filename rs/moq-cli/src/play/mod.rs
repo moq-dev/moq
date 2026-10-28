@@ -7,12 +7,16 @@
 //!
 //! The media tasks need the decoders, so they stay behind `play`, but they
 //! reach the devices only through `output`: tests drive them against a
-//! recorder (`fake`), and `just rs play` runs those on every PR that reaches
-//! this crate.
+//! recorder (`fake`), and the merge gate's test build turns `play` on for every
+//! PR that reaches this crate.
 
-// With `play` off the event loop is gone and nothing calls the modules below.
-// They are still compiled and tested, which is the point.
-#![cfg_attr(not(feature = "play"), allow(dead_code))]
+#![cfg_attr(
+	not(feature = "play"),
+	allow(
+		dead_code,
+		reason = "with `play` off the event loop is gone and nothing calls the modules below. They are still compiled and tested, which is the point"
+	)
+)]
 
 mod args;
 mod buffer;
@@ -26,6 +30,8 @@ mod fake;
 mod headless;
 #[cfg(feature = "play")]
 mod media;
+#[cfg(feature = "play")]
+mod metrics;
 #[cfg(feature = "play")]
 mod output;
 #[cfg(feature = "play")]

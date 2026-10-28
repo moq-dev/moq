@@ -2,18 +2,20 @@ import { expect, spyOn, test } from "bun:test";
 import { Producer as Broadcast } from "./broadcast.ts";
 import * as Epoch from "./epoch.ts";
 import { randomHop } from "./hop.ts";
-import { NativeSession } from "./ietf/adapter.ts";
 import { Publisher as IetfPublisher } from "./ietf/publisher.ts";
+import { NativeSession } from "./ietf/session.ts";
 import { Subscribe as IetfSubscribe } from "./ietf/subscribe.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
+import { hooks } from "./internal.ts";
 import { Fetch } from "./lite/fetch.ts";
 import { Publisher as LitePublisher } from "./lite/publisher.ts";
 import { Subscribe as LiteSubscribe } from "./lite/subscribe.ts";
 import { Track } from "./lite/track.ts";
 import { Version as LiteVersion } from "./lite/version.ts";
-import { createMockTransportPair } from "./mock.ts";
+import { createMockTransportPair, SessionBroadcast } from "./mock.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
+import { readsFrom } from "./resume.test-util";
 import { Stream } from "./stream.ts";
 import { wireOf } from "./wire.ts";
 
@@ -26,7 +28,7 @@ test.each(["lite", "ietf", "fetch", "track"] as const)(
 	async (kind) => {
 		const pair = createMockTransportPair();
 		const origin = new Producer();
-		const dynamic = origin.dynamic(Path.from("room"));
+		const dynamic = origin.requestsRoute(Path.from("room"));
 		const publisher =
 			kind === "ietf"
 				? new IetfPublisher({
@@ -105,7 +107,7 @@ test.each(["lite", "ietf", "fetch", "track"] as const)(
 
 test("last cancellation finishes the internal wait and discards a late consumer", async () => {
 	const origin = new Producer();
-	const dynamic = origin.dynamic(Path.from("room"));
+	const dynamic = origin.requestsRoute(Path.from("room"));
 	const requests = dynamic.requested();
 	const hold = new AbortController();
 	const wait = wireOf(origin.consume()).demand(path, undefined, hold.signal);
@@ -127,11 +129,11 @@ test("last cancellation finishes the internal wait and discards a late consumer"
 		const keeper = source.consume();
 		const late = source.consume();
 		const close = spyOn(late, "close");
-		old.accept(late);
+		hooks.acceptRequest(old, late);
 		expect(close).toHaveBeenCalledTimes(1);
 		close.mockRestore();
 		expect(source.closed.peek()).toBeUndefined();
-		fresh.accept(source);
+		hooks.acceptRequest(fresh, source);
 		await settle();
 		expect(next.active.peek()?.closed).toBe(source.closed);
 		next.close();
@@ -148,7 +150,7 @@ test.each([true, false])(
 	"shared local/remote demand is withdrawn whichever leaves last (local first: %s)",
 	async (localFirst) => {
 		const origin = new Producer();
-		const dynamic = origin.dynamic(Path.from("room"));
+		const dynamic = origin.requestsRoute(Path.from("room"));
 		const requests = dynamic.requested();
 		const hold = new AbortController();
 		const wait = wireOf(origin.consume())
@@ -168,9 +170,8 @@ test.each([true, false])(
 				local.close();
 			}
 			await settle();
-			const late = new Broadcast();
-			const front = late.consume();
-			old.accept(front);
+			const late = new SessionBroadcast();
+			hooks.acceptRequest(old, late);
 			expect(late.closed.peek()).toBeNull();
 			const next = origin.request(path);
 			const fresh = (await requests.next()).value;
@@ -193,13 +194,13 @@ test.each([
 ] as const)("cancelling one waiter preserves a second %s requester across %i routes", async (other, routes) => {
 	const origin = new Producer();
 	const prefix = Path.from("room");
-	const dynamics = Array.from({ length: routes }, (_, i) => origin.dynamic(prefix, { cost: BigInt(i) }));
+	const dynamics = Array.from({ length: routes }, (_, i) => origin.requestsRoute(prefix, { cost: BigInt(i) }));
 	const hold = new AbortController();
 	const wire = wireOf(origin.consume());
 	const first = wire.demand(path, undefined, hold.signal).catch(() => undefined);
 	// With competing routes, re-price the cancelled waiter's route so the survivor pends on another.
 	const cancelled = dynamics[0];
-	if (routes > 1) cancelled.update({ ...cancelled.route, cost: BigInt(routes) });
+	if (routes > 1) cancelled.updateRoute({ ...cancelled.route, cost: BigInt(routes) });
 	const requests = dynamics[routes > 1 ? 1 : 0].requested();
 	const second = other === "peer" ? wire.demand(path) : undefined;
 	const local = other === "local" ? origin.request(path) : undefined;
@@ -209,7 +210,7 @@ test.each([
 	try {
 		hold.abort();
 		await first;
-		request.accept(source);
+		hooks.acceptRequest(request, source);
 		await settle();
 		expect(other === "peer" ? (await second)?.closed : local?.active.peek()?.closed).toBe(source.closed);
 	} finally {
@@ -222,7 +223,7 @@ test.each([
 
 test("an already cancelled signal never enqueues or subscribes to abort", async () => {
 	const origin = new Producer();
-	const dynamic = origin.dynamic(Path.from("room"));
+	const dynamic = origin.requestsRoute(Path.from("room"));
 	const requests = dynamic.requested();
 	const hold = new AbortController();
 	hold.abort();
@@ -244,7 +245,7 @@ test.each(["accept", "reject", "cancel"] as const)(
 	"%s releases the abort listener without closing a shared producer",
 	async (action) => {
 		const origin = new Producer();
-		const dynamic = origin.dynamic(Path.from("room"));
+		const dynamic = origin.requestsRoute(Path.from("room"));
 		const requests = dynamic.requested();
 		const source = new Broadcast();
 		const keeper = source.consume();
@@ -256,7 +257,7 @@ test.each(["accept", "reject", "cancel"] as const)(
 		const request = (await requests.next()).value;
 		if (!request) throw new Error("expected a pending request");
 		try {
-			if (action === "accept") request.accept(source);
+			if (action === "accept") hooks.acceptRequest(request, source);
 			if (action === "reject") request.reject(new Error("denied"));
 			if (action === "cancel") hold.abort();
 			const result = await wait;
@@ -264,9 +265,9 @@ test.each(["accept", "reject", "cancel"] as const)(
 			hold.abort();
 			if (action === "accept") {
 				expect(result?.closed).toBe(source.closed);
-				request.accept(source);
+				hooks.acceptRequest(request, source);
 				request.reject(new Error("late"));
-			} else request.accept(source);
+			} else hooks.acceptRequest(request, source);
 			expect(source.closed.peek()).toBeUndefined();
 		} finally {
 			remove.mockRestore();
@@ -280,12 +281,12 @@ test.each(["accept", "reject", "cancel"] as const)(
 
 test("a pending local request changing routes withdraws the old route's work", async () => {
 	const origin = new Producer();
-	const first = origin.dynamic(Path.from("room"), { cost: 5n });
+	const first = origin.requestsRoute(Path.from("room"), { cost: 5n });
 	const a = first.requested();
 	const local = origin.request(path);
 	const old = (await a.next()).value;
 	if (!old) throw new Error("expected a pending request");
-	const second = origin.dynamic(Path.from("room"), { cost: 1n });
+	const second = origin.requestsRoute(Path.from("room"), { cost: 1n });
 	const b = second.requested();
 	const fresh = (await b.next()).value;
 	if (!fresh) throw new Error("expected a pending request");
@@ -294,9 +295,9 @@ test("a pending local request changing routes withdraws the old route's work", a
 	const late = source.consume();
 	const close = spyOn(late, "close");
 	try {
-		old.accept(late);
+		hooks.acceptRequest(old, late);
 		expect(close).toHaveBeenCalledTimes(1);
-		fresh.accept(source);
+		hooks.acceptRequest(fresh, source);
 		await settle();
 		expect(local.active.peek()?.closed).toBe(source.closed);
 	} finally {
@@ -313,7 +314,7 @@ test("a pending local request changing routes withdraws the old route's work", a
 test("cancelling an old epoch waiter does not decrement a new epoch's demand", async () => {
 	const origin = new Producer();
 	const epoch = Epoch.mint();
-	const dynamic = origin.dynamic(Path.from("room"), { epoch });
+	const dynamic = origin.requestsRoute(Path.from("room"), { epoch });
 	const requests = dynamic.requested();
 	const wire = wireOf(origin.consume());
 	const hold = new AbortController();
@@ -321,7 +322,7 @@ test("cancelling an old epoch waiter does not decrement a new epoch's demand", a
 	const old = (await requests.next()).value;
 	if (!old) throw new Error("expected old request");
 	const nextEpoch = Epoch.mint();
-	dynamic.update({ epoch: nextEpoch });
+	dynamic.updateRoute({ epoch: nextEpoch });
 	const after = wire.demand(path, nextEpoch);
 	hold.abort();
 	await before;
@@ -330,7 +331,7 @@ test("cancelling an old epoch waiter does not decrement a new epoch's demand", a
 	const source = new Broadcast();
 	try {
 		old.reject(new Error("obsolete"));
-		fresh.accept(source);
+		hooks.acceptRequest(fresh, source);
 		expect((await after)?.closed).toBe(source.closed);
 	} finally {
 		origin.close();
@@ -345,16 +346,16 @@ test.each(["answer", "release"] as const)(
 		const origin = new Producer();
 		const epoch = Epoch.mint();
 		const prefix = Path.from("room");
-		const a = origin.dynamic(prefix, { epoch, cost: 1n });
-		const b = origin.dynamic(prefix, { epoch, cost: 5n });
+		const a = origin.requestsRoute(prefix, { epoch, cost: 1n });
+		const b = origin.requestsRoute(prefix, { epoch, cost: 5n });
 		const ar = a.requested();
 		const br = b.requested();
 		const held = origin.request(path);
 		const source = new Broadcast();
-		(await ar.next()).value?.accept(source);
+		hooks.acceptRequest((await ar.next()).value, source);
 		await settle();
 		// Another instance wins new requests. The old handle stays on its own epoch.
-		const c = origin.dynamic(prefix, { epoch: Epoch.mint(), cost: 0n });
+		const c = origin.requestsRoute(prefix, { epoch: Epoch.mint(), cost: 0n });
 		a.close();
 		await settle();
 		const pending = (await br.next()).value;
@@ -376,12 +377,12 @@ test.each(["answer", "release"] as const)(
 		const front = late.consume();
 		const close = spyOn(front, "close");
 		try {
-			pending.accept(front);
+			hooks.acceptRequest(pending, front);
 			await settle();
 			if (action === "release") expect(close).toHaveBeenCalledTimes(1);
 			else {
 				expect(close).not.toHaveBeenCalled();
-				expect(held.active.peek()?.closed).toBe(late.closed);
+				expect(readsFrom(held.active.peek(), late)).toBe(true);
 			}
 		} finally {
 			close.mockRestore();
@@ -404,18 +405,18 @@ test.each([0, 1])(
 		const sources: Broadcast[] = [];
 		for (let i = 0; i < 2; i++) {
 			const epoch = Epoch.parse(`00000000-0000-7000-8000-00000000000${i + 1}`);
-			const primary = origin.dynamic(prefix, { epoch, cost: 0n });
-			const standby = origin.dynamic(prefix, { epoch, cost: 1n });
+			const primary = origin.requestsRoute(prefix, { epoch, cost: 0n });
+			const standby = origin.requestsRoute(prefix, { epoch, cost: 1n });
 			const ar = primary.requested();
 			const br = standby.requested();
 			const held = origin.request(path);
 			const source = new Broadcast();
 			sources.push(source);
-			(await ar.next()).value?.accept(source);
+			hooks.acceptRequest((await ar.next()).value, source);
 			await settle();
 			entries.push({ primary, ar, br, held });
 		}
-		origin.dynamic(prefix, { epoch: Epoch.parse("00000000-0000-7000-8000-000000000003") });
+		origin.requestsRoute(prefix, { epoch: Epoch.parse("00000000-0000-7000-8000-000000000003") });
 		const pending = [];
 		for (const entry of entries) {
 			entry.primary.close();
@@ -435,11 +436,11 @@ test.each([0, 1])(
 			// The slot is still detached until its microtask runs, but no longer owns demand.
 			entries[released].held.close();
 			hold.abort();
-			pending[released].accept(front);
+			hooks.acceptRequest(pending[released], front);
 			expect(close).toHaveBeenCalledTimes(1);
-			pending[1 - released].accept(replacement);
+			hooks.acceptRequest(pending[1 - released], replacement);
 			await wait;
-			expect(entries[1 - released].held.active.peek()?.closed).toBe(replacement.closed);
+			expect(readsFrom(entries[1 - released].held.active.peek(), replacement)).toBe(true);
 		} finally {
 			close.mockRestore();
 			for (const entry of entries) entry.held.close();
@@ -456,7 +457,7 @@ test.each([0, 1])(
 test("a normal FETCH request FIN keeps unanswered origin demand alive", async () => {
 	const pair = createMockTransportPair();
 	const origin = new Producer();
-	const dynamic = origin.dynamic(Path.from("room"));
+	const dynamic = origin.requestsRoute(Path.from("room"));
 	const requests = dynamic.requested();
 	const publisher = new LitePublisher(pair.server, LiteVersion.DRAFT_06, randomHop(), origin.consume());
 	let input!: ReadableStreamDefaultController<Uint8Array>;
@@ -497,7 +498,7 @@ test.each(["accept", "reject"] as const)(
 	"cancellation racing %s releases only the cancelled waiter",
 	async (answer) => {
 		const origin = new Producer();
-		const dynamic = origin.dynamic(Path.from("room"));
+		const dynamic = origin.requestsRoute(Path.from("room"));
 		const requests = dynamic.requested();
 		const wire = wireOf(origin.consume());
 		const hold = new AbortController();
@@ -510,7 +511,7 @@ test.each(["accept", "reject"] as const)(
 		const denied = new Error("denied");
 		try {
 			hold.abort(cancelled);
-			if (answer === "accept") request.accept(source);
+			if (answer === "accept") hooks.acceptRequest(request, source);
 			else request.reject(denied);
 			expect(await first).toBe(cancelled);
 			const result = await second;
@@ -526,7 +527,7 @@ test.each(["accept", "reject"] as const)(
 
 test.each([true, false])("last waiter cancellation and accept in one turn (cancel first: %s)", async (cancelFirst) => {
 	const origin = new Producer();
-	const dynamic = origin.dynamic(Path.from("room"));
+	const dynamic = origin.requestsRoute(Path.from("room"));
 	const requests = dynamic.requested();
 	const wire = wireOf(origin.consume());
 	const hold = new AbortController();
@@ -540,7 +541,7 @@ test.each([true, false])("last waiter cancellation and accept in one turn (cance
 	const close = spyOn(front, "close");
 	try {
 		if (cancelFirst) hold.abort(cancelled);
-		request.accept(front);
+		hooks.acceptRequest(request, front);
 		if (!cancelFirst) hold.abort(cancelled);
 		expect(await wait).toBe(cancelled);
 		expect(close).toHaveBeenCalledTimes(cancelFirst ? 1 : 0);
@@ -550,7 +551,7 @@ test.each([true, false])("last waiter cancellation and accept in one turn (cance
 			const fresh = (await requests.next()).value;
 			expect(fresh).not.toBe(request);
 			if (!fresh) throw new Error("expected fresh request");
-			fresh.accept(source);
+			hooks.acceptRequest(fresh, source);
 		}
 		const answer = await next;
 		expect(answer?.closed).toBe(source.closed);
@@ -567,7 +568,7 @@ test.each([true, false])("last waiter cancellation and accept in one turn (cance
 
 test.each([true, false])("local demand survives same-turn cancellation only when rejoined: %s", async (rejoin) => {
 	const origin = new Producer();
-	const dynamic = origin.dynamic(Path.from("room"));
+	const dynamic = origin.requestsRoute(Path.from("room"));
 	const requests = dynamic.requested();
 	const local = origin.request(path);
 	const hold = new AbortController();
@@ -585,7 +586,7 @@ test.each([true, false])("local demand survives same-turn cancellation only when
 	const replacement = rejoin ? origin.request(path) : undefined;
 	try {
 		await settle();
-		request.accept(front);
+		hooks.acceptRequest(request, front);
 		expect(close).toHaveBeenCalledTimes(rejoin ? 0 : 1);
 		if (replacement) {
 			await settle();
@@ -595,7 +596,7 @@ test.each([true, false])("local demand survives same-turn cancellation only when
 			const next = (await requests.next()).value;
 			expect(next).not.toBe(request);
 			if (!next) throw new Error("expected fresh request");
-			next.accept(source);
+			hooks.acceptRequest(next, source);
 			await settle();
 			expect(fresh.active.peek()?.closed).toBe(source.closed);
 			fresh.close();
@@ -613,7 +614,7 @@ test.each([true, false])("local demand survives same-turn cancellation only when
 
 test("queued cancellation preserves order, replacement identity, and empty-queue wakeup", async () => {
 	const origin = new Producer();
-	const dynamic = origin.dynamic(Path.from("room"));
+	const dynamic = origin.requestsRoute(Path.from("room"));
 	const requests = dynamic.requested();
 	const wire = wireOf(origin.consume());
 	const holds = Array.from({ length: 4 }, () => new AbortController());
@@ -639,7 +640,7 @@ test("queued cancellation preserves order, replacement identity, and empty-queue
 test("reset clears queued work while a handler is suspended and admits the new epoch", async () => {
 	const origin = new Producer();
 	const epoch = Epoch.mint();
-	const dynamic = origin.dynamic(Path.from("room"), { epoch });
+	const dynamic = origin.requestsRoute(Path.from("room"), { epoch });
 	const requests = dynamic.requested();
 	const wire = wireOf(origin.consume());
 	const waits = [path, Path.from("room/obsolete")].map((name) => wire.demand(name, epoch).catch(() => {}));
@@ -647,7 +648,7 @@ test("reset clears queued work while a handler is suspended and admits the new e
 		const old = (await requests.next()).value;
 		expect(old?.path).toBe(path);
 		const nextEpoch = Epoch.mint();
-		dynamic.update({ epoch: nextEpoch });
+		dynamic.updateRoute({ epoch: nextEpoch });
 		waits.push(wire.demand(path, nextEpoch).catch(() => {}));
 		const fresh = (await requests.next()).value;
 		expect(fresh?.path).toBe(path);
@@ -663,7 +664,7 @@ test("reset clears queued work while a handler is suspended and admits the new e
 
 test("concurrent handlers consume queued requests once across empty batches", async () => {
 	const origin = new Producer();
-	const dynamic = origin.dynamic(Path.from("room"));
+	const dynamic = origin.requestsRoute(Path.from("room"));
 	const handlers = [dynamic.requested(), dynamic.requested()];
 	const wire = wireOf(origin.consume());
 	const waits: Promise<unknown>[] = [];

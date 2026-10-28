@@ -40,14 +40,9 @@ fn benchmark(c: &mut criterion::Criterion) {
 							for receiver in &receivers {
 								for _ in 0..burst {
 									let mut tx = sender.acquire().await.expect("send buffer");
-									tx[..4].copy_from_slice(b"turn");
-									tx.send(udp::Transmit {
-										to: receiver.local_addr().expect("addr"),
-										len: 4,
-										segment: 4,
-										ecn: None,
-									})
-									.expect("send");
+									tx.extend_from_slice(b"turn");
+									tx.send(udp::Transmit::new(receiver.local_addr().expect("addr"), 4))
+										.expect("send");
 								}
 							}
 							for receiver in &receivers {
@@ -68,8 +63,28 @@ fn benchmark(c: &mut criterion::Criterion) {
 	group.finish();
 }
 
+/// Compare the same transport method before and after Local's thread guard.
+/// The memory transport returns a constant here, keeping actual I/O out of the check cost.
+#[cfg(target_os = "linux")]
+fn local_thread_check(c: &mut criterion::Criterion) {
+	use std::hint::black_box;
+
+	use moq_net::transport::{memory, poll::Session as _};
+	use moq_uring::transport::Local;
+
+	let (session, _peer) = memory::pair(memory::Config::default());
+	let local = Local::new(session.clone());
+	let mut group = c.benchmark_group("local_thread_check");
+	group.bench_function("direct", |b| b.iter(|| black_box(&session).max_datagram_size()));
+	group.bench_function("checked", |b| b.iter(|| black_box(&local).max_datagram_size()));
+	group.finish();
+}
+
+#[cfg(not(target_os = "linux"))]
+fn local_thread_check(_: &mut criterion::Criterion) {}
+
 #[cfg(not(target_os = "linux"))]
 fn benchmark(_: &mut criterion::Criterion) {}
 
-criterion_group!(benches, benchmark);
+criterion_group!(benches, benchmark, local_thread_check);
 criterion_main!(benches);

@@ -1,0 +1,14 @@
+{
+	"name": "@moq/smoke-native",
+	"private": true,
+	"type": "module",
+	"dependencies": {
+		"@moq/hang": "latest",
+		"@moq/net": "latest",
+		"@moq/web-transport": "latest",
+		"zod": "^4.4.3"
+	},
+	"devDependencies": {
+		"tsx": "^4.23.1"
+	}
+}

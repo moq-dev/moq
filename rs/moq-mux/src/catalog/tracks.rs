@@ -194,10 +194,14 @@ pub struct VideoHint {
 	pub display_aspect_width: Option<u32>,
 	/// The height of the aspect ratio the whole picture is displayed at.
 	pub display_aspect_height: Option<u32>,
+	/// The colour the pixels carry. Each field the stream signals outranks the hint's.
+	pub color: Option<hang::catalog::Color>,
 	/// The maximum bitrate in bits per second.
 	pub bitrate: Option<u64>,
 	/// The frame rate in frames per second.
 	pub framerate: Option<f64>,
+	/// The rendition's [`reorder`](hang::catalog::VideoConfig::reorder) depth.
+	pub reorder: Option<u8>,
 	/// If true, the decoder optimizes for latency.
 	pub optimize_for_latency: Option<bool>,
 	/// The maximum jitter before the next frame is emitted.
@@ -209,6 +213,10 @@ pub struct VideoHint {
 	/// Unlike the other fields this is a choice, not a hint: the bitstream never reveals a
 	/// container, so it is applied to every config the importer publishes rather than filling a gap.
 	pub container: hang::catalog::Container,
+	/// The rendition's [`preference`](hang::catalog::VideoConfig::preference).
+	///
+	/// A choice like the container: the bitstream never reveals it, so every config gets it.
+	pub preference: i32,
 }
 
 /// Fill `slot` from `value` only when the slot is still empty, so a value the stream detected always
@@ -234,12 +242,15 @@ impl From<hang::catalog::VideoConfig> for VideoHint {
 			coded_height: config.coded_height,
 			display_aspect_width: config.display_aspect_width,
 			display_aspect_height: config.display_aspect_height,
+			color: config.color,
 			bitrate: config.bitrate,
 			framerate: config.framerate,
+			reorder: config.reorder,
 			optimize_for_latency: config.optimize_for_latency,
 			jitter: config.jitter,
 			delay: config.delay,
 			container: config.container,
+			preference: config.preference,
 		}
 	}
 }
@@ -258,12 +269,15 @@ impl VideoHint {
 		fill(&mut config.coded_height, self.coded_height);
 		fill(&mut config.display_aspect_width, self.display_aspect_width);
 		fill(&mut config.display_aspect_height, self.display_aspect_height);
+		crate::codec::color::fill(&mut config.color, self.color.as_ref(), "hint");
 		fill(&mut config.bitrate, self.bitrate);
 		fill(&mut config.framerate, self.framerate);
+		fill(&mut config.reorder, self.reorder);
 		fill(&mut config.optimize_for_latency, self.optimize_for_latency);
 		fill(&mut config.jitter, self.jitter);
 		fill(&mut config.delay, self.delay);
 		config.container = self.container.clone();
+		config.preference = self.preference;
 	}
 
 	/// Build a config from these fields alone, or `None` if the codec is missing. Used to publish
@@ -360,6 +374,7 @@ pub(crate) fn same_video_identity(previous: &hang::catalog::VideoConfig, next: &
 		&& previous.container == next.container
 		&& previous.display_aspect_width == next.display_aspect_width
 		&& previous.display_aspect_height == next.display_aspect_height
+		&& previous.interlaced == next.interlaced
 }
 
 /// Whether an audio decoder can keep reading the same track under this config.
@@ -398,17 +413,28 @@ fn check_identity<E: CatalogExt>(previous: &Catalog<E>, next: &Catalog<E>, name:
 /// timestamps by. Clones share that timebase.
 pub struct Reserved<E: CatalogExt = ()> {
 	timebase: super::Timebase<E>,
+	hls_hint: Option<std::time::Duration>,
 }
 
 impl<E: CatalogExt> Reserved<E> {
 	pub(super) fn new(timebase: super::Timebase<E>) -> Self {
 		timebase.catalog.add_reserver();
-		Self { timebase }
+		Self {
+			timebase,
+			hls_hint: None,
+		}
+	}
+
+	/// Declare the track's regular group duration, which fixes its HLS segment duration up front
+	/// unless [`Config::with_hls`](super::Config::with_hls) disabled HLS records.
+	pub fn with_hls_hint(mut self, duration: impl Into<Option<std::time::Duration>>) -> Self {
+		self.hls_hint = duration.into();
+		self
 	}
 
 	/// Track properties for a media track under this catalog, carrying any retention it declares.
 	/// See [`Producer::track_info`](super::Producer::track_info).
-	pub fn track_info(&self, priority: u8) -> moq_net::track::Info {
+	pub fn track_info(&self, priority: i8) -> moq_net::track::Info {
 		self.timebase.catalog.track_info(priority)
 	}
 
@@ -477,7 +503,9 @@ impl<E: CatalogExt> Reserved<E> {
 		crate::Error: From<C::Error>,
 	{
 		let rendition = self.init(track.name())?;
-		self.timebase.catalog.media(track, container, rendition, config.into())
+		self.timebase
+			.catalog
+			.media(track, container, rendition, config.into(), self.hls_hint)
 	}
 
 	/// Resolve a timestamp on the broadcast's shared clock (see [`Producer::timestamp`]).
@@ -504,7 +532,7 @@ impl<E: CatalogExt> Reserved<E> {
 
 impl<E: CatalogExt> Clone for Reserved<E> {
 	fn clone(&self) -> Self {
-		Self::new(self.timebase.clone())
+		Self::new(self.timebase.clone()).with_hls_hint(self.hls_hint)
 	}
 }
 
@@ -559,7 +587,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		container: super::hang::Container,
 		info: moq_net::track::Info,
 	) -> crate::Result<crate::container::Producer<super::hang::Container, C>> {
-		let track = self.catalog.fresh_track(info)?;
+		let track = self.catalog.fresh_track(&self.name, info)?;
 		self.catalog.track(track, container, None)
 	}
 
@@ -629,6 +657,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 			serde_json::to_writer(std::io::sink(), &next).map_err(moq_json::Error::from)?;
 			self.present = true;
 			*guard = next;
+			guard.list::<C>(&self.name);
 			guard.commit()?;
 		}
 		self.supplied = supplied;
@@ -677,7 +706,8 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		let mut resolved = Self::resolved(&self.supplied, &estimate);
 		// A measurement never lowers the published jitter or delay, including one raised through
 		// `modify`.
-		let published = self.config()?.estimate();
+		let mut config = self.config()?;
+		let published = config.estimate();
 		resolved.jitter = resolved.jitter.max(published.jitter);
 		resolved.delay = resolved.delay.max(published.delay);
 		self.detected = estimate;
@@ -695,7 +725,6 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		let throttled = self.published.as_ref().is_some_and(|published| {
 			published.bitrate == resolved.bitrate && published.framerate == resolved.framerate
 		});
-		let mut config = self.config()?;
 		config.set_estimate(resolved.clone());
 		self.stage(config)?.commit_estimate(throttled)?;
 		self.published = Some(resolved);
@@ -722,10 +751,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		if !self.present {
 			return Err(crate::Error::NotPublished);
 		}
-		let mut catalog = self.catalog.snapshot();
-		C::get_mut(&mut catalog, &self.name)
-			.cloned()
-			.ok_or(crate::Error::NotPublished)
+		self.catalog.config::<C>(&self.name).ok_or(crate::Error::NotPublished)
 	}
 
 	pub(crate) fn replace(&mut self, config: C) -> crate::Result<()> {
@@ -1053,23 +1079,8 @@ mod tests {
 		moq_net::Timestamp::from_micros(micros).unwrap()
 	}
 
-	// Legacy unless selected, and a clone (what an importer is handed) carries the selection.
-	#[test]
-	fn a_video_hint_applies_its_container_to_every_config() {
-		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
-		VideoHint::default().apply(&mut config);
-		assert_eq!(config.container, hang::catalog::Container::Legacy);
-
-		let hint = VideoHint {
-			container: hang::catalog::Container::Loc,
-			..Default::default()
-		};
-		hint.apply(&mut config);
-		assert_eq!(config.container, hang::catalog::Container::Loc);
-	}
-
 	/// Feed ~40ms 100 kB frames over more than the bitrate window, with a measured
-	/// 40ms container batch span. PTS spacing alone says nothing about flush delay.
+	/// 40ms container batch span. PTS spacing alone says nothing about jitter.
 	fn feed<E: CatalogExt, C: RenditionConfig<E>>(rendition: &mut Rendition<E, C>) {
 		let mut estimator = super::super::Estimator::new();
 		estimator.burst(Duration::from_millis(40));
@@ -1306,18 +1317,39 @@ mod tests {
 		);
 	}
 
-	/// Every rendition gets its own timeline, advertised together at the catalog root.
+	/// Each rendition gets its own HLS records, advertised in its own entry, and only when enabled.
 	#[test]
-	fn renditions_get_their_own_timelines() {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let mut catalog = super::super::Producer::new(&mut broadcast, super::super::Config::default()).unwrap();
+	fn renditions_get_their_own_hls_records() {
+		for enabled in [false, true] {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog_config = super::super::Config::default().with_hls(enabled.then(crate::hls::Config::default));
+			let mut catalog = super::super::Producer::new(&mut broadcast, catalog_config).unwrap();
 
-		let _video0 = catalog.enroll("video0").unwrap();
-		let _video1 = catalog.enroll("video1").unwrap();
-		let section = catalog.timeline().section();
-		assert_eq!(section.timelines["video0"], "video0.timeline.z");
-		assert_eq!(section.timelines["video1"], "video1.timeline.z");
-		assert_eq!(catalog.snapshot().archive, Some(section));
+			let hint = Some(std::time::Duration::from_secs(4));
+			let video0 = catalog.enroll("video0", hint).unwrap();
+			let video1 = catalog.enroll("video1", hint).unwrap();
+			assert_eq!(video0.is_some(), enabled);
+			assert_eq!(video1.is_some(), enabled);
+			{
+				let mut guard = catalog.modify().unwrap();
+				guard.video.insert("video0", config(None, None)).unwrap();
+				guard.video.insert("video1", config(None, None)).unwrap();
+			}
+
+			let snapshot = catalog.snapshot();
+			let hls = |name: &str| snapshot.video.renditions[name].hls.clone();
+			match enabled {
+				true => {
+					let four = std::time::Duration::from_secs(4);
+					assert_eq!(hls("video0"), Some(hang::catalog::Hls::new("video0.hls", four)));
+					assert_eq!(hls("video1"), Some(hang::catalog::Hls::new("video1.hls", four)));
+				}
+				false => {
+					assert_eq!(hls("video0"), None);
+					assert_eq!(hls("video1"), None);
+				}
+			}
+		}
 	}
 
 	mod custom {

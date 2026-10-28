@@ -1,9 +1,9 @@
+import { Milli } from "@moq/clock";
 /**
  * Connection statistics: what the local transport counts, and what the peer reports.
  *
  * @module
  */
-import * as Time from "../time.ts";
 
 /**
  * A point-in-time snapshot of the transport's counters, from `WebTransport.getStats()`.
@@ -12,8 +12,8 @@ import * as Time from "../time.ts";
  * a caller computing a rate wants to choose its own sampling instants. Snapshot twice
  * and divide by the interval you measured.
  *
- * Every field is optional. The qmux/WebSocket fallback implements no `getStats()` at
- * all and reports nothing; see {@link Probe} for what the peer measures.
+ * Every field is optional. The qmux/WebSocket fallback reports nothing; see
+ * {@link Probe} for what the peer measures.
  *
  * The field names match Rust's `moq_net::session::Stats` but the counters keep each
  * stack's own semantics rather than being normalized. Notably W3C excludes
@@ -29,7 +29,7 @@ export interface Stats {
 	 * Usually absent: browsers don't report an RTT yet even though the W3C dictionary
 	 * has the field. Use {@link Probe.rtt}, which the peer measures.
 	 */
-	rtt?: Time.Milli;
+	rtt?: Milli;
 
 	/** Estimated send bandwidth from the congestion controller, in bits per second. */
 	estimatedSendRate?: number;
@@ -71,7 +71,7 @@ export interface Probe {
 	 * Measured through the peer's application layer, so it reads higher than a
 	 * transport-level RTT would.
 	 */
-	rtt?: Time.Milli;
+	rtt?: Milli;
 
 	/** The peer's estimate of the bitrate it is receiving from us, in bits per second. */
 	estimatedRecvRate?: number;
@@ -96,7 +96,7 @@ export interface TransportStats {
 
 /**
  * Snapshot `quic` via `getStats()`, or an empty snapshot when the transport doesn't
- * implement it (the qmux/WebSocket fallback, older browsers) or the call fails.
+ * implement it (older browsers) or the call fails.
  *
  * @internal
  */
@@ -106,7 +106,7 @@ export async function transportStats(quic: WebTransport): Promise<Stats> {
 	try {
 		const stats = await getStats.call(quic);
 		return {
-			rtt: stats.smoothedRtt !== undefined ? Time.Milli(stats.smoothedRtt) : undefined,
+			rtt: stats.smoothedRtt !== undefined ? Milli(stats.smoothedRtt) : undefined,
 			estimatedSendRate: stats.estimatedSendRate ?? undefined,
 			bytesSent: stats.bytesSent,
 			bytesReceived: stats.bytesReceived,

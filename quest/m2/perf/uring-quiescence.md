@@ -5,11 +5,11 @@
 A received packet's QUIC processing and the sends it produces are staged in
 the same drive-loop turn, so one enter carries the reply. Today
 `Tasks::poll` runs one pass over the ready set per turn and a mid-pass wake
-lands in the next turn by design (rs/kio/src/task.rs:246-257, test
+lands in the next turn by design (`Tasks::poll` in rs/kio/src/task.rs, test
 `a_mid_pass_wake_lands_in_the_next_pass`), so a datagram costs three turns:
 dispatch sets the demux bit, the demux drains packets and kicks each
-connection driver (rs/moq-uring/src/quic/noq/endpoint.rs:208-220,
-:285-290), and the drivers stage `SendMsg` a turn later. Every hop is a turn
+connection driver (`Endpoint::demux` in
+rs/moq-uring/src/quic/driver/endpoint.rs), and the drivers stage `SendMsg` a turn later. Every hop is a turn
 and up to an enter. The other io_uring runtimes drain their local queue to
 exhaustion, or to a quantum, before touching the ring.
 
@@ -27,28 +27,36 @@ must not starve the socket.
   (today), 2, 4, and 8.
 - Dispatch runs before the task pass, not after: the loop becomes reap and
   dispatch, then tasks to quiescence, then submit or park. That removes the
-  stale first pass a park-returning turn runs today (worker.rs:180 polls on
-  readiness the previous turn already consumed).
+  stale first pass a park-returning turn runs today (the worker loop in
+  rs/moq-uring/src/worker.rs polls tasks on readiness the previous turn
+  already consumed).
 - The egress driver stages one GSO train of `TRAIN_SEGMENTS = 63` segments
-  per turn and then wakes itself (`Driver::flush`,
-  rs/moq-uring/src/quic/noq/connection.rs:743-751), so a deep backlog pays a
+  per turn and then wakes itself (`Driver::flush` in
+  rs/moq-uring/src/quic/driver/connection.rs), so a deep backlog pays a
   whole turn per train and would consume every pass. That cadence is a
   hardcoded fairness choice across connections sharing a socket. Make it a
   trains-per-turn budget on `flush` and sweep 1, 2, and 4 together with the
   pass budget, under the fanout and single-heavy-connection shapes, so trains
   per turn and passes per turn are measured together. A no-win keeps 1 train.
-  The #3120 numbers are the deleted quiche driver's; re-profile on noq.
+  The #3120 numbers are the deleted quiche driver's; re-profile on `moq-quic`.
   Decided in the 2026-09-30 audit: the egress requeue quest merged here, since
   both budgets need the same sweep.
 - Add `passes` per turn to the metrics beside `turns`.
+- [Task capacity](/quest/m2/performance-survey/task-capacity.md) also
+  reshapes the `Tasks::poll` wake-word snapshot. Whichever of the two lands
+  second rebases its benchmark on the other.
+- Ingress fairness: a pass budget does not bound work inside one poll.
+  The endpoint's `Inner::poll_run` calls `poll_recv` until `Pending`, so one
+  poll drains every queued receive completion, and `Endpoint::demux` drains
+  every datagram of each, where one GRO completion can carry many. Measure
+  saturated ingress against timers, control messages, and quiet connections
+  on the same worker, and if their latency shows it, budget both the
+  completions per poll and the datagrams per turn. Decided in the 2026-10-22
+  io_uring audit: a latency question, not a known starvation bug.
 
 Acceptance: turns and enters per received datagram on the chat shape
 (request-reply is the worst case), CPU per Gbps and p99 latency on the fanout
-shape, via `just bench BASE` on Linux. The existing starvation test keeps its
-meaning with a budget of 1 and gains a sibling proving the budget bound.
-
-## Required
-
-- [Hard fork](/quest/m1/quic/fork/README.md) - the noq driver this edits moves onto `moq-quic` (decided in the 2026-10-05 audit)
-- [One enter per turn](/quest/m2/perf/uring-one-enter.md) - the metrics and
-  the submit placement this sweep is measured with
+shape, on Linux with the io_uring workers at both base and current, using
+`just bench-runtime` at each revision with the same worker count. The existing
+starvation test keeps its meaning with a budget of 1 and gains a sibling
+proving the budget bound.

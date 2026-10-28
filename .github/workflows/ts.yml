@@ -6,32 +6,7 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "0 8 * * *"
-  pull_request:
-    paths:
-      - "test/ts/**"
-      - "test/lib/**"
-      - "test/justfile"
-      - "rs/moq-mux/**"
-      - "rs/hang/**"
-      - "rs/moq-cli/**"
-      - "rs/moq-net/**"
-      - "rs/moq-tokio/**"
-      - "rs/moq-relay/**"
-      - "rs/moq-loc/**"
-      - "rs/moq-json/**"
-      # Workspace dependencies of moq-net, moq-tokio and moq-mux on the TS path.
-      - "rs/kio/**"
-      - "rs/moq-flate/**"
-      - "rs/moq-msf/**"
-      - "rs/moq-pattern/**"
-      - "rs/moq-sock/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - "flake.nix"
-      - "flake.lock"
-      - ".github/actions/rust-cache/**"
-      - ".github/workflows/ts.yml"
+  workflow_call:
 
 concurrency:
   group: ts-${{ github.ref }}
@@ -45,6 +20,8 @@ jobs:
   ts:
     name: TS validation
     runs-on: ubuntu-latest
+    # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
+    environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -52,26 +29,19 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
-        with:
-          tool-cache: false
-
-      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
-        with:
-          determinate: false
-          extra-conf: |
-            extra-substituters = https://kixelated.cachix.org
-            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
+      - uses: ./.github/actions/nix
 
       - name: Rust cache
         uses: ./.github/actions/rust-cache
+        with:
+          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
 
       - name: FFmpeg and TSDuck controls
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts-controls
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
 
       - name: TS pair controls
         if: ${{ !cancelled() }}
@@ -83,14 +53,90 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
       - name: TS fragmented PES headers
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts --fragment-pes
         env:
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      # KLV and DVB AC-3 the importer carries as whole PES: each PES comes back byte-equal
+      # outside its PTS and DTS, at its source placement, and the AC-3 passes the T-STD model.
+      - name: TS private PES
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --klv --strict
+        env:
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      # MPEG-2 video the importer carries as whole PES: FFmpeg decodes the capture to the
+      # source's pictures, and the video passes the T-STD model.
+      - name: TS MPEG-2 video
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --mpeg2
+        env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      # A KLV stream joins the program mid-stream and leaves it: the export announces each
+      # layout at the next PMT version, and carries the stream only while a PMT lists it.
+      - name: TS PMT revision
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --revision --strict
+        env:
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      - name: TS audio-only SCTE-35
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --clockless audio-scte35
+        env:
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      - name: TS sections-only clock
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --clockless sections
+        env:
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      - name: TS whole-PES-only clock
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --clockless pes
+        env:
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      # `import/export ts --passthrough`: from its first packet the capture is the source's
+      # packets in place, and every compliance check grades it as it grades that interval of
+      # the source. The generated clip fails the T-STD model on its own; the capture must too.
+      - name: TS passthrough
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --passthrough
+        env:
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      # The same over a hardware encoder's capture the T-STD model passes, with a dirty start
+      # the importer acquires past.
+      - name: TS passthrough of a broadcast capture
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts-passthrough-capture
+        env:
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      # The same over a whole MPTS: two programs on their own PCR PIDs, whose recovery points
+      # rarely line up.
+      - name: TS passthrough of an MPTS
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --passthrough --mpts
+        env:
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
       # The same round-trip at 2 Mb/s, where every keyframe outgrows a 25 ms PCR slot,
@@ -100,7 +146,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts --bitrate 2000000
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
       # 1080p video filling a broadcast-sized 9 Mbit CPB, at the default delay: the
@@ -110,7 +156,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts --hrd
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
       # 1080p video with no HRD at its level's 24 Mb/s leak, so the export has to admit
@@ -119,7 +165,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts --leak
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
       # The same video beside two audio PIDs in a multiplex the source fills with no nulls,
@@ -129,7 +175,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts --full
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
       # The same video beside four audio PIDs in a multiplex faster than its Rx: each slot
@@ -138,16 +184,16 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts --headroom
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
-      # The same round-trip over an open-GOP clip: every leading picture after a
-      # recovery point must come back, in decode order.
+      # The same round-trip over an open-GOP clip: recovery-group orphans are trimmed,
+      # continuous leading pictures stay in decode order, and all shape checks gate.
       - name: TS open GOP
         if: ${{ !cancelled() }}
-        run: nix develop --command just test ts --open-gop
+        run: nix develop --command just test ts --open-gop --strict
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
       # Builds the sparse-EPG and pending-version fixtures and round-trips
@@ -156,7 +202,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts-eit
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
       # The T-STD model must pass a broadcast capture and fail the same capture
@@ -165,7 +211,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts-tstd
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
       # The pair needs enough overlap to grade the slower table cadences.
@@ -173,18 +219,54 @@ jobs:
         if: ${{ !cancelled() && github.event_name != 'pull_request' }}
         run: nix develop --command just test ts --pair
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
 
       # Live timing needs the real-time window to distinguish drift from startup.
       - name: TS live release timing
         if: ${{ !cancelled() && github.event_name != 'pull_request' }}
         run: nix develop --command just test ts --live --duration 120
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
+
+      # The subscriber's leg congested the way real paths are, through moq-shaper: 7 Mb/s under
+      # the 9 Mb/s video and four audio PIDs, behind a 2 s queue, 25 ms each way. The export must
+      # stay T-STD compliant and continuous, shed whole groups, and keep its latency through EOF.
+      - name: TS congested path
+        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        run: nix develop --command just test ts --headroom --rate 7000000 --duration 120
+        env:
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
+
+      # The same path behind a 250 ms queue, with the relay's loss-based CUBIC: BBRv3 never fills a
+      # queue this deep, CUBIC overflows it every sawtooth. QUIC must recover what the queue drops
+      # inside the export's 1 s delay, and the run fails unless the queue overflowed.
+      - name: TS overflowing path
+        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        run: nix develop --command just test ts --headroom --rate 7000000 --queue 250ms --duration 120
+        env:
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
+          MOQ_QUIC_CONGESTION_CONTROL: loss
+
+      # Passthrough over the overflowing path, under its 10 Mb/s multiplex: what arrives must be
+      # the source's packets in place, through the source's last packet.
+      - name: TS passthrough overflowing path
+        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        run: nix develop --command just test ts --passthrough --rate 7000000 --queue 250ms --duration 120
+        env:
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
+          MOQ_QUIC_CONGESTION_CONTROL: loss
+
+      # Two minutes of MoQ content faults and a congested bottleneck, on a paused clock: each
+      # recovery graded against what was delivered and decoded, and the latency must not drift.
+      - name: TS long recovery
+        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        run: nix develop --command just rs ts-recovery
+        env:
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
 
       - name: Upload failure artifacts
         if: ${{ failure() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: ts-failure
           path: ${{ runner.temp }}/moq-test-runs

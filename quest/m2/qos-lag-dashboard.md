@@ -4,20 +4,22 @@
 
 The demo stats dashboard (`demo/web/src/stats.ts`) shows the relay's viewer
 lag and dropped media: percentiles of the egress `lag` histogram over the
-chart window, and `dropped` duration, bytes, and groups as rates, cluster-wide
+chart window, and `dropped` bytes, frames, and groups as rates, cluster-wide
 and per node like the existing counters.
 
 ## Plan
 
-- Read both from the stats totals and [prefix
-  tracks](/quest/m1/stats-prefix-tracks.md), which land first,
-  rather than the `publisher.json` rows they sit on today (decided in the
-  2026-10-06 audit; the rows stay for existing readers, 2026-10-12); [viewer lag histogram](/quest/m1/qos/lag-histogram.md)
+- Read both from the stats totals and prefix tracks
+  (`<path>/prefix.json`) rather than the group tracks' per-path rows they sit on today (decided in the
+  2026-10-06 audit; the rows stay for existing readers, 2026-10-12); [viewer lag histogram](/quest/m2/qos/lag-histogram.md)
   lands them on the egress side of its per-group totals and prefix tracks
   (decided 2026-10-08). `lag` is a cumulative byte count per bucket keyed
   by its upper edge (`"50ms"` to `"5s"`, then `"inf"`, empty buckets
-  omitted); `dropped` is `{ duration, bytes, groups }` with the duration in
-  fractional milliseconds. `doc/concept/stats.md` documents them. Diff two
+  omitted); `dropped` has the same four fields as `stale` (`bytes`, `frames`,
+  `groups`, `datagrams`), written only when non-empty. `lag` is absent where
+  no viewer's backend reports acknowledgements (qmux, the browser
+  transport), so show no data there rather than zero lag.
+  `doc/concept/stats.md` documents them. Diff two
   samples within one subscription for an interval's distribution, as the
   dashboard already does to turn cumulative bytes into rates, and sum nodes
   bucket by bucket.
@@ -34,5 +36,4 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [Viewer lag histogram](/quest/m1/qos/lag-histogram.md) - the `lag` histogram and `dropped` counters the dashboard reads
-- [Stats prefix tracks](/quest/m1/stats-prefix-tracks.md) - the prefix tracks the dashboard reads lag from, beside the totals
+- [Viewer lag histogram](/quest/m2/qos/lag-histogram.md) - the `lag` histogram and `dropped` counters the dashboard reads

@@ -35,24 +35,25 @@ required-features = ["uring"]
 doc = false
 
 [features]
-default = ["noq", "websocket"]
+default = ["quic", "websocket"]
 iroh = ["moq-tokio/iroh"]
-noq = ["moq-tokio/noq"]
+quic = ["moq-tokio/quic"]
 uring = ["dep:moq-uring"]
 websocket = ["moq-tokio/websocket"]
 
 [dependencies]
 anyhow = { workspace = true, features = ["backtrace"] }
 humantime = { workspace = true }
+moq-clock = { workspace = true }
 moq-net = { workspace = true }
-moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
+moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs", "net"] }
 rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 toml = { workspace = true }
 tracing = { workspace = true }
-usage = { workspace = true, features = ["completions", "config"] }
+usage-rs = { workspace = true, features = ["completions", "config"] }
 
 # The host sampler reads /proc, so it is Linux-only (production relays are Linux).
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -60,5 +61,10 @@ moq-uring = { workspace = true, optional = true }
 procfs = "0.18"
 
 [dev-dependencies]
+# Runs the tests that need a variable set or unset in a child process given it.
+test-env = { path = "../test-env" }
 # test-util enables tokio::time::pause/advance for the deterministic produce tests.
 tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

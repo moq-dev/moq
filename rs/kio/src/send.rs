@@ -16,6 +16,7 @@ pub trait MaybeSend: Send {}
 #[cfg(not(target_family = "wasm"))]
 impl<T: Send + ?Sized> MaybeSend for T {}
 
+/// `Send` on native targets, no bound at all on wasm.
 #[cfg(target_family = "wasm")]
 pub trait MaybeSend {}
 

@@ -1,4 +1,4 @@
-export class MockChannel extends EventTarget {
+class MockChannel extends EventTarget {
 	binaryType = "blob";
 	bufferedAmount = 0;
 	bufferedAmountLowThreshold = 0;
@@ -66,7 +66,7 @@ export class MockChannel extends EventTarget {
 	}
 }
 
-export class MockPeer {
+class MockPeer {
 	sctp = { maxMessageSize: 65536 };
 	#channel?: MockChannel;
 	#incoming?: MockChannel;

@@ -32,11 +32,11 @@ final server = await Server.listen(
     tlsGenerate: ['localhost'],
   ),
 );
-final broadcast = server.createBroadcast('live');
-broadcast.announce(route: MoqRoute()); // unannounced broadcasts are invisible
+final publication = server.createBroadcast('live');
+publication.announce(route: AnnounceRoute()); // unannounced broadcasts are invisible
 await for (final request in server.requests()) {
   final session = await request.accept();
-  print(session.connects());
+  print(session.state().connects);
 }
 ```
 

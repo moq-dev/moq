@@ -119,6 +119,14 @@ impl<T> ProducerWeak<T> {
 		crate::consumer::consume(&self.state, &self.counts)
 	}
 
+	/// Create a [`ConsumerWeak`], which reads the state without joining the consumer count.
+	pub fn consume_weak(&self) -> ConsumerWeak<T> {
+		ConsumerWeak {
+			state: self.state.clone(),
+			counts: self.counts.clone(),
+		}
+	}
+
 	/// Create a consumer only if the channel is open.
 	///
 	/// The closed check and count increment share the lock held by
@@ -146,10 +154,11 @@ impl<T> ProducerWeak<T> {
 	}
 
 	/// Poll for channel closure, registering the waiter if still open.
+	#[cfg_attr(feature = "_sim", track_caller)]
 	pub fn poll_closed(&self, waiter: &Waiter) -> Poll<()> {
 		let mut state = self.state.lock();
 		if state.closed {
-			return Poll::Ready(());
+			return crate::coop::ready(());
 		}
 
 		waiter.register(&mut state.waiters_closed);
@@ -165,16 +174,17 @@ impl<T> ProducerWeak<T> {
 
 	/// Poll-based variant of [`Self::unused`]: `Ready(Ok(()))` when no consumers
 	/// remain, [`Closed`] if the channel closed first, else `Pending`.
+	#[cfg_attr(feature = "_sim", track_caller)]
 	pub fn poll_unused(&self, waiter: &Waiter) -> Poll<Result<(), Closed>> {
 		// Closure is checked first, matching `Producer::poll_unused`: a closed channel
 		// with no consumers resolves `Closed` from either handle.
 		let mut state = self.state.lock();
 		if state.closed {
-			return Poll::Ready(Err(Closed));
+			return crate::coop::ready(Err(Closed));
 		}
 
 		if self.counts.consumers.load(Ordering::Relaxed) == 0 {
-			return Poll::Ready(Ok(()));
+			return crate::coop::ready(Ok(()));
 		}
 
 		waiter.register(&mut state.waiters_consumer);
@@ -182,7 +192,7 @@ impl<T> ProducerWeak<T> {
 		// Re-check after registration to avoid TOCTOU race where the last
 		// consumer drops between the initial check and waiter registration.
 		if self.counts.consumers.load(Ordering::Relaxed) == 0 {
-			return Poll::Ready(Ok(()));
+			return crate::coop::ready(Ok(()));
 		}
 
 		Poll::Pending
@@ -205,22 +215,23 @@ impl<T> ProducerWeak<T> {
 
 	/// Poll-based variant of [`Self::used`]: `Ready(Ok(()))` once a consumer
 	/// exists, [`Closed`] if the channel closed first, else `Pending`.
+	#[cfg_attr(feature = "_sim", track_caller)]
 	pub fn poll_used(&self, waiter: &Waiter) -> Poll<Result<(), Closed>> {
 		// Closure is checked first, matching `Producer::poll_used`.
 		let mut state = self.state.lock();
 		if state.closed {
-			return Poll::Ready(Err(Closed));
+			return crate::coop::ready(Err(Closed));
 		}
 
 		if self.counts.consumers.load(Ordering::Relaxed) > 0 {
-			return Poll::Ready(Ok(()));
+			return crate::coop::ready(Ok(()));
 		}
 
 		waiter.register(&mut state.waiters_consumer);
 
 		// Re-check after registration to avoid TOCTOU race.
 		if self.counts.consumers.load(Ordering::Relaxed) > 0 {
-			return Poll::Ready(Ok(()));
+			return crate::coop::ready(Ok(()));
 		}
 
 		Poll::Pending
@@ -269,6 +280,7 @@ impl<T> ConsumerWeak<T> {
 	/// Available here so a watcher can register for changes without joining the
 	/// consumer count, which is what [`Producer::unused`](crate::Producer::unused)
 	/// keys off.
+	#[cfg_attr(feature = "_sim", track_caller)]
 	pub fn poll<F, R>(&self, waiter: &Waiter, f: F) -> Poll<Result<R, Ref<'_, T>>>
 	where
 		F: FnOnce(&Ref<'_, T>) -> Poll<R>,
@@ -277,11 +289,11 @@ impl<T> ConsumerWeak<T> {
 		let consumer_state = Ref { state };
 
 		if let Poll::Ready(res) = f(&consumer_state) {
-			return Poll::Ready(Ok(res));
+			return crate::coop::ready(Ok(res));
 		}
 
 		if consumer_state.state.closed {
-			return Poll::Ready(Err(consumer_state));
+			return crate::coop::ready(Err(consumer_state));
 		}
 
 		let mut state = consumer_state.state;
@@ -301,10 +313,11 @@ impl<T> ConsumerWeak<T> {
 	}
 
 	/// Poll for channel closure, registering the waiter if still open.
+	#[cfg_attr(feature = "_sim", track_caller)]
 	pub fn poll_closed(&self, waiter: &Waiter) -> Poll<()> {
 		let mut state = self.state.lock();
 		if state.closed {
-			return Poll::Ready(());
+			return crate::coop::ready(());
 		}
 
 		waiter.register(&mut state.waiters_closed);

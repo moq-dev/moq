@@ -7,7 +7,7 @@
 //!   segments into MoQ (an HTTP *client* that *publishes*).
 //! - [`server`] serves HLS playlists, DASH manifests, and CMAF segments over
 //!   HTTP for MoQ broadcasts (an HTTP *server*). It subscribes only to each
-//!   broadcast's catalog and timeline tracks; media bytes are FETCHed from
+//!   broadcast's catalog and HLS record tracks; media bytes are FETCHed from
 //!   the relay one group at a time, only when a segment is actually requested.
 //!   It serves every request; gate access by layering your own middleware onto
 //!   [`Server::router`](server::Server::router), or parse and authorize each request
@@ -16,7 +16,7 @@
 //! All CMAF byte handling (import via [`moq_mux::container::fmp4::Import`],
 //! export via [`moq_mux::container::fmp4::Muxer`]) lives in `moq-mux`; this
 //! crate owns the HLS playlist and DASH manifest generation, the
-//! timeline-driven playlist window, and the HTTP surface.
+//! record-driven playlist window, and the HTTP surface.
 
 #![warn(missing_docs)]
 
@@ -26,7 +26,6 @@ pub mod import;
 #[cfg(feature = "server")]
 pub mod server;
 
-pub(crate) use error::status_retryable;
 pub use error::*;
 #[cfg(feature = "server")]
 pub use server::Server;

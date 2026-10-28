@@ -1,6 +1,6 @@
 name: Android
 
-# Compiles moq-video for Android, which nothing else on a pull request does.
+# Compiles moq-video for Android, which no merge queue job does.
 # Its MediaCodec encoder and decoder, the `Surface::HardwareBuffer` variant and
 # the `frame::android` module are all `#[cfg(target_os = "android")]`, so every
 # Linux job compiles them to nothing, and a moq-net change that breaks them
@@ -23,31 +23,7 @@ permissions:
   contents: read
 
 on:
-  pull_request:
-    # `closed` is here only so merging/closing a PR cancels its in-flight run
-    # via the concurrency group below; the job itself is skipped on close.
-    types: [opened, synchronize, reopened, closed]
-    paths:
-      - "rs/moq-video/**"
-      - "rs/moq-ffi/**"
-      - "rs/moq-tokio/**"
-      - "rs/moq-mux/**"
-      - "rs/moq-net/**"
-      - "rs/moq-nvenc/**"
-      - "rs/moq-loc/**"
-      - "rs/moq-msf/**"
-      - "rs/moq-json/**"
-      - "rs/moq-flate/**"
-      - "rs/moq-pattern/**"
-      - "rs/hang/**"
-      - "rs/kio/**"
-      - "rs/justfile"
-      - "justfile"
-      - ".cargo/config.toml"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - ".github/workflows/android.yml"
+  workflow_call:
 
 concurrency:
   group: android-${{ github.ref }}
@@ -59,7 +35,6 @@ env:
 jobs:
   android:
     name: Android
-    if: github.event.action != 'closed'
     # x86_64 rather than the arm runners check.yml uses: GitHub documents the
     # Android SDK and NDK as preinstalled on this image.
     runs-on: ubuntu-24.04

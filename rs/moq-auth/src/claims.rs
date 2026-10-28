@@ -78,8 +78,11 @@ pub struct Permissions {
 
 impl Permissions {
 	/// Access granted as these pattern unions.
-	pub fn new(publish: Patterns, subscribe: Patterns) -> Self {
-		Self { publish, subscribe }
+	pub fn new(publish: impl Into<Patterns>, subscribe: impl Into<Patterns>) -> Self {
+		Self {
+			publish: publish.into(),
+			subscribe: subscribe.into(),
+		}
 	}
 
 	/// Whether nothing is granted, which is a refusal.
@@ -116,23 +119,21 @@ pub struct Claims {
 	/// It's mostly for compression and is optional, defaulting to the empty string.
 	pub root: String,
 
-	/// If specified, the user can publish any matching broadcasts.
-	/// If not specified, the user will not publish any broadcasts.
+	/// Patterns the holder may publish, relative to the root.
 	pub publish: Patterns,
 
-	/// If specified, the user can subscribe to any matching broadcasts.
-	/// If not specified, the user will not receive announcements and cannot subscribe to any broadcasts.
+	/// Patterns the holder may subscribe to, relative to the root.
 	pub subscribe: Patterns,
 
 	/// The expiration time of the token as a unix timestamp (`exp`).
-	pub expires: Option<std::time::SystemTime>,
+	pub expires: Option<moq_clock::Wall>,
 
 	/// The issued time of the token as a unix timestamp (`iat`).
-	pub issued: Option<std::time::SystemTime>,
+	pub issued: Option<moq_clock::Wall>,
 
 	/// The time before which the token is refused, as a unix timestamp (`nbf`).
 	/// Enforced by [`Key::verify`](crate::Key::verify).
-	pub not_before: Option<std::time::SystemTime>,
+	pub not_before: Option<moq_clock::Wall>,
 }
 
 impl Claims {
@@ -157,7 +158,7 @@ impl Claims {
 	/// Expire the token at this time. Enforced by [`Key::verify`](crate::Key::verify).
 	///
 	/// Accepts an `Option` so a caller can pass one through without unwrapping it.
-	pub fn with_expires(mut self, at: impl Into<Option<std::time::SystemTime>>) -> Self {
+	pub fn with_expires(mut self, at: impl Into<Option<moq_clock::Wall>>) -> Self {
 		self.expires = at.into();
 		self
 	}
@@ -165,7 +166,7 @@ impl Claims {
 	/// Record when the token was issued. Purely informational; nothing enforces it.
 	///
 	/// Accepts an `Option` so a caller can pass one through without unwrapping it.
-	pub fn with_issued(mut self, at: impl Into<Option<std::time::SystemTime>>) -> Self {
+	pub fn with_issued(mut self, at: impl Into<Option<moq_clock::Wall>>) -> Self {
 		self.issued = at.into();
 		self
 	}
@@ -239,7 +240,7 @@ impl Claims {
 mod tests {
 	use super::*;
 
-	use std::time::{Duration, SystemTime};
+	use std::time::Duration;
 
 	fn patterns(texts: &[&str]) -> Patterns {
 		texts.iter().map(|text| text.parse().unwrap()).collect()
@@ -250,8 +251,8 @@ mod tests {
 			root: "test-path".to_string(),
 			publish: patterns(&["test-pub/**"]),
 			subscribe: patterns(&["test-sub/**"]),
-			expires: Some(SystemTime::now() + Duration::from_secs(3600)),
-			issued: Some(SystemTime::now()),
+			expires: Some(moq_clock::wall() + Duration::from_secs(3600)),
+			issued: Some(moq_clock::wall()),
 			not_before: None,
 		}
 	}

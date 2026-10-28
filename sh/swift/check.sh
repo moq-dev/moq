@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
+    exec bash "$(dirname "$0")/../local.sh" bash "$0" "$@"
+fi
+
 # Local smoke check for the Swift wrapper. Builds moq-ffi for the host
 # macOS target, lays out a local XCFramework, and runs `swift test`.
 #
@@ -41,8 +45,7 @@ fi
 
 HOST_TARGET=$(rustc -vV | awk '/^host:/ {print $2}')
 # Debug by default. This is a compile-and-test gate, not a benchmark, and a
-# release build of moq-ffi shares no artifacts with the debug ones `just ci check`
-# and `just ci test` already produce, so it was a third full compile of the
+# release build of moq-ffi shares no artifacts with the debug ones `just ci` already produces, so it was a third full compile of the
 # dependency tree (~5 min of CI on its own, plus a whole target/release tree on
 # a runner that was already tight on disk). Set MOQ_FFI_PROFILE=release for an
 # optimized cdylib; the shipped artifacts are built by rs/moq-ffi/build.sh,
@@ -54,7 +57,8 @@ CARGO_PROFILE=()
 [[ "$PROFILE" == "release" ]] && CARGO_PROFILE=(--release)
 
 echo "swift check: building moq-ffi for $HOST_TARGET..."
-cargo build --locked ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"} --package moq-ffi \
+# `openh264`, as release builds ship it: the software encoder the tests rely on.
+cargo build --locked ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"} --package moq-ffi --features openh264 \
     --manifest-path "$WORKSPACE_DIR/Cargo.toml"
 
 TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE_DIR/Cargo.toml" --no-deps |
@@ -70,7 +74,7 @@ STATIC="$TARGET_BASE/$PROFILE/libmoq_ffi.a"
 # Generate bindings.
 BINDGEN_OUT=$(mktemp -d)
 trap 'rm -rf "$BINDGEN_OUT"' EXIT
-cargo run --locked ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"} --package uniffi-bindgen \
+cargo run --locked ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"} --package uniffi-bindgen --features cli \
     --manifest-path "$WORKSPACE_DIR/Cargo.toml" -- \
     generate --library "$CDYLIB" --language swift --out-dir "$BINDGEN_OUT"
 
@@ -98,4 +102,4 @@ bash "$WORKSPACE_DIR/doc/lib/samples.sh" swift "$WORKSPACE_DIR/doc/lib/swift/ind
 # swift/Package.swift already declares a path-based MoqFFIBinary pointing
 # at the xcframework laid out above, so no manifest mutation is needed.
 cd "$SWIFT_DIR"
-env ${xcode_sdk_env[@]+"${xcode_sdk_env[@]}"} swift test
+env ${xcode_sdk_env[@]+"${xcode_sdk_env[@]}"} swift test "$@"

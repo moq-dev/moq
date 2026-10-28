@@ -3,8 +3,11 @@
  * a watch coming and going over held watches and attached sessions.
  */
 
+import { Manual } from "@moq/clock";
+import { Once } from "@moq/signals";
 import { announcedView } from "../src/announced.test-util";
 import * as Announce from "../src/announced.ts";
+import { AuthSession } from "../src/auth_session.ts";
 import { Producer as BroadcastProducer } from "../src/broadcast.ts";
 import type { Established } from "../src/connection/established.ts";
 import { forwardAnnounced } from "../src/connection/forward.ts";
@@ -17,6 +20,8 @@ const headCounts = [1, 4, 16];
 const routeCounts = [8, 32, 128];
 const updates = 32;
 let checksum = 0;
+// Keep discovery's linger fixed while measuring with the host's performance clock.
+new Manual().install();
 
 // Let every interest stream's forwarding loop drain its queue.
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -28,7 +33,12 @@ class FakeSession {
 	die!: () => void;
 
 	constructor() {
-		registerWire(this, { consume: () => new BroadcastProducer().consume() });
+		registerWire(this, {
+			consume: () => new BroadcastProducer().consume(),
+			goaway: new Once(),
+			exclusive: false,
+			auth: new AuthSession({ peerGrant: { publish: new Path.Patterns(), subscribe: new Path.Patterns() } }),
+		});
 		this.closed = new Promise((resolve) => {
 			this.die = () => resolve(null);
 		});
@@ -37,6 +47,8 @@ class FakeSession {
 	announced(): Announce.Consumer {
 		const stream = new Announce.Producer();
 		this.streams.push(stream);
+		// This peer has no initial routes; later announcements are live updates.
+		stream.synced();
 		return stream.consume();
 	}
 }

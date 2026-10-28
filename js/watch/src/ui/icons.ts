@@ -1,5 +1,4 @@
 import audio from "./icons/audio.svg?raw";
-import buffer from "./icons/buffer.svg?raw";
 import captions from "./icons/captions.svg?raw";
 import check from "./icons/check.svg?raw";
 import close from "./icons/close.svg?raw";
@@ -17,9 +16,9 @@ import volumeHigh from "./icons/volume-high.svg?raw";
 import volumeLow from "./icons/volume-low.svg?raw";
 import volumeMedium from "./icons/volume-medium.svg?raw";
 
+export { icon } from "@moq/ui";
 export {
 	audio,
-	buffer,
 	captions,
 	check,
 	close,
@@ -37,12 +36,3 @@ export {
 	volumeLow,
 	volumeMedium,
 };
-
-export function icon(svg: string): HTMLElement {
-	const span = document.createElement("span");
-	span.className = "flex-center";
-	span.setAttribute("role", "img");
-	span.setAttribute("aria-hidden", "true");
-	span.innerHTML = svg;
-	return span;
-}

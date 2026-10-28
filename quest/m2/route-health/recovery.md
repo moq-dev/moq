@@ -5,6 +5,8 @@
 Endpoints and relays automatically move a stalled track to a verified working
 same-epoch alternate, then return to the preferred route after demonstrated
 recovery, while preserving logical readers and bounded control/media overhead.
+This includes a route that dies without a close: the track moves before the
+QUIC idle timeout declares it dead.
 Epochless broadcasts never enter this active/passive mechanism.
 
 ## Plan

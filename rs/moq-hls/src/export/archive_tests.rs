@@ -1,35 +1,35 @@
 //! Serving a `moq-archive` recording as HLS.
 //!
-//! A [`moq_archive::Reader`] replays each track's timeline onto a broadcast and answers FETCH from
-//! its record objects, so the exporter serves it exactly like a live broadcast. These tests pin
-//! the storage traffic that composition produces: playlists read only the timelines, and a segment
-//! GETs only objects of the requested rendition.
+//! A source broadcast, its catalog and HLS records included, is recorded by an
+//! [`moq_archive::Producer`] and served back by an [`moq_archive::Consumer`], so the exporter
+//! serves the archived catalog exactly like a live broadcast. These tests pin the storage traffic
+//! that composition produces: playlists read only the records, and a segment GETs only objects
+//! of the requested rendition.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use futures::stream::BoxStream;
-use hang::timeline::{Position, Record};
+use hang::hls::Record;
+use moq_archive::Store;
 use moq_archive::object_store::memory::InMemory;
 use moq_archive::object_store::path::Path;
 use moq_archive::object_store::{
 	self, CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
 	PutMultipartOptions, PutOptions, PutPayload, PutResult,
 };
-use moq_archive::{Frame, Group, Info, Object, Store, reader};
-use moq_json::window;
+use moq_net::{Timescale, Timestamp, group, track};
 
 use super::*;
 
-/// In-memory store that records every GET path and counts listings.
+/// In-memory store that records every GET path.
 #[derive(Debug, Clone, Default)]
 struct Counting {
 	inner: Arc<InMemory>,
 	gets: Arc<Mutex<Vec<String>>>,
-	lists: Arc<AtomicUsize>,
 	/// Fail every media GET, so nothing can quietly depend on one.
 	reject_media: Arc<AtomicBool>,
 }
@@ -38,11 +38,6 @@ impl Counting {
 	/// Every GET since the last call.
 	fn take(&self) -> Vec<String> {
 		std::mem::take(&mut *self.gets.lock().unwrap())
-	}
-
-	/// Listings since the store was created.
-	fn lists(&self) -> usize {
-		self.lists.load(Ordering::SeqCst)
 	}
 
 	fn reject_media(&self, reject: bool) {
@@ -94,7 +89,6 @@ impl ObjectStore for Counting {
 	}
 
 	fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
-		self.lists.fetch_add(1, Ordering::SeqCst);
 		self.inner.list(prefix)
 	}
 
@@ -107,228 +101,199 @@ impl ObjectStore for Counting {
 	}
 }
 
-/// One track's timeline encoder, as `moq_archive::Writer` drives it.
-struct Encoder {
-	encoder: window::Encoder<Record>,
-	/// Next timeline group sequence.
-	group: u64,
+/// One rendition of the source: its media track, and the records that segment it.
+struct Source {
+	media: track::Producer,
+	records: moq_mux::hls::Producer,
+	/// The record track, to finish its retained group with the recording.
+	track: track::Producer,
 	/// Next record sequence.
 	record: u64,
 }
 
-/// Writes recording objects the way `moq_archive::Writer` lays them out, with full control over
-/// each record's timing and groups.
+/// A source broadcast recorded into a store as it publishes.
 struct Recording {
+	/// The store's own handle, for its GET log.
+	counting: Counting,
 	store: Store<Counting>,
-	encoders: HashMap<String, Encoder>,
+	broadcast: moq_net::broadcast::Producer,
+	catalog: moq_json::snapshot::Producer<hang::Catalog>,
+	sources: HashMap<String, Source>,
+	recorder: tokio::task::JoinHandle<moq_archive::Result<()>>,
 }
 
 impl Recording {
-	async fn new(tracks: &[&str]) -> Self {
-		let store = Store::new(Counting::default(), "rec");
-		let mut encoders = HashMap::new();
-		for track in tracks {
+	async fn new() -> Self {
+		let counting = Counting::default();
+		let store = Store::new(counting.clone(), "rec");
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
+			.unwrap();
+		let mut json = moq_json::snapshot::Config::default();
+		json.deltas = false;
+		let mut catalog = moq_json::snapshot::Producer::new(track, json);
+		catalog
+			.update(moq_net::Timed::from(&self::catalog()).at(Timestamp::now()))
+			.unwrap();
+
+		let mut sources = HashMap::new();
+		for name in ["360p", "1080p", "audio"] {
 			// Legacy media is stamped in microseconds.
-			store.put_info(track, &Info::new(1, 1_000_000).unwrap()).await.unwrap();
-			store
-				.put_info(&timeline(track), &Info::new(0, 1000).unwrap())
-				.await
+			let media = track::Info::default()
+				.with_timescale(Timescale::new(1_000_000).unwrap())
+				.with_priority(1);
+			let media = broadcast.create_track(name, media).unwrap();
+			let track = broadcast
+				.create_track(hang::hls::default_name(name), moq_mux::hls::Producer::info())
 				.unwrap();
-			let config = window::ProducerConfig::default()
-				.with_compression(true)
-				.with_op_ratio(0);
-			let encoder = Encoder {
-				encoder: window::Encoder::new(config),
-				group: 0,
+			let source = Source {
+				media,
+				records: moq_mux::hls::Producer::new(track.clone()),
+				track,
 				record: 0,
 			};
-			encoders.insert(track.to_string(), encoder);
+			sources.insert(name.to_string(), source);
 		}
-		Self { store, encoders }
+
+		// The source publishes in bursts, so the budget covers a whole recording.
+		let config = moq_archive::producer::Config::default()
+			.with_flush(Duration::from_millis(100))
+			.with_max_delay(Duration::from_secs(3600));
+		let recorder = tokio::spawn(moq_archive::Producer::new(store.clone(), broadcast.consume(), config).run());
+		// Subscribed before anything is published, so every group is recorded live.
+		for source in sources.values() {
+			while source.media.subscription().is_none() || source.track.subscription().is_none() {
+				tokio::time::sleep(Duration::from_millis(1)).await;
+			}
+		}
+		Self {
+			counting,
+			store,
+			broadcast,
+			catalog,
+			sources,
+			recorder,
+		}
 	}
 
-	/// Store and commit `track`'s next record: `groups`, each a list of frame timestamps in micros,
-	/// spanning `pts..pts + duration` in milliseconds, popping `pop` older records.
-	async fn add(&mut self, track: &str, pts: u64, duration: u64, groups: &[(u64, &[u64])], pop: u64) {
-		let encoder = self.encoders.get_mut(track).unwrap();
-		let sequence = encoder.record;
-		encoder.record += 1;
-		let first = groups.first().unwrap().0;
-		let last = groups.last().unwrap().0;
-		let record = Record::new(
-			sequence,
-			pts,
-			duration,
-			Position::group(first),
-			Position::group(last + 1),
-		);
-
-		let groups = groups
-			.iter()
-			.map(|&(sequence, frames)| Group {
-				sequence,
-				frames: frames
-					.iter()
-					.enumerate()
-					.map(|(index, &micros)| legacy(track, micros, index == 0))
-					.collect(),
-			})
-			.collect();
-		self.store
-			.put_segments(track, sequence, &Object::new(groups))
-			.await
-			.unwrap();
-
-		let mut payloads = Vec::new();
-		let pending = encoder.encoder.push(&record).unwrap();
-		payloads.push((pending.keyframe, pending.payload.clone()));
-		pending.commit();
-		if let Some(pending) = encoder.encoder.pop(pop).unwrap() {
-			payloads.push((pending.keyframe, pending.payload.clone()));
-			pending.commit();
-		}
-		let mut groups: Vec<Group> = Vec::new();
-		for (keyframe, payload) in payloads {
-			if keyframe || groups.is_empty() {
-				groups.push(Group {
-					sequence: encoder.group,
-					frames: Vec::new(),
-				});
-				encoder.group += 1;
+	/// Publish `track`'s next segment from `pts` milliseconds: `groups`, each a list of frame
+	/// timestamps in micros.
+	fn add(&mut self, track: &str, pts: u64, groups: &[(u64, &[u64])]) {
+		let source = self.sources.get_mut(track).unwrap();
+		for &(sequence, frames) in groups {
+			let mut group = source.media.create_group(group::Info { sequence }).unwrap();
+			for (index, &micros) in frames.iter().enumerate() {
+				let timestamp = Timestamp::from_micros(micros).unwrap();
+				group.write_frame(timestamp, legacy(track, micros, index == 0)).unwrap();
 			}
-			let frame = Frame {
-				timestamp: record.pts,
-				payload,
-			};
-			groups.last_mut().unwrap().frames.push(frame);
+			group.finish().unwrap();
 		}
+		let first = groups.first().unwrap().0;
+		self.push(track, Record::new(0, first, pts));
+	}
+
+	/// Record that `track`'s content stopped at `pts` milliseconds, before group `group`.
+	fn stop(&mut self, track: &str, group: u64, pts: u64) {
+		self.push(track, Record::new(0, group, pts).with_duration(0));
+	}
+
+	fn push(&mut self, track: &str, mut record: Record) {
+		let source = self.sources.get_mut(track).unwrap();
+		record.sequence = source.record;
+		source.record += 1;
+		source.records.push(&record).unwrap();
+	}
+
+	/// Wait until the recorder subscribed to every track and stored what was published.
+	async fn stored(&self) {
+		tokio::time::sleep(Duration::from_secs(5)).await;
+	}
+
+	/// End the source cleanly, then wait for the recorder to mark the archive complete.
+	async fn finish(mut self) -> Store<Counting> {
+		self.catalog.finish().unwrap();
+		for source in self.sources.values_mut() {
+			source.media.finish().unwrap();
+			source.records.finish().unwrap();
+		}
+		self.stored().await;
+		self.broadcast.close();
+		self.recorder.await.unwrap().unwrap();
 		self.store
-			.put_segments(&timeline(track), sequence, &Object::new(groups))
-			.await
-			.unwrap();
 	}
 
 	/// Every GET since the last call.
 	fn gets(&self) -> Vec<String> {
-		self.store.inner().take()
+		self.counting.take()
 	}
-
-	fn timelines(&self) -> std::collections::BTreeMap<String, String> {
-		self.encoders
-			.keys()
-			.map(|track| (track.clone(), timeline(track)))
-			.collect()
-	}
-}
-
-fn timeline(track: &str) -> String {
-	hang::timeline::default_name(track)
 }
 
 /// One Legacy frame: a VP8 keyframe for video (geometry the muxer can parse), filler otherwise.
-fn legacy(track: &str, micros: u64, keyframe: bool) -> Frame {
+fn legacy(track: &str, micros: u64, keyframe: bool) -> Bytes {
 	let payload: &'static [u8] = match (track.starts_with("audio"), keyframe) {
 		(true, _) => &[0xFC, 0xFF, 0xFE],
 		(false, true) => &[0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a, 0x40, 0x01, 0xf0, 0x00],
 		(false, false) => &[0x31, 0x00, 0x00],
 	};
 	let frame = hang::container::Frame {
-		timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
+		timestamp: Timestamp::from_micros(micros).unwrap(),
 		payload: Bytes::from_static(payload),
 	};
 	let mut encoded = BytesMut::new();
 	frame.encode(&mut encoded).unwrap();
-	Frame {
-		timestamp: micros,
-		payload: encoded.freeze(),
-	}
+	encoded.freeze()
 }
 
-/// A live-style archive entry naming every rendition's timeline.
-fn live() -> hang::catalog::Archive {
-	let mut archive = hang::catalog::Archive::new();
-	for track in ["360p", "1080p", "audio"] {
-		archive.timelines.insert(track.to_string(), timeline(track));
-	}
-	archive
-}
-
-/// The archive entry a replay advertises: the recording's timelines, durable in its store.
-fn durable() -> hang::catalog::Archive {
-	let mut archive = live();
-	archive.store = Some("memory:///rec/".parse().unwrap());
-	archive.version = Some(hang::catalog::Archive::VERSION);
-	archive
-}
-
-/// The catalog an exporter is handed: every rendition's config, plus `archive`. Out-of-band
+/// The source's catalog: every rendition's config, each naming its HLS records. Out-of-band
 /// configs, so no init needs media.
-fn catalog(archive: hang::catalog::Archive) -> hang::Catalog {
+fn catalog() -> hang::Catalog {
+	let hls = |track: &str| hang::catalog::Hls::new(hang::hls::default_name(track), Duration::from_secs(2));
 	let mut catalog = hang::Catalog::default();
-	catalog.archive = Some(archive);
 	for (name, width, height) in [("360p", 640, 360), ("1080p", 1920, 1080)] {
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.coded_width = Some(width);
 		config.coded_height = Some(height);
+		config.hls = Some(hls(name));
 		catalog.video.renditions.insert(name.to_string(), config);
 	}
-	let audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+	let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+	audio.hls = Some(hls("audio"));
 	catalog.audio.renditions.insert("audio".to_string(), audio);
 	catalog
 }
 
-/// A recording served back through an origin: the reader's broadcast carries the supplied
-/// catalog, and a broadcaster exports it.
+/// An archive served back through an origin by a consumer, and a broadcaster exporting it.
 struct Replay {
-	/// Taken to supply finality.
-	reader: Option<moq_archive::Reader<Counting>>,
 	broadcaster: Arc<Broadcaster>,
-	_catalog: moq_json::snapshot::Producer<hang::Catalog>,
-	_broadcast: moq_net::broadcast::Producer,
+	/// Keeps the served broadcast's origin open.
 	_origin: moq_net::origin::Producer,
+	consumer: tokio::task::JoinHandle<moq_archive::Result<()>>,
+	driver: tokio::task::JoinHandle<moq_net::Error>,
 }
 
 impl Replay {
-	async fn open(recording: &Recording, cache: u64, archive: hang::catalog::Archive) -> Self {
-		Self::open_with(recording, cache, archive, Config::default()).await
-	}
-
-	async fn open_with(recording: &Recording, cache: u64, archive: hang::catalog::Archive, config: Config) -> Self {
+	async fn open(store: &Store<Counting>, cache: u64) -> Self {
 		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
-		tokio::spawn(moq_net::time::run(driver));
+		let driver = tokio::spawn(moq_net::time::run(driver));
 		let broadcast = origin.create_broadcast("rec").unwrap();
-
-		let track = broadcast
-			.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
-			.unwrap();
-		let mut json = moq_json::snapshot::Config::default();
-		json.delta_ratio = 0;
-		let mut catalog = moq_json::snapshot::Producer::new(track, json);
-		catalog
-			.update(moq_net::Timed::from(&self::catalog(archive)).at(moq_net::Timestamp::now()))
-			.unwrap();
-
-		let serving = reader::Config::new(recording.timelines()).with_cache(cache);
-		let reader = moq_archive::Reader::open(recording.store.clone(), &broadcast, serving)
+		let serving = moq_archive::consumer::Config::default().with_cache(cache);
+		let consumer = moq_archive::Consumer::open(store.clone(), broadcast.broadcast().clone(), serving)
 			.await
 			.unwrap();
-		tokio::spawn(reader.serve());
+		let consumer = tokio::spawn(consumer.run());
 		broadcast.announce(Default::default()).unwrap();
-		for _ in 0..10 {
-			tokio::task::yield_now().await;
-		}
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "rec").await, config);
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "rec").await, Config::default());
 		tokio::time::timeout(Duration::from_secs(5), broadcaster.ready())
 			.await
-			.expect("a rendition becomes playable");
+			.expect("a rendition becomes playable or fails");
 
 		Self {
-			reader: Some(reader),
 			broadcaster,
-			_catalog: catalog,
-			_broadcast: broadcast,
 			_origin: origin,
+			consumer,
+			driver,
 		}
 	}
 
@@ -360,128 +325,101 @@ impl Replay {
 	}
 }
 
-fn is_media(path: &str) -> bool {
-	path.contains("/segments/") && !path.contains("timeline")
-}
-
-/// Three 2s segments: one keyframe group per video record, four audio groups per audio record.
-/// The first video rendition by name, 1080p, is the reference.
-async fn three_segments() -> Recording {
-	segments(3).await
-}
-
-/// `count` 2s segments, laid out like [`three_segments`].
-async fn segments(count: u64) -> Recording {
-	segments_with(count, None).await
-}
-
-async fn bounded_segments(count: u64) -> Recording {
-	segments_with(count, Some(4)).await
-}
-
-async fn segments_with(count: u64, checkpoint: Option<usize>) -> Recording {
-	let mut recording = Recording::new(&["360p", "1080p", "audio"]).await;
-	if let Some(limit) = checkpoint {
-		for encoder in recording.encoders.values_mut() {
-			encoder.encoder = window::Encoder::new(
-				window::ProducerConfig::default()
-					.with_compression(true)
-					.with_checkpoint_records(limit)
-					.with_op_ratio(0),
-			);
-		}
+impl Drop for Replay {
+	fn drop(&mut self) {
+		self.consumer.abort();
+		self.driver.abort();
 	}
+}
+
+/// The record tracks' suffix as the store escapes it in a path.
+const HLS: &str = "%2Ehls";
+
+/// A stored media object: neither records, the catalog, nor a marker.
+fn is_media(path: &str) -> bool {
+	let name = path.rsplit('/').next().unwrap_or_default();
+	let marker = [".info", "end", ".end"].contains(&name);
+	!marker && !path.contains(HLS) && !path.contains("catalog")
+}
+
+/// `count` 2s segments: one keyframe group per video segment, four audio groups per audio one.
+async fn segments(count: u64) -> Recording {
+	let mut recording = Recording::new().await;
 	for segment in 0..count {
-		let pts = segment * 2_000_000;
-		for video in ["360p", "1080p"] {
-			recording
-				.add(video, segment * 2000, 2000, &[(segment, &[pts, pts + 1_000_000])], 0)
-				.await;
-		}
-		let audio: Vec<(u64, [u64; 1])> = (0..4).map(|i| (segment * 4 + i, [pts + i * 500_000])).collect();
-		let audio: Vec<(u64, &[u64])> = audio
-			.iter()
-			.map(|(sequence, frames)| (*sequence, &frames[..]))
-			.collect();
-		recording.add("audio", segment * 2000, 2000, &audio, 0).await;
+		add_segment(&mut recording, segment);
 	}
 	recording
 }
 
-#[tokio::test]
-async fn playlists_read_only_timelines_and_segments_their_own_objects() {
-	let recording = three_segments().await;
-	let replay = Replay::open(&recording, 64 * 1024 * 1024, durable()).await;
+fn add_segment(recording: &mut Recording, segment: u64) {
+	let pts = segment * 2_000_000;
+	for video in ["360p", "1080p"] {
+		recording.add(video, segment * 2000, &[(segment, &[pts, pts + 1_000_000])]);
+	}
+	let audio: Vec<(u64, [u64; 1])> = (0..4).map(|i| (segment * 4 + i, [pts + i * 500_000])).collect();
+	let audio: Vec<(u64, &[u64])> = audio
+		.iter()
+		.map(|(sequence, frames)| (*sequence, &frames[..]))
+		.collect();
+	recording.add("audio", segment * 2000, &audio);
+}
+
+#[tokio::test(start_paused = true)]
+async fn playlists_read_only_records_and_segments_their_own_objects() {
+	let recording = segments(3).await;
+	recording.stored().await;
+	let replay = Replay::open(&recording.store, 64 * 1024 * 1024).await;
 
 	let master = replay.broadcaster.master_playlist(None);
 	assert!(master.contains("video/360p/media.m3u8") && master.contains("video/1080p/media.m3u8"));
 
 	// Render and reload every playlist with media GETs refused: shared numbering, and not one
-	// media GET. The reference lists every segment; the others hold back the newest until their
-	// own timeline passes its end, or ends.
-	recording.store.inner().reject_media(true);
+	// media GET. The newest segment waits for the record after it.
+	recording.counting.reject_media(true);
 	for _ in 0..2 {
-		for (kind, name, listed) in [
-			(Kind::Video, "1080p", 3),
-			(Kind::Video, "360p", 2),
-			(Kind::Audio, "audio", 3),
-		] {
+		for (kind, name) in [(Kind::Video, "1080p"), (Kind::Video, "360p"), (Kind::Audio, "audio")] {
 			let playlist = replay.playlist(kind, name).await;
+			let tag = replay.broadcaster.rendition(kind, name).unwrap().tag().to_string();
 			for segment in 0..3 {
-				let line = format!("seg/29b1cd67.{segment}.m4s\n");
-				assert_eq!(playlist.contains(&line), segment < listed, "{name}: {playlist}");
+				let line = format!("seg/{tag}.{segment}.m4s\n");
+				assert_eq!(playlist.contains(&line), segment < 2, "{name}: {playlist}");
 			}
-			assert!(!playlist.contains("#EXT-X-ENDLIST"), "no finality was supplied");
+			assert!(!playlist.contains("#EXT-X-ENDLIST"), "the recording is still growing");
 		}
 	}
 	let gets = recording.gets();
-	assert!(gets.iter().any(|path| path.contains("timeline")), "{gets:?}");
-	assert!(
-		!gets.iter().any(|path| is_media(path)),
-		"playlists must not GET media: {gets:?}"
-	);
-	recording.store.inner().reject_media(false);
-	// A segment resolves its objects from the timelines: no listing, no index object.
-	let lists = recording.store.inner().lists();
+	for rendition in ["360p", "1080p", "audio"] {
+		assert!(
+			gets.contains(&format!("rec/{rendition}/.info")),
+			"track properties bind before media: {gets:?}"
+		);
+	}
+	assert!(gets.iter().any(|path| path.contains(HLS)), "{gets:?}");
+	recording.counting.reject_media(false);
 
-	// Switching renditions downloads only the selected rendition's object.
-	let low = replay
-		.rendition(Kind::Video, "360p")
-		.listed_segment(1)
-		.await
-		.unwrap()
-		.unwrap();
-	assert_eq!(&low[4..8], b"moof");
-	assert_eq!(
-		recording.gets(),
-		["rec/360p/.info", "rec/360p/segments/0000000000000000001"]
-	);
-	let high = replay
-		.rendition(Kind::Video, "1080p")
-		.listed_segment(2)
-		.await
-		.unwrap()
-		.unwrap();
-	assert_eq!(&high[4..8], b"moof");
-	assert_eq!(
-		recording.gets(),
-		["rec/1080p/.info", "rec/1080p/segments/0000000000000000002"]
-	);
+	// Switching renditions downloads only the selected rendition's objects.
+	for (kind, name, segment) in [
+		(Kind::Video, "360p", 1),
+		(Kind::Video, "1080p", 1),
+		// An audio segment spans four groups.
+		(Kind::Audio, "audio", 1),
+	] {
+		let media = replay
+			.rendition(kind, name)
+			.listed_segment(segment)
+			.await
+			.unwrap()
+			.unwrap();
+		assert_eq!(&media[4..8], b"moof");
+		let gets = recording.gets();
+		assert!(!gets.is_empty(), "{name}");
+		assert!(
+			gets.iter().all(|path| path.starts_with(&format!("rec/{name}/"))),
+			"{name}: {gets:?}"
+		);
+	}
 
-	// An audio segment spans four groups but still costs one object GET.
-	let audio = replay
-		.rendition(Kind::Audio, "audio")
-		.listed_segment(1)
-		.await
-		.unwrap()
-		.unwrap();
-	assert_eq!(&audio[4..8], b"moof");
-	assert_eq!(
-		recording.gets(),
-		["rec/audio/.info", "rec/audio/segments/0000000000000000001"]
-	);
-
-	// A repeated request hits the reader's cache, including the immutable `.info`.
+	// A repeated request hits the consumer's cache.
 	replay
 		.rendition(Kind::Video, "360p")
 		.listed_segment(1)
@@ -489,18 +427,18 @@ async fn playlists_read_only_timelines_and_segments_their_own_objects() {
 		.unwrap()
 		.unwrap();
 	assert_eq!(recording.gets(), Vec::<String>::new());
-	assert_eq!(recording.store.inner().lists(), lists, "segments never list");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_bounded_cache_rereads_evicted_objects() {
-	let recording = three_segments().await;
+	let recording = segments(3).await;
+	recording.stored().await;
 	// Too small for any object, so nothing stays cached.
-	let replay = Replay::open(&recording, 1, durable()).await;
+	let replay = Replay::open(&recording.store, 1).await;
 	replay.playlist(Kind::Audio, "audio").await;
 	recording.gets();
 
-	// Each of the segment's four groups misses the cache and GETs the same object again.
+	// Each of the segment's four groups misses the cache and GETs its object again.
 	let audio = replay
 		.rendition(Kind::Audio, "audio")
 		.listed_segment(1)
@@ -509,266 +447,124 @@ async fn a_bounded_cache_rereads_evicted_objects() {
 		.unwrap();
 	assert_eq!(&audio[4..8], b"moof");
 	let gets: Vec<String> = recording.gets().into_iter().filter(|path| is_media(path)).collect();
-	assert_eq!(gets, vec!["rec/audio/segments/0000000000000000001"; 4]);
+	assert_eq!(gets.len(), 4, "{gets:?}");
 }
 
-#[tokio::test]
-async fn missing_rendition_segments_are_gaps_and_time_jumps_are_discontinuities() {
-	let mut recording = Recording::new(&["360p", "1080p", "audio"]).await;
-	recording.add("1080p", 0, 2000, &[(0, &[0])], 0).await;
-	recording.add("360p", 0, 8000, &[(0, &[0])], 0).await;
-	// 360p stored nothing for segment 1.
-	recording.add("1080p", 2000, 2000, &[(1, &[2_000_000])], 0).await;
-	// Content time jumps from 4s to 10s.
-	recording.add("1080p", 10_000, 2000, &[(2, &[10_000_000])], 0).await;
-	recording.add("360p", 10_000, 2000, &[(1, &[10_000_000])], 0).await;
+#[tokio::test(start_paused = true)]
+async fn stopped_segments_are_gaps_and_a_resume_is_a_discontinuity() {
+	let mut recording = Recording::new().await;
+	// 1080p: two segments, a stop, then content resumes at 10s.
+	recording.add("1080p", 0, &[(0, &[0])]);
+	recording.add("1080p", 2000, &[(1, &[2_000_000])]);
+	recording.stop("1080p", 2, 4000);
+	recording.add("1080p", 10_000, &[(2, &[10_000_000])]);
+	recording.stop("1080p", 3, 12_000);
+	// 360p starts its segment 1 a second and a half late. Each rendition lists its own records,
+	// so it is listed as is.
+	recording.add("360p", 0, &[(0, &[0])]);
+	recording.add("360p", 3500, &[(1, &[3_500_000])]);
+	recording.stop("360p", 2, 4000);
+	recording.add("360p", 10_000, &[(2, &[10_000_000])]);
+	recording.stop("360p", 3, 12_000);
+	recording.add("audio", 0, &[(0, &[0])]);
+	recording.stop("audio", 1, 2000);
+	let counting = recording.counting.clone();
+	let store = recording.finish().await;
 
-	let mut replay = Replay::open(&recording, 64 * 1024 * 1024, durable()).await;
-	// Finality resolves each rendition's newest segment.
-	replay.reader.take().unwrap().finish().unwrap();
-	let low = replay
+	let replay = Replay::open(&store, 64 * 1024 * 1024).await;
+	replay
 		.playlist_until(Kind::Video, "360p", |playlist| playlist.contains("#EXT-X-ENDLIST"))
 		.await;
-	let expected = concat!(
-		"#EXTINF:2.00000,\nseg/29b1cd67.0.m4s\n",
-		"#EXT-X-GAP\n#EXTINF:2.00000,\nseg/29b1cd67.1.m4s\n",
-		"#EXT-X-DISCONTINUITY\n#EXTINF:2.00000,\nseg/29b1cd67.2.m4s\n",
-	);
-	assert!(low.contains(expected), "{low}");
-	let high = replay.playlist(Kind::Video, "1080p").await;
-	assert!(!high.contains("#EXT-X-GAP"), "{high}");
-	assert!(
-		high.contains("#EXT-X-DISCONTINUITY\n#EXTINF:2.00000,\nseg/29b1cd67.2.m4s\n"),
-		"{high}"
-	);
+	let low = replay.rendition(Kind::Video, "360p").snapshot();
+	let flags = |snapshot: &playlist::Snapshot| {
+		snapshot
+			.segments
+			.iter()
+			.map(|s| (s.segment, s.gap, s.discontinuity))
+			.collect::<Vec<_>>()
+	};
+	let expected = [
+		(0, false, false),
+		(1, false, false),
+		(2, true, false),
+		(3, false, true),
+		(4, true, false),
+	];
+	assert_eq!(flags(&low), expected);
+	replay
+		.playlist_until(Kind::Video, "1080p", |playlist| playlist.contains("#EXT-X-ENDLIST"))
+		.await;
+	let high = replay.rendition(Kind::Video, "1080p").snapshot();
+	assert_eq!(flags(&high), expected);
 
 	// A gap is never fetched.
-	recording.gets();
+	counting.take();
 	let rendition = replay.rendition(Kind::Video, "360p");
-	assert!(rendition.listed_segment(1).await.unwrap().is_none());
-	assert!(!recording.gets().iter().any(|path| is_media(path)));
-	let after = rendition.listed_segment(2).await.unwrap().unwrap();
+	assert!(rendition.listed_segment(2).await.unwrap().is_none());
+	assert!(!counting.take().iter().any(|path| is_media(path)));
+	let late = rendition.listed_segment(1).await.unwrap().unwrap();
+	assert_eq!(&late[4..8], b"moof");
+	let after = rendition.listed_segment(3).await.unwrap().unwrap();
 	assert_eq!(&after[4..8], b"moof");
 }
 
-#[tokio::test]
-async fn a_growing_recording_ends_only_on_caller_finality() {
-	let mut recording = three_segments().await;
-	let mut replay = Replay::open(&recording, 64 * 1024 * 1024, durable()).await;
+/// A growing recording is followed as the archive grows, and ends once its producer marks it
+/// complete.
+#[tokio::test(start_paused = true)]
+async fn a_growing_recording_ends_with_its_markers() {
+	let mut recording = segments(3).await;
+	recording.stored().await;
+	let replay = Replay::open(&recording.store, 64 * 1024 * 1024).await;
 	replay.playlist(Kind::Video, "1080p").await;
+	let tag = replay
+		.broadcaster
+		.rendition(Kind::Video, "1080p")
+		.unwrap()
+		.tag()
+		.to_string();
 
-	// A DVR commit: segment 3 arrives and segment 0 expires.
-	recording.add("1080p", 6000, 2000, &[(3, &[6_000_000])], 1).await;
-	recording.gets();
-	let mut reader = replay.reader.take().unwrap();
-	reader.refresh().await.unwrap();
+	add_segment(&mut recording, 3);
+	recording.stored().await;
 	let playlist = replay
 		.playlist_until(Kind::Video, "1080p", |playlist| {
-			playlist.contains("seg/29b1cd67.3.m4s\n")
+			playlist.contains(&format!("seg/{tag}.2.m4s\n"))
 		})
 		.await;
-	assert!(playlist.contains("#EXT-X-MEDIA-SEQUENCE:1\n"), "{playlist}");
-	assert!(!playlist.contains("seg/29b1cd67.0.m4s"), "{playlist}");
 	assert!(
 		!playlist.contains("#EXT-X-ENDLIST"),
-		"a recording without finality stays live"
-	);
-	let gets = recording.gets();
-	assert!(
-		!gets.iter().any(|path| is_media(path)),
-		"following reads only the timelines: {gets:?}"
+		"a recording without markers stays live"
 	);
 
-	// The store holds no completion marker; the caller supplies finality.
-	reader.finish().unwrap();
+	for track in ["360p", "1080p", "audio"] {
+		let group = if track == "audio" { 16 } else { 4 };
+		recording.stop(track, group, 8_000);
+	}
+	recording.finish().await;
 	let playlist = replay
 		.playlist_until(Kind::Video, "1080p", |playlist| playlist.contains("#EXT-X-ENDLIST"))
 		.await;
-	assert!(playlist.contains("seg/29b1cd67.3.m4s\n#EXT-X-ENDLIST\n"), "{playlist}");
+	assert!(playlist.contains(&format!("seg/{tag}.3.m4s\n")), "{playlist}");
 }
 
-/// A durable timeline still lists only the default 16s window: a live playlist stays bounded
-/// however much the store retains.
-#[tokio::test]
-async fn a_durable_timeline_lists_the_window() {
-	let recording = segments(12).await;
-	let replay = Replay::open(&recording, 64 * 1024 * 1024, durable()).await;
+/// A durable record track still lists only the default 16s window: a live playlist stays
+/// bounded however much the store retains.
+#[tokio::test(start_paused = true)]
+async fn durable_records_list_the_window() {
+	let recording = segments(13).await;
+	recording.stored().await;
+	let replay = Replay::open(&recording.store, 64 * 1024 * 1024).await;
+	let tag = replay
+		.broadcaster
+		.rendition(Kind::Video, "1080p")
+		.unwrap()
+		.tag()
+		.to_string();
 	let playlist = replay
 		.playlist_until(Kind::Video, "1080p", |playlist| {
-			playlist.contains("seg/29b1cd67.11.m4s\n")
+			playlist.contains(&format!("seg/{tag}.11.m4s\n"))
 		})
 		.await;
 	// Eight 2s segments cover the window.
 	assert!(playlist.contains("#EXT-X-MEDIA-SEQUENCE:4\n"), "{playlist}");
-	assert!(!playlist.contains("seg/29b1cd67.3.m4s\n"), "{playlist}");
-}
-
-/// History mode lists a durable timeline's whole recording, and DASH offers the whole listed
-/// span. A live-style entry, or a `replay` path that moves the durable ranges to another
-/// broadcast, keeps the window even then.
-#[tokio::test]
-async fn history_mode_lists_a_durable_timeline_past_the_window() {
-	let recording = bounded_segments(12).await;
-	let config = Config {
-		history: true,
-		..Config::default()
-	};
-	let replay = Replay::open_with(&recording, 64 * 1024 * 1024, durable(), config.clone()).await;
-	let playlist = replay
-		.playlist_until(Kind::Video, "1080p", |playlist| {
-			playlist.contains("seg/29b1cd67.11.m4s\n")
-		})
-		.await;
-	assert!(playlist.contains("#EXT-X-MEDIA-SEQUENCE:0\n"), "{playlist}");
-	assert!(playlist.contains("seg/29b1cd67.0.m4s\n"), "{playlist}");
-
-	for (kind, name) in [(Kind::Video, "360p"), (Kind::Video, "1080p"), (Kind::Audio, "audio")] {
-		replay.rendition(kind, name).init().await.unwrap();
-	}
-	let manifest = replay.broadcaster.manifest(None).expect("manifest renders");
-	assert!(manifest.contains("timeShiftBufferDepth=\"PT24.000S\""), "{manifest}");
-
-	let mut elsewhere = durable();
-	elsewhere.replay = Some(moq_net::path::RelativeOwned::new("./recording"));
-	for archive in [live(), elsewhere] {
-		let windowed = Replay::open_with(&recording, 64 * 1024 * 1024, archive, config.clone()).await;
-		let playlist = windowed
-			.playlist_until(Kind::Video, "1080p", |playlist| {
-				playlist.contains("seg/29b1cd67.11.m4s\n")
-			})
-			.await;
-		assert!(!playlist.contains("seg/29b1cd67.0.m4s\n"), "{playlist}");
-	}
-}
-
-#[tokio::test(start_paused = true)]
-async fn history_mode_recovers_evicted_timeline_groups() {
-	history_after_expiry(false).await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn history_mode_recovers_a_finished_timeline() {
-	history_after_expiry(true).await;
-}
-
-async fn history_after_expiry(finished: bool) {
-	let recording = bounded_segments(12).await;
-	let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
-	let driver = tokio::spawn(moq_net::time::run(driver));
-	let broadcast = origin.create_broadcast("rec").unwrap();
-	let track = broadcast
-		.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
-		.unwrap();
-	let mut catalog = moq_json::snapshot::Producer::new(track, moq_json::snapshot::Config::default());
-	catalog
-		.update(moq_net::Timed::from(&self::catalog(durable())).at(moq_net::Timestamp::now()))
-		.unwrap();
-	let reader = moq_archive::Reader::open(
-		recording.store.clone(),
-		&broadcast,
-		reader::Config::new(recording.timelines()),
-	)
-	.await
-	.unwrap();
-	let serving = tokio::spawn(reader.serve());
-	let reader = if finished {
-		reader.finish().unwrap();
-		None
-	} else {
-		Some(reader)
-	};
-	// Expire the publisher cache before any HLS consumer can retain a copy.
-	let now = moq_net::time::Instant::now();
-	broadcast.info().pool.gc(now, &kio::Waiter::noop());
-	broadcast
-		.info()
-		.pool
-		.gc(now + Duration::from_secs(31), &kio::Waiter::noop());
-	let subscription = moq_net::track::Subscription::default()
-		.with_start(moq_net::track::Position::group(0))
-		.with_max_delay(Duration::from_millis((1_u64 << 62) - 1));
-	let mut retained = broadcast
-		.consume()
-		.track(&timeline("1080p"))
-		.unwrap()
-		.subscribe(subscription)
-		.await
-		.unwrap()
-		.ordered();
-	let retained = retained.next_group().await.unwrap();
-	assert!(
-		retained.is_none_or(|group| group.sequence > 0),
-		"the initial timeline groups must really be evicted"
-	);
-	broadcast.announce(Default::default()).unwrap();
-	let broadcaster = Broadcaster::new(
-		crate::resolved(&origin, "rec").await,
-		Config {
-			history: true,
-			..Config::default()
-		},
-	);
-	tokio::time::timeout(Duration::from_secs(5), broadcaster.ready())
-		.await
-		.expect("a rendition becomes playable after cache expiry");
-	let replay = Replay {
-		reader,
-		broadcaster,
-		_catalog: catalog,
-		_broadcast: broadcast,
-		_origin: origin,
-	};
-	// Every rendition recovers its own evicted timeline, not only the reference: otherwise the
-	// reference's early rows resolve as gaps on its siblings.
-	for (kind, name) in [(Kind::Video, "1080p"), (Kind::Video, "360p"), (Kind::Audio, "audio")] {
-		let playlist = replay
-			.playlist_until(kind, name, |playlist| playlist.contains(".10.m4s\n"))
-			.await;
-		assert!(playlist.contains("#EXT-X-MEDIA-SEQUENCE:0\n"), "{name}: {playlist}");
-		assert!(playlist.contains(".0.m4s\n"), "{name}: {playlist}");
-		assert!(!playlist.contains("#EXT-X-GAP"), "{name}: {playlist}");
-		assert!(replay.rendition(kind, name).listed_segment(0).await.unwrap().is_some());
-	}
-	serving.abort();
-	driver.abort();
-	let _ = serving.await;
-	let _ = driver.await;
-}
-
-/// Retention prunes a recording's first timeline objects, so history mode refuses it before
-/// listing anything rather than starting from a later checkpoint.
-#[tokio::test(start_paused = true)]
-async fn history_mode_refuses_a_retained_recording() {
-	let recording = bounded_segments(12).await;
-	for track in recording.timelines().values() {
-		for segment in 0..4 {
-			let key = moq_archive::Key::segments(track, segment).unwrap();
-			recording.store.delete(&key).await.unwrap();
-		}
-	}
-	let replay = Replay::open_with(
-		&recording,
-		64 * 1024 * 1024,
-		durable(),
-		Config {
-			history: true,
-			..Config::default()
-		},
-	)
-	.await;
-	for (kind, name) in [(Kind::Video, "360p"), (Kind::Video, "1080p"), (Kind::Audio, "audio")] {
-		let snapshot = replay.rendition(kind, name).snapshot();
-		assert!(
-			snapshot.segments.is_empty(),
-			"{name} listed {} segments",
-			snapshot.segments.len()
-		);
-		assert!(snapshot.finished, "{name} playlist must end");
-	}
-
-	let broadcast = replay._origin.consume().request_broadcast("rec", None).await.unwrap();
-	let err = history::read(&broadcast, &durable(), "1080p", |_| panic!("nothing is listed"))
-		.await
-		.unwrap_err();
-	assert!(matches!(err, crate::Error::HistoryPruned(_)), "{err}");
+	assert!(!playlist.contains(&format!("seg/{tag}.3.m4s\n")), "{playlist}");
 }

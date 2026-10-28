@@ -1,7 +1,32 @@
 //! The counters [`Import::stats`](super::Import::stats) and
 //! [`Export::stats`](super::Export::stats) return, and reporting on them.
+//!
+//! [`Report`] carries them in a media report, as the `mpegts` and `release` sections beside
+//! `transport` and `renditions`. Counters are cumulative and omitted at zero.
 
 use std::collections::{BTreeMap, BTreeSet};
+
+use serde::{Deserialize, Serialize};
+
+fn is_zero(value: &u64) -> bool {
+	*value == 0
+}
+
+/// The sections an MPEG-TS import or export adds to its media report: the `E` of
+/// [`hang::stats::Snapshot`] or [`hang::echo::Snapshot`], flattened beside `transport` and
+/// `renditions`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[non_exhaustive]
+pub struct Report {
+	/// What each elementary stream delivered and the transport stream's errors: an import's
+	/// [`Snapshot`], or the rows of an [`Export`]. A passthrough has none.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub mpegts: Option<Snapshot>,
+	/// How an export's release clock keeps up with the source. An import has none.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub release: Option<Release>,
+}
 
 /// What each demuxed elementary stream delivered, and the audio frame sync it lost or could
 /// not verify, keyed by elementary stream PID; the PSI sections the stream as a whole lost to
@@ -20,52 +45,74 @@ use std::collections::{BTreeMap, BTreeSet};
 ///
 /// [`Export`] carries the same rows for the streams an exporter writes, so one schema reads
 /// both edges.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[serde_with::serde_as]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct Snapshot {
-	/// One row per elementary stream PID the importer carries, ordered by PID. A PID the
-	/// importer drops (an undecoded stream without the `mpegts` catalog section) has none.
+	/// One row per PID, ordered by PID: each elementary stream the PMT lists, carried or
+	/// refused, and each PID no table claims that the importer dropped packets on. A dropped
+	/// PID's row names no track, is [`Class::Data`], and counts its packets in
+	/// [`Stream::refused`]. A PID keeps one row for its life: a PMT that claims it, releases it,
+	/// or claims it again moves the row with its counters, and while dropped it names no track.
+	/// Packets before every listed PMT has arrived, or lapsed past 0.5 s, are acquisition and
+	/// not counted; so are null packets. An import of one program from a multiplex that lists
+	/// others counts no PID no table claims, since another program's PMT may. An SI PID has a
+	/// `.si` row only once it counts [`Stream::unplaced`] sections.
+	// Keys read from strings: a flattened section loses JSON's integer-key parsing.
+	#[serde_as(as = "BTreeMap<serde_with::DisplayFromStr, _>")]
+	#[serde(skip_serializing_if = "BTreeMap::is_empty")]
 	pub streams: BTreeMap<u16, Stream>,
 	/// PAT and PMT sections dropped because their CRC-32 did not match. Each one left the
 	/// table already in force standing, or, before any, delayed the program's start to the
 	/// next good repetition. Counted for the stream rather than per elementary stream, since
 	/// the PSI PIDs have no row of their own. TR 101 290 2.2 `CRC_error`, on the PAT and PMT
 	/// only: the reduced-SI set of its table 5.1b. Captured SI is not CRC-checked.
+	#[serde(skip_serializing_if = "is_zero")]
 	pub crc_error: u64,
 	/// 1.1 `TS_sync_loss`: sync lost after two consecutive corrupt sync bytes on the packet
 	/// grid, and acquired again after five correct ones (ISO/IEC 13818-1 G.1).
+	#[serde(skip_serializing_if = "is_zero")]
 	pub ts_sync_loss: u64,
 	/// 1.2 `Sync_byte_error`: a byte other than 0x47 where the grid expects a sync byte, while
 	/// in sync.
+	#[serde(skip_serializing_if = "is_zero")]
 	pub sync_byte_error: u64,
 	/// 1.3 `PAT_error_2`: each 0.5 s of program clock without a PAT section on PID 0, and each
 	/// packet on PID 0 that is scrambled or starts a section other than a PAT.
+	#[serde(skip_serializing_if = "is_zero")]
 	pub pat_error: u64,
 	/// 1.4 `Continuity_count_error`, on every PID but the null PID: a counter gap, or a third
 	/// copy of a packet. A gap declared by `discontinuity_indicator`, the one duplicate ISO/IEC
 	/// 13818-1 2.4.3.3 permits, and a payload-less packet repeating its counter are not errors.
 	/// A loss of exactly 16 packets leaves the counter in step, and only a byte comparison
 	/// tells a loss of 15 from a duplicate, so the count is a floor.
+	#[serde(skip_serializing_if = "is_zero")]
 	pub continuity_count_error: u64,
 	/// 1.5 `PMT_error_2`: each 0.5 s of program clock without a PMT section on a PMT PID the
 	/// PAT names for the imported program, and each scrambled packet on one.
+	#[serde(skip_serializing_if = "is_zero")]
 	pub pmt_error: u64,
 	/// 2.1 `Transport_error`: packets with `transport_error_indicator` set, on any PID. Such a
 	/// packet counts nothing else.
+	#[serde(skip_serializing_if = "is_zero")]
 	pub transport_error: u64,
 	/// 2.3a `PCR_repetition_error`: consecutive PCR values on the PCR PID more than 100 ms
 	/// apart. Graded on the values, not on arrival: that speaks for the encoder's insertion,
 	/// which is what ingest can, while the network in front of the importer re-times arrival.
 	/// The interval across a `discontinuity_indicator` is not graded.
+	#[serde(skip_serializing_if = "is_zero")]
 	pub pcr_repetition_error: u64,
 	/// 2.3b `PCR_discontinuity_indicator_error`: consecutive PCR values outside 0 to 100 ms
 	/// apart, backwards included, without `discontinuity_indicator`. On values a run of missing
 	/// PCRs and an unsignalled jump are the same difference, so a forward step over 100 ms
 	/// counts here and as a repetition error both.
+	#[serde(skip_serializing_if = "is_zero")]
 	pub pcr_discontinuity_indicator_error: u64,
 	/// 2.5 `PTS_error`: each 700 ms of program clock without a PTS on an elementary stream
 	/// that has carried one. Verbatim streams are not graded: SCTE-35 and subtitles have no
 	/// cadence to hold.
+	#[serde(skip_serializing_if = "is_zero")]
 	pub pts_error: u64,
 }
 
@@ -77,44 +124,74 @@ impl Snapshot {
 }
 
 /// What one elementary stream delivered, lost, or could not verify. See [`Snapshot`].
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[serde_with::serde_as]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct Stream {
 	/// The current or most recent MoQ track suffix for this PID (`.avc3`, `.mp2`, `.ts`, ...),
-	/// or empty for MPEG-1/2 video, which is read for its clock and not published. At export,
-	/// the suffix an import of the output would give the PID.
+	/// or empty for a PID that publishes no track: one dropped, or MPEG-1/2 video refused and
+	/// read only for its clock. At export, the suffix an import of the output would give the PID.
+	#[serde(skip_serializing_if = "String::is_empty")]
 	pub track: String,
 	/// How this PID was classified. See [`Class`].
 	pub class: Class,
-	/// Access units the stream delivered: frames published for decoded media, PES payloads or
+	/// Access units the stream delivered: frames published for decoded media, whole PES or
 	/// sections carried verbatim, and PES read on MPEG-1/2 video. At export, the PES or
 	/// sections written for each frame.
+	#[serde(skip_serializing_if = "is_zero")]
 	pub units: u64,
 	/// Transport time since the stream last delivered an access unit, or since the PMT
 	/// declared it, measured on the program clock (PCR): the one read at import, the one
-	/// written at export. `None` until the first PCR.
+	/// written at export. `None` until the first PCR. Whole milliseconds in a report.
 	///
 	/// No threshold applies: a sparse stream such as SCTE-35 is legitimately quiet for
 	/// seconds, so how long is too long is for whoever alarms to decide.
+	#[serde_as(as = "Option<serde_with::DurationMilliSeconds<u64>>")]
+	#[serde(skip_serializing_if = "Option::is_none")]
 	pub quiet: Option<std::time::Duration>,
 	/// Completed resyncs: the stream lost frame sync and locked onto a confirmed frame
 	/// again. Each one is a gap in the audio.
+	#[serde(skip_serializing_if = "is_zero")]
 	pub resyncs: u64,
 	/// Bytes thrown away scanning for sync, across every resync and any scan still in
 	/// progress.
+	#[serde(skip_serializing_if = "is_zero")]
 	pub discarded: u64,
 	/// Frames published that nothing vouched for: the offset came from a scan, or the bytes
 	/// were joined onto a tail carried across a PES boundary, and no successor frame could
 	/// confirm it. That substitutes audio rather than leaving a gap, which is why it is
 	/// counted separately from a resync.
+	#[serde(skip_serializing_if = "is_zero")]
 	pub unconfirmed: u64,
 	/// Damaged packets, PES, or access units refused whole on this PID. Export stays zero.
+	#[serde(skip_serializing_if = "is_zero")]
 	pub damaged: u64,
+	/// Whole PES or sections, SI included, dropped because the program clock could not place
+	/// them: before the first PCR, after the last with no interval to extrapolate from, or
+	/// before the broadcast clock's zero. Any PES lands before that zero while its stream is
+	/// still behind a wrap the import's first PTS already crossed. Export stays zero.
+	#[serde(skip_serializing_if = "is_zero")]
+	pub unplaced: u64,
+	/// What this PID lost to a route the import does not carry. Once for each time its stream
+	/// was refused: a listed stream the import cannot carry (an ambiguous 0x86 without a CUEI
+	/// registration, an Opus configuration it cannot map, any undecoded stream without the
+	/// `mpegts` catalog section or in a program with no PCR to place it by), or a whole-PES
+	/// stream with a clock field only the PTS and DTS of are rebased (ESCR, a
+	/// `pack_header_field`, a TREF), PES-level scrambling, an unbounded non-video PES, or a
+	/// header export refuses, whose track ends and leaves the catalog. Once for each
+	/// TS-scrambled packet on a carried stream, which the raw lane could carry. And once for
+	/// each packet on a PID no table claims ([`Snapshot::streams`]). Export stays zero.
+	#[serde(skip_serializing_if = "is_zero")]
+	pub refused: u64,
 	/// This PID's share of [`Snapshot::continuity_count_error`].
+	#[serde(skip_serializing_if = "is_zero")]
 	pub continuity_count_error: u64,
 	/// This PID's share of [`Snapshot::transport_error`].
+	#[serde(skip_serializing_if = "is_zero")]
 	pub transport_error: u64,
 	/// This PID's share of [`Snapshot::pts_error`].
+	#[serde(skip_serializing_if = "is_zero")]
 	pub pts_error: u64,
 }
 
@@ -143,16 +220,20 @@ impl Stream {
 /// Not the PMT `stream_type`. `0x86` is DTS audio or, with a CUEI registration, an SCTE-35
 /// section, and those take different routes. The stopped-stream log grades audio and video
 /// only; a sparse data PID stays counted.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Class {
-	/// Undecoded or sparse data (SCTE-35, ID3, private sections, verbatim PES), or a PCR PID
-	/// that carries no elementary stream. A quiet second is not a stall.
-	#[default]
-	Data,
 	/// Continuous audio.
-	Audio,
-	/// Continuous video, including MPEG-1/2 video read only for its clock.
-	Video,
+	Audio = 1,
+	/// Continuous video, including MPEG-1/2 video carried whole or read only for its clock.
+	Video = 2,
+	/// Undecoded or sparse data (SCTE-35, ID3, private sections, private PES), a PCR PID that
+	/// carries no elementary stream, or a dropped PID. A quiet second is not a stall. A class a later
+	/// version adds reads as data. It must stay last for `#[serde(other)]`; the explicit
+	/// discriminants keep every variant's `as` value.
+	#[default]
+	#[serde(other)]
+	Data = 0,
 }
 
 impl Class {
@@ -174,15 +255,69 @@ impl Class {
 pub struct Export {
 	/// One row per elementary stream PID the exporter writes, ordered by PID.
 	pub streams: BTreeMap<u16, Stream>,
-	/// Frames dropped for arriving after their deadline, and the frames a video track then
-	/// dropped waiting for its next keyframe.
+	/// How the release clock is keeping up with the source.
+	pub release: Release,
+}
+
+/// How an export keeps up with the source: the frames it drops, trims, and never receives,
+/// and how its release clock tracks the source's. What [`Export::stats`](super::Export::stats)
+/// reports beside its rows, and [`Release::stats`](super::Release::stats) on its own.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct Release {
+	/// Frames dropped after their stream's first went out: for arriving after their deadline,
+	/// for falling due before a new timeline's clock was acquired, and the frames a video track
+	/// then dropped waiting for its next keyframe or leading the keyframe it resumed at, late
+	/// or after a hole upstream once the output held frames ahead of the hole.
+	#[serde(skip_serializing_if = "is_zero")]
 	pub dropped: u64,
+	/// Frames dropped before their stream's first went out, so the output starts on a whole
+	/// group led by the video keyframe: what a joiner is handed older than the delay, a start
+	/// group cut short upstream, the first keyframe's leading pictures, and what precedes the
+	/// first keyframe or the codec config.
+	/// Nothing is missing from the output for these.
+	#[serde(skip_serializing_if = "is_zero")]
+	pub trimmed: u64,
+	/// Times a source skipped media it will never deliver: a group lost or expired upstream,
+	/// or a resubscription. A declared break is not one. Each is logged with the span it
+	/// skipped.
+	#[serde(skip_serializing_if = "is_zero")]
+	pub gaps: u64,
+	/// The least time any frame arrived before its deadline over the last whole second, in
+	/// milliseconds: how much more latency the path could take before frames drop. Negative
+	/// when a frame missed its deadline. `None` until a second has passed, and without a delay.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub margin: Option<i64>,
+	/// How far the output clock sits from the source's plus the delay, in milliseconds, as last
+	/// measured: positive holds frames longer than the delay, negative shorter. The clock pulls
+	/// it shut over ten minutes. `None` until there is a measurement.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub offset: Option<i64>,
 	/// How fast the source's clock runs against ours, in parts per million (positive runs
 	/// fast), as last measured. `None` until there is a measurement.
+	#[serde(skip_serializing_if = "Option::is_none")]
 	pub drift: Option<f64>,
 	/// How many measurements found the source's clock further off ours than the 30 ppm an
 	/// MPEG-TS system clock may be (ISO/IEC 13818-1 2.4.2.1), which the output cannot follow.
+	#[serde(skip_serializing_if = "is_zero")]
 	pub out_of_tolerance: u64,
+}
+
+impl Release {
+	pub(crate) fn of<K: Ord + Clone, T>(jitter: &crate::jitter::Buffer<K, T>) -> Self {
+		let jitter = jitter.reporting();
+		let millis = |seconds: f64| (seconds * 1e3).round() as i64;
+		Self {
+			dropped: jitter.dropped(),
+			trimmed: jitter.trimmed(),
+			gaps: 0,
+			margin: jitter.margin().map(millis),
+			offset: jitter.offset().map(millis),
+			drift: jitter.drift().map(|drift| drift * 1e6),
+			out_of_tolerance: jitter.out_of_tolerance(),
+		}
+	}
 }
 
 /// An export's rows with every stream-wide counter zero, so one [`Log`] reads either edge.
@@ -287,6 +422,16 @@ impl Log {
 					"damaged TS units refused"
 				);
 			}
+			let dropped = |stream: &Stream| (stream.unplaced, stream.refused);
+			if previous.map_or((0, 0), dropped) != dropped(stream) {
+				tracing::info!(
+					pid = *pid,
+					track = stream.track,
+					unplaced = stream.unplaced,
+					refused = stream.refused,
+					"private PES not carried"
+				);
+			}
 			if previous.map_or((0, 0, 0), lost) == lost(stream) {
 				continue;
 			}
@@ -305,6 +450,13 @@ impl Log {
 #[cfg(test)]
 mod test {
 	use super::*;
+
+	/// A class a later version adds reads as data.
+	#[test]
+	fn an_unknown_class_reads_as_data() {
+		let class: Class = serde_json::from_str(r#""subtitle""#).unwrap();
+		assert_eq!(class, Class::Data);
+	}
 
 	/// A stream whose count stops across a sample is logged once, with its silence, and again
 	/// only after it has delivered in between; a stream that keeps counting never is, and
@@ -493,6 +645,59 @@ mod test {
 				_ => Err(format!("expected one line per move, got {moved:?}")),
 			}
 		});
+	}
+
+	/// A report carries the counters beside `transport` and `renditions`, camelCase, keyed by
+	/// PID, `quiet` in milliseconds, and zero counters omitted; it reads back whole, and a class
+	/// a later version adds reads as data.
+	#[test]
+	fn a_report_flattens_beside_the_media_counters() {
+		let mut mpegts = Snapshot {
+			continuity_count_error: 2,
+			..Default::default()
+		};
+		mpegts.streams.insert(
+			256,
+			Stream {
+				track: ".avc3".to_string(),
+				class: Class::Video,
+				units: 120,
+				quiet: Some(std::time::Duration::from_micros(40_400)),
+				continuity_count_error: 2,
+				..Default::default()
+			},
+		);
+		let release = Release {
+			margin: Some(-12),
+			offset: Some(3),
+			drift: Some(1.5),
+			..Default::default()
+		};
+		let mut snapshot = hang::stats::Snapshot::<Report>::default();
+		snapshot.ext.mpegts = Some(mpegts);
+		snapshot.ext.release = Some(release);
+
+		let json = serde_json::to_value(&snapshot).unwrap();
+		assert_eq!(
+			json,
+			serde_json::json!({
+				"mpegts": {
+					"streams": {
+						"256": { "track": ".avc3", "class": "video", "units": 120, "quiet": 40, "continuityCountError": 2 }
+					},
+					"continuityCountError": 2
+				},
+				"release": { "margin": -12, "offset": 3, "drift": 1.5 }
+			})
+		);
+		let mut read: hang::stats::Snapshot<Report> = serde_json::from_value(json).unwrap();
+		let quiet = &mut read.ext.mpegts.as_mut().unwrap().streams.get_mut(&256).unwrap().quiet;
+		assert_eq!(*quiet, Some(std::time::Duration::from_millis(40)));
+		*quiet = snapshot.ext.mpegts.as_ref().unwrap().streams[&256].quiet;
+		assert_eq!(read, snapshot);
+
+		let row: Stream = serde_json::from_value(serde_json::json!({ "class": "subtitle", "later": 1 })).unwrap();
+		assert_eq!(row.class, Class::Data);
 	}
 
 	/// Damage is reported per PID when its cumulative count moves, including the final sample.

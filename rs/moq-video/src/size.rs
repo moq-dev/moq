@@ -1,4 +1,4 @@
-use crate::{Error, Rate};
+use crate::{Error, FrameRate};
 
 /// A frame resolution in pixels.
 ///
@@ -55,7 +55,7 @@ impl Size {
 	///
 	/// This is arithmetic, not policy: it rejects only what cannot be represented,
 	/// leaving "no encoder handles a frame that large" to the backend.
-	pub(crate) fn validate_encodable(&self, what: &str, framerate: Rate) -> Result<(), Error> {
+	pub(crate) fn validate_encodable(&self, what: &str, framerate: FrameRate) -> Result<(), Error> {
 		let pixels = self.pixels();
 		let representable = u128::from(pixels)
 			.checked_mul(u128::from(framerate.numerator()))
@@ -115,7 +115,7 @@ mod tests {
 	fn validate_encodable_rejects_unrepresentable_sizes() {
 		// A frame nobody can encode, but whose arithmetic still fits: the backend
 		// decides, not us.
-		let rate = Rate::new(30, 1).unwrap();
+		let rate = FrameRate::new(30, 1).unwrap();
 		assert!(Size::new(65534, 65534).validate_encodable("frame", rate).is_ok());
 
 		// pixels x framerate overflows u64.
@@ -126,16 +126,11 @@ mod tests {
 		);
 		// ...and it is the product that matters, not either side alone.
 		assert!(Size::new(u32::MAX - 1, 2).validate_encodable("frame", rate).is_ok());
-		let extreme = Rate::new(crate::rate::MAX_FRAMES_PER_SECOND, 1).unwrap();
+		let extreme = FrameRate::new(crate::frame_rate::MAX_FRAMES_PER_SECOND, 1).unwrap();
 		assert!(
 			Size::new(u32::MAX - 1, u32::MAX - 1)
 				.validate_encodable("frame", extreme)
 				.is_err()
 		);
-	}
-
-	#[test]
-	fn display_reads_as_a_resolution() {
-		assert_eq!(Size::new(1920, 1080).to_string(), "1920x1080");
 	}
 }

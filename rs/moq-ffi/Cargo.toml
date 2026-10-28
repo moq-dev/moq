@@ -22,18 +22,31 @@ crate-type = ["staticlib", "cdylib"]
 [features]
 # On by default so every existing consumer (the language wrappers, `build.sh`)
 # keeps the surface it has. Opt out with `default-features = false` to skip the
-# ~40 crates that only the codecs pull in, including openh264's vendored C++.
+# ~40 crates that only the codecs pull in.
 # They are unavailable on wasm32 regardless: the browser encodes via WebCodecs.
 default = ["audio", "video"]
 
 audio = ["dep:moq-audio"]
 video = ["dep:moq-video", "dep:pollster"]
+# The OpenH264 software H.264 fallback (vendored C++) for `video`. Off for
+# development and linting; `build.sh`, maturin, and CI's tests turn it on. It is
+# the only encoder on API-24 Android and the Apple simulators, so every release
+# build needs it.
+openh264 = ["moq-video?/openh264"]
+# qlog trace capture (`MoqQuicConfig::qlog`). Off by default: it compiles the qlog
+# machinery in and is only wanted for debugging; `moq_qlog_supported` reports it.
+qlog = ["moq-tokio/qlog"]
+# Test-only hooks for the host suites: control of the runtime clock (`just py test`) and a
+# count of moq's heap (the Dart leak tests). Released builds leave it off, so they never
+# carry the `moq_ffi_test_*` symbols or the counting allocator.
+testing = ["moq-clock/manual"]
 
 [dependencies]
 bytes = { workspace = true }
 hang = { workspace = true }
 # `kio::MaybeSend` is the `Send` bound that vanishes on wasm; see `ffi::Task`.
 kio = { workspace = true }
+moq-clock = { workspace = true }
 moq-json = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
@@ -49,7 +62,7 @@ url = { workspace = true }
 # Codecs only: the language wrappers do their own device I/O.
 moq-audio = { workspace = true, optional = true, features = ["aac"] }
 moq-tokio = { workspace = true, default-features = true }
-# `openh264`, `nvidia`, and `vaapi` back on, matching rs/moq-c: the workspace turns
+# `nvidia` and `vaapi` back on, matching rs/moq-c: the workspace turns
 # moq-video's defaults off for `capture` (device code the bindings don't
 # expose), and the codecs are collateral rather than the goal. Nothing is paid for them off Linux, since
 # cudarc / moq-nvenc / libloading / moq-vaapi sit behind
@@ -57,7 +70,7 @@ moq-tokio = { workspace = true, default-features = true }
 # both dlopen the driver, so the wrappers still link GPU-less and start
 # driverless; `vaapi` alone costs the build something, since moq-vaapi's bindgen
 # needs libclang (the dev shell carries it).
-moq-video = { workspace = true, optional = true, features = ["nvidia", "openh264", "vaapi"] }
+moq-video = { workspace = true, optional = true, features = ["nvidia", "vaapi"] }
 # Blocking on `encode::Sink` from the synchronous producer exports; see
 # `video::block_on` for why not a tokio helper.
 pollster = { workspace = true, optional = true }
@@ -78,15 +91,22 @@ web-async = { workspace = true }
 web-transport-trait = { workspace = true }
 web-transport-wasm = { workspace = true }
 
-[build-dependencies]
-uniffi = { workspace = true, features = ["build"] }
-
 [dev-dependencies]
 # One non-codec test blocks on a future; the main dep is `video`-only.
 pollster = { workspace = true }
+# Runs the key log tests with `SSLKEYLOGFILE` set or unset, in a child process.
+test-env = { path = "../test-env" }
 tokio = { workspace = true, features = ["test-util"] }
 web-transport-trait = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+# The video tests encode with OpenH264, the one encoder a GPU-less host has, so
+# they turn it on without the `openh264` feature.
+moq-video = { path = "../moq-video", features = ["openh264"] }
 
 [target.'cfg(unix)'.dev-dependencies]
 # Process CPU time for the benchmark's baselines.
 libc = { workspace = true }
+
+[lints]
+workspace = true

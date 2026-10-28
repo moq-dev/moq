@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- [**breaking**] `encode::Producer::new` and `with_track` take a `moq_mux::catalog::Reserved` instead of the catalog, so a caller declares the encoder's GOP with `reserve().with_timeline_hint(gop)`.
+
 ## [0.1.10](https://github.com/moq-dev/moq/compare/moq-video-v0.1.9...moq-video-v0.1.10) - 2026-10-05
 
 ### Other

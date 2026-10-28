@@ -8,13 +8,15 @@ summary, exiting non-zero on failure.
 Division of labour: TSDuck does the transport-stream parsing (we shell out to
 `tsanalyze --json` for PSI/service/structure and `tstables` for the PMT), and
 this script does what TSDuck does not cover: the ISO 13818-1 T-STD buffer
-model for supported elementary streams, and the PCR checks that need the
-time-base discontinuities a 188/204-byte header scan here recovers. PCR value
-intervals, byte schedule and release timing live in `pcr-timing.py`.
+model for supported elementary streams and each program's system buffers, and
+the PCR checks that need the time-base discontinuities a 188/204-byte header
+scan here recovers. PCR value intervals, byte schedule and release timing live
+in `pcr-timing.py`.
 
 Checks split into two severities:
-  - HARD (structural): fail the run by default. PAT/PMT, packet size, sync,
-    continuity counters, PSI CRC, PCR presence, PCR monotonicity, T-STD buffers.
+  - HARD (structural): fail the run by default. PAT/PMT, PMT versions, packet
+    size, sync, continuity counters, PSI CRC, PCR presence, PCR monotonicity,
+    T-STD buffers, system buffers.
   - SHAPE (broadcast profile): reported as WARN and only fail the run under
     `--strict`. Service descriptors (SDT).
 
@@ -27,6 +29,8 @@ from __future__ import annotations
 import argparse
 import bisect
 import json
+import re
+from fractions import Fraction
 import subprocess
 import sys
 from collections import deque
@@ -186,6 +190,7 @@ class PcrClock:
                 continue
             self.idx.append(i)
             self.sec.append(secs)
+        self._rsys: tuple[list[float], list[float]] | None = None
 
     def ok(self) -> bool:
         """True when there are enough PCRs to interpolate a timeline."""
@@ -208,6 +213,23 @@ class PcrClock:
             return sec[i0]
         slope = (sec[i1] - sec[i0]) / span
         return sec[i0] + slope * (index - idx[i0])
+
+    def rsys_bits(self, t: float) -> float:
+        """Bits Rsys (2.4.2.3) removes from the first PCR to `t`: each stretch between PCRs at
+        the transport rate they give, and beyond the edge PCRs at the edge stretch's."""
+        if self._rsys is None:
+            idx, sec = self.idx, self.sec
+            rates = [
+                max(RSYS_MIN, 188 * 8 * (idx[k + 1] - idx[k]) / (sec[k + 1] - sec[k]) / 500)
+                for k in range(len(idx) - 1)
+            ]
+            bits = [0.0]
+            for k, rate in enumerate(rates):
+                bits.append(bits[-1] + rate * (sec[k + 1] - sec[k]))
+            self._rsys = (rates, bits)
+        rates, bits = self._rsys
+        k = min(max(bisect.bisect_right(self.sec, t) - 1, 0), len(rates) - 1)
+        return bits[k] + (t - self.sec[k]) * rates[k]
 
 
 # ------------------------------------------------------------- structural checks
@@ -359,6 +381,11 @@ TB_SIZE = 512
 TELETEXT_TB_SIZE = 480
 # 2.4.2.6: TB must empty at least once a second.
 TB_EMPTY_S = 1.0
+# 2.4.2.3: PIDs 0-3 and the program's PMT share one TBsys (TB_SIZE), which passes their
+# bytes on at Rxsys into Bsys, emptied at Rsys = max(80 kb/s, transport rate / 500).
+SYSTEM_RX = 1_000_000
+BSYS_SIZE = 1536
+RSYS_MIN = 80_000
 # PTS/DTS are 33 bits at 90 kHz.
 STAMP_WRAP_S = (1 << 33) / PTS_HZ
 # EB fill is tracked by ES offset, past 2^28 B within hours, where a double resolves
@@ -411,6 +438,11 @@ HEVC_LEVELS = {
 # H.265 Table A.9 CpbNalFactor for Main, Main 10 and Main Still Picture (profile_idc 1-3).
 HEVC_NAL_FACTOR = 1100
 
+# H.262 Tables 8-13 and 8-14: level (the low nibble of profile_and_level_indication) ->
+# (Rmax bit/s, VBV_max bits), the same for every profile that has the level.
+MPEG2_LEVELS = {10: (4_000_000, 475_136), 8: (15_000_000, 1_835_008), 6: (60_000_000, 7_340_032), 4: (80_000_000, 9_781_248)}
+MPEG2_LEVEL_NAMES = {10: "Low", 8: "Main", 6: "High-1440", 4: "High"}
+
 # H.222.0 2.4.2.3: ADTS (Rx, BSn) by channels, the LFE not counted.
 ADTS_BUFFERS = ((2, 2_000_000, 3584), (8, 5_529_600, 8976), (12, 8_294_400, 12804), (48, 33_177_600, 51216))
 # channel_configuration -> full-bandwidth channels (5.1 and 7.1 drop the LFE).
@@ -424,6 +456,8 @@ AC3_ATSC_BS = 2592
 EAC3_ATSC_BS = 12896
 # ATSC A/52 Annex A 5.4: AC-3 carried as DVB private data.
 AC3_DVB_BS = 5696
+# ETSI TS 101 154 V2.9.1 4.1.6.11 gives Enhanced AC-3 the same DVB buffer.
+EAC3_DVB_BS = 5696
 
 MPEG_AUDIO_KBPS = {
     (1, 1): (0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448),
@@ -435,6 +469,7 @@ MPEG_AUDIO_KBPS = {
 }
 # stream_type -> model, for the types identified by stream_type alone.
 STREAM_KINDS = {
+    0x02: "mpeg2-video",
     0x1B: "avc",
     0x24: "hevc",
     0x0F: "adts",
@@ -502,8 +537,8 @@ class Stream:
     sps: dict[str, str] = field(default_factory=dict)
 
 
-def read_programs(ts_path: str) -> list[tuple[int, list[Stream]]]:
-    """(PCR PID, elementary streams) of each program's first PMT, as TSDuck decodes it."""
+def read_pmts(ts_path: str) -> list[dict]:
+    """Every PMT in the file, as TSDuck decodes it."""
     proc = subprocess.run(
         ["tstables", ts_path, "--psi-si", "--tid", "2", "--json-output", "-"],
         capture_output=True,
@@ -512,8 +547,13 @@ def read_programs(ts_path: str) -> list[tuple[int, list[Stream]]]:
     )
     if proc.returncode != 0:
         raise RuntimeError(f"tstables failed: {proc.stderr.strip()}")
+    return json.loads(proc.stdout or "[]")
+
+
+def read_programs(ts_path: str) -> list[tuple[int, list[Stream]]]:
+    """(PCR PID, elementary streams) of each program's first PMT, as TSDuck decodes it."""
     programs: dict[int, tuple[int, list[Stream]]] = {}
-    for pmt in json.loads(proc.stdout or "[]"):
+    for pmt in read_pmts(ts_path):
         if pmt.get("service_id") in programs:
             continue
         streams = []
@@ -524,6 +564,9 @@ def read_programs(ts_path: str) -> list[tuple[int, list[Stream]]]:
             names = {d["#name"] for d in descriptors}
             names |= {f"registration:{d['format_identifier']}" for d in descriptors if "format_identifier" in d}
             names |= {"hrd_management_valid" for d in descriptors if d.get("hrd_management_valid") is True}
+            names |= {"leak_invalid" for d in descriptors if d["#name"] == "STD_descriptor" and d.get("leak_valid") is False}
+            names |= {"temporal_poc_clock" for d in descriptors
+                      if d.get("fixed_frame_rate") is True and d.get("temporal_poc") is True}
             names |= {
                 f"tag{d['tag']}:" + "".join(d.get("#nodes", [])).replace(" ", "").lower()
                 for d in descriptors
@@ -630,6 +673,54 @@ def _hrd(sps: dict[str, str], prefix: str, value: str) -> tuple[float, float] | 
     return rate, size
 
 
+def mpeg2_params(es: bytes, descriptors: set[str]) -> Params:
+    """H.222.0 2.4.2.3 buffers for H.262 video from its first sequence header and extension.
+
+    Graded by the leak method, which H.222.0 applies unless an STD_descriptor clears leak_valid
+    and the pictures code a vbv_delay other than 0xFFFF; that vbv_delay method is refused.
+    Rbx is Rmax at Low and Main level, and min(1.05 Res, Rmax) at High-1440 and High.
+    """
+    head = es.find(b"\x00\x00\x01\xb3")
+    ext = es.find(b"\x00\x00\x01\xb5", head)
+    picture = es.find(b"\x00\x00\x01\x00", head)
+    if head < 0 or ext < 0 or len(es) < ext + 9 or es[ext + 4] >> 4 != 1:
+        raise Refused("no sequence header and sequence extension, which an H.262 stream starts with")
+    if picture < 0 or len(es) < picture + 8:
+        raise Refused("no picture header after the sequence header")
+    # vbv_delay: 16 bits after the 10-bit temporal_reference and 3-bit picture_coding_type. H.262
+    # codes it 0xFFFF in every picture of a sequence or in none, so the first decides.
+    vbv_delay = (es[picture + 5] & 0x07) << 13 | es[picture + 6] << 5 | es[picture + 7] >> 3
+    if "leak_invalid" in descriptors and vbv_delay != 0xFFFF:
+        raise Refused("an STD_descriptor selects the vbv_delay method, which this model does not implement")
+    # vbv_buffer_size_value: 10 bits after bit_rate_value and its marker; the extension's 8 bits
+    # follow its bit_rate_extension and marker.
+    vbv_low = (es[head + 10] & 0x1F) << 5 | es[head + 11] >> 3
+    vbv_high = es[ext + 8]
+    # profile_and_level_indication follows the 4-bit extension_start_code_identifier.
+    indication = (es[ext + 4] & 0x0F) << 4 | es[ext + 5] >> 4
+    level = indication & 0x0F
+    if indication & 0x80 or level not in MPEG2_LEVELS:
+        raise Refused(f"H.262 profile_and_level_indication {indication:#04x} has no Table 8-13 entry")
+    rmax, vbv_max = MPEG2_LEVELS[level]
+    vbv = (vbv_high << 10 | vbv_low) * 16 * 1024
+    if not vbv:
+        raise Refused("H.262 vbv_buffer_size 0 sizes no EB")
+    # bit_rate_value's 18 bits after frame_rate_code, and the extension's 12-bit
+    # bit_rate_extension above them, in units of 400 bit/s.
+    bit_rate = es[head + 8] << 10 | es[head + 9] << 2 | es[head + 10] >> 6
+    bit_rate |= ((es[ext + 6] & 0x1F) << 7 | es[ext + 7] >> 1) << 18
+    rbx = rmax if level in (10, 8) else min(1.05 * bit_rate * 400, rmax)
+    overhead = (0.004 + 1 / 750) * max(rmax, 2_000_000)
+    return Params(
+        label=f"H.262 {MPEG2_LEVEL_NAMES[level]} level, vbv {vbv / 1e3:.0f} kbit",
+        # Rx = 1.2 * Rmax; MBS = BSmux + BSoh + VBV_max - vbv_buffer_size; EBS = vbv_buffer_size.
+        rx=1.2 * rmax,
+        mb=(overhead + vbv_max - vbv) / 8,
+        eb=vbv / 8,
+        rbx=rbx,
+    )
+
+
 def avc_params(sps: dict[str, str]) -> Params:
     """H.222.0 2.14.3.1 buffers from the SPS: level limits, overridden by a declared NAL HRD.
 
@@ -734,16 +825,26 @@ def mpeg_audio_frame(es: bytes, pos: int) -> tuple[int, float]:
 
 
 def ac3_frame(es: bytes, pos: int) -> tuple[int, float]:
-    """(length, duration) of the AC-3 or E-AC-3 frame at `pos`; 0 duration for a dependent substream."""
+    """(length, duration) of the AC-3 or E-AC-3 frame at `pos`; 0 duration for any substream after
+    independent substream 0, which shares its access unit's interval (ETSI TS 102 366 E.1.3.1.2)."""
     h = es[pos : pos + 6]
     if len(h) < 6 or h[0] != 0x0B or h[1] != 0x77:
         raise Refused(f"no AC-3 sync at ES offset {pos}")
-    if h[5] >> 3 > 10:  # bsid 11-16: E-AC-3 (A/52 Annex E)
+    # bsid 8 or less is AC-3 and 11-16 E-AC-3 (A/52 Annex E); 9 and 10 are low-rate AC-3
+    # variants the export does not parse, and the rest are reserved.
+    bsid = h[5] >> 3
+    if bsid in (9, 10) or bsid > 16:
+        raise Refused(f"unsupported bsid {bsid} at ES offset {pos}")
+    if bsid > 10:
+        if h[2] >> 6 == 3:
+            raise Refused(f"E-AC-3 strmtyp reserved at ES offset {pos}")
+        if h[4] >> 6 == 3 and (h[4] >> 4) & 0x03 == 3:
+            raise Refused(f"E-AC-3 fscod2 reserved at ES offset {pos}")
         blocks = (1, 2, 3, 6)[(h[4] >> 4) & 0x03] if h[4] >> 6 != 3 else 6
         fscod = h[4] >> 6
         rate = (48000, 44100, 32000)[fscod] if fscod != 3 else (24000, 22050, 16000)[(h[4] >> 4) & 0x03]
-        dependent = h[2] >> 6 == 1
-        return ((((h[2] & 0x07) << 8) | h[3]) + 1) * 2, 0.0 if dependent else 256 * blocks / rate
+        extends = h[2] >> 6 == 1 or (h[2] >> 3) & 0x07 != 0
+        return ((((h[2] & 0x07) << 8) | h[3]) + 1) * 2, 0.0 if extends else 256 * blocks / rate
     fscod, code = h[4] >> 6, h[4] & 0x3F
     if fscod == 3 or code >> 1 >= len(AC3_KBPS):
         raise Refused(f"AC-3 fscod/frmsizecod reserved at ES offset {pos}")
@@ -792,8 +893,8 @@ def stream_kind(stream: Stream) -> str | None:
     if kind == 0x06 and f"registration:{int.from_bytes(b'Opus', 'big')}" in tags:
         return "opus"
     if kind == 0x06 and tags & {"DVB_enhanced_AC3_descriptor", "enhanced_AC3_descriptor"}:
-        raise Refused("E-AC-3 as DVB private data takes its buffer from ETSI TS 101 154, not modelled")
-    if kind in (0x01, 0x02, 0x10, 0x11, 0x1C, 0x20, 0x21, 0x42, 0xD1, 0xEA):
+        return "eac3-dvb"
+    if kind in (0x01, 0x10, 0x11, 0x1C, 0x20, 0x21, 0x42, 0xD1, 0xEA):
         raise Refused(f"stream_type 0x{kind:02X} is audio/video this model has no parameters for")
     return None
 
@@ -803,6 +904,8 @@ def stream_params(kind: str, stream: Stream) -> tuple[Params, object]:
     es = stream.es
     if kind == "avc":
         return avc_params(stream.sps), None
+    if kind == "mpeg2-video":
+        return mpeg2_params(bytes(es), stream.descriptors), None
     if kind == "hevc":
         return hevc_params(stream.sps), None
     if kind == "teletext":
@@ -830,15 +933,134 @@ def stream_params(kind: str, stream: Stream) -> tuple[Params, object]:
         "ac3-atsc": ("AC-3 (ATSC)", AC3_ATSC_BS, ac3_frame),
         "eac3-atsc": ("E-AC-3 (ATSC)", EAC3_ATSC_BS, ac3_frame),
         "ac3-dvb": ("AC-3 (DVB)", AC3_DVB_BS, ac3_frame),
+        "eac3-dvb": ("E-AC-3 (DVB)", EAC3_DVB_BS, ac3_frame),
     }[kind]
     return Params(label=label, rx=AUDIO_RX, b=bs), parse
 
 
 # NAL unit types that open a new access unit when they follow the last VCL NAL unit
 # of the previous one (H.264 7.4.1.2.3, H.265 7.4.2.4.4), and the VCL types.
-AU_OPENERS = {"avc": {6, 7, 8, 9, 14, 15, 16, 17, 18}, "hevc": {32, 33, 34, 35, 39, 41, 42, 43, 44, *range(48, 56)}}
-VCL = {"avc": set(range(1, 6)), "hevc": set(range(0, 32))}
-DELIMITER = {"avc": 9, "hevc": 35}
+# H.262 6.2.1 has no NAL units: a picture opens at its sequence, GOP or picture header after
+# the last slice of the one before, keyed by the start code value.
+AU_OPENERS = {
+    "avc": {6, 7, 8, 9, 14, 15, 16, 17, 18},
+    "hevc": {32, 33, 34, 35, 39, 41, 42, 43, 44, *range(48, 56)},
+    "mpeg2-video": {0xB3, 0xB8, 0x00},
+}
+VCL = {"avc": set(range(1, 6)), "hevc": set(range(0, 32)), "mpeg2-video": set(range(0x01, 0xB0))}
+# H.262 has no access unit delimiter, and needs none: its picture header is one.
+DELIMITER = {"avc": 9, "hevc": 35, "mpeg2-video": 0x00}
+
+
+def proportional_video_clock(stream: Stream, kind: str, count: int) -> list[tuple[int, Fraction, bool, tuple[int, Fraction] | None]]:
+    """Frame-only POC clocks and HRD output delays, parsed by FFmpeg.
+
+    POC plus VUI supplies presentation time; picture-timing SEI's DPB output
+    delay supplies its distance from decode time (H.264 C.2, H.265 D.3.3).
+    Never let FFmpeg's guessed packet/frame timestamps become the timing oracle.
+    """
+    if kind == "avc" and "temporal_poc_clock" not in stream.descriptors:
+        raise Refused("several access units have no declared proportional POC timestamp clock")
+    proc = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "trace", "-f", "h264" if kind == "avc" else "hevc",
+                           "-i", "pipe:0", "-map", "0:v:0", "-c", "copy", "-bsf:v", "trace_headers", "-f", "null", "-"],
+                          input=bytes(stream.es), capture_output=True, check=False)
+    if proc.returncode:
+        raise Refused("cannot parse the video timing headers")
+    blocks: list[tuple[str, dict[str, int]]] = []
+    for line in proc.stderr.decode(errors="replace").splitlines():
+        if not line.startswith("[trace_headers @"):
+            continue
+        text = line.split("] ", 1)[1]
+        if text in ("Sequence Parameter Set", "Slice Header", "Slice Segment Header"):
+            blocks.append((text, {}))
+        elif text and text[0].isupper():
+            blocks.append((text, {}))
+        elif blocks:
+            match = re.match(r"\d+\s+(\S+)\s+\S+\s+=\s+(-?\d+)$", text)
+            if match:
+                blocks[-1][1][match[1]] = int(match[2])
+    sps: dict[str, int] = {}
+    previous_lsb = previous_msb = frame_num = frame_offset = 0
+    seen = False
+    clocks = []
+    timing = None
+    for name, fields in blocks:
+        if name == "Picture Timing":
+            timing = fields
+            continue
+        if name == "Sequence Parameter Set":
+            sps = fields
+            continue
+        if name not in ("Slice Header", "Slice Segment Header"):
+            continue
+        if kind == "avc":
+            if fields.get("first_mb_in_slice") != 0:
+                continue
+            if (sps.get("frame_mbs_only_flag") != 1 or sps.get("pic_struct_present_flag", 0)
+                    or sps.get("fixed_frame_rate_flag") != 1):
+                raise Refused("missing DTS outside the frame-only video clock profile")
+            units, scale = sps.get("num_units_in_tick", 0), sps.get("time_scale", 0)
+            if units <= 0 or scale <= 0:
+                raise Refused("several access units have no proportional timestamp clock")
+            rate = tick = Fraction(units, scale)
+            output = None if timing is None else timing.get("dpb_output_delay")
+            reset = fields.get("nal_unit_type") == 5
+            if 5 in [value for key, value in fields.items() if key.startswith("memory_management_control_operation")]:
+                raise Refused("missing DTS across an MMCO-5 reset is outside the model profile")
+            mode = sps.get("pic_order_cnt_type")
+            if reset:
+                previous_lsb = previous_msb = frame_num = frame_offset = 0
+            if mode == 0:
+                maximum = 1 << (sps["log2_max_pic_order_cnt_lsb_minus4"] + 4)
+                lsb = fields["pic_order_cnt_lsb"]
+                msb = previous_msb
+                if lsb < previous_lsb and previous_lsb - lsb >= maximum // 2:
+                    msb += maximum
+                elif lsb > previous_lsb and lsb - previous_lsb > maximum // 2:
+                    msb -= maximum
+                poc = msb + lsb
+                if fields.get("nal_ref_idc"):
+                    previous_lsb, previous_msb = lsb, msb
+            elif mode == 2:
+                if fields["frame_num"] < frame_num:
+                    frame_offset += 1 << (sps["log2_max_frame_num_minus4"] + 4)
+                frame_num = fields["frame_num"]
+                poc = 0 if reset else 2 * (frame_offset + frame_num) - (fields.get("nal_ref_idc") == 0)
+            else:
+                raise Refused("missing DTS with AVC POC type 1 is outside the model profile")
+        else:
+            if fields.get("first_slice_segment_in_pic_flag") != 1:
+                continue
+            if (sps.get("field_seq_flag", 0) or sps.get("sub_pic_hrd_params_present_flag", 0)
+                    or sps.get("vui_poc_proportional_to_timing_flag") != 1):
+                raise Refused("missing DTS outside the frame-only proportional HEVC clock profile")
+            units, scale = sps.get("vui_num_units_in_tick", 0), sps.get("vui_time_scale", 0)
+            if units <= 0 or scale <= 0:
+                raise Refused("several access units have no proportional timestamp clock")
+            tick = Fraction(units, scale)
+            rate = tick * (sps.get("vui_num_ticks_poc_diff_one_minus1", 0) + 1)
+            output = None if timing is None else timing.get("pic_dpb_output_delay")
+            nal = fields["nal_unit_type"]
+            reset = nal in range(16, 21) or (nal == 21 and not seen)
+            lsb = fields.get("slice_pic_order_cnt_lsb", 0)
+            maximum = 1 << (sps["log2_max_pic_order_cnt_lsb_minus4"] + 4)
+            msb = 0 if reset else previous_msb
+            if not reset:
+                if lsb < previous_lsb and previous_lsb - lsb >= maximum // 2:
+                    msb += maximum
+                elif lsb > previous_lsb and lsb - previous_lsb > maximum // 2:
+                    msb -= maximum
+            poc = msb + lsb
+            if fields.get("nuh_temporal_id_plus1") == 1 and nal not in (0, 2, 4, 6, 7, 8, 9):
+                previous_lsb, previous_msb = lsb, msb
+        if not rate:
+            raise Refused("several access units have no proportional timestamp clock")
+        clocks.append((poc, rate, reset, None if output is None else (output, tick)))
+        timing = None
+        seen = True
+    if len(clocks) != count:
+        raise Refused("video timing headers do not identify every access unit")
+    return clocks
 
 
 def video_units(stream: Stream, kind: str) -> list[AccessUnit]:
@@ -847,22 +1069,26 @@ def video_units(stream: Stream, kind: str) -> list[AccessUnit]:
     An access unit opens at the first delimiter, parameter set or SEI after the previous
     picture's last slice (H.264 7.4.1.2.3, H.265 7.4.2.4.4); H.222.0 2.14.1 and 2.17.1
     also put a delimiter in every one, so a stream without them is refused. A PES may
-    carry several access units, but only the first takes its timestamp; the rest would
-    need decoding times derived from the stream's own timing (2.4.2.3), which this model
-    does not do, so such a layout is refused rather than graded as one unit.
+    carry several access units, but only the first takes its timestamp. Missing times
+    use a declared proportional POC clock and HRD picture-timing output delay
+    in the frame-only profile; absent signaling is refused.
     """
     es = bytes(stream.es)
     starts = []
+    owners = []
     delimited = False
     after_vcl = True  # the first opener starts the first whole access unit
     pos = es.find(b"\x00\x00\x01")
     while 0 <= pos < len(es) - 3:
-        nal = (es[pos + 3] >> 1) & 0x3F if kind == "hevc" else es[pos + 3] & 0x1F
+        nal = {"hevc": (es[pos + 3] >> 1) & 0x3F, "mpeg2-video": es[pos + 3]}.get(kind, es[pos + 3] & 0x1F)
         delimited |= nal == DELIMITER[kind]
         if nal in AU_OPENERS[kind] and after_vcl:
             # The zero_byte ahead of the start code belongs to this NAL unit (H.264 B.1.1,
             # H.265 B.2.1), so to this access unit rather than the last.
             starts.append(pos - 1 if pos and es[pos - 1] == 0 else pos)
+            # An optional zero_byte can be a preceding PES's trailing zero.
+            # The required start_code_prefix decides timestamp ownership.
+            owners.append(pos)
             after_vcl = False
         elif nal in VCL[kind]:
             after_vcl = True
@@ -875,13 +1101,30 @@ def video_units(stream: Stream, kind: str) -> list[AccessUnit]:
     packets = [index for index, _h, body, _o in stream.packets if body]
     units: list[AccessUnit] = []
     stamped: set[int] = set()
+    owner_pes = [bisect.bisect_right(pes_at, owner) - 1 for owner in owners]
+    needs_clock = len(set(owner_pes)) != len(owner_pes) or any(pes[k][1] is None for k in owner_pes)
+    clocks = proportional_video_clock(stream, kind, len(starts)) if needs_clock else []
+    anchor = None
     for n, start in enumerate(starts):
-        k = bisect.bisect_right(pes_at, start) - 1
+        k = owner_pes[n]
         _offset, pts, dts, index = pes[k]
+        explicit = pts is not None and k not in stamped
+        if clocks:
+            poc, rate, reset, output = clocks[n]
+            if reset:
+                anchor = None
+            if explicit:
+                anchor = (poc, Fraction(pts), rate)
+            elif anchor is not None and anchor[2] == rate:
+                pts = anchor[1] + (poc - anchor[0]) * rate * PTS_HZ
+                if output is None:
+                    raise Refused("an inferred access unit has no HRD picture timing for its decode time")
+                delay, tick = output
+                dts = pts - delay * tick * PTS_HZ
+            else:
+                raise Refused("an access unit has no timestamp anchor for its POC clock")
         if pts is None:
             raise Refused(f"an access unit starts in the untimestamped PES at packet {index}")
-        if k in stamped:
-            raise Refused(f"the PES at packet {index} carries several access units, whose decode times are not derived")
         stamped.add(k)
         end = starts[n + 1] if n + 1 < len(starts) else stream.es_len
         first = packets[bisect.bisect_right(packet_at, start) - 1]
@@ -1135,6 +1378,14 @@ def simulate(
     return grade
 
 
+def time_bases(scan: Scan, pcr_pid: int) -> list[tuple[PcrClock, int, int]]:
+    """(clock, first packet, end packet) of each time base on `pcr_pid` with a timeline."""
+    samples = scan.pcr_by_pid.get(pcr_pid, [])
+    bounds = [0, *sorted(i for i, _ in samples if i in scan.pcr_new_base), scan.total_packets]
+    segments = [(PcrClock([s for s in samples if lo <= s[0] < hi]), lo, hi) for lo, hi in zip(bounds, bounds[1:])]
+    return [segment for segment in segments if segment[0].ok()]
+
+
 def check_tstd(ts_path: str, packet_size: int, scan: Scan) -> Check:
     """Full T-STD buffer model (ISO 13818-1 2.4.2) for every audio and video stream.
 
@@ -1165,10 +1416,7 @@ def check_tstd(ts_path: str, packet_size: int, scan: Scan) -> Check:
         for pid, why in read_pes(data, packet_size, modelled).items():
             refused[pid] = why
             del modelled[pid]
-        samples = scan.pcr_by_pid.get(pcr_pid, [])
-        bounds = [0, *sorted(i for i, _ in samples if i in scan.pcr_new_base), scan.total_packets]
-        segments = [(PcrClock([s for s in samples if lo <= s[0] < hi]), lo, hi) for lo, hi in zip(bounds, bounds[1:])]
-        segments = [segment for segment in segments if segment[0].ok()]
+        segments = time_bases(scan, pcr_pid)
         for stream in modelled.values():
             try:
                 if kinds[stream.pid] in ("avc", "hevc"):
@@ -1213,6 +1461,432 @@ def check_tstd(ts_path: str, packet_size: int, scan: Scan) -> Check:
         return Check("tstd", Severity.HARD, Status.FAIL, "; ".join(faults), metrics)
     peaks = ", ".join(f"PID {g.pid} " + "/".join(f"{k} {v * 100:.0f}%" for k, v in g.peaks.items()) for g in grades)
     return Check("tstd", Severity.HARD, Status.PASS, f"no overflow or underflow; peak fill {peaks}", metrics)
+
+
+def is_duplicate(last: bytes | None, packet: bytes) -> bool:
+    """Whether `packet` repeats `last`, the packet before it on its PID (2.4.3.3): byte for
+    byte but for a PCR or OPCR, which a duplicate may refresh. As moq-mux's health.rs."""
+    if last is None or not packet[3] & 0x10:
+        return False
+    if last == packet:
+        return True
+    # Matching the header through the adaptation flags pins every byte before the clocks.
+    if not last[3] & 0x20 or last[:6] != packet[:6]:
+        return False
+    flags = last[5]
+    clock_end = 6 + 6 * bool(flags & 0x10) + 6 * bool(flags & 0x08)
+    if clock_end == 6 or clock_end > 5 + last[4]:
+        return False
+    return last[clock_end:] == packet[clock_end:]
+
+
+def packets_on(data: bytes, packet_size: int, pids: set[int]) -> dict[int, list[tuple[int, bytes]]]:
+    """(index, packet) of each packet on `pids`, by PID, indexed as `scan_packets` counts them."""
+    out: dict[int, list[tuple[int, bytes]]] = {}
+    index = offset = 0
+    while offset + packet_size <= len(data):
+        if data[offset] != 0x47:
+            nxt = data.find(0x47, offset + 1)
+            if nxt < 0:
+                break
+            offset = nxt
+            continue
+        pid = ((data[offset + 1] & 0x1F) << 8) | data[offset + 2]
+        if pid in pids:
+            out.setdefault(pid, []).append((index, data[offset : offset + 188]))
+        index += 1
+        offset += packet_size
+    return out
+
+
+def _crc_table() -> list[int]:
+    table = []
+    for byte in range(256):
+        crc = byte << 24
+        for _ in range(8):
+            crc = (crc << 1) ^ 0x04C11DB7 if crc & 0x80000000 else crc << 1
+        table.append(crc & 0xFFFFFFFF)
+    return table
+
+
+CRC_TABLE = _crc_table()
+
+
+def crc32_mpeg(data: bytes) -> int:
+    """The PSI section CRC (ISO 13818-1 Annex A): 0 over a whole section, its CRC included."""
+    crc = 0xFFFFFFFF
+    for byte in data:
+        crc = ((crc << 8) & 0xFFFFFFFF) ^ CRC_TABLE[(crc >> 24) ^ byte]
+    return crc
+
+
+def sections(packets: list[tuple[int, bytes]]) -> list[tuple[int, bytes]]:
+    """(index of the packet completing it, section) for each long-form section on one PID, as
+    a receiver reassembles them (2.4.4.2): a duplicate packet (2.4.3.3) adds nothing, and a
+    section failing its CRC is dropped."""
+    out: list[tuple[int, bytes]] = []
+
+    def complete(index: int, buf: bytes) -> bytes | None:
+        # Whole sections leave `buf`; the rest is a section still arriving, or stuffing.
+        while buf and buf[0] != 0xFF:
+            if len(buf) < 3:
+                return buf
+            length = 3 + (((buf[1] & 0x0F) << 8) | buf[2])
+            if len(buf) < length:
+                return buf
+            if buf[1] & 0x80 and crc32_mpeg(buf[:length]) == 0:
+                out.append((index, buf[:length]))
+            buf = buf[length:]
+        return None
+
+    pending: bytes | None = None
+    last = None
+    for index, packet in packets:
+        duplicate = is_duplicate(last, packet)
+        last = packet
+        if duplicate or not packet[3] & 0x10:
+            continue
+        payload = packet[5 + packet[4] if packet[3] & 0x20 else 4 :]
+        if packet[1] & 0x40 and payload:
+            if pending is not None:
+                complete(index, pending + payload[1 : 1 + payload[0]])
+            pending = complete(index, payload[1 + payload[0] :])
+        elif pending is not None:
+            pending = complete(index, pending + payload)
+    return out
+
+
+def system_timelines(
+    data: bytes, packet_size: int
+) -> tuple[dict[int, list[tuple[int, int | None, int | None]]], dict[int, list[tuple[int, bytes]]]]:
+    """Each program's epochs, (first packet, PMT PID, PCR PID), and the packets on PIDs 0-3
+    and every PMT PID, by PID.
+
+    A receiver learns a program's PMT PID from the PAT, and its PCR PID from a PMT on that
+    PID, each from the packet after the section that declares it. The first pair a program
+    declares holds from the start of the capture, unless a complete PAT before it left the
+    program out. A complete PAT version without a program a section has listed ends it, an
+    epoch with neither PID, until a PAT and PMT declare it again."""
+    by_pid = packets_on(data, packet_size, {0})
+    # (index, kind, PMT PID, value): a PAT naming the PMT PID (0), a PMT naming the PCR PID
+    # (1), or a complete PAT version without the program (2).
+    events: dict[int, list[tuple[int, int, int, int]]] = {}
+    listed: set[int] = set()
+    version: int | None = None
+    parts: dict[int, set[int]] = {}
+    first_complete: int | None = None
+    for index, section in sections(by_pid.get(0, [])):
+        if section[0] != 0x00 or not section[5] & 0x01:
+            continue
+        programs = set()
+        for at in range(8, len(section) - 4, 4):
+            program = (section[at] << 8) | section[at + 1]
+            pid = ((section[at + 2] & 0x1F) << 8) | section[at + 3]
+            if program:
+                programs.add(program)
+                events.setdefault(program, []).append((index, 0, pid, pid))
+        if (section[5] >> 1) & 0x1F != version:
+            version, parts = (section[5] >> 1) & 0x1F, {}
+        parts[section[6]] = programs
+        listed |= programs
+        if all(n in parts for n in range(section[7] + 1)):
+            current = set().union(*(parts[n] for n in range(section[7] + 1)))
+            for program in listed - current:
+                events[program].append((index, 2, 0, 0))
+            listed = current
+            first_complete = index if first_complete is None else first_complete
+    pmt_pids = {pid for changes in events.values() for _, _, pid, _ in changes}
+    by_pid |= packets_on(data, packet_size, {1, 2, 3} | pmt_pids)
+    for pid in pmt_pids:
+        for index, section in sections(by_pid.get(pid, [])):
+            program = (section[3] << 8) | section[4]
+            if section[0] == 0x02 and section[5] & 0x01 and program in events:
+                events[program].append((index, 1, pid, ((section[8] & 0x1F) << 8) | section[9]))
+    timelines: dict[int, list[tuple[int, int | None, int | None]]] = {}
+    for program, changes in events.items():
+        pmt = pcr = None
+        epochs: list[tuple[int, int | None, int | None]] = []
+        absent = first_complete is not None and first_complete < min(i for i, kind, _, _ in changes if kind == 0)
+        for index, kind, pid, value in sorted(changes):
+            absent |= kind == 2
+            if kind == 1 and pid != pmt:
+                continue
+            new = (value, pcr) if kind == 0 else (pmt, value) if kind == 1 else (None, None)
+            if new == (pmt, pcr):
+                continue
+            pmt, pcr = new
+            if pcr is None and (pmt is not None or not epochs or epochs[-1][1] is None):
+                continue
+            start = index + 1 if epochs or absent else 0
+            if epochs and epochs[-1][0] == start:
+                epochs.pop()
+            epochs.append((start, pmt, pcr))
+        if epochs:
+            timelines[program] = epochs
+    return timelines, by_pid
+
+
+def program_system_packets(
+    epochs: list[tuple[int, int | None, int | None]], by_pid: dict[int, list[tuple[int, bytes]]]
+) -> list[tuple[int, bool]]:
+    """(index, first copy) of each packet the program takes into TBsys while it is declared:
+    PIDs 0-3 and the PMT PID in force. Both copies of a duplicate (2.4.3.3) enter TBsys, and
+    only the first goes on to Bsys."""
+    starts = [start for start, _, _ in epochs]
+    out: list[tuple[int, bool]] = []
+    for pid, packets in by_pid.items():
+        last = None
+        for index, packet in packets:
+            first = not is_duplicate(last, packet)
+            last = packet
+            n = bisect.bisect_right(starts, index) - 1
+            pmt = epochs[n][1] if n >= 0 else None
+            if pmt is not None and (pid <= 3 or pmt == pid):
+                out.append((index, first))
+    out.sort()
+    return out
+
+
+def clock_runs(scan: Scan, epochs: list[tuple[int, int | None, int | None]]) -> list[tuple[int, int, int, bool]]:
+    """(first packet, end packet, PCR PID, fresh) for each stretch on one PCR PID and time
+    base while the program is declared. The program's buffers carry across a change of PMT
+    or PCR PID; a signalled discontinuity on the PCR PID in force, even on its first PCR,
+    starts them afresh (fresh), as in `check_tstd`, and so does the program's return."""
+    spans: list[list] = []
+    fresh = True
+    for n, (start, _, pcr_pid) in enumerate(epochs):
+        end = epochs[n + 1][0] if n + 1 < len(epochs) else scan.total_packets
+        if pcr_pid is None:
+            fresh = True
+        elif spans and spans[-1][2] == pcr_pid and not fresh:
+            spans[-1][1] = end
+        else:
+            spans.append([start, end, pcr_pid, fresh])
+            fresh = False
+    runs: list[tuple[int, int, int, bool]] = []
+    for start, end, pcr_pid, fresh in spans:
+        on_pid = {i for i, _ in scan.pcr_by_pid.get(pcr_pid, [])}
+        bases = sorted(i for i in scan.pcr_new_base if start <= i < end and i in on_pid)
+        fresh = fresh or bases[:1] == [start]
+        bases = [i for i in bases if i > start]
+        for k, (lo, hi) in enumerate(zip([start, *bases], [*bases, end])):
+            runs.append((lo, hi, pcr_pid, fresh or k > 0))
+    return runs
+
+
+@dataclass
+class SystemBuffers:
+    """One program's TBsys and Bsys, as its system packets pass through."""
+
+    # When TBsys has passed on every byte it took, and when it last started filling from empty.
+    leave: float = float("-inf")
+    busy_since: float | None = None
+    # Bsys's bytes at `at`, as the last first copy's last byte reached it.
+    level: float = 0.0
+    at: float | None = None
+    # (from when, clock) for each PCR PID the buffers have run on, the first from the start.
+    clocks: list[tuple[float, PcrClock]] = field(default_factory=list)
+
+    def run_on(self, clock: PcrClock, start: float) -> None:
+        """Take the time and transport rate from `clock` from `start` on."""
+        start = max(start, self.clocks[-1][0]) if self.clocks else float("-inf")
+        self.clocks.append((start, clock))
+
+    def drained(self, t0: float, t1: float) -> float:
+        """Bytes Bsys removes from `t0` to `t1` while it holds any: at each instant's Rsys."""
+        bits = 0.0
+        for n, (start, clock) in enumerate(self.clocks):
+            lo = max(t0, start)
+            hi = min(t1, self.clocks[n + 1][0]) if n + 1 < len(self.clocks) else t1
+            if hi > lo:
+                bits += clock.rsys_bits(hi) - clock.rsys_bits(lo)
+        return bits / 8
+
+    def take(self, start: float, end: float, first: bool, grade: Grade) -> None:
+        """One packet on the wire from `start` to `end`: whole into TBsys, and a first copy's
+        bytes on into Bsys as they leave TBsys at Rxsys, never before they arrive."""
+        if self.leave <= start:
+            self.busy_since = start
+        free = max(self.leave, start)
+        self.leave = max(end, free + 188 * 8 / SYSTEM_RX)
+        fill = (self.leave - end) * SYSTEM_RX / 8
+        grade.peak("TBsys", fill, TB_SIZE)
+        if fill > TB_SIZE + 0.5:
+            grade.flag("TBsys overflow")
+        if self.busy_since is not None and self.leave - self.busy_since > TB_EMPTY_S:
+            grade.flag("TBsys not emptied within 1 s")
+            self.busy_since = None
+        if first:
+            # Bsys takes the bytes faster than Rsys drains them, so it peaks as the last arrives.
+            if self.at is not None:
+                self.level = max(0.0, self.level - self.drained(self.at, free))
+            self.level = max(0.0, self.level + 188 - self.drained(free, self.leave))
+            self.at = self.leave
+            grade.peak("Bsys", self.level, BSYS_SIZE)
+            if self.level > BSYS_SIZE + 0.5:
+                grade.flag("Bsys overflow")
+
+
+def pmt_tables(data: bytes, packet_size: int) -> dict[int, list[tuple[int, int, bytes]]]:
+    """Each program's PMTs in force (current_next_indicator set), by program_number: (index
+    of the packet completing the section, version_number, the section less its version and
+    CRC), on whichever PMT PID a PAT named, each run of repeats once."""
+    pmt_pids = set()
+    for _, section in sections(packets_on(data, packet_size, {0}).get(0, [])):
+        if section[0] == 0x00 and section[5] & 0x01:
+            for at in range(8, len(section) - 4, 4):
+                if (section[at] << 8) | section[at + 1]:
+                    pmt_pids.add(((section[at + 2] & 0x1F) << 8) | section[at + 3])
+    found: dict[int, list[tuple[int, int, bytes]]] = {}
+    for packets in packets_on(data, packet_size, pmt_pids).values():
+        for index, section in sections(packets):
+            if section[0] == 0x02 and section[5] & 0x01:
+                program = (section[3] << 8) | section[4]
+                body = section[:5] + section[6:-4]
+                found.setdefault(program, []).append((index, (section[5] >> 1) & 0x1F, body))
+    tables: dict[int, list[tuple[int, int, bytes]]] = {}
+    for program, seen in found.items():
+        runs = tables.setdefault(program, [])
+        for table in sorted(seen):
+            if not runs or runs[-1][1:] != table[1:]:
+                runs.append(table)
+    return tables
+
+
+def check_pmt_versions(ts_path: str, packet_size: int) -> Check:
+    """Each program's PMT changes only at a new version_number (ISO 13818-1 2.4.4.9), and an
+    older version never follows a newer one.
+
+    A demux keeps the table it has until the version changes, so a change made under the same
+    version never reaches it, and a copy of the table a revision replaced, arriving after it,
+    reverts the revision. A version one up to 15 behind the newest is older, modulo 32. So is
+    a table coming back under the version it went out at before the versions since have come
+    round to it, which modulo 32 alone reads as a skip forward. A revision that skips versions
+    is reported, not failed: what a receiver sees still changes at every new version."""
+    with open(ts_path, "rb") as handle:
+        data = handle.read()
+    revisions = skipped = 0
+    for program, runs in sorted(pmt_tables(data, packet_size).items()):
+        for at in range(1, len(runs)):
+            newest, (index, version, body) = runs[at - 1][1], runs[at]
+            behind = (newest - version) % 32
+            last = max((n for n in range(at) if runs[n][1:] == (version, body)), default=None)
+            returned = last is not None and len({v for _, v, _ in runs[last + 1 : at]}) < 31
+            if behind == 0:
+                detail = f"program {program}: the PMT changed at packet {index} under version {version}"
+            elif behind < 16 or returned:
+                detail = f"program {program}: version {version} at packet {index}, after version {newest}"
+            else:
+                revisions += 1
+                skipped += (version - newest) % 32 - 1
+                continue
+            return Check("pmt-versions", Severity.HARD, Status.FAIL, detail, {"revisions": revisions})
+    detail = f"{revisions} revision(s), each at a new version" + (f", {skipped} version(s) skipped" if skipped else "")
+    return Check("pmt-versions", Severity.HARD, Status.PASS, detail, {"revisions": revisions, "skipped": skipped})
+
+
+def check_system_buffers(ts_path: str, packet_size: int, scan: Scan) -> Check:
+    """TBsys and Bsys (ISO 13818-1 2.4.2.3) for each program, on its PCR.
+
+    Each program is followed through the PAT and its PMTs: a packet on PIDs 0-3 or on the
+    PMT PID then in force arrives in the program's one TBsys over its time on the wire, as
+    the PCR PID then in force times it, and its bytes leave at Rxsys once those ahead of them
+    have, never before they arrive, into the one Bsys, which empties at Rsys whenever it
+    holds a byte, at the transport rate of the moment. Bsys takes them faster than it drains,
+    so it peaks as a packet's last byte reaches it. Graded on 2.4.2.6: neither overflows, and
+    TBsys empties at least once a second. Both buffers keep their bytes across a change of
+    PMT PID, PCR PID or transport rate; a signalled discontinuity starts them afresh, as in
+    `check_tstd`, and a program a complete PAT drops takes nothing until it is declared again,
+    afresh. Across a PCR PID change the last PCR on the old PID and the first on the new are
+    the program's successive PCRs: unless the change signals a discontinuity, they must
+    increase and lie within 0.1 s (2.7.2), or the check fails and the buffers start afresh.
+    A program declaring no PCR (PCR_PID 0x1FFF, 2.4.4.9) has no clock to model;
+    a system packet on any other PCR PID's stretch with fewer than two PCRs fails, since it
+    was not checked.
+    """
+    with open(ts_path, "rb") as handle:
+        data = handle.read()
+    timelines, by_pid = system_timelines(data, packet_size)
+    unclocked = sorted(p for p, epochs in timelines.items() if all(pcr in (0x1FFF, None) for _, _, pcr in epochs))
+    programs: dict[str, dict] = {}
+    for program, epochs in timelines.items():
+        if program in unclocked:
+            continue
+        packets = program_system_packets(epochs, by_pid)
+        indices = [index for index, _ in packets]
+        grade = Grade(program, "system")
+        modelled = 0
+        # The runs one set of buffers lives through, each clock known before any packet is
+        # taken: a packet still reaching Bsys as the clock changes drains at the next rate.
+        # Across a PCR PID change the last PCR on the old PID and the first on the new are the
+        # program's successive PCRs, which time the bytes between them (2.4.2.2).
+        chains: list[list[tuple[int, list[tuple[int, bool]], PcrClock, list[tuple[int, int]]]]] = []
+        chain = None
+        for lo, hi, pcr_pid, fresh in clock_runs(scan, epochs):
+            run = packets[bisect.bisect_left(indices, lo) : bisect.bisect_left(indices, hi)]
+            samples = [s for s in scan.pcr_by_pid.get(pcr_pid, []) if lo <= s[0] < hi]
+            clock = PcrClock(samples)
+            if pcr_pid == 0x1FFF or not clock.ok():
+                if pcr_pid != 0x1FFF and run:
+                    name = "outside a clocked time base"
+                    grade.violations[name] = grade.violations.get(name, 0) + len(run)
+                chain = None
+                continue
+            if chain is not None and not fresh:
+                before, held = chain[-1][3][-1], chain[-1][3]
+                if 0 < (samples[0][1] - before[1]) % PCR_WRAP <= PCR_HZ // 10:
+                    chain[-1] = (*chain[-1][:2], PcrClock([*held, samples[0]]), held)
+                    samples = [before, *samples]
+                    clock = PcrClock(samples)
+                else:
+                    name = "PCR PID switch without a common time base"
+                    grade.violations[name] = grade.violations.get(name, 0) + 1
+                    fresh = True
+            if fresh or chain is None:
+                chain = []
+                chains.append(chain)
+            chain.append((lo, run, clock, samples))
+        for chain in chains:
+            buffers = SystemBuffers()
+            for lo, _, clock, _ in chain:
+                buffers.run_on(clock, clock.time_at(lo))
+            for _, run, clock, _ in chain:
+                for index, first in run:
+                    modelled += 1
+                    buffers.take(clock.time_at(index), clock.time_at(index + 1), first, grade)
+        programs[str(program)] = {
+            "pmt_pids": sorted({pmt for _, pmt, _ in epochs if pmt is not None}),
+            "pcr_pids": sorted({pcr for _, _, pcr in epochs if pcr is not None}),
+            "system_packets": modelled,
+            "violations": grade.violations,
+            "peak_fill_pct": {k: round(v * 100, 1) for k, v in grade.peaks.items()},
+        }
+    metrics = {"programs": programs, "unclocked_programs": unclocked}
+    if not programs:
+        return Check("system-buffers", Severity.SHAPE, Status.WARN, "no clocked program to model", metrics)
+    faults = [
+        f"program {number} {name} x{count}"
+        for number, program in programs.items()
+        for name, count in sorted(program["violations"].items())
+    ]
+    faults += [
+        f"program {number} has no system packet inside a time base"
+        for number, program in programs.items()
+        if not program["system_packets"] and not program["violations"]
+    ]
+    if faults:
+        return Check("system-buffers", Severity.HARD, Status.FAIL, "; ".join(faults), metrics)
+    peaks = ", ".join(
+        f"program {number} " + "/".join(f"{k} {v:.0f}%" for k, v in program["peak_fill_pct"].items())
+        for number, program in programs.items()
+    )
+    return Check(
+        "system-buffers",
+        Severity.HARD,
+        Status.PASS,
+        f"no overflow, TBsys emptied each second; peak fill {peaks}",
+        metrics,
+    )
 
 
 def detect_packet_size(analysis: dict) -> int:
@@ -1279,6 +1953,7 @@ def analyze(ts_path: str, reference_seconds: float | None = None) -> list[Check]
     pat, pmt = check_pat_pmt(analysis)
     checks.append(pat)
     checks.append(pmt)
+    checks.append(check_pmt_versions(ts_path, packet_size))
     checks.append(check_psi_crc(analysis))
     checks.append(check_continuity(analysis))
     checks.append(check_pcr_presence(analysis, clock_by_pid))
@@ -1288,6 +1963,7 @@ def analyze(ts_path: str, reference_seconds: float | None = None) -> list[Check]
 
     checks.append(check_service_descriptors(analysis))
     checks.append(check_tstd(ts_path, packet_size, scan))
+    checks.append(check_system_buffers(ts_path, packet_size, scan))
     return checks
 
 

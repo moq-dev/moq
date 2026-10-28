@@ -24,6 +24,14 @@ listen = "[::]:443"
 cert = "/var/lib/moq-relay/cert.pem"
 key = "/var/lib/moq-relay/key.pem"
 
+# Or let the relay fetch and renew a Let's Encrypt certificate itself: delete
+# both cert/key pairs above and uncomment this. Let's Encrypt validates over
+# web.https on TCP port 443, so it must be reachable from the internet.
+# [acme]
+# domains = ["relay.example.com"]
+# contact = ["mailto:ops@example.com"]
+# cache = "/var/lib/moq-relay/acme"
+
 # Uncomment to also serve plain HTTP/WebSocket on port 80.
 # [web.http]
 # listen = "[::]:80"

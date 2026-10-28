@@ -1,7 +1,7 @@
 //! A thread-per-core io_uring worker for the native MoQ stack.
 //!
 //! One [`Worker`] per pinned thread. It owns a `SINGLE_ISSUER | DEFER_TASKRUN |
-//! COOP_TASKRUN` ring, a userspace timer heap, a local task set, and the UDP
+//! COOP_TASKRUN` ring, a userspace timer queue, a local task set, and the UDP
 //! sockets bound through it. The caller owns the thread loop: drive everything
 //! with [`Worker::block_on`], spawn extra `!Send` tasks through [`Handle`], and
 //! wake the worker from other threads through any [`std::task::Waker`] it hands
@@ -14,14 +14,15 @@
 //!
 //! [`quic`] stacks a sans-IO QUIC stack on that path: a [`quic::Endpoint`]
 //! serves many connections on one socket (demuxed by connection id, dials
-//! included), each a [`quic::Connection`] wrapped by [`transport::Session`],
-//! so `moq_net::Client::connect_lite` and `Server::accept_lite` run real
-//! moq-lite sessions on the worker. The socket is the identity: whatever is
+//! included), each a [`quic::Connection`] wrapped by [`transport::Session`]
+//! and [`transport::Local`], which meets moq-net's `Send` bound by checking the
+//! thread on every use, so `moq_net::Client::connect` and `Server::accept` run
+//! real MoQ sessions on the worker. The socket is the identity: whatever is
 //! built on it runs on the worker that adopted it, and a socket adopted as a
 //! member of a steered reuseport group ([`udp::Bound`]) issues connection ids
 //! that steer back to it. [`Handle::run`] supplies time and schedules driver
 //! wakeups; callers run the returned drivers with [`Handle::spawn`]. The stack
-//! underneath is enabled by the `noq` feature; a build without it leaves the
+//! underneath is enabled by the `quic` feature; a build without it leaves the
 //! module out.
 //!
 //! [`metrics::Metrics`] is how the worker's own health leaves its thread:
@@ -32,14 +33,22 @@
 //!
 //! Requires Linux 6.12; [`Worker::new`] refuses older kernels with a legible
 //! error instead of degrading. The crate compiles to nothing off Linux.
-// Off Linux the crate compiles to nothing, so these doc links have no target.
-#![cfg_attr(not(target_os = "linux"), allow(rustdoc::broken_intra_doc_links))]
+
+#![warn(missing_docs)]
+#![cfg_attr(
+	not(target_os = "linux"),
+	allow(
+		rustdoc::broken_intra_doc_links,
+		reason = "off Linux the crate compiles to nothing, so these doc links have no target"
+	)
+)]
 #![cfg(target_os = "linux")]
 
+mod clock;
 mod error;
 pub mod metrics;
 mod park;
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 pub mod quic;
 mod shared;
 mod timer;

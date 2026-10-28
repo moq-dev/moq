@@ -2,7 +2,8 @@
 
 ## Goal
 
-`<moq-publish>` announces a stats track in its catalog and fills it.
+`<moq-publish>` announces a stats track in its catalog and fills it, and an
+attribute solicits feedback by setting the catalog's `echo` section.
 `<moq-watch>`, given an echo name, publishes an `.echo` broadcast under the
 echo path of a catalog soliciting feedback. Both use the `@moq/hang` schemas.
 
@@ -12,10 +13,13 @@ echo path of a catalog soliciting feedback. Both use the `@moq/hang` schemas.
   - The encoder `Stats` signals are already per rendition (`frames`,
     `bytes`, `keyframes`). Add drops and the target bitrate.
   - Fold them into the stats snapshot keyed by rendition ID, and write it
-    through the `moq-json` snapshot producer with its `.z` sibling. A `stats`
-    attribute enables it.
+    through the `@moq/json` snapshot producer on one track with
+    `compress: true`, matching the [m1 compression migration](/quest/m1/compress/migrate.md).
+    A `stats` attribute enables it.
   - `transport` carries PROBE rtt only, because `WebTransport.getStats()`
     returns nothing useful in Chromium or Firefox today.
+  - An `echo-path` attribute sets the catalog's `echo` section, matching
+    Rust's `moq import --echo-path` (decided 2026-10-22, maintainer).
 - `js/watch`:
   - The decoder `Stats` signals grow late frames, stalls and stalled
     duration, underruns from the worklet's count, decode errors, and the
@@ -36,10 +40,6 @@ echo path of a catalog soliciting feedback. Both use the `@moq/hang` schemas.
   broadcast yet, so [Encrypted browser components](/quest/m2/e2ee/browser.md) refuses the
   stats track and the `echo` attribute when it adds one: they would publish
   rendition IDs and per-track counters in plaintext beside it.
-
-## Required
-
-- [Schema](/quest/m2/stats/schema.md) - the zod schemas this fills
 
 ## Related
 

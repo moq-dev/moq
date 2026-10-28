@@ -21,7 +21,7 @@ use std::{
 	time::Duration,
 };
 
-use crate::{Error, Result, SessionError};
+use crate::{Error, Result};
 
 /// Maximum New Session URI length, in bytes. Both wires cap it here, and a
 /// receiver treats anything longer as a protocol violation.
@@ -39,7 +39,7 @@ pub struct Goaway {
 	/// How long the sender waits before force-closing with
 	/// [`Error::GoawayTimeout`]. `None` means no deadline.
 	///
-	/// Only moq-transport draft-17+ carries this on the wire. Elsewhere it still
+	/// Only moq-transport carries this on the wire. Elsewhere it still
 	/// applies locally, so the sender enforces a deadline the peer cannot see.
 	pub(crate) timeout: Option<Duration>,
 }
@@ -90,14 +90,15 @@ impl Goaway {
 pub struct Producer {
 	trigger: kio::Producer<Option<Goaway>>,
 	/// Whether this side may name a redirect URI. A client may not,
-	/// since it cannot tell a server to open connections (draft-19 sect 10.4).
+	/// since it cannot tell a server to open connections (draft-22 section 9.2).
 	redirect: bool,
 }
 
 impl Producer {
 	/// Send the GOAWAY, consuming the handle: a session may only send one.
 	///
-	/// The session must stay driven for the message to reach the wire. With
+	/// The timeout starts at the driver poll this send wakes, independent of the
+	/// GOAWAY's own write. The session must stay driven for the message to reach the wire. With
 	/// [`Goaway::timeout`] set, the driver force-closes the session once the
 	/// deadline passes, so awaiting `Session::closed`
 	/// is how a caller observes the drain finishing either way. That holds on a
@@ -143,14 +144,6 @@ pub struct Consumer {
 }
 
 impl Consumer {
-	/// The peer's GOAWAY, or `None` if it has not sent one.
-	///
-	/// The synchronous read behind [`poll`](Self::poll), for callers that only
-	/// want to know whether the session is draining.
-	pub fn peek(&self) -> Option<Goaway> {
-		self.state.read().clone()
-	}
-
 	/// Poll for the peer's GOAWAY.
 	///
 	/// `Ready(Err)` once the session closes without one, so a caller can stop
@@ -165,12 +158,6 @@ impl Consumer {
 			Poll::Pending => Poll::Pending,
 		}
 	}
-
-	/// Wait for the peer's GOAWAY, or `None` if the session closes without one.
-	#[cfg(feature = "async")]
-	pub async fn recv(&self) -> Option<Goaway> {
-		kio::wait(|waiter| self.poll(waiter)).await.ok()
-	}
 }
 
 /// The receive-side GOAWAY signal handed to a subscriber.
@@ -180,7 +167,6 @@ impl Consumer {
 /// why the flag is not merely a read of the channel), and a wakeup for the
 /// per-source tasks, which have to react to a peer that drains and then goes quiet.
 #[derive(Clone)]
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
 pub(crate) struct GoingAway {
 	flag: Arc<AtomicBool>,
 	received: Consumer,
@@ -188,13 +174,11 @@ pub(crate) struct GoingAway {
 
 impl GoingAway {
 	/// Mark the session as going away, returning whether this was the first time.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn set(&self) -> bool {
 		!self.flag.swap(true, Ordering::AcqRel)
 	}
 
 	/// Whether a GOAWAY has been received.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn is_set(&self) -> bool {
 		self.flag.load(Ordering::Acquire)
 	}
@@ -204,7 +188,6 @@ impl GoingAway {
 	///
 	/// Stays `Ready` once set, so a caller must treat what it does in response as
 	/// idempotent rather than as an edge.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn poll(&self, waiter: &kio::Waiter) -> Poll<()> {
 		// Presence only, rather than [`Consumer::poll`]: this stays ready for the rest
 		// of the session, and every wakeup of every per-source task would otherwise
@@ -239,7 +222,6 @@ impl Default for GoingAway {
 
 /// The halves handed to a protocol driver's `start()`.
 #[derive(Clone)]
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
 pub(crate) struct Protocol {
 	/// Awaited by the driver's send path; firing means "encode and send GOAWAY now".
 	trigger: kio::Consumer<Option<Goaway>>,
@@ -255,10 +237,9 @@ impl Protocol {
 	/// # Errors
 	///
 	/// Returns [`Error::ProtocolViolation`] on a second GOAWAY, which both drafts
-	/// require the session be closed over (draft-19 sect 10.4). Keeping the first
+	/// require the session be closed over (draft-22 section 9.2). Keeping the first
 	/// payload instead would leave an observer acting on a URI the peer has since
 	/// replaced, with no way to tell.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn record(&self, goaway: Goaway) -> Result<()> {
 		if !self.going_away.set() {
 			return Err(Error::ProtocolViolation);
@@ -273,7 +254,6 @@ impl Protocol {
 	///
 	/// `None` if the trigger was dropped without firing (the session is closing
 	/// without a drain), so nothing should be sent.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn poll_triggered(&self, waiter: &kio::Waiter) -> Poll<Option<Goaway>> {
 		match self.trigger.poll(waiter, |state| match &**state {
 			Some(goaway) => Poll::Ready(goaway.clone()),
@@ -286,63 +266,41 @@ impl Protocol {
 	}
 }
 
-/// Enforces a sent GOAWAY's deadline: closes the session once it passes.
+/// The drain deadline, watched independently of the wire's send progress.
 ///
-/// The draft makes the deadline the sender's promise, not the peer's, so the
-/// driver arms this after the message hits the wire rather than making the
-/// caller hold a handle and await it.
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
-pub(crate) struct Enforce<S: crate::transport::poll::Session> {
-	session: S,
-	/// The armed deadline, or `None` when the GOAWAY carried no timeout (ready
-	/// immediately: there is nothing to enforce).
-	deadline: Option<(crate::time::Deadline, Duration)>,
+/// Armed from the instant of the driver poll that observes the send, which the
+/// send wakes. The queue's instant at the send itself is the driver's last poll,
+/// as stale as the session has been idle, so arming from it would cut the peer's
+/// window short.
+pub(crate) struct Deadline {
+	runtime: crate::time::Deadlines,
+	trigger: Option<kio::Consumer<Option<Goaway>>>,
+	armed: Option<(crate::time::Deadline, Duration)>,
 }
 
-impl<S: crate::transport::poll::Session> Enforce<S> {
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub fn new(runtime: &crate::time::Clock, session: S, timeout: Option<Duration>) -> Self {
-		Self {
-			session,
-			deadline: timeout.map(|timeout| (crate::time::Deadline::after(runtime, timeout), timeout)),
+impl Deadline {
+	/// Ready with the timeout once it expires, or without one if nothing is to enforce.
+	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Option<Duration>> {
+		if let Some(trigger) = &self.trigger {
+			let timeout = match std::task::ready!(trigger.poll(waiter, |state| match &**state {
+				Some(goaway) => Poll::Ready(goaway.timeout),
+				None => Poll::Pending,
+			})) {
+				Ok(timeout) => timeout,
+				Err(_) => return Poll::Ready(None),
+			};
+			self.trigger = None;
+			self.armed = timeout.map(|timeout| (crate::time::Deadline::after(&self.runtime, timeout), timeout));
 		}
-	}
-
-	/// Ready once the session closes on its own or the deadline passes (closing it).
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		let Some((deadline, timeout)) = &mut self.deadline else {
-			return Poll::Ready(());
+		let Some((deadline, timeout)) = &mut self.armed else {
+			return Poll::Ready(None);
 		};
-
-		let mut cx = waiter.context();
-		if self.session.poll_closed(&mut cx).is_ready() {
-			return Poll::Ready(());
-		}
 		std::task::ready!(deadline.poll(waiter));
-
-		tracing::warn!(?timeout, "peer did not leave before the GOAWAY deadline; closing");
-		self.session
-			.close(SessionError::GoawayTimeout.to_code(), &Error::GoawayTimeout.to_string());
-		Poll::Ready(())
+		Poll::Ready(Some(*timeout))
 	}
-}
-
-/// Enforce a sent GOAWAY's deadline: close the session once it passes.
-///
-/// The async form of [`Enforce`], for drivers that are still `async` themselves.
-#[cfg(feature = "async")]
-pub(crate) async fn enforce<S: crate::transport::poll::Session>(
-	runtime: &crate::time::Clock,
-	session: &mut S,
-	timeout: Option<Duration>,
-) {
-	let mut enforce = Enforce::new(runtime, session.clone(), timeout);
-	kio::wait(|waiter| enforce.poll(waiter)).await
 }
 
 /// The halves held by the public [`crate::Session`].
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
 pub(crate) struct Handle {
 	/// Cloned into each [`Producer`] handed out by `crate::Session::drain`.
 	trigger: kio::Producer<Option<Goaway>>,
@@ -356,7 +314,6 @@ impl Handle {
 	/// Create the session-side handle and its protocol-side counterpart.
 	///
 	/// `redirect` is whether this side may name a URI in its own GOAWAY.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn new(redirect: bool) -> (Self, Protocol) {
 		let trigger = kio::Producer::new(None);
 		let received = kio::Producer::new(None);
@@ -385,7 +342,6 @@ impl Handle {
 	/// A send half. Handing one out is always allowed; sending twice is what
 	/// [`Producer::send`] refuses, so a caller never has to ask whether the slot
 	/// is still free before deciding how to shut down.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn producer(&self) -> Producer {
 		Producer {
 			trigger: self.trigger.clone(),
@@ -393,16 +349,52 @@ impl Handle {
 		}
 	}
 
+	/// Watch the local deadline on the driver's `runtime` without holding up the protocol's writes.
+	pub fn deadline(&self, runtime: &crate::time::Deadlines) -> Deadline {
+		Deadline {
+			runtime: runtime.clone(),
+			trigger: Some(self.trigger.consume()),
+			armed: None,
+		}
+	}
+
 	/// A fresh handle on the receive half.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn consumer(&self) -> Consumer {
 		self.consumer.clone()
+	}
+
+	/// Whether either side sent a GOAWAY, so the session is draining.
+	pub fn draining(&self) -> bool {
+		self.trigger.read().is_some() || self.consumer.state.read().is_some()
 	}
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// A session idle since its last poll still gives the peer the full timeout:
+	/// the window opens at the poll that observes the send, not the stale last one.
+	#[test]
+	fn an_idle_session_gives_the_peer_the_whole_timeout() {
+		let runtime = crate::time::Deadlines::new(crate::time::Instant::ZERO);
+		let (handle, _protocol) = Handle::new(true);
+		let mut deadline = handle.deadline(&runtime);
+		let waiter = kio::Waiter::noop();
+		assert!(deadline.poll(&waiter).is_pending());
+
+		handle
+			.producer()
+			.send(Goaway::new().with_timeout(Duration::from_secs(1)))
+			.unwrap();
+		let sent = crate::time::Instant::ZERO + Duration::from_secs(5);
+		runtime.advance(sent);
+		assert!(deadline.poll(&waiter).is_pending());
+		runtime.advance(sent + Duration::from_secs(1) - Duration::from_nanos(1));
+		assert!(deadline.poll(&waiter).is_pending());
+		runtime.advance(sent + Duration::from_secs(1));
+		assert_eq!(deadline.poll(&waiter), Poll::Ready(Some(Duration::from_secs(1))));
+	}
 
 	/// A session sends at most one GOAWAY. Handing out the handle is always
 	/// allowed, so a caller never has to ask whether the slot is free; sending
@@ -488,13 +480,12 @@ mod tests {
 		assert!(matches!(err, Error::ProtocolViolation));
 	}
 
-	/// The consumer reports the recorded GOAWAY both synchronously and by polling.
-	#[moq_net_sim::test]
-	#[cfg(feature = "async")]
-	async fn consumer_observes_the_recorded_goaway() {
+	/// The consumer reports the recorded GOAWAY once it arrives.
+	#[test]
+	fn consumer_observes_the_recorded_goaway() {
 		let (handle, protocol) = Handle::new(true);
 		let consumer = handle.consumer();
-		assert_eq!(consumer.peek(), None);
+		assert!(consumer.poll(&kio::Waiter::noop()).is_pending());
 
 		let goaway = Goaway {
 			uri: "https://elsewhere.example/".to_string(),
@@ -502,18 +493,22 @@ mod tests {
 		};
 		protocol.record(goaway.clone()).unwrap();
 
-		assert_eq!(consumer.peek(), Some(goaway.clone()));
-		assert_eq!(consumer.recv().await, Some(goaway));
+		let Poll::Ready(Ok(received)) = consumer.poll(&kio::Waiter::noop()) else {
+			panic!("the recorded GOAWAY");
+		};
+		assert_eq!(received, goaway);
 	}
 
-	/// A session that closes without a GOAWAY resolves `recv` rather than parking
+	/// A session that closes without a GOAWAY resolves the poll rather than parking
 	/// forever, so a caller watching for one can stop.
-	#[moq_net_sim::test]
-	#[cfg(feature = "async")]
-	async fn recv_resolves_when_the_session_closes() {
+	#[test]
+	fn poll_resolves_when_the_session_closes() {
 		let (handle, protocol) = Handle::new(true);
 		let consumer = handle.consumer();
 		drop(protocol);
-		assert_eq!(consumer.recv().await, None);
+		assert!(matches!(
+			consumer.poll(&kio::Waiter::noop()),
+			Poll::Ready(Err(Error::Closed))
+		));
 	}
 }

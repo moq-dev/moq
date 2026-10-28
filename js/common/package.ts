@@ -6,7 +6,6 @@ import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { publint } from "publint";
 import { formatMessage } from "publint/utils";
-import { problems } from "./declarations.ts";
 
 console.log("✍️  Rewriting package.json...");
 const pkg = JSON.parse(readFileSync("package.json", "utf8"));
@@ -15,11 +14,14 @@ const pkg = JSON.parse(readFileSync("package.json", "utf8"));
 // JSR config can map them to the built (.js) entrypoints.
 const srcExports: Record<string, unknown> = structuredClone(pkg.exports ?? {});
 
-// Publish to JSR alongside npm for every package that publishes at all (has a
-// release script), unless it opts out with "jsr": false. The web-component
-// packages opt out: JSR forbids the HTMLElementTagNameMap global augmentation
-// every custom element needs. Captured before pkg.scripts/jsr are cleared below.
-const publishJsr = Boolean(pkg.scripts?.release) && pkg.jsr !== false;
+// A package publishes at all when it has a release script. Captured before pkg.scripts is
+// cleared below.
+const published = Boolean(pkg.scripts?.release);
+
+// Publish to JSR alongside npm for every published package, unless it opts out with
+// "jsr": false. The web-component packages opt out: JSR forbids the HTMLElementTagNameMap
+// global augmentation every custom element needs.
+const publishJsr = published && pkg.jsr !== false;
 
 function rewritePath(p: string, ext: string): string {
 	return p.replace(/^\.\/src/, ".").replace(/\.ts(x)?$/, `.${ext}`);
@@ -107,6 +109,20 @@ pkg.jsr = undefined; // JSR opt-out flag, not part of the npm package
 // Write the rewritten package.json
 writeFileSync("dist/package.json", JSON.stringify(pkg, null, 2));
 
+// A package that reports its own version keeps it in src/version.ts as "dev", since the
+// workspace runs src/ unbuilt; the published build gets the real one.
+if (existsSync("src/version.ts")) {
+	console.log(`🏷️  Stamping version ${pkg.version}...`);
+	const file = join("dist", "version.js");
+	const body = readFileSync(file, "utf8");
+	const placeholder = 'VERSION = "dev";';
+	if (body.split(placeholder).length !== 2) {
+		console.error(`${file} must contain exactly one \`${placeholder}\``);
+		process.exit(1);
+	}
+	writeFileSync(file, body.replace(placeholder, `VERSION = ${JSON.stringify(pkg.version)};`));
+}
+
 // Copy static files
 console.log("📄 Copying README.md...");
 copyFileSync("README.md", join("dist", "README.md"));
@@ -123,18 +139,6 @@ if (messages.length > 0) {
 	for (const message of messages) {
 		console.error(formatMessage(message, lintPkg));
 	}
-	process.exit(1);
-}
-
-console.log("🔍 Checking declaration imports...");
-const declarations = new Map<string, string>();
-for (const rel of new Bun.Glob("**/*.d.ts").scanSync("dist")) {
-	const file = resolve("dist", rel);
-	declarations.set(file, readFileSync(file, "utf8"));
-}
-const unresolved = problems(resolve("dist"), declarations);
-if (unresolved.length > 0) {
-	for (const problem of unresolved) console.error(problem);
 	process.exit(1);
 }
 

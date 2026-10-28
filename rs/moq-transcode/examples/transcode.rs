@@ -12,7 +12,7 @@
 
 use anyhow::Context;
 
-#[derive(usage::Cli)]
+#[derive(usage_rs::Cli)]
 #[usage(bin = "transcode", unknown_flags = "error", args_override_self = false)]
 struct Args {
 	/// The relay URL, including any auth path prefix.
@@ -32,12 +32,12 @@ struct Args {
 async fn main() -> anyhow::Result<()> {
 	moq_tokio::Log::new(tracing::Level::INFO).init()?;
 	let args = Args::parse();
-	let source_path = moq_net::PathOwned::from(args.source);
-	let output_path = moq_net::PathOwned::from(
+	let source_path = moq_net::Path::try_from(args.source)?;
+	let output_path = moq_net::Path::try_from(
 		args.output
 			.clone()
 			.unwrap_or_else(|| format!("{source_path}/transcode.hang")),
-	);
+	)?;
 
 	// Publish the derivative through one origin and consume the source through
 	// another, over a single auto-reconnecting session.
@@ -91,30 +91,7 @@ async fn main() -> anyhow::Result<()> {
 	tracing::info!(source = %source_path, output = %output_path, "transcoding");
 
 	tokio::select! {
-		res = moq_transcode::run(source, output, config) => Ok(res?),
+		res = moq_transcode::run(source, output.broadcast().clone(), config) => Ok(res?),
 		res = session.closed() => Ok(res?),
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn parses_defaults() {
-		let argv = ["transcode", "--source", "input"].map(std::ffi::OsStr::new);
-		let args = Args::try_parse_from(&argv).unwrap();
-		assert_eq!(args.url.as_str(), "http://localhost:4443/anon");
-		assert_eq!(args.source, "input");
-		assert_eq!(args.output, None);
-	}
-
-	#[test]
-	fn rejects_unknown_and_duplicate_flags() {
-		let unknown = ["transcode", "--source", "input", "--unknown"].map(std::ffi::OsStr::new);
-		assert!(Args::try_parse_from(&unknown).is_err());
-
-		let duplicate = ["transcode", "--source", "input", "--source", "other"].map(std::ffi::OsStr::new);
-		assert!(Args::try_parse_from(&duplicate).is_err());
 	}
 }

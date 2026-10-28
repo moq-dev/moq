@@ -1,5 +1,5 @@
+import { type Micro, Nano, now } from "@moq/clock";
 import * as Util from "@moq/hang/util";
-import type { Time } from "@moq/net";
 import {
 	type Computed,
 	Effect,
@@ -19,7 +19,7 @@ import { isSampleSource, normalizeSource, type SampleSource, type Source, type S
 /** A chunk of planar PCM, timestamped against the shared wall clock. */
 export interface AudioFrame {
 	/** When the first sample was captured. */
-	timestamp: Time.Micro;
+	timestamp: Micro;
 
 	/** One buffer per channel, all the same length. */
 	channels: Float32Array[];
@@ -45,7 +45,7 @@ const QUEUE = 32;
 // conversion at all, and Web Audio resamples the device to it far better than we could.
 const DEFAULT_SAMPLE_RATE = 48_000;
 
-// Signals the capture reads.
+/** Signals the capture reads. */
 export type CaptureInput = {
 	// The track or decoded samples to pump PCM off.
 	source: Getter<Source | undefined>;
@@ -62,7 +62,8 @@ export type CaptureProps = Inputs<CaptureInput> & {
 	channelCount?: number | Signal<number | undefined>;
 };
 
-type CaptureOutput = {
+/** Signals the capture derives. */
+export type CaptureOutput = {
 	// The PCM to encode, replaced whenever the source changes. Subscribe for a stream of your own:
 	// several renditions share one capture, and each needs every frame rather than the newest.
 	frames: Signal<Fanout<AudioFrame> | undefined>;
@@ -84,6 +85,7 @@ type CaptureOutput = {
  * resample and restamp them, which is the whole thing publishing a file has to avoid.
  */
 export class Capture {
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<CaptureInput>;
 
 	/** Override the capture rate in Hz. Defaults to the device's, snapped to one every codec takes. */
@@ -97,6 +99,7 @@ export class Capture {
 		format: new Signal<Format | undefined>(undefined),
 		root: new Signal<AudioNode | undefined>(undefined),
 	};
+	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
 
 	// Whether the track's context is suspended until the page's first click or keypress.
@@ -245,7 +248,7 @@ export class Capture {
 					channelCountMode: requestedChannels !== undefined ? "explicit" : "max",
 					// Stamp audio against the same wall clock as video (see video/processor.ts), so both
 					// tracks share an epoch and stay in sync.
-					processorOptions: { zero: performance.now() * 1000 },
+					processorOptions: { zero: Nano.toMicro(Nano(now())) },
 				});
 				// The edge originates at root, so only root can remove it; the worklet has no outputs.
 				root.connect(worklet);
@@ -307,7 +310,7 @@ function planar(): TransformStream<AudioData, AudioFrame> {
 				channels.push(plane);
 			}
 
-			controller.enqueue({ timestamp: data.timestamp as Time.Micro, channels });
+			controller.enqueue({ timestamp: data.timestamp as Micro, channels });
 			data.close();
 		},
 	});

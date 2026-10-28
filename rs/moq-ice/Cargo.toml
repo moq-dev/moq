@@ -1,0 +1,27 @@
+[package]
+name = "moq-ice"
+description = "Media over QUIC - drives a str0m WebRTC connection's ICE over a tokio UDP socket"
+authors = ["Luke Curley"]
+repository = "https://github.com/moq-dev/moq"
+license = "MIT OR Apache-2.0"
+
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+
+keywords = ["webrtc", "ice", "stun", "str0m", "moq"]
+categories = ["network-programming", "multimedia"]
+
+[dependencies]
+moq-clock = { workspace = true }
+str0m = { workspace = true }
+stun-types = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "net", "rt", "sync"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

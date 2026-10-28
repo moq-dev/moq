@@ -1,6 +1,8 @@
 import { expect, jest, onTestFinished, spyOn, test } from "bun:test";
+import { Milli } from "@moq/clock";
 import { Once } from "@moq/signals";
 import type * as announce from "../announced.ts";
+import * as Epoch from "../epoch.ts";
 import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.ts";
 import { type Hop, HopSchema, UNKNOWN_HOP } from "../hop.ts";
 import { hooks } from "../internal.ts";
@@ -8,22 +10,24 @@ import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
-import { Milli, Timescale, Timestamp } from "../time.ts";
+import { Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
-import { ControlStreamAdapter, NativeSession } from "./adapter.ts";
+import * as demandUtil from "../util/demand.ts";
 import type * as Cluster from "./cluster.ts";
 import { Connection } from "./connection.ts";
 import { ObjectDatagram } from "./datagram.ts";
 import { encodeObjectExtensions, type GroupFlags, Group as GroupMessage } from "./object.ts";
+import { Parameters } from "./parameters.ts";
 import type { Properties } from "./properties.ts";
-import { PublishNamespace, PublishNamespaceCancel, PublishNamespaceUpdate } from "./publish_namespace.ts";
-import { MaxRequestId, RequestError, RequestOk } from "./request.ts";
-import { Subscribe, SubscribeOk, Unsubscribe } from "./subscribe.ts";
+import { PublishNamespace, PublishNamespaceUpdate } from "./publish_namespace.ts";
+import { RequestError, RequestOk } from "./request.ts";
+import { NativeSession } from "./session.ts";
+import { Subscribe, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
 import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDone } from "./subscribe_namespace.ts";
 import { Subscriber } from "./subscriber.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
 
-const VERSION = Version.DRAFT_19;
+const VERSION = Version.DRAFT_18;
 
 /** How long to wait for a stream before calling it absent. */
 const STREAM_WAIT = 500;
@@ -34,7 +38,7 @@ const STREAM_WAIT = 500;
  * Reads the queue directly instead of racing {@link Stream.accept}, whose pending read
  * would keep the reader locked after the race resolves and could swallow a later stream.
  */
-async function nextStream(transport: WebTransport): Promise<Stream | undefined> {
+async function nextStream(transport: WebTransport, version: IetfVersion = VERSION): Promise<Stream | undefined> {
 	const reader =
 		transport.incomingBidirectionalStreams.getReader() as ReadableStreamDefaultReader<WebTransportBidirectionalStream>;
 
@@ -48,7 +52,7 @@ async function nextStream(transport: WebTransport): Promise<Stream | undefined> 
 		]);
 
 		if (!next || next.done) return undefined;
-		return new Stream({ readable: next.value.readable, writable: next.value.writable, version: VERSION });
+		return new Stream({ readable: next.value.readable, writable: next.value.writable, version });
 	} finally {
 		clearTimeout(timer);
 		reader.releaseLock();
@@ -61,86 +65,10 @@ async function nextStream(transport: WebTransport): Promise<Stream | undefined> 
  * the one that would otherwise never be discovered.
  */
 test("every peer is asked", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, VERSION, true);
 
 	const subscriber = new Subscriber({ session });
-	subscriber.announced();
-
-	expect(await nextStream(pair.client)).toBeDefined();
-});
-
-/**
- * Draft-16 is the first that allows a zero-field track namespace. Asking a foreign peer
- * (one that declared no MoQ Solicit) for one earlier is a protocol violation, so an
- * unscoped subscriber sends nothing and still takes an unsolicited announcement.
- */
-test.each([
-	["draft-14", Version.DRAFT_14, ALPN.DRAFT_14],
-	["draft-15", Version.DRAFT_15, ALPN.DRAFT_15],
-] as const)("%s does not ask a foreign peer for the empty namespace", async (_name, version, alpn) => {
-	const pair = createMockTransportPair(alpn);
-	const session = new NativeSession(pair.server, version, true);
-	const subscriber = new Subscriber({ session });
-	const announced = subscriber.announced();
-
-	expect(await nextStream(pair.client)).toBeUndefined();
-
-	const stream = await Stream.open(pair.server, { version });
-	void subscriber.runPublishNamespace(
-		new PublishNamespace({ requestId: 0n, trackNamespace: Path.from("surprise") }),
-		stream,
-	);
-	expect(await announced.next()).toMatchObject({ prefix: Path.from("surprise"), kind: "start" });
-	announced.close();
-});
-
-/** With no request stream to end it, the unasked reader ends with the session, from either side. */
-test.each([
-	["local", "server"],
-	["remote", "client"],
-] as const)("an unasked draft-14 reader ends on a %s close", async (_name, side) => {
-	const pair = createMockTransportPair(ALPN.DRAFT_14);
-	const session = new NativeSession(pair.server, Version.DRAFT_14, true);
-	const subscriber = new Subscriber({ session, quic: pair.server });
-	const announced = subscriber.announced();
-
-	pair[side].close();
-
-	expect(await announced.next()).toBeUndefined();
-});
-
-/** A peer that declared MoQ Solicit is ours: it only tells when asked, so it still is. */
-test.each([
-	["draft-14", Version.DRAFT_14, ALPN.DRAFT_14],
-	["draft-15", Version.DRAFT_15, ALPN.DRAFT_15],
-] as const)("%s still asks a soliciting peer for the empty namespace", async (_name, version, alpn) => {
-	const pair = createMockTransportPair(alpn);
-	const session = new NativeSession(pair.server, version, true);
-	const subscriber = new Subscriber({ session, solicit: true });
-
-	subscriber.announced();
-
-	expect(await nextStream(pair.client)).toBeDefined();
-});
-
-/** A named prefix is still legal on the drafts that reject the empty one. */
-test("draft-14 still asks for a named prefix", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_14);
-	const session = new NativeSession(pair.server, Version.DRAFT_14, true);
-	const subscriber = new Subscriber({ session });
-
-	subscriber.announced(Path.Pattern.subtree(Path.from("cam")));
-
-	expect(await nextStream(pair.client)).toBeDefined();
-});
-
-/** The empty prefix is the "every namespace" request from draft-16 on. */
-test("draft-16 still asks for the empty namespace", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_16);
-	const session = new NativeSession(pair.server, Version.DRAFT_16, true);
-	const subscriber = new Subscriber({ session });
-
 	subscriber.announced();
 
 	expect(await nextStream(pair.client)).toBeDefined();
@@ -151,8 +79,9 @@ test("draft-16 still asks for the empty namespace", async () => {
  * to a PUBLISH_NAMESPACE that arrives on its own stream instead.
  */
 test("an unsolicited announcement lands", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
-	const session = new NativeSession(pair.server, VERSION, true);
+	const version = Version.DRAFT_22;
+	const pair = createMockTransportPair(ALPN.DRAFT_22);
+	const session = new NativeSession(pair.server, version, true);
 	const subscriber = new Subscriber({ session });
 
 	const announced = subscriber.announced();
@@ -161,7 +90,7 @@ test("an unsolicited announcement lands", async () => {
 	expect(await nextStream(pair.client)).toBeDefined();
 
 	// What the connection dispatch does when a PUBLISH_NAMESPACE arrives instead.
-	const stream = await Stream.open(pair.server, { version: VERSION });
+	const stream = await Stream.open(pair.server, { version: version });
 	const handler = subscriber.runPublishNamespace(
 		new PublishNamespace({ requestId: 0n, trackNamespace: Path.from("surprise") }),
 		stream,
@@ -178,7 +107,7 @@ test("an unsolicited announcement lands", async () => {
 	peer.writer.close();
 	await peer.writer.closed;
 	// A second advertisement is a processing barrier: the FIN must not retract the first.
-	const second = await Stream.open(pair.server, { version: VERSION });
+	const second = await Stream.open(pair.server, { version: version });
 	const other = subscriber.runPublishNamespace(
 		new PublishNamespace({ requestId: 2n, trackNamespace: Path.from("sentinel") }),
 		second,
@@ -201,7 +130,7 @@ test("an unsolicited announcement lands", async () => {
  * only the anonymous mark: identity is the epoch's job, and nothing goes in front of the 0.
  */
 test("an advertisement with no path is anonymous", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true) });
 	const announced = subscriber.announced();
 	expect(await nextStream(pair.client)).toBeDefined();
@@ -218,23 +147,28 @@ test("an advertisement with no path is anonymous", async () => {
  * Answer the SUBSCRIBE_NAMESPACE the subscriber just opened, then hand back its stream so
  * the test can feed inline NAMESPACE entries down it.
  */
-async function acceptSubscribeNamespace(transport: WebTransport): Promise<Stream> {
-	const stream = await nextStream(transport);
+async function acceptSubscribeNamespace(transport: WebTransport, version: IetfVersion = VERSION): Promise<Stream> {
+	const stream = await nextStream(transport, version);
 	if (!stream) throw new Error("no SUBSCRIBE_NAMESPACE was sent");
 
 	// Drain the request, then answer it.
 	await stream.reader.u53();
-	await SubscribeNamespace.decode(stream.reader, VERSION);
+	await SubscribeNamespace.decode(stream.reader, version);
 	await stream.writer.u53(RequestOk.id);
-	await new RequestOk({ requestId: undefined }).encode(stream.writer, VERSION);
+	await new RequestOk().encode(stream.writer, version);
 
 	return stream;
 }
 
 /** Advertise `path` inline on a SUBSCRIBE_NAMESPACE stream. */
-async function inlineNamespace(stream: Stream, path: Path.Valid, cluster?: Cluster.Advert): Promise<void> {
+async function inlineNamespace(
+	stream: Stream,
+	path: Path.Valid,
+	cluster?: Cluster.Advert,
+	version: IetfVersion = VERSION,
+): Promise<void> {
 	await stream.writer.u53(SubscribeNamespaceEntry.id);
-	await new SubscribeNamespaceEntry({ suffix: path, cluster }).encode(stream.writer, VERSION);
+	await new SubscribeNamespaceEntry({ suffix: path, params: cluster && { cluster } }).encode(stream.writer, version);
 }
 
 /**
@@ -259,7 +193,7 @@ async function syncInline(stream: Stream, announced: announce.Consumer, cluster?
  * watcher drops a broadcast that is still being published.
  */
 test("an announcement survives the first of its two sources ending", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session });
 
@@ -296,7 +230,7 @@ test("an announcement survives the first of its two sources ending", async () =>
  * last source goes, the path really is gone and consumers have to hear it.
  */
 test("an announcement ends once its last source does", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session });
 
@@ -332,7 +266,7 @@ test("an announcement ends once its last source does", async () => {
  * for the rest of the session, for every other consumer too.
  */
 test("a subscription that dies releases what it advertised", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session });
 
@@ -353,50 +287,13 @@ test("a subscription that dies releases what it advertised", async () => {
 });
 
 /**
- * Draft-14/15 name their namespace-scoped messages instead of numbering them, so the
- * adapter can hold one request per namespace. A second would overwrite the first and the
- * withdrawals would go to the wrong stream, then to none at all, killing the session. The
- * case that makes a second reference legitimate needs an inline NAMESPACE, which those
- * drafts do not have.
- */
-test("a duplicate legacy publish_namespace is still refused", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
-	const session = new NativeSession(pair.server, Version.DRAFT_15, true);
-	const subscriber = new Subscriber({ session });
-
-	const announced = subscriber.announced();
-
-	const first = await Stream.open(pair.server, { version: Version.DRAFT_15 });
-	const handler = subscriber.runPublishNamespace(
-		new PublishNamespace({ requestId: 0n, trackNamespace: Path.from("twice") }),
-		first,
-	);
-	expect(await announced.next()).toMatchObject({ prefix: Path.from("twice"), kind: "start" });
-
-	// The same namespace again, on its own request.
-	const second = await Stream.open(pair.server, { version: Version.DRAFT_15 });
-	await subscriber.runPublishNamespace(
-		new PublishNamespace({ requestId: 2n, trackNamespace: Path.from("twice") }),
-		second,
-	);
-
-	// Refused, so it took no reference: the first request ending still retracts the path.
-	const peer = await nextStream(pair.client);
-	if (!peer) throw new Error("no PUBLISH_NAMESPACE stream to close");
-	peer.close();
-	await handler;
-
-	expect(await announced.next()).toMatchObject({ prefix: Path.from("twice"), kind: "end" });
-});
-
-/**
  * The read loop is not awaited when the local consumer closes first, and closing the
  * stream cancels the transport without discarding what the reader already buffered. An
  * entry that decodes after the teardown must not take a reference, or the path is pinned
  * for the session with nobody left to release it.
  */
 test("an entry buffered past a consumer close does not pin the path", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session });
 
@@ -409,52 +306,19 @@ test("an entry buffered past a consumer close does not pin the path", async () =
 	await inlineNamespace(subscription, Path.from("buffered"));
 
 	announced.close();
+	// The peer ends its half on the cancel, so the request leaves the wire.
+	subscription.writer.close();
 
 	// Whatever the loop managed to attach, the stream gave back on its way out.
 	await new Promise((resolve) => setTimeout(resolve, 50));
 
 	const fresh = subscriber.announced();
+	await acceptSubscribeNamespace(pair.client);
 	const seeded = await Promise.race([
 		fresh.next(),
 		new Promise<"nothing">((resolve) => setTimeout(() => resolve("nothing"), 250)),
 	]);
 	expect(seeded).toBe("nothing");
-});
-
-/**
- * The reservation has to be synchronous. The count is only taken once the OK is written,
- * so two legacy requests dispatched together would both get past a check that looked only
- * at what is announced, and both would take a reference for one namespace.
- */
-test("concurrent legacy publish_namespace requests take one reference", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
-	const session = new NativeSession(pair.server, Version.DRAFT_15, true);
-	const subscriber = new Subscriber({ session });
-
-	const announced = subscriber.announced();
-
-	// Dispatched together, as the connection would on two incoming streams.
-	const first = await Stream.open(pair.server, { version: Version.DRAFT_15 });
-	const second = await Stream.open(pair.server, { version: Version.DRAFT_15 });
-	const one = subscriber.runPublishNamespace(
-		new PublishNamespace({ requestId: 0n, trackNamespace: Path.from("raced") }),
-		first,
-	);
-	const two = subscriber.runPublishNamespace(
-		new PublishNamespace({ requestId: 2n, trackNamespace: Path.from("raced") }),
-		second,
-	);
-
-	expect(await announced.next()).toMatchObject({ prefix: Path.from("raced"), kind: "start" });
-	await two;
-
-	// Only one reference was taken, so the surviving request ending retracts the path.
-	const peer = await nextStream(pair.client);
-	if (!peer) throw new Error("no PUBLISH_NAMESPACE stream to close");
-	peer.close();
-	await one;
-
-	expect(await announced.next()).toMatchObject({ prefix: Path.from("raced"), kind: "end" });
 });
 
 /** The Hop IDs a cluster-negotiated session declared, ours first. */
@@ -467,7 +331,7 @@ const PEER: Hop = HopSchema.parse(9n);
  * route us back to ourselves, so the advertisement is dropped rather than announced.
  */
 test("an inline NAMESPACE that looped back through us is dropped", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session, cluster: { self: SELF, peer: PEER } });
 
@@ -485,7 +349,7 @@ test("an inline NAMESPACE that looped back through us is dropped", async () => {
  * gone even though the message says active.
  */
 test("an inline NAMESPACE that starts looping back is retracted", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session, cluster: { self: SELF, peer: PEER } });
 
@@ -505,7 +369,7 @@ test("an inline NAMESPACE that starts looping back is retracted", async () => {
  * `update`.
  */
 test("a repeated NAMESPACE reprices in place", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session, cluster: { self: SELF, peer: PEER } });
 
@@ -529,7 +393,7 @@ test("a repeated NAMESPACE reprices in place", async () => {
 
 /** The same rule on the other kind of advertisement, which is a request we can refuse. */
 test("a PUBLISH_NAMESPACE that looped back through us is refused", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session, cluster: { self: SELF, peer: PEER } });
 
@@ -541,7 +405,7 @@ test("a PUBLISH_NAMESPACE that looped back through us is refused", async () => {
 		new PublishNamespace({
 			requestId: 0n,
 			trackNamespace: Path.from("mine"),
-			cluster: { hops: [SELF, PEER], cost: 0n },
+			params: { cluster: { hops: [SELF, PEER], cost: 0n } },
 		}),
 		request,
 	);
@@ -550,7 +414,7 @@ test("a PUBLISH_NAMESPACE that looped back through us is refused", async () => {
 	if (!peer) throw new Error("no PUBLISH_NAMESPACE stream");
 	expect(await peer.reader.u53()).toBe(RequestError.id);
 	const err = await RequestError.decode(peer.reader, VERSION);
-	// UNINTERESTED, draft-19 section 15.11.2: stop offering us this namespace.
+	// UNINTERESTED, draft-22 section 16.11.2: stop offering us this namespace.
 	expect(err.errorCode).toBe(0x20);
 
 	// Refused, so nothing was announced: the sentinel is the first thing a consumer hears.
@@ -563,7 +427,7 @@ test("a PUBLISH_NAMESPACE that looped back through us is refused", async () => {
  * repeat it on the next SUBSCRIBE_NAMESPACE.
  */
 test("a NAMESPACE missing its hop path closes the session", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session, cluster: { self: SELF, peer: PEER } });
 
@@ -581,13 +445,12 @@ test("a NAMESPACE missing its hop path closes the session", async () => {
 });
 
 test("a malformed PUBLISH_NAMESPACE update closes the session", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const control = await Stream.open(pair.server, { version: VERSION });
 	const connection = new Connection({
 		url: new URL("https://example.com"),
 		quic: pair.server,
 		control,
-		maxRequestId: 100n,
 		version: VERSION,
 		client: false,
 		cluster: { self: SELF, peer: PEER },
@@ -600,7 +463,7 @@ test("a malformed PUBLISH_NAMESPACE update closes the session", async () => {
 		await new PublishNamespace({
 			requestId: 0n,
 			trackNamespace: Path.from("theirs"),
-			cluster: { hops: [PEER], cost: 0n },
+			params: { cluster: { hops: [PEER], cost: 0n } },
 		}).encode(request.writer, VERSION);
 
 		expect(await request.reader.u53()).toBe(RequestOk.id);
@@ -628,7 +491,7 @@ test("a malformed PUBLISH_NAMESPACE update closes the session", async () => {
  * path on the same stream brings it back.
  */
 test("a PUBLISH_NAMESPACE update that starts looping back is detached", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session, cluster: { self: SELF, peer: PEER } });
 
@@ -642,7 +505,7 @@ test("a PUBLISH_NAMESPACE update that starts looping back is detached", async ()
 		new PublishNamespace({
 			requestId: 0n,
 			trackNamespace: Path.from("theirs"),
-			cluster: { hops: [publisher, PEER], cost: 0n },
+			params: { cluster: { hops: [publisher, PEER], cost: 0n } },
 		}),
 		request,
 	);
@@ -679,54 +542,12 @@ test("a PUBLISH_NAMESPACE update that starts looping back is detached", async ()
 });
 
 /**
- * Draft-16 renews a PUBLISH_NAMESPACE with a REQUEST_UPDATE naming it, answered by the
- * update's own Request ID. One repeating a token is refused that way too, and cancels the
- * advertisement, which outlives its stream on that draft.
- */
-test("a draft-16 PUBLISH_NAMESPACE update is answered by its own Request ID", async () => {
-	const version = Version.DRAFT_16;
-	const pair = createMockTransportPair(ALPN.DRAFT_16);
-	const session = new NativeSession(pair.server, version, true);
-	const subscriber = new Subscriber({ session });
-
-	const request = await Stream.open(pair.server, { version });
-	const handler = subscriber.runPublishNamespace(
-		new PublishNamespace({ requestId: 1n, trackNamespace: Path.from("theirs") }),
-		request,
-	);
-	const peer = await nextStream(pair.client);
-	if (!peer) throw new Error("no PUBLISH_NAMESPACE stream");
-	expect(await peer.reader.u53()).toBe(RequestOk.id);
-	expect((await RequestOk.decode(peer.reader, version)).requestId).toBe(1n);
-
-	await peer.writer.u53(PublishNamespaceUpdate.id);
-	await new PublishNamespaceUpdate({ requestId: 3n, namespaceRequestId: 1n, update: {} }).encode(
-		peer.writer,
-		version,
-	);
-	expect(await peer.reader.u53()).toBe(RequestOk.id);
-	expect((await RequestOk.decode(peer.reader, version)).requestId).toBe(3n);
-
-	// Two identical AUTHORIZATION TOKENs.
-	const body = [5, 1, 2, 0x03, 3, 0x03, 0x00, 0xaa, 0, 3, 0x03, 0x00, 0xaa];
-	await peer.writer.u53(PublishNamespaceUpdate.id);
-	await peer.writer.u16(body.length);
-	for (const byte of body) await peer.writer.u8(byte);
-	expect(await peer.reader.u53()).toBe(RequestError.id);
-	expect((await RequestError.decode(peer.reader, version)).requestId).toBe(5n);
-	expect(await peer.reader.u53()).toBe(PublishNamespaceCancel.id);
-	expect((await PublishNamespaceCancel.decode(peer.reader, version)).requestId).toBe(1n);
-
-	await handler;
-});
-
-/**
  * REQUEST_UPDATE keeps an omitted parameter, so an explicit ROUTE_COST of 0 lands on the
  * path already held without disturbing the announcement. Consumers hear `update` with the
  * new cost; the stream ending is what retracts it.
  */
 test("a PUBLISH_NAMESPACE repricing is acknowledged in place", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session, cluster: { self: SELF, peer: PEER } });
 
@@ -738,7 +559,7 @@ test("a PUBLISH_NAMESPACE repricing is acknowledged in place", async () => {
 		new PublishNamespace({
 			requestId: 0n,
 			trackNamespace: Path.from("theirs"),
-			cluster: { hops: [PEER], cost: 4n },
+			params: { cluster: { hops: [PEER], cost: 4n } },
 		}),
 		request,
 	);
@@ -775,7 +596,7 @@ test("a PUBLISH_NAMESPACE repricing is acknowledged in place", async () => {
  * the next consume shares it.
  */
 test("a PUBLISH_NAMESPACE update that changes the publisher applies in place", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session, cluster: { self: SELF, peer: PEER } });
 
@@ -787,7 +608,7 @@ test("a PUBLISH_NAMESPACE update that changes the publisher applies in place", a
 		new PublishNamespace({
 			requestId: 0n,
 			trackNamespace: Path.from("theirs"),
-			cluster: { hops: [HopSchema.parse(11n), PEER], cost: 0n },
+			params: { cluster: { hops: [HopSchema.parse(11n), PEER], cost: 0n } },
 		}),
 		request,
 	);
@@ -821,14 +642,26 @@ test("a PUBLISH_NAMESPACE update that changes the publisher applies in place", a
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), kind: "end" });
 });
 
+test("a consumed broadcast refuses to list its tracks rather than claim it has none", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber({ session, cluster: { self: SELF, peer: PEER } });
+	const consumer = subscriber.consume(Path.from("theirs"));
+	await expect(consumer.tracks().next()).rejects.toThrow("track listing requires moq-lite-07");
+	// A later reader asks again, and is refused again.
+	await expect(consumer.tracks().next()).rejects.toThrow("track listing requires moq-lite-07");
+	consumer.close();
+	subscriber.close();
+});
+
 /**
  * A second PUBLISH_NAMESPACE on the stream that already carries one is no longer an
  * update: it is the base draft's duplicate request, a protocol violation.
  */
 test("a repeated PUBLISH_NAMESPACE is a protocol violation", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, VERSION, true);
-	const subscriber = new Subscriber({ session, cluster: { self: SELF, peer: PEER } });
+	const subscriber = new Subscriber({ session, quic: pair.server, cluster: { self: SELF, peer: PEER } });
 
 	const announced = subscriber.announced();
 	await acceptSubscribeNamespace(pair.client);
@@ -836,7 +669,7 @@ test("a repeated PUBLISH_NAMESPACE is a protocol violation", async () => {
 	const advert = new PublishNamespace({
 		requestId: 0n,
 		trackNamespace: Path.from("theirs"),
-		cluster: { hops: [PEER], cost: 0n },
+		params: { cluster: { hops: [PEER], cost: 0n } },
 	});
 	const request = await Stream.open(pair.server, { version: VERSION });
 	const handler = subscriber.runPublishNamespace(advert, request);
@@ -860,107 +693,9 @@ test("a repeated PUBLISH_NAMESPACE is a protocol violation", async () => {
 		channel.port2.postMessage(null);
 	});
 	await expect(handler).rejects.toThrow(ProtocolViolation);
-	expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), kind: "end" });
-});
-
-/**
- * Drafts 14-16 carry every request over the control stream adapter's virtual streams,
- * whose abort is local. UNSUBSCRIBE is the only cancellation that reaches the peer there,
- * so a cancelled subscription is only really cancelled if that message lands on the real
- * control stream.
- */
-test("a legacy cancel reaches the control stream", async () => {
-	const LEGACY = Version.DRAFT_16;
-	const pair = createMockTransportPair(ALPN.DRAFT_16);
-
-	// The one real bidi everything is multiplexed onto.
-	const controlStream = await Stream.open(pair.server, { version: LEGACY });
-	const session = new ControlStreamAdapter(pair.server, controlStream, LEGACY, 100n, true);
-	const subscriber = new Subscriber({ session });
-
-	// The peer's view of that control stream.
-	const peer = await nextStream(pair.client);
-	expect(peer).toBeDefined();
-
-	// Ask for a track, which writes SUBSCRIBE, then drop the only consumer.
-	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe();
-
-	// Let the SUBSCRIBE reach the control stream before walking away.
-	await new Promise((resolve) => setTimeout(resolve, 50));
-	track.close();
-
-	// Everything the subscriber actually put on the wire.
-	const seen: bigint[] = [];
-	const deadline = Date.now() + STREAM_WAIT;
-	while (Date.now() < deadline) {
-		const type = await Promise.race([
-			// biome-ignore lint/style/noNonNullAssertion: guarded by the expect above
-			peer!.reader.u53().catch(() => undefined),
-			new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 100)),
-		]);
-		if (type === undefined) break;
-
-		seen.push(BigInt(type));
-		// biome-ignore lint/style/noNonNullAssertion: guarded by the expect above
-		const size = await peer!.reader.u16();
-		// biome-ignore lint/style/noNonNullAssertion: guarded by the expect above
-		if (size > 0) await peer!.reader.read(size);
-		if (BigInt(type) === BigInt(Unsubscribe.id)) break;
-	}
-
-	expect(seen).toContain(BigInt(Unsubscribe.id));
-});
-
-/**
- * A publisher that rejects a SUBSCRIBE has torn the request down before answering, so there
- * is nothing left to cancel. Naming a dead request id back at it is what a strict peer can
- * read as a protocol violation and close an otherwise healthy session over.
- */
-test("a rejected subscribe is not unsubscribed", async () => {
-	const LEGACY = Version.DRAFT_16;
-	const pair = createMockTransportPair(ALPN.DRAFT_16);
-
-	const controlStream = await Stream.open(pair.server, { version: LEGACY });
-	const session = new ControlStreamAdapter(pair.server, controlStream, LEGACY, 100n, true);
-	// The mux read loop, which is what routes a response back to its virtual stream.
-	void session.run().catch(() => void 0);
-	const subscriber = new Subscriber({ session });
-
-	const peer = await nextStream(pair.client);
-	expect(peer).toBeDefined();
-	// biome-ignore lint/style/noNonNullAssertion: guarded above
-	const wire = peer!;
-
-	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe();
-
-	// Read the SUBSCRIBE, then reject it the way a publisher that cannot serve it would.
-	const subscribeType = await wire.reader.u53();
-	const subscribeSize = await wire.reader.u16();
-	await wire.reader.read(subscribeSize);
-	expect(subscribeType).toBe(3);
-
-	await wire.writer.u53(RequestError.id);
-	await new RequestError({
-		requestId: 0n,
-		// DOES_NOT_EXIST, draft-16 section 13.4.2.
-		errorCode: 0x10,
-		reasonPhrase: "not found",
-		retryInterval: 0n,
-	}).encode(wire.writer, LEGACY);
-
-	await new Promise((resolve) => setTimeout(resolve, 100));
-	track.close();
-	await new Promise((resolve) => setTimeout(resolve, 100));
-
-	// Nothing further belongs on the control stream: the request is already gone.
-	const next = await Promise.race([
-		wire.reader.u53().catch(() => undefined),
-		new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 200)),
-	]);
-
-	expect(next).toBeUndefined();
+	// The request closes the session itself, which takes the namespace subscription down too.
+	await violationClosed(pair);
+	await expect(announced.next()).rejects.toThrow();
 });
 
 /** The alias the group streams below are published on. */
@@ -1008,7 +743,7 @@ async function subscribeTrack({
 	properties?: Properties;
 	subscription?: track.Subscription;
 } = {}): Promise<{ subscriber: Subscriber; track: track.Subscriber }> {
-	const pair = createMockTransportPair(version === Version.DRAFT_16 ? ALPN.DRAFT_16 : ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, version, true);
 	const subscriber = new Subscriber({ session });
 
@@ -1020,9 +755,9 @@ async function subscribeTrack({
 	peer.writer.version = version;
 
 	expect(await peer.reader.u53()).toBe(Subscribe.id);
-	const request = await Subscribe.decode(peer.reader, version);
+	await Subscribe.decode(peer.reader, version);
 	await peer.writer.u53(SubscribeOk.id);
-	await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS, properties }).encode(peer.writer, version);
+	await new SubscribeOk({ trackAlias: ALIAS, properties }).encode(peer.writer, version);
 
 	return { subscriber, track };
 }
@@ -1086,9 +821,26 @@ test("an object without a Timestamp on a TIMESCALE track is malformed", async ()
 	stop.mockRestore();
 });
 
-test("older peer without priority property inherits wire priority 128", async () => {
+test("a compact END_OF_TRACK at object 5 with properties is subgroup 5, refused without ending the track", async () => {
+	for (const version of [Version.DRAFT_18]) {
+		const { subscriber, track } = await subscribeTrack({ version });
+		const header = stampedGroup(0);
+		header.flags.hasSubgroupObject = true;
+		// Object ID 5, one unknown integer property, an empty payload, then END_OF_TRACK.
+		const reader = new Reader(undefined, new Uint8Array([5, 2, 0x20, 7, 0, 4]), version);
+		const stop = spyOn(reader, "stop");
+
+		await subscriber.handleGroup(header, reader);
+
+		expect((stop.mock.calls[0][0] as Error).message).toBe("subgroups are not supported");
+		expect(track.closed.peek()).toBeUndefined();
+		stop.mockRestore();
+	}
+});
+
+test("older peer without priority property inherits the default publisher priority", async () => {
 	const { subscriber, track } = await subscribeTrack();
-	expect((await track.info()).priority).toBe(0xff - 128);
+	expect((await track.info()).priority).toBe(127 - 128);
 	const group = new GroupMessage({
 		trackAlias: ALIAS,
 		groupId: 3,
@@ -1102,51 +854,72 @@ test("older peer without priority property inherits wire priority 128", async ()
 });
 
 test("an info-only lookup waits for SUBSCRIBE_OK instead of abandoning", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session });
 	const info = subscriber.consume(Path.from("room")).track("video").info();
 	const peer = await nextStream(pair.client);
 	if (!peer) throw new Error("missing SUBSCRIBE stream");
 	expect(await peer.reader.u53()).toBe(Subscribe.id);
-	const request = await Subscribe.decode(peer.reader, VERSION);
+	await Subscribe.decode(peer.reader, VERSION);
 
 	await peer.writer.u53(SubscribeOk.id);
 	await new SubscribeOk({
-		requestId: request.requestId,
 		trackAlias: ALIAS,
 		properties: { priority: 37 },
 	}).encode(peer.writer, VERSION);
-	expect((await info).priority).toBe(0xff - 37);
+	expect((await info).priority).toBe(127 - 37);
+});
+
+test("SUBSCRIBE_OK's largest is known before any group arrives", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber({ session });
+	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
+	const peer = await nextStream(pair.client);
+	if (!peer) throw new Error("missing SUBSCRIBE stream");
+	expect(await peer.reader.u53()).toBe(Subscribe.id);
+	await Subscribe.decode(peer.reader, VERSION);
+
+	await peer.writer.u53(SubscribeOk.id);
+	await new SubscribeOk({
+		trackAlias: ALIAS,
+		largest: { groupId: 7n, objectId: 3n },
+	}).encode(peer.writer, VERSION);
+	// Only the group carries over, since Object IDs are not frame ordinals.
+	expect(await track.largest()).toEqual({ group: 7, frame: 0 });
+	track.close();
 });
 
 test.each(["acceptance", "timeout"])("returning demand preserves pending setup until %s", async (outcome) => {
 	jest.useFakeTimers();
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session });
 	const opening = spyOn(session, "openBi");
 	const broadcast = subscriber.consume(Path.from("room"));
-	const pending = hooks.pendingTrackProducer;
+	const make = hooks.makeRequest;
 	let returned: track.Subscriber | undefined;
 	const resumed = Promise.withResolvers<void>();
 	const waiting = Promise.withResolvers<void>();
-	const captured = spyOn(hooks, "pendingTrackProducer").mockImplementationOnce((request) => {
-		const producer = pending(request);
-		const demand = producer.demand();
-		const unused = demand.unused.bind(demand);
+	const unwanted = demandUtil.unwanted;
+	const unwantedSpy = spyOn(demandUtil, "unwanted");
+	const captured = spyOn(hooks, "makeRequest").mockImplementationOnce((options) => {
+		const request = make(options);
+		const demand = request.demand();
 		let returnedOnce = false;
-		spyOn(demand, "unused").mockImplementation(async () => {
+		unwantedSpy.mockImplementation(async (watched) => {
+			if (watched !== demand) return unwanted(watched);
 			if (returnedOnce) {
 				waiting.resolve();
-				return unused();
+				return unwanted(demand);
 			}
 			returnedOnce = true;
-			await unused();
-			const peek = demand.used.peek.bind(demand.used);
+			await unwanted(demand);
+			const peek = demand.wanted.peek.bind(demand.wanted);
 			// Return after the watcher checks demand, before its result crosses the
 			// promise race to the setup continuation. No real-time sleeps are involved.
-			const observed = spyOn(demand.used, "peek").mockImplementationOnce(() => {
+			const observed = spyOn(demand.wanted, "peek").mockImplementationOnce(() => {
 				const used = peek();
 				observed.mockRestore();
 				queueMicrotask(() => {
@@ -1156,12 +929,13 @@ test.each(["acceptance", "timeout"])("returning demand preserves pending setup u
 				return used;
 			});
 		});
-		return producer;
+		return request;
 	});
 	const first = broadcast.track("video").subscribe();
 	// Restore real timers even if an injection promise outlives the test.
 	onTestFinished(() => {
 		captured.mockRestore();
+		unwantedSpy.mockRestore();
 		opening.mockRestore();
 		first.close();
 		returned?.close();
@@ -1172,7 +946,7 @@ test.each(["acceptance", "timeout"])("returning demand preserves pending setup u
 	const peer = await nextStream(pair.client);
 	if (!peer) throw new Error("missing pending subscribe");
 	expect(await peer.reader.u53()).toBe(Subscribe.id);
-	const request = await Subscribe.decode(peer.reader, VERSION);
+	await Subscribe.decode(peer.reader, VERSION);
 	jest.advanceTimersByTime(6_000);
 	first.close();
 	await resumed.promise;
@@ -1186,33 +960,34 @@ test.each(["acceptance", "timeout"])("returning demand preserves pending setup u
 	expect(await Promise.race([waiting.promise.then(() => true), info.then(() => false)])).toBe(true);
 	if (outcome === "acceptance") {
 		await peer.writer.u53(SubscribeOk.id);
-		await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS }).encode(peer.writer, VERSION);
-		expect(await info).toMatchObject({ priority: 127 });
+		await new SubscribeOk({ trackAlias: ALIAS }).encode(peer.writer, VERSION);
+		expect(await info).toMatchObject({ priority: 127 - 128 });
 		expect(returned.closed.peek()).toBeUndefined();
 	} else {
 		jest.advanceTimersByTime(4_000);
 		expect(await info).toBeInstanceOf(Error);
-		expect(((await info) as Error).message).toContain("subscribe timed out after 10000ms");
+		expect(((await info) as Error).message).toContain("request timed out after 10000ms");
 	}
 	expect(opening).toHaveBeenCalledTimes(1);
 });
 
 test("setup abandonment closes before a queued viewer can attach", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session });
 	const broadcast = subscriber.consume(Path.from("room"));
-	const pending = hooks.pendingTrackProducer;
+	const make = hooks.makeRequest;
 	const resumed = Promise.withResolvers<track.Subscriber>();
-	const captured = spyOn(hooks, "pendingTrackProducer").mockImplementationOnce((request) => {
-		const producer = pending(request);
-		const demand = producer.demand();
-		const unused = demand.unused.bind(demand);
-		spyOn(demand, "unused").mockImplementationOnce(async () => {
-			await unused();
-			const peek = demand.used.peek.bind(demand.used);
+	const unwanted = demandUtil.unwanted;
+	const unwantedSpy = spyOn(demandUtil, "unwanted");
+	const captured = spyOn(hooks, "makeRequest").mockImplementationOnce((options) => {
+		const request = make(options);
+		const demand = request.demand();
+		unwantedSpy.mockImplementationOnce(async (watched) => {
+			await unwanted(watched);
+			const peek = demand.wanted.peek.bind(demand.wanted);
 			let checks = 0;
-			const observed = spyOn(demand.used, "peek").mockImplementation(() => {
+			const observed = spyOn(demand.wanted, "peek").mockImplementation(() => {
 				const used = peek();
 				// The first check is the watcher; the second is the setup loop's
 				// final check. A queued viewer must see that cancellation committed.
@@ -1223,13 +998,14 @@ test("setup abandonment closes before a queued viewer can attach", async () => {
 				return used;
 			});
 		});
-		return producer;
+		return request;
 	});
 	const first = broadcast.track("video").subscribe();
 	let returned: track.Subscriber | undefined;
 	// Runner timeouts do not unwind an async test parked on the injection promise.
 	onTestFinished(() => {
 		captured.mockRestore();
+		unwantedSpy.mockRestore();
 		first.close();
 		returned?.close();
 		broadcast.close();
@@ -1249,101 +1025,21 @@ test("setup abandonment closes before a queued viewer can attach", async () => {
 	expect(next).toBeInstanceOf(Stream);
 	if (!(next instanceof Stream)) throw new Error("returning viewer did not get a new subscribe");
 	expect(await next.reader.u53()).toBe(Subscribe.id);
-	const request = await Subscribe.decode(next.reader, VERSION);
+	await Subscribe.decode(next.reader, VERSION);
 	await next.writer.u53(SubscribeOk.id);
-	await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS }).encode(next.writer, VERSION);
-	expect(await info).toMatchObject({ priority: 127 });
-});
-
-test("abandonment cancels once and a late acceptance cannot capture a reused alias", async () => {
-	const version = Version.DRAFT_16;
-	const pair = createMockTransportPair(ALPN.DRAFT_16);
-	const control = await Stream.open(pair.server, { version });
-	const session = new ControlStreamAdapter(pair.server, control, version, 100n, true);
-	void session.run().catch(() => void 0);
-	const subscriber = new Subscriber({ session });
-	const peer = await nextStream(pair.client);
-	if (!peer) throw new Error("missing control stream");
-	peer.reader.version = version;
-	peer.writer.version = version;
-	const broadcast = subscriber.consume(Path.from("room"));
-	const pending = hooks.pendingTrackProducer;
-	let producer: track.Producer | undefined;
-	let oldRequest: track.Request | undefined;
-	const captured = spyOn(hooks, "pendingTrackProducer").mockImplementationOnce((request) => {
-		oldRequest = request;
-		producer = pending(request);
-		return producer;
-	});
-	const decoded = Promise.withResolvers<void>();
-	const release = Promise.withResolvers<void>();
-	const decode = SubscribeOk.decode;
-	const held = spyOn(SubscribeOk, "decode").mockImplementationOnce(async (...args) => {
-		const ok = await decode(...args);
-		decoded.resolve();
-		await release.promise;
-		return ok;
-	});
-	const first = broadcast.track("video").subscribe();
-	let second: track.Subscriber | undefined;
-	try {
-		expect(await peer.reader.u53()).toBe(Subscribe.id);
-		const request = await Subscribe.decode(peer.reader, version);
-		if (!producer || !oldRequest) throw new Error("missing pending track");
-		const accepted = spyOn(oldRequest, "accept");
-		await peer.writer.u53(SubscribeOk.id);
-		await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS }).encode(peer.writer, version);
-		await decoded.promise;
-		first.close();
-		expect(await producer.closed).toBeInstanceOf(Error);
-		expect(await peer.reader.u53()).toBe(Unsubscribe.id);
-		expect((await Unsubscribe.decode(peer.reader, version)).requestId).toBe(request.requestId);
-
-		second = broadcast.track("video").subscribe();
-		// The next message must be the new request, not a duplicate UNSUBSCRIBE.
-		expect(await peer.reader.u53()).toBe(Subscribe.id);
-		const replacement = await Subscribe.decode(peer.reader, version);
-		await peer.writer.u53(SubscribeOk.id);
-		await new SubscribeOk({ requestId: replacement.requestId, trackAlias: ALIAS }).encode(peer.writer, version);
-		await second.info();
-		release.resolve();
-		await subscriber.handleGroup(
-			new GroupMessage({
-				trackAlias: ALIAS,
-				groupId: 0,
-				subGroupId: 0,
-				publisherPriority: 0,
-				flags: groupFlags(true),
-			}),
-			new Reader(undefined, encodeObjects([0]), VERSION),
-		);
-		const groups = second.ordered();
-		const group = await groups.nextGroup();
-		expect(await group?.readString()).toBe("object 0");
-		expect(accepted).not.toHaveBeenCalled();
-		expect(second.closed.peek()).toBeUndefined();
-		groups.close();
-		accepted.mockRestore();
-	} finally {
-		release.resolve();
-		held.mockRestore();
-		captured.mockRestore();
-		first.close();
-		second?.close();
-		broadcast.close();
-		session.close();
-	}
+	await new SubscribeOk({ trackAlias: ALIAS }).encode(next.writer, VERSION);
+	expect(await info).toMatchObject({ priority: 127 - 128 });
 });
 
 test("early group waits for SUBSCRIBE_OK priority before track acceptance", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session });
 	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
 	const peer = await nextStream(pair.client);
 	if (!peer) throw new Error("missing SUBSCRIBE stream");
 	expect(await peer.reader.u53()).toBe(Subscribe.id);
-	const request = await Subscribe.decode(peer.reader, VERSION);
+	await Subscribe.decode(peer.reader, VERSION);
 
 	const flags = { ...groupFlags(true), hasPriority: false };
 	const group = new GroupMessage({ trackAlias: ALIAS, groupId: 3, subGroupId: 0, publisherPriority: 0, flags });
@@ -1353,12 +1049,11 @@ test("early group waits for SUBSCRIBE_OK priority before track acceptance", asyn
 
 	await peer.writer.u53(SubscribeOk.id);
 	await new SubscribeOk({
-		requestId: request.requestId,
 		trackAlias: ALIAS,
 		properties: { priority: 37 },
 	}).encode(peer.writer, VERSION);
 	await arriving;
-	expect((await track.info()).priority).toBe(0xff - 37);
+	expect((await track.info()).priority).toBe(127 - 37);
 	expect(group.publisherPriority).toBe(37);
 	const ordered = track.ordered();
 	expect((await ordered.nextGroup())?.sequence).toBe(3);
@@ -1371,7 +1066,7 @@ test("early group waits for SUBSCRIBE_OK priority before track acceptance", asyn
 	});
 	await subscriber.handleGroup(explicit, new Reader(undefined, encodeObjects([0]), VERSION));
 	expect(explicit.publisherPriority).toBe(9);
-	expect((await track.info()).priority).toBe(0xff - 37);
+	expect((await track.info()).priority).toBe(127 - 37);
 	expect((await ordered.nextGroup())?.sequence).toBe(4);
 	ordered.close();
 	track.close();
@@ -1382,7 +1077,7 @@ test("early group waits for SUBSCRIBE_OK priority before track acceptance", asyn
  * unusable: the objects on the stream do not decode without the head the filter excluded,
  * and moq-lite cannot represent the hole at all. Delivering it would pass the group's sixth
  * frame off as the keyframe it opens with, so the group is dropped and the track resumes at
- * the next one. Our own publisher never opens such a stream; a draft-20 peer may.
+ * the next one. Our own publisher never opens such a stream; a draft-22 peer may.
  */
 test("a group served from partway through is dropped", async () => {
 	const { subscriber, track } = await subscribeTrack();
@@ -1483,13 +1178,12 @@ test("a clear FIRST_OBJECT past object 0 is dropped", async () => {
 
 /**
  * A header-only stream with FIRST_OBJECT clear carries none of its group, so it is dropped
- * like any headless stream. With the bit set, or on drafts 14-17 that cannot clear it, the
- * same stream is an empty group. Matches the Rust rule.
+ * like any headless stream. With the bit set, the same stream is an
+ * empty group. Matches the Rust rule.
  */
 test.each([
 	[VERSION, false, [4]],
 	[VERSION, true, [3, 4]],
-	[Version.DRAFT_16, true, [3, 4]],
 ])("draft %s with FIRST_OBJECT=%s: a header-only stream delivers %p", async (version, firstObject, expected) => {
 	// A budget, so the empty group outlives its successor's arrival.
 	const { subscriber, track } = await subscribeTrack({ version, subscription: { maxDelay: Milli(60_000) } });
@@ -1517,56 +1211,6 @@ test.each([
 
 	const ordered = track.ordered();
 	for (const sequence of expected) expect((await ordered.nextGroup())?.sequence).toBe(sequence);
-	ordered.close();
-	track.close();
-});
-
-/**
- * Drafts 14-17 have no FIRST_OBJECT bit, so a subgroup that starts at the live edge
- * arrives with `firstObject` forced on and a non-zero first delta. That stream is the
- * in-progress group: drop it, keep the subscription, and deliver the next group, which
- * starts at object 0. A gap after an object was delivered still fails that group.
- */
-test.each([Version.DRAFT_14, Version.DRAFT_16])("draft %s drops a subgroup that starts mid-group", async (version) => {
-	const warning = spyOn(console, "warn").mockImplementation(() => {});
-	onTestFinished(() => warning.mockRestore());
-	const { subscriber, track } = await subscribeTrack({ version });
-
-	// The header cannot say otherwise on this draft: decode reports firstObject.
-	const partial = new GroupMessage({
-		trackAlias: ALIAS,
-		groupId: 3,
-		subGroupId: 0,
-		publisherPriority: 0,
-		flags: groupFlags(true),
-	});
-	await subscriber.handleGroup(partial, new Reader(undefined, encodeObjects([2, 0]), version));
-	expect(track.latest()).toBeUndefined();
-	expect(track.closed.peek()).toBeUndefined();
-	expect(warning).not.toHaveBeenCalled();
-
-	const whole = groupFlags(true);
-	await subscriber.handleGroup(
-		new GroupMessage({ trackAlias: ALIAS, groupId: 4, subGroupId: 0, publisherPriority: 0, flags: whole }),
-		new Reader(undefined, encodeObjects([0, 0]), version),
-	);
-
-	const ordered = track.ordered();
-	const group = await ordered.nextGroup();
-	expect(group?.sequence).toBe(4);
-	expect(await group?.readString()).toBe("object 0");
-
-	await subscriber.handleGroup(
-		new GroupMessage({ trackAlias: ALIAS, groupId: 5, subGroupId: 0, publisherPriority: 0, flags: whole }),
-		new Reader(undefined, encodeObjects([0, 5]), version),
-	);
-	const gapped = await ordered.nextGroup();
-	expect(gapped?.sequence).toBe(5);
-	expect(await gapped?.readString()).toBe("object 0");
-	await expect(gapped?.readFrameSequence()).rejects.toThrow(/object IDs must start at 0/);
-	expect(warning).toHaveBeenCalledWith(expect.stringContaining("object IDs must start at 0"));
-	expect(track.closed.peek()).toBeUndefined();
-
 	ordered.close();
 	track.close();
 });
@@ -1664,76 +1308,8 @@ test("every object in a chunk reaches the reader before it wakes", async () => {
 	track.close();
 });
 
-// Hold the actual legacy cancellation write so returning demand lands in the teardown gap.
-test("returning demand survives a blocked unsubscribe", async () => {
-	const version = Version.DRAFT_16;
-	const pair = createMockTransportPair(ALPN.DRAFT_16);
-	const control = await Stream.open(pair.server, { version });
-	const session = new ControlStreamAdapter(pair.server, control, version, 100n, true);
-	void session.run().catch(() => void 0);
-	const subscriber = new Subscriber({ session });
-	const peer = await nextStream(pair.client);
-	if (!peer) throw new Error("missing control stream");
-	peer.reader.version = version;
-	peer.writer.version = version;
-
-	const cancelStarted = Promise.withResolvers<void>();
-	const releaseCancel = Promise.withResolvers<void>();
-	const oldClosed = Promise.withResolvers<void>();
-	const open = session.openBi.bind(session);
-	const opening = spyOn(session, "openBi").mockImplementationOnce(() => {
-		const stream = open();
-		const write = stream.writer.u53.bind(stream.writer);
-		spyOn(stream.writer, "u53").mockImplementation(async (value) => {
-			if (value === Unsubscribe.id) {
-				cancelStarted.resolve();
-				await releaseCancel.promise;
-			}
-			await write(value);
-		});
-		const close = stream.close.bind(stream);
-		spyOn(stream, "close").mockImplementation(() => {
-			close();
-			oldClosed.resolve();
-		});
-		return stream;
-	});
-
-	const broadcast = subscriber.consume(Path.from("room"));
-	const first = broadcast.track("video").subscribe();
-	expect(await peer.reader.u53()).toBe(Subscribe.id);
-	const request = await Subscribe.decode(peer.reader, version);
-	await peer.writer.u53(SubscribeOk.id);
-	await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS }).encode(peer.writer, version);
-
-	// Receiving a group proves setup has accepted the track before demand disappears.
-	await subscriber.handleGroup(
-		new GroupMessage({
-			trackAlias: ALIAS,
-			groupId: 0,
-			subGroupId: 0,
-			publisherPriority: 0,
-			flags: groupFlags(true),
-		}),
-		new Reader(undefined, encodeObjects([0]), VERSION),
-	);
-	const ordered = first.ordered();
-	expect(await ordered.nextGroup()).toBeDefined();
-	ordered.close();
-	first.close();
-	await cancelStarted.promise;
-	const returned = broadcast.track("video").subscribe();
-	releaseCancel.resolve();
-	await oldClosed.promise;
-	expect(returned.closed.peek()).toBeUndefined();
-	expect(opening).toHaveBeenCalledTimes(2);
-	returned.close();
-	broadcast.close();
-	session.close();
-});
-
 test("local readers filter hidden unsolicited namespaces from a legacy peer", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true) });
 	const plain = subscriber.announced();
 	const opted = subscriber.announced(undefined, { hidden: true });
@@ -1803,17 +1379,16 @@ test("object extension limit accepts 64 KiB and stops one byte over before readi
  * carry is dropped like a lost datagram, and a malformed one ends the session.
  */
 test("an object datagram is a datagram group", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true), quic: pair.server });
 	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
 
 	const peer = await nextStream(pair.client);
 	if (!peer) throw new Error("the subscriber never opened a subscribe stream");
 	expect(await peer.reader.u53()).toBe(Subscribe.id);
-	const request = await Subscribe.decode(peer.reader, VERSION);
+	await Subscribe.decode(peer.reader, VERSION);
 	await peer.writer.u53(SubscribeOk.id);
 	await new SubscribeOk({
-		requestId: request.requestId,
 		trackAlias: ALIAS,
 		properties: { timescale: Timescale.MILLI },
 	}).encode(peer.writer, VERSION);
@@ -1857,7 +1432,7 @@ test("an object datagram is a datagram group", async () => {
 });
 
 test("a more specific epochless announcement replaces the consumed source", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true) });
 	const announced = subscriber.announced();
 	await acceptSubscribeNamespace(pair.client);
@@ -1898,17 +1473,7 @@ test("a more specific epochless announcement replaces the consumed source", asyn
 	announced.close();
 });
 
-for (const version of [
-	Version.DRAFT_14,
-	Version.DRAFT_15,
-	Version.DRAFT_16,
-	Version.DRAFT_17,
-	Version.DRAFT_18,
-	Version.DRAFT_19,
-	Version.DRAFT_20,
-	Version.DRAFT_21,
-	Version.DRAFT_22,
-]) {
+for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
 	test(`status zero without the end bit delivers an empty object and continues (${version})`, async () => {
 		const { subscriber, track } = await subscribeTrack({ version });
 		onTestFinished(() => track.close());
@@ -1931,122 +1496,413 @@ for (const version of [
 	});
 }
 
-// Retirement before allocation spends nothing; retirement after allocation drains that request.
-test.each(["waiting", "allocated"] as const)(
-	"legacy retirement while %s keeps subsequent request IDs contiguous",
-	async (phase) => {
-		const version = Version.DRAFT_15;
-		const pair = createMockTransportPair(ALPN.DRAFT_15);
-		const control = await Stream.open(pair.server, { version });
-		const session = new ControlStreamAdapter(pair.server, control, version, phase === "waiting" ? 0n : 4n, true);
-		const running = session.run().catch(() => undefined);
-		const peer = await Stream.accept(pair.client, version);
-		if (!peer) throw new Error("no control stream");
-		const entered = Promise.withResolvers<void>();
-		const allocated = Promise.withResolvers<void>();
-		const resume = Promise.withResolvers<void>();
-		const allocate = session.nextRequestId.bind(session);
-		const intercepted = spyOn(session, "nextRequestId").mockImplementationOnce(async (signal) => {
-			entered.resolve();
-			const id = await allocate(signal);
-			allocated.resolve();
-			await resume.promise;
-			return id;
-		});
-		const subscriber = new Subscriber({ session });
-		const announced = subscriber.announced();
-		const path = Path.from("room");
-		const held = subscriber.consume(path);
-		const old = held
-			.track("video")
-			.info()
-			.then(
-				() => undefined,
-				(err: unknown) => err,
-			);
-		await entered.promise;
-		if (phase === "allocated") await allocated.promise;
-
-		const source = createMockTransportPair(ALPN.DRAFT_15);
-		const sourceStream = await Stream.open(source.server, { version });
-		const sourcePeer = await Stream.accept(source.client, version);
-		if (!sourcePeer) throw new Error("no announcement stream");
-		const advertising = subscriber.runPublishNamespace(
-			new PublishNamespace({ requestId: 1n, trackNamespace: path }),
-			sourceStream,
-		);
-		let fresh: ReturnType<Subscriber["consume"]> | undefined;
-		try {
-			expect(await sourcePeer.reader.u53()).toBe(RequestOk.id);
-			await RequestOk.decode(sourcePeer.reader, version);
-			await announced.next();
-			resume.resolve();
-			expect(await old).toBeInstanceOf(Error);
-			if (phase === "waiting") {
-				await peer.writer.u53(MaxRequestId.id);
-				await new MaxRequestId({ requestId: 4n }).encode(peer.writer, version);
-			} else {
-				expect(await peer.reader.u53()).toBe(Subscribe.id);
-				const canceled = await Subscribe.decode(peer.reader, version);
-				expect(canceled.requestId).toBe(0n);
-				expect(await peer.reader.u53()).toBe(Unsubscribe.id);
-				expect((await Unsubscribe.decode(peer.reader, version)).requestId).toBe(0n);
-			}
-			fresh = subscriber.consume(path);
-			const info = fresh
-				.track("video")
-				.info()
-				.catch((err: unknown) => err);
-			expect(await peer.reader.u53()).toBe(Subscribe.id);
-			const request = await Subscribe.decode(peer.reader, version);
-			expect(request.requestId).toBe(phase === "waiting" ? 0n : 2n);
-			await peer.writer.u53(SubscribeOk.id);
-			await new SubscribeOk({
-				requestId: request.requestId,
-				trackAlias: request.requestId,
-				properties: {},
-			}).encode(peer.writer, version);
-			expect(await info).not.toBeInstanceOf(Error);
-		} finally {
-			intercepted.mockRestore();
-			resume.resolve();
-			fresh?.close();
-			held.close();
-			announced.close();
-			sourcePeer.close();
-			await advertising;
-			peer.close();
-			session.close();
-			void running;
-		}
-	},
-);
-
-test("an announce consumer closed while waiting on request-ID credit takes no ID", async () => {
-	const version = Version.DRAFT_15;
-	const pair = createMockTransportPair(ALPN.DRAFT_15);
-	const control = await Stream.open(pair.server, { version });
-	const session = new ControlStreamAdapter(pair.server, control, version, 0n, true);
-	const running = session.run().catch(() => undefined);
-	// Stand in for exhausted credit: the allocation waits until its signal aborts.
-	let cancelled = false;
-	spyOn(session, "nextRequestId").mockImplementation(
-		(signal) =>
-			new Promise((_, reject) => {
-				signal?.addEventListener("abort", () => {
-					cancelled = true;
-					reject(signal.reason);
-				});
-			}),
-	);
+/**
+ * A request on another stream can overtake a cancel, so a peer that refuses overlapping
+ * requests (PREFIX_OVERLAP) would see the broader one beside the narrower one it replaces.
+ * It goes out only once the peer has ended the narrower one's stream.
+ */
+test("a request overlapping one on its way out waits for the peer to end it", async () => {
+	const version = Version.DRAFT_22;
+	const pair = createMockTransportPair(ALPN.DRAFT_22);
+	const session = new NativeSession(pair.server, version, true);
 	const subscriber = new Subscriber({ session });
 
-	const announced = subscriber.announced(Path.Pattern.subtree(Path.from("room")));
-	await Promise.resolve();
-	announced.close();
-	for (let i = 0; i < 8; i++) await Promise.resolve();
-	expect(cancelled).toBe(true);
+	const narrow = subscriber.announced(Path.Pattern.subtree(Path.from("a/b")));
+	const stream = await acceptSubscribeNamespace(pair.client, version);
+	await inlineNamespace(stream, Path.from("x"), undefined, version);
+	expect(await narrow.next()).toMatchObject({ prefix: Path.from("a/b/x"), kind: "start" });
 
+	// A request still open is no blocker, and hears the narrower one's route go at once.
+	const watcher = subscriber.announced(Path.Pattern.subtree(Path.from("a/b")));
+	const watching = await acceptSubscribeNamespace(pair.client, version);
+	expect(await watcher.next()).toMatchObject({ prefix: Path.from("a/b/x"), kind: "start" });
+	narrow.close();
+	const broad = subscriber.announced(Path.Pattern.subtree(Path.from("a")));
+	expect(await watcher.next()).toMatchObject({ prefix: Path.from("a/b/x"), kind: "end" });
+
+	// Draft 22 cancels with a reset, and the broader request waits on the peer's half.
+	expect(stream.reader.done()).rejects.toMatchObject({ code: StreamCode.Cancel });
+	const incoming = pair.client.incomingBidirectionalStreams.getReader();
+	let sent = false;
+	const opened = incoming.read().then((next) => {
+		sent = true;
+		return next;
+	});
+
+	// The closed reader is still registered meanwhile, and hears nothing more.
+	await inlineNamespace(watching, Path.from("y"), undefined, version);
+	expect(await watcher.next()).toMatchObject({ prefix: Path.from("a/b/y"), kind: "start" });
+	expect(sent).toBe(false);
+
+	stream.writer.close();
+	const next = await opened;
+	incoming.releaseLock();
+	if (next.done) throw new Error("the broader SUBSCRIBE_NAMESPACE never went out");
+	const asked = new Stream({ readable: next.value.readable, writable: next.value.writable, version });
+	await asked.reader.u53();
+	expect((await SubscribeNamespace.decode(asked.reader, version)).namespace).toBe(Path.from("a"));
+
+	watcher.close();
+	broad.close();
 	session.close();
-	void running;
+});
+
+/** Answer the next SUBSCRIBE_NAMESPACE with REQUEST_OK, carrying `activeCount` when given. */
+async function answerCounted(transport: WebTransport, activeCount: number | undefined): Promise<Stream> {
+	const stream = await nextStream(transport);
+	if (!stream) throw new Error("no SUBSCRIBE_NAMESPACE was sent");
+	await stream.reader.u53();
+	await SubscribeNamespace.decode(stream.reader, VERSION);
+	const parameters = new Parameters();
+	parameters.activeCount = activeCount;
+	await stream.writer.u53(RequestOk.id);
+	await new RequestOk({ parameters }).encode(stream.writer, VERSION);
+	return stream;
+}
+
+const sessionClosed = (pair: ReturnType<typeof createMockTransportPair>) =>
+	Promise.race([
+		pair.server.closed,
+		new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("session stayed up")), STREAM_WAIT)),
+	]);
+
+/** The session closes with PROTOCOL_VIOLATION, not a clean code. */
+async function violationClosed(pair: ReturnType<typeof createMockTransportPair>) {
+	expect((await sessionClosed(pair)).closeCode).toBe(new ProtocolViolation("").code);
+}
+
+const yieldTask = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+/** MoQ Active Count: the consumer syncs once the counted NAMESPACEs are read. */
+test("counted NAMESPACEs sync", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber({ session, activeCount: true });
+
+	const announced = subscriber.announced();
+	const subscription = await answerCounted(pair.client, 2);
+	await inlineNamespace(subscription, Path.from("a"));
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("a"), kind: "start" });
+	const b = announced.next();
+	await yieldTask();
+	expect(announced.synced.peek()).toBe(false);
+
+	await inlineNamespace(subscription, Path.from("b"));
+	expect(await b).toMatchObject({ prefix: Path.from("b"), kind: "start" });
+	await yieldTask();
+	// Still handling the last of them.
+	expect(announced.synced.peek()).toBe(false);
+	void announced.next();
+	await yieldTask();
+	expect(announced.synced.peek()).toBe(true);
+	announced.close();
+});
+
+/** Without MoQ Active Count, REQUEST_OK is the best boundary there is. */
+test("an uncounted answer syncs on the OK", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber({ session });
+
+	const announced = subscriber.announced();
+	await yieldTask();
+	expect(announced.synced.peek()).toBe(false);
+	await acceptSubscribeNamespace(pair.client);
+	await yieldTask();
+	expect(announced.synced.peek()).toBe(true);
+	announced.close();
+});
+
+/** A count the negotiation did not promise, or a missing one it did, breaks the extension. */
+test("an ACTIVE_COUNT that does not match the negotiation closes the session", async () => {
+	for (const [negotiated, count] of [
+		[true, undefined],
+		[false, 0],
+	] as const) {
+		const pair = createMockTransportPair(ALPN.DRAFT_18);
+		const session = new NativeSession(pair.server, VERSION, true);
+		const subscriber = new Subscriber({ session, quic: pair.server, activeCount: negotiated });
+		const warn = spyOn(console, "warn").mockImplementation(() => void 0);
+		onTestFinished(() => warn.mockRestore());
+
+		subscriber.announced();
+		await answerCounted(pair.client, count);
+		await violationClosed(pair);
+	}
+});
+
+/** A violation on a namespace subscription closes the session through its request, once. */
+test("a namespace subscription closes the session once over a violation", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber({ session, quic: pair.server, activeCount: true });
+	const warn = spyOn(console, "warn").mockImplementation(() => void 0);
+	onTestFinished(() => warn.mockRestore());
+	const close = spyOn(pair.server, "close");
+
+	subscriber.announced();
+	await answerCounted(pair.client, undefined);
+	await violationClosed(pair);
+	await yieldTask();
+	expect(close.mock.calls.filter(([info]) => info?.closeCode !== undefined)).toHaveLength(1);
+});
+
+/** A counted set cut short, by a NAMESPACE_DONE or the stream ending, is the peer's fault. */
+test.each(["done", "fin"] as const)("a counted set cut short by %s closes the session", async (cut) => {
+	{
+		const pair = createMockTransportPair(ALPN.DRAFT_18);
+		const session = new NativeSession(pair.server, VERSION, true);
+		const subscriber = new Subscriber({ session, quic: pair.server, activeCount: true });
+		const warn = spyOn(console, "warn").mockImplementation(() => void 0);
+		onTestFinished(() => warn.mockRestore());
+
+		subscriber.announced();
+		const subscription = await answerCounted(pair.client, 2);
+		await inlineNamespace(subscription, Path.from("a"));
+		if (cut === "done") {
+			// The type alone is the violation, so the session may close before the rest is written.
+			await subscription.writer.u53(SubscribeNamespaceEntryDone.id);
+			await new SubscribeNamespaceEntryDone({ suffix: Path.from("a") })
+				.encode(subscription.writer, VERSION)
+				.catch(() => undefined);
+		} else {
+			subscription.writer.close();
+		}
+		await violationClosed(pair);
+	}
+});
+
+for (const negotiated of [false, true]) {
+	test(`subscriber max age is sent only to a declaring peer: ${negotiated}`, async () => {
+		const pair = createMockTransportPair(ALPN.DRAFT_18);
+		const subscriber = new Subscriber({
+			session: new NativeSession(pair.server, VERSION, true),
+			maxAge: negotiated,
+		});
+		const track = subscriber
+			.consume(Path.from("room"))
+			.track("video")
+			.subscribe({ maxDelay: Milli(250) });
+		const peer = await nextStream(pair.client);
+		if (!peer) throw new Error("no subscribe stream");
+		expect(await peer.reader.u53()).toBe(Subscribe.id);
+		const request = await Subscribe.decode(peer.reader, VERSION);
+		expect(request.maxAge).toBe(negotiated ? 250 : undefined);
+		await peer.writer.u53(SubscribeOk.id);
+		await new SubscribeOk({ trackAlias: ALIAS }).encode(peer.writer, VERSION);
+		await track.info();
+		// The aggregate can change before SUBSCRIBE_OK: the first update must catch it.
+		const tolerant = track.fork({ maxDelay: Milli(900), priority: 9 });
+		expect(await peer.reader.u53()).toBe(SubscribeUpdate.id);
+		const update = await SubscribeUpdate.decode(peer.reader, VERSION);
+		expect(update.parameters.maxAge).toBe(negotiated ? 900 : undefined);
+		expect(update.parameters.subscriberPriority).toBe(127 - 9);
+		tolerant.close();
+		track.close();
+		peer.close();
+	});
+}
+/** Advertise `path` inline under `epoch`, on a session that negotiated MoQ Epoch alone. */
+async function inlineEpoch(stream: Stream, path: Path.Valid, epoch: Epoch.Valid): Promise<void> {
+	await stream.writer.u53(SubscribeNamespaceEntry.id);
+	await new SubscribeNamespaceEntry({ suffix: path, params: { epoch } }).encode(stream.writer, VERSION);
+}
+
+/** Open a PUBLISH_NAMESPACE for `path` under `epoch`, returning the handler and the peer's end. */
+async function publishEpoch(
+	pair: ReturnType<typeof createMockTransportPair>,
+	subscriber: Subscriber,
+	path: Path.Valid,
+	epoch: Epoch.Valid,
+): Promise<{ handler: Promise<void>; peer: Stream }> {
+	const stream = await Stream.open(pair.server, { version: VERSION });
+	const handler = subscriber.runPublishNamespace(
+		new PublishNamespace({ requestId: 0n, trackNamespace: path, params: { epoch } }),
+		stream,
+	);
+	const peer = await nextStream(pair.client);
+	if (!peer) throw new Error("no PUBLISH_NAMESPACE stream");
+	expect(await peer.reader.u53()).toBe(RequestOk.id);
+	await RequestOk.decode(peer.reader, VERSION);
+	return { handler, peer };
+}
+
+/** The route names the advertised instance, and so does every SUBSCRIBE sent for it. */
+test("an advertised epoch reaches the route and the SUBSCRIBE", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
+	const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true), epoch: true });
+	const announced = subscriber.announced();
+	await acceptSubscribeNamespace(pair.client);
+
+	const epoch = Epoch.mint();
+	await publishEpoch(pair, subscriber, Path.from("room"), epoch);
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), kind: "start", route: { epoch } });
+
+	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
+	onTestFinished(() => track.close());
+	const peer = await nextStream(pair.client);
+	if (!peer) throw new Error("no SUBSCRIBE stream");
+	expect(await peer.reader.u53()).toBe(Subscribe.id);
+	expect((await Subscribe.decode(peer.reader, VERSION)).epoch).toBe(epoch);
+	announced.close();
+});
+
+test("an inline NAMESPACE route carries its epoch", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
+	const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true), epoch: true });
+	const announced = subscriber.announced();
+	const subscription = await acceptSubscribeNamespace(pair.client);
+
+	const epoch = Epoch.mint();
+	await inlineEpoch(subscription, Path.from("room"), epoch);
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), kind: "start", route: { epoch } });
+	announced.close();
+});
+
+/**
+ * A NAMESPACE repeated under another epoch replaces the instance in place: the path
+ * restarts and is never absent, and a fresh reader hears the new instance standing.
+ */
+test("a NAMESPACE repeated under another epoch restarts the path in place", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
+	const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true), epoch: true });
+	const announced = subscriber.announced();
+	const subscription = await acceptSubscribeNamespace(pair.client);
+
+	const path = Path.from("room");
+	const first = Epoch.mint();
+	await inlineEpoch(subscription, path, first);
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "start", route: { epoch: first } });
+
+	const second = Epoch.mint();
+	await inlineEpoch(subscription, path, second);
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "restart", route: { epoch: second } });
+
+	const fresh = subscriber.announced();
+	expect(await fresh.next()).toMatchObject({ prefix: path, kind: "start", route: { epoch: second } });
+	fresh.close();
+	announced.close();
+});
+
+/**
+ * A namespace advertised both inline and by a later PUBLISH_NAMESPACE takes another epoch
+ * from either: an inline repeat under the new epoch is the newest advertisement, not an
+ * update to the older of the two.
+ */
+test("a NAMESPACE repeat under another epoch outranks a later PUBLISH_NAMESPACE", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
+	const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true), epoch: true });
+	const announced = subscriber.announced();
+	const subscription = await acceptSubscribeNamespace(pair.client);
+
+	const path = Path.from("room");
+	const first = Epoch.mint();
+	await inlineEpoch(subscription, path, first);
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "start", route: { epoch: first } });
+	await publishEpoch(pair, subscriber, path, first);
+
+	const second = Epoch.mint();
+	await inlineEpoch(subscription, path, second);
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "restart", route: { epoch: second } });
+	announced.close();
+});
+
+/**
+ * A NAMESPACE that loops back through us detaches its route, but the advertisement stays
+ * live on the wire until its NAMESPACE_DONE: a repeat that restores a clean path while
+ * losing its epoch is still the violation it would be without the loop.
+ */
+test("a reflected NAMESPACE keeps its epoch live", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber({ session, quic: pair.server, cluster: { self: SELF, peer: PEER }, epoch: true });
+	const warn = spyOn(console, "warn").mockImplementation(() => void 0);
+	onTestFinished(() => warn.mockRestore());
+	const announced = subscriber.announced();
+	const subscription = await acceptSubscribeNamespace(pair.client);
+
+	const epoch = Epoch.mint();
+	const send = async (hops: Hop[], named?: Epoch.Valid) => {
+		await subscription.writer.u53(SubscribeNamespaceEntry.id);
+		await new SubscribeNamespaceEntry({
+			suffix: Path.from("room"),
+			params: { cluster: { hops, cost: 0n }, epoch: named },
+		}).encode(subscription.writer, VERSION);
+	};
+	await send([PEER], epoch);
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), kind: "start" });
+	await send([SELF, PEER], epoch);
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), kind: "end" });
+
+	await send([PEER]);
+	await violationClosed(pair);
+});
+
+/**
+ * Gaining or losing an epoch is not one instance replacing another, so a repeat that does
+ * either means the peer skipped the NAMESPACE_DONE.
+ */
+test.each(["gains", "loses"] as const)("a NAMESPACE repeat that %s an epoch closes the session", async (change) => {
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber({ session, quic: pair.server, epoch: true });
+	const warn = spyOn(console, "warn").mockImplementation(() => void 0);
+	onTestFinished(() => warn.mockRestore());
+	const announced = subscriber.announced();
+	const subscription = await acceptSubscribeNamespace(pair.client);
+
+	const epoch = Epoch.mint();
+	const send = async (path: Path.Valid, named?: Epoch.Valid) => {
+		await subscription.writer.u53(SubscribeNamespaceEntry.id);
+		await new SubscribeNamespaceEntry({ suffix: path, params: { epoch: named } }).encode(
+			subscription.writer,
+			VERSION,
+		);
+	};
+	const [before, after] = change === "gains" ? [undefined, epoch] : [epoch, undefined];
+	await send(Path.from("room"), before);
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), kind: "start" });
+
+	// Control: a repeat that keeps the epoch, or its absence, is not a violation.
+	await send(Path.from("room"), before);
+	await send(Path.from("sentinel"), before);
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("sentinel"), kind: "start" });
+
+	await send(Path.from("room"), after);
+	await violationClosed(pair);
+});
+
+/**
+ * Two PUBLISH_NAMESPACE requests travel on independent streams, so a restarted publisher's
+ * new advertisement can land before its old one's withdrawal. The newest stands throughout.
+ */
+test("a stale instance's withdrawal arriving last keeps the newer epoch", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
+	const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true), epoch: true });
+	const announced = subscriber.announced();
+	await acceptSubscribeNamespace(pair.client);
+
+	const path = Path.from("room");
+	const first = Epoch.mint();
+	const old = await publishEpoch(pair, subscriber, path, first);
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "start", route: { epoch: first } });
+
+	const second = Epoch.mint();
+	await publishEpoch(pair, subscriber, path, second);
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "restart", route: { epoch: second } });
+
+	old.peer.close();
+	await old.handler;
+
+	const next = await Promise.race([
+		announced.next(),
+		new Promise<"nothing">((resolve) => setTimeout(() => resolve("nothing"), 250)),
+	]);
+	expect(next).toBe("nothing");
+
+	// A fresh reader hears the newer instance as the one standing.
+	const fresh = subscriber.announced();
+	expect(await fresh.next()).toMatchObject({ prefix: path, kind: "start", route: { epoch: second } });
+	fresh.close();
+	announced.close();
 });

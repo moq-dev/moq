@@ -8,9 +8,16 @@ set working-directory := '.'
 default:
     just check
 
-# Build the package and run the probe and doc samples against its install.
-check:
-    ../sh/cpp/check.sh
+# Build the package, or check an archive, and run its installed consumers.
+[no-cd]
+[positional-arguments]
+check *args:
+    python3 {{ quote(justfile_directory() / "sh/cpp/ffi.test.py") }}
+    {{ quote(justfile_directory() / "sh/cpp/check.sh") }} "$@"
+
+# Run the in-process binding benchmark with the release library.
+bench:
+    bash ../sh/cpp/bench.sh
 
 # Runs in the caller's directory, so a relative `--output` means what it would
 # to the script itself.
@@ -24,3 +31,9 @@ package *args:
 # Remove the package builds.
 clean:
     rm -rf moq/build
+
+# Stage, archive, fetch, or publish the pinned default-feature native input.
+[no-cd]
+[positional-arguments]
+ffi *args:
+    python3 {{ quote(justfile_directory() / "sh/cpp/ffi.py") }} "$@"

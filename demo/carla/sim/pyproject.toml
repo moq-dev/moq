@@ -1,0 +1,48 @@
+# The CARLA worker. Not published: a demo, run from the repo.
+#
+# moq's bindings are deliberately NOT listed here. venv.sh installs them from
+# this checkout's py/ (moq-ffi built by maturin, moq-rs editable), so the
+# worker always runs the bindings of the tree it ships in, never a PyPI release.
+[project]
+name = "moq-carla-sim"
+version = "0.1.0"
+description = "A CARLA world of simulated trucks published over MoQ, steerable from the browser."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    # CARLA ships wheels for cp310-cp312 only, which is what pins the
+    # interpreter above.
+    "carla==0.9.16",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["moq_carla_sim"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+# RUF100 fails a `noqa` that no longer suppresses anything.
+select = ["E", "F", "W", "I", "RUF100"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+# Collected from the root uv workspace's dev tools rather than the CARLA venv:
+# tests/conftest.py stubs `moq` and `carla`, so the package imports from source.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+# Type-checks the worker against the in-tree moq wrapper source, so an API
+# change there fails the gate instead of crashing at runtime. carla exists only
+# in the CARLA venv; typings/ stands in for it.
+[tool.pyright]
+include = ["moq_carla_sim"]
+extraPaths = ["../../../py/moq-rs"]
+pythonVersion = "3.12"
+reportMissingModuleSource = false

@@ -21,3 +21,9 @@ kio = { workspace = true }
 moq-net = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+futures = { workspace = true }
+
+[lints]
+workspace = true

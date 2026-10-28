@@ -1,0 +1,633 @@
+name: Smoke
+
+# Installs each moq package from its PUBLIC registry and checks that the
+# published clients interoperate, catching packaging breakage in a release
+# (test/smoke). The in-tree companion, interop.yml, builds from this checkout.
+on:
+  # Manual on-demand runs.
+  workflow_dispatch:
+    inputs:
+      history_url:
+        description: Seed the relay report history from this URL instead of the deployed site
+        required: false
+  # Merges that touch the harness itself (smoke.sh / token.sh / clients) run the
+  # matrix against the published packages. The build caches below (mbx, cargo
+  # binaries) only save from the default branch's push or dispatch runs, never
+  # from the nightly schedule, so this also keeps them warm.
+  push:
+    branches: [main]
+    paths:
+      - "test/smoke/**"
+      - ".github/workflows/smoke.yml"
+  # Nightly: catches breakage from a freshly published wheel / formula / .deb /
+  # npm / go module that a developer wouldn't notice until a user hit it.
+  schedule:
+    - cron: "0 8 * * *"
+
+concurrency:
+  group: smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: test/smoke
+
+jobs:
+  smoke:
+    name: ${{ matrix.os }} / ${{ matrix.channel }}
+    runs-on: ${{ matrix.os }}
+    # The matrix runs in real time (ffmpeg -re pacing + per-subscriber timeouts);
+    # this is just a safety net against a hung relay/client. The nix channel
+    # gets longer: compiling a moq HEAD that isn't in cachix yet has taken 43
+    # minutes on its own, and that build is what seeds the cache (see below).
+    timeout-minutes: ${{ matrix.channel == 'nix' && 75 || 45 }}
+
+    # smoke.sh resolves the latest libmoq release via the GitHub API. Without a
+    # token that call is anonymous (60 req/hr per IP), which the heavily-NAT'd
+    # macOS runners routinely exhaust -> "no libmoq-v* release found" -> the C
+    # subscriber drops out and every "* -> c" case fails. Authenticating lifts
+    # the limit to 1000 req/hr per token.
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      SMOKE_BROWSER_ARTIFACTS: ${{ github.workspace }}/test/smoke/clients/js/artifacts
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The Rust binaries ship through three channels that install the same
+          # thing; we test each separately where the OS supports it. The Python /
+          # Go / browser clients always come from their own registries.
+          - os: ubuntu-latest
+            channel: cargo
+          - os: ubuntu-latest
+            channel: apt
+          # The moq flake is itself a public channel (nix run github:moq-dev/moq).
+          - os: ubuntu-latest
+            channel: nix
+          # Docker Hub (moqdev/moq-relay + moqdev/moq). Linux only: the
+          # wrappers use `--network host`, which needs a native Docker daemon
+          # (GitHub's macOS runners have none).
+          - os: ubuntu-latest
+            channel: docker
+          # macOS cells temporarily disabled to cut CI spend (over budget this
+          # month). Re-enable by uncommenting; nothing else depends on them.
+          # - os: macos-latest
+          #   channel: cargo
+          # - os: macos-latest
+          #   channel: brew
+          # - os: macos-latest
+          #   channel: nix
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/just
+
+      # ── client toolchains ──────────────────────────────────────────────
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          gradle-version: "8.14.4"
+
+      - name: System deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          # gcc (cc) for the C client is already on the runner, but g++ isn't:
+          # libmoq.a bundles openh264, so static consumers need libstdc++ to link.
+          # libva-dev is not a real dependency (moq-vaapi dlopen's libva and
+          # libmoq.a has no libva symbols); it's here only because libmoq's
+          # published moq.pc and CMake package still advertise -lva/-lva-drm, so
+          # the c-pkgconfig and c-cmake variants pass them to the linker. Drop it
+          # once a libmoq release ships without those. The hand-rolled `c` variant
+          # already omits them, see LIBMOQ_OS_LIBS in the smoke harness.
+          # gstreamer1.0-* provides gst-launch/gst-inspect + the core elements
+          # (filesink) the moq-gst subscriber loads the prebuilt plugin against.
+          # pkg-config + cmake drive the c-pkgconfig / c-cmake build variants
+          # (they consume the prebuilt libmoq's moq.pc and lib/cmake/moq package).
+          sudo apt-get install -y ffmpeg curl procps coreutils jq pkg-config cmake g++ libva-dev \
+            gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good
+
+      - name: System deps (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          # clang (cc) for the C client and swift for the Swift client ship with Xcode.
+          # pkg-config + cmake drive the c-pkgconfig / c-cmake build variants.
+          # gstreamer is the system runtime the prebuilt moq-gst plugin links against.
+          brew install ffmpeg coreutils jq pkg-config cmake gstreamer
+          # GNU coreutils provides `timeout` (macOS ships neither it nor pgrep
+          # under those names by default; pgrep exists, timeout does not).
+          echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
+
+      # ── Rust binaries, per channel (left on PATH for smoke.sh) ──────────
+      # Key the installed binaries on the newest published versions (from the
+      # crates.io sparse index) and the compiler. An exact hit is already the
+      # latest install, so it skips `cargo install`; a new release or rustc
+      # misses and compiles for real, which is exactly when this channel has
+      # something new to prove.
+      - name: Resolve latest crate versions (cargo)
+        id: crates
+        if: matrix.channel == 'cargo'
+        # A failed lookup must fail the step: a `null` key could otherwise
+        # exact-hit a stale entry and skip the install after a new release.
+        run: |
+          latest() {
+            curl -sfL --retry 3 "https://index.crates.io/mo/q-/$1" |
+              jq -ers '[.[] | select((.yanked | not) and (.vers | contains("-") | not))] | last.vers'
+          }
+          relay=$(latest moq-relay)
+          cli=$(latest moq-cli)
+          echo "key=cargo-bin-${RUNNER_OS}-moq-relay-$relay-moq-cli-$cli-$(rustc -V | tr -c 'a-zA-Z0-9.\n' -)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache installed moq binaries (cargo)
+        id: cargo-cache
+        if: matrix.channel == 'cargo'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/bin/moq-relay
+            ~/.cargo/bin/moq
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+          key: ${{ steps.crates.outputs.key }}
+
+      - name: Install moq Rust packages (cargo)
+        if: matrix.channel == 'cargo' && steps.cargo-cache.outputs.cache-hit != 'true'
+        # Honor each published binary crate's Cargo.lock. Without --locked, the
+        # cargo channel can select a newly broken transitive dependency even when
+        # the crate was published and tested against a working resolution.
+        run: cargo install --locked moq-relay moq-cli
+
+      - name: Install moq Rust packages (apt)
+        if: matrix.channel == 'apt'
+        run: |
+          curl -fsSL https://apt.moq.dev/moq-keyring.gpg \
+            | sudo tee /usr/share/keyrings/moq-keyring.gpg > /dev/null
+          echo "deb [signed-by=/usr/share/keyrings/moq-keyring.gpg] https://apt.moq.dev stable main" \
+            | sudo tee /etc/apt/sources.list.d/moq.list
+          sudo apt-get update
+          sudo apt-get install -y moq-relay moq-cli
+
+      - name: Install moq Rust packages (brew)
+        if: matrix.channel == 'brew'
+        run: |
+          brew tap moq-dev/tap
+          brew install moq-dev/tap/moq-relay moq-dev/tap/moq-cli
+
+      - name: Install Nix (nix channel)
+        if: matrix.channel == 'nix'
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+        with:
+          extra-conf: |
+            extra-substituters = https://kixelated.cachix.org
+            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
+
+      - name: Build moq from the flake (nix channel)
+        if: matrix.channel == 'nix'
+        # --refresh so we always build the latest moq, never a cached eval; the
+        # moq flake is referenced ad-hoc here, so its version is never locked.
+        run: |
+          relay=$(nix build --refresh --no-link --print-out-paths 'github:moq-dev/moq#moq-relay')
+          cli=$(nix build --refresh --no-link --print-out-paths 'github:moq-dev/moq#moq')
+          {
+            echo "RELAY_BIN=$relay/bin/moq-relay"
+            echo "CLI_BIN=$cli/bin/moq"
+          } >> "$GITHUB_ENV"
+
+      # cachix.yml only pushes release tags, so each new HEAD
+      # compiles here for ~20 minutes. Push what we just built, so later runs
+      # (and anyone doing `nix run github:moq-dev/moq#moq`) substitute it until
+      # moq's main moves. Only the two outputs' runtime closures, never the
+      # multi-GB build dependencies; unpinned, so cachix's LRU evicts them
+      # before any pinned release. Skipped on pull requests and until the repo
+      # has a CACHIX_AUTH_TOKEN secret.
+      - name: Push moq build to cachix (nix channel)
+        if: matrix.channel == 'nix' && github.event_name != 'pull_request'
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          if [ -z "$CACHIX_AUTH_TOKEN" ]; then
+            echo "no CACHIX_AUTH_TOKEN secret; not pushing"
+            exit 0
+          fi
+          nix run nixpkgs#cachix -- push kixelated "${RELAY_BIN%/bin/*}" "${CLI_BIN%/bin/*}"
+
+      - name: Pull moqdev images (docker channel)
+        if: matrix.channel == 'docker'
+        # Pull :latest fresh, then point smoke.sh at the wrapper scripts (which
+        # `docker run --network host` the images) via RELAY_BIN/CLI_BIN. Docker is
+        # preinstalled on the Linux runners.
+        run: |
+          docker pull moqdev/moq-relay
+          docker pull moqdev/moq
+          {
+            echo "RELAY_BIN=$PWD/clients/docker/moq-relay"
+            echo "CLI_BIN=$PWD/clients/docker/moq"
+          } >> "$GITHUB_ENV"
+
+      # ── browser deps (Chromium runtime libs on Linux) ──────────────────
+      - name: Playwright system deps (Linux)
+        if: runner.os == 'Linux'
+        run: just playwright-deps
+
+      - name: Harness tests
+        run: just harness-check
+
+      # Fail loudly if we've drifted off "latest": a committed lock file, a moq
+      # package that stopped being requested at latest, or a stale playwright pin.
+      - name: Freshness
+        run: just freshness
+
+      # ── run the full interop matrix ────────────────────────────────────
+      # Publishers: rust, python, go, and the three browser variants publish today;
+      # swift/kotlin/c/gst subscribe only. Go builds on Linux against the
+      # published moq-go module; gst resolves the latest moq-gst-v* release.
+      # Browser variants: js-web, js-esbuild (bundlers), js-jsdelivr (CDN).
+      # Swift needs the Xcode toolchain, so it's a macOS-only subscriber.
+      # --timeout 30 gives headless Chromium cold-start headroom.
+      - name: Smoke
+        run: |
+          browser="js-web,js-esbuild,js-jsdelivr"
+          # Both run moq's @moq/web-transport polyfill. node briefly failed on the
+          # polyfill's napi CJS named-import; fixed in @moq/web-transport 0.1.2.
+          native="js-node,js-bun"
+          # c / c-pkgconfig / c-cmake: same libmoq client built three ways, to
+          # exercise the moq.pc and CMake-package consumer paths, not just -I/-L.
+          subs="rust,python,go,kotlin,c,c-pkgconfig,c-cmake,gst,$browser,$native"
+          if [ "$RUNNER_OS" = "macOS" ]; then subs="$subs,swift"; fi
+          just smoke \
+            --publishers "rust,python,go,$browser" \
+            --subscribers "$subs" \
+            --timeout 30
+
+      - name: Upload browser failure diagnostics
+        if: ${{ !cancelled() && hashFiles('test/smoke/clients/js/artifacts/*') != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: browser-failures-${{ matrix.os }}-${{ matrix.channel }}
+          path: test/smoke/clients/js/artifacts/
+          if-no-files-found: error
+
+      # Quick proof the harness can actually report failure.
+      - name: Negative control
+        run: just negative --subscribers rust,python
+
+      # ── token interop ──────────────────────────────────────────────────
+      # Independent of the media matrix: prove the published token tooling
+      # cross-verifies. `moq auth` rides the same channel as moq-relay/moq
+      # (cargo/apt/brew/nix, on PATH or CLI_BIN); @moq/auth comes from npm and
+      # runs under both node and bun; rust-docker runs `auth` in the
+      # moqdev/moq image. The negative pass inside token.sh confirms each verifier rejects
+      # tampered tokens and the wrong key.
+      - name: Token interop
+        # Independent of the media matrix, so a red media cell mustn't hide it.
+        if: ${{ !cancelled() }}
+        run: |
+          # The `rust` impl runs a native `moq auth`, which only the
+          # cargo/apt/brew/nix channels install. The docker channel's moq wrapper
+          # doesn't mount the token lane's scratch dir, so it exercises the Rust
+          # verifier through the rust-docker cell instead of plain `rust`.
+          if [ "${{ matrix.channel }}" = "docker" ]; then
+            impls="js-node,js-bun,rust-docker"
+          else
+            impls="rust,js-node,js-bun"
+            # The Docker cell needs a daemon; GitHub's macOS runners have none, so
+            # it's Linux-only. (Docker is preinstalled on the Linux runners.)
+            if [ "$RUNNER_OS" = "Linux" ]; then impls="$impls,rust-docker"; fi
+          fi
+          just token --generators "$impls" --verifiers "$impls"
+
+  relays:
+    name: External relay interop
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      report: ${{ steps.report.outcome }}
+    # ~20 public endpoints x 2 publishers, each bounded by --timeout.
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/just
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: System deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg curl procps coreutils jq
+
+      # apt is the quickest channel to install; the relay binary isn't needed
+      # because every endpoint is remote.
+      - name: Install moq CLI (apt)
+        run: |
+          curl -fsSL https://apt.moq.dev/moq-keyring.gpg \
+            | sudo tee /usr/share/keyrings/moq-keyring.gpg > /dev/null
+          echo "deb [signed-by=/usr/share/keyrings/moq-keyring.gpg] https://apt.moq.dev stable main" \
+            | sudo tee /etc/apt/sources.list.d/moq.list
+          sudo apt-get update
+          sudo apt-get install -y moq-cli
+
+      - name: Playwright system deps
+        run: just playwright-deps
+
+      # The relay list comes live from the moq-interop-runner registry. Only
+      # moq-dev's own relay gates the job; every other endpoint lands in the job
+      # summary table as optional. Rust publishes and subscribes on every transport.
+      # js-web is the browser and js-bun is the WebTransport polyfill. Both run
+      # only on WebTransport. The polyfill has no raw-QUIC (moqt://) mode, so
+      # neither is listed on native QUIC or on the WebSocket column.
+      - name: External relay interop
+        run: just relays --publishers rust,js-web --subscribers rust,js-web,js-bun --timeout 30 --json results.json --logs logs
+
+      # The HTML report (report/index.html) at /relays/ on moq's GitHub Pages
+      # site. Built even when a required relay failed, since that's exactly the
+      # run worth looking at. History carries forward from the currently
+      # deployed site. A failed build uploads nothing, so a broken history never
+      # replaces the deployed one.
+      - name: Build report
+        id: report
+        if: ${{ !cancelled() && hashFiles('test/smoke/results.json') != '' }}
+        env:
+          HISTORY_URL: ${{ inputs.history_url }}
+        run: |
+          owner="${GITHUB_REPOSITORY%%/*}"
+          just report results.json logs _site "${HISTORY_URL:-https://${owner}.github.io/${GITHUB_REPOSITORY#*/}/relays/history.json}"
+
+      - name: Upload report
+        if: ${{ !cancelled() && steps.report.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: relay-report
+          path: test/smoke/_site/
+          if-no-files-found: error
+
+  # Publish the relay report from main only (nightly or on demand), never from a
+  # PR. moq has one Pages site, so this commits under relays/ on the gh-pages
+  # branch the nightly benchmark table and the interop report also write, then
+  # deploys that whole branch. Sharing nightly.yml's concurrency group, with every
+  # waiting writer queued, keeps the writers from racing the branch or each
+  # other's deploy.
+  relays-report:
+    name: Publish relay report
+    needs: relays
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && needs.relays.outputs.report == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: benchmark-pages
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      # Delete a Pages artifact left by an earlier run attempt or by this run's
+      # upstream runner report.
+      actions: write
+      contents: write
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # This job pushes the shared gh-pages branch.
+          persist-credentials: true
+
+      - uses: ./.github/actions/just
+
+      - name: Download report
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: relay-report
+          path: ${{ runner.temp }}/relay-report
+
+      - name: Commit report
+        run: just publish "$RUNNER_TEMP/relay-report" "$RUNNER_TEMP/pages"
+
+      - name: Drop a stale Pages artifact
+        working-directory: .
+        run: just gh pages-clean
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Upload site
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: ${{ runner.temp }}/pages
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+
+  cloudflare:
+    name: Cloudflare interoperability
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # Both projects are built from Git HEAD; the six runtime checks are quick.
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/just
+
+      # Both relays build from Git HEAD, so only the tip changes day to day. mbx
+      # (as in .github/actions/rust-cache) caches each compilation; `objects` mode because the
+      # checkouts land in fresh temp dirs. The shim routes the scripts' plain
+      # `cargo build` through it; without mise, setup only reports where the
+      # shim lives, so put that directory first on PATH (as moq's dev shell
+      # does). `--status` exits non-zero when there is no shim.
+      - uses: jdx/mr-boxington-action@47ce49b32025d93a7a2f4570815afaa2b7092240 # v1.7.2
+        with:
+          version: 1.17.0
+          github-cache-mode: objects
+          cache-key: ${{ runner.os }}-${{ runner.arch }}-mbx-objects-cloudflare-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-mbx-objects-cloudflare-
+      - name: Cargo shim
+        run: |
+          mbx setup --yes
+          shim=$(mbx setup --status | sed -n '1s/.*: //p')
+          [ -x "$shim" ]
+          dirname "$shim" >> "$GITHUB_PATH"
+
+      - name: Cloudflare interoperability
+        run: just cloudflare
+
+  moxygen:
+    name: Moxygen interoperability
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    # The published client image and moq-dev relay both follow Git HEAD. Building
+    # the Rust relay is the long pole; the 12 protocol cases are bounded and quick.
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/just
+
+      # Both relays build from Git HEAD, so only the tip changes day to day. mbx
+      # (as in .github/actions/rust-cache) caches each compilation; `objects` mode because the
+      # checkouts land in fresh temp dirs. The shim routes the scripts' plain
+      # `cargo build` through it; without mise, setup only reports where the
+      # shim lives, so put that directory first on PATH (as moq's dev shell
+      # does). `--status` exits non-zero when there is no shim.
+      - uses: jdx/mr-boxington-action@47ce49b32025d93a7a2f4570815afaa2b7092240 # v1.7.2
+        with:
+          version: 1.17.0
+          github-cache-mode: objects
+          cache-key: ${{ runner.os }}-${{ runner.arch }}-mbx-objects-moxygen-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-mbx-objects-moxygen-
+      - name: Cargo shim
+        run: |
+          mbx setup --yes
+          shim=$(mbx setup --status | sed -n '1s/.*: //p')
+          [ -x "$shim" ]
+          dirname "$shim" >> "$GITHUB_PATH"
+
+      - name: Moxygen interoperability
+        # Current moq-dev HEAD negotiates successfully but fails moxygen's
+        # announce-subscribe case. Keep the full diagnostic visible without
+        # failing the job; remove this once that protocol mismatch is fixed.
+        continue-on-error: true
+        run: just moxygen
+
+  interop-runner:
+    name: Upstream Docker interoperability
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    outputs:
+      report: ${{ steps.upload.outcome }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/just
+
+      - uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+
+      - name: Build this checkout's relay image
+        run: just runner-build
+
+      # Upstream follows its default branch. This job has no secrets and neither
+      # checkout persists credentials; its report is the only publishing input.
+      - name: Checkout upstream runner HEAD
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: englishm/moq-interop-runner
+          path: runner-upstream
+          persist-credentials: false
+
+      # Any failed pair or setup step fails the job. A complete run still writes
+      # its report first, since a failing run is the one worth looking at.
+      - name: Run upstream Docker matrices
+        run: just runner "$GITHUB_WORKSPACE/runner-upstream" "$GITHUB_WORKSPACE/interop-runner-report"
+
+      - name: Upload upstream report
+        id: upload
+        if: ${{ !cancelled() && hashFiles('interop-runner-report/index.html') != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: interop-runner-report
+          path: interop-runner-report/
+          if-no-files-found: error
+
+      - name: Upload runner diagnostics
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: interop-runner-diagnostics
+          path: runner-upstream/results
+          if-no-files-found: ignore
+
+  interop-runner-report:
+    name: Publish upstream runner report
+    needs: interop-runner
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && needs.interop-runner.outputs.report == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: benchmark-pages
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      # Delete a Pages artifact left by an earlier run attempt or by this run's
+      # relay report.
+      actions: write
+      contents: write
+      pages: write
+      id-token: write
+    defaults:
+      run:
+        working-directory: .
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: true
+
+      - uses: ./.github/actions/just
+
+      - name: Download upstream report
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: interop-runner-report
+          path: ${{ runner.temp }}/interop-runner-report
+
+      - name: Commit upstream report
+        run: just gh pages-publish interop-runner "$RUNNER_TEMP/interop-runner-report" "$RUNNER_TEMP/pages"
+
+      - name: Drop a stale Pages artifact
+        run: just gh pages-clean
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Upload site
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: ${{ runner.temp }}/pages
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

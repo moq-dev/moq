@@ -27,7 +27,9 @@ pub(crate) fn from_transport(error: impl crate::transport::Error) -> Error {
 }
 
 /// Classify control bytes at a stream boundary, keeping a transport FIN/reset distinct.
-pub(super) fn control<S: crate::transport::poll::Session>(session: &mut S, err: Error) -> Error {
+#[cfg(feature = "async")]
+pub(super) fn control(session: &mut crate::driver::Transport, err: Error) -> Error {
+	use crate::transport::poll::Session as _;
 	let err = match err {
 		Error::Decode(crate::DecodeError::Short) => err,
 		err => crate::auth::protocol_error(err),
@@ -46,6 +48,8 @@ mod tests {
 	fn an_unknown_code_does_not_gain_a_lite_meaning() {
 		assert_eq!(to_session_code(&SessionError::Unsupported), 0x30);
 		assert_eq!(from_session_code(0x30), SessionError::Unsupported);
+		assert_eq!(to_session_code(&SessionError::Expired), 0x18);
+		assert_eq!(from_session_code(0x18), SessionError::Expired);
 		for code in 0x30..=0x3f {
 			assert_eq!(to_session_code(&SessionError::Unknown(code)), 0x1);
 		}

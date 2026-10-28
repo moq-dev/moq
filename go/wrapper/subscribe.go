@@ -39,6 +39,11 @@ func (b *BroadcastConsumer) FetchGroup(
 	sequence uint64,
 	options *FetchGroupOptions,
 ) (*GroupConsumer, error) {
+	if options != nil {
+		if err := bridge.NonNegative(options.MaxDelay, "max delay"); err != nil {
+			return nil, err
+		}
+	}
 	inner, err := b.inner.FetchGroup(ctx, name, sequence, options)
 	if err != nil {
 		return nil, err
@@ -46,53 +51,27 @@ func (b *BroadcastConsumer) FetchGroup(
 	return &GroupConsumer{inner: inner}, nil
 }
 
-// Resolve returns the broadcast serving a catalog rendition, honoring its broadcast
-// reference: ffi.MoqVideo.Broadcast / ffi.MoqAudio.Broadcast. A nil or empty reference names this
-// broadcast, anything else names a sibling relative to it (e.g. "./source"). Call it on a
-// rendition that carries one before media.NewTrackConsumer, SubscribeTrack, FetchGroup, or
-// media.FetchGroup, which take a track name rather than a rendition: the
-// rendition's Track, or its catalog key when nil. DecodeAudio and DecodeVideo resolve both themselves.
+// Resolve returns the broadcast serving a catalog rendition, built with
+// media.VideoRendition or media.AudioRendition. The rendition's Broadcast reference, nil or
+// empty, names this broadcast; anything else names a sibling relative to it (e.g. "./source").
+// Its Epoch is the publisher instance the reference names: a broadcast proven to serve another
+// instance errors instead of resolving, and a route without an epoch cannot prove one, so there
+// it is best effort. Call it on a rendition that carries a reference before SubscribeTrack or
+// FetchGroup, which take a track name rather than a rendition: the rendition's Track, or its ID
+// when nil. The rendition-based media.NewTrackConsumer, media.FetchGroup, audio.Subscribe, and
+// video.Subscribe resolve it themselves.
 //
 // Errors if this broadcast came from a local producer rather than an origin, since a
 // standalone broadcast has no sibling to name.
-func (b *BroadcastConsumer) Resolve(ctx context.Context, reference *string) (*BroadcastConsumer, error) {
-	inner, err := b.inner.Resolve(ctx, reference)
+func (b *BroadcastConsumer) Resolve(ctx context.Context, rendition ffi.MoqRendition) (*BroadcastConsumer, error) {
+	if err := bridge.Rendition(rendition); err != nil {
+		return nil, err
+	}
+	inner, err := b.inner.Resolve(ctx, rendition)
 	if err != nil {
 		return nil, err
 	}
 	return &BroadcastConsumer{inner: inner}, nil
-}
-
-// DecodeAudio subscribes to a raw-audio track; samples come back in the
-// format declared by output. catalogAudio comes from the catalog.
-func (b *BroadcastConsumer) DecodeAudio(
-	ctx context.Context,
-	name string,
-	catalogAudio ffi.MoqAudio,
-	output AudioDecoderOutput,
-) (*AudioConsumer, error) {
-	inner, err := b.inner.DecodeAudio(ctx, name, catalogAudio, output)
-	if err != nil {
-		return nil, err
-	}
-	return &AudioConsumer{inner: inner}, nil
-}
-
-// DecodeVideo subscribes to a video track and decodes it inside the bindings.
-// catalogVideo comes from the catalog. output.Format picks the packed CPU layout
-// every frame arrives in, defaulting to I420 when nil; each frame repeats it.
-// output.Resize is best effort, so read each frame's own dimensions.
-func (b *BroadcastConsumer) DecodeVideo(
-	ctx context.Context,
-	name string,
-	catalogVideo ffi.MoqVideo,
-	output VideoDecoderOutput,
-) (*VideoConsumer, error) {
-	inner, err := b.inner.DecodeVideo(ctx, name, catalogVideo, output)
-	if err != nil {
-		return nil, err
-	}
-	return &VideoConsumer{inner: inner}, nil
 }
 
 // GroupConsumer is a stream of raw frames within a single group.
@@ -131,17 +110,7 @@ type TrackConsumer struct {
 // or (nil, nil) when the track ends. Prefer this for live, latency-sensitive
 // consumption.
 func (t *TrackConsumer) RecvGroup(ctx context.Context) (*GroupConsumer, error) {
-	res, err := bridge.CallHandle(ctx, t.inner.Cancel, func(ctx context.Context) (*ffi.MoqGroupConsumer, error) {
-		res, err := t.inner.RecvGroup(ctx)
-		if err != nil || res == nil {
-			return nil, err
-		}
-		return *res, nil
-	})
-	if err != nil || res == nil {
-		return nil, err
-	}
-	return &GroupConsumer{inner: res}, nil
+	return t.group(ctx, t.inner.RecvGroup)
 }
 
 // NextGroup returns the next group in sequence order, skipping forward if
@@ -149,8 +118,12 @@ func (t *TrackConsumer) RecvGroup(ctx context.Context) (*GroupConsumer, error) {
 // more than latency. Shares the sequence cursor with ReadFrame: a group one
 // method has already taken is not returned by the other.
 func (t *TrackConsumer) NextGroup(ctx context.Context) (*GroupConsumer, error) {
+	return t.group(ctx, t.inner.NextGroup)
+}
+
+func (t *TrackConsumer) group(ctx context.Context, next func(context.Context) (**ffi.MoqGroupConsumer, error)) (*GroupConsumer, error) {
 	res, err := bridge.CallHandle(ctx, t.inner.Cancel, func(ctx context.Context) (*ffi.MoqGroupConsumer, error) {
-		res, err := t.inner.NextGroup(ctx)
+		res, err := next(ctx)
 		if err != nil || res == nil {
 			return nil, err
 		}
@@ -180,23 +153,18 @@ func (t *TrackConsumer) RecvDatagram(ctx context.Context) (*Datagram, error) {
 }
 
 // Info returns the publisher-side track properties learned during subscription.
-func (t *TrackConsumer) Info() (TrackInfo, error) {
-	info, err := t.inner.Info()
-	if err != nil {
-		return TrackInfo{}, err
-	}
-	return trackInfoFromFFI(info), nil
+func (t *TrackConsumer) Info() TrackInfo {
+	return trackInfoFromFFI(t.inner.Info())
 }
 
-// Update changes this subscriber's delivery preferences. It fails only on a
-// negative MaxDelay.
+// Update changes this subscriber's delivery preferences. It fails on a
+// negative MaxDelay, or a time anchor the track can't serve.
 func (t *TrackConsumer) Update(subscription Subscription) error {
 	sub, err := subscription.ffi()
 	if err != nil {
 		return err
 	}
-	t.inner.Update(sub)
-	return nil
+	return t.inner.Update(sub)
 }
 
 // Groups ranges over groups in sequence order.
@@ -220,60 +188,9 @@ func (t *TrackConsumer) Cancel() {
 	t.inner.Cancel()
 }
 
-// AudioConsumer is a stream of decoded audio frames.
-type AudioConsumer struct {
-	inner *ffi.MoqAudioConsumer
-}
-
-// Next returns the next audio frame, or (nil, nil) when the track ends.
-func (a *AudioConsumer) Next(ctx context.Context) (*AudioFrame, error) {
-	return bridge.Call(ctx, a.inner.Cancel, a.inner.Next)
-}
-
-// All ranges over audio frames until the track ends or the loop breaks.
-func (a *AudioConsumer) All(ctx context.Context) iter.Seq2[*AudioFrame, error] {
-	return bridge.Seq(ctx, a.Next)
-}
-
-// Cancel stops the stream.
-func (a *AudioConsumer) Cancel() {
-	a.inner.Cancel()
-}
-
-// VideoConsumer is a stream of decoded video frames.
-type VideoConsumer struct {
-	inner *ffi.MoqVideoConsumer
-}
-
-// Next returns the next decoded frame, or (nil, nil) when the track ends.
-// Close each frame when done with it.
-func (v *VideoConsumer) Next(ctx context.Context) (*VideoDecodedFrame, error) {
-	res, err := bridge.CallHandle(ctx, v.inner.Cancel, func(ctx context.Context) (*ffi.MoqVideoDecodedFrame, error) {
-		res, err := v.inner.Next(ctx)
-		if err != nil || res == nil {
-			return nil, err
-		}
-		return *res, nil
-	})
-	if err != nil || res == nil {
-		return nil, err
-	}
-	return &VideoDecodedFrame{inner: res}, nil
-}
-
-// All ranges over decoded frames until the track ends or the loop breaks.
-func (v *VideoConsumer) All(ctx context.Context) iter.Seq2[*VideoDecodedFrame, error] {
-	return bridge.Seq(ctx, v.Next)
-}
-
-// Cancel stops the stream.
-func (v *VideoConsumer) Cancel() {
-	v.inner.Cancel()
-}
-
 // VideoDecodedFrame is one decoded video frame. It owns the decoder's surface
 // until Close, which returns it to the decoder: holding many frames stalls
-// decoding. It stays valid after its VideoConsumer is cancelled.
+// decoding. It stays valid after its video.Consumer is cancelled.
 type VideoDecodedFrame struct {
 	inner *ffi.MoqVideoDecodedFrame
 }
@@ -299,7 +216,7 @@ func (f *VideoDecodedFrame) Pixels(format VideoPixelFormat) ([]byte, error) {
 }
 
 // Surface borrows the decoder's surface, or returns nil when the frame is in CPU
-// memory. Only a DecodeVideo with VideoDecoderOutput.Surface set produces one,
+// memory. Only a video.Consumer with DecoderOutput.Surface set produces one,
 // and it stays valid until Close.
 func (f *VideoDecodedFrame) Surface() VideoSurface {
 	if surface := f.inner.Surface(); surface != nil {

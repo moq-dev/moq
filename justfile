@@ -14,7 +14,8 @@ mod kt
 mod swift
 mod go
 mod dart
-# The C++ package over moq-ffi.
+# The C and C++ packages over moq-ffi.
+mod c
 mod cpp
 # OBS Studio plugin (C++). See doc/bin/obs.md.
 mod obs 'cpp/obs'
@@ -29,6 +30,7 @@ mod drafts
 mod gh '.github'
 # Shortcuts to avoid `demo::` prefix.
 mod boy 'demo/boy'
+mod carla 'demo/carla'
 mod pub 'demo/pub'
 mod relay 'demo/relay'
 mod sub 'demo/sub'
@@ -46,9 +48,10 @@ dev:
 bench $BASE="":
     bench/run.sh "$BASE"
 
-# Benchmark the Rust, Go, Python, and Kotlin bindings against two Rust baselines.
-bench-ffi:
-    bench/ffi.sh
+# Compare admitted suites across checkouts and worker counts; see bench/README.md.
+[positional-arguments]
+bench-local *args:
+    python3 bench/local.py "$@"
 
 # Measure audio group sizes across relay publisher/subscriber and fanout shapes.
 bench-audio:
@@ -58,11 +61,23 @@ bench-audio:
 # io_uring workers; WORKERS defaults to every logical CPU.
 # Example: `just bench-runtime 5 16`.
 bench-runtime $ROUNDS="3" $WORKERS="":
-    MOQ_BENCH_RUNTIME_ROUNDS="$ROUNDS" MOQ_BENCH_RUNTIME_WORKERS="$WORKERS" bench/run.sh --runtime
+    BENCH_RUNTIME_ROUNDS="$ROUNDS" BENCH_RUNTIME_WORKERS="$WORKERS" bench/run.sh --runtime
 
-# Attribute relay worker std mutex waits by stack, for each worker count.
-bench-lock $WORKLOAD="fanout" $WORKERS="1 4 16":
-    MOQ_BENCH_LOCK_WORKLOAD="$WORKLOAD" MOQ_BENCH_LOCK_WORKERS="$WORKERS" bench/run.sh --lock
+# Sweep the relay's QUIC shard count against room and fanout connection counts;
+# 0 shards is the shared runtime. Example: `just bench-shard "0 1 8" "64 512"`.
+bench-shard $SHARDS="0 1 4 16" $CONNECTIONS="16 64 256":
+    BENCH_SHARD_COUNTS="$SHARDS" BENCH_SHARD_CONNECTIONS="$CONNECTIONS" bench/run.sh --shard
+
+# Profile the relay at each worker count: std mutex waits by stack (lock), CPU
+# stacks (cpu), or jemalloc heap and churn (heap). Example: `just bench-profile "cpu heap" fanout-heavy 4`.
+bench-profile $MODES $WORKLOAD="fanout" $WORKERS="1 4 16" $RUNTIME="tokio-workers" $BASE="":
+    BENCH_PROFILE_MODES="$MODES" BENCH_PROFILE_WORKLOAD="$WORKLOAD" BENCH_PROFILE_WORKERS="$WORKERS" BENCH_PROFILE_RUNTIME="$RUNTIME" BENCH_BASE="$BASE" bench/run.sh --profile
+
+# Real-browser transport, CMAF, and publish/watch costs, optionally against a base:
+# `just bench-browser origin/main`. `--smoke` is the bounded correctness lane.
+[positional-arguments]
+bench-browser *args:
+    bench/browser/run.sh "$@"
 
 # Install repo-wide tooling. Per-language deps install on first check.
 install:
@@ -79,20 +94,41 @@ install:
 check $BASE="":
     sh/dispatch.sh check "$BASE"
 
-# CI runs `check` as two parallel jobs, since one runner doing both takes about
-# the sum of their times. Same dispatch, with MOQ_STRICT=1.
+# The merge queue runs this gate in one job. The test build also enforces
+# default-feature clippy; selected feature extremes run in the gate, while
+# the full feature matrix and optimized bindings run nightly and on release
+# PRs. Missing tools fail under CI_STRICT.
 
-# Run half of `check` for CI: JOB `check` lints and compiles, `test` runs the tests.
-ci $JOB $BASE="":
-    sh/dispatch.sh "ci-$JOB" "$BASE"
+# Run the merge queue's Linux gate over the branch diff against BASE.
+ci $BASE="":
+    CI_STRICT=1 NEXTEST_PROFILE=ci sh/dispatch.sh ci "$BASE"
 
-# Report what a CI job (`check`, `test`, `platform`) selects, before installing the dev shell or build caches.
-ci-select $JOB $BASE="":
-    sh/dispatch.sh "ci-$JOB" "$BASE" --query
+# Run the queue's Linux gate over every package.
+gate:
+    just ci --all
+
+# Diff every published API against its last release: `just api-diff [--deny] [rust|js|ffi]...`.
+# `--deny` fails on any break, as backports into `release` must.
+[positional-arguments]
+api-diff *args:
+    sh/api-diff/run.sh "$@"
+
+# Report what CI selects before installing the dev shell or build caches.
+ci-select $BASE="":
+    sh/dispatch.sh ci "$BASE" --query
+
+# Report the native platform suites before installing their toolchains.
+ci-select-platform $BASE="":
+    sh/dispatch.sh ci-platform "$BASE" --query
 
 # Auto-fix lint and formatting for what the branch changed since BASE.
 fix $BASE="":
     sh/dispatch.sh fix "$BASE"
+
+# Build .oss-scanner/ with Anthropic's OSS Scanner tools/check: `just oss-scanner [REF] [REPO]`. REF must be pushed.
+[positional-arguments]
+oss-scanner *args:
+    sh/oss-scanner.sh "$@"
 
 # Build the packages.
 build:

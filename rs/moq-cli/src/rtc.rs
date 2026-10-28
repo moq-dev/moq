@@ -14,7 +14,7 @@ use crate::moq::{ImportTarget, notify_ready};
 
 /// WebRTC endpoint args: exactly one of `--connect` (WHIP/WHEP client) /
 /// `--listen` (WHIP/WHEP server). The parent direction picks WHIP vs WHEP.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[usage(group("rtc-mode", required))]
 pub struct Args {
@@ -61,6 +61,7 @@ pub async fn listen_import(target: ImportTarget, listen: Listen) -> anyhow::Resu
 	let mut config = server_config(&listen);
 	config.max_age = target.max_age;
 	config.bandwidth = target.bandwidth;
+	config.linger = target.linger;
 	let server = moq_rtc::Server::new(config);
 	serve(server.publish_router(publisher), "WHIP", listen).await
 }
@@ -108,7 +109,8 @@ pub async fn connect_import(target: ImportTarget, url: Url, epoch: moq_net::Epoc
 	config.max_age = target.max_age;
 	config.bandwidth = target.bandwidth;
 	let client = moq_rtc::Client::new(config);
-	Ok(client.subscribe(url, producer).await?)
+	client.subscribe(url, producer.broadcast().clone()).await?;
+	Ok(())
 }
 
 /// WHIP client: push a broadcast from the Origin to a remote (export).
@@ -124,7 +126,8 @@ pub async fn connect_export(origin: moq_net::origin::Consumer, url: Url, name: S
 	notify_ready();
 
 	let client = moq_rtc::Client::new(moq_rtc::client::Config::default());
-	Ok(client.publish(url, origin, &name).await?)
+	client.publish(url, origin, &name).await?;
+	Ok(())
 }
 
 fn server_config(listen: &Listen) -> moq_rtc::server::Config {

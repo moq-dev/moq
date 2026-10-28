@@ -2,61 +2,33 @@
 
 ## Goal
 
-A viewer seeks through a bounded archive and returns to live playback using the
-same timeline and group-range objects as an unbounded archive.
+A viewer seeks back by time and returns to live playback. A seek is a
+`Time(pts)` range, answered by the live broadcast's cache while the content is
+young enough, and otherwise by an archive broadcast that a host serves through
+`archive::Consumer` at a path the application gives the player.
 
 ## Plan
 
-The recording writer owns retention, deletion grace, checkpoint recovery, and
-restart cleanup. This quest consumes that contract and owns viewer seek and
-return-to-live behavior, not a second writer implementation.
+Retargeted 2026-10-17 with the [archive line](/quest/m1/archive/README.md):
+seeking uses time ranges, not timelines, and archives are found by the host,
+not through a catalog pointer. The 09-29 decisions that a recording is the
+broadcast at the source path, reached by falling through a live
+announcement, are superseded: moq-lite routing never falls through to a prefix
+route, so the archive lives at its own path.
 
-The player reads the archive timeline, FETCHes old groups through the normal
-miss chain, and splices back to SUBSCRIBE at the live edge without opening a
-second media format. Missing groups remain ordinary gaps.
+- Within the publisher's max age, the live broadcast's cache answers the seek.
+  Past it, the player subscribes to the archive broadcast with the same range
+  and splices back to the live broadcast at its live edge, without duplicated
+  or rewound playback. Missing groups remain ordinary gaps.
+- How the player learns the archive path is the application's choice; the
+  player API takes it as input.
+- Decided 2026-10-17: the player surface is `@moq/watch`. Rejected: a Rust
+  player first, which no consumer needs yet.
 
-An unbounded archive can continue the same segment numbering without rewriting
-objects retained from an earlier DVR window.
-
-Test seeks within the retained window, expiry during a seek, missing groups,
-restart recovery, and return to live without duplicated or rewound playback.
-Use the writer/reader fixtures; a retention defect is fixed in its owning layer.
-
-The reader evicts popped spans from its object cache, but a group it already
-served stays in `moq_net`'s track cache until the pool reclaims it. Decide
-whether expiry during a seek needs a group eviction API in `moq-net`.
-
-`moq-hls` reads a timeline from the catalog's own broadcast, and an
-`archive.replay` path only marks it non-durable. Decided (09-29): the exporter
-does not follow `replay`, and viewers don't address a separate replay
-broadcast. A recording is the broadcast. Since Wildcard (#4403) the archive
-serves the source path through the root claim, and a live announcement shadows it. So when live
-ends, `moq-hls` resolves the same name and falls through to the recording:
-playlists keep serving for rewind and for players finishing the last
-segments. The fall-through needs the recording to publish its catalog live,
-since `moq-hls` subscribes to it rather than FETCHing it. Decided (09-29):
-that republishing moves into `moq-archive`, so any host of the archive
-behind the root claim does it, not only `moq-cli`, as [Replay
-catalog](/quest/m1/archive/replay-catalog.md) now plans.
-
-During live, rewind needs no handover: a recorded broadcast's live timeline
-is durable, and every group it lists is promised available, so a seek past
-the live window FETCHes old groups through the normal miss chain down to the
-archive. A live HLS playlist stays capped to its window even for a durable
-timeline (decided 10-05), so an HLS seek past it needs the explicit
-`moq_hls::export::Config::history` listing. `moq-hls` gains
-no linger (the `hls-linger` quest was dropped, because an unannounced
-broadcast can't be FETCHed and a linger would only serve the cache). Test
-the handover: a live HLS session keeps its playlist URIs and media sequence
-numbers when the name moves from the live publisher to the archive, which
-announces a fresh epoch ([Replay
-catalog](/quest/m1/archive/replay-catalog.md)), so viewers follow a
-`Restart` rather than resume.
+Test seeks within the cache, past it into the archive, across a pruned start,
+over missing groups, and return to live.
 
 ## Required
 
-- [Replay catalog](/quest/m1/archive/replay-catalog.md) - the recording publishes its catalog live, so `moq-hls` finds it after the handover
-
-## Closes
-
-- [#2275](https://github.com/moq-dev/moq/issues/2275) - close this issue when the quest finishes
+- [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - the `Time(pts)` range a seek sends
+- [Archive time ranges](/quest/m2/archive-time-ranges.md) - the archive consumer resolves time ranges from its keys

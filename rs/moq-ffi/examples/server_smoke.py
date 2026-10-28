@@ -7,7 +7,7 @@ Usage:
 
     # Build the cdylib and generate the Python bindings.
     cargo build --release --package moq-ffi
-    cargo run --package uniffi-bindgen -- generate \
+    cargo run --package uniffi-bindgen --features cli -- generate \
         --library target/release/libmoq_ffi.so \
         --language python --out-dir target/py-bindings
 

@@ -26,7 +26,7 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::rc::Rc;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -42,6 +42,7 @@ use super::mode::Request;
 use super::portal;
 use super::pump::Geometry;
 use super::{Config, Stream};
+use crate::color::{Primaries, Range};
 use crate::frame::{DmaBuf, DmaBufFrame, DmaBufLayout, DmaBufPlane, DrmFormat, I420, Surface, wait_dma_buf_readable};
 use crate::{Color, Error, Size};
 
@@ -58,10 +59,6 @@ const FORMAT_TIMEOUT: Duration = Duration::from_secs(10);
 /// ScreenCaptureKit backend).
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 
-// Display sources share the implicit screen selection across demand reopens.
-// Explicit Portal sources instead own a separate grant for each selection.
-static DISPLAY: LazyLock<portal::Selection> = LazyLock::new(|| portal::Selection::new(portal::Kind::Screen));
-
 fn err(ctx: &str, e: impl std::fmt::Display) -> Error {
 	Error::Codec(anyhow::anyhow!("{ctx}: {e}"))
 }
@@ -69,8 +66,7 @@ fn err(ctx: &str, e: impl std::fmt::Display) -> Error {
 pub(super) mod camera;
 
 /// Open a system-picked screen or window and stream frames from a PipeWire thread.
-pub(super) async fn open(config: &Config, selection: Option<&portal::Selection>) -> Result<Stream, Error> {
-	let selection = selection.unwrap_or(&DISPLAY);
+pub(super) async fn open(config: &Config, selection: &portal::Selection) -> Result<Stream, Error> {
 	let (node_id, fd, session) = portal_negotiate(config.cursor, selection).await?;
 	start(
 		config,
@@ -128,7 +124,7 @@ async fn start(config: &Config, capture: Capture, session: Option<SessionGuard>)
 	let chan = FrameChannel::new();
 	let framerate = config
 		.framerate
-		.unwrap_or(crate::Rate::integer(DEFAULT_FRAMERATE))
+		.unwrap_or(crate::FrameRate::integer(DEFAULT_FRAMERATE))
 		.rounded();
 	let (geo_tx, geo_rx) = tokio::sync::oneshot::channel();
 	let (quit_tx, quit_rx) = pw::channel::channel::<()>();
@@ -179,7 +175,7 @@ async fn start(config: &Config, capture: Capture, session: Option<SessionGuard>)
 		_session: session,
 	};
 
-	let geo = match tokio::time::timeout(FORMAT_TIMEOUT, geo_rx).await {
+	let geo = match moq_clock::timeout(FORMAT_TIMEOUT, geo_rx).await {
 		Ok(Ok(result)) => result?,
 		Ok(Err(_)) => {
 			return Err(Error::Codec(anyhow::anyhow!(
@@ -194,7 +190,7 @@ async fn start(config: &Config, capture: Capture, session: Option<SessionGuard>)
 		}
 	};
 
-	let first = match tokio::time::timeout(FIRST_FRAME_TIMEOUT, chan.recv()).await {
+	let first = match moq_clock::timeout(FIRST_FRAME_TIMEOUT, chan.recv()).await {
 		Ok(Ok(Some(frame))) => frame,
 		Ok(Err(error)) => return Err(error),
 		Ok(Ok(None)) | Err(_) => {
@@ -979,7 +975,7 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					// The compositor reports 0/1 for a variable rate; only a real
 					// rate is worth forwarding to the encoder.
 					let fr = state.format.framerate();
-					let framerate = crate::Rate::new(fr.num, fr.denom).ok();
+					let framerate = crate::FrameRate::new(fr.num, fr.denom).ok();
 					let _ = tx.send(Ok(Geometry {
 						width,
 						height,
@@ -1402,21 +1398,19 @@ fn color_from_pipewire(range: u32, matrix: u32, size: Size) -> Result<Option<Col
 		return Ok(None);
 	}
 
-	let limited = match range {
-		spa::sys::SPA_VIDEO_COLOR_RANGE_UNKNOWN | spa::sys::SPA_VIDEO_COLOR_RANGE_16_235 => true,
-		spa::sys::SPA_VIDEO_COLOR_RANGE_0_255 => false,
+	let range = match range {
+		spa::sys::SPA_VIDEO_COLOR_RANGE_UNKNOWN | spa::sys::SPA_VIDEO_COLOR_RANGE_16_235 => Range::Limited,
+		spa::sys::SPA_VIDEO_COLOR_RANGE_0_255 => Range::Full,
 		_ => {
 			return Err(Error::Codec(anyhow::anyhow!(
 				"unsupported PipeWire YUV color range {range}"
 			)));
 		}
 	};
-	let bt709 = match matrix {
-		spa::sys::SPA_VIDEO_COLOR_MATRIX_UNKNOWN => {
-			matches!(Color::infer(size), Color::Bt709Limited | Color::Bt709Full)
-		}
-		spa::sys::SPA_VIDEO_COLOR_MATRIX_BT709 => true,
-		spa::sys::SPA_VIDEO_COLOR_MATRIX_BT601 => false,
+	let color = match matrix {
+		spa::sys::SPA_VIDEO_COLOR_MATRIX_UNKNOWN => Color::infer(size),
+		spa::sys::SPA_VIDEO_COLOR_MATRIX_BT709 => Color::BT709,
+		spa::sys::SPA_VIDEO_COLOR_MATRIX_BT601 => Color::BT601,
 		_ => {
 			return Err(Error::Codec(anyhow::anyhow!(
 				"unsupported PipeWire YUV color matrix {matrix}"
@@ -1424,12 +1418,7 @@ fn color_from_pipewire(range: u32, matrix: u32, size: Size) -> Result<Option<Col
 		}
 	};
 
-	Ok(Some(match (bt709, limited) {
-		(false, true) => Color::Bt601Limited,
-		(false, false) => Color::Bt601Full,
-		(true, true) => Color::Bt709Limited,
-		(true, false) => Color::Bt709Full,
-	}))
+	Ok(Some(color.with_range(range)))
 }
 
 /// `SPA_VIDEO_TRANSFER_BT2020_10` and `SPA_VIDEO_TRANSFER_BT601`, spelled out.
@@ -1444,14 +1433,16 @@ const SPA_VIDEO_TRANSFER_BT2020_10: spa::sys::spa_video_transfer_function = 13;
 const SPA_VIDEO_TRANSFER_BT601: spa::sys::spa_video_transfer_function = 16;
 
 fn validate_pipewire_description(kind: Kind, color: Color, primaries: u32, transfer: u32) -> Result<(), Error> {
-	let expected_primaries = match color {
-		Color::Bt601Limited | Color::Bt601Full => spa::sys::SPA_VIDEO_COLOR_PRIMARIES_SMPTE170M,
-		Color::Bt709Limited | Color::Bt709Full => spa::sys::SPA_VIDEO_COLOR_PRIMARIES_BT709,
+	// Only the SDR pairings are labelled: VA-API derives its whole VUI from
+	// the matrix, so a PQ, HLG or BT.2020 capture would be refused there.
+	let expected_primaries = match color.primaries {
+		Primaries::Smpte170m => spa::sys::SPA_VIDEO_COLOR_PRIMARIES_SMPTE170M,
+		_ => spa::sys::SPA_VIDEO_COLOR_PRIMARIES_BT709,
 	};
 	// UVC webcams describe their YUY2 as a BT.601 matrix with BT.709 primaries
-	// (an integrated USB webcam does, through spa-v4l2), a pairing `Color`
-	// cannot name. The matrix and range decide how the samples decode,
-	// so a camera keeps them and accepts either SDR primaries.
+	// (an integrated USB webcam does, through spa-v4l2). The matrix and range
+	// decide how the samples decode, and VA-API can only signal the classic
+	// pairings, so a camera keeps those and accepts either SDR primaries.
 	let primaries_match = primaries == spa::sys::SPA_VIDEO_COLOR_PRIMARIES_UNKNOWN
 		|| primaries == expected_primaries
 		|| (kind == Kind::Camera
@@ -1743,9 +1734,9 @@ mod tests {
 			1, 100, 2, 200, 3, 101, 4, 201, 99, 99, // row 0
 			5, 100, 6, 200, 7, 101, 8, 201, 99, 99, // row 1
 		];
-		let frame = convert(VideoFormat::YUY2, &data, layout, Some(Color::Bt601Limited)).unwrap();
+		let frame = convert(VideoFormat::YUY2, &data, layout, Some(Color::BT601)).unwrap();
 		assert_eq!(frame.y(), &[1, 2, 3, 4, 5, 6, 7, 8]);
-		assert_eq!(frame.color(), Some(Color::Bt601Limited));
+		assert_eq!(frame.color(), Some(Color::BT601));
 	}
 
 	/// An integrated USB webcam's description through spa-v4l2: a camera
@@ -1760,7 +1751,7 @@ mod tests {
 		format.set_transfer_function(spa::sys::SPA_VIDEO_TRANSFER_BT709);
 		assert_eq!(
 			pipewire_color(Kind::Camera, format, 640, 480).unwrap(),
-			Some(Color::Bt601Limited)
+			Some(Color::BT601)
 		);
 		assert!(pipewire_color(Kind::Screen, format, 640, 480).is_err());
 
@@ -1918,7 +1909,7 @@ mod tests {
 				size,
 			)
 			.unwrap(),
-			Some(Color::Bt601Full)
+			Some(Color::BT601.with_range(Range::Full))
 		);
 		assert_eq!(
 			color_from_pipewire(
@@ -1959,10 +1950,10 @@ mod tests {
 			VideoFormat::NV12,
 			&[16, 16, 16, 16, 16, 16, 16, 16, 128, 128, 128, 128],
 			layout,
-			Some(Color::Bt601Full),
+			Some(Color::BT601.with_range(Range::Full)),
 		)
 		.unwrap();
-		assert_eq!(frame.color(), Some(Color::Bt601Full));
+		assert_eq!(frame.color(), Some(Color::BT601.with_range(Range::Full)));
 	}
 
 	#[test]
@@ -1970,17 +1961,17 @@ mod tests {
 		let geometry = Some((1920, 1080));
 		assert!(!format_requires_restart(
 			geometry,
-			Some(Color::Bt709Limited),
+			Some(Color::BT709),
 			1920,
 			1080,
-			Some(Color::Bt709Limited),
+			Some(Color::BT709),
 		));
 		assert!(format_requires_restart(
 			geometry,
-			Some(Color::Bt709Limited),
+			Some(Color::BT709),
 			1920,
 			1080,
-			Some(Color::Bt709Full),
+			Some(Color::BT709.with_range(Range::Full)),
 		));
 	}
 
@@ -2121,7 +2112,7 @@ mod tests {
 			},
 			format: DrmFormat::NV12,
 			modifier: 0,
-			color: Some(Color::Bt709Full),
+			color: Some(Color::BT709.with_range(Range::Full)),
 		});
 		let frame = DmaBuf::adopt(
 			DmaBufLayout {
@@ -2129,7 +2120,7 @@ mod tests {
 				modifier: 0,
 				size: Size::new(2, 2),
 				planes: vec![DmaBufPlane::new(0, 2), DmaBufPlane::new(4, 2)],
-				color: Some(Color::Bt709Full),
+				color: Some(Color::BT709.with_range(Range::Full)),
 			},
 			inner,
 		)
@@ -2138,7 +2129,10 @@ mod tests {
 		assert_eq!(frame.modifier(), 0);
 		assert_eq!((frame.width(), frame.height()), (2, 2));
 		assert_eq!(frame.planes()[1], DmaBufPlane::new(4, 2));
-		assert_eq!(Surface::DmaBuf(frame.clone()).color(), Some(Color::Bt709Full));
+		assert_eq!(
+			Surface::DmaBuf(frame.clone()).color(),
+			Some(Color::BT709.with_range(Range::Full))
+		);
 		let export = frame.export().expect("exported fd");
 		let clone = frame.clone();
 
@@ -2177,9 +2171,9 @@ mod tests {
 	/// needs a desktop session, PipeWire, and a human clicking the picker dialog:
 	/// `cargo test -p moq-video --features pipewire portal_capture -- --ignored`.
 	#[tokio::test]
-	#[ignore]
+	#[ignore = "needs a desktop portal and a human at the picker; see quest/m3/video-hardware.md"]
 	async fn portal_captures_frames() {
-		let mut stream = match open(&Config::default(), None).await {
+		let mut stream = match open(&Config::default(), &portal::Selection::new(portal::Kind::Screen)).await {
 			Ok(stream) => stream,
 			Err(e) => {
 				eprintln!("skipping: no portal screen capture available: {e}");

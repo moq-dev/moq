@@ -24,12 +24,14 @@ hang = { workspace = true }
 humantime = { workspace = true }
 kio = { workspace = true }
 m3u8-rs = "6"
-moq-json = { workspace = true }
+moq-clock = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 percent-encoding = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true, features = ["rustls", "gzip"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
@@ -37,9 +39,14 @@ tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
-async-trait = "0.1"
+async-trait = { workspace = true }
 futures = { workspace = true }
 moq-archive = { path = "../moq-archive" }
-moq-tokio = { path = "../moq-tokio", default-features = false, features = ["tcp", "noq", "aws-lc-rs"] }
+moq-json = { path = "../moq-json" }
+moq-tokio = { path = "../moq-tokio", default-features = false, features = ["tcp", "quic", "aws-lc-rs"] }
 tokio = { workspace = true, features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
+tracing-test = { workspace = true, features = ["no-env-filter"] }
+
+[lints]
+workspace = true

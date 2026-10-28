@@ -1,6 +1,7 @@
+import type { Milli } from "@moq/clock";
 import type { Container } from "@moq/hang";
 import type * as Moq from "@moq/net";
-import { Error as NetError, type Time } from "@moq/net";
+import { Error as NetError } from "@moq/net";
 import type { Effect, Getter } from "@moq/signals";
 
 /**
@@ -14,7 +15,7 @@ export function subscribeMedia(
 		broadcast: Moq.Broadcast.Consumer;
 		track: string;
 		priority: number;
-		maxDelay: Getter<Time.Milli>;
+		maxDelay: Getter<Milli>;
 	},
 ): Moq.Track.Subscriber | undefined {
 	if (effect.get(props.broadcast.closed) !== undefined) return;

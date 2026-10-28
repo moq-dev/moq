@@ -1,7 +1,7 @@
+import { Micro, Milli, type Second } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import type * as Moq from "@moq/net";
-import { Time } from "@moq/net";
 import {
 	type Computed,
 	Effect,
@@ -15,7 +15,7 @@ import {
 } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 import { errors } from "../internal";
-import { type Baseline, Estimator } from "../jitter";
+import { Estimator, type Order } from "../order";
 import { hardwareReliable } from "../support/video";
 import type { Capture } from "./capture";
 import { normalizeSource, type Source } from "./types";
@@ -35,35 +35,46 @@ export interface Stats {
 // TODO support signals?
 /** Encoder tuning knobs. All optional; the encoder auto-sizes anything left unset. */
 export interface Config {
-	// If not provided, the encoder will select the best codec.
+	/** If not provided, the encoder will select the best codec. */
 	codec?: string;
 
-	// Constrain the encoded width/height in pixels. If unset, source width.max and height.max
-	// constraints provide the cap when both are present; otherwise screens default to logical pixels.
+	/**
+	 * Constrain the encoded width/height in pixels. If unset, source width.max and height.max
+	 * constraints provide the cap when both are present; otherwise screens default to logical pixels.
+	 */
 	maxPixels?: number;
 
-	// Cap the encoded resolution to this fraction of the source pixel count.
-	// For example 0.25 yields a quarter of the pixels (half the width and height),
-	// scaling with the source instead of assuming a fixed resolution.
-	// When combined with maxPixels, the smaller resulting cap wins.
+	/**
+	 * Cap the encoded resolution to this fraction of the source pixel count.
+	 * For example 0.25 yields a quarter of the pixels (half the width and height),
+	 * scaling with the source instead of assuming a fixed resolution.
+	 * When combined with maxPixels, the smaller resulting cap wins.
+	 */
 	maxScale?: number;
 
-	// The interval at which to insert keyframes. (default: 2000 milliseconds)
-	keyframeInterval?: Time.Milli;
+	/**
+	 * The longest interval between keyframes. A joining subscriber forces one sooner once the
+	 * group's deltas outweigh the track's refresh ratio. (default: 2000 milliseconds)
+	 */
+	keyframeInterval?: Milli;
 
-	// If not provided, the encoder will use the best bitrate for the given width, height, and framerate.
+	/** If not provided, the encoder will use the best bitrate for the given width, height, and framerate. */
 	maxBitrate?: number;
 
-	// Multiply the number of pixels by this value to get the bitrate. (default: 0.07)
-	// NOTE: This is multiplied by the codecScale (1.0 for h264) to get the final scale.
+	/**
+	 * Multiply the number of pixels by this value to get the bitrate. (default: 0.07)
+	 * NOTE: This is multiplied by the codecScale (1.0 for h264) to get the final scale.
+	 */
 	bitrateScale?: number;
 
-	// Cap the encoded frame rate. If set below the captured rate, frames are dropped to hit this target.
-	// Also feeds the bitrate calculation and the encoder config. If unset, the captured track's rate is used.
+	/**
+	 * Cap the encoded frame rate. If set below the captured rate, frames are dropped to hit this target.
+	 * Also feeds the bitrate calculation and the encoder config. If unset, the captured track's rate is used.
+	 */
 	frameRate?: number;
 }
 
-// Signals the encoder reads.
+/** Signals the encoder reads. */
 export type EncoderInput = {
 	// Whether to encode this rendition. Defaults to true. When false it stops encoding but stays in the
 	// catalog with `enabled: false` and its last config, and stays registered so a subscriber still gets
@@ -88,7 +99,8 @@ export type EncoderProps = Inputs<EncoderInput> & {
 	config?: Config | Signal<Config | undefined>;
 };
 
-type EncoderOutput = {
+/** Signals the encoder derives. */
+export type EncoderOutput = {
 	/** The encoder failure, cleared only by a new capture source or format, or new encoder settings. */
 	error: Signal<Error | undefined>;
 	// The catalog config published for this rendition, `enabled: false` while disabled, or undefined
@@ -118,6 +130,7 @@ export class Encoder {
 	/** The full track name of this rendition, e.g. `"video/hd"`. */
 	readonly name: string;
 
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<EncoderInput>;
 
 	/** The live-editable encoder tuning knobs (codec, dimensions, bitrate, frame rate). */
@@ -140,6 +153,7 @@ export class Encoder {
 		active: new Signal<boolean>(false),
 		stats: new Signal<Stats>({ frames: 0, bytes: 0, keyframes: 0 }),
 	};
+	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
 
 	// The output dimensions of the video in pixels.
@@ -191,7 +205,7 @@ export class Encoder {
 	};
 	#signals = new Effect();
 	#estimator = new Estimator();
-	// The estimator's jitter and delay, republished whenever either rises.
+	// The estimator's delay, republished whenever it rises.
 	#estimate = new Signal<Estimator["estimate"]>({});
 	// What this rendition advertised on each broadcast, keyed by the broadcast or, for a local preview,
 	// the encoder. A broadcast keeps a rendition's track when it re-registers, so returning to one
@@ -332,7 +346,7 @@ export class Encoder {
 			effect.set(this.#out.active, enabled && !!track && !error, false);
 			if (!enabled || !track || error) return;
 
-			this.#encode(track, broadcast.baseline, effect);
+			this.#encode(track, broadcast.order, effect);
 		});
 
 		// Reserve against the connection for as long as this track is live. Wait
@@ -363,22 +377,40 @@ export class Encoder {
 	}
 
 	// Encode captured frames into the track producer, reconfiguring when the resolved config changes.
-	#encode(track: Moq.Track.Producer, baseline: Baseline, effect: Effect): void {
+	#encode(track: Moq.Track.Producer, order: Order, effect: Effect): void {
 		const capture = effect.get(this.in.capture);
 		if (!capture) return;
 
 		const producer = new Container.Legacy.Producer(track, new Container.Legacy.Format("video"));
+		const demand = track.demand();
 
-		let lastKeyframe: Time.Micro | undefined;
-		let lastEncoded: Time.Micro | undefined;
+		let lastKeyframe: Micro | undefined;
+		let lastEncoded: Micro | undefined;
+		// The catalog declares no reordering, so each chunk must present after the one before it.
+		let lastOutput: number | undefined;
+		// The largest group demand asked for that a keyframe already answers. A join over the refresh
+		// ratio asks for one past the largest, which the next frame opens.
+		let answered: number | undefined;
+		const answer = () => {
+			const wanted = demand.wanted.peek();
+			if (wanted !== undefined) answered = Math.max(answered ?? 0, wanted);
+		};
 		let tearingDown = false;
 
 		effect.spawn(async () => {
 			const encoder = new VideoEncoder({
 				output: (frame: EncodedVideoChunk) => {
+					if (lastOutput !== undefined && frame.timestamp <= lastOutput) {
+						this.#abort(
+							new Error(`encoder reordered a frame at ${frame.timestamp}us behind ${lastOutput}us`),
+							track,
+						);
+						return;
+					}
+					lastOutput = frame.timestamp;
 					const key = frame.type === "key";
 					if (key) {
-						lastKeyframe = frame.timestamp as Time.Micro;
+						lastKeyframe = frame.timestamp as Micro;
 					}
 
 					this.#out.stats.update((stats) => ({
@@ -387,8 +419,10 @@ export class Encoder {
 						keyframes: key ? stats.keyframes + 1 : stats.keyframes,
 					}));
 
-					producer.encode(frame, frame.timestamp as Time.Micro, key);
-					if (this.#estimator.flush(frame.timestamp, baseline)) {
+					producer.encode(frame, frame.timestamp as Micro, key);
+					// Including a keyframe the encoder placed on its own, which opened a group too.
+					if (key) answer();
+					if (this.#estimator.write(frame.timestamp, order)) {
 						this.#estimate.set({ ...this.#estimator.estimate });
 					}
 				},
@@ -426,7 +460,8 @@ export class Encoder {
 				if (!fanout) return;
 
 				// Our own stream off the shared capture, so the preview or another rendition reading
-				// slowly can't take frames from this one.
+				// slowly can't take frames from this one. Teardown ends a pending read by cancelling it;
+				// racing the read against teardown would drop a frame that had already resolved, unclosed.
 				const reader = fanout.subscribe(effect).getReader();
 				effect.cleanup(() => {
 					reader.cancel().catch(() => {});
@@ -434,13 +469,17 @@ export class Encoder {
 
 				effect.spawn(async () => {
 					for (;;) {
-						const next = await effect.race(reader.read());
-						if (!next?.value) break;
+						const { value: frame } = await reader.read();
+						if (!frame) break;
 
 						// Ours now: every path below has to close it.
-						const frame = next.value;
 						try {
+							if (effect.abort.aborted) break;
 							if (encoder.state !== "configured") continue;
+							// A pending input means the codec is saturated. Keep capture live instead of
+							// growing a stale encode queue whose lateness becomes permanent catalog delay.
+							// Drop before answering a keyframe request or advancing the frame-rate cursor.
+							if (encoder.encodeQueueSize > 0) continue;
 
 							// This doesn't need to be reactive.
 							const config = this.config.peek();
@@ -449,27 +488,34 @@ export class Encoder {
 							// Allow half an interval of slack so jittery capture timestamps don't drop
 							// a frame we meant to keep.
 							const targetFrameRate = config?.frameRate;
+							// A repeated timestamp would present with the frame before it, which no reordering
+							// declared allows; a backward one still fails the track at output.
+							if (frame.timestamp === lastEncoded) continue;
 							if (targetFrameRate && lastEncoded !== undefined) {
-								const minGap = Time.Micro.fromSecond((1 / targetFrameRate) as Time.Second);
+								const minGap = Micro.fromSecond((1 / targetFrameRate) as Second);
 								if (frame.timestamp - lastEncoded < minGap - minGap / 2) continue;
 							}
-							lastEncoded = frame.timestamp as Time.Micro;
+							lastEncoded = frame.timestamp as Micro;
 
-							const interval = config?.keyframeInterval ?? Time.Milli.fromSecond(2 as Time.Second);
+							const interval = config?.keyframeInterval ?? Milli.fromSecond(2 as Second);
 
-							// Force a keyframe if this is the first frame (no group yet), the GOP elapsed, or
-							// the caller asked for one and the last is old enough.
+							// Force a keyframe if this is the first frame (no group yet), the GOP elapsed, the
+							// caller asked for one, or a join wants a group past the largest. No spacing: the
+							// refresh ratio already rate-limits joins by the bytes a group holds.
 							const since = lastKeyframe === undefined ? undefined : frame.timestamp - lastKeyframe;
+							const wanted = demand.wanted.peek();
 							const keyFrame =
 								resized ||
 								since === undefined ||
-								since >= Time.Micro.fromMilli(interval) ||
-								(this.#cut && since >= Time.Micro.fromMilli(MIN_CUT_INTERVAL));
+								since >= Micro.fromMilli(interval) ||
+								this.#cut ||
+								(wanted !== undefined && (answered === undefined || wanted > answered));
 							if (keyFrame) {
-								lastKeyframe = frame.timestamp as Time.Micro;
+								lastKeyframe = frame.timestamp as Micro;
 								resized = false;
-								// Any keyframe serves an outstanding request.
+								// Any keyframe serves an outstanding request and every join before it.
 								this.#cut = false;
+								answer();
 							}
 
 							encoder.encode(frame, { keyFrame });
@@ -498,7 +544,7 @@ export class Encoder {
 					track.closed.peek() === undefined
 				) {
 					// One frame interval after the last picture, in whole microseconds like any VideoFrame.
-					const interval = Time.Micro.fromSecond((1 / (config.framerate ?? 30)) as Time.Second);
+					const interval = Micro.fromSecond((1 / (config.framerate ?? 30)) as Second);
 					const frame = black(config, Math.round(lastEncoded + interval));
 					try {
 						encoder.encode(frame, { keyFrame: true });
@@ -510,6 +556,9 @@ export class Encoder {
 				}
 			} finally {
 				if (encoder.state !== "closed") encoder.close();
+				// A stopped rendition stops holding the others' delay back. Not a cleanup: the black
+				// keyframe above is written after one would run, and would seat this rendition again.
+				order.leave(this.#estimator);
 				// The broadcast owns this static track across demand gaps. Close the current group, marking
 				// the break so a later subscriber resumes on the same track without the pre-gap group reading
 				// as live. A fatal encoder error aborts the track instead.
@@ -523,7 +572,7 @@ export class Encoder {
 		const cause = error instanceof Error ? error : new Error(String(error));
 		this.#failure.peek().set(cause);
 		this.#out.error.set(cause);
-		track.close(cause);
+		track.abort(cause);
 	}
 
 	// Publishes the catalog for the probe: its codec string, the coded-size ceiling, and the bitrate and
@@ -556,6 +605,8 @@ export class Encoder {
 			codedWidth: Catalog.u53(config.width),
 			codedHeight: Catalog.u53(config.height),
 			optimizeForLatency: true,
+			// Realtime WebCodecs encoders emit no B-frames; the output callback refuses one that does.
+			reorder: Catalog.u8(0),
 			container: { kind: "legacy" } as const,
 			...estimate,
 		};
@@ -649,7 +700,7 @@ export class Encoder {
 		const reservation = effect.get(this.#reservation);
 		if (reservation) {
 			const grant = reservation.peek();
-			effect.get(reservation.grant);
+			effect.get(reservation.rate);
 			if (grant != null) bitrate = Math.min(bitrate, grant);
 		}
 
@@ -788,7 +839,7 @@ export class Encoder {
 				latencyMode: "realtime",
 				hardwareAcceleration,
 				avc: codec.startsWith("avc1") ? { format: "annexb" } : undefined,
-				// @ts-expect-error Typescript needs to be updated.
+				// @ts-expect-error TypeScript's DOM lib lacks the HEVC codec registration's `hevc` config.
 				hevc: codec.startsWith("hev1") ? { format: "annexb" } : undefined,
 			};
 
@@ -803,22 +854,20 @@ export class Encoder {
 	 * Request a keyframe, opening a new group at a frame no earlier than this call.
 	 *
 	 * For a resume, a recording cut, or a known tune-in moment; {@link Config.keyframeInterval} is the
-	 * cadence. Requests coalesce into the next keyframe, and forced keyframes land at least 500ms
-	 * apart so a caller in a loop cannot pin the encoder at all-keyframe. A request while not encoding
-	 * is served by the keyframe every encode starts with.
+	 * longest a group runs, and a joining subscriber already opens one through the track's refresh
+	 * ratio. Requests between two frames coalesce into one keyframe on the next, with no spacing: a
+	 * caller in a loop pins the encoder at all-keyframe. A request while not encoding is served by the
+	 * keyframe every encode starts with.
 	 */
 	cut(): void {
 		this.#cut = true;
 	}
 
+	/** Stop and release everything this holds. */
 	close() {
 		this.#signals.close();
 	}
 }
-
-// The closest two requested keyframes may land. A keyframe costs several times a predicted frame,
-// and this stays well under the default two-second GOP so a request still beats the cadence.
-const MIN_CUT_INTERVAL = 500 as Time.Milli;
 
 // The source's nominal frame rate: what the capture device settled on, or what a frame stream
 // declared. Undefined when nothing reports one.

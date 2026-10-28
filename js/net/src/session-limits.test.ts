@@ -1,166 +1,20 @@
 import { expect, spyOn, test } from "bun:test";
 import { SessionCode, SessionError } from "./error.ts";
-import { HopSchema, randomHop } from "./hop.ts";
-import { NativeSession } from "./ietf/adapter.ts";
-import { Fetch as IetfFetch } from "./ietf/fetch.ts";
-import { Publisher as IetfPublisher } from "./ietf/publisher.ts";
+import { HopSchema } from "./hop.ts";
 import { RequestOk } from "./ietf/request.ts";
-import { Subscribe as IetfSubscribe } from "./ietf/subscribe.ts";
 import { SubscribeNamespaceEntry } from "./ietf/subscribe_namespace.ts";
 import { Subscriber as IetfSubscriber } from "./ietf/subscriber.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
 import { AnnounceOk, encodeAnnounceBroadcast } from "./lite/announce.ts";
-import { Fetch as LiteFetch } from "./lite/fetch.ts";
-import { Publisher as LitePublisher } from "./lite/publisher.ts";
-import { Subscribe as LiteSubscribe } from "./lite/subscribe.ts";
 import { Subscriber as LiteSubscriber } from "./lite/subscriber.ts";
 import { Version as LiteVersion } from "./lite/version.ts";
 import { createMockTransportPair } from "./mock.ts";
-import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Stream, Writer } from "./stream.ts";
-import { Timescale } from "./time.ts";
 import type { Limits } from "./util/limits.ts";
-import { wireOf } from "./wire.ts";
 
-// Small caps keep each case fast; util/limits.test.ts pins the real defaults.
-const limits: Limits = { announces: 8, subscriptions: 4, fetches: 4 };
-
-// A publisher serving one announced broadcast whose tracks are never accepted, so every
-// subscription stays live, waiting on the track, without timers or media. With `track`, the
-// "video" track exists but never produces a group, so a FETCH waits on the group instead.
-function pendingPublisher(protocol: "lite" | "ietf", options: { track?: boolean } = {}) {
-	const pair = createMockTransportPair();
-	const closing = spyOn(pair.server, "close");
-	const quiet = [
-		spyOn(console, "warn").mockImplementation(() => {}),
-		spyOn(console, "debug").mockImplementation(() => {}),
-	];
-	const origin = new OriginProducer();
-	const path = Path.from("test");
-	const broadcast = origin.createBroadcast(path);
-	broadcast.announce();
-	if (options.track) broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	// Serve tracks on demand, then never answer the request.
-	void wireOf(broadcast).requested();
-	const version = protocol === "lite" ? LiteVersion.DRAFT_06 : IetfVersion.DRAFT_22;
-	const publisher =
-		protocol === "lite"
-			? new LitePublisher(pair.server, LiteVersion.DRAFT_06, randomHop(), origin.consume(), undefined, limits)
-			: new IetfPublisher({
-					quic: pair.server,
-					session: new NativeSession(pair.server, IetfVersion.DRAFT_22, false),
-					publish: origin.consume(),
-					requiresSolicitation: false,
-					limits,
-				});
-	const pending: Promise<void>[] = [];
-	let draining = false;
-	const writes: (() => void)[] = [];
-
-	// Subscribe once, returning a cancel that resets the requester's half.
-	const subscribe = (id: number): (() => void) => {
-		let requester!: ReadableStreamDefaultController<Uint8Array>;
-		const stream = new Stream({
-			version,
-			readable: new ReadableStream<Uint8Array>({
-				start(controller) {
-					requester = controller;
-				},
-			}),
-			writable: new WritableStream<Uint8Array>(),
-		});
-		const request =
-			publisher instanceof LitePublisher
-				? publisher.runSubscribe(
-						new LiteSubscribe({ id: BigInt(id), broadcast: path, track: "video", priority: 0 }),
-						stream,
-					)
-				: publisher.runSubscribe(
-						new IetfSubscribe({
-							requestId: BigInt(id * 2),
-							trackNamespace: path,
-							trackName: "video",
-							subscriberPriority: 0,
-						}),
-						stream,
-					);
-		pending.push(request.catch(() => {}));
-		return () => requester.error(new Error("cancelled"));
-	};
-
-	// Each wire request has its own slot even when its track and group are identical.
-	const fetch = (id: number): (() => void) => {
-		let requester!: ReadableStreamDefaultController<Uint8Array>;
-		const stream = new Stream({
-			version,
-			readable: new ReadableStream<Uint8Array>({
-				start(controller) {
-					requester = controller;
-				},
-			}),
-			writable: new WritableStream<Uint8Array>({
-				write() {
-					if (draining) return;
-					return new Promise<void>((resolve) => writes.push(resolve));
-				},
-			}),
-		});
-		const request =
-			publisher instanceof LitePublisher
-				? publisher.runFetch(new LiteFetch({ broadcast: path, track: "video", group: 0, priority: 0 }), stream)
-				: publisher.runFetch(new IetfFetch({ requestId: BigInt(id * 2) }), stream);
-		pending.push(request.catch(() => {}));
-		return () => requester.error(new Error("cancelled"));
-	};
-
-	const close = async () => {
-		draining = true;
-		for (const release of writes) release();
-		broadcast.close();
-		origin.close();
-		await Promise.all(pending);
-		publisher.close();
-		pair.client.close();
-		pair.server.close();
-		closing.mockRestore();
-		for (const spy of quiet) spy.mockRestore();
-	};
-
-	return { closing, pending, subscribe, fetch, close };
-}
-
-test.each(["lite", "ietf"] as const)("%s refuses the first subscription beyond the session cap", async (protocol) => {
-	const session = pendingPublisher(protocol);
-	try {
-		for (let id = 0; id < limits.subscriptions; id++) session.subscribe(id);
-		expect(session.closing).not.toHaveBeenCalled();
-		session.subscribe(limits.subscriptions);
-		expect(session.closing).toHaveBeenCalledTimes(1);
-		expect(session.closing.mock.calls[0]?.[0]?.closeCode).toBe(SessionCode.TooManyRequests);
-	} finally {
-		await session.close();
-	}
-});
-
-test.each(["lite", "ietf"] as const)(
-	"%s releases subscriptions cancelled before the track is answered",
-	async (protocol) => {
-		const session = pendingPublisher(protocol);
-		try {
-			const cancels = [];
-			for (let id = 0; id < limits.subscriptions; id++) cancels.push(session.subscribe(id));
-			for (const cancel of cancels) cancel();
-			// Every cancelled request ends without the track ever being answered.
-			await Promise.all(session.pending);
-
-			session.subscribe(limits.subscriptions);
-			expect(session.closing).not.toHaveBeenCalled();
-		} finally {
-			await session.close();
-		}
-	},
-);
+// Small caps keep each case fast.
+const limits: Limits = { announces: 8 };
 
 test.each(["lite", "ietf"] as const)("%s closes on the first advertisement beyond its cap", async (protocol) => {
 	const pair = createMockTransportPair();
@@ -223,8 +77,9 @@ test.each(["lite", "ietf"] as const)("%s closes on the first advertisement beyon
 					quic: pair.server,
 					session: {
 						version: IetfVersion.DRAFT_22,
+						client: false,
 						nextRequestId: async () => 0n,
-						spendRequest: () => {},
+						checkRequestId: () => {},
 						openBi: async () => new Stream({ version, readable, writable }),
 						acceptBi: async () => undefined,
 						close: () => pair.server.close(),
@@ -244,37 +99,5 @@ test.each(["lite", "ietf"] as const)("%s closes on the first advertisement beyon
 		closing.mockRestore();
 		warnings.mockRestore();
 		debug.mockRestore();
-	}
-});
-
-test.each(["lite", "ietf"] as const)("%s caps each FETCH before shared lookup", async (protocol) => {
-	const session = pendingPublisher(protocol);
-	try {
-		for (let id = 0; id < limits.fetches; id++) session.fetch(id);
-		expect(session.closing).not.toHaveBeenCalled();
-		session.fetch(limits.fetches);
-		expect(session.closing).toHaveBeenCalledTimes(1);
-		expect(session.closing.mock.calls[0]?.[0]?.closeCode).toBe(SessionCode.TooManyRequests);
-	} finally {
-		await session.close();
-	}
-});
-
-test.each([
-	["an unanswered", false],
-	["a missing group's", true],
-] as const)("lite returns FETCH slots when %s requester leaves", async (_, track) => {
-	const session = pendingPublisher("lite", { track });
-	try {
-		for (let round = 0; round < 3; round++) {
-			const cancels = Array.from({ length: limits.fetches }, (_, id) => session.fetch(id));
-			// Let each lookup settle into its wait first: the track's answer, or a group that never comes.
-			await new Promise((resolve) => setTimeout(resolve, 0));
-			for (const cancel of cancels) cancel();
-			await Promise.all(session.pending);
-			expect(session.closing).not.toHaveBeenCalled();
-		}
-	} finally {
-		await session.close();
 	}
 });

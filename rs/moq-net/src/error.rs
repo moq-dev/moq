@@ -26,6 +26,10 @@ pub enum SessionError {
 	#[error("unauthorized")]
 	Unauthorized,
 
+	/// The peer's token has expired. Retrying with refreshed credentials may succeed.
+	#[error("authorization token expired")]
+	Expired,
+
 	/// The peer broke a protocol rule; the session is unusable.
 	#[error("protocol violation")]
 	ProtocolViolation,
@@ -34,9 +38,8 @@ pub enum SessionError {
 	#[error("key-value formatting error")]
 	KeyValueFormatting,
 
-	/// The peer went past what the session allows: a request ID at or past the
-	/// MAX_REQUEST_ID we advertised (moq-transport drafts 14 to 16), or more announcements,
-	/// subscriptions, or FETCH requests than its `crate::session::Limits`.
+	/// The peer went past what the session allows, such as more announcements than its
+	/// `crate::session::Limits`.
 	#[error("too many requests")]
 	TooManyRequests,
 
@@ -57,12 +60,16 @@ pub enum SessionError {
 	#[error("version negotiation failed")]
 	Version,
 
+	/// The peer's token could not be parsed. Retrying with the same token will fail again.
+	#[error("malformed auth token")]
+	MalformedAuthToken,
+
 	/// A token named an alias that was never registered.
 	#[error("unknown auth token alias")]
 	UnknownAuthTokenAlias,
 
 	/// The peer left more unacknowledged REQUEST_UPDATEs outstanding on one request stream
-	/// than the MAX_REQUEST_UPDATES it was advertised (draft-19 section 10.3.1.7).
+	/// than the MAX_REQUEST_UPDATES it was advertised (draft-22 section 9.1.7).
 	#[error("too many request updates")]
 	TooManyRequestUpdates,
 
@@ -81,6 +88,14 @@ pub enum SessionError {
 	/// A request ID was reused or violated the negotiated draft’s order or parity rules.
 	#[error("invalid request id")]
 	InvalidRequestId,
+
+	/// The peer sent a PATH it may not send, such as a server sending one at all.
+	#[error("invalid path")]
+	InvalidPath,
+
+	/// The peer sent an AUTHORITY it may not send, such as a server sending one at all.
+	#[error("invalid authority")]
+	InvalidAuthority,
 }
 
 impl SessionError {
@@ -90,15 +105,19 @@ impl SessionError {
 			Self::Cancel => 0x0,
 			Self::Internal => 0x1,
 			Self::Unauthorized => 0x2,
+			Self::Expired => 0x18,
 			Self::ProtocolViolation => 0x3,
 			Self::InvalidRequestId => 0x4,
 			Self::KeyValueFormatting => 0x6,
 			Self::TooManyRequests => 0x7,
+			Self::InvalidPath => 0x8,
 			Self::GoawayTimeout => 0x10,
 			Self::Timeout => 0x11,
 			Self::AuthTokenCacheOverflow => 0x13,
 			Self::Version => 0x15,
+			Self::MalformedAuthToken => 0x16,
 			Self::UnknownAuthTokenAlias => 0x17,
+			Self::InvalidAuthority => 0x19,
 			Self::Unsupported => 0x1,
 			Self::TooManyRequestUpdates => 0x1B,
 			Self::App(app) => *app as u32 + 64,
@@ -116,15 +135,19 @@ impl SessionError {
 			0x0 => Self::Cancel,
 			0x1 => Self::Internal,
 			0x2 => Self::Unauthorized,
+			0x18 => Self::Expired,
 			0x3 => Self::ProtocolViolation,
 			0x4 => Self::InvalidRequestId,
 			0x6 => Self::KeyValueFormatting,
 			0x7 => Self::TooManyRequests,
+			0x8 => Self::InvalidPath,
 			0x10 => Self::GoawayTimeout,
 			0x11 => Self::Timeout,
 			0x13 => Self::AuthTokenCacheOverflow,
 			0x15 => Self::Version,
+			0x16 => Self::MalformedAuthToken,
 			0x17 => Self::UnknownAuthTokenAlias,
+			0x19 => Self::InvalidAuthority,
 			0x1B => Self::TooManyRequestUpdates,
 			code @ 64.. => match u16::try_from(code - 64) {
 				Ok(app) => Self::App(app),
@@ -217,9 +240,10 @@ pub enum StreamError {
 	#[error("group too large")]
 	GroupTooLarge,
 
-	/// A frame's timestamp doesn't match its track: missing on a timed track, present on
-	/// an untimed one, or out of range for the track's timescale.
-	#[error("frame timestamp doesn't match track timescale")]
+	/// A frame's timestamp doesn't fit its track: missing on a timed track, present on an
+	/// untimed one, out of range for the track's timescale, or starting a group earlier
+	/// than the group before it.
+	#[error("frame timestamp doesn't fit its track")]
 	TimestampMismatch,
 
 	/// The grant does not cover this subscription, fetch, or announcement, or no longer
@@ -307,7 +331,10 @@ impl StreamError {
 /// Local conditions are the flat variants (`Cancel`, `NotFound`, `Lagged`, and so
 /// on): this side decided what went wrong. Codes received from a peer are nested
 /// in [`Self::Session`] or [`Self::Stream`], preserving the registry and the numeric
-/// value. [`Self::Remote`] is an unrecognized request-rejection code (the IETF
+/// value. A stream also reads its session ending cleanly, whichever side closed it, as
+/// `Session(SessionError::Cancel)`: to the stream that is the session failing under it,
+/// while `Session::closed` reports the clean close itself as [`Self::Cancel`].
+/// [`Self::Remote`] is an unrecognized request-rejection code (the IETF
 /// request registry), not a session or stream unknown.
 ///
 /// The two registries are the wire. Mapping a local condition onto a code is
@@ -346,13 +373,21 @@ pub enum Error {
 	#[error("invalid path: {0}")]
 	InvalidPath(#[from] crate::InvalidPattern),
 
+	/// A published broadcast or route contains a literal `.` or `..` segment.
+	#[error("broadcast path contains a navigation segment")]
+	NavigationSegment,
+
+	/// A path was spelled with a leading, trailing, or doubled `/`.
+	#[error("path contains an empty segment")]
+	EmptySegment,
+
 	/// A duplicate ID was used
 	// The broadcast/track is a duplicate
 	#[error("duplicate")]
 	Duplicate,
 
-	/// Nobody is reading any more, so the producer stopped. Not a failure.
-	// Cancel is returned when there are no more readers.
+	/// Nobody is reading any more, so the producer stopped; or the session closed cleanly,
+	/// by either side, as `Session::closed` reports it. Not a failure.
 	#[error("cancelled")]
 	Cancel,
 
@@ -408,11 +443,15 @@ pub enum Error {
 	#[error("unauthorized")]
 	Unauthorized,
 
+	/// The authorization token has expired and can be refreshed.
+	#[error("authorization token expired")]
+	Expired,
+
 	/// A valid message arrived in a state where it is not allowed.
 	#[error("unexpected message")]
 	UnexpectedMessage,
 
-	/// The peer asked for a feature this endpoint does not implement.
+	/// A feature was asked for that this endpoint, or the wire to the peer, does not implement.
 	#[error("unsupported")]
 	Unsupported,
 
@@ -420,12 +459,8 @@ pub enum Error {
 	#[error(transparent)]
 	Encode(#[from] coding::EncodeError),
 
-	/// A message carried more parameters than this endpoint accepts.
-	#[error("too many parameters")]
-	TooManyParameters,
-
-	/// The peer already holds as many FETCH requests, announcements, or subscriptions as this
-	/// session allows (see `crate::session::Limits`).
+	/// The peer went past this session's `crate::session::Limits`, such as too many
+	/// announcements.
 	#[error("too many requests")]
 	TooManyRequests,
 
@@ -460,22 +495,16 @@ pub enum Error {
 	#[error("group too large")]
 	GroupTooLarge,
 
-	/// A whole-frame write was refused because a frame is already open on the group.
-	///
-	/// A [`crate::group::Producer`] streaming a frame with `create_frame` blocks the
-	/// whole-frame writes on every clone of that producer until it finishes, since
-	/// appending around it would reorder the group.
-	#[error("frame already open")]
-	FrameOpen,
-
-	/// A frame's timestamp doesn't match its track: it's missing on a timed track,
-	/// present on an untimed track, or out of range for the track's timescale.
-	#[error("frame timestamp doesn't match track timescale")]
+	/// A frame's timestamp doesn't fit its track: it's missing on a timed track, present
+	/// on an untimed track, out of range for the track's timescale, or starts a group
+	/// earlier than the group before it.
+	#[error("frame timestamp doesn't fit its track")]
 	TimestampMismatch,
 
-	/// The group was evicted by its own track to pay eviction debt under memory
-	/// pressure (see [`cache::Pool`](crate::cache::Pool)). Unlike [`Self::Old`],
-	/// the group was still within the publisher's window; it can be re-fetched.
+	/// The group was evicted under memory pressure: by its own track to pay eviction debt
+	/// (see [`cache::Pool`](crate::cache::Pool)), or by the transport when incomplete
+	/// messages spent its receive window. Unlike [`Self::Old`], the group was still within
+	/// the publisher's window; it can be re-fetched.
 	#[error("evicted")]
 	Evicted,
 
@@ -488,7 +517,7 @@ pub enum Error {
 	/// The peer did not close the session within the GOAWAY drain deadline.
 	///
 	/// Sent as the session termination code when the draining side force-closes
-	/// after the advertised deadline expires (see [`crate::goaway::Goaway::timeout`]).
+	/// after the advertised drain deadline expires.
 	#[error("goaway timeout")]
 	GoawayTimeout,
 
@@ -496,10 +525,9 @@ pub enum Error {
 	#[error("malformed track")]
 	MalformedTrack,
 
-	/// The stream was torn down because the session closed. The specific reason travels on
-	/// the session close, not here.
-	#[error("session closed")]
-	SessionClosed,
+	/// The track requires a moq-transport property this endpoint does not understand.
+	#[error("unsupported extension")]
+	UnsupportedExtension,
 
 	/// A session-scoped protocol error, with its registry and verbatim code.
 	///
@@ -520,6 +548,13 @@ pub enum Error {
 	/// Session and stream unknowns are [`Self::Session`] / [`Self::Stream`], not this.
 	#[error("remote error: code={0}")]
 	Remote(u32),
+	/// The underlying connection reached its transport idle deadline.
+	#[error("transport idle timeout")]
+	IdleTimeout,
+
+	/// The transport refused a request because the peer granted no stream credit.
+	#[error("no stream credit")]
+	NoStreamCredit,
 }
 
 impl Error {
@@ -547,6 +582,10 @@ impl Error {
 	/// [`StreamError::from_code`]. Reading a stream reset with the session table (or the
 	/// reverse) silently mistranslates, since e.g. 0 is "no error" for a session but an
 	/// internal error for a stream.
+	///
+	/// Without either code, the transport's [`close_kind`](crate::transport::Error::close_kind)
+	/// decides: an idle timeout is [`Error::IdleTimeout`], a local close is
+	/// `Error::Session(SessionError::Cancel)`, and anything else is [`Error::Transport`].
 	pub fn from_transport(err: impl crate::transport::Error) -> Self {
 		if let Some((code, _reason)) = err.session_error() {
 			return SessionError::from_code(code).into();
@@ -556,7 +595,13 @@ impl Error {
 			return StreamError::from_code(code).into();
 		}
 
-		Self::Transport(err.to_string())
+		match err.close_kind() {
+			crate::transport::CloseKind::IdleTimeout => Self::IdleTimeout,
+			crate::transport::CloseKind::Evicted => Self::Evicted,
+			// A connection ending must not become the model's clean end-of-content.
+			crate::transport::CloseKind::Closed => SessionError::Cancel.into(),
+			_ => Self::Transport(err.to_string()),
+		}
 	}
 }
 
@@ -574,6 +619,13 @@ impl From<StreamError> for Error {
 	}
 }
 
+/// Lets an entry point taking `impl TryInto<Path, Error: Into<Error>>` accept a `Path` too.
+impl From<std::convert::Infallible> for Error {
+	fn from(never: std::convert::Infallible) -> Self {
+		match never {}
+	}
+}
+
 /// Which session code to send for a local error.
 ///
 /// Lossy on purpose: [`Error`] describes what went wrong locally, while the registry is what
@@ -587,11 +639,11 @@ impl From<&Error> for SessionError {
 			Error::Stream(StreamError::App(app)) => Self::App(*app),
 			// A stream-scoped code has no meaning in this registry; don't forward the number.
 			Error::Stream(_) => Self::Internal,
-			Error::Cancel | Error::Closed | Error::GoingAway | Error::SessionClosed => Self::Cancel,
+			Error::Cancel | Error::Closed | Error::GoingAway => Self::Cancel,
 			Error::Unauthorized => Self::Unauthorized,
+			Error::Expired => Self::Expired,
 			Error::Unsupported => Self::Unsupported,
 			Error::Version | Error::UnknownAlpn(_) => Self::Version,
-			Error::TooManyParameters => Self::KeyValueFormatting,
 			Error::TooManyRequests => Self::TooManyRequests,
 			Error::GoawayTimeout => Self::GoawayTimeout,
 			Error::Timeout => Self::Timeout,
@@ -603,14 +655,33 @@ impl From<&Error> for SessionError {
 			| Error::Encode(_)
 			| Error::WrongSize
 			| Error::BoundsExceeded(_)
-			| Error::InvalidPath(_) => Self::ProtocolViolation,
+			| Error::InvalidPath(_)
+			| Error::NavigationSegment
+			| Error::EmptySegment => Self::ProtocolViolation,
 			Error::App(app) => Self::App(*app),
 			// A code we did not recognize, so we cannot say which space it came from.
 			// Forwarding it into this one risks landing on a value that IS registered here
 			// (a session 0x4 would become the stream's GOING_AWAY), and the draft already
 			// says an unrecognized code is an unspecified error. Send that instead.
 			Error::Remote(_) => Self::Internal,
-			_ => Self::Internal,
+			// Our own transport failed: there is no code to say so.
+			Error::Transport(_) | Error::IdleTimeout | Error::NoStreamCredit => Self::Internal,
+			// Stream-scoped conditions have no session code.
+			Error::Old
+			| Error::Evicted
+			| Error::Lagged
+			| Error::NotFound
+			| Error::NotFetchable
+			| Error::InvalidRange
+			| Error::InvalidJoiningRequestId
+			| Error::Unroutable
+			| Error::FrameTooLarge
+			| Error::GroupTooLarge
+			| Error::TimestampMismatch
+			| Error::MalformedTrack
+			| Error::UnsupportedExtension => Self::Internal,
+			// A producer dropped without an end is a bug here, so it is never given a meaning.
+			Error::Dropped => Self::Internal,
 		}
 	}
 }
@@ -625,10 +696,11 @@ impl From<&Error> for StreamError {
 			Error::Stream(err) => err.clone(),
 			// App codes share the 64+ range in both registries.
 			Error::Session(SessionError::App(app)) => Self::App(*app),
-			// A session-scoped code has no meaning in this registry; don't forward the number.
-			Error::Session(_) => Self::Internal,
+			// A stream that can still be reset outlived the session that failed, so that was
+			// another one: the route this stream was served through. The path lost its route;
+			// this session is fine, and the failed session's code means nothing here.
+			Error::Session(_) | Error::Transport(_) | Error::IdleTimeout => Self::Unroutable,
 			Error::Cancel | Error::Closed => Self::Cancel,
-			Error::SessionClosed => Self::Session(SessionError::Cancel),
 			Error::Decode(coding::DecodeError::Session(err)) => Self::Session(err.clone()),
 			Error::Old => Self::Old,
 			Error::Evicted => Self::Evicted,
@@ -640,14 +712,18 @@ impl From<&Error> for StreamError {
 			Error::FrameTooLarge => Self::FrameTooLarge,
 			Error::GroupTooLarge => Self::GroupTooLarge,
 			Error::TimestampMismatch => Self::TimestampMismatch,
-			// Losing access ends this stream, not the session.
-			Error::Unauthorized => Self::Unauthorized,
+			// Losing access ends this stream, not the session. A request can expire on its
+			// own (REQUEST_ERROR 0x5), and the stream registry has no expiry code.
+			Error::Unauthorized | Error::Expired => Self::Unauthorized,
 			Error::Timeout => Self::DeliveryTimeout,
 			Error::GoingAway => Self::GoingAway,
 			// Our own parse failure is, from the peer's side, a malformed track.
-			Error::Decode(_) | Error::BoundsExceeded(_) | Error::InvalidPath(_) | Error::MalformedTrack => {
-				Self::MalformedTrack
-			}
+			Error::Decode(_)
+			| Error::BoundsExceeded(_)
+			| Error::InvalidPath(_)
+			| Error::NavigationSegment
+			| Error::EmptySegment
+			| Error::MalformedTrack => Self::MalformedTrack,
 			Error::App(app) => Self::App(*app),
 			// See the SessionError impl: an unregistered code carries no registry, so
 			// re-sending the number could mistranslate it.
@@ -655,19 +731,35 @@ impl From<&Error> for StreamError {
 			// Session-scoped: the peer learns the detail from the session close.
 			// A stream refused on its own is not a session failure, so it does not claim
 			// SESSION_CLOSED; there is no stream-scoped PROTOCOL_VIOLATION to send instead.
-			Error::UnexpectedStream => Self::Internal,
+			Error::UnexpectedStream | Error::NoStreamCredit => Self::Internal,
 			Error::Version
 			| Error::UnknownAlpn(_)
-			| Error::TooManyParameters
+			| Error::TooManyRequests
+			| Error::Duplicate
 			| Error::GoawayTimeout
 			| Error::ProtocolViolation
 			| Error::UnexpectedMessage => Self::Session(SessionError::from(err)),
-			_ => Self::Internal,
+			// No stream code says so: an unknown stream type, a request only moq-transport
+			// can make, or a fault on our own side.
+			Error::Unsupported
+			| Error::UnsupportedExtension
+			| Error::InvalidRange
+			| Error::InvalidJoiningRequestId
+			| Error::Encode(_) => Self::Internal,
+			// A producer dropped without an end is a bug here, so it is never given a meaning.
+			Error::Dropped => Self::Internal,
 		}
 	}
 }
 
 impl crate::transport::Error for Error {
+	fn close_kind(&self) -> crate::transport::CloseKind {
+		match self {
+			Self::IdleTimeout => crate::transport::CloseKind::IdleTimeout,
+			// Closed also ends model handles and virtual streams, not just connections.
+			_ => crate::transport::CloseKind::Transport,
+		}
+	}
 	fn session_error(&self) -> Option<(u32, String)> {
 		None
 	}
@@ -690,41 +782,32 @@ mod tests {
 
 	#[test]
 	fn session_codes_round_trip() {
-		// Only the registered codes are a wire contract, so only they round trip.
-		let registered = [
-			SessionError::Cancel,
-			SessionError::Internal,
-			SessionError::Unauthorized,
-			SessionError::ProtocolViolation,
-			SessionError::InvalidRequestId,
-			SessionError::KeyValueFormatting,
-			SessionError::TooManyRequests,
-			SessionError::GoawayTimeout,
-			SessionError::Timeout,
-			SessionError::AuthTokenCacheOverflow,
-			SessionError::Version,
-			SessionError::UnknownAuthTokenAlias,
-			SessionError::TooManyRequestUpdates,
-			SessionError::App(0),
-			SessionError::App(404),
-		];
-		for err in registered {
-			assert_eq!(
-				SessionError::from_code(err.to_code()),
-				err,
-				"{err:?} did not round trip"
-			);
+		// Only the registered codes are a wire contract, so only they round trip, each on
+		// the value the drafts assign (moq-transport's, where we reuse its code).
+		for (err, spec) in [
+			(SessionError::Cancel, 0x0),
+			(SessionError::Internal, 0x1),
+			(SessionError::Unauthorized, 0x2),
+			(SessionError::ProtocolViolation, 0x3),
+			(SessionError::InvalidRequestId, 0x4),
+			(SessionError::KeyValueFormatting, 0x6),
+			(SessionError::TooManyRequests, 0x7),
+			(SessionError::InvalidPath, 0x8),
+			(SessionError::GoawayTimeout, 0x10),
+			(SessionError::Timeout, 0x11),
+			(SessionError::AuthTokenCacheOverflow, 0x13),
+			(SessionError::Version, 0x15),
+			(SessionError::MalformedAuthToken, 0x16),
+			(SessionError::UnknownAuthTokenAlias, 0x17),
+			(SessionError::Expired, 0x18),
+			(SessionError::InvalidAuthority, 0x19),
+			(SessionError::TooManyRequestUpdates, 0x1B),
+			(SessionError::App(0), 0x40),
+			(SessionError::App(404), 0x40 + 404),
+		] {
+			assert_eq!(err.to_code(), spec, "{err:?} moved off its assigned code");
+			assert_eq!(SessionError::from_code(spec), err, "{err:?} did not round trip");
 		}
-
-		// The moq-transport codes we reuse must keep moq-transport's values.
-		assert_eq!(SessionError::Unauthorized.to_code(), 0x2);
-		assert_eq!(SessionError::InvalidRequestId.to_code(), 0x4);
-		assert_eq!(SessionError::TooManyRequests.to_code(), 0x7);
-		assert_eq!(SessionError::GoawayTimeout.to_code(), 0x10);
-		assert_eq!(SessionError::AuthTokenCacheOverflow.to_code(), 0x13);
-		assert_eq!(SessionError::Version.to_code(), 0x15);
-		assert_eq!(SessionError::UnknownAuthTokenAlias.to_code(), 0x17);
-		assert_eq!(SessionError::TooManyRequestUpdates.to_code(), 0x1B);
 
 		// The reserved 32-47 range, and anything else unregistered, keeps its value instead
 		// of being given a meaning. A peer on the old placeholders (0x20-0x22) lands here.
@@ -739,37 +822,23 @@ mod tests {
 			SessionError::ProtocolViolation
 		);
 		assert_eq!(StreamError::from(&Error::UnexpectedStream), StreamError::Internal);
+
+		// An expired request (REQUEST_ERROR 0x5) relayed onto a stream ends only that
+		// request; SESSION_CLOSED would falsely tell the peer its session is going away.
+		assert_eq!(StreamError::from(&Error::Expired), StreamError::Unauthorized);
 	}
 
 	#[test]
 	fn stream_codes_round_trip() {
-		// Only the registered codes are a wire contract, so only they round trip.
-		let registered = [
-			StreamError::Internal,
-			StreamError::Cancel,
-			StreamError::DeliveryTimeout,
-			StreamError::ControlTimeout,
-			StreamError::GoingAway,
-			StreamError::TooFarBehind,
-			StreamError::MalformedTrack,
-			StreamError::GroupTooLarge,
-			StreamError::NotFound,
-			StreamError::Old,
-			StreamError::Evicted,
-			StreamError::Unroutable,
-			StreamError::WrongSize,
-			StreamError::FrameTooLarge,
-			StreamError::TimestampMismatch,
-			StreamError::NotFetchable,
-			StreamError::Unauthorized,
-			StreamError::App(7),
-		];
-		for err in registered {
-			assert_eq!(StreamError::from_code(err.to_code()), err, "{err:?} did not round trip");
-		}
-
-		// moq-lite's own 48-63 range, pinned to the draft's table.
-		for (err, code) in [
+		// Only the registered codes are a wire contract, so only they round trip, each on
+		// the value the draft assigns.
+		for (err, spec) in [
+			(StreamError::Internal, 0x0),
+			(StreamError::Cancel, 0x1),
+			(StreamError::DeliveryTimeout, 0x2),
+			(StreamError::GoingAway, 0x4),
+			(StreamError::TooFarBehind, 0x5),
+			(StreamError::MalformedTrack, 0x12),
 			(StreamError::ControlTimeout, 0x31),
 			(StreamError::GroupTooLarge, 0x32),
 			(StreamError::NotFound, 0x33),
@@ -781,12 +850,13 @@ mod tests {
 			(StreamError::TimestampMismatch, 0x39),
 			(StreamError::NotFetchable, 0x3a),
 			(StreamError::Unauthorized, 0x3b),
+			(StreamError::App(7), 0x40 + 7),
 		] {
-			assert_eq!(err.to_code(), code, "{err:?} moved off its assigned code");
+			assert_eq!(err.to_code(), spec, "{err:?} moved off its assigned code");
+			assert_eq!(StreamError::from_code(spec), err, "{err:?} did not round trip");
 		}
 
-		// The reserved 32-47 range carries no meaning, including the values the four
-		// codes above used to be sent from: a peer still emitting them is not given one.
+		// The reserved 32-47 range carries no meaning, so a peer emitting it is not given one.
 		for code in 0x20..0x30 {
 			assert_eq!(StreamError::from_code(code), StreamError::Unknown(code));
 		}
@@ -836,17 +906,26 @@ mod tests {
 			64 + 7
 		);
 
-		// An unregistered code carries no registry, so it must not be re-sent as a number
-		// that means something here: session 0x4 and 0x5 are GOING_AWAY and TOO_FAR_BEHIND
-		// on a stream. Downgrade to the unspecified-error code instead.
-		for code in [0x4, 0x5, 0x1f] {
+		// An upstream session's close must not be re-sent as a number that means something
+		// here: session 0x4 and 0x5 are GOING_AWAY and TOO_FAR_BEHIND on a stream. The
+		// downstream session is healthy; only the path lost its route.
+		for code in [0x0, 0x4, 0x5, 0x1f] {
 			let crossed = StreamError::from(&Error::from(SessionError::from_code(code)));
 			assert_eq!(
 				crossed,
-				StreamError::Internal,
+				StreamError::Unroutable,
 				"session {code:#x} leaked into the stream space"
 			);
 		}
+		assert_eq!(
+			StreamError::from(&Error::Transport("reset".into())),
+			StreamError::Unroutable
+		);
+		assert_eq!(StreamError::from(&Error::IdleTimeout), StreamError::Unroutable);
+
+		// A producer dropped without an end is a bug, never given a meaning.
+		assert_eq!(StreamError::from(&Error::Dropped), StreamError::Internal);
+		assert_eq!(SessionError::from(&Error::Dropped), SessionError::Internal);
 	}
 
 	// The registry a code is read with depends on what failed, and picking the wrong one

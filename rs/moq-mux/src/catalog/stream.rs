@@ -28,6 +28,7 @@ pub trait Stream: kio::MaybeSend + 'static {
 	/// The application extension carried by the yielded catalog (`()` for media-only).
 	type Ext: CatalogExt;
 
+	/// Poll for the next catalog snapshot, or `None` once the stream ends.
 	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Catalog<Self::Ext>>>>;
 
 	/// Wait for the next snapshot.

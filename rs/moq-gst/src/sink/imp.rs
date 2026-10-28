@@ -11,7 +11,7 @@
 
 use std::collections::HashSet;
 use std::sync::{LazyLock, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -20,30 +20,37 @@ use gst::prelude::*;
 use gst::subclass::prelude::*;
 use hang::moq_net;
 
-use super::pad::{CapsOutcome, ProducerOptions, PushOutcome, caps_supported};
+use super::pad::{CapsOutcome, Names, ProducerOptions, PushOutcome, caps_supported};
 use super::request_pad::{MoqSinkPad, Notifications, PadLifecycle};
 use super::session::{
 	CAT, Completion, CompletionHandle, ConnectionStatus, RUNTIME, ResolvedSettings, Session, SessionRegistration,
 	notify, sessions_structure,
 };
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct Settings {
 	url: Option<String>,
 	broadcast: Option<String>,
-	tls_disable_verify: bool,
-	quic_idle_timeout: Option<Duration>,
-	quic_keep_alive: Option<Duration>,
+	connection: crate::connection::Settings,
+	linger: Duration,
 }
 
-fn duration_millis(duration: Duration) -> u64 {
-	duration.as_millis().try_into().unwrap_or(u64::MAX)
+impl Default for Settings {
+	fn default() -> Self {
+		Self {
+			url: None,
+			broadcast: None,
+			connection: Default::default(),
+			linger: moq_mux::Linger::DEFAULT,
+		}
+	}
 }
 
 impl TryFrom<Settings> for ResolvedSettings {
 	type Error = anyhow::Error;
 
 	fn try_from(value: Settings) -> Result<Self> {
+		let (connect, quic) = value.connection.resolve()?;
 		Ok(Self {
 			url: url::Url::parse(value.url.as_ref().context("url property is required")?)?,
 			broadcast: value
@@ -51,9 +58,8 @@ impl TryFrom<Settings> for ResolvedSettings {
 				.as_ref()
 				.context("broadcast property is required")?
 				.clone(),
-			tls_disable_verify: value.tls_disable_verify,
-			quic_idle_timeout: value.quic_idle_timeout,
-			quic_keep_alive: value.quic_keep_alive,
+			connect,
+			quic,
 		})
 	}
 }
@@ -61,9 +67,17 @@ impl TryFrom<Settings> for ResolvedSettings {
 /// Live state for one READY to PAUSED run.
 struct State {
 	session: Session,
-	broadcast: moq_net::broadcast::Producer,
+	broadcast: moq_net::origin::Publication,
 	catalog: Option<moq_mux::catalog::Producer>,
 	wall: std::sync::Arc<super::wall::Wall>,
+	/// The configured track names this run ended, which it never publishes again.
+	names: Names,
+	/// How long a clean end keeps the finished broadcast up before its EOS.
+	linger: Duration,
+	/// Whether the finished broadcast closed, so the EOS it owes may go out.
+	drained: bool,
+	/// The task serving the finished broadcast for its linger, aborted on stop.
+	lingering: Option<tokio::task::AbortHandle>,
 	/// Whether this publication's single EOS message already went out. One per publication, not per
 	/// entry to PLAYING: a finished publication is terminal here, so there is nothing to announce twice.
 	eos_delivered: bool,
@@ -90,8 +104,8 @@ struct Control {
 
 /// Claim this publication's EOS, if it is owed and may go out now.
 ///
-/// One claim per publication, so whichever arrives first (the transition into PLAYING, or the pad that
-/// ended it) is the only one that posts. Called under `control`, which is what serializes the two.
+/// One claim per publication, so whichever arrives first (the transition into PLAYING, or the end of
+/// the linger) is the only one that posts. Called under `control`, which is what serializes the two.
 fn claim_eos(control: &mut Control) -> Posted {
 	if !control.playing {
 		return Posted::Nothing;
@@ -99,7 +113,8 @@ fn claim_eos(control: &mut Control) -> Posted {
 	let Some(state) = control.live.as_mut() else {
 		return Posted::Nothing;
 	};
-	if state.eos_delivered || state.session.completion().get() != Completion::Eos {
+	// Only a clean finish drains, so a drained publication ended with EOS.
+	if state.eos_delivered || !state.drained {
 		return Posted::Nothing;
 	}
 	state.eos_delivered = true;
@@ -130,7 +145,7 @@ enum Posted {
 
 /// The element-wide outcome a publishing session earned.
 enum MessageKind {
-	/// Every pad ended and the producers closed.
+	/// Every pad ended and the broadcast closed.
 	Eos,
 	/// A producer failed to close, already formatted for the bus.
 	FinalizeError(String),
@@ -169,7 +184,6 @@ impl ObjectSubclass for MoqSink {
 impl ObjectImpl for MoqSink {
 	fn properties() -> &'static [glib::ParamSpec] {
 		static PROPS: LazyLock<Vec<glib::ParamSpec>> = LazyLock::new(|| {
-			let quic = moq_tokio::quic::Resolved::default();
 			vec![
 				glib::ParamSpecString::builder("url")
 					.nick("Destination URL")
@@ -181,22 +195,10 @@ impl ObjectImpl for MoqSink {
 					.blurb("The name of the broadcast to publish")
 					.mutable_ready()
 					.build(),
-				glib::ParamSpecBoolean::builder("tls-disable-verify")
-					.nick("TLS disable verify")
-					.blurb("Disable TLS verification")
-					.default_value(false)
-					.mutable_ready()
-					.build(),
-				glib::ParamSpecUInt64::builder("quic-idle-timeout")
-					.nick("QUIC idle timeout")
-					.blurb("QUIC idle timeout in milliseconds, 0 to disable locally")
-					.default_value(duration_millis(quic.idle_timeout))
-					.mutable_ready()
-					.build(),
-				glib::ParamSpecUInt64::builder("quic-keep-alive")
-					.nick("QUIC keep-alive")
-					.blurb("QUIC keep-alive interval in milliseconds, 0 to disable; iroh still pings at least every 5s")
-					.default_value(quic.keep_alive.map(duration_millis).unwrap_or(0))
+				glib::ParamSpecUInt64::builder("linger")
+					.nick("Linger")
+					.blurb("At end of stream, keep the finished broadcast up this many milliseconds for late subscribers, then post EOS; 0 closes it at once")
+					.default_value(crate::connection::duration_millis(moq_mux::Linger::DEFAULT))
 					.mutable_ready()
 					.build(),
 				// Read-only, served from the live session's status. Each notifies on change.
@@ -236,6 +238,9 @@ impl ObjectImpl for MoqSink {
 					.read_only()
 					.build(),
 			]
+			.into_iter()
+			.chain(crate::connection::properties())
+			.collect()
 		});
 		PROPS.as_ref()
 	}
@@ -263,10 +268,8 @@ impl ObjectImpl for MoqSink {
 		match pspec.name() {
 			"url" => settings.url = value.get().unwrap(),
 			"broadcast" => settings.broadcast = value.get().unwrap(),
-			"tls-disable-verify" => settings.tls_disable_verify = value.get().unwrap(),
-			"quic-idle-timeout" => settings.quic_idle_timeout = Some(Duration::from_millis(value.get().unwrap())),
-			"quic-keep-alive" => settings.quic_keep_alive = Some(Duration::from_millis(value.get().unwrap())),
-			_ => unreachable!(),
+			"linger" => settings.linger = Duration::from_millis(value.get().unwrap()),
+			name => settings.connection.set(name, value),
 		}
 	}
 
@@ -297,20 +300,8 @@ impl ObjectImpl for MoqSink {
 				match name {
 					"url" => settings.url.to_value(),
 					"broadcast" => settings.broadcast.to_value(),
-					"tls-disable-verify" => settings.tls_disable_verify.to_value(),
-					"quic-idle-timeout" => duration_millis(
-						settings
-							.quic_idle_timeout
-							.unwrap_or_else(|| moq_tokio::quic::Resolved::default().idle_timeout),
-					)
-					.to_value(),
-					"quic-keep-alive" => settings
-						.quic_keep_alive
-						.or_else(|| moq_tokio::quic::Resolved::default().keep_alive)
-						.map(duration_millis)
-						.unwrap_or(0)
-						.to_value(),
-					_ => unreachable!(),
+					"linger" => crate::connection::duration_millis(settings.linger).to_value(),
+					name => settings.connection.get(name),
 				}
 			}
 		}
@@ -446,7 +437,7 @@ impl ElementImpl for MoqSink {
 			if let Some(state) = control.live.as_ref()
 				&& let Some(catalog) = state.catalog.as_ref()
 			{
-				pad.lifecycle().media.reserve(catalog, state.wall.clone());
+				pad.lifecycle().media.reserve(catalog, state.wall.clone(), &state.names);
 			}
 			control.admissions.insert(pad.clone());
 		}
@@ -573,7 +564,9 @@ impl MoqSink {
 
 	/// Create the session and producers before any buffer flows.
 	fn start_session(&self) -> Result<SessionRegistration, gst::StateChangeError> {
-		let settings = ResolvedSettings::try_from(self.settings.lock().unwrap().clone()).map_err(|err| {
+		let settings = self.settings.lock().unwrap().clone();
+		let linger = settings.linger;
+		let settings = ResolvedSettings::try_from(settings).map_err(|err| {
 			gst::error!(CAT, obj = self.obj(), "invalid settings: {err:#}");
 			gst::StateChangeError
 		})?;
@@ -591,6 +584,10 @@ impl MoqSink {
 				broadcast,
 				catalog: Some(catalog),
 				wall,
+				names: Names::default(),
+				linger,
+				drained: false,
+				lingering: None,
 				eos_delivered: false,
 			});
 			let pads = self.pads_locked(&control);
@@ -604,7 +601,7 @@ impl MoqSink {
 						let changes = lifecycle.reset();
 						lifecycle.completion = Some(completion.clone());
 						if !lifecycle.releasing {
-							lifecycle.media.reserve(catalog, wall.clone());
+							lifecycle.media.reserve(catalog, wall.clone(), &state.names);
 						}
 						changes
 					};
@@ -671,7 +668,10 @@ impl MoqSink {
 		if let Some(err) = failure {
 			gst::warning!(CAT, "finalize on stop: {err:?}");
 		}
-		// Close the broadcast before reaping the session task.
+		// Close the broadcast before reaping the session task. This also ends a linger early.
+		if let Some(lingering) = state.lingering.take() {
+			lingering.abort();
+		}
 		state.broadcast.close();
 		drop(closed);
 		state.session.stop();
@@ -685,7 +685,6 @@ impl MoqSink {
 		// Map and copy outside the lock so the per-pad lock covers only the producer write. Avoiding the
 		// copy for an oversized buffer needs a reliable, media-aware size heuristic; moq-net remains the
 		// authority and rejects FrameTooLarge before reserving its own group slot.
-		let pts = buffer.pts();
 		// Only subtitles use this: a cue needs an explicit end, unlike a media frame.
 		let duration = buffer.duration();
 		let current_running_time = self.obj().current_running_time();
@@ -697,7 +696,7 @@ impl MoqSink {
 		});
 		let sample = super::wall::Sample {
 			running: reference_running_time,
-			wall: std::time::SystemTime::now(),
+			wall: moq_clock::wall(),
 		};
 		let map = buffer.map_readable().map_err(|_| {
 			gst::error!(CAT, "failed to map buffer on pad {}", pad.name());
@@ -726,9 +725,10 @@ impl MoqSink {
 				return Ok(gst::FlowSuccess::Ok);
 			}
 			let outcome = lifecycle.media.place_wall(&buffer, sample).and_then(|()| {
+				let pts = lifecycle.media.timeline_pts(&buffer)?;
 				lifecycle
 					.media
-					.push_buffer(data, pts, duration, current_running_time, Instant::now())
+					.push_buffer(data, pts, duration, current_running_time)
 					.map_err(anyhow::Error::msg)
 			});
 			let changes = match &outcome {
@@ -888,7 +888,7 @@ impl MoqSink {
 					if !lifecycle.releasing {
 						lifecycle.ended = false;
 						if let Some(catalog) = &state.catalog {
-							lifecycle.media.reserve(catalog, state.wall.clone());
+							lifecycle.media.reserve(catalog, state.wall.clone(), &state.names);
 						}
 					}
 				}
@@ -914,7 +914,7 @@ impl MoqSink {
 									lifecycle.media.flush();
 									let catalog = state.catalog.as_ref();
 									if let Some(catalog) = catalog {
-										lifecycle.media.reserve(catalog, state.wall.clone());
+										lifecycle.media.reserve(catalog, state.wall.clone(), &state.names);
 									}
 									let caps = lifecycle.media.resumable_caps();
 									caps.zip(catalog).and_then(|(caps, catalog)| {
@@ -1032,13 +1032,13 @@ impl MoqSink {
 			}
 		}
 		state.wall.finish();
-		if let Some(mut catalog) = state.catalog.take()
+		let mut catalog = state.catalog.take();
+		if let Some(catalog) = &mut catalog
 			&& let Err(err) = catalog.finish().context("finalize catalog")
 			&& failure.is_none()
 		{
 			failure = Some(err);
 		}
-		drop(closed);
 		// Claimed after the work, not before: the outcome decides which terminal state this pass takes.
 		// Losing the claim means the session task already ended the publication and posted its own
 		// error, so this pass owes the bus nothing.
@@ -1046,17 +1046,61 @@ impl MoqSink {
 		let message = match failure {
 			Some(err) => match completion.fail() {
 				true => Posted::Message {
-					session: state.session.completion(),
+					session: completion,
 					kind: MessageKind::FinalizeError(format!("{err:?}")),
 				},
 				false => Posted::Nothing,
 			},
-			None => {
-				completion.finish();
-				claim_eos(control)
+			None if completion.finish() => {
+				// The closed renditions and the catalog hold the finished tracks, so they go only
+				// once the broadcast closes.
+				let finished =
+					moq_mux::Linger::new([state.broadcast.broadcast().clone()], (closed, catalog), state.linger);
+				self.linger_locked(control, finished)
 			}
+			None => Posted::Nothing,
 		};
 		Finished { updates, message }
+	}
+
+	/// Serve the finished broadcast for its linger so a subscriber that arrives after the end still
+	/// gets the tail, and owe the EOS once it closes. With no linger, close it and owe the EOS now.
+	///
+	/// The EOS waits for the linger because `gst-launch` exits on it, and NULL closes the broadcast.
+	/// Stopping the pipeline is the interrupt: it aborts the linger, which closes the broadcast.
+	fn linger_locked<T: Send + 'static>(&self, control: &mut Control, finished: moq_mux::Linger<T>) -> Posted {
+		let state = control.live.as_mut().expect("a finished publication is live");
+		let linger = state.linger;
+		if linger.is_zero() {
+			drop(finished);
+			state.drained = true;
+			return claim_eos(control);
+		}
+		gst::info!(
+			CAT,
+			obj = self.obj(),
+			"all pads ended, serving the broadcast for {linger:?}"
+		);
+		let task = RUNTIME.spawn(linger_task(
+			finished,
+			self.obj().downgrade(),
+			state.session.completion(),
+		));
+		state.lingering = Some(task.abort_handle());
+		Posted::Nothing
+	}
+
+	/// Owe the EOS now that the finished broadcast closed, unless a newer run replaced `session`.
+	fn drained(&self, session: &CompletionHandle) {
+		let message = {
+			let mut control = self.control.lock().unwrap();
+			match control.live.as_mut() {
+				Some(state) if std::sync::Arc::ptr_eq(&state.session.completion(), session) => state.drained = true,
+				_ => return,
+			}
+			claim_eos(&mut control)
+		};
+		self.post_current(message);
 	}
 
 	fn notify_updates(&self, updates: Vec<PadUpdate>) {
@@ -1131,7 +1175,7 @@ impl MoqSink {
 
 		match kind {
 			MessageKind::Eos => {
-				gst::info!(CAT, "all pads ended, posting EOS");
+				gst::info!(CAT, "the broadcast ended, posting EOS");
 				let obj = self.obj();
 				let _ = obj.post_message(gst::message::Eos::builder().src(&*obj).build());
 			}
@@ -1145,6 +1189,18 @@ impl MoqSink {
 	}
 }
 
+/// Serve a finished broadcast for its linger, then release the EOS its publication owes.
+async fn linger_task<T>(
+	finished: moq_mux::Linger<T>,
+	element: glib::WeakRef<super::MoqSink>,
+	session: CompletionHandle,
+) {
+	finished.wait().await;
+	if let Some(element) = element.upgrade() {
+		element.imp().drained(&session);
+	}
+}
+
 /// Build a pad's producer for `caps` in the open publication, returning its status changes and whether
 /// the caps were accepted.
 fn observe_caps(
@@ -1153,11 +1209,9 @@ fn observe_caps(
 	lifecycle: &mut PadLifecycle,
 	caps: &gst::Caps,
 ) -> (Option<Notifications>, bool) {
-	lifecycle.media.reserve(catalog, state.wall.clone());
+	lifecycle.media.reserve(catalog, state.wall.clone(), &state.names);
 	let requested = lifecycle.requested().map(str::to_owned);
-	let mut options = ProducerOptions::new(caps)
-		.with_container(lifecycle.container().into())
-		.with_encoder(lifecycle.encoder());
+	let mut options = ProducerOptions::new(caps).with_container(lifecycle.container().into());
 	if let Some(track) = requested.as_deref() {
 		options = options.with_track(track);
 	}
@@ -1179,8 +1233,11 @@ mod tests {
 	use super::super::session::CompletionState;
 	use super::*;
 
+	/// A sink that closes its broadcast at the end of stream, for tests not about the linger.
 	fn sink() -> super::super::MoqSink {
-		glib::Object::builder::<super::super::MoqSink>().build()
+		glib::Object::builder::<super::super::MoqSink>()
+			.property("linger", 0u64)
+			.build()
 	}
 
 	struct CatalogRun(super::super::MoqSink);
@@ -1213,7 +1270,7 @@ mod tests {
 					Duration::ZERO,
 					super::super::wall::Sample {
 						running: Some(gst::ClockTime::ZERO),
-						wall: std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_735_689_600),
+						wall: moq_clock::Wall::UNIX_EPOCH + Duration::from_secs(1_735_689_600),
 					},
 				)
 				.unwrap();
@@ -1542,7 +1599,8 @@ mod tests {
 		assert!(completion_of(&run.0).is_open());
 	}
 
-	// GStreamer keeps CAPS sticky across a flush, so a resumed pad gets no new CAPS event.
+	// GStreamer keeps CAPS sticky across a flush, so a resumed pad gets no new CAPS event. EOS ended its
+	// track, so the resumed one takes a fresh name.
 	#[test]
 	fn an_unresolved_pad_resumed_after_eos_publishes_without_new_caps() {
 		use futures::FutureExt;
@@ -1572,7 +1630,7 @@ mod tests {
 			let std::task::Poll::Ready(Ok(Some(next))) = next_catalog(&mut catalog) else {
 				panic!("the resumed pad must publish its rendition ({resume})")
 			};
-			assert!(next.video.renditions.contains_key("video"), "{resume}");
+			assert!(next.video.renditions.contains_key("video/1"), "{resume}");
 			let broadcast = run
 				.0
 				.imp()
@@ -1585,7 +1643,7 @@ mod tests {
 				.broadcast
 				.consume();
 			let mut track = broadcast
-				.track("video")
+				.track("video/1")
 				.expect("the resumed track is published")
 				.subscribe(None)
 				.now_or_never()
@@ -1686,65 +1744,6 @@ mod tests {
 		};
 		assert!(next.text.renditions.is_empty());
 		assert!(next.audio.renditions.contains_key("audio"));
-	}
-
-	#[test]
-	fn a_playing_pause_cycle_does_not_raise_encoder_jitter() {
-		gst::init().unwrap();
-		let sink = sink();
-		sink.set_property("url", "https://127.0.0.1:1");
-		sink.set_property("broadcast", "pause-test");
-		let pad = sink
-			.request_pad_simple("sink_0")
-			.unwrap()
-			.downcast::<MoqSinkPad>()
-			.unwrap();
-		sink.set_state(gst::State::Paused).unwrap();
-		let (broadcast, catalog) = {
-			let control = sink.imp().control.lock().unwrap();
-			let state = control.live.as_ref().unwrap();
-			(state.broadcast.clone(), state.catalog.as_ref().unwrap().clone())
-		};
-		let caps = gst::Caps::builder("audio/x-opus")
-			.field("rate", 48_000i32)
-			.field("channels", 2i32)
-			.build();
-		assert!(matches!(
-			pad.lifecycle().media.observe_caps(
-				&broadcast,
-				&catalog,
-				ProducerOptions::new(&caps).with_track("audio").with_encoder(true)
-			),
-			CapsOutcome::Active(_)
-		));
-		let segment = gst::FormattedSegment::<gst::ClockTime>::new();
-		pad.lifecycle().media.observe_segment(segment.upcast());
-		sink.set_state(gst::State::Playing).unwrap();
-		let anchor = Instant::now();
-		for (pts, arrival) in [(0, 0), (20, 120), (40, 6_000), (60, 6_020)] {
-			if pts == 40 {
-				sink.set_state(gst::State::Paused).unwrap();
-				sink.set_state(gst::State::Playing).unwrap();
-			}
-			assert_eq!(
-				pad.lifecycle()
-					.media
-					.push_buffer(
-						Bytes::from_static(b"opus frame"),
-						Some(gst::ClockTime::from_mseconds(pts)),
-						None,
-						None,
-						anchor + Duration::from_millis(arrival)
-					)
-					.unwrap(),
-				PushOutcome::Published
-			);
-		}
-		assert_eq!(
-			catalog.snapshot().audio.renditions["audio"].jitter,
-			Some(Duration::from_millis(100))
-		);
-		sink.set_state(gst::State::Null).unwrap();
 	}
 
 	fn spec(element: &super::super::MoqSink, name: &str) -> glib::ParamSpec {
@@ -2031,6 +2030,54 @@ mod tests {
 		let _ = element.set_state(gst::State::Null);
 	}
 
+	// A clean end keeps the broadcast up for subscribers that arrive late, and the EOS waits for it:
+	// `gst-launch` exits on that message, which would close the broadcast under them. The real sink
+	// lingers on its own runtime, so this drives the same task on a paused clock over a stand-in track.
+	#[tokio::test(start_paused = true)]
+	async fn the_eos_waits_for_the_linger() {
+		gst::init().unwrap();
+		let sink = sink();
+		sink.set_property("url", "https://127.0.0.1:1");
+		sink.set_property("broadcast", "linger-test");
+		let element = sink.clone().upcast::<gst::Element>();
+		let bus = gst::Bus::new();
+		element.set_bus(Some(&bus));
+		element.set_state(gst::State::Playing).expect("start playing");
+		let (broadcast, session) = {
+			let control = sink.imp().control.lock().unwrap();
+			let state = control.live.as_ref().expect("live session");
+			(state.broadcast.broadcast().clone(), state.session.completion())
+		};
+		let consumer = broadcast.consume();
+		let track = broadcast.create_track("video", None).unwrap();
+		track.append_group().unwrap().finish().unwrap();
+		track.finish().unwrap();
+		assert!(session.finish());
+		while bus.pop().is_some() {}
+
+		let linger = Duration::from_secs(30);
+		let start = moq_clock::now();
+		let finished = moq_mux::Linger::new([broadcast], track, linger);
+		let lingering = tokio::spawn(linger_task(finished, sink.downgrade(), session));
+
+		moq_clock::sleep(linger - Duration::from_secs(1)).await;
+		let mut late = consumer.track("video").unwrap().subscribe(None).await.unwrap();
+		assert!(
+			late.recv_group().await.unwrap().is_some(),
+			"a late subscriber drains the tail"
+		);
+		assert!(bus.pop_filtered(&[gst::MessageType::Eos]).is_none(), "the EOS waits");
+
+		lingering.await.unwrap();
+		assert_eq!(moq_clock::now() - start, linger);
+		assert!(consumer.is_closed());
+		assert!(
+			bus.pop_filtered(&[gst::MessageType::Eos]).is_some(),
+			"the EOS follows the linger"
+		);
+		let _ = element.set_state(gst::State::Null);
+	}
+
 	#[test]
 	fn errors_are_scoped_to_the_session_that_produced_them() {
 		gst::init().unwrap();
@@ -2074,15 +2121,14 @@ mod tests {
 		sink.imp().post_session_error(&first, "old session failed".to_string());
 
 		assert!(
-			bus.timed_pop_filtered(gst::ClockTime::ZERO, &[gst::MessageType::Error])
-				.is_none(),
+			bus.pop_filtered(&[gst::MessageType::Error]).is_none(),
 			"the stopped session posted an error into its replacement"
 		);
 
 		sink.imp()
 			.post_session_error(&replacement, "current session failed".to_string());
 		let message = bus
-			.timed_pop_filtered(gst::ClockTime::ZERO, &[gst::MessageType::Error])
+			.pop_filtered(&[gst::MessageType::Error])
 			.expect("the current session posted its error");
 		let gst::MessageView::Error(error) = message.view() else {
 			unreachable!();
@@ -2102,9 +2148,11 @@ mod tests {
 		for name in [
 			"url",
 			"broadcast",
+			"linger",
 			"tls-disable-verify",
 			"quic-idle-timeout",
 			"quic-keep-alive",
+			"quic-keylog",
 		] {
 			assert!(
 				spec(&sink, name).flags().contains(gst::PARAM_FLAG_MUTABLE_READY),
@@ -2115,6 +2163,7 @@ mod tests {
 			assert_eq!(spec(&sink, name).value_type(), u64::static_type());
 			assert_eq!(sink.property::<u64>(name), value);
 		}
+		assert_eq!(spec(&sink, "linger").default_value().get::<u64>(), Ok(30_000));
 		for name in [
 			"status",
 			"connected",
@@ -2137,7 +2186,7 @@ mod tests {
 
 	#[test]
 	fn duration_millis_saturates() {
-		assert_eq!(duration_millis(Duration::MAX), u64::MAX);
+		assert_eq!(crate::connection::duration_millis(Duration::MAX), u64::MAX);
 	}
 
 	#[test]
@@ -2153,13 +2202,34 @@ mod tests {
 		let quic = super::super::session::quic_config(&resolved).resolve();
 		assert_eq!(quic.idle_timeout, Duration::from_secs(15));
 		assert_eq!(quic.keep_alive, Some(Duration::from_secs(3)));
+		assert!(!sink.property::<bool>("quic-keylog"));
+		assert!(quic.keylog.is_none());
 
 		sink.set_property("quic-keep-alive", 0u64);
 		sink.set_property("quic-idle-timeout", 0u64);
+		sink.set_property("quic-keylog", true);
 		let resolved = ResolvedSettings::try_from(sink.imp().settings.lock().unwrap().clone()).unwrap();
 		let quic = super::super::session::quic_config(&resolved).resolve();
 		assert_eq!(quic.idle_timeout, Duration::ZERO);
 		assert_eq!(quic.keep_alive, None);
+		assert!(quic.keylog.is_some());
+	}
+
+	/// The sink retries without a budget, so an outage of any length is ridden out
+	/// (the session tests' relay loss covers the redial itself).
+	#[test]
+	fn the_sink_retries_without_a_budget() {
+		gst::init().unwrap();
+		let sink = sink();
+		sink.set_property("url", "https://relay.example.com/anon");
+		sink.set_property("broadcast", "test");
+		let resolved = ResolvedSettings::try_from(sink.imp().settings.lock().unwrap().clone()).unwrap();
+		let config = super::super::session::connect_config(&resolved);
+		assert_eq!(
+			config.backoff.timeout,
+			Some((Duration::ZERO).into()),
+			"zero is unlimited"
+		);
 	}
 
 	#[test]

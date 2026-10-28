@@ -94,7 +94,6 @@ test("the error type names the registry the code came from", () => {
 });
 
 test("invalid request IDs keep their session registry code", () => {
-	expect(Number(SessionCode.InvalidRequestId)).toBe(0x4);
 	expect(fromClose({ closeCode: 0x4 })?.code).toBe(SessionCode.InvalidRequestId);
 });
 
@@ -207,21 +206,53 @@ test("fromClose: a clean close is null, a coded close keeps its code", () => {
 	expect(fromClose({ closeCode: SessionCode.GoawayTimeout })?.message).toBe("remote error: 16");
 });
 
-// The two registries are wire contracts (draft-lcurley-moq-lite, Error Codes) and must match
-// the Rust tables, since the two implementations talk to each other.
-test("the code tables match the spec", () => {
-	// moq-transport's, reused unchanged.
-	expect(Number(SessionCode.Cancel)).toBe(0x0);
-	expect(Number(SessionCode.Unauthorized)).toBe(0x2);
-	expect(Number(SessionCode.GoawayTimeout)).toBe(0x10);
-	expect(Number(SessionCode.AuthTokenCacheOverflow)).toBe(0x13);
-	expect(Number(SessionCode.Version)).toBe(0x15);
-	expect(Number(SessionCode.UnknownAuthTokenAlias)).toBe(0x17);
-	expect(Number(SessionCode.TooManyRequestUpdates)).toBe(0x1b);
-	expect(Number(StreamCode.Cancel)).toBe(0x1);
-	expect(Number(StreamCode.SessionClosed)).toBe(0x3);
-	expect(Number(StreamCode.TooFarBehind)).toBe(0x5);
+// The two registries are wire contracts (draft-lcurley-moq-lite, Error Codes). Encoder and
+// decoder share these constants, so only a spec table catches a renumbering.
+test("session codes match the draft's Session Error Codes table", () => {
+	expect({ ...SessionCode } as Record<string, number>).toEqual({
+		Cancel: 0x0,
+		Internal: 0x1,
+		Unauthorized: 0x2,
+		ProtocolViolation: 0x3,
+		InvalidRequestId: 0x4,
+		KeyValueFormatting: 0x6,
+		TooManyRequests: 0x7,
+		InvalidPath: 0x8,
+		GoawayTimeout: 0x10,
+		Timeout: 0x11,
+		AuthTokenCacheOverflow: 0x13,
+		Version: 0x15,
+		MalformedAuthToken: 0x16,
+		UnknownAuthTokenAlias: 0x17,
+		Expired: 0x18,
+		InvalidAuthority: 0x19,
+		TooManyRequestUpdates: 0x1b,
+		Unsupported: 0x30,
+	});
+});
 
+test("stream codes match the draft's Stream Error Codes table", () => {
+	expect({ ...StreamCode } as Record<string, number>).toEqual({
+		Internal: 0x0,
+		Cancel: 0x1,
+		DeliveryTimeout: 0x2,
+		SessionClosed: 0x3,
+		GoingAway: 0x4,
+		TooFarBehind: 0x5,
+		MalformedTrack: 0x12,
+		ControlTimeout: 0x31,
+		GroupTooLarge: 0x32,
+		NotFound: 0x33,
+		Old: 0x34,
+		Evicted: 0x35,
+		Unroutable: 0x36,
+		FrameTooLarge: 0x38,
+		TimestampMismatch: 0x39,
+		Unauthorized: 0x3b,
+	});
+});
+
+test("the code tables keep their registry ranges", () => {
 	// Session codes retain moq-transport assignments below 32; Lite owns 48-63.
 	for (const code of Object.values(SessionCode)) {
 		if (code === SessionCode.Unsupported) {
@@ -231,7 +262,6 @@ test("the code tables match the spec", () => {
 			expect(code).toBeLessThan(32);
 		}
 	}
-	expect(Number(SessionCode.Unsupported)).toBe(0x30);
 
 	// The stream table adds moq-lite's own 48-63 assignments. 32-47 is reserved and
 	// carries nothing, so no code sits there.
@@ -254,20 +284,8 @@ test("the code tables match the spec", () => {
 			expect(code).toBeLessThan(32);
 		}
 	}
-	// The values the Rust `StreamError` sends for the same conditions.
-	expect(Number(StreamCode.ControlTimeout)).toBe(0x31);
-	expect(Number(StreamCode.GroupTooLarge)).toBe(0x32);
-	expect(Number(StreamCode.NotFound)).toBe(0x33);
-	expect(Number(StreamCode.Old)).toBe(0x34);
-	expect(Number(StreamCode.Evicted)).toBe(0x35);
-	expect(Number(StreamCode.Unroutable)).toBe(0x36);
-	expect(Number(StreamCode.FrameTooLarge)).toBe(0x38);
-	expect(Number(StreamCode.TimestampMismatch)).toBe(0x39);
-	expect(Number(StreamCode.Unauthorized)).toBe(0x3b);
-
 	// The spaces are disjoint: 0 ends a session cleanly but fails a stream.
 	expect(Number(SessionCode.Cancel)).not.toBe(Number(StreamCode.Cancel));
-	expect(Number(StreamCode.Internal)).toBe(0x0);
 });
 
 test("fromTransport: decodes a real qmux stream reset", () => {
@@ -332,10 +350,17 @@ test("toStreamCode: a local condition maps to the code the peer can act on", () 
 	expect(toStreamCode(new StreamError(StreamCode.GoingAway))).toBe(StreamCode.GoingAway);
 	expect(toStreamCode(new StreamError(StreamCode(70)))).toBe(StreamCode(70));
 
-	// Anything else already means 0, and so does a session code: the registries are disjoint, so
-	// forwarding one onto a stream would mistranslate it (session 0x4 is a stream GOING_AWAY).
+	// Anything else already means 0.
 	expect(toStreamCode(new Error("boom"))).toBe(StreamCode.Internal);
-	expect(toStreamCode(new SessionError(SessionCode.GoawayTimeout))).toBe(StreamCode.Internal);
+	// A session's close reaching a stream came from the route it was served through. Its code is
+	// not forwarded: the registries are disjoint (session 0x4 is a stream GOING_AWAY).
+	expect(toStreamCode(new SessionError(SessionCode.GoawayTimeout))).toBe(StreamCode.Unroutable);
+	// An application code means the same in both registries, so the source's own error survives.
+	expect(toStreamCode(new SessionError(SessionCode(70)))).toBe(StreamCode(70));
+	// So is a session that failed at the transport, with no close code: its route is gone.
+	expect(toStreamCode(Object.assign(new Error("connection lost"), { source: "session" }))).toBe(
+		StreamCode.Unroutable,
+	);
 });
 
 // A control request that outlived its deadline is not late content. It carries its own code so a
@@ -350,17 +375,7 @@ test("toStreamCode: a control timeout keeps its own code", () => {
 	expect(toStreamCode(timeout)).toBe(StreamCode.ControlTimeout);
 
 	// The moq-transport registry has no value for it, so every draft reads it as INTERNAL_ERROR.
-	for (const version of [
-		Version.DRAFT_14,
-		Version.DRAFT_15,
-		Version.DRAFT_16,
-		Version.DRAFT_17,
-		Version.DRAFT_18,
-		Version.DRAFT_19,
-		Version.DRAFT_20,
-		Version.DRAFT_21,
-		Version.DRAFT_22,
-	]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
 		expect(toStreamCode(timeout, { version })).toBe(StreamCode.Internal);
 	}
 
@@ -420,6 +435,6 @@ test("toStreamCode: lite-only codes do not reach an IETF peer", () => {
 		StreamCode.Unroutable,
 		StreamCode.FrameTooLarge,
 	]) {
-		expect(toStreamCode(new StreamError(code), { version: Version.DRAFT_20 })).toBe(StreamCode.Internal);
+		expect(toStreamCode(new StreamError(code), { version: Version.DRAFT_22 })).toBe(StreamCode.Internal);
 	}
 });

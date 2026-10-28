@@ -4,14 +4,26 @@
  * Creates paired client/server transports connected via TransformStreams.
  */
 
+import { Consumer as BroadcastConsumer } from "./broadcast.ts";
 import type { TransportStats } from "./connection/stats.ts";
 import type { Frame } from "./group.ts";
 import type { SendStream } from "./stream.ts";
 import { Timestamp } from "./time.ts";
 
-/** A UTF-8 text frame stamped now, for a test writing to a timed track. */
-export function textFrame(text: string): Frame {
-	return { payload: new TextEncoder().encode(text), timestamp: Timestamp.now() };
+/** A UTF-8 text frame stamped `timestamp` (now by default), for a test writing to a timed track. */
+export function textFrame(text: string, timestamp = Timestamp.now()): Frame {
+	return { payload: new TextEncoder().encode(text), timestamp };
+}
+
+/**
+ * A broadcast as a session hands it out: no producer, so it ends once no handle holds it,
+ * which is how a test sees the origin let go of an answer.
+ */
+export class SessionBroadcast extends BroadcastConsumer {
+	// biome-ignore lint/complexity/noUselessConstructor: widens the protected base constructor to public
+	constructor() {
+		super();
+	}
 }
 
 // High watermark to prevent writes from blocking on backpressure.
@@ -50,7 +62,7 @@ export class MockTransport implements WebTransport {
 
 	readonly datagrams: WebTransportDatagramDuplexStream;
 	readonly congestionControl: WebTransportCongestionControl;
-	readonly reliability: string;
+	readonly reliability = "supports-unreliable";
 
 	/**
 	 * Every outgoing stream this transport opened, in call order, split by stream kind. Each
@@ -99,7 +111,6 @@ export class MockTransport implements WebTransport {
 		});
 
 		this.congestionControl = "default";
-		this.reliability = "supports-unreliable";
 
 		if (datagramsEnabled) {
 			// A real datagram duplex: writes enqueue into the peer's incoming readable,
@@ -282,8 +293,9 @@ export class MockTransport implements WebTransport {
 	/** The snapshot {@link getStats} resolves with (default empty). */
 	stats: TransportStats = {};
 
-	async getStats(): Promise<TransportStats> {
-		return this.stats;
+	/** `datagrams` is the one member the W3C stats dictionary requires. */
+	async getStats() {
+		return { datagrams: {}, ...this.stats };
 	}
 }
 
@@ -311,7 +323,7 @@ export interface MockTransportOptions {
 /**
  * Creates a pair of connected MockTransport instances.
  *
- * @param protocol - The WebTransport protocol identifier (e.g. "moqt-17", "moql", "")
+ * @param protocol - The WebTransport protocol identifier (e.g. "moqt-18", "moql", "")
  * @param options - Optional behavior toggles for datagram availability
  * @returns An object containing `client` and `server` transports
  */

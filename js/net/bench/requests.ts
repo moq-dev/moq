@@ -1,20 +1,25 @@
 /** Sweep request restart and cancellation over independent origin and waiter dimensions. */
 import { Producer as Broadcast } from "../src/broadcast";
 import * as Epoch from "../src/epoch";
-import { NativeSession } from "../src/ietf/adapter";
 import { Publisher as IetfPublisher } from "../src/ietf/publisher";
 import { RequestOk } from "../src/ietf/request";
+import { NativeSession } from "../src/ietf/session";
 import {
 	SubscribeNamespace,
 	SubscribeNamespaceEntry,
 	SubscribeNamespaceEntryDone,
 } from "../src/ietf/subscribe_namespace";
 import { ALPN, Version } from "../src/ietf/version";
+import { hooks } from "../src/internal";
 import { createMockTransportPair } from "../src/mock";
 import { Producer } from "../src/origin";
 import * as Path from "../src/path";
+import { readsFrom } from "../src/resume.test-util";
 import { Stream } from "../src/stream";
 import { wireOf } from "../src/wire";
+
+// Keep protocol diagnostics out of the measured CSV on stdout.
+console.debug = console.error;
 
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 console.log("touched,routes,followers,update_us");
@@ -24,8 +29,9 @@ for (const touched of ["watched", "unrelated"])
 			const origin = new Producer();
 			const path = Path.from("room/0");
 			const broadcasts = Array.from({ length: routes }, (_, i) => {
-				const broadcast = origin.createBroadcast(Path.from(`room/${i}`));
-				broadcast.announce();
+				const broadcastPublication = origin.createBroadcast(Path.from(`room/${i}`));
+				const broadcast = broadcastPublication.broadcast;
+				broadcastPublication.announce();
 				return broadcast;
 			});
 			const requests = Array.from({ length: followers }, () => origin.request(path, { announced: true }));
@@ -36,8 +42,9 @@ for (const touched of ["watched", "unrelated"])
 			for (let round = 0; round < 6; round++) {
 				const start = performance.now();
 				for (let i = 0; i < 128; i++) {
-					const next = origin.createBroadcast(touched === "watched" ? path : Path.from("other"));
-					next.announce();
+					const nextPublication = origin.createBroadcast(touched === "watched" ? path : Path.from("other"));
+					const next = nextPublication.broadcast;
+					nextPublication.announce();
 					if (touched === "watched") {
 						current.close();
 						current = next;
@@ -67,7 +74,7 @@ console.log("unrelated,waiters,cancel_us");
 for (const unrelated of [8, 128, 2048])
 	for (const waiters of [1, 8, 32]) {
 		const origin = new Producer();
-		origin.dynamic(Path.from("pending"));
+		origin.requestsRoute(Path.from("pending"));
 		const held = Array.from({ length: unrelated }, (_, i) => origin.request(Path.from(`pending/${i}`)));
 		const wire = wireOf(origin.consume());
 		const samples: number[] = [];
@@ -101,19 +108,20 @@ for (const failovers of [0, 1, 16, 128])
 			const sources: Broadcast[] = [];
 			for (let i = 0; i < failovers; i++) {
 				const epoch = Epoch.mint();
-				const primary = origin.dynamic(prefix, { epoch, cost: 0n });
+				const primary = origin.requestsRoute(prefix, { epoch, cost: 0n });
 				const ar = primary.requested();
-				const br = origin.dynamic(prefix, { epoch, cost: 1n }).requested();
+				const br = origin.requestsRoute(prefix, { epoch, cost: 1n }).requested();
 				const held = origin.request(path);
 				const source = new Broadcast();
 				sources.push(source);
-				(await ar.next()).value?.accept(source);
+				const answer = (await ar.next()).value;
+				if (answer) hooks.acceptRequest(answer, source);
 				await settle();
 				entries.push({ primary, ar, br, held });
 			}
 			const epoch = Epoch.mint();
-			origin.dynamic(prefix, { epoch });
-			for (let i = 0; i < extraRoutes; i++) origin.dynamic(prefix, { epoch, cost: BigInt(i + 1) });
+			origin.requestsRoute(prefix, { epoch });
+			for (let i = 0; i < extraRoutes; i++) origin.requestsRoute(prefix, { epoch, cost: BigInt(i + 1) });
 			const pending = [];
 			for (const entry of entries) {
 				entry.primary.close();
@@ -144,9 +152,9 @@ for (const failovers of [0, 1, 16, 128])
 				for (let i = 0; i < entries.length; i++) {
 					const source = new Broadcast();
 					sources.push(source);
-					pending[i].accept(source);
+					hooks.acceptRequest(pending[i], source);
 					await settle();
-					if (entries[i].held.active.peek()?.closed !== source.closed) throw new Error("lost failover");
+					if (!readsFrom(entries[i].held.active.peek(), source)) throw new Error("lost failover");
 				}
 				if (round > 1) samples.push(active / 128);
 			} finally {
@@ -175,7 +183,7 @@ for (const operation of ["cancel-forward", "cancel-reverse", "drain-local"])
 			const settled: number[] = [];
 			for (let round = 0; round < 4; round++) {
 				const origin = new Producer();
-				const dynamic = origin.dynamic(Path.from("pending"));
+				const dynamic = origin.requestsRoute(Path.from("pending"));
 				const requests = dynamic.requested();
 				const wire = wireOf(origin.consume());
 				const names = Array.from({ length: paths }, (_, i) => Path.from(`pending/${i}`));
@@ -233,7 +241,7 @@ for (const survivor of [false, true])
 				const origin = new Producer();
 				const prefix = Path.from("competing");
 				const path = Path.from("competing/touched");
-				for (let i = 0; i < routes; i++) origin.dynamic(prefix, { cost: BigInt(i) });
+				for (let i = 0; i < routes; i++) origin.requestsRoute(prefix, { cost: BigInt(i) });
 				const wire = wireOf(origin.consume());
 				const kept = survivor ? new AbortController() : undefined;
 				const remaining = kept ? wire.demand(path, undefined, kept.signal).catch(() => {}) : undefined;
@@ -265,7 +273,7 @@ for (const survivor of [false, true])
 console.log("namespace_update,draft,namespaces,subscribers,update_us");
 for (const [version, alpn] of [
 	[Version.DRAFT_18, ALPN.DRAFT_18],
-	[Version.DRAFT_21, ALPN.DRAFT_21],
+	[Version.DRAFT_22, ALPN.DRAFT_22],
 ] as const)
 	for (const namespaces of [1, 32, 128])
 		for (const subscribers of [1, 8]) {
@@ -273,8 +281,9 @@ for (const [version, alpn] of [
 			const sources = [];
 			for (const prefix of ["a", "b"])
 				for (let i = 0; i < namespaces; i++) {
-					const source = origin.createBroadcast(Path.from(`${prefix}/${i}`));
-					source.announce();
+					const sourcePublication = origin.createBroadcast(Path.from(`${prefix}/${i}`));
+					const source = sourcePublication.broadcast;
+					sourcePublication.announce();
 					sources.push(source);
 				}
 			const peers = await Promise.all(

@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
+import { Milli } from "@moq/clock";
 import { Decoder } from "@moq/flate";
-import { Time, Track } from "@moq/net";
+import { Track } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { Producer } from "./producer.ts";
 
@@ -8,7 +9,7 @@ type Value = Record<string, unknown>;
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
-const REPLAY_LATENCY = Time.Milli(30_000);
+const REPLAY_LATENCY = Milli(30_000);
 
 // Reconstruct every value a compressed consumer yields, in order.
 async function drainCompressed(track: Track.Subscriber): Promise<Value[]> {
@@ -39,7 +40,7 @@ async function groupCount(track: Track.Ordered): Promise<number> {
 
 test("compressed snapshot per group round-trips", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>({ track, deltaRatio: 0, compression: "deflate" });
+	const producer = new Producer<Value>({ track, deltas: false, compression: "deflate" });
 	producer.update({ value: { a: 1 } });
 	producer.update({ value: { a: 2 } });
 	producer.finish();
@@ -51,7 +52,7 @@ test("compressed snapshot per group round-trips", async () => {
 test("compressed live consumer sees each update in order", async () => {
 	// A live consumer reconstructs each update in order from the shared per-group stream.
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>({ track, deltaRatio: 100, compression: "deflate" });
+	const producer = new Producer<Value>({ track, deltas: true, compression: "deflate" });
 	const consumer = new Consumer<Value>({ track: track.subscribe(), compression: "deflate" });
 
 	for (let n = 1; n <= 5; n++) {
@@ -62,7 +63,7 @@ test("compressed live consumer sees each update in order", async () => {
 
 test("compressed deltas share one group and reconstruct", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>({ track, deltaRatio: 100, compression: "deflate" });
+	const producer = new Producer<Value>({ track, deltas: true, compression: "deflate" });
 	producer.update({ value: { a: 1, b: 1 } });
 	producer.update({ value: { a: 1, b: 2 } });
 	producer.update({ value: { a: 5, b: 2 } });
@@ -73,7 +74,7 @@ test("compressed deltas share one group and reconstruct", async () => {
 
 test("compressed late joiner reconstructs from snapshot + deltas", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>({ track, deltaRatio: 100, compression: "deflate" });
+	const producer = new Producer<Value>({ track, deltas: true, compression: "deflate" });
 	producer.update({ value: { a: 1, b: 1 } });
 	producer.update({ value: { a: 1, b: 2 } });
 	producer.update({ value: { a: 5, b: 2 } });
@@ -87,7 +88,7 @@ test("a group's snapshot decodes from a fresh decoder", async () => {
 	// Frame 0 opens a cold window, so a brand-new decoder reconstructs it, which is what lets a late
 	// joiner (or the Rust consumer) start mid-stream at any group boundary.
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>({ track, deltaRatio: 0, compression: "deflate" });
+	const producer = new Producer<Value>({ track, deltas: false, compression: "deflate" });
 	producer.update({ value: { hello: "world" } });
 	producer.finish();
 
@@ -100,7 +101,7 @@ test("a group's snapshot decodes from a fresh decoder", async () => {
 test("compressed deltas reuse the window", async () => {
 	// The shared per-group window is the point: a delta restating snapshot content shrinks sharply.
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>({ track, deltaRatio: 100, compression: "deflate" });
+	const producer = new Producer<Value>({ track, deltas: true, compression: "deflate" });
 	const phrase = "Media over QUIC delivers real-time latency at massive scale";
 	producer.update({ value: { note: phrase } });
 	producer.update({ value: { note: phrase, echo: phrase } });
@@ -120,24 +121,25 @@ test("compression shrinks a repetitive frame", async () => {
 	const value = { renditions: Array(3).fill("video".repeat(50)) };
 
 	const plain = new Track.Producer("plain");
-	new Producer<Value>({ track: plain, deltaRatio: 0 }).update({ value: value });
+	new Producer<Value>({ track: plain, deltas: false }).update({ value: value });
 	const compressed = new Track.Producer("compressed");
-	new Producer<Value>({ track: compressed, deltaRatio: 0, compression: "deflate" }).update({ value: value });
+	new Producer<Value>({ track: compressed, deltas: false, compression: "deflate" }).update({ value: value });
 
 	const plainLen = (await firstFrame(plain.subscribe().ordered())).length;
 	const compressedLen = (await firstFrame(compressed.subscribe().ordered())).length;
 	expect(compressedLen).toBeLessThan(plainLen);
 });
 
-test("compressed deltas roll on the compressed budget", async () => {
-	// With compression the budget is measured on compressed frame sizes: #snapshotLen and #deltaBytes
-	// are the written slice lengths, not the raw JSON. A tight ratio over many distinct updates must
-	// roll more than one group, and a late joiner must still rebuild the final value across the
-	// compressed group boundary. Guards against the budget regressing to raw lengths. Two identical
-	// producers (deterministic output) keep the group-count and reconstruction reads independent.
+test("compressed deltas reconstruct across group boundaries", async () => {
+	// Each group opens a fresh DEFLATE window, so a late joiner must rebuild the final value across
+	// the compressed boundaries. Two identical producers (deterministic output) keep the group-count
+	// and reconstruction reads independent.
 	const fill = (track: Track.Producer) => {
-		const producer = new Producer<Value>({ track, deltaRatio: 2, compression: "deflate" });
-		for (let n = 0; n <= 40; n++) producer.update({ value: { n } });
+		const producer = new Producer<Value>({ track, compression: "deflate" });
+		for (let n = 0; n <= 40; n++) {
+			producer.update({ value: { n } });
+			if (n % 7 === 6) producer.cut();
+		}
 		producer.finish();
 	};
 

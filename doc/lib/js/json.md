@@ -6,15 +6,16 @@ description: JSON over MoQ tracks, as snapshots, streams, or a sliding window
 # @moq/json
 
 [![npm](https://img.shields.io/npm/v/@moq/json)](https://www.npmjs.com/package/@moq/json)
+[![API](https://img.shields.io/badge/API-reference-blue)](/lib/js/api/json)
 
 JSON over [`@moq/net`](/lib/js/net) tracks, in three modes. Snapshot and stream
 are the catalog modes on the [hang](/concept/hang#data-tracks) page. Window is
 a third framing for a raw track: both ends opt into it, and a generic catalog
 reader will not pick it up.
 
-- **Snapshot**: lossy latest value, with RFC 7396 merge-patch deltas. A delta before any snapshot is an error. `next()` yields every state in order; `latest()` skips to the newest.
+- **Snapshot**: lossy latest value, with RFC 7396 merge-patch deltas. A delta before any snapshot is an error. `next()` yields every state in order; `latest()` skips to the newest. Deltas ride one group until a joiner wants a fresh one: give the track a `refresh` ratio (8 is typical) and the producer restates the value in a new group. Without a ratio a group rolls only at its caps.
 - **Stream**: lossless append-log in a single group. A reader that falls behind fails the read rather than resuming mid-log.
-- **Window**: a bounded run of records a reader can join at any point. A new group restates what it keeps explicitly, so a reader that was keeping up is not handed a record twice.
+- **Window**: a bounded run of records a reader can join at any point. A new group restates what it keeps explicitly, so a reader that was keeping up is not handed a record twice. Its ops roll on the track's `refresh` ratio the same way.
 
 Both sides choose the same compression, `"none"` or `"deflate"`. Producers take
 a `Timed` value, `{ value, at }`, where `at` is the capture time written as
@@ -32,11 +33,11 @@ for await (const { value, at } of consumer) {
 }
 ```
 
-`next()` buffers every state it has not yielded. On a timed track it skips a
-group once the subscription's `maxDelay` proves it stale, and the default of
-zero keeps only the newest group, so subscribe with a `maxDelay` covering how
-far the playhead trails the live edge. An untimed track skips nothing; a reader
-that cannot keep up calls `latest()` instead.
+`next()` buffers every state it has not yielded and skips a group once the
+subscription's `maxDelay` proves it stale. The budget counts media time and
+wall time, or wall time alone for an untimed track. The default of zero keeps
+only the newest group, so subscribe with a `maxDelay` covering how far the
+playhead trails the live edge. Use `latest()` to skip straight to the head.
 
 A stream rides one group, so the whole log shares `@moq/net`'s group budget:
 32 MiB of payload and 8192 records. An append that might not fit is refused

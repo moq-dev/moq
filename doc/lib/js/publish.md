@@ -6,6 +6,7 @@ description: Capture, encode, and publish from the browser
 # @moq/publish
 
 [![npm](https://img.shields.io/npm/v/@moq/publish)](https://www.npmjs.com/package/@moq/publish)
+[![API](https://img.shields.io/badge/API-reference-blue)](/lib/js/api/publish)
 
 The publisher: captures a camera, microphone, screen, or file, encodes with
 WebCodecs, writes the catalog, and publishes a hang broadcast.
@@ -28,13 +29,17 @@ WebCodecs, writes the catalog, and publishes a hang broadcast.
 | Attribute | |
 | --- | --- |
 | `url`, `name` | Relay URL (with `?jwt=` if needed) and broadcast name. |
+| `versions` | Protocol versions to offer, most preferred first, comma-separated like `moq-transport-18,moq-lite-06`. Every stable version by default. |
 | `source` | `camera`, `screen`, or `file`. |
 | `muted`, `invisible` | Disable audio or video capture. |
 | `preview` | What the nested element shows: the raw `source` (default), a decoded copy of the `encoded` stream to see what viewers get, or `none`. |
 | `backend` | How a `<canvas>` preview is drawn; see [@moq/video](/lib/js/video). `auto` (default), `webgpu`, or `2d`. |
-| `announce` | When to advertise: once the `source` is live (default), `always`, or `never`. Nobody can see or subscribe to the broadcast until it is announced. |
+| `announce` | When to advertise: once the `source` is live (default), or `always`. Nobody can see or subscribe to the broadcast until it is announced. To keep it out of discovery, use a hidden name with a `.`-prefixed segment; it is still subscribable by name. |
 
-Every attribute is also a reactive property. The
+Every attribute is also a reactive property, and property or UI changes reflect
+back into the attributes. An invalid value is refused rather than defaulted: the
+property setter throws, and invalid markup reports a browser `error` event and
+suspends the element until corrected or removed. The
 [README](https://www.npmjs.com/package/@moq/publish) lists types and defaults.
 A nested `<video>` gets the raw capture stream; a `<canvas>` is drawn by the
 element. `<moq-publish-support>` shows what the browser can encode.
@@ -49,7 +54,10 @@ for a permission, device, or settings change instead of prompting again.
 The video encoder follows its share of the connection's send-rate estimate, so
 several publishers on one connection do not each target the whole uplink.
 Codec, resolution, framerate, and bitrate are tunable through
-`el.video.config`, and `el.video.cut()` asks for an extra keyframe. Size,
+`el.video.config`, and `el.video.cut()` asks for an extra keyframe. A viewer
+who joins once a group's deltas outweigh twice its keyframe gets a fresh one,
+so `keyframeInterval` is only the longest a group runs. Through a moq-lite
+relay, only the join that opens the relay's upstream subscription counts. Size,
 bitrate, and framerate change in place, while a codec or audio format change
 keeps the rendition's catalog ID under a fresh `track` name that viewers
 follow through the catalog. For
@@ -57,12 +65,12 @@ simulcast, drop the element and register several encoders on a
 `Publish.Broadcast`, as below.
 
 Audio groups carry at least 20 ms by default, packing shorter codec frames
-together. `el.audio.groupDuration` changes that minimum; `Time.Milli(0)` puts
+together. `el.audio.groupDuration` changes that minimum; `Milli(0)` puts
 every frame in its own group. A longer minimum lets a relay keep fewer
 streams, at the cost of coarser loss: a viewer that falls behind skips a whole
 group. Frames still forward as they are encoded.
 
-Timestamps are `performance.now()` in microseconds, so every source shares one
+Timestamps are `@moq/clock`'s `now()` in microseconds, so every source shares one
 timeline. The catalog's `clock` maps it to wall time. Stamp your own tracks
 (e.g. text cues) on the same timeline to stay in sync.
 
@@ -77,6 +85,7 @@ the same content, so a track re-created on the same `net` throws on an append
 that would reuse its sequences:
 
 ```ts
+import { Milli } from "@moq/clock";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 
@@ -88,9 +97,12 @@ signals.run((effect) => {
     // value is stamped with when it was written, so the track declares a timescale.
     const track = net.createTrack("meta.json", {
         timescale: Moq.Time.Timescale.MILLI,
-        maxAge: Moq.Time.Milli(86_400_000),
+        maxAge: Milli(86_400_000),
     });
-    effect.cleanup(() => track.close());
+    effect.cleanup(() => {
+        track.finish();
+        track.close();
+    });
 
     const meta = new Json.Snapshot.Producer<Meta>({ track });
     meta.update({ value: current, at: Moq.Time.Timestamp.now() });
@@ -116,16 +128,19 @@ import * as Publish from "@moq/publish";
 // the broadcasts, so they survive a reconnect.
 const connection = new Moq.Connection({ url: new URL("https://relay.example.com/anon") });
 
+const camera = new Publish.Source.Camera({ enabled: true });
+const microphone = new Publish.Source.Microphone({ enabled: true });
+const video = new Publish.Signals.Computed((effect) => effect.get(camera.out.source)?.video);
+// The orientation turns a phone's landscape frames upright while it is held in portrait.
+const capture = new Publish.Video.Capture({ source: video, orientation: camera.out.orientation });
+
 const broadcast = new Publish.Broadcast({
     origin: connection.origin,
     enabled: true,
     name: Publish.Net.Path.from("alice.hang"),
+    display: capture.out.display,
+    rotation: capture.out.rotation,
 });
-
-const camera = new Publish.Source.Camera({ enabled: true });
-const microphone = new Publish.Source.Microphone({ enabled: true });
-const video = new Publish.Signals.Computed((effect) => effect.get(camera.out.source)?.video);
-const capture = new Publish.Video.Capture({ source: video });
 
 // Each encoder registers a rendition on the broadcast (`broadcast.video(name)`) and
 // encodes only while someone is subscribed.

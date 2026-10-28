@@ -10,12 +10,16 @@
 #
 # One relay per protocol flavour, because negotiation is the part that broke:
 #   lite   default versions        -> moq-lite-06 over its own ALPN
-#   ietf   --listen-version 19     -> moq-transport-19 over its own ALPN
+#   ietf   --listen-version 22     -> moq-transport-22 over its own ALPN
 #   setup  --listen-version lite-02 -> the "moql" ALPN, version chosen by SETUP
 #
 # The publisher is @moq/net (TypeScript) and the subscriber is @moq/wasm (Rust),
 # so each case is also an interop check. See README.md.
 set -euo pipefail
+
+if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
+    exec bash "$(dirname "$0")/../../sh/local.sh" bash "$0" "$@"
+fi
 
 WASM_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 WORKSPACE=$(cd "$WASM_DIR/../.." && pwd)
@@ -34,11 +38,23 @@ PORT="${WASM_PORT:-}"
 
 # Cargo profile for the relay. Debug compiles faster, which is what a test
 # fixture wants; the workload is three connections and a few hundred KiB.
+BASELINE=
+UNIFFI=
 PROFILE="${WASM_PROFILE:-debug}"
 RELAY="${RELAY_BIN:-}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --baseline)
+            BASELINE=true
+            export HARNESS_KEEP=1
+            shift
+            ;;
+        --uniffi)
+            # moq-ffi over ubrn's wasm2 player, as a third backend. See README.md.
+            UNIFFI=true
+            shift
+            ;;
         --timeout)
             if [[ $# -lt 2 || -z "${2:-}" || "$2" == -* ]]; then
                 echo "error: --timeout requires a value" >&2
@@ -65,7 +81,7 @@ fi
 # defaults, which is the ALPN both sides prefer.
 FLAVOURS=(
     "lite::moq-lite-06"
-    "ietf:moq-transport-19:moq-transport-19"
+    "ietf:moq-transport-22:moq-transport-22"
     "setup:moq-lite-02:moq-lite-02"
 )
 
@@ -94,6 +110,11 @@ command -v wasm-bindgen >/dev/null 2>&1 || {
 echo "building @moq/wasm..."
 (cd "$WORKSPACE" && just js wasm)
 
+if [[ -n $UNIFFI ]]; then
+    echo "building moq-ffi over ubrn (UniFFI 0.31 pin, scratch checkout)..."
+    "$WASM_DIR/uniffi/build.sh"
+fi
+
 echo "building moq-relay ($PROFILE)..."
 flag=()
 [[ "$PROFILE" == "debug" ]] || flag=(--profile "$PROFILE")
@@ -103,20 +124,33 @@ TARGET_BASE="${CARGO_TARGET_DIR:-$WORKSPACE/target}"
 
 cd "$WASM_DIR"
 bun install --frozen-lockfile
-# Playwright ships its own Chromium; PLAYWRIGHT_BROWSERS_PATH means CI installed
-# it already, in which case this is a no-op anyway.
-bunx playwright install chromium
+# The root devShell provides the matching Playwright Chromium.
 
 # Type-check against wasm-bindgen's generated .d.ts, as the shared harness check does.
 # wasm-bindgen resolves a type in a signature by its Rust identifier alone, so a
 # binding can compile, run, and still publish typings that name the wrong class.
 echo "type-checking against js/wasm/dist/moq.d.ts..."
 bunx tsc --noEmit
+# The generated TypeScript opts out with @ts-nocheck, so this checks what callers see.
+[[ -z $UNIFFI ]] || bunx tsc --noEmit -p uniffi/tsconfig.json
 
 echo "bundling the harness page..."
 rm -rf dist
-bun build src/main.ts --outdir dist --target browser >/dev/null
-cp index.html dist/index.html
+driver=driver.ts
+if [[ -n $BASELINE ]]; then
+    bun test baseline/fixture.test.ts
+    bun build baseline/publisher.ts baseline/consumer.ts --outdir dist --target browser >/dev/null
+    bun build ../../js/net/src/index.ts --outfile dist/net.js --target browser --minify >/dev/null
+    driver=baseline/driver.ts
+    if [[ -n $UNIFFI ]]; then
+        bun build uniffi/dist/index.ts --outfile dist/uniffi.js --target browser --minify >/dev/null
+        export WASM_UNIFFI=1
+    fi
+else
+    bun build src/main.ts --outdir dist --target browser >/dev/null
+    cp index.html dist/index.html
+fi
+[[ -z $UNIFFI ]] || bun build uniffi/cases.ts --outfile dist/uniffi-cases.js --target browser >/dev/null
 
 # ── relays ──────────────────────────────────────────────────────────────────
 # One reservation per flavour rather than a span from a fixed base: a span means
@@ -142,7 +176,11 @@ for flavour in "${FLAVOURS[@]}"; do
     [[ -z "$version_flag" ]] || args+=(--listen-version "$version_flag")
 
     echo "starting $name relay on 127.0.0.1:${port}..."
-    harness_spawn "relay-$name" "$HARNESS_RUN/relay-$name.log" "$RELAY" "${args[@]}"
+    # moq-net at debug logs each request's answer and end, so a case that stalls shows
+    # which hop stopped: the page's own log has the far end, and the relay's only shows
+    # requests starting at info.
+    harness_spawn "relay-$name" "$HARNESS_RUN/relay-$name.log" \
+        env RUST_LOG="${RUST_LOG:-info,moq_net=debug}" "$RELAY" "${args[@]}"
 
     if ! harness_ready "$url/certificate.sha256" 30 "$HARNESS_PID"; then
         echo "$name relay never became ready" >&2
@@ -164,8 +202,13 @@ printf '[%s]\n' "$(
 # in `wait`, where a trap can run: bash defers a trap until a foreground child
 # returns, which would leave Chromium behind for as long as the driver hangs.
 status=0
-harness_spawn driver - bun driver.ts --relays "$HARNESS_RUN/relays.json" --timeout "$TIMEOUT"
+harness_spawn driver - bun "$driver" --relays "$HARNESS_RUN/relays.json" --timeout "$TIMEOUT"
 harness_wait "$HARNESS_PID" || status=$?
+
+if [[ $status -eq 0 && -n $UNIFFI ]]; then
+    harness_spawn uniffi - bun uniffi/driver.ts --relays "$HARNESS_RUN/relays.json"
+    harness_wait "$HARNESS_PID" || status=$?
+fi
 
 if [[ $status -ne 0 ]]; then
     for flavour in "${FLAVOURS[@]}"; do

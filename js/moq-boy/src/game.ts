@@ -6,6 +6,7 @@
  *
  * @module
  */
+import { Nano, Second } from "@moq/clock";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import * as Watch from "@moq/watch";
@@ -35,7 +36,7 @@ interface Command {
 }
 
 // Stop publishing feedback after 60s of no input.
-const FEEDBACK_IDLE_MS = 60_000;
+const FEEDBACK_IDLE = Nano.fromSecond(Second(60));
 
 // Game Boy native resolution.
 const GB_WIDTH = 160;
@@ -64,46 +65,58 @@ export const KEY_MAP: Record<string, string> = {
  * signals from this class to render the interface.
  */
 export class Game {
+	/** The session identifier, such as the ROM name. */
 	readonly sessionId: string;
 	readonly #signals = new Moq.Signals.Effect();
 
-	// Config references.
+	/** The session currently expanded, shared by every game on the page. */
 	readonly expanded: Moq.Signals.Signal<string | undefined>;
 	readonly #viewerPrefix: string;
 
-	// Reactive state exposed to UI.
+	/** Whether the pointer is over this game's tile. */
 	readonly hovered = new Moq.Signals.Signal(false);
+	/** Whether this game is expanded or hovered, which enables audio and input. */
 	readonly active = new Moq.Signals.Signal(false);
+	/** The playback delay target. */
 	readonly delay = new Moq.Signals.Signal<Watch.Delay>("auto");
+	/** Whether the viewer muted this game. */
 	readonly userMuted = new Moq.Signals.Signal(false);
+	/** The playback volume, from 0 to 1. */
 	readonly volume = new Moq.Signals.Signal(0.25);
+	/** The latest status the emulator published, or undefined before the first. */
 	readonly status = new Moq.Signals.Signal<GameStatus | undefined>(undefined);
+	/** The identifier of this viewer's feedback broadcast while it publishes. */
 	readonly viewerId = new Moq.Signals.Signal<string | undefined>(undefined);
 
-	// The canvas to render into, owned here and wired into the renderer (read-only there).
-	// The UI sets this once the <canvas> is mounted.
+	/** The canvas the video renders into, set by the UI once it is mounted. */
 	readonly canvas = new Moq.Signals.Signal<HTMLCanvasElement | undefined>(undefined);
 
 	// The video rendition target, owned here and wired into the video source as an input.
 	readonly #target = new Moq.Signals.Signal<Watch.Video.Target | undefined>(undefined);
 
-	// Watch API objects exposed so UI can access canvas, etc.
+	/** The game's broadcast. */
 	readonly broadcast: Watch.Broadcast;
+	/** The clock that keeps video and audio in step. */
 	readonly sync: Watch.Sync;
+	/** Picks the video rendition to fetch. */
 	readonly videoSource: Watch.Video.Source;
+	/** Decodes the video rendition. */
 	readonly videoDecoder: Watch.Video.Decoder;
+	/** Draws decoded frames into {@link canvas}. */
 	readonly videoRenderer: Watch.Video.Renderer;
+	/** Picks the audio rendition to fetch. */
 	readonly audioSource: Watch.Audio.Source;
+	/** Decodes the audio rendition. */
 	readonly audioDecoder: Watch.Audio.Decoder;
+	/** Plays decoded audio. */
 	readonly audioEmitter: Watch.Audio.Emitter;
 
-	// Input state.
+	/** The Game Boy buttons currently held down. */
 	readonly heldButtons = new Set<string>();
 
 	// Internal command publishing state.
 	#command = new Moq.Signals.Signal<Command | undefined>(undefined);
 	#feedbackActive = new Moq.Signals.Signal(false);
-	#feedbackTimeout: ReturnType<typeof setTimeout> | undefined;
 
 	constructor(config: GameConfig) {
 		const { sessionId, connection, expanded, gamePrefix, viewerPrefix } = config;
@@ -117,7 +130,7 @@ export class Game {
 		// Video pipeline.
 		this.broadcast = new Watch.Broadcast({
 			origin: config.origin,
-			name: Moq.Path.from(`${gamePrefix}/${sessionId}`),
+			name: Moq.Path.from(gamePrefix, sessionId),
 			enabled: true,
 		});
 		this.#signals.cleanup(() => this.broadcast.close());
@@ -191,6 +204,7 @@ export class Game {
 
 		// Command publishing.
 		this.#signals.run(this.#runCommands.bind(this, connection, config.origin));
+		this.#signals.run(this.#runFeedbackIdle.bind(this));
 	}
 
 	/** Send a button state update. */
@@ -202,8 +216,6 @@ export class Game {
 	sendCommand(cmd: Record<string, unknown>) {
 		// Activate feedback broadcasting on input, with idle timeout.
 		this.#feedbackActive.set(true);
-		clearTimeout(this.#feedbackTimeout);
-		this.#feedbackTimeout = setTimeout(() => this.#feedbackActive.set(false), FEEDBACK_IDLE_MS);
 
 		this.#command.set({ cmd, timestamps: this.#timestamps() }, true);
 	}
@@ -220,8 +232,8 @@ export class Game {
 		return entries;
 	}
 
+	/** Stop playback and input for this session. */
 	close() {
-		clearTimeout(this.#feedbackTimeout);
 		this.#signals.close();
 	}
 
@@ -280,6 +292,13 @@ export class Game {
 		});
 	}
 
+	#runFeedbackIdle(effect: Moq.Signals.Effect) {
+		if (!effect.get(this.#feedbackActive)) return;
+		// Every command restarts the idle timer.
+		effect.get(this.#command);
+		effect.timer(() => this.#feedbackActive.set(false), FEEDBACK_IDLE);
+	}
+
 	#runCommands(connection: Moq.Connection, origin: Moq.Origin.Producer, effect: Moq.Signals.Effect) {
 		// Publishing goes through the origin, but gate on a live connection anyway: a command
 		// broadcast for a game nobody is connected to is feedback into the void.
@@ -288,7 +307,6 @@ export class Game {
 		if (!effect.get(this.active)) {
 			// Clear feedback state when deactivating.
 			this.#feedbackActive.set(false);
-			clearTimeout(this.#feedbackTimeout);
 			this.#command.set(undefined);
 			return;
 		}
@@ -299,10 +317,11 @@ export class Game {
 		const viewerId = Math.random().toString(36).slice(2, 8);
 		this.viewerId.set(viewerId);
 
-		const viewerBroadcast = origin.createBroadcast(
-			Moq.Path.from(`${this.#viewerPrefix}/${this.sessionId}/${viewerId}`),
+		const viewerBroadcastPublication = origin.createBroadcast(
+			Moq.Path.from(this.#viewerPrefix, this.sessionId, viewerId),
 		);
-		viewerBroadcast.announce({ epoch: Moq.Epoch.mint() });
+		const viewerBroadcast = viewerBroadcastPublication.broadcast;
+		viewerBroadcastPublication.announce({ epoch: Moq.Epoch.mint() });
 		effect.cleanup(() => {
 			viewerBroadcast.close();
 			this.viewerId.set(undefined);

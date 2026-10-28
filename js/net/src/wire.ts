@@ -13,6 +13,7 @@ import type { Drain } from "./connection/goaway.ts";
 import type * as Epoch from "./epoch.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import type { Route } from "./hop.ts";
+import type { Lister, Tracks } from "./listing.ts";
 import type * as origin from "./origin.ts";
 import type * as Path from "./path.ts";
 import type * as track from "./track.ts";
@@ -23,9 +24,15 @@ export interface Broadcast {
 	/** The track's properties; `hold` keeps the track wanted until it aborts, the way a held TRACK stream does, and aborting it before the answer abandons the lookup. */
 	resolveTrackInfo(name: string, hold?: AbortSignal): Promise<track.Info>;
 	/** The newest frame the track's cache holds, read without subscribing; `undefined` while it holds none. */
-	largest(name: string): track.Location | undefined;
-	fetchGroup(name: string, sequence: number, options?: track.FetchGroupOptions): Promise<GroupConsumer>;
+	largest(name: string): track.Position | undefined;
+	/** Fetch one group; absent when the session's version has no FETCH, so callers never ask. */
+	fetchGroup?(name: string, sequence: number, options?: track.FetchGroupOptions): Promise<GroupConsumer>;
 	requested(): Promise<track.Request | undefined>;
+	// Sessions dedup a peer's listings per broadcast; a custom session has no public owner yet.
+	/** List the broadcast's tracks for `owner`, ending its older listing of this broadcast with CANCELLED. */
+	tracks(owner?: object): Tracks;
+	/** Answer the broadcast's listings, as a session does with its peer's; throws while another answers. */
+	lister(): Lister;
 	/**
 	 * A session delivered this broadcast. An originated route refuses to serve it:
 	 * publishing it would name this origin's hop for upstream content.
@@ -49,10 +56,14 @@ export interface OriginProducer {
 	accepts(prefix: Path.Valid): boolean;
 	receive(
 		prefix: Path.Valid,
-		route?: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] },
-	): origin.Dynamic;
+		route?: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"]; auth?: Route["auth"] },
+	): origin.Requests;
 	attach(discovery: boolean): Dispose;
-	expect(): Dispose;
+	/**
+	 * Hold the origin's announcement streams overlapping `prefix` unsynced until
+	 * the returned dispose: a session holds one while its peer's initial set is in flight.
+	 */
+	snapshot(prefix: Path.Valid): Dispose;
 	readonly requests: Getter<ReadonlyMap<Path.Valid, origin.RequestSlot> | undefined>;
 	changed(): GetPromise<unknown>;
 	/** Whether sessions should answer the request with a blind subscription right now. */
@@ -64,7 +75,6 @@ export interface OriginProducer {
 /** The protocol-facing operations behind an origin consumer. */
 export interface OriginConsumer {
 	routes(path: Path.Valid): boolean;
-	readonly broadcasts: Getter<ReadonlyMap<Path.Valid, broadcast.Consumer> | undefined>;
 	readonly advertised: Getter<Advertisements | undefined>;
 	/** The announced local broadcast at `path`, when it is the route peers are offered there.
 	 * A request naming an `epoch` only matches a route serving it. */
@@ -107,7 +117,22 @@ export interface Established {
 	consume(path: Path.Valid): broadcast.Consumer;
 	/** Settles with the peer's GOAWAY; the session keeps serving until it closes. */
 	readonly goaway: GetPromise<Drain>;
+	/**
+	 * Whether the peer refuses an announce request overlapping one it still holds, so
+	 * discovery never holds two where one covers the other.
+	 */
+	readonly exclusive: boolean;
+	// private: plumbing
+	/**
+	 * This session's side of its auth handle.
+	 *
+	 * @internal
+	 */
+	readonly auth: import("./auth_session.ts").AuthSession;
 }
+
+/** A produced broadcast's view, which always fetches from its own cache. */
+export type Produced = Broadcast & Required<Pick<Broadcast, "fetchGroup">>;
 
 type View = Broadcast | OriginProducer | OriginConsumer | Established;
 const views = new WeakMap<object, View>();
@@ -132,6 +157,7 @@ export function overrideBroadcastWire(
 	views.set(handle, { ...(view as Broadcast), ...overrides, fromSession: true });
 }
 
+export function wireOf(handle: broadcast.Producer): Produced;
 export function wireOf(handle: broadcast.Producer | broadcast.Consumer): Broadcast;
 export function wireOf(handle: origin.Producer): OriginProducer;
 export function wireOf(handle: origin.Consumer): OriginConsumer;

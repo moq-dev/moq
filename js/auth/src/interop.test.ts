@@ -257,11 +257,11 @@ describe("Rust-serialized contract", () => {
 	// request::tests::end_serializes_to_the_cross_language_vector and
 	// grant::tests::serializes_to_the_cross_language_vector in the Rust crate.
 	const RUST_REQUEST =
-		'{"id":"00ff","event":"end","reason":"expired","duration":1.5,"bytes":{"sent":10,"received":20},"node":"relay-1","transport":"websocket","remote":"203.0.113.9:4433","path":"/demo/room","query":"jwt=abc"}';
+		'{"id":"00ff","event":"end","reason":"expired","duration":1.5,"bytes":{"sent":10,"received":20},"node":"relay-1","transport":"websocket","remote":"203.0.113.9:4433","path":"/demo/room","query":"jwt=abc","implementation":"moq-net-js/0.4.2"}';
 	const RUST_INVALID_END =
-		'{"id":"00ff","event":"end","reason":"invalid","duration":1.5,"bytes":{"sent":10,"received":20},"node":"relay-1","transport":"websocket","remote":"203.0.113.9:4433","path":"/demo/room","query":"jwt=abc"}';
+		'{"id":"00ff","event":"end","reason":"invalid","duration":1.5,"bytes":{"sent":10,"received":20},"node":"relay-1","transport":"websocket","remote":"203.0.113.9:4433","path":"/demo/room","query":"jwt=abc","implementation":"moq-net-js/0.4.2"}';
 	const RUST_GRANT =
-		'{"publish":["alice/**"],"subscribe":["**"],"root":"pid/room","expires":4102444800,"revalidate":60,"tier":"websocket","peer":true,"upstream":true}';
+		'{"publish":["alice/**"],"subscribe":["**"],"root":"pid/room","expires":4102444800,"revalidate":60,"tier":"websocket","label":"project/key/123","peer":true,"upstream":true}';
 
 	test("parse a request a Rust relay sent", () => {
 		const request = RequestSchema.parse(JSON.parse(RUST_REQUEST));
@@ -270,6 +270,7 @@ describe("Rust-serialized contract", () => {
 		expect(request.reason).toBe("expired");
 		expect(request.duration).toBe(1.5);
 		expect(request.bytes).toEqual({ sent: 10, received: 20 });
+		expect(request.implementation).toBe("moq-net-js/0.4.2");
 	});
 
 	test("parse an invalid end reason a Rust relay sent", () => {
@@ -297,6 +298,7 @@ describe("Rust-serialized contract", () => {
 			expires: 4102444800,
 			revalidate: 60,
 			tier: "websocket",
+			label: "project/key/123",
 			peer: true,
 			upstream: true,
 		});

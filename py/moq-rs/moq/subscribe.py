@@ -3,37 +3,34 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING
 
-from moq_ffi import MoqAudio as Audio
 from moq_ffi import (
-    MoqAudioConsumer,
     MoqBroadcastConsumer,
     MoqFrame,
     MoqGroupConsumer,
     MoqTrackConsumer,
-    MoqVideoConsumer,
 )
-from moq_ffi import MoqVideo as Video
 
 from ._records import _subscription
+from ._stream import _Stream
 from .types import (
-    AudioDecoderOutput,
-    AudioFrame,
     Datagram,
     FetchGroupOptions,
     Frame,
     Subscription,
     TrackInfo,
-    VideoDecodedFrame,
-    VideoDecoderOutput,
 )
+
+if TYPE_CHECKING:
+    from .media import Audio, Video
 
 
 def _frame(frame: MoqFrame | None) -> Frame | None:
     return None if frame is None else Frame._from_ffi(frame)
 
 
-class GroupConsumer:
+class GroupConsumer(_Stream[Frame]):
     """Async iterator of raw frames within a single group."""
 
     def __init__(self, inner: MoqGroupConsumer) -> None:
@@ -44,20 +41,8 @@ class GroupConsumer:
         """The sequence number of this group within the track."""
         return self._inner.sequence()
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> Frame:
-        frame = await self._inner.read_frame()
-        if frame is None:
-            raise StopAsyncIteration
-        return Frame._from_ffi(frame)
+    async def _next(self) -> Frame | None:
+        return await self.read_frame()
 
     async def read_frame(self) -> Frame | None:
         """Read the next raw frame. Returns `None` when the group ends."""
@@ -68,7 +53,7 @@ class GroupConsumer:
         self._inner.cancel()
 
 
-class TrackConsumer:
+class TrackConsumer(_Stream[GroupConsumer]):
     """Async iterator of groups from a track, in sequence order.
 
     Iterating yields groups via :meth:`next_group`. Use :meth:`recv_group` (or
@@ -82,20 +67,8 @@ class TrackConsumer:
     def __init__(self, inner: MoqTrackConsumer) -> None:
         self._inner = inner
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> GroupConsumer:
-        group = await self.next_group()
-        if group is None:
-            raise StopAsyncIteration
-        return group
+    async def _next(self) -> GroupConsumer | None:
+        return await self.next_group()
 
     async def groups_as_arrived(self) -> AsyncIterator[GroupConsumer]:
         """Iterate groups in arrival order, including out-of-sequence deliveries.
@@ -157,75 +130,14 @@ class TrackConsumer:
         return TrackInfo._from_ffi(self._inner.info())
 
     def update(self, subscription: Subscription) -> None:
-        """Change this subscriber's delivery preferences."""
+        """Change this subscriber's delivery preferences.
+
+        Raises on a time anchor the track can't serve.
+        """
         self._inner.update(subscription._ffi())
 
     def cancel(self) -> None:
         """Cancel the subscription and stop delivering groups."""
-        self._inner.cancel()
-
-
-class AudioConsumer:
-    """Async iterator of decoded audio frames.
-
-    Built via :meth:`BroadcastConsumer.decode_audio`. The PCM layout
-    is fixed by the :class:`AudioDecoderOutput` passed at subscribe
-    time; each frame's ``data`` is raw bytes in that format.
-    """
-
-    def __init__(self, inner: MoqAudioConsumer) -> None:
-        self._inner = inner
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> AudioFrame:
-        frame = await self._inner.next()
-        if frame is None:
-            raise StopAsyncIteration
-        return frame
-
-    def cancel(self) -> None:
-        """Cancel the subscription and stop delivering audio frames."""
-        self._inner.cancel()
-
-
-class VideoConsumer:
-    """Async iterator of decoded video frames.
-
-    Built via :meth:`BroadcastConsumer.decode_video`. Each frame owns its
-    decoded picture until it is garbage collected; ``frame.pixels(format)``
-    converts it to tightly packed CPU pixels. Each carries its own
-    ``width()`` and ``height()``: ``output.resize`` is best effort, so read
-    the frame rather than assuming it took.
-    """
-
-    def __init__(self, inner: MoqVideoConsumer) -> None:
-        self._inner = inner
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> VideoDecodedFrame:
-        frame = await self._inner.next()
-        if frame is None:
-            raise StopAsyncIteration
-        return frame
-
-    def cancel(self) -> None:
-        """Cancel the subscription and stop delivering video frames."""
         self._inner.cancel()
 
 
@@ -259,63 +171,22 @@ class BroadcastConsumer:
         """
         return GroupConsumer(await self._inner.fetch_group(name, sequence, options))
 
-    async def resolve(self, reference: str | None) -> "BroadcastConsumer":
-        """Resolve a catalog rendition's ``broadcast`` reference to the broadcast
-        serving its track.
+    async def resolve(self, id: str, rendition: Video | Audio) -> "BroadcastConsumer":
+        """Resolve the catalog rendition ``id`` to the broadcast serving its track.
 
-        ``reference`` is ``catalog.video[name].broadcast`` /
-        ``catalog.audio[name].broadcast``: ``None`` or empty names this broadcast,
-        anything else names a sibling relative to it (e.g. ``./source``). Call it on
-        a rendition that carries one before :meth:`~moq.media.TrackConsumer.subscribe`,
-        :meth:`subscribe_track`, :meth:`fetch_group`, or :meth:`~moq.media.GroupConsumer.fetch`,
-        which take a track name rather than a rendition: the rendition's ``track``, or its
-        catalog key when unset. :meth:`decode_audio` and :meth:`decode_video` resolve both
-        themselves.
+        The rendition's ``broadcast`` reference, ``None`` or empty, names this
+        broadcast; anything else names a sibling relative to it (e.g. ``./source``).
+        Its ``epoch`` is the publisher instance the reference names: a broadcast
+        proven to serve another instance raises instead of resolving, and a route
+        without an epoch cannot prove one, so there it is best effort. Call it on a
+        rendition that carries a reference before :meth:`subscribe_track` or
+        :meth:`fetch_group`, which take a track name rather than a rendition: the
+        rendition's ``track``, or ``id`` when unset. The rendition-based consumers in
+        the media, audio, and video namespaces resolve it themselves.
 
         Raises if this broadcast came from a local producer rather than an origin,
         since a standalone broadcast has no sibling to name.
         """
-        return BroadcastConsumer(await self._inner.resolve(reference))
+        from .media import _rendition
 
-    async def decode_audio(
-        self,
-        name: str,
-        catalog_audio: Audio,
-        output: AudioDecoderOutput,
-    ) -> AudioConsumer:
-        """Subscribe to a raw-audio track; samples come back in the format
-        declared by ``output``.
-
-        ``catalog_audio`` comes from the catalog (e.g.
-        ``await moq.media.catalog(broadcast)`` followed by
-        ``catalog.audio[name]``). Only Opus and AAC-LC tracks are supported;
-        AAC is decode only, since nothing here encodes it.
-        Use ``output.max_delay_us`` to
-        control how aggressively stalled groups get skipped. That's
-        the congestion-control knob. (Named ``_max`` to leave room for
-        a future ``min_buffer_us`` jitter-buffer floor, which is a
-        distinct knob: this one bounds how stale a group may be, that
-        one how much to hold before presenting.)
-        """
-        return AudioConsumer(await self._inner.decode_audio(name, catalog_audio, output))
-
-    async def decode_video(
-        self,
-        name: str,
-        catalog_video: Video,
-        output: VideoDecoderOutput | None = None,
-    ) -> VideoConsumer:
-        """Subscribe to a video track and decode it inside the bindings.
-
-        ``catalog_video`` comes from the catalog (e.g.
-        ``await moq.media.catalog(broadcast)`` followed by ``catalog.video[name]``).
-        An unrecognized codec raises here; a recognized one no native backend
-        handles raises when the decoder opens, both before the first frame.
-
-        Each frame converts to a packed CPU layout on demand with
-        ``frame.pixels(format)``.
-
-        ``output.resize`` asks the decoder for a different size and is best
-        effort, so read each frame's own dimensions.
-        """
-        return VideoConsumer(await self._inner.decode_video(name, catalog_video, output or VideoDecoderOutput()))
+        return BroadcastConsumer(await self._inner.resolve(_rendition(id, rendition)))

@@ -1,8 +1,9 @@
+use moq_clock::Wall;
 use moq_pattern::Patterns;
 use serde::{Deserialize, Serialize};
-use serde_with::{DurationSeconds, TimestampSeconds, serde_as};
+use serde_with::{DurationSeconds, serde_as};
 use std::collections::BTreeMap;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 /// What a session may do, as the auth server answered.
 ///
@@ -35,18 +36,23 @@ pub struct Grant {
 	pub mounts: BTreeMap<String, String>,
 
 	/// When the session closes, as unix seconds.
-	#[serde_as(as = "Option<TimestampSeconds<i64>>")]
-	pub expires: Option<SystemTime>,
+	#[serde_as(as = "Option<moq_clock::serde::UnixSeconds>")]
+	pub expires: Option<Wall>,
 
 	/// How long until the relay asks again, in seconds.
 	#[serde_as(as = "Option<DurationSeconds<u64>>")]
 	pub revalidate: Option<Duration>,
 
-	/// An opaque label handed to stats, so traffic can be bucketed.
+	/// The stats tier this session's traffic is bucketed under: `/`-joined segments of
+	/// ASCII letters, digits, `.`, `_`, and `-`, as [`tier::validate`](crate::tier::validate) checks.
 	pub tier: Option<String>,
 
+	/// The literal path this session's stats record under, independent of its root. Absent records under the empty label.
+	pub label: Option<String>,
+
 	/// The session is a cluster peer (another relay): what it announces entered
-	/// the cluster elsewhere, not here.
+	/// the cluster elsewhere, not here, and it discovers hidden routes without
+	/// asking, for peers that predate the opt-in. A client certificate alone is not.
 	#[serde(skip_serializing_if = "std::ops::Not::not")]
 	pub peer: bool,
 
@@ -58,25 +64,29 @@ pub struct Grant {
 }
 
 impl Grant {
-	/// A grant of these patterns and nothing else.
-	pub fn new(publish: Patterns, subscribe: Patterns) -> Self {
+	/// A grant of these patterns, with no other restrictions.
+	pub fn new(publish: impl Into<Patterns>, subscribe: impl Into<Patterns>) -> Self {
 		Self {
-			publish,
-			subscribe,
+			publish: publish.into(),
+			subscribe: subscribe.into(),
 			..Default::default()
 		}
 	}
 
-	/// Snapshot the expiry on Tokio's clock; one already past is now, and one beyond
+	/// Snapshot the expiry on the ambient clock; one already past is now, and one beyond
 	/// the clock's range is never.
-	#[cfg(feature = "tokio")]
-	pub fn deadline(&self) -> Option<tokio::time::Instant> {
-		let remaining = self.expires?.duration_since(SystemTime::now()).unwrap_or_default();
-		tokio::time::Instant::now().checked_add(remaining)
+	pub fn deadline(&self) -> Option<moq_clock::Instant> {
+		// Read the instant first, so a pause between the two reads shortens the grant
+		// instead of extending it.
+		let start = moq_clock::now();
+		let now = moq_clock::wall();
+		let remaining = self.expires?.checked_duration_since(now).unwrap_or_default();
+		start.checked_add(remaining)
 	}
 
 	/// Refuse a grant that admits nothing, marks a non-peer upstream, asks to be
-	/// revalidated without a bound or at no interval, or has already expired.
+	/// revalidated without a bound or at no interval, names an invalid stats tier or
+	/// label, or has already expired.
 	pub fn validate(&self) -> crate::Result<()> {
 		if self.publish.is_empty() && self.subscribe.is_empty() {
 			return Err(crate::Error::UselessGrant);
@@ -91,7 +101,13 @@ impl Grant {
 		if self.revalidate.is_some_and(|cadence| cadence.is_zero()) {
 			return Err(crate::Error::ZeroRevalidate);
 		}
-		if self.expires.is_some_and(|expires| expires <= SystemTime::now()) {
+		if let Some(tier) = &self.tier {
+			crate::tier::validate(tier)?;
+		}
+		if let Some(label) = &self.label {
+			moq_pattern::Pattern::literal(label).map_err(crate::Error::InvalidLabel)?;
+		}
+		if self.expires.is_some_and(|expires| expires <= moq_clock::wall()) {
 			return Err(crate::Error::GrantExpired);
 		}
 		Ok(())
@@ -113,9 +129,10 @@ mod tests {
 			subscribe: patterns(&["**"]),
 			root: Some("pid/room".into()),
 			mounts: BTreeMap::new(),
-			expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(4_102_444_800)),
+			expires: Some(Wall::UNIX_EPOCH + Duration::from_secs(4_102_444_800)),
 			revalidate: Some(Duration::from_secs(60)),
 			tier: Some("websocket".into()),
+			label: Some("project/key/123".into()),
 			peer: true,
 			upstream: true,
 		};
@@ -137,21 +154,22 @@ mod tests {
 			subscribe: patterns(&["**"]),
 			root: Some("pid/room".into()),
 			mounts: BTreeMap::new(),
-			expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(4_102_444_800)),
+			expires: Some(Wall::UNIX_EPOCH + Duration::from_secs(4_102_444_800)),
 			revalidate: Some(Duration::from_secs(60)),
 			tier: Some("websocket".into()),
+			label: Some("project/key/123".into()),
 			peer: true,
 			upstream: true,
 		};
 		assert_eq!(
 			serde_json::to_string(&grant).unwrap(),
-			r#"{"publish":["alice/**"],"subscribe":["**"],"root":"pid/room","expires":4102444800,"revalidate":60,"tier":"websocket","peer":true,"upstream":true}"#
+			r#"{"publish":["alice/**"],"subscribe":["**"],"root":"pid/room","expires":4102444800,"revalidate":60,"tier":"websocket","label":"project/key/123","peer":true,"upstream":true}"#
 		);
 	}
 
 	#[test]
 	fn mounts_round_trip_as_an_object() {
-		let mut grant = Grant::new(Patterns::new(), patterns(&["**"]));
+		let mut grant = Grant::new(Patterns::default(), patterns(&["**"]));
 		grant.mounts.insert(".svc".into(), ".svc/pid".into());
 		let json = serde_json::to_string(&grant).unwrap();
 		assert_eq!(json, r#"{"subscribe":["**"],"mounts":{".svc":".svc/pid"}}"#);
@@ -160,74 +178,106 @@ mod tests {
 
 	#[test]
 	fn empty_fields_are_omitted_and_defaulted() {
-		let grant = Grant::new(patterns(&["**"]), Patterns::new());
+		let grant = Grant::new(patterns(&["**"]), Patterns::default());
 		assert_eq!(serde_json::to_string(&grant).unwrap(), r#"{"publish":["**"]}"#);
 		assert_eq!(serde_json::from_str::<Grant>(r#"{"publish":["**"]}"#).unwrap(), grant);
 	}
 
-	#[test]
-	fn validate_refuses_nothing_unbounded_and_expired() {
+	#[moq_clock::test]
+	async fn validate_refuses_nothing_unbounded_and_expired() {
 		assert!(matches!(Grant::default().validate(), Err(crate::Error::UselessGrant)));
 
-		let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
+		let mut grant = Grant::new(patterns(&["**"]), Patterns::default());
 		grant.validate().unwrap();
 
 		grant.revalidate = Some(Duration::from_secs(1));
 		assert!(matches!(grant.validate(), Err(crate::Error::UnboundedRevalidate)));
 
 		// Exact: no grace for an auth server whose clock runs behind.
-		grant.expires = Some(SystemTime::now());
+		let now = moq_clock::wall();
+		grant.expires = Some(now);
 		assert!(matches!(grant.validate(), Err(crate::Error::GrantExpired)));
 
-		grant.expires = Some(SystemTime::now() - Duration::from_secs(1));
+		grant.expires = Some(now - Duration::from_secs(1));
 		assert!(matches!(grant.validate(), Err(crate::Error::GrantExpired)));
 
-		grant.expires = Some(SystemTime::now() + Duration::from_secs(60));
+		grant.expires = Some(now + Duration::from_secs(60));
 		grant.validate().unwrap();
+		moq_clock::sim::advance(Duration::from_secs(60)).await;
+		assert!(
+			matches!(grant.validate(), Err(crate::Error::GrantExpired)),
+			"expiry follows the ambient clock, not the host's"
+		);
 
+		grant.expires = Some(now + Duration::from_secs(120));
 		grant.revalidate = Some(Duration::ZERO);
 		assert!(matches!(grant.validate(), Err(crate::Error::ZeroRevalidate)));
 	}
 
 	#[test]
 	fn validate_refuses_an_upstream_that_is_not_a_peer() {
-		let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
+		let mut grant = Grant::new(patterns(&["**"]), Patterns::default());
 		grant.upstream = true;
 		assert!(matches!(grant.validate(), Err(crate::Error::UpstreamWithoutPeer)));
 		grant.peer = true;
 		grant.validate().unwrap();
 	}
 
-	#[cfg(feature = "tokio")]
-	#[tokio::test(start_paused = true)]
+	#[test]
+	fn validate_refuses_an_invalid_stats_label() {
+		let mut grant = Grant::new(patterns(&["**"]), Patterns::default());
+		grant.label = Some("project/*".into());
+		assert!(matches!(grant.validate(), Err(crate::Error::InvalidLabel(_))));
+	}
+
+	#[test]
+	fn validate_refuses_a_tier_a_metrics_label_would_escape() {
+		let mut grant = Grant::new(patterns(&["**"]), Patterns::default());
+		for tier in ["a\"b", "a\\b", "a\nb"] {
+			grant.tier = Some(tier.into());
+			assert!(
+				matches!(grant.validate(), Err(crate::Error::InvalidTier(_))),
+				"{tier:?}"
+			);
+		}
+		grant.tier = Some("region/sjc".into());
+		grant.validate().unwrap();
+	}
+
+	/// The expiry and the instant come from one clock, so time passing before the
+	/// snapshot never shortens the grant.
+	#[moq_clock::test]
 	async fn deadline_is_the_exact_expiry() {
-		let start = tokio::time::Instant::now();
-		let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
+		let start = moq_clock::now();
+		let now = moq_clock::wall();
+		let mut grant = Grant::new(patterns(&["**"]), Patterns::default());
 		assert_eq!(grant.deadline(), None);
 
-		grant.expires = Some(SystemTime::now() + Duration::from_secs(10));
-		let deadline = grant.deadline().unwrap();
-		assert!(deadline <= start + Duration::from_secs(10), "not later than the expiry");
-		assert!(deadline > start + Duration::from_secs(9));
+		grant.expires = Some(now + Duration::from_secs(10));
+		moq_clock::sim::advance(Duration::from_secs(4)).await;
+		assert_eq!(grant.deadline(), Some(start + Duration::from_secs(10)));
 
-		grant.expires = Some(SystemTime::now() - Duration::from_secs(1));
+		grant.expires = Some(now - Duration::from_secs(1));
 		assert_eq!(
 			grant.deadline(),
-			Some(start),
+			Some(start + Duration::from_secs(4)),
 			"a past expiry is now, not a grace window"
 		);
 	}
 
-	/// Regression: the furthest `expires` the wire carries overflowed `Instant` on
-	/// clocks with a narrower range than `SystemTime` (macOS) and panicked. Windows'
-	/// `SystemTime` cannot represent it, so the grant does not parse there.
-	#[cfg(all(feature = "tokio", unix))]
-	#[tokio::test(start_paused = true)]
-	async fn deadline_past_the_clock_is_never() {
-		let start = tokio::time::Instant::now();
-		let grant: Grant = serde_json::from_str(r#"{"publish":["**"],"expires":9223372036854775807}"#).unwrap();
-		// Linux's clock reaches that far; macOS's does not, which reads as no expiry.
-		let deadline = grant.deadline();
-		assert!(deadline.is_none_or(|at| at > start + Duration::from_secs(1 << 40)));
+	#[moq_clock::test]
+	async fn expiry_saturates_to_the_wall_range() {
+		let parse = |expires: i64| {
+			serde_json::from_value::<Grant>(serde_json::json!({"publish":["**"],"expires":expires})).unwrap()
+		};
+		let past = parse(-1);
+		assert_eq!(past.expires, Some(Wall::UNIX_EPOCH));
+		assert!(matches!(past.validate(), Err(crate::Error::GrantExpired)));
+
+		// The furthest expiry the wire carries must not overflow the instant.
+		let far = parse(i64::MAX);
+		assert_eq!(far.expires, Some(Wall::UNIX_EPOCH.saturating_add(Duration::MAX)));
+		far.validate().unwrap();
+		far.deadline();
 	}
 }

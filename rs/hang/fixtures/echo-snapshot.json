@@ -1,0 +1,27 @@
+{
+  "transport": {
+    "rtt": 24,
+    "rate": 7000000,
+    "lostBytes": 150,
+    "lostPackets": 1,
+    "age": 6
+  },
+  "renditions": {
+    "hd": {
+      "frames": 890,
+      "bytes": 1030000,
+      "decoded": 880,
+      "late": 3,
+      "errors": 2,
+      "stalls": 1,
+      "stalled": 120,
+      "underruns": 4,
+      "arrival": {
+        "timestamp": 30000,
+        "wall": 175184640000
+      },
+      "latency": 200
+    },
+    "reset": {}
+  }
+}

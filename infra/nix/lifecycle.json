@@ -1,0 +1,10 @@
+{
+	"rules": [
+		{
+			"id": "expire",
+			"enabled": true,
+			"conditions": { "prefix": "" },
+			"deleteObjectsTransition": { "condition": { "type": "Age", "maxAge": 2592000 } }
+		}
+	]
+}

@@ -1,19 +1,24 @@
 {
   description = "MoQ - Media over QUIC";
 
-  # Pre-built binaries live in our Cachix cache. Only tagged releases are
-  # pushed (CI fires on moq-relay-v*, moq-cli-v*, etc.), so pin the flake ref
-  # to a recent tag to get a hit. The default branch HEAD is not cached and
-  # builds from source:
+  # Pre-built binaries live in our binary cache at nix.moq.dev. Of the
+  # packages, only tagged releases are pushed (moq-relay-v*, moq-cli-v*, etc.),
+  # so pin the flake ref to a recent tag to get a hit. The default branch HEAD
+  # builds from source, though its dev shell is cached:
   #   nix run github:moq-dev/moq/moq-relay-v0.12.4#moq-relay --accept-flake-config
   #
   # --accept-flake-config opts into the nixConfig below for one command. To
-  # trust the cache permanently instead, run: cachix use kixelated
+  # trust the cache permanently instead, add these settings to nix.conf.
+  #
+  # The dev shell paths expire 30 days after upload, possibly before a path
+  # that depends on them; `fallback` builds whatever is missing instead of
+  # failing the substitution.
   nixConfig = {
-    extra-substituters = [ "https://kixelated.cachix.org" ];
+    extra-substituters = [ "https://nix.moq.dev" ];
     extra-trusted-public-keys = [
-      "kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk="
+      "nix.moq.dev-1:BZ0DtCypDFv1ESX3hxuB42yc0vitSA1YHojSmVwB5bk="
     ];
+    fallback = true;
   };
 
   inputs = {
@@ -27,7 +32,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:kixelated/quest/b7027a3ded4b0a36505f40eb7ed788c1023e7a49";
+      url = "github:kixelated/quest/fd1d88fb19317afc1c0cbca34cc23e9cf4d32375";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
@@ -53,6 +58,7 @@
     {
       nixosModules = {
         moq-relay = import ./nix/modules/moq-relay.nix;
+        github-runner-vm = import ./nix/modules/github-runner-vm.nix;
       };
 
       overlays.default = import ./nix/overlay.nix { inherit crane; };
@@ -64,6 +70,16 @@
           inherit system;
           overlays = [ (import rust-overlay) ];
         };
+
+        wasm-bindgen-version =
+          (pkgs.lib.findSingle (package: package.name == "wasm-bindgen")
+            (throw "Cargo.lock has no wasm-bindgen package")
+            (throw "Cargo.lock has multiple wasm-bindgen versions")
+            (builtins.fromTOML (builtins.readFile ./Cargo.lock)).package
+          ).version;
+        wasm-bindgen-cli =
+          pkgs.${"wasm-bindgen-cli_${builtins.replaceStrings [ "." ] [ "_" ] wasm-bindgen-version}"}
+            or (throw "nixpkgs does not package wasm-bindgen-cli ${wasm-bindgen-version} locked in Cargo.lock");
 
         # Pinned build toolchain (not latest stable) so `nix develop` and CI
         # compile against a fixed rustc and the relay's MSRV can't creep up
@@ -80,6 +96,9 @@
             "clippy"
             "rust-src"
             "rust-analyzer"
+            # llvm-cov and llvm-profdata for `just rs coverage`, which must
+            # match rustc's LLVM. cargo-llvm-cov finds them in the sysroot.
+            "llvm-tools"
           ];
           targets = [
             "wasm32-unknown-unknown"
@@ -138,9 +157,17 @@
             # unification would otherwise hide a broken single-crate build.
             cargo-hack
             cargo-nextest
+            # Source-based test coverage (`just rs coverage`).
+            # Its LLVM test helpers must read the compiler's profile format.
+            (cargo-llvm-cov.override {
+              rustPlatform = makeRustPlatform {
+                cargo = rust-toolchain;
+                rustc = rust-toolchain;
+              };
+            })
             # Browser/WASM bindings (rs/moq-wasm -> @moq/wasm via `just js wasm`).
-            # wasm-bindgen-cli must match the `wasm-bindgen` crate version (the
-            # crate is pinned to nixpkgs' CLI version); bump both together.
+            # Cargo.lock selects the matching schema version, independently of
+            # nixpkgs' default wasm-bindgen-cli.
             wasm-bindgen-cli
           ]
           ++ gstreamerDeps
@@ -194,6 +221,8 @@
           # JSR publishing. We call `deno publish` directly instead of `bunx jsr`
           # so the release doesn't race on a runtime binary download.
           deno
+          # One browser build for local and CI Playwright checks.
+          playwright-driver.browsers
         ];
 
         # Python dependencies
@@ -251,10 +280,12 @@
           jq
           # Runs the moq.sh installer tests under a strict POSIX shell.
           dash
+          # Proves the temporary bench relay owns its TCP and UDP sockets.
+          lsof
         ];
 
         # Linters / formatters used by `just check` and `just fix`, which
-        # skip a module whose tools aren't on $PATH. CI sets MOQ_STRICT=1,
+        # skip a module whose tools aren't on $PATH. CI sets CI_STRICT=1,
         # which turns that skip into an error (see the tools map in
         # sh/dispatch.sh), so this list and that one have to stay in step.
         lintDeps = with pkgs; [
@@ -332,20 +363,24 @@
         # `-kixelated.N` pre-release so they never collide with upstream's.
         uniffi-bindgen-dart = pkgs.rustPlatform.buildRustPackage rec {
           pname = "uniffi-bindgen-dart";
-          version = "0.3.1-kixelated.5+v0.32.0";
+          version = "0.3.1-kixelated.6+v0.32.0";
 
           src = pkgs.fetchFromGitHub {
             owner = "kixelated";
             repo = "uniffi-dart";
             rev = "v${version}";
-            hash = "sha256-MobLv4aov+ySk3X8bd6Sr5MLiXxCprkoFqEFt5xOerw=";
+            hash = "sha256-Ff5o3n4l1O578gJ5pInAqf6/MkM+lkwzovJtEffvpqk=";
           };
 
           # The upstream repository ignores Cargo.lock so cargo installs test
           # the unlocked resolver. Nix still consumes committed lock data.
           cargoLock.lockFile = ./nix/uniffi-dart-Cargo.lock;
-          # Enum fields must use the record's converter name without renaming it.
-          patches = [ ./nix/uniffi-dart-record-error.patch ];
+          # Carry record converter, per-operation cancellation, and negative duration fixes at the source.
+          patches = [
+            ./nix/uniffi-dart-record-error.patch
+            ./nix/uniffi-dart-cancellation.patch
+            ./nix/uniffi-dart-duration-negative.patch
+          ];
           postPatch = ''
             cp ${./nix/uniffi-dart-Cargo.lock} Cargo.lock
           '';
@@ -354,34 +389,37 @@
           doCheck = false;
         };
 
-        # uniffi-bindgen-cpp renders rs/moq-ffi for cpp/moq's CMake build. Not in
-        # nixpkgs, so build it from source; without it `just check` skips the
-        # cpp module, which MOQ_STRICT turns into a failure in CI.
+        # uniffi-bindgen-cpp renders rs/moq-ffi for the CMake builds of cpp/moq and,
+        # with its C backend, c/moq. Not in nixpkgs, so build it from source;
+        # without it `just check` skips the c and cpp modules, which CI_STRICT
+        # turns into a failure in CI.
         #
         # Like uniffi-bindgen-go, the tag pairs the generator's version with the
         # uniffi release it reads, so it moves with the `uniffi` dependency in
-        # rs/moq-ffi/Cargo.toml. Five other places name the same tag and must be
+        # rs/moq-ffi/Cargo.toml. The other places name the same tag and must be
         # bumped together: the `cargo install` lines in rs/moq-ffi/build.sh,
-        # cpp/moq/README.md, .github/workflows/cpp.yml,
-        # .github/workflows/obs.yml, and .github/workflows/release-cpp.yml.
+        # cpp/moq/README.md, .github/workflows/{c,cpp}.yml,
+        # .github/workflows/platform.yml, .github/workflows/release-{c,cpp}.yml,
+        # and .github/workflows/release-shared-ffi.yml.
         #
         # This points at a fork of LiveKit's async branch (livekit/uniffi-bindgen-cpp
         # PR #1): neither LiveKit nor NordSecurity has a uniffi 0.32 generator,
-        # and the fork adds `error_style = "expected"`, which cpp/moq/uniffi.toml
-        # turns on. Its tags add a `-kixelated.N` pre-release so they never
-        # collide with upstream's. Move back upstream once one tags both.
+        # and the fork adds `error_style = "expected"`, `strip_type_prefix`, and
+        # `strip_function_prefix`, which cpp/moq/uniffi.toml turns on. Its tags
+        # add a `-kixelated.N` pre-release so they never collide with upstream's.
+        # Move back upstream once one tags both.
         uniffi-bindgen-cpp = pkgs.rustPlatform.buildRustPackage rec {
           pname = "uniffi-bindgen-cpp";
-          version = "0.11.0-kixelated.4+v0.32.2";
+          version = "0.11.0-kixelated.7+v0.32.2";
 
           src = pkgs.fetchFromGitHub {
             owner = "kixelated";
             repo = "uniffi-bindgen-cpp";
             rev = "v${version}";
-            hash = "sha256-pmk9M5Wt6DYlXZYPjJ2Nn0tbDi1ve3wCH0Lel9xomCY=";
+            hash = "sha256-nErLn2hQus5omIaFheJWy06wKQS9HiKNtksxaJm9Z8k=";
           };
 
-          cargoHash = "sha256-/DRrwhJiKFCzibiJU2D3QaBM3XTmieRgUNc7tHDiGXI=";
+          cargoHash = "sha256-fz7fn6D12zmFFSVSdySDfNRtQe+n4KCB9bXAsuvq/QY=";
 
           # The workspace's other member is the fixture crate, which pulls the
           # uniffi examples in from git; build only the generator.
@@ -514,6 +552,9 @@
 
           inherit uniffi-bindgen-cpp uniffi-bindgen-dart;
 
+          # The @moq/libav npm package, which js/libav/build.ts copies into js/libav/dist.
+          moq-libav = pkgs.callPackage ./js/libav/package.nix { };
+
           # The quest CLI alone, so quest.yml can validate the tree without
           # realising the whole dev shell.
           quest = quest-cli;
@@ -537,6 +578,12 @@
         # are disallowed in the flake `packages` schema.
         legacyPackages = {
           inherit (pkgs) gst_all_1;
+
+          # Nightly conformance needs both pinned Moxygen endpoints. Keep this
+          # C++ dependency build out of the default shell and flake checks.
+          moxygen = pkgs.callPackage ./nix/moxygen.nix { };
+
+          runner-userns-profile = import ./nix/runner/unshare.nix { inherit pkgs; };
 
           # `nix develop .#obs`: the default shell plus obs-studio, which linking
           # the plugin on Linux needs (`just obs build`, `just obs ci`). Kept out
@@ -564,8 +611,12 @@
             ++ dartDeps
             ++ devTools
             ++ [ quest-cli ]
-            # perf records relay worker off-CPU stacks for `just bench-lock`.
-            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.perf ];
+            # `just bench-profile`: perf records relay waits and CPU stacks, and
+            # jemalloc's jeprof symbolizes heap snapshots.
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+              pkgs.perf
+              pkgs.jemalloc
+            ];
 
           # jemalloc's configure uses -O0 test builds, which conflict with
           # Nix's _FORTIFY_SOURCE hardening (requires -O).
@@ -584,6 +635,15 @@
           # finds a shim there too. That is the only way mbx reaches a build
           # that spawns Cargo itself, which release-plz does.
           shellHook = ''
+            # `nix develop` points TMPDIR at a fresh nix-shell.* dir that it
+            # never removes. Drop it and keep the caller's TMPDIR, as nix-direnv
+            # does, so nothing piles up there.
+            if [[ ''${NIX_BUILD_TOP-} == */nix-shell.* && -d $NIX_BUILD_TOP ]]; then
+              rm -rf "$NIX_BUILD_TOP"
+              export TMPDIR=''${NIX_BUILD_TOP%/*}
+              unset NIX_BUILD_TOP TMP TEMP TEMPDIR
+            fi
+
             status=$(mbx setup --status 2>/dev/null || true)
             shim=$(printf '%s\n' "$status" | sed -n '1s/.*: //p')
             if [ -x "$shim" ]; then
@@ -594,7 +654,11 @@
           env = {
             # What sh/dispatch.sh checks before a scoped `just check` or `just
             # fix`. IN_NIX_SHELL would also pass inside another project's shell.
-            MOQ_DEV_SHELL = "1";
+            IN_MOQ_DEV_SHELL = "1";
+
+            PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
+            PLAYWRIGHT_VERSION = pkgs.playwright-driver.version;
+            PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = "true";
 
             # Where `just obs compile` and `just obs test` look for libobs. Set
             # on every platform so the plugin type-checks against the pinned OBS
@@ -621,8 +685,8 @@
         # test` (see rs/justfile), reaching mbx through the Cargo shim the dev
         # shell puts on PATH. Neither path goes through crane.
         # `nix flake check` is kept -- it still validates flake eval + builds the
-        # dev shell -- but no longer compiles the workspace, so it's cheap
-        # enough that `just check` runs it on any Nix/Rust input change. Release
+        # runner tests. The dispatcher runs it for Nix and packaging inputs;
+        # Rust source changes use the Cargo gate above. Release
         # artifacts still build via crane `buildPackage` (see `packages` above /
         # release-*.yml).
         #
@@ -633,7 +697,10 @@
             test -f "${overlayPkgs.moq-boy.src}/rs/moq-video/src/frame/nv12_resize.ptx"
             touch "$out"
           '';
-        };
+        }
+        // pkgs.lib.optionalAttrs (system == "x86_64-linux") (
+          import ./nix/runner/checks.nix { inherit pkgs; }
+        );
       }
     );
 }

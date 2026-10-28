@@ -188,6 +188,581 @@ fn run(data: &[u8]) -> crate::catalog::hang::Catalog {
 	catalog.snapshot()
 }
 
+// A supported malformed track must fail the import, even beside a usable track.
+fn assert_out_of_range(track: MatroskaSpec, field: &str) {
+	for reverse in [false, true] {
+		let mut tracks = vec![track_entry_audio_opus(1, 48_000.0, 2), track.clone()];
+		if reverse {
+			tracks.reverse();
+		}
+		let data = MkvBuilder::new()
+			.header("matroska")
+			.segment_start()
+			.info(1_000_000)
+			.tracks(tracks)
+			.segment_end()
+			.build();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let result = import.decode(&data).and_then(|()| import.finish());
+		assert!(
+			matches!(&result, Err(crate::Error::Mkv(super::Error::ValueOutOfRange(name))) if *name == field),
+			"{field}, reverse {reverse}: {result:?}"
+		);
+	}
+}
+
+#[test]
+fn numeric_range_pixel_width() {
+	for value in [u64::from(u32::MAX) + 1, u64::MAX] {
+		assert_out_of_range(track_entry_video_vp9(2, value, 1080), "PixelWidth");
+	}
+}
+
+#[test]
+fn numeric_range_pixel_height() {
+	for value in [u64::from(u32::MAX) + 1, u64::MAX] {
+		assert_out_of_range(track_entry_video_vp9(2, 1920, value), "PixelHeight");
+	}
+}
+
+#[test]
+fn numeric_range_channels() {
+	for value in [u64::from(u32::MAX) + 1, u64::MAX] {
+		assert_out_of_range(track_entry_audio_mp3(2, 48_000.0, value), "Channels");
+	}
+}
+
+#[test]
+fn numeric_range_sampling_frequency() {
+	for value in [
+		f64::from(u32::MAX) + 0.5,
+		f64::from(u32::MAX) + 1.0,
+		-1.0,
+		f64::NAN,
+		f64::INFINITY,
+		f64::NEG_INFINITY,
+	] {
+		assert_out_of_range(track_entry_audio_mp3(2, value, 2), "SamplingFrequency");
+	}
+}
+
+#[test]
+fn numeric_range_representable_values_keep_existing_conversion() {
+	for (size, rate, channels) in [
+		(0, 0.0, 0),
+		(u32::MAX, f64::from(u32::MAX), u32::MAX),
+		(1920, 44_100.5, 2),
+	] {
+		let data = MkvBuilder::new()
+			.header("matroska")
+			.segment_start()
+			.info(1_000_000)
+			.tracks(vec![
+				track_entry_video_vp9(1, u64::from(size), u64::from(size)),
+				track_entry_audio_mp3(2, rate, u64::from(channels)),
+			])
+			.segment_end()
+			.build();
+		let catalog = run(&data);
+		let video = catalog.video.renditions.values().next().unwrap();
+		assert_eq!((video.coded_width, video.coded_height), (Some(size), Some(size)));
+		let audio = catalog.audio.renditions.values().next().unwrap();
+		assert_eq!((audio.sample_rate, audio.channel_count), (rate as u32, channels));
+	}
+}
+
+#[test]
+fn numeric_range_unsupported_codecs_are_refused() {
+	use MatroskaSpec::*;
+	for (kind, codec, fields) in [
+		(
+			1,
+			"V_UNKNOWN",
+			Video(Master::Full(vec![PixelWidth(u64::MAX), PixelHeight(u64::MAX)])),
+		),
+		(
+			2,
+			"A_UNKNOWN",
+			Audio(Master::Full(vec![Channels(u64::MAX), SamplingFrequency(f64::INFINITY)])),
+		),
+	] {
+		let unsupported = TrackEntry(Master::Full(vec![
+			TrackNumber(2),
+			TrackType(kind),
+			CodecID(codec.into()),
+			fields,
+		]));
+		for reverse in [false, true] {
+			let mut tracks = vec![track_entry_audio_opus(1, 48_000.0, 2), unsupported.clone()];
+			if reverse {
+				tracks.reverse();
+			}
+			let data = MkvBuilder::new()
+				.header("matroska")
+				.segment_start()
+				.info(1_000_000)
+				.tracks(tracks)
+				.segment_end()
+				.build();
+			for initial in [false, true] {
+				let error = import_result(&data, initial).unwrap_err();
+				assert!(
+					matches!(&error,
+						crate::Error::Mkv(super::Error::UnsupportedVideoCodec(name) | super::Error::UnsupportedAudioCodec(name)) if name == codec
+					),
+					"{codec}, reverse {reverse}, initial {initial}: {error:?}"
+				);
+			}
+		}
+	}
+}
+
+#[test]
+fn numeric_range_validates_fields_without_overriding_codec_config() {
+	use crate::codec::h264;
+	use MatroskaSpec::*;
+	use bytes::Bytes;
+
+	let avcc = h264::build_avcc(
+		&[Bytes::from_static(h264::fixtures::SPS_IPB)],
+		&[Bytes::from_static(h264::fixtures::PPS)],
+	)
+	.unwrap();
+	let video = TrackEntry(Master::Full(vec![
+		TrackNumber(2),
+		TrackType(1),
+		CodecID("V_MPEG4/ISO/AVC".into()),
+		CodecPrivate(avcc.to_vec()),
+		Video(Master::Full(vec![PixelWidth(1920), PixelHeight(1080)])),
+	]));
+	let aac = TrackEntry(Master::Full(vec![
+		TrackNumber(2),
+		TrackType(2),
+		CodecID("A_AAC".into()),
+		CodecPrivate(vec![0x11, 0x90]),
+		Audio(Master::Full(vec![])),
+	]));
+	for (track, is_video) in [
+		(video, true),
+		(track_entry_audio_opus(2, 48_000.0, 2), false),
+		(track_entry_audio_flac(2, 48_000, 2), false),
+		(aac, false),
+	] {
+		let cases = if is_video {
+			vec![
+				(vec![PixelWidth(1920), PixelHeight(1080)], None),
+				(vec![PixelWidth(u64::MAX), PixelHeight(1080)], Some("PixelWidth")),
+				(vec![PixelWidth(1920), PixelHeight(u64::MAX)], Some("PixelHeight")),
+			]
+		} else {
+			vec![
+				(vec![SamplingFrequency(44_100.0), Channels(6)], None),
+				(
+					vec![SamplingFrequency(f64::INFINITY), Channels(2)],
+					Some("SamplingFrequency"),
+				),
+				(vec![SamplingFrequency(48_000.0), Channels(u64::MAX)], Some("Channels")),
+			]
+		};
+		for (fields, error) in cases {
+			let mut track = track.clone();
+			let TrackEntry(Master::Full(children)) = &mut track else {
+				unreachable!()
+			};
+			for child in children {
+				if let Video(Master::Full(value)) | Audio(Master::Full(value)) = child {
+					*value = fields.clone();
+				}
+			}
+			if let Some(field) = error {
+				assert_out_of_range(track, field);
+				continue;
+			}
+			let data = MkvBuilder::new()
+				.header("matroska")
+				.segment_start()
+				.info(1_000_000)
+				.tracks(vec![track])
+				.segment_end()
+				.build();
+			let catalog = run(&data);
+			if is_video {
+				let video = catalog.video.renditions.values().next().unwrap();
+				assert_eq!((video.coded_width, video.coded_height), (Some(64), Some(64)));
+			} else {
+				let audio = catalog.audio.renditions.values().next().unwrap();
+				assert_eq!((audio.sample_rate, audio.channel_count), (48_000, 2));
+			}
+		}
+	}
+}
+
+#[test]
+fn codec_private_resolves_display_aspect() {
+	use crate::codec::{h264, h265};
+	use bytes::Bytes;
+	for (avc, hevc, expected) in [
+		(h264::fixtures::SPS_IPB, h265::fixtures::SPS_NVENC, (None, None)),
+		(
+			h264::fixtures::SPS_ANAMORPHIC,
+			h265::fixtures::SPS_ANAMORPHIC,
+			(Some(16), Some(9)),
+		),
+	] {
+		let avcc = h264::build_avcc(&[Bytes::from_static(avc)], &[Bytes::from_static(h264::fixtures::PPS)]).unwrap();
+		let hvcc = h265::build_hvcc(
+			&[Bytes::from_static(h265::fixtures::VPS)],
+			&[Bytes::from_static(hevc)],
+			&[Bytes::from_static(h265::fixtures::PPS)],
+		)
+		.unwrap();
+		for (codec_id, private) in [("V_MPEG4/ISO/AVC", avcc), ("V_MPEGH/ISO/HEVC", hvcc)] {
+			let (width, height) = match expected {
+				(None, None) if codec_id == "V_MPEG4/ISO/AVC" => (64, 64),
+				(None, None) => (1280, 720),
+				_ => (1440, 1080),
+			};
+			let data = MkvBuilder::new()
+				.header("matroska")
+				.segment_start()
+				.info(1_000_000)
+				.tracks(vec![MatroskaSpec::TrackEntry(Master::Full(vec![
+					MatroskaSpec::TrackNumber(1),
+					MatroskaSpec::TrackUID(1),
+					MatroskaSpec::TrackType(1),
+					MatroskaSpec::CodecID(codec_id.into()),
+					MatroskaSpec::CodecPrivate(private.to_vec()),
+					MatroskaSpec::Video(Master::Full(vec![
+						MatroskaSpec::PixelWidth(width),
+						MatroskaSpec::PixelHeight(height),
+					])),
+				]))])
+				.segment_end()
+				.build();
+			let catalog = run(&data);
+			let config = catalog.video.renditions.values().next().unwrap();
+			assert_eq!(
+				(config.display_aspect_width, config.display_aspect_height),
+				expected,
+				"{codec_id}"
+			);
+		}
+	}
+}
+
+fn aspect_file(codec_id: &str, private: Option<Vec<u8>>, extra: Vec<MatroskaSpec>) -> Vec<u8> {
+	let mut video = vec![MatroskaSpec::PixelWidth(1440), MatroskaSpec::PixelHeight(1080)];
+	video.extend(extra);
+	let mut track = vec![
+		MatroskaSpec::TrackNumber(1),
+		MatroskaSpec::TrackUID(1),
+		MatroskaSpec::TrackType(1),
+		MatroskaSpec::CodecID(codec_id.into()),
+		MatroskaSpec::Video(Master::Full(video)),
+	];
+	if let Some(private) = private {
+		track.push(MatroskaSpec::CodecPrivate(private));
+	}
+	MkvBuilder::new()
+		.header("matroska")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![MatroskaSpec::TrackEntry(Master::Full(track))])
+		.segment_end()
+		.build()
+}
+
+#[test]
+fn container_aspect_display_dimensions_and_crop() {
+	use MatroskaSpec::*;
+	let cases = [
+		(vec![DisplayWidth(1920), DisplayHeight(1080)], (Some(16), Some(9))),
+		(vec![DisplayWidth(1080), DisplayHeight(1080)], (Some(1), Some(1))),
+		(vec![DisplayWidth(1920)], (Some(16), Some(9))),
+		(vec![DisplayHeight(810)], (Some(16), Some(9))),
+		(vec![], (None, None)),
+		(vec![DisplayWidth(2880), DisplayHeight(2160)], (None, None)),
+		// The catalog has no crop, so a crop with default display dimensions keeps square samples
+		// and the whole picture keeps its shape instead of being squeezed into the cropped ratio.
+		(vec![PixelCropRight(360)], (None, None)),
+		(vec![PixelCropLeft(180), PixelCropRight(180)], (None, None)),
+		(vec![PixelCropTop(135), PixelCropBottom(135)], (None, None)),
+		(vec![PixelCropRight(720), PixelCropBottom(540)], (None, None)),
+		(
+			vec![PixelCropRight(360), DisplayWidth(1080), DisplayHeight(1080)],
+			(None, None),
+		),
+		// A 1080x1080 crop displayed at 1440x1080 has 4:3 samples, so the whole 1440x1080 is 16:9.
+		(
+			vec![PixelCropRight(360), DisplayWidth(1440), DisplayHeight(1080)],
+			(Some(16), Some(9)),
+		),
+		(vec![PixelCropRight(360), DisplayWidth(1440)], (Some(16), Some(9))),
+		(
+			vec![PixelCropRight(360), DisplayWidth(1920), DisplayHeight(1080)],
+			(Some(64), Some(27)),
+		),
+	];
+	for (extra, expected) in cases {
+		// AV1 has no SPS aspect; VP9 uses the same container metadata path.
+		for (codec, private) in [("V_AV1", Some(vec![0x81, 0, 0, 0])), ("V_VP9", None)] {
+			let catalog = run(&aspect_file(codec, private, extra.clone()));
+			let config = catalog.video.renditions.values().next().unwrap();
+			assert_eq!(
+				(config.display_aspect_width, config.display_aspect_height),
+				expected,
+				"{codec} {extra:?}"
+			);
+		}
+	}
+	for unit in 1..=4 {
+		let data = aspect_file(
+			"V_VP9",
+			None,
+			vec![DisplayUnit(unit), DisplayWidth(16), DisplayHeight(9)],
+		);
+		let catalog = run(&data);
+		let config = catalog.video.renditions.values().next().unwrap();
+		assert_eq!(
+			(config.display_aspect_width, config.display_aspect_height),
+			(Some(16), Some(9)),
+			"unit {unit}"
+		);
+	}
+}
+
+fn assert_invalid_aspect(data: &[u8], context: &str) {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut import = super::Import::new(broadcast, catalog.reserve());
+	let result = import.decode(data).and_then(|()| import.finish());
+	assert!(
+		matches!(result, Err(crate::Error::Mkv(super::Error::InvalidAspect(_)))),
+		"{context}: {result:?}"
+	);
+}
+
+#[test]
+fn container_aspect_refuses_missing_nonpixel_dimensions() {
+	use MatroskaSpec::*;
+	for unit in 1..=4 {
+		for extra in [vec![], vec![DisplayWidth(16)], vec![DisplayHeight(9)]] {
+			let mut fields = vec![DisplayUnit(unit)];
+			fields.extend(extra);
+			assert_invalid_aspect(&aspect_file("V_VP9", None, fields), &format!("unit {unit}"));
+		}
+	}
+}
+
+#[test]
+fn container_aspect_malformed_track_is_not_skipped() {
+	use MatroskaSpec::*;
+	for reverse in [false, true] {
+		let mut tracks = vec![
+			track_entry_audio_opus(1, 48000.0, 2),
+			TrackEntry(Master::Full(vec![
+				TrackNumber(2),
+				TrackUID(2),
+				TrackType(1),
+				CodecID("V_VP9".into()),
+				Video(Master::Full(vec![
+					PixelWidth(1440),
+					PixelHeight(1080),
+					DisplayUnit(1),
+					DisplayWidth(16),
+				])),
+			])),
+		];
+		if reverse {
+			tracks.reverse();
+		}
+		let data = MkvBuilder::new()
+			.header("matroska")
+			.segment_start()
+			.info(1_000_000)
+			.tracks(tracks)
+			.segment_end()
+			.build();
+		assert_invalid_aspect(&data, &format!("reverse {reverse}"));
+	}
+}
+
+#[tokio::test]
+async fn container_aspect_unsupported_role_keeps_audio() {
+	use MatroskaSpec::*;
+	for reverse in [false, true] {
+		let mut tracks = vec![
+			track_entry_audio_opus(1, 48000.0, 2),
+			TrackEntry(Master::Full(vec![
+				TrackNumber(2),
+				TrackUID(2),
+				TrackType(18),
+				CodecID("V_UNKNOWN".into()),
+				Video(Master::Full(vec![PixelWidth(0), PixelHeight(1080)])),
+			])),
+		];
+		if reverse {
+			tracks.reverse();
+		}
+		let data = MkvBuilder::new()
+			.header("matroska")
+			.segment_start()
+			.info(1_000_000)
+			.tracks(tracks)
+			.cluster(0, || vec![simple_block(1, 0, true, b"opus")])
+			.segment_end()
+			.build();
+		let catalog = run(&data);
+		assert_eq!(catalog.audio.renditions.len(), 1);
+		assert!(catalog.video.renditions.is_empty());
+		let imported = import_chunked(&data, data.len()).await;
+		assert!(imported.refused.is_none());
+		assert_eq!(imported.published.len(), 1);
+		assert_eq!(imported.published.values().next().unwrap(), &[0]);
+	}
+}
+
+#[test]
+#[tracing_test::traced_test]
+fn container_aspect_matroska_keeps_sps() {
+	use crate::codec::{h264, h265};
+	use bytes::Bytes;
+	let avcc = h264::build_avcc(
+		&[Bytes::from_static(h264::fixtures::SPS_ANAMORPHIC)],
+		&[Bytes::from_static(h264::fixtures::PPS)],
+	)
+	.unwrap();
+	let hvcc = h265::build_hvcc(
+		&[Bytes::from_static(h265::fixtures::VPS)],
+		&[Bytes::from_static(h265::fixtures::SPS_ANAMORPHIC)],
+		&[Bytes::from_static(h265::fixtures::PPS)],
+	)
+	.unwrap();
+	for (codec, private) in [("V_MPEG4/ISO/AVC", avcc), ("V_MPEGH/ISO/HEVC", hvcc)] {
+		let catalog = run(&aspect_file(
+			codec,
+			Some(private.to_vec()),
+			vec![MatroskaSpec::DisplayWidth(1080), MatroskaSpec::DisplayHeight(1080)],
+		));
+		let config = catalog.video.renditions.values().next().unwrap();
+		assert_eq!(
+			(config.display_aspect_width, config.display_aspect_height),
+			(Some(16), Some(9))
+		);
+	}
+	logs_assert(|lines| {
+		let conflicts = lines
+			.iter()
+			.filter(|line| line.contains("display aspect disagrees") && line.contains("Matroska"))
+			.count();
+		if conflicts == 2 {
+			Ok(())
+		} else {
+			Err(format!("expected two SPS conflicts, got {conflicts}"))
+		}
+	});
+}
+
+#[test]
+fn container_aspect_absent_preserves_pixel_dimensions() {
+	use MatroskaSpec::*;
+	for (fields, expected) in [
+		(vec![], (None, None)),
+		(vec![PixelWidth(0), PixelHeight(1080)], (Some(0), Some(1080))),
+		(vec![PixelWidth(1440)], (Some(1440), None)),
+		(vec![PixelHeight(0)], (None, Some(0))),
+		// A crop with default display dimensions is never read, so it is not validated.
+		(
+			vec![PixelWidth(1440), PixelHeight(1080), PixelCropRight(u64::MAX)],
+			(Some(1440), Some(1080)),
+		),
+	] {
+		let data = MkvBuilder::new()
+			.header("matroska")
+			.segment_start()
+			.info(1_000_000)
+			.tracks(vec![TrackEntry(Master::Full(vec![
+				TrackNumber(1),
+				TrackUID(1),
+				TrackType(1),
+				CodecID("V_VP9".into()),
+				Video(Master::Full(fields)),
+			]))])
+			.segment_end()
+			.build();
+		let catalog = run(&data);
+		let config = catalog.video.renditions.values().next().unwrap();
+		assert_eq!((config.coded_width, config.coded_height), expected);
+		assert_eq!(
+			(config.display_aspect_width, config.display_aspect_height),
+			(None, None)
+		);
+	}
+}
+
+#[test]
+fn container_aspect_uncropped_display_needs_no_pixel_size() {
+	use MatroskaSpec::*;
+	for fields in [
+		vec![DisplayWidth(16), DisplayHeight(9)],
+		vec![PixelWidth(0), PixelHeight(1080), DisplayWidth(16), DisplayHeight(9)],
+		vec![DisplayUnit(1), DisplayWidth(16), DisplayHeight(9)],
+	] {
+		let data = MkvBuilder::new()
+			.header("matroska")
+			.segment_start()
+			.info(1_000_000)
+			.tracks(vec![TrackEntry(Master::Full(vec![
+				TrackNumber(1),
+				TrackUID(1),
+				TrackType(1),
+				CodecID("V_VP9".into()),
+				Video(Master::Full(fields)),
+			]))])
+			.segment_end()
+			.build();
+		let catalog = run(&data);
+		let config = catalog.video.renditions.values().next().unwrap();
+		assert_eq!(
+			(config.display_aspect_width, config.display_aspect_height),
+			(Some(16), Some(9))
+		);
+	}
+}
+
+#[test]
+fn container_aspect_matroska_rejects_invalid_dimensions() {
+	use MatroskaSpec::*;
+	for fields in [
+		vec![DisplayWidth(0)],
+		vec![DisplayHeight(0)],
+		vec![DisplayWidth(u64::MAX), DisplayHeight(1)],
+		vec![DisplayUnit(5), DisplayWidth(16), DisplayHeight(9)],
+		// A crop read to scale explicit display dimensions must leave a picture.
+		vec![PixelCropRight(1440), DisplayWidth(16)],
+		vec![PixelCropLeft(1), PixelCropRight(u64::MAX), DisplayWidth(16)],
+		vec![PixelCropTop(1081), DisplayHeight(9)],
+		vec![PixelCropBottom(1080), DisplayHeight(9)],
+		vec![
+			DisplayUnit(1),
+			PixelCropRight(u64::MAX),
+			DisplayWidth(16),
+			DisplayHeight(9),
+		],
+	] {
+		assert_invalid_aspect(&aspect_file("V_VP9", None, fields.clone()), &format!("{fields:?}"));
+	}
+	let data = aspect_file("V_VP9", None, vec![DisplayWidth(u64::MAX), DisplayHeight(u64::MAX)]);
+	let catalog = run(&data);
+	let config = catalog.video.renditions.values().next().unwrap();
+	assert_eq!(
+		(config.display_aspect_width, config.display_aspect_height),
+		(Some(1), Some(1))
+	);
+}
+
 #[test]
 fn test_flac_catalog() {
 	let data = MkvBuilder::new()
@@ -354,9 +929,9 @@ fn test_mp3_catalog() {
 }
 
 #[test]
-fn test_unsupported_codec_skipped() {
+fn unsupported_audio_codec_is_refused() {
 	// Mix of supported (Opus) and unsupported (Vorbis) audio tracks. The Vorbis track
-	// should be dropped with a warning; Opus should make it into the catalog.
+	// must refuse the import, including when a usable Opus track precedes it.
 	let data = MkvBuilder::new()
 		.header("webm")
 		.segment_start()
@@ -374,36 +949,17 @@ fn test_unsupported_codec_skipped() {
 		.segment_end()
 		.build();
 
-	let catalog = run(&data);
-	assert_eq!(catalog.audio.renditions.len(), 1);
-	let a = catalog.audio.renditions.values().next().unwrap();
-	assert!(matches!(a.codec, AudioCodec::Opus));
-}
-
-#[test]
-fn test_block_timestamp_scaling() {
-	// TimestampScale = 1_000_000 ns (1ms). Cluster timestamp = 1000, block rel = 33
-	// → 1033 ms = 1_033_000 us.
-	let data = MkvBuilder::new()
-		.header("webm")
-		.segment_start()
-		.info(1_000_000)
-		.track_video(1, "V_VP9", 16, 16)
-		.cluster(1000, || vec![simple_block(1, 33, true, b"f")])
-		.segment_end()
-		.build();
-
-	// Smoke check: parsing succeeds. Timestamp value itself is internal to the
-	// container::Producer; the catalog round-trip above already exercises the
-	// rendition wiring.
-	let _ = run(&data);
+	for initial in [false, true] {
+		assert!(
+			matches!(import_result(&data, initial), Err(crate::Error::Mkv(super::Error::UnsupportedAudioCodec(name))) if name == "A_VORBIS")
+		);
+	}
 }
 
 /// A rendition must never be advertised when its media producer could not be built.
 ///
-/// Publishing the media producer is fallible (it enrolls the track in the broadcast timeline, minting the
-/// shared `timeline.z` track, which can collide), so publishing the catalog entry first would
-/// leave consumers a rendition that is announced but has no producer behind it and is therefore
+/// Publishing the media producer is fallible (it mints the track's HLS record track, which can
+/// collide), so publishing the catalog entry first would leave consumers a rendition that is announced but has no producer behind it and is therefore
 /// never served.
 #[test]
 fn rendition_is_not_published_when_the_media_track_fails() {
@@ -417,23 +973,23 @@ fn rendition_is_not_published_when_the_media_track_fails() {
 
 	// Control: the same fixture publishes exactly one rendition when nothing collides, so the
 	// assertion below cannot pass merely because the fixture stopped reaching track import.
-	assert_eq!(run(&data).video.renditions.len(), 1, "fixture must publish a rendition");
+	let control = run(&data);
+	assert_eq!(control.video.renditions.len(), 1, "fixture must publish a rendition");
+	let name = control.video.renditions.keys().next().unwrap().clone();
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 
-	// Squat the catalog's timeline track, so building the media producer (whose enrollment
-	// enrolls the catalog too) fails. The handle must stay alive: the broadcast tracks names weakly, so
-	// dropping it frees the name.
-	let _squat = broadcast
-		.create_track(hang::timeline::default_name(hang::Catalog::DEFAULT_NAME), None)
-		.unwrap();
+	// Squat the rendition's HLS record track, so enrolling it (and with it building its media
+	// producer) fails. The handle must stay alive: the broadcast tracks names weakly, so
+	// dropping it frees the name. Unique names are per broadcast, so the track is named as in
+	// the control.
+	let _squat = broadcast.create_track(hang::hls::default_name(&name), None).unwrap();
 
 	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.reserve());
 	let buf = bytes::BytesMut::from(&data[..]);
-	// The importer logs and skips a track it cannot build, rather than failing the whole
-	// decode, so the outcome shows up in the catalog rather than in this result.
-	let _ = mkv.decode(&buf);
+	// A producer failure must reach the importer caller without advertising the rendition.
+	assert!(mkv.decode(&buf).is_err());
 
 	assert!(
 		catalog.snapshot().video.renditions.is_empty(),
@@ -446,7 +1002,7 @@ struct Imported {
 	published: std::collections::BTreeMap<String, Vec<u128>>,
 	/// The root clock the catalog advertised.
 	clock: hang::catalog::Clock,
-	arrival: std::ops::RangeInclusive<std::time::SystemTime>,
+	arrival: std::ops::RangeInclusive<moq_clock::Wall>,
 	/// Why a chunk was refused, if one was.
 	refused: Option<crate::Error>,
 }
@@ -459,7 +1015,7 @@ async fn import_chunked(data: &[u8], chunk: usize) -> Imported {
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.reserve());
 
-	let before = std::time::SystemTime::now();
+	let before = moq_clock::wall();
 	let mut refused = None;
 	for piece in data.chunks(chunk) {
 		if let Err(err) = mkv.decode(piece) {
@@ -467,7 +1023,7 @@ async fn import_chunked(data: &[u8], chunk: usize) -> Imported {
 			break;
 		}
 	}
-	let after = std::time::SystemTime::now();
+	let after = moq_clock::wall();
 	mkv.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
@@ -479,8 +1035,7 @@ async fn import_chunked(data: &[u8], chunk: usize) -> Imported {
 	}
 }
 
-/// Every drain pass restarts from a replay point, so a small chunk replays tags; each block
-/// still publishes exactly once.
+/// Incomplete elements span chunks, and each completed block publishes exactly once.
 #[tokio::test]
 async fn chunked_decode_publishes_each_block_once() {
 	let data = MkvBuilder::new()
@@ -655,7 +1210,6 @@ async fn subtitle_languages_and_empty_tracks_are_published() {
 			text_entry(1, "S_TEXT/UTF8", "en", "English"),
 			text_entry(2, "S_TEXT/UTF8", "es", "Spanish"),
 			text_entry(3, "S_TEXT/UTF8", "fr", "French"),
-			text_entry(4, "S_TEXT/ASS", "de", "Unsupported"),
 		])
 		.cluster(0, || {
 			let MatroskaSpec::SimpleBlock(block) = simple_block(1, 250, true, b"Hello") else {
@@ -1105,4 +1659,396 @@ fn subtitle_codec_state_is_refused() {
 		matches!(result, Err(crate::Error::Mkv(super::Error::InvalidSubtitle(_)))),
 		"{result:?}"
 	);
+}
+
+/// The SPS outranks the Colour element, which still fills what the SPS leaves unsaid: here the
+/// static HDR metadata.
+#[test]
+fn sps_color_outranks_colour_which_fills_its_gaps() {
+	use crate::codec::h264::fixtures::{PPS, SPS_BT709};
+
+	let hdr = crate::codec::color::test::hdr10();
+	let mut container = crate::codec::color::cicp(9, 16, 9, Some(true)).unwrap();
+	container.mastering = hdr.mastering;
+	container.content_light = hdr.content_light;
+	let colour = super::export::matroska_colour(&container).unwrap();
+
+	let avcc = crate::codec::h264::build_avcc(
+		&[bytes::Bytes::from_static(SPS_BT709)],
+		&[bytes::Bytes::from_static(PPS)],
+	)
+	.unwrap();
+	let entry = MatroskaSpec::TrackEntry(Master::Full(vec![
+		MatroskaSpec::TrackNumber(1),
+		MatroskaSpec::TrackUID(1),
+		MatroskaSpec::TrackType(1),
+		MatroskaSpec::CodecID("V_MPEG4/ISO/AVC".to_string()),
+		MatroskaSpec::CodecPrivate(avcc.to_vec()),
+		MatroskaSpec::Video(Master::Full(vec![
+			MatroskaSpec::PixelWidth(64),
+			MatroskaSpec::PixelHeight(64),
+			colour,
+		])),
+	]));
+	let data = MkvBuilder::new()
+		.header("matroska")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![entry])
+		.segment_end()
+		.build();
+
+	let catalog = run(&data);
+	let color = catalog.video.renditions.values().next().unwrap().color.clone().unwrap();
+	assert_eq!(
+		(color.primaries, color.transfer, color.matrix, color.range),
+		(Some(1), Some(1), Some(1), Some(hang::catalog::Range::Limited))
+	);
+	assert_eq!(
+		(color.mastering, color.content_light),
+		(hdr.mastering, hdr.content_light)
+	);
+}
+
+/// Every catalog colour field survives a Matroska Colour element.
+#[test]
+fn colour_element_round_trips() {
+	let hdr = crate::codec::color::test::hdr10();
+	let mut color = crate::codec::color::cicp(9, 18, 9, Some(true)).unwrap();
+	color.mastering = hdr.mastering;
+	color.content_light = hdr.content_light;
+	let MatroskaSpec::Colour(Master::Full(children)) = super::export::matroska_colour(&color).unwrap() else {
+		panic!("expected a full Colour element");
+	};
+	assert_eq!(super::import::matroska_color(&children).unwrap(), Some(color));
+	assert_eq!(super::export::matroska_colour(&hang::catalog::Color::default()), None);
+}
+
+/// A Colour value with no catalog representation is refused rather than clamped or dropped.
+#[test]
+fn unrepresentable_colour_is_refused() {
+	for child in [
+		MatroskaSpec::MaxCLL(70_000),
+		MatroskaSpec::MaxFALL(65_536),
+		MatroskaSpec::Primaries(300),
+		MatroskaSpec::MasteringMetadata(Master::Full(vec![MatroskaSpec::LuminanceMax(f64::NAN)])),
+		MatroskaSpec::MasteringMetadata(Master::Full(vec![MatroskaSpec::LuminanceMin(-1.0)])),
+		MatroskaSpec::MasteringMetadata(Master::Full(vec![MatroskaSpec::PrimaryRChromaticityX(1.5)])),
+	] {
+		assert!(super::import::matroska_color(&[child]).is_err());
+	}
+}
+
+/// Container entry points must preserve importer failures, both in the constructor's
+/// initial data and in arbitrarily split subsequent chunks.
+fn import_result(data: &[u8], initial: bool) -> crate::Result<()> {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let init = crate::import::ContainerInit::new(
+		crate::import::ContainerFormat::Mkv,
+		if initial {
+			bytes::Bytes::copy_from_slice(data)
+		} else {
+			bytes::Bytes::new()
+		},
+	);
+	let mut import: crate::import::Container = crate::import::Container::new(broadcast, catalog.reserve(), &init)?;
+	if !initial {
+		for chunk in data.chunks(7) {
+			import.decode(chunk)?;
+		}
+	}
+	import.finish()
+}
+
+#[test]
+fn malformed_track_metadata_fails_through_the_container() {
+	use MatroskaSpec::*;
+	let cases = [
+		TrackEntry(Master::Full(vec![TrackType(2), CodecID("A_OPUS".into())])),
+		TrackEntry(Master::Full(vec![
+			TrackNumber(2),
+			TrackType(2),
+			CodecID("A_AAC".into()),
+		])),
+		TrackEntry(Master::Full(vec![
+			TrackNumber(2),
+			TrackType(1),
+			CodecID("V_MPEG4/ISO/AVC".into()),
+			CodecPrivate(vec![0]),
+		])),
+		TrackEntry(Master::Full(vec![
+			TrackNumber(2),
+			TrackType(1),
+			CodecID("V_VP9".into()),
+			Video(Master::Full(vec![
+				PixelWidth(320),
+				PixelHeight(240),
+				Colour(Master::Full(vec![MaxCLL(70_000)])),
+			])),
+		])),
+	];
+	for (index, invalid) in cases.into_iter().enumerate() {
+		for reverse in [false, true] {
+			let mut tracks = vec![track_entry_audio_opus(1, 48_000.0, 2), invalid.clone()];
+			if reverse {
+				tracks.reverse();
+			}
+			let data = MkvBuilder::new()
+				.header("matroska")
+				.segment_start()
+				.info(1_000_000)
+				.tracks(tracks)
+				.segment_end()
+				.build();
+			for initial in [false, true] {
+				assert!(
+					import_result(&data, initial).is_err(),
+					"case {index}, reverse {reverse}, initial {initial}"
+				);
+			}
+		}
+	}
+}
+
+#[test]
+fn duplicate_track_numbers_fail_even_for_skipped_roles() {
+	use MatroskaSpec::*;
+	for second in [
+		track_entry_audio_opus(1, 44_100.0, 1),
+		TrackEntry(Master::Full(vec![
+			TrackNumber(1),
+			TrackType(18),
+			CodecID("B_BUTTONS".into()),
+		])),
+	] {
+		for reverse in [false, true] {
+			let mut tracks = vec![track_entry_audio_opus(1, 48_000.0, 2), second.clone()];
+			if reverse {
+				tracks.reverse();
+			}
+			let data = MkvBuilder::new()
+				.header("matroska")
+				.segment_start()
+				.info(1_000_000)
+				.tracks(tracks)
+				.segment_end()
+				.build();
+			for initial in [false, true] {
+				let result = import_result(&data, initial);
+				assert!(
+					matches!(&result, Err(crate::Error::Moq(moq_net::Error::Duplicate))),
+					"reverse {reverse}, initial {initial}: {result:?}"
+				);
+			}
+		}
+	}
+}
+
+#[test]
+fn invalid_timestamp_scales_are_refused() {
+	for initial in [false, true] {
+		let zero = MkvBuilder::new()
+			.header("webm")
+			.segment_start()
+			.info(0)
+			.tracks(vec![track_entry_audio_opus(1, 48_000.0, 2)])
+			.cluster(0, || vec![simple_block(1, 0, true, b"opus")])
+			.segment_end()
+			.build();
+		assert!(matches!(
+			import_result(&zero, initial),
+			Err(crate::Error::Mkv(super::Error::ValueOutOfRange("TimestampScale")))
+		));
+	}
+}
+
+#[test]
+fn block_tick_overflow_is_refused_before_timestamp_conversion() {
+	for (cluster, relative, scale) in [(u64::MAX, 1, 1), (u64::MAX, 0, 2)] {
+		for initial in [false, true] {
+			let data = MkvBuilder::new()
+				.header("webm")
+				.segment_start()
+				.info(scale)
+				.tracks(vec![track_entry_audio_opus(1, 48_000.0, 2)])
+				.cluster(cluster, || vec![simple_block(1, relative, true, b"opus")])
+				.segment_end()
+				.build();
+			let outcome = std::panic::catch_unwind(|| import_result(&data, initial));
+			assert!(matches!(
+				outcome,
+				Ok(Err(crate::Error::Mkv(super::Error::TimestampOverflow)))
+			));
+		}
+	}
+	let negative = MkvBuilder::new()
+		.header("webm")
+		.segment_start()
+		.info(1)
+		.tracks(vec![track_entry_audio_opus(1, 48_000.0, 2)])
+		.cluster(0, || vec![simple_block(1, -1, true, b"opus")])
+		.segment_end()
+		.build();
+	for initial in [false, true] {
+		assert!(matches!(
+			import_result(&negative, initial),
+			Err(crate::Error::Mkv(super::Error::NegativeBlockTimestamp))
+		));
+	}
+}
+
+#[test]
+fn unsupported_subtitle_codec_is_refused() {
+	for reverse in [false, true] {
+		let mut tracks = vec![
+			track_entry_audio_opus(1, 48_000.0, 2),
+			text_entry(2, "S_TEXT/ASS", "de", "Unsupported"),
+		];
+		if reverse {
+			tracks.reverse();
+		}
+		let data = MkvBuilder::new()
+			.header("matroska")
+			.segment_start()
+			.info(1_000_000)
+			.tracks(tracks)
+			.segment_end()
+			.build();
+		for initial in [false, true] {
+			assert!(
+				matches!(import_result(&data, initial), Err(crate::Error::UnknownFormat(codec)) if codec.contains("S_TEXT/ASS"))
+			);
+		}
+	}
+}
+
+#[tokio::test(start_paused = true)]
+async fn tiny_chunks_preserve_tracks_and_skip_only_unsupported_roles() {
+	use MatroskaSpec::*;
+	let data = MkvBuilder::new()
+		.header("matroska")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![
+			track_entry_audio_opus(1, 48_000.0, 2),
+			track_entry_audio_opus(2, 48_000.0, 1),
+			TrackEntry(Master::Full(vec![
+				TrackNumber(3),
+				TrackType(18),
+				CodecID("B_BUTTONS".into()),
+				Video(Master::Full(vec![PixelWidth(u64::MAX)])),
+			])),
+		])
+		.cluster(0, || {
+			vec![
+				simple_block(1, 0, true, b"stereo"),
+				simple_block(2, 20, true, b"mono"),
+				simple_block(3, 0, true, b"ignored"),
+			]
+		})
+		.segment_end()
+		.build();
+	for chunk in [1, 2, 7, 16, data.len()] {
+		let imported = import_chunked(&data, chunk).await;
+		assert!(imported.refused.is_none(), "chunk {chunk}: {:?}", imported.refused);
+		assert_eq!(imported.published.len(), 2, "chunk {chunk}");
+		let mut timestamps: Vec<_> = imported.published.into_values().collect();
+		timestamps.sort();
+		assert_eq!(timestamps, [vec![0], vec![20_000]], "chunk {chunk}");
+	}
+}
+
+#[test]
+fn partial_track_metadata_is_refused_at_eof() {
+	let data = MkvBuilder::new()
+		.header("webm")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![track_entry_audio_opus(1, 48_000.0, 2)])
+		.segment_end()
+		.build();
+	for missing in 1..=8 {
+		for initial in [false, true] {
+			assert!(
+				matches!(
+					import_result(&data[..data.len() - missing], initial),
+					Err(crate::Error::Mkv(super::Error::MatroskaParse))
+				),
+				"missing {missing}, initial {initial}"
+			);
+		}
+	}
+	for initial in [false, true] {
+		import_result(&data, initial).unwrap();
+	}
+}
+
+#[test]
+fn block_ticks_above_the_signed_range_are_not_misreported_as_negative() {
+	for (cluster, relative) in [(i64::MAX as u64, 1i16), (u64::MAX, -1)] {
+		let data = MkvBuilder::new()
+			.header("webm")
+			.segment_start()
+			.info(1)
+			.tracks(vec![track_entry_audio_opus(1, 48_000.0, 2)])
+			.cluster(cluster, || vec![simple_block(1, relative, true, b"frame")])
+			.segment_end()
+			.build();
+		// The addition fits u64, but exceeds MoQ's existing timestamp value range.
+		for initial in [false, true] {
+			assert!(
+				matches!(import_result(&data, initial), Err(crate::Error::TimestampOverflow(_))),
+				"{cluster}+{relative}, initial {initial}"
+			);
+		}
+	}
+}
+
+#[test]
+fn invalid_track_number_fields_are_refused() {
+	use MatroskaSpec::*;
+	for (fields, duplicate) in [
+		(vec![TrackNumber(0)], false),
+		(vec![TrackNumber(1), TrackNumber(2)], true),
+	] {
+		let mut entry = fields;
+		entry.extend([TrackType(2), CodecID("A_OPUS".into())]);
+		let data = MkvBuilder::new()
+			.header("webm")
+			.segment_start()
+			.info(1_000_000)
+			.tracks(vec![TrackEntry(Master::Full(entry))])
+			.segment_end()
+			.build();
+		for initial in [false, true] {
+			let error = import_result(&data, initial).unwrap_err();
+			if duplicate {
+				assert!(matches!(error, crate::Error::Moq(moq_net::Error::Duplicate)));
+			} else {
+				assert!(matches!(
+					error,
+					crate::Error::Mkv(super::Error::ValueOutOfRange("TrackNumber"))
+				));
+			}
+		}
+	}
+}
+
+/// ffmpeg's live WebM uses an unknown-size Segment and real Opus packet metadata.
+/// The encoded fixture needs no ffmpeg installation when this gate runs.
+#[tokio::test(start_paused = true)]
+async fn real_live_webm_imports_across_chunk_boundaries() {
+	let data = include_bytes!("test_data/opus.webm");
+	for initial in [false, true] {
+		import_result(data, initial).unwrap();
+	}
+	for chunk in [1, 7, 64, data.len()] {
+		let imported = import_chunked(data, chunk).await;
+		assert!(imported.refused.is_none(), "chunk {chunk}: {:?}", imported.refused);
+		assert_eq!(imported.published.len(), 1);
+		let timestamps = imported.published.into_values().next().unwrap();
+		assert_eq!(timestamps.len(), 6);
+		assert!(timestamps.windows(2).all(|pair| pair[0] < pair[1]));
+	}
 }

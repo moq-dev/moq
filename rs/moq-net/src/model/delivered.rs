@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 /// below it as handed out (see [`Self::forget_below`]). The run starting at 0 is that
 /// floor, so only the gaps above it cost memory.
 #[derive(Default)]
-pub(crate) struct Delivered {
+pub(super) struct Delivered {
 	/// First to last sequence, inclusive, never adjacent to each other.
 	runs: BTreeMap<u64, u64>,
 }
@@ -20,6 +20,21 @@ impl Delivered {
 			.range(..=sequence)
 			.next_back()
 			.is_some_and(|(_, last)| sequence <= *last)
+	}
+
+	/// The first sequence above the handed-out prefix, or none once every sequence is past.
+	pub fn floor(&self) -> Option<u64> {
+		self.runs.get(&0).map_or(Some(0), |last| last.checked_add(1))
+	}
+
+	/// Whether every sequence in `groups` was handed out, or is below the floor.
+	pub fn covers(&self, groups: std::ops::Range<u64>) -> bool {
+		groups.is_empty()
+			|| self
+				.runs
+				.range(..=groups.start)
+				.next_back()
+				.is_some_and(|(_, last)| groups.end - 1 <= *last)
 	}
 
 	/// Record `sequence` as handed out; `false` when it already was.
@@ -40,6 +55,33 @@ impl Delivered {
 		true
 	}
 
+	/// The parts of `groups` not handed out, in order.
+	pub fn gaps(&self, groups: std::ops::Range<u64>) -> Vec<std::ops::Range<u64>> {
+		let mut gaps = Vec::new();
+		let mut next = groups.start;
+		let from = self
+			.runs
+			.range(..=groups.start)
+			.next_back()
+			.map_or(next, |(start, _)| *start);
+		for (first, last) in self.runs.range(from..) {
+			if next >= groups.end {
+				return gaps;
+			}
+			if *first > next {
+				gaps.push(next..(*first).min(groups.end));
+			}
+			match last.checked_add(1) {
+				Some(after) => next = next.max(after),
+				None => return gaps,
+			}
+		}
+		if next < groups.end {
+			gaps.push(next..groups.end);
+		}
+		gaps
+	}
+
 	/// Count every sequence below `floor` as handed out.
 	pub fn forget_below(&mut self, floor: u64) {
 		let Some(below) = floor.checked_sub(1) else {
@@ -56,13 +98,18 @@ impl Delivered {
 	}
 
 	/// The lowest sequence handed out above a gap: once it is past the reader's budget,
-	/// so is the gap, since group timestamps on a track never rewind.
+	/// so is the gap, since a timed track refuses a group whose start rewinds.
 	pub fn above_gap(&self) -> Option<u64> {
 		let mut runs = self.runs.keys();
 		match runs.next()? {
 			0 => runs.next().copied(),
 			first => Some(*first),
 		}
+	}
+
+	/// The last run starting below `sequence`.
+	pub fn last_before(&self, sequence: u64) -> Option<u64> {
+		self.runs.range(..sequence).next_back().map(|(start, _)| *start)
 	}
 
 	/// How many runs it holds: one per gap, plus the floor.
@@ -81,6 +128,20 @@ mod test {
 	}
 
 	#[test]
+	fn gaps_are_what_no_run_covers() {
+		let mut delivered = Delivered::default();
+		for sequence in [2, 4, 5, 9] {
+			delivered.insert(sequence);
+		}
+		assert_eq!(delivered.gaps(0..12), [0..2, 3..4, 6..9, 10..12]);
+		assert_eq!(delivered.gaps(4..6), []);
+		assert_eq!(delivered.gaps(5..11), [6..9, 10..11]);
+		delivered.insert(u64::MAX - 1);
+		let gaps = delivered.gaps(u64::MAX - 2..u64::MAX);
+		assert_eq!((gaps.len(), gaps.first()), (1, Some(&(u64::MAX - 2..u64::MAX - 1))));
+	}
+
+	#[test]
 	fn insert_joins_neighbouring_runs() {
 		let mut delivered = Delivered::default();
 		assert!(delivered.insert(5));
@@ -94,6 +155,9 @@ mod test {
 		assert_eq!(runs(&delivered), [(4, 8)]);
 		assert!(delivered.contains(4) && delivered.contains(8));
 		assert!(!delivered.contains(3) && !delivered.contains(9));
+		assert_eq!(delivered.floor(), Some(0), "a run above a gap is not the prefix");
+		assert!(delivered.covers(4..9) && delivered.covers(9..9));
+		assert!(!delivered.covers(3..5) && !delivered.covers(8..10));
 	}
 
 	#[test]
@@ -105,6 +169,7 @@ mod test {
 		assert_eq!(runs(&delivered), [(0, 0), (u64::MAX, u64::MAX)]);
 		delivered.forget_below(u64::MAX);
 		assert_eq!(runs(&delivered), [(0, u64::MAX)]);
+		assert_eq!(delivered.floor(), None);
 	}
 
 	#[test]
@@ -114,6 +179,11 @@ mod test {
 			delivered.insert(sequence);
 		}
 		assert_eq!(delivered.above_gap(), Some(3));
+		assert_eq!(delivered.last_before(0), None);
+		assert_eq!(delivered.last_before(3), None);
+		assert_eq!(delivered.last_before(5), Some(3));
+		assert_eq!(delivered.last_before(9), Some(5));
+		assert_eq!(delivered.last_before(13), Some(12));
 		delivered.forget_below(0);
 		assert_eq!(delivered.runs(), 4);
 
@@ -122,6 +192,7 @@ mod test {
 		assert_eq!(runs(&delivered), [(0, 6), (9, 9), (12, 12)]);
 		assert_eq!(delivered.above_gap(), Some(9));
 		assert!(delivered.contains(4), "below the floor counts as handed out");
+		assert_eq!(delivered.floor(), Some(7));
 
 		// A floor inside a gap keeps the run above it.
 		delivered.forget_below(11);

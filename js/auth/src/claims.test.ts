@@ -1,15 +1,16 @@
 import { expect, test } from "bun:test";
-import { authorize, type Claims, ClaimsSchema, ScopeSchema } from "./claims.ts";
+import { authorize, type Claims, ClaimsSchema, type Permissions, ScopeSchema } from "./claims.ts";
+import { GrantSchema } from "./contract.ts";
 import { encodeGrants } from "./wire.ts";
 
 // These cases mirror the Rust moq-auth crate's claims::tests one-for-one, so both
 // sides stay pinned to the same authorization semantics.
 
 function claims(root: string, subscribe: string[], publish: string[]): Claims {
-	return { root, subscribe, publish };
+	return ClaimsSchema.parse({ root, subscribe, publish });
 }
 
-function texts(permissions: { subscribe: { toJSON(): string[] }; publish: { toJSON(): string[] } }) {
+function texts(permissions: Permissions) {
 	return { subscribe: permissions.subscribe.toJSON(), publish: permissions.publish.toJSON() };
 }
 
@@ -117,4 +118,15 @@ test("authorize - wildcards rebase as a set", () => {
 	// `**/chat` reached at `chat` is both the path itself and deeper `**/chat`.
 	const permissions = authorize(claims("", ["**/chat"], []), "chat");
 	expect(permissions.subscribe.toJSON()).toEqual(["", "**/chat"]);
+});
+
+test("roles are pattern lists and refuse object restrictions in full", () => {
+	for (const role of ["publish", "subscribe"]) {
+		for (const object of [{ path: "alice/**" }, { path: ["alice/**"], rate: 8000 }]) {
+			const input = { publish: ["**"], subscribe: ["**"], [role]: object };
+			expect(ClaimsSchema.safeParse(input).success).toBe(false);
+			expect(ScopeSchema.safeParse(input).success).toBe(false);
+			expect(GrantSchema.safeParse(input).success).toBe(false);
+		}
+	}
 });

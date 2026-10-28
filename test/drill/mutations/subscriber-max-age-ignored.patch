@@ -1,0 +1,16 @@
+# drill: ietf_subscriber_max_age_skips_bufferbloat
+# expect: subscriber max age did not reach the publisher
+#
+# Preserve negotiation and decoding, but ignore the requested budget when serving.
+--- a/rs/moq-net/src/ietf/publisher.rs
++++ b/rs/moq-net/src/ietf/publisher.rs
+@@ -1741,9 +1741,6 @@
+ 		// A live SUBSCRIBE's NEW_GROUP_REQUEST asks nothing more: subscribing is itself a join,
+ 		// which the track's refresh ratio judges.
+ 		let mut subscription = serving_subscription(msg.subscriber_priority).with_order(msg.group_order.to_order());
+-		if let Some(max_age) = msg.max_age {
+-			subscription.max_delay = Some(Duration::from_millis(max_age));
+-		}
+ 		// A range that resolves without the live edge has a fixed start, which is no join:
+ 		// bound the subscription before subscribing so the ratio never judges it. From the
+ 		// start of its group, so a relay's copy holds the group's head for its other readers,

@@ -1,5 +1,7 @@
 import { Decoder as Flate } from "@moq/flate";
 
+import { parse } from "../parse.ts";
+
 function object(value: unknown, label: string): Record<string, unknown> {
 	if (value === null || typeof value !== "object" || Array.isArray(value)) {
 		throw new Error(`${label} must be an object`);
@@ -15,7 +17,7 @@ function index(value: unknown, label: string): number {
 }
 
 /** Options for a {@link Decoder}. */
-export interface ConsumerConfig {
+export interface DecoderConfig {
 	/** Read frames written with `Config.compression` on. Defaults to `false`. */
 	compression?: boolean;
 }
@@ -71,7 +73,7 @@ export class Decoder<T> {
 	#events: Queued<T>[] = [];
 	#nextEvent = 0;
 
-	constructor(config: ConsumerConfig = {}) {
+	constructor(config: DecoderConfig = {}) {
 		this.#compress = config.compression ?? false;
 	}
 
@@ -86,7 +88,7 @@ export class Decoder<T> {
 				if (generation !== this.#generation) throw new Error("stale window group");
 				if (this.#compress) flate ??= new Flate();
 				const bytes = flate ? flate.frame(payload) : payload;
-				const frame = object(JSON.parse(new TextDecoder().decode(bytes)) as unknown, "window frame");
+				const frame = object(parse(bytes), "window frame");
 
 				if (!positioned) {
 					if (!Array.isArray(frame.records)) throw new Error("window header records must be an array");

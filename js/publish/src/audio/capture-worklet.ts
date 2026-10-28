@@ -1,13 +1,13 @@
-import { Time } from "@moq/net";
+import { Micro, type Second } from "@moq/clock";
 import type { AudioFrame } from "./capture";
 
 class Capture extends AudioWorkletProcessor {
 	#sampleCount = 0;
-	#zero: Time.Micro;
+	#zero: Micro;
 
 	constructor(options?: AudioWorkletNodeOptions) {
 		super();
-		this.#zero = (options?.processorOptions?.zero ?? 0) as Time.Micro;
+		this.#zero = (options?.processorOptions?.zero ?? 0) as Micro;
 	}
 
 	process(input: Float32Array[][]) {
@@ -17,8 +17,7 @@ class Capture extends AudioWorkletProcessor {
 		if (channels.length === 0) return true; // TODO: No input hooked up?
 
 		// Convert sample count to microseconds, offset onto the shared wall clock.
-		const timestamp = (Time.Micro.fromSecond((this.#sampleCount / sampleRate) as Time.Second) +
-			this.#zero) as Time.Micro;
+		const timestamp = (Micro.fromSecond((this.#sampleCount / sampleRate) as Second) + this.#zero) as Micro;
 
 		const msg: AudioFrame = {
 			timestamp,

@@ -21,12 +21,19 @@ ffmpeg, no GStreamer, no system codec to install. `moq import capture` and
 
 Selection is automatic and hardware first. GPU libraries are loaded at
 runtime, so one binary starts anywhere and warns when it falls back to
-software. openh264 is the H.264 fallback and is on by default. H.265 is
+software. openh264 is the H.264 fallback, behind the opt-in `openh264`
+feature (vendored C++); the published bindings and binaries enable it. H.265 is
 hardware-only, AV1 decodes through NVDEC and MediaCodec, and VP8 and VP9
 decode in software through the opt-in `vpx` feature.
 
 Capture is pull-driven: `encode::publish_capture` advertises the track up
-front and opens the camera only while someone subscribes. Backends that can
+front and opens the camera only while someone subscribes. A viewer who joins
+once the current group's deltas outweigh twice its keyframe gets a fresh
+keyframe, so the GOP is only the longest a group runs. Through a moq-lite
+relay, only the join that opens the relay's upstream subscription counts. A
+build with the `v4l2` feature keeps every `Auto` or `Hardware` selection to its
+GOP, whichever encoder it lands on, since a V4L2 driver may refuse the request.
+Backends that can
 change bitrate live follow the connection's send estimate. Where the platform
 allows it, frames stay on the GPU between capture, decode, encode, and render.
 
@@ -39,7 +46,8 @@ On Wayland, the `pipewire` feature lets Rust callers request a screen or
 window through the system picker with `capture::Source::Portal`. Keep the
 selection for automatic reopens; create a new one to choose another source.
 Restoring a grant without another dialog depends on compositor support. X11
-continues to select displays and windows by ID.
+continues to select displays and windows by ID, and `capture::Source::Display`
+refuses anything else rather than opening the picker.
 
 Windows display and window capture use Windows.Graphics.Capture on Windows 10
 2004 or newer; application capture and system audio are not provided there.

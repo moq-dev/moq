@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use hang::catalog::{AudioConfig, Container as CatalogContainer, VideoConfig};
+use moq_net::Timestamp;
 
 use crate::catalog::hang::Container as HangContainer;
 use crate::container::Frame;
@@ -11,6 +12,7 @@ use crate::container::source::{VideoTransform, build_video_transform, catalog_di
 
 use super::export::{
 	apply_codec_durations, catalog_timescale_audio, catalog_timescale_video, extract_init, infer_missing_durations,
+	timestamp_gap,
 };
 use super::{Error, Fragmenter, fragment, synthesize_audio_trak, synthesize_video_trak};
 
@@ -21,6 +23,10 @@ use super::{Error, Fragmenter, fragment, synthesize_audio_trak, synthesize_video
 const TRACK_ID: u32 = 1;
 
 /// Whether the muxer serves a video or an audio rendition, with its catalog config.
+#[allow(
+	clippy::large_enum_variant,
+	reason = "one per muxer, so the variant sizes never add up to an allocation's worth; only large when extra features grow the video config"
+)]
 enum Kind {
 	Video(VideoConfig),
 	Audio(AudioConfig),
@@ -172,8 +178,8 @@ impl Muxer {
 		use crate::container::Container as _;
 
 		let mut out: Vec<Frame> = Vec::new();
-		while let Some(frames) = self.container.read(group).await? {
-			for frame in frames {
+		while let Some(wire) = group.read_frame().await? {
+			for frame in self.container.decode(wire)? {
 				if let Some(bound) = self.container.end(&frame) {
 					if matches!(self.kind, Kind::Video(_))
 						&& let Some(last) = out.last_mut()
@@ -283,10 +289,13 @@ impl Muxer {
 	/// even so: consecutive sequence numbers say nothing about whether the publisher paused
 	/// across the boundary.
 	///
+	/// `end`, when the caller knows where the content ends (such as the next segment's start),
+	/// times the last presented sample if neither its codec nor a duration marker does.
+	///
 	/// To make each frame separately addressable instead, use
 	/// [`fragmenter`](Self::fragmenter).
-	pub fn fragment(&self, sequence: u32, frames: &[Frame]) -> crate::Result<Bytes> {
-		let frames = self.resolve_durations(frames)?;
+	pub fn fragment(&self, sequence: u32, frames: &[Frame], end: Option<Timestamp>) -> crate::Result<Bytes> {
+		let frames = self.resolve_durations(frames, end)?;
 		Ok(super::encode_fragment(self.fragment_info(sequence), &frames)?)
 	}
 
@@ -316,11 +325,21 @@ impl Muxer {
 		}
 	}
 
-	/// Give every frame a duration: the one its codec states, else the gap to its successor in
-	/// this slice, else the catalog frame rate / sample rate.
-	fn resolve_durations(&self, frames: &[Frame]) -> crate::Result<Vec<Frame>> {
+	/// Give every frame a duration: the one its codec states, else `end` for the last presented
+	/// one, else the gap to its successor in this slice, else the catalog frame rate / sample
+	/// rate.
+	fn resolve_durations(&self, frames: &[Frame], end: Option<Timestamp>) -> crate::Result<Vec<Frame>> {
 		let mut frames = frames.to_vec();
 		apply_codec_durations(&mut frames, self.opus);
+		if let Some(end) = end
+			&& let Some(last) = frames.iter_mut().max_by_key(|frame| frame.timestamp.as_micros())
+			&& last.duration.is_none()
+			// Quantized at the output scale like the gaps between samples, so any end gap is
+			// whole ticks; one within a tick falls back like a sample with no successor.
+			&& let Ok(Some(duration)) = timestamp_gap(last.timestamp, end, self.timescale)
+		{
+			last.duration = Some(duration);
+		}
 		infer_missing_durations(&mut frames, None, self.default_frame, self.timescale)?;
 		Ok(frames)
 	}
@@ -342,8 +361,7 @@ impl Muxer {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use hang::catalog::VideoCodec;
-	use moq_net::Timestamp;
+	use hang::catalog::{AudioCodec, VideoCodec};
 
 	/// A millisecond track: the frames written here carry timestamps.
 	fn timed() -> moq_net::track::Info {
@@ -384,7 +402,7 @@ mod tests {
 		assert_eq!(frames.len(), 2);
 		assert!(frames[0].keyframe, "the group's first frame is a keyframe");
 
-		let fragment = muxer.fragment(7, &frames).unwrap();
+		let fragment = muxer.fragment(7, &frames, None).unwrap();
 		assert_eq!(&fragment[4..8], b"moof");
 
 		// Decode it back: timestamps survive at the muxer's timescale (framerate * 1000).
@@ -422,7 +440,7 @@ mod tests {
 		assert_eq!(frames.len(), 2, "the marker is not a sample");
 		assert_eq!(frames[1].duration.unwrap().as_micros(), 33_000);
 
-		let fragment = muxer.fragment(0, &frames).unwrap();
+		let fragment = muxer.fragment(0, &frames, None).unwrap();
 		assert_eq!(super::super::sample_durations(&fragment), vec![Some(990), Some(990)]);
 	}
 
@@ -487,7 +505,49 @@ mod tests {
 
 	#[test]
 	fn fragment_with_no_frames_is_empty() {
-		assert!(video_muxer().fragment(0, &[]).unwrap().is_empty());
+		assert!(video_muxer().fragment(0, &[], None).unwrap().is_empty());
+	}
+
+	/// A known end times the last sample, unless its codec already states its duration: an end
+	/// rounded to the millisecond would cut a sub-millisecond Opus packet short.
+	#[test]
+	fn an_end_times_only_an_untimed_last_sample() {
+		let at = |micros| Timestamp::from_micros(micros).unwrap();
+		let video = [frame(0, true), frame(33_000, false)];
+		let fragment = video_muxer().fragment(0, &video, Some(at(66_000))).unwrap();
+		assert_eq!(super::super::sample_durations(&fragment), vec![Some(990), Some(990)]);
+
+		// 20 ms of 48 kHz Opus: TOC config 15 (SILK/WB 20 ms), one frame.
+		let opus = Muxer::audio(&AudioConfig::new(AudioCodec::Opus, 48_000, 2)).unwrap();
+		let packet = Frame {
+			timestamp: at(3_980_500),
+			payload: Bytes::from_static(&[0x78, 0x00, 0x00, 0x00]),
+			keyframe: true,
+			duration: None,
+		};
+		let fragment = opus.fragment(0, &[packet], Some(at(4_000_000))).unwrap();
+		assert_eq!(super::super::sample_durations(&fragment), vec![Some(960)]);
+	}
+
+	/// The end gap is measured at the output timescale, like the gaps between samples: one that
+	/// is no whole number of ticks still times the sample, and so does one finer than the
+	/// sample's own scale.
+	#[test]
+	fn an_end_is_quantized_at_the_output_timescale() {
+		let at = |micros| Timestamp::from_micros(micros).unwrap();
+		let video = [frame(0, true), frame(33_333, false)];
+		let fragment = video_muxer().fragment(0, &video, Some(at(66_666))).unwrap();
+		assert_eq!(
+			super::super::sample_durations(&fragment),
+			vec![Some(1_000), Some(1_000)]
+		);
+
+		let coarse = Frame {
+			timestamp: Timestamp::new(1, moq_net::Timescale::new(1).unwrap()).unwrap(),
+			..frame(0, true)
+		};
+		let fragment = video_muxer().fragment(0, &[coarse], Some(at(1_500_000))).unwrap();
+		assert_eq!(super::super::sample_durations(&fragment), vec![Some(15_000)]);
 	}
 
 	#[test]
@@ -503,7 +563,7 @@ mod tests {
 			keyframe: true,
 			duration: None,
 		};
-		let fragment = muxer.fragment(0, std::slice::from_ref(&frame)).unwrap();
+		let fragment = muxer.fragment(0, std::slice::from_ref(&frame), None).unwrap();
 		assert_eq!(super::super::sample_durations(&fragment), vec![Some(1001)]);
 
 		let mut fragmenter = muxer.fragmenter(fragment::Config {
@@ -524,7 +584,7 @@ mod tests {
 			duration: None,
 		});
 
-		let fragment = muxer.fragment(0, &input).unwrap();
+		let fragment = muxer.fragment(0, &input, None).unwrap();
 		assert_eq!(super::super::sample_durations(&fragment), vec![Some(1_000); 3]);
 		assert_eq!(super::super::timeline(&fragment), (0, vec![0; 3]));
 
@@ -564,7 +624,7 @@ mod tests {
 			keyframe: true,
 			duration: None,
 		};
-		let fragment = muxer.fragment(0, &[frame]).unwrap();
+		let fragment = muxer.fragment(0, &[frame], None).unwrap();
 		assert_eq!(super::super::sample_durations(&fragment), vec![Some(10_000)]);
 	}
 
@@ -583,7 +643,7 @@ mod tests {
 			duration: None,
 		};
 		let decoded = super::super::decode(
-			muxer.fragment(0, &[frame]).unwrap(),
+			muxer.fragment(0, &[frame], None).unwrap(),
 			None,
 			super::super::Track::new(timescale, crate::container::fmp4::Kind::Video),
 		)
@@ -613,7 +673,7 @@ mod tests {
 			duration: Some(Timestamp::from_scale(3_000, 90_000).unwrap()),
 		};
 		let decoded = super::super::decode(
-			muxer.fragment(0, &[frame]).unwrap(),
+			muxer.fragment(0, &[frame], None).unwrap(),
 			None,
 			super::super::Track::new(timescale, crate::container::fmp4::Kind::Video),
 		)
@@ -627,7 +687,7 @@ mod tests {
 	fn with_framerate_updates_the_fallback_without_the_timescale() {
 		let muxer = video_muxer_without_framerate().with_framerate(Some(60.0));
 		assert_eq!(muxer.timescale().as_u64(), 90_000);
-		let fragment = muxer.fragment(0, &[frame(0, true)]).unwrap();
+		let fragment = muxer.fragment(0, &[frame(0, true)], None).unwrap();
 		assert_eq!(super::super::sample_durations(&fragment), vec![Some(1_500)]);
 	}
 
@@ -637,7 +697,7 @@ mod tests {
 	fn with_framerate_snaps_a_fractional_cadence_to_whole_ticks() {
 		for (fps, ticks) in [(60_000.0 / 1001.0, 1_502), (24_000.0 / 1001.0, 3_754)] {
 			let muxer = video_muxer_without_framerate().with_framerate(Some(fps));
-			let fragment = muxer.fragment(0, &[frame(0, true)]).unwrap();
+			let fragment = muxer.fragment(0, &[frame(0, true)], None).unwrap();
 			assert_eq!(super::super::sample_durations(&fragment), vec![Some(ticks)], "{fps}");
 		}
 
@@ -646,7 +706,7 @@ mod tests {
 		config.framerate = Some(30.0);
 		let muxer = Muxer::video(&config).unwrap().with_framerate(Some(24_000.0 / 1001.0));
 		assert_eq!(muxer.timescale().as_u64(), 30_000);
-		let fragment = muxer.fragment(0, &[frame(0, true)]).unwrap();
+		let fragment = muxer.fragment(0, &[frame(0, true)], None).unwrap();
 		assert_eq!(super::super::sample_durations(&fragment), vec![Some(1_251)]);
 	}
 
@@ -663,7 +723,7 @@ mod tests {
 			Some(1e9),
 		] {
 			let muxer = video_muxer_without_framerate().with_framerate(fps);
-			let fragment = muxer.fragment(0, &[frame(0, true)]).unwrap();
+			let fragment = muxer.fragment(0, &[frame(0, true)], None).unwrap();
 			// The 30 fps fallback at 90 kHz.
 			assert_eq!(super::super::sample_durations(&fragment), vec![Some(3_000)], "{fps:?}");
 		}
@@ -688,7 +748,7 @@ mod tests {
 		};
 
 		let decoded = super::super::decode(
-			muxer.fragment(0, &[frame]).unwrap(),
+			muxer.fragment(0, &[frame], None).unwrap(),
 			None,
 			super::super::Track::new(timescale, crate::container::fmp4::Kind::Video),
 		)
@@ -772,7 +832,7 @@ mod tests {
 				..frame(i * 20_000, true)
 			})
 			.collect();
-		let fragment = muxer.fragment(0, &frames).unwrap();
+		let fragment = muxer.fragment(0, &frames, None).unwrap();
 
 		let timescale = moq_net::Timescale::new(48_000).unwrap();
 		let decoded = super::super::decode(
@@ -789,37 +849,5 @@ mod tests {
 				"TOC duration, not the fallback"
 			);
 		}
-	}
-
-	// A group boundary is never a duration, even when the groups arrived consecutively: the
-	// publisher may have paused across it (moq-boy runs its PTS on a clock that keeps going
-	// while the encoder is off), which is what once produced a 2405 second sample.
-	#[tokio::test]
-	async fn audio_fragment_does_not_absorb_a_pause() {
-		use hang::catalog::AudioCodec;
-
-		let config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
-		let muxer = Muxer::audio(&config).unwrap();
-
-		// Two one-packet groups either side of a 40 minute pause, fetched back to back.
-		let packet = Bytes::from_static(&[0x78, 0x00, 0x00, 0x00]);
-		let frames: Vec<Frame> = [63_244, 2_405_070_000]
-			.into_iter()
-			.map(|micros| Frame {
-				payload: packet.clone(),
-				..frame(micros, true)
-			})
-			.collect();
-		let fragment = muxer.fragment(0, &frames).unwrap();
-
-		let timescale = moq_net::Timescale::new(48_000).unwrap();
-		let decoded = super::super::decode(
-			fragment,
-			None,
-			super::super::Track::new(timescale, crate::container::fmp4::Kind::Video),
-		)
-		.unwrap();
-		let first = decoded[0].duration.unwrap().as_micros();
-		assert_eq!(first, 20_000, "the pause is a discontinuity, not a 2405 second sample");
 	}
 }

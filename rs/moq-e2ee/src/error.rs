@@ -4,7 +4,7 @@
 #[derive(thiserror::Error, Debug, Clone)]
 #[non_exhaustive]
 pub enum Error {
-	/// An integer is outside the profile bounds, a `bytes` field exceeds 65535, or a name is not 22 base64url characters.
+	/// An integer is outside the profile bounds, a `bytes` field exceeds 65535, or a physical name does not parse.
 	#[error("identity")]
 	Identity,
 
@@ -20,7 +20,7 @@ pub enum Error {
 	#[error("oversize")]
 	Oversize,
 
-	/// AEAD open failed, including relocation across any identity field.
+	/// AEAD open failed, including relocation across any identity field, or a physical name does not open under its generation.
 	#[error("authentication")]
 	Authentication,
 

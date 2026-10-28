@@ -34,12 +34,9 @@ What remains is the publisher side. The allocator
 estimate by `track::Info::priority`, filling a tier before the next sees a
 bit and splitting max-min fair within one. A controller that assigns
 descending priorities down the ladder gets correct allocation from that
-alone. Send order is a different number today: `Priority::cmp`
-(`rs/moq-net/src/priority.rs`) ranks first by `Priority.track`, which is
-the subscriber's priority from SUBSCRIBE (`msg.priority` in
-`rs/moq-net/src/lite/publisher.rs`), not the publisher's `Info::priority`.
-[Scope track priority](/quest/m1/track-priority-scope.md) owns making the
-publisher's number the tiebreak after it, so the same number decides what to
+alone. Send order ranks by the subscriber's priority from SUBSCRIBE first
+and the publisher's `Info::priority` after it (`Priority::cmp` in
+`rs/moq-net/src/priority.rs`, [moq-dev/moq#6142](https://github.com/moq-dev/moq/pull/6142)), so the same number decides what to
 produce and, among equal subscriber priorities, what to send first; the
 controller only consumes that tiebreak.
 
@@ -81,10 +78,6 @@ encoders on every target change.
   rung's share, target, enabled state, and send order
 - [Fetch and catalog](/quest/m3/ladder/fetch.md) - uncached FETCH encodes at
   the shared applied target, and rung state survives a source catalog refresh
-
-## Closes
-
-- [#2858](https://github.com/moq-dev/moq/issues/2858) - close this issue when the questline finishes
 
 ## Related
 

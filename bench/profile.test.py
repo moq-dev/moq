@@ -1,4 +1,9 @@
 import importlib.util
+import json
+import os
+import signal
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -7,10 +12,116 @@ spec = importlib.util.spec_from_file_location('profile', Path(__file__).with_nam
 profile = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(profile)
 
+spec = importlib.util.spec_from_file_location('runtime', Path(__file__).with_name('runtime.py'))
+runtime = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(runtime)
+
+
+class Runtime(unittest.TestCase):
+    def test_workers_must_match_the_backend_and_count(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tasks = Path(directory)
+            for backend, prefix in [('tokio-workers', 'moq-quic'), ('io-uring-workers', 'moq-uring')]:
+                with self.subTest(backend=backend):
+                    for path in tasks.glob('*/comm'):
+                        path.unlink()
+                    names = [f'{prefix}-0', f'{prefix}-1', 'tokio-runtime-w', 'moq-relay']
+                    for index, name in enumerate(names):
+                        task = tasks / str(index)
+                        task.mkdir(exist_ok=True)
+                        (task / 'comm').write_text(name + '\n')
+                    self.assertEqual(runtime.verify(tasks, backend, 2)['workers'], names[:2])
+                    other = 'io-uring-workers' if backend == 'tokio-workers' else 'tokio-workers'
+                    for selected, count in [(other, 2), (backend, 1), (backend, 3)]:
+                        with self.assertRaises(ValueError):
+                            runtime.verify(tasks, selected, count)
+                    (tasks / '2/comm').write_text('moq-quic-2' if prefix == 'moq-uring' else 'moq-uring-2')
+                    with self.assertRaises(ValueError):
+                        runtime.verify(tasks, backend, 2)
+
+    def test_profile_rejects_invalid_selection_before_building(self):
+        root = Path(__file__).resolve().parent.parent
+        for environment, diagnostic in [
+            ({'BENCH_PROFILE_RUNTIME': 'tokio-shared'}, 'profile runtime'),
+            ({'BENCH_PROFILE_WORKERS': '0'}, 'profile workers'),
+            ({'BENCH_PROFILE_WORKERS': '1 257'}, 'profile workers'),
+            ({'BENCH_PROFILE_WORKERS': '1 nope'}, 'profile workers'),
+            ({'BENCH_PROFILE_WORKERS': '01'}, 'profile workers'),
+            ({'BENCH_PROFILE_WORKERS': '999999999999999999999999'}, 'profile workers'),
+        ]:
+            with self.subTest(environment=environment):
+                result = subprocess.run(['bash', str(root / 'bench/run.sh'), '--profile'],
+                                        env=dict(os.environ, BENCH_PROFILE_MODES='cpu', **environment),
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn(diagnostic, result.stderr)
+
+
 FIXTURE = Path(__file__).with_name('profile.test.txt').read_text()
 IDLE, MUTEX, ALLOCATOR = '2152705', '2152709', '2152707'
 # Every fixture wait closes, so the window end only has to follow the last event.
 END = 271707 * 1_000_000_000
+
+
+class Orchestration(unittest.TestCase):
+    def test_old_base_uses_current_harness_and_generator(self):
+        root = Path(__file__).resolve().parent.parent
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory) / 'repo'
+            bench = checkout / 'bench'
+            bench.mkdir(parents=True)
+            (bench / 'workloads').mkdir()
+            (bench / 'run.sh').write_text('exit 87\n')
+            environment = dict(os.environ, GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null',
+                               GIT_AUTHOR_NAME='Test', GIT_AUTHOR_EMAIL='test@example.com',
+                               GIT_COMMITTER_NAME='Test', GIT_COMMITTER_EMAIL='test@example.com')
+            for command in [['init', '-q'], ['add', '.'], ['commit', '-qm', 'old harness']]:
+                subprocess.run(['git', *command], cwd=checkout, env=environment, check=True,
+                               capture_output=True)
+            (bench / 'run.sh').write_text((root / 'bench/run.sh').read_text())
+            (bench / 'metadata.py').write_text('')
+            (bench / 'profile.py').write_text('')
+            (bench / 'relay.sh').write_text('''PROFILE=
+run_workload() {
+    printf '%s\\t%s\\t%s\\t%s\\t%s\\n' "$1" "$4" "$5" "$LOAD_BIN" "$HOST_BIN" >> "$RUN/calls.tsv"
+    local directory=$RUN/relay/$1/$3
+    mkdir -p "$directory/cpu"
+    printf '{"recv_fps":100,"cpu_cores":1}\\n' > "$directory/summary.json"
+    printf '{"samples":999,"sampled_cores":1}\\n' > "$directory/cpu/cpu.json"
+}
+''')
+            commands = Path(directory) / 'bin'
+            commands.mkdir()
+            cargo = commands / 'cargo'
+            cargo.write_text('''#!/usr/bin/env python3
+import os
+from pathlib import Path
+output = Path(os.environ['CARGO_TARGET_DIR']) / 'profiling'
+output.mkdir(parents=True, exist_ok=True)
+check = output / 'moq-bench-uring-check'
+check.write_text('#!/bin/sh\\nexit 0\\n')
+check.chmod(0o755)
+''')
+            cargo.chmod(0o755)
+            artifacts = Path(directory) / 'evidence'
+            environment.update(PATH=str(commands) + os.pathsep + os.environ['PATH'],
+                               BENCH_ARTIFACTS=str(artifacts), BENCH_PROFILE_MODES='cpu',
+                               BENCH_PROFILE_WORKLOAD='fixture', BENCH_PROFILE_WORKERS='2',
+                               BENCH_PROFILE_RUNTIME='io-uring-workers', BENCH_BASE='HEAD',
+                               CARGO_TARGET_DIR=str(Path(directory) / 'target'))
+            result = subprocess.run(['bash', 'bench/run.sh', '--profile'], cwd=checkout,
+                                    env=environment, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            run, = artifacts.glob('run.*')
+            calls = [line.split('\t') for line in (run / 'calls.tsv').read_text().splitlines()]
+            self.assertEqual([call[0] for call in calls],
+                             ['base/control-cpu-2', 'base/cpu-2',
+                              'current/control-cpu-2', 'current/cpu-2'])
+            for _, backend, count, generator, sampler in calls:
+                self.assertEqual((backend, count), ('io-uring-workers', '2'))
+                self.assertIn('/current/profile/profiling/', generator)
+                self.assertIn('/current/profile/profiling/', sampler)
+            self.assertFalse((run / 'base').exists(), 'temporary base worktree must be removed')
 
 
 class Parse(unittest.TestCase):
@@ -145,18 +256,123 @@ class Reduce(unittest.TestCase):
                 profile.reduce({'1': 'moq-quic-0'}, records, {'1': 0}, {'1': 1})
 
 
+CPU_FIXTURE = '''\
+11 100.000000001: cpu-clock:
+	    ffffffff81000000 [unknown] ([kernel.kallsyms])
+	    ffffffff81000100 [unknown] ([kernel.kallsyms])
+	    7ffff7d2c07a sendmsg (/nix/store/glibc/lib/libc.so.6)
+	    5555569d8ae4 <moq_quic::Endpoint>::send (/moq/moq-relay)
+	    5555569d8608 std::thread::run (/moq/moq-relay)
+12 100.001000001: cpu-clock:
+	    5555569d8ae4 <moq_net::Session>::poll (/moq/moq-relay)
+	    5555569d8608 std::thread::run (/moq/moq-relay)
+13 100.002000001: cpu-clock:
+	    5555569d8608 std::thread::run (/moq/moq-relay)
+'''
+
+
+class Cpu(unittest.TestCase):
+    def test_kernel_time_is_a_leaf_under_its_user_stack(self):
+        [(_, _, event, frames), *_] = profile.parse(CPU_FIXTURE, kernel=True)
+        self.assertEqual(event, 'cpu-clock')
+        self.assertEqual(frames[:2], ['[kernel]', 'sendmsg'])
+        # Lock waits keep dropping kernel frames outright.
+        self.assertEqual(profile.parse(CPU_FIXTURE)[0][3][0], 'sendmsg')
+
+    def test_workers_fold_into_their_role(self):
+        names = {'11': 'moq-quic-0', '12': 'moq-quic-1'}
+        result, folded = profile.fold(names, profile.parse(CPU_FIXTURE, kernel=True), 0.5)
+        self.assertEqual(result['samples'], 3)
+        self.assertEqual(result['threads'], {'moq-quic-0': 1, 'moq-quic-1': 1, 'tid-13': 1})
+        self.assertAlmostEqual(result['sampled_cores'], 3 / 999 / 0.5)
+        self.assertEqual(folded['moq-quic;std::thread::run;<moq_quic::Endpoint>::send;sendmsg;[kernel]'], 1)
+        self.assertEqual(folded['moq-quic;std::thread::run;<moq_net::Session>::poll'], 1)
+
+    def test_empty_or_unresolved_refused(self):
+        with self.assertRaisesRegex(ValueError, 'no CPU samples'):
+            profile.fold({}, [], 1)
+        unresolved = [('1', 0, 'cpu-clock', ['[kernel]', 'syscall'])]
+        with self.assertRaisesRegex(ValueError, 'no CPU sample has resolved MoQ frames'):
+            profile.fold({}, unresolved, 1)
+
+    def test_lost_samples_refused(self):
+        with self.assertRaises(ValueError):
+            profile.parse(CPU_FIXTURE + '11 100.003000000: PERF_RECORD_LOST_SAMPLES lost 3\n', kernel=True)
+
+
+class Heap(unittest.TestCase):
+    def test_usr1_handler_detected(self):
+        previous = signal.signal(signal.SIGUSR1, signal.SIG_DFL)
+        try:
+            self.assertFalse(profile.catches_usr1(os.getpid()))
+            signal.signal(signal.SIGUSR1, lambda *_: None)
+            self.assertTrue(profile.catches_usr1(os.getpid()))
+        finally:
+            signal.signal(signal.SIGUSR1, previous)
+
+    def test_report_scales_churn_by_the_steady_window(self):
+        def jeprof(binary, dump, *args):
+            if '--collapsed' in args:
+                return 'moq_relay::main;<moq_net::Session>::run;alloc 4096\nmoq_relay::main;freed 0\n'
+            totals = {'--inuse_space': {'before.heap': 1 << 20, 'steady-end.heap': 3 << 20},
+                      '--alloc_space': {'steady-end.heap': 20 << 20}, '--alloc_objects': {'steady-end.heap': 1000}}
+            kind = next(arg for arg in args if arg in totals)
+            return f'Total: {totals[kind].get(dump.name, 2 << 20)} B\n'
+
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            (directory / 'snapshots.tsv').write_text(
+                'before\t0\nsteady-start\t1000000000\nsteady-end\t6000000000\nteardown\t8000000000\n')
+            with patch.object(profile, 'jeprof', side_effect=jeprof) as calls:
+                profile.heap(Path('relay'), directory)
+            result = json.loads((directory / 'heap.json').read_text())
+            self.assertEqual(result['window_s'], 5)
+            self.assertEqual(result['retained_bytes'], {'before': 1 << 20, 'steady-start': 2 << 20,
+                                                        'steady-end': 3 << 20, 'teardown': 2 << 20})
+            self.assertEqual(result['churn_bytes_per_s'], 4 << 20)
+            self.assertEqual(result['churn_allocs_per_s'], 200)
+            # Churn is the steady-end accumulation net of steady-start's.
+            churn = [call.args for call in calls.call_args_list if '--alloc_space' in call.args]
+            self.assertTrue(all(f'--base={directory / "steady-start.heap"}' in args for args in churn))
+            # A stack the base cancelled out is dropped from the flame graph.
+            self.assertEqual((directory / 'churn.folded').read_text(), 'moq_relay::main;<moq_net::Session>::run;alloc 4096\n')
+
+    def test_teardown_waits_for_the_relay_to_drop_every_session(self):
+        clock = iter(range(0, 100, 1))
+        with patch.object(profile.time, 'monotonic', side_effect=lambda: next(clock)), \
+                patch.object(profile.time, 'sleep'), \
+                patch.object(profile, 'sessions', return_value=1), \
+                patch.object(profile.os, 'kill') as kill:
+            with self.assertRaisesRegex(ValueError, 'still holds sessions'):
+                profile.snapshot(1, Path('.'), ['teardown'], 0, 0, settled='http://relay/sessions')
+            # A teardown snapshot of live sessions would read as a leak; none is taken.
+            kill.assert_not_called()
+
+    def test_missing_snapshot_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / 'snapshots.tsv').write_text('before\t0\n')
+            with self.assertRaisesRegex(ValueError, 'missing heap snapshots: steady-start, steady-end, teardown'):
+                profile.heap(Path('relay'), Path(directory))
+
+
 class Require(unittest.TestCase):
-    def check(self, paranoid):
+    def check(self, mode, paranoid):
         with patch.object(profile.Path, 'read_text', return_value=paranoid + '\n'):
-            profile.require()
+            profile.require(mode)
 
     def test_refusal_names_the_command(self):
         # Ubuntu's default is 4; 2 forbids kernel samples; 1 and 0 cap the locked buffer.
-        for paranoid in ['4', '2', '1', '0']:
-            with self.assertRaises(ValueError) as refused:
-                self.check(paranoid)
-            self.assertIn('sudo sysctl -w kernel.perf_event_paranoid=-1', str(refused.exception))
-        self.check('-1')
+        for mode in ['lock', 'cpu']:
+            for paranoid in ['4', '2', '1', '0']:
+                with self.assertRaises(ValueError) as refused:
+                    self.check(mode, paranoid)
+                self.assertIn('sudo sysctl -w kernel.perf_event_paranoid=-1', str(refused.exception))
+            self.check(mode, '-1')
+
+    def test_heap_needs_jeprof(self):
+        with patch.object(profile.shutil, 'which', return_value=None):
+            with self.assertRaisesRegex(ValueError, 'jeprof'):
+                profile.require('heap')
 
 
 if __name__ == '__main__':

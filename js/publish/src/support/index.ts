@@ -4,22 +4,27 @@
  *
  * @module
  */
+
 import { Connection } from "@moq/net";
 import { workerSupported } from "../video/processor";
 import { probe } from "./video";
 
+/** How well a feature works: natively, through a fallback, or not at all. */
 export type Level = "full" | "partial" | "none";
 
+/** Whether a codec encodes in hardware and in software. */
 export type Codec = {
 	hardware?: boolean; // undefined when we can't detect hardware acceleration
 	software: boolean;
 };
 
+/** Which audio codecs encode. */
 export type Audio = {
-	aac: boolean;
+	aac: Level;
 	opus: Level;
 };
 
+/** Which video codecs encode. */
 export type Video = {
 	h264: Codec;
 	h265: Codec;
@@ -28,6 +33,7 @@ export type Video = {
 	av1: Codec;
 };
 
+/** The full publishing support report. */
 export type Full = {
 	webtransport: Level;
 	audio: {
@@ -64,6 +70,7 @@ async function audioEncoderSupported(codec: keyof typeof CODECS): Promise<boolea
 	return res.supported === true;
 }
 
+/** Detect what this browser supports for publishing. */
 export async function isSupported(): Promise<Full> {
 	return {
 		// Report "partial" when @moq/net forces the WebSocket fallback.
@@ -71,7 +78,8 @@ export async function isSupported(): Promise<Full> {
 		audio: {
 			capture: typeof AudioWorkletNode !== "undefined",
 			encoding: {
-				aac: await audioEncoderSupported("aac"),
+				// No fallback encodes AAC, so it is native or nothing.
+				aac: (await audioEncoderSupported("aac")) ? "full" : "none",
 				opus: (await audioEncoderSupported("opus")) ? "full" : "partial",
 			},
 		},

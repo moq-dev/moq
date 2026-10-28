@@ -1,4 +1,4 @@
-import { Time } from "@moq/net";
+import { Milli } from "@moq/clock";
 
 /**
  * Parse a duration attribute: `"300ms"`, `"30s"`, or a bare `"0"`.
@@ -11,15 +11,15 @@ import { Time } from "@moq/net";
  *
  * @internal
  */
-export function parseDuration(value: string): Time.Milli | undefined {
+export function parseDuration(value: string): Milli | undefined {
 	const match = /^(\d+(?:\.\d+)?)(ms|s)?$/.exec(value.trim());
 	if (!match) return undefined;
 
 	const amount = Number.parseFloat(match[1]);
 	if (!Number.isFinite(amount)) return undefined;
-	if (match[2] === undefined) return amount === 0 ? Time.Milli.zero : undefined;
+	if (match[2] === undefined) return amount === 0 ? Milli.zero : undefined;
 
-	return Time.Milli(match[2] === "s" ? amount * 1000 : amount);
+	return Milli(match[2] === "s" ? amount * 1000 : amount);
 }
 
 /**
@@ -31,6 +31,6 @@ export function parseDuration(value: string): Time.Milli | undefined {
  *
  * @internal
  */
-export function formatDuration(value: Time.Milli): string {
+export function formatDuration(value: Milli): string {
 	return `${value}ms`;
 }

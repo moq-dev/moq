@@ -4,15 +4,26 @@
 		"types": ["bun", "vite/client"]
 	},
 	"include": [
+		"net-cleanups.browser.ts",
+		"net-cleanups",
 		"close.ts",
+		"encoded-preview.browser.ts",
+		"encoded-preview",
 		"driver.ts",
 		"harness.ts",
 		"harness.browser.ts",
+		"open-gop.browser.ts",
+		"open-gop",
 		"capture-channel-count.browser.ts",
 		"buffering",
+		"watch-ui",
+		"publish-ui.browser.ts",
+		"publish-ui",
 		"media.ts",
 		"src",
 		"vite.config.ts",
+		"source-selection.browser.ts",
+		"source-selection",
 		"../../../../js/common/worklet.d.ts"
 	]
 }

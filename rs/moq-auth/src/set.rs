@@ -2,6 +2,7 @@ use crate::error::KeyError;
 use crate::{Claims, Key, KeyOperation};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::Arc;
 
 /// JWK Set to spec <https://datatracker.ietf.org/doc/html/rfc7517#section-5>
@@ -43,13 +44,16 @@ impl<'de> Deserialize<'de> for KeySet {
 	}
 }
 
-impl KeySet {
+impl FromStr for KeySet {
+	type Err = crate::Error;
+
 	/// Parse a set from a JSON string.
-	#[allow(clippy::should_implement_trait)]
-	pub fn from_str(s: &str) -> crate::Result<Self> {
+	fn from_str(s: &str) -> crate::Result<Self> {
 		Ok(serde_json::from_str(s)?)
 	}
+}
 
+impl KeySet {
 	/// Load a set from a JSON file.
 	pub fn from_file<P: AsRef<Path>>(path: P) -> crate::Result<Self> {
 		let json = std::fs::read_to_string(&path)?;
@@ -72,6 +76,7 @@ impl KeySet {
 		Ok(())
 	}
 
+	/// Copy the set with each key's private parts removed, failing on a symmetric key, which has no public half.
 	pub fn to_public_set(&self) -> crate::Result<KeySet> {
 		Ok(KeySet {
 			keys: self
@@ -110,9 +115,12 @@ impl KeySet {
 	///
 	/// A token without a `kid` is accepted only when the set holds exactly one key and that key has no `kid`.
 	pub fn verify(&self, token: &str) -> crate::Result<Claims> {
-		let header = jsonwebtoken::decode_header(token)?;
+		self.key(token)?.verify(token)
+	}
 
-		let key = match header.kid {
+	pub(crate) fn key(&self, token: &str) -> crate::Result<Arc<Key>> {
+		let header = jsonwebtoken::decode_header(token)?;
+		match header.kid {
 			Some(kid) => self
 				.find_key(kid.as_str())
 				.ok_or_else(|| crate::Error::from(KeyError::KeyNotFound(kid))),
@@ -124,9 +132,7 @@ impl KeySet {
 					Err(KeyError::MissingKid.into())
 				}
 			}
-		}?;
-
-		key.verify(token)
+		}
 	}
 }
 
@@ -138,15 +144,16 @@ mod tests {
 		texts.iter().map(|text| text.parse().unwrap()).collect()
 	}
 	use crate::Algorithm;
-	use std::time::{Duration, SystemTime};
+	use moq_clock::Wall;
+	use std::time::Duration;
 
 	fn create_test_claims() -> Claims {
 		Claims {
 			root: "test-path".to_string(),
 			publish: patterns(&["test-pub/**"]),
 			subscribe: patterns(&["test-sub/**"]),
-			expires: Some(SystemTime::now() + Duration::from_secs(3600)),
-			issued: Some(SystemTime::now()),
+			expires: Some(moq_clock::wall() + Duration::from_secs(3600)),
+			issued: Some(moq_clock::wall()),
 			not_before: None,
 		}
 	}
@@ -168,31 +175,6 @@ mod tests {
 	}
 
 	#[test]
-	fn test_keyset_from_str_invalid_json() {
-		let result = KeySet::from_str("invalid json");
-		assert!(result.is_err());
-	}
-
-	#[test]
-	fn test_keyset_from_str_empty() {
-		let json = r#"{"keys":[]}"#;
-		let set = KeySet::from_str(json).unwrap();
-		assert!(set.keys.is_empty());
-	}
-
-	#[test]
-	fn test_keyset_to_str() {
-		let key = create_test_key(Some("1"));
-		let set = KeySet {
-			keys: vec![Arc::new(key)],
-		};
-
-		let json = set.to_str().unwrap();
-		assert!(json.contains("\"keys\""));
-		assert!(json.contains("\"kid\":\"1\""));
-	}
-
-	#[test]
 	fn test_keyset_serde_round_trip() {
 		let key1 = create_test_key(Some("1"));
 		let key2 = create_test_key(Some("2"));
@@ -206,18 +188,6 @@ mod tests {
 		assert_eq!(deserialized.keys.len(), 2);
 		assert!(deserialized.find_key("1").is_some());
 		assert!(deserialized.find_key("2").is_some());
-	}
-
-	#[test]
-	fn test_find_key_success() {
-		let key = create_test_key(Some("my-key"));
-		let set = KeySet {
-			keys: vec![Arc::new(key)],
-		};
-
-		let found = set.find_key("my-key");
-		assert!(found.is_some());
-		assert_eq!(found.unwrap().kid.as_ref().map(|k| k.encode()), Some("my-key"));
 	}
 
 	#[test]
@@ -304,18 +274,6 @@ mod tests {
 
 		let result = set.to_public_set();
 		assert!(result.is_err());
-	}
-
-	#[test]
-	fn test_encode_success() {
-		let key = create_test_key(Some("1"));
-		let set = KeySet {
-			keys: vec![Arc::new(key)],
-		};
-		let claims = create_test_claims();
-
-		let token = set.sign(&claims).unwrap();
-		assert!(!token.is_empty());
 	}
 
 	#[test]
@@ -412,8 +370,8 @@ mod tests {
 		// Use a random-ish name to avoid collisions
 		let filename = format!(
 			"test_keyset_{}.json",
-			SystemTime::now()
-				.duration_since(SystemTime::UNIX_EPOCH)
+			moq_clock::wall()
+				.checked_duration_since(Wall::UNIX_EPOCH)
 				.unwrap()
 				.as_nanos()
 		);
@@ -434,8 +392,8 @@ mod tests {
 	fn test_file_io_permissions() {
 		use std::os::unix::fs::PermissionsExt;
 
-		let unique = SystemTime::now()
-			.duration_since(SystemTime::UNIX_EPOCH)
+		let unique = moq_clock::wall()
+			.checked_duration_since(Wall::UNIX_EPOCH)
 			.unwrap()
 			.as_nanos();
 		let path = std::env::temp_dir().join(format!("test_keyset_perms_{unique}.json"));

@@ -12,8 +12,8 @@ just rs fuzz lite
 The targets are `lite`, `announce`, `ietf`, `varint`, `path`, and `pattern`. Extra arguments pass through to
 libFuzzer, so `just rs fuzz lite -- -max_total_time=300` bounds a run.
 
-The Nightly workflow runs every target for five minutes and uploads failure inputs
-as workflow artifacts.
+The Nightly workflow runs every target for five minutes, resumes from the previous run's
+minimized corpus, and uploads failure inputs as workflow artifacts.
 
 ## How it fits together
 
@@ -28,8 +28,8 @@ module (`src/fuzz.rs`), and the files here are one-line shims. Two reasons:
 `just rs fuzz` regenerates `seeds/` from `moq_net::fuzz::seeds()` before each run, so
 the corpus follows the dispatch instead of rotting beside it. libFuzzer writes what it
 discovers to `corpus/<target>/`, which is kept across runs and gitignored along with
-`seeds/` and `artifacts/`. `cargo +nightly fuzz cmin --fuzz-dir rs/moq-net/fuzz <target>`
-shrinks the corpus once it has grown.
+`seeds/` and `artifacts/`. `just rs fuzz --minimize <target>` shrinks
+the corpus once it has grown.
 
 Calling `cargo fuzz` directly skips `just rs fuzz`, which turns off the release
 profile's fat LTO (it drops the sanitizer-coverage globals, so the link fails) and
@@ -40,19 +40,26 @@ symbol stripping. Prefix direct calls with
 
 Beyond "does not panic":
 
+- A short decode requires more outer input. A field running short inside a complete
+  length-prefixed body is malformed and cannot ask for bytes from the next message.
 - Whatever we encode, we decode back, consuming every byte. The peer's decoder is this
   same code, so emitting something we would reject is a bug on the wire.
 - Encoding is stable: encode, decode, encode again yields identical bytes. Skipped
   where a parameter map reaches the wire, since those encoders walk a `HashMap` and its
-  iteration order differs per instance (moq-lite SETUP, and draft-14/15, which unlike
-  draft-16+ do not sort by key first).
+  iteration order differs per instance (moq-lite SETUP).
 - A lite-07 announce stream our decoder accepts, recompressed by our encoder, resolves
   to the same announcements.
+- Every path decoded from the wire (a moq-lite path, an IETF namespace or Full Track
+  Name) or resolved from an announce stream parses back to itself under the strict
+  constructor, and so does each run of its leading segments.
+- Setup Options a client accepts from its server, a server accepts from its client: only
+  PATH and AUTHORITY are one-sided.
 - `Path::relative` inverts `Path::resolve`, and never produces a reference that walks
   above the root.
 
-A decode that fails is not a finding, and neither is an encode that fails: a value can
-decode at a version that cannot express it again.
+A refused decode is not a finding unless it asks for more bytes despite a complete
+body. An encode failure is legitimate: a value can decode at a version that cannot
+express it again.
 
 ## When something crashes
 

@@ -9,7 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- [**breaking**] Auth roles hold path patterns directly, matching release. Removed the unenforced `Access`/`Rate` API and the unvalidated public `Key::decode`; object roles, including bitrate caps, are refused during parsing.
+
 - Auth requests distinguish `webtransport` from native `quic`. Upgrade auth servers before relays: older servers reject the new value. Rust and JavaScript auth parsers now map future transport names to `unknown`.
+- `moq auth serve` refuses a query carrying more than one `jwt`, even an empty or escaped one, with `serve::Refusal::DuplicateJwt` instead of believing the last. The value is percent-decoded once.
+- `Client::connect` no longer times out on its own: the caller's deadline bounds it, and dropping the future drops the request. `attach`, revalidate, and end keep a ten-second bound, reported as `Error::Unavailable`.
 
 ## [0.2.1](https://github.com/moq-dev/moq/compare/moq-auth-v0.2.0...moq-auth-v0.2.1) - 2026-10-03
 

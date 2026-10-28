@@ -6,8 +6,6 @@
 //! returned answer, then hands the resulting `str0m::Rtc` to the internal
 //! session driver in ingest mode (the same sink the WHIP server uses).
 
-use std::time::Instant;
-
 use str0m::{
 	Candidate, Rtc,
 	change::SdpAnswer,
@@ -23,9 +21,9 @@ pub(crate) async fn dial(client: &Client, url: Url, broadcast: moq_net::broadcas
 		.with_bandwidth(client.config().bandwidth.clone());
 	let sink = Box::new(IngestSink::new(broadcast, config)?);
 
-	let (socket, candidates) = session::bind_udp(&client.config().ice_candidates).await?;
-	let mut rtc = Rtc::new(Instant::now());
-	for addr in &candidates {
+	let socket = session::bind_udp(&client.config().ice_candidates).await?;
+	let mut rtc = Rtc::new(moq_clock::now().into_std());
+	for addr in socket.locals() {
 		let cand = Candidate::host(*addr, "udp").map_err(Error::rtc)?;
 		rtc.add_local_candidate(cand);
 	}
@@ -59,18 +57,9 @@ pub(crate) async fn dial(client: &Client, url: Url, broadcast: moq_net::broadcas
 	// The URL routinely carries the auth token in its query, or userinfo.
 	tracing::info!(url = %moq_tokio::RedactedUrl::new(&url), "whep client connected");
 
-	// 1:1 socket (no demux on the client): pump its datagrams into the session.
-	// The session tags each datagram with the advertised candidate matching its
-	// family (str0m matches the destination against a host candidate, not the bind).
-	let inbound = session::spawn_socket_reader(socket.clone());
-	let mut session = session::Session::ingest(rtc, socket, candidates, inbound, sink);
+	let mut session = session::Session::ingest(rtc, socket, sink)?;
 	for mid in mids {
 		session.open_media(mid)?;
 	}
-	tokio::spawn(async move {
-		let result = session.run().await;
-		session::log_session_end("whep client", &result);
-	});
-
-	Ok(())
+	session::end("whep client", session.run().await)
 }

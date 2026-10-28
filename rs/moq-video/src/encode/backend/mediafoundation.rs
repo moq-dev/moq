@@ -35,15 +35,17 @@ use windows::Win32::Media::MediaFoundation::{
 	MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
 	MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
 	MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_HEVC,
-	MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFVideoPrimaries_BT709, MFVideoPrimaries_SMPTE170M,
-	MFVideoTransFunc_709, MFVideoTransferMatrix_BT601, MFVideoTransferMatrix_BT709, eAVEncCommonRateControlMode_CBR,
-	eAVEncH264VProfile_High, eAVEncH265VProfile_Main_420_8,
+	MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFVideoPrimaries_BT709, MFVideoPrimaries_BT2020,
+	MFVideoPrimaries_EBU3213, MFVideoPrimaries_SMPTE170M, MFVideoTransFunc_709, MFVideoTransFunc_2084,
+	MFVideoTransFunc_HLG, MFVideoTransferMatrix_BT601, MFVideoTransferMatrix_BT709, MFVideoTransferMatrix_BT2020_10,
+	eAVEncCommonRateControlMode_CBR, eAVEncH264VProfile_High, eAVEncH265VProfile_Main_420_8,
 };
 use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_UI4};
 use windows::core::{GUID, Interface};
 
 use super::super::encoder::{Applied, Codec, Config, Gop};
 use super::{Backend, Encoded, keyframe_annexb};
+use crate::color::{Matrix, Primaries, Range, Transfer};
 use crate::frame::{Surface, interleave_uv};
 use crate::mf::{ComGuard, mf_err, pack_2x32};
 use crate::{Color, Error, Frame};
@@ -63,7 +65,7 @@ pub(crate) struct MediaFoundation {
 	codec: Codec,
 	width: u32,
 	height: u32,
-	framerate: crate::Rate,
+	framerate: crate::FrameRate,
 	bitrate: u32,
 	/// Keyframe interval in frames.
 	gop: u32,
@@ -230,15 +232,25 @@ impl MediaFoundation {
 	/// stream; the conversion picks the matrix an untagged stream implies, which
 	/// is what keeps that case correct.
 	fn set_color(&self, media: &IMFMediaType) -> Result<(), Error> {
-		let (primaries, matrix) = match self.color {
-			Color::Bt601Limited | Color::Bt601Full => (MFVideoPrimaries_SMPTE170M, MFVideoTransferMatrix_BT601),
-			Color::Bt709Limited | Color::Bt709Full => (MFVideoPrimaries_BT709, MFVideoTransferMatrix_BT709),
+		let primaries = match self.color.primaries {
+			Primaries::Smpte170m => MFVideoPrimaries_SMPTE170M,
+			Primaries::Bt470bg => MFVideoPrimaries_EBU3213,
+			Primaries::Bt709 => MFVideoPrimaries_BT709,
+			Primaries::Bt2020 => MFVideoPrimaries_BT2020,
 		};
-		// BT.601 and BT.709 share a transfer curve; only primaries and matrix differ.
-		let transfer = MFVideoTransFunc_709;
-		let range = match self.color.limited() {
-			true => MFNominalRange_16_235,
-			false => MFNominalRange_0_255,
+		let transfer = match self.color.transfer {
+			Transfer::Bt709 => MFVideoTransFunc_709,
+			Transfer::Pq => MFVideoTransFunc_2084,
+			Transfer::Hlg => MFVideoTransFunc_HLG,
+		};
+		let matrix = match self.color.matrix {
+			Matrix::Bt601 => MFVideoTransferMatrix_BT601,
+			Matrix::Bt709 => MFVideoTransferMatrix_BT709,
+			Matrix::Bt2020 => MFVideoTransferMatrix_BT2020_10,
+		};
+		let range = match self.color.range {
+			Range::Limited => MFNominalRange_16_235,
+			Range::Full => MFNominalRange_0_255,
 		};
 
 		unsafe {
@@ -341,7 +353,10 @@ impl MediaFoundation {
 				buffer
 			},
 			Surface::I420(_) => self.upload_nv12(frame)?,
-			#[allow(unreachable_patterns)]
+			#[allow(
+				unreachable_patterns,
+				reason = "the other surfaces exist only on some platforms and features"
+			)]
 			_ => {
 				return Err(Error::Codec(anyhow::anyhow!(
 					"unsupported frame for mediafoundation encoder"

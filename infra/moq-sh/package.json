@@ -7,6 +7,10 @@
 	"devDependencies": {
 		"@cloudflare/workers-types": "^5",
 		"typescript": "7.0.2",
-		"wrangler": "^4"
+		"wrangler": "^4.151.2"
+	},
+	"//overrides": "Drop this when upstream stops pinning a vulnerable undici.",
+	"overrides": {
+		"undici@7": "^7.30.1"
 	}
 }

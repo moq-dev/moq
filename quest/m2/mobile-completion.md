@@ -1,10 +1,10 @@
-# [M] Verify native and mobile support before closing #700
+# [M] Verify native and mobile support end to end
 
 ## Goal
 
 The selected mobile media architecture has a documented, usable capture,
-encode, subscribe, decode, and render path on iOS and Android. The next binding
-work and deferred mobile phases are complete before #700 closes.
+encode, subscribe, decode, and render path on iOS and Android, and the
+deferred mobile phases are complete.
 
 ## Plan
 
@@ -18,18 +18,15 @@ path, limitations, and reproducible device results; wire repeatable coverage
 into CI and identify the hardware evidence separately. Update the
 native/mobile getting-started docs with the working path.
 
-Do not close #700 merely because its next subset or a design decision finished.
+Do not finish this quest merely because its next subset or a design decision
+finished.
 
 Promoted from m2 on 2026-10-09 by maintainer priority, with both capture
-quests.
+quests. Deferred back to m2 in #5427 (`8f0dfa760`) with those capture
+quests; mobile completion does not gate the next breaking cut.
 
 ## Required
 
 - [Dart on iOS](/quest/m2/dart-ios.md) - the Dart iOS asset proof
-- [Dart codec parity](/quest/m2/dart-codecs.md) - codec-enabled artifacts and Dart video consumer integration
 - [iOS capture](/quest/m2/mobile-capture-ios.md) - deliver the selected iOS capture path
 - [Android capture](/quest/m2/mobile-capture-android.md) - deliver the selected Android capture and codec path
-
-## Closes
-
-- [#700](https://github.com/moq-dev/moq/issues/700) - native and mobile support, including the deferred phases

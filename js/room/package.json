@@ -20,6 +20,7 @@
 		"release": "bun ../common/release.ts"
 	},
 	"dependencies": {
+		"@moq/clock": "workspace:^",
 		"@moq/hang": "workspace:^",
 		"@moq/json": "workspace:^",
 		"@moq/net": "workspace:^",
@@ -29,10 +30,10 @@
 	},
 	"devDependencies": {
 		"@types/audioworklet": "^0.0.100",
-		"@types/bun": "^1.4.2",
-		"@typescript/lib-dom": "npm:@types/web@^0.0.350",
+		"@types/bun": "^1.4.3",
+		"@typescript/lib-dom": "npm:@types/web@^0.0.358",
 		"rimraf": "^6.1.3",
 		"typescript": "7.0.2",
-		"vite": "^8.3.2"
+		"vite": "^8.3.4"
 	}
 }

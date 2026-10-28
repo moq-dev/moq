@@ -65,16 +65,22 @@ The simplest way to watch a stream:
 |------------------|----------------------------|---------------|------------------------------------------|
 | `url`            | string                     | required      | Relay server URL                         |
 | `name`           | string                     | required      | Broadcast name/path                      |
+| `versions`       | comma-separated list       | stable versions | Protocol versions to offer, most preferred first, like `moq-transport-18,moq-lite-06` |
 | `paused`         | boolean                    | false         | Pause playback                           |
-| `muted`          | boolean                    | false         | Mute audio                               |
+| `muted`          | boolean                    | false         | Mute audio without changing volume       |
 | `visible`        | never, distance, or always | `20%`         | When to download video (see below)       |
-| `volume`         | number                     | 0.5           | Audio volume (0-1)                       |
+| `volume`         | number                     | 0.5           | Audio level (0-1), independent of mute    |
 | `backend`        | auto, webgpu, 2d           | `auto`        | Graphics API for the canvas. `auto` picks WebGPU where it can render video, else Canvas2D. |
 | `announced`      | boolean                    | true          | Wait for (re)announcement before subscribing. Ignored when the relay does not support broadcast discovery. |
 | `delay`          | `auto`, duration, `instant` | `auto`       | Distance from the live edge. `instant` paints frames as they decode and disables audio. |
 | `buffer`         | duration                   | `0ms`         | Future-dated media held before playback skips ahead. |
 | `captions`       | string                     | off           | Text rendition to render. |
 | `catalog-format` | hang, hangz, msf, manual   | auto-detected | The catalog format; detected from the name suffix unless set. `hangz` (compressed) is opt-in. |
+
+Property and built-in UI changes reflect into attributes. Invalid URLs, numbers, durations,
+version lists, and rendering/catalog modes are refused: their property setters throw, and malformed markup
+reports a browser `error` event and suspends media until corrected or removed. Defaults apply
+when attributes are absent.
 
 The `visible` attribute controls when the video track is downloaded, based on the canvas
 position relative to the viewport:
@@ -107,8 +113,8 @@ const player = new Watch.Player({
     origin: connection.origin,
     probe: connection.probe,
     name: Watch.Net.Path.from("room/alice.hang"),
-    canvas,
-    muted,
+    video: { canvas },
+    audio: { muted },
 });
 
 // player.broadcast, player.video, player.audio, player.text,
@@ -116,13 +122,19 @@ const player = new Watch.Player({
 // Later: player.close(); connection.close();
 ```
 
+Per-media inputs nest by kind: `video` takes `target`, `canvas`, `visible`, and
+`backend`; `audio` takes `target`, `volume`, and `muted`; `text` takes the
+caption `target` and its `container`. A `target` pins a rendition by catalog
+name or, for video, caps its size and bitrate. `<moq-watch>` exposes the same
+signals under `controls.video`, `controls.audio`, and `controls.text`.
+
 `<moq-watch>` wraps this same `Player` and maps attributes to its controls.
 `Broadcast`, `Sync`, and the `Video`, `Audio`, and `Text` components remain
 available when an application needs a different pipeline.
 
 ## UI Web Component
 
-`@moq/watch` includes a Web Component UI overlay (`<moq-watch-ui>`) with playback controls, volume, buffering indicator, unsupported-codec indicator, quality selector, and stats panel. It is built on top of `@moq/signals` with no framework dependency.
+`@moq/watch` includes a Web Component UI overlay (`<moq-watch-ui>`) with playback controls, volume, buffering indicator, unsupported catalog and codec notices, quality selector, and stats panel. It is built on top of `@moq/signals` with no framework dependency.
 
 ```html
 <script type="module">

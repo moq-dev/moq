@@ -3,7 +3,7 @@
 ## Goal
 
 `Worker::maybe_park` (`rs/moq-uring/src/worker.rs`) waits with a CQE batch target
-and a `min_wait_usec`, the three return paths are tested, and the benchmark
+and a `min_wait_usec`, every return path is tested, and the benchmark
 matrix shows fewer wakeups per message without a p99 regression before any
 default changes.
 
@@ -18,10 +18,10 @@ The worker requires `IORING_FEAT_MIN_TIMEOUT`, but `maybe_park` currently waits 
 A timed `io_uring_enter` can combine:
 
 - a CQE batch target `N`
-- a short minimum wait `t` once at least one CQE exists
+- a short minimum wait `t`, measured from entry
 - the next application timer `T` as the absolute maximum wait
 
-The kernel returns when `N` CQEs arrive, when `t` expires after partial progress, or when `T` expires with no progress. This should trade a bounded amount of latency for fewer wakeups and larger batches.
+The kernel returns when `N` CQEs arrive, when `t` expires with at least one CQE, at the first CQE after `t` expired with none, or when `T` expires with no progress. This should trade a bounded amount of latency for fewer wakeups and larger batches.
 
 #### Proposal
 
@@ -29,19 +29,12 @@ The kernel returns when `N` CQEs arrive, when `t` expires after partial progress
 - Apply them only when the worker is otherwise ready to park. Preserve the next timer as the hard deadline.
 - Measure a small static matrix first, then consider an adaptive target based on recent CQ batch occupancy.
 - Keep remote futex wakes and handshake/control traffic bounded by the configured minimum wait.
-- Test all three return paths: batch target reached, partial batch released by the minimum wait, and empty ring released by the application deadline.
+- Test every return path: batch target reached, partial batch released by the minimum wait, a lone completion after the minimum wait expired empty, and empty ring released by the application deadline.
+- Add a sparse-arrival case so the matrix shows how little batching the entry-relative minimum wait leaves.
 
 #### Acceptance
 
 Benchmark chat, 1:1 video, and fanout workloads with `N = 1/4/8/16` and `t = 0/5/10/20 us`. Record CQEs per wake, enters per second, CPU per message, p50, p99, and p999 latency. Pick no production default until the latency budget and CPU win are both demonstrated.
 
 Decided in the 2026-09-30 audit: moved to m2. It trades latency for CPU,
-the win is unmeasured on noq, and io_uring ships in no package.
-
-## Required
-
-- [One enter per turn](/quest/m2/perf/uring-one-enter.md) - reshapes the same park and enter path, and adds the per-enter metrics this measures
-
-## Closes
-
-- [#3200](https://github.com/moq-dev/moq/issues/3200) - close this issue when the quest finishes
+the win is unmeasured on `moq-quic`, and io_uring ships in no package.

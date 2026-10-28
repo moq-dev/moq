@@ -1,0 +1,124 @@
+#!/usr/bin/env just --justfile
+#
+# The CARLA demo: simulated trucks in one CARLA world, watched and steered from
+# a browser over MoQ. See README.md.
+
+set fallback
+
+# The simulator is not included: start `just carla server` once and leave it
+# running across restarts of everything else.
+#
+# Run a local relay, both trucks, and the web player.
+default:
+    bun install
+    bun run concurrently --kill-others --names relay,trucks,web --prefix-colors auto \
+    	"just relay" \
+    	"just wait && just wait-port 127.0.0.1 2000 && just worker" \
+    	"just wait && just web"
+
+# Run the Python worker: every truck in one shared CARLA world. It reads the
+# relay from MOQ_URL itself, so a production token never reaches argv.
+worker *ARGS:
+    @sim/python.sh -m moq_carla_sim.main {{ ARGS }}
+
+# Run the web player against a relay.
+web url='http://localhost:4443':
+    cd web && VITE_RELAY_URL="{{ url }}" bun --bun vite --open
+
+# Build the player for carla.moq.dev, against the public demo relay.
+build-web:
+    bun install --frozen-lockfile
+    cd web && VITE_RELAY_URL=https://cdn.moq.dev/demo bun run build
+
+# Deploy the player to carla.moq.dev.
+deploy: build-web
+    cd web && bun wrangler deploy
+
+# Build the worker's virtualenv, with moq's Python bindings from this checkout.
+venv:
+    sim/venv.sh
+
+# Run the CARLA simulator on the local NVIDIA GPU, in podman.
+server:
+    sim/server.sh
+
+# Generate the rootless NVIDIA CDI device the simulator runs with.
+cdi:
+    sim/cdi.sh
+
+# Disable rendering on a simulator no worker owns, so an idle simulator stays idle.
+park *ARGS:
+    @sim/python.sh -m moq_carla_sim.park {{ ARGS }}
+
+# Measure camera capture capacity on a separate, idle simulator.
+benchmark *ARGS:
+    @sim/python.sh -m moq_carla_sim.benchmark {{ ARGS }}
+
+# Bake the running town's road network into the player's map; commit the result.
+map *ARGS:
+    @sim/python.sh -m moq_carla_sim.roadmap --out web/src/maps {{ ARGS }}
+
+# Install the simulator and worker as rootless systemd user units.
+service-install:
+    sim/systemd/install-user-service.sh
+
+# Start the units now and at login (at boot with `loginctl enable-linger`).
+service-enable:
+    systemctl --user enable --now carla-worker.service
+
+# Stop the units and remove them from startup.
+service-disable:
+    systemctl --user disable --now carla-worker.service carla-sim.service
+
+# Show the units' status.
+service-status:
+    systemctl --user status carla-worker.service carla-sim.service
+
+# Follow the units' logs.
+service-logs:
+    journalctl --user -u carla-worker.service -u carla-sim.service -f
+
+# The root workspace's dev tools, in an environment of their own: syncing the
+# shared venv would uninstall `just py`'s editable build while its checks run.
+dev := "uv run --project ../../.. --isolated --only-group dev"
+
+# None of these need CARLA or a GPU. `just js` and `just rs` cover the player and
+# the bridge.
+#
+# Lint and test the worker and its launchers.
+check:
+    cd sim && {{ dev }} --locked ruff check .
+    cd sim && {{ dev }} --locked ruff format --check .
+    cd sim && {{ dev }} --locked pyright
+    cd sim && {{ dev }} --locked pytest -q
+    sim/python.test.sh
+    sim/server.test.sh
+    sim/systemd/install-user-service.test.sh
+    bridge/gpu.test.sh
+
+# Auto-fix the worker's lint and formatting.
+fix:
+    cd sim && {{ dev }} ruff check --fix .
+    cd sim && {{ dev }} ruff format .
+
+# A Vulkan stand-in plays the CARLA plugin. A host with no NVIDIA GPU skips, and
+# one whose NVIDIA driver is not loaded fails.
+#
+# Run the GPU bridge end to end on this host's NVIDIA GPU.
+bridge-gpu:
+    cd ../.. && demo/carla/bridge/gpu.sh cargo test --locked -p moq-carla-bridge --test gpu -- --ignored
+
+# Wait for a TCP port to accept connections. bash's /dev/tcp rather than nc,
+# because the user units gate on this at boot and nc is not in the devshell.
+[private]
+wait-port host port tries="60":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for _ in $(seq 1 {{ tries }}); do
+        if (exec 3<>/dev/tcp/{{ host }}/{{ port }}) 2>/dev/null; then
+            exit 0
+        fi
+        sleep 0.5
+    done
+    echo "timed out waiting for {{ host }}:{{ port }}" >&2
+    exit 1

@@ -1,9 +1,10 @@
 // A track keeps its timedness end to end: no receive path fills in arrival time, and a
-// wire that can't declare a timeline delivers frames untimed. Mirrors rs/moq-net/tests/untimed.rs.
+// wire that can't declare a timeline delivers frames untimed. Mirrors rs/moq-net/tests/integration/untimed.rs.
 import { expect, test } from "bun:test";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { accept, connect } from "./connection/index.ts";
 import * as Ietf from "./ietf/index.ts";
+import { hooks } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
@@ -18,23 +19,18 @@ interface Wire {
 	name: string;
 	protocol: string;
 	version?: number;
-	/** Whether the wire can declare a track's timeline. */
+	/** Whether a timed track arrives timed. Lite-05/06 receivers drop timestamps, which may be send times. */
 	declares: boolean;
-	/** Whether the wire carries a timestamp on every frame, a send time for an untimed one. */
-	stamps: boolean;
 }
 
 const WIRES: Wire[] = [
-	{ name: "lite-01", protocol: "", version: Lite.Version.DRAFT_01, declares: false, stamps: false },
-	{ name: "lite-03", protocol: Lite.ALPN_03, declares: false, stamps: false },
-	{ name: "lite-04", protocol: Lite.ALPN_04, declares: false, stamps: false },
-	{ name: "lite-05", protocol: Lite.ALPN_05, declares: true, stamps: true },
-	{ name: "lite-06", protocol: Lite.ALPN_06, declares: true, stamps: true },
-	{ name: "lite-07-wip", protocol: Lite.ALPN_07_WIP, declares: true, stamps: false },
-	{ name: "ietf-14", protocol: "", version: Ietf.Version.DRAFT_14, declares: false, stamps: false },
-	{ name: "ietf-16", protocol: Ietf.ALPN.DRAFT_16, declares: false, stamps: false },
-	{ name: "ietf-17", protocol: Ietf.ALPN.DRAFT_17, declares: true, stamps: false },
-	{ name: "ietf-20", protocol: Ietf.ALPN.DRAFT_20, declares: true, stamps: false },
+	{ name: "lite-01", protocol: "", version: Lite.Version.DRAFT_01, declares: false },
+	{ name: "lite-03", protocol: Lite.ALPN_03, declares: false },
+	{ name: "lite-04", protocol: Lite.ALPN_04, declares: false },
+	{ name: "lite-05", protocol: Lite.ALPN_05, declares: false },
+	{ name: "lite-06", protocol: Lite.ALPN_06, declares: false },
+	{ name: "lite-07-wip", protocol: Lite.ALPN_07_WIP, declares: true },
+	{ name: "ietf-22", protocol: Ietf.ALPN.DRAFT_22, declares: true },
 ];
 
 /** Serve one group of `timestamps` on a track with `timescale`, and read it back over `wire`. */
@@ -46,8 +42,9 @@ async function roundTrip(wire: Wire, timescale: Timescale | undefined, timestamp
 		accept({ transport: pair.server, url, version: wire.version, publish: origin.consume() }),
 	]);
 
-	const broadcast = origin.createBroadcast(Path.from("test"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("test"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	// Every request is answered, including the TRACK lookup lite-05+ makes before subscribing.
 	const serving = (async () => {
 		for (;;) {
@@ -57,7 +54,7 @@ async function roundTrip(wire: Wire, timescale: Timescale | undefined, timestamp
 			for (const [i, timestamp] of timestamps.entries()) {
 				group.writeFrame({ payload: new Uint8Array([i]), timestamp });
 			}
-			group.close();
+			group.finish();
 		}
 	})();
 
@@ -87,13 +84,14 @@ async function republish(input: BroadcastConsumer): Promise<BroadcastProducer> {
 			for (let group = await groups.nextGroup(); group; group = await groups.nextGroup()) {
 				const out = video.appendGroup();
 				for (let frame = await group.readFrame(); frame; frame = await group.readFrame()) out.writeFrame(frame);
-				out.close();
+				out.finish();
 			}
 			// Closing the broadcast does not end a track inserted into it.
+			video.finish();
 			video.close();
 		} catch (err) {
 			// An upstream abort goes downstream as an abort, never as a clean end.
-			video.close(err instanceof Error ? err : new Error(String(err)));
+			video.abort(err instanceof Error ? err : new Error(String(err)));
 		} finally {
 			copy.close();
 		}
@@ -105,7 +103,7 @@ test("a forwarded untimed track stays untimed", async () => {
 	// The publisher's hop (lite-04) can't declare a timeline, and the forwarding node must
 	// not claim one on its moq-transport hop either.
 	const upstream = createMockTransportPair(Lite.ALPN_04);
-	const downstream = createMockTransportPair(Ietf.ALPN.DRAFT_20);
+	const downstream = createMockTransportPair(Ietf.ALPN.DRAFT_22);
 	const source = new OriginProducer();
 	const relay = new OriginProducer();
 	const [publisher, ingest, serve, subscriber] = await Promise.all([
@@ -115,27 +113,28 @@ test("a forwarded untimed track stays untimed", async () => {
 		connect({ url, transport: downstream.client }),
 	]);
 
-	const broadcast = source.createBroadcast(Path.from("test"));
-	broadcast.announce();
+	const broadcastPublication = source.createBroadcast(Path.from("test"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	const serving = (async () => {
 		for (;;) {
 			const request = await wireOf(broadcast).requested();
 			if (!request) break;
 			const group = request.accept({ timescale: Timescale.MICRO }).appendGroup();
 			group.writeFrame({ payload: new Uint8Array([7]), timestamp: Timestamp.fromMicros(1_234) });
-			group.close();
+			group.finish();
 		}
 	})();
 
 	// Serve the downstream session from the upstream one. A JS origin refuses to serve a
 	// broadcast a session delivered, so the forwarding node republishes a copy it produced.
-	const dynamic = relay.dynamic(Path.from("test"));
+	const dynamic = relay.requestsRoute(Path.from("test"));
 	const inputs: BroadcastConsumer[] = [];
 	const forwarding = (async () => {
 		for await (const request of dynamic.requested()) {
 			const input = wireOf(ingest).consume(request.path);
 			inputs.push(input);
-			request.accept(await republish(input));
+			hooks.acceptRequest(request, await republish(input));
 		}
 	})();
 
@@ -156,21 +155,14 @@ test("a forwarded untimed track stays untimed", async () => {
 });
 
 for (const wire of WIRES) {
-	test(`${wire.name}: an untimed track arrives untimed, or with send times where the wire must stamp`, async () => {
+	test(`${wire.name}: an untimed track arrives untimed`, async () => {
 		const { info, frames } = await roundTrip(wire, undefined, [undefined, undefined]);
 		expect(frames.map((frame) => frame.payload[0])).toEqual([0, 1]);
-
-		if (wire.stamps) {
-			// Lite-05 and lite-06 can't say a track is untimed, so it goes out timed at milliseconds.
-			expect(info.timescale).toBe(Timescale.MILLI);
-			for (const frame of frames) expect(frame.timestamp).toBeDefined();
-		} else {
-			expect(info.timescale).toBeUndefined();
-			for (const frame of frames) expect(frame.timestamp).toBeUndefined();
-		}
+		expect(info.timescale).toBeUndefined();
+		for (const frame of frames) expect(frame.timestamp).toBeUndefined();
 	});
 
-	test(`${wire.name}: a timed track keeps its timestamps only where the wire declares units`, async () => {
+	test(`${wire.name}: a timed track keeps its timestamps only where the wire delivers them`, async () => {
 		const { info, frames } = await roundTrip(wire, Timescale.MICRO, [
 			Timestamp.fromMicros(1_000),
 			Timestamp.fromMicros(1_234),
@@ -181,7 +173,7 @@ for (const wire of WIRES) {
 			expect(info.timescale).toBe(Timescale.MICRO);
 			expect(frames.map((frame) => frame.timestamp?.asMicros())).toEqual([1_000, 1_234]);
 		} else {
-			// No units on the wire, and no arrival time made up in their place.
+			// No trusted units on the wire, and no arrival time made up in their place.
 			expect(info.timescale).toBeUndefined();
 			for (const frame of frames) expect(frame.timestamp).toBeUndefined();
 		}
@@ -189,7 +181,7 @@ for (const wire of WIRES) {
 }
 
 for (const wire of WIRES.filter((wire) => wire.name === "lite-06" || wire.name === "lite-07-wip")) {
-	test(`${wire.name}: an untimed datagram arrives untimed, or with a send time where the wire must stamp`, async () => {
+	test(`${wire.name}: an untimed datagram arrives untimed`, async () => {
 		const pair = createMockTransportPair(wire.protocol);
 		const origin = new OriginProducer();
 		const [client, server] = await Promise.all([
@@ -197,23 +189,23 @@ for (const wire of WIRES.filter((wire) => wire.name === "lite-06" || wire.name =
 			accept({ transport: pair.server, url, publish: origin.consume() }),
 		]);
 
-		const broadcast = origin.createBroadcast(Path.from("test"));
-		broadcast.announce();
+		const broadcastPublication = origin.createBroadcast(Path.from("test"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		const producer = broadcast.createTrack("video", {});
 		const subscriber = wireOf(client).consume(Path.from("test")).track("video").subscribe();
 
 		// Datagrams aren't cached, so a group read back first proves the subscription is live.
 		const group = producer.appendGroup();
 		group.writeFrame({ payload: new Uint8Array([0]) });
-		group.close();
+		group.finish();
 		expect(await subscriber.recvGroup()).toBeDefined();
 
 		producer.appendDatagram(undefined, new Uint8Array([7]));
 		const datagram = await subscriber.recvDatagram();
 
 		expect(datagram?.payload).toEqual(new Uint8Array([7]));
-		if (wire.stamps) expect(datagram?.timestamp).toBeDefined();
-		else expect(datagram?.timestamp).toBeUndefined();
+		expect(datagram?.timestamp).toBeUndefined();
 
 		broadcast.close();
 		subscriber.close();

@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { Time } from "@moq/net";
+import { type Micro, Milli } from "@moq/clock";
 import type { AudioFrame } from "./capture";
 import { Gain } from "./gain";
 
 const RATE = 48_000;
-const FADE = Time.Milli(50);
+const FADE = Milli(50);
 // The samples a FADE ramp spans at RATE.
 const FADE_SAMPLES = (FADE / 1000) * RATE;
 
@@ -13,7 +13,7 @@ const SLOW_RATE = RATE / 2;
 
 function ones(samples: number, channels = 1): AudioFrame {
 	return {
-		timestamp: 0 as Time.Micro,
+		timestamp: 0 as Micro,
 		channels: Array.from({ length: channels }, () => new Float32Array(samples).fill(1)),
 	};
 }
@@ -81,7 +81,7 @@ describe("Gain", () => {
 
 	test("steps at once with no fade", () => {
 		const gain = new Gain();
-		gain.set(0, Time.Milli(0));
+		gain.set(0, Milli(0));
 
 		expect([...gain.apply(ones(128), RATE).channels[0]]).toEqual(Array.from({ length: 128 }, () => 0));
 	});
@@ -103,7 +103,7 @@ describe("Gain", () => {
 		// Distinct amplitudes: two channels of the same value would compare equal even if one were
 		// overwritten with its neighbour rather than scaled in place.
 		const frame: AudioFrame = {
-			timestamp: 0 as Time.Micro,
+			timestamp: 0 as Micro,
 			channels: [new Float32Array(128).fill(1), new Float32Array(128).fill(-0.5)],
 		};
 

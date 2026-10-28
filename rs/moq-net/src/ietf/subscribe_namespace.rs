@@ -1,41 +1,19 @@
 //! IETF moq-transport subscribe namespace messages
 
-use std::borrow::Cow;
-
 use crate::{Path, coding::*, ietf::RequestId};
 
 use super::Message;
-use super::cluster;
 use super::hidden::HIDDEN_PARAM;
 use super::namespace::{decode_namespace, encode_namespace};
+use super::publish_namespace::{AdvertParams, Negotiated};
 
 use super::Version;
 
-/// SUBSCRIBE_TRACKS message ID (0x51) introduced in draft-18 (#1542).
-///
-/// moq-lite does not implement PUBLISH replication through a CDN, which is the
-/// only thing that SUBSCRIBE_TRACKS enables (subscribing to all tracks under a
-/// prefix), so each one is refused with REQUEST_ERROR NOT_SUPPORTED.
-pub const SUBSCRIBE_TRACKS_ID: u64 = 0x51;
-
-/// True for the drafts that use the legacy 0x11 SUBSCRIBE_NAMESPACE message.
-/// Draft-18+ uses the renumbered 0x50 message instead.
-fn is_legacy_version(version: Version) -> bool {
-	matches!(
-		version,
-		Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17
-	)
-}
-
-/// SUBSCRIBE_NAMESPACE message (draft-18+, type 0x50).
-///
-/// Draft-18 renumbered the message from 0x11 to 0x50 and dropped the Subscribe
-/// Options field when it split SUBSCRIBE_TRACKS (0x51) off into its own message
-/// type (#1542). Draft-14 through draft-17 use [`SubscribeNamespaceLegacy`].
+/// SUBSCRIBE_NAMESPACE message (type 0x50).
 #[derive(Clone, Debug)]
-pub struct SubscribeNamespace<'a> {
+pub struct SubscribeNamespace {
 	pub request_id: RequestId,
-	pub namespace: Path<'a>,
+	pub namespace: Path,
 	/// MoQ Hidden: also advertise hidden namespaces. Only sent to a peer that declared
 	/// the extension; absent means false.
 	pub hidden: bool,
@@ -55,23 +33,17 @@ fn hidden_from_param(value: Option<u64>) -> Result<bool, DecodeError> {
 	}
 }
 
-impl Message for SubscribeNamespace<'_> {
+impl<'a> Message<'a> for SubscribeNamespace {
 	const ID: u64 = 0x50;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		if is_legacy_version(version) {
-			return Err(EncodeError::Version);
-		}
 		self.request_id.encode(w, version)?;
 		encode_namespace(w, &self.namespace)?;
 		encode_params!(w, version, HIDDEN_PARAM => hidden_param(self.hidden));
 		Ok(())
 	}
 
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		if is_legacy_version(version) {
-			return Err(DecodeError::Version);
-		}
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
 		let namespace = decode_namespace(r)?;
 		// The token decodes but grants nothing: the session's grant is what authorizes the request.
@@ -91,267 +63,63 @@ impl Message for SubscribeNamespace<'_> {
 	}
 }
 
-/// What a draft-16/17 SUBSCRIBE_NAMESPACE asks for (d16 §9.25, d17 §9.20).
-///
-/// Draft-14/15 have no field and only ever ask for namespaces. Draft-18 dropped it
-/// when SUBSCRIBE_TRACKS took over the PUBLISH half.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SubscribeOptions {
-	/// PUBLISH for each matching track (0x00).
-	Publish,
-	/// NAMESPACE for each matching namespace (0x01).
-	Namespace,
-	/// Both PUBLISH and NAMESPACE (0x02).
-	Both,
-}
-
-impl SubscribeOptions {
-	fn encode(self, w: &mut Encoder<'_>) -> Result<(), EncodeError> {
-		w.varint(match self {
-			Self::Publish => 0x00u64,
-			Self::Namespace => 0x01,
-			Self::Both => 0x02,
-		})
-	}
-
-	fn decode(r: &mut Decoder<'_>) -> Result<Self, DecodeError> {
-		match r.varint()? {
-			0x00 => Ok(Self::Publish),
-			0x01 => Ok(Self::Namespace),
-			0x02 => Ok(Self::Both),
-			_ => Err(DecodeError::InvalidValue),
-		}
-	}
-}
-
-/// SUBSCRIBE_NAMESPACE message for draft-14 through draft-17 (type 0x11).
-///
-/// In v16 this moves from the control stream to its own bidirectional stream.
-/// Draft-16/17 carry [`SubscribeOptions`]; draft-17 additionally prefixes a
-/// Required Request ID delta (removed in draft-18 per #1615). Draft-18+ uses
-/// [`SubscribeNamespace`].
-#[derive(Clone, Debug)]
-pub struct SubscribeNamespaceLegacy<'a> {
-	pub request_id: RequestId,
-	pub namespace: Path<'a>,
-	/// Encoded on v16/v17 only; earlier drafts always mean [`SubscribeOptions::Namespace`].
-	pub subscribe_options: SubscribeOptions,
-	/// MoQ Hidden: see [`SubscribeNamespace::hidden`].
-	pub hidden: bool,
-}
-
-impl Message for SubscribeNamespaceLegacy<'_> {
-	const ID: u64 = 0x11;
-
-	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		if !is_legacy_version(version) {
-			return Err(EncodeError::Version);
-		}
-		self.request_id.encode(w, version)?;
-		if version == Version::Draft17 {
-			w.varint(0)?; // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
-		}
-		encode_namespace(w, &self.namespace)?;
-		if matches!(version, Version::Draft16 | Version::Draft17) {
-			self.subscribe_options.encode(w)?;
-		}
-		encode_params!(w, version, HIDDEN_PARAM => hidden_param(self.hidden));
-		Ok(())
-	}
-
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		if !is_legacy_version(version) {
-			return Err(DecodeError::Version);
-		}
-		let request_id = RequestId::decode(r, version)?;
-		if version == Version::Draft17 {
-			let _required_request_id_delta = r.varint()?;
-		}
-		let namespace = decode_namespace(r)?;
-		let subscribe_options = match version {
-			Version::Draft16 | Version::Draft17 => SubscribeOptions::decode(r)?,
-			_ => SubscribeOptions::Namespace,
-		};
-
-		// The token decodes but grants nothing: the session's grant is what authorizes the request.
-		// FORWARD is legal here in draft-15 through draft-17. The value is checked (only
-		// 0 or 1) and then dropped: a namespace subscription has no objects to forward.
-		// Draft-14 has no such parameter, so an unlisted id is ignored. Draft-18 moved
-		// FORWARD onto SUBSCRIBE_TRACKS and closes if it shows up on the new message.
-		decode_params!(r, version,
-			0x03 => authorization_token: Vec<super::token::RequestToken>,
-			0x10 => _forward: Option<bool> where matches!(version, Version::Draft15 | Version::Draft16 | Version::Draft17),
-			HIDDEN_PARAM => hidden: Option<u64>,
-		);
-		let hidden = hidden_from_param(hidden)?;
-		// Last, so a malformed field closes the session before a token refusal.
-		super::token::single(authorization_token)?;
-
-		Ok(Self {
-			request_id,
-			namespace,
-			subscribe_options,
-			hidden,
-		})
-	}
-}
-
-/// SubscribeNamespaceOk message (0x12): v14 only
-#[derive(Clone, Debug)]
-pub struct SubscribeNamespaceOk {
-	pub request_id: RequestId,
-}
-
-impl Message for SubscribeNamespaceOk {
-	const ID: u64 = 0x12;
-
-	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		self.request_id.encode(w, version)?;
-		Ok(())
-	}
-
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		let request_id = RequestId::decode(r, version)?;
-		Ok(Self { request_id })
-	}
-}
-
-/// SubscribeNamespaceError message (0x13): v14 only
-#[derive(Clone, Debug)]
-pub struct SubscribeNamespaceError<'a> {
-	pub request_id: RequestId,
-	pub error_code: u64,
-	pub reason_phrase: Cow<'a, str>,
-}
-
-impl Message for SubscribeNamespaceError<'_> {
-	const ID: u64 = 0x13;
-
-	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		self.request_id.encode(w, version)?;
-		w.varint(self.error_code)?;
-		w.string(&self.reason_phrase)?;
-		Ok(())
-	}
-
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		let request_id = RequestId::decode(r, version)?;
-		let error_code = r.varint()?;
-		let reason_phrase = Cow::Owned(r.string()?);
-
-		Ok(Self {
-			request_id,
-			error_code,
-			reason_phrase,
-		})
-	}
-}
-
-/// UnsubscribeNamespace message (0x14): v14/v15 only (v16 uses stream close)
-#[derive(Clone, Debug)]
-pub struct UnsubscribeNamespace {
-	pub request_id: RequestId,
-}
-
-impl Message for UnsubscribeNamespace {
-	const ID: u64 = 0x14;
-
-	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		self.request_id.encode(w, version)?;
-		Ok(())
-	}
-
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		let request_id = RequestId::decode(r, version)?;
-		Ok(Self { request_id })
-	}
-}
-
-/// NAMESPACE message (0x08): v16+, sent on the SUBSCRIBE_NAMESPACE bidi stream.
+/// NAMESPACE message (0x08), sent on the SUBSCRIBE_NAMESPACE bidi stream.
 /// Indicates a namespace suffix matching the subscribed prefix is active.
 ///
 /// The base message carries only the suffix. A session that negotiated the MoQ Cluster
-/// extension uses the extended form instead, which appends a Parameters field so the
-/// advertisement can carry its HOP_PATH and ROUTE_COST (see [`cluster`]).
+/// or MoQ Epoch extension uses the extended form instead, which appends one Parameters
+/// field for both, so the advertisement can carry its HOP_PATH and ROUTE_COST (see
+/// [`super::cluster`]) and its EPOCH (see [`super::epoch`]).
 #[derive(Clone, Debug)]
-pub struct Namespace<'a> {
-	pub suffix: Path<'a>,
+pub struct Namespace {
+	pub suffix: Path,
 
-	/// The MoQ Cluster parameters. `Some` selects the extended form; `None` the base
-	/// one. An endpoint must not append them on a session that did not negotiate.
-	pub cluster: Option<cluster::Advert>,
+	/// The extension parameters. `Some` selects the extended form; `None` the base one.
+	/// An endpoint must not append them on a session that negotiated neither extension.
+	pub params: Option<AdvertParams>,
 }
 
-impl Namespace<'_> {
+impl Namespace {
 	/// Decode the message body, expecting the extended form when the session negotiated
-	/// the MoQ Cluster extension. See [`super::PublishNamespace::decode_body`].
-	pub fn decode_body(r: &mut Decoder<'_>, version: Version, negotiated: bool) -> Result<Self, DecodeError> {
+	/// an extension that defines it. See [`super::PublishNamespace::decode_body`].
+	pub fn decode_body(r: &mut Decoder<'_>, version: Version, negotiated: Negotiated) -> Result<Self, DecodeError> {
 		let suffix = decode_namespace(r)?;
 
 		// The base form has no Parameters field at all, so there is nothing to read
-		// (and nothing to reject) unless the extension is on.
-		let cluster = match negotiated {
-			true => Some(super::publish_namespace::decode_cluster_params(r, version)?),
+		// (and nothing to reject) unless an extension is on.
+		let params = match negotiated.extended() {
+			true => Some(super::publish_namespace::decode_advert_params(r, version, negotiated)?),
 			false => None,
 		};
 
-		Ok(Self { suffix, cluster })
+		Ok(Self { suffix, params })
 	}
 }
 
-impl Message for Namespace<'_> {
+impl<'a> Message<'a> for Namespace {
 	const ID: u64 = 0x08;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		encode_namespace(w, &self.suffix)?;
-		match &self.cluster {
-			Some(advert) => super::publish_namespace::encode_cluster_params(w, version, Some(advert)),
+		match &self.params {
+			Some(params) => super::publish_namespace::encode_advert_params(w, version, params),
 			None => Ok(()),
 		}
 	}
 
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		Self::decode_body(r, version, false)
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
+		Self::decode_body(r, version, Negotiated::default())
 	}
 }
 
-/// PUBLISH_BLOCKED message (0x0F): draft-17 only
-/// Indicates a track within a namespace is blocked from publishing.
-#[derive(Clone, Debug)]
-#[allow(dead_code)] // Will be used in Phase 3 bidi stream handling
-pub struct PublishBlocked<'a> {
-	pub suffix: Path<'a>,
-	pub track_name: Cow<'a, str>,
-}
-
-impl Message for PublishBlocked<'_> {
-	const ID: u64 = 0x0F;
-
-	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		assert!(version == Version::Draft17, "PublishBlocked is draft17 only");
-		encode_namespace(w, &self.suffix)?;
-		w.string(&self.track_name)?;
-		Ok(())
-	}
-
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		if version != Version::Draft17 {
-			return Err(DecodeError::Unsupported);
-		}
-		let suffix = decode_namespace(r)?;
-		let track_name = Cow::Owned(r.string()?);
-		Ok(Self { suffix, track_name })
-	}
-}
-
-/// NAMESPACE_DONE message (0x0E): v16 only, sent on SUBSCRIBE_NAMESPACE bidi stream
+/// NAMESPACE_DONE message (0x0E), sent on the SUBSCRIBE_NAMESPACE bidi stream.
 /// Indicates a namespace suffix matching the subscribed prefix is no longer active.
 #[derive(Clone, Debug)]
-pub struct NamespaceDone<'a> {
-	pub suffix: Path<'a>,
+pub struct NamespaceDone {
+	pub suffix: Path,
 }
 
-impl Message for NamespaceDone<'_> {
+impl<'a> Message<'a> for NamespaceDone {
 	const ID: u64 = 0x0E;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
@@ -359,7 +127,7 @@ impl Message for NamespaceDone<'_> {
 		Ok(())
 	}
 
-	fn decode_msg(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, _: Version) -> Result<Self, DecodeError> {
 		let suffix = decode_namespace(r)?;
 		Ok(Self { suffix })
 	}
@@ -367,9 +135,10 @@ impl Message for NamespaceDone<'_> {
 
 #[cfg(test)]
 mod tests {
+	use super::super::cluster;
 	use super::*;
 
-	fn body<M: Message>(msg: &M, version: Version) -> Vec<u8> {
+	fn body<'m, M: Message<'m>>(msg: &M, version: Version) -> Vec<u8> {
 		let mut buf = Vec::new();
 		msg.encode_msg(&mut Encoder::new(&mut buf, version.into()), version)
 			.unwrap();
@@ -381,78 +150,169 @@ mod tests {
 		cluster::HopPath::new(crate::Hops::try_from(hops).unwrap())
 	}
 
+	const CLUSTER: Negotiated = Negotiated {
+		cluster: true,
+		epoch: false,
+	};
+	const EPOCH: Negotiated = Negotiated {
+		cluster: false,
+		epoch: true,
+	};
+	const BOTH: Negotiated = Negotiated {
+		cluster: true,
+		epoch: true,
+	};
+
+	fn decode(bytes: Vec<u8>, version: Version, negotiated: Negotiated) -> Result<(Namespace, bool), DecodeError> {
+		let mut buf = bytes::Bytes::from(bytes);
+		let decoded = crate::coding::decode_buf(&mut buf, version, |r, v| Namespace::decode_body(r, v, negotiated))?;
+		Ok((decoded, buf.is_empty()))
+	}
+
+	fn clustered(hops: &[u64], cost: u64) -> Option<AdvertParams> {
+		Some(AdvertParams {
+			cluster: Some(cluster::Advert {
+				hops: hop_path(hops),
+				cost,
+			}),
+			epoch: None,
+		})
+	}
+
 	/// The extended NAMESPACE appends a Parameters field carrying the path and cost;
 	/// the base one has no such field at all.
 	#[test]
 	fn cluster_namespace_round_trips() {
-		let version = Version::Draft19;
+		let version = Version::Draft18;
 		let msg = Namespace {
-			suffix: Path::new("alice.hang"),
-			cluster: Some(cluster::Advert {
-				hops: hop_path(&[7, 9]),
-				cost: 5,
-			}),
+			suffix: Path::from_static("alice.hang"),
+			params: clustered(&[7, 9], 5),
 		};
 
 		let encoded = body(&msg, version);
-		let mut buf = bytes::Bytes::from(encoded.clone());
-		let decoded = crate::coding::decode_buf(&mut buf, version, |r, v| Namespace::decode_body(r, v, true)).unwrap();
-		assert!(buf.is_empty());
+		let (decoded, consumed) = decode(encoded.clone(), version, CLUSTER).unwrap();
+		assert!(consumed);
 		assert_eq!(decoded.suffix.as_str(), "alice.hang");
-		assert_eq!(decoded.cluster, msg.cluster);
+		assert_eq!(decoded.params, msg.params);
 
 		// The base form is strictly shorter, and reading the extended bytes as base
 		// leaves the parameters behind rather than silently absorbing them.
 		let base = Namespace {
-			suffix: Path::new("alice.hang"),
-			cluster: None,
+			suffix: Path::from_static("alice.hang"),
+			params: None,
 		};
 		let base_encoded = body(&base, version);
 		assert!(base_encoded.len() < encoded.len());
 
-		let mut buf = bytes::Bytes::from(encoded);
-		let decoded = crate::coding::decode_buf(&mut buf, version, |r, v| Namespace::decode_body(r, v, false)).unwrap();
-		assert!(decoded.cluster.is_none());
-		assert!(!buf.is_empty(), "the parameters were not consumed");
+		let (decoded, consumed) = decode(encoded, version, Negotiated::default()).unwrap();
+		assert!(decoded.params.is_none());
+		assert!(!consumed, "the parameters were not consumed");
 	}
 
 	/// ROUTE_COST is optional and absent means 0, so a free path sends nothing.
 	#[test]
 	fn cluster_namespace_omits_zero_cost() {
-		let version = Version::Draft19;
+		let version = Version::Draft18;
 		let free = Namespace {
-			suffix: Path::new("a"),
-			cluster: Some(cluster::Advert {
-				hops: hop_path(&[7]),
-				cost: 0,
-			}),
+			suffix: Path::from_static("a"),
+			params: clustered(&[7], 0),
 		};
 		let priced = Namespace {
-			suffix: Path::new("a"),
-			cluster: Some(cluster::Advert {
-				hops: hop_path(&[7]),
-				cost: 1,
-			}),
+			suffix: Path::from_static("a"),
+			params: clustered(&[7], 1),
 		};
 		assert!(body(&free, version).len() < body(&priced, version).len());
 
-		let mut buf = bytes::Bytes::from(body(&free, version));
-		let decoded = crate::coding::decode_buf(&mut buf, version, |r, v| Namespace::decode_body(r, v, true)).unwrap();
-		assert_eq!(decoded.cluster.unwrap().cost, 0);
+		let (decoded, _) = decode(body(&free, version), version, CLUSTER).unwrap();
+		assert_eq!(decoded.params.unwrap().cluster.unwrap().cost, 0);
+	}
+
+	/// MoQ Epoch alone extends NAMESPACE too: the block is present, empty for a route
+	/// without an epoch, and carries EPOCH for one with.
+	#[test]
+	fn epoch_namespace_round_trips() {
+		let version = Version::Draft22;
+		let epoch = crate::Epoch::mint();
+		for epoch in [None, Some(epoch)] {
+			let msg = Namespace {
+				suffix: Path::from_static("a"),
+				params: Some(AdvertParams {
+					cluster: None,
+					epoch: epoch.clone(),
+				}),
+			};
+			let (decoded, consumed) = decode(body(&msg, version), version, EPOCH).unwrap();
+			assert!(consumed);
+			assert_eq!(decoded.params, msg.params, "{epoch:?}");
+		}
+	}
+
+	/// With both extensions, one block holds the parameters of both.
+	#[test]
+	fn both_extensions_share_one_block() {
+		let version = Version::Draft22;
+		let mut params = clustered(&[7], 3).unwrap();
+		params.epoch = Some(crate::Epoch::mint());
+		let msg = Namespace {
+			suffix: Path::from_static("a"),
+			params: Some(params),
+		};
+		let encoded = body(&msg, version);
+		let (decoded, consumed) = decode(encoded.clone(), version, BOTH).unwrap();
+		assert!(consumed);
+		assert_eq!(decoded.params, msg.params);
+
+		// Read as the base form, a single block is all that is left over.
+		let mut suffix = Vec::new();
+		encode_namespace(&mut Encoder::new(&mut suffix, version.into()), &Path::from_static("a")).unwrap();
+		let mut block = Vec::new();
+		super::super::publish_namespace::encode_advert_params(
+			&mut Encoder::new(&mut block, version.into()),
+			version,
+			msg.params.as_ref().unwrap(),
+		)
+		.unwrap();
+		assert_eq!(encoded, [suffix, block].concat());
+	}
+
+	/// EPOCH on a session that did not negotiate MoQ Epoch is an unknown parameter, and so
+	/// is a malformed one on a session that did.
+	#[test]
+	fn epoch_refused_unless_negotiated_and_well_formed() {
+		let version = Version::Draft22;
+		let msg = Namespace {
+			suffix: Path::from_static("a"),
+			params: Some(AdvertParams {
+				cluster: clustered(&[7], 0).unwrap().cluster,
+				epoch: Some(crate::Epoch::mint()),
+			}),
+		};
+		assert!(matches!(
+			decode(body(&msg, version), version, CLUSTER),
+			Err(DecodeError::InvalidValue)
+		));
+
+		let mut buf = Vec::new();
+		encode_namespace(&mut Encoder::new(&mut buf, version.into()), &Path::from_static("a")).unwrap();
+		let w = &mut Encoder::new(&mut buf, version.into());
+		w.varint(1).unwrap();
+		w.varint(super::super::epoch::EPOCH_PARAM).unwrap();
+		w.bytes(&[0; 16]).unwrap();
+		assert!(matches!(decode(buf, version, EPOCH), Err(DecodeError::InvalidValue)));
 	}
 
 	/// A negotiated session that omits HOP_PATH is a protocol violation.
 	#[test]
 	fn cluster_namespace_requires_hop_path() {
-		let version = Version::Draft19;
+		let version = Version::Draft18;
 		let mut buf = Vec::new();
-		encode_namespace(&mut Encoder::new(&mut buf, version.into()), &Path::new("a")).unwrap();
+		encode_namespace(&mut Encoder::new(&mut buf, version.into()), &Path::from_static("a")).unwrap();
 		// Number of Parameters = 0.
 		Encoder::new(&mut buf, version.into()).varint(0).unwrap();
 
 		let mut bytes = bytes::Bytes::from(buf);
 		assert!(matches!(
-			crate::coding::decode_buf(&mut bytes, version, |r, v| Namespace::decode_body(r, v, true)),
+			crate::coding::decode_buf(&mut bytes, version, |r, v| Namespace::decode_body(r, v, CLUSTER)),
 			Err(DecodeError::InvalidValue)
 		));
 	}
@@ -461,14 +321,17 @@ mod tests {
 	/// so a receiver that sees them there rejects the message.
 	#[test]
 	fn cluster_params_rejected_when_not_negotiated() {
-		let version = Version::Draft19;
+		let version = Version::Draft18;
 		let msg = super::super::PublishNamespace {
 			request_id: RequestId(1),
-			track_namespace: Path::new("a"),
-			cluster: Some(cluster::Advert {
-				hops: hop_path(&[7]),
-				cost: 0,
-			}),
+			track_namespace: Path::from_static("a"),
+			params: AdvertParams {
+				cluster: Some(cluster::Advert {
+					hops: hop_path(&[7]),
+					cost: 0,
+				}),
+				epoch: None,
+			},
 			authorization_token: None,
 		};
 
@@ -478,88 +341,56 @@ mod tests {
 		let mut bytes = bytes::Bytes::from(buf);
 		assert!(
 			crate::coding::decode_buf(&mut bytes, version, |r, v| super::super::PublishNamespace::decode_body(
-				r, v, false
+				r,
+				v,
+				Negotiated::default()
 			))
 			.is_err()
 		);
 	}
 
-	/// FORWARD (0x10) is legal on SUBSCRIBE_NAMESPACE through draft-17. A value other
-	/// than 0 or 1 still closes the session. Draft-18 dropped it from this message.
+	/// Draft-18 moved FORWARD (0x10) onto SUBSCRIBE_TRACKS, so it closes the session here.
 	#[test]
-	fn forward_follows_the_draft() {
-		fn with_forward(version: Version, value: u64) -> Vec<u8> {
-			let mut buf = Vec::new();
-			let w = &mut Encoder::new(&mut buf, version.into());
-			RequestId(1).encode(w, version).unwrap();
-			if version == Version::Draft17 {
-				w.varint(0).unwrap();
-			}
-			encode_namespace(w, &Path::default()).unwrap();
-			if matches!(version, Version::Draft16 | Version::Draft17) {
-				w.varint(1).unwrap();
-			}
-			// Count, absolute key, then the raw varint. encode_params! needs a Result.
-			w.varint(1).unwrap();
-			w.varint(0x10).unwrap();
-			w.varint(value).unwrap();
-			buf
-		}
-
-		for version in [Version::Draft15, Version::Draft16, Version::Draft17] {
-			let mut buf = bytes::Bytes::from(with_forward(version, 0));
-			crate::coding::decode_buf(&mut buf, version, SubscribeNamespaceLegacy::decode_msg)
-				.unwrap_or_else(|err| panic!("{version} FORWARD=0: {err}"));
-			assert!(buf.is_empty(), "{version}");
-
-			let mut buf = bytes::Bytes::from(with_forward(version, 2));
-			assert!(
-				crate::coding::decode_buf(&mut buf, version, SubscribeNamespaceLegacy::decode_msg).is_err(),
-				"{version} FORWARD=2"
-			);
-		}
-
-		let mut buf = bytes::Bytes::from(with_forward(Version::Draft18, 0));
-		assert!(crate::coding::decode_buf(&mut buf, Version::Draft18, SubscribeNamespace::decode_msg).is_err());
+	fn forward_is_refused() {
+		let version = Version::Draft18;
+		let mut buf = Vec::new();
+		let w = &mut Encoder::new(&mut buf, version.into());
+		RequestId(1).encode(w, version).unwrap();
+		encode_namespace(w, &Path::default()).unwrap();
+		// Count, key, then the raw varint.
+		w.varint(1).unwrap();
+		w.varint(0x10).unwrap();
+		w.varint(0).unwrap();
+		let mut buf = bytes::Bytes::from(buf);
+		assert!(crate::coding::decode_buf(&mut buf, version, |r, v| SubscribeNamespace::decode_msg(r, v)).is_err());
 	}
 
 	#[test]
-	fn message_ids() {
-		// 0x11 through draft-17 (legacy), renumbered to 0x50 in draft-18 (#1542).
-		assert_eq!(SubscribeNamespaceLegacy::ID, 0x11);
+	fn message_type_code_point() {
 		assert_eq!(SubscribeNamespace::ID, 0x50);
 	}
 
 	#[test]
-	fn draft18_omits_subscribe_options() {
-		// Draft-18 modern body: Request ID (0x00), empty namespace field-count
-		// (0x00), Number of Parameters (0x00). No Subscribe Options field.
-		let modern = SubscribeNamespace {
+	fn body_has_no_subscribe_options() {
+		// Request ID (0x00), empty namespace field-count (0x00), Number of Parameters (0x00).
+		let msg = SubscribeNamespace {
 			request_id: RequestId(0),
 			namespace: Path::default(),
 			hidden: false,
 		};
-		assert_eq!(body(&modern, Version::Draft18), vec![0x00, 0x00, 0x00]);
-
-		// The legacy draft-17 body keeps the options field, so it is one byte longer.
-		let legacy = SubscribeNamespaceLegacy {
-			request_id: RequestId(0),
-			namespace: Path::default(),
-			subscribe_options: SubscribeOptions::Namespace,
-			hidden: false,
-		};
-		assert!(body(&legacy, Version::Draft17).len() > body(&modern, Version::Draft18).len());
+		assert_eq!(body(&msg, Version::Draft18), vec![0x00, 0x00, 0x00]);
 	}
 
 	#[test]
-	fn modern_round_trips() {
+	fn round_trips() {
 		let msg = SubscribeNamespace {
 			request_id: RequestId(4),
-			namespace: Path::new("example/meeting"),
+			namespace: Path::from_static("example/meeting"),
 			hidden: false,
 		};
 		let mut buf = bytes::Bytes::from(body(&msg, Version::Draft18));
-		let decoded = crate::coding::decode_buf(&mut buf, Version::Draft18, SubscribeNamespace::decode_msg).unwrap();
+		let decoded =
+			crate::coding::decode_buf(&mut buf, Version::Draft18, |r, v| SubscribeNamespace::decode_msg(r, v)).unwrap();
 		assert!(buf.is_empty());
 		assert_eq!(decoded.request_id, RequestId(4));
 		assert_eq!(decoded.namespace.as_str(), "example/meeting");
@@ -571,84 +402,16 @@ mod tests {
 		for hidden in [false, true] {
 			let msg = SubscribeNamespace {
 				request_id: RequestId(4),
-				namespace: Path::new("example"),
+				namespace: Path::from_static("example"),
 				hidden,
 			};
 			let mut buf = bytes::Bytes::from(body(&msg, Version::Draft18));
 			assert_eq!(
-				crate::coding::decode_buf(&mut buf, Version::Draft18, SubscribeNamespace::decode_msg)
+				crate::coding::decode_buf(&mut buf, Version::Draft18, |r, v| SubscribeNamespace::decode_msg(r, v))
 					.unwrap()
 					.hidden,
 				hidden
 			);
-
-			for version in [Version::Draft14, Version::Draft16, Version::Draft17] {
-				let msg = SubscribeNamespaceLegacy {
-					request_id: RequestId(4),
-					namespace: Path::new("example"),
-					subscribe_options: SubscribeOptions::Namespace,
-					hidden,
-				};
-				let mut buf = bytes::Bytes::from(body(&msg, version));
-				let decoded =
-					crate::coding::decode_buf(&mut buf, version, SubscribeNamespaceLegacy::decode_msg).unwrap();
-				assert_eq!(decoded.hidden, hidden, "{version:?}");
-			}
 		}
-	}
-
-	#[test]
-	fn legacy_round_trips() {
-		for version in [Version::Draft16, Version::Draft17] {
-			for options in [
-				SubscribeOptions::Publish,
-				SubscribeOptions::Namespace,
-				SubscribeOptions::Both,
-			] {
-				let msg = SubscribeNamespaceLegacy {
-					request_id: RequestId(4),
-					namespace: Path::new("example/meeting"),
-					subscribe_options: options,
-					hidden: false,
-				};
-				let mut buf = bytes::Bytes::from(body(&msg, version));
-				let decoded =
-					crate::coding::decode_buf(&mut buf, version, SubscribeNamespaceLegacy::decode_msg).unwrap();
-				assert!(buf.is_empty(), "trailing bytes for {version:?}");
-				assert_eq!(decoded.request_id, RequestId(4));
-				assert_eq!(decoded.namespace.as_str(), "example/meeting");
-				assert_eq!(decoded.subscribe_options, options);
-			}
-		}
-	}
-
-	/// The drafts define only 0x00 through 0x02, so we refuse any other value as a protocol violation.
-	#[test]
-	fn legacy_rejects_unknown_subscribe_options() {
-		// Request ID, empty namespace, Subscribe Options 0x03, no parameters.
-		let mut buf = bytes::Bytes::from(vec![0x00, 0x00, 0x03, 0x00]);
-		assert!(matches!(
-			crate::coding::decode_buf(&mut buf, Version::Draft16, SubscribeNamespaceLegacy::decode_msg),
-			Err(DecodeError::InvalidValue)
-		));
-	}
-
-	#[test]
-	fn rejects_wrong_version() {
-		// The modern 0x50 message only exists in draft-18+.
-		for version in [Version::Draft14, Version::Draft16, Version::Draft17] {
-			let mut buf = bytes::Bytes::from(vec![0x00, 0x00, 0x00]);
-			assert!(matches!(
-				crate::coding::decode_buf(&mut buf, version, SubscribeNamespace::decode_msg),
-				Err(DecodeError::Version)
-			));
-		}
-
-		// The legacy 0x11 message only exists in draft-14..17.
-		let mut buf = bytes::Bytes::from(vec![0x00, 0x00, 0x00]);
-		assert!(matches!(
-			crate::coding::decode_buf(&mut buf, Version::Draft18, SubscribeNamespaceLegacy::decode_msg),
-			Err(DecodeError::Version)
-		));
 	}
 }

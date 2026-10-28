@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Coverage-guided fuzzing of the moq-net wire codecs: sh/rs/fuzz.sh TARGET [ARGS...]
+# Coverage-guided fuzzing: sh/rs/fuzz.sh [--minimize] TARGET [ARGS...]
 #
-# TARGET is lite, announce, ietf, varint, path, or pattern; ARGS pass to
+# TARGET names a file in some crate's fuzz/fuzz_targets/, such as moq-net's lite or
+# moq-quic's connection; names are unique across crates. ARGS pass to
 # `cargo fuzz run`, so `just rs fuzz lite -- -max_total_time=300` bounds a run.
-# See rs/moq-net/fuzz/README.md.
+# See rs/moq-net/fuzz/README.md and rs/moq-quic/fuzz/README.md.
 #
-# Seeds are regenerated first so the corpus follows the dispatch rather than a
+# Seeds are regenerated first so the corpus follows the code rather than a
 # stale run, and libFuzzer writes what it discovers to the FIRST corpus
 # directory, which is why the generated seeds are passed second and stay
 # read-only.
@@ -13,8 +14,24 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-target=${1:?usage: sh/rs/fuzz.sh TARGET [ARGS...]}
+action=run
+if [[ ${1:-} == --minimize ]]; then
+    action=cmin
+    shift
+fi
+target=${1:?usage: sh/rs/fuzz.sh [--minimize] TARGET [ARGS...]}
 shift
+
+shopt -s nullglob
+shims=(rs/*/fuzz/fuzz_targets/"$target".rs)
+shopt -u nullglob
+if [[ ${#shims[@]} -ne 1 ]]; then
+    echo "rs: expected one fuzz target named $target, found ${#shims[@]}: ${shims[*]}" >&2
+    exit 1
+fi
+# The crate directory is named after its crate.
+crate=$(basename "$(dirname "$(dirname "$(dirname "${shims[0]}")")")")
+dir=rs/$crate/fuzz
 
 if ! command -v cargo-fuzz >/dev/null 2>&1; then
     echo "rs: cargo-fuzz is missing: cargo install --locked cargo-fuzz" >&2
@@ -26,8 +43,10 @@ if ! rustup run nightly rustc --version >/dev/null 2>&1; then
     exit 1
 fi
 
-cargo run --locked -q -p moq-net --features fuzz --example fuzz-seeds -- rs/moq-net/fuzz/seeds
-mkdir -p rs/moq-net/fuzz/corpus/"$target"
+if [[ "$action" == run ]]; then
+    cargo run --locked -q -p "$crate" --features fuzz --example fuzz-seeds -- "$dir"/seeds
+fi
+mkdir -p "$dir"/corpus/"$target"
 
 # Nightly by PATH rather than by `cargo +nightly`: the dev shell puts a
 # Nix-provided cargo ahead of the rustup shim, so the `+` form is not
@@ -45,5 +64,8 @@ export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-D recursion_depth_exceeding_limit"
 export CARGO_PROFILE_RELEASE_LTO=false
 export CARGO_PROFILE_RELEASE_STRIP=none
 
-cargo fuzz run --fuzz-dir rs/moq-net/fuzz "$target" \
-    rs/moq-net/fuzz/corpus/"$target" rs/moq-net/fuzz/seeds/"$target" "$@"
+corpora=("$dir"/corpus/"$target")
+if [[ "$action" == run ]]; then
+    corpora+=("$dir"/seeds/"$target")
+fi
+cargo fuzz "$action" --fuzz-dir "$dir" "$target" "${corpora[@]}" "$@"

@@ -1,7 +1,9 @@
 import { expect, test } from "bun:test";
+import { Milli } from "@moq/clock";
+import { ProtocolViolation } from "../error.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
-import { Milli, Timescale } from "../time.ts";
+import { Timescale } from "../time.ts";
 import { infoDefaults } from "../track.ts";
 import { Track, TrackInfo } from "./track.ts";
 import { Version } from "./version.ts";
@@ -51,14 +53,15 @@ test("TrackInfo for Rust's default Info matches cross-language wire bytes", asyn
 	const model = infoDefaults();
 	const info = new TrackInfo({ ...model, timescale: model.timescale ?? undefined });
 	expect(await bytes((w) => info.encode(w, Version.DRAFT_05), Version.DRAFT_05)).toEqual(
-		new Uint8Array([0x0c, 0x7f, 0x00, 0xc0, 0x1f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x43, 0xe8]),
+		new Uint8Array([0x0c, 0x80, 0x00, 0xc0, 0x1f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x43, 0xe8]),
 	);
 });
 
 test("TrackInfo carries an untimed track as zero on lite-07 and milliseconds before", async () => {
 	const info = new TrackInfo({ priority: 1 });
 	const lite07 = await bytes((w) => info.encode(w, Version.DRAFT_07), Version.DRAFT_07);
-	expect(lite07.at(-1)).toBe(0);
+	// The timescale, then the compression codec.
+	expect(lite07.at(-2)).toBe(0);
 	const got = await TrackInfo.decode(new Reader(undefined, lite07, Version.DRAFT_07), Version.DRAFT_07);
 	expect(got.timescale).toBeUndefined();
 
@@ -71,6 +74,22 @@ test("TrackInfo carries an untimed track as zero on lite-07 and milliseconds bef
 		zero[zero.length - 1] = 0;
 		await expect(TrackInfo.decode(new Reader(undefined, zero, version), version)).rejects.toThrow(RangeError);
 	}
+});
+
+test("TrackInfo carries the compression codec on lite-07 only", async () => {
+	const info = new TrackInfo({ priority: 1, compress: true });
+	const lite07 = await bytes((w) => info.encode(w, Version.DRAFT_07), Version.DRAFT_07);
+	expect(lite07.at(-1)).toBe(1);
+	const got = await TrackInfo.decode(new Reader(undefined, lite07, Version.DRAFT_07), Version.DRAFT_07);
+	expect(got.compress).toBe(true);
+
+	// Anything but none (0) or DEFLATE (1) is a protocol violation.
+	lite07[lite07.length - 1] = 2;
+	await expect(TrackInfo.decode(new Reader(undefined, lite07, Version.DRAFT_07), Version.DRAFT_07)).rejects.toThrow(
+		ProtocolViolation,
+	);
+
+	await expect(bytes((w) => info.encode(w, Version.DRAFT_06), Version.DRAFT_06)).rejects.toThrow();
 });
 
 test("Track request round-trips on draft-05", async () => {
@@ -92,7 +111,7 @@ test("TRACK_INFO is rejected before draft-05", async () => {
 
 test("TrackInfo round-trips valid boundary metadata", async () => {
 	const info = new TrackInfo({
-		priority: 255,
+		priority: 127,
 		maxAge: Number.MAX_SAFE_INTEGER - 1,
 		timescale: Number.MAX_SAFE_INTEGER,
 	});
@@ -102,15 +121,15 @@ test("TrackInfo round-trips valid boundary metadata", async () => {
 		Version.DRAFT_05,
 	);
 	const got = await TrackInfo.decode(reader, Version.DRAFT_05);
-	expect(got.priority).toBe(255);
+	expect(got.priority).toBe(127);
 	expect(got.maxAge).toBe(Number.MAX_SAFE_INTEGER - 1);
 	expect(got.timescale).toBe(Timescale(Number.MAX_SAFE_INTEGER));
 });
 
 test("TrackInfo refuses invalid fields at construction", () => {
 	for (const fields of [
-		{ priority: 256, timescale: 1000 },
-		{ priority: -1, timescale: 1000 },
+		{ priority: 128, timescale: 1000 },
+		{ priority: -129, timescale: 1000 },
 		{ priority: 1.5, timescale: 1000 },
 		{ timescale: 0 },
 		{ timescale: -1 },
@@ -200,3 +219,14 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06]) {
 		}
 	});
 }
+
+test("refresh ratio survives lite-07 and disappears on legacy wires", async () => {
+	for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
+		for (const refresh of [undefined, 0, 3, 0xffff_ffff]) {
+			const info = new TrackInfo({ priority: 7, refresh });
+			const encoded = await bytes((w) => info.encode(w, version), version);
+			const decoded = await TrackInfo.decode(new Reader(undefined, encoded, version), version);
+			expect(decoded.refresh).toBe(version === Version.DRAFT_07 ? refresh : undefined);
+		}
+	}
+});

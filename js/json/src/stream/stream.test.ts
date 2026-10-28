@@ -1,5 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
+import { Milli } from "@moq/clock";
 import { Group, Error as NetError, Time, Track } from "@moq/net";
+import * as z from "@zod/mini";
 import { Consumer, Producer, Rolled } from "./index.ts";
 
 type Rec = { n: number };
@@ -83,9 +85,9 @@ test("a second group is reported while the first is still open", async () => {
 
 	// Ask for a replay window, so the first group is delivered rather than skipped by the
 	// subscriber's default max delay budget once a newer group exists.
-	const consumer = new Consumer<Rec>({ track: track.subscribe({ maxDelay: Time.Milli(30_000) }) });
+	const consumer = new Consumer<Rec>({ track: track.subscribe({ maxDelay: Milli(30_000) }) });
 	expect((await consumer.next())?.value).toEqual({ n: 0 });
-	await expect(consumer.next()).rejects.toThrow(Rolled);
+	await expect(consumer.next()).rejects.toBeInstanceOf(Rolled);
 
 	// Both mirrors are released. The read that lost the race would otherwise stay registered on the
 	// first group, keeping this consumer's subscription reachable after the caller drops it.
@@ -94,7 +96,36 @@ test("a second group is reported while the first is still open", async () => {
 
 	// Sticky: a later read must not report the rest of the first group as a whole log.
 	first.writeFrame({ payload: encode({ n: 2 }), timestamp: Time.Timestamp.now() });
-	await expect(consumer.next()).rejects.toThrow(Rolled);
+	await expect(consumer.next()).rejects.toBeInstanceOf(Rolled);
+});
+
+for (const compression of ["none", "deflate"] as const) {
+	test(`schema validation stays inside the read (compression=${compression})`, async () => {
+		const track = new Track.Producer("test").accept({});
+		const producer = new Producer<Rec>({ track, compression });
+		producer.append({ value: { n: 1 } });
+		producer.finish();
+
+		const schema = z.pipe(
+			z.object({ n: z.number() }),
+			z.transform((record) => {
+				expect(() => consumer.next()).toThrow("multiple calls to next not supported");
+				return record.n + 1;
+			}),
+		);
+		const consumer = new Consumer({ track: track.subscribe(), compression, schema });
+		expect(await consumer.next()).toEqual({ value: 2, at: undefined });
+		expect(await consumer.next()).toBeUndefined();
+	});
+}
+
+test("a failed track preserves its error", async () => {
+	const track = new Track.Producer("test");
+	const consumer = new Consumer({ track: track.subscribe() });
+	const next = consumer.next();
+	const failure = new Error("source failed");
+	track.abort(failure);
+	await expect(next).rejects.toBe(failure);
 });
 
 test("a second concurrent read is refused rather than served the first one's group", async () => {
@@ -194,6 +225,18 @@ for (const compression of [false, true]) {
 		expect(await drain(track.subscribe(), compression)).toEqual([0, 1]);
 	});
 }
+
+// A compressed record is charged its plaintext, since that is what a reader's window inflates: two
+// records that each fit, and deflate to almost nothing, still overflow the budget together.
+test("a compressed log is charged its inflated size", async () => {
+	const track = new Track.Producer("test");
+	const producer = new Producer<{ n: number; pad: string }>({ track, compression: "deflate" });
+	const pad = "x".repeat(Group.MAX_GROUP_CACHE_BYTES / 2);
+	producer.append({ value: { n: 0, pad } });
+	expect(() => producer.append({ value: { n: 1, pad } })).toThrow(NetError.GroupTooLarge);
+	producer.finish();
+	expect(await drain(track.subscribe(), true)).toEqual([0]);
+});
 
 // The budget covers the whole log, so once its frames are spent every append is refused, and the log
 // written so far still finishes cleanly and reads back whole.

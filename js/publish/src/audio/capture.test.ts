@@ -1,7 +1,7 @@
 import { expect, mock, spyOn, test } from "bun:test";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
-import { Baseline } from "../jitter";
+import { Order } from "../order";
 
 // The capture pulls its processor in as a `?worklet` blob URL, which the bun test loader can't
 // resolve. Stub it so the module imports; the value is only ever passed to our fake addModule.
@@ -563,7 +563,7 @@ test("a failed encoder stays failed until the capture source changes", async () 
 		close: () => {},
 	};
 	const encoder = new Encoder("audio", {
-		broadcast: { audio: () => rendition, baseline: new Baseline() } as never,
+		broadcast: { audio: () => rendition, order: new Order() } as never,
 		capture,
 		enabled,
 	});
@@ -611,6 +611,7 @@ test("a failed encoder stays failed until the capture source changes", async () 
 	} finally {
 		encoder.close();
 		capture.close();
+		track.finish();
 		track.close();
 		await settle();
 		error.mockRestore();

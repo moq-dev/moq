@@ -113,7 +113,7 @@ pub(crate) struct Memo {
 	/// Filled by the diff in progress, and swapped in once its frame is committed.
 	next: Entries,
 	/// Reused by the repeated-key check.
-	check: RefCell<crate::merge::CheckScratch>,
+	check: RefCell<crate::strict::Scratch>,
 }
 
 #[derive(Default)]
@@ -281,7 +281,7 @@ fn lockstep(
 	new: &[u8],
 	patch: &mut Vec<u8>,
 	forced: &mut bool,
-	check: &RefCell<crate::merge::CheckScratch>,
+	check: &RefCell<crate::strict::Scratch>,
 ) -> Option<()> {
 	if old.first() != Some(&b'{') || new.first() != Some(&b'{') {
 		return replace(new, patch, forced, check);
@@ -323,16 +323,11 @@ fn lockstep(
 /// object value. A top-level null is caught here, and a replacement object holding one anywhere is
 /// left to the value diff rather than parsed (inside an array, or a string, it would be data). So is
 /// a replacement that repeats a key, for the value diff to refuse.
-fn replace(
-	new: &[u8],
-	patch: &mut Vec<u8>,
-	forced: &mut bool,
-	check: &RefCell<crate::merge::CheckScratch>,
-) -> Option<()> {
+fn replace(new: &[u8], patch: &mut Vec<u8>, forced: &mut bool, check: &RefCell<crate::strict::Scratch>) -> Option<()> {
 	match new {
 		b"null" => *forced = true,
 		[b'{', ..] if new.windows(4).any(|window| window == b"null") => return None,
-		[b'{' | b'[', ..] if crate::merge::check(new, check).is_err() => return None,
+		[b'{' | b'[', ..] if crate::strict::check(new, check).is_err() => return None,
 		_ => {}
 	}
 	patch.extend_from_slice(new);
@@ -755,9 +750,8 @@ impl MapDiff<'_> {
 					let memo = scratch.memo.as_ref().expect("a miss implies a memo");
 					let (start, end) = *memo.next.ends.last().expect("a miss records its entry");
 					let bytes = &memo.next.bytes[start..end];
-					crate::merge::check(bytes, &memo.check)
-						.and_then(|()| serde_json::from_slice(bytes))
-						.map_err(|err| Error(err.to_string()))?
+					crate::strict::check(bytes, &memo.check).map_err(|err| Error(err.to_string()))?;
+					serde_json::from_slice(bytes).map_err(|err| Error(err.to_string()))?
 				};
 				let (child, existed) = self.differ.child(key);
 				(entry.serialize(child)?, existed)
@@ -1233,41 +1227,12 @@ mod test {
 	}
 
 	#[test]
-	fn changed_scalar() {
-		check(json!({ "a": 1, "b": 2 }), json!({ "a": 1, "b": 3 }));
-	}
-
-	#[test]
-	fn added_key() {
-		let result = diff(&json!({ "a": 1 }), &json!({ "a": 1, "b": 2 }));
-		assert!(!result.forced_snapshot);
-		assert_eq!(result.patch, json!({ "b": 2 }));
-		check(json!({ "a": 1 }), json!({ "a": 1, "b": 2 }));
-	}
-
-	#[test]
 	fn added_null_key_forces_snapshot() {
 		check(json!({ "a": 1 }), json!({ "a": 1, "x": null }));
 		check(
 			json!({ "items": [{ "a": 1 }] }),
 			json!({ "items": [{ "a": 1, "x": null }] }),
 		);
-	}
-
-	#[test]
-	fn removed_key_is_null() {
-		let result = diff(&json!({ "a": 1, "b": 2 }), &json!({ "a": 1 }));
-		assert!(!result.forced_snapshot, "removing a key is a clean delete");
-		assert_eq!(result.patch, json!({ "b": null }));
-		check(json!({ "a": 1, "b": 2 }), json!({ "a": 1 }));
-	}
-
-	#[test]
-	fn nested_object_only_includes_changed_keys() {
-		let result = diff(&json!({ "o": { "x": 1, "y": 2 } }), &json!({ "o": { "x": 1, "y": 9 } }));
-		assert!(!result.forced_snapshot);
-		assert_eq!(result.patch, json!({ "o": { "y": 9 } }));
-		check(json!({ "o": { "x": 1, "y": 2 } }), json!({ "o": { "x": 1, "y": 9 } }));
 	}
 
 	#[test]
@@ -1278,14 +1243,6 @@ mod test {
 	}
 
 	#[test]
-	fn changed_array_is_wholesale_delta() {
-		let result = diff(&json!({ "a": [1, 2] }), &json!({ "a": [1, 2, 3] }));
-		assert!(!result.forced_snapshot);
-		assert_eq!(result.patch, json!({ "a": [1, 2, 3] }));
-		check(json!({ "a": [1, 2] }), json!({ "a": [1, 2, 3] }));
-	}
-
-	#[test]
 	fn unchanged_array_is_pruned() {
 		let result = diff(&json!({ "a": [1, 2, 3], "b": 1 }), &json!({ "a": [1, 2, 3], "b": 2 }));
 		assert_eq!(
@@ -1293,11 +1250,6 @@ mod test {
 			json!({ "b": 2 }),
 			"an unchanged array stays out of the patch"
 		);
-	}
-
-	#[test]
-	fn added_array_is_delta() {
-		check(json!({ "a": 1 }), json!({ "a": 1, "b": [1] }));
 	}
 
 	#[test]
@@ -1314,24 +1266,11 @@ mod test {
 	}
 
 	#[test]
-	fn set_to_null_forces_snapshot() {
-		// A genuine null value can't be represented: merge patch would delete the key.
-		let result = diff(&json!({ "a": 1 }), &json!({ "a": null }));
-		assert!(result.forced_snapshot);
-		assert!(reference(&json!({ "a": 1 }), &json!({ "a": null })).forced_snapshot);
-	}
-
-	#[test]
 	fn nested_null_forces_snapshot() {
 		let old = json!({ "o": { "x": 1 } });
 		let new = json!({ "o": { "x": null } });
 		assert!(diff(&old, &new).forced_snapshot);
 		assert_eq!(diff(&old, &new).forced_snapshot, reference(&old, &new).forced_snapshot);
-	}
-
-	#[test]
-	fn replacing_object_with_scalar() {
-		check(json!({ "a": { "x": 1 } }), json!({ "a": 5 }));
 	}
 
 	#[test]

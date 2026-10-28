@@ -40,13 +40,14 @@ public final class TrackConsumer: AsyncSequence, Sendable {
     }
 
     /// The publisher-side properties learned during subscription.
-    public func info() throws -> TrackInfo {
-        try ffi.info()
+    public func info() -> TrackInfo {
+        ffi.info()
     }
 
-    /// Change this subscriber's delivery preferences.
-    public func update(subscription: Subscription) {
-        ffi.update(subscription: subscription)
+    /// Change this subscriber's delivery preferences. Throws on a time anchor the track
+    /// can't serve.
+    public func update(subscription: Subscription) throws {
+        try ffi.update(subscription: subscription)
     }
 
     /// Cancel all current and future reads.
@@ -129,19 +130,15 @@ public final class TrackDemand: Sendable {
         ffi.name()
     }
 
-    /// Whether the track has at least one active consumer right now.
-    public var isUsed: Bool {
-        ffi.isUsed()
+    /// The group subscribers want next, or nil while nobody subscribes. A value past the
+    /// newest group asks for a new group now, typically a keyframe.
+    public var wanted: UInt64? {
+        ffi.wanted()
     }
 
-    /// Suspend until the track has at least one active consumer.
-    public func used() async throws {
-        try await ffi.used()
-    }
-
-    /// Suspend until the track has no active consumers.
-    public func unused() async throws {
-        try await ffi.unused()
+    /// Suspend until `wanted` changes and return it. The first call returns at once.
+    public func wantedChanged() async throws -> UInt64? {
+        try await ffi.wantedChanged()
     }
 }
 
@@ -165,8 +162,8 @@ public final class TrackProducer: Sendable {
     }
 
     /// Serve fetches for groups that are not currently cached.
-    public func dynamic() throws -> TrackDynamic {
-        TrackDynamic(try ffi.dynamic())
+    public func requests() throws -> TrackRequests {
+        TrackRequests(try ffi.requests())
     }
 
     /// Append a new group, returning a producer for its frames.

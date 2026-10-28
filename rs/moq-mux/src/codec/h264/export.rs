@@ -9,46 +9,17 @@
 //! With an avcC description, length prefixes become start codes and any out-of-band
 //! parameter sets precede keyframes. avc3 samples may carry all parameter sets inline.
 
-use std::task::{Poll, ready};
+use std::task::Poll;
 
 use bytes::Bytes;
-use hang::Catalog;
 use hang::catalog::{VideoCodecKind, VideoConfig};
 
 use crate::catalog::Stream;
 use crate::codec::annexb;
-use crate::container::ExportSource;
 
 /// Single-rendition H.264 Annex-B exporter.
 pub struct Export<S: Stream> {
-	source: crate::Source,
-	catalog: Option<S>,
-	max_delay: std::time::Duration,
-	track: Option<H264Track>,
-	/// The latest presentation time written. A switch to another rendition resumes at its first
-	/// keyframe past it: a new subscription starts at the rendition's latest group, which for
-	/// one re-enabled is the stale group it stopped on.
-	playhead: Option<std::time::Duration>,
-}
-
-struct H264Track {
-	name: String,
-	/// Snapshot of the catalog config we built `source` from. Cached so that
-	/// a catalog update which keeps the same rendition name but changes the
-	/// codec config (e.g. a new avcC) triggers a full rebuild instead of
-	/// silently reusing a stale `convert`.
-	config: VideoConfig,
-	source: ExportSource,
-	/// A decoder description supplies length-prefix size and any out-of-band parameter sets.
-	/// Without one, the payload is already Annex-B.
-	convert: Option<Convert>,
-	/// Frames are dropped until a keyframe past the playhead.
-	joining: bool,
-}
-
-struct Convert {
-	length_size: usize,
-	keyframe_prefix: Bytes,
+	inner: annexb::Export<S, Codec>,
 }
 
 impl<S: Stream> Export<S> {
@@ -60,11 +31,7 @@ impl<S: Stream> Export<S> {
 	/// in a snapshot, the first by BTreeMap order wins and a warning is logged.
 	pub fn new(source: crate::Source, catalog: S) -> Self {
 		Self {
-			source,
-			catalog: Some(catalog),
-			max_delay: std::time::Duration::ZERO,
-			track: None,
-			playhead: None,
+			inner: annexb::Export::new(source, catalog),
 		}
 	}
 
@@ -74,100 +41,28 @@ impl<S: Stream> Export<S> {
 	/// Defaults to
 	/// [`std::time::Duration::ZERO`](std::time::Duration::ZERO) (skip aggressively).
 	pub fn with_max_delay(mut self, max_delay: std::time::Duration) -> Self {
-		self.max_delay = max_delay;
+		self.inner = self.inner.with_max_delay(max_delay);
 		self
 	}
 
+	/// Wait for the next Annex B access unit, or `None` once the export ends.
 	pub async fn next(&mut self) -> crate::Result<Option<Bytes>> {
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 
+	/// Poll for the next Annex B access unit, or `None` once the export ends.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Bytes>>> {
-		while let Some(catalog) = self.catalog.as_mut() {
-			match catalog.poll_next(waiter)? {
-				Poll::Ready(Some(snapshot)) => self.update_catalog(&snapshot.media())?,
-				Poll::Ready(None) => {
-					self.catalog = None;
-					break;
-				}
-				Poll::Pending => break,
-			}
-		}
-
-		loop {
-			let Some(track) = self.track.as_mut() else {
-				if self.catalog.is_none() {
-					return Poll::Ready(Ok(None));
-				}
-				return Poll::Pending;
-			};
-
-			match ready!(track.source.poll_read(waiter))? {
-				Some(frame) => {
-					let timestamp = std::time::Duration::from(frame.timestamp);
-					if track.joining {
-						if !frame.keyframe || self.playhead.is_some_and(|playhead| timestamp <= playhead) {
-							continue;
-						}
-						track.joining = false;
-					}
-					self.playhead = self.playhead.max(Some(timestamp));
-					let bytes = match &track.convert {
-						None => frame.payload,
-						Some(convert) => {
-							let prefix = frame.keyframe.then(|| convert.keyframe_prefix.as_ref());
-							annexb::from_length_prefixed(&frame.payload, convert.length_size, prefix)?
-						}
-					};
-					if bytes.is_empty() {
-						continue;
-					}
-					return Poll::Ready(Ok(Some(bytes)));
-				}
-				None => {
-					self.track = None;
-					continue;
-				}
-			}
-		}
+		self.inner.poll_next(waiter)
 	}
+}
 
-	fn update_catalog(&mut self, catalog: &Catalog) -> crate::Result<()> {
-		let mut catalog = catalog.clone();
-		self.source.retain_selectable(&mut catalog);
+struct Codec;
 
-		let picked = catalog
-			.video
-			.renditions
-			.iter()
-			.filter(|(_, c)| c.codec.kind() == VideoCodecKind::H264)
-			.collect::<Vec<_>>();
+impl annexb::Codec for Codec {
+	const KIND: VideoCodecKind = VideoCodecKind::H264;
 
-		if picked.len() > 1 {
-			tracing::warn!(
-				count = picked.len(),
-				"multiple H.264 renditions in catalog snapshot; using the first by name. \
-				 Narrow with catalog::Select to pick one explicitly."
-			);
-		}
-
-		let Some((name, config)) = picked.into_iter().next() else {
-			self.track = None;
-			return Ok(());
-		};
-
-		if self
-			.track
-			.as_ref()
-			.is_some_and(|t| t.name == *name && t.config == *config)
-		{
-			return Ok(());
-		}
-
-		let Some(source) = ExportSource::for_video_raw(&self.source, name, config, self.max_delay)? else {
-			unreachable!("invalid broadcast references were removed above");
-		};
-		let convert = match config.description.as_ref().filter(|d| !d.is_empty()) {
+	fn convert(name: &str, config: &VideoConfig) -> crate::Result<Option<annexb::Convert>> {
+		Ok(match config.description.as_ref().filter(|d| !d.is_empty()) {
 			None => None,
 			Some(avcc) => {
 				let params = super::Avcc::parse(avcc)?;
@@ -175,29 +70,19 @@ impl<S: Stream> Export<S> {
 					&& (params.sps.is_empty() || params.pps.is_empty())
 				{
 					return Err(super::Error::MissingParamSets {
-						name: name.clone(),
+						name: name.to_string(),
 						sps: params.sps.len(),
 						pps: params.pps.len(),
 					}
 					.into());
 				}
 				let prefix = annexb::build_prefix(params.sps.iter().chain(params.pps.iter()));
-				Some(Convert {
+				Some(annexb::Convert {
 					length_size: params.length_size,
 					keyframe_prefix: prefix,
 				})
 			}
-		};
-
-		self.track = Some(H264Track {
-			name: name.clone(),
-			config: config.clone(),
-			source,
-			convert,
-			joining: true,
-		});
-
-		Ok(())
+		})
 	}
 }
 
@@ -271,6 +156,51 @@ mod tests {
 	/// Regression: when source is avc1 (length-prefixed + out-of-band avcC),
 	/// the exporter must inject SPS+PPS before every keyframe and convert
 	/// length prefixes to start codes for every frame.
+	#[tokio::test(start_paused = true)]
+	async fn a_moved_rendition_uses_its_new_parameter_sets() {
+		use crate::container::test_util::{Moving, marked_frame};
+		let mut moving = Moving::new();
+		let first = avc1_catalog(
+			"main",
+			build_avcc(crate::container::test_util::SPS, crate::container::test_util::PPS),
+		);
+		let second = avc1_catalog("main", build_avcc(Moving::MAIN_SPS, crate::container::test_util::PPS));
+		let mut first = first.video.renditions["main"].clone();
+		first.track = Some("a".into());
+		moving
+			.catalog
+			.modify()
+			.unwrap()
+			.video
+			.renditions
+			.insert("main".into(), first.clone());
+		let mut export = Export::new(moving.source().await, moving.catalog_stream().await);
+		moving.a.write(marked_frame(0, 0xa1)).unwrap();
+		let first_prefix = <Codec as annexb::Codec>::convert("main", &first)
+			.unwrap()
+			.unwrap()
+			.keyframe_prefix;
+		assert!(next(&mut export).await.starts_with(&first_prefix));
+		let mut second = second.video.renditions["main"].clone();
+		second.track = Some("b".into());
+		let second_prefix = <Codec as annexb::Codec>::convert("main", &second)
+			.unwrap()
+			.unwrap()
+			.keyframe_prefix;
+		assert_ne!(first_prefix, second_prefix);
+		moving
+			.catalog
+			.modify()
+			.unwrap()
+			.video
+			.renditions
+			.insert("main".into(), second);
+		moving.b.write(marked_frame(30, 0xb1)).unwrap();
+		let frame = next(&mut export).await;
+		assert!(frame.starts_with(&second_prefix));
+		assert!(!frame.starts_with(&first_prefix));
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn avc1_export_injects_sps_pps_on_keyframes() {
 		let sps: &[u8] = &[

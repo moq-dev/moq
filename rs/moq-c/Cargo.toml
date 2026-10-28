@@ -16,6 +16,11 @@ categories = ["multimedia", "network-programming", "web-programming"]
 name = "moq"
 crate-type = ["staticlib"]
 
+[features]
+# The OpenH264 software H.264 fallback (vendored C++). Off for development and
+# linting; `build.sh`, the nix package, and CI's tests turn it on.
+openh264 = ["moq-video/openh264"]
+
 [dependencies]
 anyhow = { workspace = true, features = ["backtrace"] }
 bytes = { workspace = true }
@@ -26,11 +31,11 @@ moq-audio = { workspace = true, features = ["aac"] }
 moq-json = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
-moq-tokio = { workspace = true, features = ["noq", "aws-lc-rs", "websocket", "tcp", "uds"] }
-# Select the OpenH264 fallback plus NVIDIA and VAAPI hardware codecs explicitly
-# because workspace defaults are off. The hardware backends dlopen their driver;
-# `vaapi` also runs bindgen, so Linux builds need libclang.
-moq-video = { workspace = true, features = ["nvidia", "openh264", "vaapi"] }
+moq-tokio = { workspace = true, features = ["quic", "aws-lc-rs", "websocket", "tcp", "uds"] }
+# Select the NVIDIA and VAAPI hardware codecs explicitly because workspace
+# defaults are off. The hardware backends dlopen their driver; `vaapi` also runs
+# bindgen, so Linux builds need libclang. The software fallback is `openh264`.
+moq-video = { workspace = true, features = ["nvidia", "vaapi"] }
 # Blocking on `encode::Sink` from the synchronous C entry points; see
 # `video::block_on` for why not a tokio helper.
 pollster = { workspace = true }
@@ -44,4 +49,14 @@ url = { workspace = true }
 cbindgen = "0.29"
 
 [dev-dependencies]
+moq-clock = { path = "../moq-clock" }
 moq-loc = { path = "../moq-loc" }
+# The tests encode with OpenH264, the one encoder a GPU-less host has, so they
+# turn it on without the `openh264` feature.
+moq-video = { path = "../moq-video", features = ["openh264"] }
+# Runs the tests that need a variable set or unset in a child process given it.
+test-env = { path = "../test-env" }
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

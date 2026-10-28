@@ -5,6 +5,8 @@
  *
  * @module
  */
+
+import { Milli, Nano } from "@moq/clock";
 import { Effect, Signal } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
 import type MoqWatch from "../element";
@@ -20,7 +22,7 @@ import type { Tab, UiState } from "./state";
 import styles from "./styles/index.css?inline";
 
 // How long the chrome lingers after the pointer stops moving (while playing).
-const HIDE_MS = 2800;
+const HIDE = Nano.fromMilli(Milli(2800));
 
 // Whether `el` is the element the browser has actually put fullscreen. Unlike
 // `document.fullscreenElement`, this is not retargeted to the shadow host. `matches` throws on a
@@ -36,6 +38,7 @@ function matchesFullscreen(el: HTMLElement): boolean {
 	return false;
 }
 
+/** The `<moq-watch-ui>` element: playback controls around the `<moq-watch>` it wraps. */
 export default class MoqWatchUi extends HTMLElement {
 	#signals?: Effect;
 	#root: ShadowRoot;
@@ -53,6 +56,7 @@ export default class MoqWatchUi extends HTMLElement {
 		this.#observer = new MutationObserver(() => this.#updateWatch());
 	}
 
+	/** Called by the browser when the element joins a document. */
 	connectedCallback() {
 		this.#updateWatch();
 		this.#observer.observe(this, { childList: true });
@@ -62,6 +66,7 @@ export default class MoqWatchUi extends HTMLElement {
 		signals.run(this.#render.bind(this));
 	}
 
+	/** Called by the browser when the element leaves its document. */
 	disconnectedCallback() {
 		this.#observer.disconnect();
 		this.#signals?.close();
@@ -88,7 +93,7 @@ export default class MoqWatchUi extends HTMLElement {
 		// The slotted <moq-watch> (canvas/video) sits at the base of the stack.
 		player.appendChild(DOM.create("slot"));
 
-		// Center affordances: play prompt + buffering spinner + offline / refused / unsupported-codec / hidden notices.
+		// Center affordances: play prompt + buffering spinner + offline / refused / unsupported / hidden notices.
 		const center = DOM.create("div", { className: "center" });
 		center.append(
 			centerPlay(effect, watch),
@@ -200,7 +205,7 @@ export default class MoqWatchUi extends HTMLElement {
 			e.get(activity);
 			state.chrome.set(true);
 			if (isPinned) return;
-			e.timer(() => state.chrome.set(false), HIDE_MS);
+			e.timer(() => state.chrome.set(false), HIDE);
 		});
 
 		effect.event(this, "pointerleave", () => {

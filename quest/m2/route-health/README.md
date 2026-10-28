@@ -16,6 +16,12 @@ Decided with the maintainer, 2026-10-13:
 - Ranked in m2, after clustering stability, federation, and P2P. Health
   design must first reproduce a stall that transport failure and ordinary
   reconnect do not recover, or the line is abandoned.
+- A route that dies without a close counts as such a stall until the QUIC
+  idle timeout fires (decided 2026-10-20, from
+  [#6062](https://github.com/moq-dev/moq/issues/6062)): a killed relay
+  starves a same-epoch subscription until the QUIC idle timeout fires; since
+  [#6183](https://github.com/moq-dev/moq/pull/6183) resume recovers only what
+  max age still holds, so a max age below the timeout still loses media.
 
 - Application-assigned connection priority remains ahead of additive cost.
   Deterministic hashing still chooses distinct equal routes; a new connection
@@ -62,7 +68,7 @@ third route, simultaneous relay decisions,
 loss/reordering, cancelled demand, and stale/replayed progress. Wire these into
 CI. Report actual media overlap, control traffic, wakes, switches, and memory
 across tracks, candidate connections, and downstream readers. Extend the
-[P2P harness](/quest/m1/p2p/harness.md) with real browser/native cases:
+[P2P harness](/quest/m2/p2p/harness.md) with real browser/native cases:
 metadata-only standby, stalled payload with advancing control, same-epoch
 promotion with bounded overlap, verified failback, and epochless exclusion.
 Add a route-health section to the routing concept page.
@@ -77,6 +83,5 @@ Add a route-health section to the routing concept page.
 ## Related
 
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - reachability and advertisement freshness, distinct from delivery health
-- [Live largest location](/quest/m1/largest.md) - reported source position is not delivered payload
 - [Link quality](/quest/m2/link-quality.md) - optional metric repricing, not this local delivery-health decision
 - [Routing guide](/quest/m1/routing-guide.md) - priorities, health, and epoch-only continuity explained together

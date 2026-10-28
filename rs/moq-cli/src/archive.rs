@@ -1,109 +1,246 @@
-//! Archive endpoints: record one broadcast into an object store (export), or
-//! republish a recording from one (import), through `moq-archive`.
+//! Archive endpoints: record every broadcast announced under a prefix into an object store
+//! (export), or republish one recorded broadcast from one (import), through `moq-archive`.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
 use hang::moq_net;
-use moq_archive::writer::{Control, Retention};
-use moq_mux::catalog::{CatalogFormat, Stream as _};
 use object_store::ObjectStore;
+use object_store::path::{Path, PathPart};
 use url::Url;
 
 use crate::moq::notify_ready;
 
-/// How long expired objects outlive the timeline that dropped them, unless
-/// `--retention-grace` says otherwise.
+/// How long a superseded object outlives its DVR window, unless `--retention-grace` says otherwise.
 const GRACE: Duration = Duration::from_secs(30);
 
 /// `export archive` args.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct ExportArgs {
 	/// Where to record: `file:///dir`, `s3://bucket/prefix`, `gs://bucket/prefix`, or `az://container/prefix`.
+	/// Each broadcast records under `<broadcast>/@<epoch>` beneath it.
 	pub store: Url,
 
-	/// Keep only this much recent content (a DVR), deleting older records. Unset keeps everything.
+	/// Keep only this much recent content (a DVR), deleting older objects. Unset keeps everything.
 	#[usage(long)]
-	pub retention: Option<crate::duration::Duration>,
+	pub retention: Option<moq_tokio::cli::Duration>,
 
-	/// How long expired objects outlive the timeline that dropped them, so readers can finish
-	/// their downloads. Defaults to 30s; needs `--retention`.
+	/// How long a deleted object outlives the retention, so readers can finish their downloads.
+	/// Defaults to 30s; needs `--retention`.
 	#[usage(long)]
-	pub retention_grace: Option<crate::duration::Duration>,
+	pub retention_grace: Option<moq_tokio::cli::Duration>,
 }
 
 /// `import archive` args.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct ImportArgs {
-	/// The recording to replay, as `export archive` wrote it.
+	/// One recorded broadcast: the `<broadcast>/@<epoch>` key prefix `export archive` wrote.
 	pub store: Url,
 
-	/// Keep following a recording that is still growing, checking for new segments at this
-	/// interval. Unset replays what is stored now and ends the timeline there.
+	/// How often a recording still growing is checked for new objects and tracks. Defaults to 1s.
 	#[usage(long)]
-	pub follow: Option<crate::duration::Duration>,
+	pub refresh: Option<moq_tokio::cli::Duration>,
 }
 
-/// Record the broadcast `name` into `args.store` until the broadcast ends.
+/// One publisher instance being recorded: its path, and its epoch when its route has one.
+type Instance = (moq_net::Path, Option<moq_net::Epoch>);
+
+/// Record every broadcast announced at or under `prefix` into `args.store`, each publisher
+/// instance under `<path>/@<epoch>`, until the announcements end.
 ///
-/// Reads the broadcast's own catalog: every track gets its own timeline, cut at group boundaries
-/// between 2s and 10s, while the catalog and data tracks use a zero minimum and record each group
-/// as it finishes.
-pub async fn export(
-	origin: moq_net::origin::Consumer,
-	name: String,
-	format: CatalogFormat,
-	args: ExportArgs,
-) -> anyhow::Result<()> {
-	let retention = match (args.retention, args.retention_grace) {
-		(Some(window), grace) => Some(Retention::new(
-			window.into_std(),
-			grace.map_or(GRACE, crate::duration::Duration::into_std),
+/// A route without an epoch names no instance, so each one it announces records under an epoch
+/// minted here: a restarted export never resumes it, and never stitches two instances together.
+pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: ExportArgs) -> anyhow::Result<()> {
+	let dvr = match (args.retention, args.retention_grace) {
+		(Some(window), grace) => Some(moq_archive::producer::Dvr::new(
+			window.into(),
+			grace.map_or(GRACE, Into::into),
 		)),
 		(None, Some(_)) => anyhow::bail!("`--retention-grace` needs `--retention`"),
 		(None, None) => None,
 	};
-	let catalog_track = catalog_track(format)?;
-	let store = open(&args.store)?;
+	let config = moq_archive::producer::Config::default().with_dvr(dvr);
+	let (store, root) = open_store(&args.store)?;
 
-	let broadcast = origin
-		.routed_broadcast(&name)
-		.await
-		.with_context(|| format!("broadcast `{name}` is unavailable"))?;
-	let config = moq_archive::writer::Config::default().with_retention(retention);
-	let writer = moq_archive::Writer::new(store, broadcast.clone(), config)
-		.await
-		.with_context(|| format!("failed to start recording into {}", args.store))?;
-	let control = writer.control();
-	control.track(catalog_track, sparse()).await?;
-	let catalog = moq_mux::catalog::Consumer::<()>::new(&broadcast, format).await?;
+	// Announcements leave hidden routes out unless asked, and a prefix naming one asks.
+	let hidden = prefix.split('/').any(|segment| segment.starts_with('.'));
+	let prefix = moq_net::Path::new(&prefix)?;
+	let mut announced = origin.clone().with_hidden(hidden).announced();
+	let mut recordings = tokio::task::JoinSet::new();
+	let mut running = Running::default();
+	let claims = Claims::default();
 
-	tracing::info!(%name, store = %args.store, "recording");
+	tracing::info!(%prefix, store = %args.store, "recording");
 	notify_ready();
 
-	// The writer decides when the recording is over; the catalog only feeds it tracks.
-	let run = writer.run();
-	tokio::pin!(run);
-	tokio::select! {
-		result = &mut run => result.context("recording failed"),
-		Err(err) = enroll(control.clone(), catalog) => {
-			// Store what already arrived before failing, so the recording stays readable.
-			control.stop()?;
-			if let Err(stopped) = run.await {
-				tracing::warn!(%stopped, "recording failed while stopping");
+	loop {
+		let instance = tokio::select! {
+			event = announced.next() => {
+				let announce = match event.context("announcements ended")? {
+					// Another publisher instance, or the same one announced again.
+					moq_net::announce::Event::Start(announce) | moq_net::announce::Event::Restart(announce) => announce,
+					_ => continue,
+				};
+				if !announce.prefix.has_prefix(&prefix) {
+					continue;
+				}
+				let instance: Instance = (announce.prefix, announce.route.epoch);
+				if !running.start(&instance) {
+					continue;
+				}
+				instance
 			}
-			Err(err)
+			Some(done) = recordings.join_next() => {
+				let (instance, result) = done.context("recording panicked")?;
+				result?;
+				if !running.done(&instance) {
+					continue;
+				}
+				instance
+			}
+		};
+		let key = key(&root, &instance)?;
+		let store = moq_archive::Store::new(store.clone(), key);
+		// Requested now, so an announcement resolves the instance serving it when read, not
+		// whichever one serves by the time its task runs.
+		let request = origin.request_broadcast(&instance.0, instance.1.clone());
+		recordings.spawn(record(request, instance, store, config.clone(), claims.clone()));
+	}
+}
+
+/// The broadcasts being recorded. Announcements read after another instance took over all
+/// resolve that one, so it is recorded once.
+#[derive(Clone, Default)]
+struct Claims(Arc<std::sync::Mutex<HashMap<moq_net::Path, Vec<moq_net::broadcast::Consumer>>>>);
+
+impl Claims {
+	/// Claim `broadcast` for recording, or `None` when it is recorded already.
+	fn claim(&self, path: &moq_net::Path, broadcast: &moq_net::broadcast::Consumer) -> Option<Claim> {
+		let mut claims = self.0.lock().unwrap();
+		let claimed = claims.entry(path.clone()).or_default();
+		if claimed.iter().any(|other| other.is_clone(broadcast)) {
+			return None;
+		}
+		claimed.push(broadcast.clone());
+		Some(Claim {
+			claims: self.clone(),
+			path: path.clone(),
+			broadcast: broadcast.clone(),
+		})
+	}
+}
+
+/// A broadcast being recorded, released on drop.
+struct Claim {
+	claims: Claims,
+	path: moq_net::Path,
+	broadcast: moq_net::broadcast::Consumer,
+}
+
+impl Drop for Claim {
+	fn drop(&mut self) {
+		let mut claims = self.claims.0.lock().unwrap();
+		if let Some(claimed) = claims.get_mut(&self.path) {
+			claimed.retain(|other| !other.is_clone(&self.broadcast));
+			if claimed.is_empty() {
+				claims.remove(&self.path);
+			}
 		}
 	}
 }
 
+/// The epoch-pinned instances recording, so each records under its key once at a time, and again
+/// when it was announced anew meanwhile.
+#[derive(Default)]
+struct Running(HashMap<Instance, bool>);
+
+impl Running {
+	/// Whether to record `instance` now that it was announced. An epochless one is a new instance
+	/// each time, under a fresh key.
+	fn start(&mut self, instance: &Instance) -> bool {
+		if instance.1.is_none() {
+			return true;
+		}
+		match self.0.get_mut(instance) {
+			Some(again) => {
+				*again = true;
+				false
+			}
+			None => {
+				self.0.insert(instance.clone(), false);
+				true
+			}
+		}
+	}
+
+	/// Whether to record `instance` again, now that its recording ended.
+	fn done(&mut self, instance: &Instance) -> bool {
+		match self.0.get_mut(instance) {
+			Some(again) if *again => {
+				*again = false;
+				true
+			}
+			_ => {
+				self.0.remove(instance);
+				false
+			}
+		}
+	}
+}
+
+/// Record one publisher instance until its broadcast ends, unless another recording has it.
+async fn record(
+	request: impl Future<Output = Result<moq_net::broadcast::Consumer, moq_net::Error>>,
+	instance: Instance,
+	store: moq_archive::Store<Arc<dyn ObjectStore>>,
+	config: moq_archive::producer::Config,
+	claims: Claims,
+) -> (Instance, anyhow::Result<()>) {
+	let result = async {
+		let path = &instance.0;
+		let broadcast = request
+			.await
+			.with_context(|| format!("broadcast `{path}` is unavailable"))?;
+		let Some(_claim) = claims.claim(path, &broadcast) else {
+			return Ok(());
+		};
+		tracing::info!(%path, key = %store.prefix(), "recording broadcast");
+		moq_archive::Producer::new(store, broadcast, config)
+			.run()
+			.await
+			.with_context(|| format!("recording `{path}` failed"))
+	}
+	.await;
+	(instance, result)
+}
+
+/// The key prefix one instance records under: its path's segments, then `@<epoch>`.
+///
+/// A path segment's key never starts with `@`, since a leading one is percent-encoded like `%`
+/// always is, so no instance's prefix lies inside another's, whatever paths a publisher picks.
+fn key(root: &Path, (path, epoch): &Instance) -> anyhow::Result<Path> {
+	let epoch = epoch.clone().unwrap_or_else(moq_net::Epoch::mint);
+	let mut key = root.clone();
+	for segment in path.as_str().split('/').filter(|segment| !segment.is_empty()) {
+		let part = PathPart::from(segment);
+		key = match part.as_ref().strip_prefix('@') {
+			Some(rest) => key.join(PathPart::parse(&format!("%40{rest}"))?),
+			None => key.join(part),
+		};
+	}
+	let epoch = format!("@{epoch}");
+	Ok(key.join(PathPart::parse(&epoch).context("an epoch is one key segment")?))
+}
+
 /// Republish the recording at `args.store` as the broadcast `name`, announced under `epoch`.
 ///
-/// Each track's timeline replays as a live track and every other track's groups are served on
-/// request.
+/// Every stored track is served with its original groups: each live from its newest stored
+/// group, and history on request. A recording still growing is followed until its producer
+/// marks it complete.
 pub async fn import(
 	origin: moq_net::origin::Producer,
 	name: String,
@@ -111,407 +248,279 @@ pub async fn import(
 	epoch: moq_net::Epoch,
 ) -> anyhow::Result<()> {
 	let store = open(&args.store)?;
-	// A second handle lists the recording's timelines while the reader owns the first.
-	let listing = open(&args.store)?;
+	let mut config = moq_archive::consumer::Config::default();
+	if let Some(refresh) = args.refresh {
+		config = config.with_refresh(refresh.into());
+	}
 	let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
-	let mut timelines = store
-		.timelines()
-		.await
-		.with_context(|| format!("failed to list the recording at {}", args.store))?;
-	let config = moq_archive::reader::Config::new(timelines.clone());
-	let mut reader = moq_archive::Reader::open(store, &broadcast, config)
+	let consumer = moq_archive::Consumer::open(store, broadcast.broadcast().clone(), config)
 		.await
 		.with_context(|| format!("no readable recording at {}", args.store))?;
-	let serve = reader.serve();
 	broadcast
 		.announce(moq_net::origin::Route::default().with_epoch(epoch))
 		.context("failed to announce broadcast")?;
 
 	tracing::info!(%name, store = %args.store, "replaying");
 	notify_ready();
-
-	// The store holds no end marker, so only the caller can say the recording is complete.
-	let Some(interval) = args.follow.map(crate::duration::Duration::into_std) else {
-		reader.finish()?;
-		serve.await;
-		return Ok(());
-	};
-	let refresh = async {
-		loop {
-			tokio::time::sleep(interval).await;
-			// A rendition the recording enrolled after the replay started.
-			for (track, timeline) in listing.timelines().await? {
-				if let std::collections::btree_map::Entry::Vacant(entry) = timelines.entry(track) {
-					reader.track(entry.key(), &timeline).await?;
-					entry.insert(timeline);
-				}
-			}
-			reader.refresh().await?;
-		}
-	};
-	tokio::select! {
-		() = serve => Ok(()),
-		result = refresh => result,
-	}
+	consumer
+		.run()
+		.await
+		.with_context(|| format!("replaying {} failed", args.store))
 }
 
 /// Open the object store `url` names, taking cloud credentials from the `AWS_*`, `GOOGLE_*`,
-/// and `AZURE_*` environment variables.
-fn open(url: &Url) -> anyhow::Result<moq_archive::Store<Box<dyn ObjectStore>>> {
+/// and `AZURE_*` environment variables, with the prefix the URL names.
+fn open_store(url: &Url) -> anyhow::Result<(Arc<dyn ObjectStore>, Path)> {
 	let credentials = std::env::vars_os()
 		.filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
 		.filter(|(key, _)| ["AWS_", "GOOGLE_", "AZURE_"].iter().any(|cloud| key.starts_with(cloud)));
 	let (store, prefix) =
 		object_store::parse_url_opts(url, credentials).with_context(|| format!("unsupported archive store {url}"))?;
+	Ok((Arc::from(store), prefix))
+}
+
+/// [`open_store`] as one recorded broadcast.
+fn open(url: &Url) -> anyhow::Result<moq_archive::Store<Arc<dyn ObjectStore>>> {
+	let (store, prefix) = open_store(url)?;
 	Ok(moq_archive::Store::new(store, prefix))
 }
 
-/// How sparse data, such as a catalog, is cut: every group is its own record.
-fn sparse() -> moq_mux::timeline::Config {
-	moq_mux::timeline::Config::default().with_duration_min(Duration::ZERO)
-}
-
-/// The track carrying the catalog `format` reads.
-fn catalog_track(format: CatalogFormat) -> anyhow::Result<&'static str> {
-	Ok(match format {
-		CatalogFormat::Hang => hang::Catalog::DEFAULT_NAME,
-		CatalogFormat::HangZ => hang::Catalog::COMPRESSED_NAME,
-		CatalogFormat::Msf => moq_msf::DEFAULT_NAME,
-		other => anyhow::bail!("`export archive` cannot record a {other:?} catalog"),
-	})
-}
-
-/// Enroll each track as the catalog lists it, until the catalog ends.
-async fn enroll<S: ObjectStore>(
-	control: Control<S>,
-	mut catalog: moq_mux::catalog::Consumer<()>,
-) -> anyhow::Result<()> {
-	let mut tracks = Tracks::default();
-	while let Some(snapshot) = catalog.next().await? {
-		for change in tracks.update(&snapshot)? {
-			match change {
-				Change::Media(name) => control.track(&name, moq_mux::timeline::Config::default()).await?,
-				Change::Sparse(name) => control.track(&name, sparse()).await?,
-				Change::Remove(name) => control.remove(&name)?,
-			}
-		}
-	}
-	Ok(())
-}
-
-/// A change to the recorded track set.
-#[derive(Debug, PartialEq, Eq)]
-enum Change {
-	/// Record a rendition, its records cut by duration.
-	Media(String),
-	/// Record a data track, each group its own record.
-	Sparse(String),
-	/// Stop recording a track the catalog dropped.
-	Remove(String),
-}
-
-/// The catalog tracks being recorded, diffed against each new snapshot.
-#[derive(Default)]
-struct Tracks {
-	/// Every name ever enrolled. The writer never takes a name back.
-	enrolled: HashSet<String>,
-	/// The names the latest snapshot listed.
-	listed: HashSet<String>,
-}
-
-impl Tracks {
-	/// The changes that bring the recording in line with `catalog`.
-	///
-	/// Refuses a track served from another broadcast, since an archive holds exactly one, and a
-	/// track that returns after the catalog dropped it, since the writer cannot resume one.
-	fn update(&mut self, catalog: &hang::Catalog) -> anyhow::Result<Vec<Change>> {
-		use hang::catalog::Reference;
-
-		// Recorded by track name, which is what the archive's timelines are keyed by.
-		fn entry<'a, C: Reference>(
-			(id, config): (&'a String, &'a C),
-			media: bool,
-		) -> (&'a str, Option<&'a moq_net::path::RelativeOwned>, bool) {
-			(config.track(id), config.broadcast(), media)
-		}
-		let video = catalog.video.renditions.iter().map(|e| entry(e, true));
-		let audio = catalog.audio.renditions.iter().map(|e| entry(e, true));
-		let text = catalog.text.renditions.iter().map(|e| entry(e, false));
-		let json = catalog.json.tracks.iter().map(|e| entry(e, false));
-		let binary = catalog.binary.tracks.iter().map(|e| entry(e, false));
-
-		let mut listed = HashSet::new();
-		let mut changes = Vec::new();
-		for (name, broadcast, media) in video.chain(audio).chain(text).chain(json).chain(binary) {
-			if let Some(broadcast) = broadcast {
-				anyhow::bail!(
-					"track `{name}` is served from broadcast `{broadcast}`; an archive records one broadcast"
-				);
-			}
-			if !listed.insert(name.to_string()) || self.listed.contains(name) {
-				continue;
-			}
-			anyhow::ensure!(
-				self.enrolled.insert(name.to_string()),
-				"track `{name}` returned to the catalog after it was dropped; the recording cannot resume it"
-			);
-			changes.push(match media {
-				true => Change::Media(name.to_string()),
-				false => Change::Sparse(name.to_string()),
-			});
-		}
-
-		let mut dropped: Vec<_> = self.listed.difference(&listed).cloned().collect();
-		dropped.sort();
-		changes.extend(dropped.into_iter().map(Change::Remove));
-		self.listed = listed;
-		Ok(changes)
-	}
-}
-
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 
-	use hang::catalog::{AudioCodec, AudioConfig, JsonConfig, Mode};
 	use moq_net::{Timescale, Timestamp, group, track};
 
-	fn audio() -> AudioConfig {
-		AudioConfig::new(AudioCodec::Opus, 48_000, 2)
-	}
-
-	/// Renditions are media, data tracks are sparse, and a later snapshot only adds what is new.
-	#[test]
-	fn renditions_are_media_and_the_rest_sparse() {
-		let mut tracks = Tracks::default();
-		let mut catalog = hang::Catalog::default();
-		catalog.audio.renditions.insert("audio".into(), audio());
-		catalog
-			.json
-			.tracks
-			.insert("chat".into(), JsonConfig::new(Mode::Snapshot));
-
-		assert_eq!(
-			tracks.update(&catalog).unwrap(),
-			[Change::Media("audio".into()), Change::Sparse("chat".into())]
-		);
-
-		catalog.audio.renditions.insert("audio2".into(), audio());
-		assert_eq!(tracks.update(&catalog).unwrap(), [Change::Media("audio2".into())]);
-		assert_eq!(tracks.update(&catalog).unwrap(), []);
-	}
-
-	/// A rendition keyed apart from its track records the track.
-	#[test]
-	fn renditions_record_their_track() {
-		let mut rendition = audio();
-		rendition.track = Some("audio".into());
-		let mut catalog = hang::Catalog::default();
-		catalog.audio.renditions.insert("main".into(), rendition);
-
-		assert_eq!(
-			Tracks::default().update(&catalog).unwrap(),
-			[Change::Media("audio".into())]
-		);
-	}
-
-	/// A dropped rendition stops recording, and coming back is refused rather than silently lost.
-	#[test]
-	fn a_dropped_track_is_removed_for_good() {
-		let mut tracks = Tracks::default();
-		let mut catalog = hang::Catalog::default();
-		catalog.audio.renditions.insert("audio".into(), audio());
-		tracks.update(&catalog).unwrap();
-
-		let removed = catalog.audio.renditions.remove("audio").unwrap();
-		assert_eq!(tracks.update(&catalog).unwrap(), [Change::Remove("audio".into())]);
-
-		catalog.audio.renditions.insert("audio".into(), removed);
-		let err = tracks.update(&catalog).unwrap_err().to_string();
-		assert!(err.contains("cannot resume"), "{err}");
-	}
-
-	/// A rendition living in a sibling broadcast would be missing from the recording.
-	#[test]
-	fn another_broadcast_is_refused() {
-		let mut rendition = audio();
-		rendition.broadcast = Some(moq_net::path::RelativeOwned::new("./source"));
-		let mut catalog = hang::Catalog::default();
-		catalog.audio.renditions.insert("audio".into(), rendition);
-
-		let err = Tracks::default().update(&catalog).unwrap_err().to_string();
-		assert!(err.contains("broadcast `source`"), "{err}");
-	}
-
-	/// Wait until the export's subscription has reached `track`.
-	///
-	/// `.info` is written after that, while the enroll command is still being queued.
-	/// Finishing on the file races that command and the recording ends with "writer closed".
-	async fn subscribed(track: &mut track::Producer, recording: &mut tokio::task::JoinHandle<anyhow::Result<()>>) {
-		tokio::select! {
-			subscription = track.subscription_changed() => {
-				let subscription = subscription.expect("the rendition stays open until the export subscribes");
-				assert!(subscription.is_some(), "the export subscribed");
+	/// Every file under `dir`, relative to it.
+	fn files(dir: &std::path::Path) -> Vec<String> {
+		let mut files = Vec::new();
+		let mut pending = vec![dir.to_path_buf()];
+		while let Some(next) = pending.pop() {
+			for entry in std::fs::read_dir(next).unwrap() {
+				let path = entry.unwrap().path();
+				if path.is_dir() {
+					pending.push(path);
+				} else {
+					files.push(path.strip_prefix(dir).unwrap().to_string_lossy().into_owned());
+				}
 			}
-			result = &mut *recording => panic!("the export ended before it subscribed: {result:?}"),
 		}
+		files.sort();
+		files
 	}
 
-	/// What `export archive` records, `import archive` serves back group for group, and the
-	/// export ends cleanly with its broadcast.
+	/// `export archive` records each broadcast announced under its prefix into its own
+	/// `<path>/@<epoch>`, and leaves out what is announced elsewhere.
 	#[tokio::test]
-	async fn a_recording_replays_its_groups() {
-		// `open` reads the credential variables.
-		let _env = crate::test_env::EnvGuard::clear(&[]);
+	async fn each_broadcast_records_under_its_own_key_prefix() {
 		let dir = tempfile::tempdir().unwrap();
 		let url = Url::from_directory_path(dir.path()).unwrap();
 
 		let origin = moq_tokio::origin::spawn();
-		let mut broadcast = origin.create_broadcast("live.hang").unwrap();
-		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-		let info = track::Info::default()
-			.with_timescale(Timescale::MILLI)
-			.with_max_age(Duration::from_secs(3600));
-		let mut track = broadcast.create_track("audio", info).unwrap();
-		catalog
-			.mutate(|catalog| {
-				catalog.audio.renditions.insert("audio".into(), audio());
-			})
-			.unwrap();
-		broadcast.announce(Default::default()).unwrap();
-
 		let args = ExportArgs {
-			store: url.clone(),
+			store: url,
 			retention: None,
 			retention_grace: None,
 		};
-		let mut recording = tokio::spawn(export(origin.consume(), "live.hang".into(), CatalogFormat::Hang, args));
+		let recording = tokio::spawn(export(origin.consume(), "live".into(), args));
 
-		for sequence in 0..3 {
-			let mut group = track.create_group(group::Info { sequence }).unwrap();
-			for offset in [0, 500] {
-				let timestamp = Timestamp::from_millis(sequence * 1000 + offset).unwrap();
-				group.write_frame(timestamp, format!("{sequence}+{offset}")).unwrap();
+		let info = track::Info::default()
+			.with_timescale(Timescale::MILLI)
+			.with_max_age(Duration::from_secs(3600));
+		let mut epochs = Vec::new();
+		let mut broadcasts = Vec::new();
+		for path in ["live/a", "live/b", "other"] {
+			let broadcast = origin.create_broadcast(path).unwrap();
+			let track = broadcast.create_track("video", info.clone()).unwrap();
+			let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+			group.write_frame(Timestamp::from_millis(0).unwrap(), path).unwrap();
+			group.finish().unwrap();
+			let epoch = moq_net::Epoch::mint();
+			broadcast
+				.announce(moq_net::origin::Route::default().with_epoch(epoch.clone()))
+				.unwrap();
+			epochs.push(epoch);
+			broadcasts.push((broadcast, track));
+		}
+
+		// Each recording ends with its broadcast, once it subscribed.
+		for (broadcast, mut track) in broadcasts.drain(..2) {
+			tokio::time::timeout(Duration::from_secs(10), track.subscription_changed())
+				.await
+				.expect("the export subscribes")
+				.unwrap();
+			track.finish().unwrap();
+			broadcast.close();
+		}
+		let complete = [
+			format!("live/a/@{}/.end", epochs[0]),
+			format!("live/b/@{}/.end", epochs[1]),
+		];
+		tokio::time::timeout(Duration::from_secs(10), async {
+			while !complete.iter().all(|end| dir.path().join(end).exists()) {
+				tokio::time::sleep(Duration::from_millis(10)).await;
 			}
+		})
+		.await
+		.expect("both recordings complete");
+		recording.abort();
+
+		let files = files(dir.path());
+		for (path, epoch) in [("live/a", &epochs[0]), ("live/b", &epochs[1])] {
+			for file in [".end", "video/.info", "video/end"] {
+				assert!(files.contains(&format!("{path}/@{epoch}/{file}")), "{files:?}");
+			}
+			assert!(
+				files.contains(&format!(
+					"{path}/@{epoch}/video/0000000000000000000-0000000000000000000-0000000000000000000"
+				)),
+				"{files:?}"
+			);
+		}
+		assert!(!files.iter().any(|file| file.starts_with("other")), "{files:?}");
+	}
+
+	/// `import archive` republishes a recording `export archive` wrote under the given name and
+	/// epoch, serving its stored groups.
+	#[tokio::test]
+	async fn an_exported_broadcast_imports() {
+		let dir = tempfile::tempdir().unwrap();
+		let url = Url::from_directory_path(dir.path()).unwrap();
+
+		let source = moq_net::broadcast::Info::new().produce();
+		let info = track::Info::default().with_timescale(Timescale::MILLI);
+		let video = source.create_track("video", info).unwrap();
+		for sequence in 0..2 {
+			let mut group = video.create_group(group::Info { sequence }).unwrap();
+			let pts = Timestamp::from_millis(sequence * 1000).unwrap();
+			group.write_frame(pts, format!("frame {sequence}")).unwrap();
 			group.finish().unwrap();
 		}
-
-		subscribed(&mut track, &mut recording).await;
-		track.finish().unwrap();
-		catalog.finish().unwrap();
-		broadcast.close();
-
-		tokio::time::timeout(Duration::from_secs(10), recording)
-			.await
-			.expect("the export ends with its broadcast")
-			.unwrap()
-			.expect("the recording succeeds");
-
-		let replay = moq_tokio::origin::spawn();
-		let args = ImportArgs {
-			store: url,
-			follow: None,
-		};
-		let serving = tokio::spawn(import(
-			replay.clone(),
-			"replay.hang".into(),
-			args,
-			moq_net::Epoch::mint(),
-		));
-
-		let consumer = replay.consume().routed_broadcast("replay.hang").await.unwrap();
-		let audio = consumer.track("audio").unwrap();
-		for sequence in 0..3 {
-			let mut group = audio.fetch_group(sequence, None).await.unwrap();
-			for offset in [0, 500] {
-				let frame = group.read_frame().await.unwrap().expect("a frame");
-				assert_eq!(
-					frame.timestamp.unwrap().as_millis(),
-					u128::from(sequence * 1000 + offset)
-				);
-				assert_eq!(frame.payload, format!("{sequence}+{offset}"));
+		video.finish().unwrap();
+		let recording =
+			tokio::spawn(moq_archive::Producer::new(open(&url).unwrap(), source.consume(), Default::default()).run());
+		// Its objects, then the markers once the broadcast ends.
+		tokio::time::timeout(Duration::from_secs(10), async {
+			while files(dir.path()).len() < 2 {
+				tokio::time::sleep(Duration::from_millis(10)).await;
 			}
-			assert!(group.read_frame().await.unwrap().is_none());
-		}
-
-		serving.abort();
-	}
-
-	/// Renditions already live in the opening catalog are all recorded from their first group.
-	///
-	/// Groups are published before export starts, so the writer can drain the first rendition
-	/// while the next subscription is still in flight.
-	#[tokio::test]
-	async fn an_opening_snapshot_records_every_rendition() {
-		let _env = crate::test_env::EnvGuard::clear(&[]);
-		let dir = tempfile::tempdir().unwrap();
-		let url = Url::from_directory_path(dir.path()).unwrap();
+		})
+		.await
+		.expect("the recording stores its track");
+		source.close();
+		recording.await.unwrap().unwrap();
 
 		let origin = moq_tokio::origin::spawn();
-		let mut broadcast = origin.create_broadcast("live.hang").unwrap();
-		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-		let info = track::Info::default()
-			.with_timescale(Timescale::MILLI)
-			.with_max_age(Duration::from_secs(3600));
-		let mut first = broadcast.create_track("audio", info.clone()).unwrap();
-		let mut second = broadcast.create_track("audio2", info).unwrap();
-		for track in [&first, &second] {
-			for sequence in 0..3 {
-				let mut group = track.create_group(group::Info { sequence }).unwrap();
-				for offset in [0, 500] {
-					let timestamp = Timestamp::from_millis(sequence * 1000 + offset).unwrap();
-					group.write_frame(timestamp, format!("{sequence}+{offset}")).unwrap();
-				}
-				group.finish().unwrap();
-			}
-		}
-		catalog
-			.mutate(|catalog| {
-				catalog.audio.renditions.insert("audio".into(), audio());
-				catalog.audio.renditions.insert("audio2".into(), audio());
-			})
-			.unwrap();
-		broadcast.announce(Default::default()).unwrap();
-
-		let args = ExportArgs {
-			store: url.clone(),
-			retention: None,
-			retention_grace: None,
+		let args = ImportArgs {
+			store: url,
+			refresh: None,
 		};
-		let mut recording = tokio::spawn(export(origin.consume(), "live.hang".into(), CatalogFormat::Hang, args));
-
-		subscribed(&mut first, &mut recording).await;
-		subscribed(&mut second, &mut recording).await;
-		first.finish().unwrap();
-		second.finish().unwrap();
-		catalog.finish().unwrap();
-		broadcast.close();
-
-		tokio::time::timeout(Duration::from_secs(10), recording)
-			.await
-			.expect("the export ends with its broadcast")
-			.unwrap()
-			.expect("the recording succeeds");
-
-		// Each rendition's own timeline opens at its first group.
-		let store = super::open(&url).unwrap();
-		for track in ["audio", "audio2"] {
-			let object = store
-				.get_segments(&hang::timeline::default_name(track), 0)
-				.await
-				.expect("record 0");
-			let config = moq_json::window::ConsumerConfig::default().with_compression(true);
-			let mut decoder = moq_json::window::Decoder::<hang::timeline::Record>::new(config);
-			for stored in object.groups {
-				let mut group = decoder.group();
-				for frame in stored.frames {
-					group.decode(&frame.payload).unwrap();
+		let epoch = moq_net::Epoch::mint();
+		let _import = tokio::spawn(import(origin.clone(), "replay".into(), args, epoch.clone()));
+		let mut announced = origin.consume().announced();
+		tokio::time::timeout(Duration::from_secs(10), async {
+			loop {
+				if let Some(moq_net::announce::Event::Start(announce)) = announced.next().await {
+					assert_eq!(announce.prefix.as_str(), "replay");
+					assert_eq!(announce.route.epoch, Some(epoch.clone()));
+					break;
 				}
 			}
-			let Some(moq_json::window::Event::Push { value, .. }) = decoder.next_event() else {
-				panic!("{track} record 0 is pushed first");
-			};
-			assert_eq!(value.start, hang::timeline::Position::group(0), "{track}");
-		}
+		})
+		.await
+		.expect("the replay is announced");
+		let broadcast = origin.consume().request_broadcast("replay", None).await.unwrap();
+		let track = broadcast.track("video").unwrap();
+		let mut group = track.fetch_group(0, None).await.unwrap();
+		let frame = group.read_frame().await.unwrap().unwrap();
+		assert_eq!(&frame.payload[..], b"frame 0");
+	}
+
+	/// An epochless route announced again while its last recording drains is a new recording, and
+	/// an epoch-pinned one records again once its recording ends.
+	#[test]
+	fn a_re_announced_instance_is_recorded() {
+		let mut running = Running::default();
+		let epochless = (moq_net::Path::from_static("live/a"), None);
+		assert!(running.start(&epochless));
+		assert!(running.start(&epochless));
+		assert!(!running.done(&epochless));
+
+		let pinned = (moq_net::Path::from_static("live/b"), Some(moq_net::Epoch::mint()));
+		assert!(running.start(&pinned));
+		assert!(!running.start(&pinned));
+		assert!(running.done(&pinned));
+		assert!(!running.done(&pinned));
+		assert!(running.start(&pinned));
+	}
+
+	/// Announcements that resolve the same broadcast record it once at a time, while another
+	/// instance at the path records beside it.
+	#[tokio::test]
+	async fn a_resolved_broadcast_is_recorded_once() {
+		let origin = moq_tokio::origin::spawn();
+		let path = moq_net::Path::from_static("live/a");
+		let newest = origin.create_broadcast(&path).unwrap();
+		let older = origin.create_broadcast(&path).unwrap();
+
+		let claims = Claims::default();
+		let claim = claims.claim(&path, &newest.consume()).expect("first claim");
+		assert!(claims.claim(&path, &newest.consume()).is_none());
+		let beside = claims.claim(&path, &older.consume()).expect("another instance");
+
+		drop(claim);
+		assert!(claims.claim(&path, &newest.consume()).is_some());
+		drop(beside);
+		assert!(claims.0.lock().unwrap().is_empty());
+	}
+
+	/// A route without an epoch records under one minted per instance, so two instances never
+	/// share a key prefix.
+	#[test]
+	fn an_epochless_instance_gets_a_fresh_key() {
+		let instance = (moq_net::Path::from_static("live/a"), None);
+		let first = key(&Path::from("rec"), &instance).unwrap();
+		let second = key(&Path::from("rec"), &instance).unwrap();
+		assert_ne!(first, second);
+		assert!(first.as_ref().starts_with("rec/live/a/"), "{first}");
+
+		let epoch = moq_net::Epoch::mint();
+		let pinned = (moq_net::Path::from_static("live/a"), Some(epoch.clone()));
+		assert_eq!(
+			key(&Path::from("rec"), &pinned).unwrap().as_ref(),
+			format!("rec/live/a/@{epoch}")
+		);
+	}
+
+	/// A path segment's key never starts with `@`, so a path that spells out another instance's
+	/// key prefix records beside it, never inside it.
+	#[test]
+	fn keys_are_prefix_free() {
+		let epoch = moq_net::Epoch::mint();
+		let victim = key(
+			&Path::from("rec"),
+			&(moq_net::Path::from_static("live/a"), Some(epoch.clone())),
+		)
+		.unwrap();
+		let hostile = format!("live/a/@{epoch}");
+		let nested = key(
+			&Path::from("rec"),
+			&(moq_net::Path::new(&hostile).unwrap(), Some(moq_net::Epoch::mint())),
+		)
+		.unwrap();
+		assert!(nested.prefix_match(&victim).is_none(), "{nested} is under {victim}");
+		assert!(
+			nested.as_ref().starts_with(&format!("rec/live/a/%40{epoch}/@")),
+			"{nested}"
+		);
+
+		// `%` is escaped too, so an escaped-looking segment keys apart from the `@` one.
+		let literal = key(
+			&Path::from("rec"),
+			&(moq_net::Path::new(&format!("live/a/%40{epoch}")).unwrap(), Some(epoch)),
+		)
+		.unwrap();
+		assert!(literal.as_ref().starts_with("rec/live/a/%2540"), "{literal}");
 	}
 }

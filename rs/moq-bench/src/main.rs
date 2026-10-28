@@ -1,6 +1,5 @@
 mod config;
 mod connection;
-mod duration;
 mod range;
 mod stats;
 
@@ -84,15 +83,15 @@ async fn main() -> anyhow::Result<()> {
 			stats: stats.clone(),
 		};
 		tasks.spawn(async move {
-			tokio::time::sleep(delay).await;
+			moq_clock::sleep(delay).await;
 			connection::run(ctx).await;
 		});
 	}
 
-	let duration = config.duration.map(crate::duration::Duration::into_std);
+	let duration = config.duration.map(Into::into);
 	let stop = async move {
 		match duration {
-			Some(d) => tokio::time::sleep(d).await,
+			Some(d) => moq_clock::sleep(d).await,
 			None => std::future::pending::<()>().await,
 		}
 	};
@@ -107,6 +106,11 @@ async fn main() -> anyhow::Result<()> {
 		// than exit green with a partial JSONL file.
 		res = &mut reporter => res??,
 	}
+
+	// Tell the relay the sessions ended, rather than leaving it to wait out the idle
+	// timeout, so anything measured after the load sees the relay's teardown.
+	tasks.shutdown().await;
+	client.close().await;
 
 	stats.ensure_delivery(config.expects_delivery())
 }

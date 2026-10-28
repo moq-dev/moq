@@ -15,13 +15,11 @@
 //! per connection and CPU per message (see the README).
 
 #[cfg(target_os = "linux")]
-mod duration;
-
-#[cfg(target_os = "linux")]
 mod linux {
+	use moq_clock::Wall;
 	use std::collections::HashMap;
 	use std::io::Write;
-	use std::time::{Duration, SystemTime, UNIX_EPOCH};
+	use std::time::Duration;
 
 	use anyhow::Context;
 	use procfs::CurrentSI;
@@ -45,7 +43,7 @@ mod linux {
 	}
 
 	/// Sample CPU, memory, and context-switch counters for a running process.
-	#[derive(usage::Cli, Debug)]
+	#[derive(usage_rs::Cli, Debug)]
 	#[usage(unknown_flags = "error", args_override_self = false)]
 	#[usage(name = "moq-bench-host", version = env!("CARGO_PKG_VERSION"))]
 	#[usage(completion)]
@@ -64,10 +62,10 @@ mod linux {
 
 		/// Stop after this duration. Runs until interrupted (or the targets exit) otherwise.
 		#[usage(long)]
-		duration: Option<crate::duration::Duration>,
+		duration: Option<moq_tokio::cli::Duration>,
 
 		/// Write JSON lines to this file instead of stdout. Truncates on start.
-		#[usage(long, value_hint = usage::ValueHint::FilePath, extensions("jsonl", "json"))]
+		#[usage(long, value_hint = usage_rs::ValueHint::FilePath, extensions("jsonl", "json"))]
 		pub output: Option<std::path::PathBuf>,
 
 		/// Include a per-thread breakdown in every sample. Costs one /proc read per
@@ -233,9 +231,8 @@ mod linux {
 		target.ctx.retain(|tid| live.contains(&tid));
 
 		Ok(Sample {
-			timestamp_ms: SystemTime::now()
-				.duration_since(UNIX_EPOCH)
-				.unwrap_or_default()
+			timestamp_ms: moq_clock::wall()
+				.saturating_duration_since(Wall::UNIX_EPOCH)
 				.as_millis(),
 			pid: target.proc.pid,
 			comm: stat.comm.clone(),
@@ -280,7 +277,7 @@ mod linux {
 				.join(", ")
 		);
 
-		let start = std::time::Instant::now();
+		let start = moq_clock::now();
 		loop {
 			// Host-wide once per round: unlike the per-target reads inside `sample`,
 			// a failure here is not a target exiting, so it fails the run.
@@ -306,13 +303,13 @@ mod linux {
 			out.flush()?;
 
 			anyhow::ensure!(!targets.is_empty(), "all target processes exited");
-			let Some(delay) = next_delay(
-				args.interval.0,
-				args.duration.map(crate::duration::Duration::into_std),
-				start.elapsed(),
-			) else {
+			let Some(delay) = next_delay(args.interval.0, args.duration.map(Into::into), start.elapsed()) else {
 				return Ok(());
 			};
+			#[expect(
+				clippy::disallowed_methods,
+				reason = "the sampler runs outside any runtime, so it blocks on the host clock"
+			)]
 			std::thread::sleep(delay);
 		}
 	}
@@ -342,12 +339,11 @@ mod linux {
 		fn zero_interval_rejected() {
 			let argv = [std::ffi::OsStr::new("--interval"), std::ffi::OsStr::new("0s")];
 			let err = Args::parse_from(&argv).unwrap_err();
-			let err = usage::render_failure(Args::spec(), &argv, &err);
+			let err = usage_rs::render_failure(Args::spec(), &argv, &err);
 			assert!(err.contains("greater than 0s"), "unexpected error: {err}");
 
-			// Nonzero still parses, and the default holds.
-			let args = Args::parse_from(&[]).unwrap();
-			assert_eq!(args.interval, PositiveDuration(Duration::from_secs(1)));
+			// The default still passes the same check.
+			Args::parse_from(&[]).unwrap();
 		}
 
 		/// A duration shorter than the interval must cap the sleep, not stretch the

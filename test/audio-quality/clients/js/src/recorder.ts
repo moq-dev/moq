@@ -2,7 +2,7 @@
  * The recorder page: subscribes to a broadcast's audio and stamps each frame as it comes off its
  * group's stream, which is where the player's container consumer receives it.
  *
- * Built only on the public `@moq/net` and `@moq/hang` surface, so it records the path a viewer's
+ * Built on the same transport, container and codec-duration readers, so it records the path a viewer's
  * player takes (a WebTransport session in Chromium, every group on its own stream) without a debug
  * hook in the player. It reads groups the way `Container.Consumer` does, concurrently and decoded
  * with the same format, but stamps them before the consumer's in-order delivery: a group the
@@ -15,13 +15,15 @@
  *
  * @module
  */
+
+import { Milli } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Moq from "@moq/net";
 import { format, arrivals as readArrivals } from "./capture.ts";
 import type { Arrival } from "./schema.ts";
 
 /** How far back the relay may serve a group. Long, so a late group is recorded rather than dropped. */
-const MAX_DELAY = Moq.Time.Milli(10_000);
+const MAX_DELAY = Milli(10_000);
 
 /** What the recorder has, until the driver drains it. */
 export type Recorder = {
@@ -99,7 +101,7 @@ async function record(): Promise<void> {
 		const group = await track.recvGroup();
 		if (!group) throw new Error("the track ended");
 		(async () => {
-			for await (const arrival of readArrivals(group, decoder)) arrivals.push(arrival);
+			for await (const arrival of readArrivals(group, { decoder, config })) arrivals.push(arrival);
 		})().catch(fail);
 	}
 }

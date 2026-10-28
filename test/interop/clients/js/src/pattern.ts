@@ -28,14 +28,15 @@ export const HEIGHT = 240;
 export const FRAME_BITS = 13;
 
 /**
- * Blocks along the top strip: a white reference, a black reference, one per counter bit, and an
+ * Blocks along the top strip: a white reference, a black reference, one per counter and source-generation bit, and an
  * even parity block.
  *
  * Parity is what separates "this frame is not the fixture" from "one block was misread". Without
  * it a single flipped bit reads as a wild frame number, which looks exactly like the picture
  * jumping backwards.
  */
-export const CELLS = FRAME_BITS + 3;
+const GENERATION_BITS = 2;
+export const CELLS = FRAME_BITS + GENERATION_BITS + 3;
 
 /** Fraction of the frame height occupied by the counter strip. */
 const STRIP = 1 / 6;
@@ -99,14 +100,15 @@ export function stepSkew(actual: number, expected: number): number {
 }
 
 // Even parity over the painted counter bits.
-function parity(frameId: number): number {
+function parity(frameId: number, generation: number): number {
 	let bit = 0;
 	for (let i = 0; i < FRAME_BITS; i++) bit ^= (frameId >> i) & 1;
+	for (let i = 0; i < GENERATION_BITS; i++) bit ^= (generation >> i) & 1;
 	return bit;
 }
 
 /** Paint one fixture frame: the counter strip on top, a sweeping bar below. */
-export function paint(ctx: CanvasRenderingContext2D, frameId: number): void {
+export function paint(ctx: CanvasRenderingContext2D, frameId: number, generation = 0): void {
 	const width = ctx.canvas.width;
 	const height = ctx.canvas.height;
 	const strip = height * STRIP;
@@ -116,10 +118,11 @@ export function paint(ctx: CanvasRenderingContext2D, frameId: number): void {
 	ctx.fillStyle = "#808080";
 	ctx.fillRect(0, 0, width, height);
 
-	// Cell 0 is the white reference, cell 1 the black reference, then the counter LSB first, then parity.
+	// Cell 0 is the white reference, cell 1 the black reference, then counter and generation LSB first, then parity.
 	const bits = [1, 0];
 	for (let i = 0; i < FRAME_BITS; i++) bits.push((frameId >> i) & 1);
-	bits.push(parity(frameId));
+	for (let i = 0; i < GENERATION_BITS; i++) bits.push((generation >> i) & 1);
+	bits.push(parity(frameId, generation));
 
 	for (let i = 0; i < CELLS; i++) {
 		ctx.fillStyle = bits[i] ? "#ffffff" : "#000000";
@@ -137,6 +140,8 @@ export function paint(ctx: CanvasRenderingContext2D, frameId: number): void {
 export type Decoded = {
 	/** The painted frame counter. */
 	frameId: number;
+	/** The source generation, so a reconfiguration cannot keep presenting old pictures. */
+	generation: number;
 	/** Gap between the white and black reference blocks, 0-255. Below {@link MIN_CONTRAST} is unreadable. */
 	contrast: number;
 };
@@ -181,8 +186,13 @@ export function decode(pixels: Uint8ClampedArray, width: number, height: number)
 		if (luma(i + 2) > threshold) frameId |= 1 << i;
 	}
 
-	// A misread block is not a frame number, so report it as unreadable rather than as a jump.
-	if ((luma(CELLS - 1) > threshold ? 1 : 0) !== parity(frameId)) return undefined;
+	let generation = 0;
+	for (let i = 0; i < GENERATION_BITS; i++) {
+		if (luma(i + FRAME_BITS + 2) > threshold) generation |= 1 << i;
+	}
 
-	return { frameId, contrast };
+	// A misread block is not a frame number, so report it as unreadable rather than as a jump.
+	if ((luma(CELLS - 1) > threshold ? 1 : 0) !== parity(frameId, generation)) return undefined;
+
+	return { frameId, generation, contrast };
 }

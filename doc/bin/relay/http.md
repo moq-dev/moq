@@ -42,10 +42,23 @@ listen = "127.0.0.1:9101"
 
 ### GET /metrics
 
-Prometheus text: bytes, frames, groups, subscriptions, viewers, requests, and sessions
-split by `tier` and `role`, plus accept-loop counters per TCP listener. Traffic
-counters accumulate for the node's lifetime and leave out the stats feed's own
-traffic. Host CPU and memory belong to a node exporter.
+Prometheus text: payload bytes, frames, groups, announces, subscriptions, and
+viewers split by `tier` and `role`; requests and sessions by `tier`; and
+accept-loop counters per TCP listener. Payload counters accumulate for the
+node's lifetime and leave out the stats feed's own traffic. Host CPU and memory
+belong to a node exporter.
+
+`moq_relay_wire_tx_bytes_total` and `moq_relay_wire_rx_bytes_total` sum the
+per-session [transport counters](/concept/stats#sessions) by `tier`, including
+internal sessions and the stats feed. Compare them with payload to spot
+transport overhead and idle traffic. Transports that do not report them
+contribute zero.
+
+`moq_relay_control_tx_bytes_total` and `moq_relay_control_rx_bytes_total`
+count control-message bytes by `tier` and `class` (`session`, `announce`, `track_info`, `subscribe`, `fetch`,
+`probe`, `auth`, `goaway`, `other`) to spot control-heavy sessions. They
+include message size prefixes but leave out media payload and transport
+overhead such as QUIC framing, ACKs, and retransmissions.
 
 A few worth alerting on:
 
@@ -54,6 +67,10 @@ A few worth alerting on:
 - `moq_relay_sessions_refused_total`, by `reason`. A rise in `unavailable`
   points at the auth server; a rise in `refused` at the credentials clients
   present. Each attempt counts, so a client that retries is counted again.
+- `moq_relay_sessions_failed_total`, by `tier` and `kind` (`idle_timeout`,
+  `transport`, `application`, `expired`): admitted sessions that ended
+  abnormally. A clean close is not a failure. Reported only while
+  [stats](/bin/relay/config#stats) are enabled.
 - `moq_relay_stale_bytes_total` and friends: content dropped for drifting past
   a subscriber's latency budget.
 - `moq_relay_draining_sessions`: sessions sent a GOAWAY during a

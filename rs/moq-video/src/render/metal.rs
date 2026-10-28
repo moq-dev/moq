@@ -10,13 +10,11 @@
 //! without it (a plain `CVPixelBufferCreate`, as
 //! [`Surface::into_pixel_buffer`](crate::Surface::into_pixel_buffer) does when
 //! uploading a CPU frame) has no handle Metal can address, and the import fails.
-//! Capture and decoder pools always set it, so frames off the fast path arrive
-//! importable; anything else lands on the CPU fallback, which is the right
-//! answer for pixels that were on the CPU to begin with.
+//! Capture and decoder pools always set it, so their frames arrive importable.
 
 use std::ptr::NonNull;
 
-use objc2_core_foundation::CFRetained;
+use objc2_core_foundation::{CFDictionary, CFRetained};
 use objc2_core_video::{
 	CVMetalTexture, CVMetalTextureCache, CVMetalTextureGetTexture, CVPixelBuffer, CVPixelBufferGetHeightOfPlane,
 	CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidthOfPlane, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
@@ -25,6 +23,7 @@ use objc2_core_video::{
 use objc2_metal::{MTLPixelFormat, MTLTextureType};
 
 use super::source::{Layout, Source};
+use crate::color::Range;
 use crate::frame::apple::PixelBuffer;
 use crate::{Color, Error, Size};
 
@@ -46,7 +45,9 @@ fn err(message: impl std::fmt::Display) -> Error {
 /// So the wrapper rides along in the texture's drop callback, which wgpu invokes
 /// once it no longer references the texture (after the submissions using it
 /// retire).
-struct Keepalive(#[expect(dead_code, reason = "held for its release, never read")] CFRetained<CVMetalTexture>);
+pub(super) struct Keepalive(
+	#[expect(dead_code, reason = "held for its release, never read")] pub(super) CFRetained<CVMetalTexture>,
+);
 
 // SAFETY: CoreVideo objects are CoreFoundation types whose retain/release are
 // thread-safe. Nothing here dereferences the wrapper after construction; it is
@@ -54,6 +55,66 @@ struct Keepalive(#[expect(dead_code, reason = "held for its release, never read"
 // whichever thread retires the submission.
 unsafe impl Send for Keepalive {}
 unsafe impl Sync for Keepalive {}
+
+/// The layout and range (video swing vs full swing) a pixel format imports as,
+/// or `None` when it does not.
+fn layout_of(format: u32) -> Option<(Layout, Range)> {
+	match format {
+		f if f == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange => Some((Layout::Nv12, Range::Limited)),
+		f if f == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange => Some((Layout::Nv12, Range::Full)),
+		// Rare: a pool configured for planar output rather than the NV12 every
+		// hardware decoder produces. Cheap to support and it keeps the import
+		// from being NV12-only by construction.
+		f if f == kCVPixelFormatType_420YpCbCr8Planar => Some((Layout::I420, Range::Limited)),
+		_ => None,
+	}
+}
+
+/// Whether [`Import::import`] takes `buffer`'s pixel format.
+pub(super) fn imports(buffer: &PixelBuffer) -> bool {
+	layout_of(CVPixelBufferGetPixelFormatType(buffer.buffer())).is_some()
+}
+
+/// Whether [`Import::new`] takes `device`: only a Metal one has the `MTLDevice`
+/// the texture cache binds to.
+pub(super) fn supports(device: &wgpu::Device) -> bool {
+	// SAFETY: the handle is only checked for presence and dropped at once.
+	unsafe { device.as_hal::<wgpu::hal::api::Metal>() }.is_some()
+}
+
+/// A `CVMetalTextureCache` on `device`'s `MTLDevice`, making every texture
+/// with `textures` as its attributes.
+///
+/// Errors when the device is not a Metal one.
+pub(super) fn texture_cache(
+	device: &wgpu::Device,
+	textures: Option<&CFDictionary>,
+) -> Result<CFRetained<CVMetalTextureCache>, Error> {
+	// SAFETY: the handle is only read to create the cache, and it is dropped
+	// before this returns, so nothing outlives the guard.
+	let metal =
+		unsafe { device.as_hal::<wgpu::hal::api::Metal>() }.ok_or_else(|| err("wgpu device is not a Metal device"))?;
+
+	let mut ptr: *mut CVMetalTextureCache = std::ptr::null_mut();
+	// SAFETY: `textures` is a CFDictionary of CoreVideo texture attributes, and
+	// `ptr` is a valid out-pointer for the duration.
+	let status = unsafe {
+		CVMetalTextureCache::create(
+			None,
+			None,
+			metal.raw_device(),
+			textures,
+			NonNull::new(&mut ptr).expect("stack pointer is non-null"),
+		)
+	};
+	drop(metal);
+
+	NonNull::new(ptr)
+		.filter(|_| status == 0)
+		// SAFETY: CVMetalTextureCacheCreate returns a +1 reference.
+		.map(|ptr| unsafe { CFRetained::from_raw(ptr) })
+		.ok_or_else(|| err(format!("CVMetalTextureCacheCreate failed: {status}")))
+}
 
 /// A `CVMetalTextureCache` bound to the renderer's Metal device.
 ///
@@ -73,61 +134,29 @@ unsafe impl Send for Import {}
 impl Import {
 	/// Build a texture cache on the same `MTLDevice` wgpu is rendering with.
 	///
-	/// Errors when the device is not a Metal one, which is how a caller running
-	/// wgpu's Vulkan or GL backend on macOS lands on the CPU path.
+	/// Errors when the device is not a Metal one, for which
+	/// [`output`](super::output) picks `Output::Cpu`.
 	pub fn new(device: &wgpu::Device) -> Result<Self, Error> {
-		// SAFETY: the handle is only read to create the cache, and it is
-		// dropped before this returns, so nothing outlives the guard.
-		let metal = unsafe { device.as_hal::<wgpu::hal::api::Metal>() }
-			.ok_or_else(|| err("wgpu device is not a Metal device"))?;
-
-		let mut ptr: *mut CVMetalTextureCache = std::ptr::null_mut();
-		// SAFETY: no attribute dictionaries are passed (so there are no generics
-		// to get wrong), and `ptr` is a valid out-pointer for the duration.
-		let status = unsafe {
-			CVMetalTextureCache::create(
-				None,
-				None,
-				metal.raw_device(),
-				None,
-				NonNull::new(&mut ptr).expect("stack pointer is non-null"),
-			)
-		};
-		drop(metal);
-
-		let cache = NonNull::new(ptr)
-			.filter(|_| status == 0)
-			// SAFETY: CVMetalTextureCacheCreate returns a +1 reference.
-			.map(|ptr| unsafe { CFRetained::from_raw(ptr) })
-			.ok_or_else(|| err(format!("CVMetalTextureCacheCreate failed: {status}")))?;
-
-		Ok(Self { cache })
+		Ok(Self {
+			cache: texture_cache(device, None)?,
+		})
 	}
 
 	/// Alias each plane of `buffer` as a texture.
 	pub fn import(&mut self, device: &wgpu::Device, buffer: &PixelBuffer) -> Result<Source, Error> {
 		let size = Size::new(buffer.width(), buffer.height());
 		let format = CVPixelBufferGetPixelFormatType(buffer.buffer());
-
-		// The pixel format names the layout and the range (video swing vs full
-		// swing).
-		let (layout, range_is_full) = match format {
-			f if f == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange => (Layout::Nv12, false),
-			f if f == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange => (Layout::Nv12, true),
-			// Rare: a pool configured for planar output rather than the NV12
-			// every hardware decoder produces. Cheap to support and it keeps the
-			// import from being NV12-only by construction.
-			f if f == kCVPixelFormatType_420YpCbCr8Planar => (Layout::I420, false),
-			f => return Err(err(format!("cannot import pixel format {f:#x}"))),
+		let Some((layout, range)) = layout_of(format) else {
+			return Err(err(format!(
+				"cannot import pixel format {format:#x}; decode or capture with render::output(&device), which delivers it as CPU frames"
+			)));
 		};
 
 		// The matrix comes off the buffer's own attachment, which VideoToolbox
 		// copies out of the stream's VUI, so an imported frame and the same frame
 		// downloaded to the CPU are read the same way. The planar format carries no
 		// such attachment, so it falls back to the size guess.
-		let color = buffer
-			.color()
-			.unwrap_or_else(|| Color::infer(size).with_range(!range_is_full));
+		let color = buffer.color().unwrap_or_else(|| Color::infer(size).with_range(range));
 
 		let (plane0, plane1, plane2) = match layout {
 			Layout::Nv12 => {

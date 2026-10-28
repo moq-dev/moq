@@ -6,6 +6,7 @@
 	"include": [
 		"analyze.ts",
 		"driver.ts",
+		"native.ts",
 		"grade.ts",
 		"record.ts",
 		"replay.ts",

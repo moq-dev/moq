@@ -1,5 +1,6 @@
 //! The track-free half of stream consuming: frame payloads in, records out.
 
+use std::cell::RefCell;
 use std::marker::PhantomData;
 
 use serde::de::DeserializeOwned;
@@ -17,6 +18,8 @@ pub struct Decoder<T> {
 	/// The DEFLATE decoder (one window for the whole log), `Some` while decompressing.
 	flate: Option<moq_flate::Decoder>,
 	compression: bool,
+	/// Reused key buffers for refusing a record that repeats a key.
+	check: RefCell<crate::strict::Scratch>,
 	_marker: PhantomData<fn() -> T>,
 }
 
@@ -26,6 +29,7 @@ impl<T> Decoder<T> {
 		Self {
 			flate: config.compression.is_deflate().then(moq_flate::Decoder::new),
 			compression: config.compression.is_deflate(),
+			check: RefCell::default(),
 			_marker: PhantomData,
 		}
 	}
@@ -39,10 +43,10 @@ impl<T> Decoder<T> {
 impl<T: DeserializeOwned> Decoder<T> {
 	/// Decode the next frame payload back into a record.
 	pub fn decode(&mut self, payload: &[u8]) -> Result<T> {
-		Ok(match self.flate.as_mut() {
-			Some(flate) => serde_json::from_slice(&flate.frame(payload)?)?,
-			None => serde_json::from_slice(payload)?,
-		})
+		let inflated = self.flate.as_mut().map(|flate| flate.frame(payload)).transpose()?;
+		let plain = inflated.as_deref().unwrap_or(payload);
+		crate::strict::check(plain, &self.check)?;
+		Ok(serde_json::from_slice(plain)?)
 	}
 }
 
@@ -80,35 +84,9 @@ mod test {
 	}
 
 	#[test]
-	fn plaintext_roundtrip_in_order() {
-		let values: Vec<Value> = (0..5).map(|n| json!({ "n": n })).collect();
-		assert_eq!(roundtrip(false, &values), values);
-	}
-
-	#[test]
 	fn compressed_roundtrip_in_order() {
 		let values: Vec<Value> = (0..20).map(|n| json!({ "group": n, "pts": n * 2_000 })).collect();
 		assert_eq!(roundtrip(true, &values), values);
-	}
-
-	#[test]
-	fn the_shared_window_shrinks_repetitive_records() {
-		let mut encoder = Encoder::<Value>::new(cfg(true));
-		let sizes: Vec<usize> = (0..8)
-			.map(|n| {
-				let record = encoder.encode(&json!({ "group": n, "pts": n * 2_000 })).unwrap();
-				let len = record.payload().len();
-				record.commit();
-				len
-			})
-			.collect();
-
-		let raw = serde_json::to_vec(&json!({ "group": 7, "pts": 14_000 })).unwrap().len();
-		assert!(
-			*sizes.last().unwrap() < raw / 2,
-			"windowed record {} should be far below its raw size {raw}",
-			sizes.last().unwrap()
-		);
 	}
 
 	/// A caller that rolls a group has to restart both windows, or the new group's frames decode
@@ -130,6 +108,19 @@ mod test {
 		let record = encoder.encode(&json!({ "n": 99 })).unwrap();
 		assert_eq!(decoder.decode(record.payload()).unwrap(), json!({ "n": 99 }));
 		record.commit();
+	}
+
+	#[test]
+	fn duplicate_keys_are_refused() {
+		let vectors = crate::strict::test::vectors();
+		let mut decoder = Decoder::<Value>::new(cfg(false));
+		for payload in &vectors.refused {
+			let err = decoder.decode(payload.as_bytes()).unwrap_err();
+			assert!(matches!(err, crate::Error::DuplicateKey), "{payload}: {err}");
+		}
+		for payload in &vectors.accepted {
+			decoder.decode(payload.as_bytes()).unwrap();
+		}
 	}
 }
 

@@ -31,9 +31,5 @@ Registered files let SQEs address a stable table slot with `types::Fixed`. This 
 Benchmark steady-state send/receive traffic and high socket-churn workloads. Record CPU, cycles, instructions, throughput, and socket lifetime cost. Keep the implementation only if the hot-path win justifies the slot-lifecycle complexity.
 
 Decided in the 2026-09-30 audit: moved to m2. The hot-path win is
-unmeasured on noq, and io_uring ships in no package. Decided 2026-10-08:
+unmeasured on `moq-quic`, and io_uring ships in no package. Decided 2026-10-08:
 moved to m3 with the rest of the speculative ring work; no fleet demand.
-
-## Closes
-
-- [#3202](https://github.com/moq-dev/moq/issues/3202) - close this issue when the quest finishes

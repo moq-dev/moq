@@ -1,6 +1,7 @@
 import { Decoder as Flate } from "@moq/flate";
 
 import { isDeflate } from "../compression.ts";
+import { parse } from "../parse.ts";
 import type { Config } from "./encoder.ts";
 
 /**
@@ -29,8 +30,7 @@ export class Decoder<T> {
 
 	/** Decode the next frame payload back into a record. */
 	decode(payload: Uint8Array): T {
-		const plain = this.#flate ? this.#flate.frame(payload) : payload;
-		const value = JSON.parse(new TextDecoder().decode(plain));
-		return this.#schema ? this.#schema.parse(value) : value;
+		const value = parse(this.#flate ? this.#flate.frame(payload) : payload);
+		return this.#schema ? this.#schema.parse(value) : (value as T);
 	}
 }

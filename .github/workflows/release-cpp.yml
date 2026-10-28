@@ -10,14 +10,34 @@ on:
   # Dry-run: build everything, publish nothing. Nightly calls every release
   # workflow this way so a broken build surfaces before the tag is cut.
   workflow_call:
+    inputs:
+      reuse-native:
+        description: "Use this run's native input after its installed-consumer gate succeeds"
+        type: boolean
+        default: false
   workflow_dispatch:
+    inputs:
+      prebuilt-test:
+        description: "Validate the same-revision shared default-feature input on all four hosts"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
+  native:
+    if: github.event_name == 'workflow_dispatch' && inputs.prebuilt-test
+    uses: ./.github/workflows/release-ffi.yml
+    with:
+      language: default
+      bindings: false
+      targets: '["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-pc-windows-msvc"]'
+
   build:
     name: Build (${{ matrix.target }})
+    needs: [native]
+    if: ${{ always() && !cancelled() }}
     runs-on: ${{ matrix.os }}
 
     strategy:
@@ -54,7 +74,7 @@ jobs:
       # The tag flake.nix pins; see the comment there.
       - name: Install uniffi-bindgen-cpp
         shell: bash
-        run: cargo install uniffi-bindgen-cpp --locked --git https://github.com/kixelated/uniffi-bindgen-cpp --tag v0.11.0-kixelated.4+v0.32.2
+        run: cargo install uniffi-bindgen-cpp --locked --git https://github.com/kixelated/uniffi-bindgen-cpp --tag v0.11.0-kixelated.7+v0.32.2
 
       # The package version lives in cpp/moq/VERSION; a tag that disagrees is a mistake.
       - name: Check version
@@ -69,14 +89,80 @@ jobs:
             exit 1
           fi
 
+      - name: Refuse same-run input for a release tag
+        if: inputs.reuse-native && github.ref_type == 'tag'
+        run: |
+          echo "::error::cpp-v releases must use their immutable FFI_VERSION pin"
+          exit 1
+
+      - name: Download validated same-run input
+        if: inputs.reuse-native
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: cpp-native-${{ matrix.target }}
+          path: native-archive
+
+      - name: Parse prebuilt FFI version
+        if: inputs.reuse-native || (github.event_name == 'workflow_dispatch' && inputs.prebuilt-test)
+        id: ffi-version
+        run: just gh release parse-version moq-ffi
+
+      - name: Download shared input for compatibility check
+        if: github.event_name == 'workflow_dispatch' && inputs.prebuilt-test
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: default-lib-${{ matrix.target }}
+          path: native-library
+
+      - name: Stage shared input
+        if: github.event_name == 'workflow_dispatch' && inputs.prebuilt-test
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.native.outputs.version }}
+        run: just cpp ffi stage --version "$VERSION" --target "$TARGET" --library native-library --output native-stage
+
+      - name: Check installed consumers with shared input
+        if: github.event_name == 'workflow_dispatch' && inputs.prebuilt-test
+        shell: bash
+        run: just cpp check --ffi-dir "$GITHUB_WORKSPACE/native-stage"
+
+      - name: Archive checked input
+        if: github.event_name == 'workflow_dispatch' && inputs.prebuilt-test
+        run: just cpp ffi archive --directory native-stage --output native-archive
+
+      - name: Verify and extract validated input
+        if: inputs.reuse-native || (github.event_name == 'workflow_dispatch' && inputs.prebuilt-test)
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ steps.ffi-version.outputs.version }}
+        run: just cpp ffi extract --version "$VERSION" --target "$TARGET" --directory native-archive --output native-input
+
       - name: Build and package
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
-        run: just cpp package --target "$TARGET" --output dist
+          PREBUILT_INPUT: ${{ inputs.reuse-native || (github.event_name == 'workflow_dispatch' && inputs.prebuilt-test) }}
+        run: |
+          args=(--target "$TARGET" --output dist)
+          if [[ "$PREBUILT_INPUT" == true ]]; then
+            args+=(--ffi-dir "$GITHUB_WORKSPACE/native-input")
+          fi
+          just cpp package "${args[@]}"
+
+      - name: Check packaged archive
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          version=$(tr -d '[:space:]' < cpp/moq/VERSION)
+          extension=tar.gz
+          [[ "$TARGET" == *-windows-* ]] && extension=zip
+          just cpp check --archive "dist/moq-cpp-$version-$TARGET.$extension"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: moq-cpp-${{ matrix.target }}
           path: dist/*
@@ -106,7 +192,7 @@ jobs:
         run: just gh release prev-tag cpp
 
       - name: Download artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: artifacts
           merge-multiple: true
@@ -123,11 +209,12 @@ jobs:
   # every release: rebuild it against the release just published (no second
   # cargo build, guaranteed-matching bindings) and cut a parallel
   # obs-moq-v<version> release. The plugin's version is its own,
-  # cpp/obs/VERSION. Runs after `release` so the archives
-  # the plugin's CMake fetches are already live.
+  # cpp/obs/VERSION. Tags wait for `release` so downloads are live; dry runs
+  # consume this run's checked local archive without publishing anything.
   obs-build:
     name: OBS plugin (${{ matrix.target }})
-    needs: release
+    needs: [build, release]
+    if: ${{ always() && !cancelled() && needs.build.result == 'success' && (github.ref_type != 'tag' || needs.release.result == 'success') }}
     runs-on: ${{ matrix.os }}
 
     # macOS + Windows only. These link the ffmpeg the obs-deps bundle ships
@@ -158,19 +245,33 @@ jobs:
         shell: bash
         run: echo "version=$(tr -d '[:space:]' < cpp/moq/VERSION)" >>"$GITHUB_OUTPUT"
 
+      - name: Download local C++ archive
+        if: github.ref_type != 'tag'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: moq-cpp-${{ matrix.target }}
+          path: cpp-archive
+
       # Native Xcode / Visual Studio; libobs/Qt6/ffmpeg come from the obs-deps
-      # bundle and the C++ package from the release just published (--moq-release).
+      # bundle and C++ comes from the checked local archive, or the published tag.
       # build.sh versions the plugin from cpp/obs/VERSION.
       - name: Build and package
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
           MOQ_RELEASE: ${{ steps.parse.outputs.version }}
+          REF_TYPE: ${{ github.ref_type }}
         run: |
-          just obs package --target "$TARGET" --moq-release "$MOQ_RELEASE" --output dist
+          args=(--moq-release "$MOQ_RELEASE")
+          if [[ "$REF_TYPE" != tag ]]; then
+            extension=tar.gz
+            [[ "$TARGET" == *-windows-* ]] && extension=zip
+            args=(--moq-archive "$GITHUB_WORKSPACE/cpp-archive/moq-cpp-$MOQ_RELEASE-$TARGET.$extension")
+          fi
+          just obs package --target "$TARGET" "${args[@]}" --output dist
 
       - name: Upload artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: obs-moq-${{ matrix.target }}
           path: dist/*
@@ -178,6 +279,7 @@ jobs:
   obs-release:
     name: OBS plugin release
     needs: obs-build
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -211,7 +313,7 @@ jobs:
       # Only the obs-moq archives: the moq-cpp-* artifacts from the build job
       # belong to the C++ release, not this one.
       - name: Download artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: artifacts
           pattern: obs-moq-*

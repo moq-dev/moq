@@ -18,19 +18,29 @@ use crate::window::DatagramWindow;
 /// Sequences are allocated monotonically; reuse and exhaustion are refused before encryption.
 pub struct Producer {
 	inner: moq_net::track::Producer,
-	group_key: Arc<Mutex<TrackKey>>,
-	datagram_key: TrackKey,
+	keys: Keys,
 	next: u64,
 }
 
-impl Producer {
-	pub(crate) fn new(inner: moq_net::track::Producer, group_key: TrackKey, datagram_key: TrackKey) -> Self {
+/// A semantic name's grouped-frame and datagram keys; clones share their accounting.
+#[derive(Clone, Debug)]
+pub(crate) struct Keys {
+	pub group: Arc<Mutex<TrackKey>>,
+	pub datagram: Arc<Mutex<TrackKey>>,
+}
+
+impl Keys {
+	pub(crate) fn new(group: TrackKey, datagram: TrackKey) -> Self {
 		Self {
-			inner,
-			group_key: Arc::new(Mutex::new(group_key)),
-			datagram_key,
-			next: 0,
+			group: Arc::new(Mutex::new(group)),
+			datagram: Arc::new(Mutex::new(datagram)),
 		}
+	}
+}
+
+impl Producer {
+	pub(crate) fn new(inner: moq_net::track::Producer, keys: Keys) -> Self {
+		Self { inner, keys, next: 0 }
 	}
 
 	/// The physical track name.
@@ -57,7 +67,7 @@ impl Producer {
 	pub fn create_group(&mut self, sequence: u64) -> Result<group::Producer> {
 		self.allocate(sequence)?;
 		let inner = self.inner.create_group(moq_net::group::Info { sequence })?;
-		Ok(group::Producer::new(inner, self.group_key.clone()))
+		Ok(group::Producer::new(inner, Arc::clone(&self.keys.group)))
 	}
 
 	/// Encrypt `plaintext` at the next sequence and insert the datagram, returning that sequence.
@@ -92,9 +102,12 @@ impl Producer {
 		plaintext: &[u8],
 	) -> Result<()> {
 		self.reserve(sequence)?;
-		let payload = self
-			.datagram_key
-			.protect(sequence, 0, plaintext, MAX_DATAGRAM_PAYLOAD)?;
+		let payload =
+			self.keys
+				.datagram
+				.lock()
+				.expect("track key")
+				.protect(sequence, 0, plaintext, MAX_DATAGRAM_PAYLOAD)?;
 		self.next = sequence + 1;
 		self.inner.insert_datagram(sequence, timestamp, payload)?;
 		Ok(())
@@ -136,7 +149,7 @@ impl Producer {
 
 	#[cfg(test)]
 	pub(crate) fn datagram_invocations(&self) -> u64 {
-		self.datagram_key.invocations()
+		self.keys.datagram.lock().expect("track key").invocations()
 	}
 }
 
@@ -149,26 +162,118 @@ impl fmt::Debug for Producer {
 	}
 }
 
+/// A reserved track its subscribers wait on until it is accepted.
+///
+/// Made by [`broadcast::Producer::reserve_track`](crate::broadcast::Producer::reserve_track),
+/// with its physical name already claimed. Accept it once its [`demand`](Self::demand) shows a
+/// subscriber, or up front. Dropping it without [`accept`](Self::accept) rejects the waiting
+/// subscribers.
+pub struct Request {
+	inner: moq_net::track::Request,
+	keys: Keys,
+}
+
+impl Request {
+	pub(crate) fn new(inner: moq_net::track::Request, keys: Keys) -> Self {
+		Self { inner, keys }
+	}
+
+	/// The physical track name.
+	pub fn name(&self) -> &str {
+		self.inner.name()
+	}
+
+	/// Watch subscriber demand without keeping the track alive.
+	pub fn demand(&self) -> moq_net::track::Demand {
+		self.inner.demand()
+	}
+
+	/// Serve the track, resolving every waiting subscriber.
+	pub fn accept(self, info: impl Into<Option<moq_net::track::Info>>) -> Producer {
+		Producer::new(self.inner.accept(info), self.keys)
+	}
+
+	/// Fail every waiting subscriber with `err`. The physical name stays claimed.
+	pub fn reject(self, err: moq_net::Error) {
+		self.inner.reject(err);
+	}
+}
+
+impl fmt::Debug for Request {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct("track::Request").field("name", &self.name()).finish()
+	}
+}
+
+/// The pollable state of a [`broadcast::Consumer::subscribe`](crate::broadcast::Consumer::subscribe);
+/// awaited via the [`kio::Pending`] wrapper, whose `DerefMut` exposes [`Self::update`].
+pub struct Subscribing {
+	inner: kio::Pending<moq_net::track::Subscribing>,
+	generation: crate::generation::Consumer,
+	// Keys derive from the name subscribed to, never from the name a relay hands back.
+	semantic: String,
+}
+
+impl Subscribing {
+	pub(crate) fn new(
+		inner: kio::Pending<moq_net::track::Subscribing>,
+		generation: crate::generation::Consumer,
+		semantic: String,
+	) -> Self {
+		Self {
+			inner,
+			generation,
+			semantic,
+		}
+	}
+
+	/// Poll until the track is found, yielding a decrypting [`Consumer`].
+	///
+	/// # Errors
+	///
+	/// A net error if the track is aborted or not found.
+	pub fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<Consumer>> {
+		let subscriber = ready!(self.inner.poll_ok(waiter))?;
+		Poll::Ready(self.generation.consume(subscriber, &self.semantic))
+	}
+
+	/// Change the subscription preferences before (or after) it resolves.
+	///
+	/// # Errors
+	///
+	/// [`moq_net::Error::Closed`] if the track already ended.
+	pub fn update(&mut self, subscription: moq_net::track::Subscription) -> Result<()> {
+		Ok(self.inner.update(subscription)?)
+	}
+}
+
+impl kio::Task for Subscribing {
+	type Output = Result<Consumer>;
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {
+		self.poll_ok(waiter)
+	}
+}
+
 /// Subscriber for one physical track.
 ///
 /// Grouped authentication failure ends the track and wakes pending reads with
-/// [`Error::Authentication`]. A bad datagram is an [`Event::Authentication`] until
-/// that key is exhausted.
+/// [`Error::Authentication`]. A datagram that fails to open is dropped as an
+/// [`Event::Identity`], [`Event::Oversize`], or [`Event::Authentication`] until that key is exhausted.
 pub struct Consumer {
 	name: String,
-	group_key: Arc<Mutex<TrackKey>>,
-	datagram_key: TrackKey,
+	// Shared with every other subscription to this name under the generation.
+	keys: Keys,
 	window: DatagramWindow,
 	terminal: Arc<Terminal>,
 }
 
 impl Consumer {
-	pub(crate) fn new(inner: moq_net::track::Subscriber, group_key: TrackKey, datagram_key: TrackKey) -> Self {
+	pub(crate) fn new(inner: moq_net::track::Subscriber, keys: Keys) -> Self {
 		let name = inner.name().to_string();
 		Self {
 			name,
-			group_key: Arc::new(Mutex::new(group_key)),
-			datagram_key,
+			keys,
 			window: DatagramWindow::default(),
 			terminal: Terminal::new(Some(inner)),
 		}
@@ -186,7 +291,7 @@ impl Consumer {
 	/// [`Error::Authentication`] once a grouped frame has failed to open, or a net error.
 	pub fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		let terminal = Arc::clone(&self.terminal);
-		let group_key = Arc::clone(&self.group_key);
+		let group_key = Arc::clone(&self.keys.group);
 		terminal.poll_subscription(waiter, |inner, waiter| {
 			let Some(inner) = ready!(inner.poll_recv_group(waiter)?) else {
 				return Poll::Ready(Ok(None));
@@ -210,18 +315,19 @@ impl Consumer {
 
 	/// Poll for the next datagram event.
 	///
-	/// A bad tag and a duplicate are events, not track-ending errors.
+	/// A datagram that fails to open (a sequence out of range, a bad size, or a forged tag) and
+	/// a duplicate are events, not track-ending errors.
 	///
 	/// # Errors
 	///
 	/// [`Error::Authentication`] only if a grouped frame already failed,
-	/// [`Error::Oversize`] or [`Error::Exhausted`] from opening, or a net error.
+	/// [`Error::Exhausted`] from opening, or a net error.
 	pub fn poll_recv_datagram(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Event>>> {
 		let terminal = Arc::clone(&self.terminal);
 		terminal.poll_subscription(waiter, |inner, waiter| self.open_datagram(inner, waiter))
 	}
 
-	/// Open one datagram. A bad tag stays an event; exhausting the datagram key does not.
+	/// Open one datagram. A bad datagram stays an event; exhausting the datagram key does not.
 	fn open_datagram(
 		&mut self,
 		inner: &mut moq_net::track::Subscriber,
@@ -234,10 +340,13 @@ impl Consumer {
 		if self.window.is_duplicate(sequence) {
 			return Poll::Ready(Ok(Some(Event::Duplicate { sequence })));
 		}
-		match self
-			.datagram_key
-			.open(sequence, 0, &datagram.payload, MAX_DATAGRAM_PAYLOAD)
-		{
+		let opened =
+			self.keys
+				.datagram
+				.lock()
+				.expect("track key")
+				.open(sequence, 0, &datagram.payload, MAX_DATAGRAM_PAYLOAD);
+		match opened {
 			Ok(plaintext) => {
 				self.window.mark(sequence);
 				Poll::Ready(Ok(Some(Event::Datagram(Datagram {
@@ -249,6 +358,8 @@ impl Consumer {
 			// A bad datagram is not grouped failure: the track, its demand, and any
 			// parked grouped read stay up. `exhausted` is this key's own limit.
 			Err(Error::Authentication) => Poll::Ready(Ok(Some(Event::Authentication { sequence }))),
+			Err(Error::Identity) => Poll::Ready(Ok(Some(Event::Identity { sequence }))),
+			Err(Error::Oversize) => Poll::Ready(Ok(Some(Event::Oversize { sequence }))),
 			Err(err) => Poll::Ready(Err(err)),
 		}
 	}

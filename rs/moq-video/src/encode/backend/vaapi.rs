@@ -41,8 +41,9 @@ use moq_vaapi::encode::{Config as VaapiConfig, Encoder};
 
 use super::super::encoder::{Applied, Codec, Config, Gop, Preset};
 use super::{Backend, Encoded, keyframe_annexb};
+use crate::color::Matrix;
 use crate::frame::{DmaBuf, DrmFormat, I420, vaapi};
-use crate::{Error, Frame, Surface};
+use crate::{Color, Error, Frame, Surface};
 
 pub(crate) const NAME: &str = "vaapi";
 
@@ -68,9 +69,19 @@ impl Vaapi {
 	fn new(config: &Config) -> Result<Self, Error> {
 		let bitrate = config.resolved_bitrate().as_bps().min(u32::MAX as u64) as u32;
 		let Gop::Keyframe { interval } = config.gop;
+		// moq-vaapi derives the VUI's primaries and transfer from the matrix, the
+		// way SD and HD video pair them, so any other pairing is refused.
+		let color = config.resolved_color();
+		let paired = match color.matrix {
+			Matrix::Bt601 => Color::BT601,
+			_ => Color::BT709,
+		};
+		if color != paired.with_range(color.range) {
+			return Err(Error::Unsupported(format!("VA-API cannot signal {color:?}")));
+		}
 		let vaapi = VaapiConfig {
 			device: vaapi::device().map(Path::to_path_buf),
-			color: vaapi::color(config.resolved_color()),
+			color: vaapi::color(color)?,
 			..VaapiConfig::new(
 				config.width,
 				config.height,
@@ -227,7 +238,7 @@ mod tests {
 	use crate::decode::backend as decode_backend;
 	use crate::decode::{Codec as DecodeCodec, Config as DecodeConfig, Kind as DecodeKind};
 	use crate::encode::{Encoder as CrateEncoder, Kind as EncodeKind};
-	use crate::{Output, Rate, Size};
+	use crate::{FrameRate, Output, Size};
 
 	const WIDTH: u32 = 320;
 	const HEIGHT: u32 = 240;
@@ -235,7 +246,7 @@ mod tests {
 	fn config() -> Config {
 		Config {
 			kind: EncodeKind::Named(NAME.into()),
-			..Config::new(WIDTH, HEIGHT, Rate::new(30, 1).unwrap())
+			..Config::new(WIDTH, HEIGHT, FrameRate::new(30, 1).unwrap())
 		}
 	}
 
@@ -378,7 +389,7 @@ mod tests {
 		// A software-encoded source stream, decoded by VA-API into DMA-BUFs.
 		let mut source = CrateEncoder::new(&Config {
 			kind: EncodeKind::Software,
-			..Config::new(WIDTH, HEIGHT, Rate::new(30, 1).unwrap())
+			..Config::new(WIDTH, HEIGHT, FrameRate::new(30, 1).unwrap())
 		})
 		.unwrap();
 		let mut hardware = decoder(NAME, Output::Native);
@@ -536,13 +547,13 @@ mod tests {
 		// Opposite of the space `resolved_color` would infer from the size, so a
 		// backend that ignores `Config::color` cannot pass.
 		for (size, color, described) in [
-			(Size::new(640, 480), Color::Bt709Limited, BT709_DESCRIBED),
-			(Size::new(1920, 1080), Color::Bt601Limited, BT601_DESCRIBED),
+			(Size::new(640, 480), Color::BT709, BT709_DESCRIBED),
+			(Size::new(1920, 1080), Color::BT601, BT601_DESCRIBED),
 		] {
 			let config = Config {
 				kind: EncodeKind::Named(NAME.into()),
 				color: Some(color),
-				..Config::new(size.width, size.height, Rate::new(30, 1).unwrap())
+				..Config::new(size.width, size.height, FrameRate::new(30, 1).unwrap())
 			};
 			let Ok(mut backend) = Vaapi::new(&config) else {
 				eprintln!("skipping: no VA-API H.264 encoder");

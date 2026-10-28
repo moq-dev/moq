@@ -29,7 +29,9 @@
 //! Instead an append that might not fit is refused with [`moq_net::Error::GroupTooLarge`] before
 //! it is encoded, and the log stays intact and writable. With compression the check counts the
 //! record's raw size plus DEFLATE's worst-case overhead, since the compressed size is only known
-//! once the window has moved. The budget covers the whole log rather than a single record, so once
+//! once the window has moved, and each written record is charged its raw size: a reader's DEFLATE
+//! window is held to the same budget, so compression shrinks the wire but not how much a log can
+//! hold. The budget covers the whole log rather than a single record, so once
 //! it is spent every append is refused: the live stream is bounded history by design, a publisher
 //! with more to say opens a new track, and deep history is served from a recording.
 //!
@@ -48,6 +50,9 @@ pub use consumer::Consumer;
 pub use decoder::Decoder;
 pub use encoder::{Config, Encoder, Pending};
 pub use producer::Producer;
+
+#[cfg(test)]
+use futures::FutureExt;
 
 #[cfg(test)]
 mod test {
@@ -123,16 +128,13 @@ mod test {
 	fn demand_follows_subscribers() {
 		let (producer, consumer) = producer(Config::default());
 		let demand = producer.demand();
-		let waiter = kio::Waiter::noop();
-		assert!(matches!(demand.poll_used(&waiter), Poll::Ready(Ok(()))));
+		assert_eq!(demand.wanted(), Some(0));
 
 		drop(consumer);
-		assert!(matches!(demand.poll_unused(&waiter), Poll::Ready(Ok(()))));
-		assert!(demand.poll_used(&waiter).is_pending());
+		assert_eq!(demand.wanted(), None);
 
 		let _consumer = producer.consume();
-		assert!(matches!(demand.poll_used(&waiter), Poll::Ready(Ok(()))));
-		assert!(demand.poll_unused(&waiter).is_pending());
+		assert_eq!(demand.wanted(), Some(0));
 	}
 
 	fn compressed() -> Config {
@@ -159,7 +161,7 @@ mod test {
 		let waiter = kio::Waiter::noop();
 		let mut out = Vec::new();
 		while let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&waiter) {
-			out.push(value);
+			out.push(value.value);
 		}
 		out
 	}
@@ -197,28 +199,18 @@ mod test {
 	}
 
 	#[test]
-	fn compressed_roundtrip_in_order() {
-		let (mut producer, track) = producer(compressed());
-		for n in 0..20 {
-			producer.append(&json!({ "group": n, "pts": n * 2_000 })).unwrap();
-		}
-		producer.finish().unwrap();
-
-		let records = drain(consume(track, true));
-		assert_eq!(records.len(), 20);
-		assert_eq!(records[7], json!({ "group": 7, "pts": 14_000 }));
-	}
-
-	#[test]
 	fn all_records_ride_one_group() {
-		let (mut producer, track) = producer(compressed());
+		let (mut producer, mut track) = producer(compressed());
 		for n in 0..50 {
 			producer.append(&json!({ "n": n })).unwrap();
 		}
 		producer.finish().unwrap();
 
 		// Never rolled: a single group holds the whole log.
-		assert_eq!(track.latest(), Some(0));
+		assert_eq!(
+			track.largest().now_or_never().flatten().map(|position| position.group),
+			Some(0)
+		);
 		assert_eq!(drain(consume(track, true)).len(), 50);
 	}
 
@@ -231,7 +223,7 @@ mod test {
 		for n in 0..3 {
 			producer.append(&json!({ "n": n })).unwrap();
 			match consumer.poll_next(&waiter) {
-				Poll::Ready(Ok(Some(value))) => assert_eq!(value, json!({ "n": n })),
+				Poll::Ready(Ok(Some(value))) => assert_eq!(value.value, json!({ "n": n })),
 				other => panic!("expected record, got {other:?}"),
 			}
 		}
@@ -286,7 +278,15 @@ mod test {
 				.is_err()
 		);
 
-		assert_eq!(subscriber.latest(), None, "a rejected record opened a group");
+		assert_eq!(
+			subscriber
+				.largest()
+				.now_or_never()
+				.flatten()
+				.map(|position| position.group),
+			None,
+			"a rejected record opened a group"
+		);
 
 		let waiter = kio::Waiter::noop();
 		assert!(
@@ -408,7 +408,7 @@ mod test {
 
 		assert!(matches!(
 			consumer.poll_next(&waiter),
-			Poll::Ready(Ok(Some(value))) if value == json!({ "n": 0 })
+			Poll::Ready(Ok(Some(value))) if value.value == json!({ "n": 0 })
 		));
 		assert!(matches!(
 			consumer.poll_next(&waiter),
@@ -453,6 +453,18 @@ mod test {
 				"compression={compression}"
 			);
 		}
+	}
+
+	/// A compressed record is charged its plaintext, since that is what a reader's window inflates:
+	/// two records that each fit, and deflate to almost nothing, still overflow the budget together.
+	#[test]
+	fn a_compressed_log_is_charged_its_inflated_size() {
+		let (mut producer, track) = producer(compressed());
+		let half = Value::String("x".repeat(moq_net::group::MAX_CACHE_BYTES as usize / 2));
+		producer.append(&half).unwrap();
+		assert!(refused(producer.append(&half)));
+		producer.finish().unwrap();
+		assert_eq!(drain(consume(track, true)), vec![half]);
 	}
 
 	/// The budget covers the whole log, so once its frames are spent every append is refused, and

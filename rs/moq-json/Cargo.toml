@@ -25,8 +25,9 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+futures = { workspace = true }
 json-patch = "4"
-proptest = { version = "1.12.0", default-features = false, features = ["std", "handle-panics"] }
+proptest = { workspace = true, features = ["handle-panics"] }
 
 [[bench]]
 name = "codec"
@@ -43,3 +44,11 @@ harness = false
 [[bench]]
 name = "window"
 harness = false
+
+# Run the documented example's inline test in the normal nextest gate.
+[[example]]
+name = "teleop"
+test = true
+
+[lints]
+workspace = true

@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
+import { Milli } from "@moq/clock";
 import Session from "@moq/qmux";
 import { connect } from "../../js/net/src/connection/connect.ts";
 import { Producer } from "../../js/net/src/origin.ts";
 import * as Path from "../../js/net/src/path.ts";
-import { Milli } from "../../js/net/src/time.ts";
 
 // stdout carries the `ready` handshake to the Rust test, so library debug logs go to stderr.
 console.debug = console.error;
@@ -14,9 +14,10 @@ if (!address || !protocol || !["publish", "subscribe"].includes(mode))
 const origin = new Producer();
 const ages = [undefined, Milli(0), Milli(30_000)];
 if (mode === "publish") {
-	const broadcast = origin.createBroadcast(Path.from("age"));
+	const broadcastPublication = origin.createBroadcast(Path.from("age"));
+	const broadcast = broadcastPublication.broadcast;
 	for (const [i, maxAge] of ages.entries()) broadcast.createTrack(String(i), { maxAge });
-	broadcast.announce();
+	broadcastPublication.announce();
 }
 const url = new URL(address);
 const transport = new Session(url, {

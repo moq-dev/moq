@@ -1,16 +1,17 @@
 ---
 title: Demos
-description: The web demo and MoQ Boy
+description: The web demo, MoQ Boy, and CARLA
 ---
 
 # Demos
 
-Both run locally from a checkout and live at [moq.dev](https://moq.dev).
+Each runs locally from a checkout. The web demo and MoQ Boy also live at
+[moq.dev](https://moq.dev); CARLA's simulator needs a Linux host with an NVIDIA GPU.
 
 ## Web demo
 
 ```bash
-just            # relay + Big Buck Bunny + the web UI at http://localhost:5173
+just            # relay + Big Buck Bunny + the web UI at http://localhost:5173/watch.html
 ```
 
 A Vite app in [`demo/web/`](https://github.com/moq-dev/moq/tree/main/demo/web)
@@ -48,3 +49,24 @@ and publisher), [`js/moq-boy`](https://github.com/moq-dev/moq/tree/main/js/moq-b
 (the `<moq-boy>` element, published as `@moq/boy`), and
 [`demo/boy`](https://github.com/moq-dev/moq/tree/main/demo/boy). The same
 shape covers teleoperation: swap the emulator for a robot.
+
+## CARLA
+
+Teleoperation over MoQ: simulated trucks drive themselves through one
+[CARLA](https://carla.org) world until you take one over from the browser.
+The simulator needs a Linux host with an NVIDIA GPU and an image built by
+[moq-dev/carla](https://github.com/moq-dev/carla); the player runs anywhere.
+
+```bash
+just carla venv                       # once: the worker
+CARLA_IMAGE=<tag> just carla server   # leave the simulator running
+just carla                            # relay + trucks + player
+```
+
+What it demonstrates:
+
+- **GPU to wire.** Camera images never leave the GPU: `moq-video` encodes them on the device that rendered them, and a camera renders only while someone subscribes.
+- **Control with a lease.** A driver publishes a JSON `control` track under `viewer/carla/{truck}/`; the truck accepts one driver at a time, bound to the epoch it announced with, and returns to autonomy when the lease lapses.
+- **Measured feedback.** Each truck's `status` track carries what the gate accepted and what the vehicle did, so the player draws requested against measured steering.
+
+Code: [`demo/carla`](https://github.com/moq-dev/moq/tree/main/demo/carla).

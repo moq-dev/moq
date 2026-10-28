@@ -1,4 +1,4 @@
-import * as Moq from "@moq/net";
+import { Milli } from "@moq/clock";
 import type { Effect } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
 import type MoqWatch from "../../element";
@@ -25,7 +25,7 @@ export function latencyTab(parent: Effect, watch: MoqWatch): HTMLElement {
 	const buttons = PRESETS.map((preset) => {
 		const chip = DOM.create("button", { className: "chip", type: "button" }, preset.label);
 		parent.event(chip, "click", () => {
-			watch.delay = preset.value === "auto" ? "auto" : Moq.Time.Milli(preset.value);
+			watch.delay = preset.value === "auto" ? "auto" : Milli(preset.value);
 		});
 		chips.appendChild(chip);
 		return { preset, chip };
@@ -42,22 +42,17 @@ export function latencyTab(parent: Effect, watch: MoqWatch): HTMLElement {
 	// The draggable buffered-range timeline.
 	const timeline = bufferControl(parent, watch);
 
-	// Numeric readout: resolved jitter + total end-to-end buffer.
+	// Numeric readout: the resolved delay.
 	const readout = DOM.create("div", { className: "latency-readout" });
-	const jitterStat = DOM.create("div", { className: "latency-stat" });
-	const jitterVal = DOM.create("span", { className: "latency-stat-value" }, "—");
-	jitterStat.append(DOM.create("span", { className: "latency-stat-label" }, "Jitter buffer"), jitterVal);
-	const bufferStat = DOM.create("div", { className: "latency-stat" });
-	const bufferVal = DOM.create("span", { className: "latency-stat-value" }, "—");
-	bufferStat.append(DOM.create("span", { className: "latency-stat-label" }, "Total buffer"), bufferVal);
-	readout.append(jitterStat, bufferStat);
+	const delayStat = DOM.create("div", { className: "latency-stat" });
+	const delayVal = DOM.create("span", { className: "latency-stat-value" }, "—");
+	delayStat.append(DOM.create("span", { className: "latency-stat-label" }, "Delay"), delayVal);
+	readout.append(delayStat);
 
 	parent.run((effect) => {
 		const mode = effect.get(watch.controls.delay);
-		const jitter = effect.get(watch.sync.out.jitter);
-		const total = effect.get(watch.sync.out.delay);
-		jitterVal.textContent = `${formatMillis(jitter)}${mode === "auto" ? " (auto)" : ""}`;
-		bufferVal.textContent = formatMillis(total);
+		const delay = effect.get(watch.sync.out.delay);
+		delayVal.textContent = `${formatMillis(delay)}${mode === "auto" ? " (auto)" : ""}`;
 	});
 
 	const hint = DOM.create(

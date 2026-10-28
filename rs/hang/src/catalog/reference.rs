@@ -4,10 +4,14 @@ use super::{AudioConfig, BinaryConfig, JsonConfig, TextConfig, VideoConfig};
 ///
 /// An entry's key in the catalog is its ID. The track it names is `track` when set and the ID
 /// otherwise, in `broadcast` when set and the catalog's own broadcast otherwise. Every reader
-/// subscribes through [`track`](Self::track) so the two never diverge.
+/// subscribes through [`track`](Self::track) so the two never diverge. [`epoch`](Self::epoch)
+/// optionally names the publisher instance the broadcast must be.
 pub trait Reference {
 	/// The broadcast publishing the track, relative to the catalog's; `None` is the catalog's own.
-	fn broadcast(&self) -> Option<&moq_net::path::RelativeOwned>;
+	fn broadcast(&self) -> Option<&moq_net::path::Relative>;
+
+	/// The publisher instance the broadcast must be; `None` accepts the first one resolved.
+	fn epoch(&self) -> Option<&moq_net::Epoch>;
 
 	/// The track's name in its broadcast, given this entry's ID.
 	fn track<'a>(&'a self, id: &'a str) -> &'a str;
@@ -16,8 +20,12 @@ pub trait Reference {
 macro_rules! reference {
 	($($config:ty),*) => {$(
 		impl Reference for $config {
-			fn broadcast(&self) -> Option<&moq_net::path::RelativeOwned> {
+			fn broadcast(&self) -> Option<&moq_net::path::Relative> {
 				self.broadcast.as_ref()
+			}
+
+			fn epoch(&self) -> Option<&moq_net::Epoch> {
+				self.epoch.as_ref()
 			}
 
 			fn track<'a>(&'a self, id: &'a str) -> &'a str {

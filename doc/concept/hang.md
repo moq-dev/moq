@@ -20,9 +20,7 @@ payloads follow [moq-e2ee](/draft/moq-e2ee). See [Encryption](#encryption).
 
 `catalog.json` is a JSON track listing the renditions of each media kind and
 the decoder config for each. It updates live as tracks come and go, and a
-compressed twin (`catalog.json.z`) is published alongside it. Catalog readers refuse an
-update with more than 64 video, audio, and text renditions combined, before
-opening media subscriptions. The refusal covers the whole update.
+compressed twin (`catalog.json.z`) is published alongside it.
 
 ```json
 {
@@ -63,14 +61,35 @@ decoder once per track.
 A few things the catalog can express beyond decoder config:
 
 - **Labels.** Any rendition may carry a human-readable `label` for a track picker. The map key stays the rendition's ID, so labels need not be unique and renaming one doesn't rename the track.
-- **Renditions in another broadcast.** A rendition may point at a relative broadcast path, so a transcoder can publish a ladder that adds low rungs and references the source's original rendition without re-publishing its bytes. The path resolves against where the consumer found the catalog, so a reference that escapes above the root names nothing and the catalog is rejected.
+- **Renditions in another broadcast.** A rendition may point at a relative broadcast path, so a transcoder can publish a ladder that adds low rungs and references the source's original rendition without re-publishing its bytes. The path resolves against where the consumer found the catalog, so a reference that escapes above the root names nothing and the catalog is rejected. `@moq/watch` and `moqsrc` follow a referenced path's announcements like their own, restarting the rendition on each instance that serves it; every other reader, such as `moq play`, the exporters, and the bindings, waits for the first one announced and keeps it, and an exporter ends the rendition with it. An optional `epoch` beside the path names the [publisher instance](/concept/moq-lite#publisher-epochs) it expects: a route proving another instance ends the rendition instead of falling back to it, while a route without an epoch (an older version) cannot prove one, so there it is best effort.
 - **Track names.** The map key is a rendition's ID and, by default, its track name. A rendition sets `track` only when the two must differ, such as two renditions of same-named tracks in different broadcasts, or a rendition whose media changed and so needs a new name; readers subscribe to `track` when present. An ID can't name both a video and an audio rendition.
-- **Jitter.** A rendition can say how far its frames fell behind the media clock before the publisher flushed them, in whole milliseconds rounded up. Encoders report the spread of lateness above each rendition's own recent minimum, so a constant encoder delay is not jitter; container imports estimate batch spans without counting ingest delay. It describes the publisher, never the network, only grows over the life of a stream, and a player sizes its buffer to at least this much. A `0` is read as absent.
-- **Delay.** A rendition can also say how far its frames reach the transport behind the broadcast's earliest rendition, measured the same way from each rendition's minimum lateness, so a video encoder running 200 ms behind audio advertises `delay: 200` on video. It follows the same rules as jitter. A player holds the largest `delay + jitter` among the renditions it subscribes to, and never subtracts one rendition's `delay` from another's.
+- **Jitter.** A rendition can say how much media it writes behind a frame's timestamp, in whole milliseconds rounded up: the reorder delay of B-frames and the span of a fragment or batch written together. It is measured from media timestamps alone, never the time a frame was written, so neither a constant encoder delay nor a capture clock counts. It describes the publisher, never the network, only grows over the life of a stream, and a player sizes its buffer to at least this much. A `0` is read as absent.
+- **Delay.** A rendition can also say how far its frames' timestamps trail those another rendition already wrote, so a video encoder running 200 ms behind audio advertises `delay: 200` on video. A rendition alone measures none. It follows the same rules as jitter. A player holds the largest `delay + jitter` among the renditions it subscribes to, and never subtracts one rendition's `delay` from another's.
+- **Reorder depth.** A video rendition may declare `reorder`, the most frames that can precede one in decode order and follow it in presentation, as H.264 `max_num_reorder_frames` counts them; `0` declares none, which is not the same as absent. The Rust H.264 and H.265 importers copy it from the SPS when the SPS declares one (progressive H.264 only), and `@moq/publish` declares `0`. The MPEG-TS, Matroska, and FLV exporters then derive each group's decode times from that group's frames alone, so exports that joined at different groups agree, and they end the export on a frame reordered deeper than declared or a depth the codec level cannot reach. Without it they infer decode times from the timestamps they have read, as before. A publisher never changes it once declared.
+- **Colour.** A video rendition may carry `color`: the H.273 primaries, transfer, matrix, and range, plus the HDR10 mastering display and content light levels, so a renderer can set up HDR without parsing the bitstream. The Rust importers fill it from the SPS VUI, AV1 sequence header, and VP9 header, then fill gaps from a container's `colr` box or Matroska `Colour` element; the stream wins a disagreement. The HDR10 values come from H.264 and H.265 SEI or AV1 metadata OBUs in MPEG-TS and raw elementary streams, an AV1 track's av1C, or Matroska, but not yet from H.264 or H.265 in fMP4 or FLV. Nothing in `@moq/watch` reads it yet.
+- **Spatial media.** A video rendition may carry `projection` (flat `rectilinear`, or `equirectangular` with the degrees of longitude it spans, 180 for VR180) and `stereo` (`mono`, `left-right`, or `top-bottom` frame packing), and an audio rendition may carry `layout: "ambisonic"` for AmbiX channels. Readers treat a value they don't recognize as absent. Nothing in `@moq/watch` renders them yet.
 - **Disabled renditions.** An audio or video rendition with `enabled: false` has no frames coming, and a player must not select it. Pausing a rendition in `@moq/publish` keeps it in the catalog this way rather than removing it, so a mute is a one-field update; a disabled video rendition encodes one black keyframe first, so a player that predates the field shows black instead of a frozen picture. The field is written only when false. The older video `stalled` field is no longer written, and readers ignore it.
-- **Archive.** A broadcast may advertise an `archive` entry mapping each track, the catalog included, to its own timeline track (a small index of the track's spans: timing plus group and frame positions) and, if recorded, the replay MoQ path, object-store URL, and format version. Every track is cut by one rule, at group boundaries between 2s and 10s (a zero minimum for sparse data such as the catalog), and tracks commit and expire independently. The timelines are what let the [HLS gateway](/bin/hls) build playlists without subscribing to media. A reader that cannot decode the `archive` entry, such as one from a different version, ignores it and loses the timelines and replay, but live media still plays.
-- **Clock.** The optional root `clock` maps PTS zero to wall time so every media track and the archive index share one fixed epoch after timescale conversion. It is independent of `archive`, so a live-only publisher can expose wall-clock timing without creating a timeline. Publish independent sources as sibling broadcasts under one prefix, such as `robot/front.hang` and `robot/rear.hang`; each broadcast's audio and video entries are renditions of that source. In one Rust publisher, pass the same `moq_mux::Clock` to each `catalog::Config::with_clock`; JS publishers on one page already share the page clock. Consumers discover the siblings by prefix and align their timestamps through the advertised wall mapping; `@moq/watch` plays one broadcast at a time.
+- **Preference.** A video rendition may carry a signed `preference`, default `0`. A player keeps only the highest preference it can decode, then picks by size and bitrate within it, as do the single-rendition egresses (RTMP play, WHEP, FLV, the transcoder's source). A publisher that adds its own H.264 copy of an H.265 source marks the copy `-1`, so only a viewer that can't decode H.265 pulls it. Picking a rendition by name still overrides it. The field is written only when nonzero.
+- **HLS records.** A video or audio rendition may carry an `hls` field naming a small track of HLS segment records, each segment's first group and pts, plus the nominal segment duration. Each rendition numbers its own segments, and an edge serves a rendition's segment `n` from its record `n`; segments line up across renditions wherever their keyframes do. The records are what let the [HLS gateway](/bin/hls) build playlists without subscribing to media; a rendition without them gets no playlist. Rust publishers (`moq-mux` and everything built on it) publish them by default; `@moq/publish` does not yet. A reader that cannot decode the field ignores it.
+- **Clock.** The optional root `clock` maps PTS zero to wall time so every media track and every HLS record share one fixed epoch after timescale conversion. Publish independent sources as sibling broadcasts under one prefix, such as `robot/front.hang` and `robot/rear.hang`; each broadcast's audio and video entries are renditions of that source. In one Rust publisher, pass the same `moq_mux::Clock` to each `catalog::Config::with_clock`; JS publishers on one page already share the page clock. Consumers discover the siblings by prefix and align their timestamps through the advertised wall mapping; `@moq/watch` plays one broadcast at a time.
+- **Version.** The root `version` is the oldest moq-hang draft that reads the catalog correctly, written only when a field needs one newer than 03: a `track` that differs from its ID, or a video `warmup`. Readers ignore fields they don't know, but refuse a `version` above their own with a typed "unsupported catalog version" error, so a player can say to upgrade instead of misreading the catalog. An additive field never raises it.
 - **Extensions.** The root is a loose object. Applications add their own sections (`scte35`, for example) next to the ones hang defines, optionally naming a track that carries the data. Every library exposes a way to write your section without clobbering the built-in ones, and readers ignore what they don't know.
+
+## Media reports
+
+A catalog may name a publisher snapshot track with `stats: { track }` and
+solicit viewer feedback with `echo: { path }`. Applications can use hang's
+shared Rust and JS snapshot schemas to exchange per-rendition delivery and
+playout measurements, alongside transport measurements. The echo path is
+relative to the catalog broadcast; an application assigns one `.echo` name
+per viewer and soliciting catalog, and controls the token rights under that
+prefix. Echo broadcasts carry `feedback.json` without a media catalog, so
+readers can filter them from playable content.
+
+These are schema and discovery primitives. The publishers and players do not
+automatically produce reports. MSF catalogs omit both sections. See
+[media stats](/concept/stats#media-reports) for the roles and the
+[hang draft](/draft/moq-hang#media-stats) for their contract.
 
 ## Text
 
@@ -121,7 +140,7 @@ into it on a raw track.
 The rest is descriptive: `compression` (`deflate`, the same group-scoped
 `deflate-raw` the catalog uses), `schema` on a JSON track, `mime` on a binary
 one, `bitrate`, `jitter`, and `delay` with the same meaning as for media, plus
-the optional `broadcast` reference and `track` name. A publisher measures `jitter` and `delay`
+the optional `broadcast` reference and `track` name. A publisher measures `delay`
 only from payloads stamped with their capture time on the broadcast clock. A
 consumer that doesn't recognize a `mode` or `compression` ignores that track and
 round-trips it verbatim.
@@ -151,11 +170,11 @@ service. The root `m2ts` section names the one track holding it:
 
 Each frame is a run of whole 188-byte packets in input order, timestamped on
 the multiplex's own PCR clock, which never steps back: a source whose clock
-steps back is a new broadcast. `randomAccess` says whether every group begins
-where a receiver can start decoding, and `muxRate` is the constant multiplex
-rate in bits per second, absent for a variable-rate source. A player has
-nothing to decode here. `moq import ts --passthrough` writes this section (see
-[moq-cli](/bin/cli)); the encoding is in
+steps back is a new broadcast. `randomAccess` says whether every published group
+began where a receiver can start decoding, and `muxRate` is the measured
+constant multiplex rate in bits per second, absent for a variable-rate source.
+A player has nothing to decode here. `moq import ts --passthrough` writes this
+section (see [moq-cli](/bin/cli)); the encoding is in
 [draft-lcurley-moq-mpegts](/draft/moq-mpegts).
 
 ## Container
@@ -185,7 +204,8 @@ without waiting for the next frame. Audio has codec-defined durations, and CMAF
 carries sample durations directly, so neither needs per-group duration markers.
 Audio retains its separate terminal marker before codec drain packets, allowing
 consumers to discard encoder padding beyond the source endpoint. Empty payloads
-on data tracks remain data, including empty text cues.
+on data tracks remain data, including empty text cues, so a data track marks a
+discontinuity with a group of one object with no bytes instead.
 
 ## Groups and keyframes
 

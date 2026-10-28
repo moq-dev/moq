@@ -2,7 +2,7 @@
 
 ## Goal
 
-Implement and verify the remaining 10-bit HEVC encoding work tracked in
+Implement and verify the remaining 10-bit HEVC encoding work described in
 [#2147](https://github.com/moq-dev/moq/issues/2147). NVDEC AV1 decoding and
 catalog AV1 types already exist; do not reimplement them.
 
@@ -30,10 +30,6 @@ run the hardware tests on the [GPU CI](/quest/m2/gpu-ci.md) host.
 
 Public API: additive capabilities on the extension points settled on main. Wire: existing
 codec signaling, with cross-language fixtures for any metadata change.
-
-## Closes
-
-- [#2147](https://github.com/moq-dev/moq/issues/2147) - close this issue when the quest finishes
 
 ## Related
 

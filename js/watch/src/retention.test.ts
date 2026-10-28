@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import { type Micro, Milli, Nano, now } from "@moq/clock";
 import { Container } from "@moq/hang";
 import * as Moq from "@moq/net";
 import { Time } from "@moq/net";
@@ -57,15 +58,15 @@ async function pendingListeners(run: () => Promise<void>): Promise<number> {
 // Frames sleep on the clock once each, so a sleep that keeps anything on a clock that never changes
 // piles it up for the life of the player.
 test("waits on a stable clock leave nothing behind", async () => {
-	const sync = new Sync({ delay: Time.Milli(10) });
+	const sync = new Sync({ delay: Milli(10) });
 	// Let the delay effect run before anchoring.
 	await new Promise((resolve) => setTimeout(resolve, 0));
-	sync.received(Time.Milli.now());
+	sync.received(Nano.toMilli(Nano(now())));
 
 	const wait = async () => {
 		for (let round = 0; round < 10; round++) {
-			const now = Time.Milli.now();
-			await Promise.all(Array.from({ length: 100 }, () => sync.wait(now)));
+			const at = Nano.toMilli(Nano(now()));
+			await Promise.all(Array.from({ length: 100 }, () => sync.wait(at)));
 		}
 	};
 	expect(await pendingReactions(wait)).toBe(0);
@@ -80,11 +81,11 @@ test("waits on a stable clock leave nothing behind", async () => {
 test("a long subscription through the player path leaves nothing behind", async () => {
 	const broadcast = new Moq.Broadcast.Producer();
 	// A tiny publisher window, so the track's own replay cache stays flat too.
-	const track = broadcast.createTrack("audio", { timescale: Time.Timescale.MILLI, maxAge: Time.Milli(1) });
+	const track = broadcast.createTrack("audio", { timescale: Time.Timescale.MILLI, maxAge: Milli(1) });
 	const format = new Container.Legacy.Format("audio");
 	const producer = new Container.Legacy.Producer(track, format);
 
-	const sync = new Sync({ delay: Time.Milli(10) });
+	const sync = new Sync({ delay: Milli(10) });
 	const effect = new Effect();
 	const sub = subscribeMedia(effect, {
 		broadcast: broadcast.consume(),
@@ -99,13 +100,13 @@ test("a long subscription through the player path leaves nothing behind", async 
 	const presenting = new Set<Promise<unknown>>();
 	const play = async (count: number) => {
 		for (let i = 0; i < count; i++) {
-			producer.encode(new Uint8Array([i & 0xff]), Math.round(Time.Micro.now()) as Time.Micro, true);
+			producer.encode(new Uint8Array([i & 0xff]), Math.round(Nano.toMicro(Nano(now()))) as Micro, true);
 			// Pass over any gap or end.
 			let next = await nextMedia(consumer);
 			while (next && next.kind !== "frame") next = await nextMedia(consumer);
 			if (!next) throw new Error("the track ended");
 
-			const timestamp = Time.Milli.fromMicro(next.frame.timestamp);
+			const timestamp = Milli.fromMicro(next.frame.timestamp);
 			sync.received(timestamp);
 			const presented = effect.race(sync.wait(timestamp));
 			presenting.add(presented);

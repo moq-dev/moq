@@ -9,7 +9,7 @@ use std::{net, path::PathBuf, str::FromStr, sync::Arc};
 use crate::quic::CongestionControl;
 use url::Url;
 use web_transport_iroh::iroh::{self, SecretKey};
-// NOTE: web-transport-iroh should re-export proto like web-transport-moq does.
+// NOTE: web-transport-iroh should re-export proto like `crate::quic::web` does.
 use web_transport_proto::{ConnectRequest, ConnectResponse};
 
 pub use iroh::Endpoint;
@@ -23,6 +23,50 @@ fn congestion_factory(family: CongestionControl) -> Arc<dyn iroh::endpoint::Cont
 	match family {
 		CongestionControl::Loss => Arc::new(noq_proto::congestion::CubicConfig::default()),
 		CongestionControl::Delay => Arc::new(noq_proto::congestion::Bbr3Config::default()),
+		CongestionControl::None => Arc::new(Unlimited),
+	}
+}
+
+/// No congestion control: a window that never shrinks, too large for noq to pace.
+///
+/// noq has no such controller, so this mirrors `moq_congestion::Unlimited`.
+#[derive(Clone, Copy, Debug)]
+struct Unlimited;
+
+#[expect(
+	clippy::disallowed_types,
+	reason = "noq's traits take its std instants, which this controller ignores"
+)]
+impl noq_proto::congestion::Controller for Unlimited {
+	fn on_congestion_event(&mut self, _: std::time::Instant, _: std::time::Instant, _: bool, _: bool, _: u64, _: u64) {}
+
+	fn on_mtu_update(&mut self, _: u16) {}
+
+	// noq turns its pacer off for any window past `u32::MAX`.
+	fn window(&self) -> u64 {
+		u64::MAX
+	}
+
+	fn clone_box(&self) -> Box<dyn noq_proto::congestion::Controller> {
+		Box::new(*self)
+	}
+
+	fn initial_window(&self) -> u64 {
+		u64::MAX
+	}
+
+	fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+		self
+	}
+}
+
+#[expect(
+	clippy::disallowed_types,
+	reason = "noq's traits take its std instants, which this controller ignores"
+)]
+impl noq_proto::congestion::ControllerFactory for Unlimited {
+	fn build(self: Arc<Self>, _: std::time::Instant, _: u16) -> Box<dyn noq_proto::congestion::Controller> {
+		Box::new(*self)
 	}
 }
 
@@ -112,7 +156,7 @@ pub enum Error {
 	RecvRequest(String),
 
 	/// GSO is always on for iroh, so `--quic-gso=false` cannot be honored.
-	#[error("the iroh backend cannot disable GSO; drop --quic-gso=false or use the noq backend")]
+	#[error("the iroh backend cannot disable GSO; drop --quic-gso=false or use the quic backend")]
 	GsoUnsupported,
 }
 
@@ -131,7 +175,7 @@ crate::error::from_message! {
 type Result<T> = std::result::Result<T, Error>;
 
 /// Settings for the shared iroh endpoint, used by both the client and server.
-#[derive(usage::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(usage_rs::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -200,8 +244,8 @@ impl Config {
 	/// iroh is a single P2P endpoint shared by both roles, so it takes the client
 	/// section (the per-connection knobs are symmetric). It honors the knobs its
 	/// transport-config builder exposes (stream limits, idle timeout, keep-alive,
-	/// MTU discovery, congestion control, flow-control windows). It cannot disable
-	/// GSO, so `gso = false` fails with [`Error::GsoUnsupported`].
+	/// MTU discovery, congestion control, flow-control windows), and key logging. It
+	/// cannot disable GSO, so `gso = false` fails with [`Error::GsoUnsupported`].
 	pub async fn bind(self, quic: &crate::quic::Config) -> Result<Option<Endpoint>> {
 		if !self.enabled.unwrap_or(false) {
 			return Ok(None);
@@ -218,6 +262,16 @@ impl Config {
 		quic.validate().map_err(Error::Config)?;
 
 		let quic = quic.resolve();
+		if quic.keep_alive.is_none() {
+			return Err(Error::Config(crate::Error::NoBackend(
+				"Iroh cannot disable keep-alive; omit quic.keep_alive or set a positive interval",
+			)));
+		}
+		if quic.keylog.is_some() {
+			return Err(Error::Config(crate::Error::NoBackend(
+				"Iroh does not support an explicit quic.keylog path",
+			)));
+		}
 		if quic.gso_disabled() {
 			return Err(Error::GsoUnsupported);
 		}
@@ -268,9 +322,9 @@ impl Config {
 /// The per-connection transport config, shared by both roles.
 ///
 /// `keep_alive` is the value [`crate::quic::Config::resolve`] already produced:
-/// `Some` is the interval, and `None` (`0s`) means disabled. iroh 1.2's setter
+/// `Some` is the interval, and `None` (`0s`) means disabled. iroh 1.4's setter
 /// only stores `Some`, and the builder starts at its own 5s heartbeat, so a
-/// disabled interval cannot be written. A zero duration would rearm the timer
+/// disabled interval is refused at bind. A zero duration would rearm the timer
 /// for immediately and spin, so it is not passed. iroh's separate per-path
 /// heartbeat stays at the 5s it ships with: that setter ignores anything longer
 /// and cannot clear it either.
@@ -288,17 +342,11 @@ fn transport_config(quic: &crate::quic::Resolved) -> iroh::endpoint::QuicTranspo
 	if !quic.mtu_discovery {
 		transport = transport.mtu_discovery_config(None);
 	}
-	// iroh's connection window is unlimited, so apply ours when unset.
-	let window = quic.receive_window.unwrap_or(crate::quic::DEFAULT_RECEIVE_WINDOW);
-	let window = iroh::endpoint::VarInt::from_u64(window).unwrap_or(iroh::endpoint::VarInt::MAX);
+	let window = iroh::endpoint::VarInt::from_u64(quic.receive_window).unwrap_or(iroh::endpoint::VarInt::MAX);
 	transport = transport.receive_window(window);
-	if let Some(window) = quic.stream_receive_window {
-		let window = iroh::endpoint::VarInt::from_u64(window).unwrap_or(iroh::endpoint::VarInt::MAX);
-		transport = transport.stream_receive_window(window);
-	}
-	if let Some(window) = quic.send_window {
-		transport = transport.send_window(window);
-	}
+	let window = iroh::endpoint::VarInt::from_u64(quic.stream_receive_window).unwrap_or(iroh::endpoint::VarInt::MAX);
+	transport = transport.stream_receive_window(window);
+	transport = transport.send_window(quic.send_window);
 	transport.congestion_controller_factory(congestion_factory(quic.congestion()))
 }
 
@@ -374,25 +422,16 @@ pub(crate) async fn accept(
 	}
 }
 
-/// Which transport binding an `iroh://` dial negotiated.
+/// Dial `url`, returning the session and where its request target travels.
 ///
-/// Unlike the other schemes, this isn't known until the ALPN is chosen, and it decides
-/// where the request target travels: H3 puts it in the CONNECT URL, raw QUIC has nowhere
-/// to put it but the SETUP.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Binding {
-	/// Raw QUIC over an iroh connection, carrying no request URI.
-	Raw,
-	/// WebTransport over HTTP/3, carrying the request URI in its CONNECT.
-	H3,
-}
-
+/// Unlike the other schemes, that isn't known until the ALPN is chosen: H3 puts it in
+/// the CONNECT URL, raw QUIC has nowhere to put it but the SETUP.
 pub(crate) async fn connect(
 	endpoint: &Endpoint,
 	url: Url,
 	addrs: impl IntoIterator<Item = std::net::SocketAddr>,
 	versions: &moq_net::Versions,
-) -> Result<(web_transport_iroh::Session, Binding)> {
+) -> Result<(web_transport_iroh::Session, moq_net::transport::Address)> {
 	let alpns = versions.alpns();
 	let (primary, rest) = alpns.split_first().ok_or(Error::NoVersions)?;
 
@@ -431,12 +470,15 @@ pub(crate) async fn connect(
 
 			(
 				web_transport_iroh::Session::connect_h3(conn, request).await?,
-				Binding::H3,
+				moq_net::transport::Address::Uri,
 			)
 		}
 		alpn if alpns.contains(&alpn) => {
 			let conn = connecting.await?;
-			(web_transport_iroh::Session::raw(conn), Binding::Raw)
+			(
+				web_transport_iroh::Session::raw(conn),
+				moq_net::transport::Address::Setup,
+			)
 		}
 		_ => return Err(Error::UnsupportedAlpn(alpn)),
 	};
@@ -461,8 +503,41 @@ fn url_set_scheme(url: Url, scheme: &str) -> Result<Url> {
 }
 
 #[cfg(test)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use super::*;
+
+	#[tokio::test]
+	async fn zero_keep_alive_is_refused_only_when_iroh_is_enabled() {
+		let mut config = Config::default();
+		let quic = crate::quic::Config {
+			keep_alive: Some(std::time::Duration::ZERO.into()),
+			..Default::default()
+		};
+		assert!(config.clone().bind(&quic).await.unwrap().is_none());
+		config.enabled = Some(true);
+		let err = config.bind(&quic).await.unwrap_err();
+		assert!(
+			matches!(err, Error::Config(crate::Error::NoBackend(reason)) if reason.contains("cannot disable keep-alive"))
+		);
+	}
+
+	#[tokio::test]
+	async fn explicit_keylog_path_is_refused_only_when_iroh_is_enabled() {
+		let mut config = Config::default();
+		let quic = crate::quic::Config {
+			keylog: Some("keys.log".into()),
+			..Default::default()
+		};
+		assert!(config.clone().bind(&quic).await.unwrap().is_none());
+		config.enabled = Some(true);
+		let err = config.bind(&quic).await.unwrap_err();
+		assert!(matches!(err, Error::Config(crate::Error::NoBackend(reason)) if reason.contains("keylog path")));
+	}
 
 	/// A public builder taking a config this crate did not check, so it refuses
 	/// before it touches the key file or a socket.
@@ -473,7 +548,7 @@ mod tests {
 	/// endpoint is the accepted-and-ignored failure in miniature.
 	#[tokio::test]
 	async fn bind_refuses_a_released_quic_spelling() {
-		#[derive(usage::Cli)]
+		#[derive(usage_rs::Cli)]
 		#[usage(unknown_flags = "error", args_override_self = false)]
 		#[usage(settings)]
 		struct Cli {
@@ -531,7 +606,7 @@ mod tests {
 
 	/// Build a controller from each family's factory and downcast it to the
 	/// concrete implementation it must map to. iroh runs on noq, so this is the
-	/// same pairing as the noq backend.
+	/// same pairing as the quic backend.
 	#[test]
 	fn congestion_factory_maps_each_family() {
 		let now = std::time::Instant::now();
@@ -542,6 +617,9 @@ mod tests {
 
 		let delay = congestion_factory(CongestionControl::Delay).build(now, mtu);
 		assert!(delay.into_any().downcast::<noq_proto::congestion::Bbr3>().is_ok());
+
+		let none = congestion_factory(CongestionControl::None).build(now, mtu);
+		assert!(none.into_any().downcast::<Unlimited>().is_ok());
 	}
 
 	/// The connection keep-alive is the resolved interval, not iroh's 5s heartbeat.

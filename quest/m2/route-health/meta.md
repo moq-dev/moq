@@ -51,5 +51,4 @@ Wire: a metadata delivery mode in the current lite wip; exact encoding is settle
 ## Required
 
 - [Health design](/quest/m2/route-health/design.md) - progress and mode-transition contract
-- [Live largest location](/quest/m1/largest.md) - the shared live progress surface
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - final subscription range shape this extends
