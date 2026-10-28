@@ -1,15 +1,9 @@
-use std::future::{IntoFuture, Ready, ready};
 #[cfg(test)]
 use std::net::{IpAddr, SocketAddr};
 
-use futures::future::Either;
-
 use moq_quic::ConnectionError;
 
-use crate::quic::driver::{
-	connection::{Connecting, Connection},
-	endpoint::EndpointRef,
-};
+use crate::quic::driver::{connection::Connecting, endpoint::EndpointRef};
 
 /// An incoming connection for which the server has not yet begun its part of the handshake
 #[derive(Debug)]
@@ -75,16 +69,4 @@ impl Drop for Incoming {
 struct State {
 	inner: moq_quic::Incoming,
 	endpoint: EndpointRef,
-}
-
-impl IntoFuture for Incoming {
-	type Output = Result<Connection, ConnectionError>;
-	type IntoFuture = Either<Connecting, Ready<Self::Output>>;
-
-	fn into_future(self) -> Self::IntoFuture {
-		match self.accept() {
-			Ok(connecting) => Either::Left(connecting),
-			Err(error) => Either::Right(ready(Err(error))),
-		}
-	}
 }
