@@ -44,14 +44,16 @@ and their alternatives:
   parameter is the stackless half of that idea. Sans-IO is the other: the protocol
   never does I/O and each runtime drives it.
 - **Sans-IO compared** in [moq-dev/moq#7058](https://github.com/moq-dev/moq/pull/7058),
-  on the lite subscriber's upstream SUBSCRIBE (prototype on
-  [`spike/sansio-upstream`](https://github.com/moq-dev/moq/tree/spike/sansio-upstream)).
+  on the lite subscriber's upstream SUBSCRIBE (an unmerged prototype, since deleted).
   moq-net already takes I/O through its transport traits and runs on any executor,
   so sans-IO only buys a core without waiters. That core translated through rust2-ts
   with 4 refusals, but the serve loop driving it still had 919, so translating a
   session still waits on the model. Rules became plain `#[test]`s, while
   interleaving bugs stay in driver tests. Compile cost and the benches were flat.
   The cost is an effect enum per model touch (+206 lines on this path).
+  **Decided (maintainer, 2026-10-28):** moq-net's protocol core stays kio poll and
+  does not move toward sans-IO. Pull pure wire rules into plain functions where
+  that turns scripted async tests into plain ones, as ordinary refactors.
 - **Gate the wrappers regardless** of the build measurement, because poll-first is
   the style moq wants. kixelated/rust2's
   [semantic API hash quest](https://github.com/kixelated/rust2/blob/main/quest/m3/api-cutoff.md)
