@@ -12,24 +12,25 @@ Decided 2026-10-28 (maintainer): the hold applies in every first-party
 consumer, with the same rule as the JS quest. Initial selection skips disabled
 renditions, an enabled alternative wins, and a removed rendition is dropped.
 
-- `rs/moq-mux/src/select.rs:93,121`: the selection filters require
-  `config.enabled`.
-- `rs/moq-cli/src/play/media.rs:192-193,445-452`: `stop_disabled` drops demand
-  on the playing rendition.
-- `rs/moq-ffi/src/audio.rs:613-616`: a disabled rendition returns `NotFound`.
-  It should keep a held one, and the wrappers' docs follow.
+Already holding: `moq_mux::select::Broadcast::retain` and `catalog::Select`,
+`moq play`, moq-ffi's audio and video consumers, and moq-c's `moq_consume_*`.
 
-[moq-audio follows the grant](/quest/m2/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md)
-already expects a held listener to keep demand on a single audio rendition
-disabled below the codec floor.
+Left:
 
-The spec wording lands with whichever hold quest lands first.
-
-Tests: the JS quest's cases, in moq-mux select and moq-ffi.
-
-Public API: moq-ffi returns a held disabled rendition where it returned
-`NotFound`. Wire: none.
+- moq-gst `moqsrc`: `reconcile` (`rs/moq-gst/src/source/imp.rs`) stops a
+  disabled rendition's reader and holds its pad idle. Keep the reader running
+  while no rendition of its kind is enabled. The disable tests
+  (`a_reenabled_rendition_resumes_on_the_same_pad`,
+  `a_reenabled_sibling_rendition_plays_the_next_instance_after_a_finish`)
+  change with it.
+- Open: whether the exports hold too. `Source::retain_selectable`
+  (`rs/moq-mux/src/source.rs`) drops a disabled rendition for every
+  fMP4/TS/MKV/FLV/Annex B export, and the HLS export, WebRTC egress and RTMP
+  play follow the flag on their own. A held track sends nothing, which an
+  interleaving muxer or an HLS player may wait on, so the recommendation is
+  that exports keep dropping it.
 
 ## Related
 
 - [JS consumers hold a disabled rendition](/quest/m1/push-to-talk/hold-js.md) - the same rule in JS
+- [OBS source picks renditions by the catalog contract](/quest/m2/obs-source-renditions.md) - holds through moq-c
