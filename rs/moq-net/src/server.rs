@@ -1437,7 +1437,7 @@ mod tests {
 
 	#[moq_clock::test]
 	async fn accept_request_reads_buffered_setup_after_transport_close() {
-		let mut session = FakeSession::new(ALPN_LITE_05, [lite05_setup(Some("/closed"), None, None)]);
+		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(Some("/closed"), None, None)]);
 		crate::transport::poll::Session::close(&session, SessionError::Cancel.to_code(), "closed");
 		let request = Server::new().accept_request(moq_clock::now(), session).await.unwrap();
 		assert_eq!(request.path(), "/closed");

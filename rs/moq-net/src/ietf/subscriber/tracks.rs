@@ -1748,7 +1748,7 @@ mod tests {
 			.write_all(&mut &[0x00, 0x02, 0x00, 0xff][..])
 			.await
 			.unwrap();
-		let mut peer = h.peer.clone();
+		let peer = h.peer.clone();
 		let closed = kio::wait(move |waiter| crate::transport::poll::Session::poll_closed(&peer, waiter));
 		moq_clock::timeout(TIMEOUT, closed)
 			.await

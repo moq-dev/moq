@@ -307,14 +307,12 @@ impl poll::SendStream for SinkSend {
 		{
 			// A closed gate parks forever, which surfaces as a hung test rather than a
 			// write that silently skipped the gate.
-			let waiter = waiter;
 			match gate.poll(waiter, |open| if **open { Poll::Ready(()) } else { Poll::Pending }) {
 				Poll::Ready(Ok(())) => {}
 				Poll::Ready(Err(_)) | Poll::Pending => return Poll::Pending,
 			}
 		}
 		if let Some(budget) = &self.budget {
-			let waiter = waiter;
 			match budget.poll(waiter, |limit| {
 				if self.writes < **limit {
 					Poll::Ready(())
@@ -1128,7 +1126,6 @@ impl poll::Session for ScriptedSession {
 			return Poll::Pending;
 		}
 		if let Some(gate) = self.open_gate.clone() {
-			let waiter = waiter;
 			// A closed gate reads as open: the test dropped the producer, so nothing is
 			// holding the stream back anymore.
 			if gate
@@ -1229,7 +1226,7 @@ impl poll::Session for ScriptedSession {
 fn a_local_close_preserves_scripted_uni_bytes_and_ends_accepts() {
 	use poll::{RecvStream as _, Session as _};
 	for fin in [false, true] {
-		let mut session = ScriptedSession::new(Vec::new()).with_incoming_unis(vec![b"last".to_vec()]);
+		let session = ScriptedSession::new(Vec::new()).with_incoming_unis(vec![b"last".to_vec()]);
 		if fin {
 			session.close(Close::Fin);
 		}

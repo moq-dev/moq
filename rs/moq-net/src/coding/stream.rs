@@ -122,7 +122,7 @@ mod tests {
 			crate::Version::Lite(Version::Lite07),
 			crate::Version::Ietf(crate::ietf::Version::Draft18),
 		] {
-			let mut session = ScriptedSession::new(Vec::new()).without_credit();
+			let session = ScriptedSession::new(Vec::new()).without_credit();
 			let waiter = &kio::Waiter::noop();
 			for _ in 0..2 {
 				assert!(matches!(
@@ -146,7 +146,7 @@ mod tests {
 	fn request_header_backpressure_is_not_credit_refusal() {
 		use crate::lite::test_transport::ScriptedSession;
 		let gate = kio::Producer::new(false);
-		let mut session = ScriptedSession::gated_open(Vec::new(), gate.consume());
+		let session = ScriptedSession::gated_open(Vec::new(), gate.consume());
 		let waiter = &kio::Waiter::noop();
 		assert!(Stream::poll_open_request(&session, Version::Lite07, waiter).is_pending());
 		{
