@@ -2481,10 +2481,12 @@ where
 	/// does.
 	///
 	/// Another instance (another epoch, or an epochless route) opens a fresh jitter generation.
-	/// The buffered old program drains before the new PMT, with advanced table versions,
-	/// every PID's first packet flagging the break, and each stream starting on a keyframe.
 	/// [`Follower`](super::Follower) keeps feeding the old program until the new clock and
-	/// first media are usable, bounded by its follow window. No timestamps are aligned.
+	/// first media are usable, bounded by its follow window. Then what the old program
+	/// already released goes out before the new PMT, and what it still buffers is dropped,
+	/// so the new program keeps its own delay. The new PMT has advanced table versions,
+	/// every PID's first packet flags the break, and each stream starts on a keyframe. No
+	/// timestamps are aligned.
 	pub fn follow(mut self, broadcast: moq_net::broadcast::Consumer, catalog: S) -> Result<Self, crate::Error> {
 		self.followed(&broadcast, catalog, Duration::ZERO)?;
 		Ok(self)

@@ -496,6 +496,36 @@ async fn export_packs_aac_frames_up_to_their_buffer() {
 	}
 }
 
+/// The audio PES timestamps each slice of a stream starts, keyed off the PMT's PID
+/// assignments as they stand at that slice.
+fn audio_pts_by_slice(frames: &[Frame]) -> Vec<Vec<u64>> {
+	let bytes: Vec<u8> = frames.iter().flat_map(|f| f.payload.iter().copied()).collect();
+	let mut reader = TsPacketReader::new(Cursor::new(bytes.as_slice()));
+	let mut audio_pid = None;
+	let mut out = Vec::new();
+	for frame in frames {
+		let mut pts = Vec::new();
+		for _ in 0..frame.payload.len() / 188 {
+			let packet = reader.read_ts_packet().unwrap().expect("a whole packet");
+			match packet.payload {
+				Some(TsPayload::Pmt(pmt)) => {
+					audio_pid = pmt
+						.es_info
+						.iter()
+						.find(|es| es.stream_type == StreamType::AdtsAac)
+						.map(|es| es.elementary_pid);
+				}
+				Some(TsPayload::PesStart(pes)) if Some(packet.header.pid) == audio_pid => {
+					pts.extend(pes.header.pts.map(|pts| pts.as_u64()));
+				}
+				_ => {}
+			}
+		}
+		out.push(pts);
+	}
+	out
+}
+
 /// Collect PES presentation timestamps per elementary stream (video H.264, audio AAC),
 /// keyed off the PMT's PID assignments.
 fn collect_pes_pts(ts: &[u8]) -> (Vec<u64>, Vec<u64>) {
@@ -11172,6 +11202,90 @@ async fn a_healthy_stitch_feeds_the_old_generation_until_the_new_clock_acquires(
 	);
 	assert_eq!(unflagged(&next), Vec::<u16>::new());
 	assert_eq!(follower.export().discontinuity(), 1);
+}
+
+/// Every stitched switch drops the old program's tail rather than playing it first, so
+/// each replacement goes out at the delay, latency does not build up switch after switch,
+/// and the output stays in order with no hole at any switch.
+#[tokio::test(start_paused = true)]
+async fn repeated_stitches_keep_the_delay() {
+	use std::task::Poll;
+	let origin = crate::source::produce_origin();
+	let route = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+	// Publisher `k` stamps its media `k * 100 s` on, so each epoch has its own timeline.
+	const SPACING: u64 = 100_000;
+	const SWITCH: u64 = 4_000;
+	let mut publishers = Vec::new();
+	let (first, mut catalog) = publish_live::<()>(&origin, route());
+	let audio = aac_rendition(&mut first.broadcast().clone(), &mut catalog, "a.aac");
+	publishers.push((first, catalog, audio));
+	let export = open_export(crate::source::resolved(&origin, "live").await)
+		.await
+		.unwrap()
+		.with_delay(Duration::from_secs(1));
+	let mut follower = super::Follower::new(export)
+		.unwrap()
+		.with_stitch(true)
+		.with_follow(Duration::from_secs(10));
+	let step = Duration::from_millis(20);
+	let start = tokio::time::Instant::now();
+	// Each frame out: when, and its epoch.
+	let mut frames = Vec::new();
+	for ms in (0..4 * SWITCH).step_by(20) {
+		if ms > 0 && ms % SWITCH == 0 {
+			let (new, mut catalog) = publish_live::<()>(&origin, route());
+			let audio = aac_rendition(&mut new.broadcast().clone(), &mut catalog, "a.aac");
+			publishers.push((new, catalog, audio));
+		}
+		for (k, (_, _, audio)) in publishers.iter_mut().enumerate() {
+			write_aac(audio, k as u64 * SPACING + ms);
+		}
+		tokio::task::yield_now().await;
+		loop {
+			match follower.poll_next(&moq_net::kio::Waiter::noop()) {
+				Poll::Ready(Ok(Some(frame))) => {
+					frames.push((start.elapsed(), follower.export().discontinuity(), frame))
+				}
+				Poll::Ready(end) => panic!("every publisher is healthy: {end:?}"),
+				Poll::Pending => break,
+			}
+		}
+		tokio::time::advance(step).await;
+	}
+	assert_eq!(follower.export().discontinuity(), 3, "every replacement went out");
+
+	// How far each PTS went out behind the wall time its frame was written, per epoch.
+	let mut latency: std::collections::BTreeMap<u64, Vec<Duration>> = Default::default();
+	let mut last: Option<(u64, u64)> = None;
+	let slices: Vec<Frame> = frames.iter().map(|(_, _, frame)| frame.clone()).collect();
+	for ((elapsed, epoch, _), pts) in frames.iter().zip(audio_pts_by_slice(&slices)) {
+		for pts in pts {
+			assert!(
+				last.is_none_or(|last| last < (*epoch, pts)),
+				"out of order at {elapsed:?}: {last:?} then {:?}",
+				(epoch, pts)
+			);
+			last = Some((*epoch, pts));
+			let written = Duration::from_millis(pts / 90 - 60_000 - epoch * SPACING);
+			latency.entry(*epoch).or_default().push(*elapsed - written);
+		}
+	}
+	let settled: Vec<Duration> = latency
+		.values()
+		.map(|latency| latency[latency.len() / 2..].iter().copied().max().unwrap())
+		.collect();
+	for (epoch, latency) in settled.iter().enumerate() {
+		assert!(
+			latency.abs_diff(settled[0]) <= PCR_INTERVAL + step,
+			"epoch {epoch} settled at {latency:?} against {:?} before any switch: {settled:?}",
+			settled[0]
+		);
+	}
+	for epoch in 1..=3 {
+		let switch = frames.iter().position(|(_, e, _)| *e == epoch).unwrap();
+		let gap = frames[switch].0 - frames[switch - 1].0;
+		assert!(gap <= PCR_INTERVAL + step, "switch {epoch} left a hole: {gap:?}");
+	}
 }
 
 /// A hard follow deadline can expose a hole even while A is healthy: its input

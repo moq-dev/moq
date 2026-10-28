@@ -18,7 +18,7 @@ use super::flate;
 mod content;
 use crate::cache;
 use crate::frame::{self, Cached, FrameBuf, Payload};
-use crate::{Timescale, stats, track};
+use crate::{Timescale, stats, track, util::SendCell};
 use bytes::Bytes;
 #[cfg(all(feature = "async", any(test, feature = "fuzz")))]
 pub(crate) use content::StorageBench;
@@ -1090,7 +1090,9 @@ pub struct Producer {
 #[derive(Clone)]
 // Sessions need an abortable observer while public callers use Demand.
 pub(crate) struct Handle {
-	state: kio::Producer<GroupState>,
+	// The group's frames reach its track and cache account, so the cell proves `Send`
+	// once here instead of inside every session machine holding a group.
+	state: SendCell<kio::Producer<GroupState>>,
 	info: Info,
 	track: track::Info,
 	cache: Arc<cache::Track>,
@@ -1100,7 +1102,7 @@ pub(crate) struct Handle {
 /// A group the track no longer caches, held without keeping it open or allocated, so a
 /// track abort can still end it while its writer adds to it.
 pub(super) struct Detached {
-	state: kio::Weak<GroupState>,
+	state: SendCell<kio::Weak<GroupState>>,
 	info: Info,
 	track: track::Info,
 	cache: Arc<cache::Track>,
@@ -1111,7 +1113,7 @@ impl Detached {
 	/// The group, while it is neither finished nor aborted.
 	pub(super) fn writing(&self) -> Option<Handle> {
 		let handle = Handle {
-			state: self.state.upgrade()?,
+			state: SendCell::new(self.state.upgrade()?),
 			info: self.info,
 			track: self.track.clone(),
 			cache: self.cache.clone(),
@@ -1295,7 +1297,7 @@ impl Producer {
 		Self {
 			handle: Handle {
 				info,
-				state,
+				state: SendCell::new(state),
 				track,
 				cache,
 				alive,
@@ -2260,7 +2262,7 @@ impl Handle {
 	/// This group as [`Detached`], for the track to end once it stops caching it.
 	pub(super) fn detach(&self) -> Detached {
 		Detached {
-			state: self.state.downgrade(),
+			state: SendCell::new(self.state.downgrade()),
 			info: self.info,
 			track: self.track.clone(),
 			cache: self.cache.clone(),
