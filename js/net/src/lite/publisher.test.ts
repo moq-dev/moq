@@ -974,9 +974,8 @@ test("lite draft-06: the end sweep does not drop a sent datagram", async () => {
 	}
 });
 
-// A cut this subscription already dropped stays dropped: the subscriber accounted for it, so
-// a group the publisher re-creates under it afterwards is not served.
-test("lite draft-06: a cut dropped then re-created is not served", async () => {
+// A drop describes what was missing then; a late copy of the same group is still served.
+test("lite draft-06: a reported cut still allows a late group", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0 });
 	try {
 		sub.serve(0);
@@ -991,6 +990,7 @@ test("lite draft-06: a cut dropped then re-created is not served", async () => {
 
 		sub.serve(1);
 		sub.serve(2);
+		expect(await sub.servedSequence()).toBe(1);
 		expect(await sub.servedSequence()).toBe(2);
 		sub.track.finish();
 		sub.track.close();
