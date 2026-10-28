@@ -1194,8 +1194,7 @@ mod tests {
 				let consumer = broadcast.consume();
 				let config = moq_mux::catalog::Config::default()
 					.with_clock(clock)
-					.with_max_age(RETAIN)
-					.with_hls(moq_mux::hls::Config::default());
+					.with_max_age(RETAIN);
 				let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
 				let track = broadcast
 					.create_track(

@@ -68,6 +68,8 @@ class GroupState {
 	// Absolute sequence of the frame at the front of `frames`, advanced by a read: the
 	// sequence the next read returns.
 	start = 0;
+	// The wire offset this copy began at; unlike `start`, reads never advance it.
+	offset = 0;
 
 	cacheBytes = 0;
 	compressed?: boolean;
@@ -217,6 +219,16 @@ export class Producer {
 			}
 			if (state.closed.peek() !== undefined) flate.finish();
 		};
+		hooks.groupOffset = (group) => group.#state.offset;
+		hooks.startGroup = (group, start) => {
+			if (!Number.isSafeInteger(start) || start < 0) throw new RangeError("invalid group frame start");
+			const state = group.#state;
+			if (state.total.peek() !== 0 || state.closed.peek() !== undefined || group.#mirrors?.size)
+				throw new Error("group already started");
+			if (start !== 0 && state.compressed) throw new ProtocolViolation("compressed group lacks its prefix");
+			state.start = state.offset = start;
+			state.total.set(start);
+		};
 		hooks.writeGroupFrame = (group, frame, inflated) => group.#writeFrame(frame, inflated);
 		hooks.groupCacheBytes = (group) => group.#state.flate?.bytes ?? group.#state.cacheBytes;
 		hooks.groupFrameCount = (group) => group.#state.total.peek();
@@ -294,6 +306,7 @@ export class Producer {
 		dst.compressed = this.#state.compressed;
 		for (const frame of this.#state.frames.peek()) appendFrame(dst, frame);
 		dst.start = this.#state.start;
+		dst.offset = this.#state.offset;
 		// The replay only covers what is still buffered, so the count has to come from the
 		// source: it is what names a frame's absolute sequence, and what a publisher reads
 		// to resolve the live edge.
@@ -346,6 +359,8 @@ export class Producer {
 			throw new FrameTooLarge();
 		if (inflated !== undefined && (!this.#state.flate || !Number.isSafeInteger(inflated) || inflated < 0))
 			throw new ProtocolViolation("unexpected inflated frame size");
+		if (this.#state.total.peek() === Number.MAX_SAFE_INTEGER)
+			throw new ProtocolViolation("group frame index exceeds the safe integer range");
 		checkTimed(this.#state.timed, frame);
 		if (this.#limit !== undefined && this.#state.total.peek() >= this.#limit) {
 			throw new Error(`frame ${this.#state.total.peek()} is past the track's end`);
@@ -358,7 +373,7 @@ export class Producer {
 			commits = this.#admits.map((admit) => admit(start));
 		}
 		if (
-			this.#state.total.peek() >= MAX_GROUP_FRAMES ||
+			this.#state.total.peek() - this.#state.offset >= MAX_GROUP_FRAMES ||
 			((!this.#state.flate || inflated !== undefined) &&
 				this.#state.cacheBytes + frame.payload.byteLength > MAX_GROUP_CACHE_BYTES) ||
 			(this.#state.flate?.declared ?? this.#state.cacheBytes) + (inflated ?? frame.payload.length) >
@@ -687,13 +702,16 @@ export class Consumer {
 	static {
 		makeConsumer = (state) => new Consumer(state);
 		hooks.releaseGroupReader = (group, abort) => group.#release(abort);
-		hooks.groupTimestamp = (group) => (group.#state.unverified ? undefined : group.#state.timestamp);
+		hooks.groupTimestamp = (group) =>
+			group.#state.unverified || group.#state.offset !== 0 ? undefined : group.#state.timestamp;
 		hooks.groupLatest = (group) => (group.#state.unverified ? undefined : group.#state.latest);
 		hooks.unverifyGroup = (group) => {
 			group.#state.unverified = true;
 		};
 		hooks.groupArrived = (group) => group.#state.arrived;
-		hooks.groupStarted = (group) => group.#state.total.peek() > 0 || group.#state.closed.peek() !== undefined;
+		hooks.groupIndex = (group) => group.#index();
+		hooks.groupStarted = (group) =>
+			group.#state.total.peek() > group.#state.offset || group.#state.closed.peek() !== undefined;
 		hooks.groupFate = (group) => {
 			const state = group.#state;
 			return () => {

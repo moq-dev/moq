@@ -3674,6 +3674,8 @@ mod tests {
 			.await
 			.expect("dial timeout")
 			.expect("incoming")
+			.accept()
+			.expect("accept")
 			.await
 			.expect("handshake");
 		running.abort();
@@ -3725,6 +3727,8 @@ mod tests {
 			.await
 			.expect("dial timeout")
 			.expect("incoming")
+			.accept()
+			.expect("accept")
 			.await
 			.expect("handshake");
 		cluster

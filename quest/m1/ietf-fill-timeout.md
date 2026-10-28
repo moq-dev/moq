@@ -24,8 +24,7 @@ before advertising or sending support.
 
 Decided 2026-10-27 (maintainer): split by language. This Rust half starts
 now; the JS half is [JS FETCH fill timeout](/quest/m1/ietf-fill-timeout-js.md),
-which waits on the cached [JavaScript FETCH](/quest/m1/js-fetch.md)
-responder. Keep the two wire behaviors identical.
+which builds on the cached JavaScript FETCH responder. Keep the two wire behaviors identical.
 
 Propagate an explicit FETCH max-delay as the upstream wait budget where
 the draft supports it. For omitted max-delay, retain the wire's omitted

@@ -531,36 +531,6 @@ test("a SUBSCRIBE withdrawn while resuming releases its demand", async () => {
 	}
 });
 
-// Legal requests we don't serve are refused NOT_SUPPORTED one at a time.
-test("FETCH gets NOT_SUPPORTED", async () => {
-	const refusal = async (version: IetfVersion, run: (pub: Publisher, stream: Stream) => Promise<void>) => {
-		const pair = createMockTransportPair(ALPN.DRAFT_18);
-		const session = new NativeSession(pair.server, version, true);
-		const { pub, origin } = publisher(pair.server, { session });
-		const written: Uint8Array[] = [];
-		const stream = new Stream({
-			readable: new ReadableStream<Uint8Array>(),
-			writable: new WritableStream<Uint8Array>({
-				write: (chunk) => {
-					written.push(new Uint8Array(chunk));
-				},
-			}),
-			version,
-		});
-		await run(pub, stream);
-		await stream.writer.closed;
-		origin.close();
-		return written.flatMap((chunk) => Array.from(chunk));
-	};
-
-	for (const version of [Version.DRAFT_22] as const) {
-		const fetch = await refusal(version, (pub, stream) => pub.runFetch(new Fetch({ requestId: 7n }), stream));
-		// FETCH_ERROR on draft-14, REQUEST_ERROR after; the code follows the Length and any Request ID.
-		expect(fetch[0]).toBe(0x05);
-		expect(fetch[3]).toBe(0x3);
-	}
-});
-
 test("Range Filters over MAX_FILTER_RANGES zero get INVALID_FILTER", async () => {
 	for (const version of [Version.DRAFT_22]) {
 		const pair = createMockTransportPair(ALPNS[version]);
@@ -1652,7 +1622,20 @@ test("EPOCH on a request without MoQ Epoch is a protocol violation", async () =>
 		),
 	).rejects.toThrow(ProtocolViolation);
 	await expect(
-		pub.runFetch(new Fetch({ requestId: 7n, trackNamespace, epoch }), requestStream(VERSION).stream),
+		pub.runFetch(
+			new Fetch({
+				requestId: 7n,
+				type: {
+					kind: "standalone",
+					trackNamespace,
+					trackName: "video",
+					start: { group: 0n, object: 0n },
+					end: { group: 0n, object: 0n },
+				},
+				epoch,
+			}),
+			requestStream(VERSION).stream,
+		),
 	).rejects.toThrow(ProtocolViolation);
 
 	origin.close();
@@ -2948,22 +2931,13 @@ async function subscribeOkLargest(version: IetfVersion): Promise<SubscribeOk["la
 }
 
 /**
- * What LARGEST_OBJECT names has to match where the subscription actually starts. Below
- * draft-22 the filter is ignored and the whole group is served, and the only way to ask for a
- * head we skipped is a joining FETCH, which we answer with an empty stream. Advertising the
- * mid-group edge there promises a backfill nothing can deliver, so the Location drops to the
- * start of the group.
+ * LARGEST_OBJECT is the live edge on every draft: a Next Object subscription starts right
+ * after it, and the head before it comes back by a fill or a joining FETCH that ends there.
  */
-test.each([
-	["draft-17", Version.DRAFT_18],
-	["draft-18", Version.DRAFT_18],
-] as const)("%s: LARGEST_OBJECT is the start of the group it serves", async (_draft, version) => {
-	expect(await subscribeOkLargest(version)).toEqual({ groupId: 5n, objectId: 0n });
-});
-
-/** Draft-22 serves a skipped head with a FILL, so it advertises the true live edge. */
-test("draft-22: LARGEST_OBJECT is the live edge", async () => {
-	expect(await subscribeOkLargest(Version.DRAFT_22)).toEqual({ groupId: 5n, objectId: 3n });
+test("LARGEST_OBJECT is the live edge", async () => {
+	for (const version of IETF_VERSIONS) {
+		expect(await subscribeOkLargest(version)).toEqual({ groupId: 5n, objectId: 3n });
+	}
 });
 
 /**

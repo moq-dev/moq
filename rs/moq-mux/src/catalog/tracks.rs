@@ -393,7 +393,7 @@ impl<E: CatalogExt> Reserved<E> {
 	}
 
 	/// Declare the track's regular group duration, which fixes its HLS segment duration up front
-	/// when [`Config::with_hls`](super::Config::with_hls) enabled HLS records.
+	/// unless [`Config::with_hls`](super::Config::with_hls) disabled HLS records.
 	pub fn with_hls_hint(mut self, duration: impl Into<Option<std::time::Duration>>) -> Self {
 		self.hls_hint = duration.into();
 		self

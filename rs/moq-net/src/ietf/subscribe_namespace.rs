@@ -33,7 +33,7 @@ fn hidden_from_param(value: Option<u64>) -> Result<bool, DecodeError> {
 	}
 }
 
-impl Message for SubscribeNamespace {
+impl<'a> Message<'a> for SubscribeNamespace {
 	const ID: u64 = 0x50;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -43,7 +43,7 @@ impl Message for SubscribeNamespace {
 		Ok(())
 	}
 
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
 		let namespace = decode_namespace(r)?;
 		// The token decodes but grants nothing: the session's grant is what authorizes the request.
@@ -96,7 +96,7 @@ impl Namespace {
 	}
 }
 
-impl Message for Namespace {
+impl<'a> Message<'a> for Namespace {
 	const ID: u64 = 0x08;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -107,7 +107,7 @@ impl Message for Namespace {
 		}
 	}
 
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		Self::decode_body(r, version, Negotiated::default())
 	}
 }
@@ -119,7 +119,7 @@ pub struct NamespaceDone {
 	pub suffix: Path,
 }
 
-impl Message for NamespaceDone {
+impl<'a> Message<'a> for NamespaceDone {
 	const ID: u64 = 0x0E;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
@@ -127,7 +127,7 @@ impl Message for NamespaceDone {
 		Ok(())
 	}
 
-	fn decode_msg(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, _: Version) -> Result<Self, DecodeError> {
 		let suffix = decode_namespace(r)?;
 		Ok(Self { suffix })
 	}
@@ -138,7 +138,7 @@ mod tests {
 	use super::super::cluster;
 	use super::*;
 
-	fn body<M: Message>(msg: &M, version: Version) -> Vec<u8> {
+	fn body<'m, M: Message<'m>>(msg: &M, version: Version) -> Vec<u8> {
 		let mut buf = Vec::new();
 		msg.encode_msg(&mut Encoder::new(&mut buf, version.into()), version)
 			.unwrap();
@@ -362,7 +362,7 @@ mod tests {
 		w.varint(0x10).unwrap();
 		w.varint(0).unwrap();
 		let mut buf = bytes::Bytes::from(buf);
-		assert!(crate::coding::decode_buf(&mut buf, version, SubscribeNamespace::decode_msg).is_err());
+		assert!(crate::coding::decode_buf(&mut buf, version, |r, v| SubscribeNamespace::decode_msg(r, v)).is_err());
 	}
 
 	#[test]
@@ -389,7 +389,8 @@ mod tests {
 			hidden: false,
 		};
 		let mut buf = bytes::Bytes::from(body(&msg, Version::Draft18));
-		let decoded = crate::coding::decode_buf(&mut buf, Version::Draft18, SubscribeNamespace::decode_msg).unwrap();
+		let decoded =
+			crate::coding::decode_buf(&mut buf, Version::Draft18, |r, v| SubscribeNamespace::decode_msg(r, v)).unwrap();
 		assert!(buf.is_empty());
 		assert_eq!(decoded.request_id, RequestId(4));
 		assert_eq!(decoded.namespace.as_str(), "example/meeting");
@@ -406,7 +407,7 @@ mod tests {
 			};
 			let mut buf = bytes::Bytes::from(body(&msg, Version::Draft18));
 			assert_eq!(
-				crate::coding::decode_buf(&mut buf, Version::Draft18, SubscribeNamespace::decode_msg)
+				crate::coding::decode_buf(&mut buf, Version::Draft18, |r, v| SubscribeNamespace::decode_msg(r, v))
 					.unwrap()
 					.hidden,
 				hidden

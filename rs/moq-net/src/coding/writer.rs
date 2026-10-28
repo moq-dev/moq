@@ -261,7 +261,7 @@ impl<S: crate::transport::poll::SendStream> Writer<S, ietf::Version> {
 
 	/// Encode an IETF `Message` to the stream as `[type_id][size][body]`, with the same
 	/// all-or-nothing buffering as [`Self::buffer_message`] and cancellation rules as [`Self::encode`].
-	pub async fn encode_message<T: ietf::Message>(&mut self, msg: &T) -> Result<(), Error> {
+	pub async fn encode_message<'m, T: ietf::Message<'m>>(&mut self, msg: &T) -> Result<(), Error> {
 		self.buffer_message(T::ID, msg)?;
 		std::future::poll_fn(|cx| self.poll_flush(cx)).await
 	}

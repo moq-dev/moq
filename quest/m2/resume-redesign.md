@@ -84,5 +84,4 @@ Public API: none. Wire: none.
 ## Related
 
 - [A reserved group survives a route returning](/quest/m1/cut-audit/reserved-route-return.md) - a pre-cut fix this deletes
-- [One route phase](/quest/m1/cut-audit/route-phase.md) - a pre-cut fix this deletes
 - [Recover reads its budget without a sync](/quest/m2/recover-budget.md) - a per-frame cost this deletes

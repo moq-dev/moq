@@ -62,10 +62,10 @@ These land with the next breaking release.
   released verifiers reject, so upgrade every auth server and verifier before
   issuing capped tokens.
 - **HLS records replace archive timelines.** The hang catalog's root `archive`
-  section is gone. A video or audio rendition opts in to HLS with its own `hls`
-  field naming a `<track>.hls` record track, and nothing publishes one by
-  default. Neither side reads the other's shape, so upgrade HLS exporters and
-  their publishers together, and opt the publishers in (`moq import --hls`).
+  section is gone. A video or audio rendition carries its own `hls` field
+  naming a `<track>.hls` record track, which Rust publishers write by default.
+  Neither side reads the other's shape, so upgrade HLS exporters and their
+  publishers together.
 - **Announce restarts.** moq-lite 07 adds `ANNOUNCE_RESTART` (0x3): another
   publisher instance now serves the prefix. lite-06's `ANNOUNCE_RESTART` is
   named `ANNOUNCE_UPDATE`, as it always meant. moq-transport with the epoch

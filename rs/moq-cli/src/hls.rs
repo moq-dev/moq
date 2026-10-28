@@ -168,15 +168,13 @@ pub async fn import(target: ImportTarget, args: ImportArgs, epoch: moq_net::Epoc
 		name,
 		max_age,
 		linger,
-		hls,
 		bandwidth,
 	} = target;
 	let producer = origin.create_broadcast(&name).context("failed to create broadcast")?;
 
 	let config = moq_mux::catalog::Config::default()
 		.with_max_age(max_age)
-		.with_bandwidth(bandwidth)
-		.with_hls(hls.then(moq_mux::hls::Config::default));
+		.with_bandwidth(bandwidth);
 	let catalog = moq_mux::catalog::Producer::new(&mut producer.broadcast().clone(), config)?;
 	// Announced once the catalog first goes out, which waits for every rendition's init: a
 	// relay queries a broadcast's tracks the moment it is announced, and keeps the refusals of a
@@ -516,7 +514,6 @@ mod test {
 			name: "hls".to_string(),
 			max_age: None,
 			linger: moq_mux::Linger::DEFAULT,
-			hls: false,
 			bandwidth: Default::default(),
 		};
 		let args = ImportArgs {

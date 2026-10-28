@@ -570,26 +570,38 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		Ok(())
 	}
 
-	/// Drop any existing video track `track_id` (finishing it and clearing its
-	/// catalog rendition) and allocate a fresh one.
+	/// Retire any existing video track `track_id` and allocate a fresh one.
 	fn replace_video(&mut self, track_id: u8) -> anyhow::Result<moq_net::track::Producer> {
-		if let Some(mut old) = self.video.remove(&track_id) {
-			old.track.finish()?;
+		if let Some(old) = self.video.remove(&track_id) {
+			self.retire(old.track)?;
 		}
 		Ok(self
 			.broadcast
 			.unique_track(".flv-v", self.catalog.track_info(hang::catalog::PRIORITY.video))?)
 	}
 
-	/// Drop any existing audio track `track_id` (finishing it and clearing its
-	/// catalog rendition) and allocate a fresh one.
+	/// Retire any existing audio track `track_id` and allocate a fresh one.
 	fn replace_audio(&mut self, track_id: u8) -> anyhow::Result<moq_net::track::Producer> {
-		if let Some(mut old) = self.audio.remove(&track_id) {
-			old.track.finish()?;
+		if let Some(old) = self.audio.remove(&track_id) {
+			self.retire(old.track)?;
 		}
 		Ok(self
 			.broadcast
 			.unique_track(".flv-a", self.catalog.track_info(hang::catalog::PRIORITY.audio))?)
+	}
+
+	/// End a track this importer is done with, clearing its catalog rendition and retiring its HLS
+	/// records. Every track takes a fresh name, so a publisher changing its config holds only its live
+	/// tracks.
+	fn retire<R: Clone + Send + 'static>(
+		&self,
+		mut track: crate::container::Producer<crate::catalog::hang::Container, R>,
+	) -> anyhow::Result<()> {
+		let ended = track.end();
+		let name = track.name().to_string();
+		drop(track);
+		self.catalog.retire(&name)?;
+		Ok(ended?)
 	}
 
 	/// Close the current group on every track and reopen at `sequence`.
@@ -622,12 +634,28 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// generic [`moq_net::Error::Dropped`] a bare drop surfaces. The counterpart to
 	/// [`Self::finish`] for a failed teardown (e.g. the RTMP client disconnected).
 	/// Consumes the importer.
+	///
+	/// Unlike a drop, this leaves the tracks' HLS records to the catalog, whose abort fails them
+	/// rather than ending them as a complete recording.
 	pub fn abort(mut self, err: moq_net::Error) {
 		for stream in std::mem::take(&mut self.video).into_values() {
 			stream.track.abort(err.clone());
 		}
 		for stream in std::mem::take(&mut self.audio).into_values() {
 			stream.track.abort(err.clone());
+		}
+	}
+}
+
+impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {
+	fn drop(&mut self) {
+		let (video, audio) = (std::mem::take(&mut self.video), std::mem::take(&mut self.audio));
+		let video = video.into_values().map(|stream| self.retire(stream.track));
+		let audio = audio.into_values().map(|stream| self.retire(stream.track));
+		for result in video.chain(audio) {
+			if let Err(err) = result {
+				tracing::warn!(%err, "failed to end a dropped FLV track");
+			}
 		}
 	}
 }

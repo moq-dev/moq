@@ -962,11 +962,11 @@ HLS records exist only so an edge can serve a broadcast as HLS or DASH without s
 MoQ groups carry only an opaque sequence number; the timestamps live inside the media frames.
 A record track republishes where each segment of one rendition starts, a few bytes per segment, so an edge builds playlists from the records alone and fetches a segment's groups only when a player requests it.
 
-Records are optional and opt-in: a video or audio rendition carries them only when its publisher enables them, and a rendition without them is not HLS-renderable.
+Records are optional: a video or audio rendition carries them only when its publisher publishes them, and a rendition without them is not HLS-renderable.
 Other tracks, including the catalog and data tracks ({{data}}), carry none.
 
 ## Catalog Field {#hls-catalog}
-A video or audio rendition opts in with its `hls` field:
+A video or audio rendition advertises its records with its `hls` field:
 
 ~~~
 type HlsSchema = {
@@ -1144,7 +1144,7 @@ This document has no IANA actions.
 ## moq-hang-04
 {:numbered="false"}
 
-- Replaced the root `archive` section and its per-track timelines with an opt-in, per-rendition `hls` field on video and audio ({{hls}}). Each record is a segment's first `group` and `pts` in milliseconds, with an optional `duration` where zero marks a stop; frame positions, `end`, `keyframe`, `timescale`, `replay`, `replayEpoch`, `store`, and `version` are gone. Each rendition numbers its own segments, and an edge maps a rendition's record `n` to its segment `n`. The record track is named `<track>.hls` and is not compressed.
+- Replaced the root `archive` section and its per-track timelines with an optional, per-rendition `hls` field on video and audio ({{hls}}). Each record is a segment's first `group` and `pts` in milliseconds, with an optional `duration` where zero marks a stop; frame positions, `end`, `keyframe`, `timescale`, `replay`, `replayEpoch`, `store`, and `version` are gone. Each rendition numbers its own segments, and an edge maps a rendition's record `n` to its segment `n`. The record track is named `<track>.hls` and is not compressed.
 - A reader refuses a JSON frame in which an object repeats a member name.
 - Added the root `version` ({{catalog-version}}): the oldest draft that reads the catalog, which a consumer refuses when above its own. A `track` other than the entry's ID or a video `warmup` needs 4. Consumers MUST ignore unknown fields.
 - A data track marks a discontinuity with a group of one object with no bytes, since its empty payload is data. An object with no bytes on an audio or video track, or sharing its group, is malformed.

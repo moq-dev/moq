@@ -6,6 +6,7 @@ description: The pub/sub layer in TypeScript
 # @moq/net
 
 [![npm](https://img.shields.io/npm/v/@moq/net)](https://www.npmjs.com/package/@moq/net)
+[![API](https://img.shields.io/badge/API-reference-blue)](/lib/js/api/net)
 
 The TypeScript twin of [`moq-net`](/lib/rs/moq-net): connections, origins,
 broadcasts, tracks, groups, and frames, negotiating moq-lite or moq-transport
