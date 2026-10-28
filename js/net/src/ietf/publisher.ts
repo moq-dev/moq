@@ -3244,9 +3244,11 @@ export class Publisher {
 			group.close();
 		}
 		// The subscription starts right after the saved Largest Object, so the head has to be
-		// here in full or the two leave a gap, unless the FILL_TIMEOUT marks the rest as one.
-		// Frames read are consecutive, so a full count starts at object 0.
-		if (!last.timedOut && last.frames.length !== Number(end.object)) return unavailable;
+		// here in full or the two leave a gap, unless the FILL_TIMEOUT marks the rest of a
+		// prefix as one. Frames read are consecutive, so a full count starts at object 0.
+		const whole = last.frames.length === Number(end.object);
+		const prefix = last.timedOut && (last.frames[0]?.sequence ?? 0) === 0;
+		if (!whole && !prefix) return unavailable;
 		return {
 			cache: join.track,
 			owned: false,
@@ -3583,9 +3585,10 @@ async function nextFrame(
 	signal: AbortSignal,
 	closed?: Promise<void>,
 ): Promise<({ sequence: number } & group.Frame) | undefined | typeof TIMED_OUT> {
-	const read = () => {
+	const read = async () => {
 		const next = group.readFrameSequence({ from });
-		return closed ? race([next, closed.then(() => undefined)]) : next;
+		// Raced as is: a reaction chained on `closed` would stay on it for every frame read.
+		return closed === undefined ? next : ((await race([next, closed])) ?? undefined);
 	};
 	if (deadline === undefined) return untilAborted(read(), signal);
 
@@ -3593,7 +3596,8 @@ async function nextFrame(
 		if (frame.sequence >= from) return frame;
 	}
 	// A finished or failed group settles the read at once, which says which it was.
-	if (!group.done && now() >= deadline) return TIMED_OUT;
+	if (group.done) return untilAborted(read(), signal);
+	if (now() >= deadline) return TIMED_OUT;
 	const expiry = new AbortController();
 	try {
 		const expired = sleepUntil(deadline, { signal: expiry.signal }).then((): typeof TIMED_OUT => TIMED_OUT);
