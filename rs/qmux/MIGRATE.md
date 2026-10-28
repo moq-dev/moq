@@ -4,10 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Polls take the caller's waiter ([#7042](https://github.com/moq-dev/moq/pull/7042))
-
-`Session`'s moq-net poll methods take `&self` and a `&kio::Waiter`, and its streams' `poll_*` take a `&kio::Waiter` in place of a `Context`; see moq-net's migration guide. A clone is no longer needed to wait on two operations at once.
-
 ### Framing belongs to session establishment
 
 Wrap byte streams with `transport::Stream::new(io)` and pass the sole `Config` to `Session::connect` or `Session::accept`; wrapping no longer starts I/O. Custom `Transport` implementations receive `&Config` in `split` and bind their framing there.
