@@ -119,7 +119,6 @@ removed).
 ## Required
 
 - [Resume checked against a model](/quest/m1/resume-model-test.md) - a randomized test checks every resumed reader against a one-track reference model in Rust and JS, and passes before the cut
-- [Recover by the reader's budget](/quest/m1/recover-reader-budget.md) - resume judges a missing group by each reader's own budget, not the copy's
 - [Slow joiner test](/quest/m1/slow-joiner-test.md) - a reader stalled before its first read loses no groups within its budget, under real stream backpressure
 - [moq-bench scores only gaps at or after a subscription's start](/quest/m1/bench-join-gaps.md) - late-filled history is counted apart, never as loss
 - [Address groups by timestamp](/quest/m1/time-addressing/README.md) - group start timestamps replace sequence numbers in the moq-net API and lite-07 wire, while old subscribers, old publishers, and published JS clients keep working

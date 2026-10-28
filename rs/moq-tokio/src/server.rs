@@ -258,7 +258,7 @@ pub struct Server {
 impl Server {
 	/// Build a server from its config, binding the QUIC socket up front.
 	///
-	/// The stream (`tcp`/`unix`) listeners need a runtime, so they wait for
+	/// The stream (`tcp`/`unix`) listeners bind asynchronously, so they wait for
 	/// [`listen`](Self::listen).
 	pub fn new(config: Config) -> crate::Result<Self> {
 		Self::build(config, Parts::All)
@@ -505,7 +505,7 @@ impl Server {
 			tracing::info!(%addr, "listening");
 		}
 		while let Some(request) = listener.accept().await {
-			tokio::spawn(crate::panic::isolate(async move {
+			crate::runtime::spawn(crate::panic::isolate(async move {
 				if let Err(err) = serve_session(request).await {
 					tracing::warn!(%err, "session ended with error");
 				}
@@ -584,9 +584,12 @@ impl Server {
 		reason = "`mut` is only needed to bind the stream listeners, which a QUIC-only build has none of"
 	)]
 	pub async fn bind(mut self) -> crate::Result<Listener> {
-		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
-		self.streams.bind().await?;
-		Ok(Listener { server: self })
+		crate::runtime::scope(async move {
+			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+			self.streams.bind().await?;
+			Ok(Listener { server: self })
+		})
+		.await
 	}
 
 	/// Start serving: bind whatever is still unbound and hand back the
@@ -595,7 +598,7 @@ impl Server {
 	/// Terminal, and that is the point: it consumes the `Server`, so the builders
 	/// above cannot run afterwards and every session is served the configuration
 	/// this call captured. The QUIC socket is bound by [`crate::listen::Config::init`], but
-	/// the stream (`tcp`/`unix`) listeners need a runtime, so they bind here, and
+	/// the stream (`tcp`/`unix`) listeners bind asynchronously, so they bind here, and
 	/// their accept loops start here too. Use [`bind`](Self::bind) to learn the
 	/// port without accepting yet.
 	///
@@ -898,7 +901,7 @@ impl Listener {
 	/// race this against your own ctrl-C future and drop the listener if you want
 	/// one to stop the loop.
 	pub async fn accept(&mut self) -> Option<Request> {
-		self.server.accept_next().await
+		crate::runtime::scope(self.server.accept_next()).await
 	}
 
 	/// Read the MoQ SETUP from the data channel the remote peer opened on an
@@ -909,43 +912,46 @@ impl Listener {
 	/// speaks. Returns [`Error::Stopped`] once the listener is closing.
 	#[cfg(feature = "webrtc")]
 	pub async fn accept_webrtc(&self, peer: &crate::webrtc::Answerer) -> crate::Result<Request> {
-		use crate::webrtc::Error as WebRtcError;
+		crate::runtime::scope(async move {
+			use crate::webrtc::Error as WebRtcError;
 
-		let server = &self.server;
-		let active = server.activity.enter().ok_or(Error::Stopped)?;
-		if !server.versions.alpns().contains(&peer.protocol()) {
-			return Err(WebRtcError::Protocol(peer.protocol().to_string()).into());
-		}
-		let deadline = server.timeout.and_then(|timeout| moq_clock::now().checked_add(timeout));
-
-		let handshake = async {
-			let opened = peer.channel().await?;
-			if opened.protocol != peer.protocol() {
-				return Err(WebRtcError::Protocol(opened.protocol));
+			let server = &self.server;
+			let active = server.activity.enter().ok_or(Error::Stopped)?;
+			if !server.versions.alpns().contains(&peer.protocol()) {
+				return Err(WebRtcError::Protocol(peer.protocol().to_string()).into());
 			}
-			let config = opened.config;
-			let protocol = opened.protocol;
-			let session = qmux::Session::accept(opened.channel, config).await?;
-			Ok((session, protocol))
-		};
-		let (session, protocol) = within(deadline, handshake).await?;
+			let deadline = server.timeout.and_then(|timeout| moq_clock::now().checked_add(timeout));
 
-		let (request, deadline) = accept_request(&server.moq, session, deadline).await?;
-		Ok(Request {
-			transport: Transport::WebRtc,
-			url: None,
-			authority: None,
-			identity: None,
-			link: Link {
-				alpn: Some(protocol),
-				..Default::default()
-			},
-			handshake: Box::new(request),
-			#[cfg(feature = "quic")]
-			quic: None,
-			deadline,
-			active,
+			let handshake = async {
+				let opened = peer.channel().await?;
+				if opened.protocol != peer.protocol() {
+					return Err(WebRtcError::Protocol(opened.protocol));
+				}
+				let config = opened.config;
+				let protocol = opened.protocol;
+				let session = qmux::Session::accept(opened.channel, config).await?;
+				Ok((session, protocol))
+			};
+			let (session, protocol) = within(deadline, handshake).await?;
+
+			let (request, deadline) = accept_request(&server.moq, session, deadline).await?;
+			Ok(Request {
+				transport: Transport::WebRtc,
+				url: None,
+				authority: None,
+				identity: None,
+				link: Link {
+					alpn: Some(protocol),
+					..Default::default()
+				},
+				handshake: Box::new(request),
+				#[cfg(feature = "quic")]
+				quic: None,
+				deadline,
+				active,
+			})
 		})
+		.await
 	}
 
 	/// Close every listener and connection, once each QUIC peer has been sent the
@@ -955,7 +961,7 @@ impl Listener {
 	/// still held, so the address can be bound again at once. A worker group
 	/// member's socket stays in its group until the group is gone.
 	pub async fn close(mut self) {
-		self.server.shutdown().await;
+		crate::runtime::scope(self.server.shutdown()).await;
 	}
 
 	/// The address the QUIC listener bound to, useful when the config asked for
@@ -1255,7 +1261,7 @@ impl StreamBind {
 
 /// The stream (`tcp`/`unix`) listeners owned by a [`Server`].
 ///
-/// Bound by [`Server::bind`] (they need a runtime). [`Server::listen`] then starts
+/// Bound by [`Server::bind`] (they bind asynchronously). [`Server::listen`] then starts
 /// each accept loop; a bind-only listener starts them on the first
 /// [`Listener::accept`] instead. Each loop feeds completed [`Request`]s back over
 /// a channel. The tasks own their listeners and in-flight handshakes, and are
@@ -1446,7 +1452,7 @@ fn spawn_tcp_loop(
 	tx: tokio::sync::mpsc::Sender<Request>,
 ) -> tokio::task::JoinHandle<std::convert::Infallible> {
 	let local = listener.local_addr().ok();
-	tokio::spawn(async move {
+	crate::runtime::spawn(async move {
 		// Owned by the loop so stopping it (listener close or drop) also aborts
 		// every in-flight handshake, releasing its socket.
 		let mut handshakes = tokio::task::JoinSet::new();
@@ -1499,7 +1505,7 @@ fn spawn_unix_loop(
 	allow: Option<crate::unix::Allow>,
 	tx: tokio::sync::mpsc::Sender<Request>,
 ) -> tokio::task::JoinHandle<std::convert::Infallible> {
-	tokio::spawn(async move {
+	crate::runtime::spawn(async move {
 		// Owned by the loop, as in `spawn_tcp_loop`.
 		let mut handshakes = tokio::task::JoinSet::new();
 		loop {
@@ -1695,7 +1701,7 @@ impl Request {
 	/// cannot hold a connection open behind a decision that never comes. Without a
 	/// deadline, waits forever.
 	pub async fn within<T>(&self, work: impl Future<Output = T>) -> crate::Result<T> {
-		Deadline::bound(self.deadline.as_ref(), async { Ok(work.await) }).await
+		crate::runtime::scope(Deadline::bound(self.deadline.as_ref(), async { Ok(work.await) })).await
 	}
 
 	/// Accept the session, driving it until it closes.
@@ -1717,9 +1723,9 @@ impl Request {
 		if let Some(deadline) = deadline {
 			handshake = handshake.with_deadline(deadline.at);
 		}
-		let (session, driver) = handshake.ok().await?;
+		let (session, driver) = crate::runtime::scope(handshake.ok()).await?;
 		use tracing::Instrument;
-		tokio::spawn(
+		crate::runtime::spawn(
 			async move {
 				crate::panic::isolate(async move {
 					let _active = active;
@@ -2970,8 +2976,8 @@ mod tests {
 		assert!(server.accept_health().is_empty());
 	}
 
-	/// Building the endpoint needs a runtime, and `certificates()` must stay
-	/// readable without one (no guard escapes to the caller).
+	/// `certificates()` must stay readable with no runtime entered (no guard
+	/// escapes to the caller).
 	#[cfg(feature = "quic")]
 	#[tokio::test]
 	async fn certificates_expose_generated_fingerprints() {

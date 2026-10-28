@@ -247,75 +247,78 @@ impl Config {
 	/// MTU discovery, congestion control, flow-control windows), and key logging. It
 	/// cannot disable GSO, so `gso = false` fails with [`Error::GsoUnsupported`].
 	pub async fn bind(self, quic: &crate::quic::Config) -> Result<Option<Endpoint>> {
-		if !self.enabled.unwrap_or(false) {
-			return Ok(None);
-		}
-
-		// Public, and takes a config this crate did not necessarily check, so it
-		// refuses rather than trusting the caller: `resolve` reads the canonical
-		// fields, and a released `--client-quic-gso=false` would arrive here as "GSO
-		// on" and bind an endpoint the caller asked not to have.
-		let deprecated = quic.deprecated();
-		if !deprecated.is_empty() {
-			return Err(Error::Deprecated(deprecated));
-		}
-		quic.validate().map_err(Error::Config)?;
-
-		let quic = quic.resolve();
-		if quic.keep_alive.is_none() {
-			return Err(Error::Config(crate::Error::NoBackend(
-				"Iroh cannot disable keep-alive; omit quic.keep_alive or set a positive interval",
-			)));
-		}
-		if quic.keylog.is_some() {
-			return Err(Error::Config(crate::Error::NoBackend(
-				"Iroh does not support an explicit quic.keylog path",
-			)));
-		}
-		if quic.gso_disabled() {
-			return Err(Error::GsoUnsupported);
-		}
-
-		// If the secret matches the expected format (hex encoded), use it directly.
-		let secret_key = if let Some(secret) = self.secret.as_ref().and_then(|s| SecretKey::from_str(s).ok()) {
-			secret
-		} else if let Some(path) = self.secret {
-			let path = PathBuf::from(path);
-			if !path.exists() {
-				// Generate a new random secret and write it to the file.
-				let secret = SecretKey::generate();
-				tokio::fs::write(path, hex::encode(secret.to_bytes())).await?;
-				secret
-			} else {
-				// Otherwise, read the secret from a file.
-				let key_str = tokio::fs::read_to_string(&path).await?;
-				SecretKey::from_str(&key_str).map_err(|err| Error::Secret(crate::error::message(err)))?
+		crate::runtime::scope(async move {
+			if !self.enabled.unwrap_or(false) {
+				return Ok(None);
 			}
-		} else {
-			// Otherwise, generate a new random secret.
-			SecretKey::generate()
-		};
 
-		let transport = transport_config(&quic);
+			// Public, and takes a config this crate did not necessarily check, so it
+			// refuses rather than trusting the caller: `resolve` reads the canonical
+			// fields, and a released `--client-quic-gso=false` would arrive here as "GSO
+			// on" and bind an endpoint the caller asked not to have.
+			let deprecated = quic.deprecated();
+			if !deprecated.is_empty() {
+				return Err(Error::Deprecated(deprecated));
+			}
+			quic.validate().map_err(Error::Config)?;
 
-		let mut builder = if self.disable_relay.unwrap_or(false) {
-			Endpoint::builder(iroh::endpoint::presets::N0DisableRelay)
-		} else {
-			Endpoint::builder(iroh::endpoint::presets::N0)
-		}
-		.secret_key(secret_key)
-		.transport_config(transport.build());
-		if let Some(addr) = self.bind_v4 {
-			builder = builder.bind_addr(addr)?;
-		}
-		if let Some(addr) = self.bind_v6 {
-			builder = builder.bind_addr(addr)?;
-		}
+			let quic = quic.resolve();
+			if quic.keep_alive.is_none() {
+				return Err(Error::Config(crate::Error::NoBackend(
+					"Iroh cannot disable keep-alive; omit quic.keep_alive or set a positive interval",
+				)));
+			}
+			if quic.keylog.is_some() {
+				return Err(Error::Config(crate::Error::NoBackend(
+					"Iroh does not support an explicit quic.keylog path",
+				)));
+			}
+			if quic.gso_disabled() {
+				return Err(Error::GsoUnsupported);
+			}
 
-		let endpoint = builder.bind().await?;
-		tracing::info!(endpoint_id = %endpoint.id(), "iroh listening");
+			// If the secret matches the expected format (hex encoded), use it directly.
+			let secret_key = if let Some(secret) = self.secret.as_ref().and_then(|s| SecretKey::from_str(s).ok()) {
+				secret
+			} else if let Some(path) = self.secret {
+				let path = PathBuf::from(path);
+				if !path.exists() {
+					// Generate a new random secret and write it to the file.
+					let secret = SecretKey::generate();
+					tokio::fs::write(path, hex::encode(secret.to_bytes())).await?;
+					secret
+				} else {
+					// Otherwise, read the secret from a file.
+					let key_str = tokio::fs::read_to_string(&path).await?;
+					SecretKey::from_str(&key_str).map_err(|err| Error::Secret(crate::error::message(err)))?
+				}
+			} else {
+				// Otherwise, generate a new random secret.
+				SecretKey::generate()
+			};
 
-		Ok(Some(endpoint))
+			let transport = transport_config(&quic);
+
+			let mut builder = if self.disable_relay.unwrap_or(false) {
+				Endpoint::builder(iroh::endpoint::presets::N0DisableRelay)
+			} else {
+				Endpoint::builder(iroh::endpoint::presets::N0)
+			}
+			.secret_key(secret_key)
+			.transport_config(transport.build());
+			if let Some(addr) = self.bind_v4 {
+				builder = builder.bind_addr(addr)?;
+			}
+			if let Some(addr) = self.bind_v6 {
+				builder = builder.bind_addr(addr)?;
+			}
+
+			let endpoint = builder.bind().await?;
+			tracing::info!(endpoint_id = %endpoint.id(), "iroh listening");
+
+			Ok(Some(endpoint))
+		})
+		.await
 	}
 }
 
