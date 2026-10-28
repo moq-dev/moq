@@ -107,7 +107,9 @@ start_relay() {
     fi
 
     for attempt in {1..5}; do
-        port=$((40000 + (RANDOM % 20000)))
+        # Below the ephemeral ranges (Linux 32768+, macOS 49152+), where every client socket
+        # on a busy machine competes for the port; the heap mode's port + 1 stays below too.
+        port=$((20000 + (RANDOM % 12000)))
         config=$directory/relay-$attempt.toml
         log=$directory/relay-$attempt.log
         relay_config "$config" "$port" "$runtime" "$workers"
@@ -122,8 +124,14 @@ start_relay() {
                 break
             fi
             if (: <>"/dev/tcp/127.0.0.1/$port") 2>/dev/null && relay_owns_port "$RELAY_PID" "$port"; then
-                RELAY_PORT=$port
-                return 0
+                # Sockets bind before workers spawn. Use the same readiness window
+                # to verify the backend and count rather than accepting a fallback.
+                if [[ $runtime != tokio-workers && $runtime != io-uring-workers ]] ||
+                    python3 "$ROOT/bench/runtime.py" "$RELAY_PID" "$runtime" "$workers" \
+                        "$directory/runtime.json" 2>"$directory/runtime.log"; then
+                    RELAY_PORT=$port
+                    return 0
+                fi
             fi
             sleep 0.1
         done
@@ -137,6 +145,7 @@ start_relay() {
 
     printf 'relay failed to start:\n' >&2
     cat "$log" >&2
+    if [[ -f $directory/runtime.log ]]; then cat "$directory/runtime.log" >&2; fi
     return 1
 }
 

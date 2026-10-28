@@ -3,22 +3,43 @@ import * as Json from "@moq/json";
 import * as Msf from "@moq/msf";
 import type * as Moq from "@moq/net";
 import { Error as NetError, Path, StreamCode } from "@moq/net";
-import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
+import {
+	Effect,
+	type Getter,
+	type GetterType,
+	getter,
+	type Inputs,
+	type Readonlys,
+	readonlys,
+	Signal,
+} from "@moq/signals";
 
 import { toHang } from "./msf";
 
 type ReferencedRendition = {
 	broadcast?: Path.Relative;
+	epoch?: Catalog.ReferenceEpoch;
 };
+
+// Whether a rendition's reference names something this consumer can play.
+type Usable = (rel: Path.Relative | undefined, epoch: Moq.Epoch.Valid | undefined) => boolean;
 
 // Either the catalog's own broadcast, or a sibling to consume by path.
 type RelativeTarget = { local: true } | { local: false; path: Moq.Path.Valid };
 
 function filterRenditions<T extends ReferencedRendition>(
 	renditions: Record<string, T>,
-	usable: (rel: Path.Relative | undefined) => boolean,
+	usable: Usable,
 ): Record<string, T> {
-	return Object.fromEntries(Object.entries(renditions).filter(([, config]) => usable(config.broadcast)));
+	return Object.fromEntries(
+		Object.entries(renditions).filter(([, config]) => usable(config.broadcast, config.epoch)),
+	);
+}
+
+// Whether `active` is proven to be another instance than `epoch` names. An epochless route cannot
+// prove its instance, so only a known mismatch counts.
+function provesOther(active: Moq.Broadcast.Consumer | undefined, epoch: Moq.Epoch.Valid | undefined): boolean {
+	return epoch !== undefined && active?.epoch !== undefined && active.epoch !== epoch;
 }
 
 // Whether an announced route covers `path`, until closed. Hidden routes count: a service claim
@@ -47,7 +68,7 @@ function watchCovered(origin: Moq.Origin.Table, path: Moq.Path.Valid): { covered
 
 // Every section carrying a `broadcast` reference must be listed here, same as `Catalog.checkResolvable`;
 // one left out silently exempts its tracks from the reachability filter.
-function filterCatalog(catalog: Catalog.Root, usable: (rel: Path.Relative | undefined) => boolean): Catalog.Root {
+function filterCatalog(catalog: Catalog.Root, usable: Usable): Catalog.Root {
 	return {
 		...catalog,
 		video: catalog.video
@@ -67,7 +88,7 @@ function filterCatalog(catalog: Catalog.Root, usable: (rel: Path.Relative | unde
 }
 
 /**
- * Watch supports the on-the-wire catalog formats from @moq/hang, plus "hangz" (the
+ * Watch supports the on-the-wire catalog formats from `@moq/hang`, plus "hangz" (the
  * DEFLATE-compressed `catalog.json.z` track) and a "manual" mode where the user supplies the
  * catalog directly without fetching. "hangz" is opt-in only: it shares the `.hang` broadcast suffix
  * and is never auto-detected, so set it explicitly via `catalogFormat`.
@@ -75,10 +96,6 @@ function filterCatalog(catalog: Catalog.Root, usable: (rel: Path.Relative | unde
 export const CATALOG_FORMATS = [...Catalog.FORMATS, "hangz", "manual"] as const;
 /** A catalog format the watcher can read; see {@link CATALOG_FORMATS}. */
 export type CatalogFormat = (typeof CATALOG_FORMATS)[number];
-
-// "error" means the origin refused the broadcast; `out.error` says why.
-// "unsupported" means its catalog requires a newer player.
-type Status = "offline" | "loading" | "live" | "error" | "unsupported";
 
 /**
  * Signals the component reads. Whoever owns the backing Signal (the caller, or
@@ -111,8 +128,11 @@ export type BroadcastInput = {
 	catalog: Getter<Catalog.Root | undefined>;
 };
 
-type BroadcastOutput = {
-	status: Signal<Status>;
+/** Signals the component derives. */
+export type BroadcastOutput = {
+	// "error" means the origin refused the broadcast; `error` says why.
+	// "unsupported" means its catalog requires a newer player.
+	status: Signal<"offline" | "loading" | "live" | "error" | "unsupported">;
 	active: Signal<Moq.Broadcast.Consumer | undefined>;
 
 	// Why the origin refused the broadcast, while `status` is "error". A refusal is final:
@@ -124,6 +144,8 @@ type BroadcastOutput = {
 	// broadcast appears once that broadcast is announced, so this can change without a new catalog.
 	catalog: Signal<Catalog.Root | undefined>;
 };
+
+type Status = GetterType<BroadcastOutput["status"]>;
 
 /** A catalog source that can wait for announcement before subscribing. */
 export class Broadcast {
@@ -182,12 +204,16 @@ export class Broadcast {
 	}
 
 	// Publish the catalog minus every rendition this consumer cannot use: one naming a
-	// broadcast that isn't announced to us. Selecting one of those would render nothing,
-	// since `relativeBroadcast` resolves it to no broadcast at all. Reruns as announcements
-	// arrive, so a rendition appears once its broadcast does.
+	// broadcast that isn't announced to us, or one whose broadcast proves another epoch than it
+	// names. Selecting one of those would render nothing, since `relativeBroadcast` resolves it to
+	// no broadcast at all. Reruns as announcements arrive, so a rendition appears once its
+	// broadcast does. Only a rendition naming an epoch resolves its broadcast here, sharing the
+	// request playback uses.
 	#runFiltered(effect: Effect): void {
 		const raw = effect.get(this.#raw);
-		const usable = (rel: Path.Relative | undefined) => this.#relativeTarget(effect, rel) !== undefined;
+		const usable: Usable = (rel, epoch) =>
+			this.#relativeTarget(effect, rel) !== undefined &&
+			(epoch === undefined || !provesOther(this.#relativeActive(effect, rel), epoch));
 		effect.set(this.#out.catalog, raw ? filterCatalog(raw, usable) : undefined);
 	}
 
@@ -441,6 +467,8 @@ export class Broadcast {
 	 * `epoch` is the rendition's `epoch` field, the publisher instance the reference names.
 	 * Returns `undefined` while the followed broadcast is proven to be another instance, rather
 	 * than reading it. A route without an epoch cannot prove one, so there it is best effort.
+	 *
+	 * @internal
 	 */
 	relativeBroadcast(
 		effect: Effect,
@@ -448,7 +476,7 @@ export class Broadcast {
 		epoch?: Moq.Epoch.Valid,
 	): Moq.Broadcast.Consumer | undefined {
 		const active = this.#relativeActive(effect, rel);
-		if (!active || epoch === undefined || active.epoch === undefined || active.epoch === epoch) return active;
+		if (!active || !provesOther(active, epoch)) return active;
 		console.warn("ignoring rendition: its broadcast serves another epoch", active.path, active.epoch, epoch);
 		return undefined;
 	}

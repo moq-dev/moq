@@ -5,7 +5,7 @@
 //! check is judged by the track's record of arrivals, so a cost that grows with the groups
 //! cached or the tracks held shows up as a slope over either axis.
 //!
-//! Run with `cargo bench -p moq-net --bench tail`.
+//! Run with `cargo bench -p moq-net --features fuzz --bench tail`.
 
 use std::{hint::black_box, task::Poll, time::Duration};
 
@@ -38,7 +38,7 @@ impl Held {
 					track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
 				track.start_at(0).unwrap();
 				let end = track::Position::group(groups as u64 + 1);
-				track.received();
+				moq_net::fuzz::received(&track);
 				track.finish_at(end).unwrap();
 				// Group 0 never arrives: the hole that holds the reader.
 				for sequence in 1..=groups as u64 {

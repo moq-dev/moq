@@ -16,12 +16,13 @@ use std::{
 		Arc, Mutex,
 		atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering},
 	},
-	task::{Context, Poll, ready},
+	task::{Poll, ready},
 	time::Duration,
 };
 
-use bytes::{Buf, Bytes};
 use moq_net::{
+	bytes::{Buf, Bytes},
+	kio,
 	time::Instant,
 	transport::{memory, poll},
 };
@@ -106,10 +107,10 @@ impl Link {
 
 	/// Move every stream the transport has accepted to the held or ready queue,
 	/// returning the transport's error once it has none left.
-	fn route(&self, session: &mut memory::Session, cx: &mut Context<'_>) -> Option<memory::Error> {
+	fn route(&self, session: &memory::Session, waiter: &kio::Waiter) -> Option<memory::Error> {
 		let mut unis = self.uni.lock().unwrap();
 		let uni_err = loop {
-			match poll::Session::poll_accept_uni(session, cx) {
+			match poll::Session::poll_accept_uni(session, waiter) {
 				Poll::Ready(Ok(recv)) => {
 					let line = unis.pop_front().expect("opened");
 					let held = line.held;
@@ -127,7 +128,7 @@ impl Link {
 
 		let mut bis = self.bi.lock().unwrap();
 		let bi_err = loop {
-			match poll::Session::poll_accept_bi(session, cx) {
+			match poll::Session::poll_accept_bi(session, waiter) {
 				Poll::Ready(Ok((send, recv))) => {
 					let [forward, back] = bis.pop_front().expect("opened");
 					let held = forward.held;
@@ -146,8 +147,8 @@ impl Link {
 
 	/// Sort every stream opened so far, so a release sees them all.
 	fn settle(&self) {
-		let mut acceptor = self.acceptor.lock().unwrap();
-		self.route(&mut acceptor, &mut Context::from_waker(std::task::Waker::noop()));
+		let acceptor = self.acceptor.lock().unwrap();
+		self.route(&acceptor, &kio::Waiter::noop());
 	}
 
 	/// Deliver held uni streams in the order `pick` leaves them, and stop holding.
@@ -215,22 +216,22 @@ impl poll::SendStream for MockSendStream {
 	type Error = memory::Error;
 	type Group = poll::Ungrouped;
 
-	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
+	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		if self.conn.hold_writes.load(Ordering::Relaxed) {
-			let written = poll::Session::poll_closed(&mut self.session, cx).map(Err);
+			let written = poll::Session::poll_closed(&self.session, waiter).map(Err);
 			return self.wrote(buf.first().copied(), written);
 		}
-		let written = self.inner.poll_write(cx, buf);
+		let written = self.inner.poll_write(waiter, buf);
 		self.wrote(buf.first().copied(), written)
 	}
 
-	fn poll_write_buf<B: Buf>(&mut self, cx: &mut Context<'_>, buf: &mut B) -> Poll<Result<usize, Self::Error>> {
+	fn poll_write_buf<B: Buf>(&mut self, waiter: &kio::Waiter, buf: &mut B) -> Poll<Result<usize, Self::Error>> {
 		let first = buf.chunk().first().copied();
 		if self.conn.hold_writes.load(Ordering::Relaxed) {
-			let written = poll::Session::poll_closed(&mut self.session, cx).map(Err);
+			let written = poll::Session::poll_closed(&self.session, waiter).map(Err);
 			return self.wrote(first, written);
 		}
-		let written = self.inner.poll_write_buf(cx, buf);
+		let written = self.inner.poll_write_buf(waiter, buf);
 		self.wrote(first, written)
 	}
 
@@ -269,14 +270,14 @@ impl poll::SendStream for MockSendStream {
 		}
 	}
 
-	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
 		if self.conn.hold_fins.load(Ordering::Relaxed) {
-			return Poll::Ready(Err(ready!(poll::Session::poll_closed(&mut self.session, cx))));
+			return Poll::Ready(Err(ready!(poll::Session::poll_closed(&self.session, waiter))));
 		}
 		if self.finished && (self.ack || self.conn.ack_fins.load(Ordering::Relaxed)) {
 			return Poll::Ready(Ok(()));
 		}
-		self.inner.poll_closed(cx)
+		self.inner.poll_closed(waiter)
 	}
 }
 
@@ -311,7 +312,6 @@ pub struct MockChunks {
 	buf: Bytes,
 	/// Data chunks handed to the reader so far.
 	chunks: usize,
-	park: kio::Park,
 }
 
 impl MockChunks {
@@ -324,16 +324,15 @@ impl MockChunks {
 			landing: None,
 			buf: Bytes::new(),
 			chunks: 0,
-			park: Default::default(),
 		}
 	}
 
 	/// The next whole chunk, FIN, or error, once it has arrived.
-	fn poll_event(&mut self, cx: &mut Context<'_>) -> Poll<Event> {
+	fn poll_event(&mut self, waiter: &kio::Waiter) -> Poll<Event> {
 		if let Some(split) = &self.line.split
 			&& self.chunks > 0
 			&& split
-				.poll(self.park.hold(cx), |released| match **released {
+				.poll(waiter, |released| match **released {
 					true => Poll::Ready(()),
 					false => Poll::Pending,
 				})
@@ -347,7 +346,7 @@ impl MockChunks {
 				return Poll::Ready(Err(memory::Error::Closed));
 			};
 			// Below the buffering, so each event is one whole message the writer sent.
-			let event = ready!(poll::Chunks::poll_read_chunk(inner.get_mut(), cx, usize::MAX));
+			let event = ready!(poll::Chunks::poll_read_chunk(inner.get_mut(), waiter, usize::MAX));
 			let arrival = match &event {
 				Err(memory::Error::Reset(_)) => self.line.reset.lock().unwrap().take(),
 				Ok(_) => self.line.arrivals.lock().unwrap().pop_front(),
@@ -361,7 +360,7 @@ impl MockChunks {
 			// Only a test sets a latency, so the flight lands on the simulated clock.
 			if self.landing != Some(arrival) {
 				self.landing = Some(arrival);
-				let waker = cx.waker().clone();
+				let waker = waiter.waker().clone();
 				drop(moq_clock::sim::spawn(async move {
 					moq_clock::sleep_until(arrival).await;
 					waker.wake();
@@ -397,12 +396,12 @@ impl MockChunks {
 impl poll::Chunks for MockChunks {
 	type Error = memory::Error;
 
-	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
+	fn poll_read_chunk(&mut self, waiter: &kio::Waiter, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
 		if max == 0 {
 			return Poll::Ready(Ok(Some(Bytes::new())));
 		}
 		if self.buf.is_empty() {
-			match ready!(self.poll_event(cx))? {
+			match ready!(self.poll_event(waiter))? {
 				Some(chunk) => self.buf = chunk,
 				None => return Poll::Ready(Ok(None)),
 			}
@@ -447,7 +446,7 @@ struct Side {
 	bidi_types: StreamTypes,
 	/// Stream resets sent by this side.
 	resets: Resets,
-	/// What [`poll::Session::stats`] reports.
+	/// What [`poll::Session::metrics`] reports.
 	stats: Mutex<MockStats>,
 	/// How many times the stats were read.
 	stats_reads: AtomicUsize,
@@ -466,7 +465,7 @@ pub struct MockStats {
 	pub rtt: Option<Duration>,
 }
 
-impl moq_net::transport::Stats for MockStats {
+impl moq_net::transport::Metrics for MockStats {
 	fn estimated_send_rate(&self) -> Option<u64> {
 		self.estimated_send_rate
 	}
@@ -484,8 +483,6 @@ pub struct MockSession {
 	/// Parks withheld opens on the close, apart from the session's own close poll.
 	closer: memory::Session,
 	side: Arc<Side>,
-	accept_uni: kio::Park,
-	accept_bi: kio::Park,
 }
 
 impl MockSession {
@@ -515,21 +512,16 @@ impl poll::Session for MockSession {
 	type RecvStream = MockRecvStream;
 	type Error = memory::Error;
 
-	fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
-		let waiter = self.accept_uni.hold(cx);
-		let err = self.side.inc.route(&mut self.inner, &mut waiter.context());
+	fn poll_accept_uni(&self, waiter: &kio::Waiter) -> Poll<Result<Self::RecvStream, Self::Error>> {
+		let err = self.side.inc.route(&self.inner, waiter);
 		if let Poll::Ready(Ok((recv, line))) = self.side.inc.ready_uni.poll_pop(waiter) {
 			return Poll::Ready(Ok(self.recv(recv, line)));
 		}
 		err.map_or(Poll::Pending, |err| Poll::Ready(Err(err)))
 	}
 
-	fn poll_accept_bi(
-		&mut self,
-		cx: &mut Context<'_>,
-	) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
-		let waiter = self.accept_bi.hold(cx);
-		let err = self.side.inc.route(&mut self.inner, &mut waiter.context());
+	fn poll_accept_bi(&self, waiter: &kio::Waiter) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
+		let err = self.side.inc.route(&self.inner, waiter);
 		if let Poll::Ready(Ok(((send, back), (recv, forward)))) = self.side.inc.ready_bi.poll_pop(waiter) {
 			return Poll::Ready(Ok((self.send(send, back), self.recv(recv, forward))));
 		}
@@ -537,13 +529,13 @@ impl poll::Session for MockSession {
 	}
 
 	fn poll_open_bi(
-		&mut self,
-		cx: &mut Context<'_>,
+		&self,
+		waiter: &kio::Waiter,
 		options: poll::SendOptions<'_, poll::Ungrouped>,
 	) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 		let link = &self.side.out;
 		let mut lines = link.bi.lock().unwrap();
-		let (send, recv) = ready!(self.inner.poll_open_bi(cx, Default::default()))?;
+		let (send, recv) = ready!(self.inner.poll_open_bi(waiter, Default::default()))?;
 		let held = link.held_bi.lock().unwrap().is_some();
 		let forward = Arc::new(Line {
 			held,
@@ -563,18 +555,29 @@ impl poll::Session for MockSession {
 		Poll::Ready(Ok((send, self.recv(recv, back))))
 	}
 
+	fn poll_open_request(
+		&self,
+		waiter: &kio::Waiter,
+		options: moq_net::transport::poll::SendOptions<
+			'_,
+			<Self::SendStream as moq_net::transport::poll::SendStream>::Group,
+		>,
+	) -> std::task::Poll<Result<Option<moq_net::transport::poll::BiStreams<Self>>, Self::Error>> {
+		self.poll_open_bi(waiter, options).map_ok(Some)
+	}
+
 	fn poll_open_uni(
-		&mut self,
-		cx: &mut Context<'_>,
+		&self,
+		waiter: &kio::Waiter,
 		options: poll::SendOptions<'_, poll::Ungrouped>,
 	) -> Poll<Result<Self::SendStream, Self::Error>> {
 		if self.side.withheld.load(Ordering::Relaxed) {
-			return Poll::Ready(Err(ready!(self.closer.poll_closed(cx))));
+			return Poll::Ready(Err(ready!(self.closer.poll_closed(waiter))));
 		}
 
 		let link = &self.side.out;
 		let mut lines = link.uni.lock().unwrap();
-		let send = ready!(self.inner.poll_open_uni(cx, Default::default()))?;
+		let send = ready!(self.inner.poll_open_uni(waiter, Default::default()))?;
 		let line = Arc::new(Line {
 			held: link.held_uni.lock().unwrap().is_some(),
 			split: link.split.lock().unwrap().clone(),
@@ -589,12 +592,12 @@ impl poll::Session for MockSession {
 		Poll::Ready(Ok(send))
 	}
 
-	fn send_group(&mut self, _: i64) -> Option<poll::Ungrouped> {
+	fn send_group(&self, _: i64) -> Option<poll::Ungrouped> {
 		None
 	}
 
 	fn send_datagram(
-		&mut self,
+		&self,
 		payload: Bytes,
 		options: poll::SendOptions<'_, poll::Ungrouped>,
 	) -> Result<(), Self::Error> {
@@ -604,31 +607,31 @@ impl poll::Session for MockSession {
 		self.inner.send_datagram(payload, options)
 	}
 
-	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
-		self.inner.poll_recv_datagram(cx)
+	fn poll_recv_datagram(&self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Self::Error>> {
+		self.inner.poll_recv_datagram(waiter)
 	}
 
 	fn max_datagram_size(&self) -> usize {
 		self.inner.max_datagram_size()
 	}
 
-	fn binding(&self) -> moq_net::transport::Binding {
-		self.inner.binding()
+	fn address(&self) -> moq_net::transport::Address {
+		self.inner.address()
 	}
 
 	fn protocol(&self) -> Option<&str> {
 		self.inner.protocol()
 	}
 
-	fn close(&mut self, code: u32, reason: &str) {
+	fn close(&self, code: u32, reason: &str) {
 		self.inner.close(code, reason);
 	}
 
-	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
-		self.inner.poll_closed(cx)
+	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Self::Error> {
+		self.inner.poll_closed(waiter)
 	}
 
-	fn stats(&self) -> impl moq_net::transport::Stats {
+	fn metrics(&self) -> impl moq_net::transport::Metrics {
 		assert!(
 			!self.side.panic_on_stats.load(Ordering::Relaxed),
 			"injected transport panic"
@@ -642,8 +645,7 @@ impl poll::Session for MockSession {
 	}
 }
 
-// Only some test binaries steer delivery.
-#[allow(dead_code)]
+#[allow(dead_code, reason = "only some test binaries steer delivery")]
 impl MockSession {
 	/// Writes that parked on the in-memory stream's byte window.
 	pub fn blocked_writes(&self) -> usize {
@@ -820,8 +822,8 @@ impl MockSession {
 
 	/// The code and reason the connection was closed with, once either side closed it.
 	pub fn close_reason(&self) -> Option<(u32, String)> {
-		let mut cx = Context::from_waker(std::task::Waker::noop());
-		match poll::Session::poll_closed(&mut self.inner.clone(), &mut cx) {
+		let waiter = &kio::Waiter::noop();
+		match poll::Session::poll_closed(&self.inner.clone(), waiter) {
 			Poll::Ready(err) => moq_net::transport::Error::session_error(&err),
 			Poll::Pending => None,
 		}
@@ -871,8 +873,6 @@ pub fn create_mock_session_pair(config: memory::Config) -> (MockSession, MockSes
 			panic_on_stats: Default::default(),
 			wire: Default::default(),
 		}),
-		accept_uni: Default::default(),
-		accept_bi: Default::default(),
 	};
 
 	(

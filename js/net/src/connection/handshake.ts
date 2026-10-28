@@ -1,12 +1,17 @@
+import { Milli } from "@moq/clock";
 import { closeReason, ProtocolViolation, SessionCode, StreamError } from "../error.ts";
 import { type Hop, randomHop } from "../hop.ts";
 import * as Ietf from "../ietf/index.ts";
 import * as Message from "../ietf/message.ts";
+import * as Lite from "../lite/index.ts";
 import { Reader, Stream, UnexpectedEnd, Writer } from "../stream.ts";
 import * as Extensions from "./extensions.ts";
 
+/** Default bound on a connection attempt, including its SETUP exchange. @internal */
+export const DEFAULT_TIMEOUT = Milli(30_000);
+
 /**
- * Draft-17+ SETUP exchange. Each side opens a uni stream, writes its Setup
+ * Draft-18+ SETUP exchange. Each side opens a uni stream, writes its Setup
  * message, and reads the peer's Setup off an incoming uni stream. The two
  * halves run in parallel and the protocol is symmetric, so both `connect`
  * (client) and `accept` (server) use this same function.
@@ -15,8 +20,8 @@ import * as Extensions from "./extensions.ts";
  * {@link receiveSetup}), plus what the peer's SETUP declared: whether it requires
  * solicitation, which decides whether we announce namespaces unprompted (see the MoQ Solicit
  * extension), its Hop ID (see the MoQ Cluster extension), and whether MoQ Auth and MoQ Epoch
- * are negotiated. We declare our Hop ID on every session, and Solicit, Auth, and Epoch unless
- * `extensions` declines them: we send SUBSCRIBE_NAMESPACE for each prefix we want, so an unsolicited advertisement
+ * are negotiated, plus the implementation it advertised. We declare our Hop ID on every
+ * session, and Solicit, Auth, and Epoch unless `extensions` declines them: we send SUBSCRIBE_NAMESPACE for each prefix we want, so an unsolicited advertisement
  * can tell us nothing we won't have asked for, and a peer that knows our Hop ID can withhold
  * the advertisements that already flowed through us.
  */
@@ -24,7 +29,7 @@ export async function exchangeSetup(
 	transport: WebTransport,
 	version: Ietf.IetfVersion,
 	implementation: string,
-	{ client, extensions }: { client: boolean; extensions: Extensions.Offered },
+	{ client, extensions, token }: { client: boolean; extensions: Extensions.Offered; token?: Uint8Array },
 ): Promise<{
 	control: Stream;
 	early: Reader[];
@@ -35,19 +40,21 @@ export async function exchangeSetup(
 	cluster: Ietf.Cluster.Hops;
 	auth: boolean;
 	epoch: boolean;
+	peerImplementation: string | undefined;
 }> {
-	const encoder = new TextEncoder();
 	const params = new Ietf.SetupOptions();
-	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode(implementation));
-	Extensions.intoSetup(params, extensions, version);
+	Ietf.implementationIntoSetup(params, implementation);
+	Extensions.intoSetup(params, extensions);
 	Ietf.hiddenIntoSetup(params);
 	Ietf.maxAgeIntoSetup(params);
-	Ietf.activeCountIntoSetup(params, version);
+	Ietf.activeCountIntoSetup(params);
+	// Only a client presents a connection credential.
+	if (client && token) Ietf.tokenIntoSetup(params, { kind: Ietf.TOKEN_OUT_OF_BAND, value: token });
 
 	// One id per session, like the moq-lite connection: nothing in this process forwards
 	// between sessions, so there is nothing for a shared id to detect.
 	const self = randomHop();
-	Ietf.Cluster.intoSetup(params, self, version);
+	Ietf.Cluster.intoSetup(params, self);
 
 	const setupMsg = new Ietf.Setup({ parameters: params });
 
@@ -76,6 +83,7 @@ export async function exchangeSetup(
 		// Negotiated only when both sides offer it.
 		auth: received.auth && extensions.auth,
 		epoch: received.epoch && extensions.epoch,
+		peerImplementation: received.implementation,
 	};
 }
 
@@ -107,6 +115,7 @@ async function receiveSetup(
 	cluster: Hop | undefined;
 	auth: boolean;
 	epoch: boolean;
+	implementation: string | undefined;
 }> {
 	const uniReader = transport.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
 		ReadableStream<Uint8Array>
@@ -142,7 +151,7 @@ async function receiveSetup(
 	await reader.u53(); // the SETUP type, peeked above
 	const setup = await Ietf.Setup.decode(reader, version);
 
-	// A server sends neither PATH nor AUTHORITY (draft-21 sections 9.1.1 and 9.1.2).
+	// A server sends neither PATH nor AUTHORITY (draft-22 sections 9.1.1 and 9.1.2).
 	if (client && setup.parameters.getBytes(Ietf.SetupOption.Path) !== undefined) {
 		throw new ProtocolViolation("server SETUP carries PATH", { code: SessionCode.InvalidPath });
 	}
@@ -150,8 +159,8 @@ async function receiveSetup(
 		throw new ProtocolViolation("server SETUP carries AUTHORITY", { code: SessionCode.InvalidAuthority });
 	}
 	// Nothing here uses the peer's token, but one that cannot be decoded still closes the
-	// session (draft-21 section 8.9).
-	Ietf.tokenFromSetup(setup.parameters, version);
+	// session (draft-22 section 8.9).
+	Ietf.tokenFromSetup(setup.parameters);
 
 	return {
 		reader,
@@ -159,9 +168,15 @@ async function receiveSetup(
 		solicit: Ietf.solicitFromSetup(setup.parameters),
 		hidden: Ietf.hiddenFromSetup(setup.parameters),
 		maxAge: Ietf.maxAgeFromSetup(setup.parameters),
-		activeCount: Ietf.activeCountFromSetup(setup.parameters, version),
-		cluster: Ietf.Cluster.fromSetup(setup.parameters, version),
-		auth: Ietf.Auth.fromSetup(setup.parameters, version) === true,
-		epoch: Ietf.Epoch.fromSetup(setup.parameters, version),
+		activeCount: Ietf.activeCountFromSetup(setup.parameters),
+		cluster: Ietf.Cluster.fromSetup(setup.parameters),
+		auth: Ietf.Auth.fromSetup(setup.parameters) === true,
+		epoch: Ietf.Epoch.fromSetup(setup.parameters),
+		implementation: Ietf.implementationFromSetup(setup.parameters),
 	};
+}
+
+/** Whether SETUP selecting `version` ends the SETUP stream, the session continuing as its ALPN would. */
+export function handsOff(version: Lite.Version): boolean {
+	return version !== Lite.Version.DRAFT_01 && version !== Lite.Version.DRAFT_02;
 }

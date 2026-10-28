@@ -246,8 +246,8 @@ std::string Configure(obs_data_t *, moq::ClientConfig &config)
 {
 	if (!g_settings_ok)
 		config.bind = "not an address";
-	config.backoff.initial_us = 10'000;
-	config.backoff.max_us = 50'000;
+	config.backoff.initial = std::chrono::milliseconds(10);
+	config.backoff.max = std::chrono::milliseconds(50);
 	return g_settings_error;
 }
 } // namespace MoQSettings
@@ -402,6 +402,23 @@ struct MoQOutputStatsTest {
 		std::lock_guard<std::mutex> lock(output.mutex);
 		output.live = false;
 	}
+	// A fast first connect and drop can coalesce before the UI observes Connected.
+	static bool ObserveCoalescedFirstConnect(MoQOutput &output)
+	{
+		std::lock_guard<std::recursive_mutex> signal_lock(output.signal_mutex);
+		auto current = output.attempt;
+		if (!current || !current->session)
+			return false;
+		current->pending.reset();
+		current->connected = false;
+		output.connect_time_ms = 0;
+		auto state = current->session->state();
+		state.phase = moq::ConnectionPhase::kDisconnected;
+		state.version.reset();
+		output.OnState(current, std::move(state));
+		return current->connected && !current->live && output.GetConnectTime() > 0;
+	}
+
 	// Whether every audio and video track holds a reservation.
 	static bool Reserved(MoQOutput &output)
 	{
@@ -436,7 +453,7 @@ std::vector<std::pair<obs_encoder_t *, long long>> updates()
 int main()
 {
 	{
-		TestRelay relay;
+		TestRelay relay(true, {"moq-transport-18"});
 		reset(relay.Url());
 		MoQOutput output(nullptr, OUTPUT);
 		CHECK(output.Start());
@@ -444,6 +461,8 @@ int main()
 		CHECK(first.has_value());
 		CHECK(first == output.GetEpoch());
 		CHECK(WaitFor([&] { return output.IsLiveSession() && relay.Accepted() == 1; }));
+		// The plugin names itself ahead of the C++ package, so a relay can tell it apart.
+		CHECK(relay.Advertised("moq-obs/dev moq-cpp/"));
 		relay.DropSessions();
 		CHECK(WaitFor([&] { return output.GetReconnectCount() == 1 && output.IsLiveSession(); }));
 		CHECK(MoQOutputStatsTest::Epoch(output) == first);
@@ -458,6 +477,17 @@ int main()
 		output.Stop();
 	}
 	printf("each start announces a fresh epoch, reconnect preserves it: ok\n");
+
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		MoQOutput output(nullptr, OUTPUT);
+		CHECK(output.Start());
+		CHECK(WaitFor([&] { return output.IsLiveSession(); }));
+		CHECK(MoQOutputStatsTest::ObserveCoalescedFirstConnect(output));
+		output.Stop();
+	}
+	printf("a coalesced first connection is remembered while offline: ok\n");
 
 	for (int retirement = 0; retirement < 3; ++retirement) {
 		TestRelay relay;
@@ -631,6 +661,9 @@ int main()
 			CHECK(next.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
 			auto first = TestOk(next.get(), "first frame");
 			CHECK(first.has_value());
+			const auto *first_frame = first ? std::get_if<moq::MediaRead::kFrame>(&first->get_variant())
+							: nullptr;
+			CHECK(first_frame != nullptr);
 
 			// Large enough to be in flight when Stop() runs, so a Stop() that cancels
 			// rather than drains cuts it off (256 KiB can land first under TSan). Small
@@ -651,7 +684,7 @@ int main()
 
 			// Everything up to the last frame, then the end of the track.
 			bool ended = false;
-			uint64_t last_timestamp = first ? first->timestamp_us : 0;
+			uint64_t last_timestamp = first_frame ? first_frame->frame.timestamp_us : 0;
 			for (;;) {
 				next = media->next();
 				if (next.wait_for(std::chrono::seconds(10)) != std::future_status::ready)
@@ -663,10 +696,12 @@ int main()
 					ended = true;
 					break;
 				}
-				last_timestamp = (*result)->timestamp_us;
+				CHECK(!std::holds_alternative<moq::MediaRead::kGap>((*result)->get_variant()));
+				if (const auto *frame = std::get_if<moq::MediaRead::kFrame>(&(*result)->get_variant()))
+					last_timestamp = frame->frame.timestamp_us;
 			}
 			CHECK(ended);
-			CHECK(first && last_timestamp > first->timestamp_us);
+			CHECK(first_frame && last_timestamp > first_frame->frame.timestamp_us);
 		}
 	}
 	printf("stop drains the session: ok\n");
@@ -843,8 +878,8 @@ int main()
 	}
 	printf("OBS-driven restart: ok\n");
 
-	// A token edited mid-stream goes to the live session only, and presenting a
-	// newer one or stopping cancels whatever is still in flight.
+	// A token edited mid-stream replaces the session's tokens, and presenting a
+	// newer one or stopping drops the wait on the relay's answer still in flight.
 	{
 		TestRelay relay;
 		reset(relay.Url());

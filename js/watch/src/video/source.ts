@@ -15,9 +15,6 @@ type CacheableSupported = Supported & {
 	[supportCacheKey]?: (config: Catalog.VideoConfig) => string;
 };
 
-/** A video source error that prevents choosing a usable rendition. */
-export type SourceError = "unsupported";
-
 /** What the viewer wants from the video rendition; the source picks the best one within it. */
 export type Target = {
 	// Optional manual override for the selected rendition name.
@@ -51,12 +48,14 @@ export type SourceInput = {
 	probe: Getter<Moq.Connection.Probe | undefined>;
 };
 
-type SourceOutput = {
+/** Signals the source derives. */
+export type SourceOutput = {
 	catalog: Signal<Catalog.Video | undefined>;
 	available: Signal<Record<string, Catalog.VideoConfig>>;
 
-	// The current source error, or undefined while healthy or still probing.
-	error: Signal<SourceError | undefined>;
+	// Why no rendition can be chosen, or undefined while healthy or still probing. A
+	// `NotSupportedError` means the browser can decode none of the catalog's renditions.
+	error: Signal<Error | undefined>;
 
 	// The name of the active rendition.
 	track: Signal<string | undefined>;
@@ -195,7 +194,8 @@ function enabledRenditions(renditions: Record<string, Catalog.VideoConfig>): Rec
 /** Keep only the highest preference: a lower one is a fallback for players that can't decode it. */
 function preferredRenditions(renditions: Record<string, Catalog.VideoConfig>): Record<string, Catalog.VideoConfig> {
 	const entries = Object.entries(renditions);
-	const top = Math.max(...entries.map(([, config]) => config.preference ?? 0));
+	// A loop, not `Math.max(...)`: a catalog's rendition count can exceed the argument limit.
+	const top = entries.reduce((top, [, config]) => Math.max(top, config.preference ?? 0), Number.NEGATIVE_INFINITY);
 	return Object.fromEntries(entries.filter(([, config]) => (config.preference ?? 0) === top));
 }
 
@@ -210,12 +210,15 @@ export class Source {
 	readonly #out: SourceOutput = {
 		catalog: new Signal<Catalog.Video | undefined>(undefined),
 		available: new Signal<Record<string, Catalog.VideoConfig>>({}),
-		error: new Signal<SourceError | undefined>(undefined),
+		error: new Signal<Error | undefined>(undefined),
 		track: new Signal<string | undefined>(undefined),
 		config: new Signal<Catalog.VideoConfig | undefined>(undefined),
 	};
 	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
+	#pending = new Signal(false);
+	/** Whether rendition support is still being resolved. @internal */
+	readonly pending: Getter<boolean> = this.#pending;
 
 	#signals = new Effect();
 	#supportCache = new WeakMap<Supported, Map<string, { key: string; supported: boolean }>>();
@@ -262,6 +265,7 @@ export class Source {
 			if (!names.has(name)) cache.delete(name);
 		}
 
+		effect.set(this.#pending, true, false);
 		effect.spawn(async () => {
 			const available: Record<string, Catalog.VideoConfig> = {};
 
@@ -299,14 +303,14 @@ export class Source {
 				if (isSupported) available[name] = config;
 			}
 
-			const error =
-				Object.keys(available).length === 0 && Object.keys(renditions).length > 0 ? "unsupported" : undefined;
-			if (error === "unsupported") {
+			if (Object.keys(available).length === 0 && Object.keys(renditions).length > 0) {
 				console.warn("[Source] No supported video renditions found:", renditions);
+				this.#out.error.set(new DOMException("no supported video renditions", "NotSupportedError"));
+			} else {
+				this.#out.error.set(undefined);
 			}
-
-			this.#out.error.set(error);
 			this.#out.available.set(available);
+			this.#pending.set(false);
 		});
 	}
 
@@ -348,7 +352,7 @@ export class Source {
 	 *
 	 * Each enabled filter returns matching renditions sorted by preference.
 	 * The first rendition present in every filter's output is selected.
-	 * If no rendition satisfies all filters, a warning is logged.
+	 * If the rankings conflict, the first ranking's best rendition is selected.
 	 */
 	#select(renditions: Record<string, Catalog.VideoConfig>, target?: Target): string | undefined {
 		const entries = Object.entries(renditions);
@@ -385,8 +389,8 @@ export class Source {
 			}
 		}
 
-		console.warn("conflicting rendition filters, no rendition satisfies all criteria");
-		return undefined;
+		console.warn("conflicting rendition filters, using the first ranking's preferred rendition");
+		return rankings[0][0];
 	}
 
 	/** Stop and release everything this holds. */

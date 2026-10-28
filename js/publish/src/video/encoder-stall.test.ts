@@ -4,7 +4,7 @@ import { u53 } from "@moq/hang/catalog";
 import * as Moq from "@moq/net";
 import { Signal } from "@moq/signals";
 import { Fanout } from "../fanout";
-import { Baseline } from "../jitter";
+import { Estimator, Order } from "../order";
 import { Encoder } from "./encoder";
 
 // Model an encoder that cannot accept more work until the test completes its pending input.
@@ -95,7 +95,7 @@ test("a slower-than-realtime encoder drops input instead of ratcheting catalog l
 	SlowEncoder.instances = [];
 	Input.all = [];
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	let controller!: ReadableStreamDefaultController<VideoFrame>;
 	const fanout = new Fanout(
 		new ReadableStream<VideoFrame>({
@@ -106,10 +106,19 @@ test("a slower-than-realtime encoder drops input instead of ratcheting catalog l
 		{ clone: (frame) => frame.clone(), release: (frame) => frame.close() },
 	);
 	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MICRO });
-	const baseline = new Baseline();
-	const rendition = { config: new Signal(undefined), track: new Signal(track), close: () => track.close() };
+	const order = new Order();
+	// An on-time audio rendition shares the broadcast, writing each capture as it happens.
+	const audio = new Estimator();
+	const rendition = {
+		config: new Signal(undefined),
+		track: new Signal(track),
+		close: () => {
+			track.finish();
+			track.close();
+		},
+	};
 	const encoder = new Encoder("video", {
-		broadcast: { video: () => rendition, baseline } as never,
+		broadcast: { video: () => rendition, order } as never,
 		capture: {
 			in: { source: new Signal({ getSettings: () => ({ frameRate: 25 }), getConstraints: () => ({}) }) },
 			out: { display: new Signal({ width: 640, height: 480 }), frames: new Signal(fanout) },
@@ -119,7 +128,7 @@ test("a slower-than-realtime encoder drops input instead of ratcheting catalog l
 	const send = async (millis = 40) => {
 		await clock.advance(Nano.fromMilli(Milli(millis)));
 		const timestamp = Nano.toMicro(Nano(clock.now()));
-		baseline.observe(0, timestamp); // An on-time audio rendition shares the broadcast.
+		audio.write(timestamp, order);
 		controller.enqueue(new Input(timestamp) as never);
 		await clock.advance(Nano.zero);
 	};
@@ -162,9 +171,10 @@ test("a slower-than-realtime encoder drops input instead of ratcheting catalog l
 	} finally {
 		encoder.close();
 		fanout.close();
+		track.finish();
 		track.close();
 		await clock.advance(Nano.zero);
-		restore();
+		installed.close();
 		for (const [index, name] of ["VideoEncoder", "VideoFrame"].entries()) {
 			const original = originals[index];
 			if (original) Object.defineProperty(globalThis, name, original);

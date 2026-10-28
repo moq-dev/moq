@@ -2,8 +2,8 @@
 
 import { Milli } from "@moq/clock";
 import { randomHop } from "../src/hop.ts";
-import { NativeSession } from "../src/ietf/adapter.ts";
 import { Publisher as IetfPublisher } from "../src/ietf/publisher.ts";
+import { NativeSession } from "../src/ietf/session.ts";
 import { Subscribe as IetfSubscribe } from "../src/ietf/subscribe.ts";
 import { ALPN, Version as IetfVersion } from "../src/ietf/version.ts";
 import { Publisher as LitePublisher } from "../src/lite/publisher.ts";
@@ -17,8 +17,9 @@ import { Timescale, Timestamp } from "../src/time.ts";
 
 async function measure(protocol: string, groups: number, viewers: number) {
 	const origin = new Origin();
-	const broadcast = origin.createBroadcast(Path.from("bench"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("bench"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	const track = broadcast.createTrack("data", { maxAge: Milli(60_000), timescale: Timescale.MICRO });
 	const pair = createMockTransportPair(protocol === "lite" ? ALPN_05 : ALPN.DRAFT_22);
 	const version = protocol === "lite" ? LiteVersion.DRAFT_05 : IetfVersion.DRAFT_22;
@@ -98,7 +99,7 @@ async function measure(protocol: string, groups: number, viewers: number) {
 				payload: new Uint8Array(32),
 				timestamp: Timestamp.fromMicros(sequence * 2500 + Math.floor((frame * 2500) / 128)),
 			});
-		group.close();
+		group.finish();
 	}
 	let deadline: ReturnType<typeof setTimeout> | undefined;
 	try {
@@ -120,6 +121,7 @@ async function measure(protocol: string, groups: number, viewers: number) {
 		clearInterval(timer);
 		publisher.close();
 		for (const stream of streams) stream.close();
+		track.finish();
 		track.close();
 		broadcast.close();
 		origin.close();

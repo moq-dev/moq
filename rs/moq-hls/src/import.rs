@@ -10,7 +10,7 @@ use std::collections::hash_map::Entry;
 use std::io::SeekFrom;
 use std::time::Duration;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use m3u8_rs::{
 	AlternativeMedia, AlternativeMediaType, ByteRange, Map, MasterPlaylist, MediaPlaylist, MediaSegment, Resolution,
 	VariantStream,
@@ -24,6 +24,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing::{debug, info, warn};
 use url::Url;
 
+use crate::error::redact;
 use crate::{Error, Result, SequenceKind};
 
 /// Per-request timeout for the default HTTP client (playlist + segment fetches).
@@ -57,14 +58,8 @@ const MAX_RENDITION_FAILURES: usize = 3;
 #[non_exhaustive]
 pub struct Config {
 	/// The master or media playlist URL to import. Local files use a `file://` URL.
+	/// Every resource and redirect hop must share its scheme, host, and port.
 	pub playlist: Url,
-
-	/// HTTP client used to fetch the playlist and segments, for example one carrying
-	/// credentials for an authenticated origin. Defaults to a plain client with a 30
-	/// second per-request timeout.
-	///
-	/// This is a [`reqwest::Client`].
-	pub client: Option<Client>,
 
 	/// Republish each fMP4 fragment whole as CMAF instead of splitting it into one Legacy frame per
 	/// sample. See [`fmp4::Import::with_passthrough`](moq_mux::container::fmp4::Import::with_passthrough).
@@ -72,11 +67,10 @@ pub struct Config {
 }
 
 impl Config {
-	/// Create an import configuration for `playlist` using the default HTTP client.
+	/// Create an import configuration for `playlist`.
 	pub fn new(playlist: Url) -> Self {
 		Self {
 			playlist,
-			client: None,
 			passthrough: false,
 		}
 	}
@@ -153,13 +147,13 @@ impl RangeCursor {
 				.as_ref()
 				.filter(|(previous_url, _)| previous_url == &url)
 				.map(|(_, end)| *end)
-				.ok_or_else(|| Error::MissingByteRangeOffset { url: url.clone() })?,
+				.ok_or_else(|| Error::MissingByteRangeOffset { url: redact(&url) })?,
 		};
 		let end = start
 			.checked_add(range.length)
 			.filter(|_| range.length > 0)
 			.ok_or_else(|| Error::InvalidByteRange {
-				url: url.clone(),
+				url: redact(&url),
 				start,
 				length: range.length,
 			})?;
@@ -180,44 +174,82 @@ fn resolve_map(url: Url, range: Option<&ByteRange>) -> Result<Resource> {
 	RangeCursor::default().resolve(url, range)
 }
 
+/// Whether `url` shares `entry`'s scheme, host, and port.
+///
+/// `file:` URLs have opaque origins in [`Url::origin`], so compare the parts directly.
+fn same_origin(entry: &Url, url: &Url) -> bool {
+	entry.scheme() == url.scheme()
+		&& entry.host() == url.host()
+		&& entry.port_or_known_default() == url.port_or_known_default()
+}
+
 /// Fetches playlists and segments over HTTP or from the filesystem, applying HLS byte
 /// ranges (and validating that the server honored them).
 struct Fetcher {
 	client: Client,
+	/// The caller's playlist URL. A playlist is untrusted, so every fetch stays on its origin.
+	entry: Url,
 }
 
 impl Fetcher {
-	fn new(client: Option<Client>) -> Result<Self> {
-		let client = match client {
-			Some(client) => client,
-			None => Client::builder()
-				.user_agent(concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")))
-				// Bound playlist/segment fetches so a stuck request can't wedge `run()`.
-				.timeout(REQUEST_TIMEOUT)
-				.build()?,
-		};
-		Ok(Self { client })
+	fn new(config: &Config) -> Result<Self> {
+		let entry = config.playlist.clone();
+		if !matches!(entry.scheme(), "file" | "http" | "https") {
+			return Err(Error::ResourceRefused);
+		}
+
+		// An intermediate hop is already a request to its origin, so check each one before
+		// following it. A stopped hop reaches `fetch` as a redirect response, refused there.
+		let origin = entry.clone();
+		let follow = reqwest::redirect::Policy::default();
+		let redirect = reqwest::redirect::Policy::custom(move |attempt| {
+			if same_origin(&origin, attempt.url()) {
+				follow.redirect(attempt)
+			} else {
+				attempt.stop()
+			}
+		});
+
+		let client = Client::builder()
+			.user_agent(concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")))
+			// Bound playlist/segment fetches so a stuck request can't wedge `run()`.
+			.timeout(REQUEST_TIMEOUT)
+			.redirect(redirect)
+			.build()?;
+		Ok(Self { client, entry })
 	}
 
-	async fn media_playlist(&self, url: Url) -> Result<MediaPlaylist> {
-		let body = self.fetch_url(url).await?;
+	/// Fetch and parse a media playlist, with the URL its relative URIs resolve against.
+	async fn media_playlist(&self, url: Url) -> Result<(MediaPlaylist, Url)> {
+		let (body, base) = self.playlist(url).await?;
 
 		// Nom errors take ownership of the input, so we need to stringify any error messages.
-		let playlist = m3u8_rs::parse_media_playlist_res(&body).map_err(|e| Error::ParsePlaylist(e.to_string()))?;
+		let playlist = m3u8_rs::parse_media_playlist_res(&body)
+			.map_err(|e| Error::ParsePlaylist(e.map(|e| e.code).to_string()))?;
 
-		Ok(playlist)
+		Ok((playlist, base))
 	}
 
-	async fn fetch_url(&self, url: Url) -> Result<Bytes> {
-		self.fetch(&Resource { url, range: None }).await
+	/// Fetch a playlist, with the URL its relative URIs resolve against: where any redirects ended.
+	async fn playlist(&self, url: Url) -> Result<(Bytes, Url)> {
+		self.get(&Resource { url, range: None }).await
 	}
 
 	async fn fetch(&self, resource: &Resource) -> Result<Bytes> {
+		Ok(self.get(resource).await?.0)
+	}
+
+	/// Fetch `resource`, with the URL that finally served it after any redirects.
+	async fn get(&self, resource: &Resource) -> Result<(Bytes, Url)> {
 		let url = &resource.url;
+		if !same_origin(&self.entry, url) {
+			return Err(Error::ResourceRefused);
+		}
 		if url.scheme() == "file" {
 			let path = url.to_file_path().map_err(|_| Error::InvalidFileUrl)?;
 			let Some(range) = resource.range else {
-				return tokio::fs::read(&path).await.map(Bytes::from).map_err(Error::from);
+				let bytes = tokio::fs::read(&path).await.map(Bytes::from).map_err(Error::from)?;
+				return Ok((bytes, url.clone()));
 			};
 
 			let mut file = tokio::fs::File::open(&path).await.map_err(Error::from)?;
@@ -227,20 +259,45 @@ impl Fetcher {
 				.read_to_end(&mut bytes)
 				.await
 				.map_err(Error::from)?;
-			self.validate_range_length(resource, Bytes::from(bytes))
+			Ok((
+				Self::validate_range_length(url, range, Bytes::from(bytes))?,
+				url.clone(),
+			))
 		} else {
-			let response = self.request(resource).send().await.map_err(Error::from)?;
-			let response = response.error_for_status().map_err(Error::from)?;
-			let partial = response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
-			if partial {
-				self.validate_content_range(resource, response.headers())?;
+			let response = self.request(resource).send().await?;
+			if response.status().is_redirection() {
+				return Err(Error::ResourceRefused);
 			}
-			let bytes = response.bytes().await.map_err(Error::from)?;
-			if resource.range.is_some() && !partial {
-				self.slice_full_response(resource, bytes)
-			} else {
-				self.validate_range_length(resource, bytes)
+			let mut response = response.error_for_status()?;
+			let served = response.url().clone();
+			let Some(range) = resource.range else {
+				return Ok((response.bytes().await?, served));
+			};
+
+			// An origin that ignores `Range` sends the whole resource, which would cost every
+			// earlier byte of the file for each segment.
+			if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+				return Err(Error::ByteRangeIgnored {
+					url: redact(url),
+					status: response.status().as_u16(),
+				});
 			}
+			Self::validate_content_range(url, range, response.headers())?;
+
+			// Stream the body so an overrun fails without buffering the excess.
+			let mut body = BytesMut::new();
+			while let Some(chunk) = response.chunk().await? {
+				let read = body.len() + chunk.len();
+				if !u64::try_from(read).is_ok_and(|read| read <= range.length) {
+					return Err(Error::ByteRangeLengthMismatch {
+						url: redact(url),
+						expected: range.length,
+						actual: read,
+					});
+				}
+				body.extend_from_slice(&chunk);
+			}
+			Ok((Self::validate_range_length(url, range, body.freeze())?, served))
 		}
 	}
 
@@ -253,35 +310,10 @@ impl Fetcher {
 		request
 	}
 
-	fn slice_full_response(&self, resource: &Resource, bytes: Bytes) -> Result<Bytes> {
-		let Some(range) = resource.range else {
-			return Ok(bytes);
-		};
-		let start = usize::try_from(range.start).ok();
-		let end = range
-			.start
-			.checked_add(range.length)
-			.and_then(|end| usize::try_from(end).ok());
-		match start
-			.zip(end)
-			.and_then(|(start, end)| bytes.get(start..end).map(|_| (start, end)))
-		{
-			Some((start, end)) => Ok(bytes.slice(start..end)),
-			None => Err(Error::ByteRangeLengthMismatch {
-				url: resource.url.clone(),
-				expected: range.length,
-				actual: bytes.len().saturating_sub(start.unwrap_or(bytes.len())),
-			}),
-		}
-	}
-
-	fn validate_range_length(&self, resource: &Resource, bytes: Bytes) -> Result<Bytes> {
-		let Some(range) = resource.range else {
-			return Ok(bytes);
-		};
+	fn validate_range_length(url: &Url, range: ResolvedRange, bytes: Bytes) -> Result<Bytes> {
 		if u64::try_from(bytes.len()).ok() != Some(range.length) {
 			return Err(Error::ByteRangeLengthMismatch {
-				url: resource.url.clone(),
+				url: redact(url),
 				expected: range.length,
 				actual: bytes.len(),
 			});
@@ -289,10 +321,7 @@ impl Fetcher {
 		Ok(bytes)
 	}
 
-	fn validate_content_range(&self, resource: &Resource, headers: &reqwest::header::HeaderMap) -> Result<()> {
-		let Some(range) = resource.range else {
-			return Ok(());
-		};
+	fn validate_content_range(url: &Url, range: ResolvedRange, headers: &reqwest::header::HeaderMap) -> Result<()> {
 		let end = range.start + range.length - 1;
 		let actual = headers
 			.get(reqwest::header::CONTENT_RANGE)
@@ -306,7 +335,7 @@ impl Fetcher {
 			.and_then(|(start, end)| Some((start.parse().ok()?, end.parse().ok()?)));
 		if bounds != Some((range.start, end)) {
 			return Err(Error::ByteRangeResponseMismatch {
-				url: resource.url.clone(),
+				url: redact(url),
 				start: range.start,
 				end,
 			});
@@ -373,6 +402,9 @@ struct TrackState {
 	failures: usize,
 	/// The playlist carries `EXT-X-ENDLIST` and its last segment is imported: nothing follows.
 	ended: bool,
+	/// This track has joined the playlist while it was live. Unlike `next_sequence`, eviction
+	/// does not forget it, so a playlist that ends while the rendition recovers still finishes.
+	followed: bool,
 }
 
 impl TrackState {
@@ -389,14 +421,15 @@ impl TrackState {
 			media_range: RangeCursor::default(),
 			failures: 0,
 			ended: false,
+			followed: false,
 		}
 	}
 
 	/// Give up on this rendition's current importer generation after repeated failures.
 	///
-	/// Dropping the importer closes its recorders and retires its catalog entries, so players
-	/// stop selecting a rendition that no longer advances; a later successful step rebuilds it
-	/// from the init segment.
+	/// Dropping the importer ends its tracks and retires their catalog entries and HLS records, so
+	/// players stop selecting a rendition that no longer advances; a later successful step rebuilds
+	/// it from the init segment.
 	fn evict(&mut self) {
 		self.importer = None;
 		self.map = None;
@@ -406,26 +439,27 @@ impl TrackState {
 	/// Fetch this track's current media playlist and consume any fresh segments,
 	/// recording the playlist's target duration if not already known.
 	async fn ingest(&mut self, fetcher: &Fetcher, target_duration: &mut Option<u64>) -> Result<usize> {
-		let playlist = fetcher.media_playlist(self.playlist.clone()).await?;
+		// Reloads request the listed URL, so a redirect that moves is followed anew each time.
+		let (playlist, base) = fetcher.media_playlist(self.playlist.clone()).await?;
+		let end = sequence_end(&playlist)?;
 		if target_duration.is_none() {
 			*target_duration = Some(playlist.target_duration);
 		}
 
-		let consumed = self.consume_segments(fetcher, &playlist).await?;
-		let last = playlist.media_sequence + playlist.segments.len() as u64;
-		self.ended = playlist.end_list && self.next_sequence.is_none_or(|next| next == last);
+		let consumed = self.consume_segments(fetcher, &playlist, &base).await?;
+		self.ended = playlist.end_list && self.next_sequence.is_none_or(|next| next == end);
 		Ok(consumed)
 	}
 
 	/// Where in `playlist.segments` this track resumes, re-anchoring (and warning) if the
 	/// upstream window moved out from under us.
-	fn anchor(&mut self, playlist_seq: u64, last_playlist_seq: u64, total_segments: usize) -> usize {
-		// Joining a live window: start near its edge rather than replaying the whole thing.
-		let live_edge = total_segments.saturating_sub(ANCHOR_SEGMENTS);
+	fn anchor(&mut self, playlist: &MediaPlaylist) -> Result<usize> {
+		let playlist_seq = playlist.media_sequence;
+		let last_playlist_seq = sequence_end(playlist)?;
 
 		// First step: starting mid-window is normal, so no warning.
 		let Some(next) = self.next_sequence else {
-			return live_edge;
+			return self.join(playlist);
 		};
 
 		if next > last_playlist_seq {
@@ -437,7 +471,7 @@ impl TrackState {
 				"imported ahead of playlist (upstream sequence reset?), re-anchoring near the live edge"
 			);
 			self.reanchor();
-			return live_edge;
+			return self.join(playlist);
 		}
 
 		if next < playlist_seq {
@@ -448,10 +482,27 @@ impl TrackState {
 				"fell behind the playlist window, resuming from its oldest segment"
 			);
 			self.reanchor();
-			return 0;
+			return Ok(0);
 		}
 
-		(next - playlist_seq) as usize
+		Ok((next - playlist_seq) as usize)
+	}
+
+	/// Where this track joins `playlist` when it has no position in it yet.
+	///
+	/// The window is joined near its edge (see [`ANCHOR_SEGMENTS`]). A playlist that had already
+	/// ended before this track ever saw it live is refused: joining its tail would end the import
+	/// cleanly having published an arbitrary suffix of the recording, and replaying it whole would
+	/// burst it out faster than real time, withholding the catalog until the last segment
+	/// downloads. One that ended after it was followed live, even while this track had no position
+	/// in it (it was empty, or the rendition was evicted), is the live stream ending.
+	fn join(&mut self, playlist: &MediaPlaylist) -> Result<usize> {
+		if !playlist.end_list {
+			self.followed = true;
+		} else if !self.followed {
+			return Err(Error::PlaylistEnded);
+		}
+		Ok(playlist.segments.len().saturating_sub(ANCHOR_SEGMENTS))
 	}
 
 	/// Forget where we were, so the next pushed segment re-bases the MoQ group sequence.
@@ -461,12 +512,12 @@ impl TrackState {
 		self.next_sequence = None;
 	}
 
-	async fn consume_segments(&mut self, fetcher: &Fetcher, playlist: &MediaPlaylist) -> Result<usize> {
+	/// Import `playlist`'s fresh segments, resolving its relative URIs against `base`.
+	async fn consume_segments(&mut self, fetcher: &Fetcher, playlist: &MediaPlaylist, base: &Url) -> Result<usize> {
 		let playlist_seq = playlist.media_sequence;
 		let total_segments = playlist.segments.len();
-		let last_playlist_seq = playlist_seq + total_segments as u64;
 
-		let skip = self.anchor(playlist_seq, last_playlist_seq, total_segments);
+		let skip = self.anchor(playlist)?;
 		let to_process = total_segments.saturating_sub(skip);
 
 		debug!(
@@ -504,7 +555,7 @@ impl TrackState {
 				map = segment.map.as_ref();
 			}
 			if !segment.uri.is_empty() {
-				let url = resolve_uri(&self.playlist, &segment.uri)?;
+				let url = resolve_uri(base, &segment.uri)?;
 				self.media_range.resolve(url, segment.byte_range.as_ref())?;
 			}
 		}
@@ -522,9 +573,10 @@ impl TrackState {
 			// m3u8-rs only attaches `EXT-X-MAP` to the segment directly after the tag, so
 			// on every segment but that one this is the map carried down from the prefix.
 			if let Some(map) = map {
-				self.ensure_map(fetcher, map).await?;
+				self.ensure_map(fetcher, map, base).await?;
 			}
-			self.push_segment(fetcher, segment, sequence, discontinuity_seq).await?;
+			self.push_segment(fetcher, segment, base, sequence, discontinuity_seq)
+				.await?;
 		}
 
 		info!(label = %self.label, consumed = to_process, "consumed HLS segments");
@@ -532,8 +584,8 @@ impl TrackState {
 	}
 
 	/// Point this track at `map`'s init segment, replacing the importer if it changed.
-	async fn ensure_map(&mut self, fetcher: &Fetcher, map: &Map) -> Result<()> {
-		let url = resolve_uri(&self.playlist, &map.uri)?;
+	async fn ensure_map(&mut self, fetcher: &Fetcher, map: &Map, base: &Url) -> Result<()> {
+		let url = resolve_uri(base, &map.uri)?;
 		let resource = resolve_map(url, map.byte_range.as_ref())?;
 
 		// The resolved resource IS the init segment's identity: same bytes, same generation.
@@ -549,8 +601,11 @@ impl TrackState {
 		// segment that never yields a moov surfaces later as a decode error.
 		importer.decode(&bytes)?;
 
-		// A changed map starts a new track generation. The new importer publishes its
-		// configuration first, then dropping the old importer retires its catalog entries.
+		// The old generation must finish before retiring its catalog entries, so a subscriber
+		// draining its final group sees a clean end instead of a dropped producer.
+		if let Some(previous) = self.importer.as_mut() {
+			previous.finish()?;
+		}
 		self.importer = Some(importer);
 		self.map = Some(resource);
 		self.next_discontinuity = None;
@@ -562,6 +617,7 @@ impl TrackState {
 		&mut self,
 		fetcher: &Fetcher,
 		segment: &MediaSegment,
+		base: &Url,
 		sequence: u64,
 		discontinuity_sequence: u64,
 	) -> Result<()> {
@@ -569,7 +625,7 @@ impl TrackState {
 			return Err(Error::EmptySegmentUri);
 		}
 
-		let url = resolve_uri(&self.playlist, &segment.uri)?;
+		let url = resolve_uri(base, &segment.uri)?;
 		let mut range = self.media_range.clone();
 		let resource = range.resolve(url, segment.byte_range.as_ref())?;
 		let bytes = fetcher.fetch(&resource).await?;
@@ -592,16 +648,25 @@ impl TrackState {
 			.next_discontinuity
 			.is_some_and(|previous| previous != discontinuity_sequence)
 		{
-			importer.discontinuity();
+			importer.discontinuity()?;
 		}
 		if reanchored {
 			importer.seek(group_sequence)?;
 		}
 		// Every playlist entry is a source segment boundary, so declare it even when the media
-		// carries no styp. Every rendition declares the same ones; the timeline drops a cut
+		// carries no styp. Every rendition declares the same ones; the HLS segmenter drops a cut
 		// that would land inside its minimum segment duration, so the duplicates cost nothing.
-		importer.cut();
-		importer.decode(&bytes)?;
+		importer.cut()?;
+		importer.decode(&bytes).map_err(|err| match err {
+			// Timestamp resets are unsupported: the published tracks never rewind, and no later
+			// pass can import this segment, so it is refused rather than retried.
+			moq_mux::Error::TimestampRewind(_)
+			| moq_mux::Error::Cmaf(moq_mux::container::fmp4::Error::NonMonotonicDecodeTime { .. }) => Error::Rewind {
+				rendition: self.label.clone(),
+				source: err,
+			},
+			err => err.into(),
+		})?;
 
 		self.media_range = range;
 		self.next_sequence = Some(sequence + 1);
@@ -619,8 +684,8 @@ impl TrackState {
 pub struct Import {
 	sink: Sink,
 	fetcher: Fetcher,
-	/// Parsed base URL for the playlist (file:// or http(s)://).
-	base_url: Url,
+	/// The configured master or media playlist URL (file:// or http(s)://).
+	playlist: Url,
 	/// All discovered video variants (one per HLS rendition).
 	video: Vec<TrackState>,
 	/// Optional audio track shared across variants.
@@ -630,11 +695,11 @@ pub struct Import {
 impl Import {
 	/// Create a new HLS import that will write into the given broadcast.
 	pub fn new(broadcast: moq_net::broadcast::Producer, catalog: CatalogProducer, cfg: Config) -> Result<Self> {
-		let base_url = cfg.playlist;
+		let fetcher = Fetcher::new(&cfg)?;
 		Ok(Self {
 			sink: Sink::new(broadcast, catalog, cfg.passthrough),
-			fetcher: Fetcher::new(cfg.client)?,
-			base_url,
+			fetcher,
+			playlist: cfg.playlist,
 			video: Vec::new(),
 			audio: None,
 		})
@@ -661,12 +726,20 @@ impl Import {
 	///
 	/// The playlist ends cleanly once every rendition's playlist carries `EXT-X-ENDLIST` and its
 	/// last segment is imported; this then returns `Ok`, and [`finish`](Self::finish) ends the
-	/// broadcast. A playlist that never ends runs until cancelled.
+	/// broadcast. A playlist that never ends runs until cancelled. Import follows live playlists
+	/// only: one that has already ended (`EXT-X-ENDLIST`) when a rendition first sees it fails with
+	/// [`Error::PlaylistEnded`], rather than importing its tail and ending as if it were whole.
+	///
+	/// An `EXT-X-DISCONTINUITY` keeps the source's timestamps: a forward jump continues the same
+	/// tracks, and a changed `EXT-X-MAP` starts a fresh generation of them. Timestamps that go
+	/// backwards on the same tracks, such as an encoder restart that reuses its init segment,
+	/// end the import with [`Error::Rewind`] instead of publishing a group that rewinds.
 	///
 	/// A failed step is logged and retried with escalating backoff, and the import ends with the
 	/// last error once the backoff budget is spent, so a broken source surfaces within seconds
-	/// instead of looping forever. The one shortcut is an HTTP status the origin actually sent: a
-	/// `404` playlist ends the import immediately, since no amount of waiting turns it into a `200`.
+	/// instead of looping forever. A settled answer ends the import immediately: an HTTP status
+	/// the origin actually sent, such as a `404` playlist, or [`Error::PlaylistEnded`], since no
+	/// amount of waiting changes either.
 	pub async fn run(&mut self) -> Result<()> {
 		let mut delay = STEP_RETRY_MIN;
 		let mut deadline = moq_clock::now() + STEP_RETRY_BUDGET;
@@ -696,11 +769,14 @@ impl Import {
 					deadline = moq_clock::now() + STEP_RETRY_BUDGET;
 					outcome
 				}
-				// A status the origin actually sent is its answer: a 404 playlist is not going to
-				// become a 200 on the next pass. Everything else rides the backoff budget.
-				Err(err) if err.status().is_some_and(|status| !crate::status_retryable(status)) => {
+				Err(err @ Error::ResourceRefused) => return Err(err),
+				// A settled answer, such as a 404 playlist, is not going to become a 200 on the next
+				// pass. Everything else rides the backoff budget.
+				Err(err) if err.settled() => {
 					return Err(err);
 				}
+				// The source rewound its timestamps, which no later pass can import.
+				Err(err @ Error::Rewind { .. }) => return Err(err),
 				Err(err) => {
 					let now = moq_clock::now();
 					if now >= deadline {
@@ -735,22 +811,22 @@ impl Import {
 		}
 	}
 
-	/// Finish every rendition's tracks and the catalog once [`run`](Self::run) returned `Ok`,
-	/// returning the finished broadcast, which stays announced until it is dropped. Keep it
-	/// until its media is stale, with [`Finish::wait`](moq_net::broadcast::Finish::wait), so
-	/// subscribers still catching up drain the tail.
-	pub fn finish(mut self) -> Result<moq_net::broadcast::Finish> {
+	/// Finish every rendition's tracks and the catalog once [`run`](Self::run) returned `Ok`.
+	///
+	/// The finished tracks stay servable while the import is held, so hand it and the
+	/// broadcast to a [`moq_mux::Linger`] to keep them up for late subscribers.
+	pub fn finish(&mut self) -> Result<()> {
 		for track in self.video.iter_mut().chain(self.audio.iter_mut()) {
 			if let Some(importer) = &mut track.importer {
 				importer.finish()?;
 			}
 		}
 		self.sink.catalog.finish()?;
-		// Taken while the importers are alive, so it holds the tracks just finished.
-		Ok(self.sink.broadcast.clone().finish())
+		Ok(())
 	}
 
-	/// Abort every rendition's importer with `err` so subscribers see the real cause.
+	/// Abort every rendition's importer and the catalog with `err` so subscribers see the real
+	/// cause.
 	///
 	/// Call this when the import is torn down with a known error; simply dropping the
 	/// [`Import`] instead lets its tracks end as [`moq_net::Error::Dropped`]. Consumes
@@ -766,6 +842,7 @@ impl Import {
 		{
 			importer.abort(err.clone());
 		}
+		self.sink.catalog.clone().abort(err);
 	}
 
 	/// Perform a single import step for all active tracks.
@@ -805,8 +882,17 @@ impl Import {
 					wrote_segments += count;
 					ok += 1;
 				}
+				// Admission is settled by the caller's input policy, not rendition health.
+				Err(err @ Error::ResourceRefused) => return Err(err),
 				Err(err) => match on_error {
 					OnError::Fail => return Err(err),
+					// A playlist that ended before this rendition saw it live is refused input, not a
+					// dead variant the others can cover for: importing the rest would publish a
+					// broadcast silently missing it.
+					OnError::Warn if matches!(err, Error::PlaylistEnded) => return Err(err),
+					// A rewind ends the import: no sibling covers for it, and evicting the
+					// rendition would rejoin it as fresh tracks, accepting the reset after all.
+					OnError::Warn if matches!(err, Error::Rewind { .. }) => return Err(err),
 					// Keep the other renditions going: one bad variant or segment shouldn't
 					// drop the rest or abort the whole step.
 					OnError::Warn => {
@@ -821,8 +907,7 @@ impl Import {
 						// permanently-dead variant doesn't end an import the others could still
 						// serve. Keeping whichever error came last instead would make the outcome
 						// depend on rendition order.
-						let recoverable = err.status().is_none_or(crate::status_retryable);
-						if recoverable || failed.is_none() {
+						if !err.settled() || failed.is_none() {
 							failed = Some(err);
 						}
 					}
@@ -850,15 +935,16 @@ impl Import {
 			return Ok(());
 		}
 
-		let body = self.fetcher.fetch_url(self.base_url.clone()).await?;
+		let (body, base) = self.fetcher.playlist(self.playlist.clone()).await?;
 		if !m3u8_rs::is_master_playlist(&body) {
 			// Fallback: treat the provided URL as a single (muxed) media playlist.
-			let track = self.track("video[0]", self.base_url.clone(), select_muxed());
+			let track = self.track("video[0]", self.playlist.clone(), select_muxed());
 			self.video.push(track);
 			return Ok(());
 		}
 
-		let master = m3u8_rs::parse_master_playlist_res(&body).map_err(|e| Error::ParsePlaylist(e.to_string()))?;
+		let master = m3u8_rs::parse_master_playlist_res(&body)
+			.map_err(|e| Error::ParsePlaylist(e.map(|e| e.code).to_string()))?;
 		let variants = select_variants(&master);
 		if variants.is_empty() {
 			return Err(Error::NoVariants);
@@ -869,7 +955,7 @@ impl Import {
 		if let Some(group_id) = variants.iter().find_map(|v| v.audio.as_deref()) {
 			if let Some(audio_tag) = select_audio(&master, group_id) {
 				if let Some(uri) = &audio_tag.uri {
-					let audio_url = resolve_uri(&self.base_url, uri)?;
+					let audio_url = resolve_uri(&base, uri)?;
 					// Boundaries follow the video variant; audio only reports its groups.
 					self.audio = Some(self.track("audio", audio_url, select_audio_only()));
 				} else {
@@ -888,12 +974,12 @@ impl Import {
 			select_muxed()
 		};
 		for (index, variant) in variants.iter().enumerate() {
-			let video_url = resolve_uri(&self.base_url, &variant.uri)?;
+			let video_url = resolve_uri(&base, &variant.uri)?;
 			let track = self.track(format!("video[{index}]"), video_url, variant_select.clone());
 			self.video.push(track);
 		}
 
-		let audio_url = self.audio.as_ref().map(|a| a.playlist.to_string());
+		let audio_url = self.audio.as_ref().map(|a| redact(&a.playlist).to_string());
 		info!(
 			video_variants = variants.len(),
 			audio = audio_url.as_deref().unwrap_or("none"),
@@ -1033,7 +1119,11 @@ fn select_variants(master: &MasterPlaylist) -> Vec<&VariantStream> {
 	// logs stay stable across runs.
 	let mut selected: Vec<&VariantStream> = by_resolution.into_values().collect();
 	selected.sort_by_key(|variant| {
-		let pixels = variant.resolution.map(|r| r.width * r.height).unwrap_or(0);
+		// Widened so a hostile RESOLUTION neither panics nor wraps into a false rank.
+		let pixels = variant
+			.resolution
+			.map(|r| u128::from(r.width) * u128::from(r.height))
+			.unwrap_or(0);
 		std::cmp::Reverse((pixels, bandwidth(variant)))
 	});
 	selected
@@ -1045,6 +1135,20 @@ fn resolve_uri(base: &Url, value: &str) -> std::result::Result<Url, url::ParseEr
 	}
 
 	base.join(value)
+}
+
+/// One past the media sequence of the playlist's last segment, rejecting a window that wraps u64.
+///
+/// Every sequence a segment of the window carries is below this, so validating it once keeps
+/// the per-segment arithmetic in range.
+fn sequence_end(playlist: &MediaPlaylist) -> Result<u64> {
+	playlist
+		.media_sequence
+		.checked_add(playlist.segments.len() as u64)
+		.ok_or(Error::SequenceOverflow {
+			kind: SequenceKind::Media,
+			value: playlist.media_sequence,
+		})
 }
 
 /// Advance the running discontinuity sequence, rejecting a u64 wrap on absurd input.
@@ -1083,7 +1187,7 @@ fn moq_sequence(discontinuity_sequence: u64, media_sequence: u64) -> Result<u64>
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use std::path::{Path, PathBuf};
@@ -1142,13 +1246,7 @@ mod tests {
 		(init, fragments)
 	}
 
-	async fn serve_response(
-		status: &str,
-		headers: &[(&str, &str)],
-		body: &[u8],
-	) -> (Url, tokio::task::JoinHandle<Vec<u8>>) {
-		let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-		let address = listener.local_addr().unwrap();
+	fn http_response(status: &str, headers: &[(&str, &str)], body: &[u8]) -> Vec<u8> {
 		let mut response = format!(
 			"HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n",
 			body.len()
@@ -1159,24 +1257,42 @@ mod tests {
 		response.push_str("\r\n");
 		let mut response = response.into_bytes();
 		response.extend_from_slice(body);
+		response
+	}
 
-		let server = tokio::spawn(async move {
-			let (mut stream, _) = listener.accept().await.unwrap();
-			let mut request = Vec::new();
-			loop {
-				let mut chunk = [0; 1024];
-				let read = stream.read(&mut chunk).await.unwrap();
-				if read == 0 {
-					break;
+	/// Answer one connection per canned response, in order, returning each request.
+	fn serve(listener: TcpListener, responses: Vec<Vec<u8>>) -> tokio::task::JoinHandle<Vec<Vec<u8>>> {
+		tokio::spawn(async move {
+			let mut requests = Vec::new();
+			for response in responses {
+				let (mut stream, _) = listener.accept().await.unwrap();
+				let mut request = Vec::new();
+				loop {
+					let mut chunk = [0; 1024];
+					let read = stream.read(&mut chunk).await.unwrap();
+					if read == 0 {
+						break;
+					}
+					request.extend_from_slice(&chunk[..read]);
+					if request.windows(4).any(|window| window == b"\r\n\r\n") {
+						break;
+					}
 				}
-				request.extend_from_slice(&chunk[..read]);
-				if request.windows(4).any(|window| window == b"\r\n\r\n") {
-					break;
-				}
+				stream.write_all(&response).await.unwrap();
+				requests.push(request);
 			}
-			stream.write_all(&response).await.unwrap();
-			request
-		});
+			requests
+		})
+	}
+
+	async fn serve_response(
+		status: &str,
+		headers: &[(&str, &str)],
+		body: &[u8],
+	) -> (Url, tokio::task::JoinHandle<Vec<Vec<u8>>>) {
+		let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let address = listener.local_addr().unwrap();
+		let server = serve(listener, vec![http_response(status, headers, body)]);
 		(Url::parse(&format!("http://{address}/media.mp4")).unwrap(), server)
 	}
 
@@ -1195,8 +1311,242 @@ mod tests {
 		)
 	}
 
-	fn fetcher() -> Fetcher {
-		Fetcher::new(None).unwrap()
+	fn fetcher(entry: &Url) -> Fetcher {
+		Fetcher::new(&Config::new(entry.clone())).unwrap()
+	}
+
+	/// `url` carrying a credential in every part a signed URL might put one.
+	fn signed(url: &Url) -> Url {
+		let mut url = url.clone();
+		url.set_username("alice").unwrap();
+		url.set_password(Some("hunter2")).unwrap();
+		url.set_query(Some("jwt=s3cret"));
+		url.set_fragment(Some("f4ag"));
+		url
+	}
+
+	/// Fails if any rendering of `err` carries a credential from [`signed`], as text or as the
+	/// byte list a `Debug`-printed `&[u8]` renders.
+	fn assert_redacted(err: &Error) {
+		let printed = format!("{err} {err:#} {err:?}");
+		for fixture in ["alice", "hunter2", "jwt", "s3cret", "f4ag"] {
+			let bytes = format!("{:?}", fixture.as_bytes());
+			let bytes = bytes.trim_matches(['[', ']']);
+			assert!(
+				!printed.contains(fixture) && !printed.contains(bytes),
+				"error leaked {fixture}: {printed}"
+			);
+		}
+	}
+
+	#[test]
+	fn same_origin_references_are_admitted() {
+		let entry = Url::parse("https://example.com/live/master.m3u8").unwrap();
+		for reference in [
+			"video.m3u8",
+			"../a.mp4",
+			"/a.mp4",
+			"//example.com/a.mp4",
+			"https://example.com:443/a.mp4",
+			"HTTPS://EXAMPLE.COM/a.mp4",
+		] {
+			let url = resolve_uri(&entry, reference).unwrap();
+			assert!(same_origin(&entry, &url), "{reference}");
+		}
+	}
+
+	#[tokio::test]
+	async fn cross_origin_references_are_refused() {
+		let dir = temp_dir();
+		let path = dir.join("resource");
+		std::fs::write(&path, b"sentinel").unwrap();
+		let local = Url::from_file_path(dir.join("media.m3u8")).unwrap();
+		let remote = Url::parse("https://example.com/live/media.m3u8").unwrap();
+		let file = Url::from_file_path(&path).unwrap();
+		let mut downgraded = remote.clone();
+		downgraded.set_scheme("http").unwrap();
+		for (entry, reference) in [
+			(&remote, "https://other.example/live/a.mp4"),
+			(&remote, "//other.example/live/a.mp4"),
+			(&remote, downgraded.as_str()),
+			(&remote, "https://example.com:8443/live/a.mp4"),
+			(&remote, file.as_str()),
+			(&local, "https://example.com/live/a.mp4"),
+			(&local, "//example.com/live/a.mp4"),
+		] {
+			// Refused before any I/O: none of these hosts resolve, and the file exists.
+			let url = resolve_uri(entry, reference).unwrap();
+			let fetcher = fetcher(entry);
+			assert!(
+				matches!(fetcher.playlist(url.clone()).await, Err(Error::ResourceRefused)),
+				"{reference} from {entry}"
+			);
+			assert!(matches!(
+				fetcher.fetch(&ranged_resource(url)).await,
+				Err(Error::ResourceRefused)
+			));
+		}
+	}
+
+	#[tokio::test]
+	async fn redirect_hops_stay_on_the_playlist_origin() {
+		// A same-origin hop is followed.
+		let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let entry = Url::parse(&format!("http://{}/media.m3u8", listener.local_addr().unwrap())).unwrap();
+		let server = serve(
+			listener,
+			vec![
+				http_response("302 Found", &[("Location", "/moved.m3u8")], b""),
+				http_response("200 OK", &[], b"moved"),
+			],
+		);
+		let (body, base) = fetcher(&entry).playlist(entry.clone()).await.unwrap();
+		assert_eq!(body, b"moved"[..]);
+		assert_eq!(base, entry.join("/moved.m3u8").unwrap());
+		server.await.unwrap();
+
+		// A later hop to another origin is refused before it is requested.
+		let other = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+		other.set_nonblocking(true).unwrap();
+		let location = format!("http://{}/media.m3u8", other.local_addr().unwrap());
+		let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let entry = Url::parse(&format!("http://{}/media.m3u8", listener.local_addr().unwrap())).unwrap();
+		let server = serve(
+			listener,
+			vec![
+				http_response("302 Found", &[("Location", "/hop.m3u8")], b""),
+				http_response("302 Found", &[("Location", &location)], b""),
+			],
+		);
+		assert!(matches!(
+			fetcher(&entry).playlist(entry.clone()).await,
+			Err(Error::ResourceRefused)
+		));
+		server.await.unwrap();
+		assert_eq!(other.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+	}
+
+	#[tokio::test]
+	async fn redirected_master_resolves_against_its_final_url() {
+		let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let origin = format!("http://{}", listener.local_addr().unwrap());
+		let master = "#EXTM3U\n\
+			#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aac\",NAME=\"en\",DEFAULT=YES,URI=\"audio.m3u8\"\n\
+			#EXT-X-STREAM-INF:BANDWIDTH=1000,CODECS=\"avc1.4d401f,mp4a.40.2\",AUDIO=\"aac\"\nvideo.m3u8\n";
+		let server = serve(
+			listener,
+			vec![
+				http_response("302 Found", &[("Location", "/new/master.m3u8")], b""),
+				http_response("200 OK", &[], master.as_bytes()),
+			],
+		);
+		let sink = sink();
+		let cfg = Config::new(Url::parse(&format!("{origin}/old/master.m3u8")).unwrap());
+		let mut import = Import::new(sink.broadcast, sink.catalog, cfg).unwrap();
+		import.ensure_tracks().await.unwrap();
+		server.await.unwrap();
+
+		assert_eq!(import.video[0].playlist.as_str(), format!("{origin}/new/video.m3u8"));
+		assert_eq!(
+			import.audio.unwrap().playlist.as_str(),
+			format!("{origin}/new/audio.m3u8")
+		);
+	}
+
+	#[tokio::test]
+	async fn redirected_media_playlist_resolves_against_its_final_url() {
+		let (init, fragments) = fmp4_parts(1);
+		let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let origin = format!("http://{}", listener.local_addr().unwrap());
+		let media = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:1,\n0.m4s\n";
+		let moved = http_response("302 Found", &[("Location", "/new/video.m3u8")], b"");
+		let server = serve(
+			listener,
+			vec![
+				moved.clone(),
+				http_response("200 OK", &[], media.as_bytes()),
+				http_response("200 OK", &[], &init),
+				http_response("200 OK", &[], &fragments[0]),
+				// The reload asks the listed URL again, so a moved redirect is followed anew.
+				moved,
+				http_response("200 OK", &[], media.as_bytes()),
+			],
+		);
+		let entry = Url::parse(&format!("{origin}/old/video.m3u8")).unwrap();
+		let fetcher = fetcher(&entry);
+		let mut track = TrackState::new("video[0]".to_string(), entry, select_muxed(), sink());
+		let mut target_duration = None;
+		assert_eq!(track.ingest(&fetcher, &mut target_duration).await.unwrap(), 1);
+		assert_eq!(track.ingest(&fetcher, &mut target_duration).await.unwrap(), 0);
+
+		let paths: Vec<_> = server
+			.await
+			.unwrap()
+			.iter()
+			.map(|r| request_path(r).unwrap().to_string())
+			.collect();
+		assert_eq!(
+			paths,
+			[
+				"/old/video.m3u8",
+				"/new/video.m3u8",
+				"/new/init.mp4",
+				"/new/0.m4s",
+				"/old/video.m3u8",
+				"/new/video.m3u8",
+			]
+		);
+	}
+
+	#[tokio::test]
+	async fn admission_failure_ends_import_without_retrying() {
+		tokio::time::pause();
+		let sink = sink();
+		let mut import = Import::new(
+			sink.broadcast.clone(),
+			sink.catalog.clone(),
+			Config::new(Url::parse("https://example.com/master.m3u8").unwrap()),
+		)
+		.unwrap();
+		import.video.push(TrackState::new(
+			"video[0]".to_string(),
+			Url::parse("file:///refused.m3u8").unwrap(),
+			select_muxed(),
+			sink,
+		));
+		assert!(matches!(
+			futures::FutureExt::now_or_never(import.run()),
+			Some(Err(Error::ResourceRefused))
+		));
+	}
+
+	#[tokio::test]
+	async fn local_import_allows_local_resources() {
+		let dir = temp_dir();
+		let path = dir.join("resource");
+		std::fs::write(&path, b"sentinel").unwrap();
+		let url = Url::from_file_path(&path).unwrap();
+		let fetcher = Fetcher::new(&Config::new(url.clone())).unwrap();
+		assert_eq!(
+			fetcher.playlist(url.clone()).await.unwrap(),
+			(Bytes::from_static(b"sentinel"), url.clone())
+		);
+		assert_eq!(fetcher.fetch(&ranged_resource(url)).await.unwrap(), b"nti"[..]);
+	}
+
+	#[tokio::test]
+	async fn unsupported_resources_are_refused() {
+		let entry = Url::parse("https://example.com/master.m3u8").unwrap();
+		for scheme in ["ftp", "data", "custom"] {
+			let url = Url::parse(&format!("{scheme}://example.com/resource?token=secret")).unwrap();
+			assert!(matches!(
+				Fetcher::new(&Config::new(url.clone())),
+				Err(Error::ResourceRefused)
+			));
+			let error = fetcher(&entry).playlist(url).await.unwrap_err();
+			assert!(matches!(error, Error::ResourceRefused));
+			assert!(!format!("{error} {error:?}").contains("secret"));
+		}
 	}
 
 	fn ranged_resource(url: Url) -> Resource {
@@ -1239,28 +1589,76 @@ mod tests {
 		assert_eq!(uris, ["large.m3u8", "medium.m3u8", "small.m3u8"]);
 	}
 
+	/// A declared area past `u64` still ranks by its true size: 2^32 x 2^32 would wrap to 0.
+	#[test]
+	fn select_variants_ranks_an_enormous_resolution_first() {
+		let master = b"#EXTM3U\n\
+			#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080,CODECS=\"avc1.4d401f\"\nlarge.m3u8\n\
+			#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=4294967296x4294967296,CODECS=\"avc1.4d401f\"\nhuge.m3u8\n";
+		let (_, master) = m3u8_rs::parse_master_playlist(master).unwrap();
+		let uris: Vec<&str> = select_variants(&master).iter().map(|v| v.uri.as_str()).collect();
+		assert_eq!(uris, ["huge.m3u8", "large.m3u8"]);
+	}
+
+	/// A `len`-segment window starting at `media_sequence`, ended with `EXT-X-ENDLIST` or not.
+	fn window(media_sequence: u64, len: usize, end_list: bool) -> MediaPlaylist {
+		MediaPlaylist {
+			media_sequence,
+			segments: vec![MediaSegment::default(); len],
+			end_list,
+			..Default::default()
+		}
+	}
+
 	/// Joining a live window must start near its edge, not replay the whole thing.
 	#[test]
 	fn first_anchor_joins_near_the_live_edge() {
 		let mut track = track_state();
-		// A 10-segment window starting at media sequence 100.
-		assert_eq!(track.anchor(100, 110, 10), 10 - ANCHOR_SEGMENTS);
+		assert_eq!(track.anchor(&window(100, 10, false)).unwrap(), 10 - ANCHOR_SEGMENTS);
 	}
 
 	/// A window shorter than the rewind is consumed whole rather than skipped.
 	#[test]
 	fn first_anchor_takes_a_short_window_whole() {
 		let mut track = track_state();
-		assert_eq!(track.anchor(0, 2, 2), 0);
+		assert_eq!(track.anchor(&window(0, 2, false)).unwrap(), 0);
+	}
+
+	/// A playlist that has already ended is refused however short, since importing any part of
+	/// it would end cleanly on a recording the import never followed.
+	#[test]
+	fn first_anchor_refuses_an_ended_playlist() {
+		for len in [2, 10] {
+			let mut track = track_state();
+			let err = track.anchor(&window(100, len, true)).unwrap_err();
+			assert!(matches!(err, Error::PlaylistEnded), "{err:?}");
+		}
+	}
+
+	/// Joining an empty live window is still a join: the segment it gains next is imported, even
+	/// when the playlist ends in the same reload.
+	#[test]
+	fn an_empty_live_join_resumes_at_its_first_segment() {
+		let mut track = track_state();
+		assert_eq!(track.anchor(&window(100, 0, false)).unwrap(), 0);
+		assert_eq!(track.anchor(&window(100, 1, true)).unwrap(), 0);
 	}
 
 	#[test]
 	fn contiguous_anchor_resumes_where_it_left_off() {
 		let mut track = track_state();
 		track.next_sequence = Some(105);
-		assert_eq!(track.anchor(100, 110, 10), 5);
+		assert_eq!(track.anchor(&window(100, 10, false)).unwrap(), 5);
 		// Still anchored: no re-base.
 		assert_eq!(track.next_sequence, Some(105));
+	}
+
+	/// A followed playlist that ends keeps importing from where it left off, through its end.
+	#[test]
+	fn contiguous_anchor_follows_a_playlist_into_its_end() {
+		let mut track = track_state();
+		track.next_sequence = Some(105);
+		assert_eq!(track.anchor(&window(100, 10, true)).unwrap(), 5);
 	}
 
 	/// An upstream sequence reset leaves us "ahead"; rejoin near the live edge.
@@ -1268,8 +1666,24 @@ mod tests {
 	fn anchor_ahead_of_playlist_rejoins_near_the_live_edge() {
 		let mut track = track_state();
 		track.next_sequence = Some(500);
-		assert_eq!(track.anchor(100, 110, 10), 10 - ANCHOR_SEGMENTS);
+		assert_eq!(track.anchor(&window(100, 10, false)).unwrap(), 10 - ANCHOR_SEGMENTS);
 		assert!(track.next_sequence.is_none());
+	}
+
+	/// A followed playlist that ends while the track has no position in it, after an upstream
+	/// reset or an eviction, is rejoined near its edge and finishes: the live stream ended.
+	#[test]
+	fn a_followed_playlist_that_ends_is_rejoined() {
+		let mut track = track_state();
+		assert_eq!(track.anchor(&window(100, 10, false)).unwrap(), 10 - ANCHOR_SEGMENTS);
+		track.next_sequence = Some(500);
+		assert_eq!(track.anchor(&window(100, 10, true)).unwrap(), 10 - ANCHOR_SEGMENTS);
+
+		let mut track = track_state();
+		assert_eq!(track.anchor(&window(100, 10, false)).unwrap(), 10 - ANCHOR_SEGMENTS);
+		track.next_sequence = Some(110);
+		track.evict();
+		assert_eq!(track.anchor(&window(105, 10, true)).unwrap(), 10 - ANCHOR_SEGMENTS);
 	}
 
 	/// Falling out of the window loses media either way; take everything still there.
@@ -1277,8 +1691,23 @@ mod tests {
 	fn anchor_behind_playlist_resumes_from_the_oldest_segment() {
 		let mut track = track_state();
 		track.next_sequence = Some(5);
-		assert_eq!(track.anchor(100, 110, 10), 0);
+		assert_eq!(track.anchor(&window(100, 10, false)).unwrap(), 0);
 		assert!(track.next_sequence.is_none());
+	}
+
+	/// A window whose sequence runs past `u64` is refused before anything is anchored.
+	#[test]
+	fn anchor_refuses_a_window_past_the_last_sequence() {
+		let mut track = track_state();
+		let err = track.anchor(&window(u64::MAX, 1, false)).unwrap_err();
+		assert!(matches!(
+			err,
+			Error::SequenceOverflow {
+				kind: SequenceKind::Media,
+				value: u64::MAX,
+			}
+		));
+		assert!(!track.followed);
 	}
 
 	#[tokio::test]
@@ -1340,7 +1769,7 @@ mod tests {
 			.unwrap();
 		let err = cursor
 			.resolve(
-				Url::parse("https://example.com/b.mp4").unwrap(),
+				signed(&Url::parse("https://example.com/b.mp4").unwrap()),
 				Some(&ByteRange {
 					length: 5,
 					offset: None,
@@ -1349,6 +1778,7 @@ mod tests {
 			.unwrap_err();
 
 		assert!(matches!(err, Error::MissingByteRangeOffset { .. }));
+		assert_redacted(&err);
 	}
 
 	#[test]
@@ -1365,12 +1795,48 @@ mod tests {
 		assert!(matches!(err, Error::MissingByteRangeOffset { .. }));
 	}
 
+	#[test]
+	fn empty_byte_range_is_refused() {
+		let err = RangeCursor::default()
+			.resolve(
+				signed(&Url::parse("https://example.com/media.mp4").unwrap()),
+				Some(&ByteRange {
+					length: 0,
+					offset: Some(10),
+				}),
+			)
+			.unwrap_err();
+
+		assert!(matches!(
+			err,
+			Error::InvalidByteRange {
+				start: 10,
+				length: 0,
+				..
+			}
+		));
+		assert_redacted(&err);
+	}
+
+	#[tokio::test]
+	async fn playlist_parse_error_omits_the_playlist() {
+		let dir = temp_dir();
+		let path = dir.join("media.m3u8");
+		std::fs::write(&path, "#EXTINF:1,\nseg.m4s?jwt=s3cret\n").unwrap();
+		let url = Url::from_file_path(&path).unwrap();
+
+		let err = fetcher(&url).media_playlist(url).await.unwrap_err();
+
+		assert!(matches!(err, Error::ParsePlaylist(_)));
+		assert_redacted(&err);
+	}
+
 	#[tokio::test]
 	async fn ranged_http_resource_accepts_matching_partial_response() {
 		let (url, server) = serve_response("206 Partial Content", &[("Content-Range", "bytes 2-4/6")], b"cde").await;
 
-		let bytes = fetcher().fetch(&ranged_resource(url)).await.unwrap();
-		let request = String::from_utf8(server.await.unwrap()).unwrap();
+		let bytes = fetcher(&url).fetch(&ranged_resource(url.clone())).await.unwrap();
+		let request = String::from_utf8(server.await.unwrap().remove(0)).unwrap();
 
 		assert_eq!(bytes, b"cde".as_slice());
 		assert!(
@@ -1381,20 +1847,45 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn ranged_http_resource_slices_full_response() {
+	async fn ranged_http_resource_refuses_full_response() {
 		let (url, server) = serve_response("200 OK", &[], b"abcdef").await;
 
-		let bytes = fetcher().fetch(&ranged_resource(url)).await.unwrap();
+		let err = fetcher(&url).fetch(&ranged_resource(signed(&url))).await.unwrap_err();
 		server.await.unwrap();
 
-		assert_eq!(bytes, b"cde".as_slice());
+		assert!(matches!(err, Error::ByteRangeIgnored { status: 200, .. }));
+		assert_redacted(&err);
+	}
+
+	#[tokio::test]
+	async fn ranged_http_resource_refuses_overrun_before_the_body_ends() {
+		// The body promises far more than the range and stays open after the first bytes, so
+		// only a fetch that refuses mid-stream returns before the request timeout.
+		let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let url = Url::parse(&format!("http://{}/media.mp4", listener.local_addr().unwrap())).unwrap();
+		let server = tokio::spawn(async move {
+			let (mut stream, _) = listener.accept().await.unwrap();
+			let mut request = [0; 1024];
+			let _ = stream.read(&mut request).await.unwrap();
+			let head = "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 2-4/6\r\nContent-Length: 1000000\r\n\r\n";
+			stream.write_all(head.as_bytes()).await.unwrap();
+			stream.write_all(b"cdefgh").await.unwrap();
+			// Hold the connection until the client hangs up.
+			let _ = stream.read(&mut request).await;
+		});
+
+		let err = fetcher(&url).fetch(&ranged_resource(signed(&url))).await.unwrap_err();
+		server.await.unwrap();
+
+		assert!(matches!(err, Error::ByteRangeLengthMismatch { expected: 3, .. }));
+		assert_redacted(&err);
 	}
 
 	#[tokio::test]
 	async fn ranged_http_resource_rejects_wrong_response_length() {
 		let (url, server) = serve_response("206 Partial Content", &[("Content-Range", "bytes 2-4/6")], b"cd").await;
 
-		let err = fetcher().fetch(&ranged_resource(url)).await.unwrap_err();
+		let err = fetcher(&url).fetch(&ranged_resource(signed(&url))).await.unwrap_err();
 		server.await.unwrap();
 
 		assert!(matches!(
@@ -1405,16 +1896,18 @@ mod tests {
 				..
 			}
 		));
+		assert_redacted(&err);
 	}
 
 	#[tokio::test]
 	async fn ranged_http_resource_rejects_mismatched_content_range() {
 		let (url, server) = serve_response("206 Partial Content", &[("Content-Range", "bytes 3-5/6")], b"def").await;
 
-		let err = fetcher().fetch(&ranged_resource(url)).await.unwrap_err();
+		let err = fetcher(&url).fetch(&ranged_resource(signed(&url))).await.unwrap_err();
 		server.await.unwrap();
 
 		assert!(matches!(err, Error::ByteRangeResponseMismatch { start: 2, end: 4, .. }));
+		assert_redacted(&err);
 	}
 
 	#[tokio::test]
@@ -1440,39 +1933,112 @@ mod tests {
 		assert_eq!(import.video[0].next_sequence, Some(2));
 	}
 
-	/// A playlist that ends (`EXT-X-ENDLIST`) ends the import once its last segment is in, and the
-	/// finished broadcast keeps serving it, catalog included, for the retention.
-	#[tokio::test]
-	async fn an_ended_playlist_finishes_the_import() {
-		let (init, fragments) = fmp4_parts(2);
+	/// One file holding the fixture's init and four segments that each open a group, and a playlist
+	/// listing the first `count` of them, ended with `EXT-X-ENDLIST` or not. The file is the same
+	/// whatever `count`, so rewriting the playlist models a live window growing.
+	fn recording(count: usize, end_list: bool) -> (Vec<u8>, String) {
+		// The fixture interleaves per-track moofs, so only fragments 0, 1, 2 and 4 open a group.
+		let (init, fragments) = fmp4_parts(5);
+		let segments: Vec<&Vec<u8>> = [0, 1, 2, 4].iter().map(|&k| &fragments[k]).collect();
+		assert!(count <= segments.len());
+
 		let mut resource = init.clone();
-		resource.extend_from_slice(&fragments[0]);
-		resource.extend_from_slice(&fragments[1]);
-		let playlist = format!(
-			"#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"media.mp4\",BYTERANGE=\"{}@0\"\n#EXTINF:1,\n#EXT-X-BYTERANGE:{}@{}\nmedia.mp4\n#EXTINF:1,\n#EXT-X-BYTERANGE:{}\nmedia.mp4\n#EXT-X-ENDLIST\n",
-			init.len(),
-			fragments[0].len(),
-			init.len(),
-			fragments[1].len()
+		let mut playlist = format!(
+			"#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"media.mp4\",BYTERANGE=\"{}@0\"\n",
+			init.len()
 		);
+		for (index, segment) in segments.iter().enumerate() {
+			if index < count {
+				let range = format!("{}@{}", segment.len(), resource.len());
+				playlist.push_str(&format!("#EXTINF:1,\n#EXT-X-BYTERANGE:{range}\nmedia.mp4\n"));
+			}
+			resource.extend_from_slice(segment);
+		}
+		if end_list {
+			playlist.push_str("#EXT-X-ENDLIST\n");
+		}
+		(resource, playlist)
+	}
+
+	/// A playlist that has already ended when the import joins it is refused before anything is
+	/// published, rather than importing its last few segments and ending as if they were the whole
+	/// recording. The refusal is settled, so `run` reports it without spending the retry budget.
+	#[tokio::test]
+	async fn an_initially_ended_playlist_is_refused() {
+		tokio::time::pause();
+		let (resource, playlist) = recording(4, true);
+		let (mut import, catalog) = write_import(&temp_dir(), &resource, &playlist);
+
+		assert!(matches!(import.init().await, Err(Error::PlaylistEnded)));
+		assert!(import.video[0].importer.is_none(), "nothing was imported");
+		assert!(catalog.snapshot().video.renditions.is_empty());
+
+		let run = tokio::time::timeout(Duration::from_secs(5), import.run())
+			.await
+			.expect("a settled refusal skips the retry budget");
+		assert!(matches!(run, Err(Error::PlaylistEnded)));
+	}
+
+	/// One rendition that had already ended is refused even while another is live and ingesting,
+	/// rather than importing a broadcast without it until the live one ends.
+	#[tokio::test]
+	async fn an_ended_rendition_beside_a_live_one_is_refused() {
+		tokio::time::pause();
+		let dir = temp_dir();
+		let (resource, live) = recording(3, false);
+		let (_, ended) = recording(4, true);
+		std::fs::write(dir.join("media.mp4"), &resource).unwrap();
+		std::fs::write(dir.join("live.m3u8"), live).unwrap();
+		std::fs::write(dir.join("ended.m3u8"), ended).unwrap();
+		let master = "#EXTM3U\n\
+			#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=640x360,CODECS=\"avc1.4d401f\"\nlive.m3u8\n\
+			#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1280x720,CODECS=\"avc1.4d401f\"\nended.m3u8\n";
+		std::fs::write(dir.join("master.m3u8"), master).unwrap();
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let cfg = Config::new(Url::from_file_path(dir.join("master.m3u8")).unwrap());
+		let mut import = Import::new(broadcast, catalog, cfg).unwrap();
+
+		let run = tokio::time::timeout(Duration::from_secs(5), import.run())
+			.await
+			.expect("the ended rendition ends the import");
+		assert!(matches!(run, Err(Error::PlaylistEnded)), "{run:?}");
+	}
+
+	/// A followed playlist that gains `EXT-X-ENDLIST` ends the import once its last segment is in,
+	/// including one published alongside the end, and the finished import keeps serving it,
+	/// catalog included, while it is held.
+	#[tokio::test]
+	async fn a_playlist_that_ends_later_finishes_the_import() {
+		tokio::time::pause();
+		let (resource, playlist) = recording(3, false);
 		let dir = temp_dir();
 		std::fs::write(dir.join("media.mp4"), &resource).unwrap();
 		std::fs::write(dir.join("media.m3u8"), playlist).unwrap();
 
-		let max_age = Duration::from_secs(3);
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let config = moq_mux::catalog::Config::default().with_max_age(max_age);
-		let catalog = CatalogProducer::new(&mut broadcast, config).unwrap();
+		let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 		let playlist = Url::from_file_path(dir.join("media.m3u8")).unwrap();
 		let mut import = Import::new(broadcast, catalog, Config::new(playlist)).unwrap();
 
+		import.init().await.unwrap();
+		assert_eq!(
+			import.video[0].next_sequence,
+			Some(3),
+			"the live window was joined whole"
+		);
+		assert!(!import.video[0].ended);
+
+		let (_, ended) = recording(4, true);
+		std::fs::write(dir.join("media.m3u8"), ended).unwrap();
 		tokio::time::timeout(Duration::from_secs(10), import.run())
 			.await
 			.expect("an ended playlist ends the import")
 			.unwrap();
-		let finish = import.finish().unwrap();
-		assert_eq!(finish.linger(), max_age);
+		assert_eq!(import.video[0].next_sequence, Some(4), "the final segment was imported");
+		import.finish().unwrap();
 		let mut listed = consumer.track("catalog.json").unwrap().subscribe(None).await.unwrap();
 		assert!(
 			listed.recv_group().await.unwrap().is_some(),
@@ -1520,21 +2086,14 @@ mod tests {
 	/// are still running cannot evict the finished rendition.
 	#[tokio::test]
 	async fn an_ended_rendition_is_not_evicted() {
-		let (init, fragments) = fmp4_parts(2);
-		let mut resource = init.clone();
-		resource.extend_from_slice(&fragments[0]);
-		resource.extend_from_slice(&fragments[1]);
-		let playlist = format!(
-			"#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"media.mp4\",BYTERANGE=\"{}@0\"\n#EXTINF:1,\n#EXT-X-BYTERANGE:{}@{}\nmedia.mp4\n#EXTINF:1,\n#EXT-X-BYTERANGE:{}\nmedia.mp4\n#EXT-X-ENDLIST\n",
-			init.len(),
-			fragments[0].len(),
-			init.len(),
-			fragments[1].len()
-		);
+		let (resource, playlist) = recording(2, false);
 		let dir = temp_dir();
 		let (mut import, _catalog) = write_import(&dir, &resource, &playlist);
 
 		import.init().await.unwrap();
+		let (_, ended) = recording(2, true);
+		std::fs::write(dir.join("media.m3u8"), ended).unwrap();
+		assert!(import.step(OnError::Warn).await.unwrap().ended);
 		assert!(import.video[0].ended, "the rendition imported its last segment");
 
 		std::fs::remove_file(dir.join("media.m3u8")).unwrap();
@@ -1620,6 +2179,282 @@ mod tests {
 			import.video[0].map.as_ref().unwrap().range.unwrap().start,
 			second_init as u64
 		);
+	}
+
+	/// The first frame of every buffered group, without waiting for another source event.
+	fn group_stamps(subscriber: &mut moq_net::track::Ordered) -> (Vec<(u64, u128)>, Option<moq_net::Error>) {
+		let mut out = Vec::new();
+		loop {
+			let mut group = match subscriber.poll_next_group(&kio::Waiter::noop()) {
+				Poll::Ready(Ok(Some(group))) => group,
+				Poll::Pending | Poll::Ready(Ok(None)) => break,
+				Poll::Ready(Err(error)) => return (out, Some(error)),
+			};
+			let frame = match group.poll_read_frame(&kio::Waiter::noop()) {
+				Poll::Ready(Ok(Some(frame))) => frame,
+				Poll::Ready(Err(error)) => return (out, Some(error)),
+				other => panic!("reading a published group's first frame: {other:?}"),
+			};
+			out.push((group.sequence, frame.timestamp.unwrap().as_micros()));
+		}
+		(out, None)
+	}
+
+	struct Discontinuity {
+		result: Result<usize>,
+		before: String,
+		after: String,
+		old_groups: Vec<(u64, u128)>,
+		terminal: Option<moq_net::Error>,
+		new_groups: Vec<(u64, u128)>,
+		/// The first generation's HLS record track has ended.
+		old_records_ended: bool,
+	}
+
+	/// Whether `subscriber` has ended, after draining the groups it already holds.
+	fn ended(subscriber: &mut moq_net::track::Ordered) -> bool {
+		loop {
+			match subscriber.poll_next_group(&kio::Waiter::noop()) {
+				Poll::Ready(Ok(Some(_))) => continue,
+				Poll::Ready(Ok(None)) => return true,
+				Poll::Pending => return false,
+				Poll::Ready(Err(error)) => panic!("the record track failed: {error:?}"),
+			}
+		}
+	}
+
+	/// A one-track fMP4 muxer for synthesized VP8 video or Opus audio.
+	fn synth(video: bool) -> moq_mux::container::fmp4::Muxer {
+		use hang::catalog::{AudioCodec, AudioConfig, VideoCodec, VideoConfig};
+		use moq_mux::container::fmp4::Muxer;
+
+		if video {
+			let mut config = VideoConfig::new(VideoCodec::VP8);
+			config.coded_width = Some(320);
+			config.coded_height = Some(240);
+			config.framerate = Some(50.0);
+			Muxer::video(&config).unwrap()
+		} else {
+			Muxer::audio(&AudioConfig::new(AudioCodec::Opus, 48_000, 2)).unwrap()
+		}
+	}
+
+	/// Write `muxer`'s init segment to `init.mp4` in `dir`, and one keyframe at each of `stamps`
+	/// (in microseconds) to `{prefix}{index}.m4s`.
+	fn write_synth(dir: &Path, muxer: &moq_mux::container::fmp4::Muxer, prefix: &str, stamps: &[u64]) {
+		std::fs::write(dir.join(format!("{prefix}init.mp4")), muxer.init().unwrap().unwrap()).unwrap();
+		for (index, &micros) in stamps.iter().enumerate() {
+			let frame = moq_mux::container::Frame {
+				timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
+				duration: Some(moq_net::Timestamp::from_micros(20_000).unwrap()),
+				payload: Bytes::from_static(&[0x78, 0x00, 0x00, 0x00]),
+				keyframe: true,
+			};
+			let fragment = muxer.fragment(index as u32, &[frame], None).unwrap();
+			std::fs::write(dir.join(format!("{prefix}{index}.m4s")), fragment).unwrap();
+		}
+	}
+
+	/// Exercise the playlist/map path with real fMP4 produced by the exporter's muxer.
+	///
+	/// The second segment, stamped `after_us`, follows a 5 s one behind the playlist `tags`.
+	async fn discontinuity(video: bool, passthrough: bool, tags: &str, after_us: u64) -> Discontinuity {
+		let dir = temp_dir();
+		let muxer = synth(video);
+		write_synth(&dir, &muxer, "", &[5_000_000, after_us]);
+		std::fs::copy(dir.join("init.mp4"), dir.join("other.mp4")).unwrap();
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let sink = Sink::new(broadcast, catalog.clone(), passthrough);
+		let mut track = TrackState::new(
+			if video { "video" } else { "audio" }.to_string(),
+			Url::from_file_path(dir.join("media.m3u8")).unwrap(),
+			if video {
+				select_video_only()
+			} else {
+				select_audio_only()
+			},
+			sink,
+		);
+		let before = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:1,\n0.m4s\n";
+		let before = m3u8_rs::parse_media_playlist_res(before.as_bytes()).unwrap();
+		let local = fetcher(&track.playlist);
+		let base = track.playlist.clone();
+		track.consume_segments(&local, &before, &base).await.unwrap();
+		let name = |snapshot: &moq_mux::catalog::hang::Catalog| {
+			if video {
+				snapshot.video.renditions.keys().next()
+			} else {
+				snapshot.audio.renditions.keys().next()
+			}
+			.unwrap()
+			.clone()
+		};
+		let before_name = name(&catalog.snapshot());
+		let replay = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(3600));
+		let mut old = consumer
+			.track(&before_name)
+			.unwrap()
+			.subscribe(replay.clone())
+			.await
+			.unwrap()
+			.ordered();
+		let mut old_records = consumer
+			.track(&hang::hls::default_name(&before_name))
+			.unwrap()
+			.subscribe(replay.clone())
+			.await
+			.unwrap()
+			.ordered();
+		let after = format!(
+			"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:1,\n0.m4s\n{tags}#EXTINF:1,\n1.m4s\n"
+		);
+		let after = m3u8_rs::parse_media_playlist_res(after.as_bytes()).unwrap();
+		let result = track.consume_segments(&local, &after, &base).await;
+		let after_name = name(&catalog.snapshot());
+		let (old_groups, terminal) = group_stamps(&mut old);
+		let old_records_ended = ended(&mut old_records);
+		let new_groups = if before_name != after_name {
+			let mut new = consumer
+				.track(&after_name)
+				.unwrap()
+				.subscribe(replay)
+				.await
+				.unwrap()
+				.ordered();
+			let (groups, error) = group_stamps(&mut new);
+			assert!(error.is_none(), "new generation failed: {error:?}");
+			groups
+		} else {
+			Vec::new()
+		};
+		std::fs::remove_dir_all(dir).unwrap();
+		Discontinuity {
+			result,
+			before: before_name,
+			after: after_name,
+			old_groups,
+			terminal,
+			new_groups,
+			old_records_ended,
+		}
+	}
+
+	#[tokio::test]
+	async fn forward_discontinuity_preserves_source_time_and_identity() {
+		for video in [false, true] {
+			for passthrough in [false, true] {
+				let case = discontinuity(video, passthrough, DISCONTINUITY, 7_000_000).await;
+				case.result.unwrap();
+				assert!(case.terminal.is_none(), "{terminal:?}", terminal = case.terminal);
+				assert_eq!(case.before, case.after);
+				assert_eq!(
+					case.old_groups,
+					[(0, 5_000_000), (moq_sequence(1, 1).unwrap(), 7_000_000)]
+				);
+			}
+		}
+	}
+
+	const DISCONTINUITY: &str = "#EXT-X-DISCONTINUITY\n";
+
+	/// A timestamp reset under the same init segment is refused as a rewind, unwrapped or
+	/// passthrough, with or without the discontinuity the source should have signalled, and
+	/// without publishing anything for it: the track keeps its media and its name, and no group
+	/// (not even an aborted one) opens for the refused segment.
+	#[tokio::test]
+	async fn timestamp_reset_is_refused() {
+		for video in [false, true] {
+			for passthrough in [false, true] {
+				for tags in [DISCONTINUITY, ""] {
+					let case = discontinuity(video, passthrough, tags, 0).await;
+					let label = format!("video={video} passthrough={passthrough} tags={tags:?}");
+					assert!(
+						matches!(
+							case.result,
+							Err(Error::Rewind {
+								source: moq_mux::Error::TimestampRewind(_)
+									| moq_mux::Error::Cmaf(
+										moq_mux::container::fmp4::Error::NonMonotonicDecodeTime { .. }
+									),
+								..
+							})
+						),
+						"{label}: {:?}",
+						case.result
+					);
+					assert_eq!(case.before, case.after, "{label}");
+					assert!(case.terminal.is_none(), "{label}: {:?}", case.terminal);
+					assert_eq!(case.old_groups, [(0, 5_000_000)], "{label}");
+				}
+			}
+		}
+	}
+
+	/// A rewind ends the import at once, even while a sibling rendition is healthy: it is not
+	/// retried, and the rendition is not evicted and rejoined as fresh tracks.
+	#[tokio::test]
+	async fn a_rewind_ends_the_import() {
+		let dir = temp_dir();
+		write_synth(&dir, &synth(true), "video", &[5_000_000, 7_000_000]);
+		write_synth(&dir, &synth(false), "audio", &[5_000_000, 0]);
+		let master = "#EXTM3U\n\
+			#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"en\",DEFAULT=YES,URI=\"audio.m3u8\"\n\
+			#EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS=\"avc1.4d401f,opus\",AUDIO=\"aud\"\n\
+			video.m3u8\n";
+		std::fs::write(dir.join("master.m3u8"), master).unwrap();
+		let playlist = |prefix: &str, segments: &str| {
+			let body = format!("#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"{prefix}init.mp4\"\n{segments}");
+			std::fs::write(dir.join(format!("{prefix}.m3u8")), body).unwrap();
+		};
+		playlist("video", "#EXTINF:1,\nvideo0.m4s\n");
+		playlist("audio", "#EXTINF:1,\naudio0.m4s\n");
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let cfg = Config::new(Url::from_file_path(dir.join("master.m3u8")).unwrap());
+		let mut import = Import::new(broadcast, catalog, cfg).unwrap();
+		import.init().await.unwrap();
+
+		// Video moves forward while audio restarts at zero under the same init segment.
+		playlist(
+			"video",
+			"#EXTINF:1,\nvideo0.m4s\n#EXT-X-DISCONTINUITY\n#EXTINF:1,\nvideo1.m4s\n",
+		);
+		playlist(
+			"audio",
+			"#EXTINF:1,\naudio0.m4s\n#EXT-X-DISCONTINUITY\n#EXTINF:1,\naudio1.m4s\n",
+		);
+		let run = tokio::time::timeout(Duration::from_secs(5), import.run())
+			.await
+			.expect("a rewind is not retried");
+		assert!(
+			matches!(&run, Err(Error::Rewind { rendition, .. }) if rendition == "audio"),
+			"{run:?}"
+		);
+		std::fs::remove_dir_all(dir).unwrap();
+	}
+
+	/// A different `EXT-X-MAP` resource, even with identical bytes.
+	const CHANGED_MAP: &str = "#EXT-X-DISCONTINUITY\n#EXT-X-MAP:URI=\"other.mp4\"\n";
+
+	#[tokio::test]
+	async fn changed_map_discontinuity_publishes_a_fresh_identity() {
+		for video in [false, true] {
+			for passthrough in [false, true] {
+				for after_us in [0, 7_000_000] {
+					let case = discontinuity(video, passthrough, CHANGED_MAP, after_us).await;
+					case.result.unwrap();
+					assert!(case.terminal.is_none(), "{terminal:?}", terminal = case.terminal);
+					assert_ne!(case.before, case.after);
+					assert!(case.old_records_ended, "the replaced generation retires its records");
+					assert_eq!(case.old_groups, [(0, 5_000_000)]);
+					assert_eq!(case.new_groups, [(moq_sequence(1, 1).unwrap(), u128::from(after_us))]);
+				}
+			}
+		}
 	}
 
 	/// Every frame timestamp `name` carries so far, in microseconds.
@@ -1728,6 +2563,26 @@ mod tests {
 
 		let audio = hls.audio.as_ref().expect("separate audio rendition");
 		assert!(audio.select.has_audio() && !audio.select.has_video());
+	}
+
+	#[tokio::test]
+	#[tracing_test::traced_test]
+	async fn discovery_logs_redact_playlist_credentials() {
+		let audio = signed(&Url::parse("https://example.com/audio.m3u8").unwrap());
+		let master = format!(
+			"#EXTM3U\n\
+			#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"en\",URI=\"{audio}\"\n\
+			#EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS=\"avc1.4d401f,mp4a.40.2\",AUDIO=\"aud\"\n\
+			video.m3u8?jwt=s3cret#f4ag\n"
+		);
+		let hls = discover(&master).await;
+		assert_eq!(hls.audio.as_ref().unwrap().playlist, audio);
+
+		assert!(logs_contain("selected master playlist renditions"));
+		assert!(logs_contain("audio=\"https://example.com/audio.m3u8\""));
+		for credential in ["alice", "hunter2", "jwt", "s3cret", "f4ag"] {
+			assert!(!logs_contain(credential), "log leaked {credential}");
+		}
 	}
 
 	/// A master whose variant carries muxed A/V (no separate audio group) publishes
@@ -1866,15 +2721,28 @@ video.m3u8
 					.find(|(name, _)| name == path)
 					.map(|(_, body)| body.as_slice())
 					.unwrap_or_else(|| panic!("unexpected request for {path}: {}", String::from_utf8_lossy(&request)));
-				let mut response = format!(
-					"HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-					body.len()
-				)
-				.into_bytes();
-				response.extend_from_slice(body);
+				let response = match request_range(&request) {
+					Some((start, end)) => http_response(
+						"206 Partial Content",
+						&[("Content-Range", &format!("bytes {start}-{end}/{}", body.len()))],
+						&body[start..=end],
+					),
+					None => http_response("200 OK", &[], body),
+				};
 				stream.write_all(&response).await.unwrap();
 			}
 		})
+	}
+
+	/// The inclusive `bytes=start-end` a request asked for, if any.
+	fn request_range(request: &[u8]) -> Option<(usize, usize)> {
+		let request = std::str::from_utf8(request).ok()?;
+		let range = request.lines().find_map(|line| {
+			let (name, value) = line.split_once(':')?;
+			name.eq_ignore_ascii_case("range").then(|| value.trim())
+		})?;
+		let (start, end) = range.strip_prefix("bytes=")?.split_once('-')?;
+		Some((start.parse().ok()?, end.parse().ok()?))
 	}
 
 	fn request_path(request: &[u8]) -> Option<&str> {

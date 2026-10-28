@@ -40,7 +40,10 @@ async def main():
                 frames = await moq.media.TrackConsumer.subscribe(broadcast, id, audio)
                 async with frames:
                     async for frame in frames:
-                        print(f"Got frame: {len(frame.payload)} bytes, ts={frame.timestamp}")
+                        if isinstance(frame, moq.media.MediaFrame):
+                            print(f"Got frame: {len(frame.payload)} bytes, ts={frame.timestamp}")
+                        else:
+                            print("Media break:", frame)
 
 
 asyncio.run(main())
@@ -56,7 +59,8 @@ import moq
 
 async def main():
     async with moq.Client("https://cdn.moq.dev/anon") as client:
-        broadcast = client.create_broadcast("my-stream")
+        publication = client.create_broadcast("my-stream")
+        broadcast = publication.broadcast
 
         # Publish an Opus audio track (init bytes from your encoder)
         audio = moq.media.TrackProducer.audio(
@@ -71,7 +75,7 @@ async def main():
         audio.cut()
 
         # A fresh epoch per run tells viewers a restart is a new broadcast.
-        broadcast.announce(moq.Route(epoch=moq.mint_epoch()))
+        publication.announce(moq.AnnounceRoute(epoch=moq.mint_epoch()))
 
         # Clean up
         audio.finish()
@@ -90,9 +94,9 @@ import moq
 
 async def main():
     async with moq.Server("127.0.0.1:4443", tls_generate=["localhost"]) as server:
-        broadcast = server.create_broadcast("hello")
-        track = broadcast.publish_track("events")
-        broadcast.announce()
+        publication = server.create_broadcast("hello")
+        track = publication.broadcast.publish_track("events")
+        publication.announce()
         print(f"listening on https://{server.local_addr}")
 
         sessions = []
@@ -127,47 +131,49 @@ client = moq.Client(
 
 ### Connection
 
-- **`connect(url, *, tls_verify=True, tls_roots=(), tls_system_roots=None, tls_fingerprints=(), tls_cert=None, tls_key=None, tls_host_name=None, bind=None, versions=(), timeout=None, race=None, resolution_delay=None, max_streams=None, idle_timeout=None, keep_alive=None, gso=None, mtu_discovery=None, congestion_control=None, qlog=None, keylog=False, websocket_enabled=None, websocket_delay=None, reconnect=True, backoff=None, publish=None, consume=None)`**. Shorthand for `Client(...)`; use as `async with moq.connect(url) as client:`.
+- **`connect(url, *, bind=None, versions=(), timeout=None, race=None, resolution_delay=None, tls=None, quic=None, websocket=None, once=False, backoff=None, publish=None, consume=None)`**. Shorthand for `Client(...)`; use as `async with moq.connect(url) as client:`. The names and nesting mirror moq-ffi's `MoqClientConfig`.
 - **`Client(url, *, ...)`**, taking the same arguments. Async context manager for connecting to a relay.
-  - `tls_roots`. PEM root certificate file path(s) to trust instead of the system roots.
-  - `tls_system_roots`. Whether to trust platform roots in addition to custom roots.
-  - `tls_fingerprints`. Hex SHA-256 fingerprint(s) to pin the peer's certificate to, the native equivalent of `serverCertificateHashes`. Accepts the values a server reports via `cert_fingerprints()`, so you can trust a self-signed certificate without `tls_verify=False`.
-  - `tls_cert`, `tls_key`. Paired PEM certificate chain and private key paths for mTLS.
-  - `tls_host_name`. Verify the certificate against this name (SNI) instead of the URL's host.
-  - `max_streams`. Raise the peer's inbound stream cap.
-  - `idle_timeout`, `keep_alive`, `gso`, `mtu_discovery`, `congestion_control`, `qlog`. QUIC tuning; `keep_alive=timedelta(0)` disables pings, `congestion_control` takes a `CongestionControl`, and `qlog` is a trace directory when `qlog_supported()`.
-  - `keylog`. Write TLS session secrets to the file `SSLKEYLOGFILE` names, for decrypting a capture; without `SSLKEYLOGFILE` the client refuses to build.
   - `versions`. Protocol versions to offer, most preferred first (e.g. `"moq-lite-03"`); empty offers all, which `versions()` lists.
   - `timeout`, `race`, `resolution_delay`. Bound one connect attempt and pace Happy Eyeballs.
-  - `reconnect`, `backoff`. Redial with a `Backoff` when the transport drops; `reconnect=False` dials once.
-  - `.session`. The established `Session` (or `None` before connecting / after exit).
+  - `tls=ClientTls(...)`. Certificate trust and the mTLS identity:
+    - `insecure`. Skip certificate verification (local development only).
+    - `roots`. PEM root certificate file path(s) to trust instead of the system roots.
+    - `system_roots`. Whether to trust platform roots in addition to custom roots.
+    - `fingerprints`. Hex SHA-256 fingerprint(s) to pin the peer's certificate to, the native equivalent of `serverCertificateHashes`. Accepts the values a server reports via `cert_fingerprints()`, so you can trust a self-signed certificate without `insecure=True`.
+    - `cert`, `key`. Paired PEM certificate chain and private key paths for mTLS.
+    - `host_name`. Verify the certificate against this name (SNI) instead of the URL's host.
+  - `quic=QuicConfig(...)`. QUIC tuning: `max_streams` raises the peer's inbound stream cap; `idle_timeout`, `keep_alive` (`timedelta(0)` disables pings), `gso`, `mtu_discovery`, `congestion_control` (a `CongestionControl`), and `qlog` (a trace directory when `qlog_supported()`). `keylog=True` writes TLS session secrets to the file `SSLKEYLOGFILE` names, for decrypting a capture; without `SSLKEYLOGFILE` the client refuses to build.
+  - `websocket=WebSocketConfig(...)`. The fallback raced against QUIC: `enabled=False` turns it off, and `delay` is QUIC's head start.
+  - `once`, `backoff`. Redial with a `Backoff` when the transport drops; `once=True` dials once.
+  - `.session`. The connecting or connected `Session` (or `None` before entering / after exit).
 - **`Server(bind="[::]:443", *, tls_cert=(), tls_key=(), tls_generate=(), versions=(), max_streams=None, keylog=False, publish=None, consume=None)`**. Async context manager + async iterator of incoming `Request`s.
   - `keylog`. Write TLS session secrets to the file `SSLKEYLOGFILE` names, for decrypting a capture; without `SSLKEYLOGFILE` entering the server fails.
   - `.local_addr`. The bound address (useful when binding to port `0`).
   - `.cert_fingerprints()`. SHA-256 fingerprints of the configured TLS certificates, for `serverCertificateHashes` browser cert pinning.
-  - `.create_broadcast(path) → BroadcastProducer`. Create an unannounced broadcast, invisible to everyone; `announce()` makes it discoverable and reachable; `close()` ends it.
+  - `.create_broadcast(path) → Publication`. Create an unannounced broadcast, invisible to everyone; fill `.broadcast`, then `announce()` makes it discoverable and reachable; `.broadcast.close()` ends it.
 - **`Request`**. An incoming session, yielded by `async for request in server`.
   - `.url`, `.path`, `.query`, `.transport`. The query-free path is uniform across transports; the root or missing path is `""`. The encoded query may contain credentials.
   - `await .accept(*, publish=None, consume=None) → Session`. Origins are captured when accept starts; None inherits the server default and a supplied origin replaces it. Pass fresh origins for isolation, or the same origin on both sides to share it. A second response raises `AlreadyResponded`; calls after cancel raise `Cancelled`. Complete the handshake (hold the result to keep the connection alive).
   - `await .reject(code)`. Reject with an application error code; 401 and 403 map to unauthorized.
   - `.cancel()`. Cancel an in-flight `accept()`/`reject()` call.
-- **`Session`**. An established connection. Holding it keeps the connection alive; it is also an `async with` context manager that drains on a clean exit and cancels on an error.
+- **`Session`**. A connection, connecting or connected. Holding it keeps the connection alive; it is also an `async with` context manager that drains on a clean exit and cancels on an error.
   - `await .closed()`. Wait until the session closes.
-  - `.cancel(code)`, `await session.shutdown()`. Cancel immediately, or drain within one second, raising on failure. Explicit `moq-lite-07-wip` waits for the peer to receive finished tails; older Lite versions, including default lite-06, wait only for transport ACKs. IETF also waits for transport ACKs.
+  - `.cancel(code)`, `session.shutdown()`. Cancel immediately, or request a drain now and await `session.closed()` for its result, including a delivery timeout after one second. Explicit `moq-lite-07-wip` waits for the peer to receive finished tails; older Lite versions, including default lite-06, wait only for transport ACKs. IETF also waits for transport ACKs.
   - `.publish() → OriginProducer`, `.consume() → OriginConsumer`. The wired origin sides.
   - `.stats() → ConnectionStats`. Snapshot RTT, bandwidth estimates, and byte/packet counters.
-  - `await .status() → ConnectionStatus`, `.connects()`, `.failure()`. Watch reconnects; `connects()` counts connections, 1 on the first, and `failure()` says why a reconnect is under way. Before the first connect, `Client.failure()` says why the dial is retrying.
-  - `.bandwidth() → Bandwidth`. Divide the send estimate between encoders and app-owned tracks.
-  - `.auth() → Auth`. On `moq-lite-07-wip` and on moq-transport draft-17+ with the MoQ Auth extension, `.grant()` reads the peer's `Grant` and `await .add(token) → AuthToken` presents a fresh token without reconnecting.
+  - `.state()` and `await .state_changed(after)`. Read one lifecycle snapshot and wait with its revision; first-dial failures and reconnects share the same session.
+  - `.allocator() → Allocator`. Divide the send estimate between encoders and app-owned tracks.
+  - `.grants() → GrantConsumer`. On `moq-lite-07-wip` and on moq-transport draft-18+ with the MoQ Auth extension, `.grant()` reads the peer's `Grant` and `async for grant in session.grants()` follows it.
+  - `.tokens() → Tokens | None`. A client session's credentials: `.set([...])` replaces them without reconnecting and `await .answered()` raises the relay's refusal.
 
 ### Publishing
 
 - **`BroadcastProducer()`**. Create a broadcast to publish tracks into.
-  - `.dynamic() → BroadcastDynamic`
-  - `moq.video.Producer(media.CatalogProducer(broadcast), input, output, *, bandwidth=None)`. Encode raw video frames inside the binding.
-  - `moq.audio.Producer(media.CatalogProducer(broadcast), input, output, *, bandwidth=None)`. Encode raw PCM frames. A zero frame duration uses the codec's own frame.
+  - `.requests() → BroadcastRequests`
+  - `moq.video.Producer(media.CatalogProducer(broadcast), input, output, *, track=None, bandwidth=None)`. Encode raw video frames inside the binding.
+  - `moq.audio.Producer(media.CatalogProducer(broadcast), input, output, *, track=None, bandwidth=None)`. Encode raw PCM frames. A zero frame duration uses the codec's own frame.
   - `.close()` ends the broadcast for good; a second call is a no-op.
-- **`BroadcastDynamic`**. Async source of tracks requested by subscribers.
+- **`BroadcastRequests`**. Async source of tracks requested by subscribers.
   - `await .requested_track() → TrackRequest`. Call `.accept()` on it for a `TrackProducer`, or `.abort(code)` to reject.
   - Async iterator yielding `TrackRequest`
 - **`TrackProducer` / `GroupProducer`**. Write raw payloads with no codec parsing.
@@ -200,7 +206,8 @@ client = moq.Client(
   `await media.catalog(broadcast)` reads one snapshot and releases its subscription.
 - `await media.TrackConsumer.subscribe(broadcast, id, rendition, *, subscription=None)`
   decodes live media from a catalog rendition: its ID (catalog key) and its `Video` or `Audio`
-  config. It follows the rendition's `broadcast` and `track` itself.
+  config. It follows the rendition's `broadcast` and `track` itself and yields `MediaFrame`,
+  `Gap`, or `End`. An encoder end is not iterator EOF; media can resume after it.
 - `await media.GroupConsumer.fetch(broadcast, id, rendition, sequence, *, options=None)`
   fetches and decodes exactly one group of a catalog rendition.
 - `media.GroupConsumer(group, container)` decodes a raw group, such as one from
@@ -208,13 +215,17 @@ client = moq.Client(
   as it lands.
 
 `media.TrackProducer.write_frame(payload, timestamp)` requires the caller's capture time as
-`timedelta`; `.flush(timestamp)` and returned `media.MediaFrame.timestamp` use it too. `demand()` owns the track name and
+`timedelta`; returned `media.MediaFrame.timestamp` uses it too. `demand()` owns the track name and
 subscriber waits. `.cut()` / `.seek(sequence)` draw group boundaries; `.finish()` ends the import.
 
 ### Data
 
-`moq.json.SnapshotProducer.update(value, timestamp=None)` and
-`moq.json.StreamProducer.append(value, timestamp=None)` preserve optional capture time.
+`moq.json.SnapshotProducer.update(value, timestamp=None)`,
+`moq.json.StreamProducer.append(value, timestamp=None)`, and
+`moq.json.WindowProducer.push(value, timestamp=None)` / `.pop(count, timestamp=None)` preserve
+optional capture time. A window keeps a sliding run of records a reader can join at any point,
+and `.cut()` ends its open group so the next edit opens one restating the window; the catalog has
+no window mode, so `WindowProducer` takes only the track.
 `moq.flate.SnapshotProducer` and `moq.flate.StreamProducer` offer the same operations for bytes.
 Omitting time leaves data untimed; choose the track's `timescale` to match.
 
@@ -233,16 +244,19 @@ Omitting time leaves data untimed; choose the track's `timescale` to match.
 - **`GroupConsumer`**. Async iterator of raw `Frame`s.
   - `.read_frame() -> Frame | None` returns a raw frame with optional capture time.
 
-Every handle whose cleanup is `cancel()` is an async context manager, so exiting `async with` releases it: the consumers (`media.CatalogConsumer`, `media.TrackConsumer`, `media.GroupConsumer`, `TrackConsumer`, `audio.Consumer`, `video.Consumer`, `GroupConsumer`, `json.SnapshotConsumer`, `json.StreamConsumer`, `AnnounceConsumer`, `AnnouncedBroadcast`) and the dynamic sources (`OriginDynamic`, `BroadcastDynamic`, `TrackDynamic`).
+Every handle whose cleanup is `cancel()` is an async context manager, so exiting `async with` releases it: the consumers (`media.CatalogConsumer`, `media.TrackConsumer`, `media.GroupConsumer`, `TrackConsumer`, `audio.Consumer`, `video.Consumer`, `GroupConsumer`, `json.SnapshotConsumer`, `json.StreamConsumer`, `json.WindowConsumer`, `AnnounceConsumer`, `AnnouncedBroadcast`) and the dynamic sources (`OriginRequests`, `BroadcastRequests`, `TrackRequests`).
 
 ### Origin (advanced)
 
 - **`OriginProducer(*, cache_capacity_bytes=None)`**. Manage broadcast announcements. Set `cache_capacity_bytes` to bound cached groups under this origin.
   - `.consume() → OriginConsumer`
-  - `.dynamic(prefix) → OriginDynamic`
-  - `.create_broadcast(path) → BroadcastProducer`
-- **`OriginDynamic`**. Async source of broadcasts requested by consumers.
-  - `await .requested_broadcast() → BroadcastRequest`. Call `.prepare(mint_epoch())`, fill its `.broadcast`, then `.publish()` to serve it under a new epoch, or `.reject(code)` to fail the requester.
+  - `.requests(prefix) → OriginRequests`
+  - `.create_broadcast(path) → Publication`
+- **`Publication`**. A broadcast published on an origin. Dropping it keeps the route; closing the broadcast ends it.
+  - `.broadcast → BroadcastProducer`. The broadcast to fill.
+  - `.announce(route=None)`, `.unannounce()`. Advertise or retract its exact path; both raise `Closed` once the broadcast closed.
+- **`OriginRequests`**. Async source of broadcasts requested by consumers.
+  - `await .requested_broadcast() → BroadcastRequest`. Call `.prepare(mint_epoch())`, fill its `.broadcast`, then `.publish() → Publication` to serve it under a new epoch, or `.reject(code)` to fail the requester.
   - Async iterator yielding `BroadcastRequest`
 - **`OriginConsumer`**. Discover broadcasts.
   - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator of `AnnounceEvent`: `AnnounceEventStart`, `AnnounceEventUpdate`, `AnnounceEventEnd`, or `AnnounceEventRestart`, each carrying an `Announce` whose `.route.epoch` names the publisher run; on a restart, request the path again); `filter` is a pattern relative to the literal prefix, while each `Announce.prefix` stays origin-relative and `.captures` reports wildcard matches
@@ -253,7 +267,7 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
 
 - **`media.Catalog`**. `.audio: dict[str, Audio]`, `.video: dict[str, Video]`, `.display`, `.rotation`, `.flip`.
 - **`Frame`**. `.payload: bytes`, `.timestamp: timedelta | None`. The unit of every write and every raw read; `None` means untimed when publishing or reading.
-- **`media.MediaFrame`**. `.payload: bytes`, `.timestamp: timedelta`, `.keyframe: bool`. Returned by media subscriptions. `keyframe` marks a group start or video keyframe; for audio it is true only at a group start.
+- **`media.MediaFrame`**. `.payload: bytes`, `.timestamp: timedelta`, `.keyframe: bool`. The frame variant of a media read. `keyframe` marks a group start or video keyframe; for audio it is true only at a group start.
 - **`Datagram`**. `.sequence: int`, `.timestamp: timedelta | None`, `.payload: bytes`. Delivered only on datagram-capable transports with lite-05 or newer moq-lite, or moq-transport.
 - **`media.Audio`**. `.codec`, `.sample_rate`, `.channel_count`, `.bitrate`, `.enabled`, `.description`.
 - **`media.Video`**. `.codec`, `.coded: Dimensions`, `.display_aspect`, `.bitrate`, `.enabled`, `.framerate`, `.description`. A false `.enabled` means no frames are coming, so don't select the rendition.

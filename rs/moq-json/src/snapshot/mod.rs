@@ -18,8 +18,9 @@
 //!
 //! A group of deltas grows until a joiner wants a fresh one. A track created with a
 //! [`refresh`](moq_net::track::Info::refresh) ratio asks for one when a subscriber joins while the
-//! open group's deltas outweigh that ratio times its snapshot, so the joiner never downloads much
-//! more than the value itself. [`Producer::refresh`] answers by restating the value as a snapshot in
+//! open group's deltas outweigh that ratio times its snapshot. The joiner still reads the cached
+//! group meanwhile: the ratio limits how often groups roll, not what a joiner downloads.
+//! [`Producer::refresh`] answers by restating the value as a snapshot in
 //! a new group; [`Encoder::snapshot`] does the same for a caller that owns the track. Without a ratio,
 //! or behind a relay that cannot forward the ask, a group runs to the encoder's frame and byte caps.
 //!
@@ -97,7 +98,7 @@ mod test {
 			Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
 		));
 		let at = moq_net::Timestamp::from_millis(100).unwrap();
-		producer.mutate(Some(at), |value| value["n"] = json!(2)).unwrap();
+		producer.mutate(|value| value["n"] = json!(2), Some(at)).unwrap();
 		let waiter = kio::Waiter::noop();
 		let mut groups = producer.consume();
 		let Poll::Ready(Ok(Some(mut group))) = groups.poll_recv_group(&waiter) else {
@@ -221,7 +222,7 @@ mod test {
 	fn next_preserves_intermediate_states() {
 		let (mut producer, mut track) = producer(cfg(true));
 		let mut subscription = track.subscription();
-		subscription.max_delay = std::time::Duration::MAX;
+		subscription.max_delay = None;
 		track.update(subscription).unwrap();
 		for n in [1, 2, 3] {
 			producer
@@ -806,14 +807,14 @@ mod test {
 		let mut consumer = track.subscribe(None);
 		let mut producer = Producer::<Doc>::new(track, cfg(false));
 
-		producer.mutate(None, |doc| doc.video = Some("v1".to_string())).unwrap();
+		producer.mutate(|doc| doc.video = Some("v1".to_string()), None).unwrap();
 
 		// The second owner starts from the latest value and adds its own field without clobbering.
-		producer.mutate(None, |doc| doc.scte35 = Some(42)).unwrap();
+		producer.mutate(|doc| doc.scte35 = Some(42), None).unwrap();
 
 		// A closure that changes nothing publishes nothing: deltas are off, so each publish would
 		// otherwise open a group of its own.
-		producer.mutate(None, |_| {}).unwrap();
+		producer.mutate(|_| {}, None).unwrap();
 		assert_eq!(
 			consumer
 				.largest()
@@ -847,9 +848,12 @@ mod test {
 		producer.update(&json!({ "keep": true })).unwrap();
 
 		assert!(matches!(
-			producer.mutate(None, |value| {
-				*value = json!({ "big": "x".repeat(moq_net::group::MAX_CACHE_BYTES as usize + 1) });
-			}),
+			producer.mutate(
+				|value| {
+					*value = json!({ "big": "x".repeat(moq_net::group::MAX_CACHE_BYTES as usize + 1) });
+				},
+				None
+			),
 			Err(crate::Error::Net(moq_net::Error::FrameTooLarge))
 		));
 	}
@@ -956,12 +960,12 @@ mod test {
 		let ms = |n| moq_net::Timestamp::from_millis(n).unwrap();
 		let (mut producer, _track) = producer_on(cfg(true), timed());
 		producer
-			.mutate(Some(ms(100)), |value| *value = json!({ "video": "v1" }))
+			.mutate(|value| *value = json!({ "video": "v1" }), Some(ms(100)))
 			.unwrap();
 
 		// Untimed on a timed track, so the frame is rejected before it reaches a group.
 		assert!(matches!(
-			producer.mutate(None, |value| value["scte35"] = json!(42)),
+			producer.mutate(|value| value["scte35"] = json!(42), None),
 			Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
 		));
 
@@ -1255,12 +1259,12 @@ mod test {
 	#[test]
 	fn rejected_field_names_its_path() {
 		#[derive(serde::Deserialize)]
-		#[allow(dead_code)]
+		#[allow(dead_code, reason = "the test only checks that deserializing fails")]
 		struct Inner {
 			count: u8,
 		}
 		#[derive(serde::Deserialize)]
-		#[allow(dead_code)]
+		#[allow(dead_code, reason = "the test only checks that deserializing fails")]
 		struct Outer {
 			inner: Inner,
 		}

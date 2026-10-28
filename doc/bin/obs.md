@@ -25,10 +25,10 @@ Enter a relay URL explicitly. On the shared anonymous relay, use a unique path
 such as `https://cdn.moq.dev/anon/your-stream`. A URL with `?jwt=` fills the
 token field. Editing the token while live presents the new one without
 reconnecting, on a session that carries in-band authorization: a
-`moq-transport` draft-17 or later version pinned under Advanced settings, with
+`moq-transport` draft-18 or later version pinned under Advanced settings, with
 a relay that negotiates the MoQ Auth extension. The default protocol does not
 yet, so there the dock reports the new token as refused and it applies on the
-next Go Live.
+next reconnect or Go Live.
 
 By default the dock tunes the encoder for low latency on this stream only:
 no B-frames or lookahead on the encoders that support turning them off. This
@@ -91,7 +91,7 @@ supports them), and the WebSocket fallback race. A rejected value stops the
 stream with the reason in the log rather than silently using a default.
 To decrypt a packet capture, turn on **TLS key log** here or in a MoQ Source's
 properties and start OBS with `SSLKEYLOGFILE` naming the file; the variable
-alone writes nothing, and the toggle without it fails the connection.
+alone writes nothing, and the toggle without it fails the connection. Existing Unix log files must be private (mode 0600); files accessible to group or others are refused.
 
 The plugin is C++ over the [generated C++ bindings](/lib/cpp/) and ships with
 every moq-cpp release. Stopping finishes the tracks and drains for up to one

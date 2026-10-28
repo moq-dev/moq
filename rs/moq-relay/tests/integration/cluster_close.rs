@@ -27,7 +27,7 @@ fn dial_template() -> (moq_tokio::connect::Config, moq_tokio::quic::Config) {
 	let mut connect = moq_tokio::connect::Config::default();
 	connect.tls.insecure = Some(true);
 	let mut quic = moq_tokio::quic::Config::default();
-	quic.idle_timeout = Some(BARE_IDLE);
+	quic.idle_timeout = Some((BARE_IDLE).into());
 	(connect, quic)
 }
 
@@ -41,6 +41,8 @@ async fn accept(server: &driver::Endpoint) -> driver::Connection {
 		.await
 		.expect("dial timeout")
 		.expect("incoming")
+		.accept()
+		.expect("accept")
 		.await
 		.expect("handshake")
 }
@@ -143,7 +145,10 @@ async fn a_relay_shutdown_closes_its_cluster_dials() {
 	let runtime = dialer_runtime();
 	let (trigger, running) = runtime
 		.spawn(async move {
-			let relay = moq_relay::Relay::load(config).await.expect("load relay");
+			let relay = moq_relay::Relay::load(config)
+				.await
+				.expect("load relay")
+				.with_signals(false);
 			let trigger = relay.shutdown_trigger().clone();
 			(trigger, tokio::spawn(relay.run()))
 		})

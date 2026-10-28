@@ -7,9 +7,9 @@ does no unnecessary whole-backlog sorting.
 
 ## Plan
 
-[Track replay](/js/net/src/track.ts) mirrors every cached group on join
-(line 1061); each mirror pushes and sorts the entire unread group array
-(lines 1096-1098). Even ordered replay sorts arrays of sizes 1 through G.
+[Track replay](/js/net/src/track.ts) mirrors every cached group on join;
+each mirror pushes and sorts the entire unread group array. Even ordered
+replay sorts arrays of sizes 1 through G.
 The separate timeline index already has an append fast path and ordered
 insertion. Existing track timing drains immediately and misses growing queues.
 
@@ -22,8 +22,8 @@ mirror lifetimes remain identical. Reuse existing ordering machinery if it
 makes the result simpler.
 
 This is distinct from subscription update traffic in
-[moq-dev/moq#6305](https://github.com/moq-dev/moq/pull/6305) and the storage
-contract in [unbounded JS groups](/quest/m2/unbounded-groups/js.md).
+[moq-dev/moq#6391](https://github.com/moq-dev/moq/pull/6391) and the storage
+contract in [unbounded JS groups](/quest/m1/unbounded-groups/js.md).
 
 Follow the [survey's benchmark contract](/quest/m2/performance-survey/README.md):
 measure the baseline before optimizing, retain paired evidence, verify equivalent

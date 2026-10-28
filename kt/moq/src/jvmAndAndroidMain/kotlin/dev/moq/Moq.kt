@@ -1,28 +1,28 @@
 package dev.moq
 
 /**
- * A connected MoQ session with publish/subscribe conveniences.
+ * A MoQ session with publish/subscribe conveniences.
  *
  * Build one with [Moq.connect]. The underlying [session] always exposes a
  * publisher and a subscriber (wired from the origins in its [ClientConfig], or
  * auto-created), so you can [createBroadcast] and collect [announced] updates
  * without touching the raw [Client] handle.
  *
- * Call [shutdown] to drain finished tracks before disconnecting. [AutoCloseable]
+ * Call [shutdown], then await [Session.closed] to drain finished tracks before disconnecting. [AutoCloseable]
  * disposal through `use { ... }` or [close] cancels immediately.
  */
 class Moq internal constructor(
-    /** The established session. Use it for [Session.closed]/[Session.shutdown]. */
+    /** The connecting or connected session. Use it for [Session.closed]/[Session.shutdown]. */
     val session: Session,
     private val client: Client,
 ) : AutoCloseable {
     /**
      * Create an unannounced broadcast at [path], invisible to everyone until announced.
      *
-     * Advertise it with `announce` after populating tracks. `end()` ends it for good; `close()`
-     * (or `use`) releases the handle, which ends it once no `dynamic()` handle remains.
+     * Fill `broadcast()`, then advertise it with `announce`. The broadcast's `end()` ends it for
+     * good, as does releasing its last handle: the publication, each `broadcast()`, and `requests()`.
      */
-    fun createBroadcast(path: String): BroadcastProducer = session.publish().createBroadcast(path)
+    fun createBroadcast(path: String): Publication = session.publish().createBroadcast(path)
 
     /**
      * Discover routes matching [config]; prefixes stay relative to the origin.
@@ -52,42 +52,42 @@ class Moq internal constructor(
     suspend fun requestBroadcast(path: String): BroadcastConsumer = session.consume().requestBroadcast(path)
 
     /**
-     * How many times this session has connected: 1 for the connect that built it, one more on
-     * each reconnect. A server-accepted session stays at 1.
-     *
-     * Pair it with [Session.status] to log each reconnect by number.
-     */
-    fun connects(): ULong = session.connects()
-
-    /**
      * The session's bandwidth allocator.
      *
-     * Every call returns a handle to the same registry. [Bandwidth.reserve] a
+     * Every call returns a handle to the same registry. [Allocator.reserve] a
      * share for an app-owned encoder, or pass the handle to an audio or video
      * producer.
      */
-    fun bandwidth(): Bandwidth = session.bandwidth()
+    fun allocator(): Allocator = session.allocator()
 
     /**
-     * The session's authorization: the grant its peer gave it, and more tokens to present.
+     * Follow the grant the peer gave this session.
      *
-     * Collect [Auth.grants] to follow the grant, and [Auth.add] a fresh token before the
-     * current one expires; each added token is presented again on every reconnect.
+     * Collect `grants().updates()` for the current grant and each change. Every call returns
+     * an independent consumer.
      */
-    fun auth(): Auth = session.auth()
+    fun grants(): GrantConsumer = session.grants()
 
     /**
-     * Drain finished tracks within one second, throwing on failure.
+     * The credentials every dial presents ([ClientConfig.tokens]), to replace while running.
+     *
+     * [Tokens.set] replaces them, such as before the current ones expire: the next dial presents
+     * them, and a live session with in-band AUTH presents them at once, withdrawing each
+     * replaced token once its replacements are answered, even when one is refused. After an
+     * authorization refusal the session redials only if they changed. An empty token throws
+     * `MoqException.Config`. Suspend on [Tokens.answered] for the relay's verdict.
+     */
+    fun tokens(): Tokens = checkNotNull(session.tokens()) { "a client session presents tokens" }
+
+    /**
+     * Request a draining close now; await `session.closed()` for its result, then [close]
+     * to release the client.
      * Explicit `moq-lite-07-wip` waits for the peer to receive finished tails; older
      * Lite versions, including the default lite-06, wait only for transport ACKs.
      * IETF also waits for transport ACKs.
      */
-    suspend fun shutdown() {
-        try {
-            session.shutdown()
-        } finally {
-            client.cancel()
-        }
+    fun shutdown() {
+        session.shutdown()
     }
 
     /** Cancel immediately and release the client. */
@@ -98,7 +98,7 @@ class Moq internal constructor(
 
     companion object {
         /**
-         * Connect to a relay at [url] and return the live [Moq] connection.
+         * Connect to a relay at [url] and return a connecting [Moq] connection.
          *
          * [config] carries the TLS trust, bind address, protocol versions, QUIC and
          * WebSocket tuning, reconnect pacing, and origins; every field has a default.
@@ -110,7 +110,7 @@ class Moq internal constructor(
          * two directions.
          */
         suspend fun connect(url: String, config: ClientConfig = ClientConfig()): Moq {
-            val client = Client(config)
+            val client = Client(config.copy(implementation = implementation(config.implementation)))
             try {
                 return Moq(client.connect(url), client)
             } catch (e: Throwable) {

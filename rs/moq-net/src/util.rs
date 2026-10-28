@@ -79,7 +79,7 @@ pub(crate) struct Tasks {
 }
 
 /// A claim on a [`TaskSet`]'s lifetime with no submission queue: what a
-/// broadcast published on an origin and an `origin::Dynamic` hold, so the
+/// broadcast published on an origin and an `origin::Requests` hold, so the
 /// driver outlives the producer handles a session was given and dropped.
 pub(crate) struct Keepalive {
 	_alive: kio::Producer<()>,
@@ -99,7 +99,7 @@ impl Tasks {
 	///
 	/// A task submitted after the set is gone is dropped: the driver has torn down,
 	/// so the task would have been cancelled anyway.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn push(&self, task: impl MaybeBoxedExt<'static, Output = ()>) {
 		let mut state = self.state.lock();
 		if !state.closed {
@@ -190,7 +190,7 @@ impl TaskSet {
 	}
 
 	/// Queue a future for polling by this set.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn push(&mut self, task: impl MaybeBoxedExt<'static, Output = ()>) {
 		self.active.push(future_task(task.maybe_boxed()));
 	}

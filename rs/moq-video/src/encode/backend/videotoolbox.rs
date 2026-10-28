@@ -436,7 +436,6 @@ fn annexb_from_sample(sample: &CMSampleBuffer, codec: Codec) -> Result<Option<(B
 
 /// Dispatch to the codec-specific VideoToolbox parameter-set getter. Both have
 /// identical signatures; only the codec differs.
-#[allow(clippy::too_many_arguments)]
 unsafe fn get_param_set(
 	format: &CMFormatDescription,
 	index: usize,
@@ -553,7 +552,7 @@ mod tests {
 				let config = Config {
 					codec,
 					preset,
-					..Config::new(320, 240, crate::Rate::new(30, 1).unwrap())
+					..Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap())
 				};
 				// Determine which controls this host accepts independently of the production fallback.
 				let candidates: &[Preset] = match preset {

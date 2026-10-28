@@ -62,16 +62,16 @@ describe("Rust-generated fixtures", () => {
 		const key = Key.parse(RUST_HS256_KEY);
 		const claims = await Key.verify(key, RUST_HS256_TOKEN);
 		expect(claims.root).toBe("demo");
-		expect(claims.publish?.toJSON()).toEqual(["alice/**"]);
-		expect(claims.subscribe?.toJSON()).toEqual(["bob/**"]);
+		expect(claims.publish).toEqual(["alice/**"]);
+		expect(claims.subscribe).toEqual(["bob/**"]);
 	});
 
 	test("verify Rust HS256 token scoped to the root path", async () => {
 		const key = Key.parse(RUST_HS256_KEY);
 		const claims = await Key.verify(key, RUST_HS256_TOKEN_EMPTY_ROOT);
 		expect(claims.root).toBe("");
-		expect(claims.publish?.toJSON()).toEqual(["alice/**"]);
-		expect(claims.subscribe?.toJSON()).toEqual(["bob/**"]);
+		expect(claims.publish).toEqual(["alice/**"]);
+		expect(claims.subscribe).toEqual(["bob/**"]);
 
 		// An empty root grants its patterns wherever the connection lands.
 		const permissions = authorize(claims, "alice");
@@ -84,8 +84,8 @@ describe("Rust-generated fixtures", () => {
 		const token = await Key.sign(key, { root: "js-test", publish: ["pub1/**"], subscribe: ["sub1/**"] });
 		const claims = await Key.verify(key, token);
 		expect(claims.root).toBe("js-test");
-		expect(claims.publish?.toJSON()).toEqual(["pub1/**"]);
-		expect(claims.subscribe?.toJSON()).toEqual(["sub1/**"]);
+		expect(claims.publish).toEqual(["pub1/**"]);
+		expect(claims.subscribe).toEqual(["sub1/**"]);
 	});
 
 	test("parse Rust EdDSA keys", () => {
@@ -104,15 +104,15 @@ describe("Rust-generated fixtures", () => {
 		const token = await Key.sign(privateKey, { root: "js-eddsa", publish: ["test/**"] });
 		const claims = await Key.verify(publicKey, token);
 		expect(claims.root).toBe("js-eddsa");
-		expect(claims.publish?.toJSON()).toEqual(["test/**"]);
+		expect(claims.publish).toEqual(["test/**"]);
 	});
 
 	test("verify Rust EdDSA token with public key", async () => {
 		const key = Key.parse(RUST_EDDSA_PUBLIC_KEY);
 		const claims = await Key.verify(key, RUST_EDDSA_TOKEN);
 		expect(claims.root).toBe("room");
-		expect(claims.publish?.toJSON()).toEqual(["stream1/**", "stream2/**"]);
-		expect(claims.subscribe?.toJSON()).toEqual(["feed1/**"]);
+		expect(claims.publish).toEqual(["stream1/**", "stream2/**"]);
+		expect(claims.subscribe).toEqual(["feed1/**"]);
 	});
 
 	// moq auth generate --root project --publish 'live/**' --subscribe 'watch/**' --out /tmp/scoped.jwk
@@ -137,8 +137,8 @@ describe("Rust-generated fixtures", () => {
 	test("verify a Rust token signed within its key scope", async () => {
 		const key = Key.parse(RUST_SCOPED_KEY);
 		const claims = await Key.verify(key, RUST_SCOPED_TOKEN);
-		expect(claims.publish?.toJSON()).toEqual(["live/room/**"]);
-		expect(claims.subscribe?.toJSON()).toEqual(["watch/**"]);
+		expect(claims.publish).toEqual(["live/room/**"]);
+		expect(claims.subscribe).toEqual(["watch/**"]);
 	});
 
 	test("JS enforces the same scope Rust does", async () => {
@@ -152,8 +152,8 @@ describe("Rust-generated fixtures", () => {
 		// is not compared: JS orders the header differently and stamps `iat`.
 		const token = await Key.sign(key, { root: "project", publish: ["live/room/**"], subscribe: ["watch/**"] });
 		const claims = await Key.verify(key, token);
-		expect(claims.publish?.toJSON()).toEqual(["live/room/**"]);
-		expect(claims.subscribe?.toJSON()).toEqual(["watch/**"]);
+		expect(claims.publish).toEqual(["live/room/**"]);
+		expect(claims.subscribe).toEqual(["watch/**"]);
 	});
 });
 
@@ -194,8 +194,8 @@ describe("Rust-generated JWK Set", () => {
 		const set = KeySet.parse(RUST_JWKS);
 		const claims = await KeySet.verify(set, RUST_JWKS_TOKEN);
 		expect(claims.root).toBe("demo");
-		expect(claims.publish?.toJSON()).toEqual(["alice/**"]);
-		expect(claims.subscribe?.toJSON()).toEqual(["bob/**"]);
+		expect(claims.publish).toEqual(["alice/**"]);
+		expect(claims.subscribe).toEqual(["bob/**"]);
 	});
 
 	test("a token whose kid is absent from the Rust JWKS is rejected", async () => {
@@ -257,9 +257,9 @@ describe("Rust-serialized contract", () => {
 	// request::tests::end_serializes_to_the_cross_language_vector and
 	// grant::tests::serializes_to_the_cross_language_vector in the Rust crate.
 	const RUST_REQUEST =
-		'{"id":"00ff","event":"end","reason":"expired","duration":1.5,"bytes":{"sent":10,"received":20},"node":"relay-1","transport":"websocket","remote":"203.0.113.9:4433","path":"/demo/room","query":"jwt=abc"}';
+		'{"id":"00ff","event":"end","reason":"expired","duration":1.5,"bytes":{"sent":10,"received":20},"node":"relay-1","transport":"websocket","remote":"203.0.113.9:4433","path":"/demo/room","query":"jwt=abc","implementation":"moq-net-js/0.4.2"}';
 	const RUST_INVALID_END =
-		'{"id":"00ff","event":"end","reason":"invalid","duration":1.5,"bytes":{"sent":10,"received":20},"node":"relay-1","transport":"websocket","remote":"203.0.113.9:4433","path":"/demo/room","query":"jwt=abc"}';
+		'{"id":"00ff","event":"end","reason":"invalid","duration":1.5,"bytes":{"sent":10,"received":20},"node":"relay-1","transport":"websocket","remote":"203.0.113.9:4433","path":"/demo/room","query":"jwt=abc","implementation":"moq-net-js/0.4.2"}';
 	const RUST_GRANT =
 		'{"publish":["alice/**"],"subscribe":["**"],"root":"pid/room","expires":4102444800,"revalidate":60,"tier":"websocket","label":"project/key/123","peer":true,"upstream":true}';
 
@@ -270,6 +270,7 @@ describe("Rust-serialized contract", () => {
 		expect(request.reason).toBe("expired");
 		expect(request.duration).toBe(1.5);
 		expect(request.bytes).toEqual({ sent: 10, received: 20 });
+		expect(request.implementation).toBe("moq-net-js/0.4.2");
 	});
 
 	test("parse an invalid end reason a Rust relay sent", () => {

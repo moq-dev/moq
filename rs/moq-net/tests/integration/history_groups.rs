@@ -25,8 +25,7 @@ const VERSIONS: &[&str] = &[
 	"moq-lite-03",
 	"moq-lite-05",
 	"moq-lite-07-wip",
-	"moq-transport-14",
-	"moq-transport-17",
+	"moq-transport-18",
 	"moq-transport-22",
 ];
 
@@ -82,7 +81,7 @@ async fn round(version: &str, relay: bool, newest_first: bool) -> Vec<(u64, usiz
 		.expect("broadcast resolves");
 
 	let reader = moq_clock::sim::spawn(async move {
-		let subscription = Subscription::default().with_max_delay(FOREVER).with_groups(0..);
+		let subscription = Subscription::default().with_max_delay(FOREVER).with_range(0..);
 		let mut sub = remote
 			.track("history")
 			.unwrap()
@@ -223,7 +222,7 @@ async fn a_late_subscriber_receives_the_relays_cached_history() {
 	let consumer = first.consume();
 	consumer.routed("bcast").await.unwrap();
 	let remote = consumer.request_broadcast("bcast", None).await.unwrap();
-	let subscription = Subscription::default().with_max_delay(FOREVER).with_groups(0..);
+	let subscription = Subscription::default().with_max_delay(FOREVER).with_range(0..);
 	let first_subscription = subscription.clone();
 	let first_reader = moq_clock::sim::spawn(async move {
 		let mut sub = remote

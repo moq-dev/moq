@@ -32,8 +32,9 @@ with unavailable transport measurements absent. Missing rendition counters
 mean zero, and JavaScript preserves omission. A known-zero gauge or transport
 measurement stays explicit, so it remains distinct from unavailable.
 
-`moq import --stats` and `moq export --echo` report them from the
-[CLI](/bin/cli#stats-and-feedback). An import counts the frames and payload
+`moq import --report` and `moq export --echo` report them from the
+[CLI](/bin/cli#reports-and-feedback), and `moq import --echo-path` solicits
+feedback. An import counts the frames and payload
 bytes it writes to each rendition, and video keyframes; an export counts what
 it reads and records its newest arrival. See the
 [hang draft](/draft/moq-hang#media-stats) for track framing, field units, and
@@ -46,14 +47,25 @@ A TS import or export adds sections of its own, which
 cumulative and omitted at zero, and a gauge is omitted until it is measured.
 
 `mpegts` holds `streams`, one row per elementary stream keyed by its PID in
-decimal, and the stream-wide counters. A row has `track` (the track suffix),
+decimal (plus a `.si` row for an SI PID that dropped sections), and the
+stream-wide counters. A row has `track` (the track suffix),
 `class` (`audio`, `video`, or `data`; an unknown class reads as `data`),
 `units` (access units delivered), and `quiet`, a gauge: milliseconds of
 program clock since its last access unit. Its losses are `resyncs`, bytes
 `discarded` scanning for audio sync, `unconfirmed` frames, `damaged` units,
 `unplaced` units the program clock could not place, the times the stream was
 `refused`, and its shares of `continuityCountError`, `transportError`, and
-`ptsError`.
+`ptsError`. A TS-scrambled packet on a carried stream counts as `refused`.
+
+Every PID but the null PID either takes a route or is counted. A listed stream
+the import cannot carry, such as `0x86` without a SCTE-35 registration, gets a
+row with an empty `track` and one `refused`. Once every program's PMT is in, or
+has been missing for 0.5 s of program clock, a PID that no PAT, PMT, or
+captured SI table claims, such as the CAT, conditional access, or ATSC PSIP,
+gets a `data` row with an empty `track` and `refused` counting its packets,
+with one warning when it starts. An import of one `--program` of a
+multi-program stream cannot tell another program's PIDs from these, so it
+counts none of them.
 
 The stream-wide counters count ETSI TR 101 290 checks at that standard's
 fixed limits:
@@ -96,98 +108,155 @@ source's. `export ts --passthrough` reports it without `mpegts`.
 | `offset` | Gauge, milliseconds: how far the output clock sits from the source's plus the delay. Positive holds frames longer than the delay. The clock pulls it shut over ten minutes. |
 | `drift` | Gauge, parts per million: the source clock's rate against ours, positive running fast. |
 | `outOfTolerance` | Measurements that found the source clock past the 30 ppm ISO/IEC 13818-1 allows, which the output cannot follow. |
-| `overruns` | `export ts --sync` only: groups that began behind the end of the one before on their PID, where legs can differ until the lane catches up. |
-| `late` | `export ts --sync` only: packets dropped for reaching their slot after it went out, leaving stuffing. |
+
+### Health
+
+`hang::health` and `Hang.Health` in `@moq/hang` grade a client from two
+consecutive reports: `publisher` takes a pair of `stats` snapshots, `viewer` a
+pair of `.echo` snapshots. Each report names the broadcast it was read from
+(its path and epoch), which observed every number in it; the caller states the
+interval between the two and how long ago the newer one arrived. Both
+languages compute the same result from the shared fixtures in
+`rs/hang/fixtures/health.json`.
+
+The result holds the deltas over the interval (frames, bytes, and bitrate per
+rendition; lost bytes and packets for the connection) and a verdict for the
+connection and each rendition: `unknown`, `healthy`, `degraded`, or
+`unhealthy`. Each verdict carries its evidence, every input with its value and
+grade, and is the worst graded input. An input the report cannot show is
+listed as `unknown`, and a verdict with nothing graded is `unknown`: a browser
+publisher that knows only its PROBE RTT grades on RTT alone. A report older
+than the stale limit is `unknown` throughout, as is a transport sample whose
+`age` plus the report's exceeds it, and a client with no report has no sample at all. A changed
+path or epoch (`replaced`) or a decreasing counter (`decrease`) is a reset:
+the deltas start over, so only gauges are graded until the next pair.
+Container sections such as `mpegts` are not read.
+
+| Input | Role | Value | Degraded | Unhealthy |
+| --- | --- | --- | --- | --- |
+| `rtt` | both | Round-trip time, ms. | 300 | 800 |
+| `loss` | publisher | Transport bytes lost per media byte sent. | 0.02 | 0.1 |
+| `headroom` | publisher | Estimated `rate` over the media bitrate sent. | below 1.5 | below 1 |
+| `skipped` | publisher | Frames skipped, as a share of frames sent or skipped. | 0.01 | 0.05 |
+| `late` | viewer | Late frames per frame received. | 0.01 | 0.05 |
+| `errors` | viewer | Decode errors per frame received. | 0.01 | 0.05 |
+| `stalled` | viewer | The share of the interval spent stalled. | 0.01 | 0.05 |
+
+These are defaults the caller can override, as is the five-second stale limit.
+A viewer's loss counters describe its own uplink, so they are reported but not
+graded. Loss and headroom divide the connection's transport counters by the
+report's own media, so they hold when the broadcast is the only one its
+connection publishes. The transport limits were measured on one paced TS feed
+through a shaped link over five-second intervals; no CLI reporter emits
+`skipped`, `late`, `errors`, or `stalled`, so their limits are not measured.
+
+A publisher whose link falls below its media rate sends no report at all,
+since its report track sits below every media track. Its health goes stale
+and reads `unknown`; only its viewers' playout counters can show the damage.
 
 ## Broadcasts
 
-Each node publishes under a prefix, `.stats` by default, which
+Each node publishes one broadcast under a prefix, `.stats` by default, which
 [moq-lite](/concept/moq-lite) hides from announce listings that don't ask for
 it. Traffic under the prefix is never counted, so serving stats doesn't
 generate more stats.
 
 ```text
-<prefix>/node/<node>               depth 0: one broadcast per node
-<prefix>/<group>/node/<node>       depth N: one broadcast per group per node
+<prefix>/node/<node>
 ```
 
 - `<node>` tells relays sharing a cluster apart. It may span several segments
   (`sjc/1`), and is omitted along with its slash when unset: `<prefix>/node`.
-- `<group>` is the first `depth` segments of each broadcast path (for traffic)
-  or stats label (for sessions), so a consumer can scope an announce to one
-  tenant. A path shorter than `depth` groups under all of its segments.
 - The literal `node` segment leaves room for sibling categories under the same
-  prefix, so a consumer skips any path without `node` where it expects one. A
-  group segment literally named `node` is ambiguous; don't use one.
+  prefix, so a consumer skips any path without `node` where it expects one.
 
-Each announcement carries a fresh [publisher epoch](/concept/moq-lite#publisher-epochs)
-on its route, so a restarted node or a group returning from idle is a new
-broadcast at the same path: it replaces the old one, and no relay serves it
-groups cached under the old epoch. A reader treats each epoch as its own set of
-counters. The epoch rides moq-lite 07 announcements, and moq-transport draft 17
-and later with the [epoch extension](/draft/moq-epoch); over anything else a
-reader sees the same change as an end and a start at the path.
+The broadcast stays announced for the producer's life. Each announcement
+carries a fresh [publisher epoch](/concept/moq-lite#publisher-epochs) on its
+route, so a restarted node is a new broadcast at the same path: it replaces the
+old one, and no relay serves it groups cached under the old epoch. A reader
+treats each epoch as its own set of counters. The epoch rides moq-lite 07
+announcements, and moq-transport with the
+[epoch extension](/draft/moq-epoch); over anything else a reader sees the same
+change as an end and a start at the path.
 An aggregating reader pins each node's subscription to its epoch, and when one
 publisher is reached through both kinds of link (with and without an epoch), it
 carries only that path's outgoing counters across the change.
 
-At depth 0 the broadcast stays announced for the producer's life. At depth
-1 or more, a group's broadcast is announced while that group has entries, and
-for a linger (five minutes by default) after its last one leaves. A group that
-returns within the linger keeps its broadcast and epoch, so viewer churn
-doesn't unannounce and re-announce it across the mesh, and its totals
-continue. Once the linger elapses with the group still empty, the broadcast is
-unannounced and its counters dropped; a group that returns later announces a
-new epoch counted from zero. Within one epoch, group numbers keep increasing
-across recreated tracks and may have gaps.
+Every group shares the node's broadcast, so a token scoped to the stats prefix
+reads every group's tracks; scope by group with an aggregating reader instead.
 
 ## Tracks
 
 Traffic is split by **tier**, an arbitrary label (a billing class, a region)
 the relay takes from the auth grant, or from `--cluster-tier` for links it
-dials and LAN peers it admits. The default tier's label is empty. Each track
-comes in two encodings:
+dials and LAN peers it admits. The default tier's label is empty. Every track
+but a group's comes in two encodings:
 
 | Track | Frame keyed by | Entry |
 | --- | --- | --- |
-| `totals.json` | tier | [Totals](#totals) for the whole group |
-| `[<tier>/]publisher.json` | broadcast path | [Traffic](#traffic) this node sent (egress) |
-| `[<tier>/]subscriber.json` | broadcast path | [Traffic](#traffic) this node received (ingress) |
-| `[<tier>/]sessions.json` | stats label | [Sessions](#sessions) connected now |
-| `[<label>/]presence.json` | tier | [Sessions](#sessions) under one stats label |
-| `[<path>/]traffic.json` | tier | [Prefix](#prefix) traffic under one broadcast prefix |
+| `totals.json` | tier | [Totals](#totals) for the whole node |
+| `[<group>/]group.json` | | [Group](#group): one group's totals, paths, and labels, every tier |
+| `[<label>/]presence.json` | tier | [Presence](#presence): sessions under one stats label |
+| `[<path>/]prefix.json` | tier | [Prefix](#prefix) traffic under one broadcast prefix |
 
-The default tier's per-tier tracks are unprefixed. A named tier prefixes each
-name with its label and a slash: tier `region/sjc` publishes
-`region/sjc/publisher.json`. Appending `.z` selects the
-[compressed](#compressed) encoding of the same track: `publisher.json.z`.
+Appending `.z` selects the [compressed](#compressed) encoding of the same
+track: `totals.json.z`. `totals.json` always exists.
 
-`totals.json` and the default tier's six per-tier tracks always exist. A named
-tier's are created on its first recorded traffic, but a subscriber may ask for
-them earlier: any name of the shape
-`[<tier>/]{publisher,subscriber,sessions}.json[.z]` is accepted and held open
-with `{}` until the tier records.
+### Group tracks
+
+The relay buckets traffic into groups by the first `depth` segments of each
+broadcast path, and sessions by the first `depth` segments of each stats label;
+a path shorter than `depth` groups under all of its segments. Each group is a
+`<group>/group.json` track (`group.json` for the empty group, the only one at
+depth 0) carrying all of the group's tiers, both directions, and its sessions,
+so a reader holds one subscription per group.
+
+A reader discovers the live groups from the broadcast's track listing (TRACKS
+in moq-lite 07, `SUBSCRIBE_TRACKS` in moq-transport draft 18 and later). At
+depth 0 the one group's track is listed for the producer's life. At depth 1 or
+more, a group's track is listed from its first entry until it has lingered
+empty (five minutes by default), then unlisted and ended. A group that returns
+within the linger keeps its track and epoch, and its totals continue. The
+node's announcement never changes, so group churn costs no announce traffic
+across a cluster. Over a hop that cannot carry a listing (moq-lite 06 and
+older, or moq-transport before draft 18) the listing is empty or refused; a
+reader that knows a group's name can still subscribe to it while it is listed,
+and is refused otherwise.
+
+A group that returns after its linger is a new instance of its track: its
+frames carry a new `epoch` and count from zero, and its group numbers, which
+count publish intervals, continue past the old instance's. Holding a group's
+track doesn't count as an entry, so a reader follows the listing to the next
+instance. A frame too large to cache ends only that group's track.
+
+### Requested tracks
 
 A presence track exists only while subscribed. Ask for `<label>/presence.json`
-for any stats label in the group (`presence.json` for the empty label). The relay
-answers with the label's current sessions and counts from there, holding a label
-with no sessions open at `{}`, and stops producing it once the last subscriber
-leaves. A prefix track works the same way for any broadcast prefix in the
-group: ask for `<path>/traffic.json` (`traffic.json` for the empty prefix). A
-label or prefix outside the group, or any other name, is refused.
+for any stats label (`presence.json` for the empty label). The relay answers
+with the label's current sessions and counts from there, holding a label with
+no sessions open at `{}`, and stops producing it once the last subscriber
+leaves. A prefix track works the same way for any broadcast prefix: ask for
+`<path>/prefix.json` (`prefix.json` for the empty prefix). Any other name is
+refused.
 
 ## Frames
 
-Every frame is a JSON object mapping a key to an entry. A track with no
-entries holds `{}`.
+Every frame is a JSON object mapping a key to an entry, except a
+[group](#group) track's. A track with no entries holds `{}`.
 
 The producer drains its counters every interval (one second by default) and
 writes only when a track's frame changed, so silence means nothing moved, not
-that the producer is gone. The track ends when the producer does, or at
-depth 1 or more when its group's broadcast is unannounced; the group may
-return later as a new broadcast. A frame too large to cache (32 MB) ends its
-track with a `FrameTooLarge` error. The `.z` flavor meets the same limit by its
+that the producer is gone. The track ends when the producer does, or when its
+group track is unlisted; the group may return later as a new track instance. A
+frame too large to cache (32 MB) ends its track with a `FRAME_TOO_LARGE` error.
+The `.z` flavor meets the same limit by its
 uncompressed size, since a reader inflates the whole group.
+
+A group's number is its publish's scheduled time divided by the interval, so
+the interval is its timescale. Publishes are scheduled at least an interval
+apart, even after a late one, so each opens its groups in an interval of its
+own, and a track recreated later numbers its groups past every group its
+earlier instance wrote.
 
 ### Totals
 
@@ -198,29 +267,50 @@ uncompressed size, since a reader inflates the whole group.
 }
 ```
 
-Each tier that recorded anything in the group's epoch, with its egress
-(`publisher`) and ingress (`subscriber`) [Traffic](#traffic) and its
-[Sessions](#sessions), summed over every broadcast and stats label in the group.
-Unlike the per-path tracks, an entry that ends stays counted, so the next
-frame always carries everything since the epoch began: a reader that misses
-frames loses nothing while the group stays announced. Billing reads this
-track.
+Each tier that recorded anything in the epoch, with its egress (`publisher`)
+and ingress (`subscriber`) [Traffic](#traffic) and its [Presence](#presence),
+summed over every broadcast and stats label. Unlike a group's paths and labels,
+an entry that ends stays counted, so the next frame always carries everything
+since the epoch began: a reader that misses frames loses nothing while the
+node stays announced. Billing reads this track.
 
-A lingering group's frames repeat its final totals. A reader that misses every
-frame from the group's last change until it unannounces loses that epoch's
-tail, so a meter that only reads totals under-counts by it.
+### Group
 
-### Per-tier tracks
+```json
+{
+  "epoch": "0192f4e6-7b8a-7c3d-9e1f-2a3b4c5d6e7f",
+  "tiers": {
+    "": {
+      "publisher": { ... }, "subscriber": { ... }, "sessions": { ... },
+      "paths": { "acme/live": { "publisher": { ... } } },
+      "labels": { "acme": { ... } }
+    }
+  }
+}
+```
 
-A traffic entry appears from its first nonzero counter until the relay drops
-its counters, even while idle: the last viewer can leave while the publisher
-still holds the path, and a returning viewer resumes the same counters. So a
-key missing from a frame had no counters, and one that returns starts from
-zero; the totals keep what it counted. A sessions entry appears while a
-session or HTTP request holds its context and on the tick its last one ends. While a group
-lingers empty, these tracks hold `{}`.
+`epoch` is a UUIDv7 minted for each instance of the group's track, and a
+reader keeps each epoch's counters apart, as it does for a broadcast's epochs.
+`tiers` maps each tier the group recorded on since then. Its top-level
+`publisher`, `subscriber`, and `sessions` are the group's [totals](#totals), so
+a totals reader parses them unchanged, and like the node's totals they keep
+every entry that ended. A lingering group's frames repeat its final totals: a
+reader that misses every frame from the group's last change until it is
+unlisted loses that instance's tail, so a meter reads the node's totals.
 
-### Presence
+`paths` holds each broadcast path's egress (`publisher`) and ingress
+(`subscriber`) [Traffic](#traffic). A path appears from its first nonzero
+counter until the relay drops its counters, even while idle: the last viewer
+can leave while the publisher still holds the path, and a returning viewer
+resumes the same counters. So a path missing from a frame had no counters, and
+one that returns starts from zero; the totals keep what it counted. A side that
+has never moved is left out and reads as zero.
+
+`labels` holds each stats label's [Presence](#presence), while a session or
+HTTP request holds its context and on the tick its last one ends. While a group
+lingers empty, its `paths` and `labels` are empty.
+
+### Per-label tracks
 
 A presence track's entries are cumulative from when it was first held: a
 session that ends stays counted, and so does every one after it, while
@@ -228,10 +318,10 @@ anyone holds the track. A track held again starts over.
 
 Wire bytes start at zero on every hold, including the first. Other presence
 fields seed from the root's current live-session counters; they do not recover
-closed roots from before the hold. Node totals keep the full group epoch's
-history. Each recreated track starts a fresh snapshot group using the
-broadcast's shared, increasing group sequence, so relay caches can distinguish
-it from an earlier hold. Plain and compressed tracks share that allocator.
+closed roots from before the hold. Node totals keep the full epoch's
+history. Each recreated track starts a fresh snapshot group numbered by its
+publish interval, past any group of an earlier hold, so relay caches can
+distinguish the two.
 
 ### Prefix
 
@@ -288,7 +378,7 @@ stale.
 | --- | --- |
 | `announces_started` / `announces_ended` | Announces and unannounces of the broadcast. |
 | `announced_bytes` | The broadcast name's length, summed over each announce and unannounce. Not part of `bytes`. |
-| `broadcasts_started` / `broadcasts_ended` | On `publisher.json`, a session's first subscription to the broadcast and its last one closing. Started minus ended is the viewer count. `subscriber.json` leaves both at zero: ingress does not count viewers. |
+| `broadcasts_started` / `broadcasts_ended` | On egress (`publisher`), a session's first subscription to the broadcast and its last one closing. Started minus ended is the viewer count. Ingress (`subscriber`) leaves both at zero: it does not count viewers. |
 | `subscriptions_started` / `subscriptions_ended` | Track subscriptions opened and closed. |
 | `fetches` | One-shot group fetches requested, including ones that found nothing. Their payload counts in `bytes`, `frames`, and `groups`. |
 | `bytes` / `frames` / `groups` | Payload delivered. |
@@ -300,7 +390,7 @@ The last six fields are legacy spellings of the `*_started` and `*_ended`
 counters, still written so an older consumer reads a newer relay. A reader
 should prefer the canonical name and fall back to the legacy one.
 
-### Sessions
+### Presence
 
 ```json
 {
@@ -317,13 +407,13 @@ should prefer the canonical name and fall back to the legacy one.
 ```
 
 `sessions_started` and `sessions_ended` count connects and disconnects, whether
-or not any data flows: under a stats label on the tier for `sessions.json`,
+or not any data flows: under a stats label on the tier for a group's `labels`,
 under the label on each tier for `presence.json`, and under every label in the
-group on the tier for `totals.json`. `sessions` and `sessions_closed` are their
+group or node on the tier for its totals. `sessions` and `sessions_closed` are their
 legacy spellings. A session moved to a new tier ends on the old one and starts
 on the new. `sent_bytes` and `received_bytes` count the payload this node sent
-to and received from those sessions and HTTP requests, the same bytes the
-per-path tracks count. A changed label moves later presence and bytes; bytes
+to and received from those sessions and HTTP requests, the same bytes a
+group's `paths` count. A changed label moves later presence and bytes; bytes
 before the change remain under the old label. Older readers ignore these fields
 and newer readers default missing fields to zero.
 
@@ -337,9 +427,9 @@ UDP bytes, including retransmissions and transport overhead. The transport
 updates a connection's counters as it sends and receives, and a stats tick reads
 them without polling the session or activating its periodic sampler. A retag
 flushes the old tier and label first; closing a session records its final delta.
-An embedder creates a `transport::Wire`, registers it with `stats::Handle::wire`
-or `stats::Session::wire`, records its connection's cumulative totals on it, and
-holds the returned guard. Dropping the guard records the final reading.
+An embedder creates a `transport::Wire`, registers it with `stats::Session::wire`,
+records its connection's cumulative totals on it, and holds the returned guard.
+Dropping the guard records the final reading.
 
 Unsupported transports, including browsers and the current WebSocket/qmux
 adapter, contribute zero. WebSocket wire accounting requires the separate
@@ -359,7 +449,10 @@ ignore `expired`; newer readers default a missing counter to zero.
 subset of `sessions_ended`, so the live count is unchanged. A clean close by
 either side, a drain, or a shutdown is not a failure. A grant that expires
 mid-session counts as `expired`; one revoked or narrowed out from under it
-counts as `application`. A reader treats a missing object as zeros.
+counts as `application`. Each session records how it ended, so a grant revoked
+after its session already closed does not count, and a dialed link that
+reconnects fails only if its last session did. A reader treats a missing object
+as zeros.
 
 `requests` counts admitted request/response exchanges under the token's label and
 tier, including HTTP `/fetch` and `/announced`. They never start or end a session.
@@ -370,11 +463,12 @@ reads it as zero when absent. A request moved to another tier stays counted wher
 it was admitted; later traffic follows the new tier.
 
 `announces_peak` and `subscriptions_peak` are the most broadcasts announced to
-the relay, and subscriptions held on it, by any one session. Compare them with
-the relay's [client or peer session limits](/bin/relay/config#session-and-peer):
-a session that goes past one is closed with `TOO_MANY_REQUESTS`. On
-`sessions.json` a peak never goes down while the label has a session; on the
-totals and presence tracks it never goes down while the track lives. Summing
+the relay, and subscriptions held on it, by any one session. Compare announces
+with the relay's [client or peer session limits](/bin/relay/config#session-and-peer),
+past which a session is closed with `TOO_MANY_REQUESTS`, and subscriptions with
+its QUIC `max_streams`, which bounds them. In a group's `labels` a peak never
+goes down while the label has a session; in the totals and presence tracks it
+never goes down while the track lives. Summing
 nodes or labels takes the largest.
 
 ### Counters
@@ -385,8 +479,8 @@ count is started minus ended. A frame never shows ended above started.
 
 A new epoch starts every counter from zero, so a reader summing a node over
 time adds each epoch's counters rather than diffing across them. Within one
-epoch the totals never go down. A per-tier counter going **down** means the
-entry was dropped and re-created, and a presence or prefix counter going down
+epoch the totals never go down. A group's path or label counter going **down**
+means the entry was dropped and re-created, and a presence or prefix counter going down
 means the track was held again. Treat it as the start of a fresh segment
 rather than a negative rate. On a route without an epoch (an older relay, or a session older
 than moq-lite 07), a counter going down also means the node restarted.
@@ -397,7 +491,12 @@ defaults a missing field to zero, so it can read an older relay.
 ## Encodings
 
 Both encodings carry identical frames; pick by bandwidth. Only the track name
-says which one a track uses: the payload has no marker.
+says which one a track uses: the payload has no marker. A group track has one
+name and no `.z` sibling: it sets the track's
+[compressed](/concept/moq-lite#subscriptions) flag, so a session that can
+signal compression carries it DEFLATEd and every other reads an inflated copy.
+Its frames read like the compressed encoding's after inflating: a snapshot
+opening each group, then merge patches.
 
 ### Plain
 

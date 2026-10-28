@@ -1,6 +1,6 @@
 /**
  * OBJECT_DATAGRAM: one Object carried in a QUIC datagram (draft-14 section 10.3.1 through
- * draft-20 section 11.3.1).
+ * draft-22 section 11.2.1).
  *
  * The model counterpart is {@link Datagram}, a single-frame group, so only an Object at ID 0
  * maps onto it. The Type is a set of flags on every draft; draft-14 lacks the
@@ -14,7 +14,7 @@ import { error, ProtocolViolation, reason } from "../error.ts";
 import { type Cursor, encodeVarint, Reader } from "../stream.ts";
 import type { Timescale } from "../time.ts";
 import { encodeObjectExtensions } from "./object.ts";
-import { type IetfVersion, Version } from "./version.ts";
+import type { IetfVersion } from "./version.ts";
 
 // The bits of an OBJECT_DATAGRAM Type.
 const PROPERTIES = 0x01;
@@ -26,15 +26,9 @@ const STATUS = 0x20;
 const ALL = PROPERTIES | END_OF_GROUP | ZERO_OBJECT_ID | DEFAULT_PRIORITY | STATUS;
 
 /** Whether `kind` is a Type this draft defines. */
-function valid(kind: number, version: IetfVersion): boolean {
-	if (version === Version.DRAFT_14) return kind <= 0x07 || kind === 0x20 || kind === 0x21;
+function valid(kind: number): boolean {
 	// A status cannot also end the group.
 	return (kind & ~ALL) === 0 && !((kind & STATUS) !== 0 && (kind & END_OF_GROUP) !== 0);
-}
-
-/** Drafts 14-16 let any status carry Properties; later ones only a Normal Object. */
-function legacy(version: IetfVersion): boolean {
-	return version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
 }
 
 /** What follows an OBJECT_DATAGRAM's header: the payload, or the status of an Object without one. */
@@ -46,7 +40,7 @@ export class ObjectDatagram {
 	groupId: number;
 	/** The Object ID, or `undefined` when the ZERO_OBJECT_ID bit omits it (Object 0). */
 	objectId?: number;
-	/** The Publisher Priority, or `undefined` to inherit the subscription's (draft-15+). */
+	/** The Publisher Priority, or `undefined` to inherit the subscription's. */
 	publisherPriority?: number;
 	/** No Object past this one exists in the group. */
 	endOfGroup: boolean;
@@ -80,7 +74,7 @@ export class ObjectDatagram {
 		if (this.objectId === undefined) kind |= ZERO_OBJECT_ID;
 		if (this.publisherPriority === undefined) kind |= DEFAULT_PRIORITY;
 		if ("status" in this.body) kind |= STATUS;
-		if (!valid(kind, version)) throw new Error(`OBJECT_DATAGRAM type 0x${kind.toString(16)} is invalid`);
+		if (!valid(kind)) throw new Error(`OBJECT_DATAGRAM type 0x${kind.toString(16)} is invalid`);
 
 		const parts = [encodeVarint(kind, version), encodeVarint(this.trackAlias, version)];
 		parts.push(encodeVarint(this.groupId, version));
@@ -92,7 +86,7 @@ export class ObjectDatagram {
 			parts.push(encodeVarint(this.properties.byteLength, version), this.properties);
 		}
 		if ("status" in this.body) {
-			if (!legacy(version) && this.body.status !== 0 && this.properties !== undefined) {
+			if (this.body.status !== 0 && this.properties !== undefined) {
 				throw new Error("only a Normal OBJECT_DATAGRAM may carry properties");
 			}
 			parts.push(encodeVarint(this.body.status, version));
@@ -116,7 +110,7 @@ export class ObjectDatagram {
 	 */
 	static async decode(data: Uint8Array, version: IetfVersion): Promise<ObjectDatagram> {
 		try {
-			return await new Reader(undefined, data, version).decode((c) => decodeFields(c, version));
+			return await new Reader(undefined, data, version).decode(decodeFields);
 		} catch (err: unknown) {
 			if (err instanceof ProtocolViolation) throw err;
 			throw new ProtocolViolation(`malformed OBJECT_DATAGRAM: ${reason(error(err))}`, { cause: err });
@@ -147,11 +141,11 @@ export async function encodeDatagram(
 	}).encode(version);
 }
 
-function decodeFields(c: Cursor, version: IetfVersion): ObjectDatagram {
+function decodeFields(c: Cursor): ObjectDatagram {
 	// Full width, so an out-of-range Type is refused rather than overflowing.
 	const raw = c.u62();
 	const kind = raw <= 0xffn ? Number(raw) : -1;
-	if (kind < 0 || !valid(kind, version)) {
+	if (kind < 0 || !valid(kind)) {
 		throw new ProtocolViolation(`invalid OBJECT_DATAGRAM type 0x${raw.toString(16)}`);
 	}
 
@@ -168,7 +162,7 @@ function decodeFields(c: Cursor, version: IetfVersion): ObjectDatagram {
 	let body: DatagramBody;
 	if (kind & STATUS) {
 		const status = c.u53();
-		if (!legacy(version) && status !== 0 && properties !== undefined) {
+		if (status !== 0 && properties !== undefined) {
 			throw new ProtocolViolation("only a Normal OBJECT_DATAGRAM may carry properties");
 		}
 		if (c.remaining > 0) throw new ProtocolViolation(`OBJECT_DATAGRAM has ${c.remaining} trailing bytes`);

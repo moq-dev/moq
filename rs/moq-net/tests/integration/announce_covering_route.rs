@@ -108,17 +108,7 @@ async fn remote_lite_peer_hears_the_covering_route() {
 async fn remote_ietf_peer_hears_the_covering_route() {
 	let mut expected = EXPECTED.to_vec();
 	expected.push("session open: true");
-	for version in [
-		"moq-transport-14",
-		"moq-transport-15",
-		"moq-transport-16",
-		"moq-transport-17",
-		"moq-transport-18",
-		"moq-transport-19",
-		"moq-transport-20",
-		"moq-transport-21",
-		"moq-transport-22",
-	] {
+	for version in ["moq-transport-18", "moq-transport-22"] {
 		assert_eq!(covering(Some(version)).await, expected, "{version}");
 	}
 }

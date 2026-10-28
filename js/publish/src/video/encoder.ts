@@ -15,7 +15,7 @@ import {
 } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 import { errors } from "../internal";
-import { type Baseline, Estimator } from "../jitter";
+import { Estimator, type Order } from "../order";
 import { hardwareReliable } from "../support/video";
 import type { Capture } from "./capture";
 import { normalizeSource, type Source } from "./types";
@@ -35,32 +35,42 @@ export interface Stats {
 // TODO support signals?
 /** Encoder tuning knobs. All optional; the encoder auto-sizes anything left unset. */
 export interface Config {
-	// If not provided, the encoder will select the best codec.
+	/** If not provided, the encoder will select the best codec. */
 	codec?: string;
 
-	// Constrain the encoded width/height in pixels. If unset, source width.max and height.max
-	// constraints provide the cap when both are present; otherwise screens default to logical pixels.
+	/**
+	 * Constrain the encoded width/height in pixels. If unset, source width.max and height.max
+	 * constraints provide the cap when both are present; otherwise screens default to logical pixels.
+	 */
 	maxPixels?: number;
 
-	// Cap the encoded resolution to this fraction of the source pixel count.
-	// For example 0.25 yields a quarter of the pixels (half the width and height),
-	// scaling with the source instead of assuming a fixed resolution.
-	// When combined with maxPixels, the smaller resulting cap wins.
+	/**
+	 * Cap the encoded resolution to this fraction of the source pixel count.
+	 * For example 0.25 yields a quarter of the pixels (half the width and height),
+	 * scaling with the source instead of assuming a fixed resolution.
+	 * When combined with maxPixels, the smaller resulting cap wins.
+	 */
 	maxScale?: number;
 
-	// The longest interval between keyframes. A joining subscriber forces one sooner once the
-	// group's deltas outweigh the track's refresh ratio. (default: 2000 milliseconds)
+	/**
+	 * The longest interval between keyframes. A joining subscriber forces one sooner once the
+	 * group's deltas outweigh the track's refresh ratio. (default: 2000 milliseconds)
+	 */
 	keyframeInterval?: Milli;
 
-	// If not provided, the encoder will use the best bitrate for the given width, height, and framerate.
+	/** If not provided, the encoder will use the best bitrate for the given width, height, and framerate. */
 	maxBitrate?: number;
 
-	// Multiply the number of pixels by this value to get the bitrate. (default: 0.07)
-	// NOTE: This is multiplied by the codecScale (1.0 for h264) to get the final scale.
+	/**
+	 * Multiply the number of pixels by this value to get the bitrate. (default: 0.07)
+	 * NOTE: This is multiplied by the codecScale (1.0 for h264) to get the final scale.
+	 */
 	bitrateScale?: number;
 
-	// Cap the encoded frame rate. If set below the captured rate, frames are dropped to hit this target.
-	// Also feeds the bitrate calculation and the encoder config. If unset, the captured track's rate is used.
+	/**
+	 * Cap the encoded frame rate. If set below the captured rate, frames are dropped to hit this target.
+	 * Also feeds the bitrate calculation and the encoder config. If unset, the captured track's rate is used.
+	 */
 	frameRate?: number;
 }
 
@@ -89,7 +99,8 @@ export type EncoderProps = Inputs<EncoderInput> & {
 	config?: Config | Signal<Config | undefined>;
 };
 
-type EncoderOutput = {
+/** Signals the encoder derives. */
+export type EncoderOutput = {
 	/** The encoder failure, cleared only by a new capture source or format, or new encoder settings. */
 	error: Signal<Error | undefined>;
 	// The catalog config published for this rendition, `enabled: false` while disabled, or undefined
@@ -194,7 +205,7 @@ export class Encoder {
 	};
 	#signals = new Effect();
 	#estimator = new Estimator();
-	// The estimator's jitter and delay, republished whenever either rises.
+	// The estimator's delay, republished whenever it rises.
 	#estimate = new Signal<Estimator["estimate"]>({});
 	// What this rendition advertised on each broadcast, keyed by the broadcast or, for a local preview,
 	// the encoder. A broadcast keeps a rendition's track when it re-registers, so returning to one
@@ -335,7 +346,7 @@ export class Encoder {
 			effect.set(this.#out.active, enabled && !!track && !error, false);
 			if (!enabled || !track || error) return;
 
-			this.#encode(track, broadcast.baseline, effect);
+			this.#encode(track, broadcast.order, effect);
 		});
 
 		// Reserve against the connection for as long as this track is live. Wait
@@ -366,7 +377,7 @@ export class Encoder {
 	}
 
 	// Encode captured frames into the track producer, reconfiguring when the resolved config changes.
-	#encode(track: Moq.Track.Producer, baseline: Baseline, effect: Effect): void {
+	#encode(track: Moq.Track.Producer, order: Order, effect: Effect): void {
 		const capture = effect.get(this.in.capture);
 		if (!capture) return;
 
@@ -375,6 +386,8 @@ export class Encoder {
 
 		let lastKeyframe: Micro | undefined;
 		let lastEncoded: Micro | undefined;
+		// The catalog declares no reordering, so each chunk must present after the one before it.
+		let lastOutput: number | undefined;
 		// The largest group demand asked for that a keyframe already answers. A join over the refresh
 		// ratio asks for one past the largest, which the next frame opens.
 		let answered: number | undefined;
@@ -387,6 +400,14 @@ export class Encoder {
 		effect.spawn(async () => {
 			const encoder = new VideoEncoder({
 				output: (frame: EncodedVideoChunk) => {
+					if (lastOutput !== undefined && frame.timestamp <= lastOutput) {
+						this.#abort(
+							new Error(`encoder reordered a frame at ${frame.timestamp}us behind ${lastOutput}us`),
+							track,
+						);
+						return;
+					}
+					lastOutput = frame.timestamp;
 					const key = frame.type === "key";
 					if (key) {
 						lastKeyframe = frame.timestamp as Micro;
@@ -401,7 +422,7 @@ export class Encoder {
 					producer.encode(frame, frame.timestamp as Micro, key);
 					// Including a keyframe the encoder placed on its own, which opened a group too.
 					if (key) answer();
-					if (this.#estimator.flush(frame.timestamp, baseline)) {
+					if (this.#estimator.write(frame.timestamp, order)) {
 						this.#estimate.set({ ...this.#estimator.estimate });
 					}
 				},
@@ -467,6 +488,9 @@ export class Encoder {
 							// Allow half an interval of slack so jittery capture timestamps don't drop
 							// a frame we meant to keep.
 							const targetFrameRate = config?.frameRate;
+							// A repeated timestamp would present with the frame before it, which no reordering
+							// declared allows; a backward one still fails the track at output.
+							if (frame.timestamp === lastEncoded) continue;
 							if (targetFrameRate && lastEncoded !== undefined) {
 								const minGap = Micro.fromSecond((1 / targetFrameRate) as Second);
 								if (frame.timestamp - lastEncoded < minGap - minGap / 2) continue;
@@ -532,6 +556,9 @@ export class Encoder {
 				}
 			} finally {
 				if (encoder.state !== "closed") encoder.close();
+				// A stopped rendition stops holding the others' delay back. Not a cleanup: the black
+				// keyframe above is written after one would run, and would seat this rendition again.
+				order.leave(this.#estimator);
 				// The broadcast owns this static track across demand gaps. Close the current group, marking
 				// the break so a later subscriber resumes on the same track without the pre-gap group reading
 				// as live. A fatal encoder error aborts the track instead.
@@ -545,7 +572,7 @@ export class Encoder {
 		const cause = error instanceof Error ? error : new Error(String(error));
 		this.#failure.peek().set(cause);
 		this.#out.error.set(cause);
-		track.close(cause);
+		track.abort(cause);
 	}
 
 	// Publishes the catalog for the probe: its codec string, the coded-size ceiling, and the bitrate and
@@ -578,6 +605,8 @@ export class Encoder {
 			codedWidth: Catalog.u53(config.width),
 			codedHeight: Catalog.u53(config.height),
 			optimizeForLatency: true,
+			// Realtime WebCodecs encoders emit no B-frames; the output callback refuses one that does.
+			reorder: Catalog.u8(0),
 			container: { kind: "legacy" } as const,
 			...estimate,
 		};
@@ -671,7 +700,7 @@ export class Encoder {
 		const reservation = effect.get(this.#reservation);
 		if (reservation) {
 			const grant = reservation.peek();
-			effect.get(reservation.grant);
+			effect.get(reservation.rate);
 			if (grant != null) bitrate = Math.min(bitrate, grant);
 		}
 
@@ -810,7 +839,7 @@ export class Encoder {
 				latencyMode: "realtime",
 				hardwareAcceleration,
 				avc: codec.startsWith("avc1") ? { format: "annexb" } : undefined,
-				// @ts-expect-error Typescript needs to be updated.
+				// @ts-expect-error TypeScript's DOM lib lacks the HEVC codec registration's `hevc` config.
 				hevc: codec.startsWith("hev1") ? { format: "annexb" } : undefined,
 			};
 

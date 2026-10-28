@@ -72,7 +72,7 @@ jobs:
         shell: bash -leo pipefail {0}
         env:
           # Fail rather than skip the io_uring arm if the runner's kernel lacks it.
-          MOQ_STRICT: 1
+          CI_STRICT: 1
 
       - name: Harness regressions
         id: harness
@@ -101,8 +101,8 @@ jobs:
           # The run writes its directory here, so a failed one is uploaded below
           # and a passing one is deleted as usual. Each case's record lands beside
           # it, for the report below.
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
-          MOQ_TEST_RESULTS: ${{ runner.temp }}/moq-test-runs/results.jsonl
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RESULTS: ${{ runner.temp }}/moq-test-runs/results.jsonl
 
       # The same matrix with every client pinned to one moq-transport draft per pass. A release
       # PR runs the oldest and newest even draft between Rust and native JS; nightly and manual
@@ -115,9 +115,9 @@ jobs:
           nix develop --command just test interop "${args[@]}"
         shell: bash -leo pipefail {0}
         env:
-          INTEROP_ARGS: ${{ github.event_name == 'pull_request' && '--publishers rust --subscribers rust,js-native-node,js-native-bun --versions moq-transport-14,moq-transport-22' || '--all --versions ietf' }}
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
-          MOQ_TEST_RESULTS: ${{ runner.temp }}/moq-test-runs/results.jsonl
+          INTEROP_ARGS: ${{ github.event_name == 'pull_request' && '--publishers rust --subscribers rust,js-native-node,js-native-bun --versions moq-transport-18,moq-transport-22' || '--all --versions ietf' }}
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RESULTS: ${{ runner.temp }}/moq-test-runs/results.jsonl
 
       # Registry installs and the release matrix run only on main, nightly or
       # on demand: a break only needs catching before the next release.
@@ -128,8 +128,8 @@ jobs:
         shell: bash -leo pipefail {0}
         env:
           GH_TOKEN: ${{ github.token }}
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
-          MOQ_TEST_RESULTS: ${{ runner.temp }}/moq-test-runs/results.jsonl
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RESULTS: ${{ runner.temp }}/moq-test-runs/results.jsonl
 
       - name: Portrait transcode
         id: portrait
@@ -137,8 +137,8 @@ jobs:
         run: nix develop --command just test portrait
         shell: bash -leo pipefail {0}
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
-          MOQ_TEST_RESULTS: ${{ runner.temp }}/moq-test-runs/results.jsonl
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RESULTS: ${{ runner.temp }}/moq-test-runs/results.jsonl
 
       - name: Interop negative control
         id: negative
@@ -146,8 +146,8 @@ jobs:
         run: nix develop --command just test interop-negative
         shell: bash -leo pipefail {0}
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
-          MOQ_TEST_RESULTS: ${{ runner.temp }}/moq-test-runs/results.jsonl
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RESULTS: ${{ runner.temp }}/moq-test-runs/results.jsonl
 
       # Browser-to-browser media QA: presented frame progress, audible tone, audio/video skew, and
       # the publication lifecycle, plus the negative controls that prove each assertion can fail.
@@ -157,8 +157,8 @@ jobs:
         run: nix develop --command just test media
         shell: bash -leo pipefail {0}
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
-          MOQ_TEST_RESULTS: ${{ runner.temp }}/moq-test-runs/results.jsonl
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RESULTS: ${{ runner.temp }}/moq-test-runs/results.jsonl
 
       # Run independently so an unrelated cold-start failure cannot hide the
       # codec replacement and same-track coded-size growth measurements.
@@ -168,8 +168,8 @@ jobs:
         run: nix develop --command just test media --media-cases rename
         shell: bash -leo pipefail {0}
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
-          MOQ_TEST_RESULTS: ${{ runner.temp }}/moq-test-runs/results.jsonl
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RESULTS: ${{ runner.temp }}/moq-test-runs/results.jsonl
 
       # A failing harness run keeps its directory, holding the process logs, the
       # relay config, and a Playwright trace of the failing page. Upload it for a

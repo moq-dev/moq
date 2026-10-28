@@ -582,25 +582,32 @@ impl AudioTimeline {
 	}
 }
 
-/// How to hand `incoming` samples to a speaker already holding `buffered`, so
-/// it sits on `target`: the jitter buffer the browser's audio rings hold, in
-/// sample frames.
+/// How to hand a write to a speaker already holding `buffered`, so it sits on
+/// `target`: the jitter buffer the browser's audio rings hold, in sample frames.
+/// The write is `fill` samples of silence standing in for a hole in the media,
+/// then the `frame` itself.
 ///
 /// A `dry` ring, one that ran out or has only just opened, re-stalls: it pads up
 /// to the target before playing on, rather than playing the next arrival on an
-/// empty cushion. A ring more than
-/// `slack` over the target lands back on it by skipping the oldest of what is
-/// arriving. The slack is what a device period and a write's own length move the
+/// empty cushion. A ring more than `slack` over the target lands back on it by
+/// skipping the oldest of what is arriving.
+///
+/// A playing ring is judged on what it holds ahead of the frame. The speaker
+/// drains a frame before the next one is due, so counting it would skip a frame
+/// that lands a little early and leave the ring a frame short for the next late
+/// one: a click, then a dropout. The slack is what a device period moves the
 /// level by, so ordinary cadence never skips.
-pub(super) fn fit(dry: bool, buffered: u64, target: u64, slack: u64, incoming: u64) -> Fit {
+pub(super) fn fit(dry: bool, buffered: u64, target: u64, slack: u64, fill: u64, frame: u64) -> Fit {
+	let incoming = fill + frame;
 	let pad = if dry {
 		target.saturating_sub(buffered + incoming)
 	} else {
 		0
 	};
 	let level = buffered + pad + incoming;
-	let skip = if level > target + slack {
-		(level - target).min(incoming)
+	let ahead = if dry { level } else { level - frame };
+	let skip = if ahead > target + slack {
+		(ahead - target).min(incoming)
 	} else {
 		0
 	};
@@ -617,7 +624,7 @@ pub(super) struct Fit {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 
@@ -1175,30 +1182,42 @@ mod tests {
 	/// A dry ring refills to the target before the next arrival plays.
 	#[test]
 	fn a_dry_ring_restalls_to_the_target() {
-		assert_eq!(fit(true, 0, 4_800, 960, 960), Fit { pad: 3_840, skip: 0 });
+		assert_eq!(fit(true, 0, 4_800, 960, 0, 960), Fit { pad: 3_840, skip: 0 });
 		// A fresh sink starts on a little silence of its own, which counts.
-		assert_eq!(fit(true, 2_400, 4_800, 960, 960), Fit { pad: 1_440, skip: 0 });
+		assert_eq!(fit(true, 2_400, 4_800, 960, 0, 960), Fit { pad: 1_440, skip: 0 });
 		// A write longer than the target needs no padding, only the landing.
-		assert_eq!(fit(true, 0, 960, 960, 4_800), Fit { pad: 0, skip: 3_840 });
+		assert_eq!(fit(true, 0, 960, 960, 0, 4_800), Fit { pad: 0, skip: 3_840 });
 	}
 
-	/// Ordinary cadence, a write on a ring already at the target, stays within
-	/// the slack and loses nothing.
+	/// Ordinary cadence, a write on a ring at most the slack over the target, loses
+	/// nothing, however long the write.
 	#[test]
 	fn cadence_within_the_slack_plays_everything() {
-		assert_eq!(fit(false, 4_000, 4_800, 960, 960), Fit { pad: 0, skip: 0 });
-		assert_eq!(fit(false, 4_800, 4_800, 960, 960), Fit { pad: 0, skip: 0 });
+		assert_eq!(fit(false, 4_000, 4_800, 960, 0, 960), Fit { pad: 0, skip: 0 });
+		assert_eq!(fit(false, 4_800, 4_800, 960, 0, 960), Fit { pad: 0, skip: 0 });
+		// A frame that lands early, on a ring a device period over the target.
+		assert_eq!(fit(false, 5_760, 4_800, 960, 0, 960), Fit { pad: 0, skip: 0 });
+		assert_eq!(fit(false, 4_800, 4_800, 960, 0, 1_920), Fit { pad: 0, skip: 0 });
 		// Running low is not running dry: nothing is padded until the ring is out.
-		assert_eq!(fit(false, 480, 4_800, 960, 960), Fit { pad: 0, skip: 0 });
+		assert_eq!(fit(false, 480, 4_800, 960, 0, 960), Fit { pad: 0, skip: 0 });
 	}
 
-	/// A burst past the slack lands back on the target, and a ring already
-	/// over it drops the whole write.
+	/// A ring holding more than the slack over the target lands back on it,
+	/// skipping as much of the write as that takes.
 	#[test]
-	fn a_burst_lands_on_the_target() {
-		assert_eq!(fit(false, 4_800, 4_800, 960, 1_920), Fit { pad: 0, skip: 1_920 });
-		assert_eq!(fit(false, 4_000, 4_800, 960, 4_800), Fit { pad: 0, skip: 4_000 });
+	fn excess_lands_on_the_target() {
+		assert_eq!(fit(false, 5_761, 4_800, 960, 0, 960), Fit { pad: 0, skip: 960 });
+		assert_eq!(fit(false, 6_000, 4_800, 960, 0, 2_400), Fit { pad: 0, skip: 1_200 });
 		// A target that fell is reached by skipping, not by waiting to drain.
-		assert_eq!(fit(false, 9_600, 4_800, 960, 960), Fit { pad: 0, skip: 960 });
+		assert_eq!(fit(false, 9_600, 4_800, 960, 0, 960), Fit { pad: 0, skip: 960 });
+	}
+
+	/// The silence standing in for a hole sits ahead of the frame, so it is what
+	/// an over-full ring skips first; a ring the hole drained plays it through.
+	#[test]
+	fn a_hole_is_skipped_before_its_frame() {
+		assert_eq!(fit(false, 4_800, 4_800, 960, 1_920, 960), Fit { pad: 0, skip: 1_920 });
+		assert_eq!(fit(false, 4_000, 4_800, 960, 1_920, 960), Fit { pad: 0, skip: 1_120 });
+		assert_eq!(fit(false, 2_880, 4_800, 960, 1_920, 960), Fit { pad: 0, skip: 0 });
 	}
 }

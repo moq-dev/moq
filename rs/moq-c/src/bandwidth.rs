@@ -51,37 +51,22 @@ impl Bandwidth {
 ///
 /// Returns a non-zero handle, or a negative error if the session is unknown.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_session_bandwidth(session: u32) -> i32 {
+pub extern "C" fn moq_session_allocator(session: u32) -> i32 {
 	ffi::enter(move || {
 		let session = ffi::parse_id(session)?;
 		let mut state = State::lock();
-		let allocator = state.session.bandwidth(session)?;
+		let allocator = state.session.allocator(session)?;
 		state.bandwidth.insert(allocator)
 	})
 }
 
-/// Release a bandwidth handle. Reservations taken against it stay until they
+/// Release an allocator handle. Reservations taken against it stay until they
 /// themselves are closed (or the session's allocator is gone).
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_bandwidth_close(bandwidth: u32) -> i32 {
+pub extern "C" fn moq_allocator_close(allocator: u32) -> i32 {
 	ffi::enter(move || {
-		let bandwidth = ffi::parse_id(bandwidth)?;
-		State::lock().bandwidth.close(bandwidth)
-	})
-}
-
-/// Probe up to `target_bps` instead of the sum of the reservations.
-///
-/// The session probes for what its reservations add up to by default, so the
-/// estimate can rise to fund them. A `target_bps` of 0 turns probing off, and
-/// `present` false follows the reservations again.
-#[unsafe(no_mangle)]
-pub extern "C" fn moq_bandwidth_set_target(bandwidth: u32, target_bps: u64, present: bool) -> i32 {
-	ffi::enter(move || {
-		let bandwidth = ffi::parse_id(bandwidth)?;
-		let allocator = State::lock().bandwidth.allocator(bandwidth)?;
-		allocator.set_target(present.then_some(moq_net::bandwidth::Rate::from_bps(target_bps)));
-		Ok(())
+		let allocator = ffi::parse_id(allocator)?;
+		State::lock().bandwidth.close(allocator)
 	})
 }
 
@@ -91,30 +76,31 @@ pub extern "C" fn moq_bandwidth_set_target(bandwidth: u32, target_bps: u64, pres
 /// ever send. Drop the reservation with [`moq_reservation_close`] to hand the
 /// room back.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_bandwidth_reserve(bandwidth: u32, track: u32, max_bps: u64) -> i32 {
+pub extern "C" fn moq_allocator_reserve(allocator: u32, track: u32, max_bps: u64) -> i32 {
 	ffi::enter(move || {
-		let bandwidth = ffi::parse_id(bandwidth)?;
+		let allocator = ffi::parse_id(allocator)?;
 		let track = ffi::parse_id(track)?;
 		let mut state = State::lock();
 		let demand = state.publish.track_demand(track)?;
-		state.bandwidth.reserve(bandwidth, &demand, max_bps)
+		state.bandwidth.reserve(allocator, &demand, max_bps)
 	})
 }
 
 /// This reservation's slice right now, in bits per second.
 ///
-/// `present` is false when there is no estimate or no demand: hold the current
-/// rate. `present` true and `bps` 0 is a real zero grant.
+/// `present` is false when there is no estimate: hold the current rate. `present`
+/// true and `bps` 0 is a real zero rate. While nothing subscribes to the track,
+/// `bps` is the slice it would get back, without claiming it from the others.
 ///
 /// # Safety
 /// - `bps` and `present` must be valid pointers.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_reservation_grant(reservation: u32, bps: *mut u64, present: *mut bool) -> i32 {
+pub unsafe extern "C" fn moq_reservation_rate(reservation: u32, bps: *mut u64, present: *mut bool) -> i32 {
 	ffi::enter(move || {
 		let reservation = ffi::parse_id(reservation)?;
 		let bps = unsafe { bps.as_mut() }.ok_or(Error::InvalidPointer)?;
 		let present = unsafe { present.as_mut() }.ok_or(Error::InvalidPointer)?;
-		match State::lock().bandwidth.reservation(reservation)?.peek() {
+		match State::lock().bandwidth.reservation(reservation)?.rate() {
 			Some(rate) => {
 				*bps = rate.as_bps();
 				*present = true;

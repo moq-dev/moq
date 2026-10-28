@@ -13,26 +13,33 @@ use crate::jitter::{self, Target};
 use crate::resample::{Remix, Resampler};
 use crate::{Activity, Error, Format, Frame, Layout};
 
-/// Decoded PCM and encoder ends in delivery order.
+/// One item of a [`Consumer`] read, in delivery order: decoded PCM, or a break in it.
 ///
-/// `discontinuity` goes up wherever the decoded timeline breaks: at the fresh
-/// encoder after an [`End`](Self::End), or at a loss. A bump with no `End`
-/// before it is a loss, and the hole runs from the previous frame's end to the
-/// new frame's timestamp.
+/// The decoded counterpart of [`moq_mux::container::Read`], and the same shape
+/// `moq_video::decode::Read` has, so a player handles loss and ends alike for
+/// every media type.
 #[derive(Clone, Debug)]
 pub enum Read {
-	/// Decoded PCM, including the drained tail before a discontinuity.
-	Frame {
-		/// The decoded timeline these samples belong to; only changes matter.
-		discontinuity: u64,
-		/// The decoded samples and their presentation time.
-		frame: Frame,
+	/// Decoded PCM.
+	Frame(Frame),
+	/// Media after what was already read was lost: a group was skipped or never arrived,
+	/// or a packet's timestamp did not continue the previous one. What follows does not
+	/// continue what came before, and every sample decoded before the loss precedes it.
+	///
+	/// The span is an upper bound, in the scale of the frame that follows.
+	Gap {
+		/// The furthest presentation point already read.
+		timestamp: moq_net::Timestamp,
+		/// How long until the next frame resumes.
+		duration: moq_net::Timestamp,
 	},
-	/// The publisher stopped this encoder; its final PCM may still follow.
+	/// The publisher stopped its encoder: it paused, switched source, or finished.
+	///
+	/// Frames that follow and start before `end` are the stopped encoder's remaining
+	/// media: its codec drain, trimmed at `end`, and the resampler's tail. The first frame
+	/// at or past `end` comes from a fresh encoder, since a timeline only moves forward.
 	End {
-		/// The decoded timeline holding the stopped encoder's final samples.
-		discontinuity: u64,
-		/// Samples at or past this point are padding and are trimmed.
+		/// Where the stopped encoder's media stops.
 		end: moq_net::Timestamp,
 	},
 }
@@ -118,8 +125,6 @@ pub struct Consumer {
 	/// Frames decoded and not yet handed back, so a gap's tail can be returned
 	/// ahead of the packet that exposed it.
 	ready: VecDeque<Read>,
-	/// Stable across all groups and the resampler tail of one decoded timeline.
-	discontinuity: u64,
 	/// Codec activity spans the resampler's buffered output still covers.
 	spans: VecDeque<ActivitySpan>,
 	/// Activity of the last span the output ran past, for the rounding samples the
@@ -165,17 +170,9 @@ impl Consumer {
 			.then(|| Remix::new(decoder.layout(), layout))
 			.transpose()?;
 
-		let resampler = if sample_rate == decoder.sample_rate() {
-			None
-		} else {
-			let chunk_frames = (decoder.sample_rate() as usize * 20) / 1000;
-			Some(Resampler::new(
-				decoder.sample_rate(),
-				sample_rate,
-				decoder.layout().channels(),
-				chunk_frames,
-			)?)
-		};
+		if sample_rate == 0 {
+			return Err(Error::Unsupported("output sample rate must be > 0".into()));
+		}
 
 		let name = name.into();
 		let warmup = catalog.warmup.unwrap_or_default();
@@ -202,7 +199,7 @@ impl Consumer {
 			&& warmup.is_zero()
 			&& let Some(live_edge) = subscriber.largest().await
 		{
-			subscriber.set_groups(live_edge.group..);
+			subscriber = subscriber.with_range(live_edge.group..);
 		}
 		let track = subscriber;
 		let retention = track.info().max_age;
@@ -226,7 +223,7 @@ impl Consumer {
 			target: Target::new(options.delay, catalog.jitter),
 			decoder,
 			track,
-			resampler,
+			resampler: None,
 			remix,
 			options,
 			max_delay,
@@ -238,7 +235,6 @@ impl Consumer {
 			resolved_layout: layout,
 			next_start: None,
 			ready: VecDeque::new(),
-			discontinuity: 0,
 			spans: VecDeque::new(),
 			trailing: Activity::Active,
 			epoch: None,
@@ -312,31 +308,29 @@ impl Consumer {
 					// own group carries the stopped encoder's final packets, trimmed below.
 					if self.end.is_some() && group != self.end_group {
 						self.restart()?;
-						self.discontinuity += 1;
 					}
 					frame
 				}
-				// The loss shows as the next frame's discontinuity, with no end before it.
-				Some(Encoded::Gap { .. }) => {
+				// Behind whatever the resampler held from before the loss.
+				Some(Encoded::Gap { timestamp, duration }) => {
 					self.restart()?;
-					self.discontinuity += 1;
 					self.warmup_pending = !self.warmup.is_zero();
+					self.ready.push_back(Read::Gap { timestamp, duration });
 					continue;
 				}
+				// The resampler keeps running: the stopped encoder's final packets follow in
+				// the marker's group and continue its media. What it still holds comes out
+				// after the end, starting before it, once a fresh encoder or the track's end
+				// drains it.
 				Some(Encoded::End { group, end }) => {
 					self.end = Some(end);
 					self.end_group = group;
 					self.frames_decoded = 0;
 					self.terminal_start = None;
-					return Ok(Some(Read::End {
-						discontinuity: self.discontinuity,
-						end,
-					}));
+					self.ready.push_back(Read::End { end });
+					continue;
 				}
-				None => {
-					let discontinuity = self.discontinuity;
-					return Ok(self.flush()?.map(|frame| Read::Frame { discontinuity, frame }));
-				}
+				None => return Ok(self.flush()?.map(Read::Frame)),
 			};
 
 			// Every packet the container hands over is an arrival, including one the
@@ -359,17 +353,19 @@ impl Consumer {
 			// phase reconstructs each batch's time from the marker rather than
 			// reading it off the packet, so there is nothing left to compare.
 			if self.end.is_none()
-				&& self
-					.next_start
-					.is_some_and(|next| discontinuous(next, mux_frame.timestamp))
+				&& let Some(next) = self.next_start
+				&& discontinuous(next, timestamp)
 			{
 				if let Some(frame) = self.gap()? {
-					self.ready.push_back(Read::Frame {
-						discontinuity: self.discontinuity,
-						frame,
-					});
+					self.ready.push_back(Read::Frame(frame));
 				}
-				self.discontinuity += 1;
+				// From where the timeline should have continued to where it did, which an
+				// overlap leaves empty.
+				let start = next.convert(timestamp.scale())?.min(timestamp);
+				self.ready.push_back(Read::Gap {
+					timestamp: start,
+					duration: timestamp.checked_sub(start)?,
+				});
 			}
 
 			let rate = self.decoder.sample_rate();
@@ -422,6 +418,19 @@ impl Consumer {
 				continue;
 			}
 
+			if self.resampler.is_none() && rate != self.resolved_sample_rate {
+				// A decoded frame pays for the channel count. Bound the input
+				// window in frames, and its duration at low rates, so neither
+				// side's allocation grows with a catalog's rate declaration.
+				let chunk_frames = (rate as usize / 50).clamp(1, 960);
+				self.resampler = Some(Resampler::new(
+					rate,
+					self.resolved_sample_rate,
+					self.decoder.layout().channels(),
+					chunk_frames,
+				)?);
+			}
+
 			let (pcm, timestamp) = match self.resampler.as_mut() {
 				// The resampler works in fixed chunks, so it holds back whatever didn't
 				// fill one. What comes out next starts with those held-back samples, which
@@ -435,9 +444,9 @@ impl Consumer {
 					} else {
 						r.held_at().unwrap_or(decoded_at)
 					};
-					let skipped = r.skipped();
+					let timestamp = r.output_at(held)?;
 					let pcm = r.process(&decoded, decoded_at)?;
-					(pcm, rewind(held, skipped, self.resolved_sample_rate)?)
+					(pcm, timestamp)
 				}
 				None => (decoded, decoded_at),
 			};
@@ -471,10 +480,7 @@ impl Consumer {
 			// Queued rather than returned, so a tail drained at a gap earlier in this
 			// same iteration still comes out first. The next turn of the loop pops it.
 			if let Some(frame) = self.frame(pcm, timestamp, activity)? {
-				self.ready.push_back(Read::Frame {
-					discontinuity: self.discontinuity,
-					frame,
-				});
+				self.ready.push_back(Read::Frame(frame));
 			}
 		}
 	}
@@ -486,10 +492,7 @@ impl Consumer {
 	/// as their own frame first rather than filtered together with what follows it.
 	fn restart(&mut self) -> Result<(), Error> {
 		if let Some(frame) = self.drain()? {
-			self.ready.push_back(Read::Frame {
-				discontinuity: self.discontinuity,
-				frame,
-			});
+			self.ready.push_back(Read::Frame(frame));
 		}
 		self.next_start = None;
 		self.spans.clear();
@@ -532,10 +535,9 @@ impl Consumer {
 		let Some(resampler) = self.resampler.as_mut() else {
 			return Ok(None);
 		};
-		let held = resampler.held_at();
-		let skipped = resampler.skipped();
+		let timestamp = resampler.held_at().map(|held| resampler.output_at(held)).transpose()?;
 		let pcm = resampler.drain()?;
-		self.tail(pcm, held, skipped)
+		self.tail(pcm, timestamp)
 	}
 
 	/// The tail the resampler is still holding when the track ends, once.
@@ -549,27 +551,19 @@ impl Consumer {
 			return Ok(None);
 		};
 
-		let held = resampler.held_at();
-		let skipped = resampler.skipped();
-		self.tail(resampler.flush()?, held, skipped)
+		let timestamp = resampler.held_at().map(|held| resampler.output_at(held)).transpose()?;
+		self.tail(resampler.flush()?, timestamp)
 	}
 
 	/// Stamp and pack a tail the resampler handed back, if it handed back one.
 	///
-	/// `held` is where the samples it was holding arrived, which is where the tail
-	/// begins once the startup frames it dropped of its own are taken off. `None`
-	/// there means the resampler never ran, so there is nothing to place.
-	fn tail(
-		&mut self,
-		pcm: Vec<f32>,
-		held: Option<moq_net::Timestamp>,
-		skipped: usize,
-	) -> Result<Option<Frame>, Error> {
-		let Some(held) = held.filter(|_| !pcm.is_empty()) else {
+	/// `timestamp` includes the filter's retained fractional phase. `None` means
+	/// the resampler never ran, so there is nothing to place.
+	fn tail(&mut self, pcm: Vec<f32>, timestamp: Option<moq_net::Timestamp>) -> Result<Option<Frame>, Error> {
+		let Some(timestamp) = timestamp.filter(|_| !pcm.is_empty()) else {
 			return Ok(None);
 		};
 
-		let timestamp = rewind(held, skipped, self.resolved_sample_rate)?;
 		let activity = self.activity_at(timestamp);
 		self.frame(pcm, timestamp, activity)
 	}
@@ -701,8 +695,8 @@ mod tests {
 	async fn next_frame(consumer: &mut Consumer) -> Result<Option<Frame>, Error> {
 		loop {
 			match consumer.read().await? {
-				Some(Read::Frame { frame, .. }) => return Ok(Some(frame)),
-				Some(Read::End { .. }) => {}
+				Some(Read::Frame(frame)) => return Ok(Some(frame)),
+				Some(Read::Gap { .. } | Read::End { .. }) => {}
 				None => return Ok(None),
 			}
 		}
@@ -711,8 +705,97 @@ mod tests {
 	use moq_net::Timestamp;
 
 	use super::*;
-	use crate::encode::{Encoder, Input, Options as EncodeOptions, Producer, Settings};
+	use crate::encode::{Config as EncodeConfig, Encoder, Input, Options as EncodeOptions, Producer};
 	use crate::{Format, Layout};
+
+	#[tokio::test(start_paused = true)]
+	async fn conversion_waits_for_decoded_samples() {
+		for (rate, channels) in [(44_100, 1), (4_000_000_000, 8), (48_000, u32::MAX)] {
+			let broadcast = moq_net::broadcast::Info::new().produce();
+			let _track = broadcast
+				.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+				.unwrap();
+			let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, rate, channels);
+			let consumer = Consumer::new(
+				&broadcast.consume(),
+				&catalog,
+				"audio",
+				Options {
+					output: Output {
+						sample_rate: Some(96_000),
+						..Default::default()
+					},
+					..Default::default()
+				},
+			)
+			.await
+			.unwrap();
+			assert!(consumer.resampler.is_none(), "catalog allocated the resampler");
+		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn conversion_allocation_is_bounded_after_data_arrives() {
+		use std::future::Future;
+		use std::task::{Context, Poll};
+
+		let mut baseline = None;
+		for rate in [96_000, 4_000_000_000] {
+			let broadcast = moq_net::broadcast::Info::new().produce();
+			let track = broadcast
+				.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+				.unwrap();
+			let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, rate, 8);
+			let mut producer = moq_mux::container::Producer::new(
+				track,
+				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+			);
+			let mut consumer = Consumer::new(
+				&broadcast.consume(),
+				&catalog,
+				"audio",
+				Options {
+					output: Output {
+						sample_rate: Some(48_000),
+						..Default::default()
+					},
+					..Default::default()
+				},
+			)
+			.await
+			.unwrap();
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp: Timestamp::ZERO,
+					duration: None,
+					payload: vec![0; 4].into(),
+					keyframe: true,
+				})
+				.unwrap();
+			assert!(matches!(consumer.read().await, Err(Error::Misaligned { .. })));
+			assert!(consumer.resampler.is_none(), "a refused packet allocated the resampler");
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp: Timestamp::ZERO,
+					duration: None,
+					payload: vec![0; 960 * 8 * 4].into(),
+					keyframe: true,
+				})
+				.unwrap();
+			let (read, stats) = crate::allocation::measure(|| {
+				let mut read = std::pin::pin!(consumer.read());
+				read.as_mut().poll(&mut Context::from_waker(std::task::Waker::noop()))
+			});
+			assert!(!matches!(read, Poll::Ready(Err(_))), "{read:?}");
+			assert!(consumer.resampler.is_some());
+			let baseline = *baseline.get_or_insert(stats.bytes);
+			assert!(
+				stats.bytes <= baseline,
+				"{rate} Hz allocated {} bytes, baseline {baseline}",
+				stats.bytes
+			);
+		}
+	}
 
 	async fn warmup_output(start: Start, declared: bool) -> (Vec<u128>, usize) {
 		let broadcast = moq_net::broadcast::Info::new().produce();
@@ -791,7 +874,7 @@ mod tests {
 		tokio::join!(
 			async {
 				let (session, driver) = client
-					.connect_lite(moq_net::time::now(), client_transport)
+					.connect(moq_net::time::Instant::now(), client_transport)
 					.await
 					.unwrap();
 				tokio::spawn(moq_net::time::run(driver));
@@ -799,7 +882,7 @@ mod tests {
 			},
 			async {
 				let (session, driver) = server
-					.accept_lite(moq_net::time::now(), server_transport)
+					.accept(moq_net::time::Instant::now(), server_transport)
 					.await
 					.unwrap();
 				tokio::spawn(moq_net::time::run(driver));
@@ -1062,11 +1145,11 @@ mod tests {
 		};
 		let options = EncodeOptions {
 			track: Some("audio".to_string()),
-			settings: Settings::new(48_000, Layout::Mono),
+			config: EncodeConfig::new(48_000, Layout::Mono),
 			..EncodeOptions::default()
 		};
 		let mut producer = Producer::new(&mut broadcast, catalog, input.clone(), &options).unwrap();
-		let mut catalog = Encoder::new(&Settings::new(input.sample_rate, input.layout))
+		let mut catalog = Encoder::new(&EncodeConfig::new(input.sample_rate, input.layout))
 			.unwrap()
 			.catalog();
 		// Every packet counts here; the warmup tests cover trimming.
@@ -1144,7 +1227,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn an_undeclared_timestamp_hole_is_a_discontinuity() {
+	async fn an_undeclared_timestamp_hole_is_a_gap() {
 		tokio::time::pause();
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
@@ -1174,17 +1257,21 @@ mod tests {
 				.unwrap();
 		}
 		producer.finish().unwrap();
-		let mut timelines = Vec::new();
+		let mut reads = Vec::new();
 		while let Some(event) = consumer.read().await.unwrap() {
-			if let Read::Frame { discontinuity, frame } = event {
-				timelines.push((frame.timestamp.as_micros(), discontinuity));
-			}
+			reads.push(match event {
+				Read::Frame(frame) => format!("frame {}", frame.timestamp.as_micros()),
+				Read::Gap { timestamp, duration } => format!("gap {}+{}", timestamp.as_micros(), duration.as_micros()),
+				Read::End { end } => format!("end {}", end.as_micros()),
+			});
 		}
-		assert_eq!(timelines, [(0, 0), (20_000, 0), (500_000, 1)]);
+		assert_eq!(reads, ["frame 0", "frame 20000", "gap 40000+460000", "frame 500000"]);
 	}
 
+	/// What the resampler holds at a marker comes out after the end, starting before it,
+	/// and ahead of the fresh encoder's first frame at or past it.
 	#[tokio::test]
-	async fn decoded_segments_keep_resampler_tails_before_fresh_encoder_frames() {
+	async fn a_resampler_tail_after_an_end_starts_before_it() {
 		tokio::time::pause();
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
@@ -1224,25 +1311,29 @@ mod tests {
 			}
 		}
 		producer.finish().unwrap();
+		let mut before = Vec::new();
 		let mut ended = None;
-		let mut tail = false;
-		let mut resumed = false;
+		let mut after = Vec::new();
 		while let Some(event) = consumer.read().await.unwrap() {
 			match event {
-				Read::End { discontinuity, .. } if ended.is_none() => ended = Some(discontinuity),
-				Read::Frame { discontinuity, .. } if ended == Some(discontinuity) => {
-					assert!(!resumed);
-					tail = true;
-				}
-				Read::Frame { discontinuity, .. } if ended.is_some_and(|old| old != discontinuity) => resumed = true,
-				_ => {}
+				Read::Frame(frame) if ended.is_none() => before.push(frame.timestamp),
+				Read::Frame(frame) => after.push(frame.timestamp),
+				Read::End { end } => ended = Some(end),
+				Read::Gap { .. } => panic!("nothing was lost"),
 			}
 		}
+		let end = ended.expect("the marker reads as an end");
 		assert!(
-			tail,
-			"the old resampler tail must follow its End without looking like a new encoder"
+			before.iter().all(|timestamp| *timestamp < end),
+			"{before:?} past {end:?}"
 		);
-		assert!(resumed, "a later group opens a fresh decoded timeline");
+		let tail = after.iter().take_while(|timestamp| **timestamp < end).count();
+		assert_eq!(tail, 1, "the stopped encoder's resampler tail leads: {after:?}");
+		assert!(after.len() > tail, "a later group opens a fresh decoded timeline");
+		assert!(
+			after[tail..].iter().all(|timestamp| *timestamp >= end),
+			"{after:?} before {end:?}"
+		);
 	}
 
 	/// A packet whose sample count isn't a multiple of the resampler's chunk leaves
@@ -1381,11 +1472,11 @@ mod tests {
 
 	#[tokio::test]
 	async fn resampling_keeps_the_activity_boundary_on_its_source() {
-		let mut encoder = Encoder::new(&Settings {
+		let mut encoder = Encoder::new(&EncodeConfig {
 			dtx: true,
 			bitrate: Some(moq_net::bandwidth::Rate::from_bps(24_000)),
 			frame_duration: std::time::Duration::from_millis(10),
-			..Settings::new(48_000, Layout::Mono)
+			..EncodeConfig::new(48_000, Layout::Mono)
 		})
 		.unwrap();
 		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 1);
@@ -1587,7 +1678,7 @@ mod tests {
 		let read = pcm_gaps(44_100, 48_000, 882, &stamps).await;
 		let mut r = crate::resample::Resampler::new(44_100, 48_000, 1, 882).unwrap();
 		r.process(&[0.25; 882], stamps[0]).unwrap();
-		let expected = rewind(stamps[1], r.skipped(), 48_000).unwrap().as_micros();
+		let expected = r.output_at(stamps[1]).unwrap().as_micros();
 		assert_eq!(read[1].0, expected);
 	}
 
@@ -1598,10 +1689,10 @@ mod tests {
 	/// before the jump and are labelled by the packet they came from.
 	#[tokio::test]
 	async fn a_terminal_jump_leaves_the_held_samples_alone() {
-		let mut encoder = Encoder::new(&Settings {
+		let mut encoder = Encoder::new(&EncodeConfig {
 			dtx: true,
 			bitrate: Some(moq_net::bandwidth::Rate::from_bps(24_000)),
-			..Settings::new(48_000, Layout::Mono)
+			..EncodeConfig::new(48_000, Layout::Mono)
 		})
 		.unwrap();
 		let mut catalog = encoder.catalog();
@@ -1719,7 +1810,7 @@ mod tests {
 			sample_rate: 48_000,
 			layout: Layout::Mono,
 		};
-		let mut encoder = Encoder::new(&Settings::new(input.sample_rate, input.layout)).unwrap();
+		let mut encoder = Encoder::new(&EncodeConfig::new(input.sample_rate, input.layout)).unwrap();
 		let mut catalog = encoder.catalog();
 		// Every packet counts here; the warmup tests cover trimming.
 		catalog.warmup = None;
@@ -1893,7 +1984,7 @@ mod tests {
 	/// would shrink the term by exactly that much.
 	#[tokio::test]
 	async fn opus_states_its_own_frame_duration() {
-		let mut encoder = Encoder::new(&Settings::new(48_000, Layout::Mono)).unwrap();
+		let mut encoder = Encoder::new(&EncodeConfig::new(48_000, Layout::Mono)).unwrap();
 		let mut catalog = encoder.catalog();
 		// Every packet counts here; the warmup tests cover trimming.
 		catalog.warmup = None;
@@ -1989,7 +2080,7 @@ mod tests {
 			sample_rate: 48_000,
 			layout: Layout::Mono,
 		};
-		let mut encoder = Encoder::new(&Settings::new(input.sample_rate, input.layout)).unwrap();
+		let mut encoder = Encoder::new(&EncodeConfig::new(input.sample_rate, input.layout)).unwrap();
 		let mut catalog = encoder.catalog();
 		// Every packet counts here; the warmup tests cover trimming.
 		catalog.warmup = None;
@@ -2042,7 +2133,7 @@ mod tests {
 			sample_rate: 48_000,
 			layout: Layout::Mono,
 		};
-		let mut encoder = Encoder::new(&Settings::new(input.sample_rate, input.layout)).unwrap();
+		let mut encoder = Encoder::new(&EncodeConfig::new(input.sample_rate, input.layout)).unwrap();
 		let mut catalog = encoder.catalog();
 		// Every packet counts here; the warmup tests cover trimming.
 		catalog.warmup = None;
@@ -2127,7 +2218,7 @@ mod tests {
 		)
 		.await
 		.unwrap();
-		assert_eq!(observed.subscription().unwrap().max_delay, max_delay);
+		assert_eq!(observed.subscription().unwrap().max_delay, Some(max_delay));
 
 		let samples = [0.25f32, -0.5, 0.75, -1.0];
 		let payload: Vec<u8> = samples.iter().flat_map(|sample| sample.to_le_bytes()).collect();
@@ -2160,7 +2251,7 @@ mod tests {
 		};
 
 		// One real Opus packet, so a mis-framed read can't accidentally decode.
-		let mut encoder = Encoder::new(&Settings::new(input.sample_rate, input.layout)).unwrap();
+		let mut encoder = Encoder::new(&EncodeConfig::new(input.sample_rate, input.layout)).unwrap();
 		let mut catalog = encoder.catalog();
 		// Every packet counts here; the warmup tests cover trimming.
 		catalog.warmup = None;

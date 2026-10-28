@@ -5,6 +5,9 @@ description: Logical time and timers with a manual clock for deterministic tests
 
 # @moq/clock
 
+[![npm](https://img.shields.io/npm/v/@moq/clock)](https://www.npmjs.com/package/@moq/clock)
+[![API](https://img.shields.io/badge/API-reference-blue)](/lib/js/api/clock)
+
 Use `@moq/clock` when a deadline and the elapsed time beside it must come from
 one clock. Its default backend reads the host's monotonic and wall clocks;
 a test installs a `Manual` clock without patching the host's timers.
@@ -17,7 +20,7 @@ bun add @moq/clock
 import { Manual, Milli, Nano, now, sleep } from "@moq/clock";
 
 const clock = new Manual();
-const restore = clock.install();
+const installed = clock.install();
 try {
     const start = now();
     const pending = sleep(Nano.fromMilli(Milli(10)));
@@ -25,7 +28,7 @@ try {
     await pending;
     console.log(now() - start); // 10,000,000 nanoseconds
 } finally {
-    restore();
+    installed.close();
 }
 ```
 
@@ -48,16 +51,19 @@ timers late without draining, modeling a stalled event loop. `stepWall()` change
 only wall time. `fire()` waits for a timer
 to be armed, even by a later host task such as I/O, then advances exactly to the
 earliest deadline the same way; it never resolves if nothing arms one.
-Drive each clock serially: until `advance()` or `fire()` settles, another
-`advance()` or `fire()` rejects and `jump()` throws without moving time.
+`drive(work)` fires deadlines one at a time until `work` settles, then settles
+with it, for work whose timers a test cannot count; time stops at the deadline
+it settled on, so a timer armed afterwards waits for the next explicit call.
+Drive each clock serially: until `advance()`, `fire()`, or `drive()` settles,
+another one rejects and `jump()` throws without moving time.
 Timer callbacks may arm timers, but must leave driving that clock to their caller.
 
 `origin()` reads the wall time at instant zero, which maps an instant onto
 wall time without the jitter of subtracting two live reads. On the host it is
 the realm's performance time origin; on a `Manual` it follows `stepWall()`.
 
-Installation is scoped to the current JS realm. Restore it in `finally` and
-keep tests sharing that realm serial. Timers remain bound to the clock on
+Installation is scoped to the current JS realm. Close the handle `install()`
+returns in `finally`, and keep tests sharing that realm serial. Timers remain bound to the clock on
 which they were created, even after restoration. Host timers used by a test
 runner or RPC framework keep running in real time.
 

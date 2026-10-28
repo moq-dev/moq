@@ -1,4 +1,3 @@
-import { ProtocolViolation } from "../error.ts";
 import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
@@ -12,27 +11,9 @@ import {
 	NEGOTIATED_NONE,
 	type Negotiated,
 } from "./publish_namespace.ts";
-import { type IetfVersion, Version } from "./version.ts";
+import type { IetfVersion } from "./version.ts";
 
-// True for the drafts that use the legacy 0x11 SUBSCRIBE_NAMESPACE message.
-// Draft-18+ uses the renumbered 0x50 message instead.
-function isLegacyVersion(version: IetfVersion): boolean {
-	switch (version) {
-		case Version.DRAFT_14:
-		case Version.DRAFT_15:
-		case Version.DRAFT_16:
-		case Version.DRAFT_17:
-			return true;
-		default:
-			return false;
-	}
-}
-
-// SUBSCRIBE_NAMESPACE message (draft-18+, type 0x50).
-//
-// Draft-18 renumbered the message from 0x11 to 0x50 and dropped the Subscribe
-// Options field when it split SUBSCRIBE_TRACKS (0x51) off into its own message
-// type (#1542). Draft-14 through draft-17 use SubscribeNamespaceLegacy.
+// SUBSCRIBE_NAMESPACE message (type 0x50).
 export class SubscribeNamespace {
 	static id = 0x50;
 
@@ -52,9 +33,6 @@ export class SubscribeNamespace {
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
-		if (isLegacyVersion(version)) {
-			throw new Error(`SUBSCRIBE_NAMESPACE (0x50) is draft-18+ only, not ${version}`);
-		}
 		await w.u62(this.requestId);
 		await Namespace.encode(w, this.namespace);
 		const params = new Parameters();
@@ -71,111 +49,11 @@ export class SubscribeNamespace {
 	}
 
 	static async #decode(r: Reader, version: IetfVersion): Promise<SubscribeNamespace> {
-		if (isLegacyVersion(version)) {
-			throw new Error(`SUBSCRIBE_NAMESPACE (0x50) is draft-18+ only, not ${version}`);
-		}
 		const requestId = await r.u62();
 		const namespace = await Namespace.decode(r);
 		const params = await Parameters.decode(r, version, "subscribe-namespace");
 
 		return new SubscribeNamespace({ namespace, requestId, hidden: params.hidden });
-	}
-}
-
-/**
- * What a draft-16/17 SUBSCRIBE_NAMESPACE asks for (d16 §9.25, d17 §9.20).
- *
- * Draft-14/15 have no field and only ever ask for namespaces. Draft-18 dropped it
- * when SUBSCRIBE_TRACKS took over the PUBLISH half.
- */
-export const SubscribeOptions = {
-	/** PUBLISH for each matching track. */
-	PUBLISH: 0x00,
-	/** NAMESPACE for each matching namespace. */
-	NAMESPACE: 0x01,
-	/** Both PUBLISH and NAMESPACE. */
-	BOTH: 0x02,
-} as const;
-
-/** One of the {@link SubscribeOptions} values. */
-export type SubscribeOptions = (typeof SubscribeOptions)[keyof typeof SubscribeOptions];
-
-// SUBSCRIBE_NAMESPACE message for draft-14 through draft-17 (type 0x11).
-//
-// In v16 this moves from the control stream to its own bidi stream. Draft-16/17
-// carry SubscribeOptions; draft-17 additionally prefixes a Required Request ID
-// delta (removed in draft-18 per #1615). Draft-18+ uses SubscribeNamespace.
-export class SubscribeNamespaceLegacy {
-	static id = 0x11;
-
-	namespace: Path.Valid;
-	requestId: bigint;
-	/** Encoded on v16/v17 only; earlier drafts always mean NAMESPACE. */
-	subscribeOptions: SubscribeOptions;
-	/** MoQ Hidden: see {@link SubscribeNamespace.hidden}. */
-	hidden: boolean;
-
-	constructor({
-		namespace,
-		requestId,
-		subscribeOptions = SubscribeOptions.NAMESPACE,
-		hidden = false,
-	}: {
-		namespace: Path.Valid;
-		requestId: bigint;
-		subscribeOptions?: SubscribeOptions;
-		hidden?: boolean;
-	}) {
-		this.namespace = namespace;
-		this.requestId = requestId;
-		this.subscribeOptions = subscribeOptions;
-		this.hidden = hidden;
-	}
-
-	async #encode(w: Writer, version: IetfVersion): Promise<void> {
-		if (!isLegacyVersion(version)) {
-			throw new Error(`legacy SUBSCRIBE_NAMESPACE (0x11) is draft-14..17 only, not ${version}`);
-		}
-		await w.u62(this.requestId);
-		if (version === Version.DRAFT_17) {
-			await w.u62(0n); // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
-		}
-		await Namespace.encode(w, this.namespace);
-		if (version === Version.DRAFT_16 || version === Version.DRAFT_17) {
-			await w.u53(this.subscribeOptions);
-		}
-		const params = new Parameters();
-		params.hidden = this.hidden;
-		await params.encode(w, version);
-	}
-
-	async encode(w: Writer, version: IetfVersion): Promise<void> {
-		return Message.encode(w, (wr) => this.#encode(wr, version));
-	}
-
-	static async decode(r: Reader, version: IetfVersion): Promise<SubscribeNamespaceLegacy> {
-		return Message.decode(r, (rd) => SubscribeNamespaceLegacy.#decode(rd, version));
-	}
-
-	static async #decode(r: Reader, version: IetfVersion): Promise<SubscribeNamespaceLegacy> {
-		if (!isLegacyVersion(version)) {
-			throw new Error(`legacy SUBSCRIBE_NAMESPACE (0x11) is draft-14..17 only, not ${version}`);
-		}
-		const requestId = await r.u62();
-		if (version === Version.DRAFT_17) {
-			await r.u62(); // required_request_id_delta (draft-17 only, removed in draft-18 per #1615)
-		}
-		const namespace = await Namespace.decode(r);
-		let subscribeOptions: SubscribeOptions = SubscribeOptions.NAMESPACE;
-		if (version === Version.DRAFT_16 || version === Version.DRAFT_17) {
-			// Full width, so a value past 2^53 is still a protocol violation.
-			const raw = await r.u62();
-			if (raw > BigInt(SubscribeOptions.BOTH)) throw new ProtocolViolation(`invalid Subscribe Options: ${raw}`);
-			subscribeOptions = Number(raw) as SubscribeOptions;
-		}
-		const params = await Parameters.decode(r, version, "subscribe-namespace");
-
-		return new SubscribeNamespaceLegacy({ namespace, requestId, subscribeOptions, hidden: params.hidden });
 	}
 }
 
@@ -186,102 +64,8 @@ export class SubscribeNamespaceLegacy {
 /// with REQUEST_ERROR NOT_SUPPORTED.
 export const SUBSCRIBE_TRACKS_ID = 0x51;
 
-export class SubscribeNamespaceOk {
-	static id = 0x12;
-
-	requestId: bigint;
-
-	constructor({ requestId }: { requestId: bigint }) {
-		this.requestId = requestId;
-	}
-
-	async #encode(w: Writer): Promise<void> {
-		await w.u62(this.requestId);
-	}
-
-	async encode(w: Writer, _version: IetfVersion): Promise<void> {
-		return Message.encode(w, this.#encode.bind(this));
-	}
-
-	static async decode(r: Reader, _version: IetfVersion): Promise<SubscribeNamespaceOk> {
-		return Message.decode(r, SubscribeNamespaceOk.#decode);
-	}
-
-	static async #decode(r: Reader): Promise<SubscribeNamespaceOk> {
-		const requestId = await r.u62();
-		return new SubscribeNamespaceOk({ requestId });
-	}
-}
-
-export class SubscribeNamespaceError {
-	static id = 0x13;
-
-	requestId: bigint;
-	errorCode: number;
-	reasonPhrase: string;
-
-	constructor({
-		requestId,
-		errorCode,
-		reasonPhrase,
-	}: { requestId: bigint; errorCode: number; reasonPhrase: string }) {
-		this.requestId = requestId;
-		this.errorCode = errorCode;
-		this.reasonPhrase = reasonPhrase;
-	}
-
-	async #encode(w: Writer): Promise<void> {
-		await w.u62(this.requestId);
-		await w.u62(BigInt(this.errorCode));
-		await w.string(this.reasonPhrase);
-	}
-
-	async encode(w: Writer, _version: IetfVersion): Promise<void> {
-		return Message.encode(w, this.#encode.bind(this));
-	}
-
-	static async decode(r: Reader, _version: IetfVersion): Promise<SubscribeNamespaceError> {
-		return Message.decode(r, SubscribeNamespaceError.#decode);
-	}
-
-	static async #decode(r: Reader): Promise<SubscribeNamespaceError> {
-		const requestId = await r.u62();
-		const errorCode = Number(await r.u62());
-		const reasonPhrase = await r.string();
-
-		return new SubscribeNamespaceError({ requestId, errorCode, reasonPhrase });
-	}
-}
-
-export class UnsubscribeNamespace {
-	static id = 0x14;
-
-	requestId: bigint;
-
-	constructor({ requestId }: { requestId: bigint }) {
-		this.requestId = requestId;
-	}
-
-	async #encode(w: Writer): Promise<void> {
-		await w.u62(this.requestId);
-	}
-
-	async encode(w: Writer, _version: IetfVersion): Promise<void> {
-		return Message.encode(w, this.#encode.bind(this));
-	}
-
-	static async decode(r: Reader, _version: IetfVersion): Promise<UnsubscribeNamespace> {
-		return Message.decode(r, UnsubscribeNamespace.#decode);
-	}
-
-	static async #decode(r: Reader): Promise<UnsubscribeNamespace> {
-		const requestId = await r.u62();
-		return new UnsubscribeNamespace({ requestId });
-	}
-}
-
 /**
- * NAMESPACE message (0x08), v16+, sent on the SUBSCRIBE_NAMESPACE bidi stream.
+ * NAMESPACE message (0x08), sent on the SUBSCRIBE_NAMESPACE bidi stream.
  *
  * The base message carries only the suffix. A session that negotiated the MoQ Cluster or
  * MoQ Epoch extension uses the extended form instead, which appends one Parameters field
@@ -335,7 +119,7 @@ export class SubscribeNamespaceEntry {
 	}
 }
 
-/// NAMESPACE_DONE message (0x0E) — v16 only, sent on SUBSCRIBE_NAMESPACE bidi stream
+/// NAMESPACE_DONE message (0x0E), sent on the SUBSCRIBE_NAMESPACE bidi stream.
 export class SubscribeNamespaceEntryDone {
 	static id = 0x0e;
 
@@ -360,37 +144,5 @@ export class SubscribeNamespaceEntryDone {
 	static async #decode(r: Reader): Promise<SubscribeNamespaceEntryDone> {
 		const suffix = await Namespace.decode(r);
 		return new SubscribeNamespaceEntryDone({ suffix });
-	}
-}
-
-/// PUBLISH_BLOCKED message (0x0F) — draft-17 only, sent on SUBSCRIBE_NAMESPACE bidi stream
-export class PublishBlocked {
-	static id = 0x0f;
-
-	suffix: Path.Valid;
-	trackName: string;
-
-	constructor({ suffix, trackName }: { suffix: Path.Valid; trackName: string }) {
-		this.suffix = suffix;
-		this.trackName = trackName;
-	}
-
-	async #encode(w: Writer): Promise<void> {
-		await Namespace.encode(w, this.suffix);
-		await w.string(this.trackName);
-	}
-
-	async encode(w: Writer, _version: IetfVersion): Promise<void> {
-		return Message.encode(w, this.#encode.bind(this));
-	}
-
-	static async decode(r: Reader, _version: IetfVersion): Promise<PublishBlocked> {
-		return Message.decode(r, PublishBlocked.#decode);
-	}
-
-	static async #decode(r: Reader): Promise<PublishBlocked> {
-		const suffix = await Namespace.decode(r);
-		const trackName = await r.string();
-		return new PublishBlocked({ suffix, trackName });
 	}
 }

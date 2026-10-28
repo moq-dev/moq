@@ -36,12 +36,16 @@ asyncio.run(main())
 
    Client
    connect
+   ClientTls
+   QuicConfig
+   WebSocketConfig
+   Backoff
    Server
    Session
    Request
    Transport
-   Auth
-   AuthToken
+   GrantConsumer
+   Tokens
    Grant
 ```
 
@@ -55,15 +59,14 @@ asyncio.run(main())
    :nosignatures:
 
    BroadcastProducer
-   BroadcastDynamic
+   BroadcastRequests
    BroadcastRequest
    TrackProducer
    TrackDemand
-   TrackDynamic
+   TrackRequests
    TrackRequest
    GroupProducer
-   GroupRequest
-   GroupDemand
+   Fill
 ```
 
 ## Subscribing
@@ -176,7 +179,8 @@ broadcast, and producers advertise it in the catalog.
 
    OriginProducer
    OriginConsumer
-   OriginDynamic
+   OriginRequests
+   Publication
    AnnounceConsumer
    AnnouncedBroadcast
    Announce
@@ -210,6 +214,7 @@ Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
    media.VideoProperties
    VideoCodec
    VideoPixelFormat
+   video.FrameRate
    VideoEncoderInput
    VideoEncoderOutput
    VideoEncoderKind
@@ -221,6 +226,7 @@ Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
    Subscription
    TrackInfo
    FetchGroupOptions
+   AnnounceRoute
    Route
    ConnectionStats
 ```
@@ -240,7 +246,6 @@ Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
    protocol_error
    log_level
    mint_epoch
-   epoch_time
 ```
 
 ```{toctree}

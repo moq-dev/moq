@@ -25,6 +25,14 @@ typealias CatalogConsumer = uniffi.moq.MoqMediaCatalogConsumer
 typealias Catalog = uniffi.moq.MoqCatalog
 /** A media [Frame] whose keyframe flag marks group starts or video keyframes; audio flags only group starts. */
 typealias MediaFrame = uniffi.moq.MoqMediaFrame
+/** One encoded frame, a gap, or an encoder end. */
+typealias Read = uniffi.moq.MoqMediaRead
+/** An encoded frame and its container metadata. */
+typealias ReadFrame = uniffi.moq.MoqMediaRead.Frame
+/** Lost media; what follows does not continue it. */
+typealias ReadGap = uniffi.moq.MoqMediaRead.Gap
+/** Where a stopped encoder's media stops. */
+typealias ReadEnd = uniffi.moq.MoqMediaRead.End
 /** The catalog description of a video track, including whether it is enabled (a disabled one has no frames coming). */
 typealias Video = uniffi.moq.MoqVideo
 /** Caller-provided catalog fields for a video track. */
@@ -94,9 +102,6 @@ suspend fun catalog(broadcast: dev.moq.BroadcastConsumer): Catalog {
     }
 }
 
-/** Stream of decoded media frames in decode order. */
-fun TrackConsumer.frames(): Flow<MediaFrame> = pull({ cancel() }) { next() }
-
 /** Stream of decoded frames from one finite media group. */
 fun GroupConsumer.frames(): Flow<MediaFrame> = pull({ cancel() }) { next() }
 
@@ -113,3 +118,11 @@ val MediaFrame.timestamp: Duration
 inline fun <reified T> CatalogProducer.setSection(name: String, value: T) {
     setSection(name, MoqJson.encodeToString(serializer<T>(), value))
 }
+
+/** The furthest presentation point already read. */
+val ReadGap.timestamp: Duration
+    get() = timestampUs.toLong().microseconds
+
+/** Where the stopped encoder's media stops. */
+val ReadEnd.end: Duration
+    get() = endUs.toLong().microseconds

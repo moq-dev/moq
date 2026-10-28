@@ -29,12 +29,14 @@ fn congestion_factory(family: CongestionControl) -> Arc<dyn iroh::endpoint::Cont
 
 /// No congestion control: a window that never shrinks, too large for noq to pace.
 ///
-/// noq has no such controller, so this mirrors moq-quic's `congestion::Unlimited`.
+/// noq has no such controller, so this mirrors `moq_congestion::Unlimited`.
 #[derive(Clone, Copy, Debug)]
 struct Unlimited;
 
-// noq's traits take its std instants, which this controller ignores.
-#[allow(clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_types,
+	reason = "noq's traits take its std instants, which this controller ignores"
+)]
 impl noq_proto::congestion::Controller for Unlimited {
 	fn on_congestion_event(&mut self, _: std::time::Instant, _: std::time::Instant, _: bool, _: bool, _: u64, _: u64) {}
 
@@ -58,7 +60,10 @@ impl noq_proto::congestion::Controller for Unlimited {
 	}
 }
 
-#[allow(clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_types,
+	reason = "noq's traits take its std instants, which this controller ignores"
+)]
 impl noq_proto::congestion::ControllerFactory for Unlimited {
 	fn build(self: Arc<Self>, _: std::time::Instant, _: u16) -> Box<dyn noq_proto::congestion::Controller> {
 		Box::new(*self)
@@ -257,6 +262,16 @@ impl Config {
 		quic.validate().map_err(Error::Config)?;
 
 		let quic = quic.resolve();
+		if quic.keep_alive.is_none() {
+			return Err(Error::Config(crate::Error::NoBackend(
+				"Iroh cannot disable keep-alive; omit quic.keep_alive or set a positive interval",
+			)));
+		}
+		if quic.keylog.is_some() {
+			return Err(Error::Config(crate::Error::NoBackend(
+				"Iroh does not support an explicit quic.keylog path",
+			)));
+		}
 		if quic.gso_disabled() {
 			return Err(Error::GsoUnsupported);
 		}
@@ -289,7 +304,6 @@ impl Config {
 			Endpoint::builder(iroh::endpoint::presets::N0)
 		}
 		.secret_key(secret_key)
-		.keylog(quic.keylog)
 		.transport_config(transport.build());
 		if let Some(addr) = self.bind_v4 {
 			builder = builder.bind_addr(addr)?;
@@ -308,9 +322,9 @@ impl Config {
 /// The per-connection transport config, shared by both roles.
 ///
 /// `keep_alive` is the value [`crate::quic::Config::resolve`] already produced:
-/// `Some` is the interval, and `None` (`0s`) means disabled. iroh 1.2's setter
+/// `Some` is the interval, and `None` (`0s`) means disabled. iroh 1.4's setter
 /// only stores `Some`, and the builder starts at its own 5s heartbeat, so a
-/// disabled interval cannot be written. A zero duration would rearm the timer
+/// disabled interval is refused at bind. A zero duration would rearm the timer
 /// for immediately and spin, so it is not passed. iroh's separate per-path
 /// heartbeat stays at the 5s it ships with: that setter ignores anything longer
 /// and cannot clear it either.
@@ -408,25 +422,16 @@ pub(crate) async fn accept(
 	}
 }
 
-/// Which transport binding an `iroh://` dial negotiated.
+/// Dial `url`, returning the session and where its request target travels.
 ///
-/// Unlike the other schemes, this isn't known until the ALPN is chosen, and it decides
-/// where the request target travels: H3 puts it in the CONNECT URL, raw QUIC has nowhere
-/// to put it but the SETUP.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Binding {
-	/// Raw QUIC over an iroh connection, carrying no request URI.
-	Raw,
-	/// WebTransport over HTTP/3, carrying the request URI in its CONNECT.
-	H3,
-}
-
+/// Unlike the other schemes, that isn't known until the ALPN is chosen: H3 puts it in
+/// the CONNECT URL, raw QUIC has nowhere to put it but the SETUP.
 pub(crate) async fn connect(
 	endpoint: &Endpoint,
 	url: Url,
 	addrs: impl IntoIterator<Item = std::net::SocketAddr>,
 	versions: &moq_net::Versions,
-) -> Result<(web_transport_iroh::Session, Binding)> {
+) -> Result<(web_transport_iroh::Session, moq_net::transport::Address)> {
 	let alpns = versions.alpns();
 	let (primary, rest) = alpns.split_first().ok_or(Error::NoVersions)?;
 
@@ -465,12 +470,15 @@ pub(crate) async fn connect(
 
 			(
 				web_transport_iroh::Session::connect_h3(conn, request).await?,
-				Binding::H3,
+				moq_net::transport::Address::Uri,
 			)
 		}
 		alpn if alpns.contains(&alpn) => {
 			let conn = connecting.await?;
-			(web_transport_iroh::Session::raw(conn), Binding::Raw)
+			(
+				web_transport_iroh::Session::raw(conn),
+				moq_net::transport::Address::Setup,
+			)
 		}
 		_ => return Err(Error::UnsupportedAlpn(alpn)),
 	};
@@ -495,9 +503,41 @@ fn url_set_scheme(url: Url, scheme: &str) -> Result<Url> {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use super::*;
+
+	#[tokio::test]
+	async fn zero_keep_alive_is_refused_only_when_iroh_is_enabled() {
+		let mut config = Config::default();
+		let quic = crate::quic::Config {
+			keep_alive: Some(std::time::Duration::ZERO.into()),
+			..Default::default()
+		};
+		assert!(config.clone().bind(&quic).await.unwrap().is_none());
+		config.enabled = Some(true);
+		let err = config.bind(&quic).await.unwrap_err();
+		assert!(
+			matches!(err, Error::Config(crate::Error::NoBackend(reason)) if reason.contains("cannot disable keep-alive"))
+		);
+	}
+
+	#[tokio::test]
+	async fn explicit_keylog_path_is_refused_only_when_iroh_is_enabled() {
+		let mut config = Config::default();
+		let quic = crate::quic::Config {
+			keylog: Some("keys.log".into()),
+			..Default::default()
+		};
+		assert!(config.clone().bind(&quic).await.unwrap().is_none());
+		config.enabled = Some(true);
+		let err = config.bind(&quic).await.unwrap_err();
+		assert!(matches!(err, Error::Config(crate::Error::NoBackend(reason)) if reason.contains("keylog path")));
+	}
 
 	/// A public builder taking a config this crate did not check, so it refuses
 	/// before it touches the key file or a socket.

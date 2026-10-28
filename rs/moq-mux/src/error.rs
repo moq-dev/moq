@@ -180,51 +180,29 @@ pub enum Error {
 		composition_time_ms: i32,
 	},
 
-	/// [`timeline::Producer::resume`](crate::timeline::Producer::resume) received a checkpoint
-	/// whose record at this window index has a different sequence.
-	#[error("timeline checkpoint record at index {0} has a different sequence")]
-	TimelineCheckpoint(u64),
-
-	/// [`timeline::Producer::push`](crate::timeline::Producer::push) received a record out of order.
-	#[error("timeline record {actual} pushed where {expected} was next")]
-	TimelineSequence {
+	/// An HLS record did not land at its window's next index: pushed out of order, or read where
+	/// its `sequence` differs from its window index.
+	#[error("HLS record {actual} where {expected} was next")]
+	HlsSequence {
 		/// The window's next index.
 		expected: u64,
-		/// The pushed record's sequence.
+		/// The record's sequence.
 		actual: u64,
 	},
 
-	/// A timeline frame report did not advance past the previous one.
-	#[error("timeline report at {position:?} does not advance past {last:?}")]
-	TimelinePosition {
-		/// The rejected report's position.
-		position: hang::timeline::Position,
-		/// The previous report's position.
-		last: hang::timeline::Position,
+	/// An HLS frame report named a group before the previous report's.
+	#[error("HLS report for group {group} after group {last}")]
+	HlsGroup {
+		/// The rejected report's group.
+		group: u64,
+		/// The previous report's group.
+		last: u64,
 	},
 
-	/// The catalog's `archive` entry indexes no timeline for this track.
-	#[error("no timeline for track {0}")]
-	TimelineMissing(String),
-
-	/// A timeline frame report is timed differently from the track's earlier ones: a track is all
-	/// timed or all untimed.
-	#[error("timeline report at {0:?} does not match the track's timing")]
-	TimelineTiming(hang::timeline::Position),
-
-	/// A timeline record has no `pts` or `duration` to decode, as on an untimed track.
-	#[error("timeline record {0} is untimed")]
-	TimelineUntimed(u64),
-
-	/// Error from a muxer/demuxer that reports via `anyhow` (currently MPEG-TS).
+	/// Error from a muxer/demuxer that reports via `anyhow` (currently the MPEG-TS demuxer).
 	/// Boxed in an `Arc` so the enum stays `Clone` (`anyhow::Error` is not).
 	#[error("{0}")]
 	Other(std::sync::Arc<anyhow::Error>),
-
-	/// A timeline catalog section declared a timescale that isn't a valid
-	/// [`moq_net::Timescale`] (zero, or too large).
-	#[error("invalid timeline timescale: {0}")]
-	InvalidTimescale(u32),
 
 	/// A timestamp cannot be mapped between the broadcast clock and the wall: PTS zero would land
 	/// before the moq epoch (2020) or after now, the host's wall clock was unset so the clock has no
@@ -277,15 +255,85 @@ pub enum Error {
 	#[error("capture time is outside the broadcast clock")]
 	InvalidCapture,
 
+	/// A transport stream passthrough was fed packets other than 188 bytes.
+	///
+	/// A 192-byte source (BDAV M2TS, a four-byte timestamp before each packet) or a 204-byte one
+	/// (Reed-Solomon parity after each) is refused rather than reframed, since dropping those bytes
+	/// would break the byte identity passthrough exists for.
+	#[error("transport stream uses {0}-byte packets; passthrough carries 188-byte packets only")]
+	TsPacketSize(usize),
+
+	/// The clock PID's PCR went backwards without `discontinuity_indicator`.
+	///
+	/// The source broke its own timebase without saying so, which leaves no timestamp that both
+	/// follows the PCR and stays on one timeline.
+	#[error("PCR on PID {pid} went back from {from} to {to} without a discontinuity_indicator")]
+	PcrRewind {
+		/// The clock PID.
+		pid: u16,
+		/// The previous PCR, raw 27 MHz ticks.
+		from: u64,
+		/// The PCR that stepped back, raw 27 MHz ticks.
+		to: u64,
+	},
+
+	/// The clock PID's PCR went backwards with `discontinuity_indicator`: the source restarted.
+	///
+	/// What follows is new content, which belongs in a new broadcast rather than on a timeline that
+	/// steps back, so the import ends here.
+	#[error("PCR on PID {pid} restarted from {from} back to {to}; a restart needs a new broadcast")]
+	PcrRestart {
+		/// The clock PID.
+		pid: u16,
+		/// The previous PCR, raw 27 MHz ticks.
+		from: u64,
+		/// The flagged PCR, raw 27 MHz ticks.
+		to: u64,
+	},
+
+	/// The clock PID carried no PCR across more bytes than a group may hold.
+	///
+	/// Those bytes cannot be timed, and holding them for a PCR that may never come is unbounded.
+	#[error("no PCR on PID {pid} for {bytes} bytes")]
+	PcrGap {
+		/// The clock PID.
+		pid: u16,
+		/// The bytes waiting on a PCR.
+		bytes: u64,
+	},
+
 	/// Another publisher instance replaced a followed broadcast, and stitching was off.
 	#[error("another publisher instance replaced broadcast `{0}`; enable stitch to follow it as a program switch")]
 	Replaced(String),
+
+	/// A rendition moved to a track whose media goes back before what the export already read for it.
+	#[error(
+		"rendition {rendition} moved to a track that goes back in time: a group starts at {start:?}, not past {read:?}"
+	)]
+	RenditionRewound {
+		/// The rendition's ID in the catalog.
+		rendition: String,
+		/// Where the new track's group starts.
+		start: std::time::Duration,
+		/// The latest media the export read from the rendition's previous track.
+		read: std::time::Duration,
+	},
 }
 
 impl Error {
 	/// The error for a rendition whose container this build does not recognize.
 	pub(crate) fn unsupported_container(container: &hang::catalog::UnknownContainer) -> Self {
 		Self::UnsupportedContainer(container.kind().unwrap_or("<missing>").to_string())
+	}
+
+	/// The reason a track this error aborts gives its subscribers. Only a transport error has a
+	/// wire code; anything else reaches them as a generic failure while the cause stays here.
+	pub(crate) fn reason(&self) -> moq_net::Error {
+		match self {
+			Self::Moq(err) => err.clone(),
+			Self::Json(moq_json::Error::Net(err)) => err.clone(),
+			_ => moq_net::StreamError::Internal.into(),
+		}
 	}
 }
 

@@ -5,6 +5,8 @@ import MoqFFI
 public enum Media {
     /// A media frame whose keyframe flag marks a group start or video keyframe; audio flags only group starts.
     public typealias MediaFrame = MoqFFI.MoqMediaFrame
+    /// One encoded frame, a gap, or an encoder end.
+    public typealias Read = MoqMediaRead
     /// The JSON manifest describing a broadcast's tracks: video and audio
     /// renditions, display geometry, and untyped application sections.
     public typealias Catalog = MoqFFI.MoqCatalog
@@ -91,6 +93,12 @@ public enum Media {
         public func setSection(name: String, json: String) throws { try ffi.setSection(name: name, json: json) }
         /// Remove an application catalog section if present.
         public func removeSection(name: String) throws { try ffi.removeSection(name: name) }
+        /// Finish the catalog, which ends the broadcast's content.
+        ///
+        /// Finish every track first. The broadcast stays announced and keeps serving its finished
+        /// tracks to late subscribers until its `close()` takes it offline; how long to keep it up
+        /// is yours to decide.
+        public func finish() throws { try ffi.finish() }
     }
 
     /// Read side of a broadcast's catalog. Iterating yields catalog updates as the
@@ -127,10 +135,10 @@ public enum Media {
         }
     }
 
-    /// Read side of a media track. Iterating yields decoded frames in decode order.
+    /// Read side of a media track. Iterating yields encoded frames, gaps, and encoder ends.
     public final class TrackConsumer: AsyncSequence, Sendable {
-        /// The decoded media frame emitted by this sequence.
-        public typealias Element = MediaFrame
+        /// The media read emitted by this sequence.
+        public typealias Element = Read
 
         let ffi: MoqMediaTrackConsumer
 
@@ -142,8 +150,8 @@ public enum Media {
             self.ffi = ffi
         }
 
-        /// The next frame, or `nil` once the track ends or is closed.
-        public func next() async throws -> MediaFrame? {
+        /// The next frame, gap, or encoder end, or `nil` once the track ends or is closed.
+        public func next() async throws -> Read? {
             try await ffi.next()
         }
 
@@ -153,7 +161,7 @@ public enum Media {
         }
 
         /// Create an iterator that cancels native reads when iteration ends.
-        public func makeAsyncIterator() -> AsyncThrowingStream<MediaFrame, Swift.Error>.Iterator {
+        public func makeAsyncIterator() -> AsyncThrowingStream<Read, Swift.Error>.Iterator {
             moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
                 try await ffi.next()
             }.makeAsyncIterator()
@@ -180,7 +188,7 @@ public enum Media {
         ///
         /// Pair it with ``Moq/TrackConsumer/recvGroup()`` to read media in arrival order: frame
         /// timestamps are container media time, not the transport's. Which groups arrive, and how
-        /// long a stalled one stays readable, is the subscription's `maxDelayUs`. Takes over
+        /// long a stalled one stays readable, is the subscription's `maxDelay`. Takes over
         /// `group`, whose handle is closed afterward; throws if it has already read a frame.
         public convenience init(group: Moq.GroupConsumer, container: Container) throws {
             self.init(try MoqMediaGroupConsumer(group: group.ffi, container: container))
@@ -238,13 +246,7 @@ public enum Media {
             try ffi.writeFrame(frame: Frame(payload: payload, timestampUs: timestampUs))
         }
 
-        /// Record a local encoder's frame handoff on the broadcast media clock.
-        /// Call after `writeFrame` only for local encoder output.
-        public func flush(timestampUs: UInt64) throws {
-            try ffi.flush(timestampUs: timestampUs)
-        }
-
-        /// Mark a timeline break and restart handoff measurement, preserving advertised jitter.
+        /// Mark a timeline break, preserving the advertised jitter and delay.
         public func discontinuity() throws {
             try ffi.discontinuity()
         }

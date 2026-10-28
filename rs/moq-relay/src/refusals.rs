@@ -1,21 +1,24 @@
 //! Relay refusal collection, shared with published stats when enabled.
 
 use crate::auth;
-pub(crate) use moq_net::stats::Refusal;
-use moq_net::stats::{Registry, Tier};
+pub(crate) use moq_net::stats::RefusalKind;
+use moq_net::{
+	Path,
+	stats::{Registry, Tier},
+};
 
-impl From<&auth::Error> for Refusal {
+impl From<&auth::Error> for RefusalKind {
 	// Exhaustive on purpose: a new `auth::Error` variant must pick its reason here.
 	fn from(err: &auth::Error) -> Self {
 		match err {
 			auth::Error::Refused(refusal) => match refusal.reason {
-				moq_auth::refusal::Reason::Forbidden => Refusal::Forbidden,
-				moq_auth::refusal::Reason::Expired => Refusal::Expired,
-				_ => Refusal::Refused,
+				moq_auth::refusal::Reason::Forbidden => RefusalKind::Forbidden,
+				moq_auth::refusal::Reason::Expired => RefusalKind::Expired,
+				_ => RefusalKind::Refused,
 			},
-			auth::Error::Unavailable(_) => Refusal::Unavailable,
-			auth::Error::Forbidden(_) => Refusal::Forbidden,
-			auth::Error::Request(_) => Refusal::Request,
+			auth::Error::Unavailable(_) => RefusalKind::Unavailable,
+			auth::Error::Forbidden(_) => RefusalKind::Forbidden,
+			auth::Error::Request(_) => RefusalKind::Request,
 		}
 	}
 }
@@ -38,14 +41,20 @@ impl Refusals {
 			Self::default()
 		}
 	}
-	pub(crate) fn record(&self, reason: Refusal) {
-		self.0.tier(Tier::default()).refuse("", reason);
+	pub(crate) fn record(&self, reason: RefusalKind) {
+		self.0.tier(Tier::default()).refuse(Path::empty(), reason);
 	}
 	pub(crate) fn record_auth(&self, err: &auth::Error) {
 		if let auth::Error::Refused(refusal) = err {
-			self.0
-				.tier(refusal.tier.clone().map(Tier::new).unwrap_or_default())
-				.refuse(refusal.root.as_deref().unwrap_or(""), err.into());
+			// A refusal only counts: one naming a tier or root too long for a path counts
+			// under the default instead.
+			let tier = crate::configured_tier(refusal.tier.clone()).unwrap_or_default();
+			let root = refusal
+				.root
+				.as_deref()
+				.and_then(|root| Path::new(root).ok())
+				.unwrap_or_default();
+			self.0.tier(tier).refuse(root, err.into());
 		} else {
 			self.record(err.into());
 		}
@@ -58,7 +67,7 @@ impl Refusals {
 		counts
 	}
 	#[cfg(test)]
-	pub(crate) fn count(&self, reason: Refusal) -> u64 {
+	pub(crate) fn count(&self, reason: RefusalKind) -> u64 {
 		self.snapshot().count(reason)
 	}
 }
@@ -99,6 +108,6 @@ mod tests {
 			assert_eq!(presence.sessions_refused.forbidden, 1);
 			assert_eq!(presence.sessions_refused.expired, 1);
 		}
-		assert_eq!(refusals.count(Refusal::Expired), 4);
+		assert_eq!(refusals.count(RefusalKind::Expired), 4);
 	}
 }

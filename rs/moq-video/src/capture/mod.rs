@@ -3,8 +3,9 @@
 //! - macOS camera -> AVFoundation, screen -> ScreenCaptureKit, both yielding
 //!   zero-copy `CVPixelBuffer` surfaces straight to VideoToolbox.
 //! - Linux camera -> native V4L2 (YUYV / MJPEG -> CPU I420), or a PipeWire
-//!   camera node (`pipewire` feature), X11 display and window -> X11, Wayland
-//!   display and window -> xdg-desktop-portal + PipeWire (`pipewire` feature).
+//!   camera node (`pipewire` feature), X11 display and window -> X11, and a
+//!   system-picked screen or window -> xdg-desktop-portal + PipeWire (`pipewire`
+//!   feature).
 //! - Windows camera -> native Media Foundation (`IMFSourceReader`), display and
 //!   window -> Windows.Graphics.Capture (GPU NV12, Windows 10 2004 or newer).
 //!
@@ -12,7 +13,7 @@
 
 use std::sync::Arc;
 
-use crate::{Error, Frame, Rate};
+use crate::{Error, Frame, FrameRate, Output};
 
 mod channel;
 use channel::FrameChannel;
@@ -96,8 +97,10 @@ pub enum Source {
 
 	/// A whole display. `None` opens the main display.
 	///
-	/// The id is the opaque value [`displays`] reports. On Wayland the
-	/// xdg-desktop-portal picker owns selection and no stable id is available.
+	/// The id is the opaque value [`displays`] reports. Linux supports X11
+	/// displays only, including XWayland's `x11:` ids; on Wayland the main
+	/// display and any other id are refused, so ask the system picker with
+	/// [`Source::Portal`] instead.
 	Display(Option<String>),
 
 	/// A single window, by the id [`windows`] reports. Supported on macOS,
@@ -173,12 +176,12 @@ pub struct Mode {
 	///
 	/// Empty when the driver describes a continuous range instead of listing
 	/// rates, or cannot enumerate intervals for this size.
-	pub framerates: Vec<Rate>,
+	pub framerates: Vec<FrameRate>,
 }
 
 impl Mode {
 	/// The highest rate this mode offers, or `None` when the driver listed none.
-	pub fn max_framerate(&self) -> Option<Rate> {
+	pub fn max_framerate(&self) -> Option<FrameRate> {
 		self.framerates.first().copied()
 	}
 }
@@ -260,10 +263,13 @@ pub struct Config {
 	/// Preferred output height in pixels.
 	pub height: Option<u32>,
 	/// Preferred exact frame rate.
-	pub framerate: Option<Rate>,
+	pub framerate: Option<FrameRate>,
 	/// Draw the mouse cursor into captured frames. Screen/window/app sources
 	/// only; ignored by cameras. Defaults to `true`.
 	pub cursor: bool,
+	/// Where captured pixels live. Defaults to [`Output::Native`]: whatever the
+	/// platform captures into, a GPU surface or CPU pixels.
+	pub output: Output,
 }
 
 impl Default for Config {
@@ -274,6 +280,7 @@ impl Default for Config {
 			height: None,
 			framerate: None,
 			cursor: true,
+			output: Output::Native,
 		}
 	}
 }
@@ -290,9 +297,11 @@ pub struct Stream {
 	chan: Arc<FrameChannel>,
 	width: u32,
 	height: u32,
-	framerate: Option<Rate>,
+	framerate: Option<FrameRate>,
 	color: Option<crate::Color>,
 	label: String,
+	/// [`Config::output`], applied to each frame as it is read.
+	output: Output,
 	/// First frame captured during [`open`] (some backends learn their geometry
 	/// only from a frame); returned by the first [`read`](Self::read).
 	pending: Option<Frame>,
@@ -307,7 +316,7 @@ impl Stream {
 		chan: Arc<FrameChannel>,
 		width: u32,
 		height: u32,
-		framerate: Option<Rate>,
+		framerate: Option<FrameRate>,
 		label: String,
 		pending: Option<Frame>,
 		backend: Keepalive,
@@ -320,6 +329,7 @@ impl Stream {
 			framerate,
 			color,
 			label,
+			output: Output::Native,
 			pending,
 			_backend: backend,
 		}
@@ -335,10 +345,15 @@ impl Stream {
 	/// Dropping this future cancels only the pending read. Dropping the stream
 	/// releases the capture source.
 	pub async fn read(&mut self) -> Result<Option<Frame>, Error> {
-		if let Some(frame) = self.pending.take() {
-			return Ok(Some(frame));
-		}
-		self.chan.recv().await
+		let frame = match self.pending.take() {
+			Some(frame) => frame,
+			None => match self.chan.recv().await? {
+				Some(frame) => frame,
+				None => return Ok(None),
+			},
+		};
+		let surface = self.output.convert(frame.surface)?;
+		Ok(Some(Frame::new(surface, frame.timestamp)))
 	}
 
 	/// Width of the captured frames in pixels.
@@ -352,7 +367,7 @@ impl Stream {
 	}
 
 	/// The negotiated frame rate, or `None` if the source doesn't report one.
-	pub fn framerate(&self) -> Option<Rate> {
+	pub fn framerate(&self) -> Option<FrameRate> {
 		self.framerate
 	}
 
@@ -382,7 +397,7 @@ pub(crate) struct Synthetic {
 #[cfg(all(test, feature = "openh264"))]
 impl Synthetic {
 	/// Open a synthetic device with the given geometry, returning it and the stream reading it.
-	pub(crate) fn open(size: crate::Size, framerate: Rate) -> (Self, Stream) {
+	pub(crate) fn open(size: crate::Size, framerate: FrameRate) -> (Self, Stream) {
 		let chan = FrameChannel::new();
 		let stream = Stream::new(
 			chan.clone(),
@@ -414,6 +429,12 @@ impl Synthetic {
 
 /// Open the capture source described by `config`.
 pub async fn open(config: &Config) -> Result<Stream, Error> {
+	let mut stream = open_source(config).await?;
+	stream.output = config.output;
+	Ok(stream)
+}
+
+async fn open_source(config: &Config) -> Result<Stream, Error> {
 	match &config.source {
 		Source::Camera(device) => {
 			let _ = device;
@@ -452,18 +473,7 @@ pub async fn open(config: &Config) -> Result<Stream, Error> {
 			{
 				wgc::open(config).await
 			}
-			#[cfg(all(target_os = "linux", feature = "pipewire"))]
-			{
-				if x11::selected(device.as_deref()) {
-					x11::open_display(config, device.as_deref()).await
-				} else {
-					if let Some(device) = device {
-						tracing::debug!(%device, "portal screen capture ignores the device selector; the picker owns selection");
-					}
-					pipewire::open(config, None).await
-				}
-			}
-			#[cfg(all(target_os = "linux", not(feature = "pipewire")))]
+			#[cfg(target_os = "linux")]
 			{
 				x11::open_display(config, device.as_deref()).await
 			}
@@ -492,7 +502,7 @@ pub async fn open(config: &Config) -> Result<Stream, Error> {
 			}
 		}
 		#[cfg(all(target_os = "linux", feature = "pipewire"))]
-		Source::Portal(selection) => pipewire::open(config, Some(selection)).await,
+		Source::Portal(selection) => pipewire::open(config, selection).await,
 		Source::App(id) => {
 			let _ = id;
 			#[cfg(target_os = "macos")]

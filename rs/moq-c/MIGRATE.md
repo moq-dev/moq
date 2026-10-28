@@ -4,6 +4,56 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
+
+Every function taking a path, such as `moq_origin_create_broadcast` and `moq_origin_request`, returns an error for a path with a leading, trailing, or doubled `/` instead of collapsing it. Pass the canonical path, such as `room/cam`.
+
+### Request handlers are named requests ([#6752](https://github.com/moq-dev/moq/pull/6752))
+
+The request-handler functions are renamed to match moq-net's `requests()`; their arguments and callbacks are unchanged:
+`moq_origin_dynamic` and `moq_origin_dynamic_cancel` are `moq_origin_requests` and `moq_origin_requests_cancel`,
+`moq_publish_dynamic`, `moq_publish_track_dynamic`, and `moq_track_request_dynamic` are `moq_publish_requests`, `moq_publish_track_requests`, and `moq_track_request_requests`,
+and `moq_publish_dynamic_cancel` is `moq_publish_requests_cancel`.
+
+### Session allocator ([#6751](https://github.com/moq-dev/moq/pull/6751))
+
+`moq_session_bandwidth` is `moq_session_allocator`, `moq_bandwidth_reserve` is `moq_allocator_reserve`, and `moq_bandwidth_close` is `moq_allocator_close`, matching `moq_net::bandwidth::Allocator`. `moq_reservation_grant` is `moq_reservation_rate`, matching `moq_net::bandwidth::Reservation::rate()`. Signatures are unchanged. The receive estimate keeps its names (`moq_session_recv_bandwidth`, `moq_bandwidth_consumer_*`).
+
+### `moq_encode_video` takes a `moq_video_encode_options`
+
+`moq_encode_video`'s fourth argument is a `const moq_video_encode_options *` instead of a `uint32_t bandwidth`: pass `NULL` where you passed `0`, or `&(moq_video_encode_options){.bandwidth = bandwidth}`.
+Its `lower` field takes the handle of the next lower rendition's encoder, to disable this one while its bandwidth grant cannot fund it; that needs a `bandwidth` and a bitrate above the lower encoder's.
+`moq_reservation_rate` reports the slice the track would get back while nothing subscribes to it, instead of no grant.
+
+### Decoders deliver reads
+
+`moq_decode_audio` and `moq_decode_video` call back with a read id per decoded frame, gap, or encoder end instead of a frame id. Replace `moq_decode_audio_frame` / `moq_decode_video_frame` with `moq_decode_audio_read` / `moq_decode_video_read`, which fill a `moq_audio_read` / `moq_video_read`: check `kind` (`MOQ_DECODE_READ_FRAME`, `MOQ_DECODE_READ_GAP`, `MOQ_DECODE_READ_END`) and take the frame from its `frame` field, the lost span from `gap`, or `end_us`. Free every id with `moq_decode_audio_read_free` / `moq_decode_video_read_free` where you called the `_frame_free` functions. Skip gap and end reads to keep the old behavior, or restart playback there, since what follows does not continue what came before.
+
+### Sessions report a lifecycle snapshot
+
+`moq_session_connect` and `moq_session_request_accept` take a `moq_state_callback` instead of a `moq_status_callback`: `void on_state(void *user_data, const moq_connection_state *state)`.
+Each change delivers a `moq_connection_state` with `phase`, `connects`, `failure`, and the live `protocol`; copy what you keep, since it is valid only during the callback.
+Read `state->connects` where you read a positive status code. A failed dial or dropped connection now fires the callback with a negative `failure`, so drop your `moq_session_failure` polling; `moq_error()` describes it during the callback.
+The terminal call has phase `MOQ_CONNECTION_PHASE_CLOSED`, with `failure` zero after a requested close or the error that ended the session, where the terminal status code used to be. Release `user_data` there, as before.
+
+### Exact encoder rates and publication options
+
+`moq_video_encoder_input.framerate` is now `moq_video_frame_rate { numerator,
+denominator }`, changing the C ABI layout. Replace `30` with `{30, 1}` or use
+`{30000, 1001}` for an exact fractional rate. Both components must be nonzero;
+rates above 1,000,000 fps are refused. Recompile callers with the generated header
+and matching native library. Invalid rational rates return `MOQ_ERROR_INVALID_CONFIG`.
+Audio and publication track arguments are unchanged.
+
+### Video rendition preference
+
+`moq_video_config` gains `int32_t preference`. Initialize it to `0` to keep the default ranking; higher values are preferred and compatibility transcodes use `-1`. Rebuild C consumers against the matching header and library because the struct layout changes.
+
+### A broadcast reference waits for its sibling's announcement (#6254)
+
+`moq_consume_video` and `moq_consume_audio` on a rendition whose catalog `broadcast` field names a sibling now wait for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Where you skipped such a rendition on that error, give up on it yourself with `moq_consume_video_cancel` or `moq_consume_audio_cancel`.
+
 ### JSON snapshot `delta_ratio` is `deltas`
 
 `moq_json_snapshot_config.delta_ratio` is replaced by `bool deltas`.
@@ -19,8 +69,8 @@ To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 beco
 ### A client asks only about what it watches (#6165)
 
 On moq-lite, a client session asks its relay for announcements only under paths something watches, through `moq_origin_announced` or `moq_origin_announced_broadcast`, instead of under its whole scope at connect.
-`moq_origin_request` owns discovery of its path while resolving and reports an unroutable path only once discovery has synced without a covering route.
-Request the path directly; no separate announcement stream is needed for resolution. An explicit selected-handler refusal is returned directly, including while following announcements. Handle that error before explicitly trying a later resolution.
+`moq_origin_request` watches nothing, so on a client it fails with a negative code for a path nothing watches, even when the relay announces it.
+Resolve the path with `moq_origin_announced_broadcast`, or hold `moq_origin_announced` over its prefix while requesting.
 moq-transport and moq-lite-03/04 sessions are unchanged.
 
 ### `MOQ_CONTAINER_FORMAT_FMP4` unwraps to Legacy (#6250)
@@ -36,7 +86,7 @@ Clamp timestamps you build from unbounded input to `2^61 - 1`.
 
 ### Finished tracks stay until the broadcast ends (#6157)
 
-`moq_publish_track_finish`, `moq_publish_media_finish`, `moq_publish_container_finish`, and the encoder finishes now release the handle while the broadcast keeps the finished track listed, with its catalog rendition and demand, until `moq_publish_close` or the new `moq_publish_finish_close`.
+`moq_publish_track_finish`, `moq_publish_media_finish`, `moq_publish_container_finish`, and the encoder finishes now release the handle while the broadcast keeps the finished track listed, with its catalog rendition and demand, until `moq_publish_close`.
 Publish a replacement under a new name, and expect a finished track's demand terminal callback when the broadcast closes rather than at the finish.
 
 ### A claim answers by publishing (#5678)
@@ -174,6 +224,7 @@ if (frame.timestamp_present) use(frame.timestamp_us);
 ### `moq_publish_finish` is removed (#4152)
 
 Close the broadcast with `moq_publish_close`.
+To end its content first, call `moq_publish_catalog_finish`; the broadcast stays up until `moq_publish_close`.
 
 ### A decoded frame can fail on its own (#4094)
 

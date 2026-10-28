@@ -13,15 +13,15 @@
 //! [`moq_video_codec`]).
 
 use std::ffi::{c_char, c_void};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use tokio::sync::oneshot;
 
+use crate::decode::Read;
 use crate::ffi::OnStatus;
 use crate::task::Task;
-use crate::{Error, Id, NonZeroSlab, Shared, State, ffi};
+use crate::{Error, Id, NonZeroSlab, Shared, State, ffi, moq_decode_gap, moq_decode_read_kind};
 
 // ---- C-visible types ----
 
@@ -31,7 +31,7 @@ use crate::{Error, Id, NonZeroSlab, Shared, State, ffi};
 /// carry it are typed `u32`. A C caller passing an unknown discriminant gets
 /// `Error::InvalidCode` instead of UB.
 #[repr(C)]
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_video_pixel_format {
 	/// Tightly-packed planar I420: Y, then U, then V, no row padding.
@@ -47,7 +47,7 @@ pub enum moq_video_pixel_format {
 /// Not every codec has a backend on every machine: H.265 is hardware-only, so
 /// publishing it fails where no hardware encoder is available.
 #[repr(C)]
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_video_codec {
 	/// H.264 / AVC, published as an `avc3` track.
@@ -58,7 +58,7 @@ pub enum moq_video_codec {
 
 /// Which encoder implementation [`moq_encode_video`] should use.
 #[repr(C)]
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_video_encoder_kind {
 	/// Prefer a platform hardware encoder, falling back to software.
@@ -71,11 +71,20 @@ pub enum moq_video_encoder_kind {
 	MOQ_VIDEO_ENCODER_KIND_NAMED = 3,
 }
 
+/// An exact video frame rate in frames per second.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct moq_video_frame_rate {
+	/// Frames per second numerator; must be nonzero.
+	pub numerator: u32,
+	/// Frames per second denominator; must be nonzero.
+	pub denominator: u32,
+}
+
 /// Raw frame layout the caller hands to [`moq_encode_video_frame`], plus
 /// the resolution and rate the encoder is opened at. Every published frame must
 /// match `width` x `height`; scale before publishing if your source moves.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_video_encoder_input {
 	/// `moq_video_pixel_format` discriminant.
 	pub format: u32,
@@ -85,13 +94,12 @@ pub struct moq_video_encoder_input {
 	pub height: u32,
 	/// Nominal frames per second, used for the codec time base and the default
 	/// bitrate and keyframe interval. Must be non-zero.
-	pub framerate: u32,
+	pub framerate: moq_video_frame_rate,
 }
 
 /// Codec-side configuration for [`moq_encode_video`]. Every knob spells
 /// "unset" as 0.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_video_encoder_output {
 	/// `moq_video_codec` discriminant.
 	pub codec: u32,
@@ -110,6 +118,26 @@ pub struct moq_video_encoder_output {
 	pub encoder_len: usize,
 }
 
+/// Rate control for [`moq_encode_video`].
+///
+/// NULL or zeroed holds the configured bitrate regardless of congestion. New fields
+/// always append, so a zeroed struct keeps meaning the defaults.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct moq_video_encode_options {
+	/// A handle from [`crate::moq_session_allocator`] whose grant the encoder follows,
+	/// or 0 to hold the configured bitrate.
+	pub bandwidth: u32,
+	/// The [`moq_encode_video`] handle of the next lower rendition of the same source,
+	/// or 0. It makes this encoder a simulcast rung: while its grant cannot fund it, it
+	/// stops encoding (frames published to it are dropped) and advertises itself
+	/// disabled, so the lower renditions keep their share, then resumes on a keyframe
+	/// once the grant recovers. It takes the track priority one below `lower`'s, so the
+	/// allocator fills that one first. It needs a `bandwidth`, and a bitrate above
+	/// `lower`'s.
+	pub lower: u32,
+}
+
 /// One raw frame handed to [`moq_encode_video_frame`].
 ///
 /// Pixel format and resolution are fixed by [`moq_video_encoder_input`] at
@@ -118,7 +146,6 @@ pub struct moq_video_encoder_output {
 /// returning). The decode side has its own [`moq_video_frame`], which does carry
 /// dimensions, since there they are what the stream turned out to be.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_video_encoder_frame {
 	/// Presentation timestamp, in microseconds.
 	pub timestamp_us: u64,
@@ -139,7 +166,6 @@ pub struct moq_video_encoder_frame {
 /// field changes its layout, so rebuild callers against the `moq.h` that ships
 /// with the `libmoq.a` they link.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_video_decoder_output {
 	/// Upper bound on buffering before skipping a stalled group, in
 	/// microseconds. Same congestion-control knob as
@@ -163,14 +189,13 @@ pub struct moq_video_decoder_output {
 /// height/2` each), no row padding, BT.601 limited range; RGBA is tightly
 /// packed `width * height * 4` bytes, no row padding.
 ///
-/// The frame id owns the decoded picture, and the pixels are produced from it
-/// on the first [`moq_decode_video_frame`] call for that id. `data` stays valid
-/// until the same id is released with [`moq_decode_video_frame_free`].
+/// The read id owns the decoded picture, and the pixels are produced from it
+/// on the first [`moq_decode_video_read`] call for that id. `data` stays valid
+/// until the same id is released with [`moq_decode_video_read_free`].
 ///
 /// The publish side has its own [`moq_video_encoder_frame`], which carries no
 /// dimensions because the encoder already fixed them.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_video_frame {
 	/// The presentation timestamp in microseconds.
 	pub timestamp_us: u64,
@@ -184,15 +209,32 @@ pub struct moq_video_frame {
 	pub data_size: usize,
 }
 
+/// One read from [`moq_decode_video`]: a decoded picture, or a break between them.
+/// `kind` says which field is filled; the others are zeroed.
+#[repr(C)]
+pub struct moq_video_read {
+	/// Which kind of read this is.
+	pub kind: moq_decode_read_kind,
+	/// The decoded picture, for [moq_decode_read_kind::MOQ_DECODE_READ_FRAME].
+	pub frame: moq_video_frame,
+	/// The lost span, for [moq_decode_read_kind::MOQ_DECODE_READ_GAP]. Every picture from
+	/// before the loss precedes it, and what follows does not continue what came before.
+	pub gap: moq_decode_gap,
+	/// Where the stopped encoder's media stops in microseconds, for
+	/// [moq_decode_read_kind::MOQ_DECODE_READ_END]. The stopped encoder's last pictures
+	/// precede it; what follows comes from a fresh encoder.
+	pub end_us: u64,
+}
+
 // ---- State extension (used internally by lib.rs) ----
 
-/// Raw-video state: encoders being published, plus decoder tasks and their
-/// buffered decoded frames.
+/// Raw-video state: encoders being published, plus decoder tasks and the
+/// reads they delivered.
 #[derive(Default)]
 pub struct Video {
 	producers: NonZeroSlab<Shared<VideoEncoder>>,
 	consumer_tasks: NonZeroSlab<Task>,
-	frames: NonZeroSlab<Arc<VideoFrame>>,
+	reads: NonZeroSlab<Read<Arc<VideoFrame>>>,
 }
 
 /// Wait out an encode-thread round trip from a C entry point.
@@ -222,42 +264,103 @@ fn video_ceiling(
 		})
 }
 
+/// The policy a rendition follows: its manual `ceiling`, above the `lower` rendition's
+/// current ceiling, if any.
+fn video_policy(ceiling: moq_net::bandwidth::Rate, lower: Option<moq_net::bandwidth::Rate>) -> moq_mux::rate::Policy {
+	let mut policy = moq_mux::rate::Policy::new(ceiling);
+	policy.lower = lower;
+	policy
+}
+
+/// The lower rendition's current ceiling, or `None` once it finished, which leaves
+/// this one nothing to fall back to, so it never disables. Arms `waiter` for either
+/// change.
+fn lower_ceiling(
+	lower: &Option<kio::Consumer<moq_net::bandwidth::Rate>>,
+	waiter: &kio::Waiter,
+) -> Option<moq_net::bandwidth::Rate> {
+	let lower = lower.as_ref()?;
+	match lower.poll(waiter, |_| std::task::Poll::<()>::Pending) {
+		std::task::Poll::Pending => Some(*lower.read()),
+		// The closure never completes, so this is the channel closing.
+		std::task::Poll::Ready(_) => None,
+	}
+}
+
+/// Feed each grant through the same policy moq-video uses, and retune the live
+/// encoder, disabling and resuming a rung. Retires on
+/// [`BitrateUnsupported`](moq_video::Error::BitrateUnsupported).
 async fn follow_reservation(
 	inner: Shared<VideoEncoder>,
-	mut consumer: moq_net::bandwidth::Consumer,
-	ceiling: Arc<AtomicU64>,
+	lower: Option<kio::Consumer<moq_net::bandwidth::Rate>>,
+	consumer: moq_net::bandwidth::Consumer,
+	ceiling: moq_net::bandwidth::Rate,
 ) {
-	use moq_mux::rate::{Control, Policy};
-
-	let mut max = moq_net::bandwidth::Rate::from_bps(ceiling.load(Ordering::SeqCst));
-	let mut control = Control::new(Policy::new(max));
+	let noop = kio::Waiter::noop();
+	let mut follower = moq_mux::rate::Follower::new(consumer, video_policy(ceiling, lower_ceiling(&lower, &noop)));
 	loop {
-		let estimate = match consumer.changed().await {
-			Ok(estimate) => estimate,
-			Err(_) => return,
+		// Both ceilings are read on every wake, before the follower filters a grant against
+		// them. This one's `moq_encode_video_bitrate` moves its reservation after moving its
+		// ceiling, which wakes this poll; the lower one's ceiling wakes it directly, wherever
+		// that rendition reserves. The lower one is read first, so no two encoder locks are
+		// ever held at once.
+		let next = kio::wait(|waiter| {
+			let below = lower_ceiling(&lower, waiter);
+			let guard = inner.lock();
+			let Some(producer) = guard.as_ref() else {
+				return std::task::Poll::Ready(None);
+			};
+			follower.set_policy(video_policy(*producer.ceiling.read(), below));
+			follower.poll_next(waiter).map(Some)
+		})
+		.await;
+		let Some(Ok(target)) = next else {
+			return;
 		};
-		let next = moq_net::bandwidth::Rate::from_bps(ceiling.load(Ordering::SeqCst));
-		if next != max {
-			max = next;
-			control = Control::new(Policy::new(max));
-		}
-		let Some(bitrate) = control.update(estimate, moq_net::time::now()) else {
-			continue;
-		};
-
+		let below = lower_ceiling(&lower, &noop);
 		let mut guard = inner.lock();
 		let Some(producer) = guard.as_mut() else {
 			return;
 		};
-		match block_on(producer.encoder.set_bitrate(bitrate)) {
-			Ok(()) => tracing::debug!(bitrate = bitrate.as_bps(), "adjusted encoder bitrate"),
-			Err(moq_video::Error::BitrateUnsupported(name)) => {
-				tracing::warn!(encoder = name, "encoder cannot follow the bandwidth estimate");
-				return;
-			}
-			Err(err) => {
-				tracing::warn!(error = %err, bitrate = bitrate.as_bps(), "failed to adjust encoder bitrate");
-			}
+		let policy = video_policy(*producer.ceiling.read(), below);
+		if retune(&mut follower, policy, target, |target| producer.apply(target)).is_err() {
+			return;
+		}
+	}
+}
+
+/// Apply the follower's next `target` through `apply`, unless the `policy` moved since it
+/// was asked for: then follow under the new policy, whose manual ceiling
+/// `moq_encode_video_bitrate` already applied, instead. Returns the target applied, or
+/// `Err` with the name of an encoder that cannot follow at all.
+fn retune(
+	follower: &mut moq_mux::rate::Follower,
+	policy: moq_mux::rate::Policy,
+	target: moq_mux::rate::Target,
+	apply: impl FnOnce(moq_mux::rate::Target) -> Result<(), moq_video::Error>,
+) -> Result<Option<moq_mux::rate::Target>, &'static str> {
+	if *follower.policy() != policy {
+		// The target was never applied, so take it back first: a policy that keeps the
+		// follower's state (a moved lower rendition) would otherwise count it applied.
+		follower.failed();
+		follower.set_policy(policy);
+		return Ok(None);
+	}
+	match apply(target) {
+		Ok(()) => {
+			tracing::debug!(?target, "adjusted encoder bitrate");
+			Ok(Some(target))
+		}
+		Err(moq_video::Error::BitrateUnsupported(name)) => {
+			tracing::warn!(encoder = name, "encoder cannot follow the bandwidth estimate");
+			Err(name)
+		}
+		// The follower takes the target back and retries it, so a quiet grant still
+		// recovers.
+		Err(err) => {
+			tracing::warn!(error = %err, ?target, "failed to adjust encoder bitrate");
+			follower.failed();
+			Ok(None)
 		}
 	}
 }
@@ -272,8 +375,17 @@ async fn follow_reservation(
 /// unbalancing the per-thread COM apartment the Windows backend opens. The sink
 /// owns the thread instead, so every caller is welcome.
 pub(crate) struct VideoEncoder {
-	encoder: moq_video::encode::Sink,
-	producer: moq_video::encode::Producer<moq_mux::catalog::hang::Extra>,
+	/// `None` while the rendition is disabled for lack of bandwidth.
+	encoder: Option<moq_video::encode::Sink>,
+	producer: moq_video::encode::Producer,
+	/// The encoder settings, to reopen at [`ceiling`](Self::ceiling) when a disabled
+	/// rendition resumes.
+	config: moq_video::encode::Config,
+	/// The track priority this rendition was published at; a higher rung takes one below.
+	priority: i8,
+	/// The next lower rendition's ceiling, set when this one is a simulcast rung. A
+	/// consumer, so a rung never keeps the rendition below it publishing.
+	lower: Option<kio::Consumer<moq_net::bandwidth::Rate>>,
 	format: moq_video_pixel_format,
 	/// The encoded resolution, from the publish config. Frames carry only pixels,
 	/// so this is what says how to read them.
@@ -281,12 +393,25 @@ pub(crate) struct VideoEncoder {
 	reservation: Option<Arc<moq_net::bandwidth::Reservation>>,
 	follow: Option<oneshot::Sender<()>>,
 	followed: Option<crate::ffi::Background>,
-	ceiling: Option<Arc<AtomicU64>>,
-	finished: crate::publish::Finished,
+	/// The manual ceiling [`moq_encode_video_bitrate`] last applied, which caps every
+	/// grant. Behind the encoder's lock, so the follower never reads an old, higher
+	/// one and retunes over a newer cap. A channel, so a rung above this rendition
+	/// wakes when it moves and when this rendition ends.
+	pub(crate) ceiling: kio::Producer<moq_net::bandwidth::Rate>,
+	children: crate::publish::Children,
+}
+
+impl crate::publish::Abort for Shared<VideoEncoder> {
+	fn abort(self, err: moq_net::Error) {
+		// Dropping the follow sender stops the rate follower; the encoder closes with it.
+		if let Some(encoder) = self.take() {
+			encoder.producer.abort(err);
+		}
+	}
 }
 
 /// A delivered frame: the decoded picture, retained until its id is freed, and
-/// the packed pixels [`moq_decode_video_frame`] produces from it on first use.
+/// the packed pixels [`moq_decode_video_read`] produces from it on first use.
 ///
 /// Converting on first use rather than at delivery keeps the work off the
 /// delivery task and skips it for a frame the caller frees unread. The pixels
@@ -354,18 +479,20 @@ pub struct DecoderOutput {
 /// anyway would leave a truncated stream indistinguishable from a complete one,
 /// and only the local caller would ever learn otherwise.
 fn finalize(
-	mut producer: moq_video::encode::Producer<moq_mux::catalog::hang::Extra>,
+	mut producer: moq_video::encode::Producer,
 	drained: Result<(), moq_video::Error>,
-	finished: &crate::publish::Finished,
+	children: &crate::publish::Children,
+	child: crate::publish::Child,
 ) -> Result<(), Error> {
 	match drained {
 		Ok(()) => {
 			producer.finish()?;
 			// The broadcast keeps the finished track, so its finish still holds it.
-			finished.keep(producer);
+			children.keep(child, producer);
 			Ok(())
 		}
 		Err(err) => {
+			children.forget(child);
 			producer.abort(moq_net::Error::Transport(err.to_string()));
 			Err(err.into())
 		}
@@ -387,10 +514,14 @@ impl VideoEncoder {
 			moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA => moq_video::Surface::rgba(data, size)?,
 		};
 
+		// Disabled: nothing is encoded until the grant resumes the rendition.
+		let Some(encoder) = self.encoder.as_mut() else {
+			return Ok(());
+		};
 		let frame = moq_video::Frame::new(surface, moq_net::Timestamp::from_micros(timestamp_us)?);
 		// A backend that pipelines hands back an earlier frame's output, so this is
 		// zero or more access units rather than one per call.
-		let encoded = block_on(self.encoder.encode(frame))?;
+		let encoded = block_on(encoder.encode(frame))?;
 		self.producer.publish(&encoded)?;
 		Ok(())
 	}
@@ -400,38 +531,96 @@ impl VideoEncoder {
 			followed.check()?;
 		}
 		// A keyframe is what a cut is on the wire: the importer closes the open
-		// group and starts a new one at it.
-		Ok(block_on(self.encoder.cut())?)
+		// group and starts a new one at it. A disabled rung resumes on a keyframe anyway.
+		match self.encoder.as_mut() {
+			Some(encoder) => Ok(block_on(encoder.cut())?),
+			None => Ok(()),
+		}
 	}
 
 	fn publish_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
 		if let Some(followed) = &self.followed {
 			followed.check()?;
 		}
-		block_on(self.encoder.set_bitrate(moq_net::bandwidth::Rate::from_bps(bitrate)))?;
-		// Ceiling first: `update` wakes the follower, which must not read the old
-		// floor and retune above this cap before parking on an unchanged grant.
-		if let Some(ceiling) = &self.ceiling {
-			ceiling.store(bitrate, Ordering::SeqCst);
+		let bitrate = moq_net::bandwidth::Rate::from_bps(bitrate);
+		// A disabled rung has no encoder to retune; it reopens at the new ceiling.
+		if let Some(encoder) = self.encoder.as_mut() {
+			block_on(encoder.set_bitrate(bitrate))?;
 		}
+		let Ok(mut ceiling) = self.ceiling.write() else {
+			unreachable!("only dropping the encoder closes its ceiling")
+		};
+		*ceiling = bitrate;
+		drop(ceiling);
 		if let Some(reservation) = &self.reservation {
-			reservation.update(moq_net::bandwidth::Rate::from_bps(bitrate));
+			reservation.update(bitrate);
 		}
 		Ok(())
 	}
 
-	fn publish_finish(self) -> Result<(), Error> {
+	/// Apply a rate-control target, leaving the rendition as it was on an error.
+	///
+	/// A disable drains the encoder into the track and closes it; a resume reopens one
+	/// at the ceiling, whose first frame is a keyframe on every backend, and retunes it
+	/// to the target. An encoder that cannot retune still resumes, at its ceiling, and
+	/// reports [`BitrateUnsupported`](moq_video::Error::BitrateUnsupported) so rate
+	/// control retires.
+	fn apply(&mut self, target: moq_mux::rate::Target) -> Result<(), moq_video::Error> {
+		let bitrate = match target {
+			moq_mux::rate::Target::Enabled(bitrate) => bitrate,
+			moq_mux::rate::Target::Disabled => {
+				if let Some(encoder) = self.encoder.take() {
+					// The encoder is gone either way, so a lost tail only costs those frames.
+					let drained = block_on(encoder.finish()).and_then(|encoded| self.producer.publish(&encoded));
+					if let Err(err) = drained {
+						tracing::warn!(error = %err, "failed to drain a disabled rendition's encoder");
+					}
+					self.producer.discontinuity()?;
+				}
+				return self.producer.set_enabled(false);
+			}
+		};
+		if let Some(encoder) = self.encoder.as_mut() {
+			return block_on(encoder.set_bitrate(bitrate));
+		}
+
+		let ceiling = *self.ceiling.read();
+		let mut config = self.config.clone();
+		config.bitrate = Some(ceiling);
+		let mut encoder = block_on(moq_video::encode::Sink::open(&config))?;
+		let retuned = match bitrate < ceiling {
+			true => block_on(encoder.set_bitrate(bitrate)),
+			false => Ok(()),
+		};
+		if let Err(err) = &retuned
+			&& !matches!(err, moq_video::Error::BitrateUnsupported(_))
+		{
+			return retuned;
+		}
+		self.producer.set_enabled(true)?;
+		self.encoder = Some(encoder);
+		retuned
+	}
+
+	/// Drain and finish the encoder behind handle `id`.
+	fn publish_finish(self, id: Id) -> Result<(), Error> {
 		let VideoEncoder {
 			encoder,
 			mut producer,
 			followed,
-			finished,
+			children,
+			ceiling,
 			..
 		} = self;
+		// Ended before the drain, so a rung above stops counting on this rendition now.
+		drop(ceiling);
 		// Drain the codec into the track before ending it, so the last frames land
 		// in it rather than being dropped with the encoder.
-		let drained = block_on(encoder.finish()).and_then(|encoded| producer.publish(&encoded));
-		finalize(producer, drained, &finished)?;
+		let drained = match encoder {
+			Some(encoder) => block_on(encoder.finish()).and_then(|encoded| producer.publish(&encoded)),
+			None => Ok(()),
+		};
+		finalize(producer, drained, &children, crate::publish::Child::Video(id))?;
 		// A follower panic only stops rate adaptation, so the track still ends
 		// cleanly before the panic is reported.
 		followed.map_or(Ok(()), |followed| followed.check())
@@ -444,6 +633,9 @@ impl Video {
 	/// The encoder and the rendition it will emit are both resolved by the caller,
 	/// and before this, so a config this machine can't encode fails without leaving
 	/// a track advertised that will never carry frames.
+	///
+	/// A `lower` encoder makes this one a simulcast rung above it: it takes the track
+	/// priority one below, and disables when its bandwidth grant can no longer fund it.
 	pub fn publish(
 		&mut self,
 		target: crate::publish::Target<'_>,
@@ -451,42 +643,72 @@ impl Video {
 		config: &moq_video::encode::Config,
 		rendition: hang::catalog::VideoConfig,
 		encoder: moq_video::encode::Sink,
+		lower: Option<Id>,
 	) -> Result<Id, Error> {
 		let reserved = target
 			.catalog
 			.reserve()
-			.with_timeline_hint(config.gop.duration(config.framerate));
-		let producer = moq_video::encode::Producer::new(target.producer.clone(), reserved, rendition)?;
-		let finished = target.finished.clone();
-		self.producers.insert(Shared::new(VideoEncoder {
-			encoder,
+			.with_hls_hint(config.gop.duration(config.framerate));
+		let ceiling = video_ceiling(config, &rendition);
+		let (lower, priority) = match lower {
+			Some(lower) => {
+				let lower = self.producer(lower)?;
+				let guard = lower.lock();
+				let below = guard.as_ref().ok_or(Error::MediaNotFound)?;
+				let below_ceiling = *below.ceiling.read();
+				if below_ceiling >= ceiling {
+					return Err(Error::InvalidConfig(format!(
+						"the lower rendition's {} bps is not below this one's {} bps",
+						below_ceiling.as_bps(),
+						ceiling.as_bps()
+					)));
+				}
+				(Some(below.ceiling.consume()), below.priority.saturating_sub(1))
+			}
+			None => (None, hang::catalog::PRIORITY.video),
+		};
+		// The suffix `moq_video::encode::Producer::new` would derive, built here so the
+		// track can take this rendition's priority.
+		let suffix = match &rendition.codec {
+			hang::catalog::VideoCodec::H264(_) => ".avc3",
+			hang::catalog::VideoCodec::H265(_) => ".hev1",
+			other => {
+				return Err(Error::InvalidConfig(format!(
+					"{other} is not a codec this producer can publish"
+				)));
+			}
+		};
+		let track = target.producer.unique_track(suffix, reserved.track_info(priority))?;
+		let producer = moq_video::encode::Producer::with_track(track, reserved, rendition)?;
+		let encoder = Shared::new(VideoEncoder {
+			encoder: Some(encoder),
 			producer,
+			config: config.clone(),
+			priority,
+			lower,
 			format,
 			size: config.size(),
 			reservation: None,
 			follow: None,
 			followed: None,
-			ceiling: None,
-			finished,
-		}))
+			ceiling: kio::Producer::new(ceiling),
+			children: target.children.clone(),
+		});
+		target
+			.children
+			.insert(&mut self.producers, encoder, crate::publish::Child::Video)
 	}
 
-	pub(crate) fn follow(
-		&self,
-		id: Id,
-		allocator: &moq_net::bandwidth::Allocator,
-		ceiling: moq_net::bandwidth::Rate,
-	) -> Result<(), Error> {
+	/// Reserve the encoder's ceiling against `allocator` and follow the grant.
+	pub(crate) fn follow(&self, id: Id, allocator: &moq_net::bandwidth::Allocator) -> Result<(), Error> {
 		let shared = self.producer(id)?;
-		let max = ceiling;
-		let ceiling = Arc::new(AtomicU64::new(max.as_bps()));
-		let reservation = {
+		let (reservation, ceiling, lower) = {
 			let mut guard = shared.lock();
 			let encoder = guard.as_mut().ok_or(Error::MediaNotFound)?;
-			let reservation = Arc::new(allocator.reserve(&encoder.producer.demand(), max));
+			let ceiling = *encoder.ceiling.read();
+			let reservation = Arc::new(allocator.reserve(&encoder.producer.demand(), ceiling));
 			encoder.reservation = Some(reservation.clone());
-			encoder.ceiling = Some(ceiling.clone());
-			reservation
+			(reservation, ceiling, encoder.lower.clone())
 		};
 		let (close, closed) = oneshot::channel();
 		shared.lock().as_mut().ok_or(Error::MediaNotFound)?.follow = Some(close);
@@ -495,7 +717,7 @@ impl Video {
 			tokio::select! {
 				biased;
 				_ = closed => {}
-				_ = follow_reservation(follower, reservation.consumer(), ceiling) => {}
+				_ = follow_reservation(follower, lower, reservation.consume(), ceiling) => {}
 			}
 			Ok(())
 		});
@@ -539,7 +761,7 @@ impl Video {
 		self.producers.remove(id).ok_or(Error::MediaNotFound)
 	}
 
-	/// Decode a rendition and deliver frame handles to the callback.
+	/// Decode a rendition and deliver read handles to the callback.
 	pub fn consume(
 		&mut self,
 		rendition: crate::consume::Rendition<hang::catalog::VideoConfig>,
@@ -577,23 +799,24 @@ impl Video {
 		output: DecoderOutput,
 	) -> Result<(), Error> {
 		loop {
-			// `biased` so a pending close always wins over a ready frame.
-			let frame = tokio::select! {
+			// `biased` so a pending close always wins over a ready read.
+			let read = tokio::select! {
 				biased;
 				_ = &mut close => return Ok(()),
-				frame = consumer.read() => match frame? {
-					Some(frame) => frame,
+				read = consumer.read() => match read? {
+					Some(moq_video::decode::Read::Frame(frame)) => Read::Frame(Arc::new(VideoFrame {
+						frame,
+						output,
+						pixels: OnceLock::new(),
+					})),
+					Some(moq_video::decode::Read::Gap { timestamp, duration }) => Read::gap(timestamp, duration)?,
+					Some(moq_video::decode::Read::End { end }) => Read::end(end)?,
 					None => return Ok(()),
 				},
 			};
 
-			let frame = Arc::new(VideoFrame {
-				frame,
-				output,
-				pixels: OnceLock::new(),
-			});
-			let frame_id = State::lock().video.frames.insert(frame)?;
-			callback.call(Ok(frame_id));
+			let read_id = State::lock().video.reads.insert(read)?;
+			callback.call(Ok(read_id));
 		}
 	}
 
@@ -602,15 +825,15 @@ impl Video {
 		self.consumer_tasks.close(id, Error::TrackNotFound)
 	}
 
-	/// Resolve a frame handle, so the caller can convert it with the global lock
-	/// released.
-	fn frame(&self, id: Id) -> Result<Arc<VideoFrame>, Error> {
-		self.frames.get(id).cloned().ok_or(Error::FrameNotFound)
+	/// Resolve a read handle, so the caller can convert its frame with the global
+	/// lock released.
+	fn read(&self, id: Id) -> Result<Read<Arc<VideoFrame>>, Error> {
+		self.reads.get(id).cloned().ok_or(Error::FrameNotFound)
 	}
 
-	/// Release a decoded frame handle.
-	pub fn frame_free(&mut self, id: Id) -> Result<(), Error> {
-		self.frames.remove(id).ok_or(Error::FrameNotFound)?;
+	/// Release a delivered read handle.
+	pub fn read_free(&mut self, id: Id) -> Result<(), Error> {
+		self.reads.remove(id).ok_or(Error::FrameNotFound)?;
 		Ok(())
 	}
 }
@@ -693,24 +916,31 @@ unsafe fn encoder_kind(output: &moq_video_encoder_output) -> Result<moq_video::e
 /// - `input` / `output` must point to fully populated structs.
 /// - `output->encoder` must point to `output->encoder_len` bytes of UTF-8 when
 ///   `output->kind` is `MOQ_VIDEO_ENCODER_KIND_NAMED`.
-/// - `bandwidth` is a handle from [`crate::moq_session_bandwidth`], or 0 to hold the
-///   configured bitrate regardless of congestion.
+/// - `options` may be NULL, or must point at a readable [`moq_video_encode_options`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_encode_video(
 	broadcast: u32,
 	input: *const moq_video_encoder_input,
 	output: *const moq_video_encoder_output,
-	bandwidth: u32,
+	options: *const moq_video_encode_options,
 ) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
 		let raw_input = unsafe { input.as_ref() }.ok_or(Error::InvalidPointer)?;
 		let raw_output = unsafe { output.as_ref() }.ok_or(Error::InvalidPointer)?;
+		let options = unsafe { options.as_ref() }.copied().unwrap_or_default();
+		let bandwidth = ffi::parse_id_optional(options.bandwidth)?;
+		let lower = ffi::parse_id_optional(options.lower)?;
+		if lower.is_some() && bandwidth.is_none() {
+			return Err(Error::InvalidConfig(
+				"a lower rendition needs a bandwidth allocator to follow".into(),
+			));
+		}
 
 		let format = pixel_format_from_u32(raw_input.format)?;
 
-		let framerate = moq_video::Rate::new(raw_input.framerate, 1)
-			.map_err(|_| Error::Video(moq_video::Error::InvalidFramerate(raw_input.framerate).into()))?;
+		let framerate = moq_video::FrameRate::new(raw_input.framerate.numerator, raw_input.framerate.denominator)
+			.map_err(|err| Error::InvalidConfig(format!("invalid framerate: {err}")))?;
 		let mut config = moq_video::encode::Config::new(raw_input.width, raw_input.height, framerate);
 		config.codec = codec_from_u32(raw_output.codec)?;
 		config.kind = unsafe { encoder_kind(raw_output)? };
@@ -729,13 +959,19 @@ pub unsafe extern "C" fn moq_encode_video(
 		let rendition = block_on(config.probe())?;
 		let encoder = block_on(moq_video::encode::Sink::open(&config))?;
 
-		let bandwidth = ffi::parse_id_optional(bandwidth)?;
 		let mut state = State::lock();
 		let allocator = bandwidth.map(|id| state.bandwidth.allocator(id)).transpose()?;
 		let State { publish, video, .. } = &mut *state;
-		let id = video.publish(publish.target(broadcast)?, format, &config, rendition.clone(), encoder)?;
+		let id = video.publish(
+			publish.target(broadcast)?,
+			format,
+			&config,
+			rendition.clone(),
+			encoder,
+			lower,
+		)?;
 		if let Some(allocator) = allocator.as_ref() {
-			video.follow(id, allocator, video_ceiling(&config, &rendition))?;
+			video.follow(id, allocator)?;
 		}
 		Ok(id)
 	})
@@ -787,7 +1023,9 @@ pub unsafe extern "C" fn moq_encode_video_demand(
 /// picture in the pixel format and at the resolution declared by
 /// [`moq_video_encoder_input`].
 /// A backend that pipelines publishes an earlier frame's output here, so a call
-/// that emits nothing is normal rather than an error.
+/// that emits nothing is normal rather than an error. While a rung published with a
+/// `lower` rendition is disabled for lack of bandwidth, the frame is dropped
+/// without encoding.
 ///
 /// # Safety
 /// - `frame` must point to a valid [`moq_video_encoder_frame`].
@@ -863,16 +1101,23 @@ pub extern "C" fn moq_encode_video_bitrate(producer: u32, bitrate: u64) -> i32 {
 /// Flush any frames the codec is still holding and finalize the video track.
 ///
 /// The handle is released, so nothing can be published to it afterwards.
-/// The broadcast keeps the finished track, catalog rendition included, until it closes or its
-/// `moq_publish_finish` linger ends, so a late subscriber can still drain it.
+/// The broadcast keeps the finished track, catalog rendition included, until it closes, so a
+/// late subscriber can still drain it.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_encode_video_finish(producer: u32) -> i32 {
 	ffi::enter(move || {
-		let producer = ffi::parse_id(producer)?;
-		// The id is dropped first, so nothing new queues behind the drain; whatever
-		// is mid-encode still finishes before this takes the encoder.
-		let producer = State::lock().video.remove(producer)?;
-		producer.take().ok_or(Error::MediaNotFound)?.publish_finish()
+		let id = ffi::parse_id(producer)?;
+		// The id stays until the drain ends, so a racing moq_publish_close waits it out
+		// instead of missing a track that still publishes. A call queued behind the drain
+		// finds the encoder gone.
+		let shared = State::lock().video.producer(id)?;
+		let finished = {
+			let mut guard = shared.lock();
+			guard.take().ok_or(Error::MediaNotFound)?.publish_finish(id)
+		};
+		// A racing close may have released the id already.
+		let _ = State::lock().video.remove(id);
+		finished
 	})
 }
 
@@ -885,28 +1130,29 @@ pub extern "C" fn moq_encode_video_finish(producer: u32) -> i32 {
 ///
 /// An unknown `output->format` or an invalid `output->width`/`height` fails
 /// here, before subscribing. Each frame is produced in the requested layout by
-/// [`moq_decode_video_frame`], which fails for that frame rather than deliver
+/// [`moq_decode_video_read`], which fails for that frame rather than deliver
 /// another layout.
 ///
 /// Returns a non-zero handle on success or a negative error code.
 ///
-/// `on_frame` is called with a positive frame id per decoded frame, then exactly
-/// once more with a terminal code: `0` (closed cleanly) or a negative error.
-/// After the terminal (`<= 0`) callback, `on_frame` is never called again and
-/// `user_data` is never touched again, so release `user_data` there. The terminal
-/// callback fires even after [`moq_decode_video_cancel`].
+/// `on_read` is called with a positive read id per decoded frame, gap, or encoder
+/// end (see [`moq_decode_video_read`]), then exactly once more with a terminal
+/// code: `0` (closed cleanly) or a negative error. After the terminal (`<= 0`)
+/// callback, `on_read` is never called again and `user_data` is never touched
+/// again, so release `user_data` there. The terminal callback fires even after
+/// [`moq_decode_video_cancel`].
 ///
 /// Starts at the newest cached group so reopening live playback skips the backlog.
 ///
 /// # Safety
 /// - `output` must point to a valid [`moq_video_decoder_output`].
-/// - `user_data` must stay valid until the terminal (`<= 0`) `on_frame` callback.
+/// - `user_data` must stay valid until the terminal (`<= 0`) `on_read` callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_decode_video(
 	catalog: u32,
 	index: u32,
 	output: *const moq_video_decoder_output,
-	on_frame: crate::moq_status_callback,
+	on_read: crate::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
@@ -929,24 +1175,24 @@ pub unsafe extern "C" fn moq_decode_video(
 		// delivery loop still enforces it, since other backends ignore it.
 		options.decoder.scale_hint = size;
 		let output = DecoderOutput { format, size };
-		let on_frame = unsafe { OnStatus::new(user_data, on_frame)? };
+		let on_read = unsafe { OnStatus::new(user_data, on_read)? };
 
 		let mut state = State::lock();
 		let rendition = state.consume.rendition(catalog, index as usize)?;
 
 		let State { video, .. } = &mut *state;
-		video.consume(rendition, options, output, on_frame)
+		video.consume(rendition, options, output, on_read)
 	})
 }
 
 /// Stop a video (raw) consumer's background task.
 ///
 /// Returns immediately: zero on success, or a negative code if already closed.
-/// Does NOT free `user_data`; the on-frame callback still fires once more with a
+/// Does NOT free `user_data`; the on-read callback still fires once more with a
 /// terminal `0` (or a negative error), which is where `user_data` should be
-/// released. Frame ids already delivered are likewise not freed: each stays
+/// released. Read ids already delivered are likewise not freed: each stays
 /// readable after the terminal callback until released with
-/// [`moq_decode_video_frame_free`].
+/// [`moq_decode_video_read_free`].
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_decode_video_cancel(consumer: u32) -> i32 {
 	ffi::enter(move || {
@@ -955,72 +1201,87 @@ pub extern "C" fn moq_decode_video_cancel(consumer: u32) -> i32 {
 	})
 }
 
-/// Write a delivered frame's pixels and metadata into `dst`.
+/// Write a delivered read into `dst`: its kind, and the frame's pixels, the gap,
+/// or the end it carries.
 ///
-/// The first call for an `id` converts the decoded picture to the layout and
-/// size [`moq_decode_video`] asked for; later calls return the same pixels. A
+/// The first call for a frame's `id` converts the decoded picture to the layout
+/// and size [`moq_decode_video`] asked for; later calls return the same pixels. A
 /// conversion failure returns a negative code for this frame only, leaving the
 /// id to be freed as usual. Safe to call from any thread, including inside the
-/// frame callback.
+/// read callback.
 ///
-/// The written `dst->data` pointer remains valid until the same `id` is released
-/// with [`moq_decode_video_frame_free`].
+/// The written `dst->frame.data` pointer remains valid until the same `id` is
+/// released with [`moq_decode_video_read_free`].
 ///
 /// # Safety
-/// - `dst` must point to a writable [`moq_video_frame`].
+/// - `dst` must point to a writable [`moq_video_read`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_decode_video_frame(id: u32, dst: *mut moq_video_frame) -> i32 {
+pub unsafe extern "C" fn moq_decode_video_read(id: u32, dst: *mut moq_video_read) -> i32 {
 	ffi::enter(move || {
 		let id = ffi::parse_id(id)?;
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
-		let frame = State::lock().video.frame(id)?;
-		let pixels = frame.pixels()?;
-		*dst = moq_video_frame {
-			// The decoded Timestamp is bounded by a QUIC varint, so its microseconds fit.
-			timestamp_us: frame.frame.timestamp.as_micros() as u64,
-			width: pixels.width,
-			height: pixels.height,
-			// The slab keeps its `Arc` until the id is freed, and the pixels are
-			// never replaced once set, so the pointer outlives this call.
-			data: pixels.data.as_ptr(),
-			data_size: pixels.data.len(),
+		let read = State::lock().video.read(id)?;
+		let (kind, gap, end_us) = read.info();
+		let frame = match &read {
+			Read::Frame(frame) => {
+				let pixels = frame.pixels()?;
+				moq_video_frame {
+					// The decoded Timestamp is bounded by a QUIC varint, so its microseconds fit.
+					timestamp_us: frame.frame.timestamp.as_micros() as u64,
+					width: pixels.width,
+					height: pixels.height,
+					// The slab keeps its `Arc` until the id is freed, and the pixels are
+					// never replaced once set, so the pointer outlives this call.
+					data: pixels.data.as_ptr(),
+					data_size: pixels.data.len(),
+				}
+			}
+			_ => moq_video_frame {
+				timestamp_us: 0,
+				width: 0,
+				height: 0,
+				data: std::ptr::null(),
+				data_size: 0,
+			},
+		};
+		*dst = moq_video_read {
+			kind,
+			frame,
+			gap,
+			end_us,
 		};
 		Ok(())
 	})
 }
 
-/// Free a frame previously delivered through the consume callback, releasing
-/// its decoded picture back to the decoder. Required for every delivered frame
-/// id; closing the parent consumer is not enough, and a decoder whose frames
-/// are all held stalls until some are freed.
+/// Free a read previously delivered through the decode callback, releasing a
+/// frame's decoded picture back to the decoder. Required for every delivered read
+/// id; closing the parent consumer is not enough, and a decoder whose frames are
+/// all held stalls until some are freed.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_decode_video_frame_free(id: u32) -> i32 {
+pub extern "C" fn moq_decode_video_read_free(id: u32) -> i32 {
 	ffi::enter(move || {
 		let id = ffi::parse_id(id)?;
-		State::lock().video.frame_free(id)
+		State::lock().video.read_free(id)
 	})
 }
+
 #[cfg(test)]
 mod tests {
 	use super::*;
 
 	/// A video track wired up without an encoder, plus a subscriber on it: enough
 	/// to pin what [`finalize`] shows the far end.
-	async fn track_under_test() -> (
-		moq_video::encode::Producer<moq_mux::catalog::hang::Extra>,
-		moq_net::track::Subscriber,
-	) {
+	async fn track_under_test() -> (moq_video::encode::Producer, moq_net::track::Subscriber) {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let config = moq_mux::catalog::Config::default()
 			.with_catalog(moq_mux::catalog::hang::Catalog::<moq_mux::catalog::hang::Extra>::default());
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
 		let consumer = broadcast.consume();
 		// Probed rather than hand-built, so the test track carries what a real one would.
-		let encode = moq_video::encode::Config::new(320, 240, moq_video::Rate::new(30, 1).unwrap());
+		let encode = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
 		let rendition = encode.probe().await.unwrap();
-		let reserved = catalog
-			.reserve()
-			.with_timeline_hint(encode.gop.duration(encode.framerate));
+		let reserved = catalog.reserve().with_hls_hint(encode.gop.duration(encode.framerate));
 		let producer = moq_video::encode::Producer::new(broadcast, reserved, rendition).unwrap();
 
 		let name = producer.demand().name().to_string();
@@ -1033,7 +1294,13 @@ mod tests {
 	#[tokio::test]
 	async fn a_successful_drain_ends_the_track_cleanly() {
 		let (producer, mut track) = track_under_test().await;
-		finalize(producer, Ok(()), &Default::default()).unwrap();
+		finalize(
+			producer,
+			Ok(()),
+			&Default::default(),
+			crate::publish::Child::Video(Id::try_from(1u32).unwrap()),
+		)
+		.unwrap();
 		assert!(matches!(track.recv_group().await, Ok(None)), "expected a clean end");
 	}
 
@@ -1044,7 +1311,13 @@ mod tests {
 	async fn a_failed_drain_aborts_the_track() {
 		let (producer, mut track) = track_under_test().await;
 		let err = moq_video::Error::Codec(anyhow::anyhow!("the codec lost the tail"));
-		finalize(producer, Err(err), &Default::default()).unwrap_err();
+		finalize(
+			producer,
+			Err(err),
+			&Default::default(),
+			crate::publish::Child::Video(Id::try_from(1u32).unwrap()),
+		)
+		.unwrap_err();
 
 		let Err(err) = track.recv_group().await else {
 			panic!("expected an abort, not a clean end");
@@ -1060,27 +1333,164 @@ mod tests {
 	#[tokio::test]
 	async fn finish_ends_the_track_after_a_rate_follower_panic() {
 		let (producer, mut track) = track_under_test().await;
-		let mut config = moq_video::encode::Config::new(320, 240, moq_video::Rate::new(30, 1).unwrap());
+		let mut config = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
 		config.kind = moq_video::encode::Kind::Software;
 		let encoder = moq_video::encode::Sink::open(&config).await.unwrap();
 		let followed = crate::ffi::Background::new(async { panic!("injected rate follower panic") });
 		assert!(matches!(followed.finished().await, Err(Error::Panic)));
 		let video = VideoEncoder {
-			encoder,
+			encoder: Some(encoder),
 			producer,
+			config: config.clone(),
+			priority: hang::catalog::PRIORITY.video,
+			lower: None,
 			format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420,
 			size: config.size(),
 			reservation: None,
 			follow: None,
 			followed: Some(followed),
-			ceiling: None,
-			finished: Default::default(),
+			ceiling: kio::Producer::new(moq_net::bandwidth::Rate::from_mbps(1)),
+			children: Default::default(),
 		};
 
-		let result = tokio::task::spawn_blocking(move || video.publish_finish())
+		let id = Id::try_from(1u32).unwrap();
+		let result = tokio::task::spawn_blocking(move || video.publish_finish(id))
 			.await
 			.unwrap();
 		assert!(matches!(result, Err(Error::Panic)), "{result:?}");
 		assert!(matches!(track.recv_group().await, Ok(None)), "expected a clean end");
+	}
+}
+
+#[cfg(test)]
+mod follow_tests {
+	use std::time::Duration;
+
+	use moq_mux::rate::{Follower, Policy, Target};
+	use moq_net::bandwidth::Rate;
+
+	use super::*;
+
+	/// Retune through `set`, which only ever sees an enabled target: these policies set no
+	/// lower rendition, so nothing disables.
+	fn rate(
+		follower: &mut Follower,
+		ceiling: Rate,
+		target: Target,
+		set: impl FnOnce(Rate) -> Result<(), moq_video::Error>,
+	) -> Result<Option<Target>, &'static str> {
+		retune(follower, Policy::new(ceiling), target, |target| match target {
+			Target::Enabled(bitrate) => set(bitrate),
+			Target::Disabled => unreachable!("no lower rendition"),
+		})
+	}
+
+	/// A lower rendition moving between a target and its apply drops that target, and the
+	/// follower asks for it again under the new policy rather than counting it applied.
+	#[tokio::test(start_paused = true)]
+	async fn a_moved_lower_retries_the_dropped_target() {
+		let policy = |lower| {
+			let mut policy = Policy::new(Rate::from_mbps(4));
+			policy.lower = Some(lower);
+			policy
+		};
+		let grant = moq_net::bandwidth::Producer::new();
+		let mut follower = Follower::new(grant.consume(), policy(Rate::from_mbps(1)));
+		grant.set(Some(Rate::from_mbps(2))).unwrap();
+		let dropped = follower.next().await.unwrap();
+		let moved = retune(&mut follower, policy(Rate::from_kbps(900)), dropped, |_| {
+			unreachable!("a target under a stale policy is never applied")
+		});
+		assert_eq!(moved, Ok(None));
+
+		let retried = moq_clock::timeout(Duration::from_secs(60), follower.next())
+			.await
+			.expect("the dropped target is asked for again");
+		assert_eq!(retried.unwrap(), Target::Enabled(Rate::from_mbps(2)));
+	}
+
+	fn bitrate(target: Target) -> Rate {
+		let Target::Enabled(bitrate) = target else {
+			unreachable!("no lower rendition")
+		};
+		bitrate
+	}
+
+	/// Retune at every target until the follower goes a minute without one.
+	async fn quiet(follower: &mut Follower, ceiling: Rate, mut set: impl FnMut(Rate) -> Result<(), moq_video::Error>) {
+		while let Ok(bitrate) = moq_clock::timeout(Duration::from_secs(60), follower.next()).await {
+			rate(follower, ceiling, bitrate.unwrap(), &mut set).unwrap();
+		}
+	}
+
+	/// The grant recovers once and never changes again, and the final raise fails once:
+	/// the follower still carries the encoder back to its ceiling.
+	#[tokio::test(start_paused = true)]
+	async fn a_quiet_grant_retries_a_failed_raise() {
+		let ceiling = Rate::from_mbps(4);
+		let grant = moq_net::bandwidth::Producer::new();
+		let mut follower = Follower::new(grant.consume(), Policy::new(ceiling));
+		let mut applied = Vec::new();
+		let mut refuse = Some(ceiling);
+		let mut set = |bitrate| {
+			if refuse.take_if(|refused| *refused == bitrate).is_some() {
+				return Err(moq_video::Error::Unsupported("a transient refusal".into()));
+			}
+			applied.push(bitrate);
+			Ok(())
+		};
+
+		grant.set(Some(Rate::from_mbps(1))).unwrap();
+		let bitrate = follower.next().await.unwrap();
+		rate(&mut follower, ceiling, bitrate, &mut set).unwrap();
+		tokio::time::advance(Duration::from_secs(1)).await;
+		grant.set(Some(ceiling)).unwrap();
+		quiet(&mut follower, ceiling, &mut set).await;
+
+		assert_eq!(refuse, None, "the final raise was never refused");
+		assert_eq!(applied.last(), Some(&ceiling), "{applied:?}");
+	}
+
+	/// `moq_encode_video_bitrate` lowers the ceiling while a raise toward the old one is
+	/// due. The ceiling is read under the encoder lock, so the raise is dropped rather
+	/// than retuning above the new cap, and the encoder recovers to the new cap.
+	#[tokio::test(start_paused = true)]
+	async fn a_lowered_ceiling_beats_a_due_raise() {
+		let old = Rate::from_mbps(4);
+		let lowered = Rate::from_mbps(2);
+		let grant = moq_net::bandwidth::Producer::new();
+		let mut follower = Follower::new(grant.consume(), Policy::new(old));
+		let applied = std::cell::RefCell::new(Vec::new());
+		let set = |bitrate| {
+			applied.borrow_mut().push(bitrate);
+			Ok(())
+		};
+
+		grant.set(Some(Rate::from_mbps(1))).unwrap();
+		assert_eq!(follower.next().await.unwrap(), Target::Enabled(Rate::from_mbps(1)));
+		tokio::time::advance(Duration::from_secs(1)).await;
+		grant.set(Some(old)).unwrap();
+		let first = follower.next().await.unwrap();
+		rate(&mut follower, old, first, set).unwrap();
+
+		// `moq_encode_video_bitrate` already retuned the encoder to the new cap.
+		let due = follower.next().await.unwrap();
+		assert!(bitrate(due) > bitrate(first), "a raise toward the old ceiling");
+		assert_eq!(rate(&mut follower, lowered, due, set), Ok(None));
+		assert_eq!(follower.policy().max, lowered);
+		quiet(&mut follower, lowered, set).await;
+		assert_eq!(*applied.borrow(), [bitrate(first)], "nothing retuned past the new cap");
+
+		// A later attack and recovery climbs back to the new cap, not the old one.
+		grant.set(Some(Rate::from_mbps(1))).unwrap();
+		let bitrate = follower.next().await.unwrap();
+		rate(&mut follower, lowered, bitrate, set).unwrap();
+		tokio::time::advance(Duration::from_secs(1)).await;
+		grant.set(Some(old)).unwrap();
+		quiet(&mut follower, lowered, set).await;
+
+		let applied = applied.into_inner();
+		assert_eq!(applied.last(), Some(&lowered), "{applied:?}");
+		assert!(applied.iter().all(|bitrate| *bitrate <= lowered), "{applied:?}");
 	}
 }

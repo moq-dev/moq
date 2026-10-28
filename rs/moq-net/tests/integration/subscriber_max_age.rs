@@ -19,7 +19,7 @@ async fn budget(track: &mut track::Producer, millis: u64, version: Version) {
 		loop {
 			if track
 				.subscription()
-				.is_some_and(|subscription| subscription.max_delay == Duration::from_millis(millis))
+				.is_some_and(|subscription| subscription.max_delay == Some(Duration::from_millis(millis)))
 			{
 				return;
 			}
@@ -32,7 +32,7 @@ async fn budget(track: &mut track::Producer, millis: u64, version: Version) {
 
 #[moq_clock::test]
 async fn relay_forwards_the_most_tolerant_subscriber_max_age() {
-	for draft in 14..=22 {
+	for draft in [18, 22] {
 		let version: Version = format!("moq-transport-{draft}").parse().unwrap();
 		let publisher = origin(1);
 		let relay = origin(2);

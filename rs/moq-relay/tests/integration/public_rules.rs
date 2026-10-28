@@ -21,10 +21,15 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 
 fn client() -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
-	config.once = Some(true);
-	config.websocket.delay = Some(Duration::ZERO);
+	#[cfg(feature = "websocket")]
+	{
+		config.websocket.delay = Some((Duration::ZERO).into());
+	}
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
-	config.init(Default::default()).expect("client init")
+	config
+		.init(Default::default())
+		.expect("client init")
+		.with_reconnect(false)
 }
 
 /// The relay's web stack with WebSocket and the HTTP routes, admitting through `auth`.

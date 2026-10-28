@@ -50,15 +50,14 @@ impl VideoEncoder {
 
 		// Game Boy is 160x144; force the openh264 software encoder since hardware
 		// encoders can reject such tiny resolutions.
-		let mut config = moq_video::encode::Config::new(WIDTH, HEIGHT, moq_video::Rate::new(FRAMERATE, 1).unwrap());
+		let mut config =
+			moq_video::encode::Config::new(WIDTH, HEIGHT, moq_video::FrameRate::new(FRAMERATE, 1).unwrap());
 		config.kind = moq_video::encode::Kind::Software;
 
 		// Probed from a throwaway encoder, before the emulator has run a frame, so a
 		// viewer can discover (and unpause) a moq-boy that has published nothing.
 		let rendition = config.probe().await.expect("failed to probe the H.264 encoder");
-		let reserved = catalog
-			.reserve()
-			.with_timeline_hint(config.gop.duration(config.framerate));
+		let reserved = catalog.reserve().with_hls_hint(config.gop.duration(config.framerate));
 		let producer =
 			moq_video::encode::Producer::new(broadcast, reserved, rendition).expect("failed to create avc3 producer");
 		let demand = producer.demand();

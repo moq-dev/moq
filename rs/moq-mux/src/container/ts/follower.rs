@@ -1,4 +1,4 @@
-//! [`Follower`]: an [`Export`] driven by its path's announcements, as a player is.
+//! [`Follower`]: an [`Export`] driven by the publisher instances serving its path, as a player is.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -9,103 +9,95 @@ use moq_clock::Instant;
 
 use super::{Export, catalog};
 use crate::container::Frame;
-
-/// How long an export failure waits for its broadcast to go before it counts as the export's own.
-///
-/// A killed publisher's tracks can error just before its route is withdrawn, so the two need not
-/// land together.
-const CLOSE_GRACE: Duration = Duration::from_secs(1);
-
-/// The subscriptions carrying an export on into another broadcast.
-type Resolved<E> = crate::Result<(moq_net::broadcast::Consumer, crate::catalog::Consumer<E>)>;
+use crate::follow::{Event, Instances};
 
 #[cfg(not(target_family = "wasm"))]
-type Resolving<E> = Pin<Box<dyn Future<Output = Resolved<E>> + Send>>;
+type Subscribing<E> = Pin<Box<dyn Future<Output = crate::Result<crate::catalog::Consumer<E>>> + Send>>;
 #[cfg(target_family = "wasm")]
-type Resolving<E> = Pin<Box<dyn Future<Output = Resolved<E>>>>;
+type Subscribing<E> = Pin<Box<dyn Future<Output = crate::Result<crate::catalog::Consumer<E>>>>>;
 
-/// What the announcements say serves the exported path.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// What the instances say serves the exported path.
 enum Serving {
-	/// Nothing: every route went.
-	Gone,
-	/// The publisher instance being exported.
+	/// The instance being exported, with no change since the export carried on into it.
 	Ours,
-	/// Another instance: a newer epoch, or any return of an epochless route.
-	Other(Option<moq_net::Epoch>),
+	/// Nothing: the instance handed out last went.
+	Gone,
+	/// The instance being exported, handed out again since: it came back after a gap.
+	Return(moq_net::broadcast::Consumer),
+	/// Another instance: another epoch, or any return of an epochless route.
+	Other(moq_net::broadcast::Consumer),
 }
 
-/// A first catalog snapshot the export awaits, since a subscribed catalog that never answers is
-/// no return or switch.
-struct Awaiting {
-	/// When the linger runs out.
-	deadline: Instant,
-	missing: Missing,
+/// Subscribing to an instance's catalog, to carry the export on into it.
+struct Subscription<E: catalog::Catalog> {
+	target: moq_net::broadcast::Consumer,
+	catalog: Subscribing<E>,
 }
 
-/// What a catalog still missing at the deadline means.
+/// Why the export awaits the first catalog snapshot of the instance it carried on into.
 enum Missing {
-	/// A return that never resumed: the export ends as it did before it.
-	Return(crate::Result<()>),
-	/// A replacement switched to mid-stream that never served its catalog: a failure.
+	/// Carried on after the export ended with `end`: an instance that ends before it serves
+	/// leaves the export waiting for another until `deadline`.
+	Ended { end: crate::Result<()>, deadline: Instant },
+	/// A replacement switched to mid-stream, which ending before it serves is a failure.
 	Switch,
 }
 
 enum State<E: catalog::Catalog> {
-	/// Exporting, until the deadline when its catalog is yet to deliver a snapshot.
-	Running { awaiting: Option<Awaiting> },
-	/// The export ended with `end`, waiting for the announcements to say what follows.
-	Settling {
-		end: crate::Result<()>,
-		/// Until when a failure with the broadcast still announced waits for it to go.
-		grace: Option<Instant>,
-		/// When the linger runs out.
-		deadline: Instant,
+	/// Exporting, while switching to a replacement when stitching one, and awaiting the
+	/// catalog's first snapshot after carrying on into an instance.
+	Running {
+		awaiting: Option<Missing>,
+		switching: Option<Subscription<E>>,
 	},
-	/// Resolving the instance serving the path now, to carry the export on into it.
-	Following {
-		resolving: Resolving<E>,
-		/// Bounds the resolution and then the catalog's first snapshot.
-		awaiting: Awaiting,
-		/// Where the export carries on, bound and all, if the instance goes before it resolves.
-		fallback: Box<State<E>>,
+	/// The export ended with `end`, waiting until `deadline` for an instance to carry on into.
+	Settling { end: crate::Result<()>, deadline: Instant },
+	/// The export ended with `end`, and an instance serving the path is being subscribed.
+	Resuming {
+		subscription: Subscription<E>,
+		end: crate::Result<()>,
+		deadline: Instant,
 	},
 	/// Nothing follows.
 	Done,
 }
 
-/// Carries an [`Export`] across its broadcast's returns, following the path's announcements.
+/// Carries an [`Export`] across its broadcast's returns, following the publisher instances
+/// serving its path through [`Instances`].
 ///
-/// The same publisher instance (the same epoch) returning within the [linger](Self::with_linger)
+/// The same publisher instance (the same epoch) returning within the [follow](Self::with_follow)
 /// continues the stream. Another instance taking the path fails with
 /// [`Error::Replaced`](crate::Error::Replaced), unless [stitching](Self::with_stitch), which
 /// switches the program to it at once. Subscriptions are sticky, so without stitching a
-/// replaced publisher that stays up keeps the export until it ends. An export that fails
-/// while its broadcast stays announced fails here too, without lingering.
+/// replaced publisher that stays up keeps the export until it ends.
 ///
-/// Announcements alone decide whether the broadcast returned: a return that fails to resolve
-/// waits for the next one, and the linger running out reports that failure.
+/// A track failure is followed only when its cause says the publisher left: the route serving
+/// it was lost (`Unroutable`, which a moq-lite relay resets a copy with once its upstream
+/// session ends), the session carrying it ended, or a moq-transport peer ended it with a code
+/// it does not register, since PUBLISH_DONE has none for a lost route. Any other failure is
+/// the export's own and fails here at once.
+///
+/// An instance that comes back is awaited until its catalog serves a first snapshot, with no
+/// deadline but its own end. A return that refuses its catalog waits for the next change, and
+/// the follow running out reports that refusal. A refusal to resolve the path at all fails at
+/// once, as it does for every [`Instances`] reader.
 ///
 /// An epochless route has no instance to match, so any return of one is a replacement.
 pub struct Follower<E: catalog::Catalog = ()> {
 	export: Export<crate::catalog::Consumer<E>>,
 	state: State<E>,
-	announced: moq_net::announce::Follow,
-	path: moq_net::PathOwned,
-	/// The epoch of the instance being exported.
-	epoch: Option<moq_net::Epoch>,
+	instances: Instances,
+	path: moq_net::Path,
 	serving: Serving,
-	/// Every route went since the export resolved its broadcast.
-	ended: bool,
-	/// An announcement arrived since the follower was built.
-	started: bool,
+	/// Taking the instances on hand when built, which replay the route the export resolved.
+	priming: bool,
 	/// The origin closed, so nothing more is announced.
 	closed: bool,
-	/// Why the last return failed to resolve, reported instead of the end if the linger runs out.
+	/// Why the last return refused its catalog, reported instead of the end if the follow runs out.
 	failed: Option<crate::Error>,
-	/// A return failed to resolve: nothing is followed until the next announcement.
+	/// The instance serving now refused its catalog: nothing is followed until the next change.
 	refused: bool,
-	linger: Duration,
+	follow: Duration,
 	stitch: bool,
 	timer: Option<Pin<Box<moq_clock::Sleep>>>,
 }
@@ -116,50 +108,41 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 	/// Fails when the export's origin can never cover its path.
 	pub fn new(export: Export<crate::catalog::Consumer<E>>) -> crate::Result<Self> {
 		let source = export.source();
-		let announced = source.origin().follow(source.path())?;
-		let path = source.path().clone();
-		let epoch = export.instance().cloned();
+		let instances = Instances::new(source.origin(), source.path(), None)?;
 		let mut follower = Self {
+			path: source.path().clone(),
 			export,
-			state: State::Running { awaiting: None },
-			announced,
-			path,
-			epoch,
+			state: State::Running {
+				awaiting: None,
+				switching: None,
+			},
+			instances,
 			serving: Serving::Ours,
-			ended: false,
-			started: false,
+			priming: true,
 			closed: false,
 			failed: None,
 			refused: false,
-			linger: Duration::ZERO,
+			follow: Duration::ZERO,
 			stitch: false,
 			timer: None,
 		};
-		// Take the start naming the route the export resolved now, before anything else can
-		// fold into it. The cursor replays the routes on hand at once, so none means the route
-		// already went, and the next start is a return.
-		follower.poll_announced(&kio::Waiter::noop());
-		if !follower.started {
-			follower.started = true;
-			follower.serving = Serving::Gone;
-			follower.ended = true;
-		}
+		// Take the instance on hand now, before a gap can fold into it: one handed out at once is
+		// the route the export resolved, so only a later one is a return.
+		follower.poll_instances(&kio::Waiter::noop())?;
+		follower.priming = false;
 		Ok(follower)
 	}
 
-	/// Wait up to `linger` for the same instance to return once the broadcast ends. Defaults to
-	/// [`Duration::ZERO`].
-	///
-	/// It bounds the whole return, and a mid-stream stitch from its restart to the
-	/// replacement catalog's first snapshot. Zero requires an already available catalog.
-	pub fn with_linger(mut self, linger: Duration) -> Self {
-		self.linger = linger;
+	/// Wait up to `follow` after the broadcast ends for the same instance, or with
+	/// [stitching](Self::with_stitch) a replacement, to come back. Defaults to
+	/// [`Duration::ZERO`], which carries on only into an instance already serving the path.
+	pub fn with_follow(mut self, follow: Duration) -> Self {
+		self.follow = follow;
 		self
 	}
 
 	/// Follow another publisher instance taking the path, as a full program switch (see
-	/// [`Export::follow`]). Defaults to `false`. Its first catalog must arrive within
-	/// [`with_linger`](Self::with_linger), including when the old instance is still live.
+	/// [`Export::follow`]). Defaults to `false`.
 	pub fn with_stitch(mut self, stitch: bool) -> Self {
 		self.stitch = stitch;
 		self
@@ -185,320 +168,249 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 	}
 
 	fn poll_state(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Frame>>> {
-		if let Some(expired) = self.expired() {
-			return Poll::Ready(expired);
-		}
-
 		loop {
 			match std::mem::replace(&mut self.state, State::Done) {
 				State::Done => return Poll::Ready(Ok(None)),
-				State::Running { mut awaiting } => {
-					self.poll_announced(waiter);
-					// Subscriptions are sticky, so a replacement leaves the export on the old
-					// instance until it ends, unless asked to switch at once.
-					if self.stitch && matches!(self.serving, Serving::Other(_)) {
-						tracing::info!(path = %self.path, "broadcast replaced, switching the program to the new instance");
-						self.state = State::Following {
-							resolving: self.resolve(),
-							awaiting: Awaiting {
-								deadline: moq_clock::now() + self.linger,
-								missing: Missing::Switch,
-							},
-							fallback: Box::new(State::Running { awaiting }),
-						};
-						continue;
+				State::Running {
+					mut awaiting,
+					mut switching,
+				} => {
+					self.poll_instances(waiter)?;
+					if self.poll_switch(waiter, &mut switching)? {
+						awaiting = Some(Missing::Switch);
 					}
 					let next = self.export.poll_next(waiter);
-					if self.export.cataloged() {
-						awaiting = None;
-					}
+					awaiting = awaiting.filter(|_| !self.export.cataloged());
 					let end = match next {
 						Poll::Ready(Ok(Some(frame))) => {
-							self.state = State::Running { awaiting };
+							self.state = State::Running { awaiting, switching };
 							return Poll::Ready(Ok(Some(frame)));
 						}
-						// A switch whose catalog closed before its first snapshot never served one.
-						Poll::Ready(Ok(None)) => match awaiting {
-							Some(Awaiting {
-								missing: Missing::Switch,
-								..
-							}) => Err(self.missing_catalog()),
-							_ => Ok(()),
-						},
-						Poll::Ready(Err(err)) => Err(err),
+						Poll::Ready(Err(err)) if !left(&err) => {
+							tracing::warn!(path = %self.path, %err, "export failed, so not following");
+							return Poll::Ready(Err(err));
+						}
+						Poll::Ready(end) => end.map(|_| ()),
 						Poll::Pending => {
-							if let Some(awaiting) = awaiting.take_if(|awaiting| self.elapsed(waiter, awaiting.deadline))
-							{
-								return Poll::Ready(self.expire(awaiting));
+							// An instance that goes with its catalog still open never served.
+							if let Some(missing) = awaiting.take_if(|_| matches!(self.serving, Serving::Gone)) {
+								self.state = self.withdrawn(missing);
+								continue;
 							}
-							self.state = State::Running { awaiting };
+							self.state = State::Running { awaiting, switching };
 							return Poll::Pending;
 						}
 					};
-					let now = moq_clock::now();
-					// A failure ends the broadcast only if the broadcast goes too.
-					let grace = (end.is_err() && !self.ended && self.serving == Serving::Ours)
-						.then(|| now + CLOSE_GRACE.min(self.linger));
-					if grace.is_none() {
-						self.lingering(&end);
+					// Nor did one whose catalog ended before its first snapshot.
+					if let Some(missing) = awaiting {
+						self.state = self.withdrawn(missing);
+						continue;
 					}
+					self.following(&end);
 					self.state = State::Settling {
 						end,
-						grace,
-						deadline: now + self.linger,
+						deadline: moq_clock::now() + self.follow,
 					};
 				}
-				State::Settling {
-					end,
-					mut grace,
-					deadline,
-				} => {
-					self.poll_announced(waiter);
-					// A broadcast that went, even one already back, was no failure of the export's own.
-					if grace.is_some() && (self.serving != Serving::Ours || self.ended) {
-						grace = None;
-						self.lingering(&end);
-					}
-					if let Some(at) = grace {
-						// One still announced cannot return, so the failure is the export's own.
-						if self.closed || self.elapsed(waiter, at) {
-							let err = end.expect_err("only a failure waits out the grace");
-							tracing::warn!(path = %self.path, %err, "export failed with the broadcast still up, so not lingering");
-							return Poll::Ready(Err(err));
-						}
-						self.state = State::Settling { end, grace, deadline };
-						return Poll::Pending;
-					}
-
-					let follow = match &self.serving {
-						_ if self.refused => false,
-						Serving::Ours => self.ended,
-						Serving::Other(_) if self.stitch => true,
+				State::Settling { end, deadline } => {
+					self.poll_instances(waiter)?;
+					let target = match &self.serving {
+						_ if self.refused => None,
+						Serving::Return(target) => Some(target.clone()),
+						Serving::Other(target) if self.stitch => Some(target.clone()),
 						Serving::Other(_) => return Poll::Ready(Err(crate::Error::Replaced(self.path.to_string()))),
-						Serving::Gone => false,
+						Serving::Ours | Serving::Gone => None,
 					};
-					if follow {
-						self.state = State::Following {
-							resolving: self.resolve(),
-							fallback: Box::new(State::Settling {
-								end: end.clone(),
-								grace: None,
-								deadline,
-							}),
-							awaiting: Awaiting {
-								deadline,
-								missing: Missing::Return(end),
-							},
+					if let Some(target) = target {
+						self.state = State::Resuming {
+							subscription: self.subscribe(target),
+							end,
+							deadline,
 						};
 						continue;
 					}
 					if self.closed || self.elapsed(waiter, deadline) {
 						return Poll::Ready(self.gone(end));
 					}
-					self.state = State::Settling { end, grace, deadline };
+					self.state = State::Settling { end, deadline };
 					return Poll::Pending;
 				}
-				State::Following {
-					mut resolving,
-					awaiting,
-					fallback,
+				State::Resuming {
+					mut subscription,
+					end,
+					deadline,
 				} => {
-					// Whatever the request waits on, the announcements say what serves the path
-					// now: rather than sit out a route that went, ask afresh from there.
-					if self.poll_announced(waiter) {
-						tracing::debug!(path = %self.path, "announcement while resolving, asking again");
-						// A stitch still facing a replacement asks that one, within its original bound.
-						if matches!(*fallback, State::Running { .. }) && matches!(self.serving, Serving::Other(_)) {
-							self.state = State::Following {
-								resolving: self.resolve(),
-								awaiting,
-								fallback,
+					// Whatever the subscription waits on, the instances say what serves the path
+					// now: rather than sit out one that went, decide afresh from there.
+					if self.poll_instances(waiter)? {
+						tracing::debug!(path = %self.path, "instance changed while subscribing, deciding again");
+						self.state = State::Settling { end, deadline };
+						continue;
+					}
+					match waiter.poll_future(subscription.catalog.as_mut()) {
+						Poll::Ready(Ok(catalog)) => {
+							self.carry_on(&subscription.target, catalog)?;
+							self.state = State::Running {
+								awaiting: Some(Missing::Ended { end, deadline }),
+								switching: None,
 							};
-							continue;
 						}
-						// Otherwise it stays on the export it has, still awaiting what it was.
-						self.state = *fallback;
-						// The fallback's wait predates this poll, so it gets no same-poll grace.
-						if let Some(expired) = self.expired() {
-							return Poll::Ready(expired);
-						}
-						continue;
-					}
-					if let Poll::Ready(resolved) = waiter.poll_future(resolving.as_mut()) {
-						let (broadcast, catalog) = match resolved {
-							Ok(resolved) => resolved,
-							// A stitch from a live export fails loud: the replacement would not serve.
-							Err(err) if matches!(*fallback, State::Running { .. }) => return Poll::Ready(Err(err)),
-							// While lingering, a return that fails to resolve is no return yet: nothing
-							// serves the path until the next announcement says otherwise. The error is
-							// reported only if the linger runs out.
-							Err(err) => {
-								tracing::warn!(path = %self.path, %err, "broadcast failed to resolve, still waiting");
+						// Refused, or gone before the instances say so: nothing is followed until
+						// the next change. Only the follow running out reports a refusal.
+						Poll::Ready(Err(err)) => {
+							tracing::warn!(path = %self.path, %err, "catalog subscription failed, still waiting");
+							if !left(&err) {
 								self.failed = Some(err);
-								self.refused = true;
-								self.state = *fallback;
-								if let Some(expired) = self.expired() {
-									return Poll::Ready(expired);
-								}
-								continue;
 							}
-						};
-						self.export.followed(&broadcast, catalog)?;
-						self.failed = None;
-						self.epoch = self.export.instance().cloned();
-						self.serving = Serving::Ours;
-						self.ended = false;
-						tracing::info!(
-							path = %self.path,
-							epoch = self.epoch.as_ref().map(tracing::field::display),
-							"exporting broadcast"
-						);
-						self.state = State::Running {
-							awaiting: Some(awaiting),
-						};
-						continue;
+							self.refused = true;
+							self.state = State::Settling { end, deadline };
+						}
+						Poll::Pending => {
+							self.state = State::Resuming {
+								subscription,
+								end,
+								deadline,
+							};
+							return Poll::Pending;
+						}
 					}
-					if self.elapsed(waiter, awaiting.deadline) {
-						return Poll::Ready(self.expire(awaiting));
-					}
-					self.state = State::Following {
-						resolving,
-						awaiting,
-						fallback,
-					};
-					return Poll::Pending;
 				}
 			}
 		}
 	}
 
-	/// Apply every announcement on hand, returning whether any changed what serves the path.
-	fn poll_announced(&mut self, waiter: &kio::Waiter) -> bool {
+	/// Drive a switch to the replacement serving the path when stitching, returning whether the
+	/// export carried on into it.
+	///
+	/// The old instance keeps playing until the replacement's catalog is subscribed, however long
+	/// that takes, and a replacement that goes first is no switch.
+	fn poll_switch(&mut self, waiter: &kio::Waiter, switching: &mut Option<Subscription<E>>) -> crate::Result<bool> {
+		let target = match &self.serving {
+			Serving::Other(target) if self.stitch && !self.refused => target,
+			_ => {
+				*switching = None;
+				return Ok(false);
+			}
+		};
+		if !switching
+			.as_ref()
+			.is_some_and(|switching| switching.target.is_clone(target))
+		{
+			tracing::info!(path = %self.path, "broadcast replaced, switching the program to the new instance");
+			*switching = Some(self.subscribe(target.clone()));
+		}
+		let subscription = switching.as_mut().expect("just set");
+		match waiter.poll_future(subscription.catalog.as_mut()) {
+			Poll::Ready(Ok(catalog)) => {
+				let subscription = switching.take().expect("just polled");
+				self.carry_on(&subscription.target, catalog)?;
+				Ok(true)
+			}
+			// Gone before the instances say so: no switch until the next change.
+			Poll::Ready(Err(err)) if left(&err) => {
+				tracing::warn!(path = %self.path, %err, "replacement went before its catalog subscribed");
+				*switching = None;
+				self.refused = true;
+				Ok(false)
+			}
+			// The replacement would not serve, so the switch fails loud.
+			Poll::Ready(Err(err)) => Err(err),
+			Poll::Pending => Ok(false),
+		}
+	}
+
+	/// Carry the export on into `target`, whose `catalog` is subscribed.
+	fn carry_on(
+		&mut self,
+		target: &moq_net::broadcast::Consumer,
+		catalog: crate::catalog::Consumer<E>,
+	) -> crate::Result<()> {
+		self.export.followed(target, catalog, self.follow)?;
+		self.serving = Serving::Ours;
+		self.failed = None;
+		tracing::info!(
+			path = %self.path,
+			epoch = self.export.instance().map(tracing::field::display),
+			"exporting broadcast"
+		);
+		Ok(())
+	}
+
+	/// Apply every change on hand, returning whether any came through.
+	fn poll_instances(&mut self, waiter: &kio::Waiter) -> crate::Result<bool> {
 		let mut any = false;
 		while !self.closed {
-			any |= match self.announced.poll_next(waiter) {
-				Poll::Ready(Some(event)) => self.apply(event),
-				Poll::Ready(None) => {
-					self.closed = true;
-					true
+			match self.instances.poll_next(waiter) {
+				Poll::Ready(Ok(Event::Start(broadcast))) => {
+					self.serving = match self.export.instance() {
+						// An epochless route has no instance to match, so only the broadcast
+						// being exported is its own.
+						None if broadcast.is_clone(&self.export.source().broadcast()) => Serving::Ours,
+						// Even the same broadcast handed out again is a return: the origin hands
+						// one out only for an announcement that brings it.
+						Some(epoch) if broadcast.info().epoch.as_ref() == Some(epoch) => match self.priming {
+							true => Serving::Ours,
+							false => Serving::Return(broadcast),
+						},
+						_ => Serving::Other(broadcast),
+					};
 				}
+				Poll::Ready(Ok(Event::End)) => self.serving = Serving::Gone,
+				Poll::Ready(Err(crate::Error::Moq(moq_net::Error::Closed))) => self.closed = true,
+				Poll::Ready(Err(err)) => return Err(err),
 				Poll::Pending => break,
-			};
+			}
+			any = true;
 		}
 		self.refused &= !any;
-		any
+		Ok(any)
 	}
 
-	/// Apply an announcement, returning whether it changed what serves the path.
-	fn apply(&mut self, event: moq_net::announce::Event) -> bool {
-		let first = !std::mem::replace(&mut self.started, true);
-		self.serving = match event {
-			moq_net::announce::Event::Start(announce) => {
-				let epoch = announce.route.epoch;
-				// The first start names the route the export resolved, as near as an epochless
-				// route can tell.
-				match epoch == self.epoch && (epoch.is_some() || first) {
-					true => Serving::Ours,
-					false => Serving::Other(epoch),
-				}
-			}
-			// The export's own instance winning the path back, as when a more specific route of
-			// another instance goes, is still its own.
-			moq_net::announce::Event::Restart(announce) => {
-				let epoch = announce.route.epoch;
-				match epoch.is_some() && epoch == self.epoch {
-					true => Serving::Ours,
-					false => Serving::Other(epoch),
-				}
-			}
-			moq_net::announce::Event::End(_) => {
-				self.ended = true;
-				Serving::Gone
-			}
-			// The same instance over another route, which subscriptions ride out. A gap that
-			// ended the export's request comes as an end and a start instead.
-			moq_net::announce::Event::Update(_) => return false,
-		};
-		true
+	/// Begin subscribing to `target`'s catalog.
+	fn subscribe(&self, target: moq_net::broadcast::Consumer) -> Subscription<E> {
+		let (broadcast, format) = (target.clone(), self.export.catalog_format());
+		Subscription {
+			target,
+			catalog: Box::pin(async move { crate::catalog::Consumer::new(&broadcast, format).await }),
+		}
 	}
 
-	/// Begin resolving the instance serving the path now.
-	fn resolve(&self) -> Resolving<E> {
-		let epoch = match &self.serving {
-			Serving::Other(epoch) => epoch.clone(),
-			Serving::Ours | Serving::Gone => self.epoch.clone(),
-		};
-		let request = self.export.source().origin().request_broadcast(&self.path, epoch);
-		let format = self.export.catalog_format();
-		Box::pin(async move {
-			let broadcast = request.await?;
-			let catalog = crate::catalog::Consumer::new(&broadcast, format).await?;
-			Ok((broadcast, catalog))
-		})
+	/// Where the export goes once the instance it carried on into ends before its first snapshot.
+	fn withdrawn(&mut self, missing: Missing) -> State<E> {
+		tracing::warn!(path = %self.path, "broadcast ended before serving its catalog");
+		match missing {
+			Missing::Ended { end, deadline } => State::Settling { end, deadline },
+			Missing::Switch => State::Settling {
+				end: Err(
+					anyhow::anyhow!("replacement broadcast `{}` ended before serving its catalog", self.path).into(),
+				),
+				deadline: moq_clock::now() + self.follow,
+			},
+		}
 	}
 
-	fn lingering(&self, end: &crate::Result<()>) {
-		if self.linger.is_zero() {
+	fn following(&self, end: &crate::Result<()>) {
+		if self.follow.is_zero() {
 			return;
 		}
 		match end {
 			Ok(()) => {
-				tracing::info!(path = %self.path, linger = ?self.linger, "broadcast finished, waiting for it to return")
+				tracing::info!(path = %self.path, follow = ?self.follow, "broadcast finished, waiting for it to return")
 			}
 			Err(err) => {
-				tracing::warn!(path = %self.path, %err, linger = ?self.linger, "broadcast ended, waiting for it to return")
+				tracing::warn!(path = %self.path, %err, follow = ?self.follow, "broadcast ended, waiting for it to return")
 			}
 		}
 	}
 
-	/// End a catalog wait already past its deadline, before a late snapshot can count.
-	///
-	/// Only waits from an earlier poll are checked: within one poll a ready catalog still makes
-	/// it, which zero linger relies on.
-	fn expired(&mut self) -> Option<crate::Result<Option<Frame>>> {
-		let awaiting = match &self.state {
-			State::Running { awaiting } => awaiting.as_ref(),
-			State::Following { awaiting, .. } => Some(awaiting),
-			State::Settling { .. } | State::Done => None,
-		};
-		if !awaiting.is_some_and(|awaiting| moq_clock::now() >= awaiting.deadline) {
-			return None;
-		}
-		let (State::Running {
-			awaiting: Some(awaiting),
-		}
-		| State::Following { awaiting, .. }) = std::mem::replace(&mut self.state, State::Done)
-		else {
-			unreachable!("only a running or following state awaits a catalog");
-		};
-		Some(self.expire(awaiting))
-	}
-
-	/// How a wait for the catalog's first snapshot ends once the linger runs out.
-	fn expire(&mut self, awaiting: Awaiting) -> crate::Result<Option<Frame>> {
-		match awaiting.missing {
-			Missing::Return(end) => self.gone(end),
-			Missing::Switch => Err(self.missing_catalog()),
-		}
-	}
-
-	/// How the export ends once the linger runs out with nothing back: with why the last
-	/// return failed to resolve, if one did, else as the broadcast ended.
+	/// How the export ends once the follow runs out with nothing back: with why the last
+	/// return refused its catalog, if one did, else as the broadcast ended.
 	fn gone(&mut self, end: crate::Result<()>) -> crate::Result<Option<Frame>> {
-		tracing::info!(path = %self.path, linger = ?self.linger, "broadcast did not return");
+		tracing::info!(path = %self.path, follow = ?self.follow, "broadcast did not return");
 		match self.failed.take() {
 			Some(err) => Err(err),
 			None => end.map(|()| None),
 		}
-	}
-
-	fn missing_catalog(&self) -> crate::Error {
-		anyhow::anyhow!(
-			"replacement broadcast `{}` did not serve its catalog within {:?}",
-			self.path,
-			self.linger
-		)
-		.into()
 	}
 
 	/// Whether `at` has come, registering `waiter` to wake then if not.
@@ -512,4 +424,22 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 		}
 		waiter.poll_future(timer.as_mut()).is_ready()
 	}
+}
+
+/// Whether a failure says the publisher left rather than the export failing: the route serving
+/// the broadcast was lost, the session carrying it ended, or a moq-transport peer named no cause.
+pub(super) fn left(err: &crate::Error) -> bool {
+	let (crate::Error::Moq(err) | crate::Error::Hang(hang::Error::Moq(err))) = err else {
+		return false;
+	};
+	use moq_net::{Error, StreamError};
+	matches!(
+		err,
+		Error::Unroutable
+			| Error::Stream(StreamError::Unroutable | StreamError::Session(_))
+			| Error::Session(_)
+			| Error::Transport(_)
+			| Error::IdleTimeout
+			| Error::Remote(_)
+	)
 }

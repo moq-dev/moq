@@ -1,5 +1,5 @@
 //! Archive endpoints: record every broadcast announced under a prefix into an object store
-//! (export), or republish a recording from one (import), through `moq-archive`.
+//! (export), or republish one recorded broadcast from one (import), through `moq-archive`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -26,29 +26,28 @@ pub struct ExportArgs {
 
 	/// Keep only this much recent content (a DVR), deleting older objects. Unset keeps everything.
 	#[usage(long)]
-	pub retention: Option<crate::duration::Duration>,
+	pub retention: Option<moq_tokio::cli::Duration>,
 
 	/// How long a deleted object outlives the retention, so readers can finish their downloads.
 	/// Defaults to 30s; needs `--retention`.
 	#[usage(long)]
-	pub retention_grace: Option<crate::duration::Duration>,
+	pub retention_grace: Option<moq_tokio::cli::Duration>,
 }
 
 /// `import archive` args.
 #[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct ImportArgs {
-	/// The timeline recording to replay.
+	/// One recorded broadcast: the `<broadcast>/@<epoch>` key prefix `export archive` wrote.
 	pub store: Url,
 
-	/// Keep following a recording that is still growing, checking for new segments at this
-	/// interval. Unset replays what is stored now and ends the timeline there.
+	/// How often a recording still growing is checked for new objects and tracks. Defaults to 1s.
 	#[usage(long)]
-	pub follow: Option<crate::duration::Duration>,
+	pub refresh: Option<moq_tokio::cli::Duration>,
 }
 
 /// One publisher instance being recorded: its path, and its epoch when its route has one.
-type Instance = (moq_net::PathOwned, Option<moq_net::Epoch>);
+type Instance = (moq_net::Path, Option<moq_net::Epoch>);
 
 /// Record every broadcast announced at or under `prefix` into `args.store`, each publisher
 /// instance under `<path>/@<epoch>`, until the announcements end.
@@ -58,8 +57,8 @@ type Instance = (moq_net::PathOwned, Option<moq_net::Epoch>);
 pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: ExportArgs) -> anyhow::Result<()> {
 	let dvr = match (args.retention, args.retention_grace) {
 		(Some(window), grace) => Some(moq_archive::producer::Dvr::new(
-			window.into_std(),
-			grace.map_or(GRACE, crate::duration::Duration::into_std),
+			window.into(),
+			grace.map_or(GRACE, Into::into),
 		)),
 		(None, Some(_)) => anyhow::bail!("`--retention-grace` needs `--retention`"),
 		(None, None) => None,
@@ -69,7 +68,7 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 
 	// Announcements leave hidden routes out unless asked, and a prefix naming one asks.
 	let hidden = prefix.split('/').any(|segment| segment.starts_with('.'));
-	let prefix = moq_net::Path::new(&prefix).to_owned();
+	let prefix = moq_net::Path::new(&prefix)?;
 	let mut announced = origin.clone().with_hidden(hidden).announced();
 	let mut recordings = tokio::task::JoinSet::new();
 	let mut running = Running::default();
@@ -116,11 +115,11 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 /// The broadcasts being recorded. Announcements read after another instance took over all
 /// resolve that one, so it is recorded once.
 #[derive(Clone, Default)]
-struct Claims(Arc<std::sync::Mutex<HashMap<moq_net::PathOwned, Vec<moq_net::broadcast::Consumer>>>>);
+struct Claims(Arc<std::sync::Mutex<HashMap<moq_net::Path, Vec<moq_net::broadcast::Consumer>>>>);
 
 impl Claims {
 	/// Claim `broadcast` for recording, or `None` when it is recorded already.
-	fn claim(&self, path: &moq_net::PathOwned, broadcast: &moq_net::broadcast::Consumer) -> Option<Claim> {
+	fn claim(&self, path: &moq_net::Path, broadcast: &moq_net::broadcast::Consumer) -> Option<Claim> {
 		let mut claims = self.0.lock().unwrap();
 		let claimed = claims.entry(path.clone()).or_default();
 		if claimed.iter().any(|other| other.is_clone(broadcast)) {
@@ -138,7 +137,7 @@ impl Claims {
 /// A broadcast being recorded, released on drop.
 struct Claim {
 	claims: Claims,
-	path: moq_net::PathOwned,
+	path: moq_net::Path,
 	broadcast: moq_net::broadcast::Consumer,
 }
 
@@ -239,8 +238,9 @@ fn key(root: &Path, (path, epoch): &Instance) -> anyhow::Result<Path> {
 
 /// Republish the recording at `args.store` as the broadcast `name`, announced under `epoch`.
 ///
-/// Each track's timeline replays as a live track and every other track's groups are served on
-/// request.
+/// Every stored track is served with its original groups: each live from its newest stored
+/// group, and history on request. A recording still growing is followed until its producer
+/// marks it complete.
 pub async fn import(
 	origin: moq_net::origin::Producer,
 	name: String,
@@ -248,48 +248,24 @@ pub async fn import(
 	epoch: moq_net::Epoch,
 ) -> anyhow::Result<()> {
 	let store = open(&args.store)?;
-	// A second handle lists the recording's timelines while the reader owns the first.
-	let listing = open(&args.store)?;
+	let mut config = moq_archive::consumer::Config::default();
+	if let Some(refresh) = args.refresh {
+		config = config.with_refresh(refresh.into());
+	}
 	let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
-	let mut timelines = store
-		.timelines()
-		.await
-		.with_context(|| format!("failed to list the recording at {}", args.store))?;
-	let config = moq_archive::reader::Config::new(timelines.clone());
-	let mut reader = moq_archive::Reader::open(store, &broadcast, config)
+	let consumer = moq_archive::Consumer::open(store, broadcast.broadcast().clone(), config)
 		.await
 		.with_context(|| format!("no readable recording at {}", args.store))?;
-	let serve = reader.serve();
 	broadcast
 		.announce(moq_net::origin::Route::default().with_epoch(epoch))
 		.context("failed to announce broadcast")?;
 
 	tracing::info!(%name, store = %args.store, "replaying");
 	notify_ready();
-
-	// The store holds no end marker, so only the caller can say the recording is complete.
-	let Some(interval) = args.follow.map(crate::duration::Duration::into_std) else {
-		reader.finish()?;
-		serve.await;
-		return Ok(());
-	};
-	let refresh = async {
-		loop {
-			moq_clock::sleep(interval).await;
-			// A rendition the recording enrolled after the replay started.
-			for (track, timeline) in listing.timelines().await? {
-				if let std::collections::btree_map::Entry::Vacant(entry) = timelines.entry(track) {
-					reader.track(entry.key(), &timeline).await?;
-					entry.insert(timeline);
-				}
-			}
-			reader.refresh().await?;
-		}
-	};
-	tokio::select! {
-		() = serve => Ok(()),
-		result = refresh => result,
-	}
+	consumer
+		.run()
+		.await
+		.with_context(|| format!("replaying {} failed", args.store))
 }
 
 /// Open the object store `url` names, taking cloud credentials from the `AWS_*`, `GOOGLE_*`,
@@ -303,14 +279,14 @@ fn open_store(url: &Url) -> anyhow::Result<(Arc<dyn ObjectStore>, Path)> {
 	Ok((Arc::from(store), prefix))
 }
 
-/// [`open_store`] as one recording.
+/// [`open_store`] as one recorded broadcast.
 fn open(url: &Url) -> anyhow::Result<moq_archive::Store<Arc<dyn ObjectStore>>> {
 	let (store, prefix) = open_store(url)?;
 	Ok(moq_archive::Store::new(store, prefix))
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 
@@ -338,8 +314,6 @@ mod tests {
 	/// `<path>/@<epoch>`, and leaves out what is announced elsewhere.
 	#[tokio::test]
 	async fn each_broadcast_records_under_its_own_key_prefix() {
-		// `open_store` reads the credential variables.
-		let _env = crate::test_env::EnvGuard::clear(&[]);
 		let dir = tempfile::tempdir().unwrap();
 		let url = Url::from_directory_path(dir.path()).unwrap();
 
@@ -407,17 +381,73 @@ mod tests {
 		assert!(!files.iter().any(|file| file.starts_with("other")), "{files:?}");
 	}
 
+	/// `import archive` republishes a recording `export archive` wrote under the given name and
+	/// epoch, serving its stored groups.
+	#[tokio::test]
+	async fn an_exported_broadcast_imports() {
+		let dir = tempfile::tempdir().unwrap();
+		let url = Url::from_directory_path(dir.path()).unwrap();
+
+		let source = moq_net::broadcast::Info::new().produce();
+		let info = track::Info::default().with_timescale(Timescale::MILLI);
+		let video = source.create_track("video", info).unwrap();
+		for sequence in 0..2 {
+			let mut group = video.create_group(group::Info { sequence }).unwrap();
+			let pts = Timestamp::from_millis(sequence * 1000).unwrap();
+			group.write_frame(pts, format!("frame {sequence}")).unwrap();
+			group.finish().unwrap();
+		}
+		video.finish().unwrap();
+		let recording =
+			tokio::spawn(moq_archive::Producer::new(open(&url).unwrap(), source.consume(), Default::default()).run());
+		// Its objects, then the markers once the broadcast ends.
+		tokio::time::timeout(Duration::from_secs(10), async {
+			while files(dir.path()).len() < 2 {
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("the recording stores its track");
+		source.close();
+		recording.await.unwrap().unwrap();
+
+		let origin = moq_tokio::origin::spawn();
+		let args = ImportArgs {
+			store: url,
+			refresh: None,
+		};
+		let epoch = moq_net::Epoch::mint();
+		let _import = tokio::spawn(import(origin.clone(), "replay".into(), args, epoch.clone()));
+		let mut announced = origin.consume().announced();
+		tokio::time::timeout(Duration::from_secs(10), async {
+			loop {
+				if let Some(moq_net::announce::Event::Start(announce)) = announced.next().await {
+					assert_eq!(announce.prefix.as_str(), "replay");
+					assert_eq!(announce.route.epoch, Some(epoch.clone()));
+					break;
+				}
+			}
+		})
+		.await
+		.expect("the replay is announced");
+		let broadcast = origin.consume().request_broadcast("replay", None).await.unwrap();
+		let track = broadcast.track("video").unwrap();
+		let mut group = track.fetch_group(0, None).await.unwrap();
+		let frame = group.read_frame().await.unwrap().unwrap();
+		assert_eq!(&frame.payload[..], b"frame 0");
+	}
+
 	/// An epochless route announced again while its last recording drains is a new recording, and
 	/// an epoch-pinned one records again once its recording ends.
 	#[test]
 	fn a_re_announced_instance_is_recorded() {
 		let mut running = Running::default();
-		let epochless = (moq_net::Path::new("live/a").to_owned(), None);
+		let epochless = (moq_net::Path::from_static("live/a"), None);
 		assert!(running.start(&epochless));
 		assert!(running.start(&epochless));
 		assert!(!running.done(&epochless));
 
-		let pinned = (moq_net::Path::new("live/b").to_owned(), Some(moq_net::Epoch::mint()));
+		let pinned = (moq_net::Path::from_static("live/b"), Some(moq_net::Epoch::mint()));
 		assert!(running.start(&pinned));
 		assert!(!running.start(&pinned));
 		assert!(running.done(&pinned));
@@ -430,7 +460,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_resolved_broadcast_is_recorded_once() {
 		let origin = moq_tokio::origin::spawn();
-		let path = moq_net::Path::new("live/a").to_owned();
+		let path = moq_net::Path::from_static("live/a");
 		let newest = origin.create_broadcast(&path).unwrap();
 		let older = origin.create_broadcast(&path).unwrap();
 
@@ -449,14 +479,14 @@ mod tests {
 	/// share a key prefix.
 	#[test]
 	fn an_epochless_instance_gets_a_fresh_key() {
-		let instance = (moq_net::Path::new("live/a").to_owned(), None);
+		let instance = (moq_net::Path::from_static("live/a"), None);
 		let first = key(&Path::from("rec"), &instance).unwrap();
 		let second = key(&Path::from("rec"), &instance).unwrap();
 		assert_ne!(first, second);
 		assert!(first.as_ref().starts_with("rec/live/a/"), "{first}");
 
 		let epoch = moq_net::Epoch::mint();
-		let pinned = (moq_net::Path::new("live/a").to_owned(), Some(epoch.clone()));
+		let pinned = (moq_net::Path::from_static("live/a"), Some(epoch.clone()));
 		assert_eq!(
 			key(&Path::from("rec"), &pinned).unwrap().as_ref(),
 			format!("rec/live/a/@{epoch}")
@@ -470,13 +500,13 @@ mod tests {
 		let epoch = moq_net::Epoch::mint();
 		let victim = key(
 			&Path::from("rec"),
-			&(moq_net::Path::new("live/a").to_owned(), Some(epoch.clone())),
+			&(moq_net::Path::from_static("live/a"), Some(epoch.clone())),
 		)
 		.unwrap();
 		let hostile = format!("live/a/@{epoch}");
 		let nested = key(
 			&Path::from("rec"),
-			&(moq_net::Path::new(&hostile).to_owned(), Some(moq_net::Epoch::mint())),
+			&(moq_net::Path::new(&hostile).unwrap(), Some(moq_net::Epoch::mint())),
 		)
 		.unwrap();
 		assert!(nested.prefix_match(&victim).is_none(), "{nested} is under {victim}");
@@ -488,10 +518,7 @@ mod tests {
 		// `%` is escaped too, so an escaped-looking segment keys apart from the `@` one.
 		let literal = key(
 			&Path::from("rec"),
-			&(
-				moq_net::Path::new(&format!("live/a/%40{epoch}")).to_owned(),
-				Some(epoch),
-			),
+			&(moq_net::Path::new(&format!("live/a/%40{epoch}")).unwrap(), Some(epoch)),
 		)
 		.unwrap();
 		assert!(literal.as_ref().starts_with("rec/live/a/%2540"), "{literal}");

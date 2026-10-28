@@ -2,26 +2,26 @@
 
 ## Goal
 
-Condition: the first `moq-ffi-v*` tag whose commit carries
-`.github/workflows/release-shared-ffi.yml` has run `Release FFI`, and a
-Nightly's `Shipping sizes` job has run since
-[#5549](https://github.com/moq-dev/moq/pull/5549). Check the tag with
-`git ls-tree <tag> .github/workflows/` and its runs with
-`gh run list --workflow release-shared-ffi.yml --event push`; check sizes with
-`gh run list --workflow nightly.yml --event schedule` and the `Shipping sizes`
-job. Then verify the items below, fix or quest what fails, and delete this
-quest.
+Verify the first `moq-ffi-v*` tag that runs `Release FFI`. Condition: the
+backport [#6730](https://github.com/moq-dev/moq/pull/6730) has merged to
+`release`, and a `moq-ffi-v*` tag cut after it has run `Release FFI`. Check the
+tag with `git ls-tree <tag> .github/workflows/` and its runs with
+`gh run list --workflow release-shared-ffi.yml --event push`. Then verify the
+items below, fix or quest what fails, and delete this quest.
 
 ## Plan
 
-`moq-ffi-v0.4.16` (2026-10-16) was cut from a `release` without #5549, so it
-ran the per-language workflows and verified nothing here. The Linux release
-toolchain now links; verify `Shipping sizes` on the next scheduled Nightly.
+`moq-ffi-v0.4.16` through `moq-ffi-v0.4.18` were cut from a `release` without
+[#5549](https://github.com/moq-dev/moq/pull/5549), so they ran the per-language
+workflows. #6730 backports #5549, the attempt-scoped publisher check from
+[#5573](https://github.com/moq-dev/moq/pull/5573), and the wrapper gates from
+[#6084](https://github.com/moq-dev/moq/pull/6084), without the Shipping sizes
+and C++ parts `release` lacks.
 
-The first scheduled Nightly after the change (run 38897397428, 2026-10-16)
-already verified the dry-run side: the nested job names match the publisher
-check, each packager selected its own targets from the shared artifacts, and
-the Swift wrapper dry run passed. Its measured saving is in `.github/ffi.md`.
+The Nightly side is verified: run 38897397428 covered the dry-run jobs (see
+`.github/ffi.md`), and the Shipping sizes jobs of Nightlies 39779729461 and
+40090959108 keep the `release/go-lib-<target>/` keys, with the second compared
+against the prior history (a changed artifact set fails the report).
 
 From the first shared tag:
 
@@ -29,8 +29,3 @@ From the first shared tag:
   sees its publisher through the jobs API under the `workflow_run` token and
   releases or skips as its own publisher did.
 - The Go, Kotlin and Swift packages publish from the shared artifacts.
-
-From the first `Shipping sizes` run:
-
-- The Go static libraries keep their `release/go-lib-<target>/` history keys,
-  so the comparison shows no removed or added Go entries.

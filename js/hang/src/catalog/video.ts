@@ -2,6 +2,7 @@ import * as z from "@zod/mini";
 import { compareName, compareNumber } from "./compare";
 import { ContainerSchema } from "./container";
 import { hexSchema } from "./hex";
+import { HlsFieldSchema } from "./hls";
 import { u8Schema, u53Schema } from "./integers";
 import { EpochSchema, RelativeBroadcastSchema } from "./path";
 
@@ -133,8 +134,17 @@ export const VideoConfigSchema = z.object({
 	// so an unrecognized packing survives a republish; a consumer treats one as absent.
 	stereo: z.optional(z.string()),
 
+	// Each picture weaves two fields, so a renderer deinterlaces it. Absent means progressive.
+	interlaced: z.optional(z.boolean()),
+
 	// The maximum frame rate of the video in frames per second.
 	framerate: z.optional(z.number()),
+
+	// The most frames that can precede a frame in decode order and follow it in presentation order,
+	// as H.264 max_num_reorder_frames and HEVC sps_max_num_reorder_pics count them. 0 declares that
+	// presentation order is decode order. Absent declares nothing: a consumer that authors decode
+	// times infers them from the timestamps instead. Once declared, it holds for the track's life.
+	reorder: z.optional(u8Schema),
 
 	// The maximum bitrate of the video in bits per second.
 	// TODO: Support up to Number.MAX_SAFE_INTEGER
@@ -185,6 +195,10 @@ export const VideoConfigSchema = z.object({
 			z.transform((value) => (value === 0 ? undefined : value)),
 		),
 	),
+
+	// This rendition's HLS segment records, when the publisher opted in. Without it the rendition
+	// is not HLS-renderable. A malformed value is absent, so it can never reject the media.
+	hls: HlsFieldSchema,
 });
 
 /**

@@ -31,7 +31,7 @@ Share `media.NewTimebase(broadcast)` through `ContainerInit` when several import
 source timeline; omitting it keeps an independent offset. Timebases belong to one broadcast
 and do not keep it open; release the handle with `Close` on the calling goroutine.
 `NewContainerProducer` takes chunks split anywhere, so a raw byte stream needs no other importer.
-`ContainerFormatFmp4` splits each fragment into one frame per sample; `ContainerFormatCmaf` republishes it whole.
+`ContainerFormatFmp4` splits each fragment into one frame per sample.
 For arrival-order reads, decode each group from `moq.TrackConsumer.RecvGroup` with
 `media.NewGroupConsumer`; frames carry container media time as they land. `media.FetchGroup`
 fetches and decodes one past group.
@@ -47,7 +47,9 @@ import "moq.dev/moq"
 import moqmedia "moq.dev/moq/media"
 
 // Subscribe. The iterator is live, so run it in its own goroutine.
-client, err := moq.Dial(ctx, "https://relay.example.com", moq.WithTLSRoots("ca.pem"))
+client, err := moq.Dial(ctx, "https://relay.example.com", moq.ClientConfig{
+    TLS: moq.ClientTLS{Roots: []string{"ca.pem"}},
+})
 if err != nil {
     log.Fatal(err)
 }
@@ -94,7 +96,8 @@ import (
 
 // Publish encoded frames, or raw pixels with the codec inside the binding.
 // opusInit, packet, pts, and rgba come from your encoder or capture source.
-broadcast, _ := client.CreateBroadcast("my-stream.hang")
+publication, _ := client.CreateBroadcast("my-stream.hang")
+broadcast := publication.Broadcast()
 audio, _ := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.AudioFormatOpus, Data: opusInit})
 timestamp := 20 * time.Millisecond
 _ = audio.WriteFrame(moq.Frame{Payload: packet, Timestamp: &timestamp})
@@ -102,18 +105,20 @@ _ = audio.Cut() // audio has no keyframes, so this is what gives it groups
 
 track := "camera"
 catalogProducer, _ := moqmedia.NewCatalogProducer(broadcast)
-video, _ := moqvideo.NewProducer(catalogProducer,
-    moqvideo.EncoderInput{Format: moq.VideoPixelFormatRgba, Width: 1280, Height: 720, Framerate: 30},
-    moqvideo.EncoderOutput{Codec: moq.VideoCodecH264, Track: &track, Kind: moq.AutoEncoder()},
-    nil,
-)
+video, _ := moqvideo.NewProducer(catalogProducer, moqvideo.ProducerOptions{
+    Input: moqvideo.EncoderInput{Format: moq.VideoPixelFormatRgba, Width: 1280, Height: 720, Framerate: moqvideo.FrameRate{Numerator: 30000, Denominator: 1001}},
+    Output: moqvideo.EncoderOutput{Codec: moq.VideoCodecH264, Kind: moq.AutoEncoder()},
+    Track: &track,
+})
 _ = video.Write(moqvideo.Frame{Timestamp: time.Duration(pts) * time.Microsecond, Data: rgba})
 epoch := moq.MintEpoch() // a fresh epoch per run
-_ = broadcast.Announce(moq.Route{Epoch: &epoch})
+_ = publication.Announce(moq.AnnounceRoute{Epoch: &epoch})
 _ = audio.Finish()
 _ = video.Finish()
 broadcast.Close()    // keep the producer reachable while publishing, then close explicitly
 ```
+
+Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Producer options hold input, codec settings, track naming, and optional session bandwidth ownership; standalone encoders take only codec settings. For simulcast, give each rendition the next one down as `Lower`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers. A rung only disables while the session probes for bandwidth, which on native transports takes moq-quic with BBR3.
 
 ## Things to know
 
@@ -122,16 +127,19 @@ one to one; the API reference has the names, and [Layers](/lib/layers)
 shows which module holds each.
 
 - **Context cancellation.** Every call that can block takes a `context.Context` first, and cancelling it tears down the native work, not just your wait. A one-shot call (`RequestBroadcast`, `FetchGroup`, `Server.Accept`) aborts alone; a stream read (`Next`, `ReadFrame`, and the iterators over them) cancels the stream it reads.
-- **Keep owners reachable.** An origin from `moq.NewOriginProducer` has no `Close`. It ends when the garbage collector reaches its last owner (each producer, published broadcast, and `OriginDynamic`), and its consumers then fail with `moq.ErrClosed`.
+- **Keep owners reachable.** An origin from `moq.NewOriginProducer` has no `Close`. It ends when the garbage collector reaches its last owner (each producer, published broadcast, and `OriginRequests`), and its consumers then fail with `moq.ErrClosed`.
+- **Bandwidth ownership.** An encoder you manage can reserve a share of the session's bandwidth. Reuse its reservation when the ceiling changes; before abandoning or replacing it, call `Update(0)` to return its share and automatic probe ceiling without waiting for garbage collection. The track can stay subscribed and the reservation can be reused.
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `Cut()`: after every frame, or at a segment cadence to align with video.
-- **Live encoder timing.** After writing a frame you encoded yourself, call `Flush(timestamp)` with the same timestamp so the catalog advertises your jitter. Skip it for file and network imports. On a seek or pause, call `Discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
+- **Timeline breaks.** On a seek or pause, call `Discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
+- **Media reads.** `media.TrackConsumer`, `audio.Consumer`, and `video.Consumer` return a `Read` in order: `ReadFrame`, a `ReadGap` where media was lost, or a `ReadEnd` where the publisher stopped its encoder. A gap breaks continuity. An encoder end is not stream EOF: following frames before its endpoint are the old encoder's drain; the first at or past it starts fresh.
 - **Decoded frames hold decoder buffers.** `Close` each `VideoDecodedFrame` promptly, or the decoder stalls. `Resize` is best effort, so read each frame's `Width()` and `Height()`.
-- **Closing.** `client.Close()` drains for up to one second and returns an error on failure. `session.Shutdown(ctx)` does the same, and `session.Cancel(code)` closes at once. Finish or abort live tracks first. Application delivery requires explicitly selecting `moq-lite-07-wip` on both peers; older Lite versions (including default lite-06) and IETF wait only for transport ACKs.
-- **Ending cleanly.** When the input ends, finish every track, then call `broadcast.Finish()`. The returned `*BroadcastFinish` keeps the broadcast announced and serving the finished tracks for `Linger()`, their longest max age, so a subscriber still catching up can drain them. `finish.Wait(ctx)` returns once the linger passes; ending `ctx`, or `finish.Close()`, closes the broadcast at once. `broadcast.Close()` stays the abrupt end.
-- **Stats.** `Session().Stats()` reports `RTT`, `EstimatedSendRateBps`, and the byte and packet counters (`BytesSent`, `BytesReceived`, `BytesLost`, `PacketsSent`, `PacketsReceived`, `PacketsLost`). A field is nil when the transport does not report it, which is not the same as zero. `Version` names the negotiated protocol, and while a client session reconnects `Session().Failure()` says why. Hold the owned `BandwidthConsumer` returned by `Session().RecvBandwidth()` to receive bandwidth estimates. `Peek()` reads the current estimate in bits per second and `Changed(ctx)` waits for a new one. Calling `Close()` on the last consumer stops PROBE; the session and stats snapshots do not request it. Client consumers survive reconnects and report no estimate while disconnected.
-- **Authorization.** On `moq-lite-07-wip` (opt in with `moq.WithVersions`) and on moq-transport draft-17+ with the [MoQ Auth extension](/draft/moq-auth), `Session().Auth().Grant()` is the `Grant` the relay sent back, nil until it answers and while a client session reconnects; `GrantChanged(ctx)` waits for the next one. `Add(ctx, token)` presents a fresh token without reconnecting, returns an `AuthToken` whose grant joins the union until `Close()`, and is presented again on every reconnect. A refusal returns the relay's code.
+- **Closing.** `client.Close()` drains for up to one second and returns an error on failure. `session.Shutdown()` requests that drain immediately; `session.Closed(ctx)` waits for its result, and `session.Cancel(code)` closes at once. Finish or abort live tracks first. Application delivery requires explicitly selecting `moq-lite-07-wip` on both peers; older Lite versions (including default lite-06) and IETF wait only for transport ACKs.
+- **Ending cleanly.** When the input ends, finish every track, then call `Finish()` on its `media.CatalogProducer` to finish the catalog, which ends the content. The broadcast stays announced and keeps serving the finished tracks, so a subscriber still catching up can drain them, until `broadcast.Close()` takes it offline. How long to keep it up is yours to decide. A track still open at the close, or released without a finish, ends with `Unroutable`, which readers take as the publisher leaving.
+- **Stats.** `Session().Stats()` reports `RTT`, `EstimatedSendRateBps`, and the byte and packet counters (`BytesSent`, `BytesReceived`, `BytesLost`, `PacketsSent`, `PacketsReceived`, `PacketsLost`). A field is nil when the transport does not report it, which is not the same as zero. `Version` names the negotiated protocol. `Dial` returns a connecting session; read `Session().State()` and wait with `StateChanged(ctx, state.Revision)` to observe first-dial failures and reconnects. Hold the owned `BandwidthConsumer` returned by `Session().RecvBandwidth()` to receive bandwidth estimates. `Rate()` reads the current estimate in bits per second and `RateChanged(ctx)` waits for a new one. Calling `Close()` on the last consumer stops PROBE; the session and stats snapshots do not request it. Client consumers survive reconnects and report no estimate while disconnected.
+- **Authorization.** On `moq-lite-07-wip` (opt in with `ClientConfig.Versions`) and on moq-transport draft-18+ with the [MoQ Auth extension](/draft/moq-auth), `Session().Grants()` returns a `GrantConsumer`: `Grant()` is the `Grant` the relay sent back, nil until it answers and while a client session reconnects, and `Changed(ctx)` waits for the next one. `Close()` it when done.
+- **Tokens.** Set `ClientConfig.Tokens` instead of putting the credential in the URL. The first is the connection credential, sent in SETUP and, while an offered version can't carry it there (lite before 07), as the URL's `?jwt=`; each other token widens the grant over AUTH. `Session().Tokens().Set(...)` replaces a client session's tokens before they expire: the next dial presents them, a live AUTH session at once, and after an authorization refusal the session redials only if they changed. `Answered(ctx)` returns nil once the relay accepts them, or its refusal with the relay's code. A `?jwt=` already in the URL stays the connection credential, which is how to reach a relay older than this release.
 - **Errors.** Read diagnostic payloads from `Reason` and structured protocol failures from `Details`.
-- **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder.
+- **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder. Among the video renditions you can decode, prefer the highest `Preference`; `0` is the default and `-1` marks a compatibility transcode.
 - **Track demand.** Obtain a dynamic track request’s `Demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
 
 ## Runtime

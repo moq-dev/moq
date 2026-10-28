@@ -26,7 +26,7 @@ path = "src/main.rs"
 doc = false
 
 [features]
-default = ["cluster-lan", "quic", "websocket", "webrtc", "nvidia", "s3", "gcs", "azure"]
+default = ["cluster-lan", "quic", "websocket", "nvidia", "s3", "gcs", "azure"]
 # Experimental transport with a heavy dependency tree, enabled only on request.
 iroh = ["moq-relay/iroh", "moq-tokio/iroh"]
 # LAN discovery and meshing (`--cluster-lan`).
@@ -73,11 +73,6 @@ nvidia = ["moq-video?/nvidia", "moq-transcode?/nvidia"]
 # feature it turns on. Only bites when `capture`, `transcode`, or `play` pulls in
 # moq-video.
 openh264 = ["moq-video?/openh264", "moq-transcode?/openh264"]
-# Compatibility aliases for the pre-consolidation names, kept so a manifest that
-# already asks for the old split still resolves. Undocumented on purpose: the
-# feature tables name only `nvidia`.
-nvenc = ["nvidia"]
-nvdec = ["nvidia"]
 # Intel/AMD VAAPI hardware encoding (Linux), opt-in like the moq-video feature
 # it turns on: libva is dlopen'd at runtime, but moq-vaapi's bindgen needs
 # libclang on the build host. Only bites when `capture`, `transcode`, or `play`
@@ -133,6 +128,7 @@ moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs
 moq-transcode = { workspace = true, optional = true }
 moq-video = { workspace = true, optional = true }
 object_store = { workspace = true, features = ["fs"] }
+percent-encoding = { workspace = true }
 pollster = { workspace = true, optional = true }
 reqwest = { workspace = true, features = ["rustls", "json"] }
 rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }
@@ -161,11 +157,13 @@ moq-shaper = { path = "../moq-shaper" }
 # Writes the PAT and PMTs, CRCs included, of the two-program input `import ts --program all` splits.
 mpeg2ts = "0.6.0"
 tempfile = { workspace = true }
+# Runs the tests that need a variable set or unset in a child process given it.
+test-env = { path = "../test-env" }
 # `test-util` enables `tokio::time::pause` so the TS round-trip test simulates the
 # exporter drain timeouts instantly instead of waiting on the wall clock.
 tokio = { workspace = true, features = ["test-util"] }
 # Plays the `announced` view's frames on a virtual terminal, scrolling included.
-vt100 = "0.16.2"
+vt100 = "0.17.0"
 
 [target.'cfg(unix)'.dev-dependencies]
 # Sends the signals the `auth serve` shutdown test checks.
@@ -180,5 +178,24 @@ name = "interop-tail"
 path = "../../test/interop/clients/rust/tail.rs"
 
 [[example]]
+name = "interop-goaway"
+path = "../../test/interop/clients/rust/goaway.rs"
+
+[[example]]
+name = "interop-control"
+path = "../../test/interop/clients/rust/control.rs"
+
+[[example]]
+name = "interop-goaway-client"
+path = "../../test/interop/clients/rust/goaway-client.rs"
+
+[[example]]
+name = "interop-finish"
+path = "../../test/interop/clients/rust/finish.rs"
+
+[[example]]
 name = "interop-audio"
 path = "../../test/interop/clients/rust/audio.rs"
+
+[lints]
+workspace = true

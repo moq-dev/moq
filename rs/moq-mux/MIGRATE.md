@@ -4,6 +4,71 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `moq_net::Path` has no lifetime
+
+`Source::resolve_reference` takes `Option<&Relative>` and returns `Option<Path>`, `ts::Programs::new` takes `impl Into<moq_net::Path>`, so pass a `Path`, and `follow::Instances::new` takes `impl TryInto<moq_net::Path, Error: Into<moq_net::Error>>`. Replace `PathOwned` with `Path` and drop `to_owned()` and `into_owned()` on paths. See moq-net's migration for the rest.
+
+### MKV and FLV import refuse malformed tracks and unsupported codecs (#6908)
+
+MKV import fails on a malformed track, a duplicate or zero `TrackNumber`, a zero `TimestampScale`, a block timestamp outside the `u64` timeline, an unsupported codec or subtitle encoding, or input truncated at `finish()`, instead of skipping the track or wrapping the timestamp. Input after `finish()` fails with `mkv::Error::TracksAfterFinish`.
+FLV import fails with `Error::UnknownFormat` on an unsupported legacy or enhanced codec instead of dropping its tags.
+Supply valid metadata and supported codecs, or transcode or remove unsupported media tracks before import. Tracks of an unsupported role (such as MKV buttons) are still skipped.
+
+### Rate following can disable a simulcast rung
+
+`rate::Follower::next` and `poll_next` return a `rate::Target`, and `rate::Control::update` returns `Option<rate::Target>`: `Target::Enabled(rate)` is the bitrate to encode at, and `Target::Disabled` means stop encoding and advertise the rendition disabled.
+`rate::Policy` gains `lower`, the next lower rendition's ceiling, which only a rendition encoded beside lower ones sets; add `lower: None` to a struct literal, or build it with `Policy::new`.
+Match `Target::Enabled(rate)` where you took the rate before. A policy without `lower` never yields `Target::Disabled`.
+
+### Repeated MSF track names and PMT PIDs keep the last entry
+
+`catalog::msf::Error::DuplicateTrackName` is gone. An MSF catalog naming a track twice keeps the later track as that rendition, and a hang catalog projected to MSF advertises one track per namespace and name, the later rendition's.
+A TS PMT listing a PID twice routes it by the later entry instead of failing the import.
+Delete matches on `DuplicateTrackName`.
+
+### HLS records replace timelines
+
+The `timeline` module is replaced by `hls`, and records are still published by default.
+`catalog::Config::with_timeline(config)` is `with_hls(config)`, and `with_hls(None)` publishes none.
+`catalog::Reserved::with_timeline_hint` is `with_hls_hint`, and `catalog::Producer::timeline()` is gone.
+Each video and audio rendition advertises its own `hls` field and `<track>.hls` record track, cut at group boundaries; untimed and data tracks get none.
+Read records with `hls::Consumer::subscribe(&broadcast, &hls)`, whose `Event::Push` carries an `hls::Entry`, or publish your own with `hls::Producer`.
+`Config::duration_min` is `hls::Config::duration`, `with_duration_min` is `with_duration`, and `DEFAULT_DURATION_MIN` is `DEFAULT_DURATION`.
+It is now the spacing of a pts grid rather than a floor: a group starts a segment when its pts falls in a later multiple of it than the previous group's, so a segment may be shorter.
+Each rendition cuts and numbers its own segments, so they line up across renditions wherever keyframes share timestamps.
+`container::fmp4::Muxer::fragment` takes a third argument, where the content ends, which times the last sample when neither its codec nor a duration marker does; pass `None` to keep the old behavior.
+
+### JSON snapshot encoder options move to `json::Options`
+
+`json::Config::deltas` and `with_deltas` move to the new `json::Options`, which `catalog::Producer::json_snapshot` takes as a third argument, so a custom catalog entry can set them too.
+Pass `json::Options::default()` where you relied on the default, or `json::Options::default().with_deltas(false)` where you called `Config::with_deltas(false)`.
+
+### `Programs::finish` returns the program broadcasts
+
+`Programs::finish` now returns each program's `broadcast::Producer` instead of `()`.
+Hand them, with the `Programs` that owns their tracks, to the new `moq_mux::Linger` to keep the finished programs up for a fixed time from the end:
+
+```rust
+let broadcasts = programs.finish()?;
+moq_mux::Linger::new(broadcasts, programs, moq_mux::Linger::DEFAULT).wait().await;
+```
+
+### TS service information expires on the program clock
+
+TS import retracts SI sub-tables and incomplete generations that stop repeating within their table's maximum interval (30 seconds for unknown tables).
+Repeat current tables within that interval; stale tables no longer remain advertised indefinitely.
+Host time and stalled PCR do not age SI, and existing readers can finish snapshots they already hold.
+
+### Passthrough fMP4 refuses a rewound group as `TimestampRewind` (#6426)
+
+A passthrough `container::fmp4::Import` refuses a group that starts below the previous one with `Error::TimestampRewind` before opening it, as an unwrapped track does, instead of `Error::Moq(moq_net::Error::TimestampMismatch)` from a group it already opened.
+Match `TimestampRewind` where you matched `TimestampMismatch`.
+
+### `Source` waits for a sibling's first announcement (#6254)
+
+`Source::bind`, `resolve`, and `subscribe_track` now wait for a sibling nothing announces yet instead of failing with `Unroutable`, and keep the first instance they resolve: once it goes, they answer that ended broadcast rather than waiting for the next.
+Where you skipped a rendition on that error, bound the call yourself (`tokio::time::timeout`, or drop it), or follow the sibling's instances with `Source::follow`.
+
 ### JSON `delta_ratio` is `deltas`
 
 `json::Config::delta_ratio` and `with_delta_ratio` are replaced by `deltas: bool` and `with_deltas` (default `true`).
@@ -76,26 +141,10 @@ Recordings published with `pes` framing no longer export; import their source ag
 `container::fmp4::Wire::new` returns `Result<Wire>`, as `Wire::from_init` already did, and refuses any other handler instead of treating it as data.
 Handle the error from `Wire::new`.
 
-### `ts::Programs::finish` returns each program's `Finish` (#5795)
-
-`Programs::finish` returns `anyhow::Result<Vec<moq_net::broadcast::Finish>>` instead of `anyhow::Result<()>`.
-Each handle keeps its program's broadcast servable until its media is stale, and dropping it closes that program.
-Await `Finish::wait` on each handle to linger, or drop the handles to close every program now.
-
-### Timeline durations are hints (#5715)
-
-`timeline::Config::duration_max`, `with_duration_max`, and `DEFAULT_DURATION_MAX` are gone; set `duration_hint` with `with_duration_hint`, the expected record duration such as the GOP, and the split ceiling follows from it.
-`DEFAULT_DURATION_MIN` is 4 s instead of 2 s, so set `with_duration_min` to keep the shorter records.
-
 ### The catalog consumer is opaque (#5630)
 
 Construct `catalog::Consumer` with `Consumer::new(broadcast, format).await`, or convert a `catalog::hang::Consumer` with `.into()`, then read it through `catalog::Stream`.
 Its `Hang`, `Msf`, and `Closed` variants and `catalog::msf::Consumer::track` are private.
-
-### Timelines record untimed tracks (#5720)
-
-`timeline::Segmenter::frame` takes `pts: impl Into<Option<Timestamp>>`, so existing callers compile.
-A segmenter fed the wrong timedness for its track fails with `Error::TimelineTiming` or `Error::TimelineUntimed`.
 
 ### An unset host clock publishes no wall mapping (#5429)
 

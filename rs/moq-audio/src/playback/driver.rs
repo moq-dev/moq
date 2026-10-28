@@ -925,6 +925,9 @@ impl Driver {
 
 	/// Catch the mixer up after a sink was added or dropped.
 	fn sync(&mut self) {
+		// The audio thread posts a sync once it closes out an observer's measurement.
+		self.shared.observe.wake();
+
 		if let Some(retired) = &self.retired {
 			// Each of these frees a ring buffer, which is exactly why the mixer
 			// handed it over instead of dropping it itself.
@@ -937,8 +940,10 @@ impl Driver {
 			}
 			// The mixer's queue is full, which takes a burst far larger than a
 			// device period. Give it a period to drain and try again.
-			// The device thread runs outside any runtime, so it blocks on the host clock.
-			#[allow(clippy::disallowed_methods)]
+			#[expect(
+				clippy::disallowed_methods,
+				reason = "the device thread runs outside any runtime, so it blocks on the host clock"
+			)]
 			std::thread::sleep(SYNC_DELAY);
 		}
 
@@ -1010,7 +1015,7 @@ impl Driver {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use crate::playback::sink::{self, Input};

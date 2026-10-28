@@ -32,11 +32,12 @@ async function publish(config: Transport): Promise<void> {
 	// Fixture generation stays outside every timed interval.
 	const fixtures = Array.from({ length: config.frames }, (_, frame) => payload(config.size, frame));
 	const origin = new Moq.Origin.Producer();
-	const producer = origin.createBroadcast(Moq.Path.from(config.path));
+	const publication = origin.createBroadcast(Moq.Path.from(config.path));
+	const producer = publication.broadcast;
 	// Retention covers the whole run, so a slow consumer cannot lose a group to eviction.
 	const track = producer.createTrack("data", { timescale: Moq.Time.Timescale.MILLI, maxAge: Milli(600_000) });
 	const demand = track.demand().wanted;
-	producer.announce();
+	publication.announce();
 	const connection = await Moq.Connection.connect({
 		url: new URL(config.url),
 		publish: origin.consume(),
@@ -44,6 +45,7 @@ async function publish(config: Transport): Promise<void> {
 	});
 	if (connection.transport !== "webtransport") throw new Error(`publisher negotiated ${connection.transport}`);
 	cleanup.push(() => {
+		track.finish();
 		track.close();
 		producer.close();
 		connection.abort();
@@ -57,7 +59,7 @@ async function publish(config: Transport): Promise<void> {
 			const group = track.appendGroup();
 			for (let frame = start; frame < Math.min(start + config.group, config.frames); frame++)
 				group.writeFrame({ payload: fixtures[frame], timestamp: Moq.Time.Timestamp.fromMillis(frame) });
-			group.close();
+			group.finish();
 		}
 	})();
 }

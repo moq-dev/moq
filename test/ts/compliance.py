@@ -14,9 +14,9 @@ scan here recovers. PCR value intervals, byte schedule and release timing live
 in `pcr-timing.py`.
 
 Checks split into two severities:
-  - HARD (structural): fail the run by default. PAT/PMT, packet size, sync,
-    continuity counters, PSI CRC, PCR presence, PCR monotonicity, T-STD buffers,
-    system buffers.
+  - HARD (structural): fail the run by default. PAT/PMT, PMT versions, packet
+    size, sync, continuity counters, PSI CRC, PCR presence, PCR monotonicity,
+    T-STD buffers, system buffers.
   - SHAPE (broadcast profile): reported as WARN and only fail the run under
     `--strict`. Service descriptors (SDT).
 
@@ -29,6 +29,8 @@ from __future__ import annotations
 import argparse
 import bisect
 import json
+import re
+from fractions import Fraction
 import subprocess
 import sys
 from collections import deque
@@ -436,6 +438,11 @@ HEVC_LEVELS = {
 # H.265 Table A.9 CpbNalFactor for Main, Main 10 and Main Still Picture (profile_idc 1-3).
 HEVC_NAL_FACTOR = 1100
 
+# H.262 Tables 8-13 and 8-14: level (the low nibble of profile_and_level_indication) ->
+# (Rmax bit/s, VBV_max bits), the same for every profile that has the level.
+MPEG2_LEVELS = {10: (4_000_000, 475_136), 8: (15_000_000, 1_835_008), 6: (60_000_000, 7_340_032), 4: (80_000_000, 9_781_248)}
+MPEG2_LEVEL_NAMES = {10: "Low", 8: "Main", 6: "High-1440", 4: "High"}
+
 # H.222.0 2.4.2.3: ADTS (Rx, BSn) by channels, the LFE not counted.
 ADTS_BUFFERS = ((2, 2_000_000, 3584), (8, 5_529_600, 8976), (12, 8_294_400, 12804), (48, 33_177_600, 51216))
 # channel_configuration -> full-bandwidth channels (5.1 and 7.1 drop the LFE).
@@ -462,6 +469,7 @@ MPEG_AUDIO_KBPS = {
 }
 # stream_type -> model, for the types identified by stream_type alone.
 STREAM_KINDS = {
+    0x02: "mpeg2-video",
     0x1B: "avc",
     0x24: "hevc",
     0x0F: "adts",
@@ -556,6 +564,9 @@ def read_programs(ts_path: str) -> list[tuple[int, list[Stream]]]:
             names = {d["#name"] for d in descriptors}
             names |= {f"registration:{d['format_identifier']}" for d in descriptors if "format_identifier" in d}
             names |= {"hrd_management_valid" for d in descriptors if d.get("hrd_management_valid") is True}
+            names |= {"leak_invalid" for d in descriptors if d["#name"] == "STD_descriptor" and d.get("leak_valid") is False}
+            names |= {"temporal_poc_clock" for d in descriptors
+                      if d.get("fixed_frame_rate") is True and d.get("temporal_poc") is True}
             names |= {
                 f"tag{d['tag']}:" + "".join(d.get("#nodes", [])).replace(" ", "").lower()
                 for d in descriptors
@@ -660,6 +671,54 @@ def _hrd(sps: dict[str, str], prefix: str, value: str) -> tuple[float, float] | 
     rate = (rates[-1] + 1) << (6 + int(sps[f"{value}bit_rate_scale"]))
     size = (sizes[-1] + 1) << (4 + int(sps[f"{value}cpb_size_scale"]))
     return rate, size
+
+
+def mpeg2_params(es: bytes, descriptors: set[str]) -> Params:
+    """H.222.0 2.4.2.3 buffers for H.262 video from its first sequence header and extension.
+
+    Graded by the leak method, which H.222.0 applies unless an STD_descriptor clears leak_valid
+    and the pictures code a vbv_delay other than 0xFFFF; that vbv_delay method is refused.
+    Rbx is Rmax at Low and Main level, and min(1.05 Res, Rmax) at High-1440 and High.
+    """
+    head = es.find(b"\x00\x00\x01\xb3")
+    ext = es.find(b"\x00\x00\x01\xb5", head)
+    picture = es.find(b"\x00\x00\x01\x00", head)
+    if head < 0 or ext < 0 or len(es) < ext + 9 or es[ext + 4] >> 4 != 1:
+        raise Refused("no sequence header and sequence extension, which an H.262 stream starts with")
+    if picture < 0 or len(es) < picture + 8:
+        raise Refused("no picture header after the sequence header")
+    # vbv_delay: 16 bits after the 10-bit temporal_reference and 3-bit picture_coding_type. H.262
+    # codes it 0xFFFF in every picture of a sequence or in none, so the first decides.
+    vbv_delay = (es[picture + 5] & 0x07) << 13 | es[picture + 6] << 5 | es[picture + 7] >> 3
+    if "leak_invalid" in descriptors and vbv_delay != 0xFFFF:
+        raise Refused("an STD_descriptor selects the vbv_delay method, which this model does not implement")
+    # vbv_buffer_size_value: 10 bits after bit_rate_value and its marker; the extension's 8 bits
+    # follow its bit_rate_extension and marker.
+    vbv_low = (es[head + 10] & 0x1F) << 5 | es[head + 11] >> 3
+    vbv_high = es[ext + 8]
+    # profile_and_level_indication follows the 4-bit extension_start_code_identifier.
+    indication = (es[ext + 4] & 0x0F) << 4 | es[ext + 5] >> 4
+    level = indication & 0x0F
+    if indication & 0x80 or level not in MPEG2_LEVELS:
+        raise Refused(f"H.262 profile_and_level_indication {indication:#04x} has no Table 8-13 entry")
+    rmax, vbv_max = MPEG2_LEVELS[level]
+    vbv = (vbv_high << 10 | vbv_low) * 16 * 1024
+    if not vbv:
+        raise Refused("H.262 vbv_buffer_size 0 sizes no EB")
+    # bit_rate_value's 18 bits after frame_rate_code, and the extension's 12-bit
+    # bit_rate_extension above them, in units of 400 bit/s.
+    bit_rate = es[head + 8] << 10 | es[head + 9] << 2 | es[head + 10] >> 6
+    bit_rate |= ((es[ext + 6] & 0x1F) << 7 | es[ext + 7] >> 1) << 18
+    rbx = rmax if level in (10, 8) else min(1.05 * bit_rate * 400, rmax)
+    overhead = (0.004 + 1 / 750) * max(rmax, 2_000_000)
+    return Params(
+        label=f"H.262 {MPEG2_LEVEL_NAMES[level]} level, vbv {vbv / 1e3:.0f} kbit",
+        # Rx = 1.2 * Rmax; MBS = BSmux + BSoh + VBV_max - vbv_buffer_size; EBS = vbv_buffer_size.
+        rx=1.2 * rmax,
+        mb=(overhead + vbv_max - vbv) / 8,
+        eb=vbv / 8,
+        rbx=rbx,
+    )
 
 
 def avc_params(sps: dict[str, str]) -> Params:
@@ -835,7 +894,7 @@ def stream_kind(stream: Stream) -> str | None:
         return "opus"
     if kind == 0x06 and tags & {"DVB_enhanced_AC3_descriptor", "enhanced_AC3_descriptor"}:
         return "eac3-dvb"
-    if kind in (0x01, 0x02, 0x10, 0x11, 0x1C, 0x20, 0x21, 0x42, 0xD1, 0xEA):
+    if kind in (0x01, 0x10, 0x11, 0x1C, 0x20, 0x21, 0x42, 0xD1, 0xEA):
         raise Refused(f"stream_type 0x{kind:02X} is audio/video this model has no parameters for")
     return None
 
@@ -845,6 +904,8 @@ def stream_params(kind: str, stream: Stream) -> tuple[Params, object]:
     es = stream.es
     if kind == "avc":
         return avc_params(stream.sps), None
+    if kind == "mpeg2-video":
+        return mpeg2_params(bytes(es), stream.descriptors), None
     if kind == "hevc":
         return hevc_params(stream.sps), None
     if kind == "teletext":
@@ -879,9 +940,127 @@ def stream_params(kind: str, stream: Stream) -> tuple[Params, object]:
 
 # NAL unit types that open a new access unit when they follow the last VCL NAL unit
 # of the previous one (H.264 7.4.1.2.3, H.265 7.4.2.4.4), and the VCL types.
-AU_OPENERS = {"avc": {6, 7, 8, 9, 14, 15, 16, 17, 18}, "hevc": {32, 33, 34, 35, 39, 41, 42, 43, 44, *range(48, 56)}}
-VCL = {"avc": set(range(1, 6)), "hevc": set(range(0, 32))}
-DELIMITER = {"avc": 9, "hevc": 35}
+# H.262 6.2.1 has no NAL units: a picture opens at its sequence, GOP or picture header after
+# the last slice of the one before, keyed by the start code value.
+AU_OPENERS = {
+    "avc": {6, 7, 8, 9, 14, 15, 16, 17, 18},
+    "hevc": {32, 33, 34, 35, 39, 41, 42, 43, 44, *range(48, 56)},
+    "mpeg2-video": {0xB3, 0xB8, 0x00},
+}
+VCL = {"avc": set(range(1, 6)), "hevc": set(range(0, 32)), "mpeg2-video": set(range(0x01, 0xB0))}
+# H.262 has no access unit delimiter, and needs none: its picture header is one.
+DELIMITER = {"avc": 9, "hevc": 35, "mpeg2-video": 0x00}
+
+
+def proportional_video_clock(stream: Stream, kind: str, count: int) -> list[tuple[int, Fraction, bool, tuple[int, Fraction] | None]]:
+    """Frame-only POC clocks and HRD output delays, parsed by FFmpeg.
+
+    POC plus VUI supplies presentation time; picture-timing SEI's DPB output
+    delay supplies its distance from decode time (H.264 C.2, H.265 D.3.3).
+    Never let FFmpeg's guessed packet/frame timestamps become the timing oracle.
+    """
+    if kind == "avc" and "temporal_poc_clock" not in stream.descriptors:
+        raise Refused("several access units have no declared proportional POC timestamp clock")
+    proc = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "trace", "-f", "h264" if kind == "avc" else "hevc",
+                           "-i", "pipe:0", "-map", "0:v:0", "-c", "copy", "-bsf:v", "trace_headers", "-f", "null", "-"],
+                          input=bytes(stream.es), capture_output=True, check=False)
+    if proc.returncode:
+        raise Refused("cannot parse the video timing headers")
+    blocks: list[tuple[str, dict[str, int]]] = []
+    for line in proc.stderr.decode(errors="replace").splitlines():
+        if not line.startswith("[trace_headers @"):
+            continue
+        text = line.split("] ", 1)[1]
+        if text in ("Sequence Parameter Set", "Slice Header", "Slice Segment Header"):
+            blocks.append((text, {}))
+        elif text and text[0].isupper():
+            blocks.append((text, {}))
+        elif blocks:
+            match = re.match(r"\d+\s+(\S+)\s+\S+\s+=\s+(-?\d+)$", text)
+            if match:
+                blocks[-1][1][match[1]] = int(match[2])
+    sps: dict[str, int] = {}
+    previous_lsb = previous_msb = frame_num = frame_offset = 0
+    seen = False
+    clocks = []
+    timing = None
+    for name, fields in blocks:
+        if name == "Picture Timing":
+            timing = fields
+            continue
+        if name == "Sequence Parameter Set":
+            sps = fields
+            continue
+        if name not in ("Slice Header", "Slice Segment Header"):
+            continue
+        if kind == "avc":
+            if fields.get("first_mb_in_slice") != 0:
+                continue
+            if (sps.get("frame_mbs_only_flag") != 1 or sps.get("pic_struct_present_flag", 0)
+                    or sps.get("fixed_frame_rate_flag") != 1):
+                raise Refused("missing DTS outside the frame-only video clock profile")
+            units, scale = sps.get("num_units_in_tick", 0), sps.get("time_scale", 0)
+            if units <= 0 or scale <= 0:
+                raise Refused("several access units have no proportional timestamp clock")
+            rate = tick = Fraction(units, scale)
+            output = None if timing is None else timing.get("dpb_output_delay")
+            reset = fields.get("nal_unit_type") == 5
+            if 5 in [value for key, value in fields.items() if key.startswith("memory_management_control_operation")]:
+                raise Refused("missing DTS across an MMCO-5 reset is outside the model profile")
+            mode = sps.get("pic_order_cnt_type")
+            if reset:
+                previous_lsb = previous_msb = frame_num = frame_offset = 0
+            if mode == 0:
+                maximum = 1 << (sps["log2_max_pic_order_cnt_lsb_minus4"] + 4)
+                lsb = fields["pic_order_cnt_lsb"]
+                msb = previous_msb
+                if lsb < previous_lsb and previous_lsb - lsb >= maximum // 2:
+                    msb += maximum
+                elif lsb > previous_lsb and lsb - previous_lsb > maximum // 2:
+                    msb -= maximum
+                poc = msb + lsb
+                if fields.get("nal_ref_idc"):
+                    previous_lsb, previous_msb = lsb, msb
+            elif mode == 2:
+                if fields["frame_num"] < frame_num:
+                    frame_offset += 1 << (sps["log2_max_frame_num_minus4"] + 4)
+                frame_num = fields["frame_num"]
+                poc = 0 if reset else 2 * (frame_offset + frame_num) - (fields.get("nal_ref_idc") == 0)
+            else:
+                raise Refused("missing DTS with AVC POC type 1 is outside the model profile")
+        else:
+            if fields.get("first_slice_segment_in_pic_flag") != 1:
+                continue
+            if (sps.get("field_seq_flag", 0) or sps.get("sub_pic_hrd_params_present_flag", 0)
+                    or sps.get("vui_poc_proportional_to_timing_flag") != 1):
+                raise Refused("missing DTS outside the frame-only proportional HEVC clock profile")
+            units, scale = sps.get("vui_num_units_in_tick", 0), sps.get("vui_time_scale", 0)
+            if units <= 0 or scale <= 0:
+                raise Refused("several access units have no proportional timestamp clock")
+            tick = Fraction(units, scale)
+            rate = tick * (sps.get("vui_num_ticks_poc_diff_one_minus1", 0) + 1)
+            output = None if timing is None else timing.get("pic_dpb_output_delay")
+            nal = fields["nal_unit_type"]
+            reset = nal in range(16, 21) or (nal == 21 and not seen)
+            lsb = fields.get("slice_pic_order_cnt_lsb", 0)
+            maximum = 1 << (sps["log2_max_pic_order_cnt_lsb_minus4"] + 4)
+            msb = 0 if reset else previous_msb
+            if not reset:
+                if lsb < previous_lsb and previous_lsb - lsb >= maximum // 2:
+                    msb += maximum
+                elif lsb > previous_lsb and lsb - previous_lsb > maximum // 2:
+                    msb -= maximum
+            poc = msb + lsb
+            if fields.get("nuh_temporal_id_plus1") == 1 and nal not in (0, 2, 4, 6, 7, 8, 9):
+                previous_lsb, previous_msb = lsb, msb
+        if not rate:
+            raise Refused("several access units have no proportional timestamp clock")
+        clocks.append((poc, rate, reset, None if output is None else (output, tick)))
+        timing = None
+        seen = True
+    if len(clocks) != count:
+        raise Refused("video timing headers do not identify every access unit")
+    return clocks
 
 
 def video_units(stream: Stream, kind: str) -> list[AccessUnit]:
@@ -890,22 +1069,26 @@ def video_units(stream: Stream, kind: str) -> list[AccessUnit]:
     An access unit opens at the first delimiter, parameter set or SEI after the previous
     picture's last slice (H.264 7.4.1.2.3, H.265 7.4.2.4.4); H.222.0 2.14.1 and 2.17.1
     also put a delimiter in every one, so a stream without them is refused. A PES may
-    carry several access units, but only the first takes its timestamp; the rest would
-    need decoding times derived from the stream's own timing (2.4.2.3), which this model
-    does not do, so such a layout is refused rather than graded as one unit.
+    carry several access units, but only the first takes its timestamp. Missing times
+    use a declared proportional POC clock and HRD picture-timing output delay
+    in the frame-only profile; absent signaling is refused.
     """
     es = bytes(stream.es)
     starts = []
+    owners = []
     delimited = False
     after_vcl = True  # the first opener starts the first whole access unit
     pos = es.find(b"\x00\x00\x01")
     while 0 <= pos < len(es) - 3:
-        nal = (es[pos + 3] >> 1) & 0x3F if kind == "hevc" else es[pos + 3] & 0x1F
+        nal = {"hevc": (es[pos + 3] >> 1) & 0x3F, "mpeg2-video": es[pos + 3]}.get(kind, es[pos + 3] & 0x1F)
         delimited |= nal == DELIMITER[kind]
         if nal in AU_OPENERS[kind] and after_vcl:
             # The zero_byte ahead of the start code belongs to this NAL unit (H.264 B.1.1,
             # H.265 B.2.1), so to this access unit rather than the last.
             starts.append(pos - 1 if pos and es[pos - 1] == 0 else pos)
+            # An optional zero_byte can be a preceding PES's trailing zero.
+            # The required start_code_prefix decides timestamp ownership.
+            owners.append(pos)
             after_vcl = False
         elif nal in VCL[kind]:
             after_vcl = True
@@ -918,13 +1101,30 @@ def video_units(stream: Stream, kind: str) -> list[AccessUnit]:
     packets = [index for index, _h, body, _o in stream.packets if body]
     units: list[AccessUnit] = []
     stamped: set[int] = set()
+    owner_pes = [bisect.bisect_right(pes_at, owner) - 1 for owner in owners]
+    needs_clock = len(set(owner_pes)) != len(owner_pes) or any(pes[k][1] is None for k in owner_pes)
+    clocks = proportional_video_clock(stream, kind, len(starts)) if needs_clock else []
+    anchor = None
     for n, start in enumerate(starts):
-        k = bisect.bisect_right(pes_at, start) - 1
+        k = owner_pes[n]
         _offset, pts, dts, index = pes[k]
+        explicit = pts is not None and k not in stamped
+        if clocks:
+            poc, rate, reset, output = clocks[n]
+            if reset:
+                anchor = None
+            if explicit:
+                anchor = (poc, Fraction(pts), rate)
+            elif anchor is not None and anchor[2] == rate:
+                pts = anchor[1] + (poc - anchor[0]) * rate * PTS_HZ
+                if output is None:
+                    raise Refused("an inferred access unit has no HRD picture timing for its decode time")
+                delay, tick = output
+                dts = pts - delay * tick * PTS_HZ
+            else:
+                raise Refused("an access unit has no timestamp anchor for its POC clock")
         if pts is None:
             raise Refused(f"an access unit starts in the untimestamped PES at packet {index}")
-        if k in stamped:
-            raise Refused(f"the PES at packet {index} carries several access units, whose decode times are not derived")
         stamped.add(k)
         end = starts[n + 1] if n + 1 < len(starts) else stream.es_len
         first = packets[bisect.bisect_right(packet_at, start) - 1]
@@ -1527,6 +1727,64 @@ class SystemBuffers:
                 grade.flag("Bsys overflow")
 
 
+def pmt_tables(data: bytes, packet_size: int) -> dict[int, list[tuple[int, int, bytes]]]:
+    """Each program's PMTs in force (current_next_indicator set), by program_number: (index
+    of the packet completing the section, version_number, the section less its version and
+    CRC), on whichever PMT PID a PAT named, each run of repeats once."""
+    pmt_pids = set()
+    for _, section in sections(packets_on(data, packet_size, {0}).get(0, [])):
+        if section[0] == 0x00 and section[5] & 0x01:
+            for at in range(8, len(section) - 4, 4):
+                if (section[at] << 8) | section[at + 1]:
+                    pmt_pids.add(((section[at + 2] & 0x1F) << 8) | section[at + 3])
+    found: dict[int, list[tuple[int, int, bytes]]] = {}
+    for packets in packets_on(data, packet_size, pmt_pids).values():
+        for index, section in sections(packets):
+            if section[0] == 0x02 and section[5] & 0x01:
+                program = (section[3] << 8) | section[4]
+                body = section[:5] + section[6:-4]
+                found.setdefault(program, []).append((index, (section[5] >> 1) & 0x1F, body))
+    tables: dict[int, list[tuple[int, int, bytes]]] = {}
+    for program, seen in found.items():
+        runs = tables.setdefault(program, [])
+        for table in sorted(seen):
+            if not runs or runs[-1][1:] != table[1:]:
+                runs.append(table)
+    return tables
+
+
+def check_pmt_versions(ts_path: str, packet_size: int) -> Check:
+    """Each program's PMT changes only at a new version_number (ISO 13818-1 2.4.4.9), and an
+    older version never follows a newer one.
+
+    A demux keeps the table it has until the version changes, so a change made under the same
+    version never reaches it, and a copy of the table a revision replaced, arriving after it,
+    reverts the revision. A version one up to 15 behind the newest is older, modulo 32. So is
+    a table coming back under the version it went out at before the versions since have come
+    round to it, which modulo 32 alone reads as a skip forward. A revision that skips versions
+    is reported, not failed: what a receiver sees still changes at every new version."""
+    with open(ts_path, "rb") as handle:
+        data = handle.read()
+    revisions = skipped = 0
+    for program, runs in sorted(pmt_tables(data, packet_size).items()):
+        for at in range(1, len(runs)):
+            newest, (index, version, body) = runs[at - 1][1], runs[at]
+            behind = (newest - version) % 32
+            last = max((n for n in range(at) if runs[n][1:] == (version, body)), default=None)
+            returned = last is not None and len({v for _, v, _ in runs[last + 1 : at]}) < 31
+            if behind == 0:
+                detail = f"program {program}: the PMT changed at packet {index} under version {version}"
+            elif behind < 16 or returned:
+                detail = f"program {program}: version {version} at packet {index}, after version {newest}"
+            else:
+                revisions += 1
+                skipped += (version - newest) % 32 - 1
+                continue
+            return Check("pmt-versions", Severity.HARD, Status.FAIL, detail, {"revisions": revisions})
+    detail = f"{revisions} revision(s), each at a new version" + (f", {skipped} version(s) skipped" if skipped else "")
+    return Check("pmt-versions", Severity.HARD, Status.PASS, detail, {"revisions": revisions, "skipped": skipped})
+
+
 def check_system_buffers(ts_path: str, packet_size: int, scan: Scan) -> Check:
     """TBsys and Bsys (ISO 13818-1 2.4.2.3) for each program, on its PCR.
 
@@ -1695,6 +1953,7 @@ def analyze(ts_path: str, reference_seconds: float | None = None) -> list[Check]
     pat, pmt = check_pat_pmt(analysis)
     checks.append(pat)
     checks.append(pmt)
+    checks.append(check_pmt_versions(ts_path, packet_size))
     checks.append(check_psi_crc(analysis))
     checks.append(check_continuity(analysis))
     checks.append(check_pcr_presence(analysis, clock_by_pid))

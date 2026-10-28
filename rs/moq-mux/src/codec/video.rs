@@ -82,26 +82,12 @@ pub(crate) struct Reorder {
 	/// One picture's duration as `(units, scale)`, i.e. `units / scale` seconds, when the header
 	/// declares a fixed picture rate.
 	pub period: Option<(u64, u64)>,
-	/// Whether a picture may be a single field (H.264 `frame_mbs_only_flag` 0), while
-	/// [`Self::depth`] counts frames and field pairs.
-	pub fields: bool,
 }
 
 impl Reorder {
 	/// The deepest reordering a conforming sequence header declares: no decoded picture buffer
 	/// holds more than 16 frames (H.264 A.3.1, HEVC A.4.2).
 	pub(crate) const MAX_DEPTH: u32 = 16;
-
-	/// The most frames, each one picture, that can precede one in decode order and follow it in
-	/// output order: the depth, or with fields both fields of each pair it counts and the other
-	/// field of the frame's own pair.
-	pub(crate) fn pictures(self) -> usize {
-		let depth = usize::try_from(self.depth).unwrap_or(usize::MAX);
-		match self.fields {
-			true => depth.saturating_mul(2).saturating_add(1),
-			false => depth,
-		}
-	}
 
 	/// The minimum decode delay and lookahead in 90 kHz ticks.
 	pub(crate) fn timing(self, framerate: Option<f64>) -> (u64, u64) {
@@ -117,6 +103,72 @@ impl Reorder {
 	}
 }
 
+/// The deepest catalog `reorder` a rendition's codec and level can reach: what fits the level's
+/// decoded picture buffer at the coded size (H.264 A.3.1 MaxDpbFrames, H.265 A.4.2 MaxDpbSize
+/// less the current picture), or the codec's largest buffer when the level or size is unknown.
+/// VP8, VP9 and AV1 present in decode order.
+pub(crate) fn max_reorder(config: &hang::catalog::VideoConfig) -> u32 {
+	use hang::catalog::VideoCodec;
+
+	match &config.codec {
+		VideoCodec::H264(h264) => {
+			// level_idc 11 with constraint_set3_flag is level 1b for Baseline, Main and Extended.
+			let level_1b = h264.level == 11 && h264.constraints & 0x10 != 0 && matches!(h264.profile, 66 | 77 | 88);
+			let max_dpb_mbs: Option<u64> = match h264.level {
+				_ if level_1b => Some(396),
+				9 | 10 => Some(396),
+				11 => Some(900),
+				12 | 13 | 20 => Some(2_376),
+				21 => Some(4_752),
+				22 | 30 => Some(8_100),
+				31 => Some(18_000),
+				32 => Some(20_480),
+				40 | 41 => Some(32_768),
+				42 => Some(34_816),
+				50 => Some(110_400),
+				51 | 52 => Some(184_320),
+				60..=62 => Some(696_320),
+				_ => None,
+			};
+			let frame_mbs = config
+				.coded_width
+				.zip(config.coded_height)
+				.map(|(width, height)| u64::from(width.div_ceil(16)) * u64::from(height.div_ceil(16)));
+			match max_dpb_mbs.zip(frame_mbs.filter(|mbs| *mbs > 0)) {
+				Some((dpb, frame)) => (dpb / frame).min(u64::from(Reorder::MAX_DEPTH)) as u32,
+				None => Reorder::MAX_DEPTH,
+			}
+		}
+		VideoCodec::H265(h265) => {
+			let max_luma_ps: Option<u64> = match h265.level_idc {
+				30 => Some(36_864),
+				60 => Some(122_880),
+				63 => Some(245_760),
+				90 => Some(552_960),
+				93 => Some(983_040),
+				120 | 123 => Some(2_228_224),
+				150 | 153 | 156 => Some(8_912_896),
+				180 | 183 | 186 => Some(35_651_584),
+				_ => None,
+			};
+			let samples = config
+				.coded_width
+				.zip(config.coded_height)
+				.map(|(width, height)| u64::from(width) * u64::from(height));
+			let max_dpb_size = match max_luma_ps.zip(samples) {
+				Some((luma, size)) if size <= luma >> 2 => 16,
+				Some((luma, size)) if size <= luma >> 1 => 12,
+				Some((luma, size)) if size <= (3 * luma) >> 2 => 8,
+				Some(_) => 6,
+				None => 16,
+			};
+			max_dpb_size - 1
+		}
+		VideoCodec::VP8 | VideoCodec::VP9(_) | VideoCodec::AV1(_) => 0,
+		_ => Reorder::MAX_DEPTH,
+	}
+}
+
 /// The hypothetical reference decoder a video sequence header declares: its NAL HRD's last
 /// schedule, the one the transport stream's decoder buffers are sized from (ISO 13818-1
 /// 2.14.3.1, 2.17.2).
@@ -126,6 +178,14 @@ pub(crate) struct Hrd {
 	pub bit_rate: u64,
 	/// The CPB's size in bits.
 	pub cpb_size: u64,
+}
+
+/// A sequence header that reorders deeper than the track already declared.
+#[derive(Debug, thiserror::Error)]
+#[error("video reorder depth {reorder} exceeds the {declared} the track declared")]
+struct Deepened {
+	declared: u8,
+	reorder: u8,
 }
 
 /// The catalog-publishing state a video importer overlays onto every config it resolves.
@@ -142,6 +202,8 @@ pub(crate) struct Catalog {
 	resolved: Option<hang::catalog::VideoConfig>,
 	/// The static HDR metadata the bitstream carried in band, overlaid onto every config.
 	hdr: crate::codec::color::Hdr,
+	/// Whether the publisher is producing this rendition, overlaid onto every config.
+	enabled: bool,
 }
 
 impl Catalog {
@@ -152,6 +214,21 @@ impl Catalog {
 			last: None,
 			resolved: None,
 			hdr: Default::default(),
+			enabled: true,
+		}
+	}
+
+	/// Advertise whether the publisher is producing this rendition, republishing the last
+	/// config if it changed. Overlaid onto every later config, so a resolution change
+	/// while disabled stays disabled.
+	pub(crate) fn set_enabled(&mut self, track: &mut Track, enabled: bool) -> crate::Result<()> {
+		if self.enabled == enabled {
+			return Ok(());
+		}
+		self.enabled = enabled;
+		match self.resolved.clone() {
+			Some(config) => self.publish(track, config),
+			None => Ok(()),
 		}
 	}
 
@@ -170,10 +247,23 @@ impl Catalog {
 	/// Overlay the hint onto `config` and publish it to `rendition`, unless it matches the last
 	/// publish. A changed config just re-mirrors the rendition; there are no fixed tracks to
 	/// reject a reconfiguration.
+	///
+	/// A declared `reorder` is fixed for the track's life, so a later sequence header declaring
+	/// less or none keeps it, and one declaring more fails: frames reordered that deep would
+	/// break the bound consumers already clock the track by.
 	pub(crate) fn publish(&mut self, track: &mut Track, mut config: hang::catalog::VideoConfig) -> crate::Result<()> {
 		self.resolved = Some(config.clone());
 		self.hdr.apply(&mut config.color);
 		self.hint.apply(&mut config);
+		config.enabled = self.enabled;
+		if let Some(declared) = self.last.as_ref().and_then(|last| last.reorder) {
+			match config.reorder {
+				Some(reorder) if reorder > declared => {
+					return Err(anyhow::Error::new(Deepened { declared, reorder }).into());
+				}
+				_ => config.reorder = Some(declared),
+			}
+		}
 		if self.last.as_ref() == Some(&config) {
 			return Ok(());
 		}

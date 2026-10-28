@@ -30,8 +30,7 @@ async fn relay(version: moq_net::Version, javascript: Option<bool>) -> anyhow::R
 					.await?,
 			);
 		}
-		for (session, driver) in sessions {
-			driver.await??;
+		for session in sessions {
 			let _ = session.closed().await;
 		}
 		Ok::<_, anyhow::Error>(())
@@ -126,7 +125,7 @@ async fn relay(version: moq_net::Version, javascript: Option<bool>) -> anyhow::R
 
 #[tokio::test]
 async fn max_age_relay_rust() {
-	for version in ["moq-lite-07-wip", "moq-transport-17", "moq-transport-22"] {
+	for version in ["moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
 		tokio::time::timeout(TIMEOUT, relay(version.parse().unwrap(), None))
 			.await
 			.unwrap()
@@ -137,7 +136,7 @@ async fn max_age_relay_rust() {
 #[tokio::test]
 #[ignore = "requires Bun; run by just test max-age in the interop workflow"]
 async fn max_age_relay_javascript() {
-	for version in ["moq-lite-07-wip", "moq-transport-17", "moq-transport-22"] {
+	for version in ["moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
 		for publish in [false, true] {
 			tokio::time::timeout(TIMEOUT, relay(version.parse().unwrap(), Some(publish)))
 				.await

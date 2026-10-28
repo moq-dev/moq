@@ -7,7 +7,7 @@ import (
 	"moq.dev/moq/internal/bridge"
 )
 
-// Session is an established MoQ connection. Hold it (or the Client/Server that
+// Session is a MoQ connection, including its initial native dial. Hold it (or the Client/Server that
 // produced it) to keep the connection alive; once every handle is dropped the
 // connection closes.
 type Session struct {
@@ -15,49 +15,46 @@ type Session struct {
 }
 
 // Closed blocks until the session closes and returns the reason. A graceful
-// close reports an error for which IsShutdown returns true. Cancelling ctx gives
+// close reports an error for which IsShutdown returns true. After Shutdown, it
+// waits for the drain and reports delivery failures. Cancelling ctx gives
 // up waiting and shuts the session down, so a caller that no longer cares about
 // the connection can tear it down by cancelling.
 func (s *Session) Closed(ctx context.Context) error {
 	return bridge.CallErr(ctx, s.abort, s.inner.Closed)
 }
 
-// Status blocks until the connection status differs from the one this session
-// last reported. A client session reports ConnectionStatusConnected first (the connect it
-// was built from), then follows the reconnect loop: ConnectionStatusDisconnected while
-// redialing, ConnectionStatusMigrating during a GOAWAY handover. It returns an error once
-// the connection stops for good. A server-accepted session's only transition is
-// terminal, so Status waits for the close and returns its reason. Cancelling ctx
-// gives up waiting and shuts the session down.
-//
-// This reports the current status rather than every edge: a drop that reconnects
-// before the next call is coalesced away, so the outages it hides are the ones
-// that already healed. Don't count outages with it.
-func (s *Session) Status(ctx context.Context) (ConnectionStatus, error) {
-	return bridge.Call(ctx, s.abort, s.inner.Status)
+// ConnectionState is one coherent lifecycle snapshot.
+type ConnectionState struct {
+	// Revision is the opaque token for the next StateChanged wait.
+	Revision uint64
+	// Phase says whether the connection is dialing, serving, replacing, or closed.
+	Phase ConnectionPhase
+	// Connects counts successful sessions, including replacements.
+	Connects uint64
+	// Failure is the latest failed attempt or terminal cause, cleared by a successful connect.
+	Failure error
+	// Version names the live protocol, or nil while offline.
+	Version *string
 }
 
-// Connects counts how many times this session has connected: 1 for the connect that built it, one
-// more on each reconnect. A server-accepted session stays at 1.
-//
-// Pair it with Status to log each reconnect by number: a ConnectionStatusConnected whose
-// count grew is a reconnect. Like Status, it reports the current state, so a
-// drop that reconnects between reads is coalesced away.
-func (s *Session) Connects() uint64 {
-	return s.inner.Connects()
-}
-
-// Failure reports why a client session is reconnecting: the error that ended
-// the last connection or failed the latest redial, or nil once a connection
-// lands. A redial that keeps failing never changes Status, so poll this while it
-// reports ConnectionStatusDisconnected to show the reason. Giving up for good
-// returns from Closed instead. A server-accepted session always returns nil.
-func (s *Session) Failure() error {
-	failure := s.inner.Failure()
-	if failure == nil || *failure == nil {
-		return nil
+func connectionStateFromFFI(state ffi.MoqConnectionState) ConnectionState {
+	var failure error
+	if state.Failure != nil {
+		failure = *state.Failure
 	}
-	return *failure
+	return ConnectionState{Revision: state.Revision, Phase: state.Phase, Connects: state.Connects, Failure: failure, Version: state.Version}
+}
+
+// State reads the lifecycle fields together without advancing a watcher.
+func (s *Session) State() ConnectionState { return connectionStateFromFFI(s.inner.State()) }
+
+// StateChanged waits for a revision different from after, without sharing a watcher cursor.
+// Cancelling ctx only cancels this wait; it leaves the connection and other watchers running.
+func (s *Session) StateChanged(ctx context.Context, after uint64) (ConnectionState, error) {
+	state, err := bridge.Call(ctx, nil, func(ctx context.Context) (ffi.MoqConnectionState, error) {
+		return s.inner.StateChanged(ctx, after)
+	})
+	return connectionStateFromFFI(state), err
 }
 
 // Stats snapshots the current connection statistics.
@@ -65,113 +62,116 @@ func (s *Session) Stats() ConnectionStats {
 	return connectionStatsFromFFI(s.inner.Stats())
 }
 
-// Bandwidth is the session's bandwidth allocator. Every call returns a handle
+// Allocator is the session's bandwidth allocator. Every call returns a handle
 // to the same registry, so reservations made through one are visible to the
 // others. A client handle survives reconnects: the grant is nil while
 // disconnected and resumes on the next connection.
-func (s *Session) Bandwidth() *Bandwidth {
-	return &Bandwidth{inner: s.inner.Bandwidth()}
+func (s *Session) Allocator() *Allocator {
+	return &Allocator{inner: s.inner.Allocator()}
 }
 
-// Auth is the session's authorization: the grant its peer gave it, and more
-// tokens to present. Each call returns an independent watcher of the grant. A
-// client session's handle survives reconnects, presenting each added token again
-// on every new connection.
-func (s *Session) Auth() *Auth {
-	return &Auth{inner: s.inner.Auth()}
+// Grants follows the grant the peer gave this session. Each call returns an
+// independent consumer; close it when done. A client session's grant follows
+// each reconnect, reading nil while offline.
+func (s *Session) Grants() *GrantConsumer {
+	return &GrantConsumer{inner: s.inner.Grants()}
 }
 
-// Auth reads a session's grant and presents more tokens.
+// GrantConsumer follows the grant a session's peer gave it: the union of every
+// token the session presented.
 //
 // AUTH is only on moq-lite-07-wip and on moq-transport sessions that negotiate
 // the MoQ Auth extension; elsewhere the grant stays nil.
-type Auth struct {
-	inner *ffi.MoqAuth
+type GrantConsumer struct {
+	inner *ffi.MoqGrantConsumer
 }
 
-// Grant returns the union of every token's grant, or nil until the peer first
-// answers one. A client session reads nil while it reconnects.
-func (a *Auth) Grant() *Grant {
-	return grantFromFFI(a.inner.Grant())
+// Grant returns the grant now, or nil until the peer first answers a token. A
+// client session reads nil while it reconnects.
+func (g *GrantConsumer) Grant() *Grant {
+	return grantFromFFI(g.inner.Grant())
 }
 
-// GrantChanged blocks until the grant differs from the one this handle last
-// reported, or held when it was made, and returns it. It errors once the session
-// ends.
-func (a *Auth) GrantChanged(ctx context.Context) (*Grant, error) {
-	grant, err := bridge.Call(ctx, nil, a.inner.GrantChanged)
+// Changed blocks until the grant differs from the one this last returned, or
+// held when it was made, and returns it. It errors once a client's connection
+// or a server's session ends, or after Close; a reconnect is not an end.
+func (g *GrantConsumer) Changed(ctx context.Context) (*Grant, error) {
+	grant, err := bridge.Call(ctx, nil, g.inner.Changed)
 	return grantFromFFI(grant), err
 }
 
-// Add presents another token, returning once the peer accepts it. Its grant
-// joins the union until the token is closed. The peer's refusal is a
-// ProtocolError carrying its code; a session that cannot carry another token
-// returns an error for which errors.Is(err, ErrUnsupported) holds. Cancelling ctx
-// withdraws the token.
-func (a *Auth) Add(ctx context.Context, token string) (*AuthToken, error) {
-	inner, err := bridge.CallHandle(ctx, nil, func(ctx context.Context) (*ffi.MoqAuthToken, error) {
-		return a.inner.Add(ctx, token)
-	})
-	if err != nil {
-		return nil, err
+// Close ends every current and future Changed call.
+func (g *GrantConsumer) Close() { g.inner.Cancel() }
+
+// Tokens returns the credentials a native client session presents, to replace
+// while it runs, or nil for a server-accepted session, which presents none.
+func (s *Session) Tokens() *Tokens {
+	inner := s.inner.Tokens()
+	if inner == nil {
+		return nil
 	}
-	return &AuthToken{inner: inner}, nil
+	return &Tokens{inner: *inner}
 }
 
-// AuthToken is one token presented with Auth.Add.
-type AuthToken struct {
-	inner *ffi.MoqAuthToken
+// Tokens are the credentials a client session presents, replaceable while it runs.
+type Tokens struct {
+	inner *ffi.MoqTokens
 }
 
-// Grant returns this token's own grant, or nil after it ended.
-func (t *AuthToken) Grant() *Grant {
-	return grantFromFFI(t.inner.Grant())
+// Set replaces the credentials every dial presents, such as before the current
+// ones expire. The first is the connection credential, unless the URL carries
+// its own ?jwt=; each other one widens the grant over in-band AUTH. The next
+// dial presents them, and a live session with in-band AUTH presents them at
+// once, withdrawing each replaced token once its replacements are answered,
+// even when one is refused. After an authorization refusal the session redials
+// only if they changed. An empty token is refused.
+func (t *Tokens) Set(tokens ...string) error {
+	return t.inner.Set(append([]string(nil), tokens...))
 }
 
-// Closed blocks until the token ends, returning the peer's revocation or the
-// session's close, or nil when the peer closed it without an error.
-func (t *AuthToken) Closed(ctx context.Context) error {
-	return bridge.CallErr(ctx, nil, t.inner.Closed)
+// Answered blocks until the peer's first verdict on the tokens the last Set
+// newly presented: nil once each is granted, in band or as a later dial's
+// connection credential. A token the set kept counts only once refused, and
+// nothing is re-checked after the answer. It returns the peer's refusal as a
+// ProtocolError carrying its code, an error for which
+// errors.Is(err, ErrUnsupported) holds when the session cannot carry an
+// in-band token, or the connection's close reason.
+func (t *Tokens) Answered(ctx context.Context) error {
+	return bridge.CallErr(ctx, nil, t.inner.Answered)
 }
 
-// Close withdraws the token, removing its grant from the union.
-func (t *AuthToken) Close() { t.inner.Cancel() }
-
-// Bandwidth divides one connection's send estimate among the tracks sharing it.
-type Bandwidth struct {
-	inner *ffi.MoqBandwidth
+// Allocator divides one connection's send estimate among the tracks sharing it.
+type Allocator struct {
+	inner *ffi.MoqAllocator
 }
 
 // Reserve claims up to maxBps for the track demand watches; every track
 // producer hands out its Demand. maxBps is a ceiling, not a measurement:
-// reserve the most the track can ever send. Drop the reservation to hand the
-// room back.
-func (b *Bandwidth) Reserve(demand *TrackDemand, maxBps uint64) *Reservation {
-	return &Reservation{inner: b.inner.Reserve(demand.inner, maxBps)}
+// reserve the most the track can ever send. Reuse Reservation.Update to change
+// the ceiling, or call Update(0) before abandoning or replacing the reservation
+// to hand the room back without waiting for garbage collection.
+func (a *Allocator) Reserve(demand *TrackDemand, maxBps uint64) *Reservation {
+	return &Reservation{inner: a.inner.Reserve(demand.inner, maxBps)}
 }
 
-// SetTarget probes up to targetBps instead of the sum of the reservations. The
-// session probes for what its reservations add up to by default, so the
-// estimate can rise to fund them. 0 turns probing off, and nil follows the
-// reservations again.
-func (b *Bandwidth) SetTarget(targetBps *uint64) {
-	b.inner.SetTarget(targetBps)
-}
-
-// Reservation is one track's standing claim on a Bandwidth.
+// Reservation is one track's standing claim on an Allocator.
 //
-// Grant is a snapshot: nil means no estimate or no demand, so hold the current
-// rate, and 0 is a real zero grant.
+// Rate is a snapshot: nil means no estimate, so hold the current rate, and 0 is
+// a real zero rate. While nothing subscribes it is the share the track would get.
+// Update(0) relinquishes the allocation while the track stays subscribed; the
+// handle remains usable and a later Update can claim bandwidth again.
 type Reservation struct {
 	inner *ffi.MoqReservation
 }
 
-// Grant returns this reservation's slice right now, in bits per second.
-func (r *Reservation) Grant() *uint64 {
-	return r.inner.Grant()
+// Rate returns this reservation's slice right now, in bits per second.
+func (r *Reservation) Rate() *uint64 {
+	return r.inner.Rate()
 }
 
-// Update changes the ceiling, keeping the same claim.
+// Update changes the ceiling, keeping the same claim. Zero immediately gives
+// its share to siblings and removes its contribution to the automatic probe
+// target; it does not close the track or destroy the native handle.
 func (r *Reservation) Update(maxBps uint64) {
 	r.inner.Update(maxBps)
 }
@@ -186,13 +186,12 @@ func (s *Session) Consume() *OriginConsumer {
 	return &OriginConsumer{inner: s.inner.Consume()}
 }
 
-// Shutdown drains finished tracks within one second, returning any drain error.
-// Explicit moq-lite-07-wip waits for the peer to receive finished tails; older Lite
-// versions, including the default lite-06, wait only for transport ACKs.
-// IETF also waits for transport ACKs.
-// Cancelling ctx aborts the session immediately.
-func (s *Session) Shutdown(ctx context.Context) error {
-	return bridge.CallErr(ctx, s.abort, s.inner.Shutdown)
+// Shutdown requests a draining close now; wait for its result with Closed.
+// Explicit moq-lite-07-wip waits for the peer to receive finished tails; older
+// Lite versions (including default lite-06) and IETF wait only for transport ACKs.
+// Finish or abort live tracks first; the drain times out after one second.
+func (s *Session) Shutdown() {
+	s.inner.Shutdown()
 }
 
 // abort tears the session down without draining, for a cancelled ctx.
@@ -217,12 +216,12 @@ func (s *Session) RecvBandwidth() *BandwidthConsumer {
 // BandwidthConsumer owns a bandwidth estimate, in bits per second.
 type BandwidthConsumer struct{ inner *ffi.MoqBandwidthConsumer }
 
-// Peek reads the current estimate, or nil while unavailable.
-func (b *BandwidthConsumer) Peek() *uint64 { return b.inner.Peek() }
+// Rate is the current estimate, or nil while unavailable.
+func (b *BandwidthConsumer) Rate() *uint64 { return b.inner.Rate() }
 
-// Changed waits for the estimate to change, or its producer to close.
-func (b *BandwidthConsumer) Changed(ctx context.Context) (*uint64, error) {
-	return bridge.Call(ctx, b.inner.Cancel, b.inner.Changed)
+// RateChanged waits for the estimate to change and returns the new Rate, or fails once its producer closes.
+func (b *BandwidthConsumer) RateChanged(ctx context.Context) (*uint64, error) {
+	return bridge.Call(ctx, b.inner.Cancel, b.inner.RateChanged)
 }
 
 // Close releases this consumer's demand, including a pending wait.

@@ -20,7 +20,7 @@ select_packages() {
         echo ALL
         return
     fi
-    if [[ "$list" == --all ]] || grep -qE '^(Cargo\.(toml|lock)|rust-toolchain\.toml|rs/justfile|sh/rs/(select|platform|nextest)\.sh|\.config/nextest\.toml)$' "$list"; then
+    if [[ "$list" == --all ]] || grep -qE '^(\.cargo/.*|sh/local\.(sh|ts)|Cargo\.(toml|lock)|rust-toolchain\.toml|rs/justfile|sh/rs/(select|platform|nextest|(net|tokio|media)-features)\.sh|\.config/nextest\.toml)$' "$list"; then
         echo ALL
         return
     fi
@@ -113,6 +113,12 @@ case "$packages" in
     *) echo "rs: selecting $names" ;;
 esac
 
+# Selection and empty crate sets stay outside admission. The paths are
+# root-relative because the `cd` above invalidates a relative `$0`.
+if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
+    exec bash sh/local.sh bash sh/rs/select.sh "$@"
+fi
+
 # The `*-fuzz` crates need a nightly toolchain; only `just rs fuzz` compiles them.
 if [[ "$packages" == ALL ]]; then
     flags=(--workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz)
@@ -128,13 +134,21 @@ case "$action" in
         ;;
     check | check-test | lint)
         just rs "$action" "${flags[@]}"
+        # Workspace feature unification can hide an individual crate's missing
+        # gates. Keep the boundary checks isolated and the full matrix nightly.
+        just rs feature-shapes "${flags[@]}"
+        if wants '(kio|moq-net)'; then just rs loom --no-run; fi
+        if wants moq-net; then just rs net-features; fi
+        if wants moq-quic; then just rs quic-features; fi
+        if wants moq-tokio; then just rs tokio-features; fi
+        if wants '(moq-video|moq-audio|moq-transcode)'; then just rs media-features; fi
         # moq-wasm's crate root is `#![cfg(target_arch = "wasm32")]`, so only a
         # wasm32 pass checks it. moq-mux, moq-ffi, and moq-clock ride along in that pass, and
         # nothing depends on moq-ffi, so each has to reach it on its own.
         if wants '(moq-wasm|moq-mux|moq-ffi|moq-clock)'; then just rs wasm; fi
         # Device code behind the off-by-default `capture` feature. check-test
         # lints it through the test build, as for the default features.
-        if [[ "$action" != lint ]] && wants '(moq-video|moq-audio)'; then
+        if [[ "$action" != lint ]] && wants '(moq-video|moq-audio|moq-scene|moq-studio)'; then
             if [[ "$action" == check-test ]]; then just rs capture-test; else just rs capture; fi
         fi
         # moq-cli's media tasks are behind `play`; only check-test runs tests.
@@ -153,10 +167,20 @@ case "$action" in
         # CI keeps Cargo's per-crate build timings, which check.yml uploads.
         timings=()
         [[ "${GITHUB_ACTIONS:-}" != true ]] || timings=(--timings)
+        # The tests behind the off-by-default device features join this build
+        # rather than compiling the workspace again per feature set. Those
+        # features only add code, so every test still runs. Cargo rejects a
+        # feature of a package outside the selection, hence the explicit picks.
+        features=()
+        if wants '(moq-video|moq-audio)'; then
+            [[ "$packages" == ALL ]] || flags+=(--package moq-video --package moq-audio)
+            features+=(moq-video/capture moq-audio/capture moq-audio/playback)
+        fi
+        if wants moq-cli; then features+=(moq-cli/play moq-cli/openh264); fi
+        # The WebRTC module's hostile-input tests, such as mDNS backpressure.
+        if wants moq-tokio; then features+=(moq-tokio/webrtc); fi
+        if ((${#features[@]})); then flags+=(--features "${features[*]}"); fi
         just rs test "${flags[@]}" ${timings[@]+"${timings[@]}"}
-        # Tests behind the off-by-default `capture` and `play` features.
-        if wants '(moq-video|moq-audio)'; then just rs capture-test ${timings[@]+"${timings[@]}"}; fi
-        if wants moq-cli; then just rs play ${timings[@]+"${timings[@]}"}; fi
         ;;
     platform)
         # moq-gst links GStreamer via pkg-config, which the runners don't have.

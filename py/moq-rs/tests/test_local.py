@@ -1,9 +1,10 @@
 """Local pub/sub tests: no network required."""
 
 import asyncio
+import json
 import struct
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from typing import Any, cast
 
 import moq
@@ -11,7 +12,7 @@ import moq_ffi
 import pytest
 
 # Every group from the first, rather than only what the live edge still reaches.
-FROM_GROUP_0 = [moq.Range(start=cast(moq.Anchor, moq.Anchor.ABSOLUTE(group=0, frame=0)))]
+FROM_GROUP_0 = [moq.Range(start=cast(moq.Anchor, moq.Anchor.ABSOLUTE(group=0)))]
 
 
 async def until_wanted(demand: moq.TrackDemand, wanted: bool = True) -> None:
@@ -21,9 +22,9 @@ async def until_wanted(demand: moq.TrackDemand, wanted: bool = True) -> None:
 
 
 def create_announced(origin: moq.OriginProducer, path: str) -> moq.BroadcastProducer:
-    broadcast = origin.create_broadcast(path)
-    broadcast.announce()
-    return broadcast
+    publication = origin.create_broadcast(path)
+    publication.announce()
+    return publication.broadcast
 
 
 async def routes(announced: moq.AnnounceConsumer):
@@ -101,25 +102,20 @@ def h264_init() -> bytes:
     return sps + pps
 
 
-async def test_fetch_abort_is_a_stream_app_code():
+async def test_fetch_of_a_dropped_group_is_not_found():
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("events")
-    dynamic = track.dynamic()
+    dynamic = track.requests()
     consumer = broadcast.consume()
 
     async def reject():
-        request = await dynamic.requested_group()
-        request.abort(404)
+        fill = await dynamic.requested_fill()
+        fill.drop_groups(5, 6)
 
     task = asyncio.create_task(reject())
-    with pytest.raises(moq.Error.Protocol) as raised:  # type: ignore[attr-defined]
+    with pytest.raises(moq.Error.NotFound):
         await consumer.fetch_group("events", 5)
     await task
-    protocol = moq.protocol_error(raised.value)
-    assert protocol is not None
-    assert protocol.scope == moq.ErrorScope.STREAM
-    assert protocol.code == 64 + 404
-    assert protocol.kind == moq.ProtocolKind.APP
 
 
 def test_protocol_error_helper_covers_known_app_and_unknown():
@@ -146,11 +142,11 @@ def test_protocol_error_helper_covers_known_app_and_unknown():
 
 
 def test_error_str_is_rust_display():
-    assert str(moq.Error.Closed()) == "closed"  # type: ignore[attr-defined]
-    error = moq.Error.Transport(reason="reset")  # type: ignore[attr-defined]
+    assert str(moq.Error.Closed()) == "closed"
+    error = moq.Error.Transport(reason="reset")
     assert str(error) == "transport: reset"
     details = moq.ProtocolError(scope=moq.ErrorScope.STREAM, code=468, kind=moq.ProtocolKind.APP, message="gone")
-    assert str(moq.Error.Protocol(details)) == "gone"  # type: ignore[attr-defined]
+    assert str(moq.Error.Protocol(details)) == "gone"
 
 
 def test_publish_media_lifecycle():
@@ -235,6 +231,7 @@ async def test_local_publish_consume_audio():
         media.write_frame(payload, timedelta(microseconds=1_000_000))
 
         async for frame in media_consumer:
+            assert isinstance(frame, moq.media.MediaFrame)
             assert frame.payload == payload
             assert frame.timestamp // timedelta(microseconds=1) == 1_000_000
             break
@@ -271,6 +268,7 @@ async def test_video_publish_consume():
         media.write_frame(keyframe, timedelta(microseconds=0))
 
         async for frame in media_consumer:
+            assert isinstance(frame, moq.media.MediaFrame)
             assert frame.timestamp // timedelta(microseconds=1) == 0
             assert len(frame.payload) > 0
             break
@@ -319,6 +317,7 @@ async def test_multiple_frames_ordering():
 
         for i, expected_ts in enumerate(timestamps):
             async for frame in media_consumer:
+                assert isinstance(frame, moq.media.MediaFrame)
                 assert frame.timestamp // timedelta(microseconds=1) == expected_ts
                 assert frame.payload == f"frame-{i}".encode()
                 break
@@ -385,79 +384,47 @@ async def test_announced_epoch_restarts():
     origin = moq.OriginProducer()
     consumer = origin.consume()
     announced = consumer.announced()
-    broadcast = origin.create_broadcast("epoch")
+    publication = origin.create_broadcast("epoch")
 
     first = moq.mint_epoch()
-    fixed = datetime(2023, 11, 14, 22, 13, 20, tzinfo=timezone.utc)
-    assert moq.epoch_time("018bcfe5-6800-7000-8000-000000000000") == fixed
-    broadcast.announce(moq.Route(epoch=first))
+    publication.announce(moq.AnnounceRoute(epoch=first))
     start = await next_route(announced)
     assert isinstance(start, moq.AnnounceEventStart)
     assert start.announce.route.epoch == first
 
     second = moq.mint_epoch()
-    broadcast.announce(moq.Route(epoch=second))
+    publication.announce(moq.AnnounceRoute(epoch=second))
     restart = await next_route(announced)
     assert isinstance(restart, moq.AnnounceEventRestart)
     assert restart.announce.route.epoch == second
 
-    with pytest.raises(moq.Error.InvalidEpoch):  # type: ignore[attr-defined]
-        moq.epoch_time(first.upper())
-    with pytest.raises(OverflowError):
-        moq.epoch_time("ffffffff-ffff-7000-8000-000000000000")
-    with pytest.raises(moq.Error.InvalidEpoch):  # type: ignore[attr-defined]
-        broadcast.announce(moq.Route(epoch="not-an-epoch"))
-    broadcast.close()
+    with pytest.raises(moq.Error.InvalidEpoch):
+        publication.announce(moq.AnnounceRoute(epoch=first.upper()))
+    with pytest.raises(moq.Error.InvalidEpoch):
+        publication.announce(moq.AnnounceRoute(epoch="not-an-epoch"))
+    publication.broadcast.close()
 
 
-async def test_finish_lingers_until_closed():
+async def test_finish_serves_until_closed():
     origin = moq.OriginProducer()
     consumer = origin.consume()
     announced = consumer.announced()
     broadcast = create_announced(origin, "finish")
     assert isinstance(await next_route(announced), moq.AnnounceEventStart)
 
-    track = broadcast.publish_track("status", moq.TrackInfo(max_age=timedelta(hours=1)))
+    track = broadcast.publish_track("status")
     track.write_frame(b"tail")
     track.finish()
-    finish = broadcast.finish()
-    assert finish.linger == timedelta(hours=1)
-    with pytest.raises(moq.Error.Closed):  # type: ignore[attr-defined]
-        broadcast.consume()
+    moq.media.CatalogProducer(broadcast).finish()
 
-    # Cancelling the wait is the interrupt: the broadcast closes at once.
-    wait = asyncio.ensure_future(finish.wait())
-    await asyncio.sleep(0)
-    wait.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await wait
+    # A late subscriber still drains the finished track while the broadcast is up.
+    late = await consumer.request_broadcast("finish")
+    reader = await late.subscribe_track("status")
+    frame = await asyncio.wait_for(reader.read_frame(), timeout=5)
+    assert frame is not None and frame.payload == b"tail"
+
+    broadcast.close()
     assert isinstance(await next_route(announced), moq.AnnounceEventEnd)
-    finish.close()
-
-
-async def test_finish_wait_cancelled_before_it_starts_closes():
-    origin = moq.OriginProducer()
-    consumer = origin.consume()
-    announced = consumer.announced()
-    broadcast = create_announced(origin, "finish")
-    assert isinstance(await next_route(announced), moq.AnnounceEventStart)
-
-    broadcast.publish_track("status", moq.TrackInfo(max_age=timedelta(hours=1))).finish()
-    finish = broadcast.finish()
-    # Cancelled before the loop first steps it, so the wait's body never runs.
-    wait = asyncio.create_task(finish.wait())
-    wait.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await wait
-    assert isinstance(await next_route(announced), moq.AnnounceEventEnd)
-
-
-async def test_finish_without_a_max_age_closes_on_wait():
-    broadcast = moq.BroadcastProducer()
-    broadcast.publish_track("status").finish()
-    finish = broadcast.finish()
-    assert finish.linger == timedelta(0)
-    await asyncio.wait_for(finish.wait(), timeout=5.0)
 
 
 def test_publish_lifecycle():
@@ -493,14 +460,14 @@ def test_track_info_keeps_native_default_priority():
 
 def test_string_sequences_refuse_a_bare_string():
     """A bare str would split into characters, so the config refuses it up front."""
-    with pytest.raises(TypeError, match="tls_roots"):
-        moq.Client("https://localhost:4443", tls_roots="ca.pem")
+    with pytest.raises(TypeError, match="roots"):
+        moq.Client("https://localhost:4443", tls=moq.ClientTls(roots="ca.pem"))
     with pytest.raises(TypeError, match="versions"):
         moq.Server(versions="moq-lite-03")
 
 
 async def test_fetch_group_and_serve_dynamic_miss():
-    """Fetch a cached group, then serve an uncached sequence through TrackDynamic."""
+    """Fetch a cached group, then serve an uncached sequence through TrackRequests."""
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("events", moq.TrackInfo(timescale=1_000_000))
     consumer = broadcast.consume()
@@ -513,16 +480,17 @@ async def test_fetch_group_and_serve_dynamic_miss():
     assert fetched.sequence == 0
     assert [frame.payload async for frame in fetched] == [b"cached"]
 
-    dynamic = track.dynamic()
+    dynamic = track.requests()
     pending = asyncio.create_task(consumer.fetch_group("events", 7, moq.FetchGroupOptions(priority=11)))
-    request = await asyncio.wait_for(dynamic.requested_group(), timeout=5.0)
-    assert request.sequence == 7
-    assert request.priority == 11
-    demand = request.demand()
-    assert demand.sequence == 7
-    assert demand.is_used()
+    fill = await asyncio.wait_for(dynamic.requested_fill(), timeout=5.0)
+    assert (fill.start_group, fill.start_frame, fill.end_group) == (7, 0, 8)
+    assert fill.priority == 11
+    assert fill.next() == 7
+    assert fill.is_used()
+    assert fill.is_wanted(7)
+    assert not fill.is_wanted(8)
 
-    produced = request.accept()
+    produced = fill.accept(7)
     produced.write_frame(b"archive", timedelta(microseconds=140_000))
     produced.finish()
 
@@ -564,6 +532,91 @@ async def test_json_stream_roundtrip():
     producer.finish()
 
 
+async def test_json_window_roundtrip():
+    broadcast = moq.BroadcastProducer()
+    track = broadcast.publish_track("log", moq.TrackInfo(timescale=1_000_000))
+    producer = moq.json.WindowProducer(track, compression=True)
+    consumer = moq.json.WindowConsumer(await broadcast.consume().subscribe_track("log"), compression=True)
+    demand = producer.demand()
+    await asyncio.wait_for(until_wanted(demand), timeout=5.0)
+
+    for n in range(3):
+        producer.push({"n": n}, timestamp=timedelta(milliseconds=n))
+    producer.pop(2, timestamp=timedelta(milliseconds=3))
+
+    for n in range(3):
+        event = await asyncio.wait_for(anext(consumer), timeout=5.0)
+        assert event == moq.json.Timed(moq.json.WindowPush(n, {"n": n}), timedelta(milliseconds=n))
+    event = await asyncio.wait_for(anext(consumer), timeout=5.0)
+    assert event == moq.json.Timed(moq.json.WindowPop(range(0, 2)), timedelta(milliseconds=3))
+
+    producer.finish()
+    with pytest.raises(moq.Error.Closed):
+        producer.push({"n": 3}, timestamp=timedelta(milliseconds=4))
+    assert [event async for event in consumer] == []
+
+
+async def test_json_window_cut_restates_the_window():
+    broadcast = moq.BroadcastProducer()
+    producer = moq.json.WindowProducer(broadcast.publish_track("log"))
+    raw = await broadcast.consume().subscribe_track("log")
+    consumer = moq.json.WindowConsumer(await broadcast.consume().subscribe_track("log"))
+
+    for n in range(3):
+        producer.push({"n": n})
+    producer.pop(1)
+    events = [(await asyncio.wait_for(anext(consumer), timeout=5.0)).value for _ in range(4)]
+    assert events == [
+        moq.json.WindowPush(0, {"n": 0}),
+        moq.json.WindowPush(1, {"n": 1}),
+        moq.json.WindowPush(2, {"n": 2}),
+        moq.json.WindowPop(range(0, 1)),
+    ]
+
+    producer.cut()
+    producer.push({"n": 3})
+    while True:
+        group = await asyncio.wait_for(raw.recv_group(), timeout=5.0)
+        assert group is not None
+        if group.sequence > 0:
+            break
+    header = await asyncio.wait_for(group.read_frame(), timeout=5.0)
+    assert header is not None
+    assert json.loads(header.payload) == {"offset": 1, "records": [{"n": 1}, {"n": 2}, {"n": 3}]}
+
+    # The restated records were already delivered, so the reader sees only the new one.
+    event = await asyncio.wait_for(anext(consumer), timeout=5.0)
+    assert event.value == moq.json.WindowPush(3, {"n": 3})
+    producer.finish()
+
+
+async def test_json_window_skips_records_outside_the_checkpoint():
+    broadcast = moq.BroadcastProducer()
+    producer = moq.json.WindowProducer(broadcast.publish_track("log", moq.TrackInfo(refresh=1)), checkpoint_records=2)
+    for n in range(5):
+        producer.push({"n": n})
+
+    # The join crosses the refresh ratio, so the producer restates the bounded checkpoint.
+    joiner = await broadcast.consume().subscribe_track("log")
+    while True:
+        group = await asyncio.wait_for(joiner.recv_group(), timeout=5.0)
+        assert group is not None
+        if group.sequence > 0:
+            break
+
+    consumer = moq.json.WindowConsumer(await broadcast.consume().subscribe_track("log"))
+    events = [(await asyncio.wait_for(anext(consumer), timeout=5.0)).value for _ in range(3)]
+    assert events == [
+        moq.json.WindowSkip(range(0, 3)),
+        moq.json.WindowPush(3, {"n": 3}),
+        moq.json.WindowPush(4, {"n": 4}),
+    ]
+
+    producer.finish()
+    with pytest.raises(moq.Error.JsonTrack):
+        moq.json.WindowProducer(broadcast.publish_track("bad"), checkpoint_records=0)
+
+
 async def test_json_producers_report_demand():
     broadcast = moq.BroadcastProducer()
     snapshot = moq.json.SnapshotProducer(broadcast, broadcast.publish_track("status"), compression=True)
@@ -586,13 +639,13 @@ async def test_json_producers_report_demand():
     await asyncio.wait_for(until_wanted(stream_demand, False), timeout=5.0)
 
     snapshot.finish()
-    with pytest.raises(moq.Error.Closed):  # type: ignore[attr-defined]
+    with pytest.raises(moq.Error.Closed):
         await asyncio.wait_for(until_wanted(snapshot_demand), timeout=5.0)
 
 
 async def test_dynamic_track_request():
     broadcast = moq.BroadcastProducer()
-    dynamic = broadcast.dynamic()
+    dynamic = broadcast.requests()
     consumer = broadcast.consume()
 
     # The subscribe stays pending until the request is accepted below; run it concurrently.
@@ -618,7 +671,7 @@ async def test_dynamic_track_request():
     track.finish()
     broadcast.close()
     del track
-    with pytest.raises(moq.Error.Closed):  # type: ignore[attr-defined]
+    with pytest.raises(moq.Error.Closed):
         await asyncio.wait_for(until_wanted(demand), timeout=5.0)
 
 
@@ -631,7 +684,7 @@ async def test_media_subscribe_refuses_a_non_rendition():
 
 async def test_dynamic_track_request_can_publish_media():
     broadcast = moq.BroadcastProducer()
-    dynamic = broadcast.dynamic()
+    dynamic = broadcast.requests()
     consumer = broadcast.consume()
     catalog_consumer = await moq.media.CatalogConsumer.subscribe(consumer)
 
@@ -676,6 +729,7 @@ async def test_dynamic_track_request_can_publish_media():
     media.write_frame(payload, timedelta(microseconds=20_000))
 
     async for frame in media_consumer:
+        assert isinstance(frame, moq.media.MediaFrame)
         assert frame.payload == payload
         assert frame.timestamp // timedelta(microseconds=1) == 20_000
         break
@@ -685,7 +739,7 @@ async def test_dynamic_track_request_can_publish_media():
 
 async def test_dynamic_broadcast_request():
     origin = moq.OriginProducer(cache_capacity_bytes=4096)
-    dynamic = origin.dynamic("")
+    dynamic = origin.requests("")
     consumer = origin.consume()
 
     request_broadcast = asyncio.create_task(consumer.request_broadcast("dynamic/broadcast"))
@@ -696,6 +750,7 @@ async def test_dynamic_broadcast_request():
     prepared = request.prepare(moq.mint_epoch())
     track = prepared.broadcast.publish_track("status", moq.TrackInfo(timescale=1_000_000))
     served = prepared.publish()
+    assert served.broadcast is prepared.broadcast
     with pytest.raises(Exception):
         _ = request.path
 
@@ -709,12 +764,12 @@ async def test_dynamic_broadcast_request():
     assert frame.payload == payload
     assert frame.timestamp == timedelta(microseconds=20_000)
     track.finish()
-    served.close()
+    served.broadcast.close()
 
 
 async def test_dynamic_broadcast_request_can_reject():
     origin = moq.OriginProducer()
-    dynamic = origin.dynamic("")
+    dynamic = origin.requests("")
     consumer = origin.consume()
 
     request_broadcast = asyncio.create_task(consumer.request_broadcast("missing"))
@@ -846,11 +901,16 @@ def test_public_api_exports():
     assert isinstance(moq.connect("https://example.com"), moq.Client)
     client = moq.connect(
         "https://example.com",
-        tls_roots=["root.pem"],
-        tls_fingerprints=["abc123"],
+        tls=moq.ClientTls(roots=["root.pem"], fingerprints=["abc123"]),
     )
     assert client._config.tls.roots == ["root.pem"]
     assert client._config.tls.fingerprints == ["abc123"]
+
+
+def test_client_tokens_reach_the_config():
+    """Tokens reach the config every session starts from."""
+    client = moq.connect("https://example.com", tokens=["first", "second"])
+    assert client._config.tokens == ["first", "second"]
 
 
 async def test_container_consumer_default_latency_and_context_manager():
@@ -875,6 +935,7 @@ async def test_container_consumer_default_latency_and_context_manager():
 
         async with await moq.media.TrackConsumer.subscribe(broadcast_consumer, track_name, audio) as media_consumer:
             async for frame in media_consumer:
+                assert isinstance(frame, moq.media.MediaFrame)
                 assert frame.payload == payload
                 break
 
@@ -1143,14 +1204,14 @@ async def test_container_group_takes_over_an_unread_group():
     group.write_frame(_legacy(1_000_000, b"a"), timedelta(milliseconds=1))
     raw = await _recv_raw(consumer)
     assert await raw.read_frame() is not None
-    with pytest.raises(moq.Error.AlreadyCommitted):  # type: ignore[attr-defined]
+    with pytest.raises(moq.Error.AlreadyCommitted):
         moq.media.GroupConsumer(raw, _LEGACY)
 
     group = track.append_group()
     group.write_frame(_legacy(1_020_000, b"b"), timedelta(milliseconds=2))
     raw = await _recv_raw(consumer)
     media = moq.media.GroupConsumer(raw, _LEGACY)
-    with pytest.raises(moq.Error.Cancelled):  # type: ignore[attr-defined]
+    with pytest.raises(moq.Error.Cancelled):
         await raw.read_frame()
     frame = await asyncio.wait_for(anext(media), timeout=5.0)
     assert frame.timestamp == timedelta(microseconds=1_020_000)
@@ -1166,9 +1227,10 @@ async def test_container_group_fails_loudly():
     # A truncated varint timestamp: the 2-byte form with only its first byte.
     group.write_frame(b"\x40", timedelta(milliseconds=1))
     raw = await _recv_raw(consumer)
-    with pytest.raises(moq.Error.Codec):  # type: ignore[attr-defined]
+    with pytest.raises(moq.Error.Codec):
         moq.media.GroupConsumer(raw, cast(moq.media.Container, moq.media.Container.CMAF(init=b"")))
     media = moq.media.GroupConsumer(raw, _LEGACY)
+    # UniFFI rebinds the error class, hiding its Exception base from pyright.
     with pytest.raises(moq.Error):  # type: ignore[attr-defined]
         await asyncio.wait_for(anext(media), timeout=5.0)
 
@@ -1349,10 +1411,10 @@ def test_audio_encoder_returns_namespaced_records():
     assert isinstance(finish, moq.audio.EncoderFinish)
 
 
-def test_audio_encoder_preset_init_and_bitrate():
-    """A preset sets the frame size, the encoder reports its OpusHead, and the bitrate retunes live."""
+def test_audio_encoder_frame_init_and_bitrate():
+    """A frame duration sets the frame size, the encoder reports its OpusHead, and the bitrate retunes live."""
     output = moq.audio.EncoderOutput(
-        codec=moq.AudioCodec.opus(), sample_rate=48000, channels=1, preset=moq.audio.Preset.LOW_LATENCY
+        codec=moq.AudioCodec.opus(), sample_rate=48000, channels=1, frame_duration=timedelta(milliseconds=10)
     )
     encoder = moq.audio.Encoder(output)
     assert encoder.frame_size == 480
@@ -1362,8 +1424,8 @@ def test_audio_encoder_preset_init_and_bitrate():
     encoder.set_bitrate(32_000)
     assert encoder.encode([0.0] * encoder.frame_size).data
 
-    with pytest.raises(moq.Error.Audio):  # type: ignore[attr-defined]
-        moq.audio.Encoder(replace(output, frame_duration=timedelta(milliseconds=20)))
+    with pytest.raises(moq.Error.Audio):
+        moq.audio.Encoder(replace(output, frame_duration=timedelta(milliseconds=15)))
 
 
 def test_video_namespace_names_its_configuration_types():
@@ -1381,11 +1443,14 @@ def test_encode_audio_with_opus_object():
     for codec_first in (True, False):
         broadcast = moq.BroadcastProducer()
         codec = moq.AudioCodec.opus()
-        output = moq.audio.EncoderOutput(codec=codec, track="mic")
+        output = moq.audio.EncoderOutput(
+            codec=codec,
+        )
         producer = moq.audio.Producer(
             moq.media.CatalogProducer(broadcast),
             moq.AudioEncoderInput(format=moq.AudioSampleFormat.F32, sample_rate=48_000, channels=1),
             output,
+            track="mic",
         )
         if codec_first:
             del codec
@@ -1407,7 +1472,10 @@ async def test_audio_consumer_reports_its_playout_delay():
     audio = moq.audio.Producer(
         moq.media.CatalogProducer(broadcast),
         moq.AudioEncoderInput(format=moq.AudioSampleFormat.F32, sample_rate=48_000, channels=1),
-        moq.audio.EncoderOutput(codec=moq.AudioCodec.opus(), track="mic"),
+        moq.audio.EncoderOutput(
+            codec=moq.AudioCodec.opus(),
+        ),
+        track="mic",
     )
 
     consumer = origin.consume()
@@ -1426,8 +1494,8 @@ async def test_audio_consumer_reports_its_playout_delay():
     # Two 20 ms Opus frames of silence at 48 kHz mono.
     for i in range(2):
         audio.write(moq.audio.Frame(timestamp=timedelta(milliseconds=20 * i), data=bytes(960 * 4)))
-    await asyncio.wait_for(anext(fixed), timeout=5.0)
-    await asyncio.wait_for(anext(estimated), timeout=5.0)
+    assert isinstance(await asyncio.wait_for(anext(fixed), timeout=5.0), moq.audio.Frame)
+    assert isinstance(await asyncio.wait_for(anext(estimated), timeout=5.0), moq.audio.Frame)
 
     assert fixed.delay == timedelta(milliseconds=80)
     assert estimated.delay != initial
@@ -1444,15 +1512,20 @@ async def test_decode_video_frame():
     broadcast = create_announced(origin, "video-decode-frame")
     video = moq.video.Producer(
         moq.media.CatalogProducer(broadcast),
-        moq.VideoEncoderInput(format=moq.VideoPixelFormat.RGBA, width=320, height=240, framerate=30),
+        moq.VideoEncoderInput(
+            format=moq.VideoPixelFormat.RGBA,
+            width=320,
+            height=240,
+            framerate=moq.video.FrameRate(numerator=30000, denominator=1001),
+        ),
         # Software so the encode is deterministic everywhere. uniffi nests each
         # variant inside the enum without declaring it a subclass, so the cast is
         # what makes the variant typecheck.
         moq.VideoEncoderOutput(
             codec=moq.VideoCodec.H264,
-            track="camera",
             kind=cast(moq.VideoEncoderKind, moq.VideoEncoderKind.SOFTWARE()),
         ),
+        track="camera",
     )
 
     # Seed the track so a subscriber joining below lands on encoded media.
@@ -1475,8 +1548,10 @@ async def test_decode_video_frame():
 
     frame = await asyncio.wait_for(anext(decoder), timeout=5.0)
     decoder.cancel()
+    assert isinstance(frame, moq.VideoDecodedFrame)
 
     i420 = frame.pixels(moq.VideoPixelFormat.I420)
+
     assert len(i420) == frame.width() * frame.height() * 3 // 2
 
     packed = frame.pixels(moq.VideoPixelFormat.RGBA)
@@ -1489,32 +1564,64 @@ async def test_decode_video_frame():
 
 async def test_broadcast_is_reachable_only_while_announced():
     origin = moq.OriginProducer()
-    broadcast = origin.create_broadcast("live")
-    track = broadcast.publish_track("events")
+    publication = origin.create_broadcast("live")
+    track = publication.broadcast.publish_track("events")
     consumer = origin.consume()
     with pytest.raises(Exception):
         await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)
 
-    broadcast.announce()
+    publication.announce()
     announced = consumer.announced()
     first = await next_route(announced)
     assert isinstance(first, moq.AnnounceEventStart)
     assert first.announce.prefix == "live"
 
-    broadcast.unannounce()
+    publication.unannounce()
     retracted = await next_route(announced)
     assert isinstance(retracted, moq.AnnounceEventEnd)
     assert retracted.announce.prefix == "live"
     with pytest.raises(Exception):
         await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)
 
-    broadcast.announce()
+    publication.announce()
     back = await next_route(announced)
     assert isinstance(back, moq.AnnounceEventStart)
     await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)
     announced.cancel()
     track.finish()
+    publication.broadcast.close()
+
+
+async def test_dropping_a_publication_keeps_its_route():
+    origin = moq.OriginProducer()
+    consumer = origin.consume()
+    publication = origin.create_broadcast("live")
+    broadcast = publication.broadcast
+    assert publication.broadcast is broadcast
+    publication.announce()
+    del publication
+    await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)
+
     broadcast.close()
+    with pytest.raises(moq.Error.Protocol):
+        await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)
+
+
+async def test_a_stale_publication_leaves_its_replacement_alone():
+    origin = moq.OriginProducer()
+    consumer = origin.consume()
+    stale = origin.create_broadcast("live")
+    stale.announce()
+    stale.broadcast.close()
+
+    replacement = origin.create_broadcast("live")
+    replacement.announce()
+    with pytest.raises(moq.Error.Closed):
+        stale.announce()
+    with pytest.raises(moq.Error.Closed):
+        stale.unannounce()
+    await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)
+    replacement.broadcast.close()
 
 
 async def test_announced_pattern_captures():
@@ -1522,7 +1629,7 @@ async def test_announced_pattern_captures():
     consumer = origin.consume()
     announced = consumer.announced("room", filter="*/chat")
 
-    dynamic = origin.dynamic("room")
+    dynamic = origin.requests("room")
     overlap = await next_route(announced)
     assert isinstance(overlap, moq.AnnounceEventStart)
     assert overlap.announce.prefix == "room"
@@ -1543,7 +1650,7 @@ async def test_announced_pattern_captures():
 
 async def test_dynamic_serves_a_request_under_a_prefix():
     origin = moq.OriginProducer()
-    dynamic = origin.dynamic("live")
+    dynamic = origin.requests("live")
     consumer = origin.consume()
 
     pending = asyncio.create_task(consumer.request_broadcast("live/cam"))
@@ -1552,7 +1659,7 @@ async def test_dynamic_serves_a_request_under_a_prefix():
     served = request.prepare(moq.mint_epoch()).publish()
     await asyncio.wait_for(pending, timeout=5.0)
     dynamic.cancel()
-    served.close()
+    served.broadcast.close()
 
 
 async def test_dynamic_and_json_handles_are_async_context_managers():
@@ -1564,19 +1671,19 @@ async def test_dynamic_and_json_handles_are_async_context_managers():
         assert moq.is_shutdown(excinfo.value)
 
     origin = moq.OriginProducer()
-    async with origin.dynamic("live") as origin_dynamic:
+    async with origin.requests("live") as origin_dynamic:
         pass
     await assert_cancelled(origin_dynamic.requested_broadcast())
 
     broadcast = moq.BroadcastProducer()
-    async with broadcast.dynamic() as broadcast_dynamic:
+    async with broadcast.requests() as broadcast_dynamic:
         pass
     await assert_cancelled(broadcast_dynamic.requested_track())
 
     track = broadcast.publish_track("events")
-    async with track.dynamic() as track_dynamic:
+    async with track.requests() as track_dynamic:
         pass
-    await assert_cancelled(track_dynamic.requested_group())
+    await assert_cancelled(track_dynamic.requested_fill())
 
     snapshot = moq.json.SnapshotProducer(broadcast, broadcast.publish_track("state"))
     async with moq.json.SnapshotConsumer(await broadcast.consume().subscribe_track("state")) as snapshot_consumer:
@@ -1588,8 +1695,14 @@ async def test_dynamic_and_json_handles_are_async_context_managers():
         pass
     await assert_cancelled(anext(stream_consumer))
 
+    window = moq.json.WindowProducer(broadcast.publish_track("window"))
+    async with moq.json.WindowConsumer(await broadcast.consume().subscribe_track("window")) as window_consumer:
+        pass
+    await assert_cancelled(anext(window_consumer))
+
     snapshot.finish()
     stream.finish()
+    window.finish()
     track.finish()
     broadcast.close()
 
@@ -1599,7 +1712,7 @@ def test_media_catalog_handle_closes_with_broadcast():
     catalog = moq.media.CatalogProducer(broadcast)
     catalog.set_section("app", {"value": 42})
     broadcast.close()
-    with pytest.raises(moq.Error.Closed):  # type: ignore[attr-defined]
+    with pytest.raises(moq.Error.Closed):
         catalog.remove_section("app")
 
 

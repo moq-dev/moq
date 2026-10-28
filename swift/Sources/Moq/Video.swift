@@ -2,14 +2,20 @@ import MoqFFI
 
 /// Native video encoding, publication, and decoding.
 public enum Video {
-    /// The pixel layout, resolution, and framerate written to a `Producer`.
+    /// An exact video frame rate in frames per second.
+    public typealias FrameRate = MoqFFI.MoqVideoFrameRate
+
+    /// The raw frame layout, resolution, and framerate the caller writes.
     public typealias EncoderInput = VideoEncoderInput
-    /// The track name, codec, bitrate, group mode, and backend preference.
+    /// The codec, bitrate, group mode, and backend preference.
     public typealias EncoderOutput = VideoEncoderOutput
     /// What a `Consumer` delivers: an optional resize, a max delay, and the decoder's surface (macOS only).
     public typealias DecoderOutput = VideoDecoderOutput
     /// One raw picture with its presentation timestamp.
     public typealias Frame = VideoFrame
+    /// One item a `Consumer` reads, in delivery order: a decoded `.frame`, a `.gap`
+    /// where media was lost, or an `.end` where the publisher stopped its encoder.
+    public typealias Read = MoqVideoRead
     /// One encoded access unit from an `Encoder`.
     public typealias Packet = MoqVideoPacket
     /// How pictures are split into independently decodable groups.
@@ -28,13 +34,23 @@ public enum Video {
         let ffi: MoqVideoProducer
 
         /// Open a video track on the catalog's broadcast and register its rendition.
+        ///
+        /// Pass `lower`, the next rendition down a simulcast ladder, to disable this
+        /// one while the bandwidth grant cannot fund it; it resumes once the grant
+        /// recovers. Needs `bandwidth` and a bitrate above the lower rendition's.
         public init(
             catalog: Media.CatalogProducer,
             input: EncoderInput,
             output: EncoderOutput,
-            bandwidth: Bandwidth? = nil
+            track: String? = nil,
+            bandwidth: Allocator? = nil,
+            lower: Producer? = nil
         ) throws {
-            ffi = try MoqVideoProducer(catalog: catalog.ffi, input: input, output: output, bandwidth: bandwidth?.ffi)
+            ffi = try MoqVideoProducer(
+                catalog: catalog.ffi,
+                options: MoqVideoProducerOptions(
+                    input: input, output: output, track: track, bandwidth: bandwidth?.ffi,
+                    lower: lower?.ffi))
         }
 
         /// A watch-only handle to whether the video track has subscribers.
@@ -82,11 +98,12 @@ public enum Video {
     }
 
     /// Read side of a video track decoded inside the bindings. Iterating yields
-    /// frames that own their decoded picture; call `pixels(format:)` for tightly
-    /// packed CPU pixels. Release frames promptly: held frames hold decoder buffers.
+    /// frames that own their decoded picture, and the gaps and encoder ends between
+    /// them; call `pixels(format:)` for tightly packed CPU pixels. Release frames
+    /// promptly: held frames hold decoder buffers.
     public final class Consumer: AsyncSequence, Sendable {
-        /// The decoded video frame emitted by this sequence.
-        public typealias Element = VideoDecodedFrame
+        /// The frame, gap, or end emitted by this sequence.
+        public typealias Element = Read
 
         let ffi: MoqVideoConsumer
 
@@ -109,8 +126,8 @@ public enum Video {
             ))
         }
 
-        /// The next frame, or `nil` once the track ends or is closed.
-        public func next() async throws -> VideoDecodedFrame? {
+        /// The next frame, gap, or end, or `nil` once the track ends or is closed.
+        public func next() async throws -> Read? {
             try await ffi.next()
         }
 
@@ -120,7 +137,8 @@ public enum Video {
         }
 
         /// Create an iterator that cancels native reads when iteration ends.
-        public func makeAsyncIterator() -> AsyncThrowingStream<VideoDecodedFrame, Swift.Error>.Iterator {
+        public func makeAsyncIterator() -> AsyncThrowingStream<Read, Swift.Error>.Iterator {
+
             moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
                 try await ffi.next()
             }.makeAsyncIterator()
@@ -131,7 +149,7 @@ public enum Video {
     public final class Encoder: Sendable {
         let ffi: MoqVideoEncoder
 
-        /// Open a codec-only encoder; `output.track` is ignored.
+        /// Open a codec-only encoder.
         public init(input: EncoderInput, output: EncoderOutput) throws {
             ffi = try MoqVideoEncoder(input: input, output: output)
         }

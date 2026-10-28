@@ -83,7 +83,7 @@ async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 	let (go_tx, go_rx) = futures::channel::oneshot::channel::<()>();
 
 	let reader = moq_clock::sim::spawn(async move {
-		let subscription = moq_net::track::Subscription::default().with_groups(0..);
+		let subscription = moq_net::track::Subscription::default().with_range(0..);
 		let mut sub = remote
 			.track("video")
 			.unwrap()
@@ -194,8 +194,7 @@ const DEATH_VERSIONS: &[&str] = &[
 	"moq-lite-03",
 	"moq-lite-05",
 	"moq-lite-07-wip",
-	"moq-transport-14",
-	"moq-transport-17",
+	"moq-transport-18",
 	"moq-transport-22",
 ];
 
@@ -225,7 +224,7 @@ async fn killed(version: &str, local: bool) -> (Option<moq_net::Error>, Option<m
 	// Subscribing resolves only once the publisher serves the track, which it does
 	// only after seeing the subscription, so the reader runs concurrently.
 	let reader = moq_clock::sim::spawn(async move {
-		let subscription = moq_net::track::Subscription::default().with_groups(0..);
+		let subscription = moq_net::track::Subscription::default().with_range(0..);
 		let mut sub = remote
 			.track("video")
 			.unwrap()

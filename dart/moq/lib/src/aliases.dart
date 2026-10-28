@@ -16,6 +16,9 @@ import 'package:moq_ffi/moq_ffi.dart';
 /// A MoQ client: configure the TLS/bind knobs, then connect to a relay.
 typedef Client = MoqClient;
 
+/// The credentials a [Client] presents, replaceable while it runs.
+typedef Tokens = MoqTokens;
+
 /// A live pub/sub session with a relay, exposing publish and consume origins.
 typedef Session = MoqSession;
 
@@ -28,6 +31,9 @@ typedef Transport = MoqTransport;
 /// The congestion control family for a QUIC connection.
 typedef CongestionControl = MoqCongestionControl;
 
+/// Certificate trust and the mTLS identity for `ConnectOptions.tls`.
+typedef ClientTls = MoqClientTls;
+
 /// The publish side of an origin: create broadcasts so subscribers can discover them.
 typedef OriginProducer = MoqOriginProducer;
 
@@ -38,13 +44,16 @@ typedef OriginConfig = MoqOriginConfig;
 typedef OriginConsumer = MoqOriginConsumer;
 
 /// A served route: advertises a path prefix and yields broadcast requests beneath it.
-typedef OriginDynamic = MoqOriginDynamic;
+typedef OriginRequests = MoqOriginRequests;
 
 /// A requested broadcast not yet accepted: fulfill it with a producer or reject it.
 typedef BroadcastRequest = MoqBroadcastRequest;
 
 /// A claim answer being filled before its exact route is announced.
 typedef BroadcastPrepared = MoqBroadcastPrepared;
+
+/// A broadcast published on an origin: the broadcast to fill and its announcement.
+typedef Publication = MoqPublication;
 
 /// A stream of announce events under a prefix.
 typedef AnnounceConsumer = MoqAnnounceConsumer;
@@ -54,6 +63,9 @@ typedef AnnounceConfig = MoqAnnounceConfig;
 
 /// A pending wait for a route to cover a specific path.
 typedef AnnouncedBroadcast = MoqAnnouncedBroadcast;
+
+/// How a broadcast advertises its exact path: its static production cost and publisher epoch.
+typedef AnnounceRoute = MoqAnnounceRoute;
 
 /// A route over a prefix: its origin-relative path, wildcard captures, and route metadata.
 typedef Announce = MoqAnnounce;
@@ -82,11 +94,7 @@ typedef BroadcastProducer = MoqBroadcastProducer;
 typedef BroadcastConsumer = MoqBroadcastConsumer;
 
 /// Receives tracks requested from a dynamically served broadcast.
-typedef BroadcastDynamic = MoqBroadcastDynamic;
-
-/// A cleanly ended broadcast, still announced and serving its finished tracks
-/// until its linger ends; close it to end the linger early.
-typedef BroadcastFinish = MoqBroadcastFinish;
+typedef BroadcastRequests = MoqBroadcastRequests;
 
 /// The write side of a raw track: append groups of frames.
 typedef TrackProducer = MoqTrackProducer;
@@ -94,8 +102,8 @@ typedef TrackProducer = MoqTrackProducer;
 /// A subscriber-requested track not yet accepted: accept it for a [TrackProducer] or abort it.
 typedef TrackRequest = MoqTrackRequest;
 
-/// A stream of uncached group requests for one track, for serving fetches on demand.
-typedef TrackDynamic = MoqTrackDynamic;
+/// A stream of the fills readers of one track need: runs of groups the cache lacks.
+typedef TrackRequests = MoqTrackRequests;
 
 /// A watch-only handle to whether a published track has subscribers; holding it keeps nothing open.
 typedef TrackDemand = MoqTrackDemand;
@@ -103,11 +111,8 @@ typedef TrackDemand = MoqTrackDemand;
 /// The read side of a raw track: yields groups in sequence order, skipping ahead if it falls behind.
 typedef TrackConsumer = MoqTrackConsumer;
 
-/// A request to produce one uncached group for a fetch consumer.
-typedef GroupRequest = MoqGroupRequest;
-
-/// A watch-only handle to whether any caller still wants a requested group; holding it keeps nothing open.
-typedef GroupDemand = MoqGroupDemand;
+/// A run of groups readers miss: accept each group you have and drop the rest.
+typedef Fill = MoqFill;
 
 /// The write side of a single group: append frames to it.
 typedef GroupProducer = MoqGroupProducer;
@@ -140,28 +145,28 @@ typedef FetchGroupOptions = MoqFetchGroupOptions;
 typedef TrackInfo = MoqTrackInfo;
 
 /// Divides one connection's send estimate among the tracks sharing it.
-typedef Bandwidth = MoqBandwidth;
+typedef Allocator = MoqAllocator;
 
 /// An owned bandwidth estimate; release it to stop receive PROBE demand.
 typedef BandwidthConsumer = MoqBandwidthConsumer;
 
-/// One track's standing claim on a [Bandwidth].
+/// One track's standing claim on an [Allocator].
 typedef Reservation = MoqReservation;
 
 /// A snapshot of transport connection statistics.
 typedef ConnectionStats = MoqConnectionStats;
 
-/// A session's authorization: the grant its peer gave it, and more tokens to present.
-typedef Auth = MoqAuth;
-
-/// One token presented with [Auth.add]; cancel it to withdraw the token.
-typedef AuthToken = MoqAuthToken;
+/// Follows the grant a session's peer gave it; cancel it to release a pending wait.
+typedef GrantConsumer = MoqGrantConsumer;
 
 /// What the peer lets this side do: publish and subscribe patterns, and an expiry.
 typedef Grant = MoqGrant;
 
-/// A connection lifecycle transition reported by [Session.status].
-typedef ConnectionStatus = MoqConnectionStatus;
+/// A connection lifecycle transition reported by [Session.state].
+typedef ConnectionPhase = MoqConnectionPhase;
+
+/// One coherent connection lifecycle snapshot.
+typedef ConnectionState = MoqConnectionState;
 
 /// Retry pacing for the automatic reconnect: initial delay, multiplier, ceiling, and give-up window.
 typedef Backoff = MoqBackoff;

@@ -6,6 +6,7 @@
 //! container; [`Import`] parses external fMP4 streams and [`Export`]
 //! produces them.
 
+mod edit;
 mod export;
 pub mod fragment;
 mod fragmenter;
@@ -186,6 +187,14 @@ pub enum Error {
 	#[error("invalid data offset")]
 	InvalidDataOffset,
 
+	/// Absolute file offsets cannot be resolved in a standalone fragment.
+	#[error("absolute base_data_offset is unsupported; use moof-relative offsets")]
+	UnsupportedBaseDataOffset,
+
+	/// Every media sample must contain at least one byte.
+	#[error("empty media sample")]
+	EmptySample,
+
 	/// The frame timestamp carries a fragment's earliest presentation time exactly only when the
 	/// track counts in the same ticks as the media.
 	#[error("track timescale {track:?} doesn't match the CMAF mdhd timescale {mdhd:?}")]
@@ -303,6 +312,10 @@ pub enum Error {
 	/// delivered the codec configuration their track needs.
 	#[error("renditions {0:?} never delivered their codec configuration")]
 	TrackUndescribed(Vec<String>),
+
+	/// A track's edit list does more than delay the track and start its media at one time.
+	#[error("unsupported edit list: {0}")]
+	UnsupportedEditList(&'static str),
 }
 
 impl From<mp4_atom::Error> for Error {
@@ -491,7 +504,9 @@ pub(crate) fn decode(data: Bytes, timestamp: Option<Timestamp>, track: Track) ->
 		defaults,
 	} = track;
 
-	let mut cursor = std::io::Cursor::new(&data);
+	// A slice cursor like the other fMP4 decodes: mp4-atom's `Any` decoder is large and compiles
+	// once per reader type.
+	let mut cursor = std::io::Cursor::new(data.as_ref());
 	let mut moof = None;
 	let mut mdat = None;
 
@@ -511,80 +526,35 @@ pub(crate) fn decode(data: Bytes, timestamp: Option<Timestamp>, track: Track) ->
 	let (mdat_start, mdat_data) = mdat.ok_or(Error::NoMdat)?;
 	let traf = moof.traf.first().ok_or(Error::NoTraf)?;
 
-	// Samples are read from the mdat front to back, so each run must start where the previous
-	// one ended. A run's data_offset counts from the moof's first byte (CMAF's default-base-is-moof).
-	if traf.tfhd.base_data_offset.is_some() {
-		return Err(Error::InvalidDataOffset);
-	}
 	let data_start = mdat_start.checked_sub(moof_start).ok_or(Error::InvalidDataOffset)?;
 	let tfdt = traf.tfdt.as_ref().ok_or(Error::NoTfdt)?;
 	let base_dts = tfdt.base_media_decode_time;
-
-	// DTS is reconstructed by accumulating each sample's duration. A non-final sample
-	// with no resolvable duration would leave every following sample stuck at the same
-	// DTS, silently collapsing their timestamps, so reject that fragment instead.
-	let total_samples: usize = traf.trun.iter().map(|t| t.entries.len()).sum();
+	let mut resolver = sample::Resolver::new(data_start, mdat_data.len());
 
 	// Rounded the way `encode` stamps it, so a timestamp the track carried at another scale
 	// lands back on the tick it was written at.
 	let anchor = timestamp.map(|t| timestamp_ticks(t, timescale)).transpose()?;
 
 	let mut frames = Vec::new();
-	let mut ptss = Vec::with_capacity(total_samples);
-	let mut offset = 0usize;
+	let mut ptss = Vec::new();
 	let mut dts = i128::from(base_dts);
-	let mut sample_index = 0usize;
-
-	for trun in &traf.trun {
-		if let Some(data_offset) = trun.data_offset
-			&& usize::try_from(data_offset).ok() != Some(data_start + offset)
-		{
-			return Err(Error::InvalidDataOffset);
-		}
-
-		for entry in &trun.entries {
-			let sample = defaults.resolve(&traf.tfhd, entry);
-			let end = offset + sample.size as usize;
-
-			if end > mdat_data.len() {
-				return Err(Error::SampleRangeOutOfBounds {
-					start: offset,
-					end,
-					len: mdat_data.len(),
-				});
-			}
-
-			ptss.push(dts + i128::from(entry.cts.unwrap_or_default()));
-			let payload = Bytes::copy_from_slice(&mdat_data[offset..end]);
-			let keyframe = kind == Kind::Video && sample.is_sync();
-
-			// Carry the sample-duration through at the track's scale when present, so
-			// the jitter buffer can use it and an exporter can write it back.
-			let sample_duration = sample.duration;
-
-			// The last sample needs no duration (nothing follows it to time), but any
-			// earlier sample without one makes the rest of the fragment's DTS ambiguous.
-			let is_last = sample_index + 1 == total_samples;
-			if sample_duration.is_none() && !is_last {
-				return Err(Error::MissingSampleDuration);
-			}
-
-			let duration = sample_duration
-				.map(|d| Timestamp::new(d as u64, timescale))
-				.transpose()?;
-
-			frames.push(Frame {
-				// Placeholder until the earliest PTS is known.
-				timestamp: Timestamp::ZERO,
-				payload,
-				keyframe,
-				duration,
-			});
-
-			offset = end;
-			dts += i128::from(sample_duration.unwrap_or(0));
-			sample_index += 1;
-		}
+	for resolved in resolver.resolve(traf, defaults)? {
+		let sample::Resolved { sample, cts, range } = resolved?;
+		ptss.push(dts + i128::from(cts));
+		let payload = Bytes::copy_from_slice(&mdat_data[range]);
+		let keyframe = kind == Kind::Video && sample.is_sync();
+		let duration = sample
+			.duration
+			.map(|d| Timestamp::new(d as u64, timescale))
+			.transpose()?;
+		frames.push(Frame {
+			// Placeholder until the earliest PTS is known.
+			timestamp: Timestamp::ZERO,
+			payload,
+			keyframe,
+			duration,
+		});
+		dts += i128::from(sample.duration.unwrap_or(0));
 	}
 
 	let (anchor, earliest) = match anchor {
@@ -1943,10 +1913,9 @@ mod tests {
 		assert!(matches!(err, Error::TimescaleMismatch { .. }), "got {err:?}");
 	}
 
-	/// Samples are read front to back, so a run whose data_offset points anywhere but the next
-	/// sample is refused rather than sliced from the wrong bytes.
+	/// A run whose samples extend beyond the payload is refused.
 	#[test]
-	fn decode_refuses_a_run_that_skips_bytes() {
+	fn decode_refuses_a_run_past_the_payload() {
 		use mp4_atom::{DecodeMaybe, Encode};
 
 		let timescale = moq_net::Timescale::MICRO;
@@ -1965,7 +1934,7 @@ mod tests {
 		skewed.extend_from_slice(mdat);
 
 		let err = decode(Bytes::from(skewed), None, Track::new(timescale, Kind::Video)).unwrap_err();
-		assert!(matches!(err, Error::InvalidDataOffset), "got {err:?}");
+		assert!(matches!(err, Error::SampleRangeOutOfBounds { .. }), "got {err:?}");
 	}
 
 	/// A frame timestamp the track carries at another scale anchors to the nearest tick, the way

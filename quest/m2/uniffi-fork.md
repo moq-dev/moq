@@ -1,69 +1,83 @@
-# [L] Hard-fork the binding generator
+# [M] Switch moq's bindings to rust2's UniFFI fork
 
 ## Goal
 
-One moq-dev repository holds UniFFI's core and every generator moq uses
-(Kotlin, Swift, Python, Go, Dart, C++, and C), builds them from one lockfile,
-and releases them under one tag. moq-ffi depends on the fork's crates from
-crates.io under moq names, and moq names that release in one pin file. The
-three `kixelated/uniffi-*` generator forks are archived. Generated bindings
-are unchanged by the move itself.
+moq-ffi depends on the UniFFI fork's renamed crates from crates.io, and every
+generator moq uses (Kotlin, Swift, Python, Go, Dart, C++, and C) comes from
+[kixelated/rust2](https://github.com/kixelated/rust2) through one pinned flake
+input. `rs/uniffi-bindgen`, `nix/uniffi-dart-*`, and the per-generator pins are
+deleted, and the three `kixelated/uniffi-*` generator forks are archived.
+The browser's TypeScript, generated through ubrn's `wasm2` flavour, still
+generates against the fork. Generated bindings are unchanged by the switch
+itself.
 
 ## Plan
 
 Decided with the maintainer on 2026-10-13, after a review of how moq uses
 UniFFI:
 
-- **Base**: UniFFI. [The BoltFFI spike](/bench/ffi-gen/README.md)
+- **Base**: UniFFI. [The BoltFFI spike](https://github.com/kixelated/rust2/blob/main/bench/ffi/README.md#boltffi-comparison)
   recommended it. Decided later in #5838 (2026-10-17, maintainer):
-  UniFFI-generated moq-ffi serves the browser too, over BoltFFI, so one generator serves every
-  language.
-
-- **Why**: every UniFFI minor release breaks external generators (0.31
+  UniFFI-generated moq-ffi serves the browser too, through ubrn's `wasm2`
+  flavour (chosen over BoltFFI and hand-written moq-wasm), so one binding
+  surface serves every language.
+- **Why fork**: every UniFFI minor release breaks external generators (0.31
   changed `module_path`, 0.32 changed the metadata encoding without bumping
   the contract version, and `main` removes the old library-mode API). No
-  external generator has released for 0.32, so moq already carries three
-  forks, each pinned in about five places. The core also blocks work moq
-  needs: byte copies, zero-copy returns, and namespaced external types
+  external generator has released for 0.32, so moq carries three forks, each
+  pinned in about five places. The core also blocks work moq needs: byte
+  copies, zero-copy returns, and namespaced external types
   (mozilla/uniffi-rs#3026, auto-closed by our
   [#5498](https://github.com/moq-dev/moq/pull/5498) and still unfixed
   upstream).
-- **Hard fork, fresh repo**: `moq-dev/uniffi` is a new repository, not a
-  GitHub fork and not submodules. Import uniffi-rs at the 0.32.2 release and
-  the three generators at their pinned tags
-  (`kixelated/uniffi-bindgen-go`, `kixelated/uniffi-dart`,
-  `kixelated/uniffi-bindgen-cpp` with its C backend) into one Cargo
-  workspace with a committed lockfile. Record each import's upstream source
-  and revision, and keep each component's license (uniffi-rs is MPL-2.0).
 - **Free to diverge**: the fork may change metadata, checksums, and the FFI
-  contract when a moq quest needs it. Upstream changes are cherry-picked when
-  useful, not tracked. Offering a patch upstream is optional and needs
-  maintainer approval each time.
-- **Publishing**: the fork publishes renamed crates to crates.io (for example
-  `moq-uniffi`, `moq-uniffi-core`, `moq-uniffi-macros`,
-  `moq-uniffi-bindgen`), and moq-ffi depends on them directly with no
-  `[patch]`. crates.io moq-ffi must build without git dependencies, and a
-  diverged contract must never mix silently with upstream UniFFI. Give the
-  contract its own namespace, so a mismatch fails loudly at load time.
-- **Generated code stays identical at the move**: Kotlin package names,
-  library symbol prefixes, and every wrapper's API do not change in this
-  quest. Diff the regenerated bindings for every language against `main`'s,
-  and run each wrapper's check plus `just test interop --all`.
-- **One pin**: replace the per-generator pins with one file that
-  `flake.nix`, the release workflows, `rs/moq-ffi/build.sh`, and `sh/`
-  read. Delete the "five places" comments in `flake.nix` and the
-  `nix/uniffi-dart-*` lockfile and patch. `rs/uniffi-bindgen` builds the
-  Kotlin/Swift/Python CLI from the fork.
-- **The fork's CI** builds every generator and runs its fixture suite,
-  including the unlocked `cargo install` resolve that bit the 0.32 port.
-- Update the quests that name a `kixelated/uniffi-*` fork
-  ([Generated C bindings](/quest/m1/c/README.md)) to point at moq-dev/uniffi.
+  contract when a moq quest needs it. A diverged contract must never mix
+  silently with upstream UniFFI.
 
-Public API: none at the move; moq-ffi's dependency names change. Wire: none.
+Decided with the maintainer on 2026-10-23: the hard fork lives in
+`kixelated/rust2`, not a new `moq-dev/uniffi`. rust2 groups Rust-to-other-language
+tools (bindings, a TypeScript translator, build-speed work) under one setup.
+moq's generator code moves with it, including `rs/uniffi-bindgen`. The import
+and crates.io publishing are rust2's
+[UniFFI import quest](https://github.com/kixelated/rust2/blob/main/quest/m1/uniffi.md),
+which publishes `rust2-uniffi`, `rust2-uniffi-core`, `rust2-uniffi-macros`, and
+`rust2-uniffi-bindgen`. This quest is the moq side:
+
+- moq-ffi depends on the `rust2-uniffi*` crates directly, with no `[patch]` and
+  no git dependency, so crates.io moq-ffi still builds.
+- **Generated code stays identical**: Kotlin package names, library symbol
+  prefixes, and every wrapper's API do not change. Diff the regenerated
+  bindings for every language against `main`'s, and run each wrapper's check
+  plus `just test interop --all`.
+- **One pin**: rust2 becomes a flake input, and `flake.nix`, the release
+  workflows, `rs/moq-ffi/build.sh`, and `sh/` read the generators from it.
+  Delete `rs/uniffi-bindgen`, the "five places" comments in `flake.nix`, and the
+  `nix/uniffi-dart-*` lockfile and patch. The `sh/{kt,swift,dart,cpp}`
+  packaging scripts stay: they package moq.
+- **Browser TypeScript**: ubrn's `wasm2` generator is upstream and reads
+  UniFFI metadata, which the fork may change. Either show upstream ubrn still
+  generates from the renamed crates, or carry ubrn's TypeScript generator in
+  rust2 with the others, as [ubrn 0.32](/quest/m2/rs2ts/ubrn-032.md) already
+  plans if ubrn has not moved. Include the TypeScript in the regenerated
+  bindings diff.
+- Negative durations (2026-10-25, maintainer): the Dart negative-duration
+  patch moq carries goes upstream into the fork's Dart generator, and the Go
+  generator stops panicking on a negative `time.Duration` (the Go wrapper
+  guards it today; delete the guard in the PR that pins a generator with the
+  fix, with a test passing a negative duration through the Go binding).
+- Update the quests that name a `kixelated/uniffi-*` fork
+  ([Generated C bindings](/quest/m2/c/README.md)) to point at rust2, then
+  archive the three forks.
+
+Public API: none; moq-ffi's dependency names change. Wire: none.
+
+## Required
+
+- [rust2 publishes its UniFFI fork](/quest/m2/rust2-uniffi.md) - the crates and generators this switches to
 
 ## Related
 
-- [Payload bytes](/quest/m2/ffi-bytes.md) - the first patch the fork carries
-- [Kotlin calls](/quest/m2/kt-ffi-calls.md) - a Kotlin generator patch the fork carries
-- [Namespaced external types](/quest/m2/uniffi-namespaces.md) - fixes mozilla/uniffi-rs#3026 in the fork
-- [Foreign poll for hot reads](/quest/m2/ffi-poll-protocol.md) - a generated poll protocol the fork carries; dropping a future at cancel is optional here, since no moq quest waits on it
+- [ubrn generates UniFFI 0.32 TypeScript](/quest/m2/rs2ts/ubrn-032.md) - the browser generator this switch must keep working
+- [Payload bytes](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-bytes.md) - the first patch the fork carries
+- [Kotlin calls](https://github.com/kixelated/rust2/blob/main/quest/m1/kt-ffi-calls.md) - a Kotlin generator patch the fork carries
+- [Foreign poll for hot reads](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-poll-protocol.md) - a generated poll protocol the fork carries; dropping a future at cancel is optional here, since no moq quest waits on it

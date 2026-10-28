@@ -8,8 +8,8 @@ cost for a burst that has already drained.
 ## Plan
 
 [kio::Tasks](/rs/kio/src/task.rs) grows slots and per-slot wakers, retains
-them after completion, and snapshots every allocated wake-bit word each poll
-(lines 270-298, 364-370). Dispatch scans those words again. Work can depend on
+them after completion, and snapshots every allocated wake-bit word in each
+`Tasks::poll`. Dispatch scans those words again. Work can depend on
 historical peak/64 even when only one task remains. The io_uring worker and
 session serving loops are current consumers.
 
@@ -30,8 +30,28 @@ shape and 1.90% on SD, the largest moq-net site on both, and kio
 tasks/waiters at 7.5-11.5% of samples. Self-time only; it does not show how
 much is historical capacity.
 
+Measured in the 2026-10-27 audit on main
+[`651c30fee9`](https://github.com/moq-dev/moq/commit/651c30fee9d88fd56f4079433dd3e1f98d77f21c),
+one live, non-ready task left after a burst (the task carries only a `bool`,
+so real session tasks retain more per slot). Dropping the set returned the
+heap to baseline, so this is retained capacity, not a leak. Timings are
+unpinned wall clock on a shared host, so they show the slope only:
+
+| Historical peak | Retained heap | Median ns per owner poll |
+|---|---|---|
+| 1 | 912 B | 79.9 |
+| 1,024 | 188,768 B | 86.6 |
+| 16,384 | 3,019,184 B | 1,216.1 |
+| 65,536 | 12,076,592 B | 4,830.8 |
+
+Candidates to evaluate: reclaimable slot chunks, and an index of nonempty
+ready words so a poll does not scan historical capacity. Include owner polls
+triggered by unrelated active work in the sweep.
+
 Related: [worker quiescence](/quest/m2/perf/uring-quiescence.md) and
 [relay allocations](/quest/m2/perf/relay-allocs.md) own other costs.
+Worker quiescence also reshapes the `Tasks::poll` snapshot with a pass
+budget; whichever of the two lands second rebases its benchmark on the other.
 
 Follow the [survey's benchmark contract](/quest/m2/performance-survey/README.md):
 measure the baseline before optimizing, retain paired evidence, verify equivalent

@@ -151,12 +151,27 @@ test("latest lets a newer group preempt an open one", async () => {
 	// A complete newer value arrives while the previous group is still open.
 	const fresh = track.appendGroup();
 	fresh.writeFrame({ payload: bytes(2), timestamp: Time.Timestamp.now() });
-	fresh.close();
+	fresh.finish();
 
 	expect((await consumer.latest())?.value).toEqual(bytes(2));
 
-	stale.close();
+	stale.finish();
+	track.finish();
 	track.close();
+});
+
+// Skipping to the head never widens the reader's range: a capped reader reads the newest value
+// below its cap, and a datagram past every group does not strand it.
+test("latest stays inside the reader's range", async () => {
+	const track = new Track.Producer("test");
+	const producer = new Producer({ track });
+	const subscriber = track.subscribe({ maxDelay: REPLAY_LATENCY }).withRange({ end: { excluded: 2 } });
+	const consumer = new Consumer({ track: subscriber });
+
+	for (let n = 0; n < 4; n++) producer.update({ value: bytes(n) });
+	track.appendDatagram(Time.Timestamp.now(), bytes(9));
+	expect((await consumer.latest())?.value).toEqual(bytes(1));
+	producer.finish();
 });
 
 test("an aborted track surfaces its error instead of spinning", async () => {
@@ -167,7 +182,7 @@ test("an aborted track surfaces its error instead of spinning", async () => {
 	const consumer = new Consumer({ track: track.subscribe() });
 
 	const boom = new Error("subscription aborted");
-	track.close(boom);
+	track.abort(boom);
 
 	await expect(consumer.next()).rejects.toThrow("subscription aborted");
 });

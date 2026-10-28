@@ -5,7 +5,7 @@ import { HISTORY, info, Publisher, Subscriber, TRACK } from "./chat.ts";
 
 test("chat expires ten-second history and late readers only see retained messages", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const broadcast = new Broadcast.Producer();
 	const publisher = Publisher.create(broadcast);
 	const subscriber = Subscriber.subscribe(broadcast.consume());
@@ -31,7 +31,7 @@ test("chat expires ten-second history and late readers only see retained message
 		publisher.finish();
 		subscriber.close();
 		broadcast.close();
-		restore();
+		installed.close();
 	}
 });
 
@@ -45,7 +45,7 @@ test("chat rejects non-string window records and propagates track failures", asy
 			timestamp: Time.Timestamp.now(),
 		});
 		await expect(subscriber.recv()).rejects.toThrow("chat record must be a string");
-		track.close(new Error("chat aborted"));
+		track.abort(new Error("chat aborted"));
 		await expect(subscriber.recv()).rejects.toThrow("chat aborted");
 	} finally {
 		subscriber.close();

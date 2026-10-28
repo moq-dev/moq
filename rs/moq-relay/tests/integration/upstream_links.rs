@@ -140,7 +140,7 @@ async fn node(id: u64, connect: Vec<Peer>) -> Node {
 /// A broadcast writing a group every 50ms on `origin`, so a subscriber attaching
 /// at any point receives one. Dropping it ends the broadcast.
 struct Publisher {
-	_broadcast: moq_net::broadcast::Producer,
+	_broadcast: moq_net::origin::Publication,
 	writer: tokio::task::AbortHandle,
 }
 

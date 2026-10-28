@@ -23,8 +23,8 @@ histograms, which stay monotonic and merge-patch friendly, and which any
 consumer can diff into a distribution. Clients report for themselves through
 hang stats and `.echo` feedback tracks, planned in their own line on `main`.
 
-Only the lag counters land here. Client health and preflight are
-[client health](/quest/m2/stats/health.md) and
+Only the lag counters land here. Client health is
+[graded in hang](/doc/concept/stats.md#health), and preflight is
 [preflight](/quest/m2/stats/preflight.md) in the media stats line. The
 moq.pro (downstream) dashboard work, including the health badge and the
 connection-health drill-down, consumes both.
@@ -33,20 +33,22 @@ The per-broadcast verdict combining client reports, the relay's starvation,
 and publisher timeliness lives downstream. This line only reports the
 counters.
 
-Decided (2026-10-06 audit): stats prefix tracks (`<path>/traffic.json`)
+Decided (2026-10-06 audit): stats prefix tracks (`<path>/prefix.json`)
 landed first in #5811, since they are a prerequisite of the lag API; the lag
 histogram was deferred to m2 by the maintainer on 2026-10-15 and lands on the
 stats totals and
-prefix tracks rather than the per-path `publisher.json` and
-`subscriber.json` map rows, which stay unchanged for existing readers
+prefix tracks rather than the group tracks' per-path
+`paths` rows, which stay unchanged for existing readers
 (2026-10-12).
 Rejected: the histogram first, which would make prefix tracks carry the lag
 histogram and dropped counters across.
 
 Decided (2026-10-08): the egress histogram is its own quest,
 [viewer lag histogram](/quest/m2/qos/lag-histogram.md), since every other
-child reads it. The line's PR, #4133, closed without landing (2026-10-09);
-its code is kept on `wip/4133-lag-histogram`.
+child reads it. The line's PR, #4133, closed without landing (2026-10-09).
+Its port, #6791, closed unmerged on 2026-10-26 to wait for the ACK hook,
+since `lag` and `dropped` are measured per acknowledged frame; its branch is
+the histogram quest's starting point.
 
 Decided (2026-09-28): the line's moq-stats changes break the published
 crate. Client stats left the line (2026-09-29)

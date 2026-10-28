@@ -25,6 +25,9 @@ pub(crate) struct Tail {
 	streams: u64,
 	// Streams whose header arrived and that are still being read.
 	active: u64,
+	// The publisher ended the subscription, so the track is over even if the session
+	// dies before the tail settles.
+	ended: bool,
 }
 
 impl Default for Tail {
@@ -40,7 +43,18 @@ impl Tail {
 			ledger: Ledger::new(grace),
 			streams: 0,
 			active: 0,
+			ended: false,
 		}
+	}
+
+	/// Record that the publisher ended the subscription.
+	pub fn end(&mut self) {
+		self.ended = true;
+	}
+
+	/// Whether the publisher ended the subscription.
+	pub fn is_ended(&self) -> bool {
+		self.ended
 	}
 
 	/// Change the grace, for a subscription whose max delay changed.
@@ -161,10 +175,13 @@ impl Settle {
 
 	/// Ready once no stream is being read and either `complete` holds or the grace
 	/// expired, or once the subscription is gone.
+	///
+	/// `complete` runs whenever no stream is being read, the grace notwithstanding, so a
+	/// caller recording what it found sees a stream that finished after the grace.
 	pub fn poll(&mut self, waiter: &kio::Waiter, mut complete: impl FnMut(&Tail) -> bool) -> Poll<()> {
 		let expired = self.grace.poll(waiter).is_ready();
 		self.tail
-			.poll(waiter, |tail| match tail.active == 0 && (expired || complete(tail)) {
+			.poll(waiter, |tail| match tail.active == 0 && (complete(tail) || expired) {
 				true => Poll::Ready(()),
 				false => Poll::Pending,
 			})
@@ -194,6 +211,27 @@ mod tests {
 
 		drop(reading);
 		settled.await;
+	}
+
+	/// A stream that outlives the grace still reaches `complete` once it finishes.
+	#[moq_clock::test]
+	async fn completion_is_judged_after_the_grace() {
+		let runtime = crate::time::sim();
+		let tail = kio::Producer::new(Tail::default());
+		let reading = Reading::open(&tail, Some(0), runtime.now());
+		let mut settle = Settle::new(&runtime, tail.consume());
+		moq_clock::sleep(GRACE * 2).await;
+
+		drop(reading);
+		let mut complete = false;
+		kio::wait(|waiter| {
+			settle.poll(waiter, |tail| {
+				complete = tail.streams() == 1;
+				complete
+			})
+		})
+		.await;
+		assert!(complete);
 	}
 
 	/// A stream parked on another one does not hold the end open.

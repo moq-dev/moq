@@ -19,15 +19,14 @@ mod front;
 mod aborts;
 mod bytes;
 mod clock;
-// private: passthrough
 pub(crate) mod datagram;
 mod delivered;
 mod expiry;
+mod skipped;
 // The DEFLATE codec behind compressed tracks.
 mod flate;
-// private: passthrough
 pub(crate) mod object;
-mod requests;
+mod request_queue;
 mod resume;
 mod subscription;
 mod time;
@@ -37,12 +36,10 @@ mod weak_cache;
 #[cfg(test)]
 mod test_tracing;
 
-use requests::Requests;
+use request_queue::RequestQueue;
 use weak_cache::{WeakCache, WeakEntry};
 
 pub use bytes::*;
-// pending: /quest/m1/public-model/serve.md
-pub(crate) use subscription::Cap;
 // Datagram stays flat at the crate root (a small track-adjacent wire type),
 // not under a role module.
 pub use datagram::*;
@@ -56,8 +53,8 @@ pub mod origin {
 	// private: capability gap
 	pub(crate) use super::origin_impl::Lookup;
 	pub use super::origin_impl::{
-		Config, Consumer, Cost, DEFAULT_UPDATE_HOLD, Driver, Dynamic, Preference, Prepared, Producer, Request,
-		Requesting, Route, Source,
+		Config, Consumer, Cost, Driver, HopLimit, Link, Preference, Prepared, Producer, Publication, Request,
+		Requesting, Requests, Route, Source,
 	};
 }
 
@@ -73,24 +70,19 @@ pub use origin_impl::{Consume, Hop, Hops, InvalidHop};
 
 // The announce-interest prefixes a scope needs on a prefix-shaped wire.
 #[cfg(feature = "async")]
-// pending: /quest/m1/public-model/answer.md
 pub(crate) use origin_impl::interest_prefixes;
 
 // Held by a session while its peer's initial announcements arrive.
 #[cfg(feature = "async")]
-// pending: /quest/m1/public-model/answer.md
 pub(crate) use origin_impl::Snapshot;
 
 // What a client session asks its peer to announce, as the origin's readers change.
 #[cfg(feature = "async")]
-// pending: /quest/m1/public-model/answer.md
 pub(crate) use origin_impl::{InterestChange, Interests};
 
 // The advertise-only route guard, for tests shaping the route table.
 #[cfg(all(test, feature = "async"))]
-// private: test
 pub(crate) use origin_impl::AnnounceProducer;
 
 #[cfg(all(test, feature = "async"))]
-// private: test
-pub(crate) use origin_impl::ProduceTest;
+pub(crate) use origin_impl::{ProduceTest, TestSelection};

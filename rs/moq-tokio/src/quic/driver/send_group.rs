@@ -19,57 +19,70 @@ pub struct SendGroup(Arc<Inner>);
 /// How an outgoing stream or datagram is scheduled: its [`SendGroup`] and priority
 pub type SendOptions<'a> = moq_quic::SendOptions<'a, SendGroup>;
 
-/// The options as the connection knows them.
-pub(crate) fn to_quic(options: SendOptions<'_>) -> moq_quic::SendOptions<'_> {
-    moq_quic::SendOptions {
-        group: options.group.map(SendGroup::id),
-        priority: options.priority,
-    }
+/// The options as `conn` knows them.
+///
+/// # Panics
+/// - when `options.group` belongs to another connection
+pub(crate) fn to_quic<'a>(options: SendOptions<'a>, conn: &ConnectionInner) -> moq_quic::SendOptions<'a> {
+	moq_quic::SendOptions {
+		group: options.group.map(|group| group.id_on(conn)),
+		priority: options.priority,
+	}
 }
 
 #[derive(Debug)]
 struct Inner {
-    conn: Arc<ConnectionInner>,
-    group: Option<moq_quic::SendGroup>,
+	conn: Arc<ConnectionInner>,
+	group: Option<moq_quic::SendGroup>,
 }
 
 impl SendGroup {
-    pub(crate) fn new(conn: Arc<ConnectionInner>, priority: i64) -> Self {
-        let group = conn
-            .state
-            .lock("SendGroup::new")
-            .inner
-            .send_groups()
-            .open(priority);
-        Self(Arc::new(Inner {
-            conn,
-            group: Some(group),
-        }))
-    }
+	pub(crate) fn new(conn: Arc<ConnectionInner>, priority: i64) -> Self {
+		let group = conn.state.lock().inner.send_groups().open(priority);
+		Self(Arc::new(Inner {
+			conn,
+			group: Some(group),
+		}))
+	}
 
-    /// Change the group's priority, moving any data it has queued along with it
-    pub fn set_priority(&self, priority: i64) {
-        let mut conn = self.0.conn.state.lock("SendGroup::set_priority");
-        conn.inner.send_groups().set_priority(self.id(), priority);
-    }
+	/// Change the group's priority, moving any data it has queued along with it
+	pub fn set_priority(&self, priority: i64) {
+		let mut conn = self.0.conn.state.lock();
+		conn.inner.send_groups().set_priority(self.id(), priority);
+	}
 
-    /// Get the group's priority
-    pub fn priority(&self) -> i64 {
-        let mut conn = self.0.conn.state.lock("SendGroup::priority");
-        conn.inner.send_groups().priority(self.id())
-    }
+	/// Get the group's priority
+	pub fn priority(&self) -> i64 {
+		let mut conn = self.0.conn.state.lock();
+		conn.inner.send_groups().priority(self.id())
+	}
 
-    /// The group as the connection knows it, which refuses it on any other connection.
-    pub(crate) fn id(&self) -> &moq_quic::SendGroup {
-        self.0.group.as_ref().expect("only taken on drop")
-    }
+	/// The group as the connection knows it, which refuses it on any other connection.
+	pub(crate) fn id(&self) -> &moq_quic::SendGroup {
+		self.0.group.as_ref().expect("only taken on drop")
+	}
+
+	/// The group as `conn` knows it.
+	///
+	/// Call it before taking `conn`'s lock: moq-quic makes the same check, but panicking
+	/// there poisons the lock, so every handle's drop panics again and aborts the process.
+	///
+	/// # Panics
+	/// - when the group belongs to another connection
+	pub(crate) fn id_on(&self, conn: &ConnectionInner) -> &moq_quic::SendGroup {
+		assert!(
+			std::ptr::eq(&*self.0.conn, conn),
+			"send group used on another connection"
+		);
+		self.id()
+	}
 }
 
 impl Drop for Inner {
-    fn drop(&mut self) {
-        if let Some(group) = self.group.take() {
-            let mut conn = self.conn.state.lock("SendGroup::drop");
-            conn.inner.send_groups().close(group);
-        }
-    }
+	fn drop(&mut self) {
+		if let Some(group) = self.group.take() {
+			let mut conn = self.conn.state.lock();
+			conn.inner.send_groups().close(group);
+		}
+	}
 }

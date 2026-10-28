@@ -146,7 +146,7 @@ impl Release {
 				}
 				let (frame, arrived) = match track.poll_event(waiter) {
 					Poll::Ready(Ok(Some(Event::Frame { frame, arrived }))) => (frame, arrived),
-					Poll::Ready(Ok(Some(Event::GroupEnd | Event::FrameEnd { .. } | Event::Cut))) => continue,
+					Poll::Ready(Ok(Some(Event::GroupEnd | Event::FrameEnd { .. } | Event::Cut { .. }))) => continue,
 					Poll::Ready(Ok(None)) => {
 						self.finished = true;
 						break;
@@ -159,7 +159,7 @@ impl Release {
 				let arrival = Arrival {
 					arrived: arrived.max(self.subscribed),
 					read: moq_clock::now(),
-					decode: frame.timestamp,
+					decode: frame.timestamp.into(),
 					restart: track.markers(),
 					skip: track.skips(),
 					cut: track.cuts(),

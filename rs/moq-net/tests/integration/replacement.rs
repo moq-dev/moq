@@ -171,10 +171,10 @@ async fn epoch_lite07() {
 		.expect("timed out");
 }
 
-/// moq-transport carries the epoch with the MoQ Epoch extension, from draft-17.
+/// moq-transport carries the epoch with the MoQ Epoch extension.
 #[moq_clock::test]
 async fn epoch_ietf() {
-	for version in ["moq-transport-17", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22"] {
 		moq_clock::timeout(TEST_TIMEOUT, replace(version, Some(epoch())))
 			.await
 			.expect("timed out");
@@ -265,6 +265,52 @@ async fn route_death_past_hold_errors() {
 			moq_clock::timeout(TEST_TIMEOUT, route_death(version, relayed, PAST_HOLD))
 				.await
 				.expect("timed out");
+		}
+	}
+}
+
+/// A publisher restarts as a new process (a new hop) while its old session lingers,
+/// dead but not yet idled out. The restart wins at once, whichever chain hashes lower,
+/// so a viewer's first request reaches it instead of waiting on the dead session.
+async fn restart_while_the_old_session_lingers(version: &str, old_hop: u64, new_hop: u64) {
+	let version: Version = version.parse().unwrap();
+	let viewer = produce_origin(3);
+
+	let old = produce_origin(old_hop);
+	let old_cam = old.publish("cam", origin::Route::default()).unwrap();
+	let _old_video = old_cam.create_track("video", timed()).unwrap();
+	let old_session = link(version, &old, &viewer).await;
+	let mut announced = viewer.consume().announced();
+	next_event(&mut announced).await;
+
+	// The old process dies without a close: its session falls silent.
+	old_session.client_transport.set_latency(Duration::from_secs(3600));
+	old_session.server_transport.set_latency(Duration::from_secs(3600));
+
+	let new = produce_origin(new_hop);
+	let new_cam = new.publish("cam", origin::Route::default()).unwrap();
+	let new_video = new_cam.create_track("video", timed()).unwrap();
+	let _new_session = link(version, &new, &viewer).await;
+	moq_clock::sleep(PAST_HOLD).await;
+
+	let cam = viewer.consume().request_broadcast("cam", None).await.unwrap();
+	let mut video = subscribe(&cam, "video")
+		.await
+		.unwrap_or_else(|err| panic!("{version} ({old_hop} -> {new_hop}): {err}"));
+	write(&new_video, "new:0");
+	assert_eq!(read(&mut video).await, "new:0", "{version} ({old_hop} -> {new_hop})");
+}
+
+#[moq_clock::test]
+async fn restart_while_the_old_session_lingers_wins() {
+	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
+		for (old_hop, new_hop) in [(1, 4), (4, 1)] {
+			moq_clock::timeout(
+				TEST_TIMEOUT,
+				restart_while_the_old_session_lingers(version, old_hop, new_hop),
+			)
+			.await
+			.expect("timed out");
 		}
 	}
 }

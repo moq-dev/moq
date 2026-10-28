@@ -143,12 +143,13 @@ async function withPublisher<T>(
 	// The session serves an origin rather than individual broadcasts, so the path is
 	// published into the origin and the session announces the table.
 	const origin = new Moq.Origin.Producer();
-	const broadcast = origin.createBroadcast(Moq.Path.from(path));
+	const broadcastPublication = origin.createBroadcast(Moq.Path.from(path));
+	const broadcast = broadcastPublication.broadcast;
 	const track = broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI });
 	const missing = broadcast.createTrack("missing");
 	const used = track.demand().wanted;
 	const missingUsed = missing.demand().wanted;
-	broadcast.announce();
+	broadcastPublication.announce();
 	const connection = await Moq.Connection.connect({ url: new URL(relay.url), publish: origin.consume() });
 
 	let stopped = false;
@@ -172,22 +173,25 @@ async function withPublisher<T>(
 			for (const frame of FIXTURE) {
 				group.writeFrame({ payload: frame, timestamp: Moq.Time.Timestamp.now() });
 			}
-			group.close();
+			group.finish();
 		}
+		track.finish();
 		track.close();
 	})();
 	const rejecting = (async () => {
 		while (missingUsed.peek() === undefined && missing.closed.peek() === undefined) {
 			await Promise.race([missingUsed.changed(), missing.closed]);
 		}
-		if (missingUsed.peek() !== undefined) missing.close(new Error("no such track: missing"));
+		if (missingUsed.peek() !== undefined) missing.abort(new Error("no such track: missing"));
 	})();
 
 	try {
 		return await run(advance);
 	} finally {
 		stopped = true;
+		track.finish();
 		track.close();
+		missing.finish();
 		missing.close();
 		broadcast.close();
 		// Teardown, not a graceful end: the case is over and the harness is not waiting

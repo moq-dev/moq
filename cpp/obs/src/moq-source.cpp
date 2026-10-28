@@ -29,6 +29,7 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 
+#include "moq-implementation.h"
 #include "moq-source.h"
 #include "moq-url.h"
 #include "moq-worker.h"
@@ -75,6 +76,8 @@ namespace {
 struct moq_source;
 
 enum class Decoded { Pending, Ready, Failed };
+// Full: the decoder refused the packet until its pending pictures are taken.
+enum class Sent { Accepted, Full, Failed };
 
 // A track owns its codec and converted output, including while it is only a candidate.
 struct VideoDecoder {
@@ -82,6 +85,8 @@ struct VideoDecoder {
 	AVPixelFormat current_pix_fmt = AV_PIX_FMT_NONE;
 	SwsContext *sws_ctx = nullptr;
 	bool got_keyframe = false;
+	// End can precede the old encoder's final packets, whose timestamps are below it.
+	std::optional<uint64_t> end_us;
 	uint32_t frames_waiting_for_keyframe = 0;
 	uint32_t consecutive_decode_errors = 0;
 	obs_source_frame frame = {};
@@ -133,6 +138,7 @@ struct Track {
 // settings change, a terminal failure, or destroy drops it whole, which cancels
 // every pending call it holds.
 struct Connection {
+	uint64_t revision = 0;
 	std::string url;
 	std::string broadcast;
 
@@ -145,7 +151,7 @@ struct Connection {
 	std::shared_ptr<moq::BroadcastConsumer> consumer;
 	std::shared_ptr<moq::MediaCatalogConsumer> catalog;
 
-	// The connect, then the session's status transitions.
+	// The connect, then the session's lifecycle revisions.
 	std::optional<moq::Continuation> session_call;
 	// Waiting for the next publisher instance.
 	std::optional<moq::Continuation> available_call;
@@ -201,9 +207,9 @@ static void moq_source_on_broadcast(struct moq_source *ctx, const std::shared_pt
 				    moq::expected<std::shared_ptr<moq::BroadcastConsumer>> result);
 static void moq_source_on_catalogs(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				   moq::expected<std::shared_ptr<moq::MediaCatalogConsumer>> result);
-static void moq_source_watch_status(struct moq_source *ctx, const std::shared_ptr<Connection> &conn);
-static void moq_source_on_status(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
-				 moq::expected<moq::ConnectionStatus> result);
+static void moq_source_watch_state(struct moq_source *ctx, const std::shared_ptr<Connection> &conn);
+static void moq_source_on_state(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				moq::expected<moq::ConnectionState> result);
 static void moq_source_on_catalog(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				  moq::expected<std::optional<moq::Catalog>> result);
 static void moq_source_next_catalog(struct moq_source *ctx, const std::shared_ptr<Connection> &conn);
@@ -214,7 +220,8 @@ static void moq_source_subscribe_video(struct moq_source *ctx, const std::shared
 static void moq_source_clear_audio_locked(struct moq_source *ctx);
 static void moq_source_subscribe_audio(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				       const moq::Catalog &catalog);
-static Decoded moq_source_decode_frame(VideoDecoder &decoder, const moq::MediaFrame &frame_data);
+static Sent moq_source_send_packet(VideoDecoder &decoder, const moq::MediaFrame &frame_data);
+static Decoded moq_source_receive_frame(VideoDecoder &decoder);
 
 // Wraps a continuation so it runs under ctx->mutex, and only while `conn` is still
 // the source's connection. Dropping a connection cancels its calls, but a result
@@ -360,6 +367,7 @@ static moq::ClientConfig moq_source_client_config(bool keylog)
 {
 	moq::ClientConfig config;
 	config.quic.keylog = keylog;
+	config.implementation = MoQImplementation();
 	return config;
 }
 
@@ -402,8 +410,9 @@ static void moq_source_on_connect(struct moq_source *ctx, const std::shared_ptr<
 	}
 
 	conn->session = *result;
-	LOG_INFO("MoQ session connected (connect %llu)", (unsigned long long)conn->session->connects());
-	moq_source_watch_status(ctx, conn);
+	moq_source_on_state(ctx, conn, conn->session->state());
+	if (ctx->connection != conn)
+		return;
 
 	// Wait for the broadcast to be announced. Announcements arrive over the session
 	// after it connects, so resolving against only what is announced *now* would race
@@ -475,15 +484,16 @@ static void moq_source_on_catalogs(struct moq_source *ctx, const std::shared_ptr
 }
 
 // Follows the session's connect and reconnect transitions until it gives up.
-static void moq_source_watch_status(struct moq_source *ctx, const std::shared_ptr<Connection> &conn)
+static void moq_source_watch_state(struct moq_source *ctx, const std::shared_ptr<Connection> &conn)
 {
-	conn->session_call = conn->session->status().then(
-		ctx->worker.Executor(),
-		moq_source_current<moq::expected<moq::ConnectionStatus>>(ctx, conn, moq_source_on_status));
+	conn->session_call =
+		conn->session->state_changed(conn->revision)
+			.then(ctx->worker.Executor(),
+			      moq_source_current<moq::expected<moq::ConnectionState>>(ctx, conn, moq_source_on_state));
 }
 
-static void moq_source_on_status(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
-				 moq::expected<moq::ConnectionStatus> result)
+static void moq_source_on_state(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				moq::expected<moq::ConnectionState> result)
 {
 	if (!result) {
 		// Reconnecting gave up (or the relay refused us). Tear down every
@@ -493,19 +503,17 @@ static void moq_source_on_status(struct moq_source *ctx, const std::shared_ptr<C
 		return;
 	}
 
-	switch (*result) {
-	case moq::ConnectionStatus::kConnected:
-		// `available()` hands out the broadcast announced over the new connect; nothing to redo here.
-		LOG_INFO("MoQ session reconnected (connect %llu)", (unsigned long long)conn->session->connects());
-		break;
-	case moq::ConnectionStatus::kDisconnected:
-		LOG_WARNING("MoQ session dropped, reconnecting");
-		break;
-	case moq::ConnectionStatus::kMigrating:
-		LOG_INFO("MoQ session migrating");
-		break;
+	conn->revision = result->revision;
+	if (result->failure)
+		LOG_WARNING("MoQ connection attempt failed: %s", result->failure->to_string().c_str());
+	if (result->phase == moq::ConnectionPhase::kClosed) {
+		moq_source_fail_locked(ctx);
+		return;
 	}
-	moq_source_watch_status(ctx, conn);
+	if (result->phase == moq::ConnectionPhase::kConnected)
+		LOG_INFO("MoQ session connected (connect %llu)", (unsigned long long)result->connects);
+
+	moq_source_watch_state(ctx, conn);
 }
 
 static void moq_source_next_catalog(struct moq_source *ctx, const std::shared_ptr<Connection> &conn)
@@ -556,7 +564,7 @@ static void moq_source_read_track(struct moq_source *ctx, const std::shared_ptr<
 				  const std::shared_ptr<Track> &track);
 static void moq_source_on_frame(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				const std::shared_ptr<Track> &track,
-				moq::expected<std::optional<moq::MediaFrame>> result);
+				moq::expected<std::optional<moq::MediaRead>> result);
 
 // The track, while it is still the connection's current video or audio track.
 static std::shared_ptr<Track> moq_source_track(const Connection &conn, const std::weak_ptr<Track> &weak)
@@ -613,13 +621,48 @@ static void moq_source_read_track(struct moq_source *ctx, const std::shared_ptr<
 				  const std::shared_ptr<Track> &track)
 {
 	track->call = track->consumer->next().then(
-		ctx->worker.Executor(), moq_source_track_current<moq::expected<std::optional<moq::MediaFrame>>>(
+		ctx->worker.Executor(), moq_source_track_current<moq::expected<std::optional<moq::MediaRead>>>(
 						ctx, conn, track, moq_source_on_frame));
+}
+
+// Hands OBS every picture the decoder has ready, in presentation order. False when a
+// picture failed to decode or convert.
+static bool moq_source_output_video(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				    const std::shared_ptr<Track> &track)
+{
+	for (;;) {
+		switch (moq_source_receive_frame(*track->video_decoder)) {
+		case Decoded::Pending:
+			return true;
+		case Decoded::Failed:
+			return false;
+		case Decoded::Ready:
+			// Commit only after decode and conversion succeed, under the same lock as output.
+			if (track == conn->pending_video)
+				conn->video = std::move(conn->pending_video);
+			obs_source_output_video(ctx->source, &track->video_decoder->frame);
+			break;
+		}
+	}
+}
+
+// Drain pictures from the old encoder before either kind of boundary.
+static void moq_source_drain_video(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				   const std::shared_ptr<Track> &track)
+{
+	AVCodecContext *codec = track->video_decoder->codec_ctx;
+	int ended = avcodec_send_packet(codec, nullptr);
+	if (ended == AVERROR(EAGAIN)) {
+		moq_source_output_video(ctx, conn, track);
+		ended = avcodec_send_packet(codec, nullptr);
+	}
+	if (ended == 0)
+		moq_source_output_video(ctx, conn, track);
 }
 
 static void moq_source_on_frame(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				const std::shared_ptr<Track> &track,
-				moq::expected<std::optional<moq::MediaFrame>> result)
+				moq::expected<std::optional<moq::MediaRead>> result)
 {
 	if (!result) {
 		LOG_ERROR("%s track error: %s", track->kind, result.error().to_string().c_str());
@@ -628,19 +671,48 @@ static void moq_source_on_frame(struct moq_source *ctx, const std::shared_ptr<Co
 	}
 	if (!*result) {
 		LOG_DEBUG("%s track closed cleanly", track->kind);
+		// An ended candidate must not replace playback that may still be live.
+		if (track == conn->pending_video && conn->video) {
+			moq_source_discard_candidate(conn, track);
+			return;
+		}
+		// The decoder holds reordered pictures back until it learns the stream ended. Like a
+		// packet, the end is refused while pictures are pending, so take them first.
+		moq_source_drain_video(ctx, conn, track);
 		moq_source_discard_candidate(conn, track);
 		return;
 	}
-	const auto decoded = moq_source_decode_frame(*track->video_decoder, **result);
-	if (decoded == Decoded::Failed && track == conn->pending_video) {
-		moq_source_discard_candidate(conn, track);
+	auto &decoder = *track->video_decoder;
+	const auto &variant = (*result)->get_variant();
+	if (const auto *end = std::get_if<moq::MediaRead::kEnd>(&variant)) {
+		decoder.end_us = end->end_us;
+		moq_source_read_track(ctx, conn, track);
 		return;
 	}
-	if (decoded == Decoded::Ready) {
-		// Commit only after decode and conversion succeed, under the same lock as output.
-		if (track == conn->pending_video)
-			conn->video = std::move(conn->pending_video);
-		obs_source_output_video(ctx->source, &track->video_decoder->frame);
+	const auto *read = std::get_if<moq::MediaRead::kFrame>(&variant);
+	if (!read || (decoder.end_us && read->frame.timestamp_us >= *decoder.end_us)) {
+		// A gap loses references immediately. An end does so only at the fresh encoder,
+		// after all old tail packets below its endpoint have entered the decoder.
+		moq_source_drain_video(ctx, conn, track);
+		avcodec_flush_buffers(decoder.codec_ctx);
+		decoder.got_keyframe = false;
+		decoder.end_us.reset();
+	}
+	if (!read) {
+		moq_source_read_track(ctx, conn, track);
+		return;
+	}
+	Sent sent = moq_source_send_packet(*track->video_decoder, read->frame);
+	bool drained = true;
+	if (sent == Sent::Full) {
+		// A drain that failed partway left pictures behind; take them so the packet fits.
+		drained = moq_source_output_video(ctx, conn, track);
+		sent = moq_source_send_packet(*track->video_decoder, read->frame);
+	}
+	const bool decoded = sent == Sent::Accepted && moq_source_output_video(ctx, conn, track) && drained;
+	if (!decoded && track == conn->pending_video) {
+		moq_source_discard_candidate(conn, track);
+		return;
 	}
 	moq_source_read_track(ctx, conn, track);
 }
@@ -656,13 +728,14 @@ static void moq_source_stop_audio(const std::shared_ptr<Connection> &conn, const
 static void moq_source_read_audio(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				  const std::shared_ptr<Track> &track);
 
-// Takes one decoded frame under the source lock. A candidate's first frame commits it, and
-// any failure stops the track. On success `audio` points into the frame, for output once
-// the lock is released.
-static bool moq_source_on_audio_frame(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
-				      const std::shared_ptr<Track> &track,
-				      const moq::expected<std::optional<moq::AudioFrame>> &result,
-				      obs_source_audio &audio)
+// Takes one decoded read under the source lock. A candidate's first frame commits it, and
+// any failure stops the track. On a frame `audio` points into it, for output once the lock
+// is released. A gap or encoder end needs nothing here: OBS buffers by timestamp, so the
+// next frame resumes wherever its timestamp lands.
+static bool moq_source_on_audio_read(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				     const std::shared_ptr<Track> &track,
+				     const moq::expected<std::optional<moq::AudioRead>> &result,
+				     obs_source_audio &audio)
 {
 	if (!result) {
 		LOG_ERROR("Audio track error: %s", result.error().to_string().c_str());
@@ -675,8 +748,14 @@ static bool moq_source_on_audio_frame(struct moq_source *ctx, const std::shared_
 		return false;
 	}
 
+	const auto *read = std::get_if<moq::AudioRead::kFrame>(&(*result)->get_variant());
+	if (!read) {
+		moq_source_read_audio(ctx, conn, track);
+		return false;
+	}
+
 	// moq-audio delivers whole planar float samples in the layout the track asked for.
-	const auto &frame = **result;
+	const auto &frame = read->frame;
 	const auto &layout = track->audio_layout;
 	const size_t plane = frame.data.size() / layout.channels;
 	if (plane == 0 || plane % sizeof(float) != 0 || plane * layout.channels != frame.data.size()) {
@@ -711,7 +790,7 @@ static void moq_source_read_audio(struct moq_source *ctx, const std::shared_ptr<
 	track->call = track->audio_consumer->next().then(
 		ctx->worker.Executor(),
 		[ctx, weak_conn = std::weak_ptr<Connection>(conn),
-		 weak_track = std::weak_ptr<Track>(track)](moq::expected<std::optional<moq::AudioFrame>> result) {
+		 weak_track = std::weak_ptr<Track>(track)](moq::expected<std::optional<moq::AudioRead>> result) {
 			obs_source_audio audio = {};
 			{
 				std::lock_guard<std::mutex> lock(ctx->mutex);
@@ -719,7 +798,7 @@ static void moq_source_read_audio(struct moq_source *ctx, const std::shared_ptr<
 				if (!conn || conn != ctx->connection)
 					return;
 				auto track = moq_source_track(*conn, weak_track);
-				if (!track || !moq_source_on_audio_frame(ctx, conn, track, result, audio))
+				if (!track || !moq_source_on_audio_read(ctx, conn, track, result, audio))
 					return;
 			}
 			// `result` owns the samples, and OBS copies them before returning. Destroy
@@ -983,6 +1062,10 @@ static std::unique_ptr<VideoDecoder> moq_source_prepare_decoder(const moq::Video
 		}
 	}
 
+	// Packets carry the frame's microsecond timestamp, which the decoder hands back on the
+	// picture it belongs to.
+	decoder->codec_ctx->pkt_timebase = AVRational{1, 1'000'000};
+
 	// Open codec
 	if (avcodec_open2(decoder->codec_ctx, codec, NULL) < 0) {
 		LOG_ERROR("Failed to open codec");
@@ -992,12 +1075,13 @@ static std::unique_ptr<VideoDecoder> moq_source_prepare_decoder(const moq::Video
 	return decoder;
 }
 
+// Feeds one frame to the decoder.
+//
 // NOTE: Caller must hold ctx->mutex when calling this function.
-static Decoded moq_source_decode_frame(VideoDecoder &decoder, const moq::MediaFrame &frame_data)
+static Sent moq_source_send_packet(VideoDecoder &decoder, const moq::MediaFrame &frame_data)
 {
-	// Conversion buffers are allocated when the decoder first produces a frame.
 	if (!decoder.codec_ctx)
-		return Decoded::Failed;
+		return Sent::Failed;
 
 	// Skip non-keyframes until we get the first one
 	if (!decoder.got_keyframe && !frame_data.keyframe) {
@@ -1006,7 +1090,7 @@ static Decoded moq_source_decode_frame(VideoDecoder &decoder, const moq::MediaFr
 			LOG_INFO("Waiting for keyframe... (skipped %u frames so far)",
 				 decoder.frames_waiting_for_keyframe);
 		}
-		return Decoded::Pending;
+		return Sent::Accepted;
 	}
 
 	// Mark that we've received a keyframe from the stream
@@ -1025,13 +1109,14 @@ static Decoded moq_source_decode_frame(VideoDecoder &decoder, const moq::MediaFr
 	// Create AVPacket from frame data
 	AVPacket *packet = av_packet_alloc();
 	if (!packet) {
-		return Decoded::Failed;
+		return Sent::Failed;
 	}
 
 	packet->data = const_cast<uint8_t *>(frame_data.payload.data());
 	packet->size = static_cast<int>(frame_data.payload.size());
-	packet->pts = frame_data.timestamp_us / 1000; // Convert to milliseconds
-	packet->dts = packet->pts;
+	// The decoder hands this back on the picture it belongs to. Decode order has no
+	// timestamp of its own here, so dts stays unset.
+	packet->pts = static_cast<int64_t>(frame_data.timestamp_us);
 
 	// Send packet to decoder
 	int ret = avcodec_send_packet(decoder.codec_ctx, packet);
@@ -1054,18 +1139,28 @@ static Decoded moq_source_decode_frame(VideoDecoder &decoder, const moq::MediaFr
 				LOG_ERROR("Error sending packet to decoder: %s", errbuf);
 			}
 		}
-		return ret == AVERROR(EAGAIN) ? Decoded::Pending : Decoded::Failed;
+		return ret == AVERROR(EAGAIN) ? Sent::Full : Sent::Failed;
 	}
+	return Sent::Accepted;
+}
 
+// Takes the decoder's next picture into decoder.frame, stamped with that picture's own
+// timestamp: with B-frames it belongs to an earlier packet than the one just sent.
+// Pending once the decoder needs more input or has drained.
+//
+// NOTE: Caller must hold ctx->mutex when calling this function.
+static Decoded moq_source_receive_frame(VideoDecoder &decoder)
+{
 	// Receive decoded frames
 	AVFrame *frame = av_frame_alloc();
 	if (!frame) {
 		return Decoded::Failed;
 	}
 
-	ret = avcodec_receive_frame(decoder.codec_ctx, frame);
+	int ret = avcodec_receive_frame(decoder.codec_ctx, frame);
 	if (ret < 0) {
-		if (ret != AVERROR(EAGAIN)) {
+		const bool done = ret == AVERROR(EAGAIN) || ret == AVERROR_EOF;
+		if (!done) {
 			decoder.consecutive_decode_errors++;
 			char errbuf[AV_ERROR_MAX_STRING_SIZE];
 			av_strerror(ret, errbuf, sizeof(errbuf));
@@ -1083,11 +1178,17 @@ static Decoded moq_source_decode_frame(VideoDecoder &decoder, const moq::MediaFr
 			}
 		}
 		av_frame_free(&frame);
-		return ret == AVERROR(EAGAIN) ? Decoded::Pending : Decoded::Failed;
+		return done ? Decoded::Pending : Decoded::Failed;
 	}
 
 	// Successfully decoded a frame - reset error counter
 	decoder.consecutive_decode_errors = 0;
+
+	if (frame->best_effort_timestamp == AV_NOPTS_VALUE) {
+		LOG_ERROR("Decoded video frame has no timestamp");
+		av_frame_free(&frame);
+		return Decoded::Failed;
+	}
 
 	// Check if we need to (re)initialize the scaler - either first frame, dimension change, or pixel format change
 	enum AVPixelFormat decoded_pix_fmt = (enum AVPixelFormat)frame->format;
@@ -1181,9 +1282,8 @@ static Decoded moq_source_decode_frame(VideoDecoder &decoder, const moq::MediaFr
 		return Decoded::Failed;
 	}
 
-	// Update OBS frame timestamp and output. OBS expects nanoseconds; frames
-	// carry microseconds.
-	decoder.frame.timestamp = frame_data.timestamp_us * 1000;
+	// OBS expects nanoseconds; packets carry microseconds.
+	decoder.frame.timestamp = static_cast<uint64_t>(frame->best_effort_timestamp) * 1000;
 	decoder.frame.format = VIDEO_FORMAT_RGBA;
 	av_frame_free(&frame);
 	return Decoded::Ready;

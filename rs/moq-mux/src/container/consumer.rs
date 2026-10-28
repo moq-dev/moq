@@ -17,8 +17,8 @@ pub(crate) enum Event {
 	/// The group finished cleanly.
 	GroupEnd,
 	/// The group was lost upstream partway, so nothing more of it arrives. The gap it leaves is
-	/// read once the next group resumes the track.
-	Cut,
+	/// read once the next group resumes the track. `observed` is when the loss was read.
+	Cut { observed: Instant },
 }
 
 /// Read items and exporter-only boundaries in delivery order.
@@ -41,7 +41,9 @@ pub(crate) enum Item {
 	},
 	FrameEnd(Timestamp),
 	GroupEnd,
-	Cut,
+	Cut {
+		observed: Instant,
+	},
 }
 
 /// Decode a moq-lite track into a stream of media [`Frame`]s in age-bounded
@@ -198,6 +200,7 @@ impl<F: Container> Consumer<F> {
 		let start = track.floor();
 		let max_delay = subscription
 			.max_delay
+			.unwrap_or(std::time::Duration::MAX)
 			.min(track.info().max_age.unwrap_or(std::time::Duration::MAX));
 		Self {
 			name: track.name().into(),
@@ -274,7 +277,7 @@ impl<F: Container> Consumer<F> {
 				Some(Item::Frame { group, frame, .. }) => Read::Frame { group, frame },
 				Some(Item::Gap { timestamp, duration }) => Read::Gap { timestamp, duration },
 				Some(Item::End { group, end }) => Read::End { group, end },
-				Some(Item::FrameEnd(_) | Item::GroupEnd | Item::Cut) => continue,
+				Some(Item::FrameEnd(_) | Item::GroupEnd | Item::Cut { .. }) => continue,
 				None => return Poll::Ready(Ok(None)),
 			};
 			return Poll::Ready(Ok(Some(read)));
@@ -297,7 +300,7 @@ impl<F: Container> Consumer<F> {
 			Some(Event::FrameEnd { end, opens: true }) => (Item::End { group: self.group, end }, end),
 			Some(Event::FrameEnd { end, opens: false }) => return Poll::Ready(Ok(Some(Item::FrameEnd(end)))),
 			Some(Event::GroupEnd) => return Poll::Ready(Ok(Some(Item::GroupEnd))),
-			Some(Event::Cut) => return Poll::Ready(Ok(Some(Item::Cut))),
+			Some(Event::Cut { observed }) => return Poll::Ready(Ok(Some(Item::Cut { observed }))),
 			None => return Poll::Ready(Ok(None)),
 		};
 		if std::mem::take(&mut self.gap)
@@ -375,19 +378,6 @@ impl<F: Container> Consumer<F> {
 			}
 		}
 
-		// Reap aborted groups the cursor hasn't reached: nothing below settles them
-		// (the read arm only handles the front at the cursor, and neither the skip
-		// target scan nor the empty-group check counts an abort), so one left ahead
-		// of a sequence gap would park the consumer forever. Buffered frames read
-		// before the abort stay deliverable, and a fault found among them waits for
-		// its place in delivery order, so a group holding either is kept; the front
-		// at the cursor keeps the eviction fast path in the read arm below.
-		// poll_aborted registers the waiter on live groups, so a later abort re-polls.
-		let current = self.current;
-		self.discard(|group| {
-			group.sequence > current && group.buffered.is_empty() && group.fault.is_none() && group.poll_aborted(waiter)
-		})?;
-
 		loop {
 			if self.pending.front().is_none_or(|group| group.sequence <= self.current) {
 				self.hole_timer = None;
@@ -454,7 +444,9 @@ impl<F: Container> Consumer<F> {
 						self.current = self.pending.front().map_or(self.current + 1, |g| g.sequence);
 						// Said now rather than with the gap, which waits for the next group: what
 						// the caller holds of this one need not wait for a successor.
-						return Poll::Ready(Ok(Some(Event::Cut)));
+						return Poll::Ready(Ok(Some(Event::Cut {
+							observed: moq_clock::now(),
+						})));
 					}
 					// Cleanly finished group: advance to the next sequence.
 					Poll::Ready(Ok(None)) => {
@@ -481,6 +473,18 @@ impl<F: Container> Consumer<F> {
 					}
 				}
 			}
+
+			// Reap later aborts only when delivery blocks. An aborted group beyond a
+			// sequence gap must not park the reader forever. Buffered frames and faults
+			// stay in delivery order; the current group has its eviction path above.
+			// Live groups register the waiter here so a later abort wakes the reader.
+			let current = self.current;
+			self.discard(|group| {
+				group.sequence > current
+					&& group.buffered.is_empty()
+					&& group.fault.is_none()
+					&& group.poll_aborted(waiter)
+			})?;
 
 			// The current group's furthest presentation point (timestamp + duration).
 			let current_end = if let Some(current) = self.pending.front_mut()
@@ -1195,7 +1199,7 @@ mod tests {
 		let track = track_producer("data", info);
 		let subscription = moq_net::track::Subscription::default()
 			.with_max_delay(hour)
-			.with_groups(0..);
+			.with_range(0..);
 		let mut reader = Consumer::new(
 			track.subscribe(subscription),
 			Container::Legacy(crate::container::Kind::Data),
@@ -1225,7 +1229,7 @@ mod tests {
 		let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let subscription = moq_net::track::Subscription::default()
 			.with_max_delay(Duration::from_secs(10))
-			.with_groups(0..);
+			.with_range(0..);
 		let mut reader = Consumer::new(
 			track.subscribe(subscription),
 			Container::Legacy(crate::container::Kind::Data),
@@ -1383,7 +1387,7 @@ mod tests {
 		let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let subscription = moq_net::track::Subscription::default()
 			.with_max_delay(Duration::from_secs(10))
-			.with_groups(0..);
+			.with_range(0..);
 		let mut reader = Consumer::new(
 			track.subscribe(subscription),
 			Container::Legacy(crate::container::Kind::Data),
@@ -1443,7 +1447,7 @@ mod tests {
 				let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.audio));
 				let subscription = moq_net::track::Subscription::default()
 					.with_max_delay(Duration::from_secs(10))
-					.with_groups(0..);
+					.with_range(0..);
 				let mut reader = Consumer::new(
 					track.subscribe(subscription),
 					Container::Legacy(crate::container::Kind::Data),
@@ -1670,7 +1674,7 @@ mod tests {
 			_ => panic!("the empty group is the largest"),
 		};
 		assert_eq!(edge.group, 1);
-		subscriber.set_groups(edge.group..);
+		subscriber = subscriber.with_range(edge.group..);
 		let mut consumer = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Audio));
 
 		write_group(&mut track, 2, &[ts(1_000_000), ts(1_600_000)]);
@@ -2382,21 +2386,17 @@ mod tests {
 		let epoch = moq_net::Epoch::mint();
 		let origin = crate::source::produce_origin();
 		let hops = moq_net::Hops::try_from(vec![moq_net::Hop::new(10).unwrap()]).unwrap();
-		let first_route = origin
-			.dynamic_route(
-				"live",
-				moq_net::origin::Route::default()
-					.with_epoch(epoch.clone())
-					.with_hops(hops.clone())
-					.with_cost(5),
-			)
-			.unwrap();
-		let pending = origin.consume().request_broadcast("live", None);
-		let first = moq_net::broadcast::Info::new().produce();
+		let route = |cost: u64| {
+			moq_net::origin::Route::default()
+				.with_epoch(epoch.clone())
+				.with_hops(hops.clone())
+				.with_cost(cost)
+		};
+		let first = origin.create_broadcast("live").unwrap();
 		let info = hang::container::track_info(hang::catalog::PRIORITY.video);
 		let first_track = first.create_track("video", info.clone()).unwrap();
-		first_route.requested_broadcast().await.unwrap().accept(&first);
-		let broadcast = pending.await.unwrap();
+		first.announce(route(5)).unwrap();
+		let broadcast = origin.consume().request_broadcast("live", None).await.unwrap();
 		let track = broadcast
 			.track("video")
 			.unwrap()
@@ -2423,21 +2423,11 @@ mod tests {
 		// while the first route stays up but silent. They carry the same broadcast, so each
 		// holds every group from 1 on. The open group is given up once the track runs a
 		// full budget past it.
-		let mut routes = Vec::new();
 		let mut sources = Vec::new();
 		for sequence in 1..=4 {
-			let route = origin
-				.dynamic_route(
-					"live",
-					moq_net::origin::Route::default()
-						.with_epoch(epoch.clone())
-						.with_hops(hops.clone())
-						.with_cost(5 - sequence),
-				)
-				.unwrap();
-			let source = moq_net::broadcast::Info::new().produce();
+			let source = origin.create_broadcast("live").unwrap();
 			let mut track = source.create_track("video", info.clone()).unwrap();
-			route.requested_broadcast().await.unwrap().accept(&source);
+			source.announce(route(5 - sequence)).unwrap();
 			let mut demand = track.demand();
 			while demand.wanted_changed().await.unwrap().is_none() {}
 			if sequence == 1 {
@@ -2446,7 +2436,6 @@ mod tests {
 			for sequence in 1..=sequence {
 				write_group(&mut track, sequence, &[ts(sequence * 1_000_000)]);
 			}
-			routes.push(route);
 			sources.push((source, track));
 		}
 
@@ -2455,7 +2444,7 @@ mod tests {
 		// The aborted group 0 says it was cut, then skips straight to its successor; a short
 		// clean group emits GroupEnd.
 		assert!(
-			matches!(consumer.poll_event(&waiter), Poll::Ready(Ok(Some(Event::Cut)))),
+			matches!(consumer.poll_event(&waiter), Poll::Ready(Ok(Some(Event::Cut { .. })))),
 			"the cut is said before the successor"
 		);
 		let event = consumer.poll_event(&waiter);
@@ -2536,29 +2525,36 @@ mod tests {
 	/// only once the newest content is a full budget past what the gap could still hold.
 	#[tokio::test]
 	async fn missing_sequence_skips_on_live_track() {
+		// The delivery budget runs on max(wall, pts): on wall time a stalled runner ages
+		// group 2 out of delivery before the consumer reaches it.
+		tokio::time::pause();
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_millis(100)));
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
-		// Group 0, then group 2 -- sequence 1 is missing (evicted) and never arrives.
-		// The track is NOT finished (live), the case that used to hang. Group 3 pushes
-		// the live edge a full budget past group 2's start, expiring the gap at 1.
+		// Read group 0 first, positioning the cursor there before the newer groups
+		// arrive; otherwise delivery convicts group 0 and the cursor never meets the gap.
 		write_group(&mut track, 0, &[ts(0), ts(20_000)]);
+		for expected in [ts(0), ts(20_000)] {
+			let frame = consumer.read_frame().await.unwrap().unwrap();
+			assert_eq!(frame.timestamp, expected);
+		}
+
+		// Group 2 arrives but sequence 1 is missing (evicted) and never does. The track
+		// is NOT finished (live), the case that used to hang. Group 3 pushes the live
+		// edge a full budget past group 2's start, expiring the gap at 1.
 		write_group(&mut track, 2, &[ts(200_000)]);
 		write_group(&mut track, 3, &[ts(320_000)]);
 
-		// Reading must reach group 2 across the gap instead of waiting forever for 1.
-		let reached = tokio::time::timeout(Duration::from_secs(1), async {
-			loop {
-				let frame = consumer.read_frame().await.unwrap().unwrap();
-				if frame.timestamp == ts(200_000) {
-					return;
-				}
-			}
-		})
-		.await;
-		assert!(reached.is_ok(), "consumer hung on a missing sequence on a live track");
+		// The age budget alone closes the gap: the deadline sits short of the 100ms
+		// hole timer, so waiting it out fails the test.
+		let frame = tokio::time::timeout(Duration::from_millis(50), consumer.read_frame())
+			.await
+			.expect("consumer hung on a missing sequence on a live track")
+			.unwrap()
+			.unwrap();
+		assert_eq!(frame.timestamp, ts(200_000), "skipped the missing sequence to group 2");
 	}
 
 	/// The other half of the budget-gated gap: while the newest content is still within
@@ -2607,7 +2603,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
 			moq_net::track::Subscription::default()
-				.with_groups(0..)
+				.with_range(0..)
 				.with_max_delay(Duration::from_millis(500)),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
@@ -2819,8 +2815,8 @@ mod tests {
 		let read = read_past_frames(&mut consumer).await;
 		assert!(matches!(read, Err(crate::Error::UnknownFormat(_))), "{read:?}");
 		assert!(track.demand().wanted().is_none(), "the ended reader still subscribes");
-		assert!(!malformed.demand().is_used(), "the ended reader still holds its group");
-		assert!(!later.demand().is_used(), "the ended reader still holds a later group");
+		assert!(!malformed.demand().wanted(), "the ended reader still holds its group");
+		assert!(!later.demand().wanted(), "the ended reader still holds a later group");
 	}
 
 	/// A malformed object mid-group, found while looking ahead past a blocked group, ends the

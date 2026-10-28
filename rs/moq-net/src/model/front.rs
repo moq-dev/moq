@@ -494,16 +494,10 @@ impl Front {
 			return;
 		}
 		let verdict = match result {
-			// A copy claiming the same content with different metadata is
-			// refused rather than reinterpreted.
+			// A same-epoch copy claims identical content, so any difference in
+			// its metadata is refused rather than reinterpreted.
 			Ok(info) => match self.info.get(&name) {
-				Some(expected)
-					if expected.timescale != info.timescale
-						|| expected.max_age != info.max_age
-						|| expected.priority != info.priority =>
-				{
-					Err(Error::Unsupported)
-				}
+				Some(expected) if *expected != info => Err(Error::Unsupported),
 				Some(_) => Ok(()),
 				None => {
 					self.info.insert(name.clone(), info);
@@ -566,12 +560,16 @@ impl Front {
 			}
 			// Died mid-serve after delivering from the same instance: normal
 			// failover, re-splice from the serving source at the first missing group.
-			Err(_) if delivered && self.serving.is_some_and(|(_, candidate)| candidate.epoch) => {
+			Err(err)
+				if delivered
+					&& super::resume::route_failed(&err)
+					&& self.serving.is_some_and(|(_, candidate)| candidate.epoch) =>
+			{
 				track.state = TrackState::Idle;
 				self.redispatch(name, actions);
 			}
-			// Without an epoch nothing says a re-request serves the same bytes, so
-			// the track ends with the upstream error and readers request again.
+			// A content verdict survives every copy. Without an epoch, even a route
+			// failure cannot be retried against the same content.
 			Err(err) if delivered => {
 				track.state = TrackState::Idle;
 				track.ended = true;
@@ -1091,6 +1089,35 @@ mod tests {
 		);
 	}
 
+	#[test]
+	fn an_epoch_copy_verdict_aborts_without_querying_again() {
+		for candidate in [remote(1), local(1)] {
+			for err in [
+				Error::from(crate::StreamError::FrameTooLarge),
+				Error::from(crate::StreamError::MalformedTrack),
+				Error::App(7),
+				Error::NotFound,
+				Error::Unsupported,
+			] {
+				let mut front = serving(candidate, 100);
+				assert_actions(
+					front.step(Event::TrackEnded {
+						track: name("video"),
+						source: 100,
+						closing: false,
+						result: Err(err.clone()),
+						delivered: true,
+					}),
+					&[Action::Abort {
+						track: name("video"),
+						err,
+					}],
+				);
+				assert_actions(front.step(Event::Used { track: name("video") }), &[]);
+			}
+		}
+	}
+
 	/// Without an epoch a re-request could reach another instance, so the track ends
 	/// with the error instead, whether the route is a peer's or a local broadcast.
 	#[test]
@@ -1157,43 +1184,56 @@ mod tests {
 
 	#[test]
 	fn incompatible_copy_is_refused() {
-		let mut front = serving(remote(1), 100);
-		front.step(Event::Selected {
-			best: Some(remote(2)),
-			serving_closing: false,
-		});
-		front.step(Event::Resolved {
-			route: 2,
-			result: Ok(200),
-		});
-		let other = track::Info {
-			max_age: Some(Duration::from_secs(1)),
-			..track::Info::timed()
-		};
-		// The source it replaced keeps feeding the track (the audit's F3)...
-		assert_actions(
-			front.step(Event::TrackInfo {
-				track: name("video"),
-				source: 200,
-				closing: false,
-				result: Ok(other),
-			}),
-			&[],
-		);
-		// ...and the refusal stands once that runs out.
-		assert_actions(
-			front.step(Event::TrackEnded {
-				track: name("video"),
-				source: 100,
-				closing: false,
-				result: Err(Error::Dropped),
-				delivered: true,
-			}),
-			&[Action::Abort {
-				track: name("video"),
-				err: Error::Unsupported,
-			}],
-		);
+		// A same-epoch copy claims identical content, so every field counts, `refresh` too.
+		let differing = [
+			track::Info {
+				max_age: Some(Duration::from_secs(1)),
+				..info()
+			},
+			track::Info {
+				compress: true,
+				..info()
+			},
+			track::Info {
+				refresh: Some(4),
+				..info()
+			},
+		];
+		for other in differing {
+			let mut front = serving(remote(1), 100);
+			front.step(Event::Selected {
+				best: Some(remote(2)),
+				serving_closing: false,
+			});
+			front.step(Event::Resolved {
+				route: 2,
+				result: Ok(200),
+			});
+			// The source it replaced keeps feeding the track (the audit's F3)...
+			assert_actions(
+				front.step(Event::TrackInfo {
+					track: name("video"),
+					source: 200,
+					closing: false,
+					result: Ok(other),
+				}),
+				&[],
+			);
+			// ...and the refusal stands once that runs out.
+			assert_actions(
+				front.step(Event::TrackEnded {
+					track: name("video"),
+					source: 100,
+					closing: false,
+					result: Err(Error::Dropped),
+					delivered: true,
+				}),
+				&[Action::Abort {
+					track: name("video"),
+					err: Error::Unsupported,
+				}],
+			);
+		}
 	}
 
 	#[test]

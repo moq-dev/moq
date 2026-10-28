@@ -4,17 +4,19 @@
 
 A relay session over the WebSocket fallback is held to its `publish.rate`
 and `subscribe.rate` like a QUIC session, and is admitted instead of refused.
-HTTP `/fetch` and `/announced` keep refusing capped tokens; see
-[the claim](/doc/bin/relay/auth.md#claims).
+When caps are reintroduced, HTTP `/fetch` and `/announced` must refuse them:
+a request has no connection to meter.
 
 ## Plan
 
-The token claim this quest enforces does not exist yet: [auth access is
-patterns](/quest/m1/api-audit/auth-access.md) removed the unenforced
-`publish.rate`/`subscribe.rate` fields before the release. Whichever rate
-quest lands first re-adds them as optional, with a rate type moq-auth owns
-(or a lower shared units crate), converted at the relay boundary so moq-auth
-never depends on moq-net.
+Token claims and HTTP grants carry path patterns only; object roles, including
+bitrate caps, are refused during parsing. Decided 2026-10-25 (maintainer):
+[QUIC caps](/quest/m2/rate-quic.md) reintroduces optional caps with a type
+moq-auth owns (or a lower shared units crate), converted at the relay boundary
+so moq-auth never depends on moq-net, and [the grant](/quest/m2/rate-grant.md)
+Requires it. This quest reuses that type. Its parsers and refusal rules must
+prevent any transport without enforcement from silently discarding a cap, so
+WebSocket admission keeps refusing caps until this wrapper enforces them.
 
 TCP carries the backpressure, but only if the kernel cannot absorb the
 excess:
@@ -37,11 +39,15 @@ excess:
 - Reads stop at the bucket, so the client's TCP window closes; writes stop
   at the bucket, so a subscriber sees the cap. Set at auth and reset on
   revalidation. The io_uring stream sessions get the same wrapper once they
-  serve WebSocket. Drop the relay's refusal for WebSocket in the same PR.
+  serve WebSocket. WebSocket admission accepts capped roles only once this wrapper enforces them.
 
 Tests: a client writing flat out is held to the cap plus the bounded
 buffers; delivery to a capped subscriber never exceeds it; a cap change on a
 live session applies.
+
+## Required
+
+- [QUIC caps](/quest/m2/rate-quic.md) - introduces the moq-auth cap type this reuses
 
 ## Related
 

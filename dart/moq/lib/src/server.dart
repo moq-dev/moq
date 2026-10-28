@@ -1,11 +1,13 @@
 import 'package:moq_ffi/moq_ffi.dart';
 
 import 'aliases.dart';
+import 'stream.dart';
+import 'version.dart';
 
 /// Everything [Server.listen] can be told.
 ///
 /// A value the native side cannot use fails [Server.listen] with
-/// `MoqException.Config`.
+/// `ConfigMoqException`.
 final class ListenOptions {
   /// Local socket address to listen on, e.g. `127.0.0.1:4443` or `[::]:443`.
   final String bind;
@@ -94,6 +96,7 @@ final class Server {
           maxStreams: options.maxStreams,
           keylog: options.keylog,
         ),
+        implementation: implementation,
         publish: publishOrigin,
         consume: options.consume ?? shared,
       ),
@@ -110,10 +113,10 @@ final class Server {
 
   /// Create a broadcast at [path], served to incoming sessions.
   ///
-  /// Advertise it with `announce` after populating tracks. Throws when [listen]
-  /// was given a [ListenOptions.consume] origin but no
+  /// Advertise it with `announce` after populating its `broadcast`. Throws
+  /// when [listen] was given a [ListenOptions.consume] origin but no
   /// [ListenOptions.publish] one, since there is then nothing to serve from.
-  BroadcastProducer createBroadcast(String path) {
+  Publication createBroadcast(String path) {
     final origin = _publishOrigin;
     if (origin == null) throw StateError('no publish origin configured');
     return origin.createBroadcast(path: path);
@@ -130,18 +133,34 @@ final class Server {
   /// Each [Request] must be answered with `accept()` to complete the handshake
   /// or `reject(code:)` to refuse it; the returned session must be held to keep
   /// the connection alive. The stream ends when the server stops accepting.
-  Stream<Request> requests() async* {
-    while (true) {
-      final request = await server.accept();
-      if (request == null) return;
-      yield request;
-    }
-  }
+  /// Cancelling releases only its pending accept; the server keeps listening.
+  Stream<Request> requests() => _Requests(server).cast<Request>();
 
   /// Stop accepting new sessions and release the native server handle, closing
   /// the listening socket before it returns so the address can be bound again
   /// immediately.
   void close() {
     server.cancel();
+  }
+}
+
+final class _Requests extends NativeStream<Request?> {
+  final MoqServer server;
+  _Requests(this.server);
+
+  @override
+  UniffiRustFuture<Request?> read() => server.accept();
+
+  @override
+  bool finished(Request? value) => value == null;
+
+  @override
+  void discard(Request? value) {
+    if (value == null) return;
+    try {
+      value.cancel();
+    } finally {
+      value.dispose();
+    }
   }
 }

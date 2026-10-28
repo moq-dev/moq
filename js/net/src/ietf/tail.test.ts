@@ -2,22 +2,24 @@ import { expect, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
 import { ProtocolViolation, StreamCode, StreamError } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
+import { hooks } from "../internal.ts";
 import { GRACE } from "../ledger.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
-import { NativeSession } from "./adapter.ts";
 import { type GroupFlags, Group as GroupMessage } from "./object.ts";
 import { PublishDone } from "./publish.ts";
+import { NativeSession } from "./session.ts";
 import { Subscribe, SubscribeOk } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { ALPN, Version } from "./version.ts";
 
-const VERSION = Version.DRAFT_19;
+const VERSION = Version.DRAFT_18;
 const ALIAS = 9n;
 const TRACK_ENDED = 0x2;
 const INTERNAL_ERROR = 0x0;
 const UNAUTHORIZED = 0x1;
+const SUBSCRIPTION_ENDED = 0x3;
 
 // A plain subgroup stream: no extensions, no subgroup id, end of group on FIN.
 const FLAGS: GroupFlags = {
@@ -53,7 +55,7 @@ function groupStream(subscriber: Subscriber, groupId: number, flags = FLAGS) {
 
 /** A subscriber with one track subscribed and answered; the test plays the publisher. */
 async function subscribed(largest?: number) {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session });
 	const reader = subscriber
@@ -64,10 +66,9 @@ async function subscribed(largest?: number) {
 	const peer = await Stream.accept(pair.client, VERSION);
 	if (!peer) throw new Error("the subscriber never opened a subscribe stream");
 	expect(await peer.reader.u53()).toBe(Subscribe.id);
-	const request = await Subscribe.decode(peer.reader, VERSION);
+	await Subscribe.decode(peer.reader, VERSION);
 	await peer.writer.u53(SubscribeOk.id);
 	await new SubscribeOk({
-		requestId: request.requestId,
 		trackAlias: ALIAS,
 		largest: largest === undefined ? undefined : { groupId: BigInt(largest), objectId: 0n },
 	}).encode(peer.writer, VERSION);
@@ -133,7 +134,8 @@ test("a group read across PUBLISH_DONE is delivered whole", async () => {
 
 test("a Stream Count of 0 is a hint, so a late stream within the grace is still delivered", async () => {
 	const clock = new Manual();
-	using _clock = { [Symbol.dispose]: clock.install() };
+	const installed = clock.install();
+	using _clock = { [Symbol.dispose]: () => installed.close() };
 	const { subscriber, reader, done } = await subscribed();
 	await done(TRACK_ENDED, 0n);
 
@@ -161,6 +163,22 @@ test("a PUBLISH_DONE with an error status aborts the track", async () => {
 	expect(await reader.closed).toBeInstanceOf(Error);
 });
 
+// SUBSCRIPTION_ENDED ends only the subscription: a later one continues the track past these
+// groups, so the copy delivers what was in flight and then fails rather than declare an end.
+test("a SUBSCRIPTION_ENDED PUBLISH_DONE drains, then aborts the track", async () => {
+	const { subscriber, reader, done } = await subscribed();
+	const group = groupStream(subscriber, 0);
+	group.write(object("0.0"));
+	group.finish();
+	await group.handled;
+	await done(SUBSCRIPTION_ENDED, 1n);
+
+	expect(await readAll(await reader.recvGroup())).toEqual(["0.0"]);
+	expect(await reader.closed).toBeInstanceOf(Error);
+	// No end was declared: the track fails rather than finish.
+	await expect(reader.finished()).rejects.toBeInstanceOf(Error);
+});
+
 test("an UNAUTHORIZED PUBLISH_DONE reads as the revocation a moq-lite peer sends", async () => {
 	const { reader, done } = await subscribed();
 	await done(UNAUTHORIZED, 0n);
@@ -181,7 +199,7 @@ test("END_OF_TRACK after a group's last object ends the track after that group",
 
 	await done(TRACK_ENDED, 1n);
 	expect(await reader.recvGroup()).toBeUndefined();
-	expect(reader.end()).toEqual({ group: 4, frame: 1 });
+	expect(hooks.subscriberEnd(reader)).toEqual({ group: 4, frame: 1 });
 });
 
 test("END_OF_TRACK at object 0 ends the track before its group, which never exists", async () => {
@@ -197,7 +215,7 @@ test("END_OF_TRACK at object 0 ends the track before its group, which never exis
 	await done(TRACK_ENDED, 2n);
 	expect((await reader.recvGroup())?.sequence).toBe(0);
 	expect(await reader.recvGroup()).toBeUndefined();
-	expect(reader.end()).toEqual({ group: 2, frame: 0 });
+	expect(hooks.subscriberEnd(reader)).toEqual({ group: 2, frame: 0 });
 });
 
 test("a standalone END_OF_TRACK at object 5 preserves its terminal group", async () => {
@@ -206,7 +224,7 @@ test("a standalone END_OF_TRACK at object 5 preserves its terminal group", async
 	end.write(new Uint8Array([5, 0, 0x4]));
 	end.finish();
 	await end.handled;
-	expect(reader.end()).toEqual({ group: 5, frame: 5 });
+	expect(hooks.subscriberEnd(reader)).toEqual({ group: 5, frame: 5 });
 	await done(TRACK_ENDED, 1n);
 	expect(await reader.recvGroup()).toBeUndefined();
 });
@@ -226,7 +244,7 @@ test("a compact stream starting at object 5 is subgroup 5, refused without a gro
 	huge.write(new Uint8Array([...new Array(9).fill(0xff), 1, 42]));
 	huge.finish();
 	await huge.handled;
-	expect(reader.end()).toBeUndefined();
+	expect(hooks.subscriberEnd(reader)).toBeUndefined();
 
 	const group = groupStream(subscriber, 6, { ...FLAGS, hasSubgroupObject: true });
 	group.write(object("6.0"));

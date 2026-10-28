@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"iter"
 	"time"
 
@@ -158,6 +159,13 @@ func (c *CatalogProducer) SetSection(name string, value any) error {
 // RemoveSection removes an application catalog section if present.
 func (c *CatalogProducer) RemoveSection(name string) error { return c.inner.RemoveSection(name) }
 
+// Finish finishes the catalog, which ends the broadcast's content.
+//
+// Finish every track first. The broadcast stays announced and keeps serving its
+// finished tracks to late subscribers until [moq.BroadcastProducer.Close] takes it
+// offline; how long to keep it up is yours to decide.
+func (c *CatalogProducer) Finish() error { return c.inner.Finish() }
+
 // NewAudioTrackProducer imports encoded audio frames on target.
 func NewAudioTrackProducer(broadcast *moq.BroadcastProducer, target Target, init AudioInit) (*TrackProducer, error) {
 	resolved, err := targetFFI(target)
@@ -227,6 +235,9 @@ type TrackConfig struct {
 
 // NewTrackConsumer subscribes to and decodes a catalog rendition, following its broadcast and track.
 func NewTrackConsumer(ctx context.Context, broadcast *moq.BroadcastConsumer, config TrackConfig) (*TrackConsumer, error) {
+	if err := bridge.Rendition(config.Rendition); err != nil {
+		return nil, err
+	}
 	sub, err := bridge.Subscription(config.Subscription)
 	if err != nil {
 		return nil, err
@@ -247,6 +258,14 @@ type GroupConfig struct {
 
 // FetchGroup fetches and decodes exactly one group of a catalog rendition, following its broadcast and track.
 func FetchGroup(ctx context.Context, broadcast *moq.BroadcastConsumer, config GroupConfig) (*GroupConsumer, error) {
+	if err := bridge.Rendition(config.Rendition); err != nil {
+		return nil, err
+	}
+	if config.Options != nil {
+		if err := bridge.NonNegative(config.Options.MaxDelay, "max delay"); err != nil {
+			return nil, err
+		}
+	}
 	inner, err := ffi.MoqMediaGroupConsumerFetch(ctx, bridge.BroadcastConsumer(broadcast), ffi.MoqMediaGroupConfig{Rendition: config.Rendition, Sequence: config.Sequence, Options: config.Options})
 	if err != nil {
 		return nil, err
@@ -330,8 +349,6 @@ const (
 const (
 	// ContainerFormatFmp4 is fragmented MP4 / CMAF, split into one frame per sample.
 	ContainerFormatFmp4 = ffi.MoqContainerFormatFmp4
-	// ContainerFormatCmaf is fragmented MP4 / CMAF, republished whole as one CMAF frame per fragment.
-	ContainerFormatCmaf = ffi.MoqContainerFormatCmaf
 	// ContainerFormatMkv is Matroska / WebM.
 	ContainerFormatMkv = ffi.MoqContainerFormatMkv
 	// ContainerFormatTs is an MPEG-2 transport stream.
@@ -364,17 +381,7 @@ func (m *TrackProducer) WriteFrame(frame moq.Frame) error {
 	return m.inner.WriteFrame(f)
 }
 
-// Flush records a local encoder's frame handoff on the broadcast media clock.
-// Call after WriteFrame only for local encoder output, not file or network imports.
-func (m *TrackProducer) Flush(timestamp time.Duration) error {
-	us, err := bridge.Duration(timestamp, "timestamp")
-	if err != nil {
-		return err
-	}
-	return m.inner.Flush(us)
-}
-
-// Discontinuity marks a timeline break and restarts handoff measurement, preserving advertised jitter.
+// Discontinuity marks a timeline break, preserving the advertised jitter and delay.
 func (m *TrackProducer) Discontinuity() error {
 	return m.inner.Discontinuity()
 }
@@ -464,18 +471,58 @@ func mediaFrame(frame *ffi.MoqMediaFrame, err error) (*MediaFrame, error) {
 	return &MediaFrame{Payload: frame.Payload, Timestamp: time.Duration(frame.TimestampUs) * time.Microsecond, Keyframe: frame.Keyframe}, nil
 }
 
-// TrackConsumer is a stream of decoded media frames.
+// Read is one encoded frame, a ReadGap, or a ReadEnd, in delivery order.
+type Read interface{ read() }
+
+// ReadFrame is an encoded frame and its container metadata.
+type ReadFrame struct{ Frame MediaFrame }
+
+// ReadGap is lost media; what follows does not continue it.
+type ReadGap struct {
+	Timestamp time.Duration
+	Duration  time.Duration
+}
+
+// ReadEnd is where a stopped encoder's media stops. Following frames before End
+// are its remaining media; the first at or past End comes from a fresh encoder.
+type ReadEnd struct{ End time.Duration }
+
+func (ReadFrame) read() {}
+func (ReadGap) read()   {}
+func (ReadEnd) read()   {}
+
+func mediaRead(raw ffi.MoqMediaRead) (Read, error) {
+	switch read := raw.(type) {
+	case ffi.MoqMediaReadFrame:
+		frame, err := mediaFrame(&read.Frame, nil)
+		if err != nil {
+			return nil, err
+		}
+		return ReadFrame{Frame: *frame}, nil
+	case ffi.MoqMediaReadGap:
+		return ReadGap{Timestamp: time.Duration(read.TimestampUs) * time.Microsecond, Duration: read.Duration}, nil
+	case ffi.MoqMediaReadEnd:
+		return ReadEnd{End: time.Duration(read.EndUs) * time.Microsecond}, nil
+	}
+	return nil, fmt.Errorf("unknown media read: %T", raw)
+}
+
+// TrackConsumer is a stream of encoded frames, gaps, and encoder ends.
 type TrackConsumer struct {
 	inner *ffi.MoqMediaTrackConsumer
 }
 
-// Next returns the next frame, or (nil, nil) when the track ends.
-func (m *TrackConsumer) Next(ctx context.Context) (*MediaFrame, error) {
-	return mediaFrame(bridge.Call(ctx, m.inner.Cancel, m.inner.Next))
+// Next returns the next read, or (nil, nil) once the track ends.
+func (m *TrackConsumer) Next(ctx context.Context) (Read, error) {
+	raw, err := bridge.Call(ctx, m.inner.Cancel, m.inner.Next)
+	if err != nil || raw == nil {
+		return nil, err
+	}
+	return mediaRead(*raw)
 }
 
-// All ranges over frames until the track ends or the loop breaks.
-func (m *TrackConsumer) All(ctx context.Context) iter.Seq2[*MediaFrame, error] {
+// All ranges over reads until the track ends or the loop breaks.
+func (m *TrackConsumer) All(ctx context.Context) iter.Seq2[Read, error] {
 	return bridge.Seq(ctx, m.Next)
 }
 

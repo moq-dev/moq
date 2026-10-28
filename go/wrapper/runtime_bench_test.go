@@ -114,11 +114,7 @@ func BenchmarkFFI(b *testing.B) {
 			b.Fatal(err)
 		}
 		b.Cleanup(consumer.Cancel)
-		benchCall(b, func() {
-			if _, err := consumer.Info(); err != nil {
-				b.Fatal(err)
-			}
-		})
+		benchCall(b, func() { _ = consumer.Info() })
 	})
 }
 
@@ -154,10 +150,11 @@ func benchThroughput(b *testing.B, c benchCase) {
 	origin := moq.NewOriginProducerWithConfig(moq.OriginConfig{CacheCapacityBytes: &cacheBytes})
 	// The origin owns the cache policy; keep it until the case ends.
 	b.Cleanup(func() { runtime.KeepAlive(origin) })
-	broadcast, err := origin.CreateBroadcast("bench")
+	publication, err := origin.CreateBroadcast("bench")
 	if err != nil {
 		b.Fatal(err)
 	}
+	broadcast := publication.Broadcast()
 	b.Cleanup(func() { _ = broadcast.Close() })
 	tracks := make([]*moq.TrackProducer, c.publishers)
 	consumers := make([]*moq.TrackConsumer, 0, c.publishers*c.subscribers)

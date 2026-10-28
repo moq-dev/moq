@@ -6,6 +6,7 @@ import type MoqPublish from "@moq/publish/element";
 import type MoqWatch from "@moq/watch/element";
 import { refused, refusedWebSocket } from "./close";
 import { type CaptureState, FAULTS, type Fault, publish, SAMPLE_MS } from "./contract";
+import { finish } from "./finish";
 import { Fixture } from "./fixture";
 import { attach, watchResources } from "./probe";
 
@@ -23,27 +24,39 @@ function parseFault(value: string | null): Fault {
 	return fault;
 }
 
-if (role === "publish") {
+if (role === "finish-publish" || role === "finish-subscribe") {
+	finish(role, url, broadcast, versions, Number(params.get("frames") ?? 10), Number(params.get("timeout") ?? 60_000));
+} else if (role === "publish") {
 	const el = document.createElement("moq-publish") as MoqPublish;
 	el.setAttribute("url", url);
 	if (versions) el.setAttribute("versions", versions);
 	el.setAttribute("name", broadcast);
-	// Chromium's --use-fake-device-for-media-stream feeds getUserMedia fake
-	// camera and microphone input. Audio is encoded lazily when a player asks.
-	el.setAttribute("source", "camera");
-	// The microphone plays the driver's test tone. Keep Chromium's voice processing off it: that
-	// mixes stereo to mono and suppresses a steady tone as noise.
-	el.signals.run((effect) => {
-		const mic = effect.get(el.sources.audio);
-		if (mic && "constraints" in mic) {
-			mic.constraints.set({
-				channelCount: 2,
-				echoCancellation: false,
-				noiseSuppression: false,
-				autoGainControl: false,
-			});
-		}
-	});
+	// Media is encoded lazily when a player asks.
+	const media = params.get("media");
+	if (media) {
+		// The interop driver's file of the picture and test tone, decoded and looped rather than
+		// captured: a fake device splices the tone whenever the machine is short of CPU.
+		const response = await fetch(media);
+		if (!response.ok) throw new Error(`no publisher media at ${media}: ${response.status}`);
+		el.controls.source.set(new File([await response.blob()], "interop-media"));
+	} else {
+		// Chromium's --use-fake-device-for-media-stream feeds getUserMedia fake camera and microphone
+		// input, for the capture checks in media.ts.
+		el.setAttribute("source", "camera");
+		// Keep Chromium's voice processing off the microphone: that mixes stereo to mono and
+		// suppresses a steady tone as noise.
+		el.signals.run((effect) => {
+			const mic = effect.get(el.sources.audio);
+			if (mic && "constraints" in mic) {
+				mic.constraints.set({
+					channelCount: 2,
+					echoCancellation: false,
+					noiseSuppression: false,
+					autoGainControl: false,
+				});
+			}
+		});
+	}
 	document.body.appendChild(el);
 	// So the driver can wait for the session to close before closing the browser.
 	watchResources();
@@ -70,7 +83,13 @@ if (role === "publish") {
 	document.body.appendChild(host);
 
 	const fault = parseFault(params.get("fault"));
-	let fixture: Fixture | undefined = new Fixture(host, url, broadcast, fault);
+	let fixture: Fixture | undefined = new Fixture(host, {
+		url,
+		name: broadcast,
+		fault,
+		versions: versions?.split(","),
+		generation: Number(params.get("generation") ?? 0),
+	});
 
 	// The driver stops and restarts the publisher in place to exercise a same-path republish, which
 	// has to reuse this page so the audio context keeps its user activation.
@@ -81,7 +100,13 @@ if (role === "publish") {
 		},
 		start: () => {
 			fixture?.close();
-			fixture = new Fixture(host, url, broadcast, fault);
+			fixture = new Fixture(host, {
+				url,
+				name: broadcast,
+				fault,
+				versions: versions?.split(","),
+				generation: Number(params.get("generation") ?? 0),
+			});
 		},
 		disableVideo: () => fixture?.setVideo(false),
 		enableVideo: () => fixture?.setVideo(true),
@@ -108,6 +133,18 @@ if (role === "publish") {
 	// Only the late-join negative control passes this, to hold the player behind live.
 	const delay = params.get("delay");
 	if (delay) el.setAttribute("delay", delay);
+
+	// The interop matrix checks each audio rendition in a page of its own, pinned by codec (the
+	// catalog's up to its first `.`). The target lands with the catalog, before the player has
+	// probed which renditions it can decode, so no other rendition ever plays here.
+	const codec = params.get("codec");
+	if (codec) {
+		el.signals.run((effect) => {
+			const renditions = effect.get(el.broadcast.out.catalog)?.audio?.renditions ?? {};
+			const name = Object.keys(renditions).find((name) => renditions[name].codec.split(".")[0] === codec);
+			if (name) el.controls.audio.target.set({ name });
+		});
+	}
 
 	const player = document.createElement("moq-watch-ui");
 	player.appendChild(el);

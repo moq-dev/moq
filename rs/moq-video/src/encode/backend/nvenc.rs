@@ -488,7 +488,7 @@ mod tests {
 		if driver_available() {
 			return; // real driver present: open() would legitimately try to run
 		}
-		let config = Config::new(1920, 1080, crate::Rate::new(30, 1).unwrap());
+		let config = Config::new(1920, 1080, crate::FrameRate::new(30, 1).unwrap());
 		let error = Nvenc::open(&config).err().expect("missing driver must be refused");
 		assert!(
 			error.to_string().contains("NVENC unavailable"),
@@ -501,7 +501,7 @@ mod tests {
 		if driver_available() {
 			return;
 		}
-		let mut config = Config::new(1920, 1080, crate::Rate::new(30, 1).unwrap());
+		let mut config = Config::new(1920, 1080, crate::FrameRate::new(30, 1).unwrap());
 		config.kind = crate::encode::Kind::Named(NAME.into());
 		let error = crate::encode::backend::open(&config)
 			.err()
@@ -569,7 +569,7 @@ mod tests {
 		}
 		let config = crate::encode::Config {
 			kind: crate::encode::Kind::Named(NAME.into()),
-			..crate::encode::Config::new(320, 240, crate::Rate::new(30, 1).unwrap())
+			..crate::encode::Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap())
 		};
 		let Ok(mut encoder) = crate::encode::Encoder::new(&config) else {
 			// Driver present but NVENC still unusable (e.g. GPU busy); don't fail.
@@ -624,7 +624,7 @@ mod tests {
 					kind: crate::encode::Kind::Named(NAME.into()),
 					codec,
 					preset,
-					..crate::encode::Config::new(320, 240, crate::Rate::new(30, 1).unwrap())
+					..crate::encode::Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap())
 				};
 				let Ok(mut encoder) = crate::encode::Encoder::new(&config) else {
 					return;
@@ -649,7 +649,7 @@ mod tests {
 		if !driver_available() {
 			return;
 		}
-		let mut config = crate::encode::Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
+		let mut config = crate::encode::Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
 		config.kind = crate::encode::Kind::Named(NAME.into());
 		config.bitrate = Some(moq_net::bandwidth::Rate::from_bps(1_000_000));
 		let Ok(mut encoder) = crate::encode::Encoder::new(&config) else {
@@ -682,7 +682,7 @@ mod tests {
 		let config = crate::encode::Config {
 			codec: crate::encode::Codec::H265,
 			kind: crate::encode::Kind::Named(NAME.into()),
-			..crate::encode::Config::new(320, 240, crate::Rate::new(30, 1).unwrap())
+			..crate::encode::Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap())
 		};
 		let Ok(mut encoder) = crate::encode::Encoder::new(&config) else {
 			return;
@@ -729,7 +729,7 @@ mod tests {
 		if !driver_available() {
 			return;
 		}
-		let mut config = crate::encode::Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
+		let mut config = crate::encode::Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
 		config.kind = crate::encode::Kind::Named(NAME.into());
 		config.gop = Gop::Keyframe { interval: 3 };
 		let Ok(mut encoder) = crate::encode::Encoder::new(&config) else {
@@ -784,7 +784,7 @@ mod tests {
 		let (w, h) = (300u32, 240u32);
 		let config = crate::encode::Config {
 			kind: crate::encode::Kind::Named(NAME.into()),
-			..crate::encode::Config::new(w, h, crate::Rate::new(30, 1).unwrap())
+			..crate::encode::Config::new(w, h, crate::FrameRate::new(30, 1).unwrap())
 		};
 		let Ok(mut encoder) = crate::encode::Encoder::new(&config) else {
 			return;
@@ -851,7 +851,7 @@ mod tests {
 			return None;
 		}
 		let (w, h) = (1280u32, 720u32);
-		let mut config = crate::encode::Config::new(w, h, crate::Rate::new(30, 1).unwrap());
+		let mut config = crate::encode::Config::new(w, h, crate::FrameRate::new(30, 1).unwrap());
 		config.kind = crate::encode::Kind::Named(NAME.into());
 		config.bitrate = Some(moq_net::bandwidth::Rate::from_bps(4_000_000));
 		config.gop = Gop::Keyframe { interval: 30 };

@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { setTimeout as hostTimeout } from "node:timers/promises";
 import {
 	Elapsed,
+	type Installed,
 	Instant,
 	interval,
 	Manual,
@@ -19,13 +20,13 @@ import {
 	wall,
 } from "./index.ts";
 
-const restores: (() => void)[] = [];
+const installs: Installed[] = [];
 afterEach(() => {
-	for (const restore of restores.splice(0).reverse()) restore();
+	for (const installed of installs.splice(0).reverse()) installed.close();
 });
 function manual(): Manual {
 	const clock = new Manual();
-	restores.push(clock.install());
+	installs.push(clock.install());
 	return clock;
 }
 const ns = Nano.fromMilli;
@@ -77,11 +78,11 @@ test("installation restores nested and out-of-order scopes without reviving them
 	const inner = manual();
 	inner.jump(Nano(8));
 	expect<number>(now()).toBe(8);
-	restores[0]();
+	installs[0].close();
 	expect<number>(now()).toBe(8);
-	restores[1]();
+	installs[1].close();
 	const restored = now();
-	restores[1]();
+	installs[1].close();
 	expect<number>(now()).toBeGreaterThanOrEqual(restored);
 	expect<number>(now()).not.toBe(4);
 });
@@ -350,18 +351,69 @@ test("a past deadline armed while draining observes the current instant", async 
 	expect<number>(clock.now()).toBe(10);
 });
 
-for (const driver of ["advance", "fire"] as const) {
+test("drive fires each deadline its work waits on and stops when the work settles", async () => {
+	const clock = manual();
+	let late = false;
+	void sleepUntil(Instant(100)).then(() => {
+		late = true;
+	});
+	const work = (async () => {
+		await sleep(Nano(10));
+		await sleep(Nano(20));
+		return now();
+	})();
+	expect<number>(await clock.drive(work)).toBe(30);
+	expect<number>(clock.now()).toBe(30);
+	await hostTimeout(0);
+	expect(late).toBe(false);
+});
+
+test("drive settles with its work's rejection at the deadline that caused it", async () => {
+	const clock = manual();
+	await expect(
+		clock.drive(
+			sleep(Nano(10)).then(() => {
+				throw new Error("boom");
+			}),
+		),
+	).rejects.toThrow("boom");
+	expect<number>(clock.now()).toBe(10);
+});
+
+for (const settles of ["before any timer", "on a later host task"] as const) {
+	test(`drive leaves no driver behind when its work settles ${settles}`, async () => {
+		const clock = manual();
+		const work = settles === "before any timer" ? Promise.resolve(1) : hostTimeout(0).then(() => 1);
+		expect(await clock.drive(work)).toBe(1);
+		const fired: number[] = [];
+		void sleep(ns(Milli(60_000))).then(() => fired.push(now()));
+		void sleep(ns(Milli(70_000))).then(() => fired.push(now()));
+		await hostTimeout(0);
+		expect(fired).toEqual([]);
+		expect<number>(clock.now()).toBe(0);
+		expect<number>(await clock.fire()).toBe(ns(Milli(60_000)));
+		expect(fired).toEqual([ns(Milli(60_000))]);
+	});
+}
+
+for (const driver of ["advance", "fire", "drive"] as const) {
 	test(`${driver} rejects overlapping time drivers without releasing its ownership`, async () => {
 		const clock = manual();
-		const pending = driver === "advance" ? clock.advance(Nano(10)) : clock.fire();
+		let release = () => {};
+		const work = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const pending =
+			driver === "advance" ? clock.advance(Nano(10)) : driver === "fire" ? clock.fire() : clock.drive(work);
 		try {
 			await expect(clock.advance(Nano(100))).rejects.toThrow("already pending");
 			expect(() => clock.jump(Nano(100))).toThrow("already pending");
 			await expect(clock.fire()).rejects.toThrow("already pending");
+			await expect(clock.drive(Promise.resolve())).rejects.toThrow("already pending");
 			expect<number>(clock.now()).toBe(0);
 		} finally {
-			// Let fire finish even if an assertion fails before it has a timer.
-			void sleepUntil(Instant(10));
+			// Let fire and drive finish even if an assertion fails before they have a timer.
+			void sleepUntil(Instant(10)).then(release);
 			await pending;
 		}
 		expect<number>(clock.now()).toBe(10);

@@ -13,12 +13,13 @@ import {
 	error,
 	ProtocolViolation,
 	reason,
+	SessionCode,
 	StreamCode,
 	Stream as StreamError,
 	sessionCause,
 	unauthorized,
 } from "../error.ts";
-import * as netGroup from "../group.ts";
+import type * as netGroup from "../group.ts";
 import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import {
 	finalSequence,
@@ -36,50 +37,28 @@ import { Tail } from "../tail.ts";
 import type { Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
+import { closeUnwanted } from "../util/announce.ts";
 import { Deadline, requestOptions } from "../util/deadline.ts";
 import { abandoned as demandAbandoned, isAbandoned, unwanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
-import type { Session } from "./adapter.ts";
 import { DuplicateTrackAlias, RetiredTrackAlias, TrackAliases } from "./aliases.ts";
 import * as Cluster from "./cluster.ts";
 import { ObjectDatagram } from "./datagram.ts";
-import { requestReason, toRequestCode } from "./error.ts";
+import { requestReason } from "./error.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
-import {
-	decodeObjectTime,
-	EndOfTrackProperties,
-	Frame,
-	type Group as GroupMessage,
-	hasFirstObjectBit,
-	ObjectIdGap,
-} from "./object.ts";
+import { decodeObjectTime, EndOfTrackProperties, Frame, type Group as GroupMessage, ObjectIdGap } from "./object.ts";
 import { Parameters } from "./parameters.ts";
-import { ABSENT_WIRE, fromWire, toWire } from "./priority.ts";
+import { DEFAULT_WIRE, fromWire, toWire } from "./priority.ts";
 import { type Publish, PublishDone, PublishDoneStatus, publishDoneClean } from "./publish.ts";
-import {
-	type AdvertParams,
-	type PublishNamespace,
-	PublishNamespaceCancel,
-	PublishNamespaceDone,
-	PublishNamespaceOk,
-	PublishNamespaceUpdate,
-} from "./publish_namespace.ts";
+import { type AdvertParams, type PublishNamespace, PublishNamespaceUpdate } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
 import { type Framed, RequestStream, refuseReserved, refuseUpdate } from "./request_stream.ts";
-import { joinFilter, Subscribe, SubscribeError, SubscribeOk, SubscribeUpdate, Unsubscribe } from "./subscribe.ts";
-import {
-	PublishBlocked,
-	SubscribeNamespace,
-	SubscribeNamespaceEntry,
-	SubscribeNamespaceEntryDone,
-	SubscribeNamespaceLegacy,
-	SubscribeNamespaceOk,
-	UnsubscribeNamespace,
-} from "./subscribe_namespace.ts";
+import type { Session } from "./session.ts";
+import { joinFilter, Subscribe, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
+import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDone } from "./subscribe_namespace.ts";
 import { MalformedAuthToken } from "./token.ts";
-import { Version } from "./version.ts";
 
 // Wire ceiling (2^62-1). A draining session stamps it on every live route so any other
 // candidate outranks it, while the route stays selectable as the last path. Matches Rust
@@ -131,6 +110,9 @@ type Announced = { adverts: { id: number; route: Route }[]; route: Route };
 /** A local announce reader's filter: its scope, the prefix it asked for, and its hidden opt-in. */
 type Filter = { scope: Path.Pattern; prefix: Path.Valid; hidden: boolean };
 
+/** A local announce reader: its filter, and what settles once its request is off the wire. */
+type Asking = Filter & { gone?: Promise<void> };
+
 /** Whether a reader with `filter` sees an announcement at `path`. */
 function sees(filter: Filter, path: Path.Valid): boolean {
 	return scopeOverlaps(filter.scope, path) && (filter.hidden || !hiddenBelow(filter.prefix, path));
@@ -138,7 +120,7 @@ function sees(filter: Filter, path: Path.Valid): boolean {
 
 /**
  * Handles subscribing to broadcasts using moq-transport protocol.
- * Uses the stream-per-request pattern (real bidi streams for v17, virtual for v14-v16).
+ * Each request rides its own bidi stream.
  *
  * @internal
  */
@@ -169,11 +151,6 @@ export class Subscriber {
 	// Dedup consumed broadcasts per path: repeat consume() calls share one subscription.
 	#consumes = new BroadcastCache();
 
-	// Paths with a legacy PUBLISH_NAMESPACE request in flight, reserved synchronously.
-	// The count below is only taken once the OK is written, and two requests that both
-	// got past the duplicate check before either attached would both take one.
-	#legacyRequests = new Set<Path.Valid>();
-
 	// Every announced path, with the live advertisements that reference it.
 	//
 	// A peer may advertise one namespace twice on a session: an unsolicited
@@ -183,15 +160,17 @@ export class Subscriber {
 	// to end from retracting what the other still holds. A publisher replacing its instance
 	// (MoQ Epoch) withdraws one advertisement and makes another, on separate streams that
 	// can arrive in either order, so the newest stands until it goes and an update to an
-	// older one changes nothing. Each path holds one of the session's announce slots,
-	// however many advertisements reference it.
-	#announced: SlotMap<Path.Valid, Announced>;
+	// older one changes nothing. Each live wire advertisement holds an announce slot,
+	// even while its route loops back through us and is absent from this derived map.
+	#announced = new Map<Path.Valid, Announced>();
+	#announceSlots: Slots;
 
 	// Names each advertisement the peer makes, so a later update or withdrawal finds its own.
 	#nextAdvert = 0;
 
-	// Any consumers that want each new announcement, keyed by their local filter.
-	#announcedConsumers = new Map<announce.Producer, Filter>();
+	// Any consumers that want each new announcement, keyed by their local filter, until
+	// their request is off the wire.
+	#announcedConsumers = new Map<announce.Producer, Asking>();
 
 	// Whether the peer understands the HIDDEN parameter (MoQ Hidden).
 	#hidden: boolean;
@@ -199,10 +178,6 @@ export class Subscriber {
 
 	// Whether a SUBSCRIBE_NAMESPACE's REQUEST_OK counts the NAMESPACEs that follow it (MoQ Active Count).
 	#activeCount: boolean;
-
-	// What the peer's SETUP declared about being solicited (MoQ Solicit), `undefined`
-	// when it declared nothing.
-	#solicit?: boolean;
 
 	// Settles when the peer sends GOAWAY, repricing this session's routes to the drain cost.
 	#goaway?: GetPromise<Drain>;
@@ -229,7 +204,6 @@ export class Subscriber {
 		hidden = false,
 		maxAge = false,
 		activeCount = false,
-		solicit,
 		goaway,
 		grant,
 		auth,
@@ -249,8 +223,6 @@ export class Subscriber {
 		maxAge?: boolean;
 		/** Whether both SETUPs declared MoQ Active Count. */
 		activeCount?: boolean;
-		/** What the peer's SETUP declared about being solicited (MoQ Solicit). */
-		solicit?: boolean;
 		/** Settles when the peer sends GOAWAY. */
 		goaway?: GetPromise<Drain>;
 		/** The union of our tokens' grants (MoQ Auth), which bounds what we subscribe to. */
@@ -261,13 +233,12 @@ export class Subscriber {
 	}) {
 		this.#session = session;
 		this.#quic = quic;
-		this.#announced = new SlotMap(new Slots(limits.announces, { quic, reason: "too many announcements" }));
+		this.#announceSlots = new Slots(limits.announces, { quic, reason: "too many announcements" });
 		this.#cluster = cluster;
 		this.#epoch = epoch;
 		this.#hidden = hidden;
 		this.#maxAge = maxAge;
 		this.#activeCount = activeCount;
-		this.#solicit = solicit;
 		this.#goaway = goaway;
 		this.#grant = grant;
 		this.#auth = auth;
@@ -277,7 +248,7 @@ export class Subscriber {
 	}
 
 	// Whether the peer has sent GOAWAY. Requests keep opening here until a replacement
-	// session's route outranks this one, deliberately past draft-19 section 10.4's SHOULD
+	// session's route outranks this one, deliberately past draft-22 section 9.2's SHOULD
 	// NOT: refusing them would fail requests that land before the replacement is up.
 	#goingAway(): boolean {
 		return this.#goaway?.peek() !== undefined;
@@ -330,19 +301,31 @@ export class Subscriber {
 	 *
 	 * The peer is asked with SUBSCRIBE_NAMESPACE regardless of what it declared, and an
 	 * unsolicited PUBLISH_NAMESPACE lands here too, so a peer that only tells and one
-	 * that only answers are both discovered. A draft-14 or draft-15 peer that declared no
-	 * MoQ Solicit is not asked for the empty prefix, so an unscoped subscriber only hears
-	 * what that peer tells.
+	 * that only answers are both discovered.
 	 *
 	 * Hidden routes (a `.`-prefixed segment below the scope's head) are left out unless
 	 * `options.hidden` opts in. The opt-in rides the SUBSCRIBE_NAMESPACE when the peer
 	 * understands it (MoQ Hidden); the rule is also applied here, since an unsolicited
 	 * PUBLISH_NAMESPACE or a peer that never heard of it hides nothing.
+	 *
+	 * The request goes out once every overlapping request already closed here is off the
+	 * wire, so a peer that refuses overlapping requests never sees this one beside them.
 	 */
 	announced(scope: Path.Pattern = Path.Pattern.all(), options?: announce.Options): announce.Consumer {
 		// The wire speaks announce interest by prefix.
 		const prefix = scopeHead(scope);
-		const filter = { scope, prefix, hidden: options?.hidden ?? false };
+		const filter: Asking = { scope, prefix, hidden: options?.hidden ?? false };
+
+		// The overlapping requests on their way out, such as the narrower ones an exclusive
+		// discovery just closed for this one. Those still open overlap it only where the
+		// caller holds both on purpose. One whose last reader just closed is leaving even
+		// before its producer closes.
+		const blockers: Promise<void>[] = [];
+		for (const [other, { prefix: asked, gone }] of this.#announcedConsumers) {
+			if (gone === undefined || (other.wanted.peek() && other.closed.peek() === undefined)) continue;
+			if (Path.hasPrefix(asked, prefix) || Path.hasPrefix(prefix, asked)) blockers.push(gone);
+		}
+
 		const announced = new announce.Producer();
 		for (const [active, info] of this.#announced) {
 			if (!sees(filter, active)) continue;
@@ -354,13 +337,16 @@ export class Subscriber {
 			});
 		}
 		this.#announcedConsumers.set(announced, filter);
+		const consumer = announced.consume();
+		// The last reader leaving ends the stream, which cancels the request.
+		closeUnwanted(announced);
 
-		void this.#runAnnounced(announced, prefix, filter.hidden && this.#hidden).finally(() => {
+		filter.gone = this.#runAnnounced(announced, prefix, filter.hidden && this.#hidden, blockers).finally(() => {
 			this.#announcedConsumers.delete(announced);
 			announced.close();
 		});
 
-		return announced.consume();
+		return consumer;
 	}
 
 	/**
@@ -382,7 +368,8 @@ export class Subscriber {
 
 		console.debug(`announced: broadcast=${path} active=true epoch=${route.epoch}`);
 		for (const [consumer, filter] of this.#announcedConsumers) {
-			if (!sees(filter, path)) continue;
+			// A consumer that closed stays registered until its request is off the wire.
+			if (!sees(filter, path) || consumer.closed.peek() !== undefined) continue;
 			const scope = filter.scope;
 			consumer.append({ prefix: path, captures: scopeCaptures(scope, path), kind: "start", route });
 		}
@@ -421,9 +408,8 @@ export class Subscriber {
 		console.debug(`announced: broadcast=${path} ${restart ? `restart=true epoch=${route.epoch}` : "rerouted"}`);
 		const kind = restart ? "restart" : "update";
 		for (const [consumer, filter] of this.#announcedConsumers) {
-			if (!sees(filter, path)) continue;
-			// A consumer that closed stays registered until its reader loop notices.
-			if (consumer.closed.peek() !== undefined) continue;
+			// A consumer that closed stays registered until its request is off the wire.
+			if (!sees(filter, path) || consumer.closed.peek() !== undefined) continue;
 			const scope = filter.scope;
 			consumer.append({ prefix: path, captures: scopeCaptures(scope, path), kind, route });
 		}
@@ -451,66 +437,64 @@ export class Subscriber {
 		console.debug(`announced: broadcast=${path} active=false`);
 
 		for (const [consumer, filter] of this.#announcedConsumers) {
-			if (!sees(filter, path)) continue;
+			// A consumer that closed stays registered until its request is off the wire.
+			if (!sees(filter, path) || consumer.closed.peek() !== undefined) continue;
 			const scope = filter.scope;
-			try {
-				consumer.append({
-					prefix: path,
-					captures: scopeCaptures(scope, path),
-					kind: "end",
-					route: existing.route,
-				});
-			} catch {
-				// Consumer already closed, will be cleaned up
-			}
+			consumer.append({ prefix: path, captures: scopeCaptures(scope, path), kind: "end", route: existing.route });
 		}
 	}
 
-	// The peer broke the protocol: close with the violation's code before the session's own
-	// close, which would send a clean one, as the connection does for its own violations.
-	#violated(err: ProtocolViolation) {
+	// Close with this code before the session's own close, which would send a clean one, as
+	// the connection does for its own violations.
+	#fail(code: SessionCode, reason: string) {
 		try {
-			this.#quic?.close({ closeCode: err.code, reason: err.message });
+			this.#quic?.close({ closeCode: code, reason });
 		} catch {
 			// Already closed.
 		}
 		this.#session.close();
 	}
 
-	async #runAnnounced(announced: announce.Producer, prefix: Path.Valid, hidden: boolean) {
+	async #runAnnounced(
+		announced: announce.Producer,
+		prefix: Path.Valid,
+		hidden: boolean,
+		blockers: Promise<void>[],
+	): Promise<void> {
 		const version = this.#session.version;
-
-		// A zero-field track namespace was a protocol violation until draft-16 allowed
-		// it. A peer that never declared MoQ Solicit is not ours: it may enforce that, and
-		// it tells us unasked anyway, so send nothing and stay registered for its
-		// unsolicited PUBLISH_NAMESPACE. Returning would drop this consumer before one
-		// could land. A peer that declared Solicit only tells when asked, so it still is.
-		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15;
-		if (legacy && prefix.length === 0 && this.#solicit === undefined) {
-			// Nothing marks where what it tells unasked starts or ends, so there is nothing to wait for.
-			announced.synced();
-			// No request stream ends this wait, so the session's end has to.
-			const ends: PromiseLike<unknown>[] = [announced.closed];
-			if (this.#quic) ends.push(this.#quic.closed.catch(() => undefined));
-			await Promise.race(ends);
-			return;
-		}
 
 		// Suffixes live on this stream, with the advertisement each holds and the epoch it named,
 		// so a repeat is recognized as an update to it rather than a second one, which would leak.
 		// An advertisement stays live on the wire until its NAMESPACE_DONE, even while its
 		// route is detached (`id` unset) for looping back through us.
-		const live = new Map<Path.Valid, { id?: number; epoch?: Epoch.Valid }>();
+		const live = new SlotMap<Path.Valid, { id?: number; epoch?: Epoch.Valid }>(this.#announceSlots);
 
-		// Set once the teardown below has given back everything this stream held. The read
-		// loop is not awaited when the local consumer closes first, and closing the stream
-		// cancels the transport without discarding what the reader already buffered, so a
-		// fully buffered entry can still decode afterwards. Attaching one then would take a
-		// reference nobody is left to release, pinning the path for the session.
+		// Set once `release` has given back everything this stream held. The read loop is not
+		// awaited when the local consumer closes first, and the stream keeps delivering what
+		// the peer sends until it ends its half, so an entry can still decode afterwards.
+		// Attaching one then would take a reference nobody is left to release, pinning the
+		// path for the session.
 		let released = false;
 
-		// v14/v15: SubscribeNamespace on control stream (via adapter virtual stream)
-		// v16+: SubscribeNamespace on its own real bidi stream
+		// The stream owns every advertisement it carried, so give them back however it ends:
+		// as the request starts leaving, a decode error, or the peer resetting it. Without
+		// this each namespace keeps its count and the source never detaches, which would pin
+		// the path for the session even after the other source withdrew.
+		const release = () => {
+			released = true;
+			for (const [path, held] of live) {
+				if (held.id !== undefined) this.#detachAnnounce(path, held.id);
+			}
+			live.clear();
+		};
+
+		// A peer that refuses overlapping requests would refuse this one while it still holds
+		// a request this overlaps, so wait for those to leave the wire. A consumer that leaves
+		// meanwhile sends nothing.
+		if (blockers.length > 0) {
+			await race([Promise.allSettled(blockers), announced.closed]);
+			if (announced.closed.peek() !== undefined) return;
+		}
 
 		// A consumer that leaves while waiting on request-ID credit takes no ID, so a granted one
 		// never opens a request nobody wants.
@@ -526,46 +510,30 @@ export class Subscriber {
 		if (requestId === undefined) return;
 
 		try {
-			// v16: use a real bidi stream (not virtual control stream)
 			const deadline = new Deadline();
 			const request = new RequestStream(
-				await deadline.wait(
-					deadline.open(
-						version === Version.DRAFT_16 && this.#session.openNativeBi
-							? this.#session.openNativeBi(requestOptions)
-							: this.#session.openBi(requestOptions),
-					),
-				),
+				await deadline.wait(deadline.open(this.#session.openBi(requestOptions))),
 				this.#session,
 				this.#quic,
 			);
 
 			const run = async () => {
-				// Draft-18+ uses SUBSCRIBE_NAMESPACE (0x50); earlier drafts use the
-				// legacy 0x11 message with a Subscribe Options field.
-				if (
-					version === Version.DRAFT_14 ||
-					version === Version.DRAFT_15 ||
-					version === Version.DRAFT_16 ||
-					version === Version.DRAFT_17
-				) {
-					const msg = new SubscribeNamespaceLegacy({ namespace: prefix, requestId, hidden });
-					await Message.write(request.writer, SubscribeNamespaceLegacy.id, msg, version);
-				} else {
-					const msg = new SubscribeNamespace({ namespace: prefix, requestId, hidden });
-					await Message.write(request.writer, SubscribeNamespace.id, msg, version);
-				}
+				const msg = new SubscribeNamespace({ namespace: prefix, requestId, hidden });
+				await Message.write(request.writer, SubscribeNamespace.id, msg, version);
 				console.debug(`subscribe_namespace written: requestId=${requestId}`);
 
-				const end = async () => {
-					// For v14/v15: send UnsubscribeNamespace before closing
-					if (version === Version.DRAFT_14 || version === Version.DRAFT_15) {
-						try {
-							const unsub = new UnsubscribeNamespace({ requestId });
-							await Message.write(request.writer, UnsubscribeNamespace.id, unsub, version);
-						} catch {
-							// Stream might already be closed
-						}
+				// End the request, settling once it is off the wire. `reading` is whatever reads
+				// the stream now, which has to finish before anything else may.
+				const end = async (reading: Promise<unknown>) => {
+					release();
+					// A request on another stream can overtake the cancel, so this one is off the
+					// wire only once the peer ends its half. What it sends meanwhile is dropped.
+					request.cancel();
+					await reading.catch(() => undefined);
+					try {
+						while ((await request.next()) !== undefined) {}
+					} catch {
+						// Reset, or the session ended.
 					}
 					request.close();
 				};
@@ -585,14 +553,12 @@ export class Subscriber {
 						}
 						return count ?? 0;
 					}
-					// v14: SubscribeNamespaceOk, whose body says nothing more.
-					if (framed.type === SubscribeNamespaceOk.id) return 0;
 					throw new Error(`SubscribeNamespace rejected: typeId=0x${framed.type.toString(16)}`);
 				})();
 				// A consumer that leaves before the peer answers ends the request now, not on the answer.
 				const answered = await race([response, announced.closed.then(() => undefined)]);
 				if (answered === undefined) {
-					await end();
+					await end(response);
 					return;
 				}
 				let initial = answered;
@@ -603,6 +569,8 @@ export class Subscriber {
 						if (initial === 0) announced.synced();
 
 						const framed = await request.next();
+						// Ending: `end` drains the rest.
+						if (released) break;
 						if (framed === undefined) {
 							if (initial > 0)
 								throw new ProtocolViolation("namespace stream ended inside the initial set");
@@ -633,6 +601,10 @@ export class Subscriber {
 								throw new ProtocolViolation(`NAMESPACE repeated gaining or losing an epoch: ${path}`);
 							}
 
+							// The wire still holds a reflected advertisement until DONE, so charge
+							// it before deciding whether its route can be used. Repeats keep the slot.
+							if (held === undefined) live.set(path, { epoch: params.epoch });
+
 							// A repeat updates the advertisement in place, so one that now
 							// loops back through us has taken a route we can't subscribe
 							// over: the path is gone even though the message says active.
@@ -661,9 +633,6 @@ export class Subscriber {
 							const held = live.get(path);
 							live.delete(path);
 							if (held?.id !== undefined) this.#detachAnnounce(path, held.id);
-						} else if (msgType === PublishBlocked.id && version === Version.DRAFT_17) {
-							const blocked = await PublishBlocked.decode(framed.reader, version);
-							console.debug(`publish_blocked: suffix=${blocked.suffix} track=${blocked.trackName}`);
 						} else {
 							throw new Error(
 								`unexpected message on subscribe_namespace stream: 0x${msgType.toString(16)}`,
@@ -683,7 +652,7 @@ export class Subscriber {
 
 				// Wait for either the read loop or the announced to close
 				await race([readLoop, announced.closed]);
-				await end();
+				await end(readLoop);
 			};
 			await request.serve(run());
 		} catch (err: unknown) {
@@ -696,15 +665,7 @@ export class Subscriber {
 			// that will never be announced. Matches the lite subscriber.
 			announced.close(e);
 		} finally {
-			// The stream owns every advertisement it carried, so release them however it
-			// ends: a clean close, a decode error, or the peer resetting it. Without this
-			// each namespace keeps its count and the source never detaches, which would
-			// pin the path for the session even after the other source withdrew.
-			released = true;
-			for (const [path, held] of live) {
-				if (held.id !== undefined) this.#detachAnnounce(path, held.id);
-			}
-			live.clear();
+			release();
 		}
 	}
 
@@ -743,8 +704,8 @@ export class Subscriber {
 		try {
 			for (;;) {
 				while (!lister.used.peek()) {
-					if (lister.ended.peek() !== undefined) return;
-					await race([Signal.race(lister.used, lister.ended)]);
+					if (lister.closed.peek() !== undefined) return;
+					await race([Signal.race(lister.used, lister.closed)]);
 				}
 				lister.abort(new Error("track listing requires moq-lite-07 or newer"));
 			}
@@ -753,7 +714,7 @@ export class Subscriber {
 		}
 	}
 
-	// The adapter is gone. If the transport has already closed, that close is the
+	// The session is gone. If the transport has already closed, that close is the
 	// error. A still-open transport, such as a GOAWAY drain, has no peer code yet,
 	// so this does not wait for it. Either way the route failed, so a resumed track moves on.
 	async #closedSession(): Promise<Error> {
@@ -792,8 +753,7 @@ export class Subscriber {
 		let requestId: bigint | undefined;
 		try {
 			valid?.throwIfAborted();
-			// The allocator cancels its own wait. Once it returns an ID, setup must spend
-			// it on the wire before cancellation, or the next legacy request would skip it.
+			// The allocator cancels its own wait.
 			requestId = await this.#session.nextRequestId(valid);
 		} catch (err) {
 			request.reject(error(err));
@@ -844,7 +804,7 @@ export class Subscriber {
 					maxAge = result.maxAge;
 					break;
 				}
-				if (demand.closed.peek() === undefined && demand.wanted.peek() !== undefined) continue;
+				if (hooks.demandReleased(demand).peek() === undefined && demand.wanted.peek() !== undefined) continue;
 				throw abandoned;
 			}
 			console.debug(`subscribe ok: id=${requestId} broadcast=${broadcast} track=${request.name}`);
@@ -882,11 +842,6 @@ export class Subscriber {
 				if (!state.sent && !afterSetup) return;
 				torn = true;
 
-				// Once the SUBSCRIBE is out the publisher may be serving, whether or not it has
-				// answered yet: data streams are independent of the request stream. Aborting says
-				// nothing on v14-16, where the request rides a virtual stream whose reset is
-				// local, so the UNSUBSCRIBE has to go out explicitly.
-				if (state.sent && !state.rejected) await this.#cancelSubscribe(state.stream, requestId);
 				state.stream.abort(e);
 			};
 
@@ -905,8 +860,8 @@ export class Subscriber {
 		const producer = subscription.track;
 		let disposeGrant: Dispose | undefined;
 		try {
-			// Which terminal fired decides whether we owe the publisher a cancellation, so
-			// tag them rather than racing bare promises.
+			// Which terminal fired decides how the track closes, so tag them rather than
+			// racing bare promises.
 			const publisherEnded = Symbol("publisher");
 			const localEnded = Symbol("local");
 			const revokedEnded = Symbol("revoked");
@@ -929,7 +884,7 @@ export class Subscriber {
 			const unanswered = new Signal(0);
 			const done = race([
 				this.#runPublishDone(stream, subscription, broadcast, unanswered).then(() => publisherEnded),
-				producer.closed.then(() => localEnded),
+				hooks.trackReleased(producer).then(() => localEnded),
 				revoked,
 			]);
 			const updates = this.#runUpdates(stream, requestId, producer, priority, maxAge, unanswered, done);
@@ -941,7 +896,11 @@ export class Subscriber {
 			const demand = producer.demand();
 			for (;;) {
 				const reason = await race([done, unwanted(demand).then(() => idle)]);
-				if (reason === idle && demand.closed.peek() === undefined && demand.wanted.peek() !== undefined)
+				if (
+					reason === idle &&
+					hooks.demandReleased(demand).peek() === undefined &&
+					demand.wanted.peek() !== undefined
+				)
 					continue;
 				terminal = reason;
 				break;
@@ -953,26 +912,23 @@ export class Subscriber {
 			// straight out of its loop for the same reason.
 			if (terminal === revokedEnded) {
 				console.info(`subscription no longer authorized: broadcast=${broadcast} track=${request.name}`);
-				producer.close(refused);
+				producer.abort(refused);
 			} else {
-				producer.close();
+				// Only a received end declares one; a copy nobody wants anymore is released, not finished.
+				hooks.releaseTrack(producer);
 			}
 
 			// Closing settled `done`, so an update still being written finishes and nothing starts
-			// another. Its bytes must not interleave with the cancellation, and on drafts 14 and 15
-			// its spent request ID must reach the wire before any later one can.
+			// another. Its bytes must not interleave with the close.
 			await updates;
-
-			// The publisher already ended the request, so there is nothing to cancel. Sending
-			// UNSUBSCRIBE here would name a request it has already torn down.
-			if (terminal !== publisherEnded) await this.#cancelSubscribe(stream, requestId);
 
 			stream.close();
 			console.debug(`subscribe close: id=${requestId} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
 			stream.abort(err);
 			const e = await sessionCause(this.#quic, err);
-			producer.close(this.#localClose ? undefined : e);
+			if (this.#localClose) hooks.releaseTrack(producer);
+			else producer.abort(e);
 			console.warn(
 				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.name} error=${reason(e)}`,
 			);
@@ -1030,13 +986,17 @@ export class Subscriber {
 
 		const { tail, track } = subscription;
 		const complete = () => count > 0n && BigInt(tail.streams) >= count;
-		await tail.settle(complete, track.closed);
+		await tail.settle(complete, hooks.trackReleased(track));
+		// SUBSCRIPTION_ENDED ends just this subscription, so the copy fails rather than declare an
+		// end the track may run past: a later reader subscribes afresh, and its groups continue.
+		if (done.statusCode !== PublishDoneStatus.TRACK_ENDED) {
+			throw new Error(`publish done: subscription ended reason=${done.reasonPhrase}`);
+		}
 	}
 
 	/**
-	 * Follow the aggregate subscriber priority upstream until `done` settles: SUBSCRIBE_UPDATE
-	 * through draft 16, REQUEST_UPDATE after, each under a Request ID of its own. From draft 16
-	 * the answer comes back on this stream (routed by the adapter on draft 16), so one update is
+	 * Follow the aggregate subscriber priority upstream until `done` settles with REQUEST_UPDATE,
+	 * each under a Request ID of its own. The answer comes back on this stream, so one update is
 	 * in flight at a time and changes meanwhile coalesce. No draft lets an update change the
 	 * group order, so it stays as asked.
 	 */
@@ -1050,9 +1010,6 @@ export class Subscriber {
 		done: Promise<unknown>,
 	): Promise<void> {
 		const version = this.#session.version;
-		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
-		// Draft 14 answers no update, and draft 15's answer reaches no subscription.
-		const answered = version !== Version.DRAFT_14 && version !== Version.DRAFT_15;
 		const stopped = done.then(
 			() => null,
 			() => null,
@@ -1061,10 +1018,12 @@ export class Subscriber {
 		void stopped.then(() => stop.abort());
 
 		for (;;) {
+			// With no subscriber left there is nothing to follow: the subscription is ending, or
+			// keeps what it last asked for until one returns, as on lite and in Rust.
 			const subscription = producer.subscription.peek();
 			const wanted = toWire(subscription?.priority ?? 0);
-			const wantedMaxAge = this.#maxAge ? (subscription?.maxDelay ?? Number.MAX_SAFE_INTEGER) : undefined;
-			if ((wanted === sent && wantedMaxAge === sentMaxAge) || unanswered.peek() > 0) {
+			const wantedMaxAge = this.#maxAge ? subscription?.maxDelay : undefined;
+			if (!subscription || (wanted === sent && wantedMaxAge === sentMaxAge) || unanswered.peek() > 0) {
 				const disposes: Dispose[] = [];
 				const wake = new Promise<void>((resolve) => {
 					disposes.push(
@@ -1089,13 +1048,20 @@ export class Subscriber {
 			const parameters = new Parameters();
 			parameters.subscriberPriority = wanted;
 			parameters.maxAge = wantedMaxAge;
-			const update = legacy
-				? new SubscribeUpdate({ requestId, ownRequestId: own, parameters })
-				: new SubscribeUpdate({ requestId: own, parameters });
-			// Counted before writing: the answer can be read before the write's promise resolves.
-			if (answered) unanswered.update((count) => count + 1);
+			const update = new SubscribeUpdate({ requestId: own, parameters });
+			let message: Uint8Array;
 			try {
-				await Message.write(stream.writer, SubscribeUpdate.id, update, version);
+				message = await Message.frame(stream.writer.version, SubscribeUpdate.id, update, version);
+			} catch (err) {
+				// Nothing reached the wire, but the track can no longer follow its subscribers.
+				console.warn(`subscribe update failed: id=${requestId} error=${reason(error(err))}`);
+				producer.abort(error(err));
+				return;
+			}
+			// Counted before writing: the answer can be read before the write's promise resolves.
+			unanswered.update((count) => count + 1);
+			try {
+				await stream.writer.write(message);
 			} catch {
 				// The publisher stopped reading; its responses decide how the track ends.
 				return;
@@ -1103,26 +1069,6 @@ export class Subscriber {
 			sent = wanted;
 			sentMaxAge = wantedMaxAge;
 			console.debug(`subscribe update: id=${requestId} priority=${wanted}`);
-		}
-	}
-
-	/**
-	 * Tell the publisher to stop serving a subscription we are walking away from.
-	 *
-	 * v14-16 cancel with UNSUBSCRIBE (draft-16 section 9.12), which is what lets the
-	 * publisher destroy the subscription (section 5.1.1); v17+ removed the message and
-	 * rely on the stream reset instead. Every path that abandons an Established
-	 * subscription goes through here, because those versions carry the request over a
-	 * virtual stream whose reset never reaches the peer.
-	 */
-	async #cancelSubscribe(stream: RequestStream, requestId: bigint) {
-		const version = this.#session.version;
-		if (version !== Version.DRAFT_14 && version !== Version.DRAFT_15 && version !== Version.DRAFT_16) return;
-
-		try {
-			await Message.write(stream.writer, Unsubscribe.id, new Unsubscribe({ requestId }), version);
-		} catch {
-			// The stream may already be gone; there is nothing further to tell the peer.
 		}
 	}
 
@@ -1146,11 +1092,8 @@ export class Subscriber {
 	}> {
 		const version = this.#session.version;
 
-		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
-		// Virtual streams use no transport credit. Their owner must send UNSUBSCRIBE before
-		// resetting them, including on a deadline, so they stay out of the real-stream guard.
 		state.stream = new RequestStream(
-			legacy ? await this.#session.openBi() : await deadline.open(this.#session.openBi(requestOptions)),
+			await deadline.open(this.#session.openBi(requestOptions)),
 			this.#session,
 			this.#quic,
 		);
@@ -1158,10 +1101,7 @@ export class Subscriber {
 		// The timeout can fire while the open is still in flight, in which case cleanup ran
 		// with nothing to release. Bail now that the stream is recorded, so settling this
 		// promise hands it back to be torn down.
-		// A legacy ID is already spent and cannot be skipped. Its virtual open is local,
-		// so finish this request and let cleanup send UNSUBSCRIBE, even if retirement
-		// won the await above. No response data is released from the canceled setup.
-		if (state.cancelled && !legacy) throw new Error("subscribe cancelled before it was sent");
+		if (state.cancelled) throw new Error("subscribe cancelled before it was sent");
 
 		const msg = new Subscribe({
 			requestId,
@@ -1196,10 +1136,7 @@ export class Subscriber {
 			let reasonPhrase = "unknown error";
 			try {
 				if (response.type === RequestError.id) {
-					const err =
-						version === Version.DRAFT_14
-							? await SubscribeError.decode(response.reader, version)
-							: await RequestError.decode(response.reader, version);
+					const err = await RequestError.decode(response.reader, version);
 					reasonPhrase = requestReason(err.errorCode, err.reasonPhrase, "subscribe", version);
 				}
 			} catch {
@@ -1220,22 +1157,22 @@ export class Subscriber {
 		}
 		// Staged until the answer is written in below, so no reader sees the track before its
 		// Largest and start.
-		const staged = request.stage({
-			// No TIMESCALE (always so on drafts 14-16, which can't carry it) means no timeline,
-			// and the track must not claim one when served onward.
+		const staged = hooks.stageRequest(request, {
+			// No TIMESCALE means no timeline, and the track must not claim one when served onward.
 			timescale: ok.properties.timescale,
-			priority: fromWire(ok.properties.priority ?? ABSENT_WIRE),
+			priority: fromWire(ok.properties.priority ?? DEFAULT_WIRE),
 			maxAge: maxCacheDuration === undefined ? undefined : Milli(Number(maxCacheDuration)),
 			// A moq-transport peer may stamp arrival times, and nothing on the wire says it didn't.
-			unchecked: ok.properties.timescale != null,
+			ietf: version,
 		});
 		const producer = staged.producer;
 		const subscription: Subscription = { track: producer, tail: new Tail() };
 		state.subscription = subscription;
 		if (ok.largest) {
 			// Object IDs can start past zero or skip, while readers see frame ordinals, so only
-			// the group carries over: its first frame is the edge a reader can count on.
-			hooks.reportedLargest(producer, { group: Number(ok.largest.groupId), frame: 0 });
+			// the group carries over: its first frame is the edge a reader can count on. It names
+			// no object, so a Next Object join served onward still starts at the group's first.
+			hooks.reportedGroup(producer, Number(ok.largest.groupId));
 		}
 		// The live join starts at the publisher's edge, whatever floor the demand asked for.
 		// With no Largest it skips nothing, so every group is owed: a lower one's stream may
@@ -1257,7 +1194,7 @@ export class Subscriber {
 			// Only one alias naming two different tracks is the session's problem. A publisher
 			// sharing an alias between subscriptions to one track is allowed to do that, and
 			// disconnecting over it would drop every other broadcast on the session.
-			if (err instanceof DuplicateTrackAlias) this.#session.close();
+			if (err instanceof DuplicateTrackAlias) this.#fail(SessionCode.ProtocolViolation, err.message);
 			throw err;
 		}
 		state.registeredAlias = ok.trackAlias;
@@ -1295,54 +1232,25 @@ export class Subscriber {
 		if (this.#reflected(msg.params.cluster)) {
 			console.debug(`dropping reflected publish_namespace: broadcast=${path}`);
 			await request.refuse("publish_namespace", {
-				requestId: msg.requestId,
 				condition: "uninterested",
 				reasonPhrase: "route loops back",
 			});
 			return;
 		}
 
-		// Draft-14/15 key their namespace-scoped messages by name, not request ID, so the
-		// adapter can hold only one request per namespace: a second would overwrite the
-		// first, and the withdrawals would then close the wrong stream and fail to find
-		// the other. Nothing is lost by refusing it, because the case that makes a second
-		// reference legitimate (an inline NAMESPACE for a path a PUBLISH_NAMESPACE already
-		// carried) needs a message those drafts do not have.
-		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15;
-		if (legacy && (this.#announced.has(path) || this.#legacyRequests.has(path))) {
-			console.warn("duplicate PublishNamespace");
-			// No draft registers a code for a duplicate, and this refusal is a draft-14/15
-			// implementation limit, which is what INTERNAL_ERROR describes.
-			await request.refuse("publish_namespace", {
-				requestId: msg.requestId,
-				condition: "internal",
-				reasonPhrase: "duplicate namespace",
-			});
-			return;
-		}
-
-		// Everywhere else a path this session already knows is not refused: the same
-		// namespace can reach us twice, and each advertisement is tracked apart from news.
-		// This request owns exactly one of those references, named by its id while
-		// attached, and gives it back when the stream ends.
-		if (legacy) this.#legacyRequests.add(path);
+		// A path this session already knows is not refused: the same namespace can reach us
+		// twice, and each advertisement is tracked apart from news. This request owns exactly
+		// one of those references, named by its id while attached, and gives it back when the
+		// stream ends.
+		this.#announceSlots.acquire();
 		let attached: number | undefined;
 		// Fixed for the advertisement's life: no REQUEST_UPDATE carries one.
 		const epoch = msg.params.epoch;
 
 		try {
 			// Send OK first. This must complete before notifying consumers,
-			// because consumers may trigger Subscribe writes that would
-			// interleave with our OK on the control stream.
-			if (version === Version.DRAFT_14) {
-				const ok = new PublishNamespaceOk({ requestId: msg.requestId });
-				await Message.write(request.writer, PublishNamespaceOk.id, ok, version);
-			} else {
-				const ok = new RequestOk({
-					requestId: version === Version.DRAFT_15 || version === Version.DRAFT_16 ? msg.requestId : undefined,
-				});
-				await Message.write(request.writer, RequestOk.id, ok, version);
-			}
+			// because consumers may trigger Subscribe writes.
+			await Message.write(request.writer, RequestOk.id, new RequestOk(), version);
 
 			// Only now is the advertisement ours to announce, for the reason above: a
 			// consumer reacting with a SUBSCRIBE must not interleave with that OK.
@@ -1353,7 +1261,6 @@ export class Subscriber {
 			// close. Nothing else would deliver a re-parented route. What the peer holds
 			// is kept current, since an update carries only what changed.
 			let held = msg.params.cluster;
-			const done = version === Version.DRAFT_16 || legacy;
 			for (;;) {
 				const framed = await race([request.next(), request.ended.then(() => undefined)]);
 				if (framed === undefined) {
@@ -1362,24 +1269,6 @@ export class Subscriber {
 					break;
 				}
 
-				// Drafts 14-15 have no update for an advertisement, so a SUBSCRIBE_UPDATE the
-				// adapter routed here is refused and changes nothing. Draft 14 answers no update;
-				// draft 15 names the update's own Request ID, which the adapter already spent.
-				if (legacy && framed.type === SubscribeUpdate.id) {
-					const body = await framed.reader.read(await framed.reader.u16());
-					if (version === Version.DRAFT_15) {
-						await refuseUpdate(request.writer, version, "publish_namespace", {
-							requestId: await new Reader(undefined, body, version).u62(),
-							condition: "not_supported",
-							reasonPhrase: "update not supported",
-						});
-					}
-					continue;
-				}
-				if (done && framed.type === PublishNamespaceDone.id) {
-					await PublishNamespaceDone.decode(framed.reader, version);
-					break;
-				}
 				// A repeated PUBLISH_NAMESPACE lands here too: a second request on the
 				// stream is the base draft's duplicate request ID.
 				if (framed.type !== PublishNamespaceUpdate.id) {
@@ -1388,36 +1277,23 @@ export class Subscriber {
 					);
 				}
 
-				// Draft-16 updates ride the control stream, which already spent their own Request
-				// ID and keys their answer by it.
-				const keyed = version === Version.DRAFT_16;
 				let update: PublishNamespaceUpdate;
 				try {
 					update = await PublishNamespaceUpdate.decode(framed.reader, version);
 				} catch (err) {
 					if (!(err instanceof MalformedAuthToken)) throw err;
-					// A refused update still spends its own request ID.
-					if (!keyed && err.requestId !== undefined) this.#session.spendRequest(err.requestId);
+					// A refused update's request ID is still checked.
+					if (err.requestId !== undefined) this.#session.checkRequestId(err.requestId);
 					// Section 8.9 rejects the update, which withdraws the advertisement as any
 					// refused update does.
 					await refuseUpdate(request.writer, version, "publish_namespace", {
-						requestId: err.requestId,
 						condition: "malformed_auth_token",
 						reasonPhrase: err.message,
 					});
-					// Draft-16's advertisement outlives its stream, so withdraw it explicitly.
-					if (keyed) {
-						const cancel = new PublishNamespaceCancel({
-							requestId: msg.requestId,
-							errorCode: toRequestCode("malformed_auth_token", "publish_namespace", version),
-							reasonPhrase: err.message,
-						});
-						await Message.write(request.writer, PublishNamespaceCancel.id, cancel, version);
-					}
 					request.close();
 					break;
 				}
-				if (!keyed) this.#session.spendRequest(update.requestId);
+				this.#session.checkRequestId(update.requestId);
 
 				// The parameters exist only on a session that negotiated the extension;
 				// anywhere else they are the peer's violation.
@@ -1450,11 +1326,10 @@ export class Subscriber {
 				// Nothing here can fail to apply, so every update is acknowledged. A leaf
 				// routes nothing, so a repricing changes nothing it holds; consumers still
 				// hear the new route so a forwarder can reprice.
-				const ok = new RequestOk({ requestId: keyed ? update.requestId : undefined });
-				await Message.write(request.writer, RequestOk.id, ok, version);
+				await Message.write(request.writer, RequestOk.id, new RequestOk(), version);
 			}
 		} finally {
-			if (legacy) this.#legacyRequests.delete(path);
+			this.#announceSlots.release();
 
 			// Give back exactly what was taken: a request that never got its OK out never
 			// referenced the path, and retracting there would drop someone else's count.
@@ -1481,7 +1356,6 @@ export class Subscriber {
 			Namespace.reserved(msg.trackNamespace, this.#session.version)
 				? refuseReserved(request)
 				: request.refuse("publish", {
-						requestId: msg.requestId,
 						condition: "not_supported",
 						reasonPhrase: "publish not supported",
 					}),
@@ -1503,7 +1377,7 @@ export class Subscriber {
 			// The control message establishing this alias can arrive after the data stream.
 			subscription = await this.#aliases.get(group.trackAlias);
 		} catch (err: unknown) {
-			if (err instanceof ProtocolViolation) this.#violated(err);
+			if (err instanceof ProtocolViolation) this.#fail(err.code, err.message);
 			const e = await sessionCause(this.#quic, err);
 			// Ours: we cancelled the subscription and the publisher has not stopped yet.
 			// Anything else on this alias is the publisher sending data for a track it never
@@ -1530,15 +1404,14 @@ export class Subscriber {
 						`group ${group.groupId} is at or past the declared end ${subscription.end}`,
 					);
 				}
-				producer = new netGroup.Producer(group.groupId);
-				track.writeGroup(producer);
+				producer = track.createGroup(group.groupId);
 			}
 			return producer;
 		};
 
 		try {
 			// The alias binds after SUBSCRIBE_OK commits the track property; an omitted
-			// header priority inherits it (draft-21 section 10.4).
+			// header priority inherits it (draft-22 section 10.4).
 			if (!group.flags.hasPriority) group.publisherPriority = toWire((await track.info()).priority);
 
 			const timescale = this.#timescales.get(group.trackAlias);
@@ -1551,7 +1424,7 @@ export class Subscriber {
 				// cache.
 				const frame =
 					stream.tryDecode(decode) ??
-					(await race([stream.decodeMaybe(decode), producer?.closed ?? track.closed]));
+					(await race([stream.decodeMaybe(decode), producer?.closed ?? hooks.trackReleased(track)]));
 				if (!producer && (frame === null || frame instanceof Error)) {
 					stream.stop(frame ?? new StreamError(StreamCode.Cancel));
 					return;
@@ -1559,7 +1432,7 @@ export class Subscriber {
 				if (!frame || frame instanceof Error) {
 					// FIRST_OBJECT clear on a stream that ends with no object: it starts partway
 					// through its group and carries none of it, so drop it like any headless
-					// stream. Drafts 14-17 cannot clear the bit, so there it is an empty group.
+					// stream.
 					if (!producer && !group.flags.firstObject) {
 						console.debug(
 							`dropping a group with no head: alias=${group.trackAlias} group=${group.groupId}`,
@@ -1576,7 +1449,7 @@ export class Subscriber {
 					// the track ends with it, and at object 0 it ends before it.
 					if (producer && frame.idDelta !== 0) throw new ObjectIdGap(frame.idDelta);
 					const end = { group: group.groupId, frame: nextObject + frame.idDelta };
-					producer?.close();
+					producer?.finish();
 					try {
 						hooks.endTrack(track, end);
 					} catch (err: unknown) {
@@ -1599,9 +1472,9 @@ export class Subscriber {
 			}
 
 			// A group with no objects still exists.
-			open().close();
+			open().finish();
 		} catch (err: unknown) {
-			if (err instanceof ProtocolViolation) this.#violated(err);
+			if (err instanceof ProtocolViolation) this.#fail(err.code, err.message);
 			const e = await sessionCause(this.#quic, err);
 			// The compact form names the subgroup by its first Object ID, so a nonzero one is
 			// subgroup N: stop the stream before any group exists for it.
@@ -1610,15 +1483,11 @@ export class Subscriber {
 				stream.stop(new Error("subgroups are not supported"));
 				return;
 			}
-			// The producer is still unopened only when the first object failed. On a draft
-			// with no FIRST_OBJECT bit, that non-zero delta is a headless group: drop the
-			// stream and leave the subscription up for the next group. Delivering the
-			// object would renumber a P-frame as the keyframe the group opens with.
-			if (
-				producer === undefined &&
-				e instanceof ObjectIdGap &&
-				(!group.flags.firstObject || !hasFirstObjectBit(this.#session.version))
-			) {
+			// The producer is still unopened only when the first object failed. With FIRST_OBJECT
+			// clear, that non-zero delta is a headless group: drop the stream and leave the
+			// subscription up for the next group. Delivering the object would renumber a P-frame
+			// as the keyframe the group opens with.
+			if (producer === undefined && e instanceof ObjectIdGap && !group.flags.firstObject) {
 				console.debug(`dropping a group with no head: alias=${group.trackAlias} group=${group.groupId}`);
 				stream.stop(new Error("a group must start at object 0"));
 				return;
@@ -1626,20 +1495,20 @@ export class Subscriber {
 			if (e instanceof ObjectIdGap) console.warn(`unsupported object gap: ${reason(e)}`);
 			if (e instanceof EndOfTrackProperties) {
 				// The group before the marker is complete; only the track's end can't be carried.
-				producer?.close();
-				track.close(e);
+				producer?.finish();
+				track.abort(e);
 			} else if (
 				e instanceof ProtocolViolation ||
 				(e instanceof StreamError && e.code === StreamCode.MalformedTrack)
 			) {
 				// The publisher broke the track's end or its content, which no later group can repair.
-				producer?.close(e);
-				track.close(e);
+				producer?.abort(e);
+				track.abort(e);
 			} else {
 				// A stream that fails before its first object still names a group, which the
 				// reader sees fail rather than silently go missing.
 				try {
-					open().close(e);
+					open().abort(e);
 				} catch {
 					// The track has already closed or ended below this group.
 				}
@@ -1741,15 +1610,13 @@ export class Subscriber {
 
 /**
  * A broadcast consumed from a moq-transport session. Track info is resolved by the
- * subscribe path (the inherited `resolveTrackInfo`), but the protocol has no one-shot
- * group fetch, so `track.Consumer.fetchGroup()` is rejected.
+ * subscribe path (the inherited `resolveTrackInfo`), but this client has no one-shot
+ * group fetch, so the wire offers none and `track.Consumer.fetchGroup()` is rejected.
  */
 class ConsumeBroadcast extends broadcast.Consumer {
 	constructor(state?: never) {
 		super(state);
-		overrideBroadcastWire(this, {
-			fetchGroup: () => Promise.reject(new Error("fetch group is not supported for moq-transport")),
-		});
+		overrideBroadcastWire(this, { fetchGroup: undefined });
 	}
 
 	// Preserve the subclass when the consume cache shares this broadcast across callers.

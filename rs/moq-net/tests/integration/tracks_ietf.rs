@@ -17,13 +17,7 @@ use support::harness::{MockConnectOptions, MockPair, connect_mock};
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Every draft that has SUBSCRIBE_TRACKS.
-const DRAFTS: [&str; 5] = [
-	"moq-transport-18",
-	"moq-transport-19",
-	"moq-transport-20",
-	"moq-transport-21",
-	"moq-transport-22",
-];
+const DRAFTS: [&str; 2] = ["moq-transport-18", "moq-transport-22"];
 
 /// SUBSCRIBE (0x03), as the first byte of a request stream.
 const SUBSCRIBE: u8 = 0x03;
@@ -45,6 +39,7 @@ async fn next(tracks: &mut moq_net::broadcast::Tracks) -> String {
 	{
 		Ok(Some(TracksEvent::Added { name, .. })) => format!("+{name}"),
 		Ok(Some(TracksEvent::Removed { name })) => format!("-{name}"),
+		Ok(Some(TracksEvent::Finished { name })) => format!("~{name}"),
 		Ok(Some(TracksEvent::Synced)) => "synced".into(),
 		Ok(None) => "end".into(),
 		Err(err) => format!("error: {err}"),
@@ -183,37 +178,6 @@ async fn a_listing_carries_track_info() {
 	assert_eq!(info.priority, 9);
 }
 
-/// Before draft-18 there is no SUBSCRIBE_TRACKS, so the listing is refused rather than
-/// answered empty, and a reader still subscribes.
-#[moq_clock::test]
-async fn before_draft_18_the_listing_is_refused() {
-	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let a = broadcast.create_track("a", None).unwrap();
-	broadcast.announce(Default::default()).unwrap();
-
-	let (subscriber, _pair) = connect(&publisher, "moq-transport-17").await;
-	let remote = resolve(&subscriber, "bcast").await;
-	let mut tracks = remote.tracks().unwrap();
-	assert_eq!(
-		next(&mut tracks).await,
-		format!("error: {}", moq_net::Error::Unsupported)
-	);
-
-	let mut sub = moq_clock::timeout(TIMEOUT, remote.track("a").unwrap().subscribe(None))
-		.await
-		.expect("subscribe timeout")
-		.expect("subscribe");
-	moq_clock::timeout(TIMEOUT, support::wanted(a.demand()))
-		.await
-		.expect("never subscribed")
-		.unwrap();
-	let mut group = a.append_group().unwrap();
-	group.write_frame(None, &b"frame"[..]).unwrap();
-	group.finish().unwrap();
-	assert_eq!(read(&mut sub).await, Some((0, b"frame".to_vec())));
-}
-
 /// A reader of a listed track resumes its held PUBLISH, so its data arrives with no
 /// SUBSCRIBE at all; draft-18 would refuse one as a second subscription to the track.
 /// Once the reader leaves, the PUBLISH pauses and stays listed, and the next reader
@@ -277,8 +241,8 @@ async fn a_reader_resumes_the_held_publish() {
 }
 
 /// A reader joining a listed track mid-group gets the objects already published in it: on
-/// drafts 18 and 19, whose filters deliver nothing already published, through a Joining
-/// FETCH on the held PUBLISH's Request ID, and from draft-20 through the resume's fill.
+/// draft 18, whose filters deliver nothing already published, through a Joining
+/// FETCH on the held PUBLISH's Request ID, and from draft-22 through the resume's fill.
 #[moq_clock::test]
 async fn a_join_gets_the_current_groups_head() {
 	for version in DRAFTS {
@@ -476,13 +440,13 @@ async fn a_listing_past_the_announces_cap_is_reset() {
 	}
 }
 
-/// Only TRACK_ENDED removes a listed track. Our answerer cannot tell a track that finished
-/// from one that left the listing and may go on elsewhere, so it ends either's PUBLISH in
-/// error: the listing fails loudly instead of removing the track quietly, and a reader
+/// Only TRACK_ENDED removes a listed track, and our answerer sends it only for a track that
+/// finished: that one leaves the listing quietly. One that left unfinished may go on
+/// elsewhere, so its PUBLISH ends in error, which fails the listing loudly, and a reader
 /// listing again sees what is still listed.
 #[moq_clock::test]
-async fn an_unlisted_track_fails_the_listing() {
-	for finish in [false, true] {
+async fn a_track_leaves_the_listing_as_it_ended() {
+	for finish in [true, false] {
 		for version in DRAFTS {
 			let publisher = produce_origin(1);
 			let broadcast = publisher.create_broadcast("bcast").unwrap();
@@ -498,17 +462,16 @@ async fn an_unlisted_track_fails_the_listing() {
 			listed.sort();
 			assert_eq!(listed, ["+a", "+b"], "{version}");
 
-			match finish {
-				true => {
-					a.finish().unwrap();
-					drop(a);
-				}
-				false => {
-					let _ = a.abort(moq_net::Error::Cancel);
-				}
+			if finish {
+				a.finish().unwrap();
+				drop(a);
+				assert_eq!(next(&mut tracks).await, "~a", "{version}");
+				assert!(quiet(&mut tracks).await, "{version}: the listing stands");
+				continue;
 			}
+			let _ = a.abort(moq_net::Error::Cancel);
 			let failed = next(&mut tracks).await;
-			assert!(failed.starts_with("error:"), "{version} finish={finish}: {failed}");
+			assert!(failed.starts_with("error:"), "{version}: {failed}");
 
 			let mut again = remote.tracks().unwrap();
 			assert_eq!(next(&mut again).await, "synced", "{version}");

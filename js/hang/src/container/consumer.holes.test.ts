@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Manual, Micro, Milli, Nano } from "@moq/clock";
-import { Group, Time, Track } from "@moq/net";
+import { Time, Track } from "@moq/net";
 import { Consumer, type Read } from "./consumer.ts";
 import { encodeFrame, Format } from "./legacy.ts";
 
@@ -8,7 +8,7 @@ const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 test.each([0, 100])("a sequence hole before a paused data marker expires at %sms", async (budget) => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const track = new Track.Producer("data");
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
 		format: new Format("data"),
@@ -23,16 +23,14 @@ test.each([0, 100])("a sequence hole before a paused data marker expires at %sms
 		}
 	})();
 	try {
-		const first = new Group.Producer(0);
-		track.writeGroup(first);
+		const first = track.createGroup(0);
 		first.writeFrame({ payload: encodeFrame(new Uint8Array([1]), Micro(10_000)), timestamp: Time.Timestamp.now() });
-		first.close();
+		first.finish();
 		await flush();
 		expect(results).toHaveLength(1);
-		const marker = new Group.Producer(2);
-		track.writeGroup(marker);
+		const marker = track.createGroup(2);
 		marker.writeFrame({ payload: new Uint8Array(), timestamp: Time.Timestamp.now() });
-		marker.close();
+		marker.finish();
 		await flush();
 		if (budget > 0) {
 			expect(results).toHaveLength(1);
@@ -46,15 +44,16 @@ test.each([0, 100])("a sequence hole before a paused data marker expires at %sms
 		]);
 	} finally {
 		consumer.close();
+		track.finish();
 		track.close();
 		await reading;
-		restore();
+		installed.close();
 	}
 });
 
 test("a filled hole cancels its timer and the next hole gets a fresh budget", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const track = new Track.Producer("data");
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
 		format: new Format("data"),
@@ -69,13 +68,12 @@ test("a filled hole cancels its timer and the next hole gets a fresh budget", as
 		}
 	})();
 	const write = (sequence: number, timestamp?: number) => {
-		const group = new Group.Producer(sequence);
-		track.writeGroup(group);
+		const group = track.createGroup(sequence);
 		group.writeFrame({
 			payload: timestamp === undefined ? new Uint8Array() : encodeFrame(new Uint8Array([1]), Micro(timestamp)),
 			timestamp: Time.Timestamp.fromMicros(timestamp ?? 20_000),
 		});
-		group.close();
+		group.finish();
 	};
 	try {
 		write(0, 0);
@@ -97,15 +95,16 @@ test("a filled hole cancels its timer and the next hole gets a fresh budget", as
 		]);
 	} finally {
 		consumer.close();
+		track.finish();
 		track.close();
 		await reading;
-		restore();
+		installed.close();
 	}
 });
 
 test("the holes a stalled source left behind share one budget", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const track = new Track.Producer("data");
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
 		format: new Format("data"),
@@ -120,13 +119,12 @@ test("the holes a stalled source left behind share one budget", async () => {
 		}
 	})();
 	const write = (sequence: number) => {
-		const group = new Group.Producer(sequence);
-		track.writeGroup(group);
+		const group = track.createGroup(sequence);
 		group.writeFrame({
 			payload: encodeFrame(new Uint8Array([1]), Micro(sequence * 10_000)),
 			timestamp: Time.Timestamp.fromMicros(sequence * 10_000),
 		});
-		group.close();
+		group.finish();
 	};
 	try {
 		write(0);
@@ -138,15 +136,16 @@ test("the holes a stalled source left behind share one budget", async () => {
 		expect(results.map((read) => read.kind)).toEqual(["frame", "gap", "frame", "gap", "frame", "gap", "frame"]);
 	} finally {
 		consumer.close();
+		track.finish();
 		track.close();
 		await reading;
-		restore();
+		installed.close();
 	}
 });
 
 test("a hole is late from the earliest arrival past it", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const track = new Track.Producer("data");
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
 		format: new Format("data"),
@@ -161,13 +160,12 @@ test("a hole is late from the earliest arrival past it", async () => {
 		}
 	})();
 	const write = (sequence: number) => {
-		const group = new Group.Producer(sequence);
-		track.writeGroup(group);
+		const group = track.createGroup(sequence);
 		group.writeFrame({
 			payload: encodeFrame(new Uint8Array([1]), Micro(sequence * 10_000)),
 			timestamp: Time.Timestamp.fromMicros(sequence * 10_000),
 		});
-		group.close();
+		group.finish();
 	};
 	try {
 		write(0);
@@ -182,8 +180,9 @@ test("a hole is late from the earliest arrival past it", async () => {
 		expect(results.map((read) => read.kind)).toEqual(["frame", "gap", "frame", "gap", "frame"]);
 	} finally {
 		consumer.close();
+		track.finish();
 		track.close();
 		await reading;
-		restore();
+		installed.close();
 	}
 });

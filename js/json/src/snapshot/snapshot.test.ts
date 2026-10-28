@@ -149,6 +149,20 @@ test("latest abandons a held group when a newer snapshot group rolls", async () 
 	expect(await consumer.latest()).toBeUndefined();
 });
 
+// Skipping to the head never widens the reader's range: a capped reader reads the newest state
+// below its cap, and a datagram past every group does not strand it.
+test("latest stays inside the reader's range", async () => {
+	const track = new Track.Producer("test");
+	const producer = new Producer<Value>({ track, deltas: false });
+	const subscriber = track.subscribe({ maxDelay: REPLAY_LATENCY }).withRange({ end: { excluded: 2 } });
+	const consumer = new Consumer<Value>({ track: subscriber });
+
+	for (let n = 0; n < 4; n++) producer.update({ value: { a: n } });
+	track.appendDatagram(Time.Timestamp.now(), new Uint8Array([0]));
+	expect((await consumer.latest())?.value).toEqual({ a: 1 });
+	producer.finish();
+});
+
 // `next()` finishes the held group before the newer one, so a playhead sees every state.
 test("next reads a held group out before a newer snapshot group", async () => {
 	const track = new Track.Producer("test");
@@ -613,6 +627,22 @@ test("a compressed delta is gated on its encoded size, not its plaintext", async
 	expect(values[values.length - 1]).toEqual(patched);
 });
 
+// A publisher gives up a group a reader is still on once a newer one supersedes it, which every
+// moq-lite version reports as OLD. The reader skips to the newer snapshot instead of failing.
+test("snapshot consumer skips a group the publisher dropped mid-read", async () => {
+	const track = new Track.Producer("test");
+	const consumer = new Consumer<Value>({ track: track.subscribe() });
+	const first = track.appendGroup();
+	first.writeFrame({ payload: new TextEncoder().encode('{"v":0}'), timestamp: Time.Timestamp.now() });
+	expect((await consumer.latest())?.value).toEqual({ v: 0 });
+
+	const next = consumer.latest();
+	first.abort(new NetError.Stream(StreamCode.Old));
+	const second = track.appendGroup();
+	second.writeFrame({ payload: new TextEncoder().encode('{"v":1}'), timestamp: Time.Timestamp.now() });
+	expect((await next)?.value).toEqual({ v: 1 });
+});
+
 // A malformed or failed group must reach the caller; only an explicit retention gap is resumable.
 test("snapshot consumer propagates a non-gap frame failure", async () => {
 	const track = new Track.Producer("test");
@@ -620,7 +650,7 @@ test("snapshot consumer propagates a non-gap frame failure", async () => {
 	const group = track.appendGroup();
 	group.writeFrame({ payload: new TextEncoder().encode('{"ok":true}'), timestamp: Time.Timestamp.now() });
 	expect((await consumer.next())?.value).toEqual({ ok: true });
-	group.close(new NetError.Stream(StreamCode.Internal));
+	group.abort(new NetError.Stream(StreamCode.Internal));
 	await expect(consumer.next()).rejects.toMatchObject({ code: StreamCode.Internal });
 });
 

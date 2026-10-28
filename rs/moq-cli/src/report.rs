@@ -1,5 +1,5 @@
-//! Media reports: the stats track `import --stats` names in its catalog, the feedback
-//! `export --echo` publishes where a catalog solicits it, and the `export stats` and
+//! Media reports: the track `import --report` names in its catalog's `stats` section, the feedback
+//! `export --echo` publishes where a catalog solicits it, and the `export report` and
 //! `export echo` sinks that print them.
 //!
 //! Each report is one snapshot track and its compressed `.z` sibling, written about once a
@@ -263,9 +263,9 @@ pub struct EchoTarget {
 
 /// The feedback broadcast in force: where it is published and its snapshot tracks.
 struct Feedback {
-	path: moq_net::PathOwned,
+	path: moq_net::Path,
 	// Held for the route: dropping it retracts the announcement.
-	_broadcast: moq_net::broadcast::Producer,
+	_broadcast: moq_net::origin::Publication,
 	tracks: Pair<hang::echo::Snapshot<ts::stats::Report>>,
 }
 
@@ -334,7 +334,12 @@ impl Echo {
 			if prefix.is_none() {
 				tracing::warn!(path = %echo.path.as_str(), "the catalog solicits feedback above the connection root");
 			}
-			Some(prefix?.join(format!("{}{}", self.target.name.0, hang::echo::SUFFIX).as_str()))
+			let prefix = prefix?;
+			let name = format!("{}{}", self.target.name.0, hang::echo::SUFFIX);
+			hang::moq_net::Path::new(&name)
+				.and_then(|name| prefix.join(&name))
+				.inspect_err(|err| tracing::warn!(%err, path = %echo.path.as_str(), "the feedback path is too long"))
+				.ok()
 		});
 		if self.feedback.as_ref().map(|feedback| &feedback.path) == target.as_ref() {
 			return;
@@ -353,9 +358,9 @@ impl Echo {
 		}
 	}
 
-	fn publish(&self, path: &moq_net::PathOwned) -> anyhow::Result<Feedback> {
-		let mut broadcast = self.target.origin.create_broadcast(path)?;
-		let tracks = Pair::create(&mut broadcast, hang::echo::TRACK)?;
+	fn publish(&self, path: &moq_net::Path) -> anyhow::Result<Feedback> {
+		let broadcast = self.target.origin.create_broadcast(path)?;
+		let tracks = Pair::create(&mut broadcast.broadcast().clone(), hang::echo::TRACK)?;
 		// A fresh instance, so a reader sees a replaced feedback broadcast as a restart.
 		broadcast.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))?;
 		Ok(Feedback {
@@ -415,9 +420,9 @@ async fn snapshot(
 	}
 }
 
-/// `export stats`: write the broadcast's stats snapshots to stdout as JSON lines, following the
+/// `export report`: write the broadcast's media reports to stdout as JSON lines, following the
 /// track its catalog's `stats` section names, until the catalog and that track have both ended.
-pub async fn print_stats(origin: moq_net::origin::Consumer, path: String) -> anyhow::Result<()> {
+pub async fn print_report(origin: moq_net::origin::Consumer, path: String) -> anyhow::Result<()> {
 	let mut stdout = tokio::io::stdout();
 	origin
 		.routed(&path)
@@ -488,7 +493,7 @@ async fn write_echo(
 ) -> anyhow::Result<()> {
 	// Announcements leave hidden routes out unless asked, and a prefix naming one asks.
 	let hidden = prefix.split('/').any(|segment| segment.starts_with('.'));
-	let prefix = moq_net::Path::new(&prefix).to_owned();
+	let prefix = moq_net::Path::new(&prefix)?;
 	let mut announced = origin.clone().with_hidden(hidden).announced();
 	let (lines, mut written) = tokio::sync::mpsc::channel::<String>(LINES);
 	let mut readers = Readers::default();
@@ -527,14 +532,14 @@ async fn write_echo(
 /// The `export echo` reader of each feedback broadcast, live or draining after its `End`.
 #[derive(Default)]
 struct Readers {
-	running: HashMap<moq_net::PathOwned, tokio::task::JoinHandle<()>>,
+	running: HashMap<moq_net::Path, tokio::task::JoinHandle<()>>,
 	/// One timer per `End`, yielding the path and the reader it ended once `DRAIN` passes.
-	drains: tokio::task::JoinSet<(moq_net::PathOwned, tokio::task::Id)>,
+	drains: tokio::task::JoinSet<(moq_net::Path, tokio::task::Id)>,
 }
 
 impl Readers {
 	/// Read `path` with `reader`, replacing any reader still on it.
-	fn start(&mut self, path: moq_net::PathOwned, reader: tokio::task::JoinHandle<()>) {
+	fn start(&mut self, path: moq_net::Path, reader: tokio::task::JoinHandle<()>) {
 		if let Some(previous) = self.running.insert(path, reader) {
 			previous.abort();
 		}
@@ -542,7 +547,7 @@ impl Readers {
 
 	/// Let the reader of `path` drain, not abort it: the final snapshot can still be in flight. It
 	/// stays so a start at the path replaces it, and goes after `DRAIN` even if its track stays open.
-	fn end(&mut self, path: moq_net::PathOwned) {
+	fn end(&mut self, path: moq_net::Path) {
 		let Some(reader) = self.running.get(&path) else {
 			return;
 		};
@@ -573,11 +578,7 @@ impl Readers {
 }
 
 /// Send a line for each feedback snapshot the broadcast at `path` publishes, until it ends.
-async fn read_echo(
-	origin: moq_net::origin::Consumer,
-	path: moq_net::PathOwned,
-	lines: tokio::sync::mpsc::Sender<String>,
-) {
+async fn read_echo(origin: moq_net::origin::Consumer, path: moq_net::Path, lines: tokio::sync::mpsc::Sender<String>) {
 	let read = async {
 		let broadcast = origin.request_broadcast(&path, None).await?;
 		let subscriber = broadcast.track(hang::echo::TRACK)?.subscribe(None).await?;
@@ -603,7 +604,7 @@ async fn read_echo(
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use tokio::io::{AsyncBufReadExt, BufReader};
@@ -669,7 +670,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_drained_reader_is_forgotten() {
 		let mut readers = Readers::default();
-		let path = moq_net::Path::new("viewer.echo").to_owned();
+		let path = moq_net::Path::from_static("viewer.echo");
 
 		readers.start(path.clone(), tokio::spawn(std::future::pending()));
 		readers.end(path.clone());
@@ -704,3 +705,8 @@ mod tests {
 		assert!(line.contains(r#""n":1"#), "{line}");
 	}
 }
+
+#[cfg(test)]
+#[path = "report/echo_test.rs"]
+#[expect(clippy::disallowed_methods, reason = "tests control the clock directly")]
+mod echo_test;

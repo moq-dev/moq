@@ -2,29 +2,25 @@
 
 from __future__ import annotations
 
-import asyncio
-from collections.abc import Coroutine, Generator
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from moq_ffi import (
-    MoqBroadcastDynamic,
-    MoqBroadcastFinish,
     MoqBroadcastProducer,
-    MoqGroupDemand,
+    MoqBroadcastRequests,
+    MoqFill,
     MoqGroupProducer,
-    MoqGroupRequest,
+    MoqOrder,
     MoqTrackDemand,
-    MoqTrackDynamic,
     MoqTrackProducer,
     MoqTrackRequest,
+    MoqTrackRequests,
 )
 
-from ._records import _from_us, _subscription, _track_info
+from ._records import _subscription, _track_info
 from ._stream import _Stream
 from .types import (
     Frame,
-    Route,
     Subscription,
     TrackInfo,
 )
@@ -108,9 +104,9 @@ class TrackProducer:
         """A watch-only handle to this track's name and whether it has subscribers."""
         return TrackDemand(self._inner.demand())
 
-    def dynamic(self) -> TrackDynamic:
+    def requests(self) -> TrackRequests:
         """Serve fetches for groups that are not currently cached."""
-        return TrackDynamic(self._inner.dynamic())
+        return TrackRequests(self._inner.requests())
 
     def append_group(self) -> GroupProducer:
         """Start a new group; write frames into it, then finish()."""
@@ -184,104 +180,122 @@ class TrackRequest:
         """Watch this track's subscribers, including after accepting it."""
         return TrackDemand(self._inner.demand())
 
-    def dynamic(self) -> TrackDynamic:
+    def requests(self) -> TrackRequests:
         """Create a fetch handler before accepting this requested track."""
-        return TrackDynamic(self._inner.dynamic())
+        return TrackRequests(self._inner.requests())
 
     def abort(self, error_code: int) -> None:
         """Reject the request with an application error code."""
         self._inner.abort(error_code)
 
 
-class GroupDemand:
-    """A watch-only handle to the callers waiting on a requested group.
+class Fill:
+    """A run of groups readers miss, for a :class:`TrackRequests` to serve.
 
-    Returned by ``GroupRequest.demand()``. Weak: holding it does not keep the
-    request alive. The last caller to leave withdraws the request, so once
-    unused, demand never returns: drop the request. Waits raise
-    ``moq.Error.Closed`` after the request is accepted or dropped, and keep
-    the rejection reason after it is rejected.
+    Call :meth:`accept` for each group you have and :meth:`drop_groups` for the rest;
+    :meth:`next` names what is still owed, in the fill's order. Dropping the fill names
+    whatever is left as dropped while a reader still wants it; once nobody does, it is
+    withdrawn, so stop serving it when :meth:`unused` returns. Stop serving a single group
+    when :meth:`unwanted` returns for it, and move on to :meth:`next`.
     """
 
-    def __init__(self, inner: MoqGroupDemand) -> None:
+    def __init__(self, inner: MoqFill) -> None:
         self._inner = inner
 
     @property
-    def sequence(self) -> int:
-        """The sequence of the group this watches."""
-        return self._inner.sequence()
-
-    def is_used(self) -> bool:
-        """Whether the group has at least one waiting caller right now."""
-        return self._inner.is_used()
-
-    async def used(self) -> None:
-        """Wait until the group has at least one waiting caller."""
-        await self._inner.used()
-
-    async def unused(self) -> None:
-        """Wait until the group has no waiting callers."""
-        await self._inner.unused()
-
-
-class GroupRequest:
-    """A request to produce one uncached group for a fetch consumer."""
-
-    def __init__(self, inner: MoqGroupRequest) -> None:
-        self._inner = inner
+    def start_group(self) -> int:
+        """The first group to fill."""
+        return self._inner.start_group()
 
     @property
-    def sequence(self) -> int:
-        """The requested group sequence within the track."""
-        return self._inner.sequence()
+    def start_frame(self) -> int:
+        """The frame within the first group to start from."""
+        return self._inner.start_frame()
+
+    @property
+    def end_group(self) -> int:
+        """The exclusive end group."""
+        return self._inner.end_group()
 
     @property
     def priority(self) -> int:
-        """The consumer's delivery priority for this fetch."""
+        """The most urgent delivery priority among the readers waiting on it."""
         return self._inner.priority()
 
-    def demand(self) -> GroupDemand:
-        """A watch-only handle to whether any caller still wants this group."""
-        return GroupDemand(self._inner.demand())
+    @property
+    def max_delay(self) -> timedelta | None:
+        """The most tolerant age budget among its readers, ``None`` for the publisher's max age alone."""
+        return self._inner.max_delay()
 
-    def accept(self) -> GroupProducer:
-        """Accept the request and return a producer for the group."""
-        return GroupProducer(self._inner.accept())
+    @property
+    def order(self) -> MoqOrder:
+        """Which end to fill first."""
+        return self._inner.order()
 
-    def abort(self, error_code: int) -> None:
-        """Reject the fetch with an application error code."""
-        self._inner.abort(error_code)
+    def next(self) -> int | None:
+        """The next group still owed in the fill's order, ``None`` once every group is answered."""
+        return self._inner.next()
+
+    def accept(self, sequence: int) -> GroupProducer:
+        """Insert group ``sequence`` and return a producer for it.
+
+        The first group starts at :attr:`start_frame`, so its frames keep their indices.
+        """
+        return GroupProducer(self._inner.accept(sequence))
+
+    def drop_groups(self, start: int, end: int) -> None:
+        """Name groups ``start`` up to the exclusive ``end`` as never to be delivered."""
+        self._inner.drop_groups(start, end)
+
+    def is_used(self) -> bool:
+        """Whether a reader still waits on this fill."""
+        return self._inner.is_used()
+
+    async def unused(self) -> None:
+        """Wait until no reader waits on this fill."""
+        await self._inner.unused()
+
+    def is_wanted(self, sequence: int) -> bool:
+        """Whether a reader still waits for group ``sequence`` from this fill.
+
+        False once every reader took it or narrowed past it, or nobody waits on the fill.
+        """
+        return self._inner.is_wanted(sequence)
+
+    async def unwanted(self, sequence: int) -> None:
+        """Wait until no reader waits for group ``sequence`` from this fill, so stop serving it."""
+        await self._inner.unwanted(sequence)
 
 
-class TrackDynamic(_Stream[GroupRequest]):
-    """Async source of uncached group requests for one track.
+class TrackRequests(_Stream[Fill]):
+    """Async source of the fills readers of one track need: runs of groups the cache lacks.
 
     Usable as an async context manager that cancels on exit.
     """
 
-    def __init__(self, inner: MoqTrackDynamic) -> None:
+    def __init__(self, inner: MoqTrackRequests) -> None:
         self._inner = inner
 
-    async def _next(self) -> GroupRequest:
-        return await self.requested_group()
+    async def _next(self) -> Fill:
+        return await self.requested_fill()
 
-    async def requested_group(self) -> GroupRequest:
-        """Wait for the next uncached group request."""
-        return GroupRequest(await self._inner.requested_group())
+    async def requested_fill(self) -> Fill:
+        """Wait for the next fill."""
+        return Fill(await self._inner.requested_fill())
 
     def cancel(self) -> None:
-        """Cancel current and future group request waits."""
+        """Cancel current and future fill waits."""
         self._inner.cancel()
 
 
-class BroadcastDynamic(_Stream[TrackRequest]):
+class BroadcastRequests(_Stream[TrackRequest]):
     """Async source of tracks requested by subscribers.
 
     Hold this object while subscriptions to unknown tracks should be accepted.
     Usable as an async context manager that cancels on exit.
     """
 
-    def __init__(self, inner: MoqBroadcastDynamic) -> None:
+    def __init__(self, inner: MoqBroadcastRequests) -> None:
         self._inner = inner
 
     async def _next(self) -> TrackRequest:
@@ -299,9 +313,9 @@ class BroadcastDynamic(_Stream[TrackRequest]):
 class BroadcastProducer:
     """Wraps MoqBroadcastProducer with a cleaner interface.
 
-    Constructing one directly creates a standalone broadcast for serving dynamic
-    requests (:meth:`moq.BroadcastRequest.accept`) or local pub/sub. To publish at
-    a path, use :meth:`moq.OriginProducer.create_broadcast` instead.
+    It fills tracks; announcing belongs to the :class:`moq.Publication` that
+    :meth:`moq.OriginProducer.create_broadcast` returns, the way to publish at a
+    path. Constructing one directly creates a standalone broadcast for local pub/sub.
     """
 
     def __init__(self) -> None:
@@ -314,21 +328,9 @@ class BroadcastProducer:
         self._inner = inner
         return self
 
-    def dynamic(self) -> BroadcastDynamic:
+    def requests(self) -> BroadcastRequests:
         """Accept subscriptions to tracks that are not published yet."""
-        return BroadcastDynamic(self._inner.dynamic())
-
-    def announce(self, route: Route | None = None) -> None:
-        """Advertise this broadcast's exact path as a route.
-
-        Announcing again re-prices the route in place. Until announced, the
-        broadcast is invisible and unroutable for local consumers and peers alike.
-        """
-        self._inner.announce(route if route is not None else Route())
-
-    def unannounce(self) -> None:
-        """Retract this broadcast's advertisement, if any, from local consumers and peers alike."""
-        self._inner.unannounce()
+        return BroadcastRequests(self._inner.requests())
 
     def publish_track(self, name: str, info: TrackInfo | None = None) -> TrackProducer:
         """Create a track. Send any bytes, no codec validation. ``info`` sets track
@@ -344,77 +346,8 @@ class BroadcastProducer:
     def close(self) -> None:
         """End the broadcast for good: retract it and serve no new tracks.
 
-        Tracks already subscribed carry on to their own end. Closing again is a no-op.
+        Tracks still open on it end with ``Unroutable``, which readers take as the publisher
+        leaving, and their later calls raise ``moq.Error.Closed``; finish a track first to end it
+        cleanly. Closing again is a no-op.
         """
         self._inner.close()
-
-    def finish(self) -> BroadcastFinish:
-        """End the broadcast cleanly, keeping it servable until its media goes stale.
-
-        Finish every track first: the returned handle holds the tracks finished by now and
-        keeps the broadcast announced, so a subscriber still catching up can drain them. A
-        track still live is not held. Every later call on this producer fails, as after
-        :meth:`close`.
-        """
-        return BroadcastFinish(self._inner.finish())
-
-
-class BroadcastFinish:
-    """A cleanly ended broadcast, still announced and serving its finished tracks.
-
-    Await :meth:`wait` to keep it up for its :attr:`linger`. Cancelling the wait, or
-    :meth:`close`, closes the broadcast at once.
-    """
-
-    def __init__(self, inner: MoqBroadcastFinish) -> None:
-        self._inner = inner
-
-    @property
-    def linger(self) -> timedelta:
-        """How long to keep the broadcast: the longest max age of the held tracks."""
-        return _from_us(self._inner.linger_us())
-
-    def wait(self) -> Coroutine[Any, Any, None]:
-        """Keep the broadcast up for its linger, or until :meth:`close`, then close it."""
-        return _FinishWait(self._inner)
-
-    def close(self) -> None:
-        """Close the broadcast now, ending the linger and any wait. Closing again is a no-op."""
-        self._inner.close()
-
-
-class _FinishWait(Coroutine[Any, Any, None]):
-    """A finish's wait that closes the broadcast when cancelled.
-
-    A coroutine body never runs when its task is cancelled before the first step, so the
-    close hooks the cancellation thrown in rather than an ``except`` inside the body.
-    """
-
-    def __init__(self, inner: MoqBroadcastFinish) -> None:
-        self._inner = inner
-        self._wait = inner.wait()
-
-    def __await__(self) -> Generator[Any, None, None]:
-        return self
-
-    def __iter__(self) -> Generator[Any, None, None]:
-        return self
-
-    def __next__(self) -> Any:
-        return self.send(None)
-
-    def send(self, value: Any) -> Any:
-        return self._wait.send(value)
-
-    def throw(self, typ: Any, val: Any = None, tb: Any = None) -> Any:
-        error = typ if val is None else val
-        if isinstance(error, asyncio.CancelledError) or (
-            isinstance(error, type) and issubclass(error, asyncio.CancelledError)
-        ):
-            self._inner.close()
-        if val is None and tb is None:
-            return self._wait.throw(typ)
-        return self._wait.throw(typ, val, tb)
-
-    def close(self) -> None:
-        self._wait.close()

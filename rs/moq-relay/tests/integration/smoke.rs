@@ -103,7 +103,7 @@ async fn spawn_versioned_relay(versions: Vec<moq_net::Version>) -> (u16, tokio::
 	config.auth.public = vec![moq_auth::Pattern::all()];
 
 	// `load` binds the web listener, so the port is ours before anyone dials it.
-	let relay = Relay::load(config).await.expect("load relay");
+	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.web_addrs().http.expect("HTTP listener is configured").port();
 	let handle = tokio::spawn(async move { relay.run().await.expect("relay") });
 
@@ -120,16 +120,21 @@ fn client_version(version: Option<moq_net::Version>) -> moq_tokio::Client {
 	config.tls.insecure = Some(true);
 	// One-shot: these tests were written against a single dial, and a background
 	// redial would re-register with the relay behind the assertions' back.
-	config.once = Some(true);
 	// Zero head start so the WebSocket path runs immediately.
-	config.websocket.delay = Some(std::time::Duration::ZERO);
+	#[cfg(feature = "websocket")]
+	{
+		config.websocket.delay = Some((std::time::Duration::ZERO).into());
+	}
 	// Every relay in this file listens on IPv4 loopback, so bind the same family
 	// rather than egressing a QUIC dial from a dual-stack IPv6 socket.
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
 	if let Some(version) = version {
 		config.version = vec![version];
 	}
-	config.init(Default::default()).expect("client init")
+	config
+		.init(Default::default())
+		.expect("client init")
+		.with_reconnect(false)
 }
 
 /// Connect a publisher and a subscriber to a real relay over `ws://`, push
@@ -184,7 +189,7 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
-	let path = moq_net::Path::new(update.prefix.as_str()).to_owned();
+	let path = update.prefix.clone();
 	assert!(active, "expected announce, got retraction");
 	// Auth root for `/smoke` is "smoke"; the broadcast "test" announces underneath.
 	assert_eq!(path.as_str(), "test");
@@ -220,18 +225,8 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 /// a QUIC one, so the interop harness can pair its `conn{id=N}` span with that close.
 #[tokio::test]
 async fn relay_websocket_logs_its_close_under_a_cluster_id() {
-	use tracing_subscriber::layer::SubscriberExt;
-
 	let logs = Logs::default();
-	// Only the connection target, as the interop harness keeps, so the span and its close
-	// must both log there.
-	let subscriber = tracing_subscriber::fmt()
-		.with_ansi(false)
-		.with_writer(logs.clone())
-		.finish()
-		.with(tracing_subscriber::filter::Targets::new().with_target("moq_relay::connection", tracing::Level::INFO));
-	// Thread-local, which covers the relay: the test's current-thread runtime runs its tasks.
-	let _logging = tracing::subscriber::set_default(subscriber);
+	let _logging = logs.capture();
 
 	let cluster = new_cluster();
 	// Take an id as a QUIC accept would, so a WebSocket counter of its own would reuse it.
@@ -381,7 +376,7 @@ async fn hidden_broadcasts_need_a_lite07_opt_in() {
 /// `--server-version` applies to the WebSocket fallback as well as QUIC.
 #[tokio::test]
 async fn relay_websocket_honors_server_version() {
-	let allowed: moq_net::Version = "moq-transport-16".parse().expect("parse allowed version");
+	let allowed: moq_net::Version = "moq-transport-18".parse().expect("parse allowed version");
 	let excluded = newest_lite_version();
 	let (port, web_handle) = spawn_versioned_relay(vec![allowed]).await;
 	let url: url::Url = format!("ws://127.0.0.1:{port}/smoke").parse().expect("parse url");
@@ -527,7 +522,7 @@ async fn relay_websocket_root_path_upgrades() {
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
-	let path = moq_net::Path::new(update.prefix.as_str()).to_owned();
+	let path = update.prefix.clone();
 	assert!(active, "expected announce, got retraction");
 	assert_eq!(path.as_str(), "test");
 	let bc = sub_consumer
@@ -665,7 +660,7 @@ async fn internal_tcp_round_trip() {
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
-	let path = moq_net::Path::new(update.prefix.as_str()).to_owned();
+	let path = update.prefix.clone();
 	assert!(active, "expected announce, got retraction");
 	assert_eq!(path.as_str(), "test");
 	let bc = sub_consumer
@@ -695,7 +690,7 @@ async fn internal_tcp_round_trip() {
 
 /// Stand up a stream `--server-bind` on a Unix socket and return the socket path
 /// plus an abort handle.
-#[cfg(unix)]
+#[cfg(all(unix, feature = "uds"))]
 async fn spawn_internal_unix_relay() -> (std::path::PathBuf, tokio::task::JoinHandle<()>) {
 	// Keep the path short: macOS caps AF_UNIX paths around 104 bytes, and the
 	// system temp dir is long. /tmp is fine on macOS and Linux. A per-call counter
@@ -719,7 +714,7 @@ async fn spawn_internal_unix_relay() -> (std::path::PathBuf, tokio::task::JoinHa
 /// Connect over `unix://` (qmux on a Unix socket) and confirm a frame
 /// round-trips. Also asserts both sides land on the newest moq-lite version,
 /// which proves the in-band ALPN negotiation populated the protocol.
-#[cfg(unix)]
+#[cfg(all(unix, feature = "uds"))]
 #[tokio::test]
 async fn internal_unix_round_trip() {
 	let (path, handle) = spawn_internal_unix_relay().await;
@@ -797,21 +792,13 @@ async fn internal_unix_round_trip() {
 }
 
 /// Every version whose SETUP carries a request path the server reads: moq-lite-05/06
-/// (Setup Stream) and moq-transport 14-18 (the `Path` SETUP parameter, in-band on
-/// the bidi stream for 14-16 and the uni Setup Stream for 17-18).
+/// (Setup Stream) and moq-transport 18 (the `Path` SETUP parameter on the uni Setup
+/// Stream).
 fn path_versions() -> Vec<moq_net::Version> {
-	[
-		"moq-lite-05",
-		"moq-lite-06",
-		"moq-transport-14",
-		"moq-transport-15",
-		"moq-transport-16",
-		"moq-transport-17",
-		"moq-transport-18",
-	]
-	.iter()
-	.map(|alpn| alpn.parse().expect("parse version alpn"))
-	.collect()
+	["moq-lite-05", "moq-lite-06", "moq-transport-18"]
+		.iter()
+		.map(|alpn| alpn.parse().expect("parse version alpn"))
+		.collect()
 }
 
 /// Publisher and subscriber (both pinned to `version`) that announce/observe
@@ -849,7 +836,7 @@ async fn path_round_trip(version: moq_net::Version, pub_url: url::Url, sub_url: 
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
-	let path = moq_net::Path::new(update.prefix.as_str()).to_owned();
+	let path = update.prefix.clone();
 
 	drop(track);
 	drop(bc);
@@ -884,7 +871,7 @@ async fn internal_tcp_path_reaches_server() {
 /// `unix://<socket>` carries no resource path in its URL (that's the socket), so
 /// the request path rides in the `?path=` query. Same assertion as TCP, across
 /// every version whose SETUP carries a path.
-#[cfg(unix)]
+#[cfg(all(unix, feature = "uds"))]
 #[tokio::test]
 async fn internal_unix_path_reaches_server() {
 	let (path, handle) = spawn_internal_unix_relay().await;

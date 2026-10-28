@@ -8,18 +8,13 @@ from datetime import timedelta
 from moq_ffi import (
     MoqClient,
     MoqClientConfig,
-    MoqClientTls,
     MoqCongestionControl,
-    MoqError,
-    MoqQuicConfig,
-    MoqWebSocketConfig,
     moq_qlog_supported,
     moq_versions,
 )
 
-from ._records import Backoff, _opt_us, _strs
-from .origin import AnnounceConsumer, AnnouncedBroadcast, OriginConsumer, OriginProducer
-from .publish import BroadcastProducer
+from ._records import Backoff, ClientTls, QuicConfig, WebSocketConfig, _implementation, _strs
+from .origin import AnnounceConsumer, AnnouncedBroadcast, OriginConsumer, OriginProducer, Publication
 from .session import Session
 from .subscribe import BroadcastConsumer
 
@@ -52,60 +47,49 @@ class Client:
         client = Client("https://relay.example.com", publish=origin, consume=origin)
 
     The WebSocket fallback races QUIC for ``http(s)`` URLs after a 200 ms head start.
-    Pass ``websocket_enabled=False`` against a QUIC-only relay, or a ``websocket_delay``
-    to change the head start:
+    Pass ``websocket=WebSocketConfig(enabled=False)`` against a QUIC-only relay, or a
+    ``delay`` to change the head start:
 
-        client = Client("https://relay.example.com", websocket_delay=timedelta(milliseconds=50))
+        client = Client("https://relay.example.com", websocket=WebSocketConfig(delay=timedelta(milliseconds=50)))
 
     For a relay that requires mTLS, pass a paired client certificate and key:
 
-        client = Client("https://relay.example.com", tls_cert="client.pem", tls_key="client.key")
+        client = Client("https://relay.example.com", tls=ClientTls(cert="client.pem", key="client.key"))
 
     The session automatically reconnects with backoff when the transport drops, and
-    broadcasts consumed through it ride out the gap. Pass ``reconnect=False`` for a
-    one-shot dial, or a :class:`Backoff` to tune the retry pacing; watch
-    :meth:`Session.status` for the connect/disconnect transitions.
+    broadcasts consumed through it ride out the gap. Pass ``once=True`` for a one-shot
+    dial, or a :class:`Backoff` to tune the retry pacing; watch
+    :meth:`Session.state_changed` for the connect/disconnect transitions.
 
     ``versions`` restricts the protocol versions offered, most preferred first, spelled
     like ``"moq-lite-03"``; empty offers every supported version, which :func:`versions` lists.
 
-    ``timeout`` bounds one connect, dial and handshake together (zero waits forever).
-    ``race`` and ``resolution_delay`` pace Happy Eyeballs. ``tls_host_name`` verifies the
-    certificate against another name (SNI). ``idle_timeout``, ``keep_alive`` (zero disables
-    it), ``gso``, ``mtu_discovery``, ``congestion_control``, and ``qlog`` (a directory, when
-    :func:`qlog_supported`) tune QUIC. ``None`` keeps the library default throughout.
+    ``tokens`` are credentials every dial presents. The first is the connection credential,
+    sent in SETUP and, while an offered version can't carry it there, the URL's ``?jwt=``;
+    each other one widens the session's grant over in-band AUTH. A URL that already carries
+    ``?jwt=`` keeps it, and then every token rides AUTH. Replace them before they expire
+    through :meth:`tokens`.
 
-    ``keylog=True`` writes TLS session secrets to the file ``SSLKEYLOGFILE`` names, for
-    decrypting a capture; without ``SSLKEYLOGFILE`` the client refuses to build.
+    ``timeout`` bounds one connect, dial and handshake together (zero waits forever).
+    ``race`` and ``resolution_delay`` pace Happy Eyeballs. ``tls`` sets certificate trust
+    and the mTLS identity (:class:`ClientTls`), and ``quic`` tunes the transport
+    (:class:`QuicConfig`). ``None`` keeps the library default throughout.
     """
 
     def __init__(
         self,
         url: str,
         *,
-        tls_verify: bool = True,
-        tls_roots: Sequence[str] = (),
-        tls_system_roots: bool | None = None,
-        tls_fingerprints: Sequence[str] = (),
-        tls_cert: str | None = None,
-        tls_key: str | None = None,
-        tls_host_name: str | None = None,
         bind: str | None = None,
         versions: Sequence[str] = (),
+        tokens: Sequence[str] = (),
         timeout: timedelta | None = None,
         race: timedelta | None = None,
         resolution_delay: timedelta | None = None,
-        max_streams: int | None = None,
-        idle_timeout: timedelta | None = None,
-        keep_alive: timedelta | None = None,
-        gso: bool | None = None,
-        mtu_discovery: bool | None = None,
-        congestion_control: CongestionControl | None = None,
-        qlog: str | None = None,
-        keylog: bool = False,
-        websocket_enabled: bool | None = None,
-        websocket_delay: timedelta | None = None,
-        reconnect: bool = True,
+        tls: ClientTls | None = None,
+        quic: QuicConfig | None = None,
+        websocket: WebSocketConfig | None = None,
+        once: bool = False,
         backoff: Backoff | None = None,
         publish: OriginProducer | None = None,
         consume: OriginProducer | None = None,
@@ -116,34 +100,16 @@ class Client:
         self._config = MoqClientConfig(
             bind=bind,
             versions=_strs(versions, "versions"),
-            timeout_us=_opt_us(timeout, "timeout"),
-            race_us=_opt_us(race, "race"),
-            resolution_delay_us=_opt_us(resolution_delay, "resolution_delay"),
-            tls=MoqClientTls(
-                insecure=not tls_verify,
-                roots=_strs(tls_roots, "tls_roots"),
-                system_roots=tls_system_roots,
-                fingerprints=_strs(tls_fingerprints, "tls_fingerprints"),
-                cert=tls_cert,
-                key=tls_key,
-                host_name=tls_host_name,
-            ),
-            quic=MoqQuicConfig(
-                max_streams=max_streams,
-                idle_timeout_us=_opt_us(idle_timeout, "idle_timeout"),
-                keep_alive_us=_opt_us(keep_alive, "keep_alive"),
-                gso=gso,
-                mtu_discovery=mtu_discovery,
-                congestion_control=congestion_control,
-                qlog=qlog,
-                keylog=keylog,
-            ),
-            websocket=MoqWebSocketConfig(
-                enabled=websocket_enabled,
-                delay_us=_opt_us(websocket_delay, "websocket_delay"),
-            ),
-            once=not reconnect,
+            tokens=_strs(tokens, "tokens"),
+            timeout=timeout,
+            race=race,
+            resolution_delay=resolution_delay,
+            tls=(tls or ClientTls())._ffi(),
+            quic=(quic or QuicConfig())._ffi(),
+            websocket=(websocket or WebSocketConfig())._ffi(),
+            once=once,
             backoff=(backoff or Backoff())._ffi(),
+            implementation=_implementation(),
             publish=None if publish is None else publish._inner,
             consume=None if consume is None else consume._inner,
         )
@@ -179,7 +145,8 @@ class Client:
                 # rather than skip: dropping the last session closes the transport, so
                 # one the caller kept a reference to would otherwise stay open.
                 if exc[0] is None:
-                    await self._session.shutdown()
+                    self._session.shutdown()
+                    await self._session.closed()
                 else:
                     self._session.cancel(0)
         finally:
@@ -188,7 +155,7 @@ class Client:
                 self._inner.cancel()
                 self._inner = None
 
-    def create_broadcast(self, path: str) -> BroadcastProducer:
+    def create_broadcast(self, path: str) -> Publication:
         """Create an unannounced broadcast at ``path``, invisible until announced. Announce it after populating tracks.
 
         See :meth:`OriginProducer.create_broadcast`.
@@ -225,46 +192,23 @@ class Client:
 
     @property
     def session(self) -> Session | None:
-        """The established session, or `None` before connecting / after exit."""
+        """The connecting or connected session, or `None` before connecting / after exit."""
         return self._session
-
-    def failure(self) -> MoqError | None:
-        """Why entering the client is still dialing: the error that failed its latest
-        attempt, or ``None`` while nothing has failed or no connect is pending.
-
-        A first dial that keeps failing and retrying never finishes ``async with``, so
-        poll this from another task to show the reason. Giving up for good raises from
-        ``async with`` instead. Once connected, :meth:`Session.failure` reports the
-        reconnects."""
-        return None if self._inner is None else self._inner.failure()
 
 
 def connect(
     url: str,
     *,
-    tls_verify: bool = True,
-    tls_roots: Sequence[str] = (),
-    tls_system_roots: bool | None = None,
-    tls_fingerprints: Sequence[str] = (),
-    tls_cert: str | None = None,
-    tls_key: str | None = None,
-    tls_host_name: str | None = None,
     bind: str | None = None,
     versions: Sequence[str] = (),
+    tokens: Sequence[str] = (),
     timeout: timedelta | None = None,
     race: timedelta | None = None,
     resolution_delay: timedelta | None = None,
-    max_streams: int | None = None,
-    idle_timeout: timedelta | None = None,
-    keep_alive: timedelta | None = None,
-    gso: bool | None = None,
-    mtu_discovery: bool | None = None,
-    congestion_control: CongestionControl | None = None,
-    qlog: str | None = None,
-    keylog: bool = False,
-    websocket_enabled: bool | None = None,
-    websocket_delay: timedelta | None = None,
-    reconnect: bool = True,
+    tls: ClientTls | None = None,
+    quic: QuicConfig | None = None,
+    websocket: WebSocketConfig | None = None,
+    once: bool = False,
     backoff: Backoff | None = None,
     publish: OriginProducer | None = None,
     consume: OriginProducer | None = None,
@@ -278,29 +222,16 @@ def connect(
     """
     return Client(
         url,
-        tls_verify=tls_verify,
-        tls_roots=tls_roots,
-        tls_system_roots=tls_system_roots,
-        tls_fingerprints=tls_fingerprints,
-        tls_cert=tls_cert,
-        tls_key=tls_key,
-        tls_host_name=tls_host_name,
         bind=bind,
         versions=versions,
+        tokens=tokens,
         timeout=timeout,
         race=race,
         resolution_delay=resolution_delay,
-        max_streams=max_streams,
-        idle_timeout=idle_timeout,
-        keep_alive=keep_alive,
-        gso=gso,
-        mtu_discovery=mtu_discovery,
-        congestion_control=congestion_control,
-        qlog=qlog,
-        keylog=keylog,
-        websocket_enabled=websocket_enabled,
-        websocket_delay=websocket_delay,
-        reconnect=reconnect,
+        tls=tls,
+        quic=quic,
+        websocket=websocket,
+        once=once,
         backoff=backoff,
         publish=publish,
         consume=consume,

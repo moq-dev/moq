@@ -1,4 +1,4 @@
-//! Cost of one merged traffic frame from [`moq_stats::aggregate`], swept over live nodes and
+//! Cost of one merged group frame from [`moq_stats::aggregate`], swept over live nodes and
 //! nodes that have come and gone, with and without the grace that folds departed nodes away.
 //! Compare known metadata with one touched publisher losing and recovering its epoch,
 //! and with live nodes that resumed after their open pairs were closed.
@@ -9,13 +9,16 @@
 //!
 //! Run `cargo bench -p moq-stats --bench aggregate` and compare the table across revisions.
 
-// Custom timings measure the real time the work took, not the ambient clock.
-#![allow(clippy::disallowed_methods)]
+#![expect(
+	clippy::disallowed_methods,
+	reason = "custom timings measure the real time the work took, not the ambient clock"
+)]
 
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use moq_net::{Epoch, origin};
-use moq_stats::{Role, Tier, Traffic, TrafficFrame, aggregate, traffic_track};
+use moq_stats::{Group, Traffic, aggregate, group_track};
 
 /// Broadcast paths each node reports.
 const KEYS: usize = 16;
@@ -26,63 +29,78 @@ const FRAMES: u32 = 64;
 /// The grace configured when folding; the churn ages past it before measuring.
 const GRACE: Duration = Duration::from_secs(1);
 
-/// A hand-published node stats broadcast with a default-tier publisher traffic track.
+/// A group frame as the producer writes it.
+#[derive(serde::Serialize)]
+struct Body {
+	epoch: String,
+	tiers: BTreeMap<String, Group>,
+}
+
+/// A hand-published node stats broadcast with one group track carrying
+/// default-tier egress.
 struct Node {
-	source: moq_net::broadcast::Producer,
+	source: moq_net::origin::Publication,
 	epoch: Epoch,
 	known: bool,
-	traffic: moq_json::snapshot::Producer<TrafficFrame>,
-	frame: TrafficFrame,
+	group: moq_json::snapshot::Producer<Body>,
+	frame: Body,
 }
 
 impl Node {
 	fn new(origin: &origin::Producer, name: &str) -> Self {
-		let source = origin
-			.create_broadcast(format!(".stats/acme/node/{name}").as_str())
-			.unwrap();
+		let source = origin.create_broadcast(format!(".stats/node/{name}").as_str()).unwrap();
 		let epoch = Epoch::mint();
 		source
 			.announce(origin::Route::default().with_epoch(epoch.clone()))
 			.unwrap();
 		let track = source
 			.create_track(
-				traffic_track(&Tier::default(), Role::Publisher, false),
+				group_track(moq_net::Path::from_static("acme")),
 				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 			)
 			.unwrap();
 		let config = moq_json::snapshot::Config::default().with_deltas(false);
-		let frame = (0..KEYS)
-			.map(|key| {
-				let mut traffic = Traffic::default();
-				traffic.subscriptions_started = 1;
-				(format!("acme/room-{key:02}"), traffic)
-			})
-			.collect();
+		let mut group = Group::default();
+		for key in 0..KEYS {
+			let mut traffic = Traffic::default();
+			traffic.subscriptions_started = 1;
+			group.paths.entry(format!("acme/room-{key:02}")).or_default().publisher = traffic;
+		}
+		let frame = Body {
+			epoch: Epoch::mint().to_string(),
+			tiers: BTreeMap::from([(String::new(), group)]),
+		};
 		Self {
 			source,
 			epoch,
 			known: true,
-			traffic: moq_json::snapshot::Producer::new(track, config),
+			group: moq_json::snapshot::Producer::new(track, config),
 			frame,
 		}
 	}
 
 	/// Bump every path's byte counter and publish the whole snapshot.
 	fn publish(&mut self, bytes: u64) {
-		for traffic in self.frame.values_mut() {
-			traffic.bytes += bytes;
+		for usage in self.frame.tiers.values_mut().flat_map(|group| group.paths.values_mut()) {
+			usage.publisher.bytes += bytes;
 		}
-		self.traffic
+		self.group
 			.update(moq_net::Timed::from(&self.frame).at(moq_net::Timestamp::now()))
 			.unwrap();
 	}
 }
 
+/// The first path's merged egress.
+fn first(frame: &BTreeMap<String, Group>) -> Option<Traffic> {
+	let usage = frame.get("")?.paths.values().next()?;
+	Some(usage.publisher)
+}
+
 /// Read merged frames until the first path reaches `want` bytes.
-async fn read_until(traffic: &mut aggregate::TrafficConsumer, want: u64) {
+async fn read_until(traffic: &mut aggregate::GroupConsumer, want: u64) {
 	loop {
 		let frame = traffic.next().await.unwrap().unwrap();
-		if frame.values().next().is_some_and(|t| t.bytes >= want) {
+		if first(&frame).is_some_and(|t| t.bytes >= want) {
 			return;
 		}
 	}
@@ -99,11 +117,8 @@ enum State {
 async fn measure(live: usize, departed: usize, grace: Duration, state: State) -> Duration {
 	let (origin, driver) = origin::Producer::new(origin::Config::default());
 	let driver = tokio::spawn(moq_net::time::run(driver));
-	let agg = aggregate::Consumer::new(
-		origin.consume(),
-		aggregate::Config::new().with_depth(1).with_grace(grace),
-	);
-	let mut traffic = agg.traffic(&Tier::default(), Role::Publisher);
+	let agg = aggregate::Consumer::new(origin.consume(), aggregate::Config::new().with_grace(grace));
+	let mut traffic = agg.group(moq_net::Path::from_static("acme"));
 
 	// Every node contributes 1 byte per path, so the total counts nodes seen.
 	let mut total = 0;
@@ -127,7 +142,7 @@ async fn measure(live: usize, departed: usize, grace: Duration, state: State) ->
 			node.source.unannounce();
 			loop {
 				let frame = traffic.next().await.unwrap().unwrap();
-				if frame.values().next().unwrap().active_subscriptions() == live as u64 - 1 {
+				if first(&frame).unwrap().active_subscriptions() == live as u64 - 1 {
 					break;
 				}
 			}

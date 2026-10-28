@@ -68,25 +68,25 @@ token-full:
 # of cargo/brew/apt. Referenced ad-hoc with --refresh so the moq version is the
 # latest default-branch build, never locked by this repo. The devShell only
 # carries client toolchains; moq is built separately here. Override the source
-# with MOQ_FLAKE (e.g. a fork or a pinned ref).
-MOQ_FLAKE := env_var_or_default("MOQ_FLAKE", "github:moq-dev/moq")
+# with SMOKE_FLAKE (e.g. a fork or a pinned ref).
+SMOKE_FLAKE := env_var_or_default("SMOKE_FLAKE", "github:moq-dev/moq")
 CACHIX_SUB := "https://kixelated.cachix.org"
 CACHIX_KEY := "kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk="
 
 nix-channel *args:
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "building moq-relay + moq from {{ MOQ_FLAKE }} (latest)..."
+    echo "building moq-relay + moq from {{ SMOKE_FLAKE }} (latest)..."
     nix_build() {
         nix build --refresh --no-link --print-out-paths \
             --extra-substituters "{{ CACHIX_SUB }}" \
             --extra-trusted-public-keys "{{ CACHIX_KEY }}" "$1"
     }
-    relay=$(nix_build '{{ MOQ_FLAKE }}#moq-relay')
-    cli=$(nix_build '{{ MOQ_FLAKE }}#moq')
+    relay=$(nix_build '{{ SMOKE_FLAKE }}#moq-relay')
+    cli=$(nix_build '{{ SMOKE_FLAKE }}#moq')
     echo "relay: $relay"
     echo "cli:   $cli"
-    RELAY_BIN="$relay/bin/moq-relay" MOQ_BIN="$cli/bin/moq" ./smoke.sh {{ args }}
+    RELAY_BIN="$relay/bin/moq-relay" CLI_BIN="$cli/bin/moq" ./smoke.sh {{ args }}
 
 # Negative control: no publisher, every subscriber must time out.
 negative *args:
@@ -103,12 +103,18 @@ freshness:
 # root .editorconfig for style; shellcheck lints the same set. Each tool is
 # guarded so it skips when not on PATH (nix develop provides them all).
 
-# Lint the harness.
+# Lint the harness and test release discovery and relay selection.
 check:
     @if command -v shfmt >/dev/null 2>&1; then shfmt --diff $(shfmt -f .); else echo "shfmt: skipped"; fi
     @if command -v shellcheck >/dev/null 2>&1 && command -v shfmt >/dev/null 2>&1; then shellcheck $(shfmt -f .); else echo "shellcheck: skipped"; fi
     @command -v actionlint >/dev/null && actionlint ../../.github/workflows/smoke.yml || echo "actionlint: skipped"
     just freshness
+    just harness-check
+
+# Offline release discovery and public-relay endpoint/gate checks.
+harness-check:
+    bash tests/release.sh
+    bash tests/relays.sh
 
 # Unit-tests the failure diagnostics first. Linux, needs sudo.
 
@@ -133,3 +139,16 @@ check-toolchain:
     nix develop --command just freshness
     cd clients/js && nix develop --command bun install
     cd clients/js && nix develop --command bun -e 'import {chromium} from "playwright"; const browser = await chromium.launch({channel: "chromium", headless: true}); await browser.close();'
+
+# Build this checkout's relay image and its upstream interop adapter.
+runner-build:
+    docker build --build-arg package=moq-relay -t moq-interop-relay-base:local ../..
+    docker build -f runner.Dockerfile -t moq-interop-relay:local .
+
+# Run the upstream Docker matrices touching moq-dev and render upstream HTML.
+runner upstream output:
+    python3 runner.py {{ quote(upstream) }} {{ quote(output) }}
+
+# Check dynamic matrix selection and fail-closed coverage validation.
+runner-check:
+    python3 runner.test.py

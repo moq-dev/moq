@@ -41,11 +41,9 @@ freshest. Baselines:
   unlinted for their macOS, Windows, and Android items. `moq-gst` has 3 items
   from `gst::plugin_define!`. `moq-v4l` reports 3108, nearly all its generated
   `sys` bindings; whether the fork earns docs is still undecided.
-- JS: since [docs-js](https://github.com/moq-dev/moq/pull/6163), every
-  published package's build runs `js/common/docs.ts`, which fails on an
-  undocumented export or public class member, so check only that its
-  exemptions (private, protected, symbol brands, and custom element reactions)
-  still hold up and that docs say something.
+- JS: the doc build renders the API reference with TypeDoc and fails on any
+  TypeDoc warning, such as an unresolved link, but not on an undocumented
+  export, so look for those and check that docs say something.
 - Links: GET (not HEAD) every external URL in `doc/` with a browser user
   agent. 316 URLs: all answered except placeholder and local hosts, relay
   URLs that only speak MoQ, npmjs.com and w3.org pages that refuse
@@ -60,10 +58,10 @@ freshest. Baselines:
   `gst-inspect-1.0` of a debug `moq-gst` build lists every element and pad
   property `doc/bin/gstreamer.md` names.
 - Cross-Package Sync: walked from `9b90cdd569` through `7d2a91fe66`. Walk the
-  next run from there. Go has no `Client` failure accessor because `Dial`
-  returns only once connected. The newer 2026-10-21 maintainer decision
-  plans that gap in [Go first-dial failure](/quest/m2/go-first-dial-failure.md);
-  verify its accessor and the Kotlin/Dart wording when that quest lands.
+  next run from there. At that baseline, Go could not observe first-dial
+  failures because `Dial` returned only once connected. Every binding now
+  returns a connecting session with one coherent `state()` snapshot; verify
+  first-dial failure observation and Kotlin/Dart wording against that API.
 
 ## Required
 

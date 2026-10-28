@@ -68,13 +68,15 @@ pub struct Client<S = TcpStream> {
 	/// The `<app>` this client connected to, logged in place of the stream key.
 	app: String,
 	/// How long [`publish`](Self::publish)'s FLV muxer waits for a stalled group
-	/// before skipping. Defaults to [`DEFAULT_MAX_DELAY`](crate::DEFAULT_MAX_DELAY).
-	export_max_delay: Duration,
+	/// before skipping.
+	max_delay: Duration,
 	/// Retention declared on the media tracks [`pull`](Self::pull) publishes, or `None`
 	/// for hang's own default.
-	import_max_age: Option<Duration>,
-	/// Connection allocator each ingested track claims its peak-hold bitrate on.
-	import_bandwidth: moq_net::bandwidth::Allocator,
+	max_age: Option<Duration>,
+	/// Connection allocator each track [`pull`](Self::pull) ingests claims its peak-hold bitrate on.
+	bandwidth: moq_net::bandwidth::Allocator,
+	/// How long a broadcast [`pull`](Self::pull) finished stays up.
+	linger: Duration,
 	/// Script data [`pull`](Self::pull) discards, including any sent before Play.Start.
 	metadata: crate::metadata::Dropped,
 }
@@ -86,11 +88,15 @@ impl Client<TcpStream> {
 	/// For `rtmps://` or any other transport, establish the stream yourself and use
 	/// [`with_stream`](Self::with_stream) instead.
 	pub async fn connect(addr: SocketAddr, app: &str) -> Result<Self> {
-		let stream = TcpStream::connect(addr).await?;
-		crate::server::configure_socket(&stream, addr);
-		// Advertise a tcUrl derived from the dial target: several ingest servers
-		// (YouTube, Twitch, some nginx-rtmp configs) reject a connect without one.
-		Self::with_stream_config(stream, app, Some(format!("rtmp://{addr}/{app}"))).await
+		moq_clock::timeout(crate::server::REQUEST_TIMEOUT, async {
+			let stream = TcpStream::connect(addr).await?;
+			crate::server::configure_socket(&stream, addr);
+			// Advertise a tcUrl derived from the dial target: several ingest servers
+			// (YouTube, Twitch, some nginx-rtmp configs) reject a connect without one.
+			Self::with_stream_config(stream, app, Some(format!("rtmp://{addr}/{app}"))).await
+		})
+		.await
+		.map_err(|_| anyhow::anyhow!("RTMP connection timed out"))?
 	}
 }
 
@@ -101,11 +107,18 @@ impl<S: Stream> Client<S> {
 	/// The bring-your-own-transport entry point: establish the connection (and, for
 	/// `rtmps://`, the TLS handshake) yourself, then hand the stream here.
 	pub async fn with_stream(stream: S, app: &str) -> Result<Self> {
-		Self::with_stream_config(stream, app, None).await
+		moq_clock::timeout(
+			crate::server::REQUEST_TIMEOUT,
+			Self::with_stream_config(stream, app, None),
+		)
+		.await
+		.map_err(|_| anyhow::anyhow!("RTMP connect request timed out"))?
 	}
 
 	async fn with_stream_config(mut stream: S, app: &str, tc_url: Option<String>) -> Result<Self> {
-		let remaining = client_handshake(&mut stream).await?;
+		let remaining = moq_clock::timeout(crate::server::HANDSHAKE_TIMEOUT, client_handshake(&mut stream))
+			.await
+			.map_err(|_| anyhow::anyhow!("RTMP handshake timed out"))??;
 
 		let mut config = ClientSessionConfig::new();
 		config.tc_url = tc_url;
@@ -133,7 +146,9 @@ impl<S: Stream> Client<S> {
 			while let Some(result) = work.pop_front() {
 				match result {
 					ClientSessionResult::OutboundResponse(packet) => stream.write_all(&packet.bytes).await?,
-					ClientSessionResult::RaisedEvent(ClientSessionEvent::ConnectionRequestAccepted) => break 'connect,
+					ClientSessionResult::RaisedEvent(ClientSessionEvent::ConnectionRequestAccepted) => {
+						break 'connect;
+					}
 					ClientSessionResult::RaisedEvent(ClientSessionEvent::ConnectionRequestRejected { description }) => {
 						return Err(anyhow::anyhow!("rtmp connect rejected: {description}").into());
 					}
@@ -155,18 +170,21 @@ impl<S: Stream> Client<S> {
 			session,
 			work,
 			app: app.to_string(),
-			export_max_delay: crate::DEFAULT_MAX_DELAY,
-			import_max_age: None,
-			import_bandwidth: moq_net::bandwidth::Allocator::unlimited(),
+			max_delay: crate::DEFAULT_MAX_DELAY,
+			max_age: None,
+			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
+			linger: moq_mux::Linger::DEFAULT,
 			metadata: Default::default(),
 		})
 	}
 
 	/// Set the FLV release delay and stalled-group budget for [`publish`](Self::publish).
-	/// Defaults to [`DEFAULT_MAX_DELAY`](crate::DEFAULT_MAX_DELAY); zero releases
-	/// available frames immediately without deadline drops.
-	pub fn with_export_max_delay(mut self, max_delay: Duration) -> Self {
-		self.export_max_delay = max_delay;
+	/// Defaults to 500 ms; zero releases available frames immediately without deadline drops.
+	///
+	/// The publish (egress) direction only; [`pull`](Self::pull) takes
+	/// [`with_max_age`](Self::with_max_age) instead.
+	pub fn with_max_delay(mut self, max_delay: Duration) -> Self {
+		self.max_delay = max_delay;
 		self
 	}
 
@@ -180,9 +198,9 @@ impl<S: Stream> Client<S> {
 	/// and the memory matters.
 	///
 	/// The pull (ingest) direction only; [`publish`](Self::publish) reads a broadcast
-	/// someone else declared, and takes [`with_export_max_delay`](Self::with_export_max_delay) instead.
-	pub fn with_import_max_age(mut self, max_age: impl Into<Option<Duration>>) -> Self {
-		self.import_max_age = max_age.into();
+	/// someone else declared, and takes [`with_max_delay`](Self::with_max_delay) instead.
+	pub fn with_max_age(mut self, max_age: impl Into<Option<Duration>>) -> Self {
+		self.max_age = max_age.into();
 		self
 	}
 
@@ -194,8 +212,18 @@ impl<S: Stream> Client<S> {
 	///
 	/// The pull (ingest) direction only; [`publish`](Self::publish) reads a
 	/// broadcast someone else declared.
-	pub fn with_import_bandwidth(mut self, bandwidth: moq_net::bandwidth::Allocator) -> Self {
-		self.import_bandwidth = bandwidth;
+	pub fn with_bandwidth(mut self, bandwidth: moq_net::bandwidth::Allocator) -> Self {
+		self.bandwidth = bandwidth;
+		self
+	}
+
+	/// Keep the broadcast [`pull`](Self::pull) publishes up for `linger` after the remote
+	/// completes the play, so a subscriber that arrives after the end still gets the tail.
+	/// Defaults to [`moq_mux::Linger::DEFAULT`]; zero closes it at once.
+	///
+	/// The pull (ingest) direction only.
+	pub fn with_linger(mut self, linger: Duration) -> Self {
+		self.linger = linger;
 		self
 	}
 
@@ -211,9 +239,9 @@ impl<S: Stream> Client<S> {
 		mut self,
 		stream_key: &str,
 		origin: origin::Consumer,
-		path: impl moq_net::AsPath,
+		path: impl Into<moq_net::Path>,
 	) -> Result<()> {
-		let path = path.as_path();
+		let path: moq_net::Path = path.into();
 		let request = self
 			.session
 			.request_publishing(stream_key.to_string(), PublishRequestType::Live)
@@ -235,7 +263,7 @@ impl<S: Stream> Client<S> {
 			.catalog::<()>(moq_mux::catalog::CatalogFormat::default())
 			.await
 			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?;
-		let mut export = FlvExport::new(source, catalog).with_delay(self.export_max_delay);
+		let mut export = FlvExport::new(source, catalog).with_delay(self.max_delay);
 		let mut tags = flv::TagReader::new();
 		let mut buffer = [0u8; READ_BUFFER];
 
@@ -295,12 +323,16 @@ impl<S: Stream> Client<S> {
 	/// on its own task.
 	///
 	/// A remote that completes the play (`NetStream.Play.Complete` or `NetStream.Play.Stop`)
-	/// ends cleanly: the finished broadcast stays up until its media is stale, so subscribers
-	/// still catching up drain the tail, and the future resolves after that. Dropping the
-	/// future ends the linger early, as does a newer publish at `path`. A connection that
-	/// drops first closes the broadcast at once.
-	pub async fn pull(mut self, stream_key: &str, origin: &origin::Producer, path: impl moq_net::AsPath) -> Result<()> {
-		let path = path.as_path();
+	/// ends cleanly: the finished broadcast stays up for the [linger](Self::with_linger), and
+	/// the future resolves after that. Dropping the future ends the linger early. A
+	/// connection that drops first closes the broadcast at once.
+	pub async fn pull(
+		mut self,
+		stream_key: &str,
+		origin: &origin::Producer,
+		path: impl Into<moq_net::Path>,
+	) -> Result<()> {
+		let path: moq_net::Path = path.into();
 		let request = self
 			.session
 			.request_playback(stream_key.to_string())
@@ -310,8 +342,8 @@ impl<S: Stream> Client<S> {
 		self.await_event(Direction::Play).await?;
 
 		let config = moq_mux::catalog::Config::default()
-			.with_max_age(self.import_max_age)
-			.with_bandwidth(self.import_bandwidth.clone());
+			.with_max_age(self.max_age)
+			.with_bandwidth(self.bandwidth.clone());
 		let mut publisher = Publisher::new(origin, path.as_str(), config)?;
 
 		// The stream key is the ingest credential (`rtmp://host/<app>/<key>`), so the
@@ -320,14 +352,15 @@ impl<S: Stream> Client<S> {
 
 		let result = self.pull_media(&mut publisher).await;
 		match result {
-			// A clean end: serve the finished broadcast until its media is stale, so
-			// subscribers still catching up drain the tail. The remote is done, so hang up first.
+			// A clean end: serve the finished broadcast for the linger, so a subscriber that
+			// arrives after the end still gets the tail. The remote is done, so hang up first.
 			Ok(true) => {
+				let linger = self.linger;
 				drop(self);
-				match publisher.finish() {
-					Ok(finish) => {
-						tracing::info!(%path, linger = ?finish.linger(), "rtmp play completed, serving the finished broadcast until its media is stale");
-						finish.wait().await;
+				match publisher.finish(linger) {
+					Ok(publisher) => {
+						tracing::info!(%path, ?linger, "rtmp play completed, serving the finished broadcast");
+						publisher.wait().await;
 					}
 					Err(err) => tracing::debug!(%err, "error finishing RTMP pull"),
 				}
@@ -363,7 +396,10 @@ impl<S: Stream> Client<S> {
 			return Ok(true);
 		}
 		loop {
-			let n = self.stream.read(&mut buffer).await?;
+			let n = tokio::select! {
+				result = self.stream.read(&mut buffer) => result?,
+				_ = moq_clock::sleep_until(publisher.media_deadline) => anyhow::bail!("remote sent no RTMP media before timeout"),
+			};
 			if n == 0 {
 				return Ok(false);
 			}
@@ -387,19 +423,20 @@ impl<S: Stream> Client<S> {
 	) -> Result<bool> {
 		for result in results {
 			match result {
-				ClientSessionResult::OutboundResponse(packet) => self.stream.write_all(&packet.bytes).await?,
+				ClientSessionResult::OutboundResponse(packet) => {
+					moq_clock::timeout_at(publisher.media_deadline, self.stream.write_all(&packet.bytes))
+						.await
+						.map_err(|_| {
+							anyhow::anyhow!("remote blocked RTMP control output before the media deadline")
+						})??;
+				}
 				ClientSessionResult::RaisedEvent(event) => match event {
-					// A frame that fails to demux is dropped, not fatal: the importer
-					// consumes whole tags atomically, so one bad frame doesn't desync.
+					// A timestamp restart ends this publisher; isolated malformed tags are skipped.
 					ClientSessionEvent::VideoDataReceived { data, timestamp } => {
-						if let Err(err) = publisher.push(flv::TAG_VIDEO, timestamp.value, &data) {
-							tracing::warn!(%err, "dropping RTMP video frame that failed to demux");
-						}
+						publisher.push(flv::TAG_VIDEO, timestamp.value, &data)?;
 					}
 					ClientSessionEvent::AudioDataReceived { data, timestamp } => {
-						if let Err(err) = publisher.push(flv::TAG_AUDIO, timestamp.value, &data) {
-							tracing::warn!(%err, "dropping RTMP audio frame that failed to demux");
-						}
+						publisher.push(flv::TAG_AUDIO, timestamp.value, &data)?;
 					}
 					// Codec config arrives in the sequence-header tags, so script
 					// data isn't forwarded.
@@ -423,42 +460,46 @@ impl<S: Stream> Client<S> {
 	/// Pump the session until the publish/play request is accepted, writing any
 	/// outbound packets and failing on an explicit rejection.
 	async fn await_event(&mut self, direction: Direction) -> Result<()> {
-		let mut buffer = [0u8; READ_BUFFER];
-		loop {
-			while let Some(result) = self.work.pop_front() {
-				match result {
-					ClientSessionResult::OutboundResponse(packet) => self.stream.write_all(&packet.bytes).await?,
-					ClientSessionResult::RaisedEvent(event) => match (direction, event) {
-						(Direction::Publish, ClientSessionEvent::PublishRequestAccepted)
-						| (Direction::Play, ClientSessionEvent::PlaybackRequestAccepted) => return Ok(()),
-						// Script data can precede Play.Start; count it without keeping the payload.
-						(
-							Direction::Play,
-							ClientSessionEvent::StreamMetadataReceived { .. }
-							| ClientSessionEvent::UnhandleableAmf0Data { .. },
-						) => self.metadata.record(),
-						// A refused publish/play arrives as an onStatus *failure* code, not a
-						// Rejected event; surface it instead of hanging until the peer closes.
-						// Benign progress codes (e.g. NetStream.Play.Reset, which precedes
-						// .Start) come through here too, so only fail on error codes.
-						(_, ClientSessionEvent::UnhandleableOnStatusCode { code }) if is_status_failure(&code) => {
-							return Err(anyhow::anyhow!("rtmp {direction} rejected by remote: {code}").into());
-						}
-						_ => {}
-					},
-					ClientSessionResult::UnhandleableMessageReceived(_) => {}
+		moq_clock::timeout(crate::server::REQUEST_TIMEOUT, async {
+			let mut buffer = [0u8; READ_BUFFER];
+			loop {
+				while let Some(result) = self.work.pop_front() {
+					match result {
+						ClientSessionResult::OutboundResponse(packet) => self.stream.write_all(&packet.bytes).await?,
+						ClientSessionResult::RaisedEvent(event) => match (direction, event) {
+							(Direction::Publish, ClientSessionEvent::PublishRequestAccepted)
+							| (Direction::Play, ClientSessionEvent::PlaybackRequestAccepted) => return Ok(()),
+							// Script data can precede Play.Start; count it without keeping the payload.
+							(
+								Direction::Play,
+								ClientSessionEvent::StreamMetadataReceived { .. }
+								| ClientSessionEvent::UnhandleableAmf0Data { .. },
+							) => self.metadata.record(),
+							// A refused publish/play arrives as an onStatus *failure* code, not a
+							// Rejected event; surface it instead of hanging until the peer closes.
+							// Benign progress codes (e.g. NetStream.Play.Reset, which precedes
+							// .Start) come through here too, so only fail on error codes.
+							(_, ClientSessionEvent::UnhandleableOnStatusCode { code }) if is_status_failure(&code) => {
+								return Err(anyhow::anyhow!("rtmp {direction} rejected by remote: {code}").into());
+							}
+							_ => {}
+						},
+						ClientSessionResult::UnhandleableMessageReceived(_) => {}
+					}
 				}
+				let n = self.stream.read(&mut buffer).await?;
+				if n == 0 {
+					return Err(anyhow::anyhow!("rtmp server closed before {direction} was accepted").into());
+				}
+				let results = self
+					.session
+					.handle_input(&buffer[..n])
+					.map_err(|e| anyhow::anyhow!("rtmp handle_input: {e:?}"))?;
+				self.work.extend(results);
 			}
-			let n = self.stream.read(&mut buffer).await?;
-			if n == 0 {
-				return Err(anyhow::anyhow!("rtmp server closed before {direction} was accepted").into());
-			}
-			let results = self
-				.session
-				.handle_input(&buffer[..n])
-				.map_err(|e| anyhow::anyhow!("rtmp handle_input: {e:?}"))?;
-			self.work.extend(results);
-		}
+		})
+		.await
+		.map_err(|_| anyhow::anyhow!("RTMP {direction} request timed out"))?
 	}
 
 	/// Write any outbound packets in `results` and discard the rest.
@@ -543,22 +584,22 @@ struct Publisher {
 	importer: FlvImport,
 	// Finished at a clean end, so the finished broadcast keeps serving the catalog.
 	catalog: moq_mux::catalog::Producer,
-	// A clone of the importer's producer, so an end can close the broadcast
-	// (prompt unannounce) even though the importer owns it.
-	broadcast: moq_net::broadcast::Producer,
+	// Controls publication so an end can retract before the importer's fill clone drops.
+	broadcast: moq_net::origin::Publication,
 	// This pull's publisher instance, so pulling again replaces it rather than resuming into it.
 	epoch: moq_net::Epoch,
+	media_deadline: moq_clock::Instant,
 }
 
 impl Publisher {
 	fn new(origin: &origin::Producer, path: &str, config: moq_mux::catalog::Config) -> anyhow::Result<Self> {
 		let epoch = moq_net::Epoch::mint();
-		let mut broadcast = origin
+		let broadcast = origin
 			.publish(path, moq_net::origin::Route::default().with_epoch(epoch.clone()))
 			.map_err(|err| anyhow::anyhow!("broadcast '{path}' could not be published: {err}"))?;
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config)?;
 		let handle = broadcast.clone();
-		let mut importer = FlvImport::new(broadcast, catalog.reserve());
+		let mut importer = FlvImport::new(broadcast.broadcast().clone(), catalog.reserve());
 
 		// Feed the FLV file header once up front; media tags follow per message.
 		importer.decode(&flv::file_header())?;
@@ -566,32 +607,28 @@ impl Publisher {
 			importer,
 			catalog,
 			epoch,
+			media_deadline: moq_clock::Instant::now() + crate::server::PUBLISH_IDLE_TIMEOUT,
 			broadcast: handle,
 		})
 	}
 
 	fn push(&mut self, tag_type: u8, timestamp: u32, body: &Bytes) -> anyhow::Result<()> {
-		// FLV's tag DataSize is 24-bit; a larger body would desync the demuxer.
-		anyhow::ensure!(
-			body.len() <= 0xFF_FFFF,
-			"RTMP message body {} exceeds FLV's 24-bit tag size limit",
-			body.len()
-		);
-		Ok(self.importer.decode(&flv::tag(tag_type, timestamp, body))?)
+		self.media_deadline = moq_clock::Instant::now() + crate::server::PUBLISH_IDLE_TIMEOUT;
+		flv::import(&mut self.importer, tag_type, timestamp, body)
 	}
 
-	/// Flush any buffered media and finish every track, the catalog included, returning
-	/// the finished broadcast, which stays announced until it is dropped.
-	fn finish(mut self) -> anyhow::Result<moq_net::broadcast::Finish> {
+	/// Flush any buffered media and finish every track, the catalog included, keeping the
+	/// finished broadcast up for `linger`.
+	fn finish(mut self, linger: Duration) -> anyhow::Result<moq_mux::Linger<Self>> {
 		self.importer.finish()?;
 		self.catalog.finish()?;
-		// Taken while the importer is alive, so it holds the tracks just finished.
-		Ok(self.broadcast.finish())
+		Ok(moq_mux::Linger::new([self.broadcast.broadcast().clone()], self, linger))
 	}
 
-	/// Flush any buffered media, then end the broadcast so the origin unannounces it at once.
+	/// Flush any buffered media and finish the catalog, then end the broadcast so the origin unannounces it at once.
 	fn close(mut self) -> anyhow::Result<()> {
 		self.importer.finish()?;
+		self.catalog.finish()?;
 		self.broadcast.close();
 		Ok(())
 	}
@@ -601,17 +638,63 @@ impl Publisher {
 	///
 	/// Consumes the publisher and closes the broadcast.
 	fn abort(self, err: moq_net::Error) {
+		self.catalog.abort(err.clone());
 		self.importer.abort(err);
 		self.broadcast.close();
 	}
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use std::time::Duration;
 
 	use super::*;
+
+	#[tokio::test(start_paused = true)]
+	async fn client_handshakes_and_requests_have_finite_budgets() {
+		let (stream, _peer) = tokio::io::duplex(4096);
+		let start = moq_clock::Instant::now();
+		assert!(Client::with_stream(stream, "live").await.is_err());
+		assert_eq!(start.elapsed(), crate::server::HANDSHAKE_TIMEOUT);
+
+		for direction in [Direction::Publish, Direction::Play] {
+			let (stream, _peer) = tokio::io::duplex(1);
+			let (session, _) = ClientSession::new(ClientSessionConfig::new()).unwrap();
+			let mut client = Client {
+				stream,
+				session,
+				work: VecDeque::new(),
+				app: "live".into(),
+				max_delay: crate::DEFAULT_MAX_DELAY,
+				max_age: None,
+				bandwidth: Default::default(),
+				linger: Duration::ZERO,
+				metadata: Default::default(),
+			};
+			let start = moq_clock::Instant::now();
+			assert!(client.await_event(direction).await.is_err());
+			assert_eq!(start.elapsed(), crate::server::REQUEST_TIMEOUT);
+			let origin = moq_tokio::origin::spawn();
+			let mut publisher = Publisher::new(&origin, "idle", Default::default()).unwrap();
+			if matches!(direction, Direction::Publish) {
+				let (packet, _) = client.session.send_ping_request().unwrap();
+				client.work.push_back(ClientSessionResult::OutboundResponse(packet));
+			}
+			let start = moq_clock::Instant::now();
+			let mut pull = Box::pin(client.pull_media(&mut publisher));
+			assert!(futures::poll!(pull.as_mut()).is_pending());
+			tokio::time::advance(crate::server::PUBLISH_IDLE_TIMEOUT).await;
+			assert!(matches!(futures::poll!(pull.as_mut()), std::task::Poll::Ready(Err(_))));
+			drop(pull);
+			assert_eq!(start.elapsed(), crate::server::PUBLISH_IDLE_TIMEOUT);
+			publisher.abort(moq_net::Error::Cancel);
+		}
+	}
 	#[tokio::test(start_paused = true)]
 	#[tracing_test::traced_test]
 	async fn pull_metadata_drops_warn_once() {
@@ -633,9 +716,10 @@ mod tests {
 			session,
 			work,
 			app: "live".into(),
-			export_max_delay: crate::DEFAULT_MAX_DELAY,
-			import_max_age: None,
-			import_bandwidth: Default::default(),
+			max_delay: crate::DEFAULT_MAX_DELAY,
+			max_age: None,
+			bandwidth: Default::default(),
+			linger: Duration::ZERO,
 			metadata: crate::metadata::Dropped::new("metadata"),
 		};
 		let origin = moq_tokio::origin::spawn();
@@ -644,7 +728,7 @@ mod tests {
 		let queued = std::mem::take(&mut client.work);
 		client.pull_results(queued, &mut publisher).await.unwrap();
 		assert_eq!(client.metadata.count, 2);
-		drop(publisher.finish().unwrap());
+		drop(publisher.finish(Duration::ZERO).unwrap());
 		drop(client);
 		logs_assert(|lines| {
 			let warnings = lines
@@ -668,17 +752,19 @@ mod tests {
 
 	/// A broadcast with one AVC keyframe at `live/cam0` and its tracks finished, with the
 	/// importer that keeps them listed and the catalog to finish it with.
-	fn source(origin: &origin::Producer) -> (moq_net::broadcast::Producer, moq_mux::catalog::Producer, FlvImport) {
+	fn source(origin: &origin::Producer) -> (moq_net::origin::Publication, moq_mux::catalog::Producer, FlvImport) {
 		let mut vseq = vec![0x17, 0x00, 0x00, 0x00, 0x00];
 		vseq.extend_from_slice(&[0x01, 0x42, 0xc0, 0x1f, 0xff, 0xe1, 0x00, 0x04, 0x67, 0x42, 0xc0, 0x1f]);
 		vseq.extend_from_slice(&[0x01, 0x00, 0x04, 0x68, 0xce, 0x3c, 0x80]);
 		let mut vframe = vec![0x17, 0x01, 0x00, 0x00, 0x00];
 		vframe.extend_from_slice(&[0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00]);
 
-		let mut broadcast = origin.create_broadcast("live/cam0").unwrap();
+		let broadcast = origin.create_broadcast("live/cam0").unwrap();
 		broadcast.announce(Default::default()).unwrap();
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		let mut importer = FlvImport::new(broadcast.clone(), catalog.reserve());
+		let catalog =
+			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())
+				.unwrap();
+		let mut importer = FlvImport::new(broadcast.broadcast().clone(), catalog.reserve());
 		importer.decode(&flv::file_header()).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vseq)).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vframe)).unwrap();
@@ -688,11 +774,11 @@ mod tests {
 
 	/// A clean end crosses an RTMP hop in both directions: a finished export unpublishes,
 	/// so the server it pushes to lingers, and a server whose play completes lets a pull
-	/// linger. Each lingering side serves its finished copy for the declared max-age.
+	/// linger. Each lingering side serves its finished copy for its linger.
 	#[tokio::test(start_paused = true)]
 	async fn a_finished_broadcast_lingers_across_rtmp() {
 		let peer = "127.0.0.1:1935".parse().unwrap();
-		let max_age = Duration::from_secs(10);
+		let linger = Duration::from_secs(10);
 		for push in [true, false] {
 			let upstream = moq_tokio::origin::spawn();
 			let downstream = moq_tokio::origin::spawn();
@@ -705,21 +791,27 @@ mod tests {
 			let server = tokio::spawn(async move {
 				match accept_stream(server_io, peer).await.unwrap().unwrap() {
 					Request::Publish(publish) => publish
-						.with_max_age(Some(max_age))
-						.accept(&ingest, "live/cam0")
+						.with_linger(linger)
+						.accept(&ingest, moq_net::Path::from_static("live/cam0"))
 						.await
 						.unwrap(),
-					Request::Play(play) => play.accept(&served, "live/cam0").await.unwrap(),
+					Request::Play(play) => play
+						.accept(&served, moq_net::Path::from_static("live/cam0"))
+						.await
+						.unwrap(),
 				}
 			});
 			let exported = upstream.consume();
 			let client = tokio::spawn(async move {
 				let client = Client::with_stream(client_io, "live").await.unwrap();
 				match push {
-					true => client.publish("cam0", exported, "live/cam0").await.unwrap(),
+					true => client
+						.publish("cam0", exported, moq_net::Path::from_static("live/cam0"))
+						.await
+						.unwrap(),
 					false => client
-						.with_import_max_age(max_age)
-						.pull("cam0", &pulled, "live/cam0")
+						.with_linger(linger)
+						.pull("cam0", &pulled, moq_net::Path::from_static("live/cam0"))
 						.await
 						.unwrap(),
 				}
@@ -743,9 +835,105 @@ mod tests {
 			done.await.unwrap();
 			assert!(!copy.is_closed(), "push={push}: the copy lingers");
 			lingering.await.unwrap();
-			assert_eq!(start.elapsed(), max_age, "push={push}");
+			assert_eq!(start.elapsed(), linger, "push={push}");
 			assert!(copy.is_closed());
 		}
+	}
+
+	/// Contains `needle` somewhere in `haystack`.
+	fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+		haystack.windows(needle.len()).any(|window| window == needle)
+	}
+
+	/// A push stays on the instance it resolved: a publisher taking over the path never reaches
+	/// the remote, so the push never splices in another timeline or codec state, and it fails
+	/// once its instance's route dies.
+	#[tokio::test(start_paused = true)]
+	async fn a_push_stays_on_its_instance_until_the_route_dies() {
+		const OLD_IDR: &[u8] = &[0x65, 0x88, 0x84, 0x21, 0x00];
+		const OLD_DELTA: &[u8] = &[0x41, 0x9a, 0x02, 0x03];
+		const NEW_IDR: &[u8] = &[0x65, 0x99, 0x99, 0x99, 0x99];
+		let publish = |origin: &origin::Producer, epoch: &moq_net::Epoch, idr: &[u8]| {
+			let mut vseq = vec![0x17, 0x00, 0x00, 0x00, 0x00];
+			vseq.extend_from_slice(&[0x01, 0x42, 0xc0, 0x1f, 0xff, 0xe1, 0x00, 0x04, 0x67, 0x42, 0xc0, 0x1f]);
+			vseq.extend_from_slice(&[0x01, 0x00, 0x04, 0x68, 0xce, 0x3c, 0x80]);
+			let mut vframe = vec![0x17, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, idr.len() as u8];
+			vframe.extend_from_slice(idr);
+			let broadcast = origin.create_broadcast("live/cam0").unwrap();
+			broadcast
+				.announce(origin::Route::default().with_epoch(epoch.clone()))
+				.unwrap();
+			let catalog = moq_mux::catalog::Producer::new(
+				&mut broadcast.broadcast().clone(),
+				moq_mux::catalog::Config::default(),
+			)
+			.unwrap();
+			let mut importer = FlvImport::new(broadcast.broadcast().clone(), catalog.reserve());
+			importer.decode(&flv::file_header()).unwrap();
+			importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vseq)).unwrap();
+			importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vframe)).unwrap();
+			(importer, catalog)
+		};
+
+		let upstream = moq_tokio::origin::spawn();
+		let downstream = moq_tokio::origin::spawn();
+		let (mut old, old_catalog) = publish(&upstream, &moq_net::Epoch::mint(), OLD_IDR);
+		let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+		let ingest = downstream.clone();
+		let server = tokio::spawn(async move {
+			let Some(Request::Publish(publish)) = accept_stream(server_io, "127.0.0.1:1935".parse().unwrap())
+				.await
+				.unwrap()
+			else {
+				panic!("expected a publish request");
+			};
+			let _ = publish.accept(&ingest, moq_net::Path::from_static("live/cam0")).await;
+		});
+		let exported = upstream.consume();
+		let pushed = tokio::spawn(async move {
+			let client = Client::with_stream(client_io, "live").await.unwrap();
+			client
+				.publish("cam0", exported, moq_net::Path::from_static("live/cam0"))
+				.await
+		});
+
+		// Read what reaches the remote back out as FLV.
+		let consumer = downstream.consume();
+		consumer.routed("live/cam0").await.unwrap();
+		let copy = consumer.request_broadcast("live/cam0", None).await.unwrap();
+		let source = moq_mux::Source::new(consumer, copy);
+		let catalog = source
+			.catalog::<()>(moq_mux::catalog::CatalogFormat::default())
+			.await
+			.unwrap();
+		let mut remote = FlvExport::new(source, catalog);
+		let mut received = Vec::new();
+		let mut until = async |needle: &[u8]| {
+			while !contains(&received, needle) {
+				let chunk = remote.next().await.unwrap().expect("the remote copy ended");
+				received.extend_from_slice(&chunk);
+			}
+		};
+		until(OLD_IDR).await;
+
+		let epoch = moq_net::Epoch::mint();
+		let mut instances = moq_mux::follow::Instances::new(&upstream.consume(), "live/cam0", Some(&epoch)).unwrap();
+		let (_new, _new_catalog) = publish(&upstream, &epoch, NEW_IDR);
+		tokio::time::timeout(Duration::from_secs(5), instances.next())
+			.await
+			.expect("the new publisher takes over")
+			.unwrap();
+
+		let mut delta = vec![0x27, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, OLD_DELTA.len() as u8];
+		delta.extend_from_slice(OLD_DELTA);
+		old.decode(&flv::tag(flv::TAG_VIDEO, 40, &delta)).unwrap();
+		until(OLD_DELTA).await;
+		assert!(!contains(&received, NEW_IDR), "the push left its instance");
+
+		old.abort(moq_net::Error::Transport("connection lost".into()));
+		drop(old_catalog);
+		assert!(pushed.await.unwrap().is_err(), "the push ended cleanly");
+		server.abort();
 	}
 
 	/// Loopback: dial the crate's own server and pull a broadcast the server plays
@@ -768,10 +956,12 @@ mod tests {
 		vframe.extend_from_slice(&[0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00]);
 
 		let server_origin = moq_tokio::origin::spawn();
-		let mut broadcast = server_origin.create_broadcast("live/cam0").unwrap();
+		let broadcast = server_origin.create_broadcast("live/cam0").unwrap();
 		broadcast.announce(Default::default()).unwrap();
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		let mut importer = FlvImport::new(broadcast, catalog.reserve());
+		let catalog =
+			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())
+				.unwrap();
+		let mut importer = FlvImport::new(broadcast.broadcast().clone(), catalog.reserve());
 		importer.decode(&flv::file_header()).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vseq)).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vframe)).unwrap();
@@ -786,7 +976,9 @@ mod tests {
 			let Request::Play(play) = request else {
 				panic!("expected a play request");
 			};
-			play.accept(&consumer, "live/cam0").await.unwrap();
+			play.accept(&consumer, moq_net::Path::from_static("live/cam0"))
+				.await
+				.unwrap();
 		});
 
 		// Client: dial, connect(`live`), play(`cam0`), republish into our own origin.
@@ -795,7 +987,10 @@ mod tests {
 		let pull_origin = client_origin.clone();
 		let pull = tokio::spawn(async move {
 			let client = Client::connect(addr, "live").await.unwrap();
-			client.pull("cam0", &pull_origin, "pulled/cam0").await.unwrap();
+			client
+				.pull("cam0", &pull_origin, moq_net::Path::from_static("pulled/cam0"))
+				.await
+				.unwrap();
 		});
 
 		// The republished broadcast should show up in the client's origin.

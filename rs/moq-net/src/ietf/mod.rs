@@ -4,14 +4,18 @@
 //!
 //! You should not use this module directly; see [crate] for the high-level API.
 
-// Private codec entry points remain testable when their session callers are absent.
-#![cfg_attr(not(feature = "async"), allow(dead_code, unused_imports))]
+#![cfg_attr(
+	not(feature = "async"),
+	allow(
+		dead_code,
+		unused_imports,
+		reason = "private codec entry points remain testable when their session callers are absent"
+	)
+)]
 
 #[macro_use]
 mod parameters;
 pub mod active_count;
-#[cfg(feature = "async")]
-mod adapter;
 pub(crate) mod auth;
 pub mod cluster;
 #[cfg(feature = "async")]
@@ -28,7 +32,7 @@ pub mod hidden;
 mod location;
 pub(crate) mod max_age;
 pub mod message;
-mod namespace;
+pub(crate) mod namespace;
 pub(crate) mod object;
 pub mod peer;
 mod priority;
@@ -55,8 +59,6 @@ mod version;
 
 #[cfg(feature = "async")]
 use control::Control;
-#[cfg(feature = "async")]
-pub(crate) use control::initial_max_request_id;
 pub use datagram::*;
 pub use fetch::*;
 pub use filter::*;
@@ -81,22 +83,6 @@ use subscriber::*;
 pub use track::*;
 pub use version::Version;
 
-#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
-pub(crate) fn request_ids(window: u64, ids: &[u64]) -> usize {
-	let control = Control::new(None, false).with_window(window, false, Version::Draft16);
-	let held: Vec<_> = ids
-		.iter()
-		.filter_map(|id| control.accept(RequestId(*id)).ok())
-		.collect();
-	held.len()
-}
-
-#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
-pub(crate) fn request_history(ids: &[u64]) -> usize {
-	let control = Control::new(None, false);
-	ids.iter().filter(|id| control.accept(RequestId(**id)).is_ok()).count()
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -110,7 +96,7 @@ mod tests {
 			("RELAY_COST", cluster::RELAY_COST, 0x40B56),
 			("SOLICIT", solicit::SOLICIT, 0x40B5A),
 			("HIDDEN", hidden::HIDDEN, 0x40B5C),
-			("AUTH", auth::AUTH, 0x40B60),
+			("AUTH", auth::AUTH, 0x40B70),
 			("ACTIVE_COUNT", active_count::ACTIVE_COUNT, 0x40B64),
 			("EPOCH", epoch::EPOCH, 0x40B68),
 		] {

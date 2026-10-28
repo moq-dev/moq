@@ -37,15 +37,12 @@ async fn spawn_relay(id: u64, connect: Vec<String>, cluster_version: Option<moq_
 	config.connect.bind = Some("127.0.0.1:0".parse().expect("parse client bind"));
 	config.connect.tls.insecure = Some(true);
 	config.connect.version.extend(cluster_version);
-	#[allow(deprecated)]
-	{
-		config.auth.public = vec![moq_auth::Pattern::all()];
-	}
+	config.auth.public = vec![moq_auth::Pattern::all()];
 	config.cluster.id = Some(id);
 	config.cluster.connect = connect.into_iter().map(moq_relay::cluster::Peer::new).collect();
 
 	// `load` binds the TCP listener, so the port is ours before anyone dials it.
-	let relay = Relay::load(config).await.expect("relay load");
+	let relay = Relay::load(config).await.expect("relay load").with_signals(false);
 	let port = relay.tcp_addr().expect("TCP listener is configured").port();
 	let internal = relay.internal().addr().expect("internal listener is configured").port();
 	let task = tokio::spawn(async move {
@@ -126,14 +123,17 @@ impl Drop for Mesh {
 fn client(version: Option<moq_net::Version>) -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
-	config.websocket.delay = Some(Duration::ZERO);
+	#[cfg(feature = "websocket")]
+	{
+		config.websocket.delay = Some((Duration::ZERO).into());
+	}
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
 	config.version.extend(version);
 	config.init(Default::default()).expect("client init")
 }
 
 struct Publisher {
-	_broadcast: moq_net::broadcast::Producer,
+	_broadcast: moq_net::origin::Publication,
 	_session: moq_tokio::Connection,
 	streamer: tokio::task::AbortHandle,
 }
@@ -189,9 +189,9 @@ async fn publish_version(port: u16, version: &str) -> Publisher {
 }
 
 async fn publish_unknown(port: u16) -> Publisher {
-	// Draft-14 has no Cluster extension, so the accepting relay must represent
+	// Lite-03 declares no origin identity, so the accepting relay must represent
 	// this external publisher with the wire-defined UNKNOWN Hop ID.
-	publish_version(port, "moq-transport-14").await
+	publish_version(port, "moq-lite-03").await
 }
 
 /// Subscribe to [`PATH`] through the relay on `port` and read its first frame.
@@ -308,7 +308,7 @@ async fn assert_unknown_publisher_stays_announced(cluster_version: Option<moq_ne
 
 /// Every ingest version that can carry a broadcast must survive the same
 /// redundant mesh. The pre-fix failure set was exactly the versions that
-/// declare no origin identity (lite <= 03, moq-transport <= 16): their
+/// declare no origin identity (lite <= 03): their
 /// broadcasts enter with an UNKNOWN first hop, and the reflected copy replaced
 /// the live source instead of parking. The identity-carrying versions held
 /// even before the fix, so this pins both halves of the boundary.
@@ -321,9 +321,7 @@ async fn every_ingest_version_crosses_a_redundant_mesh() {
 		"moq-lite-03",
 		"moq-lite-04",
 		"moq-lite-05",
-		"moq-transport-14",
-		"moq-transport-16",
-		"moq-transport-17",
+		"moq-transport-18",
 	] {
 		let mesh = Mesh::start(None).await;
 		let _publisher = publish_version(mesh.a(), version).await;
@@ -384,7 +382,7 @@ async fn unknown_publisher_does_not_flap_across_a_lite_cluster_triangle() {
 
 #[tokio::test]
 async fn unknown_publisher_does_not_flap_across_an_ietf_cluster_triangle() {
-	let version = "moq-transport-19".parse().expect("parse version");
+	let version = "moq-transport-22".parse().expect("parse version");
 	assert_unknown_publisher_stays_announced(Some(version)).await;
 }
 

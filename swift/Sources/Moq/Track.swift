@@ -40,8 +40,8 @@ public final class TrackConsumer: AsyncSequence, Sendable {
     }
 
     /// The publisher-side properties learned during subscription.
-    public func info() throws -> TrackInfo {
-        try ffi.info()
+    public func info() -> TrackInfo {
+        ffi.info()
     }
 
     /// Change this subscriber's delivery preferences. Throws on a time anchor the track
@@ -162,8 +162,8 @@ public final class TrackProducer: Sendable {
     }
 
     /// Serve fetches for groups that are not currently cached.
-    public func dynamic() throws -> TrackDynamic {
-        TrackDynamic(try ffi.dynamic())
+    public func requests() throws -> TrackRequests {
+        TrackRequests(try ffi.requests())
     }
 
     /// Append a new group, returning a producer for its frames.

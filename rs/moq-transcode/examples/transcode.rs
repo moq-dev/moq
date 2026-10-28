@@ -32,12 +32,12 @@ struct Args {
 async fn main() -> anyhow::Result<()> {
 	moq_tokio::Log::new(tracing::Level::INFO).init()?;
 	let args = Args::parse();
-	let source_path = moq_net::PathOwned::from(args.source);
-	let output_path = moq_net::PathOwned::from(
+	let source_path = moq_net::Path::try_from(args.source)?;
+	let output_path = moq_net::Path::try_from(
 		args.output
 			.clone()
 			.unwrap_or_else(|| format!("{source_path}/transcode.hang")),
-	);
+	)?;
 
 	// Publish the derivative through one origin and consume the source through
 	// another, over a single auto-reconnecting session.
@@ -91,7 +91,7 @@ async fn main() -> anyhow::Result<()> {
 	tracing::info!(source = %source_path, output = %output_path, "transcoding");
 
 	tokio::select! {
-		res = moq_transcode::run(source, output, config) => Ok(res?),
+		res = moq_transcode::run(source, output.broadcast().clone(), config) => Ok(res?),
 		res = session.closed() => Ok(res?),
 	}
 }

@@ -5,7 +5,7 @@
 //! over a [`moq_net::transport::memory`] pair and spawns both protocol drivers, giving tests
 //! two live sessions ready for pub/sub without any real QUIC or network I/O.
 
-#![allow(dead_code)]
+#![allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
 
 use moq_net::{Client, Server, Session, Version, origin};
 
@@ -14,7 +14,7 @@ use moq_net::transport::memory;
 pub use moq_net::time::run;
 
 pub fn now() -> moq_net::time::Instant {
-	moq_net::time::now()
+	moq_net::time::Instant::now()
 }
 
 /// Options for [`connect_mock`].
@@ -82,7 +82,7 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 	}
 
 	// Run both handshakes concurrently and spawn each side's driver
-	// the moment its handshake resolves: on draft-17+ the server's accept blocks
+	// the moment its handshake resolves: on moq-transport the server's accept blocks
 	// on the client's SETUP, which only reaches the wire once the client's
 	// machine is polled (and vice versa for the server's own SETUP).
 	let client_fut = async {

@@ -63,16 +63,16 @@ export class Consumer<T> {
 	async #read(skip: boolean): Promise<Timed<T> | undefined> {
 		for (;;) {
 			if (skip) {
-				// A newer group supersedes everything the current one still holds: it restarts from a
-				// full snapshot, so switching mid-group loses nothing but stale state (mirrors the Rust
-				// consumer). Older groups only hold superseded state too, so raise the floor to the
-				// newest instead of replaying each one.
-				const latest = await this.#track.largest();
-				if (this.#group !== undefined && latest !== undefined && latest.group > this.#group.sequence) {
-					this.#group.close();
-					this.#group = undefined;
+				// Jump to the newest group the reader already has; a newer one supersedes the rest.
+				// Taking groups, not the track's largest position, ignores datagrams (which share
+				// the sequence space) and stays inside any range the caller set on the reader.
+				// Mirrors the Rust consumer. A newer group restarts from a full snapshot, so switching mid-group loses
+				// nothing but stale state.
+				for (let group = this.#track.tryNextGroup(); group; group = this.#track.tryNextGroup()) {
+					this.#group?.close();
+					this.#group = group;
+					this.#framesRead = 0;
 				}
-				if (!this.#group && latest !== undefined) this.#track.setGroups({ start: { included: latest.group } });
 			}
 
 			if (!this.#group) {
@@ -134,6 +134,7 @@ export class Consumer<T> {
 	}
 }
 
+/** Types for {@link Consumer}. */
 export namespace Consumer {
 	/** Snapshot consumer options, including the source track. */
 	export type Config<T> = Pick<CodecConfig<T>, "schema" | "compression"> & {

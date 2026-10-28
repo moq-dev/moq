@@ -1,7 +1,7 @@
 use moq_net::{Timescale, Timestamp};
 use mp4_atom::{Any, DecodeMaybe};
 
-use super::{Error, sample};
+use super::{Error, edit::Edit, sample};
 use crate::container::text::{self, Cue};
 use crate::container::ttml;
 
@@ -37,6 +37,8 @@ pub(super) struct Track {
 	pub format: Format,
 	pub defaults: sample::Defaults,
 	pub timescale: Timescale,
+	/// The edit list, applied to every cue's presentation time.
+	pub edit: Edit,
 	/// The exclusive decode end of the previous fragment; the next one may not start before it.
 	pub end_decode_time: Option<u64>,
 	pub discontinuity: bool,
@@ -45,8 +47,8 @@ pub(super) struct Track {
 pub(super) struct Fragment<'a> {
 	pub traf: &'a mp4_atom::Traf,
 	pub data: &'a [u8],
-	pub moof_size: usize,
-	pub header_size: usize,
+	/// Resolve sample ranges shared with the moof's other tracks.
+	pub resolver: &'a mut sample::Resolver,
 }
 
 impl Track {
@@ -67,57 +69,40 @@ impl Track {
 			self.producer.discontinuity()?;
 			self.discontinuity = false;
 		}
-		let base: usize = traf
-			.tfhd
-			.base_data_offset
-			.unwrap_or_default()
-			.try_into()
-			.map_err(|_| Error::InvalidDataOffset)?;
-		let mut offset = base;
-		for trun in &traf.trun {
-			if let Some(value) = trun.data_offset {
-				let value: usize = value.try_into().map_err(|_| Error::InvalidDataOffset)?;
-				offset = value
-					.checked_sub(input.moof_size)
-					.and_then(|value| value.checked_sub(input.header_size))
-					.and_then(|value| value.checked_add(base))
-					.ok_or(Error::InvalidDataOffset)?;
-			}
-			for entry in &trun.entries {
-				let sample = self.defaults.resolve(&traf.tfhd, entry);
-				let duration = sample.duration.ok_or(Error::MissingSampleDuration)?;
-				let pts = dts
-					.checked_add_signed(entry.cts.unwrap_or_default() as i64)
-					.ok_or(Error::PtsOverflow)?;
-				let source = Timestamp::new(pts, self.timescale)?;
-				let timestamp = timebase.shift(source)?;
-				let duration = Timestamp::new(duration as u64, self.timescale)?;
-				let end = timestamp.checked_add(duration)?;
-				let next = offset
-					.checked_add(sample.size as usize)
-					.ok_or(Error::InvalidDataOffset)?;
-				let data = input.data.get(offset..next).ok_or(Error::InvalidDataOffset)?;
-				let payload = match &self.format {
-					Format::Vtt { header } => vtt(header, data, timestamp, end)?,
-					// The frame timestamp is serialized in hang's scale, which the body's begin must match.
-					Format::Ttml => ttml::rewrite(
-						data,
-						source,
-						timestamp.convert(hang::container::TIMESCALE)?..end.convert(hang::container::TIMESCALE)?,
-					)
-					.map_err(Error::InvalidSubtitle)?
-					.into(),
-				};
-				self.producer.write(crate::container::Frame {
-					timestamp,
-					duration: Some(duration),
-					keyframe: true,
-					payload,
-				})?;
-				self.producer.cut(None)?;
-				offset = next;
-				dts = dts.checked_add(duration.value()).ok_or(Error::PtsOverflow)?;
-			}
+		for resolved in input.resolver.resolve(traf, self.defaults)? {
+			let sample::Resolved { sample, cts, range } = resolved?;
+			let duration = sample.duration.ok_or(Error::MissingSampleDuration)?;
+			let pts = dts.checked_add_signed(cts as i64).ok_or(Error::PtsOverflow)?;
+			let duration = Timestamp::new(duration as u64, self.timescale)?;
+			let data = &input.data[range];
+			dts = dts.checked_add(duration.value()).ok_or(Error::PtsOverflow)?;
+
+			// A cue starting before the edit is dropped, like a media sample.
+			let Some(presented) = self.edit.present(pts)? else {
+				continue;
+			};
+			// TTML maps the document's media times from `source`, so they move with the edit too.
+			let source = Timestamp::new(pts, self.timescale)?;
+			let timestamp = timebase.shift(Timestamp::new(presented, self.timescale)?)?;
+			let end = timestamp.checked_add(duration)?;
+			let payload = match &self.format {
+				Format::Vtt { header } => vtt(header, data, timestamp, end)?,
+				// The frame timestamp is serialized in hang's scale, which the body's begin must match.
+				Format::Ttml => ttml::rewrite(
+					data,
+					source,
+					timestamp.convert(hang::container::TIMESCALE)?..end.convert(hang::container::TIMESCALE)?,
+				)
+				.map_err(Error::InvalidSubtitle)?
+				.into(),
+			};
+			self.producer.write(crate::container::Frame {
+				timestamp,
+				duration: Some(duration),
+				keyframe: true,
+				payload,
+			})?;
+			self.producer.cut(None)?;
 		}
 		self.end_decode_time = Some(dts);
 		Ok(())

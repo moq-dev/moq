@@ -115,24 +115,21 @@ pub(crate) fn from_msf<E: CatalogExt>(msf: &moq_msf::Catalog<E>, base: &moq_net:
 	let mut catalog = Catalog::default();
 	catalog.ext = msf.ext.clone();
 
-	let mut names = std::collections::BTreeSet::new();
 	for track in &msf.tracks {
-		if !names.insert(&track.name) {
-			return Err(Error::DuplicateTrackName(track.name.clone()).into());
-		}
+		// The track name is the rendition ID, so a later track with the name replaces the earlier
+		// one, whatever namespace or role either has.
+		catalog.video.renditions.remove(&track.name);
+		catalog.audio.renditions.remove(&track.name);
+		catalog.text.renditions.remove(&track.name);
 		let broadcast = track
 			.namespace
 			.as_ref()
 			.map(|namespace| {
-				let target = moq_net::Path::new(namespace);
 				let unresolvable = || Error::UnresolvableNamespace {
 					name: track.name.clone(),
 					namespace: namespace.clone(),
 				};
-				// An MSF namespace names content; normalizing it must not select another namespace.
-				if target.as_str() != namespace {
-					return Err(unresolvable());
-				}
+				let target = moq_net::Path::new(namespace).map_err(|_| unresolvable())?;
 				if super::names_catalog(&target, base) {
 					return Ok(None);
 				}
@@ -488,9 +485,39 @@ fn derive_from_cmaf_moov(track: &moq_msf::Track, init: bytes::Bytes) -> Result<D
 
 #[cfg(test)]
 mod test {
+	/// A later track with a name replaces the earlier one, even under another role, so the
+	/// name never lands as both a video and an audio rendition.
+	#[test]
+	fn a_repeated_track_name_keeps_the_last() {
+		let track = |role, codec: &str| {
+			let mut track = moq_msf::Track::new("main", moq_msf::Packaging::Loc);
+			track.role = Some(role);
+			track.codec = Some(codec.into());
+			track.samplerate = Some(48_000);
+			track.channel_config = Some("2".into());
+			track
+		};
+		let msf = moq_msf::Catalog::<()>::new(vec![
+			track(moq_msf::Role::Video, "vp8"),
+			track(moq_msf::Role::Video, "vp09.00.10.08"),
+			track(moq_msf::Role::Audio, "opus"),
+		]);
+		let catalog = from_msf(&msf, &moq_net::Path::empty()).unwrap();
+		catalog.check_renditions().unwrap();
+		assert!(catalog.video.renditions.is_empty());
+		assert_eq!(catalog.audio.renditions["main"].codec.to_string(), "opus");
+
+		let msf = moq_msf::Catalog::<()>::new(vec![
+			track(moq_msf::Role::Video, "vp8"),
+			track(moq_msf::Role::Video, "vp09.00.10.08"),
+		]);
+		let catalog = from_msf(&msf, &moq_net::Path::empty()).unwrap();
+		assert_eq!(catalog.video.renditions["main"].codec.to_string(), "vp09.00.10.08");
+	}
+
 	#[test]
 	fn namespace_must_be_expressible_as_a_relative_broadcast() {
-		let base = moq_net::Path::new("room/catalog");
+		let base = moq_net::Path::from_static("room/catalog");
 		for (namespace, expected) in [("room/catalog", None), ("", Some(".."))] {
 			let mut track = moq_msf::Track::new("video", moq_msf::Packaging::Loc);
 			track.namespace = Some(namespace.into());
@@ -551,7 +578,7 @@ mod test {
 			"conference123/alice",
 			"alice",
 		] {
-			let catalog = from_msf(&msf, &moq_net::Path::new(base)).unwrap();
+			let catalog = from_msf(&msf, &moq_net::Path::new(base).unwrap()).unwrap();
 			assert!(catalog.video.renditions["1080p-video"].broadcast.is_none(), "{base}");
 			assert!(catalog.audio.renditions["audio"].broadcast.is_none(), "{base}");
 		}

@@ -15,7 +15,7 @@ use crate::{Version, ietf, lite};
 pub struct BoundsExceeded;
 
 /// The largest value the QUIC form can carry: `2^62 - 1`.
-pub const MAX_QUIC: u64 = (1 << 62) - 1;
+pub(crate) const MAX_QUIC: u64 = (1 << 62) - 1;
 
 /// How a protocol version lays out a varint on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,10 +23,7 @@ pub(crate) enum Form {
 	/// QUIC's two-bit length tag, up to [`MAX_QUIC`].
 	Quic,
 	/// Leading one bits count the length, up to `u64::MAX`.
-	LeadingOnes {
-		/// Whether the 7-byte form (`1111110x`) is accepted on decode, which draft-17 forbids.
-		seven: bool,
-	},
+	LeadingOnes,
 }
 
 impl From<lite::Version> for Form {
@@ -38,20 +35,16 @@ impl From<lite::Version> for Form {
 			| lite::Version::Lite04
 			| lite::Version::Lite05
 			| lite::Version::Lite06 => Self::Quic,
-			// Lite-07 is only reached through its ALPN, so the form is known before the
-			// first byte of any stream.
-			_ => Self::LeadingOnes { seven: true },
+			// Lite-07 is reached through its ALPN or a SETUP hand-off, so the form is known
+			// before the first byte of any lite-07 stream.
+			_ => Self::LeadingOnes,
 		}
 	}
 }
 
 impl From<ietf::Version> for Form {
-	fn from(version: ietf::Version) -> Self {
-		match version {
-			ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16 => Self::Quic,
-			ietf::Version::Draft17 => Self::LeadingOnes { seven: false },
-			_ => Self::LeadingOnes { seven: true },
-		}
+	fn from(_: ietf::Version) -> Self {
+		Self::LeadingOnes
 	}
 }
 
@@ -83,15 +76,15 @@ pub(crate) fn size(value: u64, form: Form) -> Result<usize, BoundsExceeded> {
 		Form::Quic if hi == 0 && lo < 1 << 30 => 4,
 		Form::Quic if hi < 1 << 30 => 8,
 		Form::Quic => return Err(BoundsExceeded),
-		Form::LeadingOnes { .. } if hi == 0 && lo < 1 << 7 => 1,
-		Form::LeadingOnes { .. } if hi == 0 && lo < 1 << 14 => 2,
-		Form::LeadingOnes { .. } if hi == 0 && lo < 1 << 21 => 3,
-		Form::LeadingOnes { .. } if hi == 0 && lo < 1 << 28 => 4,
-		Form::LeadingOnes { .. } if hi < 1 << 3 => 5,
-		Form::LeadingOnes { .. } if hi < 1 << 10 => 6,
+		Form::LeadingOnes if hi == 0 && lo < 1 << 7 => 1,
+		Form::LeadingOnes if hi == 0 && lo < 1 << 14 => 2,
+		Form::LeadingOnes if hi == 0 && lo < 1 << 21 => 3,
+		Form::LeadingOnes if hi == 0 && lo < 1 << 28 => 4,
+		Form::LeadingOnes if hi < 1 << 3 => 5,
+		Form::LeadingOnes if hi < 1 << 10 => 6,
 		// The 7-byte form is skipped: one byte longer, but legal on every draft.
-		Form::LeadingOnes { .. } if hi < 1 << 24 => 8,
-		Form::LeadingOnes { .. } => 9,
+		Form::LeadingOnes if hi < 1 << 24 => 8,
+		Form::LeadingOnes => 9,
 	})
 }
 
@@ -103,7 +96,7 @@ pub(crate) fn size(value: u64, form: Form) -> Result<usize, BoundsExceeded> {
 pub(super) fn write(value: u64, form: Form, out: &mut Vec<u8>) -> Result<(), BoundsExceeded> {
 	match form {
 		Form::Quic => write_quic(value, out),
-		Form::LeadingOnes { .. } => {
+		Form::LeadingOnes => {
 			write_leading_ones(value, out);
 			Ok(())
 		}
@@ -168,11 +161,11 @@ fn write_leading_ones(value: u64, out: &mut Vec<u8>) {
 /// Decode a varint in `form` from the front of `buf`, returning it and the rest of `buf`.
 #[cfg_attr(target_arch = "wasm32", inline)]
 #[cfg_attr(not(target_arch = "wasm32"), inline(always))]
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(super) fn read(buf: &[u8], form: Form) -> Result<(u64, &[u8]), DecodeError> {
 	match form {
 		Form::Quic => read_quic(buf),
-		Form::LeadingOnes { seven } => read_leading_ones(buf, seven),
+		Form::LeadingOnes => read_leading_ones(buf),
 	}
 }
 
@@ -200,8 +193,8 @@ fn read_quic(buf: &[u8]) -> Result<(u64, &[u8]), DecodeError> {
 
 #[cfg_attr(target_arch = "wasm32", inline)]
 #[cfg_attr(not(target_arch = "wasm32"), inline(always))]
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
-fn read_leading_ones(buf: &[u8], seven: bool) -> Result<(u64, &[u8]), DecodeError> {
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+fn read_leading_ones(buf: &[u8]) -> Result<(u64, &[u8]), DecodeError> {
 	let Some((&first, rest)) = buf.split_first() else {
 		return Err(DecodeError::Short);
 	};
@@ -229,8 +222,6 @@ fn read_leading_ones(buf: &[u8], seven: bool) -> Result<(u64, &[u8]), DecodeErro
 			let ([a, b, lo @ ..], rest) = buf.split_first_chunk::<6>().ok_or(DecodeError::Short)?;
 			(from_halves(be([0, 0, a & 0x03, *b]), be(*lo)), rest)
 		}
-		// 1111110x: the 7-byte form, which draft-17 forbids.
-		6 if !seven => return Err(DecodeError::InvalidValue),
 		6 => {
 			let ([a, b, c, lo @ ..], rest) = buf.split_first_chunk::<7>().ok_or(DecodeError::Short)?;
 			(from_halves(be([0, a & 0x01, *b, *c]), be(*lo)), rest)
@@ -265,7 +256,7 @@ pub fn decode_quic<R: bytes::Buf>(r: &mut R) -> Result<u64, DecodeError> {
 
 /// Encode `value` as a QUIC varint (two-bit length tag).
 ///
-/// Fails with [`EncodeError::BoundsExceeded`] past [`MAX_QUIC`], writing nothing.
+/// Fails with [`EncodeError::BoundsExceeded`] past `2^62 - 1`, writing nothing.
 pub fn encode_quic<W: bytes::BufMut>(value: u64, w: &mut W) -> Result<(), EncodeError> {
 	let len = size(value, Form::Quic)?;
 	if w.remaining_mut() < len {
@@ -288,13 +279,13 @@ pub fn encode_quic<W: bytes::BufMut>(value: u64, w: &mut W) -> Result<(), Encode
 /// Map a signed value onto the unsigned range: `(n << 1) ^ (n >> 63)`.
 ///
 /// Small magnitudes stay small (-1 -> 1, 1 -> 2, -2 -> 3, ...), and all of `i64` fits.
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) const fn zigzag(signed: i64) -> u64 {
 	((signed << 1) ^ (signed >> 63)) as u64
 }
 
 /// The inverse of [`zigzag`].
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) const fn unzigzag(value: u64) -> i64 {
 	((value >> 1) as i64) ^ -((value & 1) as i64)
 }
@@ -303,8 +294,7 @@ pub(crate) const fn unzigzag(value: u64) -> i64 {
 mod tests {
 	use super::*;
 
-	const DRAFT17: Form = Form::LeadingOnes { seven: false };
-	const DRAFT18: Form = Form::LeadingOnes { seven: true };
+	const LEADING_ONES: Form = Form::LeadingOnes;
 
 	fn encode(value: u64, form: Form) -> Result<Vec<u8>, BoundsExceeded> {
 		let mut buf = Vec::new();
@@ -313,7 +303,7 @@ mod tests {
 		Ok(buf)
 	}
 
-	/// Test vectors from the draft-17 spec (Table 2: Example Integer Encodings),
+	/// Test vectors from the spec (Table 2: Example Integer Encodings),
 	/// excluding the known-buggy example 4 (0xdd7f3e7d).
 	#[test]
 	fn leading_ones_spec_examples() {
@@ -335,25 +325,16 @@ mod tests {
 		];
 
 		for (bytes, expected) in cases {
-			let (decoded, rest) = read(bytes, DRAFT17).expect("decode should succeed");
+			let (decoded, rest) = read(bytes, LEADING_ONES).expect("decode should succeed");
 			assert_eq!(decoded, *expected, "decode mismatch for bytes {bytes:02x?}");
 			assert!(rest.is_empty(), "all bytes should be consumed for {bytes:02x?}");
 
 			// Skip the non-minimal encoding (0x8025 for 37); we only emit the minimal one.
 			if bytes.len() == 1 || *expected != 37 {
-				let encoded = encode(*expected, DRAFT17).unwrap();
+				let encoded = encode(*expected, LEADING_ONES).unwrap();
 				assert_eq!(&encoded, bytes, "encode mismatch for value {expected}");
 			}
 		}
-	}
-
-	/// 11111100 (0xFC) is an invalid code point on draft-17 (allowed as 7-byte form on draft-18+).
-	#[test]
-	fn leading_ones_invalid_0xfc() {
-		assert!(
-			matches!(read(&[0xFC], DRAFT17), Err(DecodeError::InvalidValue)),
-			"0xFC should be rejected as invalid on draft-17"
-		);
 	}
 
 	#[test]
@@ -368,14 +349,14 @@ mod tests {
 		];
 
 		for (value, expected_len) in cases {
-			let encoded = encode(value, DRAFT17).unwrap();
+			let encoded = encode(value, LEADING_ONES).unwrap();
 			assert_eq!(
 				encoded.len(),
 				expected_len,
 				"unexpected encoded length for value {value}"
 			);
 
-			let (decoded, _) = read(&encoded, DRAFT17).expect("leading-ones decode should succeed");
+			let (decoded, _) = read(&encoded, LEADING_ONES).expect("leading-ones decode should succeed");
 			assert_eq!(decoded, value, "round-trip mismatch for value {value}");
 		}
 	}
@@ -386,7 +367,7 @@ mod tests {
 	fn every_length_round_trips() {
 		for bits in 0..64 {
 			for value in [1u64 << bits, (1u64 << bits) - 1, (1u64 << bits) + 1] {
-				for form in [Form::Quic, DRAFT17, DRAFT18] {
+				for form in [Form::Quic, LEADING_ONES] {
 					let Ok(encoded) = encode(value, form) else {
 						assert_eq!(form, Form::Quic);
 						assert!(value > MAX_QUIC);
@@ -414,17 +395,10 @@ mod tests {
 		}
 
 		for value in [MAX_QUIC, 1u64 << 62, u64::MAX] {
-			let encoded = encode(value, DRAFT18).unwrap();
+			let encoded = encode(value, LEADING_ONES).unwrap();
 			assert_eq!(encoded.len(), 9);
-			assert_eq!(read(&encoded, DRAFT18).unwrap().0, value);
+			assert_eq!(read(&encoded, LEADING_ONES).unwrap().0, value);
 		}
-	}
-
-	#[test]
-	fn draft17_rejects_7_byte_varint() {
-		// 1111110x prefix: invalid on draft-17.
-		let err = read(&[0xFC, 0, 0, 0, 0, 0, 0], DRAFT17).unwrap_err();
-		assert!(matches!(err, DecodeError::InvalidValue));
 	}
 
 	#[test]
@@ -465,7 +439,7 @@ mod tests {
 	}
 
 	#[test]
-	fn draft18_accepts_7_byte_varint() {
+	fn accepts_7_byte_varint() {
 		// Value 0x1234_5678_9ABC encoded as 7-byte leading-ones (1111110x | hi, +6 bytes).
 		let value: u64 = 0x1234_5678_9ABC;
 		let mut bytes = Vec::new();
@@ -476,7 +450,7 @@ mod tests {
 		for shift in (0..48).step_by(8).rev() {
 			bytes.push(((value >> shift) & 0xFF) as u8);
 		}
-		let (decoded, _) = read(&bytes, DRAFT18).unwrap();
+		let (decoded, _) = read(&bytes, LEADING_ONES).unwrap();
 		assert_eq!(decoded, value);
 	}
 

@@ -6,56 +6,59 @@ import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
 import { wireOf } from "../wire.ts";
-import { NativeSession } from "./adapter.ts";
 import { AuthMessage, AuthOk, IetfAuthWire } from "./auth.ts";
 import { Connection } from "./connection.ts";
 import { GoAway } from "./goaway.ts";
 import { PublishNamespace } from "./publish_namespace.ts";
 import { RequestOk } from "./request.ts";
+import { NativeSession } from "./session.ts";
 import { SubscribeNamespace, SubscribeNamespaceEntry } from "./subscribe_namespace.ts";
 import { ALPN, Version } from "./version.ts";
 
-// Draft-17+ carry GOAWAY on the setup stream, with the peer's deadline. The session keeps
-// serving afterwards so its groups in flight finish while the caller migrates.
-test("a draft-17 GOAWAY surfaces its URI and deadline without closing the session", async () => {
-	const version = Version.DRAFT_17;
-	const pair = createMockTransportPair(ALPN.DRAFT_17);
-	const control = await Stream.open(pair.client, { version });
-	const peer = await Stream.accept(pair.server, version);
-	if (!peer) throw new Error("no setup stream");
+// GOAWAY rides the setup stream, with the peer's deadline, and on draft-18 a Request ID. The
+// session keeps serving afterwards so its groups in flight finish while the caller migrates.
+for (const [version, alpn, requestId] of [
+	[Version.DRAFT_18, ALPN.DRAFT_18, 0n],
+	[Version.DRAFT_22, ALPN.DRAFT_22, undefined],
+] as const) {
+	test(`a ${alpn} GOAWAY surfaces its URI and deadline without closing the session`, async () => {
+		const pair = createMockTransportPair(alpn);
+		const control = await Stream.open(pair.client, { version });
+		const peer = await Stream.accept(pair.server, version);
+		if (!peer) throw new Error("no setup stream");
 
-	const connection = new Connection({
-		url: new URL("https://relay.example/"),
-		quic: pair.client,
-		control,
-		maxRequestId: 100n,
-		version,
-		client: true,
+		const connection = new Connection({
+			url: new URL("https://relay.example/"),
+			quic: pair.client,
+			control,
+			version,
+			client: true,
+		});
+
+		let closed = false;
+		void connection.closed.then(() => {
+			closed = true;
+		});
+
+		try {
+			await peer.writer.u53(GoAway.id);
+			await new GoAway({ newSessionUri: "", timeout: 5000n, requestId }).encode(peer.writer, version);
+
+			const drain = await wireOf(connection).goaway;
+			expect(drain.uri).toBe("");
+			expect(drain.timeout).toBe(Milli(5000));
+
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			expect(closed).toBe(false);
+		} finally {
+			connection.abort();
+		}
 	});
-
-	let closed = false;
-	void connection.closed.then(() => {
-		closed = true;
-	});
-
-	try {
-		await peer.writer.u53(GoAway.id);
-		await new GoAway({ newSessionUri: "", timeout: 5000n }).encode(peer.writer, version);
-
-		const drain = await wireOf(connection).goaway;
-		expect(drain.uri).toBe("");
-		expect(drain.timeout).toBe(Milli(5000));
-
-		await new Promise((resolve) => setTimeout(resolve, 20));
-		expect(closed).toBe(false);
-	} finally {
-		connection.abort();
-	}
-});
+}
 
 test("a server rejects a client GOAWAY that names a redirect", async () => {
-	const version = Version.DRAFT_17;
-	const pair = createMockTransportPair(ALPN.DRAFT_17);
+	const version = Version.DRAFT_18;
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const control = await Stream.open(pair.client, { version });
 	const peer = await Stream.accept(pair.server, version);
 	if (!peer) throw new Error("no setup stream");
@@ -64,7 +67,6 @@ test("a server rejects a client GOAWAY that names a redirect", async () => {
 		url: new URL("https://relay.example/"),
 		quic: pair.client,
 		control,
-		maxRequestId: 100n,
 		version,
 		client: false,
 	});
@@ -90,10 +92,7 @@ test("a zero GOAWAY timeout reads as no deadline", async () => {
 });
 
 for (const [version, alpn] of [
-	[Version.DRAFT_15, ALPN.DRAFT_15],
-	[Version.DRAFT_17, ALPN.DRAFT_17],
 	[Version.DRAFT_18, ALPN.DRAFT_18],
-	[Version.DRAFT_21, ALPN.DRAFT_21],
 	[Version.DRAFT_22, ALPN.DRAFT_22],
 ] as const) {
 	for (const end of ["FIN", "reset", "STOP_SENDING"] as const) {
@@ -106,7 +105,6 @@ for (const [version, alpn] of [
 				url: new URL("https://relay.example/"),
 				quic: pair.client,
 				control,
-				maxRequestId: 100n,
 				version,
 				client: true,
 			});
@@ -124,7 +122,7 @@ for (const [version, alpn] of [
 
 for (const [version, alpn] of [
 	[Version.DRAFT_18, ALPN.DRAFT_18],
-	[Version.DRAFT_21, ALPN.DRAFT_21],
+	[Version.DRAFT_22, ALPN.DRAFT_22],
 ] as const) {
 	test(`${alpn} rejects queued duplicate GOAWAYs before exposing a drain`, async () => {
 		const pair = createMockTransportPair(alpn);
@@ -135,7 +133,6 @@ for (const [version, alpn] of [
 			url: new URL("https://relay.example/"),
 			quic: pair.client,
 			control,
-			maxRequestId: 100n,
 			version,
 			client: true,
 		});
@@ -210,7 +207,6 @@ for (const [version, alpn] of [
 			url: new URL("https://relay.example/"),
 			quic: pair.client,
 			control,
-			maxRequestId: 100n,
 			version,
 			client: true,
 		});
@@ -223,7 +219,7 @@ for (const [version, alpn] of [
 			await request.writer.u53(GoAway.id);
 			await new GoAway({ newSessionUri: "" }).encode(request.writer, version);
 			await request.writer.u53(RequestOk.id);
-			await new RequestOk({ requestId: undefined }).encode(request.writer, version);
+			await new RequestOk().encode(request.writer, version);
 			await request.writer.u53(SubscribeNamespaceEntry.id);
 			await new SubscribeNamespaceEntry({ suffix: Path.from("room") }).encode(request.writer, version);
 			expect((await announced.next())?.prefix).toBe(Path.from("room"));
@@ -245,7 +241,6 @@ for (const [version, alpn] of [
 			url: new URL("https://relay.example/"),
 			quic: pair.server,
 			control,
-			maxRequestId: 100n,
 			version,
 			client: false,
 			publish: origin.consume(),
@@ -256,7 +251,7 @@ for (const [version, alpn] of [
 			expect(await request.reader.u53()).toBe(PublishNamespace.id);
 			await PublishNamespace.decode(request.reader, version);
 			await request.writer.u53(RequestOk.id);
-			await new RequestOk({ requestId: undefined }).encode(request.writer, version);
+			await new RequestOk().encode(request.writer, version);
 			await request.writer.write(Uint8Array.of(0x10, 0, 2, 0, 0, 0x10, 0, 2, 0, 0));
 			expect((await pair.client.closed).closeCode).toBe(SessionCode.ProtocolViolation);
 		} finally {
@@ -276,7 +271,6 @@ for (const [version, alpn] of [
 				url: new URL("https://relay.example/"),
 				quic: pair.server,
 				control,
-				maxRequestId: 100n,
 				version,
 				client: false,
 				publish: origin.consume(),
@@ -292,7 +286,7 @@ for (const [version, alpn] of [
 			try {
 				const first = await offered();
 				await first.writer.u53(RequestOk.id);
-				await new RequestOk({ requestId: undefined }).encode(first.writer, version);
+				await new RequestOk().encode(first.writer, version);
 				if (end === "reset") first.writer.reset(new StreamError(StreamCode.Cancel));
 				else first.writer.close();
 				await offered();

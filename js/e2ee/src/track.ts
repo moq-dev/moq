@@ -3,7 +3,7 @@
  *
  * @module
  */
-import { Group as NetGroup, type Track as NetTrack, type Time } from "@moq/net";
+import type { Group as NetGroup, Track as NetTrack, Time } from "@moq/net";
 import type { Event } from "./datagram.ts";
 import { checkU53 } from "./derive.ts";
 import { Failure } from "./failure.ts";
@@ -30,6 +30,7 @@ export class Producer {
 	#writer: Writer;
 	#datagramKey: TrackKey;
 	#next = 0;
+	#finished = false;
 
 	private constructor(inner: NetTrack.Producer, timescale: Time.Timescale | undefined, keys: Keys) {
 		this.#inner = inner;
@@ -41,6 +42,11 @@ export class Producer {
 	/** @internal */
 	static make(inner: NetTrack.Producer, timescale: Time.Timescale | undefined, keys: Keys): Producer {
 		return new Producer(inner, timescale, keys);
+	}
+
+	/** The track's final outcome, once its declared end is reached or it aborts. */
+	get closed(): NetTrack.Producer["closed"] {
+		return this.#inner.closed;
 	}
 
 	/** Allocate the next sequence and start a group there; throws {@link Failure} `identity` past `2^53-1`. */
@@ -58,8 +64,7 @@ export class Producer {
 		this.#writable();
 		this.#reserve(sequence);
 		this.#next = sequence + 1;
-		const inner = new NetGroup.Producer(sequence);
-		this.#inner.writeGroup(inner);
+		const inner = this.#inner.createGroup(sequence);
 		return Group.Producer.make(inner, this.#writer);
 	}
 
@@ -98,25 +103,39 @@ export class Producer {
 	}
 
 	/**
-	 * Close the track: cleanly after every pending write on it and its groups, or at once with
-	 * `abort`, which rejects the pending writes. Idempotent.
+	 * Declare the end after queued writes. Existing groups may still be written; new groups
+	 * and datagrams are refused. Idempotent.
 	 */
-	close(abort?: Error): void {
-		// The first close decides the outcome: a later abort cannot cancel a promised drain.
-		if (this.#writer.closed) return;
-		this.#writer.closed = true;
-		if (abort) {
-			this.#writer.aborted = abort;
-			this.#inner.close(abort);
-			return;
-		}
+	finish(): void {
+		if (this.#finished || this.#writer.closed) return;
+		this.#finished = true;
 		void this.#writer.pump.run(() => {
-			if (!this.#writer.aborted) this.#inner.close();
+			if (!this.#writer.aborted) this.#inner.finish();
 		});
 	}
 
+	/** Abort the track and its open groups at once, rejecting pending writes. Idempotent. */
+	abort(error: Error): void {
+		if (this.#writer.closed) return;
+		this.#writer.closed = true;
+		this.#writer.aborted = error;
+		this.#inner.abort(error);
+	}
+
+	/** Release this producer: drain a declared end, or cancel when nothing finished it. Idempotent. */
+	close(): void {
+		if (this.#writer.closed) return;
+		this.#writer.closed = true;
+		if (this.#finished) {
+			void this.#writer.pump.run(() => this.#inner.close());
+		} else {
+			this.#inner.close();
+			this.#writer.aborted = this.#inner.closed.peek() ?? undefined;
+		}
+	}
+
 	#writable(): void {
-		if (this.#writer.closed) throw this.#writer.aborted ?? new Error("track is closed");
+		if (this.#finished || this.#writer.closed) throw this.#writer.aborted ?? new Error("track is closed");
 	}
 
 	// Refuse a sequence this track already allocated or cannot represent.
@@ -130,7 +149,8 @@ export class Producer {
  * Subscriber for one physical track.
  *
  * Grouped authentication failure ends the track and rejects pending reads with {@link Failure}
- * `authentication`. A bad datagram is an `authentication` {@link Event} until that key is exhausted.
+ * `authentication`. A datagram that fails to open is dropped as an `identity`, `oversize`, or
+ * `authentication` {@link Event} until that key is exhausted.
  */
 export class Consumer {
 	/** The physical track name. */
@@ -179,9 +199,10 @@ export class Consumer {
 	/**
 	 * Receive the next datagram event, or `undefined` once the track ends.
 	 *
-	 * A bad tag and a duplicate are events, not track-ending errors. Rejects with
-	 * {@link Failure} `authentication` only if a grouped frame already failed, `oversize` or
-	 * `exhausted` from opening, or a net error.
+	 * A datagram that fails to open (a sequence out of range, a bad size, or a forged tag) and a
+	 * duplicate are events, not track-ending errors. Rejects with {@link Failure}
+	 * `authentication` only if a grouped frame already failed, `exhausted` from opening, or a
+	 * net error.
 	 */
 	recvDatagram(): Promise<Event | undefined> {
 		const result = this.#datagrams.then(() => this.#recvDatagram());
@@ -203,9 +224,9 @@ export class Consumer {
 
 		const { sequence, timestamp, payload } = datagram;
 		if (this.#window.isDuplicate(sequence)) return { kind: "duplicate", sequence };
-		const iv = this.#datagramKey.admitOpen(sequence, 0, payload.byteLength, MAX_DATAGRAM_PAYLOAD);
 		let plaintext: Uint8Array;
 		try {
+			const iv = this.#datagramKey.admitOpen(sequence, 0, payload.byteLength, MAX_DATAGRAM_PAYLOAD);
 			plaintext = await this.#reader.pump.run(() => {
 				this.#reader.terminal.check();
 				return this.#datagramKey.decrypt(iv, payload);
@@ -215,7 +236,9 @@ export class Consumer {
 			this.#reader.terminal.check();
 			// A bad datagram is not grouped failure: the track, its demand, and any parked grouped
 			// read stay up. `exhausted` is this key's own limit.
-			if (err instanceof Failure && err.code === "authentication") return { kind: "authentication", sequence };
+			if (!(err instanceof Failure)) throw err;
+			const kind = err.code;
+			if (kind === "authentication" || kind === "identity" || kind === "oversize") return { kind, sequence };
 			throw err;
 		}
 		this.#reader.terminal.check();

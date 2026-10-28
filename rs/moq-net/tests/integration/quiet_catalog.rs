@@ -19,7 +19,7 @@ fn timed() -> moq_net::track::Info {
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
-const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip", "moq-transport-16", "moq-transport-22"];
+const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"];
 
 /// The versions that forward a resume's floor upstream; the IETF relay subscribes without one.
 const LITE: &[&str] = &["moq-lite-06", "moq-lite-07-wip"];
@@ -47,7 +47,7 @@ async fn settle() {
 }
 
 /// Announce `live/catalog.json` holding one finished snapshot group.
-fn publish(origin: &origin::Producer) -> (broadcast::Producer, track::Producer) {
+fn publish(origin: &origin::Producer) -> (moq_net::origin::Publication, track::Producer) {
 	let broadcast = origin.create_broadcast("live").unwrap();
 	let track = broadcast.create_track("catalog.json", timed()).unwrap();
 	broadcast.announce(Default::default()).unwrap();
@@ -174,7 +174,7 @@ async fn resume_then_fresh(version: Version, in_process: bool) -> Result<(), Str
 		let _sub = resume_remote
 			.track("catalog.json")
 			.unwrap()
-			.subscribe(track::Subscription::default().with_groups(1..))
+			.subscribe(track::Subscription::default().with_range(1..))
 			.await
 			.expect("resume subscribe");
 		moq_clock::sleep(Duration::from_secs(60)).await;

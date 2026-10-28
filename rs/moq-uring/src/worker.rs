@@ -155,6 +155,9 @@ impl Worker {
 		let clock = Clock::new();
 		let deadlines = moq_clock::Deadlines::new(clock.now());
 		let unpark = Unpark::new(metrics.clone());
+		// A wake CQE can join a larger batch after warmup. Reserve the kernel's
+		// actual queue size so copying those completions does not allocate.
+		let cqes = Vec::with_capacity(ring.params().cq_entries() as usize);
 		Ok(Self {
 			owner: kio::Waiter::new(unpark.waker()),
 			shared: Rc::new(Shared {
@@ -172,7 +175,7 @@ impl Worker {
 			}),
 			tasks: kio::Tasks::new(),
 			park: kio::Park::default(),
-			cqes: Vec::new(),
+			cqes,
 			futex_armed: false,
 			alarm: None,
 		})
@@ -650,9 +653,9 @@ pub(crate) struct Owner {
 	/// Held directly: a timer on a dropped worker still has to exist, since
 	/// the driver that owns it is torn down by the same drop that would need
 	/// it.
-	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
+	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the `quic` feature uses it"))]
 	deadlines: moq_clock::Deadlines,
-	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
+	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the `quic` feature uses it"))]
 	metrics: std::sync::Arc<crate::metrics::Counters>,
 }
 
@@ -666,7 +669,7 @@ impl Owner {
 	}
 
 	/// The worker's time: the current turn's instant, or the clock's between turns.
-	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
+	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the `quic` feature uses it"))]
 	pub fn now(&self) -> Instant {
 		self.shared
 			.upgrade()
@@ -685,7 +688,7 @@ impl Owner {
 	}
 
 	/// Run a `!Send` future on the worker, or drop it if the worker is gone.
-	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
+	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the `quic` feature uses it"))]
 	pub fn spawn(&self, future: impl Future<Output = ()> + 'static) {
 		if let Some(handle) = self.handle() {
 			handle.spawn(future);
@@ -693,13 +696,13 @@ impl Owner {
 	}
 
 	/// A disarmed timer on the worker.
-	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
+	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the `quic` feature uses it"))]
 	pub fn timer(&self) -> crate::Timer {
 		crate::Timer::from_queue(&self.deadlines, self.metrics.clone())
 	}
 
 	/// A timer that expires after `duration`.
-	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
+	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the `quic` feature uses it"))]
 	pub fn after(&self, duration: Duration) -> crate::Timer {
 		let mut timer = self.timer();
 		timer.set(self.now().checked_add(duration));
@@ -779,7 +782,7 @@ mod tests {
 	}
 
 	fn worker_with(config: Config) -> Option<Worker> {
-		worker_result(Worker::new(config), std::env::var_os("MOQ_STRICT").is_some())
+		worker_result(Worker::new(config), std::env::var_os("CI_STRICT").is_some())
 	}
 
 	/// A worker on a manual clock, which only `advance` moves.
@@ -844,6 +847,53 @@ mod tests {
 			worker.handle().metrics().snapshot().enters,
 			1,
 			"the parked enter carries the staged SQE"
+		);
+	}
+
+	/// A wake-before-arm futex CQE can join a send-sized batch after warmup.
+	#[test]
+	fn a_larger_wake_batch_reuses_completion_storage() {
+		let Some(mut worker) = worker() else { return };
+		for _ in 0..4 {
+			let key = worker.shared.insert(Op::Cancel);
+			worker.shared.push(&opcode::Nop::new().build().user_data(key)).unwrap();
+		}
+		worker.shared.ring.borrow().submitter().submit_and_wait(4).unwrap();
+		worker.reap(None).unwrap();
+		let capacity = worker.cqes.capacity();
+		let before = worker.handle().metrics().snapshot();
+
+		for _ in 0..4 {
+			let key = worker.shared.insert(Op::Cancel);
+			worker.shared.push(&opcode::Nop::new().build().user_data(key)).unwrap();
+		}
+		// The wake lands after committing to park but before the kernel arms it.
+		// FUTEX_WAIT therefore posts EAGAIN beside the four ordinary completions.
+		let unpark = worker.shared.unpark.clone();
+		unpark.word.store(PARKED, Ordering::Release);
+		unpark.unpark();
+		let key = worker.shared.insert(Op::FutexWait);
+		let entry = opcode::FutexWait::new(
+			unpark.word.as_ptr(),
+			PARKED as u64,
+			FUTEX_BITSET_MATCH_ANY,
+			FUTEX2_SIZE_U32 | FUTEX2_PRIVATE,
+		)
+		.build()
+		.user_data(key);
+		worker.shared.push(&entry).unwrap();
+		worker.futex_armed = true;
+		worker.shared.ring.borrow().submitter().submit_and_wait(5).unwrap();
+		worker.reap(None).unwrap();
+
+		let after = worker.handle().metrics().snapshot();
+		assert_eq!(after.completions - before.completions, 5);
+		assert_eq!(after.wakes - before.wakes, 1);
+		assert!(!worker.futex_armed, "the futex completion must be dispatched");
+		assert_eq!(
+			worker.cqes.capacity(),
+			capacity,
+			"a larger steady-state batch grew the scratch buffer"
 		);
 	}
 
@@ -1025,12 +1075,12 @@ mod tests {
 	fn the_worker_reads_its_manual_clocks_wall_time() {
 		let Some((mut worker, clock)) = manual() else { return };
 		clock.advance(Duration::from_secs(5));
-		let (wall, anchor) = worker
-			.block_on(async { (moq_clock::wall(), moq_clock::anchor()) })
+		let (wall, origin) = worker
+			.block_on(async { (moq_clock::wall(), moq_clock::origin()) })
 			.unwrap();
 		assert_eq!(wall, clock.wall(), "the worker read the host's wall time");
-		assert_eq!(anchor.0, clock.now());
-		assert_eq!(anchor.1, clock.wall());
+		assert_eq!(origin.0, clock.now());
+		assert_eq!(origin.1, clock.wall());
 	}
 
 	/// A timer made between turns counts from the clock, not from the last turn's
@@ -1109,14 +1159,7 @@ mod tests {
 		assert!(handle.udp(bind(), udp::Config::default()).is_err());
 		assert!(matches!(sock.poll_recv(&kio::Waiter::noop()), Poll::Ready(Err(_))));
 		assert!(matches!(sock.poll_acquire(&kio::Waiter::noop()), Poll::Ready(Err(_))));
-		assert!(
-			tx.send(udp::Transmit {
-				to,
-				segment: 1200,
-				ecn: None,
-			})
-			.is_err()
-		);
+		assert!(tx.send(udp::Transmit::new(to, 1200)).is_err());
 		// And a late spawn is dropped rather than parked forever.
 		handle.spawn(async {});
 		drop(sock);
@@ -1230,6 +1273,11 @@ mod tests {
 		let Some(worker) = worker() else { return };
 		let cq = worker.shared.ring.borrow().params().cq_entries();
 		assert!(cq >= CQ_ENTRIES, "kernel granted a {cq}-entry CQ, wanted {CQ_ENTRIES}");
+		assert_eq!(
+			worker.cqes.capacity(),
+			cq as usize,
+			"scratch must cover the accepted CQ geometry"
+		);
 	}
 
 	#[test]
@@ -1258,12 +1306,7 @@ mod tests {
 		assert_eq!(held.len(), usize::from(ceiling));
 		for mut tx in held.drain(..) {
 			tx.resize(1200, 0);
-			tx.send(udp::Transmit {
-				to,
-				segment: 1200,
-				ecn: None,
-			})
-			.expect("send");
+			tx.send(udp::Transmit::new(to, 1200)).expect("send");
 		}
 
 		// The point of the test is the overflow, so prove it happened: the
@@ -1377,12 +1420,7 @@ mod tests {
 			panic!("no tx buffer");
 		};
 		tx.resize(64 * 1024, 0);
-		tx.send(udp::Transmit {
-			to,
-			segment: 1000,
-			ecn: None,
-		})
-		.expect("send 66 datagrams");
+		tx.send(udp::Transmit::new(to, 1000)).expect("send 66 datagrams");
 		drop(worker);
 	}
 
@@ -1406,11 +1444,7 @@ mod tests {
 		};
 		tx.resize(64 * 1024, 0);
 		let err = tx
-			.send(udp::Transmit {
-				to,
-				segment: 1,
-				ecn: None,
-			})
+			.send(udp::Transmit::new(to, 1))
 			.expect_err("65536 datagrams from one buffer");
 		assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
 		drop(worker);
@@ -1466,11 +1500,7 @@ mod tests {
 		};
 		tx.resize(4096, 0);
 		let err = tx
-			.send(udp::Transmit {
-				to,
-				segment: 1024,
-				ecn: None,
-			})
+			.send(udp::Transmit::new(to, 1024))
 			.expect_err("4096 bytes from a 2048 byte buffer");
 		assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
 		drop(worker);
@@ -1494,11 +1524,7 @@ mod tests {
 		// `UDP_SEGMENT` is a u16: without validation this would truncate to a
 		// one-byte stride instead of one segment.
 		let err = tx
-			.send(udp::Transmit {
-				to,
-				segment: usize::from(u16::MAX) + 2,
-				ecn: None,
-			})
+			.send(udp::Transmit::new(to, usize::from(u16::MAX) + 2))
 			.expect_err("oversized segment");
 		assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
 		drop(worker);
@@ -1537,12 +1563,7 @@ mod tests {
 				panic!("the socket failed after a rejected train");
 			};
 			tx.resize(2 * 1200, 7);
-			tx.send(udp::Transmit {
-				to,
-				segment: 1200,
-				ecn: None,
-			})
-			.expect("send");
+			tx.send(udp::Transmit::new(to, 1200)).expect("send");
 			while received < 2 * 1200 && handle.now() < deadline {
 				let handle = handle.clone();
 				worker
@@ -1586,12 +1607,7 @@ mod tests {
 			panic!("no tx buffer");
 		};
 		tx.resize(4 * 1200, 7);
-		tx.send(udp::Transmit {
-			to,
-			segment: 1200,
-			ecn: None,
-		})
-		.expect("send");
+		tx.send(udp::Transmit::new(to, 1200)).expect("send");
 
 		// Drive the worker until the loopback delivers, parking on a timer each
 		// turn so the park and timer counters see traffic too.
@@ -1669,12 +1685,7 @@ mod tests {
 		assert!(sock.poll_acquire(&kio::Waiter::noop()).is_pending());
 		assert!(sock.poll_acquire(&kio::Waiter::noop()).is_pending());
 		assert_eq!(metrics.snapshot().tx_stalls, 1);
-		tx.send(udp::Transmit {
-			to,
-			segment: 1200,
-			ecn: None,
-		})
-		.expect("send");
+		tx.send(udp::Transmit::new(to, 1200)).expect("send");
 
 		// Hold the received packet: its buffer is the pool, so the re-arm has
 		// nowhere to receive into.

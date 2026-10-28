@@ -106,19 +106,19 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 	};
 	config.resize.output = args.frames.0;
 
-	let source_path = moq_net::PathOwned::from(
+	let source_path = moq_net::Path::try_from(
 		moq.broadcast
 			.clone()
 			.context("`transcode` requires the source broadcast: pass --broadcast <name>")?,
-	);
+	)?;
 	if source_path.is_empty() {
 		anyhow::bail!("`transcode` requires the source broadcast: pass --broadcast <name>");
 	}
-	let output_path = moq_net::PathOwned::from(
+	let output_path = moq_net::Path::try_from(
 		args.output
 			.clone()
 			.unwrap_or_else(|| format!("{source_path}/transcode.hang")),
-	);
+	)?;
 
 	// Publish the derivative through one origin and consume the source through
 	// another, over a single auto-reconnecting session.
@@ -128,9 +128,6 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 		.clone()
 		.context("`transcode` requires a relay: pass --connect <url>")?;
 	let publish = moq_tokio::origin::spawn();
-	// A session drop closes the source broadcast and ends the run: the outage is
-	// surfaced rather than transcoded over. The reconnect loop covers the dial;
-	// restarting after a mid-run drop is the caller's call.
 	let remote = moq_tokio::origin::spawn();
 	let session = net
 		.client(moq.client.clone())?
@@ -138,40 +135,186 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 		.with_subscriber(remote.clone())
 		.connect(url);
 
-	// Wait for the source to be announced and resolve it: `request_broadcast` on its
-	// own answers on the spot, so asking the moment a session exists races the
-	// announcement that makes the path routable; `routed_broadcast` also rides out a
-	// covering route retracting mid-resolution (failover churn).
-	//
-	// Raced against the session ending, since the wait itself never fails: the origin
-	// outlives the session here, so a rejected token or an exhausted retry budget would
-	// otherwise leave us waiting for an announcement that can never arrive.
-	let consumer = remote.consume();
-	let source = tokio::select! {
-		source = consumer.routed_broadcast(&source_path) => {
-			source.context("source broadcast unavailable")?
-		}
-		closed = session.closed() => {
-			closed.context("session failed before the source broadcast was announced")?;
-			anyhow::bail!("session closed before the source broadcast was announced");
-		}
-	};
-
 	// Point the derivative catalog at the source renditions so players fetch them from the
 	// source directly. An empty reference would name the derivative broadcast itself, which
 	// publishes the rungs and nothing else.
-	config.source = source_path.relative(&output_path).filter(|rel| !rel.is_empty());
+	let source = source_path
+		.relative(&output_path)
+		.with_context(|| format!("`{output_path}` cannot reference the source broadcast `{source_path}`"))?;
+	config.source = Some(source).filter(|rel| !rel.is_empty());
 
-	let output = publish
-		.create_broadcast(&output_path)
-		.context("failed to create the derivative broadcast")?;
-	output
-		.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
-		.context("failed to announce the derivative broadcast")?;
-	tracing::info!(source = %source_path, output = %output_path, "transcoding");
-
+	let following = Following {
+		origin: remote.consume(),
+		publish,
+		source_path,
+		output_path,
+		config,
+	};
 	tokio::select! {
-		res = moq_transcode::run(source, output, config) => Ok(res?),
+		res = following.run() => res,
 		res = session.closed() => Ok(res?),
+	}
+}
+
+/// Each source instance owns a fresh derivative, so its timestamps and track names never
+/// describe another publisher's content on an existing broadcast.
+struct Following {
+	origin: moq_net::origin::Consumer,
+	publish: moq_net::origin::Producer,
+	source_path: moq_net::Path,
+	output_path: moq_net::Path,
+	config: moq_transcode::Config,
+}
+
+impl Following {
+	async fn run(self) -> anyhow::Result<()> {
+		use moq_mux::follow::{Event, Instances};
+
+		let mut instances = Instances::new(&self.origin, &self.source_path, None)?;
+		let mut running = None;
+		loop {
+			tokio::select! {
+				event = instances.next() => match event? {
+					Event::Start(source) => {
+						// Dropping the old ladder cancels its pending requests and rung tasks.
+						drop(running.take());
+						let output = self.publish.create_broadcast(&self.output_path)?;
+						let transcoder = moq_transcode::Transcoder::new(source, output.broadcast().clone(), self.config.clone())?;
+						output.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))?;
+						tracing::info!(source = %self.source_path, output = %self.output_path, "transcoding");
+						running = Some(Box::pin(transcoder.run()));
+					}
+					Event::End => tracing::info!(source = %self.source_path, "offline, waiting for it to return"),
+				},
+				result = async { running.as_mut().expect("guarded").await }, if running.is_some() => {
+					running = None;
+					match result {
+						Ok(()) => {}
+						// The instance ended cleanly before advertising anything to transcode.
+						Err(moq_transcode::Error::NoSource) => {
+							tracing::info!(source = %self.source_path, "ended before its video was ready, waiting for it to return");
+						}
+						Err(err) => return Err(err).context("transcoding failed"),
+					}
+				}
+			}
+		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// A pending source catalog is a real run even before an encoder is needed. Replacing
+	/// that source must retire the old derivative and announce a fresh instance immediately.
+	#[tokio::test(start_paused = true)]
+	async fn a_source_restart_replaces_the_derivative_while_its_catalog_is_pending() {
+		restart(true).await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn an_epochless_source_restart_also_creates_a_new_derivative() {
+		restart(false).await;
+	}
+
+	async fn restart(with_epoch: bool) {
+		let origin = moq_tokio::origin::spawn();
+		let publish = moq_tokio::origin::spawn();
+		let route = || {
+			let route = moq_net::origin::Route::default();
+			if with_epoch {
+				route.with_epoch(moq_net::Epoch::mint())
+			} else {
+				route
+			}
+		};
+		let old = origin.publish("source", route()).unwrap();
+		let _old_dynamic = old.requests();
+		let mut derivatives = moq_mux::follow::Instances::new(&publish.consume(), "derived", None).unwrap();
+		let following = Following {
+			origin: origin.consume(),
+			publish: publish.clone(),
+			source_path: hang::moq_net::Path::from_static("source"),
+			output_path: hang::moq_net::Path::from_static("derived"),
+			config: Default::default(),
+		};
+		let task = tokio::spawn(following.run());
+		let first = next(&mut derivatives).await;
+		let mut old_catalog = first
+			.track(hang::Catalog::DEFAULT_NAME)
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+		let new = origin.publish("source", route()).unwrap();
+		let _new_dynamic = new.requests();
+		let second = next(&mut derivatives).await;
+		assert!(!first.is_clone(&second));
+		assert_ne!(first.info().epoch, second.info().epoch);
+		assert!(first.is_closed(), "the superseded ladder is retired");
+		loop {
+			match old_catalog.recv_group().await {
+				Ok(Some(_)) => continue,
+				Err(moq_net::Error::Cancel) => break,
+				_ => panic!("the retired catalog must report deliberate cancellation"),
+			}
+		}
+		assert!(!second.is_closed(), "the new ladder serves immediately");
+		assert!(
+			!old.consume().is_closed(),
+			"replacement does not close the source publisher"
+		);
+		task.abort();
+		assert!(task.await.unwrap_err().is_cancelled());
+	}
+
+	/// A source that finishes its catalog before advertising any video is a clean end, so the
+	/// command keeps following and the next instance still gets a ladder.
+	#[tokio::test(start_paused = true)]
+	async fn a_source_ending_before_its_video_waits_for_the_next_instance() {
+		let origin = moq_tokio::origin::spawn();
+		let publish = moq_tokio::origin::spawn();
+		let route = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+		let old = origin.publish("source", route()).unwrap();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut old.broadcast().clone(), Default::default()).unwrap();
+		let mut derivatives = moq_mux::follow::Instances::new(&publish.consume(), "derived", None).unwrap();
+		let following = Following {
+			origin: origin.consume(),
+			publish: publish.clone(),
+			source_path: hang::moq_net::Path::from_static("source"),
+			output_path: hang::moq_net::Path::from_static("derived"),
+			config: Default::default(),
+		};
+		let task = tokio::spawn(following.run());
+		let first = next(&mut derivatives).await;
+
+		catalog.finish().unwrap();
+		moq_clock::timeout(std::time::Duration::from_secs(1), first.closed())
+			.await
+			.expect("the ladder outlived its source's end");
+		assert!(!task.is_finished(), "a clean end stopped following");
+
+		let new = origin.publish("source", route()).unwrap();
+		let _new_dynamic = new.requests();
+		let second = next(&mut derivatives).await;
+		assert!(!first.is_clone(&second));
+		task.abort();
+		assert!(task.await.unwrap_err().is_cancelled());
+	}
+
+	/// The next derivative instance announced at the output path.
+	async fn next(instances: &mut moq_mux::follow::Instances) -> moq_net::broadcast::Consumer {
+		let start = async {
+			loop {
+				match instances.next().await.unwrap() {
+					moq_mux::follow::Event::Start(broadcast) => return broadcast,
+					moq_mux::follow::Event::End => continue,
+				}
+			}
+		};
+		moq_clock::timeout(std::time::Duration::from_secs(1), start)
+			.await
+			.expect("no derivative instance was announced")
 	}
 }

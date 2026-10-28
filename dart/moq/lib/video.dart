@@ -16,13 +16,25 @@ typedef Producer = MoqVideoProducer;
 /// Encodes raw pictures without publishing them.
 typedef Encoder = MoqVideoEncoder;
 
-/// Subscribes to a catalog video rendition and yields decoded frames; open one with `Consumer.subscribe`.
+/// Subscribes to a catalog video rendition and yields each [Read]; open one with `Consumer.subscribe`.
 typedef Consumer = MoqVideoConsumer;
+
+/// One item a [Consumer] reads, in delivery order: [ReadFrame], [ReadGap], or [ReadEnd].
+typedef Read = MoqVideoRead;
+
+/// A decoded picture; `dispose()` its frame promptly, since held frames stall the decoder.
+typedef ReadFrame = FrameMoqVideoRead;
+
+/// Media after what was already read was lost; what follows does not continue it.
+typedef ReadGap = GapMoqVideoRead;
+
+/// The publisher stopped its encoder; what follows comes from a fresh encoder.
+typedef ReadEnd = EndMoqVideoRead;
 
 /// The pixel layout, resolution, and framerate written to a [Producer].
 typedef EncoderInput = MoqVideoEncoderInput;
 
-/// The track name, codec, bitrate, group mode, and backend preference.
+/// The codec, bitrate, group mode, and backend preference.
 typedef EncoderOutput = MoqVideoEncoderOutput;
 
 /// What a [Consumer] delivers: an optional resize, a max delay, and whether to keep the decoder's surface (macOS and iOS).
@@ -82,9 +94,20 @@ extension VideoDecodedFrameDuration on MoqVideoDecodedFrame {
   Duration get timestamp => Duration(microseconds: timestampUs());
 }
 
-/// Duration view over a decoder's latency bound.
-extension VideoDecoderOutputDuration on MoqVideoDecoderOutput {
-  /// Upper bound on buffering before a stalled group is skipped, or null for the default.
-  Duration? get maxDelay =>
-      maxDelayUs == null ? null : Duration(microseconds: maxDelayUs!);
+/// Duration view over a gap.
+extension VideoReadGapDuration on GapMoqVideoRead {
+  /// The furthest presentation point already read.
+  Duration get timestamp => Duration(microseconds: timestampUs);
 }
+
+/// Duration view over an encoder end.
+extension VideoReadEndDuration on EndMoqVideoRead {
+  /// Where the stopped encoder's media stops.
+  Duration get end => Duration(microseconds: endUs);
+}
+
+/// Input, codec settings, and publication ownership for a producer.
+typedef ProducerOptions = MoqVideoProducerOptions;
+
+/// An exact video frame rate in frames per second.
+typedef FrameRate = MoqVideoFrameRate;

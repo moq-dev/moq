@@ -6,6 +6,7 @@ description: Capture, encode, and publish from the browser
 # @moq/publish
 
 [![npm](https://img.shields.io/npm/v/@moq/publish)](https://www.npmjs.com/package/@moq/publish)
+[![API](https://img.shields.io/badge/API-reference-blue)](/lib/js/api/publish)
 
 The publisher: captures a camera, microphone, screen, or file, encodes with
 WebCodecs, writes the catalog, and publishes a hang broadcast.
@@ -28,15 +29,17 @@ WebCodecs, writes the catalog, and publishes a hang broadcast.
 | Attribute | |
 | --- | --- |
 | `url`, `name` | Relay URL (with `?jwt=` if needed) and broadcast name. |
-| `versions` | Protocol versions to offer, most preferred first, comma-separated like `moq-transport-14,moq-lite-06`. Every stable version by default. |
+| `versions` | Protocol versions to offer, most preferred first, comma-separated like `moq-transport-18,moq-lite-06`. Every stable version by default. |
 | `source` | `camera`, `screen`, or `file`. |
 | `muted`, `invisible` | Disable audio or video capture. |
 | `preview` | What the nested element shows: the raw `source` (default), a decoded copy of the `encoded` stream to see what viewers get, or `none`. |
 | `backend` | How a `<canvas>` preview is drawn; see [@moq/video](/lib/js/video). `auto` (default), `webgpu`, or `2d`. |
-| `announce` | When to advertise: once the `source` is live (default), `always`, or `never`. Nobody can see or subscribe to the broadcast until it is announced. |
-| `linger` | Finish the broadcast cleanly when advertising stops, such as a `source` that ends, instead of unannouncing it at once. It stays up while its media is fresh so viewers drain the tail, and the next announce publishes a new broadcast. Removing the element ends it at once. Off by default. |
+| `announce` | When to advertise: once the `source` is live (default), or `always`. Nobody can see or subscribe to the broadcast until it is announced. To keep it out of discovery, use a hidden name with a `.`-prefixed segment; it is still subscribable by name. |
 
-Every attribute is also a reactive property. The
+Every attribute is also a reactive property, and property or UI changes reflect
+back into the attributes. An invalid value is refused rather than defaulted: the
+property setter throws, and invalid markup reports a browser `error` event and
+suspends the element until corrected or removed. The
 [README](https://www.npmjs.com/package/@moq/publish) lists types and defaults.
 A nested `<video>` gets the raw capture stream; a `<canvas>` is drawn by the
 element. `<moq-publish-support>` shows what the browser can encode.
@@ -96,7 +99,10 @@ signals.run((effect) => {
         timescale: Moq.Time.Timescale.MILLI,
         maxAge: Milli(86_400_000),
     });
-    effect.cleanup(() => track.close());
+    effect.cleanup(() => {
+        track.finish();
+        track.close();
+    });
 
     const meta = new Json.Snapshot.Producer<Meta>({ track });
     meta.update({ value: current, at: Moq.Time.Timestamp.now() });

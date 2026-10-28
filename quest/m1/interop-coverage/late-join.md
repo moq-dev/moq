@@ -4,7 +4,7 @@
 
 On the IETF matrix (`just test interop --versions ietf`), a
 subscriber that joins mid-group receives the current group from object 0
-(a joining FETCH before draft 20, a fill from draft 20) and a standalone
+(a joining FETCH before draft 22, a fill from draft 22) and a standalone
 FETCH of a past group returns exactly its objects, for Rust and JS
 publishers and subscribers.
 
@@ -19,8 +19,7 @@ the JS publisher refuses every FETCH. Publish a track whose first group
 outlives the subscriber's arrival (a catalog written once, and a slow video
 GOP) so the case cannot pass on timing.
 
+Decided 2026-10-27 (maintainer): this needs only the cached and joining half
+of JavaScript FETCH, not the on-demand half that waits on JS ranges.
+
 Public API: none. Wire: none.
-
-## Required
-
-- [JavaScript FETCH](/quest/m1/js-fetch.md) - the JS publisher answers FETCH

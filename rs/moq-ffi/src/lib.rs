@@ -1,5 +1,8 @@
 #![warn(missing_docs)]
-#![cfg_attr(test, allow(clippy::disallowed_methods))]
+#![cfg_attr(
+	test,
+	expect(clippy::disallowed_methods, reason = "tests read the host clock directly")
+)]
 
 //! UniFFI bindings for [`moq_net`].
 //!
@@ -10,8 +13,17 @@
 // `Rc`-backed, so clippy sees a pointlessly atomic `Arc` at every construction site. The
 // `Arc` is uniffi's ABI rather than our choice, and the target is single-threaded, so the
 // wasted atomics are what one type serving both targets costs.
-#![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
+#![cfg_attr(
+	target_arch = "wasm32",
+	expect(
+		clippy::arc_with_non_send_sync,
+		reason = "`Arc` is uniffi's ABI, and wasm is single-threaded"
+	)
+)]
 
+// Counts moq's heap for the host leak tests; see `moq_ffi_test_allocated`.
+#[cfg(all(feature = "testing", not(target_arch = "wasm32")))]
+mod alloc;
 #[cfg(target_os = "android")]
 mod android;
 // The QUIC server and moq-native's logger have no browser equivalent, and the
@@ -95,6 +107,6 @@ pub extern "C" fn moq_ffi_test_clock_now() -> u64 {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test;
 
-// The binding benchmark's Rust baselines; ignored unless `just bench-ffi` asks for them.
+// The binding benchmark's Rust baselines; ignored unless a run asks for them (see bench/README.md).
 #[cfg(all(test, unix))]
 mod bench;

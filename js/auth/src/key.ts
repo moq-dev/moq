@@ -74,6 +74,8 @@ const RsaKeySchema = z
 		dp: z.optional(Base64FieldSchema),
 		dq: z.optional(Base64FieldSchema),
 		qi: z.optional(Base64FieldSchema),
+		// Multi-prime RSA is unsupported by the shared key contract.
+		oth: z.optional(z.never()),
 	})
 	.check(
 		z.superRefine((data, ctx) => {
@@ -217,23 +219,18 @@ async function sign(key: Key, claims: z.input<typeof ClaimsSchema>): Promise<str
 	return jwt;
 }
 
-/** Decode a signed token, checking only signature, algorithm, and key ID. The payload is unvalidated. */
-async function decode(key: PublicKey | SymmetricKey, token: string): Promise<unknown> {
+/** Verify a token's signature and this crate's strict claims, expiry, not-before, and key scope. */
+async function verify(key: PublicKey | SymmetricKey, token: string): Promise<Claims> {
 	ensureOperationSupported(key, "verify");
 	const joseKey = await importJoseKey(key);
 	const { payload, protectedHeader } = await jose.compactVerify(token, joseKey, {
 		algorithms: [key.alg],
 	});
 	if (protectedHeader.kid !== key.kid) throw new Error("Token kid does not match key");
-	return JSON.parse(new TextDecoder().decode(payload));
-}
-
-/** Verify a token's signature and this crate's strict claims, expiry, not-before, and key scope. */
-async function verify(key: PublicKey | SymmetricKey, token: string): Promise<Claims> {
-	const payload = await decode(key, token);
+	const decoded = JSON.parse(new TextDecoder().decode(payload));
 	let claims: Claims;
 	try {
-		claims = ClaimsSchema.parse(payload);
+		claims = ClaimsSchema.parse(decoded);
 	} catch (error) {
 		throw new Error(`Failed to parse token claims: ${error instanceof Error ? error.message : "unknown error"}`);
 	}
@@ -414,8 +411,6 @@ export const Key = {
 	public: toPublic,
 	/** Sign the claims with this key, returning the encoded token. */
 	sign,
-	/** Decode a signed token with no payload policy. */
-	decode,
 	/** Verify a token's signature and this crate's claims policy. */
 	verify,
 	/** Generate a key for the given algorithm. A random key ID is assigned if none is provided. */

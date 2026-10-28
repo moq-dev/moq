@@ -52,10 +52,10 @@ async fn serve(case: Case) -> Server {
 			tokio::spawn(async move {
 				match case {
 					Case::Reject => {
-						request.reject(moq_tokio::server::Reject::App(CODE)).await.ok();
+						request.reject(moq_net::SessionError::App(CODE)).await.ok();
 					}
 					Case::Abort | Case::AbortThenDrop => {
-						let Ok((session, _driver)) = request.ok().await else {
+						let Ok(session) = request.ok().await else {
 							return;
 						};
 						session.abort(moq_net::Error::App(CODE));

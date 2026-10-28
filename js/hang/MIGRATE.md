@@ -4,6 +4,24 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### The catalog rendition cap is removed
+
+`Catalog.MAX_RENDITIONS` and `Catalog.TooManyRenditions` are gone: `checkRenditions`, `encode`, and `watch` accept any number of renditions.
+Delete `instanceof TooManyRenditions` checks. An application that wants a limit counts the `renditions` of each section itself.
+
+### HLS records replace the root archive
+
+`Catalog.ArchiveSchema`, `Catalog.ARCHIVE_VERSION`, the root `archive` field, and the `Timeline` module are gone.
+A video or audio rendition carries an optional `hls: { track, duration }` field instead; read its records with `Hls.Consumer.subscribe(broadcast, rendition.hls)`.
+Each `Hls.Entry` is `{ sequence, group, pts, duration? }`, with `pts` and `duration` in microseconds; a zero `duration` marks where content stopped.
+`Catalog.MOQ_EPOCH_UNIX_MILLIS` is unchanged.
+
+### Container reads are a tagged union
+
+`Container.Consumer.next()` returns a `Container.Read` union instead of an object with optional `frame` and continuity counters.
+Switch on `kind`: `frame` carries `frame` and `group`, `gap` carries `timestamp` and `duration`, and `end` carries `group` and `end`.
+Reset decoder state on `gap`, and process `end` as the declared media end rather than testing `continuous` or `discontinuity`.
+
 ### CMAF decoding is a separate module
 
 Replace `Container.Cmaf` with `import * as Cmaf from "@moq/hang/cmaf"`.
@@ -20,18 +38,6 @@ Handle the rejection as fatal; only a reset or evicted group still reads as a ga
 
 `version` is the oldest moq-hang draft that reads the catalog, and parsing throws `UnsupportedVersion` for one newer than this reader.
 Rename an extension field that was called `version`.
-
-### Archive timelines declare a per-track duration (#5715)
-
-Each `archive.timelines` value is `{ track, duration }` instead of the timeline track's name, and `archive.durationMax` is removed.
-`duration` is the nominal record duration in the archive timescale, absent for an untimed track.
-Read the track name from the value's `track`, and use the per-track `duration` instead of `durationMax`.
-A catalog on the other side of this change parses with no `archive`; see the [upgrade guide](https://github.com/moq-dev/moq/blob/main/doc/setup/upgrade.md).
-
-### Timeline records are optionally timed (#5720)
-
-`Timeline.Record.pts` and `.duration` are optional, absent on an untimed track.
-Handle a record whose `pts` is `undefined`.
 
 ### Catalog ranking names its media kind
 

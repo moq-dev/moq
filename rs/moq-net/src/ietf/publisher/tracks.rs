@@ -5,10 +5,11 @@
 //! paused PUBLISH per track, which carries the track's properties and an error PUBLISH_DONE
 //! once the track is no longer listed; the subscriber resumes one with REQUEST_UPDATE to get its
 //! data, served from the cache as a SUBSCRIBE would be. A FORWARD=1 request asks for every
-//! track's data, which no draft lets us downgrade, so from draft-19 each track is answered
+//! track's data, which no draft lets us downgrade, so from draft-22 each track is answered
 //! with PUBLISH_SKIPPED and the subscriber SUBSCRIBEs to what it wants. Draft-18 has no such
 //! skip, so there the request is refused.
 
+use crate::driver::Transport;
 use std::collections::HashSet;
 
 use hashlink::LinkedHashMap;
@@ -20,13 +21,13 @@ use crate::util::TaskSet;
 #[derive(Default)]
 pub(super) struct Listings {
 	/// The prefix of every established SUBSCRIBE_TRACKS, by a key its guard removes.
-	prefixes: HashMap<u64, crate::PathOwned>,
+	prefixes: HashMap<u64, crate::Path>,
 	next: u64,
 	/// On draft-18, the tracks a PUBLISH of ours subscribes the peer to, and how many
 	/// SUBSCRIBEs of the peer's each track has: draft-18 allows the peer one subscription
 	/// per track (section 5.1), so a PUBLISH joins neither kind.
-	published: HashMap<(crate::PathOwned, Arc<str>), usize>,
-	subscribed: HashMap<(crate::PathOwned, Arc<str>), usize>,
+	published: HashMap<(crate::Path, Arc<str>), usize>,
+	subscribed: HashMap<(crate::Path, Arc<str>), usize>,
 }
 
 /// Holds a SUBSCRIBE_TRACKS prefix as established until dropped.
@@ -39,7 +40,7 @@ impl Established {
 	/// Establish `prefix`, unless it overlaps an established request (section 10.19): two
 	/// would match the same namespaces, and keeping them apart is also what lists each
 	/// broadcast at most once per session.
-	fn new(listings: &kio::Shared<Listings>, prefix: &crate::PathOwned) -> Option<Self> {
+	fn new(listings: &kio::Shared<Listings>, prefix: &crate::Path) -> Option<Self> {
 		let mut state = listings.lock();
 		if state
 			.prefixes
@@ -68,7 +69,7 @@ impl Drop for Established {
 /// until dropped.
 pub(super) struct Subscribed {
 	listings: kio::Shared<Listings>,
-	key: (crate::PathOwned, Arc<str>),
+	key: (crate::Path, Arc<str>),
 	/// A SUBSCRIBE of the peer's, rather than a PUBLISH of ours.
 	direct: bool,
 }
@@ -76,17 +77,17 @@ pub(super) struct Subscribed {
 impl Subscribed {
 	/// Claim `namespace`'s `track` for a PUBLISH of ours, unless the peer is subscribed to
 	/// it already, by its SUBSCRIBE or another PUBLISH.
-	fn publish(listings: &kio::Shared<Listings>, namespace: crate::PathOwned, track: Arc<str>) -> Option<Self> {
+	fn publish(listings: &kio::Shared<Listings>, namespace: crate::Path, track: Arc<str>) -> Option<Self> {
 		Self::claim(listings, (namespace, track), false)
 	}
 
 	/// Count the peer's SUBSCRIBE to `namespace`'s `track`, unless a PUBLISH of ours
 	/// subscribes it already.
 	pub(super) fn subscribe(listings: &kio::Shared<Listings>, namespace: &crate::Path, track: &str) -> Option<Self> {
-		Self::claim(listings, (namespace.to_owned(), Arc::from(track)), true)
+		Self::claim(listings, (namespace.clone(), Arc::from(track)), true)
 	}
 
-	fn claim(listings: &kio::Shared<Listings>, key: (crate::PathOwned, Arc<str>), direct: bool) -> Option<Self> {
+	fn claim(listings: &kio::Shared<Listings>, key: (crate::Path, Arc<str>), direct: bool) -> Option<Self> {
 		let mut locked = listings.lock();
 		let Listings {
 			published, subscribed, ..
@@ -126,7 +127,7 @@ impl Drop for Subscribed {
 }
 
 /// The subscription parameters a PUBLISH subscription has, starting from those of the
-/// SUBSCRIBE_TRACKS that made it (draft-19 section 10.19.1) and moved by each update.
+/// SUBSCRIBE_TRACKS that made it (draft-22 section 3.6.2) and moved by each update.
 #[derive(Clone, Copy)]
 struct Params {
 	priority: u8,
@@ -138,16 +139,17 @@ struct Params {
 }
 
 /// The listed tracks a request answers with PUBLISH_SKIPPED and has not sent yet, keyed by
-/// (suffix, name) in listing order. A track removed before its skip went out cancels it,
-/// so a peer that stops reading holds at most one per listed track.
-type Skips = kio::Shared<LinkedHashMap<(crate::PathOwned, Arc<str>), ()>>;
+/// (suffix, name) in listing order. A track removed before its skip went out cancels it.
+/// A FORWARD=1 listing adds one only once this is empty, so a peer that stops reading
+/// leaves the rest unread in each broadcast's listing.
+type Skips = kio::Shared<LinkedHashMap<(crate::Path, Arc<str>), ()>>;
 
 /// What a request's listing shares with the tasks listing each broadcast.
 #[derive(Clone)]
 struct Request {
 	origin: origin::Consumer,
 	/// The request's prefix, which every PUBLISH namespace starts with.
-	prefix: crate::PathOwned,
+	prefix: crate::Path,
 	/// Whether the request asked for every track's objects, which we answer with skips.
 	forward: bool,
 	params: Params,
@@ -158,18 +160,93 @@ struct Request {
 	live: kio::Consumer<()>,
 }
 
+/// Why a listed broadcast's route closed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Route {
+	/// Another instance took the path: the PUBLISHes of this one end now.
+	Replaced,
+	/// Nothing serves the path any more, so its broadcast ends soon too: its listing is read
+	/// to that end, which says which tracks finished.
+	Withdrawn,
+}
+
+/// One listed broadcast's tracks, by how far each got toward the peer.
+#[derive(Default)]
+struct Entries {
+	/// The tracks waiting their turn for a PUBLISH, in listing order.
+	pending: LinkedHashMap<Arc<str>, track::Info>,
+	/// The next track to PUBLISH, waiting on the peer's stream credit.
+	staged: Option<Staged>,
+	/// Each sent PUBLISH's entry: dropping it says the track is no longer listed.
+	listed: HashMap<Arc<str>, kio::Producer<bool>>,
+	/// The tracks with a skip queued, so the broadcast's end cancels only its own.
+	skipped: HashSet<Arc<str>>,
+}
+
+impl Entries {
+	fn skip(&mut self, skips: &Skips, suffix: &crate::Path, name: Arc<str>) {
+		skips.lock().insert((suffix.clone(), name.clone()), ());
+		self.skipped.insert(name);
+	}
+
+	/// `name` is no longer listed: drop whatever it got to, ending its PUBLISH with
+	/// TRACK_ENDED if it `finished`.
+	fn remove(&mut self, skips: &Skips, suffix: &crate::Path, name: Arc<str>, finished: bool) {
+		if self.staged.as_ref().is_some_and(|staged| staged.name == name) {
+			self.staged = None;
+		}
+		self.pending.remove(&name);
+		if self.skipped.remove(&name) {
+			skips.lock().remove(&(suffix.clone(), name.clone()));
+		}
+		if let Some(entry) = self.listed.remove(&name)
+			&& finished
+			&& let Ok(mut done) = entry.write()
+		{
+			*done = true;
+		}
+	}
+
+	/// Nothing more is PUBLISHed or skipped, while the PUBLISHes already sent stay listed.
+	fn halt(&mut self, skips: &Skips, suffix: &crate::Path) {
+		self.pending.clear();
+		self.staged = None;
+		let mut skips = skips.lock();
+		for name in self.skipped.drain() {
+			skips.remove(&(suffix.clone(), name));
+		}
+	}
+
+	/// Every track is no longer listed.
+	fn unlist(&mut self, skips: &Skips, suffix: &crate::Path) {
+		self.halt(skips, suffix);
+		self.listed.clear();
+	}
+}
+
+/// The next track to PUBLISH, ready but for its stream.
+struct Staged {
+	name: Arc<str>,
+	track: track::Consumer,
+	properties: ietf::Properties,
+	/// On draft-18, claims the track's one subscription from now on.
+	subscribed: Option<Subscribed>,
+}
+
 /// One listed track, handed to its PUBLISH task.
 struct Listed {
+	/// The PUBLISH's stream, opened once the peer's credit admitted it.
+	stream: Stream<Transport, Version>,
 	track: track::Consumer,
 	/// The track's full namespace, as the PUBLISH names it.
-	namespace: crate::PathOwned,
+	namespace: crate::Path,
 	name: Arc<str>,
 	properties: ietf::Properties,
-	/// Closes once the track is no longer listed.
-	listed: kio::Consumer<()>,
+	/// Closes once the track is no longer listed, holding whether it finished.
+	listed: kio::Consumer<bool>,
 	/// Closes once the request is cancelled, which a PUBLISH not yet sent heeds.
 	live: kio::Consumer<()>,
-	/// The subscription slot the PUBLISH holds for as long as it lives.
+	/// Counts the PUBLISH among the session's subscriptions for as long as it lives.
 	slot: crate::session::Slot,
 	/// On draft-18, claims the track's one subscription for as long as the PUBLISH lives.
 	subscribed: Option<Subscribed>,
@@ -178,7 +255,7 @@ struct Listed {
 
 /// How a paused PUBLISH subscription resumes forwarding.
 struct Resume {
-	/// FILL_PARAMETERS (draft-20+) for the objects before the join.
+	/// FILL_PARAMETERS (draft-22) for the objects before the join.
 	fill: Option<ietf::Fill>,
 	/// NEW_GROUP_REQUEST, counted as a join as on a SUBSCRIBE.
 	new_group: Option<u64>,
@@ -200,22 +277,18 @@ enum Wait {
 	Failed(Error),
 }
 
-impl<S> Publisher<S>
-where
-	S: crate::transport::poll::Boxable,
-{
+impl Publisher {
 	/// Answer a SUBSCRIBE_TRACKS: list every track under its prefix until the subscriber
 	/// cancels or the session ends, then let the PUBLISHes it made run to their own end.
 	pub(super) async fn serve_subscribe_tracks_stream(
 		self,
-		mut stream: Stream<S, Version>,
-		msg: ietf::SubscribeTracks<'_>,
+		mut stream: Stream<Transport, Version>,
+		msg: ietf::SubscribeTracks,
 	) -> Result<(), Error> {
 		if let Some(error) = super::super::namespace::refusal(&msg.prefix, self.version) {
 			return super::super::request_stream::reject(stream, error).await;
 		}
 		let refuse = |error_code, reason: &'static str| ietf::RequestError {
-			request_id: None,
 			error_code,
 			reason_phrase: reason.into(),
 			retry_interval: 0,
@@ -236,13 +309,13 @@ where
 			let error = refuse(request::NOT_SUPPORTED, "SUBSCRIBE_TRACKS needs FORWARD=0");
 			return super::super::request_stream::reject(stream, error).await;
 		}
-		let prefix = msg.prefix.to_owned();
+		let prefix = msg.prefix.clone();
 		let Some(established) = Established::new(&self.listings, &prefix) else {
 			let error = refuse(request::PREFIX_OVERLAP, "overlaps another SUBSCRIBE_TRACKS");
 			return super::super::request_stream::reject(stream, error).await;
 		};
 
-		tracing::debug!(prefix = %self.origin.absolute(&prefix), forward = msg.forward, "subscribe_tracks stream");
+		tracing::debug!(prefix = %crate::path::Rooted(self.origin.root(), &prefix), forward = msg.forward, "subscribe_tracks stream");
 
 		// The view SUBSCRIBE_NAMESPACE discovers through: rooted at the prefix so every
 		// broadcast arrives named by its suffix, never handing back what flowed through the
@@ -264,11 +337,9 @@ where
 			.discovery(!declared.hidden || self.origin.includes_hidden());
 		let mut announced = origin.announced();
 
-		stream.writer.buffer_varint(ietf::RequestOk::ID)?;
 		stream
 			.writer
-			.encode(&ietf::RequestOk {
-				request_id: None,
+			.encode_message(&ietf::RequestOk {
 				active: None,
 				largest: None,
 			})
@@ -281,7 +352,7 @@ where
 			prefix: prefix.clone(),
 			forward: msg.forward,
 			params: Params {
-				priority: msg.subscriber_priority.unwrap_or(crate::ietf::priority::ABSENT_WIRE),
+				priority: msg.subscriber_priority.unwrap_or(crate::ietf::priority::DEFAULT_WIRE),
 				order: msg.group_order,
 				filter: msg.filter.unwrap_or(Filter::Unfiltered),
 				max_age: None,
@@ -291,10 +362,17 @@ where
 			skips: Skips::default(),
 			live: live.consume(),
 		};
-		// Each listed broadcast's route: dropping it ends that broadcast's listing.
-		let mut routes: HashMap<crate::PathOwned, kio::Producer<()>> = HashMap::new();
+		// Each listed broadcast's route, closed once its announcement goes; see [`Route`].
+		let mut routes: HashMap<crate::Path, kio::Producer<Route>> = HashMap::new();
+		let withdraw = |routes: &mut HashMap<crate::Path, kio::Producer<Route>>, prefix: &crate::Path| {
+			if let Some(route) = routes.remove(prefix)
+				&& let Ok(mut route) = route.write()
+			{
+				*route = Route::Withdrawn;
+			}
+		};
 		let mut broadcasts = TaskSet::owned();
-		let mut session = self.session.clone();
+		let session = self.session.clone();
 		let mut finished = false;
 		let mut goaways = super::super::request_stream::Messages::new(self.session.clone(), self.control.client());
 
@@ -308,16 +386,14 @@ where
 		let cancelled = loop {
 			let event = broadcasts
 				.drive(|waiter| {
-					let mut cx = waiter.context();
-					if session.poll_closed(&mut cx).is_ready() {
+					if session.poll_closed(waiter).is_ready() {
 						return Poll::Ready(Event::Closed);
 					}
-					if let Poll::Ready(res) =
-						self.poll_listing_cancel(&mut stream, &mut finished, &mut goaways, &mut cx)
+					if let Poll::Ready(res) = self.poll_listing_cancel(&mut stream, &mut finished, &mut goaways, waiter)
 					{
 						return Poll::Ready(Event::Cancelled(res));
 					}
-					if let Err(err) = Self::poll_write_skips(&mut stream, &request.skips, waiter, &mut cx) {
+					if let Err(err) = Self::poll_write_skips(&mut stream, &request.skips, waiter) {
 						return Poll::Ready(Event::Cancelled(Err(err)));
 					}
 					if !answered {
@@ -338,14 +414,14 @@ where
 					crate::announce::Event::Start(announce) | crate::announce::Event::Restart(announce),
 				) => announce,
 				Event::Announce(crate::announce::Event::End(announce)) => {
-					routes.remove(&announce.prefix);
+					withdraw(&mut routes, &announce.prefix);
 					continue;
 				}
 				// A new hop or cost changes nothing listed.
 				Event::Announce(crate::announce::Event::Update(_)) => continue,
 			};
 			// A restart is a new instance: the old one's listing ends with its route.
-			let route = kio::Producer::new(());
+			let route = kio::Producer::new(Route::Replaced);
 			let task = self.clone().run_listed_broadcast(
 				request.clone(),
 				announce.prefix.clone(),
@@ -356,7 +432,7 @@ where
 			broadcasts.push(task);
 		};
 
-		tracing::debug!(prefix = %self.origin.absolute(&prefix), ?cancelled, "subscribe_tracks ended");
+		tracing::debug!(prefix = %crate::path::Rooted(self.origin.root(), &prefix), ?cancelled, "subscribe_tracks ended");
 		// The request no longer stands: another may take its prefix, nothing more is
 		// PUBLISHed, and what was never sent is dropped. Its routes stay, so a PUBLISH
 		// already sent still ends when its track does.
@@ -377,11 +453,10 @@ where
 		// each ending once its broadcast does, even while the peer is slow to take the close.
 		loop {
 			let event = kio::wait(|waiter| {
-				let mut cx = waiter.context();
 				if let Some(writer) = closing.as_mut() {
 					let closed = 'close: {
 						if !fin {
-							match writer.poll_flush(&mut cx) {
+							match writer.poll_flush(waiter) {
 								Poll::Pending => break 'close Poll::Pending,
 								Poll::Ready(res) => {
 									if res.and_then(|()| writer.finish()).is_err() {
@@ -391,13 +466,13 @@ where
 							}
 							fin = true;
 						}
-						writer.poll_close(&mut cx).map(|_| ())
+						writer.poll_close(waiter).map(|_| ())
 					};
 					if closed.is_ready() {
 						closing = None;
 					}
 				}
-				if session.poll_closed(&mut cx).is_ready() {
+				if session.poll_closed(waiter).is_ready() {
 					return Poll::Ready(None);
 				}
 				if broadcasts.poll(waiter).is_ready() && closing.is_none() {
@@ -407,7 +482,8 @@ where
 			})
 			.await;
 			match event {
-				Some(crate::announce::Event::End(announce) | crate::announce::Event::Restart(announce)) => {
+				Some(crate::announce::Event::End(announce)) => withdraw(&mut routes, &announce.prefix),
+				Some(crate::announce::Event::Restart(announce)) => {
 					routes.remove(&announce.prefix);
 				}
 				Some(_) => {}
@@ -420,17 +496,17 @@ where
 	/// ending it, such as a REQUEST_UPDATE we refuse.
 	fn poll_listing_cancel(
 		&self,
-		stream: &mut Stream<S, Version>,
+		stream: &mut Stream<Transport, Version>,
 		finished: &mut bool,
-		goaways: &mut super::super::request_stream::Messages<S>,
-		cx: &mut std::task::Context<'_>,
+		goaways: &mut super::super::request_stream::Messages,
+		waiter: &kio::Waiter,
 	) -> Poll<Result<(), Error>> {
 		use super::super::request_stream::{NamespaceUpdate, Next};
-		if stream.writer.poll_closed(cx).is_ready() {
+		if stream.writer.poll_closed(waiter).is_ready() {
 			return Poll::Ready(Ok(()));
 		}
 		while !*finished {
-			match ready!(stream.reader.poll_decode_maybe::<Next<NamespaceUpdate<true>>>(cx)) {
+			match ready!(stream.reader.poll_decode_maybe::<Next<NamespaceUpdate<true>>>(waiter)) {
 				Ok(Some(Next::Message(update))) => {
 					// Its Request ID is spent like any other: a bad one is the session's error,
 					// and one past our GOAWAY is refused as such.
@@ -455,13 +531,14 @@ where
 						),
 					};
 					let code = request::to_code(&err, request::Kind::SubscribeNamespace, self.version);
-					stream.writer.buffer_varint(ietf::RequestError::ID)?;
-					stream.writer.buffer(&ietf::RequestError {
-						request_id: None,
-						error_code: code,
-						reason_phrase: reason.into(),
-						retry_interval: 0,
-					})?;
+					stream.writer.buffer_message(
+						ietf::RequestError::ID,
+						&ietf::RequestError {
+							error_code: code,
+							reason_phrase: reason.into(),
+							retry_interval: 0,
+						},
+					)?;
 					return Poll::Ready(Ok(()));
 				}
 				Ok(Some(Next::GoAway { redirect })) => goaways.receive(redirect)?,
@@ -476,12 +553,11 @@ where
 	/// Write the pending PUBLISH_SKIPPEDs, buffering the next only once the last is out, so
 	/// a peer that stops reading leaves the rest collapsing in `skips`.
 	fn poll_write_skips(
-		stream: &mut Stream<S, Version>,
+		stream: &mut Stream<Transport, Version>,
 		skips: &Skips,
 		waiter: &kio::Waiter,
-		cx: &mut std::task::Context<'_>,
 	) -> Result<(), Error> {
-		while stream.writer.poll_flush(cx)?.is_ready() {
+		while stream.writer.poll_flush(waiter)?.is_ready() {
 			let Poll::Ready(mut pending) = skips.poll(waiter, |skips| match skips.is_empty() {
 				true => Poll::Pending,
 				false => Poll::Ready(()),
@@ -492,26 +568,35 @@ where
 				break;
 			};
 			drop(pending);
-			stream.writer.buffer_varint(ietf::PublishSkipped::ID)?;
-			stream.writer.buffer(&ietf::PublishSkipped {
-				suffix,
-				track_name: name.as_ref().into(),
-			})?;
+			stream.writer.buffer_message(
+				ietf::PublishSkipped::ID,
+				&ietf::PublishSkipped {
+					suffix,
+					track_name: name.as_ref().into(),
+				},
+			)?;
 		}
 		Ok(())
 	}
 
 	/// List one broadcast under a SUBSCRIBE_TRACKS: PUBLISH or skip each of its tracks until
 	/// its route goes or the broadcast ends, then let its PUBLISHes run to their end.
+	///
+	/// A PUBLISH starts only once the peer's stream credit opens its stream, one staged at a
+	/// time, so the PUBLISHes a peer holds are bounded by the credit it grants. The listing is
+	/// still read meanwhile, since an unlisted track's PUBLISH_DONE is what returns that
+	/// credit; the tracks read but not yet PUBLISHed wait in `pending`, moved off the
+	/// listing's own queue rather than copied. A FORWARD=1 listing has nothing to unlist, so
+	/// it reads its next track only once the request stream has taken the last skip.
 	async fn run_listed_broadcast(
 		self,
 		request: Request,
-		suffix: crate::PathOwned,
+		suffix: crate::Path,
 		epoch: Option<crate::Epoch>,
-		route: kio::Consumer<()>,
+		route: kio::Consumer<Route>,
 	) {
-		let namespace = request.prefix.join(&suffix).to_owned();
-		let absolute = self.origin.absolute(&namespace).to_owned();
+		let namespace = request.prefix.rejoin(&suffix);
+		let absolute = self.origin.root().rejoin(&namespace);
 		let flate = self.peer_setup.get().await.flate;
 
 		// Resolving may wait on a route for the broadcast, which its going ends.
@@ -533,14 +618,12 @@ where
 			}
 			None => return,
 		};
-		// Each PUBLISH watches its track's entry here: dropping it says the track is no
-		// longer listed.
-		let mut listed: HashMap<Arc<str>, kio::Producer<()>> = HashMap::new();
-		// The tracks this broadcast queued a skip for, so its end touches only its own.
-		let mut skipped: HashSet<Arc<str>> = HashSet::new();
+		let mut entries = Entries::default();
 		let mut publishes = TaskSet::owned();
-		// The listing ended, or the request did: nothing more to add.
+		let session = self.session.clone();
+		// The listing ended, the request did, or the route was withdrawn: nothing more to add.
 		let mut adding = true;
+		let mut withdrawn = false;
 		// The broadcast's listing, held only while our publish permit covers it: a track
 		// it does not cover is not revealed at all, and one it comes to cover is listed
 		// from scratch.
@@ -558,15 +641,56 @@ where
 
 		enum Event {
 			Track(crate::broadcast::TracksEvent),
+			/// The staged track's PUBLISH stream opened.
+			Opened(Result<Stream<Transport, Version>, Error>),
 			/// Our publish permit may have changed.
 			Regrant(crate::auth::Permit),
-			/// The broadcast ended or its route went: every track it listed is gone.
+			/// The broadcast ended or another instance replaced it: every track it listed is gone.
 			Ended,
+			/// The route was withdrawn: nothing more is listed, and the broadcast ends soon.
+			Withdrawn,
 			/// The request was cancelled.
 			Cancelled,
 		}
 
 		loop {
+			// Stage the next pending track that will be PUBLISHed, skipping those that will
+			// not, so a stream is opened only for a PUBLISH that goes out.
+			while adding
+				&& entries.staged.is_none()
+				&& let Some((name, info)) = entries.pending.pop_front()
+			{
+				// A track this draft cannot describe is skipped rather than PUBLISHed with
+				// its properties rewritten.
+				let Ok(properties) = track_properties(&info, request.properties_wanted, self.version, flate) else {
+					entries.skip(&request.skips, &suffix, name);
+					continue;
+				};
+				let Ok(track) = broadcast.track(&name) else {
+					continue;
+				};
+				// Draft-18 allows one subscription per track (section 5.1), so a track the
+				// peer is subscribed to, by its SUBSCRIBE or a PUBLISH still alive, is
+				// skipped. Held from now, so a SUBSCRIBE cannot slip in before the PUBLISH
+				// goes out.
+				let subscribed = match self.version {
+					Version::Draft18 => match Subscribed::publish(&self.listings, namespace.clone(), name.clone()) {
+						Some(subscribed) => Some(subscribed),
+						None => {
+							entries.skip(&request.skips, &suffix, name);
+							continue;
+						}
+					},
+					_ => None,
+				};
+				entries.staged = Some(Staged {
+					name,
+					track,
+					properties,
+					subscribed,
+				});
+			}
+
 			let event = kio::wait(|waiter| {
 				let drained = publishes.poll(waiter).is_ready();
 				if !adding && drained {
@@ -575,8 +699,11 @@ where
 				if adding && request.live.poll_closed(waiter).is_ready() {
 					return Poll::Ready(Some(Event::Cancelled));
 				}
-				if route.poll_closed(waiter).is_ready() {
-					return Poll::Ready(Some(Event::Ended));
+				if !withdrawn && route.poll_closed(waiter).is_ready() {
+					return Poll::Ready(Some(match *route.read() {
+						Route::Replaced => Event::Ended,
+						Route::Withdrawn => Event::Withdrawn,
+					}));
 				}
 				if let Poll::Ready(permit) =
 					self.auth
@@ -584,9 +711,25 @@ where
 				{
 					return Poll::Ready(Some(Event::Regrant(permit)));
 				}
+				if entries.staged.is_some()
+					&& let Poll::Ready(opened) = Stream::poll_open(&session, self.version, waiter)
+				{
+					return Poll::Ready(Some(Event::Opened(opened)));
+				}
 				let Some(tracks) = tracks.as_mut() else {
 					return Poll::Pending;
 				};
+				if request.forward
+					&& request
+						.skips
+						.poll(waiter, |skips| match skips.is_empty() {
+							true => Poll::Ready(()),
+							false => Poll::Pending,
+						})
+						.is_pending()
+				{
+					return Poll::Pending;
+				}
 				match tracks.poll_next(waiter) {
 					Poll::Ready(Ok(Some(event))) => Poll::Ready(Some(Event::Track(event))),
 					Poll::Ready(Ok(None)) => Poll::Ready(Some(Event::Ended)),
@@ -602,16 +745,9 @@ where
 			let Some(event) = event else {
 				return;
 			};
-			let unlist = |listed: &mut HashMap<Arc<str>, kio::Producer<()>>, skipped: &mut HashSet<Arc<str>>| {
-				listed.clear();
-				let mut skips = request.skips.lock();
-				for name in skipped.drain() {
-					skips.remove(&(suffix.clone(), name));
-				}
-			};
 			match event {
 				Event::Ended => {
-					unlist(&mut listed, &mut skipped);
+					entries.unlist(&request.skips, &suffix);
 					// What it already PUBLISHed ends now; wait for that to go out.
 					kio::wait(|waiter| publishes.poll(waiter)).await;
 					return;
@@ -621,13 +757,13 @@ where
 					// cancels the skips not yet sent.
 					(false, true) => {
 						tracks = None;
-						unlist(&mut listed, &mut skipped);
+						entries.unlist(&request.skips, &suffix);
 					}
 					(true, false) if adding => match broadcast.tracks() {
 						Ok(listing) => tracks = Some(listing),
 						Err(err) => {
 							tracing::debug!(broadcast = %absolute, %err, "listed broadcast ended");
-							unlist(&mut listed, &mut skipped);
+							entries.unlist(&request.skips, &suffix);
 							kio::wait(|waiter| publishes.poll(waiter)).await;
 							return;
 						}
@@ -636,74 +772,70 @@ where
 				},
 				// The PUBLISHes already sent still end when their track is unlisted, so keep
 				// reading the listing for them, adding nothing.
-				Event::Cancelled => adding = false,
-				Event::Track(crate::broadcast::TracksEvent::Synced) => {}
-				Event::Track(crate::broadcast::TracksEvent::Removed { name }) => {
-					if skipped.remove(&name) {
-						request.skips.lock().remove(&(suffix.clone(), name.clone()));
-					}
-					listed.remove(&name);
+				Event::Cancelled => {
+					adding = false;
+					entries.pending.clear();
+					entries.staged = None;
 				}
-				Event::Track(crate::broadcast::TracksEvent::Added { .. }) if !adding => {}
-				Event::Track(crate::broadcast::TracksEvent::Added { name, info }) => {
-					let mut skip = |name: Arc<str>| {
-						request.skips.lock().insert((suffix.clone(), name.clone()), ());
-						skipped.insert(name);
-					};
-					if request.forward {
-						skip(name);
+				// Its listing ends once the front serving it sees the route go, after the
+				// tracks its source finished last, so the PUBLISHes already sent end by it.
+				// The tracks not yet PUBLISHed or skipped are no longer announced.
+				Event::Withdrawn => {
+					withdrawn = true;
+					adding = false;
+					entries.halt(&request.skips, &suffix);
+				}
+				Event::Opened(Err(err)) => {
+					tracing::debug!(broadcast = %absolute, %err, "publish stream did not open");
+					entries.unlist(&request.skips, &suffix);
+					kio::wait(|waiter| publishes.poll(waiter)).await;
+					return;
+				}
+				Event::Opened(Ok(stream)) => {
+					let Some(Staged {
+						name,
+						track,
+						properties,
+						subscribed,
+					}) = entries.staged.take()
+					else {
 						continue;
-					}
-					// A track this draft cannot describe is skipped rather than PUBLISHed with
-					// its properties rewritten.
-					let Ok(properties) = track_properties(&info, request.properties_wanted, self.version, flate) else {
-						skip(name);
-						continue;
 					};
-					let Ok(track) = broadcast.track(&name) else {
-						continue;
-					};
-					// Each paused PUBLISH holds a subscription slot; past the cap the peer is
-					// told the track exists rather than left without it.
-					let Ok(slot) = self.subscriptions.acquire() else {
-						skip(name);
-						continue;
-					};
-					// Draft-18 allows one subscription per track (section 5.1), so a track the
-					// peer is subscribed to, by its SUBSCRIBE or a PUBLISH still alive, is
-					// skipped. Held from now, so a SUBSCRIBE cannot slip in before the PUBLISH
-					// goes out.
-					let subscribed = match self.version {
-						Version::Draft18 => {
-							match Subscribed::publish(&self.listings, namespace.clone(), name.clone()) {
-								Some(subscribed) => Some(subscribed),
-								None => {
-									skip(name);
-									continue;
-								}
-							}
-						}
-						_ => None,
-					};
-					let entry = kio::Producer::new(());
+					let entry = kio::Producer::new(false);
 					let task = Listed {
+						stream,
 						track,
 						namespace: namespace.clone(),
 						name: name.clone(),
 						properties,
 						listed: entry.consume(),
 						live: request.live.clone(),
-						slot,
+						slot: self.subscriptions.hold(),
 						subscribed,
 						params: request.params,
 					};
-					listed.insert(name.clone(), entry);
+					entries.listed.insert(name, entry);
 					let this = self.clone();
 					publishes.push(async move {
 						if let Err(err) = this.run_publish(task).await {
 							tracing::debug!(%err, "publish stream error");
 						}
 					});
+				}
+				Event::Track(crate::broadcast::TracksEvent::Synced) => {}
+				Event::Track(crate::broadcast::TracksEvent::Removed { name }) => {
+					entries.remove(&request.skips, &suffix, name, false)
+				}
+				// Its PUBLISH ends with TRACK_ENDED rather than in error.
+				Event::Track(crate::broadcast::TracksEvent::Finished { name }) => {
+					entries.remove(&request.skips, &suffix, name, true)
+				}
+				Event::Track(crate::broadcast::TracksEvent::Added { .. }) if !adding => {}
+				Event::Track(crate::broadcast::TracksEvent::Added { name, .. }) if request.forward => {
+					entries.skip(&request.skips, &suffix, name);
+				}
+				Event::Track(crate::broadcast::TracksEvent::Added { name, info }) => {
+					entries.pending.insert(name, info);
 				}
 			}
 		}
@@ -713,6 +845,7 @@ where
 	/// subscriber cancels or refuses it, or, once resumed, the track ends.
 	async fn run_publish(self, task: Listed) -> Result<(), Error> {
 		let Listed {
+			stream,
 			track,
 			namespace,
 			name,
@@ -728,45 +861,24 @@ where
 		// An update may ask for a new group only if the PUBLISH sent DYNAMIC_GROUPS, which
 		// INCLUDE_PROPERTIES=0 leaves out.
 		let dynamic = properties.dynamic_groups;
-		let absolute = self.origin.absolute(&namespace).to_owned();
+		let absolute = self.origin.root().rejoin(&namespace);
 
-		// Every wait on the peer's credit, for the stream, a Request ID, or the PUBLISH's
-		// bytes, lasts only while the track is listed and the request stands; a peer that
-		// grants none holds only this task and its slot. A Request ID abandoned unsent leaves
-		// a gap, which the drafts with SUBSCRIBE_TRACKS allow: none has MAX_REQUEST_ID.
-		let mut session = self.session.clone();
-		let opened = {
-			let mut opening = std::pin::pin!(Stream::open(&mut session, self.version));
-			kio::wait(|waiter| {
-				if listed.poll_closed(waiter).is_ready() || live.poll_closed(waiter).is_ready() {
-					return Poll::Ready(None);
-				}
-				waiter.poll_future(opening.as_mut()).map(Some)
-			})
-			.await
-		};
-		let Some(opened) = opened else {
-			return Ok(());
-		};
-		let mut stream = opened?;
-		let allocated = kio::wait(|waiter| {
-			if listed.poll_closed(waiter).is_ready() || live.poll_closed(waiter).is_ready() {
-				return Poll::Ready(None);
-			}
-			self.control.poll_next_request_id(waiter).map(Some)
-		})
-		.await;
+		// Every wait on the peer for the PUBLISH's bytes lasts only while the track is listed
+		// and the request stands.
+		let session = self.session.clone();
+		let mut stream = stream.with_stats(self.stats());
 		// Dropped unwritten, the stream is reset before its header, which the peer ignores.
-		let Some(request_id) = allocated else {
+		let noop = kio::Waiter::noop();
+		if listed.poll_closed(&noop).is_ready() || live.poll_closed(&noop).is_ready() {
 			return Ok(());
-		};
+		}
+		let request_id = self.control.next_request_id();
 
 		// A joining FETCH needs the subscription forwarding.
-		let join = (!Filter::is_draft20(self.version)).then(|| self.register_join(request_id));
+		let join = (!Filter::is_draft22(self.version)).then(|| self.register_join(request_id));
 		self.pause_join(join.as_ref());
 
 		tracing::debug!(id = %request_id, broadcast = %absolute, track = %name, "publish started");
-		stream.writer.buffer_varint(ietf::Publish::ID)?;
 		let publish = ietf::Publish {
 			request_id,
 			track_namespace: namespace.clone(),
@@ -775,14 +887,14 @@ where
 			largest_location: live_edge(&track).largest,
 			forward: false,
 			properties,
-			// Draft-20 and later state the listing's subscription parameters on each PUBLISH;
+			// Draft-22 and later state the listing's subscription parameters on each PUBLISH;
 			// earlier drafts carry them on PUBLISH_OK.
 			subscriber_priority: Some(params.priority),
 			group_order: params.order,
 			filter: Some(params.filter),
 		};
 		let written = {
-			let mut writing = std::pin::pin!(stream.writer.encode(&publish));
+			let mut writing = std::pin::pin!(stream.writer.encode_message(&publish));
 			kio::wait(|waiter| {
 				if listed.poll_closed(waiter).is_ready() || live.poll_closed(waiter).is_ready() {
 					return Poll::Ready(None);
@@ -801,14 +913,14 @@ where
 		let mut finished = false;
 		let mut goaways = super::super::request_stream::Messages::new(self.session.clone(), self.control.client());
 
-		// PUBLISH_OK or REQUEST_ERROR. A track unlisted before the answer has nothing to
-		// end yet, so the request is reset.
+		// PUBLISH_OK or REQUEST_ERROR. A track that left the listing unfinished before the
+		// answer has nothing to end yet, so the request is reset. One that finished waits for
+		// the answer, then ends with TRACK_ENDED, since the peer listed it on the PUBLISH.
 		let answer = kio::wait(|waiter| {
-			let mut cx = waiter.context();
-			if session.poll_closed(&mut cx).is_ready() || listed.poll_closed(waiter).is_ready() {
+			if session.poll_closed(waiter).is_ready() || (listed.poll_closed(waiter).is_ready() && !*listed.read()) {
 				return Poll::Ready(None);
 			}
-			goaways.poll_next(&mut stream.reader, &mut cx).map(Some)
+			goaways.poll_next(&mut stream.reader, waiter).map(Some)
 		})
 		.await;
 		// A NEW_GROUP_REQUEST on a PUBLISH_OK that leaves the subscription paused waits for
@@ -836,9 +948,9 @@ where
 					let ok = body
 						.message::<ietf::PublishOk>(self.version)
 						.map_err(|err| goaways.failed(err.into()))?;
-					// Through draft-19 the answer sets the Forward State and the parameters it
+					// Through draft-18 the answer sets the Forward State and the parameters it
 					// carries, an absent FORWARD meaning 1; an absent parameter keeps the one the
-					// SUBSCRIBE_TRACKS set. Draft-20 moved them off PUBLISH_OK, leaving it paused.
+					// SUBSCRIBE_TRACKS set. Draft-22 moved them off PUBLISH_OK, leaving it paused.
 					if let Some(priority) = ok.subscriber_priority {
 						params.priority = priority;
 					}
@@ -851,7 +963,7 @@ where
 						refused = Some(Served::UpdateFailed(Error::Unsupported));
 					}
 					new_group = ok.new_group.or(params.new_group.filter(|_| dynamic));
-					(ok.forward && !Filter::is_draft20(self.version)).then(|| Resume {
+					(ok.forward && !Filter::is_draft22(self.version)).then(|| Resume {
 						fill: None,
 						new_group: new_group.take(),
 						answer: false,
@@ -863,7 +975,7 @@ where
 
 		if let Some(done) = refused {
 			drop(join);
-			return self.write_publish_done(stream, request_id, done, 0).await;
+			return self.write_publish_done(stream, done, 0, None).await;
 		}
 
 		// Group streams opened over every time the subscription forwarded, which
@@ -892,12 +1004,12 @@ where
 					)
 					.await
 				{
-					Ok(Served::Paused) => {
+					Ok(Served::Paused(_)) => {
 						self.pause_join(join.as_ref());
-						self.write_request_ok(&mut stream.writer, request_id, None).await?;
+						self.write_request_ok(&mut stream.writer, None).await?;
 						// Unlisted while it forwarded: it ends now that it is idle.
 						if listed.is_closed() {
-							break unlisted();
+							break unlisted(&listed);
 						}
 						continue;
 					}
@@ -908,8 +1020,7 @@ where
 			}
 
 			let wait = kio::wait(|waiter| {
-				let mut cx = waiter.context();
-				if session.poll_closed(&mut cx).is_ready() || stream.writer.poll_closed(&mut cx).is_ready() {
+				if session.poll_closed(waiter).is_ready() || stream.writer.poll_closed(waiter).is_ready() {
 					return Poll::Ready(Wait::Cancelled);
 				}
 				if gate.poll_denied(waiter).is_ready() {
@@ -918,7 +1029,7 @@ where
 				if listed.poll_closed(waiter).is_ready() {
 					return Poll::Ready(Wait::Removed);
 				}
-				match ready!(self.poll_update(&mut stream, &mut finished, &mut goaways, &mut cx)) {
+				match ready!(self.poll_update(&mut stream, &mut finished, &mut goaways, waiter)) {
 					UpdateRead::Update(update) => Poll::Ready(Wait::Update(update)),
 					UpdateRead::Cancelled => Poll::Ready(Wait::Cancelled),
 					UpdateRead::Malformed(err) => {
@@ -937,7 +1048,7 @@ where
 
 			let update = match wait {
 				Wait::Update(update) => update,
-				Wait::Removed => break unlisted(),
+				Wait::Removed => break unlisted(&listed),
 				Wait::Revoked => {
 					tracing::info!(broadcast = %absolute, track = %name, "publish no longer authorized");
 					break Served::Track(Err(Error::Unauthorized));
@@ -973,8 +1084,7 @@ where
 				None => None,
 			};
 			if let Some((reason, err)) = refusal {
-				self.write_subscribe_error(&mut stream.writer, update.request_id, &err, reason)
-					.await?;
+				self.write_subscribe_error(&mut stream.writer, &err, reason).await?;
 				break Served::UpdateFailed(Error::Unsupported);
 			}
 			if let Some(priority) = update.priority {
@@ -994,17 +1104,17 @@ where
 						answer: true,
 					})
 				}
-				_ => self.write_request_ok(&mut stream.writer, request_id, None).await?,
+				_ => self.write_request_ok(&mut stream.writer, None).await?,
 			}
 		};
 
 		drop(join);
-		self.write_publish_done(stream, request_id, done, opened).await
+		self.write_publish_done(stream, done, opened, None).await
 	}
 
 	/// Mark a paused subscription for joining FETCHes: draft-18 section 5.1 refuses one
 	/// unless the subscription forwards.
-	fn pause_join(&self, join: Option<&Join<GroupOf<S>>>) {
+	pub(super) fn pause_join(&self, join: Option<&Join<GroupOf<Transport>>>) {
 		if let Some(join) = join {
 			join.joins.lock().insert(join.request_id, Some(Joined::Empty));
 		}
@@ -1015,15 +1125,14 @@ where
 	/// section 9.5). `Err(())` when the subscriber cancelled.
 	async fn resume_failed(
 		&self,
-		stream: &mut Stream<S, Version>,
-		request_id: RequestId,
+		stream: &mut Stream<Transport, Version>,
 		answer: bool,
 		err: Error,
 	) -> Result<Served, ()> {
 		if !answer {
 			return Ok(Served::Track(Err(err)));
 		}
-		self.write_subscribe_error(&mut stream.writer, request_id, &err, "resume failed")
+		self.write_subscribe_error(&mut stream.writer, &err, "resume failed")
 			.await
 			.map_err(|_| ())?;
 		Ok(Served::UpdateFailed(err))
@@ -1033,21 +1142,24 @@ where
 	/// with them would be served, until it pauses again or ends. Answers the resuming update
 	/// with where the subscription now joins, when `answer` says one asked. `Err(())` when the
 	/// subscriber cancelled.
-	#[allow(clippy::too_many_arguments)]
+	#[expect(
+		clippy::too_many_arguments,
+		reason = "private plumbing; a single-use argument struct would only rename the parameters"
+	)]
 	async fn resume_publish(
 		&self,
-		stream: &mut Stream<S, Version>,
+		stream: &mut Stream<Transport, Version>,
 		track: &track::Consumer,
-		namespace: &crate::PathOwned,
+		namespace: &crate::Path,
 		request_id: RequestId,
 		params: &mut Params,
 		how: Resume,
 		dynamic: bool,
-		join: Option<&Join<GroupOf<S>>>,
-		listed: &kio::Consumer<()>,
+		join: Option<&Join<GroupOf<Transport>>>,
+		listed: &kio::Consumer<bool>,
 		gate: &mut crate::auth::Gate,
 		finished: &mut bool,
-		goaways: &mut super::super::request_stream::Messages<S>,
+		goaways: &mut super::super::request_stream::Messages,
 		opened: &mut u64,
 	) -> Result<Served, ()> {
 		let mut subscription = serving_subscription(params.priority);
@@ -1055,7 +1167,7 @@ where
 			subscription = subscription.with_order(order.to_order());
 		}
 		if let Some(max_age) = params.max_age {
-			subscription.max_delay = Duration::from_millis(max_age);
+			subscription.max_delay = Some(Duration::from_millis(max_age));
 		}
 		// A start the live edge does not decide is no join; see `serve_subscribe_stream`.
 		let fixed = subscribe_range(params.filter, LiveEdge::default(), self.version);
@@ -1070,7 +1182,7 @@ where
 		// route may take a while to say where its live edge is.
 		let mut subscribing = std::pin::pin!(track.subscribe(subscription.clone()));
 		let subscribed = kio::wait(|waiter| {
-			if stream.writer.poll_closed(&mut waiter.context()).is_ready() {
+			if stream.writer.poll_closed(waiter).is_ready() {
 				return Poll::Ready(Err(()));
 			}
 			if listed.poll_closed(waiter).is_ready() {
@@ -1083,15 +1195,13 @@ where
 		.await?;
 		let mut subscriber = match subscribed {
 			Some(Ok(subscriber)) => subscriber,
-			Some(Err(err)) => return self.resume_failed(stream, request_id, how.answer, err).await,
+			Some(Err(err)) => return self.resume_failed(stream, how.answer, err).await,
 			None => {
-				return self
-					.resume_failed(stream, request_id, how.answer, Error::NotFound)
-					.await;
+				return self.resume_failed(stream, how.answer, Error::NotFound).await;
 			}
 		};
 		let live = kio::wait(|waiter| {
-			if stream.writer.poll_closed(&mut waiter.context()).is_ready() {
+			if stream.writer.poll_closed(waiter).is_ready() {
 				return Poll::Ready(Err(()));
 			}
 			if listed.poll_closed(waiter).is_ready() {
@@ -1101,19 +1211,14 @@ where
 		})
 		.await?;
 		if !live {
-			return self
-				.resume_failed(stream, request_id, how.answer, Error::NotFound)
-				.await;
+			return self.resume_failed(stream, how.answer, Error::NotFound).await;
 		}
 
 		let edge = live_edge(track);
 		let range = subscribe_range(params.filter, edge, self.version);
 		range.apply(&mut subscription);
 		let _ = subscriber.update(subscription);
-		let timescale = subscriber
-			.info()
-			.timescale
-			.filter(|_| ietf::Properties::sends_timescale(self.version));
+		let timescale = subscriber.info().timescale;
 		let mut serve = TrackServe::new(
 			self.session.clone(),
 			subscriber,
@@ -1124,8 +1229,8 @@ where
 		)
 		.compression(self.peer_setup.get().await.flate)
 		.ranked(self.priority.clone());
-		serve.pausable = true;
 		serve.dynamic = dynamic;
+		serve.filter = params.filter;
 		if let Some(value) = how.new_group {
 			serve.request_new_group(value);
 		}
@@ -1149,15 +1254,10 @@ where
 		}
 		let fill = how
 			.fill
-			.filter(|_| Filter::is_draft20(self.version))
+			.filter(|_| Filter::is_draft22(self.version))
 			.map(|fill| fill_range(fill, params.filter, edge.largest));
 
-		if how.answer
-			&& self
-				.write_request_ok(&mut stream.writer, request_id, edge.largest)
-				.await
-				.is_err()
-		{
+		if how.answer && self.write_request_ok(&mut stream.writer, edge.largest).await.is_err() {
 			return Err(());
 		}
 
@@ -1166,7 +1266,8 @@ where
 			let streams = serve.opened.clone();
 			let fill = async {
 				if let Some(fill) = fill {
-					self.run_fill(fill, &ranking, track.clone(), timescale, &streams).await;
+					self.run_fill(fill, &ranking, track.clone(), timescale, &streams, request_id)
+						.await;
 				}
 			};
 			let serving = self.run_subscription(stream, &mut serve, finished, goaways, fill, None);
@@ -1186,23 +1287,23 @@ where
 		// What an update changed while forwarding outlives a pause.
 		let applied = serve.track.subscription();
 		params.priority = crate::ietf::priority::to_wire(applied.priority);
-		params.max_age = applied.max_delay.as_millis().try_into().ok();
+		params.max_age = applied
+			.max_delay
+			.and_then(|max_delay| max_delay.as_millis().try_into().ok());
 		let served = match served {
-			Ok(Some(Served::Paused)) => Served::Paused,
-			Ok(Some(served)) => {
-				if matches!(served, Served::Track(Ok(()))) {
-					self.write_end_of_track(stream, &mut serve, finished, goaways).await;
-				}
-				served
-			}
+			Ok(Some(served)) => served,
 			Ok(None) => {
 				serve.close_groups();
 				*opened += serve.opened();
 				return Err(());
 			}
-			Err(refusal) if matches!(refusal.error, Error::Cancel) => unlisted(),
+			// Unlisted while it forwarded.
+			Err(refusal) if matches!(refusal.error, Error::Cancel) => unlisted(listed),
 			Err(refusal) => Served::Track(Err(refusal.error)),
 		};
+		if matches!(served, Served::Track(Ok(()))) {
+			self.write_end_of_track(stream, &mut serve, finished, goaways).await;
+		}
 		// Forwarding stops here: PUBLISH_DONE, or the answer to the pause, follows the close
 		// of every data stream.
 		serve.close_groups();
@@ -1211,12 +1312,14 @@ where
 	}
 }
 
-/// How a PUBLISH whose track is no longer listed ends: always in error, never TRACK_ENDED.
-/// A track that leaves the listing may go on elsewhere, as when its broadcast's route is
-/// withdrawn, and a clean end would tell the subscriber it is over. A finished track is
-/// unlisted the same way, so it deliberately ends in error too.
-fn unlisted() -> Served {
-	Served::Track(Err(Error::NotFound))
+/// How a PUBLISH whose track is no longer listed ends: TRACK_ENDED if it finished, otherwise
+/// in error. A track that leaves the listing unfinished may go on elsewhere, as when its
+/// broadcast's route is withdrawn, and a clean end would tell the subscriber it is over.
+fn unlisted(listed: &kio::Consumer<bool>) -> Served {
+	match *listed.read() {
+		true => Served::Track(Ok(())),
+		false => Served::Track(Err(Error::NotFound)),
+	}
 }
 
 #[cfg(test)]
@@ -1224,26 +1327,19 @@ mod tests {
 	use super::*;
 	use crate::model::ProduceTest as _;
 	use crate::transport::memory;
-	use crate::transport::poll::Session as _;
 
 	const TIMEOUT: Duration = Duration::from_secs(10);
 
-	const DRAFTS: [Version; 5] = [
-		Version::Draft18,
-		Version::Draft19,
-		Version::Draft20,
-		Version::Draft21,
-		Version::Draft22,
-	];
+	const DRAFTS: [Version; 2] = [Version::Draft18, Version::Draft22];
 
 	/// A publisher whose origin holds broadcast `room/cam` listing `video` and `audio`, and
 	/// the peer's end of its session.
 	struct Harness {
 		version: Version,
-		publisher: Publisher<memory::Session>,
+		publisher: Publisher,
 		session: memory::Session,
 		peer: memory::Session,
-		broadcast: crate::broadcast::Producer,
+		broadcast: crate::origin::Publication,
 		tracks: HashMap<&'static str, track::Producer>,
 		_origin: origin::Producer,
 	}
@@ -1264,9 +1360,9 @@ mod tests {
 		setup.set(declared);
 		let publisher = Publisher::new(
 			crate::time::sim(),
-			session.clone(),
+			crate::driver::Transport::new(session.clone()),
 			origin.consume(),
-			Control::new(None, false),
+			Control::new(false),
 			None,
 			setup,
 			version,
@@ -1282,15 +1378,14 @@ mod tests {
 		}
 	}
 
-	fn listing(forward: bool) -> ietf::SubscribeTracks<'static> {
+	fn listing(forward: bool) -> ietf::SubscribeTracks {
 		ietf::SubscribeTracks {
 			request_id: RequestId(0),
-			prefix: crate::Path::new("room"),
+			prefix: crate::Path::from_static("room"),
 			forward,
 			subscriber_priority: None,
 			group_order: None,
 			filter: None,
-			fill: None,
 			properties_wanted: true,
 			new_group: None,
 			range_filters: false,
@@ -1301,12 +1396,19 @@ mod tests {
 
 	impl Harness {
 		/// Send `msg` on a new request stream, dispatched as the session would.
-		async fn request<M: Message>(&mut self, msg: &M) -> Stream<memory::Session, Version> {
-			let mut stream = Stream::open(&mut self.peer, self.version).await.unwrap();
+		async fn request<'m, M: Message<'m>>(&mut self, msg: &M) -> Stream<Transport, Version> {
+			let mut stream = Stream::open(&mut crate::driver::Transport::new(self.peer.clone()), self.version)
+				.await
+				.unwrap();
 			stream.writer.varint(M::ID).await.unwrap();
 			stream.writer.encode(msg).await.unwrap();
 
-			let mut accepted = timeout(Stream::accept(&mut self.session, self.version)).await.unwrap();
+			let mut accepted = timeout(Stream::accept(
+				&mut crate::driver::Transport::new(self.session.clone()),
+				self.version,
+			))
+			.await
+			.unwrap();
 			let id = accepted.reader.varint().await.unwrap();
 			let body: ietf::Body = accepted.reader.decode().await.unwrap();
 			let task = self.publisher.handle_stream(id, body, accepted, false).unwrap();
@@ -1315,8 +1417,13 @@ mod tests {
 		}
 
 		/// The next PUBLISH the publisher opens: its stream, namespace, track and FORWARD.
-		async fn publish(&mut self) -> (Stream<memory::Session, Version>, String, String, bool) {
-			let mut stream = timeout(Stream::accept(&mut self.peer, self.version)).await.unwrap();
+		async fn publish(&mut self) -> (Stream<Transport, Version>, String, String, bool) {
+			let mut stream = timeout(Stream::accept(
+				&mut crate::driver::Transport::new(self.peer.clone()),
+				self.version,
+			))
+			.await
+			.unwrap();
 			assert_eq!(stream.reader.varint().await.unwrap(), ietf::Publish::ID);
 			let body: ietf::Body = stream.reader.decode().await.unwrap();
 			let publish: ietf::Publish = body.message(self.version).unwrap();
@@ -1331,13 +1438,13 @@ mod tests {
 	}
 
 	/// The next message on a request stream: its type and body.
-	async fn next(stream: &mut Stream<memory::Session, Version>) -> (u64, ietf::Body) {
+	async fn next(stream: &mut Stream<Transport, Version>) -> (u64, ietf::Body) {
 		let id = timeout(stream.reader.varint()).await.unwrap();
 		let body = stream.reader.decode().await.unwrap();
 		(id, body)
 	}
 
-	async fn send<M: Message>(stream: &mut Stream<memory::Session, Version>, msg: &M) {
+	async fn send<'m, M: Message<'m>>(stream: &mut Stream<Transport, Version>, msg: &M) {
 		stream.writer.varint(M::ID).await.unwrap();
 		stream.writer.encode(msg).await.unwrap();
 	}
@@ -1346,14 +1453,13 @@ mod tests {
 		body.message::<ietf::RequestError>(version).unwrap().error_code
 	}
 
-	/// Answer a PUBLISH with a PUBLISH_OK leaving it paused, which draft-20 on cannot
+	/// Answer a PUBLISH with a PUBLISH_OK leaving it paused, which draft-22 on cannot
 	/// change. From draft-18 it is sent as REQUEST_OK.
-	async fn publish_ok(stream: &mut Stream<memory::Session, Version>) {
+	async fn publish_ok(stream: &mut Stream<Transport, Version>) {
 		stream.writer.varint(ietf::RequestOk::ID).await.unwrap();
 		stream
 			.writer
 			.encode(&ietf::PublishOk {
-				request_id: None,
 				forward: false,
 				subscriber_priority: Some(128),
 				group_order: Some(GroupOrder::Ascending),
@@ -1367,12 +1473,9 @@ mod tests {
 	fn update(request_id: u64, forward: bool) -> ietf::SubscribeUpdate {
 		ietf::SubscribeUpdate {
 			request_id: RequestId(request_id),
-			subscription_request_id: None,
-			start_location: Location { group: 0, object: 0 },
-			end_group: 0,
 			subscriber_priority: None,
 			forward: Some(forward),
-			// Join at the live edge: draft-20 moved the filter off PUBLISH_OK.
+			// Join at the live edge: draft-22 moved the filter off PUBLISH_OK.
 			filter: forward.then_some(Filter::NextObject),
 			authorization_token: None,
 			new_group: None,
@@ -1424,6 +1527,74 @@ mod tests {
 		}
 	}
 
+	/// A track that finishes while its PUBLISH awaits the answer still ends with TRACK_ENDED
+	/// once answered, since the peer listed it on the PUBLISH; a reset would fail its listing.
+	#[moq_clock::test]
+	async fn a_track_finished_before_the_answer_ends_cleanly() {
+		for version in DRAFTS {
+			let mut h = harness(version);
+			let mut request = h.request(&listing(false)).await;
+			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
+			let mut published = HashMap::new();
+			for _ in 0..2 {
+				let (stream, _, name, _) = h.publish().await;
+				published.insert(name, stream);
+			}
+
+			let mut video = published.remove("video").unwrap();
+			let track = h.tracks.remove("video").unwrap();
+			track.finish().unwrap();
+			drop(track);
+			moq_clock::sleep(Duration::from_millis(10)).await;
+			publish_ok(&mut video).await;
+			let (id, body) = next(&mut video).await;
+			assert_eq!(id, ietf::PublishDone::ID, "{version}");
+			let done: ietf::PublishDone = body.message(version).unwrap();
+			assert_eq!(
+				done.status_code,
+				ietf::PublishDoneStatus::TrackEnded.code(),
+				"{version}"
+			);
+		}
+	}
+
+	/// A broadcast closing right after a track finished ends that track's PUBLISH with
+	/// TRACK_ENDED, whether its producer is still held or not, while a track left unfinished
+	/// still ends in error.
+	#[moq_clock::test]
+	async fn a_clean_end_keeps_its_finishes() {
+		for version in DRAFTS {
+			for held in [false, true] {
+				let case = format!("{version}: held={held}");
+				let mut h = harness(version);
+				let mut request = h.request(&listing(false)).await;
+				assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{case}");
+				let mut published = HashMap::new();
+				for _ in 0..2 {
+					let (mut stream, _, name, _) = h.publish().await;
+					publish_ok(&mut stream).await;
+					published.insert(name, stream);
+				}
+				moq_clock::sleep(Duration::from_millis(10)).await;
+
+				let video = h.tracks.remove("video").unwrap();
+				video.finish().unwrap();
+				let video = held.then_some(video);
+				h.broadcast.close();
+				for (name, status) in [
+					("video", ietf::PublishDoneStatus::TrackEnded),
+					("audio", ietf::PublishDoneStatus::InternalError),
+				] {
+					let (id, body) = next(published.get_mut(name).unwrap()).await;
+					assert_eq!(id, ietf::PublishDone::ID, "{case}: {name}");
+					let done: ietf::PublishDone = body.message(version).unwrap();
+					assert_eq!(done.status_code, status.code(), "{case}: {name}");
+				}
+				drop(video);
+			}
+		}
+	}
+
 	/// A REQUEST_UPDATE with FORWARD=1 resumes a paused PUBLISH: its answer names where the
 	/// subscription joins, and new groups flow. FORWARD=0 pauses it again.
 	#[moq_clock::test]
@@ -1456,13 +1627,13 @@ mod tests {
 			// The joined group's remainder, then the live group.
 			let mut opened = 0;
 			loop {
-				let recv = timeout(std::future::poll_fn(|cx| h.peer.poll_accept_uni(cx)))
+				let recv = timeout(kio::wait(|waiter| h.peer.poll_accept_uni(waiter)))
 					.await
 					.unwrap();
 				opened += 1;
-				let mut reader = crate::coding::Reader::new(recv, version);
+				let mut reader = crate::coding::Reader::new(crate::transport::boxed::RecvStream::new(recv), version);
 				let mut bytes = Vec::new();
-				while let Some(chunk) = timeout(std::future::poll_fn(|cx| reader.poll_read_chunk(cx, 1024)))
+				while let Some(chunk) = timeout(kio::wait(|waiter| reader.poll_read_chunk(waiter, 1024)))
 					.await
 					.unwrap()
 				{
@@ -1480,7 +1651,7 @@ mod tests {
 			group.write_frame(crate::Timestamp::ZERO, b"paused".as_slice()).unwrap();
 			group.finish().unwrap();
 			moq_clock::sleep(Duration::from_millis(10)).await;
-			let more = futures::poll!(std::future::poll_fn(|cx| h.peer.poll_accept_uni(cx)));
+			let more = futures::poll!(kio::wait(|waiter| h.peer.poll_accept_uni(waiter)));
 			assert!(more.is_pending(), "{version}: a paused PUBLISH forwarded");
 
 			// Ending the track while paused ends the PUBLISH, counting the streams it opened.
@@ -1511,7 +1682,12 @@ mod tests {
 				let mut request = h.request(&listing(false)).await;
 				assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
 				let mut stream = loop {
-					let mut stream = timeout(Stream::accept(&mut h.peer, version)).await.unwrap();
+					let mut stream = timeout(Stream::accept(
+						&mut crate::driver::Transport::new(h.peer.clone()),
+						version,
+					))
+					.await
+					.unwrap();
 					assert_eq!(stream.reader.varint().await.unwrap(), ietf::Publish::ID);
 					let body: ietf::Body = stream.reader.decode().await.unwrap();
 					let publish: ietf::Publish = body.message(version).unwrap();
@@ -1528,12 +1704,12 @@ mod tests {
 				let mut group = data.append_group().unwrap();
 				group.write_frame(crate::Timestamp::ZERO, payload.clone()).unwrap();
 				group.finish().unwrap();
-				let recv = timeout(std::future::poll_fn(|cx| h.peer.poll_accept_uni(cx)))
+				let recv = timeout(kio::wait(|waiter| h.peer.poll_accept_uni(waiter)))
 					.await
 					.unwrap();
-				let mut reader = crate::coding::Reader::new(recv, version);
+				let mut reader = crate::coding::Reader::new(crate::transport::boxed::RecvStream::new(recv), version);
 				let mut bytes = Vec::new();
-				while let Some(chunk) = timeout(std::future::poll_fn(|cx| reader.poll_read_chunk(cx, 1024)))
+				while let Some(chunk) = timeout(kio::wait(|waiter| reader.poll_read_chunk(waiter, 1024)))
 					.await
 					.unwrap()
 				{
@@ -1546,7 +1722,7 @@ mod tests {
 	}
 
 	/// FORWARD=1 asks for every track's objects, which we never push unasked: from
-	/// draft-19 each track is skipped, and draft-18, with no way to skip, refuses it.
+	/// draft-22 each track is skipped, and draft-18, with no way to skip, refuses it.
 	#[moq_clock::test]
 	async fn a_forwarding_listing_skips_every_track() {
 		for version in DRAFTS {
@@ -1569,7 +1745,10 @@ mod tests {
 			}
 			skipped.sort();
 			assert_eq!(skipped, ["audio", "video"], "{version}");
-			let opened = futures::poll!(std::pin::pin!(Stream::accept(&mut h.peer, version)));
+			let opened = futures::poll!(std::pin::pin!(Stream::accept(
+				&mut crate::driver::Transport::new(h.peer.clone()),
+				version
+			)));
 			assert!(opened.is_pending(), "{version}: a skipped track was PUBLISHed");
 		}
 	}
@@ -1584,7 +1763,7 @@ mod tests {
 
 			let mut nested = listing(false);
 			nested.request_id = RequestId(2);
-			nested.prefix = crate::Path::new("room/cam");
+			nested.prefix = crate::Path::from_static("room/cam");
 			let mut second = h.request(&nested).await;
 			let (id, body) = next(&mut second).await;
 			assert_eq!(id, ietf::RequestError::ID, "{version}");
@@ -1610,7 +1789,7 @@ mod tests {
 
 			let subscribe = ietf::Subscribe {
 				request_id: RequestId(2),
-				track_namespace: crate::Path::new("room/cam"),
+				track_namespace: crate::Path::from_static("room/cam"),
 				track_name: "video".into(),
 				subscriber_priority: 128,
 				group_order: GroupOrder::Descending,
@@ -1637,20 +1816,99 @@ mod tests {
 		}
 	}
 
-	/// Each paused PUBLISH holds a subscription slot; past the cap the track is skipped
-	/// (PUBLISH_BLOCKED, the same message, on draft-18) rather than held.
+	/// Listed broadcast sizes to sweep: what a listing holds must not grow with them.
+	const CATALOGS: [usize; 3] = [4, 64, 512];
+
+	/// Each PUBLISH opens only as the peer's stream credit admits it: a peer that withholds
+	/// credit and reads nothing holds as many PUBLISHes as it grants, however many tracks are
+	/// listed, and each track is PUBLISHed once credit returns.
 	#[moq_clock::test]
-	async fn past_the_subscription_cap_a_track_is_skipped() {
+	async fn a_listing_publishes_only_as_credit_admits() {
+		const CREDIT: usize = 2;
 		for version in DRAFTS {
-			let mut h = harness(version);
-			h.publisher.subscriptions = crate::session::Slots::new(1);
-			let mut request = h.request(&listing(false)).await;
-			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
-			let (_stream, _, published, _) = h.publish().await;
-			let (id, body) = next(&mut request).await;
-			assert_eq!(id, ietf::PublishSkipped::ID, "{version}");
-			let skip: ietf::PublishSkipped = body.message(version).unwrap();
-			assert_ne!(skip.track_name, published, "{version}");
+			for catalog in CATALOGS {
+				let config = memory::Config {
+					max_concurrent_bi_streams: Some(CREDIT),
+					..Default::default()
+				};
+				let mut h = harness_with(version, config, peer::Peer::default());
+				let _extra: Vec<_> = (h.tracks.len()..catalog)
+					.map(|i| {
+						h.broadcast
+							.create_track(format!("t{i}"), crate::track::Info::timed())
+							.unwrap()
+					})
+					.collect();
+				let held = |h: &Harness| usize::MAX - h.publisher.subscriptions.available();
+
+				let mut request = h.request(&listing(false)).await;
+				assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
+				moq_clock::sleep(Duration::from_millis(10)).await;
+				assert_eq!(held(&h), CREDIT, "{version} catalog={catalog}");
+
+				// Refusing each PUBLISH returns its credit, which opens the next.
+				let mut published = HashSet::new();
+				while published.len() < catalog {
+					let (stream, _, name, _) = h.publish().await;
+					assert!(published.insert(name), "{version}: PUBLISHed a track twice");
+					drop(stream);
+					assert!(held(&h) <= CREDIT, "{version} catalog={catalog}: {} held", held(&h));
+				}
+			}
+		}
+	}
+
+	/// A FORWARD=1 listing reads its next track only once the request stream has taken the
+	/// last skip, so a peer that stops reading leaves one skip queued, however many tracks
+	/// are listed.
+	#[moq_clock::test]
+	async fn a_forwarding_listing_reads_only_as_skips_go_out() {
+		for version in [Version::Draft18, Version::Draft22] {
+			for catalog in CATALOGS {
+				let h = harness(version);
+				let _extra: Vec<_> = (h.tracks.len()..catalog)
+					.map(|i| {
+						h.broadcast
+							.create_track(format!("t{i}"), crate::track::Info::timed())
+							.unwrap()
+					})
+					.collect();
+				let skips = Skips::default();
+				let live = kio::Producer::new(());
+				let route = kio::Producer::new(Route::Replaced);
+				let request = Request {
+					origin: h._origin.consume(),
+					prefix: crate::Path::from_static(""),
+					forward: true,
+					params: Params {
+						priority: crate::ietf::priority::DEFAULT_WIRE,
+						order: None,
+						filter: Filter::Unfiltered,
+						max_age: None,
+						new_group: None,
+					},
+					properties_wanted: true,
+					skips: skips.clone(),
+					live: live.consume(),
+				};
+				moq_clock::sim::spawn(h.publisher.clone().run_listed_broadcast(
+					request,
+					crate::Path::from_static("room/cam"),
+					None,
+					route.consume(),
+				));
+
+				let mut skipped = HashSet::new();
+				while skipped.len() < catalog {
+					moq_clock::sleep(Duration::from_millis(10)).await;
+					let mut queued = skips.lock();
+					assert_eq!(queued.len(), 1, "{version} catalog={catalog}");
+					let ((_, name), ()) = queued.pop_front().unwrap();
+					assert!(skipped.insert(name), "{version}: skipped a track twice");
+				}
+				moq_clock::sleep(Duration::from_millis(10)).await;
+				assert!(skips.read().is_empty(), "{version}: skipped past the listing");
+			}
 		}
 	}
 
@@ -1674,7 +1932,10 @@ mod tests {
 				.create_track("captions", crate::track::Info::timed())
 				.unwrap();
 			moq_clock::sleep(Duration::from_millis(10)).await;
-			let opened = futures::poll!(std::pin::pin!(Stream::accept(&mut h.peer, version)));
+			let opened = futures::poll!(std::pin::pin!(Stream::accept(
+				&mut crate::driver::Transport::new(h.peer.clone()),
+				version
+			)));
 			assert!(opened.is_pending(), "{version}: PUBLISHed after the cancel");
 
 			drop(h.broadcast);
@@ -1689,68 +1950,68 @@ mod tests {
 	/// again.
 	#[moq_clock::test]
 	async fn a_relisting_skips_tracks_still_published_on_draft_18() {
-		for version in [Version::Draft18, Version::Draft19] {
-			let mut h = harness(version);
-			let mut request = h.request(&listing(false)).await;
-			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
-			let (mut first, ..) = h.publish().await;
-			let (mut second, ..) = h.publish().await;
-			publish_ok(&mut first).await;
-			publish_ok(&mut second).await;
-			request.writer.abort(&Error::Cancel);
-			moq_clock::sleep(Duration::from_millis(10)).await;
+		let version = Version::Draft18;
+		let mut h = harness(version);
+		let mut request = h.request(&listing(false)).await;
+		assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
+		let (mut first, ..) = h.publish().await;
+		let (mut second, ..) = h.publish().await;
+		publish_ok(&mut first).await;
+		publish_ok(&mut second).await;
+		request.writer.abort(&Error::Cancel);
+		moq_clock::sleep(Duration::from_millis(10)).await;
 
-			let relisting = ietf::SubscribeTracks {
-				request_id: RequestId(2),
-				..listing(false)
-			};
-			let mut relisting = h.request(&relisting).await;
-			assert_eq!(next(&mut relisting).await.0, ietf::RequestOk::ID, "{version}");
-			if version == Version::Draft18 {
-				for _ in 0..2 {
-					assert_eq!(next(&mut relisting).await.0, ietf::PublishSkipped::ID);
-				}
-				let opened = futures::poll!(std::pin::pin!(Stream::accept(&mut h.peer, version)));
-				assert!(opened.is_pending(), "PUBLISHed a track twice");
-			} else {
-				let _publishes = [h.publish().await, h.publish().await];
+		let relisting = ietf::SubscribeTracks {
+			request_id: RequestId(2),
+			..listing(false)
+		};
+		let mut relisting = h.request(&relisting).await;
+		assert_eq!(next(&mut relisting).await.0, ietf::RequestOk::ID, "{version}");
+		if version == Version::Draft18 {
+			for _ in 0..2 {
+				assert_eq!(next(&mut relisting).await.0, ietf::PublishSkipped::ID);
 			}
+			let opened = futures::poll!(std::pin::pin!(Stream::accept(
+				&mut crate::driver::Transport::new(h.peer.clone()),
+				version
+			)));
+			assert!(opened.is_pending(), "PUBLISHed a track twice");
+		} else {
+			let _publishes = [h.publish().await, h.publish().await];
 		}
 	}
 
-	/// On drafts 18 and 19 a PUBLISH_OK may ask for a new group only if the PUBLISH sent
+	/// On draft 18 a PUBLISH_OK may ask for a new group only if the PUBLISH sent
 	/// DYNAMIC_GROUPS; one that asks anyway ends the PUBLISH in error.
 	#[moq_clock::test]
 	async fn a_publish_ok_new_group_needs_dynamic_groups() {
-		for version in [Version::Draft18, Version::Draft19] {
-			let mut h = harness(version);
-			let mut request = h.request(&listing(false)).await;
-			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
-			let (mut stream, ..) = h.publish().await;
-			stream.writer.varint(ietf::RequestOk::ID).await.unwrap();
-			stream
-				.writer
-				.encode(&ietf::PublishOk {
-					request_id: None,
-					forward: true,
-					subscriber_priority: None,
-					group_order: None,
-					filter: Some(Filter::NextObject),
-					new_group: Some(0),
-				})
-				.await
-				.unwrap();
-			let (id, body) = next(&mut stream).await;
-			assert_eq!(id, ietf::PublishDone::ID, "{version}");
-			let done: ietf::PublishDone = body.message(version).unwrap();
-			assert!(done.end(version).is_err(), "{version}: ended cleanly");
-		}
+		let version = Version::Draft18;
+		let mut h = harness(version);
+		let mut request = h.request(&listing(false)).await;
+		assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
+		let (mut stream, ..) = h.publish().await;
+		stream.writer.varint(ietf::RequestOk::ID).await.unwrap();
+		stream
+			.writer
+			.encode(&ietf::PublishOk {
+				forward: true,
+				subscriber_priority: None,
+				group_order: None,
+				filter: Some(Filter::NextObject),
+				new_group: Some(0),
+			})
+			.await
+			.unwrap();
+		let (id, body) = next(&mut stream).await;
+		assert_eq!(id, ietf::PublishDone::ID, "{version}");
+		let done: ietf::PublishDone = body.message(version).unwrap();
+		assert!(done.end(version).is_err(), "{version}: ended cleanly");
 	}
 
-	/// Draft-18 and 19 let PUBLISH_OK forward at once, with no update to answer.
+	/// Draft-18 lets PUBLISH_OK forward at once, with no update to answer.
 	#[moq_clock::test]
 	async fn a_forwarding_publish_ok_resumes() {
-		for version in [Version::Draft18, Version::Draft19] {
+		for version in [Version::Draft18] {
 			let mut h = harness(version);
 			let video = h.tracks.remove("video").unwrap();
 			let mut request = h.request(&listing(false)).await;
@@ -1765,7 +2026,6 @@ mod tests {
 			stream
 				.writer
 				.encode(&ietf::PublishOk {
-					request_id: None,
 					forward: true,
 					subscriber_priority: Some(128),
 					group_order: Some(GroupOrder::Ascending),
@@ -1778,7 +2038,7 @@ mod tests {
 			let mut group = video.append_group().unwrap();
 			group.write_frame(crate::Timestamp::ZERO, b"live".as_slice()).unwrap();
 			group.finish().unwrap();
-			timeout(std::future::poll_fn(|cx| h.peer.poll_accept_uni(cx)))
+			timeout(kio::wait(|waiter| h.peer.poll_accept_uni(waiter)))
 				.await
 				.unwrap();
 			drop(video);
@@ -1804,7 +2064,7 @@ mod tests {
 				..update(1, false)
 			};
 			send(&mut request, &bare).await;
-			let closed = timeout(std::future::poll_fn(|cx| h.peer.poll_closed(cx))).await;
+			let closed = timeout(kio::wait(|waiter| h.peer.poll_closed(waiter))).await;
 			assert!(
 				matches!(&closed, memory::Error::Session { reason, .. } if reason == "invalid request ID"),
 				"{version}: {closed:?}"
@@ -1812,7 +2072,7 @@ mod tests {
 		}
 	}
 
-	/// A REQUEST_UPDATE on the listing is answered with REQUEST_ERROR. From draft-20 it may
+	/// A REQUEST_UPDATE on the listing is answered with REQUEST_ERROR. From draft-22 it may
 	/// carry FORWARD, which is refused the same way rather than closing the session.
 	#[moq_clock::test]
 	async fn a_listing_update_is_refused() {
@@ -1822,7 +2082,7 @@ mod tests {
 			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
 			let refused = ietf::SubscribeUpdate {
 				filter: None,
-				forward: Filter::is_draft20(version).then_some(false),
+				forward: Filter::is_draft22(version).then_some(false),
 				..update(2, false)
 			};
 			send(&mut request, &refused).await;
@@ -1854,18 +2114,10 @@ mod tests {
 	}
 
 	/// NEW_GROUP_REQUEST resuming a paused PUBLISH is a join under the track's refresh
-	/// ratio, as on a SUBSCRIBE, even when the filter's fixed start is not. The listing's
-	/// own is each PUBLISH's default.
+	/// ratio, as on a SUBSCRIBE, even when the filter's fixed start is not.
 	#[moq_clock::test]
 	async fn a_resume_asks_for_a_new_group() {
-		for on_listing in [false, true] {
-			resume_asks_for_a_new_group(on_listing).await;
-		}
-	}
-
-	async fn resume_asks_for_a_new_group(on_listing: bool) {
-		// Draft-22 sends no NEW_GROUP_REQUEST on SUBSCRIBE_TRACKS.
-		let version = Version::Draft21;
+		let version = Version::Draft22;
 		let mut h = harness(version);
 		let live = h
 			.broadcast
@@ -1875,11 +2127,7 @@ mod tests {
 		group.write_frame(crate::Timestamp::ZERO, b"key".as_slice()).unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"delta".as_slice()).unwrap();
 
-		let request = ietf::SubscribeTracks {
-			new_group: on_listing.then_some(0),
-			..listing(false)
-		};
-		let mut request = h.request(&request).await;
+		let mut request = h.request(&listing(false)).await;
 		assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID);
 		let mut stream = loop {
 			let (stream, _, name, _) = h.publish().await;
@@ -1895,24 +2143,20 @@ mod tests {
 					start: Location { group: 4, object: 0 },
 					end: None,
 				}),
-				new_group: (!on_listing).then_some(0),
+				new_group: Some(0),
 				..update(2, true)
 			},
 		)
 		.await;
 		assert_eq!(next(&mut stream).await.0, ietf::RequestOk::ID);
-		assert_eq!(
-			live.demand().wanted(),
-			Some(5),
-			"on_listing={on_listing}: the join never reached the track"
-		);
+		assert_eq!(live.demand().wanted(), Some(5), "the join never reached the track");
 	}
 
-	/// From draft-20 an update may ask for a new group only if its PUBLISH sent
+	/// On draft-22 an update may ask for a new group only if its PUBLISH sent
 	/// DYNAMIC_GROUPS, which INCLUDE_PROPERTIES=0 leaves out even for a dynamic track.
 	#[moq_clock::test]
 	async fn a_new_group_needs_the_advertised_dynamic_groups() {
-		for version in [Version::Draft20, Version::Draft21, Version::Draft22] {
+		for version in [Version::Draft22] {
 			let mut h = harness(version);
 			let live = h
 				.broadcast
@@ -2050,109 +2294,52 @@ mod tests {
 		}
 	}
 
-	/// A paused listing's FILL_PARAMETERS (draft-20 and draft-21; draft-22 sends none on
-	/// SUBSCRIBE_TRACKS) open no fill, even once a PUBLISH resumes without its own
-	/// (draft-22 section 3.4.1).
-	#[moq_clock::test]
-	async fn a_listing_fill_opens_nothing() {
-		for version in [Version::Draft20, Version::Draft21] {
-			let mut h = harness(version);
-			let video = h.tracks.remove("video").unwrap();
-			let mut group = video.append_group().unwrap();
-			group.write_frame(crate::Timestamp::ZERO, b"cached".as_slice()).unwrap();
-
-			let request = ietf::SubscribeTracks {
-				filter: Some(Filter::NextObject),
-				fill: Some(ietf::Fill {
-					filter: Some(Filter::Relative(1)),
-					range_filters: false,
-				}),
-				..listing(false)
-			};
-			let mut request = h.request(&request).await;
-			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
-			let mut stream = loop {
-				let (stream, _, name, _) = h.publish().await;
-				if name == "video" {
-					break stream;
-				}
-			};
-			publish_ok(&mut stream).await;
-			let resume = ietf::SubscribeUpdate {
-				filter: None,
-				..update(2, true)
-			};
-			send(&mut stream, &resume).await;
-			assert_eq!(next(&mut stream).await.0, ietf::RequestOk::ID, "{version}");
-
-			// The joined group's own stream carries only what follows the join; a fill would
-			// carry the cached object.
-			group.finish().unwrap();
-			moq_clock::sleep(Duration::from_millis(10)).await;
-			while let Poll::Ready(recv) = futures::poll!(std::future::poll_fn(|cx| h.peer.poll_accept_uni(cx))) {
-				let mut reader = crate::coding::Reader::new(recv.unwrap(), version);
-				let mut bytes = Vec::new();
-				while let Some(chunk) = timeout(std::future::poll_fn(|cx| reader.poll_read_chunk(cx, 1024)))
-					.await
-					.unwrap()
-				{
-					bytes.extend_from_slice(&chunk);
-				}
-				assert!(
-					!bytes.windows(6).any(|w| w == b"cached"),
-					"{version}: the listing's fill opened"
-				);
-			}
-		}
-	}
-
 	/// On draft-18 a track the peer already SUBSCRIBEd to is skipped rather than PUBLISHed
 	/// a second time; later drafts PUBLISH it.
 	#[moq_clock::test]
 	async fn a_subscribed_track_is_skipped_on_draft_18() {
-		for version in [Version::Draft18, Version::Draft19] {
-			let mut h = harness(version);
-			let subscribe = ietf::Subscribe {
-				request_id: RequestId(0),
-				track_namespace: crate::Path::new("room/cam"),
-				track_name: "video".into(),
-				subscriber_priority: 128,
-				group_order: GroupOrder::Descending,
-				filter: Filter::NextObject,
-				fill: None,
-				properties_wanted: true,
-				forward: true,
-				rendezvous: false,
-				range_filters: false,
-				authorization_token: None,
-				epoch: None,
-				max_age: None,
-				new_group: None,
-			};
-			let mut subscription = h.request(&subscribe).await;
-			assert_eq!(next(&mut subscription).await.0, ietf::SubscribeOk::ID, "{version}");
+		let version = Version::Draft18;
+		let mut h = harness(version);
+		let subscribe = ietf::Subscribe {
+			request_id: RequestId(0),
+			track_namespace: crate::Path::from_static("room/cam"),
+			track_name: "video".into(),
+			subscriber_priority: 128,
+			group_order: GroupOrder::Descending,
+			filter: Filter::NextObject,
+			fill: None,
+			properties_wanted: true,
+			forward: true,
+			rendezvous: false,
+			range_filters: false,
+			authorization_token: None,
+			epoch: None,
+			max_age: None,
+			new_group: None,
+		};
+		let mut subscription = h.request(&subscribe).await;
+		assert_eq!(next(&mut subscription).await.0, ietf::SubscribeOk::ID, "{version}");
 
-			let request = ietf::SubscribeTracks {
-				request_id: RequestId(2),
-				..listing(false)
-			};
-			let mut request = h.request(&request).await;
-			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
-			let (_audio, _, name, _) = h.publish().await;
-			if version == Version::Draft18 {
-				assert_eq!(name, "audio");
-				let (id, body) = next(&mut request).await;
-				assert_eq!(id, ietf::PublishSkipped::ID);
-				let skip: ietf::PublishSkipped = body.message(version).unwrap();
-				assert_eq!(skip.track_name, "video");
-			} else {
-				let (_, _, other, _) = h.publish().await;
-				assert!([name, other].contains(&"video".to_string()), "{version}");
-			}
+		let request = ietf::SubscribeTracks {
+			request_id: RequestId(2),
+			..listing(false)
+		};
+		let mut request = h.request(&request).await;
+		assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
+		let (_audio, _, name, _) = h.publish().await;
+		if version == Version::Draft18 {
+			assert_eq!(name, "audio");
+			let (id, body) = next(&mut request).await;
+			assert_eq!(id, ietf::PublishSkipped::ID);
+			let skip: ietf::PublishSkipped = body.message(version).unwrap();
+			assert_eq!(skip.track_name, "video");
+		} else {
+			let (_, _, other, _) = h.publish().await;
+			assert!([name, other].contains(&"video".to_string()), "{version}");
 		}
 	}
 
-	/// From draft-20 each PUBLISH states the listing's subscription parameters, which the
+	/// From draft-22 each PUBLISH states the listing's subscription parameters, which the
 	/// subscriber otherwise takes as the defaults; earlier drafts carry them on PUBLISH_OK.
 	/// Draft-22 sends none of them on SUBSCRIBE_TRACKS.
 	#[moq_clock::test]
@@ -2167,11 +2354,16 @@ mod tests {
 			};
 			let mut request = h.request(&request).await;
 			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
-			let mut stream = timeout(Stream::accept(&mut h.peer, version)).await.unwrap();
+			let mut stream = timeout(Stream::accept(
+				&mut crate::driver::Transport::new(h.peer.clone()),
+				version,
+			))
+			.await
+			.unwrap();
 			assert_eq!(stream.reader.varint().await.unwrap(), ietf::Publish::ID);
 			let body: ietf::Body = stream.reader.decode().await.unwrap();
 			let publish: ietf::Publish = body.message(version).unwrap();
-			let stated = Filter::is_draft20(version);
+			let stated = Filter::is_draft22(version);
 			assert_eq!(publish.subscriber_priority, stated.then_some(7), "{version}");
 			assert_eq!(
 				publish.group_order,
@@ -2179,6 +2371,22 @@ mod tests {
 				"{version}"
 			);
 			assert_eq!(publish.filter, stated.then_some(Filter::NextObject), "{version}");
+		}
+	}
+
+	/// An omitted SUBSCRIBER_PRIORITY is the drafts' 128, so each PUBLISH restates 128 rather
+	/// than this stack's unset 127.
+	#[moq_clock::test]
+	async fn a_listing_without_a_priority_states_the_default() {
+		for version in DRAFTS.into_iter().filter(|version| Filter::is_draft22(*version)) {
+			let mut h = harness(version);
+			let mut request = h.request(&listing(false)).await;
+			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
+			let mut stream = timeout(Stream::accept(&mut h.peer, version)).await.unwrap();
+			assert_eq!(stream.reader.varint().await.unwrap(), ietf::Publish::ID);
+			let body: ietf::Body = stream.reader.decode().await.unwrap();
+			let publish: ietf::Publish = body.message(version).unwrap();
+			assert_eq!(publish.subscriber_priority, Some(128), "{version}");
 		}
 	}
 
@@ -2272,7 +2480,7 @@ mod tests {
 	async fn a_listing_waits_for_the_setup_answer() {
 		for version in [Version::Draft18, Version::Draft22] {
 			let mut h = harness(version);
-			let auth = crate::auth::Handle::new(true);
+			let auth = crate::auth::Link::new(true);
 			let _cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
 			let setup = peer::PeerSetup::default();
 			setup.set(peer::Peer {
@@ -2281,9 +2489,9 @@ mod tests {
 			});
 			h.publisher = Publisher::new(
 				crate::time::sim(),
-				h.session.clone(),
+				crate::driver::Transport::new(h.session.clone()),
 				h._origin.consume(),
-				Control::new(None, false),
+				Control::new(false),
 				None,
 				setup,
 				version,
@@ -2292,7 +2500,10 @@ mod tests {
 
 			let first = h.request(&listing(false)).await;
 			moq_clock::sleep(Duration::from_millis(10)).await;
-			let opened = futures::poll!(std::pin::pin!(Stream::accept(&mut h.peer, version)));
+			let opened = futures::poll!(std::pin::pin!(Stream::accept(
+				&mut crate::driver::Transport::new(h.peer.clone()),
+				version
+			)));
 			assert!(opened.is_pending(), "{version}: listed a track before the setup answer");
 
 			first.writer.abort(&Error::Cancel);
@@ -2319,23 +2530,26 @@ mod tests {
 		};
 		for version in [Version::Draft18, Version::Draft22] {
 			let mut h = harness(version);
-			let auth = crate::auth::Handle::new(false);
-			auth.authorize(&nothing());
+			let auth = crate::auth::Link::new(false);
+			auth.handle().authorize(&nothing());
 			h.publisher = h.publisher.clone().with_auth(auth.clone());
 
 			let mut request = h.request(&listing(false)).await;
 			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
 			moq_clock::sleep(Duration::from_millis(10)).await;
-			let opened = futures::poll!(std::pin::pin!(Stream::accept(&mut h.peer, version)));
+			let opened = futures::poll!(std::pin::pin!(Stream::accept(
+				&mut crate::driver::Transport::new(h.peer.clone()),
+				version
+			)));
 			assert!(opened.is_pending(), "{version}: listed a track the grant denies");
 
-			auth.authorize(&crate::auth::Grant::all());
+			auth.handle().authorize(&crate::auth::Grant::all());
 			let (mut first, ..) = h.publish().await;
 			let (mut second, ..) = h.publish().await;
 			publish_ok(&mut first).await;
 			publish_ok(&mut second).await;
 
-			auth.authorize(&nothing());
+			auth.handle().authorize(&nothing());
 			for stream in [&mut first, &mut second] {
 				assert_eq!(next(stream).await.0, ietf::PublishDone::ID, "{version}");
 			}

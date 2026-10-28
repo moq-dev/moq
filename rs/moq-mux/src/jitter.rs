@@ -1,6 +1,7 @@
 //! A jitter buffer that releases several tracks' frames in one decode order, each a fixed
 //! delay after its decode time.
 
+use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::pin::Pin;
 use std::task::Poll;
@@ -8,6 +9,348 @@ use std::time::Duration;
 
 use moq_clock::{Instant, Sleep};
 use moq_net::Timestamp;
+
+/// One active publisher and at most one independently acquiring replacement.
+/// Ordinary timeline jumps stay entirely inside each existing clock engine.
+pub(crate) struct Buffer<K, T> {
+	active: Engine<K, T>,
+	handoff: Option<Box<Handoff<K, T>>>,
+}
+
+enum Handoff<K, T> {
+	Pending(Pending<K, T>),
+	Committed(Committed<K, T>),
+}
+
+struct Pending<K, T> {
+	keys: BTreeSet<K>,
+	engine: Engine<K, T>,
+	held: BTreeMap<K, Ready<K, T>>,
+}
+
+struct Committed<K, T> {
+	keys: BTreeSet<K>,
+	old: Engine<K, T>,
+}
+
+impl<K, T> std::ops::Deref for Buffer<K, T> {
+	type Target = Engine<K, T>;
+	fn deref(&self) -> &Self::Target {
+		&self.active
+	}
+}
+impl<K, T> std::ops::DerefMut for Buffer<K, T> {
+	fn deref_mut(&mut self) -> &mut Self::Target {
+		&mut self.active
+	}
+}
+
+impl<K: Ord + Clone, T> Buffer<K, T> {
+	pub fn new(delay: Duration) -> Self {
+		Self {
+			active: Engine::new(delay),
+			handoff: None,
+		}
+	}
+
+	#[cfg(test)]
+	pub fn replay(mut self) -> Self {
+		self.active = self.active.replay();
+		self
+	}
+
+	fn pending(&self) -> Option<&Pending<K, T>> {
+		match self.handoff.as_deref() {
+			Some(Handoff::Pending(pending)) => Some(pending),
+			_ => None,
+		}
+	}
+	fn committed(&self) -> Option<&Committed<K, T>> {
+		match self.handoff.as_deref() {
+			Some(Handoff::Committed(committed)) => Some(committed),
+			_ => None,
+		}
+	}
+
+	/// Acquire another publisher without replacing the active publisher's clock.
+	pub fn start(&mut self, keys: impl IntoIterator<Item = K>, expect: impl IntoIterator<Item = K>) {
+		debug_assert!(self.handoff.is_none());
+		let mut engine = Engine::new(self.active.delay);
+		engine.replay = self.active.replay;
+		engine.expect(expect);
+		self.handoff = Some(Box::new(Handoff::Pending(Pending {
+			keys: keys.into_iter().collect(),
+			engine,
+			held: BTreeMap::new(),
+		})));
+	}
+
+	pub fn expect_pending(&mut self, keys: impl IntoIterator<Item = K>, expect: impl IntoIterator<Item = K>) {
+		if let Some(Handoff::Pending(pending)) = self.handoff.as_deref_mut() {
+			pending.keys = keys.into_iter().collect();
+			pending.engine.expect(expect);
+		} else if let Some(Handoff::Committed(committed)) = self.handoff.as_deref_mut() {
+			committed.keys = keys.into_iter().collect();
+			self.active.expect(expect);
+		}
+	}
+
+	fn reading<Q: Ord + ?Sized>(&self, key: &Q) -> &Engine<K, T>
+	where
+		K: Borrow<Q>,
+	{
+		match self.handoff.as_deref() {
+			Some(Handoff::Pending(pending)) if pending.keys.contains(key) => &pending.engine,
+			_ => &self.active,
+		}
+	}
+	fn writing<Q: Ord + ?Sized>(&mut self, key: &Q) -> &mut Engine<K, T>
+	where
+		K: Borrow<Q>,
+	{
+		match self.handoff.as_deref_mut() {
+			Some(Handoff::Pending(pending)) if pending.keys.contains(key) => &mut pending.engine,
+			_ => &mut self.active,
+		}
+	}
+
+	pub fn push(&mut self, key: K, arrival: Arrival<T>) -> anyhow::Result<Push> {
+		if let Some(Handoff::Committed(committed)) = self.handoff.as_deref() {
+			anyhow::ensure!(
+				committed.keys.contains(&key),
+				"a retired publisher queued after its handoff deadline"
+			);
+		}
+		self.writing(&key).push(key, arrival)
+	}
+	pub fn full<Q: Ord + ?Sized>(&self, key: &Q) -> bool
+	where
+		K: Borrow<Q>,
+	{
+		self.pending().is_some_and(|pending| pending.held.contains_key(key)) || self.reading(key).full(key)
+	}
+	pub fn holds<Q: Ord + ?Sized>(&self, key: &Q) -> bool
+	where
+		K: Borrow<Q>,
+	{
+		self.pending().is_some_and(|pending| pending.held.contains_key(key)) || self.reading(key).holds(key)
+	}
+	pub fn peek<Q: Ord + ?Sized>(&self, key: &Q) -> Option<&T>
+	where
+		K: Borrow<Q>,
+	{
+		self.pending()
+			.and_then(|pending| pending.held.get(key))
+			.map(|ready| &ready.item)
+			.or_else(|| self.reading(key).peek(key))
+	}
+	pub fn lose<Q: Ord + ?Sized>(&mut self, key: &Q, ahead: bool)
+	where
+		K: Borrow<Q>,
+	{
+		self.writing(key).lose(key, ahead);
+	}
+	pub fn cut(&mut self, key: &K, cut: u64) {
+		self.writing(key).cut(key, cut);
+	}
+	pub fn discard(&mut self, ready: &Ready<K, T>) {
+		if let Some(Handoff::Committed(committed)) = self.handoff.as_deref_mut()
+			&& !committed.keys.contains(&ready.track)
+		{
+			committed.old.discard(ready);
+			if ready.first
+				&& let Some(track) = self.active.tracks.get_mut(&ready.track)
+			{
+				track.started = false;
+			}
+			return;
+		}
+		self.writing(&ready.track).discard(ready);
+	}
+	pub fn forget<Q: Ord + ?Sized>(&mut self, key: &Q)
+	where
+		K: Borrow<Q>,
+	{
+		if let Some(Handoff::Committed(committed)) = self.handoff.as_deref_mut()
+			&& !committed.keys.contains(key)
+		{
+			committed.old.forget(key);
+		}
+		self.writing(key).forget(key);
+	}
+
+	/// Preview only the new publisher, leaving the old publisher free to feed and play.
+	pub fn poll_pending(&mut self, waiter: &kio::Waiter) -> Poll<Ready<K, T>> {
+		match self.handoff.as_deref_mut() {
+			Some(Handoff::Pending(pending)) => pending.engine.poll_available(waiter, Some(&pending.held)),
+			_ => Poll::Pending,
+		}
+	}
+
+	/// One issued item per track, keeping that track backpressured until video is stable.
+	pub fn hold_pending(&mut self, ready: Ready<K, T>) {
+		let Some(Handoff::Pending(pending)) = self.handoff.as_deref_mut() else {
+			unreachable!("an acquiring publisher");
+		};
+		pending.held.insert(ready.track.clone(), ready);
+	}
+
+	pub fn take_pending(&mut self) -> Vec<Ready<K, T>> {
+		match self.handoff.as_deref_mut() {
+			Some(Handoff::Pending(pending)) => std::mem::take(&mut pending.held).into_values().collect(),
+			_ => Vec::new(),
+		}
+	}
+
+	/// The new program is emittable. Keep all old deadlines and queues until adoption.
+	pub fn commit(&mut self, ready: Ready<K, T>) -> Result<(), moq_net::TimeOverflow> {
+		// Nothing more of the old publisher is read, and only the incoming engine is polled from
+		// here, so a timeline restart it is still acquiring anchors on what it holds now.
+		self.active.acquired();
+		let Handoff::Pending(Pending {
+			keys,
+			mut engine,
+			mut held,
+		}) = *self.handoff.take().expect("an acquiring publisher")
+		else {
+			unreachable!("an acquiring publisher");
+		};
+		held.insert(ready.track.clone(), ready);
+		for (_, ready) in held {
+			let track = engine.tracks.get_mut(&ready.track).expect("the previewed track");
+			// The issued start is owned by the caller even while it waits on the old tail.
+			track
+				.queue
+				.push_front((ready.generation, ready.decode, ready.deadline, ready.item));
+		}
+		let first = engine
+			.tracks
+			.values()
+			.flat_map(|track| &track.queue)
+			.map(|(_, _, at, _)| *at)
+			.min();
+		let shift = self
+			.active
+			.horizon
+			.zip(first)
+			.map_or(Duration::ZERO, |(old, new)| old.saturating_duration_since(new));
+		tracing::debug!(target: "moq_mux::container::ts::handoff", phase = "commit-clock", now = ?moq_clock::now(), old_horizon = ?self.active.horizon, new_first = ?first, ?shift, old_clock = ?self.active.clock.map(|clock| (clock.anchor, clock.base, clock.generation)), new_clock = ?engine.clock.map(|clock| (clock.anchor, clock.base, clock.generation)));
+		let offset = self.active.clock.map_or(0, |clock| clock.generation + 1);
+		for clock in [&mut engine.clock, &mut engine.previous].into_iter().flatten() {
+			clock.anchor = clock.anchor.checked_add(shift).ok_or(moq_net::TimeOverflow)?;
+			clock.generation += offset;
+		}
+		for track in engine.tracks.values_mut() {
+			track.generation += offset;
+			for (generation, _, at, _) in &mut track.queue {
+				*generation += offset;
+				*at = at.checked_add(shift).ok_or(moq_net::TimeOverflow)?;
+			}
+		}
+		if let Some(acquire) = &mut engine.acquire {
+			acquire.generation += offset;
+		}
+		engine.horizon = engine
+			.horizon
+			.map(|horizon| horizon.checked_add(shift).ok_or(moq_net::TimeOverflow))
+			.transpose()?
+			.max(self.active.horizon);
+		engine.tracks.append(&mut self.active.tracks);
+		let old = std::mem::replace(&mut self.active, engine);
+		self.handoff = Some(Box::new(Handoff::Committed(Committed { keys, old })));
+		Ok(())
+	}
+
+	pub fn is_committed(&self) -> bool {
+		matches!(self.handoff.as_deref(), Some(Handoff::Committed(_)))
+	}
+	pub fn has_pending(&self) -> bool {
+		self.pending().is_some()
+	}
+	pub fn pending_empty(&self) -> bool {
+		self.pending()
+			.is_none_or(|pending| pending.held.is_empty() && pending.engine.is_empty())
+	}
+
+	/// Return to the active publisher if a newer selection supersedes an unemitted one.
+	pub fn cancel(&mut self) {
+		if let Some(handoff) = self.handoff.take()
+			&& let Handoff::Committed(Committed { keys, mut old }) = *handoff
+		{
+			old.tracks = self
+				.active
+				.tracks
+				.extract_if(.., |key, _| !keys.contains(key))
+				.collect();
+			self.active = old;
+		}
+	}
+
+	pub fn adopted(&mut self) {
+		if let Some(handoff) = self.handoff.take()
+			&& let Handoff::Committed(committed) = *handoff
+		{
+			self.active.tracks.retain(|key, _| committed.keys.contains(key));
+		}
+	}
+
+	/// Statistics describe the emitted program, including its tail before adoption.
+	pub fn reporting(&self) -> &Engine<K, T> {
+		self.committed().map_or(&self.active, |committed| &committed.old)
+	}
+
+	pub fn at(&self, generation: u64, decode: impl Into<Decode>) -> Option<Instant> {
+		let decode = decode.into();
+		self.committed()
+			.and_then(|committed| committed.old.at(generation, decode))
+			.or_else(|| self.active.at(generation, decode))
+	}
+
+	#[cfg(test)]
+	pub fn len(&self) -> usize {
+		self.active.len()
+			+ self
+				.pending()
+				.map_or(0, |pending| pending.engine.len() + pending.held.len())
+	}
+
+	#[cfg(test)]
+	pub fn next_deadline(&self) -> Option<Instant> {
+		self.active
+			.next_deadline()
+			.into_iter()
+			.chain(
+				self.pending()
+					.and_then(|pending| pending.engine.next_available_deadline(Some(&pending.held))),
+			)
+			.min()
+	}
+}
+
+/// An authored decode instant in signed nanoseconds, including times before PTS zero.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Decode(i128);
+
+impl Decode {
+	pub(crate) fn from_nanos(nanos: i128) -> Self {
+		Self(nanos)
+	}
+
+	/// The instant `ticks` of a 90 kHz clock, rounded down.
+	pub(crate) fn from_ticks(ticks: i128) -> Self {
+		Self((ticks * 1_000_000_000).div_euclid(90_000))
+	}
+
+	fn as_nanos(self) -> i128 {
+		self.0
+	}
+}
+
+impl From<Timestamp> for Decode {
+	fn from(timestamp: Timestamp) -> Self {
+		Self::from_nanos(timestamp.as_nanos() as i128)
+	}
+}
 
 /// A frame handed to [`Buffer::push`].
 pub(crate) struct Arrival<T> {
@@ -19,7 +362,7 @@ pub(crate) struct Arrival<T> {
 	/// so frames read together do not look fresher than they are.
 	pub read: Instant,
 	/// When the frame decodes, nondecreasing within a track.
-	pub decode: Timestamp,
+	pub decode: Decode,
 	/// How many times the source had restarted its timeline when the frame was read.
 	pub restart: u64,
 	/// How many times the source's playhead had jumped (a skipped group, or a restart)
@@ -43,6 +386,8 @@ pub(crate) struct Ready<K, T> {
 	/// frame of one generation goes out before any frame of the next.
 	pub generation: u64,
 	pub item: T,
+	decode: Decode,
+	deadline: Instant,
 	/// Whether it is the first frame of its track to go out.
 	pub first: bool,
 }
@@ -130,7 +475,7 @@ pub(crate) enum Push {
 ///
 /// A caller reads a track only while it is not [`Buffer::full`], so a backlog stays in the
 /// source and goes out as it falls due, rather than being queued here whole first.
-pub(crate) struct Buffer<K, T> {
+pub(crate) struct Engine<K, T> {
 	delay: Duration,
 	/// Anchor each clock on the first frame rather than acquire it: a test exporting a
 	/// broadcast it wrote whole, every frame of which arrives at once.
@@ -199,7 +544,7 @@ const FIT: f64 = 1e-9;
 struct Clock {
 	generation: u64,
 	anchor: Instant,
-	base: Timestamp,
+	base: Decode,
 	/// As a fraction of the decode timeline.
 	drift: f64,
 }
@@ -225,7 +570,7 @@ impl<K: Ord, T> Acquire<K, T> {
 	/// decode time) is that track's slack less its queueing, and of those, the one with the least
 	/// slack, so the track sent latest against its decode time still has the delay.
 	fn fresh(&self) -> (&K, &Arrival<T>) {
-		let behind = |frame: &Arrival<T>| since(self.since, frame.read) - frame.decode.as_nanos() as i128;
+		let behind = |frame: &Arrival<T>| since(self.since, frame.read) - frame.decode.as_nanos();
 		let mut freshest: BTreeMap<&K, &Arrival<T>> = BTreeMap::new();
 		for (key, frame) in &self.frames {
 			let best = freshest.entry(key).or_insert(frame);
@@ -245,7 +590,7 @@ impl<K: Ord, T> Acquire<K, T> {
 	fn end(&self, delay: Duration) -> Instant {
 		let (_, fresh) = self.fresh();
 		let due = |frame: &Arrival<T>| {
-			let ahead = frame.decode.as_nanos() as i128 - fresh.decode.as_nanos() as i128;
+			let ahead = frame.decode.as_nanos() - fresh.decode.as_nanos();
 			offset(fresh.read + delay, ahead)
 		};
 		self.frames
@@ -342,7 +687,7 @@ struct Floor<K> {
 
 struct Track<T> {
 	/// Frames in arrival order, each with its generation, decode time and deadline.
-	queue: VecDeque<(u64, Timestamp, Instant, T)>,
+	queue: VecDeque<(u64, Decode, Instant, T)>,
 	/// The source's restart, skip and cut counters at the last frame.
 	restart: u64,
 	skip: u64,
@@ -371,7 +716,7 @@ impl<T> Track<T> {
 	}
 }
 
-impl<K: Ord + Clone, T> Buffer<K, T> {
+impl<K: Ord + Clone, T> Engine<K, T> {
 	pub fn new(delay: Duration) -> Self {
 		Self {
 			delay,
@@ -813,18 +1158,18 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 
 	/// When a frame of `generation` decoding at `decode` goes out: on the current clock, or on the
 	/// previous one while that generation's tail is still going out.
-	pub fn at(&self, generation: u64, decode: Timestamp) -> Option<Instant> {
+	pub fn at(&self, generation: u64, decode: impl Into<Decode>) -> Option<Instant> {
 		let clock = [self.clock, self.previous]
 			.into_iter()
 			.flatten()
 			.find(|clock| clock.generation == generation)?;
-		self.deadline(&clock, decode)
+		self.deadline(&clock, decode.into())
 	}
 
 	/// When a frame decoding at `decode` goes out on `clock`, if any instant holds it.
-	fn deadline(&self, clock: &Clock, decode: Timestamp) -> Option<Instant> {
+	fn deadline(&self, clock: &Clock, decode: Decode) -> Option<Instant> {
 		// Signed, since a frame can decode before the one that anchored the clock.
-		let since = decode.as_nanos() as i128 - clock.base.as_nanos() as i128;
+		let since = decode.as_nanos() - clock.base.as_nanos();
 		offset(
 			clock.anchor,
 			since + (since as f64 * clock.drift) as i128 + self.delay.as_nanos() as i128,
@@ -835,9 +1180,10 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 	/// in decode order, ties by track. Not in deadline order: two frames of one decode time
 	/// queued either side of a steering step can be due nanoseconds apart, which would make
 	/// the order depend on when each was read rather than on the media.
-	fn front(&self) -> Option<(Instant, &K)> {
+	fn front_available(&self, held: Option<&BTreeMap<K, Ready<K, T>>>) -> Option<(Instant, &K)> {
 		self.tracks
 			.iter()
+			.filter(|(key, _)| held.is_none_or(|held| !held.contains_key(*key)))
 			.filter_map(|(key, track)| {
 				let (generation, decode, deadline, _) = track.queue.front()?;
 				Some(((*generation, decode.as_nanos(), key), *deadline))
@@ -902,6 +1248,10 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 
 	/// The next frame whose deadline has come, in [`Self::front`] order.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Ready<K, T>> {
+		self.poll_available(waiter, None)
+	}
+
+	fn poll_available(&mut self, waiter: &kio::Waiter, held: Option<&BTreeMap<K, Ready<K, T>>>) -> Poll<Ready<K, T>> {
 		loop {
 			let now = moq_clock::now();
 			let acquired = self.acquired_by();
@@ -909,12 +1259,14 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 				self.acquired();
 				continue;
 			}
-			let front = self.front().map(|(deadline, key)| (deadline, key.clone()));
+			let front = self
+				.front_available(held)
+				.map(|(deadline, key)| (deadline, key.clone()));
 			if let Some((deadline, key)) = &front
 				&& (self.delay.is_zero() || now >= *deadline)
 			{
 				let track = self.tracks.get_mut(key).expect("the front's track");
-				let (generation, _, _, item) = track.queue.pop_front().expect("the front frame");
+				let (generation, decode, deadline, item) = track.queue.pop_front().expect("the front frame");
 				let first = !std::mem::replace(&mut track.started, true);
 				self.released = true;
 				// A previous-generation frame queued now would go out after this one.
@@ -925,6 +1277,8 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 					track: key.clone(),
 					generation,
 					item,
+					decode,
+					deadline,
 					first,
 				});
 			}
@@ -973,7 +1327,10 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 
 	/// Count a frame of `key` the caller dropped before queuing it: a loss once the track
 	/// started or when the caller queued frames `ahead` of it, else trimmed.
-	pub fn lose(&mut self, key: &K, ahead: bool) {
+	pub fn lose<Q: Ord + ?Sized>(&mut self, key: &Q, ahead: bool)
+	where
+		K: Borrow<Q>,
+	{
 		match ahead || self.tracks.get(key).is_some_and(|track| track.started) {
 			true => self.dropped += 1,
 			false => self.trimmed += 1,
@@ -981,15 +1338,48 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 	}
 
 	/// The frame `key` releases next, if it has one queued.
-	pub fn peek(&self, key: &K) -> Option<&T> {
+	pub fn peek<Q: Ord + ?Sized>(&self, key: &Q) -> Option<&T>
+	where
+		K: Borrow<Q>,
+	{
 		let (_, _, _, item) = self.tracks.get(key)?.queue.front()?;
 		Some(item)
+	}
+
+	/// Whether `key` has a frame waiting, queued or held for a clock still being acquired.
+	pub fn holds<Q: Ord + ?Sized>(&self, key: &Q) -> bool
+	where
+		K: Borrow<Q>,
+	{
+		self.peek(key).is_some()
+			|| self
+				.acquire
+				.as_ref()
+				.is_some_and(|acquire| acquire.tracks.contains_key(key))
+	}
+
+	/// Forget `key`, which holds nothing and will push nothing more, so what it kept to stay in
+	/// step goes with it.
+	pub fn forget<Q: Ord + ?Sized>(&mut self, key: &Q)
+	where
+		K: Borrow<Q>,
+	{
+		debug_assert!(!self.holds(key), "forgot a track that holds frames");
+		self.tracks.remove(key);
+		self.expect.remove(key);
+		self.leads.remove(key);
+		self.steer.tracks.remove(key);
 	}
 
 	/// When the next queued frame is due, or the acquisition under way ends.
 	#[cfg(test)]
 	pub fn next_deadline(&self) -> Option<Instant> {
-		self.front()
+		self.next_available_deadline(None)
+	}
+
+	#[cfg(test)]
+	fn next_available_deadline(&self, held: Option<&BTreeMap<K, Ready<K, T>>>) -> Option<Instant> {
+		self.front_available(held)
 			.map(|(deadline, _)| deadline)
 			.into_iter()
 			.chain(self.acquired_by())
@@ -998,7 +1388,10 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 
 	/// Whether `key` has a frame waiting that is already due (any frame, without a delay), so
 	/// reading more of it now would only queue what the output cannot take yet.
-	pub fn full(&self, key: &K) -> bool {
+	pub fn full<Q: Ord + ?Sized>(&self, key: &Q) -> bool
+	where
+		K: Borrow<Q>,
+	{
 		self.tracks
 			.get(key)
 			.and_then(|track| track.queue.front())
@@ -1109,6 +1502,210 @@ mod tests {
 
 	const DELAY: Duration = Duration::from_millis(100);
 
+	/// A pending publisher cannot clobber active expected tracks or automatic clock jumps.
+	#[moq_clock::test]
+	async fn pending_keys_and_active_timeline_jumps_use_independent_clocks() {
+		let start = moq_clock::now();
+		let delay = Duration::from_millis(500);
+		let mut buffer = Buffer::new(delay).replay();
+		buffer.expect([0u16]);
+		buffer.push(0, arrival(start, 0, "A0")).unwrap();
+		buffer.start([1], [1]);
+		buffer.push(1, arrival(start, 10_000, "B1")).unwrap();
+		buffer.expect([0, 2]);
+		buffer.expect_pending([1, 3], [1, 3]);
+		buffer.push(2, arrival(start, 0, "A2")).unwrap();
+		buffer.push(3, arrival(start, 10_000, "B3")).unwrap();
+		moq_clock::sleep(delay).await;
+		assert_eq!(due(&mut buffer), ["A0", "A2"]);
+		let Poll::Ready(first) = buffer.poll_pending(&kio::Waiter::noop()) else {
+			panic!("B ready");
+		};
+		assert_eq!((first.item, first.generation), ("B1", 0));
+		buffer.hold_pending(first);
+		assert!(buffer.full(&1));
+		let Poll::Ready(next) = buffer.poll_pending(&kio::Waiter::noop()) else {
+			panic!("B3 ready");
+		};
+		assert_eq!((next.item, next.generation), ("B3", 0));
+		buffer
+			.push(
+				0,
+				Arrival {
+					restart: 1,
+					..arrival(moq_clock::now(), 0, "A restart")
+				},
+			)
+			.unwrap();
+		buffer.push(3, arrival(moq_clock::now(), 10_020, "B next")).unwrap();
+		moq_clock::sleep(Duration::from_millis(20)).await;
+		let Poll::Ready(next) = buffer.poll_pending(&kio::Waiter::noop()) else {
+			panic!("B clock kept its deadline");
+		};
+		assert_eq!((next.item, next.generation), ("B next", 0));
+		moq_clock::sleep(delay - Duration::from_millis(20)).await;
+		let Poll::Ready(next) = buffer.poll_next(&kio::Waiter::noop()) else {
+			panic!("A restart ready");
+		};
+		assert_eq!((next.item, next.generation), ("A restart", 1));
+	}
+
+	/// A caller can hold B's first issued item, cancel before adoption, and resume A.
+	#[moq_clock::test]
+	async fn cancelling_an_issued_replacement_keeps_the_active_clock_and_queue() {
+		let start = moq_clock::now();
+		let delay = Duration::from_millis(500);
+		let mut buffer = Buffer::new(delay).replay();
+		buffer.push(0u16, arrival(start, 0, "A0")).unwrap();
+		buffer.push(0, arrival(start, 100, "A tail")).unwrap();
+		buffer.lose(&0, true);
+		buffer.start([1], [1]);
+		buffer.push(1, arrival(start, 10_000, "B")).unwrap();
+		buffer.lose(&1, true);
+		buffer.lose(&1, true);
+		moq_clock::sleep(delay).await;
+		assert_eq!(due(&mut buffer), ["A0"]);
+		let Poll::Ready(first) = buffer.poll_pending(&kio::Waiter::noop()) else {
+			panic!("B ready");
+		};
+		buffer.commit(first).unwrap();
+		assert_eq!(buffer.reporting().dropped(), 1);
+		moq_clock::sleep(Duration::from_millis(100)).await;
+		let Poll::Ready(tail) = buffer.poll_next(&kio::Waiter::noop()) else {
+			panic!("A tail retained");
+		};
+		assert_eq!(tail.item, "A tail");
+		let Poll::Ready(held) = buffer.poll_next(&kio::Waiter::noop()) else {
+			panic!("B issued");
+		};
+		assert_eq!(held.item, "B");
+		buffer.cancel();
+		assert_eq!(buffer.reporting().dropped(), 1);
+		assert_eq!(buffer.at(0, ms(200)), Some(start + delay + Duration::from_millis(200)));
+		buffer.push(0, arrival(moq_clock::now(), 200, "A resumed")).unwrap();
+		buffer.start([2], [2]);
+		buffer.push(2, arrival(moq_clock::now(), 20_000, "C")).unwrap();
+		moq_clock::sleep(Duration::from_millis(100)).await;
+		assert_eq!(due(&mut buffer), ["A resumed"]);
+		moq_clock::sleep(Duration::from_millis(400)).await;
+		let Poll::Ready(first) = buffer.poll_pending(&kio::Waiter::noop()) else {
+			panic!("C ready");
+		};
+		buffer.commit(first).unwrap();
+		let Poll::Ready(next) = buffer.poll_next(&kio::Waiter::noop()) else {
+			panic!("C retained");
+		};
+		assert_eq!((next.item, next.generation), ("C", 1));
+		buffer.adopted();
+		assert_eq!(buffer.reporting().dropped(), 0);
+	}
+
+	/// A restart the old publisher is still acquiring at commit goes out before the replacement.
+	#[moq_clock::test]
+	async fn a_commit_drains_the_old_publishers_acquiring_restart() {
+		let start = moq_clock::now();
+		let delay = Duration::from_millis(500);
+		let mut buffer = Buffer::new(delay);
+		buffer.push(0u16, arrival(start, 0, "A0")).unwrap();
+		moq_clock::sleep(delay).await;
+		assert_eq!(released(&mut buffer), [("A0", 0)]);
+		buffer.start([1], [1]);
+		buffer.push(1, arrival(moq_clock::now(), 10_000, "B")).unwrap();
+		moq_clock::sleep(Duration::from_millis(10)).await;
+		buffer
+			.push(0, after(1, arrival(moq_clock::now(), 5_000, "A restart")))
+			.unwrap();
+		moq_clock::sleep(delay - Duration::from_millis(10)).await;
+		let Poll::Ready(first) = buffer.poll_pending(&kio::Waiter::noop()) else {
+			panic!("B ready");
+		};
+		// A's acquisition has 10 ms left to run, so only the commit can settle it.
+		buffer.commit(first).unwrap();
+		moq_clock::sleep(Duration::from_millis(10)).await;
+		assert_eq!(released(&mut buffer), [("A restart", 1), ("B", 2)]);
+	}
+
+	#[moq_clock::test]
+	async fn a_handoff_past_the_clock_range_returns_overflow() {
+		let start = moq_clock::now();
+		let mut buffer = Buffer::new(DELAY).replay();
+		buffer.push(0u16, arrival(start, 0, "A")).unwrap();
+		let last = Instant::ZERO.checked_add(Duration::from_nanos(u64::MAX)).unwrap();
+		let decode = Decode::from_nanos((last - start - DELAY).as_nanos() as i128);
+		buffer
+			.push(
+				0,
+				Arrival {
+					decode,
+					..arrival(start, 0, "A last")
+				},
+			)
+			.unwrap();
+		buffer.start([1], [1]);
+		buffer.push(1, arrival(start, 0, "B first")).unwrap();
+		buffer.push(1, arrival(start, 1, "B after last")).unwrap();
+		moq_clock::sleep(DELAY).await;
+		let Poll::Ready(first) = buffer.poll_pending(&kio::Waiter::noop()) else {
+			panic!("B ready");
+		};
+		assert_eq!(buffer.commit(first), Err(moq_net::TimeOverflow));
+	}
+
+	#[moq_clock::test]
+	async fn decode_before_zero_keeps_its_deadline_and_media_order() {
+		let start = moq_clock::now();
+		let mut buffer = Buffer::new(DELAY).replay();
+		buffer.push(2, arrival(start, 0, "audio")).unwrap();
+		let before_zero = Decode::from_nanos(-22_223);
+		buffer
+			.push(
+				1,
+				Arrival {
+					decode: before_zero,
+					..arrival(start, 0, "video")
+				},
+			)
+			.unwrap();
+		assert_eq!(
+			buffer.at(0, before_zero),
+			Some(start + DELAY - Duration::from_nanos(22_223))
+		);
+		assert_eq!(buffer.at(0, ms(0)), Some(start + DELAY));
+		moq_clock::sleep(DELAY).await;
+		assert_eq!(due(&mut buffer), ["video", "audio"]);
+	}
+
+	#[moq_clock::test]
+	async fn moving_media_zero_preserves_acquisition_and_deadlines() {
+		let start = moq_clock::now();
+		let mut negative = Buffer::new(DELAY);
+		let mut positive = Buffer::new(DELAY);
+		for buffer in [&mut negative, &mut positive] {
+			buffer.expect([1, 2]);
+		}
+		for (key, nanos, item) in [(1, -22_223, "video"), (2, 0, "audio"), (1, -11_112, "next")] {
+			for (buffer, offset) in [(&mut negative, 0), (&mut positive, 1_000_000_000)] {
+				buffer
+					.push(
+						key,
+						Arrival {
+							decode: Decode::from_nanos(nanos + offset),
+							..arrival(start, 0, item)
+						},
+					)
+					.unwrap();
+			}
+		}
+		moq_clock::sleep(DELAY).await;
+		assert_eq!(due(&mut negative), due(&mut positive));
+		for nanos in [-22_223, -11_112, 0, 11_111] {
+			assert_eq!(
+				negative.at(0, Decode::from_nanos(nanos)),
+				positive.at(0, Decode::from_nanos(nanos + 1_000_000_000)),
+			);
+		}
+	}
+
 	/// Two floors from the recovery arm's exact audio clock and wandering video lead.
 	/// Both envelopes interpolate their two samples, so rounding in their equal depths
 	/// must not make the changing send-ahead look like source clock drift.
@@ -1133,7 +1730,7 @@ mod tests {
 		Arrival {
 			arrived,
 			read: arrived,
-			decode: ms(decode),
+			decode: ms(decode).into(),
 			restart: 0,
 			skip: 0,
 			cut: 0,
@@ -1734,6 +2331,8 @@ mod tests {
 	async fn drift(ppm: f64, hours: f64, settled: f64, queueing: impl Fn(f64) -> Duration) -> Run {
 		let delay = Duration::from_millis(500);
 		let start = moq_clock::now();
+		let clock = moq_clock::Deadlines::new(start);
+		let _entered = clock.enter();
 		let mut buffer = Buffer::new(delay);
 		let mut run = Run {
 			err: None,
@@ -1747,7 +2346,7 @@ mod tests {
 			margin: None,
 			offset: None,
 		};
-		let mut last: Option<(f64, Timestamp)> = None;
+		let mut last: Option<(f64, Decode)> = None;
 		let mut stepped = false;
 		for k in 0..(hours * 3_600.0 * 2.0) as u64 {
 			let decode = Duration::from_millis(k * 500);
@@ -1760,11 +2359,11 @@ mod tests {
 			}
 			let source = decode.as_secs_f64() * (1.0 + ppm * 1e-6);
 			let arrived = start + Duration::from_secs_f64(source) + queued;
-			tokio::time::advance(arrived.saturating_duration_since(moq_clock::now())).await;
+			clock.advance(arrived.max(clock.now()));
 			let frame = Arrival {
 				arrived,
 				read: arrived,
-				decode: Timestamp::from_micros(decode.as_micros() as u64).unwrap(),
+				decode: Timestamp::from_micros(decode.as_micros() as u64).unwrap().into(),
 				restart: 0,
 				skip: 0,
 				cut: 0,
@@ -1922,6 +2521,8 @@ mod tests {
 	/// that is later, or never if `None`, in the order they reach us, until a push fails.
 	async fn feed(shape: &Shape, ppm: f64, secs: f64, arrive: impl Fn(u16, f64) -> Option<f64>) -> Fed {
 		let start = moq_clock::now();
+		let clock = moq_clock::Deadlines::new(start);
+		let _entered = clock.enter();
 		let mut buffer = Buffer::new(shape.delay);
 		let mut frames = Vec::new();
 		for &track in shape.tracks {
@@ -1946,11 +2547,11 @@ mod tests {
 		};
 		for (sent, track, decode) in frames {
 			let arrived = start + Duration::from_secs_f64(sent);
-			tokio::time::advance(arrived.saturating_duration_since(moq_clock::now())).await;
+			clock.advance(arrived.max(clock.now()));
 			let frame = Arrival {
 				arrived,
 				read: arrived,
-				decode: Timestamp::from_micros(decode.as_micros() as u64).unwrap(),
+				decode: Timestamp::from_micros(decode.as_micros() as u64).unwrap().into(),
 				restart: 0,
 				skip: 0,
 				cut: 0,

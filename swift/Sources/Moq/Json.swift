@@ -3,9 +3,9 @@ import MoqFFI
 
 /// JSON tracks, mirroring the `moq-json` crate.
 ///
-/// Each type wraps a track: a producer takes over a `TrackProducer` and advertises it in the
-/// broadcast's catalog, and a consumer takes over a `TrackConsumer` that has not read a group
-/// yet. Values cross the FFI boundary as JSON, encoded with `JSONEncoder` and decoded with
+/// Each type wraps a track: a producer takes over a `TrackProducer` (the snapshot and stream
+/// producers also advertise it in the broadcast's catalog, which has no window mode), and a
+/// consumer takes over a `TrackConsumer` that has not read a group yet. Values cross the FFI boundary as JSON, encoded with `JSONEncoder` and decoded with
 /// `JSONDecoder`. `JSONEncoder` rejects a top-level scalar (a bare number/string/bool) on
 /// Foundation before the swift-foundation rewrite (iOS < 18 / macOS < 15), so encode an object
 /// or array there.
@@ -79,7 +79,7 @@ extension Json {
 
     /// Read side of a JSON snapshot track (lossy latest-value). Iterating yields each state in
     /// order with its timestamp: `for try await state in json { ... }`. Groups older than the
-    /// subscription's `maxDelayUs` are skipped; `latest()` skips to the newest state instead.
+    /// subscription's `maxDelay` are skipped; `latest()` skips to the newest state instead.
     public final class SnapshotConsumer<Value: Decodable & Sendable>: AsyncSequence, Sendable {
         /// The decoded snapshot state emitted by this sequence.
         public typealias Element = Timed<Value>
@@ -186,6 +186,112 @@ extension Json {
     }
 }
 
+extension Json {
+    /// Write side of a JSON window track: records pushed at the back and popped from the front.
+    ///
+    /// The window rolls to new groups that restate the records it retains, so a reader can join at
+    /// any point. Not advertised in the broadcast's catalog; a reader names the track.
+    public final class WindowProducer<Value: Encodable>: Sendable {
+        let ffi: MoqJsonWindowProducer
+
+        /// Publish `track` as a JSON window track. Takes over `track`, whose handle is closed
+        /// afterward.
+        ///
+        /// `checkpointRecords` bounds the records retained and restated for a window that is never
+        /// popped: a reader that keeps up still sees every record, while a later joiner is told the
+        /// older ones were skipped. Give the track a `refresh` ratio so a joiner past it gets the
+        /// window restated in a fresh group. Set `compression` to DEFLATE each group; the consumer
+        /// must pass the same flag.
+        public init(track: TrackProducer, compression: Bool = false, checkpointRecords: UInt64? = nil) throws {
+            ffi = try MoqJsonWindowProducer(
+                track: track.ffi,
+                config: MoqJsonWindowConfig(compression: compression, checkpointRecords: checkpointRecords)
+            )
+        }
+
+        /// Append one record to the back of the window.
+        public func push(_ value: Value, timestampUs: UInt64? = nil) throws {
+            try ffi.push(value: encodeJson(value), timestampUs: timestampUs)
+        }
+
+        /// Drop `count` records from the front of the window, clamped to what it holds.
+        public func pop(_ count: UInt64, timestampUs: UInt64? = nil) throws {
+            try ffi.pop(count: count, timestampUs: timestampUs)
+        }
+
+        /// Close the open group, so the next edit opens one restating the retained window. A no-op
+        /// when no group is open. Cut at a natural boundary, such as the end of an utterance.
+        public func cut() throws {
+            try ffi.cut()
+        }
+
+        /// A watch-only handle to whether the track has subscribers.
+        public func demand() throws -> TrackDemand {
+            TrackDemand(try ffi.demand())
+        }
+
+        /// Finish the track, closing any open group.
+        public func finish() throws {
+            try ffi.finish()
+        }
+    }
+
+    /// One change to a window, as a `WindowConsumer` sees it. Ranges are absolute record indices.
+    public enum WindowEvent<Value> {
+        /// A record joined the window at this index.
+        case push(index: UInt64, value: Value)
+        /// These records left the window.
+        case pop(Range<UInt64>)
+        /// These records will never be delivered: they were pushed and dropped while this reader
+        /// was behind, or fell outside the producer's checkpoint when it joined.
+        case skip(Range<UInt64>)
+    }
+
+    /// Read side of a JSON window track. Iterating yields each change in order with its
+    /// timestamp: `for try await event in window { ... }`. Group rolls never surface.
+    public final class WindowConsumer<Value: Decodable & Sendable>: AsyncSequence, Sendable {
+        /// The decoded window change emitted by this sequence.
+        public typealias Element = Timed<WindowEvent<Value>>
+
+        let ffi: MoqJsonWindowConsumer
+
+        /// Read `track` as a JSON window track. Takes over `track`, whose handle is closed
+        /// afterward; throws if it has already read a group. `compression` must match the flag
+        /// the producer used.
+        public init(track: TrackConsumer, compression: Bool = false) throws {
+            // checkpointRecords is producer-only, so leave it at its default here.
+            ffi = try MoqJsonWindowConsumer(track: track.ffi, config: MoqJsonWindowConfig(compression: compression))
+        }
+
+        /// The next change, or `nil` once the track ends or is closed. A record first learned of
+        /// from a restatement carries that frame's timestamp, not its original push time.
+        public func next() async throws -> Element? {
+            guard let timed = try await ffi.next() else { return nil }
+            let event: WindowEvent<Value>
+            switch timed.event {
+            case let .push(index, value): event = .push(index: index, value: try decodeJson(value))
+            case let .pop(start, end): event = .pop(start..<end)
+            case let .skip(start, end): event = .skip(start..<end)
+            }
+            return Timed(value: event, timestampUs: timed.timestampUs)
+        }
+
+        /// Cancel all current and future reads.
+        public func cancel() {
+            ffi.cancel()
+        }
+
+        /// Create an iterator that cancels native reads when iteration ends.
+        public func makeAsyncIterator() -> AsyncThrowingStream<Element, Swift.Error>.Iterator {
+            moqStream(cancel: { [ffi] in ffi.cancel() }) { [self] in
+                try await next()
+            }.makeAsyncIterator()
+        }
+    }
+}
+
+extension Json.WindowEvent: Sendable where Value: Sendable {}
+extension Json.WindowEvent: Equatable where Value: Equatable {}
 extension Json.Timed: Sendable where Value: Sendable {}
 extension Json.Timed: Equatable where Value: Equatable {}
 

@@ -3,7 +3,6 @@ import { race } from "@moq/signals";
 import { fromTransport, StreamCode, toStreamCode, toTransport } from "./error.ts";
 import { sharedStreamCode } from "./ietf/error.ts";
 import type { IetfVersion } from "./ietf/version.ts";
-import { Version } from "./ietf/version.ts";
 import { Version as Lite, type Version as LiteVersion } from "./lite/version.ts";
 import { decodeError } from "./util/decode_error.ts";
 import { TimeoutError, withTimeout } from "./util/timeout.ts";
@@ -39,9 +38,8 @@ function withCode(reason: unknown, stream: StreamVersion): unknown {
 // withCode, which reads a number as a non-stream error and sends Internal.
 function stopReason(reason: unknown, stream: StreamVersion): unknown {
 	if (typeof reason !== "number") return withCode(reason, stream);
-	const version = asIetf(stream);
 	const code =
-		version === undefined || sharedStreamCode(reason, version) ? (reason as StreamCode) : StreamCode.Internal;
+		asIetf(stream) === undefined || sharedStreamCode(reason) ? (reason as StreamCode) : StreamCode.Internal;
 	return toTransport(code, "cancel");
 }
 
@@ -101,12 +99,12 @@ export function asIetf(version: StreamVersion): IetfVersion | undefined {
 	return isLite(version) ? undefined : version;
 }
 
-// Every draft newer than these counts leading ones, so a new version falls forward.
-function isLeadingOnes(version: StreamVersion): boolean {
+/**
+ * Whether `version` writes leading-ones varints, which carry the full u64; older versions use QUIC's, which stop at 2^62-1.
+ * Every draft newer than these counts leading ones, so a new version falls forward.
+ */
+export function isLeadingOnes(version: StreamVersion): boolean {
 	switch (version) {
-		case Version.DRAFT_14:
-		case Version.DRAFT_15:
-		case Version.DRAFT_16:
 		case Lite.DRAFT_01:
 		case Lite.DRAFT_02:
 		case Lite.DRAFT_03:
@@ -278,7 +276,7 @@ export class Reader {
 	#buffer: Uint8Array;
 	#chunks: Uint8Array[] = [];
 	#chunked = 0; // bytes across #chunks
-	#stream?: ReadableStream<Uint8Array>; // if undefined, the buffer is consumed then EOF
+	// Undefined once the stream finishes, or without a stream: the buffer is consumed then EOF.
 	#reader?: ReadableStreamDefaultReader<Uint8Array>;
 	#closed?: Promise<void>;
 	// The decode that last ran short and how far, so a retry can wait for those bytes.
@@ -294,8 +292,7 @@ export class Reader {
 		version: StreamVersion,
 	) {
 		this.#buffer = buffer ?? new Uint8Array();
-		this.#stream = stream;
-		this.#reader = this.#stream?.getReader();
+		this.#reader = stream?.getReader();
 		this.version = version;
 	}
 
@@ -314,11 +311,9 @@ export class Reader {
 
 		if (result.done) {
 			// The transport already finished the stream. Drop the reader so a later stop
-			// neither builds a cancel error nor sends a reset the peer will ignore.
-			if (this.#reader === reader) {
-				this.#reader = undefined;
-				reader.releaseLock();
-			}
+			// neither builds a cancel error nor sends a reset the peer will ignore. Dropped,
+			// not released: releasing a closed stream's lock builds a TypeError per stream.
+			if (this.#reader === reader) this.#reader = undefined;
 			return false;
 		}
 
@@ -685,10 +680,7 @@ export class Cursor {
 		let size: number;
 		if (this.#leadingOnes) {
 			size = peekLeadingOnes(b[o]);
-			// 1111110x is a 7-byte form. Draft-17 rejects it; draft-18+ allows it per #1595.
-			if (size === 7 && this.version === Version.DRAFT_17) {
-				throw new Error("invalid leading-ones varint: 1111110x prefix is reserved on draft-17");
-			}
+			// 1111110x is a 7-byte form, which draft-18+ allows per #1595.
 			this.#ensure(size);
 			this.#offset += size;
 			return readLeadingOnes(b, o, size);

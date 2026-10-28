@@ -4,19 +4,149 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Broadcast requests own discovery
+### Paths fit moq-transport's 4096-byte namespace ([#6927](https://github.com/moq-dev/moq/pull/6927))
 
-`Consumer::request_broadcast` now owns discovery of its path and retries across route churn until discovery has synced without a route for its requested instance.
-It returns `Pending<origin::Requesting>`; `routed_broadcast` uses that task too, replacing `origin::Routing`.
-When polling directly, keep the task mutable for `poll_ok`; awaiting it is unchanged.
-Remove manual `Requesting::is_queued` retries: the resolver now watches route changes itself.
-A selected handler's explicit refusal is returned directly by `request_broadcast` and `announced_broadcast`; they do not wait for other discovery. The existing `routed_broadcast` helper retains its policy of retrying refusals only after the covering routes change. Paths discovery cannot name fail with `InvalidPath`.
+`Path::MAX_BYTES` is 4096, moq-transport's namespace limit, so every path fits every wire and building a longer one fails with `path::Invalid::TooLong`. Keep broadcast paths within 4096 bytes.
+A moq-transport namespace whose escaped path would exceed it is refused when decoded, and a SUBSCRIBE, TRACK\_STATUS, FETCH, or PUBLISH whose namespace and track name exceed 4096 bytes together fails that request with `Error::Encode` instead of being sent.
+
+### Building a `Path` refuses empty segments ([#6648](https://github.com/moq-dev/moq/pull/6648))
+
+`Path::new` and `TryFrom` fail with `path::Invalid::EmptySegment` on a leading, trailing, or doubled `/` instead of collapsing it, so a path has one spelling; the empty path is still the root. Origin entry points report it as `Error::EmptySegment`, and `Path::from_static` panics on it.
+Pass a prefix without a trailing `/`: `Path::from_static("room")` covers `room/cam`. Build a path from pieces with `Path::join` rather than `format!`, since an empty piece is the root and adds no segment.
+`Path::from_escaped` is gone, and `path::TooLong` is `path::Invalid::TooLong`. `Path::head(n)` returns the path's first `n` segments.
+moq-lite decoding refuses a path with an empty segment as a protocol violation, and moq-transport decoding refuses a namespace field ending in `/`, which escapes to one.
+
+### moq-transport drafts 14 through 17 are removed ([#6753](https://github.com/moq-dev/moq/pull/6753))
+
+`ietf::Version::Draft14` through `Draft17` are gone, and a peer offering only those versions, by ALPN or in the moql SETUP, fails the handshake.
+Peers must speak moq-transport draft 18 or later, or moq-lite.
+The moql SETUP (no ALPN, or `moql`) now negotiates only moq-lite versions.
+`session::Limits::requests` is removed: stream credit bounds every peer request, so drop the field and keep `announces`.
+
+### `Path` and `Relative` have no lifetime
+
+There is one owned `Path` type: a short path is stored inline and a long one shares a reference-counted buffer, so cloning stays cheap. Every path is at most `Path::MAX_BYTES`.
+
+- `PathOwned`, `Path<'a>`, and `Path<'static>` are all `Path`; `RelativeOwned` and `Relative<'a>` are `Relative`.
+- `Path::{to_owned, into_owned, borrow}` and the `Relative` equivalents are gone: drop the call, or `clone()` a `&Path` you need to keep.
+- `Path::new`, `Relative::new`, `Path::join`, and `Path::resolve` return `Result<_, path::Invalid>`, failing on a path longer than `Path::MAX_BYTES`. `Path::new` copies its argument; use `Path::from_static("room")` for a literal, which borrows it and panics if it is too long.
+- `From<&str>`, `From<&String>`, and `From<String>` for `Path` and `Relative` are `TryFrom`, with `path::Invalid` as the error.
+- `AsPath` is gone. Origin entry points such as `publish`, `create_broadcast`, `scope`, `mount`, and `routed` take `impl TryInto<Path, Error: Into<Error>>`, so `&str`, `String`, `Path`, and `&Path` still work and a too-long string fails with `Error::BoundsExceeded`. Other functions that took `impl AsPath`, such as `stats::Tier::new`, take `impl Into<Path>`: pass a `Path` or `&Path`.
+- `origin::{Producer, Consumer}::absolute` and `announce::Consumer::absolute` return `Result<Path, Error>`.
+- `Path::{has_prefix, strip_prefix, join, relative}` take `&Path`: write `path.has_prefix(&Path::from_static("room"))`.
+- Decoding a path longer than `Path::MAX_BYTES` fails with `BoundsExceeded`, like one deeper than `Path::MAX_PARTS`.
+
+### Request handlers are `requests()` ([#6752](https://github.com/moq-dev/moq/pull/6752))
+
+Rename `origin::Producer::dynamic(prefix)`, `broadcast::Producer::dynamic()`, `track::Producer::dynamic()`, and `track::Request::dynamic()` to `requests`.
+Their handles `origin::Dynamic`, `broadcast::Dynamic`, and `track::Dynamic` are `origin::Requests`, `broadcast::Requests`, and `track::Requests`; their methods are unchanged.
+
+### Names say one thing ([#6751](https://github.com/moq-dev/moq/pull/6751))
+
+Rename these, which kept their behavior:
+
+| Before | After |
+|---|---|
+| `Session::bandwidth()` | `Session::allocator()` |
+| `Client::with_bandwidth` | `Client::with_allocator` |
+| `auth::Auth` | `auth::Credential` |
+| `track::Consumer::query()`, `track::Querying` | `track::Consumer::info()`, `track::Resolving` |
+| `bandwidth::Reservation::consumer()` | `bandwidth::Reservation::consume()` |
+| `bandwidth::Reservation::peek()` | `bandwidth::Reservation::rate()` |
+| `stats::Control` | `stats::Message` |
+| `stats::Bytes` | `stats::Totals` |
+| `transport::Stats`, `transport::poll::Session::stats()` | `transport::Metrics`, `transport::poll::Session::metrics()` |
+
+`group::Demand` reads like `track::Demand`: replace `is_used()` with `wanted()`, and `used()`, `unused()`, `poll_used`, and `poll_unused` with a loop over `wanted_changed()` (or `poll_wanted_changed`), which returns the new value each time it changes and errors once the group closes.
+`transport::Metrics` drops `bytes_sent` and `bytes_received`: a transport reports them through the `transport::Wire` it returns from `wire()`, which `session::Stats` now reads.
+`transport::StatsUnavailable` is gone: `metrics()` defaults to reporting nothing, so delete an implementation that returned it.
+
+### One lifecycle vocabulary ([#6750](https://github.com/moq-dev/moq/pull/6750))
+
+`closed()` on `group::Producer`, `group::Demand`, `track::Producer`, and `track::Demand` now waits for the outcome and returns `Result<()>`: `Ok(())` once the end settles (a finished group; a track whose declared end was reached with every group below it finished), or the abort error. Match on the result where you awaited `()` or treated `Error::Dropped` as a clean end; `poll_closed` returns `Poll<Result<()>>`.
+`group::Producer::abort` after `finish` only releases the cache: readers keep the clean end.
+A session closing locally aborts its copies with `Error::Stream(StreamError::Session(SessionError::Cancel))`, so their readers end with that error instead of a clean end.
+`track::Producer::end()` is `finished()`.
+
+### An idle reservation reads the share it would get
+
+`bandwidth::Reservation::rate()` and its `consume()` report the slice the track would get back while nothing subscribes to it, instead of `None`; it still claims nothing from the other tracks.
+`None` now means only that the connection has no estimate or the reservation is gone.
+A sender that relied on `None` to hold its rate while unwatched should check its track's demand instead.
+
+### Exports without a consumer are gone
+
+These had no caller outside tests; replace them as follows.
+
+- `broadcast::Demand` and both `broadcast::{Producer, Consumer}::demand()`: watch each track's `track::Demand` instead.
+- `goaway::Consumer::{peek, recv}`: poll it, `goaway.poll(&kio::Waiter::noop())` to peek or `kio::wait(|waiter| goaway.poll(waiter)).await` to wait.
+- `bandwidth::Producer::{abort, closed}`: drop the last producer to close it.
+- `Version::{names, from_alpn, is_ietf}`: use `Versions::all().iter()` or `Version::from_code`, match `alpn()` yourself, and `!is_lite()`.
+- `Server::with_origin(origin)`: call `with_publisher(&origin).with_subscriber(origin)`.
+- `stats::Handle::{parent, tier}`, `stats::Registry::exclude`, `stats::Traffic::{is_announced, total_bytes}`, `stats::Tier::is_default`: read the public fields, such as `announces_started > announces_ended` or `tier.label().is_empty()`.
+- `frame::Consumer::poll_read_all`: use `read_all`, or poll `poll_read_chunk` until the frame ends.
+- `frame::Buffer::{is_full, filled_mut}`: compare `len()` with `capacity()`, and read `filled()`.
+- `Path::next_part`: split `as_str()` on the first `/`.
+- `setup::Token::CAT`: compare `kind` with `1`.
+- `Error::TooManyParameters` and `DecodeError::{ExpectedData, Missing, Unsupported}` were never produced; drop their match arms.
+
+### `Client::with_url` replaces `with_path` and `with_authority`
+
+Pass the URL you dial: `Client::new().with_url(url)` instead of `.with_path(path).with_authority(authority)`.
+The client derives what SETUP carries from it and from the transport's `address()`: the path and query when SETUP carries the target, plus the authority for `moqt://`, and nothing when the transport's own URI does.
+A `unix://` URL names its target in its `?path=` query.
+
+### `stats::Refusal` is `stats::RefusalKind`, and `time::now` is gone (#6510)
+
+Rename `moq_net::stats::Refusal` to `moq_net::stats::RefusalKind`, so it no longer shares a name with `moq_auth::Refusal`; its variants and `Refusals` are unchanged.
+Replace `moq_net::time::now()` with `moq_net::time::Instant::now()`, the one way to read the clock.
+
+### Published names refuse navigation segments
+
+Broadcast creation and route publication now refuse literal `.` and `..` segments, including segments in the producer's root.
+Resolve relative references before publishing, or rename broadcasts that used these segments.
+Rust reports `Error::NavigationSegment`; the existing protocol error codes carry the refusal to a peer.
+Path normalization, relative references, and subscription paths retain their semantics.
+
+### A listing says whether a removed track finished (#6399)
+
+`broadcast::TracksEvent` gains `Finished { name }`: the track left the listing because its producer declared its end. `Removed { name }` now means it left unfinished (dropped or aborted without an end, or its route withdrawn). Handle both where you matched `Removed`.
+`broadcast::Lister::finish()`, which ended every reader as if the broadcast ended, is `Lister::end()`. `Lister::finish(name)` now unlists a track as finished, beside `remove(name)` for one that left unfinished.
+
+### `Version::uses_setup_negotiation` is removed ([#6483](https://github.com/moq-dev/moq/pull/6483))
+
+Match the version yourself: lite-01 and lite-02 negotiate the version in SETUP; every other version negotiates it through ALPN.
+
+### Sessions box their transport (#6176)
+
+`Driver` and `server::Handshake` lose their transport type parameter: write `moq_net::Driver` and `moq_net::server::Handshake`.
+`Client::connect_lite`, `Server::accept_lite`, and `Server::accept_request_lite` are gone; call `connect`, `accept`, or `accept_request`, which accept every ALPN.
+Every session now takes a `transport::poll::Boxable` transport, whose streams must also be `Sync` on native.
+A `!Send` transport wraps itself in a type that checks the thread on use, such as `moq_uring::transport::Local`.
+`Client::connect` and `Server::accept_request` are plain functions returning `impl Future`, so call them as before with `.await`.
+
+### `track::Producer::largest()` is a getter
+
+`track::Producer::largest(&self)` returns the track's largest location now, `None` before any, instead of streaming each newer one; `track::Producer::poll_largest` is gone.
+Replace `poll_largest(&kio::Waiter::noop())` and `largest().await` on a producer with `largest()`.
+To wait for each newer one, keep a reader and follow its stream: `let mut reader = producer.consume();`, then `reader.largest().await`.
+
+### Transport failures keep their meaning
+
+Handle `Error::IdleTimeout` separately from `Error::Transport`. A local transport close is session cancellation, not clean end-of-content.
+Converting a transport failure to `StreamError` now gives `Unroutable` rather than `Internal`, so retry or re-resolve that route where you classified stream errors.
+
+### Track ends use positions
+
+`track::Producer::finish_at` takes a `track::Position` instead of an exclusive group sequence.
+Pass `Position::group(n)` where you passed `n`, or a position within the last group to end after a frame.
+`Producer::final_sequence()` is `end()` and returns `Option<Position>`; `Subscriber::finished()` and the ordered reader return `Position` instead of `u64`.
 
 ### IETF whole-group FETCH answers name the requested group ([#6199](https://github.com/moq-dev/moq/issues/6199))
 
-On moq-transport drafts 14 through 19, a whole-group `FETCH_OK` now names `{g, 0}` instead of `{g+1, 0}`.
+On moq-transport drafts 14 through 18, a whole-group `FETCH_OK` now names `{g, 0}` instead of `{g+1, 0}`.
 Readers accept both forms and set End Of Track to the sequence after the fetched group.
-An older moq-net reader can reject the new answer; upgrade it before pairing it with a new publisher, or use draft 20 and later, whose inclusive End Location is unchanged.
+An older moq-net reader can reject the new answer; upgrade it before pairing it with a new publisher, or use draft 22, whose inclusive End Location is unchanged.
 No Rust API changes.
 
 ### Receive streams are read through leases (#5878)
@@ -41,18 +171,6 @@ lease.release();
 `transport::CloseKind` gained `Evicted`, which `Error::from_transport` maps to `Error::Evicted`.
 `transport::Stats` gained `streams_evicted()`, and `session::Stats` the matching `streams_evicted` field.
 
-### Stage a requested track before subscribers see it (#6111)
-
-`track::Request::stage(info)` returns a `track::Staged` that derefs to the track's `Producer` while subscribers waiting on the request stay pending; `commit()` publishes it with everything written so far and returns the `Producer`.
-A relay that holds groups of a lazily served track writes them before committing, so the first reader (and an IETF `SUBSCRIBE_OK`'s Largest Location) sees them.
-Dropping a `Staged` uncommitted rejects the request with `Error::Dropped`. `accept(info)` is unchanged and equals `stage(info).commit()`.
-
-```rust
-let mut staged = request.stage(info);
-for group in retained { /* staged.create_group(..), write, finish */ }
-let producer = staged.commit();
-```
-
 ### Frame writers own their group (#6111)
 
 `group::Producer::create_frame` now takes the writer by value and returns an owned `frame::Producer` with no lifetime.
@@ -72,13 +190,10 @@ group = frame.finish()?;
 
 A caller that holds the group behind `&mut` can write a whole frame with `write_frame` instead.
 
-### A received track's end waits for groups in flight (#6111)
+### A track's end tolerates a repeat, and skipped groups can be dropped (#6111)
 
-Call `track::Producer::received()` before writing what a peer sends into a track, then declare the peer's end with `finish_at`.
-On a received copy, readers wait at a hole below that end for the subscription's max delay (or one second) in case its group is still in flight; `drop_groups(range, err)` marks groups the peer said it skipped, so readers stop waiting for them and a group still arriving there ends with `err`.
+`track::Producer::drop_groups(range, err)` marks groups the publisher skipped, so readers stop waiting for them and a group still arriving there ends with `err`.
 `finish_at` now accepts a repeat of the same end and a refinement within the last group; any other second end fails with `Error::ProtocolViolation`.
-
-`track::Request::request_start(floor)` leaves an accepted copy's start pending at `floor` until `track::Producer::start_at` resolves it, for a subscriber whose peer reports the start after accepting.
 
 ### A frameless group is not the live edge (#6111)
 
@@ -88,8 +203,7 @@ A group followed by a frameless one is judged against the next group that has a 
 ### Ending a track aborts its open groups (#6111)
 
 Aborting a track (`abort` or `abort_unused`) now aborts its unfinished groups with the same error, so their readers end with it and their writers fail.
-Dropping the last `track::Producer` without a finish aborts them with `Error::Dropped`, and `close` with `Error::SessionClosed`.
-`track::Producer::close`, `track::Producer::received`, and `group::Producer::info` are now public.
+Dropping the last `track::Producer` without a finish aborts them with `Error::Dropped`.
 
 ### Priorities are signed, with 0 unset (#6142)
 
@@ -104,8 +218,8 @@ On the wire, moq-lite carries `priority + 128` and moq-transport `127 - priority
 
 On moq-lite, a client session no longer asks its peer for announcements under its whole subscribe scope at connect.
 It asks only under the prefixes its subscribe origin's readers watch, with `announced()`, `follow`, `routed`, `routed_broadcast`, or `announced_broadcast`, and stops asking 2s after nothing at or beneath a prefix is watched.
-`request_broadcast` owns discovery of its path while resolving and reports an unroutable path only once discovery has synced without a covering route.
-Request the path directly; no separate announcement stream is needed for resolution. An explicit selected-handler refusal is returned directly, including while following announcements. Handle that error before explicitly trying a later resolution.
+`request_broadcast` watches nothing, so on a client it fails with `Error::Unroutable` for a path no reader watches, even when the peer announces it.
+Resolve a path with `routed_broadcast` or `announced_broadcast`, or hold an `announced()` stream over its prefix while requesting, the way `routed` already did after connecting.
 A broadcast resolved through a discovered route keeps its path watched until dropped.
 A server session, and a client fed into a `Producer::peer` or `Producer::upstream` handle, still asks for everything it may, so a relay discovers as before.
 Serving another session's request is not a watch, so a client that relays what it discovers to its own sessions should feed its client session `origin.upstream()` (or `peer()`) instead of a plain handle.
@@ -127,7 +241,7 @@ Clamp timestamps you build from unbounded input to `(1 << 61) - 1`.
 
 A group the publisher cut, or named in `SUBSCRIBE_DROP`, after a `track::Subscriber` saw it is now handed out, and reading it fails with the publisher's error; before, it was skipped or ended cleanly.
 A group already held fails the same way when the drop lands, even while its stream is still arriving.
-On lite-05 and lite-06 the error is always `Error::Stream(StreamError::NotFound)`.
+On lite-05 and lite-06 the error is always `Error::Stream(StreamError::Old)`.
 Treat a failed group read as the loss of that group and keep reading the track, rather than ending the subscription.
 
 ### A claim answers by publishing (#5678)
@@ -136,7 +250,7 @@ Treat a failed group read as the loss of that group and keep reading the track, 
 Answer each `origin::Request` with `request.prepare(epoch)?` (a fresh `Epoch::mint()` per output run), fill `prepared.broadcast()`, then `prepared.publish()?`, which announces the broadcast at the exact path under that epoch and returns its producer.
 Only `publish` announces it: `prepared.broadcast().announce(..)` fails with `Error::Closed`.
 `Dynamic::update` is gone: drop the claim and claim again to change it, and close an answer's producer to end that output.
-`Request::accept` is no longer part of the public API and panics on a request from `dynamic`.
+`Request::accept`, `Producer::dynamic_route`, and `Dynamic::update_route` are crate-private (#6496): only the built-in sessions answer with a broadcast they already hold.
 Dropping a `Prepared` unpublished refuses the request, as dropping a `Request` does, and `publish` fails with `Error::Unroutable` once the claim went away.
 
 ### Anchors can name a time (#6074)
@@ -200,7 +314,7 @@ Handle it like any other skipped group.
 ### Track readers follow `largest()` instead of reading `latest()` (#5725)
 
 `latest()` on `track::{Producer, Consumer, Subscriber, Ordered}` is gone.
-Await `largest()` and read `.group` where you used the sequence; where you read the edge without waiting, poll `poll_largest` once with `kio::Waiter::noop()`.
+Await `largest()` and read `.group` where you used the sequence; on a `Producer`, `largest()` reads the edge without waiting.
 It streams the newest location, the current one at once and then each newer one, and `None` once the track ends.
 A new group or datagram raises it at frame 0 before any frame lands, and it can name a frame the publisher reported before its group arrives.
 
@@ -243,17 +357,11 @@ A track received over moq-lite-05/06 arrives untimed, since its timestamps may b
 One received over moq-transport keeps its timestamps unchecked, and a relay serves it to moq-lite untimed.
 A publisher whose timeline restarts, such as an HLS `EXT-X-DISCONTINUITY` that resets decode times, publishes a new broadcast instead.
 
-### `broadcast::Producer::finish` is back, and lingers (#5795)
+### Broadcast `finish` is gone
 
-`finish()` ends the broadcast cleanly and returns a `Finish` that keeps its finished tracks servable until their media is stale.
-Dropping the `Finish` closes the broadcast, so `close()` still ends it now.
-
-```rust
-// Close now
-producer.close();
-// Serve late subscribers until the media is stale
-producer.finish().wait().await;
-```
+`broadcast::Producer::finish()`, a deprecated alias for `close()`, is removed: a broadcast has no finished state.
+Call `close()` where you called `finish()`.
+To end content cleanly, finish each track, keep the producer for as long as late readers should find it, then close it; `moq_mux::Linger` does this for a hang broadcast.
 
 ### `auth::Token` is `auth::Auth` (#5695)
 
@@ -364,12 +472,12 @@ A `group::Request` is withdrawn once its last `fetch_group` caller leaves, so a 
 
 `moq_net::web_transport_trait` is gone.
 `transport::poll::{Session, SendStream, RecvStream}` carry their own `poll_*` methods, `transport::Error`, and `transport::Stats`, and `Error::from_transport` takes a `transport::Error`.
-A custom transport implements these traits and reports `binding()`: `transport::Binding::Uri` when its handshake carries the request URI, or `InBand` when SETUP carries it.
+A custom transport implements these traits and reports `address()`: `transport::Address::Uri` when its handshake carries the request URI, or `Setup` when SETUP carries it.
 
 ```rust
 impl moq_net::transport::poll::Session for MySession {
-	fn binding(&self) -> moq_net::transport::Binding {
-		moq_net::transport::Binding::Uri
+	fn address(&self) -> moq_net::transport::Address {
+		moq_net::transport::Address::Uri
 	}
 	// poll_accept_bi, poll_open_uni, ...
 }
@@ -412,11 +520,14 @@ Treat both like `NotFound` if you match on errors.
 
 ### Sessions cap peer requests (#4820)
 
-A peer past the session's announce, subscription, or fetch bound loses the session with `TooManyRequests`.
+A peer past the session's announce bound loses the session with `TooManyRequests`.
+Stream credit bounds its subscriptions and FETCHes.
 Raise the defaults for a large relay mesh.
 
 ```rust
-let client = Client::new().with_limits(session::Limits { subscriptions: 100_000, ..Default::default() });
+let mut limits = session::Limits::default();
+limits.announces = 1_000_000;
+let client = Client::new().with_limits(limits);
 ```
 
 ### A path is one broadcast (#4741)
@@ -424,15 +535,15 @@ let client = Client::new().with_limits(session::Limits { subscriptions: 100_000,
 Broadcast identity is the path, whatever the publisher or first hop.
 A publisher that restarts its group numbering must publish under a new broadcast name.
 
-### Broadcast `finish` and `abort` are removed (#4152)
+### Broadcast `abort` is removed (#4152)
 
-Close a broadcast with `close()`; its end carries no cause.
-`broadcast::Consumer::is_finished` is gone, and `closed()` on `Consumer` and `Dynamic` returns `()`.
+`broadcast::Producer::abort` is removed; use `close()` for an immediate end without a cause.
+`broadcast::Consumer::is_finished` is gone, and `closed()` on `Consumer` and `Dynamic` returns `()`; the broadcast end carries no cause.
 
 ### No `VarInt`
 
 Varints are plain `u64`s.
-Use `moq_net::varint::decode_quic(buf)` and `moq_net::varint::encode_quic(v, buf)`, which fails past `varint::MAX_QUIC`.
+Use `moq_net::varint::decode_quic(buf)` and `moq_net::varint::encode_quic(v, buf)`, which fails past `2^62 - 1`.
 
 ## 0.2 -> 0.3
 

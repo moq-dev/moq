@@ -1,27 +1,32 @@
+use crate::driver::Transport;
 use crate::origin;
+use crate::transport::poll::Session as _;
 use crate::{
 	Error, Hop, SessionError, bandwidth,
 	coding::{Reader, Stream, Writer},
 	lite::SessionInfo,
 };
 
-use std::task::{Context, Poll, ready};
+use std::task::{Poll, ready};
 
 use super::{
 	DataType, PeerSetup, Publisher, PublisherConfig, Setup, Subscriber, SubscriberConfig, SubscriberDriver, Version,
 };
 
-pub(crate) struct SessionStart<S: crate::transport::poll::Session> {
+pub(crate) struct SessionStart {
 	pub recv_bandwidth: Option<bandwidth::Weak>,
 	/// The estimate PROBE reports, published by the session's supervisor.
 	pub estimate: kio::Producer<crate::session::Estimate>,
-	/// The session's protocol machine, named so its `Send`-ness stays inferred
-	/// from the transport instead of being fixed by a box.
-	pub driver: Driver<S>,
+	/// The session's protocol machine over the boxed transport.
+	pub driver: Driver,
 	/// The session-side GOAWAY halves, stored on the public [`crate::Session`].
 	pub goaway: crate::goaway::Handle,
 	/// The session's AUTH tokens and grants, stored on the public [`crate::Session`].
-	pub auth: crate::auth::Handle,
+	pub auth: crate::auth::Link,
+	/// The connection credential presented on `auth`, stored on the public [`crate::Session`].
+	pub credential: Option<crate::auth::Credential>,
+	/// The implementation the peer's SETUP advertised, stored on the public [`crate::Session`].
+	pub peer_implementation: crate::setup::PeerImplementation,
 }
 
 /// Server: read the peer's single SETUP message off its Setup Stream before starting
@@ -33,11 +38,8 @@ pub(crate) struct SessionStart<S: crate::transport::poll::Session> {
 ///
 /// Pass the result to [`start`] as its `peer_setup` so capability gating resolves
 /// without re-reading SETUP, and every held stream is handed back to the driver.
-pub async fn accept_setup<S: crate::transport::poll::Session>(
-	session: &mut S,
-	version: Version,
-) -> Result<AcceptedSetup<S>, Error> {
-	let mut accept = SetupAccept::<S> {
+pub async fn accept_setup(session: &mut Transport, version: Version) -> Result<AcceptedSetup, Error> {
+	let mut accept = SetupAccept {
 		version,
 		pending: Vec::new(),
 		early: Vec::new(),
@@ -46,15 +48,15 @@ pub async fn accept_setup<S: crate::transport::poll::Session>(
 	kio::wait(|waiter| accept.poll(session, waiter)).await
 }
 
-struct SetupAccept<S: crate::transport::poll::Session> {
+struct SetupAccept {
 	version: Version,
-	pending: Vec<Reader<S::RecvStream, Version>>,
-	early: Vec<Reader<S::RecvStream, Version>>,
-	setup: Option<Reader<S::RecvStream, Version>>,
+	pending: Vec<Reader<crate::transport::boxed::RecvStream, Version>>,
+	early: Vec<Reader<crate::transport::boxed::RecvStream, Version>>,
+	setup: Option<Reader<crate::transport::boxed::RecvStream, Version>>,
 }
 
-impl<S: crate::transport::poll::Session> SetupAccept<S> {
-	fn poll(&mut self, session: &mut S, waiter: &kio::Waiter) -> Poll<Result<AcceptedSetup<S>, Error>> {
+impl SetupAccept {
+	fn poll(&mut self, session: &mut Transport, waiter: &kio::Waiter) -> Poll<Result<AcceptedSetup, Error>> {
 		let Self {
 			version,
 			pending,
@@ -63,9 +65,8 @@ impl<S: crate::transport::poll::Session> SetupAccept<S> {
 		} = self;
 		let version = *version;
 
-		let mut cx = Context::from_waker(waiter.waker());
 		let mut accept_error = None;
-		while let Poll::Ready(stream) = session.poll_accept_uni(&mut cx) {
+		while let Poll::Ready(stream) = session.poll_accept_uni(waiter) {
 			match stream {
 				Ok(stream) => pending.push(Reader::new(stream, version)),
 				Err(err) => {
@@ -76,7 +77,7 @@ impl<S: crate::transport::poll::Session> SetupAccept<S> {
 		}
 		let mut index = 0;
 		while index < pending.len() {
-			let kind = match pending[index].poll_varint_peek(&mut cx) {
+			let kind = match pending[index].poll_varint_peek(waiter) {
 				Poll::Pending => {
 					index += 1;
 					continue;
@@ -103,7 +104,7 @@ impl<S: crate::transport::poll::Session> SetupAccept<S> {
 			if setup.is_some() {
 				return Poll::Ready(Err(Error::ProtocolViolation));
 			}
-			ready!(reader.poll_decode::<DataType>(&mut cx))?;
+			ready!(reader.poll_decode::<DataType>(waiter))?;
 			reader.set_priority(crate::priority::RECV_CONTROL);
 			*setup = Some(reader);
 		}
@@ -111,16 +112,16 @@ impl<S: crate::transport::poll::Session> SetupAccept<S> {
 		// before reporting the terminal error from accepting the next stream.
 		let result = setup
 			.as_mut()
-			.map(|reader| reader.poll_decode::<Setup>(&mut cx))
+			.map(|reader| reader.poll_decode_sized::<Setup>(waiter))
 			.unwrap_or(Poll::Pending);
-		let setup = match result {
+		let (setup, size) = match result {
 			Poll::Ready(result) => result?,
 			Poll::Pending => match accept_error {
 				Some(err) => return Poll::Ready(Err(err)),
 				None => return Poll::Pending,
 			},
 		};
-		if session.binding() == crate::transport::Binding::Uri && setup.path.is_some() {
+		if session.address() == crate::transport::Address::Uri && setup.path.is_some() {
 			return Poll::Ready(Err(Error::ProtocolViolation));
 		}
 		// A stream need not have delivered even its type yet. Keep it intact for the
@@ -128,23 +129,29 @@ impl<S: crate::transport::poll::Session> SetupAccept<S> {
 		early.append(pending);
 		Poll::Ready(Ok(AcceptedSetup {
 			setup,
+			size,
 			early: std::mem::take(early),
 		}))
 	}
 }
 
 /// The peer's pre-read SETUP and the streams held until it arrived.
-pub struct AcceptedSetup<S: crate::transport::poll::Session> {
+pub struct AcceptedSetup {
 	/// The SETUP decoded before origin binding.
 	pub setup: Setup,
+	/// The SETUP's encoded size, counted once the session's stats are known.
+	pub size: usize,
 	/// Streams with their type still buffered for the session classifier.
-	pub early: Vec<Reader<S::RecvStream, Version>>,
+	pub early: Vec<Reader<crate::transport::boxed::RecvStream, Version>>,
 }
 
 /// Everything one moq-lite session needs to start.
-pub struct Config<S: crate::transport::poll::Session> {
+pub struct Config {
 	/// The runtime that arms the session's timers.
 	pub runtime: crate::time::Deadlines,
+
+	/// Where the session's control traffic is counted, even with neither origin set.
+	pub stats: crate::stats::Session,
 
 	/// Whether we dialed the session. Only the dialing side aborts on a publication
 	/// its grant does not cover: a server's publish origin is everything the peer
@@ -153,11 +160,11 @@ pub struct Config<S: crate::transport::poll::Session> {
 
 	/// The transport carrying the session. Cloned into every loop that outlives
 	/// [`start`], so the connection closes when the last of them drops.
-	pub session: S,
+	pub session: Transport,
 
 	/// The stream used to set up the session, after exchanging setup messages.
 	/// NOTE: No longer used in draft-03.
-	pub setup_stream: Option<Stream<S, Version>>,
+	pub setup_stream: Option<Stream<Transport, Version>>,
 
 	/// We will publish any local broadcasts from this origin, when set.
 	pub publish: Option<origin::Consumer>,
@@ -182,12 +189,12 @@ pub struct Config<S: crate::transport::poll::Session> {
 	/// The peer's SETUP, when it was already read before [`start`] (e.g. a server that
 	/// gated on the client's path via [`accept_setup`]). Seeds the peer-setup slot so
 	/// the Setup Stream isn't expected again. `None` reads it from the wire as usual.
-	pub peer_setup: Option<AcceptedSetup<S>>,
+	pub peer_setup: Option<AcceptedSetup>,
 
 	/// The session's auth handle, created before [`start`] so a server can take the
 	/// peer's token requests during its handshake. Supports AUTH exactly when `version`
 	/// does.
-	pub auth: crate::auth::Handle,
+	pub auth: crate::auth::Link,
 	/// What the peer may make this session hold.
 	pub limits: crate::session::Limits,
 }
@@ -195,12 +202,10 @@ pub struct Config<S: crate::transport::poll::Session> {
 /// Start a lite session.
 ///
 /// Returns the receive-bandwidth consumer (if any) plus the driver that runs the session.
-pub fn start<S>(config: Config<S>) -> Result<SessionStart<S>, Error>
-where
-	S: crate::transport::poll::Session,
-{
+pub fn start(config: Config) -> Result<SessionStart, Error> {
 	let Config {
 		runtime,
+		stats,
 		client,
 		session,
 		setup_stream,
@@ -254,10 +259,13 @@ where
 	// An unset half gets an empty origin: an empty publish origin announces nothing
 	// (and answers the peer's announce-interest with an empty set), and an empty
 	// subscribe origin issues no ANNOUNCE_PLEASE.
-	let publish = publish.unwrap_or_else(|| origin::Producer::empty(Hop::random()).consume());
-	let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Hop::random()));
-	let subscriptions =
-		crate::session::Slots::new(limits.subscriptions).with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
+	let publish = publish.unwrap_or_else(|| {
+		origin::Producer::empty(Hop::random())
+			.consume()
+			.with_stats(stats.clone())
+	});
+	let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Hop::random()).with_stats(stats.clone()));
+	let subscriptions = crate::session::Slots::default().with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
 	let announces =
 		crate::session::Slots::new(limits.announces).with_stats(subscribe.stats(), crate::stats::Cap::Announces);
 
@@ -270,7 +278,19 @@ where
 	// reads the peer's Setup stream; capability-gated streams (PROBE) wait on it.
 	// When the caller already read it (a gated server accept), seed the slot so the
 	// Setup stream isn't expected on the wire again.
-	let peer_setup_slot = PeerSetup::new(client, session.binding()).offer_ietf(our_setup.ietf);
+	let peer_implementation = crate::setup::PeerImplementation::default();
+	let mut peer_setup_slot = PeerSetup::new(client, session.address())
+		.offer_ietf(our_setup.ietf)
+		.with_implementation(peer_implementation.clone());
+	// Without AUTH, the server checks a client's credential before its SETUP, which the
+	// client reads only after going live.
+	if client && version.has_setup_stream() && !version.has_auth() {
+		peer_setup_slot = peer_setup_slot.accepting(auth.clone());
+	}
+	// A version without a Setup Stream advertises nothing, so there is nothing to wait for.
+	if !version.has_setup_stream() {
+		peer_implementation.set(None);
+	}
 	let early = if let Some(accepted) = peer_setup {
 		peer_setup_slot.set(accepted.setup);
 		accepted.early
@@ -308,7 +328,6 @@ where
 		peer_grant,
 		client,
 		subscriptions,
-		fetches: crate::session::Slots::new(limits.fetches),
 	});
 	let mut subscriber = Subscriber::new(SubscriberConfig {
 		runtime: runtime.clone(),
@@ -327,24 +346,33 @@ where
 	});
 	subscriber.announces = announces;
 
+	// SendSetup only logs a failure, so refuse a SETUP that cannot encode (one past the
+	// size bound, such as a long implementation or path) here rather than leave the peer waiting.
+	if version.has_setup_stream() {
+		crate::coding::Encode::encode(
+			&our_setup,
+			&mut crate::coding::Encoder::new(&mut Vec::new(), version.into()),
+			version,
+		)?;
+	}
+
 	let driver = Driver {
 		auth: Present {
+			stats: stats.clone(),
 			runtime: runtime.clone(),
 			session: session.clone(),
 			version,
 			handle: auth.clone(),
-			going_away: goaway.going_away.clone(),
 			tokens: kio::Tasks::new(),
 			violation: Default::default(),
 			started: false,
-			_setup: setup_token,
+			_setup: setup_token.clone(),
 		},
-		local_close: Default::default(),
 		setup: version
 			.has_setup_stream()
-			.then(|| SendSetup::new(session.clone(), our_setup, version)),
-		goaway: Some(SendGoaway::new(session.clone(), goaway, version)),
-		session_stream: setup_stream,
+			.then(|| SendSetup::new(session.clone(), our_setup, version, stats.clone())),
+		goaway: Some(SendGoaway::new(session.clone(), goaway, version, stats.clone())),
+		session_stream: setup_stream.map(|stream| stream.with_stats(&stats)),
 		ending: None,
 		publisher,
 		subscriber: SubscriberDriver::new(subscriber, early, client),
@@ -357,36 +385,34 @@ where
 		driver,
 		goaway: goaway_handle,
 		auth,
+		credential: setup_token,
+		peer_implementation,
 	})
 }
 
 /// The lite session driver: one poll function racing every protocol arm, in
 /// place of a task set of boxed futures.
-pub(crate) struct Driver<S: crate::transport::poll::Session> {
+pub(crate) struct Driver {
 	/// Presenting our tokens, one AUTH stream each.
-	auth: Present<S>,
-	pub(crate) local_close: std::sync::Arc<std::sync::atomic::AtomicBool>,
+	auth: Present,
 	/// Advertising our capabilities, or `None` once sent (or on a version with no
 	/// Setup Stream).
-	setup: Option<SendSetup<S>>,
+	setup: Option<SendSetup>,
 	/// Sending our single GOAWAY if the drain trigger fires, or `None` once done.
-	goaway: Option<SendGoaway<S>>,
+	goaway: Option<SendGoaway>,
 	/// The legacy session stream (pre-lite-03). Only its *error* ends the race, so
 	/// the publisher and subscriber keep running while it sits idle.
-	session_stream: Option<Stream<S, Version>>,
+	session_stream: Option<Stream<Transport, Version>>,
 	/// The first terminal outcome, retained while received streams drain.
 	ending: Option<Result<(), Error>>,
-	publisher: Publisher<S>,
-	subscriber: SubscriberDriver<S>,
+	publisher: Publisher,
+	subscriber: SubscriberDriver,
 	/// For the terminal close: the machine's last act reports the outcome to
 	/// the peer through the transport.
-	session: S,
+	session: Transport,
 }
 
-impl<S> Driver<S>
-where
-	S: crate::transport::poll::Session,
-{
+impl Driver {
 	pub(crate) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		if self.ending.is_none() {
 			let res = std::task::ready!(self.poll_protocol(waiter));
@@ -395,23 +421,24 @@ where
 				Err(err) => err.clone(),
 			});
 			match &res {
-				Err(Error::Transport(_) | Error::IdleTimeout) => {
+				Err(err @ (Error::Transport(_) | Error::IdleTimeout)) => {
 					tracing::info!("session terminated");
-					self.session.close(SessionError::Internal.to_code(), "");
+					self.session.abort(err, SessionError::Internal.to_code(), "");
 				}
 				Err(err) => {
 					tracing::warn!(%err, "session error");
-					self.session.close(
+					self.session.abort(
+						err,
 						crate::lite::error::to_session_code(&SessionError::from(err)),
 						err.to_string().as_ref(),
 					);
 				}
 				_ => {
 					tracing::info!("session closed");
-					self.session.close(SessionError::Cancel.to_code(), "");
+					self.session.abort(&Error::Cancel, SessionError::Cancel.to_code(), "");
 				}
 			}
-			if self.local_close.load(std::sync::atomic::Ordering::Relaxed) {
+			if self.session.closing().is_local() {
 				self.subscriber.close();
 				return Poll::Ready(res);
 			}
@@ -441,8 +468,6 @@ where
 	}
 
 	fn poll_protocol(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		let mut cx = waiter.context();
-
 		// Presenting tokens ends the session only when the peer breaks the protocol.
 		if let Poll::Ready(err) = self.auth.poll(waiter) {
 			return Poll::Ready(Err(err));
@@ -450,7 +475,7 @@ where
 
 		// The send-side machines never end the session; completion just retires them.
 		if let Some(setup) = &mut self.setup
-			&& setup.poll(&mut cx).is_ready()
+			&& setup.poll(waiter).is_ready()
 		{
 			self.setup = None;
 		}
@@ -461,7 +486,7 @@ where
 		}
 
 		if let Some(stream) = &mut self.session_stream
-			&& let Poll::Ready(err) = poll_session_stream(stream, &mut cx)
+			&& let Poll::Ready(err) = poll_session_stream(stream, waiter)
 		{
 			return Poll::Ready(Err(err));
 		}
@@ -475,7 +500,7 @@ where
 	}
 }
 
-impl<S: crate::transport::poll::Session> Drop for Driver<S> {
+impl Drop for Driver {
 	fn drop(&mut self) {
 		// Dropped without finishing: release anything still waiting on a token.
 		self.auth.handle.close(Error::Cancel);
@@ -483,22 +508,22 @@ impl<S: crate::transport::poll::Session> Drop for Driver<S> {
 }
 
 /// Opens one AUTH stream per token this side presents.
-struct Present<S: crate::transport::poll::Session> {
+struct Present {
+	stats: crate::stats::Session,
 	runtime: crate::time::Deadlines,
-	session: S,
+	session: Transport,
 	version: Version,
-	handle: crate::auth::Handle,
-	going_away: crate::goaway::GoingAway,
-	tokens: kio::Tasks<PresentToken<S>>,
+	handle: crate::auth::Link,
+	tokens: kio::Tasks<PresentToken>,
 	/// Set by a token whose peer broke the protocol, which ends the session.
 	violation: kio::Shared<Option<Error>>,
 	/// Whether the first poll decided who answers the peer's tokens.
 	started: bool,
 	/// The connection's own credential, held for the life of the session.
-	_setup: Option<crate::auth::Auth>,
+	_setup: Option<crate::auth::Credential>,
 }
 
-impl<S: crate::transport::poll::Session> Present<S> {
+impl Present {
 	/// Resolve only when a token's peer broke the protocol.
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
 		if !self.started {
@@ -509,14 +534,14 @@ impl<S: crate::transport::poll::Session> Present<S> {
 		}
 		while let Poll::Ready(Some((id, token))) = self.handle.poll_opening(waiter) {
 			self.tokens.push(PresentToken {
+				stats: self.stats.clone(),
 				runtime: self.runtime.clone(),
 				session: self.session.clone(),
 				version: self.version,
 				handle: self.handle.clone(),
-				going_away: self.going_away.clone(),
 				violation: self.violation.clone(),
 				id,
-				state: PresentState::Open { token },
+				state: PresentState::Open { token, answered: false },
 			});
 		}
 		let _ = self.tokens.poll(waiter);
@@ -530,71 +555,101 @@ impl<S: crate::transport::poll::Session> Present<S> {
 
 /// One token's AUTH stream: send the token, then track the grant until either
 /// side ends it.
-struct PresentToken<S: crate::transport::poll::Session> {
+struct PresentToken {
+	stats: crate::stats::Session,
 	runtime: crate::time::Deadlines,
-	session: S,
+	session: Transport,
 	version: Version,
-	handle: crate::auth::Handle,
-	going_away: crate::goaway::GoingAway,
+	handle: crate::auth::Link,
 	violation: kio::Shared<Option<Error>>,
 	id: u64,
-	state: PresentState<S>,
+	state: PresentState,
 }
 
-enum PresentState<S: crate::transport::poll::Session> {
-	Open { token: bytes::Bytes },
-	Run { stream: Stream<S, Version>, answered: bool },
+enum PresentState {
+	Open {
+		token: bytes::Bytes,
+		/// The peer already replied to this token, so it knows AUTH: a retry's stream lost
+		/// before its reply is not the peer predating AUTH.
+		answered: bool,
+	},
+	Run {
+		stream: Stream<Transport, Version>,
+		answered: bool,
+	},
+	/// Refused for a reason that may pass, or its stream lost: present it again once the
+	/// deadline fires.
+	Retry {
+		deadline: crate::time::Deadline,
+		answered: bool,
+	},
 	Done,
 }
 
-impl<S: crate::transport::poll::Session> kio::Task for PresentToken<S> {
+impl kio::Task for PresentToken {
 	type Output = ();
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		let err = ready!(self.poll_present(waiter));
-		let answered = matches!(self.state, PresentState::Run { answered: true, .. });
-		if let PresentState::Run { stream, .. } = std::mem::replace(&mut self.state, PresentState::Done) {
-			stream.writer.abort(&Error::Cancel);
-		}
-		let err = match err {
-			// A peer that predates AUTH resets a stream type it does not know, and one
-			// that takes no tokens in band refuses the same way: either way, before any
-			// reply, this token earns nothing here.
-			Error::Stream(_) if !answered => Error::Unsupported,
-			// A malformed reply, truncated ones included, is the peer breaking the session
-			// protocol, not refusing a token.
-			err => crate::auth::protocol_error(err),
-		};
-		match &err {
-			Error::Cancel | Error::Unsupported | Error::Transport(_) | Error::IdleTimeout | Error::Session(_) => {
-				tracing::debug!(%err, "auth token ended")
+		loop {
+			let err = ready!(self.poll_present(waiter));
+			let answered = matches!(
+				self.state,
+				PresentState::Open { answered: true, .. }
+					| PresentState::Run { answered: true, .. }
+					| PresentState::Retry { answered: true, .. }
+			);
+			if let PresentState::Run { stream, .. } = std::mem::replace(&mut self.state, PresentState::Done) {
+				stream.writer.abort(&Error::Cancel);
 			}
-			err => tracing::warn!(%err, "auth token ended"),
+			let err = match err {
+				// A peer that predates AUTH resets a stream type it does not know, and one
+				// that takes no tokens in band refuses the same way: either way, before any
+				// reply, this token earns nothing here.
+				Error::Stream(_) if !answered => Error::Unsupported,
+				// A malformed reply, truncated ones included, is the peer breaking the session
+				// protocol, not refusing a token.
+				err => crate::auth::protocol_error(err),
+			};
+			if let Some(delay) = self.handle.retry(self.id, &err) {
+				tracing::debug!(%err, ?delay, "auth token presenting again");
+				self.state = PresentState::Retry {
+					deadline: crate::time::Deadline::after(&self.runtime, delay),
+					answered,
+				};
+				continue;
+			}
+			match &err {
+				Error::Cancel | Error::Unsupported | Error::Transport(_) | Error::IdleTimeout | Error::Session(_) => {
+					tracing::debug!(%err, "auth token ended")
+				}
+				err => tracing::warn!(%err, "auth token ended"),
+			}
+			if let Error::ProtocolViolation = err {
+				self.violation.lock().get_or_insert(err.clone());
+			}
+			self.handle.ended(self.id, err);
+			return Poll::Ready(());
 		}
-		if let Error::ProtocolViolation = err {
-			self.violation.lock().get_or_insert(err.clone());
-		}
-		self.handle.ended(self.id, err);
-		Poll::Ready(())
 	}
 }
 
-impl<S: crate::transport::poll::Session> PresentToken<S> {
+impl PresentToken {
 	/// Run the stream, resolving with why the token ended.
 	fn poll_present(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
-		let mut cx = Context::from_waker(waiter.waker());
 		loop {
 			match &mut self.state {
-				PresentState::Open { token } => {
-					// After a GOAWAY the peer must not see new streams.
-					if self.going_away.is_set() {
+				PresentState::Open { token, answered } => {
+					// After a GOAWAY, sent or received, the peer must not see new streams.
+					if !self.handle.active() {
 						return Poll::Ready(Error::GoingAway);
 					}
 					let token = token.clone();
-					let mut stream = match ready!(Stream::poll_open(&mut self.session, self.version, &mut cx)) {
+					let answered = *answered;
+					let mut stream = match ready!(Stream::poll_open_request(&self.session, self.version, waiter)) {
 						Ok(stream) => stream,
 						Err(err) => return Poll::Ready(err),
 					};
+					stream = stream.with_stats(&self.stats);
 					let res = stream
 						.writer
 						.buffer(&super::ControlType::Auth)
@@ -602,20 +657,17 @@ impl<S: crate::transport::poll::Session> PresentToken<S> {
 					if let Err(err) = res {
 						return Poll::Ready(err);
 					}
-					self.state = PresentState::Run {
-						stream,
-						answered: false,
-					};
+					self.state = PresentState::Run { stream, answered };
 				}
 				PresentState::Run { stream, answered } => {
-					if let Err(err) = ready!(stream.writer.poll_flush(&mut cx)) {
+					if let Err(err) = ready!(stream.writer.poll_flush(waiter)) {
 						return Poll::Ready(err);
 					}
 					// Withdrawn: closing the stream is what tells the peer.
 					if self.handle.poll_withdrawn(self.id, waiter).is_ready() {
 						return Poll::Ready(Error::Cancel);
 					}
-					let reply = match ready!(stream.reader.poll_decode_maybe::<super::AuthReply>(&mut cx)) {
+					let reply = match ready!(stream.reader.poll_decode_maybe::<super::AuthReply>(waiter)) {
 						Ok(Some(reply)) => reply,
 						// The peer ended the grant without revoking it, or closed without
 						// ever answering (mapped to unsupported by the caller).
@@ -660,6 +712,18 @@ impl<S: crate::transport::poll::Session> PresentToken<S> {
 						}
 					}
 				}
+				PresentState::Retry { deadline, answered } => {
+					if self.handle.poll_withdrawn(self.id, waiter).is_ready() {
+						return Poll::Ready(Error::Cancel);
+					}
+					ready!(deadline.poll(waiter));
+					let answered = *answered;
+					let token = match self.handle.reopen(self.id) {
+						Ok(token) => token,
+						Err(err) => return Poll::Ready(err),
+					};
+					self.state = PresentState::Open { token, answered };
+				}
 				PresentState::Done => return Poll::Ready(Error::Cancel),
 			}
 		}
@@ -669,12 +733,9 @@ impl<S: crate::transport::poll::Session> PresentToken<S> {
 /// Drain SessionInfo updates off the legacy session stream, resolving only when
 /// the stream dies (a FIN counts: the peer abandoned the session).
 // TODO do something useful with the updates
-fn poll_session_stream<S: crate::transport::poll::Session>(
-	stream: &mut Stream<S, Version>,
-	cx: &mut Context<'_>,
-) -> Poll<Error> {
+fn poll_session_stream(stream: &mut Stream<Transport, Version>, waiter: &kio::Waiter) -> Poll<Error> {
 	loop {
-		match ready!(stream.reader.poll_decode_maybe::<SessionInfo>(cx)) {
+		match ready!(stream.reader.poll_decode_maybe::<SessionInfo>(waiter)) {
 			Ok(Some(_info)) => {}
 			Ok(None) => return Poll::Ready(Error::Cancel),
 			Err(err) => return Poll::Ready(err),
@@ -685,29 +746,31 @@ fn poll_session_stream<S: crate::transport::poll::Session>(
 /// Advertise our capabilities on a uni Setup Stream, then FIN. Best-effort: an
 /// error is logged and the machine finishes; the peer falls back to "no
 /// capabilities" for us.
-struct SendSetup<S: crate::transport::poll::Session> {
+struct SendSetup {
+	stats: crate::stats::Session,
 	version: Version,
-	state: SendSetupState<S>,
+	state: SendSetupState,
 }
 
-enum SendSetupState<S: crate::transport::poll::Session> {
+enum SendSetupState {
 	/// Waiting for stream credit on our own session handle.
 	Open {
-		session: S,
+		session: Transport,
 		setup: Box<Setup>,
 	},
 	/// Flushing the buffered SETUP, then FIN and wait for the acknowledgement (a
 	/// reset racing the FIN would discard the unacked message).
 	Send {
-		writer: Writer<S::SendStream, Version>,
+		writer: Writer<crate::transport::boxed::SendStream, Version>,
 		finished: bool,
 	},
 	Done,
 }
 
-impl<S: crate::transport::poll::Session> SendSetup<S> {
-	fn new(session: S, setup: Setup, version: Version) -> Self {
+impl SendSetup {
+	fn new(session: Transport, setup: Setup, version: Version, stats: crate::stats::Session) -> Self {
 		Self {
+			stats,
 			version,
 			state: SendSetupState::Open {
 				session,
@@ -716,8 +779,8 @@ impl<S: crate::transport::poll::Session> SendSetup<S> {
 		}
 	}
 
-	fn poll(&mut self, cx: &mut Context<'_>) -> Poll<()> {
-		match ready!(self.poll_send(cx)) {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		match ready!(self.poll_send(waiter)) {
 			Ok(()) => {}
 			Err(err) => tracing::debug!(%err, "failed to send setup"),
 		}
@@ -725,13 +788,13 @@ impl<S: crate::transport::poll::Session> SendSetup<S> {
 		Poll::Ready(())
 	}
 
-	fn poll_send(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+	fn poll_send(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		loop {
 			match &mut self.state {
 				SendSetupState::Open { session, setup } => {
-					let stream = ready!(session.poll_open_uni(cx, Default::default()))
+					let stream = ready!(session.poll_open_uni(waiter, Default::default()))
 						.map_err(crate::lite::error::from_transport)?;
-					let mut writer = Writer::new(stream, self.version);
+					let mut writer = Writer::new(stream, self.version).with_stats(&self.stats);
 					writer.buffer(&super::DataType::Setup)?;
 					writer.buffer(&**setup)?;
 					self.state = SendSetupState::Send {
@@ -741,11 +804,11 @@ impl<S: crate::transport::poll::Session> SendSetup<S> {
 				}
 				SendSetupState::Send { writer, finished } => {
 					if !*finished {
-						ready!(writer.poll_flush(cx))?;
+						ready!(writer.poll_flush(waiter))?;
 						writer.finish()?;
 						*finished = true;
 					}
-					return writer.poll_closed(cx);
+					return writer.poll_closed(waiter);
 				}
 				SendSetupState::Done => return Poll::Ready(Ok(())),
 			}
@@ -755,30 +818,37 @@ impl<S: crate::transport::poll::Session> SendSetup<S> {
 
 /// Send our single GOAWAY when the drain trigger fires. The session supervisor
 /// enforces the deadline independently, including on versions with no GOAWAY message.
-struct SendGoaway<S: crate::transport::poll::Session> {
+struct SendGoaway {
+	stats: crate::stats::Session,
 	version: Version,
 	goaway: crate::goaway::Protocol,
 	/// Opening a stream and watching the session close each need their own handle.
-	closed: S,
-	session: S,
-	state: SendGoawayState<S>,
+	closed: Transport,
+	session: Transport,
+	state: SendGoawayState,
 }
 
-enum SendGoawayState<S: crate::transport::poll::Session> {
+enum SendGoawayState {
 	Waiting,
 	Open {
 		payload: crate::goaway::Goaway,
 	},
 	/// Keep the writer through FIN acknowledgement, since dropping it resets the stream.
 	Send {
-		stream: Stream<S, Version>,
+		stream: Stream<Transport, Version>,
 		finished: bool,
 	},
 }
 
-impl<S: crate::transport::poll::Session> SendGoaway<S> {
-	fn new(session: S, goaway: crate::goaway::Protocol, version: Version) -> Self {
+impl SendGoaway {
+	fn new(
+		session: Transport,
+		goaway: crate::goaway::Protocol,
+		version: Version,
+		stats: crate::stats::Session,
+	) -> Self {
 		Self {
+			stats,
 			version,
 			goaway,
 			closed: session.clone(),
@@ -788,9 +858,8 @@ impl<S: crate::transport::poll::Session> SendGoaway<S> {
 	}
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		let mut cx = waiter.context();
 		loop {
-			if self.closed.poll_closed(&mut cx).is_ready() {
+			if self.closed.poll_closed(waiter).is_ready() {
 				return Poll::Ready(());
 			}
 			match &mut self.state {
@@ -804,13 +873,14 @@ impl<S: crate::transport::poll::Session> SendGoaway<S> {
 					self.state = SendGoawayState::Open { payload };
 				}
 				SendGoawayState::Open { payload } => {
-					let mut stream = match ready!(Stream::poll_open(&mut self.session, self.version, &mut cx)) {
+					let mut stream = match ready!(Stream::poll_open(&self.session, self.version, waiter)) {
 						Ok(stream) => stream,
 						Err(err) => {
 							tracing::warn!(%err, "failed to send goaway");
 							return Poll::Ready(());
 						}
 					};
+					stream = stream.with_stats(&self.stats);
 					let msg = super::Goaway {
 						uri: std::borrow::Cow::Borrowed(payload.uri.as_str()),
 					};
@@ -829,7 +899,7 @@ impl<S: crate::transport::poll::Session> SendGoaway<S> {
 				}
 				SendGoawayState::Send { stream, finished } => {
 					let result = if !*finished {
-						match ready!(stream.writer.poll_flush(&mut cx)) {
+						match ready!(stream.writer.poll_flush(waiter)) {
 							Ok(()) => {
 								*finished = true;
 								stream.writer.finish()
@@ -840,7 +910,7 @@ impl<S: crate::transport::poll::Session> SendGoaway<S> {
 						Ok(())
 					};
 					let result = match result {
-						Ok(()) => ready!(stream.writer.poll_closed(&mut cx)),
+						Ok(()) => ready!(stream.writer.poll_closed(waiter)),
 						Err(err) => Err(err),
 					};
 					if let Err(err) = result {
@@ -916,9 +986,10 @@ mod tests {
 
 		let start = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			client: true,
 			limits: Default::default(),
-			session: transport,
+			session: crate::driver::Transport::new(transport.clone()),
 			setup_stream: None,
 			publish: None,
 			subscribe: None,
@@ -926,7 +997,7 @@ mod tests {
 			version: Version::Lite07,
 			our_setup: Setup::default(),
 			peer_setup: None,
-			auth: crate::auth::Handle::new(true),
+			auth: crate::auth::Link::new(true),
 		})
 		.unwrap();
 		let mut driver = start.driver;
@@ -941,6 +1012,98 @@ mod tests {
 		assert_eq!(log.closes()[0].0, SessionError::ProtocolViolation.to_code());
 	}
 
+	/// An AUTH_OK granting nothing, forever.
+	fn empty_grant(version: Version) -> Vec<u8> {
+		let mut grant = Vec::new();
+		let mut w = crate::coding::Encoder::new(&mut grant, version.into());
+		w.varint(0).unwrap();
+		let prefix = w.prefix_varint();
+		for _ in 0..3 {
+			w.varint(0).unwrap();
+		}
+		w.fill(prefix).unwrap();
+		grant
+	}
+
+	/// Run a client session on a shared handle over `transport` for five simulated seconds,
+	/// presenting one token, and return it after checking the session still runs.
+	async fn present_on_shared_handle(transport: ScriptedSession) -> crate::auth::Credential {
+		let handle = crate::auth::Handle::new();
+		let start = start(Config {
+			runtime: crate::time::sim(),
+			stats: Default::default(),
+			client: true,
+			limits: Default::default(),
+			session: crate::driver::Transport::new(transport),
+			setup_stream: None,
+			publish: None,
+			subscribe: None,
+			peer_hop: None,
+			version: Version::Lite07,
+			our_setup: Setup::default(),
+			peer_setup: None,
+			auth: crate::auth::Link::attach(&handle, true, false).unwrap(),
+		})
+		.unwrap();
+		let mut driver = start.driver;
+		let token = handle.present(bytes::Bytes::from_static(b"token")).unwrap();
+
+		let res = moq_clock::timeout(
+			std::time::Duration::from_secs(5),
+			kio::wait(|waiter| driver.poll(waiter)),
+		)
+		.await;
+		assert!(res.is_err(), "the session ended: {res:?}");
+		token
+	}
+
+	/// A granted token whose stream the peer resets is presented again on the same session,
+	/// backing off while each attempt is lost before a reply: at 0s, 1s, and 3s.
+	#[moq_clock::test]
+	async fn a_lost_stream_is_presented_again() {
+		let grant = empty_grant(Version::Lite07);
+		let transport = ScriptedSession::per_stream(vec![grant.clone(), grant]);
+		transport.close(crate::lite::test_transport::Close::ResetStream(
+			crate::StreamError::Internal.to_code(),
+		));
+		let log = transport.log.clone();
+		let token = present_on_shared_handle(transport).await;
+
+		let writes = log.writes.lock().unwrap().clone();
+		assert_eq!(writes.windows(5).filter(|window| *window == b"token").count(), 3);
+		assert!(
+			futures::FutureExt::now_or_never(token.closed()).is_none(),
+			"a lost stream ended the token"
+		);
+	}
+
+	/// A retry's stream that ends before its reply is lost, not a peer without AUTH: the
+	/// peer already answered the token, so it is presented again, backing off from the
+	/// refusal's delay: at 0s, 1s, and 3s.
+	#[moq_clock::test]
+	async fn a_lost_retry_is_presented_again() {
+		let version = Version::Lite07;
+		let mut busy = Vec::new();
+		let mut w = crate::coding::Encoder::new(&mut busy, version.into());
+		w.varint(1).unwrap();
+		let prefix = w.prefix_varint();
+		w.varint(SessionError::TooManyRequests.to_code().into()).unwrap();
+		w.bytes(b"busy").unwrap();
+		w.fill(prefix).unwrap();
+
+		// The setup token is granted and then closed, which settles it. Ours is refused
+		// transiently, and every retry's stream ends without a reply.
+		let transport = ScriptedSession::per_stream_eof(vec![empty_grant(version), busy]);
+		let log = transport.log.clone();
+		let token = present_on_shared_handle(transport).await;
+
+		assert_eq!(log.bi_opens(), 4, "the setup token once, ours three times");
+		assert!(
+			futures::FutureExt::now_or_never(token.closed()).is_none(),
+			"a lost retry ended the token"
+		);
+	}
+
 	#[moq_clock::test]
 	async fn malformed_presenter_auth_closes_the_session() {
 		for script in [vec![7, 1, 2], vec![7, 1, 0, 0]] {
@@ -948,9 +1111,10 @@ mod tests {
 			let log = transport.log.clone();
 			let start = start(Config {
 				runtime: crate::time::sim(),
+				stats: Default::default(),
 				client: false,
 				limits: Default::default(),
-				session: transport,
+				session: crate::driver::Transport::new(transport.clone()),
 				setup_stream: None,
 				publish: None,
 				subscribe: None,
@@ -958,7 +1122,7 @@ mod tests {
 				version: Version::Lite07,
 				our_setup: Setup::default(),
 				peer_setup: None,
-				auth: crate::auth::Handle::new(true),
+				auth: crate::auth::Link::new(true),
 			})
 			.unwrap();
 			let mut driver = start.driver;
@@ -1034,9 +1198,10 @@ mod tests {
 		let log = transport.log.clone();
 		let start = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			client: true,
 			limits: Default::default(),
-			session: transport,
+			session: crate::driver::Transport::new(transport.clone()),
 			setup_stream: None,
 			publish: None,
 			subscribe: None,
@@ -1044,7 +1209,7 @@ mod tests {
 			version: Version::Lite07,
 			our_setup,
 			peer_setup: None,
-			auth: crate::auth::Handle::new(true),
+			auth: crate::auth::Link::new(true),
 		})
 		.unwrap();
 		let mut driver = start.driver;
@@ -1068,19 +1233,21 @@ mod tests {
 		Setup::default()
 			.encode(&mut crate::coding::Encoder::new(&mut setup, version.into()), version)
 			.unwrap();
-		let mut session =
+		let session =
 			crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![Vec::new(), setup]);
-		let accepted = accept_setup(&mut session, version).await.unwrap();
+		let accepted = accept_setup(&mut crate::driver::Transport::new(session.clone()), version)
+			.await
+			.unwrap();
 		assert_eq!(accepted.early.len(), 1);
 	}
 
 	#[moq_clock::test]
 	async fn accept_setup_refuses_two_incomplete_setup_streams() {
 		use futures::FutureExt;
-		let mut session =
+		let session =
 			crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![vec![1], vec![1]]);
 		assert!(matches!(
-			accept_setup(&mut session, Version::Lite05).now_or_never(),
+			accept_setup(&mut crate::driver::Transport::new(session.clone()), Version::Lite05).now_or_never(),
 			Some(Err(Error::ProtocolViolation))
 		));
 	}
@@ -1103,7 +1270,8 @@ mod tests {
 				let log = session.log.clone();
 				let mut started = start(Config {
 					runtime: crate::time::sim(),
-					session,
+					stats: Default::default(),
+					session: crate::driver::Transport::new(session.clone()),
 					setup_stream: None,
 					publish: None,
 					subscribe: None,
@@ -1112,7 +1280,7 @@ mod tests {
 					our_setup: Setup::default(),
 					peer_setup: None,
 					client: false,
-					auth: crate::auth::Handle::new(version.has_auth()),
+					auth: crate::auth::Link::new(version.has_auth()),
 					limits: Default::default(),
 				})
 				.unwrap();
@@ -1157,7 +1325,8 @@ mod tests {
 				let log = session.log.clone();
 				let mut started = start(Config {
 					runtime: crate::time::sim(),
-					session,
+					stats: Default::default(),
+					session: crate::driver::Transport::new(session.clone()),
 					setup_stream: None,
 					publish: None,
 					subscribe: None,
@@ -1166,7 +1335,7 @@ mod tests {
 					our_setup: Setup::default(),
 					peer_setup: None,
 					client: false,
-					auth: crate::auth::Handle::new(version.has_auth()),
+					auth: crate::auth::Link::new(version.has_auth()),
 					limits: Default::default(),
 				})
 				.unwrap();
@@ -1185,12 +1354,13 @@ mod tests {
 		transport: ScriptedSession,
 		version: Version,
 		client: bool,
-		peer_setup: Option<AcceptedSetup<ScriptedSession>>,
-	) -> SessionStart<ScriptedSession> {
+		peer_setup: Option<AcceptedSetup>,
+	) -> SessionStart {
 		start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			client,
-			session: transport,
+			session: crate::driver::Transport::new(transport.clone()),
 			setup_stream: None,
 			publish: None,
 			subscribe: None,
@@ -1198,7 +1368,7 @@ mod tests {
 			version,
 			our_setup: Setup::default(),
 			peer_setup,
-			auth: crate::auth::Handle::new(version.has_auth()),
+			auth: crate::auth::Link::new(version.has_auth()),
 			limits: Default::default(),
 		})
 		.unwrap()
@@ -1227,8 +1397,10 @@ mod tests {
 	#[moq_clock::test]
 	async fn unknown_client_role_remains_bidirectional() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
-			let mut transport = ScriptedSession::new(Vec::new()).with_incoming_unis(vec![vec![1, 4, 1, 3, 1, 3]]);
-			let setup = accept_setup(&mut transport, version).await.unwrap();
+			let transport = ScriptedSession::new(Vec::new()).with_incoming_unis(vec![vec![1, 4, 1, 3, 1, 3]]);
+			let setup = accept_setup(&mut crate::driver::Transport::new(transport.clone()), version)
+				.await
+				.unwrap();
 			assert_eq!(setup.setup.role, None);
 			let log = transport.log.clone();
 			let mut started = raw_session(transport, version, false, Some(setup));
@@ -1256,6 +1428,7 @@ mod tests {
 					probe: super::super::ProbeLevel::Report,
 					..Default::default()
 				},
+				size: 0,
 				early: Vec::new(),
 			};
 			let mut started = raw_session(transport, version, true, Some(peer_setup));
@@ -1280,6 +1453,22 @@ mod tests {
 			assert!(log.closes().is_empty(), "{version}");
 			assert!(!log.stops().is_empty(), "{version}: data stream was not refused");
 		}
+	}
+
+	// GOAWAY is not a request: refusing it without credit would leave the peer
+	// unaware that we are draining.
+	#[moq_clock::test]
+	async fn goaway_waits_for_stream_credit() {
+		let transport = ScriptedSession::new(Vec::new()).without_credit();
+		let log = transport.log.clone();
+		let mut server = raw_session(transport.clone(), Version::Lite07, false, None);
+		server.goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		let _ = server.driver.poll(&kio::Waiter::noop());
+		assert_eq!(log.bi_opens(), 0, "GOAWAY waits for stream credit");
+		transport.grant_credit();
+		let _ = server.driver.poll(&kio::Waiter::noop());
+		assert_eq!(log.bi_opens(), 1, "GOAWAY stream was not opened");
+		assert!(log.closes().is_empty());
 	}
 
 	#[moq_clock::test]

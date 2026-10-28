@@ -8,33 +8,16 @@
 //!
 //! Sent on RESET_STREAM and STOP_SENDING, and read back off both. The values are the
 //! draft's, not [`StreamError::to_code`]'s: the two registries agree on most of what they
-//! both assign, but not all of it, and this one grew (and moved a value) across the drafts
-//! we negotiate, so a code only means something once you know which draft carried it.
-//!
-//! | Code | draft-14/15 | draft-16 | draft-17 | draft-18+ |
-//! |------|-------------|----------|----------|-----------|
-//! | 0x0  | INTERNAL_ERROR | INTERNAL_ERROR | INTERNAL_ERROR | INTERNAL_ERROR |
-//! | 0x1  | CANCELLED | CANCELLED | CANCELLED | CANCELLED |
-//! | 0x2  | DELIVERY_TIMEOUT | DELIVERY_TIMEOUT | DELIVERY_TIMEOUT | DELIVERY_TIMEOUT |
-//! | 0x3  | SESSION_CLOSED | SESSION_CLOSED | SESSION_CLOSED | SESSION_CLOSED |
-//! | 0x4  | - | UNKNOWN_OBJECT_STATUS | UNKNOWN_OBJECT_STATUS | GOING_AWAY |
-//! | 0x5  | - | - | TOO_FAR_BEHIND | TOO_FAR_BEHIND |
-//! | 0x12 | - | MALFORMED_TRACK | MALFORMED_TRACK | MALFORMED_TRACK |
-//!
-//! Encoding and decoding therefore move together and both take the negotiated version:
-//! GOING_AWAY sent to a draft-17 peer reads as UNKNOWN_OBJECT_STATUS, and a draft-17
-//! peer's UNKNOWN_OBJECT_STATUS read as GOING_AWAY would retire a session that is not
-//! going anywhere.
+//! both assign, but not all of it.
 
 use super::Version;
 use crate::{SessionError, StreamError};
 
 /// An implementation-specific error: the stream died on our side, with no registry entry
-/// for why. Assigned by every draft we negotiate.
+/// for why.
 pub const INTERNAL_ERROR: u32 = 0x0;
 
 /// The stream was cancelled by either endpoint. A routine unsubscribe, not a failure.
-/// Assigned by every draft we negotiate.
 pub const CANCELLED: u32 = 0x1;
 
 /// The content missed its delivery deadline.
@@ -43,43 +26,21 @@ const DELIVERY_TIMEOUT: u32 = 0x2;
 /// The session is closing, taking this stream with it.
 const SESSION_CLOSED: u32 = 0x3;
 
-/// A GOAWAY was sent or received. Draft-18 and later; draft-16 and 17 gave 0x4 to
-/// UNKNOWN_OBJECT_STATUS instead.
+/// A GOAWAY was sent or received.
 const GOING_AWAY: u32 = 0x4;
 
-/// The subscription outran the publisher's resource limits. Draft-17 and later.
+/// The subscription outran the publisher's resource limits.
 const TOO_FAR_BEHIND: u32 = 0x5;
 
-/// The track's content could not be parsed. Draft-16 and later.
+/// The track's content could not be parsed.
 const MALFORMED_TRACK: u32 = 0x12;
 
-/// Whether the draft assigns 0x4 to GOING_AWAY.
-///
-/// Draft-16 and 17 assign it to UNKNOWN_OBJECT_STATUS, which draft-18 moved to 0x6 when it
-/// took 0x4 for this. Draft-14 and 15 assign it nothing.
-fn has_going_away(version: Version) -> bool {
-	matches!(
-		version,
-		Version::Draft18 | Version::Draft19 | Version::Draft20 | Version::Draft21 | Version::Draft22
-	)
-}
-
-/// Whether the draft assigns TOO_FAR_BEHIND. Added in draft-17.
-fn has_too_far_behind(version: Version) -> bool {
-	!matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
-}
-
-/// Whether the draft assigns MALFORMED_TRACK. Added in draft-16.
-fn has_malformed_track(version: Version) -> bool {
-	!matches!(version, Version::Draft14 | Version::Draft15)
-}
-
-/// The code to reset a stream, or send STOP_SENDING, with on the negotiated draft.
+/// The code to reset a stream, or send STOP_SENDING, with.
 ///
 /// Conditions without a matching reset code use INTERNAL_ERROR. Request rejection has
 /// its own registry: a missing track belongs in a request error response, not a reset.
 /// moq-lite's own 48-63 range and its application offset have no corresponding ranges here.
-pub fn to_stream_code(err: &StreamError, version: Version) -> u32 {
+pub fn to_stream_code(err: &StreamError) -> u32 {
 	match err {
 		StreamError::Internal => INTERNAL_ERROR,
 		StreamError::Cancel => CANCELLED,
@@ -90,30 +51,30 @@ pub fn to_stream_code(err: &StreamError, version: Version) -> u32 {
 		// Flattened, as on the moq-lite wire: the session registry is disjoint, so the
 		// specific reason travels on the session close instead.
 		StreamError::Session(_) => SESSION_CLOSED,
-		StreamError::GoingAway if has_going_away(version) => GOING_AWAY,
-		StreamError::TooFarBehind if has_too_far_behind(version) => TOO_FAR_BEHIND,
-		StreamError::MalformedTrack if has_malformed_track(version) => MALFORMED_TRACK,
+		StreamError::GoingAway => GOING_AWAY,
+		StreamError::TooFarBehind => TOO_FAR_BEHIND,
+		StreamError::MalformedTrack => MALFORMED_TRACK,
 		_ => INTERNAL_ERROR,
 	}
 }
 
-/// Read a stream reset (or STOP_SENDING) code received on the negotiated draft.
+/// Read a stream reset (or STOP_SENDING) code.
 ///
-/// A code the draft does not assign stays [`StreamError::Unknown`], which surfaces as
+/// A code the drafts do not assign stays [`StreamError::Unknown`], which surfaces as
 /// [`Error::Stream`](crate::Error::Stream): an error, but never one given a meaning it did
 /// not carry. That includes the codes this crate has no local counterpart for
 /// (UNKNOWN_OBJECT_STATUS, EXCESSIVE_LOAD) and every value a later
 /// draft may add.
-pub fn from_stream_code(code: u32, version: Version) -> StreamError {
+pub fn from_stream_code(code: u32) -> StreamError {
 	match code {
 		INTERNAL_ERROR => StreamError::Internal,
 		CANCELLED => StreamError::Cancel,
 		DELIVERY_TIMEOUT => StreamError::DeliveryTimeout,
 		// The peer's session code is not on this stream, so the reason is unknown here.
 		SESSION_CLOSED => StreamError::Session(SessionError::Internal),
-		GOING_AWAY if has_going_away(version) => StreamError::GoingAway,
-		TOO_FAR_BEHIND if has_too_far_behind(version) => StreamError::TooFarBehind,
-		MALFORMED_TRACK if has_malformed_track(version) => StreamError::MalformedTrack,
+		GOING_AWAY => StreamError::GoingAway,
+		TOO_FAR_BEHIND => StreamError::TooFarBehind,
+		MALFORMED_TRACK => StreamError::MalformedTrack,
 		code => StreamError::Unknown(code),
 	}
 }
@@ -131,55 +92,34 @@ pub(crate) fn to_session_code(error: &SessionError) -> u32 {
 
 /// The moq-transport request error registry, per negotiated draft.
 ///
-/// Sent in a rejection response to a request, and read back off one. Draft-14 gives each
-/// error message its own registry and they disagree about 0x4; draft-15 folded them all
-/// into REQUEST_ERROR with a single registry that renumbered almost everything. So a
-/// request code only means something once you know both the draft and, on draft-14, which
-/// request it answers.
-///
-/// | Condition | 14 SUBSCRIBE | 14 FETCH | 14 PUBLISH | 14 ANNOUNCE | 14 SUB_NS | 15+ |
-/// |-----------|--------------|----------|------------|-------------|-----------|-----|
-/// | INTERNAL_ERROR | 0x0 | 0x0 | 0x0 | 0x0 | 0x0 | 0x0 |
-/// | UNAUTHORIZED | 0x1 | 0x1 | 0x1 | 0x1 | 0x1 | 0x1 |
-/// | TIMEOUT | 0x2 | 0x2 | 0x2 | 0x2 | 0x2 | 0x2 |
-/// | NOT_SUPPORTED | 0x3 | 0x3 | 0x3 | 0x3 | 0x3 | 0x3 |
-/// | DOES_NOT_EXIST | 0x4 | 0x4 | - | - | - | 0x10 |
-/// | UNINTERESTED | - | - | 0x4 | 0x4 | - | 0x20 |
-/// | MALFORMED_TRACK | - | 0x9 | - | - | - | 0x12 |
-/// | EXPIRED_AUTH_TOKEN | 0x12 | 0x12 | - | 0x12 | 0x12 | 0x5 |
-/// | GOING_AWAY | - | - | - | - | - | 0x6 (17+) |
-/// | UNSUPPORTED_EXTENSION | - | - | - | - | - | 0x33 (18+) |
-///
-/// The renumbering is the trap: draft-14 SUBSCRIBE_ERROR gives 0x4 to TRACK_DOES_NOT_EXIST
-/// and 0x10 to MALFORMED_AUTH_TOKEN, and draft-15 swaps the two. Sending either number
-/// without the draft in hand tells the peer the opposite of what happened.
+/// Sent in a rejection response to a request, and read back off one. The registry is
+/// disjoint from the stream reset one, so the same integer means something else there.
 pub(crate) mod request {
 	use super::Version;
 	use crate::{DecodeError, Error, SessionError, StreamError};
 
-	/// Which request the error answers, so draft-14 picks the right registry.
+	/// Which request the error answers.
 	///
-	/// Draft-15 and later carry one REQUEST_ERROR registry for every request, so from there
-	/// on the kind only decides what a refused route says: not here to a request for
-	/// content, uninterested to an offer of it.
+	/// Every request shares one REQUEST_ERROR registry, so the kind only decides what a
+	/// refused route says (not here to a request for content, uninterested to an offer of
+	/// it) and which codes only FETCH carries.
 	#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 	pub(crate) enum Kind {
-		/// SUBSCRIBE_ERROR, draft-14 section 13.1.2.
+		/// SUBSCRIBE.
 		Subscribe,
-		/// FETCH_ERROR, draft-14 section 13.1.5.
+		/// FETCH.
 		Fetch,
-		/// PUBLISH_ERROR, draft-14 section 13.1.4.
+		/// PUBLISH.
 		Publish,
-		/// ANNOUNCE_ERROR, draft-14 section 13.1.6.
+		/// PUBLISH_NAMESPACE.
 		PublishNamespace,
-		/// SUBSCRIBE_NAMESPACE_ERROR, draft-14 section 13.1.7.
+		/// SUBSCRIBE_NAMESPACE.
 		SubscribeNamespace,
-		/// TRACK_STATUS_ERROR on draft-14, REQUEST_ERROR later.
+		/// TRACK_STATUS.
 		TrackStatus,
 	}
 
-	/// An implementation-specific error, with no registry entry for why. Assigned by every
-	/// draft, for every request.
+	/// An implementation-specific error, with no registry entry for why.
 	const INTERNAL_ERROR: u64 = 0x0;
 
 	/// The peer's credentials do not cover the request.
@@ -191,86 +131,47 @@ pub(crate) mod request {
 	/// The endpoint does not implement this request at all, as opposed to refusing this one.
 	pub(crate) const NOT_SUPPORTED: u64 = 0x3;
 
-	/// A second subscription to a track the peer already subscribes to. Draft-16 and later.
+	/// A second subscription to a track the peer already subscribes to.
 	pub(crate) const DUPLICATE_SUBSCRIPTION: u64 = 0x19;
 
-	/// The endpoint is overloaded and cannot process the request. Draft-18 and later.
+	/// The endpoint is overloaded and cannot process the request.
 	pub(crate) const EXCESSIVE_LOAD: u64 = 0x9;
 
 	/// A SUBSCRIBE_NAMESPACE or SUBSCRIBE_TRACKS prefix overlapping an established one.
-	/// Draft-15 and later.
 	pub(crate) const PREFIX_OVERLAP: u64 = 0x30;
 
-	/// A GOAWAY is draining the session, so no new request is accepted. Draft-17 and later.
+	/// A GOAWAY is draining the session, so no new request is accepted.
 	const GOING_AWAY: u64 = 0x6;
 
-	/// The requested broadcast or track is not here, as draft-14 numbers it under the name
-	/// TRACK_DOES_NOT_EXIST.
-	const DOES_NOT_EXIST_14: u64 = 0x4;
-
-	/// An invalid FETCH range: draft-14 FETCH_ERROR and draft-15+ REQUEST_ERROR.
-	const INVALID_RANGE_14: u64 = 0x5;
+	/// An invalid FETCH range.
 	const INVALID_RANGE: u64 = 0x11;
 
-	/// The track holds a Mandatory Track Property the endpoint does not understand. Draft-18
-	/// and later; draft-15 gave 0x33 another meaning.
+	/// The track holds a Mandatory Track Property the endpoint does not understand.
 	const UNSUPPORTED_EXTENSION: u64 = 0x33;
 
-	/// A Range Filter exceeds MAX_FILTER_RANGES (draft-19 and later).
+	/// A Range Filter exceeds MAX_FILTER_RANGES (draft-22 and later).
 	pub(crate) const INVALID_FILTER: u64 = 0x36;
 
-	/// A joining FETCH named no active subscription. Removed from the registry in draft-20.
-	const INVALID_JOINING_REQUEST_ID_14: u64 = 0x7;
+	/// A joining FETCH named no active subscription. Removed from the registry in draft-22.
 	const INVALID_JOINING_REQUEST_ID: u64 = 0x32;
 
-	/// The same condition from draft-15 on, renamed DOES_NOT_EXIST and moved off 0x4.
+	/// The requested broadcast or track is not here.
 	const DOES_NOT_EXIST: u64 = 0x10;
 
-	/// The offered content is not wanted here, as draft-14 numbers it.
-	const UNINTERESTED_14: u64 = 0x4;
-
-	/// The same condition from draft-15 on.
+	/// The offered content is not wanted here.
 	const UNINTERESTED: u64 = 0x20;
 
-	/// The track's content could not be parsed, as draft-14 numbers it on FETCH_ERROR.
-	const MALFORMED_TRACK_14: u64 = 0x9;
-
-	/// The same condition from draft-15 on.
+	/// The track's content could not be parsed.
 	const MALFORMED_TRACK: u64 = 0x12;
 
-	/// A well-formed AUTHORIZATION TOKEN this endpoint cannot use, as draft-14 numbers it.
-	const MALFORMED_AUTH_TOKEN_14: u64 = 0x10;
-
-	/// The same condition from draft-15 on, where 0x10 became DOES_NOT_EXIST.
+	/// A well-formed AUTHORIZATION TOKEN this endpoint cannot use.
 	const MALFORMED_AUTH_TOKEN: u64 = 0x4;
 
-	/// An expired AUTHORIZATION TOKEN, as draft-14 numbers it.
-	const EXPIRED_AUTH_TOKEN_14: u64 = 0x12;
-
-	/// The same condition from draft-15 on, where 0x12 became MALFORMED_TRACK.
+	/// An expired AUTHORIZATION TOKEN.
 	const EXPIRED_AUTH_TOKEN: u64 = 0x5;
 
-	/// The value for "the thing you asked for is not here", or `None` where the draft and
-	/// request assign none.
-	fn does_not_exist(kind: Kind, version: Version) -> Option<u64> {
-		match version {
-			Version::Draft14 => match kind {
-				Kind::Subscribe | Kind::Fetch | Kind::TrackStatus => Some(DOES_NOT_EXIST_14),
-				_ => None,
-			},
-			_ => Some(DOES_NOT_EXIST),
-		}
-	}
-
-	fn invalid_range(kind: Kind, version: Version) -> Option<u64> {
-		if kind != Kind::Fetch {
-			return None;
-		}
-		Some(if version == Version::Draft14 {
-			INVALID_RANGE_14
-		} else {
-			INVALID_RANGE
-		})
+	fn invalid_range(kind: Kind) -> Option<u64> {
+		(kind == Kind::Fetch).then_some(INVALID_RANGE)
 	}
 
 	fn invalid_joining_request_id(kind: Kind, version: Version) -> Option<u64> {
@@ -278,72 +179,8 @@ pub(crate) mod request {
 			return None;
 		}
 		match version {
-			Version::Draft14 => Some(INVALID_JOINING_REQUEST_ID_14),
-			Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18 | Version::Draft19 => {
-				Some(INVALID_JOINING_REQUEST_ID)
-			}
+			Version::Draft18 => Some(INVALID_JOINING_REQUEST_ID),
 			_ => None,
-		}
-	}
-
-	/// The value for "we do not want this", or `None` where the draft and request assign
-	/// none. Draft-14 registers it only on the two requests that offer content.
-	fn uninterested(kind: Kind, version: Version) -> Option<u64> {
-		match version {
-			Version::Draft14 => match kind {
-				Kind::Publish | Kind::PublishNamespace => Some(UNINTERESTED_14),
-				_ => None,
-			},
-			_ => Some(UNINTERESTED),
-		}
-	}
-
-	/// The value for a track we could not parse, or `None` where the draft and request
-	/// assign none.
-	fn malformed_track(kind: Kind, version: Version) -> Option<u64> {
-		match version {
-			Version::Draft14 => match kind {
-				Kind::Fetch => Some(MALFORMED_TRACK_14),
-				_ => None,
-			},
-			_ => Some(MALFORMED_TRACK),
-		}
-	}
-
-	/// The value for an unusable token, or `None` where the draft and request assign none.
-	/// Draft-14 registers none on PUBLISH_ERROR.
-	fn malformed_auth_token(kind: Kind, version: Version) -> Option<u64> {
-		match (version, kind) {
-			(Version::Draft14, Kind::Publish) => None,
-			(Version::Draft14, _) => Some(MALFORMED_AUTH_TOKEN_14),
-			_ => Some(MALFORMED_AUTH_TOKEN),
-		}
-	}
-
-	/// The value for an expired token, or `None` where the draft and request assign none.
-	/// Draft-14 registers none on PUBLISH_ERROR.
-	fn expired_auth_token(kind: Kind, version: Version) -> Option<u64> {
-		match (version, kind) {
-			(Version::Draft14, Kind::Publish) => None,
-			(Version::Draft14, _) => Some(EXPIRED_AUTH_TOKEN_14),
-			_ => Some(EXPIRED_AUTH_TOKEN),
-		}
-	}
-
-	/// The value for a track needing a property we do not understand, or `None` before
-	/// draft-18 registered one.
-	fn unsupported_extension(version: Version) -> Option<u64> {
-		match version {
-			Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 => None,
-			_ => Some(UNSUPPORTED_EXTENSION),
-		}
-	}
-
-	/// The value for a draining session, or `None` before draft-17 registered one.
-	fn going_away(version: Version) -> Option<u64> {
-		match version {
-			Version::Draft14 | Version::Draft15 | Version::Draft16 => None,
-			_ => Some(GOING_AWAY),
 		}
 	}
 
@@ -359,7 +196,7 @@ pub(crate) mod request {
 			Error::Unauthorized
 			| Error::Session(SessionError::Unauthorized)
 			| Error::Stream(StreamError::Unauthorized) => return UNAUTHORIZED,
-			Error::Expired | Error::Session(SessionError::Expired) => expired_auth_token(kind, version),
+			Error::Expired | Error::Session(SessionError::Expired) => return EXPIRED_AUTH_TOKEN,
 			Error::Timeout | Error::Stream(StreamError::DeliveryTimeout) | Error::Session(SessionError::Timeout) => {
 				return TIMEOUT;
 			}
@@ -374,26 +211,27 @@ pub(crate) mod request {
 			// does not implement FETCH at all.
 			Error::NotFound
 			| Error::NotFetchable
-			| Error::Stream(StreamError::NotFound | StreamError::NotFetchable) => does_not_exist(kind, version),
-			Error::InvalidRange => invalid_range(kind, version),
+			| Error::Stream(StreamError::NotFound | StreamError::NotFetchable) => return DOES_NOT_EXIST,
+			Error::InvalidRange => invalid_range(kind),
 			Error::InvalidJoiningRequestId => invalid_joining_request_id(kind, version),
 			// A path with no route is one we will not carry. A subscriber that asked for it
 			// cannot act on "we do not want it": what it needs to know is that we do not have
 			// it, which is the same refusal from its side. Only the requests that offer content
 			// say UNINTERESTED.
-			Error::Unroutable | Error::Stream(StreamError::Unroutable) => match kind {
-				Kind::Subscribe | Kind::Fetch | Kind::TrackStatus => does_not_exist(kind, version),
-				Kind::Publish | Kind::PublishNamespace | Kind::SubscribeNamespace => uninterested(kind, version),
-			},
-			Error::Decode(DecodeError::MalformedAuthToken) => malformed_auth_token(kind, version),
+			Error::Unroutable | Error::Stream(StreamError::Unroutable) => {
+				return match kind {
+					Kind::Subscribe | Kind::Fetch | Kind::TrackStatus => DOES_NOT_EXIST,
+					Kind::Publish | Kind::PublishNamespace | Kind::SubscribeNamespace => UNINTERESTED,
+				};
+			}
+			Error::Decode(DecodeError::MalformedAuthToken) => return MALFORMED_AUTH_TOKEN,
 			// Our own parse failure is, from the peer's side, a malformed track.
 			Error::Decode(_)
 			| Error::BoundsExceeded(_)
 			| Error::MalformedTrack
-			| Error::Stream(StreamError::MalformedTrack) => malformed_track(kind, version),
-			Error::GoingAway | Error::Stream(StreamError::GoingAway) => going_away(version),
-			// Before its code, the closest is that we do not implement what the track needs.
-			Error::UnsupportedExtension => unsupported_extension(version).or(Some(NOT_SUPPORTED)),
+			| Error::Stream(StreamError::MalformedTrack) => return MALFORMED_TRACK,
+			Error::GoingAway | Error::Stream(StreamError::GoingAway) => return GOING_AWAY,
+			Error::UnsupportedExtension => return UNSUPPORTED_EXTENSION,
 			// Everything else, a duplicate included: no draft assigns it a value, and
 			// INTERNAL_ERROR is how a peer reads an unregistered code anyway.
 			_ => return INTERNAL_ERROR,
@@ -411,14 +249,14 @@ pub(crate) mod request {
 			UNAUTHORIZED => Error::Unauthorized,
 			TIMEOUT => Error::Timeout,
 			NOT_SUPPORTED => Error::Unsupported,
-			code if Some(code) == expired_auth_token(kind, version) => Error::Expired,
-			code if Some(code) == does_not_exist(kind, version) => Error::NotFound,
-			code if Some(code) == invalid_range(kind, version) => Error::InvalidRange,
+			EXPIRED_AUTH_TOKEN => Error::Expired,
+			DOES_NOT_EXIST => Error::NotFound,
+			code if Some(code) == invalid_range(kind) => Error::InvalidRange,
 			code if Some(code) == invalid_joining_request_id(kind, version) => Error::InvalidJoiningRequestId,
-			code if Some(code) == uninterested(kind, version) => Error::Unroutable,
-			code if Some(code) == malformed_track(kind, version) => Error::MalformedTrack,
-			code if Some(code) == going_away(version) => Error::GoingAway,
-			code if Some(code) == unsupported_extension(version) => Error::UnsupportedExtension,
+			UNINTERESTED => Error::Unroutable,
+			MALFORMED_TRACK => Error::MalformedTrack,
+			GOING_AWAY => Error::GoingAway,
+			UNSUPPORTED_EXTENSION => Error::UnsupportedExtension,
 			code => Error::Remote(u32::try_from(code).unwrap_or(u32::MAX)),
 		}
 	}
@@ -427,17 +265,7 @@ pub(crate) mod request {
 	mod tests {
 		use super::*;
 
-		const ALL: [Version; 9] = [
-			Version::Draft14,
-			Version::Draft15,
-			Version::Draft16,
-			Version::Draft17,
-			Version::Draft18,
-			Version::Draft19,
-			Version::Draft20,
-			Version::Draft21,
-			Version::Draft22,
-		];
+		const ALL: [Version; 2] = [Version::Draft18, Version::Draft22];
 
 		const KINDS: [Kind; 6] = [
 			Kind::Subscribe,
@@ -483,131 +311,61 @@ pub(crate) mod request {
 			}
 		}
 
-		/// Draft-14 numbers a missing track 0x4 and draft-15 moved it to 0x10, which is
-		/// draft-14's MALFORMED_AUTH_TOKEN. Getting this backwards tells a peer its token is
-		/// broken when the broadcast simply is not here, so it re-authenticates instead of
-		/// waiting for the announcement.
+		/// A missing broadcast is DOES_NOT_EXIST, never 0x4, which is MALFORMED_AUTH_TOKEN:
+		/// getting this backwards tells a peer its token is broken when the broadcast simply
+		/// is not here, so it re-authenticates instead of waiting for the announcement.
 		#[test]
-		fn a_missing_broadcast_uses_the_draft_s_own_number() {
+		fn a_missing_broadcast_is_not_here() {
 			for kind in [Kind::Subscribe, Kind::Fetch] {
-				assert_eq!(to_code(&Error::NotFound, kind, Version::Draft14), 0x4);
-				assert!(matches!(from_code(0x4, kind, Version::Draft14), Error::NotFound));
-
-				for version in ALL.into_iter().skip(1) {
+				for version in ALL {
 					assert_eq!(to_code(&Error::NotFound, kind, version), 0x10);
 					assert!(matches!(from_code(0x10, kind, version), Error::NotFound));
-					// 0x4 is MALFORMED_AUTH_TOKEN from draft-15 on, which is not ours to claim.
 					assert!(matches!(from_code(0x4, kind, version), Error::Remote(0x4)));
 				}
 			}
 
 			// A broadcast with no route is, to the peer that asked for it, not here either.
-			assert_eq!(to_code(&Error::Unroutable, Kind::Subscribe, Version::Draft20), 0x10);
+			assert_eq!(to_code(&Error::Unroutable, Kind::Subscribe, Version::Draft22), 0x10);
 
 			// So is a datagram group: never cached, so a FETCH reaching one finds nothing, and
 			// NOT_SUPPORTED would say the endpoint has no FETCH at all.
-			assert_eq!(to_code(&Error::NotFetchable, Kind::Fetch, Version::Draft14), 0x4);
-			assert_eq!(to_code(&Error::NotFetchable, Kind::Fetch, Version::Draft20), 0x10);
+			assert_eq!(to_code(&Error::NotFetchable, Kind::Fetch, Version::Draft22), 0x10);
 			// Including a lite-07 upstream's NOT_FETCHABLE, bridged by a relay.
 			assert_eq!(
-				to_code(&Error::Stream(StreamError::NotFetchable), Kind::Fetch, Version::Draft20),
+				to_code(&Error::Stream(StreamError::NotFetchable), Kind::Fetch, Version::Draft22),
 				0x10
 			);
 		}
 
-		/// Draft-14 gives 0x4 to UNINTERESTED on the requests that offer content and to
-		/// TRACK_DOES_NOT_EXIST on the ones that ask for it, so the same integer on the same
-		/// draft says two different things.
+		/// A refused route says UNINTERESTED to the requests that offer content.
 		#[test]
-		fn draft_14_reads_0x4_per_request() {
-			for kind in [Kind::Publish, Kind::PublishNamespace] {
-				assert_eq!(to_code(&Error::Unroutable, kind, Version::Draft14), 0x4);
-				assert!(matches!(from_code(0x4, kind, Version::Draft14), Error::Unroutable));
-				// Those requests offer content, so "it is not here" is not a rejection they
-				// can carry.
-				assert_eq!(to_code(&Error::NotFound, kind, Version::Draft14), INTERNAL_ERROR);
+		fn an_unroutable_offer_is_uninterested() {
+			for kind in [Kind::Publish, Kind::PublishNamespace, Kind::SubscribeNamespace] {
+				assert_eq!(to_code(&Error::Unroutable, kind, Version::Draft22), 0x20);
+				assert!(matches!(from_code(0x20, kind, Version::Draft22), Error::Unroutable));
 			}
-
-			// And neither meaning reaches a request draft-14 gives neither to.
-			assert!(matches!(
-				from_code(0x4, Kind::SubscribeNamespace, Version::Draft14),
-				Error::Remote(0x4)
-			));
 		}
 
-		/// Draft-15 swapped MALFORMED_AUTH_TOKEN and the missing-track code, and draft-14
-		/// gives PUBLISH_ERROR no value for it.
 		#[test]
-		fn a_malformed_token_uses_the_draft_s_own_number() {
+		fn token_refusals_use_their_codes() {
 			let err = Error::Decode(DecodeError::MalformedAuthToken);
-			for kind in KINDS {
-				let draft14 = if kind == Kind::Publish { INTERNAL_ERROR } else { 0x10 };
-				assert_eq!(to_code(&err, kind, Version::Draft14), draft14);
-				for version in ALL.into_iter().skip(1) {
+			for version in ALL {
+				for kind in KINDS {
 					assert_eq!(to_code(&err, kind, version), 0x4);
-				}
-			}
-		}
-
-		/// Draft-15 moved EXPIRED_AUTH_TOKEN from 0x12 to 0x5, and draft-14 gives PUBLISH_ERROR
-		/// no value for it.
-		#[test]
-		fn an_expired_token_uses_the_draft_s_own_number() {
-			for kind in KINDS {
-				if kind == Kind::Publish {
-					assert_eq!(to_code(&Error::Expired, kind, Version::Draft14), INTERNAL_ERROR);
-				} else {
-					assert_eq!(to_code(&Error::Expired, kind, Version::Draft14), 0x12);
-					assert!(matches!(from_code(0x12, kind, Version::Draft14), Error::Expired));
-				}
-				for version in ALL.into_iter().skip(1) {
 					assert_eq!(to_code(&Error::Expired, kind, version), 0x5);
 					assert!(matches!(from_code(0x5, kind, version), Error::Expired));
 				}
 			}
 		}
 
-		/// GOING_AWAY arrived in draft-17. Sent to an earlier peer, 0x6 is unassigned there,
-		/// so say INTERNAL_ERROR outright rather than a number that means nothing.
 		#[test]
-		fn going_away_only_exists_from_draft_17() {
-			for kind in KINDS {
-				for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
-					assert_eq!(to_code(&Error::GoingAway, kind, version), INTERNAL_ERROR);
-					assert!(matches!(from_code(GOING_AWAY, kind, version), Error::Remote(0x6)));
-				}
-
-				for version in [
-					Version::Draft17,
-					Version::Draft18,
-					Version::Draft19,
-					Version::Draft20,
-					Version::Draft21,
-					Version::Draft22,
-				] {
+		fn going_away_and_unsupported_extension_round_trip() {
+			for version in ALL {
+				for kind in KINDS {
 					assert_eq!(to_code(&Error::GoingAway, kind, version), GOING_AWAY);
 					assert!(matches!(from_code(GOING_AWAY, kind, version), Error::GoingAway));
-				}
-			}
-		}
-
-		/// UNSUPPORTED_EXTENSION arrived in draft-18. Draft-15 gave its 0x33 to
-		/// UNKNOWN_STATUS_IN_RANGE, so earlier drafts say NOT_SUPPORTED instead.
-		#[test]
-		fn unsupported_extension_only_exists_from_draft_18() {
-			for kind in KINDS {
-				for version in ALL {
-					let code = to_code(&Error::UnsupportedExtension, kind, version);
-					match version {
-						Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 => {
-							assert_eq!(code, NOT_SUPPORTED, "{version}");
-							assert!(!matches!(from_code(0x33, kind, version), Error::UnsupportedExtension));
-						}
-						_ => {
-							assert_eq!(code, 0x33, "{version}");
-							assert!(matches!(from_code(code, kind, version), Error::UnsupportedExtension));
-						}
-					}
+					assert_eq!(to_code(&Error::UnsupportedExtension, kind, version), 0x33);
+					assert!(matches!(from_code(0x33, kind, version), Error::UnsupportedExtension));
 				}
 			}
 		}
@@ -615,14 +373,10 @@ pub(crate) mod request {
 		#[test]
 		fn fetch_refusals_follow_each_drafts_registry() {
 			for version in ALL {
-				let range = if version == Version::Draft14 { 0x5 } else { 0x11 };
-				assert_eq!(to_code(&Error::InvalidRange, Kind::Fetch, version), range);
-				assert!(matches!(from_code(range, Kind::Fetch, version), Error::InvalidRange));
+				assert_eq!(to_code(&Error::InvalidRange, Kind::Fetch, version), 0x11);
+				assert!(matches!(from_code(0x11, Kind::Fetch, version), Error::InvalidRange));
 				let joining = match version {
-					Version::Draft14 => Some(0x7),
-					Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18 | Version::Draft19 => {
-						Some(0x32)
-					}
+					Version::Draft18 => Some(0x32),
 					_ => None,
 				};
 				assert_eq!(
@@ -660,29 +414,16 @@ pub(crate) mod request {
 		}
 
 		/// Every code we put in a rejection has to be one the negotiated draft registers for
-		/// that request. The table is transcribed from the drafts (draft-14 section 13.1
-		/// through draft-20 section 15.11.2), not derived from the mapping, so a mistake in
-		/// the mapping cannot talk the assertion into agreeing with it.
+		/// that request. The table is transcribed from the drafts (draft-18 section 15.11.2
+		/// on), not derived from the mapping, so a mistake in the mapping cannot talk the
+		/// assertion into agreeing with it.
 		#[test]
 		fn only_registered_codes_reach_the_wire() {
-			fn registered(kind: Kind, version: Version) -> &'static [u64] {
-				match (version, kind) {
-					(Version::Draft14, Kind::Subscribe) => &[0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x10, 0x12],
-					(Version::Draft14, Kind::Fetch) => &[0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8, 0x9, 0x10, 0x12],
-					(Version::Draft14, Kind::Publish) => &[0x0, 0x1, 0x2, 0x3, 0x4],
-					(Version::Draft14, Kind::PublishNamespace) => &[0x0, 0x1, 0x2, 0x3, 0x4, 0x10, 0x12],
-					(Version::Draft14, Kind::TrackStatus) => &[0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x10, 0x12],
-					(Version::Draft14, Kind::SubscribeNamespace) => &[0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x10, 0x12],
-					(Version::Draft15, _) => &[0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x10, 0x11, 0x12, 0x20, 0x30, 0x32, 0x33],
-					(Version::Draft16, _) => &[0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x10, 0x11, 0x12, 0x19, 0x20, 0x30, 0x32],
-					(Version::Draft17, _) => &[
-						0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x9, 0x10, 0x11, 0x12, 0x19, 0x20, 0x30, 0x31, 0x32,
-					],
-					_ => &[
-						0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x9, 0x10, 0x11, 0x12, 0x19, 0x20, 0x30, 0x31, 0x32, 0x33,
-						0x34, 0x35, 0x36,
-					],
-				}
+			fn registered() -> &'static [u64] {
+				&[
+					0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x9, 0x10, 0x11, 0x12, 0x19, 0x20, 0x30, 0x31, 0x32, 0x33, 0x34,
+					0x35, 0x36,
+				]
 			}
 
 			// Sent but never read back as itself: a peer's MALFORMED_AUTH_TOKEN stays remote.
@@ -692,7 +433,7 @@ pub(crate) mod request {
 					for err in EVERY_ERROR.iter().chain([&malformed]) {
 						let code = to_code(err, kind, version);
 						assert!(
-							registered(kind, version).contains(&code),
+							registered().contains(&code),
 							"{err:?} sends {code:#x}, which {version} does not register for {kind:?}"
 						);
 					}
@@ -707,7 +448,7 @@ pub(crate) mod request {
 			for err in [Error::Duplicate, Error::Cancel, Error::ProtocolViolation, Error::Closed] {
 				for kind in KINDS {
 					assert_eq!(
-						to_code(&err, kind, Version::Draft20),
+						to_code(&err, kind, Version::Draft22),
 						INTERNAL_ERROR,
 						"{err} is not internal on {kind:?}"
 					);
@@ -715,7 +456,7 @@ pub(crate) mod request {
 			}
 
 			assert!(matches!(
-				from_code(INTERNAL_ERROR, Kind::Subscribe, Version::Draft20),
+				from_code(INTERNAL_ERROR, Kind::Subscribe, Version::Draft22),
 				Error::Remote(0)
 			));
 		}
@@ -727,31 +468,17 @@ mod tests {
 	use super::*;
 	use crate::Error;
 
-	const ALL: [Version; 9] = [
-		Version::Draft14,
-		Version::Draft15,
-		Version::Draft16,
-		Version::Draft17,
-		Version::Draft18,
-		Version::Draft19,
-		Version::Draft20,
-		Version::Draft21,
-		Version::Draft22,
-	];
-
 	/// A routine unsubscribe must not read as a fault on our side. moq-lite's own error
 	/// enum encodes a cancellation as 0, which is this wire's INTERNAL_ERROR, so the codes
 	/// come from here instead.
 	#[test]
 	fn a_cancellation_is_not_an_internal_error() {
-		for version in ALL {
-			assert_eq!(to_stream_code(&StreamError::Cancel, version), CANCELLED);
-			assert_eq!(from_stream_code(CANCELLED, version), StreamError::Cancel);
-			assert!(matches!(
-				Error::from(from_stream_code(CANCELLED, version)),
-				Error::Stream(StreamError::Cancel)
-			));
-		}
+		assert_eq!(to_stream_code(&StreamError::Cancel), CANCELLED);
+		assert_eq!(from_stream_code(CANCELLED), StreamError::Cancel);
+		assert!(matches!(
+			Error::from(from_stream_code(CANCELLED)),
+			Error::Stream(StreamError::Cancel)
+		));
 
 		assert_ne!(
 			CANCELLED,
@@ -781,8 +508,8 @@ mod tests {
 		assert_eq!(to_session_code(&SessionError::App(7)), 64 + 7);
 	}
 
-	/// Every code we send must decode back to what we meant on the same draft, or two
-	/// moq-net peers disagree about what a stream reset said.
+	/// Every code we send must decode back to what we meant, or two moq-net peers disagree
+	/// about what a stream reset said.
 	#[test]
 	fn every_emitted_code_round_trips() {
 		let errors = [
@@ -799,90 +526,22 @@ mod tests {
 			StreamError::App(7),
 		];
 
-		for version in ALL {
-			for err in &errors {
-				let code = to_stream_code(err, version);
-				let decoded = from_stream_code(code, version);
-				assert_eq!(
-					to_stream_code(&decoded, version),
-					code,
-					"{err:?} on {version:?} did not survive a round trip"
-				);
-			}
-
-			// A session teardown flattens to SESSION_CLOSED and comes back as one, rather
-			// than as the session's own reason, which the stream never carried.
-			let code = to_stream_code(&StreamError::Session(SessionError::Unauthorized), version);
-			assert_eq!(code, SESSION_CLOSED);
-			assert_eq!(
-				from_stream_code(code, version),
-				StreamError::Session(SessionError::Internal)
-			);
-		}
-	}
-
-	/// Draft-18 took 0x4 for GOING_AWAY from UNKNOWN_OBJECT_STATUS, so the same integer
-	/// means different things on two drafts we both negotiate. Sending it to draft-17 would
-	/// claim the next object's status is unknowable; reading theirs as GOING_AWAY would
-	/// start draining a session that is not going anywhere.
-	#[test]
-	fn going_away_only_exists_from_draft_18() {
-		for version in [Version::Draft14, Version::Draft15, Version::Draft16, Version::Draft17] {
-			assert_eq!(to_stream_code(&StreamError::GoingAway, version), INTERNAL_ERROR);
-			assert_eq!(from_stream_code(GOING_AWAY, version), StreamError::Unknown(GOING_AWAY));
+		for err in &errors {
+			let code = to_stream_code(err);
+			let decoded = from_stream_code(code);
+			assert_eq!(to_stream_code(&decoded), code, "{err:?} did not survive a round trip");
 		}
 
-		for version in [
-			Version::Draft18,
-			Version::Draft19,
-			Version::Draft20,
-			Version::Draft21,
-			Version::Draft22,
-		] {
-			assert_eq!(to_stream_code(&StreamError::GoingAway, version), GOING_AWAY);
-			assert_eq!(from_stream_code(GOING_AWAY, version), StreamError::GoingAway);
-		}
-	}
-
-	/// The rest of the per-draft registry: TOO_FAR_BEHIND arrived in draft-17 and
-	/// MALFORMED_TRACK in draft-16, so an older peer must be told neither.
-	#[test]
-	fn later_codes_are_not_sent_to_earlier_drafts() {
-		for version in ALL {
-			let too_far_behind = to_stream_code(&StreamError::TooFarBehind, version);
-			let malformed = to_stream_code(&StreamError::MalformedTrack, version);
-
-			assert_eq!(
-				too_far_behind,
-				match has_too_far_behind(version) {
-					true => TOO_FAR_BEHIND,
-					false => INTERNAL_ERROR,
-				},
-				"{version:?} disagrees about TOO_FAR_BEHIND"
-			);
-			assert_eq!(
-				malformed,
-				match has_malformed_track(version) {
-					true => MALFORMED_TRACK,
-					false => INTERNAL_ERROR,
-				},
-				"{version:?} disagrees about MALFORMED_TRACK"
-			);
-		}
-
-		assert_eq!(
-			from_stream_code(TOO_FAR_BEHIND, Version::Draft16),
-			StreamError::Unknown(TOO_FAR_BEHIND)
-		);
-		assert_eq!(
-			from_stream_code(MALFORMED_TRACK, Version::Draft15),
-			StreamError::Unknown(MALFORMED_TRACK)
-		);
+		// A session teardown flattens to SESSION_CLOSED and comes back as one, rather
+		// than as the session's own reason, which the stream never carried.
+		let code = to_stream_code(&StreamError::Session(SessionError::Unauthorized));
+		assert_eq!(code, SESSION_CLOSED);
+		assert_eq!(from_stream_code(code), StreamError::Session(SessionError::Internal));
 	}
 
 	/// Conditions this registry has no value for say INTERNAL_ERROR rather than borrowing
 	/// moq-lite's own 48-63 range or its application offset. A peer treats an unregistered
-	/// code as INTERNAL_ERROR anyway (draft-20 section 14), so the borrowed value would
+	/// code as INTERNAL_ERROR anyway, so the borrowed value would
 	/// carry no more meaning while looking like a registration.
 	#[test]
 	fn unregistered_conditions_are_internal() {
@@ -902,7 +561,7 @@ mod tests {
 			StreamError::Unknown(0x1234),
 		] {
 			assert_eq!(
-				to_stream_code(&err, Version::Draft20),
+				to_stream_code(&err),
 				INTERNAL_ERROR,
 				"{err:?} has no value in this registry"
 			);
@@ -927,9 +586,9 @@ mod tests {
 			0x3b,
 			64 + 7,
 		] {
-			assert_eq!(from_stream_code(code, Version::Draft20), StreamError::Unknown(code));
+			assert_eq!(from_stream_code(code), StreamError::Unknown(code));
 			assert!(matches!(
-				Error::from(from_stream_code(code, Version::Draft20)),
+				Error::from(from_stream_code(code)),
 				Error::Stream(StreamError::Unknown(remote)) if remote == code
 			));
 		}
@@ -965,44 +624,28 @@ mod tests {
 	/// application codes past 64, neither of which this registry has a range for,
 	/// and it assigns 0x4 and 0x5 meanings the earlier drafts give to something else.
 	///
-	/// The table is transcribed from the drafts (draft-14 section 13.1.8 through draft-20
-	/// section 15.11.4), not derived from the mapping, so a mistake in the mapping cannot
-	/// talk the assertion into agreeing with it.
+	/// The table is transcribed from the drafts (draft-18 section 15.11.4 on), not derived
+	/// from the mapping, so a mistake in the mapping cannot talk the assertion into
+	/// agreeing with it.
 	#[test]
 	fn only_registered_codes_reach_the_wire() {
-		fn registered(version: Version) -> &'static [u32] {
-			match version {
-				Version::Draft14 | Version::Draft15 => &[0x0, 0x1, 0x2, 0x3],
-				Version::Draft16 => &[0x0, 0x1, 0x2, 0x3, 0x4, 0x12],
-				Version::Draft17 => &[0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x9, 0x12],
-				_ => &[0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x9, 0x12],
-			}
-		}
-
-		for version in ALL {
-			for err in EVERY_ERROR {
-				let code = to_stream_code(&err, version);
-				assert!(
-					registered(version).contains(&code),
-					"{err:?} sends {code:#x}, which {version} does not register"
-				);
-			}
+		const REGISTERED: &[u32] = &[0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x9, 0x12];
+		for err in EVERY_ERROR {
+			let code = to_stream_code(&err);
+			assert!(
+				REGISTERED.contains(&code),
+				"{err:?} sends {code:#x}, which is not registered"
+			);
 		}
 	}
 
 	/// A relay decodes a peer's code and re-encodes it onto the stream it tears down in
-	/// response. That hop must not change what the code says, on the same draft.
+	/// response. That hop must not change what the code says.
 	#[test]
 	fn relaying_a_code_does_not_change_its_meaning() {
-		for version in ALL {
-			for code in [INTERNAL_ERROR, CANCELLED, DELIVERY_TIMEOUT, SESSION_CLOSED] {
-				let relayed = StreamError::from(&Error::from(from_stream_code(code, version)));
-				assert_eq!(
-					to_stream_code(&relayed, version),
-					code,
-					"{code:#x} changed across a relay on {version:?}"
-				);
-			}
+		for code in [INTERNAL_ERROR, CANCELLED, DELIVERY_TIMEOUT, SESSION_CLOSED] {
+			let relayed = StreamError::from(&Error::from(from_stream_code(code)));
+			assert_eq!(to_stream_code(&relayed), code, "{code:#x} changed across a relay");
 		}
 	}
 }

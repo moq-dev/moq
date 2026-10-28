@@ -498,7 +498,7 @@ impl Device {
 	}
 
 	/// Declare the input framerate, which rate control uses to spend the bitrate.
-	pub(crate) fn set_framerate(&self, dir: Dir, framerate: crate::Rate) -> Result<(), Error> {
+	pub(crate) fn set_framerate(&self, dir: Dir, framerate: crate::FrameRate) -> Result<(), Error> {
 		let mut parm = v4l2_streamparm::zeroed();
 		parm.type_ = dir.buf_type();
 		// SAFETY: the buffer type just written picks the arm the driver reads, so
@@ -643,8 +643,10 @@ impl Device {
 		// A negative return is `EINTR` or `ENOMEM` and leaves `revents` untouched,
 		// so there is nothing to read and the caller's own deadline still bounds it.
 		if ready > 0 && event.revents & (libc::POLLIN | libc::POLLOUT | libc::POLLPRI) == 0 {
-			// The device thread runs outside any runtime, so it blocks on the host clock.
-			#[allow(clippy::disallowed_methods)]
+			#[expect(
+				clippy::disallowed_methods,
+				reason = "the device thread runs outside any runtime, so it blocks on the host clock"
+			)]
 			std::thread::sleep(timeout);
 		}
 	}

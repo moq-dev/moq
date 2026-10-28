@@ -15,13 +15,12 @@ namespace are deleted.
 See the [epic](/quest/m1/compress/README.md) for the decisions.
 
 Decided 2026-10-20 (maintainer): the timeline is `<track>.hls` with
-`compress: true`, never `<track>.hls.z`. [Catalog HLS field](/quest/m1/archive/catalog-hls.md)
-renames it and publishes it uncompressed, and the
-[archive consumer](/quest/m1/archive/consumer.md) replaces the CLI's archive
-reader, so this quest lands after both and only sets the flag.
+`compress: true`, never `<track>.hls.z`. Catalog HLS field
+renamed it and publishes it uncompressed, and the archive consumer replaced
+the CLI's archive reader, so this quest lands after it and only sets the flag.
 
 - Delete the `.z` names outright, with no transition release: hangz is opt-in
-  and `main` takes breaking changes. Add the MIGRATE.md entries.
+  and `main` takes breaking changes. The Impact bullet says how to migrate.
 - Publishers: `rs/moq-mux/src/catalog/producer.rs`, `js/publish`
   (`broadcast.ts`, `catalog.ts`), `rs/moq-stats` (drop `TrackPair`), and
   the `hls` track writer (`rs/hang/src/timeline.rs` today) set `compress` on
@@ -58,7 +57,3 @@ reader, so this quest lands after both and only sets the flag.
 Public API: removals listed above. Wire: the hang catalog loses
 `compression` and the `.z` tracks, in its draft too; moq-net none.
 
-## Required
-
-- [Catalog HLS field](/quest/m1/archive/catalog-hls.md) - renames the timeline to `<track>.hls`, which this compresses
-- [Archive consumer](/quest/m1/archive/consumer.md) - replaces the CLI archive reader that reads `.z` timelines

@@ -34,11 +34,17 @@ pub(super) struct Recorder {
 #[derive(Default)]
 struct State {
 	played: Vec<Played>,
+	speakers: usize,
 	sinks: usize,
 	events: Vec<Event>,
 }
 
 impl Recorder {
+	/// How many times playback opened the speaker.
+	pub fn speakers(&self) -> usize {
+		self.state.lock().unwrap().speakers
+	}
+
 	/// Present the newest due frame, just as the window does on a redraw.
 	pub fn present(&self, media: &super::media::Media<Self>) -> Option<hang::moq_net::Timestamp> {
 		let mut video = media.video.lock().unwrap();
@@ -72,11 +78,16 @@ impl Output for Recorder {
 	type Speaker = Self;
 
 	async fn speaker(&self) -> anyhow::Result<Self> {
+		self.state.lock().unwrap().speakers += 1;
 		Ok(self.clone())
 	}
 
 	fn send(&self, event: Event) {
 		self.state.lock().unwrap().events.push(event);
+	}
+
+	async fn render(&self) -> moq_video::Output {
+		moq_video::Output::Cpu
 	}
 }
 
@@ -119,7 +130,7 @@ impl Sink for FakeSink {
 		moq_clock::sleep_until(self.end).await;
 	}
 
-	fn write(&mut self, samples: &[u8]) -> anyhow::Result<()> {
+	fn write(&mut self, samples: &[u8]) -> anyhow::Result<moq_audio::playback::Write> {
 		anyhow::ensure!(samples.len().is_multiple_of(self.stride), "misaligned write");
 		let now = Instant::now();
 		// The real ring pads an underflow back up to its latency in silence once it
@@ -142,7 +153,9 @@ impl Sink for FakeSink {
 			to: self.end + duration,
 		});
 		self.end += duration;
-		Ok(())
+		let mut written = moq_audio::playback::Write::default();
+		written.accepted_sample_frames = frames as usize;
+		Ok(written)
 	}
 
 	fn buffered(&self) -> Duration {

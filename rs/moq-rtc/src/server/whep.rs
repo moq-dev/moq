@@ -39,7 +39,7 @@ const CATALOG_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Build the WHEP axum router. Only with the `server` feature.
 #[cfg(feature = "server")]
-pub fn router(server: Server, subscriber: moq_net::origin::Consumer) -> Router {
+pub(crate) fn router(server: Server, subscriber: moq_net::origin::Consumer) -> Router {
 	Router::new()
 		.route("/{*path}", post(handle).delete(delete))
 		.with_state(RouterState {
@@ -97,7 +97,13 @@ async fn accept_offer(
 		return Err(Error::InvalidSdp("expected Content-Type: application/sdp".into()));
 	}
 	let offer = std::str::from_utf8(&body).map_err(|err| Error::InvalidSdp(err.to_string()))?;
-	accept(server, subscriber, path, offer).await
+	accept(
+		server,
+		subscriber,
+		moq_net::Path::new(path).map_err(moq_net::Error::from)?,
+		offer,
+	)
+	.await
 }
 
 #[cfg(feature = "server")]
@@ -108,12 +114,12 @@ async fn delete(State(state): State<RouterState>, Path(path): Path<String>) -> S
 /// Accept a WHEP SDP offer and egress the MoQ broadcast `broadcast` (a path
 /// relative to `subscriber`'s root) to the negotiated WebRTC peer.
 ///
-/// This is the negotiation core behind [`router`], exposed so an embedder can own
+/// This is the negotiation core behind [`Server::subscribe_router`], exposed so an embedder can own
 /// the HTTP route and authentication: verify the request, resolve the authorized
 /// broadcast name, scope `subscriber` to the caller's grants, then hand the raw
 /// SDP offer here. Taking the consumer explicitly (rather than using the server's)
 /// lets the embedder egress through a *scoped* origin, so the subscribe scope is
-/// enforced by moq-net exactly as for a native session; the bundled [`router`]
+/// enforced by moq-net exactly as for a native session; the bundled [`Server::subscribe_router`]
 /// passes the server's own (unauthenticated) consumer. It parses the offer,
 /// resolves the broadcast on `subscriber`, restricts the answer to the codecs the
 /// catalog actually has, registers a media session on the shared mux, and
@@ -123,7 +129,7 @@ async fn delete(State(state): State<RouterState>, Path(path): Path<String>) -> S
 ///
 /// Each call watches `broadcast` while it resolves. A caller serving many paths from one
 /// lazily discovering client session should hold an `announced()` stream over its scope,
-/// as [`router`] does, so each call rides that one watch.
+/// as [`Server::subscribe_router`] does, so each call rides that one watch.
 ///
 /// `offer` is the raw SDP body; the caller is responsible for checking the
 /// `Content-Type: application/sdp` request header. Fails with [`Error::InvalidSdp`]
@@ -132,12 +138,12 @@ async fn delete(State(state): State<RouterState>, Path(path): Path<String>) -> S
 pub async fn accept(
 	server: &Server,
 	subscriber: &moq_net::origin::Consumer,
-	broadcast: impl moq_net::AsPath,
+	broadcast: impl Into<moq_net::Path>,
 	offer: &str,
 ) -> Result<Response> {
 	let offer = sdp::parse_offer(offer)?;
 
-	let source = resolve(subscriber, broadcast.as_path()).await?;
+	let source = resolve(subscriber, broadcast.into()).await?;
 	let codecs = source.catalog_codecs();
 	if codecs.is_empty() {
 		return Err(Error::NoRenditions);
@@ -159,11 +165,7 @@ pub async fn accept(
 
 	let answer = rtc.sdp_api().accept_offer(offer).map_err(Error::rtc)?;
 	let resource_id = sdp::new_resource_id();
-	let socket = moq_ice::Socket {
-		udp: mux.socket(),
-		locals: mux.candidates().to_vec(),
-		inbound,
-	};
+	let socket = moq_ice::Socket::new(mux.socket(), mux.candidates().to_vec(), inbound)?;
 	let session = session::Session::egress(rtc, socket, source)?;
 
 	// Register before returning so a DELETE that races startup still finds the
@@ -173,7 +175,6 @@ pub async fn accept(
 	Ok(Response {
 		resource_id: resource_id.clone(),
 		answer: sdp::render_answer(&answer),
-		wire: session.wire(),
 		session: crate::server::AcceptedSession {
 			server: server.clone(),
 			resource_id,
@@ -204,7 +205,7 @@ fn is_sdp(headers: &HeaderMap) -> bool {
 /// Both waits share one bound, or an unannounced broadcast, or an announced-but-catalog-less
 /// one, would park the handler forever. No route by the deadline is
 /// [`moq_net::Error::Unroutable`], so the WHEP client sees a 404 and retries (typical).
-async fn resolve(subscriber: &moq_net::origin::Consumer, path: moq_net::Path<'_>) -> Result<EgressSource> {
+async fn resolve(subscriber: &moq_net::origin::Consumer, path: moq_net::Path) -> Result<EgressSource> {
 	let deadline = moq_clock::now() + CATALOG_TIMEOUT;
 	let broadcast = moq_clock::timeout_at(deadline, subscriber.routed_broadcast(path))
 		.await
@@ -220,7 +221,7 @@ async fn resolve(subscriber: &moq_net::origin::Consumer, path: moq_net::Path<'_>
 #[cfg(feature = "server")]
 fn status_for(err: &Error) -> StatusCode {
 	match err {
-		Error::InvalidSdp(_) => StatusCode::BAD_REQUEST,
+		Error::InvalidSdp(_) | Error::Moq(moq_net::Error::EmptySegment) => StatusCode::BAD_REQUEST,
 		Error::UnsupportedCodec(_) => StatusCode::UNSUPPORTED_MEDIA_TYPE,
 		Error::SessionNotFound => StatusCode::NOT_FOUND,
 		Error::Moq(moq_net::Error::Unauthorized) => StatusCode::UNAUTHORIZED,
@@ -261,12 +262,11 @@ mod tests {
 		let addr = server.tcp_local_addr().expect("tcp listener bound");
 		let accept = tokio::spawn(async move {
 			let request = server.accept().await.expect("accept");
-			let (session, driver) = request
+			let session = request
 				.with_publisher(&pub_origin)
 				.ok()
 				.await
 				.expect("publisher session");
-			let _ = driver.await;
 			let _ = session.closed().await;
 		});
 
@@ -289,13 +289,15 @@ mod tests {
 	async fn a_broadcast_resolves_through_a_lazy_client_session() {
 		let pub_origin = moq_tokio::origin::spawn();
 
-		let mut source = pub_origin.create_broadcast("cam").expect("create broadcast");
+		let source = pub_origin.create_broadcast("cam").expect("create broadcast");
 		source
 			.announce(moq_net::origin::Route::default())
 			.expect("announce broadcast");
 		let catalog =
-			moq_mux::catalog::Producer::new(&mut source, moq_mux::catalog::Config::default()).expect("create catalog");
-		let mut opus = crate::codec::opus::Bridge::new(source, catalog, 48_000, 2).expect("create Opus bridge");
+			moq_mux::catalog::Producer::new(&mut source.broadcast().clone(), moq_mux::catalog::Config::default())
+				.expect("create catalog");
+		let mut opus = crate::codec::opus::Bridge::new(source.broadcast().clone(), catalog, 48_000, 2)
+			.expect("create Opus bridge");
 		opus.push(Frame {
 			timestamp_us: 20_000,
 			payload: Bytes::from_static(&[0xfc, 0xff, 0xfe]),
@@ -304,7 +306,7 @@ mod tests {
 
 		let (sub_origin, _connection, accept) = lazy_client(pub_origin).await;
 
-		let resolved = super::resolve(&sub_origin.consume(), moq_net::Path::new("cam"))
+		let resolved = super::resolve(&sub_origin.consume(), moq_net::Path::from_static("cam"))
 			.await
 			.expect("the broadcast resolves");
 		assert!(!resolved.catalog_codecs().is_empty());

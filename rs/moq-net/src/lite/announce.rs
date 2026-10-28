@@ -44,19 +44,19 @@ pub fn update_supported(version: Version) -> bool {
 /// base announcement, resolved against the stream's history by
 /// [`AnnounceDecoder`](super::AnnounceDecoder).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum AnnounceBroadcast<'a> {
+pub enum AnnounceBroadcast {
 	/// ANNOUNCE_START (lite-06) / active (older): a broadcast is now available.
 	/// Carries the path suffix, the hop chain, and (lite-06+) the static route
 	/// cost, and assigns the next announce id. The epoch (lite-07+) changes only
 	/// with a `Restart`.
 	Active {
-		suffix: PathRef<'a>,
+		suffix: PathRef,
 		epoch: Option<Epoch>,
 		hops: HopsRef,
 		cost: Cost,
 	},
 	/// Pre-lite-06: a broadcast is no longer available, retracted by path.
-	Ended { suffix: Path<'a>, hops: Hops },
+	Ended { suffix: Path, hops: Hops },
 	/// ANNOUNCE_END (lite-06+): a broadcast is no longer available, retracted by
 	/// announce id. The id is retired; referencing it again is a protocol violation.
 	EndedId { id: u64 },
@@ -87,20 +87,20 @@ pub enum AnnounceBroadcast<'a> {
 /// so 1 is the latest ANNOUNCE_START, and 0 names no base (`keep` must be 0 too). Only
 /// lite-07 carries a base; every other version is `rest` alone.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PathRef<'a> {
+pub struct PathRef {
 	pub base: u64,
 	pub keep: u64,
-	pub rest: Path<'a>,
+	pub rest: Path,
 }
 
-impl<'a> PathRef<'a> {
+impl PathRef {
 	/// The whole suffix, with no base.
-	pub fn literal(rest: Path<'a>) -> Self {
+	pub fn literal(rest: Path) -> Self {
 		Self { base: 0, keep: 0, rest }
 	}
 }
 
-impl Encode<Version> for PathRef<'_> {
+impl Encode<Version> for PathRef {
 	fn encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		if version.has_announce_compression() {
 			w.varint(self.base)?;
@@ -112,8 +112,8 @@ impl Encode<Version> for PathRef<'_> {
 	}
 }
 
-impl Decode<Version> for PathRef<'_> {
-	fn decode(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for PathRef {
+	fn decode(buf: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_announce_compression() {
 			return Ok(Self::literal(Path::decode(buf, version)?));
 		}
@@ -164,8 +164,8 @@ impl Encode<Version> for HopsRef {
 	}
 }
 
-impl Decode<Version> for HopsRef {
-	fn decode(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for HopsRef {
+	fn decode(buf: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_announce_compression() {
 			return Ok(Self::literal(Hops::decode(buf, version)?));
 		}
@@ -176,39 +176,6 @@ impl Decode<Version> for HopsRef {
 			return Err(DecodeError::InvalidValue);
 		}
 		Ok(Self { base, literal, keep })
-	}
-}
-
-impl AnnounceBroadcast<'_> {
-	/// Re-own a decoded message so it can outlive the decode buffer.
-	#[cfg(test)]
-	pub fn into_owned(self) -> AnnounceBroadcast<'static> {
-		match self {
-			Self::Active {
-				suffix,
-				epoch,
-				hops,
-				cost,
-			} => AnnounceBroadcast::Active {
-				suffix: PathRef {
-					base: suffix.base,
-					keep: suffix.keep,
-					rest: suffix.rest.into_owned(),
-				},
-				epoch,
-				hops,
-				cost,
-			},
-			Self::Ended { suffix, hops } => AnnounceBroadcast::Ended {
-				suffix: suffix.into_owned(),
-				hops,
-			},
-			Self::EndedId { id } => AnnounceBroadcast::EndedId { id },
-			Self::Update { id, hops, cost } => AnnounceBroadcast::Update { id, hops, cost },
-			Self::Restart { id, epoch, hops, cost } => AnnounceBroadcast::Restart { id, epoch, hops, cost },
-			Self::Skipped => AnnounceBroadcast::Skipped,
-			Self::Synced => AnnounceBroadcast::Synced,
-		}
 	}
 }
 
@@ -226,8 +193,8 @@ impl Encode<Version> for Cost {
 	}
 }
 
-impl Decode<Version> for Cost {
-	fn decode(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for Cost {
+	fn decode(buf: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_route_cost() {
 			return Ok(Cost::UNKNOWN);
 		}
@@ -242,8 +209,9 @@ impl Decode<Version> for Cost {
 	}
 }
 
-impl Encode<Version> for AnnounceBroadcast<'_> {
+impl Encode<Version> for AnnounceBroadcast {
 	fn encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
+		w.control = Some(crate::stats::Message::Announce);
 		if version.has_announce_id() {
 			// Lite06+: outer type discriminator, then a size-prefixed body (like the
 			// subscribe stream). The body varies by type.
@@ -330,40 +298,44 @@ impl Encode<Version> for AnnounceBroadcast<'_> {
 	}
 }
 
-impl Decode<Version> for AnnounceBroadcast<'_> {
-	fn decode(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for AnnounceBroadcast {
+	fn decode(buf: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
+		buf.control = Some(crate::stats::Message::Announce);
 		if version.has_announce_id() {
 			// Lite06+: outer type, then a size-prefixed body decoded within its bounds.
 			let typ = buf.varint()?;
 			let size = decode_size(buf, MAX_MESSAGE_SIZE)?;
 			let mut body = buf.sub(size)?;
-			let msg = match typ {
-				ANNOUNCE_START => Self::Active {
-					suffix: PathRef::decode(&mut body, version)?,
-					epoch: super::epoch::decode_epoch(&mut body, version)?,
-					hops: HopsRef::decode(&mut body, version)?,
-					cost: Cost::decode(&mut body, version)?,
-				},
-				SYNCED if version.has_synced() => Self::Synced,
-				ANNOUNCE_END => Self::EndedId { id: body.varint()? },
-				ANNOUNCE_UPDATE => Self::Update {
-					id: body.varint()?,
-					hops: HopsRef::decode(&mut body, version)?,
-					cost: Cost::decode(&mut body, version)?,
-				},
-				ANNOUNCE_RESTART if version.has_announce_restart() => Self::Restart {
-					id: body.varint()?,
-					epoch: super::epoch::decode_epoch(&mut body, version)?,
-					hops: HopsRef::decode(&mut body, version)?,
-					cost: Cost::decode(&mut body, version)?,
-				},
-				// Unknown types are skipped by length so an earlier Lite06 build
-				// negotiating the same ALPN does not kill the announce stream.
-				_ => {
-					body.rest();
-					Self::Skipped
-				}
-			};
+			let msg = (|| {
+				Ok(match typ {
+					ANNOUNCE_START => Self::Active {
+						suffix: PathRef::decode(&mut body, version)?,
+						epoch: super::epoch::decode_epoch(&mut body, version)?,
+						hops: HopsRef::decode(&mut body, version)?,
+						cost: Cost::decode(&mut body, version)?,
+					},
+					SYNCED if version.has_synced() => Self::Synced,
+					ANNOUNCE_END => Self::EndedId { id: body.varint()? },
+					ANNOUNCE_UPDATE => Self::Update {
+						id: body.varint()?,
+						hops: HopsRef::decode(&mut body, version)?,
+						cost: Cost::decode(&mut body, version)?,
+					},
+					ANNOUNCE_RESTART if version.has_announce_restart() => Self::Restart {
+						id: body.varint()?,
+						epoch: super::epoch::decode_epoch(&mut body, version)?,
+						hops: HopsRef::decode(&mut body, version)?,
+						cost: Cost::decode(&mut body, version)?,
+					},
+					// Unknown types are skipped by length so an earlier Lite06 build
+					// negotiating the same ALPN does not kill the announce stream.
+					_ => {
+						body.rest();
+						Self::Skipped
+					}
+				})
+			})()
+			.map_err(DecodeError::complete)?;
 			if !body.is_empty() {
 				return Err(DecodeError::Long);
 			}
@@ -373,7 +345,7 @@ impl Decode<Version> for AnnounceBroadcast<'_> {
 		// Older versions: a single size-prefixed ANNOUNCE_BROADCAST with an inner status.
 		let size = decode_size(buf, MAX_MESSAGE_SIZE)?;
 		let mut body = buf.sub(size)?;
-		let msg = Self::decode_legacy(&mut body, version)?;
+		let msg = Self::decode_legacy(&mut body, version).map_err(DecodeError::complete)?;
 		if !body.is_empty() {
 			return Err(DecodeError::Long);
 		}
@@ -381,7 +353,7 @@ impl Decode<Version> for AnnounceBroadcast<'_> {
 	}
 }
 
-impl AnnounceBroadcast<'_> {
+impl AnnounceBroadcast {
 	/// Decode the body of a pre-lite-06 ANNOUNCE_BROADCAST (inner status + path + hops).
 	fn decode_legacy(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let status = AnnounceStatus::decode(r, version)?;
@@ -440,26 +412,27 @@ fn encode_hops(w: &mut Encoder<'_>, version: Version, hops: &Hops) -> Result<(),
 /// ANNOUNCE_REQUEST: sent by the subscriber to request ANNOUNCE_BROADCAST messages
 /// for a path prefix. Renamed from ANNOUNCE_INTEREST in lite-05.
 #[derive(Clone, Debug)]
-pub struct AnnounceRequest<'a> {
+pub struct AnnounceRequest {
 	// Request tracks with this prefix.
-	pub prefix: Path<'a>,
-	// Lite04/05 only: if non-zero, the publisher SHOULD skip announces whose hop IDs
+	pub prefix: Path,
+	// Lite04/05 only: unless unknown, the publisher SHOULD skip announces whose hop IDs
 	// contain this value. Not on the wire elsewhere, so the value set here is ignored
-	// when encoding for another version and decodes as zero; lite-06 carries the
+	// when encoding for another version and decodes as unknown; lite-06 carries the
 	// identity session-wide in the SETUP Hop parameter instead.
-	pub exclude_hop: u64,
+	pub exclude_hop: Hop,
 	// Lite07+: also announce routes with a `.`-prefixed segment below the prefix.
 	// Not on the wire earlier, so the value set here is ignored when encoding for an
 	// older version and decodes as false.
 	pub hidden: bool,
 }
 
-impl Message for AnnounceRequest<'_> {
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a> Message<'a> for AnnounceRequest {
+	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Announce);
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let prefix = Path::decode(r, version)?;
 		let exclude_hop = match version.has_exclude_hop() {
-			true => r.varint()?,
-			false => 0,
+			true => Hop::decode(r, version)?,
+			false => Hop::UNKNOWN,
 		};
 		let hidden = match version.has_hidden() {
 			true => r.bool()?,
@@ -475,7 +448,7 @@ impl Message for AnnounceRequest<'_> {
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		self.prefix.encode(w, version)?;
 		if version.has_exclude_hop() {
-			w.varint(self.exclude_hop)?;
+			self.exclude_hop.encode(w, version)?;
 		}
 		if version.has_hidden() {
 			w.bool(self.hidden);
@@ -497,8 +470,9 @@ enum AnnounceStatus {
 	Update = 2,
 }
 
-impl Decode<Version> for AnnounceStatus {
-	fn decode(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for AnnounceStatus {
+	fn decode(r: &mut Decoder<'a>, _: Version) -> Result<Self, DecodeError> {
+		r.control = Some(crate::stats::Message::Announce);
 		let status = r.u8()?;
 		status.try_into().map_err(|_| DecodeError::InvalidValue)
 	}
@@ -506,6 +480,7 @@ impl Decode<Version> for AnnounceStatus {
 
 impl Encode<Version> for AnnounceStatus {
 	fn encode(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
+		w.control = Some(crate::stats::Message::Announce);
 		w.u8(*self as u8);
 		Ok(())
 	}
@@ -515,16 +490,19 @@ impl Encode<Version> for AnnounceStatus {
 ///
 /// Used by Draft01/Draft02 only. Draft03 uses individual Announce messages instead.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AnnounceInit<'a> {
+pub struct AnnounceInit {
 	/// List of currently active broadcasts, encoded as suffixes to be combined with the prefix.
-	pub suffixes: Vec<Path<'a>>,
+	pub suffixes: Vec<Path>,
 }
 
-impl Message for AnnounceInit<'_> {
-	// Published lite01/02 carry the whole initial set in one message.
-	const MAX_SIZE: usize = 64 * 1024 * 1024;
+impl AnnounceInit {
+	/// Decode one size-prefixed ANNOUNCE_INIT, refusing one that lists more than `budget`
+	/// suffixes before decoding any, so the set grows no larger than what may be announced.
+	pub(crate) fn decode_within(r: &mut Decoder<'_>, version: Version, budget: usize) -> Result<Self, DecodeError> {
+		super::message::decode_with(r, |body| Self::decode_suffixes(body, version, budget))
+	}
 
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_suffixes(r: &mut Decoder<'_>, version: Version, budget: usize) -> Result<Self, DecodeError> {
 		match version {
 			Version::Lite01 | Version::Lite02 => {}
 			_ => {
@@ -533,15 +511,30 @@ impl Message for AnnounceInit<'_> {
 		}
 
 		let count = r.varint()?;
+		if count > budget as u64 {
+			return Err(DecodeError::TooMany);
+		}
+		// Each suffix takes at least its length byte, so the body bounds the count too.
+		if count > r.remaining() as u64 {
+			return Err(DecodeError::Short);
+		}
 
-		// Don't allocate more than 1024 elements upfront
-		let mut paths = Vec::with_capacity(count.min(1024) as usize);
-
+		let mut paths = Vec::with_capacity(count as usize);
 		for _ in 0..count {
 			paths.push(Path::decode(r, version)?);
 		}
 
 		Ok(Self { suffixes: paths })
+	}
+}
+
+impl<'a> Message<'a> for AnnounceInit {
+	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Announce);
+	// Published lite01/02 carry the whole initial set in one message.
+	const MAX_SIZE: usize = 64 * 1024 * 1024;
+
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
+		Self::decode_suffixes(r, version, usize::MAX)
 	}
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -574,8 +567,9 @@ pub struct AnnounceOk {
 	pub active: u64,
 }
 
-impl Message for AnnounceOk {
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a> Message<'a> for AnnounceOk {
+	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Announce);
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_announce_ok() {
 			return Err(DecodeError::Version);
 		}
@@ -602,6 +596,31 @@ impl Message for AnnounceOk {
 mod tests {
 	use super::*;
 	use bytes::Buf;
+
+	/// A legacy initial set is held to the announce budget before any suffix decodes, so
+	/// a body of one-byte suffixes cannot become a list many times its size.
+	#[test]
+	fn announce_init_is_bounded_by_the_budget() {
+		let version = Version::Lite02;
+		let mut wire = Vec::new();
+		AnnounceInit {
+			suffixes: vec![Path::from_static("a"), Path::from_static(""), Path::from_static("b")],
+		}
+		.encode(&mut Encoder::new(&mut wire, version.into()), version)
+		.unwrap();
+		let decode =
+			|wire: &[u8], budget| AnnounceInit::decode_within(&mut Decoder::new(wire, version.into()), version, budget);
+
+		assert_eq!(decode(&wire, 3).unwrap().suffixes.len(), 3);
+		assert!(matches!(decode(&wire, 2), Err(DecodeError::TooMany)));
+
+		// A count the body cannot hold is malformed whatever the budget, before any allocation.
+		let mut wire = Vec::new();
+		let mut w = Encoder::new(&mut wire, version.into());
+		w.varint(8).unwrap();
+		w.varint(u32::MAX.into()).unwrap();
+		assert!(matches!(decode(&wire, usize::MAX), Err(DecodeError::InvalidValue)));
+	}
 
 	#[test]
 	fn synced_replaces_only_lite07s_count() {
@@ -642,7 +661,7 @@ mod tests {
 		let mut buf = Vec::new();
 		AnnounceBroadcast::Active {
 			epoch: None,
-			suffix: PathRef::literal(Path::new("foo/bar")),
+			suffix: PathRef::literal(Path::from_static("foo/bar")),
 			hops: HopsRef::default(),
 			cost: Cost::default(),
 		}
@@ -666,7 +685,7 @@ mod tests {
 	fn decodes_explicit_restart_status_as_active_on_lite05() {
 		let version = Version::Lite05;
 		let mut slice = encode_forged_restart(version);
-		let decoded = crate::coding::decode_buf(&mut slice, version, AnnounceBroadcast::decode)
+		let decoded = crate::coding::decode_buf(&mut slice, version, |r, v| AnnounceBroadcast::decode(r, v))
 			.expect("explicit restart must decode");
 		assert!(!slice.has_remaining(), "trailing bytes after decode");
 		assert!(
@@ -682,7 +701,7 @@ mod tests {
 		let mut slice = encode_forged_restart(version);
 		assert!(
 			matches!(
-				crate::coding::decode_buf(&mut slice, version, AnnounceBroadcast::decode),
+				crate::coding::decode_buf(&mut slice, version, |r, v| AnnounceBroadcast::decode(r, v)),
 				Err(DecodeError::InvalidValue)
 			),
 			"restart status must be rejected before lite-05"
@@ -694,7 +713,7 @@ mod tests {
 		msg.encode(&mut Encoder::new(&mut buf, Version::Lite05.into()), Version::Lite05)
 			.unwrap();
 		let mut slice = &buf[..];
-		let got = crate::coding::decode_buf(&mut slice, Version::Lite05, AnnounceOk::decode).unwrap();
+		let got = crate::coding::decode_buf(&mut slice, Version::Lite05, |r, v| AnnounceOk::decode(r, v)).unwrap();
 		assert!(slice.is_empty(), "trailing bytes after decode");
 		got
 	}
@@ -717,14 +736,14 @@ mod tests {
 		assert_eq!(round_trip(&msg), msg);
 	}
 
-	fn broadcast_round_trip(msg: &AnnounceBroadcast, version: Version) -> AnnounceBroadcast<'static> {
+	fn broadcast_round_trip(msg: &AnnounceBroadcast, version: Version) -> AnnounceBroadcast {
 		let mut buf = Vec::new();
 		msg.encode(&mut Encoder::new(&mut buf, version.into()), version)
 			.unwrap();
 		let mut slice = &buf[..];
-		let got = crate::coding::decode_buf(&mut slice, version, AnnounceBroadcast::decode).unwrap();
+		let got = crate::coding::decode_buf(&mut slice, version, |r, v| AnnounceBroadcast::decode(r, v)).unwrap();
 		assert!(slice.is_empty(), "trailing bytes after decode");
-		got.into_owned()
+		got
 	}
 
 	#[test]
@@ -733,14 +752,14 @@ mod tests {
 		hops.push(Hop::new(7).unwrap()).unwrap();
 		let msg = AnnounceBroadcast::Active {
 			epoch: None,
-			suffix: PathRef::literal(Path::new("room/cam")),
+			suffix: PathRef::literal(Path::from_static("room/cam")),
 			hops: HopsRef::literal(hops.clone()),
 			cost: Cost::UNKNOWN,
 		};
 		assert_eq!(broadcast_round_trip(&msg, Version::Lite05), msg);
 
 		let ended = AnnounceBroadcast::Ended {
-			suffix: Path::new("room/cam"),
+			suffix: Path::from_static("room/cam"),
 			hops: Hops::new(),
 		};
 		assert_eq!(broadcast_round_trip(&ended, Version::Lite05), ended);
@@ -756,7 +775,7 @@ mod tests {
 
 		let active = AnnounceBroadcast::Active {
 			epoch: None,
-			suffix: PathRef::literal(Path::new("room/cam")),
+			suffix: PathRef::literal(Path::from_static("room/cam")),
 			hops: HopsRef::literal(hops.clone()),
 			cost,
 		};
@@ -785,7 +804,7 @@ mod tests {
 			suffix: PathRef {
 				base: 2,
 				keep: 3,
-				rest: Path::new("cam"),
+				rest: Path::from_static("cam"),
 			},
 			hops: HopsRef {
 				base: 1,
@@ -849,7 +868,10 @@ mod tests {
 		encoder.varint(1).unwrap();
 		encoder.varint(1).unwrap();
 		assert_eq!(
-			crate::coding::decode_buf(&mut &legacy[..], Version::Lite06, AnnounceBroadcast::decode).unwrap(),
+			crate::coding::decode_buf(&mut &legacy[..], Version::Lite06, |r, v| AnnounceBroadcast::decode(
+				r, v
+			))
+			.unwrap(),
 			AnnounceBroadcast::Skipped
 		);
 	}
@@ -863,7 +885,7 @@ mod tests {
 			let mut buf = vec![ANNOUNCE_START as u8, body.len() as u8];
 			buf.extend_from_slice(&body);
 			assert!(matches!(
-				crate::coding::decode_buf(&mut &buf[..], Version::Lite07, AnnounceBroadcast::decode),
+				crate::coding::decode_buf(&mut &buf[..], Version::Lite07, |r, v| AnnounceBroadcast::decode(r, v)),
 				Err(DecodeError::InvalidValue)
 			));
 		}
@@ -877,7 +899,7 @@ mod tests {
 			suffix: PathRef {
 				base: 1,
 				keep: 1,
-				rest: Path::new("cam"),
+				rest: Path::from_static("cam"),
 			},
 			hops: HopsRef::default(),
 			cost: Cost::default(),
@@ -911,7 +933,7 @@ mod tests {
 		));
 		assert!(matches!(
 			AnnounceBroadcast::Ended {
-				suffix: Path::new("room/cam"),
+				suffix: Path::from_static("room/cam"),
 				hops: Hops::new()
 			}
 			.encode(&mut Encoder::new(&mut buf, Version::Lite06.into()), Version::Lite06),
@@ -927,7 +949,7 @@ mod tests {
 	fn route_cost_is_dropped_before_lite06() {
 		let msg = AnnounceBroadcast::Active {
 			epoch: None,
-			suffix: PathRef::literal(Path::new("room/cam")),
+			suffix: PathRef::literal(Path::from_static("room/cam")),
 			hops: HopsRef::default(),
 			cost: Cost::new(9),
 		};
@@ -936,7 +958,7 @@ mod tests {
 			got,
 			AnnounceBroadcast::Active {
 				epoch: None,
-				suffix: PathRef::literal(Path::new("room/cam")),
+				suffix: PathRef::literal(Path::from_static("room/cam")),
 				hops: HopsRef::default(),
 				cost: Cost::UNKNOWN,
 			}
@@ -959,7 +981,7 @@ mod tests {
 	#[test]
 	fn unknown_announce_type_is_skipped() {
 		let mut body = Vec::new();
-		Path::new("room/cam")
+		Path::from_static("room/cam")
 			.encode(&mut Encoder::new(&mut body, Version::Lite06.into()), Version::Lite06)
 			.unwrap();
 		Hops::new()
@@ -977,7 +999,7 @@ mod tests {
 		buf.extend_from_slice(&body);
 
 		let mut slice = &buf[..];
-		let got = crate::coding::decode_buf(&mut slice, Version::Lite06, AnnounceBroadcast::decode)
+		let got = crate::coding::decode_buf(&mut slice, Version::Lite06, |r, v| AnnounceBroadcast::decode(r, v))
 			.expect("unknown type must not kill the stream");
 		assert!(slice.is_empty());
 		assert_eq!(got, AnnounceBroadcast::Skipped);
@@ -993,15 +1015,15 @@ mod tests {
 		assert_eq!(buf.len(), 3);
 	}
 
-	fn request_round_trip(msg: &AnnounceRequest, version: Version) -> AnnounceRequest<'static> {
+	fn request_round_trip(msg: &AnnounceRequest, version: Version) -> AnnounceRequest {
 		let mut buf = Vec::new();
 		msg.encode(&mut Encoder::new(&mut buf, version.into()), version)
 			.unwrap();
 		let mut slice = &buf[..];
-		let got = crate::coding::decode_buf(&mut slice, version, AnnounceRequest::decode).unwrap();
+		let got = crate::coding::decode_buf(&mut slice, version, |r, v| AnnounceRequest::decode(r, v)).unwrap();
 		assert!(slice.is_empty(), "trailing bytes after decode");
 		AnnounceRequest {
-			prefix: got.prefix.to_owned(),
+			prefix: got.prefix.clone(),
 			exclude_hop: got.exclude_hop,
 			hidden: got.hidden,
 		}
@@ -1012,8 +1034,8 @@ mod tests {
 	fn announce_request_carries_hidden_from_lite07() {
 		for hidden in [false, true] {
 			let msg = AnnounceRequest {
-				prefix: Path::new("room/"),
-				exclude_hop: 0,
+				prefix: Path::from_static("room"),
+				exclude_hop: Hop::UNKNOWN,
 				hidden,
 			};
 			assert_eq!(request_round_trip(&msg, Version::Lite07).hidden, hidden);
@@ -1026,7 +1048,7 @@ mod tests {
 	fn announce_request_rejects_a_bad_hidden_flag() {
 		let mut buf = Vec::new();
 		let mut body = Vec::new();
-		Path::new("room")
+		Path::from_static("room")
 			.encode(&mut Encoder::new(&mut body, Version::Lite07.into()), Version::Lite07)
 			.unwrap();
 		body.push(2);
@@ -1034,7 +1056,9 @@ mod tests {
 			.varint(body.len() as u64)
 			.unwrap();
 		buf.extend_from_slice(&body);
-		assert!(crate::coding::decode_buf(&mut &buf[..], Version::Lite07, AnnounceRequest::decode).is_err());
+		assert!(
+			crate::coding::decode_buf(&mut &buf[..], Version::Lite07, |r, v| AnnounceRequest::decode(r, v)).is_err()
+		);
 	}
 
 	// Lite04/05 carry the subscriber's origin id so the publisher can skip reflected
@@ -1042,11 +1066,11 @@ mod tests {
 	#[test]
 	fn announce_request_carries_exclude_hop_on_lite05() {
 		let msg = AnnounceRequest {
-			prefix: Path::new("room/"),
-			exclude_hop: 42,
+			prefix: Path::from_static("room"),
+			exclude_hop: Hop::new(42).unwrap(),
 			hidden: false,
 		};
-		assert_eq!(request_round_trip(&msg, Version::Lite05).exclude_hop, 42);
+		assert_eq!(request_round_trip(&msg, Version::Lite05).exclude_hop.id(), 42);
 	}
 
 	// Lite06 dropped the field: the receiver's reflected-announce check catches the same
@@ -1054,11 +1078,11 @@ mod tests {
 	#[test]
 	fn announce_request_drops_exclude_hop_on_lite06() {
 		let msg = AnnounceRequest {
-			prefix: Path::new("room/"),
-			exclude_hop: 42,
+			prefix: Path::from_static("room"),
+			exclude_hop: Hop::new(42).unwrap(),
 			hidden: false,
 		};
-		assert_eq!(request_round_trip(&msg, Version::Lite06).exclude_hop, 0);
+		assert_eq!(request_round_trip(&msg, Version::Lite06).exclude_hop, Hop::UNKNOWN);
 
 		// And it costs nothing on the wire: the body is just the prefix.
 		let mut with = Vec::new();
@@ -1102,7 +1126,7 @@ mod tests {
 		// size(1 byte) | origin varint(1 byte = 0x01) | active varint(1 byte)
 		patched[1] = 0x00;
 		let mut slice = &patched[..];
-		let got = crate::coding::decode_buf(&mut slice, Version::Lite05, AnnounceOk::decode).unwrap();
+		let got = crate::coding::decode_buf(&mut slice, Version::Lite05, |r, v| AnnounceOk::decode(r, v)).unwrap();
 		assert_eq!(got.origin.id(), 0);
 		assert_eq!(got.active, 0);
 	}

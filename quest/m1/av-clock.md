@@ -23,23 +23,21 @@ line and is a published `@moq/watch` break, so it is not in flight.
 Settled: per-track handles, and this quest lands them. `sync.track("audio")`
 and `sync.track("video")` each report their advertised delay and measured
 spread, and one is nominated as the clock source. `SyncInput`
-(`js/watch/src/sync.ts`, today `delay`, `buffer`, and `probe`) breaks once,
+(`js/watch/src/sync.ts`, today `delay` and `buffer`) breaks once,
 and a third track joins without another pair of inputs; `Sync.register`
 already keeps one jitter entry per track and grows into the handles. The
 measured target per track comes from the [Audio jitter
 target](/quest/m1/audio-jitter-target/README.md) line: each decoder registers
 its own target through `Sync.register`. This quest folds the registrations
 into the handles. `SyncInput` is a published `@moq/watch` shape, so this is a
-break. [Sync.wait says what happened](/quest/m1/api-audit/sync-wait.md) lands
-first: it drops `probe` and `out.jitter` and makes the decoder-facing calls
-internal, with `wait` reporting present or skip, so the handles build on that.
+break. The decoder-facing calls (`received`, `wait`, `register`) are already
+internal, with `wait` resolving whether to present or drop, so the handles build
+on that.
 
 Recommendations for the implementation:
 
-- Playhead source. On the SharedArrayBuffer path the worklet's sample counter
-  is the playhead (`js/watch/src/audio/shared-ring-buffer.ts`). On the
-  postMessage path (`js/watch/src/audio/ring-buffer.ts`) the worklet posts an
-  estimate and the main thread extrapolates between posts.
+- Playhead source. The worklet's ring (`js/watch/src/audio/ring-buffer.ts`)
+  posts an estimate and the main thread extrapolates between posts.
 - Video reads a locally extrapolated clock, re-synced once per audio quantum,
   so the per-frame `sync.wait()` (`js/watch/src/video/decoder.ts`) never
   crosses a thread.
@@ -60,9 +58,14 @@ Recommendations for the implementation:
   catalog schema (`js/msf/src/catalog.ts`) accepts a negative `delay` and
   folds it into absent; refuse it on decode instead.
 
+Decided 2026-10-27 (maintainer): this waits only on
+[capped budgets](/quest/m1/audio-jitter-target/capped-budgets.md), not the
+whole [audio jitter target](/quest/m1/audio-jitter-target/README.md) epic,
+whose remaining manual browser proof does not gate reshaping the clock.
+
 ## Required
 
-- [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the estimator this sits on, and the per-track targets this shape carries
+- [Capped budgets](/quest/m1/audio-jitter-target/capped-budgets.md) - the estimator's browser budgets, re-measured, before this reshapes the clock around them
 
 ## Related
 

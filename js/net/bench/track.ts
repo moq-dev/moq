@@ -1,10 +1,10 @@
 /** Sweep retained groups and subscribers for one group published through a track and received. */
 
 import { Milli } from "@moq/clock";
-import { type Consumer as GroupConsumer, Producer as GroupProducer } from "../src/group.ts";
-import { hooks } from "../src/internal.ts";
+import type { Consumer as GroupConsumer, Producer as GroupProducer } from "../src/group.ts";
 import { Timescale, Timestamp } from "../src/time.ts";
 import { Producer, type Subscriber } from "../src/track.ts";
+import { untilGivenUp } from "../src/util/given_up.ts";
 
 const retainedCounts = [25, 100, 400, 1500];
 const subscriberCounts = [1, 4, 16];
@@ -62,10 +62,9 @@ async function measure(
 	// Inserted by sequence, the way the wire hands a subscribed track its groups.
 	const publish = (close: boolean) => {
 		clock += held > 0 ? 1 : CACHE_WINDOW_MS / retained;
-		const group = new GroupProducer(sequence);
-		producer.writeGroup(group);
+		const group = producer.createGroup(sequence);
 		group.writeFrame({ payload, timestamp: Timestamp.fromMillis(sequence++) });
-		if (close) group.close();
+		if (close) group.finish();
 		return group;
 	};
 
@@ -82,10 +81,10 @@ async function measure(
 			for (const consumer of received) {
 				if (hold.operation === "read") reads.push(consumer.readFrame());
 				else {
-					// The guard a publisher holds while a group stream waits for credit.
+					// The watch a publisher holds while a group stream waits for credit.
 					const opening = Promise.withResolvers<void>();
 					opened.push(opening.resolve);
-					reads.push(hooks.guardGroup(consumer, () => opening.promise));
+					reads.push(untilGivenUp(consumer, () => opening.promise));
 				}
 			}
 		}
@@ -101,7 +100,7 @@ async function measure(
 	const elapsed = now() - start;
 
 	for (const done of opened) done();
-	for (const group of open) group.close();
+	for (const group of open) group.finish();
 	await Promise.all(reads);
 	// Completion wakes every subscriber independently of producer closure.
 	const ending = subscribers.map((subscriber) => subscriber.recvGroup());
@@ -111,6 +110,7 @@ async function measure(
 		if (group) throw new Error("track did not end at its declared boundary");
 	}
 	const end = (now() - endStart) * 1000;
+	producer.finish();
 	producer.close();
 	// Ending the track releases the newest group too; idle cleanup reclaims the cache.
 	clock += CACHE_WINDOW_MS + CACHE_WINDOW_MS / 8 + 1;

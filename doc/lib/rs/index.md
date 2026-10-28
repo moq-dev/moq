@@ -23,7 +23,7 @@ see [Applications](/bin/). [Examples](/setup/examples) links runnable consumers;
 | [moq-tokio](https://docs.rs/moq-tokio) | Connects and listens over QUIC, WebSocket, or iroh, from config or CLI flags. Its `driver` feature alone is a tokio QUIC stack without MoQ. |
 | [qmux](https://docs.rs/qmux) | QUIC streams, datagrams, and flow control over TCP, TLS, WebSocket, and Unix sockets, on moq-quic's state machine. |
 | [moq-sock](https://docs.rs/moq-sock) | Socket binding and CPU pinning for thread-per-core listeners. |
-| [moq-ice](https://github.com/moq-dev/moq/tree/main/rs/moq-ice) | The ICE agent behind native WebRTC: drives a str0m connection over UDP, with a STUN client. |
+| [moq-ice](https://github.com/moq-dev/moq/tree/main/rs/moq-ice) | Internal infrastructure with no stability promise; the ICE agent behind native WebRTC: drives a str0m connection over UDP, with a STUN client. |
 | [moq-uring](https://docs.rs/moq-uring) | Experimental Linux io\_uring server for moq-lite. |
 | [hang](/lib/rs/hang) | The media layer: catalog, containers, ordered frame delivery. |
 | [moq-mux](/lib/rs/moq-mux) | Import and export fMP4/CMAF, MPEG-TS, Matroska, FLV, and Annex-B. |
@@ -33,10 +33,10 @@ see [Applications](/bin/). [Examples](/setup/examples) links runnable consumers;
 | [moq-audio](/lib/rs/moq-audio) | Microphone and speaker, Opus/PCM/AAC codecs, echo cancellation. |
 | [moq-transcode](https://docs.rs/moq-transcode) | Just-in-time rendition ladders, GPU-resident on NVIDIA. |
 | [moq-auth](/lib/rs/moq-auth) | Relay authorization: JWT signing and verification, and the auth server contract. |
-| [moq-room](/lib/rs/moq-room) | Headless rooms: announce-derived roster, token claims, and a chat track. |
+| [moq-room](/lib/rs/moq-room) | Workspace-only native rooms; use the published JS room API for applications. |
 | [moq-json](/lib/rs/moq-json) | JSON over tracks: snapshots with merge-patch deltas, or append logs. |
 | [moq-flate](/lib/rs/moq-flate) | Opaque payloads over tracks, optionally compressed with group-scoped DEFLATE: snapshots or append logs. |
-| [moq-e2ee](https://docs.rs/moq-e2ee) | End-to-end encryption of groups, datagrams, and track names, scoped to a publisher epoch. |
+| [moq-e2ee](https://github.com/moq-dev/moq/tree/main/rs/moq-e2ee) | Workspace-only end-to-end encryption of groups, datagrams, and track names, scoped to a publisher epoch. |
 | [moq-loc](https://docs.rs/moq-loc), [moq-msf](https://docs.rs/moq-msf) | The IETF LOC container and MSF catalog. |
 | [moq-stats](https://docs.rs/moq-stats) | Publish and consume relay traffic counters as tracks. |
 | [moq-clock](/lib/rs/moq-clock) | One clock for time and timers on tokio, the browser, and a deterministic test simulator. |
@@ -79,7 +79,7 @@ while let Some(event) = announced.next().await {
 let mut broadcast = origin.publish("my-stream.hang", Default::default())?;
 // moq-mux (from a container) or moq-video / moq-audio (from a device) fill it.
 // The route retracts on `unannounce()` or when the broadcast ends. To serve a whole
-// subtree on demand instead, `origin.dynamic("room")?` yields each requested path:
+// subtree on demand instead, `origin.requests("room")?` yields each requested path:
 // `prepare(Epoch::mint())`, fill its broadcast, then `publish()`, or reject it.
 ```
 
@@ -92,8 +92,13 @@ already queued, then `Client::close` sends the QUIC close. Runnable examples:
 [`subscribe.rs`](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/subscribe.rs).
 
 URLs may be `https://` (QUIC or WebTransport, with a WebSocket fallback),
-`moql://`/`moqt://` (raw QUIC), or `iroh://`. A `?jwt=` query carries the
-token. `http://` is for a relay on localhost only: it fetches the certificate
+`moql://`/`moqt://` (raw QUIC), or `iroh://`. Put credentials in
+`connect::Config::tokens` rather than the URL: the first rides SETUP (and
+`?jwt=` while an offered version needs it), each other widens the grant in band,
+and `Connection::tokens().set(...)` replaces them before they expire, with
+`answered().await` reporting the relay's verdict. A `?jwt=`
+already in the URL stays the connection credential, which reaches an older
+relay. `http://` is for a relay on localhost only: it fetches the certificate
 fingerprint unauthenticated, so never send a token over it. QUIC tuning shares
 the relay's settings; see the [relay reference](/bin/relay/config#quic).
 

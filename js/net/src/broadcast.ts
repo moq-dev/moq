@@ -3,13 +3,12 @@
  *
  * @module
  */
-import { Milli, sleep } from "@moq/clock";
-import { type Dispose, type GetPromise, type Getter, Once, race, Signal } from "@moq/signals";
+import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import type * as Epoch from "./epoch.ts";
-import { NotFound } from "./error.ts";
+import { NotFound, StreamCode, StreamError } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
-import { Route } from "./hop.ts";
-import { hooks, TrackSequences } from "./internal.ts";
+import type { Route } from "./hop.ts";
+import { hooks } from "./internal.ts";
 import { Lister, Listing, listTracks, type Tracks } from "./listing.ts";
 import * as Path from "./path.ts";
 import * as track from "./track.ts";
@@ -60,18 +59,20 @@ class BroadcastState {
 	requests = new Map<string, track.Producer>();
 	lookups = new WeakMap<track.Producer, Lookups>();
 	// Whether something answers on-demand track requests: a wire layer's consumed broadcast, or a
-	// publisher that has started pulling them. The counterpart of a live Rust `broadcast::Dynamic`;
+	// publisher that has started pulling them. The counterpart of a live Rust `broadcast::Requests`;
 	// without one, a track nobody publishes is `NotFound` rather than a request nobody will answer.
 	served = false;
-	// Each name's sequence namespace, shared by every producer of the name, created or requested.
-	sequences = new TrackSequences();
-	// Live consumer handles sharing this state (see {@link Consumer.clone}). The broadcast
-	// closes once the last one closes, so a shared consumer can be handed to several callers.
+	// Live consumer handles sharing this state (see {@link Consumer.clone}).
 	consumers = 0;
+	// A wire layer's broadcast, which has no producer: it ends once no consumer holds it, as a
+	// Rust session retires a source nothing holds. A produced broadcast ends only on its close.
+	unheld = false;
 	used = new Signal(false);
 	active = 0;
 	// The demand watcher of each open track, disposed when it closes or leaves the broadcast.
 	demands = new Map<track.Producer, Dispose>();
+	// Run synchronously once the broadcast closes, before `closed` notifies its observers.
+	closers = new Set<() => void>();
 }
 
 // Each track updates the aggregate on an edge, so a demand change touches only its track.
@@ -80,12 +81,12 @@ function watchDemand(state: BroadcastState, producer: track.Producer, lookups?: 
 	if (state.demands.has(producer)) return;
 	const demand = producer.demand();
 	// A closed track is never demand, and its close already fired, so nothing would dispose a watcher.
-	if (demand.closed.peek() !== undefined) return;
+	if (hooks.demandReleased(demand).peek() !== undefined) return;
 	let active = false;
 	const update = () => {
 		const used =
 			state.closed.peek() === undefined &&
-			demand.closed.peek() === undefined &&
+			hooks.demandReleased(demand).peek() === undefined &&
 			((lookups?.pending ?? 0) > 0 || demand.wanted.peek() !== undefined);
 		if (active === used) return;
 		state.active += used ? 1 : -1;
@@ -94,8 +95,8 @@ function watchDemand(state: BroadcastState, producer: track.Producer, lookups?: 
 	};
 	const disposeUsed = demand.wanted.subscribe(update);
 	if (lookups) lookups.changed = update;
-	const disposeClosed = demand.closed.subscribe(() => {
-		if (demand.closed.peek() === undefined) return;
+	const disposeClosed = hooks.demandReleased(demand).subscribe(() => {
+		if (hooks.demandReleased(demand).peek() === undefined) return;
 		cleanup();
 	});
 	const cleanup = () => {
@@ -146,25 +147,32 @@ async function requested(state: BroadcastState): Promise<track.Request | undefin
 function closeState(state: BroadcastState) {
 	if (state.closed.peek() !== undefined) return;
 	state.closed.set(null);
-	state.listing.detach(null);
+	state.listing.close();
 	for (const cleanup of state.demands.values()) cleanup();
-	for (const request of state.pending) request.reject();
+	for (const request of state.pending)
+		request.reject(
+			new StreamError(StreamCode.Internal, {
+				message: `track request ${request.name} dropped before acceptance`,
+			}),
+		);
 	state.requested.mutate((requests) => {
 		requests.length = 0;
 	});
+	for (const fn of state.closers) fn();
+	state.closers.clear();
 }
 
 // The producer already serving `name`, evicting entries that can no longer serve it.
 function lookup(state: BroadcastState, name: string): track.Producer | undefined {
 	const inserted = state.tracks.get(name);
 	if (inserted) {
-		if (!(inserted.closed.peek() instanceof Error)) return inserted;
+		if (!(hooks.trackReleased(inserted).peek() instanceof Error)) return inserted;
 		state.tracks.delete(name);
 	}
 
 	const requested = state.requests.get(name);
 	if (requested) {
-		if (requested.closed.peek() === undefined) return requested;
+		if (hooks.trackReleased(requested).peek() === undefined) return requested;
 		state.requests.delete(name);
 	}
 
@@ -190,7 +198,7 @@ function logical(state: BroadcastState, name: string): { producer: track.Produce
 	if (!state.served) {
 		// Answer through the track rather than throwing, so a peer's subscribe is refused with
 		// the code instead of an unhandled error.
-		producer.close(new NotFound(`track ${name}`));
+		producer.abort(new NotFound(`track ${name}`));
 		return { producer, requested: false };
 	}
 
@@ -198,12 +206,12 @@ function logical(state: BroadcastState, name: string): { producer: track.Produce
 	state.lookups.set(producer, lookups);
 	watchDemand(state, producer, lookups);
 	state.requests.set(name, producer);
-	void producer.closed.then(() => {
+	void hooks.trackReleased(producer).then(() => {
 		if (state.requests.get(name) === producer) state.requests.delete(name);
 	});
 
 	state.requested.mutate((requested) => {
-		requested.push(hooks.makeRequest({ name, producer, sequences: state.sequences, pending: state.pending }));
+		requested.push(hooks.makeRequest({ name, producer, pending: state.pending }));
 	});
 
 	return { producer, requested: true };
@@ -228,7 +236,8 @@ async function resolveTrackInfo(state: BroadcastState, name: string, hold?: Abor
 	let answered = false;
 	let ended = false;
 	const release = () => {
-		if (lookups.opened && lookups.pending === 0 && producer.demand().wanted.peek() === undefined) producer.close();
+		if (lookups.opened && lookups.pending === 0 && producer.demand().wanted.peek() === undefined)
+			hooks.releaseTrack(producer);
 	};
 	info.then(
 		() => {
@@ -255,7 +264,7 @@ async function resolveTrackInfo(state: BroadcastState, name: string, hold?: Abor
 }
 
 // The newest frame cached for `name`, without subscribing: undefined when nobody serves it yet.
-function largest(state: BroadcastState, name: string): track.Location | undefined {
+function largest(state: BroadcastState, name: string): track.Position | undefined {
 	const producer = lookup(state, name);
 	return producer && hooks.cachedLargest(producer);
 }
@@ -312,7 +321,7 @@ function adopt(state: BroadcastState, producer: track.Producer, info: track.Info
 	state.listing.listOwn(producer.name, producer, info);
 
 	// A finished track keeps serving its cache, so only an abort evicts it.
-	void producer.closed.then((closed) => {
+	void hooks.trackReleased(producer).then((closed) => {
 		if (!(closed instanceof Error)) return;
 		if (state.tracks.get(producer.name) === producer) state.tracks.delete(producer.name);
 		state.listing.unlistOwn(producer.name, producer);
@@ -321,7 +330,11 @@ function adopt(state: BroadcastState, producer: track.Producer, info: track.Info
 
 let makeDemand: (state: BroadcastState) => Demand;
 
-/** A watch-only view of demand for any track in a broadcast. */
+/**
+ * A watch-only view of demand for any track in a broadcast.
+ *
+ * @internal Tests only; nothing outside the package consumes it.
+ */
 export class Demand {
 	#state: BroadcastState;
 	private constructor(state: BroadcastState) {
@@ -336,9 +349,11 @@ export class Demand {
 		return this.#state.used;
 	}
 
-	/** Wait until every track becomes unused or the broadcast closes. */
+	/** Wait until every track becomes unused. Throws once the broadcast closes. */
 	async unused(): Promise<void> {
-		while (this.#state.used.peek() && this.#state.closed.peek() === undefined) {
+		for (;;) {
+			if (this.#state.closed.peek() !== undefined) throw new Error("broadcast is closed");
+			if (!this.#state.used.peek()) return;
 			await Signal.race(this.#state.used, this.#state.closed);
 		}
 	}
@@ -359,8 +374,6 @@ export class Producer {
 	#demand = makeDemand(this.#state);
 	#announcer?: Announcer;
 	#path = Path.empty();
-	// Set by `finish()`, which fixes the linger, so nothing may change the broadcast afterward.
-	#finished = false;
 
 	constructor() {
 		registerWire(this, {
@@ -379,10 +392,11 @@ export class Producer {
 			producer.#announcer = announcer;
 		};
 		hooks.attachAnnouncer = attachAnnouncer;
-		hooks.withholdAnnouncer = (producer) => {
-			const announcer = producer.#announcer;
-			producer.#announcer = undefined;
-			return announcer;
+
+		hooks.onClosed = (producer, fn) => {
+			const closers = producer.#state.closers;
+			closers.add(fn);
+			return () => closers.delete(fn);
 		};
 		stampProducer = (producer, path) => {
 			producer.#path = path;
@@ -397,7 +411,11 @@ export class Producer {
 		return this.#state.closed;
 	}
 
-	/** Watch demand for the broadcast's tracks. */
+	/**
+	 * Watch demand for the broadcast's tracks.
+	 *
+	 * @internal Tests only; nothing outside the package consumes it.
+	 */
 	demand(): Demand {
 		return this.#demand;
 	}
@@ -414,13 +432,12 @@ export class Producer {
 	 * from the returned producer. A request a handler has already taken stays a duplicate.
 	 * An append on the track throws if it would reuse a sequence an earlier track of the name
 	 * wrote in this broadcast, so a replacement writes its first group explicitly. Throws if an
-	 * open track or a live request already holds the name, or once the broadcast is finished.
+	 * open track or a live request already holds the name.
 	 */
 	createTrack(name: string, info: Partial<track.Info> = {}): track.Producer {
 		if (this.#state.closed.peek() !== undefined) {
 			throw new Error("broadcast is closed");
 		}
-		this.#assertUnfinished();
 
 		const request = takeQueued(this.#state, name);
 		if (request) {
@@ -436,22 +453,20 @@ export class Producer {
 		// One logical track per name: an open track or a live request already serves it.
 		// A request a handler already pulled stays duplicate, as in Rust.
 		const live = [this.#state.tracks.get(name), this.#state.requests.get(name)];
-		if (live.some((existing) => existing && existing.closed.peek() === undefined)) {
+		if (live.some((existing) => existing && hooks.trackReleased(existing).peek() === undefined)) {
 			throw new Error(`duplicate track: ${name}`);
 		}
 
 		const producer = new track.Producer(name).accept(info);
-		hooks.bindSequence(producer, this.#state.sequences.get(name));
 		adopt(this.#state, producer, track.infoDefaults(info));
 		return producer;
 	}
 
 	/**
 	 * Remove a statically inserted track, including a finished cached one: stop counting it
-	 * toward {@link demand} and listing it at once. Throws once the broadcast is finished.
+	 * toward the broadcast's demand and listing it at once.
 	 */
 	removeTrack(name: string): void {
-		this.#assertUnfinished();
 		const track = this.#state.tracks.get(name);
 		if (!track) return;
 		this.#state.tracks.delete(name);
@@ -464,132 +479,11 @@ export class Producer {
 		return trackOf(name, this);
 	}
 
-	/** The route this broadcast is announced with, or undefined while it is not announced. */
-	get route(): Route | undefined {
-		return this.#announcer?.route();
-	}
-
-	/**
-	 * Advertise this broadcast's exact path, or replace the standing advertisement's route.
-	 *
-	 * The route is taken as given, epoch included: a route with another epoch (or none)
-	 * announces a new broadcast, so re-price from the current one,
-	 * `announce({ ...broadcast.route, cost })`, to keep the instance.
-	 *
-	 * Call it once the tracks a subscriber needs first (a catalog) exist. Until then the
-	 * broadcast exists for nobody, on its own origin or at a peer. Retracts on
-	 * {@link unannounce} or {@link close}. Throws if this producer was not created through an
-	 * origin, is a claim answer still being prepared, or if the broadcast is already closed or
-	 * finished.
-	 */
-	announce(
-		route:
-			| Route
-			| {
-					epoch?: Route["epoch"];
-					hops?: Route["hops"];
-					cost?: Route["cost"];
-					auth?: Route["auth"];
-			  } = Route.default,
-	): void {
-		if (this.#state.closed.peek() !== undefined) {
-			throw new Error("broadcast is closed");
-		}
-		this.#assertUnfinished();
-		if (!this.#announcer) throw new Error("broadcast is not attached to an origin");
-		this.#announcer.announce(Route.normalize(route));
-	}
-
-	/**
-	 * Retract the advertisement of this broadcast's path, if any, from local consumers and
-	 * peers alike. {@link announce} brings it back. Throws once the broadcast is finished.
-	 */
-	unannounce(): void {
-		this.#assertUnfinished();
-		this.#announcer?.unannounce();
-	}
-
-	/** End the broadcast for good: retract it, serve no new tracks, and refuse a later {@link announce}. Idempotent. */
+	/** End the broadcast for good: retract its route and serve no new tracks. Idempotent. */
 	close(): void {
 		this.#announcer?.unannounce();
 		this.#announcer = undefined;
 		closeState(this.#state);
-	}
-
-	/**
-	 * End the broadcast cleanly, keeping it servable until its media goes stale.
-	 *
-	 * A subscriber still catching up, one that read the final catalog late or is draining a
-	 * backlog, can still request and drain the tracks closed cleanly by now. The returned
-	 * {@link Finish} keeps the broadcast announced: keep it for its {@link Finish.linger}, then
-	 * {@link Finish.close} it, or let {@link Finish.wait} do both. Closing it early is the
-	 * interrupt. Close the tracks first; one still open adds nothing. From here the broadcast
-	 * takes no more changes: creating or removing a track, announcing, unannouncing, or finishing
-	 * again throws.
-	 */
-	finish(): Finish {
-		this.#assertUnfinished();
-		this.#finished = true;
-		let linger = Milli.zero;
-		for (const track of this.#state.tracks.values()) linger = Milli(Math.max(linger, hooks.linger(track)));
-		return makeFinish(this, linger);
-	}
-
-	#assertUnfinished(): void {
-		if (this.#finished) throw new Error("broadcast is finished");
-	}
-}
-
-let makeFinish: (producer: Producer, linger: Milli) => Finish;
-
-/**
- * A cleanly ended broadcast, still announced and serving its finished tracks.
- *
- * Returned by {@link Producer.finish}. Closing it closes the broadcast.
- *
- * @public
- */
-export class Finish {
-	/**
-	 * How long to keep this handle: the longest {@link track.Info.maxAge} of the tracks closed
-	 * cleanly before {@link Producer.finish}, each capped by the cache window. Open or aborted
-	 * tracks, and tracks without a max-age, add nothing.
-	 */
-	readonly linger: Milli;
-
-	#producer: Producer;
-
-	private constructor(producer: Producer, linger: Milli) {
-		this.#producer = producer;
-		this.linger = linger;
-	}
-
-	static {
-		makeFinish = (producer, linger) => new Finish(producer, linger);
-	}
-
-	/** Settles with `null` once the broadcast closes, here or elsewhere, which ends the linger early. */
-	get closed(): GetPromise<null> {
-		return this.#producer.closed;
-	}
-
-	/**
-	 * Keep the broadcast up for {@link linger} on the installed clock, or until it closes
-	 * elsewhere, then close it. The linger counts from this call.
-	 */
-	async wait(): Promise<void> {
-		const timer = new AbortController();
-		try {
-			await race([sleep(Milli.toNano(this.linger), { signal: timer.signal }), this.closed]);
-		} finally {
-			timer.abort();
-			this.close();
-		}
-	}
-
-	/** Close the broadcast now, ending the linger early. Idempotent. */
-	close(): void {
-		this.#producer.close();
 	}
 }
 
@@ -634,6 +528,7 @@ export class Consumer {
 			// A standalone consumer is a wire layer's, which serves every track on demand.
 			this.#state = new BroadcastState();
 			this.#state.served = true;
+			this.#state.unheld = true;
 		}
 		this.#state.consumers++;
 		registerWire(this, {
@@ -688,8 +583,9 @@ export class Consumer {
 	 * Settles with `null` once the broadcast closes; a broadcast end carries no cause.
 	 * Peek it synchronously (`undefined` while open), observe it reactively, or `await` it.
 	 *
-	 * Shared by every {@link clone}: it settles once the last handle closes. The subscribing
-	 * wire layer peeks it to evict a closed entry from its per-path consume cache.
+	 * Shared by every {@link clone}. A produced broadcast settles once its producer closes; a
+	 * broadcast consumed from a session, once the session ends it or the last handle closes.
+	 * The subscribing wire layer peeks it to evict a closed entry from its per-path consume cache.
 	 */
 	get closed(): GetPromise<null> {
 		return this.#state.closed;
@@ -699,7 +595,7 @@ export class Consumer {
 	 * Return another handle to the same broadcast, reference-counted with this one.
 	 *
 	 * Both handles read the same tracks, carry the same {@link path}, and share one {@link closed}
-	 * state; the broadcast closes only once *every* handle has {@link close}d. Used by the connection's per-path
+	 * state. Used by the connection's per-path
 	 * consume cache to share one subscription across callers. Subclasses that resolve info over
 	 * the wire override this to preserve their type (see the wire layer's consumed broadcast).
 	 */
@@ -707,8 +603,10 @@ export class Consumer {
 		return new Consumer(this.shareState());
 	}
 
-	// Hand this consumer's backing state and path to a clone. Opaque (`never`) so the state type
-	// stays unexported; a subclass passes it straight back into its own `super(...)`.
+	/**
+	 * This consumer's backing state and path, for a clone. Opaque (`never`) so the state type
+	 * stays unexported; a subclass passes it straight back into its own `super(...)`.
+	 */
 	protected shareState(): never {
 		return {
 			state: this.#state,
@@ -744,13 +642,13 @@ export class Consumer {
 	}
 
 	/**
-	 * Release this handle. The broadcast is closed once this was the last live handle;
-	 * while other {@link clone}s remain open it stays live.
+	 * Release this handle, like dropping a Rust handle. A produced broadcast stays open until
+	 * its producer closes; one consumed from a session ends once no {@link clone} holds it.
 	 */
 	close(): void {
 		if (this.#closed) return;
 		this.#closed = true;
-		if (--this.#state.consumers > 0) return;
+		if (--this.#state.consumers > 0 || !this.#state.unheld) return;
 		closeState(this.#state);
 	}
 }

@@ -538,6 +538,32 @@ test("closed is stable, so racing it per frame does not allocate", async () => {
 	expect(reader.closed).toBe(reader.closed);
 });
 
+test("reading to FIN builds no error", async () => {
+	// Fixtures built outside the window, and kept alive so an error they retain stays counted.
+	const readers = Array.from(
+		{ length: 32 },
+		() =>
+			new Reader(
+				new ReadableStream<Uint8Array>({
+					start(controller) {
+						controller.enqueue(new Uint8Array([7]));
+						controller.close();
+					},
+				}),
+				undefined,
+				QUIC,
+			),
+	);
+	const before = heapStats().objectTypeCounts;
+	for (const reader of readers) {
+		expect(await reader.u8()).toBe(7);
+		expect(await reader.done()).toBe(true);
+	}
+	const after = heapStats().objectTypeCounts;
+	expect(after.TypeError ?? 0).toBeLessThanOrEqual(before.TypeError ?? 0);
+	expect(after.Error ?? 0).toBeLessThanOrEqual(before.Error ?? 0);
+});
+
 test("stop after FIN allocates nothing and sends nothing", async () => {
 	const cancelled: unknown[] = [];
 	const reader = new Reader(
@@ -587,30 +613,6 @@ test("stop mid-stream still cancels with the code", async () => {
 	reader.stop(StreamCode.Cancel);
 	const stopped = await cancelled.promise;
 	expect((stopped as { streamErrorCode?: number }).streamErrorCode).toBe(StreamCode.Cancel);
-});
-
-test("a numeric stop sends only a code the negotiated draft shares", async () => {
-	const stop = (version: StreamVersion, code: StreamCode) => {
-		const cancelled = Promise.withResolvers<unknown>();
-		const reader = new Reader(
-			new ReadableStream<Uint8Array>({
-				start(controller) {
-					controller.enqueue(new Uint8Array([1]));
-				},
-				cancel: cancelled.resolve,
-			}),
-			undefined,
-			version,
-		);
-		reader.stop(code);
-		return cancelled.promise;
-	};
-
-	// 0x4 is GOING_AWAY here, but UNKNOWN_OBJECT_STATUS on draft-16.
-	const draft16 = await stop(Version.DRAFT_16, StreamCode.GoingAway);
-	expect((draft16 as { streamErrorCode?: number }).streamErrorCode).toBe(StreamCode.Internal);
-	const draft18 = await stop(Version.DRAFT_18, StreamCode.GoingAway);
-	expect((draft18 as { streamErrorCode?: number }).streamErrorCode).toBe(StreamCode.GoingAway);
 });
 
 test("Writer reset still reads a bare number as Internal", async () => {
@@ -810,9 +812,8 @@ test("open waits for a stream slot instead of rejecting once the peer's limit is
 // arrived in draft-17, and moq-lite's own 48-63 codes are in no draft at all.
 for (const [version, tooFarBehind] of [
 	[QUIC, StreamCode.TooFarBehind],
-	[Version.DRAFT_14, StreamCode.Internal],
-	[Version.DRAFT_19, StreamCode.TooFarBehind],
-	[Version.DRAFT_20, StreamCode.TooFarBehind],
+	[Version.DRAFT_18, StreamCode.TooFarBehind],
+	[Version.DRAFT_22, StreamCode.TooFarBehind],
 ] as const) {
 	test(`stream resets select the negotiated registry (${version})`, async () => {
 		for (const [reason, expected] of [
@@ -924,12 +925,11 @@ test("the varint range follows the version: 64 bits on lite-07, 62 on lite-06", 
 	await expect(written(Lite.DRAFT_06, (w) => w.u62(2n ** 62n))).rejects.toThrow("62-bits");
 });
 
-test("a lite-07 stream decodes reset codes with the moq-lite registry", async () => {
-	// 0x4 is GOING_AWAY on moq-lite but a foreign code on draft-17.
-	const reset = async (version: StreamVersion) => {
+test("reset codes the registries share decode alike, and the rest as INTERNAL_ERROR", async () => {
+	const reset = async (version: StreamVersion, code: number) => {
 		const reader = new Reader(
 			new ReadableStream<Uint8Array>({
-				start: (controller) => controller.error(new Reset(4)),
+				start: (controller) => controller.error(new Reset(code)),
 			}),
 			undefined,
 			version,
@@ -940,17 +940,19 @@ test("a lite-07 stream decodes reset codes with the moq-lite registry", async ()
 		);
 		return (err as StreamError).code;
 	};
-	expect(await reset(Lite.DRAFT_07)).toBe(StreamCode.GoingAway);
-	expect(await reset(Version.DRAFT_17)).toBe(StreamCode.Internal);
+	// 0x4 is GOING_AWAY in both registries; 0x33 is NOT_FOUND on moq-lite only.
+	expect(await reset(Lite.DRAFT_07, 4)).toBe(StreamCode.GoingAway);
+	expect(await reset(Version.DRAFT_18, 4)).toBe(StreamCode.GoingAway);
+	expect(await reset(Lite.DRAFT_07, 0x33)).toBe(StreamCode.NotFound);
+	expect(await reset(Version.DRAFT_18, 0x33)).toBe(StreamCode.Internal);
 });
 
 test("Writer and Reader varint round-trip every size in both formats", async () => {
 	const values = [0n, 63n, 64n, 127n, 128n, 2n ** 14n, 2n ** 21n, 2n ** 28n, 2n ** 30n, 2n ** 32n, 2n ** 35n];
 	values.push(2n ** 42n, 2n ** 49n, 2n ** 53n, 2n ** 56n, 2n ** 62n - 1n);
-	for (const version of [Lite.DRAFT_06, Lite.DRAFT_07, Version.DRAFT_16, Version.DRAFT_17, Version.DRAFT_19]) {
+	for (const version of [Lite.DRAFT_06, Lite.DRAFT_07, Version.DRAFT_18]) {
 		// Only leading-ones varints reach past 62 bits.
-		const all =
-			version === Lite.DRAFT_06 || version === Version.DRAFT_16 ? values : [...values, 2n ** 62n, 2n ** 64n - 1n];
+		const all = version === Lite.DRAFT_06 ? values : [...values, 2n ** 62n, 2n ** 64n - 1n];
 		const { stream, written } = createTestWritableStream();
 		const writer = new Writer(stream, version);
 		for (const value of all) await writer.varint(U64.fromBigInt(value));
@@ -963,18 +965,10 @@ test("Writer and Reader varint round-trip every size in both formats", async () 
 	}
 });
 
-test("Writer varint refuses a QUIC varint past 62 bits before emitting bytes", async () => {
-	const { stream, written } = createTestWritableStream();
-	const writer = new Writer(stream, Version.DRAFT_16);
-	await expect(writer.varint(U64.fromBigInt(2n ** 62n))).rejects.toThrow(/larger than 62-bits/);
-	await expect(writer.varint(U64.MAX)).rejects.toThrow(/larger than 62-bits/);
-	expect(written).toEqual([]);
-});
-
 test("Reader u53 decodes every size in both formats, one byte per chunk", async () => {
 	const values = [0, 63, 64, 127, 128, 16383, 16384, 2 ** 21, 2 ** 28 - 1, 2 ** 28, 2 ** 30 - 1, 2 ** 30];
 	values.push(2 ** 35, 2 ** 42, 2 ** 49, Number.MAX_SAFE_INTEGER);
-	for (const version of [Lite.DRAFT_06, Lite.DRAFT_07, Version.DRAFT_17]) {
+	for (const version of [Lite.DRAFT_06, Lite.DRAFT_07, Version.DRAFT_18]) {
 		const { stream, written } = createTestWritableStream();
 		const writer = new Writer(stream, version);
 		for (const value of values) await writer.u53(value);

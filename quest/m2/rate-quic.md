@@ -9,12 +9,15 @@ refused.
 
 ## Plan
 
-The token claim this quest enforces does not exist yet: [auth access is
-patterns](/quest/m1/api-audit/auth-access.md) removed the unenforced
-`publish.rate`/`subscribe.rate` fields before the release. Whichever rate
-quest lands first re-adds them as optional, with a rate type moq-auth owns
-(or a lower shared units crate), converted at the relay boundary so moq-auth
-never depends on moq-net.
+Token claims and HTTP grants carry path patterns only; object roles, including
+bitrate caps, are refused during parsing. Decided 2026-10-25 (maintainer):
+this quest reintroduces optional caps with a type moq-auth owns (or a lower
+shared units crate), converted at the relay boundary so moq-auth never depends
+on moq-net. [WebSocket caps](/quest/m2/rate-websocket.md) reuses that type,
+and [the grant](/quest/m2/rate-grant.md) Requires this quest for it. Its
+parsers and refusal rules must prevent any transport without enforcement from
+silently discarding a cap: admission accepts a cap only on a transport that
+enforces it.
 
 Decided in the 2026-10-04 plan: enforce in the QUIC stack, through
 backpressure the peer cannot ignore, rather than metering and closing.
@@ -75,8 +78,7 @@ backpressure the peer cannot ignore, rather than metering and closing.
   uncapped grant lifts it, matching the union's permissive meaning. Decided
   in the 2026-10-04 plan; `moq-auth` and `js/auth` carry no union helper
   until this quest needs one.
-- Lands in `moq-quic`. The relay drops its refusal for QUIC sessions in
-  the same PR.
+- Lands in `moq-quic`. QUIC admission accepts capped roles only once the stack enforces them.
 
 Tests, on a simulated clock: a peer sending flat out is held to the cap
 within the burst; a peer that ignores credit is closed with a flow-control

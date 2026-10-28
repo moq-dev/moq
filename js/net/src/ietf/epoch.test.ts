@@ -10,25 +10,17 @@ import { Fetch } from "./fetch.ts";
 import * as Message from "./message.ts";
 import { Parameters } from "./parameters.ts";
 import { type AdvertParams, PublishNamespace } from "./publish_namespace.ts";
-import { SetupOption, SetupOptions } from "./setup_options.ts";
+import { SetupOptions } from "./setup_options.ts";
 import { Subscribe } from "./subscribe.ts";
 import { SubscribeNamespaceEntry } from "./subscribe_namespace.ts";
 import { TrackStatusRequest } from "./track.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
-const VERSION = Version.DRAFT_19;
+const VERSION = Version.DRAFT_18;
 const EPOCH_PARAM = 0x40b69n;
 const EPOCH = Epoch.mint();
 
-const LEGACY = [Version.DRAFT_14, Version.DRAFT_15, Version.DRAFT_16] as const;
-const NEGOTIATING = [
-	Version.DRAFT_17,
-	Version.DRAFT_18,
-	Version.DRAFT_19,
-	Version.DRAFT_20,
-	Version.DRAFT_21,
-	Version.DRAFT_22,
-] as const;
+const ALL = [Version.DRAFT_18, Version.DRAFT_22] as const;
 
 async function encode(
 	message: { encode(w: Writer, v: IetfVersion): Promise<void> },
@@ -67,23 +59,13 @@ function epochParam(value: Uint8Array): Parameters {
 	return params;
 }
 
-test("Epoch: SETUP declares it on draft-17 and later only", async () => {
-	for (const version of LEGACY) {
+test("Epoch: SETUP declares it", async () => {
+	for (const version of ALL) {
 		const params = new SetupOptions();
-		EpochExt.intoSetup(params, version);
-		expect(params.getVarint(SetupOption.Epoch)).toBeUndefined();
-
-		// Even one that arrived anyway reads as "not negotiated" there.
-		params.setVarint(SetupOption.Epoch, 1n);
-		expect(EpochExt.fromSetup(params, version)).toBe(false);
-	}
-
-	for (const version of NEGOTIATING) {
-		const params = new SetupOptions();
-		expect(EpochExt.fromSetup(params, version)).toBe(false);
-		EpochExt.intoSetup(params, version);
-		const decoded = await SetupOptions.decode(reader(await encode(params, version), version), version);
-		expect(EpochExt.fromSetup(decoded, version)).toBe(true);
+		expect(EpochExt.fromSetup(params)).toBe(false);
+		EpochExt.intoSetup(params);
+		const decoded = await SetupOptions.decode(reader(await encode(params, version), version));
+		expect(EpochExt.fromSetup(decoded)).toBe(true);
 	}
 });
 
@@ -120,10 +102,10 @@ test("Epoch: a REQUEST_UPDATE never carries one", async () => {
 	}
 });
 
-test("Epoch: SUBSCRIBE and TRACK_STATUS carry it on draft-17 and later only", async () => {
+test("Epoch: SUBSCRIBE and TRACK_STATUS carry it", async () => {
 	const trackNamespace = Path.from("alice");
-	for (const version of [...LEGACY, ...NEGOTIATING]) {
-		const expected = EpochExt.supported(version) ? EPOCH : undefined;
+	for (const version of ALL) {
+		const expected = EPOCH;
 
 		const subscribe = new Subscribe({
 			requestId: 0n,

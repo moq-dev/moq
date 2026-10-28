@@ -3,11 +3,14 @@
 //! Implement these traits for a transport, or wrap a backend at the application
 //! boundary. `moq-tokio`, `moq-wasm`, and `moq-uring` provide their own adapters, and
 //! [`memory`] links two peers in one process.
-//! The async helpers only drive the required poll methods. Thread-local transports
-//! stay supported; [`poll::Boxable`] adds native thread bounds for boxed drivers.
+//! The async helpers only drive the required poll methods. Sessions take a
+//! [`poll::Boxable`] transport, which adds native thread bounds; wrap a thread-local
+//! transport in a type that checks the thread on use (`moq-uring` has one).
 
 use std::time::Duration;
 
+#[cfg(feature = "async")]
+pub(crate) mod boxed;
 pub mod memory;
 
 /// A trait that is Send on native targets and empty on WASM.
@@ -38,13 +41,13 @@ impl<T> MaybeSend for T {}
 #[cfg(target_family = "wasm")]
 impl<T> MaybeSync for T {}
 
-/// Where the transport carries the request target.
+/// Where a session's request target travels.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Binding {
-	/// The request target is carried by the transport URI.
+pub enum Address {
+	/// The transport's own request URI carries it (WebTransport, qmux over WebSocket).
 	Uri,
-	/// The request target is carried by the MoQ SETUP.
-	InBand,
+	/// The MoQ SETUP carries it, because the transport has no request URI.
+	Setup,
 }
 
 /// One connection's cumulative wire counters, which its transport updates as it sends and receives.
@@ -118,21 +121,11 @@ impl Probe {
 	}
 }
 
-/// Connection-level statistics.
+/// Connection-level metrics a transport reports, beyond the byte counts its [`Wire`] holds.
 ///
 /// Methods return `Option`: `None` means the implementation doesn't track
 /// this metric, while `Some(0)` means actually zero.
-pub trait Stats {
-	/// Total bytes sent over the connection, including retransmissions and overhead.
-	fn bytes_sent(&self) -> Option<u64> {
-		None
-	}
-
-	/// Total bytes received over the connection, including duplicate and overhead.
-	fn bytes_received(&self) -> Option<u64> {
-		None
-	}
-
+pub trait Metrics {
 	/// Total bytes lost (detected via retransmission or acknowledgement).
 	fn bytes_lost(&self) -> Option<u64> {
 		None
@@ -169,21 +162,22 @@ pub trait Stats {
 	}
 }
 
-/// Default stats implementation that returns `None` for all metrics.
-pub struct StatsUnavailable;
-impl Stats for StatsUnavailable {}
+/// The metrics of a transport that tracks none.
+struct Untracked;
+impl Metrics for Untracked {}
 
 /// The smallest connection receive window a transport that leases may offer.
 ///
 /// A session keeps each unit it is still assembling leased, and a unit larger than the
 /// window can never complete, so the window has to fit the largest one with its framing:
-/// a legacy announcement set, past any frame payload.
+/// a legacy announcement set, past any frame segment. A frame returns its credit a
+/// segment at a time, so its size never matters here.
 pub const MIN_RECEIVE_WINDOW: u64 = {
 	// A type and a size prefix, each a varint of at most 8 bytes.
 	const PREFIXES: u64 = 16;
-	let message = <crate::lite::AnnounceInit<'static> as crate::lite::Message>::MAX_SIZE as u64 + PREFIXES;
-	let frame = crate::group::MAX_CACHE_BYTES;
-	if message > frame { message } else { frame }
+	let message = <crate::lite::AnnounceInit as crate::lite::Message>::MAX_SIZE as u64 + PREFIXES;
+	let segment = crate::frame::SEGMENT as u64;
+	if message > segment { message } else { segment }
 };
 
 /// The typed transport condition when no application code was received.
@@ -229,48 +223,59 @@ pub mod poll {
 
 	use std::collections::VecDeque;
 
-	use super::{Error, MaybeSend, MaybeSync, Stats};
+	use super::{Error, MaybeSend, MaybeSync, Metrics, Untracked};
 	use bytes::{Buf, Bytes, BytesMut};
 
-	/// A cloneable transport session with independent progress on each handle.
+	/// A transport session, shared by reference between the tasks that use it.
 	///
-	/// Poll operations may retain progress, but never borrow caller buffers between
-	/// calls. A pending write may be retried with a shorter buffer. Terminal
-	/// operations release retained resources; shared resources must not be held
-	/// across a wait. Implementations register the supplied waker before Pending.
-	pub trait Session: Clone + 'static {
-		/// The outgoing stream type. Only the poll half is required, so a `!Send`
-		/// session can hang `!Send` streams off it.
+	/// Every operation takes `&self` and keeps no per-caller progress between polls: the
+	/// caller owns the [`kio::Waiter`] it parks, so an abandoned wait leaves nothing behind.
+	/// Share a session with [`Arc`](std::sync::Arc) rather than cloning it. Poll operations
+	/// never borrow caller buffers between calls, and shared resources must not be held
+	/// across a wait. Implementations register the supplied waiter before Pending.
+	pub trait Session: 'static {
+		/// The outgoing stream type.
 		type SendStream: SendStream;
 
-		/// The incoming stream type. Only the poll half is required, so a `!Send`
-		/// session can hang `!Send` streams off it.
+		/// The incoming stream type.
 		type RecvStream: RecvStream;
 
 		/// The error type for every operation on this session.
 		type Error: Error;
 
 		/// Poll for a unidirectional stream created by the peer.
-		fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>>;
+		fn poll_accept_uni(&self, waiter: &kio::Waiter) -> Poll<Result<Self::RecvStream, Self::Error>>;
 
 		/// Poll for a bidirectional stream created by the peer.
-		fn poll_accept_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<BiStreams<Self>, Self::Error>>;
+		fn poll_accept_bi(&self, waiter: &kio::Waiter) -> Poll<Result<BiStreams<Self>, Self::Error>>;
 
 		/// Poll to open a unidirectional stream scheduled by `options`, which blocks while
 		/// there are too many concurrent streams.
 		fn poll_open_uni(
-			&mut self,
-			cx: &mut Context<'_>,
+			&self,
+			waiter: &kio::Waiter,
 			options: SendOptions<'_, <Self::SendStream as SendStream>::Group>,
 		) -> Poll<Result<Self::SendStream, Self::Error>>;
 
 		/// Poll to open a bidirectional stream, its sending half scheduled by `options`, which
 		/// blocks while there are too many concurrent streams.
 		fn poll_open_bi(
-			&mut self,
-			cx: &mut Context<'_>,
+			&self,
+			waiter: &kio::Waiter,
 			options: SendOptions<'_, <Self::SendStream as SendStream>::Group>,
 		) -> Poll<Result<BiStreams<Self>, Self::Error>>;
+
+		/// Open a request stream without waiting for stream credit.
+		///
+		/// `None` refuses the request before opening a stream. `Pending` means the stream
+		/// already has credit but its transport header is waiting for send capacity.
+		/// Native QUIC and qmux implement this admission check. Iroh retains its waiting
+		/// open behavior, and browser-backed sessions retain their browser's behavior.
+		fn poll_open_request(
+			&self,
+			waiter: &kio::Waiter,
+			options: SendOptions<'_, <Self::SendStream as SendStream>::Group>,
+		) -> Poll<Result<Option<BiStreams<Self>>, Self::Error>>;
 
 		/// Open a send group at `priority`, or `None` when the transport orders streams by
 		/// their own priority alone.
@@ -281,7 +286,7 @@ pub mod poll {
 		/// priority get an equal share of bytes however many streams each has queued. Streams
 		/// outside every group go before all of them. The group is released once its last
 		/// handle is dropped and its streams finish.
-		fn send_group(&mut self, priority: i64) -> Option<<Self::SendStream as SendStream>::Group>;
+		fn send_group(&self, priority: i64) -> Option<<Self::SendStream as SendStream>::Group>;
 
 		/// Send a datagram scheduled by `options`, best-effort.
 		///
@@ -299,13 +304,13 @@ pub mod poll {
 		/// - Payload is larger than `max_datagram_size()`
 		/// - Peer is not receiving datagrams.
 		fn send_datagram(
-			&mut self,
+			&self,
 			payload: Bytes,
 			options: SendOptions<'_, <Self::SendStream as SendStream>::Group>,
 		) -> Result<(), Self::Error>;
 
 		/// Poll for a datagram from the network.
-		fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>>;
+		fn poll_recv_datagram(&self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Self::Error>>;
 
 		/// The maximum size of a datagram that can be sent.
 		fn max_datagram_size(&self) -> usize;
@@ -320,23 +325,22 @@ pub mod poll {
 		fn protocol(&self) -> Option<&str>;
 
 		/// Return where this transport carries the request target.
-		fn binding(&self) -> super::Binding;
+		fn address(&self) -> super::Address;
 
 		/// Close the connection immediately with a code and reason.
 		///
 		/// Idempotent, and deliberately infallible: closing an already-closed connection
 		/// achieved what the caller asked for, and there is nothing they could do with an
 		/// error.
-		fn close(&mut self, code: u32, reason: &str);
+		fn close(&self, code: u32, reason: &str);
 
 		/// Poll until the connection is closed by either side.
-		fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error>;
+		fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Self::Error>;
 
-		/// Return connection-level statistics.
-		///
-		/// Return [`super::StatsUnavailable`] if the transport does not track them. Required
-		/// rather than defaulted for the same reason as [`protocol`](Self::protocol).
-		fn stats(&self) -> impl Stats;
+		/// Return connection-level metrics; by default, none are tracked.
+		fn metrics(&self) -> impl Metrics {
+			Untracked
+		}
 
 		/// Return the wire counters this transport updates, or `None` when it tracks none.
 		fn wire(&self) -> Option<super::Wire> {
@@ -352,57 +356,79 @@ pub mod poll {
 		}
 
 		/// Accept the next unidirectional stream opened by the peer.
-		fn accept_uni(&mut self) -> AcceptUni<'_, Self> {
-			AcceptUni(self)
+		fn accept_uni(&self) -> AcceptUni<'_, Self> {
+			AcceptUni::new(self)
 		}
 
 		/// Accept the next bidirectional stream opened by the peer.
-		fn accept_bi(&mut self) -> AcceptBi<'_, Self> {
-			AcceptBi(self)
+		fn accept_bi(&self) -> AcceptBi<'_, Self> {
+			AcceptBi::new(self)
 		}
 
 		/// Open a unidirectional stream scheduled by `options`, waiting for stream credit if
 		/// necessary.
 		fn open_uni<'a>(
-			&'a mut self,
+			&'a self,
 			options: SendOptions<'a, <Self::SendStream as SendStream>::Group>,
 		) -> OpenUni<'a, Self> {
-			OpenUni { session: self, options }
+			OpenUni {
+				session: self,
+				options,
+				park: kio::Park::default(),
+			}
 		}
 
 		/// Open a bidirectional stream, its sending half scheduled by `options`, waiting for
 		/// stream credit if necessary.
 		fn open_bi<'a>(
-			&'a mut self,
+			&'a self,
 			options: SendOptions<'a, <Self::SendStream as SendStream>::Group>,
 		) -> OpenBi<'a, Self> {
-			OpenBi { session: self, options }
+			OpenBi {
+				session: self,
+				options,
+				park: kio::Park::default(),
+			}
 		}
 
 		/// Receive the next datagram from the peer.
-		fn recv_datagram(&mut self) -> RecvDatagram<'_, Self> {
-			RecvDatagram(self)
+		fn recv_datagram(&self) -> RecvDatagram<'_, Self> {
+			RecvDatagram::new(self)
 		}
 
 		/// Wait until the session is closed by either side, returning the reason.
-		fn closed(&mut self) -> SessionClosed<'_, Self> {
-			SessionClosed(self)
+		fn closed(&self) -> SessionClosed<'_, Self> {
+			SessionClosed::new(self)
 		}
 	}
 
 	/// One in-flight `poll_*` operation as a [`Future`]: the helpers below are
 	/// named types (not `impl Future`) so their `Send`-ness stays inferred from
-	/// the transport; an opaque return type in a trait would hide it.
+	/// the transport; an opaque return type in a trait would hide it. Each holds
+	/// the [`kio::Park`] that keeps its waiter registered between polls.
 	macro_rules! poll_future {
 		($(#[$doc:meta])* $name:ident, $bound:path, $poll:ident, $out:ty) => {
 			$(#[$doc])*
-			pub struct $name<'a, S: ?Sized>(&'a mut S);
+			pub struct $name<'a, S: ?Sized> {
+				inner: &'a S,
+				park: kio::Park,
+			}
 
-			impl<S: $bound> Future for $name<'_, S> {
+			impl<'a, S: ?Sized> $name<'a, S> {
+				fn new(inner: &'a S) -> Self {
+					Self {
+						inner,
+						park: kio::Park::default(),
+					}
+				}
+			}
+
+			impl<S: $bound + ?Sized> Future for $name<'_, S> {
 				type Output = $out;
 
 				fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-					self.0.$poll(cx)
+					let this = &mut *self;
+					this.inner.$poll(this.park.hold(cx))
 				}
 			}
 		};
@@ -418,17 +444,18 @@ pub mod poll {
 	macro_rules! open_future {
 		($(#[$doc:meta])* $name:ident, $poll:ident, $out:ty) => {
 			$(#[$doc])*
-			pub struct $name<'a, S: Session> {
-				session: &'a mut S,
+			pub struct $name<'a, S: Session + ?Sized> {
+				session: &'a S,
 				options: SendOptions<'a, <S::SendStream as SendStream>::Group>,
+				park: kio::Park,
 			}
 
-			impl<S: Session> Future for $name<'_, S> {
+			impl<S: Session + ?Sized> Future for $name<'_, S> {
 				type Output = $out;
 
 				fn poll(self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
 					let this = self.get_mut();
-					this.session.$poll(cx, this.options)
+					this.session.$poll(this.park.hold(cx), this.options)
 				}
 			}
 		};
@@ -450,14 +477,104 @@ pub mod poll {
 		/// A pending [`SendStream::closed`].
 		SendClosed, SendStream, poll_closed, Result<(), S::Error>);
 
-	/// A transport whose session, streams, and errors can be captured by the
-	/// boxed drivers (`Send` boxes on native): what the moq-transport path
-	/// requires until it too becomes named machines. Implemented automatically.
+	/// A session shared with the client or server that runs it, so the caller can still close
+	/// or watch it.
+	impl<S: Session + ?Sized> Session for std::sync::Arc<S> {
+		type SendStream = S::SendStream;
+		type RecvStream = S::RecvStream;
+		type Error = S::Error;
+
+		fn poll_accept_uni(&self, waiter: &kio::Waiter) -> Poll<Result<Self::RecvStream, Self::Error>> {
+			(**self).poll_accept_uni(waiter)
+		}
+
+		fn poll_accept_bi(&self, waiter: &kio::Waiter) -> Poll<Result<BiStreams<Self>, Self::Error>> {
+			(**self).poll_accept_bi(waiter)
+		}
+
+		fn poll_open_uni(
+			&self,
+			waiter: &kio::Waiter,
+			options: SendOptions<'_, <Self::SendStream as SendStream>::Group>,
+		) -> Poll<Result<Self::SendStream, Self::Error>> {
+			(**self).poll_open_uni(waiter, options)
+		}
+
+		fn poll_open_bi(
+			&self,
+			waiter: &kio::Waiter,
+			options: SendOptions<'_, <Self::SendStream as SendStream>::Group>,
+		) -> Poll<Result<BiStreams<Self>, Self::Error>> {
+			(**self).poll_open_bi(waiter, options)
+		}
+
+		fn poll_open_request(
+			&self,
+			waiter: &kio::Waiter,
+			options: SendOptions<'_, <Self::SendStream as SendStream>::Group>,
+		) -> Poll<Result<Option<BiStreams<Self>>, Self::Error>> {
+			(**self).poll_open_request(waiter, options)
+		}
+
+		fn send_group(&self, priority: i64) -> Option<<Self::SendStream as SendStream>::Group> {
+			(**self).send_group(priority)
+		}
+
+		fn send_datagram(
+			&self,
+			payload: Bytes,
+			options: SendOptions<'_, <Self::SendStream as SendStream>::Group>,
+		) -> Result<(), Self::Error> {
+			(**self).send_datagram(payload, options)
+		}
+
+		fn poll_recv_datagram(&self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Self::Error>> {
+			(**self).poll_recv_datagram(waiter)
+		}
+
+		fn max_datagram_size(&self) -> usize {
+			(**self).max_datagram_size()
+		}
+
+		fn protocol(&self) -> Option<&str> {
+			(**self).protocol()
+		}
+
+		fn address(&self) -> super::Address {
+			(**self).address()
+		}
+
+		fn close(&self, code: u32, reason: &str) {
+			(**self).close(code, reason)
+		}
+
+		fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Self::Error> {
+			(**self).poll_closed(waiter)
+		}
+
+		fn metrics(&self) -> impl Metrics {
+			(**self).metrics()
+		}
+
+		fn wire(&self) -> Option<super::Wire> {
+			(**self).wire()
+		}
+
+		fn probe(&self) -> Option<super::Probe> {
+			(**self).probe()
+		}
+	}
+
+	/// A transport that the async client and server can box:
+	/// the session, its streams, send groups, and errors are thread-safe on native.
+	/// Implemented automatically.
+	///
+	/// Boxing is what compiles the session code once per binary rather than once per
+	/// transport.
 	pub trait Boxable:
 		Session<
-			SendStream: MaybeSend + SendStream<Group: MaybeSend + MaybeSync>,
-			RecvStream: MaybeSend,
-			Error: MaybeSend,
+			SendStream: MaybeSend + MaybeSync + SendStream<Group: MaybeSend + MaybeSync>,
+			RecvStream: MaybeSend + MaybeSync,
 		> + MaybeSend
 		+ MaybeSync
 	{
@@ -465,9 +582,8 @@ pub mod poll {
 
 	impl<S> Boxable for S where
 		S: Session<
-				SendStream: MaybeSend + SendStream<Group: MaybeSend + MaybeSync>,
-				RecvStream: MaybeSend,
-				Error: MaybeSend,
+				SendStream: MaybeSend + MaybeSync + SendStream<Group: MaybeSend + MaybeSync>,
+				RecvStream: MaybeSend + MaybeSync,
 			> + MaybeSend
 			+ MaybeSync
 	{
@@ -535,7 +651,7 @@ pub mod poll {
 		/// Poll to write some of the buffer to the stream, returning how many bytes were
 		/// written. See [`poll_write_buf`](Self::poll_write_buf) for the partial-write
 		/// contract, which this shares.
-		fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>>;
+		fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Self::Error>>;
 
 		/// Poll to write some of the given buffer to the stream, advancing it by the
 		/// number of bytes written. This may be less than the whole buffer, so callers
@@ -555,8 +671,8 @@ pub mod poll {
 		/// Override this to avoid a copy when the underlying transport can take
 		/// ownership of `buf`'s bytes: see [`Buf::copy_to_bytes`], which is free for a
 		/// [`Bytes`] source.
-		fn poll_write_buf<B: Buf>(&mut self, cx: &mut Context<'_>, buf: &mut B) -> Poll<Result<usize, Self::Error>> {
-			let size = ready!(self.poll_write(cx, buf.chunk()))?;
+		fn poll_write_buf<B: Buf>(&mut self, waiter: &kio::Waiter, buf: &mut B) -> Poll<Result<usize, Self::Error>> {
+			let size = ready!(self.poll_write(waiter, buf.chunk()))?;
 			buf.advance(size);
 			Poll::Ready(Ok(size))
 		}
@@ -604,26 +720,38 @@ pub mod poll {
 		///
 		/// Some implementations do not support FIN acknowledgement, in which case this
 		/// resolves once the FIN is sent.
-		fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>>;
+		fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>>;
 
 		/// Write some of the buffer, returning how many bytes were accepted.
 		fn write<'a>(&'a mut self, buf: &'a [u8]) -> Write<'a, Self> {
-			Write { stream: self, buf }
+			Write {
+				stream: self,
+				buf,
+				park: kio::Park::default(),
+			}
 		}
 
 		/// Write some of the buffer, advancing it by the bytes accepted.
 		fn write_buf<'a, B: Buf>(&'a mut self, buf: &'a mut B) -> WriteBuf<'a, Self, B> {
-			WriteBuf { stream: self, buf }
+			WriteBuf {
+				stream: self,
+				buf,
+				park: kio::Park::default(),
+			}
 		}
 
 		/// Write the entire chunk to the stream.
 		fn write_chunk(&mut self, chunk: Bytes) -> WriteChunk<'_, Self> {
-			WriteChunk { stream: self, chunk }
+			WriteChunk {
+				stream: self,
+				chunk,
+				park: kio::Park::default(),
+			}
 		}
 
 		/// Wait until the stream is closed by either side.
-		fn closed(&mut self) -> SendClosed<'_, Self> {
-			SendClosed(self)
+		fn closed(&self) -> SendClosed<'_, Self> {
+			SendClosed::new(self)
 		}
 	}
 
@@ -631,6 +759,7 @@ pub mod poll {
 	pub struct Write<'a, S: ?Sized> {
 		stream: &'a mut S,
 		buf: &'a [u8],
+		park: kio::Park,
 	}
 
 	impl<S: SendStream> Future for Write<'_, S> {
@@ -638,7 +767,7 @@ pub mod poll {
 
 		fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
 			let this = &mut *self;
-			this.stream.poll_write(cx, this.buf)
+			this.stream.poll_write(this.park.hold(cx), this.buf)
 		}
 	}
 
@@ -646,6 +775,7 @@ pub mod poll {
 	pub struct WriteBuf<'a, S: ?Sized, B> {
 		stream: &'a mut S,
 		buf: &'a mut B,
+		park: kio::Park,
 	}
 
 	impl<S: SendStream, B: Buf> Future for WriteBuf<'_, S, B> {
@@ -653,7 +783,7 @@ pub mod poll {
 
 		fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
 			let this = &mut *self;
-			this.stream.poll_write_buf(cx, this.buf)
+			this.stream.poll_write_buf(this.park.hold(cx), this.buf)
 		}
 	}
 
@@ -661,6 +791,7 @@ pub mod poll {
 	pub struct WriteChunk<'a, S: ?Sized> {
 		stream: &'a mut S,
 		chunk: Bytes,
+		park: kio::Park,
 	}
 
 	impl<S: SendStream> Future for WriteChunk<'_, S> {
@@ -668,8 +799,9 @@ pub mod poll {
 
 		fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
 			let this = &mut *self;
+			let waiter = this.park.hold(cx);
 			while !this.chunk.is_empty() {
-				ready!(this.stream.poll_write_buf(cx, &mut this.chunk))?;
+				ready!(this.stream.poll_write_buf(waiter, &mut this.chunk))?;
 			}
 			Poll::Ready(Ok(()))
 		}
@@ -702,7 +834,7 @@ pub mod poll {
 		///
 		/// A lease may borrow the transport's connection state, so release it before
 		/// touching any other stream of the session.
-		fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<Self::Lease<'_>, Self::Error>>;
+		fn poll_lease(&mut self, waiter: &kio::Waiter, want: usize) -> Poll<Result<Self::Lease<'_>, Self::Error>>;
 
 		/// Rank this stream for eviction when incomplete messages exhaust the receive window.
 		///
@@ -723,11 +855,11 @@ pub mod poll {
 		///
 		/// An empty `max` reads nothing and returns an empty chunk: asking for no bytes is
 		/// not end of stream.
-		fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
+		fn poll_read_chunk(&mut self, waiter: &kio::Waiter, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
 			if max == 0 {
 				return Poll::Ready(Ok(Some(Bytes::new())));
 			}
-			let mut lease = ready!(self.poll_lease(cx, 1))?;
+			let mut lease = ready!(self.poll_lease(waiter, 1))?;
 			if !lease.has_remaining() {
 				return Poll::Ready(Ok(None));
 			}
@@ -738,7 +870,11 @@ pub mod poll {
 
 		/// Read the next chunk, up to `max` bytes, or `None` once finished.
 		fn read_chunk(&mut self, max: usize) -> ReadChunk<'_, Self> {
-			ReadChunk { stream: self, max }
+			ReadChunk {
+				stream: self,
+				max,
+				park: kio::Park::default(),
+			}
 		}
 	}
 
@@ -763,6 +899,7 @@ pub mod poll {
 	pub struct ReadChunk<'a, S: ?Sized> {
 		stream: &'a mut S,
 		max: usize,
+		park: kio::Park,
 	}
 
 	impl<S: RecvStream> Future for ReadChunk<'_, S> {
@@ -770,7 +907,7 @@ pub mod poll {
 
 		fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
 			let this = &mut *self;
-			this.stream.poll_read_chunk(cx, this.max)
+			this.stream.poll_read_chunk(this.park.hold(cx), this.max)
 		}
 	}
 
@@ -783,7 +920,7 @@ pub mod poll {
 
 		/// Poll for the next chunk, up to `max` bytes, or `None` once the peer finished the
 		/// stream.
-		fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>>;
+		fn poll_read_chunk(&mut self, waiter: &kio::Waiter, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>>;
 
 		/// Send a `STOP_SENDING` code. See [`RecvStream::stop`].
 		///
@@ -832,12 +969,12 @@ pub mod poll {
 		where
 			S: 'a;
 
-		fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<BufferedLease<'_>, S::Error>> {
+		fn poll_lease(&mut self, waiter: &kio::Waiter, want: usize) -> Poll<Result<BufferedLease<'_>, S::Error>> {
 			while self.len < want && !self.fin {
 				// Whatever the transport has in one piece: a transport handing over whole
 				// messages, like the memory one, keeps a large frame in a single chunk, so it
 				// reaches the consumer without a copy. Each read still ends at what has arrived.
-				match ready!(self.inner.poll_read_chunk(cx, usize::MAX))? {
+				match ready!(self.inner.poll_read_chunk(waiter, usize::MAX))? {
 					Some(chunk) if chunk.is_empty() => {}
 					Some(chunk) => {
 						self.len += chunk.len();
@@ -943,7 +1080,7 @@ mod tests {
 
 	impl Chunks for Queue {
 		type Error = crate::Error;
-		fn poll_read_chunk(&mut self, _: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
+		fn poll_read_chunk(&mut self, _: &kio::Waiter, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
 			match self.chunks.pop_front() {
 				Some(chunk) => {
 					let n = chunk.len().min(max);
@@ -972,11 +1109,11 @@ mod tests {
 	/// A lease waits for `want` across chunks, and dropping it keeps every unread byte for the next.
 	#[test]
 	fn lease_waits_for_want_and_drop_keeps_unread() {
-		let mut cx = Context::from_waker(std::task::Waker::noop());
+		let waiter = kio::Waiter::noop();
 		let mut stream = buffered(&[b"ab", b"cd"], false);
 
 		{
-			let Poll::Ready(Ok(lease)) = stream.poll_lease(&mut cx, 3) else {
+			let Poll::Ready(Ok(lease)) = stream.poll_lease(&waiter, 3) else {
 				panic!("both chunks were ready")
 			};
 			assert_eq!(lease.remaining(), 4);
@@ -984,8 +1121,8 @@ mod tests {
 			assert_eq!(lease.chunks().collect::<Vec<_>>(), [b"ab", b"cd"]);
 		}
 
-		assert!(stream.poll_lease(&mut cx, 5).is_pending(), "nothing more arrived");
-		let Poll::Ready(Ok(lease)) = stream.poll_lease(&mut cx, 1) else {
+		assert!(stream.poll_lease(&waiter, 5).is_pending(), "nothing more arrived");
+		let Poll::Ready(Ok(lease)) = stream.poll_lease(&waiter, 1) else {
 			panic!("the dropped lease's bytes are still there")
 		};
 		let mut lease = lease;
@@ -993,7 +1130,7 @@ mod tests {
 		lease.advance(3);
 		lease.release();
 
-		let Poll::Ready(Ok(lease)) = stream.poll_lease(&mut cx, 0) else {
+		let Poll::Ready(Ok(lease)) = stream.poll_lease(&waiter, 0) else {
 			panic!("want 0 never waits")
 		};
 		assert_eq!(lease.chunk(), b"d");
@@ -1004,10 +1141,10 @@ mod tests {
 	/// finished stream leases what is left with its FIN.
 	#[test]
 	fn copy_to_bytes_and_fin_ends_short() {
-		let mut cx = Context::from_waker(std::task::Waker::noop());
+		let waiter = kio::Waiter::noop();
 		let mut stream = buffered(&[b"abc", b"de"], true);
 
-		let Poll::Ready(Ok(mut lease)) = stream.poll_lease(&mut cx, 10) else {
+		let Poll::Ready(Ok(mut lease)) = stream.poll_lease(&waiter, 10) else {
 			panic!("a finished stream leases short")
 		};
 		assert!(lease.is_fin());
@@ -1033,10 +1170,10 @@ mod tests {
 	#[test]
 	fn a_large_chunk_is_leased_whole() {
 		static FRAME: [u8; 1 << 20] = [7; 1 << 20];
-		let mut cx = Context::from_waker(std::task::Waker::noop());
+		let waiter = kio::Waiter::noop();
 		let mut stream = buffered(&[&FRAME], true);
 
-		let Poll::Ready(Ok(mut lease)) = stream.poll_lease(&mut cx, 1) else {
+		let Poll::Ready(Ok(mut lease)) = stream.poll_lease(&waiter, 1) else {
 			panic!("the chunk was ready")
 		};
 		let chunk = lease.copy_to_bytes(FRAME.len());
@@ -1047,12 +1184,12 @@ mod tests {
 	/// Stopping discards what was buffered and stops the transport.
 	#[test]
 	fn stop_discards_the_buffer() {
-		let mut cx = Context::from_waker(std::task::Waker::noop());
+		let waiter = kio::Waiter::noop();
 		let mut stream = buffered(&[b"abc"], false);
-		assert!(stream.poll_lease(&mut cx, 1).is_ready());
+		assert!(stream.poll_lease(&waiter, 1).is_ready());
 		stream.stop(7);
 		assert_eq!(stream.get_ref().stopped, Some(7));
-		assert!(stream.poll_lease(&mut cx, 1).is_pending());
+		assert!(stream.poll_lease(&waiter, 1).is_pending());
 	}
 
 	trait NowOrNever {

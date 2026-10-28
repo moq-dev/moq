@@ -83,12 +83,15 @@ v4l2 = ["dep:moq-v4l", "dep:libc"]
 # backend that can produce or consume one. It pulls no graphics API by itself.
 dmabuf = ["dep:libc", "dep:linux-raw-sys"]
 # GPU rendering of decoded frames (the `render` module): a wgpu pipeline that
-# converts a frame to RGBA and hands back a texture the caller presents. wgpu
-# loads Vulkan / Metal / D3D at runtime, so this costs compile time and nothing
-# else; a relay or headless publisher drops it. `dmabuf` adds the Linux surface
-# vocabulary; Vulkan itself still comes from wgpu.
+# converts a frame to RGBA and hands back a texture the caller presents, and the
+# export that hands a drawn texture to an encoder. wgpu loads Vulkan / Metal / D3D
+# at runtime, so this costs compile time and nothing else; a relay or headless
+# publisher drops it. `dmabuf` adds the Linux surface vocabulary; Vulkan itself
+# still comes from wgpu, and `ash` names the handles the export allocates on
+# wgpu's own Vulkan device.
 render = [
     "dmabuf",
+    "dep:ash",
     "dep:bytemuck",
     "dep:wgpu",
     "dep:objc2-metal",
@@ -239,7 +242,8 @@ objc2-screen-capture-kit = { workspace = true }
 # that feed a hardware encoder MFT zero-copy; without a GPU it falls back to CPU
 # NV12 deinterleaved to I420 for openh264. Links only system import libs, no
 # vendor SDK. The Direct3D11 / Dxgi features cover the shared D3D11 device and
-# the `IMFDXGIBuffer` surfaces wrapping each captured texture.
+# the `IMFDXGIBuffer` surfaces wrapping each captured texture; Direct3D12 and
+# Security cover the `render` export's textures shared from wgpu's device.
 windows = { version = "0.62", features = [
     "Foundation",
     "Foundation_Metadata",
@@ -249,9 +253,11 @@ windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_System_Com",
     "Win32_Media_MediaFoundation",
+    "Win32_Security",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D10",
     "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Direct3D12",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
@@ -282,3 +288,6 @@ pollster = { workspace = true }
 # `start_paused`, so the capture driver tests run on mocked time.
 tokio = { workspace = true, features = ["test-util"] }
 tracing-test = { workspace = true }
+
+[lints]
+workspace = true

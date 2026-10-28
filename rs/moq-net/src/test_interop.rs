@@ -24,6 +24,183 @@ pub(crate) fn fin(version: &str, started: bool, clean: bool, responses: Vec<u8>)
 	serde_json::from_slice(&bun("bare-fin.ts", input)).expect("JS publisher returned response bytes")
 }
 
+/// Rust updates keep the JS subscription alive, cover both unseen groups after narrowing,
+/// and fill cached history with the update's ID and the actual group deltas on draft-22.
+#[test]
+#[ignore = "requires Bun; run by just test interop"]
+fn ietf_range_updates_interop() {
+	use crate::coding::Decode;
+	use ietf::{EndLocation, Filter, Location, Message, RequestId};
+	#[derive(serde::Deserialize)]
+	struct Served {
+		responses: Vec<Vec<u8>>,
+		streams: Vec<Vec<u8>>,
+	}
+	for version in [ietf::Version::Draft18, ietf::Version::Draft22] {
+		let draft22 = Filter::is_draft22(version);
+		let range = |start, end: Option<u64>| Filter::Absolute {
+			start: Location {
+				group: start,
+				object: 0,
+			},
+			end: end.map(|group| EndLocation { group, object: None }),
+		};
+		let mut subscribe = Vec::new();
+		let mut w = Encoder::new(&mut subscribe, version.into());
+		w.varint(ietf::Subscribe::ID).unwrap();
+		ietf::Subscribe {
+			request_id: RequestId(0),
+			track_namespace: crate::Path::from_static("room"),
+			track_name: "video".into(),
+			subscriber_priority: 127,
+			group_order: ietf::GroupOrder::Ascending,
+			filter: if draft22 { range(4, None) } else { Filter::Unfiltered },
+			fill: None,
+			properties_wanted: false,
+			forward: true,
+			rendezvous: false,
+			range_filters: false,
+			authorization_token: None,
+			new_group: None,
+			max_age: None,
+			epoch: None,
+		}
+		.encode(&mut w, version)
+		.unwrap();
+		let update = |id, filter, fill| {
+			let mut bytes = Vec::new();
+			let mut w = Encoder::new(&mut bytes, version.into());
+			w.varint(ietf::SubscribeUpdate::ID).unwrap();
+			ietf::SubscribeUpdate {
+				request_id: RequestId(id),
+				subscriber_priority: None,
+				forward: None,
+				filter: Some(filter),
+				authorization_token: None,
+				new_group: None,
+				max_age: None,
+				fill,
+			}
+			.encode(&mut w, version)
+			.unwrap();
+			bytes
+		};
+		let mut updates = Vec::new();
+		if draft22 {
+			updates.push(update(
+				2,
+				range(0, None),
+				Some(ietf::Fill {
+					group_order: Some(ietf::GroupOrder::Ascending),
+					filter: Some(range(0, None)),
+					range_filters: false,
+				}),
+			));
+		} else {
+			updates.push(update(2, range(10, None), None));
+		}
+		updates.push(update(4, range(6, Some(7)), None));
+		let input = serde_json::json!({
+			"draft": crate::Version::from(version).code() & 0xff,
+			"subscribe": subscribe,
+			"updates": updates,
+		});
+		let served: Served = serde_json::from_slice(&bun("ietf-range-updates.ts", input)).unwrap();
+		assert_eq!(served.responses.len(), 3);
+		for (index, bytes) in served.responses.iter().enumerate() {
+			let mut r = Decoder::new(bytes, version.into());
+			if index == 0 {
+				assert_eq!(r.varint().unwrap(), ietf::SubscribeOk::ID);
+				let ok = ietf::SubscribeOk::decode(&mut r, version).unwrap();
+				assert_eq!(ok.track_alias, 0);
+				assert_eq!(ok.largest, draft22.then_some(Location { group: 3, object: 1 }));
+			} else {
+				assert_eq!(r.varint().unwrap(), ietf::RequestOk::ID);
+				let ok = ietf::RequestOk::decode(&mut r, version).unwrap();
+				assert_eq!(
+					ok.largest,
+					if draft22 {
+						Some(Location {
+							group: index as u64 + 2,
+							object: 1,
+						})
+					} else {
+						(index == 2).then_some(Location { group: 8, object: 1 })
+					}
+				);
+			}
+			assert!(r.is_empty());
+		}
+		let mut groups = Vec::new();
+		let mut filled = Vec::new();
+		for bytes in &served.streams {
+			let mut r = Decoder::new(bytes, version.into());
+			if r.varint().unwrap() == ietf::FetchHeader::TYPE {
+				assert!(draft22);
+				assert_eq!(
+					ietf::FetchHeader::decode(&mut r, version).unwrap().request_id,
+					RequestId(2)
+				);
+				let mut prior: Option<(u64, u64)> = None;
+				while !r.is_empty() {
+					let ietf::FetchObject::Object { group, object, .. } =
+						ietf::FetchObject::decode(&mut r, version).unwrap()
+					else {
+						panic!("a complete cached fill must contain objects");
+					};
+					let location = match (prior, group) {
+						(None, Some(group)) => (group, object.unwrap()),
+						(Some((prior, _)), Some(delta)) => (prior + delta + 1, object.unwrap()),
+						(Some((group, prior)), None) => (group, prior + object.unwrap_or(1)),
+						_ => panic!("fill omitted its first group"),
+					};
+					let len = r.varint().unwrap() as usize;
+					assert_eq!(r.slice(len).unwrap(), [location.0 as u8, location.1 as u8]);
+					filled.push(location);
+					prior = Some(location);
+				}
+			} else {
+				let mut r = Decoder::new(bytes, version.into());
+				let header = ietf::GroupHeader::decode(&mut r, version).unwrap();
+				assert_eq!(header.track_alias, 0, "updates must retain the subscription alias");
+				assert!(header.flags.has_end, "a complete group must end");
+				let mut objects = Vec::new();
+				while !r.is_empty() {
+					let delta = r.varint().unwrap();
+					let object = objects.last().map_or(delta, |prior| prior + delta + 1);
+					if header.flags.has_extensions {
+						let len = r.varint().unwrap() as usize;
+						r.slice(len).unwrap();
+					}
+					let len = r.varint().unwrap() as usize;
+					assert_eq!(r.slice(len).unwrap(), [header.group_id as u8, object as u8]);
+					objects.push(object);
+				}
+				groups.push((header.group_id, objects));
+			}
+		}
+		groups.sort_unstable();
+		assert_eq!(
+			groups,
+			if draft22 {
+				vec![(3, vec![]), (4, vec![0, 1]), (6, vec![0, 1]), (7, vec![0, 1])]
+			} else {
+				vec![(6, vec![0, 1]), (7, vec![0, 1])]
+			},
+			"{version}"
+		);
+		assert_eq!(
+			filled,
+			if draft22 {
+				(0..4).flat_map(|group| [(group, 0), (group, 1)]).collect::<Vec<_>>()
+			} else {
+				vec![]
+			},
+			"{version}"
+		);
+	}
+}
+
 /// Every varint size boundary in both formats, plus the 2^53 edge of a JS `number`. js/net's own
 /// tests cover leading-ones values past 2^62 - 1, where the QUIC form stops.
 #[test]
@@ -36,7 +213,7 @@ fn varint_interop() {
 	values.push(varint::MAX_QUIC);
 
 	let quic = Form::Quic;
-	let leading_ones = Form::from(ietf::Version::Draft17);
+	let leading_ones = Form::from(ietf::Version::Draft18);
 	let encode = |v: u64, form: Form| {
 		let mut buf = Vec::new();
 		Encoder::new(&mut buf, form).varint(v).unwrap();
@@ -252,25 +429,11 @@ fn ietf_datagram_interop() {
 	use crate::coding::Decode;
 	use crate::{Timescale, Timestamp};
 
-	let all = [
-		ietf::Version::Draft14,
-		ietf::Version::Draft15,
-		ietf::Version::Draft16,
-		ietf::Version::Draft17,
-		ietf::Version::Draft18,
-		ietf::Version::Draft19,
-		ietf::Version::Draft20,
-		ietf::Version::Draft21,
-		ietf::Version::Draft22,
-	];
-	for (draft, version) in (14..).zip(all) {
-		let legacy = matches!(
-			version,
-			ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16
-		);
+	let all = [ietf::Version::Draft18, ietf::Version::Draft22];
+	for (draft, version) in [18, 22].into_iter().zip(all) {
 		let mut properties = Vec::new();
 		let mut w = Encoder::new(&mut properties, version.into());
-		ietf::encode_object_time(&mut w, Timestamp::from_millis(1234).unwrap(), Timescale::MILLI, version).unwrap();
+		ietf::encode_object_time(&mut w, Timestamp::from_millis(1234).unwrap(), Timescale::MILLI).unwrap();
 
 		// What a publisher sends: Object 0, explicit priority, ending its group, stamped.
 		let mut datagrams = vec![ietf::ObjectDatagram {
@@ -291,28 +454,15 @@ fn ietf_datagram_interop() {
 			properties: None,
 			body: ietf::DatagramBody::Status(0),
 		});
-		if version != ietf::Version::Draft14 {
-			datagrams.push(ietf::ObjectDatagram {
-				track_alias: (1 << 40) + 1,
-				group_id: (1 << 50) + 1,
-				object_id: Some(1 << 20),
-				publisher_priority: None,
-				end_of_group: true,
-				properties: None,
-				body: ietf::DatagramBody::Payload(bytes::Bytes::new()),
-			});
-		}
-		if legacy {
-			datagrams.push(ietf::ObjectDatagram {
-				track_alias: 1,
-				group_id: 2,
-				object_id: Some(0),
-				publisher_priority: Some(0),
-				end_of_group: false,
-				properties: Some(properties.clone()),
-				body: ietf::DatagramBody::Status(3),
-			});
-		}
+		datagrams.push(ietf::ObjectDatagram {
+			track_alias: (1 << 40) + 1,
+			group_id: (1 << 50) + 1,
+			object_id: Some(1 << 20),
+			publisher_priority: None,
+			end_of_group: true,
+			properties: None,
+			body: ietf::DatagramBody::Payload(bytes::Bytes::new()),
+		});
 		let encoded: Vec<Vec<u8>> = datagrams
 			.iter()
 			.map(|datagram| datagram.encode_bytes(version).unwrap().to_vec())
@@ -383,7 +533,7 @@ fn lite_tracks_interop() {
 
 	let version = lite::Version::Lite07;
 	let request = lite::Tracks {
-		broadcast: crate::Path::new("room"),
+		broadcast: crate::Path::from_static("room"),
 		epoch: None,
 	}
 	.encode_bytes(version)
@@ -404,6 +554,7 @@ fn lite_tracks_interop() {
 				format!("+{name}")
 			}
 			lite::TracksEvent::Removed { name } => format!("-{name}"),
+			lite::TracksEvent::Finished { name } => format!("~{name}"),
 			lite::TracksEvent::Synced => "synced".to_string(),
 		});
 	}
@@ -443,29 +594,15 @@ fn ietf_track_status_interop() {
 	use crate::coding::Decode;
 	use crate::ietf::error::request;
 
-	let all = [
-		ietf::Version::Draft14,
-		ietf::Version::Draft15,
-		ietf::Version::Draft16,
-		ietf::Version::Draft17,
-		ietf::Version::Draft18,
-		ietf::Version::Draft19,
-		ietf::Version::Draft20,
-		ietf::Version::Draft21,
-		ietf::Version::Draft22,
-	];
-	for (draft, version) in (14..).zip(all) {
-		let legacy = matches!(
-			version,
-			ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16
-		);
+	let all = [ietf::Version::Draft18, ietf::Version::Draft22];
+	for (draft, version) in [18, 22].into_iter().zip(all) {
 		let request = |id: u64, namespace: &str, wanted: bool| {
 			let mut buf = Vec::new();
 			let mut w = Encoder::new(&mut buf, version.into());
 			w.varint(<ietf::TrackStatus as ietf::Message>::ID).unwrap();
 			ietf::TrackStatus {
 				request_id: ietf::RequestId(id),
-				track_namespace: crate::Path::new(namespace),
+				track_namespace: crate::Path::new(namespace).unwrap(),
 				track_name: "video".into(),
 				properties_wanted: wanted,
 				epoch: None,
@@ -484,19 +621,17 @@ fn ietf_track_status_interop() {
 
 		for (index, wanted) in [true, false].into_iter().enumerate() {
 			let mut r = Decoder::new(&responses[index], version.into());
-			assert_eq!(r.varint().unwrap(), ietf::TrackStatusOk::id(version), "{version}");
+			assert_eq!(
+				r.varint().unwrap(),
+				<ietf::TrackStatusOk as ietf::Message>::ID,
+				"{version}"
+			);
 			let ok = ietf::TrackStatusOk::decode(&mut r, version).unwrap();
 			assert!(r.is_empty(), "{version}: trailing bytes");
 
 			let expected = match version {
-				// GROUP_ORDER is a field on draft-14 and a parameter on draft-15.
-				ietf::Version::Draft14 | ietf::Version::Draft15 => ietf::Properties {
-					group_order: Some(ietf::GroupOrder::Descending),
-					..Default::default()
-				},
-				ietf::Version::Draft16 | ietf::Version::Draft17 => ietf::Properties::default(),
-				// Only draft-20 can carry the opt-out.
-				_ if !wanted && ietf::Filter::is_draft20(version) => ietf::Properties::default(),
+				// Only draft-22 can carry the opt-out.
+				_ if !wanted && ietf::Filter::is_draft22(version) => ietf::Properties::default(),
 				_ => ietf::Properties {
 					unknown: Default::default(),
 					dynamic_groups: false,
@@ -511,7 +646,6 @@ fn ietf_track_status_interop() {
 			assert_eq!(
 				ok,
 				ietf::TrackStatusOk {
-					request_id: legacy.then_some(ietf::RequestId(1 + 2 * index as u64)),
 					largest: Some(ietf::Location { group: 4, object: 1 }),
 					properties: expected,
 				},
@@ -521,10 +655,7 @@ fn ietf_track_status_interop() {
 
 		let mut r = Decoder::new(&responses[2], version.into());
 		let code = match r.varint().unwrap() {
-			ietf::TRACK_STATUS_ERROR_14 if version == ietf::Version::Draft14 => {
-				ietf::SubscribeError::decode(&mut r, version).unwrap().error_code
-			}
-			id if id == <ietf::RequestError as ietf::Message>::ID && version != ietf::Version::Draft14 => {
+			id if id == <ietf::RequestError as ietf::Message>::ID => {
 				ietf::RequestError::decode(&mut r, version).unwrap().error_code
 			}
 			id => panic!("{version}: unexpected refusal type {id}"),

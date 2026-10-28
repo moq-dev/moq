@@ -1,6 +1,6 @@
 import type * as Epoch from "../epoch.ts";
 import { ProtocolViolation } from "../error.ts";
-import { type Cost, type Hop, HopSchema, MAX_HOPS, UNKNOWN_HOP } from "../hop.ts";
+import { type Cost, type Hop, HopSchema, MAX_HOPS, UNKNOWN_HOP, wireHop } from "../hop.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import { decodeEpoch, encodeEpoch } from "./epoch.ts";
@@ -117,7 +117,7 @@ async function encodeHops(w: Writer, version: Version, hops: Hop[]) {
 			// Lite04+: hop count + individual Hop varints.
 			await w.u53(hops.length);
 			for (const origin of hops) {
-				await w.u62(origin);
+				await w.u62(wireHop(origin, version));
 			}
 			break;
 	}
@@ -407,9 +407,8 @@ export class AnnounceHistory {
 			const keep = msg.pathBase.keep;
 			if (keep > head.length) throw new ProtocolViolation(`announce keeps ${keep} of ${head.length} segments`);
 			suffix = Path.join(Path.from(...head.slice(0, keep)), suffix);
-			if (Path.parts(suffix).length > Path.MAX_PARTS) {
-				throw new ProtocolViolation(`path exceeds ${Path.MAX_PARTS} parts`);
-			}
+			const error = Path.check(suffix);
+			if (error) throw new ProtocolViolation(error);
 		}
 		const hops = this.#hops(msg.hops, msg.hopBase);
 		this.#live.set(this.#next++, { suffix, hops });
@@ -440,19 +439,17 @@ export class AnnounceHistory {
  */
 export class AnnounceRequest {
 	prefix: Path.Valid;
-	/** Lite04/05 only: the 62-bit Hop id of the peer asking for announces, which the
-	 * publisher uses to skip announces that already passed through it. Zero means "no
-	 * exclusion". Not on the wire elsewhere, so a value set here is ignored when encoding
-	 * for another version and decodes as zero.
-	 *
-	 * Must be a bigint: peer origins are up to 62 bits and overflow u53. */
-	excludeHop: bigint;
+	/** Lite04/05 only: the Hop id of the peer asking for announces, which the publisher
+	 * uses to skip announces that already passed through it. {@link UNKNOWN_HOP} means
+	 * "no exclusion". Not on the wire elsewhere, so a value set here is ignored when
+	 * encoding for another version and decodes as unknown. */
+	excludeHop: Hop;
 	/** Lite07+: also announce routes with a `.`-prefixed segment below the prefix. Not on
 	 * the wire earlier, so a value set here is ignored when encoding for an older version
 	 * and decodes as false. */
 	hidden: boolean;
 
-	constructor(prefix: Path.Valid, excludeHop: bigint = 0n, hidden = false) {
+	constructor(prefix: Path.Valid, excludeHop: Hop = UNKNOWN_HOP, hidden = false) {
 		this.prefix = prefix;
 		this.excludeHop = excludeHop;
 		this.hidden = hidden;
@@ -461,7 +458,7 @@ export class AnnounceRequest {
 	async #encode(w: Writer, version: Version) {
 		await w.string(Path.encode(this.prefix));
 		if (hasExcludeHop(version)) {
-			await w.u62(this.excludeHop);
+			await w.u62(wireHop(this.excludeHop, version));
 		}
 		if (hasHidden(version)) {
 			await w.bool(this.hidden);
@@ -470,7 +467,7 @@ export class AnnounceRequest {
 
 	static async #decode(r: Reader, version: Version): Promise<AnnounceRequest> {
 		const prefix = Path.decode(await r.string());
-		const excludeHop = hasExcludeHop(version) ? await r.u62() : 0n;
+		const excludeHop = hasExcludeHop(version) ? HopSchema.parse(await r.u62()) : UNKNOWN_HOP;
 		const hidden = hasHidden(version) ? await r.bool() : false;
 		return new AnnounceRequest(prefix, excludeHop, hidden);
 	}
@@ -557,7 +554,7 @@ export class AnnounceOk {
 	}
 
 	async #encode(w: Writer, version: Version) {
-		await w.u62(this.hop);
+		await w.u62(wireHop(this.hop, version));
 		if (!hasSynced(version)) await w.u53(this.active);
 	}
 

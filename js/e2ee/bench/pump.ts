@@ -27,22 +27,24 @@ for (const bytes of [160, 1_160, 16_384, 262_144]) {
 			const net = new Broadcast.Producer().createTrack(await generation.name("video"), {
 				timescale: Time.Timescale.MILLI,
 			});
-			const consumer = credential.consume(generation.epoch).consume(net.subscribe({ maxDelay: Milli(60_000) }));
-			const producer = await generation.produce(net);
+			const consumer = credential
+				.consume(generation.epoch)
+				.consume(net.subscribe({ maxDelay: Milli(60_000) }), "video");
+			const producer = await generation.produce(net, "video");
 
 			const sealStart = performance.now();
 			const pending: Promise<void>[] = [];
 			let group = producer.appendGroup();
 			for (let frame = 0; frame < frames; frame++) {
 				if (frame > 0 && frame % GROUP_FRAMES === 0) {
-					group.close();
+					group.finish();
 					group = producer.appendGroup();
 				}
 				pending.push(group.writeFrame(Time.Timestamp.fromMillis(frame), payload));
 				if (pending.length >= depth) await pending.shift();
 			}
 			await Promise.all(pending);
-			group.close();
+			group.finish();
 			const sealed = performance.now();
 
 			let read = 0;
@@ -52,6 +54,7 @@ for (const bytes of [160, 1_160, 16_384, 262_144]) {
 				while (await received.readFrame()) read++;
 			}
 			const opened = performance.now();
+			producer.finish();
 			producer.close();
 			consumer.close();
 

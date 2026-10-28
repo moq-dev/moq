@@ -29,10 +29,19 @@ spike assumed no consumer; teleoperation uplinks are one):
 - [The receive-ts spike](/quest/m2/quic-realtime/receive-ts.md) gates the
   candidates. A negative verdict on the forward-delay signal switches the
   candidates to RTT gradients rather than abandoning the epic.
-- Bake-off: all three candidates in parallel, each behind
-  `congestion::Controller` in `moq-quic`. The spike's moq-shaper uplink
+- Bake-off: all three candidates in parallel, each a controller
+  in `moq-congestion`. The spike's moq-shaper uplink
   presets decide it; the report states the shaper's timing jitter as the
   noise floor of the delay signal.
+- Native probing is required (decided 2026-10-25, maintainer). Every
+  candidate implements `moq_congestion::Controller::probes` and reports
+  `probe_inflight`, so moq-quic's native probing
+  ([moq-dev/moq#6635](https://github.com/moq-dev/moq/pull/6635)) still
+  raises its estimate, and the bake-off measures probing alongside queuing
+  delay. Reason: the [native rung disable](/quest/m1/simulcast-rung-disable.md)
+  only stops a rung on a session with a sender, so a `Realtime` that cannot
+  probe would silently leave moq-cli, OBS, and FFI simulcast publishers with
+  no rung disable or recovery. A candidate that cannot probe does not ship.
 - Naming: add `Realtime` to `moq_tokio::quic::CongestionControl` (`realtime`
   on the CLI and in TOML), which is `non_exhaustive`, so it is additive.
   `Delay` keeps meaning BBR3; reword its doc line to say model-based, since
@@ -65,14 +74,14 @@ owns that feedback.
 ## Required
 
 - [Receive-ts spike](/quest/m2/quic-realtime/receive-ts.md) - the extension in `moq-quic` and a verdict on its forward-delay signal
-- [GCC candidate](/quest/m2/quic-realtime/gcc.md) - libwebrtc's GoogCC vendored into `moq-quic` and refreshed to current WebRTC
+- [GCC candidate](/quest/m2/quic-realtime/gcc.md) - libwebrtc's GoogCC vendored into `moq-congestion` and refreshed to current WebRTC
 - [BBR3 delay bound](/quest/m2/quic-realtime/bbr-delay-bound.md) - BBR3 with inflight capped when the forward delay gradient shows queue growth
-- [SCReAMv2 candidate](/quest/m2/quic-realtime/scream.md) - the RFC 8298bis delay path ported to `moq-quic`
+- [SCReAMv2 candidate](/quest/m2/quic-realtime/scream.md) - the RFC 8298bis delay path ported to `moq-congestion`
 - [moqsink encoder feedback](/quest/m2/quic-realtime/moqsink-feedback.md) - GStreamer publishers retune their encoder to the target rate
 
 ## Related
 
 - [Per-stream deadlines](/quest/m2/quic-deadline.md) - also consumes the forward-delay estimate
-- [BBR media study](/quest/m2/quic-bbr-natural-drain.md) - BBR3 behavior under media, the baseline here
+- [BBR media study](/quest/m2/quic-bbr-study.md) - BBR3 behavior under media, the baseline here
 - [Measure ECN on the backbone](/quest/m2/quic-ecn-measure.md) - decides whether SCReAMv2's L4S path is worth porting
 - [QUIC on the sim](/quest/m2/quic-sim.md) - deterministic successor to the moq-shaper harness once it lands

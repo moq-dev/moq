@@ -46,18 +46,18 @@ Every interview prompt and the selected answer (✅) are in the planning PR.
   built on first demand, shared across readers, billed to the cache pool, and
   dropped with its group. A thousand old-lite viewers cost one inflate.
 - **Signaling:** lite-07 TrackInfo carries the codec id and the frame header the
-  size; IETF draft-17+ carries them only
+  size; IETF carries them only
   after both peers advertise a setup parameter, because unknown track
-  properties are discarded. Lite-01..06, IETF draft-14/15/16, and IETF peers without the
+  properties are discarded. Lite-01..06 and IETF peers without the
   parameter get the inflated copy, with no flag. A sealed compression
   declaration is preserved, so delivery is refused when plain fallback would
   remove it.
-- **Ranges.** A range starting at frame N of a compressed group is served
-  from N. The requester only asks from N because it holds 0..N-1, so it
-  inflates from its own cached prefix. Reading frame N without 0..N-1 is a
-  non-goal: groups are delta encoded anyway. The requesting model enforces
-  it: a start on a compressed group it lacks the prefix for widens to frame
-  0 before the request leaves, and a server serves exactly what is asked.
+- **Ranges.** Compressed tracks are not special: every subscription, new or
+  resumed, starts at the beginning of a group, and one resuming from another
+  route may take the group's start from that route's cached prefix
+  (maintainer, on [moq-dev/moq#6465](https://github.com/moq-dev/moq/pull/6465)). Application
+  ranges and fetches name whole groups, so a compressed group always
+  inflates from a prefix its requester holds.
 - **Specs:** draft-lcurley-moq-flate keeps the codec and becomes the IETF
   extension; draft-lcurley-moq-lite specifies the lite-07 field and size and
   references it for the codec.
@@ -74,17 +74,15 @@ Every interview prompt and the selected answer (✅) are in the planning PR.
 This README owns the end-to-end proof and the guide once every child lands:
 
 - A Rust publisher's compressed `catalog.json` reaches a JS player over
-  lite-07 compressed, and a lite-06 and an IETF draft-14 subscriber through
+  lite-07 compressed, and a lite-06 and a plain IETF subscriber through
   moq-relay inflated, from one inflate on the relay.
 - A short guide under `doc/` on when to set `compress`, what each protocol
   version receives, and the cost on the relay.
 
 ## Required
 
-- [Mid-group subscriptions widen](/quest/m1/compress/app-range-widen.md) - an application range starting mid-group on a compressed track widens to frame 0 at the subscriber instead of failing with `Lagged`
 - [Migrate](/quest/m1/compress/migrate.md) - catalogs, stats, and timelines publish one compressed track; moq-flate, @moq/flate, and every `.z` name are gone
 
 ## Related
 
-- [Refresh](/quest/m1/refresh/README.md) - its byte ratio measures the stored, compressed group
-- [Front eviction](/quest/m2/unbounded-groups/front-eviction.md) - a compressed group's evicted prefix must refill before a reader can inflate past it
+- [Front eviction](/quest/m1/unbounded-groups/front-eviction.md) - a compressed group's evicted prefix must refill before a reader can inflate past it

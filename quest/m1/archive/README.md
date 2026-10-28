@@ -11,8 +11,8 @@ host publishes at a path of its choosing. Track, group, and frame structure and
 payloads survive byte for byte, so any consumer of the live broadcast, HLS
 included, works on the stored one.
 
-The catalog carries no archive pointer. Timelines survive only as an opt-in
-`hls` field for HLS compatibility.
+The catalog carries no archive pointer. Timelines survive only as a
+per-rendition `hls` field for HLS compatibility.
 
 ## Plan
 
@@ -24,7 +24,7 @@ archive (per-track `.timeline.z` records named by the catalog's root
   layout and catalog section are deleted with no version bump or migration
   path; an old prefix holds no keys the new consumer recognizes and is
   refused as empty. This supersedes the earlier rule to preserve the v1 and v2
-  formats. Add the `moq-archive` and `hang` entries to their `MIGRATE.md`.
+  formats. The Impact bullet says how to migrate in `moq-archive` and `hang`.
 - **Discovery is pull**, decided 2026-10-19 in place of SUBSCRIBE_ALL's push:
   ANNOUNCE finds the broadcasts under a prefix, a moq-lite TRACKS request
   lists each broadcast's tracks as they appear, and the archive SUBSCRIBEs per
@@ -57,7 +57,7 @@ archive (per-track `.timeline.z` records named by the catalog's root
   every rendition) and size-based cuts. The
   `archive::Producer` records the rest.
 - **Hosts serve archives, relays do not.** `archive::Consumer` serves a stored
-  prefix through `broadcast::Dynamic` and `track::Dynamic`, the archived
+  prefix through `broadcast::Requests` and `track::Requests`, the archived
   catalog included as an ordinary track, and a host publishes it at a path of
   its choosing. Rejected: a moq-relay storage fallback. Also rejected: serving
   the archive as a covering-prefix route under the original path, which
@@ -68,10 +68,10 @@ archive (per-track `.timeline.z` records named by the catalog's root
 - **Seek by time.** A `Time(pts)` range end
   ([Subscribe ranges](/quest/m1/subscribe-ranges/README.md)) is resolved by
   whoever holds the track, the cache or an archive consumer. DVR seeks with it.
-- **`hls` is for HLS only, and opt-in.** A per-rendition catalog field names a
-  track whose (first group, pts) records mark each HLS segment, and a publisher
-  enabling it aligns segments across renditions
-  ([Catalog HLS field](/quest/m1/archive/catalog-hls.md)). The root `archive`
+- **`hls` is for HLS only.** A per-rendition catalog field names a
+  track whose (first group, pts) records mark each HLS segment, each rendition
+  cutting its own on a pts grid so they line up wherever keyframes do
+  (Catalog HLS field, landed). The root `archive`
   section is deleted everywhere. Rejected: always-on timelines.
 
 Protected broadcasts stay out of scope. Recording keying, retention policy,
@@ -84,10 +84,7 @@ from a host. Each child fixes the stale docs it touches.
 
 ## Required
 
-- [Archive consumer](/quest/m1/archive/consumer.md) - `archive::Consumer` serves a stored prefix as a broadcast from its key listing, and `moq export/import archive` use the new pair
-- [Catalog HLS field](/quest/m1/archive/catalog-hls.md) - the root `archive` section is gone; an opt-in per-rendition `hls` field marks each aligned HLS segment's first group and pts and declares its nominal duration
 - [Fixed HLS target duration](/quest/m1/archive/hls-target.md) - one `EXT-X-TARGETDURATION` for the run, from the declared `hls` duration; an overrun is listed with a warning
-- [History from the retained floor](/quest/m1/archive/history-floor.md) - HLS history over an archive consumer broadcast whose start was pruned lists from its oldest stored segment
 
 ## Related
 

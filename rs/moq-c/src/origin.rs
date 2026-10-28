@@ -32,7 +32,7 @@ pub struct Origin {
 	broadcast_request: NonZeroSlab<(moq_net::origin::Request, crate::ffi::Background)>,
 
 	/// Claim answers being filled before their exact route is announced.
-	prepared: NonZeroSlab<(moq_net::origin::Prepared, crate::ffi::Background)>,
+	prepared: NonZeroSlab<(moq_net::origin::Prepared, crate::ffi::Background, Id)>,
 }
 
 #[derive(Clone)]
@@ -118,7 +118,7 @@ impl AnnouncedRecord {
 
 struct DynamicEntry {
 	task: Task,
-	inner: Option<moq_net::origin::Dynamic>,
+	inner: Option<moq_net::origin::Requests>,
 }
 
 impl Origin {
@@ -321,11 +321,11 @@ impl Origin {
 	/// Create an unannounced broadcast at `path` on an origin.
 	///
 	/// Errors with [`Error::Moq`] if the path is outside the origin's scope.
-	pub fn create_broadcast<P: moq_net::AsPath>(
+	pub fn create_broadcast<P: TryInto<moq_net::Path, Error: Into<moq_net::Error>>>(
 		&self,
 		origin: Id,
 		path: P,
-	) -> Result<(moq_net::broadcast::Producer, crate::ffi::Background), Error> {
+	) -> Result<(moq_net::origin::Publication, crate::ffi::Background), Error> {
 		let origin = self.get(origin)?;
 		let result = origin.producer.create_broadcast(path);
 		origin.driver.check()?;
@@ -338,7 +338,7 @@ impl Origin {
 		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
 		origin.driver.check()?;
 		let driver = origin.driver.clone();
-		let result = origin.producer.dynamic(prefix);
+		let result = origin.producer.requests(prefix);
 		origin.driver.check()?;
 		let inner = result?;
 		let (task, close) = Task::new(on_request);
@@ -422,14 +422,15 @@ impl Origin {
 		&mut self,
 		prepared: moq_net::origin::Prepared,
 		driver: crate::ffi::Background,
+		broadcast: Id,
 	) -> Result<Id, Error> {
-		self.prepared.insert((prepared, driver))
+		self.prepared.insert((prepared, driver, broadcast))
 	}
 
 	pub fn prepared_take(
 		&mut self,
 		prepared: Id,
-	) -> Result<(moq_net::origin::Prepared, crate::ffi::Background), Error> {
+	) -> Result<(moq_net::origin::Prepared, crate::ffi::Background, Id), Error> {
 		self.prepared.remove(prepared).ok_or(Error::NotFound)
 	}
 
@@ -455,8 +456,8 @@ mod supervision_tests {
 			})
 			.unwrap();
 		let mut publish = crate::publish::Publish::default();
-		let broadcast = publish
-			.create(origins.create_broadcast(origin, "retained").unwrap())
+		let (publication, _broadcast) = publish
+			.create_publication(origins.create_broadcast(origin, "retained").unwrap())
 			.unwrap();
 		origins.close(origin).unwrap();
 		*trigger
@@ -465,13 +466,13 @@ mod supervision_tests {
 		assert!(matches!(completion.finished().await, Err(Error::Panic)));
 		drop(completion);
 		assert!(matches!(
-			publish.announce(broadcast, Default::default()),
+			publish.announce(publication, Default::default()),
 			Err(Error::Panic)
 		));
 		let healthy = origins.create().unwrap();
-		let broadcast = publish
-			.create(origins.create_broadcast(healthy, "healthy").unwrap())
+		let (publication, _broadcast) = publish
+			.create_publication(origins.create_broadcast(healthy, "healthy").unwrap())
 			.unwrap();
-		publish.announce(broadcast, Default::default()).unwrap();
+		publish.announce(publication, Default::default()).unwrap();
 	}
 }

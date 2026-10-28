@@ -8,12 +8,12 @@
 
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::task::{Context, Poll};
+use std::task::Poll;
 use std::time::Duration;
 
 use bytes::{Buf, Bytes};
 use moq_clock::Instant;
-use moq_net::transport::{self as net, Binding, poll};
+use moq_net::transport::{self as net, Address, poll};
 use moq_quic::{Dir, Side, StreamId, TransportError, TransportErrorCode, VarInt, mux};
 use rustc_hash::FxHashMap;
 
@@ -34,7 +34,7 @@ struct Inner {
 	/// Updated by the reader and writer, so stats never take the lock.
 	wire: net::Wire,
 	socket_stats: Option<SharedSocketStats>,
-	binding: Binding,
+	address: Address,
 }
 
 struct State {
@@ -441,13 +441,14 @@ impl Drop for Guard {
 
 /// A multiplexed session over a reliable transport.
 ///
-/// Clones share the session; each carries its own parking so concurrent pending operations
-/// don't trample each other's wakeups. Dropping the last clone closes the session with an
-/// APPLICATION_CLOSE of code 0; streams outliving it fail.
+/// Clones share the session, and every operation parks the caller's own waiter. Dropping the
+/// last clone closes the session with an APPLICATION_CLOSE of code 0; streams outliving it
+/// fail.
+#[derive(Clone)]
 pub struct Session {
 	inner: Arc<Inner>,
-	guard: Arc<Guard>,
-	park: kio::Park,
+	// Held for its drop, which closes the session once the last clone goes.
+	_guard: Arc<Guard>,
 	/// The application protocol, cached at establishment so `protocol()` can borrow it.
 	protocol: Option<String>,
 }
@@ -498,17 +499,16 @@ impl Session {
 			}),
 			wire: net::Wire::new(),
 			socket_stats: transport.socket_stats(),
-			binding: transport.binding(),
+			address: transport.address(),
 		});
 
-		let (writer, reader) = transport.split();
+		let (writer, reader) = transport.split(&config);
 		let reader = tokio::spawn(run_reader(inner.clone(), reader));
 		tokio::spawn(run_writer(inner.clone(), writer, reader));
 
 		Ok(Self {
-			guard: Arc::new(Guard(inner.clone())),
+			_guard: Arc::new(Guard(inner.clone())),
 			inner,
-			park: kio::Park::default(),
 			protocol: config.negotiated_protocol(),
 		})
 	}
@@ -548,7 +548,7 @@ impl Session {
 	/// Open a send group at `priority`, for streams to join with
 	/// [`SendStream::set_group`](poll::SendStream::set_group) and datagrams with
 	/// [`SendOptions`](poll::SendOptions).
-	pub fn send_group(&self, priority: i64) -> SendGroup {
+	fn send_group(&self, priority: i64) -> SendGroup {
 		let id = self.inner.lock().conn.send_groups().open(priority);
 		SendGroup(Arc::new(GroupInner {
 			inner: self.inner.clone(),
@@ -556,8 +556,7 @@ impl Session {
 		}))
 	}
 
-	fn poll_accept_dir(&mut self, cx: &Context<'_>, dir: Dir) -> Poll<Result<StreamId, Error>> {
-		let waiter = self.park.hold(cx);
+	fn poll_accept_dir(&self, waiter: &kio::Waiter, dir: Dir) -> Poll<Result<StreamId, Error>> {
 		let mut state = self.inner.lock();
 		if let Some(id) = state.conn.streams().accept(dir) {
 			return Poll::Ready(Ok(id));
@@ -573,12 +572,11 @@ impl Session {
 	}
 
 	fn poll_open_dir(
-		&mut self,
-		cx: &Context<'_>,
+		&self,
+		waiter: &kio::Waiter,
 		dir: Dir,
 		options: poll::SendOptions<'_, SendGroup>,
 	) -> Poll<Result<StreamId, Error>> {
-		let waiter = self.park.hold(cx);
 		let mut state = self.inner.lock();
 		if let Some(err) = &state.closed {
 			return Poll::Ready(Err(err.clone()));
@@ -591,17 +589,6 @@ impl Session {
 		}
 		waiter.register(&mut state.open_waiters);
 		Poll::Pending
-	}
-}
-
-impl Clone for Session {
-	fn clone(&self) -> Self {
-		Self {
-			inner: self.inner.clone(),
-			guard: self.guard.clone(),
-			park: kio::Park::default(),
-			protocol: self.protocol.clone(),
-		}
 	}
 }
 
@@ -626,13 +613,13 @@ impl poll::Session for Session {
 	type RecvStream = RecvStream;
 	type Error = Error;
 
-	fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<RecvStream, Error>> {
-		self.poll_accept_dir(cx, Dir::Uni)
+	fn poll_accept_uni(&self, waiter: &kio::Waiter) -> Poll<Result<RecvStream, Error>> {
+		self.poll_accept_dir(waiter, Dir::Uni)
 			.map_ok(|id| RecvStream::new(self.inner.clone(), id))
 	}
 
-	fn poll_accept_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<(SendStream, RecvStream), Error>> {
-		self.poll_accept_dir(cx, Dir::Bi).map_ok(|id| {
+	fn poll_accept_bi(&self, waiter: &kio::Waiter) -> Poll<Result<(SendStream, RecvStream), Error>> {
+		self.poll_accept_dir(waiter, Dir::Bi).map_ok(|id| {
 			(
 				SendStream::new(self.inner.clone(), id),
 				RecvStream::new(self.inner.clone(), id),
@@ -641,20 +628,20 @@ impl poll::Session for Session {
 	}
 
 	fn poll_open_uni(
-		&mut self,
-		cx: &mut Context<'_>,
+		&self,
+		waiter: &kio::Waiter,
 		options: poll::SendOptions<'_, SendGroup>,
 	) -> Poll<Result<SendStream, Error>> {
-		self.poll_open_dir(cx, Dir::Uni, options)
+		self.poll_open_dir(waiter, Dir::Uni, options)
 			.map_ok(|id| SendStream::new(self.inner.clone(), id))
 	}
 
 	fn poll_open_bi(
-		&mut self,
-		cx: &mut Context<'_>,
+		&self,
+		waiter: &kio::Waiter,
 		options: poll::SendOptions<'_, SendGroup>,
 	) -> Poll<Result<(SendStream, RecvStream), Error>> {
-		self.poll_open_dir(cx, Dir::Bi, options).map_ok(|id| {
+		self.poll_open_dir(waiter, Dir::Bi, options).map_ok(|id| {
 			(
 				SendStream::new(self.inner.clone(), id),
 				RecvStream::new(self.inner.clone(), id),
@@ -662,11 +649,39 @@ impl poll::Session for Session {
 		})
 	}
 
-	fn send_group(&mut self, priority: i64) -> Option<SendGroup> {
+	fn poll_open_request(
+		&self,
+		waiter: &kio::Waiter,
+		options: poll::SendOptions<'_, SendGroup>,
+	) -> Poll<Result<Option<poll::BiStreams<Self>>, Error>> {
+		let mut state = self.inner.lock();
+		if let Some(err) = &state.closed {
+			return Poll::Ready(Err(err.clone()));
+		}
+		// A session started on an out-of-band protocol (a WebSocket subprotocol) runs before
+		// the peer's transport parameters arrive. Until then its credit is unknown, not spent.
+		if !state.established {
+			waiter.register(&mut state.establish_waiters);
+			return Poll::Pending;
+		}
+		let id = state.conn.streams().open(Dir::Bi, to_quic(options));
+		if id.is_some() {
+			state.driver.wake();
+		}
+		drop(state);
+		Poll::Ready(Ok(id.map(|id| {
+			(
+				SendStream::new(self.inner.clone(), id),
+				RecvStream::new(self.inner.clone(), id),
+			)
+		})))
+	}
+
+	fn send_group(&self, priority: i64) -> Option<SendGroup> {
 		Some(Session::send_group(self, priority))
 	}
 
-	fn send_datagram(&mut self, payload: Bytes, options: poll::SendOptions<'_, SendGroup>) -> Result<(), Error> {
+	fn send_datagram(&self, payload: Bytes, options: poll::SendOptions<'_, SendGroup>) -> Result<(), Error> {
 		let mut state = self.inner.lock();
 		if let Some(err) = &state.closed {
 			return Err(err.clone());
@@ -680,8 +695,7 @@ impl poll::Session for Session {
 		Ok(())
 	}
 
-	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Error>> {
-		let waiter = self.park.hold(cx);
+	fn poll_recv_datagram(&self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Error>> {
 		let mut state = self.inner.lock();
 		if let Some(datagram) = state.conn.datagrams().recv() {
 			return Poll::Ready(Ok(datagram));
@@ -701,11 +715,11 @@ impl poll::Session for Session {
 		Session::protocol(self)
 	}
 
-	fn binding(&self) -> Binding {
-		self.inner.binding
+	fn address(&self) -> Address {
+		self.inner.address
 	}
 
-	fn close(&mut self, code: u32, reason: &str) {
+	fn close(&self, code: u32, reason: &str) {
 		let err = Error::ConnectionClosed {
 			code: code.into(),
 			reason: reason.to_string(),
@@ -713,8 +727,7 @@ impl poll::Session for Session {
 		self.inner.close(code.into(), reason, err);
 	}
 
-	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Error> {
-		let waiter = self.park.hold(cx);
+	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
 		let mut state = self.inner.lock();
 		if let Some(err) = &state.closed {
 			return Poll::Ready(err.clone());
@@ -723,14 +736,12 @@ impl poll::Session for Session {
 		Poll::Pending
 	}
 
-	fn stats(&self) -> impl net::Stats {
+	fn metrics(&self) -> impl net::Metrics {
 		let state = self.inner.lock();
 		// The kernel's view of the socket underneath beats a QX_PING sample: it is there
 		// from the first byte and costs no traffic.
 		let socket = self.inner.socket_stats.as_ref();
-		Stats {
-			sent: state.sent_bytes,
-			received: state.received_bytes,
+		Metrics {
 			rtt: socket.and_then(|stats| stats.rtt()).or(state.conn.rtt()),
 			rate: socket.and_then(|stats| stats.estimated_send_rate()),
 		}
@@ -741,23 +752,13 @@ impl poll::Session for Session {
 	}
 }
 
-/// A snapshot of the session's counters.
-struct Stats {
-	sent: u64,
-	received: u64,
+/// A snapshot of the session's metrics; its [`net::Wire`] holds the byte counts.
+struct Metrics {
 	rtt: Option<Duration>,
 	rate: Option<u64>,
 }
 
-impl net::Stats for Stats {
-	fn bytes_sent(&self) -> Option<u64> {
-		Some(self.sent)
-	}
-
-	fn bytes_received(&self) -> Option<u64> {
-		Some(self.received)
-	}
-
+impl net::Metrics for Metrics {
 	fn rtt(&self) -> Option<Duration> {
 		self.rtt
 	}
@@ -814,7 +815,6 @@ impl std::fmt::Debug for SendGroup {
 pub struct SendStream {
 	inner: Arc<Inner>,
 	id: StreamId,
-	park: kio::Park,
 	/// The FIN was queued; further writes are refused and `poll_closed` waits for it to go
 	/// out.
 	fin: bool,
@@ -836,29 +836,19 @@ impl SendStream {
 		Self {
 			inner,
 			id,
-			park: kio::Park::default(),
 			fin: false,
 			reset: false,
 		}
 	}
 
-	/// Reset the stream with `code`, still delivering the first `offset` bytes written, as
-	/// RESET_STREAM_AT does on draft-02. Elsewhere the prefix is not guaranteed.
-	pub fn reset_at(&mut self, offset: u64, code: u32) {
-		self.reset_with(code, Some(offset));
-	}
-
-	fn reset_with(&mut self, code: u32, offset: Option<u64>) {
+	fn reset_with(&mut self, code: u32) {
 		if self.reset {
 			return;
 		}
 		let code = VarInt::from_u32(code);
 		let mut state = self.inner.lock();
 		// Err means the stream is already gone, which is what we wanted.
-		let _ = match offset {
-			Some(offset) => state.conn.send_stream(self.id).reset_at(offset, code),
-			None => state.conn.send_stream(self.id).reset(code),
-		};
+		let _ = state.conn.send_stream(self.id).reset(code);
 		state.driver.wake();
 		self.reset = true;
 	}
@@ -868,12 +858,11 @@ impl poll::SendStream for SendStream {
 	type Error = Error;
 	type Group = SendGroup;
 
-	fn poll_write(&mut self, cx: &mut Context<'_>, mut buf: &[u8]) -> Poll<Result<usize, Error>> {
-		self.poll_write_buf(cx, &mut buf)
+	fn poll_write(&mut self, waiter: &kio::Waiter, mut buf: &[u8]) -> Poll<Result<usize, Error>> {
+		self.poll_write_buf(waiter, &mut buf)
 	}
 
-	fn poll_write_buf<B: Buf>(&mut self, cx: &mut Context<'_>, buf: &mut B) -> Poll<Result<usize, Error>> {
-		let waiter = self.park.hold(cx);
+	fn poll_write_buf<B: Buf>(&mut self, waiter: &kio::Waiter, buf: &mut B) -> Poll<Result<usize, Error>> {
 		if self.fin || self.reset {
 			return Poll::Ready(Err(Error::StreamClosed));
 		}
@@ -937,11 +926,10 @@ impl poll::SendStream for SendStream {
 	}
 
 	fn reset(&mut self, code: u32) {
-		self.reset_with(code, None);
+		self.reset_with(code);
 	}
 
-	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-		let waiter = self.park.hold(cx);
+	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		if self.reset {
 			return Poll::Ready(Ok(()));
 		}
@@ -994,7 +982,7 @@ enum Read {
 /// An incoming stream. Dropping it unfinished sends STOP_SENDING with code 0.
 ///
 /// Reading returns the peer's connection credit as it goes, so incomplete messages are
-/// bounded by the largest message each rather than by `max_data`, and nothing is evicted.
+/// bounded by the largest message each rather than by `receive_window`, and nothing is evicted.
 pub struct RecvStream(poll::Buffered<RecvChunks>);
 
 impl RecvStream {
@@ -1002,7 +990,6 @@ impl RecvStream {
 		Self(poll::Buffered::new(RecvChunks {
 			inner,
 			id,
-			park: kio::Park::default(),
 			finished: false,
 			reset: None,
 			stopped: false,
@@ -1014,8 +1001,8 @@ impl poll::RecvStream for RecvStream {
 	type Error = Error;
 	type Lease<'a> = poll::BufferedLease<'a>;
 
-	fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<Self::Lease<'_>, Error>> {
-		self.0.poll_lease(cx, want)
+	fn poll_lease(&mut self, waiter: &kio::Waiter, want: usize) -> Poll<Result<Self::Lease<'_>, Error>> {
+		self.0.poll_lease(waiter, want)
 	}
 
 	fn set_priority(&mut self, priority: i64) {
@@ -1037,7 +1024,6 @@ impl std::fmt::Debug for RecvStream {
 struct RecvChunks {
 	inner: Arc<Inner>,
 	id: StreamId,
-	park: kio::Park,
 	/// Every byte up to the FIN was read out of the connection.
 	finished: bool,
 	/// The peer reset the stream with this code. Reading it frees the connection's stream
@@ -1050,8 +1036,7 @@ struct RecvChunks {
 impl poll::Chunks for RecvChunks {
 	type Error = Error;
 
-	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
-		let waiter = self.park.hold(cx);
+	fn poll_read_chunk(&mut self, waiter: &kio::Waiter, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
 		if max == 0 {
 			return Poll::Ready(Ok(Some(Bytes::new())));
 		}
@@ -1100,7 +1085,7 @@ impl poll::Chunks for RecvChunks {
 /// kicks the writer.
 fn read(state: &mut State, id: StreamId, max: usize) -> Read {
 	let mut recv = state.conn.recv_stream(id);
-	let mut chunks = match recv.read(true) {
+	let mut chunks = match recv.read() {
 		Ok(chunks) => chunks,
 		// The stream is gone, so everything it held is already ours.
 		Err(_) => return Read::Finished,

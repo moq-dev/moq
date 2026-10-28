@@ -20,11 +20,19 @@ grow/drain cycles to expose reclamation CPU, copies and allocation churn.
 Preserve arrival cursors, live-edge protection and useful cache retention.
 Correct the accounting explanation with the chosen implementation.
 
-Coordinate with [group storage](/quest/m2/group-storage-bench.md) and
-[log adoption](/quest/m2/perf/kio-channel-contention/log-adoption.md) if their
-representation has changed. [Idle GC](/quest/m1/release-perf/gc-idle.md) owns
-unnecessary clock/lock work, not retained queue backing.
+Coordinate with [Front eviction](/quest/m1/unbounded-groups/front-eviction.md) if
+its representation has changed. Land the benchmark now, but any shrink of the
+`arrival`/`evict` deques waits on
+[log adoption](/quest/m2/perf/kio-channel-contention/log-adoption.md)'s verdict,
+since that quest may move `TrackState` arrival order onto the kio log.
+Idle GC clock and lock work was settled by
+[moq-dev/moq#6291](https://github.com/moq-dev/moq/pull/6291); this owns
+retained queue backing.
 
 Follow the [survey benchmark contract](/quest/m2/performance-survey/README.md):
 baseline first, paired evidence, equivalent work and nightly coverage. A
 measured no-win is valid. No API or wire change is expected; report actual impact.
+
+## Related
+
+- [Log adoption](/quest/m2/perf/kio-channel-contention/log-adoption.md) - may replace the `arrival` deque this quest would shrink

@@ -104,6 +104,7 @@ test("concurrent consumer reads are rejected", async () => {
 	const first = consumer.next();
 
 	expect(() => consumer.next()).toThrow("multiple calls to next not supported");
+	track.finish();
 	track.close();
 	expect(await first).toBeUndefined();
 });
@@ -371,7 +372,7 @@ test("a lagging consumer is told what it missed", async () => {
 		producer.push({ value: { n } });
 		producer.pop(1);
 	}
-	subscriber.setGroups({ start: { included: (await subscriber.largest())?.group ?? 0 } });
+	subscriber.withRange({ start: { included: (await subscriber.largest())?.group ?? 0 } });
 	const events = await live.finish();
 
 	const skipped = events.flatMap((e) => ("skip" in e ? span(e.skip) : []));
@@ -403,13 +404,14 @@ test("consumer resumes at a checkpoint after losing a group", async () => {
 		group.writeFrame({ payload: frame.payload, timestamp: Time.Timestamp.now() });
 		frame.commit();
 		expect((await consumer.next())?.value).toEqual({ push: { index: 0, value: { n: 0 } } });
-		group.close(error);
+		group.abort(error);
 
 		frame = encoder.push({ n: 1 });
 		group = track.appendGroup();
 		group.writeFrame({ payload: frame.payload, timestamp: Time.Timestamp.now() });
 		frame.commit();
-		group.close();
+		group.finish();
+		track.finish();
 		track.close();
 
 		expect((await consumer.next())?.value).toEqual({ push: { index: 1, value: { n: 1 } } });
@@ -424,7 +426,7 @@ test("a fresh consumer adopts the current offset", async () => {
 	producer.pop(3);
 
 	const subscriber = track.subscribe();
-	subscriber.setGroups({ start: { included: (await subscriber.largest())?.group ?? 0 } });
+	subscriber.withRange({ start: { included: (await subscriber.largest())?.group ?? 0 } });
 	const consumer = new Consumer<Rec>({ track: subscriber });
 	producer.finish();
 	const events: Event<Rec>[] = [];
@@ -594,7 +596,7 @@ test("events carry their frame's timestamp, and a header's restated records get 
 	producer.cut();
 	producer.push({ value: { n: 3 }, at: at(400) });
 	producer.finish();
-	late.setGroups({ start: { included: 1 } });
+	late.withRange({ start: { included: 1 } });
 	const events: Timed<Event<Rec>>[] = [];
 	for await (const event of new Consumer<Rec>({ track: late })) events.push(event);
 	expect(events.map((event) => event.value)).toEqual([

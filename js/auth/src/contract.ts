@@ -9,7 +9,7 @@
 
 import { Pattern } from "@moq/pattern";
 import * as z from "@zod/mini";
-import { AccessSchema } from "./access.ts";
+import { PatternListSchema } from "./claims.ts";
 
 const PathSchema = z.string().check(
 	z.refine(
@@ -24,6 +24,9 @@ const PathSchema = z.string().check(
 		{ message: "invalid path" },
 	),
 );
+
+// A relay renders the tier as a metrics label; empty is the default tier.
+const TierSchema = z.string().check(z.regex(/^([A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*)?$/, "invalid tier"));
 
 /** How a session reached the relay; `http` is a one-shot request on the relay's web listener. */
 export const TransportSchema = z.pipe(
@@ -105,7 +108,11 @@ const BaseRequestSchema = z.object({
 	remote: z.optional(z.string()),
 	/** The relay's socket address the session arrived on, absent likewise. */
 	local: z.optional(z.string()),
-	/** The SNI the client presented, when the transport carried TLS. */
+	/**
+	 * The SNI that selected the relay's certificate, absent without TLS or SNI.
+	 * The client picks it among the names the relay serves, so a hostname-scoped
+	 * server binds the tenant to the credential, not to this alone.
+	 */
 	server_name: z.optional(z.string()),
 	/** The negotiated application protocol, including the moq version. */
 	alpn: z.optional(z.string()),
@@ -117,6 +124,8 @@ const BaseRequestSchema = z.object({
 	token: z.optional(TokenSchema),
 	/** The direction the client declared at SETUP; absent means both. */
 	role: z.optional(RoleSchema),
+	/** What the client advertised in its SETUP, such as `moq-net-js/0.4.2`; peer-controlled, so never authorize on it. */
+	implementation: z.optional(z.string()),
 	/** The verified client certificate, when one was presented. */
 	tls: z.optional(PeerSchema),
 });
@@ -160,10 +169,10 @@ export type Request = z.infer<typeof RequestSchema>;
  */
 export const GrantSchema = z
 	.object({
-		/** Publish paths and an optional upload cap, relative to the root. */
-		publish: z.optional(AccessSchema),
-		/** Subscribe paths and an optional download cap, relative to the root. */
-		subscribe: z.optional(AccessSchema),
+		/** Patterns the session may publish, relative to the root. */
+		publish: z.optional(PatternListSchema),
+		/** Patterns the session may subscribe to, relative to the root. */
+		subscribe: z.optional(PatternListSchema),
 		/** The path the patterns are relative to, replacing the dialed one. Absent means the dialed path. */
 		root: z.optional(z.string()),
 		/** Subtrees read from elsewhere: each path, relative to the root, resolves at the absolute path it maps to. Read-only. */
@@ -172,17 +181,21 @@ export const GrantSchema = z
 		expires: z.optional(z.int()),
 		/** How long until the relay asks again, in whole seconds. Zero would be a tight loop. */
 		revalidate: z.optional(z.int().check(z.positive())),
-		/** An opaque label handed to stats, so traffic can be bucketed. */
-		tier: z.optional(z.string()),
+		/** The stats tier this session's traffic is bucketed under: `/`-joined segments of ASCII letters, digits, `.`, `_`, and `-`. */
+		tier: z.optional(TierSchema),
 		/** The literal path this session's stats record under, independent of its root. Absent records under the empty label. */
 		label: z.optional(PathSchema),
-		/** The session is a cluster peer (another relay): what it announces entered the cluster elsewhere. */
+		/**
+		 * The session is a cluster peer (another relay): what it announces entered the cluster elsewhere,
+		 * and it discovers hidden routes without asking, for peers that predate the opt-in.
+		 * A client certificate alone is not.
+		 */
 		peer: z.optional(z.boolean()),
 		/** The peer is upstream: the relay never offers it a route learned from another upstream. Requires `peer`. */
 		upstream: z.optional(z.boolean()),
 	})
 	.check(
-		z.refine((grant) => (grant.publish?.path.size ?? 0) > 0 || (grant.subscribe?.path.size ?? 0) > 0, {
+		z.refine((grant) => (grant.publish?.length ?? 0) > 0 || (grant.subscribe?.length ?? 0) > 0, {
 			message: "a grant must name something",
 		}),
 		z.refine((grant) => grant.revalidate === undefined || grant.expires !== undefined, {
@@ -198,11 +211,11 @@ export type Grant = z.infer<typeof GrantSchema>;
 /** The reason and verified attribution an auth server returns with HTTP 403. */
 export const RefusalSchema = z.object({
 	/** Unknown reason strings read as `refused`. */
-	reason: z.pipe(z.string(), z.catch(z.enum(["refused", "forbidden", "expired"]), "refused")),
+	reason: z.pipe(z.string(), z.catch(z.enum(["refused", "forbidden", "expired", "malformed"]), "refused")),
 	/** A root named by a verified credential, never an unverified request path. */
 	root: z.optional(PathSchema),
-	/** The tier resolved by the decider; absent uses the default tier. */
-	tier: z.optional(z.string()),
+	/** The tier resolved by the decider, as in a grant; absent uses the default tier. */
+	tier: z.optional(TierSchema),
 });
 /** A typed refusal returned by an admission decider. */
 export type Refusal = z.infer<typeof RefusalSchema>;

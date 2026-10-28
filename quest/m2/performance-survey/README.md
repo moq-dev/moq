@@ -70,7 +70,7 @@ benchmark result is claimed.
 
 For settings sweeps, record effective values, not only requested ones.
 [Resolved client defaults](/rs/moq-tokio/src/quic.rs) currently allow 10,000
-streams per direction, 64 MiB connection receive credit, 4 MiB per-stream
+streams per direction, 128 MiB connection receive credit, 4 MiB per-stream
 credit and 16 MiB send credit. [Relay peer overrides](/rs/moq-relay/src/limits.rs)
 allow 100,000 streams and 640 MiB each of connection receive and send credit.
 Standalone backend defaults differ again; benchmark the effective settings
@@ -143,32 +143,34 @@ No duplicate quest or workflow edit belongs here.
 
 ### Existing ownership and deliberately deferred work
 
-- [Release performance](/quest/m1/release-perf/README.md) owns sparse gaps,
-  resume duplicates, idle GC, stats drain, FETCH fan-out, JS frame regressions,
-  and paired comparison correctness. Active PRs already address these.
+- [Release performance](/quest/m1/release-perf/README.md) owns the main
+  against release comparison for this cut, including the sparse read slope;
+  it already fixed or accepted resume duplicates, idle GC, stats drain, FETCH
+  fan-out, JS frame regressions, and paired comparison correctness. The
+  [performance audit](/quest/m2/audit-perf.md) repeats it before later cuts.
 - [Perf](/quest/m2/perf/README.md) owns measured channel contention, relay
   allocations, ingest batching, worker quiescence and runtime selection.
-- [Release audit PR](https://github.com/moq-dev/moq/pull/6311) owns QMux
-  copying/resource growth, CMAF allocation abuse, media reorder queues,
-  watch teardown, and HLS contract investigations. MKV fragmentation below
-  concerns parser replay before those queues; recheck that PR before coding.
-- [Binding bytes](/quest/m2/ffi-bytes.md),
-  [foreign polling](/quest/m2/ffi-poll-protocol.md),
-  [Kotlin calls](/quest/m2/kt-ffi-calls.md),
+- The [release audit](/quest/m1/release-audit/README.md) bounded the media
+  reorder queues in [moq-dev/moq#6453](https://github.com/moq-dev/moq/pull/6453)
+  and fixed QMux copying in
+  [moq-dev/moq#6381](https://github.com/moq-dev/moq/pull/6381). MKV
+  fragmentation below concerns parser replay before those queues.
+- [Binding bytes](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-bytes.md),
+  [foreign polling](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-poll-protocol.md),
+  [Kotlin calls](https://github.com/kixelated/rust2/blob/main/quest/m1/kt-ffi-calls.md),
   [NVENC pooling](/quest/m2/nvenc-pool.md), and
   [watch worker planning](/quest/m2/plan-watch-worker.md) retain their scopes.
 - [Route wakes](/quest/m2/route-wakes.md),
   [keyed prefix polling](/quest/m2/keyed-prefix-polling.md), and
   [front parking](/quest/m2/origin-front-parks.md) own discovery scans/wakes.
-- The [recurring audit](/quest/m1/audit-perf.md) retains real congestion-
+- The [recurring audit](/quest/m2/audit-perf.md) retains real congestion-
   controller/loss-recovery coverage, broader importer/container coverage,
   and publish Fanout/audio-ring profiling. QUIC protocol microbenchmarks use
   `Unlimited`; their numbers cannot establish controller performance. Expand
   reassembly flight/reordering coverage there before proposing another index.
-  [BBR study](/quest/m2/quic-bbr-natural-drain.md) owns controller behavior.
-- Archive reader internals are being replaced by the
-  [archive consumer](/quest/m1/archive/consumer.md). Do not optimize the
-  outgoing timeline reader. Benchmark the landed replacement when revisiting it.
+  [BBR study](/quest/m2/quic-bbr-study.md) owns controller behavior.
+- The archive consumer replaced the timeline reader; benchmark it when
+  revisiting archive reads.
 
 ## Required
 
@@ -196,6 +198,6 @@ No duplicate quest or workflow edit belongs here.
 
 ## Related
 
-- [Performance audit](/quest/m1/audit-perf.md) - nightly regression attribution and remaining coverage
+- [Performance audit](/quest/m2/audit-perf.md) - nightly regression attribution and remaining coverage
 - [Benchmark sources](/quest/m2/bench-sources.md) - publishing existing measurements to the trend table
-- [Nightly comparisons](/quest/m1/bench-ci.md) - paired nightly regression reporting
+- [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - noise floor of the paired nightly regression report

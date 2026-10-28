@@ -171,16 +171,16 @@ async function requestRoundTrip(msg: AnnounceRequest, version: Version): Promise
 // Draft04/05 carry the subscriber's Hop ID so the publisher can skip reflected
 // announces before they hit the wire.
 test("AnnounceRequest carries excludeHop on draft-05", async () => {
-	const got = await requestRoundTrip(new AnnounceRequest(Path.from("room/"), 42n), Version.DRAFT_05);
-	expect(got.excludeHop).toBe(42n);
+	const got = await requestRoundTrip(new AnnounceRequest(Path.from("room"), HopSchema.parse(42n)), Version.DRAFT_05);
+	expect(got.excludeHop).toBe(HopSchema.parse(42n));
 });
 
 // Draft06 dropped the field: the receiver's reflected-announce check catches the same
 // loops, so a value set locally is simply not sent and decodes as zero.
 test("AnnounceRequest drops excludeHop on draft-06", async () => {
-	const msg = new AnnounceRequest(Path.from("room/"), 42n);
+	const msg = new AnnounceRequest(Path.from("room"), HopSchema.parse(42n));
 	const got = await requestRoundTrip(msg, Version.DRAFT_06);
-	expect(got.excludeHop).toBe(0n);
+	expect(got.excludeHop).toBe(UNKNOWN_HOP);
 
 	const with05 = await bytes((w) => msg.encode(w, Version.DRAFT_05), Version.DRAFT_05);
 	const with06 = await bytes((w) => msg.encode(w, Version.DRAFT_06), Version.DRAFT_06);
@@ -190,7 +190,7 @@ test("AnnounceRequest drops excludeHop on draft-06", async () => {
 // Draft07 carries the hidden opt-in; every earlier version decodes as not opted in.
 test("AnnounceRequest carries hidden from draft-07", async () => {
 	for (const hidden of [false, true]) {
-		const msg = new AnnounceRequest(Path.from("room/"), 0n, hidden);
+		const msg = new AnnounceRequest(Path.from("room"), UNKNOWN_HOP, hidden);
 		expect((await requestRoundTrip(msg, Version.DRAFT_07)).hidden).toBe(hidden);
 		expect((await requestRoundTrip(msg, Version.DRAFT_06)).hidden).toBe(false);
 	}
@@ -221,6 +221,22 @@ test("AnnounceOk round-trips a declared origin", async () => {
 	const got = await AnnounceOk.decode(reader, Version.DRAFT_05);
 	expect(got.hop).toBe(HopSchema.parse(42n));
 	expect(got.active).toBe(1);
+});
+
+// A QUIC varint stops at 2^62-1, so draft-06 carries a wider hop as unknown.
+test("a 64-bit hop is unknown on draft-06 and whole on draft-07", async () => {
+	const wide = HopSchema.parse((1n << 64n) - 1n);
+	for (const [version, want] of [
+		[Version.DRAFT_06, UNKNOWN_HOP],
+		[Version.DRAFT_07, wide],
+	] as const) {
+		const got = await roundTrip({ status: "active", suffix: Path.from("room"), hops: [wide] }, version);
+		expect(got).toMatchObject({ hops: [want] });
+
+		const msg = new AnnounceOk(wide, 0);
+		const reader = new Reader(undefined, await bytes((w) => msg.encode(w, version), version), version);
+		expect((await AnnounceOk.decode(reader, version)).hop).toBe(want);
+	}
 });
 
 test("a hop chain that revisits a hop is refused in both directions", async () => {
@@ -372,6 +388,17 @@ test("AnnounceHistory rejects a keep longer than the base", () => {
 		ProtocolViolation,
 	);
 	expect(() => history.update({ id: 0n, hops: [], hopBase: { distance: 1n, keep: 2 } })).toThrow(ProtocolViolation);
+});
+
+test("AnnounceHistory rejects a resolved path past the byte limit", () => {
+	const history = new AnnounceHistory();
+	history.start({ suffix: Path.from("x".repeat(Path.MAX_BYTES - 2)), hops: [] });
+	// `head/y` is exactly the limit, and one byte more is refused.
+	const { suffix } = history.start({ suffix: Path.from("y"), hops: [], pathBase: { distance: 1n, keep: 1 } });
+	expect(suffix.length).toBe(Path.MAX_BYTES);
+	expect(() => history.start({ suffix: Path.from("yz"), hops: [], pathBase: { distance: 1n, keep: 1 } })).toThrow(
+		ProtocolViolation,
+	);
 });
 
 test("AnnounceHistory rejects a resolved chain that repeats a hop", () => {

@@ -20,8 +20,8 @@ both `off` and `ect1` need a `moq-quic` change.
 
 - In `moq-quic`: an `Ect1` marking option and the accounting to keep the two
   codepoints apart, so an L4S response (proportional to the CE fraction per
-  RTT, per RFC 9330 to 9332) can be tried as a `Controller` change without a
-  transport change. Off by default.
+  RTT, per RFC 9330 to 9332) can be tried as a `moq-congestion` controller
+  without a transport change; the controller chooses the codepoint. Off by default.
 - `moq-tokio`'s `[quic]` section gains `ecn = off | ect0 | ect1`, ect0 by
   default (today's behavior on tokio), and `doc/bin/relay/config.md`
   documents it in the same PR.

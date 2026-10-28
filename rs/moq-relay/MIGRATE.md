@@ -5,6 +5,40 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
+
+A session dialed at a URL path with a trailing or doubled `/`, such as `/room/` or `/room//cam`, is refused as a bad request instead of collapsed; dial `/room`. An auth grant whose `root`, `mounts`, `tier`, or `label` has one is refused as forbidden, and `stats.prefix`, `stats.node`, and `--cluster-tier` with one refuse to start.
+
+### `moq_net::Path` has no lifetime
+
+`auth` token fields that were `PathOwned` are `moq_net::Path`. `auth::Token::new` and `auth::Lease::new` return `Result`, refusing a grant whose root, mount, tier, or label is longer than `moq_net::Path::MAX_BYTES`. See moq-net's migration for the rest.
+
+### Tiers are metric-safe names (#6778)
+
+`--cluster-tier` and the auth server's grant and refusal `tier` must be `/`-joined segments of ASCII letters, digits, `.`, `_`, and `-`.
+The relay refuses to start with any other `--cluster-tier`, and treats a grant naming one as an auth server error; rename such tiers, for example `gold tier` to `gold-tier`.
+
+### Unknown `MOQ_*` environment variables stop startup ([#6633](https://github.com/moq-dev/moq/pull/6633))
+
+A `MOQ_*` variable moq-relay does not read, such as a misspelling, a removed name, or one meant for another binary, now stops startup with the variable named instead of being ignored.
+Remove or rename what the error lists.
+
+### Auth `server_name` is the SNI only (#6509)
+
+The auth request's `server_name` no longer falls back to the HTTP `Host` header, `:authority`, or the WebTransport CONNECT host: it is absent over plain `http://` and `ws://` and for an IP-literal dial, while HTTPS and `wss://` report the SNI.
+An auth server that scopes tenants by hostname must see them over TLS, and still binds the tenant to the credential.
+
+### A client certificate alone lists no hidden routes (#6509)
+
+Only a grant with `peer: true` lists `.`-named routes to a session that did not ask for them.
+Have the auth server mark cluster peers as `peer` (`moq auth serve --mtls-peer`) before upgrading, or a peer below moq-lite-07-wip loses those paths.
+
+### `stats.interval` is a duration (#6472)
+
+`stats.interval`, `--stats-interval`, and `MOQ_STATS_INTERVAL` take a duration such as `"1s"` or `"500ms"` instead of a bare number of seconds, and a zero interval refuses to start.
+Write `interval = 5` as `interval = "5s"`.
+In Rust, `stats::Config::interval` is an `Option<Duration>` (`None` publishes every second), and `stats::Config::build` returns a `Result`.
+
 ### `receive_window` has a floor (#5878)
 
 The `[quic]` and `[peer.quic]` `receive_window` must be at least 67108880 bytes (64 MiB plus 16), or the relay refuses to start; the `[quic]` default is now 128 MiB.
@@ -19,6 +53,10 @@ Upgrade any client that still speaks only `webtransport` over WebSocket before t
 
 `uring::Workers::serve(cluster, auth, shutdown, sessions)` is now `spawn` with the same arguments, which sets every worker up without accepting, followed by `serve()`, which starts them accepting.
 Install anything that must be in place before the first session (`Relay::run` installs its signal handlers) between the two.
+
+### `Accepted` takes any transport's handshake (#6176)
+
+`Accepted` loses its transport type parameter, since `moq_net::server::Handshake` has none: write `Accepted` instead of `Accepted<S>`.
 
 ### `supervise` takes a `Serving` guard (#6144)
 
@@ -73,11 +111,11 @@ Give the cluster `with_connect(connect, quic)`, plus `with_iroh(endpoint)` for `
 A `[quic]` `max_streams` of 0 stops startup, as `[peer.quic]` already did, since zero streams wedge the connection.
 Remove it to keep the default.
 
-### Auth roles carry `moq_auth::Access` (#5697)
+### Auth roles are patterns
 
-`auth::Token::publish` and `subscribe` are `moq_auth::Access`, so an embedder reads the patterns from `.path`.
-The relay refuses every grant with a bitrate cap, including one added in-band or at revalidation, because no transport meters it yet; HTTP `/fetch` and `/announced` always refuse caps.
-An embedder running its own gateway must enforce the cap or refuse the grant before forwarding media.
+`auth::Token::publish` and `subscribe` are `moq_auth::Patterns`, matching release.
+Read and construct each pattern union directly instead of using `moq_auth::Access` and `.path`.
+Token and auth-server grant parsers refuse object roles, including bitrate caps, before relay admission; no transport currently enforces a cap.
 
 ### Workers default to unpinned (#5688)
 

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, jest, mock, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { readFileSync } from "node:fs";
 import { Manual, Micro, Milli, Nano, now } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
@@ -7,7 +7,10 @@ import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 import { type Delay, Sync } from "../sync";
-import { SharedRingBuffer } from "./shared-ring-buffer";
+import { Decoder as VideoDecoder } from "../video/decoder";
+import { Source as VideoSource } from "../video/source";
+import type { Message, State } from "./render";
+import { AudioRingBuffer } from "./ring-buffer";
 import { Source } from "./source";
 
 // Bun cannot load the blob-URL worklet import.
@@ -51,8 +54,61 @@ class FakeContext extends EventTarget {
 	};
 }
 
+// Every worklet built.
+let worklets: FakeWorklet[] = [];
+
+// The render worklet's side of the port, synchronous: each message applies to a real ring, and
+// every quantum read reports the ring's state back, the way `render-worklet.ts` does.
 class FakeWorklet {
-	readonly port = Object.assign(new EventTarget(), { postMessage() {}, start() {} });
+	ring?: AudioRingBuffer;
+	#epoch = 0;
+	#playing = true;
+	readonly port = Object.assign(new EventTarget(), {
+		postMessage: (msg: Message) => {
+			if (msg.type === "init") {
+				this.ring = new AudioRingBuffer(msg);
+				this.#playing = msg.playing ?? true;
+			} else if (msg.type === "data") this.ring?.write(msg.timestamp, msg.data);
+			else if (msg.type === "latency") {
+				this.ring?.setLatency(msg.latency);
+				if (msg.park !== undefined) {
+					this.ring?.park();
+					this.#epoch = msg.park;
+				}
+			} else if (msg.type === "truncate") this.ring?.truncate(msg.timestamp);
+			else if (msg.type === "reset") {
+				this.ring?.reset();
+				this.#epoch = msg.epoch;
+				this.#playing = msg.playing ?? true;
+			} else if (msg.type === "playing" && msg.epoch === this.#epoch) this.#playing = msg.playing;
+		},
+		start() {},
+	});
+	constructor() {
+		worklets.push(this);
+	}
+	get stalled(): boolean {
+		return this.ring?.stalled ?? true;
+	}
+	get length(): number {
+		return this.ring?.length ?? 0;
+	}
+	// Render one quantum and report the ring's state back to the main thread.
+	read(output: Float32Array[]): number {
+		const ring = this.ring;
+		if (!ring) return 0;
+		const read = this.#playing ? ring.read(output) : 0;
+		const state: State = {
+			type: "state",
+			timestamp: ring.timestamp,
+			stalled: ring.stalled,
+			anchored: ring.anchored,
+			underruns: ring.underruns,
+			epoch: this.#epoch,
+		};
+		this.port.dispatchEvent(new MessageEvent("message", { data: state }));
+		return read;
+	}
 	disconnect() {}
 }
 
@@ -96,12 +152,22 @@ const globals = [
 const originals = new Map<string, PropertyDescriptor | undefined>();
 let codecs = 0;
 let codecErrors: AudioDecoderInit["error"][] = [];
+// Thrown by the next `decode`, as WebCodecs does synchronously for a chunk it refuses.
+let decodeThrows: Error | undefined;
+let deferAudioOutput = false;
+let pendingAudio: (() => void)[] = [];
+let audioInputs: number[] = [];
 
 beforeEach(() => {
 	frameTimestamp = 0;
 	codecs = 0;
 	codecErrors = [];
+	decodeThrows = undefined;
+	deferAudioOutput = false;
+	pendingAudio = [];
+	audioInputs = [];
 	contexts = [];
+	worklets = [];
 	moduleLoaded = Promise.resolve();
 	for (const name of globals) originals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
 
@@ -119,11 +185,16 @@ beforeEach(() => {
 		}
 		reset() {
 			this.needsKey = true;
+			pendingAudio = [];
 		}
 		decode(chunk: { timestamp: number; type: EncodedAudioChunkType }) {
+			if (decodeThrows) throw decodeThrows;
 			if (this.needsKey && chunk.type !== "key") throw new DOMException("key chunk required", "DataError");
 			this.needsKey = false;
-			this.init.output(new FakeData(chunk.timestamp) as unknown as AudioData);
+			audioInputs.push(chunk.timestamp);
+			const emit = () => this.init.output(new FakeData(chunk.timestamp) as unknown as AudioData);
+			if (deferAudioOutput) pendingAudio.push(emit);
+			else emit();
 		}
 		close() {
 			this.state = "closed";
@@ -159,18 +230,24 @@ afterEach(() => {
 	mock.restore();
 });
 
-// Hands frames to whichever container consumer is reading, and ends a consumer's reads on close.
+// Hands frames to whichever container consumer is reading, and ends a consumer's reads on close. An
+// Error stands in for a malformed read.
 function feed() {
+	let currentConsumer: Container.Consumer | undefined;
 	const closed = new WeakSet<Container.Consumer>();
-	const queue: Read[] = [];
-	let waiter: { consumer: Container.Consumer; resolve: (read: Read | undefined) => void } | undefined;
+	const queue: (Read | Error)[] = [];
+	let waiter:
+		| { consumer: Container.Consumer; resolve: (read: Read | undefined) => void; reject: (err: Error) => void }
+		| undefined;
 
 	spyOn(Container.Consumer.prototype, "next").mockImplementation(function (this: Container.Consumer) {
+		currentConsumer = this;
 		if (closed.has(this)) return Promise.resolve(undefined);
 		const read = queue.shift();
+		if (read instanceof Error) return Promise.reject(read);
 		if (read) return Promise.resolve(read);
-		return new Promise<Read | undefined>((resolve) => {
-			waiter = { consumer: this, resolve };
+		return new Promise<Read | undefined>((resolve, reject) => {
+			waiter = { consumer: this, resolve, reject };
 		});
 	});
 
@@ -184,21 +261,30 @@ function feed() {
 		close.call(this);
 	});
 
-	return (read: Read) => {
+	const push = (read: Read | Error) => {
 		const current = waiter;
 		waiter = undefined;
-		if (current) current.resolve(read);
-		else queue.push(read);
+		if (!current) queue.push(read);
+		else if (read instanceof Error) current.reject(read);
+		else current.resolve(read);
+	};
+	return {
+		push,
+		// Network arrivals can advance while next() is held behind decoder backpressure.
+		buffered: (ranges: Container.BufferedRanges) => {
+			if (!currentConsumer) throw new Error("consumer has not started");
+			(currentConsumer.buffered as Signal<Container.BufferedRanges>).set(ranges);
+		},
 	};
 }
 
 async function play(initial: Delay, buffered = false, cmaf = false) {
 	// These cases test timeline handover after the optional decoder has loaded.
 	if (cmaf) await import("@moq/hang/cmaf");
-	const push = feed();
-	const truncate = spyOn(SharedRingBuffer.prototype, "truncate");
-	const reset = spyOn(SharedRingBuffer.prototype, "reset");
-	const insert = spyOn(SharedRingBuffer.prototype, "insert");
+	const { push, buffered: queued } = feed();
+	const truncate = spyOn(AudioRingBuffer.prototype, "truncate");
+	const reset = spyOn(AudioRingBuffer.prototype, "reset");
+	const insert = spyOn(AudioRingBuffer.prototype, "write");
 
 	let producer = new Moq.Broadcast.Producer();
 	let consumer = producer.consume();
@@ -231,7 +317,8 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 
 	const delay = new Signal<Delay>(initial);
 	const source = new Source({ broadcast, supported: async () => true });
-	const sync = new Sync({ delay, buffer: Milli(buffered ? 1000 : 0) });
+	const buffer = new Signal(Milli(buffered ? 1000 : 0));
+	const sync = new Sync({ delay, buffer });
 	// The decoder's own switch, which a mute or pause turns off.
 	const decoding = new Signal(true);
 	const decoder = new Decoder({ source, sync, enabled: decoding });
@@ -251,7 +338,10 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 
 	return {
 		delay,
+		buffer,
+		sync,
 		push,
+		queued,
 		enabled,
 		decoding,
 		context: decoder.out.context,
@@ -282,8 +372,10 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 			consumer = producer.consume();
 			frameTimestamp = 0;
 		},
+		// The resolved playout target.
+		target: () => sync.out.delay.peek(),
 		// The rings written to, and the timestamps of every frame that reached one.
-		rings: () => [...new Set(insert.mock.contexts)] as SharedRingBuffer[],
+		rings: () => worklets.filter((worklet) => worklet.ring && insert.mock.contexts.includes(worklet.ring)),
 		inserted: () => insert.mock.calls.map(([timestamp]) => timestamp as number),
 		// Each subscription resolves the rendition's broadcast once.
 		subscriptions: () => relativeBroadcast.mock.calls.length,
@@ -298,6 +390,40 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 			producer.close();
 		},
 	};
+}
+
+for (const cmaf of [false, true]) {
+	it(`a ${cmaf ? "CMAF" : "legacy"} gap releases accounting for codec outputs it discarded`, async () => {
+		const clock = new Manual();
+		const installed = clock.install();
+		deferAudioOutput = true;
+		const playback = await play(Milli(100), true, cmaf);
+		try {
+			for (let n = 0; n < 6; n++) {
+				playback.push({ ...frame(), group: n === 0 ? 0 : 1 });
+				await microtasks();
+			}
+			expect(audioInputs).toHaveLength(6);
+			expect(pendingAudio).toHaveLength(6);
+			expect(playback.inserted()).toHaveLength(0);
+			playback.push({ kind: "gap", timestamp: Micro(140_000), duration: Micro(20_000) });
+			await microtasks();
+			expect(pendingAudio).toHaveLength(0);
+			deferAudioOutput = false;
+			frameTimestamp = 160_000;
+			const resumed = frame();
+			playback.push({ ...resumed, group: 2 });
+			await microtasks();
+			expect(audioInputs).toHaveLength(7);
+			expect(playback.inserted()).toContain(resumed.frame.timestamp);
+			await playback.play(5);
+			expect(playback.sync.playing.peek()).toBe(true);
+		} finally {
+			playback.close();
+			await microtasks();
+			installed.close();
+		}
+	});
 }
 
 it("decodes an audio packet inside a group after a gap", async () => {
@@ -325,6 +451,108 @@ it("decodes an audio packet inside a group after a gap", async () => {
 		await microtasks();
 	}
 });
+
+// A subscription's head arrives newest-first, one group per frame. Chrome's AudioDecoder stamps every
+// output from its first input, so decoding the older frames after it shifts the rest of the track.
+for (const cmaf of [false, true]) {
+	it(`decodes a ${cmaf ? "CMAF" : "legacy"} buffered subscription head in timestamp order`, async () => {
+		const playback = await play(Milli(100), true, cmaf);
+		try {
+			for (const ms of [140, 120, 100, 80, 60, 40, 20, 0]) {
+				frameTimestamp = (ms - 20) * 1000;
+				playback.push({ ...frame(), group: ms / 20 });
+				await microtasks();
+			}
+			expect(playback.inserted()).toEqual([]);
+
+			// The live edge moves on, so the head is complete and plays from its oldest frame, refilling
+			// the 100 ms floor.
+			frameTimestamp = 140_000;
+			playback.push({ ...frame(), group: 8 });
+			await microtasks();
+			expect(playback.inserted()).toEqual([0, 20_000, 40_000, 60_000, 80_000]);
+		} finally {
+			playback.close();
+			await microtasks();
+		}
+	});
+
+	// A buffered head above the decoded floor waits in the reorder buffer, not the consumer, until it
+	// runs past the target. Those frames are what cover the part of the target held encoded.
+	it(`starts a ${cmaf ? "CMAF" : "legacy"} buffered head held past a target above the floor`, async () => {
+		const playback = await play(Milli(1000), true, cmaf);
+		try {
+			const target = playback.target();
+			expect(target).toBeGreaterThan(500);
+			while (frameTimestamp <= target * 1000 + 20_000) {
+				playback.push(frame());
+				await microtasks();
+			}
+			expect(playback.inserted()[0]).toBe(20_000);
+		} finally {
+			playback.close();
+			await microtasks();
+		}
+	});
+
+	// Pre-skip longer than the decoded floor discards every output the refill released toward it, so
+	// the refill has to count what reaches the ring, not what it released.
+	if (!cmaf) {
+		it("starts a buffered Opus head whose pre-skip outlasts the floor", async () => {
+			const playback = await play(Milli(1000), true);
+			try {
+				// OpusHead, version 1, stereo, a 520 ms pre-skip of 24,960 samples: past the 500 ms floor, yet
+				// within the head the harness covers, since it queues nothing behind a released batch.
+				playback.restore({ description: "4f707573486561640102" + "8061" + "80bb0000" + "0000" + "00" });
+				await microtasks();
+				const target = playback.target();
+				while (frameTimestamp <= (target + 2000) * 1000) {
+					playback.push(frame());
+					await microtasks();
+				}
+				// The first output to outlast the pre-skip lands at the start of the timeline.
+				expect(playback.inserted()[0]).toBe(20_000);
+			} finally {
+				playback.close();
+				await microtasks();
+			}
+		});
+	}
+
+	// A fresh encoder after a declared end may restart its timeline below the old one, and the decoder
+	// resets for it before anything is judged out of order.
+	it(`decodes a ${cmaf ? "CMAF" : "legacy"} fresh encoder below the timeline it replaced`, async () => {
+		const playback = await play(Milli(100), false, cmaf);
+		try {
+			frameTimestamp = 480_000;
+			playback.push({ ...frame(), group: 0 });
+			await microtasks();
+			playback.push({ kind: "end", group: 0, end: Micro(520_000) });
+			frameTimestamp = 0;
+			playback.push({ ...frame(), group: 1 });
+			await microtasks();
+			expect(playback.inserted()).toEqual([500_000, 20_000]);
+		} finally {
+			playback.close();
+			await microtasks();
+		}
+	});
+
+	it(`skips a ${cmaf ? "CMAF" : "legacy"} live subscription head older than its live edge`, async () => {
+		const playback = await play(Milli(100), false, cmaf);
+		try {
+			for (const ms of [140, 120, 100, 80, 60, 40, 20, 0, 160]) {
+				frameTimestamp = (ms - 20) * 1000;
+				playback.push({ ...frame(), group: ms / 20 });
+				await microtasks();
+			}
+			expect(playback.inserted()).toEqual([140_000, 160_000]);
+		} finally {
+			playback.close();
+			await microtasks();
+		}
+	});
+}
 
 describe("Decoder across a broadcast disable", () => {
 	it("releases the graph when its broadcast is disabled and rebuilds on return", async () => {
@@ -396,7 +624,7 @@ describe("Decoder across a delay change", () => {
 });
 
 // Play a ring out the way the worklet does, one render quantum at a time, until it runs dry.
-function drain(ring: SharedRingBuffer): number {
+function drain(ring: FakeWorklet): number {
 	const output = [new Float32Array(128), new Float32Array(128)];
 	let total = 0;
 	for (;;) {
@@ -407,17 +635,14 @@ function drain(ring: SharedRingBuffer): number {
 }
 
 describe("Decoder across a rendition's absence", () => {
-	afterEach(() => jest.useRealTimers());
-
 	it("plays the tail, suspends once drained, and resumes on return", async () => {
-		// The ring's stall state is polled on an interval.
-		jest.useFakeTimers();
 		const playback = await play(Milli(100));
 		try {
 			await playback.play(12);
 			const [ring] = playback.rings();
+			// The worklet reports the ring playing once it renders a quantum.
+			expect(ring.read([new Float32Array(128), new Float32Array(128)])).toBe(128);
 			expect(ring.stalled).toBe(false);
-			jest.advanceTimersByTime(50);
 			await microtasks();
 
 			playback.remove();
@@ -431,7 +656,6 @@ describe("Decoder across a rendition's absence", () => {
 			expect(drain(ring)).toBeGreaterThan(0);
 			expect(playback.truncates()).toBe(0);
 			expect(playback.resets()).toBe(0);
-			jest.advanceTimersByTime(50);
 			await microtasks();
 			expect(context.calls.suspend).toBe(1);
 			expect(context.state).toBe("suspended");
@@ -505,20 +729,42 @@ describe("Decoder across a rendition's absence", () => {
 		}
 	});
 
-	it("keeps the graph when only the container changes", async () => {
-		const playback = await play(Milli(100));
-		try {
-			await playback.play();
-			playback.restore({ container: { kind: "loc" } });
-			await microtasks();
-			await playback.play();
-
-			expect(playback.subscriptions()).toBe(2);
-			expect(contexts).toHaveLength(1);
-		} finally {
-			playback.close();
-		}
-	});
+	for (const [name, patch] of Object.entries({
+		container: { container: { kind: "loc" } },
+		codec: { codec: "mp4a.40.2" },
+	})) {
+		it(`keeps compatible PCM and Sync when the ${name} changes on the same instance`, async () => {
+			const clock = new Manual();
+			const installed = clock.install();
+			const playback = await play(Milli(100), true);
+			const reset = spyOn(playback.sync, "reset");
+			try {
+				await playback.play(7);
+				const ring = playback.rings().at(-1);
+				if (!ring) throw new Error("missing audio ring");
+				const held = ring.length;
+				const reference = playback.sync.out.reference.peek();
+				expect(held).toBeGreaterThan(0);
+				playback.restore(patch);
+				await microtasks();
+				expect(playback.subscriptions()).toBe(2);
+				expect(playback.codecs()).toBe(2);
+				expect(contexts).toHaveLength(1);
+				expect(playback.rings()).toEqual([ring]);
+				expect(ring.length).toBe(held);
+				expect(playback.resets()).toBe(0);
+				expect(reset).not.toHaveBeenCalled();
+				expect(playback.sync.out.reference.peek()).toBe(reference);
+				expect(ring.read([new Float32Array(960), new Float32Array(960)])).toBe(960);
+				await playback.play();
+				expect(reset).not.toHaveBeenCalled();
+			} finally {
+				playback.close();
+				await microtasks();
+				installed.close();
+			}
+		});
+	}
 
 	it("rebuilds the graph on a new channel count", async () => {
 		const playback = await play(Milli(100));
@@ -600,6 +846,34 @@ for (const cmaf of [false, true]) {
 }
 
 describe("fatal decoder errors", () => {
+	// A failure in the read loop, not a WebCodecs callback, must still reach `error` and release the
+	// subscription, instead of leaving the player apparently live.
+	for (const cmaf of [false, true]) {
+		for (const failure of ["a malformed read", "a decode that throws"] as const) {
+			it(`reports ${failure} on ${cmaf ? "CMAF" : "legacy"} and releases its subscription`, async () => {
+				const close = spyOn(Moq.Track.Subscriber.prototype, "close");
+				const playback = await play(Milli(100), false, cmaf);
+				try {
+					await playback.play(2);
+					const before = close.mock.calls.length;
+					const error = new Error(failure);
+					if (failure === "a malformed read") {
+						playback.push(error);
+					} else {
+						decodeThrows = error;
+						await playback.play(1);
+					}
+					await microtasks();
+					expect(playback.error.peek()).toBe(error);
+					expect(close.mock.calls.length).toBeGreaterThan(before);
+				} finally {
+					playback.close();
+					close.mockRestore();
+				}
+			});
+		}
+	}
+
 	it("releases audio subscriptions and retains the failure until the source changes", async () => {
 		const close = spyOn(Moq.Track.Subscriber.prototype, "close");
 		const playback = await play(Milli(100));
@@ -672,8 +946,7 @@ describe("fatal decoder errors", () => {
 function manualAt(ms: number) {
 	const clock = new Manual();
 	clock.jump(Nano.fromMilli(Milli(ms)));
-	const restore = clock.install();
-	return { advance: (by: number) => clock.advance(Nano.fromMilli(Milli(by))), restore };
+	return { advance: (by: number) => clock.advance(Nano.fromMilli(Milli(by))), installed: clock.install() };
 }
 
 // A legacy container frame: the media timestamp, then one payload byte.
@@ -690,7 +963,7 @@ function legacyFrame(media: Micro): Moq.Group.Frame {
 async function livePlayback(burst: number) {
 	const FRAME = 20;
 	const clock = manualAt(0);
-	const insert = spyOn(SharedRingBuffer.prototype, "insert");
+	const insert = spyOn(AudioRingBuffer.prototype, "write");
 
 	const audio = Catalog.AudioConfigSchema.parse({
 		codec: "opus",
@@ -721,10 +994,18 @@ async function livePlayback(burst: number) {
 	let sequence = 0;
 	let held: number[] = [];
 
-	const ring = () => insert.mock.contexts.at(-1) as SharedRingBuffer | undefined;
+	const ring = () => worklets.findLast((worklet) => worklet.ring && insert.mock.contexts.includes(worklet.ring));
 	return {
 		sync,
 		error: decoder.out.error,
+		arrivals: () => decoder.arrivals(),
+		// Lose one whole group without changing the following media timestamps or arrival cadence.
+		async hole() {
+			if (held.length) throw new Error("a hole needs an empty delivery burst");
+			sequence++;
+			frame++;
+			await clock.advance(FRAME);
+		},
 		counts,
 		ring,
 		get burst() {
@@ -735,6 +1016,7 @@ async function livePlayback(burst: number) {
 		},
 		// Rename the rendition, publishing the rest of the timeline on the new track.
 		rename(name: string, patch: Record<string, unknown> = {}) {
+			track.finish();
 			track.close();
 			track = producer.createTrack(name, { timescale: Moq.Time.Timescale.MILLI });
 			sequence = 0;
@@ -743,7 +1025,7 @@ async function livePlayback(burst: number) {
 		// Serve the same rendition from another path, as a `broadcast` override does.
 		move(path: string) {
 			media.peek().close();
-			producer = new Moq.Origin.Producer().createBroadcast(Moq.Path.from(path));
+			producer = new Moq.Origin.Producer().createBroadcast(Moq.Path.from(path)).broadcast;
 			track = producer.createTrack("audio", { timescale: Moq.Time.Timescale.MILLI });
 			sequence = 0;
 			media.set(producer.consume());
@@ -758,10 +1040,9 @@ async function livePlayback(burst: number) {
 					held.push(frame * FRAME);
 					if (held.length < burst) continue;
 					for (const timestamp of held) {
-						const group = new Moq.Group.Producer(sequence++);
+						const group = track.createGroup(sequence++);
 						group.writeFrame(legacyFrame(Micro.fromMilli(Milli(timestamp))));
-						group.close();
-						track.writeGroup(group);
+						group.finish();
 					}
 					held = [];
 				}
@@ -783,10 +1064,40 @@ async function livePlayback(burst: number) {
 			media.peek().close();
 			producer.close();
 			await microtasks();
-			clock.restore();
+			clock.installed.close();
 		},
 	};
 }
+
+it("a missing live group re-primes without clearing decoded PCM or resetting Sync", async () => {
+	const playback = await livePlayback(1);
+	const reset = spyOn(playback.sync, "reset");
+	const prime = spyOn(AudioDecoder.prototype, "reset");
+	const arrivals = playback.arrivals();
+	const received: { kind: string }[] = [];
+	const reading = (async () => {
+		for await (const arrival of arrivals) received.push(arrival);
+	})();
+	try {
+		await playback.run(1000);
+		const ring = playback.ring();
+		expect(ring?.stalled).toBe(false);
+		const buffered = ring?.length;
+		await playback.hole();
+		expect(ring?.length).toBe(buffered);
+		await playback.run(2000);
+		expect(received.some((arrival) => arrival.kind === "gap")).toBe(true);
+		expect(prime).toHaveBeenCalledTimes(1);
+		expect(reset).not.toHaveBeenCalled();
+		expect(playback.ring()).toBe(ring);
+		expect(ring?.stalled).toBe(false);
+		expect(playback.error.peek()).toBeUndefined();
+	} finally {
+		arrivals.close();
+		await reading;
+		await playback.close();
+	}
+});
 
 describe("Decoder across a rename", () => {
 	// A codec change renames the audio track, and the replacement's consumer reads the same path.
@@ -879,3 +1190,294 @@ describe("Decoder across a rename", () => {
 		}
 	});
 });
+
+it("keeps audio's opening buffered while an enabled video track fills", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const playback = await play(Milli(100), true);
+	const video = new Signal<{ start: Milli; end: Milli } | null>(null);
+	const remove = playback.sync.register(new Signal(Milli(100)), video);
+	try {
+		await playback.play(8);
+		await clock.advance(Nano.zero);
+		const ring = playback.rings()[0];
+		expect(ring).toBeDefined();
+		const opening = ring.ring?.timestamp;
+		for (let i = 0; i < 5; i++) expect(ring.read([new Float32Array(960), new Float32Array(960)])).toBe(0);
+		await clock.advance(Nano.fromMilli(Milli(500)));
+		expect(ring.ring?.timestamp).toBe(opening);
+		video.set({ start: Milli(20), end: Milli(120) });
+		await clock.advance(Nano.zero);
+		expect(ring.read([new Float32Array(960), new Float32Array(960)])).toBe(960);
+		expect(ring.ring?.timestamp).toBe(Micro((opening ?? 0) + 20_000));
+	} finally {
+		remove();
+		playback.close();
+		await microtasks();
+		installed.close();
+	}
+});
+
+it("starts above the decoded audio floor without expanding PCM storage", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const playback = await play(Milli(1000), true);
+	const video = new Signal<{ start: Milli; end: Milli } | null>(null);
+	const remove = playback.sync.register(new Signal(Milli(1000)), video);
+	try {
+		await playback.play(80);
+		await clock.advance(Nano.zero);
+		const ring = playback.rings()[0];
+		expect(ring).toBeDefined();
+		expect(ring.ring?.length).toBeLessThanOrEqual(24_000);
+		expect(playback.sync.playing.peek()).toBe(false);
+		const opening = ring.ring?.timestamp;
+		for (let i = 0; i < 5; i++) expect(ring.read([new Float32Array(960), new Float32Array(960)])).toBe(0);
+		await clock.advance(Nano.fromMilli(Milli(500)));
+		expect(ring.ring?.timestamp).toBe(opening);
+		video.set({ start: Milli(20), end: Milli(1020) });
+		await clock.advance(Nano.zero);
+		expect(ring.read([new Float32Array(960), new Float32Array(960)])).toBe(960);
+		expect(ring.ring?.timestamp).toBe(Micro((opening ?? 0) + 20_000));
+	} finally {
+		remove();
+		playback.close();
+		await microtasks();
+		installed.close();
+	}
+});
+
+it("waits for video support before allowing audio-only startup", async () => {
+	const playback = await play(Milli(100), true);
+	let resolve!: (supported: boolean) => void;
+	const source = new VideoSource({
+		broadcast: {
+			out: {
+				catalog: new Signal({
+					video: {
+						renditions: {
+							video: { codec: "vp8", codedWidth: 16, codedHeight: 16, container: { kind: "legacy" } },
+						},
+					},
+				}),
+			},
+		} as unknown as Broadcast,
+		supported: () =>
+			new Promise<boolean>((done) => {
+				resolve = done;
+			}),
+	});
+	const video = new VideoDecoder({ source, sync: playback.sync });
+	try {
+		await microtasks();
+		await playback.play(8);
+		const ring = playback.rings()[0];
+		expect(ring).toBeDefined();
+		expect(ring.read([new Float32Array(960), new Float32Array(960)])).toBe(0);
+		resolve(false);
+		await microtasks();
+		expect(ring.read([new Float32Array(960), new Float32Array(960)])).toBe(960);
+	} finally {
+		video.close();
+		source.close();
+		playback.close();
+		await microtasks();
+	}
+});
+
+for (const cmaf of [false, true]) {
+	it(`a ${cmaf ? "CMAF" : "legacy"} hole re-primes the codec while keeping PCM and the clock`, async () => {
+		const clock = new Manual();
+		const installed = clock.install();
+		const playback = await play(Milli(100), true, cmaf);
+		const reset = spyOn(playback.sync, "reset");
+		const prime = spyOn(AudioDecoder.prototype, "reset");
+		try {
+			await playback.play(7);
+			expect(playback.sync.playing.peek()).toBe(true);
+			const ring = playback.rings().at(-1);
+			if (!ring) throw new Error("missing audio ring");
+			ring.read([new Float32Array(960), new Float32Array(960)]);
+			await microtasks();
+			const held = ring.length;
+			const reference = playback.sync.out.reference.peek();
+			const resets = playback.resets();
+			const parked = playback.sync.wait(Milli(1000));
+			expect(held).toBeGreaterThan(0);
+			playback.push({ kind: "gap", timestamp: Micro(160_000), duration: Micro(20_000) });
+			await microtasks();
+			expect(prime).toHaveBeenCalledTimes(1);
+			expect(reset).not.toHaveBeenCalled();
+			expect(playback.resets()).toBe(resets);
+			expect(ring.length).toBe(held);
+			expect(playback.sync.out.reference.peek()).toBe(reference);
+			expect(playback.sync.playing.peek()).toBe(true);
+			expect(Bun.peek.status(parked)).toBe("pending");
+			frameTimestamp = 160_000;
+			await playback.play(1);
+			expect(playback.sync.playing.peek()).toBe(true);
+			expect(ring.read([new Float32Array(960), new Float32Array(960)])).toBe(960);
+			await clock.advance(Nano.fromMilli(Milli(1200)));
+			expect(await parked).toBe(true);
+		} finally {
+			playback.close();
+			await microtasks();
+			installed.close();
+		}
+	});
+}
+
+it.each([100, 1000])(
+	"closing during shared startup at %dms releases the audio graph and backpressured reader",
+	async (delay) => {
+		const playback = await play(Milli(delay), true);
+		const video = new Signal<{ start: Milli; end: Milli } | null>(null);
+		const remove = playback.sync.register(new Signal(Milli(delay)), video);
+		const disconnect = spyOn(FakeWorklet.prototype, "disconnect");
+		const closeTrack = spyOn(Moq.Track.Subscriber.prototype, "close");
+		try {
+			await playback.play(delay / 20 + 30);
+			expect(playback.sync.playing.peek()).toBe(false);
+			const context = playback.context.peek() as unknown as FakeContext;
+			expect(context).toBeDefined();
+			const decoded = playback.inserted().length;
+			playback.close();
+			await microtasks();
+			expect(context.calls.close).toBe(1);
+			expect(disconnect).toHaveBeenCalled();
+			expect(closeTrack).toHaveBeenCalled();
+			// The other track becoming ready cannot revive the cancelled audio reader.
+			video.set({ start: Milli(0), end: Milli(delay) });
+			await microtasks();
+			expect(playback.inserted()).toHaveLength(decoded);
+		} finally {
+			remove();
+			playback.close();
+			await microtasks();
+			disconnect.mockRestore();
+			closeTrack.mockRestore();
+		}
+	},
+);
+
+it("a rejected audio support probe does not leave buffered video waiting on a pending track", async () => {
+	const sync = new Sync({ delay: Milli(100), buffer: Milli(1000) });
+	const remove = sync.register(new Signal(Milli(100)), new Signal({ start: Milli(0), end: Milli(100) }));
+	let reject!: (error: Error) => void;
+	const failure = new Error("audio support probe failed");
+	const logged = spyOn(console, "warn").mockImplementation(() => {});
+	const source = new Source({
+		broadcast: {
+			in: { enabled: new Signal(true) },
+			out: {
+				catalog: new Signal({
+					audio: {
+						renditions: {
+							audio: Catalog.AudioConfigSchema.parse({
+								codec: "opus",
+								container: { kind: "legacy" },
+								sampleRate: 48000,
+								numberOfChannels: 2,
+							}),
+						},
+					},
+				}),
+			},
+		} as unknown as Broadcast,
+		supported: () =>
+			new Promise<boolean>((_resolve, fail) => {
+				reject = fail;
+			}),
+	});
+	const decoder = new Decoder({ source, sync });
+	try {
+		await microtasks();
+		sync.received(Milli(0));
+		await microtasks();
+		expect(sync.playing.peek()).toBe(false);
+		reject(failure);
+		await microtasks();
+		expect(source.out.available.peek()).toEqual({});
+		expect(source.pending.peek()).toBe(false);
+		expect(source.out.config.peek()).toBeUndefined();
+		expect(sync.playing.peek()).toBe(true);
+	} finally {
+		decoder.close();
+		source.close();
+		remove();
+		sync.close();
+		logged.mockRestore();
+	}
+});
+
+it.each([false, true])("releases shared startup across a hole in queued audio (CMAF=%s)", async (cmaf) => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const playback = await play(Milli(1500), true, cmaf);
+	const video = new Signal<{ start: Milli; end: Milli } | null>({ start: Milli(20), end: Milli(1520) });
+	const remove = playback.sync.register(new Signal(Milli(1500)), video);
+	try {
+		await playback.play(25);
+		// The audio after the hole counts, the hole itself does not.
+		playback.queued([
+			{ start: Milli(520), end: Milli(620) },
+			{ start: Milli(1500), end: Milli(1600) },
+		]);
+		const next = frame();
+		next.group = 1;
+		playback.push(next);
+		await microtasks();
+		await clock.advance(Nano.zero);
+		const ring = playback.rings()[0];
+		expect(ring.ring?.length).toBe(24000);
+		expect(playback.sync.playing.peek()).toBe(false);
+		expect(ring.read([new Float32Array(960), new Float32Array(960)])).toBe(0);
+		// Enough arrives past the hole while it stays open.
+		playback.queued([
+			{ start: Milli(520), end: Milli(620) },
+			{ start: Milli(1500), end: Milli(2500) },
+		]);
+		await clock.advance(Nano.zero);
+		expect(playback.sync.playing.peek()).toBe(true);
+		expect(ring.read([new Float32Array(960), new Float32Array(960)])).toBe(960);
+	} finally {
+		remove();
+		playback.close();
+		await microtasks();
+		installed.close();
+	}
+});
+
+for (const cmaf of [false, true]) {
+	for (const buffered of [false, true]) {
+		it(`switches a running ${cmaf ? "CMAF" : "legacy"} player to ${buffered ? "buffered" : "live"} audio`, async () => {
+			const playback = await play(Milli(100), !buffered, cmaf);
+			try {
+				await playback.play(12);
+				playback.buffer.set(Milli(buffered ? 1000 : 0));
+				await microtasks();
+				const inserted = playback.inserted().length;
+				const start = frameTimestamp;
+				for (const ms of [140, 120, 100, 80, 60, 40, 20, 0, 160]) {
+					frameTimestamp = start + (ms - 20) * 1000;
+					playback.push({ ...frame(), group: 1 + ms / 20 });
+					await microtasks();
+				}
+				expect(playback.inserted().slice(inserted)).toEqual(
+					(buffered ? [0, 20, 40, 60, 80] : [140, 160]).map((ms) => start + ms * 1000),
+				);
+
+				// A running live ring sheds old audio when it gets ahead; a buffered ring plays it all.
+				const ring = worklets.at(-1)?.ring;
+				if (!ring) throw new Error("no running audio ring");
+				ring.reset();
+				const samples = [new Float32Array(4800), new Float32Array(4800)];
+				for (const timestamp of [0, 100_000, 200_000]) ring.write(Micro(timestamp), samples);
+				expect(ring.length).toBe(samples[0].length * (buffered ? 3 : 1));
+			} finally {
+				playback.close();
+				await microtasks();
+			}
+		});
+	}
+}

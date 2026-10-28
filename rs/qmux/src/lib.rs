@@ -16,8 +16,8 @@
 //!
 //! | Module | Entry point | Feature |
 //! | --- | --- | --- |
-//! | `tcp` | `tcp::Config` | `tcp` |
-//! | `uds` | `uds::Config` | `uds` (Unix only) |
+//! | `tcp` | `tcp::connect`, `tcp::accept` | `tcp` |
+//! | `uds` | `uds::connect`, `uds::accept` | `uds` (Unix only) |
 //! | `tls` | `tls::Client`, `tls::Server` | `tls` |
 //! | `ws` | `ws::Client`, `ws::Server`, `ws::Upgraded` | `ws` |
 //! | [`transport`] | [`transport::Transport`] | |
@@ -59,15 +59,10 @@ pub use config::{Config, Protocol};
 pub use error::Error;
 pub use moq_quic::mux::Version;
 pub use session::{RecvStream, SendGroup, SendStream, Session};
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use socket::TcpStats;
 pub use socket::{SharedSocketStats, SocketStats};
 
-/// Every supported version's bare ALPN, newest first
-///
-/// Use this when configuring TLS to advertise QMux support. For one version's ALPN, use
-/// [`Version::alpn()`].
-pub const ALPNS: &[&str] = &["qmux-02", "qmux-01", "qmux-00"];
-
 /// The largest frame draft-00 accepts, header included
+#[cfg(any(feature = "tcp", all(unix, feature = "uds"), feature = "ws"))]
 const MAX_FRAME_SIZE: usize = 16384;

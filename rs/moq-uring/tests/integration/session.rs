@@ -2,7 +2,7 @@
 //!
 //! A publisher and a subscriber session run on one worker (two sockets, two
 //! [`moq_uring::quic::Connection`]s over loopback), negotiated end to end by
-//! `moq_net::Server::accept_lite` / `Client::connect_lite`, with a broadcast,
+//! `moq_net::Server::accept` / `Client::connect`, with a broadcast,
 //! a track, and a frame flowing through the model.
 //!
 //! Origin drivers run through Tokio's explicit-time adapter while session
@@ -20,7 +20,7 @@ use moq_uring::{Config, Error, Worker, quic, udp};
 fn worker() -> Option<Worker> {
 	match Worker::new(Config::default()) {
 		Ok(worker) => Some(worker),
-		Err(Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
+		Err(Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
 			eprintln!("skipping io_uring session test: {reason}");
 			None
 		}
@@ -93,12 +93,15 @@ fn lite_session_over_the_worker() {
 			.expect("quic accept");
 		let (session, driver) = moq_net::Server::new()
 			.with_publisher(&pub_origin)
-			.accept_lite(
-				moq_net::time::now(),
-				moq_uring::transport::Session::new(quic::web::Session::raw(conn), moq_net::transport::Binding::InBand),
+			.accept(
+				moq_net::time::Instant::now(),
+				moq_uring::transport::Local::new(moq_uring::transport::Session::new(
+					quic::web::Session::raw(conn),
+					moq_net::transport::Address::Setup,
+				)),
 			)
 			.await
-			.expect("accept_lite");
+			.expect("accept");
 		let _ = server_handle.run(driver).await;
 		// Serve until the client walks away.
 		session.closed().await;
@@ -116,15 +119,15 @@ fn lite_session_over_the_worker() {
 
 			let (session, driver) = moq_net::Client::new()
 				.with_subscriber(sub.clone())
-				.connect_lite(
-					moq_net::time::now(),
-					moq_uring::transport::Session::new(
+				.connect(
+					moq_net::time::Instant::now(),
+					moq_uring::transport::Local::new(moq_uring::transport::Session::new(
 						quic::web::Session::raw(conn),
-						moq_net::transport::Binding::InBand,
-					),
+						moq_net::transport::Address::Setup,
+					)),
 				)
 				.await
-				.expect("connect_lite");
+				.expect("connect");
 			let task_handle = handle.clone();
 			handle.spawn(async move {
 				let _ = task_handle.run(driver).await;
@@ -228,15 +231,15 @@ fn two_lite_sessions_share_the_server_socket() {
 			server_handle.spawn(async move {
 				let (session, driver) = moq_net::Server::new()
 					.with_publisher(&pub_origin)
-					.accept_lite(
-						moq_net::time::now(),
-						moq_uring::transport::Session::new(
+					.accept(
+						moq_net::time::Instant::now(),
+						moq_uring::transport::Local::new(moq_uring::transport::Session::new(
 							quic::web::Session::raw(conn),
-							moq_net::transport::Binding::InBand,
-						),
+							moq_net::transport::Address::Setup,
+						)),
 					)
 					.await
-					.expect("accept_lite");
+					.expect("accept");
 				let _ = session_handle.run(driver).await;
 				session.closed().await;
 			});
@@ -257,15 +260,15 @@ fn two_lite_sessions_share_the_server_socket() {
 				let conn = quic::client::connect(client_sock, &dial).await.expect("quic connect");
 				let (session, driver) = moq_net::Client::new()
 					.with_subscriber(sub.clone())
-					.connect_lite(
-						moq_net::time::now(),
-						moq_uring::transport::Session::new(
+					.connect(
+						moq_net::time::Instant::now(),
+						moq_uring::transport::Local::new(moq_uring::transport::Session::new(
 							quic::web::Session::raw(conn),
-							moq_net::transport::Binding::InBand,
-						),
+							moq_net::transport::Address::Setup,
+						)),
 					)
 					.await
-					.expect("connect_lite");
+					.expect("connect");
 				let task_handle = handle.clone();
 				handle.spawn(async move {
 					let _ = task_handle.run(driver).await;

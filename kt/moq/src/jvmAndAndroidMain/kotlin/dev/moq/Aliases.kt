@@ -11,8 +11,10 @@ package dev.moq
 // listen facade (see Server.kt), which exposes the raw handle as `server`.
 /** A MoQ client built from a [ClientConfig]: connect it to a relay. */
 typealias Client = uniffi.moq.MoqClient
-/** Client configuration: bind address, versions, TLS, QUIC, WebSocket, reconnect pacing, and origins. */
+/** Client configuration: bind address, versions, tokens, TLS, QUIC, WebSocket, reconnect pacing, and origins. */
 typealias ClientConfig = uniffi.moq.MoqClientConfig
+/** The credentials a [Client] presents, replaceable while it runs. */
+typealias Tokens = uniffi.moq.MoqTokens
 /** Certificate trust and the mTLS identity for a [ClientConfig]. */
 typealias ClientTls = uniffi.moq.MoqClientTls
 /** Server configuration: bind address, versions, TLS identity, QUIC, and origins. */
@@ -35,12 +37,14 @@ typealias Transport = uniffi.moq.MoqTransport
 // Origin (broadcast discovery / announcement).
 /** The publish side of an origin: create broadcasts so subscribers can discover them. */
 typealias OriginProducer = uniffi.moq.MoqOriginProducer
+/** An origin's handle on one broadcast: `broadcast()` to fill it, `announce` and `unannounce` to advertise it. */
+typealias Publication = uniffi.moq.MoqPublication
 /** Config for creating an origin, such as its total cache budget. */
 typealias OriginConfig = uniffi.moq.MoqOriginConfig
 /** The subscribe side of an origin: discover and request published broadcasts. */
 typealias OriginConsumer = uniffi.moq.MoqOriginConsumer
 /** A served route: advertises a path prefix and yields broadcast requests beneath it. */
-typealias OriginDynamic = uniffi.moq.MoqOriginDynamic
+typealias OriginRequests = uniffi.moq.MoqOriginRequests
 /** A requested broadcast not yet accepted: fulfill it with a producer or reject it. */
 typealias BroadcastRequest = uniffi.moq.MoqBroadcastRequest
 /** A claim answer being filled before its exact route is announced. */
@@ -74,23 +78,19 @@ typealias BroadcastProducer = uniffi.moq.MoqBroadcastProducer
 /** The read side of a broadcast: subscribe to its catalog and tracks. */
 typealias BroadcastConsumer = uniffi.moq.MoqBroadcastConsumer
 /** Receives tracks requested from a dynamically served broadcast. */
-typealias BroadcastDynamic = uniffi.moq.MoqBroadcastDynamic
-/** A cleanly ended broadcast, still announced and serving its finished tracks until its linger ends. */
-typealias BroadcastFinish = uniffi.moq.MoqBroadcastFinish
+typealias BroadcastRequests = uniffi.moq.MoqBroadcastRequests
 /** The write side of a raw track: append groups of frames. */
 typealias TrackProducer = uniffi.moq.MoqTrackProducer
 /** A subscriber-requested track not yet accepted: accept it for a [TrackProducer] or abort it. */
 typealias TrackRequest = uniffi.moq.MoqTrackRequest
-/** A stream of uncached group requests for one track, for serving fetches on demand. */
-typealias TrackDynamic = uniffi.moq.MoqTrackDynamic
+/** A stream of the fills readers of one track need: runs of groups the cache lacks. */
+typealias TrackRequests = uniffi.moq.MoqTrackRequests
 /** A watch-only handle to whether a published track has subscribers; holding it keeps nothing open. */
 typealias TrackDemand = uniffi.moq.MoqTrackDemand
 /** The read side of a raw track: yields groups in sequence order, skipping ahead if it falls behind. */
 typealias TrackConsumer = uniffi.moq.MoqTrackConsumer
-/** A request to produce one uncached group for a fetch consumer. */
-typealias GroupRequest = uniffi.moq.MoqGroupRequest
-/** A watch-only handle to whether any caller still wants a requested group; holding it keeps nothing open. */
-typealias GroupDemand = uniffi.moq.MoqGroupDemand
+/** A run of groups readers miss: accept each group you have and drop the rest. */
+typealias Fill = uniffi.moq.MoqFill
 /** The write side of a single group: append frames to it. */
 typealias GroupProducer = uniffi.moq.MoqGroupProducer
 /** The read side of a single group: yields timestamped raw frames. */
@@ -101,7 +101,9 @@ typealias GroupConsumer = uniffi.moq.MoqGroupConsumer
 typealias Datagram = uniffi.moq.MoqDatagram
 /** A payload plus the timestamp it should be presented at. */
 typealias Frame = uniffi.moq.MoqFrame
-/** A path-prefix route: the publisher epoch it serves (null when unknown), relay hop ids (oldest first), and static production and link cost (lower wins). */
+/** How a broadcast advertises its exact path: its static production cost (lower wins) and the publisher epoch it serves (null when unknown). */
+typealias AnnounceRoute = uniffi.moq.MoqAnnounceRoute
+/** An observed path-prefix route: the publisher epoch it serves (null when unknown), relay hop ids (oldest first), and static production and link cost (lower wins). */
 typealias Route = uniffi.moq.MoqRoute
 /** Tunes how a track subscription is delivered: priority, latency budget, ranges, and group ordering. */
 typealias Subscription = uniffi.moq.MoqSubscription
@@ -109,7 +111,7 @@ typealias Subscription = uniffi.moq.MoqSubscription
 typealias Range = uniffi.moq.MoqRange
 /** Where one end of a [Range] falls: [AnchorAbsolute], [AnchorRelative], or [AnchorTime]. */
 typealias Anchor = uniffi.moq.MoqAnchor
-/** An exact group and frame. */
+/** A group, delivered from its first frame. */
 typealias AnchorAbsolute = uniffi.moq.MoqAnchor.Absolute
 /** The group `groups` before the latest one, clamped to group 0: 0 is the latest. */
 typealias AnchorRelative = uniffi.moq.MoqAnchor.Relative
@@ -135,7 +137,7 @@ typealias VideoDecoderOutput = uniffi.moq.MoqVideoDecoderOutput
 typealias VideoDecodedFrame = uniffi.moq.MoqVideoDecodedFrame
 /** The PCM layout the caller feeds an audio producer. */
 typealias AudioEncoderInput = uniffi.moq.MoqAudioEncoderInput
-/** The codec-side encoder configuration: codec, output rate/channels, bitrate, frame duration, and preset. */
+/** The codec-side encoder configuration: codec, output rate/channels, bitrate, and frame duration. */
 typealias AudioEncoderOutput = uniffi.moq.MoqAudioEncoderOutput
 /** One video frame: pixels in the configured layout plus a presentation timestamp. */
 typealias VideoFrame = uniffi.moq.MoqVideoFrame
@@ -145,26 +147,27 @@ typealias VideoCodec = uniffi.moq.MoqVideoCodec
 typealias VideoPixelFormat = uniffi.moq.MoqVideoPixelFormat
 /** The pixel layout, resolution, and framerate the caller feeds a video producer. */
 typealias VideoEncoderInput = uniffi.moq.MoqVideoEncoderInput
-/** The video track name, codec, bitrate, keyframe interval, and backend preference. */
+/** The video codec, bitrate, keyframe interval, and backend preference. */
 typealias VideoEncoderOutput = uniffi.moq.MoqVideoEncoderOutput
 /** Which encoder implementation to use: automatic, hardware, software, or one named backend. */
 typealias VideoEncoderKind = uniffi.moq.MoqVideoEncoderKind
 /** Divides one connection's send estimate among the tracks sharing it. */
-typealias Bandwidth = uniffi.moq.MoqBandwidth
+typealias Allocator = uniffi.moq.MoqAllocator
 /** An owned bandwidth estimate; release it to stop receive PROBE demand. */
 typealias BandwidthConsumer = uniffi.moq.MoqBandwidthConsumer
-/** One track's standing claim on a [Bandwidth]. */
+/** One track's standing claim on an [Allocator]. */
 typealias Reservation = uniffi.moq.MoqReservation
 /** A snapshot of transport connection statistics. */
 typealias ConnectionStats = uniffi.moq.MoqConnectionStats
-/** A session's authorization: the grant its peer gave it, and more tokens to present. */
-typealias Auth = uniffi.moq.MoqAuth
-/** One token presented with [Auth.add]; cancel it to withdraw the token. */
-typealias AuthToken = uniffi.moq.MoqAuthToken
+/** Follows the grant a session's peer gave it; cancel it to release a pending wait. */
+typealias GrantConsumer = uniffi.moq.MoqGrantConsumer
 /** What the peer lets this side do: publish and subscribe patterns, and an expiry. */
 typealias Grant = uniffi.moq.MoqGrant
-/** A connection lifecycle transition reported by [Session.status]. */
-typealias ConnectionStatus = uniffi.moq.MoqConnectionStatus
+/** A connection lifecycle transition reported by [Session.state]. */
+typealias ConnectionPhase = uniffi.moq.MoqConnectionPhase
+
+/** One coherent connection lifecycle snapshot. */
+typealias ConnectionState = uniffi.moq.MoqConnectionState
 /** Retry pacing for the automatic reconnect: initial delay, multiplier, ceiling, and give-up window. */
 typealias Backoff = uniffi.moq.MoqBackoff
 /** Whether a protocol code is from the session or stream registry. */

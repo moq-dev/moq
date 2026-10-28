@@ -13,10 +13,20 @@ fn id(raw: i32) -> u32 {
 	raw as u32
 }
 
-/// Create a broadcast at `path` on `origin` and announce it.
+/// Create a broadcast at `path` on `origin`, returning its publication and fill handles.
+fn create_broadcast(origin: u32, path: &[u8]) -> (u32, u32) {
+	let mut broadcast = 0;
+	let publication =
+		id(unsafe { moq_origin_create_broadcast(origin, path.as_ptr() as *const c_char, path.len(), &mut broadcast) });
+	(publication, broadcast)
+}
+
+/// Create a broadcast at `path` on `origin` and announce it, keeping only the fill handle:
+/// releasing the publication leaves the route up.
 fn publish_broadcast(origin: u32, path: &[u8]) -> u32 {
-	let broadcast = id(unsafe { moq_origin_create_broadcast(origin, path.as_ptr() as *const c_char, path.len()) });
-	assert_eq!(unsafe { moq_publish_announce(broadcast, std::ptr::null()) }, 0);
+	let (publication, broadcast) = create_broadcast(origin, path);
+	assert_eq!(unsafe { moq_publication_announce(publication, std::ptr::null()) }, 0);
+	assert_eq!(moq_publication_free(publication), 0);
 	broadcast
 }
 
@@ -170,6 +180,111 @@ extern "C" fn channel_callback(user_data: *mut c_void, code: i32) {
 
 /// FFI callback for tests that only inspect the registrar's immediate return code.
 extern "C" fn ignore_callback(_user_data: *mut c_void, _code: i32) {}
+
+/// A [moq_connection_state] copied out of an `on_state` callback.
+#[derive(Debug)]
+struct Seen {
+	phase: moq_connection_phase,
+	connects: u64,
+	failure: i32,
+	/// What `moq_error` said about `failure` during the callback.
+	error: Option<String>,
+	/// What `moq_error_protocol` said about `failure` during the callback.
+	protocol: Option<moq_protocol_error>,
+	version: String,
+}
+
+/// Collects every snapshot a session's `on_state` delivers.
+struct States {
+	rx: mpsc::Receiver<Seen>,
+	ptr: *mut c_void,
+}
+
+impl States {
+	fn new() -> Self {
+		let (tx, rx) = mpsc::channel();
+		let ptr = Box::into_raw(Box::new(tx)) as *mut c_void;
+		Self { rx, ptr }
+	}
+
+	fn recv(&self) -> Seen {
+		self.rx.recv_timeout(TIMEOUT).expect("state callback timed out")
+	}
+
+	/// Skip to the terminal snapshot, which must be the last one.
+	fn recv_terminal(&self) -> Seen {
+		loop {
+			let seen = self.recv();
+			if seen.phase == moq_connection_phase::MOQ_CONNECTION_PHASE_CLOSED {
+				assert!(
+					self.rx.recv_timeout(Duration::from_millis(50)).is_err(),
+					"a snapshot followed the terminal one"
+				);
+				return seen;
+			}
+		}
+	}
+}
+
+impl Drop for States {
+	fn drop(&mut self) {
+		unsafe { drop(Box::from_raw(self.ptr as *mut mpsc::Sender<Seen>)) };
+	}
+}
+
+extern "C" fn state_callback(user_data: *mut c_void, state: *const moq_connection_state) {
+	let tx = unsafe { &*(user_data as *const mpsc::Sender<Seen>) };
+	let state = unsafe { &*state };
+	let mut protocol = moq_protocol_error {
+		scope: 0,
+		code: 0,
+		kind: 0,
+	};
+	let failed = state.failure < 0;
+	let error = failed.then(|| {
+		unsafe { std::ffi::CStr::from_ptr(moq_error()) }
+			.to_string_lossy()
+			.into_owned()
+	});
+	let protocol = (failed && unsafe { moq_error_protocol(&mut protocol) } == 0).then_some(protocol);
+	let _ = tx.send(Seen {
+		phase: state.phase,
+		connects: state.connects,
+		failure: state.failure,
+		error,
+		protocol,
+		version: borrowed_string(state.protocol.data, state.protocol.len).unwrap_or_default(),
+	});
+}
+
+/// FFI state callback for tests that only inspect the immediate return code.
+extern "C" fn ignore_state(_user_data: *mut c_void, _state: *const moq_connection_state) {}
+
+/// Read a delivered video read id, returning the call's code and what it wrote.
+fn video_read(id: u32) -> (i32, moq_video_read) {
+	let mut read = moq_video_read {
+		kind: moq_decode_read_kind::MOQ_DECODE_READ_END,
+		frame: moq_video_frame {
+			timestamp_us: 0,
+			width: 0,
+			height: 0,
+			data: std::ptr::null(),
+			data_size: 0,
+		},
+		gap: moq_decode_gap::default(),
+		end_us: 0,
+	};
+	let code = unsafe { moq_decode_video_read(id, &mut read) };
+	(code, read)
+}
+
+/// Read a delivered video read id that must be a decoded frame.
+fn video_frame(id: u32) -> moq_video_frame {
+	let (code, read) = video_read(id);
+	assert_eq!(code, 0);
+	assert_eq!(read.kind, moq_decode_read_kind::MOQ_DECODE_READ_FRAME);
+	read.frame
+}
 
 /// Build a valid OpusHead init buffer (RFC 7845 §5.1).
 fn opus_head() -> Vec<u8> {
@@ -549,6 +664,7 @@ fn publish_catalog_config_invalid_broadcast() {
 	let name = "video";
 	let codec = "vp8";
 	let video = moq_video_config {
+		preference: 0,
 		name: name.as_ptr() as *const c_char,
 		name_len: name.len(),
 		label: std::ptr::null(),
@@ -604,6 +720,7 @@ fn publish_media_owns_its_rendition_before_the_first_keyframe() {
 	let name = "0.avc3";
 	let codec = "avc1.42c01e";
 	let video = moq_video_config {
+		preference: 0,
 		name: name.as_ptr() as *const c_char,
 		name_len: name.len(),
 		label: std::ptr::null(),
@@ -654,6 +771,7 @@ fn publish_video_config_replaces_its_own_rendition() {
 	let name = "authored";
 	let codec = "vp8";
 	let mut video = moq_video_config {
+		preference: 0,
 		name: name.as_ptr() as *const c_char,
 		name_len: name.len(),
 		label: std::ptr::null(),
@@ -726,6 +844,7 @@ fn publish_catalog_roundtrip() {
 	let height: u32 = 1080;
 	let description: &[u8] = &[0x01, 0x02, 0x03];
 	let video = moq_video_config {
+		preference: 0,
 		name: video_name.as_ptr() as *const c_char,
 		name_len: video_name.len(),
 		label: video_label.as_ptr() as *const c_char,
@@ -741,6 +860,7 @@ fn publish_catalog_roundtrip() {
 	assert_eq!(unsafe { moq_publish_video_config(broadcast, &video) }, 0);
 	let disabled_video_name = "video-disabled";
 	let disabled_video = moq_video_config {
+		preference: 0,
 		name: disabled_video_name.as_ptr() as *const c_char,
 		name_len: disabled_video_name.len(),
 		label: std::ptr::null(),
@@ -803,6 +923,7 @@ fn publish_catalog_roundtrip() {
 
 	// The video rendition we authored comes back through the consume API.
 	let mut video_cfg = moq_video_config {
+		preference: 0,
 		name: std::ptr::null(),
 		name_len: 0,
 		label: std::ptr::null(),
@@ -926,6 +1047,7 @@ fn a_half_specified_coded_size_round_trips() {
 	let name = "video";
 	let codec = "vp8";
 	let mut video = moq_video_config {
+		preference: -1,
 		name: name.as_ptr() as *const c_char,
 		name_len: name.len(),
 		label: std::ptr::null(),
@@ -946,6 +1068,7 @@ fn a_half_specified_coded_size_round_trips() {
 	let catalog = id(catalog_cb.recv());
 
 	let mut read = moq_video_config {
+		preference: 0,
 		name: std::ptr::null(),
 		name_len: 0,
 		label: std::ptr::null(),
@@ -959,6 +1082,7 @@ fn a_half_specified_coded_size_round_trips() {
 		container: moq_container::default(),
 	};
 	assert_eq!(unsafe { moq_consume_video_config(catalog, 0, &mut read) }, 0);
+	assert_eq!(read.preference, -1);
 	assert_eq!(read.coded_width, 1920);
 	assert_eq!(read.coded_height, 0, "the absent height must not come back invented");
 
@@ -966,6 +1090,7 @@ fn a_half_specified_coded_size_round_trips() {
 	// size across unchanged, which is the case a shared presence flag would break
 	// by inventing a zero height.
 	let forward = publish_broadcast(origin, b"half-coded-size-forwarded");
+	video.preference = read.preference;
 	video.coded_width = read.coded_width;
 	video.coded_height = read.coded_height;
 	assert_eq!(unsafe { moq_publish_video_config(forward, &video) }, 0);
@@ -975,6 +1100,7 @@ fn a_half_specified_coded_size_round_trips() {
 	let forwarded_task = id(unsafe { moq_consume_catalog(forwarded, Some(channel_callback), forwarded_cb.ptr) });
 	let forwarded_catalog = id(forwarded_cb.recv());
 	assert_eq!(unsafe { moq_consume_video_config(forwarded_catalog, 0, &mut read) }, 0);
+	assert_eq!(read.preference, -1);
 	assert_eq!(read.coded_width, 1920);
 	assert_eq!(read.coded_height, 0, "forwarding must not invent the absent height");
 
@@ -1004,6 +1130,7 @@ fn raw_loc_video_uses_the_declared_catalog_container() {
 
 	let codec = b"vp8";
 	let video = moq_video_config {
+		preference: 0,
 		name: name.as_ptr() as *const c_char,
 		name_len: name.len(),
 		label: std::ptr::null(),
@@ -1029,6 +1156,7 @@ fn raw_loc_video_uses_the_declared_catalog_container() {
 
 	// The declaration survives the round trip, so a consumer knows to parse LOC.
 	let mut video_cfg = moq_video_config {
+		preference: 0,
 		name: std::ptr::null(),
 		name_len: 0,
 		label: std::ptr::null(),
@@ -1069,7 +1197,7 @@ fn raw_loc_video_uses_the_declared_catalog_container() {
 		timestamp_present: false,
 		keyframe: false,
 	};
-	assert_eq!(unsafe { moq_consume_frame(frame_id, &mut frame) }, 0);
+	assert_eq!(unsafe { encoded_frame(frame_id, &mut frame) }, 0);
 	assert_eq!(frame.timestamp_us, timestamp_us);
 	assert!(frame.timestamp_present, "a media frame is always timed");
 	assert!(frame.keyframe);
@@ -1078,7 +1206,7 @@ fn raw_loc_video_uses_the_declared_catalog_container() {
 		payload
 	);
 
-	assert_eq!(moq_consume_frame_free(frame_id), 0);
+	assert_eq!(moq_consume_read_free(frame_id), 0);
 	assert_eq!(moq_consume_video_cancel(consumer), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0);
 	assert_eq!(moq_consume_catalog_free(catalog), 0);
@@ -1162,6 +1290,7 @@ fn unpublishable_catalog_containers_are_rejected() {
 	let name = "video";
 	let codec = "vp8";
 	let config = |container| moq_video_config {
+		preference: 0,
 		name: name.as_ptr() as *const c_char,
 		name_len: name.len(),
 		label: std::ptr::null(),
@@ -1393,6 +1522,7 @@ fn publish_track_invalid_broadcast() {
 	let subscription = moq_subscription {
 		priority: 1,
 		max_delay_us: 0,
+		max_delay_present: false,
 		ranges: std::ptr::null(),
 		ranges_len: 0,
 		order: 0,
@@ -1502,6 +1632,7 @@ fn raw_track_publish_consume() {
 	let subscription = moq_subscription {
 		priority: 0,
 		max_delay_us: 1_000_000,
+		max_delay_present: true,
 		ranges: std::ptr::null(),
 		ranges_len: 0,
 		order: 0,
@@ -1710,13 +1841,11 @@ fn raw_track_subscription_options_and_update() {
 		start: moq_anchor {
 			kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
 			group: 1,
-			frame: 0,
 			timestamp_us: 0,
 		},
 		end: moq_anchor {
 			kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
 			group: 2,
-			frame: 0,
 			timestamp_us: 0,
 		},
 		end_present: true,
@@ -1724,6 +1853,7 @@ fn raw_track_subscription_options_and_update() {
 	let subscription = moq_subscription {
 		priority: 5,
 		max_delay_us: 25_000,
+		max_delay_present: true,
 		ranges: ranges.as_ptr(),
 		ranges_len: ranges.len(),
 		order: 0,
@@ -1824,13 +1954,11 @@ fn raw_track_time_anchor() {
 		start: moq_anchor {
 			kind: moq_anchor_kind::MOQ_ANCHOR_TIME as u32,
 			group: 0,
-			frame: 0,
 			timestamp_us: 30_000,
 		},
 		end: moq_anchor {
 			kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
 			group: 0,
-			frame: 0,
 			timestamp_us: 0,
 		},
 		end_present: false,
@@ -1838,6 +1966,7 @@ fn raw_track_time_anchor() {
 	let subscription = moq_subscription {
 		priority: 5,
 		max_delay_us: 1_000_000,
+		max_delay_present: true,
 		ranges: ranges.as_ptr(),
 		ranges_len: ranges.len(),
 		order: 0,
@@ -1924,13 +2053,11 @@ fn raw_track_update_refuses_time_on_untimed() {
 		start: moq_anchor {
 			kind: moq_anchor_kind::MOQ_ANCHOR_TIME as u32,
 			group: 0,
-			frame: 0,
 			timestamp_us: 0,
 		},
 		end: moq_anchor {
 			kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
 			group: 0,
-			frame: 0,
 			timestamp_us: 0,
 		},
 		end_present: false,
@@ -1938,6 +2065,7 @@ fn raw_track_update_refuses_time_on_untimed() {
 	let update = moq_subscription {
 		priority: 3,
 		max_delay_us: 1_000_000,
+		max_delay_present: true,
 		ranges: ranges.as_ptr(),
 		ranges_len: ranges.len(),
 		order: 0,
@@ -1990,12 +2118,12 @@ fn raw_track_relative_update_counts_from_the_track_edge() {
 	let anchor = |kind: moq_anchor_kind, group: u64| moq_anchor {
 		kind: kind as u32,
 		group,
-		frame: 0,
 		timestamp_us: 0,
 	};
 	let subscribe = |ranges: &[moq_range]| moq_subscription {
 		priority: 0,
 		max_delay_us: 60_000_000,
+		max_delay_present: true,
 		ranges: ranges.as_ptr(),
 		ranges_len: ranges.len(),
 		order: 0,
@@ -2203,7 +2331,7 @@ fn close_invalid_or_zero_ids() {
 	assert!(moq_session_close(9999) < 0);
 	assert!(moq_publish_close(9999) < 0);
 	assert!(moq_consume_close(9999) < 0);
-	assert!(moq_consume_frame_free(9999) < 0);
+	assert!(moq_consume_read_free(9999) < 0);
 
 	assert!(moq_origin_close(0) < 0);
 	assert!(moq_session_close(0) < 0);
@@ -2211,7 +2339,7 @@ fn close_invalid_or_zero_ids() {
 }
 
 /// A finished broadcast serves its finished tracks to a late subscriber, even after their
-/// handles were freed, and reports the longest max age among them as its linger.
+/// handles were freed, until it closes.
 #[test]
 fn publish_finish_serves_finished_tracks_until_closed() {
 	let origin = id(moq_origin_create());
@@ -2221,8 +2349,8 @@ fn publish_finish_serves_finished_tracks_until_closed() {
 	let name = b"data";
 	let info = moq_track_info {
 		priority: 0,
-		max_age_us: 5_000_000,
-		max_age_present: true,
+		max_age_us: 0,
+		max_age_present: false,
 		timescale: 0,
 		timescale_present: false,
 		refresh: 0,
@@ -2250,22 +2378,14 @@ fn publish_finish_serves_finished_tracks_until_closed() {
 	);
 	assert_eq!(moq_publish_media_finish(media), 0);
 
-	// A NULL out-pointer is refused before the broadcast is consumed.
-	assert!(unsafe { moq_publish_finish(broadcast, std::ptr::null_mut()) } < 0);
-	let mut linger_us = 0;
-	let finish = id(unsafe { moq_publish_finish(broadcast, &mut linger_us) });
-	// The media track's default max age outlasts the raw track's.
-	assert!(linger_us >= 5_000_000, "linger {linger_us}us");
-	assert!(
-		moq_publish_close(broadcast) < 0,
-		"a finished broadcast handle is released"
-	);
+	assert_eq!(moq_publish_catalog_finish(broadcast), 0);
 
 	let consume = request_broadcast(origin, path);
 	let frame_cb = Callback::new();
 	let subscription = moq_subscription {
 		priority: 0,
 		max_delay_us: 0,
+		max_delay_present: false,
 		ranges: std::ptr::null(),
 		ranges_len: 0,
 		order: 0,
@@ -2296,9 +2416,9 @@ fn publish_finish_serves_finished_tracks_until_closed() {
 	assert_eq!(frame_cb.recv_terminal(), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 
-	assert_eq!(moq_publish_finish_close(finish), 0);
-	assert!(moq_publish_finish_close(finish) < 0, "a closed finish is released");
-	assert!(request_once(origin, path) < 0, "a closed finish is unroutable");
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert!(moq_publish_close(broadcast) < 0, "a closed broadcast is released");
+	assert!(request_once(origin, path) < 0, "a closed broadcast is unroutable");
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -2380,8 +2500,8 @@ fn double_close_all_resource_types() {
 	);
 	let frame_id = id(frame_cb.recv());
 
-	assert_eq!(moq_consume_frame_free(frame_id), 0);
-	assert!(moq_consume_frame_free(frame_id) < 0);
+	assert_eq!(moq_consume_read_free(frame_id), 0);
+	assert!(moq_consume_read_free(frame_id) < 0);
 
 	assert_eq!(moq_consume_audio_cancel(track), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0, "audio close delivers terminal 0");
@@ -2417,7 +2537,6 @@ fn media_cut_bounds_audio_groups() {
 			unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), i * 20_000) },
 			0
 		);
-		assert_eq!(moq_publish_media_flush(media, i * 20_000), 0);
 		assert_eq!(moq_publish_media_cut(media), 0, "each packet is its own group");
 	}
 
@@ -2430,8 +2549,6 @@ fn media_cut_bounds_audio_groups() {
 	assert_eq!(moq_publish_media_discontinuity(media), 0);
 
 	// Both report a missing importer rather than panicking on an unknown id.
-	assert!(moq_publish_media_flush(9999, 0) < 0);
-	assert!(moq_publish_media_flush(media, u64::MAX) < 0);
 	assert!(moq_publish_media_discontinuity(9999) < 0);
 	assert!(moq_publish_media_discontinuity(0) < 0);
 	assert!(moq_publish_media_cut(9999) < 0);
@@ -2568,7 +2685,8 @@ fn announced_deactivation() {
 	let announced_task = id(unsafe { moq_origin_announced(origin, std::ptr::null(), Some(channel_callback), cb.ptr) });
 
 	let path = b"deactivate/test";
-	let broadcast = publish_broadcast(origin, path);
+	let (publication, broadcast) = create_broadcast(origin, path);
+	assert_eq!(unsafe { moq_publication_announce(publication, std::ptr::null()) }, 0);
 
 	let (announced_id, info) = cb.recv_route();
 	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_START);
@@ -2576,14 +2694,14 @@ fn announced_deactivation() {
 
 	// Going non-live unannounces the broadcast without tearing it down: local
 	// consumers stop reaching it, exactly as peers do, until it announces again.
-	assert_eq!(moq_publish_unannounce(broadcast), 0);
+	assert_eq!(moq_publication_unannounce(publication), 0);
 
 	let (deactivated_id, info) = cb.recv_route();
 	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_END);
 	assert_eq!(moq_origin_announced_free(deactivated_id), 0);
 	assert!(request_once(origin, path) < 0, "an unannounced broadcast is unroutable");
 
-	assert_eq!(unsafe { moq_publish_announce(broadcast, std::ptr::null()) }, 0);
+	assert_eq!(unsafe { moq_publication_announce(publication, std::ptr::null()) }, 0);
 	let (reannounced_id, info) = cb.recv_route();
 	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_START);
 	assert_eq!(moq_origin_announced_free(reannounced_id), 0);
@@ -2592,6 +2710,34 @@ fn announced_deactivation() {
 	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
 	assert_eq!(cb.recv_terminal(), 0, "announced close delivers terminal 0");
 	assert_eq!(moq_publish_close(broadcast), 0);
+	assert!(
+		unsafe { moq_publication_announce(publication, std::ptr::null()) } < 0,
+		"a closed broadcast cannot announce"
+	);
+	assert_eq!(moq_publication_free(publication), 0);
+	assert!(moq_publication_free(publication) < 0, "a freed publication is released");
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A publication outliving its closed broadcast cannot announce or withdraw the broadcast that
+/// replaced it at the same path.
+#[test]
+fn a_stale_publication_leaves_its_replacement_alone() {
+	let origin = id(moq_origin_create());
+	let path = b"replaced";
+	let (stale, broadcast) = create_broadcast(origin, path);
+	assert_eq!(unsafe { moq_publication_announce(stale, std::ptr::null()) }, 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+
+	let (publication, replacement) = create_broadcast(origin, path);
+	assert_eq!(unsafe { moq_publication_announce(publication, std::ptr::null()) }, 0);
+	assert!(unsafe { moq_publication_announce(stale, std::ptr::null()) } < 0);
+	assert!(moq_publication_unannounce(stale) < 0);
+	let _ = request_broadcast(origin, path);
+
+	assert_eq!(moq_publication_free(stale), 0);
+	assert_eq!(moq_publication_free(publication), 0);
+	assert_eq!(moq_publish_close(replacement), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -2602,11 +2748,12 @@ fn create_broadcast_is_unroutable_until_announced() {
 	let announced_task = id(unsafe { moq_origin_announced(origin, std::ptr::null(), Some(channel_callback), cb.ptr) });
 
 	let path = b"quiet";
-	let broadcast = id(unsafe { moq_origin_create_broadcast(origin, path.as_ptr() as *const c_char, path.len()) });
+	let (publication, broadcast) = create_broadcast(origin, path);
 	// Nobody reaches it, locally included, until it announces.
 	assert!(request_once(origin, path) < 0, "an unannounced broadcast is unroutable");
 
-	assert_eq!(unsafe { moq_publish_announce(broadcast, std::ptr::null()) }, 0);
+	assert_eq!(unsafe { moq_publication_announce(publication, std::ptr::null()) }, 0);
+	assert_eq!(moq_publication_free(publication), 0);
 	let _ = request_broadcast(origin, path);
 	let (announced_id, info) = cb.recv_route();
 	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_START);
@@ -2622,14 +2769,15 @@ fn create_broadcast_is_unroutable_until_announced() {
 fn announce_accepts_an_anonymous_hop() {
 	let origin = id(moq_origin_create());
 	let path = b"anon";
-	let broadcast = id(unsafe { moq_origin_create_broadcast(origin, path.as_ptr() as *const c_char, path.len()) });
+	let (publication, broadcast) = create_broadcast(origin, path);
 	let hops = [0u64];
 	let route = moq_route {
 		hops: hops.as_ptr(),
 		hops_len: hops.len(),
 		cost: 1,
 	};
-	assert_eq!(unsafe { moq_publish_announce(broadcast, &route) }, 0);
+	assert_eq!(unsafe { moq_publication_announce(publication, &route) }, 0);
+	assert_eq!(moq_publication_free(publication), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
@@ -2640,7 +2788,7 @@ fn dynamic_serves_a_request_under_a_prefix() {
 	let cb = Callback::new();
 	let prefix = b"live";
 	let dynamic = id(unsafe {
-		moq_origin_dynamic(
+		moq_origin_requests(
 			origin,
 			prefix.as_ptr() as *const c_char,
 			prefix.len(),
@@ -2674,12 +2822,15 @@ fn dynamic_serves_a_request_under_a_prefix() {
 	let mut served = 0;
 	let prepared =
 		id(unsafe { moq_broadcast_request_prepare(request, epoch.as_ptr().cast(), epoch.len(), &mut served) });
-	assert_eq!(moq_broadcast_prepared_publish(prepared), 0);
+	let publication = id(moq_broadcast_prepared_publish(prepared));
 	assert!(req_cb.recv() > 0);
 	req_cb.recv_terminal();
+	// The answer's route is the publication's to withdraw.
+	assert_eq!(moq_publication_unannounce(publication), 0);
+	assert_eq!(moq_publication_free(publication), 0);
 
-	assert_eq!(moq_origin_dynamic_cancel(dynamic), 0);
-	assert!(moq_origin_dynamic_cancel(dynamic) < 0, "double-cancel should fail");
+	assert_eq!(moq_origin_requests_cancel(dynamic), 0);
+	assert!(moq_origin_requests_cancel(dynamic) < 0, "double-cancel should fail");
 	assert_eq!(cb.recv_terminal(), 0);
 	assert_eq!(moq_publish_close(served), 0);
 	assert_eq!(moq_origin_close(origin), 0);
@@ -2690,7 +2841,7 @@ fn dynamic_refuses_a_missing_callback() {
 	let origin = id(moq_origin_create());
 	let prefix = b"live";
 	let code = unsafe {
-		moq_origin_dynamic(
+		moq_origin_requests(
 			origin,
 			prefix.as_ptr() as *const c_char,
 			prefix.len(),
@@ -2998,11 +3149,11 @@ fn dynamic_serves_track_requests() {
 	let broadcast = publish_broadcast(origin, b"dynamic-tracks");
 
 	assert!(
-		unsafe { moq_publish_dynamic(broadcast, None, std::ptr::null_mut()) } < 0,
+		unsafe { moq_publish_requests(broadcast, None, std::ptr::null_mut()) } < 0,
 		"a missing on_request must be refused"
 	);
 	let request_cb = Callback::new();
-	let dynamic = id(unsafe { moq_publish_dynamic(broadcast, Some(channel_callback), request_cb.ptr) });
+	let dynamic = id(unsafe { moq_publish_requests(broadcast, Some(channel_callback), request_cb.ptr) });
 
 	// The subscribe stays pending until the request is answered.
 	let consume = consume_local(broadcast);
@@ -3082,9 +3233,9 @@ fn dynamic_serves_track_requests() {
 	assert_eq!(moq_track_request_free(request), 0);
 	assert!(freed_cb.recv_terminal() < 0, "a freed request fails its subscriber");
 
-	assert_eq!(moq_publish_dynamic_cancel(dynamic), 0);
+	assert_eq!(moq_publish_requests_cancel(dynamic), 0);
 	assert_eq!(request_cb.recv_terminal(), 0);
-	assert!(moq_publish_dynamic_cancel(dynamic) < 0, "double-close should fail");
+	assert!(moq_publish_requests_cancel(dynamic) < 0, "double-close should fail");
 
 	assert_eq!(moq_consume_track_cancel(consumer), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0);
@@ -3101,7 +3252,7 @@ fn dynamic_track_request_publishes_media() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"dynamic-media");
 	let request_cb = Callback::new();
-	let _dynamic = id(unsafe { moq_publish_dynamic(broadcast, Some(channel_callback), request_cb.ptr) });
+	let _dynamic = id(unsafe { moq_publish_requests(broadcast, Some(channel_callback), request_cb.ptr) });
 
 	let consume = consume_local(broadcast);
 	let frame_cb = Callback::new();
@@ -3142,13 +3293,14 @@ fn dynamic_track_request_publishes_media() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// A raw track request already delivered stays acceptable after its broadcast handle is closed.
+/// A raw track request accepted after its broadcast closed is refused, and its subscriber sees the
+/// publisher leave instead of a track that outlives the broadcast.
 #[test]
-fn track_request_accepts_after_the_broadcast_closes() {
+fn track_request_accepted_after_the_broadcast_closes_is_refused() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"dynamic-closed");
 	let request_cb = Callback::new();
-	let _dynamic = id(unsafe { moq_publish_dynamic(broadcast, Some(channel_callback), request_cb.ptr) });
+	let _dynamic = id(unsafe { moq_publish_requests(broadcast, Some(channel_callback), request_cb.ptr) });
 
 	let consume = consume_local(broadcast);
 	let frame_cb = Callback::new();
@@ -3156,10 +3308,11 @@ fn track_request_accepts_after_the_broadcast_closes() {
 
 	let request = id(request_cb.recv());
 	assert_eq!(moq_publish_close(broadcast), 0);
-	let track = id(unsafe { moq_track_request_accept(request, std::ptr::null()) });
-	assert_eq!(moq_publish_track_finish(track), 0);
-	// The subscription ends with the finished track, before its callback's channel is freed.
-	assert_eq!(frame_cb.recv_terminal(), 0);
+	assert_eq!(
+		unsafe { moq_track_request_accept(request, std::ptr::null()) },
+		MOQ_ERROR_BROADCAST_NOT_FOUND
+	);
+	assert!(frame_cb.recv_terminal() < 0, "the subscription ended cleanly");
 	assert_eq!(request_cb.recv_terminal(), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_origin_close(origin), 0);
@@ -3172,7 +3325,6 @@ fn fetch_group(
 	name: &str,
 	sequence: u64,
 	priority: i8,
-	frame_start: u64,
 ) -> mpsc::Receiver<Result<(u64, Vec<u8>), moq_net::Error>> {
 	let consumer = State::lock()
 		.publish
@@ -3184,9 +3336,7 @@ fn fetch_group(
 	crate::ffi::RUNTIME.spawn(async move {
 		let res = async {
 			let track = consumer.track(&name)?;
-			let options = moq_net::group::Fetch::default()
-				.with_priority(priority)
-				.with_frame_start(frame_start);
+			let options = moq_net::group::Fetch::default().with_priority(priority);
 			let mut group = track.fetch_group(sequence, options).await?;
 			let index = group.index();
 			let frame = group.read_frame().await?.expect("expected a fetched frame");
@@ -3207,9 +3357,9 @@ fn track_dynamic_serves_a_fetch_miss() {
 		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
 
 	let group_cb = Callback::new();
-	let dynamic = id(unsafe { moq_publish_track_dynamic(track, Some(channel_callback), group_cb.ptr) });
+	let dynamic = id(unsafe { moq_publish_track_requests(track, Some(channel_callback), group_cb.ptr) });
 
-	let fetch = fetch_group(broadcast, "data", 5, 11, 0);
+	let fetch = fetch_group(broadcast, "data", 5, 11);
 	let request = id(group_cb.recv());
 	let mut sequence = 0u64;
 	let mut priority = 0i8;
@@ -3231,52 +3381,141 @@ fn track_dynamic_serves_a_fetch_miss() {
 	assert_eq!(moq_publish_group_finish(group), 0);
 	assert_eq!(fetch.recv_timeout(TIMEOUT).unwrap().unwrap(), (0, payload.to_vec()));
 
-	// A rejected fetch fails with the application code.
-	let fetch = fetch_group(broadcast, "data", 6, 0, 0);
+	// A rejected fetch fails as not found.
+	let fetch = fetch_group(broadcast, "data", 6, 0);
 	let request = id(group_cb.recv());
 	assert_eq!(moq_group_request_abort(request, 9), 0);
 	let err = fetch
 		.recv_timeout(TIMEOUT)
 		.unwrap()
 		.expect_err("a rejected fetch fails");
-	assert!(matches!(err, moq_net::Error::App(9)), "got {err:?}");
+	assert!(matches!(err, moq_net::Error::NotFound), "got {err:?}");
 
-	assert_eq!(moq_publish_dynamic_cancel(dynamic), 0);
+	assert_eq!(moq_publish_requests_cancel(dynamic), 0);
 	assert_eq!(group_cb.recv_terminal(), 0);
 	assert_eq!(moq_publish_track_finish(track), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// A group request every reader narrowed past is withdrawn, and the next group its fill
+/// still owes is requested without waiting for an answer.
 #[test]
-fn track_dynamic_serves_a_fetch_from_frame_start() {
+fn a_group_request_nobody_reads_is_withdrawn() {
 	let origin = id(moq_origin_create());
-	let broadcast = publish_broadcast(origin, b"track-dynamic-frame-start");
+	let broadcast = publish_broadcast(origin, b"track-dynamic-narrowed");
 	let name = b"data";
 	let track =
 		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
-
 	let group_cb = Callback::new();
-	let dynamic = id(unsafe { moq_publish_track_dynamic(track, Some(channel_callback), group_cb.ptr) });
+	let dynamic = id(unsafe { moq_publish_track_requests(track, Some(channel_callback), group_cb.ptr) });
 
-	let fetch = fetch_group(broadcast, "data", 5, 0, 3);
+	let ascending = |start, end| {
+		moq_net::track::Subscription::default()
+			.with_max_delay(None)
+			.with_range(start..end)
+			.with_order(moq_net::track::Order::Ascending)
+	};
+	let mut reader = {
+		let mut state = State::lock();
+		let producer = state.publish.track_producer(Id::try_from(track).unwrap()).unwrap();
+		let reader = producer.subscribe(ascending(7, u64::MAX));
+		producer.start_at(10).unwrap();
+		let mut group = producer.create_group(moq_net::group::Info { sequence: 10 }).unwrap();
+		group
+			.write_frame(moq_net::Timestamp::from_millis(10).unwrap(), &b"live"[..])
+			.unwrap();
+		group.finish().unwrap();
+		reader
+	};
+	let waiter = kio::Waiter::noop();
+	while let std::task::Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
+	let first = id(group_cb.recv());
+	let mut sequence = 0u64;
+	assert_eq!(unsafe { moq_group_request_sequence(first, &mut sequence) }, 0);
+	assert_eq!(sequence, 7);
+
+	// Reading only 8, so the fill owes nothing once 8 is let go.
+	reader.update(ascending(8, 9)).unwrap();
+	assert!(reader.poll_recv_group(&waiter).is_pending());
+	let next = id(group_cb.recv());
+	assert_eq!(unsafe { moq_group_request_sequence(next, &mut sequence) }, 0);
+	assert_eq!(sequence, 8, "group 7, which nobody reads, held the fill back");
+	assert!(moq_group_request_accept(first) < 0, "the withdrawn request");
+
+	assert_eq!(moq_group_request_free(next), 0);
+	drop(reader);
+	assert_eq!(moq_publish_requests_cancel(dynamic), 0);
+	assert_eq!(group_cb.recv_terminal(), 0);
+	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// Rejecting a group request fails only the readers waiting on it: the group is not named
+/// dropped, so a later subscriber asks again.
+#[test]
+fn a_rejected_group_request_binds_only_its_readers() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"track-dynamic-refused");
+	let name = b"data";
+	let track =
+		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
+	let group_cb = Callback::new();
+	let dynamic = id(unsafe { moq_publish_track_requests(track, Some(channel_callback), group_cb.ptr) });
+
+	// The live feed ran from 10 and ended, so only a fill can serve group 6.
+	{
+		let mut state = State::lock();
+		let producer = state.publish.track_producer(Id::try_from(track).unwrap()).unwrap();
+		producer.start_at(10).unwrap();
+		let mut group = producer.create_group(moq_net::group::Info { sequence: 10 }).unwrap();
+		group
+			.write_frame(moq_net::Timestamp::from_millis(10).unwrap(), &b"live"[..])
+			.unwrap();
+		group.finish().unwrap();
+		producer.finish().unwrap();
+	}
+	let subscribe = || {
+		let subscription = moq_net::track::Subscription::default()
+			.with_max_delay(None)
+			.with_range(6..7);
+		let mut state = State::lock();
+		let producer = state.publish.track_producer(Id::try_from(track).unwrap()).unwrap();
+		producer.subscribe(subscription)
+	};
+	let waiter = kio::Waiter::noop();
+
+	let mut sequence = 0u64;
+	for reject in [
+		|request| moq_group_request_abort(request, 9),
+		|request| moq_group_request_free(request),
+	] {
+		let mut reader = subscribe();
+		assert!(reader.poll_recv_group(&waiter).is_pending());
+		let request = id(group_cb.recv());
+		assert_eq!(unsafe { moq_group_request_sequence(request, &mut sequence) }, 0);
+		assert_eq!(sequence, 6);
+		assert_eq!(reject(request), 0);
+	}
+
+	let mut reader = subscribe();
+	assert!(reader.poll_recv_group(&waiter).is_pending());
 	let request = id(group_cb.recv());
-	let mut frame_start = 0u64;
-	assert_eq!(unsafe { moq_group_request_frame_start(request, &mut frame_start) }, 0);
-	assert_eq!(frame_start, 3);
-
 	let group = id(moq_group_request_accept(request));
-	let payload = b"tail";
+	let payload = b"fetched";
 	assert_eq!(
-		unsafe { moq_publish_group_frame(group, payload.as_ptr(), payload.len(), 100_000) },
+		unsafe { moq_publish_group_frame(group, payload.as_ptr(), payload.len(), 6_000) },
 		0
 	);
 	assert_eq!(moq_publish_group_finish(group), 0);
-	let (index, got) = fetch.recv_timeout(TIMEOUT).unwrap().unwrap();
-	assert_eq!(index, 3, "the consumer resumes at the requested frame");
-	assert_eq!(got, payload);
+	let std::task::Poll::Ready(Ok(Some(group))) = reader.poll_recv_group(&waiter) else {
+		panic!("the accepted group reaches the reader");
+	};
+	assert_eq!(group.sequence, 6);
 
-	assert_eq!(moq_publish_dynamic_cancel(dynamic), 0);
+	drop(reader);
+	assert_eq!(moq_publish_requests_cancel(dynamic), 0);
 	assert_eq!(group_cb.recv_terminal(), 0);
 	assert_eq!(moq_publish_track_finish(track), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
@@ -3288,13 +3527,13 @@ fn track_request_dynamic_survives_accept() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"request-dynamic");
 	let request_cb = Callback::new();
-	let _dynamic = id(unsafe { moq_publish_dynamic(broadcast, Some(channel_callback), request_cb.ptr) });
+	let _dynamic = id(unsafe { moq_publish_requests(broadcast, Some(channel_callback), request_cb.ptr) });
 
 	// A fetch of a track the broadcast has not declared requests the track first.
-	let fetch = fetch_group(broadcast, "archive", 9, 0, 0);
+	let fetch = fetch_group(broadcast, "archive", 9, 0);
 	let request = id(request_cb.recv());
 	let group_cb = Callback::new();
-	let track_dynamic = id(unsafe { moq_track_request_dynamic(request, Some(channel_callback), group_cb.ptr) });
+	let track_dynamic = id(unsafe { moq_track_request_requests(request, Some(channel_callback), group_cb.ptr) });
 	let track = id(unsafe { moq_track_request_accept(request, std::ptr::null()) });
 
 	let group_request = id(group_cb.recv());
@@ -3310,7 +3549,7 @@ fn track_request_dynamic_survives_accept() {
 	assert_eq!(moq_publish_group_finish(group), 0);
 	assert_eq!(fetch.recv_timeout(TIMEOUT).unwrap().unwrap(), (0, payload.to_vec()));
 
-	assert_eq!(moq_publish_dynamic_cancel(track_dynamic), 0);
+	assert_eq!(moq_publish_requests_cancel(track_dynamic), 0);
 	assert_eq!(group_cb.recv_terminal(), 0);
 	assert_eq!(moq_publish_track_finish(track), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
@@ -3361,6 +3600,7 @@ fn local_publish_consume() {
 	assert_eq!(codec, "opus");
 
 	let mut video_cfg = moq_video_config {
+		preference: 0,
 		name: std::ptr::null(),
 		name_len: 0,
 		label: std::ptr::null(),
@@ -3397,14 +3637,14 @@ fn local_publish_consume() {
 		timestamp_present: false,
 		keyframe: false,
 	};
-	assert_eq!(unsafe { moq_consume_frame(frame_id, &mut frame) }, 0);
+	assert_eq!(unsafe { encoded_frame(frame_id, &mut frame) }, 0);
 	assert_eq!(frame.payload_size, payload.len());
 	assert_eq!(frame.timestamp_us, timestamp_us);
 
 	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
 	assert_eq!(received, payload, "frame payload should match");
 
-	assert_eq!(moq_consume_frame_free(frame_id), 0);
+	assert_eq!(moq_consume_read_free(frame_id), 0);
 	assert_eq!(moq_consume_audio_cancel(track), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0, "audio close delivers terminal 0");
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
@@ -3533,7 +3773,7 @@ fn consume_audio_follows_a_sibling_broadcast_reference() {
 			.renditions
 			.get_mut(&name)
 			.unwrap()
-			.broadcast = Some(moq_net::path::Relative::new("./source").into_owned());
+			.broadcast = Some(moq_net::path::Relative::new("./source").unwrap());
 	}
 
 	let consume = request_broadcast(origin, b"a/pub");
@@ -3560,12 +3800,12 @@ fn consume_audio_follows_a_sibling_broadcast_reference() {
 		timestamp_present: false,
 		keyframe: false,
 	};
-	assert_eq!(unsafe { moq_consume_frame(frame_id, &mut frame) }, 0);
+	assert_eq!(unsafe { encoded_frame(frame_id, &mut frame) }, 0);
 	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
 	assert_eq!(received, payload, "the sibling broadcast's frame should arrive");
 	assert_eq!(frame.timestamp_us, timestamp_us);
 
-	assert_eq!(moq_consume_frame_free(frame_id), 0);
+	assert_eq!(moq_consume_read_free(frame_id), 0);
 	assert_eq!(moq_consume_audio_cancel(track), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0, "audio close delivers terminal 0");
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
@@ -3606,14 +3846,14 @@ fn consume_announced_close_cancels() {
 }
 
 /// Publish `path` on `origin` through `route`, which the C ABI cannot set.
-fn publish(origin: u32, path: &str, route: moq_net::origin::Route) -> moq_net::broadcast::Producer {
+fn publish(origin: u32, path: &str, route: moq_net::origin::Route) -> moq_net::origin::Publication {
 	let _runtime = crate::ffi::RUNTIME.enter();
 	let origin = crate::Id::try_from(origin).unwrap();
 	State::lock().origin.get(origin).unwrap().publish(path, route).unwrap()
 }
 
 /// Publish `path` on `origin` under a fresh epoch, as each run of a publisher does.
-fn publish_run(origin: u32, path: &str) -> moq_net::broadcast::Producer {
+fn publish_run(origin: u32, path: &str) -> moq_net::origin::Publication {
 	publish(
 		origin,
 		path,
@@ -3654,19 +3894,13 @@ fn consume_announced_follows_a_restart() {
 /// Another instance taking over while the wait resolves is the one it delivers, so the restart
 /// that announced it must not deliver it again. `dynamic_at` is where the route the wait first
 /// resolves through covers the path: above it, the takeover's restart lands while resolving;
-/// at it, the origin holds that restart for [`moq_net::origin::DEFAULT_UPDATE_HOLD`].
+/// at it, the origin holds that restart for the default [`moq_net::origin::Config::update_hold`].
 fn consume_announced_delivers_a_takeover_once(dynamic_at: &str) {
 	let origin = id(moq_origin_create());
 	let dynamic = {
 		let _runtime = crate::ffi::RUNTIME.enter();
 		let origin = crate::Id::try_from(origin).unwrap();
-		let route = moq_net::origin::Route::default();
-		State::lock()
-			.origin
-			.get(origin)
-			.unwrap()
-			.dynamic_route(dynamic_at, route)
-			.unwrap()
+		State::lock().origin.get(origin).unwrap().requests(dynamic_at).unwrap()
 	};
 	let cb = Callback::new();
 	let path = b"live";
@@ -3685,7 +3919,9 @@ fn consume_announced_delivers_a_takeover_once(dynamic_at: &str) {
 	let takeover = publish(origin, "live", moq_net::origin::Route::default());
 	let delivered = id(cb.recv());
 	assert!(
-		cb.rx.recv_timeout(moq_net::origin::DEFAULT_UPDATE_HOLD * 2).is_err(),
+		cb.rx
+			.recv_timeout(moq_net::origin::Config::default().update_hold * 2)
+			.is_err(),
 		"the takeover was delivered twice"
 	);
 
@@ -3706,16 +3942,11 @@ fn consume_announced_delivers_a_held_takeover_once() {
 	consume_announced_delivers_a_takeover_once("live");
 }
 
-/// Serve `prefix` on `origin` dynamically through `route`.
-fn serve_dynamic(origin: u32, prefix: &str, route: moq_net::origin::Route) -> moq_net::origin::Dynamic {
+/// Serve `prefix` on `origin` dynamically.
+fn serve_dynamic(origin: u32, prefix: &str) -> moq_net::origin::Requests {
 	let _runtime = crate::ffi::RUNTIME.enter();
 	let origin = crate::Id::try_from(origin).unwrap();
-	State::lock()
-		.origin
-		.get(origin)
-		.unwrap()
-		.dynamic_route(prefix, route)
-		.unwrap()
+	State::lock().origin.get(origin).unwrap().requests(prefix).unwrap()
 }
 
 /// Wait for the broadcast at `path` on `origin`, delivering each instance through `cb`.
@@ -3747,9 +3978,9 @@ extern "C" fn gated_callback(user_data: *mut c_void, code: i32) {
 	}
 }
 
-/// An end is a gap that ended every request on the old route, even when a route above the path
-/// with the same epoch carries the instance on. So the instance serving the path afterwards is
-/// delivered again, though the caller still holds its handle.
+/// An end is a gap that ended every request on the old route, even when a claim above the path
+/// answers under the same epoch. So the instance serving the path afterwards is delivered again,
+/// though the caller still holds a handle to its epoch.
 #[test]
 fn consume_announced_delivers_the_instance_again_after_an_end() {
 	let origin = id(moq_origin_create());
@@ -3777,7 +4008,7 @@ fn consume_announced_delivers_the_instance_again_after_an_end() {
 
 	// Hold the wait inside that delivery so both changes are on hand when it next looks. Seeing
 	// the route above stand before the path's own route left would prove no gap: an update.
-	let dynamic = serve_dynamic(origin, "", route);
+	let dynamic = serve_dynamic(origin, "");
 	{
 		let _runtime = crate::ffi::RUNTIME.enter();
 		run.unannounce();
@@ -3786,9 +4017,8 @@ fn consume_announced_delivers_the_instance_again_after_an_end() {
 	let request = crate::ffi::RUNTIME.block_on(dynamic.requested_broadcast()).unwrap();
 	let served = {
 		let _runtime = crate::ffi::RUNTIME.enter();
-		let served = moq_net::broadcast::Info::new().produce();
-		request.accept(served.consume());
-		served
+		let epoch = route.epoch.clone().unwrap();
+		request.prepare(epoch).unwrap().publish().unwrap()
 	};
 	let again = id(recv());
 
@@ -3805,7 +4035,7 @@ fn consume_announced_delivers_the_instance_again_after_an_end() {
 #[test]
 fn consume_announced_delivers_a_freed_takeover_again() {
 	let origin = id(moq_origin_create());
-	let dynamic = serve_dynamic(origin, "live", moq_net::origin::Route::default());
+	let dynamic = serve_dynamic(origin, "live");
 	let cb = Callback::new();
 	let task = consume_announced(origin, b"live", &cb);
 
@@ -3828,7 +4058,7 @@ fn consume_announced_delivers_a_freed_takeover_again() {
 #[test]
 fn consume_announced_delivers_a_gap_while_resolving_once() {
 	let origin = id(moq_origin_create());
-	let dynamic = serve_dynamic(origin, "", moq_net::origin::Route::default());
+	let dynamic = serve_dynamic(origin, "");
 	let cb = Callback::new();
 	let task = consume_announced(origin, b"live", &cb);
 
@@ -3837,11 +4067,13 @@ fn consume_announced_delivers_a_gap_while_resolving_once() {
 		let _runtime = crate::ffi::RUNTIME.enter();
 		drop(dynamic);
 	}
-	std::thread::sleep(moq_net::origin::DEFAULT_UPDATE_HOLD * 2);
+	std::thread::sleep(moq_net::origin::Config::default().update_hold * 2);
 	let arrival = publish(origin, "live", moq_net::origin::Route::default());
 	let delivered = id(cb.recv());
 	assert!(
-		cb.rx.recv_timeout(moq_net::origin::DEFAULT_UPDATE_HOLD * 2).is_err(),
+		cb.rx
+			.recv_timeout(moq_net::origin::Config::default().update_hold * 2)
+			.is_err(),
 		"the arrival was delivered twice"
 	);
 
@@ -3869,6 +4101,7 @@ fn video_publish_consume() {
 	let catalog_id = id(catalog_cb.recv());
 
 	let mut video_cfg = moq_video_config {
+		preference: 0,
 		name: std::ptr::null(),
 		name_len: 0,
 		label: std::ptr::null(),
@@ -3937,11 +4170,11 @@ fn video_publish_consume() {
 		timestamp_present: false,
 		keyframe: false,
 	};
-	assert_eq!(unsafe { moq_consume_frame(frame_id, &mut frame) }, 0);
+	assert_eq!(unsafe { encoded_frame(frame_id, &mut frame) }, 0);
 	assert_eq!(frame.timestamp_us, 0);
 	assert!(frame.payload_size > 0, "frame should have payload data");
 
-	assert_eq!(moq_consume_frame_free(frame_id), 0);
+	assert_eq!(moq_consume_read_free(frame_id), 0);
 	assert_eq!(moq_consume_video_cancel(track), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0, "video close delivers terminal 0");
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
@@ -4068,6 +4301,95 @@ fn gray_rgba(width: u32, height: u32) -> Vec<u8> {
 	vec![0x80u8; width as usize * height as usize * 4]
 }
 
+/// A finished encoder reaches a C decoder as an end read in microseconds rather
+/// than vanishing: Opus pads a partial last frame, so the finish publishes where
+/// the source really stopped.
+#[test]
+fn audio_raw_decode_reads_the_encoder_end() {
+	const START_US: u64 = 123_000;
+	const SAMPLES: usize = 860;
+
+	let origin = id(moq_origin_create());
+	let path = b"audio-raw-end-test";
+	let broadcast = publish_broadcast(origin, path);
+	let input = moq_audio_encoder_input {
+		format: moq_audio_sample_format::MOQ_AUDIO_SAMPLE_FORMAT_F32 as u32,
+		sample_rate: 48_000,
+		channels: 1,
+	};
+	let output = moq_audio_encoder_output {
+		codec: c"opus".as_ptr(),
+		codec_len: 4,
+		sample_rate: 0,
+		channels: 0,
+		bitrate: 0,
+		frame_duration_us: 0,
+	};
+	let producer = id(unsafe { moq_encode_audio(broadcast, c"audio".as_ptr(), 5, &input, &output, 0) });
+	let pcm: Vec<u8> = (0..SAMPLES)
+		.flat_map(|i| (i as f32 / SAMPLES as f32).to_le_bytes())
+		.collect();
+	let frame = moq_audio_frame {
+		timestamp_us: START_US,
+		data: pcm.as_ptr(),
+		data_size: pcm.len(),
+	};
+	assert_eq!(unsafe { moq_encode_audio_frame(producer, &frame) }, 0);
+	assert_eq!(moq_encode_audio_finish(producer), 0);
+
+	let consume = request_broadcast(origin, path);
+	let catalog_cb = Callback::new();
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_id = id(catalog_cb.recv());
+	let decoded = moq_audio_decoder_output {
+		format: moq_audio_sample_format::MOQ_AUDIO_SAMPLE_FORMAT_F32 as u32,
+		sample_rate: 0,
+		channels: 0,
+		max_delay_us: 30_000_000,
+	};
+	let read_cb = Callback::new();
+	id(unsafe { moq_decode_audio(catalog_id, 0, &decoded, Some(channel_callback), read_cb.ptr) });
+
+	let mut ends = Vec::new();
+	loop {
+		let code = read_cb.recv();
+		if code <= 0 {
+			assert_eq!(code, 0, "a finished track closes cleanly");
+			break;
+		}
+		let mut read = moq_audio_read {
+			kind: moq_decode_read_kind::MOQ_DECODE_READ_GAP,
+			frame: moq_audio_frame {
+				timestamp_us: 0,
+				data: std::ptr::null(),
+				data_size: 0,
+			},
+			gap: moq_decode_gap::default(),
+			end_us: 0,
+		};
+		assert_eq!(unsafe { moq_decode_audio_read(id(code), &mut read) }, 0);
+		match read.kind {
+			moq_decode_read_kind::MOQ_DECODE_READ_FRAME => {
+				assert!(!read.frame.data.is_null());
+			}
+			moq_decode_read_kind::MOQ_DECODE_READ_END => {
+				assert!(read.frame.data.is_null(), "an end carries no samples");
+				ends.push(read.end_us);
+			}
+			moq_decode_read_kind::MOQ_DECODE_READ_GAP => panic!("nothing was lost"),
+		}
+		assert_eq!(moq_decode_audio_read_free(id(code)), 0);
+	}
+	assert_eq!(ends, [START_US + SAMPLES as u64 * 1_000_000 / 48_000]);
+
+	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
+	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
+	assert_eq!(catalog_cb.recv_catalog_terminal(), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 /// The publish-side mirror of [`video_raw_decode`]: hand raw RGBA to
 /// `moq_encode_video` and read decoded I420 back out of
 /// `moq_decode_video`, so the encode and decode halves meet on the wire.
@@ -4081,7 +4403,10 @@ fn video_raw_publish_consume() {
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
 		width: 320,
 		height: 240,
-		framerate: 30,
+		framerate: moq_video_frame_rate {
+			numerator: 30_000,
+			denominator: 1001,
+		},
 	};
 	// Software so the test is deterministic everywhere: `Auto` would reach for a
 	// hardware backend that CI runners don't have.
@@ -4093,12 +4418,12 @@ fn video_raw_publish_consume() {
 		encoder: std::ptr::null(),
 		encoder_len: 0,
 	};
-	let producer = id(unsafe { moq_encode_video(broadcast, &input, &output, 0) });
+	let producer = id(unsafe { moq_encode_video(broadcast, &input, &output, std::ptr::null()) });
 
 	let rgba = gray_rgba(320, 240);
 	let publish = |index: u64| {
 		let frame = moq_video_encoder_frame {
-			timestamp_us: index * 33_333,
+			timestamp_us: index * 1_001_000 / 30,
 			data: rgba.as_ptr(),
 			data_size: rgba.len(),
 		};
@@ -4133,43 +4458,38 @@ fn video_raw_publish_consume() {
 	}
 
 	let frame_id = id(frame_cb.recv());
-	let mut frame = moq_video_frame {
-		timestamp_us: 0,
-		width: 0,
-		height: 0,
-		data: std::ptr::null(),
-		data_size: 0,
-	};
 	// Hold the frame across cancellation: its id owns the decoded picture, so it
 	// stays readable after the terminal callback and until it is freed.
 	assert_eq!(moq_decode_video_cancel(consumer), 0);
 	loop {
 		let code = frame_cb.recv();
 		if code > 0 {
-			assert_eq!(moq_decode_video_frame_free(id(code)), 0);
+			assert_eq!(moq_decode_video_read_free(id(code)), 0);
 		} else {
 			assert_eq!(code, 0, "raw video close delivers terminal 0");
 			break;
 		}
 	}
 
-	assert_eq!(unsafe { moq_decode_video_frame(frame_id, &mut frame) }, 0);
+	let frame = video_frame(frame_id);
 	assert_eq!(frame.width, 320);
 	assert_eq!(frame.height, 240);
 	assert_eq!(frame.data_size, 320 * 240 * 3 / 2, "tightly-packed I420");
 
 	// Pixels are produced once per id, so a second read hands back the same buffer.
-	let first = frame.data;
-	assert_eq!(unsafe { moq_decode_video_frame(frame_id, &mut frame) }, 0);
-	assert_eq!(frame.data, first, "the pixel pointer is stable until the id is freed");
-
-	assert_eq!(moq_decode_video_frame_free(frame_id), 0);
 	assert_eq!(
-		unsafe { moq_decode_video_frame(frame_id, &mut frame) },
+		video_frame(frame_id).data,
+		frame.data,
+		"the pixel pointer is stable until the id is freed"
+	);
+
+	assert_eq!(moq_decode_video_read_free(frame_id), 0);
+	assert_eq!(
+		video_read(frame_id).0,
 		Error::FrameNotFound.code(),
 		"a freed id is released, not left readable"
 	);
-	assert_eq!(moq_decode_video_frame_free(frame_id), Error::FrameNotFound.code());
+	assert_eq!(moq_decode_video_read_free(frame_id), Error::FrameNotFound.code());
 
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
 	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
@@ -4247,7 +4567,10 @@ fn decode_first_frame(output: &moq_video_decoder_output) -> (u32, u32, usize) {
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
 		width: 320,
 		height: 240,
-		framerate: 30,
+		framerate: moq_video_frame_rate {
+			numerator: 30,
+			denominator: 1,
+		},
 	};
 	let encode_output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
@@ -4257,7 +4580,7 @@ fn decode_first_frame(output: &moq_video_decoder_output) -> (u32, u32, usize) {
 		encoder: std::ptr::null(),
 		encoder_len: 0,
 	};
-	let producer = id(unsafe { moq_encode_video(broadcast, &input, &encode_output, 0) });
+	let producer = id(unsafe { moq_encode_video(broadcast, &input, &encode_output, std::ptr::null()) });
 
 	let rgba = gray_rgba(320, 240);
 	let publish = |index: u64| {
@@ -4287,22 +4610,15 @@ fn decode_first_frame(output: &moq_video_decoder_output) -> (u32, u32, usize) {
 	}
 
 	let frame_id = id(frame_cb.recv());
-	let mut frame = moq_video_frame {
-		timestamp_us: 0,
-		width: 0,
-		height: 0,
-		data: std::ptr::null(),
-		data_size: 0,
-	};
-	assert_eq!(unsafe { moq_decode_video_frame(frame_id, &mut frame) }, 0);
+	let frame = video_frame(frame_id);
 	let result = (frame.width, frame.height, frame.data_size);
 
-	assert_eq!(moq_decode_video_frame_free(frame_id), 0);
+	assert_eq!(moq_decode_video_read_free(frame_id), 0);
 	assert_eq!(moq_decode_video_cancel(consumer), 0);
 	loop {
 		let code = frame_cb.recv();
 		if code > 0 {
-			assert_eq!(moq_decode_video_frame_free(id(code)), 0);
+			assert_eq!(moq_decode_video_read_free(id(code)), 0);
 		} else {
 			assert_eq!(code, 0, "raw video close delivers terminal 0");
 			break;
@@ -4360,7 +4676,10 @@ fn video_raw_publish_from_many_threads() {
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
 		width: 320,
 		height: 240,
-		framerate: 30,
+		framerate: moq_video_frame_rate {
+			numerator: 30,
+			denominator: 1,
+		},
 	};
 	let output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
@@ -4372,7 +4691,7 @@ fn video_raw_publish_from_many_threads() {
 		encoder: std::ptr::null(),
 		encoder_len: 0,
 	};
-	let producer = id(unsafe { moq_encode_video(broadcast, &input, &output, 0) });
+	let producer = id(unsafe { moq_encode_video(broadcast, &input, &output, std::ptr::null()) });
 
 	// A fresh caller thread per frame, never the one that published.
 	let rgba = std::sync::Arc::new(gray_rgba(320, 240));
@@ -4431,7 +4750,10 @@ fn a_stalled_encode_does_not_block_unrelated_calls() {
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
 		width: 320,
 		height: 240,
-		framerate: 30,
+		framerate: moq_video_frame_rate {
+			numerator: 30,
+			denominator: 1,
+		},
 	};
 	let output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
@@ -4441,8 +4763,8 @@ fn a_stalled_encode_does_not_block_unrelated_calls() {
 		encoder: std::ptr::null(),
 		encoder_len: 0,
 	};
-	let stalled = id(unsafe { moq_encode_video(broadcast, &input, &output, 0) });
-	let other = id(unsafe { moq_encode_video(broadcast, &input, &output, 0) });
+	let stalled = id(unsafe { moq_encode_video(broadcast, &input, &output, std::ptr::null()) });
+	let other = id(unsafe { moq_encode_video(broadcast, &input, &output, std::ptr::null()) });
 
 	// Hold the lock a publish takes for the duration of its encode.
 	let handle = State::lock().video.producer(Id::try_from(stalled).unwrap()).unwrap();
@@ -4499,6 +4821,60 @@ fn a_stalled_encode_does_not_block_unrelated_calls() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// Closing a broadcast whose encoder is mid-encode waits for that encode without holding the
+/// global lock, so unrelated calls go on meanwhile.
+#[test]
+fn closing_a_broadcast_does_not_block_unrelated_calls_behind_its_encoder() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"video-close-stall-test");
+
+	let input = moq_video_encoder_input {
+		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
+		width: 320,
+		height: 240,
+		framerate: moq_video_frame_rate {
+			numerator: 30,
+			denominator: 1,
+		},
+	};
+	let output = moq_video_encoder_output {
+		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
+		bitrate: 0,
+		gop: 0,
+		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
+		encoder: std::ptr::null(),
+		encoder_len: 0,
+	};
+	let stalled = id(unsafe { moq_encode_video(broadcast, &input, &output, std::ptr::null()) });
+
+	// Hold the lock an encode takes for the duration of its codec call.
+	let handle = State::lock().video.producer(Id::try_from(stalled).unwrap()).unwrap();
+	let held = handle.lock();
+	let closing = std::thread::spawn(move || moq_publish_close(broadcast));
+
+	// Once the close released the broadcast, unrelated calls must not wait on the encoder. On
+	// its own thread so a regression fails this assertion rather than hanging the test.
+	let (tx, rx) = mpsc::channel();
+	let unrelated = std::thread::spawn(move || {
+		let broadcast = Id::try_from(broadcast).unwrap();
+		while State::lock().publish.catalog_snapshot(broadcast).is_ok() {
+			std::thread::yield_now();
+		}
+		let _ = tx.send(moq_origin_create());
+	});
+	let created = rx
+		.recv_timeout(TIMEOUT)
+		.expect("an unrelated call was waiting on the closing encoder");
+	assert!(created > 0, "creating an origin failed while a close was waiting");
+	unrelated.join().unwrap();
+
+	drop(held);
+	assert_eq!(closing.join().unwrap(), 0);
+	assert!(moq_encode_video_finish(stalled) < 0, "the close released the encoder");
+	assert_eq!(moq_origin_close(id(created)), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 /// A raw video producer rejects a buffer that isn't one picture at the
 /// configured resolution, rather than reinterpreting it.
 #[test]
@@ -4510,7 +4886,10 @@ fn video_raw_publish_rejects_frame_size_mismatch() {
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
 		width: 320,
 		height: 240,
-		framerate: 30,
+		framerate: moq_video_frame_rate {
+			numerator: 30,
+			denominator: 1,
+		},
 	};
 	let output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
@@ -4520,7 +4899,7 @@ fn video_raw_publish_rejects_frame_size_mismatch() {
 		encoder: std::ptr::null(),
 		encoder_len: 0,
 	};
-	let producer = id(unsafe { moq_encode_video(broadcast, &input, &output, 0) });
+	let producer = id(unsafe { moq_encode_video(broadcast, &input, &output, std::ptr::null()) });
 
 	// A 640x480 buffer against a 320x240 encoder: the frame carries no dimensions
 	// of its own, so this is caught as a wrong-sized picture.
@@ -4548,7 +4927,10 @@ fn video_raw_publish_rejects_invalid_config() {
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 as u32,
 		width: 320,
 		height: 240,
-		framerate: 30,
+		framerate: moq_video_frame_rate {
+			numerator: 30,
+			denominator: 1,
+		},
 	};
 	let valid_output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
@@ -4559,20 +4941,32 @@ fn video_raw_publish_rejects_invalid_config() {
 		encoder_len: 0,
 	};
 
-	assert!(unsafe { moq_encode_video(broadcast, std::ptr::null(), &valid_output, 0) } < 0);
-	assert!(unsafe { moq_encode_video(broadcast, &valid_input, std::ptr::null(), 0) } < 0);
+	assert!(unsafe { moq_encode_video(broadcast, std::ptr::null(), &valid_output, std::ptr::null()) } < 0);
+	assert!(unsafe { moq_encode_video(broadcast, &valid_input, std::ptr::null(), std::ptr::null()) } < 0);
 
 	let bad_format = moq_video_encoder_input {
 		format: 99,
 		..valid_input
 	};
-	assert!(unsafe { moq_encode_video(broadcast, &bad_format, &valid_output, 0) } < 0);
+	assert!(unsafe { moq_encode_video(broadcast, &bad_format, &valid_output, std::ptr::null()) } < 0);
 
 	let zero_framerate = moq_video_encoder_input {
-		framerate: 0,
+		framerate: moq_video_frame_rate {
+			numerator: 0,
+			denominator: 1,
+		},
 		..valid_input
 	};
-	assert!(unsafe { moq_encode_video(broadcast, &zero_framerate, &valid_output, 0) } < 0);
+	assert!(unsafe { moq_encode_video(broadcast, &zero_framerate, &valid_output, std::ptr::null()) } < 0);
+	let zero_denominator = moq_video_encoder_input {
+		framerate: moq_video_frame_rate {
+			numerator: 30_000,
+			denominator: 0,
+		},
+		..valid_input
+	};
+	let refused = unsafe { moq_encode_video(broadcast, &zero_denominator, &valid_output, std::ptr::null()) };
+	assert!(refused < 0 && refused != MOQ_ERROR_PANIC);
 
 	// Regression: dimensions arrive as a raw `u32` pair, and their product used to
 	// overflow the default-bitrate estimate inside the encoder. It has to be refused
@@ -4582,7 +4976,7 @@ fn video_raw_publish_rejects_invalid_config() {
 		height: u32::MAX - 1,
 		..valid_input
 	};
-	let refused = unsafe { moq_encode_video(broadcast, &unrepresentable, &valid_output, 0) };
+	let refused = unsafe { moq_encode_video(broadcast, &unrepresentable, &valid_output, std::ptr::null()) };
 	assert!(refused < 0 && refused != MOQ_ERROR_PANIC, "{refused}");
 
 	// A size no encoder can take, but whose arithmetic is fine, is the backend's
@@ -4597,7 +4991,7 @@ fn video_raw_publish_rejects_invalid_config() {
 		height: 2,
 		..valid_input
 	};
-	let huge = unsafe { moq_encode_video(broadcast, &merely_huge, &valid_output, 0) };
+	let huge = unsafe { moq_encode_video(broadcast, &merely_huge, &valid_output, std::ptr::null()) };
 	if huge > 0 {
 		assert_eq!(moq_encode_video_finish(id(huge)), 0);
 	} else {
@@ -4612,13 +5006,13 @@ fn video_raw_publish_rejects_invalid_config() {
 		codec: 99,
 		..valid_output
 	};
-	assert!(unsafe { moq_encode_video(broadcast, &valid_input, &bad_codec, 0) } < 0);
+	assert!(unsafe { moq_encode_video(broadcast, &valid_input, &bad_codec, std::ptr::null()) } < 0);
 
 	let bad_kind = moq_video_encoder_output {
 		kind: 99,
 		..valid_output
 	};
-	assert!(unsafe { moq_encode_video(broadcast, &valid_input, &bad_kind, 0) } < 0);
+	assert!(unsafe { moq_encode_video(broadcast, &valid_input, &bad_kind, std::ptr::null()) } < 0);
 
 	// Handles for a producer that was never created.
 	assert!(moq_encode_video_cut(0) < 0);
@@ -4634,7 +5028,7 @@ fn video_raw_publish_rejects_invalid_config() {
 #[test]
 fn video_raw_decode() {
 	// Encode a few gray frames to Annex-B (avc3, SPS/PPS inline on the keyframe).
-	let mut config = moq_video::encode::Config::new(320, 240, moq_video::Rate::new(30, 1).unwrap());
+	let mut config = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
 	config.kind = moq_video::encode::Kind::Software;
 	let mut encoder = moq_video::encode::Encoder::new(&config).expect("openh264 encoder");
 	let gray = vec![0x80u8; 320 * 240 * 4];
@@ -4684,27 +5078,20 @@ fn video_raw_decode() {
 
 	// First decoded frame: packed I420 at the encoder resolution.
 	let frame_id = id(frame_cb.recv());
-	let mut frame = moq_video_frame {
-		timestamp_us: 0,
-		width: 0,
-		height: 0,
-		data: std::ptr::null(),
-		data_size: 0,
-	};
-	assert_eq!(unsafe { moq_decode_video_frame(frame_id, &mut frame) }, 0);
+	let frame = video_frame(frame_id);
 	assert_eq!(frame.width, 320);
 	assert_eq!(frame.height, 240);
 	assert_eq!(frame.data_size, 320 * 240 * 3 / 2, "tightly-packed I420");
 	assert!(!frame.data.is_null());
 
-	assert_eq!(moq_decode_video_frame_free(frame_id), 0);
+	assert_eq!(moq_decode_video_read_free(frame_id), 0);
 	assert_eq!(moq_decode_video_cancel(consumer), 0);
 
-	// Drain any other decoded frames already queued, then expect the terminal 0.
+	// Drain any other decoded reads already queued, then expect the terminal 0.
 	loop {
 		let code = frame_cb.recv();
 		if code > 0 {
-			assert_eq!(moq_decode_video_frame_free(id(code)), 0);
+			assert_eq!(moq_decode_video_read_free(id(code)), 0);
 		} else {
 			assert_eq!(code, 0, "raw video close delivers terminal 0");
 			break;
@@ -4765,14 +5152,14 @@ fn multiple_frames_ordering() {
 			timestamp_present: false,
 			keyframe: false,
 		};
-		assert_eq!(unsafe { moq_consume_frame(frame_id, &mut frame) }, 0);
+		assert_eq!(unsafe { encoded_frame(frame_id, &mut frame) }, 0);
 		assert_eq!(frame.timestamp_us, expected_ts, "frame {i} has wrong timestamp");
 
 		let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
 		let expected = format!("frame-{i}");
 		assert_eq!(received, expected.as_bytes(), "frame {i} has wrong payload");
 
-		assert_eq!(moq_consume_frame_free(frame_id), 0);
+		assert_eq!(moq_consume_read_free(frame_id), 0);
 	}
 
 	assert_eq!(moq_consume_audio_cancel(track), 0);
@@ -4842,7 +5229,7 @@ fn catalog_update_on_new_track() {
 #[test]
 fn null_pointer_handling() {
 	assert_eq!(
-		unsafe { moq_consume_frame(9999, std::ptr::null_mut()) },
+		unsafe { encoded_frame(9999, std::ptr::null_mut()) },
 		-6,
 		"null dst should return InvalidPointer (-6)"
 	);
@@ -4882,7 +5269,7 @@ fn session_connect_invalid_url() {
 
 #[test]
 fn session_connect_and_close() {
-	let cb = Callback::new();
+	let cb = States::new();
 	let url = b"moqt://localhost:1";
 	let session = id(unsafe {
 		moq_session_connect(
@@ -4891,22 +5278,25 @@ fn session_connect_and_close() {
 			std::ptr::null(),
 			0,
 			0,
-			Some(channel_callback),
+			Some(state_callback),
 			cb.ptr,
 		)
 	});
 
-	// close() requests shutdown; the task still delivers exactly one terminal
-	// callback (0 = clean close, or a negative connect error), after which
-	// user_data is safe to free.
+	// close() requests shutdown; the task still delivers exactly one terminal snapshot, after
+	// which user_data is safe to free and the handle is already gone.
 	assert_eq!(moq_session_close(session), 0);
-	assert!(cb.recv() <= 0, "session close delivers a terminal code");
+	let terminal = cb.recv_terminal();
+	assert_eq!(terminal.failure, 0, "a requested close is clean: {terminal:?}");
+	assert!(
+		moq_session_close(session) < 0,
+		"the terminal snapshot released the handle"
+	);
 }
 
-/// A dial that keeps failing never fires `on_status`, so `moq_session_failure` is the only
-/// place its reason shows while the loop retries.
+/// Every failed dial reaches `on_state` while the loop retries, before any connect.
 #[test]
-fn session_failure_names_a_failing_dial() {
+fn a_failing_dial_reports_its_failure() {
 	// Hang up on every connection, so a WebSocket dial fails fast. Holding the listener
 	// keeps a parallel test from taking the port.
 	let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -4917,7 +5307,7 @@ fn session_failure_names_a_failing_dial() {
 		}
 	});
 	let url = format!("ws://127.0.0.1:{port}/");
-	let cb = Callback::new();
+	let cb = States::new();
 	let session = id(unsafe {
 		moq_session_connect(
 			url.as_ptr() as *const c_char,
@@ -4925,34 +5315,25 @@ fn session_failure_names_a_failing_dial() {
 			std::ptr::null(),
 			0,
 			0,
-			Some(channel_callback),
+			Some(state_callback),
 			cb.ptr,
 		)
 	});
 
-	let deadline = std::time::Instant::now() + TIMEOUT;
-	let code = loop {
-		let code = moq_session_failure(session);
-		if code != 0 {
-			break code;
-		}
-		assert!(
-			std::time::Instant::now() < deadline,
-			"the refused dial never reported a failure"
-		);
-		std::thread::sleep(Duration::from_millis(10));
-	};
-	assert_ne!(
-		code,
-		Error::SessionNotFound.code(),
-		"the session ended instead of retrying: {:?}",
-		cb.rx.try_recv()
+	let failed = cb.recv();
+	assert_eq!(failed.phase, moq_connection_phase::MOQ_CONNECTION_PHASE_CONNECTING);
+	assert_eq!(failed.connects, 0);
+	assert!(failed.failure < 0, "the refused dial reports why: {failed:?}");
+	assert!(
+		failed.error.is_some_and(|error| !error.is_empty()),
+		"moq_error describes the failure during the callback"
 	);
-	assert!(!moq_error().is_null(), "the failure is recorded like a failed call");
-	assert!(cb.rx.try_recv().is_err(), "a failed dial fires no status");
+	assert!(failed.version.is_empty(), "nothing is serving");
 
 	assert_eq!(moq_session_close(session), 0);
-	assert!(cb.recv() <= 0, "session close delivers a terminal code");
+	let terminal = cb.recv_terminal();
+	assert_eq!(terminal.failure, 0, "a requested close is clean: {terminal:?}");
+	assert_eq!(terminal.connects, 0);
 }
 
 /// Borrow a `&str` as the `moq_string` the list setters take.
@@ -4979,7 +5360,7 @@ fn dial(config: Option<&moq_client_config>) -> i32 {
 			config.map_or(std::ptr::null(), |c| c as *const _),
 			0,
 			0,
-			Some(ignore_callback),
+			Some(ignore_state),
 			std::ptr::null_mut(),
 		)
 	}
@@ -5000,6 +5381,45 @@ fn a_null_config_dials_with_the_defaults() {
 		parsed.connect.websocket.resolve().enabled,
 		defaults.connect.websocket.resolve().enabled
 	);
+}
+
+/// The caller's product tokens go ahead of the library's, and a malformed list fails the dial.
+#[test]
+fn implementation_prefixes_the_library() {
+	let core = format!("moq-c/{} {}", env!("CARGO_PKG_VERSION"), moq_net::IMPLEMENTATION);
+	assert_eq!(parsed(&client_config()).connect.implementation, Some(core.clone()));
+
+	let mut config = client_config();
+	let prefix = "moq-obs/0.7.0";
+	config.implementation = prefix.as_ptr() as *const c_char;
+	config.implementation_len = prefix.len();
+	assert_eq!(parsed(&config).connect.implementation, Some(format!("{prefix} {core}")));
+
+	let bad = "moq-obs/0.7.0 ";
+	config.implementation = bad.as_ptr() as *const c_char;
+	config.implementation_len = bad.len();
+	assert!(unsafe { crate::parse_client(Some(&config)) }.is_err());
+}
+
+/// Configured tokens reach the dial in order, and an empty one fails it.
+#[test]
+fn tokens_reach_the_dial() {
+	assert!(parsed(&client_config()).connect.tokens.is_empty());
+
+	let mut config = client_config();
+	let tokens = [moq_str("a"), moq_str("b")];
+	config.tokens = tokens.as_ptr();
+	config.tokens_len = tokens.len();
+	let parsed = parsed(&config).connect.tokens;
+	assert_eq!(
+		parsed.iter().map(|token| token.as_str()).collect::<Vec<_>>(),
+		["a", "b"]
+	);
+
+	let empty = [moq_str("a"), moq_str("")];
+	config.tokens = empty.as_ptr();
+	config.tokens_len = empty.len();
+	assert!(unsafe { crate::parse_client(Some(&config)) }.is_err());
 }
 
 /// The whole point of the `has_*` flags: a caller who zeroes the struct and sets
@@ -5028,7 +5448,7 @@ fn a_zeroed_config_is_the_defaults() {
 	assert!(parsed.connect.tls.root.is_empty());
 	assert!(parsed.quic.gso.is_none());
 	assert!(parsed.quic.mtu_discovery.is_none());
-	assert!(!parsed.quic.resolve().keylog);
+	assert!(parsed.quic.resolve().keylog.is_none());
 }
 
 /// `moq_client_defaults` has to agree with what a zeroed struct actually dials,
@@ -5053,19 +5473,16 @@ fn defaults_report_what_a_zeroed_config_dials() {
 	assert!(config.has_backoff_initial);
 	assert_eq!(
 		config.backoff_initial_us,
-		expected.connect.backoff.initial.unwrap().as_micros() as u64
+		expected.connect.backoff.initial().as_micros() as u64
 	);
 	assert!(config.has_backoff_multiplier);
 	assert_eq!(config.backoff_multiplier, expected.connect.backoff.multiplier);
 	assert!(config.has_backoff_max);
-	assert_eq!(
-		config.backoff_max_us,
-		expected.connect.backoff.max.unwrap().as_micros() as u64
-	);
+	assert_eq!(config.backoff_max_us, expected.connect.backoff.max().as_micros() as u64);
 	assert!(config.has_backoff_timeout);
 	assert_eq!(
-		expected.connect.backoff.timeout,
-		Some(std::time::Duration::from_micros(config.backoff_timeout_us))
+		expected.connect.backoff.timeout(),
+		std::time::Duration::from_micros(config.backoff_timeout_us)
 	);
 
 	let websocket = expected.connect.websocket.resolve();
@@ -5093,7 +5510,9 @@ fn defaults_report_what_a_zeroed_config_dials() {
 	// And what it reports must round-trip: dialing with it is dialing with the defaults.
 	let expected = crate::client::Config::default();
 	let reparsed = parsed(&config);
-	assert_eq!(reparsed.connect.backoff.initial, expected.connect.backoff.initial);
+	assert_eq!(reparsed.connect.backoff.initial(), expected.connect.backoff.initial());
+	assert_eq!(reparsed.connect.backoff.max(), expected.connect.backoff.max());
+	assert_eq!(reparsed.connect.backoff.timeout(), expected.connect.backoff.timeout());
 	assert_eq!(
 		reparsed.connect.websocket.resolve().enabled,
 		expected.connect.websocket.resolve().enabled
@@ -5111,18 +5530,27 @@ fn zero_with_a_flag_set_is_a_real_value() {
 	config.has_quic_keep_alive = true;
 
 	let explicit = parsed(&config);
-	assert_eq!(explicit.connect.backoff.timeout, Some(std::time::Duration::ZERO));
-	assert_eq!(explicit.quic.keep_alive, Some(std::time::Duration::ZERO));
+	assert_eq!(
+		explicit.connect.backoff.timeout,
+		Some((std::time::Duration::ZERO).into())
+	);
+	assert_eq!(explicit.quic.keep_alive, Some((std::time::Duration::ZERO).into()));
 
 	// Without the flags the same zeroes mean nothing at all.
 	let defaults = parsed(&client_config());
-	assert_ne!(defaults.connect.backoff.timeout, Some(std::time::Duration::ZERO));
-	assert_eq!(defaults.quic.keep_alive, Some(std::time::Duration::from_secs(3)));
+	assert_ne!(
+		defaults.connect.backoff.timeout,
+		Some((std::time::Duration::ZERO).into())
+	);
+	assert_eq!(
+		defaults.quic.resolve().keep_alive,
+		Some(std::time::Duration::from_secs(3))
+	);
 }
 
 #[test]
 fn config_versions_round_trip() {
-	let versions = [moq_str("moq-lite-05"), moq_str("moq-transport-19")];
+	let versions = [moq_str("moq-lite-05"), moq_str("moq-transport-22")];
 	let mut config = client_config();
 	config.versions = versions.as_ptr();
 	config.versions_len = versions.len();
@@ -5245,19 +5673,25 @@ fn config_quic_and_backoff_knobs_apply() {
 	let parsed = parsed(&config);
 	assert_eq!(
 		parsed.connect.backoff.initial,
-		Some(std::time::Duration::from_micros(500_000))
+		Some(std::time::Duration::from_micros(500_000).into())
 	);
 	assert_eq!(parsed.connect.backoff.multiplier, 3);
 	assert_eq!(
 		parsed.connect.backoff.max,
-		Some(std::time::Duration::from_micros(10_000_000))
+		Some(std::time::Duration::from_micros(10_000_000).into())
 	);
 	assert_eq!(parsed.quic.max_streams, Some(4096));
-	assert_eq!(parsed.quic.idle_timeout, Some(std::time::Duration::from_millis(15_000)));
+	assert_eq!(
+		parsed.quic.idle_timeout,
+		Some(std::time::Duration::from_millis(15_000).into())
+	);
 	assert_eq!(parsed.quic.gso, Some(false));
 	assert_eq!(parsed.quic.mtu_discovery, Some(true));
 	assert_eq!(parsed.quic.qlog.as_deref(), Some(std::path::Path::new(dir)));
-	assert_eq!(parsed.quic.keylog, Some(true));
+	assert_eq!(
+		parsed.quic.keylog,
+		Some(std::env::var_os("SSLKEYLOGFILE").unwrap_or_default().into())
+	);
 }
 
 /// Whether a qlog directory works at all is a compile-time feature, so the capability
@@ -5329,7 +5763,7 @@ fn dial_applies_the_config() {
 	config.connect_timeout_us = 100_000;
 	config.has_connect_timeout = true;
 
-	let cb = Callback::new();
+	let cb = States::new();
 	let url = b"moqt://localhost:1";
 	let session = id(unsafe {
 		moq_session_connect(
@@ -5338,13 +5772,13 @@ fn dial_applies_the_config() {
 			&config,
 			0,
 			0,
-			Some(channel_callback),
+			Some(state_callback),
 			cb.ptr,
 		)
 	});
 
 	assert_eq!(moq_session_close(session), 0);
-	assert!(cb.recv() <= 0, "session close delivers a terminal code");
+	cb.recv_terminal();
 }
 
 fn test_allocator() -> (u32, moq_net::bandwidth::Producer) {
@@ -5357,22 +5791,25 @@ fn test_allocator() -> (u32, moq_net::bandwidth::Producer) {
 	(bandwidth, estimate)
 }
 
-fn grant(reservation: u32) -> Option<u64> {
+fn rate(reservation: u32) -> Option<u64> {
 	let mut bps = 0;
 	let mut present = false;
-	assert_eq!(unsafe { moq_reservation_grant(reservation, &mut bps, &mut present) }, 0);
+	assert_eq!(unsafe { moq_reservation_rate(reservation, &mut bps, &mut present) }, 0);
 	present.then_some(bps)
 }
 
-fn wait_grant(reservation: u32) -> u64 {
+/// Wait for `reservation`'s grant to reach `bps`, since a subscription reaches the
+/// allocator asynchronously and an unwatched track already reads a would-be share.
+fn wait_rate(reservation: u32, bps: u64) {
 	let deadline = std::time::Instant::now() + TIMEOUT;
 	loop {
-		if let Some(bps) = grant(reservation) {
-			return bps;
+		let last = rate(reservation);
+		if last == Some(bps) {
+			return;
 		}
 		assert!(
 			std::time::Instant::now() < deadline,
-			"timed out waiting for a reservation grant"
+			"timed out waiting for a {bps} bps rate, last {last:?}"
 		);
 		std::thread::sleep(Duration::from_millis(10));
 	}
@@ -5411,25 +5848,25 @@ fn bandwidth_reservations_split_the_estimate() {
 	let (first_sub, first_cb) = subscribe_named_track(consume, b"a");
 	let (second_sub, second_cb) = subscribe_named_track(consume, b"b");
 
-	let first = id(moq_bandwidth_reserve(bandwidth, first_track, 4_000_000));
-	let second = id(moq_bandwidth_reserve(bandwidth, second_track, 2_000_000));
+	let first = id(moq_allocator_reserve(bandwidth, first_track, 4_000_000));
+	let second = id(moq_allocator_reserve(bandwidth, second_track, 2_000_000));
 	estimate
 		.set(Some(moq_net::bandwidth::Rate::from_bps(3_000_000)))
 		.unwrap();
 
-	wait_grant(first);
-	wait_grant(second);
-	let a = grant(first).expect("first grant");
-	let b = grant(second).expect("second grant");
+	wait_rate(first, 1_500_000);
+	wait_rate(second, 1_500_000);
+	let a = rate(first).expect("first rate");
+	let b = rate(second).expect("second rate");
 	assert!(a + b <= 3_000_000, "{a} + {b} oversubscribed");
 	assert_eq!(a, 1_500_000);
 	assert_eq!(b, 1_500_000);
 
 	assert_eq!(moq_reservation_close(first), 0);
-	assert_eq!(grant(second), Some(2_000_000));
+	assert_eq!(rate(second), Some(2_000_000));
 
 	assert_eq!(moq_reservation_close(second), 0);
-	assert_eq!(moq_bandwidth_close(bandwidth), 0);
+	assert_eq!(moq_allocator_close(bandwidth), 0);
 	assert_eq!(moq_consume_track_cancel(first_sub), 0);
 	assert_eq!(moq_consume_track_cancel(second_sub), 0);
 	let _ = first_cb.recv_terminal();
@@ -5463,16 +5900,16 @@ fn bandwidth_handles_share_the_registry() {
 	let (first_sub, first_cb) = subscribe_named_track(consume, b"a");
 	let (second_sub, second_cb) = subscribe_named_track(consume, b"b");
 
-	let reserved = id(moq_bandwidth_reserve(first, first_track, 4_000_000));
-	assert_eq!(wait_grant(reserved), 3_000_000);
-	let other = id(moq_bandwidth_reserve(second, second_track, 4_000_000));
-	assert_eq!(wait_grant(other), 1_500_000);
-	assert_eq!(grant(reserved), Some(1_500_000));
+	let reserved = id(moq_allocator_reserve(first, first_track, 4_000_000));
+	wait_rate(reserved, 3_000_000);
+	let other = id(moq_allocator_reserve(second, second_track, 4_000_000));
+	wait_rate(other, 1_500_000);
+	wait_rate(reserved, 1_500_000);
 
 	assert_eq!(moq_reservation_close(reserved), 0);
 	assert_eq!(moq_reservation_close(other), 0);
-	assert_eq!(moq_bandwidth_close(first), 0);
-	assert_eq!(moq_bandwidth_close(second), 0);
+	assert_eq!(moq_allocator_close(first), 0);
+	assert_eq!(moq_allocator_close(second), 0);
 	assert_eq!(moq_consume_track_cancel(first_sub), 0);
 	assert_eq!(moq_consume_track_cancel(second_sub), 0);
 	let _ = first_cb.recv_terminal();
@@ -5495,7 +5932,10 @@ fn encode_video_bitrate_caps_the_reservation() {
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
 		width: 320,
 		height: 240,
-		framerate: 30,
+		framerate: moq_video_frame_rate {
+			numerator: 30,
+			denominator: 1,
+		},
 	};
 	let output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
@@ -5505,29 +5945,139 @@ fn encode_video_bitrate_caps_the_reservation() {
 		encoder: std::ptr::null(),
 		encoder_len: 0,
 	};
-	let producer = id(unsafe { moq_encode_video(broadcast, &input, &output, bandwidth) });
+	let producer = id(unsafe {
+		moq_encode_video(
+			broadcast,
+			&input,
+			&output,
+			&moq_video_encode_options { bandwidth, lower: 0 },
+		)
+	});
 	let reservation = id(moq_encode_video_reservation(producer));
 	let (sub, cb) = subscribe_named_track(consume, b"0.avc3");
 
 	estimate
 		.set(Some(moq_net::bandwidth::Rate::from_bps(4_000_000)))
 		.unwrap();
-	assert_eq!(wait_grant(reservation), 4_000_000);
+	wait_rate(reservation, 4_000_000);
 
 	assert_eq!(moq_encode_video_bitrate(producer, 1_000_000), 0);
-	assert_eq!(grant(reservation), Some(1_000_000));
+	assert_eq!(rate(reservation), Some(1_000_000));
 
 	estimate
 		.set(Some(moq_net::bandwidth::Rate::from_bps(3_000_000)))
 		.unwrap();
-	assert_eq!(grant(reservation), Some(1_000_000));
+	assert_eq!(rate(reservation), Some(1_000_000));
 
 	assert_eq!(moq_reservation_close(reservation), 0);
 	assert_eq!(moq_consume_track_cancel(sub), 0);
 	let _ = cb.recv_terminal();
 	assert_eq!(moq_encode_video_finish(producer), 0);
-	assert_eq!(moq_bandwidth_close(bandwidth), 0);
+	assert_eq!(moq_allocator_close(bandwidth), 0);
 	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A simulcast rung needs a bandwidth allocator and a bitrate above its lower rendition's.
+#[test]
+fn encode_video_rung_needs_a_grant_and_a_band() {
+	let (bandwidth, _estimate) = test_allocator();
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"rung");
+
+	let input = moq_video_encoder_input {
+		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
+		width: 320,
+		height: 240,
+		framerate: moq_video_frame_rate {
+			numerator: 30,
+			denominator: 1,
+		},
+	};
+	let output = |bitrate| moq_video_encoder_output {
+		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
+		bitrate,
+		gop: 0,
+		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
+		encoder: std::ptr::null(),
+		encoder_len: 0,
+	};
+	let options = |bandwidth, lower| moq_video_encode_options { bandwidth, lower };
+	let low = id(unsafe { moq_encode_video(broadcast, &input, &output(500_000), &options(bandwidth, 0)) });
+	assert!(unsafe { moq_encode_video(broadcast, &input, &output(2_000_000), &options(0, low)) } < 0);
+	assert!(unsafe { moq_encode_video(broadcast, &input, &output(400_000), &options(bandwidth, low)) } < 0);
+	let high = id(unsafe { moq_encode_video(broadcast, &input, &output(2_000_000), &options(bandwidth, low)) });
+
+	assert_eq!(moq_encode_video_finish(high), 0);
+	assert_eq!(moq_encode_video_finish(low), 0);
+	assert_eq!(moq_allocator_close(bandwidth), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A rung watches its lower rendition's own ceiling, which wakes it when that moves or
+/// ends, so it notices even when the lower rendition reserves nothing it shares.
+#[test]
+fn encode_video_ceiling_wakes_a_rung_above() {
+	struct Flag(std::sync::atomic::AtomicBool);
+	impl std::task::Wake for Flag {
+		fn wake(self: std::sync::Arc<Self>) {
+			self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+		}
+	}
+
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"rung");
+	let input = moq_video_encoder_input {
+		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
+		width: 320,
+		height: 240,
+		framerate: moq_video_frame_rate {
+			numerator: 30,
+			denominator: 1,
+		},
+	};
+	let output = moq_video_encoder_output {
+		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
+		bitrate: 500_000,
+		gop: 0,
+		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
+		encoder: std::ptr::null(),
+		encoder_len: 0,
+	};
+	// No allocator, so nothing it does moves a reservation a rung would share.
+	let low = id(unsafe { moq_encode_video(broadcast, &input, &output, std::ptr::null()) });
+	let ceiling = State::lock()
+		.video
+		.producer(Id::try_from(low).unwrap())
+		.unwrap()
+		.lock()
+		.as_ref()
+		.unwrap()
+		.ceiling
+		.consume();
+
+	let flag = std::sync::Arc::new(Flag(std::sync::atomic::AtomicBool::new(false)));
+	let waiter = kio::Waiter::new(std::task::Waker::from(flag.clone()));
+	let arm = || ceiling.poll(&waiter, |_| std::task::Poll::<()>::Pending).is_pending();
+	assert!(arm());
+
+	assert_eq!(moq_encode_video_bitrate(low, 400_000), 0);
+	assert!(
+		flag.0.swap(false, std::sync::atomic::Ordering::SeqCst),
+		"a moved ceiling wakes the rung"
+	);
+	assert_eq!(*ceiling.read(), moq_net::bandwidth::Rate::from_bps(400_000));
+	assert!(arm());
+
+	assert_eq!(moq_encode_video_finish(low), 0);
+	assert!(
+		flag.0.load(std::sync::atomic::Ordering::SeqCst),
+		"an ended rendition wakes the rung"
+	);
+	assert!(!arm(), "the ceiling closes with the rendition");
+
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
@@ -5560,13 +6110,7 @@ fn listen(cb: &Callback) -> (u32, String, String) {
 }
 
 /// Dial `url`, pinning `fingerprint`, with `consume` receiving the peer's broadcasts.
-fn dial_pinned(
-	url: &str,
-	fingerprint: &str,
-	consume: u32,
-	on_status: extern "C" fn(*mut c_void, i32),
-	user_data: *mut c_void,
-) -> u32 {
+fn dial_pinned(url: &str, fingerprint: &str, consume: u32, user_data: *mut c_void) -> u32 {
 	let fingerprints = [moq_str(fingerprint)];
 	let mut config = client_config();
 	config.tls_fingerprints = fingerprints.as_ptr();
@@ -5580,7 +6124,7 @@ fn dial_pinned(
 			&config,
 			0,
 			consume,
-			Some(on_status),
+			Some(state_callback),
 			user_data,
 		)
 	})
@@ -5595,12 +6139,11 @@ fn server_accepts_a_session() {
 	let (server, addr, fingerprint) = listen(&server_cb);
 
 	let received = id(moq_origin_create());
-	let client_cb = Callback::new();
+	let client_cb = States::new();
 	let client = dial_pinned(
 		&format!("https://{addr}/room?jwt=abc"),
 		&fingerprint,
 		received,
-		channel_callback,
 		client_cb.ptr,
 	);
 
@@ -5612,22 +6155,34 @@ fn server_accepts_a_session() {
 	let mut query = moq_str("");
 	assert_eq!(unsafe { moq_session_request_query(request, &mut query) }, 0);
 	assert_eq!(borrowed_string(query.data, query.len).as_deref(), Some("jwt=abc"));
+	let mut implementation = moq_str("");
+	assert_eq!(
+		unsafe { moq_session_request_peer_implementation(request, &mut implementation) },
+		0
+	);
+	// The default lite-06 session ignores the later Implementation parameter.
+	assert_eq!(borrowed_string(implementation.data, implementation.len), None);
 
-	let session_cb = Callback::new();
-	let session = id(unsafe { moq_session_request_accept(request, served, 0, Some(channel_callback), session_cb.ptr) });
+	let session_cb = States::new();
+	let session = id(unsafe { moq_session_request_accept(request, served, 0, Some(state_callback), session_cb.ptr) });
 	assert!(
 		unsafe { moq_session_request_path(request, &mut path) } < 0,
 		"accept consumes the request"
 	);
 
-	// Both sides report the first (and, for the server, only) connect.
-	assert_eq!(session_cb.recv(), 1);
-	assert_eq!(client_cb.recv(), 1);
+	// Both sides report the first (and, for the server, only) connect, with its protocol.
+	for cb in [&session_cb, &client_cb] {
+		let connected = cb.recv();
+		assert_eq!(connected.phase, moq_connection_phase::MOQ_CONNECTION_PHASE_CONNECTED);
+		assert_eq!(connected.connects, 1);
+		assert_eq!(connected.failure, 0);
+		assert!(!connected.version.is_empty(), "a live session names its protocol");
+	}
 
 	let mut stats: moq_connection_stats = unsafe { std::mem::zeroed() };
 	assert_eq!(unsafe { moq_session_stats(session, &mut stats) }, 0);
-	let bandwidth = id(moq_session_bandwidth(session));
-	assert_eq!(moq_bandwidth_close(bandwidth), 0);
+	let bandwidth = id(moq_session_allocator(session));
+	assert_eq!(moq_allocator_close(bandwidth), 0);
 
 	// The broadcast the server publishes reaches the client. A client only asks the
 	// server about what it watches, so wait on the path rather than request it once.
@@ -5645,11 +6200,36 @@ fn server_accepts_a_session() {
 	let consumed = id(announced_cb.recv());
 	assert_eq!(moq_origin_announced_broadcast_cancel(task), 0);
 	assert_eq!(announced_cb.recv_terminal(), 0);
-	assert_eq!(moq_consume_close(consumed), 0);
-
-	// Closing the accepted session is a clean terminal close.
+	// Prime the subscription, then queue a finished tail before closing the accepted
+	// session. Its terminal callback must not report success after aborting the tail.
+	let track = publish_named_track(broadcast, b"tail");
+	let (consumer, frames) = subscribe_named_track(consumed, b"tail");
+	let first = b"ready";
+	assert_eq!(
+		unsafe { moq_publish_track_frame(track, first.as_ptr(), first.len(), 0) },
+		0
+	);
+	assert_eq!(moq_consume_track_frame_free(id(frames.recv())), 0);
+	let tail = vec![42; 64 * 1024];
+	assert_eq!(
+		unsafe { moq_publish_track_frame(track, tail.as_ptr(), tail.len(), 1) },
+		0
+	);
+	assert_eq!(moq_publish_track_finish(track), 0);
 	assert_eq!(moq_session_close(session), 0);
-	assert_eq!(session_cb.recv_terminal(), 0);
+	let frame_id = id(frames.recv());
+	let mut frame: moq_frame = unsafe { std::mem::zeroed() };
+	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
+	assert_eq!(
+		unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) },
+		tail
+	);
+	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
+	assert_eq!(frames.recv_terminal(), 0, "the tail ends cleanly");
+	let terminal = session_cb.recv_terminal();
+	assert_eq!((terminal.failure, terminal.connects), (0, 1));
+	assert!(moq_consume_track_cancel(consumer) < 0, "the consumer ended");
+	assert_eq!(moq_consume_close(consumed), 0);
 	assert_eq!(moq_session_close(client), 0);
 	client_cb.recv_terminal();
 
@@ -5671,14 +6251,8 @@ fn server_rejects_a_session() {
 	let server_cb = Callback::new();
 	let (server, addr, fingerprint) = listen(&server_cb);
 
-	let client_cb = ProtocolCallback::new();
-	let client = dial_pinned(
-		&format!("https://{addr}/"),
-		&fingerprint,
-		0,
-		protocol_callback,
-		client_cb.ptr,
-	);
+	let client_cb = States::new();
+	let client = dial_pinned(&format!("https://{addr}/"), &fingerprint, 0, client_cb.ptr);
 
 	let request = id(server_cb.recv());
 	let mut path = moq_str("x");
@@ -5693,13 +6267,9 @@ fn server_rejects_a_session() {
 
 	// The rejection closes a session the transport already established, so the client
 	// may see it connect first. It then gives up on the auth rejection rather than redialing.
-	let mut status = client_cb.recv();
-	if status.0 == 1 {
-		status = client_cb.recv();
-	}
-	let (code, protocol) = status;
-	assert_eq!(code, MOQ_ERROR_MOQ);
-	let protocol = protocol.expect("the rejection carries a protocol close");
+	let terminal = client_cb.recv_terminal();
+	assert_eq!(terminal.failure, MOQ_ERROR_MOQ);
+	let protocol = terminal.protocol.expect("the rejection carries a protocol close");
 	assert_eq!(protocol.scope, moq_error_scope::MOQ_ERROR_SCOPE_SESSION as u32);
 	assert_eq!(protocol.kind, moq_protocol_kind::MOQ_PROTOCOL_KIND_UNAUTHORIZED as u32);
 	assert!(moq_session_close(client) < 0, "the client session already ended");
@@ -5738,8 +6308,9 @@ fn server_listen_refuses_bad_config() {
 /// than binding and logging nothing.
 #[test]
 fn server_keylog_requires_sslkeylogfile() {
-	// SAFETY: nextest runs each test in its own process, so nothing else reads the environment.
-	unsafe { std::env::remove_var("SSLKEYLOGFILE") };
+	if !test_env::Env::without(&["SSLKEYLOGFILE"]).isolate() {
+		return;
+	}
 	let bind = "127.0.0.1:0";
 	let generate = [moq_str("localhost")];
 	let mut config: moq_server_config = unsafe { std::mem::zeroed() };
@@ -5763,6 +6334,7 @@ fn read_raw_frames(consume: u32, name: &[u8], count: usize) -> Vec<Vec<u8>> {
 	let subscription = moq_subscription {
 		priority: 0,
 		max_delay_us: 1_000_000,
+		max_delay_present: true,
 		ranges: std::ptr::null(),
 		ranges_len: 0,
 		order: 0,
@@ -6021,7 +6593,10 @@ async fn a_background_panic_reaches_the_terminal_callback_and_keeps_another_orig
 	let task = crate::ffi::RUNTIME.spawn(async move {
 		let result = crate::ffi::run(async {
 			panic!("injected background panic");
-			#[allow(unreachable_code)]
+			#[expect(
+				unreachable_code,
+				reason = "the panic is the point; the `Ok` names the future's output type"
+			)]
 			Ok::<(), Error>(())
 		})
 		.await;
@@ -6032,4 +6607,21 @@ async fn a_background_panic_reaches_the_terminal_callback_and_keeps_another_orig
 	let broadcast = publish_broadcast(origin, b"survivor");
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
+}
+
+// Existing payload controls require a frame, while the tagged-read control covers breaks.
+unsafe fn encoded_frame(id: u32, dst: *mut moq_frame) -> i32 {
+	if dst.is_null() {
+		return unsafe { moq_consume_read(id, std::ptr::null_mut()) };
+	}
+	let mut read = std::mem::MaybeUninit::<moq_media_read>::uninit();
+	let status = unsafe { moq_consume_read(id, read.as_mut_ptr()) };
+	if status == 0 {
+		let read = unsafe { read.assume_init() };
+		assert_eq!(read.kind, moq_decode_read_kind::MOQ_DECODE_READ_FRAME);
+		unsafe {
+			*dst = read.frame;
+		}
+	}
+	status
 }

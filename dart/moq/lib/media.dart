@@ -27,6 +27,18 @@ typedef Catalog = MoqCatalog;
 /// A media frame whose keyframe flag marks group starts or video keyframes; audio flags only group starts.
 typedef MediaFrame = MoqMediaFrame;
 
+/// One encoded frame, a gap, or an encoder end.
+typedef Read = MoqMediaRead;
+
+/// An encoded frame and its container metadata.
+typedef ReadFrame = FrameMoqMediaRead;
+
+/// Lost media; what follows does not continue it.
+typedef ReadGap = GapMoqMediaRead;
+
+/// Where a stopped encoder's media stops.
+typedef ReadEnd = EndMoqMediaRead;
+
 /// The catalog description of a video track, including whether it is enabled (a disabled one has no frames coming).
 typedef Video = MoqVideo;
 
@@ -97,4 +109,16 @@ typedef Container = MoqContainer;
 extension MediaFrameDuration on MoqMediaFrame {
   /// Presentation timestamp.
   Duration get timestamp => Duration(microseconds: timestampUs);
+}
+
+/// Duration view over a gap.
+extension MediaReadGapDuration on GapMoqMediaRead {
+  /// The furthest presentation point already read.
+  Duration get timestamp => Duration(microseconds: timestampUs);
+}
+
+/// Duration view over an encoder end.
+extension MediaReadEndDuration on EndMoqMediaRead {
+  /// Where the stopped encoder's media stops.
+  Duration get end => Duration(microseconds: endUs);
 }

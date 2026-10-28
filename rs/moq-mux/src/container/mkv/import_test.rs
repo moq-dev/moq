@@ -188,6 +188,217 @@ fn run(data: &[u8]) -> crate::catalog::hang::Catalog {
 	catalog.snapshot()
 }
 
+// A supported malformed track must fail the import, even beside a usable track.
+fn assert_out_of_range(track: MatroskaSpec, field: &str) {
+	for reverse in [false, true] {
+		let mut tracks = vec![track_entry_audio_opus(1, 48_000.0, 2), track.clone()];
+		if reverse {
+			tracks.reverse();
+		}
+		let data = MkvBuilder::new()
+			.header("matroska")
+			.segment_start()
+			.info(1_000_000)
+			.tracks(tracks)
+			.segment_end()
+			.build();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let result = import.decode(&data).and_then(|()| import.finish());
+		assert!(
+			matches!(&result, Err(crate::Error::Mkv(super::Error::ValueOutOfRange(name))) if *name == field),
+			"{field}, reverse {reverse}: {result:?}"
+		);
+	}
+}
+
+#[test]
+fn numeric_range_pixel_width() {
+	for value in [u64::from(u32::MAX) + 1, u64::MAX] {
+		assert_out_of_range(track_entry_video_vp9(2, value, 1080), "PixelWidth");
+	}
+}
+
+#[test]
+fn numeric_range_pixel_height() {
+	for value in [u64::from(u32::MAX) + 1, u64::MAX] {
+		assert_out_of_range(track_entry_video_vp9(2, 1920, value), "PixelHeight");
+	}
+}
+
+#[test]
+fn numeric_range_channels() {
+	for value in [u64::from(u32::MAX) + 1, u64::MAX] {
+		assert_out_of_range(track_entry_audio_mp3(2, 48_000.0, value), "Channels");
+	}
+}
+
+#[test]
+fn numeric_range_sampling_frequency() {
+	for value in [
+		f64::from(u32::MAX) + 0.5,
+		f64::from(u32::MAX) + 1.0,
+		-1.0,
+		f64::NAN,
+		f64::INFINITY,
+		f64::NEG_INFINITY,
+	] {
+		assert_out_of_range(track_entry_audio_mp3(2, value, 2), "SamplingFrequency");
+	}
+}
+
+#[test]
+fn numeric_range_representable_values_keep_existing_conversion() {
+	for (size, rate, channels) in [
+		(0, 0.0, 0),
+		(u32::MAX, f64::from(u32::MAX), u32::MAX),
+		(1920, 44_100.5, 2),
+	] {
+		let data = MkvBuilder::new()
+			.header("matroska")
+			.segment_start()
+			.info(1_000_000)
+			.tracks(vec![
+				track_entry_video_vp9(1, u64::from(size), u64::from(size)),
+				track_entry_audio_mp3(2, rate, u64::from(channels)),
+			])
+			.segment_end()
+			.build();
+		let catalog = run(&data);
+		let video = catalog.video.renditions.values().next().unwrap();
+		assert_eq!((video.coded_width, video.coded_height), (Some(size), Some(size)));
+		let audio = catalog.audio.renditions.values().next().unwrap();
+		assert_eq!((audio.sample_rate, audio.channel_count), (rate as u32, channels));
+	}
+}
+
+#[test]
+fn numeric_range_unsupported_codecs_are_refused() {
+	use MatroskaSpec::*;
+	for (kind, codec, fields) in [
+		(
+			1,
+			"V_UNKNOWN",
+			Video(Master::Full(vec![PixelWidth(u64::MAX), PixelHeight(u64::MAX)])),
+		),
+		(
+			2,
+			"A_UNKNOWN",
+			Audio(Master::Full(vec![Channels(u64::MAX), SamplingFrequency(f64::INFINITY)])),
+		),
+	] {
+		let unsupported = TrackEntry(Master::Full(vec![
+			TrackNumber(2),
+			TrackType(kind),
+			CodecID(codec.into()),
+			fields,
+		]));
+		for reverse in [false, true] {
+			let mut tracks = vec![track_entry_audio_opus(1, 48_000.0, 2), unsupported.clone()];
+			if reverse {
+				tracks.reverse();
+			}
+			let data = MkvBuilder::new()
+				.header("matroska")
+				.segment_start()
+				.info(1_000_000)
+				.tracks(tracks)
+				.segment_end()
+				.build();
+			for initial in [false, true] {
+				let error = import_result(&data, initial).unwrap_err();
+				assert!(
+					matches!(&error,
+						crate::Error::Mkv(super::Error::UnsupportedVideoCodec(name) | super::Error::UnsupportedAudioCodec(name)) if name == codec
+					),
+					"{codec}, reverse {reverse}, initial {initial}: {error:?}"
+				);
+			}
+		}
+	}
+}
+
+#[test]
+fn numeric_range_validates_fields_without_overriding_codec_config() {
+	use crate::codec::h264;
+	use MatroskaSpec::*;
+	use bytes::Bytes;
+
+	let avcc = h264::build_avcc(
+		&[Bytes::from_static(h264::fixtures::SPS_IPB)],
+		&[Bytes::from_static(h264::fixtures::PPS)],
+	)
+	.unwrap();
+	let video = TrackEntry(Master::Full(vec![
+		TrackNumber(2),
+		TrackType(1),
+		CodecID("V_MPEG4/ISO/AVC".into()),
+		CodecPrivate(avcc.to_vec()),
+		Video(Master::Full(vec![PixelWidth(1920), PixelHeight(1080)])),
+	]));
+	let aac = TrackEntry(Master::Full(vec![
+		TrackNumber(2),
+		TrackType(2),
+		CodecID("A_AAC".into()),
+		CodecPrivate(vec![0x11, 0x90]),
+		Audio(Master::Full(vec![])),
+	]));
+	for (track, is_video) in [
+		(video, true),
+		(track_entry_audio_opus(2, 48_000.0, 2), false),
+		(track_entry_audio_flac(2, 48_000, 2), false),
+		(aac, false),
+	] {
+		let cases = if is_video {
+			vec![
+				(vec![PixelWidth(1920), PixelHeight(1080)], None),
+				(vec![PixelWidth(u64::MAX), PixelHeight(1080)], Some("PixelWidth")),
+				(vec![PixelWidth(1920), PixelHeight(u64::MAX)], Some("PixelHeight")),
+			]
+		} else {
+			vec![
+				(vec![SamplingFrequency(44_100.0), Channels(6)], None),
+				(
+					vec![SamplingFrequency(f64::INFINITY), Channels(2)],
+					Some("SamplingFrequency"),
+				),
+				(vec![SamplingFrequency(48_000.0), Channels(u64::MAX)], Some("Channels")),
+			]
+		};
+		for (fields, error) in cases {
+			let mut track = track.clone();
+			let TrackEntry(Master::Full(children)) = &mut track else {
+				unreachable!()
+			};
+			for child in children {
+				if let Video(Master::Full(value)) | Audio(Master::Full(value)) = child {
+					*value = fields.clone();
+				}
+			}
+			if let Some(field) = error {
+				assert_out_of_range(track, field);
+				continue;
+			}
+			let data = MkvBuilder::new()
+				.header("matroska")
+				.segment_start()
+				.info(1_000_000)
+				.tracks(vec![track])
+				.segment_end()
+				.build();
+			let catalog = run(&data);
+			if is_video {
+				let video = catalog.video.renditions.values().next().unwrap();
+				assert_eq!((video.coded_width, video.coded_height), (Some(64), Some(64)));
+			} else {
+				let audio = catalog.audio.renditions.values().next().unwrap();
+				assert_eq!((audio.sample_rate, audio.channel_count), (48_000, 2));
+			}
+		}
+	}
+}
+
 #[test]
 fn codec_private_resolves_display_aspect() {
 	use crate::codec::{h264, h265};
@@ -379,7 +590,7 @@ fn container_aspect_malformed_track_is_not_skipped() {
 }
 
 #[tokio::test]
-async fn container_aspect_unsupported_video_keeps_audio() {
+async fn container_aspect_unsupported_role_keeps_audio() {
 	use MatroskaSpec::*;
 	for reverse in [false, true] {
 		let mut tracks = vec![
@@ -387,7 +598,7 @@ async fn container_aspect_unsupported_video_keeps_audio() {
 			TrackEntry(Master::Full(vec![
 				TrackNumber(2),
 				TrackUID(2),
-				TrackType(1),
+				TrackType(18),
 				CodecID("V_UNKNOWN".into()),
 				Video(Master::Full(vec![PixelWidth(0), PixelHeight(1080)])),
 			])),
@@ -718,9 +929,9 @@ fn test_mp3_catalog() {
 }
 
 #[test]
-fn test_unsupported_codec_skipped() {
+fn unsupported_audio_codec_is_refused() {
 	// Mix of supported (Opus) and unsupported (Vorbis) audio tracks. The Vorbis track
-	// should be dropped with a warning; Opus should make it into the catalog.
+	// must refuse the import, including when a usable Opus track precedes it.
 	let data = MkvBuilder::new()
 		.header("webm")
 		.segment_start()
@@ -738,17 +949,17 @@ fn test_unsupported_codec_skipped() {
 		.segment_end()
 		.build();
 
-	let catalog = run(&data);
-	assert_eq!(catalog.audio.renditions.len(), 1);
-	let a = catalog.audio.renditions.values().next().unwrap();
-	assert!(matches!(a.codec, AudioCodec::Opus));
+	for initial in [false, true] {
+		assert!(
+			matches!(import_result(&data, initial), Err(crate::Error::Mkv(super::Error::UnsupportedAudioCodec(name))) if name == "A_VORBIS")
+		);
+	}
 }
 
 /// A rendition must never be advertised when its media producer could not be built.
 ///
-/// Publishing the media producer is fallible (it enrolls the track in the broadcast timeline, minting the
-/// shared `timeline.z` track, which can collide), so publishing the catalog entry first would
-/// leave consumers a rendition that is announced but has no producer behind it and is therefore
+/// Publishing the media producer is fallible (it mints the track's HLS record track, which can
+/// collide), so publishing the catalog entry first would leave consumers a rendition that is announced but has no producer behind it and is therefore
 /// never served.
 #[test]
 fn rendition_is_not_published_when_the_media_track_fails() {
@@ -762,23 +973,23 @@ fn rendition_is_not_published_when_the_media_track_fails() {
 
 	// Control: the same fixture publishes exactly one rendition when nothing collides, so the
 	// assertion below cannot pass merely because the fixture stopped reaching track import.
-	assert_eq!(run(&data).video.renditions.len(), 1, "fixture must publish a rendition");
+	let control = run(&data);
+	assert_eq!(control.video.renditions.len(), 1, "fixture must publish a rendition");
+	let name = control.video.renditions.keys().next().unwrap().clone();
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 
-	// Squat the catalog's timeline track, so building the media producer (whose enrollment
-	// enrolls the catalog too) fails. The handle must stay alive: the broadcast tracks names weakly, so
-	// dropping it frees the name.
-	let _squat = broadcast
-		.create_track(hang::timeline::default_name(hang::Catalog::DEFAULT_NAME), None)
-		.unwrap();
+	// Squat the rendition's HLS record track, so enrolling it (and with it building its media
+	// producer) fails. The handle must stay alive: the broadcast tracks names weakly, so
+	// dropping it frees the name. Unique names are per broadcast, so the track is named as in
+	// the control.
+	let _squat = broadcast.create_track(hang::hls::default_name(&name), None).unwrap();
 
 	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.reserve());
 	let buf = bytes::BytesMut::from(&data[..]);
-	// The importer logs and skips a track it cannot build, rather than failing the whole
-	// decode, so the outcome shows up in the catalog rather than in this result.
-	let _ = mkv.decode(&buf);
+	// A producer failure must reach the importer caller without advertising the rendition.
+	assert!(mkv.decode(&buf).is_err());
 
 	assert!(
 		catalog.snapshot().video.renditions.is_empty(),
@@ -791,7 +1002,7 @@ struct Imported {
 	published: std::collections::BTreeMap<String, Vec<u128>>,
 	/// The root clock the catalog advertised.
 	clock: hang::catalog::Clock,
-	arrival: std::ops::RangeInclusive<std::time::SystemTime>,
+	arrival: std::ops::RangeInclusive<moq_clock::Wall>,
 	/// Why a chunk was refused, if one was.
 	refused: Option<crate::Error>,
 }
@@ -804,7 +1015,7 @@ async fn import_chunked(data: &[u8], chunk: usize) -> Imported {
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.reserve());
 
-	let before = std::time::SystemTime::now();
+	let before = moq_clock::wall();
 	let mut refused = None;
 	for piece in data.chunks(chunk) {
 		if let Err(err) = mkv.decode(piece) {
@@ -812,7 +1023,7 @@ async fn import_chunked(data: &[u8], chunk: usize) -> Imported {
 			break;
 		}
 	}
-	let after = std::time::SystemTime::now();
+	let after = moq_clock::wall();
 	mkv.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
@@ -824,8 +1035,7 @@ async fn import_chunked(data: &[u8], chunk: usize) -> Imported {
 	}
 }
 
-/// Every drain pass restarts from a replay point, so a small chunk replays tags; each block
-/// still publishes exactly once.
+/// Incomplete elements span chunks, and each completed block publishes exactly once.
 #[tokio::test]
 async fn chunked_decode_publishes_each_block_once() {
 	let data = MkvBuilder::new()
@@ -1000,7 +1210,6 @@ async fn subtitle_languages_and_empty_tracks_are_published() {
 			text_entry(1, "S_TEXT/UTF8", "en", "English"),
 			text_entry(2, "S_TEXT/UTF8", "es", "Spanish"),
 			text_entry(3, "S_TEXT/UTF8", "fr", "French"),
-			text_entry(4, "S_TEXT/ASS", "de", "Unsupported"),
 		])
 		.cluster(0, || {
 			let MatroskaSpec::SimpleBlock(block) = simple_block(1, 250, true, b"Hello") else {
@@ -1527,5 +1736,319 @@ fn unrepresentable_colour_is_refused() {
 		MatroskaSpec::MasteringMetadata(Master::Full(vec![MatroskaSpec::PrimaryRChromaticityX(1.5)])),
 	] {
 		assert!(super::import::matroska_color(&[child]).is_err());
+	}
+}
+
+/// Container entry points must preserve importer failures, both in the constructor's
+/// initial data and in arbitrarily split subsequent chunks.
+fn import_result(data: &[u8], initial: bool) -> crate::Result<()> {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let init = crate::import::ContainerInit::new(
+		crate::import::ContainerFormat::Mkv,
+		if initial {
+			bytes::Bytes::copy_from_slice(data)
+		} else {
+			bytes::Bytes::new()
+		},
+	);
+	let mut import: crate::import::Container = crate::import::Container::new(broadcast, catalog.reserve(), &init)?;
+	if !initial {
+		for chunk in data.chunks(7) {
+			import.decode(chunk)?;
+		}
+	}
+	import.finish()
+}
+
+#[test]
+fn malformed_track_metadata_fails_through_the_container() {
+	use MatroskaSpec::*;
+	let cases = [
+		TrackEntry(Master::Full(vec![TrackType(2), CodecID("A_OPUS".into())])),
+		TrackEntry(Master::Full(vec![
+			TrackNumber(2),
+			TrackType(2),
+			CodecID("A_AAC".into()),
+		])),
+		TrackEntry(Master::Full(vec![
+			TrackNumber(2),
+			TrackType(1),
+			CodecID("V_MPEG4/ISO/AVC".into()),
+			CodecPrivate(vec![0]),
+		])),
+		TrackEntry(Master::Full(vec![
+			TrackNumber(2),
+			TrackType(1),
+			CodecID("V_VP9".into()),
+			Video(Master::Full(vec![
+				PixelWidth(320),
+				PixelHeight(240),
+				Colour(Master::Full(vec![MaxCLL(70_000)])),
+			])),
+		])),
+	];
+	for (index, invalid) in cases.into_iter().enumerate() {
+		for reverse in [false, true] {
+			let mut tracks = vec![track_entry_audio_opus(1, 48_000.0, 2), invalid.clone()];
+			if reverse {
+				tracks.reverse();
+			}
+			let data = MkvBuilder::new()
+				.header("matroska")
+				.segment_start()
+				.info(1_000_000)
+				.tracks(tracks)
+				.segment_end()
+				.build();
+			for initial in [false, true] {
+				assert!(
+					import_result(&data, initial).is_err(),
+					"case {index}, reverse {reverse}, initial {initial}"
+				);
+			}
+		}
+	}
+}
+
+#[test]
+fn duplicate_track_numbers_fail_even_for_skipped_roles() {
+	use MatroskaSpec::*;
+	for second in [
+		track_entry_audio_opus(1, 44_100.0, 1),
+		TrackEntry(Master::Full(vec![
+			TrackNumber(1),
+			TrackType(18),
+			CodecID("B_BUTTONS".into()),
+		])),
+	] {
+		for reverse in [false, true] {
+			let mut tracks = vec![track_entry_audio_opus(1, 48_000.0, 2), second.clone()];
+			if reverse {
+				tracks.reverse();
+			}
+			let data = MkvBuilder::new()
+				.header("matroska")
+				.segment_start()
+				.info(1_000_000)
+				.tracks(tracks)
+				.segment_end()
+				.build();
+			for initial in [false, true] {
+				let result = import_result(&data, initial);
+				assert!(
+					matches!(&result, Err(crate::Error::Moq(moq_net::Error::Duplicate))),
+					"reverse {reverse}, initial {initial}: {result:?}"
+				);
+			}
+		}
+	}
+}
+
+#[test]
+fn invalid_timestamp_scales_are_refused() {
+	for initial in [false, true] {
+		let zero = MkvBuilder::new()
+			.header("webm")
+			.segment_start()
+			.info(0)
+			.tracks(vec![track_entry_audio_opus(1, 48_000.0, 2)])
+			.cluster(0, || vec![simple_block(1, 0, true, b"opus")])
+			.segment_end()
+			.build();
+		assert!(matches!(
+			import_result(&zero, initial),
+			Err(crate::Error::Mkv(super::Error::ValueOutOfRange("TimestampScale")))
+		));
+	}
+}
+
+#[test]
+fn block_tick_overflow_is_refused_before_timestamp_conversion() {
+	for (cluster, relative, scale) in [(u64::MAX, 1, 1), (u64::MAX, 0, 2)] {
+		for initial in [false, true] {
+			let data = MkvBuilder::new()
+				.header("webm")
+				.segment_start()
+				.info(scale)
+				.tracks(vec![track_entry_audio_opus(1, 48_000.0, 2)])
+				.cluster(cluster, || vec![simple_block(1, relative, true, b"opus")])
+				.segment_end()
+				.build();
+			let outcome = std::panic::catch_unwind(|| import_result(&data, initial));
+			assert!(matches!(
+				outcome,
+				Ok(Err(crate::Error::Mkv(super::Error::TimestampOverflow)))
+			));
+		}
+	}
+	let negative = MkvBuilder::new()
+		.header("webm")
+		.segment_start()
+		.info(1)
+		.tracks(vec![track_entry_audio_opus(1, 48_000.0, 2)])
+		.cluster(0, || vec![simple_block(1, -1, true, b"opus")])
+		.segment_end()
+		.build();
+	for initial in [false, true] {
+		assert!(matches!(
+			import_result(&negative, initial),
+			Err(crate::Error::Mkv(super::Error::NegativeBlockTimestamp))
+		));
+	}
+}
+
+#[test]
+fn unsupported_subtitle_codec_is_refused() {
+	for reverse in [false, true] {
+		let mut tracks = vec![
+			track_entry_audio_opus(1, 48_000.0, 2),
+			text_entry(2, "S_TEXT/ASS", "de", "Unsupported"),
+		];
+		if reverse {
+			tracks.reverse();
+		}
+		let data = MkvBuilder::new()
+			.header("matroska")
+			.segment_start()
+			.info(1_000_000)
+			.tracks(tracks)
+			.segment_end()
+			.build();
+		for initial in [false, true] {
+			assert!(
+				matches!(import_result(&data, initial), Err(crate::Error::UnknownFormat(codec)) if codec.contains("S_TEXT/ASS"))
+			);
+		}
+	}
+}
+
+#[tokio::test(start_paused = true)]
+async fn tiny_chunks_preserve_tracks_and_skip_only_unsupported_roles() {
+	use MatroskaSpec::*;
+	let data = MkvBuilder::new()
+		.header("matroska")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![
+			track_entry_audio_opus(1, 48_000.0, 2),
+			track_entry_audio_opus(2, 48_000.0, 1),
+			TrackEntry(Master::Full(vec![
+				TrackNumber(3),
+				TrackType(18),
+				CodecID("B_BUTTONS".into()),
+				Video(Master::Full(vec![PixelWidth(u64::MAX)])),
+			])),
+		])
+		.cluster(0, || {
+			vec![
+				simple_block(1, 0, true, b"stereo"),
+				simple_block(2, 20, true, b"mono"),
+				simple_block(3, 0, true, b"ignored"),
+			]
+		})
+		.segment_end()
+		.build();
+	for chunk in [1, 2, 7, 16, data.len()] {
+		let imported = import_chunked(&data, chunk).await;
+		assert!(imported.refused.is_none(), "chunk {chunk}: {:?}", imported.refused);
+		assert_eq!(imported.published.len(), 2, "chunk {chunk}");
+		let mut timestamps: Vec<_> = imported.published.into_values().collect();
+		timestamps.sort();
+		assert_eq!(timestamps, [vec![0], vec![20_000]], "chunk {chunk}");
+	}
+}
+
+#[test]
+fn partial_track_metadata_is_refused_at_eof() {
+	let data = MkvBuilder::new()
+		.header("webm")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![track_entry_audio_opus(1, 48_000.0, 2)])
+		.segment_end()
+		.build();
+	for missing in 1..=8 {
+		for initial in [false, true] {
+			assert!(
+				matches!(
+					import_result(&data[..data.len() - missing], initial),
+					Err(crate::Error::Mkv(super::Error::MatroskaParse))
+				),
+				"missing {missing}, initial {initial}"
+			);
+		}
+	}
+	for initial in [false, true] {
+		import_result(&data, initial).unwrap();
+	}
+}
+
+#[test]
+fn block_ticks_above_the_signed_range_are_not_misreported_as_negative() {
+	for (cluster, relative) in [(i64::MAX as u64, 1i16), (u64::MAX, -1)] {
+		let data = MkvBuilder::new()
+			.header("webm")
+			.segment_start()
+			.info(1)
+			.tracks(vec![track_entry_audio_opus(1, 48_000.0, 2)])
+			.cluster(cluster, || vec![simple_block(1, relative, true, b"frame")])
+			.segment_end()
+			.build();
+		// The addition fits u64, but exceeds MoQ's existing timestamp value range.
+		for initial in [false, true] {
+			assert!(
+				matches!(import_result(&data, initial), Err(crate::Error::TimestampOverflow(_))),
+				"{cluster}+{relative}, initial {initial}"
+			);
+		}
+	}
+}
+
+#[test]
+fn invalid_track_number_fields_are_refused() {
+	use MatroskaSpec::*;
+	for (fields, duplicate) in [
+		(vec![TrackNumber(0)], false),
+		(vec![TrackNumber(1), TrackNumber(2)], true),
+	] {
+		let mut entry = fields;
+		entry.extend([TrackType(2), CodecID("A_OPUS".into())]);
+		let data = MkvBuilder::new()
+			.header("webm")
+			.segment_start()
+			.info(1_000_000)
+			.tracks(vec![TrackEntry(Master::Full(entry))])
+			.segment_end()
+			.build();
+		for initial in [false, true] {
+			let error = import_result(&data, initial).unwrap_err();
+			if duplicate {
+				assert!(matches!(error, crate::Error::Moq(moq_net::Error::Duplicate)));
+			} else {
+				assert!(matches!(
+					error,
+					crate::Error::Mkv(super::Error::ValueOutOfRange("TrackNumber"))
+				));
+			}
+		}
+	}
+}
+
+/// ffmpeg's live WebM uses an unknown-size Segment and real Opus packet metadata.
+/// The encoded fixture needs no ffmpeg installation when this gate runs.
+#[tokio::test(start_paused = true)]
+async fn real_live_webm_imports_across_chunk_boundaries() {
+	let data = include_bytes!("test_data/opus.webm");
+	for initial in [false, true] {
+		import_result(data, initial).unwrap();
+	}
+	for chunk in [1, 7, 64, data.len()] {
+		let imported = import_chunked(data, chunk).await;
+		assert!(imported.refused.is_none(), "chunk {chunk}: {:?}", imported.refused);
+		assert_eq!(imported.published.len(), 1);
+		let timestamps = imported.published.into_values().next().unwrap();
+		assert_eq!(timestamps.len(), 6);
+		assert!(timestamps.windows(2).all(|pair| pair[0] < pair[1]));
 	}
 }

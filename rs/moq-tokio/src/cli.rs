@@ -5,12 +5,14 @@
 //! `parse()` is expected to take them first. A binary that parses more than once
 //! never reaches that code, so it has to answer them itself. Both shapes exist here:
 //! a TOML merge that layers CLI, env, and file with recorded provenance, and
-//! moq-cli's repeated `--` stage grammar. A private duration adapter parses the
-//! human-readable values used by those flags and TOML keys.
+//! moq-cli's repeated `--` stage grammar. [`Duration`] parses the human-readable
+//! values used by those flags and TOML keys, and [`check_env`] refuses `MOQ_*`
+//! variables a binary does not read.
 
 #[path = "deprecated.rs"]
 mod deprecated;
 pub(crate) mod duration;
+mod env;
 
 use std::collections::HashSet;
 use std::ffi::OsStr;
@@ -24,7 +26,8 @@ use usage_rs::config::{
 };
 
 pub use deprecated::Deprecated;
-pub(crate) use duration::Duration;
+pub use duration::Duration;
+pub use env::{UnknownEnv, check_env};
 
 /// Re-exported because [`Merge`] and [`answer`] use Usage types in their APIs.
 pub use usage_rs;
@@ -216,9 +219,6 @@ fn overlay_unoccupied(base: &mut toml::Value, overlay: &toml::Value, path: &str,
 				} else {
 					format!("{path}.{key}")
 				};
-				if !occupied.contains(child.as_str()) {
-					base.remove(&format!("__cli_{key}"));
-				}
 				match base.get_mut(key) {
 					Some(existing) => overlay_unoccupied(existing, value, &child, occupied),
 					None if occupied.contains(child.as_str()) => {}

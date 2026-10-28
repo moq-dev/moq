@@ -24,7 +24,10 @@ beside the field.
   decide how qmux's I/O path refreshes the `Wire` (for example, after each
   socket write batch) without a syscall per write, in place of the
   qmux record bytes `qmux::Session::wire` counts today, including the relay's
-  `SocketStats` wiring (`rs/moq-relay/src/websocket.rs`).
+  `SocketStats` wiring (`rs/moq-relay/src/web.rs`).
 - Test: a loopback WebSocket session's `sent_bytes` covers at least the
   payload it wrote.
 
+## Required
+
+- [qmux drives its own socket](/quest/m2/perf/stream/driver.md) - replaces qmux's read/write path, so the counters go on the new driver once (decided 2026-10-22, maintainer)

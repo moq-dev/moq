@@ -36,8 +36,16 @@ pub enum TracksEvent {
 	/// Every track this hop listed when the listing began, and still lists, has been
 	/// reported. Sent once; later events are live.
 	Synced,
-	/// A track is no longer listed. A handler may still serve its name on request.
+	/// A track is no longer listed, unfinished: its producer dropped or aborted before
+	/// declaring its end, or the route or handler that listed it withdrew. A handler may still
+	/// serve its name on request.
 	Removed {
+		/// The name an earlier [`Self::Added`] reported.
+		name: Arc<str>,
+	},
+	/// A track is no longer listed because it finished: its producer declared its end. Its
+	/// groups stay readable while the cache retains them.
+	Finished {
 		/// The name an earlier [`Self::Added`] reported.
 		name: Arc<str>,
 	},
@@ -58,14 +66,12 @@ struct Entry {
 /// [`Error::Cancel`], so an owner's listings cost one queue per broadcast however many
 /// paths or requests reach it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-// private: capability gap
 // Sessions dedup a peer's listings per broadcast; a custom session has no public owner yet.
 pub(crate) struct Owner(u64);
 
 impl Owner {
-	// private: capability gap
 	// Sessions dedup a peer's listings per broadcast; a custom session has no public owner yet.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn new() -> Self {
 		static NEXT: AtomicU64 = AtomicU64::new(0);
 		Self(NEXT.fetch_add(1, Ordering::Relaxed))
@@ -148,9 +154,10 @@ impl ListingState {
 		self.each(|queue| queue.add(name.clone(), info.clone()));
 	}
 
-	fn remove(&mut self, name: &str) {
+	/// Unlist `name`, telling readers whether it `finished`.
+	fn remove(&mut self, name: &str, finished: bool) {
 		if let Some((name, _)) = self.live.remove_entry(name) {
-			self.each(|queue| queue.remove(&name));
+			self.each(|queue| queue.remove(&name, finished));
 		}
 	}
 
@@ -162,7 +169,7 @@ impl ListingState {
 			// The earlier track of the name has not unlisted yet, but it left the table
 			// for this one to be created: readers see it go and the new one arrive.
 			Some(entry) if entry.own.is_some() && !entry.answered => {
-				self.remove(&name);
+				self.remove(&name, false);
 				let own = Some(token);
 				self.insert(
 					name,
@@ -192,7 +199,7 @@ impl ListingState {
 	}
 
 	/// Unlist a track the producer created, unless a later one took its name.
-	pub(super) fn unlist_own(&mut self, name: &str, token: u64) {
+	pub(super) fn unlist_own(&mut self, name: &str, token: u64, finished: bool) {
 		let Some(entry) = self.live.get_mut(name) else {
 			return;
 		};
@@ -201,7 +208,7 @@ impl ListingState {
 		}
 		entry.own = None;
 		if !entry.answered {
-			self.remove(name);
+			self.remove(name, finished);
 		}
 	}
 
@@ -226,13 +233,13 @@ impl ListingState {
 		}
 	}
 
-	fn answer_remove(&mut self, name: &str) -> Result<(), Error> {
+	fn answer_remove(&mut self, name: &str, finished: bool) -> Result<(), Error> {
 		let Some(entry) = self.live.get_mut(name).filter(|entry| entry.answered) else {
 			return Err(Error::NotFound);
 		};
 		entry.answered = false;
 		if entry.own.is_none() {
-			self.remove(name);
+			self.remove(name, finished);
 		}
 		Ok(())
 	}
@@ -253,7 +260,7 @@ impl ListingState {
 			.map(|(name, _)| name.clone())
 			.collect();
 		for name in answered {
-			let _ = self.answer_remove(&name);
+			let _ = self.answer_remove(&name, false);
 		}
 		self.answered = false;
 	}
@@ -266,8 +273,19 @@ impl ListingState {
 		self.generation += 1;
 	}
 
-	/// The broadcast ended: so does every listing of it.
-	pub(super) fn close(&mut self) {
+	/// The broadcast ended: so does every listing of it, first unlisting each track its
+	/// producer created that `finished`, as its holder dropping later would have. A handler's
+	/// answer of the same name does not keep it live, since the producer's track is what served it.
+	pub(super) fn close(&mut self, finished: impl Fn(&str) -> bool) {
+		let done: Vec<Arc<str>> = self
+			.live
+			.iter()
+			.filter(|(name, entry)| entry.own.is_some() && finished(name))
+			.map(|(name, _)| name.clone())
+			.collect();
+		for name in done {
+			self.remove(&name, true);
+		}
 		self.detach(Ok(()));
 	}
 }
@@ -278,6 +296,8 @@ pub(in crate::model) struct Unlist {
 	state: kio::Shared<BroadcastState>,
 	name: Arc<str>,
 	token: u64,
+	/// Whether the track declared its end, so readers see it finish rather than vanish.
+	finished: bool,
 }
 
 impl Unlist {
@@ -293,13 +313,22 @@ impl Unlist {
 			state: state.clone(),
 			name,
 			token,
+			finished: false,
 		}
+	}
+
+	/// Unlist now, as a track that `finished` or left unfinished.
+	pub(in crate::model) fn unlist(mut self, finished: bool) {
+		self.finished = finished;
 	}
 }
 
 impl Drop for Unlist {
 	fn drop(&mut self) {
-		self.state.lock().listing.unlist_own(&self.name, self.token);
+		self.state
+			.lock()
+			.listing
+			.unlist_own(&self.name, self.token, self.finished);
 	}
 }
 
@@ -320,9 +349,15 @@ impl ListOnAccept {
 /// A change a reader has yet to read.
 enum Pending {
 	Add(track::Info),
-	Remove,
+	/// The track left, having finished or not.
+	Remove {
+		finished: bool,
+	},
 	/// A removal of a track the reader saw, then a track of the same name listed again.
-	Readd(track::Info),
+	Readd {
+		finished: bool,
+		info: track::Info,
+	},
 }
 
 /// One reader's pending changes, keyed by name in the order they happened.
@@ -341,24 +376,27 @@ pub(super) struct Queue {
 impl Queue {
 	fn add(&mut self, name: Arc<str>, info: track::Info) {
 		match self.pending.get_mut(&name) {
-			Some(pending @ Pending::Remove) => *pending = Pending::Readd(info),
-			// A name is listed once at a time, so only its removal can be pending.
-			Some(_) => debug_assert!(false, "a listed track was listed again"),
+			Some(pending) => match *pending {
+				Pending::Remove { finished } => *pending = Pending::Readd { finished, info },
+				// A name is listed once at a time, so only its removal can be pending.
+				_ => debug_assert!(false, "a listed track was listed again"),
+			},
 			None => {
 				self.pending.insert(name, Pending::Add(info));
 			}
 		}
 	}
 
-	fn remove(&mut self, name: &Arc<str>) {
+	fn remove(&mut self, name: &Arc<str>, finished: bool) {
 		match self.pending.get_mut(name) {
 			// Never read: the two cancel.
 			Some(Pending::Add(_)) => {
 				self.pending.remove(name);
 			}
-			Some(pending) => *pending = Pending::Remove,
+			// Read, then re-added unread: the reader sees only the last removal.
+			Some(pending) => *pending = Pending::Remove { finished },
 			None => {
-				self.pending.insert(name.clone(), Pending::Remove);
+				self.pending.insert(name.clone(), Pending::Remove { finished });
 			}
 		}
 	}
@@ -368,7 +406,7 @@ impl Queue {
 		self.pending
 			.values()
 			.map(|pending| match pending {
-				Pending::Readd(_) => 2,
+				Pending::Readd { .. } => 2,
 				_ => 1,
 			})
 			.sum()
@@ -394,8 +432,22 @@ impl Queue {
 	}
 
 	fn next(&mut self) -> Result<Option<TracksEvent>, Error> {
-		if let Some(end) = &self.end {
-			return end.clone().map(|()| None);
+		match &self.end {
+			Some(Err(err)) => return Err(err.clone()),
+			// A clean end still reports each track that left before it, and how; an add the
+			// reader never read is dropped.
+			Some(Ok(())) => {
+				while let Some((name, pending)) = self.pending.pop_front() {
+					match pending {
+						Pending::Add(_) => {}
+						Pending::Remove { finished } | Pending::Readd { finished, .. } => {
+							return Ok(Some(removal(name, finished)));
+						}
+					}
+				}
+				return Ok(None);
+			}
+			None => {}
 		}
 		if !self.synced && (self.bound == Some(0) || (self.bound.is_some() && self.pending.is_empty())) {
 			self.synced = true;
@@ -407,19 +459,28 @@ impl Queue {
 		}
 		Ok(Some(match pending {
 			Pending::Add(info) => TracksEvent::Added { name, info },
-			Pending::Remove => TracksEvent::Removed { name },
-			Pending::Readd(info) => {
+			Pending::Remove { finished } => removal(name, finished),
+			Pending::Readd { finished, info } => {
 				self.pending.insert_front(name.clone(), Pending::Add(info));
-				TracksEvent::Removed { name }
+				removal(name, finished)
 			}
 		}))
+	}
+}
+
+/// The event for `name` leaving the listing.
+fn removal(name: Arc<str>, finished: bool) -> TracksEvent {
+	match finished {
+		true => TracksEvent::Finished { name },
+		false => TracksEvent::Removed { name },
 	}
 }
 
 /// The tracks a broadcast lists, from [`Consumer::tracks`].
 ///
 /// Reports every track listed when it was created, then [`TracksEvent::Synced`], then
-/// each change as it happens, until the broadcast ends. Listing a broadcast never
+/// each change as it happens, until the broadcast ends: a clean end comes after each
+/// track that left before it, and a track still listed then ends unfinished. Listing a broadcast never
 /// requests a track: subscribe to each listed one through [`Consumer::track`].
 pub struct Tracks {
 	broadcast: Consumer,
@@ -465,8 +526,8 @@ impl Consumer {
 	/// List the broadcast's tracks: each one with its info, then
 	/// [`TracksEvent::Synced`], then changes as they happen.
 	///
-	/// Lists the tracks the producer created and any a handler answers with through a
-	/// [`Lister`], such as a relay's copy listing its upstream's. A track served only on
+	/// Lists the tracks the producer created and any a session answers with, such as a
+	/// relay's copy listing its upstream's. A track served only on
 	/// request is never listed, and listing never requests one. Fails with
 	/// [`Error::Unroutable`] once the broadcast has ended.
 	pub fn tracks(&self) -> Result<Tracks, Error> {
@@ -475,9 +536,8 @@ impl Consumer {
 
 	/// [`Self::tracks`] for `owner`, ending its older listing of this broadcast with
 	/// [`Error::Cancel`].
-	// private: capability gap
 	// Sessions dedup a peer's listings per broadcast; a custom session has no public owner yet.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn tracks_as(&self, owner: Owner) -> Result<Tracks, Error> {
 		self.list(Some(owner))
 	}
@@ -499,13 +559,13 @@ impl Consumer {
 	}
 }
 
-/// A handler's answer to the broadcast's listings, from [`Dynamic::lister`](super::Dynamic::lister).
+/// A handler's answer to the broadcast's listings, from [`Requests::lister`](super::Requests::lister).
 ///
 /// A broadcast has at most one. While it exists, readers wait for it to
 /// [`sync`](Self::synced) before reporting [`TracksEvent::Synced`]. Answer while [`poll_used`](Self::poll_used): list what the
 /// publisher behind the handler holds and keep it current, then [`clear`](Self::clear)
 /// once [`poll_unused`](Self::poll_unused). Dropping it clears what it listed.
-pub struct Lister {
+pub(crate) struct Lister {
 	state: kio::Shared<BroadcastState>,
 }
 
@@ -556,13 +616,24 @@ impl Lister {
 		state.listing.answer_add(name.into(), info)
 	}
 
-	/// Stop listing a track. Fails with [`Error::NotFound`] if this answer does not list it.
+	/// Stop listing a track that left unfinished, reported as [`TracksEvent::Removed`].
+	/// Fails with [`Error::NotFound`] if this answer does not list it.
 	pub fn remove(&self, name: &str) -> Result<(), Error> {
+		self.unlist(name, false)
+	}
+
+	/// Stop listing a track that finished, reported as [`TracksEvent::Finished`]. Fails with
+	/// [`Error::NotFound`] if this answer does not list it.
+	pub fn finish(&self, name: &str) -> Result<(), Error> {
+		self.unlist(name, true)
+	}
+
+	fn unlist(&self, name: &str, finished: bool) -> Result<(), Error> {
 		let mut state = self.state.lock();
 		if state.closing {
 			return Err(Error::Closed);
 		}
-		state.listing.answer_remove(name)
+		state.listing.answer_remove(name, finished)
 	}
 
 	/// The answer holds everything this hop knows now; later changes are live.
@@ -581,17 +652,17 @@ impl Lister {
 	/// End every current reader as if the broadcast ended, and withdraw the answer, as
 	/// when the publisher behind the handler ends its broadcast first. A later reader
 	/// asks again.
-	pub fn finish(&self) {
-		self.end(Ok(()));
+	pub fn end(&self) {
+		self.detach(Ok(()));
 	}
 
 	/// Fail every current reader with `err` and withdraw the answer. A later reader
 	/// asks again.
 	pub fn abort(&self, err: Error) {
-		self.end(Err(err));
+		self.detach(Err(err));
 	}
 
-	fn end(&self, end: Result<(), Error>) {
+	fn detach(&self, end: Result<(), Error>) {
 		let mut state = self.state.lock();
 		state.listing.detach(end);
 		state.listing.answer_clear();
@@ -620,6 +691,7 @@ mod tests {
 			Poll::Pending => None,
 			Poll::Ready(Ok(Some(TracksEvent::Added { name, .. }))) => Some(format!("+{name}")),
 			Poll::Ready(Ok(Some(TracksEvent::Removed { name }))) => Some(format!("-{name}")),
+			Poll::Ready(Ok(Some(TracksEvent::Finished { name }))) => Some(format!("~{name}")),
 			Poll::Ready(Ok(Some(TracksEvent::Synced))) => Some("synced".into()),
 			Poll::Ready(Ok(None)) => Some("end".into()),
 			Poll::Ready(Err(err)) => Some(format!("error: {err}")),
@@ -688,26 +760,105 @@ mod tests {
 		assert_eq!(drain(&mut tracks), ["-a", "-b"]);
 	}
 
+	/// A track whose producer declared its end leaves as finished; one dropped or aborted
+	/// without an end leaves unfinished.
 	#[test]
-	fn a_finished_track_is_listed_while_held() {
+	fn a_removal_says_whether_the_track_finished() {
 		let broadcast = Info::new().produce();
 		let a = broadcast.create_track("a", None).unwrap();
+		let b = broadcast.create_track("b", None).unwrap();
+		let c = broadcast.create_track("c", None).unwrap();
+		let mut tracks = broadcast.consume().tracks().unwrap();
+		assert_eq!(drain(&mut tracks), ["+a", "+b", "+c", "synced"]);
 		a.finish().unwrap();
 		drop(a);
-		// Nothing holds it once its producer is gone.
-		let mut tracks = broadcast.consume().tracks().unwrap();
-		assert_eq!(drain(&mut tracks), ["synced"]);
+		drop(b);
+		c.finish().unwrap();
+		c.abort(Error::Cancel).unwrap();
+		assert_eq!(drain(&mut tracks), ["~a", "-b", "-c"]);
+	}
 
+	/// A finished track listed again under its name is still reported as having finished
+	/// first, and the re-add follows.
+	#[test]
+	fn a_finished_track_listed_again_collapses_in_place() {
 		let broadcast = Info::new().produce();
 		let a = broadcast.create_track("a", None).unwrap();
-		a.finish().unwrap();
 		let mut tracks = broadcast.consume().tracks().unwrap();
 		assert_eq!(drain(&mut tracks), ["+a", "synced"]);
-		let finish = broadcast.finish();
+		a.finish().unwrap();
 		drop(a);
-		assert_eq!(drain(&mut tracks), NONE, "held by the finish");
-		drop(finish);
-		assert_eq!(drain(&mut tracks), ["end"]);
+		let _a = broadcast.create_track("a", None).unwrap();
+		assert_eq!(pending(&tracks), 1, "the removal and re-add collapse");
+		assert_eq!(drain(&mut tracks), ["~a", "+a"]);
+	}
+
+	/// A handler's answer reports each track as its upstream ended it.
+	#[test]
+	fn a_lister_finishes_or_removes_a_track() {
+		let broadcast = Info::new().produce();
+		let lister = broadcast.requests().lister().unwrap();
+		lister.add("up", track::Info::default()).unwrap();
+		lister.add("gone", track::Info::default()).unwrap();
+		lister.synced();
+		let mut tracks = broadcast.consume().tracks().unwrap();
+		assert_eq!(drain(&mut tracks), ["+up", "+gone", "synced"]);
+		lister.finish("up").unwrap();
+		lister.remove("gone").unwrap();
+		assert_eq!(drain(&mut tracks), ["~up", "-gone"]);
+		assert!(matches!(lister.finish("up"), Err(Error::NotFound)));
+	}
+
+	/// A clean end reports each track that left before it, and how, but not one the reader
+	/// never saw; an error ends at once.
+	#[test]
+	fn a_clean_end_follows_the_removals_before_it() {
+		let broadcast = Info::new().produce();
+		let a = broadcast.create_track("a", None).unwrap();
+		let b = broadcast.create_track("b", None).unwrap();
+		let live = broadcast.create_track("live", None).unwrap();
+		let mut tracks = broadcast.consume().tracks().unwrap();
+		assert_eq!(drain(&mut tracks), ["+a", "+b", "+live", "synced"]);
+		a.finish().unwrap();
+		drop(a);
+		drop(b);
+		let _unseen = broadcast.create_track("unseen", None).unwrap();
+		live.finish().unwrap();
+		broadcast.close();
+		assert_eq!(drain(&mut tracks), ["~a", "-b", "~live", "end"]);
+
+		// The producer's finished track is what a handler's answer of its name served.
+		let broadcast = Info::new().produce();
+		let lister = broadcast.requests().lister().unwrap();
+		lister.add("a", track::Info::default()).unwrap();
+		lister.synced();
+		let a = broadcast.create_track("a", None).unwrap();
+		let mut tracks = broadcast.consume().tracks().unwrap();
+		assert_eq!(drain(&mut tracks), ["+a", "synced"]);
+		a.finish().unwrap();
+		broadcast.close();
+		assert_eq!(drain(&mut tracks), ["~a", "end"]);
+
+		// A handler's end is clean too, and its abort is not.
+		for abort in [false, true] {
+			let broadcast = Info::new().produce();
+			let lister = broadcast.requests().lister().unwrap();
+			lister.add("up", track::Info::default()).unwrap();
+			lister.synced();
+			let mut tracks = broadcast.consume().tracks().unwrap();
+			assert_eq!(drain(&mut tracks), ["+up", "synced"]);
+			lister.finish("up").unwrap();
+			match abort {
+				true => {
+					lister.abort(Error::Cancel);
+					assert_eq!(drain(&mut tracks), [format!("error: {}", Error::Cancel)]);
+				}
+				false => {
+					lister.end();
+					assert_eq!(drain(&mut tracks), ["~up", "end"]);
+				}
+			}
+		}
 	}
 
 	#[test]
@@ -749,7 +900,7 @@ mod tests {
 	#[test]
 	fn a_track_served_on_request_is_never_listed() {
 		let broadcast = Info::new().produce();
-		let mut dynamic = broadcast.dynamic();
+		let mut dynamic = broadcast.requests();
 		let consumer = broadcast.consume();
 		let mut tracks = consumer.tracks().unwrap();
 		assert_eq!(drain(&mut tracks), ["synced"]);
@@ -832,7 +983,7 @@ mod tests {
 	fn readers_wait_for_the_lister_to_sync() {
 		let broadcast = Info::new().produce();
 		let _own = broadcast.create_track("own", None).unwrap();
-		let lister = broadcast.dynamic().lister().unwrap();
+		let lister = broadcast.requests().lister().unwrap();
 		let waiter = kio::Waiter::noop();
 		assert!(lister.poll_used(&waiter).is_pending());
 
@@ -860,7 +1011,7 @@ mod tests {
 	fn a_name_listed_by_both_is_reported_once() {
 		let broadcast = Info::new().produce();
 		let own = broadcast.create_track("a", None).unwrap();
-		let lister = broadcast.dynamic().lister().unwrap();
+		let lister = broadcast.requests().lister().unwrap();
 		lister.add("a", track::Info::default()).unwrap();
 		lister.synced();
 		let mut tracks = broadcast.consume().tracks().unwrap();
@@ -874,7 +1025,7 @@ mod tests {
 	#[test]
 	fn an_aborted_answer_fails_its_readers_and_a_later_reader_asks_again() {
 		let broadcast = Info::new().produce();
-		let lister = broadcast.dynamic().lister().unwrap();
+		let lister = broadcast.requests().lister().unwrap();
 		let waiter = kio::Waiter::noop();
 		let mut tracks = broadcast.consume().tracks().unwrap();
 		lister.add("up", track::Info::default()).unwrap();
@@ -900,7 +1051,7 @@ mod tests {
 	#[test]
 	fn a_dropped_lister_withdraws_its_answer_and_syncs() {
 		let broadcast = Info::new().produce();
-		let lister = broadcast.dynamic().lister().unwrap();
+		let lister = broadcast.requests().lister().unwrap();
 		lister.add("up", track::Info::default()).unwrap();
 		let mut tracks = broadcast.consume().tracks().unwrap();
 		assert_eq!(drain(&mut tracks), ["+up"]);
@@ -958,7 +1109,7 @@ mod tests {
 		assert!(matches!(queue.lock().next(), Ok(Some(TracksEvent::Added { .. }))));
 		// The new track of the name lists before the earlier one unlists.
 		listing.list_own("a".into(), track::Info::default());
-		listing.unlist_own("a", first);
+		listing.unlist_own("a", first, false);
 		assert!(queue.lock().pending.is_empty(), "the name never stopped being listed");
 	}
 
@@ -967,22 +1118,22 @@ mod tests {
 	#[test]
 	fn a_broadcast_has_one_lister() {
 		let broadcast = Info::new().produce();
-		let lister = broadcast.dynamic().lister().unwrap();
-		assert!(matches!(broadcast.dynamic().lister(), Err(Error::Duplicate)));
+		let lister = broadcast.requests().lister().unwrap();
+		assert!(matches!(broadcast.requests().lister(), Err(Error::Duplicate)));
 		drop(lister);
-		broadcast.dynamic().lister().expect("the first lister left");
+		broadcast.requests().lister().expect("the first lister left");
 	}
 
 	#[test]
-	fn a_finished_answer_ends_its_readers_and_a_later_reader_asks_again() {
+	fn an_ended_answer_ends_its_readers_and_a_later_reader_asks_again() {
 		let broadcast = Info::new().produce();
-		let lister = broadcast.dynamic().lister().unwrap();
+		let lister = broadcast.requests().lister().unwrap();
 		let waiter = kio::Waiter::noop();
 		let mut tracks = broadcast.consume().tracks().unwrap();
 		lister.add("up", track::Info::default()).unwrap();
 		lister.synced();
 		assert_eq!(drain(&mut tracks), ["+up", "synced"]);
-		lister.finish();
+		lister.end();
 		assert_eq!(drain(&mut tracks), ["end"]);
 		assert!(matches!(lister.poll_unused(&waiter), Poll::Ready(Ok(()))));
 
@@ -994,7 +1145,7 @@ mod tests {
 	#[test]
 	fn a_cleared_answer_unsyncs_a_reader_still_waiting() {
 		let broadcast = Info::new().produce();
-		let lister = broadcast.dynamic().lister().unwrap();
+		let lister = broadcast.requests().lister().unwrap();
 		let _a = broadcast.create_track("a", None).unwrap();
 		let _b = broadcast.create_track("b", None).unwrap();
 		lister.synced();
@@ -1009,7 +1160,7 @@ mod tests {
 	#[test]
 	fn a_lister_sees_the_broadcast_end() {
 		let broadcast = Info::new().produce();
-		let lister = broadcast.dynamic().lister().unwrap();
+		let lister = broadcast.requests().lister().unwrap();
 		broadcast.close();
 		assert!(matches!(
 			lister.poll_used(&kio::Waiter::noop()),

@@ -15,11 +15,11 @@ from datetime import datetime, timedelta, timezone
 import moq
 
 
-async def publish(url: str, broadcast_name: str, track_name: str, tls_verify: bool) -> None:
-    async with moq.Client(url, tls_verify=tls_verify) as client:
-        broadcast = client.create_broadcast(broadcast_name)
-        track = broadcast.publish_track(track_name, moq.TrackInfo(timescale=1_000_000))
-        broadcast.announce()
+async def publish(url: str, broadcast_name: str, track_name: str, insecure: bool) -> None:
+    async with moq.Client(url, tls=moq.ClientTls(insecure=insecure)) as client:
+        publication = client.create_broadcast(broadcast_name)
+        track = publication.broadcast.publish_track(track_name, moq.TrackInfo(timescale=1_000_000))
+        publication.announce()
         print(f"publishing {broadcast_name!r} track={track_name!r} at {url}")
 
         while True:
@@ -38,8 +38,8 @@ async def publish(url: str, broadcast_name: str, track_name: str, tls_verify: bo
             group.finish()
 
 
-async def subscribe(url: str, broadcast_name: str, track_name: str, tls_verify: bool) -> None:
-    async with moq.Client(url, tls_verify=tls_verify) as client:
+async def subscribe(url: str, broadcast_name: str, track_name: str, insecure: bool) -> None:
+    async with moq.Client(url, tls=moq.ClientTls(insecure=insecure)) as client:
         print(f"waiting for {broadcast_name!r} at {url}")
         broadcast = await client.announced_broadcast(broadcast_name)
 
@@ -66,7 +66,7 @@ def main() -> None:
 
     runner = publish if args.role == "publish" else subscribe
     try:
-        asyncio.run(runner(args.url, args.broadcast, args.track, tls_verify=not args.no_tls_verify))
+        asyncio.run(runner(args.url, args.broadcast, args.track, insecure=args.no_tls_verify))
     except KeyboardInterrupt:
         pass
 

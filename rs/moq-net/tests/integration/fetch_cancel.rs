@@ -48,7 +48,7 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 	}
 
 	let broadcast = nodes[0].create_broadcast("room").unwrap();
-	let mut dynamic = broadcast.dynamic();
+	let mut dynamic = broadcast.requests();
 	broadcast.announce(Default::default()).unwrap();
 	moq_clock::sleep(Duration::from_secs(1)).await;
 
@@ -65,9 +65,9 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 		futures::future::Either::Left((request, _)) => request.expect("the track request reaches the publisher"),
 		futures::future::Either::Right(_) => panic!("nothing answered the track"),
 	};
-	let groups = request.dynamic();
+	let groups = request.requests();
 	let _track = request.accept(timed());
-	let request = match futures::future::select(std::pin::pin!(groups.requested_group()), &mut waiting).await {
+	let request = match futures::future::select(std::pin::pin!(groups.requested_fill()), &mut waiting).await {
 		futures::future::Either::Left((request, _)) => request.expect("the fetch reaches the publisher"),
 		futures::future::Either::Right(_) => panic!("nothing answered the fetch"),
 	};
@@ -75,16 +75,12 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 	match stage {
 		Stage::Unanswered => {
 			drop(waiting);
-			moq_clock::timeout(
-				Duration::from_secs(5),
-				kio::wait(|waiter| request.demand().poll_unused(waiter)),
-			)
-			.await
-			.unwrap_or_else(|_| panic!("{ctx}: the publisher's fetch is still wanted"))
-			.expect("the pending fetch is still open");
+			moq_clock::timeout(Duration::from_secs(5), kio::wait(|waiter| request.poll_unused(waiter)))
+				.await
+				.unwrap_or_else(|_| panic!("{ctx}: the publisher's fetch is still wanted"));
 		}
 		Stage::MidResponse => {
-			let mut group = request.accept(timed()).unwrap();
+			let mut group = request.accept(0, timed()).unwrap();
 			group.write_frame(Timestamp::ZERO, Bytes::from_static(b"head")).unwrap();
 
 			let mut fetched = waiting.await.unwrap();
@@ -93,7 +89,12 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 			drop(fetched);
 
 			// The publisher stops serving the group: nobody reads it any more.
-			moq_clock::timeout(Duration::from_secs(5), group.demand().unused())
+			let mut demand = group.demand();
+			let unwanted = async move {
+				while demand.wanted_changed().await? {}
+				Ok::<_, moq_net::Error>(())
+			};
+			moq_clock::timeout(Duration::from_secs(5), unwanted)
 				.await
 				.unwrap_or_else(|_| panic!("{ctx}: the publisher still serves the fetch"))
 				.unwrap();
@@ -112,7 +113,7 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 			assert_eq!(payloads, [&b"head"[..], &b"tail"[..]], "{ctx}");
 		}
 		Stage::Drained => {
-			let mut group = request.accept(timed()).unwrap();
+			let mut group = request.accept(0, timed()).unwrap();
 			group.write_frame(Timestamp::ZERO, Bytes::from_static(b"head")).unwrap();
 			group.write_frame(Timestamp::ZERO, Bytes::from_static(b"tail")).unwrap();
 
@@ -174,7 +175,7 @@ async fn a_refetch_within_the_linger_stays_on_the_relay(version: &str) {
 	let _pair = peer(version, &publisher, &relay).await;
 
 	let broadcast = publisher.create_broadcast("room").unwrap();
-	let mut dynamic = broadcast.dynamic();
+	let mut dynamic = broadcast.requests();
 	broadcast.announce(Default::default()).unwrap();
 	moq_clock::sleep(Duration::from_secs(1)).await;
 
@@ -184,13 +185,13 @@ async fn a_refetch_within_the_linger_stays_on_the_relay(version: &str) {
 		futures::future::Either::Left((request, _)) => request.expect("the track request reaches the publisher"),
 		futures::future::Either::Right(_) => panic!("nothing answered the track"),
 	};
-	let groups = request.dynamic();
+	let groups = request.requests();
 	let _track = request.accept(timed());
-	let request = match futures::future::select(std::pin::pin!(groups.requested_group()), &mut waiting).await {
+	let request = match futures::future::select(std::pin::pin!(groups.requested_fill()), &mut waiting).await {
 		futures::future::Either::Left((request, _)) => request.expect("the fetch reaches the publisher"),
 		futures::future::Either::Right(_) => panic!("nothing answered the fetch"),
 	};
-	let mut group = request.accept(timed()).unwrap();
+	let mut group = request.accept(0, timed()).unwrap();
 	group
 		.write_frame(Timestamp::ZERO, Bytes::from_static(b"segment"))
 		.unwrap();
@@ -206,7 +207,7 @@ async fn a_refetch_within_the_linger_stays_on_the_relay(version: &str) {
 
 	let mut refetch = Box::pin(consumer.track("video").unwrap().fetch_group(0, None));
 	let track_request = std::pin::pin!(dynamic.requested_track());
-	let group_request = std::pin::pin!(groups.requested_group());
+	let group_request = std::pin::pin!(groups.requested_fill());
 	let upstream = futures::future::select(track_request, group_request);
 	let mut fetched = match futures::future::select(&mut refetch, upstream).await {
 		futures::future::Either::Left((fetched, _)) => fetched.expect("the relay serves the group again"),
@@ -231,6 +232,6 @@ async fn a_refetch_within_the_linger_stays_on_the_relay_lite07() {
 }
 
 #[moq_clock::test]
-async fn a_refetch_within_the_linger_stays_on_the_relay_ietf19() {
-	a_refetch_within_the_linger_stays_on_the_relay("moq-transport-19").await;
+async fn a_refetch_within_the_linger_stays_on_the_relay_ietf18() {
+	a_refetch_within_the_linger_stays_on_the_relay("moq-transport-18").await;
 }

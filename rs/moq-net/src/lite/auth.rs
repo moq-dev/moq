@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 
+use crate::Patterns;
 use crate::coding::*;
-use crate::{Pattern, Patterns};
 
 use super::{Message, Version};
 
@@ -16,8 +16,9 @@ pub struct Auth {
 	pub token: Bytes,
 }
 
-impl Message for Auth {
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a> Message<'a> for Auth {
+	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Auth);
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_auth() {
 			return Err(DecodeError::Version);
 		}
@@ -48,39 +49,14 @@ pub struct AuthOk {
 /// Largest millisecond count every implementation carries losslessly.
 const MAX_EXPIRES_MS: u64 = (1 << 53) - 1;
 
-/// Encode a grant's patterns as their canonical text.
-fn encode_patterns(patterns: &Patterns, w: &mut Encoder<'_>) -> Result<(), EncodeError> {
-	w.varint(patterns.len() as u64)?;
-	for pattern in patterns {
-		w.string(pattern.as_str())?;
-	}
-	Ok(())
-}
-
-fn decode_patterns(r: &mut Decoder<'_>) -> Result<Patterns, DecodeError> {
-	let count = r.varint()?;
-	let mut patterns = Patterns::new();
-	// No preallocation: the count is peer-controlled, and the message size limit
-	// is what bounds how many patterns actually fit.
-	for _ in 0..count {
-		let text = r.string()?;
-		let pattern = Pattern::try_from(text.as_str()).map_err(|_| DecodeError::InvalidValue)?;
-		// Only the canonical spelling is valid, so each pattern has one encoding.
-		if pattern.as_str() != text {
-			return Err(DecodeError::InvalidValue);
-		}
-		patterns.insert(pattern);
-	}
-	Ok(patterns)
-}
-
-impl Message for AuthOk {
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a> Message<'a> for AuthOk {
+	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Auth);
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_auth() {
 			return Err(DecodeError::Version);
 		}
-		let publish = decode_patterns(r)?;
-		let subscribe = decode_patterns(r)?;
+		let publish = Patterns::decode(r, version)?;
+		let subscribe = Patterns::decode(r, version)?;
 		let expires = match r.varint()? {
 			0 => None,
 			ms if ms <= MAX_EXPIRES_MS => Some(Duration::from_millis(ms)),
@@ -97,8 +73,8 @@ impl Message for AuthOk {
 		if !version.has_auth() {
 			return Err(EncodeError::Version);
 		}
-		encode_patterns(&self.publish, w)?;
-		encode_patterns(&self.subscribe, w)?;
+		self.publish.encode(w, version)?;
+		self.subscribe.encode(w, version)?;
 		// 0 means never, so a grant that has already lapsed rounds up to the
 		// smallest value that still reads as an expiry.
 		let expires = match self.expires {
@@ -122,8 +98,9 @@ pub struct AuthError {
 /// human-readable reason, and rejected from the length prefix alone.
 const MAX_REASON: usize = 8192;
 
-impl Message for AuthError {
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a> Message<'a> for AuthError {
+	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Auth);
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_auth() {
 			return Err(DecodeError::Version);
 		}
@@ -159,7 +136,12 @@ const AUTH_OK: u64 = 0;
 const AUTH_ERROR: u64 = 1;
 
 /// Write a `type` varint followed by the size-prefixed message body.
-fn encode_typed<M: Message>(w: &mut Encoder<'_>, typ: u64, msg: &M, version: Version) -> Result<(), EncodeError> {
+fn encode_typed<'m, M: Message<'m>>(
+	w: &mut Encoder<'_>,
+	typ: u64,
+	msg: &M,
+	version: Version,
+) -> Result<(), EncodeError> {
 	w.varint(typ)?;
 	msg.encode(w, version)
 }
@@ -173,8 +155,8 @@ impl Encode<Version> for AuthReply {
 	}
 }
 
-impl Decode<Version> for AuthReply {
-	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for AuthReply {
+	fn decode(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		match r.varint()? {
 			AUTH_OK => Ok(Self::Ok(AuthOk::decode(r, version)?)),
 			AUTH_ERROR => Ok(Self::Error(AuthError::decode(r, version)?)),
@@ -186,6 +168,7 @@ impl Decode<Version> for AuthReply {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::Pattern;
 
 	fn patterns(texts: &[&str]) -> Patterns {
 		texts.iter().map(|text| Pattern::try_from(*text).unwrap()).collect()
@@ -197,7 +180,7 @@ mod tests {
 		Ok(buf)
 	}
 
-	fn round_trip<T: Encode<Version> + Decode<Version>>(msg: &T) -> T {
+	fn round_trip<T: Encode<Version> + for<'a> Decode<'a, Version>>(msg: &T) -> T {
 		let buf = encode(msg, Version::Lite07).unwrap();
 		let mut r = Decoder::new(&buf, Version::Lite07.into());
 		let got = T::decode(&mut r, Version::Lite07).unwrap();

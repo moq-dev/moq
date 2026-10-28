@@ -41,7 +41,7 @@ async fn listen_tcp(version: moq_net::Version) -> (u16, moq_tokio::Listener) {
 
 #[test]
 fn old_peers_keep_hidden_paths() {
-	for version in ["moq-lite-05", "moq-lite-06", "moq-transport-17"] {
+	for version in ["moq-lite-05", "moq-lite-06", "moq-transport-18"] {
 		run_cluster_test(old_peer_keeps_hidden_paths(version.parse().unwrap()));
 	}
 }
@@ -57,7 +57,7 @@ async fn old_peer_keeps_hidden_paths(version: moq_net::Version) {
 		let mut discovered = peer_origin.consume().with_hidden(true).announced();
 		let accept = tokio::spawn(async move {
 			let request = server.accept().await.expect("cluster dial");
-			let (session, _driver) = request.with_subscriber(peer_origin).ok().await.expect("accept");
+			let session = request.with_subscriber(peer_origin).ok().await.expect("accept");
 			session.closed().await;
 		});
 

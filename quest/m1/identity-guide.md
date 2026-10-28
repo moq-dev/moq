@@ -21,10 +21,15 @@ as a bug. Show lifetime pins for readers without announcement following and
 Start/End/Restart for those that follow siblings. Explain optional expected
 epochs, known mismatch refusal, and the weaker legacy best-effort guarantee.
 
-Include lazy epochless claims, exact per-job announcements, the accepted
-cold-start Restart fallback, and proven Takeover preserving the same instance
-with an independent route. Distinguish lineage from arbitrary cross-worker
-stitching, and show what happens when either announcement ends. Cover
+Include lazy epochless claims, exact per-job announcements under fresh
+epochs ([claim answer epochs](https://github.com/moq-dev/moq/pull/5678)), and
+the cold-start Restart fallback.
+
+Decided 2026-10-27 (maintainer): the guide documents what exists (epochs,
+Restart, claim answers, and the cold-start fallback) and no longer waits on
+[announcement takeover](/quest/m1/announce-takeover.md); the takeover PR adds
+its own section, distinguishing lineage from cross-worker stitching and
+showing what happens when either announcement ends. Cover
 SUBSCRIBE and FETCH, publisher max-age versus reader max-delay, unordered
 arrivals and duplicates, and terminal DROP behavior by supported version.
 Do not claim unimplemented behavior: identify current capabilities and link
@@ -38,7 +43,6 @@ of duplicating them. Use the existing documentation build checks.
 
 Public API and wire: none; this is a user guide for existing feature owners.
 
-## Required
+## Related
 
-- [Reference announcements](/quest/m0/broadcast-epoch/reference-announcements.md) - settles how readers pin and follow catalog references
-- [Announcement takeover](/quest/m1/announce-takeover.md) - establishes the continuity operation the guide demonstrates
+- [Announcement takeover](/quest/m1/announce-takeover.md) - adds its own section once it lands

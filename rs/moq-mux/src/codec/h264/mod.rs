@@ -20,6 +20,8 @@ pub use split::*;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
+use crate::codec::annexb::{InBandCodec, ParameterSets};
+
 // H.264 NAL unit types (ISO/IEC 14496-10 §7.4.1).
 const NAL_TYPE_SEI: u8 = 6;
 const NAL_TYPE_SPS: u8 = 7;
@@ -178,16 +180,12 @@ impl Sps {
 /// The reordering an SPS NAL unit declares in its VUI: `max_num_reorder_frames` from the
 /// bitstream restriction, and the frame period when `fixed_frame_rate_flag` is set.
 ///
-/// `None` when the SPS carries no VUI or no bitstream restriction, declares more than
-/// [`Reorder::MAX_DEPTH`](crate::codec::video::Reorder::MAX_DEPTH), or fails to parse.
+/// `None` when the SPS carries no VUI or no bitstream restriction, or fails to parse.
 pub(crate) fn sps_reorder(nal: &[u8]) -> Option<crate::codec::video::Reorder> {
-	use crate::codec::video::Reorder;
-
 	let vui = sps_vui(nal)?;
-	Some(Reorder {
-		depth: vui.depth.filter(|depth| *depth <= Reorder::MAX_DEPTH)?,
+	Some(crate::codec::video::Reorder {
+		depth: vui.depth?,
 		period: vui.period,
-		fields: !vui.frame_only,
 	})
 }
 
@@ -196,58 +194,14 @@ pub(crate) fn sps_hrd(nal: &[u8]) -> Option<crate::codec::video::Hrd> {
 	sps_vui(nal)?.hrd
 }
 
-/// The colour an SPS NAL unit's VUI signals, when it carries a video signal type.
-pub(crate) fn sps_color(nal: &[u8]) -> Option<hang::catalog::Color> {
-	sps_vui(nal)?.color
-}
-
-/// How a buffering period SEI lays out the delays of the NAL HRD an SPS NAL unit declares.
-pub(crate) fn sps_buffering(nal: &[u8]) -> Option<Buffering> {
-	sps_vui(nal)?.buffering
-}
-
-/// How a buffering period SEI lays out the delays of an SPS's NAL HRD (ITU-T H.264 D.1.2, E.1.2).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Buffering {
-	/// `cpb_cnt_minus1 + 1`: the schedules it gives a delay and an offset for.
-	schedules: u32,
-	/// `initial_cpb_removal_delay_length_minus1 + 1`: the bits each takes.
-	bits: u32,
-}
-
-/// The `initial_cpb_removal_delay`, in 90 kHz ticks, that a buffering period SEI in an access
-/// unit of `length_size`-prefixed NAL units gives the NAL HRD's last schedule, the one
-/// [`sps_hrd`] reads: how long the HRD holds the unit's first bit before decoding it.
-pub(crate) fn initial_cpb_removal_delay(au: &[u8], length_size: usize, buffering: Buffering) -> Option<u32> {
-	use h264_parser::bitreader::BitReader;
-	use h264_parser::eg::read_ue;
-
-	for nal in crate::codec::annexb::length_prefixed_nals(au, length_size)
-		.ok()?
-		.map_while(std::result::Result::ok)
-	{
-		match nal.first().map(|header| header & 0x1f) {
-			Some(6) => {}
-			// SEI precedes the first slice of its access unit (7.4.1.2.3).
-			Some(1..=5) => return None,
-			_ => continue,
-		}
-		let rbsp = h264_parser::nal::ebsp_to_rbsp(&nal[1..]);
-		for message in h264_parser::sei::SeiMessage::parse(&rbsp).ok()? {
-			let h264_parser::sei::SeiPayload::Unknown(0, payload) = message.payload else {
-				continue;
-			};
-			let mut r = BitReader::new(&payload);
-			read_ue(&mut r).ok()?; // seq_parameter_set_id
-			let mut delay = None;
-			for _ in 0..buffering.schedules {
-				delay = Some(r.read_bits(buffering.bits).ok()?);
-				r.skip_bits(buffering.bits).ok()?; // initial_cpb_removal_delay_offset
-			}
-			return delay;
-		}
+/// Whether an SPS NAL unit codes field pictures or field macroblock pairs (`frame_mbs_only_flag` 0).
+pub(crate) fn sps_interlaced(nal: &[u8]) -> Option<bool> {
+	if nal.len() < 4 {
+		return None;
 	}
-	None
+	let rbsp = h264_parser::nal::ebsp_to_rbsp(&nal[1..]);
+	let sps = h264_parser::Sps::parse(&rbsp).ok()?;
+	Some(!sps.frame_mbs_only_flag)
 }
 
 /// What an SPS VUI declares about picture timing, sample shape, and colour.
@@ -264,8 +218,6 @@ struct Vui {
 	depth: Option<u32>,
 	/// The NAL HRD, when present.
 	hrd: Option<crate::codec::video::Hrd>,
-	/// How a buffering period SEI lays out the NAL HRD's delays.
-	buffering: Option<Buffering>,
 }
 
 impl Vui {
@@ -288,6 +240,11 @@ impl Vui {
 		config.display_aspect_width = display_aspect.map(|(width, _)| width);
 		config.display_aspect_height = display_aspect.map(|(_, height)| height);
 		config.color = self.color.clone();
+		// A field picture counts as half a frame, so only a frame-only SPS declares in frames.
+		config.reorder = self
+			.depth
+			.filter(|depth| self.frame_only && *depth <= crate::codec::video::max_reorder(config))
+			.and_then(|depth| u8::try_from(depth).ok());
 	}
 }
 
@@ -412,12 +369,9 @@ fn vui(rbsp: &[u8]) -> h264_parser::Result<Option<Vui>> {
 		}
 	}
 	let nal_hrd = r.read_flag()?;
-	let (hrd, buffering) = match nal_hrd {
-		true => {
-			let (hrd, buffering) = read_hrd(&mut r)?;
-			(Some(hrd), Some(buffering))
-		}
-		false => (None, None),
+	let hrd = match nal_hrd {
+		true => Some(read_hrd(&mut r)?),
+		false => None,
 	};
 	let vcl_hrd = r.read_flag()?;
 	if vcl_hrd {
@@ -435,7 +389,6 @@ fn vui(rbsp: &[u8]) -> h264_parser::Result<Option<Vui>> {
 			period,
 			depth: None,
 			hrd,
-			buffering,
 		}));
 	}
 	r.skip_bits(1)?; // motion_vectors_over_pic_boundaries_flag
@@ -450,13 +403,11 @@ fn vui(rbsp: &[u8]) -> h264_parser::Result<Option<Vui>> {
 		period,
 		depth: Some(depth),
 		hrd,
-		buffering,
 	}))
 }
 
-/// Read `hrd_parameters()` (ITU-T H.264 E.1.2) down to its last schedule (E.2.2), and how a
-/// buffering period SEI lays out its delays.
-fn read_hrd(r: &mut h264_parser::bitreader::BitReader) -> h264_parser::Result<(crate::codec::video::Hrd, Buffering)> {
+/// Read `hrd_parameters()` (ITU-T H.264 E.1.2) down to its last schedule (E.2.2).
+fn read_hrd(r: &mut h264_parser::bitreader::BitReader) -> h264_parser::Result<crate::codec::video::Hrd> {
 	use h264_parser::eg::read_ue;
 
 	let cpb_cnt_minus1 = read_ue(r)?;
@@ -478,15 +429,8 @@ fn read_hrd(r: &mut h264_parser::bitreader::BitReader) -> h264_parser::Result<(c
 			cpb_size: cpb_size << (4 + cpb_size_scale),
 		};
 	}
-	let bits = r.read_bits(5)? + 1; // initial_cpb_removal_delay_length_minus1
-	r.skip_bits(15)?; // cpb_removal_delay, dpb_output_delay and time_offset lengths
-	Ok((
-		hrd,
-		Buffering {
-			schedules: cpb_cnt_minus1 + 1,
-			bits,
-		},
-	))
+	r.skip_bits(20)?; // four delay/offset lengths
+	Ok(hrd)
 }
 
 /// Parsed AVCDecoderConfigurationRecord (ISO/IEC 14496-15 §5.3.3.1.2).
@@ -766,8 +710,8 @@ impl Avc1 {
 		let mut nal_iter = crate::codec::annexb::NalIterator::new(&mut buf);
 
 		let mut out = BytesMut::with_capacity(payload.remaining());
-		let mut frame_sps: Vec<Bytes> = Vec::new();
-		let mut frame_pps: Vec<Bytes> = Vec::new();
+		let mut frame_sps = ParameterSets::new();
+		let mut frame_pps = ParameterSets::new();
 		let mut emitted_any_slice = false;
 
 		loop {
@@ -792,10 +736,12 @@ impl Avc1 {
 		// rather than lingering in the avcC. Per type, so a frame that updates only
 		// one of SPS/PPS keeps the other.
 		let mut changed = false;
+		let frame_sps: Vec<Bytes> = frame_sps.into_values().collect();
 		if !frame_sps.is_empty() && frame_sps != self.sps {
 			self.sps = frame_sps;
 			changed = true;
 		}
+		let frame_pps: Vec<Bytes> = frame_pps.into_values().collect();
 		if !frame_pps.is_empty() && frame_pps != self.pps {
 			self.pps = frame_pps;
 			changed = true;
@@ -820,25 +766,25 @@ impl Avc1 {
 	}
 }
 
-/// Process one NAL: SPS/PPS are collected (distinctly) into this frame's sets,
+/// Process one NAL: SPS/PPS are collected by id into this frame's sets,
 /// everything else is length-prefixed and appended to `out`. Returns true if the
 /// NAL was a slice (i.e. produced sample bytes).
 fn process_nal(
 	nal: &Bytes,
 	out: &mut BytesMut,
-	frame_sps: &mut Vec<Bytes>,
-	frame_pps: &mut Vec<Bytes>,
+	frame_sps: &mut ParameterSets,
+	frame_pps: &mut ParameterSets,
 ) -> Result<bool> {
 	if nal.is_empty() {
 		return Ok(false);
 	}
 	match nal[0] & 0x1f {
 		NAL_TYPE_SPS => {
-			crate::codec::annexb::push_distinct(frame_sps, nal);
+			InBandCodec::H264.insert_parameter_set(frame_sps, nal)?;
 			Ok(false)
 		}
 		NAL_TYPE_PPS => {
-			crate::codec::annexb::push_distinct(frame_pps, nal);
+			InBandCodec::H264.insert_parameter_set(frame_pps, nal)?;
 			Ok(false)
 		}
 		_ => {
@@ -913,42 +859,6 @@ pub(crate) mod fixtures {
 	];
 	/// x264's `cll=1000,400` SEI.
 	pub(crate) const SEI_CONTENT_LIGHT: &[u8] = &[0x06, 0x90, 0x04, 0x03, 0xe8, 0x01, 0x90, 0x80];
-	/// Baseline `bframes=0:force-cfr=1:nal-hrd=cbr:bitrate=800:vbv-maxrate=800:vbv-bufsize=320` at
-	/// 320x240: an 800 kb/s CBR NAL HRD with 0.4 s of buffer delay.
-	pub(crate) const SPS_HRD_SHORT: &[u8] = &[
-		0x67, 0x42, 0xc0, 0x14, 0xd9, 0x01, 0x41, 0xfb, 0x01, 0x10, 0x00, 0x00, 0x03, 0x00, 0x10, 0x00, 0x00, 0x03,
-		0x03, 0x2e, 0x4a, 0x00, 0x30, 0xd4, 0x01, 0x38, 0xe2, 0x83, 0x00, 0x78, 0xa1, 0x52, 0x40,
-	];
-	/// The buffering period SEI x264 opens [`SPS_HRD_SHORT`]'s first picture with: 32,399 ticks
-	/// of `initial_cpb_removal_delay`, and 3,601 of offset.
-	pub(crate) const SEI_BUFFERING_SHORT: &[u8] = &[0x06, 0x00, 0x05, 0x8f, 0xd1, 0xe0, 0x70, 0x8c, 0x80];
-
-	/// A buffering period SEI NAL unit giving each schedule a `bits`-wide delay from `delays`,
-	/// and an offset of one.
-	pub(crate) fn buffering_period(delays: &[u32], bits: u32) -> Vec<u8> {
-		let mut fields = vec![(1, 1)]; // seq_parameter_set_id 0
-		for &delay in delays {
-			fields.extend([(delay, bits), (1, bits)]);
-		}
-		fields.push((1, 1)); // bit_equal_to_one, then zeros to the byte
-		let (mut payload, mut acc, mut held) = (Vec::new(), 0u64, 0);
-		for (value, width) in fields {
-			acc = acc << width | u64::from(value);
-			held += width;
-			while held >= 8 {
-				held -= 8;
-				payload.push((acc >> held) as u8);
-			}
-			acc &= (1 << held) - 1;
-		}
-		if held > 0 {
-			payload.push((acc << (8 - held)) as u8);
-		}
-		let mut nal = vec![0x06, 0x00, payload.len() as u8];
-		nal.extend(payload);
-		nal.push(0x80);
-		nal
-	}
 }
 
 #[cfg(test)]
@@ -958,6 +868,7 @@ mod tests {
 	/// Only a VUI with a video signal type adds colour, and its colour description is read whole.
 	#[test]
 	fn sps_color_reads_the_video_signal_type() {
+		let sps_color = |nal: &[u8]| sps_vui(nal)?.color;
 		let sdr = sps_color(fixtures::SPS_BT709).unwrap();
 		assert_eq!(
 			(sdr.primaries, sdr.transfer, sdr.matrix, sdr.range),
@@ -973,70 +884,6 @@ mod tests {
 
 	const SC4: &[u8] = &[0, 0, 0, 1];
 
-	/// An RBSP written bit by bit.
-	#[derive(Default)]
-	struct Bits(Vec<bool>);
-
-	impl Bits {
-		fn put(&mut self, value: u64, width: u32) {
-			self.0.extend((0..width).rev().map(|bit| value >> bit & 1 == 1));
-		}
-
-		fn ue(&mut self, value: u32) {
-			let code = u64::from(value) + 1;
-			let width = 64 - code.leading_zeros();
-			self.put(0, width - 1);
-			self.put(code, width);
-		}
-
-		/// The SPS NAL unit, stop bit and emulation prevention added.
-		fn sps(mut self) -> Vec<u8> {
-			self.0.push(true);
-			self.0.resize(self.0.len().next_multiple_of(8), false);
-			let mut nal = vec![0x67];
-			let mut zeros = 0;
-			for byte in self.0.chunks(8) {
-				let byte = byte.iter().fold(0u8, |byte, &bit| byte << 1 | u8::from(bit));
-				if zeros == 2 && byte <= 3 {
-					nal.push(3);
-					zeros = 0;
-				}
-				zeros = if byte == 0 { zeros + 1 } else { 0 };
-				nal.push(byte);
-			}
-			nal
-		}
-	}
-
-	/// A 64x48 baseline SPS whose VUI carries only a bitstream restriction declaring `depth`.
-	fn sps_declaring(depth: u32) -> Vec<u8> {
-		let mut bits = Bits::default();
-		bits.put(66, 8); // profile_idc
-		bits.put(30, 16); // constraint flags, reserved bits, level_idc
-		for value in [0, 0, 2, 1] {
-			bits.ue(value); // seq_parameter_set_id .. max_num_ref_frames
-		}
-		bits.put(0, 1); // gaps_in_frame_num_value_allowed_flag
-		bits.ue(3); // pic_width_in_mbs_minus1
-		bits.ue(2); // pic_height_in_map_units_minus1
-		bits.put(0b1101, 4); // frame_mbs_only, direct_8x8_inference, frame_cropping, vui_parameters_present
-		bits.put(0, 8); // the VUI's aspect ratio .. pic_struct flags
-		bits.put(0b11, 2); // bitstream_restriction_flag, motion_vectors_over_pic_boundaries_flag
-		for value in [0, 0, 16, 16, depth, depth] {
-			bits.ue(value); // max_bytes_per_pic_denom .. max_dec_frame_buffering
-		}
-		bits.sps()
-	}
-
-	/// No decoded picture buffer holds more than 16 frames (A.3.1), so a deeper declaration is no
-	/// declaration rather than a count to hold that many frames for.
-	#[test]
-	fn an_impossible_reorder_depth_is_undeclared() {
-		assert_eq!(sps_reorder(&sps_declaring(2)).map(|reorder| reorder.depth), Some(2));
-		assert_eq!(sps_reorder(&sps_declaring(16)).map(|reorder| reorder.depth), Some(16));
-		assert_eq!(sps_reorder(&sps_declaring(1 << 20)), None);
-	}
-
 	#[test]
 	fn sps_reorder_reads_the_vui() {
 		use crate::codec::video::Reorder;
@@ -1046,39 +893,29 @@ mod tests {
 			sps_reorder(fixtures::SPS_IPB),
 			Some(Reorder {
 				depth: 1,
-				period: fixed,
-				fields: false
+				period: fixed
 			})
 		);
 		assert_eq!(
 			sps_reorder(fixtures::SPS_PYRAMID),
 			Some(Reorder {
 				depth: 2,
-				period: fixed,
-				fields: false
+				period: fixed
 			})
 		);
 		assert_eq!(
 			sps_reorder(fixtures::SPS_IPB_VARIABLE),
-			Some(Reorder {
-				depth: 1,
-				period: None,
-				fields: false
-			})
+			Some(Reorder { depth: 1, period: None })
 		);
 		// The field-capable SPS still declares its depth and tick; only the frame rate needs
-		// `pic_struct` to read it. A field may follow the other field of its own frame.
-		let field = sps_reorder(fixtures::SPS_FIELD);
+		// `pic_struct` to read it.
 		assert_eq!(
-			field,
+			sps_reorder(fixtures::SPS_FIELD),
 			Some(Reorder {
 				depth: 0,
-				period: Some((2, 50)),
-				fields: true
+				period: Some((2, 50))
 			})
 		);
-		assert_eq!(field.map(Reorder::pictures), Some(1));
-		assert_eq!(sps_reorder(fixtures::SPS_PYRAMID).map(Reorder::pictures), Some(2));
 		// Baseline with no VUI declares nothing.
 		assert_eq!(sps_reorder(&[0x67, 0x42, 0xc0, 0x1f, 0xde]), None);
 		// A VUI cut short is no declaration rather than a wrong one.
@@ -1111,54 +948,10 @@ mod tests {
 			sps_reorder(fixtures::SPS_HRD),
 			Some(Reorder {
 				depth: 1,
-				period: Some((2, 50)),
-				fields: false
+				period: Some((2, 50))
 			})
 		);
 		assert_eq!(sps_hrd(fixtures::SPS_IPB), None);
-	}
-
-	fn length_prefixed(nals: &[&[u8]]) -> Vec<u8> {
-		nals.iter()
-			.flat_map(|nal| (nal.len() as u32).to_be_bytes().into_iter().chain(nal.iter().copied()))
-			.collect()
-	}
-
-	#[test]
-	fn initial_cpb_removal_delay_reads_the_last_schedule() {
-		use crate::codec::video::Hrd;
-		use fixtures::buffering_period;
-
-		assert_eq!(
-			sps_buffering(fixtures::SPS_HRD),
-			Some(Buffering { schedules: 1, bits: 19 })
-		);
-		assert_eq!(sps_buffering(fixtures::SPS_IPB), None);
-		let short = sps_buffering(fixtures::SPS_HRD_SHORT).expect("a NAL HRD");
-		assert_eq!(short, Buffering { schedules: 1, bits: 18 });
-		assert_eq!(
-			sps_hrd(fixtures::SPS_HRD_SHORT),
-			Some(Hrd {
-				bit_rate: 800_000,
-				cpb_size: 320_000
-			})
-		);
-		let aud: &[u8] = &[0x09, 0xf0];
-		let slice: &[u8] = &[0x65, 0x88, 0x84];
-		let au = length_prefixed(&[aud, fixtures::SEI_BUFFERING_SHORT, slice]);
-		assert_eq!(initial_cpb_removal_delay(&au, 4, short), Some(32_399));
-		let two = Buffering { schedules: 2, bits: 18 };
-		let au = length_prefixed(&[&buffering_period(&[90_000, 36_000], 18), slice]);
-		assert_eq!(initial_cpb_removal_delay(&au, 4, two), Some(36_000));
-		// No buffering period before the first slice, none at all, and one cut short.
-		let au = length_prefixed(&[slice, fixtures::SEI_BUFFERING_SHORT]);
-		assert_eq!(initial_cpb_removal_delay(&au, 4, short), None);
-		assert_eq!(
-			initial_cpb_removal_delay(&length_prefixed(&[aud, slice]), 4, short),
-			None
-		);
-		let au = length_prefixed(&[fixtures::SEI_BUFFERING_SHORT]);
-		assert_eq!(initial_cpb_removal_delay(&au[..au.len() - 3], 4, short), None);
 	}
 
 	fn annexb_frame(nals: &[&[u8]]) -> Bytes {
@@ -1239,7 +1032,7 @@ mod tests {
 		// in order, so slices referencing either id stay decodable.
 		let sps = Bytes::from_static(&[0x67, 0x42, 0xc0, 0x1f, 0xde]);
 		let pps0 = Bytes::from_static(&[0x68, 0xce, 0x3c, 0x80]);
-		let pps1 = Bytes::from_static(&[0x68, 0xce, 0x3c, 0x81]);
+		let pps1 = Bytes::from_static(&[0x68, 0x4e, 0x3c, 0x80]);
 
 		let avcc = build_avcc(std::slice::from_ref(&sps), &[pps0.clone(), pps1.clone()]).unwrap();
 		// numOfSequenceParameterSets is the low 5 bits of byte 5.
@@ -1254,7 +1047,7 @@ mod tests {
 		// One keyframe carrying both PPS: the synthesized avcC keeps both, in order.
 		let sps = &[0x67, 0x42, 0xc0, 0x1f, 0xde][..];
 		let pps0 = &[0x68, 0xce, 0x3c, 0x80][..];
-		let pps1 = &[0x68, 0xce, 0x3c, 0x81][..];
+		let pps1 = &[0x68, 0x4e, 0x3c, 0x80][..];
 		let idr = &[0x65, 0x88][..];
 
 		let mut tx = Avc1::new();
@@ -1274,7 +1067,7 @@ mod tests {
 		// and drops the old one rather than accumulating both forever.
 		let sps = &[0x67, 0x42, 0xc0, 0x1f, 0xde][..];
 		let pps0 = &[0x68, 0xce, 0x3c, 0x80][..];
-		let pps1 = &[0x68, 0xce, 0x3c, 0x81][..];
+		let pps1 = &[0x68, 0x4e, 0x3c, 0x80][..];
 		let idr = &[0x65, 0x88][..];
 
 		let mut tx = Avc1::new();
@@ -1288,6 +1081,21 @@ mod tests {
 			vec![sps, pps1],
 			"reinit must drop the superseded PPS"
 		);
+	}
+
+	#[test]
+	fn avc3_repeated_pps_id_keeps_the_last() {
+		// Two PPS defining id 0 in one keyframe: the later replaces the earlier, as in a decoder.
+		let sps = &[0x67, 0x42, 0xc0, 0x1f, 0xde][..];
+		let pps_a = &[0x68, 0xce, 0x3c, 0x80][..];
+		let pps_b = &[0x68, 0xce, 0x38, 0x80][..];
+		let idr = &[0x65, 0x88][..];
+
+		let mut tx = Avc1::new();
+		tx.transform(annexb_frame(&[sps, pps_a, pps_b, idr])).unwrap();
+
+		let (_, params) = avcc_params(tx.avcc().expect("avcC available")).unwrap();
+		assert_eq!(params.iter().map(|p| p.as_ref()).collect::<Vec<_>>(), vec![sps, pps_b]);
 	}
 
 	#[test]

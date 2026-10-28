@@ -1,14 +1,15 @@
 //! Hand-written HLS media playlist generation.
 //!
-//! Each reference record defines one complete aligned segment with its own duration.
-//! URLs carry the source reference and record number, and that number is the segment's
+//! Each HLS record defines one complete segment with its own duration.
+//! URLs carry the record track's tag and record number, and that number is the segment's
 //! `EXT-X-MEDIA-SEQUENCE`, so every edge derives it alone. URIs are relative to the media playlist
 //! (`/<broadcast>/<kind>/<rendition>/media.m3u8`), so they resolve against the rendition
 //! directory.
 
+use moq_clock::Wall;
 use std::fmt::Write;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 /// fMP4 segments via `EXT-X-MAP` require protocol version 6.
 const VERSION: u32 = 6;
@@ -29,9 +30,6 @@ pub(crate) struct Snapshot {
 	pub segments: Vec<Segment>,
 	/// Whether the broadcast ended (`EXT-X-ENDLIST`).
 	pub finished: bool,
-	/// Wall-clock time of the first listed segment (`EXT-X-PROGRAM-DATE-TIME`), when the
-	/// catalog advertises its root broadcast clock.
-	pub program_date_time: Option<SystemTime>,
 	/// The publisher run every segment URL carries (`seg/{generation}.{tag}.{segment}.m4s`).
 	pub generation: Option<Arc<str>>,
 }
@@ -40,15 +38,19 @@ pub(crate) struct Snapshot {
 pub(crate) struct Segment {
 	/// The source segment number; the URI is `seg/{tag}.{segment}.m4s`.
 	pub segment: u64,
-	/// The [`tag`](super::segments::tag) of the reference numbering the segment.
+	/// The [`tag`](super::segments::tag) of the record track numbering the segment.
 	pub tag: String,
 	/// `EXTINF` duration.
 	pub duration: Duration,
 	/// The rendition has no content for this span (`EXT-X-GAP`): the segment keeps its slot in
-	/// the aligned numbering, but a player should not request it.
+	/// the rendition's numbering, but a player should not request it.
 	pub gap: bool,
 	/// Content time jumped before this segment (`EXT-X-DISCONTINUITY`).
 	pub discontinuity: bool,
+	/// Wall-clock start (`EXT-X-PROGRAM-DATE-TIME`), when the catalog advertises its root
+	/// broadcast clock. Rendered on the first segment and after each discontinuity, where the
+	/// running sum of `EXTINF`s no longer gives it.
+	pub program_date_time: Option<Wall>,
 }
 
 /// Render a media playlist for one rendition from a [`Snapshot`], mapping `init.{init}.mp4`.
@@ -82,17 +84,17 @@ pub(crate) fn render_media(snapshot: &Snapshot, init: &str, query: Option<&str>)
 	let _ = writeln!(out, "#EXT-X-MAP:URI=\"init.{init}.mp4{suffix}\"");
 
 	for (index, segment) in snapshot.segments.iter().enumerate() {
-		if index == 0
-			&& let Some(pdt) = snapshot.program_date_time
+		if segment.discontinuity {
+			let _ = writeln!(out, "#EXT-X-DISCONTINUITY");
+		}
+		if (index == 0 || segment.discontinuity)
+			&& let Some(pdt) = segment.program_date_time
 		{
 			let _ = writeln!(
 				out,
 				"#EXT-X-PROGRAM-DATE-TIME:{}",
-				humantime::format_rfc3339_millis(pdt)
+				humantime::format_rfc3339_millis(pdt.into())
 			);
-		}
-		if segment.discontinuity {
-			let _ = writeln!(out, "#EXT-X-DISCONTINUITY");
 		}
 		if segment.gap {
 			let _ = writeln!(out, "#EXT-X-GAP");
@@ -127,6 +129,7 @@ mod tests {
 					duration: Duration::from_secs(2),
 					gap: false,
 					discontinuity: false,
+					program_date_time: Some(Wall::UNIX_EPOCH + Duration::from_millis(1_751_846_400_123)),
 				},
 				Segment {
 					segment: 11,
@@ -134,10 +137,10 @@ mod tests {
 					duration: Duration::from_millis(1960),
 					gap: false,
 					discontinuity: false,
+					program_date_time: Some(Wall::UNIX_EPOCH + Duration::from_millis(1_751_846_402_123)),
 				},
 			],
 			finished: false,
-			program_date_time: Some(SystemTime::UNIX_EPOCH + Duration::from_millis(1_751_846_400_123)),
 			generation: None,
 		};
 
@@ -147,6 +150,7 @@ mod tests {
 		assert!(out.contains("#EXT-X-MEDIA-SEQUENCE:10\n"));
 		assert!(out.contains("#EXT-X-MAP:URI=\"init.0123abcd.mp4\"\n"));
 		assert!(out.contains("#EXT-X-PROGRAM-DATE-TIME:2025-07-07T00:00:00.123Z\n"));
+		assert_eq!(out.matches("PROGRAM-DATE-TIME").count(), 1, "only the first: {out}");
 		assert!(out.contains("#EXTINF:2.00000,\nseg/ab12cd34.10.m4s\n"));
 		assert!(out.contains("#EXTINF:1.96000,\nseg/ab12cd34.11.m4s\n"));
 		assert!(!out.contains("#EXT-X-ENDLIST"));
@@ -156,6 +160,43 @@ mod tests {
 		assert!(signed.contains("#EXT-X-MAP:URI=\"init.0123abcd.mp4?jwt=abc.def\"\n"));
 		assert!(signed.contains("\nseg/ab12cd34.10.m4s?jwt=abc.def\n"));
 		assert!(signed.contains("\nseg/ab12cd34.11.m4s?jwt=abc.def\n"));
+	}
+
+	// Content that stops and resumes later restates its wall clock: the stop's zero duration
+	// carries none of the jump.
+	#[test]
+	fn a_discontinuity_restates_the_program_date_time() {
+		let at = |millis| Some(Wall::UNIX_EPOCH + Duration::from_millis(millis));
+		let segment = |segment, duration, gap, discontinuity, program_date_time| Segment {
+			segment,
+			tag: "ab12cd34".into(),
+			duration: Duration::from_millis(duration),
+			gap,
+			discontinuity,
+			program_date_time,
+		};
+		let snapshot = Snapshot {
+			target_duration: 2,
+			media_sequence: 0,
+			discontinuity_sequence: 0,
+			segments: vec![
+				segment(0, 2_000, false, false, at(0)),
+				segment(1, 0, true, false, at(2_000)),
+				segment(2, 2_000, false, true, at(10_000)),
+				segment(3, 2_000, false, false, at(12_000)),
+			],
+			finished: false,
+			generation: None,
+		};
+
+		let out = render_media(&snapshot, "0123abcd", None);
+		assert!(
+			out.contains(
+				"seg/ab12cd34.1.m4s\n#EXT-X-DISCONTINUITY\n#EXT-X-PROGRAM-DATE-TIME:1970-01-01T00:00:10.000Z\n#EXTINF:2.00000,\nseg/ab12cd34.2.m4s\n"
+			),
+			"{out}"
+		);
+		assert_eq!(out.matches("PROGRAM-DATE-TIME").count(), 2, "{out}");
 	}
 
 	#[test]
@@ -170,9 +211,9 @@ mod tests {
 				duration: Duration::from_secs(2),
 				gap: false,
 				discontinuity: false,
+				program_date_time: None,
 			}],
 			finished: false,
-			program_date_time: None,
 			generation: Some("run-7".into()),
 		};
 
@@ -193,9 +234,9 @@ mod tests {
 				duration: Duration::from_secs(4),
 				gap: false,
 				discontinuity: false,
+				program_date_time: None,
 			}],
 			finished: true,
-			program_date_time: None,
 			generation: None,
 		};
 

@@ -64,6 +64,5 @@ Decided 2026-10-22 with the maintainer:
 
 ## Required
 
-- [The studio app](/quest/m3/studio/app.md) - the canvas and MoQ output these destinations join
 - [AudioToolbox AAC encode](/quest/m2/audio-encode-audiotoolbox.md) - AAC on macOS
 - [Media Foundation AAC encode](/quest/m2/audio-encode-mediafoundation.md) - AAC on Windows

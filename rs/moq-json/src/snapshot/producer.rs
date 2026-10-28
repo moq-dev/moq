@@ -88,8 +88,8 @@ impl<T: Serialize> Producer<T> {
 	///
 	/// A join wants one once the open group's deltas outweigh the track's
 	/// [`refresh`](moq_net::track::Info::refresh) ratio times its snapshot (see
-	/// [`Demand::wanted`](moq_net::track::Demand::wanted)), so that joiner reads the value without
-	/// downloading them. The snapshot carries the newest timestamp written, so the new group never starts before the last.
+	/// [`Demand::wanted`](moq_net::track::Demand::wanted)). It is a soft trigger: that joiner still
+	/// reads the cached group, then the new one. The snapshot carries the newest timestamp written, so the new group never starts before the last.
 	/// Nothing happens before the first update, or on a track without a ratio.
 	///
 	/// The producer has no runtime of its own, so the owner drives this: loop on it, or select on it
@@ -122,9 +122,9 @@ impl<T: Serialize> Producer<T> {
 	///
 	/// ```no_run
 	/// # fn example(producer: &mut moq_json::snapshot::Producer<serde_json::Value>) -> moq_json::Result<()> {
-	/// producer.mutate(None, |catalog| {
+	/// producer.mutate(|catalog| {
 	///     catalog["scte35"] = serde_json::json!({ "id": 1 });
-	/// })
+	/// }, None)
 	/// # }
 	/// ```
 	///
@@ -132,7 +132,7 @@ impl<T: Serialize> Producer<T> {
 	/// from the latest value, so their sections compose instead of clobbering one another. This is
 	/// [`modify`](Self::modify) opened and committed for you; take the guard to hold the lock across
 	/// several edits, and [`update`](Self::update) to replace the whole value.
-	pub fn mutate(&mut self, at: Option<moq_net::Timestamp>, f: impl FnOnce(&mut T)) -> Result<()>
+	pub fn mutate(&mut self, f: impl FnOnce(&mut T), at: Option<moq_net::Timestamp>) -> Result<()>
 	where
 		T: Default + DeserializeOwned,
 	{
@@ -318,13 +318,10 @@ impl<T> Inner<T> {
 		// admits the groups below it. The largest counts every group, even an empty one, so the
 		// next group is the one after it.
 		let track = &self.track.inner;
-		let next = match track.clone().poll_largest(&moq_net::kio::Waiter::noop()) {
-			std::task::Poll::Ready(Some(largest)) => largest.group.saturating_add(1),
-			_ => 0,
-		};
+		let next = track.largest().map_or(0, |largest| largest.group.saturating_add(1));
 		if track.is_closed()
 			|| track
-				.end()
+				.finished()
 				.is_some_and(|end| moq_net::track::Position::group(next) >= end)
 		{
 			return Err(moq_net::Error::Closed.into());

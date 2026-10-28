@@ -25,8 +25,8 @@ A CI `cargo check` for wasm32 keeps them building.
   arrive, and flushes with backpressure.
 - **Runtime:** browser objects are not `Send`, so these backends run on the
   browser runtime.
-- **API changes:** any change to a published entry point gets a
-  `MIGRATE.md` entry.
+- **API changes:** any change to a published entry point says how to
+  migrate in the PR's Impact bullet.
 - **Codec support** is probed at runtime. An unsupported codec fails loudly
   rather than silently picking another.
 - **Out of scope:** replacing js/publish's or js/watch's internals with these
@@ -34,5 +34,4 @@ A CI `cargo check` for wasm32 keeps them building.
 
 ## Required
 
-- [The studio app](/quest/m3/studio/app.md) - the app the page builds to wasm
-- [A runtime trait replaces web-async](/quest/m2/runtime-trait.md) - spawn and time on the browser instead of tokio's runtime
+- [Libraries spawn nothing](/quest/m1/poll-first/no-spawn.md) - web-async gone and the browser clock read directly, with no runtime to spawn on

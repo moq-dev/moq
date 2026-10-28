@@ -1,39 +1,20 @@
 # Migrating the Dart moq\_ffi package
 
-How to update your code for each breaking change, newest first.
-
 ## Unreleased
 
-### Priorities are signed (#6142)
+### Follow the core API migration guide
 
-`MoqTrackInfo.priority`, `MoqSubscription.priority`, `MoqFetchGroupOptions.priority`, and `MoqGroupRequest.priority()` take `-128..=127`, higher first, and 0 is the unset midpoint.
-`MoqTrackInfo.priority` defaulted to 127 and now defaults to 0.
-To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
-Regenerate the bindings for the changed checksums.
+These bindings are generated from moq-ffi. Apply every change in the
+[moq-ffi migration guide](../../rs/moq-ffi/MIGRATE.md), using this language's generated casing.
+Regenerate the bindings and rebuild the matching native library together; method metadata checksums are not a separate API migration.
+The [hand-written wrapper](../moq/MIGRATE.md) has its own migration guide.
 
-### A client asks only about what it watches (#6165)
+### Native futures support operation cancellation
 
-On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced()` or `announcedBroadcast()`, instead of under its whole scope at connect.
-`MoqOriginConsumer.requestBroadcast()` owns discovery of its path while resolving and reports an unroutable path only once discovery has synced without a covering route.
-Request the path directly; no separate announcement stream is needed for resolution. An explicit selected-handler refusal is returned directly, including while following announcements. Handle that error before explicitly trying a later resolution.
-moq-transport and moq-lite-03/04 sessions are unchanged.
-Regenerate the bindings for the changed `request_broadcast` checksum.
-
-### Catalog references carry their epoch
-
-`MoqVideo` and `MoqAudio` gain `epoch`, the publisher instance their `broadcast` reference names.
-`MoqBroadcastConsumer.resolve(reference:)` requires `epoch:` too; pass the rendition's `epoch` alongside, or `null` to resolve whichever instance answers.
-Resolving, and the rendition-based consumers, fail a rendition whose broadcast is proven to serve another epoch with `MuxMoqException`.
-
-### Finished tracks stay until the broadcast ends (#6157)
-
-A finished track, raw or media, now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `MoqBroadcastProducer.finish()` lets go, instead of unlisting when its producer finishes or is released.
-Publish a replacement under a new name, and expect a finished track's demand watch to end with the broadcast.
-Regenerate the bindings for the new `MoqBroadcastFinish` and the changed checksums.
-
-### Regenerate the matching bindings
-
-Documentation on `MoqAudioProducer::write` and `finish` changes their UniFFI metadata checksums.
-Keep the generated Dart code and native library together.
-For a custom native build, regenerate the matching bindings with `just dart generate`.
-The method signatures and behavior are unchanged.
+Generated async calls return `UniffiRustFuture<T>`, which implements `Future<T>` and adds `Future<void> cancel()`.
+Existing `await` and `Future<T>` assignments work unchanged; custom implementations of generated interfaces must return the new type.
+Direct callers of `uniffiRustCallAsync` must pass the native cancel function before the free function.
+Keep the original call to cancel it: futures returned by `then`, `timeout`, and other `Future` combinators do not propagate cancellation.
+`cancel()` is idempotent and waits for native cleanup without closing the object that started the call.
+The original future throws `UniffiCancelledException` if cancellation wins; a result already ready can still win the race.
+Regenerate with the patched generator from `nix develop` and `just dart generate`; native symbols and UniFFI checksums are unchanged.

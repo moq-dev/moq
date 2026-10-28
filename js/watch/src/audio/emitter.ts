@@ -2,6 +2,7 @@ import { Milli } from "@moq/clock";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Decoder } from "./decoder";
 
+// How long a volume change ramps for.
 const FADE = Milli(200);
 
 /** Signals the emitter reads. */
@@ -20,12 +21,10 @@ export type EmitterInput = {
 export type EmitterProps = Inputs<EmitterInput> & {
 	/** Decoder supplying PCM. */
 	source: Decoder;
-
-	/** How long a volume change ramps for. Defaults to 200 ms; 0 steps at once. */
-	fade?: Milli | Signal<Milli>;
 };
 
-type EmitterOutput = {
+/** Signals the emitter derives. */
+export type EmitterOutput = {
 	// Whether audio should be downloaded. Wired into the decoder's `enabled` input by the owner.
 	enabled: Signal<boolean>;
 };
@@ -37,9 +36,6 @@ export class Emitter {
 
 	/** The wired inputs, read-only. */
 	readonly in: Readonlys<EmitterInput>;
-
-	/** How long a volume change ramps for. 0 steps at once; a negative or non-finite fade throws and leaves the volume as it was. */
-	fade: Signal<Milli>;
 
 	readonly #out: EmitterOutput = {
 		enabled: new Signal<boolean>(false),
@@ -59,9 +55,8 @@ export class Emitter {
 			muted: getter(props?.muted ?? false),
 			paused: getter(props?.paused ?? false),
 		};
-		this.fade = Signal.from(props.fade ?? FADE);
 
-		// Only download while playing audible audio. Pausing or muting stops it.
+		// Only download while playing and unmuted. Volume is an independent output level.
 		this.#signals.run((effect) => {
 			const enabled = !effect.get(this.in.paused) && !effect.get(this.in.muted);
 			this.#out.enabled.set(enabled);
@@ -73,7 +68,7 @@ export class Emitter {
 
 			// Seed the level without subscribing: rebuilding the node on a volume change would jump
 			// straight to the new level and skip the fade below.
-			const gain = new GainNode(root.context, { gain: this.in.volume.peek() });
+			const gain = new GainNode(root.context, { gain: this.in.muted.peek() ? 0 : this.in.volume.peek() });
 			root.connect(gain);
 
 			effect.set(this.#gain, gain);
@@ -102,15 +97,9 @@ export class Emitter {
 				gain.gain.setValueAtTime(level, now);
 			});
 
-			const fade = effect.get(this.fade);
-			if (!Number.isFinite(fade) || fade < 0)
-				throw new Error(`audio fade must be a finite, non-negative number of ms: ${fade}`);
-
 			// Linear, like the publisher's gain: an exponential ramp can't start from or reach silence.
-			const volume = effect.get(this.in.volume);
-			const now = gain.context.currentTime;
-			if (fade === 0) gain.gain.setValueAtTime(volume, now);
-			else gain.gain.linearRampToValueAtTime(volume, now + Milli.toSecond(fade));
+			const volume = effect.get(this.in.muted) ? 0 : effect.get(this.in.volume);
+			gain.gain.linearRampToValueAtTime(volume, gain.context.currentTime + Milli.toSecond(FADE));
 		});
 	}
 

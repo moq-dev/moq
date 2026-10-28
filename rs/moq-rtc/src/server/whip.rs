@@ -28,7 +28,7 @@ struct RouterState {
 
 /// Build the WHIP axum router. Only with the `server` feature.
 #[cfg(feature = "server")]
-pub fn router(server: Server, publisher: moq_net::origin::Producer) -> Router {
+pub(crate) fn router(server: Server, publisher: moq_net::origin::Producer) -> Router {
 	Router::new()
 		.route("/{*path}", post(handle).delete(delete))
 		.with_state(RouterState { server, publisher })
@@ -81,7 +81,13 @@ async fn accept_offer(
 		return Err(Error::InvalidSdp("expected Content-Type: application/sdp".into()));
 	}
 	let offer = std::str::from_utf8(&body).map_err(|err| Error::InvalidSdp(err.to_string()))?;
-	accept(server, publisher, path, offer).await
+	accept(
+		server,
+		publisher,
+		moq_net::Path::new(path).map_err(moq_net::Error::from)?,
+		offer,
+	)
+	.await
 }
 
 #[cfg(feature = "server")]
@@ -92,13 +98,13 @@ async fn delete(State(state): State<RouterState>, Path(path): Path<String>) -> S
 /// Accept a WHIP SDP offer and publish the negotiated WebRTC media into
 /// `publisher` under `broadcast` (a path relative to that producer's root).
 ///
-/// This is the negotiation core behind [`router`], exposed so an embedder can
+/// This is the negotiation core behind [`Server::publish_router`], exposed so an embedder can
 /// own the HTTP route and authentication: verify the request, resolve the
 /// authorized broadcast name, scope `publisher` to the caller's grants, then hand
 /// the raw SDP offer here. Taking the producer explicitly (rather than using the
 /// server's) lets the embedder publish through a *scoped* origin, so the publish
 /// scope is enforced by moq-net exactly as for a native session; the bundled
-/// [`router`] passes the server's own (unauthenticated) producer. It parses the
+/// [`Server::publish_router`] passes the server's own (unauthenticated) producer. It parses the
 /// offer, registers a media session on the shared mux, announces the
 /// broadcast under a fresh epoch once negotiation succeeds (so a fast subscriber
 /// doesn't 404 in the gap before the first RTP packet, and a reconnecting
@@ -114,11 +120,11 @@ async fn delete(State(state): State<RouterState>, Path(path): Path<String>) -> S
 pub async fn accept(
 	server: &Server,
 	publisher: &moq_net::origin::Producer,
-	broadcast: impl moq_net::AsPath,
+	broadcast: impl Into<moq_net::Path>,
 	offer: &str,
 ) -> Result<Response> {
 	let offer = sdp::parse_offer(offer)?;
-	let broadcast = broadcast.as_path();
+	let broadcast: moq_net::Path = broadcast.into();
 
 	// Create the broadcast hidden up front, so an out-of-scope offer is refused before
 	// any mux work. It announces only once negotiation succeeds (below).
@@ -127,7 +133,7 @@ pub async fn accept(
 	let config = moq_mux::catalog::Config::default()
 		.with_max_age(server.config().max_age)
 		.with_bandwidth(server.config().bandwidth.clone());
-	let sink = Box::new(IngestSink::new(producer, config)?);
+	let sink = Box::new(IngestSink::new(producer.broadcast().clone(), config)?);
 
 	// Register a session on the shared media mux: known ICE credentials (so the
 	// demux routes this peer's STUN by ufrag), an inbox to read datagrams from,
@@ -153,11 +159,7 @@ pub async fn accept(
 	handle.announce(moq_net::origin::Route::default().with_epoch(epoch.clone()))?;
 
 	let resource_id = sdp::new_resource_id();
-	let socket = moq_ice::Socket {
-		udp: mux.socket(),
-		locals: mux.candidates().to_vec(),
-		inbound,
-	};
+	let socket = moq_ice::Socket::new(mux.socket(), mux.candidates().to_vec(), inbound)?;
 	let session = session::Session::ingest(rtc, socket, sink)?;
 
 	// Register before returning so a DELETE that races the first packet still
@@ -168,7 +170,6 @@ pub async fn accept(
 	Ok(Response {
 		resource_id: resource_id.clone(),
 		answer: sdp::render_answer(&answer),
-		wire: session.wire(),
 		session: crate::server::AcceptedSession {
 			server: server.clone(),
 			resource_id,
@@ -192,7 +193,7 @@ fn is_sdp(headers: &HeaderMap) -> bool {
 #[cfg(feature = "server")]
 fn status_for(err: &Error) -> StatusCode {
 	match err {
-		Error::InvalidSdp(_) => StatusCode::BAD_REQUEST,
+		Error::InvalidSdp(_) | Error::Moq(moq_net::Error::EmptySegment) => StatusCode::BAD_REQUEST,
 		Error::UnsupportedCodec(_) => StatusCode::UNSUPPORTED_MEDIA_TYPE,
 		Error::SessionNotFound => StatusCode::NOT_FOUND,
 		Error::Moq(moq_net::Error::Unauthorized) => StatusCode::UNAUTHORIZED,
@@ -201,7 +202,7 @@ fn status_for(err: &Error) -> StatusCode {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use str0m::{
 		format::Codec,
@@ -219,6 +220,36 @@ mod tests {
 		offer.to_sdp_string()
 	}
 
+	/// A session that ends without a DELETE, here one that never connects, ends its tracks
+	/// with the transport cause, so a reader sees the publisher go rather than a producer
+	/// dropped unfinished.
+	#[tokio::test(start_paused = true)]
+	async fn a_session_ending_without_a_delete_ends_its_tracks() {
+		let server = Server::new(crate::server::Config::default());
+		let origin = moq_tokio::origin::spawn();
+		let consumer = origin.consume();
+		let session = accept(&server, &origin, moq_net::Path::from_static("live/cam0"), &offer())
+			.await
+			.unwrap();
+		let broadcast = consumer.request_broadcast("live/cam0", None).await.unwrap();
+		let mut catalog = broadcast
+			.track(hang::Catalog::DEFAULT_NAME)
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+
+		let ended = session.run().await;
+		assert!(matches!(ended, Err(crate::Error::IceTimeout)), "{ended:?}");
+		let end = loop {
+			match catalog.recv_group().await {
+				Ok(Some(_)) => continue,
+				end => break end.map(|_| ()),
+			}
+		};
+		assert!(matches!(end, Err(moq_net::Error::Transport(_))), "{end:?}");
+	}
+
 	/// An encoder reconnecting to the same broadcast while its stale session is still
 	/// open restarts the broadcast at once: each offer is its own epoch, so a fresh
 	/// request reaches the reconnect, while the stale viewer stays on the old one until
@@ -228,7 +259,9 @@ mod tests {
 		let server = Server::new(crate::server::Config::default());
 		let origin = moq_tokio::origin::spawn();
 		let consumer = origin.consume();
-		let _stale_session = accept(&server, &origin, "live/cam0", &offer()).await.unwrap();
+		let _stale_session = accept(&server, &origin, moq_net::Path::from_static("live/cam0"), &offer())
+			.await
+			.unwrap();
 		let stale = consumer.request_broadcast("live/cam0", None).await.unwrap();
 		let mut catalog = stale
 			.track(hang::Catalog::DEFAULT_NAME)
@@ -237,7 +270,9 @@ mod tests {
 			.await
 			.unwrap();
 
-		let _fresh_session = accept(&server, &origin, "live/cam0", &offer()).await.unwrap();
+		let _fresh_session = accept(&server, &origin, moq_net::Path::from_static("live/cam0"), &offer())
+			.await
+			.unwrap();
 		// The session binds a real UDP socket, so this runs on the wall clock.
 		let stale_viewer = tokio::time::timeout(std::time::Duration::from_millis(200), async {
 			loop {

@@ -26,6 +26,8 @@
 #   ./run.sh --fragment-pes        # split generated clear PES headers across packets
 #   ./run.sh --clockless sections # sections, pes, or audio-scte35 without video
 #   ./run.sh --klv                 # add KLV and DVB AC-3, carried as whole PES, and grade them
+#   ./run.sh --mpeg2               # MPEG-2 video, carried as whole PES, graded by decoding it
+#   ./run.sh --revision            # revise the PMT mid-stream, adding then dropping a KLV stream
 #   ./run.sh --delay 2s            # pass the exporter's --delay
 #   ./run.sh --rate 7000000        # bufferbloat: 7 Mb/s to the subscriber behind a deep queue (moq-shaper)
 #   ./run.sh --loss 10             # drop 10% of the relay's datagrams to the subscriber (moq-shaper)
@@ -48,6 +50,10 @@
 # because there is nothing to disagree with -- so this is the only arm that can
 # see a cadence regression at all.
 set -euo pipefail
+
+if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
+    exec bash "$(dirname "$0")/../../sh/local.sh" bash "$0" "$@"
+fi
 
 DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 WORKSPACE=$(cd "$DIR/../.." && pwd)
@@ -87,6 +93,8 @@ FULL=""         # the same with audio, in a multiplex the source fills with no n
 FRAGMENT_PES="" # use following null slots for fragmented PES headers
 CLOCKLESS=""    # generated programs clocked by audio or a dedicated PCR-only PID
 KLV=""          # inject asynchronous and synchronous KLV beside DVB AC-3, and grade every PES
+MPEG2=""        # publish MPEG-2 video, which the importer carries whole, and decode the capture
+REVISION=""     # revise the PMT twice mid-stream, and grade the export's revisions
 LOSS=""         # percent of relay -> subscriber datagrams dropped at random by moq-shaper
 RATE=""         # bits/s moq-shaper carries from the relay to the subscriber, behind QUEUE
 QUEUE=""        # how long a datagram may wait for RATE before the path tail-drops it
@@ -182,6 +190,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --klv)
             KLV=1
+            shift
+            ;;
+        --mpeg2)
+            MPEG2=1
+            shift
+            ;;
+        --revision)
+            REVISION=1
             shift
             ;;
         --delay)
@@ -286,6 +302,15 @@ if [[ -n "$KLV" && -n "$SOURCE$ANALYZE_ONLY$HRD$HEADROOM$LEAK$FULL$OPEN_GOP$FRAG
     echo "error: --klv generates its own clip and grades the demultiplexed export's PES" >&2
     exit 1
 fi
+if [[ -n "$REVISION" && -n "$SOURCE$ANALYZE_ONLY$HRD$HEADROOM$LEAK$FULL$OPEN_GOP$FRAGMENT_PES$PAIR$LIVE$PASSTHROUGH$MPTS$KLV$CLOCKLESS$MPEG2" ]]; then
+    echo "error: --revision revises the generated closed-GOP clip and grades the demultiplexed export's PMT" >&2
+    exit 1
+fi
+
+if [[ -n "$MPEG2" && -n "$SOURCE$ANALYZE_ONLY$HRD$HEADROOM$LEAK$FULL$OPEN_GOP$FRAGMENT_PES$PAIR$LIVE$PASSTHROUGH$MPTS$KLV" ]]; then
+    echo "error: --mpeg2 generates its own clip and decodes the demultiplexed export" >&2
+    exit 1
+fi
 
 if [[ -n "$CLOCKLESS" ]]; then
     case "$CLOCKLESS" in audio-scte35 | sections | pes) ;; *)
@@ -293,7 +318,7 @@ if [[ -n "$CLOCKLESS" ]]; then
         exit 1
         ;;
     esac
-    if [[ -n "$SOURCE$ANALYZE_ONLY$HRD$HEADROOM$LEAK$FULL$OPEN_GOP$FRAGMENT_PES$PAIR$LIVE$PASSTHROUGH$MPTS$KLV$RATE$LOSS" ]]; then
+    if [[ -n "$SOURCE$ANALYZE_ONLY$HRD$HEADROOM$LEAK$FULL$OPEN_GOP$FRAGMENT_PES$PAIR$LIVE$PASSTHROUGH$MPTS$KLV$MPEG2$RATE$LOSS" ]]; then
         echo "error: --clockless generates and grades an unimpaired program without video" >&2
         exit 1
     fi
@@ -547,6 +572,17 @@ elif [[ -n "$KLV" ]]; then
         -c:a:0 aac -b:a:0 128k -c:a:1 ac3 -b:a:1 192k \
         -f mpegts -mpegts_flags system_b -muxrate "$BITRATE" -pcr_period 20 "$HARNESS_RUN/media.ts"
     python3 "$DIR/klv.py" inject "$HARNESS_RUN/media.ts" "$SRC_TS" --report "$HARNESS_RUN/klv-injected.json"
+elif [[ -n "$MPEG2" ]]; then
+    echo "### generating ~${DURATION}s MPEG-2 video and MPEG audio clip"
+    # Main Profile at Main Level with its whole VBV buffer, the shape of an SD contribution
+    # feed. Variable rate, so the encoder codes vbv_delay 0xFFFF and the T-STD leak method applies.
+    ffmpeg -y -hide_banner -loglevel error \
+        -f lavfi -i "testsrc=size=720x576:rate=25" \
+        -f lavfi -i "sine=frequency=1000:sample_rate=48000" \
+        -t "$DURATION" \
+        -c:v mpeg2video -g 25 -bf 2 -b:v 6M -maxrate 8M -bufsize 1835008 \
+        -c:a mp2 -b:a 192k \
+        -f mpegts -muxrate "$BITRATE" -pcr_period 20 "$SRC_TS"
 else
     echo "### generating ~${DURATION}s broadcast-like ${OPEN_GOP:+open-GOP }clip with ffmpeg"
     # CBR with a 20 ms PCR, like a contribution feed. Not cosmetic: `regulate`
@@ -566,6 +602,12 @@ else
         -x264-params "$X264" -b:v 8M \
         -c:a aac -b:a 128k \
         -f mpegts -muxrate "$BITRATE" -pcr_period 20 -pes_payload_size 0 "$SRC_TS"
+fi
+# A KLV stream joins the program a third of the way in and leaves it two thirds in, each
+# change announced by a PMT revision, in the clip's null slots.
+if [[ -n "$REVISION" ]]; then
+    mv "$SRC_TS" "$HARNESS_RUN/media.ts"
+    python3 "$DIR/revision.py" inject "$HARNESS_RUN/media.ts" "$SRC_TS" --report "$HARNESS_RUN/revision-injected.json"
 fi
 
 if [[ -n "$FRAGMENT_PES" ]]; then
@@ -894,7 +936,7 @@ fi
 # pair. Other arms retain their specific structural/model oracles until their
 # acquisition and decoder-priming contracts are covered by fixtures. A path
 # narrower than the media sheds groups, which only holes.py grades.
-if [[ -z "$SOURCE$OPEN_GOP$HRD$HEADROOM$LEAK$FULL$KLV$CLOCKLESS$RATE" ]]; then
+if [[ -z "$SOURCE$OPEN_GOP$HRD$HEADROOM$LEAK$FULL$KLV$MPEG2$CLOCKLESS$RATE" ]]; then
     if ! python3 "$DIR/decode.py" "$SRC_TS" "$SUB_TS" --output "$HARNESS_RUN/decode"; then
         # The exporter counts what it dropped (late), trimmed (before its output began),
         # and lost upstream (gaps), and logs each loss, so the failure says which it was.
@@ -913,7 +955,7 @@ fi
 # grade only the access units that arrived. Under --rate the path is narrower than the media,
 # so the export has to shed: only whole groups, and never the last, which a stall or a
 # latency that grew with the queue would cost.
-if [[ -n "$HRD$HEADROOM$LEAK$FULL$KLV" || (-n "$RATE" && -z "$SOURCE") ]]; then
+if [[ -n "$HRD$HEADROOM$LEAK$FULL$KLV$MPEG2" || (-n "$RATE" && -z "$SOURCE") ]]; then
     echo
     if ! python3 "$DIR/holes.py" "$SUB_TS" "$SRC_TS" ${RATE:+--shed}; then
         echo >&2
@@ -965,6 +1007,27 @@ if [[ -n "$KLV" ]]; then
     if ! python3 "$DIR/klv.py" grade "$SRC_TS" "$SUB_TS" --report-json "$HARNESS_RUN/klv.json"; then
         echo >&2
         echo "error: KLV analysis failed (see round-trip logs below)" >&2
+        dump_logs
+        exit 1
+    fi
+fi
+
+if [[ -n "$MPEG2" ]]; then
+    echo
+    if ! python3 "$DIR/mpeg2.py" "$SRC_TS" "$SUB_TS"; then
+        echo >&2
+        echo "error: the MPEG-2 video did not survive the round trip (see round-trip logs below)" >&2
+        dump_logs
+        exit 1
+    fi
+fi
+
+# The export announces each layout the source's PMT revised to, at the next version.
+if [[ -n "$REVISION" ]]; then
+    echo
+    if ! python3 "$DIR/revision.py" grade "$SRC_TS" "$SUB_TS" --report-json "$HARNESS_RUN/revision.json"; then
+        echo >&2
+        echo "error: PMT revision analysis failed (see round-trip logs below)" >&2
         dump_logs
         exit 1
     fi

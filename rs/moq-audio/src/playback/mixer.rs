@@ -8,7 +8,7 @@
 //!   entry list never has to grow.
 //! - Commands arrive over a bounded channel, whose slots are also allocated up
 //!   front, so draining it never touches the allocator.
-//! - A removed sink owns a heap-backed `ResamplingCons`, so it is handed back to
+//! - A removed sink owns a heap-backed `ring::Consumer`, so it is handed back to
 //!   the driver to drop rather than dropped here.
 
 use std::sync::Arc;
@@ -16,13 +16,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError};
 use std::time::Duration;
 
-#[cfg(feature = "aec")]
-use fixed_resample::ResamplingProd;
-use fixed_resample::{ReadStatus, ResamplingCons};
-
 use super::observe::{self, Ledger};
 #[cfg(feature = "aec")]
 use crate::resample::Remix;
+use crate::ring::{self, Read};
 use crate::{Error, Layout};
 
 /// Frames mixed per pass. The callback buffer is chunked to this so the scratch
@@ -105,7 +102,7 @@ pub(super) enum Command {
 	/// Start mixing a sink.
 	Add {
 		id: u64,
-		cons: ResamplingCons<f32>,
+		cons: ring::Consumer,
 		gain: Arc<Gain>,
 		completion: Arc<super::sink::Completion>,
 	},
@@ -114,13 +111,13 @@ pub(super) enum Command {
 	Remove { id: u64 },
 	/// Copy the mix into an echo-cancellation reference, or stop with `None`.
 	#[cfg(feature = "aec")]
-	Reference(Option<ResamplingProd<f32>>),
+	Reference(Option<ring::Producer>),
 }
 
 /// One sink being mixed, owned by the audio thread until it is retired.
 pub(super) struct Entry {
 	id: u64,
-	cons: ResamplingCons<f32>,
+	cons: ring::Consumer,
 	gain: Arc<Gain>,
 	completion: Arc<super::sink::Completion>,
 	/// Device deadline of the last period containing this sink's samples.
@@ -133,13 +130,16 @@ pub(super) struct Entry {
 ///
 /// Nothing reads these payloads, which is the point: they exist so the driver
 /// thread is the one that drops them.
-#[allow(dead_code)]
+#[allow(
+	dead_code,
+	reason = "nothing reads the payloads; they exist so the driver thread drops them"
+)]
 pub(super) enum Retired {
 	/// A sink that was removed or rebuilt.
 	Sink(Entry),
 	/// The echo reference a canceller replaced or gave up.
 	#[cfg(feature = "aec")]
-	Reference(ResamplingProd<f32>),
+	Reference(ring::Producer),
 }
 
 /// The state behind the output callback.
@@ -164,7 +164,7 @@ pub(super) struct Mixer {
 	/// that is the signal the speaker gets and therefore the one the microphone
 	/// hears back.
 	#[cfg(feature = "aec")]
-	reference: Option<ResamplingProd<f32>>,
+	reference: Option<ring::Producer>,
 	/// Downmixes the bus to the reference's stereo.
 	#[cfg(feature = "aec")]
 	downmix: Remix,
@@ -328,17 +328,14 @@ impl Mixer {
 				// stays on the timeline instead of queueing up and jumping when
 				// it unmutes. The status only reports under/overflow, which the
 				// channel has already corrected for.
-				let status = entry.cons.read_interleaved(&mut scratch[..samples], false);
-				if !matches!(
-					status,
-					ReadStatus::InputNotReady | ReadStatus::UnderflowOccurred { num_frames_read: 0 }
-				) {
+				let status = entry.cons.read(&mut scratch[..samples]);
+				if !matches!(status, Read::NotReady | Read::Underflow { frames: 0 }) {
 					entry.played_at = played_at;
 				}
 				let read = match status {
-					ReadStatus::InputNotReady => None,
-					ReadStatus::UnderflowOccurred { num_frames_read } => Some(num_frames_read),
-					ReadStatus::Ok | ReadStatus::OverflowCorrected { .. } => Some(frames),
+					Read::NotReady => None,
+					Read::Underflow { frames: read } => Some(read),
+					Read::Ok | Read::Trimmed { .. } => Some(frames),
 				};
 				match read {
 					Some(read) if entry.completion.writing() => {
@@ -385,7 +382,7 @@ impl Mixer {
 			if let Some(reference) = reference.as_mut() {
 				let stereo = &mut stereo[..frames * REFERENCE_CHANNELS];
 				downmix.apply(&bus[..samples], stereo);
-				reference.push_interleaved(stereo);
+				reference.push(stereo);
 			}
 
 			out[done * channels..(done + frames) * channels].copy_from_slice(&bus[..samples]);
@@ -396,11 +393,15 @@ impl Mixer {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
-	use fixed_resample::{PushStatus, ResamplingChannelConfig, ResamplingProd, resampling_channel};
+	use crate::ring::Push;
 
 	use super::*;
 
@@ -445,16 +446,16 @@ mod tests {
 		///
 		/// The channel runs at the device rate so no resampling sits between the
 		/// pushed samples and the assertions.
-		fn add(&mut self, gain: Arc<Gain>) -> (u64, ResamplingProd<f32>) {
-			let (prod, cons) = resampling_channel::<f32>(
+		fn add(&mut self, gain: Arc<Gain>) -> (u64, ring::Producer) {
+			let (prod, cons) = ring::channel(
 				self.channels,
 				RATE,
 				RATE,
-				true,
-				ResamplingChannelConfig {
-					latency_seconds: 0.01,
-					capacity_seconds: 1.0,
-					..Default::default()
+				ring::Config {
+					latency: Duration::from_millis(10),
+					capacity: Duration::from_secs(1),
+					pad: true,
+					trim: true,
 				},
 			);
 
@@ -476,7 +477,7 @@ mod tests {
 		/// Run one pass, which drains pending commands and reads every sink.
 		///
 		/// The first pass after [`add`](Self::add) is also what marks the channel's
-		/// output side ready: `push_interleaved` discards samples until the
+		/// output side ready: `push` discards samples until the
 		/// consumer has read once, exactly as it does for the real device before
 		/// its first callback.
 		fn fill(&mut self, out: &mut [f32]) {
@@ -506,7 +507,7 @@ mod tests {
 				let mut elapsed = std::time::Duration::ZERO;
 				for _ in 0..1000 {
 					for prod in &mut prods {
-						prod.push_interleaved(&pcm);
+						prod.push(&pcm);
 					}
 					let start = std::time::Instant::now();
 					harness.fill(std::hint::black_box(&mut out));
@@ -522,8 +523,8 @@ mod tests {
 	}
 
 	/// Push `frames` stereo frames of a constant sample.
-	fn push(prod: &mut ResamplingProd<f32>, value: f32, frames: usize) {
-		prod.push_interleaved(&vec![value; frames * STEREO]);
+	fn push(prod: &mut ring::Producer, value: f32, frames: usize) {
+		prod.push(&vec![value; frames * STEREO]);
 	}
 
 	#[test]
@@ -533,14 +534,14 @@ mod tests {
 
 		// Nothing has read yet, so these samples are dropped rather than queued
 		// to play late.
-		assert_eq!(prod.push_interleaved(&[1.0; 64]), PushStatus::OutputNotReady);
+		assert_eq!(prod.push(&[1.0; 64]), Push::NotReady);
 
 		let mut out = vec![0.0f32; 512];
 		harness.fill(&mut out);
 		assert!(out.iter().all(|s| *s == 0.0));
 
 		// Now that the mixer has read once, writes land.
-		assert_ne!(prod.push_interleaved(&[1.0; 64]), PushStatus::OutputNotReady);
+		assert_ne!(prod.push(&[1.0; 64]), Push::NotReady);
 	}
 
 	#[test]
@@ -709,14 +710,14 @@ mod tests {
 		// read also primes the channel with its configured latency in silence,
 		// which is why the buffer below is read past it rather than at it.
 		let mut heard = vec![0.0f32; 2048 * REFERENCE_CHANNELS];
-		tap.read_interleaved(&mut heard, false);
+		tap.read(&mut heard);
 
 		for prod in &mut prods {
 			push(prod, 0.5, FRAMES);
 		}
 
 		harness.settle(&mut out);
-		tap.read_interleaved(&mut heard, false);
+		tap.read(&mut heard);
 		let tail = &heard[heard.len() - 64..];
 		assert!(
 			tail.iter().all(|s| (*s - 1.0).abs() < 1e-5),
@@ -761,16 +762,16 @@ mod tests {
 	/// A tap running at the device rate, so the assertions see the mix untouched
 	/// by resampling.
 	#[cfg(feature = "aec")]
-	fn reference_channel() -> (ResamplingProd<f32>, ResamplingCons<f32>) {
-		resampling_channel::<f32>(
+	fn reference_channel() -> (ring::Producer, ring::Consumer) {
+		ring::channel(
 			REFERENCE_CHANNELS,
 			RATE,
 			RATE,
-			true,
-			ResamplingChannelConfig {
-				latency_seconds: 0.02,
-				capacity_seconds: 0.2,
-				..Default::default()
+			ring::Config {
+				latency: Duration::from_millis(20),
+				capacity: Duration::from_millis(200),
+				pad: true,
+				trim: true,
 			},
 		)
 	}
@@ -810,7 +811,7 @@ mod tests {
 		let (_, mut prod) = harness.add(Arc::new(Gain::new()));
 		harness.fill(&mut out);
 		let frame = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6];
-		prod.push_interleaved(&frame.repeat(FRAMES));
+		prod.push(&frame.repeat(FRAMES));
 
 		harness.settle(&mut out);
 
@@ -834,12 +835,12 @@ mod tests {
 		harness.fill(&mut out);
 
 		let mut heard = vec![0.0f32; 2048 * REFERENCE_CHANNELS];
-		tap.read_interleaved(&mut heard, false);
+		tap.read(&mut heard);
 
 		// Center only, which a stereo downmix splits evenly at -3 dB.
-		prod.push_interleaved(&[0.0, 0.0, 0.5, 0.0, 0.0, 0.0].repeat(FRAMES));
+		prod.push(&[0.0, 0.0, 0.5, 0.0, 0.0, 0.0].repeat(FRAMES));
 		harness.settle(&mut out);
-		tap.read_interleaved(&mut heard, false);
+		tap.read(&mut heard);
 
 		let want = 0.5 * std::f32::consts::FRAC_1_SQRT_2;
 		let tail = &heard[heard.len() - 64..];

@@ -35,8 +35,6 @@ fn expected(version: &str) -> Arrives {
 	match version {
 		// Lite-05 and lite-06 stamp untimed tracks with send times, so their receivers drop them.
 		"moq-lite-03" | "moq-lite-04" | "moq-lite-05" | "moq-lite-06" => Arrives::Untimed,
-		// Drafts 14 to 16 can't carry TIMESCALE.
-		"moq-transport-14" | "moq-transport-16" => Arrives::Untimed,
 		_ => Arrives::Faithful,
 	}
 }
@@ -47,10 +45,8 @@ const VERSIONS: &[&str] = &[
 	"moq-lite-05",
 	"moq-lite-06",
 	"moq-lite-07-wip",
-	"moq-transport-14",
-	"moq-transport-16",
-	"moq-transport-17",
-	"moq-transport-20",
+	"moq-transport-18",
+	"moq-transport-22",
 ];
 
 fn produce_origin(hop: u64) -> origin::Producer {
@@ -148,7 +144,7 @@ async fn frames_arrive_as_published() {
 #[moq_clock::test]
 async fn a_relay_forwards_an_untimed_track_untimed() {
 	for hops in [
-		&["moq-transport-17", "moq-transport-20"][..],
+		&["moq-transport-18", "moq-transport-22"][..],
 		&["moq-lite-07-wip", "moq-lite-07-wip"][..],
 	] {
 		let (frame, info) = frame_through(hops, untimed()).await;
@@ -156,26 +152,21 @@ async fn a_relay_forwards_an_untimed_track_untimed() {
 		assert_eq!(info.timescale, None, "{hops:?}: the relay must not claim a timeline");
 	}
 
-	for hops in [
-		&["moq-lite-03", "moq-transport-17"][..],
-		&["moq-transport-16", "moq-transport-20"][..],
-	] {
-		let (frame, info) = frame_through(hops, timed()).await;
-		assert_eq!(frame, None, "{hops:?}: the first hop has no timestamps to forward");
-		assert_eq!(info.timescale, None, "{hops:?}: the relay must not claim a timeline");
-	}
+	let hops = ["moq-lite-03", "moq-transport-18"];
+	let (frame, info) = frame_through(&hops, timed()).await;
+	assert_eq!(frame, None, "{hops:?}: the first hop has no timestamps to forward");
+	assert_eq!(info.timescale, None, "{hops:?}: the relay must not claim a timeline");
 }
 
 /// An explicit start on an untimed track is honored the same way on lite and
 /// moq-transport: only an unfloored subscriber jumps to the latest group.
 ///
 /// The subscription asks for history the way a resume does, with a budget covering it.
-/// moq-transport before draft
-/// 20 can only join a past group through a joining FETCH, which our publisher refuses for
-/// groups before the live one, so draft 20 stands in for it.
+/// moq-transport before draft 22 can only join a past group through a joining FETCH,
+/// which our publisher refuses for groups before the live one, so draft 22 stands in for it.
 #[moq_clock::test]
 async fn an_explicit_start_holds_on_an_untimed_track() {
-	for version in ["moq-lite-03", "moq-lite-06", "moq-lite-07-wip", "moq-transport-20"] {
+	for version in ["moq-lite-03", "moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
 		let chain = Chain::new(&[version]).await;
 		let broadcast = chain.nodes[0].create_broadcast("room").unwrap();
 		let mut producer = broadcast.create_track("data", untimed()).unwrap();
@@ -187,7 +178,7 @@ async fn an_explicit_start_holds_on_an_untimed_track() {
 
 		let consumer = chain.nodes[1].consume().request_broadcast("room", None).await.unwrap();
 		let subscription = track::Subscription::default()
-			.with_groups(2..)
+			.with_range(2..)
 			.with_max_delay(Duration::from_secs(30));
 		let mut subscriber = moq_clock::timeout(TIMEOUT, consumer.track("data").unwrap().subscribe(subscription))
 			.await
@@ -210,7 +201,7 @@ async fn an_explicit_start_holds_on_an_untimed_track() {
 /// time that the receiver drops.
 #[moq_clock::test]
 async fn datagrams_arrive_as_published() {
-	for version in ["moq-lite-05", "moq-lite-07-wip", "moq-transport-16", "moq-transport-20"] {
+	for version in ["moq-lite-05", "moq-lite-07-wip", "moq-transport-22"] {
 		let chain = Chain::new(&[version]).await;
 		let broadcast = chain.nodes[0].create_broadcast("room").unwrap();
 		let mut producer = broadcast.create_track("data", untimed()).unwrap();
@@ -235,10 +226,10 @@ async fn datagrams_arrive_as_published() {
 /// A standalone FETCH of an untimed track answers with untimed objects.
 #[moq_clock::test]
 async fn a_fetched_untimed_frame_arrives_untimed() {
-	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-19"] {
+	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-18"] {
 		let chain = Chain::new(&[version]).await;
 		let broadcast = chain.nodes[0].create_broadcast("room").unwrap();
-		let mut dynamic = broadcast.dynamic();
+		let mut dynamic = broadcast.requests();
 		broadcast.announce(Default::default()).unwrap();
 		moq_clock::sleep(Duration::from_secs(1)).await;
 
@@ -248,13 +239,13 @@ async fn a_fetched_untimed_frame_arrives_untimed() {
 			futures::future::Either::Left((request, _)) => request.expect("the track request reaches the publisher"),
 			futures::future::Either::Right(_) => panic!("nothing answered the track"),
 		};
-		let groups = request.dynamic();
+		let groups = request.requests();
 		let _track = request.accept(untimed());
-		let request = match futures::future::select(std::pin::pin!(groups.requested_group()), &mut waiting).await {
+		let request = match futures::future::select(std::pin::pin!(groups.requested_fill()), &mut waiting).await {
 			futures::future::Either::Left((request, _)) => request.expect("the fetch reaches the publisher"),
 			futures::future::Either::Right(_) => panic!("nothing answered the fetch"),
 		};
-		let mut group = request.accept(timed()).unwrap();
+		let mut group = request.accept(0, timed()).unwrap();
 		group.write_frame(None, Bytes::from_static(b"segment")).unwrap();
 		group.finish().unwrap();
 
