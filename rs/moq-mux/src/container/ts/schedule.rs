@@ -1853,7 +1853,13 @@ mod tests {
 			let mut held = None;
 			while let Some(slot) = schedule.next(known).unwrap() {
 				indexes.push(slot.index);
-				if slot.packets.as_chunks::<{ TsPacket::SIZE }>().0.iter().any(|packet| pid(packet) == 0x11) {
+				if slot
+					.packets
+					.as_chunks::<{ TsPacket::SIZE }>()
+					.0
+					.iter()
+					.any(|packet| pid(packet) == 0x11)
+				{
 					held = Some(slot.index);
 					break;
 				}
