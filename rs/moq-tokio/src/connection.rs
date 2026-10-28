@@ -997,7 +997,7 @@ impl Connection {
 
 		let running = std::sync::Arc::new(Running { shared });
 		let task_running = std::sync::Arc::downgrade(&running);
-		let task = tokio::spawn(async move {
+		let task = crate::runtime::spawn(async move {
 			let shared = &running.shared;
 			let reconnect = client.reconnect;
 			// Isolated inside `shared`, so a panic still records a terminal error
@@ -1099,7 +1099,7 @@ impl Connection {
 				}
 			}
 		};
-		let (session, predecessor) = tokio::join!(session, predecessor);
+		let (session, predecessor) = crate::runtime::scope(async { tokio::join!(session, predecessor) }).await;
 		drop(running);
 		Ok(session.and(predecessor)?)
 	}
