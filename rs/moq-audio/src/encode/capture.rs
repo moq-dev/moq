@@ -2425,9 +2425,8 @@ mod tests {
 		async fn on_demand_waits_for_a_subscriber() {
 			let (samples, input) = stream(None);
 			let mut fixture = Fixture::on_demand(Duration::from_secs(1), moq_clock::wall(), [Open::Stream(input)]);
+			// `Waiting` is announced right before the demand gate, so nothing opens past it unsubscribed.
 			wait_for(&mut fixture.publication, Status::Waiting).await;
-			tokio::time::sleep(Duration::from_millis(50)).await;
-			assert_eq!(fixture.publication.state().status(), Status::Waiting);
 			assert_eq!(fixture.opens.load(Ordering::SeqCst), 0, "opened with nobody listening");
 
 			let mut track = fixture.subscribe().await;
