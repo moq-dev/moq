@@ -356,7 +356,7 @@ impl Consumer {
 /// Whether `err` is the route failing to deliver rather than judging what it carried, so a new
 /// copy may fix it. Anything else would repeat on every copy. Mirrors `routeFailed` in
 /// `js/net/src/resume.ts`.
-fn route_failed(err: &Error) -> bool {
+pub(super) fn route_failed(err: &Error) -> bool {
 	matches!(
 		err,
 		Error::Transport(_)

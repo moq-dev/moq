@@ -158,7 +158,6 @@ surface and zero-copy texture import, land before the cut.
 - [HLS opt-in for gateways](/quest/m1/hls-opt-in-gateways.md) - SRT, RTMP, WebRTC ingest and the bindings can publish HLS records
 - [HLS and DASH segment conformance](/quest/m1/hls-conformance.md) - nightly ffprobe checks that advertised timing, sync flags, and bytes match the media served
 - [App-limited BBR3 estimate ages](/quest/m1/bbr-app-limited.md) - an app-limited BBR3 estimate falls within seconds after the path drops
-- [Aborted epoch reads keep their cause](/quest/m1/epoch-abort-cause.md) - an aborted read through an epoch route ends with its own error, not NotFound
 - [Bindings name every session code](/quest/m1/ffi-malformed-auth-kind.md) - MALFORMED_AUTH_TOKEN and its siblings reach moq-ffi, moq-c, and the wrappers
 - [Unbounded groups](/quest/m1/unbounded-groups/README.md) - groups and frames lose their size caps; the cache sheds parts of a group under pressure and refills the holes in place
 - [Messages borrow instead of owning](/quest/m1/borrowed-messages.md) - message structs borrow from the wire on decode and from callers on encode, after lifetime-free `Path`
