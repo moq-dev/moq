@@ -477,8 +477,8 @@ pub mod poll {
 		/// A pending [`SendStream::closed`].
 		SendClosed, SendStream, poll_closed, Result<(), S::Error>);
 
-	/// A session shared with the [`Client`](crate::Client) or [`Server`](crate::Server) that
-	/// runs it, so the caller can still close or watch it.
+	/// A session shared with the client or server that runs it, so the caller can still close
+	/// or watch it.
 	impl<S: Session + ?Sized> Session for std::sync::Arc<S> {
 		type SendStream = S::SendStream;
 		type RecvStream = S::RecvStream;
