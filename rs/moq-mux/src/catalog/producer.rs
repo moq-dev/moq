@@ -49,6 +49,10 @@ struct State<E: CatalogExt> {
 
 	/// Holds estimate-driven publishes to one per [`ESTIMATE_WINDOW`].
 	estimates: Throttle,
+
+	/// The last revision [`Producer::fresh_track`] handed out per base name, so a successor never
+	/// reuses a name.
+	revisions: std::collections::HashMap<String, u64>,
 }
 
 impl<E: CatalogExt> State<E> {
@@ -459,6 +463,7 @@ impl<E: CatalogExt> Producer<E> {
 				clock,
 				anchored,
 				estimates: Throttle::default(),
+				revisions: Default::default(),
 			})),
 			hls: config.hls,
 			max_age: config.max_age,
@@ -789,6 +794,35 @@ impl<E: CatalogExt> Producer<E> {
 			tracing::error!(%err, "failed to publish the catalog, aborting its tracks");
 			self.outputs.abort(&err);
 			take(&self.current).closed = Some(err);
+		}
+	}
+
+	/// Create the successor of track `name` under the next `<name>/<n>` this catalog has not
+	/// handed out, for a rendition whose identity changed: a name always means the same content.
+	///
+	/// A successor's own successor counts on from the same base, so `v/1` is followed by `v/2`.
+	pub(crate) fn fresh_track(
+		&self,
+		name: &str,
+		info: moq_net::track::Info,
+	) -> crate::Result<moq_net::track::Producer> {
+		let mut state = take(&self.current);
+		let base = match name.rsplit_once('/') {
+			Some((base, n)) if n.parse::<u64>().is_ok() && state.revisions.contains_key(base) => base,
+			_ => name,
+		};
+		let revision = state.revisions.entry(base.to_string()).or_default();
+		loop {
+			*revision += 1;
+			match self
+				.outputs
+				.broadcast
+				.create_track(format!("{base}/{revision}"), info.clone())
+			{
+				// Someone else published that name explicitly; try the next.
+				Err(moq_net::Error::Duplicate) => continue,
+				track => return Ok(track?),
+			}
 		}
 	}
 

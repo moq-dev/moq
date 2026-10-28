@@ -56,7 +56,6 @@ the same workload.
 ## Required
 
 - [Poll forms](/quest/m1/quic-api/poll.md) - the leak-free driver polls these impls forward to
-- [moq-net polls on kio waiters](/quest/m1/quic-api/net-poll.md) - the `&self, &kio::Waiter` trait shape these impls implement
 
 ## Related
 

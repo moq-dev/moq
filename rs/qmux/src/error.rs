@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use moq_net::transport::CloseKind;
-use moq_quic::{ConnectionError, TransportErrorCode};
+use moq_quic::{LimitsError, TransportErrorCode, connection::Error as ConnectionError};
 
 /// Errors that can occur during QMux session and stream operations.
 #[derive(Debug, thiserror::Error, Clone)]
@@ -53,6 +53,10 @@ pub enum Error {
 	/// A [`Config`](crate::Config) value the session cannot run with.
 	#[error("invalid config: {0}")]
 	InvalidConfig(&'static str),
+
+	/// The flow-control limits are ones a peer would refuse.
+	#[error("invalid limits: {0}")]
+	Limits(#[from] LimitsError),
 
 	/// The peer opened more streams than it was allowed.
 	#[error("stream limit exceeded")]
@@ -109,16 +113,20 @@ pub enum Error {
 }
 
 impl Error {
-	/// The terminal error for a connection that ended for `reason`, `established` or not
-	pub(crate) fn lost(reason: ConnectionError, established: bool) -> Self {
+	/// The terminal error for a connection that ended for `reason`
+	pub(crate) fn lost(reason: ConnectionError) -> Self {
 		match reason {
 			ConnectionError::ApplicationClosed(close) => Self::ConnectionClosed {
 				code: close.error_code.into_inner(),
-				reason: String::from_utf8_lossy(&close.reason).into_owned(),
+				reason: close.reason,
+			},
+			ConnectionError::LocallyClosed { code, reason } => Self::ConnectionClosed {
+				code: code.into_inner(),
+				reason,
 			},
 			ConnectionError::ConnectionClosed(close) => Self::ConnectionReset {
 				code: close.error_code.into(),
-				reason: String::from_utf8_lossy(&close.reason).into_owned(),
+				reason: close.reason,
 			},
 			ConnectionError::TransportError(err) => match err.code {
 				TransportErrorCode::FLOW_CONTROL_ERROR | TransportErrorCode::FINAL_SIZE_ERROR => Self::FlowControlError,
@@ -127,9 +135,8 @@ impl Error {
 				TransportErrorCode::STREAM_LIMIT_ERROR => Self::StreamLimitExceeded,
 				_ => Self::ProtocolViolation,
 			},
-			ConnectionError::TimedOut if established => Self::IdleTimeout,
-			ConnectionError::TimedOut => Self::HandshakeTimeout,
-			// A local close publishes its own code, so this is a close without one.
+			ConnectionError::TimedOut => Self::IdleTimeout,
+			ConnectionError::HandshakeTimeout => Self::HandshakeTimeout,
 			_ => Self::Closed,
 		}
 	}

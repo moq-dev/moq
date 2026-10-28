@@ -709,15 +709,8 @@ impl Shape for Grouped {
 
 /// One node's subscription to the merged track.
 enum Reader<F> {
-	/// Resolving the announced path into a broadcast. `queued` records whether
-	/// the request was handed to a serving route (fixed at request time): a
-	/// queued request that fails `Unroutable` was killed by its serving route
-	/// retracting (the table has already changed), while an unqueued
-	/// `Unroutable` means nothing serves the path at all.
-	Resolving {
-		pending: Pending<origin::Requesting>,
-		queued: bool,
-	},
+	/// Resolving the instance while owning discovery and retrying route churn.
+	Resolving(Box<Pending<origin::Requesting>>),
 	/// Waiting for the node's listing to offer the track.
 	Waiting,
 	/// Awaiting the subscription handshake.
@@ -1033,7 +1026,7 @@ fn advance<S: Shape>(
 		}
 
 		match &mut node.reader {
-			Reader::Resolving { pending, queued } => match pending.poll_ok(waiter) {
+			Reader::Resolving(pending) => match pending.poll_ok(waiter) {
 				// An unpinned retry on a known lineage can reach a replacement publisher
 				// before its announcement drains here. Its counters belong to its own entry,
 				// which that announcement creates, so this lineage keeps its last frame.
@@ -1067,15 +1060,6 @@ fn advance<S: Shape>(
 						return changed | node.depart();
 					}
 				},
-				// A queued request killed by its route retracting: an identical
-				// standby swaps in without any announce update, so re-resolve
-				// through the already-updated table. Each retry consumed a real
-				// retraction, so this cannot spin; an instant Unroutable instead
-				// means nothing serves the path (the retraction that empties the
-				// table also unannounces this node).
-				Poll::Ready(Err(moq_net::Error::Unroutable)) if *queued => {
-					node.reader = resolve(origin, &node.path, node.epoch.clone());
-				}
 				Poll::Ready(Err(err)) => {
 					tracing::debug!(?err, name, "stats: node broadcast unresolvable");
 					return changed | node.depart();
@@ -1166,8 +1150,7 @@ fn advance<S: Shape>(
 /// Start resolving `path` (relative to the announce cursor) into a broadcast.
 fn resolve<F>(origin: &origin::Consumer, path: &Path, epoch: Option<Epoch>) -> Reader<F> {
 	let pending = origin.request_broadcast(path, epoch);
-	let queued = pending.is_queued();
-	Reader::Resolving { pending, queued }
+	Reader::Resolving(Box::new(pending))
 }
 
 #[cfg(test)]
@@ -1746,7 +1729,7 @@ mod tests {
 					.announce(origin::Route::default().with_epoch(epoch_b.clone()))
 					.unwrap();
 				new.publish("acme/room", 30);
-				let pending = origin.consume().request_broadcast(".stats/node/a", None);
+				let mut pending = origin.consume().request_broadcast(".stats/node/a", None);
 				let front = futures::executor::block_on(kio::wait(|waiter| {
 					driver.poll(now, waiter).unwrap();
 					pending.poll_ok(waiter)

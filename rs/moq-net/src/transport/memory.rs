@@ -26,7 +26,7 @@
 use std::{
 	collections::VecDeque,
 	sync::Arc,
-	task::{Context, Poll, ready},
+	task::{Poll, ready},
 };
 
 use bytes::{Buf, Bytes};
@@ -86,12 +86,6 @@ pub fn pair(config: Config) -> (Session, Session) {
 			conn: conn.clone(),
 			local,
 		}),
-		accept_uni: Default::default(),
-		accept_bi: Default::default(),
-		open_uni: Default::default(),
-		open_bi: Default::default(),
-		datagram: Default::default(),
-		closed: Default::default(),
 	};
 
 	(side(0), side(1))
@@ -183,14 +177,12 @@ impl Conn {
 			buffer: self.config.stream_buffer,
 			done: false,
 			credit: send,
-			park: Default::default(),
 		};
 		let reader = poll::Buffered::new(Chunks {
 			channel,
 			close: self.close.clone(),
 			stopped: false,
 			credit: recv,
-			park: Default::default(),
 		});
 		(writer, reader)
 	}
@@ -296,14 +288,6 @@ impl Drop for Side {
 #[derive(Clone)]
 pub struct Session {
 	side: Arc<Side>,
-	// One park per pending-operation class: a park holds a single waiter, and a clone
-	// polling two classes at once must not clobber its own registration.
-	accept_uni: kio::Park,
-	accept_bi: kio::Park,
-	open_uni: kio::Park,
-	open_bi: kio::Park,
-	datagram: kio::Park,
-	closed: kio::Park,
 }
 
 impl Session {
@@ -338,37 +322,33 @@ impl poll::Session for Session {
 	type RecvStream = RecvStream;
 	type Error = Error;
 
-	fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<RecvStream, Error>> {
-		let waiter = self.accept_uni.hold(cx);
+	fn poll_accept_uni(&self, waiter: &kio::Waiter) -> Poll<Result<RecvStream, Error>> {
 		Self::poll_accept(&self.side.incoming().uni, &self.side.conn.close, waiter)
 	}
 
-	fn poll_accept_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<(SendStream, RecvStream), Error>> {
-		let waiter = self.accept_bi.hold(cx);
+	fn poll_accept_bi(&self, waiter: &kio::Waiter) -> Poll<Result<(SendStream, RecvStream), Error>> {
 		Self::poll_accept(&self.side.incoming().bi, &self.side.conn.close, waiter)
 	}
 
 	fn poll_open_uni(
-		&mut self,
-		cx: &mut Context<'_>,
+		&self,
+		waiter: &kio::Waiter,
 		_: poll::SendOptions<'_, poll::Ungrouped>,
 	) -> Poll<Result<SendStream, Error>> {
 		let outgoing = self.side.outgoing();
 		let max = self.conn().config.max_concurrent_uni_streams;
-		let waiter = self.open_uni.hold(cx);
 		let credit = ready!(poll_credit(&outgoing.uni_open, max, &self.side.conn.close, waiter))?;
 		let (send, recv) = self.conn().stream(None, credit);
 		Poll::Ready(self.open(&outgoing.uni, recv).map(|()| send))
 	}
 
 	fn poll_open_bi(
-		&mut self,
-		cx: &mut Context<'_>,
+		&self,
+		waiter: &kio::Waiter,
 		_: poll::SendOptions<'_, poll::Ungrouped>,
 	) -> Poll<Result<(SendStream, RecvStream), Error>> {
 		let outgoing = self.side.outgoing();
 		let max = self.conn().config.max_concurrent_bi_streams;
-		let waiter = self.open_bi.hold(cx);
 		// The peer's halves both hold the credit, so it returns once the peer is done with both.
 		let credit = ready!(poll_credit(&outgoing.bi_open, max, &self.side.conn.close, waiter))?;
 		let (send, peer_recv) = self.conn().stream(None, credit.clone());
@@ -378,21 +358,18 @@ impl poll::Session for Session {
 	}
 
 	fn poll_open_request(
-		&mut self,
-		cx: &mut std::task::Context<'_>,
-		options: crate::transport::poll::SendOptions<
-			'_,
-			<Self::SendStream as crate::transport::poll::SendStream>::Group,
-		>,
-	) -> std::task::Poll<Result<Option<crate::transport::poll::BiStreams<Self>>, Self::Error>> {
-		self.poll_open_bi(cx, options).map_ok(Some)
+		&self,
+		waiter: &kio::Waiter,
+		options: poll::SendOptions<'_, poll::Ungrouped>,
+	) -> Poll<Result<Option<poll::BiStreams<Self>>, Error>> {
+		self.poll_open_bi(waiter, options).map_ok(Some)
 	}
 
-	fn send_group(&mut self, _: i64) -> Option<crate::transport::poll::Ungrouped> {
+	fn send_group(&self, _: i64) -> Option<poll::Ungrouped> {
 		None
 	}
 
-	fn send_datagram(&mut self, payload: Bytes, _: poll::SendOptions<'_, poll::Ungrouped>) -> Result<(), Error> {
+	fn send_datagram(&self, payload: Bytes, _: poll::SendOptions<'_, poll::Ungrouped>) -> Result<(), Error> {
 		if let Some(err) = closed(&self.conn().close) {
 			return Err(err);
 		}
@@ -403,8 +380,7 @@ impl poll::Session for Session {
 		Ok(())
 	}
 
-	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Error>> {
-		let waiter = self.datagram.hold(cx);
+	fn poll_recv_datagram(&self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Error>> {
 		Self::poll_accept(&self.side.incoming().datagrams, &self.side.conn.close, waiter)
 	}
 
@@ -421,12 +397,12 @@ impl poll::Session for Session {
 		super::Address::Setup
 	}
 
-	fn close(&mut self, code: u32, reason: &str) {
+	fn close(&self, code: u32, reason: &str) {
 		self.conn().close(code, reason);
 	}
 
-	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Error> {
-		poll_close(&self.side.conn.close, self.closed.hold(cx))
+	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
+		poll_close(&self.side.conn.close, waiter)
 	}
 }
 
@@ -481,20 +457,19 @@ pub struct SendStream {
 	done: bool,
 	/// The credit of a bidi stream the peer opened, held until this side is done.
 	credit: Option<Credit>,
-	park: kio::Park,
 }
 
 impl poll::SendStream for SendStream {
 	type Error = Error;
 	type Group = crate::transport::poll::Ungrouped;
 
-	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Error>> {
+	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Error>> {
 		let mut buf = buf;
-		self.poll_write_buf(cx, &mut buf)
+		self.poll_write_buf(waiter, &mut buf)
 	}
 
 	/// Queue all of `buf` as one message, waiting while the channel is full.
-	fn poll_write_buf<B: Buf>(&mut self, cx: &mut Context<'_>, buf: &mut B) -> Poll<Result<usize, Error>> {
+	fn poll_write_buf<B: Buf>(&mut self, waiter: &kio::Waiter, buf: &mut B) -> Poll<Result<usize, Error>> {
 		if self.done {
 			return Poll::Ready(Err(Error::Closed));
 		}
@@ -502,7 +477,6 @@ impl poll::SendStream for SendStream {
 			return Poll::Ready(Ok(0));
 		}
 
-		let waiter = self.park.hold(cx);
 		if let Poll::Ready(err) = poll_close(&self.close, waiter) {
 			return Poll::Ready(Err(err));
 		}
@@ -568,8 +542,7 @@ impl poll::SendStream for SendStream {
 	/// Ready once this side reset the stream, the reader stopped it, or the reader took
 	/// every message of a finished stream. That stands in for a FIN acknowledgement, so a
 	/// writer that waits for it before closing the session knows the peer has the data.
-	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-		let waiter = self.park.hold(cx);
+	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		// Check the close first, so a drain that happened before it is still seen below.
 		let closed = poll_close(&self.close, waiter);
 		if let Poll::Ready(channel) = self.channel.poll(waiter, |channel| channel.sent().map(drop)) {
@@ -597,7 +570,6 @@ pub struct Chunks {
 	stopped: bool,
 	/// The open-stream count this stream holds a credit in, until it is done.
 	credit: Option<Credit>,
-	park: kio::Park,
 }
 
 impl Chunks {
@@ -611,7 +583,7 @@ impl poll::Chunks for Chunks {
 	type Error = Error;
 
 	/// Pop the next message, or split off its first `max` bytes.
-	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
+	fn poll_read_chunk(&mut self, waiter: &kio::Waiter, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
 		if self.stopped {
 			return Poll::Ready(Err(Error::Closed));
 		}
@@ -619,7 +591,6 @@ impl poll::Chunks for Chunks {
 			return Poll::Ready(Ok(Some(Bytes::new())));
 		}
 
-		let waiter = self.park.hold(cx);
 		// Check the close first, so a message queued before it is still read below.
 		let closed = poll_close(&self.close, waiter);
 		let Poll::Ready(mut channel) = self.channel.poll(waiter, |channel| {
@@ -693,8 +664,8 @@ mod tests {
 		}
 	}
 
-	fn noop() -> Context<'static> {
-		Context::from_waker(Waker::noop())
+	fn noop() -> kio::Waiter {
+		kio::Waiter::noop()
 	}
 
 	fn ready<T>(poll: Poll<T>) -> T {
@@ -711,19 +682,19 @@ mod tests {
 		}
 	}
 
-	fn uni(a: &mut Session, b: &mut Session) -> (SendStream, RecvStream) {
-		let send = ready(a.poll_open_uni(&mut noop(), Default::default())).unwrap();
-		let recv = ready(b.poll_accept_uni(&mut noop())).unwrap();
+	fn uni(a: &Session, b: &Session) -> (SendStream, RecvStream) {
+		let send = ready(a.poll_open_uni(&noop(), Default::default())).unwrap();
+		let recv = ready(b.poll_accept_uni(&noop())).unwrap();
 		(send, recv)
 	}
 
 	fn write(send: &mut SendStream, chunk: &Bytes) -> Poll<Result<usize, Error>> {
-		send.poll_write_buf(&mut noop(), &mut chunk.clone())
+		send.poll_write_buf(&noop(), &mut chunk.clone())
 	}
 
 	/// Below the lease buffering, so each read sees the channel itself.
 	fn read(recv: &mut RecvStream, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
-		poll::Chunks::poll_read_chunk(recv.get_mut(), &mut noop(), max)
+		poll::Chunks::poll_read_chunk(recv.get_mut(), &noop(), max)
 	}
 
 	fn text(chunk: Poll<Result<Option<Bytes>, Error>>) -> Bytes {
@@ -738,8 +709,8 @@ mod tests {
 
 	#[test]
 	fn one_write_is_one_read() {
-		let (mut a, mut b) = pair(Config::default());
-		let (mut send, mut recv) = uni(&mut a, &mut b);
+		let (a, b) = pair(Config::default());
+		let (mut send, mut recv) = uni(&a, &b);
 
 		let first = Bytes::from(vec![1u8; 4096]);
 		let second = Bytes::from_static(b"second");
@@ -762,21 +733,18 @@ mod tests {
 
 	#[test]
 	fn full_channel_pends_writer_until_read() {
-		let (mut a, mut b) = pair(buffer(8));
-		let (mut send, mut recv) = uni(&mut a, &mut b);
-		let (mut other, mut other_recv) = uni(&mut a, &mut b);
+		let (a, b) = pair(buffer(8));
+		let (mut send, mut recv) = uni(&a, &b);
+		let (mut other, mut other_recv) = uni(&a, &b);
 
 		// A write is never split, so one larger than the buffer still lands whole.
 		let large = Bytes::from_static(b"0123456789");
 		assert_eq!(ready(write(&mut send, &large)).unwrap(), 10);
 
 		let count = Arc::new(Count::default());
-		let waker = Waker::from(count.clone());
+		let waiter = kio::Waiter::new(Waker::from(count.clone()));
 		let mut next = Bytes::from_static(b"x");
-		assert!(
-			send.poll_write_buf(&mut Context::from_waker(&waker), &mut next)
-				.is_pending()
-		);
+		assert!(send.poll_write_buf(&waiter, &mut next).is_pending());
 		assert_eq!(next, "x");
 
 		// Only that stream is full.
@@ -788,13 +756,13 @@ mod tests {
 		assert!(write(&mut send, &next).is_pending());
 		assert_eq!(text(read(&mut recv, usize::MAX)), "23456789");
 		assert!(count.0.load(Ordering::Relaxed) > 0);
-		assert_eq!(ready(send.poll_write_buf(&mut noop(), &mut next)).unwrap(), 1);
+		assert_eq!(ready(send.poll_write_buf(&noop(), &mut next)).unwrap(), 1);
 	}
 
 	#[test]
 	fn zero_buffer_holds_one_message() {
-		let (mut a, mut b) = pair(buffer(0));
-		let (mut send, mut recv) = uni(&mut a, &mut b);
+		let (a, b) = pair(buffer(0));
+		let (mut send, mut recv) = uni(&a, &b);
 
 		assert_eq!(ready(write(&mut send, &Bytes::from_static(b"one"))).unwrap(), 3);
 		assert!(write(&mut send, &Bytes::from_static(b"two")).is_pending());
@@ -804,86 +772,77 @@ mod tests {
 
 	#[test]
 	fn uni_credit_pends_opens_until_a_stream_is_done() {
-		let (mut a, mut b) = pair(Config {
+		let (a, b) = pair(Config {
 			max_concurrent_uni_streams: Some(2),
 			..Default::default()
 		});
-		let open = |a: &mut Session, cx: &mut Context<'_>| a.poll_open_uni(cx, Default::default());
+		let open = |a: &Session, waiter: &kio::Waiter| a.poll_open_uni(waiter, Default::default());
 
 		// Streams the peer has not accepted yet hold credit too.
-		let mut finished = ready(open(&mut a, &mut noop())).unwrap();
-		let _reset = ready(open(&mut a, &mut noop())).unwrap();
+		let mut finished = ready(open(&a, &noop())).unwrap();
+		let _reset = ready(open(&a, &noop())).unwrap();
 		let count = Arc::new(Count::default());
-		let waker = Waker::from(count.clone());
-		assert!(open(&mut a, &mut Context::from_waker(&waker)).is_pending());
+		let waiter = kio::Waiter::new(Waker::from(count.clone()));
+		assert!(open(&a, &waiter).is_pending());
 
 		// Credit is per direction.
-		let _back = ready(open(&mut b, &mut noop())).unwrap();
+		let _back = ready(open(&b, &noop())).unwrap();
 
 		// Reading to the end returns the credit, and wakes the parked open.
 		ready(write(&mut finished, &Bytes::from_static(b"x"))).unwrap();
 		finished.finish().unwrap();
-		let mut recv = ready(b.poll_accept_uni(&mut noop())).unwrap();
+		let mut recv = ready(b.poll_accept_uni(&noop())).unwrap();
 		assert_eq!(text(read(&mut recv, usize::MAX)), "x");
-		assert!(
-			open(&mut a, &mut Context::from_waker(&waker)).is_pending(),
-			"an unread FIN keeps the credit"
-		);
+		assert!(open(&a, &waiter).is_pending(), "an unread FIN keeps the credit");
 		assert_eq!(ready(read(&mut recv, usize::MAX)).unwrap(), None);
 		assert!(count.0.load(Ordering::Relaxed) > 0);
-		let _third = ready(open(&mut a, &mut noop())).unwrap();
-		assert!(open(&mut a, &mut noop()).is_pending());
+		let _third = ready(open(&a, &noop())).unwrap();
+		assert!(open(&a, &noop()).is_pending());
 
 		// So does dropping a stream, accepted or not.
 		drop(recv);
-		assert!(open(&mut a, &mut noop()).is_pending(), "the credit was returned once");
-		drop(ready(b.poll_accept_uni(&mut noop())).unwrap());
-		let _fourth = ready(open(&mut a, &mut noop())).unwrap();
+		assert!(open(&a, &noop()).is_pending(), "the credit was returned once");
+		drop(ready(b.poll_accept_uni(&noop())).unwrap());
+		let _fourth = ready(open(&a, &noop())).unwrap();
 
 		// A parked open fails once the session closes.
 		b.close(1, "bye");
-		assert!(matches!(
-			ready(open(&mut a, &mut noop())),
-			Err(Error::Session { code: 1, .. })
-		));
+		assert!(matches!(ready(open(&a, &noop())), Err(Error::Session { code: 1, .. })));
 	}
 
 	/// A bidi stream holds its opener's credit until the peer is done with both halves.
 	#[test]
 	fn bi_credit_returns_once_the_peer_is_done_with_both_halves() {
-		let (mut a, mut b) = pair(Config {
+		let (a, b) = pair(Config {
 			max_concurrent_bi_streams: Some(1),
 			..Default::default()
 		});
-		let open = |a: &mut Session, cx: &mut Context<'_>| a.poll_open_bi(cx, Default::default());
+		let open = |a: &Session, waiter: &kio::Waiter| a.poll_open_bi(waiter, Default::default());
 
-		let (mut send, _recv) = ready(open(&mut a, &mut noop())).unwrap();
+		let (mut send, _recv) = ready(open(&a, &noop())).unwrap();
 		let count = Arc::new(Count::default());
-		let waker = Waker::from(count.clone());
-		assert!(open(&mut a, &mut Context::from_waker(&waker)).is_pending());
+		let waiter = kio::Waiter::new(Waker::from(count.clone()));
+		assert!(open(&a, &waiter).is_pending());
 
 		// The peer reading our half to the end leaves its own half open.
 		send.finish().unwrap();
-		let (mut peer_send, mut peer_recv) = ready(b.poll_accept_bi(&mut noop())).unwrap();
+		let (mut peer_send, mut peer_recv) = ready(b.poll_accept_bi(&noop())).unwrap();
 		assert_eq!(ready(read(&mut peer_recv, usize::MAX)).unwrap(), None);
-		assert!(
-			open(&mut a, &mut Context::from_waker(&waker)).is_pending(),
-			"the peer still writes"
-		);
+		assert!(open(&a, &waiter).is_pending(), "the peer still writes");
 
 		peer_send.finish().unwrap();
 		assert!(count.0.load(Ordering::Relaxed) > 0);
-		let _second = ready(open(&mut a, &mut noop())).unwrap();
+		let _second = ready(open(&a, &noop())).unwrap();
 	}
 
 	#[test]
 	fn reset_drops_queued_messages() {
-		let (mut a, mut b) = pair(buffer(8));
-		let (mut send, mut recv) = uni(&mut a, &mut b);
+		let (a, b) = pair(buffer(8));
+		let (mut send, mut recv) = uni(&a, &b);
 
 		ready(write(&mut send, &Bytes::from_static(b"01234567"))).unwrap();
 		send.reset(7);
-		assert!(ready(send.poll_closed(&mut noop())).is_ok());
+		assert!(ready(send.poll_closed(&noop())).is_ok());
 		assert!(matches!(ready(read(&mut recv, usize::MAX)), Err(Error::Reset(7))));
 		assert!(matches!(
 			ready(write(&mut send, &Bytes::from_static(b"x"))),
@@ -893,21 +852,21 @@ mod tests {
 
 	#[test]
 	fn finish_closes_once_drained() {
-		let (mut a, mut b) = pair(Config::default());
-		let (mut send, mut recv) = uni(&mut a, &mut b);
+		let (a, b) = pair(Config::default());
+		let (mut send, mut recv) = uni(&a, &b);
 
 		ready(write(&mut send, &Bytes::from_static(b"done"))).unwrap();
 		send.finish().unwrap();
 		assert!(matches!(send.finish(), Err(Error::Closed)));
 
 		// The writer's close waits for the reader to take every message.
-		assert!(send.poll_closed(&mut noop()).is_pending());
+		assert!(send.poll_closed(&noop()).is_pending());
 		assert_eq!(text(read(&mut recv, usize::MAX)), "done");
-		assert!(ready(send.poll_closed(&mut noop())).is_ok());
+		assert!(ready(send.poll_closed(&noop())).is_ok());
 		assert_eq!(ready(read(&mut recv, usize::MAX)).unwrap(), None);
 
 		// A reset after the finish is ignored, so the reader still gets everything.
-		let (mut send, mut recv) = uni(&mut a, &mut b);
+		let (mut send, mut recv) = uni(&a, &b);
 		ready(write(&mut send, &Bytes::from_static(b"kept"))).unwrap();
 		send.finish().unwrap();
 		send.reset(2);
@@ -916,26 +875,26 @@ mod tests {
 
 		// A reader that stops after taking everything leaves the writer finished.
 		drop(recv);
-		assert!(ready(send.poll_closed(&mut noop())).is_ok());
+		assert!(ready(send.poll_closed(&noop())).is_ok());
 
 		// A reader that stops with messages unread fails the writer, finished or not.
-		let (mut send, recv) = uni(&mut a, &mut b);
+		let (mut send, recv) = uni(&a, &b);
 		ready(write(&mut send, &Bytes::from_static(b"unread"))).unwrap();
 		send.finish().unwrap();
 		drop(recv);
-		assert!(matches!(ready(send.poll_closed(&mut noop())), Err(Error::Stopped(0))));
+		assert!(matches!(ready(send.poll_closed(&noop())), Err(Error::Stopped(0))));
 	}
 
 	#[test]
 	fn stop_fails_the_writer() {
-		let (mut a, mut b) = pair(Config::default());
-		let (mut send, mut recv) = uni(&mut a, &mut b);
+		let (a, b) = pair(Config::default());
+		let (mut send, mut recv) = uni(&a, &b);
 
 		ready(write(&mut send, &Bytes::from_static(b"01234567"))).unwrap();
-		assert!(send.poll_closed(&mut noop()).is_pending());
+		assert!(send.poll_closed(&noop()).is_pending());
 
 		recv.stop(3);
-		assert!(matches!(ready(send.poll_closed(&mut noop())), Err(Error::Stopped(3))));
+		assert!(matches!(ready(send.poll_closed(&noop())), Err(Error::Stopped(3))));
 		assert!(matches!(
 			ready(write(&mut send, &Bytes::from_static(b"x"))),
 			Err(Error::Stopped(3))
@@ -946,22 +905,22 @@ mod tests {
 
 	#[test]
 	fn drops_reset_and_stop() {
-		let (mut a, mut b) = pair(Config::default());
+		let (a, b) = pair(Config::default());
 
-		let (send, mut recv) = uni(&mut a, &mut b);
+		let (send, mut recv) = uni(&a, &b);
 		drop(send);
 		assert!(matches!(ready(read(&mut recv, usize::MAX)), Err(Error::Reset(0))));
 
-		let (mut send, recv) = uni(&mut a, &mut b);
+		let (send, recv) = uni(&a, &b);
 		drop(recv);
-		assert!(matches!(ready(send.poll_closed(&mut noop())), Err(Error::Stopped(0))));
+		assert!(matches!(ready(send.poll_closed(&noop())), Err(Error::Stopped(0))));
 	}
 
 	#[test]
 	fn bidi_streams_pair_up() {
-		let (mut a, mut b) = pair(Config::default());
-		let (mut a_send, mut a_recv) = ready(a.poll_open_bi(&mut noop(), Default::default())).unwrap();
-		let (mut b_send, mut b_recv) = ready(b.poll_accept_bi(&mut noop())).unwrap();
+		let (a, b) = pair(Config::default());
+		let (mut a_send, mut a_recv) = ready(a.poll_open_bi(&noop(), Default::default())).unwrap();
+		let (mut b_send, mut b_recv) = ready(b.poll_accept_bi(&noop())).unwrap();
 
 		ready(write(&mut a_send, &Bytes::from_static(b"ping"))).unwrap();
 		assert_eq!(text(read(&mut b_recv, usize::MAX)), "ping");
@@ -971,25 +930,25 @@ mod tests {
 
 	#[test]
 	fn close_drains_queued_messages() {
-		let (mut a, mut b) = pair(Config {
+		let (a, b) = pair(Config {
 			protocol: Some("moq".into()),
 			..Default::default()
 		});
 		assert_eq!(b.protocol(), Some("moq"));
-		let (mut send, mut recv) = uni(&mut a, &mut b);
-		let (mut unfinished, mut unfinished_recv) = uni(&mut a, &mut b);
-		let late = ready(a.poll_open_uni(&mut noop(), Default::default())).unwrap();
+		let (mut send, mut recv) = uni(&a, &b);
+		let (mut unfinished, mut unfinished_recv) = uni(&a, &b);
+		let late = ready(a.poll_open_uni(&noop(), Default::default())).unwrap();
 
 		ready(write(&mut send, &Bytes::from_static(b"last"))).unwrap();
 		send.finish().unwrap();
 		ready(write(&mut unfinished, &Bytes::from_static(b"part"))).unwrap();
-		assert!(b.poll_closed(&mut noop()).is_pending());
+		assert!(b.poll_closed(&noop()).is_pending());
 
 		a.close(4, "bye");
 		let closed = |err: Error| matches!(err, Error::Session { code: 4, ref reason } if reason == "bye");
-		assert!(closed(ready(b.poll_closed(&mut noop()))));
+		assert!(closed(ready(b.poll_closed(&noop()))));
 		assert!(closed(
-			ready(a.poll_open_uni(&mut noop(), Default::default())).err().unwrap()
+			ready(a.poll_open_uni(&noop(), Default::default())).err().unwrap()
 		));
 		assert!(closed(
 			ready(write(&mut unfinished, &Bytes::from_static(b"x"))).unwrap_err()
@@ -1005,26 +964,23 @@ mod tests {
 
 		// A stream opened before the close is still accepted.
 		drop(late);
-		ready(b.poll_accept_uni(&mut noop())).unwrap();
-		assert!(closed(ready(b.poll_accept_uni(&mut noop())).err().unwrap()));
+		ready(b.poll_accept_uni(&noop())).unwrap();
+		assert!(closed(ready(b.poll_accept_uni(&noop())).err().unwrap()));
 	}
 
 	#[test]
 	fn dropping_a_side_closes() {
-		let (a, mut b) = pair(Config::default());
+		let (a, b) = pair(Config::default());
 		let clone = a.clone();
 		drop(a);
-		assert!(b.poll_closed(&mut noop()).is_pending());
+		assert!(b.poll_closed(&noop()).is_pending());
 		drop(clone);
-		assert!(matches!(
-			ready(b.poll_closed(&mut noop())),
-			Error::Session { code: 0, .. }
-		));
+		assert!(matches!(ready(b.poll_closed(&noop())), Error::Session { code: 0, .. }));
 	}
 
 	#[test]
 	fn datagrams() {
-		let (mut a, mut b) = pair(Config::default());
+		let (a, b) = pair(Config::default());
 		a.send_datagram(vec![0; MAX_DATAGRAM_SIZE + 1].into(), Default::default())
 			.unwrap();
 		for _ in 0..DATAGRAM_QUEUE {
@@ -1033,8 +989,8 @@ mod tests {
 		// The peer's queue is full, so this one is lost, like the oversized one.
 		a.send_datagram("two".into(), Default::default()).unwrap();
 		for _ in 0..DATAGRAM_QUEUE {
-			assert_eq!(ready(b.poll_recv_datagram(&mut noop())).unwrap(), "one");
+			assert_eq!(ready(b.poll_recv_datagram(&noop())).unwrap(), "one");
 		}
-		assert!(b.poll_recv_datagram(&mut noop()).is_pending());
+		assert!(b.poll_recv_datagram(&noop()).is_pending());
 	}
 }

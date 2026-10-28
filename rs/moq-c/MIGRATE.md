@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Authored configs keep their identity ([#7110](https://github.com/moq-dev/moq/pull/7110))
+
+`moq_publish_video_config` and `moq_publish_audio_config` return `MOQ_ERROR_MUX` for a repeat call that changes the rendition's `codec`, `description`, or `container`, or an audio `sample_rate` or `channel_count`.
+Publish media with a new identity under a new name, and remove the old rendition.
+Tracks published with `moq_publish_video` or `moq_publish_audio` take a new name such as `<name>/1` when the stream's decoder identity changes, so read the name from the catalog rather than caching it.
+A frame passed to `moq_encode_video_frame` that moves the rendition to a new track, such as a resume at a ceiling past the declared level, reserves bandwidth against the new track, so call `moq_encode_video_reservation` again rather than holding the first handle.
+
 ### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
 
 Every function taking a path, such as `moq_origin_create_broadcast` and `moq_origin_request`, returns an error for a path with a leading, trailing, or doubled `/` instead of collapsing it. Pass the canonical path, such as `room/cam`.

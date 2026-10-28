@@ -491,7 +491,24 @@ impl Misses {
 			self.judged.insert(run.clone());
 		}
 		let start = state.start_sequence.unwrap_or(0);
+		// Below the start its publisher resolved from the budget, such a copy cannot tell a
+		// group a reader's budget reaches, so it leaves them to the feed's re-offer.
+		if state.fills_from_start && start > 0 {
+			candidates.remove(0..start);
+		}
 		for run in candidates.iter() {
+			// Backfill another reader's fill cached is no hole, yet the arrival walk never
+			// reaches it: this reader takes it as filled where it would ask for a hole.
+			for held in backfill(state, run.clone()).iter() {
+				let (unfed, awaited) = state.unfed(held.clone(), now);
+				for run in unfed.iter() {
+					self.filled.extend(run.clone());
+				}
+				for (run, folds) in awaited {
+					self.filled.extend(run.start..run.end.min(start));
+					self.deferred.insert(run.start.max(start)..run.end, folds);
+				}
+			}
 			for hole in holes(state, run.clone()) {
 				for hole in self.unclaimed(state, hole) {
 					let (unfed, awaited) = state.unfed(hole, now);
@@ -720,6 +737,16 @@ impl TrackState {
 		}
 		(unfed, awaited)
 	}
+}
+
+/// The runs of `run` the cache holds as backfill: servable, but out of the arrival walk.
+fn backfill(state: &TrackState, run: ops::Range<u64>) -> RangeSet<u64> {
+	state
+		.lookup
+		.range(run)
+		.filter(|(_, slot)| !slot.is_walked() && slot.serves_end())
+		.map(|(&sequence, _)| sequence..sequence + 1)
+		.collect()
 }
 
 /// The runs of `run` the cache holds nothing servable for.

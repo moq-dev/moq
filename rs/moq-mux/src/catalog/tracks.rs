@@ -367,6 +367,22 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::TextConfig {
 	}
 }
 
+/// Refuse an edit that redefines rendition `name`'s track identity in place: a publisher whose
+/// decoder identity changed publishes under a new name instead.
+fn check_identity<E: CatalogExt>(previous: &Catalog<E>, next: &Catalog<E>, name: &str) -> crate::Result<()> {
+	if let (Some(previous), Some(next)) = (previous.video.renditions.get(name), next.video.renditions.get(name))
+		&& !previous.same_identity(next)
+	{
+		return Err(crate::Error::IdentityChanged(name.to_string()));
+	}
+	if let (Some(previous), Some(next)) = (previous.audio.renditions.get(name), next.audio.renditions.get(name))
+		&& !previous.same_identity(next)
+	{
+		return Err(crate::Error::IdentityChanged(name.to_string()));
+	}
+	Ok(())
+}
+
 /// A clonable reservation context handed to importers so they declare their tracks up front.
 ///
 /// Made via [`Producer::reserve`]. While any `Reserved` clone is alive the track set may still
@@ -549,6 +565,24 @@ pub(crate) type VideoTrack<E = ()> = Rendition<E, hang::catalog::VideoConfig>;
 pub(crate) type AudioTrack<E = ()> = Rendition<E, hang::catalog::AudioConfig>;
 /// A single text (caption/subtitle) track's catalog rendition. See [`Rendition`].
 impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
+	/// The successor of this rendition's track, under a newly minted name, for a decoder identity
+	/// change. `hls_hint` carries the segment duration the old track declared.
+	pub(crate) fn fresh(
+		&self,
+		container: super::hang::Container,
+		info: moq_net::track::Info,
+		hls_hint: Option<std::time::Duration>,
+	) -> crate::Result<crate::container::Producer<super::hang::Container, C>> {
+		let track = self.catalog.fresh_track(&self.name, info)?;
+		let rendition = self.catalog.rendition(track.name())?;
+		self.catalog.media(track, container, rendition, None, hls_hint)
+	}
+
+	/// Finish and forget the HLS records of `track`, a predecessor this rendition replaced.
+	pub(crate) fn retire(&self, track: &str) -> crate::Result<()> {
+		self.catalog.retire(track)
+	}
+
 	fn new(reserved: Reserved<E>, name: String) -> crate::Result<Self> {
 		Self::owned(reserved.producer(), Some(reserved), name)
 	}
@@ -610,6 +644,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 			let mut guard = self.catalog.modify()?;
 			let mut next = (*guard).clone();
 			config.insert(&mut next, &self.name);
+			check_identity(&guard, &next, &self.name)?;
 			// Serialization must succeed before the reserved snapshot retains the edit.
 			serde_json::to_writer(std::io::sink(), &next).map_err(moq_json::Error::from)?;
 			self.present = true;
@@ -715,6 +750,18 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		self.stage(config)?.commit()
 	}
 
+	/// Advertise `bitrate` as a supplied value that measurement no longer replaces, leaving every
+	/// other field, measured or not, as published.
+	pub(crate) fn supply_bitrate(&mut self, bitrate: u64) -> crate::Result<()> {
+		let mut config = self.config()?;
+		let mut estimate = config.estimate();
+		estimate.bitrate = Some(bitrate);
+		config.set_estimate(estimate);
+		self.replace(config)?;
+		self.supplied.bitrate = Some(bitrate);
+		Ok(())
+	}
+
 	/// Write `config` into the catalog, leaving the caller to choose how the guard publishes it.
 	fn stage(&mut self, config: C) -> crate::Result<super::Guard<'_, E>> {
 		if !self.present {
@@ -724,6 +771,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		let mut guard = self.catalog.modify()?;
 		let mut next = (*guard).clone();
 		config.insert(&mut next, &self.name);
+		check_identity(&guard, &next, &self.name)?;
 		serde_json::to_writer(std::io::sink(), &next).map_err(moq_json::Error::from)?;
 		*guard = next;
 		Ok(guard)
@@ -779,6 +827,97 @@ mod tests {
 		config.bitrate = bitrate;
 		config.jitter = jitter;
 		config
+	}
+
+	#[test]
+	fn video_identity_edits_are_refused_without_changing_the_catalog() {
+		let original = config(Some(1_000_000), None);
+		let mut changed = Vec::new();
+		let mut codec = original.clone();
+		codec.codec = "avc1.42c01e".parse().unwrap();
+		changed.push(codec);
+		let mut description = original.clone();
+		description.description = Some(bytes::Bytes::from_static(&[1, 2, 3]));
+		changed.push(description);
+		let mut container = original.clone();
+		container.container = hang::catalog::Container::Loc;
+		changed.push(container);
+		let mut width = original.clone();
+		width.display_aspect_width = Some(4);
+		changed.push(width);
+		let mut height = original.clone();
+		height.display_aspect_height = Some(3);
+		changed.push(height);
+		for next in changed {
+			for operation in ["set", "replace", "stage"] {
+				let (_broadcast, catalog, mut rendition) = video_track();
+				rendition.set(original.clone()).unwrap();
+				let refused = match operation {
+					"set" => rendition.set(next.clone()).is_err(),
+					"replace" => rendition.replace(next.clone()).is_err(),
+					"stage" => rendition.stage(next.clone()).is_err(),
+					_ => unreachable!(),
+				};
+				assert!(refused, "{operation} retained identity change {next:?}");
+				assert_eq!(catalog.snapshot().video.renditions["v"], original);
+			}
+		}
+	}
+
+	#[test]
+	fn video_size_and_estimates_can_change_in_place() {
+		let (_broadcast, catalog, mut rendition) = video_track();
+		let mut original = config(Some(1_000_000), None);
+		original.coded_width = Some(1280);
+		original.coded_height = Some(720);
+		original.framerate = Some(60.0);
+		rendition.set(original.clone()).unwrap();
+		let mut next = original;
+		next.coded_width = Some(1920);
+		next.coded_height = Some(1080);
+		next.bitrate = Some(500_000);
+		next.framerate = Some(30.0);
+		rendition.set(next.clone()).unwrap();
+		assert_eq!(catalog.snapshot().video.renditions["v"], next);
+	}
+
+	#[test]
+	fn audio_identity_edits_are_refused_without_changing_the_catalog() {
+		let original = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+		let mut changed = Vec::new();
+		let mut codec = original.clone();
+		codec.codec = hang::catalog::AudioCodec::Flac;
+		changed.push(codec);
+		let mut description = original.clone();
+		description.description = Some(bytes::Bytes::from_static(&[1, 2, 3]));
+		changed.push(description);
+		let mut container = original.clone();
+		container.container = hang::catalog::Container::Loc;
+		changed.push(container);
+		let mut sample_rate = original.clone();
+		sample_rate.sample_rate = 44_100;
+		changed.push(sample_rate);
+		let mut channels = original.clone();
+		channels.channel_count = 1;
+		changed.push(channels);
+		for next in changed {
+			for operation in ["set", "replace", "stage"] {
+				let mut broadcast = moq_net::broadcast::Info::new().produce();
+				let catalog = super::super::Producer::new(&mut broadcast, super::super::Config::default()).unwrap();
+				let reserved = catalog.reserve();
+				let mut rendition = reserved.init::<hang::catalog::AudioConfig>("a").unwrap();
+				drop(reserved);
+				rendition.set(original.clone()).unwrap();
+				let refused = match operation {
+					"set" => rendition.set(next.clone()).is_err(),
+					"replace" => rendition.replace(next.clone()).is_err(),
+					"stage" => rendition.stage(next.clone()).is_err(),
+					_ => unreachable!(),
+				};
+				assert!(refused, "{operation} retained identity change {next:?}");
+				assert_eq!(catalog.snapshot().audio.renditions["a"], original);
+			}
+		}
 	}
 
 	#[test]

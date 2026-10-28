@@ -88,6 +88,5 @@ from a host. Each child fixes the stale docs it touches.
 
 ## Related
 
-- [Rust identity enforcement](/quest/m1/catalog-identity-rs.md) - a track's definition never changes for its name, so the archived catalog describes every group of the tracks it lists
 - [e2ee](/quest/m2/e2ee/README.md) - protected broadcasts are excluded initially
 - [DVR rewind](/quest/m2/archive-dvr.md) - seeks back through the cache, then an archive, with time ranges

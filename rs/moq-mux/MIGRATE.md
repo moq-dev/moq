@@ -4,6 +4,15 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A decoder identity change publishes a new track ([#7110](https://github.com/moq-dev/moq/pull/7110))
+
+A rendition never changes its identity in place: `codec`, `description`, `container`, `display_aspect_width`/`display_aspect_height`, and `interlaced` for video, and `codec`, `description`, `container`, `sample_rate`, and `channel_count` for audio (see `hang::catalog::VideoConfig::same_identity`).
+`container::Producer::set`, `replace`, and `stage` refuse such a change with `Error::IdentityChanged`; every other field still updates in place.
+The codec importers (H.264, H.265, AV1, VP8, VP9) publish a stream whose identity changes, such as a new SPS profile or level, or a new avcC, under the next free `<name>/<n>` and finish the old track.
+TS AAC, MP2, AC-3, and E-AC-3, and FLV in-band audio start a new track when a frame header changes the format instead of ignoring it.
+Read `name()`, `demand()`, and `track()` from the importer after each write rather than caching them.
+An av1C without a sequence header in its `configOBUs` no longer publishes a rendition: the stream's first sequence header does.
+
 ### `moq_net::Path` has no lifetime
 
 `Source::resolve_reference` takes `Option<&Relative>` and returns `Option<Path>`, `ts::Programs::new` takes `impl Into<moq_net::Path>`, so pass a `Path`, and `follow::Instances::new` takes `impl TryInto<moq_net::Path, Error: Into<moq_net::Error>>`. Replace `PathOwned` with `Path` and drop `to_owned()` and `into_owned()` on paths. See moq-net's migration for the rest.

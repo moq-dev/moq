@@ -372,7 +372,7 @@ impl Publisher {
 			}
 		};
 		let mut broadcasts = TaskSet::owned();
-		let mut session = self.session.clone();
+		let session = self.session.clone();
 		let mut finished = false;
 		let mut goaways = super::super::request_stream::Messages::new(self.session.clone(), self.control.client());
 
@@ -386,16 +386,14 @@ impl Publisher {
 		let cancelled = loop {
 			let event = broadcasts
 				.drive(|waiter| {
-					let mut cx = waiter.context();
-					if session.poll_closed(&mut cx).is_ready() {
+					if session.poll_closed(waiter).is_ready() {
 						return Poll::Ready(Event::Closed);
 					}
-					if let Poll::Ready(res) =
-						self.poll_listing_cancel(&mut stream, &mut finished, &mut goaways, &mut cx)
+					if let Poll::Ready(res) = self.poll_listing_cancel(&mut stream, &mut finished, &mut goaways, waiter)
 					{
 						return Poll::Ready(Event::Cancelled(res));
 					}
-					if let Err(err) = Self::poll_write_skips(&mut stream, &request.skips, waiter, &mut cx) {
+					if let Err(err) = Self::poll_write_skips(&mut stream, &request.skips, waiter) {
 						return Poll::Ready(Event::Cancelled(Err(err)));
 					}
 					if !answered {
@@ -455,11 +453,10 @@ impl Publisher {
 		// each ending once its broadcast does, even while the peer is slow to take the close.
 		loop {
 			let event = kio::wait(|waiter| {
-				let mut cx = waiter.context();
 				if let Some(writer) = closing.as_mut() {
 					let closed = 'close: {
 						if !fin {
-							match writer.poll_flush(&mut cx) {
+							match writer.poll_flush(waiter) {
 								Poll::Pending => break 'close Poll::Pending,
 								Poll::Ready(res) => {
 									if res.and_then(|()| writer.finish()).is_err() {
@@ -469,13 +466,13 @@ impl Publisher {
 							}
 							fin = true;
 						}
-						writer.poll_close(&mut cx).map(|_| ())
+						writer.poll_close(waiter).map(|_| ())
 					};
 					if closed.is_ready() {
 						closing = None;
 					}
 				}
-				if session.poll_closed(&mut cx).is_ready() {
+				if session.poll_closed(waiter).is_ready() {
 					return Poll::Ready(None);
 				}
 				if broadcasts.poll(waiter).is_ready() && closing.is_none() {
@@ -502,14 +499,14 @@ impl Publisher {
 		stream: &mut Stream<Transport, Version>,
 		finished: &mut bool,
 		goaways: &mut super::super::request_stream::Messages,
-		cx: &mut std::task::Context<'_>,
+		waiter: &kio::Waiter,
 	) -> Poll<Result<(), Error>> {
 		use super::super::request_stream::{NamespaceUpdate, Next};
-		if stream.writer.poll_closed(cx).is_ready() {
+		if stream.writer.poll_closed(waiter).is_ready() {
 			return Poll::Ready(Ok(()));
 		}
 		while !*finished {
-			match ready!(stream.reader.poll_decode_maybe::<Next<NamespaceUpdate<true>>>(cx)) {
+			match ready!(stream.reader.poll_decode_maybe::<Next<NamespaceUpdate<true>>>(waiter)) {
 				Ok(Some(Next::Message(update))) => {
 					// Its Request ID is spent like any other: a bad one is the session's error,
 					// and one past our GOAWAY is refused as such.
@@ -559,9 +556,8 @@ impl Publisher {
 		stream: &mut Stream<Transport, Version>,
 		skips: &Skips,
 		waiter: &kio::Waiter,
-		cx: &mut std::task::Context<'_>,
 	) -> Result<(), Error> {
-		while stream.writer.poll_flush(cx)?.is_ready() {
+		while stream.writer.poll_flush(waiter)?.is_ready() {
 			let Poll::Ready(mut pending) = skips.poll(waiter, |skips| match skips.is_empty() {
 				true => Poll::Pending,
 				false => Poll::Ready(()),
@@ -624,7 +620,7 @@ impl Publisher {
 		};
 		let mut entries = Entries::default();
 		let mut publishes = TaskSet::owned();
-		let mut session = self.session.clone();
+		let session = self.session.clone();
 		// The listing ended, the request did, or the route was withdrawn: nothing more to add.
 		let mut adding = true;
 		let mut withdrawn = false;
@@ -716,7 +712,7 @@ impl Publisher {
 					return Poll::Ready(Some(Event::Regrant(permit)));
 				}
 				if entries.staged.is_some()
-					&& let Poll::Ready(opened) = Stream::poll_open(&mut session, self.version, &mut waiter.context())
+					&& let Poll::Ready(opened) = Stream::poll_open(&session, self.version, waiter)
 				{
 					return Poll::Ready(Some(Event::Opened(opened)));
 				}
@@ -869,7 +865,7 @@ impl Publisher {
 
 		// Every wait on the peer for the PUBLISH's bytes lasts only while the track is listed
 		// and the request stands.
-		let mut session = self.session.clone();
+		let session = self.session.clone();
 		let mut stream = stream.with_stats(self.stats());
 		// Dropped unwritten, the stream is reset before its header, which the peer ignores.
 		let noop = kio::Waiter::noop();
@@ -921,11 +917,10 @@ impl Publisher {
 		// answer has nothing to end yet, so the request is reset. One that finished waits for
 		// the answer, then ends with TRACK_ENDED, since the peer listed it on the PUBLISH.
 		let answer = kio::wait(|waiter| {
-			let mut cx = waiter.context();
-			if session.poll_closed(&mut cx).is_ready() || (listed.poll_closed(waiter).is_ready() && !*listed.read()) {
+			if session.poll_closed(waiter).is_ready() || (listed.poll_closed(waiter).is_ready() && !*listed.read()) {
 				return Poll::Ready(None);
 			}
-			goaways.poll_next(&mut stream.reader, &mut cx).map(Some)
+			goaways.poll_next(&mut stream.reader, waiter).map(Some)
 		})
 		.await;
 		// A NEW_GROUP_REQUEST on a PUBLISH_OK that leaves the subscription paused waits for
@@ -1025,8 +1020,7 @@ impl Publisher {
 			}
 
 			let wait = kio::wait(|waiter| {
-				let mut cx = waiter.context();
-				if session.poll_closed(&mut cx).is_ready() || stream.writer.poll_closed(&mut cx).is_ready() {
+				if session.poll_closed(waiter).is_ready() || stream.writer.poll_closed(waiter).is_ready() {
 					return Poll::Ready(Wait::Cancelled);
 				}
 				if gate.poll_denied(waiter).is_ready() {
@@ -1035,7 +1029,7 @@ impl Publisher {
 				if listed.poll_closed(waiter).is_ready() {
 					return Poll::Ready(Wait::Removed);
 				}
-				match ready!(self.poll_update(&mut stream, &mut finished, &mut goaways, &mut cx)) {
+				match ready!(self.poll_update(&mut stream, &mut finished, &mut goaways, waiter)) {
 					UpdateRead::Update(update) => Poll::Ready(Wait::Update(update)),
 					UpdateRead::Cancelled => Poll::Ready(Wait::Cancelled),
 					UpdateRead::Malformed(err) => {
@@ -1188,7 +1182,7 @@ impl Publisher {
 		// route may take a while to say where its live edge is.
 		let mut subscribing = std::pin::pin!(track.subscribe(subscription.clone()));
 		let subscribed = kio::wait(|waiter| {
-			if stream.writer.poll_closed(&mut waiter.context()).is_ready() {
+			if stream.writer.poll_closed(waiter).is_ready() {
 				return Poll::Ready(Err(()));
 			}
 			if listed.poll_closed(waiter).is_ready() {
@@ -1207,7 +1201,7 @@ impl Publisher {
 			}
 		};
 		let live = kio::wait(|waiter| {
-			if stream.writer.poll_closed(&mut waiter.context()).is_ready() {
+			if stream.writer.poll_closed(waiter).is_ready() {
 				return Poll::Ready(Err(()));
 			}
 			if listed.poll_closed(waiter).is_ready() {
@@ -1633,13 +1627,13 @@ mod tests {
 			// The joined group's remainder, then the live group.
 			let mut opened = 0;
 			loop {
-				let recv = timeout(std::future::poll_fn(|cx| h.peer.poll_accept_uni(cx)))
+				let recv = timeout(kio::wait(|waiter| h.peer.poll_accept_uni(waiter)))
 					.await
 					.unwrap();
 				opened += 1;
 				let mut reader = crate::coding::Reader::new(crate::transport::boxed::RecvStream::new(recv), version);
 				let mut bytes = Vec::new();
-				while let Some(chunk) = timeout(std::future::poll_fn(|cx| reader.poll_read_chunk(cx, 1024)))
+				while let Some(chunk) = timeout(kio::wait(|waiter| reader.poll_read_chunk(waiter, 1024)))
 					.await
 					.unwrap()
 				{
@@ -1657,7 +1651,7 @@ mod tests {
 			group.write_frame(crate::Timestamp::ZERO, b"paused".as_slice()).unwrap();
 			group.finish().unwrap();
 			moq_clock::sleep(Duration::from_millis(10)).await;
-			let more = futures::poll!(std::future::poll_fn(|cx| h.peer.poll_accept_uni(cx)));
+			let more = futures::poll!(kio::wait(|waiter| h.peer.poll_accept_uni(waiter)));
 			assert!(more.is_pending(), "{version}: a paused PUBLISH forwarded");
 
 			// Ending the track while paused ends the PUBLISH, counting the streams it opened.
@@ -1710,12 +1704,12 @@ mod tests {
 				let mut group = data.append_group().unwrap();
 				group.write_frame(crate::Timestamp::ZERO, payload.clone()).unwrap();
 				group.finish().unwrap();
-				let recv = timeout(std::future::poll_fn(|cx| h.peer.poll_accept_uni(cx)))
+				let recv = timeout(kio::wait(|waiter| h.peer.poll_accept_uni(waiter)))
 					.await
 					.unwrap();
 				let mut reader = crate::coding::Reader::new(crate::transport::boxed::RecvStream::new(recv), version);
 				let mut bytes = Vec::new();
-				while let Some(chunk) = timeout(std::future::poll_fn(|cx| reader.poll_read_chunk(cx, 1024)))
+				while let Some(chunk) = timeout(kio::wait(|waiter| reader.poll_read_chunk(waiter, 1024)))
 					.await
 					.unwrap()
 				{
@@ -2044,7 +2038,7 @@ mod tests {
 			let mut group = video.append_group().unwrap();
 			group.write_frame(crate::Timestamp::ZERO, b"live".as_slice()).unwrap();
 			group.finish().unwrap();
-			timeout(std::future::poll_fn(|cx| h.peer.poll_accept_uni(cx)))
+			timeout(kio::wait(|waiter| h.peer.poll_accept_uni(waiter)))
 				.await
 				.unwrap();
 			drop(video);
@@ -2070,7 +2064,7 @@ mod tests {
 				..update(1, false)
 			};
 			send(&mut request, &bare).await;
-			let closed = timeout(std::future::poll_fn(|cx| h.peer.poll_closed(cx))).await;
+			let closed = timeout(kio::wait(|waiter| h.peer.poll_closed(waiter))).await;
 			assert!(
 				matches!(&closed, memory::Error::Session { reason, .. } if reason == "invalid request ID"),
 				"{version}: {closed:?}"

@@ -54,19 +54,16 @@ migration quest. web-transport-iroh decodes CONNECT with it, so an in-tree
 copy would duplicate the crate whenever iroh is on. Its QPACK bound ships as
 the upstream web-transport-proto 0.6.3 patch.
 
-Decided 2026-10-27 (maintainer): this waits on
-[moq-net polls on kio waiters](/quest/m1/quic-api/net-poll.md), not on
+Decided 2026-10-27 (maintainer): this waits only on moq-net's poll traits
+taking `&self, &kio::Waiter`, which
+[moq-dev/moq#7042](https://github.com/moq-dev/moq/pull/7042) landed, not on
 [native WebTransport](/quest/m1/quic-api/native-web.md). The iroh, wasm, and
-ffi impls need only net-poll's trait shape, so they need not wait for native
+ffi impls need only that trait shape, so they need not wait for native
 QUIC to move off the adapter. Whichever of native WebTransport and this quest
 lands second deletes the generic adapters; native WebTransport already
 expects to leave the adapter serving iroh. qmux uses `web-transport-trait`
 only as a dev-dependency, for its 0.6 interop tests, so it does not block the
 removal.
-
-## Required
-
-- [moq-net polls on kio waiters](/quest/m1/quic-api/net-poll.md) - the `&self, &kio::Waiter` trait shape the iroh, wasm, and ffi impls implement
 
 ## Related
 

@@ -184,10 +184,11 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 	publisher := dialWorker(t, ctx, url)
 	defer publisher.Close()
 
-	broadcast, err := publisher.CreateBroadcast("live")
+	publication, err := publisher.CreateBroadcast("live")
 	if err != nil {
 		t.Fatal(err)
 	}
+	broadcast := publication.Broadcast()
 	defer broadcast.Close()
 
 	track, err := broadcast.PublishTrack("data", timedInfo())
@@ -195,7 +196,7 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer track.Finish()
-	if err := broadcast.Announce(moq.AnnounceRoute{}); err != nil {
+	if err := publication.Announce(moq.AnnounceRoute{}); err != nil {
 		t.Fatal(err)
 	}
 
