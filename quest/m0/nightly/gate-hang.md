@@ -1,18 +1,20 @@
-# [S] Nightly's gate names a hung module
+# [S] Nightly's gate stops hanging
 
 ## Goal
 
-The test that hung the 2026-10-27 scheduled Nightly gate
-([job](https://github.com/moq-dev/moq/actions/runs/40506938673/job/122198526371),
-36 minutes with no output before the timeout) is found and fixed at its
-cause, and the gate prints per-module progress with timestamps, so a future
-hang names its module.
+Nightly's `just gate` step finishes instead of hanging until the job timeout,
+and when a test does hang, the log names the module that hung.
 
 ## Plan
 
-Found by [moq-dev/moq#6991](https://github.com/moq-dev/moq/pull/6991)'s
-replay. The gate buffers output per module, so the log cannot say which one
-hung. Reproduce with `just gate`, then add the timestamps. Never a retry or
-a longer timeout.
+[Run 40506938673](https://github.com/moq-dev/moq/actions/runs/40506938673/job/122198526371)
+on 2026-10-27 printed nothing for its last 36 minutes before the 60-minute
+timeout. Tooling-test output is buffered, so the hung module is not visible.
+Found while landing [moq-dev/moq#6991](https://github.com/moq-dev/moq/pull/6991).
 
-Public API: none.
+Decided 2026-10-28 (maintainer): one quest for both the fix and the
+visibility. Reproduce with `just gate`, fix the hung test at its cause (never
+a raised timeout), and make the gate's test output identify each module as it
+runs (unbuffered or per-module timestamps) so the next hang names itself.
+
+Public API: none. Wire: none.

@@ -32,6 +32,12 @@ relay and CLI `fetch --group`, and player continuity checks in the Rust and
 JS container consumers and `js/watch`. Update the hang draft and the docs
 each one makes stale; rename CLI flags per the repo's CLI rule.
 
+Added 2026-10-27 (maintainer, from an external release-to-main audit): an
+HLS exporter today requests the record tracks, but on-demand capture starts
+from media-track demand, so an HLS-only viewer never starts it. Once the
+export reads media tracks directly, prove that an HLS-only viewer of an
+on-demand publisher starts capture and gets a playlist.
+
 Public API: breaking where a consumer exposes group numbers (CLI
 `--group`, archive keys), and `moq_mux::hls`, `hang::hls`, and
 `catalog::Config::with_hls` are deleted. Wire: hang drops empty duration
