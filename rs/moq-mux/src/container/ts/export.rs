@@ -2757,6 +2757,11 @@ where
 
 		self.program.schedule.set_tables(pmt_pid);
 		self.program.schedule.set_clock(pcr_pid);
+		// A reader of the first tables has no program clock yet. Tables that take over from
+		// an earlier program's flag a break in the clock it already reads instead.
+		if !self.program.pcr_discontinuity {
+			self.program.schedule.open();
+		}
 		for track in self.program.tracks.values() {
 			self.program.liveness.register(track.pid);
 		}

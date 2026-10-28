@@ -3474,6 +3474,109 @@ async fn service_layer_survives_roundtrip() {
 	assert_eq!(program2.pmt_pid, program.pmt_pid, "PMT PID survived");
 }
 
+/// An export leads with its PAT and PMT, then a PCR interval on the clock they name, then
+/// its SI and media: a re-import places every SI table's first emission instead of dropping
+/// it until it repeats, padded or not, and every PES with it.
+#[tokio::test(start_paused = true)]
+async fn a_reimport_keeps_the_first_si() {
+	let data = include_bytes!("test_data/bbb.ts");
+	let nit = make_long_section(0x40, 0x1234, 1, 0, 0, &[0xf0, 0x00]);
+	// Past bbb's PCRs, where its import keeps SI: bbb's own SDT precedes them.
+	let mut input = data.to_vec();
+	input.extend_from_slice(&si_packet(0x0010, &nit));
+	let mut sdt = data[..188].to_vec();
+	sdt[3] = (sdt[3] & 0xf0) | ((sdt[3] + 1) & 0x0f);
+	input.extend_from_slice(&sdt);
+	let sdt = ts_sections(&sdt, 0x0011);
+
+	// Each export reads an import of its own.
+	for rate in [None, Some(5_000_000)] {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+		)
+		.unwrap();
+		let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
+		import.decode(&BytesMut::from(&input[..])).unwrap();
+		import.finish().unwrap();
+		let units = |stats: super::stats::Snapshot| {
+			stats
+				.streams
+				.iter()
+				.filter(|(_, stream)| stream.units > 0)
+				.map(|(pid, stream)| (*pid, stream.units))
+				.collect::<Vec<_>>()
+		};
+		let imported = units(import.stats());
+
+		let mut export = open_ts(
+			crate::source::announced(&consumer).await,
+			crate::catalog::CatalogFormat::Hang,
+		)
+		.await
+		.unwrap();
+		if let Some(rate) = rate {
+			export = export.with_mux_rate(rate);
+		}
+		let ts = drain_with(export).await;
+		assert_packet_aligned(&ts);
+
+		// Nothing but the tables and the clock goes out before the PMT and two PCRs after it.
+		let packets = ts.as_chunks::<188>().0;
+		let pid = |packet: &[u8; 188]| u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2]);
+		let pmt = packets.iter().position(|packet| pid(packet) == 0x1000).expect("a PMT");
+		let clock = packets
+			.iter()
+			.enumerate()
+			.skip(pmt)
+			.filter(|(_, packet)| super::import::pcr(packet).is_some())
+			.nth(1)
+			.expect("two PCRs after the PMT")
+			.0;
+		let first = packets
+			.iter()
+			.position(|packet| ![0, 0x1000, 0x1fff].contains(&pid(packet)) && packet[3] & 0x10 != 0)
+			.expect("SI and media");
+		assert!(
+			first >= clock,
+			"{rate:?}: a payload at packet {first}, the PMT at {pmt} and its second PCR at {clock}"
+		);
+
+		let mut broadcast2 = moq_net::broadcast::Info::new().produce();
+		let consumer2 = broadcast2.consume();
+		let catalog2 = crate::catalog::Producer::new(
+			&mut broadcast2,
+			crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+		)
+		.unwrap();
+		let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.reserve());
+		import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
+		import2.finish().unwrap();
+		let stats = import2.stats();
+		for (pid, stream) in &stats.streams {
+			assert_eq!(
+				stream.unplaced, 0,
+				"{rate:?}: PID {pid:#x} dropped what it could not place"
+			);
+		}
+		assert_eq!(units(stats), imported, "{rate:?}: every PES");
+
+		let si = catalog2.snapshot().ext.mpegts.si;
+		assert_eq!(
+			read_si_sections(&consumer2, &si[&0x0010][&0x40].track).await,
+			vec![Bytes::from(nit.clone())],
+			"{rate:?}: the NIT"
+		);
+		assert_eq!(
+			read_si_sections(&consumer2, &si[&0x0011][&0x42].track).await,
+			sdt,
+			"{rate:?}: the SDT"
+		);
+	}
+}
+
 /// Each SI PID must be re-emitted on its own interval, independently of the PSI cadence
 /// and of video keyframes. The fixtures are a fraction of a second long, so nothing else
 /// distinguishes a correct interval from "emitted once and never again": this builds a
@@ -4739,9 +4842,7 @@ async fn a_selected_programs_si_survives_export() {
 	);
 }
 
-/// The sections `ts` carries on `pid`, each whole in one packet. Read off the wire rather
-/// than by a re-import: SI an export leads with precedes its PCRs, so an import drops it
-/// until it repeats.
+/// The sections `ts` carries on `pid`, each whole in one packet, read off the wire.
 fn ts_sections(ts: &[u8], pid: u16) -> Vec<Bytes> {
 	ts.chunks(188)
 		.filter(|p| (u16::from(p[1] & 0x1f) << 8 | u16::from(p[2])) == pid && p[1] & 0x40 != 0)
