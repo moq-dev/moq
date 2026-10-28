@@ -67,7 +67,10 @@ type Served = ReturnType<typeof serve>;
 function writeGroup(track: TrackProducer, sequence: number, payloads: string[], finish = true) {
 	const group = track.createGroup(sequence);
 	for (const [object, payload] of payloads.entries()) {
-		group.writeFrame({ payload: new TextEncoder().encode(payload), timestamp: new Timestamp(object, Timescale.MILLI) });
+		group.writeFrame({
+			payload: new TextEncoder().encode(payload),
+			timestamp: new Timestamp(object, Timescale.MILLI),
+		});
 	}
 	if (finish) group.finish();
 	return group;
@@ -82,7 +85,9 @@ function publishPairs(track: TrackProducer, count: number, hole?: number) {
 
 /** The `[group, object, payload]` a run of two-object groups holds. */
 function pairs(groups: number[]): [number, number, string][] {
-	return groups.flatMap((group) => [0, 1].map((object): [number, number, string] => [group, object, `${group}-${object}`]));
+	return groups.flatMap((group) =>
+		[0, 1].map((object): [number, number, string] => [group, object, `${group}-${object}`]),
+	);
 }
 
 /**
@@ -216,7 +221,10 @@ function refused(answer: Answer): number {
 test("FETCH and FETCH_OK round trip on every draft", async () => {
 	const encode = async (msg: Fetch | FetchOk, version: IetfVersion) => {
 		const chunks: Uint8Array[] = [];
-		const writer = new Writer(new WritableStream({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }), version);
+		const writer = new Writer(
+			new WritableStream({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
+			version,
+		);
 		await msg.encode(writer, version);
 		writer.close();
 		await writer.closed;
@@ -247,7 +255,9 @@ test("a FETCH of one whole group", async () => {
 	for (const version of VERSIONS) {
 		using fx = serve(version);
 		publishPairs(fx.track, 5);
-		const answer = served(await fetch(fx, new Fetch({ requestId: FETCH_ID, type: range(version, at(2, 0), at(2, 0)) })));
+		const answer = served(
+			await fetch(fx, new Fetch({ requestId: FETCH_ID, type: range(version, at(2, 0), at(2, 0)) })),
+		);
 		// A whole-group answer before draft-22 keeps Object 0 rather than claiming the next group.
 		expect(answer.ok.endLocation).toEqual(version === D18 ? at(2, 0) : at(2, 1));
 		expect(answer.ok.endOfTrack).toBe(false);
@@ -261,7 +271,9 @@ test("a FETCH stops at its end object", async () => {
 	for (const version of VERSIONS) {
 		using fx = serve(version);
 		publishPairs(fx.track, 5);
-		const answer = served(await fetch(fx, new Fetch({ requestId: FETCH_ID, type: range(version, at(2, 0), at(2, 1)) })));
+		const answer = served(
+			await fetch(fx, new Fetch({ requestId: FETCH_ID, type: range(version, at(2, 0), at(2, 1)) })),
+		);
 		expect(answer.ok.endLocation).toEqual(endAt(version, 2, 0));
 		expect(answer.objects).toEqual(pairs([2]).slice(0, 1));
 	}
@@ -290,19 +302,25 @@ test("a FETCH through the final object reports the end of track", async () => {
 		publishPairs(fx.track, 5);
 		fx.track.finish();
 
-		const last = served(await fetch(fx, new Fetch({ requestId: FETCH_ID, type: range(version, at(4, 1), at(4, 0)) })));
+		const last = served(
+			await fetch(fx, new Fetch({ requestId: FETCH_ID, type: range(version, at(4, 1), at(4, 0)) })),
+		);
 		expect(last.ok.endLocation).toEqual(version === D18 ? at(4, 0) : at(4, 1));
 		expect(last.ok.endOfTrack).toBe(true);
 		expect(last.objects).toEqual(pairs([4]).slice(1));
 
 		// Capped at the track's last group, so the End Location names its last object.
-		const past = served(await fetch(fx, new Fetch({ requestId: FETCH_ID, type: range(version, at(3, 0), at(9, 0)) })));
+		const past = served(
+			await fetch(fx, new Fetch({ requestId: FETCH_ID, type: range(version, at(3, 0), at(9, 0)) })),
+		);
 		expect(past.ok.endLocation).toEqual(endAt(version, 4, 1));
 		expect(past.ok.endOfTrack).toBe(true);
 		expect(past.objects).toEqual(pairs([3, 4]));
 
 		// A shorter prefix must not claim the track ends there.
-		const prefix = served(await fetch(fx, new Fetch({ requestId: FETCH_ID, type: range(version, at(4, 0), at(4, 1)) })));
+		const prefix = served(
+			await fetch(fx, new Fetch({ requestId: FETCH_ID, type: range(version, at(4, 0), at(4, 1)) })),
+		);
 		expect(prefix.ok.endOfTrack).toBe(false);
 	}
 });
@@ -361,7 +379,9 @@ test("a FETCH skips a datagram", async () => {
 		expect(fx.track.appendDatagram(new Timestamp(0, Timescale.MILLI), new Uint8Array([1]))).toBe(3);
 		writeGroup(fx.track, 4, ["4-0"]);
 
-		const answer = served(await fetch(fx, new Fetch({ requestId: FETCH_ID, type: range(version, at(1, 0), at(3, 0)) })));
+		const answer = served(
+			await fetch(fx, new Fetch({ requestId: FETCH_ID, type: range(version, at(1, 0), at(3, 0)) })),
+		);
 		// The End Location names the last object sent rather than promising the datagram.
 		expect(answer.ok.endLocation).toEqual(endAt(version, 2, 1));
 		expect(answer.objects).toEqual(pairs([1, 2]));

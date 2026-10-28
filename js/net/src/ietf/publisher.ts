@@ -1504,7 +1504,15 @@ export class Publisher {
 			if (slice.until !== undefined && frame.sequence >= slice.until) break;
 
 			const sequence = group.sequence;
-			previous = await this.#writeFetchObject({ stream, sequence, frame, first, previous, timescale, stop: cancelled });
+			previous = await this.#writeFetchObject({
+				stream,
+				sequence,
+				frame,
+				first,
+				previous,
+				timescale,
+				stop: cancelled,
+			});
 			first = false;
 		}
 		return previous;
@@ -3160,11 +3168,13 @@ export class Publisher {
 		signal: AbortSignal,
 	): Promise<FetchAnswer | Refusal> {
 		if (!join) return { condition: "invalid_joining_request_id", reasonPhrase: "no such subscription" };
-		if (join.kind === "unsupported") return { condition: "not_supported", reasonPhrase: "joining filter not supported" };
+		if (join.kind === "unsupported")
+			return { condition: "not_supported", reasonPhrase: "joining filter not supported" };
 		const largest = join.largest;
 		if (!largest) return { condition: "invalid_range", reasonPhrase: "no objects at subscription start" };
 		const start = type.kind === "relativeJoining" ? saturatingSub(largest.group, type.offset) : type.group;
-		if (start > largest.group) return { condition: "invalid_range", reasonPhrase: "joining group past the subscription" };
+		if (start > largest.group)
+			return { condition: "invalid_range", reasonPhrase: "joining group past the subscription" };
 		// The groups before the subscription's are a standalone FETCH's to ask for.
 		if (start !== largest.group)
 			return { condition: "not_supported", reasonPhrase: "joining FETCH spans more than one group" };
@@ -3233,7 +3243,15 @@ export class Publisher {
 				if (sequence === last.sequence) {
 					let first = true;
 					for (const frame of last.frames) {
-						previous = await this.#writeFetchObject({ stream, sequence, frame, first, previous, timescale, stop });
+						previous = await this.#writeFetchObject({
+							stream,
+							sequence,
+							frame,
+							first,
+							previous,
+							timescale,
+							stop,
+						});
 						first = false;
 					}
 					continue;
@@ -3243,7 +3261,14 @@ export class Publisher {
 				if (!group) continue;
 				try {
 					const slice = fetchSlice(range, sequence);
-					previous = await this.#writeFillGroup({ stream, group, slice, timescale, cancelled: stop, previous });
+					previous = await this.#writeFillGroup({
+						stream,
+						group,
+						slice,
+						timescale,
+						cancelled: stop,
+						previous,
+					});
 				} finally {
 					group.close();
 				}
