@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
+import Qmux from "@moq/qmux";
 import { accept } from "../connection/accept.ts";
 import { connect } from "../connection/connect.ts";
 import { SessionCode, SessionError } from "../error.ts";
@@ -254,6 +255,29 @@ function finAfterClose(transport: MockTransport) {
 	};
 }
 
+// A qmux session pair over an in-memory socket. Unlike the mock, its receive streams are
+// pull-driven, so a stream's FIN surfaces only to a read.
+function qmuxPair(): { client: WebTransport; server: WebTransport } {
+	const socket = (readable: ReadableStream<Uint8Array>, writable: WritableStream<Uint8Array>) => {
+		const closed = Promise.withResolvers<{ closeCode: number; reason: string }>();
+		return {
+			url: "",
+			opened: Promise.resolve({ readable, writable, extensions: "", protocol: "qmux-01" }),
+			closed: closed.promise,
+			close: () => closed.resolve({ closeCode: 1000, reason: "" }),
+		};
+	};
+	// Copied, since a sender may reuse its buffer once a write resolves.
+	const pipe = () =>
+		new TransformStream<Uint8Array, Uint8Array>({ transform: (chunk, c) => c.enqueue(chunk.slice()) });
+	const up = pipe();
+	const down = pipe();
+	const config = { idleTimeout: null };
+	const client = new Qmux(socket(down.readable, up.writable), { config });
+	const server = Qmux.accept(socket(up.readable, down.writable), { config });
+	return { client, server };
+}
+
 // Holds the one-second close deadline on a manual clock, so a test fires it by hand instead of waiting.
 function mockDeadline() {
 	const clock = new Manual();
@@ -369,6 +393,48 @@ for (const [alpn, version] of [
 				const group = await track.nextGroup();
 				for (const frame of frames) expect(await group?.readString()).toBe(frame);
 				expect(await group?.readString()).toBeUndefined();
+				expect(await track.nextGroup()).toBeUndefined();
+			} finally {
+				track.close();
+				remote.close();
+				client.abort();
+				server.abort();
+				broadcast.close();
+				origin.close();
+			}
+		});
+	}
+
+	// The subscriber reads a legacy subscribe stream to its FIN, since QMux closes a stream only
+	// on a read; awaiting the FIN instead would hold the closing session's drain forever.
+	if (!hasTrackStream(version)) {
+		test(`a peer close finishes a FIN'd track over qmux ${versionName(version)}`, async () => {
+			const pair = qmuxPair();
+			const origin = new Producer();
+			const broadcastPublication = origin.createBroadcast(Path.from("room"));
+			const broadcast = broadcastPublication.broadcast;
+			broadcastPublication.announce();
+			const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+			const url = new URL("https://localhost/test");
+			const client = new Connection({ url, quic: pair.client, version });
+			const server = new Connection({
+				url,
+				quic: pair.server,
+				version,
+				publish: origin.consume(),
+				client: false,
+			});
+			const remote = wireOf(client).consume(Path.from("room"));
+			const track = remote.track("video").subscribe().ordered();
+			try {
+				const group = producer.appendGroup();
+				group.writeFrame(textFrame("only"));
+				group.finish();
+				expect(await (await track.nextGroup())?.readString()).toBe("only");
+
+				producer.finish();
+				producer.close();
+				await server.close();
 				expect(await track.nextGroup()).toBeUndefined();
 			} finally {
 				track.close();

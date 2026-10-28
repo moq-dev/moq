@@ -966,15 +966,10 @@ export class Subscriber {
 			// don't carry SUBSCRIBE_UPDATE on the wire, so skip the watcher there
 			// and just wait on the stream/track like before.
 			//
-			// On lite-05+ the publisher sends SUBSCRIBE_START/END/DROP on this stream until
-			// its FIN; older drafts just close it. Either way group streams can still be in
-			// flight, so the track ends only once the tail is accounted for. A reset rejects
-			// instead, so the track ends with that error rather than a clean tail.
-			const responses = hasTrackStream(this.version)
-				? this.runResponses(stream, entry)
-				: stream.reader.closed.then(() => {
-						entry.finished = true;
-					});
+			// The publisher sends responses on this stream until its FIN. Group streams can
+			// still be in flight, so the track ends only once the tail is accounted for. A reset
+			// rejects instead, so the track ends with that error rather than a clean tail.
+			const responses = this.runResponses(stream, entry);
 			entry.responses = responses.catch(() => {});
 			let tailSettled = false;
 			// Set when the publisher ended the subscription short of the demand.
@@ -1449,11 +1444,13 @@ export class Subscriber {
 		}
 	}
 
-	// Reads SUBSCRIBE_START/END/DROP on the subscribe stream until FIN (lite-05+), recording
-	// the range the tail is accounted against. SUBSCRIBE_END declares the track's end right
-	// away, so a consumer learns it before the last groups arrive. The publisher must declare
-	// the end before FIN unless we cancelled locally, or on lite-07 it covered a bounded range;
-	// resets and malformed responses reject.
+	// Reads the subscribe stream's responses until FIN, recording the range the tail is
+	// accounted against: SUBSCRIBE_START/END/DROP on lite-05+, and any SUBSCRIBE_DROP after the
+	// OK before then, where the FIN itself ends the track. Reading to the FIN, rather than
+	// awaiting it, matters: a pull-driven transport stream closes only on a read.
+	// SUBSCRIBE_END declares the track's end right away, so a consumer learns it before the
+	// last groups arrive. The publisher must declare the end before FIN unless we cancelled
+	// locally, or on lite-07 it covered a bounded range; resets and malformed responses reject.
 	private async runResponses(stream: Stream, entry: SubscribeEntry): Promise<void> {
 		for (;;) {
 			const resp = await decodeSubscribeResponseMaybe(stream.reader, this.version);
@@ -1463,6 +1460,11 @@ export class Subscriber {
 			entry.answered?.();
 			entry.answered = undefined;
 			if (!resp) {
+				// Before lite-05 the FIN is the track's only end.
+				if (!hasTrackStream(this.version)) {
+					entry.finished = true;
+					return;
+				}
 				// A bounded range may have widened since, in an update the publisher never read.
 				const covered = hasRanges(this.version) && entry.bounded;
 				if (entry.end === undefined && !covered && hooks.trackReleased(entry.track).peek() === undefined)
@@ -1470,6 +1472,7 @@ export class Subscriber {
 				return;
 			}
 
+			if ("ok" in resp) throw new ProtocolViolation("duplicate SUBSCRIBE_OK");
 			if ("start" in resp) {
 				entry.start = resp.start.group;
 				hooks.startTrack(entry.track, { start: entry.start, requested: entry.requested });
