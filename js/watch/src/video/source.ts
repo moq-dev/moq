@@ -186,7 +186,7 @@ function byBitrate(target: number): RenditionFilter {
 	};
 }
 
-/** Return the renditions that may be selected: a disabled one has no frames coming. */
+/** Return the renditions that may be newly selected: a disabled one has no frames coming. */
 function enabledRenditions(renditions: Record<string, Catalog.VideoConfig>): Record<string, Catalog.VideoConfig> {
 	return Object.fromEntries(Object.entries(renditions).filter(([, config]) => config.enabled !== false));
 }
@@ -219,6 +219,9 @@ export class Source {
 	#pending = new Signal(false);
 	/** Whether rendition support is still being resolved. @internal */
 	readonly pending: Getter<boolean> = this.#pending;
+
+	// The last selection, which a disable holds while no enabled rendition remains.
+	#held?: { broadcast: Broadcast; track: string };
 
 	#signals = new Effect();
 	#supportCache = new WeakMap<Supported, Map<string, { key: string; supported: boolean }>>();
@@ -315,17 +318,23 @@ export class Source {
 	}
 
 	#runSelected(effect: Effect): void {
-		const available = enabledRenditions(effect.get(this.#out.available));
+		const broadcast = effect.get(this.in.broadcast);
+		const all = effect.get(this.#out.available);
+		const available = enabledRenditions(all);
 		const target = effect.get(this.in.target);
 
-		if (target?.name && target.name in available) {
-			const config = available[target.name];
-			effect.set(this.#out.track, target.name);
-			effect.set(this.#out.config, config);
-			return;
-		}
+		const selected = this.#choose(effect, available, target) ?? this.#hold(broadcast, all);
+		this.#held = selected && broadcast ? { broadcast, track: selected } : undefined;
+		if (!selected) return;
 
-		if (Object.keys(available).length === 0) return;
+		effect.set(this.#out.track, selected);
+		effect.set(this.#out.config, all[selected]);
+	}
+
+	// Pick among the enabled renditions.
+	#choose(effect: Effect, available: Record<string, Catalog.VideoConfig>, target?: Target): string | undefined {
+		if (target?.name && target.name in available) return target.name;
+		if (Object.keys(available).length === 0) return undefined;
 
 		// Auto-select: use recv bandwidth if no explicit bitrate target.
 		let effectiveTarget = target;
@@ -338,13 +347,16 @@ export class Source {
 			}
 		}
 
-		const selected = this.#select(preferredRenditions(available), effectiveTarget);
-		if (!selected) return;
+		return this.#select(preferredRenditions(available), effectiveTarget);
+	}
 
-		const config = available[selected];
-
-		effect.set(this.#out.track, selected);
-		effect.set(this.#out.config, config);
+	// Every rendition is disabled: keep the selected one, and its subscription, so the re-enable
+	// plays without a resubscribe. A removed rendition, or another broadcast, starts over.
+	#hold(broadcast: Broadcast | undefined, all: Record<string, Catalog.VideoConfig>): string | undefined {
+		if (Object.values(all).some((config) => config.enabled !== false)) return undefined;
+		const held = this.#held;
+		if (!held || held.broadcast !== broadcast || !(held.track in all)) return undefined;
+		return held.track;
 	}
 
 	/**

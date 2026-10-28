@@ -4,12 +4,13 @@
 
 Every first-party Rust consumer keeps its selected rendition, and its
 subscription, while the publisher has it disabled and no enabled alternative
-exists, as [@moq/watch does](/quest/m1/push-to-talk/hold-js.md).
+exists, as `@moq/watch` does (`js/watch/src/audio/source.ts` and
+`video/source.ts`, `#hold`).
 
 ## Plan
 
 Decided 2026-10-28 (maintainer): the hold applies in every first-party
-consumer, with the same rule as the JS quest. Initial selection skips disabled
+consumer, with the same rule as `@moq/watch`. Initial selection skips disabled
 renditions, an enabled alternative wins, and a removed rendition is dropped.
 
 - `rs/moq-mux/src/select.rs:93,121`: the selection filters require
@@ -23,13 +24,11 @@ renditions, an enabled alternative wins, and a removed rendition is dropped.
 already expects a held listener to keep demand on a single audio rendition
 disabled below the codec floor.
 
-The spec wording lands with whichever hold quest lands first.
+The hang spec and catalog docs already say "should not select".
 
-Tests: the JS quest's cases, in moq-mux select and moq-ffi.
+Tests: `@moq/watch`'s cases (mute then unmute keeps one subscription, an
+enabled alternative takes over, a rendition removed while held is dropped), in
+moq-mux select and moq-ffi.
 
 Public API: moq-ffi returns a held disabled rendition where it returned
 `NotFound`. Wire: none.
-
-## Related
-
-- [JS consumers hold a disabled rendition](/quest/m1/push-to-talk/hold-js.md) - the same rule in JS

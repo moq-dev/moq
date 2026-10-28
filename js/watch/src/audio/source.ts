@@ -60,6 +60,9 @@ export class Source {
 	/** Whether rendition support is still being resolved. @internal */
 	readonly pending: Getter<boolean> = this.#pending;
 
+	// The last selection, which a disable holds while no enabled rendition remains.
+	#held?: { broadcast: Broadcast; track: string };
+
 	#signals = new Effect();
 
 	constructor(props?: Inputs<SourceInput>) {
@@ -126,59 +129,44 @@ export class Source {
 	}
 
 	#runSelected(effect: Effect): void {
-		// A disabled rendition has no frames coming, so it is never selected, even by name.
-		const available = Object.fromEntries(
-			Object.entries(effect.get(this.#out.available)).filter(([, config]) => config.enabled !== false),
-		);
-		if (Object.keys(available).length === 0) return;
-
+		const broadcast = effect.get(this.in.broadcast);
+		const all = effect.get(this.#out.available);
 		const target = effect.get(this.in.target);
 
-		let selected: { track: string; config: Catalog.AudioConfig } | undefined;
+		// A disabled rendition has no frames coming, so it is never newly selected, even by name.
+		const available = Object.fromEntries(Object.entries(all).filter(([, config]) => config.enabled !== false));
 
-		// Manual selection by name
-		if (target?.name && target.name in available) {
-			selected = { track: target.name, config: available[target.name] };
-		} else {
-			// Automatic selection
-			selected = this.#select(available);
-			if (!selected) return;
-		}
+		const track =
+			target?.name && target.name in available
+				? target.name
+				: (this.#select(available) ?? this.#hold(broadcast, all));
+		this.#held = track && broadcast ? { broadcast, track } : undefined;
+		if (!track) return;
 
-		effect.set(this.#out.track, selected.track);
-		effect.set(this.#out.config, selected.config);
+		const config = all[track];
+		effect.set(this.#out.track, track);
+		effect.set(this.#out.config, config);
+		effect.set(this.#out.jitter, config.jitter !== undefined ? Milli(config.jitter) : undefined);
+	}
 
-		const jitter = selected.config.jitter;
-		effect.set(this.#out.jitter, jitter !== undefined ? Milli(jitter) : undefined);
+	// Every rendition is disabled: keep the selected one, and its subscription, so the re-enable
+	// plays without a resubscribe. A removed rendition, or another broadcast, starts over.
+	#hold(broadcast: Broadcast | undefined, all: Record<string, Catalog.AudioConfig>): string | undefined {
+		if (Object.values(all).some((config) => config.enabled !== false)) return undefined;
+		const held = this.#held;
+		if (!held || held.broadcast !== broadcast || !(held.track in all)) return undefined;
+		return held.track;
 	}
 
 	/**
 	 * Select rendition based on the configured strategy.
 	 */
-	#select(
-		renditions: Record<string, Catalog.AudioConfig>,
-	): { track: string; config: Catalog.AudioConfig } | undefined {
+	#select(renditions: Record<string, Catalog.AudioConfig>): string | undefined {
 		const entries = Object.entries(renditions);
-		if (entries.length === 0) return undefined;
-
-		for (const [track, config] of entries) {
-			if (config.container.kind === "legacy") {
-				return { track, config };
-			}
+		for (const kind of ["legacy", "loc", "cmaf"]) {
+			const found = entries.find(([, config]) => config.container.kind === kind);
+			if (found) return found[0];
 		}
-
-		for (const [track, config] of entries) {
-			if (config.container.kind === "loc") {
-				return { track, config };
-			}
-		}
-
-		for (const [track, config] of entries) {
-			if (config.container.kind === "cmaf") {
-				return { track, config };
-			}
-		}
-
 		return undefined;
 	}
 

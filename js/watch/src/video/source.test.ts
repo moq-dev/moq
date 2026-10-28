@@ -241,6 +241,62 @@ describe("Source disabled rendition selection", () => {
 		source.close();
 	});
 
+	it("holds the selected rendition while every rendition is disabled", async () => {
+		const state = mutableBroadcast({
+			low: config("avc1.64001e", { bitrate: 1_000_000 }),
+			high: config("avc1.640028", { bitrate: 2_000_000 }),
+		});
+		const source = new Source({ broadcast: state.broadcast, supported: async () => true });
+
+		await settle();
+		expect(source.out.track.peek()).toBe("high");
+
+		state.catalog.set({
+			video: {
+				renditions: {
+					low: config("avc1.64001e", { bitrate: 1_000_000, enabled: false }),
+					high: config("avc1.640028", { bitrate: 2_000_000, enabled: false }),
+				},
+			},
+		});
+		await settle();
+		expect(source.out.track.peek()).toBe("high");
+		expect(source.out.config.peek()?.enabled).toBe(false);
+
+		// An enabled alternative takes over from the held rendition.
+		state.catalog.set({
+			video: {
+				renditions: {
+					low: config("avc1.64001e", { bitrate: 1_000_000 }),
+					high: config("avc1.640028", { bitrate: 2_000_000, enabled: false }),
+				},
+			},
+		});
+		await settle();
+		expect(source.out.track.peek()).toBe("low");
+		source.close();
+	});
+
+	it("drops a held rendition once it is removed", async () => {
+		const state = mutableBroadcast({ high: config("avc1.640028", { bitrate: 2_000_000 }) });
+		const source = new Source({ broadcast: state.broadcast, supported: async () => true });
+
+		await settle();
+		state.catalog.set({
+			video: { renditions: { high: config("avc1.640028", { bitrate: 2_000_000, enabled: false }) } },
+		});
+		await settle();
+		expect(source.out.track.peek()).toBe("high");
+
+		state.catalog.set({
+			video: { renditions: { low: config("avc1.64001e", { bitrate: 1_000_000, enabled: false }) } },
+		});
+		await settle();
+		expect(source.out.track.peek()).toBeUndefined();
+		expect(source.out.config.peek()).toBeUndefined();
+		source.close();
+	});
+
 	it("ignores a legacy stalled flag", async () => {
 		const source = new Source({
 			broadcast: mockBroadcast({
