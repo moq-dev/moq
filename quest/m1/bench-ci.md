@@ -58,6 +58,18 @@ the hosted runners, so its noise is near zero, and it is free for open source.
 It does not measure syscalls, I/O, or contention, so the relay load, uring,
 transport, and session sweeps stay on the paired hosted comparison.
 
+Observed 2026-10-28, before any A/A run: the last two scheduled Nightlies'
+gates failed with only slowdowns, and their rounds mostly agree within a few
+points. `22808bbb2` against `8810d7365` confirmed 5 (net
+retirement selection about +23%); `270395a33` against `22808bbb2` confirmed
+20 across three groups (net `codec_messages/encode/lite` +67.7%,
+`group_write_frames/batch32/*` about +45%). A one-signed, tightly agreeing
+result is either a real regression or a systematic bias between the base and
+head builds or run order, which noise would not produce; the A/A run tells
+them apart. If the A/A run also confirms regressions, fix that bias and adopt
+CodSpeed for the pure-CPU benches. If it is clean, bisect the reported cases
+and fix the regressions.
+
 The A/A calibration includes moq-quic's windowed `benches/streams.rs` cases:
 on a shared host the unchanged base alone varied 17 to 43% between
 back-to-back runs ([moq-dev/moq#6950](https://github.com/moq-dev/moq/pull/6950)).
