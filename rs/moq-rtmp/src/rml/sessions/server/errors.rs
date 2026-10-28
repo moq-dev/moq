@@ -7,6 +7,10 @@ use thiserror::Error;
 /// Represents the type of error that occurred
 #[derive(Debug, Error)]
 pub enum ServerSessionError {
+	/// A connection may request one app for its entire lifetime.
+	#[error("connect was already requested")]
+	RepeatedConnect,
+
 	/// Encountered when an error occurs while deserializing the incoming byte data
 	#[error("An error occurred deserializing incoming data: {0}")]
 	ChunkDeserializationError(#[from] ChunkDeserializationError),

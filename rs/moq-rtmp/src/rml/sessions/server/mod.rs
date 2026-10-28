@@ -53,13 +53,11 @@ pub struct ServerSession {
 	serializer: ChunkSerializer,
 	deserializer: ChunkDeserializer,
 	connected_app_name: Option<String>,
-	outstanding_requests: HashMap<u32, OutstandingRequest>,
-	next_request_number: u32,
+	request: Option<OutstandingRequest>,
 	current_state: SessionState,
 	fms_version: String,
 	object_encoding: f64,
-	active_streams: HashMap<u32, ActiveStream>,
-	next_stream_id: u32,
+	active_stream: Option<ActiveStream>,
 	peer_window_ack_size: Option<u32>,
 	bytes_received: u64,
 	bytes_received_since_last_ack: u32,
@@ -78,13 +76,11 @@ impl ServerSession {
 			serializer: ChunkSerializer::new(),
 			deserializer: ChunkDeserializer::new(),
 			connected_app_name: None,
-			outstanding_requests: HashMap::new(),
-			next_request_number: 0,
+			request: None,
 			current_state: SessionState::Started,
 			fms_version: config.fms_version,
 			object_encoding: 0.0,
-			active_streams: HashMap::new(),
-			next_stream_id: 1,
+			active_stream: None,
 			peer_window_ack_size: None,
 			bytes_received: 0,
 			bytes_received_since_last_ack: 0,
@@ -244,7 +240,10 @@ impl ServerSession {
 
 	/// Tells the server session that it should accept an outstanding request
 	pub fn accept_request(&mut self, request_id: u32) -> Result<Vec<ServerSessionResult>, ServerSessionError> {
-		let request = match self.outstanding_requests.remove(&request_id) {
+		if self.request.as_ref().map(OutstandingRequest::id) != Some(request_id) {
+			return Err(ServerSessionError::InvalidRequestId);
+		}
+		let request = match self.request.take() {
 			Some(x) => x,
 			None => return Err(ServerSessionError::InvalidRequestId),
 		};
@@ -274,10 +273,16 @@ impl ServerSession {
 		code: &str,
 		description: &str,
 	) -> Result<Vec<ServerSessionResult>, ServerSessionError> {
-		let request = match self.outstanding_requests.remove(&request_id) {
+		if self.request.as_ref().map(OutstandingRequest::id) != Some(request_id) {
+			return Err(ServerSessionError::InvalidRequestId);
+		}
+		let request = match self.request.take() {
 			Some(x) => x,
 			None => return Err(ServerSessionError::InvalidRequestId),
 		};
+
+		self.current_state = SessionState::Completed;
+		self.active_stream = None;
 
 		let (transaction_id, stream_id) = match request {
 			OutstandingRequest::ConnectionRequest { transaction_id, .. } => (transaction_id, 0),
@@ -397,7 +402,7 @@ impl ServerSession {
 	/// Changes stream to Completed, and sends out an
 	/// `onStatus(code: NetStream.Play.Complete)`
 	pub fn finish_playing(&mut self, stream_id: u32) -> Result<Packet, ServerSessionError> {
-		let stream_key = match self.active_streams.get_mut(&stream_id) {
+		let stream_key = match self.active_stream.as_mut().filter(|_| stream_id == 1) {
 			Some(ActiveStream { current_state: state }) => {
 				let k = match state {
 					StreamState::Playing { stream_key: k } => k.clone(),
@@ -461,9 +466,8 @@ impl ServerSession {
 	) -> Result<Vec<ServerSessionResult>, ServerSessionError> {
 		let results = match name {
 			"connect" => self.handle_command_connect(transaction_id, command_object)?,
-			"closeStream" => self.handle_command_close_stream(additional_args)?,
+			"closeStream" | "deleteStream" => self.handle_command_close_stream(additional_args)?,
 			"createStream" => self.handle_command_create_stream(transaction_id)?,
-			"deleteStream" => self.handle_command_delete_stream(additional_args)?,
 			"play" => self.handle_command_play(stream_id, transaction_id, additional_args)?,
 			"publish" => self.handle_command_publish(stream_id, transaction_id, additional_args)?,
 
@@ -483,6 +487,10 @@ impl ServerSession {
 		transaction_id: f64,
 		command_object: Value<'_>,
 	) -> Result<Vec<ServerSessionResult>, ServerSessionError> {
+		if self.current_state != SessionState::Started || self.request.is_some() {
+			return Err(ServerSessionError::RepeatedConnect);
+		}
+
 		let properties = match command_object {
 			Value::Object(properties) => properties,
 			_ => return Err(ServerSessionError::NoAppNameForConnectionRequest),
@@ -542,9 +550,8 @@ impl ServerSession {
 			transaction_id,
 		};
 
-		let request_number = self.next_request_number;
-		self.next_request_number = self.next_request_number + 1;
-		self.outstanding_requests.insert(request_number, request);
+		let request_number = request.id();
+		self.request = Some(request);
 
 		let event = ServerSessionEvent::ConnectionRequested {
 			app_name: app_name,
@@ -661,10 +668,18 @@ impl ServerSession {
 			_ => return Ok(Vec::new()),
 		};
 
-		let stream = match self.active_streams.get_mut(&stream_id) {
+		let stream = match self.active_stream.as_mut().filter(|_| stream_id == 1) {
 			Some(x) => x,
 			None => return Ok(Vec::new()),
 		};
+
+		if !matches!(
+			stream.current_state,
+			StreamState::Publishing { .. } | StreamState::Playing { .. }
+		) {
+			let packet = self.create_error_packet("NetStream.Call.Failed", "stream has not started", 0.0, stream_id)?;
+			return Ok(vec![ServerSessionResult::OutboundResponse(packet)]);
+		}
 
 		// Before we change the stream state we need to grab the info from it for any
 		// events that need to be raised
@@ -693,9 +708,10 @@ impl ServerSession {
 			_ => Vec::new(),
 		};
 
-		// As afar as we are concerned, a created and closed stream are equivalent.  Both allow
-		// reusing the stream
-		stream.current_state = StreamState::Created;
+		// A connection carries one publisher epoch or one playback, never a replacement.
+		stream.current_state = StreamState::Completed;
+		self.current_state = SessionState::Completed;
+		self.request = None;
 
 		Ok(results)
 	}
@@ -704,14 +720,22 @@ impl ServerSession {
 		&mut self,
 		transaction_id: f64,
 	) -> Result<Vec<ServerSessionResult>, ServerSessionError> {
-		let new_stream_id = self.next_stream_id;
-		self.next_stream_id = self.next_stream_id + 1;
+		if self.current_state != SessionState::Connected || self.active_stream.is_some() {
+			let packet = self.create_error_packet(
+				"NetConnection.Call.Failed",
+				"one stream is allowed after connect",
+				transaction_id,
+				0,
+			)?;
+			return Ok(vec![ServerSessionResult::OutboundResponse(packet)]);
+		}
+		let new_stream_id = 1;
 
 		let new_stream = ActiveStream {
 			current_state: StreamState::Created,
 		};
 
-		self.active_streams.insert(new_stream_id, new_stream);
+		self.active_stream = Some(new_stream);
 
 		let packet = self.create_success_response(
 			transaction_id,
@@ -721,62 +745,6 @@ impl ServerSession {
 		)?; // Stream create result must always be on stream 0 for flash clients
 
 		Ok(vec![ServerSessionResult::OutboundResponse(packet)])
-	}
-
-	fn handle_command_delete_stream(
-		&mut self,
-		mut arguments: Values<'_>,
-	) -> Result<Vec<ServerSessionResult>, ServerSessionError> {
-		// Not sure if I need to send a response
-		if self.current_state != SessionState::Connected {
-			return Ok(Vec::new());
-		}
-
-		let app_name = match self.connected_app_name {
-			Some(ref name) => name.clone(),
-			None => return Ok(Vec::new()),
-		};
-
-		if arguments.len() == 0 {
-			return Ok(Vec::new());
-		}
-
-		// First argument is expected to be the stream id
-		let stream_id = match arguments.next().unwrap() {
-			Value::Number(x) => x as u32,
-			_ => return Ok(Vec::new()),
-		};
-
-		let stream = match self.active_streams.remove(&stream_id) {
-			Some(stream) => stream,
-			None => return Ok(Vec::new()),
-		};
-
-		let result = match stream.current_state {
-			StreamState::Publishing {
-				ref stream_key,
-				mode: _,
-			} => {
-				let event = ServerSessionEvent::PublishStreamFinished {
-					stream_key: stream_key.clone(),
-					app_name,
-				};
-
-				vec![ServerSessionResult::RaisedEvent(event)]
-			}
-
-			StreamState::Playing { ref stream_key } => {
-				let event = ServerSessionEvent::PlayStreamFinished {
-					app_name,
-					stream_key: stream_key.clone(),
-				};
-
-				vec![ServerSessionResult::RaisedEvent(event)]
-			}
-			_ => Vec::new(),
-		};
-
-		Ok(result)
 	}
 
 	fn handle_command_publish(
@@ -799,6 +767,21 @@ impl ServerSession {
 			let packet = self.create_error_packet(
 				"NetStream.Publish.Start",
 				"Can't publish before connecting",
+				transaction_id,
+				stream_id,
+			)?;
+			return Ok(vec![ServerSessionResult::OutboundResponse(packet)]);
+		}
+
+		if !matches!(
+			self.active_stream.as_ref().filter(|_| stream_id == 1),
+			Some(ActiveStream {
+				current_state: StreamState::Created
+			})
+		) {
+			let packet = self.create_error_packet(
+				"NetStream.Publish.Failed",
+				"create one stream before requesting publish or play",
 				transaction_id,
 				stream_id,
 			)?;
@@ -867,9 +850,9 @@ impl ServerSession {
 			stream_id,
 		};
 
-		let request_number = self.next_request_number;
-		self.next_request_number = self.next_request_number + 1;
-		self.outstanding_requests.insert(request_number, request);
+		self.active_stream.as_mut().unwrap().current_state = StreamState::Requested;
+		let request_number = request.id();
+		self.request = Some(request);
 
 		let event = ServerSessionEvent::PublishStreamRequested {
 			request_id: request_number,
@@ -901,6 +884,21 @@ impl ServerSession {
 			let packet = self.create_error_packet(
 				"NetStream.Play.Start",
 				"Can't play before connecting",
+				transaction_id,
+				stream_id,
+			)?;
+			return Ok(vec![ServerSessionResult::OutboundResponse(packet)]);
+		}
+
+		if !matches!(
+			self.active_stream.as_ref().filter(|_| stream_id == 1),
+			Some(ActiveStream {
+				current_state: StreamState::Created
+			})
+		) {
+			let packet = self.create_error_packet(
+				"NetStream.Play.Failed",
+				"create one stream before requesting publish or play",
 				transaction_id,
 				stream_id,
 			)?;
@@ -983,9 +981,9 @@ impl ServerSession {
 			stream_id,
 		};
 
-		let request_number = self.next_request_number;
-		self.next_request_number = self.next_request_number + 1;
-		self.outstanding_requests.insert(request_number, request);
+		self.active_stream.as_mut().unwrap().current_state = StreamState::Requested;
+		let request_number = request.id();
+		self.request = Some(request);
 
 		let event = ServerSessionEvent::PlayStreamRequested {
 			request_id: request_number,
@@ -1027,7 +1025,9 @@ impl ServerSession {
 		}
 
 		let app_name = self.connected_app_name.clone()?;
-		let StreamState::Publishing { ref stream_key, .. } = self.active_streams.get(&stream_id)?.current_state else {
+		let StreamState::Publishing { ref stream_key, .. } =
+			self.active_stream.as_ref().filter(|_| stream_id == 1)?.current_state
+		else {
 			return None;
 		};
 
@@ -1059,7 +1059,7 @@ impl ServerSession {
 			None => return Ok(Vec::new()), // No app name so we aren't in a valid connection state.
 		};
 
-		let publish_stream_key = match self.active_streams.get(&stream_id) {
+		let publish_stream_key = match self.active_stream.as_ref().filter(|_| stream_id == 1) {
 			Some(ref stream) => {
 				match stream.current_state {
 					StreamState::Publishing {
@@ -1143,7 +1143,7 @@ impl ServerSession {
 			None => return Ok(Vec::new()), // No app name so we aren't in a valid connection state.
 		};
 
-		let publish_stream_key = match self.active_streams.get(&stream_id) {
+		let publish_stream_key = match self.active_stream.as_ref().filter(|_| stream_id == 1) {
 			Some(ref stream) => {
 				match stream.current_state {
 					StreamState::Publishing {
@@ -1209,7 +1209,7 @@ impl ServerSession {
 		stream_key: String,
 		mode: PublishMode,
 	) -> Result<Vec<ServerSessionResult>, ServerSessionError> {
-		match self.active_streams.get_mut(&stream_id) {
+		match self.active_stream.as_mut().filter(|_| stream_id == 1) {
 			Some(active_stream) => {
 				active_stream.current_state = StreamState::Publishing {
 					stream_key: stream_key.clone(),
@@ -1259,7 +1259,7 @@ impl ServerSession {
 		stream_id: u32,
 		stream_key: String,
 	) -> Result<Vec<ServerSessionResult>, ServerSessionError> {
-		match self.active_streams.get_mut(&stream_id) {
+		match self.active_stream.as_mut().filter(|_| stream_id == 1) {
 			Some(active_stream) => {
 				active_stream.current_state = StreamState::Playing {
 					stream_key: stream_key.clone(),
