@@ -1,0 +1,14 @@
+warning: calls to `std::mem::drop` with a reference instead of an owned value does nothing
+  --> src/lib.rs:52:29
+   |
+52 |         let b: u64 = wait!(B => { drop(label); self.src.poll_next(waiter) })?;
+   |                                   ^^^^^-----^
+   |                                        |
+   |                                        argument has type `&mut String`
+   |
+   = note: `#[warn(dropping_references)]` on by default
+help: use `let _ = ...` to ignore the expression or result
+   |
+52 -         let b: u64 = wait!(B => { drop(label); self.src.poll_next(waiter) })?;
+52 +         let b: u64 = wait!(B => { let _ = label; self.src.poll_next(waiter) })?;
+   |

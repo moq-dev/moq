@@ -1,0 +1,4 @@
+time:   0.030; rss:  109MB ->  119MB (  +10MB)	coherence_checking
+time:   0.151; rss:  109MB ->  132MB (  +23MB)	type_check_crate
+time:   0.154; rss:  132MB ->  166MB (  +34MB)	MIR_borrow_checking
+time:   0.488; rss:   28MB ->   62MB (  +34MB)	total

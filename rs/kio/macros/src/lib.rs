@@ -228,6 +228,13 @@ fn lower(args: &Args, stmts: &[Stmt]) -> syn::Result<(TokenStream, Vec<Variant>)
 		}
 	}
 
+	// Tokenize each statement once: every token is a call into the compiler.
+	let reads: Vec<Vec<Reads>> = segments
+		.iter()
+		.map(|segment| segment.iter().map(Reads::new).collect())
+		.collect();
+	let polls: Vec<HashSet<String>> = waits.iter().map(|wait| uses(wait.poll.to_token_stream())).collect();
+
 	// Each wait stores the in-scope locals its poll or a later statement reads.
 	// Each local remembers its declaring statement, by segment and index.
 	let mut scope: Vec<(Local, (usize, usize))> = Vec::new();
@@ -244,11 +251,11 @@ fn lower(args: &Args, stmts: &[Stmt]) -> syn::Result<(TokenStream, Vec<Variant>)
 			}
 		}
 
-		let polled = uses(wait.poll.to_token_stream());
 		let mut stored = Vec::new();
 		for (local, decl) in &scope {
-			let polled = polled.contains(&local.ident.to_string());
-			let after = used_later(&local.ident, &segments[k + 1..], &waits[k + 1..]);
+			let name = local.ident.to_string();
+			let polled = polls[k].contains(&name);
+			let after = used_later(&name, &reads[k + 1..], &polls[k + 1..]);
 			if !polled && !after {
 				continue;
 			}
@@ -315,8 +322,10 @@ fn lower(args: &Args, stmts: &[Stmt]) -> syn::Result<(TokenStream, Vec<Variant>)
 			.filter(|local| local.after)
 			.map(|local| {
 				let ident = &local.ident;
-				let mutability = local.mutable.then(|| quote! { mut });
-				quote! { #ident: #mutability #ident }
+				match local.mutable {
+					true => quote! { #ident: mut #ident },
+					false => quote! { #ident },
+				}
 			})
 			.collect();
 		let take = if owned.is_empty() {
@@ -375,19 +384,31 @@ fn strip_every_poll(stmt: &Stmt) -> syn::Result<Option<Stmt>> {
 	Ok(Some(syn::parse2(rest)?))
 }
 
-/// Takes the `wait!` this statement starts with (through `?`, method calls, and
-/// field access), leaving `ready` in its place.
+/// Takes the `wait!` this statement evaluates first, leaving `ready` in its place.
 fn head_wait(stmt: &mut Stmt, ready: &Ident) -> syn::Result<Option<Wait>> {
 	fn head(expr: &mut Expr, ready: &Ident) -> syn::Result<Option<Wait>> {
 		match expr {
 			Expr::Macro(mac) if is_wait(&mac.mac) => {
 				let wait = mac.mac.parse_body()?;
+				// Point type errors on the value at the `wait!`, not the attribute.
+				let ready = Ident::new("ready", ready.span().located_at(syn::spanned::Spanned::span(&mac.mac)));
 				*expr = syn::parse_quote!(#ready);
 				Ok(Some(wait))
 			}
 			Expr::Try(inner) => head(&mut inner.expr, ready),
 			Expr::MethodCall(inner) => head(&mut inner.receiver, ready),
 			Expr::Field(inner) => head(&mut inner.base, ready),
+			Expr::Binary(inner) => head(&mut inner.left, ready),
+			Expr::Cast(inner) => head(&mut inner.expr, ready),
+			Expr::Paren(inner) => head(&mut inner.expr, ready),
+			Expr::Unary(inner) => head(&mut inner.expr, ready),
+			Expr::Reference(inner) => head(&mut inner.expr, ready),
+			Expr::Index(inner) => head(&mut inner.expr, ready),
+			// A path call evaluates nothing before its first argument.
+			Expr::Call(inner) if matches!(*inner.func, Expr::Path(_)) => match inner.args.first_mut() {
+				Some(first) => head(first, ready),
+				None => Ok(None),
+			},
 			_ => Ok(None),
 		}
 	}
@@ -401,6 +422,7 @@ fn head_wait(stmt: &mut Stmt, ready: &Ident) -> syn::Result<Option<Wait>> {
 		// A bare `wait!(..);` must be ready with `()`.
 		Stmt::Macro(mac) if is_wait(&mac.mac) => {
 			let wait = mac.mac.parse_body()?;
+			let ready = Ident::new("ready", ready.span().located_at(syn::spanned::Spanned::span(&mac.mac)));
 			*stmt = syn::parse_quote!(let () = #ready;);
 			Ok(Some(wait))
 		}
@@ -566,31 +588,49 @@ fn uses(tokens: TokenStream) -> HashSet<String> {
 	into
 }
 
-/// Whether `ident` is read after a wait, before a later `let` shadows it.
-fn used_later(ident: &Ident, segments: &[Vec<Stmt>], waits: &[Wait]) -> bool {
-	let name = ident.to_string();
+/// What a statement reads, and what it binds if it is a `let`.
+struct Reads {
+	uses: HashSet<String>,
+	binds: Vec<String>,
+}
+
+impl Reads {
+	fn new(stmt: &Stmt) -> Self {
+		let Stmt::Local(local) = stmt else {
+			return Self {
+				uses: uses(stmt.to_token_stream()),
+				binds: Vec::new(),
+			};
+		};
+		// The initializer only: the pattern names what it binds, not what it reads.
+		let uses = local.init.as_ref().map_or_else(HashSet::new, |init| {
+			let mut tokens = init.expr.to_token_stream();
+			if let Some((_, diverge)) = &init.diverge {
+				tokens.extend(diverge.to_token_stream());
+			}
+			self::uses(tokens)
+		});
+		let binds = bindings(&local.pat)
+			.iter()
+			.map(|local| local.ident.to_string())
+			.collect();
+		Self { uses, binds }
+	}
+}
+
+/// Whether `name` is read after a wait, before a later `let` shadows it.
+/// `polls[k]` is the wait that ends `segments[k]`.
+fn used_later(name: &str, segments: &[Vec<Reads>], polls: &[HashSet<String>]) -> bool {
 	for (k, segment) in segments.iter().enumerate() {
-		for stmt in segment {
-			if let Stmt::Local(local) = stmt {
-				if local.init.as_ref().is_some_and(|init| {
-					uses(init.expr.to_token_stream()).contains(&name)
-						|| init
-							.diverge
-							.as_ref()
-							.is_some_and(|(_, diverge)| uses(diverge.to_token_stream()).contains(&name))
-				}) {
-					return true;
-				}
-				if bindings(&local.pat).iter().any(|binding| binding.ident == name) {
-					return false;
-				}
-			} else if uses(stmt.to_token_stream()).contains(&name) {
+		for reads in segment {
+			if reads.uses.contains(name) {
 				return true;
 			}
+			if reads.binds.iter().any(|bind| bind == name) {
+				return false;
+			}
 		}
-		if let Some(wait) = waits.get(k)
-			&& uses(wait.poll.to_token_stream()).contains(&name)
-		{
+		if polls.get(k).is_some_and(|poll| poll.contains(name)) {
 			return true;
 		}
 	}

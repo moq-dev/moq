@@ -1,0 +1,7 @@
+error: this statement runs once, so it cannot return `Poll::Pending`: wait with `let x: T = wait!(Step => poll)?;`
+  --> src/lib.rs:52:11
+   |
+52 |         let c = ready!(self.src.poll_next(waiter))?;
+   |                 ^^^^^
+
+error: could not compile `synth` (lib) due to 1 previous error

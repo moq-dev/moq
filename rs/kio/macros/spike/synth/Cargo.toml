@@ -1,0 +1,10 @@
+[package]
+name = "synth"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+kio = { path = "../../../rs/kio", features = ["macros"] }
+
+[workspace]
