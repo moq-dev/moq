@@ -41,6 +41,7 @@
 //! every origin so the whole process caches into a single policy.
 
 use crate::sync::Mutex;
+use crate::util::SendCell;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, PoisonError, Weak};
@@ -131,7 +132,9 @@ impl Config {
 /// payments, and the always-protected live edge all let usage transiently exceed it.
 #[derive(Clone)]
 pub struct Pool {
-	inner: Arc<Inner>,
+	// Every track and handoff registry reaches back into group state, so the cell
+	// proves `Send` once here instead of inside every origin and broadcast handle.
+	inner: Arc<SendCell<Inner>>,
 }
 
 impl Default for Pool {
@@ -213,7 +216,7 @@ impl Pool {
 			ms.max(1).div_ceil(TICK_MS).saturating_mul(TICK_MS)
 		});
 		Self {
-			inner: Arc::new(Inner {
+			inner: Arc::new(SendCell::new(Inner {
 				used: AtomicU64::new(0),
 				capacity: AtomicU64::new(config.capacity.unwrap_or(u64::MAX)),
 				expiry,
@@ -226,7 +229,7 @@ impl Pool {
 				wall_micros: AtomicU64::new(0),
 				wall: kio::Lock::default(),
 				held: Mutex::default(),
-			}),
+			})),
 		}
 	}
 
@@ -638,7 +641,7 @@ impl std::fmt::Debug for Pool {
 /// nothing can cache into it any more.
 #[derive(Clone)]
 pub struct PoolWeak {
-	inner: std::sync::Weak<Inner>,
+	inner: std::sync::Weak<SendCell<Inner>>,
 }
 
 impl PoolWeak {

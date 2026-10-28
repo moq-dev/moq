@@ -3161,11 +3161,7 @@ impl Subscriber {
 		// A local terminal ended the wait, so the peer still holds the request to cancel.
 		let mut unanswered = false;
 		let setup = {
-			let mut response = std::pin::pin!(crate::util::sendable(self.read_answer(
-				&mut stream,
-				&mut messages,
-				held.as_mut()
-			)));
+			let mut response = std::pin::pin!(self.read_answer(&mut stream, &mut messages, held.as_mut()));
 			loop {
 				let setup = kio::wait(|waiter| {
 					let response = waiter.poll_future(response.as_mut());
@@ -3827,7 +3823,7 @@ impl Subscriber {
 		{
 			// Refusing the copy wakes its FETCH jobs too. Keep driving their cancels
 			// while this stream waits for its FIN, even if the peer never ACKs it.
-			let mut cancelling = std::pin::pin!(crate::util::sendable(self.cancel_subscribe(stream)));
+			let mut cancelling = std::pin::pin!(self.cancel_subscribe(stream));
 			kio::wait(|waiter| {
 				let _ = group_fetches.poll(waiter);
 				waiter.poll_future(cancelling.as_mut())
@@ -4291,7 +4287,7 @@ impl Subscriber {
 		let mut demand = request.demand();
 		let mut closed = self.session.clone();
 		let response = {
-			let mut response = std::pin::pin!(crate::util::sendable(self.read_track_status_response(&mut stream)));
+			let mut response = std::pin::pin!(self.read_track_status_response(&mut stream));
 			loop {
 				let res = kio::wait(|waiter| {
 					let response = waiter.poll_future(response.as_mut());
