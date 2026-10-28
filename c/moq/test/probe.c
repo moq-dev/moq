@@ -344,8 +344,8 @@ int main(void) {
     CHECK(received);
     CHECK(received->payload.len == sizeof(hello));
     CHECK(memcmp(received->payload.data, hello, sizeof(hello)) == 0);
-    /* The default moq-lite-06 session drops received timestamps, so the track arrives untimed. */
-    CHECK(!received->timestamp_us.has_value);
+    CHECK(received->timestamp_us.has_value);
+    CHECK(received->timestamp_us.value == 1000);
     moq_frame_free(received);
     CHECK(!cancelled.done);
 

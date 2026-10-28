@@ -5,7 +5,6 @@ import { ProtocolViolation, StreamCode, StreamError, TimestampMismatch, TooFarBe
 import { Decoder } from "./flate/decoder.ts";
 import { Encoder } from "./flate/encoder.ts";
 import { type Consumer as GroupConsumer, type Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
-import { Version as IetfVersion } from "./ietf/version.ts";
 import { hooks } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { Timescale, Timestamp } from "./time.ts";
@@ -3383,13 +3382,13 @@ test("an endless track with gaps remembers only those within the budget", () => 
 	}
 });
 
-test("IETF provenance survives normalization on timed and untimed tracks", () => {
+test("unchecked survives normalization on timed and untimed tracks", () => {
 	for (const timescale of [undefined, Timescale.MILLI]) {
-		const info = infoDefaults({ ietf: IetfVersion.DRAFT_22, timescale });
-		expect(info.ietf).toBe(IetfVersion.DRAFT_22);
+		const info = infoDefaults({ unchecked: true, timescale });
+		expect(info.unchecked).toBe(true);
 		expect(info.timescale).toBe(timescale);
 	}
-	const producer = new TrackProducer("ietf").accept({ timescale: Timescale.MILLI, ietf: IetfVersion.DRAFT_22 });
+	const producer = new TrackProducer("ietf").accept({ timescale: Timescale.MILLI, unchecked: true });
 	try {
 		stampGroup(producer, 0, 1000);
 		stampGroup(producer, 1, 500);

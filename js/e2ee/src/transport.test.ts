@@ -48,10 +48,10 @@ async function active(origin: Origin.Producer, path: Path.Valid): Promise<Broadc
 }
 
 // Whether the wire carries the route's epoch, and the track's timestamps. Neither is
-// authenticated, so the frames open either way. A lite-05 receiver drops timestamps.
+// authenticated, so the frames open either way.
 const transports = [
 	["moq-lite-07", "moq-lite-07-wip", true, true],
-	["moq-lite-05", "moq-lite-05", false, false],
+	["moq-lite-05", "moq-lite-05", false, true],
 	["moq-transport-18", "moqt-18", true, true],
 ] as const;
 

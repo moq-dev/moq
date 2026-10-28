@@ -36,8 +36,8 @@ async function run(config: Sample) {
 	let grew = false;
 	let received = 0;
 	const frames = config.publishers * config.subscribers * config.frames;
-	// Lite-02 carries no timestamps, and a lite-05/06 subscriber drops them.
-	const timed = !/^moq-lite-0[1-6]$/.test(config.version);
+	// Lite-01 to lite-04 carry no timestamps.
+	const timed = !/^moq-lite-0[1-4]$/.test(config.version);
 	const check = (bytes: Uint8Array, frame: number) => {
 		first ??= performance.now() - start;
 		verify(bytes, config.size, frame);

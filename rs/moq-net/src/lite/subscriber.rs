@@ -497,9 +497,7 @@ impl Subscriber {
 			.zip(entry.framing.timescale)
 			.map(|(value, scale)| Timestamp::new(value, scale))
 			.transpose()
-			.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?
-			// Dropped where it may be a send time, like a frame's.
-			.filter(|_| self.version.has_media_time());
+			.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
 
 		// A datagram is never owed a stream, so it never holds the subscription's end open.
 		if let Ok(mut tail) = entry.tail.write() {
@@ -1042,7 +1040,7 @@ impl GroupRecv {
 					self.state = GroupRecvState::Serve {
 						group: crate::recv::Group::new(group),
 						track,
-						ingest: FrameIngest::new(framing, self.subscriber.version, ietf, hdr.frame_start),
+						ingest: FrameIngest::new(framing, ietf, hdr.frame_start),
 						_reading: reading,
 					};
 				}
@@ -1113,9 +1111,6 @@ struct FrameIngest {
 	/// `Some` once the Group State of the `ietf` extension arrived: every frame follows an
 	/// object record.
 	records: Option<RecordIngest>,
-	/// Whether the session's timestamps are media time. Lite-05/06 ones may be send times,
-	/// so they are read to stay in step and dropped.
-	media_time: bool,
 }
 
 /// A group's object records on ingest, under the `ietf` extension.
@@ -1161,7 +1156,7 @@ enum IngestPhase {
 
 impl FrameIngest {
 	/// `ietf` when the session negotiated the extension, so the stream starts with a Group State.
-	fn new(framing: lite::Framing, version: Version, ietf: bool, frame_start: u64) -> Self {
+	fn new(framing: lite::Framing, ietf: bool, frame_start: u64) -> Self {
 		Self {
 			framing,
 			prev_ts: 0,
@@ -1171,7 +1166,6 @@ impl FrameIngest {
 			},
 			frame_start,
 			records: None,
-			media_time: version.has_media_time(),
 		}
 	}
 
@@ -1293,9 +1287,8 @@ impl FrameIngest {
 					self.prev_ts = next;
 					let timestamp = Timestamp::new(next, scale)
 						.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
-					// Read to stay in step, but dropped where it may be a send time.
 					self.phase = IngestPhase::Inflated {
-						timestamp: self.media_time.then_some(timestamp),
+						timestamp: Some(timestamp),
 					};
 				}
 				IngestPhase::Inflated { timestamp } => {
@@ -2943,11 +2936,10 @@ mod tests {
 					going_away: Default::default(),
 					auth: crate::auth::Link::new(false),
 				});
-				// The track is untimed where the subscriber drops received timestamps.
 				let track = track::Producer::new(
 					std::sync::Arc::new(crate::broadcast::Info::default()),
 					"video",
-					crate::track::Info::default().with_timescale(version.has_media_time().then_some(Timescale::MILLI)),
+					crate::track::Info::timed(),
 				);
 				let mut consumer = track.consume().subscribe(None).await.unwrap();
 				subscriber.subscribes.lock().insert(
@@ -3284,16 +3276,15 @@ mod tests {
 			auth: crate::auth::Link::new(false),
 		});
 
-		// The copy is untimed where the wire's timestamps may be send times.
-		let timed = version.has_media_time();
-		let info = match timed {
-			true => crate::track::Info::timed(),
-			false => crate::track::Info::default(),
+		// Unchecked where the wire's timestamps may be send times, as the copy is accepted.
+		let info = crate::track::Info {
+			unchecked: !version.has_media_time(),
+			..crate::track::Info::timed()
 		};
 		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", info);
 		let mut before = track.create_group(4u64.into()).unwrap();
 		before
-			.write_frame(timed.then(|| Timestamp::from_millis(1000).unwrap()), &b"before"[..])
+			.write_frame(Timestamp::from_millis(1000).unwrap(), &b"before"[..])
 			.unwrap();
 		before.finish().unwrap();
 		subscriber.subscribes.lock().insert(
@@ -3318,10 +3309,10 @@ mod tests {
 		(res, track)
 	}
 
-	/// Lite-05/06 timestamps may be send times, so a received frame is read past its
-	/// timestamp and lands untimed: nothing rewinds, and the track stays open.
+	/// Lite-05/06 timestamps may be send times, so a received group that rewinds keeps its
+	/// timestamp unchecked, and the track stays open.
 	#[moq_clock::test]
-	async fn lite06_timestamps_are_dropped() {
+	async fn a_lite06_rewind_passes_through() {
 		for version in [Version::Lite05, Version::Lite06] {
 			// Frame 0 at 500ms, before group 4's 1000ms.
 			let (res, track) = receive_group(version, &[500]).await;
@@ -3332,7 +3323,7 @@ mod tests {
 			assert_eq!(group.sequence, 5, "{version}");
 			let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
 			assert_eq!(frame.payload.as_ref(), b"frame", "{version}");
-			assert_eq!(frame.timestamp, None, "{version}");
+			assert_eq!(frame.timestamp, Timestamp::from_millis(500).ok(), "{version}");
 		}
 	}
 
@@ -3347,7 +3338,6 @@ mod tests {
 	/// A received timestamp past 2^61 - 1 is refused at every version, so a relay never
 	/// holds one that lite-05/06 could not carry as a group's first frame. lite-06 reaches
 	/// it with a second delta, lite-07 with a first frame its 64-bit varint can encode.
-	/// lite-05/06 drop the timestamp, but a stream carrying one past the bound is still malformed.
 	#[moq_clock::test]
 	async fn a_received_timestamp_past_2_61_is_refused() {
 		let max: i64 = (1 << 61) - 1;
@@ -3356,8 +3346,7 @@ mod tests {
 			res.unwrap_or_else(|err| panic!("{version}: {err:?}"));
 			let mut group = track.consume().peek_group(5).unwrap();
 			let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
-			let kept = version.has_media_time().then_some(max as u64);
-			assert_eq!(frame.timestamp.map(Timestamp::value), kept, "{version}");
+			assert_eq!(frame.timestamp.map(Timestamp::value), Some(max as u64), "{version}");
 
 			let (res, _) = receive_group(version, &[max, 1]).await;
 			assert!(matches!(res, Err(Error::BoundsExceeded(_))), "{version}: {res:?}");
@@ -3879,9 +3868,8 @@ mod tests {
 		let broadcast = crate::broadcast::Info::new().produce();
 		// The broadcast keeps only a weak handle, so the map below owns the only strong
 		// `track::Producer`: dropping it is what ends the track.
-		// Untimed, as the subscriber drops lite-05 timestamps.
 		let producer = broadcast
-			.create_track("datagrams", crate::track::Info::default())
+			.create_track("datagrams", crate::track::Info::timed())
 			.unwrap();
 		let mut received = producer.subscribe(None);
 		subscriber.subscribes.lock().insert(
@@ -7198,11 +7186,9 @@ impl kio::Task for TrackServeRun {
 					let request = request.take().expect("request pending");
 					match res {
 						Ok((mut info, held)) => {
-							// Lite05/06 timestamps may be send times, so the copy is untimed
-							// and the ingest reads past them (see `lite::Framing::new`).
-							if !self.serve.subscriber.version.has_media_time() {
-								info.timescale = None;
-							}
+							// Lite05/06 timestamps may be send times, so the copy's groups
+							// skip the rewind check.
+							info.unchecked = !self.serve.subscriber.version.has_media_time();
 							let mut serve_loop = ServeLoop::new(&self.serve, request, info);
 							serve_loop.held = Some(held);
 							self.state = TrackRunState::Serve(serve_loop);
@@ -8465,7 +8451,6 @@ impl kio::Task for FetchServeRun {
 						readers,
 						ingest: Box::new(FrameIngest::new(
 							lite::Framing::new(&self.info, self.serve.subscriber.version),
-							self.serve.subscriber.version,
 							ietf,
 							frame_start,
 						)),

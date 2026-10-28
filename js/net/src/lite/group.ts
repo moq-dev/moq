@@ -81,14 +81,12 @@ export interface WireFrame extends netGroup.Frame {
 export interface FrameFormat {
 	/** The wire timescale; non-zero means every frame carries a zigzag-delta timestamp. */
 	scale: number;
-	/** Whether a carried timestamp is kept; false drops it where it may be a send time. */
-	timed?: boolean;
 	/** Whether every frame declares its plain size ahead of a stored slice. */
 	compress?: boolean;
 }
 
 /** Decode one frame, with timestamp deltas when scaled and declared plain sizes when compressed. */
-export function frameDecoder({ scale, timed = true, compress = false }: FrameFormat): (c: Cursor) => WireFrame {
+export function frameDecoder({ scale, compress = false }: FrameFormat): (c: Cursor) => WireFrame {
 	const timescale = scale === 0 ? undefined : Time.Timescale(scale);
 	let prevTs = 0n;
 	return (c) => {
@@ -100,8 +98,7 @@ export function frameDecoder({ scale, timed = true, compress = false }: FrameFor
 		const payload = c.read(size);
 		// Commit the delta only after the last read: an incomplete decode gets retried.
 		prevTs += delta;
-		// Read to stay in step, but dropped where it may be a send time.
-		const timestamp = timescale === undefined || !timed ? undefined : new Time.Timestamp(Number(prevTs), timescale);
+		const timestamp = timescale === undefined ? undefined : new Time.Timestamp(Number(prevTs), timescale);
 		return { payload, inflated, timestamp };
 	};
 }

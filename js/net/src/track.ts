@@ -19,7 +19,6 @@ import {
 } from "./error.ts";
 import { datagramSlice, type Stored, sliceView } from "./flate/group.ts";
 import { type Frame, type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
-import type { IetfVersion } from "./ietf/version.ts";
 import {
 	type DropRun,
 	dropAt,
@@ -153,8 +152,11 @@ export interface Info {
 	 * one is pending. `0` asks on any join after a delta. An integer in `0..2^32`.
 	 */
 	refresh?: number;
-	/** The original moq-transport publisher's draft, whose timestamps may rewind. @internal */
-	ietf?: IetfVersion;
+	/**
+	 * Whether this copy's groups skip the rewind check, since its timestamps may be moq-transport
+	 * arrival times or lite-05/06 send times. Mirrors the Rust `track::Info::unchecked`. @internal
+	 */
+	unchecked?: boolean;
 }
 
 // Normalize a duration for the wire, which carries it as an unsigned varint.
@@ -192,7 +194,7 @@ export function infoDefaults(info: Partial<Info> = {}): Info {
 		maxAge: info.maxAge === undefined ? undefined : wireMillis("maxAge", info.maxAge),
 		priority: priorityValue(info.priority ?? DEFAULT_PRIORITY),
 		refresh: info.refresh == null ? undefined : refreshRatio(info.refresh),
-		...(info.ietf === undefined ? {} : { ietf: info.ietf }),
+		...(info.unchecked ? { unchecked: true } : {}),
 	};
 }
 
@@ -1448,9 +1450,9 @@ export class Producer {
 		return group;
 	}
 
-	// Whether this track's timestamps may rewind (see {@link Info.ietf}).
+	// Whether this track's timestamps may rewind (see {@link Info.unchecked}).
 	#unchecked(): boolean {
-		return this.#state.info.peek()?.ietf !== undefined;
+		return this.#state.info.peek()?.unchecked === true;
 	}
 
 	// Fan a datagram out to every live subscriber, dropping the oldest once the ring is full.

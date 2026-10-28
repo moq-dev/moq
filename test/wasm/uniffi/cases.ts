@@ -350,8 +350,8 @@ const remote: Record<string, (relay: Relay) => Promise<string | undefined>> = {
 					| undefined;
 				if (got?.sequence() !== sequence) throw new Error(`sequence ${got?.sequence()} != ${sequence}`);
 				const frame = await got.readFrame();
-				// Lite-02 carries no timestamp and a lite-05/06 subscriber drops it; the rest keep it exact.
-				const expected = /^moq-lite-0[1-6]$/.test(relay.version) ? undefined : stamp(sequence);
+				// Lite-01 to lite-04 carry no timestamp; the rest keep it exact.
+				const expected = /^moq-lite-0[1-4]$/.test(relay.version) ? undefined : stamp(sequence);
 				if (frame?.timestampUs !== expected) throw new Error(`timestamp ${frame?.timestampUs} != ${expected}`);
 				seen.push(String(sequence));
 			}

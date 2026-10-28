@@ -262,8 +262,7 @@ int main() {
     CHECK(!reading.valid());
     CHECK(frame.has_value());
     CHECK(frame->payload == bytes("hello"));
-    // The default moq-lite-06 session drops received timestamps, so the track arrives untimed.
-    CHECK(!frame->timestamp_us.has_value());
+    CHECK(frame->timestamp_us == 1000);
 
     // A continuation receives the next frame on the executor.
     {

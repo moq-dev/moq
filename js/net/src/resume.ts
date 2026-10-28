@@ -102,15 +102,16 @@ export function routeFailed(err: Error): boolean {
 	return err instanceof SessionError || sessionClosed(err);
 }
 
-// Every `track.Info` field, so one added later fails to compile until it is listed here.
+// Every `track.Info` field but `unchecked`, so one added later fails to compile until it is
+// listed here. `unchecked` says how a copy arrived, not what it holds, so copies over different
+// versions still match.
 const INFO_FIELDS = Object.keys({
 	compress: true,
 	timescale: true,
 	maxAge: true,
 	priority: true,
 	refresh: true,
-	ietf: true,
-} satisfies Record<keyof track.Info, true>) as (keyof track.Info)[];
+} satisfies Record<Exclude<keyof track.Info, "unchecked">, true>) as (keyof track.Info)[];
 
 /** Two copies claiming the same content must agree on all of it, like Rust's `Info` equality. */
 function compatible(a: track.Info, b: track.Info): boolean {

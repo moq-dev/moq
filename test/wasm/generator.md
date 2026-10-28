@@ -179,7 +179,7 @@ three bindings. moq-wasm's column is the existing suite in [`src/main.ts`](src/m
 | reads a published broadcast, every byte, 128 KiB frames | yes | yes | yes |
 | refuses a missing track | yes | yes: rejects with `NotFound` (transport-19) or `Protocol` (lite) | yes: rejects with the slice's `Net { reason: "not found" }` |
 | publishes | no: consume only | yes | yes |
-| frame timestamps | no: payload only | yes, exact, as `bigint` microseconds on a version that delivers them (not lite-02 or lite-06) | yes |
+| frame timestamps | no: payload only | yes, exact, as `bigint` microseconds on a version that carries them (not lite-02) | yes |
 | u64 sequence above 2^53, end to end | not testable: no publisher can send it | yes, 2^53+1 on all three; 2^62-1 on lite-02 and transport-19 (see bugs) | same as moq-ffi |
 | cancellation through `AbortSignal` | no: `free()` rejects pending calls | rejects with `AbortError`; the next call still gets the next frame | UniFFI: `AbortError`; BoltFFI: `BoltFFICancelledError`; neither steals the next frame |
 | aborting releases the call's state | n/a | yes: a track's demand drops only once the aborted future is freed | not testable: the slice has no demand |
