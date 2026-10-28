@@ -428,6 +428,84 @@ test("disabling keeps the rendition in the catalog with enabled: false", async (
 	expect(encoder.out.catalog.peek()).toEqual(before);
 });
 
+// Push-to-talk: an unmute with the capture left open must not wait on a fresh Opus probe before the
+// catalog advertises the rendition again.
+test("re-enabling with an unchanged capture reuses the probe", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	using env = await setup();
+	const { encoder, enabled } = env;
+
+	const before = encoder.out.catalog.peek();
+	expect(LaggingAudioEncoder.probes).toHaveLength(1);
+
+	enabled.set(false);
+	await settle();
+	expect(encoder.out.catalog.peek()?.enabled).toBe(false);
+
+	enabled.set(true);
+	await settle(2);
+	expect(encoder.out.catalog.peek()).toEqual(before);
+	expect(LaggingAudioEncoder.probes).toHaveLength(1);
+});
+
+test("re-enabling with a changed sample rate probes again", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	using env = await setup();
+	const { encoder, enabled, capture } = env;
+
+	enabled.set(false);
+	await settle();
+	capture.out.format.set({ sampleRate: 24_000, channelCount: 1 });
+
+	const configuring = configured();
+	enabled.set(true);
+	const config = await configuring;
+	expect(config.sampleRate).toBe(24_000);
+	expect(LaggingAudioEncoder.probes.map((probe) => probe.sampleRate)).toEqual([48_000, 24_000]);
+	expect(encoder.out.catalog.peek()).toMatchObject({ sampleRate: 24_000 });
+	expect(encoder.out.catalog.peek()?.enabled).toBeUndefined();
+});
+
+// Chrome stamps encoder output from its first input, ignoring later jumps, so audio resumed after a
+// long mute must still carry its capture timestamps rather than trail them by the mute.
+test("audio resumed after a multi-second mute carries its capture timestamps", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	using env = await setup();
+	const { enabled, feed, written, writes } = env;
+
+	const push = async (start: number, count: number) => {
+		for (let i = 0; i < count; i++) {
+			await feed.push({ timestamp: Micro(start + i * 20_000), channels: [new Float32Array(960)] });
+		}
+		await feed.drain();
+	};
+
+	await push(20_000, 4); // two written, two held
+
+	const marked = new Promise<void>((resolve) => {
+		writes.onWrite = resolve;
+	});
+	enabled.set(false);
+	await marked;
+	writes.onWrite = undefined;
+
+	// Capture keeps running through a five-second mute.
+	await push(100_000, 250);
+	const resumed = configured();
+	enabled.set(true);
+	await resumed;
+	await push(5_100_000, 4); // two written, two held
+
+	expect(written).toEqual([
+		[20_000, 1],
+		[40_000, 1],
+		[100_000, 0],
+		[5_100_000, 1],
+		[5_120_000, 1],
+	]);
+	expect(LaggingAudioEncoder.probes).toHaveLength(1);
+});
+
 // Closing tears down the subscription and the pipeline, which both end the epoch; cleanups run
 // last-in, first-out, so the marker lands once and before the rendition closes the track.
 test("closing with a subscriber attached marks the end once before the track closes", async () => {
