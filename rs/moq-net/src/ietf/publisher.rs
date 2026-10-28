@@ -977,6 +977,25 @@ impl Publisher {
 		kio::wait(|waiter| self.poll_serving_origin(waiter)).await
 	}
 
+	/// Resolve a request's broadcast while the peer still wants the answer.
+	async fn resolve(
+		&self,
+		stream: &mut Stream<Transport, Version>,
+		path: &crate::Path,
+		epoch: Option<crate::Epoch>,
+	) -> Result<Option<crate::broadcast::Consumer>, Error> {
+		let Some(origin) = self
+			.until_withdrawn(stream, |waiter| self.poll_serving_origin(waiter))
+			.await
+		else {
+			return Ok(None);
+		};
+		let requesting = origin.request_broadcast(path, epoch);
+		self.until_withdrawn(stream, |waiter| requesting.poll_ok(waiter))
+			.await
+			.transpose()
+	}
+
 	/// Our origin handle with [`Self::exclude`] applied, the view both the data plane
 	/// and the announce loops read this peer's routes through.
 	fn excluding(&self, peer: &cluster::Peer) -> origin::Consumer {
@@ -1383,31 +1402,18 @@ impl Publisher {
 							rendezvous_error(err, rendezvous, resolved),
 						))
 					};
-					// A producer may never answer, so each setup step ends once the subscriber
-					// withdraws the request, giving back the demand and the slot at once.
-					let Some(origin) = self
-						.until_withdrawn(&mut stream, |waiter| self.poll_serving_origin(waiter))
-						.await
-					else {
-						return Ok(Subscribed::Withdrawn);
-					};
 					// We just received a subscribe for this exact namespace, so the peer must have
 					// already seen the announcement. `request_broadcast` resolves it immediately, or
 					// falls back to the route covering it (an `origin::Requests`), if any. Pinned to
 					// the instance it names, if any: another is refused, never served.
-					let requesting = origin.request_broadcast(&msg.track_namespace, msg.epoch.clone());
-					let broadcast = match self
-						.until_withdrawn(&mut stream, |waiter| requesting.poll_ok(waiter))
-						.await
-					{
-						Some(Ok(broadcast)) => broadcast,
+					let broadcast = match self.resolve(&mut stream, &msg.track_namespace, msg.epoch.clone()).await {
+						Ok(Some(broadcast)) => broadcast,
 						// The reason is the origin's, not ours: a dynamic router refusing on
 						// authorization or a drain says so, and only an unroutable path means the
 						// broadcast is not here.
-						Some(Err(err)) => return refused(err, false),
-						None => return Ok(Subscribed::Withdrawn),
+						Err(err) => return refused(err, false),
+						Ok(None) => return Ok(Subscribed::Withdrawn),
 					};
-					drop(requesting);
 					let track = match broadcast.track(&msg.track_name) {
 						Ok(track) => track,
 						Err(err) => return refused(err, true),
@@ -2877,11 +2883,9 @@ impl Publisher {
 
 				// The peer must have seen the announcement to name this namespace, so this
 				// resolves like a SUBSCRIBE does.
-				let broadcast = match gate
-					.guard(async { self.serving_origin().await.request_broadcast(&namespace, epoch).await })
-					.await
-				{
-					Ok(broadcast) => broadcast,
+				let broadcast = match gate.guard(self.resolve(&mut stream, &namespace, epoch)).await {
+					Ok(Some(broadcast)) => broadcast,
+					Ok(None) => return Ok(()),
 					Err(err) => return self.reject_fetch(stream, &err, &err.to_string()).await,
 				};
 				let track = match broadcast.track(&track) {
@@ -3291,16 +3295,11 @@ impl Publisher {
 			return self.reject_track_status(stream, &Error::Unauthorized).await;
 		}
 		let broadcast = match gate
-			.guard(async {
-				// Pinned to the instance it names, if any: another is refused, never served.
-				self.serving_origin()
-					.await
-					.request_broadcast(&msg.track_namespace, msg.epoch.clone())
-					.await
-			})
+			.guard(self.resolve(&mut stream, &msg.track_namespace, msg.epoch.clone()))
 			.await
 		{
-			Ok(broadcast) => broadcast,
+			Ok(Some(broadcast)) => broadcast,
+			Ok(None) => return Ok(()),
 			Err(err) => return self.reject_track_status(stream, &err).await,
 		};
 
@@ -12205,12 +12204,22 @@ mod serve_tests {
 	async fn a_subscribe_withdrawn_during_setup_releases_its_demand() {
 		for version in ALL_VERSIONS {
 			for setup in [Setup::Resolving, Setup::Subscribing, Setup::Live] {
-				withdrawn_during(version, setup).await;
+				withdrawn_during(version, setup, request::Kind::Subscribe).await;
 			}
 		}
 	}
 
-	async fn withdrawn_during(version: Version, setup: Setup) {
+	/// Broadcast resolution cannot hold a withdrawn FETCH or TRACK_STATUS alive.
+	#[moq_clock::test]
+	async fn requests_withdrawn_while_resolving_release_their_demand() {
+		for version in ALL_VERSIONS {
+			for kind in [request::Kind::Fetch, request::Kind::TrackStatus] {
+				withdrawn_during(version, Setup::Resolving, kind).await;
+			}
+		}
+	}
+
+	async fn withdrawn_during(version: Version, setup: Setup, kind: request::Kind) {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let session = ScriptedSession::new(Vec::new());
 		let peer_setup = peer::PeerSetup::default();
@@ -12228,11 +12237,55 @@ mod serve_tests {
 		let stream = Stream::open(&mut crate::driver::Transport::new(request.clone()), version)
 			.await
 			.unwrap();
-		let mut serving = std::pin::pin!(
-			publisher
-				.clone()
-				.run_subscribe_stream(stream, subscribe(Filter::NextObject, None))
-		);
+		let mut serving = std::pin::pin!(async {
+			match kind {
+				request::Kind::Subscribe => {
+					publisher
+						.clone()
+						.run_subscribe_stream(stream, subscribe(Filter::NextObject, None))
+						.await
+				}
+				request::Kind::Fetch => {
+					publisher
+						.clone()
+						.run_fetch_stream(
+							stream,
+							ietf::Fetch {
+								request_id: RequestId(REQUEST_ID),
+								subscriber_priority: 128,
+								group_order: GroupOrder::Ascending,
+								fetch_type: fetch_range(
+									version,
+									"video",
+									Location { group: 0, object: 0 },
+									Location { group: 0, object: 1 },
+								),
+								range_filters: false,
+								fill_timeout: false,
+								properties_wanted: true,
+								epoch: None,
+							},
+						)
+						.await
+				}
+				request::Kind::TrackStatus => {
+					publisher
+						.clone()
+						.run_track_status_stream(
+							stream,
+							ietf::TrackStatus {
+								request_id: RequestId(REQUEST_ID),
+								track_namespace: crate::Path::from_static("room"),
+								track_name: "video".into(),
+								properties_wanted: true,
+								epoch: None,
+							},
+						)
+						.await
+				}
+				_ => unreachable!(),
+			}
+		});
 
 		// Drive the subscription to where it waits, holding what it asked for.
 		let mut claim = None;
@@ -12288,7 +12341,7 @@ mod serve_tests {
 		}
 		assert_eq!(
 			publisher.subscriptions.available(),
-			usize::MAX - 1,
+			usize::MAX - usize::from(matches!(kind, request::Kind::Subscribe)),
 			"{version} {setup:?}"
 		);
 		assert_eq!(demanded(), !matches!(setup, Setup::Resolving), "{version} {setup:?}");
