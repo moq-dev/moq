@@ -314,7 +314,6 @@ impl Consumer {
 				groups_read: false,
 				out: Vec::new(),
 				drops: RangeMap::new(),
-				peeked: None,
 				declared: None,
 				refused: false,
 			})
@@ -627,49 +626,25 @@ impl Subscriber {
 		&self.subscription
 	}
 
-	/// Poll for the next group not in `delivered`: in arrival order, or in sequence order
-	/// for `ordered`.
-	pub(super) fn poll_group(
-		&mut self,
-		ordered: bool,
-		delivered: &Delivered,
-		waiter: &kio::Waiter,
-	) -> Poll<Result<Option<group::Consumer>>> {
-		self.reader().poll_group(ordered, delivered, waiter)
-	}
-
-	/// The lowest next group across copies, without handing it out.
+	/// Reserve the lowest next group not in `delivered` across copies, without handing it
+	/// out: in arrival order, or in sequence order for `ordered`.
 	pub(super) fn poll_peek_group(
 		&mut self,
 		ordered: bool,
 		delivered: &Delivered,
 		waiter: &kio::Waiter,
-	) -> Poll<Result<Option<u64>>> {
+	) -> Poll<Result<Option<Candidate>>> {
 		let mut reader = self.reader();
-		reader.peeked = None;
 		loop {
 			if let Some(result) = reader.poll_lowest(ordered, delivered, waiter) {
-				return result.map(|result| {
-					result.map(|next| {
-						let sequence = next.as_ref().map(|next| next.sequence);
-						reader.peeked = next;
-						sequence
-					})
-				});
+				return result;
 			}
 		}
 	}
 
-	/// Invalidate a reservation below the containing reader's past prefix.
-	pub(super) fn skip_ordered(&mut self, floor: Option<u64>) {
-		let mut reader = self.reader();
-		if reader
-			.peeked
-			.as_ref()
-			.is_some_and(|peeked| floor.is_none_or(|floor| peeked.sequence < floor))
-		{
-			reader.peeked = None;
-		}
+	/// Hand out the group a [`Self::poll_peek_group`] reserved.
+	pub(super) fn take(&mut self, candidate: Candidate) -> Result<group::Consumer> {
+		self.reader().take(candidate)
 	}
 
 	/// Poll for the next datagram in arrival order. `delivered` decides which replaced
@@ -806,12 +781,25 @@ impl Subscriber {
 	}
 }
 
-struct Candidate {
-	sequence: u64,
-	/// Its copy's lease, which names that copy: one route can back several. A nested reader
-	/// may sync a route swap before its caller consumes this candidate, so it also keeps
-	/// that exact copy alive until that commit.
+/// A group a [`Reader`] reserved on one of its copies.
+pub(super) struct Candidate {
+	/// Its copy's lease, which names that copy: one route can back several. A route may
+	/// change before the caller takes this candidate, so it also keeps that exact copy
+	/// alive until then.
 	lease: Arc<()>,
+	/// The copy's own reservation, which taking hands out whatever the copy's cursor did
+	/// since: a route returning to it moves its bounds.
+	reserved: track::Reserved,
+}
+
+impl Candidate {
+	pub(super) fn sequence(&self) -> u64 {
+		self.reserved.sequence()
+	}
+
+	pub(super) fn ordered(&self) -> bool {
+		self.reserved.ordered()
+	}
 }
 
 /// Exact identities within the reader's budget. The last delivery never ages until
@@ -858,7 +846,6 @@ impl Datagrams {
 
 /// A [`Subscriber`]'s state.
 struct Reader {
-	peeked: Option<Candidate>,
 	/// The first exclusive end any copy declared, refined by a matching mid-group end.
 	declared: Option<Position>,
 	/// Copies of one logical track contradicted its end.
@@ -1125,9 +1112,6 @@ impl Reader {
 				self.refused = true;
 			}
 		}
-		if self.refused {
-			self.peeked = None;
-		}
 	}
 
 	/// Whether `at` is past the declared end, which refuses the track: another copy
@@ -1135,7 +1119,6 @@ impl Reader {
 	fn past_end(&mut self, at: Position) -> bool {
 		if self.declared.is_some_and(|end| at >= end) {
 			self.refused = true;
-			self.peeked = None;
 		}
 		self.refused
 	}
@@ -1258,38 +1241,12 @@ impl Reader {
 		})
 	}
 
-	fn poll_group(
-		&mut self,
-		ordered: bool,
-		delivered: &Delivered,
-		waiter: &kio::Waiter,
-	) -> Poll<Result<Option<group::Consumer>>> {
-		loop {
-			if let Some(res) = self.poll_group_once(ordered, delivered, waiter) {
-				return res;
-			}
-		}
-	}
-
-	/// One pass over the copies; `None` when the route moved meanwhile and it is worth
-	/// another.
-	fn poll_group_once(
-		&mut self,
-		ordered: bool,
-		delivered: &Delivered,
-		waiter: &kio::Waiter,
-	) -> Option<Poll<Result<Option<group::Consumer>>>> {
-		let candidate = match self.peeked.take() {
-			Some(candidate) => candidate,
-			None => match self.poll_lowest(ordered, delivered, waiter)? {
-				Poll::Ready(Ok(Some(next))) => next,
-				Poll::Ready(Ok(None)) => return Some(Poll::Ready(Ok(None))),
-				Poll::Ready(Err(err)) => return Some(Poll::Ready(Err(err))),
-				Poll::Pending => return Some(Poll::Pending),
-			},
-		};
-		if self.past_end(Position::group(candidate.sequence)) {
-			return Some(Poll::Ready(Err(Error::ProtocolViolation)));
+	/// Hand out the group `candidate` reserved. Selection reserves the exact group, so
+	/// eviction can abort that group but cannot substitute a later one and advance the
+	/// logical reader past a gap.
+	fn take(&mut self, candidate: Candidate) -> Result<group::Consumer> {
+		if self.past_end(Position::group(candidate.sequence())) {
+			return Err(Error::ProtocolViolation);
 		}
 		let index = self
 			.copies
@@ -1297,18 +1254,9 @@ impl Reader {
 			.position(|copy| Arc::ptr_eq(&copy.lease, &candidate.lease))
 			.expect("the candidate's lease retains its copy");
 		let Sub::Ready(sub) = &mut self.copies[index].sub else {
-			unreachable!()
+			unreachable!("a candidate comes from a copy that answered")
 		};
-		let result = match ordered {
-			true => sub.poll_next_group(waiter),
-			false => sub.poll_recv_group(waiter),
-		};
-		// Selection reserves the exact group, so eviction can abort that group but
-		// cannot substitute a later one and advance the logical reader past a gap.
-		let Poll::Ready(Ok(Some(mut group))) = result else {
-			unreachable!("the peek reserved a group")
-		};
-		assert_eq!(group.sequence, candidate.sequence, "the peek reserved this exact group");
+		let mut group = sub.take(candidate.reserved)?;
 		self.observe(index, group.sequence);
 		// A mid-group end caps the group it falls in, as it caps a direct track's.
 		if let Some(end) = self
@@ -1317,8 +1265,7 @@ impl Reader {
 		{
 			group = group.with_end(end.frame);
 		}
-		let group = self.hand_out(index, group);
-		Some(Poll::Ready(Ok(Some(group))))
+		Ok(self.hand_out(index, group))
 	}
 
 	/// Choose without consuming a candidate, so a newer copy cannot overtake a lower
@@ -1376,7 +1323,8 @@ impl Reader {
 				let res = sub.poll_peek_group(ordered, waiter);
 				match res {
 					Poll::Pending => break,
-					Poll::Ready(Ok(Some(sequence))) => {
+					Poll::Ready(Ok(Some(reserved))) => {
+						let sequence = reserved.sequence();
 						if !Self::deliverable(&self.copies[index], sequence, delivered) {
 							let Sub::Ready(sub) = &mut self.copies[index].sub else {
 								unreachable!()
@@ -1384,14 +1332,14 @@ impl Reader {
 							if ordered {
 								sub.skip_ordered(sequence.checked_add(1));
 							} else {
-								let _ = sub.poll_recv_group(waiter);
+								let _ = sub.take(reserved);
 							}
 							continue;
 						}
-						if lowest.as_ref().is_none_or(|lowest| sequence <= lowest.sequence) {
+						if lowest.as_ref().is_none_or(|lowest| sequence <= lowest.sequence()) {
 							lowest = Some(Candidate {
-								sequence,
 								lease: self.copies[index].lease.clone(),
+								reserved,
 							});
 						}
 						break;
@@ -1681,7 +1629,6 @@ impl Reader {
 	/// Assign the local floor and cap. A copy still waiting on its info takes them when it
 	/// resolves; one already reading has to be moved, or a group it skipped stays skipped.
 	fn set_range(&mut self, start: u64, end: Option<u64>, delivered: &Delivered) {
-		self.peeked = None;
 		let passed = std::mem::replace(&mut self.groups, (start, end)).0;
 		for copy in &mut self.copies {
 			let start = copy.start(start);
@@ -3317,6 +3264,14 @@ mod test {
 		group.finish().unwrap();
 	}
 
+	/// The group a peek reserves, to take later.
+	fn peek(sub: &mut track::Subscriber, ordered: bool) -> track::Reserved {
+		let Poll::Ready(Ok(Some(reserved))) = sub.poll_peek_group(ordered, &kio::Waiter::noop()) else {
+			panic!("a group to reserve")
+		};
+		reserved
+	}
+
 	/// Every group the reader hands out right now.
 	fn drain(sub: &mut track::Subscriber, ordered: bool) -> Vec<u64> {
 		let mut sequences = Vec::new();
@@ -3533,24 +3488,61 @@ mod test {
 				one.write_frame(ts(1), b"x".as_ref()).unwrap();
 				one.finish().unwrap();
 				write(&a, 3);
-				let waiter = kio::Waiter::noop();
-				assert_eq!(
-					sub.poll_peek_group(ordered, &waiter).map(Result::unwrap),
-					Poll::Ready(Some(1))
-				);
+				let reserved = peek(&mut sub, ordered);
+				assert_eq!(reserved.sequence(), 1);
 				one.abort(Error::Evicted).unwrap();
 				let b = copy();
 				routes.serve(b.consume());
 				write(&b, 2);
-				let next = match ordered {
-					true => sub.poll_next_group(&waiter),
-					false => sub.poll_recv_group(&waiter),
-				};
-				let Poll::Ready(Ok(Some(group))) = next else {
-					panic!("the reserved group")
-				};
+				let group = sub.take(reserved).unwrap();
 				assert_eq!(group.sequence, 1, "ordered={ordered}, nested={nested}");
 				assert_eq!(drain(&mut sub, ordered), [2], "ordered={ordered}, nested={nested}");
+			}
+		}
+	}
+
+	/// A route that returns to the reserving copy after another served moves that copy's
+	/// bounds, even past the reserved group when it arrived late, but taking still hands it
+	/// out: whichever reader's route returns, the containing one's or a nested copy's.
+	#[test]
+	fn a_reserved_group_survives_its_route_returning() {
+		for ordered in [false, true] {
+			for late in [false, true].into_iter().filter(|late| !(ordered && *late)) {
+				for (nested, outer_flips) in [(false, false), (true, false), (true, true)] {
+					let case = format!("ordered={ordered}, late={late}, nested={nested}, outer_flips={outer_flips}");
+					let routes = Producer::new();
+					let inner = logical(&routes);
+					let outer_routes = Producer::new();
+					let outer = logical(&outer_routes);
+					outer_routes.serve(inner.consume());
+					let a = copy();
+					routes.serve(a.consume());
+					let mut sub = subscribe(if nested { &outer } else { &inner }, HOUR);
+					write(&a, 0);
+					if late {
+						write(&a, 3);
+					}
+					drain(&mut sub, ordered);
+					let mut two = a.create_group(group::Info { sequence: 2 }).unwrap();
+					two.write_frame(ts(2), b"x".as_ref()).unwrap();
+					two.finish().unwrap();
+					let reserved = peek(&mut sub, ordered);
+					assert_eq!(reserved.sequence(), 2, "{case}");
+					two.abort(Error::Evicted).unwrap();
+					match outer_flips {
+						true => {
+							outer_routes.serve(copy().consume());
+							outer_routes.serve(inner.consume());
+						}
+						false => {
+							routes.serve(copy().consume());
+							routes.serve(a.consume());
+						}
+					}
+					assert_eq!(sub.take(reserved).unwrap().sequence, 2, "{case}");
+					write(&a, 4);
+					assert_eq!(drain(&mut sub, ordered), [4], "{case}");
+				}
 			}
 		}
 	}
