@@ -37,6 +37,11 @@ m1 quest on 2026-10-22.
   API audit). Collapse entries a later change reversed or reshaped (an API
   removed then reintroduced, a default changed twice) into the net change,
   and drop the intermediate history.
+- Read the API-diff report's auto-trait changes too, not only renamed or
+  removed items (added 2026-10-27, from an external release-to-main audit
+  that found lost `Sync` on JSON consumers, fMP4/HLS importers, video decode
+  consumers, and relay state). Restore an accidental loss at its source;
+  otherwise the migration note says how to share the type instead.
 - Compile-check the code in every `MIGRATE.md` section the cut ships against
   the candidate. Nothing else builds it.
 - Required by the cut, after m1's breaking work has landed.

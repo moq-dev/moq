@@ -22,7 +22,7 @@ skip costs nothing extra.
   start the new program at `--delay`. Keep output monotonic across the
   program change.
 - Test repeated switches: latency settles back to `--delay` after each,
-  rather than accumulating.
+  rather than accumulating, and output stays in order across every switch.
 - Also reproduce #6919's priority observation: a mid-stream
   `Subscriber::update` demotion of the old leg still showed priority 0 on
   the receive side. Fix it if update propagation is wrong; otherwise

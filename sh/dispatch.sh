@@ -312,7 +312,9 @@ step() {
                 fi
             fi
             # 77 marks the probe's skip, so the check's own 77 is a failure.
-            bash sh/local.sh nix flake check || {
+            # Full build logs name a failing VM subtest; Nix otherwise keeps
+            # only the last 25 lines, which are QEMU's cleanup.
+            bash sh/local.sh nix flake check --print-build-logs || {
                 local status=$?
                 [[ -n "${CI_STRICT:-}" ]] || ((status != 77)) || status=1
                 return "$status"

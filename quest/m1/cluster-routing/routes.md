@@ -666,6 +666,16 @@ mints at its own time, so mint order outranks cost, preference, and the
 local-broadcast tie and relays disagree on a pool path's winner, while
 ranking a minted epoch last keeps the renewal it was meant to delete.
 
+Decided 2026-10-27 (maintainer), from
+[grant subject](https://github.com/moq-dev/moq/pull/6992): decide what key
+identities are filed under for sessions allowed to publish part of the tree
+with no subject (public rules, mTLS certificates, or a third-party auth
+server), and whether the relay refuses such a grant when the client
+presented a token. Also from
+[moq-dev/moq#6947](https://github.com/moq-dev/moq/pull/6947): in `js/net`'s
+`origin.ts` a detached request stays on its own route instead of following
+the cheapest one; fix it with the route-selection rework here.
+
 ## Required
 
 - [Grant subject](/quest/m1/cluster-routing/grant-subject.md) - the issuer-qualified subject scoped identities are filed under

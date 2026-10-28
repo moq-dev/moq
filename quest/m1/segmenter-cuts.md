@@ -33,7 +33,3 @@ regression guard: it declares both cuts before any group, so it needs both
 boundaries.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [fMP4 boundary sync](/quest/m1/fmp4-boundary-sync.md) - the same non-sync declared boundary, on the group side

@@ -286,6 +286,7 @@ void main() {
       options: const ListenOptions(
         bind: '127.0.0.1:0',
         tlsGenerate: ['localhost'],
+        versions: ['moq-lite-07-wip'],
       ),
     ).timeout(timeout);
     expect(server.certFingerprints(), isNotEmpty);
@@ -304,7 +305,7 @@ void main() {
       options: ConnectOptions(
         tls: ClientTls(insecure: true, hostName: 'localhost'),
         bind: '127.0.0.1:0',
-        versions: versions(),
+        versions: const ['moq-lite-07-wip'],
         timeout: Duration(seconds: 5),
         race: Duration.zero,
         resolutionDelay: Duration.zero,

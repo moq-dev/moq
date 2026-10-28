@@ -442,7 +442,16 @@ async fn reversed(version: &str) -> Reversed {
 				.await
 				.expect("handshake")
 		},
-		async { server.accept().await.expect("incoming").await.expect("accept") },
+		async {
+			server
+				.accept()
+				.await
+				.expect("incoming")
+				.accept()
+				.expect("accept")
+				.await
+				.expect("accept")
+		},
 	);
 
 	let publisher = moq_tokio::origin::spawn();

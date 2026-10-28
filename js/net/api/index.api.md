@@ -631,7 +631,7 @@ export namespace Track {
 		demand(): Track.Demand;
 		readonly name: string;
 		get priority(): number;
-		reject(err?: Error): void;
+		reject(err: Error): void;
 		get subscription(): Readonly<Track.Subscription>;
 	}
 	export class Subscriber {

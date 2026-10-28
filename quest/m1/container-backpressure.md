@@ -34,6 +34,9 @@ Steps:
   net groups while it is full, so pressure reaches the net cache and QUIC
   flow control instead of a refusal. Keep the existing span skip for
   latency.
+- Charge each buffered sample's and group's own overhead to the budget, not
+  only payload bytes, and keep the oldest group moving even when later groups
+  fill the budget, so the consumer cannot deadlock on its own lookahead.
 - Mirror names across Rust and JS.
 - Test a publisher that packs many frames into one timestamp, and one that
   opens many groups: memory stays near the budget and playback still skips
