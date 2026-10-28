@@ -3612,7 +3612,7 @@ mod tests {
 	fn bare_quic_server(
 		connect: &moq_tokio::connect::Config,
 		idle: std::time::Duration,
-	) -> moq_tokio::quic::driver::Endpoint {
+	) -> moq_tokio::quic::driver::endpoint::Endpoint {
 		use moq_tokio::quic::driver;
 		let key = rcgen::KeyPair::generate().expect("keypair");
 		let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
@@ -3633,11 +3633,15 @@ mod tests {
 			.map(|alpn| alpn.as_bytes().to_vec())
 			.collect();
 		let crypto = driver::crypto::rustls::QuicServerConfig::try_from(tls).expect("quic crypto");
-		let mut transport = driver::TransportConfig::default();
-		transport.max_idle_timeout(Some(idle.try_into().expect("idle timeout")));
-		let mut server_config = driver::ServerConfig::with_crypto(Arc::new(crypto));
-		server_config.transport_config(Arc::new(transport));
-		driver::Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).expect("server")
+		let mut transport = driver::transport::Config::default();
+		transport.idle_timeout = Some(idle);
+		let mut server_config = driver::server::Config::new(Arc::new(crypto));
+		server_config.transport = transport;
+		driver::endpoint::Endpoint::new(
+			driver::endpoint::Config::default().with_server(server_config),
+			std::net::UdpSocket::bind("127.0.0.1:0").unwrap(),
+		)
+		.expect("server")
 	}
 
 	/// Cancelling `run` aborts the dials a peer list started, which run outside
@@ -3652,7 +3656,7 @@ mod tests {
 		let mut connect = moq_tokio::connect::Config::default();
 		connect.tls.insecure = Some(true);
 		let server = bare_quic_server(&connect, IDLE);
-		let port = server.local_addr().expect("server addr").port();
+		let port = server.local_addr().port();
 		let dir = tempfile::tempdir().expect("tempdir");
 		let peers = dir.path().join("peers.json");
 		std::fs::write(&peers, format!(r#"["moql://127.0.0.1:{port}/"]"#)).expect("write peers");
@@ -3701,7 +3705,7 @@ mod tests {
 		let mut connect = moq_tokio::connect::Config::default();
 		connect.tls.insecure = Some(true);
 		let server = bare_quic_server(&connect, IDLE);
-		let port = server.local_addr().expect("server addr").port();
+		let port = server.local_addr().port();
 
 		let config = Config {
 			connect: vec![Peer::new(format!("moql://127.0.0.1:{port}/"))],
@@ -3745,7 +3749,7 @@ mod tests {
 			.await
 			.expect("the peer heard no close before its idle timeout");
 		match err {
-			driver::ConnectionError::ApplicationClosed(close) => assert_eq!(&close.reason[..], b"client shutdown"),
+			driver::connection::Error::ApplicationClosed(close) => assert_eq!(close.reason, "client shutdown"),
 			other => panic!("the link ended with {other:?}, not the shutdown close"),
 		}
 	}

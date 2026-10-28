@@ -202,11 +202,22 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		}
 	}
 
-	/// The new program is emittable. Keep all old deadlines and queues until adoption.
+	/// The new program is emittable. The old program's queued tail is dropped: the switch
+	/// already breaks the program, and draining the tail first would add it to the latency
+	/// of every later frame. Old clocks are kept until adoption for what already went out.
 	pub fn commit(&mut self, ready: Ready<K, T>) -> Result<(), moq_net::TimeOverflow> {
-		// Nothing more of the old publisher is read, and only the incoming engine is polled from
-		// here, so a timeline restart it is still acquiring anchors on what it holds now.
+		// Nothing more of the old publisher is read, so a timeline restart it is still
+		// acquiring is settled now, then dropped with the rest of its tail.
 		self.active.acquired();
+		for track in self.active.tracks.values_mut() {
+			let cut = std::mem::take(&mut track.queue).len() as u64;
+			// A cancel resumes the old publisher, whose next frames may reference the cut ones.
+			track.waiting |= cut > 0;
+			match track.started {
+				true => self.active.dropped += cut,
+				false => self.active.trimmed += cut,
+			}
+		}
 		let Handoff::Pending(Pending {
 			keys,
 			mut engine,
@@ -229,12 +240,14 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 			.flat_map(|track| &track.queue)
 			.map(|(_, _, at, _)| *at)
 			.min();
+		// Only what already went out bounds the new program, so output stays in order while
+		// the new program keeps the delay its own clock acquired.
 		let shift = self
 			.active
-			.horizon
+			.released
 			.zip(first)
 			.map_or(Duration::ZERO, |(old, new)| old.saturating_duration_since(new));
-		tracing::debug!(target: "moq_mux::container::ts::handoff", phase = "commit-clock", now = ?moq_clock::now(), old_horizon = ?self.active.horizon, new_first = ?first, ?shift, old_clock = ?self.active.clock.map(|clock| (clock.anchor, clock.base, clock.generation)), new_clock = ?engine.clock.map(|clock| (clock.anchor, clock.base, clock.generation)));
+		tracing::debug!(target: "moq_mux::container::ts::handoff", phase = "commit-clock", now = ?moq_clock::now(), old_released = ?self.active.released, new_first = ?first, ?shift, old_clock = ?self.active.clock.map(|clock| (clock.anchor, clock.base, clock.generation)), new_clock = ?engine.clock.map(|clock| (clock.anchor, clock.base, clock.generation)));
 		let offset = self.active.clock.map_or(0, |clock| clock.generation + 1);
 		for clock in [&mut engine.clock, &mut engine.previous].into_iter().flatten() {
 			clock.anchor = clock.anchor.checked_add(shift).ok_or(moq_net::TimeOverflow)?;
@@ -254,7 +267,7 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 			.horizon
 			.map(|horizon| horizon.checked_add(shift).ok_or(moq_net::TimeOverflow))
 			.transpose()?
-			.max(self.active.horizon);
+			.max(self.active.released);
 		engine.tracks.append(&mut self.active.tracks);
 		let old = std::mem::replace(&mut self.active, engine);
 		self.handoff = Some(Box::new(Handoff::Committed(Committed { keys, old })));
@@ -493,8 +506,8 @@ pub(crate) struct Engine<K, T> {
 	/// The tracks an acquisition waits to hear from, bounded, so that it anchors on whichever
 	/// of them is sent latest against its decode time.
 	expect: BTreeSet<K>,
-	/// Whether a frame has gone out since the clock started.
-	released: bool,
+	/// The latest deadline of a frame gone out.
+	released: Option<Instant>,
 	/// What the clock is steered on, since it last started.
 	steer: Steer<K>,
 	/// How much more slack each track had than the track sent latest, in seconds, in the last
@@ -727,7 +740,7 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 			tracks: BTreeMap::new(),
 			horizon: None,
 			expect: BTreeSet::new(),
-			released: false,
+			released: None,
 			steer: Steer::default(),
 			leads: BTreeMap::new(),
 			timer: None,
@@ -772,7 +785,7 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 			.is_some_and(|acquire| acquire.tracks.contains_key(&key));
 		let Some(clock) = self
 			.clock
-			.filter(|_| !held && !(self.released && self.jumps(&key, &arrival)))
+			.filter(|_| !held && !(self.released.is_some() && self.jumps(&key, &arrival)))
 		else {
 			self.hold(key, arrival);
 			return Ok(Push::Queued);
@@ -796,7 +809,7 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 			let generation = track.generation;
 			return Ok(self.queue(key, arrival, generation, None, false));
 		}
-		if self.released && !self.delay.is_zero() {
+		if self.released.is_some() && !self.delay.is_zero() {
 			self.steer(&key, deadline, &arrival)?;
 		}
 		Ok(self.queue(key, arrival, clock.generation, deadline, false))
@@ -1268,7 +1281,7 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 				let track = self.tracks.get_mut(key).expect("the front's track");
 				let (generation, decode, deadline, item) = track.queue.pop_front().expect("the front frame");
 				let first = !std::mem::replace(&mut track.started, true);
-				self.released = true;
+				self.released = self.released.max(Some(deadline));
 				// A previous-generation frame queued now would go out after this one.
 				if self.clock.is_some_and(|clock| clock.generation == generation) {
 					self.previous = None;
@@ -1550,9 +1563,9 @@ mod tests {
 		assert_eq!((next.item, next.generation), ("A restart", 1));
 	}
 
-	/// A caller can hold B's first issued item, cancel before adoption, and resume A.
+	/// A caller can hold B's first issued item, cancel before adoption, and resume A on its clock.
 	#[moq_clock::test]
-	async fn cancelling_an_issued_replacement_keeps_the_active_clock_and_queue() {
+	async fn cancelling_an_issued_replacement_keeps_the_active_clock() {
 		let start = moq_clock::now();
 		let delay = Duration::from_millis(500);
 		let mut buffer = Buffer::new(delay).replay();
@@ -1569,18 +1582,15 @@ mod tests {
 			panic!("B ready");
 		};
 		buffer.commit(first).unwrap();
-		assert_eq!(buffer.reporting().dropped(), 1);
+		// The commit drops A's tail.
+		assert_eq!(buffer.reporting().dropped(), 2);
 		moq_clock::sleep(Duration::from_millis(100)).await;
-		let Poll::Ready(tail) = buffer.poll_next(&kio::Waiter::noop()) else {
-			panic!("A tail retained");
-		};
-		assert_eq!(tail.item, "A tail");
 		let Poll::Ready(held) = buffer.poll_next(&kio::Waiter::noop()) else {
 			panic!("B issued");
 		};
 		assert_eq!(held.item, "B");
 		buffer.cancel();
-		assert_eq!(buffer.reporting().dropped(), 1);
+		assert_eq!(buffer.reporting().dropped(), 2);
 		assert_eq!(buffer.at(0, ms(200)), Some(start + delay + Duration::from_millis(200)));
 		buffer.push(0, arrival(moq_clock::now(), 200, "A resumed")).unwrap();
 		buffer.start([2], [2]);
@@ -1600,9 +1610,40 @@ mod tests {
 		assert_eq!(buffer.reporting().dropped(), 0);
 	}
 
-	/// A restart the old publisher is still acquiring at commit goes out before the replacement.
+	/// A cancel after commit resumes the old publisher at its next sync frame, since the frames
+	/// after its cut tail may reference it.
 	#[moq_clock::test]
-	async fn a_commit_drains_the_old_publishers_acquiring_restart() {
+	async fn a_cancelled_commit_resumes_the_old_publisher_at_a_sync_frame() {
+		let start = moq_clock::now();
+		let delay = Duration::from_millis(500);
+		let mut buffer = Buffer::new(delay).replay();
+		buffer.push(0u16, arrival(start, 0, "A0")).unwrap();
+		buffer.push(0, arrival(start, 100, "A tail")).unwrap();
+		buffer.start([1], [1]);
+		buffer.push(1, arrival(start, 10_000, "B")).unwrap();
+		moq_clock::sleep(delay).await;
+		assert_eq!(due(&mut buffer), ["A0"]);
+		let Poll::Ready(first) = buffer.poll_pending(&kio::Waiter::noop()) else {
+			panic!("B ready");
+		};
+		buffer.commit(first).unwrap();
+		buffer.cancel();
+		assert_eq!(buffer.reporting().dropped(), 1);
+		let delta = Arrival {
+			sync: false,
+			..arrival(moq_clock::now(), 200, "A delta")
+		};
+		assert_eq!(buffer.push(0, delta).unwrap(), Push::Waiting);
+		assert_eq!(buffer.reporting().dropped(), 2);
+		let key = arrival(moq_clock::now(), 300, "A key");
+		assert_eq!(buffer.push(0, key).unwrap(), Push::Queued);
+		moq_clock::sleep(delay).await;
+		assert_eq!(due(&mut buffer), ["A key"]);
+	}
+
+	/// A restart the old publisher is still acquiring at commit is dropped with the old tail.
+	#[moq_clock::test]
+	async fn a_commit_drops_the_old_publishers_acquiring_restart() {
 		let start = moq_clock::now();
 		let delay = Duration::from_millis(500);
 		let mut buffer = Buffer::new(delay);
@@ -1621,34 +1662,108 @@ mod tests {
 		};
 		// A's acquisition has 10 ms left to run, so only the commit can settle it.
 		buffer.commit(first).unwrap();
-		moq_clock::sleep(Duration::from_millis(10)).await;
-		assert_eq!(released(&mut buffer), [("A restart", 1), ("B", 2)]);
+		assert_eq!(released(&mut buffer), [("B", 2)]);
+		assert_eq!(buffer.reporting().dropped(), 1);
 	}
 
+	/// A replacement shifted behind what already went out fails past the clock's range.
 	#[moq_clock::test]
 	async fn a_handoff_past_the_clock_range_returns_overflow() {
 		let start = moq_clock::now();
 		let mut buffer = Buffer::new(DELAY).replay();
-		buffer.push(0u16, arrival(start, 0, "A")).unwrap();
+		// A's clock runs a millisecond behind B's, so B shifts behind A's last frame out.
+		buffer
+			.push(0u16, arrival(start + Duration::from_millis(1), 0, "A"))
+			.unwrap();
+		buffer.start([1], [1]);
+		buffer.push(1, arrival(start, 0, "B first")).unwrap();
 		let last = Instant::ZERO.checked_add(Duration::from_nanos(u64::MAX)).unwrap();
 		let decode = Decode::from_nanos((last - start - DELAY).as_nanos() as i128);
 		buffer
 			.push(
-				0,
+				1,
 				Arrival {
 					decode,
-					..arrival(start, 0, "A last")
+					..arrival(start, 0, "B last")
 				},
 			)
 			.unwrap();
-		buffer.start([1], [1]);
-		buffer.push(1, arrival(start, 0, "B first")).unwrap();
-		buffer.push(1, arrival(start, 1, "B after last")).unwrap();
-		moq_clock::sleep(DELAY).await;
+		moq_clock::sleep(DELAY + Duration::from_millis(1)).await;
+		assert_eq!(due(&mut buffer), ["A"]);
 		let Poll::Ready(first) = buffer.poll_pending(&kio::Waiter::noop()) else {
 			panic!("B ready");
 		};
 		assert_eq!(buffer.commit(first), Err(moq_net::TimeOverflow));
+	}
+
+	/// Each switch goes out at the delay its replacement's clock acquired, not after the old
+	/// program's tail, so latency does not build up switch after switch, and every frame
+	/// after a switch is the replacement's.
+	#[moq_clock::test]
+	async fn repeated_switches_keep_the_delay() {
+		const TICK: Duration = Duration::from_millis(100);
+		let start = moq_clock::now();
+		let delay = Duration::from_millis(500);
+		let mut buffer = Buffer::<u16, Instant>::new(delay).replay();
+		// Publisher `key` stamps each frame `key * 100 s` past the time it sends it.
+		let push = |buffer: &mut Buffer<u16, Instant>, key: u16| {
+			let now = moq_clock::now();
+			let frame = Arrival {
+				arrived: now,
+				read: now,
+				decode: ms(u64::from(key) * 100_000 + (now - start).as_millis() as u64).into(),
+				restart: 0,
+				skip: 0,
+				cut: 0,
+				sync: true,
+				leading: false,
+				item: now,
+			};
+			assert_eq!(buffer.push(key, frame).unwrap(), Push::Queued);
+		};
+		// Every frame due now goes out the delay after it arrived, in generation order, and
+		// all from `key`.
+		let drain = |buffer: &mut Buffer<u16, Instant>, key: u16, generation: &mut u64| {
+			let mut count = 0;
+			while let Poll::Ready(ready) = buffer.poll_next(&kio::Waiter::noop()) {
+				assert_eq!(ready.track, key, "an old frame after the switch");
+				assert_eq!(moq_clock::now() - ready.item, delay);
+				assert!(ready.generation >= *generation);
+				*generation = ready.generation;
+				count += 1;
+			}
+			count
+		};
+		let mut generation = 0;
+		for _ in 0..20 {
+			push(&mut buffer, 0);
+			drain(&mut buffer, 0, &mut generation);
+			moq_clock::sleep(TICK).await;
+		}
+		for key in 1..4u16 {
+			buffer.start([key], [key]);
+			let first = loop {
+				push(&mut buffer, key - 1);
+				push(&mut buffer, key);
+				drain(&mut buffer, key - 1, &mut generation);
+				if let Poll::Ready(first) = buffer.poll_pending(&kio::Waiter::noop()) {
+					break first;
+				}
+				moq_clock::sleep(TICK).await;
+			};
+			let dropped = buffer.reporting().dropped();
+			buffer.commit(first).unwrap();
+			// The old tail still queued, the delay's worth read since the frame due now, is cut.
+			assert_eq!(buffer.reporting().dropped() - dropped, 5);
+			assert_eq!(drain(&mut buffer, key, &mut generation), 1);
+			buffer.adopted();
+			for _ in 0..20 {
+				moq_clock::sleep(TICK).await;
+				push(&mut buffer, key);
+				drain(&mut buffer, key, &mut generation);
+			}
+		}
+		assert_eq!(generation, 3);
 	}
 
 	#[moq_clock::test]

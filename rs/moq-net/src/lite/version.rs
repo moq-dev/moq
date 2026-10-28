@@ -219,6 +219,13 @@ impl Version {
 		)
 	}
 
+	/// Whether a copy's fills stop at the start its publisher resolved from the budget.
+	/// Lite-06 resolves the start, but drops media time and sends FETCH without a max
+	/// delay, so nothing judges a group below that start against a reader's budget.
+	pub(crate) fn fills_from_start(self) -> bool {
+		self.resolves_start() && !self.has_media_time() && !self.has_fetch_max_delay()
+	}
+
 	/// Whether subscription completion waits for the subscriber's FIN.
 	pub(crate) fn waits_for_subscriber_fin(self) -> bool {
 		!matches!(

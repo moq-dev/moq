@@ -21,7 +21,7 @@ use std::{
 use rangemap::{RangeMap, RangeSet};
 
 use super::{Info, Order, Position, TrackState, clamp_max_delay};
-use crate::{Error, Result, StreamError, group};
+use crate::{Error, Result, StreamError, group, util::SendCell};
 
 /// The fills a track's readers asked for, queued or taken by a handler, under one lock.
 #[derive(Default)]
@@ -664,7 +664,9 @@ pub(super) fn poll_requested(
 			asks,
 			result,
 		};
-		return Poll::Ready(Ok(Fill { inner: Arc::new(inner) }));
+		return Poll::Ready(Ok(Fill {
+			inner: Arc::new(SendCell::new(inner)),
+		}));
 	}
 
 	// No fill queued: surface a track abort so the handler loop can exit.
@@ -690,7 +692,9 @@ pub(super) fn poll_requested(
 /// A reader narrowing its ranges may leave a single group, so stop serving that one when
 /// [`poll_unwanted`](Self::poll_unwanted) is ready and move on to [`next`](Self::next).
 pub struct Fill {
-	inner: Arc<Inner>,
+	// Its track state reaches every group of the track, so the cell proves `Send` once
+	// here instead of inside every session machine holding a fill.
+	inner: Arc<SendCell<Inner>>,
 }
 
 /// The state a [`Fill`] and its per-group handles share. The last one dropping settles what
@@ -1235,7 +1239,7 @@ impl Readers {
 /// that group of the fill; dropping it unanswered leaves the group to the fill.
 #[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) struct GroupFill {
-	inner: Arc<Inner>,
+	inner: Arc<SendCell<Inner>>,
 	sequence: u64,
 	frame_start: u64,
 	frame_end: Option<u64>,

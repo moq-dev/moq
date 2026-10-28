@@ -380,16 +380,13 @@ fn payload(index: usize, range: ops::Range<usize>) -> Vec<u8> {
 
 fn run(case: &Case) -> Result<Outcome, TestCaseError> {
 	entropy::reseed(case.seed);
-	let mut transport = TransportConfig::default();
-	transport
-		.stream_receive_window(case.limits.stream_window.into())
-		.receive_window(case.limits.window.into())
-		.max_concurrent_uni_streams(case.limits.max_streams.into())
-		.max_concurrent_bidi_streams(case.limits.max_streams.into())
-		.datagram_receive_buffer_size(Some(65_536))
-		.datagram_send_buffer_size(65_536)
-		.reset_stream_at(true);
-	let transport = Arc::new(transport);
+	let mut transport = transport::Config::default();
+	transport.limits.stream_receive_window = NonZeroU64::new(case.limits.stream_window.into());
+	transport.limits.receive_window = NonZeroU64::new(case.limits.window.into());
+	transport.limits.max_streams = NonZeroU64::new(case.limits.max_streams.into());
+	transport.datagram.receive_buffer = Some(65_536);
+	transport.datagram.send_buffer = 65_536;
+	transport.reset_stream_at = true;
 
 	let mut server_config = server_config();
 	server_config.transport = transport.clone();
@@ -500,7 +497,7 @@ fn run(case: &Case) -> Result<Outcome, TestCaseError> {
 		link.reorder = 0.0;
 	}
 	let now = pair.time;
-	pair.client_conn_mut(client_ch).close(now, VarInt(0), Bytes::new());
+	pair.client_conn_mut(client_ch).close(now, VarInt(0), String::new());
 	pair.drive();
 	let reason = loop {
 		match pair.server_conn_mut(server_ch).poll() {

@@ -305,6 +305,9 @@ pub enum Error {
 	/// Another publisher instance replaced a followed broadcast, and stitching was off.
 	#[error("another publisher instance replaced broadcast `{0}`; enable stitch to follow it as a program switch")]
 	Replaced(String),
+	/// A published rendition changed fields that require a new decoder configuration.
+	#[error("rendition `{0}` changed identity; publish it under a new track name")]
+	IdentityChanged(String),
 
 	/// A rendition moved to a track whose media goes back before what the export already read for it.
 	#[error(

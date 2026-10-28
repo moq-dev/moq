@@ -2347,7 +2347,10 @@ interface ServedGroup {
 interface ServedFill {
 	/** The request id the FETCH_HEADER named, when it survived a reset. */
 	requestId?: bigint;
-	/** Each object's group, absolute id, and payload. */
+	/**
+	 * Each object's group, absolute id, and payload, and each End of Range's group and id
+	 * with `end <reason in hex>` for its payload.
+	 */
 	objects: { group: number; id: number; payload: string }[];
 	/**
 	 * The error the stream ended with, when the publisher reset it instead of finishing.
@@ -2515,6 +2518,13 @@ async function readFill(
 	try {
 		while (!(await reader.done())) {
 			const flags = await reader.u53();
+			// Absolute ids, and nothing after them.
+			if (flags >= 0x80) {
+				group = Number(await reader.u62());
+				id = Number(await reader.u62());
+				objects.push({ group, id, payload: `end ${flags.toString(16)}` });
+				continue;
+			}
 			if (flags & 0x08) {
 				const value = await reader.u53();
 				group = objects.length === 0 ? value : order === "ascending" ? group + value + 1 : group - value - 1;
@@ -3279,10 +3289,51 @@ test("draft-22: the subscriber leaving ends a fill still reading its group", asy
 		client.close();
 
 		// A reset discards what the peer has not acknowledged, so the objects already written
-		// may or may not survive it. That it ends at all, with the cancellation as its reason,
-		// is the whole point.
+		// may or may not survive it. That it ends at all, reset as CANCELLED, is the whole point.
 		const served = await reading;
-		expect(served.reset?.message).toContain("unsubscribed");
+		expect(served.reset).toMatchObject({ code: StreamCode.Cancel });
+	} finally {
+		open.finish();
+		fx.close();
+		client.close();
+	}
+});
+
+// A fill's FILL_TIMEOUT bounds its wait as a FETCH's does. Zero takes only what is cached, so
+// the open group's missing tail is a Timed-Out gap rather than a wait the fill never ends.
+test("draft-22: a fill's FILL_TIMEOUT marks what it did not wait for", async () => {
+	using _clock = manual();
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const open = track.appendGroup();
+	open.writeFrame({ payload: new TextEncoder().encode("0.0"), timestamp: Timestamp.now() });
+	writeGroup(track, 1);
+
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "nextObject" },
+			fill: {
+				filter: { kind: "absolute", startGroup: 0n, startObject: 0n, endGroup: 0n },
+				fillTimeout: Milli(0),
+				rangeFilters: false,
+			},
+		}),
+	);
+
+	try {
+		const fill = await nextUni(fx.uni);
+		if (!fill) throw new Error("no fetch stream for the requested fill");
+		const served = await readFill(fill);
+		expect(served.reset).toBeUndefined();
+		expect(served.objects).toEqual([
+			{ group: 0, id: 0, payload: "0.0" },
+			{ group: 0, id: Number(2n ** 62n - 1n), payload: "end 20c" },
+		]);
 	} finally {
 		open.finish();
 		fx.close();
@@ -4368,7 +4419,7 @@ test("draft-22: narrowing gives up an excluded group's open stream", async () =>
 		await new SubscribeUpdate({ requestId: 2n, parameters }).encode(client.writer, fx.version);
 		expect(await client.reader.u53()).toBe(RequestOk.id);
 		await RequestOk.decode(client.reader, fx.version);
-		expect((await reading)?.message).toContain("range update");
+		expect(await reading).toMatchObject({ code: StreamCode.Cancel });
 		// The publisher remains usable; only this subscription stopped its old group.
 		open.writeFrame({ payload: new Uint8Array([2]), timestamp: Timestamp.now() });
 		writeGroup(track, 1);
@@ -4603,7 +4654,7 @@ test.each([
 			expect(await client.reader.u53()).toBe(RequestOk.id);
 			await RequestOk.decode(client.reader, fx.version);
 		}
-		expect((await reading)?.message).toContain("range update");
+		expect(await reading).toMatchObject({ code: StreamCode.Cancel });
 		open.writeFrame({ payload: new TextEncoder().encode("1.1"), timestamp: Timestamp.now() });
 		open.finish();
 		expect((await readServed(fx.uni, 2)).sort()).toEqual(["0.0", "1.0", "1.1"]);

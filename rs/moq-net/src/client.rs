@@ -475,7 +475,7 @@ impl Client {
 		// The server ends the stream after its SETUP. Reading to the end first keeps the drop
 		// from stopping a reply the server is still waiting to have acknowledged.
 		if version.hands_off() {
-			std::future::poll_fn(|cx| stream.reader.poll_closed(cx)).await?;
+			kio::wait(|waiter| stream.reader.poll_closed(waiter)).await?;
 			drop(stream);
 			return self.start_lite(runtime, session, v, peer_hop);
 		}
@@ -527,7 +527,7 @@ mod tests {
 		sync::{Arc, Mutex},
 	};
 
-	use std::task::{Context, Poll};
+	use std::task::Poll;
 
 	use crate::SessionError;
 	use crate::coding::{Decode, Encode};
@@ -557,8 +557,6 @@ mod tests {
 	#[derive(Clone, Default)]
 	struct FakeSession {
 		state: Arc<FakeSessionState>,
-		// Per-clone, so each pending poll_closed keeps its own registration live.
-		park: kio::Park,
 		/// The sender, set by [`Self::with_probe`].
 		probe: Option<crate::transport::Probe>,
 	}
@@ -599,7 +597,6 @@ mod tests {
 			};
 			Self {
 				state: Arc::new(state),
-				park: kio::Park::default(),
 				probe: None,
 			}
 		}
@@ -638,57 +635,57 @@ mod tests {
 		type RecvStream = FakeRecvStream;
 		type Error = FakeError;
 
-		fn poll_accept_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
+		fn poll_accept_uni(&self, _waiter: &kio::Waiter) -> Poll<Result<Self::RecvStream, Self::Error>> {
 			Poll::Pending
 		}
 
 		fn poll_accept_bi(
-			&mut self,
-			_cx: &mut Context<'_>,
+			&self,
+			_waiter: &kio::Waiter,
 		) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 			Poll::Pending
 		}
 
 		fn poll_open_bi(
-			&mut self,
-			_cx: &mut Context<'_>,
+			&self,
+			_waiter: &kio::Waiter,
 			_: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
 		) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 			Poll::Ready(self.state.control_stream.lock().unwrap().take().ok_or(FakeError))
 		}
 
 		fn poll_open_request(
-			&mut self,
-			cx: &mut std::task::Context<'_>,
+			&self,
+			waiter: &kio::Waiter,
 			options: crate::transport::poll::SendOptions<
 				'_,
 				<Self::SendStream as crate::transport::poll::SendStream>::Group,
 			>,
 		) -> std::task::Poll<Result<Option<crate::transport::poll::BiStreams<Self>>, Self::Error>> {
-			self.poll_open_bi(cx, options).map_ok(Some)
+			self.poll_open_bi(waiter, options).map_ok(Some)
 		}
 
 		fn poll_open_uni(
-			&mut self,
-			_cx: &mut Context<'_>,
+			&self,
+			_waiter: &kio::Waiter,
 			_: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
 		) -> Poll<Result<Self::SendStream, Self::Error>> {
 			Poll::Pending
 		}
 
-		fn send_group(&mut self, _: i64) -> Option<crate::transport::poll::Ungrouped> {
+		fn send_group(&self, _: i64) -> Option<crate::transport::poll::Ungrouped> {
 			None
 		}
 
 		fn send_datagram(
-			&mut self,
+			&self,
 			_: Bytes,
 			_: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
 		) -> Result<(), Self::Error> {
 			Ok(())
 		}
 
-		fn poll_recv_datagram(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
+		fn poll_recv_datagram(&self, _waiter: &kio::Waiter) -> Poll<Result<Bytes, Self::Error>> {
 			Poll::Pending
 		}
 
@@ -703,11 +700,11 @@ mod tests {
 			self.state.protocol
 		}
 
-		fn close(&mut self, code: u32, reason: &str) {
+		fn close(&self, code: u32, reason: &str) {
 			self.state.close_events.lock().push((code, reason.to_string()));
 		}
 
-		fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
+		fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Self::Error> {
 			assert!(
 				!self
 					.state
@@ -715,7 +712,7 @@ mod tests {
 					.swap(false, std::sync::atomic::Ordering::Relaxed),
 				"injected driver poll panic"
 			);
-			let _ = std::task::ready!(self.state.close_events.poll(self.park.hold(cx), any_close));
+			let _ = std::task::ready!(self.state.close_events.poll(waiter, any_close));
 			Poll::Ready(FakeError)
 		}
 
@@ -753,7 +750,7 @@ mod tests {
 		type Error = FakeError;
 		type Group = crate::transport::poll::Ungrouped;
 
-		fn poll_write(&mut self, _cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
+		fn poll_write(&mut self, _waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 			self.writes.lock().unwrap().put_slice(buf);
 			Poll::Ready(Ok(buf.len()))
 		}
@@ -770,7 +767,7 @@ mod tests {
 
 		fn reset(&mut self, _code: u32) {}
 
-		fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+		fn poll_closed(&self, _waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
 			Poll::Ready(Ok(()))
 		}
 	}
@@ -784,7 +781,7 @@ mod tests {
 	impl crate::transport::poll::Chunks for FakeChunks {
 		type Error = FakeError;
 
-		fn poll_read_chunk(&mut self, _cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
+		fn poll_read_chunk(&mut self, _waiter: &kio::Waiter, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
 			if self.data.is_empty() {
 				return Poll::Ready(Ok(None));
 			}
@@ -1073,7 +1070,7 @@ mod tests {
 			.with_versions(Version::Lite(lite::Version::Lite04).into())
 			.with_stats(registry.tier(Tier::default()).session(crate::Path::from_static("root")));
 		let runtime = crate::time::Deadlines::new(crate::time::Instant::now());
-		let mut task = Transport::new(FakeSession::new(Some(ALPN_LITE_04), Vec::new()));
+		let task = Transport::new(FakeSession::new(Some(ALPN_LITE_04), Vec::new()));
 		let (session, mut driver) =
 			futures::executor::block_on(client.connect_boxed(runtime.now(), task.clone())).unwrap();
 		task.close(SessionError::ProtocolViolation.to_code(), "malformed");

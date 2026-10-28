@@ -122,8 +122,11 @@ supplies a PES boundary or clock fails rather than retaining bytes indefinitely.
 It takes one program: a multi-program
 stream is refused until `--program` picks one, or `--program all` publishes
 each as its own broadcast (`event.hang` becomes `event/1.hang`,
-`event/2.hang`). A damaged packet is dropped on its own PID, so video freezes
-until its next keyframe while the other tracks carry on. The importer also
+`event/2.hang`), following the PAT: a program it adds publishes, one it drops
+ends, and one that returns publishes as a new instance. A listed program whose
+PMT does not arrive within 0.5 s of program clock ends the import. A damaged packet is
+dropped on its own PID, so video freezes until its next keyframe while the
+other tracks carry on. The importer also
 logs feed health (stalled streams, TR 101 290 errors) without changing what it
 publishes. `--passthrough` publishes the multiplex whole instead, every packet
 in order on one [`m2ts`](/concept/hang#transport-streams) track with every
@@ -484,10 +487,11 @@ the break. A stitch waits for the replacement's first catalog snapshot until it
 arrives or the replacement goes, keeping the old publisher playing meanwhile,
 so even the default `--follow 0s` switches to a replacement that is still
 starting. After the catalog arrives, the old instance keeps feeding for up to
-`--follow` while the replacement acquires its clock and first usable media, and
-its buffered tail drains before the marked switch. A replacement usable within
-that window adds no gap to the output; one still acquiring when it runs out,
-such as on a link too slow to carry both instances, starts after a gap.
+`--follow` while the replacement acquires its clock and first usable media.
+The marked switch then drops the old instance's buffered tail, so the
+replacement plays at `--delay` rather than behind it. A replacement usable
+within that window adds no gap to the output; one still acquiring when it runs
+out, such as on a link too slow to carry both instances, starts after a gap.
 Timestamps across epochs are not aligned. Without `--stitch` the export stays
 on the old publisher while it is up. Only lite-07 and moq-transport sessions
 carry epochs, so on the

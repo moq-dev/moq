@@ -9,16 +9,34 @@ use crate::quic::Resolved;
 use crate::quic::ServerId;
 use crate::tls::FingerprintVerifier;
 use std::net;
-use std::pin::Pin;
-use std::sync::{Arc, Mutex, RwLock};
-use std::task::{Context, Poll, Waker, ready};
+use std::sync::Arc;
 use std::time::Duration;
+
+/// The transport config the resolved quic knobs describe, for either role.
+fn transport(quic: &Resolved, role: &str) -> Result<driver::transport::Config> {
+	let mut transport = driver::transport::Config::default();
+	transport.idle_timeout = Some(quic.idle_timeout);
+	transport.keep_alive = quic.keep_alive;
+	// MTU discovery is enabled by default; disable it unless asked.
+	if !quic.mtu_discovery {
+		transport.mtu = None;
+	}
+	// The windows replace moq-quic's own defaults, so every runtime honors the same section.
+	transport.limits = quic.limits();
+	if let Some(gso) = quic.gso {
+		transport.segmentation_offload = gso;
+	}
+	transport.congestion = congestion_factory(quic.congestion());
+	transport.validate()?;
+	apply_qlog(&mut transport, quic, role)?;
+	Ok(transport)
+}
 
 /// Attach a qlog stream writing into the configured directory, if any.
 ///
-/// A [`driver::QlogStream`] is a shared handle: every connection on the endpoint writes into
-/// it, tagged with its own qlog `group_id`, so this is one file per endpoint.
-fn apply_qlog(transport: &mut driver::TransportConfig, quic: &Resolved, role: &str) -> Result<()> {
+/// A [`driver::transport::qlog::Stream`] is a shared handle: every connection on the endpoint
+/// writes into it, tagged with its own qlog `group_id`, so this is one file per endpoint.
+fn apply_qlog(transport: &mut driver::transport::Config, quic: &Resolved, role: &str) -> Result<()> {
 	// `Client::validate` already rejected a directory this build can't honor, so the
 	// block below is only reached where capture actually works.
 	let Some(dir) = quic.qlog_dir() else {
@@ -37,10 +55,11 @@ fn apply_qlog(transport: &mut driver::TransportConfig, quic: &Resolved, role: &s
 		// never called per event, so a BufWriter would hold every trace in memory until the
 		// endpoint drops and lose the lot if the process is killed. Killing a stuck process
 		// is exactly when these traces are worth having.
-		let mut config = driver::QlogConfig::default();
-		config.writer(Box::new(file)).title(Some(format!("moq-tokio {role}")));
+		let mut config = driver::transport::qlog::Config::default();
+		config.writer = Some(Box::new(file));
+		config.title = Some(format!("moq-tokio {role}"));
 
-		transport.qlog_stream(config.into_stream());
+		transport.qlog = config.into_stream();
 		tracing::info!(path = %path.display(), "writing qlog");
 	}
 
@@ -48,39 +67,6 @@ fn apply_qlog(transport: &mut driver::TransportConfig, quic: &Resolved, role: &s
 	let _ = (transport, dir, role);
 
 	Ok(())
-}
-
-/// Apply the resolved quic knobs to a transport config.
-fn apply_transport(transport: &mut driver::TransportConfig, quic: &Resolved) {
-	transport.max_idle_timeout(Some(quic.idle_timeout.try_into().expect("idle timeout out of range")));
-	transport.keep_alive_interval(quic.keep_alive);
-
-	// MTU discovery is enabled by default; disable it unless asked.
-	if !quic.mtu_discovery {
-		transport.mtu_discovery_config(None);
-	}
-
-	let max_streams = driver::VarInt::from_u64(quic.max_streams).unwrap_or(driver::VarInt::MAX);
-	transport.max_concurrent_bidi_streams(max_streams);
-	transport.max_concurrent_uni_streams(max_streams);
-
-	if let Some(gso) = quic.gso {
-		transport.enable_segmentation_offload(gso);
-	}
-
-	apply_windows(transport, quic);
-
-	transport.congestion_controller_factory(congestion_factory(quic.congestion()));
-}
-
-/// Apply the flow-control windows `Config::resolve` settled, replacing moq-quic's own.
-fn apply_windows(transport: &mut driver::TransportConfig, quic: &Resolved) {
-	// Saturating rather than erroring: `Config::validate` already rejects a window
-	// past the varint, so this only bites a `Resolved` built without it.
-	transport.receive_window(driver::VarInt::from_u64(quic.receive_window).unwrap_or(driver::VarInt::MAX));
-	transport
-		.stream_receive_window(driver::VarInt::from_u64(quic.stream_receive_window).unwrap_or(driver::VarInt::MAX));
-	transport.send_window(quic.send_window);
 }
 
 /// The controller factory for a congestion control family. moq-quic's BBR is v3.
@@ -102,20 +88,16 @@ pub enum Error {
 
 	/// The QUIC endpoint could not be created around the bound socket.
 	#[error("failed to create QUIC endpoint")]
-	CreateEndpoint(#[source] std::io::Error),
+	CreateEndpoint(#[source] driver::endpoint::Error),
+
+	/// The resolved transport settings are ones the QUIC stack refuses.
+	#[error("invalid quic config: {0}")]
+	Config(#[from] driver::ConfigError),
 
 	/// The qlog trace file couldn't be created, usually a missing directory.
 	#[cfg(feature = "qlog")]
 	#[error("failed to create qlog file")]
 	CreateQlog(#[source] std::io::Error),
-
-	/// No async runtime was found. Construct the client or server from within a tokio runtime.
-	#[error("no async runtime")]
-	NoRuntime,
-
-	/// The endpoint's local address could not be read from the socket.
-	#[error("failed to get local address")]
-	LocalAddr(#[source] std::io::Error),
 
 	/// The configured bind address could not be resolved.
 	#[error("failed to resolve bind address")]
@@ -273,8 +255,8 @@ impl crate::failover::Aggregate for Error {
 }
 
 crate::error::from_message! {
-	driver::ConnectError => Connect,
-	driver::ConnectionError => Connection,
+	driver::endpoint::ConnectError => Connect,
+	driver::connection::Error => Connection,
 	web::ServerError => Server,
 	hex::FromHexError => InvalidFingerprint,
 }
@@ -300,8 +282,8 @@ type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Clone)]
 pub(crate) struct Client {
-	pub quic: driver::Endpoint,
-	pub transport: Arc<driver::TransportConfig>,
+	pub quic: driver::endpoint::Endpoint,
+	pub transport: driver::transport::Config,
 	/// Whether an `http://` URL may bootstrap a pin (see [crate::tls::Connect::allows_http_bootstrap]).
 	pub http_bootstrap: bool,
 	/// Optional TLS SNI / verification hostname override (from config).
@@ -325,11 +307,8 @@ impl Client {
 		let socket = crate::bind::udp(crate::bind::Udp::new(resolved.bind)).map_err(Error::BindSocket)?;
 		let dual_stack = crate::bind::udp_is_dual_stack(&socket);
 
-		let mut transport = driver::TransportConfig::default();
 		let quic = quic.resolve();
-		apply_transport(&mut transport, &quic);
-		apply_qlog(&mut transport, &quic, "client")?;
-		let transport = Arc::new(transport);
+		let transport = transport(&quic, "client")?;
 		let keylog = quic
 			.keylog
 			.as_deref()
@@ -337,13 +316,8 @@ impl Client {
 			.transpose()?
 			.map(Arc::new);
 
-		// There's a bit more boilerplate to make a generic endpoint.
-		// The driver spawns its tasks on the current tokio runtime.
-		tokio::runtime::Handle::try_current().map_err(|_| Error::NoRuntime)?;
-		let endpoint_config = driver::EndpointConfig::default();
-
-		// Create the generic QUIC endpoint.
-		let quic = driver::Endpoint::new(endpoint_config, None, socket).map_err(Error::CreateEndpoint)?;
+		let quic = driver::endpoint::Endpoint::new(driver::endpoint::Config::default(), socket)
+			.map_err(Error::CreateEndpoint)?;
 
 		Ok(Self {
 			quic,
@@ -359,10 +333,7 @@ impl Client {
 
 	/// Close every connection, then wait until each has sent its close to the peer.
 	pub async fn close(self) {
-		self.quic.close(driver::VarInt::from_u32(0), b"client shutdown");
-		// Not `wait_idle`, which also sits out each connection's 3 PTO closing
-		// period: that only repeats the close to a peer that already has it.
-		self.quic.wait_all_draining().await;
+		self.quic.close(driver::VarInt::from_u32(0), "client shutdown").await;
 	}
 
 	pub async fn connect(
@@ -389,7 +360,7 @@ impl Client {
 		// Resolve, adapted to the local socket's family; the dial below races the
 		// answers Happy Eyeballs style as they land, so neither a broken family nor a
 		// lookup still waiting on its AAAA record can stall the connect.
-		let local = self.quic.local_addr().map_err(Error::LocalAddr)?;
+		let local = self.quic.local_addr();
 		let candidates = match addr.addresses() {
 			Some(addrs) => crate::resolve::Candidates::fixed(addrs.iter().copied()),
 			None => crate::resolve::Candidates::resolve(target, port, self.resolution_delay),
@@ -449,8 +420,8 @@ impl Client {
 		}
 
 		let config: driver::crypto::rustls::QuicClientConfig = config.try_into()?;
-		let mut config = driver::ClientConfig::new(Arc::new(config));
-		config.transport_config(self.transport.clone());
+		let mut config = driver::client::Config::new(Arc::new(config));
+		config.transport = self.transport.clone();
 
 		tracing::debug!(peer = %crate::connect::Endpoint(&url), "connecting");
 
@@ -458,10 +429,8 @@ impl Client {
 		// CONNECT below, so the server sees a single request no matter how many
 		// addresses were dialed.
 		let connection = crate::failover::race(candidates, self.failover_delay, |addr| {
-			let endpoint = self.quic.clone();
-			let config = config.clone();
-			let host_name = host_name.clone();
-			async move { Ok::<_, Error>(endpoint.connect_with(config, addr, &host_name)?.await?) }
+			let connecting = self.quic.connect(&config, addr, &host_name);
+			async move { Ok::<_, Error>(connecting?.await?) }
 		})
 		.await?;
 		tracing::Span::current().record("id", connection.stable_id());
@@ -502,7 +471,8 @@ impl Error {
 			Self::InvalidScheme
 			| Self::UnsupportedScheme(_)
 			| Self::InvalidDnsName
-			| Self::NoRuntime
+			| Self::CreateEndpoint(driver::endpoint::Error::NoRuntime)
+			| Self::Config(_)
 			| Self::NoInitialCipherSuite
 			| Self::ConnectRejected(_)
 			| Self::Limits(_) => true,
@@ -583,151 +553,8 @@ fn proto_status(err: &web::proto::ConnectError) -> Option<u16> {
 // ── Server ──────────────────────────────────────────────────────────
 
 pub(crate) struct Server {
-	pub quic: driver::Endpoint,
+	pub quic: driver::endpoint::Endpoint,
 	tls: crate::tls::Serve,
-	socket: Socket,
-}
-
-/// The server's UDP socket, which [`Server::shutdown`] closes even while the driver
-/// still holds references to it.
-///
-/// The driver gives each connection a sender sharing the socket, and a connection lives
-/// as long as anything holds its handle, so dropping the endpoint leaves the port
-/// bound until every accepted session is gone too. Taking the socket out of this
-/// slot closes it regardless.
-#[derive(Clone, Debug)]
-struct Socket {
-	io: Arc<RwLock<Option<Arc<tokio::net::UdpSocket>>>>,
-	state: Arc<moq_sock::udp::UdpSocketState>,
-	local: net::SocketAddr,
-	/// Wakes every sender blocked on a full send buffer from the socket's single
-	/// write-readiness registration.
-	blocked: Arc<Blocked>,
-	/// When a send error was last logged, shared so a busy server logs one per interval.
-	last_send_error: Arc<Mutex<Option<driver::Instant>>>,
-}
-
-impl Socket {
-	fn new(socket: std::net::UdpSocket) -> std::io::Result<Self> {
-		let state = moq_sock::udp::UdpSocketState::new((&socket).into())?;
-		let local = socket.local_addr()?;
-		let io = tokio::net::UdpSocket::from_std(socket)?;
-		Ok(Self {
-			io: Arc::new(RwLock::new(Some(Arc::new(io)))),
-			state: Arc::new(state),
-			local,
-			blocked: Default::default(),
-			last_send_error: Default::default(),
-		})
-	}
-
-	/// Close the socket. A reuseport member stays in its group regardless: the
-	/// group retains a handle of its own.
-	fn release(&self) {
-		self.io.write().unwrap().take();
-	}
-}
-
-impl driver::AsyncUdpSocket for Socket {
-	fn create_sender(&self) -> Pin<Box<dyn driver::UdpSender>> {
-		Box::pin(self.clone())
-	}
-
-	fn poll_recv(
-		&mut self,
-		cx: &mut Context<'_>,
-		bufs: &mut [std::io::IoSliceMut<'_>],
-		meta: &mut [moq_sock::udp::RecvMeta],
-	) -> Poll<std::io::Result<usize>> {
-		let io = self.io.read().unwrap();
-		// Released: nothing arrives again, and the endpoint stops through its close.
-		let Some(io) = io.as_deref() else {
-			return Poll::Pending;
-		};
-		// Only the endpoint driver receives, so the one readiness waker is enough.
-		loop {
-			ready!(io.poll_recv_ready(cx))?;
-			match io.try_io(tokio::io::Interest::READABLE, || self.state.recv(io.into(), bufs, meta)) {
-				Ok(res) => return Poll::Ready(Ok(res)),
-				// `try_io` clears readiness only for `WouldBlock`; retrying any other error
-				// would spin, since `poll_recv_ready` completes at once and the recv fails again.
-				Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
-				Err(err) => return Poll::Ready(Err(err)),
-			}
-		}
-	}
-
-	fn local_addr(&self) -> std::io::Result<net::SocketAddr> {
-		Ok(self.local)
-	}
-
-	fn max_receive_segments(&self) -> usize {
-		self.state.gro_segments()
-	}
-
-	fn may_fragment(&self) -> bool {
-		self.state.may_fragment()
-	}
-}
-
-impl driver::UdpSender for Socket {
-	fn poll_send(
-		self: Pin<&mut Self>,
-		transmit: &moq_sock::udp::Transmit<'_>,
-		cx: &mut Context<'_>,
-	) -> Poll<std::io::Result<()>> {
-		let io = self.io.read().unwrap();
-		// Released: the datagram is lost, which UDP always allows.
-		let Some(io) = io.as_deref() else {
-			return Poll::Ready(Ok(()));
-		};
-		loop {
-			match io.try_io(tokio::io::Interest::WRITABLE, || {
-				self.state.try_send(io.into(), transmit)
-			}) {
-				Ok(()) => return Poll::Ready(Ok(())),
-				Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
-				Err(err) => {
-					let mut last = self.last_send_error.lock().unwrap();
-					return Poll::Ready(driver::send_failed(&mut last, err, transmit));
-				}
-			}
-			// Every connection sends from its own task, but tokio keeps one waker per
-			// direction, so register a fan-out to all of them instead of this task's.
-			self.blocked.push(cx.waker());
-			let waker = Waker::from(self.blocked.clone());
-			ready!(io.poll_send_ready(&mut Context::from_waker(&waker)))?;
-		}
-	}
-
-	fn max_transmit_segments(&self) -> usize {
-		self.state.max_gso_segments()
-	}
-}
-
-/// The tasks waiting for a [`Socket`] to become writable.
-#[derive(Debug, Default)]
-struct Blocked(Mutex<Vec<Waker>>);
-
-impl Blocked {
-	fn push(&self, waker: &Waker) {
-		let mut wakers = self.0.lock().unwrap();
-		if !wakers.iter().any(|w| w.will_wake(waker)) {
-			wakers.push(waker.clone());
-		}
-	}
-}
-
-impl std::task::Wake for Blocked {
-	fn wake(self: Arc<Self>) {
-		self.wake_by_ref();
-	}
-
-	fn wake_by_ref(self: &Arc<Self>) {
-		for waker in std::mem::take(&mut *self.0.lock().unwrap()) {
-			waker.wake();
-		}
-	}
 }
 
 pub(crate) struct Options {
@@ -745,17 +572,14 @@ impl Server {
 			member,
 			tls: served,
 		} = options;
-		let mut transport = driver::TransportConfig::default();
 		let quic = quic.resolve();
-		apply_transport(&mut transport, &quic);
-		apply_qlog(&mut transport, &quic, "server")?;
+		let transport = transport(&quic, "server")?;
 		let keylog = quic
 			.keylog
 			.as_deref()
 			.map(crate::tls::KeyLog::open)
 			.transpose()?
 			.map(Arc::new);
-		let transport = Arc::new(transport);
 
 		// H3 is last because it requires WebTransport framing which not all H3 endpoints support.
 		let mut alpns: Vec<Vec<u8>> = config
@@ -772,21 +596,12 @@ impl Server {
 		}
 
 		let tls: driver::crypto::rustls::QuicServerConfig = tls.try_into()?;
-		let mut tls = driver::ServerConfig::with_crypto(Arc::new(tls));
-		tls.transport_config(transport);
-
+		let mut server = driver::server::Config::new(Arc::new(tls));
+		server.transport = transport;
 		// Advertise the preferred_address transport parameter (RFC 9000 §9.6).
 		// The driver allocates a fresh CID + reset token for the address during the handshake.
-		if let Some(addr) = config.preferred_v4 {
-			tls.preferred_address_v4(Some(addr));
-		}
-		if let Some(addr) = config.preferred_v6 {
-			tls.preferred_address_v6(Some(addr));
-		}
-
-		// There's a bit more boilerplate to make a generic endpoint.
-		// The driver spawns its tasks on the current tokio runtime.
-		tokio::runtime::Handle::try_current().map_err(|_| Error::NoRuntime)?;
+		server.preferred_address_v4 = config.preferred_v4;
+		server.preferred_address_v6 = config.preferred_v6;
 
 		let listen = config
 			.bind
@@ -797,12 +612,12 @@ impl Server {
 			.unwrap_or(crate::server::DEFAULT_BIND);
 		let load_balancer = config.load_balancer();
 
-		let mut endpoint_config = driver::EndpointConfig::default();
-		// First, since it also keys the default connection ID generator. The ones
-		// below validate a predecessor's IDs without it.
+		let mut endpoint_config = driver::endpoint::Config::default().with_server(server);
+		// It also keys the default connection ID generator. The ones below validate a
+		// predecessor's IDs without it.
 		if let Some(secret) = &config.reset.secret {
 			let secret = crate::secret::Secret::read(secret).map_err(Error::ResetSecret)?;
-			endpoint_config.reset_secret(secret.as_bytes());
+			endpoint_config.reset_secret = Some(*secret.as_bytes());
 		}
 
 		// Configure connection ID generator with server ID if provided
@@ -811,13 +626,13 @@ impl Server {
 				return Err(Error::ShardWithQuicLb);
 			}
 			// The steering filter recognizes short headers by their fixed bit.
-			endpoint_config.grease_quic_bit(false);
+			endpoint_config.grease_quic_bit = false;
 			tracing::debug!(
 				index = shard.index(),
 				count = shard.count(),
 				"encoding the shard in connection IDs"
 			);
-			endpoint_config.cid_generator(Arc::new(move || {
+			endpoint_config.cid_generator = Some(Arc::new(move || {
 				let mut cids = moq_quic::RandomConnectionIdGenerator::default();
 				cids.set_shard(shard.index(), shard.count());
 				Box::new(cids)
@@ -839,7 +654,7 @@ impl Server {
 				nonce_len,
 				"using QUIC-LB compatible connection ID generation"
 			);
-			endpoint_config.cid_generator(Arc::new(move || {
+			endpoint_config.cid_generator = Some(Arc::new(move || {
 				Box::new(ServerIdGenerator::new(server_id.clone(), nonce_len))
 			}));
 		}
@@ -851,19 +666,12 @@ impl Server {
 			None => crate::bind::udp(crate::bind::Udp::new(listen)).map_err(Error::BindSocket)?,
 		};
 
-		// Create the generic QUIC endpoint.
-		let socket = Socket::new(socket).map_err(Error::CreateEndpoint)?;
-		let quic = driver::Endpoint::new_with_abstract_socket(endpoint_config, Some(tls), Box::new(socket.clone()))
-			.map_err(Error::CreateEndpoint)?;
+		let quic = driver::endpoint::Endpoint::new(endpoint_config, socket).map_err(Error::CreateEndpoint)?;
 
-		Ok(Self {
-			quic,
-			tls: served,
-			socket,
-		})
+		Ok(Self { quic, tls: served })
 	}
 
-	pub fn accept(&self) -> impl std::future::Future<Output = Option<driver::Incoming>> + '_ {
+	pub fn accept(&self) -> impl std::future::Future<Output = Option<driver::endpoint::Incoming>> + '_ {
 		self.quic.accept()
 	}
 
@@ -871,19 +679,19 @@ impl Server {
 		self.tls.certificates()
 	}
 
-	pub fn local_addr(&self) -> Result<net::SocketAddr> {
-		self.quic.local_addr().map_err(Error::LocalAddr)
+	pub fn local_addr(&self) -> net::SocketAddr {
+		self.quic.local_addr()
 	}
 
+	/// Close every connection without waiting for the closes to go out, as a drop must.
 	pub fn close(&self) {
-		self.quic.close(driver::VarInt::from_u32(0), b"server shutdown");
+		drop(self.quic.close(driver::VarInt::from_u32(0), "server shutdown"));
 	}
 
 	/// Close every connection, wait until each has sent its close to the peer,
 	/// then release the socket.
 	pub async fn shutdown(self) {
 		self.closer().close().await;
-		self.socket.release();
 	}
 
 	/// A handle that closes this server's connections from wherever its owner
@@ -894,15 +702,13 @@ impl Server {
 }
 
 /// Closes a [`Server`]'s connections without owning it; see [`Server::closer`].
-pub(crate) struct Closer(driver::Endpoint);
+pub(crate) struct Closer(driver::endpoint::Endpoint);
 
 impl Closer {
-	/// Close every connection and wait until each has sent its close to the peer.
+	/// Close every connection, wait until each has sent its close to the peer, then release
+	/// the socket.
 	pub async fn close(self) {
-		self.0.close(driver::VarInt::from_u32(0), b"server shutdown");
-		// Not `wait_idle`, which also sits out each connection's 3 PTO closing
-		// period: that only repeats the close to a peer that already has it.
-		self.0.wait_all_draining().await;
+		self.0.close(driver::VarInt::from_u32(0), "server shutdown").await;
 	}
 }
 
@@ -915,7 +721,7 @@ impl Closer {
 /// request), and the dialed authority (the CONNECT authority on WebTransport, the TLS
 /// SNI on raw QUIC). Raw QUIC carries no request URL (the path rides the SETUP instead).
 pub(crate) async fn accept(
-	conn: driver::Incoming,
+	conn: driver::endpoint::Incoming,
 	alpns: Vec<&'static str>,
 ) -> Result<crate::server::Accepted<web::Session>> {
 	let mut conn = conn.accept()?;
@@ -1061,39 +867,6 @@ mod tests {
 		pinned_connection("[::1]:0", Some("localhost")).await;
 	}
 
-	/// The server's socket hands a send that finds no route back to the connection, as the
-	/// client's does, rather than logging it as loss. Linux refuses a v4-mapped destination on an
-	/// IPv6-only socket with `ENETUNREACH`, an unroutable family without touching the host's routes.
-	#[cfg(target_os = "linux")]
-	#[tokio::test]
-	async fn server_socket_returns_unreachable_sends() {
-		let socket = socket2::Socket::new(
-			socket2::Domain::IPV6,
-			socket2::Type::DGRAM,
-			Some(socket2::Protocol::UDP),
-		)
-		.unwrap();
-		socket.set_only_v6(true).unwrap();
-		socket.set_nonblocking(true).unwrap();
-		socket
-			.bind(&net::SocketAddr::from((net::Ipv6Addr::LOCALHOST, 0)).into())
-			.unwrap();
-		let socket = Socket::new(socket.into()).unwrap();
-
-		let transmit = moq_sock::udp::Transmit {
-			destination: net::SocketAddr::new(net::Ipv4Addr::LOCALHOST.to_ipv6_mapped().into(), 1),
-			ecn: None,
-			contents: b"hello",
-			segment_size: None,
-			src_ip: None,
-		};
-		let mut sender = driver::AsyncUdpSocket::create_sender(&socket);
-		let result = std::future::poll_fn(|cx| sender.as_mut().poll_send(&transmit, cx)).await;
-
-		let err = result.expect_err("an unroutable send must reach the connection");
-		assert_eq!(err.kind(), std::io::ErrorKind::NetworkUnreachable);
-	}
-
 	/// The certificate fetch goes out without a process-default crypto provider installed,
 	/// even when reqwest is built with rustls but no provider (as iroh builds it).
 	#[tokio::test]
@@ -1146,7 +919,7 @@ mod tests {
 			tls,
 		})
 		.expect("server init");
-		let addr = server.local_addr().expect("local addr");
+		let addr = server.local_addr();
 		let mut tls_config = crate::tls::Connect::default();
 		tls_config.fingerprint = server.certificates().fingerprints();
 		assert!(!tls_config.fingerprint.is_empty());
@@ -1171,40 +944,33 @@ mod tests {
 		let (_client, _server) = result.expect("pinned connection failed");
 	}
 
-	/// moq-quic exposes no getters for the flow-control windows, but its `Debug` prints
-	/// them, which is enough to prove each one reached the transport config, and that
-	/// unset windows get our defaults instead of moq-quic's.
+	/// Every window reaches the transport config, and unset windows get our defaults instead
+	/// of moq-quic's.
 	#[test]
-	fn apply_windows_writes_each_field() {
+	fn transport_writes_each_window() {
 		let quic = crate::quic::Config {
 			receive_window: Some(128 << 20),
 			stream_receive_window: Some(8 << 20),
 			send_window: Some(32 << 20),
 			..Default::default()
 		};
+		let limits = transport(&quic.resolve(), "client").unwrap().limits;
+		assert_eq!(limits.receive_window.unwrap().get(), 128 << 20);
+		assert_eq!(limits.stream_receive_window.unwrap().get(), 8 << 20);
+		assert_eq!(limits.send_window.unwrap().get(), 32 << 20);
 
-		let mut transport = driver::TransportConfig::default();
-		apply_windows(&mut transport, &quic.resolve());
-		let applied = format!("{:?}", transport);
-
-		for field in [
-			format!("receive_window: {}", 128 << 20),
-			format!("stream_receive_window: {}", 8 << 20),
-			format!("send_window: {}", 32 << 20),
-		] {
-			assert!(applied.contains(&field), "{field} missing from {applied}");
-		}
-
-		let mut untouched = driver::TransportConfig::default();
-		apply_windows(&mut untouched, &crate::quic::Config::default().resolve());
-		let applied = format!("{:?}", untouched);
-		for field in [
-			format!("receive_window: {}", crate::quic::DEFAULT_RECEIVE_WINDOW),
-			format!("stream_receive_window: {}", crate::quic::DEFAULT_STREAM_RECEIVE_WINDOW),
-			format!("send_window: {}", crate::quic::DEFAULT_SEND_WINDOW),
-		] {
-			assert!(applied.contains(&field), "{field} missing from {applied}");
-		}
+		let limits = transport(&crate::quic::Config::default().resolve(), "client")
+			.unwrap()
+			.limits;
+		assert_eq!(
+			limits.receive_window.unwrap().get(),
+			crate::quic::DEFAULT_RECEIVE_WINDOW
+		);
+		assert_eq!(
+			limits.stream_receive_window.unwrap().get(),
+			crate::quic::DEFAULT_STREAM_RECEIVE_WINDOW
+		);
+		assert_eq!(limits.send_window.unwrap().get(), crate::quic::DEFAULT_SEND_WINDOW);
 	}
 
 	/// Build a controller from each family's factory and downcast it to the
@@ -1252,7 +1018,7 @@ mod tests {
 			tls,
 		})
 		.expect("server init");
-		let addr = server.local_addr().expect("local addr");
+		let addr = server.local_addr();
 
 		let accepted = tokio::spawn(async move {
 			let incoming = server.accept().await.expect("no incoming connection");
@@ -1298,7 +1064,7 @@ mod tests {
 	}
 
 	/// Whether a live connection is running BBRv3.
-	fn is_bbr3(conn: &driver::Connection) -> bool {
+	fn is_bbr3(conn: &driver::connection::Connection) -> bool {
 		conn.congestion_state()
 			.into_any()
 			.downcast::<moq_congestion::Bbr3>()

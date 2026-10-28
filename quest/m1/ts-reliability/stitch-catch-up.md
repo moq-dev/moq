@@ -1,33 +1,56 @@
-# [M] A stitched switch returns to --delay
+# [M] A demoted subscriber priority reaches the publisher
 
 ## Goal
 
-After `moq export ts --stitch` switches to a replacement publisher instance,
-end-to-end latency returns to `--delay` once the replacement acquires,
-instead of carrying the old program's tail as added latency.
+A mid-stream `track::Subscriber::update` that lowers a subscription's
+priority reaches the publisher's aggregate for that track, on lite-07 and
+moq-transport, directly and through a relay, including on an old instance
+after an epoch switch. A stitched export can then demote its old leg while
+the replacement acquires.
 
 ## Plan
 
-Decided 2026-10-27 (maintainer), from
-[moq-dev/moq#6919](https://github.com/moq-dev/moq/pull/6919): drop the old
-tail, not time-compress. The switch is already a TS program change, so the
-skip costs nothing extra.
+The latency half of this quest landed in
+[moq-dev/moq#7049](https://github.com/moq-dev/moq/pull/7049): a stitched
+switch now drops the old program's tail and starts the replacement at
+`--delay`. What remains is the priority observation from
+[moq-dev/moq#6919](https://github.com/moq-dev/moq/pull/6919), which #7049
+reproduced as a propagation bug.
 
-- Today `commit` in `rs/moq-mux/src/jitter.rs` starts the replacement past
-  the old `horizon`, and the anchor only moves forward. The only catch-up is
-  clock steering capped at about 30 ppm (`MAX_DRIFT`, `MAX_SLEW`), so the
-  3.9 s, 3.6 s, and 7.5 s measured in #6919's run would take about a day
-  and a half each to remove.
-- Once the replacement acquires, cut the old program's queued tail and
-  start the new program at `--delay`. Keep output monotonic across the
-  program change.
-- Test repeated switches: latency settles back to `--delay` after each,
-  rather than accumulating, and output stays in order across every switch.
-- Also reproduce #6919's priority observation: a mid-stream
-  `Subscriber::update` demotion of the old leg still showed priority 0 on
-  the receive side. Fix it if update propagation is wrong; otherwise
-  explain it in the PR.
-- Update `doc/bin/cli.md` and `doc/setup/redundancy.md` inline if they
-  describe switch latency.
+Reproduction (in `rs/moq-net-tests/tests/integration/restart.rs`, with its
+`link`, `subscribe`, `write`, `read` and `epochs` helpers): publish `live`
+with one `video` track, subscribe from a viewer origin, read a group, call
+`update(subscription().with_priority(-2))` on the subscriber, settle, write
+and read another group, then read the publisher's
+`track::Producer::subscription().priority`. Results from #7049:
+
+| Case | Demotion (-2) | Promotion (+1) |
+| --- | --- | --- |
+| lite-07, direct or relayed, no switch | reaches the publisher | reaches it |
+| lite-07 after an epoch switch (`expect_replaced` in place), direct or relayed | stays 0 | reaches it |
+| moq-transport-18, direct, no switch | stays 0 | reaches it |
+| moq-transport-18 after an epoch switch, relayed | stays 0 | stays 0 |
+
+The aggregate takes the `max` of its subscribers' priorities, so a demotion
+that never arrives looks the same as one masked by another subscriber at 0.
+Temporary instrumentation of the publisher's per-priority counts showed:
+
+- moq-transport-18, no switch: the publisher counts two subscribers at 0 for
+  the viewer's one subscription, so one SUBSCRIBE (or something beside it)
+  holds a second priority-0 subscription. Find it, and either have it carry
+  the request's priority or keep it out of the priority aggregate.
+- lite-07 after a switch: the publisher counts one subscriber, still at 0,
+  and promotion arrives, so the viewer side never sends the demotion. Its copy
+  of the old instance's track likely holds a second priority-0 subscriber
+  after the restart, masking the demotion in the viewer's aggregate.
+
+Check the relay-and-switch moq-transport case once both are fixed: it also
+drops a promotion, so a third cause may remain there.
+
+Land the reproduction as integration tests over both versions, with and
+without a relay and a switch. Then decide whether the stitched export should
+demote its old leg while the replacement acquires (#6919 measured the
+replacement's keyframe arriving 0.7 to 2.2 s after the follow ran out on a
+160 kbit/s link); if so, add it and check the bufferbloat fixture's gap.
 
 Public API: none expected. Wire: none.

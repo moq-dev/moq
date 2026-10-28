@@ -124,17 +124,21 @@ function record(stream: Announce.Consumer): string[] {
 	return events;
 }
 
-test("no watcher opens no announce request, and a plain request answers blind", async () => {
+test("a plain request discovers an unwatched path and waits for its initial set", async () => {
 	const origin = new OriginProducer();
 	const session = new FakeSession();
 	forwardAnnounced(session.session, origin);
-
+	expect(session.requests).toEqual([]);
 	const request = origin.request(Path.from("room"));
 	await settle();
-	expect(session.requests).toEqual([]);
+	expect(session.open()).toEqual(["room/**"]);
+	expect(request.active.peek()).toBeUndefined();
+	expect(session.consumes(Path.from("room"))).toBe(0);
+	start(session.stream("room/**"), "room");
+	session.stream("room/**").synced();
+	await settle();
 	expect(request.active.peek()).toBeDefined();
 	expect(session.consumes(Path.from("room"))).toBe(1);
-
 	request.close();
 	session.die();
 	origin.close();
@@ -466,8 +470,12 @@ test("a refused announce request downgrades the session once, and later watches 
 	session.stream("room/**").close(new Error("namespace rejected"));
 	await settle();
 	expect(origin.discovery.peek()).toBe(false);
-	// The gated request falls back to a blind answer on the live session.
-	expect(watched.active.peek()).toBeDefined();
+	// Following cannot use a peer that no longer announces; a plain request can.
+	expect(watched.active.peek()).toBeUndefined();
+	expect(session.consumes(path)).toBe(0);
+	const plain = origin.request(path);
+	await settle();
+	expect(plain.active.peek()).toBeDefined();
 	expect(session.consumes(path)).toBe(1);
 
 	const later = origin.announced(Path.Pattern.subtree(Path.from("other")));
@@ -475,6 +483,7 @@ test("a refused announce request downgrades the session once, and later watches 
 	expect(session.requests.length).toBe(1);
 
 	later.close();
+	plain.close();
 	watched.close();
 	session.die();
 	origin.close();
@@ -503,13 +512,17 @@ test("a discovery failure under a live session retracts what it fed and answers 
 	expect(wireOf(origin).routes(path)).toBe(false);
 	expect(origin.discovery.peek()).toBe(false);
 
-	// The same request falls back to a blind answer on the live session.
+	// The follower stays offline; a separate plain request can use the blind peer.
 	expect(watched.closed.peek()).toBeUndefined();
-	expect(watched.active.peek()).toBeDefined();
+	expect(watched.active.peek()).toBeUndefined();
+	const plain = origin.request(path);
+	await settle();
+	expect(plain.active.peek()).toBeDefined();
 	// The announcement's own consume, plus the blind answer standing in for it now.
 	expect(session.consumes(path)).toBe(2);
 
 	watched.close();
+	plain.close();
 	session.die();
 	origin.close();
 });
@@ -544,6 +557,11 @@ test("a request replaced across one coalesced wakeup still gets answered", async
 	const path = Path.from("wanted");
 
 	forwardAnnounced(session.session, origin);
+	// Refusing discovery downgrades the session, so plain requests take its blind answers.
+	const listing = origin.announced(Path.Pattern.subtree(path));
+	await settle();
+	session.stream("wanted/**").close(new Error("namespace rejected"));
+	await settle();
 
 	const first = origin.request(path);
 	await settle();
@@ -563,6 +581,7 @@ test("a request replaced across one coalesced wakeup still gets answered", async
 	expect(session.consumes(path)).toBe(2);
 
 	second.close();
+	listing.close();
 	session.die();
 	origin.close();
 });
@@ -606,7 +625,7 @@ test("a scoped origin narrows a root watch to its disjoint literal heads", async
 	origin.close();
 });
 
-test("a scoped session filters announcements and blind requests under its root", async () => {
+test("a scoped session filters discovered routes and requests under its root", async () => {
 	const origin = new OriginProducer();
 	const scoped = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.parse("room/*/chat")]));
 	const session = new FakeSession();
@@ -617,12 +636,13 @@ test("a scoped session filters announcements and blind requests under its root",
 	await settle();
 	// Session-relative: the scope's root is the session's.
 	expect(session.open()).toEqual(["room/**"]);
-	for (const prefix of ["room/alice/video", "room/alice/chat"]) start(session.stream("room/**"), prefix);
+	for (const prefix of ["room/alice/video", "room/alice/chat", "room/bob/chat"])
+		start(session.stream("room/**"), prefix);
 
 	const allowed = origin.request(Path.from("tenant/room/bob/chat"));
 	const denied = origin.request(Path.from("tenant/room/bob/video"));
 	await settle();
-	expect(events).toEqual(["start tenant/room/alice/chat"]);
+	expect(events).toEqual(["start tenant/room/alice/chat", "start tenant/room/bob/chat"]);
 	expect(session.consumes(Path.from("room/bob/chat"))).toBe(1);
 	expect(session.consumes(Path.from("room/bob/video"))).toBe(0);
 
@@ -725,6 +745,26 @@ test("a request synced as it opens releases the watcher", async () => {
 	expect(watch.synced.peek()).toBe(true);
 
 	watch.close();
+	session.die();
+	origin.close();
+});
+
+test("a scoped session refuses blind requests outside its allowed paths", async () => {
+	const origin = new OriginProducer();
+	const scoped = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.parse("room/*/chat")]));
+	const session = new FakeSession();
+	forwardAnnounced(session.session, scoped);
+	const allowed = origin.request(Path.from("tenant/room/bob/chat"));
+	const denied = origin.request(Path.from("tenant/room/bob/video"));
+	await settle();
+	for (const request of session.requests) request.stream.close(new Error("no discovery"));
+	await settle();
+	expect(allowed.active.peek()).toBeDefined();
+	expect(session.consumes(Path.from("room/bob/chat"))).toBe(1);
+	expect(denied.active.peek()).toBeUndefined();
+	expect(session.consumes(Path.from("room/bob/video"))).toBe(0);
+	allowed.close();
+	denied.close();
 	session.die();
 	origin.close();
 });

@@ -481,7 +481,7 @@ mod tests {
 
 		// Both handshakes are done, so each end knows its peer's grant, and an open
 		// with credit left completes without waiting.
-		for (end, mut session) in [("client", client), ("server", server)] {
+		for (end, session) in [("client", client), ("server", server)] {
 			let mut held = Vec::new();
 			for opened in 0..1_000 {
 				let bi = session.open_bi(Default::default()).now_or_never();

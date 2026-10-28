@@ -650,34 +650,40 @@ fn bench_subscribe(c: &mut Criterion) {
 /// depend on `publishers`.
 fn bench_request(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/request");
-	// A request costs nothing per subscriber, so this sweeps the publisher counts
-	// in `SHAPES` rather than its shapes, whose last two share one.
 	for publishers in [100, 1_000] {
-		let mut fleet = fanout(publishers, 0);
-		// A broadcast above the misses covers them without serving them.
-		let _covering = fleet.producer.publish("room", origin::Route::default()).unwrap();
-		let waiter = kio::Waiter::noop();
-		group.bench_function(BenchmarkId::new("local", publishers), |b| {
-			b.iter(|| {
-				let pending = fleet.consumer.request_broadcast("room/0", None);
-				// The front's driver resolves the first request; later ones join it.
-				fleet.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
-				pending
-					.now_or_never()
-					.expect("resolves once driven")
-					.expect("local broadcast");
+		for requesters in [1, 8, 32] {
+			let mut fleet = fanout(publishers, 0);
+			let _covering = fleet.producer.publish("room", origin::Route::default()).unwrap();
+			let waiter = kio::Waiter::noop();
+			let shape = format!("{publishers}p_{requesters}r");
+			group.throughput(Throughput::Elements(requesters));
+			group.bench_function(BenchmarkId::new("local", &shape), |b| {
+				b.iter(|| {
+					let pending: Vec<_> = (0..requesters)
+						.map(|_| fleet.consumer.request_broadcast("room/0", None))
+						.collect();
+					fleet.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+					for pending in pending {
+						pending
+							.now_or_never()
+							.expect("resolves once driven")
+							.expect("local broadcast");
+					}
+				});
 			});
-		});
-		group.bench_function(BenchmarkId::new("unroutable", publishers), |b| {
-			b.iter(|| {
-				let result = fleet
-					.consumer
-					.request_broadcast("room/missing", None)
-					.now_or_never()
-					.expect("fails synchronously");
-				assert!(matches!(result, Err(moq_net::Error::Unroutable)));
+			group.bench_function(BenchmarkId::new("unroutable", &shape), |b| {
+				b.iter(|| {
+					for _ in 0..requesters {
+						let result = fleet
+							.consumer
+							.request_broadcast("room/missing", None)
+							.now_or_never()
+							.expect("fails synchronously");
+						assert!(matches!(result, Err(moq_net::Error::Unroutable)));
+					}
+				});
 			});
-		});
+		}
 	}
 	group.finish();
 }
