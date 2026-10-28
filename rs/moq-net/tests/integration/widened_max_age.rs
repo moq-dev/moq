@@ -10,7 +10,7 @@ use std::time::Duration;
 use moq_net::track::{Info, Range, Subscription};
 use moq_net::{Hop, Timescale, Timestamp, Version, origin, track};
 
-use crate::support::harness::{peer, spawn};
+use crate::support::harness::{MockConnectOptions, connect_mock, peer, spawn};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -156,4 +156,74 @@ async fn the_same_max_age_sends_no_update() {
 	);
 	let changed = moq_clock::timeout(Duration::from_secs(1), chain.source.subscription_changed()).await;
 	assert!(changed.is_err(), "the publisher saw {changed:?}");
+}
+
+/// The groups `registry`'s sessions sent as publisher.
+fn sent_groups(registry: &moq_net::stats::Registry) -> u64 {
+	registry
+		.snapshot()
+		.traffic()
+		.into_iter()
+		.filter(|(_, role, _)| *role == moq_net::stats::Role::Publisher)
+		.map(|(_, _, traffic)| traffic.groups)
+		.sum()
+}
+
+/// Only the newcomer that widens the relay's max age pulls a re-offer upstream; the ones
+/// after it are served from what the relay cached, however many there are.
+#[moq_clock::test]
+async fn wider_newcomers_after_the_first_pull_nothing_upstream() {
+	let version: Version = VERSION.parse().unwrap();
+	let publisher = origin(1);
+	let relay = origin(2);
+	// The publisher accepts the relay, so its session meters what goes upstream.
+	let registry = moq_net::stats::Registry::new(Default::default());
+	let mut options = MockConnectOptions::new(version);
+	options.client_publish = Some(relay.consume().with_hidden(true));
+	options.client_subscribe = Some(relay.clone());
+	options.server_publish = Some(publisher.consume().with_hidden(true));
+	options.server_subscribe = Some(publisher.clone());
+	options.server_stats = registry
+		.tier(moq_net::stats::Tier::new(moq_net::Path::from_static("upstream")))
+		.session(moq_net::Path::from_static(""));
+	let _upstream = connect_mock(options).await;
+	let broadcast = publisher.create_broadcast("live").unwrap();
+	let source = broadcast
+		.create_track("video", Info::default().with_timescale(Timescale::MILLI))
+		.unwrap();
+	for sequence in 0..GROUPS {
+		let mut group = source.create_group(moq_net::group::Info { sequence }).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(sequence * 1000).unwrap(), &b"x"[..])
+			.unwrap();
+		group.finish().unwrap();
+	}
+	broadcast.announce(Default::default()).unwrap();
+
+	let mut links = Vec::new();
+	let mut readers = Vec::new();
+	let mut join = async |budget| {
+		let viewer = origin(3);
+		links.push(peer(version, &relay, &viewer).await);
+		let consumer = viewer.consume();
+		consumer.routed("live").await.unwrap();
+		let remote = consumer.request_broadcast("live", None).await.unwrap();
+		let subscription = Subscription::default()
+			.with_max_delay(budget)
+			.with_ranges([Range::oldest()]);
+		let mut reader = remote.track("video").unwrap().subscribe(subscription).await.unwrap();
+		let got = received(&mut reader).await;
+		readers.push((viewer, reader));
+		got
+	};
+	let narrow = moq_clock::timeout(TIMEOUT, join(NARROW)).await.unwrap();
+	assert_eq!(narrow, (6..GROUPS).collect());
+	let wide = moq_clock::timeout(TIMEOUT, join(WIDE)).await.unwrap();
+	assert_eq!(wide, (2..GROUPS).collect());
+	let widened = sent_groups(&registry);
+	for newcomer in 0..3 {
+		let got = moq_clock::timeout(TIMEOUT, join(WIDE)).await.unwrap();
+		assert_eq!(got, wide, "newcomer {newcomer}");
+	}
+	assert_eq!(sent_groups(&registry), widened, "later newcomers pull nothing upstream");
 }

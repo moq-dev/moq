@@ -17769,6 +17769,33 @@ mod test {
 		);
 	}
 
+	/// A reader arriving after another's fill cached the groups under the start reads them
+	/// from the cache: the arrival walk never reaches a backfill, and no fill is asked again.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_newcomer_reads_the_backfill_another_fill_cached() {
+		let (producer, dynamic, mut first) = started_late();
+		let waiter = kio::Waiter::noop();
+		while let Poll::Ready(Ok(Some(_))) = first.poll_recv_group(&waiter) {}
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("below the start is a miss");
+		};
+		while let Some(sequence) = fill.next() {
+			write_filled(fill.accept(sequence, None), sequence);
+		}
+		let mut newcomer = producer.subscribe(replay().with_range(0..));
+		let mut read = Vec::new();
+		while let Poll::Ready(Ok(Some(group))) = newcomer.poll_recv_group(&waiter) {
+			read.push(group.sequence);
+		}
+		read.sort();
+		assert_eq!(read, [0, 1, 2, 3]);
+		assert!(
+			dynamic.poll_requested_fill(&waiter).is_pending(),
+			"the cache answers it"
+		);
+	}
+
 	/// Groups a fill answered before the reader came back are handed out in the reader's
 	/// order, so a warm cache keeps a descending reader newest first.
 	#[test]

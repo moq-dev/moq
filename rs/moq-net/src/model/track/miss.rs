@@ -492,6 +492,13 @@ impl Misses {
 		}
 		let start = state.start_sequence.unwrap_or(0);
 		for run in candidates.iter() {
+			// Backfill another reader's fill cached is no hole, yet the arrival walk never
+			// reaches it, so this reader takes it as filled, as the reader that asked does.
+			for (&sequence, slot) in state.lookup.range(run.clone()) {
+				if !slot.is_walked() && slot.serves_end() {
+					self.filled.insert(sequence);
+				}
+			}
 			for hole in holes(state, run.clone()) {
 				for hole in self.unclaimed(state, hole) {
 					let (unfed, awaited) = state.unfed(hole, now);
