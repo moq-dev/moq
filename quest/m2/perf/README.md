@@ -86,6 +86,8 @@ revisions on the same host and worker count, and profiles with
 - [Borrow-free QUIC state](/quest/m2/perf/quic-borrow-free.md) - a prototyped report on sharing connection state with stream handles without `RefCell` or `Mutex`: context passing vs driver-owned state with per-stream channels
 - [Run to quiescence](/quest/m2/perf/uring-quiescence.md) - a received packet's reply is staged in the same turn, under a pass and train budget that keeps the fairness rule
 - [Ingest batch](/quest/m2/perf/ingest-batch.md) - relay ingest pays one lock, wake, and clock read per burst of whole frames instead of per frame
+- [Streaming frame read owners](/quest/m2/perf/frame-read-owners.md) - readers of a frame still arriving share one byte owner per publication instead of allocating one each per read
 - [Shard by default](/quest/m2/perf/shard-default.md) - a saturating shard sweep decides whether an unset `runtime.workers` runs one worker per core on Linux
 - [Profile the io_uring clock read](/quest/m2/perf/uring-clock-profile.md) - a `perf` profile shows whether #5926's per-turn clock read cut the io_uring relay's `[vdso]` share and CPU
 - [io_uring buffer pool memory](/quest/m2/perf/uring-pool-memory.md) - measure reserved versus resident pool memory before any shrink policy
+- [io_uring demux churn](/quest/m2/perf/uring-demux-churn.md) - the demux snapshots stats and builds its fed list once per completion, not per datagram
