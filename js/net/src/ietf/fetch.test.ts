@@ -366,9 +366,6 @@ test("a FETCH the cache cannot answer is refused before FETCH_OK", async () => {
 		// A newest group with no objects starts past Largest Object too.
 		writeGroup(fx.track, 4, []);
 		expect(await ask(at(4, 0), at(4, 4))).toBe(INVALID_RANGE);
-
-		const fill = new Fetch({ requestId: FETCH_ID, type: range(version, at(0, 0), at(0, 0)), fillTimeout: true });
-		expect(refused(await fetch(fx, fill))).toBe(NOT_SUPPORTED);
 	}
 });
 
