@@ -2960,7 +2960,7 @@ export class Publisher {
 		}
 
 		// Everything that ends the answer early: the requester leaving, our grant narrowing,
-		// or the subscription a joining FETCH named ending.
+		// or the subscription a joining FETCH named ending before it resolved.
 		const stop = new AbortController();
 		const cancel = new StreamError(StreamCode.Cancel, { message: "cancel" });
 		void request.ended.then(() => stop.abort(cancel));
@@ -2970,8 +2970,11 @@ export class Publisher {
 			// The request ended, which the stop already heard.
 			() => undefined,
 		);
+		// A resolved answer holds its head in memory, so a subscription that ends after it, as
+		// a track finishing right after SUBSCRIBE_OK does, still gets the head it joined.
+		let resolved = false;
 		const lapsed = new Error("subscription ended");
-		if (join?.kind === "join") void join.ended.then(() => stop.abort(lapsed));
+		if (join?.kind === "join") void join.ended.then(() => resolved || stop.abort(lapsed));
 		const watch = namespace && this.#gate.watch(namespace, () => stop.abort(unauthorized(namespace)));
 		if (namespace && watch?.revoked()) stop.abort(unauthorized(namespace));
 
@@ -2997,6 +3000,7 @@ export class Publisher {
 				await request.refuse("fetch", answer);
 				return;
 			}
+			resolved = true;
 			await this.#answerFetch(msg, request, answer, stop.signal);
 		} finally {
 			watch?.dispose();

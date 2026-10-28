@@ -520,6 +520,32 @@ test("draft-18: a joining FETCH serves the head its subscription starts after", 
 	client.close();
 });
 
+// A subscription can end while its head is in flight, as when a track finishes right after
+// SUBSCRIBE_OK, and the head is then all the subscriber gets of that group.
+test("draft-18: a joining FETCH outlives a subscription that ends after FETCH_OK", async () => {
+	using fx = serve(D18);
+	const live = writeGroup(fx.track, 5, ["5-0", "5-1"], false);
+	const { client, serving } = await subscribe(fx);
+
+	const request = requestStream(D18);
+	const task = fx.pub.runFetch(joining(), request.stream);
+	expect(await request.answer.u53()).toBe(FetchOk.id);
+	client.close();
+	await serving;
+	live.finish();
+
+	// The subscription's own stream for group 5 opened first, and its end reset it.
+	const subscription = await fx.uni.read();
+	if (subscription.done) throw new Error("no subscription stream");
+	const next = await fx.uni.read();
+	if (next.done) throw new Error("no fetch stream");
+	const reader = new Reader(next.value, undefined, D18);
+	expect(await reader.u53()).toBe(FetchHeader.type);
+	await FetchHeader.decode(reader, D18);
+	expect(await readObjects(reader, "ascending")).toEqual(pairs([5]));
+	await task;
+});
+
 test("draft-18: a joining FETCH its subscription cannot answer is refused", async () => {
 	{
 		using fx = serve(D18);
