@@ -43,19 +43,29 @@ state again).
   too. A broadcast without one is not HLS-renderable.
 - **Segment N starts at the group containing pts N × interval**, the group a
   `Time` start at that pts resolves to, so an edge serves a segment from its
-  number alone. It runs up to the group containing the next line, which the
-  edge trims itself; ranges need no exclusive time end. The media sequence
-  number is N.
+  number alone. It runs up to where segment N + 1 starts, which the edge
+  trims itself; ranges need no exclusive time end. The media sequence number
+  is N.
 - **Whole groups only.** Never split a group: a segment starting mid-GOP is
   not independent.
-- **A line inside a pause or gap** is an `EXT-X-GAP` segment.
+- **A line inside a pause or gap** starts its segment at the first group
+  after it, so media resuming between lines is never dropped. If none starts
+  before the next line, the segment is `EXT-X-GAP`.
 - **A group containing more than one line** (it overran the interval) is
   listed at its first line, and each line it swallows is an `EXT-X-GAP`
   segment, so numbering never skips. Its `EXTINF` understates the media;
   document the deviation beside
   [fixed target duration](/quest/m1/archive/hls-target.md)'s overrun rule,
   whose target then comes from the interval.
+- **Segments run under twice the interval** even without an overrun, since
+  the group containing a line can start up to one interval before it. Open
+  for the maintainer: a target of twice the interval (RFC 8216 compliant,
+  but players hold back twice as far) or the interval itself with longer
+  segments listed under the overrun rule.
 - DASH lists the same segments by `$Time$`.
+
+Pin the segmentation with table-driven tests over pauses that end between
+lines, unequal GOPs, and overruns.
 
 Convert each consumer that numbers groups: hang and moq-mux timelines,
 HLS/DASH export, `seek` for GOP-aligned failover in moq-mux, HLS import's
