@@ -17193,9 +17193,19 @@ mod test {
 
 		// The backfill serves by sequence, but never in arrival order.
 		assert!(consumer.peek_group(1).is_some());
+		let mut walked = Vec::new();
+		let mut index = 0;
+		while let Poll::Ready(Ok(Some((group, next)))) = producer.state.read().poll_recv_group(index, 0) {
+			walked.push(group.sequence);
+			index = next + 1;
+		}
+		assert_eq!(walked, [0, 2]);
+		// A reader takes it as the fill answer for the group the feed gave up, as it would
+		// have asked a fill for it, and the stale arrival entry adds nothing.
 		let mut subscriber = producer.subscribe(replay());
-		assert_eq!(subscriber.assert_group().sequence, 0);
-		assert_eq!(subscriber.assert_group().sequence, 2);
+		let mut read: Vec<_> = (0..3).map(|_| subscriber.assert_group().sequence).collect();
+		read.sort();
+		assert_eq!(read, [0, 1, 2]);
 		subscriber.assert_no_group();
 	}
 
