@@ -2848,25 +2848,6 @@ test("finish is not terminal: closed settles once the groups below the end finis
 	expect(hooks.trackReleased(producer).peek()).toBeNull();
 });
 
-// As in Rust, an aborted group below the end has nothing left in flight, cut or cancelled.
-test("an aborted group below the end lets it settle", async () => {
-	for (const error of [new StreamError(StreamCode.Cancel), new Error("cut")]) {
-		const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
-		const aborted = producer.appendGroup();
-		aborted.writeFrame(textFrame("open"));
-		producer.appendGroup().finish();
-		producer.finish();
-		await settle();
-		expect(producer.closed.peek()).toBeUndefined();
-
-		aborted.abort(error);
-		await settle();
-		expect(producer.closed.peek()).toBeNull();
-		producer.abort(new Error("boom"));
-		expect(producer.closed.peek()).toBeNull();
-	}
-});
-
 test("closed reports an abort before the end settles", () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
 	producer.appendGroup().writeFrame(textFrame("open"));

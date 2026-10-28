@@ -1330,8 +1330,6 @@ export class Producer {
 		void group.closed.then((closed) => {
 			stop();
 			if (closed === null) this.#finishLargest(group.sequence);
-			// An aborted group below the end no longer holds it open either.
-			else this.#settle();
 		});
 		// Give held mirrors the new live edge before pruning their timeline entry,
 		// so their latency guard can preserve a terminal expiry verdict.
@@ -1719,16 +1717,15 @@ export class Producer {
 	}
 
 	// Whether the declared end was reached, the pending tail owes nothing below it, and every
-	// cached group below it closed, so nothing the end promised is still in flight: a finished
-	// group holds everything it will, and an aborted one delivers nothing more. An abort over a
-	// group the tail still owed cut it off, so readers get the error rather than a clean end
-	// without it. Mirrors the Rust `is_settled`.
+	// cached group below it finished, so the track already holds everything it promised. An
+	// abort over a group the tail still owed cut it off, so readers get the error rather than
+	// a clean end without it. Mirrors the Rust `is_settled`.
 	#settled(): boolean {
 		const end = this.#state.end.peek();
 		if (end === undefined) return false;
 		const final = finalSequence(end);
 		if (this.#received < final || this.#owes(final)) return false;
-		return this.#cache.every(({ group }) => group.sequence >= final || group.closed.peek() !== undefined);
+		return this.#cache.every(({ group }) => group.sequence >= final || group.closed.peek() === null);
 	}
 
 	/** Append a frame as its own single-frame group. */
