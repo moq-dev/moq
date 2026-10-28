@@ -122,9 +122,10 @@ case "$1" in
         # The allocation/window/play-buffer tables keep their stdout in the run;
         # only Criterion estimates enter the trend report.
         criterion extra --no-fail-fast -p moq-e2ee -p moq-json -p moq-archive -p moq-cli -p moq-mux -p moq-audio \
+            -p moq-quic --features moq-quic/fuzz \
             --bench protect --bench codec --bench table --bench allocations --bench window \
             --bench producer --bench play_buffer --bench jitter --bench decode_clock --bench ts_programs --bench ts_video \
-            --bench bus --bench parameter_sets
+            --bench bus --bench parameter_sets --bench sent_packets
         ;;
     rust-uring)
         # One run per target makes an unsupported/skipped ring fail report

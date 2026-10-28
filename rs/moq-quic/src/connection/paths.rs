@@ -149,7 +149,7 @@ impl PathData {
 		if self.first_packet.is_none() {
 			self.first_packet = Some(pn);
 		}
-		if let Some(forgotten) = space.sent(pn, packet) {
+		if let Some(forgotten) = space.sent_packets.insert(pn, packet) {
 			self.remove_in_flight(&forgotten);
 		}
 	}
