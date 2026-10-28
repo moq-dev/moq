@@ -10,7 +10,7 @@ use std::{
 
 use crate::{
 	Error, Path, Timescale, Timestamp, bandwidth,
-	coding::{Reader, Stream, varint::MAX_QUIC},
+	coding::{Decode as _, Reader, Stream, varint::MAX_QUIC},
 	lite,
 	track::{Anchor, Position, Subscription},
 };
@@ -1888,6 +1888,22 @@ struct TracksRecv {
 	unanswered: Option<crate::model::broadcast::RequestValidity>,
 }
 
+/// A TRACKS event, with its name resolved against what the listing holds.
+#[derive(Debug)]
+enum Listing {
+	Added(Arc<str>, lite::TrackInfo),
+	/// The listed name, or `None` if nothing by that name is listed.
+	Removed(Option<Arc<str>>),
+	/// Like [`Self::Removed`].
+	Finished(Option<Arc<str>>),
+	Synced,
+}
+
+/// The key `listed` holds for `name`, shared rather than copied.
+fn known(listed: &HashMap<Arc<str>, crate::session::Slot>, name: &str) -> Option<Arc<str>> {
+	listed.get_key_value(name).map(|(name, _)| name.clone())
+}
+
 impl TracksRecv {
 	/// Apply the peer's events until it ends the listing, or the error that ends it.
 	fn poll(&mut self, source: &SourceServe, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
@@ -1923,14 +1939,23 @@ impl TracksRecv {
 		ready!(stream.writer.poll_flush(&mut cx))?;
 		loop {
 			ready!(self.budget.poll_yield(waiter));
-			let event = ready!(stream.reader.poll_decode_maybe::<lite::TracksEvent>(&mut cx))?;
+			// Resolved while the name is still the wire's: only a new listing copies it, and
+			// a removal is a lookup.
+			let listed = &self.listed;
+			let event = ready!(stream.reader.poll_decode_maybe_with(&mut cx, |r| {
+				Ok(match lite::TracksEvent::decode(r, version)? {
+					lite::TracksEvent::Added { name, info } => Listing::Added(name.as_ref().into(), info),
+					lite::TracksEvent::Removed { name } => Listing::Removed(known(listed, &name)),
+					lite::TracksEvent::Finished { name } => Listing::Finished(known(listed, &name)),
+					lite::TracksEvent::Synced => Listing::Synced,
+				})
+			}))?;
 			self.unanswered = None;
 			let Some(event) = event else {
 				return Poll::Ready(Ok(()));
 			};
 			match event {
-				lite::TracksEvent::Added { name, info } => {
-					let name: Arc<str> = name.as_ref().into();
+				Listing::Added(name, info) => {
 					if self.listed.contains_key(&name) {
 						return Poll::Ready(Err(Error::ProtocolViolation));
 					}
@@ -1938,19 +1963,17 @@ impl TracksRecv {
 					source.lister.add(name.clone(), info.into())?;
 					self.listed.insert(name, slot);
 				}
-				lite::TracksEvent::Removed { name } => {
-					if self.listed.remove(name.as_ref()).is_none() {
-						return Poll::Ready(Err(Error::ProtocolViolation));
-					}
+				Listing::Removed(name) => {
+					let name = name.ok_or(Error::ProtocolViolation)?;
+					self.listed.remove(&name);
 					source.lister.remove(&name)?;
 				}
-				lite::TracksEvent::Finished { name } => {
-					if self.listed.remove(name.as_ref()).is_none() {
-						return Poll::Ready(Err(Error::ProtocolViolation));
-					}
+				Listing::Finished(name) => {
+					let name = name.ok_or(Error::ProtocolViolation)?;
+					self.listed.remove(&name);
 					source.lister.finish(&name)?;
 				}
-				lite::TracksEvent::Synced => {
+				Listing::Synced => {
 					// This hop synced its readers when the listing began; only the order matters here.
 					if std::mem::replace(&mut self.synced, true) {
 						return Poll::Ready(Err(Error::ProtocolViolation));
@@ -4372,10 +4395,10 @@ mod tests {
 		let writes = session.log.writes.lock().unwrap().clone();
 		let mut wire = writes.as_slice();
 		assert_eq!(
-			crate::coding::decode_buf(&mut wire, VERSION, lite::ControlType::decode).unwrap(),
+			crate::coding::decode_buf(&mut wire, VERSION, |r, v| lite::ControlType::decode(r, v)).unwrap(),
 			lite::ControlType::Subscribe
 		);
-		let msg = crate::coding::decode_buf(&mut wire, VERSION, lite::Subscribe::decode).unwrap();
+		let msg = crate::coding::decode_from(&mut wire, VERSION, lite::Subscribe::decode).unwrap();
 		assert_eq!(msg.id, 0);
 		assert_eq!(msg.track, "catalog.json");
 		assert!(wire.is_empty(), "a second SUBSCRIBE trailed the first");
@@ -4857,7 +4880,9 @@ mod tests {
 			let mut wire = &wire[established..];
 			let mut wanted = Vec::new();
 			while !wire.is_empty() {
-				let msg = crate::coding::decode_buf(&mut wire, Version::Lite07, lite::SubscribeUpdate::decode).unwrap();
+				let msg =
+					crate::coding::decode_buf(&mut wire, Version::Lite07, |r, v| lite::SubscribeUpdate::decode(r, v))
+						.unwrap();
 				wanted.extend(msg.wanted_group);
 			}
 			wanted

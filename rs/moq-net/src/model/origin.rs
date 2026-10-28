@@ -212,8 +212,8 @@ impl<V> Encode<V> for Hop {
 	}
 }
 
-impl<V> Decode<V> for Hop {
-	fn decode(r: &mut Decoder<'_>, _: V) -> Result<Self, DecodeError> {
+impl<'a, V> Decode<'a, V> for Hop {
+	fn decode(r: &mut Decoder<'a>, _: V) -> Result<Self, DecodeError> {
 		Ok(Self::from_wire(r.varint()?))
 	}
 }
@@ -384,8 +384,8 @@ impl<V: Copy> Encode<V> for Hops {
 	}
 }
 
-impl<V: Copy> Decode<V> for Hops {
-	fn decode(r: &mut Decoder<'_>, version: V) -> Result<Self, DecodeError> {
+impl<'a, V: Copy> Decode<'a, V> for Hops {
+	fn decode(r: &mut Decoder<'a>, version: V) -> Result<Self, DecodeError> {
 		let count = r.varint()? as usize;
 		if count > MAX_HOPS {
 			return Err(DecodeError::BoundsExceeded);

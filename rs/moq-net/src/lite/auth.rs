@@ -16,9 +16,9 @@ pub struct Auth {
 	pub token: Bytes,
 }
 
-impl Message for Auth {
+impl<'a> Message<'a> for Auth {
 	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Auth);
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_auth() {
 			return Err(DecodeError::Version);
 		}
@@ -49,9 +49,9 @@ pub struct AuthOk {
 /// Largest millisecond count every implementation carries losslessly.
 const MAX_EXPIRES_MS: u64 = (1 << 53) - 1;
 
-impl Message for AuthOk {
+impl<'a> Message<'a> for AuthOk {
 	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Auth);
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_auth() {
 			return Err(DecodeError::Version);
 		}
@@ -98,9 +98,9 @@ pub struct AuthError {
 /// human-readable reason, and rejected from the length prefix alone.
 const MAX_REASON: usize = 8192;
 
-impl Message for AuthError {
+impl<'a> Message<'a> for AuthError {
 	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Auth);
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_auth() {
 			return Err(DecodeError::Version);
 		}
@@ -136,7 +136,12 @@ const AUTH_OK: u64 = 0;
 const AUTH_ERROR: u64 = 1;
 
 /// Write a `type` varint followed by the size-prefixed message body.
-fn encode_typed<M: Message>(w: &mut Encoder<'_>, typ: u64, msg: &M, version: Version) -> Result<(), EncodeError> {
+fn encode_typed<'m, M: Message<'m>>(
+	w: &mut Encoder<'_>,
+	typ: u64,
+	msg: &M,
+	version: Version,
+) -> Result<(), EncodeError> {
 	w.varint(typ)?;
 	msg.encode(w, version)
 }
@@ -150,8 +155,8 @@ impl Encode<Version> for AuthReply {
 	}
 }
 
-impl Decode<Version> for AuthReply {
-	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for AuthReply {
+	fn decode(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		match r.varint()? {
 			AUTH_OK => Ok(Self::Ok(AuthOk::decode(r, version)?)),
 			AUTH_ERROR => Ok(Self::Error(AuthError::decode(r, version)?)),
@@ -175,7 +180,7 @@ mod tests {
 		Ok(buf)
 	}
 
-	fn round_trip<T: Encode<Version> + Decode<Version>>(msg: &T) -> T {
+	fn round_trip<T: Encode<Version> + for<'a> Decode<'a, Version>>(msg: &T) -> T {
 		let buf = encode(msg, Version::Lite07).unwrap();
 		let mut r = Decoder::new(&buf, Version::Lite07.into());
 		let got = T::decode(&mut r, Version::Lite07).unwrap();

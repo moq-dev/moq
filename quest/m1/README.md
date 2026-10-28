@@ -162,7 +162,6 @@ surface and zero-copy texture import, land before the cut.
 - [Aborted epoch reads keep their cause](/quest/m1/epoch-abort-cause.md) - an aborted read through an epoch route ends with its own error, not NotFound
 - [Bindings name every session code](/quest/m1/ffi-malformed-auth-kind.md) - MALFORMED_AUTH_TOKEN and its siblings reach moq-ffi, moq-c, and the wrappers
 - [Unbounded groups](/quest/m1/unbounded-groups/README.md) - groups and frames lose their size caps; the cache sheds parts of a group under pressure and refills the holes in place
-- [Messages borrow instead of owning](/quest/m1/borrowed-messages.md) - message structs borrow from the wire on decode and from callers on encode, after lifetime-free `Path`
 - [Bindings decode media as media](/quest/m1/obs-data-decode.md) - moq-ffi decodes a media rendition with its kind, so OBS stops losing every other group
 - [Relay demand gaps](/quest/m1/relay-demand-gaps.md) - pre-07 backlog, IETF warm-relay newcomer, and double upstream pulls are fixed or ruled out
 - [fMP4 boundary sync](/quest/m1/fmp4-boundary-sync.md) - a declared fMP4 boundary opens a passthrough group only on a sync sample

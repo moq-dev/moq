@@ -388,10 +388,13 @@ impl Control {
 				ControlState::Auth(serve) => return serve.poll(waiter),
 				ControlState::Goaway { stream } => {
 					let mut cx = waiter.context();
-					let msg = ready!(stream.reader.poll_decode::<lite::Goaway>(&mut cx))?;
-					tracing::info!(uri = %msg.uri, "received goaway");
+					let version = self.shared.version;
+					let uri =
+						ready!(stream.reader.poll_decode_with(&mut cx, |r| {
+							Ok(lite::Goaway::decode(r, version)?.uri.into_owned())
+						}))?;
+					tracing::info!(%uri, "received goaway");
 
-					let uri = msg.uri.into_owned();
 					if !self.shared.client && !uri.is_empty() {
 						return Poll::Ready(Err(Error::ProtocolViolation));
 					}
@@ -1492,10 +1495,13 @@ trait Request: Sized {
 	/// Whether the request stays open past its reply, keeping what serving it took, until
 	/// the requester closes its side.
 	const HOLDS: bool;
-	/// The message that opens the stream.
-	type Message: Decode<Version> + std::fmt::Debug;
+	/// The message that opens the stream, owned so it outlives the bytes it came from.
+	type Message: std::fmt::Debug;
 	/// What the requester may send after the request; [`NoUpdate`] for nothing.
-	type Update: Decode<Version> + std::fmt::Debug;
+	type Update: for<'a> Decode<'a, Version> + std::fmt::Debug;
+
+	/// Decode the message that opens the stream.
+	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self::Message, DecodeError>;
 
 	/// The broadcast and track the request names.
 	fn target(msg: &Self::Message) -> (&crate::Path, &str);
@@ -1523,8 +1529,8 @@ trait Request: Sized {
 #[derive(Debug)]
 enum NoUpdate {}
 
-impl Decode<Version> for NoUpdate {
-	fn decode(_: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for NoUpdate {
+	fn decode(_: &mut Decoder<'a>, _: Version) -> Result<Self, DecodeError> {
 		Err(DecodeError::ExpectedEnd)
 	}
 }
@@ -1657,7 +1663,8 @@ impl<R: Request> RequestServe<R> {
 			let stream = self.stream.as_mut().expect("stream present");
 			match &mut self.state {
 				RequestState::Decode => {
-					let msg = ready!(stream.reader.poll_decode::<R::Message>(&mut cx))?;
+					let version = self.shared.version;
+					let msg = ready!(stream.reader.poll_decode_with(&mut cx, |r| R::decode(r, version)))?;
 					let (broadcast, track) = R::target(&msg);
 					self.broadcast = broadcast.clone();
 					self.track = track.to_string();
@@ -1807,6 +1814,10 @@ impl Request for TrackInfoServe {
 	type Message = lite::Track<'static>;
 	type Update = NoUpdate;
 
+	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self::Message, DecodeError> {
+		lite::Track::decode(r, version).map(lite::Track::into_owned)
+	}
+
 	fn target(msg: &Self::Message) -> (&crate::Path, &str) {
 		(&msg.broadcast, &msg.track)
 	}
@@ -1860,6 +1871,10 @@ impl Request for TracksServe {
 	const HOLDS: bool = false;
 	type Message = lite::Tracks;
 	type Update = NoUpdate;
+
+	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self::Message, DecodeError> {
+		lite::Tracks::decode(r, version)
+	}
 
 	fn target(msg: &Self::Message) -> (&crate::Path, &str) {
 		(&msg.broadcast, "")
@@ -1954,6 +1969,10 @@ impl Request for SubscribeServe {
 	const HOLDS: bool = false;
 	type Message = lite::Subscribe<'static>;
 	type Update = lite::SubscribeUpdate;
+
+	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self::Message, DecodeError> {
+		lite::Subscribe::decode(r, version).map(lite::Subscribe::into_owned)
+	}
 
 	fn target(msg: &Self::Message) -> (&crate::Path, &str) {
 		(&msg.broadcast, &msg.track)
@@ -2194,6 +2213,10 @@ impl Request for FetchServe {
 	const HOLDS: bool = false;
 	type Message = lite::Fetch<'static>;
 	type Update = NoUpdate;
+
+	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self::Message, DecodeError> {
+		lite::Fetch::decode(r, version).map(lite::Fetch::into_owned)
+	}
 
 	fn target(msg: &Self::Message) -> (&crate::Path, &str) {
 		(&msg.broadcast, &msg.track)
@@ -2877,8 +2900,8 @@ mod announce_test {
 		fn take_ok(&mut self) -> lite::AnnounceOk {
 			let buf = self.pending();
 			let mut slice = &buf[..];
-			let ok =
-				crate::coding::decode_buf(&mut slice, self.version, lite::AnnounceOk::decode).expect("announce ok");
+			let ok = crate::coding::decode_buf(&mut slice, self.version, |r, v| lite::AnnounceOk::decode(r, v))
+				.expect("announce ok");
 			self.cursor += buf.len() - slice.len();
 			ok
 		}
@@ -2890,7 +2913,7 @@ mod announce_test {
 			let mut msgs = Vec::new();
 			while !slice.is_empty() {
 				msgs.push(
-					crate::coding::decode_buf(&mut slice, self.version, lite::AnnounceBroadcast::decode)
+					crate::coding::decode_buf(&mut slice, self.version, |r, v| lite::AnnounceBroadcast::decode(r, v))
 						.expect("announce message"),
 				);
 			}
@@ -7455,7 +7478,7 @@ mod tests {
 		let mut slice = bytes;
 		let mut out = Vec::new();
 		while bytes::Buf::remaining(&slice) > 0 {
-			out.push(crate::coding::decode_buf(&mut slice, version, lite::Probe::decode).unwrap());
+			out.push(crate::coding::decode_buf(&mut slice, version, |r, v| lite::Probe::decode(r, v)).unwrap());
 		}
 		out
 	}

@@ -1402,7 +1402,7 @@ mod tests {
 
 	impl Harness {
 		/// Send `msg` on a new request stream, dispatched as the session would.
-		async fn request<M: Message>(&mut self, msg: &M) -> Stream<Transport, Version> {
+		async fn request<'m, M: Message<'m>>(&mut self, msg: &M) -> Stream<Transport, Version> {
 			let mut stream = Stream::open(&mut crate::driver::Transport::new(self.peer.clone()), self.version)
 				.await
 				.unwrap();
@@ -1450,7 +1450,7 @@ mod tests {
 		(id, body)
 	}
 
-	async fn send<M: Message>(stream: &mut Stream<Transport, Version>, msg: &M) {
+	async fn send<'m, M: Message<'m>>(stream: &mut Stream<Transport, Version>, msg: &M) {
 		stream.writer.varint(M::ID).await.unwrap();
 		stream.writer.encode(msg).await.unwrap();
 	}

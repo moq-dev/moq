@@ -23,9 +23,9 @@ pub struct Tracks {
 	pub epoch: Option<crate::Epoch>,
 }
 
-impl Message for Tracks {
+impl<'a> Message<'a> for Tracks {
 	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::TrackInfo);
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_tracks() {
 			return Err(DecodeError::Version);
 		}
@@ -88,8 +88,8 @@ impl Encode<Version> for TracksEvent<'_> {
 	}
 }
 
-impl Decode<Version> for TracksEvent<'_> {
-	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for TracksEvent<'a> {
+	fn decode(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		r.control = Some(crate::stats::Message::TrackInfo);
 		if !version.has_tracks() {
 			return Err(DecodeError::Version);
@@ -101,14 +101,14 @@ impl Decode<Version> for TracksEvent<'_> {
 		let msg = (|| {
 			Ok(match typ {
 				TRACKS_ADD => Self::Added {
-					name: Cow::Owned(body.string()?),
+					name: Cow::Borrowed(body.str()?),
 					info: TrackInfo::decode(&mut body, version)?,
 				},
 				TRACKS_REMOVE => Self::Removed {
-					name: Cow::Owned(body.string()?),
+					name: Cow::Borrowed(body.str()?),
 				},
 				TRACKS_FINISH => Self::Finished {
-					name: Cow::Owned(body.string()?),
+					name: Cow::Borrowed(body.str()?),
 				},
 				SYNCED => Self::Synced,
 				// A new stream with no earlier builds to tolerate.
@@ -132,7 +132,19 @@ mod test {
 
 	fn roundtrip(event: &TracksEvent<'_>) -> TracksEvent<'static> {
 		let buf = event.encode_bytes(Version::Lite07).unwrap();
-		TracksEvent::decode_slice(&buf, Version::Lite07).unwrap().0
+		match TracksEvent::decode_slice(&buf, Version::Lite07).unwrap().0 {
+			TracksEvent::Added { name, info } => TracksEvent::Added {
+				name: name.into_owned().into(),
+				info,
+			},
+			TracksEvent::Removed { name } => TracksEvent::Removed {
+				name: name.into_owned().into(),
+			},
+			TracksEvent::Finished { name } => TracksEvent::Finished {
+				name: name.into_owned().into(),
+			},
+			TracksEvent::Synced => TracksEvent::Synced,
+		}
 	}
 
 	#[test]
