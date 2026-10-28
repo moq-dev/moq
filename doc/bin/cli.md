@@ -250,7 +250,7 @@ moq ... import capture --camera 0 --width 1280 --height 720 --fps 30 --bitrate 3
 
 Video goes through the platform hardware encoder, with an H.264 software
 fallback when built with `openh264`, and audio is Opus; [moq-video](/lib/rs/moq-video) lists the
-backends. The camera opens only while someone is watching, and `--bitrate` is a
+backends. The camera stays open while publishing, and `--bitrate` is a
 ceiling that backends with live bitrate control lower to fit the connection.
 `moq devices` prints every source id. On Windows, `display:N` is an
 enumeration index rather than a stable monitor id, so re-run `moq devices` if a

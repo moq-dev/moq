@@ -10,9 +10,10 @@ as today.
 
 Decided 2026-10-28 (maintainer); see the [epic](/quest/m1/eager-encode/README.md).
 `rs/moq-cli/src/publish.rs:592` calls both `publish_capture`s, so the default
-follows the libraries. The flag selects their on-demand option. Update the
-comment there and `doc/bin/cli.md:250`. Name the flag under the repository's
-CLI rule.
+follows the libraries. The flag selects their on-demand option
+(`moq_video::encode::Capture::on_demand` for video). The comment there and
+`doc/bin/cli.md:250` describe the always-on camera; add the flag and the
+microphone. Name the flag under the repository's CLI rule.
 
 Tests: the CLI's capture args parse `--on-demand`, and the default publishes
 without a subscriber.
@@ -21,5 +22,4 @@ Public API: CLI default change, plus a new flag. Wire: none.
 
 ## Required
 
-- [moq-video captures while enabled](/quest/m1/eager-encode/video.md) - the video option this selects
 - [moq-audio captures while enabled](/quest/m1/eager-encode/audio.md) - the audio option this selects

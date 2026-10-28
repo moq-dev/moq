@@ -589,10 +589,9 @@ impl Publish {
 				// Each enabled medium publishes its own track onto the shared
 				// broadcast + catalog. Both stamp frames on the catalog's
 				// advertised clock, so HLS/DASH wall times match the mapping on
-				// the wire. Video encodes on demand (camera opens only while
-				// subscribed). Both run on this task rather than a spawn: on
-				// macOS the audio future holds ObjC handles across an await,
-				// so it is `!Send`.
+				// the wire. Video captures for the whole run. Both run on this
+				// task rather than a spawn: on macOS the audio future holds ObjC
+				// handles across an await, so it is `!Send`.
 				let video_fut = {
 					let broadcast = broadcast.clone();
 					let catalog = catalog.clone();
