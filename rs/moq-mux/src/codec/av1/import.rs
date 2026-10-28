@@ -405,7 +405,11 @@ mod tests {
 		let mut frames = split.decode(&sequence, pts).unwrap();
 		frames.extend(split.flush(pts).unwrap());
 		import.decode(frames).unwrap();
-		assert_eq!(import.track.name(), "video", "the repeated sequence header keeps the track");
+		assert_eq!(
+			import.track.name(),
+			"video",
+			"the repeated sequence header keeps the track"
+		);
 		let color = catalog.snapshot().video.renditions["video"]
 			.color
 			.clone()

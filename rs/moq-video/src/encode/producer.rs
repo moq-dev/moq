@@ -1463,7 +1463,15 @@ mod tests {
 			tokio::task::LocalSet::new()
 				.run_until(async {
 					let fixture = Fixture::start(Duration::from_secs(1), moq_clock::wall()).await;
-					let probed = fixture.catalog.snapshot().video.renditions.keys().next().unwrap().clone();
+					let probed = fixture
+						.catalog
+						.snapshot()
+						.video
+						.renditions
+						.keys()
+						.next()
+						.unwrap()
+						.clone();
 					let mut track = fixture.subscribe().await;
 					let camera = fixture.camera();
 					camera.push_native(surface(), us(0));
@@ -1482,7 +1490,15 @@ mod tests {
 					}
 
 					let mut moved = fixture.subscribe().await;
-					let name = fixture.catalog.snapshot().video.renditions.keys().next().unwrap().clone();
+					let name = fixture
+						.catalog
+						.snapshot()
+						.video
+						.renditions
+						.keys()
+						.next()
+						.unwrap()
+						.clone();
 					assert_eq!(name, format!("{probed}/1"));
 					let camera = fixture.camera_sized(640, 480);
 					camera.push_native(surface_sized(640, 480), us(80_000));
@@ -1928,13 +1944,7 @@ mod tests {
 			};
 			let requests = control.requests.weak();
 			let clock = catalog.clock();
-			let mut run = std::pin::pin!(capture_loop(
-				&mut producer,
-				&mut source,
-				&options,
-				&clock,
-				&requests,
-			));
+			let mut run = std::pin::pin!(capture_loop(&mut producer, &mut source, &options, &clock, &requests,));
 
 			// Nothing is known before an encoder opens, and its opening keyframe serves the request.
 			control.cut().unwrap();

@@ -3804,7 +3804,10 @@ impl<E: CatalogExt> AacStream<E> {
 			if let Some(import) = &mut self.import
 				&& format != self.format
 			{
-				tracing::info!(name = import.name(), "AAC format changed mid-stream, starting a new track");
+				tracing::info!(
+					name = import.name(),
+					"AAC format changed mid-stream, starting a new track"
+				);
 				import.finish()?;
 				self.import = None;
 			}
@@ -4441,7 +4444,10 @@ impl<E: CatalogExt> LegacyStream<E> {
 			if let Some(import) = &mut self.import
 				&& format != self.format
 			{
-				tracing::info!(name = import.name(), "audio format changed mid-stream, starting a new track");
+				tracing::info!(
+					name = import.name(),
+					"audio format changed mid-stream, starting a new track"
+				);
 				import.finish()?;
 				self.import = None;
 			}
@@ -6391,14 +6397,24 @@ pub(super) mod test {
 			..Default::default()
 		};
 		let cc = mux.cc(AAC_PID);
-		mux.out.extend(audio_pes_packet(AAC_PID, cc, 90_000, &[frame(48_000), frame(48_000)].concat()));
+		mux.out.extend(audio_pes_packet(
+			AAC_PID,
+			cc,
+			90_000,
+			&[frame(48_000), frame(48_000)].concat(),
+		));
 		import.decode(&mux.out).unwrap();
 		let first = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
 
 		mux.out.clear();
 		for pts in [180_000, 270_000] {
 			let cc = mux.cc(AAC_PID);
-			mux.out.extend(audio_pes_packet(AAC_PID, cc, pts, &[frame(44_100), frame(44_100)].concat()));
+			mux.out.extend(audio_pes_packet(
+				AAC_PID,
+				cc,
+				pts,
+				&[frame(44_100), frame(44_100)].concat(),
+			));
 		}
 		import.decode(&mux.out).unwrap();
 		let snapshot = catalog.snapshot();
