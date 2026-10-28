@@ -775,7 +775,9 @@ async fn priority_update(version: &str, relayed: bool, switch: bool) {
 	}
 
 	let (a, b) = epochs();
-	let old = publisher.publish("live", origin::Route::default().with_epoch(a)).unwrap();
+	let old = publisher
+		.publish("live", origin::Route::default().with_epoch(a))
+		.unwrap();
 	let old_track = old.create_track("video", timed()).unwrap();
 	let mut announced = viewer.consume().announced();
 	assert!(
@@ -787,7 +789,11 @@ async fn priority_update(version: &str, relayed: bool, switch: bool) {
 	write(&old_track, "old:0");
 	assert_eq!(read(&mut subscription).await, "old:0", "{case}");
 
-	let _new = switch.then(|| publisher.publish("live", origin::Route::default().with_epoch(b)).unwrap());
+	let _new = switch.then(|| {
+		publisher
+			.publish("live", origin::Route::default().with_epoch(b))
+			.unwrap()
+	});
 	if switch {
 		let in_place = version != "moq-lite-06".parse().unwrap();
 		expect_replaced(version, &mut announced, "live", in_place).await;

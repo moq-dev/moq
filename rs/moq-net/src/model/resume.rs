@@ -651,7 +651,6 @@ impl Mirror {
 }
 
 impl Subscriber {
-
 	/// Poll for the next group not in `delivered`: in arrival order, or in sequence order
 	/// for `ordered`.
 	pub(super) fn poll_group(
