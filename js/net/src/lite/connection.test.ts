@@ -296,7 +296,9 @@ for (const [alpn, version] of [
 			closed = true;
 		});
 		try {
-			producer.appendGroup().writeFrame(textFrame("first"));
+			const first = producer.appendGroup();
+			first.writeFrame(textFrame("first"));
+			first.finish();
 			expect(await (await track.nextGroup())?.readString()).toBe("first");
 
 			fin.enable();
