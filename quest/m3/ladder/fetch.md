@@ -35,3 +35,7 @@ intact.
 
 - [Controller](/quest/m3/ladder/controller.md) - there is no shared applied
   target to read until the controller owns one
+
+## Related
+
+- [On-demand pops](/quest/m2/video-quality/on-demand.md) - grades and fixes cold-start pops in the same fetch encoder this quest retargets
