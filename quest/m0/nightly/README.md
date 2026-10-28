@@ -31,7 +31,6 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [Log eviction passes the ARM concurrency model](/quest/m0/nightly/log-eviction.md) - the log eviction model passes on ARM and x86, with every segment access protected from reclamation
 - [The software renderer tests both capability paths](/quest/m0/nightly/render-capabilities.md) - the software-renderer lane verifies output selection with and without DMA-BUF import support without requiring hardware the runner lacks
 - [Shipping size history admits the generated C package](/quest/m0/nightly/shipping-history.md) - nightly measures the generated C shipping archives while preserving comparable existing size history and refusing missing or renamed artifacts
 - [The browser publisher completes its fairness sweep](/quest/m0/nightly/publisher-fairness.md) - the publisher fairness benchmark completes its backlog on the hosted ARM runner, yielding browser tasks while serving every group
