@@ -23,7 +23,7 @@ import {
 	SubscribeStart,
 } from "./subscribe.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
-import { ALPN_04, ALPN_05, ALPN_06, ALPN_07_WIP, Version } from "./version.ts";
+import { ALPN, ALPN_03, ALPN_04, ALPN_05, ALPN_06, ALPN_07_WIP, Version, versionName } from "./version.ts";
 
 /** A transport whose `getStats` behaves as described, or is absent entirely. */
 function transport(getStats?: () => Promise<unknown>): WebTransport {
@@ -217,9 +217,17 @@ async function settle() {
 	for (let i = 0; i < 5; i++) await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
+for (const [alpn, version] of [
+	[ALPN, Version.DRAFT_01],
+	[ALPN, Version.DRAFT_02],
+	[ALPN_03, Version.DRAFT_03],
+	[ALPN_04, Version.DRAFT_04],
+	[ALPN_05, Version.DRAFT_05],
+	[ALPN_06, Version.DRAFT_06],
+	[ALPN_07_WIP, Version.DRAFT_07],
+] as const) {
 	// A publisher that finishes a track and closes must not cut the final group short.
-	test(`close delivers a finished track's final group over ${alpn}`, async () => {
+	test(`close delivers a finished track's final group over ${versionName(version)}`, async () => {
 		const pair = createMockTransportPair(alpn);
 		const fin = holdFins(pair.server, "uni");
 		const origin = new Producer();
@@ -228,10 +236,8 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 		broadcastPublication.announce();
 		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 		const url = new URL("https://localhost/test");
-		const [client, server] = await Promise.all([
-			connect({ url, transport: pair.client }),
-			accept({ url, transport: pair.server, publish: origin.consume() }),
-		]);
+		const client = new Connection({ url, quic: pair.client, version });
+		const server = new Connection({ url, quic: pair.server, version, publish: origin.consume(), client: false });
 		const remote = wireOf(client).consume(Path.from("room"));
 		const track = remote.track("video").subscribe().ordered();
 		let closed = false;
@@ -258,6 +264,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 			fin.release();
 			await closing;
 			expect(closed).toBe(true);
+			expect(await track.nextGroup()).toBeUndefined();
 		} finally {
 			fin.release();
 			track.close();
