@@ -444,7 +444,7 @@ mod tests {
 	fn shift(ts: &[u8], by: i64) -> Vec<u8> {
 		const WRAP: i64 = 1 << 33;
 		let mut out = ts.to_vec();
-		for pkt in out.chunks_exact_mut(188) {
+		for pkt in out.as_chunks_mut::<188>().0 {
 			if let Some(pcr) = pcr(pkt) {
 				let base = (pcr as i64 / 300 + by).rem_euclid(WRAP);
 				pkt[6] = (base >> 25) as u8;

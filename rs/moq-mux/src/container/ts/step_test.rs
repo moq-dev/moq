@@ -77,7 +77,7 @@ fn write_timestamp(field: &mut [u8], t: i64) {
 /// `ts` with each PCR and PES timestamp moved by `by(clock)` 90 kHz ticks, modulo the wrap.
 fn shift(ts: &[u8], by: impl Fn(Clock) -> i64) -> Vec<u8> {
 	let mut out = ts.to_vec();
-	for pkt in out.chunks_exact_mut(188) {
+	for pkt in out.as_chunks_mut::<188>().0 {
 		let pid = pid(pkt);
 		if let Some((at, base)) = pcr_at(pkt) {
 			let base = (base + by(Clock::Pcr)).rem_euclid(WRAP);
@@ -98,7 +98,9 @@ fn shift(ts: &[u8], by: impl Fn(Clock) -> i64) -> Vec<u8> {
 /// The program clock the clip spans, first PCR to last, in 90 kHz ticks.
 fn span(ts: &[u8]) -> i64 {
 	let pcrs: Vec<i64> = ts
-		.chunks_exact(188)
+		.as_chunks::<188>()
+		.0
+		.iter()
 		.filter_map(|pkt| pcr_at(pkt).map(|(_, base)| base))
 		.collect();
 	pcrs.last().unwrap() - pcrs.first().unwrap()
@@ -142,7 +144,9 @@ fn feed(data: &[u8], chunk: usize) -> (Option<anyhow::Error>, Vec<u8>) {
 /// The input from the first packet of `pass` that carries a timestamp.
 fn first_timed(pass: &[u8]) -> &[u8] {
 	let at = pass
-		.chunks_exact(188)
+		.as_chunks::<188>()
+		.0
+		.iter()
 		.position(|pkt| pcr_at(pkt).is_some() || !pes_fields(pkt).is_empty())
 		.unwrap();
 	&pass[at * 188..]
@@ -203,14 +207,19 @@ fn a_clock_stepping_alone_is_no_switch() {
 
 	// The audio carries on a second after the first pass while the rest rewinds.
 	let audio = audio_pid(CLIP);
-	let (data, _) = replay(-SWITCH, |clock| if clock == Clock::Pes(audio) { SWITCH + HZ } else { 0 });
+	let (data, _) = replay(
+		-SWITCH,
+		|clock| if clock == Clock::Pes(audio) { SWITCH + HZ } else { 0 },
+	);
 	let (err, _) = feed(&data, 188 * 7);
 	assert!(err.as_ref().is_none_or(|err| !err.is::<Restart>()), "{err:?}");
 }
 
 /// The PID of the clip's audio: the PES that are not video.
 fn audio_pid(ts: &[u8]) -> u16 {
-	ts.chunks_exact(188)
+	ts.as_chunks::<188>()
+		.0
+		.iter()
 		.find_map(|pkt| {
 			let at = *pes_fields(pkt).first()?;
 			(!(0xe0..=0xef).contains(&pkt[at - 9 + 3])).then(|| pid(pkt))

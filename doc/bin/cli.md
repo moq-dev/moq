@@ -85,7 +85,16 @@ moq --connect https://relay.example.com/rooms/1 --connect-token "$TOKEN" --broad
 The `ts`, `fmp4`, and `flv` imports publish the input's own timestamps, mapped
 to the wall time the first frame arrived. A timeline that rewinds, such as a
 restarted encoder or a looping file wrapping to the top, ends the import with
-an error; run it again to publish anew. A flagged MPEG-TS discontinuity that
+an error; run it again to publish anew. `import ts` and `import srt` republish
+instead when an MPEG-TS clock steps onto another timeline: the PCR and every
+stream stepping back, flagged or not, or more than 10 s forward without a
+`discontinuity_indicator`. The broadcast finishes there, and the rest of the
+input publishes as a new instance under a new
+[epoch](/concept/moq-lite#publisher-epochs), on the same SRT connection, which
+`export ts --stitch --follow` carries on into. An unflagged step usually means
+redundant encoders behind a changeover switch: time-lock their clocks, or have
+the switch set `discontinuity_indicator`. `--program all` and `--passthrough`
+still end at a rewind. A flagged MPEG-TS discontinuity that
 jumps forward continues the broadcast and is declared on the exported clock.
 MPEG-TS timestamps follow their source history across the 33-bit wrap
 (every 26.5 hours), including files imported faster than real time and flagged

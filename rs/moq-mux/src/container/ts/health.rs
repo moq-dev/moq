@@ -810,7 +810,11 @@ mod test {
 		assert_eq!(pcr(&|t, _| PCR_WRAP - 1_000 * MS + t * MS, &all), (0, 0), "the wrap");
 		assert_eq!(
 			pcr(
-				&|t, part| if t < 1_000 || part != Part::Pcr { t * MS } else { (t - 500) * MS },
+				&|t, part| if t < 1_000 || part != Part::Pcr {
+					t * MS
+				} else {
+					(t - 500) * MS
+				},
 				&all
 			),
 			(0, 1),

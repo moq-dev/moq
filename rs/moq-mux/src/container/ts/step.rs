@@ -133,7 +133,9 @@ enum Reading {
 
 impl Reading {
 	fn new(last: u64, value: u64, wrap: u64, hz: u64) -> Self {
-		let duration = |ticks: u64| Duration::from_nanos(u64::try_from(u128::from(ticks) * 1_000_000_000 / u128::from(hz)).unwrap_or(u64::MAX));
+		let duration = |ticks: u64| {
+			Duration::from_nanos(u64::try_from(u128::from(ticks) * 1_000_000_000 / u128::from(hz)).unwrap_or(u64::MAX))
+		};
 		match Delta::between(last, value, wrap) {
 			Delta::Back(ticks) => Self::Stepped(Way::Back, duration(ticks)),
 			Delta::Forward(ticks) if duration(ticks) > LEAP => Self::Stepped(Way::Leap, duration(ticks)),
@@ -266,15 +268,20 @@ impl Steps {
 
 	/// Start judging a step at the packet at `at` if it shows one, with the clocks expected to
 	/// step with it.
-	fn trigger(&self, at: u64, pid: u16, marks: &Marks, routes: &Routes, (scan, framer): (u64, Framer)) -> Option<Ahead> {
+	fn trigger(
+		&self,
+		at: u64,
+		pid: u16,
+		marks: &Marks,
+		routes: &Routes,
+		(scan, framer): (u64, Framer),
+	) -> Option<Ahead> {
 		let last_pcr = self.clock.and_then(|(_, last)| last);
 		let stepped = if marks.flagged {
 			None
 		} else {
 			// Without a clock to step with them, the streams alone say nothing of the source.
-			if last_pcr.is_none() {
-				return None;
-			}
+			last_pcr?;
 			let pcr = marks
 				.pcr
 				.zip(last_pcr)
