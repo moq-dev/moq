@@ -3,7 +3,7 @@
 ## Goal
 
 The work in flight now: a passing Nightly, fixes for the `release` line, the
-quest merge driver, CI cost and latency, and test flakes.
+quest merge driver, local reviews, CI cost and latency, and test flakes.
 
 ## Plan
 
@@ -20,6 +20,7 @@ edge, which embeds moq-relay; it moved there on 2026-09-28.
 
 ## Required
 
+- [Adopt local reviews](/quest/m0/local-review.md) - PRs are reviewed locally by the other vendor's model before they are pushed, and merging never waits on an online reviewer
 - [Nightly passes on main](/quest/m0/nightly/README.md) - the scheduled Nightly passes end to end, so red means a new break
 - [Interop and Video pass on main](/quest/m0/interop-green/README.md) - the scheduled Interop and Video workflows pass, so red means a new break
 - [Release shutdown backport](/quest/m0/ffi-shutdown-backport.md) - `release` publishes a non-breaking moq-ffi with an async `drain()` and qmux sessions on the QUIC stream limit
