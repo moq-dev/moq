@@ -20,6 +20,9 @@
 //!
 //! [`coop`] bounds the passes a loop makes per poll, so one that always finds
 //! work ready still yields.
+//!
+//! With the `macros` feature, `#[kio::machine]` writes a `poll_*` state machine from
+//! straight-line code with explicit waits.
 
 #![warn(missing_docs)]
 

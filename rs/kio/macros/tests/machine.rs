@@ -192,3 +192,33 @@ fn skips_a_conditional_wait() {
 	values.try_push(3).unwrap();
 	assert_eq!(maybe.poll_maybe(&waiter), Poll::Ready(Ok(5)));
 }
+
+/// A typed tuple binding, and a macro's named argument that shares a moved local's name.
+struct Pair {
+	values: kio::Queue<u64>,
+	state: PairState,
+}
+
+#[kio::machine(self.state: PairState)]
+impl Pair {
+	fn poll_pair(&mut self, waiter: &kio::Waiter) -> Poll<Result<String, kio::Closed>> {
+		let (low, high): (u64, u64) = wait!(First => self.values.poll_pop(waiter)).map(|first| (first, first + 1))?;
+		let label: String = format!("{low}");
+		// Moved before the wait, so only the named argument below says `label`.
+		let moved: String = label;
+		wait!(Second => self.values.poll_pop(waiter))?;
+		Poll::Ready(Ok(format!("{moved}-{high}-{label}", label = low)))
+	}
+}
+
+#[test]
+fn stores_typed_tuples() {
+	let values = kio::Queue::new();
+	let mut pair = Pair {
+		values: values.clone(),
+		state: PairState::Start,
+	};
+	values.try_push(1).unwrap();
+	values.try_push(0).unwrap();
+	assert_eq!(pair.poll_pair(&kio::Waiter::noop()), Poll::Ready(Ok("1-2-1".to_string())));
+}

@@ -19,9 +19,10 @@ use syn::{
 ///
 /// `#[kio::machine(self.state: Name)]` on an `impl` generates `enum Name` and rewrites
 /// the one method that uses `wait!` to resume from `self.state`. The struct declares
-/// `state: Name` and starts it at `Name::Start`. Each wait gets a variant holding the
-/// struct of the locals that live across it, `Name<Step>`, and the machine is
-/// `Name::Done` once it returns `Poll::Ready`. `Name::name()` says where it waits.
+/// `state: Name` and starts it at `Name::Start`. Each wait gets a variant holding a
+/// struct of the locals that live across it, `Name::Step(NameStep { .. })`, and the
+/// machine is `Name::Done` once it returns `Poll::Ready`. `Name::name()` says where it
+/// waits.
 ///
 /// ```
 /// use std::task::Poll;
@@ -63,6 +64,9 @@ use syn::{
 /// - A local used after a wait must be bound as `let name: Type`, since its type
 ///   becomes a field. It is dropped when the machine leaves the last wait it lives
 ///   across, as a hand-written machine would.
+/// - Which locals a wait stores is found by name, format string captures included. A
+///   later binding that reuses a moved local's name, as a closure argument or an inner
+///   `let`, still stores it and fails as a use after move: rename one of them.
 /// - The body ends in its `Poll::Ready` value. Polling a `Done` machine panics.
 /// - `Name` is `Send` when every stored local is. A `!Send` local reports its `let`
 ///   and its wait.
@@ -739,26 +743,51 @@ fn uses(tokens: TokenStream) -> HashSet<String> {
 	fn walk(tokens: TokenStream, in_macro: bool, into: &mut HashSet<String>) {
 		let punct = |token: &Option<TokenTree>, c: char| matches!(token, Some(TokenTree::Punct(p)) if p.as_char() == c);
 		let (mut prev, mut prev2) = (None, None);
+		// A format string's captures, less the named arguments that answer them.
+		let (mut captured, mut named) = (HashSet::new(), HashSet::new());
 		let mut tokens = tokens.into_iter().peekable();
 		while let Some(token) = tokens.next() {
 			let tail = punct(&prev, '.') || (punct(&prev, ':') && punct(&prev2, ':'));
 			match &token {
 				TokenTree::Ident(ident) if !tail => {
-					let named = in_macro
+					let argument = in_macro
 						&& matches!(tokens.peek(), Some(TokenTree::Punct(eq)) if eq.as_char() == '=' && eq.spacing() == Spacing::Alone);
-					if !named {
-						into.insert(ident.to_string());
-					}
+					match argument {
+						true => named.insert(ident.to_string()),
+						false => into.insert(ident.to_string()),
+					};
 				}
 				TokenTree::Group(group) => walk(group.stream(), in_macro || punct(&prev, '!'), into),
+				TokenTree::Literal(literal) if in_macro => captures(&literal.to_string(), &mut captured),
 				_ => {}
 			}
 			prev2 = prev.replace(token);
 		}
+		into.extend(captured.into_iter().filter(|name| !named.contains(name)));
 	}
 	let mut into = HashSet::new();
 	walk(tokens, false, &mut into);
 	into
+}
+
+/// The locals a format string captures, as `x` in `"{x}"` or `"{x:?}"`. Any other
+/// literal holds no `{`, or no identifier after one.
+fn captures(literal: &str, into: &mut HashSet<String>) {
+	let mut rest = literal;
+	while let Some(at) = rest.find('{') {
+		rest = &rest[at + 1..];
+		if let Some(escaped) = rest.strip_prefix('{') {
+			rest = escaped;
+			continue;
+		}
+		let end = rest
+			.find(|c: char| !(c.is_alphanumeric() || c == '_'))
+			.unwrap_or(rest.len());
+		let name = &rest[..end];
+		if name.starts_with(|c: char| c.is_alphabetic() || c == '_') {
+			into.insert(name.to_string());
+		}
+	}
 }
 
 /// What a statement reads, and what it binds if it is a `let`.

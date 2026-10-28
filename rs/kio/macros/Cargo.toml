@@ -26,6 +26,8 @@ syn = { version = "2", features = ["full", "visit-mut"] }
 
 [dev-dependencies]
 kio = { path = "..", features = ["macros"] }
+# Runs the UI cases outside clippy, which would print their types with full paths.
+test-env = { path = "../../test-env" }
 # Compiles each mistake in `tests/ui/` and checks the diagnostic it reports.
 trybuild = "1"
 
