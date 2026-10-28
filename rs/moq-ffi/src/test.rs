@@ -234,9 +234,9 @@ async fn await_announced(consumer: &MoqOriginConsumer, path: &str) -> Arc<MoqBro
 /// Create a broadcast and announce its exact path: the create / populate / announce
 /// order with nothing to populate yet.
 fn create_announced(origin: &MoqOriginProducer, path: &str) -> Arc<MoqBroadcastProducer> {
-	let broadcast = origin.create_broadcast(path.into()).unwrap();
-	broadcast.announce(MoqAnnounceRoute::default()).unwrap();
-	broadcast
+	let publication = origin.create_broadcast(path.into()).unwrap();
+	publication.announce(MoqAnnounceRoute::default()).unwrap();
+	publication.broadcast()
 }
 
 /// The next announce event, failing the test on a timeout or a closed origin.
@@ -384,8 +384,8 @@ fn route_conversions_keep_cost_and_derive_anonymity() {
 async fn announced_route_keeps_static_cost_on_reannounce() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
-	let broadcast = origin.create_broadcast("priced-route".into()).unwrap();
-	broadcast.announce(MoqAnnounceRoute { cost: 9, epoch: None }).unwrap();
+	let publication = origin.create_broadcast("priced-route".into()).unwrap();
+	publication.announce(MoqAnnounceRoute { cost: 9, epoch: None }).unwrap();
 
 	// Reading an advertisement preserves its static production price.
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
@@ -400,25 +400,15 @@ async fn announced_route_keeps_static_cost_on_reannounce() {
 	assert_eq!(route.cost, 9);
 
 	// Re-announcing what was observed keeps the static price.
-	broadcast
+	publication
 		.announce(MoqAnnounceRoute {
 			cost: route.cost,
 			epoch: route.epoch.clone(),
 		})
 		.unwrap();
-	let current = broadcast
-		.state
-		.lock()
-		.unwrap()
-		.as_ref()
-		.unwrap()
-		.publication
-		.as_ref()
-		.unwrap()
-		.route();
-	assert_eq!(current.map(MoqRoute::from), Some(route));
+	assert_eq!(publication.inner.route().map(MoqRoute::from), Some(route));
 
-	broadcast.close().unwrap();
+	publication.broadcast().close().unwrap();
 }
 
 #[test]
@@ -454,10 +444,10 @@ async fn announced_epoch_restarts_on_a_new_epoch() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
-	let broadcast = origin.create_broadcast("epoch-route".into()).unwrap();
+	let publication = origin.create_broadcast("epoch-route".into()).unwrap();
 
 	let first = moq_mint_epoch();
-	broadcast
+	publication
 		.announce(MoqAnnounceRoute {
 			epoch: Some(first.clone()),
 			..Default::default()
@@ -468,7 +458,7 @@ async fn announced_epoch_restarts_on_a_new_epoch() {
 
 	// A new run of the same publisher is another instance: consumers restart onto it.
 	let second = moq_mint_epoch();
-	broadcast
+	publication
 		.announce(MoqAnnounceRoute {
 			epoch: Some(second.clone()),
 			..Default::default()
@@ -482,7 +472,7 @@ async fn announced_epoch_restarts_on_a_new_epoch() {
 		other => panic!("expected a restart, got {other:?}"),
 	}
 
-	broadcast.close().unwrap();
+	publication.broadcast().close().unwrap();
 }
 
 /// A media track reserves through its demand, so an app that publishes
@@ -2993,7 +2983,7 @@ fn audio_rejects_bad_init_bytes() {
 async fn create_broadcast_is_invisible_until_announced() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
-	let broadcast = origin.create_broadcast("live".into()).unwrap();
+	let publication = origin.create_broadcast("live".into()).unwrap();
 
 	let unroutable = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("live".into()))
 		.await
@@ -3008,7 +2998,7 @@ async fn create_broadcast_is_invisible_until_announced() {
 	assert!(!pending.is_finished(), "create_broadcast must not advertise the path");
 	assert!(!waited.is_finished(), "an unannounced broadcast must not resolve");
 
-	broadcast.announce(MoqAnnounceRoute::default()).unwrap();
+	publication.announce(MoqAnnounceRoute::default()).unwrap();
 	tokio::time::timeout(TIMEOUT, waited)
 		.await
 		.expect("timed out waiting for the announced broadcast")
@@ -3024,7 +3014,7 @@ async fn create_broadcast_is_invisible_until_announced() {
 		matches!(&update, MoqAnnounceEvent::Start { announce } if announce.prefix == "live"),
 		"{update:?}"
 	);
-	broadcast.close().unwrap();
+	publication.broadcast().close().unwrap();
 }
 
 /// Waiting for an exact path must hand the broadcast back named by that path, the base a
@@ -3384,8 +3374,10 @@ async fn resolve_honors_the_reference_epoch() {
 
 	let catalog = origin.create_broadcast("a/pub".into()).unwrap();
 	catalog.announce(route.clone()).unwrap();
+	let catalog = catalog.broadcast();
 	let source = origin.create_broadcast("a/source".into()).unwrap();
 	source.announce(route).unwrap();
+	let source = source.broadcast();
 	let _video = source.publish_track("video".into(), None).unwrap();
 	let plain = create_announced(&origin, "a/plain");
 
@@ -3432,8 +3424,8 @@ async fn resolve_honors_the_reference_epoch() {
 async fn announce_and_unannounce_toggles_discovery() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
-	let broadcast = origin.create_broadcast("live".into()).unwrap();
-	broadcast.announce(MoqAnnounceRoute::default()).unwrap();
+	let publication = origin.create_broadcast("live".into()).unwrap();
+	publication.announce(MoqAnnounceRoute::default()).unwrap();
 
 	// The consumer observes the flag through the announce stream: an active
 	// announcement, then its retraction.
@@ -3449,7 +3441,7 @@ async fn announce_and_unannounce_toggles_discovery() {
 	}
 	wait_live(&announced, true).await;
 
-	broadcast.unannounce().unwrap();
+	publication.unannounce().unwrap();
 	wait_live(&announced, false).await;
 
 	// Unannounced for local consumers exactly as for peers.
@@ -3459,14 +3451,67 @@ async fn announce_and_unannounce_toggles_discovery() {
 	assert!(unroutable.is_err(), "an unannounced broadcast is unroutable");
 
 	// Announcing again brings it back.
-	broadcast.announce(MoqAnnounceRoute::default()).unwrap();
+	publication.announce(MoqAnnounceRoute::default()).unwrap();
 	wait_live(&announced, true).await;
 	tokio::time::timeout(TIMEOUT, consumer.request_broadcast("live".into()))
 		.await
 		.expect("timed out requesting the reannounced broadcast")
 		.expect("a reannounced broadcast resolves");
 
+	publication.broadcast().close().unwrap();
+}
+
+/// The publication and the fill handle each keep the broadcast and its route alive: dropping
+/// either alone retracts nothing, and only the close does.
+#[tokio::test]
+async fn dropping_a_publication_keeps_its_route() {
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let consumer = origin.consume();
+	let publication = origin.create_broadcast("live".into()).unwrap();
+	publication.announce(MoqAnnounceRoute::default()).unwrap();
+	let broadcast = publication.broadcast();
+	assert!(Arc::ptr_eq(&broadcast, &publication.broadcast()));
+	drop(publication);
+	await_announced(&consumer, "live").await;
+
+	let publication = origin.create_broadcast("held".into()).unwrap();
+	publication.announce(MoqAnnounceRoute::default()).unwrap();
+	drop(publication.broadcast());
+	await_announced(&consumer, "held").await;
+
 	broadcast.close().unwrap();
+	publication.broadcast().close().unwrap();
+	for path in ["live", "held"] {
+		let unroutable = tokio::time::timeout(TIMEOUT, consumer.request_broadcast(path.into()))
+			.await
+			.expect("an unroutable request answers at once");
+		assert!(unroutable.is_err(), "a closed broadcast is unroutable");
+	}
+}
+
+/// A publication outliving its closed broadcast cannot announce or withdraw the broadcast that
+/// replaced it at the same path.
+#[tokio::test]
+async fn a_stale_publication_leaves_its_replacement_alone() {
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let consumer = origin.consume();
+	let stale = origin.create_broadcast("live".into()).unwrap();
+	stale.announce(MoqAnnounceRoute::default()).unwrap();
+	stale.broadcast().close().unwrap();
+
+	let replacement = origin.create_broadcast("live".into()).unwrap();
+	replacement.announce(MoqAnnounceRoute::default()).unwrap();
+	assert!(matches!(
+		stale.announce(MoqAnnounceRoute::default()),
+		Err(MoqError::Closed)
+	));
+	assert!(matches!(stale.unannounce(), Err(MoqError::Closed)));
+	tokio::time::timeout(TIMEOUT, consumer.request_broadcast("live".into()))
+		.await
+		.expect("timed out requesting the replacement")
+		.expect("the replacement still resolves");
+
+	replacement.broadcast().close().unwrap();
 }
 
 #[tokio::test]
@@ -4549,13 +4594,11 @@ async fn dynamic_broadcast_request() {
 	let prepared = request.prepare(epoch.clone()).unwrap();
 	let served = prepared.broadcast();
 	let track = served.publish_track("status".into(), Some(timed_info())).unwrap();
-	// Only publish announces the answer, under its epoch and after admission.
-	assert!(matches!(
-		served.announce(MoqAnnounceRoute::default()),
-		Err(MoqError::Closed)
-	));
-	prepared.publish().unwrap();
-	served
+	// Only publish announces the answer, under its epoch and after admission, and it
+	// hands back the fill handle the answer was prepared with.
+	let publication = prepared.publish().unwrap();
+	assert!(Arc::ptr_eq(&publication.broadcast(), &served));
+	publication
 		.announce(MoqAnnounceRoute {
 			epoch: Some(epoch),
 			cost: 7,
@@ -5729,7 +5772,7 @@ async fn announced_broadcast_retries_a_dropped_wait() {
 		.expect("the retry waited for another instance")
 		.unwrap()
 		.unwrap();
-	served.close().unwrap();
+	served.broadcast().close().unwrap();
 }
 
 /// Another instance taking over while `available()` resolves is the one it hands out, so the
@@ -5784,8 +5827,8 @@ async fn announced_broadcast_hands_out_the_instance_again_after_an_end() {
 		epoch: Some(moq_mint_epoch()),
 		..Default::default()
 	};
-	let broadcast = origin.create_broadcast("live".into()).unwrap();
-	broadcast.announce(route.clone()).unwrap();
+	let publication = origin.create_broadcast("live".into()).unwrap();
+	publication.announce(route.clone()).unwrap();
 	let first = tokio::time::timeout(TIMEOUT, followed.available())
 		.await
 		.expect("timed out waiting for the broadcast")
@@ -5793,7 +5836,7 @@ async fn announced_broadcast_hands_out_the_instance_again_after_an_end() {
 
 	// A covering claim answering under the same epoch.
 	let dynamic = origin.inner().inner.requests("").unwrap();
-	broadcast.unannounce().unwrap();
+	publication.unannounce().unwrap();
 	let again = tokio::spawn(async move { followed.available().await });
 	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())
 		.await
@@ -5813,7 +5856,7 @@ async fn announced_broadcast_hands_out_the_instance_again_after_an_end() {
 		"the claim above did not answer the same instance"
 	);
 	drop((served, dynamic));
-	broadcast.close().unwrap();
+	publication.broadcast().close().unwrap();
 }
 
 /// The route a wait resolves through leaving, and another instance arriving before it resolves,

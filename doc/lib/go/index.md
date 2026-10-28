@@ -96,7 +96,8 @@ import (
 
 // Publish encoded frames, or raw pixels with the codec inside the binding.
 // opusInit, packet, pts, and rgba come from your encoder or capture source.
-broadcast, _ := client.CreateBroadcast("my-stream.hang")
+publication, _ := client.CreateBroadcast("my-stream.hang")
+broadcast := publication.Broadcast()
 audio, _ := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.AudioFormatOpus, Data: opusInit})
 timestamp := 20 * time.Millisecond
 _ = audio.WriteFrame(moq.Frame{Payload: packet, Timestamp: &timestamp})
@@ -111,7 +112,7 @@ video, _ := moqvideo.NewProducer(catalogProducer, moqvideo.ProducerOptions{
 })
 _ = video.Write(moqvideo.Frame{Timestamp: time.Duration(pts) * time.Microsecond, Data: rgba})
 epoch := moq.MintEpoch() // a fresh epoch per run
-_ = broadcast.Announce(moq.AnnounceRoute{Epoch: &epoch})
+_ = publication.Announce(moq.AnnounceRoute{Epoch: &epoch})
 _ = audio.Finish()
 _ = video.Finish()
 broadcast.Close()    // keep the producer reachable while publishing, then close explicitly
