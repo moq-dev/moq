@@ -44,6 +44,28 @@ maintainer's `wrangler login`. Whether Editor alone passes wrangler's
 custom-domain check on every deploy is unproven until the first `release`
 run; [the deploy quest](../quest/m2/release/moq-sh-deploy.md) tracks it.
 
+## Write credentials
+
+Any branch pushed to this repository runs its own workflows with the
+repository's Actions secrets, so a credential that can write or publish lives
+in an Environment whose deployment policy admits only protected refs. A job
+names the Environment, and a branch that is not on the list fails to start it.
+
+| Environment | Deployable from | Holds |
+| --- | --- | --- |
+| `publish` | `main`, `release`, `moq-ffi-v*`, `moq-relay-v*`, `moq-cli-v*` | Registry, signing, deploy, alert, and moq-bot credentials |
+| `cache-write` | `main`, its merge queue, binary release tags | The mbx and Nix cache write keys ([below](#bootstrapping-the-rust-build-cache)) |
+| `npm` | `release` | Nothing; npm's trusted publisher names it |
+| `pypi` | `main`, `release`, `moq-ffi-v*` | Nothing; PyPI's trusted publisher names it |
+| `pub.dev` | `moq-dart-v*`, `moq-ffi-v*` | Nothing; pub.dev's automated publishing names it |
+| `github-pages` | `main` | Nothing |
+
+`main` is on the `publish` list for workflow_run, schedule, and dispatch jobs,
+which run there. A job that also runs dry on other refs names the Environment
+only when it publishes, as in `environment: ${{ github.ref_type == 'tag' &&
+'publish' || '' }}`. Read-only secrets, such as the mbx read key, stay at the
+repository level.
+
 ## Bootstrapping a new package repository
 
 The CI workflows (`.github/workflows/apt-repo.yml`,
@@ -95,8 +117,8 @@ domain, and signing key already exist. To stand them up the first time:
      --file moq-keyring.asc --remote
    ```
 
-5. **Configure GitHub Actions secrets** (Settings -> Secrets and variables
-   -> Actions):
+5. **Configure GitHub Actions secrets** in the `publish` Environment (see
+   [Write credentials](#write-credentials)):
 
    - `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY`: R2 API token with
      object read/write on both buckets.
