@@ -459,7 +459,7 @@ export class Producer {
 
 	/**
 	 * Remove a statically inserted track, including a finished cached one: stop counting it
-	 * toward {@link demand} and listing it at once.
+	 * toward the broadcast's demand and listing it at once.
 	 */
 	removeTrack(name: string): void {
 		const track = this.#state.tracks.get(name);

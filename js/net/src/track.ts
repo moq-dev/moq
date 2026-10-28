@@ -125,8 +125,8 @@ export interface Info {
 	 * Units per second for this track's frame timestamps, or omitted (`undefined` or `null`,
 	 * which mean the same) for an untimed track, whose frames and datagrams carry no timestamp.
 	 *
-	 * There is no default: a timed track declares its scale, such as {@link Timescale.MILLI},
-	 * or {@link Timescale.MICRO} for media that needs sub-millisecond timing. Reported in
+	 * There is no default: a timed track declares its scale, such as {@link Timescale | Timescale.MILLI},
+	 * or {@link Timescale | Timescale.MICRO} for media that needs sub-millisecond timing. Reported in
 	 * TRACK_INFO on Lite05+ and as the TIMESCALE property on moq-transport. A track received
 	 * without one (moq-lite before Lite05, or moq-transport without TIMESCALE) is untimed,
 	 * and stays untimed when served onward.

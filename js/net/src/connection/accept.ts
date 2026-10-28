@@ -13,7 +13,7 @@ import * as Extensions from "./extensions.ts";
 import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
 import { DEFAULT_TIMEOUT, exchangeSetup, handsOff } from "./handshake.ts";
 
-/** Options for {@link accept}. */
+/** Options for {@link Connection.accept}. */
 export interface AcceptProps {
 	/** The accepted transport. */
 	transport: WebTransport;
@@ -65,10 +65,7 @@ type SessionProps = {
 /**
  * Server-side handshake: accepts a transport and performs the server half of the SETUP exchange.
  *
- * @param transport - The WebTransport session to accept
- * @param url - The URL of the connection
- * @param props - Optional configuration
- * @returns A promise that resolves to a Connection instance
+ * @returns A promise that resolves to an established session
  */
 export async function accept({ transport, url, ...props }: AcceptProps): Promise<Established> {
 	if ("discovery" in props) throw new TypeError(DISCOVERY_REMOVED);
