@@ -523,9 +523,9 @@ class SmokeTest {
             assertEquals(1, fingerprints.size)
             assertEquals(64, fingerprints[0].length)
 
-            server.createBroadcast("live").use { broadcast ->
-                broadcast.announce(AnnounceRoute())
-                broadcast.unannounce()
+            server.createBroadcast("live").use { publication ->
+                publication.announce(AnnounceRoute())
+                publication.unannounce()
             }
         }
     }
@@ -557,24 +557,60 @@ class SmokeTest {
     @Test
     fun `a broadcast is reachable only while announced`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
-            origin.createBroadcast("live").use { broadcast ->
-                broadcast.publishTrack("events", null)
+            origin.createBroadcast("live").use { publication ->
+                publication.broadcast().use { it.publishTrack("events", null) }
                 val consumer = origin.consume()
                 assertFailsWith<MoqException> { consumer.requestBroadcast("live") }
 
-                broadcast.announce(AnnounceRoute())
+                publication.announce(AnnounceRoute())
                 val announced = consumer.announced(AnnounceConfig())
                 val first = assertIs<AnnounceEventStart>(announced.nextRoute())
                 assertEquals("live", first.announce.prefix)
 
-                broadcast.unannounce()
+                publication.unannounce()
                 val retracted = assertIs<AnnounceEventEnd>(announced.nextRoute())
                 assertEquals("live", retracted.announce.prefix)
                 assertFailsWith<MoqException> { consumer.requestBroadcast("live") }
 
-                broadcast.announce(AnnounceRoute())
+                publication.announce(AnnounceRoute())
                 assertIs<AnnounceEventStart>(announced.nextRoute())
                 consumer.requestBroadcast("live")
+            }
+        }
+    }
+
+    @Test
+    fun `closing a publication keeps its route until the broadcast ends`() = runTest {
+        OriginProducer(OriginConfig()).use { origin ->
+            val consumer = origin.consume()
+            val announced = consumer.announced(AnnounceConfig())
+            val publication = origin.createBroadcast("live")
+            publication.broadcast().use { broadcast ->
+                publication.use { it.announce(AnnounceRoute()) }
+                assertIs<AnnounceEventStart>(announced.nextRoute())
+                consumer.requestBroadcast("live")
+
+                broadcast.end()
+                assertIs<AnnounceEventEnd>(announced.nextRoute())
+                assertFailsWith<MoqException> { consumer.requestBroadcast("live") }
+            }
+        }
+    }
+
+    @Test
+    fun `a stale publication leaves its replacement alone`() = runTest {
+        OriginProducer(OriginConfig()).use { origin ->
+            origin.createBroadcast("live").use { stale ->
+                stale.announce(AnnounceRoute())
+                stale.broadcast().use { it.end() }
+
+                origin.createBroadcast("live").use { replacement ->
+                    replacement.announce(AnnounceRoute())
+                    assertFailsWith<MoqException.Closed> { stale.announce(AnnounceRoute()) }
+                    assertFailsWith<MoqException.Closed> { stale.unannounce() }
+                    origin.consume().requestBroadcast("live")
+                    replacement.broadcast().use { it.end() }
+                }
             }
         }
     }
@@ -583,18 +619,18 @@ class SmokeTest {
     fun `a new epoch restarts announce consumers`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
             val announced = origin.consume().announced(AnnounceConfig())
-            origin.createBroadcast("epoch").use { broadcast ->
+            origin.createBroadcast("epoch").use { publication ->
                 val first = mintEpoch()
-                broadcast.announce(AnnounceRoute(epoch = first))
+                publication.announce(AnnounceRoute(epoch = first))
                 val start = assertIs<AnnounceEventStart>(announced.nextRoute())
                 assertEquals(first, start.announce.route.epoch)
 
                 val second = mintEpoch()
-                broadcast.announce(AnnounceRoute(epoch = second))
+                publication.announce(AnnounceRoute(epoch = second))
                 val restart = assertIs<AnnounceEventRestart>(announced.nextRoute())
                 assertEquals(second, restart.announce.route.epoch)
 
-                assertFailsWith<MoqException> { broadcast.announce(AnnounceRoute(epoch = "not-an-epoch")) }
+                assertFailsWith<MoqException> { publication.announce(AnnounceRoute(epoch = "not-an-epoch")) }
             }
         }
     }
@@ -603,8 +639,8 @@ class SmokeTest {
     fun `announced pattern reports captures`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
             val announced = origin.consume().announced(AnnounceConfig(prefix = "room", filter = "*/chat"))
-            origin.createBroadcast("room/alice/chat").use { broadcast ->
-                broadcast.announce(AnnounceRoute())
+            origin.createBroadcast("room/alice/chat").use { publication ->
+                publication.announce(AnnounceRoute())
                 val update = assertIs<AnnounceEventStart>(announced.nextRoute())
                 assertEquals("room/alice/chat", update.announce.prefix)
                 assertEquals(listOf("alice"), update.announce.captures)
@@ -622,7 +658,14 @@ class SmokeTest {
                 val request = dynamic.requestedBroadcast()
                 assertEquals("live/cam", request.path())
                 request.prepare(mintEpoch()).use { prepared ->
-                    prepared.publish().use { pending.await() }
+                    prepared.broadcast().use { fill ->
+                        prepared.publish().use { publication ->
+                            pending.await()
+                            // The publication fills the broadcast it prepared: ending one ends the other.
+                            publication.broadcast().use { it.end() }
+                            assertFailsWith<MoqException.Closed> { fill.publishTrack("late", null) }
+                        }
+                    }
                 }
             }
         }
@@ -725,40 +768,42 @@ class SmokeTest {
     @Test
     fun `audio consumer reports its playout delay`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
-            origin.createBroadcast("audio-delay").use { broadcast ->
-                val audio = AudioProducer(
-                    CatalogProducer(broadcast),
-                    AudioProducerOptions(
-                        input = AudioEncoderInput(format = AudioSampleFormat.F32, sampleRate = 48_000u, channels = 1u),
-                        output = AudioEncoderOutput(codec = AudioCodec.opus(), ),
-                        track = "mic",
-                    ),
-                )
-                broadcast.announce(AnnounceRoute())
+            origin.createBroadcast("audio-delay").use { publication ->
+                publication.broadcast().use { broadcast ->
+                    val audio = AudioProducer(
+                        CatalogProducer(broadcast),
+                        AudioProducerOptions(
+                            input = AudioEncoderInput(format = AudioSampleFormat.F32, sampleRate = 48_000u, channels = 1u),
+                            output = AudioEncoderOutput(codec = AudioCodec.opus(), ),
+                            track = "mic",
+                        ),
+                    )
+                    publication.announce(AnnounceRoute())
 
-                val consumer = origin.consume().requestBroadcast("audio-delay")
-                val catalog = CatalogConsumer.subscribe(consumer).next()!!
-                val rendition = catalog.audio["mic"]!!
+                    val consumer = origin.consume().requestBroadcast("audio-delay")
+                    val catalog = CatalogConsumer.subscribe(consumer).next()!!
+                    val rendition = catalog.audio["mic"]!!
 
-                val fixedOutput = AudioDecoderOutput(format = AudioSampleFormat.F32, delay = java.time.Duration.ofMillis(80))
-                val fixed = AudioConsumer.subscribe(consumer, "mic", rendition, fixedOutput)
-                val estimated = AudioConsumer.subscribe(consumer, "mic", rendition, AudioDecoderOutput(format = AudioSampleFormat.F32))
-                assertEquals(java.time.Duration.ofMillis(80), fixed.delay())
-                val initial = estimated.delay()
+                    val fixedOutput = AudioDecoderOutput(format = AudioSampleFormat.F32, delay = java.time.Duration.ofMillis(80))
+                    val fixed = AudioConsumer.subscribe(consumer, "mic", rendition, fixedOutput)
+                    val estimated = AudioConsumer.subscribe(consumer, "mic", rendition, AudioDecoderOutput(format = AudioSampleFormat.F32))
+                    assertEquals(java.time.Duration.ofMillis(80), fixed.delay())
+                    val initial = estimated.delay()
 
-                // Two 20 ms Opus frames of silence at 48 kHz mono.
-                for (i in 0 until 2) {
-                    audio.write(AudioFrame(timestampUs = i.toULong() * 20_000uL, data = ByteArray(960 * 4)))
+                    // Two 20 ms Opus frames of silence at 48 kHz mono.
+                    for (i in 0 until 2) {
+                        audio.write(AudioFrame(timestampUs = i.toULong() * 20_000uL, data = ByteArray(960 * 4)))
+                    }
+                    assertIs<AudioReadFrame>(fixed.next())
+                    assertIs<AudioReadFrame>(estimated.next())
+
+                    assertEquals(java.time.Duration.ofMillis(80), fixed.delay())
+                    assertTrue(estimated.delay() != initial, "the estimate should move as frames are read")
+
+                    fixed.cancel()
+                    estimated.cancel()
+                    audio.finish()
                 }
-                assertIs<AudioReadFrame>(fixed.next())
-                assertIs<AudioReadFrame>(estimated.next())
-
-                assertEquals(java.time.Duration.ofMillis(80), fixed.delay())
-                assertTrue(estimated.delay() != initial, "the estimate should move as frames are read")
-
-                fixed.cancel()
-                estimated.cancel()
-                audio.finish()
             }
         }
     }
@@ -766,50 +811,52 @@ class SmokeTest {
     @Test
     fun `decoded video frame owns its picture`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
-            origin.createBroadcast("video-decode-frame").use { broadcast ->
-                val video = VideoProducer(
-                    CatalogProducer(broadcast),
-                    VideoProducerOptions(
-                        input = VideoEncoderInput(format = VideoPixelFormat.RGBA, width = 320u, height = 240u, framerate = VideoFrameRate(30000u, 1001u)),
-                        output = VideoEncoderOutput(codec = VideoCodec.H264,  kind = softwareEncoder),
-                        track = "camera",
-                        bandwidth = null,
-                    ),
-                )
-                broadcast.announce(AnnounceRoute())
+            origin.createBroadcast("video-decode-frame").use { publication ->
+                publication.broadcast().use { broadcast ->
+                    val video = VideoProducer(
+                        CatalogProducer(broadcast),
+                        VideoProducerOptions(
+                            input = VideoEncoderInput(format = VideoPixelFormat.RGBA, width = 320u, height = 240u, framerate = VideoFrameRate(30000u, 1001u)),
+                            output = VideoEncoderOutput(codec = VideoCodec.H264,  kind = softwareEncoder),
+                            track = "camera",
+                            bandwidth = null,
+                        ),
+                    )
+                    publication.announce(AnnounceRoute())
 
-                // Seed the track so a subscriber joining below lands on encoded media.
-                val rgba = ByteArray(320 * 240 * 4) { 0x80.toByte() }
-                video.cut()
-                for (i in 0 until 10) {
-                    video.write(VideoFrame(timestampUs = i.toULong() * 33_333uL, data = rgba))
+                    // Seed the track so a subscriber joining below lands on encoded media.
+                    val rgba = ByteArray(320 * 240 * 4) { 0x80.toByte() }
+                    video.cut()
+                    for (i in 0 until 10) {
+                        video.write(VideoFrame(timestampUs = i.toULong() * 33_333uL, data = rgba))
+                    }
+
+                    val consumer = origin.consume().requestBroadcast("video-decode-frame")
+                    val catalog = CatalogConsumer.subscribe(consumer).next()!!
+                    val rendition = catalog.video["camera"]!!
+
+                    val decoder = VideoConsumer.subscribe(consumer, "camera", rendition, VideoDecoderOutput())
+
+                    // Keep the encoder fed so the decoder sees frames after it joined.
+                    for (i in 10 until 40) {
+                        video.write(VideoFrame(timestampUs = i.toULong() * 33_333uL, data = rgba))
+                    }
+
+                    assertIs<VideoReadFrame>(decoder.next()).frame.use { frame ->
+
+                        // The frame outlives its consumer's cancellation.
+                        decoder.cancel()
+
+                        val planar = frame.pixels(VideoPixelFormat.I420)
+                        assertEquals(frame.width().toInt() * frame.height().toInt() * 3 / 2, planar.size)
+
+                        val packed = frame.pixels(VideoPixelFormat.RGBA)
+                        assertEquals(frame.width().toInt() * frame.height().toInt() * 4, packed.size)
+                        assertTrue(packed.indices.filter { it % 4 == 3 }.all { packed[it] == 0xFF.toByte() })
+                    }
+
+                    video.finish()
                 }
-
-                val consumer = origin.consume().requestBroadcast("video-decode-frame")
-                val catalog = CatalogConsumer.subscribe(consumer).next()!!
-                val rendition = catalog.video["camera"]!!
-
-                val decoder = VideoConsumer.subscribe(consumer, "camera", rendition, VideoDecoderOutput())
-
-                // Keep the encoder fed so the decoder sees frames after it joined.
-                for (i in 10 until 40) {
-                    video.write(VideoFrame(timestampUs = i.toULong() * 33_333uL, data = rgba))
-                }
-
-                assertIs<VideoReadFrame>(decoder.next()).frame.use { frame ->
-
-                    // The frame outlives its consumer's cancellation.
-                    decoder.cancel()
-
-                    val planar = frame.pixels(VideoPixelFormat.I420)
-                    assertEquals(frame.width().toInt() * frame.height().toInt() * 3 / 2, planar.size)
-
-                    val packed = frame.pixels(VideoPixelFormat.RGBA)
-                    assertEquals(frame.width().toInt() * frame.height().toInt() * 4, packed.size)
-                    assertTrue(packed.indices.filter { it % 4 == 3 }.all { packed[it] == 0xFF.toByte() })
-                }
-
-                video.finish()
             }
         }
     }

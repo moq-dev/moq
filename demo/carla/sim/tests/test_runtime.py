@@ -370,14 +370,16 @@ def test_session_announces_with_the_run_epoch_after_populating_tracks() -> None:
     unadvertised, so a session that never announces is invisible. The route
     carries the run's epoch so a restarted worker reads as a restart."""
     calls: list[object] = []
-    broadcast = SimpleNamespace(
-        publish_track=lambda name: calls.append(name) or SimpleNamespace(demand=SimpleNamespace),
+    publication = SimpleNamespace(
+        broadcast=SimpleNamespace(
+            publish_track=lambda name: calls.append(name) or SimpleNamespace(demand=SimpleNamespace)
+        ),
         announce=lambda route: calls.append(route),
     )
     route = SimpleNamespace(epoch="0190b2a4-0000-7000-8000-000000000000")
 
     # The video tracks were advertised when the bridge stream opened.
-    runtime.TruckSession(SimpleNamespace(name="truck1"), broadcast, SimpleNamespace(), None, None, FakeClock(), route)
+    runtime.TruckSession(SimpleNamespace(name="truck1"), publication, SimpleNamespace(), None, None, FakeClock(), route)
 
     assert calls == ["status", route]
 

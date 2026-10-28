@@ -202,13 +202,26 @@ int main() {
     // It prints the message Rust's Display gives.
     CHECK(fingerprints.error().to_string() == "bind: not listening; call listen() first");
 
-    // Publisher: a server whose origin serves one broadcast with one track.
+    // Publisher: a server whose origin serves one broadcast with one track. Dropping the
+    // publication keeps the route, which lasts until the broadcast closes.
     auto origin = moq::OriginProducer::init({});
-    auto broadcast = ok(origin->create_broadcast("probe"), "create_broadcast");
-    moq::TrackInfo info;
-    info.timescale = 1000000;
-    auto track = ok(broadcast->publish_track("data", info), "publish_track");
-    ok(broadcast->announce({}), "announce");
+    std::shared_ptr<moq::BroadcastProducer> broadcast;
+    std::shared_ptr<moq::TrackProducer> track;
+    {
+        auto publication = ok(origin->create_broadcast("probe"), "create_broadcast");
+        broadcast = publication->broadcast();
+        moq::TrackInfo info;
+        info.timescale = 1000000;
+        track = ok(broadcast->publish_track("data", info), "publish_track");
+        ok(publication->announce({}), "announce");
+    }
+
+    // A closed broadcast's publication can no longer announce.
+    auto stale = ok(origin->create_broadcast("stale"), "create_broadcast");
+    ok(stale->broadcast()->close(), "close stale broadcast");
+    auto reannounced = stale->announce({});
+    CHECK(!reannounced);
+    CHECK(std::holds_alternative<moq::Error::kClosed>(reannounced.error().get_variant()));
 
     moq::ServerConfig server_config;
     server_config.bind = "127.0.0.1:0";
