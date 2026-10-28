@@ -42,6 +42,15 @@ def tracked(history):
     return {name for row in history for name in row["bytes"]}
 
 
+def retain(current, history):
+    """Keep the thirty-day anchor compare() would pick, every newer report, and the current one."""
+    cutoff = dt.date.fromisoformat(current["date"]) - dt.timedelta(days=30)
+    # A stable sort keeps the last of several same-date reports, matching compare().
+    anchors = sorted((row for row in history if dt.date.fromisoformat(row["date"]) <= cutoff),
+                     key=lambda row: row["date"])
+    return anchors[-1:] + [row for row in history if dt.date.fromisoformat(row["date"]) > cutoff] + [current]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
@@ -50,12 +59,7 @@ def main():
     current = json.loads((args.directory / "sizes.json").read_text())
     history = json.loads(args.history.read_text()) if args.history else []
     failures = compare(current, history)
-    # Keep the oldest available thirty-day anchor and every newer report.
-    cutoff = dt.date.fromisoformat(current["date"]) - dt.timedelta(days=30)
-    anchors = [row for row in history if dt.date.fromisoformat(row["date"]) <= cutoff]
-    kept = ([max(anchors, key=lambda row: row["date"])] if anchors else [])
-    kept += [row for row in history if dt.date.fromisoformat(row["date"]) > cutoff]
-    (args.directory / "history.json").write_text(json.dumps(kept + [current], indent=2) + "\n")
+    (args.directory / "history.json").write_text(json.dumps(retain(current, history), indent=2) + "\n")
     summary = "| Artifact | Bytes |\n|---|---:|\n"
     summary += "".join(f"| {name} | {size:,} |\n" for name, size in sorted(current["bytes"].items()))
     if failures:

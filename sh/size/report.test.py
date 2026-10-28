@@ -53,6 +53,17 @@ class Trends(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "missing or renamed: artifact"):
             report.compare(renamed, [row("2026-10-09")])
 
+    def test_retains_last_same_date_anchor(self):
+        first, second = row("2026-10-10"), row("2026-10-10")
+        second["bytes"]["added"] = 100
+        current = row("2026-11-09")
+        self.assertEqual(report.retain(current, [first, second]), [second, current])
+        # compare() picks the same row, so the added series keeps its 30-day check.
+        later = row("2026-11-10")
+        later["bytes"]["added"] = 111
+        failures = report.compare(later, [second, current])
+        self.assertTrue(any("added" in failure and "30 days" in failure for failure in failures))
+
     def test_validates_every_history_row(self):
         cases = [
             {"version": 2, "date": "2026-09-01", "bytes": {"artifact": 100}},

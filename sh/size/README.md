@@ -19,7 +19,13 @@ and missing release artifacts are refused. A new artifact starts its own series,
 named in the summary and compared from its next report, while the existing
 series keep their history. A retained artifact that goes missing, including by
 rename, is refused: review the change, then start a fresh history by reporting
-without one.
+without one. A refused report writes no history, so Nightly keeps loading the
+retained one; reset it by deleting every `nightly-size-history` artifact:
+
+```sh
+gh api --paginate 'repos/{owner}/{repo}/actions/artifacts?name=nightly-size-history' \
+    --jq '.artifacts[].id' | xargs -I{} gh api -X DELETE 'repos/{owner}/{repo}/actions/artifacts/{}'
+```
 
 A regression fails Nightly and reaches its existing alert workflow. The job
 summary carries the byte counts, build times and FFI crate attribution, the
