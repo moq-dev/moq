@@ -18,7 +18,8 @@ demand for that rendition's media.
   never starts capture. This was already true with `--hls` before #6937.
 - Make record-track demand reach the media's demand where records are
   produced (`rs/moq-mux/src/hls.rs`), so every on-demand publisher benefits,
-  not only the CLI.
+  not only the CLI. The demand ends when the record track's last subscriber
+  leaves.
 - Test an HLS-only viewer against `moq publish`: capture starts and segments
   appear.
 

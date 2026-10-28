@@ -15,7 +15,8 @@ application, not a network peer.
 
 - Each of these mints a fresh track name per producer. Call
   `moq_mux::catalog::Producer::retire` when a producer is replaced or
-  dropped mid-broadcast, after its last frame is flushed.
+  dropped mid-broadcast, after its last frame is flushed and its recorder is
+  released (`retire` errors while the recorder is alive).
 - Keep #6783's rule that a dropped rendition's name can return with its
   record numbering continued: only the owner that minted a name retires it.
 - Test repeated replacement in each: record tracks stay flat.
