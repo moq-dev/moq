@@ -60,7 +60,7 @@ names the Environment, and a branch that is not on the list fails to start it.
 | `pub.dev` | `moq-dart-v*`, `moq-ffi-v*` | Nothing; pub.dev's automated publishing names it |
 | `github-pages` | `main` | Nothing |
 
-`main` is on the `publish` list for workflow_run, schedule, and dispatch jobs,
+`main` is on the `publish` list for `workflow_run`, schedule, and dispatch jobs,
 which run there. A job that also runs dry on other refs names the Environment
 only when it publishes, as in `environment: ${{ github.ref_type == 'tag' &&
 'publish' || '' }}`. Read-only secrets, such as the mbx read key, stay at the
