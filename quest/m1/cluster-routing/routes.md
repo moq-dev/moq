@@ -657,8 +657,9 @@ routes, and Selection retirement, leaving Follow's same-epoch
 Update/Restart split as the only takeover rule. Once each origin is its own
 ANNOUNCE and the first hop pins the request to its identity, the first hop's
 route is the instance, so the per-hop renewal has nothing left to protect.
-Keep an epochless change of serving origin a Restart, and keep the routing
-contract's epochless fixtures passing. Minting an epoch for every route
+An epochless change of serving route stays a Restart, including the
+same-origin next-hop change in the wire sketch above, and the routing
+contract's epochless fixtures keep passing. Minting an epoch for every route
 instead was tried and rejected
 ([moq-dev/moq#6948](https://github.com/moq-dev/moq/pull/6948)): each relay
 mints at its own time, so mint order outranks cost, preference, and the
