@@ -4,6 +4,34 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Transport polls take a `kio::Waiter` and sessions are shared by reference ([#7042](https://github.com/moq-dev/moq/pull/7042))
+
+`transport::poll` methods take `&kio::Waiter` instead of `&mut Context`, and register it before returning `Pending`; the caller keeps it alive between polls.
+`Session` no longer requires `Clone`, and every operation on it takes `&self`: accepts, opens, `send_group`, datagrams, `close`, and `poll_closed`.
+An operation keeps no per-caller progress between polls, so drop the per-handle `kio::Park`s and register the caller's waiter directly.
+On `SendStream`, `poll_closed` takes `&self`; writes, reads, and leases keep `&mut self`.
+Share a session you also hand to a `Client` or `Server` with `Arc<S>`, which implements `Session`.
+A backend whose waits keep one waker per handle can poll through a `kio::Bridge`, which wakes every waiter parked on it.
+
+```rust
+// Before
+impl moq_net::transport::poll::Session for MySession {
+	fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
+		let waiter = self.accept_park.hold(cx);
+		self.inner.poll_accept_uni(waiter)
+	}
+	// ...
+}
+
+// After
+impl moq_net::transport::poll::Session for MySession {
+	fn poll_accept_uni(&self, waiter: &kio::Waiter) -> Poll<Result<Self::RecvStream, Self::Error>> {
+		self.inner.poll_accept_uni(waiter)
+	}
+	// ...
+}
+```
+
 ### Paths fit moq-transport's 4096-byte namespace ([#6927](https://github.com/moq-dev/moq/pull/6927))
 
 `Path::MAX_BYTES` is 4096, moq-transport's namespace limit, so every path fits every wire and building a longer one fails with `path::Invalid::TooLong`. Keep broadcast paths within 4096 bytes.

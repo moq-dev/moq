@@ -1061,6 +1061,8 @@ async fn accept_request<S>(
 where
 	S: moq_net::transport::poll::Boxable + Send + Sync,
 {
+	// Shared, so the deadline can close the session the server runs.
+	let session = std::sync::Arc::new(session);
 	let deadline = deadline.map(|at| Deadline::new(at, session.clone()));
 	let accept = async { Ok(server.accept_request(moq_net::time::Instant::now(), session).await?) };
 	let request = Deadline::bound(deadline.as_ref(), accept).await?;
@@ -1113,7 +1115,7 @@ impl Deadline {
 		let close = move || {
 			let err = moq_net::Error::Timeout;
 			moq_net::transport::poll::Session::close(
-				&mut session.clone(),
+				&session,
 				moq_net::SessionError::from(&err).to_code(),
 				&err.to_string(),
 			);
@@ -2212,7 +2214,7 @@ mod tests {
 		};
 		options.identity = Some(crate::tls::PeerIdentity::from_chain(Vec::new()));
 		let accept = tokio::spawn(crate::websocket::accept(server, options));
-		let mut client = qmux::ws::Upgraded::new(client, "qmux-01.moq-lite-06")
+		let client = qmux::ws::Upgraded::new(client, "qmux-01.moq-lite-06")
 			.connect()
 			.unwrap();
 		let mut setup = client.open_uni(SendOptions::default()).await.unwrap();
@@ -2530,7 +2532,7 @@ mod tests {
 	async fn completed_setup_outlives_the_deadline() {
 		use moq_net::transport::poll::Session as _;
 
-		let (mut client, server) = session_pair().await;
+		let (client, server) = session_pair().await;
 		let timeout = std::time::Duration::from_secs(10);
 		let setup = Setup {
 			activity: Default::default(),
