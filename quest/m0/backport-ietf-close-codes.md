@@ -1,26 +1,22 @@
-# [S] Backport the IETF close-code fixes to release
+# [S] Merge and publish the IETF close-code backport
 
 ## Goal
 
-`@moq/net` on `release` closes a moq-transport session with the right error for
-the three cases [moq-dev/moq#6899](https://github.com/moq-dev/moq/pull/6899)
-fixed on main, and publishes a patch release.
+[moq-dev/moq#6959](https://github.com/moq-dev/moq/pull/6959) merges to
+`release`, and a patch of `@moq/net` containing it publishes. Confirm the
+published package includes the three protocol-violation close fixes from
+[moq-dev/moq#6899](https://github.com/moq-dev/moq/pull/6899).
 
 ## Plan
 
-Decided 2026-10-27 (maintainer): one PR against `release` per backport, in m0,
-since these are hostile-input fixes in shipped packages.
+The release-targeted implementation is prepared in #6959, with six regression
+cases covering drafts 18 and 22: initial REQUEST_UPDATE, unsolicited
+PUBLISH_NAMESPACE, and a track alias reused for different tracks.
+The main-only advertisement budgets and SUBSCRIBE_TRACKS changes do not apply.
 
-The bugs on `release` (as of 6ce67943f7):
-
-- `js/net/src/ietf/connection.ts:265`: a REQUEST_UPDATE as the initial message
-  aborts only the stream instead of closing the session with a protocol violation.
-- `connection.ts:314-317`: an unsolicited PUBLISH_NAMESPACE logs and closes
-  cleanly instead of with an error.
-- `subscriber.ts:807`: a `DuplicateTrackAlias` closes the session without its
-  error code.
-
-The announce-slot and SUBSCRIBE_TRACKS parts of #6899 are main-only and do not
-apply. Port the regression tests that cover the three cases.
+Decided 2026-10-27 (maintainer): PR creation only in this session; merging
+and publication remain for a later authorized session. No package version was
+bumped. Once the release PR has merged and its patch has published, delete
+this quest and its links on main.
 
 Public API: none. Wire: close codes only, matching main.
