@@ -28,7 +28,10 @@ Done in [moq-dev/moq#7166](https://github.com/moq-dev/moq/pull/7166): the
 `publish` and `npm` Environments exist, `pypi` and `pub.dev` admit only
 protected refs, the workflow token can no longer approve pull requests, and on
 `main` every job that uses a write secret or a publisher's OIDC identity names
-an Environment (see `infra/README.md`, "Write credentials"). The repository's
+an Environment (see `infra/README.md`, "Write credentials"). The `release
+tags` ruleset now also covers `moq-ffi-v*` and `moq-dart-v*`, and `release-js`
+passes `JSR_TOKEN` from the `npm` Environment to `deno publish`, falling back to
+JSR's repository OIDC trust while the token is unset. The repository's
 `MBX_R2_*` pair is read-only: a branch's write to `mbx-moq-dev` is refused
 with AccessDenied.
 
@@ -54,13 +57,15 @@ publish, since jobs that do not name `publish` still read it:
    (`npm`, for every `@moq/*` package), PyPI's (`pypi`, for `moq-rs` and
    `moq-ffi`) and pub.dev's (`pub.dev`, for `moq` and `moq_ffi`). Until then a
    branch can still claim their OIDC identity by copying the workflow file.
-5. Verify with the throwaway branch in the Goal, which also confirms each
+5. JSR cannot require an Environment, so the maintainer creates a JSR publish
+   token for the `@moq` scope, adds it as `JSR_TOKEN` in the `npm`
+   Environment, then unlinks the GitHub repository from each JSR package
+   (`@moq/auth`, `clock`, `hang`, `json`, `loc`, `msf`, `net`, `pattern`,
+   `qmux`, `room`, `signals`, `video`) so a branch cannot publish through
+   JSR's OIDC trust. Until the token exists, unlinking pauses JSR
+   publishing.
+6. Verify with the throwaway branch in the Goal, which also confirms each
    Environment refuses the branch.
-
-Open: `moq-ffi-v*` and `moq-dart-v*` tags are not in the `release tags`
-ruleset, so anyone who can push may create one and run a publish from any
-commit. JSR trusts any workflow in the linked repository and cannot require an
-Environment.
 
 ## Related
 
