@@ -34,9 +34,10 @@ already `read`):
   limited to the branches or tags whose workflows use it (`main`, `release`,
   or release tags). Keep at repository level only those that can't write.
 - **Organization secrets** visible here: `APP_CLIENT_ID`, `APP_ID`,
-  `APP_PRIVATE_KEY` and `DISCORD_WEBHOOK`. The App key can write, so scope it
-  the same way, or create its token only in jobs gated to a protected
-  environment.
+  `APP_PRIVATE_KEY` and `DISCORD_WEBHOOK`. The App key can write, so remove
+  this repository's access to the organization secret and supply the key only
+  through a protected environment. Gating the jobs that mint its token is not
+  enough: any branch can add a workflow that reads a visible secret.
 - **`pub.dev` and `pypi`** have no secrets, presumably OIDC trusted
   publishing, and no deployment branch policy. So a branch's workflow can
   claim either environment and get an identity the registry may trust. Limit
