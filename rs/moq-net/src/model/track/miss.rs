@@ -493,10 +493,15 @@ impl Misses {
 		let start = state.start_sequence.unwrap_or(0);
 		for run in candidates.iter() {
 			// Backfill another reader's fill cached is no hole, yet the arrival walk never
-			// reaches it, so this reader takes it as filled, as the reader that asked does.
-			for (&sequence, slot) in state.lookup.range(run.clone()) {
-				if !slot.is_walked() && slot.serves_end() {
-					self.filled.insert(sequence);
+			// reaches it: this reader takes it as filled where it would ask for a hole.
+			for held in backfill(state, run.clone()).iter() {
+				let (unfed, awaited) = state.unfed(held.clone(), now);
+				for run in unfed.iter() {
+					self.filled.extend(run.clone());
+				}
+				for (run, folds) in awaited {
+					self.filled.extend(run.start..run.end.min(start));
+					self.deferred.insert(run.start.max(start)..run.end, folds);
 				}
 			}
 			for hole in holes(state, run.clone()) {
@@ -727,6 +732,16 @@ impl TrackState {
 		}
 		(unfed, awaited)
 	}
+}
+
+/// The runs of `run` the cache holds as backfill: servable, but out of the arrival walk.
+fn backfill(state: &TrackState, run: ops::Range<u64>) -> RangeSet<u64> {
+	state
+		.lookup
+		.range(run)
+		.filter(|(_, slot)| !slot.is_walked() && slot.serves_end())
+		.map(|(&sequence, _)| sequence..sequence + 1)
+		.collect()
 }
 
 /// The runs of `run` the cache holds nothing servable for.
