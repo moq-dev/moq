@@ -49,6 +49,9 @@ mod loom;
 #[cfg(all(test, not(loom)))]
 mod tests;
 
+#[cfg(feature = "macros")]
+pub use kio_macros::machine;
+
 pub use consumer::Consumer;
 pub use lock::{Lock, LockGuard};
 pub use pending::Pending;
