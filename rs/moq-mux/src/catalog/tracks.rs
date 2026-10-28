@@ -565,13 +565,17 @@ pub(crate) type VideoTrack<E = ()> = Rendition<E, hang::catalog::VideoConfig>;
 pub(crate) type AudioTrack<E = ()> = Rendition<E, hang::catalog::AudioConfig>;
 /// A single text (caption/subtitle) track's catalog rendition. See [`Rendition`].
 impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
+	/// The successor of this rendition's track, under a newly minted name, for a decoder identity
+	/// change. `hls_hint` carries the segment duration the old track declared.
 	pub(crate) fn fresh(
 		&self,
 		container: super::hang::Container,
 		info: moq_net::track::Info,
+		hls_hint: Option<std::time::Duration>,
 	) -> crate::Result<crate::container::Producer<super::hang::Container, C>> {
 		let track = self.catalog.fresh_track(&self.name, info)?;
-		self.catalog.track(track, container, None)
+		let rendition = self.catalog.rendition(track.name())?;
+		self.catalog.media(track, container, rendition, None, hls_hint)
 	}
 
 	fn new(reserved: Reserved<E>, name: String) -> crate::Result<Self> {

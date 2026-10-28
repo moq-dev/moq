@@ -112,6 +112,7 @@ trait Rendition<R>: Send {
 		&self,
 		container: crate::catalog::hang::Container,
 		info: moq_net::track::Info,
+		hls_hint: Option<std::time::Duration>,
 	) -> crate::Result<Producer<crate::catalog::hang::Container, R>>;
 }
 
@@ -128,8 +129,9 @@ where
 		&self,
 		container: crate::catalog::hang::Container,
 		info: moq_net::track::Info,
+		hls_hint: Option<std::time::Duration>,
 	) -> crate::Result<Producer<crate::catalog::hang::Container, R>> {
-		self.fresh(container, info)
+		self.fresh(container, info, hls_hint)
 	}
 
 	fn timestamp(&self, hint: Option<moq_net::Timestamp>) -> crate::Result<moq_net::Timestamp> {
@@ -280,7 +282,8 @@ impl Producer<crate::catalog::hang::Container, hang::catalog::VideoConfig> {
 			return self.set(config);
 		}
 		let container = crate::catalog::hang::Container::try_from(&config)?;
-		let mut next = rendition.fresh(container, self.inner.info().clone())?;
+		let hls_hint = self.recorder.as_ref().and_then(|recorder| recorder.declared());
+		let mut next = rendition.fresh(container, self.inner.info().clone(), hls_hint)?;
 		next.buffer_duration = self.buffer_duration;
 		next.set(config)?;
 		self.finish()?;
