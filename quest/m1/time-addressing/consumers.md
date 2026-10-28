@@ -25,7 +25,7 @@ Decided 2026-10-27 (maintainer): moq-mux publishes HLS records by default
 until this lands. Then the `<track>.hls` record tracks, the per-rendition
 `hls` catalog field, and any A/V segment alignment go away.
 
-Decided 2026-10-27 (maintainer, from moq.pro's HLS audit): how the export
+Decided 2026-10-27 (maintainer, from an HLS audit): how the export
 cuts segments without records. HLS numbers segments by position, so every
 edge and every reload must derive the same consecutive numbers from
 timestamps alone, and a pts grid is the only stateless rule that does.
