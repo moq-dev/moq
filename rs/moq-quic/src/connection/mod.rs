@@ -976,11 +976,11 @@ impl Connection {
 				);
 				self.stats.udp_tx.on_sent(1, buf.len());
 				return Some(Transmit {
-					destination: remote,
+					remote,
 					size: buf.len(),
 					ecn: None,
 					segment_size: None,
-					src_ip: self.local_ip,
+					local_ip: self.local_ip,
 				});
 			}
 
@@ -1102,7 +1102,7 @@ impl Connection {
 		self.stats.udp_tx.on_sent(num_datagrams as u64, buf.len());
 
 		Some(Transmit {
-			destination: self.path.remote,
+			remote: self.path.remote,
 			size: buf.len(),
 			ecn: if self.path.sending_ecn {
 				Some(EcnCodepoint::Ect0)
@@ -1113,7 +1113,7 @@ impl Connection {
 				1 => None,
 				_ => Some(segment_size),
 			},
-			src_ip: self.local_ip,
+			local_ip: self.local_ip,
 		})
 	}
 
@@ -1127,7 +1127,7 @@ impl Connection {
 		let token = prev_path
 			.challenge
 			.expect("previous path challenge pending without token");
-		let destination = prev_path.remote;
+		let remote = prev_path.remote;
 		debug_assert_eq!(
 			self.highest_space,
 			SpaceId::Data,
@@ -1158,11 +1158,11 @@ impl Connection {
 		self.stats.udp_tx.on_sent(1, buf.len());
 
 		Some(Transmit {
-			destination,
+			remote,
 			size: buf.len(),
 			ecn: None,
 			segment_size: None,
-			src_ip: self.local_ip,
+			local_ip: self.local_ip,
 		})
 	}
 

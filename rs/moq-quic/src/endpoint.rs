@@ -199,11 +199,11 @@ impl Endpoint {
 					buf.write(version.wire());
 				}
 				return Some(DatagramEvent::Response(Transmit {
-					destination: remote,
+					remote,
 					ecn: None,
 					size: buf.len(),
 					segment_size: None,
-					src_ip: local_ip,
+					local_ip,
 				}));
 			}
 			Err(e) => {
@@ -328,11 +328,11 @@ impl Endpoint {
 		debug_assert!(buf.len() < inciting_dgram_len);
 
 		Some(Transmit {
-			destination: addresses.remote,
+			remote: addresses.remote,
 			ecn: None,
 			size: buf.len(),
 			segment_size: None,
-			src_ip: addresses.local_ip,
+			local_ip: addresses.local_ip,
 		})
 	}
 
@@ -837,11 +837,11 @@ impl Endpoint {
 		encode.finish(buf, &*incoming.crypto.header.local, None);
 
 		Ok(Transmit {
-			destination: incoming.addresses.remote,
+			remote: incoming.addresses.remote,
 			ecn: None,
 			size: buf.len(),
 			segment_size: None,
-			src_ip: incoming.addresses.local_ip,
+			local_ip: incoming.addresses.local_ip,
 		})
 	}
 
@@ -994,11 +994,11 @@ impl Endpoint {
 		buf.resize(buf.len() + crypto.packet.local.tag_len(), 0);
 		partial_encode.finish(buf, &*crypto.header.local, Some((0, &*crypto.packet.local)));
 		Transmit {
-			destination: addresses.remote,
+			remote: addresses.remote,
 			ecn: None,
 			size: buf.len(),
 			segment_size: None,
-			src_ip: addresses.local_ip,
+			local_ip: addresses.local_ip,
 		}
 	}
 

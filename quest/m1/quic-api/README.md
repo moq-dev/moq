@@ -43,9 +43,7 @@ Decided with the maintainer:
 
 This README's own work, after the children: read the three layers' rustdoc
 side by side and fix any name or signature that still differs, and check
-`doc/lib/rs/index.md`'s driver line still holds. Known so far: moq-uring's
-`client::Config` carries the peer and server name its `Endpoint::connect`
-dials, where moq-tokio's driver takes them as `connect` arguments.
+`doc/lib/rs/index.md`'s driver line still holds.
 
 ## Required
 

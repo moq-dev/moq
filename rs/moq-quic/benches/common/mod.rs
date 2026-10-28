@@ -306,7 +306,7 @@ fn split(out: &mut Vec<(SocketAddr, BytesMut)>, transmit: &moq_quic::Transmit, b
 	let data = &buf[..transmit.size];
 	let segment = transmit.segment_size.unwrap_or(data.len());
 	for datagram in data.chunks(segment) {
-		out.push((transmit.destination, BytesMut::from(datagram)));
+		out.push((transmit.remote, BytesMut::from(datagram)));
 	}
 }
 

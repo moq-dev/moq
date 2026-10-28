@@ -174,9 +174,9 @@ impl Pair {
 				self.last_spin = spin;
 			}
 			if let Some(socket) = &self.client.socket {
-				socket.send_to(&buffer, packet.destination).unwrap();
+				socket.send_to(&buffer, packet.remote).unwrap();
 			}
-			if self.server.addr == packet.destination {
+			if self.server.addr == packet.remote {
 				let (marked, arrivals) = self
 					.to_server
 					.transmit(&mut self.rng, self.time, self.latency, buffer.len());
@@ -201,9 +201,9 @@ impl Pair {
 				continue;
 			}
 			if let Some(socket) = &self.server.socket {
-				socket.send_to(&buffer, packet.destination).unwrap();
+				socket.send_to(&buffer, packet.remote).unwrap();
 			}
-			if self.client.addr == packet.destination {
+			if self.client.addr == packet.remote {
 				let (marked, arrivals) = self
 					.to_client
 					.transmit(&mut self.rng, self.time, self.latency, buffer.len());
@@ -927,11 +927,11 @@ fn split_transmit(transmit: Transmit, buffer: &[u8]) -> Vec<(Transmit, Bytes)> {
 		let contents = buffer.split_to(end);
 		transmits.push((
 			Transmit {
-				destination: transmit.destination,
+				remote: transmit.remote,
 				size: contents.len(),
 				ecn: transmit.ecn,
 				segment_size: None,
-				src_ip: transmit.src_ip,
+				local_ip: transmit.local_ip,
 			},
 			contents,
 		));

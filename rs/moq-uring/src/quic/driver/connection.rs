@@ -939,10 +939,10 @@ impl Driver {
 		// A lone datagram is its own segment size, and the socket's GSO
 		// stride has to match what moq-quic actually packed.
 		let transmit = udp::Transmit {
-			to: transmit.destination,
+			to: transmit.remote,
 			segment: transmit.segment_size.unwrap_or(transmit.size),
 			ecn: transmit.ecn.map(super::ecn_from_quic),
-			src_ip: transmit.src_ip,
+			src_ip: transmit.local_ip,
 		};
 		if let Err(err) = tx.send(transmit) {
 			return Poll::Ready(Err(Error::Io(err.to_string())));

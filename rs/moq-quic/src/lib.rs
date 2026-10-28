@@ -245,8 +245,8 @@ impl coding::Codec for StreamId {
 #[derive(Debug)]
 #[must_use]
 pub struct Transmit {
-	/// The socket this datagram should be sent to
-	pub destination: SocketAddr,
+	/// The address to send the datagram to
+	pub remote: SocketAddr,
 	/// Explicit congestion notification bits to set on the packet
 	pub ecn: Option<EcnCodepoint>,
 	/// Amount of data written to the caller-supplied buffer
@@ -254,8 +254,8 @@ pub struct Transmit {
 	/// The segment size if this transmission contains multiple datagrams.
 	/// This is `None` if the transmit only contains a single datagram
 	pub segment_size: Option<usize>,
-	/// Optional source IP address for the datagram
-	pub src_ip: Option<IpAddr>,
+	/// The local IP address to send the datagram from, if the socket chooses one
+	pub local_ip: Option<IpAddr>,
 }
 
 //

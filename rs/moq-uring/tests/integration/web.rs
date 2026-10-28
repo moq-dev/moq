@@ -792,13 +792,16 @@ fn dropped_session_delivers_close(explicit: bool) {
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("client socket");
 	let client = quic::Endpoint::new(sock, quic::endpoint::Config::default()).expect("client endpoint");
-	let mut dial = quic::client::Config::new(server.local_addr(), "localhost");
+	let mut dial = quic::client::Config::default();
 	dial.alpn = vec!["h3".to_string()];
 	dial.verify = false;
 
 	worker
 		.block_on(async {
-			let mut peer = client.connect(&dial).await.expect("dial");
+			let mut peer = client
+				.connect(&dial, server.local_addr(), "localhost")
+				.await
+				.expect("dial");
 			let conn = server.accept().await.expect("accept");
 			let mut watch = conn.clone();
 
@@ -919,13 +922,16 @@ fn cancelling_a_pending_web_handshake(send_settings: bool) {
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("client socket");
 	let client = quic::Endpoint::new(sock, quic::endpoint::Config::default()).expect("client endpoint");
-	let mut dial = quic::client::Config::new(server.local_addr(), "localhost");
+	let mut dial = quic::client::Config::default();
 	dial.alpn = vec!["h3".to_string()];
 	dial.verify = false;
 
 	worker
 		.block_on(async {
-			let mut peer = client.connect(&dial).await.expect("dial");
+			let mut peer = client
+				.connect(&dial, server.local_addr(), "localhost")
+				.await
+				.expect("dial");
 			let conn = server.accept().await.expect("accept");
 			let mut watch = conn.clone();
 			let mut control = None;
@@ -989,9 +995,13 @@ fn cancelling_a_pending_web_handshake(send_settings: bool) {
 			.await;
 			drop(control);
 
-			let sibling = within(&handle, "sibling dial", client.connect(&dial))
-				.await
-				.expect("sibling dial");
+			let sibling = within(
+				&handle,
+				"sibling dial",
+				client.connect(&dial, server.local_addr(), "localhost"),
+			)
+			.await
+			.expect("sibling dial");
 			let accepted = within(&handle, "sibling accept", server.accept())
 				.await
 				.expect("sibling accept");

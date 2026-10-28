@@ -302,7 +302,7 @@ mod tests {
 	const MS: Duration = Duration::from_millis(1);
 
 	fn probe(now: Instant) -> BandwidthProbe {
-		let mut probe = BandwidthProbe::new(&TransportConfig::default(), now);
+		let mut probe = BandwidthProbe::new(&transport::Config::default(), now);
 		probe.set_target(TARGET);
 		probe
 	}

@@ -164,9 +164,14 @@ impl Endpoint {
 		.await
 	}
 
-	/// Dial [`Config::peer`](crate::quic::client::Config::peer) through this
-	/// endpoint's socket, driving the handshake to completion.
-	pub async fn connect(&self, config: &crate::quic::client::Config) -> Result<Connection, Error> {
+	/// Dial `remote` through this endpoint's socket, verifying it as
+	/// `server_name`, and drive the handshake to completion.
+	pub async fn connect(
+		&self,
+		config: &crate::quic::client::Config,
+		remote: SocketAddr,
+		server_name: &str,
+	) -> Result<Connection, Error> {
 		if let Some(err) = self.inner.closed() {
 			return Err(err);
 		}
@@ -179,8 +184,8 @@ impl Endpoint {
 				self.inner.owner.now(),
 				Dial {
 					config: &client,
-					remote: config.peer,
-					server_name: &config.server_name,
+					remote,
+					server_name,
 				},
 			)
 			.map_err(|err| Error::Quic(err.to_string()))?;
@@ -433,10 +438,10 @@ impl Inner {
 		}
 		tx.extend_from_slice(&buf[..transmit.size]);
 		let transmit = udp::Transmit {
-			to: transmit.destination,
+			to: transmit.remote,
 			segment: transmit.segment_size.unwrap_or(transmit.size),
 			ecn: transmit.ecn.map(super::ecn_from_quic),
-			src_ip: transmit.src_ip,
+			src_ip: transmit.local_ip,
 		};
 		if let Err(err) = tx.send(transmit) {
 			tracing::debug!(%err, "failed to send an endpoint response");

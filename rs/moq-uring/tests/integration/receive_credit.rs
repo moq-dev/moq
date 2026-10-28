@@ -107,7 +107,8 @@ fn partial_frame_gives_way() {
 			.expect("socket")
 	};
 	let server_sock = socket(&handle);
-	let mut dial = quic::client::Config::new(server_sock.local_addr().expect("server addr"), "localhost");
+	let server_addr = server_sock.local_addr().expect("server addr");
+	let mut dial = quic::client::Config::default();
 	dial.alpn = vec![ALPN.to_string()];
 	dial.verify = false;
 	dial.transport.limits.receive_window = std::num::NonZeroU64::new(WINDOW as u64);
@@ -136,7 +137,9 @@ fn partial_frame_gives_way() {
 	let sub = sub_origin.clone();
 	worker
 		.block_on(async move {
-			let conn = quic::client::connect(client_sock, &dial).await.expect("quic connect");
+			let conn = quic::client::connect(client_sock, &dial, server_addr, "localhost")
+				.await
+				.expect("quic connect");
 			let (session, driver) = moq_net::Client::new()
 				.with_subscriber(sub.clone())
 				.connect(

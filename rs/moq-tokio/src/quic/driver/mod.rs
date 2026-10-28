@@ -92,11 +92,11 @@ pub(crate) enum ConnectionEvent {
 
 fn udp_transmit<'a>(t: &Transmit, buffer: &'a [u8]) -> moq_sock::udp::Transmit<'a> {
 	moq_sock::udp::Transmit {
-		destination: t.destination,
+		destination: t.remote,
 		ecn: t.ecn.map(udp_ecn),
 		contents: buffer,
 		segment_size: t.segment_size,
-		src_ip: t.src_ip,
+		src_ip: t.local_ip,
 	}
 }
 
