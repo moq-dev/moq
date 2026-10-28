@@ -3,10 +3,12 @@
 //! It exposes moq-quic streams and datagrams with:
 //! [`SendGroup`]s that schedule streams and datagrams together, [`SendStream::reset_at`] to
 //! keep a prefix reliable, [`RecvStream::poll_lease`] to hold receive credit until a message is
-//! complete, and [`Connection::set_limits`] to change flow control on a live connection.
+//! complete, and [`connection::Connection::set_limits`] to change flow control on a live connection.
 //!
 //! It needs no MoQ session: enable the `driver` feature (with `aws-lc-rs` or `ring`) and
-//! `default-features = false` to build it without moq-net. The entry point is the [`Endpoint`].
+//! `default-features = false` to build it without moq-net. The entry point is the
+//! [`endpoint::Endpoint`], built from an [`endpoint::Config`] and a UDP socket it owns;
+//! [`endpoint::Endpoint::connect`] dials with a [`client::Config`].
 //!
 //! [QUIC](https://en.wikipedia.org/wiki/QUIC) is a modern transport protocol addressing
 //! shortcomings of TCP, such as head-of-line blocking, poor security, slow handshakes, and
@@ -43,10 +45,8 @@
 //! encryption alone.
 #![warn(missing_docs)]
 
-use std::pin::Pin;
-
-mod connection;
-mod endpoint;
+pub mod connection;
+pub mod endpoint;
 mod incoming;
 mod mutex;
 mod recv_stream;
@@ -59,24 +59,15 @@ pub(crate) use moq_clock::Instant;
 pub(crate) use std::time::Duration;
 
 pub use moq_quic::{
-	AckFrequencyConfig, ApplicationClose, Chunk, ClientConfig, ClosedStream, ConfigError, ConnectError,
-	ConnectionClose, ConnectionError, ConnectionId, ConnectionIdGenerator, ConnectionStats, Dir, EcnCodepoint,
-	EndpointConfig, FrameStats, FrameType, IdleTimeout, InvalidCid, MtuDiscoveryConfig, PathStats, ServerConfig,
-	StreamId, Transmit, TransportConfig, TransportErrorCode, UdpStats, ValidationTokenConfig, VarInt,
-	VarIntBoundsExceeded, Written, crypto,
+	ApplicationClose, Chunk, ClosedStream, ConfigError, ConnectionClose, ConnectionId, ConnectionIdGenerator,
+	CreditStats, Dir, EcnCodepoint, FrameStats, FrameType, InvalidCid, Limits, LimitsError, PathStats, StreamId,
+	Transmit, TransportErrorCode, UdpStats, VarInt, VarIntBoundsExceeded, Version, Written, client, crypto, server,
+	transport,
 };
-#[cfg(feature = "qlog")]
-pub use moq_quic::{QlogConfig, QlogStream};
 
-pub use crate::quic::driver::connection::{Connecting, Connection, SendDatagramError};
-pub use crate::quic::driver::endpoint::Endpoint;
-pub use crate::quic::driver::incoming::Incoming;
 pub use crate::quic::driver::recv_stream::{Lease, ReadError, ReadExactError, ReadToEndError, RecvStream, ResetError};
-#[cfg(feature = "quic")]
-pub(crate) use crate::quic::driver::runtime::send_failed;
 #[cfg(all(test, feature = "quic"))]
 pub(crate) use crate::quic::driver::runtime::wrap_udp_socket;
-pub use crate::quic::driver::runtime::{AsyncUdpSocket, UdpSender};
 pub use crate::quic::driver::send_group::{SendGroup, SendOptions};
 pub use crate::quic::driver::send_stream::{SendStream, StoppedError, WriteError};
 
@@ -90,18 +81,22 @@ mod tests;
 
 #[derive(Debug)]
 pub(crate) enum ConnectionEvent {
-	Close { error_code: VarInt, reason: bytes::Bytes },
+	Close {
+		error_code: VarInt,
+		reason: String,
+	},
 	Proto(moq_quic::ConnectionEvent),
-	Rebind(Pin<Box<dyn UdpSender>>),
+	/// The endpoint switched sockets
+	Rebind,
 }
 
 fn udp_transmit<'a>(t: &Transmit, buffer: &'a [u8]) -> moq_sock::udp::Transmit<'a> {
 	moq_sock::udp::Transmit {
-		destination: t.destination,
+		destination: t.remote,
 		ecn: t.ecn.map(udp_ecn),
 		contents: buffer,
 		segment_size: t.segment_size,
-		src_ip: t.src_ip,
+		src_ip: t.local_ip,
 	}
 }
 

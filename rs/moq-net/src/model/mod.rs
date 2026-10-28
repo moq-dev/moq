@@ -49,9 +49,12 @@ pub use timed::Timed;
 /// Publishing broadcasts, announcing routes, and consuming both through an origin.
 pub mod origin {
 	pub use super::follow::AnnouncedBroadcast;
+	#[cfg(feature = "async")]
+	// private: capability gap
+	pub(crate) use super::origin_impl::Lookup;
 	pub use super::origin_impl::{
 		Config, Consumer, Cost, Driver, HopLimit, Link, Preference, Prepared, Producer, Publication, Request,
-		Requesting, Requests, Route, Routing, Source,
+		Requesting, Requests, Route, Source,
 	};
 }
 

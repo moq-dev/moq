@@ -148,7 +148,7 @@ async fn ignoring_flow_control_closes_the_channel() {
 	use qmux::transport::{Reader as _, Writer as _};
 
 	let (_offerer, _answerer, sent, received) = channels().await;
-	let budget = received.config.receive_window + READ_SLACK;
+	let budget = RECEIVE_WINDOW + READ_SLACK;
 	let within = (budget / RECORD_SIZE) as usize;
 	let (mut writer, mut reader) = (sent.channel.writer, received.channel.reader);
 	tokio::time::timeout(TIMEOUT, async {

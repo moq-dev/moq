@@ -5,7 +5,9 @@
 //! so it must read a contiguous run of groups through the last one. `cached` publishes every
 //! group before connecting, so a FETCH of a past group never races its write: moq-transport
 //! refuses a FETCH that starts past the largest group rather than waiting for it. `compress`
-//! publishes a compressed track with several frames, one empty, in each group.
+//! publishes a compressed track with several frames, one empty, in each group. `late` writes
+//! the head of group 0 before connecting and the rest only once the harness relays that the
+//! subscriber read it, so a join that skips the head stalls rather than racing the publisher.
 use std::time::Duration;
 
 use anyhow::{Context, ensure};
@@ -14,27 +16,56 @@ use tokio::io::AsyncBufReadExt;
 
 const GROUPS: u64 = 4;
 const BYTES: usize = 256 * 1024;
+/// The groups a `late` track publishes, and how many frames of group 0 precede the subscriber.
+const LATE_GROUPS: u64 = 2;
+const LATE_HEAD: usize = 2;
 
-/// Frame sizes in each group: a compressed track spans several frames, one empty, per window.
-fn sizes(compress: bool) -> &'static [usize] {
-	if compress { &[BYTES / 2, 0, BYTES / 2] } else { &[BYTES] }
+/// The frames of each group. A compressed track spans several frames, one empty, per window.
+/// `cached` and `late` give every frame its own bytes, so a FETCH or join that drops, repeats,
+/// or reorders one fails.
+fn frames(sequence: u64, mode: Option<&str>) -> Vec<Vec<u8>> {
+	match mode {
+		Some("compress") => vec![
+			vec![sequence as u8; BYTES / 2],
+			Vec::new(),
+			vec![sequence as u8; BYTES / 2],
+		],
+		Some("cached" | "late") => (0..3)
+			.map(|index| vec![(sequence * 16 + index) as u8; BYTES / 4])
+			.collect(),
+		_ => vec![vec![sequence as u8; BYTES]],
+	}
 }
 
 /// Publish every group, cutting group 1 for `drop`.
-fn write(track: &mut moq_net::track::Producer, drop: bool, compress: bool) -> anyhow::Result<()> {
+fn write(track: &mut moq_net::track::Producer, mode: Option<&str>) -> anyhow::Result<()> {
 	// Declare the end before the final group's payload is even available.
 	track.finish_at(moq_net::track::Position::group(GROUPS))?;
 	for sequence in 0..GROUPS {
 		let mut group = track.append_group()?;
-		if drop && sequence == 1 {
+		if mode == Some("drop") && sequence == 1 {
 			group.abort(moq_net::Error::App(1))?;
 			continue;
 		}
-		for &size in sizes(compress) {
-			group.write_frame(moq_net::Timestamp::ZERO, vec![sequence as u8; size])?;
+		for frame in frames(sequence, mode) {
+			group.write_frame(moq_net::Timestamp::ZERO, frame)?;
 		}
 		group.finish()?;
 	}
+	Ok(())
+}
+
+/// Read one whole group, checking every frame's bytes, and report when the `late` head is in.
+async fn read(group: &mut moq_net::group::Consumer, mode: Option<&str>) -> anyhow::Result<()> {
+	let sequence = group.sequence;
+	for (index, want) in frames(sequence, mode).iter().enumerate() {
+		let frame = group.read_frame().await?.context("short group")?;
+		ensure!(frame.payload[..] == want[..], "wrong frame {index} in group {sequence}");
+		if mode == Some("late") && sequence == 0 && index + 1 == LATE_HEAD {
+			println!("late head");
+		}
+	}
+	ensure!(group.read_frame().await?.is_none(), "extra frame in group {sequence}");
 	Ok(())
 }
 
@@ -45,14 +76,14 @@ async fn main() -> anyhow::Result<()> {
 	let args: Vec<_> = std::env::args().collect();
 	ensure!(
 		(4..=6).contains(&args.len()),
-		"usage: interop-tail publish|subscribe URL BROADCAST [VERSION [drop|join|cached|compress|datagram|status]]"
+		"usage: interop-tail publish|subscribe URL BROADCAST [VERSION [drop|join|cached|compress|datagram|status|late]]"
 	);
 	let url: url::Url = args[2].parse()?;
 	let mode = args.get(5).map(String::as_str);
 	ensure!(
 		matches!(
 			mode,
-			None | Some("drop" | "join" | "cached" | "compress" | "datagram" | "status")
+			None | Some("drop" | "join" | "cached" | "compress" | "datagram" | "status" | "late")
 		),
 		"unknown mode: {mode:?}"
 	);
@@ -62,6 +93,7 @@ async fn main() -> anyhow::Result<()> {
 	let compress = mode == Some("compress");
 	let datagram = mode == Some("datagram");
 	let status = mode == Some("status");
+	let late = mode == Some("late");
 	let mut commands = tokio::io::BufReader::new(tokio::io::stdin()).lines();
 	let mut config = moq_tokio::connect::Config::default();
 	// An empty version offers the defaults, so a mode can follow it.
@@ -83,7 +115,15 @@ async fn main() -> anyhow::Result<()> {
 			)?;
 			broadcast.announce(Default::default())?;
 			if cached {
-				write(&mut track, drop, compress)?;
+				write(&mut track, mode)?;
+			}
+			let mut head = None;
+			if late {
+				let mut group = track.append_group()?;
+				for frame in frames(0, mode).into_iter().take(LATE_HEAD) {
+					group.write_frame(moq_net::Timestamp::ZERO, frame)?;
+				}
+				head = Some(group);
 			}
 			let session = client
 				.clone()
@@ -91,7 +131,24 @@ async fn main() -> anyhow::Result<()> {
 				.connect(url)
 				.established()
 				.await?;
-			if !cached {
+			if let Some(mut group) = head {
+				ensure!(
+					commands.next_line().await?.as_deref() == Some("late tail"),
+					"subscriber did not read the head"
+				);
+				for frame in frames(0, mode).into_iter().skip(LATE_HEAD) {
+					group.write_frame(moq_net::Timestamp::ZERO, frame)?;
+				}
+				group.finish()?;
+				for sequence in 1..LATE_GROUPS {
+					let mut group = track.append_group()?;
+					for frame in frames(sequence, mode) {
+						group.write_frame(moq_net::Timestamp::ZERO, frame)?;
+					}
+					group.finish()?;
+				}
+				track.finish()?;
+			} else if !cached {
 				let mut demand = track.demand();
 				while demand.wanted_changed().await?.is_none() {}
 				if datagram {
@@ -105,7 +162,7 @@ async fn main() -> anyhow::Result<()> {
 						track.append_datagram(None, vec![sequence as u8; 900])?;
 					}
 				} else {
-					write(&mut track, drop, compress)?;
+					write(&mut track, mode)?;
 				}
 			}
 			// A finished track is not a drained transport. Keep the session alive
@@ -142,6 +199,30 @@ async fn main() -> anyhow::Result<()> {
 				client.close().await;
 				return Ok(());
 			}
+			if late {
+				// No range: join the latest group as a player does, group 0, whose head predates
+				// the subscription.
+				let options = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(5));
+				let mut track = remote.subscribe(Some(options)).await?;
+				for sequence in 0..LATE_GROUPS {
+					let mut group = track.recv_group().await?.context("missing group")?;
+					ensure!(
+						group.sequence == sequence,
+						"joined group {} for {sequence}",
+						group.sequence
+					);
+					read(&mut group, mode).await?;
+				}
+				ensure!(track.recv_group().await?.is_none(), "extra group");
+				ensure!(
+					track.finished().await? == moq_net::track::Position::group(LATE_GROUPS),
+					"wrong declared end"
+				);
+				eprintln!("late join clean groups=0,1 frames=6");
+				session.close().await?;
+				client.close().await;
+				return Ok(());
+			}
 			let options = moq_net::track::Subscription::default()
 				.with_max_delay(Duration::from_secs(if drop { 60 } else { 5 }))
 				.with_range(0..);
@@ -174,15 +255,7 @@ async fn main() -> anyhow::Result<()> {
 			while let Some(mut group) = track.recv_group().await? {
 				let sequence = group.sequence;
 				ensure!(sequence < GROUPS, "unexpected group {sequence}");
-				for &size in sizes(compress) {
-					let frame = group.read_frame().await?.context("empty group")?;
-					ensure!(frame.payload.len() == size, "truncated group {sequence}");
-					ensure!(
-						frame.payload.iter().all(|byte| *byte == sequence as u8),
-						"corrupt group {sequence}"
-					);
-				}
-				ensure!(group.read_frame().await?.is_none(), "extra frame in group {sequence}");
+				read(&mut group, mode).await?;
 				seen.push(sequence);
 			}
 			seen.sort_unstable();

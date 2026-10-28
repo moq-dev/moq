@@ -120,10 +120,12 @@ Raw tracks with a nil timescale are untimed; timed tracks require matching times
 ```go
 import moqjson "moq.dev/moq/json"
 
-broadcast, _ := client.CreateBroadcast("room")
+publication, _ := client.CreateBroadcast("room")
+broadcast := publication.Broadcast()
 track, _ := broadcast.PublishTrack("status", nil)
 status, _ := moqjson.NewSnapshotProducer(broadcast, track, moqjson.SnapshotOptions{Compression: true})
 _ = status.Update(map[string]any{"viewers": 42}, nil)
+_ = publication.Announce(moq.AnnounceRoute{})
 ```
 
 Producers take `SnapshotOptions` or `StreamOptions`; both consumers take

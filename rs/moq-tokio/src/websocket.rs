@@ -1074,10 +1074,10 @@ mod timeout_tests {
 			let peer =
 				tokio_tungstenite::WebSocketStream::from_raw_socket(peer, tungstenite::protocol::Role::Client, None)
 					.await;
-			let mut peer = qmux::ws::Upgraded::new(peer, ALPN).connect().unwrap();
+			let peer = qmux::ws::Upgraded::new(peer, ALPN).connect().unwrap();
 			let mut accept = Box::pin(accept(server, options));
 			assert!(accept.as_mut().now_or_never().is_none());
-			let _stream = futures::future::poll_fn(|cx| peer.poll_open_bi(cx, Default::default()))
+			let _stream = moq_net::kio::wait(|waiter| peer.poll_open_bi(waiter, Default::default()))
 				.await
 				.unwrap();
 			tokio::time::advance(crate::listen::DEFAULT_TIMEOUT).await;

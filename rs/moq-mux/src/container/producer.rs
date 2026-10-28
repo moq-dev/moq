@@ -108,6 +108,14 @@ trait Rendition<R>: Send {
 	fn config(&self) -> crate::Result<R>;
 	fn replace(&mut self, config: R) -> crate::Result<()>;
 	fn estimate(&mut self, estimate: crate::catalog::Estimate) -> crate::Result<()>;
+	fn supply_bitrate(&mut self, bitrate: u64) -> crate::Result<()>;
+	fn fresh(
+		&self,
+		container: crate::catalog::hang::Container,
+		info: moq_net::track::Info,
+		hls_hint: Option<std::time::Duration>,
+	) -> crate::Result<Producer<crate::catalog::hang::Container, R>>;
+	fn retire(&self, track: &str) -> crate::Result<()>;
 }
 
 impl<E, R> Rendition<R> for crate::catalog::tracks::Rendition<E, R>
@@ -117,6 +125,19 @@ where
 {
 	fn name(&self) -> &str {
 		self.name()
+	}
+
+	fn fresh(
+		&self,
+		container: crate::catalog::hang::Container,
+		info: moq_net::track::Info,
+		hls_hint: Option<std::time::Duration>,
+	) -> crate::Result<Producer<crate::catalog::hang::Container, R>> {
+		self.fresh(container, info, hls_hint)
+	}
+
+	fn retire(&self, track: &str) -> crate::Result<()> {
+		self.retire(track)
 	}
 
 	fn timestamp(&self, hint: Option<moq_net::Timestamp>) -> crate::Result<moq_net::Timestamp> {
@@ -137,6 +158,10 @@ where
 
 	fn estimate(&mut self, estimate: crate::catalog::Estimate) -> crate::Result<()> {
 		self.estimate(estimate)
+	}
+
+	fn supply_bitrate(&mut self, bitrate: u64) -> crate::Result<()> {
+		self.supply_bitrate(bitrate)
 	}
 }
 
@@ -212,6 +237,15 @@ where
 		self.rendition.as_mut().ok_or(crate::Error::NotPublished)?.set(config)
 	}
 
+	/// Advertise `bitrate` as the rendition's maximum, such as an encoder's retuned target, which
+	/// later measurement no longer replaces. Every other published field stays as it is.
+	pub fn set_bitrate(&mut self, bitrate: u64) -> crate::Result<()> {
+		self.rendition
+			.as_mut()
+			.ok_or(crate::Error::NotPublished)?
+			.supply_bitrate(bitrate)
+	}
+
 	/// Modify the published catalog config.
 	///
 	/// Estimate fields the config left to detection at [`set`](Self::set) stay owned by detection:
@@ -251,6 +285,36 @@ where
 	/// A watch-only handle to this track's subscriber demand.
 	pub fn demand(&self) -> moq_net::track::Demand {
 		self.inner.demand()
+	}
+}
+
+impl Producer<crate::catalog::hang::Container, hang::catalog::VideoConfig> {
+	/// Publish a decoder change under a fresh raw track name.
+	pub(crate) fn reconfigure(&mut self, config: hang::catalog::VideoConfig) -> crate::Result<()> {
+		let rendition = self.rendition.as_ref().ok_or(crate::Error::NotPublished)?;
+		let previous = match rendition.config() {
+			Ok(previous) => previous,
+			Err(crate::Error::NotPublished) => return self.set(config),
+			Err(err) => return Err(err),
+		};
+		if previous.same_identity(&config) {
+			return self.set(config);
+		}
+		let container = crate::catalog::hang::Container::try_from(&config)?;
+		let hls_hint = self.recorder.as_ref().and_then(|recorder| recorder.declared());
+		let mut next = rendition.fresh(container, self.inner.info().clone(), hls_hint)?;
+		next.buffer_duration = self.buffer_duration;
+		next.set(config)?;
+		self.finish()?;
+		// The old name is never published again, so its HLS records end with it. They can only
+		// retire once its recorder is gone.
+		let old = std::mem::replace(self, next);
+		let name = old.name().to_string();
+		drop(old);
+		match &self.rendition {
+			Some(rendition) => rendition.retire(&name),
+			None => Ok(()),
+		}
 	}
 }
 

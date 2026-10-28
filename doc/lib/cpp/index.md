@@ -124,7 +124,8 @@ anywhere, so a raw byte stream needs no other importer.
 // Publish encoded frames, or raw pixels with the codec inside the binding.
 // session is connected as above; opus_init, packet, and rgba come from your
 // encoder or capture source.
-auto broadcast = ok(session->publish()->create_broadcast("my-stream.hang"));
+auto publication = ok(session->publish()->create_broadcast("my-stream.hang"));
+auto broadcast = publication->broadcast(); // fill tracks here; announce on the publication
 auto audio = ok(moq::MediaTrackProducer::audio(broadcast, moq::MediaTarget::kNamed{}, {moq::AudioFormat::kOpus, opus_init}));
 ok(audio->write_frame({packet, 20'000}));
 
@@ -134,7 +135,7 @@ auto video = ok(moq::VideoProducer::init(catalog, {{moq::VideoPixelFormat::kRgba
 ok(video->write({0, rgba}));
 moq::AnnounceRoute route;
 route.epoch = moq::mint_epoch(); // a fresh epoch per run
-ok(broadcast->announce(route));
+ok(publication->announce(route));
 ok(broadcast->close());    // keep the producer alive while publishing, then close explicitly
 ```
 

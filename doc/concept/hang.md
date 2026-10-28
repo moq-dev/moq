@@ -50,13 +50,13 @@ every video rendition (display size, rotation, flip) sit at the section root.
 
 A track name always means the same content, so a catalog update never
 redefines a track. The fields a decoder can't change without reinitializing
-are fixed: codec, description, container, display aspect, sample rate, and
-channel count. Everything else, such as the coded size, `bitrate`,
+are fixed: codec, description, container, display aspect, interlacing, sample
+rate, and channel count. Everything else, such as the coded size, `bitrate`,
 `framerate`, and `enabled`, updates in place; the picture resizes in band at a
 keyframe unless a `description` pins it. A publisher that needs a new identity
 publishes a new track name, or restarts the broadcast under a new
-[epoch](/concept/moq-lite#publisher-epochs). A player can configure its
-decoder once per track.
+[epoch](/concept/moq-lite#publisher-epochs); the Rust and `@moq/publish`
+publishers take a new name. A player can configure its decoder once per track.
 
 A few things the catalog can express beyond decoder config:
 

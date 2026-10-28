@@ -23,8 +23,26 @@ emit the required gap statuses. Preserve the value and honor its semantics
 before advertising or sending support.
 
 Decided 2026-10-27 (maintainer): split by language. This Rust half starts
-now; the JS half is [JS FETCH fill timeout](/quest/m1/ietf-fill-timeout-js.md),
-which builds on the cached JavaScript FETCH responder. Keep the two wire behaviors identical.
+now. The JS half, in the cached JavaScript FETCH responder, shipped in
+[moq-dev/moq#7051](https://github.com/moq-dev/moq/pull/7051). Keep the two
+wire behaviors identical; JS does the following:
+
+- One deadline per FETCH, counted from its arrival, and per fill from its
+  start. Past it, a read takes only buffered objects.
+- The rest of a group's slice that has not arrived becomes End of Unknown
+  Range (0x10C) on draft 18 and End of Timed-Out Range (0x20C) on draft 22.
+  The marker ends at the slice's last object, or at Object ID 2^62-1 when the
+  group's end is unknown.
+- A timed-out last group keeps the whole slice in FETCH_OK's End Location:
+  {group, 2^62-1} on draft 22 and {group, 0} on draft 18.
+- When nothing of the group went out, an End of Non-Existent Range first
+  covers the absent groups before it.
+- End of Range IDs are absolute, with no payload length
+  ([moq-wg/moq-transport#1861](https://github.com/moq-wg/moq-transport/issues/1861)).
+  The next object's Group ID Delta counts from the marker, as moxygen does.
+
+JS sends no IETF FETCH, so this half also adds the Rust-requester to
+JS-responder interop of these markers.
 
 Propagate an explicit FETCH max-delay as the upstream wait budget where
 the draft supports it. For omitted max-delay, retain the wire's omitted
@@ -48,7 +66,3 @@ Public API: reuse FETCH's max-delay option; no new content-age extension
 configuration. Wire: support existing IETF parameters and gap statuses on
 their applicable versions. Update existing interop/deviation and FETCH docs
 inline, clearly distinguishing upstream wait time from content age.
-
-## Related
-
-- [JS FETCH fill timeout](/quest/m1/ietf-fill-timeout-js.md) - the same semantics in the JS responder

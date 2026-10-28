@@ -766,6 +766,11 @@ impl Recorder {
 		self.lend = records.map(|records| Lend::new(records, media.consume()));
 	}
 
+	/// The track's fixed nominal segment duration, once known.
+	pub fn declared(&self) -> Option<Duration> {
+		self.live.lock().unwrap().segmenter.declared()
+	}
+
 	/// Run `callback` once when an unhinted track learns its fixed duration.
 	pub fn on_declare(&mut self, callback: impl FnOnce(Duration) + Send + 'static) {
 		self.live.lock().unwrap().on_declare = Some(Box::new(callback));
