@@ -88,6 +88,21 @@ impl Names {
 #[must_use]
 pub(super) struct Closed {
 	track: Option<Sink>,
+	/// The catalog `track` published in.
+	catalog: Option<moq_mux::catalog::Producer>,
+}
+
+impl Closed {
+	/// Drop the track and retire its HLS records, for a pad that finished mid-run: [`Names`] never
+	/// publishes its name again, so caps churn doesn't accumulate records.
+	fn retire(self) -> Result<()> {
+		let (Some(track), Some(catalog)) = (self.track, self.catalog) else {
+			return Ok(());
+		};
+		let name = track.name();
+		drop(track);
+		Ok(catalog.retire(&name)?)
+	}
 }
 
 /// An audio or video pad, published through a codec importer.
@@ -288,6 +303,8 @@ pub struct Pad {
 	/// The run's, once reserved; until then this pad's own, which still covers renegotiation.
 	names: Names,
 	track: Option<Sink>,
+	/// The catalog `track` publishes in, set with it.
+	catalog: Option<moq_mux::catalog::Producer>,
 	/// Whether `track` has a configured name, which may be requested again. A generated one never is.
 	named: bool,
 	caps: Option<gst::Caps>,
@@ -312,6 +329,7 @@ impl Pad {
 			wall: None,
 			names: Names::default(),
 			track: None,
+			catalog: None,
 			named: false,
 			caps: None,
 			failed: false,
@@ -394,7 +412,10 @@ impl Pad {
 		}
 		let reserved = self.reserved.take().unwrap_or_else(|| catalog.reserve());
 		match self.build(broadcast, reserved, options) {
-			Ok(name) => CapsOutcome::Active(name),
+			Ok(name) => {
+				self.catalog = Some(catalog.clone());
+				CapsOutcome::Active(name)
+			}
 			Err(err) => {
 				gst::warning!(CAT, "invalidating pad: {err:?}");
 				self.fail();
@@ -899,10 +920,14 @@ impl Pad {
 
 	/// Consumes the producer so a second call is a no-op (`Track::finish()` is not idempotent). Returns
 	/// whether a producer was finalized. The importer accepts its track up front (in `Track::new`), so
-	/// `finish()` is safe even when no frame was ever decoded.
+	/// `finish()` is safe even when no frame was ever decoded. Unlike a run's end, it also retires the
+	/// track's HLS records.
 	pub fn finalize(&mut self) -> Result<bool> {
-		let (_closed, result) = self.finish();
-		result
+		let (closed, result) = self.finish();
+		let retired = closed.retire();
+		let finished = result?;
+		retired?;
+		Ok(finished)
 	}
 
 	/// Finish once, retaining rendition owners so closing a run cannot publish their removal.
@@ -910,6 +935,7 @@ impl Pad {
 		self.reserved.take();
 		let mut closed = Closed {
 			track: self.track.take(),
+			catalog: self.catalog.take(),
 		};
 		let Some(track) = closed.track.as_mut() else {
 			return (closed, Ok(false));
@@ -1445,6 +1471,32 @@ mod tests {
 		);
 		assert_eq!(subscriber.recv_group().await.unwrap().expect("a group").sequence, 0);
 		assert!(subscriber.recv_group().await.unwrap().is_none(), "the old track ended");
+	}
+
+	/// The old name never returns after a renegotiation, so its HLS records end with it instead of
+	/// accumulating with each caps change.
+	#[tokio::test(start_paused = true)]
+	async fn renegotiation_retires_the_old_records() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let mut pad = Pad::new();
+		pad.observe_caps(&broadcast, &catalog, producer_options(&h264_caps(), Some("camera")));
+		pad.observe_segment(time_segment());
+		let pushed = pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO), None, None);
+		assert_eq!(pushed, Ok(PushOutcome::Published));
+		let mut records = broadcast
+			.consume()
+			.track(&hang::hls::default_name("camera"))
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+
+		let vp8 = gst::Caps::builder("video/x-vp8").build();
+		pad.observe_caps(&broadcast, &catalog, producer_options(&vp8, Some("camera")));
+		let drained = async { while records.recv_group().await.unwrap().is_some() {} };
+		let ended = tokio::time::timeout(Duration::from_secs(1), drained).await;
+		assert!(ended.is_ok(), "the old track's records end");
 	}
 
 	/// A run never publishes a name it ended again, whoever asks for it next: each replacement mints

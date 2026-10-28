@@ -663,6 +663,13 @@ impl ExportSource {
 			.is_some_and(|instance| instance.poll_closed(waiter).is_ready())
 	}
 
+	/// Release a replaced instance's subscription while keeping its resolved metadata.
+	pub(crate) fn stop(&mut self) {
+		self.finish_ends();
+		self.state = SourceState::Ended;
+		self.instance = None;
+	}
+
 	/// End the rendition with its instance.
 	fn end(&mut self) -> Poll<crate::Result<Option<Event>>> {
 		self.finish_ends();

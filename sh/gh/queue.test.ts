@@ -35,6 +35,10 @@ for (const job of [check.jobs.check]) {
 	assert.equal(condition(job.if, "merge_group", "", true, "destroyed"), false);
 }
 assert.deepEqual(check.on.merge_group.types, ["checks_requested", "destroyed"]);
+// A merge group selects from main: a passing head can merge the entries ahead of it.
+assert.equal(condition(check.jobs.check.env.CI_BASE, "merge_group", ""), "origin/main");
+assert.equal(condition(check.jobs.check.env.CI_BASE, "pull_request", "release"), "--all");
+for (const step of check.jobs.check.steps) assert.equal(step.env?.CI_BASE, undefined, `${step.name} overrides CI_BASE`);
 // biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub expression is literal YAML.
 assert.equal(check.concurrency.group, "check-${{ github.ref }}");
 assert.equal(check.concurrency["cancel-in-progress"], true);

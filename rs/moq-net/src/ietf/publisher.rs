@@ -977,6 +977,25 @@ impl Publisher {
 		kio::wait(|waiter| self.poll_serving_origin(waiter)).await
 	}
 
+	/// Resolve a request's broadcast while the peer still wants the answer.
+	async fn resolve(
+		&self,
+		stream: &mut Stream<Transport, Version>,
+		path: &crate::Path,
+		epoch: Option<crate::Epoch>,
+	) -> Result<Option<crate::broadcast::Consumer>, Error> {
+		let Some(origin) = self
+			.until_withdrawn(stream, |waiter| self.poll_serving_origin(waiter))
+			.await
+		else {
+			return Ok(None);
+		};
+		let requesting = origin.request_broadcast(path, epoch);
+		self.until_withdrawn(stream, |waiter| requesting.poll_ok(waiter))
+			.await
+			.transpose()
+	}
+
 	/// Our origin handle with [`Self::exclude`] applied, the view both the data plane
 	/// and the announce loops read this peer's routes through.
 	fn excluding(&self, peer: &cluster::Peer) -> origin::Consumer {
@@ -1077,7 +1096,7 @@ impl Publisher {
 					msg.track_namespace.clone(),
 					crate::auth::Direction::Publish,
 				);
-				let task = this.serve_subscribe_stream(stream, msg, gate);
+				let task = this.serve_subscribe_stream(stream, msg.into_owned(), gate);
 				async move {
 					let _serve = serve;
 					if let Err(err) = task.await {
@@ -1105,6 +1124,8 @@ impl Publisher {
 				}
 				tracing::debug!(message = ?msg, "received fetch");
 				let gate = this.fetch_gate(&msg);
+				// Owned, since the task outlives the body it was read from.
+				let msg = msg.into_owned();
 				async move {
 					let _serve = serve;
 					if let Err(err) = this.serve_fetch_stream(stream, msg, gate).await {
@@ -1194,6 +1215,8 @@ impl Publisher {
 					msg.track_namespace.clone(),
 					crate::auth::Direction::Publish,
 				);
+				// Owned, since the task outlives the body it was read from.
+				let msg = msg.into_owned();
 				async move {
 					if let Err(err) = this.serve_track_status_stream(stream, msg, gate).await {
 						tracing::debug!(%err, "track_status stream error");
@@ -1233,7 +1256,7 @@ impl Publisher {
 	fn run_subscribe_stream(
 		self,
 		stream: Stream<Transport, Version>,
-		msg: ietf::Subscribe<'_>,
+		msg: ietf::Subscribe<'static>,
 	) -> impl std::future::Future<Output = Result<(), Error>> {
 		let gate = crate::auth::Gate::new(
 			self.auth.clone(),
@@ -1246,7 +1269,7 @@ impl Publisher {
 	fn serve_subscribe_stream(
 		self,
 		mut stream: Stream<Transport, Version>,
-		mut msg: ietf::Subscribe<'_>,
+		mut msg: ietf::Subscribe<'static>,
 		gate: crate::auth::Gate,
 	) -> impl std::future::Future<Output = Result<(), Error>> {
 		// Register during dispatch, before either request task can be polled.
@@ -1383,31 +1406,18 @@ impl Publisher {
 							rendezvous_error(err, rendezvous, resolved),
 						))
 					};
-					// A producer may never answer, so each setup step ends once the subscriber
-					// withdraws the request, giving back the demand and the slot at once.
-					let Some(origin) = self
-						.until_withdrawn(&mut stream, |waiter| self.poll_serving_origin(waiter))
-						.await
-					else {
-						return Ok(Subscribed::Withdrawn);
-					};
 					// We just received a subscribe for this exact namespace, so the peer must have
 					// already seen the announcement. `request_broadcast` resolves it immediately, or
 					// falls back to the route covering it (an `origin::Requests`), if any. Pinned to
 					// the instance it names, if any: another is refused, never served.
-					let requesting = origin.request_broadcast(&msg.track_namespace, msg.epoch.clone());
-					let broadcast = match self
-						.until_withdrawn(&mut stream, |waiter| requesting.poll_ok(waiter))
-						.await
-					{
-						Some(Ok(broadcast)) => broadcast,
+					let broadcast = match self.resolve(&mut stream, &msg.track_namespace, msg.epoch.clone()).await {
+						Ok(Some(broadcast)) => broadcast,
 						// The reason is the origin's, not ours: a dynamic router refusing on
 						// authorization or a drain says so, and only an unroutable path means the
 						// broadcast is not here.
-						Some(Err(err)) => return refused(err, false),
-						None => return Ok(Subscribed::Withdrawn),
+						Err(err) => return refused(err, false),
+						Ok(None) => return Ok(Subscribed::Withdrawn),
 					};
-					drop(requesting);
 					let track = match broadcast.track(&msg.track_name) {
 						Ok(track) => track,
 						Err(err) => return refused(err, true),
@@ -2753,7 +2763,11 @@ impl Publisher {
 	}
 
 	#[cfg(test)]
-	async fn run_fetch_stream(self, stream: Stream<Transport, Version>, msg: ietf::Fetch<'_>) -> Result<(), Error> {
+	async fn run_fetch_stream(
+		self,
+		stream: Stream<Transport, Version>,
+		msg: ietf::Fetch<'static>,
+	) -> Result<(), Error> {
 		let gate = self.fetch_gate(&msg);
 		self.serve_fetch_stream(stream, msg, gate).await
 	}
@@ -2761,7 +2775,7 @@ impl Publisher {
 	async fn serve_fetch_stream(
 		mut self,
 		mut stream: Stream<Transport, Version>,
-		msg: ietf::Fetch<'_>,
+		msg: ietf::Fetch<'static>,
 		admission: FetchGate,
 	) -> Result<(), Error> {
 		let namespace = match &msg.fetch_type {
@@ -2877,11 +2891,9 @@ impl Publisher {
 
 				// The peer must have seen the announcement to name this namespace, so this
 				// resolves like a SUBSCRIBE does.
-				let broadcast = match gate
-					.guard(async { self.serving_origin().await.request_broadcast(&namespace, epoch).await })
-					.await
-				{
-					Ok(broadcast) => broadcast,
+				let broadcast = match gate.guard(self.resolve(&mut stream, &namespace, epoch)).await {
+					Ok(Some(broadcast)) => broadcast,
+					Ok(None) => return Ok(()),
 					Err(err) => return self.reject_fetch(stream, &err, &err.to_string()).await,
 				};
 				let track = match broadcast.track(&track) {
@@ -3268,7 +3280,7 @@ impl Publisher {
 	fn run_track_status_stream(
 		self,
 		stream: Stream<Transport, Version>,
-		msg: ietf::TrackStatus<'_>,
+		msg: ietf::TrackStatus<'static>,
 	) -> impl std::future::Future<Output = Result<(), Error>> {
 		let gate = crate::auth::Gate::new(
 			self.auth.clone(),
@@ -3281,7 +3293,7 @@ impl Publisher {
 	async fn serve_track_status_stream(
 		self,
 		mut stream: Stream<Transport, Version>,
-		msg: ietf::TrackStatus<'_>,
+		msg: ietf::TrackStatus<'static>,
 		mut gate: crate::auth::Gate,
 	) -> Result<(), Error> {
 		if let Some(error) = super::namespace::refusal(&msg.track_namespace, self.version) {
@@ -3291,16 +3303,11 @@ impl Publisher {
 			return self.reject_track_status(stream, &Error::Unauthorized).await;
 		}
 		let broadcast = match gate
-			.guard(async {
-				// Pinned to the instance it names, if any: another is refused, never served.
-				self.serving_origin()
-					.await
-					.request_broadcast(&msg.track_namespace, msg.epoch.clone())
-					.await
-			})
+			.guard(self.resolve(&mut stream, &msg.track_namespace, msg.epoch.clone()))
 			.await
 		{
-			Ok(broadcast) => broadcast,
+			Ok(Some(broadcast)) => broadcast,
+			Ok(None) => return Ok(()),
 			Err(err) => return self.reject_track_status(stream, &err).await,
 		};
 
@@ -5997,7 +6004,8 @@ mod group_priority_test {
 					.flatten()
 					.collect();
 				let mut bytes = bytes::Bytes::from(bytes);
-				let header = crate::coding::decode_buf(&mut bytes, version, ietf::GroupHeader::decode).unwrap();
+				let header =
+					crate::coding::decode_buf(&mut bytes, version, |r, v| ietf::GroupHeader::decode(r, v)).unwrap();
 				assert_eq!(header.group_id, 5);
 				assert_eq!(header.flags.has_end, !finished);
 				if !finished {
@@ -6434,7 +6442,8 @@ mod group_priority_test {
 
 		let written = log.writes.lock().unwrap().clone();
 		let mut buf = bytes::Bytes::from(written);
-		crate::coding::decode_buf(&mut buf, Version::Draft18, ietf::GroupHeader::decode).expect("a group header")
+		crate::coding::decode_buf(&mut buf, Version::Draft18, |r, v| ietf::GroupHeader::decode(r, v))
+			.expect("a group header")
 	}
 
 	/// `hang::catalog::PRIORITY` isn't reachable from `moq-net` (hang depends on it, not the
@@ -6943,8 +6952,10 @@ mod serve_tests {
 		assert!(h.log.closes().is_empty());
 		let written = session.log.writes.lock().unwrap().clone();
 		let mut bytes = bytes::Bytes::from(written);
-		let super::super::request_stream::Framed(id, body) =
-			crate::coding::decode_buf(&mut bytes, version, super::super::request_stream::Framed::decode).unwrap();
+		let super::super::request_stream::Framed(id, body) = crate::coding::decode_buf(&mut bytes, version, |r, v| {
+			super::super::request_stream::Framed::decode(r, v)
+		})
+		.unwrap();
 		assert_eq!(id, ietf::RequestError::ID);
 		assert_eq!(body.message::<ietf::RequestError>(version).unwrap().error_code, 0x06);
 	}
@@ -10159,7 +10170,7 @@ mod serve_tests {
 			let id = crate::coding::decode_varint(&mut buf, version).unwrap();
 			assert_eq!(id, ietf::FetchOk::ID, "{version}: not a FETCH_OK");
 
-			let ok = crate::coding::decode_buf(&mut buf, version, ietf::FetchOk::decode).unwrap();
+			let ok = crate::coding::decode_buf(&mut buf, version, |r, v| ietf::FetchOk::decode(r, v)).unwrap();
 			assert!(!ok.end_of_track, "{version}: the track has not ended");
 			let properties = track_properties(&track::Info::timed(), true, version, true).unwrap();
 			assert_eq!(ok.properties, properties, "{version}: wrong properties");
@@ -10177,7 +10188,7 @@ mod serve_tests {
 				FetchHeader::TYPE
 			);
 			assert_eq!(
-				crate::coding::decode_buf(&mut buf, version, FetchHeader::decode)
+				crate::coding::decode_buf(&mut buf, version, |r, v| FetchHeader::decode(r, v))
 					.unwrap()
 					.request_id,
 				FETCH_ID
@@ -10300,9 +10311,10 @@ mod serve_tests {
 			let id = crate::coding::decode_varint(&mut response, version).unwrap();
 			assert_eq!(id, ietf::RequestError::ID);
 			assert_eq!(
-				crate::coding::decode_buf(&mut response, version, ietf::RequestError::decode)
-					.unwrap()
-					.error_code,
+				crate::coding::decode_buf(&mut response, version, |r, v| Ok(
+					ietf::RequestError::decode(r, v)?.error_code
+				))
+				.unwrap(),
 				INVALID_JOINING_REQUEST_ID
 			);
 			assert!(response.is_empty());
@@ -10327,9 +10339,10 @@ mod serve_tests {
 			ietf::RequestError::ID
 		);
 		assert_eq!(
-			crate::coding::decode_buf(&mut response, version, ietf::RequestError::decode)
-				.unwrap()
-				.error_code,
+			crate::coding::decode_buf(&mut response, version, |r, v| Ok(
+				ietf::RequestError::decode(r, v)?.error_code
+			))
+			.unwrap(),
 			0x2
 		);
 		assert!(response.is_empty());
@@ -10363,9 +10376,10 @@ mod serve_tests {
 			ietf::RequestError::ID
 		);
 		assert_eq!(
-			crate::coding::decode_buf(&mut response, version, ietf::RequestError::decode)
-				.unwrap()
-				.error_code,
+			crate::coding::decode_buf(&mut response, version, |r, v| Ok(
+				ietf::RequestError::decode(r, v)?.error_code
+			))
+			.unwrap(),
 			DOES_NOT_EXIST
 		);
 		assert!(response.is_empty());
@@ -10439,9 +10453,10 @@ mod serve_tests {
 			let id = crate::coding::decode_varint(&mut buf, version).unwrap();
 			assert_eq!(id, ietf::RequestError::ID);
 			assert_eq!(
-				crate::coding::decode_buf(&mut buf, version, ietf::RequestError::decode)
-					.unwrap()
-					.error_code,
+				crate::coding::decode_buf(&mut buf, version, |r, v| Ok(
+					ietf::RequestError::decode(r, v)?.error_code
+				))
+				.unwrap(),
 				INVALID_JOINING_REQUEST_ID
 			);
 			assert!(buf.is_empty());
@@ -10473,9 +10488,10 @@ mod serve_tests {
 					ietf::RequestError::ID
 				);
 				assert_eq!(
-					crate::coding::decode_buf(&mut buf, version, ietf::RequestError::decode)
-						.unwrap()
-						.error_code,
+					crate::coding::decode_buf(&mut buf, version, |r, v| Ok(
+						ietf::RequestError::decode(r, v)?.error_code
+					))
+					.unwrap(),
 					0x3
 				);
 			}
@@ -10503,9 +10519,10 @@ mod serve_tests {
 			let id = crate::coding::decode_varint(&mut buf, version).unwrap();
 			assert_eq!(id, ietf::RequestError::ID);
 			assert_eq!(
-				crate::coding::decode_buf(&mut buf, version, ietf::RequestError::decode)
-					.unwrap()
-					.error_code,
+				crate::coding::decode_buf(&mut buf, version, |r, v| Ok(
+					ietf::RequestError::decode(r, v)?.error_code
+				))
+				.unwrap(),
 				INVALID_RANGE
 			);
 			assert!(buf.is_empty());
@@ -10793,8 +10810,10 @@ mod serve_tests {
 		w.varint(5000).unwrap();
 		w.varint(0x3801 - 0x02).unwrap();
 		w.bytes(b"opaque").unwrap();
-		let properties =
-			crate::coding::decode_buf(&mut bytes::Bytes::from(block), version, ietf::Properties::decode).unwrap();
+		let properties = crate::coding::decode_buf(&mut bytes::Bytes::from(block), version, |r, v| {
+			ietf::Properties::decode(r, v)
+		})
+		.unwrap();
 		assert_eq!(properties.unknown.len(), 2, "{version}");
 		properties
 	}
@@ -10862,12 +10881,11 @@ mod serve_tests {
 	async fn immutable_track_properties_keep_their_encoding() {
 		// Sealed: OBJECT_DELIVERY_TIMEOUT = 42 and DYNAMIC_GROUPS = 1.
 		let block = [0x0b, 4, 0x02, 42, 0x2e, 1];
-		let upstream = crate::coding::decode_buf(
-			&mut bytes::Bytes::copy_from_slice(&block),
-			Version::Draft22,
-			ietf::Properties::decode,
-		)
-		.unwrap();
+		let upstream =
+			crate::coding::decode_buf(&mut bytes::Bytes::copy_from_slice(&block), Version::Draft22, |r, v| {
+				ietf::Properties::decode(r, v)
+			})
+			.unwrap();
 		assert!(upstream.dynamic_groups);
 		let info = track::Info {
 			refresh: Some(0),
@@ -10906,12 +10924,11 @@ mod serve_tests {
 	#[moq_clock::test]
 	async fn track_property_0x06_does_not_cross_to_draft_22() {
 		let upstream = |block: &[u8]| {
-			let properties = crate::coding::decode_buf(
-				&mut bytes::Bytes::copy_from_slice(block),
-				Version::Draft18,
-				ietf::Properties::decode,
-			)
-			.unwrap();
+			let properties =
+				crate::coding::decode_buf(&mut bytes::Bytes::copy_from_slice(block), Version::Draft18, |r, v| {
+					ietf::Properties::decode(r, v)
+				})
+				.unwrap();
 			track::Info {
 				properties: Some(Arc::new(crate::model::object::TrackProperties {
 					version: Version::Draft18,
@@ -12205,12 +12222,22 @@ mod serve_tests {
 	async fn a_subscribe_withdrawn_during_setup_releases_its_demand() {
 		for version in ALL_VERSIONS {
 			for setup in [Setup::Resolving, Setup::Subscribing, Setup::Live] {
-				withdrawn_during(version, setup).await;
+				withdrawn_during(version, setup, request::Kind::Subscribe).await;
 			}
 		}
 	}
 
-	async fn withdrawn_during(version: Version, setup: Setup) {
+	/// Broadcast resolution cannot hold a withdrawn FETCH or TRACK_STATUS alive.
+	#[moq_clock::test]
+	async fn requests_withdrawn_while_resolving_release_their_demand() {
+		for version in ALL_VERSIONS {
+			for kind in [request::Kind::Fetch, request::Kind::TrackStatus] {
+				withdrawn_during(version, Setup::Resolving, kind).await;
+			}
+		}
+	}
+
+	async fn withdrawn_during(version: Version, setup: Setup, kind: request::Kind) {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let session = ScriptedSession::new(Vec::new());
 		let peer_setup = peer::PeerSetup::default();
@@ -12228,11 +12255,55 @@ mod serve_tests {
 		let stream = Stream::open(&mut crate::driver::Transport::new(request.clone()), version)
 			.await
 			.unwrap();
-		let mut serving = std::pin::pin!(
-			publisher
-				.clone()
-				.run_subscribe_stream(stream, subscribe(Filter::NextObject, None))
-		);
+		let mut serving = std::pin::pin!(async {
+			match kind {
+				request::Kind::Subscribe => {
+					publisher
+						.clone()
+						.run_subscribe_stream(stream, subscribe(Filter::NextObject, None))
+						.await
+				}
+				request::Kind::Fetch => {
+					publisher
+						.clone()
+						.run_fetch_stream(
+							stream,
+							ietf::Fetch {
+								request_id: RequestId(REQUEST_ID),
+								subscriber_priority: 128,
+								group_order: GroupOrder::Ascending,
+								fetch_type: fetch_range(
+									version,
+									"video",
+									Location { group: 0, object: 0 },
+									Location { group: 0, object: 1 },
+								),
+								range_filters: false,
+								fill_timeout: false,
+								properties_wanted: true,
+								epoch: None,
+							},
+						)
+						.await
+				}
+				request::Kind::TrackStatus => {
+					publisher
+						.clone()
+						.run_track_status_stream(
+							stream,
+							ietf::TrackStatus {
+								request_id: RequestId(REQUEST_ID),
+								track_namespace: crate::Path::from_static("room"),
+								track_name: "video".into(),
+								properties_wanted: true,
+								epoch: None,
+							},
+						)
+						.await
+				}
+				_ => unreachable!(),
+			}
+		});
 
 		// Drive the subscription to where it waits, holding what it asked for.
 		let mut claim = None;
@@ -12288,7 +12359,7 @@ mod serve_tests {
 		}
 		assert_eq!(
 			publisher.subscriptions.available(),
-			usize::MAX - 1,
+			usize::MAX - usize::from(matches!(kind, request::Kind::Subscribe)),
 			"{version} {setup:?}"
 		);
 		assert_eq!(demanded(), !matches!(setup, Setup::Resolving), "{version} {setup:?}");
@@ -12533,7 +12604,7 @@ mod serve_tests {
 			crate::coding::decode_varint(&mut buf, version).unwrap(),
 			ietf::SubscribeOk::ID
 		);
-		crate::coding::decode_buf(&mut buf, version, ietf::SubscribeOk::decode)
+		crate::coding::decode_buf(&mut buf, version, |r, v| ietf::SubscribeOk::decode(r, v))
 			.unwrap()
 			.largest
 	}
@@ -12555,7 +12626,7 @@ mod serve_tests {
 					crate::coding::decode_varint(&mut buf, version).unwrap(),
 					ietf::SubscribeOk::ID
 				);
-				let ok = crate::coding::decode_buf(&mut buf, version, ietf::SubscribeOk::decode).unwrap();
+				let ok = crate::coding::decode_buf(&mut buf, version, |r, v| ietf::SubscribeOk::decode(r, v)).unwrap();
 				assert_eq!(
 					ok.properties.group_order,
 					Some(GroupOrder::Descending),
@@ -12694,7 +12765,8 @@ mod serve_tests {
 			kio::wait(|waiter| serve.poll(waiter)).await.unwrap();
 
 			let mut buf = bytes::Bytes::from(log.writes.lock().unwrap().clone());
-			crate::coding::decode_buf(&mut buf, Version::Draft22, ietf::GroupHeader::decode).expect("a group header")
+			crate::coding::decode_buf(&mut buf, Version::Draft22, |r, v| ietf::GroupHeader::decode(r, v))
+				.expect("a group header")
 		}
 
 		assert!(!serve(Some(0)).await.flags.has_end, "capped at object 0 of 3");
@@ -16605,7 +16677,7 @@ mod tests {
 	}
 
 	/// Send a FETCH we refuse, returning the same pair.
-	async fn fetch_refused(version: Version, fetch_type: FetchType<'_>) -> (Vec<u8>, Vec<u32>) {
+	async fn fetch_refused(version: Version, fetch_type: FetchType<'static>) -> (Vec<u8>, Vec<u32>) {
 		let h = harness(version);
 
 		let stream = Stream::open(&mut crate::driver::Transport::new(h.session.clone()), version)

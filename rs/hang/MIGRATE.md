@@ -16,7 +16,7 @@ Delete matches on `TooManyRenditions`. An application that wants a limit counts 
 ### HLS records replace the root archive
 
 `catalog::Archive`, `catalog::Timeline`, `Catalog::archive`, and the `timeline` module are gone.
-A video or audio rendition opts in to HLS with its own `hls: Option<catalog::Hls>` field, naming its record track and nominal segment duration.
+A video or audio rendition carries its own `hls: Option<catalog::Hls>` field, naming its record track and nominal segment duration.
 Records are `hls::Record { sequence, group, pts, duration }` in milliseconds on a `<track>.hls` track (`hls::default_name`, `hls::SUFFIX`).
 Build one with `Record::new(sequence, group, pts)`, adding `with_duration(0)` where content stops.
 A catalog with an old root `archive` still parses, with the entry ignored.

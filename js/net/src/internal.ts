@@ -319,7 +319,7 @@ export interface ResumeSource {
 	/** An independent subscriber to the serving copy. */
 	fork(options?: Subscription): Subscriber;
 	/** A fresh reader for a group still cached by one of this reader's copies. */
-	cachedGroup(sequence: number): GroupConsumer | undefined;
+	cachedGroup(sequence: number, from?: number): GroupConsumer | undefined;
 	/** Let go of every copy. */
 	close(abort?: Error): void;
 }
@@ -386,6 +386,8 @@ export const hooks: {
 	 * the drop. Mirrors the Rust `drop_groups`; assigned by `track.ts`.
 	 */
 	dropTrackGroups: (producer: Producer, start: number, end: number, error: Error) => void;
+	/** Create a received group at its wire offset before publishing it to readers. Assigned by `track.ts`. */
+	receiveGroup: (producer: Producer, group: { sequence: number; start: number }) => GroupProducer;
 	/** The producer's largest reported location and its subsequent changes. */
 	producerLargest: (producer: Producer) => Getter<Position | undefined>;
 
@@ -481,7 +483,7 @@ export const hooks: {
 	/** Whether this subscriber's budget gives up on `sequence`, judged by its successor; see {@link expireGroup}. */
 	staleAt: (subscriber: Subscriber, sequence: number) => Expiry;
 	/** A group the subscriber's track still caches, as a fresh read handle. */
-	cachedGroup: (subscriber: Subscriber, sequence: number) => GroupConsumer | undefined;
+	cachedGroup: (subscriber: Subscriber, sequence: number, from?: number) => GroupConsumer | undefined;
 	/** Whether {@link cachedGroup} would find the group, without making a read handle. */
 	holdsGroup: (subscriber: Subscriber, sequence: number) => boolean;
 	/** The error the subscriber's track gave `sequence` up with, if it did, and what changes it. */
@@ -512,6 +514,10 @@ export const hooks: {
 	/** Bind the group to its immutable track codec. */
 	bindGroupCompression: (group: GroupProducer, compressed: boolean) => void;
 	/** Admit a received stored slice without recompressing it. */
+	/** Set a received group's first absolute frame before publishing it. Assigned by `group.ts`. */
+	startGroup: (group: GroupProducer, start: number) => void;
+	/** The first absolute frame this source copy began at. Assigned by `group.ts`. */
+	groupOffset: (group: GroupProducer) => number;
 	writeGroupFrame: (group: GroupProducer, frame: Frame, inflated?: number) => void;
 	/** Payload footprint including a shared inflated copy, for measurements. */
 	groupCacheBytes: (group: GroupProducer) => number;
@@ -543,6 +549,8 @@ export const hooks: {
 	/** Return when a group joined its track at this hop, on the installed clock. */
 	groupArrived: (group: GroupConsumer) => Instant;
 	/** Whether a group counts as content: its first frame landed, or it ended. */
+	/** The next absolute frame this reader can serve. Assigned by `group.ts`. */
+	groupIndex: (group: GroupConsumer) => number;
 	groupStarted: (group: GroupConsumer) => boolean;
 	/** Watch the error a group's copy closes with, ignoring readers' verdicts, without holding the consumer. */
 	groupFate: (group: GroupConsumer) => () => Error | undefined;
@@ -714,6 +722,15 @@ export const hooks: {
 	bindGroupCompression: () => {
 		throw new Error("group.ts not loaded");
 	},
+	receiveGroup: () => {
+		throw new Error("track.ts not loaded");
+	},
+	groupOffset: () => {
+		throw new Error("group.ts not loaded");
+	},
+	startGroup: () => {
+		throw new Error("group.ts not loaded");
+	},
 	writeGroupFrame: () => {
 		throw new Error("group.ts not loaded");
 	},
@@ -751,6 +768,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupArrived: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupIndex: () => {
 		throw new Error("group.ts not loaded");
 	},
 	groupStarted: () => {

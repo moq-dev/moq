@@ -21,8 +21,8 @@ pub(crate) const MAX_OBJECT_EXTENSIONS: usize = 64 * 1024;
 #[derive(Debug)]
 pub(super) struct ObjectExtensionsLength(pub usize);
 
-impl Decode<Version> for ObjectExtensionsLength {
-	fn decode(buf: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for ObjectExtensionsLength {
+	fn decode(buf: &mut Decoder<'a>, _: Version) -> Result<Self, DecodeError> {
 		let size = usize::try_from(buf.varint()?).map_err(|_| DecodeError::BoundsExceeded)?;
 		if size > MAX_OBJECT_EXTENSIONS {
 			return Err(DecodeError::MessageTooLarge {
@@ -111,8 +111,8 @@ impl Encode<Version> for GroupOrder {
 	}
 }
 
-impl Decode<Version> for GroupOrder {
-	fn decode(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for GroupOrder {
+	fn decode(r: &mut Decoder<'a>, _: Version) -> Result<Self, DecodeError> {
 		Self::try_from(r.u8()?).map_err(|_| DecodeError::InvalidValue)
 	}
 }
@@ -281,8 +281,8 @@ impl Encode<Version> for GroupHeader {
 	}
 }
 
-impl Decode<Version> for GroupHeader {
-	fn decode(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for GroupHeader {
+	fn decode(r: &mut Decoder<'a>, _: Version) -> Result<Self, DecodeError> {
 		let flags = GroupFlags::decode(r.varint()?)?;
 		let track_alias = r.varint()?;
 		let group_id = r.varint()?;

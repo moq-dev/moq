@@ -212,8 +212,8 @@ impl<V> Encode<V> for Hop {
 	}
 }
 
-impl<V> Decode<V> for Hop {
-	fn decode(r: &mut Decoder<'_>, _: V) -> Result<Self, DecodeError> {
+impl<'a, V> Decode<'a, V> for Hop {
+	fn decode(r: &mut Decoder<'a>, _: V) -> Result<Self, DecodeError> {
 		Ok(Self::from_wire(r.varint()?))
 	}
 }
@@ -384,8 +384,8 @@ impl<V: Copy> Encode<V> for Hops {
 	}
 }
 
-impl<V: Copy> Decode<V> for Hops {
-	fn decode(r: &mut Decoder<'_>, version: V) -> Result<Self, DecodeError> {
+impl<'a, V: Copy> Decode<'a, V> for Hops {
+	fn decode(r: &mut Decoder<'a>, version: V) -> Result<Self, DecodeError> {
 		let count = r.varint()? as usize;
 		if count > MAX_HOPS {
 			return Err(DecodeError::BoundsExceeded);
@@ -1391,8 +1391,7 @@ struct ServeState {
 	served: WeakCache<Path, broadcast::WeakConsumer>,
 
 	// How many times the route changed instance: a front compares it to the count when
-	// it asked to tell a released request from an answered one. Shared outside the lock,
-	// since the release wakes the front while the updater still holds it.
+	// it asked to tell a released request from an answered one without taking this lock.
 	renewals: Arc<AtomicU64>,
 
 	// Set when the announcement is retracted or the origin tears down: new requests
@@ -1708,6 +1707,9 @@ struct OriginScope {
 	allowed: Patterns,
 	// The subtrees that resolve elsewhere; see [`Producer::mount`]. Disjoint.
 	mounts: Arc<[Mount]>,
+	// The subtrees this handle never reaches despite `allowed`, absolute and
+	// named as the handle sees them; see [`Consumer::exclude`].
+	excluded: Arc<[Path]>,
 }
 
 /// A subtree a handle reads from elsewhere on the origin: `at/rest` resolves at
@@ -1784,6 +1786,7 @@ impl OriginScope {
 		Self {
 			allowed: Patterns::new(),
 			mounts: Arc::from([]),
+			excluded: Arc::from([]),
 		}
 	}
 
@@ -1795,7 +1798,7 @@ impl OriginScope {
 		} else {
 			Some(Self {
 				allowed,
-				mounts: self.mounts.clone(),
+				..self.clone()
 			})
 		}
 	}
@@ -1822,7 +1825,26 @@ impl OriginScope {
 
 	/// Whether this view reaches the absolute `path`.
 	fn permits(&self, path: &Path) -> bool {
-		self.allowed.matches(path.as_str())
+		self.allowed.matches(path.as_str()) && !self.excluded.iter().any(|excluded| path.has_prefix(excluded))
+	}
+
+	/// The excluded subtrees a cursor must not present, in the space it reads: the
+	/// origin's own, or `mount`'s target. `None` when an exclusion covers the whole mount.
+	fn holes(&self, mount: Option<&Mount>) -> Option<Vec<Path>> {
+		let Some(mount) = mount else {
+			return Some(self.excluded.to_vec());
+		};
+		let mut holes = Vec::new();
+		for excluded in self.excluded.iter() {
+			if mount.at.has_prefix(excluded) {
+				return None;
+			}
+			if excluded.has_prefix(&mount.at) {
+				// Too deep for the mount to resolve, nothing beneath is nameable anyway.
+				holes.extend(mount.resolve(excluded));
+			}
+		}
+		Some(holes)
 	}
 
 	/// What this view reaches, named from `root`.
@@ -1836,6 +1858,7 @@ impl Default for OriginScope {
 		Self {
 			allowed: Patterns::from(Pattern::all()),
 			mounts: Arc::from([]),
+			excluded: Arc::from([]),
 		}
 	}
 }
@@ -2489,8 +2512,8 @@ impl Producer {
 			.collect();
 		Ok(Producer {
 			scope: OriginScope {
-				allowed: self.scope.allowed.clone(),
 				mounts,
+				..self.scope.clone()
 			},
 			..self.clone()
 		})
@@ -2848,21 +2871,12 @@ impl AnnounceProducer {
 	/// waiting on its queue. Idempotent, and what dropping the advertisement does.
 	fn retract(&self, withdrawn: bool) {
 		let mut shared = self.shared.lock();
+		let mut servers = Vec::new();
 		for (prefix, id) in &self.entries {
 			let Some(entry) = shared.routes.remove(prefix, *id) else {
 				continue;
 			};
-			// Reject anything still waiting on this route's server; a request
-			// already handed to the handler resolves through its own `Request`.
-			if let Some(server) = &entry.server {
-				let mut server = server.lock();
-				server.closed = true;
-				for producer in server.requests.drain_all() {
-					if let Ok(mut request) = producer.write() {
-						request.resolved.get_or_insert(Err(Error::Unroutable));
-					}
-				}
-			}
+			servers.extend(entry.server.clone());
 			// A peer remains reachable while any of its sessions advertises this
 			// prefix. Remove this session's route before testing the remaining
 			// claims, under the same lock, so overlapping withdrawals cannot
@@ -2880,6 +2894,23 @@ impl AnnounceProducer {
 			}
 			shared.sync_route(&entry.prefix, &entry.claim);
 			shared.prune_withdrawn(&entry.prefix);
+		}
+		drop(shared);
+		// Reject anything still waiting on this route's server; a request already
+		// handed to the handler resolves through its own `Request`. Closing wakes
+		// the server's waiters, so it runs after the table unlocks; the entries
+		// already left it, so nothing new routes here meanwhile.
+		for server in servers {
+			let released = {
+				let mut server = server.lock();
+				server.closed = true;
+				server.requests.drain_all()
+			};
+			for producer in released {
+				if let Ok(mut request) = producer.write() {
+					request.resolved.get_or_insert(Err(Error::Unroutable));
+				}
+			}
 		}
 	}
 }
@@ -3006,9 +3037,12 @@ impl DriverState {
 		// handler: the teardown is terminal, so a handler resolving late must not
 		// beat it (resolution is first-write-wins).
 		for server in servers {
-			let mut server = server.lock();
-			server.closed = true;
-			for producer in server.requests.drain_all() {
+			let released = {
+				let mut server = server.lock();
+				server.closed = true;
+				server.requests.drain_all()
+			};
+			for producer in released {
 				if let Ok(mut request) = producer.write() {
 					request.resolved.get_or_insert(Err(Error::Closed));
 				}
@@ -3453,8 +3487,8 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 						if serve.closed {
 							// Retracted under us, or its handler dropped while the
 							// announcement stands: it cannot serve. A retraction
-							// leaves the table before it closes the server, under
-							// the same lock, so the table tells the two apart.
+							// leaves the table before it closes the server, so the
+							// table tells the two apart.
 							drop(serve);
 							events.push_back(Event::Resolved {
 								route,
@@ -6163,6 +6197,17 @@ impl Consumer {
 		self
 	}
 
+	/// A clone that never reaches the subtree at `prefix`, relative to this root:
+	/// [`announced`](Self::announced) leaves out the routes at or beneath it and a
+	/// request for a path there fails with [`Error::Unauthorized`]. A route
+	/// announced above `prefix` is still reported. [`allowed`](Self::allowed) is unchanged.
+	pub fn exclude(&self, prefix: impl TryInto<Path, Error: Into<Error>>) -> Result<Self, Error> {
+		let prefix = self.root.join(&path::convert(prefix)?)?;
+		let mut consumer = self.clone();
+		consumer.scope.excluded = self.scope.excluded.iter().cloned().chain([prefix]).collect();
+		Ok(consumer)
+	}
+
 	/// Set wire discovery visibility relative to this consumer's requested root.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn discovery(mut self, hidden: bool) -> Self {
@@ -6245,8 +6290,9 @@ impl Consumer {
 		// A root at or beneath a mount reads only the mount: one cursor, re-rooted
 		// onto the target.
 		if let Some(mount) = self.scope.mount(&self.root) {
-			// A root the mount resolves past the depth limit has nothing to announce.
-			let Some(root) = mount.resolve(&self.root) else {
+			// A root the mount resolves past the depth limit, or an excluded one, has
+			// nothing to announce.
+			let (Some(root), Some(holes)) = (mount.resolve(&self.root), self.scope.holes(Some(mount))) else {
 				return AnnounceConsumer::new(
 					self.root.clone(),
 					Vec::new(),
@@ -6262,7 +6308,7 @@ impl Consumer {
 				self.hidden.translate(mount),
 				Some(mount),
 				Path::default(),
-				Vec::new(),
+				holes,
 			)];
 			return AnnounceConsumer::new(
 				self.root.clone(),
@@ -6274,16 +6320,19 @@ impl Consumer {
 			);
 		}
 
-		// Otherwise the consumer's own cursor, minus the mounted subtrees, plus one
-		// cursor per mount beneath the root it may discover, presenting under it.
+		// Otherwise the consumer's own cursor, minus the mounted and excluded subtrees,
+		// plus one cursor per mount beneath the root it may discover, presenting under it.
 		let heads = interest_prefixes(&self.scope.allowed);
-		let mut holes = Vec::new();
+		let mut holes = self.scope.holes(None).unwrap_or_default();
 		let mut cursors = Vec::new();
 		for mount in self.scope.mounts.iter() {
 			let Some(under) = mount.at.strip_prefix(&self.root) else {
 				continue;
 			};
 			holes.push(mount.at.clone());
+			let Some(mount_holes) = self.scope.holes(Some(mount)) else {
+				continue;
+			};
 			let allowed = mount.translate(&self.scope.allowed);
 			// Hidden at the mount point means hidden throughout: the dot segment is above
 			// everything the mount holds. A top-up feed's rule moves onto the target.
@@ -6301,7 +6350,7 @@ impl Consumer {
 				self.hidden.translate(mount),
 				Some(mount),
 				under.clone(),
-				Vec::new(),
+				mount_holes,
 			));
 		}
 		cursors.insert(
@@ -6388,7 +6437,7 @@ impl Consumer {
 
 		// `scope` keeps narrower permissions intact: on a consumer limited to
 		// `foo/specific`, no route can ever cover `foo`.
-		if !consumer.allowed().matches(path.as_str()) {
+		if !consumer.scope.permits(&consumer.root.join(&path)?) {
 			return Err(Error::Unauthorized);
 		}
 
@@ -6429,9 +6478,13 @@ impl Consumer {
 
 	/// [`Self::routed_broadcast`], refusing any instance but `epoch` when one is pinned.
 	pub(super) fn routing(&self, path: Path, epoch: Option<crate::Epoch>) -> Routing {
-		// `allowed` keeps narrower permissions intact: if the whole path is not
+		// The scope keeps narrower permissions intact: if the whole path is not
 		// reachable, no route can ever cover it, so bail rather than loop forever.
-		let request = (!self.allowed().matches(path.as_str())).then(|| Requesting::failed(Error::Unauthorized));
+		let request = match self.root.join(&path) {
+			Ok(named) if self.scope.permits(&named) => None,
+			Ok(_) => Some(Requesting::failed(Error::Unauthorized)),
+			Err(err) => Some(Requesting::failed(err.into())),
+		};
 		Routing {
 			consumer: self.clone(),
 			path,
@@ -7710,6 +7763,76 @@ mod tests {
 		consumer.announced().assert_next_wait();
 		let resolved = consumer.request_broadcast(".stats/node", None).await.expect("resolves");
 		assert_eq!(resolved.info().path.as_str(), ".stats/node");
+	}
+
+	/// An excluded subtree is neither discovered nor resolved, even under a route
+	/// covering it, while its hidden siblings and the covering route still show.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn exclude_hides_and_refuses_the_subtree() {
+		let producer = origin(1).produce();
+		let _claim = producer.announce("p1", Route::default()).unwrap();
+		let _cam = producer.publish("p1/cam", Route::default()).unwrap();
+		let _private = producer.publish("p1/.private/cam", Route::default()).unwrap();
+		let _overlay = producer.publish("p1/.pro/cam", Route::default()).unwrap();
+		let consumer = producer
+			.consume()
+			.scope("p1", &Patterns::from(Pattern::all()))
+			.unwrap()
+			.with_hidden(true)
+			.exclude(".pro")
+			.unwrap();
+
+		let mut announced = consumer.announced();
+		announced.expect_next_active("").await;
+		announced.expect_next_active(".private/cam").await;
+		announced.expect_next_active("cam").await;
+		announced.assert_next_wait();
+
+		consumer.request_broadcast("cam", None).await.expect("resolves");
+		for path in [".pro", ".pro/cam", ".pro/cam/.pro/transcode.hang"] {
+			let refused = consumer
+				.request_broadcast(path, None)
+				.now_or_never()
+				.expect("refused at once");
+			assert!(matches!(refused, Err(Error::Unauthorized)), "{path}");
+			let refused = consumer.routed_broadcast(path).now_or_never().expect("refused at once");
+			assert!(matches!(refused, Err(Error::Unauthorized)), "{path}");
+			assert!(matches!(consumer.follow(path), Err(Error::Unauthorized)), "{path}");
+		}
+		// Only whole segments: a sibling sharing the prefix text is untouched.
+		let _sibling = producer.publish("p1/.prod", Route::default()).unwrap();
+		announced.expect_next_active(".prod").await;
+	}
+
+	/// An exclusion inside a mount carves the target, and one over the mount point
+	/// drops the mount.
+	#[moq_clock::test]
+	async fn exclude_reaches_into_a_mount() {
+		let producer = origin(1).produce();
+		let _foo = producer.publish(".svc/p1/foo", Route::default()).unwrap();
+		let _bar = producer.publish(".svc/p1/bar", Route::default()).unwrap();
+		let _cam = producer.publish("p1/cam", Route::default()).unwrap();
+		let project = mounted(&producer, "p1", &["**"]).with_hidden(true);
+
+		let mut announced = project.exclude(".svc/foo").unwrap().announced();
+		announced.expect_next_active("cam").await;
+		announced.expect_next_active(".svc/bar").await;
+		announced.assert_next_wait();
+
+		let mut announced = project.exclude(".svc").unwrap().announced();
+		announced.expect_next_active("cam").await;
+		announced.assert_next_wait();
+
+		// Rooted inside the mount, the exclusion moves onto the target.
+		let mut inside = project
+			.scope(".svc", &Patterns::from(Pattern::all()))
+			.unwrap()
+			.exclude("foo")
+			.unwrap()
+			.announced();
+		inside.expect_next_active("bar").await;
+		inside.assert_next_wait();
 	}
 
 	/// A project-rooted handle reading `.svc` from the fleet-wide `.svc/<pid>`.
@@ -11282,6 +11405,58 @@ mod tests {
 		};
 		drop(driver);
 		assert!(matches!(request.producer.read().resolved, Some(Err(Error::Closed))));
+	}
+
+	/// An inline native executor can re-enter both tables from the rejection's wake.
+	#[test]
+	#[cfg(not(target_family = "wasm"))]
+	fn refusing_route_requests_wakes_after_unlocking() {
+		struct Reenter {
+			table: SendCell<kio::Shared<OriginState>>,
+			server: kio::Shared<ServeState>,
+			woken: AtomicBool,
+		}
+		impl Wake for Reenter {
+			fn wake(self: Arc<Self>) {
+				let _table = self.table.lock();
+				let _server = self.server.read();
+				self.woken.store(true, Ordering::SeqCst);
+			}
+		}
+
+		for teardown in [false, true] {
+			let (producer, mut driver) = Producer::new(Config::new(origin(1)));
+			let server = producer.requests_route("room", Route::default()).unwrap();
+			let _pending = producer.consume().request_broadcast("room/alice", None);
+			driver.poll(Instant::ZERO, &kio::Waiter::noop()).unwrap();
+			let channel = server
+				.state
+				.read()
+				.requests
+				.get(&Path::from_static("room/alice"))
+				.unwrap()
+				.consume();
+			// Park on both the request's channel and the server's queue.
+			let reenter = || {
+				Arc::new(Reenter {
+					table: producer.shared.clone(),
+					server: server.state.clone(),
+					woken: AtomicBool::new(false),
+				})
+			};
+			let (request, queue) = (reenter(), reenter());
+			let waiter = kio::Waiter::new(std::task::Waker::from(request.clone()));
+			assert!(channel.poll(&waiter, |_| Poll::<()>::Pending).is_pending());
+			let waiter = kio::Waiter::new(std::task::Waker::from(queue.clone()));
+			assert!(server.state.poll(&waiter, |_| Poll::Pending).is_pending());
+			if teardown {
+				drop(driver);
+			} else {
+				drop(server);
+			}
+			assert!(request.woken.load(Ordering::SeqCst));
+			assert!(queue.woken.load(Ordering::SeqCst));
+		}
 	}
 
 	/// One live subscription reading a track through a remote front, plus the

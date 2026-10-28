@@ -981,6 +981,7 @@ async fn redundant_failover(bufferbloat: bool) {
 		let mut distinct = versions.clone();
 		distinct.dedup();
 		assert_eq!(distinct, [0, 1, 2, 3], "one marked switch per change");
+		let mut switches = Vec::new();
 		for version in 1..=3 {
 			// A program opens in the slot of its first PAT, with a PCR flagging the break.
 			let all: Vec<_> = packets(&output).collect();
@@ -1006,6 +1007,31 @@ async fn redundant_failover(bufferbloat: bool) {
 				.checked_sub(1)
 				.map_or(Duration::ZERO, |before| arrivals[at].0 - arrivals[before].0);
 			eprintln!("bufferbloat={bufferbloat}, program {version}, viewer output gap={gap:?}");
+			switches.push((version, at, gap));
+		}
+		let arrivals = arrivals.lock().unwrap();
+		let steady = arrivals
+			.windows(2)
+			.enumerate()
+			.filter(|(index, _)| !switches.iter().any(|(_, at, _)| *at == index + 1))
+			.map(|(_, pair)| pair[1].0 - pair[0].0)
+			.max()
+			.expect("steady output between switches");
+		// The output's 25ms PCR grid plus this fixture's 20ms switch polling, on top of the
+		// scheduling noise measured on the same stdout reader.
+		let margin = Duration::from_millis(25 + 20);
+		eprintln!("bufferbloat={bufferbloat}, steady output max={steady:?}, cadence margin={margin:?}");
+		// A healthy switch adds no hole only when the replacement is usable within the follow.
+		// Behind this link, slower than either leg alone, both legs' audio outranks all video,
+		// so the replacement's first keyframe lands only after the follow stops the old input;
+		// its late start then costs whatever the old tail does not cover, the honest result.
+		for (version, _, gap) in switches {
+			if version != 2 && !bufferbloat {
+				assert!(
+					gap <= steady + margin,
+					"healthy program {version} added an output hole: gap={gap:?}, steady={steady:?}, margin={margin:?}"
+				);
+			}
 		}
 	}
 	if let Some(shaper) = shaper {

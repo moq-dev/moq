@@ -12,7 +12,7 @@ import { type IetfVersion, Version } from "./version.ts";
 
 // Varint parameter IDs (even)
 const MSG_PARAM_DELIVERY_TIMEOUT = 0x02n;
-/// FILL_TIMEOUT, on a FETCH. Ignored: a refusal doesn't wait.
+/// FILL_TIMEOUT, on a FETCH. Refused: we write no Timed-Out gaps.
 const MSG_PARAM_FILL_TIMEOUT = 0x0an;
 /// NEW_GROUP_REQUEST. Ignored, as the draft lets a publisher without dynamic groups do.
 const MSG_PARAM_NEW_GROUP_REQUEST = 0x32n;
@@ -58,6 +58,7 @@ type ControlMessage =
 	| "publish"
 	| "publish-namespace"
 	| "fetch"
+	| "fetch-ok"
 	| "request-ok"
 	| "request-update"
 	| "namespace"
@@ -170,6 +171,8 @@ function allows(message: ControlMessage, version: IetfVersion, id: bigint): bool
 				include ||
 				epoch
 			);
+		case "fetch-ok":
+			return false;
 		case "request-ok":
 			return expires || largest || id === MSG_PARAM_ACTIVE_COUNT;
 		case "namespace":

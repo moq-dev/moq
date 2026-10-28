@@ -5,7 +5,7 @@
  */
 import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import type * as Epoch from "./epoch.ts";
-import { NotFound } from "./error.ts";
+import { NotFound, StreamCode, StreamError } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import type { Route } from "./hop.ts";
 import { hooks } from "./internal.ts";
@@ -149,7 +149,12 @@ function closeState(state: BroadcastState) {
 	state.closed.set(null);
 	state.listing.close();
 	for (const cleanup of state.demands.values()) cleanup();
-	for (const request of state.pending) request.reject();
+	for (const request of state.pending)
+		request.reject(
+			new StreamError(StreamCode.Internal, {
+				message: `track request ${request.name} dropped before acceptance`,
+			}),
+		);
 	state.requested.mutate((requests) => {
 		requests.length = 0;
 	});
@@ -459,7 +464,7 @@ export class Producer {
 
 	/**
 	 * Remove a statically inserted track, including a finished cached one: stop counting it
-	 * toward {@link demand} and listing it at once.
+	 * toward the broadcast's demand and listing it at once.
 	 */
 	removeTrack(name: string): void {
 		const track = this.#state.tracks.get(name);

@@ -1,5 +1,5 @@
 `doc/` is the entry point to the repo: what exists, what it is for, and how to start.
-It is not the reference. Rustdoc, TSDoc, `--help`, and `drafts/` are, and they sit next to the code so they stay accurate.
+It is not the reference. Rustdoc, TSDoc (rendered into `lib/js/api/` at build time), `--help`, and `drafts/` are, and they sit next to the code so they stay accurate.
 
 - Document features, and the behavior a user must know to choose or use one.
 - Leave method and field lists, wire encodings, error codes, and per-version accounting to the API docs and drafts. Link to them.

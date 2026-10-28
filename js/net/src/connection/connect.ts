@@ -17,7 +17,7 @@ import type { Established } from "./established.ts";
 import * as Extensions from "./extensions.ts";
 import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
 import { DEFAULT_TIMEOUT, exchangeSetup, handsOff } from "./handshake.ts";
-import { type Credential, credential, fallback, hold } from "./tokens.ts";
+import { credential, fallback, hold, type Presentation } from "./tokens.ts";
 
 // Default head start for WebTransport before attempting the WebSocket fallback.
 const DEFAULT_WEBSOCKET_DELAY_MS = Milli(500);
@@ -163,7 +163,7 @@ export function normalizeVersions(props?: {
 	return props?.versions === undefined ? undefined : checkVersions(props.versions);
 }
 
-/** Options for {@link connect}. */
+/** Options for {@link Connection.connect}. */
 export interface ConnectProps {
 	/** The relay URL. */
 	url: URL;
@@ -289,8 +289,6 @@ const NEVER_ABORTED = new AbortController().signal;
 /**
  * Establishes a connection to a MOQ server.
  *
- * @param url - The URL of the server to connect to
- * @param props - Connection options
  * @returns A promise that resolves to an established session
  */
 export async function connect({ url, ...props }: ConnectProps): Promise<Established> {
@@ -359,12 +357,12 @@ async function connectInner(
 	tokens: readonly string[],
 	props: Omit<ConnectProps, "url">,
 	abort: Promise<void>,
-): Promise<[Established, Credential]> {
+): Promise<[Established, Presentation]> {
 	const offered = offer(props.versions);
 	const dial = credential(raw, tokens, offered.setupToken);
 	const url = dialable(dial.url);
 	const fallbackDial = props.websocket?.url && fallback(raw, props.websocket.url, tokens, offered.setupToken);
-	const wiring = (presented: Credential): SessionProps => ({
+	const wiring = (presented: Presentation): SessionProps => ({
 		publish: props.publish,
 		handle: props.auth,
 		client: true,

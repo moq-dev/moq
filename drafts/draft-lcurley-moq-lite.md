@@ -213,11 +213,10 @@ A partial Group is only ever delivered to a subscriber that asked for one.
 A publisher that cannot serve a Group from the frame the subscription names MUST skip that Group entirely and resolve the subscription to a later one, rather than deliver the part it holds.
 The resolved start is therefore always either exactly the requested Position or the beginning of a later Group, never some third Position the subscriber did not choose.
 
-The asymmetry with Groups is deliberate.
-A Group is the unit of decodability: dropping leading *Groups* leaves a stream the application can still decode, whereas dropping leading *Frames* often does not, whether because the Group opens with a keyframe the rest depends on or because its compression state lives in the frames that went missing.
-A subscription therefore starts at a Group's first frame, and a subscriber asks for a partial Group only to finish one whose earlier frames it already holds, from this publisher or another.
-
-Frame indices are only meaningful relative to a Group the subscriber has already begun receiving, so a subscriber MUST start a Range at frame 0 unless it already holds every frame of that group below its start.
+A Group is the unit of decodability: its earlier Frames may carry a keyframe or compression state the later Frames need.
+Applications request whole Groups, while a transport may request a partial Group for route continuation, hole fills, or front-eviction refills.
+A subscriber MAY start a Range at any frame index, whether or not it retains the earlier Frames.
+A relay that holds none of a requested Group SHOULD request it upstream from frame 0 and apply the downstream bounds locally, retaining a copy usable by whole-Group readers and compression.
 
 # Flow
 This section outlines the flow of messages within a moq-lite session.
@@ -553,7 +552,7 @@ A subscriber opens a Fetch Stream (0x3) to request a single Group from a Track.
 The subscriber sends a FETCH message containing the broadcast path, track name, priority, group sequence, and the frame range within that group.
 Unlike SUBSCRIBE, FETCH works on both live and ended broadcasts; it is the only way to read an ended one.
 The publisher responds with FRAME messages directly on the same bidirectional stream — there is no response header.
-The Subscribe ID, Group Sequence, and index of the first returned frame are implicit, taken from the original FETCH request.
+The Group Sequence and index of the first returned frame are implicit, taken from the original FETCH request.
 Because there is no response header, a publisher that cannot serve the requested frame range in full MUST reset the stream rather than return a shorter run; the subscriber has no way to learn where a truncated response actually started.
 As with a subscription, the subscriber MUST already have the track's [TRACK_INFO](#track-info) to parse the returned frames; because the properties are immutable, a single Track Stream lookup is reused across every FETCH of that track (group-by-group fetches do not re-fetch it).
 The publisher FINs the stream after the last frame, or resets the stream on error.
@@ -855,6 +854,8 @@ A group whose frame does not fit is simply not eligible for datagram delivery.
 
 # Encoding
 This section covers the encoding of each message.
+Unless specified otherwise, `(s)` is UTF-8 text and `(b)` is raw bytes, each prefixed by its byte length as an `(i)`.
+A SETUP Parameter Value uses its enclosing Parameter Length, and a FRAME or datagram Payload uses its enclosing length or boundary.
 
 ## Variable-Length Integers {#varint}
 A field marked `(i)` is a variable-length integer.
@@ -1308,7 +1309,7 @@ A floor above the latest group simply waits there: that is a resumed subscriptio
 Reaching back is best-effort, not a guarantee that the groups still exist; see `Publisher Max Age` in [TRACK_INFO](#track-info).
 
 An Absolute `Start` past frame 0 delivers its group from that frame; a start resolved at a later group is always delivered from frame 0.
-A subscriber MUST start at frame 0 unless it already holds every frame below it, from this publisher or another, since a Group is the unit of decodability (see [Positions](#positions)).
+A subscriber MAY name any start frame, as described in [Positions](#positions).
 An Absolute `End` past frame 0 delivers its group up to that frame.
 
 ## SUBSCRIBE_UPDATE
@@ -1567,6 +1568,7 @@ SUBSCRIBE_DROP Message {
 ~~~
 
 **Group Start** and **Group End** are the inclusive range of group sequences the publisher gave up.
+`Group Start = Group End + 1` is an empty range; a larger Group Start is a PROTOCOL_VIOLATION.
 **Error Code** is a [stream error code](#error-codes) saying why the groups were given up, as a reset retaining the Group Stream header would: for example NOT_FOUND for a sequence the publisher never had, or OLD for one past its budget.
 A subscriber MUST end the readers of a dropped group it holds with that error, including a group whose stream is still arriving, rather than end it cleanly.
 
@@ -1826,6 +1828,8 @@ The `Message Length` describes the payload size on the wire.
 
 ## moq-lite-07
 
+- Refuse a SUBSCRIBE_DROP whose Group Start is greater than Group End plus one on every version that carries it. SETUP parameter counts are bounded by Message Length, without a separate count cap.
+
 - Limited a broadcast path to 32 segments and 4,096 bytes.
 
 - A session without a negotiated subprotocol negotiates the version in a draft-14 CLIENT_SETUP and SERVER_SETUP exchange. Implementations apply this to moq-lite-03 through moq-lite-06 too.
@@ -1845,7 +1849,7 @@ The `Message Length` describes the payload size on the wire.
 - Added TRACK_INFO `Refresh` and SUBSCRIBE_UPDATE `Wanted Group`, carrying ratio-based refresh demand through relays.
 
 - Added `Compression` to TRACK_INFO: none (0x0) or DEFLATE (0x1), whose Groups are DEFLATE streams per draft-lcurley-moq-flate. FRAME and datagrams carry an `Inflated Size` when it is not none. Earlier versions receive the Track inflated.
-- A subscription starts at a Group's first frame: SUBSCRIBE starts past frame 0 only when the subscriber holds every frame below it, compressed Track or not.
+- SUBSCRIBE may start at any frame, including when the subscriber no longer holds the prefix. Relays widen a cold Group request upstream to frame 0 and cut locally.
 
 - Replaced ANNOUNCE_OK Active Count with an ordered, empty SYNCED event (0x4), marking the initial set without retaining routes that end before delivery.
 
@@ -1869,7 +1873,6 @@ The `Message Length` describes the payload size on the wire.
 - A subscriber MAY cancel by FIN on its Subscribe Stream, and the publisher then FINs without SUBSCRIBE_END.
 - A publisher MAY FIN a subscription whose every Range has an End, once each Group in them is sent or dropped, without SUBSCRIBE_END. The FIN ends the subscription, not the Track. Earlier versions hold a bounded subscription open until SUBSCRIBE_END, since their subscribers read a FIN as the Track's end.
 - Removed the NO_CAPACITY stream error and its one re-resolution. Every refusal is terminal, including at another route of the same prefix.
-- Assigned 0x3B UNAUTHORIZED in the stream error table: a request reset because the endpoint does not authorize it, or no longer does, distinct from SESSION_CLOSED.
 - A relay resets with UNROUTABLE, rather than INTERNAL_ERROR, a stream served through an upstream session that ended.
 - A GOAWAY recipient MAY keep opening requests on the current session until it has moved to a replacement session; previously it MUST NOT open new streams. The sender SHOULD keep answering them and MAY reset one with GOING_AWAY, which the recipient SHOULD retry on another route.
 - Replaced Warm and Cold Route Cost with one static Route Cost in moq-lite-07-wip; lite-06 retains both fields, reading Warm and writing Cold at saturation.
@@ -1954,6 +1957,7 @@ The `Message Length` describes the payload size on the wire.
 - Ranked a path that contains a 0 Hop ID below every fully identified path before comparing Route Cost. A received 0 is forwarded unchanged, and bridging an upstream that sent no hop list writes 0 for that hop. An assigned identity is local selection state and MUST NOT be forwarded.
 
 ## moq-lite-05
+- Assigned 0x3B UNAUTHORIZED to a request reset because the endpoint does not authorize it, or no longer does, distinct from SESSION_CLOSED.
 - Renamed ANNOUNCE_INTEREST to ANNOUNCE_REQUEST and ANNOUNCE to ANNOUNCE_BROADCAST.
 - Added a SETUP message and Setup Stream (0x1).
 - Added a SETUP `Probe` parameter.

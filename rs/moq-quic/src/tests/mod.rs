@@ -5971,6 +5971,78 @@ fn invalid_ecn_feedback_reports_no_congestion() {
 	}
 }
 
+/// A receiver that pads its ACK-only packets counts them in flight. ACKs and losses of them,
+/// before and after the peer migrates to a path with a fresh controller, resolve each through
+/// its own controller once and leave nothing in flight.
+#[test]
+fn padded_ack_only_packets_resolve_exactly() {
+	let _guard = subscribe();
+	let factory = Arc::new(PacketRecorderFactory::default());
+	let mut transport = TransportConfig::default();
+	transport
+		.congestion_controller_factory(factory.clone())
+		.pad_to_mtu(true);
+	let transport = Arc::new(transport);
+	let mut server_cfg = server_config();
+	server_cfg.transport = transport.clone();
+	let mut pair = Pair::new(Default::default(), server_cfg);
+	let mut client_cfg = client_config();
+	client_cfg.transport = transport;
+	let (client_ch, server_ch) = pair.connect_with(client_cfg);
+
+	// The server mostly answers with padded ACK-only packets, some lost. The client acknowledges
+	// them only alongside the ack-eliciting packet each round ends with.
+	let s = pair
+		.client_streams(client_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	let round = |pair: &mut Pair, loss| {
+		pair.to_client.loss = loss;
+		for _ in 0..8 {
+			pair.client_send(client_ch, s).write(&[42; 8 * 1024]).unwrap();
+			pair.drive();
+			pair.server_conn_mut(server_ch).ping();
+			pair.drive();
+		}
+		pair.server_conn_mut(server_ch).stats().path.lost_packets
+	};
+	let lost = round(&mut pair, 0.2);
+	assert!(lost > 0, "no ACK-only packet lost");
+
+	// A new address that is not a NAT rebinding gets a new controller.
+	pair.client.addr = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 2).into(), pair.next_port());
+	assert!(round(&mut pair, 0.2) > lost, "no ACK-only packet lost after migrating");
+	assert_eq!(pair.server_conn_mut(server_ch).remote_address(), pair.client.addr);
+	round(&mut pair, 0.0);
+	assert_eq!(pair.server_conn_mut(server_ch).bytes_in_flight(), 0);
+	let logs = factory.logs.lock().unwrap().clone();
+	assert_eq!(logs.len(), 3, "a controller per side, and one for the new path");
+	for log in &logs {
+		check_packet_resolution(log);
+	}
+}
+
+/// An ACK whose largest packet is no longer tracked yields no RTT sample, even when it newly
+/// acknowledges an ack-eliciting packet, rather than one timed from an older packet's send.
+#[test]
+fn untracked_largest_acked_skips_rtt_sample() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	let (client_ch, _) = pair.connect();
+	pair.drive();
+	let rtt = pair.client_conn_mut(client_ch).rtt();
+
+	// Long after the last sample, so timing from that packet's send would stand out.
+	pair.time += Duration::from_secs(1);
+	pair.client_conn_mut(client_ch).ping();
+	pair.drive_client();
+	pair.client_conn_mut(client_ch).ping();
+	pair.drive_client();
+	pair.client_conn_mut(client_ch).forget_newest_sent_packet();
+	pair.drive();
+	assert_eq!(pair.client_conn_mut(client_ch).rtt(), rtt);
+}
+
 /// Sends with `send`, lets it deliver, then sends again after an idle gap. With nothing in
 /// flight no ACK arrives during the gap, so the empty poll that follows the last ACK must tell
 /// the controller of starvation before the resumed send.

@@ -248,6 +248,9 @@ jobs:
         if: runner.os == 'Linux'
         run: just playwright-deps
 
+      - name: Harness tests
+        run: just harness-check
+
       # Fail loudly if we've drifted off "latest": a committed lock file, a moq
       # package that stopped being requested at latest, or a stale playwright pin.
       - name: Freshness

@@ -154,12 +154,6 @@ moq --connect https://relay.example.com/anon --broadcast camera.hang \
     import rtsp --connect rtsp://admin:secret@192.168.1.64/stream1
 ```
 
-`--hls` publishes [HLS segment records](/bin/hls#how-export-works) beside each
-video and audio rendition, which `export hls` needs to serve the broadcast.
-Renditions' segments line up wherever the source's keyframes share timestamps.
-The stdin formats, `hls`, `rtsp`, and `capture` take it; the other gateways build their
-own catalog and refuse it.
-
 ## Export
 
 The `fmp4`, `mkv`, `flv`, `h264`, and `h265` exports pick renditions with
@@ -366,7 +360,7 @@ over one connection:
 
 ```bash
 moq --connect https://relay.example.com/anon \
-    import --broadcast event.hang --hls rtsp --connect rtsp://camera.local/stream1 \
+    import --broadcast event.hang srt --listen 0.0.0.0:9000 \
     -- export --broadcast event.hang hls --listen 0.0.0.0:8080 \
     -- export --broadcast event.hang archive file:///recordings
 ```
@@ -489,8 +483,14 @@ it as a full program switch: a new PMT from its catalog, with every PID flagging
 the break. A stitch waits for the replacement's first catalog snapshot until it
 arrives or the replacement goes, keeping the old publisher playing meanwhile,
 so even the default `--follow 0s` switches to a replacement that is still
-starting. Without `--stitch` the export stays on the old publisher while it is
-up. Only lite-07 and moq-transport sessions carry epochs, so on the
+starting. After the catalog arrives, the old instance keeps feeding for up to
+`--follow` while the replacement acquires its clock and first usable media, and
+its buffered tail drains before the marked switch. A replacement usable within
+that window adds no gap to the output; one still acquiring when it runs out,
+such as on a link too slow to carry both instances, starts after a gap.
+Timestamps across epochs are not aligned. Without `--stitch` the export stays
+on the old publisher while it is up. Only lite-07 and moq-transport sessions
+carry epochs, so on the
 default version every return is a replacement. A failure other than the
 publisher leaving, such as a codec TS cannot carry, exits 1 at once. Only `ts`
 can mark a break, so the other formats refuse `--linger`, the released spelling

@@ -1198,7 +1198,7 @@ mod tests {
 		let connecting = client
 			.connect_with(client_config, server.local_addr().unwrap(), "localhost")
 			.unwrap();
-		let accept = async { server.accept().await.unwrap().await.unwrap() };
+		let accept = async { server.accept().await.unwrap().accept().unwrap().await.unwrap() };
 		let (client_conn, server_conn) = tokio::join!(async { connecting.await.unwrap() }, accept);
 
 		(client_conn, server_conn, [client, server], gate)

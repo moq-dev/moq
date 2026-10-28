@@ -156,7 +156,7 @@ struct Passthrough<E: crate::catalog::hang::CatalogExt> {
 	/// The latest group's start, which the next group may not start below.
 	start: Option<Timestamp>,
 
-	// Reports this track's groups into its HLS records, when enabled. Passthrough writes groups by
+	// Reports this track's groups into its HLS records, unless disabled. Passthrough writes groups by
 	// hand (no `container::Producer`), so the recorder is fed directly rather than through
 	// `with_recorder`.
 	recorder: Option<crate::hls::Recorder>,
@@ -192,6 +192,25 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			group.finish()?;
 		}
 		Ok(())
+	}
+
+	/// Close the open group and finish the track.
+	fn finish(&mut self) -> crate::Result<()> {
+		self.close()?;
+		self.track.finish()?;
+		// The importer may be kept around, but its media stops holding the other tracks back.
+		self.estimator.discontinuity();
+		// Dropping the recorder stops the open HLS segment, so the track is advertised.
+		self.recorder = None;
+		Ok(())
+	}
+
+	/// [`finish`](Self::finish) the track unless it already ended, for an importer about to drop it.
+	fn end(&mut self) -> crate::Result<()> {
+		if self.track.finished().is_some() || self.track.is_closed() {
+			return Ok(());
+		}
+		self.finish()
 	}
 }
 
@@ -995,14 +1014,18 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				declared: new_segment && self.declared,
 			};
 
-			match &mut track.output {
+			let opened = match &mut track.output {
 				Output::Passthrough(passthrough) => {
 					let fragment = fragment(traf, &moof, &run, &payload, &track.defaults)?;
-					passthrough.write(fragment, &run, track.kind, placement)?;
+					passthrough.write(fragment, &run, track.kind, placement)?
 				}
 				output => unwrap(output, &run, &payload, track.timescale, placement)?,
+			};
+			// Consuming the boundary on a dependent fragment would let its next sync sample
+			// advance the segment again before this track has opened the first one.
+			if opened {
+				track.segment = Some(self.segment);
 			}
-			track.segment = Some(self.segment);
 		}
 
 		Ok(())
@@ -1018,6 +1041,16 @@ struct Placement {
 	new_segment: bool,
 	/// That segment was declared by the source, so it is an HLS segment boundary too.
 	declared: bool,
+}
+
+impl Placement {
+	/// Video opens only on a sync sample; audio follows the source's segment boundary.
+	fn keyframe(self, kind: Kind, sample: &Sample) -> bool {
+		match kind {
+			Kind::Video => sample.sync,
+			Kind::Audio => self.new_segment,
+		}
+	}
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Fmp4Track<E> {
@@ -1229,18 +1262,18 @@ fn kept(traf: &mp4_atom::Traf, run: &Run) -> Result<mp4_atom::Traf> {
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
-	/// Write one per-track `fragment` as a single frame.
-	fn write(&mut self, fragment: Bytes, run: &Run, kind: Kind, placement: Placement) -> Result<()> {
+	/// Write one per-track `fragment` as a single frame, reporting whether it opened a group.
+	fn write(&mut self, fragment: Bytes, run: &Run, kind: Kind, placement: Placement) -> Result<bool> {
 		// Carry the fragment's earliest presentation time as the frame timestamp, in the
 		// track's native timescale and shifted onto the catalog clock. Consumers present the
 		// fragment at it; `tfdt` only places the samples relative to each other.
 		let timestamp = placement.offset.apply(run.earliest)?;
 		let end = placement.offset.apply(run.end)?;
 
-		// The group rolls once per segment, so a group is a segment and the fragments inside it
-		// are frames. The keyframe bit does not decide that: audio flags every sample a sync
-		// sample, so keying off it opened a group (a QUIC stream) per audio fragment.
-		let start_group = self.group.is_none() || placement.new_segment;
+		// Audio follows segment boundaries; video also waits for a sync first sample so a new
+		// group's first fragment can be decoded independently.
+		let keyframe = placement.keyframe(kind, run.samples.first().ok_or(Error::MissingTrun)?);
+		let start_group = self.group.is_none() || (placement.new_segment && keyframe);
 		// A group may not start below the one before it. Refused before the open group closes or
 		// a new one opens, so a rewound fragment publishes nothing, as an unwrapped track does.
 		if start_group
@@ -1300,7 +1333,8 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			recorder.end(end);
 		}
 		self.estimator.burst(end.checked_sub(timestamp)?.into());
-		self.publish_estimate()
+		self.publish_estimate()?;
+		Ok(start_group)
 	}
 }
 
@@ -1311,25 +1345,28 @@ fn unwrap<E: crate::catalog::hang::CatalogExt>(
 	payload: &Bytes,
 	timescale: moq_net::Timescale,
 	placement: Placement,
-) -> Result<()> {
+) -> Result<bool> {
 	let earliest = placement.offset.apply(run.earliest)?;
 	let end = placement.offset.apply(run.end)?;
-	let video = matches!(output, Output::Video(_));
+	let kind = if matches!(output, Output::Video(_)) {
+		Kind::Video
+	} else {
+		Kind::Audio
+	};
 
 	media!(output, producer => {
-		if placement.declared {
-			producer.boundary(earliest);
-		}
-
+		let mut opened = false;
 		for (index, sample) in run.samples.iter().enumerate() {
-			let keyframe = match video {
-				// Video groups open on sync samples, the `depends_on` rule the rest of moq-mux applies.
-				true => sample.sync,
-				// Packagers flag every audio sample a sync sample, which would open a group per
-				// packet. Only a segment's first sample opens one instead, so audio keeps the
-				// source's grouping (and whatever a `seek` left open).
-				false => (index == 0 && placement.new_segment) || producer.needs_keyframe(),
+			let keyframe = match kind {
+				Kind::Video => placement.keyframe(kind, sample),
+				Kind::Audio => (index == 0 && placement.keyframe(kind, sample)) || producer.needs_keyframe(),
 			};
+			if keyframe {
+				if !opened && placement.declared {
+					producer.boundary(earliest);
+				}
+				opened = true;
+			}
 			if sample.pts > sample.dts {
 				producer.reorder(Timestamp::new(sample.pts - sample.dts, timescale)?);
 			}
@@ -1347,7 +1384,7 @@ fn unwrap<E: crate::catalog::hang::CatalogExt>(
 
 		// The fragment arrived at once, so a consumer has to buffer its whole span.
 		producer.burst(end.checked_sub(earliest)?.into())?;
-		Ok(())
+		Ok(opened)
 	}, _ => unreachable!("passthrough tracks write whole fragments"))
 }
 
@@ -1362,20 +1399,16 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// No frame follows to anchor the clock, so publish the declared track set now.
 		self.initial_reservation = None;
 		for track in self.tracks.values_mut() {
-			media!(&mut track.output, producer => producer.finish()?, passthrough => {
-				passthrough.close()?;
-				passthrough.track.finish()?;
-				// The importer may be kept around, but its media stops holding the other tracks back.
-				passthrough.estimator.discontinuity();
-				// Dropping the recorder stops the open HLS segment, so the track is advertised.
-				passthrough.recorder = None;
-			});
+			media!(&mut track.output, producer => producer.finish()?, passthrough => passthrough.finish()?);
 		}
 		Ok(())
 	}
 
 	/// Abort all tracks with `err` instead of finishing, so subscribers see the real
 	/// cause rather than [`moq_net::Error::Dropped`]. Consumes the importer.
+	///
+	/// Unlike a drop, this leaves the tracks' HLS records to the catalog, whose abort fails them
+	/// rather than ending them as a complete recording.
 	pub fn abort(mut self, err: moq_net::Error) {
 		for track in std::mem::take(&mut self.text).into_values() {
 			track.producer.abort(err.clone());
@@ -1431,5 +1464,27 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			track.last_decode_time = None;
 		}
 		Ok(())
+	}
+}
+
+impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {
+	/// End each track, then retire its HLS records: every track takes a fresh name, so nothing
+	/// publishes it again, as when an HLS import replaces this init segment's importer.
+	fn drop(&mut self) {
+		for track in self.text.values_mut() {
+			if let Err(err) = track.producer.end() {
+				tracing::warn!(%err, "failed to end a dropped fMP4 text track");
+			}
+		}
+		for mut track in std::mem::take(&mut self.tracks).into_values() {
+			let (name, ended) = media!(&mut track.output,
+				producer => (producer.name().to_string(), producer.end()),
+				passthrough => (passthrough.track.name().to_string(), passthrough.end()));
+			drop(track);
+			if let Err(err) = ended {
+				tracing::warn!(%err, "failed to end a dropped fMP4 track");
+			}
+			self.catalog.retire_dropped(&name);
+		}
 	}
 }

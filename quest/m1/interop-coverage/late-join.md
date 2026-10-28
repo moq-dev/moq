@@ -23,7 +23,3 @@ Decided 2026-10-27 (maintainer): this needs only the cached and joining half
 of JavaScript FETCH, not the on-demand half that waits on JS ranges.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [JavaScript FETCH](/quest/m1/js-fetch.md) - the JS publisher answers cached and joining FETCH
