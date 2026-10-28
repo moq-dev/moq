@@ -17,22 +17,11 @@ pub struct Consumer<E = ()> {
 }
 
 impl<E: DeserializeOwned + Default> Consumer<E> {
-	/// Wrap an uncompressed catalog track subscription.
+	/// Wrap a catalog track subscription, compressed or not.
 	pub fn new(track: moq_net::track::Subscriber) -> Self {
-		Self::with_config(track, moq_json::snapshot::consumer::Config::default())
-	}
-
-	/// Wrap a DEFLATE-compressed catalog track subscription.
-	pub fn compressed(track: moq_net::track::Subscriber) -> Self {
-		let mut config = moq_json::snapshot::consumer::Config::default();
-		config.compression = moq_json::Compression::Deflate;
-		Self::with_config(track, config)
-	}
-
-	fn with_config(track: moq_net::track::Subscriber, config: moq_json::snapshot::consumer::Config) -> Self {
 		Self {
 			base: track.broadcast().path.clone(),
-			inner: moq_json::snapshot::Consumer::new(track, config),
+			inner: moq_json::snapshot::Consumer::new(track, Default::default()),
 			_ext: std::marker::PhantomData,
 		}
 	}

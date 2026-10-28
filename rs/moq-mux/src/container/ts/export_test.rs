@@ -217,10 +217,10 @@ async fn custom_selected_catalog_drives_export_and_follow() {
 	}
 }
 
-/// A follower built after EOF keeps the explicit compressed encoding without keeping its reader.
+/// A follower built after EOF keeps an explicit non-default encoding without keeping its reader.
 #[tokio::test(start_paused = true)]
-async fn a_follower_keeps_hangz_after_catalog_eof() {
-	use crate::catalog::{CatalogFormat, hang::Catalog};
+async fn a_follower_keeps_msf_after_catalog_eof() {
+	use crate::catalog::CatalogFormat;
 	use std::task::Poll;
 
 	let origin = crate::source::produce_origin();
@@ -228,26 +228,24 @@ async fn a_follower_keeps_hangz_after_catalog_eof() {
 	let publish = || {
 		let broadcast = origin.create_broadcast("live").unwrap();
 		let track = broadcast
-			.create_track(hang::Catalog::COMPRESSED_NAME, hang::Catalog::default_track_info())
+			.create_track(moq_msf::DEFAULT_NAME, hang::Catalog::default_track_info())
 			.unwrap();
-		let mut config = moq_json::snapshot::Config::default();
-		config.compression = moq_json::Compression::Deflate;
-		let mut catalog = moq_json::snapshot::Producer::<Catalog>::new(track.clone(), config);
-		catalog
-			.update(moq_net::Timed::from(&Catalog::default()).at(moq_net::Timestamp::now()))
-			.unwrap();
+		let msf = moq_msf::Catalog::<()>::new(Vec::new()).to_json().unwrap();
+		let mut group = track.append_group().unwrap();
+		group.write_frame(moq_net::Timestamp::now(), msf).unwrap();
+		group.finish().unwrap();
 		broadcast
 			.announce(moq_net::origin::Route::default().with_epoch(epoch.clone()))
 			.unwrap();
-		(broadcast, track, catalog)
+		(broadcast, track)
 	};
-	let (broadcast, mut track, mut catalog) = publish();
-	catalog.finish().unwrap();
+	let (broadcast, mut track) = publish();
+	track.finish().unwrap();
 	let source = crate::source::resolved(&origin, "live").await;
-	let stream = source.catalog::<()>(CatalogFormat::HangZ).await.unwrap();
+	let stream = source.catalog::<()>(CatalogFormat::Msf).await.unwrap();
 	let mut export = Export::new(source, stream);
 	assert!(export.next().await.unwrap().is_none());
-	assert_eq!(export.catalog_format(), CatalogFormat::HangZ);
+	assert_eq!(export.catalog_format(), CatalogFormat::Msf);
 	// The routed subscription is released when the origin driver observes the local drop.
 	tokio::time::timeout(Duration::from_secs(1), async {
 		while track.subscription().is_some() {
@@ -255,18 +253,18 @@ async fn a_follower_keeps_hangz_after_catalog_eof() {
 		}
 	})
 	.await
-	.expect("EOF must release the first compressed reader");
-	drop((broadcast, track, catalog));
+	.expect("EOF must release the first MSF reader");
+	drop((broadcast, track));
 	let mut follower = super::Follower::new(export)
 		.unwrap()
 		.with_follow(Duration::from_secs(1));
-	let (broadcast, track, mut catalog) = publish();
-	// Only catalog.json.z exists, so falling back to the default encoding cannot subscribe.
+	let (broadcast, track) = publish();
+	// Only the MSF catalog exists, so falling back to the default encoding cannot subscribe.
 	tokio::time::timeout(
 		Duration::from_secs(1),
 		kio::wait(|waiter| {
 			if let Poll::Ready(Err(err)) = follower.poll_next(waiter) {
-				panic!("compressed return failed: {err:?}");
+				panic!("MSF return failed: {err:?}");
 			}
 			if track.subscription().is_some() {
 				Poll::Ready(())
@@ -276,10 +274,10 @@ async fn a_follower_keeps_hangz_after_catalog_eof() {
 		}),
 	)
 	.await
-	.expect("compressed catalog resubscribed");
-	assert_eq!(follower.export().catalog_format(), CatalogFormat::HangZ);
-	catalog.finish().unwrap();
-	drop((follower, broadcast, track, catalog));
+	.expect("MSF catalog resubscribed");
+	assert_eq!(follower.export().catalog_format(), CatalogFormat::Msf);
+	track.finish().unwrap();
+	drop((follower, broadcast, track));
 }
 
 #[tokio::test(start_paused = true)]
