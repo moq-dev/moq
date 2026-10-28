@@ -1,32 +1,30 @@
-# [S] Smoke tests the released packages
+# [S] Resolve the remaining external Smoke interoperability failures
 
 ## Goal
 
-The Smoke workflow passes on main. Its clients call only the API of the
-latest published release, so a main-only API never breaks it, and every
-red cell is fixed at its cause.
+The Smoke workflow passes on main, with every red cell fixed at its cause.
+Smoke clients continue to use the interfaces their installed artifacts expose.
 
 ## Plan
 
-Decided 2026-10-27 (maintainer), from
-[moq-dev/moq#6879](https://github.com/moq-dev/moq/pull/6879): smoke clients
-use only released APIs, and a release cut moves them onto new ones. Smoke
-has failed on main on every run since at least 2026-10-24 (for example
-[run 40591351260](https://github.com/moq-dev/moq/actions/runs/40591351260)).
+The bounded client fixes are prepared in
+[moq-dev/moq#6981](https://github.com/moq-dev/moq/pull/6981): Go uses the
+published `Route`, C uses the published status callback and frame reads,
+and Cloudflare's current Datagram gets its status and end-of-group fields.
+The release-cut guidance now keeps smoke clients aligned with published APIs.
+`freshness.sh` still enforces Go `@latest` and the newest `libmoq`.
 
-- Go (`test/smoke/clients/go/smoke.go`) calls `moq.AnnounceRoute`, and C
-  (`test/smoke/clients/c/subscribe.c`) calls `moq_connection_state` and
-  `moq_media_read`/`MOQ_DECODE_READ_FRAME`. None are on `release`. Revert
-  them to the released API.
-- Record in the release-cut process (CONTRIBUTING or the release skill,
-  wherever the cut's checklist lives) that the cut updates smoke clients to
-  the new API.
-- Cloudflare fails with "missing fields `end_of_group` and `status`" in
-  `moq_transport::serve::Datagram`. Find the cause and fix it.
-- Upstream Docker fails because the nix build lacks the `rs/moq-net-tests`
-  workspace member. [moq-dev/moq#6931](https://github.com/moq-dev/moq/pull/6931)
-  may fix it; confirm after it lands.
-- `freshness.sh` already enforces Go `@latest` and the newest `libmoq`;
-  keep it.
+The old Nix workspace-member failure is resolved by merged
+[moq-dev/moq#6931](https://github.com/moq-dev/moq/pull/6931).
+The latest [Smoke run](https://github.com/moq-dev/moq/actions/runs/40608138308)
+now builds the Docker relay successfully, then fails actual external
+interoperability: the second runner matrix passes 6 of 20 cells and fails 14.
+Read its uploaded reports and establish each remaining cause before changing
+any protocol behavior. This is no longer the missing-workspace-target fix.
+
+After the client PR lands, inspect the next normal Smoke run for the Go, C,
+and Cloudflare lanes, and investigate remaining red cells at their source.
+Do not weaken a lane or retry media exchange to make it pass. No release,
+Nightly, or Smoke dispatch was needed for the client fixes.
 
 Public API: none. Wire: none.
