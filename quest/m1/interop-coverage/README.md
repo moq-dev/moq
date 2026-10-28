@@ -46,7 +46,6 @@ coverage on `main` at `3ab6cbf81d`.
 
 - [JS namespace lifecycle](/quest/m1/interop-coverage/js-namespace-done.md) - the runner's moq-dev-js client moves to an `@moq/net` that withdraws namespaces by reset, so subscribe-namespace-lifecycle passes on Cloudflare draft-18 and aiomoqt
 - [JS subgroup data through imquic](/quest/m1/interop-coverage/js-imquic-objects.md) - the runner's moq-dev-js client moves to an `@moq/net` patch that writes data stream headers in one write, so data-subgroup-basic passes against imquic
-- [Late join and FETCH](/quest/m1/interop-coverage/late-join.md) - a late subscriber gets the current group from object 0, and a standalone FETCH returns a past group exactly
 
 ## Related
 

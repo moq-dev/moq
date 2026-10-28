@@ -854,7 +854,9 @@ export class Publisher {
 			const fillAbort = new AbortController();
 			const unsubscribed = new Promise<void>((resolve) => {
 				unsubscribe = () => {
-					fillAbort.abort(new Error("unsubscribed before the fill finished"));
+					fillAbort.abort(
+						new StreamError(StreamCode.Cancel, { message: "unsubscribed before the fill finished" }),
+					);
 					resolve();
 				};
 			});
@@ -1157,7 +1159,7 @@ export class Publisher {
 		const narrowed = () => {
 			if (excludes(bounds.peek(), group.sequence, slice)) {
 				if (!finished) live.retired = true;
-				rangeError = new Error("group excluded by range update");
+				rangeError = new StreamError(StreamCode.Cancel, { message: "group excluded by range update" });
 				hooks.releaseGroupReader(group, rangeError);
 				excluded.resolve();
 			}
@@ -1218,9 +1220,10 @@ export class Publisher {
 
 			// A pause or the subscriber leaving resets the stream, even mid-write: a write
 			// parked on flow control would otherwise hold the pause's answer indefinitely.
-			let left = false;
+			// CANCELLED, as the draft asks of a reset the subscriber caused: 0 would read as our failure.
+			let left: StreamError | undefined;
 			const cancelled = unsubscribed.then(() => {
-				left = true;
+				left = new StreamError(StreamCode.Cancel, { message: "unsubscribed while serving the group" });
 				return undefined;
 			});
 			// The subscription's budget, or an eviction of what is left to read, may give up on the
@@ -1232,7 +1235,7 @@ export class Publisher {
 			// Writing the group stops for the pause too; the drain below answers it without a reset.
 			const send = async (op: () => Promise<unknown>) => {
 				await race([write(op), cancelled, excluded.promise]);
-				if (left) throw new Error("unsubscribed while serving the group");
+				if (left) throw left;
 				if (rangeError) throw rangeError;
 			};
 
@@ -1260,7 +1263,7 @@ export class Publisher {
 						cancelled,
 						excluded.promise,
 					]);
-					if (left) throw new Error("unsubscribed while serving the group");
+					if (left) throw left;
 					if (rangeError) throw rangeError;
 					if (!read) break;
 					next = read.sequence + 1;
