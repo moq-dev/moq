@@ -247,6 +247,8 @@ export interface RequestSlot {
 	blind: number;
 	answer?: broadcast.Consumer;
 	readonly handles: Set<Once<Error | null>>;
+	/** Pending plain handles, each ending itself once synced discovery leaves it no route. */
+	readonly absent: Set<() => void>;
 	readonly route: Signal<Resolution | undefined>;
 	/** The front a detached slot took from the table, closed with its last handle. */
 	retired?: broadcast.Consumer;
@@ -620,7 +622,38 @@ class OriginState {
 				if (count > 0) counts.set(prefix, count);
 				else counts.delete(prefix);
 			});
+			this.settle(prefix);
 		};
+	}
+
+	// The prefixes whose pending plain requests may have lost their last reason to wait.
+	#unsettled = new Set<Path.Valid>();
+
+	/**
+	 * Recheck the pending plain requests under the absolute `prefix` once the current task
+	 * settles, so a session releasing its initial set and downgrading reads as one step.
+	 */
+	settle(prefix: Path.Valid): void {
+		if (this.#unsettled.size === 0) queueMicrotask(() => this.#settled());
+		this.#unsettled.add(prefix);
+	}
+
+	#settled(): void {
+		const prefixes = [...this.#unsettled];
+		this.#unsettled.clear();
+		for (const [path, slot] of [...(this.requests.peek() ?? [])]) {
+			if (slot.absent.size === 0 || !prefixes.some((prefix) => Path.hasPrefix(prefix, path))) continue;
+			for (const absent of [...slot.absent]) absent();
+		}
+	}
+
+	/** Whether every attached session discovers and none owes an initial set covering `path`. */
+	synced(path: Path.Valid): boolean {
+		const { total, discovery } = this.sessions.peek();
+		if (total === 0 || discovery < total) return false;
+		const snapshots = this.snapshots.peek();
+		for (const prefix of coveringPrefixes(path)) if (snapshots.has(prefix)) return false;
+		return true;
 	}
 
 	// The literal heads readers are watching, counted, as a trie: announcement streams and
@@ -1394,6 +1427,8 @@ export class Producer implements Table {
 			total: total + delta,
 			discovery: d + (discovery ? delta : 0),
 		}));
+		// Losing a session without discovery can leave every pending request synced.
+		this.#state.settle(Path.empty());
 	}
 
 	// Run `release` once, at the first of its own call or this derived handle's close, so a
@@ -1586,7 +1621,8 @@ export class Requesting {
 
 	/**
 	 * Settles on refusal, origin shutdown, or explicit close.
-	 * A plain request also ends when its accepted instance stops serving;
+	 * A plain request also ends when its accepted instance stops serving, and fails
+	 * `Unroutable` while pending once discovery syncs without a route for it;
 	 * an announced request waits for a later start, even when pinned.
 	 */
 	readonly closed: GetPromise<Error | null>;
@@ -1694,9 +1730,10 @@ export class Consumer {
 
 	/**
 	 * Resolve one publisher instance, or follow announcements when `announced` is true.
-	 * Every request owns discovery of its path until closed. A plain request reports absence
-	 * only after discovery syncs and can use a session without discovery. A follower requires
-	 * discovery and waits for its pinned instance to return instead of closing on a gap.
+	 * Every request owns discovery of its path until closed. A pending plain request fails
+	 * `Unroutable` once every session's discovery has synced without a route for it, and can
+	 * use a session without discovery instead. A follower requires discovery and waits for its
+	 * pinned instance to return instead of closing on a gap.
 	 */
 	request(path: Path.Valid, options: RequestOptions = {}): Requesting {
 		if (options.announced) return this.#following(path, options);
@@ -1831,6 +1868,7 @@ export class Consumer {
 			const created: RequestSlot = {
 				blind: 0,
 				handles: new Set(),
+				absent: new Set(),
 				route: new Signal(this.#state.route(path, {})),
 			};
 			slot = created;
@@ -1895,12 +1933,31 @@ export class Consumer {
 		// holder that only ever peeked would then pin a route that has already been retracted
 		// until it happened to read again. Following the route as well retires it promptly,
 		// and the memo makes the two paths agree: whichever runs first does the swap.
-		const unsubscribe = route.subscribe(own);
+		// A pending plain request reports absence, as Rust's request does, once discovery of
+		// its path has synced without a route for its instance. Sessions hold that sync from
+		// when the watch opens, so a fresh request waits for its peer's answer. A follower
+		// keeps waiting for a start, and a resolved request ends only with its instance.
+		const absent = () => {
+			if (released || source || closed.peek() !== undefined) return;
+			const resolution = route.peek();
+			if (resolution && (epoch === undefined || resolution.epoch === epoch)) return;
+			if (!this.#state.synced(path)) return;
+			closed.set(unroutable());
+			release();
+		};
+		if (!announced) taken.absent.add(absent);
 
-		return makeRequesting(relative, active, closed, () => {
+		const unsubscribe = route.subscribe((resolution) => {
+			own(resolution);
+			if (!announced) absent();
+		});
+
+		const release = () => {
 			// Releases this request's handle; the route itself belongs to the table.
+			if (released) return;
 			released = true;
 			unsubscribe();
+			taken.absent.delete(absent);
 			logical?.conclude();
 			logical = undefined;
 			handle?.close();
@@ -1935,7 +1992,10 @@ export class Consumer {
 				this.#state.releaseMaterialized(path);
 				this.#state.forget(path);
 			});
-		});
+		};
+
+		if (!announced) absent();
+		return makeRequesting(relative, active, closed, release);
 	}
 
 	/**

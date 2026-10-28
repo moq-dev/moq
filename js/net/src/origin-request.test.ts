@@ -618,6 +618,42 @@ test("a plain request owns its scoped discovery until closed", async () => {
 	origin.close();
 });
 
+test("a pending plain request fails Unroutable once its discovery syncs without a route", async () => {
+	const origin = new Producer();
+	const wire = wireOf(origin);
+	const detach = wire.attach(true);
+	const initialSets: (() => void)[] = [];
+	const stop = wire.interests((prefix, wanted) => {
+		if (wanted) initialSets.push(wire.snapshot(prefix));
+	});
+	const missing = origin.request(Path.from("room/missing"));
+	const found = origin.request(Path.from("room/found"));
+	const pinned = origin.request(Path.from("room/pinned"), { epoch: Epoch.mint() });
+	const follower = origin.request(Path.from("room/followed"), { announced: true });
+	// The initial set reports these before it lands, and nothing at all for the rest.
+	const route = wire.receive(Path.from("room/found"));
+	const other = wire.receive(Path.from("room/pinned"), { epoch: Epoch.mint() });
+	await settle();
+	for (const request of [missing, found, pinned, follower]) expect(request.closed.peek()).toBeUndefined();
+
+	for (const synced of initialSets) synced();
+	await settle();
+	for (const request of [missing, pinned]) {
+		const err = request.closed.peek();
+		expect(err).toBeInstanceOf(StreamError);
+		expect((err as StreamError).code).toBe(StreamCode.Unroutable);
+	}
+	expect(found.closed.peek()).toBeUndefined();
+	expect(follower.closed.peek()).toBeUndefined();
+
+	for (const request of [missing, found, pinned, follower]) request.close();
+	route.close();
+	other.close();
+	stop();
+	detach();
+	origin.close();
+});
+
 test("an announced request retains a selected handler's explicit unroutable refusal", async () => {
 	const origin = new Producer();
 	const path = Path.from("room/audio");

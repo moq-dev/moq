@@ -70,8 +70,8 @@ interface Reported {
  * session to the same origin and re-opens whatever is still watched.
  *
  * A peer that refuses or resets an announce request downgrades the whole session to blind
- * answers: gated requests stop waiting for an announcement, and later watches open nothing
- * on it.
+ * answers: plain requests subscribe through it without waiting for an announcement, and
+ * later watches open nothing on it.
  *
  * @internal
  */
@@ -183,10 +183,11 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 
 		// The origin's readers under the prefix wait on this request's initial set. Released
 		// once the session stream has synced, which it reports only after the last of those
-		// events is reported here.
+		// events is reported here. A closing stream also reads as synced, but a failure is not
+		// an answer: the loop below releases it with the downgrade, in one step.
 		const snapshot = originWire.snapshot(prefix);
 		const synced = interest.announced.synced.subscribe((synced) => {
-			if (synced) snapshot();
+			if (synced && interest.announced.closed.peek() === undefined) snapshot();
 		});
 		// A request with no initial set to wait for is synced before the listener exists.
 		if (interest.announced.synced.peek()) snapshot();

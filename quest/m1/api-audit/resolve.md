@@ -29,10 +29,11 @@ is private to sessions. `Requesting::is_queued` and the public `Routing` task ar
 gone; `Requesting` is the owned task. The stats reader uses it instead of its
 own retry on `is_queued`; the mux binding keeps its pinned `routed_broadcast`
 wait. Rust and JS have same-epoch follow-return coverage, and every JS request
-owns its discovery watch from creation. JS announcement-following no longer
-silently uses a blind peer. The existing `routed_broadcast` helper retains its
-route-change retry policy for the CLI, gateway, mux binding, and relay HTTP
-consumers. Its removal belongs to the remaining rollout.
+owns its discovery watch from creation. A pending plain JS request fails
+`Unroutable` once that discovery syncs with no route for it, matching Rust. JS
+announcement-following no longer silently uses a blind peer. The existing
+`routed_broadcast` helper retains its route-change retry policy for the CLI,
+gateway, mux binding, and relay HTTP consumers. Its removal belongs to the remaining rollout.
 
 The approved public method names have not rolled out. What remains:
 
@@ -46,13 +47,10 @@ The approved public method names have not rolled out. What remains:
   and `moqsrc` already follow through `moq_mux::Source::follow`. Do not add a
   new public route API or compatibility shim to make the privatization pass.
 - JS: expose `request(path, {epoch})` and `follow(path, {epoch})` instead of the
-  `announced` option and migrate actual callers. Make a one-instance request's
-  synced-absence verdict terminal, settling `closed` with `Unroutable`, matching
-  Rust and the bindings, while a follower remains open. A plain JS request
-  currently stays pending after its discovery syncs with no route, since
-  `Requesting.unroutable` is gone. The checkpoint covers pending
-  one-instance retry through a route gap without retargeting an already resolved
-  instance. Retain synchronous request peeks and path-local wakeups.
+  `announced` option and migrate actual callers. Keep the checkpoint's
+  synced-absence `Unroutable` for `request` while `follow` stays open, and its
+  pending retry through a route gap without retargeting a resolved instance.
+  Retain synchronous request peeks and path-local wakeups.
   `Producer` pass-throughs stay only where `Table` needs them.
 - Bindings: mirror `request` and `follow`, including the optional epoch, in
   the FFI and every actual wrapper/consumer. Regenerate from source, update
@@ -65,8 +63,8 @@ The approved public method names have not rolled out. What remains:
   epoch pin. No caller should hand-roll synced resolution or rely on a wall
   clock to decide table absence.
 
-Tests cover an announced but unwatched path over lite-05/06/07-wip, Rust synced
-absence, discovery retention and release, pinned follow return, no follower
+Tests cover an announced but unwatched path over lite-05/06/07-wip, Rust and JS
+synced absence, discovery retention and release, pinned follow return, no follower
 fallback on a blind peer, and unchanged explicit refusal. Finish the API and
 caller rollout with the same lifecycle and churn checks, then the required
 Nix gate and all-language interop.
