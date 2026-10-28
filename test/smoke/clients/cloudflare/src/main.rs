@@ -220,6 +220,8 @@ async fn publish_datagrams(
             group_id: sequence,
             object_id: 0,
             priority: 127,
+            status: moq_transport::data::ObjectStatus::NormalObject,
+            end_of_group: true,
             payload: payload(sequence, object_size),
             extension_headers: Default::default(),
         })?;

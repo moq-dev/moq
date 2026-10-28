@@ -6160,14 +6160,8 @@ fn server_accepts_a_session() {
 		unsafe { moq_session_request_peer_implementation(request, &mut implementation) },
 		0
 	);
-	assert_eq!(
-		borrowed_string(implementation.data, implementation.len),
-		Some(format!(
-			"moq-c/{} {}",
-			env!("CARGO_PKG_VERSION"),
-			moq_net::IMPLEMENTATION
-		))
-	);
+	// The default lite-06 session ignores the later Implementation parameter.
+	assert_eq!(borrowed_string(implementation.data, implementation.len), None);
 
 	let session_cb = States::new();
 	let session = id(unsafe { moq_session_request_accept(request, served, 0, Some(state_callback), session_cb.ptr) });

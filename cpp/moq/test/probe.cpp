@@ -225,6 +225,7 @@ int main() {
 
     moq::ServerConfig server_config;
     server_config.bind = "127.0.0.1:0";
+    server_config.versions = {"moq-lite-07-wip"};
     server_config.tls.generate = {"localhost"};
     server_config.publish = origin;
     auto server = ok(moq::Server::init(server_config), "server init");
@@ -234,6 +235,7 @@ int main() {
     // thread blocks on one at a time.
     moq::ClientConfig client_config;
     client_config.tls.insecure = true;
+    client_config.versions = server_config.versions;
     client_config.implementation = moq::IMPLEMENTATION;
     auto client = ok(moq::Client::init(client_config), "client init");
     auto accepting = server->accept();
@@ -275,8 +277,8 @@ int main() {
     CHECK(!reading.valid());
     CHECK(frame.has_value());
     CHECK(frame->payload == bytes("hello"));
-    // The default moq-lite-06 session drops received timestamps, so the track arrives untimed.
-    CHECK(!frame->timestamp_us.has_value());
+    // Lite-07 carries both the Implementation parameter and frame timestamps.
+    CHECK(frame->timestamp_us == 1000);
 
     // A continuation receives the next frame on the executor.
     {

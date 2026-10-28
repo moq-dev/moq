@@ -718,7 +718,7 @@ int main()
 	// audio from the tracks it names. moq-audio decodes the Opus to planar float at
 	// the OBS rate, stamped on the same broadcast timeline as the video.
 	{
-		TestRelay relay;
+		TestRelay relay(true, {"moq-transport-18"});
 		reset(relay.Url());
 		Publisher publisher(relay, "obs/test");
 		void *source = createSource();
