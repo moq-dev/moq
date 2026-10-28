@@ -688,6 +688,37 @@ fn rises_to_target() {
 	rises(&compare("rises", scenario, GATE), Duration::from_secs(5));
 }
 
+/// A path short of the target, behind a queue a second deep: each attempt that misses sits out
+/// past the longest BBR3 waits between its own probes, and the path opening up is still found
+#[test]
+fn backs_off_unreachable_target() {
+	let _guard = subscribe();
+	let opens = Duration::from_secs(20);
+	let outcome = run(&Scenario {
+		rates: vec![(Duration::ZERO, 375_000), (opens, 1_500_000)],
+		buffer: 375_000,
+		duration: Duration::from_secs(25),
+		..Scenario::default()
+	});
+	outcome.report("backoff");
+
+	// When each attempt began: probe bytes in a sample after one without any
+	let mut starts = Vec::new();
+	for pair in outcome.samples.windows(3) {
+		let [before, quiet, sent] = pair else { unreachable!() };
+		if before.at < opens && quiet.redundant == before.redundant && sent.redundant > quiet.redundant {
+			starts.push(sent.at);
+		}
+	}
+	assert!(starts.len() > 2, "attempts began at {starts:?}");
+	for gap in starts.windows(2).map(|w| w[1] - w[0]) {
+		// The samples are 100ms apart
+		assert!(gap > Duration::from_millis(2900), "attempts began at {starts:?}");
+	}
+	let rise = outcome.rise(opens).expect("reached the target");
+	assert!(rise <= RISE, "reached the target {rise:?} after the path opened");
+}
+
 /// Below the media's bitrate groups expire, and none is resent after its reset
 ///
 /// BBR keeps a queue a second deep from filling, so a queue of one BDP checks the overflow.
