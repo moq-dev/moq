@@ -473,6 +473,9 @@ impl Subscriber {
 
 	/// Decode one datagram body and hand it to the matching subscription's producer.
 	fn route_datagram(&self, payload: bytes::Bytes) -> Result<(), Error> {
+		if payload.len() > lite::Datagram::MAX_SIZE {
+			return Ok(());
+		}
 		// Write through the map rather than cloning the entry out: a `TrackEntry` clone
 		// is a handful of atomic bumps on every datagram, and a producer held past its
 		// removal would keep the track (its cached groups, its stats subscription) alive.
@@ -3897,19 +3900,19 @@ mod tests {
 			},
 		);
 
-		let payload = |sequence| {
+		let payload = |sequence, size| {
 			lite::Datagram {
 				subscribe: 7,
 				sequence,
 				timestamp: Some(sequence),
-				payload: bytes::Bytes::from_static(b"x"),
+				payload: bytes::Bytes::from(vec![0; size]),
 				inflated: None,
 				ietf: None,
 			}
 			.encode_bytes(VERSION)
 			.unwrap()
 		};
-		subscriber.route_datagram(payload(1)).unwrap();
+		subscriber.route_datagram(payload(1, 1)).unwrap();
 		assert_eq!(
 			received
 				.recv_datagram()
@@ -3921,8 +3924,20 @@ mod tests {
 			1
 		);
 
+		let oversized = payload(2, 1198);
+		assert_eq!(oversized.len(), 1201);
+		subscriber.route_datagram(oversized).unwrap();
+		assert!(
+			received.recv_datagram().now_or_never().is_none(),
+			"oversized body was delivered"
+		);
+		let boundary = payload(3, 1197);
+		assert_eq!(boundary.len(), 1200);
+		subscriber.route_datagram(boundary).unwrap();
+		assert_eq!(received.recv_datagram().await.unwrap().unwrap().sequence, 3);
+
 		subscriber.remove_subscribe(7);
-		subscriber.route_datagram(payload(2)).unwrap();
+		subscriber.route_datagram(payload(4, 1)).unwrap();
 		// Dropping the last producer is an abrupt teardown, so the track resolves with
 		// `Dropped` rather than parking. A route that outlived the removal would keep the
 		// producer alive and leave this pending forever.

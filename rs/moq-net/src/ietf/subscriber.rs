@@ -243,6 +243,9 @@ impl State {
 			if let Some(producer) = track.producer {
 				let _ = producer.abort(Error::Stream(crate::StreamError::Session(SessionError::Cancel)));
 			}
+			if let Ok(mut fill) = track.fill.write() {
+				fill.cancel();
+			}
 		}
 		for (_, producer) in self.lingering.drain() {
 			let _ = producer.abort(Error::Stream(crate::StreamError::Session(SessionError::Cancel)));
@@ -13702,6 +13705,32 @@ mod stitch_tests {
 
 		h.subscriber.remove_subscribe(REQUEST).expect("subscribed");
 		assert!(matches!(group.read_frame().await, Err(Error::Cancel)));
+	}
+
+	/// Closing locally cancels a filled head whose live tail never arrived.
+	#[moq_clock::test]
+	async fn an_unclaimed_head_is_cancelled_when_the_session_closes() {
+		let h = Harness::new(
+			Fill::Serving(Some(Timescale::MICRO)),
+			vec![fill_stream(SEQUENCE, &[b"head-0"])],
+		);
+		let mut consumer = h.track.subscribe(None);
+		let mut fill = h.stream().await;
+		h.subscriber.clone().recv_fill(&mut fill).await.expect("fill");
+		let mut group = consumer.recv_group().await.unwrap().unwrap();
+		h.subscriber.close();
+		let result = group.read_frame().await;
+		assert!(
+			matches!(
+				result,
+				Err(Error::Stream(crate::StreamError::Session(SessionError::Cancel)))
+			),
+			"{result:?}"
+		);
+		assert!(
+			matches!(*h.fill.read(), Fill::Done),
+			"the cancelled head stays retained"
+		);
 	}
 
 	/// A publisher that serves a head and then opens a whole group for the same sequence

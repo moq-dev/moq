@@ -98,7 +98,8 @@ Still red from `main`, ours:
 - moq-dev-js `data-subgroup-basic` against libquicr never sees the track
   end, while moq-dev-rs passes. Not yet traced.
 - Every `js-web` publisher cell behind a joining FETCH (imquic, MOQtail
-  draft-22, aiomoqt, red5) waits on [JavaScript FETCH](/quest/m1/js-fetch.md).
+  draft-22, aiomoqt, red5) was refused its FETCH; JS now serves cached and
+  draft-18 joining FETCH, so rerun them.
 
 Theirs, reported or waiting on others:
 
@@ -151,5 +152,4 @@ backport, so it predates that fix. Classify it.
 - [Runner client bump](/quest/m2/release/runner-client-bump.md) - the runner's Rust client moves to the cut and its API
 - [Runner teardown](/quest/m3/interop-runner-approval.md) - the runner's moq.dev clients move to the withdrawing `close()` once it ships
 - [Moxygen minimal interop](/quest/m1/smoke-moxygen.md) - Moxygen's filter type, waiting upstream
-- [JavaScript FETCH](/quest/m1/js-fetch.md) - the JS publisher serves FETCH, which most red `js-web` publisher cells need
 - [Interop coverage](/quest/m1/interop-coverage/README.md) - the runner cases whose red cells this audit classifies

@@ -691,6 +691,7 @@ async function servedSubscription(
 		// Frame payloads written into every served group. Frame bounds need draft-06.
 		frames?: string[];
 		version?: Version;
+		maxDatagramSize?: number;
 		// Answer the subscription with a front's broadcast, as an application forwarding a
 		// routed one does, so the track reads through the front's serving route.
 		routed?: boolean;
@@ -699,6 +700,8 @@ async function servedSubscription(
 	const version = options.version ?? Version.DRAFT_05;
 	const frames = options.frames ?? ["hello"];
 	const pair = createMockTransportPair(version === Version.DRAFT_06 ? ALPN_06 : ALPN_05);
+	if (options.maxDatagramSize !== undefined)
+		Object.defineProperty(pair.server.datagrams, "maxDatagramSize", { value: options.maxDatagramSize });
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
 
@@ -950,6 +953,31 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 			await sub.close();
 		}
 	});
+}
+
+for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
+	for (const transport of [900, 1400]) {
+		test(`lite ${version}: datagram bodies fit the wire and ${transport}-byte transport`, async () => {
+			const installed = new Manual().install();
+			const sub = await servedSubscription({ version, startGroup: 0, maxDatagramSize: transport });
+			const reader = sub.datagrams.getReader();
+			const max = Math.min(1200, transport);
+			try {
+				// Each body has three one-byte varints before its payload.
+				sub.track.insertDatagram(0, Timestamp.fromMillis(0), new Uint8Array(max - 2));
+				sub.track.insertDatagram(1, Timestamp.fromMillis(1), new Uint8Array(max - 3));
+				const next = await reader.read();
+				if (next.done) throw new Error("datagrams ended early");
+				expect(next.value.byteLength).toBe(max);
+				expect((await DatagramMessage.decode(next.value, version, () => ({ timed: true }))).sequence).toBe(1);
+			} finally {
+				await reader.cancel();
+				await sub.close();
+				await sub.serving;
+				installed.close();
+			}
+		});
+	}
 }
 
 test.each([Version.DRAFT_06, Version.DRAFT_07])("lite %s: datagrams honor group and frame bounds", async (version) => {
