@@ -51,6 +51,13 @@ Rejected hosts (decided 2026-10-22, maintainer): the merge queue runner, the
 moq.pro load nodes, and a dedicated bare-metal host; revisit the last only if
 A/A runs show the hosted noise floor hides regressions worth catching.
 
+Decided 2026-10-27 (maintainer): if A/A runs show that, first try
+[CodSpeed](https://codspeed.io)'s CPU-simulation instrument on the pure-CPU
+Criterion microbenchmarks, before a bare-metal host. It counts instructions on
+the hosted runners, so its noise is near zero, and it is free for open source.
+It does not measure syscalls, I/O, or contention, so the relay load, uring,
+transport, and session sweeps stay on the paired hosted comparison.
+
 ## Related
 
 - [Benchmark reporting](/bench/README.md) - the paired comparison and the trend table
