@@ -172,7 +172,6 @@ removed).
 - [App-limited BBR3 estimate ages](/quest/m1/bbr-app-limited.md) - an app-limited BBR3 estimate falls within seconds after the path drops
 - [Bindings name every session code](/quest/m1/ffi-malformed-auth-kind.md) - MALFORMED_AUTH_TOKEN and its siblings reach moq-ffi, moq-c, and the wrappers
 - [Unbounded groups](/quest/m1/unbounded-groups/README.md) - groups and frames lose their size caps; the cache sheds parts of a group under pressure and refills the holes in place
-- [Relay demand gaps](/quest/m1/relay-demand-gaps.md) - pre-07 backlog, IETF warm-relay newcomer, and double upstream pulls are fixed or ruled out
 - [Segment cuts hold bounded state](/quest/m1/segmenter-cuts.md) - the HLS segmenter keeps one pending cut, so `styp` input without sync samples cannot grow it
 - [Next Object on a cold Rust copy](/quest/m1/next-object-cold-copy.md) - a join after an upstream group report starts at the first frame received, never skipping
 - [Container consumers buffer by backpressure](/quest/m1/container-backpressure.md) - Rust and JS container consumers decode ahead only a byte budget, so a hostile publisher cannot grow them
