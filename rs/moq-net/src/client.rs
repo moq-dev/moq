@@ -835,11 +835,9 @@ mod tests {
 
 		// Verify the client offered every configured moq-lite version over the `moql` SETUP.
 		let mut setup_bytes = Bytes::from(fake.control_writes());
-		let setup = crate::coding::decode_buf(
-			&mut setup_bytes,
-			Version::Lite(lite::Version::Lite02),
-			setup::Client::decode,
-		)
+		let setup = crate::coding::decode_buf(&mut setup_bytes, Version::Lite(lite::Version::Lite02), |r, v| {
+			setup::Client::decode(r, v)
+		})
 		.unwrap();
 		let advertised: Vec<Version> = setup.versions.iter().map(|v| Version::try_from(*v).unwrap()).collect();
 		assert_eq!(

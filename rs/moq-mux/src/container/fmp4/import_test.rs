@@ -1414,11 +1414,6 @@ async fn test_msf_catalog_roundtrip() {
 	assert!(matches!(audio.container, Container::Cmaf { .. }));
 }
 
-/// A catalog publishing HLS records.
-fn hls() -> crate::catalog::Config {
-	crate::catalog::Config::default().with_hls(crate::hls::Config::default())
-}
-
 /// Subscribe to `track`'s HLS records, before the catalog may advertise them.
 async fn subscribe(consumer: &moq_net::broadcast::Consumer, track: &str) -> crate::hls::Consumer {
 	let hls = hang::catalog::Hls::new(hang::hls::default_name(track), std::time::Duration::ZERO);
@@ -1451,7 +1446,7 @@ async fn groups(records: &mut crate::hls::Consumer) -> Vec<(u64, u64)> {
 async fn import_populates_the_hls_records() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast, hls()).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 
 	let data = include_bytes!("test_data/bbb.mp4");
@@ -1812,7 +1807,7 @@ async fn segmented_source_indexes_one_group_per_record_in(passthrough: bool) {
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast, hls()).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve()).with_passthrough(passthrough);
 	fmp4.decode(&init).unwrap();
 
@@ -1867,7 +1862,7 @@ async fn records_with_skew(video_offset_us: i64, passthrough: bool) -> (Vec<(u64
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast, hls()).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve()).with_passthrough(passthrough);
 	fmp4.decode(&init).unwrap();
 
@@ -2317,7 +2312,7 @@ async fn import_session(chunks: &[Vec<u8>]) -> Imported {
 	let (init, _, _) = bbb_init();
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast, hls()).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 	fmp4.decode(&init).unwrap();
 
@@ -3464,4 +3459,84 @@ fn colr_nclc_keeps_its_code_points() {
 		(Some(9), Some(16), Some(9), None)
 	);
 	assert!(super::colr_color(&mp4_atom::Colr::new(300, 1, 1, false).unwrap()).is_err());
+}
+
+/// A declared boundary waits for decodable video; dependent fragments stay in the old group.
+#[tokio::test(start_paused = true)]
+async fn declared_boundaries_wait_for_sync_samples() {
+	for passthrough in [false, true] {
+		for explicit in [false, true] {
+			let (init, (video_id, video_scale), _) = bbb_init();
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let consumer = broadcast.consume();
+			let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+			let mut import = super::Import::new(broadcast, catalog.reserve()).with_passthrough(passthrough);
+			import.decode(&init).unwrap();
+			let snapshot = catalog.snapshot();
+			let name = snapshot.video.renditions.keys().next().unwrap();
+			let mut track = consumer.track(name).unwrap().subscribe(replay()).await.unwrap();
+			for (index, sync) in [true, false, false, true, false, true].into_iter().enumerate() {
+				if index == 1 {
+					if explicit {
+						import.cut().unwrap();
+					} else {
+						import.decode(&styp()).unwrap();
+					}
+				}
+				let fragment = super::encode_fragment(
+					info(video_id, video_scale, index as u32),
+					&[sample(index as u64 * 1_000_000, sync, Some(1_000_000))],
+				)
+				.unwrap();
+				import.decode(&fragment).unwrap();
+			}
+			import.finish().unwrap();
+			let marker = usize::from(!passthrough);
+			assert_eq!(
+				drain_group_frames(&mut track),
+				vec![3 + marker, 2 + marker, 1 + marker],
+				"passthrough {passthrough}, explicit {explicit}"
+			);
+		}
+	}
+}
+
+#[tokio::test(start_paused = true)]
+async fn declared_boundaries_do_not_split_passthrough_fragments() {
+	for passthrough in [false, true] {
+		let (init, (video_id, video_scale), _) = bbb_init();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve()).with_passthrough(passthrough);
+		import.decode(&init).unwrap();
+		let snapshot = catalog.snapshot();
+		let name = snapshot.video.renditions.keys().next().unwrap();
+		let mut track = consumer.track(name).unwrap().subscribe(replay()).await.unwrap();
+		let tick = video_scale.as_u64() / 24;
+		let non_sync = 0x0001_0000;
+		import
+			.decode(&video_fragment(video_id, 0, tick, &[(0, 0, 0xA)]))
+			.unwrap();
+		import.cut().unwrap();
+		import
+			.decode(&video_fragment(
+				video_id,
+				tick,
+				tick,
+				&[(0, non_sync, 0xB), (0, 0, 0xC)],
+			))
+			.unwrap();
+		import
+			.decode(&video_fragment(video_id, 3 * tick, tick, &[(0, non_sync, 0xD)]))
+			.unwrap();
+		import
+			.decode(&video_fragment(video_id, 4 * tick, tick, &[(0, 0, 0xE)]))
+			.unwrap();
+		import.finish().unwrap();
+		assert_eq!(
+			drain_group_frames(&mut track),
+			if passthrough { vec![3, 1] } else { vec![3, 3, 2] }
+		);
+	}
 }

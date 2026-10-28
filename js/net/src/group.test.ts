@@ -9,6 +9,36 @@ import { Timestamp } from "./time.ts";
 
 const dec = new TextDecoder();
 
+test("a transport offset costs no frame storage and proves no group start", async () => {
+	const offset = MAX_GROUP_FRAMES + 7;
+	const producer = new Producer(0);
+	hooks.startGroup(producer, offset);
+	const early = producer.mirror();
+	expect(hooks.groupStarted(early)).toBe(false);
+	expect(hooks.groupTimestamp(early)).toBeUndefined();
+	for (let i = 0; i < MAX_GROUP_FRAMES; i++)
+		producer.writeFrame({ payload: new Uint8Array([i % 256]), timestamp: Timestamp.fromMillis(i) });
+	const late = producer.mirror();
+	for (const reader of [early, late]) {
+		expect(hooks.groupStarted(reader)).toBe(true);
+		expect(hooks.groupTimestamp(reader)).toBeUndefined();
+		for (let i = 0; i < MAX_GROUP_FRAMES; i++) {
+			const frame = await reader.readFrameSequence();
+			expect(frame?.sequence).toBe(offset + i);
+			expect(frame?.payload[0]).toBe(i % 256);
+		}
+		reader.close();
+	}
+	expect(() => producer.writeFrame(textFrame("overflow"))).toThrow(GroupTooLarge);
+});
+
+test("a compressed group cannot start without its dictionary prefix", () => {
+	const producer = new Producer(0);
+	hooks.startGroup(producer, 5);
+	expect(() => hooks.bindGroupCompression(producer, true)).toThrow("compressed group lacks its prefix");
+	producer.finish();
+});
+
 test("reordered frames keep the highest group PTS in live and later mirrors", () => {
 	const installed = new Manual().install();
 	try {

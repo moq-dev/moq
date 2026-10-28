@@ -747,7 +747,7 @@ impl Subscriber {
 	pub(super) async fn serve_publish(
 		&mut self,
 		mut stream: Stream<Transport, Version>,
-		msg: ietf::Publish<'_>,
+		msg: ietf::Publish<'static>,
 	) -> Result<(), Error> {
 		let key: TrackKey = (msg.track_namespace.clone(), msg.track_name.as_ref().into());
 		let info = accepted_info(&msg.properties, self.version);
@@ -1297,7 +1297,7 @@ mod tests {
 			.expect("the subscriber sent nothing")
 	}
 
-	async fn write<M: ietf::Message + std::fmt::Debug>(stream: &mut PeerStream, id: u64, msg: &M) {
+	async fn write<'m, M: ietf::Message<'m> + std::fmt::Debug>(stream: &mut PeerStream, id: u64, msg: &M) {
 		stream.writer.varint(id).await.unwrap();
 		stream.writer.encode(msg).await.unwrap();
 		settle().await;
@@ -1429,7 +1429,7 @@ mod tests {
 			let mut subscriber = self.subscriber.clone();
 			let version = self.version;
 			moq_clock::sim::spawn(async move {
-				let msg: ietf::Publish = body.message(version).unwrap();
+				let msg = body.message::<ietf::Publish>(version).unwrap().into_owned();
 				let _ = subscriber.serve_publish(ours, msg).await;
 			});
 			let (id, body) = read(&mut stream).await;

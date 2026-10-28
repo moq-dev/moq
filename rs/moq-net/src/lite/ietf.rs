@@ -316,7 +316,7 @@ impl Records {
 #[derive(Clone, Debug, Default)]
 pub struct TrackProperties(pub Option<Arc<crate::model::object::TrackProperties>>);
 
-impl Message for TrackProperties {
+impl<'a> Message<'a> for TrackProperties {
 	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::TrackInfo);
 	fn encode_msg(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
 		// A track published over moq-lite is a lone 0.
@@ -328,7 +328,7 @@ impl Message for TrackProperties {
 		Ok(())
 	}
 
-	fn decode_msg(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, _: Version) -> Result<Self, DecodeError> {
 		let code = r.varint()?;
 		if code == 0 {
 			// A track published over moq-lite has no moq-transport properties.

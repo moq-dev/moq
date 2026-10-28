@@ -10,9 +10,9 @@ that can't speak MoQ, records it as HLS files, or both. `moq import hls` pulls
 a remote HLS master or media playlist into a broadcast.
 
 ```bash
-# Publish with HLS records, then serve. Players open
+# Publish, then serve. Players open
 # http://localhost:8089/my-stream.hang/master.m3u8 (or manifest.mpd for DASH)
-ffmpeg -re -i input.mp4 -c copy -f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer -frag_duration 1000 - | moq --connect https://relay.example.com/anon --broadcast my-stream.hang import --hls fmp4
+ffmpeg -re -i input.mp4 -c copy -f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer -frag_duration 1000 - | moq --connect https://relay.example.com/anon --broadcast my-stream.hang import fmp4
 moq --connect https://relay.example.com/anon --broadcast my-stream.hang export hls --listen '[::]:8089'
 
 # Record into ./recording, ending once the broadcast finishes
@@ -49,7 +49,7 @@ Media is never transcoded, so the player must support the publisher's codecs.
 
 What that means for you:
 
-- **Opt in at the publisher.** Only a rendition whose catalog entry carries `hls` gets a playlist; nothing publishes it by default. Pass `--hls` to `moq import` (the stdin formats, `hls`, `rtsp`, and `capture`), or enable it with `moq_mux::catalog::Config::with_hls` in Rust. Without a duration hint, a rendition declares its records after its first segment.
+- **The publisher writes the records.** Only a rendition whose catalog entry carries `hls` gets a playlist. Rust publishers built on `moq-mux` (the CLI, the RTMP, SRT, and WebRTC gateways, and the native bindings) write them by default, and `moq_mux::catalog::Config::with_hls(None)` turns them off; `@moq/publish` does not write them yet. Without a duration hint, a rendition declares its records after its first segment.
 - **Each rendition cuts its own segments.** A group starts a segment when its pts falls in a later multiple of the segment duration than the previous group's, and each rendition numbers its own segments. Players match renditions by timestamp, so nothing coordinates the ladder: segments line up wherever keyframes share timestamps, a rendition that starts late lines up from its next multiple, and audio lines up with video whose keyframes sit on those multiples. The DASH manifest leaves `segmentAlignment` out. A break in one rendition's content starts a discontinuity on that rendition alone; `EXT-X-PROGRAM-DATE-TIME`, written after every discontinuity when the catalog has a clock, lets players resync.
 - **Idle renditions cost nothing**, and a segment is servable for as long as the relay's [cache](/bin/relay/config#cache) retains it. Keep `--window` (the playlist length, default 16 s) within that retention.
 - **Live joins cost the window.** The exporter reads the record checkpoint and lists at most 256 segments.

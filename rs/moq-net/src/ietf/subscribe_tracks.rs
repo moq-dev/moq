@@ -44,7 +44,7 @@ pub struct SubscribeTracks {
 	pub authorization_token: Option<RequestToken>,
 }
 
-impl Message for SubscribeTracks {
+impl<'a> Message<'a> for SubscribeTracks {
 	const ID: u64 = 0x51;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -65,7 +65,7 @@ impl Message for SubscribeTracks {
 		Ok(())
 	}
 
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
 		let prefix = decode_namespace(r)?;
 		// From draft-22 any parameter a SUBSCRIBE takes is legal here (section 3.6.2);
@@ -132,7 +132,7 @@ pub struct PublishSkipped<'a> {
 	pub track_name: Cow<'a, str>,
 }
 
-impl Message for PublishSkipped<'_> {
+impl<'a> Message<'a> for PublishSkipped<'a> {
 	const ID: u64 = 0x0F;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
@@ -141,9 +141,9 @@ impl Message for PublishSkipped<'_> {
 		Ok(())
 	}
 
-	fn decode_msg(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, _: Version) -> Result<Self, DecodeError> {
 		let suffix = decode_namespace(r)?;
-		let track_name = Cow::Owned(r.string()?);
+		let track_name = Cow::Borrowed(r.str()?);
 		Ok(Self { suffix, track_name })
 	}
 }
@@ -152,16 +152,16 @@ impl Message for PublishSkipped<'_> {
 mod tests {
 	use super::*;
 
-	fn encode<M: Message>(msg: &M, version: Version) -> Vec<u8> {
+	fn encode<'m, M: Message<'m>>(msg: &M, version: Version) -> Vec<u8> {
 		let mut buf = Vec::new();
 		msg.encode_msg(&mut Encoder::new(&mut buf, version.into()), version)
 			.unwrap();
 		buf
 	}
 
-	fn decode<M: Message>(bytes: &[u8], version: Version) -> Result<M, DecodeError> {
-		let mut buf = bytes::Bytes::from(bytes.to_vec());
-		crate::coding::decode_buf(&mut buf, version, M::decode_msg)
+	fn decode<'m, M: Message<'m>>(bytes: &'m [u8], version: Version) -> Result<M, DecodeError> {
+		let mut buf = bytes;
+		crate::coding::decode_from(&mut buf, version, |r, v| M::decode_msg(r, v))
 	}
 
 	fn paused() -> SubscribeTracks {
@@ -263,7 +263,8 @@ mod tests {
 				suffix: Path::from_static("cam"),
 				track_name: "video".into(),
 			};
-			let decoded: PublishSkipped = decode(&encode(&msg, version), version).unwrap();
+			let wire = encode(&msg, version);
+			let decoded: PublishSkipped = decode(&wire, version).unwrap();
 			assert_eq!(decoded.suffix.as_str(), "cam", "{version}");
 			assert_eq!(decoded.track_name, "video", "{version}");
 		}
