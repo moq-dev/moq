@@ -1,27 +1,26 @@
-# [S] Backport the MKV, FLV, and VP9 import fixes to release
+# [S] Publish the MKV, FLV, and VP9 import backport
 
 ## Goal
 
-moq-mux on `release` refuses the malformed MKV, FLV, and VP9 input that
-[moq-dev/moq#6908](https://github.com/moq-dev/moq/pull/6908) made fail loud on
-main, instead of wrapping timestamps, panicking, or silently dropping tracks,
-and publishes a patch release.
+Condition: [moq-dev/moq#6974](https://github.com/moq-dev/moq/pull/6974)
+has merged into `release`, and a moq-mux patch containing it has published.
+The published muxer refuses malformed MKV/FLV input and preserves VP9
+keyframe dimensions through 65536.
 
 ## Plan
 
-Decided 2026-10-27 (maintainer): one PR against `release` per backport, in m0.
+The release implementation is ready for review in
+[moq-dev/moq#6974](https://github.com/moq-dev/moq/pull/6974), backporting
+[moq-dev/moq#6908](https://github.com/moq-dev/moq/pull/6908) on branch
+`codex/backport-mux-import` without changing the public Rust API or MoQ wire.
 
-The bugs on `release` (as of 6ce67943f7):
+Both release CI halves and all 1007 mux tests pass. Patch semver checking
+passes 223 checks. The release changelog calls out that unsupported MKV
+audio/video and FLV codecs now fail import instead of being dropped.
 
-- `vp9/mod.rs:52,136-137`: `u16` width and height wrap at 65536.
-- `flv/import.rs:220,364`: unsupported codecs are warned about and dropped.
-- `mkv/import.rs:200`: `HierarchyProblems` allowed.
-- `mkv/import.rs:246-247`: a TimestampScale of 0 accepted.
-- `mkv/import.rs:298`: unsupported tracks skipped with a log line.
-- `mkv/import.rs:314`: a duplicate TrackNumber is not refused.
-- `mkv/import.rs:417`: the cluster timestamp plus relative timestamp overflows.
-
-Port each fix with its test. A dropped track that becomes an error is a
-behavior change for `release` users; call it out in the changelog.
+Remaining work is the authorized merge and patch publication. Check that the
+published `moq-mux-v*` tag contains the backport's commit and that its release
+workflow succeeded, then remove this quest. The maintainer requested no
+merges or releases during the current PR-production sweep.
 
 Public API: none. Wire: none.
