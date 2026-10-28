@@ -22,3 +22,13 @@ tokio = { workspace = true, features = ["rt"] }
 
 [lints]
 workspace = true
+
+# Declared rather than discovered: the Nix dependency-only build stubs each
+# declared target, and a package with none fails to load the workspace.
+[[test]]
+name = "announce_allocs"
+path = "tests/announce_allocs.rs"
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"
