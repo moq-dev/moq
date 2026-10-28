@@ -1,7 +1,0 @@
-error: `label` lives across `wait!(B => ..)`, so it is stored in `MState::B`: give it a type, `let label: Type`
-  --> src/lib.rs:51:7
-   |
-51 |         let label = format!("m-{a}");
-   |             ^^^^^
-
-error: could not compile `synth` (lib) due to 1 previous error

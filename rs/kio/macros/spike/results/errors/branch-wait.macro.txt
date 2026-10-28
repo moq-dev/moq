@@ -1,7 +1,0 @@
-error: `wait!` must start a top-level statement: `let x: T = wait!(Step => poll)?;`
-  --> src/lib.rs:52:27
-   |
-52 |         let b: u64 = if a > 1 { wait!(B => self.src.poll_next(waiter))? } else { 0 };
-   |                                 ^^^^
-
-error: could not compile `synth` (lib) due to 1 previous error

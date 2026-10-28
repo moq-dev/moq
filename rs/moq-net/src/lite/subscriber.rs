@@ -7310,7 +7310,21 @@ struct TrackInfoFetch {
 	state: TrackInfoState,
 }
 
-#[kio::machine(self.state: TrackInfoState)]
+enum TrackInfoState {
+	Open,
+	Send {
+		stream: Stream<Transport, Version>,
+	},
+	Read {
+		stream: Stream<Transport, Version>,
+	},
+	/// Reading the TRACK_PROPERTIES the `ietf` extension sends after TRACK_INFO.
+	Properties {
+		stream: Stream<Transport, Version>,
+		info: track::Info,
+	},
+}
+
 impl TrackInfoFetch {
 	fn new(serve: &TrackServe) -> Self {
 		let session = serve.subscriber.session.clone();
@@ -7318,7 +7332,7 @@ impl TrackInfoFetch {
 			validity: serve.validity.start(),
 			closed: session.clone(),
 			session,
-			state: TrackInfoState::Start,
+			state: TrackInfoState::Open,
 		}
 	}
 
@@ -7327,9 +7341,7 @@ impl TrackInfoFetch {
 		serve: &TrackServe,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<(track::Info, HeldTrack), Error>> {
-		#[every_poll]
 		self.validity.check(waiter)?;
-		#[every_poll]
 		if serve
 			.route
 			.as_ref()
@@ -7337,53 +7349,72 @@ impl TrackInfoFetch {
 		{
 			return Poll::Ready(Err(Error::Unroutable));
 		}
-		#[every_poll]
 		let mut cx = waiter.context();
+		loop {
+			match &mut self.state {
+				TrackInfoState::Open => {
+					let mut stream = ready!(Stream::poll_open_request(
+						&mut self.session,
+						serve.subscriber.version,
+						&mut cx
+					))?;
+					stream = stream.with_stats(serve.subscriber.origin.stats());
+					stream.writer.buffer(&lite::ControlType::Track)?;
+					stream.writer.buffer(&lite::Track {
+						epoch: serve.epoch.clone(),
+						broadcast: serve.path.clone(),
+						track: serve.name.as_str().into(),
+					})?;
+					self.state = TrackInfoState::Send { stream };
+				}
+				TrackInfoState::Send { stream } => {
+					ready!(stream.writer.poll_flush(&mut cx))?;
+					let TrackInfoState::Send { stream } = std::mem::replace(&mut self.state, TrackInfoState::Open)
+					else {
+						unreachable!()
+					};
+					self.state = TrackInfoState::Read { stream };
+				}
+				TrackInfoState::Read { stream } => {
+					if let Poll::Ready(err) = self.closed.poll_closed(&mut cx) {
+						return Poll::Ready(Err(crate::lite::error::from_transport(err)));
+					}
+					let ietf = ready!(serve.subscriber.peer_setup.poll_ietf(waiter));
+					let info = ready!(stream.reader.poll_decode::<lite::TrackInfo>(&mut cx))?;
+					let TrackInfoState::Read { stream } = std::mem::replace(&mut self.state, TrackInfoState::Open)
+					else {
+						unreachable!()
+					};
 
-		let mut stream: Stream<Transport, Version> = wait!(Open => Stream::poll_open_request(
-			&mut self.session,
-			serve.subscriber.version,
-			&mut cx
-		))?
-		.with_stats(serve.subscriber.origin.stats());
-		stream.writer.buffer(&lite::ControlType::Track)?;
-		stream.writer.buffer(&lite::Track {
-			epoch: serve.epoch.clone(),
-			broadcast: serve.path.clone(),
-			track: serve.name.as_str().into(),
-		})?;
-		wait!(Send => stream.writer.poll_flush(&mut cx))?;
-
-		let (ietf, info) = wait!(Read => {
-			if let Poll::Ready(err) = self.closed.poll_closed(&mut cx) {
-				return Poll::Ready(Err(crate::lite::error::from_transport(err)));
+					// Publisher Max Age rides on the wire, so the local retention
+					// window matches what the upstream advertises (relays re-serve with
+					// the same bound). `broadcast` is left at its default here;
+					// `track::Request::accept` stamps the track's real broadcast.
+					let model = track::Info::from(info);
+					if !ietf {
+						return Poll::Ready(Ok((model, HeldTrack(stream))));
+					}
+					self.state = TrackInfoState::Properties { stream, info: model };
+				}
+				TrackInfoState::Properties { stream, info } => {
+					if let Poll::Ready(err) = self.closed.poll_closed(&mut cx) {
+						return Poll::Ready(Err(crate::lite::error::from_transport(err)));
+					}
+					let properties = ready!(stream.reader.poll_decode::<lite::ietf::TrackProperties>(&mut cx))?;
+					// Refused as moq-transport ingress refuses it.
+					if let Some(err) = properties.0.as_ref().and_then(|properties| properties.refused(info)) {
+						return Poll::Ready(Err(err));
+					}
+					let TrackInfoState::Properties { stream, mut info } =
+						std::mem::replace(&mut self.state, TrackInfoState::Open)
+					else {
+						unreachable!()
+					};
+					info.properties = properties.0;
+					return Poll::Ready(Ok((info, HeldTrack(stream))));
+				}
 			}
-			let ietf = ready!(serve.subscriber.peer_setup.poll_ietf(waiter));
-			stream.reader.poll_decode::<lite::TrackInfo>(&mut cx).map_ok(|info| (ietf, info))
-		})?;
-
-		// Publisher Max Age rides on the wire, so the local retention
-		// window matches what the upstream advertises (relays re-serve with
-		// the same bound). `broadcast` is left at its default here;
-		// `track::Request::accept` stamps the track's real broadcast.
-		let mut info: track::Info = track::Info::from(info);
-		if !ietf {
-			return Poll::Ready(Ok((info, HeldTrack(stream))));
 		}
-
-		// Reading the TRACK_PROPERTIES the `ietf` extension sends after TRACK_INFO.
-		let properties = wait!(Properties => {
-			if let Poll::Ready(err) = self.closed.poll_closed(&mut cx) {
-				return Poll::Ready(Err(crate::lite::error::from_transport(err)));
-			}
-			stream.reader.poll_decode::<lite::ietf::TrackProperties>(&mut cx)
-		})?;
-		// Refused as moq-transport ingress refuses it.
-		if let Some(err) = properties.0.as_ref().and_then(|properties| properties.refused(&info)) {
-			return Poll::Ready(Err(err));
-		}
-		info.properties = properties.0;
-		Poll::Ready(Ok((info, HeldTrack(stream))))
 	}
 }
 

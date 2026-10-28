@@ -1,6 +1,0 @@
-time:   0.401; rss:   49MB ->  104MB (  +55MB)	expand_crate
-time:   0.401; rss:   49MB ->  104MB (  +55MB)	macro_expand_crate
-time:   0.121; rss:  127MB ->  153MB (  +26MB)	type_check_crate
-time:   0.160; rss:  153MB ->  195MB (  +42MB)	MIR_borrow_checking
-time:   0.030; rss:  195MB ->  198MB (   +3MB)	misc_checking_3
-time:   0.849; rss:   28MB ->   64MB (  +37MB)	total

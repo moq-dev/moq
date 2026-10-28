@@ -4601,19 +4601,9 @@ dependencies = [
  "criterion",
  "crossbeam-epoch",
  "futures",
- "kio-macros",
  "loom",
  "smallvec",
  "tokio",
-]
-
-[[package]]
-name = "kio-macros"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]
