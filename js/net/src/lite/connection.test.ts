@@ -23,7 +23,17 @@ import {
 	SubscribeStart,
 } from "./subscribe.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
-import { ALPN, ALPN_03, ALPN_04, ALPN_05, ALPN_06, ALPN_07_WIP, Version, versionName } from "./version.ts";
+import {
+	ALPN,
+	ALPN_03,
+	ALPN_04,
+	ALPN_05,
+	ALPN_06,
+	ALPN_07_WIP,
+	hasTrackStream,
+	Version,
+	versionName,
+} from "./version.ts";
 
 /** A transport whose `getStats` behaves as described, or is absent entirely. */
 function transport(getStats?: () => Promise<unknown>): WebTransport {
@@ -203,6 +213,47 @@ function holdFins(transport: MockTransport, streams: "uni" | "incoming-bidi") {
 	};
 }
 
+// Hand `transport` each incoming unidirectional stream only once its FIN arrived, buffered outside
+// the transport so a session close cannot discard it. QMux keeps a finished stream's unread bytes
+// across a close this way, so the reads still owed land after the close itself.
+function deliverWhole(transport: MockTransport) {
+	Object.defineProperty(transport, "incomingUnidirectionalStreams", {
+		value: transport.incomingUnidirectionalStreams.pipeThrough(
+			new TransformStream<ReadableStream<Uint8Array>, ReadableStream<Uint8Array>>({
+				transform(stream, controller) {
+					controller.enqueue(
+						new ReadableStream<Uint8Array>({
+							async start(whole) {
+								const chunks = await Array.fromAsync(stream);
+								for (const chunk of chunks) whole.enqueue(chunk);
+								whole.close();
+							},
+						}),
+					);
+				},
+			}),
+		),
+	});
+}
+
+// Deliver the bytes of every bidirectional stream `transport` opens at once, but each FIN only a task
+// after the session closed, so every reaction to the close runs before a SUBSCRIBE FIN sent first.
+function finAfterClose(transport: MockTransport) {
+	const create = transport.createBidirectionalStream.bind(transport);
+	transport.createBidirectionalStream = async (options) => {
+		const stream = await create(options);
+		const readable = stream.readable.pipeThrough(
+			new TransformStream<Uint8Array, Uint8Array>({
+				async flush() {
+					await transport.closed;
+					await new Promise((resolve) => setTimeout(resolve, 0));
+				},
+			}),
+		);
+		return { readable, writable: stream.writable };
+	};
+}
+
 // Holds the one-second close deadline on a manual clock, so a test fires it by hand instead of waiting.
 function mockDeadline() {
 	const clock = new Manual();
@@ -275,6 +326,58 @@ for (const [alpn, version] of [
 			origin.close();
 		}
 	});
+
+	// The peer's close can overtake the final group or, where it is the track's only end, the
+	// SUBSCRIBE FIN it sent first; the closing session reads them.
+	for (const overtaken of hasTrackStream(version) ? ["group"] : ["group", "fin"]) {
+		test(`a peer close drains the overtaken ${overtaken} over ${versionName(version)}`, async () => {
+			const pair = createMockTransportPair(alpn);
+			deliverWhole(pair.client);
+			if (overtaken === "fin") finAfterClose(pair.client);
+			const origin = new Producer();
+			const broadcastPublication = origin.createBroadcast(Path.from("room"));
+			const broadcast = broadcastPublication.broadcast;
+			broadcastPublication.announce();
+			const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+			const url = new URL("https://localhost/test");
+			const client = new Connection({ url, quic: pair.client, version });
+			const server = new Connection({
+				url,
+				quic: pair.server,
+				version,
+				publish: origin.consume(),
+				client: false,
+			});
+			const remote = wireOf(client).consume(Path.from("room"));
+			const track = remote.track("video").subscribe().ordered();
+			try {
+				const first = producer.appendGroup();
+				first.writeFrame(textFrame("first"));
+				first.finish();
+				expect(await (await track.nextGroup())?.readString()).toBe("first");
+
+				const frames = Array.from({ length: 32 }, (_, i) => `frame ${i}`);
+				const last = producer.appendGroup();
+				for (const frame of frames) last.writeFrame(textFrame(frame));
+				last.finish();
+				producer.finish();
+				producer.close();
+				await server.close();
+
+				const group = await track.nextGroup();
+				for (const frame of frames) expect(await group?.readString()).toBe(frame);
+				expect(await group?.readString()).toBeUndefined();
+				expect(await track.nextGroup()).toBeUndefined();
+			} finally {
+				track.close();
+				remote.close();
+				client.abort();
+				server.abort();
+				broadcast.close();
+				origin.close();
+			}
+		});
+	}
 }
 
 /** A lite-07 publisher serving a finished track to a raw subscriber that has read up to the FIN. */
