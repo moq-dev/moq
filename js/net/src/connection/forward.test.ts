@@ -124,7 +124,7 @@ function record(stream: Announce.Consumer): string[] {
 	return events;
 }
 
-test("a plain request discovers an unwatched path and waits for its initial set", async () => {
+test("a request discovers an unwatched path and waits for its initial set", async () => {
 	const origin = new OriginProducer();
 	const session = new FakeSession();
 	forwardAnnounced(session.session, origin);
@@ -209,17 +209,17 @@ test("a watch change reports only its prefix and the watches it covers", () => {
 	const unlisten = wireOf(origin).interests((prefix, wanted) => events.push(`${wanted ? "+" : "-"}${prefix}`));
 	const state = origin.consume();
 
-	const ab = state.request(Path.from("a/b"), { announced: true });
-	const ac = state.request(Path.from("a/c"), { announced: true });
-	const x = state.request(Path.from("x"), { announced: true });
+	const ab = state.follow(Path.from("a/b"));
+	const ac = state.follow(Path.from("a/c"));
+	const x = state.follow(Path.from("x"));
 	expect(events.splice(0)).toEqual(["+a/b", "+a/c", "+x"]);
 
 	// The broader watch opens first, then releases the ones it now covers; unrelated `x` is untouched.
-	const a = state.request(Path.from("a"), { announced: true });
+	const a = state.follow(Path.from("a"));
 	expect(events.splice(0)).toEqual(["+a", "-a/b", "-a/c"]);
 
 	// A watch beneath a covered prefix changes nothing.
-	const abd = state.request(Path.from("a/b/d"), { announced: true });
+	const abd = state.follow(Path.from("a/b/d"));
 	abd.close();
 	expect(events.splice(0)).toEqual([]);
 
@@ -237,12 +237,12 @@ test("a watch change reports only its prefix and the watches it covers", () => {
 	origin.close();
 });
 
-test("an announced request is a watch on its path", async () => {
+test("a follower is a watch on its path", async () => {
 	const origin = new OriginProducer();
 	const session = new FakeSession();
 	forwardAnnounced(session.session, origin);
 
-	const request = origin.request(Path.from("room/alice"), { announced: true });
+	const request = origin.follow(Path.from("room/alice"));
 	await settle();
 	expect(session.open()).toEqual(["room/alice/**"]);
 	// Gated on the announcement, so nothing answers it blind meanwhile.
@@ -461,7 +461,7 @@ test("a refused announce request downgrades the session once, and later watches 
 	const path = Path.from("room");
 	forwardAnnounced(session.session, origin);
 
-	const watched = origin.request(path, { announced: true });
+	const watched = origin.follow(path);
 	await settle();
 	expect(origin.discovery.peek()).toBe(true);
 	expect(watched.active.peek()).toBeUndefined();
@@ -495,7 +495,7 @@ test("a discovery failure under a live session retracts what it fed and answers 
 	const path = Path.from("room");
 	forwardAnnounced(session.session, origin);
 
-	const watched = origin.request(path, { announced: true });
+	const watched = origin.follow(path);
 	await settle();
 	start(session.stream("room/**"), "room");
 	await settle();

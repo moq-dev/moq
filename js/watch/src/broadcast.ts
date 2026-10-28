@@ -252,7 +252,7 @@ export class Broadcast {
 		let entry = this.#references.get(path);
 		if (!entry || entry.origin !== origin || entry.announced !== announced) {
 			entry?.request.close();
-			entry = { origin, announced, request: origin.request(path, { announced }), users: 0 };
+			entry = { origin, announced, request: announced ? origin.follow(path) : origin.request(path), users: 0 };
 			this.#references.set(path, entry);
 		}
 
@@ -283,7 +283,7 @@ export class Broadcast {
 
 		let request: Moq.Origin.Requesting;
 		try {
-			request = origin.request(name, { announced });
+			request = announced ? origin.follow(name) : origin.request(name);
 		} catch (err) {
 			effect.set(this.#out.error, err instanceof Error ? err : new Error(String(err)), undefined);
 			return;
@@ -298,7 +298,7 @@ export class Broadcast {
 		effect.run((nested) => {
 			const closed = nested.get(request.closed);
 			if (!closed) return;
-			// An announced request outlives its instances, so only a refusal ends it. A blind one
+			// A follower outlives its instances, so only a refusal ends it. A plain request
 			// ends with its accepted instance, which reads as offline rather than an error.
 			const offline =
 				!announced && resolved && closed instanceof NetError.Stream && closed.code === StreamCode.Unroutable;

@@ -206,7 +206,7 @@ async function waitUntil(pred: () => boolean): Promise<void> {
 	throw new Error("timed out waiting for condition");
 }
 
-test("an announced request follows the reconnect on the same handle", async () => {
+test("a follower follows the reconnect on the same handle", async () => {
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");
 
@@ -233,7 +233,7 @@ test("an announced request follows the reconnect on the same handle", async () =
 		delay: { initial: Milli(10), multiplier: 1, max: Milli(10) },
 		consume: clientOrigin,
 	});
-	const watched = clientOrigin.request(Path.from("late"), { announced: true });
+	const watched = clientOrigin.follow(Path.from("late"));
 
 	try {
 		await waitUntil(() => watched.active.peek() !== undefined);
