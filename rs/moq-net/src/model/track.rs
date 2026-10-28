@@ -1797,6 +1797,9 @@ impl TrackState {
 			.chain(self.detached.drain(..).filter_map(|copy| copy.writing()))
 			.collect();
 		let dropped = StreamError::from(&err);
+		// A slot survives only on a copy holding the whole group. A finished bounded copy
+		// serves no group reader, so it leaves the cache like an open one; a reader already
+		// holding it keeps it, since its writer settled and it is not aborted above.
 		let open: Vec<_> = self
 			.lookup
 			.iter()
@@ -8486,6 +8489,43 @@ mod test {
 		);
 		again.finish().unwrap();
 		assert_eq!(reader.poll_largest(&noop), Poll::Ready(None));
+	}
+
+	/// A copy a transport bound cut short finishes only its own range, so the largest group
+	/// may still grow and the stream stays open past the end.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_finished_bounded_copy_keeps_the_largest_open() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let noop = kio::Waiter::noop();
+		let mut first = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		first.write_frame(Timestamp::ZERO, &b"a"[..]).unwrap();
+		first.abort(Error::Cancel).unwrap();
+		producer.finish_at(Position::group(1)).unwrap();
+
+		let mut reader = producer.consume();
+		assert_eq!(reader.poll_largest(&noop), Poll::Ready(Some(Position::group(0))));
+		let fetch = reader.fetch_range(
+			0,
+			FetchOptions {
+				options: group::Fetch::default(),
+				end: Some(1),
+			},
+		);
+		let mut bounded = dynamic
+			.requested_fill_group()
+			.await
+			.unwrap()
+			.accept(Info::timed())
+			.unwrap();
+		bounded.write_frame(Timestamp::ZERO, &b"a"[..]).unwrap();
+		bounded.finish().unwrap();
+		fetch.await.unwrap();
+		assert!(
+			reader.poll_largest(&noop).is_pending(),
+			"the bounded copy does not hold the whole group"
+		);
 	}
 
 	/// A datagram raises the largest like a group, at its only object.
