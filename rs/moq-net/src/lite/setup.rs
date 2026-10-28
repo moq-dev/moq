@@ -730,7 +730,8 @@ mod tests {
 				implementation,
 				..Default::default()
 			};
-			assert_eq!(round_trip(&msg), msg);
+			let buf = msg.encode_bytes(Version::Lite07).unwrap();
+			assert_eq!(Setup::decode_slice(&buf, Version::Lite07).unwrap().0, msg);
 		}
 	}
 
