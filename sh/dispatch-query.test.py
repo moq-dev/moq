@@ -279,7 +279,7 @@ class QueryTests(unittest.TestCase):
             self.assertIn("local Nix builder cannot create user namespaces", result.stdout + result.stderr)
             self.assertRegex(result.stderr, r"\d+  check flake \(skipped\)")
             calls = (self.root / "calls").read_text().splitlines()
-            self.assertNotIn("nix flake check", calls)
+            self.assertNotIn("nix flake check --print-build-logs", calls)
             self.assertIn("gh test", calls)
             probe, = [call for call in calls if call.startswith("nix build ")]
             self.assertIn("--builders  --max-jobs 1", probe)
@@ -297,7 +297,7 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("(skipped)", result.stderr)
         calls = (self.root / "calls").read_text().splitlines()
-        self.assertIn("nix flake check", calls)
+        self.assertIn("nix flake check --print-build-logs", calls)
         self.assertEqual(sum(call.startswith("nix build ") for call in calls), 1)
 
     @unittest.skipUnless(sys.platform == "linux" and os.uname().machine == "x86_64", "Linux VM checks only")
@@ -305,7 +305,7 @@ class QueryTests(unittest.TestCase):
         self.stub_ci()
         self.change("flake.nix")
         nix = self.bin / "nix"
-        nix.write_text(nix.read_text() + 'case "$*" in "flake check") exit 77 ;; esac\n')
+        nix.write_text(nix.read_text() + 'case "$*" in "flake check --print-build-logs") exit 77 ;; esac\n')
         self.env.pop("CI_STRICT")
         result = subprocess.run(["bash", "sh/dispatch.sh", "check", "origin/main"], cwd=self.repo,
                                 env=self.env, text=True, capture_output=True)
@@ -326,13 +326,13 @@ class QueryTests(unittest.TestCase):
         self.assertIn("check: check flake failed", result.stderr)
         self.assertNotIn("(skipped)", result.stderr)
         calls = (self.root / "calls").read_text().splitlines()
-        self.assertNotIn("nix flake check", calls)
+        self.assertNotIn("nix flake check --print-build-logs", calls)
         self.assertIn("gh test", calls)
 
     def test_strict_ci_runs_the_full_flake_without_a_probe(self):
         self.change("flake.nix")
         calls = self.run_ci()
-        self.assertIn("nix flake check", calls)
+        self.assertIn("nix flake check --print-build-logs", calls)
         self.assertFalse(any(call.startswith("nix build ") for call in calls))
         nix = self.bin / "nix"
         nix.write_text(nix.read_text() + 'exit 77\n')
@@ -392,8 +392,8 @@ esac
                 self.change(path)
                 calls = self.run_ci()
                 (self.repo / path).unlink()
-                self.assertEqual("nix flake check" in calls, expected)
-        self.assertIn("nix flake check", self.run_ci("--all"))
+                self.assertEqual("nix flake check --print-build-logs" in calls, expected)
+        self.assertIn("nix flake check --print-build-logs", self.run_ci("--all"))
 
 
 def benchmark():
