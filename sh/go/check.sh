@@ -7,8 +7,9 @@ fi
 
 # Local smoke check for the Go module.
 #
-# Stages the ffi + wrapper modules from this checkout (sh/go/stage.sh) and
-# runs `go build`/`go vet`/`go test` against them. Intended for `just go check`.
+# Fails on in-tree Go that `gofmt -l` flags, then stages the ffi + wrapper
+# modules from this checkout (sh/go/stage.sh) and runs `go vet`/`go build`/
+# `go test` against them. Intended for `just go check`.
 #
 # The main repo stays binary-free: no `.a` or generated `.go` files land
 # in go/ during local development. Everything happens in dist/, which is
@@ -24,6 +25,16 @@ if ! command -v go >/dev/null 2>&1; then
     echo "go check: no go on PATH, skipping" >&2
     exit 0
 fi
+
+# Formatting needs only go, so it runs before the cargo/uniffi skips below.
+echo "go check: gofmt -l..."
+UNFORMATTED=$(gofmt -l "$GO_DIR" "$SCRIPT_DIR")
+if [[ -n "$UNFORMATTED" ]]; then
+    echo "go check: gofmt found unformatted files (run gofmt -w on them):" >&2
+    printf '%s\n' "$UNFORMATTED" >&2
+    exit 1
+fi
+
 if ! command -v cargo >/dev/null 2>&1; then
     echo "go check: no cargo on PATH, skipping" >&2
     exit 0
