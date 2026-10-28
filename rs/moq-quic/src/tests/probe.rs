@@ -35,6 +35,10 @@ const LATE: f64 = 0.005;
 const FAIRNESS: f64 = 0.9;
 /// Rise budget: how soon after the path opens up the estimate reaches the target
 const RISE: Duration = Duration::from_secs(5);
+/// Fall budget: how soon after the path drops the estimate comes within the ProbeBW_UP gain of
+/// it: two cycles of BBR3's max-bw window, each waiting at most 3s to probe, plus the probe's
+/// rounds and a ProbeRTT
+const FALL: Duration = Duration::from_secs(8);
 
 /// The seeds the acceptance suite runs each scenario over, probing and as the baseline
 const SEEDS: ops::RangeInclusive<u64> = 1..=8;
@@ -626,13 +630,32 @@ fn rises(trials: &[Trial], from: Duration) {
 	);
 }
 
-/// Reports how long after `from` each run's estimate fell to within the ProbeBW_UP gain of `rate`
-fn report_fall(label: &str, trials: &[Trial], from: Duration, rate: u64) {
-	for trial in trials {
-		for (run, outcome) in [("probing", &trial.probing), ("baseline", &trial.baseline)] {
-			let fell = outcome.first(from..Duration::MAX, |estimate| estimate <= rate * 5 / 4);
-			info!(label, seed = trial.seed, run, age = ?fell.map(|at| at - from), "estimate age after the path fell");
-		}
+/// Asserts the estimate, probing or not, falls to within the ProbeBW_UP gain of `rate` within
+/// [`FALL`] of `from` on the mean
+fn falls(trials: &[Trial], from: Duration, rate: u64) {
+	for (run, pick) in [
+		("probing", (|t| &t.probing) as fn(&Trial) -> &Outcome),
+		("baseline", |t| &t.baseline),
+	] {
+		let falls = trials.iter().map(|trial| {
+			let outcome = pick(trial);
+			let fell = outcome
+				.first(from..Duration::MAX, |estimate| estimate <= rate * 5 / 4)
+				.unwrap_or_else(|| {
+					panic!(
+						"seed {} {run}: estimate {} B/s never fell to {rate} B/s after {from:?}",
+						trial.seed,
+						outcome.samples.last().expect("sampled").estimate
+					)
+				});
+			(fell - from).as_secs_f64()
+		});
+		let fall = falls.sum::<f64>() / trials.len() as f64;
+		info!(run, fall, "estimate fell to {rate} B/s on the mean");
+		assert!(
+			fall <= FALL.as_secs_f64(),
+			"{run}: estimate fell to {rate} B/s {fall:.1}s after {from:?} on the mean"
+		);
 	}
 }
 
@@ -786,7 +809,7 @@ fn steps_keyframes() {
 	let _guard = subscribe();
 	let trials = compare("steps keyframes", steps(), SEEDS);
 	rises(&trials, Duration::from_secs(20));
-	report_fall("steps keyframes", &trials, Duration::from_secs(40), 375_000);
+	falls(&trials, Duration::from_secs(40), 375_000);
 }
 
 #[test]
@@ -796,7 +819,7 @@ fn steps_constant() {
 	let scenario = Scenario { keyframe: 0, ..steps() };
 	let trials = compare("steps constant", scenario, SEEDS);
 	rises(&trials, Duration::from_secs(20));
-	report_fall("steps constant", &trials, Duration::from_secs(40), 375_000);
+	falls(&trials, Duration::from_secs(40), 375_000);
 }
 
 /// Nothing is in flight while the media pauses, so nothing is resent
@@ -819,19 +842,26 @@ fn idle_restart() {
 	}
 }
 
-/// An estimate learned before the path fell holds above the target, so the probe stays idle
-/// until the controller lowers it
+/// An estimate learned before the path fell ages out, though the probe stays idle while it
+/// covers the target: on a path still above the media's bitrate, which the media never fills,
+/// and on one below it, behind a queue that overflows
 #[test]
 #[ignore = "nightly: just rs quic-sim"]
 fn stale_estimate() {
 	let _guard = subscribe();
-	let scenario = Scenario {
-		rates: vec![(Duration::ZERO, 1_500_000), (Duration::from_nanos(1), 375_000)],
-		warmup: 3_000_000,
-		..Scenario::default()
-	};
-	let trials = compare("stale", scenario, SEEDS);
-	report_fall("stale", &trials, Duration::ZERO, 375_000);
+	for rate in [375_000, 187_500] {
+		let scenario = Scenario {
+			rates: vec![(Duration::ZERO, 1_500_000), (Duration::from_nanos(1), rate)],
+			warmup: 3_000_000,
+			duration: Duration::from_secs(15),
+			..Scenario::default()
+		};
+		let trials = compare(&format!("stale {rate}"), scenario, SEEDS);
+		falls(&trials, Duration::ZERO, rate);
+		for outcome in trials.iter().flat_map(|t| [&t.probing, &t.baseline]) {
+			assert!(rate > MEDIA || outcome.queue.dropped > 0, "the queue never overflowed");
+		}
+	}
 }
 
 /// Resent data needs no new credit, so a receive window that limits the media does not limit

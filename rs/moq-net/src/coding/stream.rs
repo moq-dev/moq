@@ -1,4 +1,4 @@
-use std::task::{Context, Poll, ready};
+use std::task::{Poll, ready};
 
 use crate::Error;
 use crate::coding::{Reader, StreamCodes, Writer};
@@ -27,12 +27,12 @@ pub struct Stream<S: crate::transport::poll::Session, V> {
 
 impl<S: crate::transport::poll::Session, V: StreamCodes> Stream<S, V> {
 	/// Poll opening a new stream with the given version, waiting for stream credit.
-	pub fn poll_open(session: &mut S, version: V, cx: &mut Context<'_>) -> Poll<Result<Self, Error>>
+	pub fn poll_open(session: &S, version: V, waiter: &kio::Waiter) -> Poll<Result<Self, Error>>
 	where
 		V: Clone,
 	{
 		let (send, recv) =
-			ready!(session.poll_open_bi(cx, Default::default())).map_err(|err| version.transport_error(err))?;
+			ready!(session.poll_open_bi(waiter, Default::default())).map_err(|err| version.transport_error(err))?;
 		Poll::Ready(Ok(Self::build(send, recv, version)))
 	}
 
@@ -41,16 +41,16 @@ impl<S: crate::transport::poll::Session, V: StreamCodes> Stream<S, V> {
 	where
 		V: Clone,
 	{
-		kio::wait(|waiter| Self::poll_open(session, version.clone(), &mut waiter.context())).await
+		kio::wait(|waiter| Self::poll_open(session, version.clone(), waiter)).await
 	}
 
 	/// Poll opening a request stream, refused with [Error::NoStreamCredit] when the peer
 	/// grants no more streams instead of parking work the caller cannot see.
-	pub fn poll_open_request(session: &mut S, version: V, cx: &mut Context<'_>) -> Poll<Result<Self, Error>>
+	pub fn poll_open_request(session: &S, version: V, waiter: &kio::Waiter) -> Poll<Result<Self, Error>>
 	where
 		V: Clone,
 	{
-		let (send, recv) = ready!(session.poll_open_request(cx, Default::default()))
+		let (send, recv) = ready!(session.poll_open_request(waiter, Default::default()))
 			.map_err(|err| version.transport_error(err))?
 			.ok_or(Error::NoStreamCredit)?;
 		Poll::Ready(Ok(Self::build(send, recv, version)))
@@ -62,15 +62,15 @@ impl<S: crate::transport::poll::Session, V: StreamCodes> Stream<S, V> {
 	where
 		V: Clone,
 	{
-		kio::wait(|waiter| Self::poll_open_request(session, version.clone(), &mut waiter.context())).await
+		kio::wait(|waiter| Self::poll_open_request(session, version.clone(), waiter)).await
 	}
 
 	/// Poll accepting a new stream with the given version.
-	pub fn poll_accept(session: &mut S, version: V, cx: &mut Context<'_>) -> Poll<Result<Self, Error>>
+	pub fn poll_accept(session: &S, version: V, waiter: &kio::Waiter) -> Poll<Result<Self, Error>>
 	where
 		V: Clone,
 	{
-		let (send, recv) = ready!(session.poll_accept_bi(cx)).map_err(|err| version.transport_error(err))?;
+		let (send, recv) = ready!(session.poll_accept_bi(waiter)).map_err(|err| version.transport_error(err))?;
 		Poll::Ready(Ok(Self::build(send, recv, version)))
 	}
 
@@ -122,11 +122,11 @@ mod tests {
 			crate::Version::Lite(Version::Lite07),
 			crate::Version::Ietf(crate::ietf::Version::Draft18),
 		] {
-			let mut session = ScriptedSession::new(Vec::new()).without_credit();
-			let mut cx = Context::from_waker(std::task::Waker::noop());
+			let session = ScriptedSession::new(Vec::new()).without_credit();
+			let waiter = &kio::Waiter::noop();
 			for _ in 0..2 {
 				assert!(matches!(
-					Stream::poll_open_request(&mut session, version, &mut cx),
+					Stream::poll_open_request(&session, version, waiter),
 					Poll::Ready(Err(Error::NoStreamCredit))
 				));
 			}
@@ -146,9 +146,9 @@ mod tests {
 	fn request_header_backpressure_is_not_credit_refusal() {
 		use crate::lite::test_transport::ScriptedSession;
 		let gate = kio::Producer::new(false);
-		let mut session = ScriptedSession::gated_open(Vec::new(), gate.consume());
-		let mut cx = Context::from_waker(std::task::Waker::noop());
-		assert!(Stream::poll_open_request(&mut session, Version::Lite07, &mut cx).is_pending());
+		let session = ScriptedSession::gated_open(Vec::new(), gate.consume());
+		let waiter = &kio::Waiter::noop();
+		assert!(Stream::poll_open_request(&session, Version::Lite07, waiter).is_pending());
 		{
 			let Ok(mut open) = gate.write() else {
 				panic!("gate is still live");
@@ -156,7 +156,7 @@ mod tests {
 			*open = true;
 		}
 		assert!(matches!(
-			Stream::poll_open_request(&mut session, Version::Lite07, &mut cx),
+			Stream::poll_open_request(&session, Version::Lite07, waiter),
 			Poll::Ready(Ok(_))
 		));
 		assert_eq!(session.log.bi_opens(), 1);

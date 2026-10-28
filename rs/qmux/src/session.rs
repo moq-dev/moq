@@ -8,7 +8,7 @@
 
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::task::{Context, Poll};
+use std::task::Poll;
 use std::time::Duration;
 
 use bytes::{Buf, Bytes};
@@ -441,13 +441,14 @@ impl Drop for Guard {
 
 /// A multiplexed session over a reliable transport.
 ///
-/// Clones share the session; each carries its own parking so concurrent pending operations
-/// don't trample each other's wakeups. Dropping the last clone closes the session with an
-/// APPLICATION_CLOSE of code 0; streams outliving it fail.
+/// Clones share the session, and every operation parks the caller's own waiter. Dropping the
+/// last clone closes the session with an APPLICATION_CLOSE of code 0; streams outliving it
+/// fail.
+#[derive(Clone)]
 pub struct Session {
 	inner: Arc<Inner>,
-	guard: Arc<Guard>,
-	park: kio::Park,
+	// Held for its drop, which closes the session once the last clone goes.
+	_guard: Arc<Guard>,
 	/// The application protocol, cached at establishment so `protocol()` can borrow it.
 	protocol: Option<String>,
 }
@@ -506,9 +507,8 @@ impl Session {
 		tokio::spawn(run_writer(inner.clone(), writer, reader));
 
 		Ok(Self {
-			guard: Arc::new(Guard(inner.clone())),
+			_guard: Arc::new(Guard(inner.clone())),
 			inner,
-			park: kio::Park::default(),
 			protocol: config.negotiated_protocol(),
 		})
 	}
@@ -556,8 +556,7 @@ impl Session {
 		}))
 	}
 
-	fn poll_accept_dir(&mut self, cx: &Context<'_>, dir: Dir) -> Poll<Result<StreamId, Error>> {
-		let waiter = self.park.hold(cx);
+	fn poll_accept_dir(&self, waiter: &kio::Waiter, dir: Dir) -> Poll<Result<StreamId, Error>> {
 		let mut state = self.inner.lock();
 		if let Some(id) = state.conn.streams().accept(dir) {
 			return Poll::Ready(Ok(id));
@@ -573,12 +572,11 @@ impl Session {
 	}
 
 	fn poll_open_dir(
-		&mut self,
-		cx: &Context<'_>,
+		&self,
+		waiter: &kio::Waiter,
 		dir: Dir,
 		options: poll::SendOptions<'_, SendGroup>,
 	) -> Poll<Result<StreamId, Error>> {
-		let waiter = self.park.hold(cx);
 		let mut state = self.inner.lock();
 		if let Some(err) = &state.closed {
 			return Poll::Ready(Err(err.clone()));
@@ -591,17 +589,6 @@ impl Session {
 		}
 		waiter.register(&mut state.open_waiters);
 		Poll::Pending
-	}
-}
-
-impl Clone for Session {
-	fn clone(&self) -> Self {
-		Self {
-			inner: self.inner.clone(),
-			guard: self.guard.clone(),
-			park: kio::Park::default(),
-			protocol: self.protocol.clone(),
-		}
 	}
 }
 
@@ -626,13 +613,13 @@ impl poll::Session for Session {
 	type RecvStream = RecvStream;
 	type Error = Error;
 
-	fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<RecvStream, Error>> {
-		self.poll_accept_dir(cx, Dir::Uni)
+	fn poll_accept_uni(&self, waiter: &kio::Waiter) -> Poll<Result<RecvStream, Error>> {
+		self.poll_accept_dir(waiter, Dir::Uni)
 			.map_ok(|id| RecvStream::new(self.inner.clone(), id))
 	}
 
-	fn poll_accept_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<(SendStream, RecvStream), Error>> {
-		self.poll_accept_dir(cx, Dir::Bi).map_ok(|id| {
+	fn poll_accept_bi(&self, waiter: &kio::Waiter) -> Poll<Result<(SendStream, RecvStream), Error>> {
+		self.poll_accept_dir(waiter, Dir::Bi).map_ok(|id| {
 			(
 				SendStream::new(self.inner.clone(), id),
 				RecvStream::new(self.inner.clone(), id),
@@ -641,20 +628,20 @@ impl poll::Session for Session {
 	}
 
 	fn poll_open_uni(
-		&mut self,
-		cx: &mut Context<'_>,
+		&self,
+		waiter: &kio::Waiter,
 		options: poll::SendOptions<'_, SendGroup>,
 	) -> Poll<Result<SendStream, Error>> {
-		self.poll_open_dir(cx, Dir::Uni, options)
+		self.poll_open_dir(waiter, Dir::Uni, options)
 			.map_ok(|id| SendStream::new(self.inner.clone(), id))
 	}
 
 	fn poll_open_bi(
-		&mut self,
-		cx: &mut Context<'_>,
+		&self,
+		waiter: &kio::Waiter,
 		options: poll::SendOptions<'_, SendGroup>,
 	) -> Poll<Result<(SendStream, RecvStream), Error>> {
-		self.poll_open_dir(cx, Dir::Bi, options).map_ok(|id| {
+		self.poll_open_dir(waiter, Dir::Bi, options).map_ok(|id| {
 			(
 				SendStream::new(self.inner.clone(), id),
 				RecvStream::new(self.inner.clone(), id),
@@ -663,11 +650,10 @@ impl poll::Session for Session {
 	}
 
 	fn poll_open_request(
-		&mut self,
-		cx: &mut Context<'_>,
+		&self,
+		waiter: &kio::Waiter,
 		options: poll::SendOptions<'_, SendGroup>,
 	) -> Poll<Result<Option<poll::BiStreams<Self>>, Error>> {
-		let waiter = self.park.hold(cx);
 		let mut state = self.inner.lock();
 		if let Some(err) = &state.closed {
 			return Poll::Ready(Err(err.clone()));
@@ -691,11 +677,11 @@ impl poll::Session for Session {
 		})))
 	}
 
-	fn send_group(&mut self, priority: i64) -> Option<SendGroup> {
+	fn send_group(&self, priority: i64) -> Option<SendGroup> {
 		Some(Session::send_group(self, priority))
 	}
 
-	fn send_datagram(&mut self, payload: Bytes, options: poll::SendOptions<'_, SendGroup>) -> Result<(), Error> {
+	fn send_datagram(&self, payload: Bytes, options: poll::SendOptions<'_, SendGroup>) -> Result<(), Error> {
 		let mut state = self.inner.lock();
 		if let Some(err) = &state.closed {
 			return Err(err.clone());
@@ -709,8 +695,7 @@ impl poll::Session for Session {
 		Ok(())
 	}
 
-	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Error>> {
-		let waiter = self.park.hold(cx);
+	fn poll_recv_datagram(&self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Error>> {
 		let mut state = self.inner.lock();
 		if let Some(datagram) = state.conn.datagrams().recv() {
 			return Poll::Ready(Ok(datagram));
@@ -734,7 +719,7 @@ impl poll::Session for Session {
 		self.inner.address
 	}
 
-	fn close(&mut self, code: u32, reason: &str) {
+	fn close(&self, code: u32, reason: &str) {
 		let err = Error::ConnectionClosed {
 			code: code.into(),
 			reason: reason.to_string(),
@@ -742,8 +727,7 @@ impl poll::Session for Session {
 		self.inner.close(code.into(), reason, err);
 	}
 
-	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Error> {
-		let waiter = self.park.hold(cx);
+	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
 		let mut state = self.inner.lock();
 		if let Some(err) = &state.closed {
 			return Poll::Ready(err.clone());
@@ -831,7 +815,6 @@ impl std::fmt::Debug for SendGroup {
 pub struct SendStream {
 	inner: Arc<Inner>,
 	id: StreamId,
-	park: kio::Park,
 	/// The FIN was queued; further writes are refused and `poll_closed` waits for it to go
 	/// out.
 	fin: bool,
@@ -853,7 +836,6 @@ impl SendStream {
 		Self {
 			inner,
 			id,
-			park: kio::Park::default(),
 			fin: false,
 			reset: false,
 		}
@@ -876,12 +858,11 @@ impl poll::SendStream for SendStream {
 	type Error = Error;
 	type Group = SendGroup;
 
-	fn poll_write(&mut self, cx: &mut Context<'_>, mut buf: &[u8]) -> Poll<Result<usize, Error>> {
-		self.poll_write_buf(cx, &mut buf)
+	fn poll_write(&mut self, waiter: &kio::Waiter, mut buf: &[u8]) -> Poll<Result<usize, Error>> {
+		self.poll_write_buf(waiter, &mut buf)
 	}
 
-	fn poll_write_buf<B: Buf>(&mut self, cx: &mut Context<'_>, buf: &mut B) -> Poll<Result<usize, Error>> {
-		let waiter = self.park.hold(cx);
+	fn poll_write_buf<B: Buf>(&mut self, waiter: &kio::Waiter, buf: &mut B) -> Poll<Result<usize, Error>> {
 		if self.fin || self.reset {
 			return Poll::Ready(Err(Error::StreamClosed));
 		}
@@ -948,8 +929,7 @@ impl poll::SendStream for SendStream {
 		self.reset_with(code);
 	}
 
-	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-		let waiter = self.park.hold(cx);
+	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		if self.reset {
 			return Poll::Ready(Ok(()));
 		}
@@ -1010,7 +990,6 @@ impl RecvStream {
 		Self(poll::Buffered::new(RecvChunks {
 			inner,
 			id,
-			park: kio::Park::default(),
 			finished: false,
 			reset: None,
 			stopped: false,
@@ -1022,8 +1001,8 @@ impl poll::RecvStream for RecvStream {
 	type Error = Error;
 	type Lease<'a> = poll::BufferedLease<'a>;
 
-	fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<Self::Lease<'_>, Error>> {
-		self.0.poll_lease(cx, want)
+	fn poll_lease(&mut self, waiter: &kio::Waiter, want: usize) -> Poll<Result<Self::Lease<'_>, Error>> {
+		self.0.poll_lease(waiter, want)
 	}
 
 	fn set_priority(&mut self, priority: i64) {
@@ -1045,7 +1024,6 @@ impl std::fmt::Debug for RecvStream {
 struct RecvChunks {
 	inner: Arc<Inner>,
 	id: StreamId,
-	park: kio::Park,
 	/// Every byte up to the FIN was read out of the connection.
 	finished: bool,
 	/// The peer reset the stream with this code. Reading it frees the connection's stream
@@ -1058,8 +1036,7 @@ struct RecvChunks {
 impl poll::Chunks for RecvChunks {
 	type Error = Error;
 
-	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
-		let waiter = self.park.hold(cx);
+	fn poll_read_chunk(&mut self, waiter: &kio::Waiter, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
 		if max == 0 {
 			return Poll::Ready(Ok(Some(Bytes::new())));
 		}
