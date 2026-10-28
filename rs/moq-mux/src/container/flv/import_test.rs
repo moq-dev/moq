@@ -465,7 +465,7 @@ async fn import_multitrack_video_many_codecs() {
 
 /// A publisher that keeps changing its audio and video config replaces each track under a fresh
 /// name. A replaced track flushes its last frame and ends, and the importer retires it, so the HLS
-/// records it holds stay those of the live renditions.
+/// records it holds stay those of the live renditions. Dropping the importer ends and retires those.
 #[tokio::test(start_paused = true)]
 async fn config_churn_keeps_flat_state() {
 	const NALU: [u8; 9] = [0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00];
@@ -517,20 +517,24 @@ async fn config_churn_keeps_flat_state() {
 	assert_eq!(snap.audio.renditions.len(), 1);
 	assert_eq!(catalog.hls_tracks(), 2, "only the live renditions keep records");
 
-	let mut replaced = crate::container::Consumer::new(
-		replaced,
-		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
-	);
-	let frame = replaced
-		.read_frame()
-		.await
+	let live = consumer
+		.track(snap.video.renditions.keys().next().unwrap())
 		.unwrap()
-		.expect("the replaced track's frame");
-	assert_eq!(frame.payload.as_ref(), &NALU);
-	assert!(
-		replaced.read_frame().await.unwrap().is_none(),
-		"the replaced track ends"
-	);
+		.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+		.await
+		.unwrap();
+	drop(importer);
+	assert_eq!(catalog.hls_tracks(), 0, "a dropped importer retires its records");
+
+	for (track, label) in [(replaced, "replaced"), (live, "dropped")] {
+		let mut track = crate::container::Consumer::new(
+			track,
+			crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+		);
+		let frame = track.read_frame().await.unwrap();
+		assert_eq!(frame.expect(label).payload.as_ref(), &NALU, "{label}");
+		assert!(track.read_frame().await.unwrap().is_none(), "the {label} track ends");
+	}
 }
 
 #[tokio::test(start_paused = true)]

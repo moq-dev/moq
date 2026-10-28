@@ -232,6 +232,9 @@ pub struct Import<E: catalog::Catalog = ()> {
 	described: bool,
 	/// Carried PIDs already warned about a TS-scrambled packet.
 	scrambled: HashSet<u16>,
+	/// Whether [`finish`](Self::finish) or [`abort`](Self::abort) ended the input, even if finishing
+	/// failed part way.
+	finished: bool,
 }
 
 impl<E: catalog::Catalog> Import<E> {
@@ -303,6 +306,7 @@ impl<E: catalog::Catalog> Import<E> {
 			alone: false,
 			described: false,
 			scrambled: HashSet::new(),
+			finished: false,
 		}
 	}
 
@@ -1766,6 +1770,7 @@ impl<E: catalog::Catalog> Import<E> {
 
 	/// Flush any buffered PES and finish every track.
 	pub fn finish(&mut self) -> anyhow::Result<()> {
+		self.finished = true;
 		self.demux.finish();
 		for pid in self.headers.keys().copied().collect::<Vec<_>>() {
 			self.damage(pid, &anyhow::anyhow!("PES header truncated at end of input"))?;
@@ -1876,8 +1881,13 @@ impl<E: catalog::Catalog> Import<E> {
 	/// real cause rather than [`moq_net::Error::Dropped`]. Buffered PES is discarded.
 	/// Consumes the importer.
 	pub fn abort(mut self, err: moq_net::Error) {
+		self.finished = true;
 		for stream in std::mem::take(&mut self.streams).into_values() {
+			let name = stream.track_name();
 			stream.abort(err.clone());
+			if let Some(name) = name {
+				self.catalog.retire_dropped(&name);
+			}
 		}
 		for section in std::mem::take(&mut self.sections).into_values() {
 			section.abort(err.clone());
@@ -1887,6 +1897,25 @@ impl<E: catalog::Catalog> Import<E> {
 			super::si::Capture::new(self.broadcast.clone(), self.catalog.clone()),
 		);
 		si.abort(err);
+	}
+}
+
+impl<E: catalog::Catalog> Drop for Import<E> {
+	/// End the input unless it already ended, then retire every route's HLS records: each route
+	/// mints its own name, so nothing publishes it again.
+	fn drop(&mut self) {
+		if !self.finished
+			&& let Err(err) = self.finish()
+		{
+			tracing::warn!(%err, "failed to finish a dropped TS import");
+		}
+		for stream in std::mem::take(&mut self.streams).into_values() {
+			let name = stream.track_name();
+			drop(stream);
+			if let Some(name) = name {
+				self.catalog.retire_dropped(&name);
+			}
+		}
 	}
 }
 

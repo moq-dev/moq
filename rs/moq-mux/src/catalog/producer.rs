@@ -920,13 +920,18 @@ impl<E: CatalogExt> Producer<E> {
 		self.outputs.hls.as_ref().map_or(0, |tracks| tracks.len())
 	}
 
-	/// Retire `track`'s HLS records once its producer dropped, for an owner that never enrolls the
-	/// name again: the record track finishes and is forgotten. The catalog stops advertising it
-	/// with the rendition that carried it.
-	pub(crate) fn retire(&self, track: &str) -> crate::Result<()> {
+	/// Finish and forget the HLS records of a dropped `track` whose name is never published again.
+	pub fn retire(&self, track: &str) -> crate::Result<()> {
 		match &self.outputs.hls {
 			Some(tracks) => tracks.retire(track),
 			None => Ok(()),
+		}
+	}
+
+	/// [`retire`](Self::retire) `track` from a teardown that cannot return the error.
+	pub(crate) fn retire_dropped(&self, track: &str) {
+		if let Err(err) = self.retire(track) {
+			tracing::warn!(%err, track, "failed to retire a dropped track's HLS records");
 		}
 	}
 

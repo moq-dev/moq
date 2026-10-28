@@ -590,17 +590,18 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			.unique_track(".flv-a", self.catalog.track_info(hang::catalog::PRIORITY.audio))?)
 	}
 
-	/// Finish a replaced track, clearing its catalog rendition and retiring its HLS records. Its
-	/// replacement takes a fresh name, so a publisher changing its config holds only its live tracks.
+	/// End a track this importer is done with, clearing its catalog rendition and retiring its HLS
+	/// records. Every track takes a fresh name, so a publisher changing its config holds only its live
+	/// tracks.
 	fn retire<R: Clone + Send + 'static>(
 		&self,
 		mut track: crate::container::Producer<crate::catalog::hang::Container, R>,
 	) -> anyhow::Result<()> {
-		track.finish()?;
+		let ended = track.end();
 		let name = track.name().to_string();
 		drop(track);
 		self.catalog.retire(&name)?;
-		Ok(())
+		Ok(ended?)
 	}
 
 	/// Close the current group on every track and reopen at `sequence`.
@@ -635,10 +636,27 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Consumes the importer.
 	pub fn abort(mut self, err: moq_net::Error) {
 		for stream in std::mem::take(&mut self.video).into_values() {
+			let name = stream.track.name().to_string();
 			stream.track.abort(err.clone());
+			self.catalog.retire_dropped(&name);
 		}
 		for stream in std::mem::take(&mut self.audio).into_values() {
+			let name = stream.track.name().to_string();
 			stream.track.abort(err.clone());
+			self.catalog.retire_dropped(&name);
+		}
+	}
+}
+
+impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {
+	fn drop(&mut self) {
+		let (video, audio) = (std::mem::take(&mut self.video), std::mem::take(&mut self.audio));
+		let video = video.into_values().map(|stream| self.retire(stream.track));
+		let audio = audio.into_values().map(|stream| self.retire(stream.track));
+		for result in video.chain(audio) {
+			if let Err(err) = result {
+				tracing::warn!(%err, "failed to end a dropped FLV track");
+			}
 		}
 	}
 }

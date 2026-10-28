@@ -748,6 +748,14 @@ where
 		Ok(())
 	}
 
+	/// [`finish`](Self::finish) the track unless it already ended, for an owner about to drop it.
+	pub(crate) fn end(&mut self) -> crate::Result<()> {
+		if self.inner.finished().is_some() || self.inner.is_closed() {
+			return Ok(());
+		}
+		self.finish()
+	}
+
 	/// Abort the track and any open group with the given error.
 	///
 	/// The counterpart to [`Self::finish`] for a failed teardown: consumers observe
