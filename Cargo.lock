@@ -5493,6 +5493,7 @@ dependencies = [
  "flate2",
  "futures",
  "getrandom 0.4.3",
+ "hashbrown 0.17.1",
  "hashlink",
  "kio 0.6.2",
  "libc",

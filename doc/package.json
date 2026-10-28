@@ -14,6 +14,7 @@
 	"devDependencies": {
 		"@types/bun": "^1.4.3",
 		"@types/node": "^26.6.4",
+		"moq-doc-api": "workspace:*",
 		"typescript": "7.0.2",
 		"vitepress": "^1.6.4",
 		"vitepress-plugin-llms": "^1.14.0",

@@ -6,6 +6,7 @@ description: The media layer in TypeScript
 # @moq/hang
 
 [![npm](https://img.shields.io/npm/v/@moq/hang)](https://www.npmjs.com/package/@moq/hang)
+[![API](https://img.shields.io/badge/API-reference-blue)](/lib/js/api/hang)
 
 The [hang media format](/concept/hang) as TypeScript types and codecs, shared
 by [`@moq/watch`](/lib/js/watch) and [`@moq/publish`](/lib/js/publish).

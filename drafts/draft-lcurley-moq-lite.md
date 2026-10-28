@@ -213,11 +213,10 @@ A partial Group is only ever delivered to a subscriber that asked for one.
 A publisher that cannot serve a Group from the frame the subscription names MUST skip that Group entirely and resolve the subscription to a later one, rather than deliver the part it holds.
 The resolved start is therefore always either exactly the requested Position or the beginning of a later Group, never some third Position the subscriber did not choose.
 
-The asymmetry with Groups is deliberate.
-A Group is the unit of decodability: dropping leading *Groups* leaves a stream the application can still decode, whereas dropping leading *Frames* often does not, whether because the Group opens with a keyframe the rest depends on or because its compression state lives in the frames that went missing.
-A subscription therefore starts at a Group's first frame, and a subscriber asks for a partial Group only to finish one whose earlier frames it already holds, from this publisher or another.
-
-Frame indices are only meaningful relative to a Group the subscriber has already begun receiving, so a subscriber MUST start a Range at frame 0 unless it already holds every frame of that group below its start.
+A Group is the unit of decodability: its earlier Frames may carry a keyframe or compression state the later Frames need.
+Applications request whole Groups, while a transport may request a partial Group for route continuation, hole fills, or front-eviction refills.
+A subscriber MAY start a Range at any frame index, whether or not it retains the earlier Frames.
+A relay that holds none of a requested Group SHOULD request it upstream from frame 0 and apply the downstream bounds locally, retaining a copy usable by whole-Group readers and compression.
 
 # Flow
 This section outlines the flow of messages within a moq-lite session.
@@ -1308,7 +1307,7 @@ A floor above the latest group simply waits there: that is a resumed subscriptio
 Reaching back is best-effort, not a guarantee that the groups still exist; see `Publisher Max Age` in [TRACK_INFO](#track-info).
 
 An Absolute `Start` past frame 0 delivers its group from that frame; a start resolved at a later group is always delivered from frame 0.
-A subscriber MUST start at frame 0 unless it already holds every frame below it, from this publisher or another, since a Group is the unit of decodability (see [Positions](#positions)).
+A subscriber MAY name any start frame, as described in [Positions](#positions).
 An Absolute `End` past frame 0 delivers its group up to that frame.
 
 ## SUBSCRIBE_UPDATE
@@ -1845,7 +1844,7 @@ The `Message Length` describes the payload size on the wire.
 - Added TRACK_INFO `Refresh` and SUBSCRIBE_UPDATE `Wanted Group`, carrying ratio-based refresh demand through relays.
 
 - Added `Compression` to TRACK_INFO: none (0x0) or DEFLATE (0x1), whose Groups are DEFLATE streams per draft-lcurley-moq-flate. FRAME and datagrams carry an `Inflated Size` when it is not none. Earlier versions receive the Track inflated.
-- A subscription starts at a Group's first frame: SUBSCRIBE starts past frame 0 only when the subscriber holds every frame below it, compressed Track or not.
+- SUBSCRIBE may start at any frame, including when the subscriber no longer holds the prefix. Relays widen a cold Group request upstream to frame 0 and cut locally.
 
 - Replaced ANNOUNCE_OK Active Count with an ordered, empty SYNCED event (0x4), marking the initial set without retaining routes that end before delivery.
 

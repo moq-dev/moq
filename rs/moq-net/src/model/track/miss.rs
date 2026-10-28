@@ -203,7 +203,7 @@ impl Misses {
 				Order::Descending => self.filled.last(),
 			}
 			.copied()?;
-			if let Some(slot) = state.lookup.get(&sequence).filter(|slot| !slot.is_aborted()) {
+			if let Some(slot) = state.lookup.get(&sequence).filter(|slot| slot.serves_end()) {
 				return Some(slot.serving().clone());
 			}
 			self.filled.remove(&sequence);
@@ -330,7 +330,7 @@ impl Misses {
 					Ok(()) => {
 						self.settle(&state, groups.clone(), given_up);
 						for (&sequence, slot) in state.lookup.range(groups) {
-							if !slot.is_aborted() {
+							if slot.serves_end() {
 								self.filled.insert(sequence);
 								taken.remove(sequence..sequence + 1);
 							}
@@ -471,8 +471,8 @@ impl Misses {
 					state
 						.lookup
 						.range(run.start.max(changed.start)..run.end.min(changed.end))
-						// An aborted slot is still a hole, so its refusal stands.
-						.filter(|(_, slot)| !slot.is_aborted())
+						// An aborted or back-cut slot is still a hole, so its refusal stands.
+						.filter(|(_, slot)| slot.serves_end())
 						.map(|(&sequence, _)| sequence)
 				})
 				.collect();
@@ -616,6 +616,7 @@ impl Misses {
 			let ask = Ask {
 				start: Position::group(run.start),
 				end: run.end,
+				frame_end: None,
 				asking: *asking,
 			};
 			let (joins, unfillable) = fills.lock().join(fills, &ask);
@@ -726,7 +727,7 @@ pub(super) fn holes(state: &TrackState, run: ops::Range<u64>) -> Vec<ops::Range<
 	let mut holes = Vec::new();
 	let mut from = run.start;
 	for (&sequence, slot) in state.lookup.range(run.clone()) {
-		if slot.is_aborted() {
+		if !slot.serves_end() {
 			continue;
 		}
 		if from < sequence {

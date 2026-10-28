@@ -1159,6 +1159,21 @@ impl Charge {
 		self.bytes
 	}
 
+	/// Move already-accounted payload to a shared content owner without recording a write.
+	pub(super) fn transfer(&mut self, bytes: u64) -> Extra {
+		if self.track.is_none() {
+			return Extra::default();
+		}
+		self.bytes = self
+			.bytes
+			.checked_sub(bytes)
+			.expect("transferred payload must already be charged");
+		Extra {
+			track: self.track.clone(),
+			bytes: AtomicU64::new(bytes),
+		}
+	}
+
 	/// The shared handle to this group's last-access stamp, so the group can read it
 	/// without taking the state lock this charge lives behind.
 	pub(super) fn access(&self) -> Arc<Access> {

@@ -6,6 +6,7 @@ description: Opaque MoQ tracks, optionally compressed with group-scoped DEFLATE
 # @moq/flate
 
 [![npm](https://img.shields.io/npm/v/@moq/flate)](https://www.npmjs.com/package/@moq/flate)
+[![API](https://img.shields.io/badge/API-reference-blue)](/lib/js/api/flate)
 
 Opaque payloads over [`@moq/net`](/lib/js/net) tracks, in two modes:
 

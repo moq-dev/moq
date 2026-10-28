@@ -11,7 +11,7 @@ Found while landing [moq-dev/moq#6783](https://github.com/moq-dev/moq/pull/6783)
 `Segmenter.cuts` (`rs/moq-mux/src/hls.rs`) is a `VecDeque<Timestamp>` that
 `cut()` appends to without bound, and only a new group start drains it. Cuts
 come from a declared fMP4 segment, including a `styp` box in network input
-(for example `moq-cli` HLS ingest of a remote origin with `--hls`). An origin
+(for example `moq-cli` HLS ingest of a remote origin). An origin
 that sends `styp` segments with rising pts and no sync sample never starts a
 group, so the queue grows by one entry per segment.
 
@@ -33,7 +33,3 @@ regression guard: it declares both cuts before any group, so it needs both
 boundaries.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [fMP4 boundary sync](/quest/m1/fmp4-boundary-sync.md) - the same non-sync declared boundary, on the group side
