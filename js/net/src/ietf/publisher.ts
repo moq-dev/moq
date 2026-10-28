@@ -232,10 +232,10 @@ interface RunGroup {
 	 * The units each object's presentation timestamp is written in, or undefined when objects
 	 * carry none.
 	 *
-	 * Undefined when SUBSCRIBE_OK carries no TIMESCALE: the track has no timeline, the
-	 * subscriber sent INCLUDE_PROPERTIES=0. A
-	 * timestamp whose units were never declared is worse than none. Our own reader discards
-	 * it; another may read it as some default and time the media wrong.
+	 * Undefined only for an untimed track, which has no timeline. A timed track stamps every
+	 * object even for a subscriber that sent INCLUDE_PROPERTIES=0: that says it already knows
+	 * the track's properties, not that the track lost its timeline, and a receiver treats a
+	 * timed object without a Timestamp as malformed (draft-lcurley-moq-timestamp).
 	 */
 	timescale?: Timescale;
 
@@ -743,8 +743,8 @@ export class Publisher {
 		let cache: TrackSubscriber | undefined;
 		let ranking: Priority | undefined;
 		try {
-			// A Timestamp goes out only when this SUBSCRIBE_OK actually carries TIMESCALE.
-			const timescale = msg.propertiesWanted ? (info.timescale ?? undefined) : undefined;
+			// A timed track stamps every object, INCLUDE_PROPERTIES=0 or not; see RunGroup.timescale.
+			const timescale = info.timescale ?? undefined;
 			// The model ranks higher-first, the IETF wire lower-first. Every group this
 			// subscription serves carries the same publisher priority, which is what lets a
 			// relay prefer catalog and audio over video when it has no subscriber preference
@@ -3163,8 +3163,9 @@ export class Publisher {
 				groups,
 				last,
 				ok: new FetchOk({ endOfTrack, endLocation, properties: trackProperties(info, msg.propertiesWanted) }),
-				// A Timestamp goes out only when FETCH_OK actually carries TIMESCALE.
-				timescale: msg.propertiesWanted ? (info.timescale ?? undefined) : undefined,
+				// Stamped even under INCLUDE_PROPERTIES=0, which a relay sends for a track it
+				// already knows; see RunGroup.timescale.
+				timescale: info.timescale ?? undefined,
 				// Its own rank, so it competes with group streams by its priority alone.
 				sendOrder: sendOrder({ priority }),
 				order: msg.groupOrder ?? "ascending",
@@ -3726,8 +3727,8 @@ function cachedSequences(cache: TrackSubscriber, groups: Groups, priority: numbe
 
 /** The Track Properties a SUBSCRIBE_OK, TRACK_STATUS, or FETCH_OK answers with. */
 function trackProperties(info: Info, wanted: boolean): Properties.Properties {
-	// INCLUDE_PROPERTIES=0. The block stays present but empty, which also means the track opts
-	// out of timestamps for this requester.
+	// INCLUDE_PROPERTIES=0: the requester already knows them, so the block stays present but
+	// empty. A timed track's objects still carry their timestamps.
 	if (!wanted) return {};
 	// TIMESCALE is what opts the track into timestamps, on drafts that can send it.
 	return {

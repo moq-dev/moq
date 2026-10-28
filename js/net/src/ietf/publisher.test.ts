@@ -2951,8 +2951,9 @@ test("LARGEST_OBJECT is the live edge", async () => {
 });
 
 /**
- * INCLUDE_PROPERTIES=0 opts the response out of Track Properties, which also opts the track
- * out of timestamps: with no declared Timescale there are no units to read one in.
+ * INCLUDE_PROPERTIES=0 opts the response out of Track Properties, since the peer already knows
+ * them. A timed track still stamps every object: a receiver reads a timed object without a
+ * Timestamp as malformed, which is how a Rust relay's FETCH lost a JS publisher's track.
  */
 test("draft-22: an opt-out peer gets no track properties", async () => {
 	for (const propertiesWanted of [true, false]) {
@@ -2973,22 +2974,18 @@ test("draft-22: an opt-out peer gets no track properties", async () => {
 		expect(ok.properties.timescale !== undefined).toBe(propertiesWanted);
 		expect(ok.properties.groupOrder !== undefined).toBe(propertiesWanted);
 
-		// With no TIMESCALE declared there are no units to read a timestamp in, so the objects
-		// must not carry one either: a bare value invites a peer to read it as some default.
 		writeGroup(track, 1);
 
 		const served = await nextUni(fx.uni);
 		if (!served) throw new Error("the group was never served");
 		const reader = new Reader(served, undefined, V22);
 		const header = await GroupMessage.decode(reader, V22);
-		expect(header.flags.hasExtensions).toBe(propertiesWanted);
+		expect(header.flags.hasExtensions).toBe(true);
 
 		await reader.u53(); // object id delta
-		if (propertiesWanted) {
-			const length = await reader.u53();
-			expect(length).toBeGreaterThan(0); // the properties block, carrying the timestamp
-			await reader.read(length);
-		}
+		const length = await reader.u53();
+		expect(length).toBeGreaterThan(0); // the properties block, carrying the timestamp
+		await reader.read(length);
 		expect(await reader.read(await reader.u53())).toEqual(new TextEncoder().encode("0.0"));
 
 		fx.close();

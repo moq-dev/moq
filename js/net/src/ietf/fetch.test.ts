@@ -6,12 +6,12 @@ import { error } from "../error.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
-import { Reader, Stream, Writer } from "../stream.ts";
+import { Cursor, Reader, Stream, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import type { Order, Producer as TrackProducer } from "../track.ts";
 import { Fetch, FetchHeader, FetchOk, type FetchType, type Location } from "./fetch.ts";
 import type * as Filter from "./filter.ts";
-import { Group as GroupMessage } from "./object.ts";
+import { decodeObjectTime, Group as GroupMessage } from "./object.ts";
 import { Publisher } from "./publisher.ts";
 import { RequestError } from "./request.ts";
 import { NativeSession } from "./session.ts";
@@ -217,7 +217,12 @@ async function answer(fx: Served, wire: Reader, order: Order): Promise<Answer> {
  * Decode a fetch stream's objects as `[group, object, payload]`, its groups in `order`, and
  * each End of Range as `[group, object, "end <reason in hex>"]`.
  */
-async function readObjects(reader: Reader, order: Order): Promise<[number, number, string][]> {
+async function readObjects(
+	reader: Reader,
+	order: Order,
+	/** Each object's Timestamp in milliseconds, or undefined when it carries none. */
+	stamps?: (number | undefined)[],
+): Promise<[number, number, string][]> {
 	const objects: [number, number, string][] = [];
 	let group = 0;
 	let object = 0;
@@ -236,7 +241,11 @@ async function readObjects(reader: Reader, order: Order): Promise<[number, numbe
 		}
 		object = flags & 0x04 ? await reader.u53() : object + 1;
 		if (flags & 0x10) await reader.u8();
-		if (flags & 0x20) await reader.read(await reader.u53());
+		const properties = flags & 0x20 ? await reader.read(await reader.u53()) : undefined;
+		stamps?.push(
+			properties &&
+				decodeObjectTime(new Cursor(properties, reader.version), Timescale.MILLI)?.as(Timescale.MILLI),
+		);
 		const payload = new TextDecoder().decode(await reader.read(await reader.u53()));
 		objects.push([group, object, payload]);
 	}
@@ -318,6 +327,25 @@ test("a FETCH stops at its end object", async () => {
 		expect(answer.ok.endLocation).toEqual(endAt(version, 2, 0));
 		expect(answer.objects).toEqual(pairs([2]).slice(0, 1));
 	}
+});
+
+// INCLUDE_PROPERTIES=0 leaves FETCH_OK's properties empty, since a relay filling its cache
+// already knows the track. The objects still carry their Timestamps: a Rust relay reads a timed
+// object without one as a malformed track and aborts it for every subscriber.
+test("draft-22: an INCLUDE_PROPERTIES=0 FETCH still stamps a timed track", async () => {
+	using fx = serve(D22);
+	publishPairs(fx.track, 3);
+	const msg = new Fetch({ requestId: FETCH_ID, type: range(D22, at(1, 0), at(1, 0)), propertiesWanted: false });
+	const answer = served(await fetch(fx, msg));
+	expect(answer.ok.properties).toEqual({});
+	expect(answer.objects).toEqual(pairs([1]));
+
+	const reader = new Reader(undefined, answer.raw, D22);
+	expect(await reader.u53()).toBe(FetchHeader.type);
+	await FetchHeader.decode(reader, D22);
+	const stamps: (number | undefined)[] = [];
+	await readObjects(reader, "ascending", stamps);
+	expect(stamps).toEqual([0, 1]);
 });
 
 // The groups that do not exist are left out, and the rest go out in the order asked for.
