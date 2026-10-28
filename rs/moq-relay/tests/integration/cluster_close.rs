@@ -41,6 +41,8 @@ async fn accept(server: &driver::Endpoint) -> driver::Connection {
 		.await
 		.expect("dial timeout")
 		.expect("incoming")
+		.accept()
+		.expect("accept")
 		.await
 		.expect("handshake")
 }
