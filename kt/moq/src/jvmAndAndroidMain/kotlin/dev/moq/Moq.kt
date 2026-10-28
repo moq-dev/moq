@@ -19,10 +19,10 @@ class Moq internal constructor(
     /**
      * Create an unannounced broadcast at [path], invisible to everyone until announced.
      *
-     * Advertise it with `announce` after populating tracks. `end()` ends it for good; `close()`
-     * (or `use`) releases the handle, which ends it once no `requests()` handle remains.
+     * Fill `broadcast()`, then advertise it with `announce`. The broadcast's `end()` ends it for
+     * good, as does releasing its last handle: the publication, each `broadcast()`, and `requests()`.
      */
-    fun createBroadcast(path: String): BroadcastProducer = session.publish().createBroadcast(path)
+    fun createBroadcast(path: String): Publication = session.publish().createBroadcast(path)
 
     /**
      * Discover routes matching [config]; prefixes stay relative to the origin.

@@ -30,6 +30,12 @@ const PAYLOAD: usize = TsPacket::SIZE - 4;
 const BACKFILL: u128 = 40;
 /// The longest a transport buffer may go without emptying (ISO 13818-1 2.4.2.3).
 const TB_EMPTY: Duration = Duration::from_secs(1);
+/// How many slots after the one its first program tables finish in a timeline that
+/// [opens](Schedule::open) holds what a reader places on the program clock. The reader learns
+/// the clock PID from the PMT, so it times nothing by the PCR opening their slot; the next
+/// slot's PCR is the first it reads, and the one after closes the first interval, which it
+/// needs to place a section or whole PES.
+const OPENING: u128 = 2;
 /// One tick of the system clock, in whole nanoseconds rounded up.
 const TICK: i128 = 1_000_000_000_u128.div_ceil(SYSTEM_CLOCK) as i128;
 /// The system clock in Hz, the unit of a PCR.
@@ -589,6 +595,17 @@ pub(super) struct Schedule {
 	seq: u64,
 	/// Tables to go out ahead of the next unit pushed.
 	lead: Option<Tables>,
+	/// The timeline opens ([`Self::open`]) and its first tables are still to go out.
+	opening: bool,
+	/// The first slot a placed unit may go out in: [`OPENING`] slots after the one the first
+	/// tables finish in, on a timeline that opens.
+	clocked: u128,
+	/// Packets a reader places on the program clock, held until the opening's PCR interval is
+	/// out ([`Self::push_clocked`]).
+	unclocked: Vec<u8>,
+	/// The unit held packets last went out in, by `seq`: what is muxed after them waits until it
+	/// has finished, as it rides a lane of its own.
+	deferred: Option<u64>,
 }
 
 impl Schedule {
@@ -610,7 +627,39 @@ impl Schedule {
 			ended: false,
 			seq: 0,
 			lead: None,
+			opening: false,
+			clocked: 0,
+			unclocked: Vec::new(),
+			deferred: None,
 		}
+	}
+
+	/// Open the timeline for a reader that has no program clock yet: no placed unit goes out
+	/// until a PCR interval has followed the first tables ([`OPENING`]), so the reader can
+	/// place every one. A timeline that continues a clock the reader already has needs none.
+	pub fn open(&mut self) {
+		self.opening = true;
+	}
+
+	/// Whether a unit pushed now could go out before the opening's PCR interval is out, or
+	/// ahead of packets still held for it.
+	pub fn clocking(&self) -> bool {
+		self.opening
+			|| !self.unclocked.is_empty()
+			|| self.deferring()
+			|| self.next.is_some_and(|next| next < self.clocked)
+	}
+
+	/// Whether the unit held packets last went out in has some still to send.
+	fn deferring(&self) -> bool {
+		self.deferred
+			.is_some_and(|seq| self.units.iter().any(|unit| unit.seq == seq))
+	}
+
+	/// Hold `packets`, which a reader places on the program clock and which ride no unit of their
+	/// own, until the opening's PCR interval is out: they then go out first, as soon as they can.
+	pub fn push_clocked(&mut self, packets: Vec<u8>) {
+		self.unclocked.extend(packets);
 	}
 
 	/// Whether every source has ended, so what is queued still goes out, late if it must.
@@ -894,25 +943,31 @@ impl Schedule {
 		held
 	}
 
-	/// Put in force what the tables of unit `i` carry, as their last packet goes out, if it is one.
-	fn enforce(&mut self, i: usize) -> bool {
+	/// Put in force what the tables of unit `i` carry, as their last packet goes out in slot
+	/// `index`, if it is one.
+	fn enforce(&mut self, i: usize, index: u128) -> bool {
 		let Some(program) = &self.units[i].tables else {
 			return false;
 		};
 		self.clock = Some(program.clock);
 		self.rate = program.rate;
+		if std::mem::take(&mut self.opening) {
+			self.clocked = self.clocked.max(index + OPENING);
+		}
 		true
 	}
 
-	/// Whether a unit is still to go out.
+	/// Whether a unit, or packets held for the opening's clock, are still to go out.
 	#[cfg(test)]
 	pub fn queued(&self) -> bool {
-		!self.units.is_empty()
+		!self.units.is_empty() || !self.unclocked.is_empty()
 	}
 
 	/// Whether nothing is left to lay out: every unit sent, and the clock past its decode time.
 	pub fn is_empty(&self) -> bool {
+		// Packets held for the clock count once a slot has gone out, so slots run on to it.
 		self.units.is_empty()
+			&& (self.unclocked.is_empty() || self.next.is_none())
 			&& self
 				.horizon
 				.is_none_or(|horizon| self.next.is_some_and(|next| next > horizon))
@@ -930,6 +985,11 @@ impl Schedule {
 		self.last = None;
 		self.ended = false;
 		self.lead = None;
+		// An opening still pending stays: its tables never went out, so the reader has no clock
+		// for the next timeline to continue.
+		self.clocked = 0;
+		self.unclocked.clear();
+		self.deferred = None;
 	}
 
 	/// The first slot `unit` may go out in: [`ahead`] of its due slot, and never before the
@@ -939,13 +999,15 @@ impl Schedule {
 	/// multiplex rate the one whose span holds it, where [`Self::padded`] times each packet,
 	/// and otherwise the first that opens at or after it, as nothing times the packets
 	/// within an unpadded slot. Slot `index` opens one slot behind its boundary ([`grid_pcr`]).
+	/// On a timeline that [opens](Self::open), it waits for the opening's PCR interval too.
 	fn release(&self, unit: &Unit) -> u128 {
 		if let Some((place, _)) = unit.place {
 			let slot = PCR_INTERVAL.as_nanos();
-			return match self.rate {
+			let release = match self.rate {
 				Some(_) => place / slot + 1,
 				None => place.div_ceil(slot) + 1,
 			};
+			return release.max(self.clocked);
 		}
 		if unit.late {
 			return 0;
@@ -963,7 +1025,12 @@ impl Schedule {
 			(None, Some(first)) => Some(first),
 			// Skip the empty slots of a long gap, keeping the second before what comes next.
 			(Some(next), first) => {
-				let target = first.or(known);
+				let mut target = first.or(known);
+				// The opening's PCR interval runs slot by slot to its gate, so what it holds goes
+				// out on a clock the reader has measured.
+				if self.opening || !self.unclocked.is_empty() {
+					target = target.map(|target| target.min(self.clocked));
+				}
 				Some(next.max(target.map_or(0, |target| target.saturating_sub(BACKFILL))))
 			}
 		}
@@ -990,6 +1057,22 @@ impl Schedule {
 		};
 		if known.is_some_and(|known| index >= known) {
 			return Ok(None);
+		}
+		// The first tables finish in the first slot unless their buffers hold them back, and a
+		// placed unit beside them there would go out ahead of its clock.
+		if self.opening && self.next.is_none() {
+			self.clocked = index + OPENING;
+		}
+		// Those held behind earlier ones wait for them to finish.
+		if !self.opening && index >= self.clocked && !self.unclocked.is_empty() && !self.deferring() {
+			let packets = std::mem::take(&mut self.unclocked);
+			let by = (index + 1) * PCR_INTERVAL.as_nanos();
+			// They follow no unit, so the next one pushed keeps its own start.
+			let last = self.last;
+			let unit = self.enqueue(pid(&packets), Timing { by, decode: by }, packets, None);
+			unit.late = true;
+			self.deferred = Some(unit.seq);
+			self.last = last;
 		}
 		self.next = Some(index + 1);
 		if let Some(rate) = self.rate {
@@ -1044,7 +1127,7 @@ impl Schedule {
 			unit.sent += take;
 		}
 		let tables = (0..self.units.len())
-			.filter(|&i| self.units[i].remaining() == 0 && self.enforce(i))
+			.filter(|&i| self.units[i].remaining() == 0 && self.enforce(i, index))
 			.count();
 		for unit in self.units.iter().filter(|unit| unit.remaining() == 0) {
 			self.decoding.extend(unit.leaving());
@@ -1172,7 +1255,9 @@ impl Schedule {
 			while let Some(Reverse((by, lane))) = ready.pop() {
 				let i = *lanes[lane].front().unwrap();
 				let unit = &self.units[i];
-				if holding.get(&unit.pid).is_some_and(|&seq| seq < unit.seq) {
+				// First tables that finish past the first slot hold back what was released beside
+				// them.
+				if holding.get(&unit.pid).is_some_and(|&seq| seq < unit.seq) || self.release(unit) > index {
 					passed.push(Reverse((by, lane)));
 					continue;
 				}
@@ -1357,7 +1442,7 @@ impl Schedule {
 				}
 				if unit.remaining() == 0 {
 					lanes[lane].pop_front();
-					if self.enforce(i) {
+					if self.enforce(i, index) {
 						out.tables += 1;
 						holding = self.holding(|i| self.units[i].remaining());
 					}
@@ -1679,6 +1764,175 @@ mod tests {
 		);
 		let tables: usize = slots.iter().filter_map(|(_, pids, _)| pids.get(&100)).sum();
 		assert_eq!(tables, 2);
+	}
+
+	/// A timeline that opens holds a placed unit until a PCR interval has followed its first
+	/// tables, while the unit they lead goes out where it would have without the opening, padded
+	/// or not.
+	#[test]
+	fn an_opening_holds_placed_units_for_a_pcr_interval() {
+		for rate in [None, Some(RATE)] {
+			let first = |open: bool| {
+				let mut schedule = Schedule::new(Duration::ZERO);
+				schedule.set_rate(rate);
+				schedule.set_tables(100);
+				schedule.set_clock(1);
+				schedule.set_buffer(1, VIDEO);
+				if open {
+					schedule.open();
+				}
+				assert_eq!(schedule.clocking(), open);
+				let mut section = unit(7, 1);
+				section[1] |= 0x40;
+				schedule.push_placed(7, (0, 0), 1, section, false, Vec::new()).unwrap();
+				schedule.lead(Tables {
+					packets: [unit(0, 1), unit(100, 1)].concat(),
+					clock: 1,
+					rate,
+					added: vec![1],
+				});
+				schedule.push(1, timing(10), unit(1, 3), true).unwrap();
+				let slots = drain(&mut schedule);
+				assert!(!schedule.clocking());
+				let on = |pid: u16| {
+					slots
+						.iter()
+						.find(|(_, pids, _)| pids.contains_key(&pid))
+						.map(|&(index, ..)| index)
+				};
+				(on(100).unwrap(), on(1).unwrap(), on(7).unwrap())
+			};
+			let (tables, media, placed) = first(true);
+			assert_eq!(placed, tables + OPENING, "{rate:?}");
+			let (_, before, early) = first(false);
+			assert_eq!(media, before, "{rate:?}: the media keeps its slot");
+			assert!(early < placed, "{rate:?}: without the opening it goes in slot {early}");
+		}
+	}
+
+	/// Packets held for the opening's clock go out once its PCR interval is, without holding
+	/// back the unit they were muxed ahead of, padded or not.
+	#[test]
+	fn clocked_packets_follow_the_opening_without_the_media() {
+		for rate in [None, Some(RATE)] {
+			let mut schedule = Schedule::new(Duration::ZERO);
+			schedule.set_rate(rate);
+			schedule.set_tables(100);
+			schedule.set_clock(1);
+			schedule.set_buffer(1, VIDEO);
+			schedule.set_buffer(0x11, Buffer::SYSTEM);
+			schedule.open();
+			schedule.push_clocked(unit(0x11, 1));
+			schedule.lead(Tables {
+				packets: [unit(0, 1), unit(100, 1)].concat(),
+				clock: 1,
+				rate,
+				added: vec![1],
+			});
+			schedule.push(1, timing(10), unit(1, 3), true).unwrap();
+			assert!(schedule.clocking());
+			let slots = drain(&mut schedule);
+			assert!(!schedule.clocking());
+			let on = |pid: u16| {
+				slots
+					.iter()
+					.find(|(_, pids, _)| pids.contains_key(&pid))
+					.map(|&(index, ..)| index)
+			};
+			assert_eq!((on(100), on(1)), (Some(0), Some(0)), "{rate:?}");
+			assert_eq!(on(0x11), Some(OPENING), "{rate:?}");
+		}
+	}
+
+	/// A gap after the first frames skips no slot of the opening's PCR interval, so packets held
+	/// for it go out after consecutive PCRs rather than after a jump the reader cannot measure,
+	/// padded or not. Until they do, SI muxed after them is held behind them.
+	#[test]
+	fn clocked_packets_follow_the_opening_across_a_gap() {
+		for rate in [None, Some(RATE)] {
+			let mut schedule = Schedule::new(Duration::ZERO);
+			schedule.set_rate(rate);
+			schedule.set_tables(100);
+			schedule.set_clock(1);
+			schedule.set_buffer(1, VIDEO);
+			schedule.set_buffer(0x11, Buffer::SYSTEM);
+			schedule.open();
+			schedule.push_clocked(unit(0x11, 1));
+			schedule.lead(Tables {
+				packets: [unit(0, 1), unit(100, 1)].concat(),
+				clock: 1,
+				rate,
+				added: vec![1],
+			});
+			schedule.push(1, timing(10), unit(1, 1), true).unwrap();
+			// The next frame is ten seconds out, far past a skip.
+			let known = Some(400);
+			let mut indexes = Vec::new();
+			let mut held = None;
+			while let Some(slot) = schedule.next(known).unwrap() {
+				indexes.push(slot.index);
+				if slot
+					.packets
+					.as_chunks::<{ TsPacket::SIZE }>()
+					.0
+					.iter()
+					.any(|packet| pid(packet) == 0x11)
+				{
+					held = Some(slot.index);
+					break;
+				}
+				// SI muxed now goes behind what is held for the same PID, never ahead of it.
+				assert!(schedule.clocking(), "{rate:?}: after slot {}", slot.index);
+			}
+			assert_eq!(held, Some(OPENING), "{rate:?}: slots {indexes:?}");
+			assert_eq!(indexes, (0..=OPENING).collect::<Vec<_>>(), "{rate:?}");
+			assert!(!schedule.clocking());
+		}
+	}
+
+	/// Packets held for the opening that take more than one slot to go out keep SI muxed after
+	/// them held behind them until the last has, padded or not.
+	#[test]
+	fn clocked_packets_stay_ahead_until_they_finish() {
+		for rate in [None, Some(RATE)] {
+			let mut schedule = Schedule::new(Duration::ZERO);
+			schedule.set_rate(rate);
+			schedule.set_tables(100);
+			schedule.set_clock(1);
+			schedule.set_buffer(1, VIDEO);
+			schedule.set_buffer(0x11, Buffer::SYSTEM);
+			schedule.open();
+			schedule.push_clocked(unit(0x11, 100));
+			schedule.lead(Tables {
+				packets: [unit(0, 1), unit(100, 1)].concat(),
+				clock: 1,
+				rate,
+				added: vec![1],
+			});
+			schedule.push(1, timing(10), unit(1, 3), true).unwrap();
+			let mut sent = 0;
+			let mut slots = Vec::new();
+			while let Some(slot) = schedule.next(None).unwrap() {
+				let packets = slot.packets.as_chunks::<{ TsPacket::SIZE }>().0;
+				let held = packets.iter().filter(|&packet| pid(packet) == 0x11).count();
+				if held > 0 {
+					slots.push(slot.index);
+				}
+				sent += held;
+				if sent < 100 {
+					assert!(
+						schedule.clocking(),
+						"{rate:?}: {sent} of 100 out by slot {}",
+						slot.index
+					);
+				}
+			}
+			assert_eq!(sent, 100, "{rate:?}");
+			assert!(!schedule.clocking(), "{rate:?}");
+			if rate.is_some() {
+				assert!(slots.len() > 1, "the held packets span slots {slots:?}");
+			}
+		}
 	}
 
 	/// The pointer byte goes just before placement, so it cannot cost a section another packet.

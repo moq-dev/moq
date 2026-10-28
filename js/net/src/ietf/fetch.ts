@@ -1,3 +1,4 @@
+import type { Milli } from "@moq/clock";
 import type * as Epoch from "../epoch.ts";
 import type * as Path from "../path.ts";
 import { type Reader, Writer } from "../stream.ts";
@@ -74,9 +75,6 @@ const STANDALONE = 0x1;
 const RELATIVE_JOINING = 0x2;
 const ABSOLUTE_JOINING = 0x3;
 
-/** FILL_TIMEOUT, a budget for waiting on upstream that ends in Timed-Out gaps. */
-const FILL_TIMEOUT = 0x0an;
-
 /** A FETCH request. */
 export class Fetch {
 	static id = 0x16;
@@ -95,8 +93,11 @@ export class Fetch {
 	/** Whether the request carried Range Filters, which we refuse. Never encoded. */
 	rangeFilters: boolean;
 
-	/** Whether the request carried FILL_TIMEOUT, which we refuse. Never encoded. */
-	fillTimeout: boolean;
+	/**
+	 * FILL_TIMEOUT: the total wait for objects not yet available before they are reported as
+	 * a gap, zero for only what is cached. Absent waits as long as the publisher chooses.
+	 */
+	fillTimeout?: Milli;
 
 	/** Whether the requester wants Track Properties in FETCH_OK (INCLUDE_PROPERTIES, draft-22). */
 	propertiesWanted: boolean;
@@ -110,7 +111,7 @@ export class Fetch {
 		subscriberPriority = DEFAULT_WIRE,
 		groupOrder,
 		rangeFilters = false,
-		fillTimeout = false,
+		fillTimeout,
 		propertiesWanted = true,
 		epoch,
 	}: {
@@ -119,7 +120,7 @@ export class Fetch {
 		subscriberPriority?: number;
 		groupOrder?: Order;
 		rangeFilters?: boolean;
-		fillTimeout?: boolean;
+		fillTimeout?: Milli;
 		propertiesWanted?: boolean;
 		epoch?: Epoch.Valid;
 	}) {
@@ -141,6 +142,7 @@ export class Fetch {
 		if (this.groupOrder !== undefined)
 			params.groupOrder = this.groupOrder === "ascending" ? GroupOrder.Ascending : GroupOrder.Descending;
 		params.epoch = this.epoch;
+		params.fillTimeout = this.fillTimeout;
 
 		const type = this.type;
 		if (Filter.isDraft22(version)) {
@@ -238,7 +240,7 @@ export class Fetch {
 			// Parameters refuses anything but Ascending or Descending.
 			groupOrder: order === undefined ? undefined : order === GroupOrder.Ascending ? "ascending" : "descending",
 			rangeFilters: params.rangeFilters,
-			fillTimeout: params.vars.has(FILL_TIMEOUT),
+			fillTimeout: params.fillTimeout,
 			// Defaults to 1, so an absent parameter means the requester wants them.
 			propertiesWanted: params.includeProperties ?? true,
 			epoch,

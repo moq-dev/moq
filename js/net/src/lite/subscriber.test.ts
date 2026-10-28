@@ -30,12 +30,13 @@ import {
 	encodeSubscribeResponse,
 	SubscribeDrop,
 	SubscribeEnd,
+	SubscribeOk,
 	type SubscribeResponse,
 	SubscribeStart,
 } from "./subscribe.ts";
 import { SUBSCRIBE_SETUP_TIMEOUT_MS, Subscriber } from "./subscriber.ts";
 import { Track, TrackInfo } from "./track.ts";
-import { Version } from "./version.ts";
+import { Version, versionName } from "./version.ts";
 
 test("closing the subscriber suppresses probe stream warnings", async () => {
 	let readable!: ReadableStreamDefaultController<Uint8Array>;
@@ -2252,6 +2253,42 @@ test("a lite-07 publisher FIN ends a covered bounded subscription", async () => 
 		track.close();
 		broadcast.close();
 		subscriber.close();
+	}
+});
+
+// Before lite-05 the publisher FINs the subscribe stream only once the track is over, so that FIN
+// finishes the track once the tail settles, rather than releasing it for another route.
+test.each(
+	[Version.DRAFT_01, Version.DRAFT_02, Version.DRAFT_03, Version.DRAFT_04].map((v) => [versionName(v), v] as const),
+)("a %s publisher FIN finishes the track", async (_, version) => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const { quic, streams, opened, closes } = fakeSession();
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe();
+	try {
+		const stream = await opened(0);
+		await stream.reading;
+		const chunks: Uint8Array[] = [];
+		const writer = new Writer(
+			new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
+			version,
+		);
+		await encodeSubscribeResponse(writer, { ok: new SubscribeOk({}) }, version);
+		for (const chunk of chunks) streams[0].inbound.enqueue(chunk);
+		streams[0].inbound.close();
+		await drainReactions();
+
+		await clock.advance(Nano.fromMilli(GRACE));
+		expect(await track.finished()).toEqual({ group: 0, frame: 0 });
+		expect(await track.closed).toBeNull();
+		expect(closes).toEqual([]);
+	} finally {
+		track.close();
+		broadcast.close();
+		subscriber.close();
+		installed.close();
 	}
 });
 

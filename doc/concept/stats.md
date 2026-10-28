@@ -59,11 +59,10 @@ program clock since its last access unit. Its losses are `resyncs`, bytes
 
 Every PID but the null PID either takes a route or is counted. A listed stream
 the import cannot carry, such as `0x86` without a SCTE-35 registration, gets a
-row with an empty `track` and one `refused`. Once every program's PMT is in, or
-has been missing for 0.5 s of program clock, a PID that no PAT, PMT, or
-captured SI table claims, such as the CAT, conditional access, or ATSC PSIP,
-gets a `data` row with an empty `track` and `refused` counting its packets,
-with one warning when it starts. An import of one `--program` of a
+row with an empty `track` and one `refused`. Once every program's PMT is in, a
+PID that no PAT, PMT, or captured SI table claims, such as the CAT, conditional
+access, or ATSC PSIP, gets a `data` row with an empty `track` and `refused`
+counting its packets, with one warning when it starts. An import of one `--program` of a
 multi-program stream cannot tell another program's PIDs from these, so it
 counts none of them.
 

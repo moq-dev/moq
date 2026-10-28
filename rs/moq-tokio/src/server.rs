@@ -829,7 +829,7 @@ impl Server {
 	pub fn local_addr(&self) -> crate::Result<net::SocketAddr> {
 		#[cfg(feature = "quic")]
 		if let Some(quic) = self.quic.as_ref() {
-			return Ok(quic.local_addr()?);
+			return Ok(quic.local_addr());
 		}
 		// No QUIC backend (e.g. a stream-only `--listen-tcp-bind`).
 		Err(Error::NoBackend("no QUIC listener configured"))
@@ -1061,6 +1061,8 @@ async fn accept_request<S>(
 where
 	S: moq_net::transport::poll::Boxable + Send + Sync,
 {
+	// Shared, so the deadline can close the session the server runs.
+	let session = std::sync::Arc::new(session);
 	let deadline = deadline.map(|at| Deadline::new(at, session.clone()));
 	let accept = async { Ok(server.accept_request(moq_net::time::Instant::now(), session).await?) };
 	let request = Deadline::bound(deadline.as_ref(), accept).await?;
@@ -1113,7 +1115,7 @@ impl Deadline {
 		let close = move || {
 			let err = moq_net::Error::Timeout;
 			moq_net::transport::poll::Session::close(
-				&mut session.clone(),
+				&session,
 				moq_net::SessionError::from(&err).to_code(),
 				&err.to_string(),
 			);
@@ -1633,7 +1635,7 @@ pub struct Request {
 	handshake: Box<moq_net::server::Handshake>,
 	/// The connection under a QUIC or WebTransport request, for [`Request::quic`].
 	#[cfg(feature = "quic")]
-	quic: Option<crate::quic::driver::Connection>,
+	quic: Option<crate::quic::driver::connection::Connection>,
 	/// What remains of the handshake deadline, which also bounds [`Request::ok`].
 	deadline: Option<Deadline>,
 }
@@ -1681,7 +1683,7 @@ impl Request {
 	/// The QUIC connection under this request, to change its limits before answering
 	/// SETUP. `None` on a transport moq-quic does not drive (qmux streams, iroh).
 	#[cfg(feature = "quic")]
-	pub fn quic(&self) -> Option<&crate::quic::driver::Connection> {
+	pub fn quic(&self) -> Option<&crate::quic::driver::connection::Connection> {
 		self.quic.as_ref()
 	}
 
@@ -2212,7 +2214,7 @@ mod tests {
 		};
 		options.identity = Some(crate::tls::PeerIdentity::from_chain(Vec::new()));
 		let accept = tokio::spawn(crate::websocket::accept(server, options));
-		let mut client = qmux::ws::Upgraded::new(client, "qmux-01.moq-lite-06")
+		let client = qmux::ws::Upgraded::new(client, "qmux-01.moq-lite-06")
 			.connect()
 			.unwrap();
 		let mut setup = client.open_uni(SendOptions::default()).await.unwrap();
@@ -2530,7 +2532,7 @@ mod tests {
 	async fn completed_setup_outlives_the_deadline() {
 		use moq_net::transport::poll::Session as _;
 
-		let (mut client, server) = session_pair().await;
+		let (client, server) = session_pair().await;
 		let timeout = std::time::Duration::from_secs(10);
 		let setup = Setup {
 			activity: Default::default(),

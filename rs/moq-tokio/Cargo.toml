@@ -19,20 +19,9 @@ default = ["net", "quic", "aws-lc-rs", "websocket", "tcp", "uds"]
 net = ["dep:moq-net", "dep:web-transport-trait"]
 # The async QUIC driver alone (`quic::driver`): moq-quic on tokio, without moq-net or
 # the MoQ backend. Needs a crypto-provider feature.
-driver = ["dep:moq-congestion", "dep:moq-quic", "dep:pin-project-lite", "dep:rustc-hash", "dep:socket2"]
+driver = ["dep:moq-congestion", "dep:moq-quic", "dep:pin-project-lite", "dep:rustc-hash"]
 # QUIC and WebTransport over moq-quic, for `https://`, `moqt://`, and `moql://`.
-quic = [
-    "_transport",
-    "_certs",
-    "driver",
-    "dep:http",
-    "dep:kio",
-    "dep:rustls-native-certs",
-    "dep:web-transport-proto",
-    "dep:reqwest",
-    "watch",
-    "dep:dns-lookup",
-]
+quic = ["_transport", "_certs", "driver", "dep:http", "dep:kio", "dep:web-transport-proto", "dep:reqwest", "watch", "dep:dns-lookup"]
 # Server-side certificate handling: chains loaded from disk, self-signed generation,
 # in-memory identities, and per-SNI selection. Not one to enable on its own, since
 # nothing turns it into a listener: every QUIC backend needs it for its own TLS, and
@@ -41,7 +30,7 @@ quic = [
 _certs = ["dep:rcgen", "dep:rustls-webpki"]
 # Private "any transport is compiled" marker. Not one to enable on its own: every
 # backend that can move bytes turns it on, and `uds` reaches it through `tcp`.
-_transport = ["net"]
+_transport = ["net", "dep:moq-quic"]
 # Filesystem watcher for hot-reloading on-disk TLS certs, keys, and root CAs.
 watch = ["dep:notify"]
 # Capture qlog traces (`--*-quic-qlog <DIR>`). Off by default so production
@@ -101,15 +90,12 @@ rcgen = { workspace = true, optional = true }
 reqwest = { version = "0.13", default-features = false, optional = true }
 rustc-hash = { workspace = true, optional = true }
 rustls = "0.23"
-# The WebTransport client trusts the OS store alongside its custom roots.
-rustls-native-certs = { version = "0.8", optional = true }
 # OS-native server-cert verifier for the rustls backend.
 rustls-platform-verifier = "0.7"
 rustls-webpki = { version = "0.103", features = ["aws-lc-rs"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_with = { version = "3", features = ["hex"] }
 sha2 = { workspace = true, optional = true }
-socket2 = { workspace = true, optional = true }
 str0m = { workspace = true, optional = true }
 subtle = { workspace = true, optional = true }
 thiserror = "2"

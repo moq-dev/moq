@@ -85,13 +85,18 @@ impl Lazy {
 			.announced()
 	}
 
-	/// Whether the client's origin routes `path` right now.
+	/// Inspect the current table without running discovery for the observation itself.
 	async fn routes(&self, path: &str) -> bool {
-		match self.subscriber.consume().request_broadcast(path, None).await {
-			Ok(_) => true,
-			Err(Error::Unroutable) => false,
-			Err(err) => panic!("{path}: {err}"),
-		}
+		let consumer = self
+			.subscriber
+			.consume()
+			.scope("", &Patterns::from(Pattern::literal(path).unwrap()))
+			.unwrap();
+		let mut announced = consumer.announced();
+		matches!(
+			announced.poll_next(&kio::Waiter::noop()),
+			std::task::Poll::Ready(Some(announce::Event::Start(_)))
+		)
 	}
 }
 
@@ -352,10 +357,57 @@ async fn serving_the_peer_asks_nothing() {
 			.filter(|kind| *kind == ANNOUNCE)
 			.count();
 		assert_eq!(requests, 0, "{version}");
-		assert!(matches!(
-			local.consume().request_broadcast("a/x", None).await,
-			Err(Error::Unroutable)
-		));
+		// An application request is a reader, unlike the peer's serving view.
+		let _read = local.consume().request_broadcast("a/x", None).await.unwrap();
+		let requests = pair
+			.client_transport
+			.bidi_types()
+			.into_iter()
+			.filter(|kind| *kind == ANNOUNCE)
+			.count();
+		assert_eq!(requests, 1, "{version}: only the application request starts discovery");
+	}
+}
+
+/// Resolving a path owns the discovery that makes the peer's announcement visible.
+#[moq_clock::test]
+async fn requesting_an_unwatched_path_discovers_its_instance() {
+	for version in VERSIONS {
+		let lazy = Lazy::new(version).await;
+		assert_eq!(lazy.requests(), 0, "{version}");
+		let broadcast = lazy
+			.subscriber
+			.consume()
+			.request_broadcast("a/x", None)
+			.await
+			.expect("request discovers the announced instance without a separate watcher");
+		assert_eq!(broadcast.info().path.as_str(), "a/x");
+		assert_eq!(lazy.requests(), 1, "{version}");
+	}
+}
+
+/// Absence is answered by the peer's sync boundary, without a timer in resolution.
+#[moq_clock::test]
+async fn an_unwatched_missing_path_is_unroutable_after_sync() {
+	for version in VERSIONS {
+		let lazy = Lazy::new(version).await;
+		let result = moq_clock::timeout(SETTLE, lazy.subscriber.consume().request_broadcast("missing", None))
+			.await
+			.expect("the peer synced");
+		assert!(matches!(result, Err(Error::Unroutable)), "{version}");
+		assert_eq!(lazy.requests(), 1, "{version}");
+		let broadcast = lazy.subscriber.consume().request_broadcast("a/x", None).await.unwrap();
+		moq_clock::sleep(LINGERED).await;
+		assert!(
+			lazy.routes("a/x").await,
+			"{version}: request ownership keeps discovery alive"
+		);
+		drop(broadcast);
+		moq_clock::sleep(LINGERED).await;
+		assert!(
+			!lazy.routes("a/x").await,
+			"{version}: dropping the last reader releases discovery"
+		);
 	}
 }
 

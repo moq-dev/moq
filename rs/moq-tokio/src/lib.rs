@@ -89,8 +89,7 @@ pub mod websocket;
 #[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
 fn qmux_config() -> qmux::Config {
 	let mut config = qmux::Config::default();
-	config.max_streams_bidi = quic::DEFAULT_MAX_STREAMS;
-	config.max_streams_uni = quic::DEFAULT_MAX_STREAMS;
+	config.limits.max_streams = std::num::NonZeroU64::new(quic::DEFAULT_MAX_STREAMS);
 	config
 }
 

@@ -399,8 +399,8 @@ async fn unsupported_abort_uses_the_negotiated_session_registry() {
 async fn unsupported_close_is_decoded_by_the_negotiated_session_registry() {
 	for protocol in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
 		let version: Version = protocol.parse().unwrap();
-		let mut pair = connect_mock(MockConnectOptions::new(version)).await;
-		moq_net::transport::poll::Session::close(&mut pair.server_transport, 0x30, "unsupported");
+		let pair = connect_mock(MockConnectOptions::new(version)).await;
+		moq_net::transport::poll::Session::close(&pair.server_transport, 0x30, "unsupported");
 		let error = pair.client.closed().await;
 		let expected = if version.is_lite() {
 			moq_net::SessionError::Unsupported

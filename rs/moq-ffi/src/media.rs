@@ -799,8 +799,6 @@ impl MoqMediaCatalogProducer {
 struct MediaProducer {
 	// Boxed because the codec splitters/imports make this much larger than the container one.
 	import: Box<moq_mux::import::Track>,
-	/// Subscriber demand (name/used/unused) for the one track this publishes.
-	demand: moq_net::track::Demand,
 }
 
 /// An importer for a container, which may publish several tracks.
@@ -1004,13 +1002,11 @@ impl MoqMediaTrackStreamProducer {
 }
 
 impl MoqMediaTrackProducer {
-	/// Wrap a single-codec importer, capturing the demand handle its track exposes.
+	/// Wrap a single-codec importer.
 	fn from_import(import: moq_mux::import::Track, children: &Children) -> Result<Arc<Self>, MoqError> {
-		let demand = import.demand();
 		children.adopt(Arc::new(Self {
 			inner: std::sync::Mutex::new(Some(MediaProducer {
 				import: Box::new(import),
-				demand,
 			})),
 			children: children.clone(),
 		}))
@@ -1020,10 +1016,13 @@ impl MoqMediaTrackProducer {
 #[uniffi::export]
 impl MoqMediaTrackProducer {
 	/// A watch-only handle to whether this track has subscribers.
+	///
+	/// A frame that changes the decoder identity publishes under a new track name, so read this
+	/// again after [`write_frame`](Self::write_frame) rather than holding the first handle.
 	pub fn demand(&self) -> Result<Arc<MoqTrackDemand>, MoqError> {
 		let guard = self.inner.lock().unwrap();
 		Ok(MoqTrackDemand::new(
-			guard.as_ref().ok_or(MoqError::Closed)?.demand.clone(),
+			guard.as_ref().ok_or(MoqError::Closed)?.import.demand(),
 		))
 	}
 
