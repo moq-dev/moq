@@ -44,8 +44,8 @@ lifetime brand fights `'static` tasks.
 Measure each on [QUIC lock contention](/quest/m2/perf/quic-lock-contention.md)'s
 sweep (connections × streams per connection × workers), on tokio and
 moq-uring, and report the API each implies for moq-quic, the drivers, and
-moq-net's `transport::poll` traits. Doesn't block net-poll: only context
-passing would revisit its `&self` shape, and the report says so if it wins.
+moq-net's `transport::poll` traits. Only context passing would revisit their
+`&self` shape, and the report says so if it wins.
 
 Public API: none; prototypes stay on a branch. The adoption is its own quest.
 
