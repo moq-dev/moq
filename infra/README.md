@@ -68,7 +68,9 @@ repository level.
 
 A tag policy only helps if the tag itself is protected, so the `release tags`
 ruleset ([below](#bootstrapping-the-nix-cache)) also covers `moq-ffi-v*`
-and `moq-dart-v*`. JSR's GitHub trust checks only the repository, not an
+and `moq-dart-v*`. A `workflow_run` job that checks out the triggering commit
+first requires its `head_branch` to be such a tag at that commit, since a
+branch can share a release's name. JSR's GitHub trust checks only the repository, not an
 Environment, so `release-js` publishes to JSR with `JSR_TOKEN` instead and the
 JSR packages do not trust the repository.
 
