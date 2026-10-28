@@ -276,7 +276,7 @@ impl Producer<crate::catalog::hang::Container, hang::catalog::VideoConfig> {
 			Err(crate::Error::NotPublished) => return self.set(config),
 			Err(err) => return Err(err),
 		};
-		if crate::catalog::tracks::same_video_identity(&previous, &config) {
+		if previous.same_identity(&config) {
 			return self.set(config);
 		}
 		let container = crate::catalog::hang::Container::try_from(&config)?;

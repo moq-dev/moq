@@ -125,7 +125,8 @@ impl Import {
 		Ok(())
 	}
 
-	/// The MoQ track name this importer publishes on.
+	/// The MoQ track name this importer publishes on, which a decoder identity change replaces
+	/// with a newly minted one.
 	pub fn name(&self) -> &str {
 		self.track.name()
 	}
@@ -133,6 +134,12 @@ impl Import {
 	/// A watch-only handle to this track's subscriber demand.
 	pub fn demand(&self) -> moq_net::track::Demand {
 		self.track.track().demand()
+	}
+
+	/// The track this importer publishes on, which a decoder identity change replaces with a
+	/// newly named one.
+	pub fn track(&self) -> &moq_net::track::Producer {
+		self.track.track()
 	}
 
 	/// Finish the track, flushing the current group.

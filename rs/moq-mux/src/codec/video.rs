@@ -260,7 +260,7 @@ impl Catalog {
 		let declared = self
 			.last
 			.as_ref()
-			.filter(|last| crate::catalog::tracks::same_video_identity(last, &config))
+			.filter(|last| last.same_identity(&config))
 			.and_then(|last| last.reorder);
 		if let Some(declared) = declared {
 			match config.reorder {

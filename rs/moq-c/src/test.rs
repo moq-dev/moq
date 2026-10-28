@@ -827,6 +827,7 @@ fn manual_video_identity_change_is_refused() {
 		coded_width: 640,
 		coded_height: 360,
 		container: moq_container::default(),
+		preference: 0,
 	};
 	assert_eq!(unsafe { moq_publish_video_config(broadcast, &video) }, 0);
 	let next = "vp09.00.10.08";
@@ -834,6 +835,41 @@ fn manual_video_identity_change_is_refused() {
 	video.codec_len = next.len();
 	assert_eq!(
 		unsafe { moq_publish_video_config(broadcast, &video) },
+		crate::error::MOQ_ERROR_MUX
+	);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// Manual catalog metadata cannot redefine the decoder identity of an existing audio track, while
+/// a live field such as the label still updates in place.
+#[test]
+fn manual_audio_identity_change_is_refused() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"catalog-audio-identity-refusal");
+	let name = "authored";
+	let codec = "opus";
+	let label = "English";
+	let mut audio = moq_audio_config {
+		name: name.as_ptr().cast(),
+		name_len: name.len(),
+		label: std::ptr::null(),
+		label_len: 0,
+		codec: codec.as_ptr().cast(),
+		codec_len: codec.len(),
+		description: std::ptr::null(),
+		description_len: 0,
+		sample_rate: 48_000,
+		channel_count: 2,
+		container: moq_container::default(),
+	};
+	assert_eq!(unsafe { moq_publish_audio_config(broadcast, &audio) }, 0);
+	audio.label = label.as_ptr().cast();
+	audio.label_len = label.len();
+	assert_eq!(unsafe { moq_publish_audio_config(broadcast, &audio) }, 0);
+	audio.channel_count = 1;
+	assert_eq!(
+		unsafe { moq_publish_audio_config(broadcast, &audio) },
 		crate::error::MOQ_ERROR_MUX
 	);
 	assert_eq!(moq_publish_close(broadcast), 0);

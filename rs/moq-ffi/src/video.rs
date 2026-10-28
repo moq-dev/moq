@@ -1804,7 +1804,9 @@ mod rung_tests {
 			ladder.high.write(frame(i)).unwrap();
 		}
 		ladder.high.cut().unwrap();
-		ladder.high.set_bitrate(3_000_000).unwrap();
+		// Within the level the rung declared: a ceiling past it reopens the encoder at a new
+		// level, which is a new codec string and so a new track.
+		ladder.high.set_bitrate(1_500_000).unwrap();
 
 		apply(Target::Enabled(Rate::from_kbps(1_500)));
 		assert!(enabled(&ladder.broadcast, "high"));

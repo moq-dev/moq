@@ -367,33 +367,16 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::TextConfig {
 	}
 }
 
-/// Whether a video decoder can keep reading the same track under this config.
-pub(crate) fn same_video_identity(previous: &hang::catalog::VideoConfig, next: &hang::catalog::VideoConfig) -> bool {
-	previous.codec == next.codec
-		&& previous.description == next.description
-		&& previous.container == next.container
-		&& previous.display_aspect_width == next.display_aspect_width
-		&& previous.display_aspect_height == next.display_aspect_height
-		&& previous.interlaced == next.interlaced
-}
-
-/// Whether an audio decoder can keep reading the same track under this config.
-fn same_audio_identity(previous: &hang::catalog::AudioConfig, next: &hang::catalog::AudioConfig) -> bool {
-	previous.codec == next.codec
-		&& previous.description == next.description
-		&& previous.container == next.container
-		&& previous.sample_rate == next.sample_rate
-		&& previous.channel_count == next.channel_count
-}
-
+/// Refuse an edit that redefines rendition `name`'s track identity in place: a publisher whose
+/// decoder identity changed publishes under a new name instead.
 fn check_identity<E: CatalogExt>(previous: &Catalog<E>, next: &Catalog<E>, name: &str) -> crate::Result<()> {
 	if let (Some(previous), Some(next)) = (previous.video.renditions.get(name), next.video.renditions.get(name))
-		&& !same_video_identity(previous, next)
+		&& !previous.same_identity(next)
 	{
 		return Err(crate::Error::IdentityChanged(name.to_string()));
 	}
 	if let (Some(previous), Some(next)) = (previous.audio.renditions.get(name), next.audio.renditions.get(name))
-		&& !same_audio_identity(previous, next)
+		&& !previous.same_identity(next)
 	{
 		return Err(crate::Error::IdentityChanged(name.to_string()));
 	}
