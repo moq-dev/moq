@@ -6,6 +6,9 @@
 
 use std::{net, path::PathBuf, str::FromStr, sync::Arc};
 
+mod session;
+pub(crate) use session::Session;
+
 use crate::quic::CongestionControl;
 use url::Url;
 use web_transport_iroh::iroh::{self, SecretKey};

@@ -234,6 +234,7 @@ thiserror = "2"
 time = "0.3"
 tokio = "1.48"
 tokio-rustls = { version = "0.26", default-features = false }
+tokio-util = "0.7"
 toml = "1.1"
 tower-http = { version = "0.7", features = ["cors"] }
 tracing = "0.1"
