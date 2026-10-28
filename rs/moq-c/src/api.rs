@@ -750,7 +750,7 @@ pub struct moq_section {
 
 /// A route advertisement: hops and a static cost.
 ///
-/// Pair with [moq_publish_announce] or [moq_origin_requests]. Zeroed (NULL hops,
+/// Pair with [moq_publication_announce] or [moq_origin_requests]. Zeroed (NULL hops,
 /// hops_len 0, cost 0) is the default route. `hops` is borrowed for the duration
 /// of the call that reads it.
 ///
@@ -1801,23 +1801,33 @@ pub extern "C" fn moq_origin_create() -> i32 {
 
 /// Create a broadcast at `path` on an origin, for publishing media tracks.
 ///
-/// The broadcast is invisible and unroutable, on this origin and its peers
-/// alike, until [moq_publish_announce]. Fill it with the `moq_publish_*`
-/// functions, then announce it. [moq_publish_close] ends it for good.
-///
-/// Returns a non-zero broadcast handle on success, or a negative code on failure.
+/// Writes the broadcast handle to fill with the `moq_publish_*` functions to
+/// `broadcast`, and returns a positive publication handle that announces it, or a
+/// negative code on failure. The broadcast is invisible and unroutable, on this
+/// origin and its peers alike, until [moq_publication_announce]. Fill it, then
+/// announce it. [moq_publish_close] ends it for good;
+/// [moq_publication_free] releases the publication handle without retracting.
 ///
 /// # Safety
 /// - The caller must ensure that path is a valid pointer to path_len bytes of data.
+/// - `broadcast` must point at writable storage for one handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_origin_create_broadcast(origin: u32, path: *const c_char, path_len: usize) -> i32 {
+pub unsafe extern "C" fn moq_origin_create_broadcast(
+	origin: u32,
+	path: *const c_char,
+	path_len: usize,
+	broadcast: *mut u32,
+) -> i32 {
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
 		let path = unsafe { ffi::parse_str(path, path_len)? };
+		let broadcast_out = unsafe { broadcast.as_mut() }.ok_or(Error::InvalidPointer)?;
 
 		let mut state = State::lock();
-		let broadcast = state.origin.create_broadcast(origin, path)?;
-		state.publish.create_publication(broadcast)
+		let publication = state.origin.create_broadcast(origin, path)?;
+		let (publication, broadcast) = state.publish.create_publication(publication)?;
+		*broadcast_out = broadcast.into();
+		Ok(publication)
 	})
 }
 
@@ -1920,7 +1930,8 @@ pub unsafe extern "C" fn moq_broadcast_request_prepare(
 
 /// Publish a prepared claim answer and resolve every waiting requester.
 ///
-/// Consumes the prepared handle. The broadcast handle returned by
+/// Consumes the prepared handle and returns a positive publication handle, or a
+/// negative code on failure. The broadcast handle returned by
 /// [moq_broadcast_request_prepare] remains owned by the caller.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_broadcast_prepared_publish(prepared: u32) -> i32 {
@@ -1929,7 +1940,7 @@ pub extern "C" fn moq_broadcast_prepared_publish(prepared: u32) -> i32 {
 		let mut state = State::lock();
 		let (prepared, driver, broadcast) = state.origin.prepared_take(prepared)?;
 		driver.check()?;
-		let result = state.publish.admit(broadcast, prepared);
+		let result = state.publish.admit(broadcast, prepared, driver.clone());
 		driver.check()?;
 		result
 	})
@@ -2189,35 +2200,47 @@ pub extern "C" fn moq_origin_close(origin: u32) -> i32 {
 	})
 }
 
-/// Advertise a broadcast's exact path as a route.
+/// Advertise a publication's exact path as a route.
 ///
 /// Announcing again re-prices the route in place. A NULL `route` uses the default
 /// (no hops, cost 0). Until announced, the broadcast is invisible and unroutable for
-/// local consumers and peers alike.
+/// local consumers and peers alike. Fails once the broadcast closed.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
 /// # Safety
 /// - `route` may be NULL, or must point at a readable [moq_route].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_publish_announce(broadcast: u32, route: *const moq_route) -> i32 {
+pub unsafe extern "C" fn moq_publication_announce(publication: u32, route: *const moq_route) -> i32 {
 	ffi::enter(move || {
-		let broadcast = ffi::parse_id(broadcast)?;
+		let publication = ffi::parse_id(publication)?;
 		let route = unsafe { parse_route(route)? };
-		State::lock().publish.announce(broadcast, route)
+		State::lock().publish.announce(publication, route)
 	})
 }
 
-/// Retract a broadcast's exact-path advertisement, if any.
+/// Retract a publication's exact-path advertisement, if any.
 ///
 /// Local consumers and peers alike stop discovering and requesting it; tracks already in
-/// flight carry on, and announcing again brings it back. Returns a zero on success, or a
-/// negative code on failure.
+/// flight carry on, and announcing again brings it back. Fails once the broadcast closed.
+/// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_unannounce(broadcast: u32) -> i32 {
+pub extern "C" fn moq_publication_unannounce(publication: u32) -> i32 {
 	ffi::enter(move || {
-		let broadcast = ffi::parse_id(broadcast)?;
-		State::lock().publish.unannounce(broadcast)
+		let publication = ffi::parse_id(publication)?;
+		State::lock().publish.unannounce(publication)
+	})
+}
+
+/// Release a publication handle.
+///
+/// The broadcast and its route stay as they are; [moq_publish_close] ends them.
+/// Returns a zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publication_free(publication: u32) -> i32 {
+	ffi::enter(move || {
+		let publication = ffi::parse_id(publication)?;
+		State::lock().publish.publication_free(publication)
 	})
 }
 
