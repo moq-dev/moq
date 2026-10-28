@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 def compare(current, history):
-    """Return regressions without comparing different artifact sets or formats."""
+    """Return regressions; a new artifact starts its series, but a missing one is refused."""
     def validate(row):
         if row.get("version") != 1 or not row.get("bytes"):
             raise ValueError("expected a nonempty version 1 size report")
@@ -21,8 +21,10 @@ def compare(current, history):
     for row in history:
         if validate(row) > now:
             raise ValueError("history contains a future report")
-        if row["bytes"].keys() != current["bytes"].keys():
-            raise ValueError("artifact set changed; review and explicitly start a new history")
+    # A rename shows up as a missing key, so it is refused along with a removal.
+    if missing := sorted(tracked(history) - current["bytes"].keys()):
+        raise ValueError(f"artifacts missing or renamed: {', '.join(missing)}; "
+                         "review and explicitly start a new history")
     prior = sorted(history, key=lambda row: row["date"])
     if not prior:
         return []
@@ -32,7 +34,12 @@ def compare(current, history):
         comparisons.append(("30 days", anchors[-1], 0.10))
     return [f"{name}: {size} > {row['bytes'][name]} bytes + {limit:.0%} ({label})"
             for label, row, limit in comparisons for name, size in current["bytes"].items()
-            if size > row["bytes"][name] * (1 + limit)]
+            if name in row["bytes"] and size > row["bytes"][name] * (1 + limit)]
+
+
+def tracked(history):
+    """Every artifact name a retained report measured."""
+    return {name for row in history for name in row["bytes"]}
 
 
 def main():
@@ -51,7 +58,15 @@ def main():
     (args.directory / "history.json").write_text(json.dumps(kept + [current], indent=2) + "\n")
     summary = "| Artifact | Bytes |\n|---|---:|\n"
     summary += "".join(f"| {name} | {size:,} |\n" for name, size in sorted(current["bytes"].items()))
-    summary += "\n" + ("\n".join(failures) if failures else "No size regression; a new artifact history starts with one report.") + "\n"
+    if failures:
+        summary += "\n" + "\n".join(failures) + "\n"
+    elif not history:
+        summary += "\nNo size regression; a new artifact history starts with one report.\n"
+    else:
+        summary += "\nNo size regression.\n"
+    if history and (added := sorted(current["bytes"].keys() - tracked(history))):
+        summary += "\nNew artifact series, compared from their next report:\n\n"
+        summary += "".join(f"- {name}\n" for name in added)
     if current.get("seconds"):
         summary += "\n| Release build | Seconds |\n|---|---:|\n"
         summary += "".join(f"| {job} | {seconds:,} |\n" for job, seconds in sorted(current["seconds"].items()))
