@@ -110,6 +110,12 @@ GPU encode and source import quests are in m1 so
 moq-video's GPU encode and import API changes, mainly encoders taking a GPU
 surface and zero-copy texture import, land before the cut.
 
+Added 2026-10-27 (maintainer, from an external release-to-main audit): the
+bindings' silent `max_delay` default change and the upgrade notes that
+contradict the code. Its other findings already had owners or contradicted
+settled decisions (archives break in place; OBS video-only output stays
+removed).
+
 ## Required
 
 - [Resume checked against a model](/quest/m1/resume-model-test.md) - a randomized test checks every resumed reader against a one-track reference model in Rust and JS, and passes before the cut
@@ -131,6 +137,7 @@ surface and zero-copy texture import, land before the cut.
 - [Moxygen minimal interop](/quest/m1/smoke-moxygen.md) - waiting on Moxygen to send a registered filter type, then the smoke lane stops hiding its failure
 - [Moxygen pin bump](/quest/m1/moxygen-pin-bump.md) - waiting on moxygen#264, then the TRACK_STATUS patch is dropped
 - [Broadcast lifecycle](/quest/m1/broadcast-lifecycle/README.md) - broadcasts are online or offline with no finished state in moq-net, finished-broadcast retention is a fixed moq-mux policy, and each linger timer has one meaning
+- [Upgrade notes match the code](/quest/m1/upgrade-guide-facts.md) - the upgrade and CLI migration guides stop promising drafts 19-21, capped grants, and an ignored `MOQ_EPOCH`
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break says how to migrate
 - [moq-transport 18 and 22 only](/quest/m1/ietf-drop/README.md) - drafts 14-17 and 19-21 are deleted from Rust, JS, tests, interop lanes, and docs, removing the legacy control-stream adapter and its request limit
 - [moq-quic's API improves on quinn's](/quest/m1/quic-api/README.md) - moq-quic and both QUIC drivers ship one mirrored API: `send::`/`recv::` namespaces, one error per direction, consuming terminal operations, plain configs, no quinn baggage
