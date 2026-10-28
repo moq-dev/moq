@@ -139,6 +139,8 @@ pub(crate) struct Segmenter {
 	/// The newest boundary declared, so a repeat of it (several sources declaring the same ones)
 	/// is ignored.
 	cut: Option<Timestamp>,
+	/// A boundary was queued since the newest group started.
+	queued: bool,
 	/// Whether boundaries come only from cuts: the source declares them.
 	manual: bool,
 	ready: VecDeque<Record>,
@@ -163,6 +165,7 @@ impl Segmenter {
 			frontier: None,
 			cuts: VecDeque::new(),
 			cut: None,
+			queued: false,
 			manual: false,
 			ready: VecDeque::new(),
 			closed: false,
@@ -215,6 +218,9 @@ impl Segmenter {
 			}
 		} else {
 			self.begin(group, pts);
+		}
+		if self.last != Some(group) {
+			self.queued = false;
 		}
 		self.last = Some(group);
 		self.advance(pts);
@@ -301,7 +307,9 @@ impl Segmenter {
 	///
 	/// The first cut takes over from grid pacing for good, since the grid would otherwise end a
 	/// segment just before the caller declares where it really ends. A cut at or before an earlier
-	/// one is ignored, so several sources declaring the same boundaries cost nothing.
+	/// one is ignored, so several sources declaring the same boundaries cost nothing. So is a cut
+	/// after one no group has started since: the next group ends the segment at the earlier one, and
+	/// a source declaring segments without sync samples would otherwise queue cuts without bound.
 	pub fn cut(&mut self, pts: Timestamp) {
 		if self.closed {
 			return;
@@ -311,7 +319,9 @@ impl Segmenter {
 			return;
 		}
 		self.cut = Some(pts);
-		self.cuts.push_back(pts);
+		if !std::mem::replace(&mut self.queued, true) {
+			self.cuts.push_back(pts);
+		}
 	}
 
 	/// Content stopped before group `group`: publish a zero-duration record where it reached.
@@ -958,13 +968,31 @@ mod test {
 	#[test]
 	fn explicit_cuts_override_the_grid() {
 		let mut segmenter = Segmenter::new(Config::default());
-		segmenter.cut(ms(2_000));
-		segmenter.cut(ms(3_000));
-		groups(&mut segmenter, 0..5, 1_000);
+		for group in 0..5u64 {
+			if matches!(group, 2 | 3) {
+				segmenter.cut(ms(group * 1_000));
+			}
+			segmenter.frame(group, ms(group * 1_000)).unwrap();
+		}
 		assert_eq!(
 			drain(&mut segmenter),
 			[(0, 0, None), (2, 2_000, None), (3, 3_000, None)]
 		);
+	}
+
+	/// A source declaring segments that start no group (no sync sample) queues one cut, which the
+	/// next group meets.
+	#[test]
+	fn cuts_without_a_group_queue_one() {
+		let mut segmenter = Segmenter::new(Config::default());
+		segmenter.frame(0, ms(0)).unwrap();
+		for step in 1..1_000u64 {
+			segmenter.cut(ms(step));
+			segmenter.frame(0, ms(step)).unwrap();
+		}
+		assert_eq!(segmenter.cuts.len(), 1);
+		segmenter.frame(1, ms(1_000)).unwrap();
+		assert_eq!(drain(&mut segmenter), [(0, 0, None), (1, 1_000, None)]);
 	}
 
 	#[test]
