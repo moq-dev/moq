@@ -260,6 +260,8 @@ async fn static_dial(
 		.await
 		.expect("dial timeout")
 		.expect("incoming")
+		.accept()
+		.expect("accept")
 		.await
 		.expect("handshake");
 	(conn, running)
