@@ -3195,10 +3195,32 @@ struct InFlight {
 	weak: track::TrackWeak,
 	routes: super::resume::Producer,
 	// Kept for its readers: the logical track, the query holding its copy, and the copy's
-	// subscription.
+	// subscription, which follows their demand as it did while the front served it.
 	accepted: Option<track::Producer>,
 	_copy: Option<track::Resolving>,
-	_held: Option<kio::Pending<track::Subscribing>>,
+	held: Option<kio::Pending<track::Subscribing>>,
+}
+
+/// Keep the query's subscription on a copy following the readers' demand, and let it go
+/// with the last reader. Left behind, its first preferences would mask a later, lower
+/// aggregate from the copy's source: a shorter budget, or a demoted priority.
+fn follow_demand(
+	held: &mut Option<kio::Pending<track::Subscribing>>,
+	accepted: Option<&mut track::Producer>,
+	weak: &track::TrackWeak,
+	routes: &super::resume::Producer,
+	waiter: &kio::Waiter,
+) {
+	let (Some(hold), Some(accepted)) = (held.as_mut(), accepted) else {
+		return;
+	};
+	while let Poll::Ready(Ok(_)) = accepted.poll_subscription_changed(waiter) {}
+	match weak.subscription() {
+		Some((subscription, subscribers)) => {
+			let _ = hold.update(routes.subscription(subscription, subscribers));
+		}
+		None => *held = None,
+	}
 }
 
 impl InFlight {
@@ -3227,7 +3249,8 @@ async fn run_front(task: FrontTask, origin: TasksWeak) {
 		if origin.poll_orphaned(waiter).is_ready() {
 			return Poll::Ready(());
 		}
-		for io in std::mem::take(&mut in_flight) {
+		for mut io in std::mem::take(&mut in_flight) {
+			follow_demand(&mut io.held, io.accepted.as_mut(), &io.weak, &io.routes, waiter);
 			match io.weak.poll_unused(waiter) {
 				Poll::Pending => in_flight.push(io),
 				Poll::Ready(_) => io.release(),
@@ -3755,7 +3778,7 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 								routes,
 								accepted,
 								_copy: copy.map(|(_, _, query)| query),
-								_held: held,
+								held,
 							});
 						}
 						return in_flight;
@@ -3827,21 +3850,7 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 					{
 						return Some(Step::Info(name.clone(), asked.source, result));
 					}
-					// The query's subscription goes with the last reader.
-					if io.held.is_some()
-						&& let Some(accepted) = &mut io.accepted
-					{
-						while let Poll::Ready(Ok(_)) = accepted.poll_subscription_changed(waiter) {}
-						if let Some((subscription, subscribers)) = io.weak.subscription() {
-							// The query's hold must follow demand too, or its initial budget
-							// keeps a later, shorter aggregate from reaching the publisher.
-							if let Some(held) = &mut io.held {
-								let _ = held.update(io.routes.subscription(subscription, subscribers));
-							}
-						} else {
-							io.held = None;
-						}
-					}
+					follow_demand(&mut io.held, io.accepted.as_mut(), &io.weak, &io.routes, waiter);
 					// Settled once the copy closes: a group still open below a declared end is
 					// owed until then, and a session closing first means it never came.
 					if let Some((source, copy, _)) = &io.copy

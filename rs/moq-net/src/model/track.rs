@@ -7035,8 +7035,10 @@ pub struct Control {
 	track: Consumer,
 	/// A plain cursor's servable window, republished when the ranges are replaced, so a
 	/// group it handed out is judged against them before the cursor next reads. `None`
-	/// for a reader that follows a route, whose copies take them on its next read.
+	/// for a reader that follows a route, which [`Self::mirror`] serves instead.
 	republish: Option<Republish>,
+	/// A reader that follows a route, whose copies take the new preferences at once.
+	mirror: Option<super::resume::Mirror>,
 	// Whether the track is timed, so a time anchor on an untimed one is refused.
 	timed: bool,
 }
@@ -7098,6 +7100,9 @@ impl Control {
 		self.subscription.update(subscription)?;
 		if let Some(republish) = &self.republish {
 			republish.publish(&self.subscription);
+		}
+		if let Some(mirror) = &self.mirror {
+			mirror.sync();
 		}
 		Ok(())
 	}
@@ -7180,12 +7185,14 @@ impl Subscriber {
 					state: cursor.state.weak(),
 					published: cursor.published.weak(),
 				}),
+				mirror: None,
 				timed,
 			},
 			Inner::Resume(resume, _) => Control {
 				track: self.consume(),
 				subscription: resume.subscription().clone(),
 				republish: None,
+				mirror: Some(resume.mirror()),
 				timed,
 			},
 		}
@@ -7727,8 +7734,13 @@ impl Subscriber {
 			self.consume().refuse_subscription(&subscription)?;
 		}
 		channel.update(subscription)?;
-		if let Inner::Plain(cursor) = &mut self.inner {
-			cursor.sync();
+		match &mut self.inner {
+			Inner::Plain(cursor) => {
+				cursor.sync();
+			}
+			// The copies take the change now, not on the next read, so it reaches their
+			// sources even while nobody reads.
+			Inner::Resume(resume, _) => resume.mirror().sync(),
 		}
 		Ok(())
 	}
