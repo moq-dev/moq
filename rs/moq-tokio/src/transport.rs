@@ -523,14 +523,12 @@ impl<S: GroupedSend + 'static> Drop for SendStream<S> {
 			// terminal action then. A deferred reset fired the interrupt when it
 			// was recorded, so the salvage task never waits on blocked I/O; a
 			// deferred finish lets the write complete first (the FIN follows the
-			// data). Without a runtime the default drop stands.
+			// data).
 			Some(SendState::Writing { fut, .. }) => {
 				let reset = self.reset.take();
 				let finish = std::mem::take(&mut self.finish);
-				if (reset.is_some() || finish)
-					&& let Ok(handle) = tokio::runtime::Handle::try_current()
-				{
-					handle.spawn(async move {
+				if reset.is_some() || finish {
+					crate::runtime::spawn(async move {
 						let (mut stream, _) = fut.await;
 						match reset {
 							Some(code) => stream.reset(code),
@@ -546,10 +544,8 @@ impl<S: GroupedSend + 'static> Drop for SendStream<S> {
 			Some(SendState::Closing(fut)) => {
 				let reset = self.reset.take();
 				let finish = std::mem::take(&mut self.finish);
-				if (reset.is_some() || finish)
-					&& let Ok(handle) = tokio::runtime::Handle::try_current()
-				{
-					handle.spawn(async move {
+				if reset.is_some() || finish {
+					crate::runtime::spawn(async move {
 						let (mut stream, _) = fut.await;
 						match reset {
 							Some(code) => stream.reset(code),
@@ -795,12 +791,10 @@ impl<S: web_transport_trait::RecvStream + 'static> Drop for RecvStream<S> {
 			// the deferred code the peer classifies the abort by. Finish the
 			// read on the runtime and stop with the real code then; a deferred
 			// stop fired the interrupt when it was recorded, so the task never
-			// waits on blocked I/O. Without a runtime the default drop stands.
+			// waits on blocked I/O.
 			Some(RecvState::Reading(fut)) => {
-				if let Some(code) = self.stop.take()
-					&& let Ok(handle) = tokio::runtime::Handle::try_current()
-				{
-					handle.spawn(async move {
+				if let Some(code) = self.stop.take() {
+					crate::runtime::spawn(async move {
 						let (mut stream, _) = fut.await;
 						stream.stop(code);
 					});
