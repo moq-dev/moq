@@ -169,6 +169,60 @@ relay_chain_tests! {
 	relay_chain_ietf22: "moq-transport-22",
 }
 
+/// `P -> R -> V` across an epoch switch, as a stitched export follows one: `V` holds a
+/// subscription on each instance and demotes the old one mid-stream. The demotion reaches
+/// the old instance's publisher through the relay, and the replacement keeps its priority.
+async fn demoted_old_leg(version: &str) {
+	let version: Version = version.parse().unwrap();
+	let publisher = produce_origin(1);
+	let relay = produce_origin(2);
+	let viewer = produce_origin(3);
+	let _upstream = link(version, &publisher, &relay).await;
+	let _downstream = link(version, &relay, &viewer).await;
+	let (a, b) = epochs();
+
+	let old = publisher.publish("live", origin::Route::default().with_epoch(a)).unwrap();
+	let old_track = old.create_track("video", timed()).unwrap();
+	let mut announced = viewer.consume().announced();
+	assert!(matches!(next_event(&mut announced).await, announce::Event::Start(_)));
+	let (_stale, mut sticky) = subscribe(&viewer, "live").await;
+	write(&old_track, "old:0");
+	assert_eq!(read(&mut sticky).await, "old:0", "{version}");
+
+	let new = publisher.publish("live", origin::Route::default().with_epoch(b)).unwrap();
+	let new_track = new.create_track("video", timed()).unwrap();
+	expect_replaced(version, &mut announced, "live", true).await;
+	let (_fresh, mut subscription) = subscribe(&viewer, "live").await;
+	write(&new_track, "new:0");
+	assert_eq!(read(&mut subscription).await, "new:0", "{version}");
+
+	sticky.update(sticky.subscription().with_priority(-1)).unwrap();
+	settle().await;
+	write(&old_track, "old:1");
+	assert_eq!(read(&mut sticky).await, "old:1", "{version}");
+	let priority = |track: &track::Producer| track.subscription().map(|subscription| subscription.priority);
+	assert_eq!(priority(&old_track), Some(-1), "{version}: the old leg's publisher");
+	assert_eq!(priority(&new_track), Some(0), "{version}: the replacement's publisher");
+}
+
+macro_rules! demoted_old_leg_tests {
+	($($name:ident: $version:literal,)*) => {
+		$(
+			#[moq_clock::test]
+			async fn $name() {
+				moq_clock::timeout(TEST_TIMEOUT, demoted_old_leg($version))
+					.await
+					.expect("timed out");
+			}
+		)*
+	};
+}
+
+demoted_old_leg_tests! {
+	demoted_old_leg_lite07: "moq-lite-07-wip",
+	demoted_old_leg_ietf18: "moq-transport-18",
+}
+
 /// A worker claiming `pool` without an epoch, answering each request with an output
 /// whose `video` track carries the worker's name. The claim is a peer's, landed through
 /// the hidden `fuzz` module as a session lands it, so its answers carry no exact route.
