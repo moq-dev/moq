@@ -139,4 +139,3 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Padding runs](/quest/m0/ci/quic-padding.md) - moq-quic parses a PADDING run as one frame, keeping the padding stats' meaning
 - [tracing-test filter](/quest/m0/ci/tracing-filter.md) - moq-tokio's tests stop forcing every crate to format at TRACE
 - [Stats oversize](/quest/m0/ci/stats-oversize.md) - moq-stats refuses an oversized plain snapshot before parsing it back
-- [Out-of-crate targets](/quest/m0/ci/out-of-crate-targets.md) - branch checks format and lint a crate whose target file lives outside it, such as the Rust interop clients
