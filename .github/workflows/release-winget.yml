@@ -56,6 +56,9 @@ jobs:
     # workflow_dispatch: always (it's an explicit dry run).
     if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'moq-')) }}
     runs-on: windows-latest
+    # WINGET_TOKEN lives in the `publish` Environment, which only protected refs
+    # can deploy to. A dry run needs no token, so it can run from any branch.
+    environment: ${{ github.event_name == 'workflow_run' && 'publish' || '' }}
 
     steps:
       - name: Resolve mode and tag

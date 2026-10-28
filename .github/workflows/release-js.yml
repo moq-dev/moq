@@ -27,6 +27,9 @@ jobs:
     name: Release JS Packages
     runs-on: ubuntu-latest
     if: github.repository_owner == 'moq-dev'
+    # npm trusted publishing can require this Environment, which only `release`
+    # can deploy to, so a branch's OIDC identity cannot publish. Dry-runs skip it.
+    environment: ${{ github.event_name == 'push' && 'npm' || '' }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
