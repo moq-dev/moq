@@ -13,7 +13,11 @@ lacks `VULKAN_EXTERNAL_MEMORY_DMA_BUF`; the test requires that feature to
 open its second device.
 
 Fix the capability test's setup while retaining assertions for both supported
-and unsupported devices. Keep the real rendering and GPU-frame refusal tests
+and unsupported devices. Exercise output selection through a private,
+render-gated capability seam with the DMA-BUF feature present and absent, so
+both assertions run on CI without opening an import-capable device. Production
+capabilities still come from the actual device; the seam adds no public API or
+caller override. Keep the real rendering and GPU-frame refusal tests
 on the software driver. Avoid merely skipping the supported-path assertion on
 every CI host, adding a production fallback, or making default video builds
 pull in a graphics stack solely for a test.
