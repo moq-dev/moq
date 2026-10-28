@@ -33,7 +33,7 @@ iroh = ["moq-tokio/iroh"]
 # Discover cluster peers on the LAN with mDNS (`--cluster-lan`).
 cluster-lan = ["moq-tokio/mdns"]
 jemalloc = ["moq-tokio/jemalloc"]
-quic = ["_quic", "moq-tokio/quic", "dep:moq-quic"]
+quic = ["_quic", "moq-tokio/quic"]
 # The tokio QUIC listener, and the thread-per-core worker group behind
 # `runtime.workers`. Not one to enable on its own: it names no backend, so
 # moq-tokio would have nothing to bind a socket with.
@@ -51,7 +51,7 @@ uds = ["moq-tokio/uds"]
 # This is off by default: the relay is useful without io_uring.
 io-uring = ["_uring", "moq-uring/quic"]
 # The listener machinery shared by the feature above.
-_uring = ["dep:moq-sock", "dep:moq-uring", "dep:moq-quic"]
+_uring = ["dep:moq-sock", "dep:moq-uring"]
 
 [dependencies]
 anyhow = { workspace = true, features = ["backtrace"] }
@@ -73,7 +73,7 @@ moq-auth = { workspace = true, features = ["client"] }
 moq-clock = { workspace = true, features = ["serde"] }
 moq-net = { workspace = true }
 # The flow-control limits both QUIC runtimes take, for widening a peer's connection.
-moq-quic = { workspace = true, optional = true }
+moq-quic = { workspace = true }
 moq-stats = { workspace = true }
 moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs", "watch", "tcp"] }
 qmux = { workspace = true, features = ["ws"], optional = true }

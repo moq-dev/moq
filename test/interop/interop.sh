@@ -448,9 +448,13 @@ plan_pass() {
     fi
     [[ "$FINISH_ONLY" -eq 0 ]] || return 0
     record "not run" case="CLI FETCH" publisher=rust subscriber=rust
+    record "not run" case="late join" publisher=rust subscriber=rust
     record "not run" case=tail publisher=rust subscriber=rust
     for runtime in js-native-node js-native-bun; do
         needs "$runtime" || continue
+        record "not run" case="CLI FETCH" publisher="$runtime" subscriber=rust
+        record "not run" case="late join" publisher=rust subscriber="$runtime"
+        record "not run" case="late join" publisher="$runtime" subscriber=rust
         record "not run" case=tail publisher=rust subscriber="$runtime"
         record "not run" case=tail publisher="$runtime" subscriber=rust
         if [[ "$VERSION" == moq-transport-* ]]; then
@@ -1910,37 +1914,103 @@ run_tail_pair() {
     rm "$fifo"
 }
 
-# Exercise this checkout's CLI FETCH under the same relay close check as live readers.
+# A late joiner. The publisher writes group 0's head before any subscriber exists and the rest only
+# once the subscriber reports reading that head, so only a join from object 0 passes (a joining
+# FETCH, a draft-22 fill, or a moq-lite group), never one that merely outran the publisher.
+run_late_pair() {
+    local pub="$1" sub="$2" pid subscriber_pid started=$SECONDS from version head=""
+    local name="late-$1-$2" fifo="$LOGS/late-ack" heads="$LOGS/late-head" broadcast="late-$1-$2-$$-$RANDOM"
+    local cell=(case="late join" publisher="$pub" subscriber="$sub" log="$LOGS/$name-sub.log")
+    version=$(pinned_version)
+    if is_broken "$pub" || is_broken "$sub"; then
+        echo "  FAIL  late join $pub -> $sub (client unavailable)"
+        record fail "${cell[@]}" detail="client unavailable"
+        overall=1
+        return
+    fi
+    mkfifo "$fifo" "$heads"
+    exec 9<>"$fifo"
+    from=$(relay_next_line)
+    harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_tail_publisher "$fifo" "$pub" publish "$broadcast" "$(token_url --publish "$(publish_grant "$broadcast")")" "$version" late
+    pid="$HARNESS_PID"
+    exec 8<>"$heads"
+    harness_spawn "$name-sub" "$LOGS/$name-sub.log" run_tail_subscriber "$heads" "$sub" subscribe "$broadcast" "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" "$version" late
+    subscriber_pid="$HARNESS_PID"
+    if read -r -t "$TIMEOUT" head <&8 && [[ "$head" == "late head" ]]; then
+        printf 'late tail\n' >&9
+    fi
+    harness_wait "$subscriber_pid" || true
+    if [[ "$head" == "late head" ]] && grep -qx 'late join clean groups=0,1 frames=6' "$LOGS/$name-sub.log"; then
+        printf 'clean end\n' >&9
+        harness_wait "$pid" || true
+        if [[ -n "$version" ]] && ! check_versions "late join $pub -> $sub" "$from" "$version"; then
+            record fail "${cell[@]}" seconds=$((SECONDS - started)) detail="a relay connection negotiated another version"
+            overall=1
+        elif grep -qx 'tail acknowledged' "$LOGS/$name-pub.log"; then
+            echo "  PASS  late join $pub -> $sub (group 0 from its head; clean end 2)"
+            record pass "${cell[@]}" seconds=$((SECONDS - started))
+        else
+            echo "  FAIL  late join $pub -> $sub (publisher did not acknowledge)"
+            record fail "${cell[@]}" seconds=$((SECONDS - started)) detail="publisher did not acknowledge"
+            overall=1
+            cat "$LOGS/$name-pub.log"
+        fi
+    else
+        local why="missing group 0's head"
+        [[ "$head" != "late head" ]] || why="missing objects or clean end"
+        echo "  FAIL  late join $pub -> $sub ($why)"
+        record fail "${cell[@]}" seconds=$((SECONDS - started)) detail="$why"
+        overall=1
+        cat "$LOGS/$name-pub.log" "$LOGS/$name-sub.log"
+        harness_reap "$pid"
+        harness_reap "$subscriber_pid"
+    fi
+    exec 8>&- 9>&-
+    rm "$fifo" "$heads"
+}
+
+# This checkout's CLI FETCHes a past group of a finished track, under the same relay close check as
+# live readers. Every object has its own bytes, so a FETCH that drops, repeats, or reorders one fails.
 run_fetch_round() {
-    local name="fetch-rust" fifo="$LOGS/fetch-ack" broadcast="fetch-$$-$RANDOM" pid from version
+    local pub="$1" name="fetch-$1" fifo="$LOGS/fetch-ack" broadcast="fetch-$1-$$-$RANDOM" pid from version
     local started=$SECONDS why=""
+    local cell=(case="CLI FETCH" publisher="$pub" subscriber=rust log="$LOGS/$name-pub.log")
+    if is_broken "$pub"; then
+        echo "  FAIL  CLI FETCH $pub (client unavailable)"
+        record fail "${cell[@]}" detail="client unavailable"
+        overall=1
+        return
+    fi
     version=$(pinned_version)
     from=$(relay_next_line)
     mkfifo "$fifo"
     exec 9<>"$fifo"
-    harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_tail_publisher "$fifo" rust publish "$broadcast" "$(token_url --publish "$(publish_grant "$broadcast")")" "$version" cached
+    harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_tail_publisher "$fifo" "$pub" publish "$broadcast" "$(token_url --publish "$(publish_grant "$broadcast")")" "$version" cached
     pid="$HARNESS_PID"
     if timeout -k 3 "$TIMEOUT" "$MOQ" --connect "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" ${version:+--connect-version "$version"} \
-        --broadcast "$broadcast" fetch tail --group 0 >"$LOGS/$name.raw" &&
-        python3 - "$LOGS/$name.raw" <<'PYCODE'
-import pathlib, sys
-assert pathlib.Path(sys.argv[1]).read_bytes() == bytes(256 * 1024), "incorrect FETCH payload"
+        --broadcast "$broadcast" fetch tail --group 1 --json >"$LOGS/$name.json" &&
+        python3 - "$LOGS/$name.json" <<'PYCODE'
+import base64, json, sys
+frames = [json.loads(line) for line in open(sys.argv[1])]
+assert [(frame["group"], frame["frame"], frame["size"]) for frame in frames] == [(1, index, 64 * 1024) for index in range(3)], frames
+assert [base64.b64decode(frame["payload"], validate=True) for frame in frames] == [bytes([16 + index]) * (64 * 1024) for index in range(3)], "incorrect FETCH payload"
 PYCODE
     then
         printf 'clean end\n' >&9
         harness_wait "$pid" || true
         if grep -qx 'tail acknowledged' "$LOGS/$name-pub.log"; then
-            echo "  PASS  CLI FETCH (group 0; 262144 bytes)"
+            echo "  PASS  CLI FETCH $pub (group 1; 3 objects)"
         else
-            echo "  FAIL  CLI FETCH (publisher did not acknowledge)"
+            echo "  FAIL  CLI FETCH $pub (publisher did not acknowledge)"
             why="publisher did not acknowledge"
             overall=1
             cat "$LOGS/$name-pub.log"
         fi
     else
-        echo "  FAIL  CLI FETCH"
+        echo "  FAIL  CLI FETCH $pub"
         why="incorrect or missing FETCH payload"
         overall=1
+        cat "$LOGS/$name-pub.log"
         harness_reap "$pid"
     fi
     exec 9>&-
@@ -1950,7 +2020,7 @@ PYCODE
         why="${why:-a relay connection negotiated another version}"
         overall=1
     fi
-    local cell=(case="CLI FETCH" publisher=rust subscriber=rust seconds=$((SECONDS - started)) log="$LOGS/$name-pub.log")
+    cell+=(seconds=$((SECONDS - started)))
     if [[ -z "$why" ]]; then record pass "${cell[@]}"; else record fail "${cell[@]}" detail="$why"; fi
 }
 
@@ -2126,7 +2196,18 @@ run_control_case() {
 run_tails() {
     local runtime version
     echo "=== CLI FETCH close ==="
-    run_fetch_round
+    run_fetch_round rust
+    for runtime in js-native-node js-native-bun; do
+        ! needs "$runtime" || run_fetch_round "$runtime"
+    done
+    echo "=== late join ==="
+    run_late_pair rust rust
+    for runtime in js-native-node js-native-bun; do
+        if needs "$runtime"; then
+            run_late_pair rust "$runtime"
+            run_late_pair "$runtime" rust
+        fi
+    done
     echo "=== finite track tails ==="
     run_tail_pair rust rust
     for runtime in js-native-node js-native-bun; do

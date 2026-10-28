@@ -12,7 +12,7 @@ use std::{
 		Arc, Mutex,
 		atomic::{AtomicUsize, Ordering},
 	},
-	task::{Context, Poll, ready},
+	task::{Poll, ready},
 	time::Duration,
 };
 
@@ -231,9 +231,8 @@ impl Publisher {
 
 		let _ = self.children.poll(waiter);
 
-		let mut cx = waiter.context();
 		loop {
-			match Stream::poll_accept(&mut self.accept, self.shared.version, &mut cx) {
+			match Stream::poll_accept(&self.accept, self.shared.version, waiter) {
 				Poll::Ready(Ok(stream)) => {
 					let stream = stream.with_stats(self.shared.origin.stats());
 					self.children.push(Control {
@@ -329,8 +328,7 @@ impl Control {
 		loop {
 			match &mut self.state {
 				ControlState::Start { stream } => {
-					let mut cx = waiter.context();
-					let kind = match ready!(stream.reader.poll_decode::<lite::ControlType>(&mut cx)) {
+					let kind = match ready!(stream.reader.poll_decode::<lite::ControlType>(waiter)) {
 						Ok(kind) => Some(kind),
 						// The only way a type decodes invalid is an unknown value.
 						Err(Error::Decode(crate::DecodeError::InvalidValue)) => None,
@@ -387,12 +385,12 @@ impl Control {
 				ControlState::Probe(serve) => return serve.poll(waiter),
 				ControlState::Auth(serve) => return serve.poll(waiter),
 				ControlState::Goaway { stream } => {
-					let mut cx = waiter.context();
 					let version = self.shared.version;
-					let uri =
-						ready!(stream.reader.poll_decode_with(&mut cx, |r| {
-							Ok(lite::Goaway::decode(r, version)?.uri.into_owned())
-						}))?;
+					let uri = ready!(
+						stream
+							.reader
+							.poll_decode_with(waiter, |r| { Ok(lite::Goaway::decode(r, version)?.uri.into_owned()) })
+					)?;
 					tracing::info!(%uri, "received goaway");
 
 					if !self.shared.client && !uri.is_empty() {
@@ -480,13 +478,12 @@ impl AuthServe {
 	}
 
 	fn poll_serve(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		let mut cx = Context::from_waker(waiter.waker());
 		let stream = self.stream.as_mut().expect("stream present");
 
 		let issue = match &self.serving {
 			Some(serving) => serving.issue.clone(),
 			None => {
-				let msg = ready!(stream.reader.poll_decode::<lite::Auth>(&mut cx))?;
+				let msg = ready!(stream.reader.poll_decode::<lite::Auth>(waiter))?;
 				let serving = crate::auth::Serving::new(self.shared.auth.clone());
 				let issue = serving.issue.clone();
 				match self.shared.auth.acceptor() {
@@ -517,14 +514,14 @@ impl AuthServe {
 		};
 
 		loop {
-			ready!(stream.writer.poll_flush(&mut cx))?;
+			ready!(stream.writer.poll_flush(waiter))?;
 			if self.finished {
-				return stream.writer.poll_closed(&mut cx);
+				return stream.writer.poll_closed(waiter);
 			}
 
 			// The presenter withdrew the token, by FIN or by a cancelling reset, or its
 			// stream died.
-			if let Poll::Ready(res) = stream.reader.poll_read_chunk(&mut cx, 1).map(|res| {
+			if let Poll::Ready(res) = stream.reader.poll_read_chunk(waiter, 1).map(|res| {
 				res.and_then(|chunk| match chunk {
 					None => Ok(()),
 					Some(_) => Err(Error::ProtocolViolation),
@@ -734,16 +731,15 @@ impl ProbeServe {
 
 	fn poll_probe(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let stream = self.stream.as_mut().expect("stream present");
-		let mut cx = waiter.context();
 
 		loop {
 			// Deliver the previous estimate before weighing the next one.
-			ready!(stream.writer.poll_flush(&mut cx))?;
+			ready!(stream.writer.poll_flush(waiter))?;
 
 			// Report ignores target values, but consumes them so buffered bytes
 			// cannot hide the peer's FIN or a malformed complete message.
 			loop {
-				match stream.reader.poll_decode_maybe::<lite::Probe>(&mut cx) {
+				match stream.reader.poll_decode_maybe::<lite::Probe>(waiter) {
 					Poll::Ready(Ok(Some(_))) => ready!(self.budget.poll_yield(waiter)),
 					Poll::Ready(Ok(None)) => return Poll::Ready(Ok(())),
 					Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
@@ -878,8 +874,7 @@ impl AnnounceServe {
 			match &mut self.state {
 				AnnounceState::Decode => {
 					let stream = self.stream.as_mut().expect("stream present");
-					let mut cx = waiter.context();
-					let interest = ready!(stream.reader.poll_decode::<lite::AnnounceRequest>(&mut cx))?;
+					let interest = ready!(stream.reader.poll_decode::<lite::AnnounceRequest>(waiter))?;
 					let prefix = interest.prefix.clone();
 					let hidden = interest.hidden;
 
@@ -1364,8 +1359,6 @@ impl AnnounceRun {
 		announced: &mut announce::Consumer,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<(), Error>> {
-		let mut cx = waiter.context();
-
 		if matches!(self.phase, AnnouncePhase::Init) {
 			// Start from the grant the setup token earns, so the initial set never
 			// advertises something it would withdraw, or abort over, a moment later.
@@ -1381,7 +1374,7 @@ impl AnnounceRun {
 
 		loop {
 			// Deliver the buffered updates before selecting more work.
-			ready!(stream.writer.poll_flush(&mut cx))?;
+			ready!(stream.writer.poll_flush(waiter))?;
 
 			if matches!(self.phase, AnnouncePhase::Withdrawing) {
 				stream.writer.finish()?;
@@ -1389,7 +1382,7 @@ impl AnnounceRun {
 			}
 
 			if matches!(self.phase, AnnouncePhase::Closing) {
-				return stream.writer.poll_closed(&mut cx);
+				return stream.writer.poll_closed(waiter);
 			}
 
 			if self.replay {
@@ -1413,7 +1406,7 @@ impl AnnounceRun {
 				continue;
 			}
 
-			if let Poll::Ready(res) = stream.reader.poll_closed(&mut cx) {
+			if let Poll::Ready(res) = stream.reader.poll_closed(waiter) {
 				return Poll::Ready(res);
 			}
 			if self.initial == Some(0) {
@@ -1644,12 +1637,11 @@ impl<R: Request> RequestServe<R> {
 		{
 			return Poll::Ready(Err(Error::Unauthorized));
 		}
-		let mut cx = waiter.context();
 		loop {
 			ready!(self.budget.poll_yield(waiter));
 			// Once answered, the requester's FIN is the normal end, not a cancel.
 			if matches!(self.state, RequestState::Resolve { .. } | RequestState::Serve(_))
-				&& let Poll::Ready(res) = self.poll_requester(&mut cx)
+				&& let Poll::Ready(res) = self.poll_requester(waiter)
 			{
 				res?;
 				if !R::GRACEFUL {
@@ -1664,7 +1656,7 @@ impl<R: Request> RequestServe<R> {
 			match &mut self.state {
 				RequestState::Decode => {
 					let version = self.shared.version;
-					let msg = ready!(stream.reader.poll_decode_with(&mut cx, |r| R::decode(r, version)))?;
+					let msg = ready!(stream.reader.poll_decode_with(waiter, |r| R::decode(r, version)))?;
 					let (broadcast, track) = R::target(&msg);
 					self.broadcast = broadcast.clone();
 					self.track = track.to_string();
@@ -1725,8 +1717,8 @@ impl<R: Request> RequestServe<R> {
 					if !*finished {
 						// A reply blocked on flow control may never unblock, so a requester
 						// leaving before it is out cancels it and lets go of the request.
-						if stream.writer.poll_flush(&mut cx)?.is_pending() {
-							let closed = ready!(self.poll_requester(&mut cx));
+						if stream.writer.poll_flush(waiter)?.is_pending() {
+							let closed = ready!(self.poll_requester(waiter));
 							self.state = RequestState::Finish { finished: false };
 							closed?;
 							return Poll::Ready(Err(Error::Cancel));
@@ -1735,12 +1727,12 @@ impl<R: Request> RequestServe<R> {
 						*finished = true;
 					}
 					// The reply is the peer's once acknowledged; the hold itself owes nothing.
-					let delivered = *acked || stream.writer.poll_close(&mut cx).is_ready();
+					let delivered = *acked || stream.writer.poll_close(waiter).is_ready();
 					*acked = delivered;
 					if delivered {
 						self.settle();
 					}
-					let closed = ready!(self.poll_requester(&mut cx));
+					let closed = ready!(self.poll_requester(waiter));
 					// Let go of the request now, not when the serve is dropped.
 					self.state = RequestState::Finish { finished: true };
 					// A FIN or a reset both end the requester's interest; only a stray byte
@@ -1756,17 +1748,17 @@ impl<R: Request> RequestServe<R> {
 				}
 				RequestState::Finish { finished } => {
 					if !*finished {
-						ready!(stream.writer.poll_flush(&mut cx))?;
+						ready!(stream.writer.poll_flush(waiter))?;
 						stream.writer.finish()?;
 						*finished = true;
 					}
 					// A transport ACK does not say the application read the tail: a lite-07
 					// subscriber FINs once its tail accounting settles, so wait for that.
 					if R::GRACEFUL && self.shared.version.waits_for_subscriber_fin() {
-						ready!(self.poll_requester(&mut cx))?;
+						ready!(self.poll_requester(waiter))?;
 					}
 					let stream = self.stream.as_mut().expect("stream present");
-					return stream.writer.poll_close(&mut cx);
+					return stream.writer.poll_close(waiter);
 				}
 			}
 		}
@@ -1774,10 +1766,10 @@ impl<R: Request> RequestServe<R> {
 
 	/// Read what the requester sends while we answer: ready once it closes its send
 	/// direction, `Ok` for a FIN. Each update reaches the reply, or waits for it to start.
-	fn poll_requester(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+	fn poll_requester(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let stream = self.stream.as_mut().expect("stream present");
 		loop {
-			let update = match ready!(stream.reader.poll_decode_maybe::<R::Update>(cx)) {
+			let update = match ready!(stream.reader.poll_decode_maybe::<R::Update>(waiter)) {
 				Ok(Some(update)) => update,
 				Ok(None) => return Poll::Ready(Ok(())),
 				Err(err) => {
@@ -1902,7 +1894,7 @@ impl Request for TracksServe {
 	) -> Poll<Result<ControlFlow<()>, Error>> {
 		// Pull an event only once the last is out, so a stalled requester's changes collapse
 		// in the listing's queue rather than pile up here.
-		ready!(writer.poll_flush(&mut waiter.context()))?;
+		ready!(writer.poll_flush(waiter))?;
 		let event = match ready!(self.tracks.poll_next(waiter))? {
 			Some(crate::broadcast::TracksEvent::Added { name, info }) => lite::TracksEvent::Added {
 				name: name.to_string().into(),
@@ -2088,7 +2080,7 @@ impl Request for SubscribeServe {
 					};
 					let steer_tx = kio::Producer::new(steer);
 
-					let mut session = shared.session.clone();
+					let session = shared.session.clone();
 					let publisher = track.info().priority;
 					let group = session.send_group(crate::priority::group(msg.priority, publisher));
 					let sub = Subscription {
@@ -2304,83 +2296,80 @@ impl Request for FetchServe {
 					batch,
 					batch_pos,
 					records,
-				} => {
-					let mut cx = waiter.context();
-					loop {
-						ready!(writer.poll_flush(&mut cx))?;
-						if let Some(pending) = chunk {
-							ready!(writer.poll_write(&mut cx, pending))?;
-							if !bytes::Buf::has_remaining(pending) {
-								*chunk = None;
+				} => loop {
+					ready!(writer.poll_flush(waiter))?;
+					if let Some(pending) = chunk {
+						ready!(writer.poll_write(waiter, pending))?;
+						if !bytes::Buf::has_remaining(pending) {
+							*chunk = None;
+						}
+					} else if let Some(pending) = frame {
+						match ready!(pending.poll_read_chunk(waiter))? {
+							Some(next) => *chunk = Some(next.into()),
+							None => *frame = None,
+						}
+					} else if *batch_pos < batch.len() {
+						let index = group.index() - batch.len() as u64 + *batch_pos as u64;
+						let batched = &mut batch[*batch_pos];
+						if let Some(records) = records {
+							records.frame(writer, index, batched.fields.as_deref())?;
+						}
+						buffer_frame_info(
+							writer,
+							batched.frame.timestamp,
+							batched.inflated,
+							batched.frame.payload.len() as u64,
+							*stamp,
+							prev_ts,
+							&shared.runtime,
+						)?;
+						let payload = std::mem::take(&mut batched.frame.payload);
+						if !payload.is_empty() {
+							*chunk = Some(payload);
+						}
+						*batch_pos += 1;
+						group.keep_alive();
+					} else {
+						match group.poll_read_objects(waiter, batch) {
+							Poll::Ready(Ok(count)) if count > 0 => {
+								*batch_pos = 0;
+								return Poll::Ready(Ok(ControlFlow::Continue(())));
 							}
-						} else if let Some(pending) = frame {
-							match ready!(pending.poll_read_chunk(waiter))? {
-								Some(next) => *chunk = Some(next.into()),
-								None => *frame = None,
-							}
-						} else if *batch_pos < batch.len() {
-							let index = group.index() - batch.len() as u64 + *batch_pos as u64;
-							let batched = &mut batch[*batch_pos];
-							if let Some(records) = records {
-								records.frame(writer, index, batched.fields.as_deref())?;
-							}
-							buffer_frame_info(
-								writer,
-								batched.frame.timestamp,
-								batched.inflated,
-								batched.frame.payload.len() as u64,
-								*stamp,
-								prev_ts,
-								&shared.runtime,
-							)?;
-							let payload = std::mem::take(&mut batched.frame.payload);
-							if !payload.is_empty() {
-								*chunk = Some(payload);
-							}
-							*batch_pos += 1;
-							group.keep_alive();
-						} else {
-							match group.poll_read_objects(waiter, batch) {
-								Poll::Ready(Ok(count)) if count > 0 => {
-									*batch_pos = 0;
-									return Poll::Ready(Ok(ControlFlow::Continue(())));
+							Poll::Ready(Ok(_)) => {
+								if let Some(records) = records {
+									records.end(writer, group)?;
 								}
-								Poll::Ready(Ok(_)) => {
-									if let Some(records) = records {
-										records.end(writer, group)?;
-									}
-									return Poll::Ready(Ok(ControlFlow::Break(())));
-								}
-								Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-								Poll::Pending => {}
+								return Poll::Ready(Ok(ControlFlow::Break(())));
 							}
-							match ready!(group.poll_next_frame(waiter))? {
-								Some(next) => {
-									if let Some(records) = records {
-										records.frame(writer, group.index() - 1, next.fields.as_deref())?;
-									}
-									buffer_frame_info(
-										writer,
-										next.timestamp,
-										next.inflated,
-										next.size,
-										*stamp,
-										prev_ts,
-										&shared.runtime,
-									)?;
-									*frame = Some(next);
-									return Poll::Ready(Ok(ControlFlow::Continue(())));
+							Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+							Poll::Pending => {}
+						}
+						match ready!(group.poll_next_frame(waiter))? {
+							Some(next) => {
+								if let Some(records) = records {
+									records.frame(writer, group.index() - 1, next.fields.as_deref())?;
 								}
-								None => {
-									if let Some(records) = records {
-										records.end(writer, group)?;
-									}
-									return Poll::Ready(Ok(ControlFlow::Break(())));
+								buffer_frame_info(
+									writer,
+									next.timestamp,
+									next.inflated,
+									next.size,
+									*stamp,
+									prev_ts,
+									&shared.runtime,
+								)?;
+								*frame = Some(next);
+								return Poll::Ready(Ok(ControlFlow::Continue(())));
+							}
+							None => {
+								if let Some(records) = records {
+									records.end(writer, group)?;
 								}
+								return Poll::Ready(Ok(ControlFlow::Break(())));
 							}
 						}
 					}
-				}
+				},
 			}
 		}
 	}
@@ -4017,7 +4006,7 @@ impl TrackRun {
 		waiter: &kio::Waiter,
 	) -> Poll<Result<(), Error>> {
 		while ready!(self.poll_step(writer, waiter))?.is_continue() {}
-		writer.poll_flush(&mut waiter.context())
+		writer.poll_flush(waiter)
 	}
 
 	/// Serve one ready group or datagram (`Continue`), or `Break` once the live edge
@@ -4028,9 +4017,8 @@ impl TrackRun {
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<ControlFlow<()>, Error>> {
-		let mut cx = waiter.context();
 		// Deliver the buffered range messages before selecting more work.
-		ready!(writer.poll_flush(&mut cx))?;
+		ready!(writer.poll_flush(waiter))?;
 
 		// The group waiting for stream credit joins the others once it has one, or fails
 		// without one.
@@ -4542,7 +4530,6 @@ impl GroupServe {
 			self.state = GroupState::Done;
 			return Poll::Ready(Err(err));
 		}
-		let mut cx = waiter.context();
 		let options = match &mut self.rank {
 			Rank::Group => SendOptions {
 				group,
@@ -4553,7 +4540,7 @@ impl GroupServe {
 				priority: handle.send_order().into(),
 			},
 		};
-		let stream = match ready!(session.poll_open_uni(&mut cx, options)) {
+		let stream = match ready!(session.poll_open_uni(waiter, options)) {
 			Ok(stream) => stream,
 			Err(err) => {
 				self.settle_open(false);
@@ -4649,16 +4636,14 @@ impl GroupServe {
 					batch_pos,
 					records,
 				} => {
-					let mut cx = waiter.context();
-
 					let outcome = 'serve: {
 						// The peer closing first cancels the group.
-						if writer.poll_closed(&mut cx).is_ready() {
+						if writer.poll_closed(waiter).is_ready() {
 							break 'serve Err(Error::Cancel);
 						}
 						loop {
 							ready!(self.budget.poll_yield(waiter));
-							match writer.poll_flush(&mut cx) {
+							match writer.poll_flush(waiter) {
 								Poll::Ready(Ok(())) => {}
 								Poll::Ready(Err(err)) => break 'serve Err(err),
 								// Parking on the transport is the one stall the group cursor cannot
@@ -4673,7 +4658,7 @@ impl GroupServe {
 								}
 							}
 							if let Some(pending) = chunk {
-								match writer.poll_write(&mut cx, pending) {
+								match writer.poll_write(waiter, pending) {
 									Poll::Ready(Ok(_)) => {
 										if !bytes::Buf::has_remaining(pending) {
 											*chunk = None;
@@ -4820,11 +4805,10 @@ impl GroupServe {
 					}
 				}
 				GroupState::Closed { writer } => {
-					let mut cx = waiter.context();
 					// poll_close releases the stream on completion: the peer acknowledged
 					// everything, so the Drop fallback must not reset the stream and
 					// discard bytes still retransmitting.
-					let res = match writer.poll_close(&mut cx) {
+					let res = match writer.poll_close(waiter) {
 						Poll::Ready(res) => res,
 						// Those bytes still hold the connection until acknowledged, so a
 						// group gone stale meanwhile releases them like one still serving.
@@ -5768,7 +5752,7 @@ mod serve_group_test {
 		let session = SinkSession::new(Log::default()).with_groups().with_unacked_fin();
 		let log = session.log.clone();
 		let (mut run, mut writer, _) = lite_run(Version::Lite06, session.clone(), subscriber);
-		run.ctx.group = crate::transport::poll::Session::send_group(&mut run.ctx.session, 3);
+		run.ctx.group = crate::transport::poll::Session::send_group(&run.ctx.session, 3);
 
 		write_group(&mut track, 0, 0);
 		write_group(&mut track, 1, 1);
@@ -5855,7 +5839,7 @@ mod serve_group_test {
 			.with_unacked_fin();
 		let log = session.log.clone();
 		let (mut run, mut writer, _) = lite_run(Version::Lite06, session.clone(), subscriber);
-		run.ctx.group = crate::transport::poll::Session::send_group(&mut run.ctx.session, 3);
+		run.ctx.group = crate::transport::poll::Session::send_group(&run.ctx.session, 3);
 
 		write_group(&mut track, 0, 0);
 		let sequence = track
@@ -5893,7 +5877,7 @@ mod serve_group_test {
 			let log = session.log.clone();
 			let (mut run, mut writer, _) = lite_run(Version::Lite07, session.clone(), subscriber);
 			run.ctx.ietf = true;
-			run.ctx.group = crate::transport::poll::Session::send_group(&mut run.ctx.session, 3);
+			run.ctx.group = crate::transport::poll::Session::send_group(&run.ctx.session, 3);
 			run.update(lite::SubscribeUpdate {
 				wanted_group: None,
 				order: Order::Descending,
@@ -6047,7 +6031,7 @@ mod serve_group_test {
 		let session = SinkSession::new(Log::default()).with_groups().with_datagrams(1200);
 		let log = session.log.clone();
 		let (mut run, mut writer, _) = lite_run(Version::Lite06, session.clone(), subscriber);
-		run.ctx.group = crate::transport::poll::Session::send_group(&mut run.ctx.session, 3);
+		run.ctx.group = crate::transport::poll::Session::send_group(&run.ctx.session, 3);
 
 		let first = track
 			.append_datagram(Timestamp::from_millis(1).unwrap(), b"a".as_slice())
@@ -6179,9 +6163,7 @@ mod serve_group_test {
 		while run.start.is_none() {
 			assert!(run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready());
 		}
-		kio::wait(|waiter| writer.poll_flush(&mut waiter.context()))
-			.await
-			.unwrap();
+		kio::wait(|waiter| writer.poll_flush(waiter)).await.unwrap();
 
 		let writes = log.writes.lock().unwrap().clone();
 		let (msg, _) = lite::SubscribeResponse::decode_slice(&writes, Version::Lite07).unwrap();
@@ -6198,9 +6180,7 @@ mod serve_group_test {
 		version: Version,
 	) -> Vec<(u64, u64)> {
 		// The serve flushes what the run loop buffered before its FIN.
-		kio::wait(|waiter| writer.poll_flush(&mut waiter.context()))
-			.await
-			.unwrap();
+		kio::wait(|waiter| writer.poll_flush(waiter)).await.unwrap();
 		let writes = log.writes.lock().unwrap().clone();
 		let mut buf = writes.as_slice();
 		let mut drops = Vec::new();
@@ -6669,9 +6649,7 @@ mod serve_group_test {
 						.now_or_never()
 						.is_none()
 				);
-				kio::wait(|waiter| writer.poll_flush(&mut waiter.context()))
-					.await
-					.unwrap();
+				kio::wait(|waiter| writer.poll_flush(waiter)).await.unwrap();
 				let writes = log.writes.lock().unwrap().clone();
 				let (msg, _) = lite::SubscribeResponse::decode_slice(&writes, version).unwrap();
 				let lite::SubscribeResponse::Start(start) = msg else {
@@ -6702,9 +6680,7 @@ mod serve_group_test {
 					.now_or_never()
 					.is_none()
 			);
-			kio::wait(|waiter| writer.poll_flush(&mut waiter.context()))
-				.await
-				.unwrap();
+			kio::wait(|waiter| writer.poll_flush(waiter)).await.unwrap();
 			let writes = log.writes.lock().unwrap().clone();
 			let (msg, _) = lite::SubscribeResponse::decode_slice(&writes, version).unwrap();
 			let lite::SubscribeResponse::Start(start) = msg else {
@@ -7843,9 +7819,9 @@ mod tests {
 		request
 			.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
 			.unwrap();
-		let mut session = ScriptedSession::new(script);
-		let (send, recv) = futures::future::poll_fn(|cx| {
-			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx, Default::default())
+		let session = ScriptedSession::new(script);
+		let (send, recv) = kio::wait(|waiter| {
+			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&session, waiter, Default::default())
 		})
 		.await
 		.unwrap();
@@ -7978,9 +7954,9 @@ mod tests {
 			}
 			.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
 			.unwrap();
-			let mut session = ScriptedSession::new(script);
-			let (send, recv) = futures::future::poll_fn(|cx| {
-				<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx, Default::default())
+			let session = ScriptedSession::new(script);
+			let (send, recv) = kio::wait(|waiter| {
+				<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&session, waiter, Default::default())
 			})
 			.await
 			.unwrap();
@@ -8040,11 +8016,11 @@ mod tests {
 					}
 					.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
 					.unwrap();
-					let mut session = ScriptedSession::new(script);
-					let (_, recv) = futures::future::poll_fn(|cx| {
+					let session = ScriptedSession::new(script);
+					let (_, recv) = kio::wait(|waiter| {
 						<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(
-							&mut session,
-							cx,
+							&session,
+							waiter,
 							Default::default(),
 						)
 					})
@@ -8141,9 +8117,9 @@ mod tests {
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
 		.unwrap();
-		let mut session = ScriptedSession::new(script);
-		let (send, recv) = futures::future::poll_fn(|cx| {
-			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx, Default::default())
+		let session = ScriptedSession::new(script);
+		let (send, recv) = kio::wait(|waiter| {
+			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&session, waiter, Default::default())
 		})
 		.await
 		.unwrap();
@@ -8251,9 +8227,9 @@ mod tests {
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
 		.unwrap();
-		let mut session = ScriptedSession::new(script);
-		let (send, recv) = futures::future::poll_fn(|cx| {
-			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx, Default::default())
+		let session = ScriptedSession::new(script);
+		let (send, recv) = kio::wait(|waiter| {
+			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&session, waiter, Default::default())
 		})
 		.await
 		.unwrap();
@@ -8419,9 +8395,9 @@ mod tests {
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut script, VERSION.into()), VERSION)
 		.unwrap();
-		let mut session = ScriptedSession::new(script);
-		let (send, recv) = futures::future::poll_fn(|cx| {
-			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx, Default::default())
+		let session = ScriptedSession::new(script);
+		let (send, recv) = kio::wait(|waiter| {
+			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&session, waiter, Default::default())
 		})
 		.await
 		.unwrap();
@@ -8790,9 +8766,9 @@ mod tests {
 		let mut script = Vec::new();
 		msg.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
 			.unwrap();
-		let mut session = ScriptedSession::new(script);
-		let (send, recv) = futures::future::poll_fn(|cx| {
-			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx, Default::default())
+		let session = ScriptedSession::new(script);
+		let (send, recv) = kio::wait(|waiter| {
+			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&session, waiter, Default::default())
 		})
 		.await
 		.unwrap();

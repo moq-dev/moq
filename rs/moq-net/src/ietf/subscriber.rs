@@ -1480,9 +1480,8 @@ impl Subscriber {
 			if live.poll_closed(waiter).is_ready() {
 				return Poll::Ready(Ok(None));
 			}
-			let mut cx = waiter.context();
 			messages
-				.poll_next(&mut stream.reader, &mut cx)
+				.poll_next(&mut stream.reader, waiter)
 				.map(|next| next.map(Some))
 		})
 		.await
@@ -1514,14 +1513,13 @@ impl Subscriber {
 			}
 			false => writer.abort(&Error::Cancel),
 		}
-		let mut session = self.session.clone();
+		let session = self.session.clone();
 		kio::wait(|waiter| {
-			let mut cx = waiter.context();
-			if session.poll_closed(&mut cx).is_ready() {
+			if session.poll_closed(waiter).is_ready() {
 				return Poll::Ready(());
 			}
 			loop {
-				match ready!(messages.poll_next(&mut reader, &mut cx)) {
+				match ready!(messages.poll_next(&mut reader, waiter)) {
 					Ok(Some(_)) => continue,
 					Ok(None) | Err(_) => return Poll::Ready(()),
 				}
@@ -1862,12 +1860,11 @@ impl Subscriber {
 				};
 				let verdict = gate.verify(token, slot.clone());
 				// The session closing or the peer withdrawing the announce withdraws the token.
-				let mut session = self.session.clone();
+				let session = self.session.clone();
 				let version = self.version;
 				let verified = kio::wait(|waiter| {
-					let mut cx = waiter.context();
-					if session.poll_closed(&mut cx).is_ready()
-						|| super::request_stream::poll_withdrawn(&mut stream, version, &mut cx).is_ready()
+					if session.poll_closed(waiter).is_ready()
+						|| super::request_stream::poll_withdrawn(&mut stream, version, waiter).is_ready()
 					{
 						return Poll::Ready(None);
 					}
@@ -2017,8 +2014,7 @@ impl Subscriber {
 				Turn::Message(id, body)
 			} else {
 				kio::wait(|waiter| {
-					let mut cx = waiter.context();
-					if let Poll::Ready(result) = stream.writer.poll_closed(&mut cx) {
+					if let Poll::Ready(result) = stream.writer.poll_closed(waiter) {
 						return Poll::Ready(Turn::WriterClosed(result));
 					}
 					if let Poll::Ready(renewed) = renewal.poll(waiter) {
@@ -2027,7 +2023,7 @@ impl Subscriber {
 					// Keep reading while a verdict is pending, so a withdrawal still ends the
 					// announce: a buffered update must not mask a later terminal.
 					if !finished {
-						return match messages.poll_next(&mut stream.reader, &mut cx) {
+						return match messages.poll_next(&mut stream.reader, waiter) {
 							Poll::Ready(Ok(Some(super::request_stream::Framed(id, body)))) => {
 								Poll::Ready(Turn::Message(id, body))
 							}
@@ -2264,7 +2260,7 @@ impl Subscriber {
 	/// End an advertisement we accepted, leaving the session up: a closed stream.
 	async fn cancel_announce(&self, stream: &mut Stream<Transport, Version>) -> Result<(), Error> {
 		// An OK cut short by the grant ending is still buffered, and goes out ahead of the FIN.
-		std::future::poll_fn(|cx| stream.writer.poll_flush(cx)).await?;
+		kio::wait(|waiter| stream.writer.poll_flush(waiter)).await?;
 		if stream.writer.finish().is_ok() {
 			let _ = stream.writer.closed().await;
 		}
@@ -2576,10 +2572,9 @@ impl Subscriber {
 	/// A retraction does not disturb subscriptions already in flight: what ended
 	/// takes no new work, but the work it started finishes.
 	async fn drain(&self, tasks: &mut TaskSet) {
-		let mut session = self.session.clone();
+		let session = self.session.clone();
 		kio::wait(|waiter| {
-			let mut cx = waiter.context();
-			if session.poll_closed(&mut cx).is_ready() {
+			if session.poll_closed(waiter).is_ready() {
 				return Poll::Ready(());
 			}
 			tasks.poll(waiter)
@@ -2593,13 +2588,12 @@ impl Subscriber {
 	/// their own end, unless the announce was what authorized them.
 	async fn run_route(&self, path: Path, generation: u64) {
 		let mut broadcasts = TaskSet::owned();
-		let mut closed_session = self.session.clone();
+		let closed_session = self.session.clone();
 		let mut epoch = 0;
 		loop {
 			let next = broadcasts
 				.drive(|waiter| {
-					let mut cx = waiter.context();
-					if closed_session.poll_closed(&mut cx).is_ready() {
+					if closed_session.poll_closed(waiter).is_ready() {
 						return Poll::Ready(None);
 					}
 					// A draining peer usually stops publishing namespaces, so react
@@ -2738,7 +2732,7 @@ impl Subscriber {
 		route: Option<kio::Consumer<()>>,
 	) -> Result<(), Error> {
 		let mut subscribes = TaskSet::owned();
-		let mut closed_session = self.session.clone();
+		let closed_session = self.session.clone();
 		// Answers the source's listings with the peer's tracks, while anyone lists it.
 		let lister = std::sync::Arc::new(
 			broadcast
@@ -2749,8 +2743,7 @@ impl Subscriber {
 		loop {
 			let next = subscribes
 				.drive(|waiter| {
-					let mut cx = waiter.context();
-					if closed_session.poll_closed(&mut cx).is_ready() {
+					if closed_session.poll_closed(waiter).is_ready() {
 						return Poll::Ready(None);
 					}
 					self.poll_listing(&path, &lister, &mut listening, waiter);
@@ -3011,13 +3004,13 @@ impl Subscriber {
 				(request_id, stream, messages)
 			}
 			None => {
-				let mut opening = self.session.clone();
+				let opening = self.session.clone();
 				let stream = match kio::wait(|waiter| {
 					if gate.poll_denied(waiter).is_ready() {
 						return Poll::Ready(Err(Error::Unauthorized));
 					}
 					validity.check(waiter)?;
-					Stream::poll_open_request(&mut opening, self.version, &mut waiter.context())
+					Stream::poll_open_request(&opening, self.version, waiter)
 				})
 				.await
 				{
@@ -4075,13 +4068,13 @@ impl Subscriber {
 				// This subscription owns its joining fetch, so wait for stream credit.
 				// No ID is spent while opening a stream, so dropping a blocked open
 				// cannot leave a gap in the peer's sequential request IDs.
-				let mut opening = this.session.clone();
+				let opening = this.session.clone();
 				let mut stream = kio::wait(|waiter| {
 					validity.check(waiter)?;
 					if let Poll::Ready(err) = track.poll_aborted(waiter) {
 						return Poll::Ready(Err(err));
 					}
-					Stream::poll_open(&mut opening, this.version, &mut waiter.context())
+					Stream::poll_open(&opening, this.version, waiter)
 				})
 				.await?;
 				stream = stream.with_stats(this.origin.stats());
@@ -4185,8 +4178,7 @@ impl Subscriber {
 			let mut finished = false;
 			kio::wait(|waiter| {
 				if !finished {
-					let mut cx = waiter.context();
-					match messages.poll_end(&mut stream.reader, &mut cx) {
+					match messages.poll_end(&mut stream.reader, waiter) {
 						Poll::Ready(Ok(())) => finished = true,
 						Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 						Poll::Pending => {}
@@ -4245,13 +4237,13 @@ impl Subscriber {
 		gate: &mut crate::auth::Gate,
 	) -> Option<Idle> {
 		let validity = self.validity.start();
-		let mut opening = self.session.clone();
+		let opening = self.session.clone();
 		let mut stream = match kio::wait(|waiter| {
 			if gate.poll_denied(waiter).is_ready() {
 				return Poll::Ready(Err(Error::Unauthorized));
 			}
 			validity.check(waiter)?;
-			Stream::poll_open_request(&mut opening, self.version, &mut waiter.context())
+			Stream::poll_open_request(&opening, self.version, waiter)
 		})
 		.await
 		{
@@ -4285,7 +4277,7 @@ impl Subscriber {
 		// Nobody wanting the track any more ends the wait on a peer that may never answer,
 		// and the session ending fails it with the session's reason.
 		let mut demand = request.demand();
-		let mut closed = self.session.clone();
+		let closed = self.session.clone();
 		let response = {
 			let mut response = std::pin::pin!(self.read_track_status_response(&mut stream));
 			loop {
@@ -4303,7 +4295,7 @@ impl Subscriber {
 					if let Poll::Ready(res) = response {
 						return Poll::Ready(Some(SetupResponse::Response(res)));
 					}
-					if let Poll::Ready(err) = closed.poll_closed(&mut waiter.context()) {
+					if let Poll::Ready(err) = closed.poll_closed(waiter) {
 						return Poll::Ready(Some(SetupResponse::Cancelled(Error::from_transport(err))));
 					}
 					crate::util::poll_unwanted(&mut demand, waiter).map(|_| None)
@@ -5261,7 +5253,7 @@ impl Subscriber {
 			inflated: super::object::inflated(decoded.inflated, producer.compressed())?,
 		};
 		let mut frame = producer.create_object(header)?;
-		if let Err(err) = std::future::poll_fn(|cx| stream.poll_read_frame(cx, &mut frame)).await {
+		if let Err(err) = kio::wait(|waiter| stream.poll_read_frame(waiter, &mut frame)).await {
 			let _ = frame.abort(err.clone());
 			return Err(err);
 		}
@@ -5339,7 +5331,7 @@ impl Subscriber {
 		// token-authorized announce outside the session scope. Its abort ends this job.
 		// The fill is already owned by waiting readers; credit backpressures it until
 		// their demand leaves instead of refusing accepted work.
-		let mut opening = self.session.clone();
+		let opening = self.session.clone();
 		let mut stream = match kio::wait(|waiter| {
 			validity.check(waiter)?;
 			if let Poll::Ready(err) = fill.poll_aborted(waiter) {
@@ -5348,7 +5340,7 @@ impl Subscriber {
 			if fill.poll_unwanted_groups(run.clone(), waiter).is_ready() {
 				return Poll::Ready(Err(Error::Cancel));
 			}
-			Stream::poll_open(&mut opening, self.version, &mut waiter.context())
+			Stream::poll_open(&opening, self.version, waiter)
 		})
 		.await
 		{
@@ -5531,8 +5523,7 @@ impl Subscriber {
 		let mut abandoned = false;
 		let reset = kio::wait(|waiter| {
 			if open {
-				let mut cx = std::task::Context::from_waker(waiter.waker());
-				let closed = messages.poll_end(&mut stream.reader, &mut cx);
+				let closed = messages.poll_end(&mut stream.reader, waiter);
 				match closed {
 					Poll::Ready(Err(err)) => return Poll::Ready(Some(err)),
 					Poll::Ready(Ok(())) => open = false,
@@ -5774,7 +5765,7 @@ async fn skip_fetch_payload(stream: &mut Reader<crate::transport::boxed::RecvStr
 	while left > 0 {
 		kio::wait(|waiter| budget.poll_yield(waiter)).await;
 		let max = usize::try_from(left).unwrap_or(usize::MAX);
-		let chunk = std::future::poll_fn(|cx| stream.poll_read_chunk(cx, max))
+		let chunk = kio::wait(|waiter| stream.poll_read_chunk(waiter, max))
 			.await?
 			.ok_or(Error::ProtocolViolation)?;
 		left -= chunk.len() as u64;
@@ -5937,11 +5928,10 @@ impl GroupIngest {
 		group: &mut crate::recv::Group,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Ended, Error>> {
-		let mut cx = waiter.context();
 		loop {
 			match &mut self.phase {
 				IngestPhase::Delta => {
-					let Some(id_delta) = ready!(reader.poll_varint_maybe(&mut cx))? else {
+					let Some(id_delta) = ready!(reader.poll_varint_maybe(waiter))? else {
 						return Poll::Ready(Ok(Ended::Group));
 					};
 					let id = next_object_id(self.prior_object, id_delta)?;
@@ -5959,11 +5949,11 @@ impl GroupIngest {
 					};
 				}
 				IngestPhase::ExtSize => {
-					let ObjectExtensionsLength(size) = ready!(reader.poll_decode(&mut cx))?;
+					let ObjectExtensionsLength(size) = ready!(reader.poll_decode(waiter))?;
 					self.phase = IngestPhase::ExtBytes { size };
 				}
 				IngestPhase::ExtBytes { size } => {
-					let ext = ready!(reader.poll_read_exact(&mut cx, *size))?;
+					let ext = ready!(reader.poll_read_exact(waiter, *size))?;
 					let decoded = super::object::read(&ext, self.version, self.timescale)?;
 					let timestamp = decoded.timestamp;
 					self.properties = decoded.properties;
@@ -5973,7 +5963,7 @@ impl GroupIngest {
 					self.phase = IngestPhase::Size { timestamp };
 				}
 				IngestPhase::Size { timestamp } => {
-					let size = ready!(reader.poll_varint(&mut cx))?;
+					let size = ready!(reader.poll_varint(waiter))?;
 					if size == 0 {
 						self.phase = IngestPhase::Status { timestamp: *timestamp };
 						continue;
@@ -5987,7 +5977,7 @@ impl GroupIngest {
 					self.phase = IngestPhase::Payload { frame };
 				}
 				IngestPhase::Status { timestamp } => {
-					let status = ready!(reader.poll_varint(&mut cx))?;
+					let status = ready!(reader.poll_varint(waiter))?;
 					if status == 0 {
 						let timestamp = object_time(self.timescale, *timestamp)?;
 						let header = self.header(group, frame::Info { size: 0, timestamp })?;
@@ -6020,7 +6010,7 @@ impl GroupIngest {
 					}
 				}
 				IngestPhase::Payload { frame } => {
-					let failed = ready!(reader.poll_read_frame(&mut cx, frame)).err();
+					let failed = ready!(reader.poll_read_frame(waiter, frame)).err();
 
 					let IngestPhase::Payload { frame } = std::mem::replace(&mut self.phase, IngestPhase::Delta) else {
 						unreachable!()
@@ -6072,7 +6062,7 @@ mod tests {
 	async fn check_publish_fin(responses: Vec<u8>, clean: bool) {
 		use crate::lite::test_transport::ScriptedSession;
 		use crate::transport::poll::Session as _;
-		let mut session = ScriptedSession::eof(responses);
+		let session = ScriptedSession::eof(responses);
 		let (_, recv) = session.open_bi(Default::default()).await.unwrap();
 		let mut reader = Reader::new(crate::transport::boxed::RecvStream::new(recv), Version::Draft18);
 		let result = Subscriber::read_publish_done(
@@ -9974,7 +9964,7 @@ mod tests {
 
 	/// [`auth_announce_harness`] over a given session, such as one that finishes the stream
 	/// after its script.
-	fn auth_announce_harness_on<S: crate::transport::poll::Boxable>(
+	fn auth_announce_harness_on<S: crate::transport::poll::Boxable + Clone>(
 		version: Version,
 		session: S,
 	) -> (
@@ -12148,7 +12138,7 @@ mod stitch_tests {
 
 	/// A reader over the next scripted stream, decoded as draft-18.
 	async fn read_draft18(session: &ScriptedSession) -> Reader<crate::transport::boxed::RecvStream, Version> {
-		let mut session = session.clone();
+		let session = session.clone();
 		let (_, recv) = session.open_bi(Default::default()).await.unwrap();
 		Reader::new(crate::transport::boxed::RecvStream::new(recv), Version::Draft18)
 	}
@@ -12260,7 +12250,7 @@ mod stitch_tests {
 
 		/// A reader over the next scripted stream, standing in for one the peer opened.
 		async fn stream(&self) -> Reader<crate::transport::boxed::RecvStream, Version> {
-			let mut session = self.session.clone();
+			let session = self.session.clone();
 			let (_, recv) = session.open_bi(Default::default()).await.unwrap();
 			Reader::new(crate::transport::boxed::RecvStream::new(recv), VERSION)
 		}
@@ -12383,7 +12373,7 @@ mod stitch_tests {
 		h.subscriber.clone().recv_group(&mut initial).await.unwrap();
 		let mut bytes = fill_stream_for(UPDATE, &[(SEQUENCE + 1, &[b"unfinished".as_slice()])]);
 		bytes.pop();
-		let mut pending = ScriptedSession::new(bytes);
+		let pending = ScriptedSession::new(bytes);
 		let (_, recv) = pending.open_bi(Default::default()).await.unwrap();
 		let mut stream = Reader::new(crate::transport::boxed::RecvStream::new(recv), VERSION);
 		let mut receiving = h.subscriber.clone();
@@ -14649,7 +14639,7 @@ mod stitch_tests {
 			Self::with_session(version, ScriptedSession::per_stream(vec![objects])).await
 		}
 
-		async fn with_session(version: Version, mut session: ScriptedSession) -> Self {
+		async fn with_session(version: Version, session: ScriptedSession) -> Self {
 			let tasks = TaskSet::new();
 			let subscriber = Subscriber::new(
 				crate::time::sim(),

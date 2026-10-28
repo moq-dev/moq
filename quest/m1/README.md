@@ -120,7 +120,6 @@ removed).
 
 - [Resume checked against a model](/quest/m1/resume-model-test.md) - a randomized test checks every resumed reader against a one-track reference model in Rust and JS, and passes before the cut
 - [Recover by the reader's budget](/quest/m1/recover-reader-budget.md) - resume judges a missing group by each reader's own budget, not the copy's
-- [Rust resume release path](/quest/m1/resume-release-rust.md) - letting go of a replaced Rust copy never releases a group already moved to another
 - [Slow joiner test](/quest/m1/slow-joiner-test.md) - a reader stalled before its first read loses no groups within its budget, under real stream backpressure
 - [Address groups by timestamp](/quest/m1/time-addressing/README.md) - group start timestamps replace sequence numbers in the moq-net API and lite-07 wire, while old subscribers, old publishers, and published JS clients keep working
 - [Release audit findings](/quest/m1/release-audit/README.md) - resolve newly identified resource, parser, playback, and interoperability risks before the cut
@@ -134,6 +133,7 @@ removed).
 - [Announcement takeover](/quest/m1/announce-takeover.md) - a new independent route explicitly continues instances served through its predecessor, with shared Rust/JS semantics and lite-07 wire
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - a lite-07 SUBSCRIBE asks for past and live ranges with absolute or relative ends, in either order, and replaces FETCH; merged ranges never starve a subscriber; relays fill misses by range, including over moq-transport
 - [Drop set](/quest/m1/drop-set.md) - each cursor judges missing groups against its own budget, so a narrow reader drops promptly and a widening re-offers groups already reported dropped on lite-07
+- [Aborted copies don't hold an end open](/quest/m1/settled-abort.md) - a track's declared end settles when a fetched copy finishes a group whose live copy was cut or evicted
 - [Broadcast archives](/quest/m1/archive/README.md) - ANNOUNCE, TRACKS, and a SUBSCRIBE per track record every track under a prefix to any object_store, a host serves a stored broadcast back, and the catalog drops its archive pointer for a per-rendition `hls` field
 - [HLS recorder target](/quest/m1/hls-record-target.md) - the moq-cli HLS recorder takes its target duration from the declared `hls` duration
 - [Compressed tracks](/quest/m1/compress/README.md) - a track flagged `compress` is DEFLATEd per group by moq-net, forwarded compressed, and inflated once on the relay for peers that cannot signal it; `catalog.json.z` and moq-flate go away
@@ -148,12 +148,11 @@ removed).
 - [moq-quic's API improves on quinn's](/quest/m1/quic-api/README.md) - moq-quic and both QUIC drivers ship one mirrored API: `send::`/`recv::` namespaces, one error per direction, consuming terminal operations, plain configs, no quinn baggage
 - [Drop web-transport-trait](/quest/m1/drop-web-transport-trait.md) - iroh, wasm, and ffi implement moq-net's `transport::poll` traits, and the remaining `web_transport_trait` adapters are deleted
 - [On-demand JavaScript FETCH](/quest/m1/js-fetch-on-demand.md) - browser publishers answer IETF FETCH for evicted or uncached groups through the JS ranges request surface
+- [JS evicted FETCH groups are unknown](/quest/m1/js-fetch-evicted-unknown.md) - a group evicted between listing and writing goes out as End of Unknown Range on drafts 18 and 22, not a silent skip
 - [Rust FETCH parity](/quest/m1/ietf-fetch-parity.md) - Rust finishes an answered joining FETCH's head, refuses a lost head with DOES_NOT_EXIST, and sends no timestamps without TIMESCALE, as the JS publisher does
 - [SUBSCRIBE honors the properties opt-out](/quest/m1/subscribe-timestamps.md) - the Rust publisher sends untimed objects to a SUBSCRIBE that declines Track Properties, and the Rust subscriber asks for them when it needs timestamps
 - [JS FETCH timeout test](/quest/m1/js-fetch-timeout-test.md) - a JS joining FETCH still waiting on its SUBSCRIBE at the deadline is refused with TIMEOUT
-- [Mock reset codes](/quest/m1/mock-reset-codes.md) - `js/net`'s mock transport carries only reset codes, and any reset found sending the wrong code is fixed
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - Rust honors native FILL_TIMEOUT to bound upstream waiting on drafts 18 and 22, alongside local content-age enforcement
-- [JS FETCH fill timeout](/quest/m1/ietf-fill-timeout-js.md) - the JS FETCH responder honors FILL_TIMEOUT as Rust does
 - [Rust identity enforcement](/quest/m1/catalog-identity-rs.md) - `moq-mux` refuses a redefined rendition, and every Rust publisher mints a new rendition name for a decoder identity change and updates everything else in place
 - [IETF takeover](/quest/m1/ietf-takeover.md) - carry the shared takeover contract through the negotiated IETF epoch extension
 - [Identity and recovery guide](/quest/m1/identity-guide.md) - explain epochs, pinned catalogs, lazy jobs, restart and version compatibility as they exist; takeover adds its own section
@@ -169,16 +168,15 @@ removed).
 - [Interop coverage](/quest/m1/interop-coverage/README.md) - the riskiest moq-transport features moq-net exposes get cross-implementation tests over drafts 18 and 22
 - [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - A/A and deliberately slowed Nightly runs set the paired comparison's threshold, so its regression alerts can be trusted
 - [HLS and DASH segment conformance](/quest/m1/hls-conformance.md) - nightly ffprobe checks that advertised timing, sync flags, and bytes match the media served
-- [App-limited BBR3 estimate ages](/quest/m1/bbr-app-limited.md) - an app-limited BBR3 estimate falls within seconds after the path drops
 - [Bindings name every session code](/quest/m1/ffi-malformed-auth-kind.md) - MALFORMED_AUTH_TOKEN and its siblings reach moq-ffi, moq-c, and the wrappers
 - [Unbounded groups](/quest/m1/unbounded-groups/README.md) - groups and frames lose their size caps; the cache sheds parts of a group under pressure and refills the holes in place
 - [Relay demand gaps](/quest/m1/relay-demand-gaps.md) - pre-07 backlog, IETF warm-relay newcomer, and double upstream pulls are fixed or ruled out
 - [Segment cuts hold bounded state](/quest/m1/segmenter-cuts.md) - the HLS segmenter keeps one pending cut, so `styp` input without sync samples cannot grow it
 - [Next Object on a cold Rust copy](/quest/m1/next-object-cold-copy.md) - a join after an upstream group report starts at the first frame received, never skipping
 - [Container consumers buffer by backpressure](/quest/m1/container-backpressure.md) - Rust and JS container consumers decode ahead only a byte budget, so a hostile publisher cannot grow them
-- [Settled copies versus whole groups](/quest/m1/settled-copies.md) - every model check of whether a group is done means either a settled copy or the whole group, as it needs
 - [An HLS viewer starts capture](/quest/m1/hls-record-demand.md) - a record-track subscriber counts as demand for its rendition's media
 - [One moq-ffi build definition](/quest/m1/ffi-build-flags.md) - every binding takes moq-ffi's default features from one place
+- [gofmt-clean Go wrapper](/quest/m1/go-gofmt.md) - `just go check` fails on unformatted Go
 - [moqsrc max-delay](/quest/m1/gst-max-delay.md) - GStreamer's `moqsrc` takes a `max-delay` property instead of a hard-coded 1 s budget
 - [JS SETUP rejection ownership](/quest/m1/js-setup-rejection.md) - reproduce an unhandled version-refusal rejection without weakening the refusal
 - [moq-clock moves into kio::clock](/quest/m1/kio-clock.md) - moq-clock and its test macro become `kio::clock` and `#[kio::test]` before the cut publishes them

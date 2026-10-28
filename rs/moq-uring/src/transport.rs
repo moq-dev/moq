@@ -81,10 +81,10 @@ impl moq_net::transport::poll::RecvStream for quic::web::RecvStream {
 
 	fn poll_lease(
 		&mut self,
-		cx: &mut std::task::Context<'_>,
+		waiter: &kio::Waiter,
 		want: usize,
 	) -> std::task::Poll<Result<Self::Lease<'_>, Self::Error>> {
-		quic::web::RecvStream::poll_lease(self, cx, want).map_err(adapter::Error)
+		quic::web::RecvStream::poll_lease(self, &mut waiter.context(), want).map_err(adapter::Error)
 	}
 	fn set_priority(&mut self, priority: i64) {
 		quic::web::RecvStream::set_priority(self, priority)
