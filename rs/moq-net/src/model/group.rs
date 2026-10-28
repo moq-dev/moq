@@ -1865,7 +1865,10 @@ impl Producer {
 		// An empty group counts as content once it ends.
 		self.handle.start(None);
 		// A finished group can no longer raise the track's largest, which may end its stream.
-		self.handle.cache.finish_largest(self.sequence);
+		// A copy a transport bound cut short finished only its own range.
+		if original_fin.is_some() {
+			self.handle.cache.finish_largest(self.sequence);
+		}
 		Ok(())
 	}
 

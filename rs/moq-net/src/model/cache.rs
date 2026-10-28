@@ -721,8 +721,8 @@ pub(super) struct Track {
 #[derive(Default)]
 struct Largest {
 	position: Option<Position>,
-	// The largest group's content may still grow: no copy of it finished, and it is not a
-	// datagram. An aborted one stays open, since it can be recreated or fetched.
+	// The largest group's content may still grow: no copy of the whole group finished, and it
+	// is not a datagram. An aborted one stays open, since it can be recreated or fetched.
 	open: bool,
 	// The track ended, so no newer position can follow.
 	ended: bool,
@@ -738,8 +738,8 @@ impl Track {
 		}
 	}
 
-	/// Group `sequence` holds every frame it will have: a copy finished, or it is a datagram.
-	/// A group name fixes its content, so no legal write raises the largest past it.
+	/// Group `sequence` holds every frame it will have: a whole copy finished, or it is a
+	/// datagram. A group name fixes its content, so no legal write raises the largest past it.
 	pub(super) fn finish_largest(&self, sequence: u64) {
 		let mut largest = self.largest.lock();
 		if largest.position.is_some_and(|position| position.group == sequence) {
