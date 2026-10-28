@@ -56,9 +56,8 @@ export interface WebSocketStreamLike {
 	readonly closed: Promise<WebSocketStreamCloseEvent>;
 	/** Close the connection, with an optional code and reason. */
 	close(closeInfo?: WebSocketStreamCloseInfo): void;
-	/** Ponyfill-only: resize the write-backpressure high-water mark at runtime
-	 *  (see {@link WebSocketStream.setHighWaterMark}). Absent on the native API,
-	 *  which sizes its own send buffer — callers should treat it as optional. */
+	/** Ponyfill-only: resize the write-backpressure high-water mark at runtime.
+	 *  Absent on the native API, which sizes its own send buffer — callers should treat it as optional. */
 	setHighWaterMark?(bytes: number): void;
 }
 

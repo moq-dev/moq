@@ -2193,7 +2193,7 @@ export class Consumer {
  * requests beneath it.
  *
  * Drop it (or {@link close}) to retract the route and reject anything still waiting
- * with {@link StreamCode.Unroutable}. Close it and claim again to change it.
+ * with {@link StreamCode | StreamCode.Unroutable}. Close it and claim again to change it.
  *
  * @public
  */

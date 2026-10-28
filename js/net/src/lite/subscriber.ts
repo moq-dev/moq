@@ -1665,12 +1665,6 @@ export class Subscriber {
 		const read = tail.open(group.sequence);
 
 		try {
-			// This side never asks for a group from a later frame, so a stream that skips the
-			// first ones is a peer bug. Read as a whole group, its frames would be misnumbered,
-			// and resumption and deduplication rely on those positions.
-			if (group.frameStart !== 0) {
-				throw new ProtocolViolation(`group ${group.sequence} starts at frame ${group.frameStart}`);
-			}
 			// The publisher contradicted its own end, which no later group can repair. lite-05
 			// specified an inclusive end, so its last group lands on it: the write below drops
 			// only that group there.
@@ -1681,7 +1675,7 @@ export class Subscriber {
 				track.abort(violation);
 				throw violation;
 			}
-			producer = track.createGroup(group.sequence);
+			producer = hooks.receiveGroup(track, { sequence: group.sequence, start: group.frameStart });
 
 			await readFrames(stream, producer, {
 				scale: timescale,

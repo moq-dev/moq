@@ -125,8 +125,8 @@ export interface Info {
 	 * Units per second for this track's frame timestamps, or omitted (`undefined` or `null`,
 	 * which mean the same) for an untimed track, whose frames and datagrams carry no timestamp.
 	 *
-	 * There is no default: a timed track declares its scale, such as {@link Timescale.MILLI},
-	 * or {@link Timescale.MICRO} for media that needs sub-millisecond timing. Reported in
+	 * There is no default: a timed track declares its scale, such as {@link Timescale | Timescale.MILLI},
+	 * or {@link Timescale | Timescale.MICRO} for media that needs sub-millisecond timing. Reported in
 	 * TRACK_INFO on Lite05+ and as the TIMESCALE property on moq-transport. A track received
 	 * without one (moq-lite before Lite05, or moq-transport without TIMESCALE) is untimed,
 	 * and stays untimed when served onward.
@@ -592,7 +592,7 @@ type CachedGroup = {
 type Start = { sequence: number; start: Timestamp };
 
 // A fresh read handle on a group the producer still caches; assigned in its static block.
-let cachedMirror: (producer: Producer, sequence: number) => GroupConsumer | undefined;
+let cachedMirror: (producer: Producer, sequence: number, from: number) => GroupConsumer | undefined;
 // Whether the producer still caches a group that has not failed; assigned in its static block.
 let cachedHolds: (producer: Producer, sequence: number) => boolean;
 // Mirror the cached groups in `[start, end)` that `offer` accepts into a sink again, cut ones
@@ -774,6 +774,7 @@ export class Producer {
 	}
 
 	static {
+		hooks.receiveGroup = (producer, { sequence, start }) => producer.#createGroup(sequence, start);
 		hooks.writeDatagram = (producer, datagram, inflated) => producer.#insertDatagram(datagram, inflated);
 		sourceStart = (producer) => producer.#served && producer.#feedStart();
 		hooks.producerLargest = (producer) => producer.#state.largest;
@@ -797,10 +798,14 @@ export class Producer {
 			const entry = producer.#cached.get(sequence);
 			return entry !== undefined && !(entry.group.closed.peek() instanceof Error);
 		};
-		cachedMirror = (producer, sequence) => {
+		cachedMirror = (producer, sequence, from) => {
 			const entry = producer.#cached.get(sequence);
 			if (!entry || entry.group.closed.peek() instanceof Error) return undefined;
 			const mirror = entry.group.mirror();
+			if (hooks.groupIndex(mirror) > from) {
+				mirror.close();
+				return undefined;
+			}
 			hooks.arriveGroup(mirror, entry.arrived);
 			return mirror;
 		};
@@ -1195,7 +1200,7 @@ export class Producer {
 		let largest: Position | undefined;
 		for (const { group } of this.#cache) {
 			const count = hooks.groupFrameCount(group);
-			if (count > 0 && (largest === undefined || group.sequence > largest.group)) {
+			if (count > hooks.groupOffset(group) && (largest === undefined || group.sequence > largest.group)) {
 				largest = { group: group.sequence, frame: count - 1 };
 			}
 		}
@@ -1324,7 +1329,7 @@ export class Producer {
 		for (const sink of this.#sinks) this.#mirror(entry, sink);
 		// Follow the group's frames as they land, past the head `#advance` already named.
 		const stop = hooks.groupProgress(group, (total) => {
-			if (total > 0) this.#advanceObject({ group: group.sequence, frame: total - 1 });
+			if (total > hooks.groupOffset(group)) this.#advanceObject({ group: group.sequence, frame: total - 1 });
 		});
 		void group.closed.then((closed) => {
 			stop();
@@ -1419,6 +1424,10 @@ export class Producer {
 	 * checked like {@link appendGroup}'s.
 	 */
 	createGroup(sequence: number): GroupProducer {
+		return this.#createGroup(sequence, 0);
+	}
+
+	#createGroup(sequence: number, start: number): GroupProducer {
 		this.#writable(sequence);
 		const existing = this.#cached.get(sequence);
 		if (existing) {
@@ -1431,6 +1440,8 @@ export class Producer {
 		}
 
 		const group = new GroupProducer(sequence);
+		// Mirrors copy the absolute indices, so set them before publishing to any sink.
+		hooks.startGroup(group, start);
 		this.#bind(group);
 		this.#cap(group);
 		this.#publish(group);
@@ -2183,10 +2194,10 @@ export class Subscriber {
 				changed: subscriber.#expiryChanged(),
 			};
 		};
-		hooks.cachedGroup = (subscriber, sequence) => {
-			if (subscriber.#resume) return subscriber.#resume.cachedGroup(sequence);
+		hooks.cachedGroup = (subscriber, sequence, from = 0) => {
+			if (subscriber.#resume) return subscriber.#resume.cachedGroup(sequence, from);
 			const producer = subscriber.#state.producer;
-			return producer && cachedMirror(producer, sequence);
+			return producer && cachedMirror(producer, sequence, from);
 		};
 		hooks.holdsGroup = (subscriber, sequence) => {
 			const producer = subscriber.#state.producer;

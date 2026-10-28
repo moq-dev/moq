@@ -551,10 +551,10 @@ class Reader implements ResumeSource {
 		return holding;
 	}
 
-	cachedGroup(sequence: number): GroupConsumer | undefined {
+	cachedGroup(sequence: number, from = 0): GroupConsumer | undefined {
 		for (let index = this.#copies.length - 1; index >= 0; index--) {
 			const copy = this.#copies[index];
-			const group = hooks.cachedGroup(copy.sub, sequence);
+			const group = hooks.cachedGroup(copy.sub, sequence, from);
 			if (group) return this.#handOut(copy, group);
 		}
 		return undefined;
@@ -1327,11 +1327,11 @@ class Recover implements GroupRecover {
 		return routeFailed(failed) || copy.sub.closed.peek() instanceof Error;
 	}
 
-	async replace(_index: number, failed: Error | undefined, signal: AbortSignal): Promise<Replacement> {
+	async replace(index: number, failed: Error | undefined, signal: AbortSignal): Promise<Replacement> {
 		let fetch: Fetch | undefined;
 		let kept: GroupConsumer | undefined;
 		try {
-			const replacement = await this.#replace(failed, signal, (next) => {
+			const replacement = await this.#replace({ index, failed, signal }, (next) => {
 				fetch?.cancel();
 				fetch = next;
 			});
@@ -1345,8 +1345,7 @@ class Recover implements GroupRecover {
 	}
 
 	async #replace(
-		failed: Error | undefined,
-		signal: AbortSignal,
+		{ index, failed, signal }: { index: number; failed?: Error; signal: AbortSignal },
 		started: (fetch: Fetch) => void,
 	): Promise<Replacement> {
 		const reader = this.#reader;
@@ -1369,7 +1368,7 @@ class Recover implements GroupRecover {
 			// the group back and forth.
 			if (failed) {
 				const held = reader.holding(this.sequence, current)[0];
-				const cached = held && hooks.cachedGroup(held.sub, this.sequence);
+				const cached = held && hooks.cachedGroup(held.sub, this.sequence, index);
 				if (cached) return this.#replacement(cached, held);
 				// Once the track ended, no route continues it: only a copy holding it could.
 				if (reader.ended) throw failed;
@@ -1390,7 +1389,7 @@ class Recover implements GroupRecover {
 				waits.push(given.changed);
 				// A newer copy's track caches it: continue from there.
 				if (!failed && generation !== current.generation) {
-					const cached = hooks.cachedGroup(serving.sub, this.sequence);
+					const cached = hooks.cachedGroup(serving.sub, this.sequence, index);
 					if (cached) return this.#replacement(cached, serving);
 				}
 				// Otherwise ask for it, if the route's version can fetch. The subscription may still

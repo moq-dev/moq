@@ -35,8 +35,8 @@ impl Encode<Version> for RequestId {
 	}
 }
 
-impl Decode<Version> for RequestId {
-	fn decode(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for RequestId {
+	fn decode(r: &mut Decoder<'a>, _: Version) -> Result<Self, DecodeError> {
 		let request_id = r.varint()?;
 		Ok(Self(request_id))
 	}
@@ -53,7 +53,7 @@ pub struct RequestOk {
 	pub largest: Option<Location>,
 }
 
-impl Message for RequestOk {
+impl<'a> Message<'a> for RequestOk {
 	const ID: u64 = 0x07;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -64,7 +64,7 @@ impl Message for RequestOk {
 		Ok(())
 	}
 
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		// A REQUEST_UPDATE_OK may refresh EXPIRES, which is ignored like SUBSCRIBE_OK's.
 		// LARGEST_OBJECT is a MUST on a REQUEST_UPDATE_OK or TRACK_STATUS_OK once the track
 		// has objects.
@@ -86,7 +86,7 @@ pub struct RequestError<'a> {
 	pub retry_interval: u64,
 }
 
-impl Message for RequestError<'_> {
+impl<'a> Message<'a> for RequestError<'a> {
 	const ID: u64 = 0x05;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
@@ -96,10 +96,10 @@ impl Message for RequestError<'_> {
 		Ok(())
 	}
 
-	fn decode_msg(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, _: Version) -> Result<Self, DecodeError> {
 		let error_code = r.varint()?;
 		let retry_interval = r.varint()?;
-		let reason_phrase = Cow::Owned(r.string()?);
+		let reason_phrase = Cow::Borrowed(r.str()?);
 		Ok(Self {
 			error_code,
 			reason_phrase,
@@ -112,16 +112,16 @@ impl Message for RequestError<'_> {
 mod tests {
 	use super::*;
 
-	fn encode_message<M: Message>(msg: &M, version: Version) -> Vec<u8> {
+	fn encode_message<'m, M: Message<'m>>(msg: &M, version: Version) -> Vec<u8> {
 		let mut buf = Vec::new();
 		msg.encode_msg(&mut Encoder::new(&mut buf, version.into()), version)
 			.unwrap();
 		buf.to_vec()
 	}
 
-	fn decode_message<M: Message>(bytes: &[u8], version: Version) -> Result<M, DecodeError> {
-		let mut buf = bytes::Bytes::from(bytes.to_vec());
-		crate::coding::decode_buf(&mut buf, version, M::decode_msg)
+	fn decode_message<'m, M: Message<'m>>(bytes: &'m [u8], version: Version) -> Result<M, DecodeError> {
+		let mut buf = bytes;
+		crate::coding::decode_from(&mut buf, version, |r, v| M::decode_msg(r, v))
 	}
 
 	/// A REQUEST_UPDATE_OK may refresh EXPIRES, and a REQUEST_UPDATE_OK or TRACK_STATUS_OK
@@ -145,7 +145,9 @@ mod tests {
 					largest: None,
 					active: count,
 				};
-				let decoded: RequestOk = decode_message(&encode_message(&msg, version), version).unwrap();
+				let wire = encode_message(&msg, version);
+
+				let decoded: RequestOk = decode_message(&wire, version).unwrap();
 				assert_eq!(decoded.active, count, "{version:?}");
 			}
 		}

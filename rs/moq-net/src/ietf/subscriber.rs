@@ -1673,6 +1673,8 @@ impl Subscriber {
 					return Err(Error::WrongSize);
 				}
 				tracing::debug!(message = ?msg, "received publish");
+				// Owned, since the task outlives the body it was read from.
+				let msg = msg.into_owned();
 				async move {
 					if let Err(err) = this.serve_publish(stream, msg).await {
 						tracing::debug!(%err, "publish stream error");
@@ -2280,7 +2282,7 @@ impl Subscriber {
 	async fn run_publish_stream(
 		&mut self,
 		mut stream: Stream<Transport, Version>,
-		msg: ietf::Publish<'_>,
+		msg: ietf::Publish<'static>,
 	) -> Result<(), Error> {
 		if let Some(error) = super::namespace::refusal(&msg.track_namespace, self.version) {
 			return super::request_stream::reject(stream, error).await;
@@ -3958,7 +3960,7 @@ impl Subscriber {
 		loop {
 			let super::request_stream::Framed(type_id, body) = messages.message(reader).await?;
 			if type_id == ietf::PublishDone::ID {
-				let msg: ietf::PublishDone<'static> = body.message(version)?;
+				let msg = body.message::<ietf::PublishDone>(version)?.into_owned();
 				tracing::debug!(message = ?msg, "received publish done");
 				msg.end(version)?;
 				return Ok(msg);
@@ -4705,14 +4707,14 @@ struct PeekFirst<const EXTENSIONS: bool>(FirstObject);
 #[derive(Debug)]
 struct PeekId(u64);
 
-impl Decode<Version> for PeekId {
-	fn decode(buf: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for PeekId {
+	fn decode(buf: &mut Decoder<'a>, _: Version) -> Result<Self, DecodeError> {
 		Ok(Self(buf.varint()?))
 	}
 }
 
-impl<const EXTENSIONS: bool> Decode<Version> for PeekFirst<EXTENSIONS> {
-	fn decode(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a, const EXTENSIONS: bool> Decode<'a, Version> for PeekFirst<EXTENSIONS> {
+	fn decode(buf: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let id = buf.varint()?;
 		let has_properties = if EXTENSIONS {
 			let ObjectExtensionsLength(size) = ObjectExtensionsLength::decode(buf, version)?;
@@ -7920,7 +7922,7 @@ mod tests {
 	}
 
 	/// A control message as the peer writes it: type id, then the length-prefixed body.
-	fn message<M: Message>(id: u64, msg: &M, version: Version) -> Vec<u8> {
+	fn message<'m, M: Message<'m>>(id: u64, msg: &M, version: Version) -> Vec<u8> {
 		use crate::coding::Encode as _;
 		let mut buf = Vec::new();
 		crate::coding::Encoder::new(&mut buf, version.into())
@@ -14712,7 +14714,7 @@ mod joining_fetch_tests {
 		moq_clock::sleep(Duration::from_millis(1)).await;
 	}
 
-	fn message_bytes<M: Message>(id: u64, msg: &M, version: Version) -> Vec<u8> {
+	fn message_bytes<'m, M: Message<'m>>(id: u64, msg: &M, version: Version) -> Vec<u8> {
 		let mut buf = Vec::new();
 		crate::coding::Encoder::new(&mut buf, version.into())
 			.varint(id)
@@ -15059,14 +15061,14 @@ mod joining_fetch_tests {
 				.iter()
 				.find(|(id, _)| *id == ietf::Subscribe::ID)
 				.expect("SUBSCRIBE");
-			let mut body = subscribe.1.clone();
-			let msg = crate::coding::decode_buf(&mut body, version, ietf::Subscribe::decode_msg).unwrap();
+			let body = &subscribe.1;
+			let msg = crate::coding::decode_from(&mut &body[..], version, ietf::Subscribe::decode_msg).unwrap();
 			assert_eq!(msg.filter, Filter::NextObject, "{version}");
 			assert!(msg.fill.is_none(), "{version}");
 
 			let fetch = messages.iter().find(|(id, _)| *id == ietf::Fetch::ID).expect("FETCH");
-			let mut body = fetch.1.clone();
-			let msg = crate::coding::decode_buf(&mut body, version, ietf::Fetch::decode_msg).unwrap();
+			let body = &fetch.1;
+			let msg = crate::coding::decode_from(&mut &body[..], version, ietf::Fetch::decode_msg).unwrap();
 			assert_eq!(
 				msg.fetch_type,
 				FetchType::RelativeJoining {
@@ -15089,8 +15091,8 @@ mod joining_fetch_tests {
 
 				let messages = decode_messages(&run.session.log, version);
 				let fetch = messages.iter().find(|(id, _)| *id == ietf::Fetch::ID).expect("FETCH");
-				let mut body = fetch.1.clone();
-				let msg = crate::coding::decode_buf(&mut body, version, ietf::Fetch::decode_msg).unwrap();
+				let body = &fetch.1;
+				let msg = crate::coding::decode_from(&mut &body[..], version, ietf::Fetch::decode_msg).unwrap();
 				assert_eq!(
 					msg.fetch_type,
 					FetchType::RelativeJoining {

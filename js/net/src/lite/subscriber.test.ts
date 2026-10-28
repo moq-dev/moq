@@ -2047,6 +2047,40 @@ test.each(
 	}
 });
 
+test.each([0, 5, 9000])("a received group numbers its frames from transport offset %s", async (frameStart) => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const consumer = broadcast.track("video");
+	const early = consumer.subscribe();
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version, 1000);
+		await (await opened(1)).reading;
+		await subscriber.runGroup(
+			new Group({ subscribe: 0n, sequence: 0, frameStart }),
+			await groupStream(1000, version),
+		);
+		const late = consumer.subscribe();
+		try {
+			for (const reader of [early, late]) {
+				const group = await reader.recvGroup();
+				if (!group) throw new Error("no received group");
+				expect((await group.readFrameSequence())?.sequence).toBe(frameStart);
+				expect(await group.readFrameSequence()).toBeUndefined();
+				group.close();
+			}
+		} finally {
+			late.close();
+		}
+	} finally {
+		early.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
 // A group stream carrying one frame at `timestamp` (zigzag delta from 0) in the track's scale.
 async function groupStream(timestamp: number, version: Version = Version.DRAFT_07): Promise<Reader> {
 	const chunks: Uint8Array[] = [];

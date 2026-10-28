@@ -77,6 +77,6 @@ type Init = Config & { track: Moq.Track.Producer };
 
 /** Types for {@link Producer}. */
 export namespace Producer {
-	/** Snapshot producer options, including the destination track. */
+	/** Snapshot producer options, including the destination track. @reexport */
 	export type Config = Init;
 }

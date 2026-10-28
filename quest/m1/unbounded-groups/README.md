@@ -93,9 +93,8 @@ Decided 2026-10-16 (maintainer interview):
   quests target whichever wip is current when they land, so
   [Byte holes](/quest/m1/unbounded-groups/byte-holes.md) waits only on Front
   eviction. If lite-07 is cut first, lite-07 peers refill only at frame
-  boundaries. Frame-boundary holes refill over lite-07's frame offsets once
-  [transport frame offsets](/quest/m1/transport-frame-offsets.md) lets a
-  refill start at a frame the relay no longer holds below (decided
+  boundaries. Frame-boundary holes refill over lite-07's transport frame
+  offsets, which allow a refill to start without the evicted prefix (decided
   2026-10-25, maintainer: the application API stays whole-group).
 - JS is a separate quest. Docs change inline: the lite draft, `doc/concept`,
   the relay cache docs, the JSON and moq-net compression docs, and the e2ee

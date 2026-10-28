@@ -148,11 +148,27 @@ impl Media {
 		}
 	}
 
+	fn end(&mut self) -> crate::Result<()> {
+		match self {
+			Self::Video(track) => track.end(),
+			Self::Audio(track) => track.end(),
+			Self::Text(track) => track.end(),
+		}
+	}
+
 	fn abort(self, err: moq_net::Error) {
 		match self {
 			Self::Video(track) => track.abort(err),
 			Self::Audio(track) => track.abort(err),
 			Self::Text(track) => track.abort(err),
+		}
+	}
+
+	fn name(&self) -> &str {
+		match self {
+			Self::Video(track) => track.name(),
+			Self::Audio(track) => track.name(),
+			Self::Text(track) => track.name(),
 		}
 	}
 }
@@ -616,12 +632,31 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	/// Abort all tracks with `err` instead of finishing, so subscribers see the real
 	/// cause rather than [`moq_net::Error::Dropped`]. Consumes the importer.
+	///
+	/// Unlike a drop, this leaves the tracks' HLS records to the catalog, whose abort fails them
+	/// rather than ending them as a complete recording.
 	pub fn abort(mut self, err: moq_net::Error) {
 		for mut track in std::mem::take(&mut self.tracks).into_values() {
 			if let Some(g) = track.group.take() {
 				let _ = g.abort(err.clone());
 			}
 			track.track.abort(err.clone());
+		}
+	}
+}
+
+impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {
+	/// End each track, then retire its HLS records: every track takes a fresh name, so nothing
+	/// publishes it again.
+	fn drop(&mut self) {
+		for mut track in std::mem::take(&mut self.tracks).into_values() {
+			let name = track.track.name().to_string();
+			let ended = track.track.end();
+			drop(track);
+			if let Err(err) = ended {
+				tracing::warn!(%err, "failed to end a dropped MKV track");
+			}
+			self.catalog.retire_dropped(&name);
 		}
 	}
 }

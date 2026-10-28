@@ -113,6 +113,7 @@ futures = "0.3"
 getrandom = { version = "0.4", features = ["wasm_js"] }
 h2 = "0.4"
 hang = { version = "0.21.11", path = "rs/hang" }
+hashbrown = { version = "0.17.1", default-features = false }
 hashlink = "0.12.2"
 hex = "0.4"
 # HMAC-SHA256 for the mDNS membership proofs (moq-tokio's `mdns` feature).

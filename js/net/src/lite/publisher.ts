@@ -1675,10 +1675,11 @@ export class Publisher {
 		// The response carries no header, so the receiver numbers the first frame it gets
 		// as `startFrame`. Skipping the head here is the only thing keeping those numbers
 		// honest; a group that ends before we reach it can't be served at all.
-		for (let i = 0; i < startFrame; i++) {
+		if (hooks.groupIndex(group) > startFrame) throw new Error(`group lacks frame ${startFrame}`);
+		while (hooks.groupIndex(group) < startFrame) {
 			const skipped = await race([hooks.readGroupFrame(group, compress), stream.closed]);
 			if (!skipped) {
-				throw new Error(`fetch group ended at frame ${i}, before the requested start ${startFrame}`);
+				throw new Error(`fetch group ended before the requested start ${startFrame}`);
 			}
 		}
 
@@ -1754,8 +1755,7 @@ export class Publisher {
 	 */
 	async #serveGroup(stream: Writer, options: RunGroup) {
 		const { sub, group, stamp, compress, priority, start: startFrame, end: endFrame } = options;
-		// This model holds whole groups, so frame `startFrame` is always reachable unless
-		// the group ends first. Declaring it up front keeps the stream self-describing.
+		// The header names the requested position, so a copy missing it must be refused.
 		const msg = new GroupMessage({ subscribe: sub, sequence: group.sequence, frameStart: startFrame });
 		// The subscription's budget, or an eviction of what is left to read, may give up on the
 		// group mid-write, which abandons the stream. A group already given up never starts the write.
@@ -1766,6 +1766,7 @@ export class Publisher {
 		// Everything past this point runs inside the cleanup scope, so a failure never leaves
 		// a finished group's stream being ranked.
 		try {
+			if (hooks.groupIndex(group) > startFrame) throw new Error(`group lacks frame ${startFrame}`);
 			// A SUBSCRIBE_UPDATE re-ranks the subscription, so a group already on the wire
 			// follows it too rather than keeping a stale rank until it finishes.
 			priority.add(stream, group.sequence, startFrame);
@@ -1777,8 +1778,8 @@ export class Publisher {
 
 			let prevTs = 0n;
 			// Whether the cursor ever reached the requested start, which decides how the
-			// end of the group is read below.
-			let reached = startFrame === 0;
+			// end of the group is read below. A received tail may already begin there.
+			let reached = hooks.groupIndex(group) === startFrame;
 
 			for (;;) {
 				const read = await race([hooks.readGroupFrame(group, compress), stream.closed]);

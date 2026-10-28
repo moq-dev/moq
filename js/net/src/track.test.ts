@@ -18,6 +18,27 @@ const dec = new TextDecoder();
 // Matches the private idle cache window and Rust cache::DEFAULT_EXPIRY.
 const CACHE_WINDOW_MS = 30_000;
 
+test("a cached transport tail covers only positions it actually holds", async () => {
+	const producer = new TrackProducer("test");
+	const subscriber = producer.subscribe();
+	const tail = hooks.receiveGroup(producer, { sequence: 0, start: 5 });
+	tail.writeFrame({ payload: new Uint8Array([7]) });
+	tail.finish();
+	expect(hooks.cachedGroup(subscriber, 0)).toBeUndefined();
+	const covered = hooks.cachedGroup(subscriber, 0, 5);
+	expect((await covered?.readFrameSequence())?.sequence).toBe(5);
+	covered?.close();
+	// Distinct hostile starts cannot create one cache copy per request.
+	for (let start = 6; start < 106; start++)
+		expect(() => hooks.receiveGroup(producer, { sequence: 0, start })).toThrow("duplicate group");
+	const retained = hooks.cachedGroup(subscriber, 0, 5);
+	expect((await retained?.readFrameSequence())?.payload).toEqual(new Uint8Array([7]));
+	retained?.close();
+	subscriber.close();
+	producer.finish();
+	producer.close();
+});
+
 /** Let every pending microtask and timer callback run, so a parked read gets a turn. */
 function settle(): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, 0));

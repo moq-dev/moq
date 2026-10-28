@@ -26,7 +26,6 @@
 		"@libav.js/types": "^6.10.9"
 	},
 	"devDependencies": {
-		"@microsoft/api-extractor": "7.59.4",
 		"@types/bun": "^1.4.3",
 		"typescript": "7.0.2"
 	}
