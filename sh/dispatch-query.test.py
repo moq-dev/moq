@@ -124,12 +124,13 @@ class QueryTests(unittest.TestCase):
     def test_release_pr_base_and_merge_group_base(self):
         self.env["GITHUB_BASE_REF"] = "release"
         self.expect(True, base="", rust=False)
+        # The entry queued ahead changes Rust and has not merged; this one changes a quest.
         self.change("rs/moq-net/src/lib.rs")
         self.git("add", ".")
         self.git("commit", "-qm", "queued source")
-        group_base = self.git("rev-parse", "HEAD")
         self.change("quest/m1/example.md")
-        self.expect(True, base=group_base, rust=False)
+        # Check's merge group base: a passing head can merge the entry ahead, so it selects that too.
+        self.expect(True, base="origin/main", rust=True)
         self.expect(True, base="origin/release")
 
     def test_invalid_base_fails_instead_of_reporting_no_work(self):
