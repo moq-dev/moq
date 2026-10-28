@@ -45,7 +45,7 @@ test("chat rejects non-string window records and propagates track failures", asy
 			timestamp: Time.Timestamp.now(),
 		});
 		await expect(subscriber.recv()).rejects.toThrow("chat record must be a string");
-		track.close(new Error("chat aborted"));
+		track.abort(new Error("chat aborted"));
 		await expect(subscriber.recv()).rejects.toThrow("chat aborted");
 	} finally {
 		subscriber.close();

@@ -59,7 +59,7 @@ async fn close_ends_a_local_consumer() {
 
 #[moq_clock::test]
 async fn close_ends_a_remote_consumer() {
-	for version in ["moq-lite-05", "moq-transport-14", "moq-transport-18"] {
+	for version in ["moq-lite-05", "moq-transport-18"] {
 		let publisher = produce_origin(1);
 		let subscriber = produce_origin(2);
 		let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());

@@ -69,9 +69,9 @@ public final class BroadcastProducer: Sendable {
     }
 
     /// Accept subscriptions to tracks that are not published yet. Hold and iterate
-    /// the returned `BroadcastDynamic` while such requests should be served.
-    public func dynamic() throws -> BroadcastDynamic {
-        BroadcastDynamic(try ffi.dynamic())
+    /// the returned `BroadcastRequests` while such requests should be served.
+    public func requests() throws -> BroadcastRequests {
+        BroadcastRequests(try ffi.requests())
     }
 
     /// Advertise this broadcast's exact path as a route.
@@ -95,7 +95,9 @@ public final class BroadcastProducer: Sendable {
 
     /// End the broadcast for good: retract it and serve no new tracks.
     ///
-    /// Tracks already subscribed carry on to their own end. Closing again is a no-op.
+    /// Tracks still open on it end with `Unroutable`, which readers take as the publisher
+    /// leaving, and their later calls throw `MoqError.Closed`; finish a track first to end it
+    /// cleanly. Closing again is a no-op.
     public func close() throws {
         try ffi.close()
     }

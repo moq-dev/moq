@@ -74,7 +74,6 @@ impl Rate {
 #[derive(Default)]
 struct State {
 	bitrate: Option<Rate>,
-	abort: Option<Error>,
 }
 
 /// Produces bandwidth estimates, notifying consumers when the value changes.
@@ -93,7 +92,7 @@ impl Producer {
 
 	/// Set the current bandwidth estimate, or `None` while the backend has none.
 	pub fn set(&self, bitrate: Option<Rate>) -> Result<()> {
-		let mut state = self.modify()?;
+		let mut state = self.state.write().map_err(|_| Error::Dropped)?;
 		if state.bitrate != bitrate {
 			state.bitrate = bitrate;
 		}
@@ -105,6 +104,7 @@ impl Producer {
 		Consumer {
 			inner: Inner::Whole(self.state.consume()),
 			last: None,
+			probed: false,
 		}
 	}
 
@@ -112,21 +112,6 @@ impl Producer {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn weak(&self) -> Weak {
 		Weak(self.state.weak())
-	}
-
-	/// Close the producer with an error, notifying all consumers.
-	pub fn abort(&self, err: Error) -> Result<()> {
-		let mut state = self.modify()?;
-		state.abort = Some(err);
-		state.close();
-		Ok(())
-	}
-
-	/// Block until the channel is closed, returning the cause.
-	#[cfg(feature = "async")]
-	pub async fn closed(&self) -> Error {
-		self.state.closed().await;
-		self.close_error()
 	}
 
 	/// Block until there are no active consumers.
@@ -137,7 +122,7 @@ impl Producer {
 
 	/// Poll until there are no active consumers. Errors if the channel closes first.
 	pub fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		self.state.poll_unused(waiter).map_err(|_| self.close_error())
+		self.state.poll_unused(waiter).map_err(|_| Error::Dropped)
 	}
 
 	/// Whether at least one active consumer exists right now.
@@ -153,18 +138,7 @@ impl Producer {
 
 	/// Poll until at least one active consumer exists. Errors if the channel closes first.
 	pub fn poll_used(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		self.state.poll_used(waiter).map_err(|_| self.close_error())
-	}
-
-	fn modify(&self) -> Result<kio::Mut<'_, State>> {
-		self.state
-			.write()
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
-	}
-
-	/// The close error, once the channel is closed.
-	fn close_error(&self) -> Error {
-		self.state.read().abort.clone().unwrap_or(Error::Dropped)
+		self.state.poll_used(waiter).map_err(|_| Error::Dropped)
 	}
 }
 
@@ -186,6 +160,7 @@ impl Weak {
 		Consumer {
 			inner: Inner::Whole(self.0.consume()),
 			last: None,
+			probed: false,
 		}
 	}
 }
@@ -205,7 +180,7 @@ impl Weak {
 /// The reservations also set the session's probe target: the sum of every live
 /// reservation's ceiling, demanded or not, so a sender that stopped for lack of
 /// bandwidth keeps asking the connection for its room. A session probes for its own
-/// allocator, so take it from `Session::bandwidth` (with the `async` feature) rather
+/// allocator, so take it from `Session::allocator` (with the `async` feature) rather
 /// than building one: an allocator from [`new`](Self::new) divides an estimate but
 /// probes for nothing.
 ///
@@ -221,7 +196,7 @@ impl Allocator {
 	///
 	/// For an estimate that is not a session's, such as a test's or another
 	/// reservation's slice. A session's own comes from
-	/// `Session::bandwidth` with the `async` feature.
+	/// `Session::allocator` with the `async` feature.
 	pub fn new(estimate: Consumer) -> Self {
 		Self {
 			estimate,
@@ -237,6 +212,7 @@ impl Allocator {
 			estimate: estimate.unwrap_or(Consumer {
 				inner: Inner::Unavailable,
 				last: None,
+				probed: false,
 			}),
 			registry: self.registry.clone(),
 		}
@@ -256,11 +232,20 @@ impl Allocator {
 	}
 
 	/// Follow the probe target, for the session that probes on the reservations' behalf.
+	///
+	/// Holding it is what marks the reservations [`probed`](Consumer::probed), so only a
+	/// session whose transport has a sender takes one.
 	#[cfg(any(feature = "async", test))]
 	// Sessions follow their allocator's target; a custom session has no public way to yet.
 	pub(crate) fn target(&self) -> Target {
+		let Ok(mut registry) = self.registry.write() else {
+			unreachable!("the allocator holds its own registry producer")
+		};
+		registry.probes += 1;
+		drop(registry);
 		Target {
 			registry: Some(self.registry.consume()),
+			probing: self.registry.downgrade(),
 			last: None,
 		}
 	}
@@ -276,6 +261,7 @@ impl Allocator {
 			estimate: Consumer {
 				inner: Inner::Unavailable,
 				last: None,
+				probed: false,
 			},
 			registry: kio::Producer::default(),
 		}
@@ -312,9 +298,10 @@ impl Allocator {
 	/// released when the track closes either way, since a [`track::Demand`] is a weak
 	/// handle and reserving never keeps a track alive.
 	///
-	/// Read the current slice through [`Reservation::consumer`], which reports `None`
-	/// while nothing is subscribed to the track or the connection has no estimate.
-	/// That tells a sender to hold its current rate rather than encode at zero.
+	/// Read the current slice through [`Reservation::consume`], which reports `None`
+	/// while the connection has no estimate, telling a sender to hold its current rate
+	/// rather than encode at zero. While nothing is subscribed to the track it reports
+	/// the slice the track would get back, without claiming it from the others.
 	pub fn reserve(&self, track: &track::Demand, max: Rate) -> Reservation {
 		// Read the track before taking the registry lock, so the two are never held
 		// at once and there's no order to get wrong.
@@ -376,18 +363,19 @@ impl Reservation {
 	///
 	/// Stateless, unlike [`Consumer::poll_changed`], which carries a cursor over what it last
 	/// reported and so needs a handle of its own.
-	pub fn peek(&self) -> Option<Rate> {
+	pub fn rate(&self) -> Option<Rate> {
 		self.share.grant()
 	}
 
 	/// A handle reading this reservation's current slice of the estimate.
 	///
 	/// Cloneable and independent of the reservation: once the reservation is dropped
-	/// these report `None`, the same "hold your rate" a track nobody is watching reports.
-	pub fn consumer(&self) -> Consumer {
+	/// these report `None`, the same "hold your rate" a missing estimate reports.
+	pub fn consume(&self) -> Consumer {
 		Consumer {
 			inner: Inner::Share(Box::new(self.share.clone())),
 			last: None,
+			probed: false,
 		}
 	}
 
@@ -400,7 +388,7 @@ impl Reservation {
 	/// picture moved again.
 	///
 	/// Does nothing once every [`Allocator`] is gone, since there is then nothing left
-	/// dividing anything; a reader learns that from its [`consumer`](Self::consumer).
+	/// dividing anything; a reader learns that from its [`consumer`](Self::consume).
 	pub fn update(&self, max: Rate) {
 		let Some(registry) = self.registry.upgrade() else {
 			return;
@@ -457,6 +445,8 @@ struct Registry {
 	reserved: u128,
 	/// The application's override of `reserved` as the probe target.
 	target: Option<Rate>,
+	/// How many sessions probe for these reservations, each through its [`Target`].
+	probes: usize,
 }
 
 impl Registry {
@@ -467,7 +457,6 @@ impl Registry {
 	}
 
 	/// What the session probes up to.
-	#[cfg(any(feature = "async", test))]
 	fn target(&self) -> Rate {
 		self.target
 			.unwrap_or_else(|| Rate::from_bps(u64::try_from(self.reserved).unwrap_or(u64::MAX)))
@@ -487,7 +476,22 @@ struct Entry {
 pub(crate) struct Target {
 	/// `None` once every allocator is gone.
 	registry: Option<kio::Consumer<Registry>>,
+	/// Weak, so a session never keeps the registry alive, only counts itself while it does.
+	probing: kio::Weak<Registry>,
 	last: Option<Rate>,
+}
+
+#[cfg(any(feature = "async", test))]
+impl Drop for Target {
+	fn drop(&mut self) {
+		let Some(registry) = self.probing.upgrade() else {
+			return;
+		};
+		let Ok(mut registry) = registry.write() else {
+			return;
+		};
+		registry.probes -= 1;
+	}
 }
 
 #[cfg(any(feature = "async", test))]
@@ -548,15 +552,29 @@ impl Share {
 		let wants: Vec<Want> = self
 			.claims()
 			.into_iter()
-			.filter(|(_, demand)| demand.is_used())
+			// Its own track counts while idle too, so an unwatched sender reads the slice
+			// it would get back: a rendition stopped for lack of bandwidth, whose viewers
+			// then left, needs that to know when to resume.
+			.filter(|(want, demand)| match want.id == self.id {
+				true => !demand.is_closed(),
+				false => demand.is_used(),
+			})
 			.map(|(want, _)| want)
 			.collect();
 		allocate(estimate, &wants, self.id)
 	}
 
-	/// This share's slice, arming `waiter` for everything that could move it: the
-	/// estimate, the set of registered tracks, and each track's demand.
-	fn poll_grant(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Rate>>> {
+	/// Whether a session probes for this share's registry, toward a target above zero,
+	/// which turns probing off.
+	fn probed(&self) -> bool {
+		let registry = self.registry.read();
+		registry.probes > 0 && registry.target() > Rate::ZERO
+	}
+
+	/// This share's slice and whether a session probes for it, arming `waiter` for
+	/// everything that could move either: the estimate, the registry, and each
+	/// track's demand.
+	fn poll_grant(&mut self, waiter: &kio::Waiter) -> Poll<Result<(Option<Rate>, bool)>> {
 		// Drain the estimate rather than polling it once. A poll that returns Ready
 		// registers no waker, and this share may still conclude its own slice didn't
 		// move (its reservation caps it, so most estimate changes don't reach it) and
@@ -582,11 +600,12 @@ impl Share {
 		let wants: Vec<Want> = self
 			.claims()
 			.into_iter()
-			.filter(|(_, demand)| match demand.poll_state(waiter) {
+			.filter(|(want, demand)| match demand.poll_state(waiter) {
 				track::DemandState::Active => true,
-				// An idle track claims nothing, so an unwatched encoder's reservation
-				// goes to whoever is actually sending.
-				track::DemandState::Idle => false,
+				// An idle track claims nothing from its siblings, so an unwatched encoder's
+				// reservation goes to whoever is actually sending. Its own reader still
+				// sees the slice it would get back; see `grant`.
+				track::DemandState::Idle => want.id == self.id,
 				// Gone for good, and pruned by the next `register`.
 				track::DemandState::Closed => false,
 			})
@@ -597,7 +616,7 @@ impl Share {
 			.estimate
 			.peek()
 			.and_then(|estimate| allocate(estimate, &wants, self.id));
-		Poll::Ready(Ok(grant))
+		Poll::Ready(Ok((grant, self.probed())))
 	}
 
 	/// Snapshot the registry so the tracks can be read without holding its lock.
@@ -630,8 +649,8 @@ impl Share {
 /// A reservation is what a sender can use, so handing it more is not a reason to
 /// send more than it was configured for.
 ///
-/// `None` when `id` isn't among the wants, which is how an idle or closed track
-/// reports "hold your rate" instead of a grant of zero.
+/// `None` when `id` isn't among the wants, which is how a released or closed
+/// reservation reports "hold your rate" instead of a grant of zero.
 fn allocate(estimate: Rate, wants: &[Want], id: u64) -> Option<Rate> {
 	// Plain bits per second inside: this is where the division actually happens, and
 	// wrapping every intermediate would need arithmetic on `Rate` that no caller wants.
@@ -670,6 +689,8 @@ fn allocate(estimate: Rate, wants: &[Want], id: u64) -> Option<Rate> {
 pub struct Consumer {
 	inner: Inner,
 	last: Option<Rate>,
+	/// The [`probed`](Self::probed) state [`poll_changed`](Self::poll_changed) last reported.
+	probed: bool,
 }
 
 /// What a [`Consumer`] is reading: the whole estimate, or one track's slice of it.
@@ -691,6 +712,22 @@ impl Consumer {
 		}
 	}
 
+	/// Whether a session probes the connection for this slice's reservation, so the
+	/// estimate can rise to fund it even while its sender is stopped.
+	///
+	/// Only a session whose transport has a sender probes, and none does while
+	/// [`Allocator::set_target`] turns probing off. Without one the estimate
+	/// stops learning once the connection is app-limited, so a sender that stops for
+	/// lack of bandwidth could never see enough to resume. Always `false` for a whole
+	/// estimate, which no reservation backs. [`poll_changed`](Self::poll_changed)
+	/// reports a change to this too.
+	pub fn probed(&self) -> bool {
+		match &self.inner {
+			Inner::Share(share) => share.probed(),
+			Inner::Whole(_) | Inner::Unavailable => false,
+		}
+	}
+
 	/// Poll for a bandwidth change without blocking.
 	///
 	/// `Ok(None)` means the estimate is unavailable *for now*: the backend
@@ -698,6 +735,8 @@ impl Consumer {
 	/// sessions. `Err` means the producer is gone and no further change will ever
 	/// arrive. They're distinct because a caller holds its current rate for the
 	/// first and stops watching for the second.
+	///
+	/// A slice is also reported, unchanged, when [`probed`](Self::probed) flips.
 	///
 	/// A backend with no bandwidth estimation at all yields no [Consumer] in the
 	/// first place, so that case never reaches here.
@@ -717,7 +756,7 @@ impl Consumer {
 				// terminal. Collapsing this into `Ok(None)` would be indistinguishable
 				// from a live-but-unavailable estimate, and since a closed channel is
 				// always immediately ready, a `select!` over it would spin forever.
-				Poll::Ready(Err(state)) => return Poll::Ready(Err(state.abort.clone().unwrap_or(Error::Dropped))),
+				Poll::Ready(Err(_)) => return Poll::Ready(Err(Error::Dropped)),
 				Poll::Pending => return Poll::Pending,
 			},
 			// A share recomputes its slice on every wakeup, so it filters the
@@ -727,8 +766,11 @@ impl Consumer {
 			// arming anything rather than reporting a `None` the caller would re-read forever.
 			Inner::Unavailable => return Poll::Pending,
 			Inner::Share(share) => match share.poll_grant(waiter) {
-				Poll::Ready(Ok(grant)) if grant == last => return Poll::Pending,
-				Poll::Ready(Ok(grant)) => grant,
+				Poll::Ready(Ok((grant, probed))) if grant == last && probed == self.probed => return Poll::Pending,
+				Poll::Ready(Ok((grant, probed))) => {
+					self.probed = probed;
+					grant
+				}
 				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 				Poll::Pending => return Poll::Pending,
 			},
@@ -864,7 +906,7 @@ mod tests {
 		let (_first_broadcast, first) = track(VIDEO);
 		let _first_sub = first.subscribe(None);
 		let first = allocator.reserve(&first.demand(), bps(4_000_000));
-		let mut first_share = first.consumer();
+		let mut first_share = first.consume();
 
 		estimate.set(Some(bps(2_000_000))).unwrap();
 		// Alone, it gets everything it asked for that the link can carry.
@@ -877,11 +919,12 @@ mod tests {
 		let second_share = allocator.reserve(&second.demand(), bps(4_000_000));
 
 		assert_eq!(first_share.changed().await.unwrap(), Some(bps(1_000_000)));
-		assert_eq!(second_share.peek(), Some(bps(1_000_000)));
+		assert_eq!(second_share.rate(), Some(bps(1_000_000)));
 	}
 
-	/// An unwatched track releases its reservation, since `publish_capture` stops
-	/// encoding entirely while nothing is subscribed.
+	/// An unwatched track releases its reservation to the others, since `publish_capture`
+	/// stops encoding entirely while nothing is subscribed, but still reads the slice it
+	/// would get back, which is what a stopped rendition its viewers left resumes on.
 	#[test]
 	fn an_idle_track_claims_nothing() {
 		let estimate = Producer::new();
@@ -895,15 +938,14 @@ mod tests {
 		let (_idle_broadcast, idle) = track(VIDEO);
 		let idle_share = allocator.reserve(&idle.demand(), bps(4_000_000));
 
-		assert_eq!(watched_share.peek(), Some(bps(2_000_000)));
-		// Not zero: an idle share reports "no opinion" so a sender that is mid-shutdown
-		// holds its rate instead of retuning to the floor on the way out.
-		assert_eq!(idle_share.peek(), None);
+		assert_eq!(watched_share.rate(), Some(bps(2_000_000)));
+		// What it would get if a viewer joined: an even split with the watched track.
+		assert_eq!(idle_share.rate(), Some(bps(1_000_000)));
 
 		// It joins, and the split happens.
 		let _idle_sub = idle.subscribe(None);
-		assert_eq!(watched_share.peek(), Some(bps(1_000_000)));
-		assert_eq!(idle_share.peek(), Some(bps(1_000_000)));
+		assert_eq!(watched_share.rate(), Some(bps(1_000_000)));
+		assert_eq!(idle_share.rate(), Some(bps(1_000_000)));
 	}
 
 	/// Demand transitions have to wake a parked share, not just change what a later
@@ -918,7 +960,7 @@ mod tests {
 		let (_mine_broadcast, mine) = track(VIDEO);
 		let _mine_sub = mine.subscribe(None);
 		let mine_share_reserved = allocator.reserve(&mine.demand(), bps(4_000_000));
-		let mut mine_share = mine_share_reserved.consumer();
+		let mut mine_share = mine_share_reserved.consume();
 
 		let (_sibling_broadcast, sibling) = track(VIDEO);
 		let sibling_sub = sibling.subscribe(None);
@@ -978,7 +1020,7 @@ mod tests {
 		let (_broadcast, track) = track(VIDEO);
 		let _sub = track.subscribe(None);
 		let share_reserved = allocator.reserve(&track.demand(), bps(4_000_000));
-		let mut share = share_reserved.consumer();
+		let mut share = share_reserved.consume();
 
 		estimate.set(Some(bps(10_000_000))).unwrap();
 		assert_eq!(share.changed().await.unwrap(), Some(bps(4_000_000)));
@@ -1006,7 +1048,7 @@ mod tests {
 		let (_mine_broadcast, mine) = track(VIDEO);
 		let _mine_sub = mine.subscribe(None);
 		let share_reserved = allocator.reserve(&mine.demand(), bps(4_000_000));
-		let mut share = share_reserved.consumer();
+		let mut share = share_reserved.consume();
 
 		let (_sibling_broadcast, sibling) = track(VIDEO);
 		let sibling_sub = sibling.subscribe(None);
@@ -1031,7 +1073,7 @@ mod tests {
 		let (_broadcast, track) = track(VIDEO);
 		let _sub = track.subscribe(None);
 		let share_reserved = allocator.reserve(&track.demand(), bps(4_000_000));
-		let mut share = share_reserved.consumer();
+		let mut share = share_reserved.consume();
 
 		estimate.set(Some(bps(2_000_000))).unwrap();
 		assert_eq!(share.changed().await.unwrap(), Some(bps(2_000_000)));
@@ -1039,7 +1081,7 @@ mod tests {
 		estimate.set(None).unwrap();
 		assert_eq!(share.changed().await.unwrap(), None);
 
-		estimate.abort(Error::Cancel).unwrap();
+		drop(estimate);
 		assert!(share.changed().await.is_err());
 		assert!(share.changed().await.is_err());
 	}
@@ -1080,20 +1122,20 @@ mod tests {
 		let (_second_broadcast, second) = track(VIDEO);
 		let _second_sub = second.subscribe(None);
 		let second_reserved = allocator.reserve(&second.demand(), bps(4_000_000));
-		assert_eq!(second_reserved.peek(), Some(bps(1_000_000)));
+		assert_eq!(second_reserved.rate(), Some(bps(1_000_000)));
 
 		// A read handle is not the claim: the reservation outliving it is what keeps the
 		// room, and the reservation going away is what returns it.
-		let mut orphan = first_reserved.consumer();
+		let mut orphan = first_reserved.consume();
 		assert_eq!(orphan.changed().await.unwrap(), Some(bps(1_000_000)));
 
 		drop(first_reserved);
 		assert_eq!(allocator.registry.read().entries.len(), 1);
-		assert_eq!(second_reserved.peek(), Some(bps(2_000_000)));
+		assert_eq!(second_reserved.rate(), Some(bps(2_000_000)));
 
 		// The orphaned reader is woken and told, rather than being left parked on a slice
-		// that will never move again. It reports the same "hold your rate" as an unwatched
-		// track, not a grant of zero that would tell an encoder to stop.
+		// that will never move again. It reports the same "hold your rate" as a missing
+		// estimate, not a grant of zero that would tell an encoder to stop.
 		assert_eq!(orphan.changed().await.unwrap(), None);
 		assert_eq!(orphan.peek(), None);
 	}
@@ -1116,19 +1158,19 @@ mod tests {
 		let large_reserved = allocator.reserve(&large.demand(), bps(8_000_000));
 
 		// Max-min fair: the small claim is satisfied in full, the rest goes to the other.
-		assert_eq!(small_reserved.peek(), Some(bps(1_000_000)));
-		assert_eq!(large_reserved.peek(), Some(bps(5_000_000)));
+		assert_eq!(small_reserved.rate(), Some(bps(1_000_000)));
+		assert_eq!(large_reserved.rate(), Some(bps(5_000_000)));
 
 		// It reopens at a mode that can use much more, and the split follows without a
 		// second entry appearing.
 		small_reserved.update(bps(4_000_000));
 		assert_eq!(allocator.registry.read().entries.len(), 2);
-		assert_eq!(small_reserved.peek(), Some(bps(3_000_000)));
-		assert_eq!(large_reserved.peek(), Some(bps(3_000_000)));
+		assert_eq!(small_reserved.rate(), Some(bps(3_000_000)));
+		assert_eq!(large_reserved.rate(), Some(bps(3_000_000)));
 
 		// And back down, which has to release the difference rather than hold it.
 		small_reserved.update(bps(1_000_000));
-		assert_eq!(large_reserved.peek(), Some(bps(5_000_000)));
+		assert_eq!(large_reserved.rate(), Some(bps(5_000_000)));
 	}
 
 	/// Collected-language callers can relinquish a ceiling before their retained
@@ -1148,20 +1190,20 @@ mod tests {
 		let (_sibling_broadcast, sibling) = track(VIDEO);
 		let _sibling_sub = sibling.subscribe(None);
 		let sibling = allocator.reserve(&sibling.demand(), bps(4_000_000));
-		assert_eq!(sibling.peek(), Some(bps(1_000_000)));
+		assert_eq!(sibling.rate(), Some(bps(1_000_000)));
 		assert_eq!(target.poll_changed(&waiter), Poll::Ready(bps(12_000_000)));
 
 		retired.update(Rate::ZERO);
-		assert_eq!(retired.peek(), Some(Rate::ZERO));
-		assert_eq!(replacement.peek(), Some(bps(1_500_000)));
-		assert_eq!(sibling.peek(), Some(bps(1_500_000)));
+		assert_eq!(retired.rate(), Some(Rate::ZERO));
+		assert_eq!(replacement.rate(), Some(bps(1_500_000)));
+		assert_eq!(sibling.rate(), Some(bps(1_500_000)));
 		assert_eq!(target.poll_changed(&waiter), Poll::Ready(bps(8_000_000)));
 		retired.update(Rate::ZERO);
 		assert!(target.poll_changed(&waiter).is_pending());
 
 		// The registration remains usable, so an encoder may resume in place.
 		retired.update(bps(4_000_000));
-		assert_eq!(sibling.peek(), Some(bps(1_000_000)));
+		assert_eq!(sibling.rate(), Some(bps(1_000_000)));
 		assert_eq!(target.poll_changed(&waiter), Poll::Ready(bps(12_000_000)));
 		assert!(encoder.demand().is_used());
 	}
@@ -1178,7 +1220,7 @@ mod tests {
 		let (_broadcast, producer) = track(VIDEO);
 		let _sub = producer.subscribe(None);
 		let reserved = allocator.reserve(&producer.demand(), bps(1_000_000));
-		let mut share = reserved.consumer();
+		let mut share = reserved.consume();
 		assert_eq!(share.changed().await.unwrap(), Some(bps(1_000_000)));
 
 		let (woken, waiter) = Woken::new();
@@ -1200,7 +1242,7 @@ mod tests {
 		let (_broadcast, producer) = track(VIDEO);
 		let _sub = producer.subscribe(None);
 		let share_reserved = allocator.reserve(&producer.demand(), bps(4_000_000));
-		let mut share = share_reserved.consumer();
+		let mut share = share_reserved.consume();
 
 		drop(allocator);
 		drop(estimate);
@@ -1225,7 +1267,7 @@ mod tests {
 		assert_eq!(consumer.changed().await.unwrap(), None);
 
 		// Gone for good.
-		producer.abort(Error::Cancel).unwrap();
+		drop(producer);
 		assert!(consumer.changed().await.is_err());
 		// And it stays terminal rather than flapping back to a value.
 		assert!(consumer.changed().await.is_err());
@@ -1271,6 +1313,46 @@ mod tests {
 			target.poll_changed(&waiter).is_pending(),
 			"a pruned claim is not released twice"
 		);
+	}
+
+	/// A reservation is probed while a session follows its allocator's target, and a
+	/// reader parked on an unchanged slice is woken when that flips.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_following_session_marks_reservations_probed() {
+		let estimate = Producer::new();
+		estimate.set(Some(bps(2_000_000))).unwrap();
+		let allocator = Allocator::new(estimate.consume());
+		let (_broadcast, producer) = track(VIDEO);
+		let _sub = producer.subscribe(None);
+		let reservation = allocator.reserve(&producer.demand(), bps(4_000_000));
+		let mut grant = reservation.consume();
+		let (woken, waiter) = Woken::new();
+		assert!(matches!(grant.poll_changed(&waiter), Poll::Ready(Ok(Some(rate))) if rate == bps(2_000_000)));
+		assert!(!grant.probed());
+		assert!(grant.poll_changed(&waiter).is_pending());
+
+		let target = allocator.target();
+		assert!(woken.woken(), "a session starting to probe must wake the reader");
+		assert!(matches!(grant.poll_changed(&waiter), Poll::Ready(Ok(Some(rate))) if rate == bps(2_000_000)));
+		assert!(grant.probed());
+		assert!(grant.poll_changed(&waiter).is_pending());
+
+		// A zero target turns probing off, though the session still follows it.
+		let (woken, waiter) = Woken::new();
+		assert!(grant.poll_changed(&waiter).is_pending());
+		allocator.set_target(Some(Rate::ZERO));
+		assert!(woken.woken(), "turning probing off must wake the reader");
+		assert!(matches!(grant.poll_changed(&waiter), Poll::Ready(Ok(Some(rate))) if rate == bps(2_000_000)));
+		assert!(!grant.probed());
+		allocator.set_target(None);
+		assert!(matches!(grant.poll_changed(&waiter), Poll::Ready(Ok(Some(rate))) if rate == bps(2_000_000)));
+		assert!(grant.probed());
+
+		drop(target);
+		assert!(matches!(grant.poll_changed(&waiter), Poll::Ready(Ok(Some(rate))) if rate == bps(2_000_000)));
+		assert!(!grant.probed());
+		assert!(!estimate.consume().probed(), "a whole estimate is never probed");
 	}
 
 	/// The override replaces the sum for every clone until it is cleared.

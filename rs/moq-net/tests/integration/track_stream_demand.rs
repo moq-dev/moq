@@ -44,25 +44,6 @@ async fn link(version: Version, publisher: &origin::Producer, subscriber: &origi
 	connect_mock(options).await
 }
 
-/// Every demand edge a `broadcast::Demand` reports from here on, `true` for used.
-macro_rules! record {
-	($demand:expr) => {{
-		let edges = Rc::new(RefCell::new(Vec::new()));
-		let log = edges.clone();
-		let demand = $demand;
-		drop(moq_clock::sim::spawn(async move {
-			while demand.used().await.is_ok() {
-				log.borrow_mut().push(true);
-				if demand.unused().await.is_err() {
-					break;
-				}
-				log.borrow_mut().push(false);
-			}
-		}));
-		edges
-	}};
-}
-
 /// Every demand edge a `track::Demand` reports from here on, `true` for wanted.
 macro_rules! record_track {
 	($demand:expr) => {{
@@ -83,8 +64,8 @@ macro_rules! record_track {
 }
 
 /// A reader subscribes through `relays` relays and stays: the publisher, which starts
-/// the track on demand, is asked for it once, and its broadcast and track each see exactly
-/// one `used` edge, then `unused` once the reader leaves.
+/// the track on demand, is asked for it once, and its track sees exactly one `used` edge,
+/// then `unused` once the reader leaves.
 ///
 /// With `reorder`, the reader's SUBSCRIBE stream reaches the first hop well after its
 /// TRACK stream's data, as QUIC may deliver them, so a hop that let go of the TRACK
@@ -101,10 +82,8 @@ async fn one_used_edge(version: &str, relays: usize, reorder: bool) {
 	let reader: &MockSession = &links.last().unwrap().client_transport;
 
 	let broadcast = nodes[0].create_broadcast("room").unwrap();
-	let mut dynamic = broadcast.dynamic();
+	let mut dynamic = broadcast.requests();
 	broadcast.announce(Default::default()).unwrap();
-	let broadcast_edges = record!(broadcast.demand());
-
 	// Serve every request for the track, keeping what it started.
 	let requests = Rc::new(RefCell::new(Vec::new()));
 	let track_edges = Rc::new(RefCell::new(None));
@@ -156,7 +135,6 @@ async fn one_used_edge(version: &str, relays: usize, reorder: bool) {
 	moq_clock::sleep(Duration::from_secs(2)).await;
 	assert_eq!(requests.borrow().len(), 1, "{label}: asked for the track again");
 	let track_edges = track_edges.borrow().clone().expect("the track was requested");
-	assert_eq!(*broadcast_edges.borrow(), [true], "{label}: broadcast demand");
 	assert_eq!(*track_edges.borrow(), [true], "{label}: track demand");
 
 	// Holding the TRACK stream must not outlive the reader.
@@ -168,7 +146,6 @@ async fn one_used_edge(version: &str, relays: usize, reorder: bool) {
 		.unwrap_or_else(|_| panic!("{label}: demand outlived the reader"))
 		.unwrap();
 	moq_clock::sleep(Duration::from_millis(100)).await;
-	assert_eq!(*broadcast_edges.borrow(), [true, false], "{label}: broadcast demand");
 	assert_eq!(*track_edges.borrow(), [true, false], "{label}: track demand");
 	publisher.abort();
 }
@@ -191,8 +168,7 @@ async fn through_a_relay() {
 
 /// A bare track handle is no demand, through `relays` relays: holding one asks the
 /// publisher for nothing, a query on it does until it is dropped, and once a subscription
-/// made from it ends, the publisher and the reader's own broadcast both read unused while
-/// the handle is still held.
+/// made from it ends, the publisher reads unused while the handle is still held.
 async fn bare_handle_is_lazy(version: &str, relays: usize) {
 	let version: Version = version.parse().unwrap();
 	let label = format!("{version} over {relays} relays");
@@ -204,10 +180,8 @@ async fn bare_handle_is_lazy(version: &str, relays: usize) {
 	}
 
 	let broadcast = nodes[0].create_broadcast("room").unwrap();
-	let mut dynamic = broadcast.dynamic();
+	let mut dynamic = broadcast.requests();
 	broadcast.announce(Default::default()).unwrap();
-	let broadcast_edges = record!(broadcast.demand());
-
 	let requests = Rc::new(RefCell::new(Vec::new()));
 	let served = requests.clone();
 	let publisher = moq_clock::sim::spawn(async move {
@@ -232,10 +206,9 @@ async fn bare_handle_is_lazy(version: &str, relays: usize) {
 		requests.borrow().is_empty(),
 		"{label}: a bare handle asked for the track"
 	);
-	assert!(broadcast_edges.borrow().is_empty(), "{label}: a bare handle is demand");
 
 	// A held query reaches the publisher, and holds the track there until dropped.
-	let mut query = handle.query();
+	let mut query = handle.info();
 	moq_clock::timeout(TIMEOUT, &mut query)
 		.await
 		.unwrap_or_else(|_| panic!("{label}: query stalled"))
@@ -273,10 +246,6 @@ async fn bare_handle_is_lazy(version: &str, relays: usize) {
 		.await
 		.unwrap_or_else(|_| panic!("{label}: the publisher still reads the track as used"))
 		.unwrap();
-	assert!(
-		!remote.demand().is_used(),
-		"{label}: the reader's broadcast is still used"
-	);
 	drop(handle);
 	publisher.abort();
 }

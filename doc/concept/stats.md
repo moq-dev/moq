@@ -55,7 +55,16 @@ program clock since its last access unit. Its losses are `resyncs`, bytes
 `discarded` scanning for audio sync, `unconfirmed` frames, `damaged` units,
 `unplaced` units the program clock could not place, the times the stream was
 `refused`, and its shares of `continuityCountError`, `transportError`, and
-`ptsError`.
+`ptsError`. A TS-scrambled packet on a carried stream counts as `refused`.
+
+Every PID but the null PID either takes a route or is counted. A listed stream
+the import cannot carry, such as `0x86` without a SCTE-35 registration, gets a
+row with an empty `track` and one `refused`. Once every program's PMT is in, a
+PID that no PAT, PMT, or captured SI table claims, such as the CAT, conditional
+access, or ATSC PSIP, gets a `data` row with an empty `track` and `refused`
+counting its packets, with one warning when it starts. An import of one `--program` of a
+multi-program stream cannot tell another program's PIDs from these, so it
+counts none of them.
 
 The stream-wide counters count ETSI TR 101 290 checks at that standard's
 fixed limits:
@@ -165,7 +174,7 @@ carries a fresh [publisher epoch](/concept/moq-lite#publisher-epochs) on its
 route, so a restarted node is a new broadcast at the same path: it replaces the
 old one, and no relay serves it groups cached under the old epoch. A reader
 treats each epoch as its own set of counters. The epoch rides moq-lite 07
-announcements, and moq-transport draft 17 and later with the
+announcements, and moq-transport with the
 [epoch extension](/draft/moq-epoch); over anything else a reader sees the same
 change as an end and a start at the path.
 An aggregating reader pins each node's subscription to its epoch, and when one

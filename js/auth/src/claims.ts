@@ -143,7 +143,7 @@ export interface Permissions {
  *
  * - `path` extends the root (root `demo`, path `demo/room`), so the extra `room`
  *   narrows each pattern and drops the ones outside it.
- * - `path` is a parent of the root (root `demo`, path ``), so `demo` is prepended to
+ * - `path` is a parent of the root (root `demo`, empty path), so `demo` is prepended to
  *   each pattern to keep it anchored where the token points.
  *
  * Matching is segment-aware, so a root of `foo` does not cover `foobar`. Slashes at
@@ -152,8 +152,8 @@ export interface Permissions {
  * Throws when the two don't overlap, and when they do but every pattern falls outside
  * `path`.
  *
- * This is authorization only. Verify the signature first with {@link verify}, which is
- * where expiry is enforced.
+ * This is authorization only. Verify the signature first with {@link Key.verify} or
+ * {@link KeySet.verify}, which is where expiry is enforced.
  *
  * @public
  */

@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-
-from moq_ffi import moq_epoch_time_ms, moq_mint_epoch
+from moq_ffi import moq_mint_epoch
 
 
 def mint_epoch() -> str:
@@ -14,12 +12,3 @@ def mint_epoch() -> str:
     restart reads as a new broadcast to viewers instead of a stalled one.
     """
     return moq_mint_epoch()
-
-
-def epoch_time(epoch: str) -> datetime:
-    """The UTC wall-clock time an epoch encodes, to the millisecond.
-
-    Raises `moq.Error` unless ``epoch`` is a lowercase hyphenated UUIDv7, and
-    ``OverflowError`` for a time past year 9999, which ``datetime`` cannot hold.
-    """
-    return datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(milliseconds=moq_epoch_time_ms(epoch))

@@ -453,7 +453,7 @@ std::vector<std::pair<obs_encoder_t *, long long>> updates()
 int main()
 {
 	{
-		TestRelay relay;
+		TestRelay relay(true, {"moq-transport-18"});
 		reset(relay.Url());
 		MoQOutput output(nullptr, OUTPUT);
 		CHECK(output.Start());
@@ -461,6 +461,8 @@ int main()
 		CHECK(first.has_value());
 		CHECK(first == output.GetEpoch());
 		CHECK(WaitFor([&] { return output.IsLiveSession() && relay.Accepted() == 1; }));
+		// The plugin names itself ahead of the C++ package, so a relay can tell it apart.
+		CHECK(relay.Advertised("moq-obs/dev moq-cpp/"));
 		relay.DropSessions();
 		CHECK(WaitFor([&] { return output.GetReconnectCount() == 1 && output.IsLiveSession(); }));
 		CHECK(MoQOutputStatsTest::Epoch(output) == first);
@@ -659,6 +661,9 @@ int main()
 			CHECK(next.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
 			auto first = TestOk(next.get(), "first frame");
 			CHECK(first.has_value());
+			const auto *first_frame = first ? std::get_if<moq::MediaRead::kFrame>(&first->get_variant())
+							: nullptr;
+			CHECK(first_frame != nullptr);
 
 			// Large enough to be in flight when Stop() runs, so a Stop() that cancels
 			// rather than drains cuts it off (256 KiB can land first under TSan). Small
@@ -679,7 +684,7 @@ int main()
 
 			// Everything up to the last frame, then the end of the track.
 			bool ended = false;
-			uint64_t last_timestamp = first ? first->timestamp_us : 0;
+			uint64_t last_timestamp = first_frame ? first_frame->frame.timestamp_us : 0;
 			for (;;) {
 				next = media->next();
 				if (next.wait_for(std::chrono::seconds(10)) != std::future_status::ready)
@@ -691,10 +696,12 @@ int main()
 					ended = true;
 					break;
 				}
-				last_timestamp = (*result)->timestamp_us;
+				CHECK(!std::holds_alternative<moq::MediaRead::kGap>((*result)->get_variant()));
+				if (const auto *frame = std::get_if<moq::MediaRead::kFrame>(&(*result)->get_variant()))
+					last_timestamp = frame->frame.timestamp_us;
 			}
 			CHECK(ended);
-			CHECK(first && last_timestamp > first->timestamp_us);
+			CHECK(first_frame && last_timestamp > first_frame->frame.timestamp_us);
 		}
 	}
 	printf("stop drains the session: ok\n");
@@ -871,8 +878,8 @@ int main()
 	}
 	printf("OBS-driven restart: ok\n");
 
-	// A token edited mid-stream goes to the live session only, and presenting a
-	// newer one or stopping cancels whatever is still in flight.
+	// A token edited mid-stream replaces the session's tokens, and presenting a
+	// newer one or stopping drops the wait on the relay's answer still in flight.
 	{
 		TestRelay relay;
 		reset(relay.Url());

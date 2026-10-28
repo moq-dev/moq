@@ -17,8 +17,8 @@ pub(crate) enum Event {
 	/// The group finished cleanly.
 	GroupEnd,
 	/// The group was lost upstream partway, so nothing more of it arrives. The gap it leaves is
-	/// read once the next group resumes the track.
-	Cut,
+	/// read once the next group resumes the track. `observed` is when the loss was read.
+	Cut { observed: Instant },
 }
 
 /// Read items and exporter-only boundaries in delivery order.
@@ -41,7 +41,9 @@ pub(crate) enum Item {
 	},
 	FrameEnd(Timestamp),
 	GroupEnd,
-	Cut,
+	Cut {
+		observed: Instant,
+	},
 }
 
 /// Decode a moq-lite track into a stream of media [`Frame`]s in age-bounded
@@ -275,7 +277,7 @@ impl<F: Container> Consumer<F> {
 				Some(Item::Frame { group, frame, .. }) => Read::Frame { group, frame },
 				Some(Item::Gap { timestamp, duration }) => Read::Gap { timestamp, duration },
 				Some(Item::End { group, end }) => Read::End { group, end },
-				Some(Item::FrameEnd(_) | Item::GroupEnd | Item::Cut) => continue,
+				Some(Item::FrameEnd(_) | Item::GroupEnd | Item::Cut { .. }) => continue,
 				None => return Poll::Ready(Ok(None)),
 			};
 			return Poll::Ready(Ok(Some(read)));
@@ -298,7 +300,7 @@ impl<F: Container> Consumer<F> {
 			Some(Event::FrameEnd { end, opens: true }) => (Item::End { group: self.group, end }, end),
 			Some(Event::FrameEnd { end, opens: false }) => return Poll::Ready(Ok(Some(Item::FrameEnd(end)))),
 			Some(Event::GroupEnd) => return Poll::Ready(Ok(Some(Item::GroupEnd))),
-			Some(Event::Cut) => return Poll::Ready(Ok(Some(Item::Cut))),
+			Some(Event::Cut { observed }) => return Poll::Ready(Ok(Some(Item::Cut { observed }))),
 			None => return Poll::Ready(Ok(None)),
 		};
 		if std::mem::take(&mut self.gap)
@@ -442,7 +444,9 @@ impl<F: Container> Consumer<F> {
 						self.current = self.pending.front().map_or(self.current + 1, |g| g.sequence);
 						// Said now rather than with the gap, which waits for the next group: what
 						// the caller holds of this one need not wait for a successor.
-						return Poll::Ready(Ok(Some(Event::Cut)));
+						return Poll::Ready(Ok(Some(Event::Cut {
+							observed: moq_clock::now(),
+						})));
 					}
 					// Cleanly finished group: advance to the next sequence.
 					Poll::Ready(Ok(None)) => {
@@ -2440,7 +2444,7 @@ mod tests {
 		// The aborted group 0 says it was cut, then skips straight to its successor; a short
 		// clean group emits GroupEnd.
 		assert!(
-			matches!(consumer.poll_event(&waiter), Poll::Ready(Ok(Some(Event::Cut)))),
+			matches!(consumer.poll_event(&waiter), Poll::Ready(Ok(Some(Event::Cut { .. })))),
 			"the cut is said before the successor"
 		);
 		let event = consumer.poll_event(&waiter);
@@ -2811,8 +2815,8 @@ mod tests {
 		let read = read_past_frames(&mut consumer).await;
 		assert!(matches!(read, Err(crate::Error::UnknownFormat(_))), "{read:?}");
 		assert!(track.demand().wanted().is_none(), "the ended reader still subscribes");
-		assert!(!malformed.demand().is_used(), "the ended reader still holds its group");
-		assert!(!later.demand().is_used(), "the ended reader still holds a later group");
+		assert!(!malformed.demand().wanted(), "the ended reader still holds its group");
+		assert!(!later.demand().wanted(), "the ended reader still holds a later group");
 	}
 
 	/// A malformed object mid-group, found while looking ahead past a blocked group, ends the

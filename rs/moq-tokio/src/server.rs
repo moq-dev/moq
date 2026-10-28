@@ -740,9 +740,9 @@ impl Server {
 							// (like the stream bindings).
 							let Accepted { session, url, identity, authority, mut link } = within(deadline, crate::quic::accept(_conn, alpns)).await?;
 							link.local = local;
-							let binding = match url { Some(_) => moq_net::transport::Binding::Uri, None => moq_net::transport::Binding::InBand };
+							let address = match url { Some(_) => moq_net::transport::Address::Uri, None => moq_net::transport::Address::Setup };
 							let quic = Some((*session).clone());
-							let session = crate::transport::Session::new(session, binding);
+							let session = crate::transport::Session::new(session, address);
 							let (request, deadline) = accept_request(&setup.server, session, deadline).await?;
 							// Only WebTransport carries a request URL; raw QUIC puts the path in the SETUP.
 							let transport = match url { Some(_) => Transport::WebTransport, None => Transport::Quic };
@@ -761,8 +761,8 @@ impl Server {
 						};
 						self.accept.push(async move {
 							let Accepted { session, url, identity, authority, link } = within(deadline, super::iroh::accept(_conn, alpns)).await?;
-							let binding = match url { Some(_) => moq_net::transport::Binding::Uri, None => moq_net::transport::Binding::InBand };
-							let session = crate::transport::Session::new(session, binding);
+							let address = match url { Some(_) => moq_net::transport::Address::Uri, None => moq_net::transport::Address::Setup };
+							let session = crate::transport::Session::new(session, address);
 							let (request, deadline) = accept_request(&setup.server, session, deadline).await?;
 							Ok(Request {
 								transport: Transport::Iroh,
@@ -1502,7 +1502,7 @@ fn spawn_unix_loop(
 		let mut handshakes = tokio::task::JoinSet::new();
 		loop {
 			let pending = tokio::select! {
-				pending = listener.accept_pending() => pending,
+				pending = listener.accept_pending(allow.as_ref()) => pending,
 				Some(_) = handshakes.join_next() => continue,
 			};
 			// Closed for drain: dropping the pending handshake closes its socket.
@@ -1512,17 +1512,9 @@ fn spawn_unix_loop(
 			let deadline = setup.deadline();
 			let setup = setup.clone();
 			let tx = tx.clone();
-			let allow = allow.clone();
 			handshakes.spawn(crate::panic::isolate(async move {
 				match within(deadline, pending).await {
-					Ok((session, cred)) => {
-						// Enforce the allowlist (if any) before reading SETUP bytes from the peer.
-						if let Some(allow) = &allow
-							&& !allow.permits(&cred)
-						{
-							tracing::warn!(uid = cred.uid, gid = cred.gid, pid = ?cred.pid, "unix connection rejected by allow list");
-							return;
-						}
+					Ok((session, _cred)) => {
 						stream_request(
 							session,
 							&setup,
@@ -2020,6 +2012,64 @@ mod tests {
 		let _ = task.await;
 	}
 
+	/// A refused peer must be closed without exchanging even the qmux preface.
+	/// Use our real kernel credentials and change only the configured allowlist.
+	#[cfg(all(feature = "uds", unix))]
+	#[tokio::test]
+	async fn unix_allowlist_precedes_negotiation() {
+		use tokio::io::AsyncReadExt;
+		let (peer, _other) = tokio::net::UnixStream::pair().unwrap();
+		let cred = peer.peer_cred().unwrap();
+		for allowed in [false, true] {
+			let dir = tempfile::tempdir().unwrap();
+			let path = dir.path().join("listener.sock");
+			let listener = crate::unix::Listener::bind(&path)
+				.await
+				.unwrap()
+				.with_protocols(["moq-lite-06"]);
+			let (tx, _rx) = tokio::sync::mpsc::channel(1);
+			let task = spawn_unix_loop(
+				listener,
+				Setup {
+					activity: Default::default(),
+					server: moq_net::Server::new(),
+					timeout: None,
+				},
+				Some(crate::unix::Allow {
+					uid: vec![if allowed {
+						cred.uid()
+					} else {
+						cred.uid().wrapping_add(1)
+					}],
+					..Default::default()
+				}),
+				tx,
+			);
+			if allowed {
+				let mut config = qmux::Config::new(qmux::Version::QMux01);
+				config.protocol = qmux::Protocol::Negotiate(vec!["moq-lite-06".into()]);
+				let session = qmux::uds::connect(&path, config)
+					.await
+					.expect("allowed peer negotiates");
+				assert_eq!(session.protocol(), Some("moq-lite-06"));
+			} else {
+				let mut peer = tokio::net::UnixStream::connect(&path).await.unwrap();
+				let mut byte = [0];
+				let read = peer.read(&mut byte).await;
+				// Some kernels report reset instead of EOF when the socket closes.
+				assert!(
+					matches!(read, Ok(0))
+						|| read
+							.as_ref()
+							.is_err_and(|err| err.kind() == std::io::ErrorKind::ConnectionReset),
+					"refused peer reached qmux negotiation: {read:?}, byte={byte:?}"
+				);
+			}
+			task.abort();
+			let _ = task.await;
+		}
+	}
+
 	#[cfg(all(feature = "uds", unix))]
 	#[tokio::test]
 	async fn unix_stalled_handshake_does_not_block_accept() {
@@ -2383,7 +2433,7 @@ mod tests {
 		let start = tokio::time::Instant::now();
 		let Err(err) = accept_request(
 			&setup.server,
-			crate::transport::Session::new(peer.clone(), moq_net::transport::Binding::Uri),
+			crate::transport::Session::new(peer.clone(), moq_net::transport::Address::Uri),
 			setup.deadline(),
 		)
 		.await
@@ -2398,19 +2448,21 @@ mod tests {
 		);
 	}
 
-	/// Answering SETUP is part of the handshake: a moq-transport peer that sends
-	/// its SETUP but never grants credit for the reply is refused at the same
+	/// Answering SETUP is part of the handshake: a peer that sends its SETUP but
+	/// never grants credit for the reply is refused at the same
 	/// deadline, rather than held open by keep-alives, and the session counts it.
 	#[cfg(feature = "websocket")]
 	#[tokio::test(start_paused = true)]
 	async fn stalled_setup_reply_is_closed_at_the_deadline() {
-		// Record a real moq-transport-14 CLIENT_SETUP. The client then waits on a
-		// reply that never comes.
-		let recorder = Scripted::new("moq-00");
+		// Record a real CLIENT_SETUP offering only lite-02, whose reply waits for
+		// `ok()`; a newer lite version is answered during accept instead. The client
+		// then waits on a reply that never comes.
+		let recorder = Scripted::new("moql");
 		let client = tokio::spawn({
-			let recorder = crate::transport::Session::new(recorder.clone(), moq_net::transport::Binding::Uri);
+			let recorder = crate::transport::Session::new(recorder.clone(), moq_net::transport::Address::Uri);
 			async move {
 				let _ = moq_net::Client::new()
+					.with_versions("moq-lite-02".parse::<moq_net::Version>().unwrap().into())
 					.connect(moq_net::time::Instant::now(), recorder)
 					.await;
 			}
@@ -2420,7 +2472,7 @@ mod tests {
 		let bytes = std::mem::take(&mut *recorder.written.lock().unwrap());
 		assert!(!bytes.is_empty(), "the client never wrote its SETUP");
 
-		let mut peer = Scripted::new("moq-00");
+		let mut peer = Scripted::new("moql");
 		peer.setup = Some(bytes.into());
 		let timeout = std::time::Duration::from_secs(10);
 		let setup = Setup {
@@ -2431,7 +2483,7 @@ mod tests {
 		let start = tokio::time::Instant::now();
 		let Ok((request, deadline)) = accept_request(
 			&setup.server,
-			crate::transport::Session::new(peer.clone(), moq_net::transport::Binding::Uri),
+			crate::transport::Session::new(peer.clone(), moq_net::transport::Address::Uri),
 			setup.deadline(),
 		)
 		.await
@@ -2453,7 +2505,11 @@ mod tests {
 			quic: None,
 			deadline,
 		}
-		.with_stats(registry.tier(Default::default()).session("room"));
+		.with_stats(
+			registry
+				.tier(Default::default())
+				.session(moq_net::Path::from_static("room")),
+		);
 		let Err(err) = request.ok().await else {
 			panic!("a reply the peer never took completed");
 		};
@@ -2554,7 +2610,12 @@ mod tests {
 		}
 
 		let help = Cli::render_help(Cli::command(), true).unwrap();
-		for name in moq_net::Version::names() {
+		// Every wire code this crate parses, including the opt-in `-wip` drafts.
+		let codes = (0xff0dad00..=0xff0dadff).chain(0xff000000..=0xff0000ff);
+		for name in codes
+			.filter_map(moq_net::Version::from_code)
+			.map(|version| version.as_str())
+		{
 			assert!(help.contains(name), "missing {name} from --server-version help");
 		}
 	}

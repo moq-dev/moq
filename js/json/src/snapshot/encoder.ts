@@ -11,26 +11,32 @@ const MAX_DELTA_FRAMES = 256;
 
 /** Options shared by an {@link Encoder} and the {@link Producer} that wraps one. */
 export interface Config<T> {
-	// Encode changes as deltas (merge patches) against the group's snapshot. `false` encodes every
-	// change as a new snapshot in its own group.
-	//
-	// A group of deltas runs until a joiner wants a fresh one, judged by the track's `refresh` ratio
-	// (see {@link Encoder.snapshot}), or until it reaches the frame or byte cap.
-	//
-	// Defaults to `true`.
+	/**
+	 * Encode changes as deltas (merge patches) against the group's snapshot. `false` encodes every
+	 * change as a new snapshot in its own group.
+	 *
+	 * A group of deltas runs until a joiner wants a fresh one, judged by the track's `refresh` ratio
+	 * (see {@link Encoder.snapshot}), or until it reaches the frame or byte cap.
+	 *
+	 * Defaults to `true`.
+	 */
 	deltas?: boolean;
 
-	// Optional zod schema used to validate each value before publishing.
+	/** Optional zod schema used to validate each value before publishing. */
 	schema?: z.ZodMiniType<T>;
 
-	// Starting value for {@link Producer.mutate} before anything has been published. Required to
-	// mutate a producer that hasn't published yet (e.g. a fresh catalog); ignored once a value exists.
+	/**
+	 * Starting value for {@link Producer.mutate} before anything has been published. Required to
+	 * mutate a producer that hasn't published yet (e.g. a fresh catalog); ignored once a value exists.
+	 */
 	initial?: T;
 
-	// Compress each group as one sync-flushed `deflate-raw` (RFC 1951) stream, so deltas reuse the
-	// snapshot as context and shrink sharply. Interoperable with the Rust `moq-json` producer.
-	// `"none"`/unset (the default) writes plaintext JSON frames. A {@link Decoder} reading them
-	// must set the same {@link compression}.
+	/**
+	 * Compress each group as one sync-flushed `deflate-raw` (RFC 1951) stream, so deltas reuse the
+	 * snapshot as context and shrink sharply. Interoperable with the Rust `moq-json` producer.
+	 * `"none"`/unset (the default) writes plaintext JSON frames. A {@link Decoder} reading them
+	 * must set the same {@link compression}.
+	 */
 	compression?: Compression;
 
 	/**

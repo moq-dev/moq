@@ -773,15 +773,15 @@ impl<I: HttpStream> HttpStream for TlsStream<I> {
 ///
 /// The stream owns the accepted TCP socket, so the extra bound narrows nothing;
 /// it exists because a `cfg` can't be written on a `where` clause directly.
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) trait AcceptStream: AsyncRead + AsyncWrite + Unpin + Send + std::os::fd::AsFd + 'static {}
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl<T: AsyncRead + AsyncWrite + Unpin + Send + std::os::fd::AsFd + 'static> AcceptStream for T {}
 
-/// As above, where no descriptor is available.
-#[cfg(not(unix))]
+/// As above, where kernel TCP statistics are unavailable.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) trait AcceptStream: AsyncRead + AsyncWrite + Unpin + Send + 'static {}
-#[cfg(not(unix))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> AcceptStream for T {}
 
 impl<I, S, A> Accept<I, S> for WebAcceptor<A>
@@ -832,14 +832,14 @@ where
 
 /// The kernel's view of `stream`, when this platform exposes one and there is a
 /// qmux session that could use it.
-#[cfg(all(unix, feature = "websocket"))]
+#[cfg(all(any(target_os = "linux", target_os = "macos"), feature = "websocket"))]
 fn socket_stats<I: AcceptStream>(stream: &I) -> Option<SocketStats> {
 	qmux::TcpStats::new(stream)
 		.ok()
 		.map(|s| SocketStats(std::sync::Arc::new(s)))
 }
 
-#[cfg(not(all(unix, feature = "websocket")))]
+#[cfg(not(all(any(target_os = "linux", target_os = "macos"), feature = "websocket")))]
 fn socket_stats<I: AcceptStream>(_stream: &I) -> Option<SocketStats> {
 	None
 }
@@ -1440,7 +1440,7 @@ mod tests {
 		assert_eq!(report.traffic.len(), 2);
 		assert_eq!(report.sessions.len(), 2);
 		for label in ["first", "second"] {
-			let tier = Tier::new(label);
+			let tier = Tier::new(moq_net::Path::from_static(label));
 			let traffic = report.traffic.iter().find(|entry| entry.tier == tier).unwrap();
 			assert_eq!(traffic.path.as_str(), "room");
 			assert_eq!(
@@ -2479,7 +2479,10 @@ mod tests {
 						}
 						None => socket_step(upgrade_while_draining(web.stream, true)).await,
 					};
-					let goaway = socket_step(session.draining().recv()).await.unwrap();
+					let draining = session.draining();
+					let goaway = socket_step(moq_net::kio::wait(|waiter| draining.poll(waiter)))
+						.await
+						.unwrap();
 					assert_eq!(goaway.uri(), "");
 					session.abort(moq_net::Error::Cancel);
 					socket_step(web.running).await.unwrap().unwrap();
@@ -2583,7 +2586,9 @@ mod tests {
 			web.trigger.start();
 			let session = socket_step(upgrade_while_draining(web.stream, false)).await;
 			drop(pending);
-			assert_eq!(socket_step(session.draining().recv()).await.unwrap().uri(), "");
+			let draining = session.draining();
+			let goaway = socket_step(moq_net::kio::wait(|waiter| draining.poll(waiter))).await;
+			assert_eq!(goaway.unwrap().uri(), "");
 			session.abort(moq_net::Error::Cancel);
 			socket_step(web.running).await.unwrap().unwrap();
 		}

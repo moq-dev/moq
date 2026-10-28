@@ -37,10 +37,72 @@ enum Sink {
 	Opaque(Box<moq_net::track::Producer>),
 }
 
+impl Sink {
+	/// The track name, as the broadcast knows it.
+	fn name(&self) -> String {
+		match self {
+			Sink::Media(media) => media.track.name(),
+			Sink::Text(text) => text.producer.name().to_owned(),
+			Sink::Opaque(producer) => producer.name().to_owned(),
+		}
+	}
+}
+
+/// Every configured track name a run has published, and whether it ended.
+///
+/// A name always means the same content, and a reader that saw a track end (here or at a relay)
+/// never follows the name into a successor. So a run never publishes an ended name again: a pad that
+/// would (a new codec config, a pad requested again, a stream resumed after EOS) publishes under the
+/// first `<name>/<n>` the run has not used instead, as js/publish does. Generated names are never
+/// reused, so they are not recorded.
+#[derive(Clone, Default)]
+pub(super) struct Names(std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, bool>>>);
+
+impl Names {
+	/// `name`, unless the run ended it: then the first `name/<n>` the run has not used.
+	///
+	/// A name another pad still publishes is returned as is, so the duplicate fails loudly.
+	fn claim(&self, name: &str) -> String {
+		let mut names = self.0.lock().unwrap();
+		if names.get(name) != Some(&true) {
+			names.entry(name.to_owned()).or_insert(false);
+			return name.to_owned();
+		}
+		let mut n = 1u64;
+		loop {
+			let minted = format!("{name}/{n}");
+			if let std::collections::hash_map::Entry::Vacant(entry) = names.entry(minted.clone()) {
+				entry.insert(false);
+				return minted;
+			}
+			n += 1;
+		}
+	}
+
+	fn end(&self, name: String) {
+		self.0.lock().unwrap().insert(name, true);
+	}
+}
+
 /// Keep finished rendition owners until a whole run's catalog has closed.
 #[must_use]
 pub(super) struct Closed {
 	track: Option<Sink>,
+	/// The catalog `track` published in.
+	catalog: Option<moq_mux::catalog::Producer>,
+}
+
+impl Closed {
+	/// Drop the track and retire its HLS records, for a pad that finished mid-run: [`Names`] never
+	/// publishes its name again, so caps churn doesn't accumulate records.
+	fn retire(self) -> Result<()> {
+		let (Some(track), Some(catalog)) = (self.track, self.catalog) else {
+			return Ok(());
+		};
+		let name = track.name();
+		drop(track);
+		Ok(catalog.retire(&name)?)
+	}
 }
 
 /// An audio or video pad, published through a codec importer.
@@ -209,7 +271,8 @@ fn escape_cue(text: &str) -> String {
 /// lets the caller report a status instead of only logging one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CapsOutcome {
-	/// Already publishing under these caps, or already failed: no producer was built.
+	/// The live producer keeps publishing (the caps build the same importer), or the pad already
+	/// failed: no producer was built.
 	Unchanged,
 	/// A producer was built, reserving this track name.
 	Active(String),
@@ -237,7 +300,13 @@ pub struct Pad {
 	/// The requested pad gates the first catalog even before CAPS can name its rendition.
 	reserved: Option<moq_mux::catalog::Reserved>,
 	wall: Option<std::sync::Arc<super::wall::Wall>>,
+	/// The run's, once reserved; until then this pad's own, which still covers renegotiation.
+	names: Names,
 	track: Option<Sink>,
+	/// The catalog `track` publishes in, set with it.
+	catalog: Option<moq_mux::catalog::Producer>,
+	/// Whether `track` has a configured name, which may be requested again. A generated one never is.
+	named: bool,
 	caps: Option<gst::Caps>,
 	/// Set once a producer build rejects this pad's caps or bitstream; further buffers are dropped and
 	/// the track stays finalized. Isolated to the pad, so the session and other pads keep going. The
@@ -258,7 +327,10 @@ impl Pad {
 		Self {
 			reserved: None,
 			wall: None,
+			names: Names::default(),
 			track: None,
+			catalog: None,
+			named: false,
 			caps: None,
 			failed: false,
 			state: PadState::NoSegment,
@@ -269,8 +341,14 @@ impl Pad {
 	}
 
 	/// Fill a run's slot once, including a pad visible before its admission confirms.
-	pub(super) fn reserve(&mut self, catalog: &moq_mux::catalog::Producer, wall: std::sync::Arc<super::wall::Wall>) {
+	pub(super) fn reserve(
+		&mut self,
+		catalog: &moq_mux::catalog::Producer,
+		wall: std::sync::Arc<super::wall::Wall>,
+		names: &Names,
+	) {
 		self.wall = Some(wall);
+		self.names = names.clone();
 		if self.reserved.is_none() && self.track.is_none() && !self.failed {
 			self.reserved = Some(catalog.reserve());
 		}
@@ -315,19 +393,29 @@ impl Pad {
 
 	/// (Re)build the producer when the pad's caps change, under `track` when the pad was given a name.
 	/// A build failure invalidates only this pad; the caller keeps the session and other pads alive.
-	/// Identical caps re-sent as a sticky event keep the live producer.
+	/// Caps that build the same importer keep the live producer, so its readers continue.
 	pub(super) fn observe_caps(
 		&mut self,
 		broadcast: &moq_net::broadcast::Producer,
 		catalog: &moq_mux::catalog::Producer,
 		options: ProducerOptions<'_>,
 	) -> CapsOutcome {
-		if self.failed || (self.track.is_some() && self.caps.as_deref() == Some(options.caps)) {
+		if self.failed {
+			return CapsOutcome::Unchanged;
+		}
+		if self.track.is_some()
+			&& let Some(caps) = &self.caps
+			&& same_importer(caps, options.caps)
+		{
+			self.caps = Some(options.caps.clone());
 			return CapsOutcome::Unchanged;
 		}
 		let reserved = self.reserved.take().unwrap_or_else(|| catalog.reserve());
 		match self.build(broadcast, reserved, options) {
-			Ok(name) => CapsOutcome::Active(name),
+			Ok(name) => {
+				self.catalog = Some(catalog.clone());
+				CapsOutcome::Active(name)
+			}
 			Err(err) => {
 				gst::warning!(CAT, "invalidating pad: {err:?}");
 				self.fail();
@@ -348,8 +436,18 @@ impl Pad {
 			requested,
 		} = options;
 		let structure = caps.structure(0).context("empty caps")?;
-		// Renegotiation: finalize the previous producer before replacing it (closed once, not abandoned).
+		// Renegotiation to new content: finalize the previous producer before replacing it (closed once,
+		// not abandoned), so its name has ended and the replacement takes a fresh one.
 		self.finalize()?;
+		self.named = requested.is_some();
+		let requested = requested.map(|name| {
+			let claimed = self.names.claim(name);
+			if claimed != name {
+				gst::info!(CAT, "track {name} already ended in this run, publishing as {claimed}");
+			}
+			claimed
+		});
+		let requested = requested.as_deref();
 		// Opaque data has no codec importer and no catalog entry, so it never reaches the codec match.
 		if structure.name() == "application/octet-stream" {
 			// A generated name would leave the track unfindable: nothing advertises it.
@@ -822,10 +920,14 @@ impl Pad {
 
 	/// Consumes the producer so a second call is a no-op (`Track::finish()` is not idempotent). Returns
 	/// whether a producer was finalized. The importer accepts its track up front (in `Track::new`), so
-	/// `finish()` is safe even when no frame was ever decoded.
+	/// `finish()` is safe even when no frame was ever decoded. Unlike a run's end, it also retires the
+	/// track's HLS records.
 	pub fn finalize(&mut self) -> Result<bool> {
-		let (_closed, result) = self.finish();
-		result
+		let (closed, result) = self.finish();
+		let retired = closed.retire();
+		let finished = result?;
+		retired?;
+		Ok(finished)
 	}
 
 	/// Finish once, retaining rendition owners so closing a run cannot publish their removal.
@@ -833,6 +935,7 @@ impl Pad {
 		self.reserved.take();
 		let mut closed = Closed {
 			track: self.track.take(),
+			catalog: self.catalog.take(),
 		};
 		let Some(track) = closed.track.as_mut() else {
 			return (closed, Ok(false));
@@ -842,6 +945,9 @@ impl Pad {
 			Sink::Text(text) => text.producer.finish().map_err(anyhow::Error::from),
 			Sink::Opaque(producer) => producer.clone().finish().map_err(anyhow::Error::from),
 		};
+		if self.named {
+			self.names.end(track.name());
+		}
 		self.failed |= result.is_err();
 		(closed, result.map(|()| true))
 	}
@@ -1132,6 +1238,19 @@ pub fn caps_supported(caps: &gst::CapsRef) -> bool {
 	)
 }
 
+/// Whether `next` builds the same importer as `current`, so the live track continues under it.
+///
+/// Video configures in band and opaque data carries no config, so only their media type counts. An
+/// audio or text pad builds from its whole caps (the codec config, rate, channels, language), which
+/// is what a subscriber decodes or selects by, so any change there is new content.
+fn same_importer(current: &gst::CapsRef, next: &gst::CapsRef) -> bool {
+	let (Some(was), Some(now)) = (current.structure(0), next.structure(0)) else {
+		return false;
+	};
+	let media = now.name().as_str();
+	was.name() == now.name() && (media.starts_with("video/") || media == "application/octet-stream" || current == next)
+}
+
 fn segment_info(segment: &gst::Segment) -> SegmentInfo {
 	match segment.downcast_ref::<gst::ClockTime>() {
 		Some(time) => SegmentInfo {
@@ -1284,28 +1403,141 @@ mod tests {
 		assert!(first.finalize().unwrap(), "the first producer is still live");
 	}
 
-	// Renegotiation re-reserves the same explicit name. `build` finalizes the old producer first and the
-	// broadcast reclaims closed entries on insert, so the pad does not collide with itself.
-	#[test]
-	fn renegotiation_keeps_the_explicit_name() {
+	/// Caps the importer does not configure from keep the track live, so a reader subscribed before
+	/// the renegotiation reads on into the new caps rather than seeing the track end.
+	#[tokio::test]
+	async fn renegotiation_keeps_an_established_reader() {
 		gst::init().unwrap();
 		let (broadcast, catalog) = producers();
 		let mut pad = Pad::new();
-		assert_eq!(
-			pad.observe_caps(&broadcast, &catalog, producer_options(&h264_caps(), Some("camera")),),
-			CapsOutcome::Active("camera".to_string())
-		);
+		pad.observe_caps(&broadcast, &catalog, producer_options(&h264_caps(), Some("camera")));
+		pad.observe_segment(time_segment());
+		let mut subscriber = broadcast
+			.consume()
+			.track("camera")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+		for ms in [0, 40] {
+			let pushed = pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::from_mseconds(ms)), None, None);
+			assert_eq!(pushed, Ok(PushOutcome::Published));
+		}
+
 		let renegotiated = gst::Caps::builder("video/x-h264")
 			.field("stream-format", "byte-stream")
 			.field("alignment", "au")
 			.field("width", 1280i32)
 			.build();
 		assert_eq!(
-			pad.observe_caps(&broadcast, &catalog, producer_options(&renegotiated, Some("camera")),),
-			CapsOutcome::Active("camera".to_string()),
-			"the same name is reserved again, not rejected as a duplicate"
+			pad.observe_caps(&broadcast, &catalog, producer_options(&renegotiated, Some("camera"))),
+			CapsOutcome::Unchanged
 		);
-		assert!(!pad.is_failed());
+		let pushed = pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::from_mseconds(80)), None, None);
+		assert_eq!(pushed, Ok(PushOutcome::Published));
+
+		// The reader may skip to the latest group, but never sees the track end before the new caps.
+		loop {
+			let group = subscriber.recv_group().await.unwrap().expect("the track continues");
+			if group.sequence == 2 {
+				break;
+			}
+		}
+	}
+
+	/// A new codec config is new content: the old track ends on its name, and the replacement takes a
+	/// fresh one rather than reusing it.
+	#[tokio::test]
+	async fn a_new_codec_config_takes_a_fresh_name() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let mut pad = Pad::new();
+		pad.observe_caps(&broadcast, &catalog, producer_options(&h264_caps(), Some("camera")));
+		pad.observe_segment(time_segment());
+		let mut subscriber = broadcast
+			.consume()
+			.track("camera")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+		let pushed = pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO), None, None);
+		assert_eq!(pushed, Ok(PushOutcome::Published));
+
+		let vp8 = gst::Caps::builder("video/x-vp8").build();
+		assert_eq!(
+			pad.observe_caps(&broadcast, &catalog, producer_options(&vp8, Some("camera"))),
+			CapsOutcome::Active("camera/1".to_string())
+		);
+		assert_eq!(subscriber.recv_group().await.unwrap().expect("a group").sequence, 0);
+		assert!(subscriber.recv_group().await.unwrap().is_none(), "the old track ended");
+	}
+
+	/// The old name never returns after a renegotiation, so its HLS records end with it instead of
+	/// accumulating with each caps change.
+	#[tokio::test(start_paused = true)]
+	async fn renegotiation_retires_the_old_records() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let mut pad = Pad::new();
+		pad.observe_caps(&broadcast, &catalog, producer_options(&h264_caps(), Some("camera")));
+		pad.observe_segment(time_segment());
+		let pushed = pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO), None, None);
+		assert_eq!(pushed, Ok(PushOutcome::Published));
+		let mut records = broadcast
+			.consume()
+			.track(&hang::hls::default_name("camera"))
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+
+		let vp8 = gst::Caps::builder("video/x-vp8").build();
+		pad.observe_caps(&broadcast, &catalog, producer_options(&vp8, Some("camera")));
+		let drained = async { while records.recv_group().await.unwrap().is_some() {} };
+		let ended = tokio::time::timeout(Duration::from_secs(1), drained).await;
+		assert!(ended.is_ok(), "the old track's records end");
+	}
+
+	/// A run never publishes a name it ended again, whoever asks for it next: each replacement mints
+	/// the next free name.
+	#[test]
+	fn an_ended_name_is_never_published_again() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let names = Names::default();
+		let publish = || {
+			let mut pad = Pad::new();
+			pad.reserve(&catalog, super::super::wall::Wall::new(&catalog), &names);
+			let outcome = pad.observe_caps(&broadcast, &catalog, producer_options(&opaque_caps(), Some("levels")));
+			assert!(pad.finalize().unwrap());
+			outcome
+		};
+
+		assert_eq!(publish(), CapsOutcome::Active("levels".to_string()));
+		assert_eq!(publish(), CapsOutcome::Active("levels/1".to_string()));
+		assert_eq!(publish(), CapsOutcome::Active("levels/2".to_string()));
+	}
+
+	/// A fresh name skips one another pad publishes, rather than colliding with it.
+	#[test]
+	fn a_fresh_name_skips_a_live_one() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let names = Names::default();
+		let publish = |name| {
+			let mut pad = Pad::new();
+			pad.reserve(&catalog, super::super::wall::Wall::new(&catalog), &names);
+			let outcome = pad.observe_caps(&broadcast, &catalog, producer_options(&opaque_caps(), Some(name)));
+			(pad, outcome)
+		};
+
+		let (mut levels, _) = publish("levels");
+		let (_live, outcome) = publish("levels/1");
+		assert_eq!(outcome, CapsOutcome::Active("levels/1".to_string()));
+		assert!(levels.finalize().unwrap());
+		let (_again, outcome) = publish("levels");
+		assert_eq!(outcome, CapsOutcome::Active("levels/2".to_string()));
 	}
 
 	// AAC carries its config in caps; without codec_data the producer cannot be built.

@@ -14,7 +14,7 @@ with moq-net's types as the default, no `Send` bounds wasm can't meet, and
 the methods exactly as moq-net has them today.
 
 - Every handle a writer or reader can get from moq-net's public API,
-  including pending operations (`track::Subscribing`, `Querying`,
+  including pending operations (`track::Subscribing`, `Resolving`,
   `Fetching`), requests, and adapters, has an associated type, so no trait
   method returns a concrete moq-net type and a wrapper never leaks its
   physical handle. Examples of what the rule covers:
@@ -26,15 +26,15 @@ the methods exactly as moq-net has them today.
     the frame level they stay concrete or buffer whole frames.
     `frame::Producer<'_>` borrows its group, so its associated type is
     generic over that lifetime.
-  - Requests: a broadcast producer's `dynamic` returns its own
-    `broadcast::Dynamic`, whose `requested_track` yields its own
+  - Requests: a broadcast producer's `requests` returns its own
+    `broadcast::Requests`, whose `requested_track` yields its own
     `track::Request`, so generic code serves undeclared names (as
-    [E2EE undeclared names](/quest/m2/e2ee/undeclared-names.md) needs). A track
-    dynamic's `requested_fill` yields its own `track::Fill`, whose
+    [E2EE undeclared names](/quest/m2/e2ee/undeclared-names.md) needs). A
+    `track::Requests`'s `requested_fill` yields its own `track::Fill`, whose
     `accept` returns its own group producer and whose `drop_groups` names
     the rest dropped.
   - Pending operations: `track::Consumer::subscribe` resolves to the
-    wrapper's own subscriber, so E2EE decrypts behind it; `Querying` and
+    wrapper's own subscriber, so E2EE decrypts behind it; `Resolving` and
     `Fetching` resolve to the wrapper's logical metadata and groups.
   - Adapters: a subscriber's `ordered` returns its own `track::Ordered`
     with the same group, datagram, and control surface. moq-json's snapshot

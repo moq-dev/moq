@@ -338,14 +338,20 @@ impl Invocation {
 				}
 				// A reader refuses the whole catalog over a path it cannot resolve.
 				let broadcast = command.broadcast(&self.moq);
-				let rel = hang::moq_net::path::Relative::new(path);
-				let Some(prefix) = hang::moq_net::Path::new(&broadcast).try_resolve(&rel) else {
+				let rel = hang::moq_net::path::Relative::new(path)
+					.map_err(|err| anyhow::anyhow!("invalid --echo-path: {err}"))?;
+				let broadcast = hang::moq_net::Path::new(&broadcast)
+					.map_err(|err| anyhow::anyhow!("invalid --broadcast: {err}"))?;
+				let Some(prefix) = broadcast.try_resolve(&rel) else {
 					anyhow::bail!("--echo-path `{path}` walks above the connection root from broadcast `{broadcast}`");
 				};
 				// An origin refuses a broadcast a pattern could not name, so no viewer could
 				// publish its `<NAME>.echo` beneath this.
-				let feedback = prefix.join("viewer.echo");
-				if let Err(err) = hang::moq_net::Pattern::literal(feedback.as_str()) {
+				let feedback = prefix.join(&hang::moq_net::Path::from_static("viewer.echo"));
+				let literal = feedback
+					.map_err(anyhow::Error::from)
+					.and_then(|feedback| Ok(hang::moq_net::Pattern::literal(feedback.as_str())?));
+				if let Err(err) = literal {
 					anyhow::bail!(
 						"--echo-path `{path}` resolves to `{prefix}`, where no viewer can publish its feedback: {err}"
 					);
@@ -783,8 +789,8 @@ pub struct Import {
 	/// live, it caps how far back a FETCH can still reach (and how long a subscriber may ask to
 	/// wait for a late group). The default suits a segmented egress (HLS/DASH), which may only
 	/// advertise segments that are still fetchable; lower it when nothing reads history and the
-	/// memory matters. Media tracks only -- the catalog and timeline are read at the live edge,
-	/// which is retained unconditionally.
+	/// memory matters. Media tracks only -- the catalog and HLS records are read at the live
+	/// edge, which is retained unconditionally.
 	#[usage(long)]
 	pub max_age: Option<moq_tokio::cli::Duration>,
 
@@ -3061,7 +3067,7 @@ mod tests {
 		}
 	}
 
-	/// Every `*-version` flag offers exactly the versions [`Version::names`] parses.
+	/// Every `*-version` flag offers exactly the versions moq-net parses.
 	///
 	/// The lists are `choices(...)` literals because Usage reads them at expansion
 	/// time, so they are copies. This is what keeps a new protocol draft from
@@ -3083,9 +3089,13 @@ mod tests {
 			}
 		}
 
-		// As a set: `names()` is preference-ordered (newest first) while a choice
-		// list reads ascending, and that ordering is a presentation call.
-		let mut expected: Vec<&str> = hang::moq_net::Version::names().collect();
+		// As a set: a choice list reads ascending, and that ordering is a presentation call.
+		// Every wire code moq-net parses, including the opt-in `-wip` drafts.
+		let codes = (0xff0dad00..=0xff0dadff).chain(0xff000000..=0xff0000ff);
+		let mut expected: Vec<&str> = codes
+			.filter_map(hang::moq_net::Version::from_code)
+			.map(|version| version.as_str())
+			.collect();
 		expected.sort_unstable();
 		let mut found = Vec::new();
 		walk(Cli::spec().root, &mut found);
@@ -3093,7 +3103,7 @@ mod tests {
 		assert!(!found.is_empty(), "no version flag carried a choice list");
 		for (long, choices) in &mut found {
 			choices.sort_unstable();
-			assert_eq!(choices, &expected, "--{long} is out of step with Version::names()");
+			assert_eq!(choices, &expected, "--{long} is out of step with moq-net's versions");
 		}
 	}
 }

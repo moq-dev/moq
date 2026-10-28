@@ -99,7 +99,7 @@ fn drain(trigger: &shutdown::Trigger, observer: &shutdown::Observer) -> tokio::t
 /// only after its lease recorded the shutdown.
 #[tokio::test(start_paused = true)]
 async fn a_session_ignoring_the_goaway_is_closed_at_the_deadline() {
-	for alpn in ["moq-lite-06", "moq-lite-03", "moq-transport-17"] {
+	for alpn in ["moq-lite-06", "moq-lite-03", "moq-transport-18"] {
 		let (trigger, observer) = shutdown::Observer::new(WINDOW);
 		let session = admit(&observer, alpn.parse().unwrap(), false).await;
 		let started = tokio::time::Instant::now();

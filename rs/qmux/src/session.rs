@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use bytes::{Buf, Bytes};
 use moq_clock::Instant;
-use moq_net::transport::{self as net, Binding, poll};
+use moq_net::transport::{self as net, Address, poll};
 use moq_quic::{Dir, Side, StreamId, TransportError, TransportErrorCode, VarInt, mux};
 use rustc_hash::FxHashMap;
 
@@ -34,7 +34,7 @@ struct Inner {
 	/// Updated by the reader and writer, so stats never take the lock.
 	wire: net::Wire,
 	socket_stats: Option<SharedSocketStats>,
-	binding: Binding,
+	address: Address,
 }
 
 struct State {
@@ -498,7 +498,7 @@ impl Session {
 			}),
 			wire: net::Wire::new(),
 			socket_stats: transport.socket_stats(),
-			binding: transport.binding(),
+			address: transport.address(),
 		});
 
 		let (writer, reader) = transport.split(&config);
@@ -730,8 +730,8 @@ impl poll::Session for Session {
 		Session::protocol(self)
 	}
 
-	fn binding(&self) -> Binding {
-		self.inner.binding
+	fn address(&self) -> Address {
+		self.inner.address
 	}
 
 	fn close(&mut self, code: u32, reason: &str) {
@@ -752,14 +752,12 @@ impl poll::Session for Session {
 		Poll::Pending
 	}
 
-	fn stats(&self) -> impl net::Stats {
+	fn metrics(&self) -> impl net::Metrics {
 		let state = self.inner.lock();
 		// The kernel's view of the socket underneath beats a QX_PING sample: it is there
 		// from the first byte and costs no traffic.
 		let socket = self.inner.socket_stats.as_ref();
-		Stats {
-			sent: state.sent_bytes,
-			received: state.received_bytes,
+		Metrics {
 			rtt: socket.and_then(|stats| stats.rtt()).or(state.conn.rtt()),
 			rate: socket.and_then(|stats| stats.estimated_send_rate()),
 		}
@@ -770,23 +768,13 @@ impl poll::Session for Session {
 	}
 }
 
-/// A snapshot of the session's counters.
-struct Stats {
-	sent: u64,
-	received: u64,
+/// A snapshot of the session's metrics; its [`net::Wire`] holds the byte counts.
+struct Metrics {
 	rtt: Option<Duration>,
 	rate: Option<u64>,
 }
 
-impl net::Stats for Stats {
-	fn bytes_sent(&self) -> Option<u64> {
-		Some(self.sent)
-	}
-
-	fn bytes_received(&self) -> Option<u64> {
-		Some(self.received)
-	}
-
+impl net::Metrics for Metrics {
 	fn rtt(&self) -> Option<Duration> {
 		self.rtt
 	}
@@ -1120,7 +1108,7 @@ impl poll::Chunks for RecvChunks {
 /// kicks the writer.
 fn read(state: &mut State, id: StreamId, max: usize) -> Read {
 	let mut recv = state.conn.recv_stream(id);
-	let mut chunks = match recv.read(true) {
+	let mut chunks = match recv.read() {
 		Ok(chunks) => chunks,
 		// The stream is gone, so everything it held is already ours.
 		Err(_) => return Read::Finished,

@@ -72,6 +72,9 @@ Implementation:
   every reply decodes from its first frame, plain and barge-in, with no
   overflow.
 
+Runtime buffer changes switch the audio ring and reader mode. This quest
+keeps waiting on lite-07 for the head-hold simplification.
+
 ## Required
 
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - an ascending request is served newest-first until lite-07 negotiates by default

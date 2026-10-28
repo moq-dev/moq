@@ -4,8 +4,8 @@ import { Once } from "@moq/signals";
 import { accept } from "./connection/accept.ts";
 import { connect } from "./connection/connect.ts";
 import type { Drain } from "./connection/goaway.ts";
-import type { Session } from "./ietf/adapter.ts";
 import { GoAway } from "./ietf/goaway.ts";
+import type { Session } from "./ietf/session.ts";
 import { Subscriber } from "./ietf/subscriber.ts";
 import { ALPN, Version as IetfVersion } from "./ietf/version.ts";
 import { Goaway } from "./lite/goaway.ts";
@@ -37,7 +37,7 @@ async function waitUntil(pred: () => boolean): Promise<void> {
 	}
 }
 
-/** Bytes of one GOAWAY, framed the way the draft-17 setup stream carries it. */
+/** Bytes of one GOAWAY, framed the way the setup stream carries it. */
 async function encodeIetfGoaway(): Promise<Uint8Array> {
 	const chunks: Uint8Array[] = [];
 	const writable = new WritableStream<Uint8Array>({
@@ -45,9 +45,9 @@ async function encodeIetfGoaway(): Promise<Uint8Array> {
 			chunks.push(Uint8Array.from(chunk));
 		},
 	});
-	const writer = new Writer(writable, IetfVersion.DRAFT_17);
+	const writer = new Writer(writable, IetfVersion.DRAFT_22);
 	await writer.u53(GoAway.id);
-	await new GoAway({ newSessionUri: "" }).encode(writer, IetfVersion.DRAFT_17);
+	await new GoAway({ newSessionUri: "" }).encode(writer, IetfVersion.DRAFT_22);
 	const size = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
 	const bytes = new Uint8Array(size);
 	let offset = 0;
@@ -100,15 +100,16 @@ async function sendLiteGoaway(server: WebTransport): Promise<void> {
  * replacement is another instance: the request already open stays on the draining session.
  */
 async function handover(kind: "lite" | "ietf"): Promise<void> {
-	const protocol = kind === "lite" ? ALPN_06 : ALPN.DRAFT_17;
+	const protocol = kind === "lite" ? ALPN_06 : ALPN.DRAFT_22;
 	const pair = createMockTransportPair(protocol);
 	const inject = kind === "ietf" ? captureFirstUni(pair.server) : undefined;
 	const goawayBytes = kind === "ietf" ? await encodeIetfGoaway() : undefined;
 
 	const consume = new OriginProducer();
 	const publish = new OriginProducer();
-	const broadcast = publish.createBroadcast(Path.from("room"));
-	broadcast.announce();
+	const broadcastPublication = publish.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 
 	const served: TrackProducer[] = [];
 	let armVideo = true;
@@ -243,8 +244,8 @@ test("ietf: requests open on the draining session until the replacement wins", a
 	await handover("ietf");
 });
 
-test("announcing and subscribing after GOAWAY still open streams, on the adapter too", async () => {
-	for (const version of [IetfVersion.DRAFT_14, IetfVersion.DRAFT_16, IetfVersion.DRAFT_18]) {
+test("announcing and subscribing after GOAWAY still open streams", async () => {
+	for (const version of [IetfVersion.DRAFT_18, IetfVersion.DRAFT_22]) {
 		const goaway = new Once<Drain>();
 		goaway.set({ uri: "" });
 		let opened = false;
@@ -255,24 +256,19 @@ test("announcing and subscribing after GOAWAY still open streams, on the adapter
 				opened = true;
 				throw new Error("openBi");
 			},
-			openNativeBi() {
-				opened = true;
-				throw new Error("openNativeBi");
-			},
 			acceptBi() {
 				return Promise.resolve(undefined);
 			},
 			nextRequestId() {
 				return Promise.resolve(0n);
 			},
-			spendRequest() {
+			checkRequestId() {
 				throw new Error("unexpected incoming request");
 			},
 			close() {},
 		};
 
-		// A soliciting peer, so draft-14 still asks it for the empty namespace.
-		const subscriber = new Subscriber({ session, goaway, solicit: true });
+		const subscriber = new Subscriber({ session, goaway });
 		const track = subscriber.consume(Path.from("room")).track("video").subscribe();
 		await track.closed;
 		expect(opened).toBe(true);
@@ -295,15 +291,16 @@ async function routeDeath(kind: "lite" | "ietf", after: boolean): Promise<void> 
 	const clock = new Manual();
 	const installed = clock.install();
 	using _clock = { [Symbol.dispose]: () => installed.close() };
-	const protocol = kind === "lite" ? ALPN_06 : ALPN.DRAFT_17;
+	const protocol = kind === "lite" ? ALPN_06 : ALPN.DRAFT_22;
 	const pair = createMockTransportPair(protocol);
 	const inject = kind === "ietf" ? captureFirstUni(pair.server) : undefined;
 	const goawayBytes = kind === "ietf" ? await encodeIetfGoaway() : undefined;
 
 	const consume = new OriginProducer();
 	const publish = new OriginProducer();
-	const broadcast = publish.createBroadcast(Path.from("room"));
-	broadcast.announce();
+	const broadcastPublication = publish.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 
 	const served: TrackProducer[] = [];
 	const serving = (async () => {

@@ -179,6 +179,12 @@ async fn spawn_relay_with(
 
 	let mut config = moq_tokio::listen::Config::default();
 	config.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
+	// Opt in to lite-07 beside the defaults, so a client pinned to it can reach the AUTH stream.
+	config.version = moq_net::Versions::all()
+		.iter()
+		.copied()
+		.chain(["moq-lite-07-wip".parse().unwrap()])
+		.collect();
 	let server = config.init(Default::default()).expect("server init");
 	let mut server = server.listen().await.expect("listen");
 	let port = server.tcp_local_addr().expect("TCP listener is configured").port();
@@ -238,7 +244,10 @@ async fn spawn_ws_relay_with(
 fn client() -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
-	config.websocket.delay = Some((Duration::ZERO).into());
+	#[cfg(feature = "websocket")]
+	{
+		config.websocket.delay = Some((Duration::ZERO).into());
+	}
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
 	config
 		.init(Default::default())
@@ -442,34 +451,38 @@ async fn forwards_the_setup_token() {
 			spawn_relay(auth).await
 		};
 
-		// Draft-16 CLIENT_SETUP: AUTHORIZATION TOKEN (3), USE_VALUE (3), Token Type 0.
+		// Draft-18 SETUP (0x2F00): AUTHORIZATION TOKEN (3), USE_VALUE (3), Token Type 0.
 		let encoded = [&[0x03, 0x00][..], &value].concat();
-		let params = [&[0x01, 0x03, encoded.len() as u8][..], &encoded].concat();
-		let setup = [&[0x20][..], &(params.len() as u16).to_be_bytes(), &params].concat();
+		let params = [&[0x03, encoded.len() as u8][..], &encoded].concat();
+		let setup = [&[0xaf, 0x00][..], &(params.len() as u16).to_be_bytes(), &params].concat();
 		let mut session = if websocket {
 			qmux::ws::Client::new()
-				.with_protocol("moqt-16", &[qmux::Version::QMux01])
+				.with_protocol("moqt-18", &[qmux::Version::QMux01])
 				.connect(&format!("ws://127.0.0.1:{port}/room?source=setup"))
 				.await
 				.expect("connect WebSocket")
 		} else {
 			qmux::tcp::connect(("127.0.0.1", port), {
 				let mut config = qmux::Config::new(qmux::Version::QMux01);
-				config.protocol = qmux::Protocol::Negotiate(vec!["moqt-16".into()]);
+				config.protocol = qmux::Protocol::Negotiate(vec!["moqt-18".into()]);
 				config
 			})
 			.await
 			.expect("connect TCP")
 		};
-		let (mut send, mut recv) = session
-			.open_bi(Default::default())
+		let mut send = session
+			.open_uni(Default::default())
 			.await
-			.expect("open the control stream");
+			.expect("open the setup stream");
 		write_all(&mut send, &setup).await;
+		let mut recv = tokio::time::timeout(TIMEOUT, session.accept_uni())
+			.await
+			.expect("SETUP timeout")
+			.expect("the server's setup stream");
 		let reply = tokio::time::timeout(TIMEOUT, recv.read_chunk(1))
 			.await
-			.expect("SERVER_SETUP timeout")
-			.expect("SERVER_SETUP");
+			.expect("SETUP timeout")
+			.expect("SETUP");
 		assert_eq!(reply.map(|chunk| chunk.len()), Some(1));
 		let seen = script.seen.lock().unwrap().clone();
 		let connect = seen.iter().find(|r| r.event == Event::Connect).expect("a connect");
@@ -481,8 +494,76 @@ async fn forwards_the_setup_token() {
 			// Plain `ws://` has no SNI; the `Host` header never stands in for one.
 			assert_eq!(connect.server_name, None);
 			assert!(connect.remote.is_some_and(|addr| addr.ip().is_loopback()));
-			assert_eq!(connect.alpn.as_deref(), Some("qmux-01.moqt-16"));
+			assert_eq!(connect.alpn.as_deref(), Some("qmux-01.moqt-18"));
 		}
+		relay.abort();
+	}
+}
+
+/// A configured token is the connection credential: on lite-07 it reaches the auth server
+/// as the SETUP token with nothing in the query, and on lite-06, which has no SETUP token,
+/// in the query as a `?jwt=`.
+#[tokio::test]
+async fn a_configured_token_is_the_connection_credential() {
+	let token = moq_auth::Token {
+		kind: moq_auth::Token::OUT_OF_BAND,
+		value: b"credential".to_vec(),
+	};
+	for (versions, setup, query) in [
+		(vec!["moq-lite-07-wip"], Some(token.clone()), None),
+		(vec!["moq-lite-06"], None, Some("jwt=credential")),
+	] {
+		let script = Script::new(grant(Duration::from_secs(3600)));
+		// Over SETUP, anonymous admission fails, so an established session proves the token
+		// was used. The scripted server cannot check a query token, so that case only asserts
+		// what it was sent.
+		if let Some(token) = &setup {
+			script.on_connect(Answer::Token(grant(Duration::from_secs(3600)), token.clone()));
+		}
+		let (port, relay) = spawn_relay(build_auth(script.spawn().await)).await;
+
+		let mut config = moq_tokio::connect::Config::default();
+		config.version = versions.iter().map(|version| version.parse().unwrap()).collect();
+		config.tokens = vec!["credential".parse().unwrap()];
+		let client = config.init(Default::default()).unwrap();
+		let url: url::Url = format!("tcp://127.0.0.1:{port}/room").parse().unwrap();
+		let session = tokio::time::timeout(
+			TIMEOUT,
+			client
+				.with_reconnect(false)
+				.with_subscriber(moq_tokio::origin::spawn())
+				.connect(url)
+				.established(),
+		)
+		.await
+		.expect("connect timeout")
+		.expect("the configured token was refused");
+		if setup.is_some() {
+			// Lite-07 answers the SETUP token over AUTH, so its grant proves admission.
+			let mut grant = session.auth().grant();
+			tokio::time::timeout(TIMEOUT, async {
+				while grant.peek().is_none() {
+					grant.changed().await.expect("the relay refused the configured token");
+				}
+			})
+			.await
+			.expect("grant timeout");
+		} else {
+			// Lite-06 has no AUTH answer and a client is live before admission, so give a
+			// refusal time to land.
+			assert!(
+				tokio::time::timeout(Duration::from_millis(500), session.closed())
+					.await
+					.is_err(),
+				"{versions:?}: the relay refused the configured token"
+			);
+		}
+
+		let seen = script.seen.lock().unwrap().clone();
+		let connect = seen.iter().find(|r| r.event == Event::Connect).expect("a connect");
+		assert_eq!(connect.token, setup, "{versions:?}");
+		assert_eq!(connect.query.as_deref(), query, "{versions:?}");
+		session.abort(moq_net::Error::Cancel);
 		relay.abort();
 	}
 }
@@ -517,7 +598,7 @@ async fn a_moved_tier_retags_the_live_session() {
 	let (port, relay) = spawn_relay_with(build_auth(script.spawn().await), cluster).await;
 	let url = room_url("tcp", port);
 
-	let moved = stats::Tier::new("moved");
+	let moved = stats::Tier::new(moq_net::Path::from_static("moved"));
 	let active = |tier: &stats::Tier| {
 		registry
 			.snapshot()
@@ -1074,7 +1155,7 @@ async fn the_drain_waits_for_a_closed_session_to_report_its_end() {
 	// Keep the deadline from racing the client receiving GOAWAY under load.
 	tokio::time::pause();
 	trigger.start();
-	tokio::time::timeout(TIMEOUT, client.draining().recv())
+	tokio::time::timeout(TIMEOUT, moq_net::kio::wait(|waiter| client.draining().poll(waiter)))
 		.await
 		.expect("GOAWAY timeout")
 		.expect("a GOAWAY");
@@ -1654,7 +1735,10 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 		let client = || {
 			let mut config = moq_tokio::connect::Config::default();
 			config.version = vec!["moq-transport-22".parse().unwrap()];
-			config.websocket.delay = Some((Duration::ZERO).into());
+			#[cfg(feature = "websocket")]
+			{
+				config.websocket.delay = Some((Duration::ZERO).into());
+			}
 			config.init(Default::default()).unwrap().with_reconnect(false)
 		};
 		let origin = moq_tokio::origin::spawn();

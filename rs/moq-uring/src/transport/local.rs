@@ -96,8 +96,8 @@ impl<S: poll::Session> poll::Session for Local<S> {
 		self.0.protocol()
 	}
 
-	fn binding(&self) -> moq::Binding {
-		self.0.binding()
+	fn address(&self) -> moq::Address {
+		self.0.address()
 	}
 
 	fn close(&mut self, code: u32, reason: &str) {
@@ -108,8 +108,8 @@ impl<S: poll::Session> poll::Session for Local<S> {
 		self.0.poll_closed(cx)
 	}
 
-	fn stats(&self) -> impl moq::Stats {
-		self.0.stats()
+	fn metrics(&self) -> impl moq::Metrics {
+		self.0.metrics()
 	}
 
 	fn wire(&self) -> Option<moq::Wire> {

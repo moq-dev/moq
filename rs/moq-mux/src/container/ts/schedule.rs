@@ -1,11 +1,12 @@
 //! Lays a TS export's packets onto its PCR grid.
 
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap, VecDeque};
+use std::collections::{BinaryHeap, VecDeque};
 use std::time::Duration;
 
 use anyhow::Context;
 use mpeg2ts::ts::TsPacket;
+use rustc_hash::FxHashMap;
 
 use super::export::PCR_INTERVAL;
 
@@ -566,7 +567,7 @@ pub(super) struct Schedule {
 	/// The due slot of the last unit pushed.
 	last: Option<u128>,
 	/// Each PID's buffers, from [`Self::set_buffer`].
-	buffers: HashMap<u16, Buffer>,
+	buffers: FxHashMap<u16, Buffer>,
 	/// The PID every slot's clock packet rides on, from [`Self::set_clock`].
 	clock: Option<u16>,
 	/// The PMT's PID, which shares TBsys with the PAT, from [`Self::set_tables`].
@@ -575,12 +576,12 @@ pub(super) struct Schedule {
 	decoding: VecDeque<(u16, u128, usize)>,
 	/// When each transport buffer's last admitted packet finishes leaving it, and when it
 	/// last started filling from empty.
-	transport: HashMap<u16, (i128, i128)>,
+	transport: FxHashMap<u16, (i128, i128)>,
 	/// When Bsys has removed every system byte admitted so far, and the Rsys it empties at
 	/// whenever it holds one.
 	system: Option<(i128, u128)>,
 	/// When each video PID's MB finishes passing its last admitted payload on into EB.
-	mb: HashMap<u16, i128>,
+	mb: FxHashMap<u16, i128>,
 	/// Every source has ended, so a unit that misses its deadline is the tail going out late
 	/// rather than an output that cannot keep up.
 	ended: bool,
@@ -599,13 +600,13 @@ impl Schedule {
 			next: None,
 			horizon: None,
 			last: None,
-			buffers: HashMap::new(),
+			buffers: FxHashMap::default(),
 			clock: None,
 			pmt: None,
 			decoding: VecDeque::new(),
-			transport: HashMap::new(),
+			transport: FxHashMap::default(),
 			system: None,
-			mb: HashMap::new(),
+			mb: FxHashMap::default(),
 			ended: false,
 			seq: 0,
 			lead: None,
@@ -747,6 +748,8 @@ impl Schedule {
 	/// bytes (the section pointer field) just before it. It
 	/// decodes at `decode`, or each of `frames` at its own time, as [`Self::push_frames`]
 	/// lists them, which only the PID's decoder buffer reads: the unit misses no deadline.
+	/// It yields to units due before it decodes, so a large one, such as a whole picture,
+	/// shares the multiplex rather than holding it from placement until its last byte.
 	pub fn push_placed(
 		&mut self,
 		pid: u16,
@@ -756,7 +759,10 @@ impl Schedule {
 		keyframe: bool,
 		frames: Vec<(u128, usize)>,
 	) -> anyhow::Result<()> {
-		let timing = Timing { by: place, decode };
+		let timing = Timing {
+			by: decode.max(place),
+			decode,
+		};
 		self.queue(pid, timing, Some((place, prefix)), packets, keyframe, frames)
 	}
 
@@ -780,9 +786,15 @@ impl Schedule {
 				holds,
 				leads: pid,
 			};
+			// They go out ahead of the first byte of a placed unit, which a decode time well past
+			// its placement would otherwise let them hold the lane until, past later tables' due.
+			let lead = Timing {
+				by: place.map_or(timing.by, |(place, _)| place.min(timing.by)),
+				..timing
+			};
 			// The unit they lead keeps its own start.
 			let last = self.last;
-			self.enqueue(pmt, timing, tables.packets, Some(program));
+			self.enqueue(pmt, lead, tables.packets, Some(program));
 			self.last = last;
 		}
 		if packets.is_empty() {
@@ -869,8 +881,8 @@ impl Schedule {
 	/// The PIDs the program tables still to go out hold back, each with the first of them that
 	/// does: a unit on one, pushed after those tables, waits for them. `left` is how many
 	/// packets each unit has still to send.
-	fn holding(&self, left: impl Fn(usize) -> usize) -> HashMap<u16, u64> {
-		let mut held = HashMap::new();
+	fn holding(&self, left: impl Fn(usize) -> usize) -> FxHashMap<u16, u64> {
+		let mut held = FxHashMap::default();
 		for (i, unit) in self.units.iter().enumerate() {
 			let Some(program) = unit.tables.as_ref().filter(|_| left(i) > 0) else {
 				continue;
@@ -1105,8 +1117,8 @@ impl Schedule {
 		// One head per PID preserves decode order without walking all future units at every
 		// transport position. Removal events keep occupancy work proportional to units.
 		let mut lanes: Vec<VecDeque<usize>> = Vec::new();
-		let mut lane_by_pid = HashMap::new();
-		let mut occupancy: HashMap<u16, usize> = HashMap::new();
+		let mut lane_by_pid = FxHashMap::default();
+		let mut occupancy: FxHashMap<u16, usize> = FxHashMap::default();
 		let mut removals = Vec::new();
 		self.decoding.retain(|&(_, decode, _)| decode as i128 > time(0));
 		for &(pid, decode, held) in &self.decoding {
@@ -1432,7 +1444,7 @@ impl Schedule {
 	fn admit(&mut self, index: u128, mut budget: usize) -> Vec<usize> {
 		// Unpadded layout has no exact packet clock until the slot is assembled, so it
 		// retains units until their decode instant is behind the opening grid point.
-		let mut occupancy: HashMap<u16, usize> = HashMap::new();
+		let mut occupancy: FxHashMap<u16, usize> = FxHashMap::default();
 		self.decoding
 			.retain(|&(_, decode, _)| decode >= index.saturating_sub(1) * PCR_INTERVAL.as_nanos());
 		for &(pid, _, held) in &self.decoding {
@@ -1445,7 +1457,7 @@ impl Schedule {
 		let mut order: Vec<usize> = (0..self.units.len()).collect();
 		order.sort_by_key(|&i| self.units[i].due);
 		let mut take = vec![0; self.units.len()];
-		let mut carried: HashMap<u16, usize> = HashMap::new();
+		let mut carried: FxHashMap<u16, usize> = FxHashMap::default();
 		let mut stopped: Vec<u16> = Vec::new();
 		let mut holding = self.holding(|i| self.units[i].remaining());
 		for i in order {
@@ -1505,6 +1517,8 @@ impl Schedule {
 
 #[cfg(test)]
 mod tests {
+	use std::collections::HashMap;
+
 	use super::*;
 
 	/// A unit of `count` packets on PID `pid`.
@@ -1600,6 +1614,71 @@ mod tests {
 			}
 		}
 		out
+	}
+
+	/// A placed picture five slots long, decoding a second out, shares the multiplex with a
+	/// unit due while it is still going out, rather than holding the rate until its last byte.
+	#[test]
+	fn a_placed_pes_yields_to_units_due_before_it_decodes() {
+		let mut schedule = Schedule::new(Duration::from_millis(25));
+		schedule.set_rate(Some(RATE));
+		schedule.set_buffer(1, VIDEO);
+		let mut picture = unit(7, 200);
+		picture[1] |= 0x40;
+		schedule
+			.push_placed(7, (ms(50), ms(1_000)), 0, picture, true, Vec::new())
+			.unwrap();
+		schedule.push(1, timing(100), unit(1, 30), true).unwrap();
+		let slots = drain(&mut schedule);
+		let last = slots
+			.iter()
+			.filter(|(_, pids, _)| pids.contains_key(&1))
+			.map(|&(index, ..)| index)
+			.max();
+		assert!(
+			last.is_some_and(|last| last <= slot(ms(100))),
+			"the unit due at 100 ms goes out by slot {last:?}"
+		);
+		let sent: usize = slots.iter().filter_map(|(_, pids, _)| pids.get(&7)).sum();
+		assert_eq!(sent, 200);
+	}
+
+	/// Tables leading a placed picture that decodes a second out go out by its placement, so
+	/// the tables leading a unit due sooner, which ride the same lane after them, are not held
+	/// past that unit's deadline.
+	#[test]
+	fn tables_leading_a_placed_pes_go_out_by_its_placement() {
+		let mut schedule = Schedule::new(Duration::from_millis(25));
+		schedule.set_rate(Some(RATE));
+		schedule.set_tables(100);
+		schedule.set_clock(1);
+		schedule.set_buffer(1, VIDEO);
+		let tables = || Tables {
+			packets: [unit(0, 1), unit(100, 1)].concat(),
+			clock: 1,
+			rate: Some(RATE),
+			added: Vec::new(),
+		};
+		let mut picture = unit(7, 200);
+		picture[1] |= 0x40;
+		schedule.lead(tables());
+		schedule
+			.push_placed(7, (ms(50), ms(1_000)), 0, picture, true, Vec::new())
+			.unwrap();
+		schedule.lead(tables());
+		schedule.push(1, timing(100), unit(1, 30), true).unwrap();
+		let slots = drain(&mut schedule);
+		let last = slots
+			.iter()
+			.filter(|(_, pids, _)| pids.contains_key(&1))
+			.map(|&(index, ..)| index)
+			.max();
+		assert!(
+			last.is_some_and(|last| last <= slot(ms(100))),
+			"the unit due at 100 ms goes out by slot {last:?}"
+		);
+		let tables: usize = slots.iter().filter_map(|(_, pids, _)| pids.get(&100)).sum();
+		assert_eq!(tables, 2);
 	}
 
 	/// The pointer byte goes just before placement, so it cannot cost a section another packet.

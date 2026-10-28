@@ -29,7 +29,7 @@ class Server internal constructor(
      *
      * Advertise it with `announce` after populating tracks. `end()` ends it for
      * good; `close()` (or `use`) releases the handle, which ends it once no
-     * `dynamic()` handle remains.
+     * `requests()` handle remains.
      */
     fun createBroadcast(path: String): BroadcastProducer {
         val origin = publishOrigin ?: throw IllegalStateException("no publish origin configured")
@@ -97,11 +97,12 @@ class Server internal constructor(
          * visible to sessions publishing into it. Mirrors [Moq.connect].
          */
         suspend fun listen(config: ServerConfig): Server {
-            val wired = if (config.publish == null && config.consume == null) {
+            val named = config.copy(implementation = implementation(config.implementation))
+            val wired = if (named.publish == null && named.consume == null) {
                 val shared = OriginProducer(OriginConfig())
-                config.copy(publish = shared, consume = shared)
+                named.copy(publish = shared, consume = shared)
             } else {
-                config
+                named
             }
 
             val server = MoqServer(wired)

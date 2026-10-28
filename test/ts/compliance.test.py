@@ -62,6 +62,38 @@ def tables(*pmts: tuple[int, list[int]]) -> bytes:
     return b"".join(out)
 
 
+def h262(indication: int, rate: int, vbv: int, vbv_delay: int) -> bytes:
+    """A sequence header, sequence extension and picture header: profile_and_level_indication,
+    bit_rate in bit/s, vbv_buffer_size in 16 kbit units, and the picture's vbv_delay."""
+    value = rate // 400
+    head = b"\x00\x00\x01\xb3\x2d\x02\x40\x23"
+    head += ((value & 0x3FFFF) << 14 | 1 << 13 | (vbv & 0x3FF) << 3).to_bytes(4, "big")
+    ext = b"\x00\x00\x01\xb5"
+    ext += (1 << 44 | indication << 36 | 1 << 35 | 1 << 33 | (value >> 18) << 17 | 1 << 16 | (vbv >> 10) << 8).to_bytes(6, "big")
+    picture = b"\x00\x00\x01\x00" + (1 << 19 | vbv_delay << 3).to_bytes(4, "big")
+    return head + ext + picture
+
+
+class Mpeg2Params(unittest.TestCase):
+    def test_rbx_follows_the_level(self):
+        # Main Profile at Main Level leaks at Rmax; at High Level, at 1.05 times the stream's rate.
+        for indication, rbx in ((0x48, 15_000_000), (0x44, 21_000_000)):
+            with self.subTest(indication=indication):
+                params = compliance.mpeg2_params(h262(indication, 20_000_000, 112, 0xFFFF), set())
+                self.assertAlmostEqual(params.rbx, rbx)
+
+    def test_zero_vbv_buffer_is_refused(self):
+        with self.assertRaises(compliance.Refused):
+            compliance.mpeg2_params(h262(0x48, 4_000_000, 0, 0xFFFF), set())
+
+    def test_vbv_delay_method_is_refused(self):
+        es = h262(0x48, 4_000_000, 112, 0x1000)
+        compliance.mpeg2_params(es, set())
+        compliance.mpeg2_params(h262(0x48, 4_000_000, 112, 0xFFFF), {"leak_invalid"})
+        with self.assertRaises(compliance.Refused):
+            compliance.mpeg2_params(es, {"leak_invalid"})
+
+
 class PmtVersions(unittest.TestCase):
     def check(self, *pmts: tuple[int, list[int]]) -> compliance.Check:
         with tempfile.NamedTemporaryFile(suffix=".ts") as handle:

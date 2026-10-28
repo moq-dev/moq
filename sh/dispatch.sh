@@ -64,7 +64,7 @@ declare -A scope=(
     [workers]='^(infra/|demo/pub/|sh/js/workers\.sh$)'
     [moq_sh]='^infra/moq-sh/'
     # sh/rs/select.sh widens to the whole workspace for inputs every crate shares.
-    [rs]='^(sh/local\.(sh|ts)$|rs/|demo/carla/bridge/|sh/rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.config/nextest\.toml$)'
+    [rs]='^(\.cargo/|sh/local\.(sh|ts)$|rs/|demo/carla/bridge/|sh/rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.config/nextest\.toml$)'
     [bench]='^bench/'
     # The CARLA demo's simulator worker and launchers. Its player is a JS
     # package and its GPU bridge a Rust crate, so those modules cover them.
@@ -83,6 +83,8 @@ declare -A scope=(
     [swift]='^(swift/|sh/swift/|rs/moq-ffi/|doc/lib/swift/|doc/lib/samples\.sh$)'
     [go]='^(go/|sh/go/|rs/moq-ffi/|doc/lib/go/|doc/lib/samples\.sh$)'
     [dart]='^(dart/|sh/dart/|rs/moq-ffi/|doc/lib/dart/|doc/lib/samples\.sh$)'
+    # The C package links moq-c's native-libs lists, and the C++ package's FFI pin.
+    [c]='^(c/|sh/c/|rs/moq-ffi/|rs/moq-c/native-libs/|cpp/moq/FFI_VERSION$|cpp/moq/cmake/moq-ffi\.cmake$)'
     # The package links moq-c's native-libs lists, and compiles its doc samples.
     [cpp]='^(cpp/moq/|cpp/justfile$|sh/cpp/|rs/moq-ffi/|rs/moq-c/native-libs/|doc/lib/cpp/|doc/lib/samples\.sh$)'
     # The plugin and its tests call through the bindings generated from cpp/moq
@@ -94,7 +96,7 @@ declare -A scope=(
     [obs]='^(cpp/obs/|sh/obs/|flake\.(nix|lock)$)'
     # Rust source is compiled below. Nix reads Cargo metadata, packaging inputs,
     # and its own modules and test helpers; those still gate the full flake.
-    [flake]='(^rs/.*\.(toml|txt|ptx|in)$|^Cargo\.(toml|lock)$|^rust-toolchain\.toml$|^flake\.lock$|^nix/|\.nix$)'
+    [flake]='(^\.cargo/|^rs/.*\.(toml|txt|ptx|in)$|^Cargo\.(toml|lock)$|^rust-toolchain\.toml$|^flake\.lock$|^nix/|\.nix$)'
     # ts.yml's crate filters against the closure test/ts/run.sh builds, which
     # moves only with a manifest, the lockfile, or the harness's packages.
     [ts_paths]='^(rs/.*Cargo\.toml$|Cargo\.(toml|lock)$|test/ts/run\.sh$|\.github/workflows/release-gate\.yml$|sh/gh/ts-paths\.py$)'
@@ -116,11 +118,11 @@ if [[ "$action" == ci-platform ]]; then
     if grep -qE '^(\.cargo/|\.github/|[^/]+/justfile$|justfile$)' "$changed"; then
         shared=1
     fi
-    for module in rs swift cpp obs_compile moq_sh; do
+    for module in rs swift c cpp obs_compile moq_sh; do
         enabled=false
         pattern=${scope[$module]}
         case "$module" in
-            swift | cpp | obs_compile) pattern+="|${scope[rs]}" ;;
+            swift | c | cpp | obs_compile) pattern+="|${scope[rs]}" ;;
         esac
         if [[ -n "$shared" ]] || grep -qE "$pattern" "$changed"; then
             enabled=true
@@ -151,6 +153,7 @@ declare -A tools=(
     [swift]=''
     [go]='cargo go uniffi-bindgen-go'
     [dart]='cargo dart uniffi_bindgen_dart'
+    [c]='cargo cmake cc c++ pkg-config uniffi-bindgen-cpp'
     [cpp]='cargo cmake c++ uniffi-bindgen-cpp'
     [obs_compile]='cargo cmake pkg-config uniffi-bindgen-cpp'
     [obs]='clang-format cmake gersemi jq'
@@ -173,14 +176,14 @@ verb=$action
 # build cache only when one is selected. JS checks build @moq/wasm for its
 # consumers, and the bindings build moq-ffi.
 declare -A compiles=(
-    [check]='rs bench js py kt go dart cpp obs_compile'
+    [check]='rs bench js py kt go dart c cpp obs_compile'
     [fix]='rs'
 )
 
 # Lanes start in this order, so the slowest come first. dart runs alone (see
 # below), so it waits for the rest.
 case "$action" in
-    check | ci) modules=(py rs cpp obs_compile js kt flake bench carla swift go drafts markdown gh drill workers moq_sh quest obs ts_paths shell large_files toml nix justfile dart) ;;
+    check | ci) modules=(py rs c cpp obs_compile js kt flake bench carla swift go drafts markdown gh drill workers moq_sh quest obs ts_paths shell large_files toml nix justfile dart) ;;
     fix) modules=(js rs py carla dart obs markdown shell toml nix justfile) ;;
 esac
 
@@ -295,7 +298,28 @@ step() {
         check:quest) quest check ;;
         check:drill) just test drill-sensitivity --apply-only ;;
         check:obs_compile) just obs compile ;;
-        check:flake) bash sh/local.sh nix flake check ;;
+        check:flake)
+            if [[ -z "${CI_STRICT:-}" && "$OSTYPE" == linux* && "$HOSTTYPE" == x86_64 ]]; then
+                # Repart creates its namespace as a Nix builder, whose policy can
+                # differ from this shell's. A fresh name prevents cached success.
+                read -r nonce </proc/sys/kernel/random/uuid
+                if ! result=$(bash sh/local.sh nix build --impure --file nix/runner/userns-probe.nix \
+                    --argstr nonce "$nonce" --no-link --builders '' --max-jobs 1 --print-build-logs 2>&1); then
+                    printf '%s\n' "$result" >&2
+                    [[ "$result" == *MOQ_USERNS_UNAVAILABLE* ]] || return 1
+                    echo "$action: skipping flake; the local Nix builder cannot create user namespaces" >&2
+                    return 77
+                fi
+            fi
+            # 77 marks the probe's skip, so the check's own 77 is a failure.
+            # Full build logs name a failing VM subtest; Nix otherwise keeps
+            # only the last 25 lines, which are QEMU's cleanup.
+            bash sh/local.sh nix flake check --print-build-logs || {
+                local status=$?
+                [[ -n "${CI_STRICT:-}" ]] || ((status != 77)) || status=1
+                return "$status"
+            }
+            ;;
         check:ts_paths) python3 sh/gh/ts-paths.py ;;
         check:markdown)
             bun install --frozen-lockfile
@@ -345,12 +369,13 @@ github() {
 }
 
 # Run one lane's modules in order, appending each phase's seconds to the lane's
-# times file. The lane stops at its first failure. A TERM, from the scheduler
-# cancelling the run, records the phase it cut short.
+# times file. A failed phase skips the rest of that module, but independent
+# modules still run. A TERM records the phase it cut short.
 run_lane() {
     times=$1
     shift
     current=
+    lane_status=0
     trap 'cancelled; exit 143' TERM
     for module in "$@"; do
         phases=("$verb")
@@ -378,14 +403,22 @@ run_lane() {
             status=$?
             set -e
             ! github || echo "::endgroup::"
+            if ((status == 77)) && [[ "$module" == flake && -z "${CI_STRICT:-}" ]]; then
+                record skipped
+                current=
+                break
+            fi
             if ((status)); then
                 record failed
-                return "$status"
+                ((lane_status)) || lane_status=$status
+                current=
+                break
             fi
             record
             current=
         done
     done
+    return "$lane_status"
 }
 record() {
     echo "$((SECONDS - began)) $current${1:+ ($1)}" >>"$times"
@@ -434,7 +467,7 @@ logs=$(mktemp -d)
 declare -A running=()
 lone=
 next=0
-failed=
+failed=()
 failed_status=0
 trap 'cancel; wait; report; rm -rf "$logs" "$changed" "$js_changed"' EXIT
 trap 'exit 130' INT
@@ -443,11 +476,11 @@ trap 'exit 143' TERM
 # Each lane runs in its own process group, so a cancel reaches its whole tree;
 # a lane shell defers its own TERM trap until the running phase exits.
 # Concurrent lanes buffer their output and print it whole when they finish; a
-# serial run streams instead. The first failure cancels the running lanes and
-# starts no more, as a serial run stops at its first failure.
+# serial run streams instead. Every lane completes even when another fails,
+# so one unavailable check cannot hide unrelated failures.
 set -m
 while true; do
-    while [[ -z "$failed" && -z "$lone" ]] && ((next < ${#lanes[@]} && ${#running[@]} < limit)); do
+    while [[ -z "$lone" ]] && ((next < ${#lanes[@]} && ${#running[@]} < limit)); do
         name=${lanes[next]}
         if [[ -v "alone[$name]" ]] && ((${#running[@]})); then
             break
@@ -470,21 +503,20 @@ while true; do
     name=${running[$pid]}
     unset "running[$pid]"
     [[ "$pid" != "$lone" ]] || lone=
-    if ((status)) && [[ -z "$failed" ]]; then
-        failed=$name
-        failed_status=$status
-        cancel
-        continue
+    if ((status)); then
+        failed+=("$name")
+        ((failed_status)) || failed_status=$status
     fi
     ((limit == 1)) || cat "$logs/$name.log"
-    [[ -z "$failed" || "$status" != 143 ]] || echo "$action: cancelled ${members[$name]# }" >&2
 done
 
-# The failure prints last, after what it cancelled.
-if [[ -n "$failed" ]]; then
-    ((limit == 1)) || cat "$logs/$failed.log"
-    phase=$(sed -n 's/^[0-9]* \(.*\) (failed)$/\1/p' "$logs/$failed.times")
-    phase=${phase:-${members[$failed]# }}
-    if github; then echo "::error::$action: $phase failed"; else echo "$action: $phase failed" >&2; fi
+# Name every failed module after all independent work has completed.
+if ((${#failed[@]})); then
+    for name in "${failed[@]}"; do
+        failed_phases=$(sed -n 's/^[0-9]* \(.*\) (failed)$/\1/p' "$logs/$name.times")
+        while IFS= read -r phase; do
+            if github; then echo "::error::$action: $phase failed"; else echo "$action: $phase failed" >&2; fi
+        done <<<"${failed_phases:-${members[$name]# }}"
+    done
     exit "$failed_status"
 fi

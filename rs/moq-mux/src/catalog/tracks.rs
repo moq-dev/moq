@@ -380,7 +380,7 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::TextConfig {
 /// timestamps by. Clones share that timebase.
 pub struct Reserved<E: CatalogExt = ()> {
 	timebase: super::Timebase<E>,
-	timeline_hint: Option<std::time::Duration>,
+	hls_hint: Option<std::time::Duration>,
 }
 
 impl<E: CatalogExt> Reserved<E> {
@@ -388,13 +388,14 @@ impl<E: CatalogExt> Reserved<E> {
 		timebase.catalog.add_reserver();
 		Self {
 			timebase,
-			timeline_hint: None,
+			hls_hint: None,
 		}
 	}
 
-	/// Declare the track's regular group duration to its archive timeline.
-	pub fn with_timeline_hint(mut self, duration: impl Into<Option<std::time::Duration>>) -> Self {
-		self.timeline_hint = duration.into();
+	/// Declare the track's regular group duration, which fixes its HLS segment duration up front
+	/// unless [`Config::with_hls`](super::Config::with_hls) disabled HLS records.
+	pub fn with_hls_hint(mut self, duration: impl Into<Option<std::time::Duration>>) -> Self {
+		self.hls_hint = duration.into();
 		self
 	}
 
@@ -471,7 +472,7 @@ impl<E: CatalogExt> Reserved<E> {
 		let rendition = self.init(track.name())?;
 		self.timebase
 			.catalog
-			.media(track, container, rendition, config.into(), self.timeline_hint)
+			.media(track, container, rendition, config.into(), self.hls_hint)
 	}
 
 	/// Resolve a timestamp on the broadcast's shared clock (see [`Producer::timestamp`]).
@@ -498,7 +499,7 @@ impl<E: CatalogExt> Reserved<E> {
 
 impl<E: CatalogExt> Clone for Reserved<E> {
 	fn clone(&self) -> Self {
-		Self::new(self.timebase.clone()).with_timeline_hint(self.timeline_hint)
+		Self::new(self.timebase.clone()).with_hls_hint(self.hls_hint)
 	}
 }
 
@@ -1181,22 +1182,39 @@ mod tests {
 		);
 	}
 
-	/// Every rendition gets its own timeline, advertised together at the catalog root.
+	/// Each rendition gets its own HLS records, advertised in its own entry, and only when enabled.
 	#[test]
-	fn renditions_get_their_own_timelines() {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let mut catalog = super::super::Producer::new(&mut broadcast, super::super::Config::default()).unwrap();
+	fn renditions_get_their_own_hls_records() {
+		for enabled in [false, true] {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog_config = super::super::Config::default().with_hls(enabled.then(crate::hls::Config::default));
+			let mut catalog = super::super::Producer::new(&mut broadcast, catalog_config).unwrap();
 
-		let _video0 = catalog
-			.enroll("video0", Some(std::time::Duration::from_secs(4)))
-			.unwrap();
-		let _video1 = catalog
-			.enroll("video1", Some(std::time::Duration::from_secs(4)))
-			.unwrap();
-		let section = catalog.timeline().section();
-		assert_eq!(section.timelines["video0"].track, "video0.timeline.z");
-		assert_eq!(section.timelines["video1"].track, "video1.timeline.z");
-		assert_eq!(catalog.snapshot().archive, Some(section));
+			let hint = Some(std::time::Duration::from_secs(4));
+			let video0 = catalog.enroll("video0", hint).unwrap();
+			let video1 = catalog.enroll("video1", hint).unwrap();
+			assert_eq!(video0.is_some(), enabled);
+			assert_eq!(video1.is_some(), enabled);
+			{
+				let mut guard = catalog.modify().unwrap();
+				guard.video.insert("video0", config(None, None)).unwrap();
+				guard.video.insert("video1", config(None, None)).unwrap();
+			}
+
+			let snapshot = catalog.snapshot();
+			let hls = |name: &str| snapshot.video.renditions[name].hls.clone();
+			match enabled {
+				true => {
+					let four = std::time::Duration::from_secs(4);
+					assert_eq!(hls("video0"), Some(hang::catalog::Hls::new("video0.hls", four)));
+					assert_eq!(hls("video1"), Some(hang::catalog::Hls::new("video1.hls", four)));
+				}
+				false => {
+					assert_eq!(hls("video0"), None);
+					assert_eq!(hls("video1"), None);
+				}
+			}
+		}
 	}
 
 	mod custom {

@@ -2,68 +2,81 @@
 
 ## Goal
 
-moq-lite-07's SUBSCRIBE carries group ranges and an order, SUBSCRIBE_UPDATE
-replaces them, and FETCH is gone from lite-07. The Rust publisher serves
-ranges from the model and drops what it won't deliver, and a relay fills a
-lite upstream by subscribing to the missing ranges.
+A relay fills a lite-07 upstream by subscribing to the missing ranges, and
+SUBSCRIBE_OK carries the resolved start. Older wires and moq-transport carry
+the anchors they can, and refuse only the rest. FETCH stays on lite-07 until
+[Remove FETCH from lite-07](/quest/m1/subscribe-ranges/lite07-fetch.md)
+removes it from both implementations.
 
 ## Plan
 
-Each range end encodes `Absolute(group, frame)`, `Relative(n)`, `Time(pts)`,
-or open, and a SUBSCRIBE with no ranges is refused. A `Time` end has no
-older-wire mapping: the answering hop resolves it before going upstream on
-lite-06 or earlier, or refuses it. Older wires map at the codec only, with
-no change to a published version: lite-06 `Group Start` 0 with `Frame Start`
-0, and pre-06 absent, are `Absolute(0)..` capped by max age (the oldest group
-not yet stale); any other lite-06 pair is an absolute start. When merged
-ranges can't be expressed on an older upstream wire, subscribe from group 0
-and filter locally; lite-03 to 05 must send an explicit group 0, since the
-codec folds 0 to absent (`encode_start_group`), which they read as the latest
-group. moq-transport's relative offsets differ by one: draft-22
-`Relative(0)` is the next group and `Relative(1)` the current one, so an
-open-ended `Relative(n)..` maps to draft-22 `Relative(n + 1)`, saturating
-(an offset past the track's start clamps to group 0 either way). Older
-drafts only encode a relative 0, so there it is SUBSCRIBE plus a relative
-joining FETCH n groups back, as the live join already does. That filter
-has no end, so a range with a bounded end resolves both bounds against the
-Largest Object and goes upstream as an absolute range. Live keeps today's
-join, `NextObject` plus a `Relative(1)` fill on draft-22 or a relative
-joining FETCH on older drafts (`ietf::subscriber::subscribe_join`), so the
-current group's existing prefix still arrives. A relative end resolves
-against the latest group the answering hop knows. Behind an IETF upstream
-that is the Largest Object's group, so a newest group with no objects yet is
-not counted until its first object arrives; the relay reports what it has
-rather than waiting for the peer.
-
-Today a track copy received over lite-06 or earlier, or any moq-transport
-draft, refuses relative and time anchors with `Unsupported`, while a lite-07
-copy resolves them locally (it learns the largest and media time and asks for
-everything the budget allows; `lite::Version::resolves_anchors`). Each mapping
-above that makes an older wire carry an anchor lifts that wire's refusal for
-that anchor only, and extends the per-wire table in
-`rs/moq-net/tests/integration/range_anchors.rs`.
-
-Test the lite-05 relay case #5000 left out, on mock time beside
-`rs/moq-net/tests/integration/late_lower_group.rs`: a live subscriber already reading
-group 1, then one from `Absolute(0)`, and a fresh group 0 reaches only the
-second. Today the merged request goes upstream as its covering span, which on
-lite-05 has no floor and joins at the latest group, so group 0 never arrives;
-it needs the explicit group 0 above. The merged-range relay test,
-`rs/moq-net/tests/integration/subscribe_ranges.rs`, extends to lite-07 once it carries the
-list.
-
-Update `drafts/draft-lcurley-moq-lite.md` in the same PR: the SUBSCRIBE and
-SUBSCRIBE_UPDATE fields, the Group Order section (the order is now a field),
-the removal of FETCH, and the lite-07 changelog. This quest also owns the Order row of
-the priority table in `doc/concept/moq-lite.md`: it now describes the field
-(decided 2026-10-08, since subscribe ranges owns group order). Published versions (lite-03..06) keep
-FETCH, answered through the model's ranges. Run `just drafts check` and
-`just test interop --all`.
+Decided 2026-10-25 (maintainer, on
+[moq-dev/moq#6807](https://github.com/moq-dev/moq/pull/6807)): FETCH removal
+moves out of this quest (to its own quest since 2026-10-27), since JS still requests and serves wire FETCH on lite-07
+(`track.Consumer.fetchGroup`), so a Rust-only removal would drop a current
+cross-language capability. This quest keeps FETCH on lite-07 and makes the
+range fill work without it.
 
 Decided 2026-10-22 (maintainer): SUBSCRIBE_OK carries the resolved start for
 a relative range start, so a reader's ordered cursor takes its floor from it
-([Container reads drop backfill](/quest/m1/read-backfill.md)).
+([Container reads drop backfill](/quest/m1/read-backfill.md)). Decided
+2026-10-27 (maintainer): it is part of the Goal, since read-backfill now
+requires this quest for it.
+
+### Range fill through the subscription
+
+Lite-07 SUBSCRIBE and SUBSCRIBE_UPDATE carry the range list (`lite::Range`,
+typed anchors), and the publisher serves it from the model. Older wires map at
+the codec, and a merged request goes upstream as one span, from group 0 when
+its starts mix (`wire_span`). A lite-07 publisher FINs a covered bounded
+subscription without SUBSCRIBE_END; the Rust copy settles its tail, keeps the
+cached copy, and subscribes again only for demand the covered ranges leave
+out.
+
+An attempt that routed lite-07 fills through `FeedFetches`, adding each held
+fill's groups to the upstream ranges, broke fetches of an open or previously
+cut group (`catalog_handover` fetch tests, `restart::retired_fetch_lite07`,
+`fetch_cancel`, `untimed`, `rejoin`):
+
+- A held fill is judged by the track's arrivals ledger, which still holds the
+  cut group from the subscription that left. It settles `NotFound` before the
+  new subscription delivers the group. Judge it against the subscription that
+  asked for it.
+- Dropping a fill's range once it is answered shrinks or closes the upstream
+  subscription while its group stream is still arriving, which resets it.
+  Keep the range until that stream finishes.
+- A relay serving the fill from its own cut copy has the same problem one hop
+  up.
+
+The Rust copy sends a relative or time end as open, since nothing names a
+resolved end and it resolves the end itself (`wire_ranges`), so only absolute
+bounded ranges complete upstream. A hole on a live track counts as dropped
+only once the feed gives up on it, past the arrivals grace;
+[Fetch as a range](/quest/m1/subscribe-ranges/fetch-range.md) owns judging
+such a miss sooner. A range served only by datagrams never completes: they
+resolve no SUBSCRIBE_START, so a FIN overtaking them leaves the receiver no
+owed range to wait on. Datagram fills need the receiver told what is owed
+first.
+
+### moq-transport anchors
+
+Decided 2026-10-27 (maintainer): a bridge never sends a relative anchor to
+moq-transport. It resolves `Relative(n)` to an absolute Group ID, from its
+cache or the live edge, before sending, replacing the planned mapping of
+`Relative(n)..` onto draft-22's `Filter::Relative(n + 1)` and draft 18's
+relative joining FETCH. Reason: both count back by Group ID arithmetic, which
+breaks once [time addressing](/quest/m1/time-addressing/model.md) makes legacy
+Group IDs sparse start ticks. A range with a bounded end
+resolves both bounds against the Largest Object and goes upstream as an
+absolute range. Live keeps today's join (`ietf::subscriber::subscribe_join`).
+Each mapping that makes a wire carry an anchor lifts that wire's
+`Unsupported` refusal for it, and extends the per-wire table in
+`rs/moq-net/tests/integration/range_anchors.rs`.
+
+Update `drafts/draft-lcurley-moq-lite.md` with each wire change here. Run
+`just drafts check` and `just test interop --all`.
 
 ## Related
 
 - [Container reads drop backfill](/quest/m1/read-backfill.md) - floors its ordered cursor on the resolved start
+- [Remove FETCH from lite-07](/quest/m1/subscribe-ranges/lite07-fetch.md) - removes FETCH from lite-07 in both implementations once this and JS ranges land

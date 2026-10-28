@@ -41,13 +41,18 @@ jobs:
     environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
     # Backstop a hang instead of holding the runner for the 6-hour default.
     timeout-minutes: 60
+    env:
+      # Diff a merge group from main, not from the entry ahead of it: when the
+      # queue requires only a group's head to pass, that run vouches for every
+      # entry it merges. Building one entry at a time, the base is main anyway.
+      CI_BASE: ${{ github.base_ref == 'release' && '--all' || 'origin/main' }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # Full history so `just ci` can diff against the PR or merge group base.
+          # Full history so `just ci` can diff against main.
           fetch-depth: 0
 
       - uses: ./.github/actions/just
@@ -57,8 +62,6 @@ jobs:
       - name: Select work
         id: scope
         run: just ci-select "$CI_BASE" >> "$GITHUB_OUTPUT"
-        env:
-          CI_BASE: ${{ github.base_ref == 'release' && '--all' || github.event.merge_group.base_sha }}
 
       - uses: ./.github/actions/nix
         if: steps.scope.outputs.needed == 'true' && runner.environment != 'self-hosted'
@@ -75,8 +78,9 @@ jobs:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
 
-      # The pre-setup query and execution use the same impact map. A runner VM
-      # keeps target/, so drop the previous job's build timings first.
+      # The pre-setup query and execution use the same impact map. A
+      # self-hosted runner keeps target/, so drop the previous job's build
+      # timings first.
       - name: Check
         if: steps.scope.outputs.needed == 'true'
         run: |
@@ -85,8 +89,6 @@ jobs:
             export NEXTEST_TEST_THREADS=24
           fi
           nix develop --command just ci "$CI_BASE"
-        env:
-          CI_BASE: ${{ github.base_ref == 'release' && '--all' || github.event.merge_group.base_sha }}
 
       # Cargo's per-crate timings for the Rust test builds, so a slow crate
       # shows without rebuilding. The job summary has the per-module times.

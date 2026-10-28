@@ -32,6 +32,9 @@
 //!   output device and mixes the `playback::Sink`s registered with it, so one
 //!   device serves every track in a call. Requires the `playback` feature, so
 //!   these names are unlinked here too.
+//! - `bus` mixes any number of PCM sources, each with its own gain, mute, and
+//!   meter, into one program feed that the caller reads on its own clock: a
+//!   studio's program audio. Behind the default-on `bus` feature.
 //! - `aec` keeps the speaker out of the microphone, which is what a conference
 //!   on a laptop needs to not send itself back. `playback::Engine::canceller`
 //!   builds cloneable `aec::Control` handles from the mix it is playing and
@@ -46,6 +49,9 @@
 //! layout lives on the producer / consumer via [`encode::Input`] /
 //! [`decode::Output`], not on each frame, so callers can't drift between calls.
 
+#[cfg(test)]
+mod allocation;
+
 #[cfg(feature = "aac")]
 mod aac;
 mod activity;
@@ -54,12 +60,17 @@ mod format;
 mod frame;
 mod jitter;
 mod layout;
+mod level;
 mod opus;
 mod pcm;
 mod resample;
+#[cfg(any(feature = "bus", feature = "playback"))]
+mod ring;
 
 #[cfg(feature = "aec")]
 pub mod aec;
+#[cfg(feature = "bus")]
+pub mod bus;
 #[cfg(feature = "capture")]
 pub mod capture;
 pub mod decode;
@@ -73,3 +84,4 @@ pub use error::Error;
 pub use format::Format;
 pub use frame::Frame;
 pub use layout::Layout;
+pub use level::Level;

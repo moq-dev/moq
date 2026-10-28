@@ -11,7 +11,7 @@ use std::task::{Context, Poll};
 use bytes::{Buf, Bytes};
 
 use super::poll::{self, SendOptions};
-use super::{Binding, CloseKind, MaybeSend, MaybeSync, Probe, Wire};
+use super::{Address, CloseKind, MaybeSend, MaybeSync, Probe, Wire};
 
 /// A boxed [`poll::Boxable`] session.
 pub(crate) struct Session {
@@ -105,6 +105,7 @@ pub(crate) struct SendStream(Box<dyn ErasedSend>);
 
 impl SendStream {
 	/// Box a stream, keeping its own send-group type behind the boundary.
+	#[cfg(test)]
 	pub(crate) fn new(stream: impl poll::SendStream<Group: MaybeSend + MaybeSync> + MaybeSend + MaybeSync) -> Self {
 		Self(Box::new(stream))
 	}
@@ -114,6 +115,7 @@ impl SendStream {
 pub(crate) struct RecvStream(Box<dyn ErasedRecv>);
 
 impl RecvStream {
+	#[cfg(test)]
 	pub(crate) fn new(stream: impl poll::RecvStream + MaybeSend + MaybeSync) -> Self {
 		Self(Box::new(stream))
 	}
@@ -122,11 +124,9 @@ impl RecvStream {
 /// A boxed [`poll::Lease`], borrowed from a [`RecvStream`].
 pub(crate) struct Lease<'a>(Box<dyn ErasedLease + 'a>);
 
-/// The transport's connection stats, read once.
+/// The transport's connection metrics, read once.
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct Stats {
-	bytes_sent: Option<u64>,
-	bytes_received: Option<u64>,
+pub(crate) struct Metrics {
 	bytes_lost: Option<u64>,
 	packets_sent: Option<u64>,
 	packets_received: Option<u64>,
@@ -136,29 +136,21 @@ pub(crate) struct Stats {
 	streams_evicted: Option<u64>,
 }
 
-impl Stats {
-	fn read(stats: impl super::Stats) -> Self {
+impl Metrics {
+	fn read(metrics: impl super::Metrics) -> Self {
 		Self {
-			bytes_sent: stats.bytes_sent(),
-			bytes_received: stats.bytes_received(),
-			bytes_lost: stats.bytes_lost(),
-			packets_sent: stats.packets_sent(),
-			packets_received: stats.packets_received(),
-			packets_lost: stats.packets_lost(),
-			rtt: stats.rtt(),
-			estimated_send_rate: stats.estimated_send_rate(),
-			streams_evicted: stats.streams_evicted(),
+			bytes_lost: metrics.bytes_lost(),
+			packets_sent: metrics.packets_sent(),
+			packets_received: metrics.packets_received(),
+			packets_lost: metrics.packets_lost(),
+			rtt: metrics.rtt(),
+			estimated_send_rate: metrics.estimated_send_rate(),
+			streams_evicted: metrics.streams_evicted(),
 		}
 	}
 }
 
-impl super::Stats for Stats {
-	fn bytes_sent(&self) -> Option<u64> {
-		self.bytes_sent
-	}
-	fn bytes_received(&self) -> Option<u64> {
-		self.bytes_received
-	}
+impl super::Metrics for Metrics {
 	fn bytes_lost(&self) -> Option<u64> {
 		self.bytes_lost
 	}
@@ -206,10 +198,10 @@ trait ErasedSession: MaybeSend + MaybeSync {
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Error>>;
 	fn max_datagram_size(&self) -> usize;
 	fn protocol(&self) -> Option<&str>;
-	fn binding(&self) -> Binding;
+	fn address(&self) -> Address;
 	fn close(&mut self, code: u32, reason: &str);
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Error>;
-	fn stats(&self) -> Stats;
+	fn metrics(&self) -> Metrics;
 	fn wire(&self) -> Option<Wire>;
 	fn probe(&self) -> Option<Probe>;
 }
@@ -324,8 +316,8 @@ impl<S: poll::Boxable> ErasedSession for S {
 		poll::Session::protocol(self)
 	}
 
-	fn binding(&self) -> Binding {
-		poll::Session::binding(self)
+	fn address(&self) -> Address {
+		poll::Session::address(self)
 	}
 
 	fn close(&mut self, code: u32, reason: &str) {
@@ -336,8 +328,8 @@ impl<S: poll::Boxable> ErasedSession for S {
 		poll::Session::poll_closed(self, cx).map(Error::new)
 	}
 
-	fn stats(&self) -> Stats {
-		Stats::read(poll::Session::stats(self))
+	fn metrics(&self) -> Metrics {
+		Metrics::read(poll::Session::metrics(self))
 	}
 
 	fn wire(&self) -> Option<Wire> {
@@ -490,8 +482,8 @@ impl poll::Session for Session {
 		self.inner.protocol()
 	}
 
-	fn binding(&self) -> Binding {
-		self.inner.binding()
+	fn address(&self) -> Address {
+		self.inner.address()
 	}
 
 	fn close(&mut self, code: u32, reason: &str) {
@@ -503,8 +495,8 @@ impl poll::Session for Session {
 		self.inner.poll_closed(cx)
 	}
 
-	fn stats(&self) -> impl super::Stats {
-		self.inner.stats()
+	fn metrics(&self) -> impl super::Metrics {
+		self.inner.metrics()
 	}
 
 	fn wire(&self) -> Option<Wire> {

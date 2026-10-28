@@ -24,7 +24,7 @@ use super::stats::Snapshot;
 
 const PCR_HZ: u64 = 27_000_000;
 /// `PAT_error_2` and `PMT_error_2`: each table recurs at least every 0.5 s.
-pub(super) const TABLE_LIMIT: u64 = PCR_HZ / 2;
+const TABLE_LIMIT: u64 = PCR_HZ / 2;
 /// `PCR_repetition_error` and `PCR_discontinuity_indicator_error`: 100 ms. The 40 ms limit
 /// left TS 101 154 in 2005.
 const PCR_LIMIT: u64 = PCR_HZ / 10;
@@ -1006,7 +1006,11 @@ mod test {
 	#[test]
 	fn a_multiplex_counts_each_fault_once() {
 		let origin = crate::source::produce_origin();
-		let mut programs = Programs::new(origin, "event.hang", crate::catalog::Config::default());
+		let mut programs = Programs::new(
+			origin,
+			moq_net::Path::from_static("event.hang"),
+			crate::catalog::Config::default(),
+		);
 		let mut data = super::super::import::test::two_programs();
 		let mut corrupt = vec![0x47, 0x9f, 0xff, 0x10];
 		corrupt.resize(188, 0xff);

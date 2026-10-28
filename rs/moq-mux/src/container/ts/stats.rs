@@ -50,9 +50,15 @@ pub struct Report {
 #[serde(default, rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct Snapshot {
-	/// One row per elementary stream PID the importer carries, ordered by PID. A PID the
-	/// importer drops (an undecoded stream without the `mpegts` catalog section) has none.
-	/// An SI PID has a `.si` row only once it counts [`Stream::unplaced`] sections.
+	/// One row per PID, ordered by PID: each elementary stream the PMT lists, carried or
+	/// refused, and each PID no table claims that the importer dropped packets on. A dropped
+	/// PID's row names no track, is [`Class::Data`], and counts its packets in
+	/// [`Stream::refused`]. A PID keeps one row for its life: a PMT that claims it, releases it,
+	/// or claims it again moves the row with its counters, and while dropped it names no track.
+	/// Packets before every listed PMT has arrived are acquisition and not counted; so are null
+	/// packets. An import of one program from a multiplex that lists
+	/// others counts no PID no table claims, since another program's PMT may. An SI PID has a
+	/// `.si` row only once it counts [`Stream::unplaced`] sections.
 	// Keys read from strings: a flattened section loses JSON's integer-key parsing.
 	#[serde_as(as = "BTreeMap<serde_with::DisplayFromStr, _>")]
 	#[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -124,8 +130,8 @@ impl Snapshot {
 #[non_exhaustive]
 pub struct Stream {
 	/// The current or most recent MoQ track suffix for this PID (`.avc3`, `.mp2`, `.ts`, ...),
-	/// or empty for MPEG-1/2 video, which is read for its clock and not published. At export,
-	/// the suffix an import of the output would give the PID.
+	/// or empty for a PID that publishes no track: one dropped, or MPEG-1/2 video refused and
+	/// read only for its clock. At export, the suffix an import of the output would give the PID.
 	#[serde(skip_serializing_if = "String::is_empty")]
 	pub track: String,
 	/// How this PID was classified. See [`Class`].
@@ -167,11 +173,15 @@ pub struct Stream {
 	/// still behind a wrap the import's first PTS already crossed. Export stays zero.
 	#[serde(skip_serializing_if = "is_zero")]
 	pub unplaced: u64,
-	/// Times this PID's stream was refused rather than carried altered: an undecoded stream
-	/// in a program with no PCR to place it by, or a private PES stream with a clock field only
-	/// the PTS and DTS of are rebased (ESCR, a `pack_header_field`, a TREF), PES-level scrambling,
-	/// an unbounded non-video PES, or a header export refuses. Its track ends and leaves the
-	/// catalog. Export stays zero.
+	/// What this PID lost to a route the import does not carry. Once for each time its stream
+	/// was refused: a listed stream the import cannot carry (an ambiguous 0x86 without a CUEI
+	/// registration, an Opus configuration it cannot map, any undecoded stream without the
+	/// `mpegts` catalog section or in a program with no PCR to place it by), or a whole-PES
+	/// stream with a clock field only the PTS and DTS of are rebased (ESCR, a
+	/// `pack_header_field`, a TREF), PES-level scrambling, an unbounded non-video PES, or a
+	/// header export refuses, whose track ends and leaves the catalog. Once for each
+	/// TS-scrambled packet on a carried stream, which the raw lane could carry. And once for
+	/// each packet on a PID no table claims ([`Snapshot::streams`]). Export stays zero.
 	#[serde(skip_serializing_if = "is_zero")]
 	pub refused: u64,
 	/// This PID's share of [`Snapshot::continuity_count_error`].
@@ -232,10 +242,10 @@ impl Stream {
 pub enum Class {
 	/// Continuous audio.
 	Audio = 1,
-	/// Continuous video, including MPEG-1/2 video read only for its clock.
+	/// Continuous video, including MPEG-1/2 video carried whole or read only for its clock.
 	Video = 2,
-	/// Undecoded or sparse data (SCTE-35, ID3, private sections, private PES), or a PCR PID
-	/// that carries no elementary stream. A quiet second is not a stall. A class a later
+	/// Undecoded or sparse data (SCTE-35, ID3, private sections, private PES), a PCR PID that
+	/// carries no elementary stream, or a dropped PID. A quiet second is not a stall. A class a later
 	/// version adds reads as data. It must stay last for `#[serde(other)]`; the explicit
 	/// discriminants keep every variant's `as` value.
 	#[default]
@@ -313,6 +323,7 @@ pub struct Release {
 
 impl Release {
 	pub(crate) fn of<K: Ord + Clone, T>(jitter: &crate::jitter::Buffer<K, T>) -> Self {
+		let jitter = jitter.reporting();
 		let millis = |seconds: f64| (seconds * 1e3).round() as i64;
 		Self {
 			dropped: jitter.dropped(),

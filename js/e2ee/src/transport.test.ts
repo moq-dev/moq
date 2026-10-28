@@ -52,8 +52,7 @@ async function active(origin: Origin.Producer, path: Path.Valid): Promise<Broadc
 const transports = [
 	["moq-lite-07", "moq-lite-07-wip", true, true],
 	["moq-lite-05", "moq-lite-05", false, false],
-	["moq-transport-16", "moqt-16", false, false],
-	["moq-transport-17", "moqt-17", false, true],
+	["moq-transport-18", "moqt-18", true, true],
 ] as const;
 
 for (const [name, protocol, routed, timed] of transports) {
@@ -62,11 +61,12 @@ for (const [name, protocol, routed, timed] of transports) {
 		const cred = credential();
 		const generation = cred.produce();
 		const path = await cred.path("meeting.hang");
-		const broadcast = publisher.createBroadcast(path);
+		const broadcastPublication = publisher.createBroadcast(path);
+		const broadcast = broadcastPublication.broadcast;
 		const video = await new Protected.Producer(broadcast, generation).createTrack("video", {
 			timescale: Time.Timescale.MILLI,
 		});
-		broadcast.announce({ epoch: generation.epoch });
+		broadcastPublication.announce({ epoch: generation.epoch });
 
 		const group = video.appendGroup();
 		await group.writeFrame(ms(1), encoder.encode("keyframe"));
@@ -90,18 +90,19 @@ for (const [name, protocol, routed, timed] of transports) {
 
 		// Later frames on the open group, and a second group.
 		await group.writeFrame(ms(3), encoder.encode("late"));
-		group.close();
+		group.finish();
 		expect(decoder.decode((await received.readFrame())?.plaintext)).toBe("late");
 		expect(await received.readFrame()).toBeUndefined();
 
 		const next = video.appendGroup();
 		await next.writeFrame(ms(4), encoder.encode("next"));
-		next.close();
+		next.finish();
 		const second = await consumer.recvGroup();
 		expect(second?.sequence).toBe(1);
 		expect(decoder.decode((await second?.readFrame())?.plaintext)).toBe("next");
 
 		consumer.close();
+		video.finish();
 		video.close();
 		broadcast.close();
 		close();
@@ -110,23 +111,24 @@ for (const [name, protocol, routed, timed] of transports) {
 
 for (const [name, protocol] of [
 	["moq-lite-07", "moq-lite-07-wip"],
-	["moq-transport-17", "moqt-17"],
+	["moq-transport-18", "moqt-18"],
 ] as const)
 	test(`${name}: datagrams roundtrip encrypted`, async () => {
 		const { publisher, subscriber, close } = await session(protocol);
 		const cred = credential();
 		const generation = cred.produce();
 		const path = await cred.path("meeting.hang");
-		const broadcast = publisher.createBroadcast(path);
+		const broadcastPublication = publisher.createBroadcast(path);
+		const broadcast = broadcastPublication.broadcast;
 		const audio = await new Protected.Producer(broadcast, generation).createTrack("audio", {
 			timescale: Time.Timescale.MILLI,
 		});
-		broadcast.announce({ epoch: generation.epoch });
+		broadcastPublication.announce({ epoch: generation.epoch });
 
 		// A group first, so the subscription is serving before datagrams, which are never cached.
 		const group = audio.appendGroup();
 		await group.writeFrame(ms(0), encoder.encode("init"));
-		group.close();
+		group.finish();
 
 		const remote = await active(subscriber, path);
 		const consumer = await new Protected.Consumer(remote, cred.consume(remote.epoch ?? generation.epoch)).subscribe(
@@ -146,6 +148,7 @@ for (const [name, protocol] of [
 		expect(decoder.decode(event.datagram.plaintext)).toBe("opus");
 
 		consumer.close();
+		audio.finish();
 		audio.close();
 		broadcast.close();
 		close();

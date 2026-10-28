@@ -24,6 +24,5 @@ Public API: none. Wire: none.
 ## Related
 
 - [Benchmark sources](/quest/m2/bench-sources.md) - feeds these series into the regression table
-- [Relay session bench](/quest/m2/bench-relay.md) - the same scenario through moq-relay
 - [QUIC on the sim](/quest/m2/quic-sim.md) - an in-memory QUIC link the sweep could reuse
 - [Stream transport bench](/quest/m2/perf/stream/bench.md) - a Criterion qmux micro-bench over tcp, tls, ws and wss

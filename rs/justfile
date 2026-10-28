@@ -18,8 +18,8 @@ no_fuzz := "--exclude moq-net-fuzz --exclude moq-quic-fuzz"
 default:
     just check
 
-# Default features for the selected packages. The full workspace permutations
-# each cost a separate compile, so `features` covers them nightly. No `cargo
+# Default features for the selected packages. Selection also checks feature
+# extremes; `features` covers the full matrix nightly. No `cargo
 # check` pass: clippy is a superset of it, and the two use different rustc
 # wrappers, so running both compiles the workspace twice.
 #
@@ -49,8 +49,6 @@ lint *args:
     # clock lint's test allowances also silence clippy's disallowed_methods.
     git grep --untracked -nE '(^|[^[:alnum:]_])(set_var|remove_var)[[:space:]]*\(' -- 'rs/*.rs'; [ $? -eq 1 ] || { echo "error: a write to the process environment: pass the value down, or run a test in a child with test_env::Env" >&2; exit 1; }
     cargo fmt --all --check
-    # quinn-udp and quinn keep quinn's formatting; cargo fmt skips them (see moq-sock's lib.rs, moq-tokio's quic.rs).
-    rustfmt --edition 2024 --check rs/moq-sock/src/udp/mod.rs rs/moq-tokio/src/quic/driver/mod.rs
     RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked --no-deps "$@"
     cargo shear
     cargo sort --workspace --check --no-format
@@ -60,7 +58,6 @@ lint *args:
 fix *args:
     bash sh/local.sh cargo clippy --locked --fix --allow-staged --allow-dirty --all-targets "$@"
     cargo fmt --all
-    rustfmt --edition 2024 rs/moq-sock/src/udp/mod.rs rs/moq-tokio/src/quic/driver/mod.rs
     cargo shear --fix
     cargo sort --workspace --no-format
 
@@ -102,6 +99,7 @@ windows $BASE="":
 windows-test:
     just rs test --manifest-path rs/moq-auth/Cargo.toml
     just rs test -p hang -p moq-tokio -p moq-sock -p moq-relay
+    just rs test -p moq-video --no-default-features --features render -E 'test(/^render::export::/)'
 
 # Run io_uring tests when the branch affects the relay or its dependencies.
 [positional-arguments]
@@ -144,18 +142,22 @@ macos-test:
     just rs test -p hang -p moq-tokio -p moq-sock
     just rs test -p moq-sock --features fast-apple-datapath
     just rs test -p moq-video --no-default-features -E 'test(encode::backend::videotoolbox::tests)'
+    just rs test -p moq-video --no-default-features --features render -E 'test(/^render::export::/)'
+    # The runner's paravirtual Metal device proves the IOSurface import, ignored elsewhere.
+    just rs test -p moq-video --no-default-features --features render --lib --run-ignored only \
+        -E 'test(/^render::renderer::tests::(the_metal_import_matches_the_cpu_path|imports_survive_decoder_pool_recycling)$/)'
 
 # Compile and lint the capture and playback features, which the default check skips.
 [positional-arguments]
 capture *args:
-    bash sh/local.sh cargo clippy --locked -p moq-video -p moq-audio --all-targets --features moq-video/capture,moq-audio/capture,moq-audio/playback "$@" -- -D warnings
+    bash sh/local.sh cargo clippy --locked -p moq-video -p moq-audio -p moq-scene -p moq-studio --all-targets --features moq-video/capture,moq-audio/capture,moq-audio/playback,moq-scene/capture,moq-studio/capture "$@" -- -D warnings
 
 # The capture and playback tests drive synthetic devices, so they need no hardware.
 
 # Test the capture and playback features, which the default test pass skips.
 [positional-arguments]
 capture-test *args:
-    just rs test -p moq-video -p moq-audio --features moq-video/capture,moq-audio/capture,moq-audio/playback "$@"
+    just rs test -p moq-video -p moq-audio -p moq-scene -p moq-studio --features moq-video/capture,moq-audio/capture,moq-audio/playback,moq-scene/capture,moq-studio/capture "$@"
 
 # Compare SHM and GetImage through production capture on the current X11 display.
 x11-bench:
@@ -169,7 +171,7 @@ x11-rgb-bench:
 x11-bench-ci:
     #!/usr/bin/env bash
     set -euo pipefail
-    log="${MOQ_X11_BENCH_LOG:-.scratch/x11-capture-benchmark.log}"
+    log="${MOQ_X11_BENCH_LOG:-.tmp/x11-capture-benchmark.log}"
     mkdir -p "$(dirname "$log")"
     {
         git rev-parse HEAD
@@ -229,15 +231,19 @@ relay-minimal:
 c-tests:
     sh/rs/c-tests.sh
 
-# The feature permutations `check` leaves out, nightly. `--all-features` is the
-# only thing that compiles moq-cli's play/capture, the device features, the
-# Linux bindgen codecs, PipeWire, and jemalloc; `--no-default-features` the only
-# thing that compiles the `#[cfg(not(feature = ...))]` arms.
+# Benchmarks and examples stay in Nightly; the gate compiles the same targets
+# it tests, with both extremes exercising feature-gated implementation arms.
 
-# Compile the workspace at the feature extremes.
+# Isolate selected packages so a dependent cannot enable a feature that hides a warning.
+[positional-arguments]
+feature-shapes *args:
+    bash sh/local.sh cargo hack clippy --locked --tests --no-default-features "$@" -- -D warnings
+    bash sh/local.sh cargo hack clippy --locked --tests --all-features "$@" -- -D warnings
+
+# Compile the full feature matrix, including isolated combinations and their tests.
 features:
-    just rs net-features
-    just rs quic-features
+    just rs net-features --all
+    just rs quic-features --all
     just rs tokio-features --all
     just rs media-features --all
     bash sh/local.sh cargo check --locked --workspace {{ no_fuzz }} --all-targets --no-default-features
@@ -255,19 +261,28 @@ features:
     bash sh/rs/nextest.sh cargo nextest run --locked --workspace {{ no_fuzz }} --all-targets --all-features
 
 # Compile and test the explicit-time model without async helpers or sessions.
-net-features:
-    bash sh/rs/net-features.sh
+[positional-arguments]
+net-features *args:
+    bash sh/rs/net-features.sh "$@"
 
 # Prove moq-quic leaves moq-clock's dev-only runtime to its consumers, and lints without its default features; a workspace build unifies both back in.
-quic-features:
+[positional-arguments]
+quic-features *args:
     #!/usr/bin/env bash
     set -euo pipefail
+    targets=(--tests)
+    if [[ $# == 1 && $1 == --all ]]; then
+        targets=(--all-targets)
+    elif [[ $# != 0 ]]; then
+        echo 'usage: just rs quic-features [--all]' >&2
+        exit 2
+    fi
     graph=$(cargo tree --locked -p moq-quic -e normal --prefix none)
     if grep -E '^(tokio|web-async) ' <<<"$graph"; then
         echo "moq-quic must not depend on a native runtime" >&2
         exit 1
     fi
-    bash sh/local.sh cargo clippy --locked -p moq-quic --all-targets --no-default-features -- -D warnings
+    bash sh/local.sh cargo clippy --locked -p moq-quic "${targets[@]}" --no-default-features -- -D warnings
 
 # Compile media boundaries (--all isolates every mode) and prove expensive
 # native/render dependencies are absent when their features are excluded.
@@ -307,18 +322,20 @@ doctest *args:
     bash sh/local.sh cargo test --locked --doc "$@"
 
 # `--cfg loom` swaps kio's primitives for loom's, so it rebuilds the world and
-# stays out of `check`. `--release` because a model check runs the body once
+# executes only in Nightly; the selected Rust gate compiles it with `--no-run`.
+# `--release` because a model check runs the body once
 # per interleaving (411s -> 51s); the assertions are plain `assert!`. kio's
 # models search every interleaving; moq-net's cap preemptions (see
 # `tests/loom.rs`, `LOOM_MAX_PREEMPTIONS`). kio's own unit tests are
 # `cfg(not(loom))`.
 
-# Permutation-test the concurrent handoffs with loom.
+# Permutation-test the concurrent handoffs with loom. `crossbeam_loom` puts the
+# epoch collector that frees `kio::log` segments under loom too.
 [positional-arguments]
 loom *args:
-    RUSTFLAGS="--cfg loom" cargo test --locked --release -p kio --lib loom:: "$@"
-    RUSTFLAGS="--cfg loom" cargo test --locked --release -p moq-net --test loom "$@"
-    RUSTFLAGS="--cfg loom" cargo test --locked --release -p moq-net --test expiry-loom "$@"
+    RUSTFLAGS="--cfg loom --cfg crossbeam_loom" cargo test --locked --release -p kio --lib loom:: "$@"
+    RUSTFLAGS="--cfg loom --cfg crossbeam_loom" cargo test --locked --release -p moq-net --test loom "$@"
+    RUSTFLAGS="--cfg loom --cfg crossbeam_loom" cargo test --locked --release -p moq-net --test expiry-loom "$@"
 
 # Run the moq-quic simulation's random workloads from a fresh seed, printing the settings that replay it, then the bandwidth probe's acceptance suite.
 quic-sim:
@@ -346,7 +363,8 @@ cli-export *args:
 quic-stress:
     just rs test -p moq-tokio --lib --run-ignored only -E 'test(/^quic::driver::tests::stress_/)'
 
-# Render CPU frames through wgpu on Mesa's software Vulkan driver, so no GPU is needed.
+# Render CPU frames, composite scenes, and publish a studio program through wgpu on
+# Mesa's software Vulkan driver, so no GPU is needed.
 render-sw:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -355,7 +373,14 @@ render-sw:
     icd=("$mesa"/share/vulkan/icd.d/lvp_icd.*.json)
     LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}" \
         just rs test -p moq-video --features render --lib --run-ignored only \
-        -E 'test(/^render::renderer::tests::(the_declared_color_space_beats_the_size_guess|cpu_frames_survive_the_round_trip|config_size_overrides_the_frame_size)$/)'
+        -E 'test(/^render::renderer::tests::(the_declared_color_space_beats_the_size_guess|cpu_frames_survive_the_round_trip|config_size_overrides_the_frame_size|an_unimportable_gpu_frame_is_refused|the_output_follows_the_device)$/)'
+    # Mesa's software driver exports no memory, so this covers the readback route.
+    LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}" \
+        just rs test -p moq-video --features render,openh264 --lib --run-ignored only -E 'test(/^render::export::(nv12::)?tests::/)'
+    LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}" \
+        just rs test -p moq-scene --lib --run-ignored only -E 'test(/^compositor::tests::/)'
+    LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}" \
+        just rs test -p moq-studio --features openh264 --run-ignored only -E 'test(=engine::tests::the_program_reaches_a_relay)'
 
 # Run the ignored mDNS tests, which multicast on the host's network interfaces.
 multicast:
@@ -490,6 +515,11 @@ bench-latency:
 [positional-arguments]
 bench-ts-schedule *args:
     bash sh/local.sh cargo bench --locked -p moq-mux --bench ts_schedule -- "$@"
+
+# Ingest an MPTS across program count, bitrate and stray PIDs, the strays against null packets that skip the accounting.
+[positional-arguments]
+bench-ts-programs *args:
+    cargo bench --locked -p moq-mux --bench ts_programs -- "$@"
 
 # Sweep container export tracks and queued frames independently.
 [positional-arguments]

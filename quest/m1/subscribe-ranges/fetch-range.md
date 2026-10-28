@@ -38,12 +38,14 @@ the questions decided below and landed only the `track_range_filling` benchmark.
   read has to request it instead of letting `Lagged` reach the caller.
   `fill::Ask` already carries a start frame, so the miss judge can count a
   headless slot as a hole for a bounded window.
-- **Wire publishers keep parking.** The lite subscriber reads an upstream FIN
-  as the track's end, because "bounded downstream demand alone never FINs; the
-  publisher parks" (`lite/subscriber.rs`). Once `recv_group` ends a bounded
-  read, the lite and IETF publishers keep parking on a bounded downstream
-  SUBSCRIBE rather than FIN it, or a peer on a published version reads the
-  range's end as the track's.
+- **Wire publishers keep parking.** The lite subscriber reads an upstream
+  FIN as the track's end on a published version. Once `recv_group` ends a
+  bounded read, the IETF publisher and lite publishers before lite-07 keep
+  parking on a bounded downstream SUBSCRIBE rather than FIN it, or a peer
+  reads the range's end as the track's. The lite-07 half already landed in
+  [moq-dev/moq#6807](https://github.com/moq-dev/moq/pull/6807): a lite-07
+  publisher FINs a covered bounded subscription without SUBSCRIBE_END, which
+  ends only the subscription.
 - **Route recovery keeps a frame start.** `resume::Recover` fetches the rest of
   a group from frame N on the new route (`group::Fetch::frame_start`), which a
   whole-group range cannot say, so a crate-private fetch stays for it.
@@ -73,14 +75,18 @@ the questions decided below and landed only the `track_range_filling` benchmark.
   moq-transport fetch never subscribes, and a lite SUBSCRIBE before lite-05
   cannot name a missing group. A range wholly below the live edge stays out of
   the upstream SUBSCRIBE on any wire without range SUBSCRIBE and is filled by
-  per-group FETCH, keeping today's wire behavior until
+  FETCH, keeping today's wire behavior: since
+  [moq-dev/moq#6724](https://github.com/moq-dev/moq/pull/6724) a run of misses
+  is one range FETCH on moq-transport, and per-group FETCH is lite-only, until
   [lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) land. A bounded
   upstream SUBSCRIBE accounted by SUBSCRIBE_START and SUBSCRIBE_DROP was
   rejected: it works on lite-05 and later only.
 - **The fill path goes linear first** (maintainer, 2026-10-25). One-range
   reads put every past read on the fill path, which `track_range_filling`
   measures as superlinear in range count and span: at span 64, 215K groups/s
-  over 1 range, 69K over 16, and 1.9K over 256. This quest waits on the
-  linear fill path quest (`quest/m1/subscribe-ranges/fill-linear.md`, planned
-  in [moq-dev/moq#6790](https://github.com/moq-dev/moq/pull/6790)); once it is
-  on main, list it under Required here.
+  over 1 range, 69K over 16, and 1.9K over 256, so this quest waits on the
+  linear fill path.
+
+## Required
+
+- [Linear fill path](/quest/m1/subscribe-ranges/fill-linear.md) - filling stays flat as range count and span grow

@@ -247,6 +247,12 @@ impl<T: Serialize> Snapshot<T> {
 	pub fn finish(mut self) -> crate::Result<()> {
 		Ok(self.inner.finish()?)
 	}
+
+	/// Abort the track with `err`, which consumers see in place of a clean end, and retire its
+	/// catalog entry.
+	pub fn abort(self, err: moq_net::Error) -> crate::Result<()> {
+		Ok(self.inner.abort(err)?)
+	}
 }
 
 /// Publishes an append-log JSON track, advertised in the catalog for as long as this handle lives.
@@ -342,6 +348,12 @@ impl<T: Serialize> Stream<T> {
 	/// dropping the handle without finishing retires the entry too.
 	pub fn finish(mut self) -> crate::Result<()> {
 		Ok(self.inner.finish()?)
+	}
+
+	/// Abort the track with `err`, which consumers see in place of a clean end, and retire its
+	/// catalog entry.
+	pub fn abort(self, err: moq_net::Error) -> crate::Result<()> {
+		Ok(self.inner.abort(err)?)
 	}
 }
 
@@ -705,7 +717,7 @@ mod test {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 
 		let mut existing = JsonConfig::new(Mode::Snapshot);
-		existing.broadcast = Some(moq_net::path::RelativeOwned::new("source"));
+		existing.broadcast = Some(moq_net::path::Relative::new("source").unwrap());
 
 		let mut seed = crate::catalog::hang::Catalog::<()>::default();
 		seed.json.tracks.insert("chat".to_string(), existing.clone());

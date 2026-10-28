@@ -23,9 +23,26 @@ Measure small-group session cost over independent publisher and viewer counts,
 for SUBSCRIBE and FETCH:
 
 ```bash
-nix develop --command cargo bench --locked -p moq-net --bench session -- session_delivery_group_cost
-nix develop --command env SESSION_CPU=1 cargo bench --locked -p moq-net --bench session -- session_delivery_group_cost_cpu
+nix develop --command cargo bench --locked -p moq-net --features fuzz --bench session -- session_delivery_group_cost
+nix develop --command env SESSION_CPU=1 cargo bench --locked -p moq-net --features fuzz --bench session -- session_delivery_group_cost_cpu
 ```
+
+Run the same session scenarios through relay admission, auth, cluster routing,
+and stats over the in-memory transport:
+
+```bash
+nix develop --command cargo bench --locked -p moq-relay --features test-support --bench session -- relay_session_dash_
+nix develop --command cargo bench --locked -p moq-relay --features test-support --bench session -- relay_session_delivery_group_cost
+```
+
+The relay and model targets share shapes and complete-payload assertions. The
+`relay_` prefix distinguishes results; the model-only idle case needs its server
+session handle and is not registered by the relay target. Relay fixtures enable
+stats and admit all benchmark paths using embedded auth. The dash viewer gets a
+peer grant to discover hidden stats routes on protocols without hidden opt-in. The announcement limit
+uses the existing peer limit so the large broadcast sweeps exercise routing
+rather than ordinary-client admission caps. These settings are benchmark-only.
+The relay target has its own Nightly leg.
 
 The CPU mode requires Unix and measures the benchmark's current thread, including
 its protocol drivers and the flow-control fixture but excluding scheduler
@@ -101,14 +118,25 @@ or `heap` (jemalloc retained heap and allocation churn):
 ```bash
 nix develop --command just bench-profile lock
 nix develop --command just bench-profile "cpu heap" fanout-heavy "4 16"
+nix develop --command just bench-profile "cpu heap" audio "4 16" io-uring-workers
+nix develop --command just bench-profile cpu chat 4 io-uring-workers origin/main
 ```
 
 This builds the relay with `[profile.profiling]` and frame pointers, then runs
-the workload on Tokio workers at each count twice per mode: an unprofiled
-control, then a profiled run, so the throughput and CPU difference shows the
-profiler's overhead. Each mode captures only the relay process, never the load
+the workload on the selected runtime (`tokio-workers` by default, or
+`io-uring-workers`) at each count twice per mode: an unprofiled control, then a
+profiled run, so the throughput and CPU difference shows the profiler's overhead. Each mode captures only the relay process, never the load
 generator, during the profiled run's 5 s steady window, the same window as the
-summary's throughput. Linux only.
+summary's throughput. Linux only. Both runtimes use the runtime comparison's
+feature build; io\_uring uses its kernel support check too. Readiness verifies the
+selected backend and exact worker count from the relay's actual thread names,
+retained as `runtime.json`, before the generator starts.
+
+The optional final argument selects a base revision. The current harness builds
+it in a temporary worktree and drives both revisions with the current generator,
+sampler, workload and capture settings. This also works when the base's own
+profiling harness has no runtime selector. Results live under `relay/base/` and
+`relay/current/`, with one unprofiled control per revision, worker count and mode.
 
 ### Lock wait
 
@@ -155,6 +183,11 @@ refused rather than reported.
 ```bash
 sudo sysctl -w kernel.perf_event_paranoid=-1
 ```
+
+The maintainer's 24-core `desktop` workstation is the profiling host: it
+keeps `kernel.perf_event_paranoid=-1`. Profile there only while it is quiet,
+with no other agents running and load near zero, since other work on the
+host shows up as lock waits and CPU the relay did not cause.
 
 ### Heap
 
@@ -210,7 +243,7 @@ them as `affinity` in the metadata. A CPU with one core type runs unpinned.
 BASE comparisons run paired rounds (default three, `BENCH_RUNTIME_ROUNDS`),
 alternating base/current order. Startup remains outside the final five-second
 throughput window. `BENCH_ARTIFACTS` chooses the evidence parent (default
-the current worktree's `.scratch/bench`), which must be outside the repository,
+the current worktree's `.tmp/bench`), which must be outside the repository,
 or git-ignored and outside `bench/`; each invocation retains a new run directory even on failure.
 It contains raw load/host JSONL, process diagnostics, Criterion statistics,
 execution order, source revision and tracked dirty patch, tool/build/machine
@@ -219,7 +252,8 @@ source files. The retained path is printed at the end, including on failure.
 Choose an evidence parent outside disposable worktrees when the report must survive
 worktree removal. Criterion case discovery uses isolated short measurements and
 their full JSON IDs, since `--list` truncates display names; discovery samples
-are retained separately and never used in the comparison.
+are retained separately and never used in the comparison. A target that writes
+no Criterion samples, such as one that prints its own table, is listed as skipped.
 
 Each comparison reports the median of the paired percentage deltas, their median
 absolute deviation and range, and flags fewer than three observations or a sign
@@ -238,43 +272,26 @@ hide a relay improvement behind generator saturation. CPU efficiency remains
 withheld until offered load and delivery/loss are comparable. Zero-baseline
 metrics retain absolute deltas when their percentage ratio is undefined.
 
-Measure what each binding adds over Rust:
+Each wrapper carries a runner of the binding benchmark, which measures what the
+binding adds over Rust: `just go bench`, `just py bench`, `just kt bench`,
+`just cpp bench`, `just dart bench`, and `just swift bench` (macOS), beside the
+Rust baselines in `rs/moq-ffi/src/bench.rs`. Every runner runs the same
+in-process rounds with no network: each publisher writes one group from the
+driving thread while every subscriber reads it on its own task, and a round
+waits for every subscriber. It sweeps frame sizes from 100 B to 1 MiB at one
+publisher and subscriber, then 1/4 publishers by 1/4 subscribers at 1 KiB, and
+times two sync calls (`sequence`, `info`). Each case reports delivered MB/s and
+process CPU (user + system, every thread) per MB into
+`$MOQ_BENCH_DIR/<runner>.json`. `MOQ_BENCH_SECONDS` sets each case's time
+budget (default 1); every received frame is checked byte for byte.
 
-```bash
-nix develop --command just bench-ffi
-```
-
-Every runner (Rust, Go, Python, Kotlin, C++, Dart, Swift) runs the same in-process rounds with no
-network: each publisher writes one group from the driving thread while every
-subscriber reads it on its own task, and a round waits for every subscriber. It
-sweeps frame sizes from 100 B to 1 MiB at one publisher and subscriber, then
-1/4 publishers by 1/4 subscribers at 1 KiB, and times two sync calls
-(`sequence`, `info`). Each case reports delivered MB/s and process CPU (user +
-system, every thread) per MB. `MOQ_BENCH_SECONDS` sets each case's time budget
-(default 1); every received frame is checked byte for byte.
-
-Each runner writes `target/bench/ffi/<runner>.json`; `bench/ffi.py` combines
-them into a table and `report.json`. Ratios are against `rust-ffi`, moq-ffi's
-API called from Rust without crossing the FFI, so a wrapper's ratio is what its
-boundary and wrapper cost. `rust-net` runs the same rounds on moq-net, so its
-ratio is what moq-ffi's handles and runtime cost. Ratios hold only within one
-machine. The nightly runs it, prints the table in the job summary, and keeps the
-results as the `bench-ffi` artifact. Each language also has its own recipe
-(`just go bench`, `just py bench`, `just kt bench`, `just cpp bench`,
-`just dart bench`, `just swift bench`). C++ uses C++20 reader coroutines;
-Swift uses structured tasks; Dart uses futures on its event loop.
-The payload checks and scheduling costs are included in each measurement.
-
-Linux runs every wrapper except Swift. The nightly macOS platform job, or a
-manual Platform run with `benchmarks` set, runs `just bench-ffi swift`,
-measuring fresh Rust baselines on that same machine, and uploads
-`bench-ffi-swift` separately. Never compare its absolute values
-against the Linux job's baselines. A local run can select runners explicitly,
-for example `just bench-ffi cpp dart`. Each invocation clears its output
-directory and refuses a runner that produces no report. Dart's native asset
-hook builds its usual minimal-feature release library; C++ and Swift use
-their default-feature release libraries. No codec work is timed here.
-C++ and Dart process CPU measurement supports Linux and macOS.
+The binding benchmark itself lives in
+[rust2](https://github.com/kixelated/rust2/blob/main/bench/ffi/README.md), with
+the UniFFI fork whose changes it measures: its `just bench-ffi` runs these
+runners nightly at a pinned moq revision, against the fork, and reports each
+wrapper's ratio to Rust. So that they keep working here, moq's Nightly runs every
+runner at a token budget without measuring it: `just gh nightly bindings` on
+Linux, and `just swift bench` in the macOS Platform job.
 
 ## Browser
 
@@ -347,11 +364,12 @@ Crashes, wrong bytes, missing frames, a window that presents nothing, or an
 unavailable CPU clock fail the run; timing never does. The nightly runs
 `--smoke` and keeps its run directory as the `bench-browser` artifact.
 
-The in-memory frame and retained-history paths also run directly in Chromium:
+The in-memory frame, retained-history, and gap ledger paths also run directly in Chromium:
 
 ```bash
-nix develop --command bun bench/browser/micro.ts --bench frames --out .scratch/frames.json base=/path/to/release current=. aa=.
-nix develop --command bun bench/browser/micro.ts --bench drift --out .scratch/drift.json before=/path/to/main current=. aa=.
+nix develop --command bun bench/browser/micro.ts --bench frames --out .tmp/frames.json base=/path/to/release current=. aa=.
+nix develop --command bun bench/browser/micro.ts --bench drift --out .tmp/drift.json before=/path/to/main current=. aa=.
+nix develop --command bun bench/browser/micro.ts --bench ledger --out .tmp/ledger.json before=/path/to/main current=. aa=.
 ```
 
 Each variant uses its own workspace source and a persistent page, with one full
@@ -360,8 +378,17 @@ warmup before three alternating measured rounds. `aa` must bundle identically to
 runs the checkout's existing `js/net/bench/frames.ts`; `drift` uses the same fixture
 against every checkout, sweeping retained groups, publishers, and readers. Replay
 and group setup stay outside drift timing; each parked read checks its live
-payload. The browser smoke lane preserves one measured round of both fixtures, and drift
-also runs in the nightly JS benchmark leg. Timing is
+payload. `ledger` uses one fixture against every checkout's internal ledger, sweeping
+ascending, descending, shuffled, and rolling-expiration arrivals over the retained
+gap count. It includes each arrival's expiration and coverage checks.
+The drift sweep includes untimed controls and timed groups with decode-order
+B-frames, independently varying publisher and reader counts and retained history.
+Its `time_mode` column is 0 for untimed, 1 for millisecond timestamps, and 2
+for mixed millisecond/microsecond timestamps, which exercise exact cross-scale
+comparison.
+
+The browser smoke lane preserves one measured round of all three fixtures, and drift
+and ledger also run in the nightly JS benchmark leg. Timing is
 observational, with the A/A spread showing the host's noise floor.
 
 ## Pattern and container coverage
@@ -403,9 +430,6 @@ that artifact first or wait for the next Nightly.
 
 The table includes these measurements:
 
-- Binding delivery in MB/s, process CPU in ms/MB, sync calls in ns, and each
-  wrapper's ratio to `rust-ffi`. Ratios above 1 mean more cost than Rust on the
-  same host, including for throughput, where the ratio is Rust/wrapper.
 - Rust Criterion mean ns per iteration; the history also keeps the confidence interval.
   The `net-cpu` source and the moq-quic targets time thread CPU; the others
   time elapsed time. The Rust bench target jobs measure them with a short warmup
@@ -416,7 +440,7 @@ The table includes these measurements:
   dimension in each series name.
 
 Hosted runners vary across nights, so a trend flag prompts a look at the paired
-comparison rather than proving a regression. Binding ratios compare languages within one run.
+comparison rather than proving a regression.
 Malformed, empty, nonfinite, or duplicate measurements fail validation. The
 nightly artifacts retain the reports, raw JS output, and each Criterion run's
 metadata and estimates for 45 days. Relay load, audio quality, and the Rust
@@ -426,20 +450,19 @@ Render the table from the published history:
 
 ```bash
 git fetch origin gh-pages
-git worktree add .scratch/pages origin/gh-pages
-nix develop --command just gh benchmark-report index .scratch/pages
+git worktree add .tmp/pages origin/gh-pages
+nix develop --command just gh benchmark-report index .tmp/pages
 ```
 
-Then open `.scratch/pages/bench/index.html`. Without `--commit`, the newest
+Then open `.tmp/pages/bench/index.html`. Without `--commit`, the newest
 recorded commit counts as tonight's. Reproduce the measurements locally:
 
 ```bash
-nix develop --command just bench-ffi
 nix develop --command just gh nightly rust-bench
 nix develop --command just gh nightly js
 ```
 
-The latter two write `target/bench/nightly/{rust-bench,js}/report.json`. For a focused
+These write `target/bench/nightly/{rust-bench,js}/report.json`. For a focused
 measured Rust run using the same evidence lifecycle:
 
 ```bash
@@ -505,7 +528,7 @@ just bench-local --checkout "$PWD" --checkout /path/to/another/checkout \
 
 Each JSON record retains host load, configured workers and lanes, admission
 delay, work wall time, total wall time, and child CPU time. Logs stay under each
-checkout's `.scratch/local-bench/`. To compare Bun workspace fanout, repeat with
+checkout's `.tmp/local-bench/`. To compare Bun workspace fanout, repeat with
 the same `bun run --filter=... test` command, then add `--sequential`. To compare
 the module lanes `just check` runs at once, sweep `--jobs 1 3` over
 `bash sh/dispatch.sh check BASE`, which is then admitted once as a whole.

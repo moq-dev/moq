@@ -13,7 +13,7 @@
 use bytes::Bytes;
 
 use crate::{
-	Hops, Path, PathOwned, Pattern, broadcast, cache, coding,
+	Hops, Path, Pattern, broadcast, cache, coding,
 	coding::{Decode, Decoder, Encode, Encoder, Form, varint},
 	frame, group, ietf, lite,
 	path::Relative,
@@ -73,6 +73,18 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 	(broadcast, track, group)
 }
 
+/// Private canonical-owner fixture for size and final-storage cleanup benchmarks.
+pub struct CanonicalStorage(crate::model::group::StorageBench);
+
+impl CanonicalStorage {
+	pub fn new(frames: usize, views: usize) -> Self {
+		Self(crate::model::group::StorageBench::new(frames, views))
+	}
+	pub fn size(&self) -> u64 {
+		self.0.size()
+	}
+}
+
 /// Every target, keyed by the name of its `fuzz_targets/<name>.rs` shim.
 pub const TARGETS: &[(&str, Target)] = &[
 	("lite", lite_wire),
@@ -95,20 +107,13 @@ const LITE_VERSIONS: &[lite::Version] = &[
 ];
 
 /// The moq-transport drafts a target decodes at, selected by the input's first byte.
-const IETF_VERSIONS: &[ietf::Version] = &[
-	ietf::Version::Draft14,
-	ietf::Version::Draft15,
-	ietf::Version::Draft16,
-	ietf::Version::Draft17,
-	ietf::Version::Draft18,
-	ietf::Version::Draft22,
-];
+const IETF_VERSIONS: &[ietf::Version] = &[ietf::Version::Draft18, ietf::Version::Draft22];
 
 /// How many types [`lite_wire`] dispatches over.
-const LITE_KINDS: u8 = 22;
+const LITE_KINDS: u8 = 30;
 
 /// How many types [`ietf_wire`] dispatches over.
-const IETF_KINDS: u8 = 44;
+const IETF_KINDS: u8 = 27;
 
 /// Split the two selector bytes off the input: a version and a type.
 fn select(data: &[u8], versions: usize) -> Option<(usize, u8, &[u8])> {
@@ -126,20 +131,31 @@ fn select(data: &[u8], versions: usize) -> Option<(usize, u8, &[u8])> {
 /// message a later draft dropped). What is never legitimate is emitting bytes we then
 /// refuse, or refuse to consume in full, since the peer's decoder is this same code.
 /// The second encoding must also match the first byte for byte.
-fn roundtrip<T, V>(data: &[u8], version: V) -> bool
+///
+/// `scratch` holds our own encoding while the second decode borrows it, as the first
+/// borrows `data`.
+fn roundtrip<'a, T, V>(data: &'a [u8], scratch: &'a mut Vec<u8>, version: V) -> bool
 where
-	T: Decode<V> + Encode<V>,
+	T: Decode<'a, V> + Encode<V>,
 	V: Copy + Into<Form>,
 {
-	let Ok((decoded, _)) = T::decode_slice(data, version) else {
-		return false;
+	let mut reader = Decoder::new(data, version.into());
+	let decoded = match T::decode(&mut reader, version) {
+		Ok(decoded) => decoded,
+		Err(coding::DecodeError::Short) => {
+			assert!(reader.need() > data.len(), "short read inside a complete body");
+			return false;
+		}
+		Err(_) => return false,
 	};
 
 	let Ok(first) = decoded.encode_bytes(version) else {
 		return true;
 	};
 
-	let (decoded, used) = T::decode_slice(&first, version).expect("could not decode our own encoding");
+	scratch.extend_from_slice(&first);
+	let scratch: &'a [u8] = scratch;
+	let (decoded, used) = T::decode_slice(scratch, version).expect("could not decode our own encoding");
 	assert_eq!(used, first.len(), "our own encoding left {} bytes", first.len() - used);
 
 	let Ok(second) = decoded.encode_bytes(version) else {
@@ -148,6 +164,48 @@ where
 	assert_eq!(first, second, "encoding is not stable");
 
 	true
+}
+
+/// Assert the invariant every path holds once built: its spelling parses back to it under
+/// the strict constructor, and so does every run of its leading segments, which is what
+/// stats grouping and announce compression derive from it.
+fn assert_strict(path: &Path) {
+	let reparsed = Path::new(path.as_str()).unwrap_or_else(|err| panic!("{path:?} is refused: {err}"));
+	assert_eq!(reparsed, *path, "{path:?} did not parse back to itself");
+	let count = path.parts().count();
+	for n in 0..=count {
+		let head = path.head(n).expect("a path has a head per segment");
+		assert!(
+			Path::new(head.as_str()).is_ok(),
+			"{path:?} has an invalid head {head:?}"
+		);
+	}
+	assert!(path.head(count + 1).is_none(), "{path:?} has a head past its segments");
+}
+
+/// Read the input as a moq-lite path, whatever its kind, and hold it to [`assert_strict`].
+fn lite_path(data: &[u8], version: lite::Version) {
+	if let Ok((path, _)) = Path::decode_slice(data, version) {
+		assert_strict(&path);
+	}
+}
+
+/// Read the input as a namespace tuple and as a Full Track Name, whatever its kind, and
+/// hold each path to [`assert_strict`] and the namespace to the wire round trip.
+fn ietf_paths(data: &[u8], version: ietf::Version) {
+	let form: Form = version.into();
+	if let Ok(path) = ietf::namespace::decode_namespace(&mut Decoder::new(data, form)) {
+		assert_strict(&path);
+		let mut encoded = Vec::new();
+		ietf::namespace::encode_namespace(&mut Encoder::new(&mut encoded, form), &path)
+			.expect("could not encode a decoded namespace");
+		let echo = ietf::namespace::decode_namespace(&mut Decoder::new(&encoded, form))
+			.expect("could not decode our own namespace");
+		assert_eq!(echo, path, "namespace did not survive a round trip");
+	}
+	if let Ok((path, _)) = ietf::namespace::decode_track(&mut Decoder::new(data, form)) {
+		assert_strict(&path);
+	}
 }
 
 /// [`roundtrip`] for a datagram body, which runs to the end of its buffer.
@@ -162,7 +220,7 @@ fn datagram(data: &[u8], version: lite::Version) -> bool {
 	let mut any = false;
 	for &negotiated in negotiated {
 		for timescale in [Some(crate::Timescale::MILLI), None] {
-			for ietf in [None, Some(ietf::Version::Draft14), Some(ietf::Version::Draft22)] {
+			for ietf in [None, Some(ietf::Version::Draft18), Some(ietf::Version::Draft22)] {
 				for compressed in [false, true] {
 					let framing = lite::Framing {
 						timescale,
@@ -200,30 +258,39 @@ pub fn lite_wire(data: &[u8]) -> bool {
 	};
 	let version = LITE_VERSIONS[version];
 	let kind = kind % LITE_KINDS;
+	lite_path(rest, version);
 
 	match kind {
-		0 => roundtrip::<lite::Setup, _>(rest, version),
-		1 => roundtrip::<lite::SessionInfo, _>(rest, version),
-		2 => roundtrip::<lite::AnnounceInit<'static>, _>(rest, version),
-		3 => roundtrip::<lite::AnnounceRequest<'static>, _>(rest, version),
-		4 => roundtrip::<lite::AnnounceOk, _>(rest, version),
-		5 => roundtrip::<lite::AnnounceBroadcast<'static>, _>(rest, version),
-		6 => roundtrip::<lite::Subscribe<'static>, _>(rest, version),
-		7 => roundtrip::<lite::SubscribeOk, _>(rest, version),
-		8 => roundtrip::<lite::SubscribeStart, _>(rest, version),
-		9 => roundtrip::<lite::SubscribeEnd, _>(rest, version),
-		10 => roundtrip::<lite::SubscribeUpdate, _>(rest, version),
-		11 => roundtrip::<lite::SubscribeDrop, _>(rest, version),
-		12 => roundtrip::<lite::SubscribeResponse, _>(rest, version),
-		13 => roundtrip::<lite::Fetch<'static>, _>(rest, version),
-		14 => roundtrip::<lite::Group, _>(rest, version),
-		15 => roundtrip::<lite::Goaway<'static>, _>(rest, version),
-		16 => roundtrip::<lite::Track<'static>, _>(rest, version),
-		17 => roundtrip::<lite::TrackInfo, _>(rest, version),
-		18 => roundtrip::<lite::Probe, _>(rest, version),
+		0 => roundtrip::<lite::Setup, _>(rest, &mut Vec::new(), version),
+		1 => roundtrip::<lite::SessionInfo, _>(rest, &mut Vec::new(), version),
+		2 => roundtrip::<lite::AnnounceInit, _>(rest, &mut Vec::new(), version),
+		3 => roundtrip::<lite::AnnounceRequest, _>(rest, &mut Vec::new(), version),
+		4 => roundtrip::<lite::AnnounceOk, _>(rest, &mut Vec::new(), version),
+		5 => roundtrip::<lite::AnnounceBroadcast, _>(rest, &mut Vec::new(), version),
+		6 => roundtrip::<lite::Subscribe<'_>, _>(rest, &mut Vec::new(), version),
+		7 => roundtrip::<lite::SubscribeOk, _>(rest, &mut Vec::new(), version),
+		8 => roundtrip::<lite::SubscribeStart, _>(rest, &mut Vec::new(), version),
+		9 => roundtrip::<lite::SubscribeEnd, _>(rest, &mut Vec::new(), version),
+		10 => roundtrip::<lite::SubscribeUpdate, _>(rest, &mut Vec::new(), version),
+		11 => roundtrip::<lite::SubscribeDrop, _>(rest, &mut Vec::new(), version),
+		12 => roundtrip::<lite::SubscribeResponse, _>(rest, &mut Vec::new(), version),
+		13 => roundtrip::<lite::Fetch<'_>, _>(rest, &mut Vec::new(), version),
+		14 => roundtrip::<lite::Group, _>(rest, &mut Vec::new(), version),
+		15 => roundtrip::<lite::Goaway<'_>, _>(rest, &mut Vec::new(), version),
+		16 => roundtrip::<lite::Track<'_>, _>(rest, &mut Vec::new(), version),
+		17 => roundtrip::<lite::TrackInfo, _>(rest, &mut Vec::new(), version),
+		18 => roundtrip::<lite::Probe, _>(rest, &mut Vec::new(), version),
 		19 => datagram(rest, version),
-		20 => roundtrip::<lite::Parameters, _>(rest, version),
-		21 => roundtrip::<lite::ietf::TrackProperties, _>(rest, version),
+		20 => roundtrip::<lite::Parameters, _>(rest, &mut Vec::new(), version),
+		21 => roundtrip::<lite::ietf::TrackProperties, _>(rest, &mut Vec::new(), version),
+		22 => roundtrip::<lite::Tracks, _>(rest, &mut Vec::new(), version),
+		23 => roundtrip::<lite::TracksEvent<'_>, _>(rest, &mut Vec::new(), version),
+		24 => roundtrip::<lite::Auth, _>(rest, &mut Vec::new(), version),
+		25 => roundtrip::<lite::AuthOk, _>(rest, &mut Vec::new(), version),
+		26 => roundtrip::<lite::AuthError, _>(rest, &mut Vec::new(), version),
+		27 => roundtrip::<lite::AuthReply, _>(rest, &mut Vec::new(), version),
+		28 => roundtrip::<crate::setup::Client, _>(rest, &mut Vec::new(), crate::Version::Lite(version)),
+		29 => roundtrip::<crate::setup::Server, _>(rest, &mut Vec::new(), crate::Version::Lite(version)),
 		_ => unreachable!("kind is taken modulo LITE_KINDS"),
 	}
 }
@@ -232,7 +299,7 @@ pub fn lite_wire(data: &[u8]) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Announced {
 	/// ANNOUNCE_START: a route's suffix and wire hop chain, taking the next id.
-	Start(PathOwned, Hops),
+	Start(Path, Hops),
 	/// ANNOUNCE_UPDATE: a live id's new wire hop chain.
 	Update(u64, Hops),
 	/// ANNOUNCE_END: a live id retired.
@@ -290,22 +357,35 @@ impl AnnounceWriter {
 	}
 }
 
+/// Mark `track` as a copy received from a remote publisher, as a subscriber session does, for
+/// the tail bench.
+pub fn received(track: &track::Producer) {
+	track.received();
+}
+
+/// Fill the `groups` of `track` its cache misses, a run per FETCH, as a publisher answers a
+/// range FETCH, for the session bench. The returned guard keeps the filled groups cached.
+pub async fn fill_groups(track: &track::Consumer, groups: std::ops::Range<u64>) -> crate::Result<impl Sized> {
+	track.info().await?;
+	Ok(track.fill_groups(groups, 0).await)
+}
+
 /// `origin` as a session connected to `peer` serves it, for the viewers bench.
 pub fn excluding(origin: crate::origin::Consumer, peer: crate::Hop) -> crate::origin::Consumer {
 	origin.excluding(peer)
 }
 
 /// Land a claim with a peer's wire route, as a session does, for the origin bench.
-pub fn dynamic_route(
+pub fn requests_route(
 	origin: &crate::origin::Producer,
-	prefix: impl crate::AsPath,
+	prefix: impl Into<crate::Path>,
 	route: crate::origin::Route,
-) -> Result<crate::origin::Dynamic, crate::Error> {
-	origin.dynamic_route(prefix, route)
+) -> Result<crate::origin::Requests, crate::Error> {
+	origin.requests_route(prefix, route)
 }
 
 /// Replace a peer claim's route in place, as a session does on a route update.
-pub fn update_route(dynamic: &crate::origin::Dynamic, route: crate::origin::Route) -> Result<(), crate::Error> {
+pub fn update_route(dynamic: &crate::origin::Requests, route: crate::origin::Route) -> Result<(), crate::Error> {
 	dynamic.update_route(route)
 }
 
@@ -349,7 +429,7 @@ impl Interests {
 /// drops the entry unless some guard still holds it. Not a public API.
 pub fn bump_publisher_bytes(
 	registry: &crate::stats::Registry,
-	path: impl crate::AsPath,
+	path: impl Into<crate::Path>,
 	tier: &crate::stats::Tier,
 	n: u64,
 ) {
@@ -386,13 +466,13 @@ impl Meter {
 
 /// Build a session-local payload meter without exposing the model's private stats carriers.
 pub fn session_meter(registry: &crate::stats::Registry, tier: crate::stats::Tier, label: &str, path: &str) -> Meter {
-	let session = registry.tier(tier).session(label);
-	Meter(session.egress(path).meter())
+	let session = registry.tier(tier).session(Path::new(label).expect("label fits"));
+	Meter(session.egress(Path::new(path).expect("path fits")).meter())
 }
 
 /// Build the original per-path-only payload meter as the benchmark baseline.
 pub fn path_meter(registry: &crate::stats::Registry, tier: &crate::stats::Tier, path: &str) -> Meter {
-	Meter(registry.publisher_meter(path, tier))
+	Meter(registry.publisher_meter(Path::new(path).expect("path fits"), tier))
 }
 
 /// Encode `announced` as a fresh [`AnnounceWriter`] stream.
@@ -430,6 +510,30 @@ pub fn decode_announces(data: &[u8], compress: bool) -> Vec<Announced> {
 		resolved.push(announced);
 	}
 	resolved
+}
+
+/// Encode a moq-transport NAMESPACE message for each of `paths`.
+pub fn encode_namespaces(paths: &[Path]) -> Vec<u8> {
+	let mut data = Vec::new();
+	let w = &mut Encoder::new(&mut data, BENCH_IETF.into());
+	for path in paths {
+		let msg = ietf::Namespace {
+			suffix: path.clone(),
+			params: None,
+		};
+		msg.encode(w, BENCH_IETF).expect("a namespace that fits");
+	}
+	data
+}
+
+/// Decode the NAMESPACE messages [`encode_namespaces`] wrote.
+pub fn decode_namespaces(data: &[u8]) -> Vec<Path> {
+	let r = &mut Decoder::new(data, BENCH_IETF.into());
+	let mut paths = Vec::new();
+	while !r.is_empty() {
+		paths.push(ietf::Namespace::decode(r, BENCH_IETF).expect("our own encoding").suffix);
+	}
+	paths
 }
 
 /// A varint-heavy lite wire object, as the varint bench times it: what a publisher
@@ -500,14 +604,11 @@ impl LiteSample {
 				order: crate::track::Order::Descending,
 				epoch: None,
 				id: 3,
-				broadcast: Path::new("room/alice"),
+				broadcast: Path::from_static("room/alice"),
 				track: "video".into(),
 				priority: 2,
 				max_delay: std::time::Duration::from_secs(10),
-				start_group: None,
-				end_group: None,
-				start_frame: 0,
-				end_frame: None,
+				ranges: vec![lite::Range::OLDEST],
 			}
 			.encode(w, version)
 			.unwrap(),
@@ -569,6 +670,11 @@ impl LiteSample {
 /// Returns whether anything resolved.
 pub fn announce_stream(data: &[u8]) -> bool {
 	let resolved = decode_announces(data, true);
+	for announced in &resolved {
+		if let Announced::Start(suffix, _) = announced {
+			assert_strict(suffix);
+		}
+	}
 	let echo = decode_announces(&encode_announces(&resolved, true), true);
 	assert_eq!(echo, resolved, "compression did not survive a round trip");
 	!resolved.is_empty()
@@ -584,61 +690,36 @@ pub fn ietf_wire(data: &[u8]) -> bool {
 	};
 	let version = IETF_VERSIONS[version];
 	let kind = kind % IETF_KINDS;
+	ietf_paths(rest, version);
 
 	match kind {
-		0 => roundtrip::<ietf::GoAway<'static>, _>(rest, version),
-		1 => roundtrip::<ietf::Fetch<'static>, _>(rest, version),
-		2 => roundtrip::<ietf::FetchOk, _>(rest, version),
-		3 => roundtrip::<ietf::FetchError<'static>, _>(rest, version),
-		4 => roundtrip::<ietf::FetchCancel, _>(rest, version),
-		5 => roundtrip::<ietf::FetchHeader, _>(rest, version),
-		6 => roundtrip::<ietf::FetchType<'static>, _>(rest, version),
-		7 => roundtrip::<ietf::PublishNamespace<'static>, _>(rest, version),
-		8 => roundtrip::<ietf::PublishNamespaceOk, _>(rest, version),
-		9 => roundtrip::<ietf::PublishNamespaceError<'static>, _>(rest, version),
-		10 => roundtrip::<ietf::PublishNamespaceDone<'static>, _>(rest, version),
-		11 => roundtrip::<ietf::PublishNamespaceCancel<'static>, _>(rest, version),
-		12 => roundtrip::<ietf::TrackStatus<'static>, _>(rest, version),
-		13 => roundtrip::<ietf::Publish<'static>, _>(rest, version),
-		14 => roundtrip::<ietf::PublishOk, _>(rest, version),
-		15 => roundtrip::<ietf::PublishError<'static>, _>(rest, version),
-		16 => roundtrip::<ietf::PublishDone<'static>, _>(rest, version),
-		17 => roundtrip::<ietf::PublishSkipped<'static>, _>(rest, version),
-		18 => roundtrip::<ietf::Subscribe<'static>, _>(rest, version),
-		19 => roundtrip::<ietf::SubscribeOk, _>(rest, version),
-		20 => roundtrip::<ietf::SubscribeError<'static>, _>(rest, version),
-		21 => roundtrip::<ietf::SubscribeUpdate, _>(rest, version),
-		22 => roundtrip::<ietf::Unsubscribe, _>(rest, version),
-		23 => roundtrip::<ietf::SubscribeNamespace<'static>, _>(rest, version),
-		24 => roundtrip::<ietf::SubscribeNamespaceLegacy<'static>, _>(rest, version),
-		25 => roundtrip::<ietf::SubscribeNamespaceOk, _>(rest, version),
-		26 => roundtrip::<ietf::SubscribeNamespaceError<'static>, _>(rest, version),
-		27 => roundtrip::<ietf::UnsubscribeNamespace<'static>, _>(rest, version),
-		28 => roundtrip::<ietf::Namespace<'static>, _>(rest, version),
-		29 => roundtrip::<ietf::NamespaceDone<'static>, _>(rest, version),
-		30 => roundtrip::<ietf::MaxRequestId, _>(rest, version),
-		31 => roundtrip::<ietf::RequestsBlocked, _>(rest, version),
-		32 => roundtrip::<ietf::RequestOk, _>(rest, version),
-		33 => roundtrip::<ietf::RequestError<'static>, _>(rest, version),
-		34 => roundtrip::<ietf::GroupHeader, _>(rest, version),
-		35 => roundtrip::<ietf::Parameters, _>(rest, version),
-		36 => roundtrip::<ietf::Location, _>(rest, version),
-		37 => roundtrip::<ietf::FetchObject, _>(rest, version),
-		38 => roundtrip::<ietf::PublishNamespaceUpdate, _>(rest, version),
-		39 => roundtrip::<ietf::ObjectDatagram, _>(rest, version),
-		40 => roundtrip::<ietf::SubscribeTracks<'static>, _>(rest, version),
-		// The unified SETUP replaced the client/server pair at draft-17. The pair refuses a
-		// later draft itself, but the unified one treats an earlier draft as unreachable.
-		41 if matches!(
-			version,
-			ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16
-		) =>
-		{
-			false
-		}
-		41 => setup::<crate::setup::Setup>(rest, version, |setup| &setup.parameters),
-		42 => setup::<crate::setup::Client>(rest, version, |setup| &setup.parameters),
-		43 => setup::<crate::setup::Server>(rest, version, |setup| &setup.parameters),
+		0 => roundtrip::<ietf::GoAway<'_>, _>(rest, &mut Vec::new(), version),
+		1 => roundtrip::<ietf::Fetch<'_>, _>(rest, &mut Vec::new(), version),
+		2 => roundtrip::<ietf::FetchOk, _>(rest, &mut Vec::new(), version),
+		3 => roundtrip::<ietf::FetchHeader, _>(rest, &mut Vec::new(), version),
+		4 => roundtrip::<ietf::FetchType<'_>, _>(rest, &mut Vec::new(), version),
+		5 => roundtrip::<ietf::PublishNamespace, _>(rest, &mut Vec::new(), version),
+		6 => roundtrip::<ietf::TrackStatus<'_>, _>(rest, &mut Vec::new(), version),
+		7 => roundtrip::<ietf::Publish<'_>, _>(rest, &mut Vec::new(), version),
+		8 => roundtrip::<ietf::PublishOk, _>(rest, &mut Vec::new(), version),
+		9 => roundtrip::<ietf::PublishDone<'_>, _>(rest, &mut Vec::new(), version),
+		10 => roundtrip::<ietf::PublishSkipped<'_>, _>(rest, &mut Vec::new(), version),
+		11 => roundtrip::<ietf::Subscribe<'_>, _>(rest, &mut Vec::new(), version),
+		12 => roundtrip::<ietf::SubscribeOk, _>(rest, &mut Vec::new(), version),
+		13 => roundtrip::<ietf::SubscribeUpdate, _>(rest, &mut Vec::new(), version),
+		14 => roundtrip::<ietf::SubscribeNamespace, _>(rest, &mut Vec::new(), version),
+		15 => roundtrip::<ietf::Namespace, _>(rest, &mut Vec::new(), version),
+		16 => roundtrip::<ietf::NamespaceDone, _>(rest, &mut Vec::new(), version),
+		17 => roundtrip::<ietf::RequestOk, _>(rest, &mut Vec::new(), version),
+		18 => roundtrip::<ietf::RequestError<'_>, _>(rest, &mut Vec::new(), version),
+		19 => roundtrip::<ietf::GroupHeader, _>(rest, &mut Vec::new(), version),
+		20 => roundtrip::<ietf::Parameters, _>(rest, &mut Vec::new(), version),
+		21 => roundtrip::<ietf::Location, _>(rest, &mut Vec::new(), version),
+		22 => roundtrip::<ietf::FetchObject, _>(rest, &mut Vec::new(), version),
+		23 => roundtrip::<ietf::PublishNamespaceUpdate, _>(rest, &mut Vec::new(), version),
+		24 => roundtrip::<ietf::ObjectDatagram, _>(rest, &mut Vec::new(), version),
+		25 => roundtrip::<ietf::SubscribeTracks, _>(rest, &mut Vec::new(), version),
+		26 => setup::<crate::setup::Setup>(rest, &mut Vec::new(), version, |setup| &setup.parameters),
 		_ => unreachable!("kind is taken modulo IETF_KINDS"),
 	}
 }
@@ -648,9 +729,9 @@ pub fn ietf_wire(data: &[u8]) -> bool {
 ///
 /// A server may not send PATH or AUTHORITY but is otherwise held to the same options, so
 /// any block a client accepts from its server, a server accepts from its client.
-fn setup<T>(data: &[u8], version: ietf::Version, parameters: fn(&T) -> &Bytes) -> bool
+fn setup<'a, T>(data: &'a [u8], scratch: &'a mut Vec<u8>, version: ietf::Version, parameters: fn(&T) -> &Bytes) -> bool
 where
-	T: Decode<crate::Version> + Encode<crate::Version>,
+	T: Decode<'a, crate::Version> + Encode<crate::Version>,
 {
 	let outer = crate::Version::Ietf(version);
 	if let Ok((message, _)) = T::decode_slice(data, outer) {
@@ -662,17 +743,17 @@ where
 			);
 		}
 	}
-	roundtrip::<T, _>(data, outer)
+	roundtrip::<T, _>(data, scratch, outer)
 }
 
 /// Decode a varint with whichever codec the selected version uses.
 ///
-/// Byte 0 picks the version, which is the whole point: lite-01 to lite-06 and drafts
-/// 14-16 use the QUIC two-bit length tag, while lite-07 and draft-17+ count leading
-/// ones, and the two disagree about which byte sequences are even legal.
+/// Byte 0 picks the version, which is the whole point: lite-01 to lite-06 use the QUIC
+/// two-bit length tag, while lite-07 and the moq-transport drafts count leading ones, and
+/// the two disagree about which byte sequences are even legal.
 ///
 /// The leading-ones form spans the full `u64`, while the QUIC form stops at
-/// [`crate::coding::varint::MAX_QUIC`]; a value always re-encodes in the form it was read in.
+/// `2^62 - 1`; a value always re-encodes in the form it was read in.
 pub fn varint(data: &[u8]) -> bool {
 	let Some((&selector, rest)) = data.split_first() else {
 		return false;
@@ -728,24 +809,24 @@ impl Default for Messages {
 				order: crate::track::Order::Descending,
 				epoch: None,
 				id: 7,
-				broadcast: Path::new("room/alice"),
+				broadcast: Path::from_static("room/alice"),
 				track: "video".into(),
 				priority: 3,
 				max_delay: Duration::from_millis(500),
-				start_group: Some(1_000),
-				end_group: None,
-				start_frame: 0,
-				end_frame: None,
+				ranges: vec![lite::Range {
+					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
+					end: None,
+				}],
 			},
 			lite_update: lite::SubscribeUpdate {
 				wanted_group: None,
 				order: crate::track::Order::Descending,
 				priority: 4,
 				max_delay: Duration::from_millis(500),
-				start_group: Some(1_000),
-				end_group: Some(2_000),
-				start_frame: 0,
-				end_frame: None,
+				ranges: vec![lite::Range {
+					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
+					end: Some(lite::Anchor::Absolute(crate::track::Position::group(2_001))),
+				}],
 			},
 			lite_start: lite::SubscribeResponse::Start(lite::SubscribeStart {
 				group: 1_234,
@@ -767,7 +848,7 @@ impl Default for Messages {
 				max_age: None,
 				new_group: None,
 				request_id: ietf::RequestId(2),
-				track_namespace: Path::new("room/alice"),
+				track_namespace: Path::from_static("room/alice"),
 				track_name: "video".into(),
 				subscriber_priority: 128,
 				group_order: ietf::GroupOrder::Descending,
@@ -780,9 +861,7 @@ impl Default for Messages {
 				authorization_token: None,
 				epoch: None,
 			},
-			// Draft-17+ carries the request id in the control message framing instead.
 			ietf_ok: ietf::SubscribeOk {
-				request_id: None,
 				track_alias: 5,
 				largest: Some(ietf::Location {
 					group: 1_000,
@@ -878,6 +957,85 @@ pub fn decode_varints(data: &[u8], ietf: bool) -> u64 {
 	sum
 }
 
+/// Decode one broadcast path as moq-lite carries it (`ietf == false`), a string, or as
+/// a moq-transport namespace tuple.
+pub fn decode_path(data: &[u8], ietf: bool) -> Path {
+	let r = &mut Decoder::new(data, bench_form(ietf));
+	let path = match ietf {
+		false => Path::decode(r, BENCH_LITE).unwrap(),
+		true => ietf::namespace::decode_namespace(r).unwrap(),
+	};
+	assert!(r.is_empty());
+	path
+}
+
+/// Append `path` as moq-lite carries it (`ietf == false`), a string, or as a
+/// moq-transport namespace tuple.
+pub fn encode_path(path: &Path, ietf: bool, out: &mut Vec<u8>) {
+	let w = &mut Encoder::new(out, bench_form(ietf));
+	match ietf {
+		false => path.encode(w, BENCH_LITE).unwrap(),
+		true => ietf::namespace::encode_namespace(w, path).unwrap(),
+	}
+}
+
+/// Append a SUBSCRIBE for `track` in `broadcast`, as moq-lite (`ietf == false`) or
+/// moq-transport carries it.
+pub fn encode_subscribe(broadcast: &Path, track: &str, ietf: bool, out: &mut Vec<u8>) {
+	let w = &mut Encoder::new(out, bench_form(ietf));
+	match ietf {
+		false => lite::Subscribe {
+			id: 0,
+			broadcast: broadcast.clone(),
+			epoch: None,
+			track: track.into(),
+			priority: 0,
+			max_delay: std::time::Duration::ZERO,
+			ranges: vec![lite::Range::OLDEST],
+			order: track::Order::Descending,
+		}
+		.encode(w, BENCH_LITE)
+		.unwrap(),
+		true => ietf::Subscribe {
+			request_id: ietf::RequestId(0),
+			track_namespace: broadcast.clone(),
+			track_name: track.into(),
+			subscriber_priority: 128,
+			group_order: ietf::GroupOrder::Descending,
+			filter: ietf::Filter::NextObject,
+			fill: None,
+			properties_wanted: true,
+			forward: true,
+			rendezvous: false,
+			range_filters: false,
+			authorization_token: None,
+			new_group: None,
+			max_age: None,
+			epoch: None,
+		}
+		.encode(w, BENCH_IETF)
+		.unwrap(),
+	}
+}
+
+/// Decode the SUBSCRIBE [`encode_subscribe`] wrote, as a lookup would: its broadcast,
+/// and the length of its track name.
+pub fn decode_subscribe(data: &[u8], ietf: bool) -> (Path, usize) {
+	let r = &mut Decoder::new(data, bench_form(ietf));
+	let decoded = match ietf {
+		false => {
+			let msg = lite::Subscribe::decode(r, BENCH_LITE).unwrap();
+			(msg.broadcast, msg.track.len())
+		}
+		true => {
+			let msg = ietf::Subscribe::decode(r, BENCH_IETF).unwrap();
+			(msg.track_namespace, msg.track_name.len())
+		}
+	};
+	assert!(r.is_empty());
+	decoded
+}
+
 /// Exercise the [`Path`] invariants against arbitrary text.
 ///
 /// The input is UTF-8, split at the first newline into a target path and a base. The
@@ -889,14 +1047,26 @@ pub fn path(data: &[u8]) -> bool {
 	};
 
 	let (target, base) = text.split_once('\n').unwrap_or((text, ""));
-	let target = Path::new(target);
-	let base = Path::new(base);
 
-	// Normalization is a fixed point: re-parsing what `as_str` printed changes nothing,
-	// or every path that made a round trip through the wire would drift.
-	assert_eq!(Path::new(target.as_str()), target, "normalization is not idempotent");
-	assert_eq!(target.to_owned(), target, "owning a path changed it");
-	assert_eq!(target.borrow(), target, "borrowing a path changed it");
+	// A spelling is refused exactly when it is over the limit or has an empty segment, so
+	// each path has one spelling.
+	for s in [target, base] {
+		let expected = if s.len() > Path::MAX_BYTES {
+			Err(crate::path::Invalid::TooLong)
+		} else if !s.is_empty() && s.split('/').any(str::is_empty) {
+			Err(crate::path::Invalid::EmptySegment)
+		} else {
+			Ok(())
+		};
+		assert_eq!(Path::new(s).map(|_| ()), expected, "{s:?} was judged wrongly");
+	}
+	let (Ok(target), Ok(base)) = (Path::new(target), Path::new(base)) else {
+		return true;
+	};
+
+	// A path's own spelling parses back to it, or every path that made a round trip
+	// through the wire would drift.
+	assert_strict(&target);
 	assert_eq!(target.parts().collect::<Vec<_>>().join("/"), target.as_str());
 
 	// A prefix is a prefix whichever way you ask.
@@ -906,20 +1076,30 @@ pub fn path(data: &[u8]) -> bool {
 		"has_prefix and strip_prefix disagree"
 	);
 	if let Some(rest) = target.strip_prefix(&base) {
-		assert_eq!(base.join(&rest), target, "strip_prefix did not invert join");
+		assert_eq!(base.join(&rest), Ok(target.clone()), "strip_prefix did not invert join");
 	}
 
-	// Joining descends, so the result is always under what it started from.
-	let joined = target.join(&base);
-	assert!(joined.has_prefix(&target), "join escaped its base");
+	// Joining descends, so the result is always under what it started from, and fails
+	// only past the limit.
+	match target.join(&base) {
+		Ok(joined) => assert!(joined.has_prefix(&target), "join escaped its base"),
+		Err(_) => assert!(
+			target.len() + 1 + base.len() > Path::MAX_BYTES,
+			"a join within the limit failed"
+		),
+	}
 
 	// `relative` is documented as the inverse of `resolve`, and as never walking above
 	// the root, so `try_resolve` has to accept whatever it produces.
 	if let Some(rel) = target.relative(&base) {
-		assert_eq!(base.resolve(&rel), target, "relative did not invert resolve");
+		assert_eq!(
+			base.resolve(&rel),
+			Ok(target.clone()),
+			"relative did not invert resolve"
+		);
 		assert_eq!(
 			base.try_resolve(&rel),
-			Some(target.to_owned()),
+			Some(target.clone()),
 			"relative escaped the root"
 		);
 	}
@@ -927,9 +1107,9 @@ pub fn path(data: &[u8]) -> bool {
 	// Resolving arbitrary references must stay inside the clamped/unclamped contract:
 	// `try_resolve` only refuses by walking above the root, so whenever it answers, it
 	// answers the same as `resolve`.
-	let rel = Relative::new(base.as_str());
+	let rel = Relative::new(base.as_str()).expect("a reference no longer than its path fits");
 	if let Some(resolved) = target.try_resolve(&rel) {
-		assert_eq!(resolved, target.resolve(&rel), "try_resolve disagreed with resolve");
+		assert_eq!(Ok(resolved), target.resolve(&rel), "try_resolve disagreed with resolve");
 	}
 
 	// The wire form is the same path back, whenever the path is expressible at all.
@@ -1052,6 +1232,17 @@ pub fn seeds() -> Vec<Seed> {
 		}
 	}
 
+	// A typed empty TRACKS_SYNCED and AUTH_OK reply need nonuniform envelope bytes.
+	for (kind, body) in [(23, &[4, 0][..]), (27, &[0, 3, 0, 0, 0][..])] {
+		let mut data = vec![(LITE_VERSIONS.len() - 1) as u8, kind];
+		data.extend_from_slice(body);
+		seeds.push(Seed {
+			target: "lite",
+			kind,
+			data,
+		});
+	}
+
 	for version in 0..IETF_VERSIONS.len() as u8 {
 		for kind in 0..IETF_KINDS {
 			for fill in FILLS {
@@ -1083,34 +1274,37 @@ pub fn seeds() -> Vec<Seed> {
 	for (index, version) in IETF_VERSIONS.iter().enumerate() {
 		let outer = crate::Version::Ietf(*version);
 		let parameters = ietf::Parameters::default().encode_bytes(*version).unwrap();
-		let messages = match version {
-			ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16 => vec![
-				(
-					42,
-					crate::setup::Client {
-						versions: coding::Versions::from([outer.into()]),
-						parameters: parameters.clone(),
-					}
-					.encode_bytes(outer)
-					.unwrap(),
-				),
-				(
-					43,
-					crate::setup::Server {
-						version: outer.into(),
-						parameters,
-					}
-					.encode_bytes(outer)
-					.unwrap(),
-				),
-			],
-			_ => vec![(41, crate::setup::Setup { parameters }.encode_bytes(outer).unwrap())],
-		};
+		let messages = vec![(26, crate::setup::Setup { parameters }.encode_bytes(outer).unwrap())];
 		for (kind, message) in messages {
 			let mut data = vec![index as u8, kind];
 			data.extend(message);
 			seeds.push(Seed {
 				target: "ietf",
+				kind,
+				data,
+			});
+		}
+	}
+
+	// The `moql` SETUP pair, framed as lite-01/02, also has its own type prefix.
+	for (index, version) in LITE_VERSIONS.iter().enumerate() {
+		let outer = crate::Version::Lite(*version);
+		let client = crate::setup::Client {
+			versions: coding::Versions::from([outer.into()]),
+			parameters: Default::default(),
+		};
+		let server = crate::setup::Server {
+			version: outer.into(),
+			parameters: Default::default(),
+		};
+		let (Ok(client), Ok(server)) = (client.encode_bytes(outer), server.encode_bytes(outer)) else {
+			continue;
+		};
+		for (kind, message) in [(28, client), (29, server)] {
+			let mut data = vec![index as u8, kind];
+			data.extend(message);
+			seeds.push(Seed {
+				target: "lite",
 				kind,
 				data,
 			});
@@ -1128,7 +1322,7 @@ pub fn seeds() -> Vec<Seed> {
 				group_id: 0,
 			},
 			ietf::FetchType::Filtered {
-				namespace: crate::Path::new("a"),
+				namespace: crate::Path::from_static("a"),
 				track: "b".into(),
 				filter: ietf::Filter::Relative(1),
 			},
@@ -1158,16 +1352,11 @@ pub fn seeds() -> Vec<Seed> {
 		});
 	}
 
-	// A SUBSCRIBE_OK carrying LARGEST_OBJECT, whose value encoding changed at draft-17
-	// from a length-prefixed Location to two bare varints. A uniform fill never lands a
-	// valid parameter count followed by a Location, so build it from the encoder.
+	// A SUBSCRIBE_OK carrying LARGEST_OBJECT, whose value is two bare varints. A uniform
+	// fill never lands a valid parameter count followed by a Location, so build it from
+	// the encoder.
 	for (index, version) in IETF_VERSIONS.iter().enumerate() {
 		let subscribe_ok = ietf::SubscribeOk {
-			request_id: matches!(
-				version,
-				ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16
-			)
-			.then_some(ietf::RequestId(0)),
 			track_alias: 0,
 			largest: Some(ietf::Location { group: 427, object: 0 }),
 			properties: Default::default(),
@@ -1177,11 +1366,11 @@ pub fn seeds() -> Vec<Seed> {
 			continue;
 		};
 
-		let mut data = vec![index as u8, 19];
+		let mut data = vec![index as u8, 12];
 		data.extend_from_slice(&encoded);
 		seeds.push(Seed {
 			target: "ietf",
-			kind: 19,
+			kind: 12,
 			data,
 		});
 	}
@@ -1191,7 +1380,7 @@ pub fn seeds() -> Vec<Seed> {
 	let mut announced = Vec::new();
 	let hop = |id: u64| crate::Hop::new(id).expect("a valid hop");
 	for n in 0..12u64 {
-		let suffix = PathOwned::from(format!("pid{}/private/channel_{}/health-{n}", n % 3, n % 2));
+		let suffix = Path::new(&format!("pid{}/private/channel_{}/health-{n}", n % 3, n % 2)).unwrap();
 		let hops = Hops::try_from(vec![hop(100 + n % 3), hop(1 << 40), hop(1 << 41)]).expect("valid hops");
 		announced.push(Announced::Start(suffix, hops));
 		if n % 4 == 3 {
@@ -1408,29 +1597,19 @@ impl crate::transport::Error for NoError {
 	}
 }
 
-/// Admit modern request IDs for the history benchmark, returning the accepted count.
-pub fn request_history(ids: &[u64]) -> usize {
-	ietf::request_history(ids)
-}
-
-/// Admit a draft-16 window for the request-ID benchmark, returning the accepted count.
-pub fn request_ids(window: u64, ids: &[u64]) -> usize {
-	ietf::request_ids(window, ids)
-}
-
 /// A source-selection watch for the private request-lifetime benchmark.
 pub struct RequestValidity(crate::model::broadcast::RequestValidity);
 
 impl RequestValidity {
 	/// Watch which instance this route's peer selects for a path.
-	pub fn new(route: &crate::origin::Dynamic, path: &crate::Path) -> Self {
+	pub fn new(route: &crate::origin::Requests, path: &crate::Path) -> Self {
 		Self(crate::model::broadcast::RequestValidity::for_source(route, path))
 	}
 
 	/// Capture the lifetime of one pending request.
 	pub fn start(&self) -> kio::Consumer<()> {
 		match self.0.start() {
-			crate::model::broadcast::RequestValidity::Period(route, _) => route,
+			crate::model::broadcast::RequestValidity::Period(route, ..) => route,
 			_ => unreachable!("a source watch always captures a route lease"),
 		}
 	}
@@ -1451,13 +1630,13 @@ mod tests {
 		let registry = crate::stats::Registry::new(crate::stats::Config::new());
 		let (origin, driver) = crate::origin::Producer::new(crate::origin::Config::default());
 		let _driver = driver;
-		let tier = crate::stats::Tier::new("t");
-		let session = registry.tier(tier.clone()).session("root");
+		let tier = crate::stats::Tier::new(crate::Path::from_static("t"));
+		let session = registry.tier(tier.clone()).session(crate::Path::from_static("root"));
 		let _broadcast = origin.publish("room/1", crate::origin::Route::default()).unwrap();
 		let mut cursor = origin.consume().with_stats(session).announced();
 		while cursor.next().now_or_never().flatten().is_some() {}
 
-		bump_publisher_bytes(&registry, "room/1", &tier, 5);
+		bump_publisher_bytes(&registry, crate::Path::from_static("room/1"), &tier, 5);
 		let mut report = crate::stats::Report::default();
 		registry.report(&mut report);
 		registry.report(&mut report);

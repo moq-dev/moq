@@ -17,14 +17,8 @@ impl<E: wt::Error> moq::Error for Error<E> {
 	}
 }
 
-struct Stats<S>(S);
-impl<S: wt::Stats> moq::Stats for Stats<S> {
-	fn bytes_sent(&self) -> Option<u64> {
-		self.0.bytes_sent()
-	}
-	fn bytes_received(&self) -> Option<u64> {
-		self.0.bytes_received()
-	}
+struct Metrics<S>(S);
+impl<S: wt::Stats> moq::Metrics for Metrics<S> {
 	fn bytes_lost(&self) -> Option<u64> {
 		self.0.bytes_lost()
 	}
@@ -122,8 +116,8 @@ impl<S: backend::Session<SendStream: 'static, RecvStream: 'static> + Clone + 'st
 	fn max_datagram_size(&self) -> usize {
 		backend::Session::max_datagram_size(&self.0)
 	}
-	fn binding(&self) -> moq::Binding {
-		moq::Binding::Uri
+	fn address(&self) -> moq::Address {
+		moq::Address::Uri
 	}
 	fn protocol(&self) -> Option<&str> {
 		backend::Session::protocol(&self.0)
@@ -134,8 +128,8 @@ impl<S: backend::Session<SendStream: 'static, RecvStream: 'static> + Clone + 'st
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
 		backend::Session::poll_closed(&mut self.0, cx).map(Error)
 	}
-	fn stats(&self) -> impl moq::Stats {
-		Stats(backend::Session::stats(&self.0))
+	fn metrics(&self) -> impl moq::Metrics {
+		Metrics(backend::Session::stats(&self.0))
 	}
 }
 /// An outgoing WebTransport stream adapted to moq-net.
@@ -306,13 +300,13 @@ mod tests {
 
 	#[test]
 	fn forwards_thread_local_streams_and_keeps_error_codes() {
-		use moq_net::transport::Stats as _;
+		use moq_net::transport::Metrics as _;
 		let state = Rc::new(Cell::new(0));
 		let mut session = Session::new(Backend(state.clone()));
 		let mut cx = Context::from_waker(std::task::Waker::noop());
 		assert_eq!(poll::Session::protocol(&session), Some("moq-lite-06"));
 		assert_eq!(
-			poll::Session::stats(&session).rtt(),
+			poll::Session::metrics(&session).rtt(),
 			Some(std::time::Duration::from_millis(7))
 		);
 		let Poll::Ready(Ok((mut send, mut recv))) =

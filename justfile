@@ -14,7 +14,8 @@ mod kt
 mod swift
 mod go
 mod dart
-# The C++ package over moq-ffi.
+# The C and C++ packages over moq-ffi.
+mod c
 mod cpp
 # OBS Studio plugin (C++). See doc/bin/obs.md.
 mod obs 'cpp/obs'
@@ -52,15 +53,6 @@ bench $BASE="":
 bench-local *args:
     python3 bench/local.py "$@"
 
-# Benchmark selected wrappers against two Rust baselines on this machine.
-[positional-arguments]
-bench-ffi *runners:
-    bench/ffi.sh "$@"
-
-# Compare BoltFFI with UniFFI on one moq-ffi slice. STEPS: build, bench, size, or all.
-bench-ffi-gen *STEPS:
-    bench/ffi-gen/run.sh {{ STEPS }}
-
 # Measure audio group sizes across relay publisher/subscriber and fanout shapes.
 bench-audio:
     bench/run.sh --audio
@@ -78,8 +70,8 @@ bench-shard $SHARDS="0 1 4 16" $CONNECTIONS="16 64 256":
 
 # Profile the relay at each worker count: std mutex waits by stack (lock), CPU
 # stacks (cpu), or jemalloc heap and churn (heap). Example: `just bench-profile "cpu heap" fanout-heavy 4`.
-bench-profile $MODES $WORKLOAD="fanout" $WORKERS="1 4 16":
-    BENCH_PROFILE_MODES="$MODES" BENCH_PROFILE_WORKLOAD="$WORKLOAD" BENCH_PROFILE_WORKERS="$WORKERS" bench/run.sh --profile
+bench-profile $MODES $WORKLOAD="fanout" $WORKERS="1 4 16" $RUNTIME="tokio-workers" $BASE="":
+    BENCH_PROFILE_MODES="$MODES" BENCH_PROFILE_WORKLOAD="$WORKLOAD" BENCH_PROFILE_WORKERS="$WORKERS" BENCH_PROFILE_RUNTIME="$RUNTIME" BENCH_BASE="$BASE" bench/run.sh --profile
 
 # Real-browser transport, CMAF, and publish/watch costs, optionally against a base:
 # `just bench-browser origin/main`. `--smoke` is the bounded correctness lane.
@@ -103,8 +95,9 @@ check $BASE="":
     sh/dispatch.sh check "$BASE"
 
 # The merge queue runs this gate in one job. The test build also enforces
-# default-feature clippy; distinct feature permutations and optimized binding
-# builds run nightly and on release PRs. Missing tools fail under CI_STRICT.
+# default-feature clippy; selected feature extremes run in the gate, while
+# the full feature matrix and optimized bindings run nightly and on release
+# PRs. Missing tools fail under CI_STRICT.
 
 # Run the merge queue's Linux gate over the branch diff against BASE.
 ci $BASE="":

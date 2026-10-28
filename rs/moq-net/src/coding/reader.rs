@@ -78,7 +78,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		&mut self,
 		cx: &mut Context<'_>,
 		consume: bool,
-		decode: impl Fn(&mut Decoder<'_>) -> Result<T, DecodeError>,
+		decode: impl FnMut(&mut Decoder<'_>) -> Result<T, DecodeError>,
 	) -> Poll<Result<T, Error>>
 	where
 		V: Into<Form> + Copy,
@@ -91,7 +91,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		&mut self,
 		cx: &mut Context<'_>,
 		consume: bool,
-		decode: impl Fn(&mut Decoder<'_>) -> Result<T, DecodeError>,
+		mut decode: impl FnMut(&mut Decoder<'_>) -> Result<T, DecodeError>,
 	) -> Poll<Result<(T, usize), Error>>
 	where
 		V: Into<Form> + Copy,
@@ -172,7 +172,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		&mut self,
 		cx: &mut Context<'_>,
 		consume: bool,
-		decode: impl Fn(&mut Decoder<'_>) -> Result<T, DecodeError>,
+		decode: impl FnMut(&mut Decoder<'_>) -> Result<T, DecodeError>,
 	) -> Poll<Result<Option<T>, Error>>
 	where
 		V: Into<Form> + Copy,
@@ -185,7 +185,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 	}
 
 	/// Poll for the next message on the stream.
-	pub fn poll_decode<T: Decode<V> + Debug>(&mut self, cx: &mut Context<'_>) -> Poll<Result<T, Error>>
+	pub fn poll_decode<T: for<'a> Decode<'a, V> + Debug>(&mut self, cx: &mut Context<'_>) -> Poll<Result<T, Error>>
 	where
 		V: Into<Form> + Copy,
 	{
@@ -198,7 +198,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 	pub(crate) fn poll_decode_with<T: Debug>(
 		&mut self,
 		cx: &mut Context<'_>,
-		decode: impl Fn(&mut Decoder<'_>) -> Result<T, DecodeError>,
+		decode: impl FnMut(&mut Decoder<'_>) -> Result<T, DecodeError>,
 	) -> Poll<Result<T, Error>>
 	where
 		V: Into<Form> + Copy,
@@ -206,8 +206,21 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		self.poll_with(cx, true, decode)
 	}
 
+	/// [`Self::poll_decode_maybe`] with `decode` in place of the type's own decoder, for a
+	/// message read in place, whose borrowed fields `decode` resolves before the bytes go.
+	pub(crate) fn poll_decode_maybe_with<T: Debug>(
+		&mut self,
+		cx: &mut Context<'_>,
+		decode: impl FnMut(&mut Decoder<'_>) -> Result<T, DecodeError>,
+	) -> Poll<Result<Option<T>, Error>>
+	where
+		V: Into<Form> + Copy,
+	{
+		self.poll_with_maybe(cx, true, decode)
+	}
+
 	/// Decode the next message from the stream.
-	pub async fn decode<T: Decode<V> + Debug>(&mut self) -> Result<T, Error>
+	pub async fn decode<T: for<'a> Decode<'a, V> + Debug>(&mut self) -> Result<T, Error>
 	where
 		V: Into<Form> + Copy,
 	{
@@ -216,7 +229,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 
 	/// [`Self::poll_decode`], also returning the bytes it consumed, for a handshake to
 	/// count once the session's stats are known.
-	pub(crate) fn poll_decode_sized<T: Decode<V> + Debug>(
+	pub(crate) fn poll_decode_sized<T: for<'a> Decode<'a, V> + Debug>(
 		&mut self,
 		cx: &mut Context<'_>,
 	) -> Poll<Result<(T, usize), Error>>
@@ -228,7 +241,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 	}
 
 	/// [`Self::decode`], also returning the bytes it consumed.
-	pub(crate) async fn decode_sized<T: Decode<V> + Debug>(&mut self) -> Result<(T, usize), Error>
+	pub(crate) async fn decode_sized<T: for<'a> Decode<'a, V> + Debug>(&mut self) -> Result<(T, usize), Error>
 	where
 		V: Into<Form> + Copy,
 	{
@@ -236,7 +249,10 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 	}
 
 	/// Poll for the next message unless the stream is closed cleanly first.
-	pub fn poll_decode_maybe<T: Decode<V> + Debug>(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<T>, Error>>
+	pub fn poll_decode_maybe<T: for<'a> Decode<'a, V> + Debug>(
+		&mut self,
+		cx: &mut Context<'_>,
+	) -> Poll<Result<Option<T>, Error>>
 	where
 		V: Into<Form> + Copy,
 	{
@@ -245,7 +261,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 	}
 
 	/// Decode the next message unless the stream is closed.
-	pub async fn decode_maybe<T: Decode<V> + Debug>(&mut self) -> Result<Option<T>, Error>
+	pub async fn decode_maybe<T: for<'a> Decode<'a, V> + Debug>(&mut self) -> Result<Option<T>, Error>
 	where
 		V: Into<Form> + Copy,
 	{
@@ -253,7 +269,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 	}
 
 	/// Poll for the next message without consuming it unless the stream closes cleanly first.
-	pub fn poll_decode_peek_maybe<T: Decode<V> + Debug>(
+	pub fn poll_decode_peek_maybe<T: for<'a> Decode<'a, V> + Debug>(
 		&mut self,
 		cx: &mut Context<'_>,
 	) -> Poll<Result<Option<T>, Error>>
@@ -265,7 +281,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 	}
 
 	/// Peek the next message unless the stream is closed.
-	pub async fn decode_peek_maybe<T: Decode<V> + Debug>(&mut self) -> Result<Option<T>, Error>
+	pub async fn decode_peek_maybe<T: for<'a> Decode<'a, V> + Debug>(&mut self) -> Result<Option<T>, Error>
 	where
 		V: Into<Form> + Copy,
 	{
@@ -333,7 +349,8 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 	/// Fill a frame's payload from the stream, returning `Pending` once it would block.
 	///
 	/// The payload reaches the frame as it arrives, but keeps its receive credit until the
-	/// frame is full, so incomplete frames stay bounded by the receive window.
+	/// segment it lands in seals, so an incomplete frame holds at most one segment of the
+	/// receive window however large it is.
 	///
 	/// `Ready(Ok(()))` means the frame is full and the caller should commit it; an error
 	/// means the caller should abort it. Either way the frame is untouched otherwise, so
@@ -368,12 +385,19 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 			};
 
 			// One chunk per lease: a lease may hold the transport's lock, so the frame is
-			// written, and its consumers woken, only once the lease is gone.
-			let chunk = lease.copy_to_bytes(lease.chunk().len().min(frame.remaining()));
-			let complete = chunk.len() == frame.remaining();
+			// written, and its consumers woken, only once the lease is gone. A chunk holding
+			// the rest of the frame is taken whole, so a frame delivered in one piece keeps
+			// its allocation; any other stops where the segment being written seals.
+			let remaining = frame.remaining();
+			let take = match lease.chunk().len() >= remaining {
+				true => remaining,
+				false => lease.chunk().len().min(frame.unsealed()),
+			};
+			let chunk = lease.copy_to_bytes(take);
+			let complete = chunk.len() == remaining;
 			let ended = lease.is_fin() && !lease.has_remaining();
-			if complete {
-				// Every byte of the frame is in hand, so its credit returns.
+			if complete || chunk.len() == frame.unsealed() {
+				// Every byte of the segment is in hand, so its credit returns.
 				lease.release();
 			} else {
 				drop(lease);
@@ -411,11 +435,6 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		let bytes = lease.copy_to_bytes(size);
 		lease.release();
 		Poll::Ready(Ok(bytes))
-	}
-
-	/// Read exactly the given number of bytes from the stream.
-	pub async fn read_exact(&mut self, size: usize) -> Result<Bytes, Error> {
-		std::future::poll_fn(|cx| self.poll_read_exact(cx, size)).await
 	}
 
 	/// Poll until the stream is closed, erroring if there are any additional bytes.
@@ -496,10 +515,10 @@ mod tests {
 	fn control_counts_consumed_messages_once() {
 		use crate::{
 			lite,
-			stats::{Bytes, Control, Registry, Tier},
+			stats::{Message, Registry, Tier, Totals},
 		};
 		let registry = Registry::new(Default::default());
-		let session = registry.tier(Tier::default()).session("");
+		let session = registry.tier(Tier::default()).session(crate::Path::from_static(""));
 		let version = lite::Version::Lite07;
 		let msg = lite::Probe {
 			bitrate: Some(123),
@@ -509,7 +528,7 @@ mod tests {
 		let size = bytes.len() as u64;
 		let (head, tail) = bytes.split_at(2);
 		let counted = || registry.snapshot().control();
-		let probes = |n: u64| vec![(Tier::default(), Control::Probe, Bytes { tx: 0, rx: size * n })];
+		let probes = |n: u64| vec![(Tier::default(), Message::Probe, Totals { tx: 0, rx: size * n })];
 
 		let mut reader = queue(&[bytes, head], version).with_stats(&session);
 		let mut cx = Context::from_waker(std::task::Waker::noop());
@@ -542,8 +561,8 @@ mod tests {
 		));
 		let auth = (
 			Tier::default(),
-			Control::Auth,
-			Bytes {
+			Message::Auth,
+			Totals {
 				tx: 0,
 				rx: reply.len() as u64,
 			},
@@ -699,13 +718,15 @@ mod tests {
 		// A size-prefixed goaway: size 3, then a 2 byte URI.
 		let mut reader = queue(&[b"\x03", b"\x02a"], crate::lite::Version::Lite05);
 		let mut cx = Context::from_waker(std::task::Waker::noop());
-		assert!(reader.poll_decode::<crate::lite::Goaway>(&mut cx).is_pending());
+		let version = crate::lite::Version::Lite05;
+		let mut goaway = |r: &mut Decoder<'_>| Ok(crate::lite::Goaway::decode(r, version)?.uri.into_owned());
+		assert!(reader.poll_decode_with(&mut cx, &mut goaway).is_pending());
 		assert_eq!(reader.want, 4, "the prefix declared the whole message");
 
 		reader.stream.get_mut().chunks.push_back(b"bnext");
 		assert!(matches!(
-			reader.poll_decode::<crate::lite::Goaway>(&mut cx),
-			Poll::Ready(Ok(_))
+			reader.poll_decode_with(&mut cx, &mut goaway),
+			Poll::Ready(Ok(uri)) if uri == "ab"
 		));
 		assert_eq!(leased(&mut reader), 4, "what follows the message stays leased");
 		assert!(reader.scratch.is_empty() || reader.scratch.capacity() <= SCRATCH_KEEP);
@@ -742,14 +763,24 @@ mod tests {
 		);
 	}
 
-	fn refuses_frame<T: Decode<V> + Debug, V: StreamCodes + Into<Form> + Copy>(
+	fn refuses_frame<T: for<'a> Decode<'a, V> + Debug, V: StreamCodes + Into<Form> + Copy>(
 		prefix: &'static [u8],
 		version: V,
 		oversized: bool,
 	) {
+		refuses_frame_with(prefix, version, oversized, |r| T::decode(r, version).map(|_| ()));
+	}
+
+	/// [`refuses_frame`] for a message that borrows, which `decode` reads and drops.
+	fn refuses_frame_with<V: StreamCodes + Into<Form> + Copy>(
+		prefix: &'static [u8],
+		version: V,
+		oversized: bool,
+		decode: impl FnMut(&mut Decoder<'_>) -> Result<(), DecodeError>,
+	) {
 		let mut reader = queue(&[prefix, b"following bytes"], version);
 		let mut cx = Context::from_waker(std::task::Waker::noop());
-		let result = reader.poll_decode::<T>(&mut cx);
+		let result = reader.poll_decode_with(&mut cx, decode);
 		if oversized {
 			assert!(
 				matches!(
@@ -772,33 +803,21 @@ mod tests {
 	fn malformed_complete_frames_are_refused() {
 		use crate::{Version, ietf, lite, setup};
 		refuses_frame::<lite::Setup, _>(&[0], lite::Version::Lite05, false);
-		refuses_frame::<lite::Goaway, _>(&[0], lite::Version::Lite05, false);
-		refuses_frame::<ietf::GoAway, _>(&[0, 0], ietf::Version::Draft22, false);
-		for version in [
-			Version::Lite(lite::Version::Lite01),
-			Version::Lite(lite::Version::Lite02),
-			Version::Ietf(ietf::Version::Draft14),
-		] {
-			let prefix: &'static [u8] = if version.is_lite() { &[0x20, 0] } else { &[0x20, 0, 0] };
-			refuses_frame::<setup::Client, _>(prefix, version, false);
-			let prefix: &'static [u8] = if version.is_lite() { &[0x21, 0] } else { &[0x21, 0, 0] };
-			refuses_frame::<setup::Server, _>(prefix, version, false);
+		refuses_frame_with(&[0], lite::Version::Lite05, false, |r| {
+			lite::Goaway::decode(r, lite::Version::Lite05).map(|_| ())
+		});
+		refuses_frame_with(&[0, 0], ietf::Version::Draft22, false, |r| {
+			ietf::GoAway::decode(r, ietf::Version::Draft22).map(|_| ())
+		});
+		for version in [lite::Version::Lite01, lite::Version::Lite02] {
+			refuses_frame::<setup::Client, _>(&[0x20, 0, 0], Version::Lite(version), false);
+			refuses_frame::<setup::Server, _>(&[0x21, 0, 0], Version::Lite(version), false);
 		}
 	}
 
 	#[test]
 	fn oversized_setup_is_refused_at_the_prefix() {
-		use crate::{Version, lite, setup};
-		for version in [lite::Version::Lite01, lite::Version::Lite02] {
-			for size in [65536u64, (1 << 40) + 1] {
-				let mut prefix = vec![0x20];
-				Encoder::new(&mut prefix, version.into()).varint(size).unwrap();
-				let client: &'static [u8] = prefix.clone().leak();
-				refuses_frame::<setup::Client, _>(client, Version::Lite(version), true);
-				prefix[0] = 0x21;
-				refuses_frame::<setup::Server, _>(prefix.leak(), Version::Lite(version), true);
-			}
-		}
+		use crate::lite;
 		for version in [lite::Version::Lite05, lite::Version::Lite06] {
 			let mut prefix = Vec::new();
 			Encoder::new(&mut prefix, version.into()).varint(65536).unwrap();
@@ -945,5 +964,103 @@ mod tests {
 
 		// Two budgets' worth, and the boundary is owed nothing by the time it arrives.
 		assert_eq!(wakes.count(), 2, "the burst was withheld past its budget");
+	}
+
+	/// A leasing stream that keeps the credit of every byte read until a release, the way
+	/// a QUIC connection window does, counting what is held and what came back.
+	#[derive(Default)]
+	struct Credited {
+		chunks: VecDeque<Bytes>,
+		held: usize,
+		released: usize,
+	}
+
+	struct CreditedLease<'a>(&'a mut Credited);
+
+	impl RecvStream for Credited {
+		type Error = crate::lite::test_transport::SinkError;
+		type Lease<'a> = CreditedLease<'a>;
+
+		fn poll_lease(&mut self, _: &mut Context<'_>, want: usize) -> Poll<Result<CreditedLease<'_>, Self::Error>> {
+			match self.chunks.iter().map(Bytes::len).sum::<usize>() >= want {
+				true => Poll::Ready(Ok(CreditedLease(self))),
+				false => Poll::Pending,
+			}
+		}
+
+		fn set_priority(&mut self, _: i64) {}
+
+		fn stop(&mut self, _: u32) {}
+	}
+
+	impl Buf for CreditedLease<'_> {
+		fn remaining(&self) -> usize {
+			self.0.chunks.iter().map(Bytes::len).sum()
+		}
+
+		fn chunk(&self) -> &[u8] {
+			self.0.chunks.front().map_or(&[], |chunk| &chunk[..])
+		}
+
+		fn advance(&mut self, n: usize) {
+			let front = self.0.chunks.front_mut().expect("advanced past the lease");
+			front.advance(n);
+			if front.is_empty() {
+				self.0.chunks.pop_front();
+			}
+			self.0.held += n;
+		}
+	}
+
+	impl Lease for CreditedLease<'_> {
+		fn chunks(&self) -> impl Iterator<Item = &[u8]> {
+			self.0.chunks.iter().map(|chunk| &chunk[..])
+		}
+
+		fn is_fin(&self) -> bool {
+			false
+		}
+
+		fn release(self) {
+			self.0.released += std::mem::take(&mut self.0.held);
+		}
+	}
+
+	/// A frame returns its receive credit as each segment seals, so however large it is,
+	/// it never holds more than one segment of the window, even when a chunk straddles
+	/// the boundary.
+	#[test]
+	fn a_frame_returns_credit_per_segment() {
+		use crate::frame::SEGMENT;
+		const SIZE: usize = 2 * SEGMENT + SEGMENT / 2;
+		const CHUNK: usize = 100_000;
+
+		let (mut frame, mut payload, waiter, _wakes) = parked_frame(SIZE);
+		let data = Bytes::from((0..SIZE).map(|i| (i % 251) as u8).collect::<Vec<_>>());
+		let mut reader = Reader::new(Credited::default(), crate::lite::Version::Lite05);
+		let mut cx = Context::from_waker(std::task::Waker::noop());
+
+		let mut sent = 0;
+		let done = loop {
+			let next = (sent + CHUNK).min(SIZE);
+			reader.stream.chunks.push_back(data.slice(sent..next));
+			sent = next;
+			let res = reader.poll_read_frame(&mut cx, &mut frame);
+			let stream = &reader.stream;
+			if res.is_ready() {
+				break res;
+			}
+			assert_eq!(stream.released, sent / SEGMENT * SEGMENT, "credit returned off a seal");
+			assert!(stream.held < SEGMENT, "{} bytes held past a segment", stream.held);
+		};
+		assert!(matches!(done, Poll::Ready(Ok(()))));
+		assert_eq!(reader.stream.released, SIZE);
+
+		let _group = frame.finish().unwrap();
+		let mut read = Vec::new();
+		while let Poll::Ready(Ok(Some(chunk))) = payload.poll_read_chunk(&waiter) {
+			read.extend_from_slice(&chunk);
+		}
+		assert_eq!(read, data);
 	}
 }

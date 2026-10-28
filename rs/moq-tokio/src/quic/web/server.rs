@@ -114,7 +114,7 @@ impl Server {
 				res = self.endpoint.accept() => {
 					let conn = res?;
 					self.accept.push(Box::pin(async move {
-						let conn = conn.await?;
+						let conn = conn.accept()?.await?;
 						Request::accept(conn).await
 					}));
 				}

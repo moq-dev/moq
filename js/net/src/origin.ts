@@ -11,6 +11,7 @@
  * @module
  */
 import { Derived, type Dispose, type GetPromise, type Getter, Once, race, Signal } from "@moq/signals";
+import type * as Announce from "./announce.ts";
 import * as announce from "./announced.ts";
 import * as broadcast from "./broadcast.ts";
 import type * as Epoch from "./epoch.ts";
@@ -28,6 +29,7 @@ import {
 } from "./internal.ts";
 import * as Path from "./path.ts";
 import { Front } from "./resume.ts";
+import { closeUnwanted } from "./util/announce.ts";
 import {
 	type Advertised,
 	type Advertisements,
@@ -39,7 +41,7 @@ import {
 } from "./wire.ts";
 
 export type { Cost, Hop, Route } from "./hop.ts";
-export { isAnonymous } from "./hop.ts";
+export { HopSchema, isAnonymous } from "./hop.ts";
 
 /** The rooted permissions shared by a handle and every route it inserts. */
 class Scope {
@@ -333,7 +335,7 @@ function unroutable(): StreamError {
 	return new StreamError(StreamCode.Unroutable, { message: "unroutable" });
 }
 
-/** A served route from {@link Producer.dynamic}: the queue a handler drains. */
+/** A served route from {@link Producer.requests}: the queue a handler drains. */
 class ServeState {
 	readonly root: Path.Valid;
 	/** The prefix the route claims; every served path is at or beneath it. */
@@ -480,6 +482,19 @@ function publishPath(path: Path.Valid): void {
 	}
 }
 
+// A broadcast created through the origin: its producer, and the handle the origin routes.
+interface Created {
+	producer: broadcast.Producer;
+	front: broadcast.Consumer;
+}
+
+// End a created broadcast the origin no longer routes. Consumer handles never end a produced
+// broadcast, so the origin closes its producer; tracks already subscribed keep serving.
+function retire({ producer, front }: Created): void {
+	front.close();
+	producer.close();
+}
+
 /** Reactive backing state shared by origin producers and consumers. */
 class OriginState {
 	// Both tables decouple the application producing into the origin from the
@@ -493,7 +508,7 @@ class OriginState {
 	// newest first. Local and routes stay separate so a session can never announce a
 	// received entry back to a peer, which is what makes an origin shared by both
 	// directions echo-free.
-	created: Map<Path.Valid, broadcast.Consumer> | undefined = new Map();
+	created: Map<Path.Valid, Created> | undefined = new Map();
 	local = new VersionedSignal<Map<Path.Valid, broadcast.Consumer> | undefined>(new Map());
 	advertisedLocal = new VersionedSignal<Map<Path.Valid, Route> | undefined>(new Map());
 	routes = new VersionedSignal<Map<Path.Valid, RouteEntry[]> | undefined>(new Map());
@@ -1057,22 +1072,22 @@ export interface Table {
 	readonly discovery: Getter<boolean | undefined>;
 
 	/** Create an unannounced broadcast at `path`; see {@link Producer.createBroadcast}. */
-	createBroadcast(path: Path.Valid): broadcast.Producer;
+	createBroadcast(path: Path.Valid): Publication;
 
 	/** Resolve `path`, optionally waiting for an announcement; see {@link Consumer.request}. */
 	request(path: Path.Valid, options?: RequestOptions): Requesting;
 
 	/** The available broadcasts under `scope`, as a live stream; see {@link Consumer.announced}. */
-	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer;
+	announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 
-	/** Advertise a prefix and serve requests under it; see {@link Producer.dynamic}. */
-	dynamic(prefix: Path.Valid): Dynamic;
+	/** Advertise a prefix and serve requests under it; see {@link Producer.requests}. */
+	requests(prefix: Path.Valid): Requests;
 
 	/** Insert a route with protocol metadata. @internal */
-	dynamicRoute(
+	requestsRoute(
 		prefix: Path.Valid,
 		route?: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"]; auth?: Route["auth"] },
-	): Dynamic;
+	): Requests;
 }
 
 /** Options for resolving a broadcast path. */
@@ -1095,10 +1110,10 @@ export interface RequestOptions {
  * the origin down. A reconnecting session re-announces the table on each attach, so
  * advertisements made while offline surface on the next connection.
  *
- * Create a broadcast, populate its tracks, then {@link broadcast.Producer.announce}: an
+ * Create a broadcast, populate its tracks, then {@link Publication.announce}: an
  * exact-path subscribe before the tracks exist is refused, and nobody can see or reach a
  * broadcast until it announces. To publish broadcasts on demand instead, claim a prefix with
- * {@link dynamic} and answer the requests beneath it.
+ * {@link requests} and answer the requests beneath it.
  *
  * @public
  */
@@ -1180,20 +1195,20 @@ export class Producer implements Table {
 	}
 
 	/**
-	 * Create a broadcast at `path`, returning its producer.
+	 * Create a broadcast at `path`, returning its publication handle.
 	 *
-	 * The broadcast exists for nobody until {@link broadcast.Producer.announce}: announce
+	 * The broadcast exists for nobody until {@link Publication.announce}: announce
 	 * streams skip it and requests for its path find nothing, on this origin exactly as at
-	 * a peer. Announce once its tracks exist; {@link broadcast.Producer.unannounce}
+	 * a peer. Announce once its tracks exist; {@link Publication.unannounce}
 	 * withdraws it from everyone again.
 	 *
 	 * Close the producer to drop it. Creating a path again supersedes the previous
-	 * broadcast: the origin drops its handle on the old one, which closes it unless the
-	 * application still holds a consumer clone. Announce with a {@link Route.epoch}
+	 * broadcast: the origin retracts and closes the old one, and tracks already subscribed
+	 * keep serving until they end. Announce with a {@link Route.epoch}
 	 * (`Epoch.mint()` per run) so a restart replaces the old broadcast rather than resuming
 	 * into it; at the same epoch, a local broadcast competes on cost and wins ties.
 	 */
-	createBroadcast(path: Path.Valid): broadcast.Producer {
+	createBroadcast(path: Path.Valid): Publication {
 		path = this.#scope.path(path);
 		if (this.#borrowed?.closed) throw new Error("origin handle is closed");
 		publishPath(path);
@@ -1204,38 +1219,40 @@ export class Producer implements Table {
 		hooks.stampPath(producer, path);
 		const front = producer.consume();
 
-		hooks.attachAnnouncer(producer, {
+		const announcer: broadcast.Announcer = {
 			announce: (route) => this.#advertiseExact(path, front, route),
 			unannounce: () => this.#retractExact(path, front),
 			route: () =>
 				this.#state.local.peek()?.get(path) === front
 					? this.#state.advertisedLocal.peek()?.get(path)
 					: undefined,
-		});
+		};
+		hooks.attachAnnouncer(producer, announcer);
 
+		const entry = { producer, front };
 		const previous = created.get(path);
-		created.set(path, front);
+		created.set(path, entry);
 		if (previous) {
-			this.#retractExact(path, previous);
-			previous.close();
+			this.#retractExact(path, previous.front);
+			retire(previous);
 		}
 
 		// Drop it when the broadcast closes, unless a recreate already replaced it: a stale
 		// broadcast closing must not unpublish the live one. Clearing `created` also stops a
-		// later announce, since a consumer clone can keep the broadcast open past this close.
+		// later announce.
 		const release = this.#hold(() => {
 			this.#retractExact(path, front);
-			if (this.#state.created?.get(path) === front) this.#state.created.delete(path);
-			front.close();
+			if (this.#state.created?.get(path) === entry) this.#state.created.delete(path);
+			retire(entry);
 		});
 		void front.closed.then(release);
 
-		return producer;
+		return makePublication(producer, announcer);
 	}
 
 	#advertiseExact(path: Path.Valid, front: broadcast.Consumer, route: Route): void {
 		if (!this.#state.local.peek()) throw new Error("origin is closed");
-		if (this.#state.created?.get(path) !== front) throw new Error("broadcast is closed");
+		if (this.#state.created?.get(path)?.front !== front) throw new Error("broadcast is closed");
 		// Both maps move together, so every reader sees the broadcast and its route at once.
 		this.#state.local.mutate((broadcasts) => {
 			broadcasts?.set(path, front);
@@ -1267,15 +1284,15 @@ export class Producer implements Table {
 	 * advertises the covering prefix and rejects the rest as they are requested;
 	 * consumers narrow with a {@link Path.Pattern} locally. The advertisement is
 	 * visible to {@link Consumer.announced} and forwarded by sessions for as long as
-	 * the returned {@link Dynamic} lives. A consumer resolving a path under it that
+	 * the returned {@link Requests} lives. A consumer resolving a path under it that
 	 * no announced local broadcast wins is handed to the handle as a {@link Request}.
 	 */
-	dynamic(prefix: Path.Valid): Dynamic {
+	requests(prefix: Path.Valid): Requests {
 		return this.#insertRoute(prefix, Route.default, true, true);
 	}
 
 	/** Insert an originated claim with route metadata that answers through `hooks.acceptRequest`, for tests and benches. @internal */
-	dynamicRoute(
+	requestsRoute(
 		prefix: Path.Valid,
 		route:
 			| Route
@@ -1285,13 +1302,13 @@ export class Producer implements Table {
 					cost?: Route["cost"];
 					auth?: Route["auth"];
 			  } = Route.default,
-	): Dynamic {
+	): Requests {
 		return this.#insertRoute(prefix, Route.normalize(route), true, false);
 	}
 
 	/**
 	 * Land a route a peer announced, served through the returned handle. Same as
-	 * {@link dynamic} but not originated, so a session never announces it back.
+	 * {@link requests} but not originated, so a session never announces it back.
 	 *
 	 * @internal
 	 */
@@ -1305,11 +1322,11 @@ export class Producer implements Table {
 					cost?: Route["cost"];
 					auth?: Route["auth"];
 			  } = Route.default,
-	): Dynamic {
+	): Requests {
 		return this.#insertRoute(prefix, Route.normalize(route), false, false);
 	}
 
-	#insertRoute(prefix: Path.Valid, route: Route, originated: boolean, publishes: boolean): Dynamic {
+	#insertRoute(prefix: Path.Valid, route: Route, originated: boolean, publishes: boolean): Requests {
 		prefix = this.#scope.prefix(prefix);
 		publishPath(prefix);
 		const server = new ServeState(this.#scope.root, prefix, originated);
@@ -1464,7 +1481,7 @@ export class Producer implements Table {
 	}
 
 	/** The available broadcasts under `scope`, as a live stream; see {@link Consumer.announced}. */
-	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer {
+	announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer {
 		return this.#reader.announced(scope, options);
 	}
 
@@ -1487,9 +1504,7 @@ export class Producer implements Table {
 		if (this.#state.closed.peek() !== undefined) return;
 		this.#state.closed.set(abort ?? null);
 		for (const watch of this.#state.watchers.values()) watch.version.update((n) => n + 1);
-		for (const front of this.#state.created?.values() ?? []) {
-			front.close();
-		}
+		for (const created of this.#state.created?.values() ?? []) retire(created);
 		this.#state.created = undefined;
 		this.#state.local.update(() => undefined);
 		this.#state.advertisedLocal.update(() => undefined);
@@ -1542,23 +1557,13 @@ let makeDynamic: (
 	state: OriginState,
 	retract: Dispose,
 	publisher?: Producer,
-) => Dynamic;
+) => Requests;
 
 let makeRequest: (path: Path.Valid, server: ServeState) => Request;
 let finishRequest: (request: Request, err: Error) => void;
 let setRequestPublisher: (request: Request, publisher: Producer | undefined) => void;
-let makePrepared: (
-	request: Request,
-	answer: broadcast.Producer,
-	announcer: broadcast.Announcer,
-	epoch: Epoch.Valid,
-) => Prepared;
-let publishPrepared: (
-	request: Request,
-	answer: broadcast.Producer,
-	announcer: broadcast.Announcer,
-	epoch: Epoch.Valid,
-) => broadcast.Producer;
+let makePrepared: (request: Request, publication: Publication, epoch: Epoch.Valid) => Prepared;
+let publishPrepared: (request: Request, publication: Publication, epoch: Epoch.Valid) => Publication;
 let rejectPrepared: (request: Request, err: Error) => void;
 
 /**
@@ -1956,16 +1961,19 @@ export class Consumer {
 	 * Any pattern is accepted. A local broadcast appears once it announces, exactly as a
 	 * peer sees it. A dynamic or received route announces the prefix it covers when its
 	 * subtree overlaps the scope. The stream ends when the origin closes or the consumer is
-	 * closed. Hidden routes are left out unless `options.hidden` opts in (see {@link announce.Options}).
+	 * closed. Hidden routes are left out unless `options.hidden` opts in (see {@link Announce.Options}).
 	 * While open, it watches the scope's literal head: a `consume` session asks its peer for
 	 * announcements there.
 	 */
-	announced(scope: Path.Pattern = Path.Pattern.all(), options?: announce.Options): announce.Consumer {
+	announced(scope: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Announce.Consumer {
 		const producer = new announce.Producer();
 		const patterns = this.#scope.patterns(scope);
 		void producer.closed.then(this.#state.watch([...patterns].map(scopeHead)));
 		void this.#runAnnounced(producer, patterns, options?.hidden ?? false);
-		return producer.consume();
+		const consumer = producer.consume();
+		// The last reader leaving ends the stream and its watch.
+		closeUnwanted(producer);
+		return consumer;
 	}
 
 	/** The routes visible to one announcement watcher. */
@@ -2181,15 +2189,15 @@ export class Consumer {
 }
 
 /**
- * A served route from {@link Producer.dynamic}: advertises a prefix and answers the
+ * A served route from {@link Producer.requests}: advertises a prefix and answers the
  * requests beneath it.
  *
  * Drop it (or {@link close}) to retract the route and reject anything still waiting
- * with {@link StreamCode.Unroutable}. Close it and claim again to change it.
+ * with {@link StreamCode | StreamCode.Unroutable}. Close it and claim again to change it.
  *
  * @public
  */
-export class Dynamic {
+export class Requests {
 	/** The prefix this handle advertises. */
 	readonly prefix: Path.Valid;
 
@@ -2215,7 +2223,7 @@ export class Dynamic {
 
 	static {
 		makeDynamic = (prefix, entry, state, retract, publisher) =>
-			new Dynamic(prefix, entry, state, retract, publisher);
+			new Requests(prefix, entry, state, retract, publisher);
 	}
 
 	/** The route this handle advertises. */
@@ -2298,7 +2306,7 @@ export class Dynamic {
 /**
  * A pending request for a broadcast to be served on demand.
  *
- * Yielded by {@link Dynamic.requested}. {@link prepare} then {@link Prepared.publish}
+ * Yielded by {@link Requests.requested}. {@link prepare} then {@link Prepared.publish}
  * resolves it with a new exact-path broadcast; {@link reject} resolves it with an error.
  * Advancing the iterator or closing it without either rejects the request.
  *
@@ -2323,14 +2331,13 @@ export class Request {
 		setRequestPublisher = (request, publisher) => {
 			request.#publisher = publisher;
 		};
-		publishPrepared = (request, answer, announcer, epoch) => {
+		publishPrepared = (request, publication, epoch) => {
 			if (!request.#server.has(request)) throw new Error("request is closed");
-			hooks.attachAnnouncer(answer, announcer);
 			// The exact route usually settles the request on its own, resolving its waiters
 			// through the new epoch; answer it directly if it is still pending.
-			answer.announce({ epoch });
-			if (request.#server.has(request)) request.#server.accept(request, answer.consume());
-			return answer;
+			publication.announce({ epoch });
+			if (request.#server.has(request)) request.#server.accept(request, publication.broadcast.consume());
+			return publication;
 		};
 		rejectPrepared = (request, err) => request.#server.reject(request, err);
 		finishRequest = (request, err) => {
@@ -2345,16 +2352,11 @@ export class Request {
 	prepare(epoch: Epoch.Valid): Prepared {
 		if (this.#done) throw new Error("request is closed");
 		if (!this.#publisher) throw new Error("forwarded requests cannot be prepared");
-		const answer = this.#publisher.createBroadcast(this.path);
-		// Withheld until publish, so the answer cannot announce itself under another
-		// epoch or skip the request's admission.
-		const announcer = hooks.withholdAnnouncer(answer);
-		if (!announcer) {
-			answer.close();
-			throw new Error("origin is closed");
-		}
+		const publication = this.#publisher.createBroadcast(this.path);
+		// Only the fill handle escapes until publish, so the answer cannot announce itself
+		// under another epoch or skip the request's admission.
 		this.#done = true;
-		return makePrepared(this, answer, announcer, epoch);
+		return makePrepared(this, publication, epoch);
 	}
 
 	// Resolve a session-forwarded request with its peer's routed broadcast, through
@@ -2386,6 +2388,52 @@ export class Request {
 	}
 }
 
+let makePublication: (producer: broadcast.Producer, announcer: broadcast.Announcer) => Publication;
+
+/** An origin-owned broadcast and the capability to announce its route. */
+export class Publication {
+	/** The broadcast to fill with tracks before announcing it. */
+	readonly broadcast: broadcast.Producer;
+	readonly #announcer: broadcast.Announcer;
+
+	private constructor(producer: broadcast.Producer, announcer: broadcast.Announcer) {
+		this.broadcast = producer;
+		this.#announcer = announcer;
+	}
+
+	static {
+		makePublication = (producer, announcer) => new Publication(producer, announcer);
+	}
+
+	/** The route this broadcast is announced with, if any. */
+	get route(): Route | undefined {
+		return this.#announcer.route();
+	}
+
+	/**
+	 * Announce this broadcast, or replace its route; retain its epoch when changing only cost.
+	 * Announce once its initial tracks exist. Throws after the broadcast closes or is replaced.
+	 */
+	announce(
+		route:
+			| Route
+			| {
+					epoch?: Route["epoch"];
+					hops?: Route["hops"];
+					cost?: Route["cost"];
+					auth?: Route["auth"];
+			  } = Route.default,
+	): void {
+		if (this.broadcast.closed.peek() !== undefined) throw new Error("broadcast is closed");
+		this.#announcer.announce(Route.normalize(route));
+	}
+
+	/** Retract this broadcast's route until announced again, without closing its fill handle. */
+	unannounce(): void {
+		this.#announcer.unannounce();
+	}
+}
+
 /**
  * A claim answer being filled before its exact route is announced.
  *
@@ -2397,37 +2445,32 @@ export class Prepared {
 	/** The unannounced broadcast to fill before publishing; only {@link publish} announces it. */
 	readonly broadcast: broadcast.Producer;
 	readonly #request: Request;
-	readonly #announcer: broadcast.Announcer;
+	readonly #publication: Publication;
 	readonly #epoch: Epoch.Valid;
 	readonly #stop: Dispose;
 	#done = false;
 
-	private constructor(
-		request: Request,
-		answer: broadcast.Producer,
-		announcer: broadcast.Announcer,
-		epoch: Epoch.Valid,
-	) {
+	private constructor(request: Request, publication: Publication, epoch: Epoch.Valid) {
 		this.#request = request;
-		this.broadcast = answer;
-		this.#announcer = announcer;
+		this.broadcast = publication.broadcast;
+		this.#publication = publication;
 		this.#epoch = epoch;
 		// Synchronous, so a request made right after the broadcast closes reaches the claim again.
-		this.#stop = hooks.onClosed(answer, () => this.close());
+		this.#stop = hooks.onClosed(this.broadcast, () => this.close());
 	}
 
 	static {
-		makePrepared = (request, answer, announcer, epoch) => new Prepared(request, answer, announcer, epoch);
+		makePrepared = (request, publication, epoch) => new Prepared(request, publication, epoch);
 	}
 
 	/** Announce the filled broadcast and resolve every waiting requester, refusing them if it cannot be announced. */
-	publish(): broadcast.Producer {
+	publish(): Publication {
 		// Closing the broadcast closes this answer at once, so `#done` covers it too.
 		if (this.#done) throw new Error("prepared answer is closed");
 		this.#done = true;
 		this.#stop();
 		try {
-			return publishPrepared(this.#request, this.broadcast, this.#announcer, this.#epoch);
+			return publishPrepared(this.#request, this.#publication, this.#epoch);
 		} catch (err) {
 			this.broadcast.close();
 			rejectPrepared(this.#request, err instanceof Error ? err : new Error(String(err)));

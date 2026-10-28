@@ -4,15 +4,12 @@ use crate::catalog::{Audio, Binary, Json, PRIORITY, Text, Video};
 use serde::de::DeserializeOwned;
 use std::str::FromStr;
 
-/// Maximum number of video, audio, and text renditions accepted in one catalog update.
-pub const MAX_RENDITIONS: usize = 64;
 use serde::{Deserialize, Serialize};
 
 /// A catalog track, created by a broadcaster to describe the tracks available in a broadcast.
 ///
-/// The base catalog carries the media sections (`video`, `audio`, `text`), the optional
-/// `archive` (each track's timeline and any durable recording), the optional `clock` (the
-/// broadcast's one wall-clock mapping), the data sections
+/// The base catalog carries the media sections (`video`, `audio`, `text`), the optional `clock`
+/// (the broadcast's one wall-clock mapping), the data sections
 /// (`json`, `binary`) for application tracks that aren't media, and the optional `m2ts` (a
 /// transport stream carried whole), plus `stats` naming the publisher's media snapshot track and
 /// `echo` soliciting viewer feedback under a relative broadcast prefix.
@@ -41,18 +38,11 @@ pub struct Catalog<E = ()> {
 	/// wire when it has no renditions.
 	pub audio: Audio,
 
-	/// Each track's timeline and any durable archive, if the publisher offers them.
-	/// See [`Archive`](crate::catalog::Archive) and the [`timeline`](crate::timeline) module.
-	/// An undecodable entry is absent so incompatible archive metadata cannot reject media.
-	pub archive: Option<crate::catalog::Archive>,
-
 	/// The broadcast's one continuous clock, if the publisher exposes one.
 	///
 	/// `wall` is the wall-clock time of PTS zero in `timescale` units since the moq epoch
-	/// (2020-01-01); every media track and every timeline refer to this mapping after
-	/// timescale conversion. Independent of [`archive`](Self::archive): a live-only publisher
-	/// exposes its clock without creating a segment index. See
-	/// [`Clock`](crate::catalog::Clock).
+	/// (2020-01-01); every media track and every HLS record refer to this mapping after
+	/// timescale conversion. See [`Clock`](crate::catalog::Clock).
 	pub clock: Option<crate::catalog::Clock>,
 
 	/// Text (caption/subtitle) track information with multiple renditions.
@@ -126,10 +116,6 @@ struct Wire<E> {
 	audio: Audio,
 
 	#[serde(default)]
-	#[serde_as(as = "serde_with::DefaultOnError<_>")]
-	archive: Option<crate::catalog::Archive>,
-
-	#[serde(default)]
 	clock: Option<crate::catalog::Clock>,
 
 	#[serde(
@@ -189,7 +175,6 @@ impl<E> From<Wire<E>> for Catalog<E> {
 			version: _,
 			video,
 			audio,
-			archive,
 			clock,
 			text,
 			json,
@@ -202,7 +187,6 @@ impl<E> From<Wire<E>> for Catalog<E> {
 		Self {
 			video,
 			audio,
-			archive,
 			clock,
 			text,
 			json,
@@ -268,16 +252,9 @@ impl Catalog<()> {
 }
 
 impl<E> Catalog<E> {
-	/// Refuse a catalog with more renditions than a consumer can hold, with an ID naming both
-	/// a video and an audio rendition, or with a projection or audio layout out of range.
+	/// Refuse a catalog with an ID naming both a video and an audio rendition, or with a
+	/// projection or audio layout out of range.
 	pub fn check_renditions(&self) -> Result<()> {
-		let count = self.video.renditions.len() + self.audio.renditions.len() + self.text.renditions.len();
-		if count > MAX_RENDITIONS {
-			return Err(crate::Error::TooManyRenditions {
-				count,
-				max: MAX_RENDITIONS,
-			});
-		}
 		if let Some(id) = self
 			.video
 			.renditions
@@ -328,7 +305,6 @@ impl<E> Catalog<E> {
 		Catalog {
 			video: self.video.clone(),
 			audio: self.audio.clone(),
-			archive: self.archive.clone(),
 			clock: self.clock,
 			text: self.text.clone(),
 			..Default::default()
@@ -435,27 +411,19 @@ mod test {
 
 	use super::*;
 
+	/// The rendition count is the publisher's to choose: a catalog listing many is accepted.
 	#[test]
-	fn too_many_renditions_is_a_typed_refusal() {
+	fn many_renditions_are_accepted() {
 		let mut catalog = Catalog::<()>::default();
-		for i in 0..MAX_RENDITIONS {
+		for i in 0..1000 {
 			catalog
 				.audio
 				.renditions
 				.insert(format!("audio{i}"), AudioConfig::new(Opus, 48_000, 2));
 		}
-		assert!(catalog.check_renditions().is_ok());
-		catalog
-			.audio
-			.renditions
-			.insert("one-more".into(), AudioConfig::new(Opus, 48_000, 2));
-		assert!(matches!(
-			catalog.check_renditions(),
-			Err(crate::Error::TooManyRenditions {
-				count: 65,
-				max: MAX_RENDITIONS
-			})
-		));
+		catalog.check_renditions().unwrap();
+		let decoded = Catalog::<()>::from_str(&catalog.to_json().unwrap()).unwrap();
+		assert_eq!(decoded.audio.renditions.len(), 1000);
 	}
 
 	#[test]
@@ -506,8 +474,7 @@ mod test {
 				"audio": {{"renditions": {{"a": {{"broadcast": "./a", "epoch": "{EPOCH}", "codec": "opus", "sampleRate": 48000, "numberOfChannels": 2, "container": {{"kind": "legacy"}}}}}}}},
 				"text": {{"renditions": {{"t": {{"broadcast": "./a", "epoch": "{EPOCH}", "format": "vtt"}}}}}},
 				"json": {{"tracks": {{"j": {{"broadcast": "./a", "epoch": "{EPOCH}", "mode": "snapshot"}}}}}},
-				"binary": {{"tracks": {{"b": {{"broadcast": "./a", "epoch": "{EPOCH}", "mode": "snapshot"}}}}}},
-				"archive": {{"timelines": {{}}, "replay": "./a", "replayEpoch": "{EPOCH}"}}
+				"binary": {{"tracks": {{"b": {{"broadcast": "./a", "epoch": "{EPOCH}", "mode": "snapshot"}}}}}}
 			}}"#
 		);
 		let catalog = Catalog::<()>::from_str(&encoded).unwrap();
@@ -522,7 +489,6 @@ mod test {
 		for reference in references {
 			assert_eq!(reference.epoch(), Some(&epoch));
 		}
-		assert_eq!(catalog.archive.as_ref().unwrap().replay_epoch, Some(epoch));
 		assert_eq!(Catalog::<()>::from_str(&catalog.to_json().unwrap()).unwrap(), catalog);
 
 		// Omitted stays omitted, and a malformed or noncanonical epoch refuses the catalog.
@@ -707,6 +673,7 @@ mod test {
 				warmup: None,
 				jitter: Some(std::time::Duration::from_millis(100)),
 				delay: Some(std::time::Duration::from_millis(200)),
+				hls: None,
 			},
 		);
 
@@ -729,6 +696,7 @@ mod test {
 				warmup: None,
 				jitter: Some(std::time::Duration::from_millis(40)),
 				delay: None,
+				hls: None,
 			},
 		);
 
@@ -1037,7 +1005,12 @@ mod test {
 		}
 		let catalog = Catalog::<()>::from_str(r#"{"stats":{"track":"stats.json"},"echo":{"path":"viewers"}}"#).unwrap();
 		assert_eq!(catalog.stats, Some(crate::catalog::Stats::new("stats.json")));
-		assert_eq!(catalog.echo, Some(crate::catalog::Echo::new("viewers")));
+		assert_eq!(
+			catalog.echo,
+			Some(crate::catalog::Echo::new(
+				moq_net::path::Relative::new("viewers").unwrap()
+			))
+		);
 	}
 
 	#[test]
@@ -1083,97 +1056,71 @@ mod test {
 
 	#[test]
 	fn packaged_clock_fixture_decodes() {
-		// The canonical new shape: the root clock plus an archive without a wall field.
-		// A reader maps archive timestamps through the root clock after timescale conversion.
+		// The canonical shape: the root clock plus a per-rendition `hls` field. A reader maps HLS
+		// record timestamps (milliseconds) through the root clock after timescale conversion.
 		let json = include_str!("../../fixtures/catalog-clock.json");
 		let catalog = Catalog::<()>::from_str(json).expect("the packaged fixture must decode");
 
 		let clock = catalog.clock.expect("the fixture carries a root clock");
 		assert_eq!(clock.wall.scale().as_u64(), 1_000_000);
 
-		let archive = catalog.archive.expect("the fixture carries an archive");
-		assert_eq!(archive.timelines["video"].track, "video.timeline.z");
-		assert_eq!(archive.timescale, 1000);
+		let hls = catalog.video.renditions["video"]
+			.hls
+			.clone()
+			.expect("the fixture opts video into HLS");
+		assert_eq!(
+			hls,
+			crate::catalog::Hls::new("video.hls", std::time::Duration::from_secs(2))
+		);
 
-		// Archive PTS 2000 (ms) lands 2s after the wall epoch, whatever the track timescale.
+		// Record PTS 2000 (ms) lands 2s after the wall epoch, whatever the track timescale.
 		let expected = moq_clock::Wall::UNIX_EPOCH
 			+ std::time::Duration::from_millis(crate::catalog::MOQ_EPOCH_UNIX_MILLIS + 1_751_846_402_000);
 		assert_eq!(
 			clock
-				.wall_clock(moq_net::Timestamp::from_scale(2000, archive.timescale as u64).unwrap())
+				.wall_clock(moq_net::Timestamp::from_millis(2000).unwrap())
 				.unwrap(),
 			expected
 		);
 	}
 
 	#[test]
-	fn archive_roundtrips_at_the_root() {
-		let mut archive = crate::catalog::Archive::new();
-		archive.timelines.insert(
-			"video".to_string(),
-			crate::catalog::Timeline::new("video.timeline.z", 2_000),
-		);
-		archive.replay = Some(moq_net::path::RelativeOwned::new("recordings/clip"));
-		archive.version = Some(crate::catalog::Archive::VERSION);
-
-		let catalog = Catalog::<()> {
-			archive: Some(archive.clone()),
-			..Default::default()
-		};
-
-		let json = catalog.to_json().expect("failed to encode");
-		assert!(
-			json.contains(r#""archive":{"timelines":{"video":{"track":"video.timeline.z","duration":2000}"#),
-			"{json}"
-		);
-		assert!(
-			!json.contains(r#""timeline":"#),
-			"the old root key must not appear: {json}"
-		);
-		assert_eq!(
-			Catalog::<()>::from_str(&json).expect("failed to decode").archive,
-			Some(archive)
-		);
-	}
-
-	#[test]
-	fn an_incompatible_archive_leaves_media_playable() {
+	fn a_retired_root_archive_is_ignored() {
 		let video = serde_json::json!({
 			"renditions": {"video": {"codec": "avc1.64001f", "container": {"kind": "legacy"}}}
 		});
 		let media = Catalog::<()>::from_str(&serde_json::json!({"video": video}).to_string()).unwrap();
-		for archive in [
-			serde_json::json!({"track": "timeline.z", "timescale": 1000}),
-			serde_json::json!({"timelines": {}, "store": "not a url"}),
-			serde_json::json!({"timelines": {}, "timescale": 0}),
-			serde_json::json!({"timelines": {"video": 42}}),
-			serde_json::json!({"future": "archive"}),
-			serde_json::json!("archive"),
-			serde_json::json!([]),
+		let archive = serde_json::json!({
+			"timelines": {"video": {"track": "video.timeline.z", "duration": 2000}},
+			"timescale": 1000,
+			"replay": "./recordings/clip",
+			"store": "https://objects.example/rec/",
+			"version": 3
+		});
+		let json = serde_json::json!({"video": video, "archive": archive}).to_string();
+		let catalog = Catalog::<()>::from_str(&json).expect("a retired archive must not reject the catalog");
+		assert_eq!(catalog, media);
+		assert!(!catalog.to_json().unwrap().contains("archive"));
+	}
+
+	#[test]
+	fn an_undecodable_hls_field_leaves_media_playable() {
+		let rendition = serde_json::json!({"codec": "avc1.64001f", "container": {"kind": "legacy"}});
+		let media =
+			Catalog::<()>::from_str(&serde_json::json!({"video": {"renditions": {"video": rendition}}}).to_string())
+				.unwrap();
+		for hls in [
+			serde_json::json!({"track": "video.hls"}),
+			serde_json::json!({"duration": 4000}),
+			serde_json::json!("video.hls"),
 			serde_json::Value::Null,
 		] {
-			let json = serde_json::json!({"video": video, "archive": archive}).to_string();
-			let catalog = Catalog::<()>::from_str(&json).expect("archive metadata must not reject media");
-			assert_eq!(catalog.archive, None);
-			assert_eq!(catalog.video, media.video);
-			assert!(!catalog.to_json().unwrap().contains("\"archive\""));
+			let mut rendition = rendition.clone();
+			rendition["hls"] = hls;
+			let json = serde_json::json!({"video": {"renditions": {"video": rendition}}}).to_string();
+			let catalog = Catalog::<()>::from_str(&json).expect("HLS metadata must not reject media");
+			assert_eq!(catalog, media);
 		}
-	}
-
-	#[test]
-	fn an_incompatible_archive_does_not_hide_invalid_media() {
-		Catalog::<()>::from_str(
-			r#"{"archive":{"track":"timeline.z"},"video":{"renditions":{"video":{"codec":42,"container":{"kind":"legacy"}}}}}"#,
-		)
-		.expect_err("invalid media must still reject the catalog");
-	}
-
-	#[test]
-	fn a_legacy_root_timeline_is_not_an_archive() {
-		// No alias or fallback: a catalog that still names `timeline` at the root has no archive.
-		let catalog =
-			Catalog::<()>::from_str(r#"{"timeline":{"track":"timeline.z"}}"#).expect("legacy timeline broke decode");
-		assert_eq!(catalog.archive, None);
 	}
 
 	#[test]
@@ -1209,7 +1156,7 @@ mod test {
 		chat.schema = Some("https://example.com/chat.schema.json".to_string());
 
 		let mut status = JsonConfig::new(Mode::Snapshot);
-		status.broadcast = Some(moq_net::path::RelativeOwned::new("source"));
+		status.broadcast = Some(moq_net::path::Relative::new("source").unwrap());
 
 		let mut thumbnail = BinaryConfig::new(Mode::Snapshot);
 		thumbnail.mime = Some("image/jpeg".to_string());

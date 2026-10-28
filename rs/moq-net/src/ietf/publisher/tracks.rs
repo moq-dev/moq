@@ -21,13 +21,13 @@ use crate::util::TaskSet;
 #[derive(Default)]
 pub(super) struct Listings {
 	/// The prefix of every established SUBSCRIBE_TRACKS, by a key its guard removes.
-	prefixes: HashMap<u64, crate::PathOwned>,
+	prefixes: HashMap<u64, crate::Path>,
 	next: u64,
 	/// On draft-18, the tracks a PUBLISH of ours subscribes the peer to, and how many
 	/// SUBSCRIBEs of the peer's each track has: draft-18 allows the peer one subscription
 	/// per track (section 5.1), so a PUBLISH joins neither kind.
-	published: HashMap<(crate::PathOwned, Arc<str>), usize>,
-	subscribed: HashMap<(crate::PathOwned, Arc<str>), usize>,
+	published: HashMap<(crate::Path, Arc<str>), usize>,
+	subscribed: HashMap<(crate::Path, Arc<str>), usize>,
 }
 
 /// Holds a SUBSCRIBE_TRACKS prefix as established until dropped.
@@ -40,7 +40,7 @@ impl Established {
 	/// Establish `prefix`, unless it overlaps an established request (section 10.19): two
 	/// would match the same namespaces, and keeping them apart is also what lists each
 	/// broadcast at most once per session.
-	fn new(listings: &kio::Shared<Listings>, prefix: &crate::PathOwned) -> Option<Self> {
+	fn new(listings: &kio::Shared<Listings>, prefix: &crate::Path) -> Option<Self> {
 		let mut state = listings.lock();
 		if state
 			.prefixes
@@ -69,7 +69,7 @@ impl Drop for Established {
 /// until dropped.
 pub(super) struct Subscribed {
 	listings: kio::Shared<Listings>,
-	key: (crate::PathOwned, Arc<str>),
+	key: (crate::Path, Arc<str>),
 	/// A SUBSCRIBE of the peer's, rather than a PUBLISH of ours.
 	direct: bool,
 }
@@ -77,17 +77,17 @@ pub(super) struct Subscribed {
 impl Subscribed {
 	/// Claim `namespace`'s `track` for a PUBLISH of ours, unless the peer is subscribed to
 	/// it already, by its SUBSCRIBE or another PUBLISH.
-	fn publish(listings: &kio::Shared<Listings>, namespace: crate::PathOwned, track: Arc<str>) -> Option<Self> {
+	fn publish(listings: &kio::Shared<Listings>, namespace: crate::Path, track: Arc<str>) -> Option<Self> {
 		Self::claim(listings, (namespace, track), false)
 	}
 
 	/// Count the peer's SUBSCRIBE to `namespace`'s `track`, unless a PUBLISH of ours
 	/// subscribes it already.
 	pub(super) fn subscribe(listings: &kio::Shared<Listings>, namespace: &crate::Path, track: &str) -> Option<Self> {
-		Self::claim(listings, (namespace.to_owned(), Arc::from(track)), true)
+		Self::claim(listings, (namespace.clone(), Arc::from(track)), true)
 	}
 
-	fn claim(listings: &kio::Shared<Listings>, key: (crate::PathOwned, Arc<str>), direct: bool) -> Option<Self> {
+	fn claim(listings: &kio::Shared<Listings>, key: (crate::Path, Arc<str>), direct: bool) -> Option<Self> {
 		let mut locked = listings.lock();
 		let Listings {
 			published, subscribed, ..
@@ -142,14 +142,14 @@ struct Params {
 /// (suffix, name) in listing order. A track removed before its skip went out cancels it.
 /// A FORWARD=1 listing adds one only once this is empty, so a peer that stops reading
 /// leaves the rest unread in each broadcast's listing.
-type Skips = kio::Shared<LinkedHashMap<(crate::PathOwned, Arc<str>), ()>>;
+type Skips = kio::Shared<LinkedHashMap<(crate::Path, Arc<str>), ()>>;
 
 /// What a request's listing shares with the tasks listing each broadcast.
 #[derive(Clone)]
 struct Request {
 	origin: origin::Consumer,
 	/// The request's prefix, which every PUBLISH namespace starts with.
-	prefix: crate::PathOwned,
+	prefix: crate::Path,
 	/// Whether the request asked for every track's objects, which we answer with skips.
 	forward: bool,
 	params: Params,
@@ -184,14 +184,14 @@ struct Entries {
 }
 
 impl Entries {
-	fn skip(&mut self, skips: &Skips, suffix: &crate::PathOwned, name: Arc<str>) {
+	fn skip(&mut self, skips: &Skips, suffix: &crate::Path, name: Arc<str>) {
 		skips.lock().insert((suffix.clone(), name.clone()), ());
 		self.skipped.insert(name);
 	}
 
 	/// `name` is no longer listed: drop whatever it got to, ending its PUBLISH with
 	/// TRACK_ENDED if it `finished`.
-	fn remove(&mut self, skips: &Skips, suffix: &crate::PathOwned, name: Arc<str>, finished: bool) {
+	fn remove(&mut self, skips: &Skips, suffix: &crate::Path, name: Arc<str>, finished: bool) {
 		if self.staged.as_ref().is_some_and(|staged| staged.name == name) {
 			self.staged = None;
 		}
@@ -208,7 +208,7 @@ impl Entries {
 	}
 
 	/// Nothing more is PUBLISHed or skipped, while the PUBLISHes already sent stay listed.
-	fn halt(&mut self, skips: &Skips, suffix: &crate::PathOwned) {
+	fn halt(&mut self, skips: &Skips, suffix: &crate::Path) {
 		self.pending.clear();
 		self.staged = None;
 		let mut skips = skips.lock();
@@ -218,7 +218,7 @@ impl Entries {
 	}
 
 	/// Every track is no longer listed.
-	fn unlist(&mut self, skips: &Skips, suffix: &crate::PathOwned) {
+	fn unlist(&mut self, skips: &Skips, suffix: &crate::Path) {
 		self.halt(skips, suffix);
 		self.listed.clear();
 	}
@@ -239,7 +239,7 @@ struct Listed {
 	stream: Stream<Transport, Version>,
 	track: track::Consumer,
 	/// The track's full namespace, as the PUBLISH names it.
-	namespace: crate::PathOwned,
+	namespace: crate::Path,
 	name: Arc<str>,
 	properties: ietf::Properties,
 	/// Closes once the track is no longer listed, holding whether it finished.
@@ -283,13 +283,12 @@ impl Publisher {
 	pub(super) async fn serve_subscribe_tracks_stream(
 		self,
 		mut stream: Stream<Transport, Version>,
-		msg: ietf::SubscribeTracks<'_>,
+		msg: ietf::SubscribeTracks,
 	) -> Result<(), Error> {
 		if let Some(error) = super::super::namespace::refusal(&msg.prefix, self.version) {
 			return super::super::request_stream::reject(stream, error).await;
 		}
 		let refuse = |error_code, reason: &'static str| ietf::RequestError {
-			request_id: None,
 			error_code,
 			reason_phrase: reason.into(),
 			retry_interval: 0,
@@ -310,13 +309,13 @@ impl Publisher {
 			let error = refuse(request::NOT_SUPPORTED, "SUBSCRIBE_TRACKS needs FORWARD=0");
 			return super::super::request_stream::reject(stream, error).await;
 		}
-		let prefix = msg.prefix.to_owned();
+		let prefix = msg.prefix.clone();
 		let Some(established) = Established::new(&self.listings, &prefix) else {
 			let error = refuse(request::PREFIX_OVERLAP, "overlaps another SUBSCRIBE_TRACKS");
 			return super::super::request_stream::reject(stream, error).await;
 		};
 
-		tracing::debug!(prefix = %self.origin.absolute(&prefix), forward = msg.forward, "subscribe_tracks stream");
+		tracing::debug!(prefix = %crate::path::Rooted(self.origin.root(), &prefix), forward = msg.forward, "subscribe_tracks stream");
 
 		// The view SUBSCRIBE_NAMESPACE discovers through: rooted at the prefix so every
 		// broadcast arrives named by its suffix, never handing back what flowed through the
@@ -341,7 +340,6 @@ impl Publisher {
 		stream
 			.writer
 			.encode_message(&ietf::RequestOk {
-				request_id: None,
 				active: None,
 				largest: None,
 			})
@@ -365,8 +363,8 @@ impl Publisher {
 			live: live.consume(),
 		};
 		// Each listed broadcast's route, closed once its announcement goes; see [`Route`].
-		let mut routes: HashMap<crate::PathOwned, kio::Producer<Route>> = HashMap::new();
-		let withdraw = |routes: &mut HashMap<crate::PathOwned, kio::Producer<Route>>, prefix: &crate::PathOwned| {
+		let mut routes: HashMap<crate::Path, kio::Producer<Route>> = HashMap::new();
+		let withdraw = |routes: &mut HashMap<crate::Path, kio::Producer<Route>>, prefix: &crate::Path| {
 			if let Some(route) = routes.remove(prefix)
 				&& let Ok(mut route) = route.write()
 			{
@@ -436,7 +434,7 @@ impl Publisher {
 			broadcasts.push(task);
 		};
 
-		tracing::debug!(prefix = %self.origin.absolute(&prefix), ?cancelled, "subscribe_tracks ended");
+		tracing::debug!(prefix = %crate::path::Rooted(self.origin.root(), &prefix), ?cancelled, "subscribe_tracks ended");
 		// The request no longer stands: another may take its prefix, nothing more is
 		// PUBLISHed, and what was never sent is dropped. Its routes stay, so a PUBLISH
 		// already sent still ends when its track does.
@@ -539,7 +537,6 @@ impl Publisher {
 					stream.writer.buffer_message(
 						ietf::RequestError::ID,
 						&ietf::RequestError {
-							request_id: None,
 							error_code: code,
 							reason_phrase: reason.into(),
 							retry_interval: 0,
@@ -598,12 +595,12 @@ impl Publisher {
 	async fn run_listed_broadcast(
 		self,
 		request: Request,
-		suffix: crate::PathOwned,
+		suffix: crate::Path,
 		epoch: Option<crate::Epoch>,
 		route: kio::Consumer<Route>,
 	) {
-		let namespace = request.prefix.join(&suffix).to_owned();
-		let absolute = self.origin.absolute(&namespace).to_owned();
+		let namespace = request.prefix.rejoin(&suffix);
+		let absolute = self.origin.root().rejoin(&namespace);
 		let flate = self.peer_setup.get().await.flate;
 
 		// Resolving may wait on a route for the broadcast, which its going ends.
@@ -868,24 +865,18 @@ impl Publisher {
 		// An update may ask for a new group only if the PUBLISH sent DYNAMIC_GROUPS, which
 		// INCLUDE_PROPERTIES=0 leaves out.
 		let dynamic = properties.dynamic_groups;
-		let absolute = self.origin.absolute(&namespace).to_owned();
+		let absolute = self.origin.root().rejoin(&namespace);
 
-		// Every wait on the peer, for a Request ID or the PUBLISH's bytes, lasts only while
-		// the track is listed and the request stands. A Request ID abandoned unsent leaves a
-		// gap, which the drafts with SUBSCRIBE_TRACKS allow: none has MAX_REQUEST_ID.
+		// Every wait on the peer for the PUBLISH's bytes lasts only while the track is listed
+		// and the request stands.
 		let mut session = self.session.clone();
-		let mut stream = super::super::request_stream::with_stats(stream, self.stats(), self.version);
-		let allocated = kio::wait(|waiter| {
-			if listed.poll_closed(waiter).is_ready() || live.poll_closed(waiter).is_ready() {
-				return Poll::Ready(None);
-			}
-			self.control.poll_next_request_id(waiter).map(Some)
-		})
-		.await;
+		let mut stream = stream.with_stats(self.stats());
 		// Dropped unwritten, the stream is reset before its header, which the peer ignores.
-		let Some(request_id) = allocated else {
+		let noop = kio::Waiter::noop();
+		if listed.poll_closed(&noop).is_ready() || live.poll_closed(&noop).is_ready() {
 			return Ok(());
-		};
+		}
+		let request_id = self.control.next_request_id();
 
 		// A joining FETCH needs the subscription forwarding.
 		let join = (!Filter::is_draft22(self.version)).then(|| self.register_join(request_id));
@@ -989,7 +980,7 @@ impl Publisher {
 
 		if let Some(done) = refused {
 			drop(join);
-			return self.write_publish_done(stream, request_id, done, 0, None).await;
+			return self.write_publish_done(stream, done, 0, None).await;
 		}
 
 		// Group streams opened over every time the subscription forwarded, which
@@ -1020,7 +1011,7 @@ impl Publisher {
 				{
 					Ok(Served::Paused(_)) => {
 						self.pause_join(join.as_ref());
-						self.write_request_ok(&mut stream.writer, request_id, None).await?;
+						self.write_request_ok(&mut stream.writer, None).await?;
 						// Unlisted while it forwarded: it ends now that it is idle.
 						if listed.is_closed() {
 							break unlisted(&listed);
@@ -1099,8 +1090,7 @@ impl Publisher {
 				None => None,
 			};
 			if let Some((reason, err)) = refusal {
-				self.write_subscribe_error(&mut stream.writer, update.request_id, &err, reason)
-					.await?;
+				self.write_subscribe_error(&mut stream.writer, &err, reason).await?;
 				break Served::UpdateFailed(Error::Unsupported);
 			}
 			if let Some(priority) = update.priority {
@@ -1120,12 +1110,12 @@ impl Publisher {
 						answer: true,
 					})
 				}
-				_ => self.write_request_ok(&mut stream.writer, request_id, None).await?,
+				_ => self.write_request_ok(&mut stream.writer, None).await?,
 			}
 		};
 
 		drop(join);
-		self.write_publish_done(stream, request_id, done, opened, None).await
+		self.write_publish_done(stream, done, opened, None).await
 	}
 
 	/// Mark a paused subscription for joining FETCHes: draft-18 section 5.1 refuses one
@@ -1142,14 +1132,13 @@ impl Publisher {
 	async fn resume_failed(
 		&self,
 		stream: &mut Stream<Transport, Version>,
-		request_id: RequestId,
 		answer: bool,
 		err: Error,
 	) -> Result<Served, ()> {
 		if !answer {
 			return Ok(Served::Track(Err(err)));
 		}
-		self.write_subscribe_error(&mut stream.writer, request_id, &err, "resume failed")
+		self.write_subscribe_error(&mut stream.writer, &err, "resume failed")
 			.await
 			.map_err(|_| ())?;
 		Ok(Served::UpdateFailed(err))
@@ -1167,7 +1156,7 @@ impl Publisher {
 		&self,
 		stream: &mut Stream<Transport, Version>,
 		track: &track::Consumer,
-		namespace: &crate::PathOwned,
+		namespace: &crate::Path,
 		request_id: RequestId,
 		params: &mut Params,
 		how: Resume,
@@ -1212,11 +1201,9 @@ impl Publisher {
 		.await?;
 		let mut subscriber = match subscribed {
 			Some(Ok(subscriber)) => subscriber,
-			Some(Err(err)) => return self.resume_failed(stream, request_id, how.answer, err).await,
+			Some(Err(err)) => return self.resume_failed(stream, how.answer, err).await,
 			None => {
-				return self
-					.resume_failed(stream, request_id, how.answer, Error::NotFound)
-					.await;
+				return self.resume_failed(stream, how.answer, Error::NotFound).await;
 			}
 		};
 		let live = kio::wait(|waiter| {
@@ -1230,19 +1217,14 @@ impl Publisher {
 		})
 		.await?;
 		if !live {
-			return self
-				.resume_failed(stream, request_id, how.answer, Error::NotFound)
-				.await;
+			return self.resume_failed(stream, how.answer, Error::NotFound).await;
 		}
 
 		let edge = live_edge(track);
 		let range = subscribe_range(params.filter, edge, self.version);
 		range.apply(&mut subscription);
 		let _ = subscriber.update(subscription);
-		let timescale = subscriber
-			.info()
-			.timescale
-			.filter(|_| ietf::Properties::sends_timescale(self.version));
+		let timescale = subscriber.info().timescale;
 		let mut serve = TrackServe::new(
 			self.session.clone(),
 			subscriber,
@@ -1254,6 +1236,7 @@ impl Publisher {
 		.compression(self.peer_setup.get().await.flate)
 		.ranked(self.priority.clone());
 		serve.dynamic = dynamic;
+		serve.filter = params.filter;
 		if let Some(value) = how.new_group {
 			serve.request_new_group(value);
 		}
@@ -1280,12 +1263,7 @@ impl Publisher {
 			.filter(|_| Filter::is_draft22(self.version))
 			.map(|fill| fill_range(fill, params.filter, edge.largest));
 
-		if how.answer
-			&& self
-				.write_request_ok(&mut stream.writer, request_id, edge.largest)
-				.await
-				.is_err()
-		{
+		if how.answer && self.write_request_ok(&mut stream.writer, edge.largest).await.is_err() {
 			return Err(());
 		}
 
@@ -1294,7 +1272,8 @@ impl Publisher {
 			let streams = serve.opened.clone();
 			let fill = async {
 				if let Some(fill) = fill {
-					self.run_fill(fill, &ranking, track.clone(), timescale, &streams).await;
+					self.run_fill(fill, &ranking, track.clone(), timescale, &streams, request_id)
+						.await;
 				}
 			};
 			let serving = self.run_subscription(stream, &mut serve, finished, goaways, fill, None);
@@ -1389,7 +1368,7 @@ mod tests {
 			crate::time::sim(),
 			crate::driver::Transport::new(session.clone()),
 			origin.consume(),
-			Control::new(None, false),
+			Control::new(false),
 			None,
 			setup,
 			version,
@@ -1405,10 +1384,10 @@ mod tests {
 		}
 	}
 
-	fn listing(forward: bool) -> ietf::SubscribeTracks<'static> {
+	fn listing(forward: bool) -> ietf::SubscribeTracks {
 		ietf::SubscribeTracks {
 			request_id: RequestId(0),
-			prefix: crate::Path::new("room"),
+			prefix: crate::Path::from_static("room"),
 			forward,
 			subscriber_priority: None,
 			group_order: None,
@@ -1423,7 +1402,7 @@ mod tests {
 
 	impl Harness {
 		/// Send `msg` on a new request stream, dispatched as the session would.
-		async fn request<M: Message>(&mut self, msg: &M) -> Stream<Transport, Version> {
+		async fn request<'m, M: Message<'m>>(&mut self, msg: &M) -> Stream<Transport, Version> {
 			let mut stream = Stream::open(&mut crate::driver::Transport::new(self.peer.clone()), self.version)
 				.await
 				.unwrap();
@@ -1471,7 +1450,7 @@ mod tests {
 		(id, body)
 	}
 
-	async fn send<M: Message>(stream: &mut Stream<Transport, Version>, msg: &M) {
+	async fn send<'m, M: Message<'m>>(stream: &mut Stream<Transport, Version>, msg: &M) {
 		stream.writer.varint(M::ID).await.unwrap();
 		stream.writer.encode(msg).await.unwrap();
 	}
@@ -1487,7 +1466,6 @@ mod tests {
 		stream
 			.writer
 			.encode(&ietf::PublishOk {
-				request_id: None,
 				forward: false,
 				subscriber_priority: Some(128),
 				group_order: Some(GroupOrder::Ascending),
@@ -1501,9 +1479,6 @@ mod tests {
 	fn update(request_id: u64, forward: bool) -> ietf::SubscribeUpdate {
 		ietf::SubscribeUpdate {
 			request_id: RequestId(request_id),
-			subscription_request_id: None,
-			start_location: Location { group: 0, object: 0 },
-			end_group: 0,
 			subscriber_priority: None,
 			forward: Some(forward),
 			// Join at the live edge: draft-22 moved the filter off PUBLISH_OK.
@@ -1583,7 +1558,7 @@ mod tests {
 			let done: ietf::PublishDone = body.message(version).unwrap();
 			assert_eq!(
 				done.status_code,
-				ietf::PublishDoneStatus::TrackEnded.code(version),
+				ietf::PublishDoneStatus::TrackEnded.code(),
 				"{version}"
 			);
 		}
@@ -1619,7 +1594,7 @@ mod tests {
 					let (id, body) = next(published.get_mut(name).unwrap()).await;
 					assert_eq!(id, ietf::PublishDone::ID, "{case}: {name}");
 					let done: ietf::PublishDone = body.message(version).unwrap();
-					assert_eq!(done.status_code, status.code(version), "{case}: {name}");
+					assert_eq!(done.status_code, status.code(), "{case}: {name}");
 				}
 				drop(video);
 			}
@@ -1794,7 +1769,7 @@ mod tests {
 
 			let mut nested = listing(false);
 			nested.request_id = RequestId(2);
-			nested.prefix = crate::Path::new("room/cam");
+			nested.prefix = crate::Path::from_static("room/cam");
 			let mut second = h.request(&nested).await;
 			let (id, body) = next(&mut second).await;
 			assert_eq!(id, ietf::RequestError::ID, "{version}");
@@ -1820,7 +1795,7 @@ mod tests {
 
 			let subscribe = ietf::Subscribe {
 				request_id: RequestId(2),
-				track_namespace: crate::Path::new("room/cam"),
+				track_namespace: crate::Path::from_static("room/cam"),
 				track_name: "video".into(),
 				subscriber_priority: 128,
 				group_order: GroupOrder::Descending,
@@ -1909,7 +1884,7 @@ mod tests {
 				let route = kio::Producer::new(Route::Replaced);
 				let request = Request {
 					origin: h._origin.consume(),
-					prefix: crate::Path::new("").to_owned(),
+					prefix: crate::Path::from_static(""),
 					forward: true,
 					params: Params {
 						priority: crate::ietf::priority::DEFAULT_WIRE,
@@ -1924,7 +1899,7 @@ mod tests {
 				};
 				moq_clock::sim::spawn(h.publisher.clone().run_listed_broadcast(
 					request,
-					crate::Path::new("room/cam").to_owned(),
+					crate::Path::from_static("room/cam"),
 					None,
 					route.consume(),
 				));
@@ -2025,7 +2000,6 @@ mod tests {
 		stream
 			.writer
 			.encode(&ietf::PublishOk {
-				request_id: None,
 				forward: true,
 				subscriber_priority: None,
 				group_order: None,
@@ -2058,7 +2032,6 @@ mod tests {
 			stream
 				.writer
 				.encode(&ietf::PublishOk {
-					request_id: None,
 					forward: true,
 					subscriber_priority: Some(128),
 					group_order: Some(GroupOrder::Ascending),
@@ -2335,7 +2308,7 @@ mod tests {
 		let mut h = harness(version);
 		let subscribe = ietf::Subscribe {
 			request_id: RequestId(0),
-			track_namespace: crate::Path::new("room/cam"),
+			track_namespace: crate::Path::from_static("room/cam"),
 			track_name: "video".into(),
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
@@ -2524,7 +2497,7 @@ mod tests {
 				crate::time::sim(),
 				crate::driver::Transport::new(h.session.clone()),
 				h._origin.consume(),
-				Control::new(None, false),
+				Control::new(false),
 				None,
 				setup,
 				version,

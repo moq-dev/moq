@@ -551,8 +551,9 @@ impl Surface {
 	/// labelled with that: scaling across 576 lines would otherwise change the
 	/// guess without changing the samples.
 	pub fn resize(&self, size: Size, config: &crate::resize::Config) -> Result<Surface, Error> {
+		let output = config.output.resolve(self);
 		// Counts as a use on builds where every GPU arm is compiled out.
-		let _ = config;
+		let _ = output;
 		size.validate("resize to")?;
 
 		let implied = self
@@ -561,9 +562,7 @@ impl Surface {
 		let mut resized = match self {
 			Surface::I420(i420) => Surface::I420(i420.resize(size)?),
 			#[cfg(apple)]
-			Surface::PixelBuffer(pixels) if config.output == crate::Output::Cpu => {
-				Surface::I420(pixels.download_i420()?.resize(size)?)
-			}
+			Surface::PixelBuffer(pixels) if output == crate::Output::Cpu => Surface::I420(pixels.download_i420()?.resize(size)?),
 			#[cfg(apple)]
 			Surface::PixelBuffer(pixels) => match pixels.resize(size.width, size.height) {
 				Ok(scaled) => Surface::PixelBuffer(scaled),
@@ -576,7 +575,7 @@ impl Surface {
 				}
 			},
 			#[cfg(all(target_os = "linux", feature = "nvidia"))]
-			Surface::Cuda(cuda) if config.output == crate::Output::Cpu => Surface::I420(cuda.download_i420()?.resize(size)?),
+			Surface::Cuda(cuda) if output == crate::Output::Cpu => Surface::I420(cuda.download_i420()?.resize(size)?),
 			#[cfg(all(target_os = "linux", feature = "nvidia"))]
 			Surface::Cuda(cuda) => match cuda.resize(size) {
 				Ok(scaled) => Surface::Cuda(scaled),
@@ -595,9 +594,7 @@ impl Surface {
 				));
 			}
 			#[cfg(target_os = "windows")]
-			Surface::Texture(texture) if config.output == crate::Output::Cpu => {
-				Surface::I420(texture.download_i420()?.resize(size)?)
-			}
+			Surface::Texture(texture) if output == crate::Output::Cpu => Surface::I420(texture.download_i420()?.resize(size)?),
 			#[cfg(target_os = "windows")]
 			Surface::Texture(texture) => match texture.resize(size.width, size.height) {
 				Ok(scaled) => Surface::Texture(scaled),
@@ -615,7 +612,7 @@ impl Surface {
 			// encoder to import. If VA-API is missing or refuses the buffer,
 			// download and resize on the CPU.
 			#[cfg(all(target_os = "linux", feature = "vaapi"))]
-			Surface::DmaBuf(buffer) if config.output == crate::Output::Native => match vaapi::resize(buffer, size) {
+			Surface::DmaBuf(buffer) if output == crate::Output::Native => match vaapi::resize(buffer, size) {
 				Ok(scaled) => Surface::DmaBuf(scaled),
 				Err(err) => {
 					static WARN_ONCE: std::sync::Once = std::sync::Once::new();
@@ -884,10 +881,9 @@ impl I420 {
 
 	/// Convert BGRA to I420 in [`Color::infer`]'s color space for this size.
 	/// `stride` is the source row pitch in bytes (>= `width * 4`), so a padded
-	/// surface maps directly. Used by the screen-capture paths: Windows Desktop
-	/// Duplication (BGRA staging texture) and Linux PipeWire (BGRx/BGRA
-	/// shared-memory buffers).
-	#[cfg(any(target_os = "windows", all(target_os = "linux", feature = "pipewire")))]
+	/// surface maps directly. Used by PipeWire capture's BGRx/BGRA shared-memory
+	/// buffers.
+	#[cfg(all(target_os = "linux", feature = "pipewire"))]
 	pub(crate) fn from_bgra(bgra: &[u8], stride: u32, size: Size) -> Result<Self, Error> {
 		use yuv::bgra_to_yuv420;
 
@@ -2068,7 +2064,7 @@ pub mod d3d11 {
 	use std::sync::{LazyLock, Mutex};
 
 	use windows::Win32::Foundation::{HMODULE, RECT};
-	use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+	use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN};
 	use windows::Win32::Graphics::Direct3D10::ID3D10Multithread;
 	use windows::Win32::Graphics::Direct3D11::{
 		D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BIND_VIDEO_ENCODER, D3D11_BOX,
@@ -2087,6 +2083,7 @@ pub mod d3d11 {
 	};
 	use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_RATIONAL, DXGI_SAMPLE_DESC};
 	use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12};
+	use windows::Win32::Graphics::Dxgi::IDXGIAdapter;
 	use windows::Win32::Media::MediaFoundation::{IMFDXGIBuffer, IMFSample};
 	use windows::core::Interface;
 
@@ -2098,16 +2095,22 @@ pub mod d3d11 {
 		Error::Codec(anyhow::anyhow!("{ctx}: {e}"))
 	}
 
-	/// Create a hardware Direct3D11 device, multithread-protected (Media
-	/// Foundation's internal threads or WGC and our capture thread
-	/// both touch it). The shared low-level constructor behind the Media
-	/// Foundation device manager and Windows.Graphics.Capture.
-	pub(crate) fn create_device() -> Result<ID3D11Device, Error> {
+	/// Create a hardware Direct3D11 device on `adapter`, or the default one,
+	/// multithread-protected (Media Foundation's internal threads or WGC and our
+	/// capture thread both touch it). The shared low-level constructor behind the
+	/// Media Foundation device manager, Windows.Graphics.Capture, and the render
+	/// export.
+	pub(crate) fn create_device(adapter: Option<&IDXGIAdapter>) -> Result<ID3D11Device, Error> {
+		// A named adapter picks the driver itself.
+		let driver = match adapter {
+			Some(_) => D3D_DRIVER_TYPE_UNKNOWN,
+			None => D3D_DRIVER_TYPE_HARDWARE,
+		};
 		let mut device: Option<ID3D11Device> = None;
 		unsafe {
 			D3D11CreateDevice(
-				None,
-				D3D_DRIVER_TYPE_HARDWARE,
+				adapter,
+				driver,
 				HMODULE::default(),
 				D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
 				None,
@@ -2202,8 +2205,9 @@ pub mod d3d11 {
 			})
 		}
 
-		/// Convert a recycled WGC BGRA surface to an owned, even-sized NV12 texture.
-		#[cfg(feature = "capture")]
+		/// Convert a BGRA surface someone else recycles (a WGC frame, an exported
+		/// render target) to an owned, even-sized NV12 texture.
+		#[cfg(any(feature = "capture", feature = "render"))]
 		pub(crate) fn capture(device: &ID3D11Device, source: &ID3D11Texture2D, size: Size) -> Result<Self, Error> {
 			let plan = Plan::capture(size)?;
 			let mut desc = D3D11_TEXTURE2D_DESC::default();
@@ -2774,7 +2778,7 @@ pub mod d3d11 {
 		#[test]
 		#[ignore = "requires a Windows GPU with BGRA-to-NV12 video processing"]
 		fn wgc_conversion_crops_odd_edges_and_preserves_color() {
-			let device = create_device().expect("D3D11 hardware device");
+			let device = create_device(None).expect("D3D11 hardware device");
 			for size in [Size::new(641, 481), Size::new(1281, 721)] {
 				let mut pixels = Vec::with_capacity(size.pixels() as usize * 4);
 				for y in 0..size.height {
@@ -2836,7 +2840,7 @@ pub mod d3d11 {
 			reason = "the workload measures itself on the host clock"
 		)]
 		fn wgc_conversion_workload() {
-			let device = create_device().expect("D3D11 hardware device");
+			let device = create_device(None).expect("D3D11 hardware device");
 			for size in [Size::new(640, 480), Size::new(1280, 720), Size::new(1920, 1080)] {
 				let pixels = [0, 0, 255, 255].repeat(size.pixels() as usize);
 				let source = upload_bgra(&device, size, &pixels);
@@ -3277,7 +3281,7 @@ mod tests {
 	#[test]
 	#[ignore = "D3D11 GPU reproducer; VideoProcessorBlt can hang on affected drivers"]
 	fn d3d11_resize_defaults_to_the_gpu() {
-		let Ok(device) = super::d3d11::create_device() else {
+		let Ok(device) = super::d3d11::create_device(None) else {
 			eprintln!("skipping: no Direct3D11 hardware device");
 			return;
 		};
@@ -3304,7 +3308,7 @@ mod tests {
 	#[cfg(target_os = "windows")]
 	#[test]
 	fn d3d11_resize_can_force_the_cpu() {
-		let Ok(device) = super::d3d11::create_device() else {
+		let Ok(device) = super::d3d11::create_device(None) else {
 			eprintln!("skipping: no Direct3D11 hardware device");
 			return;
 		};
@@ -3330,7 +3334,7 @@ mod tests {
 	#[test]
 	#[ignore = "explicit D3D11 GPU probe; VideoProcessorBlt can hang on affected drivers"]
 	fn d3d11_resize_matches_cpu() {
-		let Ok(device) = super::d3d11::create_device() else {
+		let Ok(device) = super::d3d11::create_device(None) else {
 			eprintln!("skipping: no Direct3D11 hardware device");
 			return;
 		};

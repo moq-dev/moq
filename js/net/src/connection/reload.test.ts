@@ -12,6 +12,7 @@ import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
 import { Timescale } from "../time.ts";
+import { closeUnwanted } from "../util/announce.ts";
 import { nextTask } from "../util/yield.ts";
 import { wireOf } from "../wire.ts";
 import type { Established } from "./established.ts";
@@ -24,8 +25,9 @@ function accept(transport: WebTransport, url: URL, props: Omit<AcceptProps, "tra
 }
 
 function publish(origin: OriginProducer, path: Path.Valid) {
-	const broadcast = origin.createBroadcast(path);
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(path);
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	return broadcast;
 }
 
@@ -402,6 +404,80 @@ for (const code of [SessionCode.Unauthorized, SessionCode.MalformedAuthToken, Se
 	});
 }
 
+/**
+ * Stub WebTransport for lite-06, which carries the credential in the URL: refuses `refused`
+ * once `release` resolves, and accepts any other credential, recording each dialed jwt.
+ */
+function refusing(refused: string, release: Promise<void>) {
+	const dialed: (string | null)[] = [];
+	const stub = function StubWebTransport(target: string | URL) {
+		const jwt = new URL(target).searchParams.get("jwt");
+		dialed.push(jwt);
+		const pair = createMockTransportPair(Lite.ALPN_06);
+		void accept(pair.server, new URL(target)).then(async () => {
+			if (jwt !== refused) return;
+			await release;
+			pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
+		});
+		return pair.client;
+	};
+	return { dialed, stub: stub as unknown as typeof WebTransport };
+}
+
+test("a refused credential replaced since its dial redials with the new one", async () => {
+	const original = globalThis.WebTransport;
+	const { promise: release, resolve } = Promise.withResolvers<void>();
+	const { dialed, stub } = refusing("old", release);
+	globalThis.WebTransport = stub;
+
+	const tokens = new Signal<readonly string[]>(["old"]);
+	const reload = new Reload({
+		url: new URL("https://example.com/"),
+		versions: ["moq-lite-06"],
+		websocket: { enabled: false },
+		tokens,
+		delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: Milli(0) },
+	});
+	try {
+		await waitUntil(() => reload.established.peek() !== undefined);
+		tokens.set(["new"]);
+		resolve();
+		await waitUntil(() => dialed.includes("new"));
+		expect(dialed).toEqual(["old", "new"]);
+		await waitUntil(() => reload.established.peek() !== undefined);
+		expect(reload.error.peek()).toBeUndefined();
+	} finally {
+		reload.close();
+		globalThis.WebTransport = original;
+	}
+});
+
+test("new tokens redial a URL that stopped on refusing the old ones", async () => {
+	const original = globalThis.WebTransport;
+	const { dialed, stub } = refusing("old", Promise.resolve());
+	globalThis.WebTransport = stub;
+
+	const tokens = new Signal<readonly string[]>(["old"]);
+	const reload = new Reload({
+		url: new URL("https://example.com/"),
+		versions: ["moq-lite-06"],
+		websocket: { enabled: false },
+		tokens,
+		delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: Milli(0) },
+	});
+	try {
+		await waitUntil(() => reload.error.peek() !== undefined);
+		expect(dialed).toEqual(["old"]);
+		tokens.set(["new"]);
+		await waitUntil(() => dialed.includes("new"));
+		await waitUntil(() => reload.established.peek() !== undefined);
+		expect(reload.error.peek()).toBeUndefined();
+	} finally {
+		reload.close();
+		globalThis.WebTransport = original;
+	}
+});
+
 test("an unauthorized session close during setup stops retrying", async () => {
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");
@@ -662,8 +738,9 @@ for (const [name, teardown] of Object.entries(teardowns)) {
 		await waitUntil(() => handle.origin.peek() !== undefined);
 		const origin = handle.origin.peek();
 		if (!origin) throw new Error("no origin");
-		const broadcast = origin.createBroadcast(Path.from("room"));
-		broadcast.announce();
+		const broadcastPublication = origin.createBroadcast(Path.from("room"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 		await waitUntil(() => dials.length > 0);
 		const first = dials[0];
@@ -686,7 +763,8 @@ for (const [name, teardown] of Object.entries(teardowns)) {
 			fin.hold?.enable();
 			const last = producer.appendGroup();
 			last.writeFrame(textFrame("last"));
-			last.close();
+			last.finish();
+			producer.finish();
 			producer.close();
 			teardown.end(handle, win);
 			await clock.advance(Nano.fromMilli(teardown.linger));
@@ -748,8 +826,9 @@ for (const [name, drainEnd] of Object.entries(drainEnds)) {
 		globalThis.WebTransport = stub as unknown as typeof WebTransport;
 
 		const origin = new OriginProducer();
-		const broadcast = origin.createBroadcast(Path.from("room"));
-		broadcast.announce();
+		const broadcastPublication = origin.createBroadcast(Path.from("room"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 		const reload = new Reload({
 			url: new URL("https://example.com/a"),
@@ -779,6 +858,7 @@ for (const [name, drainEnd] of Object.entries(drainEnds)) {
 			remote.close();
 			reload.close();
 			for (const dial of dials) (await dial.server).abort();
+			producer.finish();
 			producer.close();
 			broadcast.close();
 			origin.close();
@@ -807,8 +887,9 @@ test("a retired GOAWAY predecessor still closes by its handover cap", async () =
 	globalThis.WebTransport = stub as unknown as typeof WebTransport;
 
 	const origin = new OriginProducer();
-	const broadcast = origin.createBroadcast(Path.from("room"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const reload = new Reload({
 		url: new URL("https://example.com/"),
@@ -844,6 +925,7 @@ test("a retired GOAWAY predecessor still closes by its handover cap", async () =
 		remote.close();
 		reload.close();
 		for (const dial of dials) (await dial.server).abort();
+		producer.finish();
 		producer.close();
 		broadcast.close();
 		origin.close();
@@ -889,8 +971,9 @@ test("closing the loop keeps the tokens until the session drains", async () => {
 	const origin = new OriginProducer();
 	const reload = new Reload({ url, websocket: { enabled: false }, publish: origin.consume() });
 	await reload.auth.add("token");
-	const broadcast = origin.createBroadcast(Path.from("room"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const first = dials[0];
 	if (!first) throw new Error("no first dial");
@@ -903,7 +986,8 @@ test("closing the loop keeps the tokens until the session drains", async () => {
 		fin.hold?.enable();
 		const last = producer.appendGroup();
 		last.writeFrame(textFrame("last"));
-		last.close();
+		last.finish();
+		producer.finish();
 		producer.close();
 		reload.close();
 
@@ -929,13 +1013,12 @@ test("closing the loop keeps the tokens until the session drains", async () => {
 test("closing an announce consumer during upstream teardown does not append retractions", async () => {
 	const { Producer } = await import("../announced.ts");
 	const upstream = new Producer();
-	const reload = new Reload({ enabled: false });
-	reload.established.set({
-		probe: new Signal(undefined),
-		announced: () => upstream.consume(),
-		stats: async () => undefined,
-	} as unknown as import("./established.ts").Established);
-	const consumer = reload.announced();
+	const producer = new Producer();
+	const pump = new Effect((effect) => pumpAnnounced(effect, upstream.consume(), producer));
+	const consumer = producer.consume();
+	// The same lifecycle as Connection.announced: the last consumer closing closes the producer and its pump.
+	closeUnwanted(producer);
+	void producer.closed.then(() => pump.close());
 	const errors = spyOn(console, "error").mockImplementation(() => {});
 	try {
 		upstream.append({
@@ -950,21 +1033,23 @@ test("closing an announce consumer during upstream teardown does not append retr
 		await Promise.resolve();
 		consumer.close();
 		await settle();
+		expect(producer.closed.peek()).not.toBeUndefined();
 		expect(errors.mock.calls).toEqual([]);
 	} finally {
 		consumer.close();
-		reload.close();
+		pump.close();
+		producer.close();
 		errors.mockRestore();
 	}
 });
 
 test("announced accepts a non-prefix scope before any session exists", () => {
-	const reload = new Reload({ enabled: false });
+	const connection = new Connection({ enabled: false });
 	try {
-		const announced = reload.announced(Path.Pattern.parse("room/*"));
+		const announced = connection.announced(Path.Pattern.parse("room/*"));
 		announced.close();
 	} finally {
-		reload.close();
+		connection.close();
 	}
 });
 
@@ -997,14 +1082,15 @@ test("a watcher syncs with the server's initial set, and again after a reconnect
 		globalThis.WebTransport = stub as unknown as typeof WebTransport;
 
 		const clientOrigin = new OriginProducer();
-		const reload = new Reload({
+		const props = {
 			enabled: true,
 			url,
 			websocket: { enabled: false },
 			delay: { initial: Milli(10), multiplier: 1, max: Milli(10) },
-			consume: viaOrigin ? clientOrigin : undefined,
-		});
-		const watching = viaOrigin ? clientOrigin.announced() : reload.announced();
+		};
+		const reload = viaOrigin ? new Reload({ ...props, consume: clientOrigin }) : undefined;
+		const connection = viaOrigin ? undefined : new Connection({ ...props, share: false });
+		const watching = connection ? connection.announced() : clientOrigin.announced();
 		const seen = new Set<string>();
 		void (async () => {
 			for await (const event of watching) {
@@ -1025,7 +1111,8 @@ test("a watcher syncs with the server's initial set, and again after a reconnect
 			expect([...seen].sort()).toEqual(["a", "b"]);
 		} finally {
 			watching.close();
-			reload.close();
+			reload?.close();
+			connection?.close();
 			clientOrigin.close();
 			for (const broadcast of published) broadcast.close();
 			serverOrigin.close();

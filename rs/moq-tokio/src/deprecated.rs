@@ -46,6 +46,12 @@ impl Deprecated {
 		self.entry(&Self::spelling(old, env), new, Some(note));
 	}
 
+	/// Record a released flag that was removed without a replacement, with a note saying
+	/// what covers it now.
+	pub fn removed(&mut self, old: &str, env: Option<&str>, note: &str) {
+		self.entry(&Self::spelling(old, env), "removed", Some(note));
+	}
+
 	/// Record a released config-file key or table, which has no environment variable.
 	pub fn toml(&mut self, old: &str, new: &str, note: Option<&str>) {
 		self.entry(old, new, note);
@@ -70,7 +76,7 @@ impl std::fmt::Display for Deprecated {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		write!(
 			f,
-			"these settings were renamed and are no longer applied; update them and try again:"
+			"these settings were renamed or removed and are no longer applied; update them and try again:"
 		)?;
 		for entry in &self.0 {
 			write!(f, "\n  {entry}")?;

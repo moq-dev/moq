@@ -321,7 +321,7 @@ impl<T> Inner<T> {
 		let next = track.largest().map_or(0, |largest| largest.group.saturating_add(1));
 		if track.is_closed()
 			|| track
-				.end()
+				.finished()
 				.is_some_and(|end| moq_net::track::Position::group(next) >= end)
 		{
 			return Err(moq_net::Error::Closed.into());

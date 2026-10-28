@@ -8,20 +8,20 @@
  * @module
  */
 import * as z from "zod/mini";
-import type { Auth } from "./auth.ts";
+import type { Credential } from "./auth.ts";
 import type * as Epoch from "./epoch.ts";
 import { isLeadingOnes, type StreamVersion } from "./stream.ts";
 
 /**
  * One relay's identity in a broadcast's hop chain: any 64-bit id.
  *
- * Names a *hop*, not an {@link !Origin | Origin} routing table: this is the id a relay
+ * Names a *hop*, not an `Origin` routing table: this is the id a relay
  * stamps into a chain as an announcement passes through, so a receiver can spot its own
  * id and reject a loop. The SETUP parameter that carries it session-wide is `Hop` too.
  *
  * The {@link HopSchema} validates any incoming value and brands it so the type system
  * enforces "only validated ids flow into hop chains." Internal code that synthesizes one
- * (e.g. {@link randomHop}) uses `HopSchema.parse(...)` to brand a raw bigint.
+ * (e.g. `randomHop`) uses `HopSchema.parse(...)` to brand a raw bigint.
  */
 export const HopSchema = z
 	.bigint()
@@ -91,7 +91,7 @@ export const Cost = {
 /**
  * The path a route took through the mesh and what using it costs.
  *
- * The metadata half of an advertisement: an origin `dynamic()` pairs it with the
+ * The metadata half of an advertisement: an origin `requests()` pairs it with the
  * pattern it covers, a broadcast `announce()` with the broadcast's exact path, and
  * an announce event carries it so consumers can read it back.
  */
@@ -111,12 +111,10 @@ export interface Route {
 	 * The token the request advertising this route carries, from `auth.add()`, or undefined
 	 * for the session's own credential. Only the session that issued it carries it, as the
 	 * token on its moq-transport PUBLISH_NAMESPACE: any other session, the inline NAMESPACE
-	 * answering a solicited SUBSCRIBE_NAMESPACE from draft 16 on (drafts 14 and 15 answer
-	 * with a PUBLISH_NAMESPACE, which carries it), and moq-lite advertise the route unnamed.
-	 * Swapping it renews the request with REQUEST_UPDATE from draft 16, or ends and makes it
-	 * again before. Local: a relay never forwards it. Mirrors `Route::auth` in rs/moq-net.
+	 * answering a solicited SUBSCRIBE_NAMESPACE, and moq-lite advertise the route unnamed.
+	 * Swapping it renews the request with REQUEST_UPDATE. Local: a relay never forwards it. Mirrors `Route::auth` in rs/moq-net.
 	 */
-	auth?: Auth;
+	auth?: Credential;
 }
 
 /** Constructors and helpers for {@link Route}. */
@@ -125,7 +123,9 @@ export const Route = {
 	default: { hops: [], cost: Cost.zero } as Route,
 
 	/** Fill route defaults and saturate the static price at the wire ceiling. */
-	normalize(route: Route | { epoch?: Epoch.Valid; hops?: readonly Hop[]; cost?: Cost; auth?: Auth } = {}): Route {
+	normalize(
+		route: Route | { epoch?: Epoch.Valid; hops?: readonly Hop[]; cost?: Cost; auth?: Credential } = {},
+	): Route {
 		const cost = route.cost ?? Cost.zero;
 		if (typeof cost !== "bigint" || cost < 0n) throw new RangeError("route cost must be a non-negative bigint");
 		const max = 2n ** 62n - 1n;
@@ -142,7 +142,7 @@ export const Route = {
  * Whether this route passed through an anonymous hop (id 0) at any depth.
  *
  * An empty chain is a local announcement, not the anonymous mark. Ingress fills a
- * received empty list with {@link UNKNOWN_HOP} before yielding it.
+ * received empty list with the anonymous hop before yielding it.
  */
 export function isAnonymous(route: Route): boolean {
 	return route.hops.includes(UNKNOWN_HOP);

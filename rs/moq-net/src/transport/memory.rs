@@ -31,7 +31,7 @@ use std::{
 
 use bytes::{Buf, Bytes};
 
-use super::{StatsUnavailable, poll};
+use super::poll;
 
 /// The largest datagram either side sends: QUIC's minimum MTU, so a payload that fits
 /// here fits any QUIC path.
@@ -416,9 +416,9 @@ impl poll::Session for Session {
 		self.conn().config.protocol.as_deref()
 	}
 
-	fn binding(&self) -> super::Binding {
+	fn address(&self) -> super::Address {
 		// Like raw QUIC, the pair has no request URI, so the target travels in SETUP.
-		super::Binding::InBand
+		super::Address::Setup
 	}
 
 	fn close(&mut self, code: u32, reason: &str) {
@@ -427,10 +427,6 @@ impl poll::Session for Session {
 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Error> {
 		poll_close(&self.side.conn.close, self.closed.hold(cx))
-	}
-
-	fn stats(&self) -> impl super::Stats {
-		StatsUnavailable
 	}
 }
 

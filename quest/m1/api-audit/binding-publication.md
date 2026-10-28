@@ -13,8 +13,9 @@ prepared broadcast no longer exposes announcement calls that can only fail.
 Decided 2026-10-23 (maintainer, on
 [moq-dev/moq#6464](https://github.com/moq-dev/moq/pull/6464)): ✅ land the
 announcement split in three PRs: native Rust in that PR, the
-[JS mirror](/quest/m1/api-audit/js-publication.md), and this binding rollout
-once the native PR merges. The native PR keeps private adapters that hold the
+[JS mirror](https://github.com/moq-dev/moq/pull/6795), and this binding rollout.
+Both merged on 2026-10-25, so this quest can start. The native PR kept
+private adapters that hold the
 `Publication` beside each binding fill handle (`rs/moq-ffi/src/producer.rs`
 `from_publication`, `rs/moq-c/src/publish.rs` `create_publication` and
 `admit`); this quest replaces them with public handles.
@@ -36,10 +37,19 @@ publication does not retract on its own).
   the prepared fill is the broadcast it prepared.
 - Wrappers: py, swift, kt, dart, `go/wrapper`, `cpp/moq`, and `cpp/obs`, with
   their tests, READMEs, `doc/lib/{py,swift,kt,go,dart,c,cpp}`, `doc/bin/obs.md`,
-  and a `MIGRATE.md` entry in each package. Regenerate bindings from source.
+  and an Impact migration note for each package. Regenerate bindings from source.
 
 Test in each layer: clone/drop, explicit unannounce, prepared
 admission (including a mismatched fill), and a stale publication against a
 replacement. Run `just test interop --all`.
+
+Decided 2026-10-25 (maintainer): the hand-written moq-c ships at this cut
+with parity with moq-ffi for every m1 binding feature, so it takes this break
+too; it is not frozen. The generated C line moves after the cut and waits for
+rust2.
+
+[moq-dev/moq#6740](https://github.com/moq-dev/moq/pull/6740) already made
+closing a binding broadcast end its tracks; the public handles keep that
+`MoqBroadcastProducer` and `moq_publish_*` close path in every wrapper.
 
 Public API: breaking in moq-ffi, the C ABI, and every wrapper. Wire: none.

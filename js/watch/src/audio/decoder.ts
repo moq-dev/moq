@@ -49,7 +49,8 @@ export type DecoderProps = Inputs<DecoderInput> & {
 	sync: Sync;
 };
 
-type DecoderOutput = {
+/** Signals the decoder derives. */
+export type DecoderOutput = {
 	/** Fatal decode failure, cleared when another source is selected. */
 	error: Signal<Error | undefined>;
 	context: Signal<AudioContext | undefined>;
@@ -250,6 +251,7 @@ export class Decoder {
 		if (!broadcast || !effect.get(broadcast.in.enabled)) return;
 
 		const { sampleRate, channels: channelCount } = shape;
+		const buffered = effect.get(this.sync.out.buffered);
 
 		// Expose the rate the graph actually runs at.
 		effect.set(this.#out.sampleRate, sampleRate);
@@ -290,7 +292,7 @@ export class Decoder {
 				channels: channelCount,
 				rate: sampleRate,
 				delay: this.sync.out.delay.peek(),
-				buffered: this.sync.out.buffered.peek(),
+				buffered,
 				playing: this.sync.playing,
 			});
 			effect.cleanup(() => ring.close());
@@ -359,6 +361,8 @@ export class Decoder {
 	}
 
 	#runDecoder(effect: Effect): void {
+		// The reorder policy belongs to the playback mode, so a mode change starts a new reader.
+		effect.get(this.sync.out.buffered);
 		const running = effect.get(this.in.enabled) && !effect.get(this.sync.out.instant);
 		const broadcast = effect.get(this.source.in.broadcast);
 		const track = effect.get(this.source.out.track);
@@ -426,7 +430,7 @@ export class Decoder {
 		}
 		this.#instance = active.closed;
 
-		// The ring outlives this effect (it's keyed on the sample rate and channel count), so a
+		// The ring outlives this effect (it's keyed on the sample rate, channel count, and mode), so a
 		// replacement subscription on the same broadcast (a rendition swap, a return from an absence)
 		// inherits whatever its predecessor decoded. Samples are timestamp indexed, so the replacement
 		// overwrites the slots it lands on, but a publisher writing ahead of real-time leaves seconds
@@ -511,9 +515,7 @@ export class Decoder {
 					if (!(await play(order.flush()))) return;
 					if (!next) break;
 					if (this.#onRead(next)) {
-						decoder.reset();
-						decoder.configure(decoderConfig);
-						order.reset();
+						this.#reprime(decoder, decoderConfig, order);
 					}
 					if (next.kind === "gap") this.#arrivals.write(gap(next));
 					continue;
@@ -600,9 +602,7 @@ export class Decoder {
 					if (!(await play(order.flush()))) return;
 					if (!next) break;
 					if (this.#onRead(next)) {
-						decoder.reset();
-						decoder.configure(decoderConfig);
-						order.reset();
+						this.#reprime(decoder, decoderConfig, order);
 					}
 					if (next.kind === "gap") this.#arrivals.write(gap(next));
 					continue;
@@ -638,14 +638,20 @@ export class Decoder {
 	): Promise<boolean> {
 		for (const read of reads) {
 			if (this.#onRead(read)) {
-				decoder.reset();
-				decoder.configure(config);
-				order.reset();
+				this.#reprime(decoder, config, order);
 			}
 			if (!order.admit(read)) continue;
 			if (!(await this.#decode(effect, decoder, read.frame))) return false;
 		}
 		return true;
+	}
+
+	// A reset discards queued codec output, so release its accounting without clearing retained PCM.
+	#reprime(decoder: AudioDecoder, config: AudioDecoderConfig, order: Order<FrameRead>): void {
+		decoder.reset();
+		this.#ring.peek()?.dropped();
+		decoder.configure(config);
+		order.reset();
 	}
 
 	// Decode one frame once backpressure admits it, reporting whether to keep going.
@@ -890,8 +896,11 @@ export class Decoder {
 	// a gap, or a later group after a declared end.
 	#onRead(read: Container.Read): boolean {
 		if (!this.#terminal.update(read)) return false;
-		this.sync.reset();
-		this.reset();
+		// A hole restarts codec prediction on the same timeline, keeping decoded PCM and parked video.
+		if (read.kind === "frame") {
+			this.sync.reset();
+			this.reset();
+		}
 		return true;
 	}
 
@@ -914,6 +923,7 @@ export class Decoder {
 	static supported = supported;
 }
 
+/** Whether the WebCodecs audio decoder can play this config. */
 async function supported(config: Catalog.AudioConfig): Promise<boolean> {
 	if (!Catalog.containerSupported(config.container)) {
 		// `kind` is the literal "unknown" tag; the container the publisher actually named is in `raw`.

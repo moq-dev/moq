@@ -390,7 +390,7 @@ struct Shape {
 	caps: gst::Caps,
 	container: hang::catalog::Container,
 	track: String,
-	broadcast: Option<moq_net::path::RelativeOwned>,
+	broadcast: Option<moq_net::path::Relative>,
 	epoch: Option<moq_net::Epoch>,
 }
 
@@ -728,7 +728,7 @@ async fn follow_catalog(
 		shutdown: shutdown.clone(),
 		stop: stopped,
 	};
-	let mut followers: HashMap<moq_net::PathOwned, Followed> = HashMap::new();
+	let mut followers: HashMap<moq_net::Path, Followed> = HashMap::new();
 	// Woken when a follower runs out of renditions, so the run can let it go without waiting for
 	// another catalog update.
 	let emptied = Arc::new(tokio::sync::Notify::new());
@@ -799,7 +799,7 @@ fn reconcile(
 	catalog: &moq_mux::catalog::hang::Catalog,
 	source: &moq_mux::Source,
 	playback: &Playback,
-	followers: &mut HashMap<moq_net::PathOwned, Followed>,
+	followers: &mut HashMap<moq_net::Path, Followed>,
 	tasks: &mut tokio::task::JoinSet<()>,
 	emptied: &Arc<tokio::sync::Notify>,
 	cancel: &watch::Receiver<bool>,
@@ -871,7 +871,7 @@ fn reconcile(
 		tasks.spawn_on(STREAMING.scope(playback.element.clone(), retire), RUNTIME.handle());
 	}
 
-	let mut plans: HashMap<moq_net::PathOwned, Plan> = HashMap::new();
+	let mut plans: HashMap<moq_net::Path, Plan> = HashMap::new();
 	for (rendition, shape) in desired {
 		let Some(path) = source.resolve_reference(shape.broadcast.as_ref()) else {
 			gst::warning!(
@@ -888,7 +888,7 @@ fn reconcile(
 	// one playing out its tail. Its follower stays reachable, with its finished records, while a
 	// disabled rendition still names it or a delisted one drains, so a re-enable or relist reaches
 	// it rather than a new follower. Once it plays nothing, the run lets it go.
-	let held: HashSet<moq_net::PathOwned> = disabled
+	let held: HashSet<moq_net::Path> = disabled
 		.iter()
 		.filter_map(|(_, reference)| source.resolve_reference(reference.broadcast()))
 		.collect();
@@ -998,7 +998,7 @@ struct Plan {
 /// rendition is reading, idle, or playing out its tail is its own state rather than a task's.
 struct Follower {
 	playback: Playback,
-	path: moq_net::PathOwned,
+	path: moq_net::Path,
 	renditions: HashMap<Rendition, Entry>,
 	readers: tokio::task::JoinSet<(Rendition, u64, Exit)>,
 	/// The instance last started.
@@ -2231,7 +2231,7 @@ mod session_tests {
 
 	/// Block until a consumer asks the broadcast for a track, returning the request unanswered so
 	/// its subscriber stays parked. Bounded so a session that never subscribes fails the test.
-	fn await_request(dynamic: &mut moq_net::broadcast::Dynamic) -> moq_net::track::Request {
+	fn await_request(dynamic: &mut moq_net::broadcast::Requests) -> moq_net::track::Request {
 		super::RUNTIME
 			.block_on(async { tokio::time::timeout(Duration::from_secs(10), dynamic.requested_track()).await })
 			.expect("no track was ever requested")
@@ -2256,15 +2256,15 @@ mod session_tests {
 		let element = element();
 		let origin = origin();
 		let catalog_broadcast = origin.create_broadcast("room/catalog").unwrap();
-		let mut local = catalog_broadcast.dynamic();
+		let mut local = catalog_broadcast.requests();
 		let left = origin.create_broadcast("room/left").unwrap();
-		let mut remote = left.dynamic();
+		let mut remote = left.requests();
 		let right = origin.create_broadcast("room/right").unwrap();
-		let mut replacement = right.dynamic();
+		let mut replacement = right.requests();
 		let mut catalog =
 			moq_mux::catalog::Producer::new(&mut catalog_broadcast.broadcast().clone(), Default::default()).unwrap();
 		let mut config = video_rendition();
-		config.broadcast = Some("./left".into());
+		config.broadcast = Some(moq_net::path::Relative::new("./left").unwrap());
 		config.track = Some("encoded".into());
 		catalog.modify().unwrap().video.renditions.insert("view".into(), config);
 		catalog_broadcast.announce(Default::default()).unwrap();
@@ -2295,7 +2295,7 @@ mod session_tests {
 			.renditions
 			.get_mut("view")
 			.unwrap()
-			.broadcast = Some("./right".into());
+			.broadcast = Some(moq_net::path::Relative::new("./right").unwrap());
 		let next = super::RUNTIME
 			.block_on(async { tokio::time::timeout(Duration::from_secs(10), replacement.requested_track()).await });
 		stopping.send(true).unwrap();
@@ -2320,7 +2320,7 @@ mod session_tests {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		// A live handler is what makes an unserved name park rather than resolve `NotFound`,
 		// which is how it behaves over the wire: the publisher just never answers.
-		let mut dynamic = broadcast.dynamic();
+		let mut dynamic = broadcast.requests();
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
 		// First update announces audio only, and no producer ever answers for it.
@@ -2396,7 +2396,7 @@ mod session_tests {
 		let element = element();
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let mut dynamic = broadcast.dynamic();
+		let mut dynamic = broadcast.requests();
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
 		{
@@ -2947,7 +2947,7 @@ mod session_tests {
 		let element = element();
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let _dynamic = broadcast.dynamic();
+		let _dynamic = broadcast.requests();
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
 		// A video rendition nobody serves, alongside an audio one that arrives. The audio pad
@@ -3315,7 +3315,7 @@ mod session_tests {
 	/// Records what reaches the element's video pads. A new pad's first stream-start and caps
 	/// precede its pad-added, so only a kept pad's later ones show.
 	#[derive(Clone, Default)]
-	struct Recorder(std::sync::Arc<(Mutex<Vec<Seen>>, std::sync::Condvar)>);
+	struct Recorder(Arc<(Mutex<Vec<Seen>>, std::sync::Condvar)>);
 
 	impl Recorder {
 		fn attach(element: &super::super::MoqSrc) -> Self {
@@ -3358,51 +3358,39 @@ mod session_tests {
 		}
 
 		fn push(&self, seen: Seen) {
-			let (list, pushed) = &*self.0;
-			list.lock().unwrap().push(seen);
-			pushed.notify_all();
+			let (recorded, changed) = &*self.0;
+			recorded.lock().unwrap().push(seen);
+			changed.notify_all();
 		}
 
 		fn seen(&self) -> Vec<Seen> {
 			self.0.0.lock().unwrap().clone()
 		}
 
-		/// Block until `tag` reaches a pad, returning that pad.
-		fn reached(&self, tag: u8) -> String {
-			let reached = |seen: &[Seen]| {
-				seen.iter().find_map(|seen| match seen {
-					Seen::Buffer(pad, seen) if *seen == tag => Some(pad.clone()),
-					_ => None,
-				})
-			};
-			let (list, pushed) = &*self.0;
-			let (seen, _) = pushed
-				.wait_timeout_while(list.lock().unwrap(), Duration::from_secs(10), |seen| {
-					reached(seen).is_none()
-				})
-				.unwrap();
-			reached(&seen).unwrap_or_else(|| panic!("{tag} never reached a pad: {seen:?}"))
-		}
-
 		fn count(&self, matches: impl Fn(&Seen) -> bool) -> usize {
 			self.seen().iter().filter(|seen| matches(seen)).count()
 		}
 
-		/// Keep writing `tag` until it reaches a pad, returning that pad. Writing again covers
-		/// whichever moment the run subscribes.
+		/// Block until what reached the pads gives `done` an answer, returning it. Bounded so a
+		/// run that never delivers fails the test with what it saw.
+		fn wait<T>(&self, what: &str, done: impl Fn(&[Seen]) -> Option<T>) -> T {
+			let (recorded, changed) = &*self.0;
+			let (seen, _) = changed
+				.wait_timeout_while(recorded.lock().unwrap(), Duration::from_secs(10), |seen| {
+					done(seen).is_none()
+				})
+				.unwrap();
+			done(&seen).unwrap_or_else(|| panic!("{what}: {seen:?}"))
+		}
+
+		/// Write `tag` once and block until it reaches a pad, returning that pad. A track keeps
+		/// its newest group for a late subscriber, so one write reaches the run whenever it
+		/// subscribes, and a pad never sees `tag` twice unless the run replays it.
 		fn written(&self, publisher: &mut Publisher, tag: u8) -> String {
-			for _ in 0..200 {
-				publisher.write(tag);
-				std::thread::sleep(Duration::from_millis(50));
-				let reached = self.seen().into_iter().find_map(|seen| match seen {
-					Seen::Buffer(pad, seen) if seen == tag => Some(pad),
-					_ => None,
-				});
-				if let Some(pad) = reached {
-					return pad;
-				}
-			}
-			panic!("{tag} never reached a pad: {:?}", self.seen());
+			publisher.write(tag);
+			self.wait(&format!("{tag} never reached a pad"), |seen| {
+				reached(seen, tag).into_iter().next()
+			})
 		}
 
 		/// One video pad, never ended: the session held it throughout.
@@ -3411,6 +3399,20 @@ mod session_tests {
 			assert_eq!(self.count(|seen| matches!(seen, Seen::Pad(_))), 1, "{seen:?}");
 			assert_eq!(self.count(|seen| matches!(seen, Seen::Eos(_))), 0, "{seen:?}");
 		}
+	}
+
+	/// The pads `tag` reached, in the order it first reached each.
+	fn reached(seen: &[Seen], tag: u8) -> Vec<String> {
+		let mut pads = Vec::new();
+		for seen in seen {
+			if let Seen::Buffer(pad, seen) = seen
+				&& *seen == tag
+				&& !pads.contains(pad)
+			{
+				pads.push(pad.clone());
+			}
+		}
+		pads
 	}
 
 	/// A session following `room` on `origin`, in place of a relay's.
@@ -3518,7 +3520,7 @@ mod session_tests {
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
 
-		let claim = origin.dynamic("").unwrap();
+		let claim = origin.requests("").unwrap();
 		let (answers, answered) = std::sync::mpsc::channel();
 		let handler = super::RUNTIME.spawn(async move {
 			while let Ok(request) = claim.requested_broadcast().await {
@@ -3551,7 +3553,7 @@ mod session_tests {
 		let element = element();
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
-		let pool = origin.dynamic("").unwrap();
+		let pool = origin.requests("").unwrap();
 		let session = follow(&element, &origin);
 		let pending = super::RUNTIME.block_on(async {
 			tokio::time::timeout(Duration::from_secs(10), pool.requested_broadcast())
@@ -3570,7 +3572,7 @@ mod session_tests {
 	/// A `room` whose video rendition references the `cam` sibling, naming `epoch` when given.
 	fn referencing(origin: &moq_net::origin::Producer, epoch: Option<moq_net::Epoch>) -> Publisher {
 		let mut config = video_rendition();
-		config.broadcast = Some("./cam".into());
+		config.broadcast = Some(moq_net::path::Relative::new("./cam").unwrap());
 		config.epoch = epoch;
 		Publisher::new(origin, Default::default(), config)
 	}
@@ -4010,26 +4012,14 @@ mod session_tests {
 		}
 		let session = follow(&element, &origin);
 
-		// Each rendition plays the first instance on a pad of its own.
-		let reached = |tag: u8| -> HashSet<String> {
-			recorder
-				.seen()
-				.into_iter()
-				.filter_map(|seen| match seen {
-					Seen::Buffer(pad, seen) if seen == tag => Some(pad),
-					_ => None,
-				})
-				.collect()
-		};
+		// Each rendition plays the first instance on a pad of its own. Written once, so a second
+		// copy on either pad can only be a replay.
 		let mut first = Publisher::sibling(&origin, moq_net::origin::Route::default().with_epoch(pinned));
-		for _ in 0..200 {
-			if reached(1).len() == 2 {
-				break;
-			}
-			first.write(1);
-			std::thread::sleep(Duration::from_millis(50));
-		}
-		assert_eq!(reached(1).len(), 2, "{:?}", recorder.seen());
+		first.write(1);
+		let played = recorder.wait("1 never reached both renditions", |seen| {
+			let pads = reached(seen, 1);
+			(pads.len() == 2).then_some(pads)
+		});
 		first.video.finish().unwrap();
 		await_finished(&first);
 
@@ -4037,7 +4027,7 @@ mod session_tests {
 		// to the pinned one.
 		let mut second = Publisher::sibling(&origin, moq_net::origin::Route::default().with_epoch(other));
 		let unpinned = recorder.written(&mut second, 2);
-		let pad = reached(1).into_iter().find(|pad| *pad != unpinned).unwrap();
+		let pad = played.into_iter().find(|pad| *pad != unpinned).unwrap();
 		let mut follow = origin.consume().follow("cam").unwrap();
 		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
 		drop(second);
@@ -4057,14 +4047,10 @@ mod session_tests {
 			.get_mut("video")
 			.unwrap()
 			.epoch = Some(next);
-		for _ in 0..200 {
-			if reached(3).contains(&pad) {
-				break;
-			}
-			third.write(3);
-			std::thread::sleep(Duration::from_millis(50));
-		}
-		assert!(reached(3).contains(&pad), "the next instance moved to another pad");
+		third.write(3);
+		recorder.wait("the next instance never reached the pinned pad", |seen| {
+			reached(seen, 3).contains(&pad).then_some(())
+		});
 		stop(session);
 
 		// Neither pad replays the first instance's track on its return.
@@ -4211,8 +4197,7 @@ mod session_tests {
 		let mut old = Publisher::sibling(&origin, moq_net::origin::Route::default().with_epoch(named));
 		let session = follow(&element, &origin);
 		await_demand(&old, true);
-		old.write(1);
-		let pad = recorder.reached(1);
+		let pad = recorder.written(&mut old, 1);
 
 		// The reference lets the old instance go once another wins its path, and only then
 		// does the new one leave, so the return is a resume rather than a missed restart.
@@ -4230,8 +4215,11 @@ mod session_tests {
 		});
 
 		await_demand(&old, true);
-		old.write(3);
-		assert_eq!(recorder.reached(3), pad, "the named instance moved to another pad");
+		assert_eq!(
+			recorder.written(&mut old, 3),
+			pad,
+			"the named instance moved to another pad"
+		);
 		stop(session);
 		assert!(
 			!recorder.seen().contains(&Seen::Buffer(pad, 2)),
@@ -4283,7 +4271,7 @@ mod session_tests {
 			let mut guard = room.catalog.modify().unwrap();
 			let config = guard.video.renditions.get_mut("video").unwrap();
 			config.track = None;
-			config.broadcast = Some("./cam".into());
+			config.broadcast = Some(moq_net::path::Relative::new("./cam").unwrap());
 		}
 		assert_eq!(recorder.written(&mut cam, 4), pad, "the move took another pad");
 		room.write(3);

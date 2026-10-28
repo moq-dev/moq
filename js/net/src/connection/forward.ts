@@ -9,7 +9,7 @@ import { type Dispose, race } from "@moq/signals";
 import type * as Announce from "../announced.ts";
 import { type Route, routesEqual } from "../hop.ts";
 import { coveringPrefixes, hooks } from "../internal.ts";
-import type { Dynamic, Producer as OriginProducer, RequestSlot } from "../origin.ts";
+import type { Producer as OriginProducer, RequestSlot, Requests } from "../origin.ts";
 import * as Path from "../path.ts";
 import { after } from "../util/timer.ts";
 import { wireOf } from "../wire.ts";
@@ -39,7 +39,7 @@ interface Interest {
  * request handing over to another never retracts it. The first reporter drives it.
  */
 interface Reported {
-	handle: Dynamic;
+	handle: Requests;
 	/** Each request's latest route for the prefix. */
 	readonly reporters: Map<Interest, Route>;
 }
@@ -58,6 +58,11 @@ interface Reported {
  * driven by its first reporter; if it changes hands anyway (a request failing), it restarts
  * unless one epoch proves both requests saw one instance.
  *
+ * A peer that refuses overlapping requests gets exclusive discovery instead: a broader request
+ * closes the narrower ones beneath it, and the session keeps it off the wire until they have
+ * left. The routes a closed request carried go with it, and come back once the broader request
+ * reports them.
+ *
  * Each active announcement inserts a route covering the announced prefix, served lazily
  * through this connection, so nothing touches the wire until somebody requests a path
  * under it. A retraction removes the entry, and so does the session dying, which is what
@@ -72,6 +77,7 @@ interface Reported {
  */
 export function forwardAnnounced(conn: Established, origin: OriginProducer): void {
 	const originWire = wireOf(origin);
+	const exclusive = wireOf(conn).exclusive;
 	// Reassigned on a downgrade, so the origin stops counting this session as discovering.
 	// Called through a closure so the session's death always detaches the current one.
 	let detach = originWire.attach(true);
@@ -155,6 +161,17 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 	};
 
 	const open = (prefix: Path.Valid) => {
+		if (exclusive) {
+			for (const [other, narrower] of interests) {
+				if (other === prefix || !Path.hasPrefix(prefix, other)) continue;
+				interests.delete(other);
+				narrower.closing = true;
+				narrower.linger?.();
+				narrower.linger = undefined;
+				narrower.announced.close();
+			}
+		}
+
 		// Hidden routes are mirrored too; each local reader opts in on its own.
 		const interest: Interest = {
 			announced: conn.announced(Path.Pattern.subtree(prefix), { hidden: true }),
@@ -272,7 +289,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 }
 
 /** Answer the requests under a received route by consuming them from the session. */
-async function drive(handle: Dynamic, conn: Established): Promise<void> {
+async function drive(handle: Requests, conn: Established): Promise<void> {
 	const session = wireOf(conn);
 	try {
 		for await (const request of handle.requested()) {

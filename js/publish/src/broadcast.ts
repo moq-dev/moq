@@ -343,7 +343,8 @@ export class Broadcast {
 
 		// Creating into the origin outlives any single session: a reconnect re-announces the
 		// broadcast and new subscriptions land on the same producer.
-		const broadcast = origin.createBroadcast(name);
+		const broadcastPublication = origin.createBroadcast(name);
+		const broadcast = broadcastPublication.broadcast;
 		effect.cleanup(() => broadcast.close());
 		// One publisher instance per broadcast, kept across unannounce and announce, so a
 		// restart is a new broadcast rather than a resume into the old one.
@@ -366,6 +367,7 @@ export class Broadcast {
 		const kinds = new Map<string, Kind>();
 		this.#kinds = kinds;
 		effect.cleanup(() => {
+			for (const { track } of tracks.values()) track.finish();
 			for (const { track } of tracks.values()) track.close();
 			if (this.#kinds === kinds) this.#kinds = new Map();
 		});
@@ -373,7 +375,7 @@ export class Broadcast {
 		let serving = false;
 		effect.run((inner) => {
 			if (!inner.get(this.in.announce)) {
-				broadcast.unannounce();
+				broadcastPublication.unannounce();
 				return;
 			}
 
@@ -397,12 +399,15 @@ export class Broadcast {
 						maxAge: Milli(Number.MAX_SAFE_INTEGER),
 						priority: Catalog.PRIORITY.catalog,
 					});
-					effect.cleanup(() => track.close());
+					effect.cleanup(() => {
+						track.finish();
+						track.close();
+					});
 					this.catalog.serve(track, effect, { compression });
 				}
 			}
 
-			broadcast.announce({ epoch });
+			broadcastPublication.announce({ epoch });
 		});
 
 		// Static tracks fan out to every subscriber. Keep the encoder-facing handle demand-gated
@@ -417,11 +422,12 @@ export class Broadcast {
 
 				let entry = tracks.get(rendition.name);
 				const cause = entry && errors.get(entry.owner)?.peek();
-				if (entry && cause) entry.track.close(cause);
+				if (entry && cause) entry.track.abort(cause);
 				const name = names[rendition.name] ?? rendition.name;
 				if (entry && entry.track.name !== name) {
 					// The catalog moved this rendition to a new name for new media. End the old track
 					// cleanly on its last identity, so its subscribers follow the catalog.
+					entry.track.finish();
 					entry.track.close();
 					entry = undefined;
 				} else if (entry && entry.owner !== rendition && entry.track.closed.peek() !== undefined) {
@@ -448,7 +454,7 @@ export class Broadcast {
 				if (error) {
 					inner.run((failure) => {
 						const cause = failure.get(error);
-						if (cause) served.close(cause);
+						if (cause) served.abort(cause);
 					});
 				}
 				inner.run((demand) => {

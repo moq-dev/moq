@@ -67,6 +67,8 @@ export interface ConnectionProps {
 	 * Defaults to true.
 	 */
 	client?: boolean;
+	/** The connection credential the client's SETUP presents, on versions that carry one (lite-07+). */
+	token?: Uint8Array;
 	/** The implementation our SETUP advertises (lite-05+). Defaults to {@link IMPLEMENTATION}; empty sends nothing. */
 	implementation?: string;
 }
@@ -127,6 +129,8 @@ export class Connection implements Established {
 
 	// Whether we dialed; see {@link ConnectionProps.client}.
 	#client: boolean;
+	// See {@link ConnectionProps.token}.
+	#token?: Uint8Array;
 	// What our SETUP advertises; see {@link ConnectionProps.implementation}.
 	#implementation: string;
 	#peerImplementation = Promise.withResolvers<string | undefined>();
@@ -163,9 +167,12 @@ export class Connection implements Established {
 		publish,
 		handle,
 		client = true,
+		token,
 		implementation = IMPLEMENTATION,
 	}: ConnectionProps) {
 		this.url = url;
+		// Older versions carry the credential in the URL instead.
+		this.#token = client && hasAuth(version) ? token : undefined;
 		this.#quic = quic;
 		this.#session = session;
 		// The session stream was opened at the SETUP exchange's version; the rest of it speaks this one.
@@ -198,7 +205,7 @@ export class Connection implements Established {
 		this.#auth.violated.subscribe((err) => {
 			if (!err) return;
 			closeViolation(this.#quic, err);
-			this.abort();
+			this.#fail(err);
 		});
 
 		this.#publisher = new Publisher(this.#quic, this.#version, this.hop, publish, {
@@ -223,6 +230,7 @@ export class Connection implements Established {
 		registerWire(this, {
 			consume: (path) => this.#subscriber.consume(path),
 			goaway: this.#goaway,
+			exclusive: false,
 			auth: this.#auth,
 		});
 
@@ -265,6 +273,12 @@ export class Connection implements Established {
 		}
 	}
 
+	// Set the received tracks' terminal cause before abort's deliberate local teardown.
+	#fail(err: Error): void {
+		this.#subscriber.close(err);
+		this.abort();
+	}
+
 	async #run(): Promise<void> {
 		const tasks: Promise<void>[] = [this.#runSession(), this.#runBidis(), this.#runUnis()];
 
@@ -304,8 +318,7 @@ export class Connection implements Established {
 			this.#peerImplementation.resolve(undefined);
 			// The session died under every track it was receiving, so they end with its
 			// error. A deliberate close() already ended them cleanly, which makes this a no-op.
-			this.#subscriber.close(fatal ?? (await closeError(this.#quic)));
-			this.abort();
+			this.#fail(fatal ?? (await closeError(this.#quic)));
 		}
 	}
 
@@ -341,7 +354,7 @@ export class Connection implements Established {
 		try {
 			await writer.u53(DataType.Setup);
 			const probe = await probeLevel(this.#quic, this.#version);
-			await new Setup({ probe, hop: this.hop, implementation: this.#implementation }).encode(
+			await new Setup({ probe, hop: this.hop, token: this.#token, implementation: this.#implementation }).encode(
 				writer,
 				this.#version,
 			);
@@ -362,7 +375,8 @@ export class Connection implements Established {
 					stream.writer.reset(err);
 					// A protocol violation on one stream is the peer breaking the session.
 					// Resetting that stream would leave it free to repeat malformed input.
-					if (closeViolation(this.#quic, err)) this.abort();
+					const violation = closeViolation(this.#quic, err);
+					if (violation) this.#fail(violation);
 				})
 				.finally(() => {
 					stream.writer.close();
@@ -440,7 +454,10 @@ export class Connection implements Established {
 				})
 				.catch((err: unknown) => {
 					stream.stop(err);
-					if (err instanceof ProtocolViolation) closeViolation(this.#quic, err);
+					if (err instanceof ProtocolViolation) {
+						closeViolation(this.#quic, err);
+						this.#fail(err);
+					}
 				});
 		}
 	}
@@ -464,7 +481,7 @@ export class Connection implements Established {
 				throw new ProtocolViolation("invalid SETUP", { cause: err });
 			});
 			if (this.#client && hasClientParameters(setup))
-				throw new ProtocolViolation("server SETUP contains Path or Role");
+				throw new ProtocolViolation("server SETUP contains Path, Role, or Token");
 			if (!this.#client && setup.path !== undefined)
 				throw new ProtocolViolation("Path on a URI-carrying binding");
 			this.#peerSetup.set(setup);

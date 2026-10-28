@@ -120,11 +120,12 @@ pub enum Order {
 /// copy waiting on a fresh upstream answer counts from the live feed's latest group once
 /// it answers, never from the groups an ended feed left in its cache.
 ///
-/// Over a session, the copy resolves them only on moq-lite-07, which reports the live edge
-/// and media time and asks upstream for every group the budget allows. A copy received
-/// over an older lite or any moq-transport version refuses each other than [`Range::live`]
-/// and [`Range::oldest`] with [`Error::Unsupported`](crate::Error::Unsupported) on read,
-/// rather than resolve it against the part of the track it holds.
+/// Over moq-lite-07, a copy resolves them from the reported live edge and media time.
+/// A Rust moq-transport copy accepts anchors its cache can already resolve, translating
+/// them to group bounds upstream; an unknown time end is refused. Older moq-lite versions
+/// accept absolute anchors but refuse time anchors and relative anchors other
+/// than [`Range::live`] and [`Range::oldest`] with [`Error::Unsupported`](crate::Error::Unsupported)
+/// rather than guess from a partial copy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Anchor {
 	/// The group with this sequence.
@@ -331,6 +332,7 @@ impl Subscription {
 	/// the latest group (or none is asked for).
 	///
 	/// The form a wire without ranges carries: a floor below which nothing is requested.
+	#[cfg(any(feature = "async", test))]
 	pub(crate) fn start(&self) -> Option<u64> {
 		let mut floor: Option<u64> = None;
 		for range in &self.ranges {

@@ -1,5 +1,5 @@
 import type { Getter } from "@moq/signals";
-import type * as announce from "../announced.ts";
+import type * as announce from "../announce.ts";
 import type * as Auth from "../auth.ts";
 import type * as Path from "../path.ts";
 import type { Probe, Stats } from "./stats.ts";
@@ -30,7 +30,7 @@ export interface Established {
 
 	/**
 	 * The tokens this side presented and the grant they earned, plus the tokens the peer
-	 * presents. On moq-lite-07-wip, and on moq-transport draft-17+ when both sides negotiate
+	 * presents. On moq-lite-07-wip, and on moq-transport draft-18+ when both sides negotiate
 	 * MoQ Auth, each side presents its connection's credential right after setup.
 	 * Otherwise the grant stays undefined.
 	 *

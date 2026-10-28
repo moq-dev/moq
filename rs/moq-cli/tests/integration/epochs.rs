@@ -95,7 +95,7 @@ fn publish(origin: &origin::Producer, epoch: &Epoch, tag: &str) -> Published {
 	catalog
 		.mutate(|catalog| {
 			let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
-			audio.broadcast = Some(moq_net::path::Relative::new("./media").into_owned());
+			audio.broadcast = Some(moq_net::path::Relative::new("./media").unwrap());
 			audio.epoch = Some(epoch.clone());
 			catalog.audio.renditions.insert("audio".into(), audio);
 		})
@@ -201,10 +201,7 @@ async fn replacement(version: &str) {
 		(changed(&mut catalog_follow).await, changed(&mut media_follow).await)
 	})
 	.await;
-	assert_eq!(
-		catalog_restart,
-		version != "moq-lite-06" && version != "moq-transport-14"
-	);
+	assert_eq!(catalog_restart, version != "moq-lite-06");
 	assert_eq!(media_restart, catalog_restart);
 	println!(
 		"{version}: relay replacement observed in {:?} of {:?} (publisher already connected)",
@@ -240,7 +237,7 @@ async fn replacement(version: &str) {
 	let mut cached = media.fetch_group(0, None).await.unwrap();
 	assert_eq!(cached.read_frame().await.unwrap().unwrap().payload.as_ref(), b"A:0");
 	if let Ok(late) = pinned.track("late")
-		&& let Ok(info) = late.query().await
+		&& let Ok(info) = late.info().await
 	{
 		assert_ne!(info.priority, 17, "retired handle resolved B's metadata");
 	}
@@ -307,6 +304,5 @@ macro_rules! versions {
 versions! {
 	lite07: "moq-lite-07-wip",
 	lite06: "moq-lite-06",
-	ietf14: "moq-transport-14",
 	ietf22: "moq-transport-22",
 }

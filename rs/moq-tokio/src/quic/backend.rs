@@ -469,7 +469,7 @@ impl Client {
 		let session = match url.scheme() {
 			"https" => {
 				let mut request = web::proto::ConnectRequest::new(url.clone());
-				for protocol in web_protocols(versions) {
+				for protocol in versions.alpns() {
 					request = request.with_protocol(protocol.to_string());
 				}
 				web::Session::connect(connection, request)
@@ -540,22 +540,6 @@ impl Error {
 			_ => None,
 		}
 	}
-}
-
-/// The WebTransport subprotocols to offer for `versions`.
-///
-/// Draft-14 predates WebTransport subprotocols: `moq-00` is only its QUIC ALPN, and a peer that
-/// accepts it over WebTransport picks draft-14 over a newer draft both support. It rides `moql`
-/// and negotiates in SETUP instead, as `js/net` does.
-fn web_protocols(versions: &moq_net::Versions) -> Vec<&'static str> {
-	let mut protocols = Vec::new();
-	for alpn in versions.alpns() {
-		let protocol = if alpn == "moq-00" { "moql" } else { alpn };
-		if !protocols.contains(&protocol) {
-			protocols.push(protocol);
-		}
-	}
-	protocols
 }
 
 fn map_client_error(err: web::ClientError) -> Error {
@@ -1062,16 +1046,6 @@ mod tests {
 	use super::*;
 	use url::Url;
 
-	#[test]
-	fn web_protocols_never_offer_moq_00() {
-		let all = moq_net::Versions::all();
-		assert!(!web_protocols(&all).contains(&"moq-00"));
-		assert_eq!(web_protocols(&all).len(), all.alpns().len() - 1);
-
-		let draft14: moq_net::Version = "moq-transport-14".parse().unwrap();
-		assert_eq!(web_protocols(&draft14.into()), ["moql"]);
-	}
-
 	#[tokio::test]
 	async fn pinned_ipv6_connection() {
 		pinned_connection("[::1]:0", None).await;
@@ -1237,16 +1211,20 @@ mod tests {
 	/// concrete moq-quic implementation it must map to.
 	#[test]
 	fn congestion_factory_maps_each_family() {
-		let now = moq_clock::Instant::now();
-		let mtu = 1200;
+		let init = moq_congestion::Init {
+			now: moq_clock::Instant::now(),
+			mtu: 1200,
+			rtt: std::time::Duration::from_millis(333),
+			max_pacing_rate: None,
+		};
 
-		let loss = congestion_factory(CongestionControl::Loss).build(now, mtu);
+		let loss = congestion_factory(CongestionControl::Loss).build(init);
 		assert!(loss.into_any().downcast::<moq_congestion::Cubic>().is_ok());
 
-		let delay = congestion_factory(CongestionControl::Delay).build(now, mtu);
+		let delay = congestion_factory(CongestionControl::Delay).build(init);
 		assert!(delay.into_any().downcast::<moq_congestion::Bbr3>().is_ok());
 
-		let none = congestion_factory(CongestionControl::None).build(now, mtu);
+		let none = congestion_factory(CongestionControl::None).build(init);
 		assert!(none.into_any().downcast::<moq_congestion::Unlimited>().is_ok());
 	}
 

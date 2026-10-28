@@ -35,16 +35,27 @@ Rules every child follows:
   counts only when that quest is in m1.
 - Inherited debt is fixed here only when it is cheap or sits on a surface
   this release breaks anyway. Otherwise it joins the later quest that
-  reshapes it (the ordered track reader joins
-  [foreign poll](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-poll-protocol.md)).
+  reshapes it (the ordered track reader joins rust2's
+  [exporter](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-export.md),
+  which absorbed its foreign poll quest on 2026-10-25).
 - Each child lists its public API and wire impact in its PR, and its Impact
   bullet says how to migrate.
 
 Already gated elsewhere, so not a child: the binary-to-flate fold is followed
 by flate's removal ([compress migrate](/quest/m1/compress/migrate.md)), in m1,
 so the cut waits for it. hang's
-`Archive::replay_epoch` goes with the root `archive` section in
-[catalog HLS](/quest/m1/archive/catalog-hls.md).
+`Archive::replay_epoch` went with the root `archive` section in catalog HLS.
+
+Kept public though only moq-transport uses them (decided 2026-10-23), so an
+audit skips them:
+
+- moq-transport-only error variants (`Error::{InvalidJoiningRequestId,
+  InvalidRange, Remote, UnsupportedExtension}`, the `DecodeError` auth-token
+  variants) and the session error codes the lite draft registers with
+  moq-transport's meaning. Errors are fine; only dead ones go.
+- `setup::Extensions::{auth, solicit, epoch}` and the relay's
+  `[listen|connect.extensions]` TOML, as interop knobs documented as
+  affecting moq-transport only.
 
 Rejected in planning:
 
@@ -63,15 +74,10 @@ Rejected in planning:
 ## Required
 
 - [Two broadcast resolutions](/quest/m1/api-audit/resolve.md) - Rust, JS, and the bindings resolve a broadcast with `request(path, epoch)` or `follow(path, epoch)`, and every racy two-step caller is gone
-- [JS origin publications](/quest/m1/api-audit/js-publication.md) - `@moq/net` origins hand out a `Publication` that announces, so `Prepared` and standalone broadcasts lose methods that always throw
+- [Bindings default to zero max delay](/quest/m1/api-audit/binding-max-delay.md) - a no-argument subscription skips superseded groups in every binding, as Rust, JS, and Python do, and no subscriber limit is asked for explicitly
 - [Binding publications](/quest/m1/api-audit/binding-publication.md) - moq-ffi, the C ABI, and every wrapper hand out a publication handle that announces, replacing the private adapters
-- [moq-net exports with a consumer](/quest/m1/api-audit/net-exports.md) - the dead and test-only moq-net, `@moq/net`, and moq-ffi items the follow-up audit found go private or away
-- [Bindings read gaps and ends](/quest/m1/api-audit/decode-read-bindings.md) - moq-ffi and every wrapper surface `Gap` and `End` instead of discarding them
-- [Session-only items stay private](/quest/m1/api-audit/model-private.md) - model items only the built-in sessions use are private
-- [moq-transport stays private](/quest/m1/api-audit/ietf-private.md) - no public moq-net item exists only for moq-transport, and a client names its request target once as a URL
-- [One lifecycle vocabulary](/quest/m1/api-audit/lifecycle.md) - finish, abort, closed, and close mean one thing on every handle, and Rust and JS observers fire alike
-- [moq-net names say one thing](/quest/m1/api-audit/net-names.md) - demand says `wanted`, colliding stats and transport names are renamed, and Rust and JS info lookups mirror
-- [Request handlers are named requests](/quest/m1/api-audit/requests.md) - `dynamic()` and `Dynamic` become `requests()` and `Requests` at every layer
+- [Demand is wanted, everywhere](/quest/m1/api-audit/wanted.md) - every `used`/`unused` pair becomes `wanted()` and `wanted_changed()`, and unused ones go
+- [One strict path rule](/quest/m1/api-audit/strict-paths.md) - `Relative` refuses empty segments, `Path` refuses non-canonical escapes, the error is `path::Error`, and auth mints only strict paths
 
 ## Related
 

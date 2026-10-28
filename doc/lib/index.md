@@ -75,7 +75,7 @@ how it looks in that language:
 - **Catalog extensions**: write your own section next to `video` and `audio`, and read others' back.
 - **Routes**: see which relays a broadcast came through, and advertise a cost as a standby publisher.
 - **Connection stats** and **errors** that tell an auth rejection (don't retry) from a shutdown or a transport failure.
-- **Authorization in band**: read the grant the relay sent back (the patterns this side may publish and subscribe to, and when it lapses), and present a fresh token before the current one expires, without reconnecting. It needs `moq-lite-07-wip`, which is opt-in, or moq-transport draft-17+ with the [MoQ Auth extension](/draft/moq-auth).
+- **Authorization in band**: read the grant the relay sent back (the patterns this side may publish and subscribe to, and when it lapses), and present a fresh token before the current one expires, without reconnecting. It needs `moq-lite-07-wip`, which is opt-in, or moq-transport draft-18+ with the [MoQ Auth extension](/draft/moq-auth).
 
 C's audio decoder neither takes nor reports a playout delay, and C has no in-band authorization.
 

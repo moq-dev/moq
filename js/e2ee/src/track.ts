@@ -3,7 +3,7 @@
  *
  * @module
  */
-import { Group as NetGroup, type Track as NetTrack, type Time } from "@moq/net";
+import type { Group as NetGroup, Track as NetTrack, Time } from "@moq/net";
 import type { Event } from "./datagram.ts";
 import { checkU53 } from "./derive.ts";
 import { Failure } from "./failure.ts";
@@ -30,6 +30,7 @@ export class Producer {
 	#writer: Writer;
 	#datagramKey: TrackKey;
 	#next = 0;
+	#finished = false;
 
 	private constructor(inner: NetTrack.Producer, timescale: Time.Timescale | undefined, keys: Keys) {
 		this.#inner = inner;
@@ -41,6 +42,11 @@ export class Producer {
 	/** @internal */
 	static make(inner: NetTrack.Producer, timescale: Time.Timescale | undefined, keys: Keys): Producer {
 		return new Producer(inner, timescale, keys);
+	}
+
+	/** The track's final outcome, once its declared end is reached or it aborts. */
+	get closed(): NetTrack.Producer["closed"] {
+		return this.#inner.closed;
 	}
 
 	/** Allocate the next sequence and start a group there; throws {@link Failure} `identity` past `2^53-1`. */
@@ -58,8 +64,7 @@ export class Producer {
 		this.#writable();
 		this.#reserve(sequence);
 		this.#next = sequence + 1;
-		const inner = new NetGroup.Producer(sequence);
-		this.#inner.writeGroup(inner);
+		const inner = this.#inner.createGroup(sequence);
 		return Group.Producer.make(inner, this.#writer);
 	}
 
@@ -98,25 +103,39 @@ export class Producer {
 	}
 
 	/**
-	 * Close the track: cleanly after every pending write on it and its groups, or at once with
-	 * `abort`, which rejects the pending writes. Idempotent.
+	 * Declare the end after queued writes. Existing groups may still be written; new groups
+	 * and datagrams are refused. Idempotent.
 	 */
-	close(abort?: Error): void {
-		// The first close decides the outcome: a later abort cannot cancel a promised drain.
-		if (this.#writer.closed) return;
-		this.#writer.closed = true;
-		if (abort) {
-			this.#writer.aborted = abort;
-			this.#inner.close(abort);
-			return;
-		}
+	finish(): void {
+		if (this.#finished || this.#writer.closed) return;
+		this.#finished = true;
 		void this.#writer.pump.run(() => {
-			if (!this.#writer.aborted) this.#inner.close();
+			if (!this.#writer.aborted) this.#inner.finish();
 		});
 	}
 
+	/** Abort the track and its open groups at once, rejecting pending writes. Idempotent. */
+	abort(error: Error): void {
+		if (this.#writer.closed) return;
+		this.#writer.closed = true;
+		this.#writer.aborted = error;
+		this.#inner.abort(error);
+	}
+
+	/** Release this producer: drain a declared end, or cancel when nothing finished it. Idempotent. */
+	close(): void {
+		if (this.#writer.closed) return;
+		this.#writer.closed = true;
+		if (this.#finished) {
+			void this.#writer.pump.run(() => this.#inner.close());
+		} else {
+			this.#inner.close();
+			this.#writer.aborted = this.#inner.closed.peek() ?? undefined;
+		}
+	}
+
 	#writable(): void {
-		if (this.#writer.closed) throw this.#writer.aborted ?? new Error("track is closed");
+		if (this.#finished || this.#writer.closed) throw this.#writer.aborted ?? new Error("track is closed");
 	}
 
 	// Refuse a sequence this track already allocated or cannot represent.

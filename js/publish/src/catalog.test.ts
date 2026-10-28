@@ -118,10 +118,9 @@ test("catalog producer advertises the page clock from the first snapshot", async
 	catalog.serve(track, effect);
 	const consumer = new Json.Snapshot.Consumer<Catalog.Root>({ track: track.subscribe() });
 
-	// Before any rendition: a live-only publisher exposes its clock without an archive.
+	// Before any rendition: a live-only publisher exposes its clock.
 	const first = Catalog.RootSchema.parse((await consumer.latest())?.value);
 	if (!first.clock) throw new Error("expected a root clock");
-	expect(first.archive).toBeUndefined();
 	expect(first.clock.timescale).toBe(1_000_000);
 
 	// A timestamp stamped the way capture does (the clock's instant in microseconds) maps onto the

@@ -124,7 +124,7 @@ test("a failed track preserves its error", async () => {
 	const consumer = new Consumer({ track: track.subscribe() });
 	const next = consumer.next();
 	const failure = new Error("source failed");
-	track.close(failure);
+	track.abort(failure);
 	await expect(next).rejects.toBe(failure);
 });
 

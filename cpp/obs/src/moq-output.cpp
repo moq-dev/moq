@@ -3,6 +3,7 @@
 
 #include "moq-output.h"
 #include "moq-error.h"
+#include "moq-implementation.h"
 #include "moq-settings.h"
 #include "moq-url.h"
 #include "logger.h"
@@ -186,6 +187,12 @@ bool MoQOutput::Start()
 	// switched off the client keeps the library defaults.
 	moq::ClientConfig config;
 	config.publish = next_origin;
+	config.implementation = MoQImplementation();
+	// Not on the URL: a URL's ?jwt= overrides the client's tokens, so every reconnect
+	// would dial it instead of the one PresentToken() set last.
+	if (const char *token = obs_service_get_connect_info(service, OBS_SERVICE_CONNECT_INFO_BEARER_TOKEN);
+	    token && *token)
+		config.tokens = {token};
 	OBSDataAutoRelease service_settings = obs_service_get_settings(service);
 	std::string invalid = MoQSettings::Configure(service_settings, config);
 	std::shared_ptr<moq::Client> client;
@@ -253,7 +260,7 @@ void MoQOutput::OnConnect(const std::shared_ptr<Attempt> &current, moq::expected
 	current->session = *result;
 	{
 		std::lock_guard<std::mutex> lock(media_mutex);
-		bandwidth = current->session->bandwidth();
+		allocator = current->session->allocator();
 	}
 	{
 		std::lock_guard<std::mutex> lock(mutex);
@@ -392,7 +399,7 @@ void MoQOutput::Reset()
 			track.producer->finish();
 	}
 	audio_tracks.clear();
-	bandwidth.reset();
+	allocator.reset();
 
 	// Close the broadcast so the origin retracts it immediately; Start()
 	// creates a fresh one on restart.
@@ -526,31 +533,36 @@ bool MoQOutput::PresentToken(const std::string &token)
 	std::lock_guard<std::recursive_mutex> signal_lock(signal_mutex);
 	if (!attempt || !attempt->session)
 		return false;
+	// Only a server-accepted session has no tokens.
+	std::shared_ptr<moq::Tokens> tokens = attempt->session->tokens();
+	if (!tokens)
+		return false;
+
+	auto refused = [this](const std::string &reason) {
+		LOG_WARNING("MoQ relay refused the new publish token: %s", reason.c_str());
+		std::lock_guard<std::mutex> lock(mutex);
+		token_refusal = reason;
+	};
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		token_refusal.clear();
 	}
+	if (auto set = tokens->set({token}); !set) {
+		attempt->presenting.reset();
+		refused(set.error().to_string());
+		return true;
+	}
 
-	// Replacing `presenting` cancels a presentation still in flight, which the
-	// newer token supersedes.
-	attempt->presenting = attempt->session->auth()->add(token).then(
-		worker.Executor(), Current<moq::expected<std::shared_ptr<moq::AuthToken>>>(
-					   attempt, [this](const std::shared_ptr<Attempt> &current, auto result) {
-						   if (!result) {
-							   const std::string reason = result.error().to_string();
-							   LOG_WARNING("MoQ relay refused the new publish token: %s",
-								       reason.c_str());
-							   std::lock_guard<std::mutex> lock(mutex);
-							   token_refusal = reason;
-							   return;
-						   }
-						   // The old token's grant leaves the union only after the new one joined.
-						   if (current->token)
-							   current->token->cancel();
-						   current->token = *result;
-						   LOG_INFO("MoQ relay accepted the new publish token: %s",
-							    MoQRedactUrl(current->url).c_str());
-					   }));
+	// Replacing `presenting` drops the wait on a token this one replaced.
+	attempt->presenting = tokens->answered().then(
+		worker.Executor(),
+		Current<moq::expected<void>>(attempt, [refused](const std::shared_ptr<Attempt> &current, auto result) {
+			if (!result) {
+				refused(result.error().to_string());
+				return;
+			}
+			LOG_INFO("MoQ relay accepted the new publish token: %s", MoQRedactUrl(current->url).c_str());
+		}));
 	return true;
 }
 
@@ -665,7 +677,7 @@ void MoQOutput::VideoData(struct encoder_packet *packet)
 	// Read before the frame is written, so a retune lands on the encoder's next
 	// frame. obs_encoder_update only flags an active encoder for its own thread.
 	if (track.rate && track.reservation) {
-		if (auto next = track.rate->Update(track.reservation->grant(), MoQRate::Clock::now()))
+		if (auto next = track.rate->Update(track.reservation->rate(), MoQRate::Clock::now()))
 			SetBitrate(encoder, *next);
 	}
 
@@ -686,7 +698,7 @@ void MoQOutput::VideoData(struct encoder_packet *packet)
 // NOTE: Caller must hold media_mutex.
 void MoQOutput::Reserve(Track &track)
 {
-	if (track.reservation || !bandwidth || track.bitrate_bps == 0)
+	if (track.reservation || !allocator || track.bitrate_bps == 0)
 		return;
 	auto demand = track.producer->demand();
 	if (!demand) {
@@ -694,7 +706,7 @@ void MoQOutput::Reserve(Track &track)
 		track.bitrate_bps = 0;
 		return;
 	}
-	track.reservation = bandwidth->reserve(*demand, track.bitrate_bps);
+	track.reservation = allocator->reserve(*demand, track.bitrate_bps);
 }
 
 // NOTE: Caller must hold media_mutex.
@@ -841,15 +853,10 @@ void MoQOutput::AudioInit(obs_encoder_t *encoder)
 
 void register_moq_output()
 {
-	const uint32_t base_flags = OBS_OUTPUT_ENCODED | OBS_OUTPUT_SERVICE | OBS_OUTPUT_MULTI_TRACK_VIDEO |
-				    OBS_OUTPUT_MULTI_TRACK_AUDIO;
-
-	const char *audio_codecs = "aac;opus";
-	const char *video_codecs = "h264;hevc;av1";
-
 	struct obs_output_info info = {};
 	info.id = "moq_output";
-	info.flags = OBS_OUTPUT_AV | base_flags;
+	info.flags = OBS_OUTPUT_AV | OBS_OUTPUT_ENCODED | OBS_OUTPUT_SERVICE | OBS_OUTPUT_MULTI_TRACK_VIDEO |
+		     OBS_OUTPUT_MULTI_TRACK_AUDIO;
 	info.get_name = [](void *) -> const char * {
 		return "MoQ Output";
 	};
@@ -874,20 +881,9 @@ void register_moq_output()
 	info.get_connect_time_ms = [](void *priv_data) -> int {
 		return static_cast<MoQOutput *>(priv_data)->GetConnectTime();
 	};
-	info.encoded_video_codecs = video_codecs;
-	info.encoded_audio_codecs = audio_codecs;
+	info.encoded_video_codecs = "h264;hevc;av1";
+	info.encoded_audio_codecs = "aac;opus";
 	info.protocols = "MoQ";
 
-	obs_register_output(&info);
-
-	info.id = "moq_output_video";
-	info.flags = OBS_OUTPUT_VIDEO | base_flags;
-	info.encoded_audio_codecs = nullptr;
-	obs_register_output(&info);
-
-	info.id = "moq_output_audio";
-	info.flags = OBS_OUTPUT_AUDIO | base_flags;
-	info.encoded_video_codecs = nullptr;
-	info.encoded_audio_codecs = audio_codecs;
 	obs_register_output(&info);
 }

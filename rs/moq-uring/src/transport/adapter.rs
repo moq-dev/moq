@@ -20,17 +20,11 @@ impl<E: wt::Error> moq::Error for Error<E> {
 	}
 }
 
-struct Stats<S> {
+struct Metrics<S> {
 	inner: S,
 	streams_evicted: Option<u64>,
 }
-impl<S: wt::Stats> moq::Stats for Stats<S> {
-	fn bytes_sent(&self) -> Option<u64> {
-		self.inner.bytes_sent()
-	}
-	fn bytes_received(&self) -> Option<u64> {
-		self.inner.bytes_received()
-	}
+impl<S: wt::Stats> moq::Metrics for Metrics<S> {
 	fn bytes_lost(&self) -> Option<u64> {
 		self.inner.bytes_lost()
 	}
@@ -135,11 +129,11 @@ pub trait GroupedSend: backend::SendStream {
 
 /// A WebTransport session adapted to moq-net.
 #[derive(Clone)]
-pub struct Session<S>(S, moq::Binding);
+pub struct Session<S>(S, moq::Address);
 impl<S> Session<S> {
 	/// Wrap a backend poll session.
-	pub fn new(session: S, binding: moq::Binding) -> Self {
-		Self(session, binding)
+	pub fn new(session: S, address: moq::Address) -> Self {
+		Self(session, address)
 	}
 }
 impl<S: Grouped<SendStream: 'static, RecvStream: 'static> + Clone + 'static> poll::Session for Session<S> {
@@ -202,7 +196,7 @@ impl<S: Grouped<SendStream: 'static, RecvStream: 'static> + Clone + 'static> pol
 	fn max_datagram_size(&self) -> usize {
 		backend::Session::max_datagram_size(&self.0)
 	}
-	fn binding(&self) -> moq::Binding {
+	fn address(&self) -> moq::Address {
 		self.1
 	}
 	fn protocol(&self) -> Option<&str> {
@@ -214,8 +208,8 @@ impl<S: Grouped<SendStream: 'static, RecvStream: 'static> + Clone + 'static> pol
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
 		backend::Session::poll_closed(&mut self.0, cx).map(Error)
 	}
-	fn stats(&self) -> impl moq::Stats {
-		Stats {
+	fn metrics(&self) -> impl moq::Metrics {
+		Metrics {
 			inner: backend::Session::stats(&self.0),
 			streams_evicted: Grouped::streams_evicted(&self.0),
 		}
@@ -422,13 +416,13 @@ mod tests {
 
 	#[test]
 	fn forwards_thread_local_streams_and_keeps_error_codes() {
-		use moq_net::transport::Stats as _;
+		use moq_net::transport::Metrics as _;
 		let state = Rc::new(Cell::new(0));
-		let mut session = Session::new(Backend(state.clone()), moq::Binding::InBand);
+		let mut session = Session::new(Backend(state.clone()), moq::Address::Setup);
 		let mut cx = Context::from_waker(std::task::Waker::noop());
 		assert_eq!(poll::Session::protocol(&session), Some("moq-lite-06"));
 		assert_eq!(
-			poll::Session::stats(&session).rtt(),
+			poll::Session::metrics(&session).rtt(),
 			Some(std::time::Duration::from_millis(7))
 		);
 		let Poll::Ready(Ok((mut send, mut recv))) =

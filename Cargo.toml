@@ -25,6 +25,7 @@ default-members = [
     "rs/moq-loc",
     "rs/moq-msf",
     "rs/moq-net",
+    "rs/moq-net-tests",
     "rs/moq-mux",
     "rs/moq-native",
     "rs/moq-nvenc",
@@ -35,10 +36,12 @@ default-members = [
     "rs/moq-rtc",
     "rs/moq-rtmp",
     "rs/moq-rtsp",
+    "rs/moq-scene",
     "rs/moq-shaper",
     "rs/moq-sock",
     "rs/moq-srt",
     "rs/moq-stats",
+    "rs/moq-studio",
     "rs/moq-tokio",
     "rs/moq-transcode",
     "rs/moq-uring",
@@ -82,7 +85,17 @@ anyhow = "1"
 ash = "0.38"
 async-trait = "0.1"
 aws-lc-rs = "1"
-axum = { version = "0.8", features = ["tokio"] }
+# Keep axum's defaults except tower-log, which enables tracing-to-log macros workspace-wide.
+axum = { version = "0.8", default-features = false, features = [
+    "form",
+    "http1",
+    "json",
+    "matched-path",
+    "original-uri",
+    "query",
+    "tokio",
+    "tracing",
+] }
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 base64 = "0.23"
 bitflags = "2"
@@ -94,11 +107,13 @@ criterion = "0.8"
 # (`fallback-dynamic-loading`), so nothing links against libcuda at build time.
 cudarc = { version = "0.19", default-features = false, features = ["driver", "fallback-dynamic-loading", "cuda-12020"] }
 dispatch2 = "0.3.1"
+ebml-iterable = "0.7.1"
 flate2 = { version = "1.1", default-features = false }
 futures = "0.3"
 getrandom = { version = "0.4", features = ["wasm_js"] }
 h2 = "0.4"
 hang = { version = "0.21.11", path = "rs/hang" }
+hashbrown = { version = "0.17.1", default-features = false }
 hashlink = "0.12.2"
 hex = "0.4"
 # HMAC-SHA256 for the mDNS membership proofs (moq-tokio's `mdns` feature).
@@ -146,6 +161,7 @@ moq-relay = { version = "0.17.2", path = "rs/moq-relay", default-features = fals
 moq-rtc = { version = "0.3.12", path = "rs/moq-rtc" }
 moq-rtmp = { version = "0.3.11", path = "rs/moq-rtmp" }
 moq-rtsp = { version = "0.1.0", path = "rs/moq-rtsp" }
+moq-scene = { version = "0.1.0", path = "rs/moq-scene" }
 moq-sock = { version = "0.2.0", path = "rs/moq-sock" }
 moq-srt = { version = "0.3.11", path = "rs/moq-srt" }
 moq-stats = { version = "0.2.12", path = "rs/moq-stats" }
@@ -187,6 +203,8 @@ objc2-screen-capture-kit = "0.3.2"
 # local-filesystem stack; `fs` (and cloud backends) are opted in by the caller.
 object_store = { version = "0.14", default-features = false }
 percent-encoding = "2"
+pkcs1 = { version = "0.7.5", features = ["alloc"] }
+pkcs8 = "0.11.0"
 pollster = "1.0"
 # default-features off to skip the fork and timeout machinery; crates opt into what they use.
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }

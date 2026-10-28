@@ -33,9 +33,8 @@ AUTH_KEYS and AUTH_PEER may repeat for refresh and key rotation. The lite
 draft and both language codecs gain AUTH_KEYS and AUTH_PEER in whichever lite
 wip is current when this lands; they do not gate the lite-07 cut (decided
 2026-10-13). Decided 2026-10-25 (maintainer): this quest owns AUTH_CNF and
-the possession proof, which do not gate the cut either, since every
-session's receiver stamps its routing identity instead of accepting a proven
-one; `just drafts check` passes. Reissue before expiry; the client
+the possession proof, which do not gate the cut either, since lite-07
+routing identities stay declared and unverified; `just drafts check` passes. Reissue before expiry; the client
 replaces the grant on each live peer session with `auth().add` and drops
 the old one. A key change mints a new grant; the old key is dead.
 
@@ -53,14 +52,15 @@ The origin then serves only the granted paths. A missing, expired,
 HMAC-signed, or unproven grant, or one whose `cnf` is not the session's
 proven key, is not a grant.
 
-Decided 2026-10-25 (maintainer): no cross-path recognition. The grant
-authorizes paths and binds a key; it carries no routing identity for a
-direct session to file routes under. The receiver stamps the direct session's
-routing identity itself, as for any session
-([Stamp routing identities](/quest/m1/cluster-routing/stamp.md)), so an
-origin reached through the CDN and directly is two identities, and switching
-between them resumes only across a matching explicit epoch. Simpler: one
-identity regime.
+The grant authorizes paths and binds a key; it carries no routing identity.
+A routing identity is declared by its origin and unverified
+([Routes and announces](/quest/m1/cluster-routing/routes.md)). Decided
+2026-10-26 (maintainer): recognizing a routing identity needs key proof, and
+this quest owns the key and its proof; receiver-stamped per-session
+identities were dropped because they split one origin into several
+identities across a relay mesh. Binding a routing identity to the key is
+not planned yet. Switching between a CDN and a direct path resumes only
+across a matching explicit epoch.
 
 [Signaling and policy](/quest/m2/p2p/signal.md) presents the grant in band
 on each direct session. P2P is its only consumer, so it lives on this line
@@ -77,7 +77,3 @@ valid proof onto another session is refused; a refreshed grant replaces
 the old one without dropping the session.
 
 Additive.
-
-## Required
-
-- [In-band auth](/quest/m1/auth/README.md) - relay tokens reach `main` with this line, so the relay owns AUTH and knows the session's paths

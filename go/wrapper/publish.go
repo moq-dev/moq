@@ -27,13 +27,13 @@ func NewBroadcastProducer() (*BroadcastProducer, error) {
 	return &BroadcastProducer{inner: inner}, nil
 }
 
-// Dynamic accepts requests for tracks that are not published yet.
-func (b *BroadcastProducer) Dynamic() (*BroadcastDynamic, error) {
-	inner, err := b.inner.Dynamic()
+// Requests accepts requests for tracks that are not published yet.
+func (b *BroadcastProducer) Requests() (*BroadcastRequests, error) {
+	inner, err := b.inner.Requests()
 	if err != nil {
 		return nil, err
 	}
-	return &BroadcastDynamic{inner: inner}, nil
+	return &BroadcastRequests{inner: inner}, nil
 }
 
 // Announce advertises this broadcast's exact path as a route.
@@ -75,18 +75,20 @@ func (b *BroadcastProducer) Consume() (*BroadcastConsumer, error) {
 }
 
 // Close ends the broadcast for good: it retracts and serves no new tracks.
-// Tracks already subscribed carry on to their own end. Closing again is a no-op.
+// Tracks still open on it end with Unroutable, which readers take as the
+// publisher leaving, and their later calls fail with ErrClosed; finish a track
+// first to end it cleanly. Closing again is a no-op.
 func (b *BroadcastProducer) Close() error {
 	return b.inner.Close()
 }
 
-// BroadcastDynamic is a stream of subscriber-requested tracks.
-type BroadcastDynamic struct {
-	inner *ffi.MoqBroadcastDynamic
+// BroadcastRequests is a stream of subscriber-requested tracks.
+type BroadcastRequests struct {
+	inner *ffi.MoqBroadcastRequests
 }
 
 // RequestedTrack waits for the next subscriber-requested track.
-func (d *BroadcastDynamic) RequestedTrack(ctx context.Context) (*TrackRequest, error) {
+func (d *BroadcastRequests) RequestedTrack(ctx context.Context) (*TrackRequest, error) {
 	inner, err := bridge.CallHandle(ctx, d.inner.Cancel, d.inner.RequestedTrack)
 	if err != nil {
 		return nil, err
@@ -95,12 +97,12 @@ func (d *BroadcastDynamic) RequestedTrack(ctx context.Context) (*TrackRequest, e
 }
 
 // All ranges over subscriber-requested tracks until the dynamic source ends.
-func (d *BroadcastDynamic) All(ctx context.Context) iter.Seq2[*TrackRequest, error] {
+func (d *BroadcastRequests) All(ctx context.Context) iter.Seq2[*TrackRequest, error] {
 	return bridge.Seq(ctx, d.RequestedTrack)
 }
 
 // Cancel stops the dynamic request stream.
-func (d *BroadcastDynamic) Cancel() {
+func (d *BroadcastRequests) Cancel() {
 	d.inner.Cancel()
 }
 
@@ -123,13 +125,13 @@ func (r *TrackRequest) Demand() (*TrackDemand, error) {
 	return &TrackDemand{inner: inner}, nil
 }
 
-// Dynamic creates a fetch handler before accepting this requested track.
-func (r *TrackRequest) Dynamic() (*TrackDynamic, error) {
-	inner, err := r.inner.Dynamic()
+// Requests creates a fetch handler before accepting this requested track.
+func (r *TrackRequest) Requests() (*TrackRequests, error) {
+	inner, err := r.inner.Requests()
 	if err != nil {
 		return nil, err
 	}
-	return &TrackDynamic{inner: inner}, nil
+	return &TrackRequests{inner: inner}, nil
 }
 
 // Accept accepts the request as a raw track. For media, pass the request as media.Requested to an importer constructor.
@@ -189,13 +191,13 @@ func (t *TrackProducer) Demand() (*TrackDemand, error) {
 	return &TrackDemand{inner: inner}, nil
 }
 
-// Dynamic serves fetches for groups that are not currently cached.
-func (t *TrackProducer) Dynamic() (*TrackDynamic, error) {
-	inner, err := t.inner.Dynamic()
+// Requests serves fetches for groups that are not currently cached.
+func (t *TrackProducer) Requests() (*TrackRequests, error) {
+	inner, err := t.inner.Requests()
 	if err != nil {
 		return nil, err
 	}
-	return &TrackDynamic{inner: inner}, nil
+	return &TrackRequests{inner: inner}, nil
 }
 
 // AppendGroup starts a new group; write frames into it, then Finish.
@@ -303,13 +305,13 @@ func (g *GroupProducer) Abort(errorCode uint16) error {
 	return g.inner.Abort(errorCode)
 }
 
-// TrackDynamic yields the fills readers of one track need: runs of groups the cache lacks.
-type TrackDynamic struct {
-	inner *ffi.MoqTrackDynamic
+// TrackRequests yields the fills readers of one track need: runs of groups the cache lacks.
+type TrackRequests struct {
+	inner *ffi.MoqTrackRequests
 }
 
 // RequestedFill waits for the next fill.
-func (d *TrackDynamic) RequestedFill(ctx context.Context) (*Fill, error) {
+func (d *TrackRequests) RequestedFill(ctx context.Context) (*Fill, error) {
 	inner, err := bridge.CallHandle(ctx, d.inner.Cancel, d.inner.RequestedFill)
 	if err != nil {
 		return nil, err
@@ -318,16 +320,16 @@ func (d *TrackDynamic) RequestedFill(ctx context.Context) (*Fill, error) {
 }
 
 // All ranges over fills until the dynamic source ends.
-func (d *TrackDynamic) All(ctx context.Context) iter.Seq2[*Fill, error] {
+func (d *TrackRequests) All(ctx context.Context) iter.Seq2[*Fill, error] {
 	return bridge.Seq(ctx, d.RequestedFill)
 }
 
 // Cancel stops current and future requested-fill waits.
-func (d *TrackDynamic) Cancel() {
+func (d *TrackRequests) Cancel() {
 	d.inner.Cancel()
 }
 
-// Fill is a run of groups readers miss, for a TrackDynamic to serve.
+// Fill is a run of groups readers miss, for a TrackRequests to serve.
 //
 // Accept each group you have and DropGroups the rest; Next names what is still
 // owed, in the fill's order. Releasing the fill names whatever is left as dropped

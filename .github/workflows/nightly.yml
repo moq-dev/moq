@@ -28,7 +28,7 @@ name: Nightly
 # release PRs on them.
 #
 # Main PRs run no cloud CI beyond the merge queue's Check, so every
-# path-filtered gate (Android, C++, WASM, X11, the audio replays, the OSS
+# path-filtered gate (Android, C, C++, WASM, X11, the audio replays, the OSS
 # Scanner image, platform.yml and the release dry-runs) runs here on main too,
 # and release-gate.yml runs them on release PRs.
 #
@@ -72,6 +72,9 @@ jobs:
   android:
     uses: ./.github/workflows/android.yml
 
+  c:
+    uses: ./.github/workflows/c.yml
+
   cpp:
     uses: ./.github/workflows/cpp.yml
 
@@ -108,19 +111,6 @@ jobs:
         # Unset keys default to the ARM runner, the plain dev shell, the Rust
         # cache, no perf sampling, and nextest's default profile.
         include:
-          - name: Binding benchmark
-            recipe: bench-ffi
-            artifact: bench-ffi
-            artifact-path: target/bench/ffi
-            benchmark: true
-          # Keeps the BoltFFI and UniFFI slice building and running for the
-          # browser generator comparison, which reuses it. It skips the size
-          # step, whose moq-ffi and moq-wasm builds double the time and are
-          # already built elsewhere.
-          - name: Generator comparison
-            recipe: bench-ffi-gen build bench
-            artifact: bench-ffi-gen
-            artifact-path: target/ffi-gen/results
           - name: Audio grouping relay benchmark
             recipe: bench-audio
           - name: Relay shard sweep
@@ -135,6 +125,8 @@ jobs:
             runner: ubuntu-24.04
           - name: Rust benchmark tests
             recipe: gh nightly rust-test
+          - name: Binding benchmark runners
+            recipe: gh nightly bindings
           - name: Rust bench targets
             recipe: gh nightly rust-bench
             artifact: bench-rust
@@ -145,6 +137,12 @@ jobs:
             recipe: gh nightly rust-shared
             artifact: bench-rust-shared
             artifact-path: target/bench/nightly/rust-shared
+            benchmark: true
+            paired: true
+          - name: Relay session benchmarks
+            recipe: gh nightly rust-relay
+            artifact: bench-rust-relay
+            artifact-path: target/bench/nightly/rust-relay
             benchmark: true
             paired: true
           - name: Rust supplemental benchmarks
@@ -579,6 +577,16 @@ jobs:
     needs: [release-shared-ffi]
     if: ${{ always() && !cancelled() }}
     uses: ./.github/workflows/release-cpp.yml
+    with:
+      reuse-native: true
+    permissions:
+      contents: write
+
+  release-c:
+    name: Release C
+    needs: [release-shared-ffi]
+    if: ${{ always() && !cancelled() }}
+    uses: ./.github/workflows/release-c.yml
     with:
       reuse-native: true
     permissions:

@@ -11,8 +11,10 @@ package dev.moq
 // listen facade (see Server.kt), which exposes the raw handle as `server`.
 /** A MoQ client built from a [ClientConfig]: connect it to a relay. */
 typealias Client = uniffi.moq.MoqClient
-/** Client configuration: bind address, versions, TLS, QUIC, WebSocket, reconnect pacing, and origins. */
+/** Client configuration: bind address, versions, tokens, TLS, QUIC, WebSocket, reconnect pacing, and origins. */
 typealias ClientConfig = uniffi.moq.MoqClientConfig
+/** The credentials a [Client] presents, replaceable while it runs. */
+typealias Tokens = uniffi.moq.MoqTokens
 /** Certificate trust and the mTLS identity for a [ClientConfig]. */
 typealias ClientTls = uniffi.moq.MoqClientTls
 /** Server configuration: bind address, versions, TLS identity, QUIC, and origins. */
@@ -40,7 +42,7 @@ typealias OriginConfig = uniffi.moq.MoqOriginConfig
 /** The subscribe side of an origin: discover and request published broadcasts. */
 typealias OriginConsumer = uniffi.moq.MoqOriginConsumer
 /** A served route: advertises a path prefix and yields broadcast requests beneath it. */
-typealias OriginDynamic = uniffi.moq.MoqOriginDynamic
+typealias OriginRequests = uniffi.moq.MoqOriginRequests
 /** A requested broadcast not yet accepted: fulfill it with a producer or reject it. */
 typealias BroadcastRequest = uniffi.moq.MoqBroadcastRequest
 /** A claim answer being filled before its exact route is announced. */
@@ -74,13 +76,13 @@ typealias BroadcastProducer = uniffi.moq.MoqBroadcastProducer
 /** The read side of a broadcast: subscribe to its catalog and tracks. */
 typealias BroadcastConsumer = uniffi.moq.MoqBroadcastConsumer
 /** Receives tracks requested from a dynamically served broadcast. */
-typealias BroadcastDynamic = uniffi.moq.MoqBroadcastDynamic
+typealias BroadcastRequests = uniffi.moq.MoqBroadcastRequests
 /** The write side of a raw track: append groups of frames. */
 typealias TrackProducer = uniffi.moq.MoqTrackProducer
 /** A subscriber-requested track not yet accepted: accept it for a [TrackProducer] or abort it. */
 typealias TrackRequest = uniffi.moq.MoqTrackRequest
 /** A stream of the fills readers of one track need: runs of groups the cache lacks. */
-typealias TrackDynamic = uniffi.moq.MoqTrackDynamic
+typealias TrackRequests = uniffi.moq.MoqTrackRequests
 /** A watch-only handle to whether a published track has subscribers; holding it keeps nothing open. */
 typealias TrackDemand = uniffi.moq.MoqTrackDemand
 /** The read side of a raw track: yields groups in sequence order, skipping ahead if it falls behind. */
@@ -148,17 +150,15 @@ typealias VideoEncoderOutput = uniffi.moq.MoqVideoEncoderOutput
 /** Which encoder implementation to use: automatic, hardware, software, or one named backend. */
 typealias VideoEncoderKind = uniffi.moq.MoqVideoEncoderKind
 /** Divides one connection's send estimate among the tracks sharing it. */
-typealias Bandwidth = uniffi.moq.MoqBandwidth
+typealias Allocator = uniffi.moq.MoqAllocator
 /** An owned bandwidth estimate; release it to stop receive PROBE demand. */
 typealias BandwidthConsumer = uniffi.moq.MoqBandwidthConsumer
-/** One track's standing claim on a [Bandwidth]. */
+/** One track's standing claim on an [Allocator]. */
 typealias Reservation = uniffi.moq.MoqReservation
 /** A snapshot of transport connection statistics. */
 typealias ConnectionStats = uniffi.moq.MoqConnectionStats
-/** A session's authorization: the grant its peer gave it, and more tokens to present. */
-typealias Auth = uniffi.moq.MoqAuth
-/** One token presented with [Auth.add]; cancel it to withdraw the token. */
-typealias AuthToken = uniffi.moq.MoqAuthToken
+/** Follows the grant a session's peer gave it; cancel it to release a pending wait. */
+typealias GrantConsumer = uniffi.moq.MoqGrantConsumer
 /** What the peer lets this side do: publish and subscribe patterns, and an expiry. */
 typealias Grant = uniffi.moq.MoqGrant
 /** A connection lifecycle transition reported by [Session.state]. */

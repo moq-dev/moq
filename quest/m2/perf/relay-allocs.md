@@ -23,19 +23,32 @@ self-time; `SendStream::poll_write` was the nearest resolved caller for 1.43%
 of all samples. That copy alone does not justify a zero-copy rewrite; its
 allocations are this quest's target.
 
+The 2026-10-27 audit adds a site the profile should attribute:
+`transport::boxed`'s `ErasedRecv::poll_lease` boxes each successful lease
+(and `ErasedLease::chunks` its iterator), and frame ingest
+(`Reader::poll_read_frame`) takes one chunk per lease, so a fragmented
+payload pays a box per chunk. Keep the one-time session and stream erasure
+that bounds monomorphization; only the per-lease box is the target.
+Switching ingest to `poll_read_chunk` is not a fix, since it returns receive
+credit before the segment seals. Its `memory` bench counted 34-49
+allocations per frame over the in-memory transport at every frame size, so
+most of the cost is fixed per frame, not per payload byte.
+
 Validate #5830's CPU profile mode with a real capture before relying on its
 stacks. Sweep the fanout benchmark over publishers and subscribers so a cost
 that grows with the table shows as a slope.
 
 Decided 2026-10-17 (maintainer): m2, under perf.
 
-Decided 2026-10-22 (maintainer): this waits on
-[dropping web-transport-trait](/quest/m1/drop-web-transport-trait.md), which
-replaces the session clones and boxed opens at the top of this profile;
-re-profile after it lands before fixing what remains.
+Decided 2026-10-22 (maintainer): this waits on the work that replaces the
+session clones and boxed opens at the top of this profile; re-profile after
+it lands before fixing what remains. Since 2026-10-23 the QUIC half of that
+removal is [native WebTransport](/quest/m1/quic-api/native-web.md), so the
+relay's QUIC profile waits on it rather than on all of
+[dropping web-transport-trait](/quest/m1/drop-web-transport-trait.md).
 
 Public API: none expected. Wire: none.
 
 ## Required
 
-- [Drop web-transport-trait](/quest/m1/drop-web-transport-trait.md) - removes the per-stream session clone and boxed future, so the profile is retaken after it
+- [Native WebTransport](/quest/m1/quic-api/native-web.md) - removes the QUIC path's per-stream session clone and boxed future, so the profile is retaken after it

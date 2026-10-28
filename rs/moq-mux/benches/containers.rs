@@ -1,4 +1,4 @@
-//! Complete fMP4/CMAF and Annex-B imports and exports, with setup outside timing.
+//! Complete container and Annex-B imports and exports, with setup outside timing.
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
@@ -259,27 +259,30 @@ fn interleaved_runs(c: &mut Criterion) {
 		));
 		let init = runtime.block_on(export("cmaf", source, stream, true));
 		drop(fixture);
-		for runs in [1, 16] {
-			let data = interleaved(&init, tracks, runs, frames, &payload);
-			for passthrough in [false, true] {
-				let (catalog, import) = import_cmaf(cmaf_import(passthrough), &data);
-				assert_eq!(catalog.snapshot().video.renditions.len(), tracks);
-				drop(import);
-			}
-			for (direction, passthrough) in [("import", true), ("unwrap", false)] {
-				let mut group = c.benchmark_group(format!("cmaf-interleaved-{direction}"));
-				group.throughput(Throughput::Bytes(data.len() as u64));
-				group.bench_function(
-					BenchmarkId::new(format!("{tracks}tracks"), format!("{runs}runs")),
-					|b| {
-						b.iter_batched(
-							|| cmaf_import(passthrough),
-							|import| import_cmaf(import, std::hint::black_box(&data)),
-							BatchSize::PerIteration,
-						);
-					},
-				);
-				group.finish();
+		for size in [1, payload.len()] {
+			let sample = payload.slice(..size);
+			for runs in [1, 16] {
+				let data = interleaved(&init, tracks, runs, frames, &sample);
+				for passthrough in [false, true] {
+					let (catalog, import) = import_cmaf(cmaf_import(passthrough), &data);
+					assert_eq!(catalog.snapshot().video.renditions.len(), tracks);
+					drop(import);
+				}
+				for (direction, passthrough) in [("import", true), ("unwrap", false)] {
+					let mut group = c.benchmark_group(format!("cmaf-interleaved-{direction}"));
+					group.throughput(Throughput::Bytes(data.len() as u64));
+					group.bench_function(
+						BenchmarkId::new(format!("{tracks}tracks"), format!("{runs}runs-{size}bytes")),
+						|b| {
+							b.iter_batched(
+								|| cmaf_import(passthrough),
+								|import| import_cmaf(import, std::hint::black_box(&data)),
+								BatchSize::PerIteration,
+							);
+						},
+					);
+					group.finish();
+				}
 			}
 		}
 	}
@@ -642,9 +645,43 @@ fn ts_si_table_history(c: &mut Criterion) {
 	);
 }
 
+/// Live WebM framing across transport chunk sizes, including byte-at-a-time metadata.
+fn mkv_chunks(c: &mut Criterion) {
+	let runtime = tokio::runtime::Builder::new_current_thread()
+		.enable_all()
+		.build()
+		.unwrap();
+	let _enter = runtime.enter();
+	let data = include_bytes!("../src/container/mkv/test_data/opus.webm");
+	let mut group = c.benchmark_group("mkv-chunks");
+	group.throughput(Throughput::Bytes(data.len() as u64));
+	for chunk in [1, 7, 64, data.len()] {
+		group.bench_function(BenchmarkId::from_parameter(chunk), |b| {
+			b.iter_batched(
+				|| {
+					let mut broadcast = moq_net::broadcast::Info::new().produce();
+					let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+					let import = moq_mux::container::mkv::Import::new(broadcast, catalog.reserve());
+					(catalog, import)
+				},
+				|(catalog, mut import)| {
+					for bytes in std::hint::black_box(data).chunks(chunk) {
+						import.decode(bytes).unwrap();
+					}
+					import.finish().unwrap();
+					(catalog, import)
+				},
+				BatchSize::PerIteration,
+			);
+		});
+	}
+	group.finish();
+}
+
 criterion_group!(
 	benches,
 	containers,
+	mkv_chunks,
 	interleaved_runs,
 	queued_groups,
 	ts_si_renewal,

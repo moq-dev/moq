@@ -28,6 +28,10 @@ pub struct MoqServerConfig {
 	/// QUIC transport tuning.
 	#[uniffi(default)]
 	pub quic: MoqQuicConfig,
+	/// Your own `name/version` product tokens, space-separated, advertised in SETUP ahead of
+	/// moq-ffi's, as [`MoqClientConfig::implementation`](crate::session::MoqClientConfig::implementation) does.
+	#[uniffi(default = None)]
+	pub implementation: Option<String>,
 	/// The origin whose broadcasts are served to incoming sessions.
 	///
 	/// With neither `publish` nor `consume` set, each session's two sides share one fresh
@@ -155,7 +159,7 @@ async fn serve(
 impl ServerState {
 	fn new(config: MoqServerConfig) -> Result<Self, MoqError> {
 		let mut listen = moq_tokio::listen::Config::default();
-		listen.implementation = Some(crate::session::implementation());
+		listen.implementation = Some(crate::session::implementation(config.implementation.as_deref())?);
 		if let Some(bind) = config.bind {
 			let parsed = bind.parse().map_err(|_| MoqError::Config {
 				reason: format!("invalid bind address: {bind}"),
@@ -403,6 +407,7 @@ pub struct MoqRequest {
 	url: Option<String>,
 	path: String,
 	query: Option<String>,
+	peer_implementation: Option<String>,
 }
 
 impl MoqRequest {
@@ -415,6 +420,7 @@ impl MoqRequest {
 		let url = request.url().map(|u| u.to_string());
 		let path = request.path().to_string();
 		let query = request.query().map(str::to_string);
+		let peer_implementation = request.peer_implementation().map(str::to_string);
 		Ok(Arc::new(Self {
 			task: Task::new(RequestState {
 				request: Some(request),
@@ -425,6 +431,7 @@ impl MoqRequest {
 			url,
 			path,
 			query,
+			peer_implementation,
 		}))
 	}
 }
@@ -465,6 +472,14 @@ impl MoqRequest {
 	/// The encoded request query without the leading `?`, if present.
 	pub fn query(&self) -> Option<String> {
 		self.query.clone()
+	}
+
+	/// The implementation the client advertised in its SETUP, such as
+	/// `moq-py/0.6.0 moq-ffi/0.4.12 moq-net-rs/0.3.10`, or null when it advertised none.
+	///
+	/// Peer-controlled: use it for logs and rollout counts, never to authorize.
+	pub fn peer_implementation(&self) -> Option<String> {
+		self.peer_implementation.clone()
 	}
 
 	/// The network transport carrying this session.
@@ -582,9 +597,10 @@ mod lifecycle_tests {
 					subscribe: vec!["**".into()],
 					expires: None,
 				};
-				for auth in [peer.auth(), session.auth()] {
-					while auth.grant().as_ref() != Some(&everything) {
-						pollster::block_on(auth.grant_changed()).unwrap();
+				for grants in [peer.grants(), session.grants()] {
+					let mut grant = grants.grant();
+					while grant.as_ref() != Some(&everything) {
+						grant = pollster::block_on(grants.changed()).unwrap();
 					}
 				}
 				peer.cancel(0);

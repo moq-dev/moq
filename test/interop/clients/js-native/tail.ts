@@ -43,9 +43,10 @@ const connection = await Moq.Connection.connect({
 });
 try {
 	if (role === "publish") {
-		const broadcast = origin.createBroadcast(Moq.Path.from(path));
+		const broadcastPublication = origin.createBroadcast(Moq.Path.from(path));
+		const broadcast = broadcastPublication.broadcast;
 		const track = broadcast.createTrack("tail", { compress, ...(status ? { priority: 2 } : {}) });
-		broadcast.announce();
+		broadcastPublication.announce();
 		const lines = createInterface({ input: process.stdin });
 		const commands = lines[Symbol.asyncIterator]();
 		if (!status) {
@@ -62,14 +63,15 @@ try {
 				for (let sequence = 0; sequence < GROUPS; sequence++) {
 					const group = track.appendGroup();
 					if (drop && sequence === 1) {
-						group.close(new Error("cut"));
+						group.abort(new Error("cut"));
 						continue;
 					}
 					for (const size of compress ? [BYTES / 2, 0, BYTES / 2] : [BYTES]) {
 						group.writeFrame({ payload: new Uint8Array(size).fill(sequence) });
 					}
-					group.close();
+					group.finish();
 				}
+				track.finish();
 				track.close();
 			}
 		}

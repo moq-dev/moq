@@ -18,7 +18,7 @@
 //! codecs (MP3 / AC-3 / E-AC-3) carry their config in band, so they configure from
 //! the first frame instead. Sample bytes already match the codec payload, so no codec
 //! transform is needed before the selected media container wraps them. FLAC (`fLaC`)
-//! enhanced audio, and any other codec, are logged and dropped.
+//! enhanced audio, and any other unsupported codec, fail the import.
 
 use std::collections::BTreeMap;
 
@@ -51,7 +51,7 @@ const MAX_DATA_OFFSET: usize = 64 * 1024;
 ///
 /// Supports legacy H.264 + AAC and the enhanced-RTMP FourCC codecs (HEVC, AV1,
 /// VP9, Opus, AC-3, E-AC-3), the payloads produced by RTMP encoders and
-/// `ffmpeg -f flv`. Unsupported codecs, plus `onMetaData` script tags, are logged
+/// `ffmpeg -f flv`. Unsupported codecs fail the import; `onMetaData` script tags are logged
 /// and dropped.
 ///
 /// Legacy and single-track enhanced tags carry one video and one audio track;
@@ -212,8 +212,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let frame_type = first >> 4;
 		let codec_id = first & 0x0f;
 		if codec_id != VIDEO_CODEC_AVC {
-			tracing::warn!(codec_id, "unsupported FLV video codec, dropping");
-			return Ok(());
+			return Err(crate::Error::UnknownFormat(format!("FLV video CodecID {codec_id}")).into());
 		}
 
 		anyhow::ensure!(body.len() >= 5, "AVC video tag too short");
@@ -289,6 +288,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		payload: &[u8],
 		timestamp: u64,
 	) -> anyhow::Result<()> {
+		if !matches!(fourcc, b"avc1" | b"hvc1" | b"av01" | b"vp09") {
+			return Err(crate::Error::UnknownFormat(format!("FLV video FourCC {fourcc:?}")).into());
+		}
 		match packet_type {
 			VIDEO_PACKET_SEQUENCE_START => {
 				let config = match fourcc {
@@ -299,8 +301,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					// redundant with the key-frame header we configure from.
 					b"vp09" => return Ok(()),
 					other => {
-						tracing::warn!(fourcc = ?other, "unsupported enhanced FLV video codec, dropping");
-						return Ok(());
+						return Err(crate::Error::UnknownFormat(format!("FLV video FourCC {other:?}")).into());
 					}
 				};
 				self.init_video(track_id, config)
@@ -356,8 +357,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			return self.write_audio(DEFAULT_TRACK_ID, frame, timestamp);
 		}
 		if sound_format != AUDIO_FORMAT_AAC {
-			tracing::warn!(sound_format, "unsupported FLV audio format, dropping");
-			return Ok(());
+			return Err(crate::Error::UnknownFormat(format!("FLV audio SoundFormat {sound_format}")).into());
 		}
 
 		anyhow::ensure!(body.len() >= 2, "AAC audio tag too short");
@@ -420,6 +420,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		payload: &[u8],
 		timestamp: u64,
 	) -> anyhow::Result<()> {
+		if !matches!(fourcc, b"Opus" | b"mp4a" | b".mp3" | b"ac-3" | b"ec-3") {
+			return Err(crate::Error::UnknownFormat(format!("FLV audio FourCC {fourcc:?}")).into());
+		}
 		match packet_type {
 			AUDIO_PACKET_SEQUENCE_START => {
 				let config = match fourcc {
@@ -428,8 +431,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					// MP3 / AC-3 / E-AC-3 are verbatim with no sequence header; they
 					// configure from the first frame. Anything else is unsupported.
 					other => {
-						tracing::warn!(fourcc = ?other, "unsupported enhanced FLV audio codec, dropping");
-						return Ok(());
+						return Err(crate::Error::UnknownFormat(format!("FLV audio FourCC {other:?}")).into());
 					}
 				};
 				self.init_audio(track_id, config)
@@ -568,26 +570,38 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		Ok(())
 	}
 
-	/// Drop any existing video track `track_id` (finishing it and clearing its
-	/// catalog rendition) and allocate a fresh one.
+	/// Retire any existing video track `track_id` and allocate a fresh one.
 	fn replace_video(&mut self, track_id: u8) -> anyhow::Result<moq_net::track::Producer> {
-		if let Some(mut old) = self.video.remove(&track_id) {
-			old.track.finish()?;
+		if let Some(old) = self.video.remove(&track_id) {
+			self.retire(old.track)?;
 		}
 		Ok(self
 			.broadcast
 			.unique_track(".flv-v", self.catalog.track_info(hang::catalog::PRIORITY.video))?)
 	}
 
-	/// Drop any existing audio track `track_id` (finishing it and clearing its
-	/// catalog rendition) and allocate a fresh one.
+	/// Retire any existing audio track `track_id` and allocate a fresh one.
 	fn replace_audio(&mut self, track_id: u8) -> anyhow::Result<moq_net::track::Producer> {
-		if let Some(mut old) = self.audio.remove(&track_id) {
-			old.track.finish()?;
+		if let Some(old) = self.audio.remove(&track_id) {
+			self.retire(old.track)?;
 		}
 		Ok(self
 			.broadcast
 			.unique_track(".flv-a", self.catalog.track_info(hang::catalog::PRIORITY.audio))?)
+	}
+
+	/// End a track this importer is done with, clearing its catalog rendition and retiring its HLS
+	/// records. Every track takes a fresh name, so a publisher changing its config holds only its live
+	/// tracks.
+	fn retire<R: Clone + Send + 'static>(
+		&self,
+		mut track: crate::container::Producer<crate::catalog::hang::Container, R>,
+	) -> anyhow::Result<()> {
+		let ended = track.end();
+		let name = track.name().to_string();
+		drop(track);
+		self.catalog.retire(&name)?;
+		Ok(ended?)
 	}
 
 	/// Close the current group on every track and reopen at `sequence`.
@@ -620,12 +634,28 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// generic [`moq_net::Error::Dropped`] a bare drop surfaces. The counterpart to
 	/// [`Self::finish`] for a failed teardown (e.g. the RTMP client disconnected).
 	/// Consumes the importer.
+	///
+	/// Unlike a drop, this leaves the tracks' HLS records to the catalog, whose abort fails them
+	/// rather than ending them as a complete recording.
 	pub fn abort(mut self, err: moq_net::Error) {
 		for stream in std::mem::take(&mut self.video).into_values() {
 			stream.track.abort(err.clone());
 		}
 		for stream in std::mem::take(&mut self.audio).into_values() {
 			stream.track.abort(err.clone());
+		}
+	}
+}
+
+impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {
+	fn drop(&mut self) {
+		let (video, audio) = (std::mem::take(&mut self.video), std::mem::take(&mut self.audio));
+		let video = video.into_values().map(|stream| self.retire(stream.track));
+		let audio = audio.into_values().map(|stream| self.retire(stream.track));
+		for result in video.chain(audio) {
+			if let Err(err) = result {
+				tracing::warn!(%err, "failed to end a dropped FLV track");
+			}
 		}
 	}
 }

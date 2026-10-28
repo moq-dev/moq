@@ -34,7 +34,7 @@ relay bounds a sparse FETCH only if the model can request ranges:
   publisher delivers what it has and fills the rest as upstream answers.
 - **Model.** `Subscription` gains `ranges` beside its `order`, mirroring the wire;
   `request_groups` as a separate API was rejected. A publisher's
-  `track::Dynamic` receives a `track::Fill` per run of misses (landed), and
+  `track::Requests` receives a `track::Fill` per run of misses (landed), and
   `fetch_group` becomes a one-range subscription or is removed. This breaks published moq-net APIs.
 - **moq-transport.** Some deployments use non-contiguous group numbers, so a
   relay never probes upstream one group at a time. Upstream, each run of
@@ -42,8 +42,9 @@ relay bounds a sparse FETCH only if the model can request ranges:
   upstream's live group (which arrives via SUBSCRIBE), so it never blocks.
   moq-transport caps a FETCH at the Largest Object, so it can return the live
   group's existing prefix but never wait for its future objects. Downstream,
-  an IETF FETCH is served from the model's ranges, capped at the Largest
-  Object.
+  an IETF FETCH is served from the model's ranges, ending at the Largest
+  Object's group, which it reads whole even while open (maintainer,
+  2026-10-25): the cache cannot know an open group's real Largest Object.
 - **Relative ends** (maintainer, 2026-10-11, superseding the 10-07 `Live`
   flag and closing #5085). Each range end is `Absolute(group)` or
   `Relative(n)`, naming the group n before the latest; either end may be
@@ -59,11 +60,13 @@ relay bounds a sparse FETCH only if the model can request ranges:
   which is the starvation the flag existed to prevent. Subscriber Max Age
   still caps every range, so `Absolute(0)..` means everything not stale.
   A relay that cannot resolve a relative end locally forwards it upstream as
-  relative.
+  relative over lite-07; a moq-transport bridge resolves it to an absolute
+  Group ID first ([Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md),
+  decided 2026-10-27).
 - **Time ends** (maintainer, 2026-10-17, for DVR seek in the
   [archive line](/quest/m1/archive/README.md)). A range end may also be
   `Time(pts)`, in the track's timescale. Whoever holds the track resolves it:
-  the cache from its groups' timestamps, or a `track::Dynamic` handler such as
+  the cache from its groups' timestamps, or a `track::Requests` handler such as
   an archive consumer. A start resolves to the group containing pts, and an
   end to just after that group. A lite-07 relay that cannot resolve one
   forwards it upstream unchanged. An untimed track refuses a time end, and a
@@ -95,11 +98,14 @@ every sequence delivered or dropped.
 
 ## Required
 
+- [Linear fill path](/quest/m1/subscribe-ranges/fill-linear.md) - filling stays flat as range count and span grow, so a subscription's range count cannot multiply per-group cost
 - [Fetch as a range](/quest/m1/subscribe-ranges/fetch-range.md) - `fetch_group` becomes a one-range subscription that ends once its range is accounted for
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the lite-07 wire, Rust publisher and subscriber, and the draft
-- [moq-transport ranges](/quest/m1/subscribe-ranges/ietf.md) - range FETCH upstream per missing run, and non-blocking FETCH served downstream
-- [JS ranges](/quest/m1/subscribe-ranges/js.md) - `@moq/net` model and lite-07 parity
+- [JS ranges](/quest/m1/subscribe-ranges/js.md) - `@moq/net` model and lite-07 parity, and the on-demand request surface
+- [Remove FETCH from lite-07](/quest/m1/subscribe-ranges/lite07-fetch.md) - FETCH removed from lite-07 in Rust, JS, and the draft
+- [Delete the old start bookkeeping](/quest/m1/subscribe-ranges/start-bookkeeping.md) - what each lite cursor is owed and dropped lives in the model, and `TrackRun` only translates it per version
 
 ## Related
 
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - bounds upstream waiting independently of content age
+- [Rust groups by start](/quest/m1/time-addressing/model.md) - the cut reworks `Absolute(group)` ends and sequence-range drops onto times

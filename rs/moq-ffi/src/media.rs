@@ -12,7 +12,7 @@ use crate::consumer::{
 use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
 use crate::ffi::Task;
-use crate::producer::{MoqBroadcastProducer, MoqTrackRequest};
+use crate::producer::{Child, Children, MoqBroadcastProducer, MoqTrackRequest};
 
 /// A width and height in pixels.
 #[derive(Clone, uniffi::Record)]
@@ -187,8 +187,8 @@ pub struct MoqAudio {
 /// A payload and the time it should be presented.
 ///
 /// The unit of both writing and raw reading: every producer write takes one of these, and a
-/// raw (non-media) read returns one. Media reads return a [`MoqMediaFrame`] instead, which
-/// adds the codec-derived keyframe flag.
+/// raw (non-media) read returns one. Media reads carry a [`MoqMediaFrame`] in their frame
+/// variant, which adds the codec-derived keyframe flag.
 #[derive(Clone, uniffi::Record)]
 pub struct MoqFrame {
 	/// The frame payload.
@@ -399,7 +399,7 @@ fn reserve_container(
 		moq_net::broadcast::Producer,
 		moq_mux::catalog::Reserved<Extra>,
 		crate::ffi::Background,
-		crate::producer::Finished,
+		crate::producer::Children,
 	),
 	MoqError,
 > {
@@ -412,7 +412,7 @@ fn reserve_container(
 			state.broadcast.clone(),
 			reserved,
 			state.driver.clone(),
-			state.finished.clone(),
+			state.children.clone(),
 		))
 	})
 }
@@ -625,14 +625,14 @@ mod test {
 
 		let epoch: moq_net::Epoch = crate::origin::moq_mint_epoch().parse().unwrap();
 		let mut video = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
-		video.broadcast = Some(moq_net::path::Relative::new("./source").into_owned());
+		video.broadcast = Some(moq_net::path::Relative::new("./source").unwrap());
 		video.epoch = Some(epoch.clone());
 		catalog.video.renditions.insert("video".to_string(), video);
 		let local = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		catalog.video.renditions.insert("local".to_string(), local);
 
 		let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
-		audio.broadcast = Some(moq_net::path::Relative::new("../elsewhere").into_owned());
+		audio.broadcast = Some(moq_net::path::Relative::new("../elsewhere").unwrap());
 		catalog.audio.renditions.insert("audio".to_string(), audio);
 
 		let converted = convert_catalog(&catalog);
@@ -814,25 +814,81 @@ struct MediaStreamProducer {
 }
 
 /// Imports a container into a broadcast, from chunks split anywhere such as a raw byte stream.
+///
+/// Released before its finish, or still open when its broadcast closes, it ends its tracks with
+/// `Unroutable`, which readers take as the publisher leaving.
 #[derive(uniffi::Object)]
 pub struct MoqMediaContainerProducer {
 	driver: crate::ffi::Background,
 	inner: std::sync::Mutex<Option<ContainerProducer>>,
-	finished: crate::producer::Finished,
+	children: Children,
 }
 
 /// Imports complete encoded frames onto one track.
+///
+/// Released before its finish, or still open when its broadcast closes, it ends its track with
+/// `Unroutable`, which readers take as the publisher leaving.
 #[derive(uniffi::Object)]
 pub struct MoqMediaTrackProducer {
 	inner: std::sync::Mutex<Option<MediaProducer>>,
-	finished: crate::producer::Finished,
+	children: Children,
 }
 
 /// Imports a video byte stream onto one track.
+///
+/// Released before its finish, or still open when its broadcast closes, it ends its track with
+/// `Unroutable`, which readers take as the publisher leaving.
 #[derive(uniffi::Object)]
 pub struct MoqMediaTrackStreamProducer {
 	inner: std::sync::Mutex<Option<MediaStreamProducer>>,
-	finished: crate::producer::Finished,
+	children: Children,
+}
+
+// A media handle dropped or closed before its finish ends its tracks the way a publisher
+// leaving does, never as a cause-less drop.
+impl Child for MoqMediaContainerProducer {
+	fn abort(&self, err: moq_net::Error) {
+		let _guard = crate::ffi::enter();
+		if let Some(container) = self.inner.lock().unwrap().take() {
+			container.import.abort(err);
+		}
+	}
+}
+
+impl Drop for MoqMediaContainerProducer {
+	fn drop(&mut self) {
+		self.abort(moq_net::Error::Unroutable);
+	}
+}
+
+impl Child for MoqMediaTrackProducer {
+	fn abort(&self, err: moq_net::Error) {
+		let _guard = crate::ffi::enter();
+		if let Some(media) = self.inner.lock().unwrap().take() {
+			media.import.abort(err);
+		}
+	}
+}
+
+impl Drop for MoqMediaTrackProducer {
+	fn drop(&mut self) {
+		self.abort(moq_net::Error::Unroutable);
+	}
+}
+
+impl Child for MoqMediaTrackStreamProducer {
+	fn abort(&self, err: moq_net::Error) {
+		let _guard = crate::ffi::enter();
+		if let Some(media) = self.inner.lock().unwrap().take() {
+			media.import.abort(err);
+		}
+	}
+}
+
+impl Drop for MoqMediaTrackStreamProducer {
+	fn drop(&mut self) {
+		self.abort(moq_net::Error::Unroutable);
+	}
 }
 
 #[uniffi::export]
@@ -856,7 +912,7 @@ impl MoqMediaTrackProducer {
 					reason: format!("init failed: {err}"),
 				}
 			})?;
-			Ok(MoqMediaTrackProducer::from_import(import, state.finished.clone()))
+			MoqMediaTrackProducer::from_import(import, &state.children)
 		})
 	}
 }
@@ -883,7 +939,7 @@ impl MoqMediaTrackProducer {
 					reason: format!("init failed: {err}"),
 				}
 			})?;
-			Ok(MoqMediaTrackProducer::from_import(import, state.finished.clone()))
+			MoqMediaTrackProducer::from_import(import, &state.children)
 		})
 	}
 }
@@ -900,15 +956,15 @@ impl MoqMediaContainerProducer {
 	) -> Result<Arc<MoqMediaContainerProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let native = moq_mux::import::ContainerInit::new(init.format.into(), init.data);
-		let (target, reserved, driver, finished) = reserve_container(broadcast, init.timebase.as_deref())?;
+		let (target, reserved, driver, children) = reserve_container(broadcast, init.timebase.as_deref())?;
 		let import = moq_mux::import::Container::new(target, reserved, &native).map_err(|err| MoqError::Codec {
 			reason: format!("init failed: {err}"),
 		})?;
 
-		Ok(Arc::new(MoqMediaContainerProducer {
+		children.adopt(Arc::new(MoqMediaContainerProducer {
 			driver,
 			inner: std::sync::Mutex::new(Some(ContainerProducer { import })),
-			finished,
+			children: children.clone(),
 		}))
 	}
 }
@@ -937,11 +993,11 @@ impl MoqMediaTrackStreamProducer {
 					}
 				})?;
 
-			Ok(Arc::new(MoqMediaTrackStreamProducer {
+			state.children.adopt(Arc::new(MoqMediaTrackStreamProducer {
 				inner: std::sync::Mutex::new(Some(MediaStreamProducer {
 					import: Box::new(import),
 				})),
-				finished: state.finished.clone(),
+				children: state.children.clone(),
 			}))
 		})
 	}
@@ -949,15 +1005,15 @@ impl MoqMediaTrackStreamProducer {
 
 impl MoqMediaTrackProducer {
 	/// Wrap a single-codec importer, capturing the demand handle its track exposes.
-	fn from_import(import: moq_mux::import::Track, finished: crate::producer::Finished) -> Arc<Self> {
+	fn from_import(import: moq_mux::import::Track, children: &Children) -> Result<Arc<Self>, MoqError> {
 		let demand = import.demand();
-		Arc::new(Self {
+		children.adopt(Arc::new(Self {
 			inner: std::sync::Mutex::new(Some(MediaProducer {
 				import: Box::new(import),
 				demand,
 			})),
-			finished,
-		})
+			children: children.clone(),
+		}))
 	}
 }
 
@@ -1038,15 +1094,19 @@ impl MoqMediaTrackProducer {
 
 	/// Finish this track and finalize encoding.
 	///
-	/// The broadcast keeps the finished track until it ends, so its finish still holds it.
+	/// The broadcast keeps the finished track until it ends, so its finish still holds it. A
+	/// failed finish ends the track with its error instead.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
 		let mut media = guard.take().ok_or(MoqError::Closed)?;
-		media.import.finish().map_err(|err| MoqError::Codec {
-			reason: format!("finish failed: {err}"),
-		})?;
-		self.finished.keep(media);
+		if let Err(err) = media.import.finish() {
+			media.import.abort(cause(&err));
+			return Err(MoqError::Codec {
+				reason: format!("finish failed: {err}"),
+			});
+		}
+		self.children.keep(media);
 		Ok(())
 	}
 }
@@ -1112,16 +1172,20 @@ impl MoqMediaContainerProducer {
 
 	/// Finish every track this container publishes.
 	///
-	/// The broadcast keeps the finished tracks until it ends, so its finish still holds them.
+	/// The broadcast keeps the finished tracks until it ends, so its finish still holds them. A
+	/// failed finish ends the tracks with its error instead.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let result = (|| {
 			let _guard = crate::ffi::enter();
 			let mut guard = self.inner.lock().unwrap();
 			let mut container = guard.take().ok_or(MoqError::Closed)?;
-			container.import.finish().map_err(|err| MoqError::Codec {
-				reason: format!("finish failed: {err}"),
-			})?;
-			self.finished.keep(container);
+			if let Err(err) = container.import.finish() {
+				container.import.abort(cause(&err));
+				return Err(MoqError::Codec {
+					reason: format!("finish failed: {err}"),
+				});
+			}
+			self.children.keep(container);
 			Ok(())
 		})();
 		self.driver.check()?;
@@ -1154,16 +1218,29 @@ impl MoqMediaTrackStreamProducer {
 
 	/// Finalize the track, publishing the last access unit still waiting for a following start code.
 	///
-	/// The broadcast keeps the finished track until it ends, so its finish still holds it.
+	/// The broadcast keeps the finished track until it ends, so its finish still holds it. A
+	/// failed finish ends the track with its error instead.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
 		let mut media = guard.take().ok_or(MoqError::Closed)?;
-		media.import.finish().map_err(|err| MoqError::Codec {
-			reason: format!("finish failed: {err}"),
-		})?;
-		self.finished.keep(media);
+		if let Err(err) = media.import.finish() {
+			media.import.abort(cause(&err));
+			return Err(MoqError::Codec {
+				reason: format!("finish failed: {err}"),
+			});
+		}
+		self.children.keep(media);
 		Ok(())
+	}
+}
+
+/// The cause a failed import ends its tracks with, so a reader sees the publisher fail rather than
+/// `Dropped`. Only a moq-net error has a wire code; any other reaches readers as `Internal`.
+fn cause(err: &moq_mux::Error) -> moq_net::Error {
+	match err {
+		moq_mux::Error::Moq(err) => err.clone(),
+		_ => moq_net::StreamError::Internal.into(),
 	}
 }
 
@@ -1245,10 +1322,12 @@ fn media_frame(mut frame: moq_mux::container::Frame) -> Result<MoqMediaFrame, Mo
 	})
 }
 
-fn media_container(container: MoqContainer) -> Result<moq_mux::catalog::hang::Container, MoqError> {
+fn media_container(
+	container: MoqContainer,
+	kind: moq_mux::container::Kind,
+) -> Result<moq_mux::catalog::hang::Container, MoqError> {
 	let container: hang::catalog::Container = container.into();
-	// This byte-oriented API has no media-kind configuration.
-	moq_mux::catalog::hang::Container::new(&container, moq_mux::container::Kind::Data).map_err(|e| MoqError::Codec {
+	moq_mux::catalog::hang::Container::new(&container, kind).map_err(|e| MoqError::Codec {
 		reason: format!("invalid container: {e}"),
 	})
 }
@@ -1275,7 +1354,51 @@ impl Catalog {
 	}
 }
 
-/// Reads container-decoded frames from a live media track.
+/// One encoded media read: a container-decoded frame, a gap, or an encoder end.
+#[derive(uniffi::Enum)]
+pub enum MoqMediaRead {
+	/// An encoded frame with its container metadata.
+	Frame {
+		/// The encoded payload, timestamp, and keyframe flag.
+		frame: MoqMediaFrame,
+	},
+	/// Media after what was already read was lost; what follows does not continue it.
+	Gap {
+		/// The furthest presentation point already read, in microseconds.
+		timestamp_us: u64,
+		/// An upper bound on how long until the next frame resumes.
+		duration: std::time::Duration,
+	},
+	/// The publisher stopped its encoder: it paused, switched source, or finished.
+	/// Frames starting before `end_us` are its remaining media; the first at or past it
+	/// comes from a fresh encoder.
+	End {
+		/// Where the stopped encoder's media stops, in microseconds.
+		end_us: u64,
+	},
+}
+
+impl TryFrom<moq_mux::container::Read> for MoqMediaRead {
+	type Error = MoqError;
+
+	fn try_from(read: moq_mux::container::Read) -> Result<Self, MoqError> {
+		use crate::consumer::timestamp_us;
+		Ok(match read {
+			moq_mux::container::Read::Frame { frame, .. } => Self::Frame {
+				frame: media_frame(frame)?,
+			},
+			moq_mux::container::Read::Gap { timestamp, duration } => Self::Gap {
+				timestamp_us: timestamp_us(timestamp)?,
+				duration: crate::ffi::duration(duration.into()),
+			},
+			moq_mux::container::Read::End { end, .. } => Self::End {
+				end_us: timestamp_us(end)?,
+			},
+		})
+	}
+}
+
+/// Reads encoded frames and the breaks between them from a live media track.
 #[derive(uniffi::Object)]
 pub struct MoqMediaTrackConsumer {
 	task: Task<Media>,
@@ -1286,15 +1409,110 @@ struct Media {
 }
 
 impl Media {
-	async fn next(&mut self) -> Result<Option<MoqMediaFrame>, MoqError> {
-		loop {
-			match self.inner.read().await? {
-				Some(moq_mux::container::Read::Frame { frame, .. }) => return media_frame(frame).map(Some),
-				// The bindings carry frames only.
-				Some(moq_mux::container::Read::Gap { .. } | moq_mux::container::Read::End { .. }) => continue,
-				None => return Ok(None),
-			}
-		}
+	async fn next(&mut self) -> Result<Option<MoqMediaRead>, MoqError> {
+		self.inner.read().await?.map(MoqMediaRead::try_from).transpose()
+	}
+}
+
+#[cfg(test)]
+mod read_tests {
+	use super::*;
+	use moq_mux::container::Container as _;
+	use std::time::Duration;
+
+	#[tokio::test(start_paused = true)]
+	async fn encoded_media_preserves_breaks() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("encoded", hang::container::track_info(0))
+			.unwrap();
+		let format = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio);
+		let reader = MoqMediaTrackConsumer::subscribe(
+			&MoqBroadcastConsumer::new(broadcast.consume()),
+			MoqMediaTrackConfig {
+				rendition: MoqRendition::Audio {
+					id: "encoded".into(),
+					config: MoqAudio {
+						label: None,
+						broadcast: None,
+						epoch: None,
+						track: None,
+						codec: "opus".into(),
+						description: None,
+						sample_rate: 48_000,
+						channel_count: 2,
+						bitrate: None,
+						enabled: true,
+						container: MoqContainer::Legacy,
+						jitter: None,
+					},
+				},
+				subscription: None,
+			},
+		)
+		.await
+		.unwrap();
+		let timestamp = |us| moq_net::Timestamp::from_micros(us).unwrap();
+		let mut first = track.create_group(0u64.into()).unwrap();
+		format()
+			.write(
+				&mut first,
+				&[moq_mux::container::Frame {
+					timestamp: timestamp(10_000),
+					payload: bytes::Bytes::from_static(b"encoded"),
+					keyframe: true,
+					duration: None,
+				}],
+			)
+			.unwrap();
+		first.finish().unwrap();
+		let Some(MoqMediaRead::Frame { frame }) = reader.next().await.unwrap() else {
+			panic!("expected frame")
+		};
+		assert_eq!(frame.payload, b"encoded");
+		assert_eq!(frame.timestamp_us, 10_000);
+		assert!(frame.keyframe);
+		let mut marker = track.create_group(2u64.into()).unwrap();
+		format()
+			.write(
+				&mut marker,
+				&[moq_mux::container::Frame {
+					timestamp: timestamp(20_000),
+					payload: bytes::Bytes::new(),
+					keyframe: false,
+					duration: None,
+				}],
+			)
+			.unwrap();
+		marker.finish().unwrap();
+		assert!(
+			matches!(reader.next().await.unwrap(), Some(MoqMediaRead::Gap { timestamp_us: 10_000, duration }) if duration == Duration::from_millis(10))
+		);
+		assert!(matches!(
+			reader.next().await.unwrap(),
+			Some(MoqMediaRead::End { end_us: 20_000 })
+		));
+		let mut resumed = track.create_group(3u64.into()).unwrap();
+		format()
+			.write(
+				&mut resumed,
+				&[moq_mux::container::Frame {
+					timestamp: timestamp(20_000),
+					payload: bytes::Bytes::from_static(b"resumed"),
+					keyframe: true,
+					duration: None,
+				}],
+			)
+			.unwrap();
+		resumed.finish().unwrap();
+		let Some(MoqMediaRead::Frame { frame }) = reader.next().await.unwrap() else {
+			panic!("end is not EOF")
+		};
+		assert_eq!(frame.payload, b"resumed");
+		track.finish().unwrap();
+		assert!(reader.next().await.unwrap().is_none());
+		reader.cancel();
+		assert!(matches!(reader.next().await, Err(MoqError::Cancelled)));
 	}
 }
 
@@ -1370,8 +1588,8 @@ impl MoqMediaCatalogConsumer {
 
 #[uniffi::export]
 impl MoqMediaTrackConsumer {
-	/// Get the next frame. Returns `None` when the track ends or is closed.
-	pub async fn next(&self) -> Result<Option<MoqMediaFrame>, MoqError> {
+	/// Get the next encoded frame, gap, or end; `None` once the track ends or is closed.
+	pub async fn next(&self) -> Result<Option<MoqMediaRead>, MoqError> {
 		self.task.run(|mut state| async move { state.next().await }).await
 	}
 
@@ -1421,10 +1639,14 @@ impl MoqMediaTrackConsumer {
 			rendition,
 			subscription,
 		} = config;
+		let kind = match &rendition {
+			MoqRendition::Audio { .. } => moq_mux::container::Kind::Audio,
+			MoqRendition::Video { .. } => moq_mux::container::Kind::Video,
+		};
 		let (reference, epoch, name, container) = rendition.into_parts();
 		// Parse the container before resolving or subscribing so we don't leave a dangling
 		// subscription if init parsing fails.
-		let media = media_container(container)?;
+		let media = media_container(container, kind)?;
 		let resolved = broadcast.resolve_inner(reference.as_deref(), epoch.as_deref()).await?;
 		let subscription = subscription
 			.map(moq_net::track::Subscription::try_from)
@@ -1453,7 +1675,7 @@ impl MoqMediaGroupConsumer {
 	#[uniffi::constructor]
 	pub fn new(group: &MoqGroupConsumer, container: MoqContainer) -> Result<Arc<Self>, MoqError> {
 		// Parse the container first, so a bad init leaves the raw group readable.
-		let media = media_container(container)?;
+		let media = media_container(container, moq_mux::container::Kind::Data)?;
 		let (group, driver) = group.take()?;
 		Ok(Arc::new(Self::from_inner(group, media, driver)))
 	}
@@ -1475,7 +1697,7 @@ impl MoqMediaGroupConsumer {
 		let (reference, epoch, name, container) = rendition.into_parts();
 		// Parse the container before fetching so invalid CMAF init data does not leave a
 		// dynamic group request waiting for a consumer that can never read it.
-		let media = media_container(container)?;
+		let media = media_container(container, moq_mux::container::Kind::Data)?;
 		let resolved = broadcast.resolve_inner(reference.as_deref(), epoch.as_deref()).await?;
 		let options = options.map(moq_net::group::Fetch::from);
 		let group = broadcast
@@ -1563,6 +1785,7 @@ mod timebase_tests {
 					keyframe: true,
 					duration: Some(moq_net::Timestamp::from_millis(20).unwrap()),
 				}],
+				None,
 			)
 			.unwrap()
 	}

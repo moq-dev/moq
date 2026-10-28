@@ -32,7 +32,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:kixelated/quest/42c49e898fdfafaf805a28302a7a11013ebb9316";
+      url = "github:kixelated/quest/fd1d88fb19317afc1c0cbca34cc23e9cf4d32375";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
@@ -389,17 +389,18 @@
           doCheck = false;
         };
 
-        # uniffi-bindgen-cpp renders rs/moq-ffi for cpp/moq's CMake build. Not in
-        # nixpkgs, so build it from source; without it `just check` skips the
-        # cpp module, which CI_STRICT turns into a failure in CI.
+        # uniffi-bindgen-cpp renders rs/moq-ffi for the CMake builds of cpp/moq and,
+        # with its C backend, c/moq. Not in nixpkgs, so build it from source;
+        # without it `just check` skips the c and cpp modules, which CI_STRICT
+        # turns into a failure in CI.
         #
         # Like uniffi-bindgen-go, the tag pairs the generator's version with the
         # uniffi release it reads, so it moves with the `uniffi` dependency in
         # rs/moq-ffi/Cargo.toml. The other places name the same tag and must be
         # bumped together: the `cargo install` lines in rs/moq-ffi/build.sh,
-        # cpp/moq/README.md, .github/workflows/cpp.yml,
-        # .github/workflows/platform.yml, .github/workflows/release-cpp.yml, and
-        # .github/workflows/release-shared-ffi.yml.
+        # cpp/moq/README.md, .github/workflows/{c,cpp}.yml,
+        # .github/workflows/platform.yml, .github/workflows/release-{c,cpp}.yml,
+        # and .github/workflows/release-shared-ffi.yml.
         #
         # This points at a fork of LiveKit's async branch (livekit/uniffi-bindgen-cpp
         # PR #1): neither LiveKit nor NordSecurity has a uniffi 0.32 generator,
@@ -634,6 +635,15 @@
           # finds a shim there too. That is the only way mbx reaches a build
           # that spawns Cargo itself, which release-plz does.
           shellHook = ''
+            # `nix develop` points TMPDIR at a fresh nix-shell.* dir that it
+            # never removes. Drop it and keep the caller's TMPDIR, as nix-direnv
+            # does, so nothing piles up there.
+            if [[ ''${NIX_BUILD_TOP-} == */nix-shell.* && -d $NIX_BUILD_TOP ]]; then
+              rm -rf "$NIX_BUILD_TOP"
+              export TMPDIR=''${NIX_BUILD_TOP%/*}
+              unset NIX_BUILD_TOP TMP TEMP TEMPDIR
+            fi
+
             status=$(mbx setup --status 2>/dev/null || true)
             shim=$(printf '%s\n' "$status" | sed -n '1s/.*: //p')
             if [ -x "$shim" ]; then

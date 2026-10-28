@@ -8,8 +8,9 @@ import { Effect, Signal } from "@moq/signals";
 import { Broadcast } from "./broadcast";
 
 function publish(origin: Origin.Producer, path: Path.Valid) {
-	const broadcast = origin.createBroadcast(path);
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(path);
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	return broadcast;
 }
 
@@ -35,11 +36,11 @@ function broadcast(name: string, paths: string[] = [name]): { source: Broadcast;
 }
 
 // Answer every request `claim` receives with a new exact broadcast, returning the answers.
-function serve(claim: Origin.Dynamic, epoch?: Moq.Epoch.Valid): Moq.Broadcast.Producer[] {
+function serve(claim: Origin.Requests, epoch?: Moq.Epoch.Valid): Moq.Broadcast.Producer[] {
 	const answers: Moq.Broadcast.Producer[] = [];
 	void (async () => {
 		for await (const request of claim.requested())
-			answers.push(request.prepare(epoch ?? Moq.Epoch.mint()).publish());
+			answers.push(request.prepare(epoch ?? Moq.Epoch.mint()).publish().broadcast);
 	})();
 	return answers;
 }
@@ -338,10 +339,12 @@ describe("relativeBroadcast", () => {
 	it("reads a reference only from the epoch it names, best effort without one", async () => {
 		const owner = new Origin.Producer();
 		const [catalogEpoch, siblingEpoch, other] = [Moq.Epoch.mint(), Moq.Epoch.mint(), Moq.Epoch.mint()];
-		const catalog = owner.createBroadcast(Path.from("a/b"));
-		catalog.announce({ epoch: catalogEpoch });
-		const sibling = owner.createBroadcast(Path.from("a/source"));
-		sibling.announce({ epoch: siblingEpoch });
+		const catalogPublication = owner.createBroadcast(Path.from("a/b"));
+		const catalog = catalogPublication.broadcast;
+		catalogPublication.announce({ epoch: catalogEpoch });
+		const siblingPublication = owner.createBroadcast(Path.from("a/source"));
+		const sibling = siblingPublication.broadcast;
+		siblingPublication.announce({ epoch: siblingEpoch });
 		const plain = publish(owner, Path.from("a/plain"));
 		const source = new Broadcast({
 			origin: owner,
@@ -380,8 +383,9 @@ describe("relativeBroadcast", () => {
 		const owner = new Origin.Producer();
 		const main = publish(owner, Path.from("a/b"));
 		const [oldEpoch, newEpoch] = [Moq.Epoch.mint(), Moq.Epoch.mint()];
-		const old = owner.createBroadcast(Path.from("a/source"));
-		old.announce({ epoch: oldEpoch });
+		const oldPublication = owner.createBroadcast(Path.from("a/source"));
+		const old = oldPublication.broadcast;
+		oldPublication.announce({ epoch: oldEpoch });
 		const source = new Broadcast({
 			origin: owner,
 			name: Path.from("a/b"),
@@ -405,8 +409,9 @@ describe("relativeBroadcast", () => {
 
 			// The announcement is the online signal: the plain reference follows the restart,
 			// while one naming the old instance never reads the new one.
-			const replacement = owner.createBroadcast(Path.from("a/source"));
-			replacement.announce({ epoch: newEpoch });
+			const replacementPublication = owner.createBroadcast(Path.from("a/source"));
+			const replacement = replacementPublication.broadcast;
+			replacementPublication.announce({ epoch: newEpoch });
 			await settle();
 			expect(following?.epoch).toBe(newEpoch);
 			expect(pinned).toBeUndefined();
@@ -424,8 +429,9 @@ describe("relativeBroadcast", () => {
 		const owner = new Origin.Producer();
 		const main = publish(owner, Path.from("a/b"));
 		const [oldEpoch, newEpoch] = [Moq.Epoch.mint(), Moq.Epoch.mint()];
-		const old = owner.createBroadcast(Path.from("a/source"));
-		old.announce({ epoch: oldEpoch });
+		const oldPublication = owner.createBroadcast(Path.from("a/source"));
+		const old = oldPublication.broadcast;
+		oldPublication.announce({ epoch: oldEpoch });
 		const named = { ...video("avc1.64001f", "./source"), epoch: oldEpoch } as Catalog.VideoConfig;
 		const source = new Broadcast({
 			origin: owner,
@@ -438,8 +444,9 @@ describe("relativeBroadcast", () => {
 			await settle();
 			expect(videoRenditions(source)).toEqual(["named", "plain"]);
 
-			const replacement = owner.createBroadcast(Path.from("a/source"));
-			replacement.announce({ epoch: newEpoch });
+			const replacementPublication = owner.createBroadcast(Path.from("a/source"));
+			const replacement = replacementPublication.broadcast;
+			replacementPublication.announce({ epoch: newEpoch });
 			await withoutWarnings(settle);
 			expect(videoRenditions(source)).toEqual(["plain"]);
 			replacement.close();
@@ -487,11 +494,11 @@ describe("blind resolution", () => {
 		await settle();
 
 		// Stand in for a claim answering the request.
-		const route = owner.dynamic(Path.from("blind.hang"));
+		const route = owner.requests(Path.from("blind.hang"));
 		const requests = route.requested();
 		const next = await requests.next();
 		if (!next.value) throw new Error("expected a request");
-		const upstream = next.value.prepare(Moq.Epoch.mint()).publish();
+		const upstream = next.value.prepare(Moq.Epoch.mint()).publish().broadcast;
 
 		await settle();
 		const active = source.out.active.peek();
@@ -600,7 +607,7 @@ describe("restart", () => {
 	it("moves to a more specific announcement of another instance", async () => {
 		const owner = new Origin.Producer();
 		const name = Path.from("pool/job.hang");
-		const pool = owner.dynamic(Path.from("pool"));
+		const pool = owner.requests(Path.from("pool"));
 		const answers = serve(pool);
 		const source = new Broadcast({ origin: owner, name, enabled: true, announced: true, catalogFormat: "manual" });
 		await settle();
@@ -608,8 +615,9 @@ describe("restart", () => {
 		expect(old).toBeDefined();
 
 		// A newer publisher announces the path, which now serves the name: a restart.
-		const exact = owner.createBroadcast(name);
-		exact.announce({ epoch: Moq.Epoch.mint() });
+		const exactPublication = owner.createBroadcast(name);
+		const exact = exactPublication.broadcast;
+		exactPublication.announce({ epoch: Moq.Epoch.mint() });
 		await settle();
 		const moved = source.out.active.peek();
 		expect(moved).toBeDefined();
@@ -632,8 +640,9 @@ describe("restart", () => {
 		const owner = new Origin.Producer();
 		const name = Path.from("pool/job.hang");
 		const epoch = Moq.Epoch.mint();
-		const exact = owner.createBroadcast(name);
-		exact.announce({ epoch });
+		const exactPublication = owner.createBroadcast(name);
+		const exact = exactPublication.broadcast;
+		exactPublication.announce({ epoch });
 		const source = new Broadcast({ origin: owner, name, enabled: true, announced: true, catalogFormat: "manual" });
 		await settle();
 		const old = source.out.active.peek();
@@ -642,7 +651,7 @@ describe("restart", () => {
 		// The exact route goes, which ends the request on it, and a prefix answers under the same
 		// epoch before the table is read again. The player still has to ask again.
 		exact.close();
-		const pool = owner.dynamic(Path.from("pool"));
+		const pool = owner.requests(Path.from("pool"));
 		const answers = serve(pool, epoch);
 		await settle();
 		const resumed = source.out.active.peek();
@@ -660,7 +669,7 @@ describe("restart", () => {
 	it("falls back to a covering prefix when the exact route ends", async () => {
 		const owner = new Origin.Producer();
 		const name = Path.from("pool/job.hang");
-		const pool = owner.dynamic(Path.from("pool"));
+		const pool = owner.requests(Path.from("pool"));
 		const answers = serve(pool);
 		const exact = publish(owner, name);
 		const source = new Broadcast({ origin: owner, name, enabled: true, announced: true, catalogFormat: "manual" });
@@ -693,7 +702,7 @@ describe("refusal", () => {
 	it("reports an unroutable refusal of a restarted publisher", async () => {
 		const owner = new Origin.Producer();
 		const name = Path.from("room/live.hang");
-		const first = owner.dynamic(Path.from("room"));
+		const first = owner.requests(Path.from("room"));
 		const answers = serve(first);
 		const source = new Broadcast({ origin: owner, name, enabled: true, announced: true, catalogFormat: "manual" });
 		await settle();
@@ -702,7 +711,7 @@ describe("refusal", () => {
 		// The publisher restarts, and refuses with the same code an ended instance reports.
 		first.close();
 		for (const answer of answers) answer.close();
-		const second = owner.dynamic(Path.from("room"));
+		const second = owner.requests(Path.from("room"));
 		const refused = await second.requested().next();
 		refused.value?.reject(new Moq.Error.Stream(Moq.StreamCode.Unroutable, { message: "refused" }));
 		await settle();
@@ -738,7 +747,7 @@ describe("refusal", () => {
 	for (const announced of [true, false]) {
 		it(`reports a refusal until a fresh request (announced: ${announced})`, async () => {
 			const owner = new Origin.Producer();
-			const route = owner.dynamic(Path.from("room"));
+			const route = owner.requests(Path.from("room"));
 			const requests = route.requested();
 			const name = new Signal(Path.from("room/refused.hang"));
 			const enabled = new Signal(true);
@@ -1020,7 +1029,7 @@ describe("wildcard renditions", () => {
 			await settle();
 			expect(videoRenditions(source)).toEqual(["source"]);
 
-			const worker = owner.dynamic(Path.from(".pro/transcode"));
+			const worker = owner.requests(Path.from(".pro/transcode"));
 			const requests = worker.requested();
 			await settle();
 			expect(videoRenditions(source)).toEqual(["source", "transcode"]);
@@ -1039,7 +1048,7 @@ describe("wildcard renditions", () => {
 			prepared.broadcast
 				.createTrack("video", { timescale: Moq.Time.Timescale.MILLI })
 				.writeFrame({ payload: new TextEncoder().encode("frame"), timestamp: Moq.Time.Timestamp.now() });
-			const produced = prepared.publish();
+			const produced = prepared.publish().broadcast;
 			await settle();
 			expect(active).toBeDefined();
 			const track = active?.track("video").subscribe().ordered();
@@ -1066,8 +1075,8 @@ describe("wildcard renditions", () => {
 
 		try {
 			// A catch-all (an archive) and a narrower pool both cover the derived path.
-			const archive = owner.dynamic(Path.empty());
-			const worker = owner.dynamic(Path.from(".pro/transcode"));
+			const archive = owner.requests(Path.empty());
+			const worker = owner.requests(Path.from(".pro/transcode"));
 			await settle();
 			expect(videoRenditions(source)).toEqual(["source", "transcode"]);
 

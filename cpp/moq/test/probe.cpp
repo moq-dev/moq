@@ -132,8 +132,19 @@ void audio_roundtrip() {
     size_t frames = 0;
     double real[2][2] = {}, imag[2][2] = {};
     for (;;) {
-        auto next = ok(consumer->next().get(), "decoded audio");
-        if (!next) break;
+        auto read = ok(consumer->next().get(), "decoded audio");
+        if (!read) break;
+        CHECK(!std::holds_alternative<moq::AudioRead::kGap>(read->get_variant()));
+        // The finish ends the encoder where its eight 20 ms frames stop.
+        if (const auto *end = std::get_if<moq::AudioRead::kEnd>(&read->get_variant())) {
+            CHECK(end->end_us == 250000 + 8 * 20000);
+            continue;
+        }
+        const auto *variant = std::get_if<moq::AudioRead::kFrame>(&read->get_variant());
+        CHECK(variant != nullptr);
+
+        const auto *next = &variant->frame;
+
         CHECK(next->timestamp_us == 250000 + frames * 1000000 / 48000);
         CHECK(next->data.size() % (2 * sizeof(float)) == 0);
         for (size_t sample = 0; sample < next->data.size() / (2 * sizeof(float)); sample++) {
@@ -191,13 +202,6 @@ int main() {
     // It prints the message Rust's Display gives.
     CHECK(fingerprints.error().to_string() == "bind: not listening; call listen() first");
 
-    // An epoch's time keeps every 48-bit millisecond, past where system_clock's nanoseconds wrap.
-    CHECK(ok(moq::epoch_time("018bcfe5-6800-7000-8000-000000000000"), "epoch_time").time_since_epoch() ==
-          std::chrono::milliseconds(1700000000000));
-    CHECK(ok(moq::epoch_time("ffffffff-ffff-7000-8000-000000000000"), "epoch_time").time_since_epoch() ==
-          std::chrono::milliseconds(0xffffffffffff));
-    CHECK(!moq::epoch_time("not-an-epoch"));
-
     // Publisher: a server whose origin serves one broadcast with one track.
     auto origin = moq::OriginProducer::init({});
     auto broadcast = ok(origin->create_broadcast("probe"), "create_broadcast");
@@ -208,6 +212,7 @@ int main() {
 
     moq::ServerConfig server_config;
     server_config.bind = "127.0.0.1:0";
+    server_config.versions = {"moq-lite-07-wip"};
     server_config.tls.generate = {"localhost"};
     server_config.publish = origin;
     auto server = ok(moq::Server::init(server_config), "server init");
@@ -217,11 +222,16 @@ int main() {
     // thread blocks on one at a time.
     moq::ClientConfig client_config;
     client_config.tls.insecure = true;
+    client_config.versions = server_config.versions;
+    client_config.implementation = moq::IMPLEMENTATION;
     auto client = ok(moq::Client::init(client_config), "client init");
     auto accepting = server->accept();
     auto connecting = client->connect("https://" + addr);
     auto request = ok(accepting.get(), "accept");
     CHECK(request != nullptr);
+    // The package names itself ahead of moq-ffi, so a server can tell bindings apart.
+    auto implementation = request->peer_implementation();
+    CHECK(implementation && implementation->rfind("moq-cpp/", 0) == 0);
     auto served = ok(request->accept(nullptr, nullptr).get(), "request accept");
     auto session = ok(connecting.get(), "connect");
 
@@ -254,8 +264,8 @@ int main() {
     CHECK(!reading.valid());
     CHECK(frame.has_value());
     CHECK(frame->payload == bytes("hello"));
-    // The default moq-lite-06 session drops received timestamps, so the track arrives untimed.
-    CHECK(!frame->timestamp_us.has_value());
+    // Lite-07 carries both the Implementation parameter and frame timestamps.
+    CHECK(frame->timestamp_us == 1000);
 
     // A continuation receives the next frame on the executor.
     {

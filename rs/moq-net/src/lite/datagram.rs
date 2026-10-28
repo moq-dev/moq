@@ -78,6 +78,9 @@ impl Encode<Version> for Datagram {
 }
 
 impl Datagram {
+	/// The largest encoded datagram body a lite hop carries.
+	pub(super) const MAX_SIZE: usize = 1200;
+
 	/// Decode a whole datagram body. The payload shares `buf` rather than copying it.
 	///
 	/// `ietf` says whether the session negotiated the extension, and `framing` describes

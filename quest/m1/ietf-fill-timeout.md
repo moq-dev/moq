@@ -1,11 +1,11 @@
-# [L] IETF FETCH honors its fill timeout
+# [M] Rust IETF FETCH honors its fill timeout
 
 ## Goal
 
-Rust and JS use IETF FILL_TIMEOUT to bound waiting for missing FETCH
-objects on drafts 18 and 22, and return the draft's timeout-gap disposition
-without hanging or discarding objects that are available. Drafts 14-17
-keep their existing wire; local FETCH age enforcement works on all versions.
+Rust uses IETF FILL_TIMEOUT to bound waiting for missing FETCH objects on
+drafts 18 and 22, and returns the draft's timeout-gap disposition without
+hanging or discarding objects that are available. Local FETCH age
+enforcement works on all versions.
 
 ## Plan
 
@@ -17,10 +17,14 @@ bounds the total wait for missing upstream objects; zero is cache-only.
 It does not judge how old an immediately available object is. Keep exact
 max-delay/max-age enforcement in the model alongside this approximation.
 
-Today Rust decodes only FILL_TIMEOUT's presence and refuses such requests
-because it cannot emit the required gap statuses. Preserve the value and
-honor its semantics before advertising or sending support. JS's IETF FETCH
-responder comes from its existing quest; build on that surface.
+Today Rust decodes only FILL_TIMEOUT's presence (`fill_timeout: bool` in
+`rs/moq-net/src/ietf/fetch.rs`) and refuses such requests because it cannot
+emit the required gap statuses. Preserve the value and honor its semantics
+before advertising or sending support.
+
+Decided 2026-10-27 (maintainer): split by language. This Rust half starts
+now; the JS half is [JS FETCH fill timeout](/quest/m1/ietf-fill-timeout-js.md),
+which builds on the cached JavaScript FETCH responder. Keep the two wire behaviors identical.
 
 Propagate an explicit FETCH max-delay as the upstream wait budget where
 the draft supports it. For omitted max-delay, retain the wire's omitted
@@ -37,7 +41,7 @@ range, reset the entire session, or silently reinterpret FILL_TIMEOUT as
 publisher retention. Test standalone and applicable joining/fill forms,
 reordered arrivals, cache-only requests, partial availability, no subsequent
 writes, cancellation, shared callers, and an older peer without this field.
-Use mocked time and the existing Rust/JS and interop CI lanes; run
+Use mocked time and the existing Rust and interop CI lanes; run
 `just check` and `just test interop --all`.
 
 Public API: reuse FETCH's max-delay option; no new content-age extension
@@ -45,10 +49,6 @@ configuration. Wire: support existing IETF parameters and gap statuses on
 their applicable versions. Update existing interop/deviation and FETCH docs
 inline, clearly distinguishing upstream wait time from content age.
 
-## Required
-
-- [JavaScript FETCH](/quest/m1/js-fetch.md) - the JS responder this extends
-
 ## Related
 
-- [moq-transport ranges](/quest/m1/subscribe-ranges/ietf.md) - sparse range forwarding and gap handling
+- [JS FETCH fill timeout](/quest/m1/ietf-fill-timeout-js.md) - the same semantics in the JS responder

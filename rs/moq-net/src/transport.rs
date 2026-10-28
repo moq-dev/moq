@@ -41,13 +41,13 @@ impl<T> MaybeSend for T {}
 #[cfg(target_family = "wasm")]
 impl<T> MaybeSync for T {}
 
-/// Where the transport carries the request target.
+/// Where a session's request target travels.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Binding {
-	/// The request target is carried by the transport URI.
+pub enum Address {
+	/// The transport's own request URI carries it (WebTransport, qmux over WebSocket).
 	Uri,
-	/// The request target is carried by the MoQ SETUP.
-	InBand,
+	/// The MoQ SETUP carries it, because the transport has no request URI.
+	Setup,
 }
 
 /// One connection's cumulative wire counters, which its transport updates as it sends and receives.
@@ -121,21 +121,11 @@ impl Probe {
 	}
 }
 
-/// Connection-level statistics.
+/// Connection-level metrics a transport reports, beyond the byte counts its [`Wire`] holds.
 ///
 /// Methods return `Option`: `None` means the implementation doesn't track
 /// this metric, while `Some(0)` means actually zero.
-pub trait Stats {
-	/// Total bytes sent over the connection, including retransmissions and overhead.
-	fn bytes_sent(&self) -> Option<u64> {
-		None
-	}
-
-	/// Total bytes received over the connection, including duplicate and overhead.
-	fn bytes_received(&self) -> Option<u64> {
-		None
-	}
-
+pub trait Metrics {
 	/// Total bytes lost (detected via retransmission or acknowledgement).
 	fn bytes_lost(&self) -> Option<u64> {
 		None
@@ -172,21 +162,22 @@ pub trait Stats {
 	}
 }
 
-/// Default stats implementation that returns `None` for all metrics.
-pub struct StatsUnavailable;
-impl Stats for StatsUnavailable {}
+/// The metrics of a transport that tracks none.
+struct Untracked;
+impl Metrics for Untracked {}
 
 /// The smallest connection receive window a transport that leases may offer.
 ///
 /// A session keeps each unit it is still assembling leased, and a unit larger than the
 /// window can never complete, so the window has to fit the largest one with its framing:
-/// a legacy announcement set, past any frame payload.
+/// a legacy announcement set, past any frame segment. A frame returns its credit a
+/// segment at a time, so its size never matters here.
 pub const MIN_RECEIVE_WINDOW: u64 = {
 	// A type and a size prefix, each a varint of at most 8 bytes.
 	const PREFIXES: u64 = 16;
-	let message = <crate::lite::AnnounceInit<'static> as crate::lite::Message>::MAX_SIZE as u64 + PREFIXES;
-	let frame = crate::group::MAX_CACHE_BYTES;
-	if message > frame { message } else { frame }
+	let message = <crate::lite::AnnounceInit as crate::lite::Message>::MAX_SIZE as u64 + PREFIXES;
+	let segment = crate::frame::SEGMENT as u64;
+	if message > segment { message } else { segment }
 };
 
 /// The typed transport condition when no application code was received.
@@ -232,7 +223,7 @@ pub mod poll {
 
 	use std::collections::VecDeque;
 
-	use super::{Error, MaybeSend, MaybeSync, Stats};
+	use super::{Error, MaybeSend, MaybeSync, Metrics, Untracked};
 	use bytes::{Buf, Bytes, BytesMut};
 
 	/// A cloneable transport session with independent progress on each handle.
@@ -333,7 +324,7 @@ pub mod poll {
 		fn protocol(&self) -> Option<&str>;
 
 		/// Return where this transport carries the request target.
-		fn binding(&self) -> super::Binding;
+		fn address(&self) -> super::Address;
 
 		/// Close the connection immediately with a code and reason.
 		///
@@ -345,11 +336,10 @@ pub mod poll {
 		/// Poll until the connection is closed by either side.
 		fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error>;
 
-		/// Return connection-level statistics.
-		///
-		/// Return [`super::StatsUnavailable`] if the transport does not track them. Required
-		/// rather than defaulted for the same reason as [`protocol`](Self::protocol).
-		fn stats(&self) -> impl Stats;
+		/// Return connection-level metrics; by default, none are tracked.
+		fn metrics(&self) -> impl Metrics {
+			Untracked
+		}
 
 		/// Return the wire counters this transport updates, or `None` when it tracks none.
 		fn wire(&self) -> Option<super::Wire> {

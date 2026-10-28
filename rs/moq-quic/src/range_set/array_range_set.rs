@@ -27,183 +27,183 @@ pub(crate) struct ArrayRangeSet(TinyVec<[Range<u64>; ARRAY_RANGE_SET_INLINE_CAPA
 const ARRAY_RANGE_SET_INLINE_CAPACITY: usize = 2;
 
 impl Clone for ArrayRangeSet {
-    fn clone(&self) -> Self {
-        // tinyvec keeps the heap representation after clones.
-        // We rather prefer the inline representation for clones if possible,
-        // since clones (e.g. for storage in `SentFrames`) are rarely mutated
-        if self.0.is_inline() || self.0.len() > ARRAY_RANGE_SET_INLINE_CAPACITY {
-            return Self(self.0.clone());
-        }
+	fn clone(&self) -> Self {
+		// tinyvec keeps the heap representation after clones.
+		// We rather prefer the inline representation for clones if possible,
+		// since clones (e.g. for storage in `SentFrames`) are rarely mutated
+		if self.0.is_inline() || self.0.len() > ARRAY_RANGE_SET_INLINE_CAPACITY {
+			return Self(self.0.clone());
+		}
 
-        let mut vec = TinyVec::new();
-        vec.extend_from_slice(self.0.as_slice());
-        Self(vec)
-    }
+		let mut vec = TinyVec::new();
+		vec.extend_from_slice(self.0.as_slice());
+		Self(vec)
+	}
 }
 
 impl ArrayRangeSet {
-    pub(crate) fn new() -> Self {
-        Default::default()
-    }
+	pub(crate) fn new() -> Self {
+		Default::default()
+	}
 
-    pub(crate) fn iter(&self) -> impl DoubleEndedIterator<Item = Range<u64>> + '_ {
-        self.0.iter().cloned()
-    }
+	pub(crate) fn iter(&self) -> impl DoubleEndedIterator<Item = Range<u64>> + '_ {
+		self.0.iter().cloned()
+	}
 
-    pub(crate) fn elts(&self) -> impl Iterator<Item = u64> + '_ {
-        self.iter().flatten()
-    }
+	pub(crate) fn elts(&self) -> impl Iterator<Item = u64> + '_ {
+		self.iter().flatten()
+	}
 
-    pub(crate) fn len(&self) -> usize {
-        self.0.len()
-    }
+	pub(crate) fn len(&self) -> usize {
+		self.0.len()
+	}
 
-    #[cfg(test)]
-    pub(super) fn contains(&self, x: u64) -> bool {
-        self.0
-            .binary_search_by(|range| {
-                if range.end <= x {
-                    Ordering::Less
-                } else if x < range.start {
-                    Ordering::Greater
-                } else {
-                    // range.start <= x < range.end
-                    Ordering::Equal
-                }
-            })
-            .is_ok()
-    }
+	#[cfg(test)]
+	pub(super) fn contains(&self, x: u64) -> bool {
+		self.0
+			.binary_search_by(|range| {
+				if range.end <= x {
+					Ordering::Less
+				} else if x < range.start {
+					Ordering::Greater
+				} else {
+					// range.start <= x < range.end
+					Ordering::Equal
+				}
+			})
+			.is_ok()
+	}
 
-    pub(crate) fn insert_one(&mut self, x: u64) -> bool {
-        self.insert(x..x + 1)
-    }
+	pub(crate) fn insert_one(&mut self, x: u64) -> bool {
+		self.insert(x..x + 1)
+	}
 
-    pub(crate) fn insert(&mut self, x: Range<u64>) -> bool {
-        let mut result = false;
+	pub(crate) fn insert(&mut self, x: Range<u64>) -> bool {
+		let mut result = false;
 
-        if x.is_empty() {
-            // Don't try to deal with ranges where x.end <= x.start
-            return false;
-        }
+		if x.is_empty() {
+			// Don't try to deal with ranges where x.end <= x.start
+			return false;
+		}
 
-        // Find the first range that might interact with `x`.
-        // Unlike removal, we use a strict comparison so that ranges
-        // adjacent to `x` are included in the right-hand partition and can be merged.
-        let idx = self.0.partition_point(|r| r.end < x.start);
+		// Find the first range that might interact with `x`.
+		// Unlike removal, we use a strict comparison so that ranges
+		// adjacent to `x` are included in the right-hand partition and can be merged.
+		let idx = self.0.partition_point(|r| r.end < x.start);
 
-        if idx == self.0.len() {
-            self.0.push(x);
-            return true;
-        }
+		if idx == self.0.len() {
+			self.0.push(x);
+			return true;
+		}
 
-        let range = &mut self.0[idx];
+		let range = &mut self.0[idx];
 
-        if x.end < range.start {
-            // The range is fully before this range and therefore not extensible.
-            // Add a new range to the left
-            self.0.insert(idx, x);
-            return true;
-        } else if range.start > x.start {
-            // The new range starts before this range but overlaps.
-            // Extend the current range to the left
-            // Note that we don't have to merge a potential left range, since
-            // this case would have been captured by merging the right range
-            // in the previous loop iteration
-            result = true;
-            range.start = x.start;
-        }
+		if x.end < range.start {
+			// The range is fully before this range and therefore not extensible.
+			// Add a new range to the left
+			self.0.insert(idx, x);
+			return true;
+		} else if range.start > x.start {
+			// The new range starts before this range but overlaps.
+			// Extend the current range to the left
+			// Note that we don't have to merge a potential left range, since
+			// this case would have been captured by merging the right range
+			// in the previous loop iteration
+			result = true;
+			range.start = x.start;
+		}
 
-        // At this point we have handled all parts of the new range which
-        // are in front of the current range. Now we handle everything from
-        // the start of the current range
+		// At this point we have handled all parts of the new range which
+		// are in front of the current range. Now we handle everything from
+		// the start of the current range
 
-        if x.end <= range.end {
-            // Fully contained
-            return result;
-        }
+		if x.end <= range.end {
+			// Fully contained
+			return result;
+		}
 
-        // Extend the current range to the end of the new range.
-        // Since it's not contained it must be bigger
-        range.end = x.end;
+		// Extend the current range to the end of the new range.
+		// Since it's not contained it must be bigger
+		range.end = x.end;
 
-        // Merge all follow-up ranges which overlap
-        while idx != self.0.len() - 1 {
-            let curr = self.0[idx].clone();
-            let next = self.0[idx + 1].clone();
-            if curr.end >= next.start {
-                self.0[idx].end = next.end.max(curr.end);
-                self.0.remove(idx + 1);
-            } else {
-                break;
-            }
-        }
+		// Merge all follow-up ranges which overlap
+		while idx != self.0.len() - 1 {
+			let curr = self.0[idx].clone();
+			let next = self.0[idx + 1].clone();
+			if curr.end >= next.start {
+				self.0[idx].end = next.end.max(curr.end);
+				self.0.remove(idx + 1);
+			} else {
+				break;
+			}
+		}
 
-        true
-    }
+		true
+	}
 
-    pub(crate) fn remove(&mut self, x: Range<u64>) -> bool {
-        let mut result = false;
+	pub(crate) fn remove(&mut self, x: Range<u64>) -> bool {
+		let mut result = false;
 
-        if x.is_empty() {
-            // Don't try to deal with ranges where x.end <= x.start
-            return false;
-        }
+		if x.is_empty() {
+			// Don't try to deal with ranges where x.end <= x.start
+			return false;
+		}
 
-        // Find the first range that might overlap with `x`.
-        // Unlike insertion, we use an inclusive comparison since removal does not
-        // affect the adjacent range on the left.
-        let mut idx = self.0.partition_point(|r| r.end <= x.start);
+		// Find the first range that might overlap with `x`.
+		// Unlike insertion, we use an inclusive comparison since removal does not
+		// affect the adjacent range on the left.
+		let mut idx = self.0.partition_point(|r| r.end <= x.start);
 
-        while idx != self.0.len() {
-            let range = self.0[idx].clone();
+		while idx != self.0.len() {
+			let range = self.0[idx].clone();
 
-            if x.end <= range.start {
-                // The range is not in the set
-                break;
-            }
+			if x.end <= range.start {
+				// The range is not in the set
+				break;
+			}
 
-            // The range overlaps with this range
-            result = true;
+			// The range overlaps with this range
+			result = true;
 
-            let left = range.start..x.start;
-            let right = x.end..range.end;
+			let left = range.start..x.start;
+			let right = x.end..range.end;
 
-            if left.is_empty() && right.is_empty() {
-                self.0.remove(idx);
-            } else if left.is_empty() {
-                self.0[idx] = right;
-                idx += 1;
-            } else if right.is_empty() {
-                self.0[idx] = left;
-                idx += 1;
-            } else {
-                self.0[idx] = right;
-                self.0.insert(idx, left);
-                idx += 2;
-            }
-        }
+			if left.is_empty() && right.is_empty() {
+				self.0.remove(idx);
+			} else if left.is_empty() {
+				self.0[idx] = right;
+				idx += 1;
+			} else if right.is_empty() {
+				self.0[idx] = left;
+				idx += 1;
+			} else {
+				self.0[idx] = right;
+				self.0.insert(idx, left);
+				idx += 2;
+			}
+		}
 
-        result
-    }
+		result
+	}
 
-    pub(crate) fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
+	pub(crate) fn is_empty(&self) -> bool {
+		self.0.is_empty()
+	}
 
-    pub(crate) fn pop_min(&mut self) -> Option<Range<u64>> {
-        if !self.0.is_empty() {
-            Some(self.0.remove(0))
-        } else {
-            None
-        }
-    }
+	pub(crate) fn pop_min(&mut self) -> Option<Range<u64>> {
+		if !self.0.is_empty() {
+			Some(self.0.remove(0))
+		} else {
+			None
+		}
+	}
 
-    #[cfg(test)]
-    pub(super) fn min(&self) -> Option<u64> {
-        self.iter().next().map(|x| x.start)
-    }
+	#[cfg(test)]
+	pub(super) fn min(&self) -> Option<u64> {
+		self.iter().next().map(|x| x.start)
+	}
 
-    pub(crate) fn max(&self) -> Option<u64> {
-        self.iter().next_back().map(|x| x.end - 1)
-    }
+	pub(crate) fn max(&self) -> Option<u64> {
+		self.iter().next_back().map(|x| x.end - 1)
+	}
 }

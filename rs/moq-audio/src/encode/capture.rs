@@ -14,7 +14,7 @@ use super::producer::Reserved;
 use super::{Input, Options, Producer};
 use crate::capture;
 use crate::resample::{Remix, Resampler};
-use crate::{Error, Format, Frame, Layout as PcmLayout};
+use crate::{Error, Format, Frame, Layout as PcmLayout, Level};
 
 /// Backoff bounds for reopening a capture source. The quick first retry covers
 /// a USB device re-enumerating; the ceiling keeps a missing device from spinning.
@@ -37,47 +37,6 @@ pub enum Status {
 	Failed,
 	/// The MoQ track ended, so the driver has stopped.
 	Ended,
-}
-
-/// The post-processing level of the most recently captured buffer.
-///
-/// Zero while the input is closed. Read it with [`Control::level`] at
-/// whatever rate the meter draws at.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Level {
-	rms: f32,
-	peak: f32,
-}
-
-impl Level {
-	/// Root mean square amplitude on a linear `0.0..=1.0` scale.
-	pub fn rms(&self) -> f32 {
-		self.rms
-	}
-
-	/// Peak absolute amplitude on a linear `0.0..=1.0` scale.
-	pub fn peak(&self) -> f32 {
-		self.peak
-	}
-
-	fn measure(samples: &[f32]) -> Self {
-		if samples.is_empty() {
-			return Self::default();
-		}
-
-		let mut squares = 0.0f64;
-		let mut peak = 0.0f32;
-		for &sample in samples {
-			let sample = sample.clamp(-1.0, 1.0);
-			squares += f64::from(sample) * f64::from(sample);
-			peak = peak.max(sample.abs());
-		}
-
-		Self {
-			rms: (squares / samples.len() as f64).sqrt() as f32,
-			peak,
-		}
-	}
 }
 
 /// A snapshot of a capture-backed publication's lifecycle.
@@ -553,8 +512,8 @@ impl Driver {
 		tokio::select! {
 			biased;
 			changed = desired_changed(&self.desired, revision) => changed.is_some(),
-			err = track.closed() => {
-				log_track_ended(err);
+			closed = track.closed() => {
+				log_track_ended(closed);
 				false
 			}
 		}
@@ -811,7 +770,7 @@ async fn until_wanted(demand: &mut moq_net::track::Demand, wanted: bool) -> bool
 			Ok(next) if next.is_some() == wanted => return true,
 			Ok(_) => {}
 			Err(err) => {
-				log_track_ended(err);
+				log_track_ended(Err(err));
 				return false;
 			}
 		}
@@ -1193,9 +1152,14 @@ impl Supervisor {
 	}
 }
 
-/// An application dropping or closing its producer ends publishing normally;
-/// a specific abort (such as a transport reset) stays visible in diagnostics.
-fn log_track_ended(err: moq_net::Error) {
+/// A finished track, or an application dropping or closing its producer, ends
+/// publishing normally; a specific abort (such as a transport reset) stays
+/// visible in diagnostics.
+fn log_track_ended(outcome: Result<(), moq_net::Error>) {
+	let Err(err) = outcome else {
+		tracing::debug!("audio track finished; stopping capture");
+		return;
+	};
 	if matches!(err, moq_net::Error::Dropped | moq_net::Error::Closed) {
 		tracing::debug!("audio track no longer announced; stopping capture");
 	} else {
@@ -2431,10 +2395,10 @@ mod tests {
 			fixture.finish().await;
 		}
 
-		/// A recording replays what the live edge published: the archive's records
-		/// carry the live timestamps across an idle restart, with the idle gap left in.
+		/// HLS lists what the live edge published: the records carry the live timestamps across an
+		/// idle restart, with the idle gap left out of every segment.
 		#[tokio::test]
-		async fn retained_archive_playback_keeps_the_live_timestamps() {
+		async fn hls_records_keep_the_live_timestamps() {
 			let (first, input) = stream(None);
 			let (second, resumed) = stream(None);
 			let mut fixture = Fixture::start(
@@ -2443,50 +2407,51 @@ mod tests {
 				[Open::Stream(input), Open::Stream(resumed)],
 			);
 			let mut live = Vec::new();
-			let mut timeline = None;
+			let mut records = None;
 
 			for samples in [&first, &second] {
 				let mut track = fixture.subscribe().await;
 				live.push(fixture.deliver(samples, &mut track, &live).await);
 				drop(track);
-				wait_for(&mut fixture.publication, Status::Waiting).await;
-				// The second run's first group closes the unhinted timeline's first record.
-				if timeline.is_none() && live.len() > 1 {
-					let section = fixture
-						.catalog
-						.snapshot()
-						.archive
-						.expect("the audio track declares its archive after the run closes");
-					timeline = Some(
-						moq_mux::timeline::Consumer::<()>::subscribe(&fixture.consumer, &section, "audio")
+				// The break is marked when the second run resumes, and its stop declares the unhinted
+				// duration.
+				if records.is_none() && live.len() > 1 {
+					let hls = fixture.catalog.snapshot().audio.renditions["audio"]
+						.hls
+						.clone()
+						.expect("the audio track declares its HLS records once the first run stops");
+					records = Some(
+						moq_mux::hls::Consumer::subscribe(&fixture.consumer, &hls)
 							.await
 							.unwrap(),
 					);
 				}
-				// Idle past the minimum segment, so each run is archived as its own record.
-				tokio::time::sleep(moq_mux::timeline::DEFAULT_DURATION_MIN + Duration::from_millis(100)).await;
+				wait_for(&mut fixture.publication, Status::Waiting).await;
+				// Idle past the minimum segment, so each run is listed as its own segment.
+				tokio::time::sleep(moq_mux::hls::DEFAULT_DURATION + Duration::from_millis(100)).await;
 			}
 
-			let (catalog, _consumer) = fixture.finish().await;
-			catalog.timeline().finish();
-			let mut timeline = timeline.unwrap();
-			let mut archived = Vec::new();
-			while let Some(event) = timeline.next().await.unwrap() {
+			let (mut catalog, _consumer) = fixture.finish().await;
+			catalog.finish().unwrap();
+			let mut records = records.unwrap();
+			let mut listed = Vec::new();
+			while let Some(event) = records.next().await.unwrap() {
 				match event {
-					moq_mux::timeline::Event::Push { entry, .. } => archived.push(entry),
-					other => panic!("unexpected timeline event {other:?}"),
+					moq_mux::hls::Event::Push { entry, .. } => listed.push(entry),
+					other => panic!("unexpected record event {other:?}"),
 				}
 			}
 
-			assert_eq!(archived.len(), live.len(), "one record per capture run: {archived:?}");
-			for (entry, live) in archived.iter().zip(&live) {
-				// The archive keeps millisecond precision.
-				assert_eq!(entry.pts.as_micros() / 1000, u128::from(*live / 1000), "{archived:?}");
+			// Each run is one segment, stopped where its content reached.
+			assert_eq!(listed.len(), 2 * live.len(), "a segment and a stop per run: {listed:?}");
+			for (pair, live) in listed.chunks(2).zip(&live) {
+				assert!(!pair[0].is_stop() && pair[1].is_stop(), "{listed:?}");
+				// The records keep millisecond precision.
+				assert_eq!(pair[0].pts.as_micros() / 1000, u128::from(*live / 1000), "{listed:?}");
 			}
-			let first = &archived[0];
 			assert!(
-				archived[1].pts.as_micros() >= first.pts.as_micros() + first.duration.as_micros(),
-				"the resumed record overlaps the one before it: {archived:?}"
+				listed[2].pts.as_micros() >= listed[1].pts.as_micros(),
+				"the resumed segment overlaps the one before it: {listed:?}"
 			);
 		}
 	}

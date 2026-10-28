@@ -83,6 +83,33 @@ test("rounds a fractional MSF delay up, and drops zero", () => {
 	expect(hang.audio?.renditions.early?.delay).toBeUndefined();
 });
 
+test("rounds a fractional MSF jitter up, keeps zero, and rejects a negative one", () => {
+	// moq-dev publishers write jitter as fractional milliseconds: one 30 fps frame is 33.333333.
+	const catalog: Msf.Catalog = {
+		tracks: [
+			{ name: "video", packaging: "loc", role: "video", codec: "vp09.00.10.08", jitter: 33.333333 },
+			{ name: "audio", packaging: "loc", role: "audio", codec: "opus", jitter: 20.5 },
+			{ name: "zero", packaging: "loc", role: "video", codec: "vp09.00.10.08", jitter: 0 },
+		],
+	};
+
+	const hang = toHang(catalog);
+	expect(hang.video?.renditions.video?.jitter).toBe(u53(34));
+	expect(hang.audio?.renditions.audio?.jitter).toBe(u53(21));
+	// Unlike delay, zero is kept: without a jitter the player falls back to the frame interval.
+	expect(hang.video?.renditions.zero?.jitter).toBe(u53(0));
+
+	for (const jitter of [-1, -0.5]) {
+		const negative: Msf.Catalog = {
+			tracks: [
+				{ name: "video", packaging: "loc", role: "video", codec: "vp09.00.10.08", jitter },
+				{ name: "audio", packaging: "loc", role: "audio", codec: "opus", jitter },
+			],
+		};
+		expect(() => toHang(negative)).toThrow();
+	}
+});
+
 test("keeps loc packaging as the loc container", () => {
 	const catalog: Msf.Catalog = {
 		tracks: [
@@ -267,15 +294,26 @@ test("MSF namespaces preserve self and root references and refuse unrepresentabl
 	expect(() => toHang({ tracks: [{ ...track, namespace: "room/left" }] })).toThrow(
 		"requires the catalog broadcast path",
 	);
-	expect(() =>
-		toHang(
-			{
-				tracks: [
-					{ ...track, namespace: "room/left" },
-					{ ...track, namespace: "room/right" },
-				],
-			},
-			base,
-		),
-	).toThrow("ambiguous");
+	const last = toHang(
+		{
+			tracks: [
+				{ ...track, namespace: "room/left" },
+				{ ...track, namespace: "room/right" },
+			],
+		},
+		base,
+	);
+	const broadcast = last.video?.renditions.video?.broadcast;
+	expect(broadcast && Path.tryResolve(base, broadcast)).toBe(Path.from("room/right"));
+});
+
+test("a later MSF track with a name replaces the earlier one, whatever its role", () => {
+	const video: Msf.Track = { name: "main", packaging: "loc", role: "video", codec: "vp8" };
+	const audio: Msf.Track = { name: "main", packaging: "loc", role: "audio", codec: "opus", samplerate: 48_000 };
+	const root = toHang({ tracks: [video, { ...video, codec: "vp09.00.10.08" }, audio] });
+	expect(root.video).toBeUndefined();
+	expect(root.audio?.renditions.main?.codec).toBe("opus");
+	expect(toHang({ tracks: [video, { ...video, codec: "vp09.00.10.08" }] }).video?.renditions.main?.codec).toBe(
+		"vp09.00.10.08",
+	);
 });

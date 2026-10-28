@@ -12,11 +12,11 @@ use crate::driver::Transport;
 
 use crate::{
 	DecodeError, Error, SessionError,
-	coding::{Decode as _, Decoder, EncodeError, Encoder},
+	coding::{Decoder, EncodeError, Encoder},
 	setup::Token,
 };
 
-use super::{Param, ParameterBytes, Parameters, RequestId, Version, error::request};
+use super::{Param, ParameterBytes, Parameters, Version, error::request};
 
 /// Retire a registered alias.
 const DELETE: u64 = 0x0;
@@ -39,7 +39,6 @@ pub fn from_setup(params: &Parameters, version: Version) -> Result<Option<Token>
 }
 
 /// Present `token` in our SETUP, by value.
-#[cfg_attr(not(test), expect(dead_code, reason = "only tests use it"))]
 pub fn into_setup(params: &mut Parameters, token: &Token, version: Version) -> Result<(), EncodeError> {
 	params.set_bytes(ParameterBytes::AuthorizationToken, encode(token, version)?);
 	Ok(())
@@ -107,27 +106,16 @@ pub(super) fn reason(err: &DecodeError) -> &'static str {
 /// Refuse a request whose tokens decoded to `err`, one [`refuses_request`] accepts, ending
 /// its stream.
 ///
-/// Section 8.9 rejects the message rather than the session. Every request starts with its
-/// Request ID, so it is read from the undecoded `body`.
+/// Section 8.9 rejects the message rather than the session.
 #[cfg(feature = "async")]
 pub(super) async fn reject(
 	mut stream: Stream<Transport, Version>,
 	kind: request::Kind,
-	body: super::Body,
 	err: DecodeError,
 	version: Version,
 ) -> Result<(), Error> {
-	let request_id = RequestId::decode(&mut body.decoder(version), version)?;
 	let reason = reason(&err);
-	super::request_stream::write_error(
-		&mut stream.writer,
-		kind,
-		request_id,
-		&Error::Decode(err),
-		reason,
-		version,
-	)
-	.await?;
+	super::request_stream::write_error(&mut stream.writer, kind, &Error::Decode(err), reason, version).await?;
 	// The peer dropping the stream once it has the rejection is a normal end.
 	let _ = stream.writer.close().await;
 	Ok(())
@@ -213,14 +201,7 @@ mod tests {
 		));
 	}
 
-	const VERSIONS: [Version; 6] = [
-		Version::Draft14,
-		Version::Draft15,
-		Version::Draft16,
-		Version::Draft17,
-		Version::Draft18,
-		Version::Draft22,
-	];
+	const VERSIONS: [Version; 2] = [Version::Draft18, Version::Draft22];
 
 	fn token() -> Token {
 		// A kind past one varint byte and a value that is not text, so neither is mistaken
@@ -267,18 +248,14 @@ mod tests {
 			kind: 300,
 			value: vec![0x00, 0xff],
 		};
-		for (version, expected) in [
-			(Version::Draft14, [0x03, 0x41, 0x2c, 0x00, 0xff]),
-			(Version::Draft17, [0x03, 0x81, 0x2c, 0x00, 0xff]),
-		] {
-			let mut params = Parameters::default();
-			into_setup(&mut params, &token, version).unwrap();
-			assert_eq!(
-				params.get_bytes(ParameterBytes::AuthorizationToken),
-				Some(&expected[..]),
-				"{version:?}"
-			);
-		}
+		let (version, expected) = (Version::Draft18, [0x03, 0x81, 0x2c, 0x00, 0xff]);
+		let mut params = Parameters::default();
+		into_setup(&mut params, &token, version).unwrap();
+		assert_eq!(
+			params.get_bytes(ParameterBytes::AuthorizationToken),
+			Some(&expected[..]),
+			"{version:?}"
+		);
 	}
 
 	#[test]
@@ -335,17 +312,9 @@ mod tests {
 				.unwrap();
 
 			let key = u64::from(ParameterBytes::AuthorizationToken);
-			let (count, keys): (Option<u64>, [u64; 2]) = match version {
-				Version::Draft14 | Version::Draft15 => (Some(2), [key, key]),
-				// Delta-encoded from draft-16, so the repeat is a delta of zero.
-				Version::Draft16 => (Some(2), [key, 0]),
-				_ => (None, [key, 0]),
-			};
 			let mut raw = Vec::new();
-			if let Some(count) = count {
-				Encoder::new(&mut raw, version.into()).varint(count).unwrap();
-			}
-			for key in keys {
+			// Delta-encoded, so the repeat is a delta of zero.
+			for key in [key, 0] {
 				Encoder::new(&mut raw, version.into()).varint(key).unwrap();
 				Encoder::new(&mut raw, version.into()).bytes(&value).unwrap();
 			}

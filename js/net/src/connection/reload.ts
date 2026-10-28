@@ -1,6 +1,6 @@
 import { Instant, Milli, Nano, now, sleep } from "@moq/clock";
 import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
-import * as Announce from "../announced.ts";
+import type * as Announce from "../announced.ts";
 import { Handle as AuthHandle } from "../auth.ts";
 import { ended } from "../auth_session.ts";
 import { Allocator } from "../bandwidth.ts";
@@ -19,7 +19,12 @@ import {
 import type { Established } from "./established.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";
 import { DEFAULT_HANDOVER, type Drain, dialed, type GoawayProps, handover, pinnedTransport, target } from "./goaway.ts";
-import type { Probe, Stats } from "./stats.ts";
+import type { Probe } from "./stats.ts";
+import { heldOf } from "./tokens.ts";
+
+function sameTokens(a: readonly string[], b: readonly string[]): boolean {
+	return a.length === b.length && a.every((token, i) => token === b[i]);
+}
 
 /**
  * Exponential backoff settings for the reconnect loop.
@@ -76,7 +81,13 @@ export type ReloadDelay = {
  *
  * @internal
  */
-export type ReloadProps = Omit<ConnectProps, "url" | "signal" | "transport" | "implementation" | "extensions"> & {
+export type ReloadProps = Omit<
+	ConnectProps,
+	"url" | "signal" | "transport" | "implementation" | "extensions" | "tokens"
+> & {
+	/** See {@link ConnectProps.tokens}; pass a `Signal` to replace them before they expire. */
+	tokens?: readonly string[] | Signal<readonly string[]>;
+
 	/** A reload owns the abort signal for each connection attempt. */
 	signal?: never;
 
@@ -170,6 +181,14 @@ export class Reload {
 	/** Whether reconnecting is active. */
 	enabled: Signal<boolean>;
 
+	/**
+	 * Credentials every dial presents; see {@link ConnectProps.tokens}. Replacing them reaches
+	 * the next dial and, on a live session with AUTH, presents the new tokens at once,
+	 * withdrawing the replaced ones once every new one has its answer. A session refused as
+	 * unauthorized redials only when these changed since its dial.
+	 */
+	tokens: Signal<readonly string[]>;
+
 	/** Current connection status. */
 	status = new Signal<ReloadStatus>("disconnected");
 
@@ -202,7 +221,7 @@ export class Reload {
 	 * estimate is `undefined` while disconnected, which tells a sender to hold
 	 * its rate rather than encode at zero.
 	 */
-	readonly bandwidth: Allocator;
+	readonly allocator: Allocator;
 
 	/**
 	 * The auth handle every session of the loop is built on, spanning reconnects.
@@ -309,6 +328,11 @@ export class Reload {
 	// loop is disabled.
 	#givenUpHref: string | undefined;
 
+	// The tokens the latest dial presented, so a refusal can tell whether they changed since.
+	#dialedTokens: readonly string[] = [];
+	// Whether the sequence stopped because the peer refused those tokens.
+	#refused = false;
+
 	// Increased by 1 each time to trigger a reload.
 	#tick = new Signal(0);
 
@@ -324,6 +348,7 @@ export class Reload {
 		if (props && "discovery" in props) throw new TypeError(DISCOVERY_REMOVED);
 		this.url = Signal.from(props?.url);
 		this.enabled = Signal.from(props?.enabled ?? true);
+		this.tokens = Signal.from(props?.tokens ?? []);
 		this.delay = props?.delay ?? {};
 		// Validated here, like the timeout, rather than by every retry.
 		pacing(this.delay);
@@ -380,8 +405,8 @@ export class Reload {
 			effect.set(this.#probeSource, effect.get(this.established)?.probe, undefined);
 		});
 
-		this.bandwidth = new Allocator(this.#estimate);
-		this.#signals.cleanup(() => this.bandwidth.close());
+		this.allocator = new Allocator(this.#estimate);
+		this.#signals.cleanup(() => this.allocator.close());
 
 		// The transport has no event for the send-rate estimate, so sample on our
 		// own schedule and skip a tick while the previous snapshot is outstanding.
@@ -404,6 +429,23 @@ export class Reload {
 
 			void sample();
 			effect.interval(() => void sample(), BANDWIDTH_POLL);
+		});
+
+		// The live session holds the current tokens on AUTH; a dial picks them up itself.
+		this.#signals.run((effect) => {
+			const tokens = effect.get(this.tokens);
+			const connection = effect.get(this.established);
+			if (connection) heldOf(connection)?.update(tokens);
+		});
+
+		// New credentials redial a URL that stopped on an auth refusal of the old ones.
+		this.#signals.run((effect) => {
+			const tokens = effect.get(this.tokens);
+			if (!this.#refused || this.#givenUpHref === undefined || sameTokens(tokens, this.#dialedTokens)) return;
+			this.#refused = false;
+			this.#givenUpHref = undefined;
+			this.#error.set(undefined);
+			this.#tick.update((tick) => tick + 1);
 		});
 
 		this.#url = this.#signals.computed((effect) => effect.get(this.url)?.href);
@@ -486,10 +528,12 @@ export class Reload {
 					this.#deadline ??= this.#window(now());
 
 					this.#dialing = true;
+					this.#dialedTokens = this.tokens.peek();
 					let connection: Established;
 					try {
 						connection = await connect({
 							url: dialing,
+							tokens: this.#dialedTokens,
 							// A redirect names the relay; a fallback URL pinned for the old one does not follow.
 							websocket: this.#redirect.peek() ? { ...this.websocket, url: undefined } : this.websocket,
 							versions: this.versions,
@@ -725,14 +769,18 @@ export class Reload {
 		// Only a session close says that. The stream registry gives 2 to DELIVERY_TIMEOUT,
 		// so a stream reset during the SETUP exchange would otherwise suppress reconnect
 		// for good.
+		//
+		// Tokens replaced since that dial are new credentials, so those earn another dial.
 		if (
 			cause instanceof SessionError &&
 			(cause.code === SessionCode.Unauthorized ||
 				cause.code === SessionCode.MalformedAuthToken ||
-				cause.code === SessionCode.Expired)
+				cause.code === SessionCode.Expired) &&
+			sameTokens(this.tokens.peek(), this.#dialedTokens)
 		) {
 			console.warn("session rejected as unauthorized, not retrying");
 			this.#giveUp(cause);
+			this.#refused = true;
 			return;
 		}
 
@@ -761,6 +809,7 @@ export class Reload {
 	}
 
 	#giveUp(cause: Error): void {
+		this.#refused = false;
 		this.#error.set(cause);
 		this.#givenUpHref = this.#sequenceHref;
 		this.#resetSequence();
@@ -772,50 +821,6 @@ export class Reload {
 		this.#sequenceHref = undefined;
 		this.#redirects.reset();
 		this.#retire();
-	}
-
-	/**
-	 * Subscribe to broadcast announcements matching `scope`, spanning reconnects.
-	 *
-	 * The same {@link Announce.Consumer} stream as {@link Established.announced}, but everything active
-	 * is retracted (an `end` event) whenever the connection drops and re-announced on
-	 * reconnect, so a consumer draining `next()` never clings to a dead route across a reconnect.
-	 */
-	announced(scope: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Announce.Consumer {
-		// With a consume origin the table already spans reconnects (the forwarder retracts
-		// a dead session's entries), so its stream is the same thing with less machinery.
-		if (this.consume) return this.consume.announced(scope, options);
-
-		const producer = new Announce.Producer();
-		const consumer = producer.consume();
-
-		const pump = new Effect();
-		pump.run((effect) => {
-			const conn = effect.get(this.established);
-			if (!conn) {
-				// The same hold as a consume origin's: behind while enabled with no session.
-				if (effect.get(this.enabled)) producer.behind();
-				else producer.synced();
-				return;
-			}
-
-			// A dropped connection retracts what it announced, so a per-broadcast watcher tears
-			// down instead of clinging to the dead route.
-			pumpAnnounced(effect, conn.announced(scope, options), producer);
-		});
-
-		this.#signals.cleanup(() => pump.close());
-		void consumer.closed.then(() => pump.close());
-
-		return consumer;
-	}
-
-	/**
-	 * Snapshot the live connection's transport counters, or undefined while disconnected.
-	 * See {@link Established.stats}.
-	 */
-	async stats(): Promise<Stats | undefined> {
-		return this.established.peek()?.stats();
 	}
 
 	/** Stop reconnecting, drain and close the current connection, and settle {@link Reload.closed}. Idempotent. */

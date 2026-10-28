@@ -12,6 +12,11 @@ use url::Url;
 
 use crate::moq::{ImportTarget, notify_ready};
 
+mod record;
+
+/// Where `export hls` serves when neither `--listen` nor `--output` is given.
+const LISTEN: SocketAddr = SocketAddr::new(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), 8089);
+
 /// HLS import (pull a remote playlist) args.
 #[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
@@ -26,13 +31,19 @@ pub struct ImportArgs {
 	pub passthrough: bool,
 }
 
-/// HLS export (serve over HTTP) args.
+/// HLS export (serve over HTTP, record to a directory) args.
 #[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct ExportArgs {
-	/// HTTP listener for the HLS endpoints.
-	#[usage(long, default = "[::]:8089")]
-	pub listen: SocketAddr,
+	/// HTTP listener for the HLS endpoints. Defaults to `[::]:8089` unless `--output` records
+	/// without serving.
+	#[usage(long, value_name = "ADDR")]
+	pub listen: Option<SocketAddr>,
+
+	/// Record the broadcast's playlists and segments into this directory, which must be empty
+	/// or absent. Fails if the recording ends abruptly or misses a segment.
+	#[usage(long, value_name = "DIR", value_hint = usage_rs::ValueHint::DirPath)]
+	pub output: Option<PathBuf>,
 
 	/// TLS certificates, keys, self-signed generation, and optional mTLS roots.
 	#[usage(flatten)]
@@ -258,23 +269,69 @@ pub async fn export(origin: moq_net::origin::Consumer, args: ExportArgs, name: S
 
 	let mut config = moq_hls::export::Config::default();
 	config.window = args.window.into();
-	let server = moq_hls::Server::new(scoped, config);
-	let app = server.router().layer(args.cors.layer([Method::GET])?);
 
 	let tls = args.tls.into_config()?;
+	let listen = match (args.listen, &args.output) {
+		(None, Some(_)) => None,
+		(listen, _) => Some(listen.unwrap_or(LISTEN)),
+	};
+	let serving = match listen {
+		Some(listen) => Some(serve(scoped.clone(), config.clone(), listen, tls, &args.cors)?),
+		None => {
+			anyhow::ensure!(
+				tls.cert.is_empty() && tls.key.is_empty() && tls.generate.is_empty() && tls.root.is_empty(),
+				"the HLS listener's TLS flags only apply with `export hls --listen`"
+			);
+			anyhow::ensure!(
+				args.cors.origin.is_empty(),
+				"`--cors-origin` only applies to `export hls --listen`"
+			);
+			None
+		}
+	};
+	let recording = args.output.map(record::Recording::create).transpose()?;
+	notify_ready();
+
+	let recording = async {
+		let Some(recording) = recording else {
+			return Ok(());
+		};
+		// Wait for a covering route rather than asking on the spot: a recording started beside
+		// its publisher, or over a session that discovers only watched paths, sees no route yet.
+		let broadcast = scoped
+			.routed_broadcast(name.as_str())
+			.await
+			.with_context(|| format!("failed to resolve broadcast `{name}`"))?;
+		let source = moq_mux::Source::new(scoped.clone(), broadcast);
+		let broadcaster = moq_hls::export::Broadcaster::new(source, config);
+		tracing::info!(%name, "recording HLS");
+		recording.run(&broadcaster).await
+	};
+	match serving {
+		Some(serving) => tokio::try_join!(serving, recording).map(|_| ()),
+		None => recording.await,
+	}
+}
+
+/// Bind the HLS listener, returning the server to run.
+fn serve(
+	origin: moq_net::origin::Consumer,
+	config: moq_hls::export::Config,
+	listen: SocketAddr,
+	tls: moq_tokio::tls::Listen,
+	cors: &crate::web::Cors,
+) -> anyhow::Result<impl Future<Output = anyhow::Result<()>> + use<>> {
+	let server = moq_hls::Server::new(origin, config);
+	let app = server.router().layer(cors.layer([Method::GET])?);
 	let tls = if tls.cert.is_empty() && tls.generate.is_empty() {
 		None
 	} else {
 		let alpn = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 		Some(tls.server_config(alpn)?)
 	};
-
-	let listener = moq_tokio::bind::tcp(args.listen)?;
-
-	tracing::info!(listen = %args.listen, "serving HLS");
-	notify_ready();
-
-	crate::web::serve(listener, app, tls).await
+	let listener = moq_tokio::bind::tcp(listen)?;
+	tracing::info!(%listen, "serving HLS");
+	Ok(crate::web::serve(listener, app, tls))
 }
 
 #[cfg(test)]
@@ -384,6 +441,32 @@ mod test {
 		assert!(format!("{err:#}").contains("before it declared a track"), "{err:#}");
 	}
 
+	/// A recording started before its broadcast is announced waits for it instead of failing.
+	#[tokio::test(start_paused = true)]
+	async fn a_recording_waits_for_its_broadcast() {
+		let dir = tempfile::tempdir().unwrap();
+		let args = ExportArgs {
+			listen: None,
+			output: Some(dir.path().join("recording")),
+			tls: Tls {
+				cert: Vec::new(),
+				key: Vec::new(),
+				generate: Vec::new(),
+				root: Vec::new(),
+				legacy_cert: Vec::new(),
+				legacy_key: Vec::new(),
+				legacy_generate: Vec::new(),
+				legacy_root: Vec::new(),
+			},
+			window: std::time::Duration::from_secs(16).into(),
+			cors: Default::default(),
+		};
+		let origin = moq_tokio::origin::spawn();
+		let exporting = export(origin.consume(), args, "live".to_string());
+		let result = moq_clock::timeout(std::time::Duration::from_secs(1), exporting).await;
+		assert!(result.is_err(), "the recording gave up: {result:?}");
+	}
+
 	/// The next group a subscriber reads after the import stopped: the error it ended with.
 	async fn ended_with(track: &mut moq_net::track::Subscriber) -> moq_net::Error {
 		loop {
@@ -416,7 +499,7 @@ mod test {
 				payload: bytes::Bytes::from_static(&[0x78, 0x00, 0x00, 0x00]),
 				keyframe: true,
 			};
-			let fragment = muxer.fragment(index as u32, &[frame]).unwrap();
+			let fragment = muxer.fragment(index as u32, &[frame], None).unwrap();
 			std::fs::write(dir.path().join(format!("{index}.m4s")), fragment).unwrap();
 		}
 		let live = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:1,\n0.m4s\n";

@@ -24,6 +24,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing::{debug, info, warn};
 use url::Url;
 
+use crate::error::redact;
 use crate::{Error, Result, SequenceKind};
 
 /// Per-request timeout for the default HTTP client (playlist + segment fetches).
@@ -146,13 +147,13 @@ impl RangeCursor {
 				.as_ref()
 				.filter(|(previous_url, _)| previous_url == &url)
 				.map(|(_, end)| *end)
-				.ok_or_else(|| Error::MissingByteRangeOffset { url: url.clone() })?,
+				.ok_or_else(|| Error::MissingByteRangeOffset { url: redact(&url) })?,
 		};
 		let end = start
 			.checked_add(range.length)
 			.filter(|_| range.length > 0)
 			.ok_or_else(|| Error::InvalidByteRange {
-				url: url.clone(),
+				url: redact(&url),
 				start,
 				length: range.length,
 			})?;
@@ -223,7 +224,8 @@ impl Fetcher {
 		let (body, base) = self.playlist(url).await?;
 
 		// Nom errors take ownership of the input, so we need to stringify any error messages.
-		let playlist = m3u8_rs::parse_media_playlist_res(&body).map_err(|e| Error::ParsePlaylist(e.to_string()))?;
+		let playlist = m3u8_rs::parse_media_playlist_res(&body)
+			.map_err(|e| Error::ParsePlaylist(e.map(|e| e.code).to_string()))?;
 
 		Ok((playlist, base))
 	}
@@ -276,7 +278,7 @@ impl Fetcher {
 			// earlier byte of the file for each segment.
 			if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
 				return Err(Error::ByteRangeIgnored {
-					url: url.clone(),
+					url: redact(url),
 					status: response.status().as_u16(),
 				});
 			}
@@ -288,7 +290,7 @@ impl Fetcher {
 				let read = body.len() + chunk.len();
 				if !u64::try_from(read).is_ok_and(|read| read <= range.length) {
 					return Err(Error::ByteRangeLengthMismatch {
-						url: url.clone(),
+						url: redact(url),
 						expected: range.length,
 						actual: read,
 					});
@@ -311,7 +313,7 @@ impl Fetcher {
 	fn validate_range_length(url: &Url, range: ResolvedRange, bytes: Bytes) -> Result<Bytes> {
 		if u64::try_from(bytes.len()).ok() != Some(range.length) {
 			return Err(Error::ByteRangeLengthMismatch {
-				url: url.clone(),
+				url: redact(url),
 				expected: range.length,
 				actual: bytes.len(),
 			});
@@ -333,7 +335,7 @@ impl Fetcher {
 			.and_then(|(start, end)| Some((start.parse().ok()?, end.parse().ok()?)));
 		if bounds != Some((range.start, end)) {
 			return Err(Error::ByteRangeResponseMismatch {
-				url: url.clone(),
+				url: redact(url),
 				start: range.start,
 				end,
 			});
@@ -425,9 +427,9 @@ impl TrackState {
 
 	/// Give up on this rendition's current importer generation after repeated failures.
 	///
-	/// Dropping the importer closes its recorders and retires its catalog entries, so players
-	/// stop selecting a rendition that no longer advances; a later successful step rebuilds it
-	/// from the init segment.
+	/// Dropping the importer ends its tracks and retires their catalog entries and HLS records, so
+	/// players stop selecting a rendition that no longer advances; a later successful step rebuilds
+	/// it from the init segment.
 	fn evict(&mut self) {
 		self.importer = None;
 		self.map = None;
@@ -652,7 +654,7 @@ impl TrackState {
 			importer.seek(group_sequence)?;
 		}
 		// Every playlist entry is a source segment boundary, so declare it even when the media
-		// carries no styp. Every rendition declares the same ones; the timeline drops a cut
+		// carries no styp. Every rendition declares the same ones; the HLS segmenter drops a cut
 		// that would land inside its minimum segment duration, so the duplicates cost nothing.
 		importer.cut()?;
 		importer.decode(&bytes).map_err(|err| match err {
@@ -941,7 +943,8 @@ impl Import {
 			return Ok(());
 		}
 
-		let master = m3u8_rs::parse_master_playlist_res(&body).map_err(|e| Error::ParsePlaylist(e.to_string()))?;
+		let master = m3u8_rs::parse_master_playlist_res(&body)
+			.map_err(|e| Error::ParsePlaylist(e.map(|e| e.code).to_string()))?;
 		let variants = select_variants(&master);
 		if variants.is_empty() {
 			return Err(Error::NoVariants);
@@ -976,7 +979,7 @@ impl Import {
 			self.video.push(track);
 		}
 
-		let audio_url = self.audio.as_ref().map(|a| a.playlist.to_string());
+		let audio_url = self.audio.as_ref().map(|a| redact(&a.playlist).to_string());
 		info!(
 			video_variants = variants.len(),
 			audio = audio_url.as_deref().unwrap_or("none"),
@@ -1310,6 +1313,30 @@ mod tests {
 
 	fn fetcher(entry: &Url) -> Fetcher {
 		Fetcher::new(&Config::new(entry.clone())).unwrap()
+	}
+
+	/// `url` carrying a credential in every part a signed URL might put one.
+	fn signed(url: &Url) -> Url {
+		let mut url = url.clone();
+		url.set_username("alice").unwrap();
+		url.set_password(Some("hunter2")).unwrap();
+		url.set_query(Some("jwt=s3cret"));
+		url.set_fragment(Some("f4ag"));
+		url
+	}
+
+	/// Fails if any rendering of `err` carries a credential from [`signed`], as text or as the
+	/// byte list a `Debug`-printed `&[u8]` renders.
+	fn assert_redacted(err: &Error) {
+		let printed = format!("{err} {err:#} {err:?}");
+		for fixture in ["alice", "hunter2", "jwt", "s3cret", "f4ag"] {
+			let bytes = format!("{:?}", fixture.as_bytes());
+			let bytes = bytes.trim_matches(['[', ']']);
+			assert!(
+				!printed.contains(fixture) && !printed.contains(bytes),
+				"error leaked {fixture}: {printed}"
+			);
+		}
 	}
 
 	#[test]
@@ -1742,7 +1769,7 @@ mod tests {
 			.unwrap();
 		let err = cursor
 			.resolve(
-				Url::parse("https://example.com/b.mp4").unwrap(),
+				signed(&Url::parse("https://example.com/b.mp4").unwrap()),
 				Some(&ByteRange {
 					length: 5,
 					offset: None,
@@ -1751,6 +1778,7 @@ mod tests {
 			.unwrap_err();
 
 		assert!(matches!(err, Error::MissingByteRangeOffset { .. }));
+		assert_redacted(&err);
 	}
 
 	#[test]
@@ -1765,6 +1793,42 @@ mod tests {
 		.unwrap_err();
 
 		assert!(matches!(err, Error::MissingByteRangeOffset { .. }));
+	}
+
+	#[test]
+	fn empty_byte_range_is_refused() {
+		let err = RangeCursor::default()
+			.resolve(
+				signed(&Url::parse("https://example.com/media.mp4").unwrap()),
+				Some(&ByteRange {
+					length: 0,
+					offset: Some(10),
+				}),
+			)
+			.unwrap_err();
+
+		assert!(matches!(
+			err,
+			Error::InvalidByteRange {
+				start: 10,
+				length: 0,
+				..
+			}
+		));
+		assert_redacted(&err);
+	}
+
+	#[tokio::test]
+	async fn playlist_parse_error_omits_the_playlist() {
+		let dir = temp_dir();
+		let path = dir.join("media.m3u8");
+		std::fs::write(&path, "#EXTINF:1,\nseg.m4s?jwt=s3cret\n").unwrap();
+		let url = Url::from_file_path(&path).unwrap();
+
+		let err = fetcher(&url).media_playlist(url).await.unwrap_err();
+
+		assert!(matches!(err, Error::ParsePlaylist(_)));
+		assert_redacted(&err);
 	}
 
 	#[tokio::test]
@@ -1786,10 +1850,11 @@ mod tests {
 	async fn ranged_http_resource_refuses_full_response() {
 		let (url, server) = serve_response("200 OK", &[], b"abcdef").await;
 
-		let err = fetcher(&url).fetch(&ranged_resource(url.clone())).await.unwrap_err();
+		let err = fetcher(&url).fetch(&ranged_resource(signed(&url))).await.unwrap_err();
 		server.await.unwrap();
 
 		assert!(matches!(err, Error::ByteRangeIgnored { status: 200, .. }));
+		assert_redacted(&err);
 	}
 
 	#[tokio::test]
@@ -1809,17 +1874,18 @@ mod tests {
 			let _ = stream.read(&mut request).await;
 		});
 
-		let err = fetcher(&url).fetch(&ranged_resource(url.clone())).await.unwrap_err();
+		let err = fetcher(&url).fetch(&ranged_resource(signed(&url))).await.unwrap_err();
 		server.await.unwrap();
 
 		assert!(matches!(err, Error::ByteRangeLengthMismatch { expected: 3, .. }));
+		assert_redacted(&err);
 	}
 
 	#[tokio::test]
 	async fn ranged_http_resource_rejects_wrong_response_length() {
 		let (url, server) = serve_response("206 Partial Content", &[("Content-Range", "bytes 2-4/6")], b"cd").await;
 
-		let err = fetcher(&url).fetch(&ranged_resource(url.clone())).await.unwrap_err();
+		let err = fetcher(&url).fetch(&ranged_resource(signed(&url))).await.unwrap_err();
 		server.await.unwrap();
 
 		assert!(matches!(
@@ -1830,16 +1896,18 @@ mod tests {
 				..
 			}
 		));
+		assert_redacted(&err);
 	}
 
 	#[tokio::test]
 	async fn ranged_http_resource_rejects_mismatched_content_range() {
 		let (url, server) = serve_response("206 Partial Content", &[("Content-Range", "bytes 3-5/6")], b"def").await;
 
-		let err = fetcher(&url).fetch(&ranged_resource(url.clone())).await.unwrap_err();
+		let err = fetcher(&url).fetch(&ranged_resource(signed(&url))).await.unwrap_err();
 		server.await.unwrap();
 
 		assert!(matches!(err, Error::ByteRangeResponseMismatch { start: 2, end: 4, .. }));
+		assert_redacted(&err);
 	}
 
 	#[tokio::test]
@@ -2139,6 +2207,20 @@ mod tests {
 		old_groups: Vec<(u64, u128)>,
 		terminal: Option<moq_net::Error>,
 		new_groups: Vec<(u64, u128)>,
+		/// The first generation's HLS record track has ended.
+		old_records_ended: bool,
+	}
+
+	/// Whether `subscriber` has ended, after draining the groups it already holds.
+	fn ended(subscriber: &mut moq_net::track::Ordered) -> bool {
+		loop {
+			match subscriber.poll_next_group(&kio::Waiter::noop()) {
+				Poll::Ready(Ok(Some(_))) => continue,
+				Poll::Ready(Ok(None)) => return true,
+				Poll::Pending => return false,
+				Poll::Ready(Err(error)) => panic!("the record track failed: {error:?}"),
+			}
+		}
 	}
 
 	/// A one-track fMP4 muxer for synthesized VP8 video or Opus audio.
@@ -2168,7 +2250,7 @@ mod tests {
 				payload: Bytes::from_static(&[0x78, 0x00, 0x00, 0x00]),
 				keyframe: true,
 			};
-			let fragment = muxer.fragment(index as u32, &[frame]).unwrap();
+			let fragment = muxer.fragment(index as u32, &[frame], None).unwrap();
 			std::fs::write(dir.join(format!("{prefix}{index}.m4s")), fragment).unwrap();
 		}
 	}
@@ -2219,6 +2301,13 @@ mod tests {
 			.await
 			.unwrap()
 			.ordered();
+		let mut old_records = consumer
+			.track(&hang::hls::default_name(&before_name))
+			.unwrap()
+			.subscribe(replay.clone())
+			.await
+			.unwrap()
+			.ordered();
 		let after = format!(
 			"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:1,\n0.m4s\n{tags}#EXTINF:1,\n1.m4s\n"
 		);
@@ -2226,6 +2315,7 @@ mod tests {
 		let result = track.consume_segments(&local, &after, &base).await;
 		let after_name = name(&catalog.snapshot());
 		let (old_groups, terminal) = group_stamps(&mut old);
+		let old_records_ended = ended(&mut old_records);
 		let new_groups = if before_name != after_name {
 			let mut new = consumer
 				.track(&after_name)
@@ -2248,6 +2338,7 @@ mod tests {
 			old_groups,
 			terminal,
 			new_groups,
+			old_records_ended,
 		}
 	}
 
@@ -2358,6 +2449,7 @@ mod tests {
 					case.result.unwrap();
 					assert!(case.terminal.is_none(), "{terminal:?}", terminal = case.terminal);
 					assert_ne!(case.before, case.after);
+					assert!(case.old_records_ended, "the replaced generation retires its records");
 					assert_eq!(case.old_groups, [(0, 5_000_000)]);
 					assert_eq!(case.new_groups, [(moq_sequence(1, 1).unwrap(), u128::from(after_us))]);
 				}
@@ -2471,6 +2563,26 @@ mod tests {
 
 		let audio = hls.audio.as_ref().expect("separate audio rendition");
 		assert!(audio.select.has_audio() && !audio.select.has_video());
+	}
+
+	#[tokio::test]
+	#[tracing_test::traced_test]
+	async fn discovery_logs_redact_playlist_credentials() {
+		let audio = signed(&Url::parse("https://example.com/audio.m3u8").unwrap());
+		let master = format!(
+			"#EXTM3U\n\
+			#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"en\",URI=\"{audio}\"\n\
+			#EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS=\"avc1.4d401f,mp4a.40.2\",AUDIO=\"aud\"\n\
+			video.m3u8?jwt=s3cret#f4ag\n"
+		);
+		let hls = discover(&master).await;
+		assert_eq!(hls.audio.as_ref().unwrap().playlist, audio);
+
+		assert!(logs_contain("selected master playlist renditions"));
+		assert!(logs_contain("audio=\"https://example.com/audio.m3u8\""));
+		for credential in ["alice", "hunter2", "jwt", "s3cret", "f4ag"] {
+			assert!(!logs_contain(credential), "log leaked {credential}");
+		}
 	}
 
 	/// A master whose variant carries muxed A/V (no separate audio group) publishes

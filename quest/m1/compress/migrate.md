@@ -15,8 +15,8 @@ namespace are deleted.
 See the [epic](/quest/m1/compress/README.md) for the decisions.
 
 Decided 2026-10-20 (maintainer): the timeline is `<track>.hls` with
-`compress: true`, never `<track>.hls.z`. [Catalog HLS field](/quest/m1/archive/catalog-hls.md)
-renames it and publishes it uncompressed, and the archive consumer replaced
+`compress: true`, never `<track>.hls.z`. Catalog HLS field
+renamed it and publishes it uncompressed, and the archive consumer replaced
 the CLI's archive reader, so this quest lands after it and only sets the flag.
 
 - Delete the `.z` names outright, with no transition release: hangz is opt-in
@@ -57,6 +57,3 @@ the CLI's archive reader, so this quest lands after it and only sets the flag.
 Public API: removals listed above. Wire: the hang catalog loses
 `compression` and the `.z` tracks, in its draft too; moq-net none.
 
-## Required
-
-- [Catalog HLS field](/quest/m1/archive/catalog-hls.md) - renames the timeline to `<track>.hls`, which this compresses

@@ -416,7 +416,8 @@ export class Truck {
 		const driverId = crypto.randomUUID().replaceAll("-", "").slice(0, 12);
 		this.driverId.set(driverId);
 
-		const driverBroadcast = conn.createBroadcast(driverPath(this.name, driverId));
+		const driverBroadcastPublication = conn.createBroadcast(driverPath(this.name, driverId));
+		const driverBroadcast = driverBroadcastPublication.broadcast;
 		effect.cleanup(() => {
 			driverBroadcast.close();
 			this.driverId.set(undefined);
@@ -429,7 +430,7 @@ export class Truck {
 		effect.cleanup(() => producer.finish());
 		effect.run(this.#runControlTrack.bind(this, track, producer));
 		// A fresh epoch per lease: the truck binds its single driver to this path and epoch.
-		driverBroadcast.announce({ epoch: Moq.Epoch.mint() });
+		driverBroadcastPublication.announce({ epoch: Moq.Epoch.mint() });
 	}
 
 	#runSafetyControl(connection: Moq.Connection, effect: Moq.Signals.Effect) {
@@ -438,9 +439,10 @@ export class Truck {
 		if (!conn || !command) return;
 
 		const driverId = `safety-${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
-		const broadcast = conn.createBroadcast(driverPath(this.name, driverId));
+		const broadcastPublication = conn.createBroadcast(driverPath(this.name, driverId));
+		const broadcast = broadcastPublication.broadcast;
 		const safety = new SafetyCommandBroadcast(command, broadcast);
-		broadcast.announce({ epoch: Moq.Epoch.mint() });
+		broadcastPublication.announce({ epoch: Moq.Epoch.mint() });
 		effect.cleanup(() => safety.close());
 	}
 

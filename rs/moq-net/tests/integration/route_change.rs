@@ -8,8 +8,8 @@
 //! every frame exactly once, in order, whether the route changes between groups or
 //! in the middle of one, and however it changes.
 //!
-//! moq-transport carries the epoch with the MoQ Epoch extension (draft-17+), so it
-//! behaves the same. Older wire versions cannot carry the epoch, so `R` cannot tell the
+//! moq-transport carries the epoch with the MoQ Epoch extension, so it behaves the
+//! same. Older lite versions cannot carry the epoch, so `R` cannot tell the
 //! two routes serve the same bytes: its subscription stays on its route and ends with
 //! it, while a better route restarts the path for new requests.
 //!
@@ -468,7 +468,6 @@ macro_rules! route_change_tests {
 
 route_change_tests! {
 	lite_07: "moq-lite-07-wip",
-	ietf_17: "moq-transport-17",
 	ietf_18: "moq-transport-18",
 	ietf_22: "moq-transport-22",
 }
@@ -512,8 +511,6 @@ pinned_tests! {
 	lite_06: "moq-lite-06",
 	lite_05: "moq-lite-05",
 	lite_04: "moq-lite-04",
-	ietf_14: "moq-transport-14",
-	ietf_16: "moq-transport-16",
 }
 
 /// `P` feeds `A` slowly and `B` promptly, and `R` reads through `A` until that route dies
@@ -614,7 +611,7 @@ async fn lite_resumes_after_a_lagging_route_dies() {
 
 #[moq_clock::test]
 async fn ietf_17_resumes_after_a_lagging_route_dies() {
-	lagging_route_dies("moq-transport-17".parse().unwrap()).await;
+	lagging_route_dies("moq-transport-18".parse().unwrap()).await;
 }
 
 #[moq_clock::test]
@@ -1111,7 +1108,7 @@ async fn producer_replaced(version: &str) {
 	let subscriber = produce_origin(3);
 
 	let broadcast = publisher.create_broadcast("live").unwrap();
-	let mut dynamic = broadcast.dynamic();
+	let mut dynamic = broadcast.requests();
 	broadcast
 		.announce(origin::Route::default().with_epoch(moq_net::Epoch::mint()))
 		.unwrap();

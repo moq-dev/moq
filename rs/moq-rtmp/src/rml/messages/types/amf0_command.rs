@@ -24,6 +24,7 @@ pub fn serialize(
 	Ok(Bytes::from(bytes))
 }
 
+#[cfg(test)]
 pub fn deserialize(data: Bytes) -> Result<RtmpMessage, MessageDeserializationError> {
 	let mut cursor = Cursor::new(data);
 	let mut arguments = amf0::deserialize(&mut cursor)?;

@@ -15,8 +15,8 @@ admission exists; extend and prove those paths rather than creating a reverse
 connection protocol. Do not require an inbound connection to the local relay.
 
 Use authenticated, namespace-scoped admission: the CDN scopes the local
-relay's connection to a path prefix, and identities it forwards for its local
-publishers are filed under `hash(subject, id)`, keyed by the grant's
+relay's connection to a path prefix, and identities it sends, its own and its
+local publishers', are filed under `hash(subject, id)`, keyed by the grant's
 credential subject, so a forger or a misconfigured
 uplink only affects its own scope (decided 2026-10-14; see
 [Routes and announces](/quest/m1/cluster-routing/routes.md)). A scoped
@@ -50,12 +50,17 @@ Update `doc/bin/relay/cluster.md` (`proxy`, `upstream`, and the
 one-copy-per-broadcast priority recipe) and affected auth/config examples in
 the same PR; the combined concept/setup guide follows separately.
 
+Decided 2026-10-27 (maintainer): this requires
+[Grant subject](/quest/m1/cluster-routing/grant-subject.md) directly, since
+scoped admission keys on it.
+
 Public API: report any peer configuration or admission change. Wire: use the
 proven lite-07 routing contract; any additional change requires draft and
 Rust/JS parity. Run `just check`, `just test interop --all`, and `just drafts check`.
 
 ## Required
 
+- [Grant subject](/quest/m1/cluster-routing/grant-subject.md) - the issuer-qualified subject the local relay's identities are filed under
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - identity, scoped claims, reachability, and export policy
 
 ## Related

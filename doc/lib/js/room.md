@@ -6,6 +6,7 @@ description: Headless multi-participant rooms over MoQ
 # @moq/room
 
 [![npm](https://img.shields.io/npm/v/@moq/room)](https://www.npmjs.com/package/@moq/room)
+[![API](https://img.shields.io/badge/API-reference-blue)](/lib/js/api/room)
 
 A room is a path prefix. There is no service and no storage: joining is minting
 a moq-auth token rooted at that prefix and dialing the relay. Participants are

@@ -63,7 +63,11 @@ Audio packets share groups of at least 20 ms while forwarding as they arrive.
 Each `sink_%u` request pad is one track. Pad properties: `track` names it
 (default: after the codec), `container=loc` publishes it as
 [LOC](/concept/standard#loc) instead of the legacy hang container, and
-`track-status`/`track-error` report its lifecycle. Element properties:
+`track-status`/`track-error` report its lifecycle. Caps that only change what
+the bitstream already carries (a video resolution) keep the track live. A run
+never publishes a track name it ended again: new codec config, a pad requested
+again, or a stream resumed after EOS publishes as `<track>/<n>`, which `track`
+reads back. Element properties:
 `url`, `broadcast`, `linger`, `connect-version`, `tls-disable-verify`, `quic-idle-timeout`, `quic-keylog`,
 `quic-keep-alive`, and read-only `status`, `connected`, `moq-version`, and
 `estimated-send-rate`, `estimated-recv-rate`, `connection-stats`, and
@@ -75,7 +79,7 @@ unknown versions fail startup. QUIC durations are milliseconds, with zero
 disabling the local idle timeout or keep-alive.
 Each run from `READY` publishes under a fresh
 [publisher epoch](/concept/moq-lite#publisher-epochs), so on moq-lite 07 (opt-in)
-or moq-transport draft 17 and later, viewers switch to a restarted pipeline at once instead of stalling on the old
+or moq-transport, viewers switch to a restarted pipeline at once instead of stalling on the old
 one; reconnects within a run keep it. The first catalog waits for a timed buffer
 to place the shared wall clock and for every requested pad to negotiate its
 rendition, including any codec config carried in its first buffers. A linked pad

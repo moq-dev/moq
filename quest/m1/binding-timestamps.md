@@ -33,8 +33,8 @@ Decided with the maintainer on 2026-10-18:
 - **#5677 shipped** the data-value timestamps with the interim microsecond
   fields; this quest converts every site at once, `MoqJsonValue` included.
 - **Shape mirrors the core:** one `{value, scale}` per value, `value` bounded
-  as `Timestamp::new` bounds it (`2^61 - 1` once
-  [#6168](https://github.com/moq-dev/moq/pull/6168) lands, decided 2026-10-22)
+  as `Timestamp::new` bounds it (`2^61 - 1` since
+  [#6168](https://github.com/moq-dev/moq/pull/6168), decided 2026-10-22)
   and `scale` non-zero and at most `2^62 - 1`, matching `Timescale::new`. The FFI boundary refuses anything else with
   an error. Rejected: raw ticks at the track scale beside
   `MoqTrackInfo.timescale`, because a producer argument needs its own scale
@@ -57,13 +57,17 @@ Verification: round-trip a 90 kHz tick, a present zero, and untimed through
 moq-ffi, moq-c, C++ and every wrapper's tests; refuse scale 0, an
 out-of-range scale, and an out-of-range value; `just test interop --all`.
 
-Decided 2026-10-20 (maintainer): the moq-c half lands on the
-[generated C package](/quest/m1/c/README.md), not the frozen hand-written
-ABI, so C users break once.
+Decided 2026-10-25 (maintainer), reversing the 2026-10-20 decision to wait
+on the generated C package: the hand-written `moq-c` ships at this cut with
+parity to moq-ffi for every m1 binding feature, so the moq-c half lands
+there, and the generated C line follows after the cut.
+
+Decided 2026-10-27 (maintainer): producer arguments keep an optional
+timestamp until the cut, so producers may still write untimed frames. Reads
+keep "untimed as absent" until then too. At the cut
+[time addressing](/quest/m1/time-addressing/README.md) makes every track
+timed, and [bindings by start](/quest/m1/time-addressing/bindings.md) drops
+that `Option` from reads only.
 
 Wall and monotonic times stay `moq_clock::Wall` and `moq_clock::Instant`, not
 media timestamps; keep the types distinct.
-
-## Required
-
-- [Generated C bindings](/quest/m1/c/README.md) - `moq_timestamp` reaches C through the generated package, so C users break once

@@ -31,8 +31,8 @@ const LITE_07: &str = "moq-lite-07-wip";
 const LITE_06: &str = "moq-lite-06";
 /// The lite Auth Stream's type byte.
 const AUTH_STREAM: u8 = 0x7;
-/// The first draft that negotiates MoQ Auth, and the newest.
-const MOQT_17: &str = "moq-transport-17";
+/// The oldest draft we speak, which negotiates MoQ Auth, and the newest.
+const MOQT_18: &str = "moq-transport-18";
 const MOQT_22: &str = "moq-transport-22";
 
 /// Run each case on every version that exchanges AUTH.
@@ -41,8 +41,8 @@ macro_rules! cases {
 		mod lite_07 {
 			$(#[moq_clock::test] async fn $case() { super::$case(super::LITE_07).await })*
 		}
-		mod moqt_17 {
-			$(#[moq_clock::test] async fn $case() { super::$case(super::MOQT_17).await })*
+		mod moqt_18 {
+			$(#[moq_clock::test] async fn $case() { super::$case(super::MOQT_18).await })*
 		}
 		mod moqt_22 {
 			$(#[moq_clock::test] async fn $case() { super::$case(super::MOQT_22).await })*
@@ -62,6 +62,7 @@ cases!(
 	a_revoked_grant_withdraws_and_can_be_restored,
 	a_refused_token_reports_the_code,
 	a_refused_setup_token_grants_nothing,
+	the_setup_token_is_the_connection_credential,
 	dropping_the_requests_refuses_queued_tokens,
 	a_closed_session_holds_no_grant,
 	an_issued_grant_ends_with_its_session,
@@ -87,8 +88,8 @@ async fn lite_07_presents_a_transiently_refused_token_again() {
 
 /// moq-transport's u16 message size is the one a test can overflow quickly.
 #[moq_clock::test]
-async fn moqt_17_a_grant_too_large_for_one_message_is_unsupported() {
-	a_grant_too_large_for_one_message_is_unsupported(MOQT_17).await
+async fn moqt_18_a_grant_too_large_for_one_message_is_unsupported() {
+	a_grant_too_large_for_one_message_is_unsupported(MOQT_18).await
 }
 
 #[moq_clock::test]
@@ -125,35 +126,9 @@ async fn lite_05_has_no_grant() {
 	older_versions_have_no_grant("moq-lite-05").await
 }
 
-/// The #6566 matrix's drafts: one without MoQ Auth, and one with it.
-#[moq_clock::test]
-async fn moqt_16_admits_exact_and_subtree_grants() {
-	exact_and_subtree_grants_admit_their_broadcast("moq-transport-16").await
-}
-
-#[moq_clock::test]
-async fn moqt_18_admits_exact_and_subtree_grants() {
-	exact_and_subtree_grants_admit_their_broadcast("moq-transport-18").await
-}
-
-#[moq_clock::test]
-async fn moqt_16_has_no_grant() {
-	older_versions_have_no_grant("moq-transport-16").await
-}
-
-#[moq_clock::test]
-async fn moqt_16_route_auth_renews_its_announce() {
-	a_route_auth_renews_its_announce("moq-transport-16").await
-}
-
 #[moq_clock::test]
 async fn moqt_22_route_auth_renews_its_announce() {
 	a_route_auth_renews_its_announce(MOQT_22).await
-}
-
-#[moq_clock::test]
-async fn moqt_16_route_auth_survives_a_reconnect() {
-	a_route_auth_survives_a_reconnect("moq-transport-16").await
 }
 
 #[moq_clock::test]
@@ -458,6 +433,8 @@ struct Options {
 	client_extensions: Option<moq_net::setup::Extensions>,
 	server_extensions: Option<moq_net::setup::Extensions>,
 	version: Option<&'static str>,
+	/// The connection credential the client's SETUP presents.
+	client_token: Option<&'static [u8]>,
 	/// The handle the client builds its session on, when not its own.
 	client_auth: Option<auth::Handle>,
 }
@@ -468,6 +445,8 @@ struct Pair {
 	client_transport: MockSession,
 	server_transport: MockSession,
 	requests: Option<auth::Requests>,
+	/// The SETUP token the server's handshake read.
+	setup_token: Option<moq_net::setup::Token>,
 	/// Aborting it drops the server's driver without letting it finish.
 	server_driver: moq_clock::sim::JoinHandle<Error>,
 }
@@ -479,6 +458,12 @@ async fn connect(opts: Options) -> Pair {
 	let (client_transport, server_transport) = create_mock_session_pair(mock);
 
 	let mut client = Client::new().with_versions(version.into());
+	if let Some(token) = opts.client_token {
+		client = client.with_token(moq_net::setup::Token {
+			kind: moq_net::setup::Token::OUT_OF_BAND,
+			value: token.to_vec(),
+		});
+	}
 	if let Some(extensions) = opts.client_extensions {
 		client = client.with_extensions(extensions);
 	}
@@ -515,15 +500,16 @@ async fn connect(opts: Options) -> Pair {
 			.accept_request(now(), server_transport)
 			.await
 			.expect("server handshake");
+		let setup_token = handshake.token().cloned();
 		// Taken before the session starts, the way a relay verifying tokens would.
 		let requests = opts.server_requests.then(|| handshake.requests());
 		let (session, mut driver) = handshake.ok().await.expect("server accept");
 		let driver = moq_clock::sim::spawn(moq_clock::drive(move |now, waiter| {
 			moq_net::time::Driver::poll(&mut driver, now, waiter)
 		}));
-		(session, requests, driver)
+		(session, requests, setup_token, driver)
 	};
-	let (client, (server, requests, server_driver)) = futures::join!(client_fut, server_fut);
+	let (client, (server, requests, setup_token, server_driver)) = futures::join!(client_fut, server_fut);
 
 	Pair {
 		client,
@@ -531,6 +517,7 @@ async fn connect(opts: Options) -> Pair {
 		client_transport: observe,
 		server_transport: observe_server,
 		requests,
+		setup_token,
 		server_driver,
 	}
 }
@@ -921,6 +908,49 @@ async fn a_refused_setup_token_grants_nothing(version: &'static str) {
 	.expect("timed out");
 }
 
+/// The token a client's SETUP presents reaches the server's handshake, and the client's
+/// empty-token AUTH stream learns the grant the server gives it.
+async fn the_setup_token_is_the_connection_credential(version: &'static str) {
+	within(async {
+		let mut pair = connect(Options {
+			version: Some(version),
+			client_publish: Some(produce_origin(2)),
+			server_requests: true,
+			client_token: Some(b"connection-credential"),
+			..Default::default()
+		})
+		.await;
+		assert_eq!(
+			pair.setup_token.map(|token| (token.kind, token.value)),
+			Some((moq_net::setup::Token::OUT_OF_BAND, b"connection-credential".to_vec()))
+		);
+
+		let _issued = serve(pair.requests.take().unwrap(), |token| {
+			token.is_empty().then(|| grant(&["room"], &[]))
+		});
+		assert_eq!(granted(&pair.client).await, grant(&["room"], &[]));
+	})
+	.await
+	.expect("timed out");
+}
+
+/// A lite version without the Token parameter carries none, so the caller's URL query
+/// has to.
+#[moq_clock::test]
+async fn lite_06_sends_no_setup_token() {
+	within(async {
+		let pair = connect(Options {
+			version: Some(LITE_06),
+			client_token: Some(b"connection-credential"),
+			..Default::default()
+		})
+		.await;
+		assert_eq!(pair.setup_token, None);
+	})
+	.await
+	.expect("timed out");
+}
+
 /// Dropping the requests refuses tokens already queued, not only later ones.
 async fn dropping_the_requests_refuses_queued_tokens(version: &'static str) {
 	within(async {
@@ -1072,10 +1102,7 @@ async fn exact_and_subtree_grants_admit_their_broadcast(version: &'static str) {
 			let mut sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
 			sub.recv_group().await.unwrap().expect("a group");
 
-			match version == "moq-transport-16" {
-				true => assert_eq!(pair.client.auth().grant().peek(), None),
-				false => assert_eq!(granted(&pair.client).await.subscribe, scope),
-			}
+			assert_eq!(granted(&pair.client).await.subscribe, scope);
 			assert_eq!(pair.client_transport.close_reason(), None);
 		})
 		.await
@@ -1493,11 +1520,8 @@ macro_rules! limit_cases {
 		mod limit_lite_07 {
 			$(#[moq_clock::test] async fn $case() { super::$case(super::LITE_07).await })*
 		}
-		mod limit_moqt_16 {
-			$(#[moq_clock::test] async fn $case() { super::$case("moq-transport-16").await })*
-		}
-		mod limit_moqt_17 {
-			$(#[moq_clock::test] async fn $case() { super::$case(super::MOQT_17).await })*
+		mod limit_moqt_18 {
+			$(#[moq_clock::test] async fn $case() { super::$case(super::MOQT_18).await })*
 		}
 	};
 }
@@ -1526,7 +1550,7 @@ async fn lite_07_narrowing_resets_a_fetch_in_flight() {
 
 /// Whether `version` exchanges AUTH, so the peer also hears of a narrowing.
 fn speaks_auth(version: &str) -> bool {
-	matches!(version, LITE_07 | MOQT_17 | MOQT_22)
+	matches!(version, LITE_07 | MOQT_18 | MOQT_22)
 }
 
 /// A revocation as the reader sees it: the local gate's own error, or the peer's
@@ -1941,7 +1965,9 @@ async fn a_handle_backs_one_active_session(version: &'static str) {
 		assert!(matches!(concurrent, Err(Error::Duplicate)), "{:?}", concurrent.err());
 
 		first.server.drain().send(moq_net::goaway::Goaway::new()).unwrap();
-		first.client.draining().recv().await.expect("the GOAWAY");
+		support::Draining::recv(&first.client.draining())
+			.await
+			.expect("the GOAWAY");
 		let mut second = connect(options()).await;
 		let mut second_tokens = serve(second.requests.take().unwrap(), |_| Some(Grant::all()));
 		let _second_issued = presented(&mut second_tokens).await;

@@ -250,7 +250,7 @@ impl SubscribeArgs {
 /// Exports one broadcast from the Origin to stdout in the requested format.
 pub struct Subscribe {
 	origin: moq_net::origin::Consumer,
-	path: moq_net::PathOwned,
+	path: moq_net::Path,
 	source: moq_mux::Source,
 	catalog: CatalogFormat,
 	args: SubscribeArgs,
@@ -281,7 +281,7 @@ impl Subscribe {
 		catalog: CatalogFormat,
 		args: SubscribeArgs,
 	) -> anyhow::Result<Self> {
-		let path = moq_net::Path::new(path).to_owned();
+		let path = moq_net::Path::new(path)?;
 		let broadcast = origin
 			.request_broadcast(&path, None)
 			.await
@@ -393,8 +393,6 @@ impl Subscribe {
 	}
 
 	async fn run_ts(self) -> anyhow::Result<()> {
-		let mut stdout = tokio::io::stdout();
-
 		self.origin.routed(&self.path).await.with_context(|| {
 			format!(
 				"broadcast `{}` is outside the session's scope, or the origin closed before it was announced",
@@ -405,6 +403,11 @@ impl Subscribe {
 			return self.run_ts_passthrough().await;
 		}
 
+		self.write_ts(tokio::io::stdout()).await
+	}
+
+	/// Write the selected TS media to a writer after resolving its route.
+	pub(super) async fn write_ts(self, mut stdout: impl tokio::io::AsyncWrite + Unpin) -> anyhow::Result<()> {
 		// TS emits PAT/PMT then a continuous PES stream (re-emitting PAT/PMT at
 		// keyframes for tune-in). Avc3/Hev1 sources pass through as Annex-B; AAC
 		// is re-framed as ADTS. `fragment_duration` does not apply to TS. The catalog stream
