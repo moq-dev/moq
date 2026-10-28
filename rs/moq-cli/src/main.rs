@@ -733,7 +733,6 @@ fn spawn_import(
 		name,
 		max_age,
 		linger,
-		hls: import.hls,
 		bandwidth: bandwidth.clone(),
 	};
 
@@ -743,8 +742,7 @@ fn spawn_import(
 		warn_if_missing_format(&name);
 		let config = moq_mux::catalog::Config::default()
 			.with_max_age(max_age)
-			.with_bandwidth(bandwidth.clone())
-			.with_hls(import.hls.then(moq_mux::hls::Config::default));
+			.with_bandwidth(bandwidth.clone());
 		let mut publish = if let ImportSource::Ts(TsImport {
 			program: Some(TsProgram::All),
 			..
@@ -811,7 +809,7 @@ fn spawn_import(
 			ImportSource::Capture(capture) => {
 				warn_if_missing_format(&name);
 				let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
-				let mut publish = Publish::capture(broadcast, &capture, bandwidth.clone(), max_age, import.hls)?;
+				let mut publish = Publish::capture(broadcast, &capture, bandwidth.clone(), max_age)?;
 				publish.announce(epoch)?;
 				local = Some(publish);
 			}

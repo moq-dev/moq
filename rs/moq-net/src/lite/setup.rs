@@ -202,11 +202,11 @@ pub struct Setup {
 	pub implementation: Option<String>,
 }
 
-impl Message for Setup {
+impl<'a> Message<'a> for Setup {
 	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Session);
 	const MAX_SIZE: usize = crate::setup::MAX_SETUP_SIZE;
 
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		ReceivedSetup::decode_msg(r, version).map(|received| received.setup)
 	}
 
@@ -266,11 +266,11 @@ pub(super) struct ReceivedSetup {
 	role_present: bool,
 }
 
-impl Message for ReceivedSetup {
+impl<'a> Message<'a> for ReceivedSetup {
 	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Session);
 	const MAX_SIZE: usize = Setup::MAX_SIZE;
 
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_setup_stream() {
 			return Err(DecodeError::Version);
 		}
@@ -489,7 +489,7 @@ mod tests {
 		msg.encode(&mut Encoder::new(&mut buf, Version::Lite05.into()), Version::Lite05)
 			.unwrap();
 		let mut slice = &buf[..];
-		let got = crate::coding::decode_buf(&mut slice, Version::Lite05, Setup::decode).unwrap();
+		let got = crate::coding::decode_buf(&mut slice, Version::Lite05, |r, v| Setup::decode(r, v)).unwrap();
 		assert!(bytes::Buf::remaining(&slice) == 0, "trailing bytes after decode");
 		got
 	}
@@ -787,7 +787,7 @@ mod tests {
 			let mut buf = Vec::new();
 			msg.encode(&mut Encoder::new(&mut buf, version.into()), version)
 				.unwrap();
-			let got = crate::coding::decode_buf(&mut &buf[..], version, Setup::decode).unwrap();
+			let got = crate::coding::decode_buf(&mut &buf[..], version, |r, v| Setup::decode(r, v)).unwrap();
 			assert_eq!(got.hop, want, "{version:?}");
 		}
 	}
@@ -812,7 +812,7 @@ mod tests {
 			.unwrap();
 		buf.extend_from_slice(&body);
 		let mut slice = &buf[..];
-		let got = crate::coding::decode_buf(&mut slice, version, Setup::decode).unwrap();
+		let got = crate::coding::decode_buf(&mut slice, version, |r, v| Setup::decode(r, v)).unwrap();
 		assert_eq!(got.hop, None);
 	}
 
@@ -857,7 +857,7 @@ mod tests {
 		buf.extend_from_slice(&body);
 
 		let mut slice = &buf[..];
-		let got = crate::coding::decode_buf(&mut slice, Version::Lite05, Setup::decode).unwrap();
+		let got = crate::coding::decode_buf(&mut slice, Version::Lite05, |r, v| Setup::decode(r, v)).unwrap();
 		assert_eq!(got.probe, ProbeLevel::Increase);
 	}
 
@@ -891,7 +891,7 @@ mod tests {
 			buf.extend_from_slice(&body);
 
 			let mut slice = &buf[..];
-			let got = crate::coding::decode_buf(&mut slice, Version::Lite05, Setup::decode).unwrap();
+			let got = crate::coding::decode_buf(&mut slice, Version::Lite05, |r, v| Setup::decode(r, v)).unwrap();
 			assert_eq!(got.role, None, "role code {code} should decode as bidirectional");
 		}
 	}
@@ -926,7 +926,7 @@ mod tests {
 		buf.extend_from_slice(&body);
 
 		let mut slice = &buf[..];
-		let got = crate::coding::decode_buf(&mut slice, Version::Lite05, Setup::decode).unwrap();
+		let got = crate::coding::decode_buf(&mut slice, Version::Lite05, |r, v| Setup::decode(r, v)).unwrap();
 		assert_eq!(got.path.as_deref(), Some("/foo"));
 	}
 }

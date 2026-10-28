@@ -10,11 +10,11 @@ import * as audio from "./audio";
 import * as video from "./video";
 
 /** Audio schemas and quality ordering. */
-export const Audio = audio;
+export { audio as Audio };
 /** The catalog audio section. */
 export type Audio = audio.Audio;
 /** Video schemas and quality ordering. */
-export const Video = video;
+export { video as Video };
 /** The catalog video section. */
 export type Video = video.Video;
 

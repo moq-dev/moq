@@ -1,11 +1,11 @@
-//! Opt-in HLS segment records: where each of a rendition's HLS segments starts.
+//! HLS segment records: where each of a rendition's HLS segments starts.
 //!
-//! Nothing here runs unless the application enables it with
-//! [`catalog::Config::with_hls`](crate::catalog::Config::with_hls). Then every video and audio
-//! rendition the catalog mints gets a track of [`hang::hls::Record`]s, one per segment, and its
-//! catalog entry gets an [`hls`](hang::catalog::Hls) field naming that track and the nominal
-//! segment duration. An edge renders HLS (or DASH) playlists from the records without subscribing
-//! to media.
+//! Every video and audio rendition a catalog mints gets a track of [`hang::hls::Record`]s, one per
+//! segment, and its catalog entry gets an [`hls`](hang::catalog::Hls) field naming that track and
+//! the nominal segment duration, unless the application disables them with
+//! [`catalog::Config::with_hls`](crate::catalog::Config::with_hls). An edge renders HLS (or DASH)
+//! playlists from the records without subscribing to media. A record track nobody subscribes to
+//! costs only the in-process bookkeeping.
 //!
 //! ## Segments
 //!
@@ -139,6 +139,8 @@ pub(crate) struct Segmenter {
 	/// The newest boundary declared, so a repeat of it (several sources declaring the same ones)
 	/// is ignored.
 	cut: Option<Timestamp>,
+	/// A boundary was queued since the newest group started.
+	queued: bool,
 	/// Whether boundaries come only from cuts: the source declares them.
 	manual: bool,
 	ready: VecDeque<Record>,
@@ -163,6 +165,7 @@ impl Segmenter {
 			frontier: None,
 			cuts: VecDeque::new(),
 			cut: None,
+			queued: false,
 			manual: false,
 			ready: VecDeque::new(),
 			closed: false,
@@ -216,6 +219,9 @@ impl Segmenter {
 		} else {
 			self.begin(group, pts);
 		}
+		if self.last != Some(group) {
+			self.queued = false;
+		}
 		self.last = Some(group);
 		self.advance(pts);
 		Ok(())
@@ -250,6 +256,10 @@ impl Segmenter {
 
 	/// Start a segment with group `group` at `pts`.
 	fn begin(&mut self, group: u64, pts: Timestamp) {
+		// However the segment starts, a cut it reached is spent.
+		while self.cuts.front().is_some_and(|cut| cut.as_micros() <= pts.as_micros()) {
+			self.cuts.pop_front();
+		}
 		self.open = Some(pts);
 		self.frontier = Some(pts);
 		self.cell = self.cell(pts);
@@ -260,6 +270,7 @@ impl Segmenter {
 	/// Whether a group starting at `pts` in grid cell `cell` ends the segment that started at
 	/// `start`.
 	fn boundary(&mut self, start: Timestamp, pts: Timestamp, cell: u128) -> bool {
+		// A cut declared after its segment had already started is spent.
 		while self
 			.cuts
 			.front()
@@ -267,13 +278,10 @@ impl Segmenter {
 		{
 			self.cuts.pop_front();
 		}
-		if self.cuts.front().is_some_and(|cut| cut.as_micros() <= pts.as_micros()) {
-			while self.cuts.front().is_some_and(|cut| cut.as_micros() <= pts.as_micros()) {
-				self.cuts.pop_front();
-			}
-			return true;
+		match self.cuts.front() {
+			Some(cut) if cut.as_micros() <= pts.as_micros() => true,
+			_ => !self.manual && cell > self.cell,
 		}
-		!self.manual && cell > self.cell
 	}
 
 	/// Report that the content extends to `pts`, without a frame starting there.
@@ -301,7 +309,9 @@ impl Segmenter {
 	///
 	/// The first cut takes over from grid pacing for good, since the grid would otherwise end a
 	/// segment just before the caller declares where it really ends. A cut at or before an earlier
-	/// one is ignored, so several sources declaring the same boundaries cost nothing.
+	/// one is ignored, so several sources declaring the same boundaries cost nothing. So is a cut
+	/// after one no group has started since: the next group ends the segment at the earlier one, and
+	/// a source declaring segments without sync samples would otherwise queue cuts without bound.
 	pub fn cut(&mut self, pts: Timestamp) {
 		if self.closed {
 			return;
@@ -311,7 +321,9 @@ impl Segmenter {
 			return;
 		}
 		self.cut = Some(pts);
-		self.cuts.push_back(pts);
+		if !std::mem::replace(&mut self.queued, true) {
+			self.cuts.push_back(pts);
+		}
 	}
 
 	/// Content stopped before group `group`: publish a zero-duration record where it reached.
@@ -354,7 +366,7 @@ impl Iterator for Segmenter {
 }
 
 /// Publishes one track's records onto its HLS record track, for a publisher that segments
-/// itself; [`catalog::Config::with_hls`](crate::catalog::Config::with_hls) records them for you.
+/// itself; a [`catalog::Producer`](crate::catalog::Producer) records them for you.
 ///
 /// Records must be pushed in sequence order, starting at the window's next index.
 pub struct Producer {
@@ -958,13 +970,51 @@ mod test {
 	#[test]
 	fn explicit_cuts_override_the_grid() {
 		let mut segmenter = Segmenter::new(Config::default());
-		segmenter.cut(ms(2_000));
-		segmenter.cut(ms(3_000));
-		groups(&mut segmenter, 0..5, 1_000);
+		for group in 0..5u64 {
+			if matches!(group, 2 | 3) {
+				segmenter.cut(ms(group * 1_000));
+			}
+			segmenter.frame(group, ms(group * 1_000)).unwrap();
+		}
 		assert_eq!(
 			drain(&mut segmenter),
 			[(0, 0, None), (2, 2_000, None), (3, 3_000, None)]
 		);
+	}
+
+	/// A source declaring segments that start no group (no sync sample) queues one cut, which the
+	/// next group meets.
+	#[test]
+	fn cuts_without_a_group_queue_one() {
+		let mut segmenter = Segmenter::new(Config::default());
+		segmenter.frame(0, ms(0)).unwrap();
+		for step in 1..1_000u64 {
+			segmenter.cut(ms(step));
+			segmenter.frame(0, ms(step)).unwrap();
+		}
+		assert_eq!(segmenter.cuts.len(), 1);
+		segmenter.frame(1, ms(1_000)).unwrap();
+		assert_eq!(drain(&mut segmenter), [(0, 0, None), (1, 1_000, None)]);
+	}
+
+	/// A segment spends the cuts it reached however it starts: on a cut, at the ceiling, or after
+	/// a skipped group.
+	#[test]
+	fn every_segment_start_spends_its_cuts() {
+		let mut segmenter = Segmenter::new(Config::default());
+		segmenter.frame(0, ms(0)).unwrap();
+		segmenter.cut(ms(1_000));
+		segmenter.frame(1, ms(1_000)).unwrap();
+		// A one-second declaration puts the ceiling at three, so each later group ends a segment there.
+		for group in 2..100u64 {
+			let pts = ms(1_000 + (group - 1) * 3_000);
+			segmenter.cut(pts);
+			segmenter.frame(group, pts).unwrap();
+			assert!(segmenter.cuts.is_empty(), "group {group}");
+		}
+		segmenter.cut(ms(1_000_000));
+		segmenter.frame(200, ms(1_000_000)).unwrap();
+		assert!(segmenter.cuts.is_empty(), "after a skipped group");
 	}
 
 	#[test]

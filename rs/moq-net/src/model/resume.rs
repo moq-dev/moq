@@ -63,11 +63,31 @@ struct Route {
 	/// another or its source detaches: a whole group it still caches is served without
 	/// waking the front. A lazy handle, so it keeps neither the copy nor its route alive.
 	parked: Option<track::Consumer>,
-	/// How the track ended, once the front decided.
-	end: Option<Result<()>>,
-	/// No front is left to replace the copy, though one may still hold it for readers
-	/// on their way: readers follow it to its end.
-	concluded: bool,
+	/// Whether the front may replace the copy, or how it finished.
+	phase: Phase,
+}
+
+#[derive(Default)]
+enum Phase {
+	#[default]
+	Open,
+	/// Readers follow the last copy to its end; no front will replace it.
+	Concluded,
+	/// The front's final verdict on the logical track.
+	Ended(Result<()>),
+}
+
+impl Phase {
+	fn terminal(&self) -> bool {
+		!matches!(self, Self::Open)
+	}
+
+	fn end(&self) -> Option<&Result<()>> {
+		match self {
+			Self::Ended(end) => Some(end),
+			_ => None,
+		}
+	}
 }
 
 /// Every reader of a logical track, so a new copy subscribes them all as it is served:
@@ -170,17 +190,19 @@ impl Producer {
 	/// The track ended: cleanly with `Ok`, or failed for good.
 	pub(super) fn end(&self, result: Result<()>) {
 		if let Ok(mut route) = self.state.write()
-			&& route.end.is_none()
+			&& route.phase.end().is_none()
 		{
-			route.end = Some(result);
+			route.phase = Phase::Ended(result);
 		}
 	}
 
 	/// No front will replace the serving copy: readers follow it to its end, while this
 	/// still holds it for the readers on their way.
 	pub(super) fn conclude(&self) {
-		if let Ok(mut route) = self.state.write() {
-			route.concluded = true;
+		if let Ok(mut route) = self.state.write()
+			&& !route.phase.terminal()
+		{
+			route.phase = Phase::Concluded;
 		}
 	}
 
@@ -198,6 +220,12 @@ impl Producer {
 			state: self.state.consume(),
 			readers: self.readers.clone(),
 		}
+	}
+}
+
+impl Drop for Producer {
+	fn drop(&mut self) {
+		self.conclude();
 	}
 }
 
@@ -233,7 +261,7 @@ impl Consumer {
 	/// The copy the front parked, while it serves none and may still serve one again.
 	pub(super) fn parked(&self) -> Option<track::Consumer> {
 		let route = self.state.read();
-		match route.copy.is_none() && route.end.is_none() && !route.concluded && !route.is_closed() {
+		match route.copy.is_none() && !route.phase.terminal() {
 			true => route.parked.clone(),
 			false => None,
 		}
@@ -315,7 +343,7 @@ impl Consumer {
 	pub(super) fn fetch_group(
 		&self,
 		sequence: u64,
-		options: group::Fetch,
+		options: track::FetchOptions,
 		logical: kio::Consumer<track::TrackState>,
 	) -> Fetching {
 		Fetching {
@@ -330,7 +358,7 @@ impl Consumer {
 	/// Poll for the route state to move past `generation`, or the track to end.
 	fn poll_changed(&self, generation: u64, waiter: &kio::Waiter) -> Poll<()> {
 		match self.state.poll(waiter, |route| {
-			match route.generation != generation || route.end.is_some() || route.concluded {
+			match route.generation != generation || route.phase.terminal() {
 				true => Poll::Ready(()),
 				false => Poll::Pending,
 			}
@@ -345,18 +373,14 @@ impl Consumer {
 	/// decision.
 	fn end(&self) -> Option<Option<Result<()>>> {
 		let route = self.state.read();
-		match (&route.end, route.concluded || route.is_closed()) {
-			(Some(end), _) => Some(Some(end.clone())),
-			(None, true) => Some(None),
-			(None, false) => None,
-		}
+		route.phase.terminal().then(|| route.phase.end().cloned())
 	}
 }
 
 /// Whether `err` is the route failing to deliver rather than judging what it carried, so a new
 /// copy may fix it. Anything else would repeat on every copy. Mirrors `routeFailed` in
 /// `js/net/src/resume.ts`.
-fn route_failed(err: &Error) -> bool {
+pub(super) fn route_failed(err: &Error) -> bool {
 	matches!(
 		err,
 		Error::Transport(_)
@@ -1753,7 +1777,7 @@ pub(super) struct Recover {
 }
 
 enum Fetch {
-	Pending(kio::Pending<track::Fetching>),
+	Pending(Box<track::Fetching>),
 	/// The serving route will not fetch it: wait for its subscription instead.
 	Refused(Error),
 }
@@ -1789,11 +1813,7 @@ impl Recover {
 			// A route that returned serves the copy being read again, which the reader reuses.
 			// Closed routes stay ready forever, so they end the wait like a conclusion.
 			let route = self.route.state.read();
-			if route.end.is_some()
-				|| route.concluded
-				|| route.is_closed()
-				|| !route.copy.as_ref().is_some_and(|copy| copy.same_channel(&self.copy))
-			{
+			if route.phase.terminal() || !route.copy.as_ref().is_some_and(|copy| copy.same_channel(&self.copy)) {
 				return true;
 			}
 			self.generation = route.generation;
@@ -1837,17 +1857,17 @@ impl Recover {
 			}
 		}
 		loop {
-			let (generation, serving, end, closed) = {
+			let (generation, serving, end, terminal) = {
 				let route = self.route.state.read();
 				(
 					route.generation,
 					route.copy.clone(),
-					route.end.clone(),
-					route.concluded || route.is_closed(),
+					route.phase.end().cloned(),
+					route.phase.terminal(),
 				)
 			};
 			// Registered before looking, so a route change from here on wakes the reader.
-			if self.route.poll_changed(generation, waiter).is_ready() && end.is_none() && !closed {
+			if self.route.poll_changed(generation, waiter).is_ready() && !terminal {
 				continue;
 			}
 			if let Some(Err(err)) = &end {
@@ -1870,7 +1890,7 @@ impl Recover {
 			}
 			let Some(serving) = serving else {
 				// Nothing serves: a failed copy waits for a route, unless none will come.
-				return match (failed, closed || end.is_some()) {
+				return match (failed, terminal) {
 					(Some(err), true) => Poll::Ready(Err(err.clone())),
 					_ => Poll::Pending,
 				};
@@ -1882,8 +1902,7 @@ impl Recover {
 			let res = self.poll_serving(generation, &serving, index, failed, waiter);
 			// The serving route failed too, and no front is left to replace it.
 			if let (Poll::Pending, Some(err)) = (&res, failed)
-				&& (closed || end.is_some())
-				&& copy_failed(&serving)
+				&& terminal && copy_failed(&serving)
 			{
 				return Poll::Ready(Err(match end {
 					Some(Err(end)) => end,
@@ -1962,7 +1981,10 @@ impl Recover {
 				frame_start: index,
 				..Default::default()
 			};
-			self.fetch = Some((generation, Fetch::Pending(serving.fetch_group(self.sequence, options))));
+			self.fetch = Some((
+				generation,
+				Fetch::Pending(Box::new(serving.fetch_group(self.sequence, options).into_inner())),
+			));
 		}
 		let Some((_, fetch)) = &mut self.fetch else {
 			unreachable!("asked above")
@@ -2060,7 +2082,7 @@ pub(super) struct Replacement {
 pub(super) struct Fetching {
 	route: Consumer,
 	sequence: u64,
-	options: group::Fetch,
+	options: track::FetchOptions,
 	logical: kio::Consumer<track::TrackState>,
 	/// The fetch in flight, and the route generation it went to.
 	pending: Option<(u64, kio::Pending<track::Fetching>)>,
@@ -2089,7 +2111,7 @@ impl kio::Task for Fetching {
 				continue;
 			}
 			if self.pending.as_ref().is_none_or(|(asked, _)| *asked != generation) {
-				self.pending = Some((generation, serving.fetch_group(self.sequence, self.options.clone())));
+				self.pending = Some((generation, serving.fetch_range(self.sequence, self.options.clone())));
 			}
 			let (_, pending) = self.pending.as_mut().expect("asked above");
 			let result = match kio::Task::poll(&mut **pending, waiter) {
@@ -2103,11 +2125,15 @@ impl kio::Task for Fetching {
 			};
 			return match result {
 				Ok(group) => {
+					// The copy may have widened its fill; the caller still reads only its range.
+					let group = group
+						.with_range(self.options.options.frame_start..)
+						.with_end(self.options.end);
 					let handoff = group.handoff();
 					Poll::Ready(Ok(group.with_recover(Recover {
 						sequence: self.sequence,
 						reader: None,
-						max_delay: self.options.max_delay,
+						max_delay: self.options.options.max_delay,
 						route: self.route.clone(),
 						generation,
 						copy: serving.clone(),
@@ -2902,6 +2928,10 @@ mod test {
 		assert_eq!(dropped(&mut sub), []);
 		a.drop_groups(2..4, StreamError::NotFound);
 		assert_eq!(dropped(&mut sub), [(2..4, StreamError::NotFound)]);
+		assert_eq!(dropped(&mut sub), []);
+		write(&a, 3);
+		write(&a, 4);
+		assert_eq!(drain(&mut sub, false), [3, 4]);
 		assert_eq!(dropped(&mut sub), []);
 	}
 
@@ -5004,6 +5034,38 @@ mod test {
 		routes.serve(b.consume());
 		assert!(wake.0.load(std::sync::atomic::Ordering::Relaxed));
 		assert!(matches!(kio::Task::poll(&mut *fetching, &waiter), Poll::Ready(Ok(_))));
+	}
+
+	/// A cold route widens its fill to the group's head, but the caller still reads from
+	/// the frame it asked for.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_widened_route_fetch_keeps_the_callers_start() {
+		let routes = Producer::new();
+		let a = copy();
+		let dynamic = a.requests();
+		routes.serve(a.consume());
+		let logical = logical(&routes);
+		let options = group::Fetch {
+			frame_start: 2,
+			..Default::default()
+		};
+		let mut fetching = logical.consume().fetch_group(0, options);
+		let waiter = kio::Waiter::noop();
+		assert!(kio::Task::poll(&mut *fetching, &waiter).is_pending());
+		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
+		assert_eq!(request.frame_start(), 0, "the cold copy fills from the head");
+		let mut group = request.accept(None).unwrap();
+		for frame in 0..4u8 {
+			group.write_frame(ts(0), vec![frame]).unwrap();
+		}
+		group.finish().unwrap();
+		let Poll::Ready(Ok(mut group)) = kio::Task::poll(&mut *fetching, &waiter) else {
+			panic!("the fill did not resolve the fetch");
+		};
+		assert_eq!(group.index(), 2);
+		let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(&frame.payload[..], &[2]);
 	}
 
 	/// A span fill made before the front serves a copy waits for one and asks it for the

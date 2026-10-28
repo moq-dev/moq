@@ -166,7 +166,7 @@ struct Outputs<E: CatalogExt> {
 	hang_track: moq_net::track::Producer,
 	hangz: moq_json::snapshot::Producer<Catalog<E>>,
 	msf_track: moq_net::track::Producer,
-	/// The broadcast's HLS record tracks, when [`Config::with_hls`] enabled them.
+	/// The broadcast's HLS record tracks, unless [`Config::with_hls`] disabled them.
 	hls: Option<crate::hls::Tracks>,
 	/// Keeps the broadcast open while the catalog is, so a publisher may hand its own handle to a
 	/// media producer and drop it.
@@ -275,7 +275,7 @@ pub struct Producer<E: CatalogExt = ()> {
 
 	current: Arc<Mutex<State<E>>>,
 
-	/// How each media track's HLS segments are cut, when enabled. See [`Config::with_hls`].
+	/// How each media track's HLS segments are cut, unless disabled. See [`Config::with_hls`].
 	hls: Option<crate::hls::Config>,
 	/// Retention override for the media tracks minted under this catalog, or `None` to keep
 	/// hang's default. Fixed at construction, so every clone and every
@@ -330,7 +330,7 @@ impl Default for Config<()> {
 			max_age: None,
 			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 			clock: None,
-			hls: None,
+			hls: Some(crate::hls::Config::default()),
 		}
 	}
 }
@@ -393,9 +393,8 @@ impl<E: CatalogExt> Config<E> {
 		self
 	}
 
-	/// Publish HLS segment records for each video and audio rendition, cut by `hls`; off by default.
-	///
-	/// See [`hls`](crate::hls) for what that costs and what it promises.
+	/// Publish HLS segment records for each video and audio rendition, cut by `hls`; `None` publishes
+	/// none. On by default, cut by [`hls::Config::default`](crate::hls::Config::default).
 	pub fn with_hls(mut self, hls: impl Into<Option<crate::hls::Config>>) -> Self {
 		self.hls = hls.into();
 		self
@@ -794,7 +793,7 @@ impl<E: CatalogExt> Producer<E> {
 	}
 
 	/// Build the media [`container::Producer`](crate::container::Producer) for `track`,
-	/// enrolling a video or audio track for HLS records when [`Config::with_hls`] enabled them.
+	/// enrolling a video or audio track for HLS records unless [`Config::with_hls`] disabled them.
 	pub(super) fn media<C, R>(
 		&self,
 		track: moq_net::track::Producer,
@@ -871,7 +870,7 @@ impl<E: CatalogExt> Producer<E> {
 		self.bandwidth.clone()
 	}
 
-	/// Enroll `track` for HLS records when [`Config::with_hls`] enabled them, advertising them in its
+	/// Enroll `track` for HLS records unless [`Config::with_hls`] disabled them, advertising them in its
 	/// rendition's `hls` field once the nominal duration is known.
 	///
 	/// The video and audio track constructors call this for you. fMP4 passthrough calls it directly
@@ -921,13 +920,18 @@ impl<E: CatalogExt> Producer<E> {
 		self.outputs.hls.as_ref().map_or(0, |tracks| tracks.len())
 	}
 
-	/// Retire `track`'s HLS records once its producer dropped, for an owner that never enrolls the
-	/// name again: the record track finishes and is forgotten. The catalog stops advertising it
-	/// with the rendition that carried it.
-	pub(crate) fn retire(&self, track: &str) -> crate::Result<()> {
+	/// Finish and forget the HLS records of a dropped `track` whose name is never published again.
+	pub fn retire(&self, track: &str) -> crate::Result<()> {
 		match &self.outputs.hls {
 			Some(tracks) => tracks.retire(track),
 			None => Ok(()),
+		}
+	}
+
+	/// [`retire`](Self::retire) `track` from a teardown that cannot return the error.
+	pub(crate) fn retire_dropped(&self, track: &str) {
+		if let Err(err) = self.retire(track) {
+			tracing::warn!(%err, track, "failed to retire a dropped track's HLS records");
 		}
 	}
 
@@ -1503,7 +1507,7 @@ mod test {
 	#[tokio::test(start_paused = true)]
 	async fn abort_fails_the_hls_records() {
 		let mut broadcast = moq_net::broadcast::Info::default().produce();
-		let catalog = Producer::<()>::new(&mut broadcast, hls()).unwrap();
+		let catalog = Producer::<()>::new(&mut broadcast, Config::default()).unwrap();
 		let _recorder = catalog
 			.enroll("video0", Some(std::time::Duration::from_secs(4)))
 			.unwrap();
@@ -1558,7 +1562,7 @@ mod test {
 		use hang::catalog::PRIORITY;
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = Producer::new(&mut broadcast, hls()).unwrap();
+		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
 		let _recorder = catalog.enroll("video", None).unwrap();
 
 		let consumer = broadcast.consume();
@@ -1955,11 +1959,6 @@ mod test {
 		);
 	}
 
-	/// A catalog publishing HLS records.
-	fn hls() -> Config {
-		Config::default().with_hls(crate::hls::Config::default())
-	}
-
 	/// A video rendition `video0` on `catalog`, with a keyframe group at each of `starts` (ms).
 	fn video0(
 		broadcast: &mut moq_net::broadcast::Producer,
@@ -1992,7 +1991,7 @@ mod test {
 	#[test]
 	fn hls_reports_a_track_collision() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = Producer::new(&mut broadcast, hls()).unwrap();
+		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
 
 		// Something else already took the name the record track wants.
 		let _taken = broadcast.create_track("video0.hls", None).unwrap();
@@ -2000,9 +1999,9 @@ mod test {
 	}
 
 	#[test]
-	fn nothing_publishes_hls_unless_enabled() {
+	fn nothing_publishes_hls_when_disabled() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		let catalog = Producer::new(&mut broadcast, Config::default().with_hls(None)).unwrap();
 		assert!(
 			catalog
 				.enroll("audio0", Some(std::time::Duration::from_secs(4)))
@@ -2019,7 +2018,7 @@ mod test {
 	#[tokio::test]
 	async fn an_estimated_duration_is_advertised_after_its_first_segment() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = Producer::new(&mut broadcast, hls()).unwrap();
+		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
 		let mut consumer = catalog.consume().unwrap();
 
 		let mut video = video0(&mut broadcast, &catalog, &[0]);
@@ -2044,7 +2043,7 @@ mod test {
 	#[test]
 	fn a_track_finished_before_its_first_segment_is_advertised() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = Producer::new(&mut broadcast, hls()).unwrap();
+		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
 		let mut video = video0(&mut broadcast, &catalog, &[0]);
 
 		video.finish().unwrap();
@@ -2077,7 +2076,7 @@ mod test {
 	#[test]
 	fn only_the_enrolled_rendition_gets_its_records() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = Producer::<()>::new(&mut broadcast, hls()).unwrap();
+		let catalog = Producer::<()>::new(&mut broadcast, Config::default()).unwrap();
 		let _video = catalog
 			.enroll("video", Some(std::time::Duration::from_secs(2)))
 			.unwrap();
@@ -2110,7 +2109,7 @@ mod test {
 	#[test]
 	fn retiring_a_track_ends_its_records() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = Producer::new(&mut broadcast, hls()).unwrap();
+		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
 		let recorder = catalog
 			.enroll("video0", Some(std::time::Duration::from_secs(4)))
 			.unwrap();
@@ -2135,7 +2134,7 @@ mod test {
 	#[test]
 	fn a_text_track_neither_records_nor_paces() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = Producer::new(&mut broadcast, hls()).unwrap();
+		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
 		let net = broadcast
 			.create_track("text0", catalog.track_info(hang::catalog::PRIORITY.text))
 			.unwrap();
@@ -2158,7 +2157,7 @@ mod test {
 	#[test]
 	fn an_undeclared_enrollment_releases_the_broadcast() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = Producer::new(&mut broadcast, hls()).unwrap();
+		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
 		let recorder = catalog.enroll("video0", None).unwrap();
 		let waiter = kio::Waiter::noop();
 		let mut subscribing = broadcast
@@ -2179,7 +2178,7 @@ mod test {
 	#[test]
 	fn clock_is_advertised_without_hls() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		let catalog = Producer::new(&mut broadcast, Config::default().with_hls(None)).unwrap();
 
 		let snapshot = catalog.snapshot();
 		assert_eq!(snapshot.clock, catalog.clock().wall());

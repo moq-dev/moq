@@ -64,6 +64,7 @@ import {
 	type ResumeShell,
 	type ResumeSource,
 	type Run,
+	removeRun,
 	runGaps,
 } from "./internal.ts";
 import { grace } from "./ledger.ts";
@@ -551,10 +552,10 @@ class Reader implements ResumeSource {
 		return holding;
 	}
 
-	cachedGroup(sequence: number): GroupConsumer | undefined {
+	cachedGroup(sequence: number, from = 0): GroupConsumer | undefined {
 		for (let index = this.#copies.length - 1; index >= 0; index--) {
 			const copy = this.#copies[index];
-			const group = hooks.cachedGroup(copy.sub, sequence);
+			const group = hooks.cachedGroup(copy.sub, sequence, from);
 			if (group) return this.#handOut(copy, group);
 		}
 		return undefined;
@@ -672,7 +673,11 @@ class Reader implements ResumeSource {
 			const end = Math.min(run.end, cursor.end ?? run.end);
 			for (const gap of delivered.gaps(Math.max(run.start, cursor.start), end)) {
 				const [open] = runGaps(feeding, gap.start, gap.end);
-				if (open) return { kind: "drop", ...open, error: run.error };
+				if (open) {
+					// Report once without marking it delivered: a late fill may still land.
+					this.#drops = removeRun(this.#drops, open.start, open.end);
+					return { kind: "drop", ...open, error: run.error };
+				}
 			}
 		}
 		return undefined;
@@ -1327,11 +1332,11 @@ class Recover implements GroupRecover {
 		return routeFailed(failed) || copy.sub.closed.peek() instanceof Error;
 	}
 
-	async replace(_index: number, failed: Error | undefined, signal: AbortSignal): Promise<Replacement> {
+	async replace(index: number, failed: Error | undefined, signal: AbortSignal): Promise<Replacement> {
 		let fetch: Fetch | undefined;
 		let kept: GroupConsumer | undefined;
 		try {
-			const replacement = await this.#replace(failed, signal, (next) => {
+			const replacement = await this.#replace({ index, failed, signal }, (next) => {
 				fetch?.cancel();
 				fetch = next;
 			});
@@ -1345,8 +1350,7 @@ class Recover implements GroupRecover {
 	}
 
 	async #replace(
-		failed: Error | undefined,
-		signal: AbortSignal,
+		{ index, failed, signal }: { index: number; failed?: Error; signal: AbortSignal },
 		started: (fetch: Fetch) => void,
 	): Promise<Replacement> {
 		const reader = this.#reader;
@@ -1369,7 +1373,7 @@ class Recover implements GroupRecover {
 			// the group back and forth.
 			if (failed) {
 				const held = reader.holding(this.sequence, current)[0];
-				const cached = held && hooks.cachedGroup(held.sub, this.sequence);
+				const cached = held && hooks.cachedGroup(held.sub, this.sequence, index);
 				if (cached) return this.#replacement(cached, held);
 				// Once the track ended, no route continues it: only a copy holding it could.
 				if (reader.ended) throw failed;
@@ -1390,7 +1394,7 @@ class Recover implements GroupRecover {
 				waits.push(given.changed);
 				// A newer copy's track caches it: continue from there.
 				if (!failed && generation !== current.generation) {
-					const cached = hooks.cachedGroup(serving.sub, this.sequence);
+					const cached = hooks.cachedGroup(serving.sub, this.sequence, index);
 					if (cached) return this.#replacement(cached, serving);
 				}
 				// Otherwise ask for it, if the route's version can fetch. The subscription may still

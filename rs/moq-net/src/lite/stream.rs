@@ -18,8 +18,8 @@ pub enum ControlType {
 	Tracks = 8,
 }
 
-impl Decode<Version> for ControlType {
-	fn decode(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for ControlType {
+	fn decode(r: &mut Decoder<'a>, _: Version) -> Result<Self, DecodeError> {
 		let t = r.varint()?;
 		t.try_into().map_err(|_| DecodeError::InvalidValue)
 	}
@@ -44,8 +44,8 @@ pub enum DataType {
 	Padding = 2,
 }
 
-impl Decode<Version> for DataType {
-	fn decode(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for DataType {
+	fn decode(r: &mut Decoder<'a>, _: Version) -> Result<Self, DecodeError> {
 		let t = r.varint()?;
 		t.try_into().map_err(|_| DecodeError::InvalidValue)
 	}

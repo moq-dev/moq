@@ -49,8 +49,8 @@ impl Parameters {
 	}
 }
 
-impl Decode<Version> for Parameters {
-	fn decode(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for Parameters {
+	fn decode(r: &mut Decoder<'a>, _: Version) -> Result<Self, DecodeError> {
 		let mut params = Self::default();
 
 		// I hate this encoding so much; let me encode my role and get on with my life.

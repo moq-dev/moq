@@ -54,8 +54,8 @@ pub(super) fn poll_withdrawn(
 #[derive(Debug)]
 pub(super) struct Framed(pub(super) u64, pub(super) super::Body);
 
-impl Decode<Version> for Framed {
-	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for Framed {
+	fn decode(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let id = r.varint()?;
 		let start = r.position();
 		let body = super::Body::decode(r, version)?;
@@ -76,8 +76,8 @@ pub(super) enum Next<T> {
 	},
 }
 
-impl<T: Decode<Version>> Decode<Version> for Next<T> {
-	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a, T: Decode<'a, Version>> Decode<'a, Version> for Next<T> {
+	fn decode(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let mut peek = r.clone();
 		if peek.varint()? == super::GoAway::ID {
 			*r = peek;
@@ -117,7 +117,7 @@ impl GoAways {
 	}
 
 	/// Read the next `T`, consuming at most one GOAWAY before it.
-	pub fn poll_next<T: Decode<Version> + std::fmt::Debug, R: crate::transport::poll::RecvStream>(
+	pub fn poll_next<T: for<'a> Decode<'a, Version> + std::fmt::Debug, R: crate::transport::poll::RecvStream>(
 		&mut self,
 		reader: &mut crate::coding::Reader<R, Version>,
 		cx: &mut Context<'_>,
@@ -311,8 +311,8 @@ impl Update {
 	}
 }
 
-impl Decode<Version> for Update {
-	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for Update {
+	fn decode(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		if r.varint()? != super::SubscribeUpdate::ID {
 			return Err(DecodeError::InvalidValue);
 		}
@@ -349,8 +349,8 @@ impl super::parameters::Param for NamespacePrefix {
 	}
 }
 
-impl<const TRACKS: bool> Decode<Version> for NamespaceUpdate<TRACKS> {
-	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a, const TRACKS: bool> Decode<'a, Version> for NamespaceUpdate<TRACKS> {
+	fn decode(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		if r.varint()? != super::SubscribeUpdate::ID {
 			return Err(DecodeError::InvalidValue);
 		}
@@ -496,12 +496,16 @@ mod tests {
 		const FRAME: &[u8] = &[0x02, 0x00, 0x06, 2, 1, 0x29, 2, 0, 0];
 		let version = Version::Draft22;
 		let mut buf = bytes::Bytes::from_static(FRAME);
-		let update = crate::coding::decode_buf(&mut buf, version, NamespaceUpdate::<true>::decode).unwrap();
+		let update =
+			crate::coding::decode_buf(&mut buf, version, |r, v| NamespaceUpdate::<true>::decode(r, v)).unwrap();
 		assert!(update.refused.is_none(), "{version}: {:?}", update.refused);
 		let mut buf = bytes::Bytes::from_static(FRAME);
-		assert!(crate::coding::decode_buf(&mut buf, version, NamespaceUpdate::<false>::decode).is_err());
+		assert!(crate::coding::decode_buf(&mut buf, version, |r, v| NamespaceUpdate::<false>::decode(r, v)).is_err());
 		let mut buf = bytes::Bytes::from_static(FRAME);
-		assert!(crate::coding::decode_buf(&mut buf, Version::Draft18, NamespaceUpdate::<true>::decode).is_err());
+		assert!(
+			crate::coding::decode_buf(&mut buf, Version::Draft18, |r, v| NamespaceUpdate::<true>::decode(r, v))
+				.is_err()
+		);
 	}
 
 	/// TRACK_NAMESPACE_PREFIX (0x34) updates a SUBSCRIBE_NAMESPACE or SUBSCRIBE_TRACKS only,

@@ -19,7 +19,7 @@ pub struct GoAway<'a> {
 	pub request_id: Option<RequestId>,
 }
 
-impl Message for GoAway<'_> {
+impl<'a> Message<'a> for GoAway<'a> {
 	const ID: u64 = 0x10;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -34,8 +34,8 @@ impl Message for GoAway<'_> {
 		Ok(())
 	}
 
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		let new_session_uri = Cow::<str>::Owned(r.string()?);
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
+		let new_session_uri = Cow::Borrowed(r.str()?);
 		// All drafts cap the New Session URI at 8,192 bytes; a longer one is a
 		// protocol violation.
 		if new_session_uri.len() > 8192 {
@@ -66,16 +66,16 @@ impl Message for GoAway<'_> {
 mod tests {
 	use super::*;
 
-	fn encode_message<M: Message>(msg: &M) -> Vec<u8> {
+	fn encode_message<'m, M: Message<'m>>(msg: &M) -> Vec<u8> {
 		let mut buf = Vec::new();
 		msg.encode_msg(&mut Encoder::new(&mut buf, Version::Draft22.into()), Version::Draft22)
 			.unwrap();
 		buf.to_vec()
 	}
 
-	fn decode_message<M: Message>(bytes: &[u8]) -> Result<M, DecodeError> {
-		let mut buf = bytes::Bytes::from(bytes.to_vec());
-		crate::coding::decode_buf(&mut buf, Version::Draft22, M::decode_msg)
+	fn decode_message<'m, M: Message<'m>>(bytes: &'m [u8]) -> Result<M, DecodeError> {
+		let mut buf = bytes;
+		crate::coding::decode_from(&mut buf, Version::Draft22, |r, v| M::decode_msg(r, v))
 	}
 
 	#[test]
@@ -125,8 +125,7 @@ mod tests {
 			.unwrap();
 		assert_eq!(buf.len(), buf19.len() + 1, "v18 must append the Request ID varint");
 
-		let mut bytes = bytes::Bytes::from(buf.to_vec());
-		let decoded: GoAway = crate::coding::decode_buf(&mut bytes, Version::Draft18, GoAway::decode_msg).unwrap();
+		let decoded: GoAway = crate::coding::decode_from(&mut &buf[..], Version::Draft18, GoAway::decode_msg).unwrap();
 
 		assert_eq!(decoded.new_session_uri, "moqt://relay.example/");
 		assert_eq!(decoded.timeout, 5000);
@@ -147,8 +146,7 @@ mod tests {
 		msg.encode_msg(&mut Encoder::new(&mut buf, Version::Draft18.into()), Version::Draft18)
 			.unwrap();
 
-		let mut bytes = bytes::Bytes::from(buf.to_vec());
-		let decoded: GoAway = crate::coding::decode_buf(&mut bytes, Version::Draft18, GoAway::decode_msg).unwrap();
+		let decoded: GoAway = crate::coding::decode_from(&mut &buf[..], Version::Draft18, GoAway::decode_msg).unwrap();
 
 		assert_eq!(decoded.new_session_uri, "moqt://relay.example/");
 		assert_eq!(decoded.timeout, 5000);
@@ -167,12 +165,12 @@ mod tests {
 		// Optional trailing Request ID:
 		Encoder::new(&mut buf, Version::Draft18.into()).varint(42u64).unwrap();
 
-		let mut bytes = bytes::Bytes::from(buf.to_vec());
-		let decoded: GoAway = crate::coding::decode_buf(&mut bytes, Version::Draft18, GoAway::decode_msg).unwrap();
+		let mut rest = &buf[..];
+		let decoded: GoAway = crate::coding::decode_from(&mut rest, Version::Draft18, GoAway::decode_msg).unwrap();
 
 		assert_eq!(decoded.new_session_uri, "moqt://relay.example/");
 		assert_eq!(decoded.timeout, 5000);
 		assert_eq!(decoded.request_id, Some(RequestId(42)));
-		assert!(bytes.is_empty(), "trailing Request ID should be consumed");
+		assert!(rest.is_empty(), "trailing Request ID should be consumed");
 	}
 }

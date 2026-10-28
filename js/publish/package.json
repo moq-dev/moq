@@ -39,7 +39,6 @@
 		"mediabunny": "^1.61.6"
 	},
 	"devDependencies": {
-		"@microsoft/api-extractor": "7.59.4",
 		"@types/audioworklet": "^0.0.100",
 		"@types/bun": "^1.4.3",
 		"@typescript/lib-dom": "npm:@types/web@^0.0.358",
