@@ -1669,14 +1669,16 @@ mod tests {
 	#[moq_clock::test]
 	async fn repeated_switches_keep_the_delay() {
 		const TICK: Duration = Duration::from_millis(100);
+		let start = moq_clock::now();
 		let delay = Duration::from_millis(500);
 		let mut buffer = Buffer::<u16, Instant>::new(delay).replay();
-		let push = |buffer: &mut Buffer<u16, Instant>, key: u16, decode: u64| {
+		// Publisher `key` stamps each frame `key * 100 s` past the time it sends it.
+		let push = |buffer: &mut Buffer<u16, Instant>, key: u16| {
 			let now = moq_clock::now();
 			let frame = Arrival {
 				arrived: now,
 				read: now,
-				decode: ms(decode).into(),
+				decode: ms(u64::from(key) * 100_000 + (now - start).as_millis() as u64).into(),
 				restart: 0,
 				skip: 0,
 				cut: 0,
@@ -1686,7 +1688,7 @@ mod tests {
 			};
 			assert_eq!(buffer.push(key, frame).unwrap(), Push::Queued);
 		};
-		// Every frame due now goes out at the delay after it arrived, in generation order, and
+		// Every frame due now goes out the delay after it arrived, in generation order, and
 		// all from `key`.
 		let drain = |buffer: &mut Buffer<u16, Instant>, key: u16, generation: &mut u64| {
 			let mut count = 0;
@@ -1700,21 +1702,17 @@ mod tests {
 			count
 		};
 		let mut generation = 0;
-		for step in 0..20 {
-			push(&mut buffer, 0, step * 100);
+		for _ in 0..20 {
+			push(&mut buffer, 0);
 			drain(&mut buffer, 0, &mut generation);
 			moq_clock::sleep(TICK).await;
 		}
 		for key in 1..4u16 {
-			// Each publisher's timeline starts somewhere else.
-			let base = u64::from(key) * 100_000;
 			buffer.start([key], [key]);
-			let mut step = 0;
 			let first = loop {
-				push(&mut buffer, key - 1, base - 100_000 + 2_000 + step * 100);
-				push(&mut buffer, key, base + step * 100);
+				push(&mut buffer, key - 1);
+				push(&mut buffer, key);
 				drain(&mut buffer, key - 1, &mut generation);
-				step += 1;
 				if let Poll::Ready(first) = buffer.poll_pending(&kio::Waiter::noop()) {
 					break first;
 				}
@@ -1722,17 +1720,17 @@ mod tests {
 			};
 			let dropped = buffer.reporting().dropped();
 			buffer.commit(first).unwrap();
-			// The old tail still queued, a delay's worth less the frame due now, is cut.
-			assert_eq!(buffer.reporting().dropped() - dropped, 4);
+			// The old tail still queued, the delay's worth read since the frame due now, is cut.
+			assert_eq!(buffer.reporting().dropped() - dropped, 5);
 			assert_eq!(drain(&mut buffer, key, &mut generation), 1);
 			buffer.adopted();
 			for _ in 0..20 {
 				moq_clock::sleep(TICK).await;
-				push(&mut buffer, key, base + step * 100);
-				step += 1;
+				push(&mut buffer, key);
 				drain(&mut buffer, key, &mut generation);
 			}
 		}
+		assert_eq!(generation, 3);
 	}
 
 	#[moq_clock::test]

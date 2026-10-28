@@ -496,6 +496,36 @@ async fn export_packs_aac_frames_up_to_their_buffer() {
 	}
 }
 
+/// The audio PES timestamps each slice of a stream starts, keyed off the PMT's PID
+/// assignments as they stand at that slice.
+fn audio_pts_by_slice(frames: &[Frame]) -> Vec<Vec<u64>> {
+	let bytes: Vec<u8> = frames.iter().flat_map(|f| f.payload.iter().copied()).collect();
+	let mut reader = TsPacketReader::new(Cursor::new(bytes.as_slice()));
+	let mut audio_pid = None;
+	let mut out = Vec::new();
+	for frame in frames {
+		let mut pts = Vec::new();
+		for _ in 0..frame.payload.len() / 188 {
+			let packet = reader.read_ts_packet().unwrap().expect("a whole packet");
+			match packet.payload {
+				Some(TsPayload::Pmt(pmt)) => {
+					audio_pid = pmt
+						.es_info
+						.iter()
+						.find(|es| es.stream_type == StreamType::AdtsAac)
+						.map(|es| es.elementary_pid);
+				}
+				Some(TsPayload::PesStart(pes)) if Some(packet.header.pid) == audio_pid => {
+					pts.extend(pes.header.pts.map(|pts| pts.as_u64()));
+				}
+				_ => {}
+			}
+		}
+		out.push(pts);
+	}
+	out
+}
+
 /// Collect PES presentation timestamps per elementary stream (video H.264, audio AAC),
 /// keyed off the PMT's PID assignments.
 fn collect_pes_pts(ts: &[u8]) -> (Vec<u64>, Vec<u64>) {
@@ -11199,7 +11229,7 @@ async fn repeated_stitches_keep_the_delay() {
 		.with_follow(Duration::from_secs(10));
 	let step = Duration::from_millis(20);
 	let start = tokio::time::Instant::now();
-	// Each frame out: when, its epoch, and the PTS it carries, if any.
+	// Each frame out: when, and its epoch.
 	let mut frames = Vec::new();
 	for ms in (0..4 * SWITCH).step_by(20) {
 		if ms > 0 && ms % SWITCH == 0 {
@@ -11214,8 +11244,7 @@ async fn repeated_stitches_keep_the_delay() {
 		loop {
 			match follower.poll_next(&moq_net::kio::Waiter::noop()) {
 				Poll::Ready(Ok(Some(frame))) => {
-					let epoch = follower.export().discontinuity();
-					frames.push((start.elapsed(), epoch, audio_pts(std::slice::from_ref(&frame))))
+					frames.push((start.elapsed(), follower.export().discontinuity(), frame))
 				}
 				Poll::Ready(end) => panic!("every publisher is healthy: {end:?}"),
 				Poll::Pending => break,
@@ -11228,14 +11257,15 @@ async fn repeated_stitches_keep_the_delay() {
 	// How far each PTS went out behind the wall time its frame was written, per epoch.
 	let mut latency: std::collections::BTreeMap<u64, Vec<Duration>> = Default::default();
 	let mut last: Option<(u64, u64)> = None;
-	for (elapsed, epoch, pts) in &frames {
+	let slices: Vec<Frame> = frames.iter().map(|(_, _, frame)| frame.clone()).collect();
+	for ((elapsed, epoch, _), pts) in frames.iter().zip(audio_pts_by_slice(&slices)) {
 		for pts in pts {
 			assert!(
-				last.is_none_or(|last| last < (*epoch, *pts)),
+				last.is_none_or(|last| last < (*epoch, pts)),
 				"out of order at {elapsed:?}: {last:?} then {:?}",
 				(epoch, pts)
 			);
-			last = Some((*epoch, *pts));
+			last = Some((*epoch, pts));
 			let written = Duration::from_millis(pts / 90 - 60_000 - epoch * SPACING);
 			latency.entry(*epoch).or_default().push(*elapsed - written);
 		}
