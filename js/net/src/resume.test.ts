@@ -1042,12 +1042,12 @@ function recvDisposition(sub: track.Subscriber): number | [number, number, numbe
 	return recv.kind;
 }
 
-test("a resumed reader reports what its serving copy gives up, once, and never serves it", async () => {
+test("a resumed reader reports a drop once and still serves a late group", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();
 	const ta = copy(a);
 	front.serve(a.consume());
-	const sub = front.consumer.track("seq").subscribe();
+	const sub = front.consumer.track("seq").subscribe({ maxDelay: Milli(60_000) });
 	ta.write(0);
 	expect(recvDisposition(sub)).toBe(0);
 	// A route failing is no verdict: another route may still deliver the group.
@@ -1059,12 +1059,34 @@ test("a resumed reader reports what its serving copy gives up, once, and never s
 	// Re-created under a run already reported dropped.
 	ta.write(3);
 	ta.write(4);
+	expect(recvDisposition(sub)).toBe(3);
 	expect(recvDisposition(sub)).toBe(4);
 	expect(recvDisposition(sub)).toBe("idle");
 
 	sub.close();
 	front.consumer.close();
 	a.close();
+});
+
+test("a separately polled drop does not deliver its run", () => {
+	const front = new Front();
+	const source = new BroadcastProducer();
+	const track = copy(source);
+	front.serve(source.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	track.write(0);
+	expect(drain(sub)).toEqual([0]);
+	const error = new StreamError(StreamCode.NotFound);
+	hooks.dropTrackGroups(track.producer, 2, 4, error);
+	expect(hooks.tryDrop(sub)).toEqual({ kind: "drop", start: 2, end: 4, error });
+	expect(hooks.tryDrop(sub)).toBeUndefined();
+	track.write(3);
+	expect(drain(sub)).toEqual([3]);
+	expect(hooks.tryDrop(sub)).toBeUndefined();
+	expect(drain(sub)).toEqual([]);
+	sub.close();
+	front.consumer.close();
+	source.close();
 });
 
 test("a resumed reader reports a group its serving copy skipped past the budget", async () => {
@@ -1171,7 +1193,7 @@ test("a front serving another front reports the inner serving route's drop", asy
 	const ta = copy(a);
 	inner.serve(a.consume());
 	outer.serve(inner.consumer);
-	const sub = outer.consumer.track("seq").subscribe();
+	const sub = outer.consumer.track("seq").subscribe({ maxDelay: Milli(60_000) });
 	ta.write(0);
 	expect(recvDisposition(sub)).toBe(0);
 	hooks.dropTrackGroups(ta.producer, 1, 3, new StreamError(StreamCode(70), { message: "cut" }));
@@ -1180,7 +1202,9 @@ test("a front serving another front reports the inner serving route's drop", asy
 	// Re-created under a run already reported dropped.
 	ta.write(2);
 	ta.write(3);
+	expect(recvDisposition(sub)).toBe(2);
 	expect(recvDisposition(sub)).toBe(3);
+	expect(recvDisposition(sub)).toBe("idle");
 
 	sub.close();
 	outer.consumer.close();

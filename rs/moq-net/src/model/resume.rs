@@ -2903,6 +2903,10 @@ mod test {
 		a.drop_groups(2..4, StreamError::NotFound);
 		assert_eq!(dropped(&mut sub), [(2..4, StreamError::NotFound)]);
 		assert_eq!(dropped(&mut sub), []);
+		write(&a, 3);
+		write(&a, 4);
+		assert_eq!(drain(&mut sub, false), [3, 4]);
+		assert_eq!(dropped(&mut sub), []);
 	}
 
 	/// A run the serving copy gave up waits while a copy it replaced may still deliver it

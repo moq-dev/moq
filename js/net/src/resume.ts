@@ -64,6 +64,7 @@ import {
 	type ResumeShell,
 	type ResumeSource,
 	type Run,
+	removeRun,
 	runGaps,
 } from "./internal.ts";
 import { grace } from "./ledger.ts";
@@ -672,7 +673,11 @@ class Reader implements ResumeSource {
 			const end = Math.min(run.end, cursor.end ?? run.end);
 			for (const gap of delivered.gaps(Math.max(run.start, cursor.start), end)) {
 				const [open] = runGaps(feeding, gap.start, gap.end);
-				if (open) return { kind: "drop", ...open, error: run.error };
+				if (open) {
+					// Report once without marking it delivered: a late fill may still land.
+					this.#drops = removeRun(this.#drops, open.start, open.end);
+					return { kind: "drop", ...open, error: run.error };
+				}
 			}
 		}
 		return undefined;
