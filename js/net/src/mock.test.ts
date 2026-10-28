@@ -10,10 +10,18 @@ async function pair() {
 	return { local, remote };
 }
 
+/** What a read sees once the stream fails. */
+function readError(readable: ReadableStream<Uint8Array>): Promise<unknown> {
+	return readable
+		.getReader()
+		.read()
+		.catch((e: unknown) => e);
+}
+
 test("a reset reaches the peer as its code alone, like a real wire", async () => {
 	const { local, remote } = await pair();
 	await local.writable.abort(new Error("local detail"));
-	const err = await remote.readable.getReader().read().catch((e: unknown) => e);
+	const err = await readError(remote.readable);
 	expect(err).toMatchObject({ source: "stream", streamErrorCode: 0 });
 	expect((err as Error).message).not.toContain("local detail");
 });
@@ -21,7 +29,7 @@ test("a reset reaches the peer as its code alone, like a real wire", async () =>
 test("a reset keeps the code its reason carries", async () => {
 	const { local, remote } = await pair();
 	await local.writable.abort(toTransport(StreamCode.Cancel, "cancel"));
-	const err = await remote.readable.getReader().read().catch((e: unknown) => e);
+	const err = await readError(remote.readable);
 	expect(err).toMatchObject({ source: "stream", streamErrorCode: StreamCode.Cancel });
 });
 

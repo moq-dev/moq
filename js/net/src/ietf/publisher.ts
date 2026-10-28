@@ -854,7 +854,9 @@ export class Publisher {
 			const fillAbort = new AbortController();
 			const unsubscribed = new Promise<void>((resolve) => {
 				unsubscribe = () => {
-					fillAbort.abort(new StreamError(StreamCode.Cancel, { message: "unsubscribed before the fill finished" }));
+					fillAbort.abort(
+						new StreamError(StreamCode.Cancel, { message: "unsubscribed before the fill finished" }),
+					);
 					resolve();
 				};
 			});
