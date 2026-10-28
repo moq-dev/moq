@@ -169,22 +169,22 @@ final class SmokeTests: XCTestCase {
 
     func testBroadcastIsReachableOnlyWhileAnnounced() async throws {
         let origin = OriginProducer()
-        let broadcast = try origin.createBroadcast(path: "live")
-        _ = try broadcast.publishTrack(name: "events")
+        let publication = try origin.createBroadcast(path: "live")
+        _ = try publication.broadcast.publishTrack(name: "events")
         let consumer = origin.consume()
         do {
             _ = try await consumer.requestBroadcast(path: "live")
             XCTFail("an unannounced broadcast must be unroutable")
         } catch {}
 
-        try broadcast.announce()
+        try publication.announce()
         let announced = try consumer.announced(prefix: "")
         guard case .start(let first) = try await nextRoute(announced) else {
             return XCTFail("expected an announcement")
         }
         XCTAssertEqual(first.prefix, "live")
 
-        try broadcast.unannounce()
+        try publication.unannounce()
         guard case .end(let retracted) = try await nextRoute(announced) else {
             return XCTFail("expected a retraction")
         }
@@ -194,11 +194,52 @@ final class SmokeTests: XCTestCase {
             XCTFail("an unannounced broadcast must be unroutable")
         } catch {}
 
-        try broadcast.announce()
+        try publication.announce()
         guard case .start = try await nextRoute(announced) else {
             return XCTFail("expected a reannouncement")
         }
         _ = try await consumer.requestBroadcast(path: "live")
+    }
+
+    /// Releasing a publication keeps its route; closing the broadcast ends it.
+    func testReleasingAPublicationKeepsItsRoute() async throws {
+        let origin = OriginProducer()
+        let consumer = origin.consume()
+        var publication: Publication? = try origin.createBroadcast(path: "live")
+        let broadcast = try XCTUnwrap(publication?.broadcast)
+        XCTAssertTrue(broadcast === publication?.broadcast)
+        try publication?.announce()
+        publication = nil
+        _ = try await consumer.requestBroadcast(path: "live")
+
+        try broadcast.close()
+        do {
+            _ = try await consumer.requestBroadcast(path: "live")
+            XCTFail("a closed broadcast must be unroutable")
+        } catch {}
+    }
+
+    /// A publication outliving its closed broadcast cannot touch the one replacing it.
+    func testStalePublicationLeavesItsReplacementAlone() async throws {
+        let origin = OriginProducer()
+        let stale = try origin.createBroadcast(path: "live")
+        try stale.announce()
+        try stale.broadcast.close()
+
+        let replacement = try origin.createBroadcast(path: "live")
+        try replacement.announce()
+        XCTAssertThrowsError(try stale.announce()) { error in
+            guard case MoqError.Closed = error else {
+                return XCTFail("expected Closed, got \(error)")
+            }
+        }
+        XCTAssertThrowsError(try stale.unannounce()) { error in
+            guard case MoqError.Closed = error else {
+                return XCTFail("expected Closed, got \(error)")
+            }
+        }
+        _ = try await origin.consume().requestBroadcast(path: "live")
+        try replacement.broadcast.close()
     }
 
     func testAnnouncedPatternCaptures() async throws {
@@ -217,23 +258,23 @@ final class SmokeTests: XCTestCase {
     func testAnnouncedEpochRestarts() async throws {
         let origin = OriginProducer()
         let announced = try origin.consume().announced(prefix: "")
-        let broadcast = try origin.createBroadcast(path: "epoch")
+        let publication = try origin.createBroadcast(path: "epoch")
 
         let first = mintEpoch()
-        try broadcast.announce(route: AnnounceRoute(epoch: first))
+        try publication.announce(route: AnnounceRoute(epoch: first))
         guard case .start(let start) = try await nextRoute(announced) else {
             return XCTFail("expected an announcement")
         }
         XCTAssertEqual(start.route.epoch, first)
 
         let second = mintEpoch()
-        try broadcast.announce(route: AnnounceRoute(epoch: second))
+        try publication.announce(route: AnnounceRoute(epoch: second))
         guard case .restart(let restart) = try await nextRoute(announced) else {
             return XCTFail("expected a restart")
         }
         XCTAssertEqual(restart.route.epoch, second)
 
-        XCTAssertThrowsError(try broadcast.announce(route: AnnounceRoute(epoch: "not-an-epoch")))
+        XCTAssertThrowsError(try publication.announce(route: AnnounceRoute(epoch: "not-an-epoch")))
     }
 
     func testDynamicServesARequestUnderAPrefix() async throws {
@@ -244,9 +285,11 @@ final class SmokeTests: XCTestCase {
         }
         let request = try await dynamic.requestedBroadcast()
         XCTAssertEqual(try request.path, "live/cam")
-        let served = try request.prepare(epoch: mintEpoch()).publish()
+        let prepared = try request.prepare(epoch: mintEpoch())
+        let served = try prepared.publish()
+        XCTAssertTrue(served.broadcast === prepared.broadcast)
         _ = try await pending.value
-        try served.close()
+        try served.broadcast.close()
         dynamic.cancel()
     }
 
@@ -577,14 +620,15 @@ final class SmokeTests: XCTestCase {
     /// as frames are read.
     func testAudioConsumerReportsItsPlayoutDelay() async throws {
         let origin = OriginProducer()
-        let broadcast = try origin.createBroadcast(path: "audio-delay")
+        let publication = try origin.createBroadcast(path: "audio-delay")
+        let broadcast = publication.broadcast
         let audio = try Audio.Producer(
             catalog: Media.CatalogProducer(broadcast: broadcast),
             input: AudioEncoderInput(format: .f32, sampleRate: 48_000, channels: 1),
             output: AudioEncoderOutput(codec: AudioCodec.opus(), ),
             track: "mic"
         )
-        try broadcast.announce()
+        try publication.announce()
 
         let consumer = try await origin.consume().requestBroadcast(path: "audio-delay")
         let catalogs = try await Media.CatalogConsumer.subscribe(broadcast: consumer)
@@ -626,14 +670,15 @@ final class SmokeTests: XCTestCase {
     /// demand and stays readable after its consumer is cancelled.
     func testDecodeVideoFrame() async throws {
         let origin = OriginProducer()
-        let broadcast = try origin.createBroadcast(path: "video-decode-frame")
+        let publication = try origin.createBroadcast(path: "video-decode-frame")
+        let broadcast = publication.broadcast
         let video = try Video.Producer(
             catalog: Media.CatalogProducer(broadcast: broadcast),
             input: VideoEncoderInput(format: .rgba, width: 320, height: 240, framerate: Video.FrameRate(numerator: 30000, denominator: 1001)),
             output: VideoEncoderOutput(codec: .h264, kind: .software),
             track: "camera"
         )
-        try broadcast.announce()
+        try publication.announce()
 
         // Seed the track so a subscriber joining below lands on encoded media.
         let rgba = Data(repeating: 0x80, count: 320 * 240 * 4)
