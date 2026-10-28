@@ -7699,6 +7699,9 @@ impl ServeLoop {
 		if serve.subscriber.version.resolves_anchors() {
 			serving.anchored();
 		}
+		if serve.subscriber.version.fills_from_start() {
+			serving.fills_from_start();
+		}
 		let serving = serving.commit();
 		Self {
 			edge: serving.consume(),

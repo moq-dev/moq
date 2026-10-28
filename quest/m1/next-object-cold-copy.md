@@ -20,7 +20,3 @@ with Next Object before any frame of `g` arrives. If it reproduces, keep the
 reported Object ID out of the reader's frame index, as JS does.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Interop covers late join and FETCH](/quest/m1/interop-coverage/late-join.md) - the cross-implementation late-join case

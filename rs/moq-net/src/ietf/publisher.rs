@@ -990,7 +990,8 @@ impl Publisher {
 		else {
 			return Ok(None);
 		};
-		let requesting = origin.request_broadcast(path, epoch);
+		// The immediate lookup: answering a peer never starts discovery of its own.
+		let requesting = origin.request(path.clone(), epoch.as_ref());
 		self.until_withdrawn(stream, |waiter| requesting.poll_ok(waiter))
 			.await
 			.transpose()
@@ -1407,7 +1408,7 @@ impl Publisher {
 						))
 					};
 					// We just received a subscribe for this exact namespace, so the peer must have
-					// already seen the announcement. `request_broadcast` resolves it immediately, or
+					// already seen the announcement. The immediate lookup resolves it at once, or
 					// falls back to the route covering it (an `origin::Requests`), if any. Pinned to
 					// the instance it names, if any: another is refused, never served.
 					let broadcast = match self.resolve(&mut stream, &msg.track_namespace, msg.epoch.clone()).await {

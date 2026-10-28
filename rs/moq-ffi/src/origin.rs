@@ -464,10 +464,8 @@ impl MoqOriginConsumer {
 
 	/// Follow the broadcast at `path`, resolving each publisher instance that serves it.
 	///
-	/// This is how you resolve a path right after connecting: announcements arrive over the
-	/// session after it opens, so `request_broadcast` on its own races them. A
-	/// broadcast created on this origin resolves once it is announced, like a
-	/// remote one.
+	/// Unlike `request_broadcast`, this waits for future announcements and keeps following
+	/// publisher instances. A local broadcast resolves once announced, like a remote one.
 	pub fn announced_broadcast(&self, path: String) -> Result<Arc<MoqAnnouncedBroadcast>, MoqError> {
 		let _guard = crate::ffi::enter();
 		self.driver.check()?;
@@ -489,14 +487,9 @@ impl MoqOriginConsumer {
 	/// Resolves through the best announced route covering the path: an announced broadcast
 	/// on this origin, a route a session announced (served on demand by that session), or a
 	/// dynamic handler on the origin. The most specific prefix wins, then the cheapest. An
-	/// unannounced broadcast is unroutable. Unlike `announced_broadcast`, this answers for what is
-	/// reachable *now* and errors if nothing can serve the path. Drop the returned future to
-	/// cancel.
-	///
-	/// Calling this straight after connecting therefore races the session's announcements
-	/// and can report a live broadcast as unroutable. Await `announced_broadcast` first. A
-	/// client only asks the relay about paths something watches, through `announced` or
-	/// `announced_broadcast`, so a path nothing watches stays unroutable.
+	/// unannounced broadcast is unroutable once discovery has synced without a covering route.
+	/// The request owns discovery of its path and retries route churn until then; no separate
+	/// announcement stream is needed. Drop the returned future to cancel.
 	pub async fn request_broadcast(&self, path: String) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
 		let broadcast = self
 			.driver

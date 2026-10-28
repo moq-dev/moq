@@ -281,10 +281,10 @@ fn close_kind(error: &(dyn std::error::Error + 'static)) -> moq::CloseKind {
 	}
 	#[cfg(feature = "quic")]
 	if let Some(error) = error.downcast_ref::<crate::quic::web::SessionError>() {
-		use crate::quic::{driver::ConnectionError, web::SessionError};
+		use crate::quic::{driver::connection::Error as ConnectionError, web::SessionError};
 		return match error {
 			SessionError::ConnectionError(ConnectionError::TimedOut) => moq::CloseKind::IdleTimeout,
-			SessionError::ConnectionError(ConnectionError::LocallyClosed) => moq::CloseKind::Closed,
+			SessionError::ConnectionError(ConnectionError::LocallyClosed { .. }) => moq::CloseKind::Closed,
 			_ => moq::CloseKind::Transport,
 		};
 	}
@@ -303,7 +303,7 @@ fn close_kind(error: &(dyn std::error::Error + 'static)) -> moq::CloseKind {
 #[cfg(all(test, feature = "quic"))]
 mod outcome_tests {
 	use super::*;
-	use crate::quic::{driver::ConnectionError, web::SessionError};
+	use crate::quic::{driver::connection::Error as ConnectionError, web::SessionError};
 	use moq_net::transport::Error as _;
 
 	#[test]
@@ -317,7 +317,10 @@ mod outcome_tests {
 			SessionError::ConnectionError(ConnectionError::TimedOut),
 		));
 		assert_eq!(idle.close_kind(), moq::CloseKind::IdleTimeout);
-		let local = Error(SessionError::ConnectionError(ConnectionError::LocallyClosed));
+		let local = Error(SessionError::ConnectionError(ConnectionError::LocallyClosed {
+			code: 0u32.into(),
+			reason: String::new(),
+		}));
 		assert!(matches!(
 			moq_net::Error::from_transport(local),
 			moq_net::Error::Session(moq_net::SessionError::Cancel)

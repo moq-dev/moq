@@ -131,7 +131,7 @@ mod linux {
 			let client_sock = handle
 				.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), ablation.config.clone())
 				.expect("client socket");
-			let mut dial = quic::client::Config::new(server_addr, "localhost");
+			let mut dial = quic::client::Config::default();
 			dial.alpn = vec![ALPN.to_string()];
 			dial.verify = false;
 
@@ -158,7 +158,9 @@ mod linux {
 			// Establish and subscribe once; iterations measure steady state.
 			let (_session, mut sub) = worker
 				.block_on(async {
-					let conn = quic::client::connect(client_sock, &dial).await.expect("quic connect");
+					let conn = quic::client::connect(client_sock, &dial, server_addr, "localhost")
+						.await
+						.expect("quic connect");
 					let (session, driver) = moq_net::Client::new()
 						.with_subscriber(sub_origin.clone())
 						.connect(

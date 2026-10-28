@@ -1,7 +1,7 @@
 /**
  * Test doubles for in-process testing.
  *
- * Creates paired client/server transports connected via TransformStreams.
+ * Creates paired client/server transports connected by in-memory streams.
  */
 
 import { Consumer as BroadcastConsumer } from "./broadcast.ts";
@@ -32,26 +32,88 @@ const WRITABLE_STRATEGY: QueuingStrategy<Uint8Array> = { highWaterMark: 256 };
 const READABLE_STRATEGY: QueuingStrategy<Uint8Array> = { highWaterMark: 256 };
 
 /** Every stream of a transport pair, so a session close can fail the ones still open. */
-type StreamSet = Set<TransformStreamDefaultController<Uint8Array>>;
+type StreamSet = Set<(err: Error) => void>;
 
-function newStream(streams: StreamSet): TransformStream<Uint8Array, Uint8Array> {
-	return new TransformStream(
+/**
+ * What the peer sees of a local reset or stop reason: only its code, as on a real wire.
+ * WebTransport sends a `WebTransportError`'s `streamErrorCode` and 0 for anything else.
+ */
+function onWire(reason: unknown, message: string): Error {
+	const { source, streamErrorCode } = (reason ?? {}) as { source?: unknown; streamErrorCode?: unknown };
+	const code = source === "stream" && typeof streamErrorCode === "number" ? streamErrorCode : 0;
+	return Object.assign(new Error(`${message}: ${code}`), { source: "stream" as const, streamErrorCode: code });
+}
+
+/**
+ * One direction of a stream. A reset (`abort`) reaches the reader, and a stop (`cancel`) the
+ * writer, carrying only the code. A TransformStream would hand the peer the local reason.
+ */
+function newStream(streams: StreamSet): { readable: ReadableStream<Uint8Array>; writable: WritableStream<Uint8Array> } {
+	let reader!: ReadableStreamDefaultController<Uint8Array>;
+	let writer!: WritableStreamDefaultController;
+	// Set once either side ends early, so a write waiting on a full reader gives up.
+	let ended = false;
+	let wake: (() => void) | undefined;
+	const resume = () => {
+		wake?.();
+		wake = undefined;
+	};
+	const end = () => {
+		ended = true;
+		resume();
+	};
+
+	const readable = new ReadableStream<Uint8Array>(
 		{
 			start(controller) {
-				streams.add(controller);
+				reader = controller;
 			},
-			// Copy each chunk to simulate real WebTransport's kernel-boundary copy.
-			// Without this, Writer's scratch buffer reuse corrupts queued data.
-			transform(chunk, controller) {
-				controller.enqueue(new Uint8Array(chunk));
+			pull: resume,
+			cancel(reason) {
+				writer.error(onWire(reason, "stop sending"));
+				end();
+			},
+		},
+		READABLE_STRATEGY,
+	);
+
+	const writable = new WritableStream<Uint8Array>(
+		{
+			start(controller) {
+				writer = controller;
+				controller.signal.addEventListener("abort", end);
+			},
+			async write(chunk) {
+				// Copy each chunk to simulate real WebTransport's kernel-boundary copy.
+				// Without this, Writer's scratch buffer reuse corrupts queued data.
+				reader.enqueue(new Uint8Array(chunk));
+				// Backpressure: wait for the reader to drain, as a TransformStream would.
+				while (!ended && (reader.desiredSize ?? 0) <= 0) {
+					await new Promise<void>((resolve) => {
+						wake = resolve;
+					});
+				}
+			},
+			close() {
+				reader.close();
+			},
+			abort(reason) {
+				reader.error(onWire(reason, "reset stream"));
 			},
 		},
 		WRITABLE_STRATEGY,
-		READABLE_STRATEGY,
 	);
+
+	streams.add((err) => {
+		reader.error(err);
+		writer.error(err);
+		end();
+	});
+
+	return { readable, writable };
 }
 
-/** A fake {@link WebTransport} backed by TransformStreams, paired with a peer. */
+/** A fake {@link WebTransport} backed by in-memory streams, paired with a peer. */
 export class MockTransport implements WebTransport {
 	readonly protocol: string;
 	readonly ready: Promise<undefined>;
@@ -184,7 +246,7 @@ export class MockTransport implements WebTransport {
 		const peer = this.#peer;
 		if (!peer) throw new Error("no peer");
 
-		// Create two TransformStreams for the two directions
+		// One stream for each direction
 		const c2s = newStream(this.#streams);
 		const s2c = newStream(this.#streams);
 
@@ -247,8 +309,8 @@ export class MockTransport implements WebTransport {
 
 		// Shaped like the WebTransportError a real session close fails its streams with.
 		const closed = Object.assign(new Error("session closed"), { source: "session", streamErrorCode: null });
-		for (const stream of this.#streams) {
-			stream.error(closed);
+		for (const fail of this.#streams) {
+			fail(closed);
 		}
 		this.#streams.clear();
 

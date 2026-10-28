@@ -5917,7 +5917,6 @@ dependencies = [
  "reqwest",
  "rustc-hash 2.1.3",
  "rustls",
- "rustls-native-certs",
  "rustls-platform-verifier",
  "rustls-webpki",
  "serde",

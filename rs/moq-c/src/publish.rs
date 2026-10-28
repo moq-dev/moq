@@ -672,12 +672,18 @@ impl Publish {
 
 	/// Insert or replace a caller-authored video rendition in the broadcast's catalog.
 	///
-	/// Errors if a media importer owns the name, since it publishes and retires its own rendition.
-	/// The catalog is republished automatically.
+	/// Errors if a media importer owns the name, since it publishes and retires its own rendition,
+	/// or if the config changes the rendition's track identity, which takes a new name. The catalog
+	/// is republished automatically.
 	pub fn video_config(&mut self, broadcast: Id, name: &str, config: hang::catalog::VideoConfig) -> Result<(), Error> {
 		let broadcast = self.broadcast_mut(broadcast)?;
 		if !broadcast.video.contains_key(name) && broadcast.catalog.is_claimed::<hang::catalog::VideoConfig>(name) {
 			return Err(Error::Hang(hang::Error::Duplicate(name.to_string())));
+		}
+		if let Some(previous) = broadcast.video.get(name)
+			&& !previous.same_identity(&config)
+		{
+			return Err(moq_mux::Error::IdentityChanged(name.to_string()).into());
 		}
 		broadcast.video.insert(name.to_string(), config.clone());
 		let mut catalog = broadcast.catalog.modify()?;
@@ -693,6 +699,11 @@ impl Publish {
 		let broadcast = self.broadcast_mut(broadcast)?;
 		if !broadcast.audio.contains_key(name) && broadcast.catalog.is_claimed::<hang::catalog::AudioConfig>(name) {
 			return Err(Error::Hang(hang::Error::Duplicate(name.to_string())));
+		}
+		if let Some(previous) = broadcast.audio.get(name)
+			&& !previous.same_identity(&config)
+		{
+			return Err(moq_mux::Error::IdentityChanged(name.to_string()).into());
 		}
 		broadcast.audio.insert(name.to_string(), config.clone());
 		let mut catalog = broadcast.catalog.modify()?;

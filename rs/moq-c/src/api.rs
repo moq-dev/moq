@@ -2138,12 +2138,10 @@ pub extern "C" fn moq_origin_announced_broadcast_cancel(task: u32) -> i32 {
 
 /// Request a broadcast from an origin by path, resolving as soon as it can be served.
 ///
-/// Resolves against what is announced *now*, where [moq_origin_announced_broadcast] waits
-/// indefinitely: it returns an announced broadcast at once, and fails when none is reachable,
-/// including a broadcast created but not announced. It does NOT wait for a later
-/// announcement. Serve on-demand paths with [moq_origin_requests]. A client session only
-/// asks its peer about paths something watches, through [moq_origin_announced] or
-/// [moq_origin_announced_broadcast], so a path nothing watches is unreachable on it.
+/// Owns discovery of the path and retries route churn while resolving one publisher instance.
+/// It fails as unroutable once discovery has synced without a covering route, including a
+/// broadcast created but not announced. No separate announcement stream is needed.
+/// Serve on-demand paths with [moq_origin_requests].
 ///
 /// `on_broadcast` is invoked with a positive broadcast handle once served, then exactly once more
 /// with a terminal code: `0` (finished, including after [moq_origin_request_cancel]) or a negative
@@ -2613,10 +2611,12 @@ pub unsafe extern "C" fn moq_publish_video_properties(broadcast: u32, properties
 /// reading a rendition out of a catalog, it writes one into the catalog of a
 /// broadcast created with [moq_origin_create_broadcast]. The rendition is keyed by
 /// `config.name`; calling this again with the same name replaces the rendition
-/// you declared, so a config can be refined in place. It fails only when a
+/// you declared, so a config can be refined in place. It fails when a
 /// [moq_publish_video] track owns the name, since that track publishes and
-/// retires its own rendition. The updated catalog is published to subscribers
-/// automatically.
+/// retires its own rendition, and when the replacement changes the track's
+/// identity (`codec`, `description`, or `container`), since a track name always
+/// means the same content: publish the changed media under a new name instead.
+/// The updated catalog is published to subscribers automatically.
 ///
 /// The struct fields are read as inputs:
 /// - `name` / `codec` are required (NOT NULL terminated) string slices.
@@ -2663,8 +2663,10 @@ pub unsafe extern "C" fn moq_publish_video_config(broadcast: u32, config: *const
 ///
 /// This is the producer counterpart to [moq_consume_audio_config]. The rendition
 /// is keyed by `config.name`, on the same terms as [moq_publish_video_config]:
-/// a repeat call replaces your own rendition, and a name a [moq_publish_audio]
-/// track owns is refused. The updated catalog is published to subscribers
+/// a repeat call replaces your own rendition, a name a [moq_publish_audio]
+/// track owns is refused, and so is a replacement that changes the track's
+/// identity (`codec`, `description`, `container`, `sample_rate`, or
+/// `channel_count`). The updated catalog is published to subscribers
 /// automatically.
 ///
 /// The struct fields are read as inputs:

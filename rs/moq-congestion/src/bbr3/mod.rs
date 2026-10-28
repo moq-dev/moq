@@ -130,6 +130,12 @@ const MIN_PROBE_WAIT_MS: u64 = 2000;
 /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.8.3>
 const MAX_ADDED_PROBE_WAIT_MS: u64 = 1000;
 
+/// How often an application-limited sample advances the max-bw window, which no probe cycle
+/// finishes while the application holds the flow below its estimate: the longest
+/// BBR.bw_probe_wait, so the window spans at least the time a bulk flow's does.
+const APP_LIMITED_CYCLE: Duration =
+    Duration::from_millis(MIN_PROBE_WAIT_MS + MAX_ADDED_PROBE_WAIT_MS);
+
 /// Substates when probing bandwidth
 /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3>
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -224,6 +230,8 @@ pub struct Bbr3 {
     /// since the BBR.max_bw_filter only needs to track samples from two time slots: the previous
     /// ProbeBW cycle and the current ProbeBW cycle.
     cycle_count: u64,
+    /// When BBR.cycle_count last advanced, or the first sample if it never has
+    cycle_count_stamp: Option<Instant>,
     /// equivalent to C.cwnd: The transport sender's congestion window. When transmitting data, the
     /// sending connection ensures that C.inflight does not exceed C.cwnd.
     cwnd: u64,
@@ -370,9 +378,9 @@ pub struct Bbr3 {
     /// equivalent to BBR.inflight_latest: a 1-round-trip max of delivered volume of data
     /// (RS.delivered).
     inflight_latest: u64,
-    /// equivalent to BBR.max_bw_filter: A windowed max filter for RS.delivery_rate samples, for
-    /// estimating BBR.max_bw.
-    max_bw_filter: MaxFilter,
+    /// equivalent to BBR.max_bw_filter: the maximum RS.delivery_rate of each of the last
+    /// BBR.MaxBwFilterLen cycles, indexed by BBR.cycle_count, as Linux BBRv3's `bw_hi`
+    max_bw_filter: [f64; MAX_BW_FILTER_LEN],
     /// equivalent to BBR.extra_acked_interval_start: The start of the time interval for estimating
     /// the excess amount of data acknowledged due to aggregation effects.
     extra_acked_interval_start: Option<Instant>,
@@ -574,6 +582,7 @@ impl Bbr3 {
             is_cwnd_limited: false,
             cwnd_limited_this_round: false,
             cycle_count: 0,
+            cycle_count_stamp: None,
             cwnd: initial_cwnd,
             pacing_rate,
             pacer: Pacer::new(
@@ -617,7 +626,7 @@ impl Bbr3 {
             undo_inflight_shortterm: u64::MAX,
             bw_latest: 0.0,
             inflight_latest: 0,
-            max_bw_filter: MaxFilter::new(MAX_BW_FILTER_LEN as u64),
+            max_bw_filter: [0.0; MAX_BW_FILTER_LEN],
             extra_acked_interval_start: None,
             extra_acked_delivered: 0,
             extra_acked_filter: MaxFilter::new(EXTRA_ACKED_FILTER_LEN as u64),
@@ -672,10 +681,17 @@ impl Bbr3 {
 
     /// equivalent to BBRUpdateModelAndState <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.2.3>
     ///
-    /// `prior_delivered` is P.delivered of the packet the ACK's sample came from.
-    fn update_model_and_state(&mut self, prior_delivered: u64, newly_acked: u64, now: Instant) {
+    /// `prior_delivered` is P.delivered of the packet the ACK's sample came from, and
+    /// `app_limited` the transport's report that the application ran out of data.
+    fn update_model_and_state(
+        &mut self,
+        prior_delivered: u64,
+        newly_acked: u64,
+        app_limited: bool,
+        now: Instant,
+    ) {
         self.update_latest_delivery_signals();
-        self.update_congestion_signals(prior_delivered);
+        self.update_congestion_signals(prior_delivered, app_limited, now);
         self.update_ack_aggregation(newly_acked, now);
         self.check_full_bw_reached();
         self.check_startup_done();
@@ -705,8 +721,8 @@ impl Bbr3 {
     }
 
     /// equivalent to BBRUpdateCongestionSignals <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.10.3>
-    fn update_congestion_signals(&mut self, prior_delivered: u64) {
-        self.update_max_bw(prior_delivered);
+    fn update_congestion_signals(&mut self, prior_delivered: u64, app_limited: bool, now: Instant) {
+        self.update_max_bw(prior_delivered, app_limited, now);
         if !self.loss_round_start {
             return;
         }
@@ -716,16 +732,35 @@ impl Bbr3 {
     }
 
     /// equivalent to BBRUpdateMaxBw <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.5>
-    fn update_max_bw(&mut self, prior_delivered: u64) {
+    ///
+    /// The draft discards an application-limited sample below BBR.max_bw and advances the window
+    /// only as a probe ends, as Linux BBRv3 and QUICHE BBR2 do. A flow the application holds
+    /// below its estimate never probes, so it would keep a maximum the path may have long since
+    /// lost. While the transport reports the application ran out of data, this admits its
+    /// application-limited samples, and one advances the window once per [`APP_LIMITED_CYCLE`].
+    /// A sample below the maximum cannot lower it within the window, so BBR.max_bw falls only as
+    /// the window ages, to the most the flow has delivered since. Samples the controller marks
+    /// application-limited itself, as ProbeRTT does, still follow the draft, as does one that
+    /// delivered a single packet: it measures the round trip rather than the path, so keep-alives
+    /// across an idle period never age the window.
+    fn update_max_bw(&mut self, prior_delivered: u64, app_limited: bool, now: Instant) {
         self.update_round(prior_delivered);
-        if let Some(rate_sample) = self.rs
-            && rate_sample.delivery_rate > 0.0
-            && (rate_sample.delivery_rate >= self.max_bw || !rate_sample.is_app_limited)
-        {
-            self.max_bw_filter
-                .update_max(self.cycle_count, rate_sample.delivery_rate.round() as u64);
-
-            self.max_bw = self.max_bw_filter.get_max() as f64;
+        let Some(rate_sample) = self.rs else {
+            return;
+        };
+        if rate_sample.delivery_rate <= 0.0 {
+            return;
+        }
+        let starved =
+            app_limited && rate_sample.is_app_limited && rate_sample.delivered > self.smss;
+        let stamp = *self.cycle_count_stamp.get_or_insert(now);
+        if starved && now >= stamp.checked_add(APP_LIMITED_CYCLE).unwrap_or(stamp) {
+            self.advance_max_bw_filter(now);
+        }
+        if starved || !rate_sample.is_app_limited || rate_sample.delivery_rate >= self.max_bw {
+            let slot = &mut self.max_bw_filter[self.cycle_count as usize % MAX_BW_FILTER_LEN];
+            *slot = slot.max(rate_sample.delivery_rate.round());
+            self.max_bw = self.max_bw_filter.iter().copied().fold(0.0, f64::max);
         }
     }
 
@@ -936,7 +971,7 @@ impl Bbr3 {
         if !self.full_bw_reached {
             return;
         }
-        self.adapt_long_term_model(newly_acked);
+        self.adapt_long_term_model(newly_acked, now);
         let state = self.state;
         match state {
             BbrState::ProbeBw(ProbeBwSubstate::Down) => {
@@ -981,7 +1016,7 @@ impl Bbr3 {
     ///
     /// The probe's feedback ends once, on the first round after it stops, so later losses are not
     /// taken as probe feedback and later rounds do not age the max-bw window again.
-    fn adapt_long_term_model(&mut self, newly_acked: u64) {
+    fn adapt_long_term_model(&mut self, newly_acked: u64, now: Instant) {
         if self.ack_phase == AckPhase::ProbeStarting && self.round_start {
             self.ack_phase = AckPhase::ProbeFeedback;
         }
@@ -992,7 +1027,7 @@ impl Bbr3 {
                 && let Some(rate_sample) = self.rs
                 && !rate_sample.is_app_limited
             {
-                self.advance_max_bw_filter();
+                self.advance_max_bw_filter(now);
             }
         }
         if !self.is_inflight_too_high() {
@@ -1011,8 +1046,18 @@ impl Bbr3 {
     }
 
     /// equivalent to BBRAdvanceMaxBwFilter <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.6>
-    fn advance_max_bw_filter(&mut self) {
+    ///
+    /// The oldest cycle's samples leave the window. A cycle without samples is not a cycle, so
+    /// it keeps the window, as Linux BBRv3's `bbr_advance_max_bw_filter` does; otherwise two
+    /// advances in a row would empty it.
+    fn advance_max_bw_filter(&mut self, now: Instant) {
+        self.cycle_count_stamp = Some(now);
+        if self.max_bw_filter[self.cycle_count as usize % MAX_BW_FILTER_LEN] == 0.0 {
+            return;
+        }
         self.cycle_count = self.cycle_count.saturating_add(1);
+        self.max_bw_filter[self.cycle_count as usize % MAX_BW_FILTER_LEN] = 0.0;
+        self.max_bw = self.max_bw_filter.iter().copied().fold(0.0, f64::max);
     }
 
     /// equivalent to BBRIsTimeToProbeBW <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.8.3>
@@ -1200,7 +1245,7 @@ impl Bbr3 {
                 )
                 && self.rs.is_some_and(|rs| !rs.is_app_limited)
             {
-                self.advance_max_bw_filter();
+                self.advance_max_bw_filter(now);
             }
             self.enter_probe_rtt();
             self.save_cwnd();
@@ -1784,7 +1829,7 @@ impl Controller for Bbr3 {
             return;
         };
         self.rs = Some(rs);
-        self.update_model_and_state(rs.prior_delivered, newly_acked, ack.now);
+        self.update_model_and_state(rs.prior_delivered, newly_acked, ack.app_limited, ack.now);
         self.update_control_parameters(newly_acked);
     }
 
@@ -6926,9 +6971,7 @@ mod test {
     fn app_limited_sample_keeps_its_label() {
         let mut sim = scripted();
         // A 10 MB/s maximum whose filter window has passed.
-        sim.bbr.max_bw_filter.update_max(0, 10_000_000);
         sim.bbr.max_bw = 10_000_000.0;
-        sim.bbr.cycle_count = MAX_BW_FILTER_LEN as u64 + 1;
         // The application ran dry before packet 0.
         sim.bbr.rate.app_limited = 1;
 
@@ -7247,6 +7290,30 @@ mod test {
         assert_eq!(sim.bbr.max_bw, 12_000_000.0);
     }
 
+    /// A flow the application holds below its maximum ages the max-bw window once per
+    /// `APP_LIMITED_CYCLE`, so the maximum falls to the rate it delivers after two of them.
+    #[test]
+    fn app_limited_flow_ages_max_bw() {
+        let mut sim = probed();
+        let cycle = APP_LIMITED_CYCLE.as_nanos() as u64;
+        // Rounds of 10 packets every 10ms deliver 1.2 MB/s, each after the application ran dry.
+        let mut now = 20 * MS;
+        while now <= 2 * cycle + 20 * MS {
+            sim.starve();
+            let first = sim.pn;
+            sim.send(now, 10);
+            sim.ack(now + 10 * MS, first..sim.pn, true);
+            assert!(sim.bbr.rs.unwrap().is_app_limited);
+            let expected = if now + 10 * MS < 2 * cycle + 10 * MS {
+                12_000_000.0
+            } else {
+                1_200_000.0
+            };
+            assert_eq!(sim.bbr.max_bw, expected, "at {}ms", (now + 10 * MS) / MS);
+            now += 10 * MS;
+        }
+    }
+
     /// ProbeRTT entered mid-probe ends the probe's feedback: the window ages once, on entry, and
     /// neither ProbeRTT's protected rounds nor later cruise rounds age it again.
     #[test]
@@ -7288,7 +7355,7 @@ mod test {
         sim.round(10 * MS, 100, 10 * MS);
         sim.bbr.probe_rtt_interval = Duration::from_secs(PROBE_RTT_INTERVAL_SEC);
         assert_eq!(sim.bbr.state, BbrState::ProbeRtt);
-        sim.bbr.cycle_count += MAX_BW_FILTER_LEN as u64 + 1;
+        sim.bbr.max_bw_filter = [0.0; MAX_BW_FILTER_LEN];
         sim
     }
 

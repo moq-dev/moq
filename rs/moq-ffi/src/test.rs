@@ -220,9 +220,8 @@ fn video_init(format: MoqVideoFormat, data: Vec<u8>) -> MoqVideoInit {
 
 /// Wait for `path` to be announced on `origin` and return its consumer.
 ///
-/// A created broadcast becomes routable asynchronously, and resolving a reference goes through
-/// `request_broadcast`, which reports a not-yet-announced path as unroutable rather than waiting.
-/// So every broadcast a test resolves has to be awaited, not just the one it starts from.
+/// A local reference published asynchronously may appear after discovery has synced empty.
+/// These tests wait for that future announcement before resolving the reference.
 async fn await_announced(consumer: &MoqOriginConsumer, path: &str) -> Arc<MoqBroadcastConsumer> {
 	let announced = consumer.announced_broadcast(path.into()).unwrap();
 	tokio::time::timeout(TIMEOUT, announced.available())
@@ -2746,6 +2745,41 @@ async fn video_publish_named_track() {
 	assert!(catalog.video.contains_key("hd"), "catalog: {:?}", catalog.video.keys());
 }
 
+/// A keyframe whose SPS names another level is a new decoder identity, so the track producer moves
+/// to a new track, and its demand follows rather than watching the one that ended.
+#[tokio::test]
+async fn video_track_demand_follows_a_new_level() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let hd = MoqMediaTrackProducer::video(
+		&broadcast,
+		MoqMediaTarget::Named {
+			name: Some("hd".into()),
+		},
+		video_init(MoqVideoFormat::Avc3, h264_init()),
+	)
+	.unwrap();
+	let keyframe = |level: u8| {
+		let mut bytes = h264_init();
+		// The SPS's level_idc, after its NAL header, profile, and constraint bytes.
+		bytes[7] = level;
+		bytes.extend_from_slice(&[0, 0, 0, 1, 0x65, 0x88, 0x84, 0x21]);
+		bytes
+	};
+	hd.write_frame(MoqFrame {
+		payload: keyframe(0x1f),
+		timestamp_us: Some(0),
+	})
+	.unwrap();
+	assert_eq!(hd.demand().unwrap().name(), "hd");
+	hd.write_frame(MoqFrame {
+		payload: keyframe(0x28),
+		timestamp_us: Some(40_000),
+	})
+	.unwrap();
+	assert_eq!(hd.demand().unwrap().name(), "hd/1");
+	hd.finish().unwrap();
+}
+
 /// The raw-stream producer frames Annex-B written in arbitrary chunks, and
 /// `finish` publishes the last access unit even with no start code after it.
 #[tokio::test]
@@ -4711,7 +4745,7 @@ async fn cancel_retracts_the_route_synchronously() {
 	let dynamic = serve(&origin, "");
 	let inner = origin.inner().consume();
 
-	let queued = inner.request_broadcast("x", None).into_inner();
+	let mut queued = inner.request_broadcast("x", None).into_inner();
 	assert!(
 		queued.poll_ok(&kio::Waiter::noop()).is_pending(),
 		"the route must serve while the handler lives"
@@ -4719,7 +4753,7 @@ async fn cancel_retracts_the_route_synchronously() {
 	drop(queued);
 
 	dynamic.cancel();
-	let verdict = inner.request_broadcast("y", None).into_inner();
+	let mut verdict = inner.request_broadcast("y", None).into_inner();
 	match verdict.poll_ok(&kio::Waiter::noop()) {
 		std::task::Poll::Ready(Err(moq_net::Error::Unroutable)) => {}
 		std::task::Poll::Ready(Err(err)) => panic!("unexpected error: {err}"),

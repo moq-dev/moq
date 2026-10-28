@@ -126,6 +126,7 @@ The historical samples locate candidates; they are not controlled benchmarks.
 
 ## Required
 
+- [Read-only pull-request CI](/quest/m0/ci/read-only-secrets.md) - write secrets and publisher identities reach only protected branches and tags, never a pushed branch
 - [Land main through quest land](/quest/m0/ci/land.md) - one self-hosted runner tests every queued PR as a squash chain and fast-forwards `main` to the longest passing prefix
 - [Measure the parallel frontend](/quest/m0/ci/nightly-levers.md) - a pinned nightly's parallel frontend, adopted only if the numbers beat its risks; Cranelift is ruled out
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - measure the hosted Nightly jobs' hits, restore time, and expiry once the bump lands
@@ -138,3 +139,4 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Padding runs](/quest/m0/ci/quic-padding.md) - moq-quic parses a PADDING run as one frame, keeping the padding stats' meaning
 - [tracing-test filter](/quest/m0/ci/tracing-filter.md) - moq-tokio's tests stop forcing every crate to format at TRACE
 - [Stats oversize](/quest/m0/ci/stats-oversize.md) - moq-stats refuses an oversized plain snapshot before parsing it back
+- [Out-of-crate targets](/quest/m0/ci/out-of-crate-targets.md) - branch checks format and lint a crate whose target file lives outside it, such as the Rust interop clients

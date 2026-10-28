@@ -824,15 +824,15 @@ impl Grouped for crate::quic::web::Session {
 	}
 
 	fn wire(&self) -> Option<moq_net::transport::Wire> {
-		Some(crate::quic::driver::Connection::wire(self))
+		Some(crate::quic::driver::connection::Connection::wire(self))
 	}
 
 	fn probe(&self) -> Option<moq_net::transport::Probe> {
-		crate::quic::driver::Connection::probe(self)
+		crate::quic::driver::connection::Connection::probe(self)
 	}
 
 	fn streams_evicted(&self) -> Option<u64> {
-		Some(crate::quic::driver::Connection::stats(self).credit.evicted)
+		Some(crate::quic::driver::connection::Connection::stats(self).credit.evicted)
 	}
 
 	fn send_group(&self, priority: i64) -> Option<crate::quic::driver::SendGroup> {
