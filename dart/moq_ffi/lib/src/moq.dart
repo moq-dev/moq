@@ -12005,7 +12005,7 @@ class FfiConverterMoqAnnouncedBroadcast {
 
 abstract class MoqBroadcastPreparedInterface {
   MoqBroadcastProducer broadcast();
-  MoqBroadcastProducer publish();
+  MoqPublication publish();
 }
 
 final _MoqBroadcastPreparedFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -12054,13 +12054,13 @@ class MoqBroadcastPrepared implements MoqBroadcastPreparedInterface {
     );
   }
 
-  MoqBroadcastProducer publish() {
+  MoqPublication publish() {
     return rustCallWithLifter(
       (status) => uniffi_moq_ffi_fn_method_moqbroadcastprepared_publish(
         uniffiClonePointer(),
         status,
       ),
-      FfiConverterMoqBroadcastProducer.lift,
+      FfiConverterMoqPublication.lift,
       moqExceptionErrorHandler,
     );
   }
@@ -12304,7 +12304,7 @@ class FfiConverterMoqOriginConsumer {
 
 abstract class MoqOriginProducerInterface {
   MoqOriginConsumer consume();
-  MoqBroadcastProducer createBroadcast({required String path});
+  MoqPublication createBroadcast({required String path});
   MoqOriginRequests requests({required String prefix});
 }
 
@@ -12362,14 +12362,14 @@ class MoqOriginProducer implements MoqOriginProducerInterface {
     );
   }
 
-  MoqBroadcastProducer createBroadcast({required String path}) {
+  MoqPublication createBroadcast({required String path}) {
     return rustCallWithLifter(
       (status) => uniffi_moq_ffi_fn_method_moqoriginproducer_create_broadcast(
         uniffiClonePointer(),
         FfiConverterString.lower(path),
         status,
       ),
-      FfiConverterMoqBroadcastProducer.lift,
+      FfiConverterMoqPublication.lift,
       moqExceptionErrorHandler,
     );
   }
@@ -12502,8 +12502,101 @@ class FfiConverterMoqOriginRequests {
   }
 }
 
-abstract class MoqBroadcastProducerInterface {
+abstract class MoqPublicationInterface {
   void announce({required MoqAnnounceRoute route});
+  MoqBroadcastProducer broadcast();
+  void unannounce();
+}
+
+final _MoqPublicationFinalizer = Finalizer<Pointer<Void>>((ptr) {
+  rustCall((status) => uniffi_moq_ffi_fn_free_moqpublication(ptr, status));
+});
+
+class MoqPublication implements MoqPublicationInterface {
+  late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
+  MoqPublication._(this._ptr) {
+    _MoqPublicationFinalizer.attach(this, _ptr, detach: this);
+  }
+  factory MoqPublication.lift(Pointer<Void> ptr) {
+    return MoqPublication._(ptr);
+  }
+  Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
+    return rustCall(
+      (status) => uniffi_moq_ffi_fn_clone_moqpublication(_ptr, status),
+    );
+  }
+
+  void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
+    _MoqPublicationFinalizer.detach(this);
+    rustCall((status) => uniffi_moq_ffi_fn_free_moqpublication(_ptr, status));
+  }
+
+  void announce({required MoqAnnounceRoute route}) {
+    return rustCall((status) {
+      uniffi_moq_ffi_fn_method_moqpublication_announce(
+        uniffiClonePointer(),
+        FfiConverterMoqAnnounceRoute.lower(route),
+        status,
+      );
+    }, moqExceptionErrorHandler);
+  }
+
+  MoqBroadcastProducer broadcast() {
+    return rustCallWithLifter(
+      (status) => uniffi_moq_ffi_fn_method_moqpublication_broadcast(
+        uniffiClonePointer(),
+        status,
+      ),
+      FfiConverterMoqBroadcastProducer.lift,
+      null,
+    );
+  }
+
+  void unannounce() {
+    return rustCall((status) {
+      uniffi_moq_ffi_fn_method_moqpublication_unannounce(
+        uniffiClonePointer(),
+        status,
+      );
+    }, moqExceptionErrorHandler);
+  }
+}
+
+class FfiConverterMoqPublication {
+  static MoqPublication lift(Pointer<Void> ptr) {
+    return MoqPublication.lift(ptr);
+  }
+
+  static Pointer<Void> lower(MoqPublication value) {
+    return value.uniffiClonePointer();
+  }
+
+  static int allocationSize(MoqPublication value) {
+    return 8;
+  }
+
+  static LiftRetVal<MoqPublication> read(Uint8List buf) {
+    final handle = buf.buffer.asByteData(buf.offsetInBytes).getInt64(0);
+    final pointer = Pointer<Void>.fromAddress(handle);
+    return LiftRetVal(MoqPublication.lift(pointer), 8);
+  }
+
+  static int write(MoqPublication value, Uint8List buf) {
+    final handle = lower(value);
+    buf.buffer.asByteData(buf.offsetInBytes).setInt64(0, handle.address);
+    return 8;
+  }
+}
+
+abstract class MoqBroadcastProducerInterface {
   void close();
   MoqBroadcastConsumer consume();
   MoqTrackProducer publishTrack({
@@ -12511,7 +12604,6 @@ abstract class MoqBroadcastProducerInterface {
     required MoqTrackInfo? info,
   });
   MoqBroadcastRequests requests();
-  void unannounce();
 }
 
 final _MoqBroadcastProducerFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -12555,16 +12647,6 @@ class MoqBroadcastProducer implements MoqBroadcastProducerInterface {
     rustCall(
       (status) => uniffi_moq_ffi_fn_free_moqbroadcastproducer(_ptr, status),
     );
-  }
-
-  void announce({required MoqAnnounceRoute route}) {
-    return rustCall((status) {
-      uniffi_moq_ffi_fn_method_moqbroadcastproducer_announce(
-        uniffiClonePointer(),
-        FfiConverterMoqAnnounceRoute.lower(route),
-        status,
-      );
-    }, moqExceptionErrorHandler);
   }
 
   void close() {
@@ -12612,15 +12694,6 @@ class MoqBroadcastProducer implements MoqBroadcastProducerInterface {
       FfiConverterMoqBroadcastRequests.lift,
       moqExceptionErrorHandler,
     );
-  }
-
-  void unannounce() {
-    return rustCall((status) {
-      uniffi_moq_ffi_fn_method_moqbroadcastproducer_unannounce(
-        uniffiClonePointer(),
-        status,
-      );
-    }, moqExceptionErrorHandler);
   }
 }
 
@@ -18839,6 +18912,47 @@ uniffi_moq_ffi_fn_method_moqoriginrequests_requested_broadcast(
 @Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
+external Pointer<Void> uniffi_moq_ffi_fn_clone_moqpublication(
+  Pointer<Void> handle,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Void Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external void uniffi_moq_ffi_fn_free_moqpublication(
+  Pointer<Void> handle,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Void Function(Pointer<Void>, RustBuffer, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external void uniffi_moq_ffi_fn_method_moqpublication_announce(
+  Pointer<Void> ptr,
+  RustBuffer route,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external Pointer<Void> uniffi_moq_ffi_fn_method_moqpublication_broadcast(
+  Pointer<Void> ptr,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Void Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external void uniffi_moq_ffi_fn_method_moqpublication_unannounce(
+  Pointer<Void> ptr,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
 external Pointer<Void> uniffi_moq_ffi_fn_clone_moqbroadcastproducer(
   Pointer<Void> handle,
   Pointer<RustCallStatus> uniffiStatus,
@@ -18856,15 +18970,6 @@ external void uniffi_moq_ffi_fn_free_moqbroadcastproducer(
   assetId: _uniffiAssetId,
 )
 external Pointer<Void> uniffi_moq_ffi_fn_constructor_moqbroadcastproducer_new(
-  Pointer<RustCallStatus> uniffiStatus,
-);
-
-@Native<Void Function(Pointer<Void>, RustBuffer, Pointer<RustCallStatus>)>(
-  assetId: _uniffiAssetId,
-)
-external void uniffi_moq_ffi_fn_method_moqbroadcastproducer_announce(
-  Pointer<Void> ptr,
-  RustBuffer route,
   Pointer<RustCallStatus> uniffiStatus,
 );
 
@@ -18904,14 +19009,6 @@ uniffi_moq_ffi_fn_method_moqbroadcastproducer_publish_track(
   assetId: _uniffiAssetId,
 )
 external Pointer<Void> uniffi_moq_ffi_fn_method_moqbroadcastproducer_requests(
-  Pointer<Void> ptr,
-  Pointer<RustCallStatus> uniffiStatus,
-);
-
-@Native<Void Function(Pointer<Void>, Pointer<RustCallStatus>)>(
-  assetId: _uniffiAssetId,
-)
-external void uniffi_moq_ffi_fn_method_moqbroadcastproducer_unannounce(
   Pointer<Void> ptr,
   Pointer<RustCallStatus> uniffiStatus,
 );
@@ -20550,7 +20647,13 @@ external int
 uniffi_moq_ffi_checksum_method_moqoriginrequests_requested_broadcast();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
-external int uniffi_moq_ffi_checksum_method_moqbroadcastproducer_announce();
+external int uniffi_moq_ffi_checksum_method_moqpublication_announce();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqpublication_broadcast();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqpublication_unannounce();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqbroadcastproducer_close();
@@ -20564,9 +20667,6 @@ uniffi_moq_ffi_checksum_method_moqbroadcastproducer_publish_track();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqbroadcastproducer_requests();
-
-@Native<Uint16 Function()>(assetId: _uniffiAssetId)
-external int uniffi_moq_ffi_checksum_method_moqbroadcastproducer_unannounce();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqbroadcastrequests_cancel();
@@ -21237,7 +21337,7 @@ void _checkApiChecksums() {
       42363) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqbroadcastprepared_publish() != 65442) {
+  if (uniffi_moq_ffi_checksum_method_moqbroadcastprepared_publish() != 60136) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqbroadcastrequest_path() != 6534) {
@@ -21264,7 +21364,7 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqoriginproducer_create_broadcast() !=
-      38558) {
+      43708) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqoriginproducer_requests() != 8499) {
@@ -21277,7 +21377,13 @@ void _checkApiChecksums() {
       31253) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqbroadcastproducer_announce() != 3965) {
+  if (uniffi_moq_ffi_checksum_method_moqpublication_announce() != 60624) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqpublication_broadcast() != 38236) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqpublication_unannounce() != 21154) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqbroadcastproducer_close() != 26090) {
@@ -21291,10 +21397,6 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqbroadcastproducer_requests() != 27464) {
-    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
-  }
-  if (uniffi_moq_ffi_checksum_method_moqbroadcastproducer_unannounce() !=
-      49647) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqbroadcastrequests_cancel() != 44028) {

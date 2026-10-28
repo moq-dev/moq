@@ -13,10 +13,20 @@ fn id(raw: i32) -> u32 {
 	raw as u32
 }
 
-/// Create a broadcast at `path` on `origin` and announce it.
+/// Create a broadcast at `path` on `origin`, returning its publication and fill handles.
+fn create_broadcast(origin: u32, path: &[u8]) -> (u32, u32) {
+	let mut broadcast = 0;
+	let publication =
+		id(unsafe { moq_origin_create_broadcast(origin, path.as_ptr() as *const c_char, path.len(), &mut broadcast) });
+	(publication, broadcast)
+}
+
+/// Create a broadcast at `path` on `origin` and announce it, keeping only the fill handle:
+/// releasing the publication leaves the route up.
 fn publish_broadcast(origin: u32, path: &[u8]) -> u32 {
-	let broadcast = id(unsafe { moq_origin_create_broadcast(origin, path.as_ptr() as *const c_char, path.len()) });
-	assert_eq!(unsafe { moq_publish_announce(broadcast, std::ptr::null()) }, 0);
+	let (publication, broadcast) = create_broadcast(origin, path);
+	assert_eq!(unsafe { moq_publication_announce(publication, std::ptr::null()) }, 0);
+	assert_eq!(moq_publication_free(publication), 0);
 	broadcast
 }
 
@@ -2675,7 +2685,8 @@ fn announced_deactivation() {
 	let announced_task = id(unsafe { moq_origin_announced(origin, std::ptr::null(), Some(channel_callback), cb.ptr) });
 
 	let path = b"deactivate/test";
-	let broadcast = publish_broadcast(origin, path);
+	let (publication, broadcast) = create_broadcast(origin, path);
+	assert_eq!(unsafe { moq_publication_announce(publication, std::ptr::null()) }, 0);
 
 	let (announced_id, info) = cb.recv_route();
 	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_START);
@@ -2683,14 +2694,14 @@ fn announced_deactivation() {
 
 	// Going non-live unannounces the broadcast without tearing it down: local
 	// consumers stop reaching it, exactly as peers do, until it announces again.
-	assert_eq!(moq_publish_unannounce(broadcast), 0);
+	assert_eq!(moq_publication_unannounce(publication), 0);
 
 	let (deactivated_id, info) = cb.recv_route();
 	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_END);
 	assert_eq!(moq_origin_announced_free(deactivated_id), 0);
 	assert!(request_once(origin, path) < 0, "an unannounced broadcast is unroutable");
 
-	assert_eq!(unsafe { moq_publish_announce(broadcast, std::ptr::null()) }, 0);
+	assert_eq!(unsafe { moq_publication_announce(publication, std::ptr::null()) }, 0);
 	let (reannounced_id, info) = cb.recv_route();
 	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_START);
 	assert_eq!(moq_origin_announced_free(reannounced_id), 0);
@@ -2699,6 +2710,34 @@ fn announced_deactivation() {
 	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
 	assert_eq!(cb.recv_terminal(), 0, "announced close delivers terminal 0");
 	assert_eq!(moq_publish_close(broadcast), 0);
+	assert!(
+		unsafe { moq_publication_announce(publication, std::ptr::null()) } < 0,
+		"a closed broadcast cannot announce"
+	);
+	assert_eq!(moq_publication_free(publication), 0);
+	assert!(moq_publication_free(publication) < 0, "a freed publication is released");
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A publication outliving its closed broadcast cannot announce or withdraw the broadcast that
+/// replaced it at the same path.
+#[test]
+fn a_stale_publication_leaves_its_replacement_alone() {
+	let origin = id(moq_origin_create());
+	let path = b"replaced";
+	let (stale, broadcast) = create_broadcast(origin, path);
+	assert_eq!(unsafe { moq_publication_announce(stale, std::ptr::null()) }, 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+
+	let (publication, replacement) = create_broadcast(origin, path);
+	assert_eq!(unsafe { moq_publication_announce(publication, std::ptr::null()) }, 0);
+	assert!(unsafe { moq_publication_announce(stale, std::ptr::null()) } < 0);
+	assert!(moq_publication_unannounce(stale) < 0);
+	let _ = request_broadcast(origin, path);
+
+	assert_eq!(moq_publication_free(stale), 0);
+	assert_eq!(moq_publication_free(publication), 0);
+	assert_eq!(moq_publish_close(replacement), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -2709,11 +2748,12 @@ fn create_broadcast_is_unroutable_until_announced() {
 	let announced_task = id(unsafe { moq_origin_announced(origin, std::ptr::null(), Some(channel_callback), cb.ptr) });
 
 	let path = b"quiet";
-	let broadcast = id(unsafe { moq_origin_create_broadcast(origin, path.as_ptr() as *const c_char, path.len()) });
+	let (publication, broadcast) = create_broadcast(origin, path);
 	// Nobody reaches it, locally included, until it announces.
 	assert!(request_once(origin, path) < 0, "an unannounced broadcast is unroutable");
 
-	assert_eq!(unsafe { moq_publish_announce(broadcast, std::ptr::null()) }, 0);
+	assert_eq!(unsafe { moq_publication_announce(publication, std::ptr::null()) }, 0);
+	assert_eq!(moq_publication_free(publication), 0);
 	let _ = request_broadcast(origin, path);
 	let (announced_id, info) = cb.recv_route();
 	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_START);
@@ -2729,14 +2769,15 @@ fn create_broadcast_is_unroutable_until_announced() {
 fn announce_accepts_an_anonymous_hop() {
 	let origin = id(moq_origin_create());
 	let path = b"anon";
-	let broadcast = id(unsafe { moq_origin_create_broadcast(origin, path.as_ptr() as *const c_char, path.len()) });
+	let (publication, broadcast) = create_broadcast(origin, path);
 	let hops = [0u64];
 	let route = moq_route {
 		hops: hops.as_ptr(),
 		hops_len: hops.len(),
 		cost: 1,
 	};
-	assert_eq!(unsafe { moq_publish_announce(broadcast, &route) }, 0);
+	assert_eq!(unsafe { moq_publication_announce(publication, &route) }, 0);
+	assert_eq!(moq_publication_free(publication), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
@@ -2781,9 +2822,12 @@ fn dynamic_serves_a_request_under_a_prefix() {
 	let mut served = 0;
 	let prepared =
 		id(unsafe { moq_broadcast_request_prepare(request, epoch.as_ptr().cast(), epoch.len(), &mut served) });
-	assert_eq!(moq_broadcast_prepared_publish(prepared), 0);
+	let publication = id(moq_broadcast_prepared_publish(prepared));
 	assert!(req_cb.recv() > 0);
 	req_cb.recv_terminal();
+	// The answer's route is the publication's to withdraw.
+	assert_eq!(moq_publication_unannounce(publication), 0);
+	assert_eq!(moq_publication_free(publication), 0);
 
 	assert_eq!(moq_origin_requests_cancel(dynamic), 0);
 	assert!(moq_origin_requests_cancel(dynamic) < 0, "double-cancel should fail");

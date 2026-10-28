@@ -29,6 +29,7 @@ from .origin import (
     OriginConsumer,
     OriginProducer,
     OriginRequests,
+    Publication,
 )
 from .publish import (
     BroadcastProducer,
@@ -125,6 +126,7 @@ __all__ = [
     "OriginRequests",
     "OriginProducer",
     "Order",
+    "Publication",
     "Range",
     "Request",
     "Reservation",
