@@ -2,8 +2,8 @@
 //! `export --echo` publishes where a catalog solicits it, and the `export report` and
 //! `export echo` sinks that print them.
 //!
-//! Each report is one snapshot track and its compressed `.z` sibling, written about once a
-//! second while someone subscribes. See the hang draft's media statistics section for the wire.
+//! Each report is one compressed snapshot track, written about once a second while someone
+//! subscribes. See the hang draft's media statistics section for the wire.
 
 use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
@@ -23,9 +23,6 @@ const INTERVAL: Duration = Duration::from_secs(1);
 /// The publisher snapshot track an import names in its catalog's `stats` section.
 pub const STATS_TRACK: &str = "stats.json";
 
-/// The suffix naming a snapshot track's compressed sibling.
-const COMPRESSED: &str = ".z";
-
 /// Lines `export echo` queues for stdout before its readers wait for it to catch up.
 const LINES: usize = 64;
 
@@ -40,79 +37,71 @@ const DRAIN: Duration = Duration::from_secs(5);
 /// Below every media track, so a report never delays the media it describes.
 const PRIORITY: i8 = i8::MIN;
 
-/// A snapshot track and its compressed `.z` sibling, written together. Either is `None` once a
-/// write failed and closed it.
-struct Pair<T> {
-	plain: Option<moq_json::snapshot::Producer<T>>,
-	compressed: Option<moq_json::snapshot::Producer<T>>,
+/// A compressed snapshot track, `None` once a write failed and closed it.
+struct ReportTrack<T> {
+	track: Option<moq_json::snapshot::Producer<T>>,
 }
 
-impl<T: serde::Serialize> Pair<T> {
-	/// Create `name` and `name.z` on `broadcast`.
+impl<T: serde::Serialize> ReportTrack<T> {
+	/// Create `name` on `broadcast`.
 	fn create(broadcast: &mut moq_net::broadcast::Producer, name: &str) -> anyhow::Result<Self> {
-		let info = moq_net::track::Info::default().with_priority(PRIORITY);
-		let plain = broadcast.create_track(name, info.clone())?;
-		// The compressed flavor keeps deltas, so a joiner asks for a fresh group once they outweigh
-		// eight snapshots.
-		let compressed = broadcast.create_track(format!("{name}{COMPRESSED}").as_str(), info.with_refresh(8))?;
-		let mut deflate = moq_json::snapshot::Config::default();
-		deflate.compression = moq_json::Compression::Deflate;
+		// Deltas compress against the snapshot in their group, and a joiner asks for a fresh group
+		// once they outweigh eight snapshots.
+		let info = moq_net::track::Info::default()
+			.with_priority(PRIORITY)
+			.with_compress(true)
+			.with_refresh(8);
+		let track = broadcast.create_track(name, info)?;
 		Ok(Self {
-			plain: Some(moq_json::snapshot::Producer::new(
-				plain,
-				moq_json::snapshot::Config::default().with_deltas(false),
-			)),
-			compressed: Some(moq_json::snapshot::Producer::new(compressed, deflate)),
+			track: Some(moq_json::snapshot::Producer::new(track, Default::default())),
 		})
 	}
 
-	/// Publish `value` on both tracks, unless nobody subscribes to either.
+	/// Publish `value`, unless nobody subscribes.
 	fn update(&mut self, value: &T) {
-		let used = [&self.plain, &self.compressed]
-			.into_iter()
-			.flatten()
-			.any(|track| track.demand().wanted().is_some());
-		if used {
+		if self
+			.track
+			.as_ref()
+			.is_some_and(|track| track.demand().wanted().is_some())
+		{
 			self.write(value);
 		}
 	}
 
-	/// Publish `value` on both tracks. A track that refuses a write would refuse every later one,
-	/// so it is closed with the cause, which its subscribers then read, and reported once.
+	/// Publish `value`. A track that refuses a write would refuse every later one, so it is closed
+	/// with the cause, which its subscribers then read, and reported once.
 	///
 	/// Also restates the value in a fresh group when a joiner wants one. Reports are written every
 	/// interval, so checking here answers a joiner within one without a task of its own.
 	fn write(&mut self, value: &T) {
-		for slot in [&mut self.plain, &mut self.compressed] {
-			let Some(track) = slot else {
-				continue;
-			};
-			let refreshed = match track.poll_refresh(&moq_net::kio::Waiter::noop()) {
-				std::task::Poll::Ready(Err(err)) => Err(err),
-				_ => Ok(()),
-			};
-			if let Err(err) = refreshed.and_then(|()| track.update(value)) {
-				tracing::warn!(%err, "a report track failed; closing it");
-				if let Some(track) = slot.take() {
-					let _ = track.abort(moq_net::Error::Transport(err.to_string()));
-				}
+		let Some(track) = &mut self.track else {
+			return;
+		};
+		let refreshed = match track.poll_refresh(&moq_net::kio::Waiter::noop()) {
+			std::task::Poll::Ready(Err(err)) => Err(err),
+			_ => Ok(()),
+		};
+		if let Err(err) = refreshed.and_then(|()| track.update(value)) {
+			tracing::warn!(%err, "a report track failed; closing it");
+			if let Some(track) = self.track.take() {
+				let _ = track.abort(moq_net::Error::Transport(err.to_string()));
 			}
 		}
 	}
 
-	/// End both tracks cleanly, keeping the last snapshot.
+	/// End the track cleanly, keeping the last snapshot.
 	fn finish(&mut self) {
-		for track in [&mut self.plain, &mut self.compressed].into_iter().flatten() {
-			if let Err(err) = track.finish() {
-				tracing::warn!(%err, "failed to finish a report");
-			}
+		if let Some(track) = &mut self.track
+			&& let Err(err) = track.finish()
+		{
+			tracing::warn!(%err, "failed to finish a report");
 		}
 	}
 
-	/// Close both tracks with `err`, so subscribers read why the report ended.
+	/// Close the track with `err`, so subscribers read why the report ended.
 	fn abort(self, err: moq_net::Error) {
-		for track in [self.plain, self.compressed].into_iter().flatten() {
-			let _ = track.abort(err.clone());
+		if let Some(track) = self.track {
+			let _ = track.abort(err);
 		}
 	}
 }
@@ -160,7 +149,7 @@ impl Sections {
 /// An import's stats track: what each of its tracks has written, from its catalog's counters,
 /// the connection's transport, and any MPEG-TS sections.
 pub struct Stats {
-	tracks: Pair<hang::stats::Snapshot<ts::stats::Report>>,
+	tracks: ReportTrack<hang::stats::Snapshot<ts::stats::Report>>,
 	renditions: Box<dyn Fn() -> BTreeMap<String, hang::stats::Rendition> + Send>,
 	connection: Option<Monitor>,
 	sections: Sections,
@@ -176,7 +165,7 @@ impl Stats {
 		catalog: &moq_mux::catalog::Producer<E>,
 		connection: Option<Monitor>,
 	) -> anyhow::Result<Self> {
-		let tracks = Pair::create(broadcast, STATS_TRACK)?;
+		let tracks = ReportTrack::create(broadcast, STATS_TRACK)?;
 		let mut catalog = catalog.clone();
 		let mut guard = catalog.modify()?;
 		guard.stats = Some(hang::catalog::Stats::new(STATS_TRACK));
@@ -266,7 +255,7 @@ struct Feedback {
 	path: moq_net::Path,
 	// Held for the route: dropping it retracts the announcement.
 	_broadcast: moq_net::origin::Publication,
-	tracks: Pair<hang::echo::Snapshot<ts::stats::Report>>,
+	tracks: ReportTrack<hang::echo::Snapshot<ts::stats::Report>>,
 }
 
 /// An export's solicited feedback: once its catalog carries an `echo` section, a
@@ -360,7 +349,7 @@ impl Echo {
 
 	fn publish(&self, path: &moq_net::Path) -> anyhow::Result<Feedback> {
 		let broadcast = self.target.origin.create_broadcast(path)?;
-		let tracks = Pair::create(&mut broadcast.broadcast().clone(), hang::echo::TRACK)?;
+		let tracks = ReportTrack::create(&mut broadcast.broadcast().clone(), hang::echo::TRACK)?;
 		// A fresh instance, so a reader sees a replaced feedback broadcast as a restart.
 		broadcast.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))?;
 		Ok(Feedback {
@@ -624,21 +613,21 @@ mod tests {
 		assert!(matches!(read.next().await, Err(moq_json::Error::TooLarge(MAX_REPORT))));
 	}
 
-	/// A joiner once the compressed track's deltas outweigh its refresh ratio gets the report
-	/// restated in a fresh group on the next write.
+	/// A joiner once the track's deltas outweigh its refresh ratio gets the report restated in a
+	/// fresh group on the next write.
 	#[tokio::test]
 	async fn a_late_joiner_gets_a_fresh_report_group() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let mut pair = Pair::<serde_json::Value>::create(&mut broadcast, STATS_TRACK).unwrap();
-		let compressed = pair.compressed.clone().unwrap();
-		let _early = compressed.consume();
+		let mut report = ReportTrack::<serde_json::Value>::create(&mut broadcast, STATS_TRACK).unwrap();
+		let track = report.track.clone().unwrap();
+		let _early = track.consume();
 		for n in 0..100 {
-			pair.write(&serde_json::json!({ "n": n }));
+			report.write(&serde_json::json!({ "n": n }));
 		}
 
-		let mut late = compressed.consume();
-		assert_eq!(compressed.demand().wanted(), Some(1), "the join asks for a fresh group");
-		pair.write(&serde_json::json!({ "n": 100 }));
+		let mut late = track.consume();
+		assert_eq!(track.demand().wanted(), Some(1), "the join asks for a fresh group");
+		report.write(&serde_json::json!({ "n": 100 }));
 		assert_eq!(late.largest().await.map(|position| position.group), Some(1));
 	}
 

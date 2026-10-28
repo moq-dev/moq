@@ -41,9 +41,9 @@ Rules every child follows:
 - Each child lists its public API and wire impact in its PR, and its Impact
   bullet says how to migrate.
 
-Already gated elsewhere, so not a child: the binary-to-flate fold is followed
-by flate's removal ([compress migrate](/quest/m1/compress/migrate.md)), in m1,
-so the cut waits for it. hang's
+The binary-to-flate fold was followed by flate's removal in the
+[compression migration](/quest/m1/compress/README.md), so moq-flate, `@moq/flate`, and
+`moq-mux::binary` have no API left to audit. hang's
 `Archive::replay_epoch` went with the root `archive` section in catalog HLS.
 
 Kept public though only moq-transport uses them (decided 2026-10-23), so an

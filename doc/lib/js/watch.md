@@ -38,7 +38,7 @@ in sync at the latency you ask for.
 | `visible` | Only download video while the element is on screen (or near it). |
 | `backend` | How the canvas is drawn; see [@moq/video](/lib/js/video). `auto` (default), `webgpu`, or `2d`. |
 | `announced` | Wait for the broadcast to be announced before subscribing (default on), so a player can mount before the stream exists. |
-| `catalog-format` | `hang`, `hangz`, `msf`, or `manual`; detected from the name by default. |
+| `catalog-format` | `hang`, `msf`, or `manual`; detected from the name by default. |
 
 Every attribute is also a reactive property, and property or UI changes reflect
 back into the attributes. An invalid value is refused rather than defaulted: the

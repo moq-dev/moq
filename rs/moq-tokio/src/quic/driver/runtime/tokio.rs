@@ -7,8 +7,9 @@ use tokio::io::Interest;
 
 use super::AsyncUdpSocket;
 
-/// Register `sock` with the current tokio runtime.
+/// Register `sock` with the current tokio runtime, else the fallback.
 pub(crate) fn wrap_udp_socket(sock: std::net::UdpSocket) -> io::Result<Box<dyn AsyncUdpSocket>> {
+	let _runtime = crate::runtime::enter();
 	Ok(Box::new(UdpSocket {
 		inner: moq_sock::udp::UdpSocketState::new((&sock).into())?,
 		io: tokio::net::UdpSocket::from_std(sock)?,
