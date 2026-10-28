@@ -1754,6 +1754,7 @@ export class Subscriber {
 	// Decode one datagram body and hand it to the matching subscription's producer. Drops the
 	// datagram (best-effort) if the subscription is unknown or closed.
 	async #routeDatagram(payload: Uint8Array): Promise<void> {
+		if (payload.byteLength > DatagramMessage.MAX_SIZE) return;
 		// An unknown subscription's datagram is dropped below, however it parses.
 		const dg = await DatagramMessage.decode(payload, this.version, (id) => ({
 			timed: !!this.#subscribes.get(id)?.timescale,

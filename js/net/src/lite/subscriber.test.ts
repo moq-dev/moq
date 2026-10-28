@@ -22,6 +22,7 @@ import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import type { Producer } from "../track.ts";
 import { type AnnounceBroadcast, AnnounceInit, AnnounceOk, encodeAnnounceBroadcast } from "./announce.ts";
+import { Datagram as DatagramMessage } from "./datagram.ts";
 import { Group } from "./group.ts";
 import { Probe } from "./probe.ts";
 import { StreamId } from "./stream.ts";
@@ -1001,6 +1002,36 @@ async function answerTrackInfo(
 	for (const chunk of chunks) stream.inbound.enqueue(chunk);
 	stream.inbound.close();
 }
+
+test.each([Version.DRAFT_06, Version.DRAFT_07])(
+	"lite %s: oversized incoming datagrams are dropped",
+	async (version) => {
+		const installed = new Manual().install();
+		const { quic, opened } = fakeSession();
+		const incoming = new TransformStream<Uint8Array, Uint8Array>();
+		Object.defineProperty(quic, "datagrams", { value: { readable: incoming.readable, maxDatagramSize: 1400 } });
+		const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+		const track = subscriber.consume(Path.from("room")).track("video").subscribe();
+		const writer = incoming.writable.getWriter();
+		const receiving = subscriber.runDatagrams();
+		try {
+			await answerTrackInfo(await opened(0), version, 1000);
+			const request = await opened(1);
+			await request.reading;
+			await respond(request, version, [{ start: new SubscribeStart(0) }]);
+			const received = track.recvDatagram();
+			await writer.write(new DatagramMessage(0n, 0, 0, new Uint8Array(1198)).encode(version));
+			await writer.write(new DatagramMessage(0n, 1, 1, new Uint8Array(1197)).encode(version));
+			expect((await received)?.sequence).toBe(1);
+		} finally {
+			await writer.close();
+			await receiving;
+			track.close();
+			subscriber.close();
+			installed.close();
+		}
+	},
+);
 
 function expectCut(err: unknown, cause: Error | undefined) {
 	if (cause) {

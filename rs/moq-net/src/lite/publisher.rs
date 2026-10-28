@@ -3740,14 +3740,9 @@ impl Subscription {
 			return false;
 		};
 
-		let max = self.session.max_datagram_size();
+		let max = self.session.max_datagram_size().min(lite::Datagram::MAX_SIZE);
 		if body.len() > max {
-			tracing::debug!(
-				sequence,
-				size = body.len(),
-				max,
-				"dropping datagram larger than the transport limit"
-			);
+			tracing::debug!(sequence, size = body.len(), max, "dropping oversized datagram");
 			return false;
 		}
 
@@ -5783,6 +5778,39 @@ mod serve_group_test {
 		let mut flipped = log.orders()[2..].to_vec();
 		flipped.sort();
 		assert_eq!(flipped, [(0, 1), (1, -1)], "older groups first");
+	}
+
+	/// The encoded body must fit both the wire cap and the transport's smaller limit.
+	#[moq_clock::test]
+	async fn datagrams_fit_the_wire_and_transport_limits() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			for transport in [900usize, 1200, 1400] {
+				for size in [899usize, 900, 901, 1199, 1200, 1201] {
+					let track = track::Producer::new(
+						Arc::new(broadcast::Info::default()),
+						"test",
+						crate::track::Info::timed(),
+					);
+					let session = SinkSession::new(Log::default()).with_datagrams(transport);
+					let (mut run, _, _) = lite_run(version, session, track.subscribe(None));
+					// The subscribe ID, sequence, and timestamp each use one byte.
+					let sent = run.ctx.serve_datagram(crate::model::datagram::Stored {
+						datagram: crate::Datagram {
+							sequence: 1,
+							timestamp: Some(Timestamp::ZERO),
+							payload: bytes::Bytes::from(vec![0; size - 3]),
+						},
+						wire: None,
+						deflated: None,
+					});
+					assert_eq!(
+						sent,
+						size <= transport.min(1200),
+						"{version}: body {size}, transport {transport}"
+					);
+				}
+			}
+		}
 	}
 
 	/// A datagram goes in its subscription's send group, ranked like the stream carrying

@@ -1615,7 +1615,7 @@ export class Publisher {
 	/**
 	 * Forwards a track's datagrams best-effort over QUIC datagrams (lite-05 §6.4), parallel to
 	 * its groups. Each datagram is dropped (there is no group fallback) if the encoded body
-	 * doesn't fit the transport's datagram limit or the send fails. Returns once the track
+	 * doesn't fit the wire and transport datagram limits or the send fails. Returns once the track
 	 * finishes; a failure never tears down the subscription.
 	 *
 	 * @internal
@@ -1632,7 +1632,7 @@ export class Publisher {
 		const { sub, stamp, served, bounds } = options;
 		const writer = this.#datagramWriter;
 		if (!writer) return; // Only reached with a writer (see the #datagramWriter gate).
-		const maxSize = DatagramStream.maxDatagramSize(this.#quic);
+		const maxSize = Math.min(DatagramMessage.MAX_SIZE, DatagramStream.maxDatagramSize(this.#quic));
 
 		try {
 			for (;;) {
