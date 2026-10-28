@@ -30,8 +30,9 @@
 //!
 //! [`catalog::Producer`](crate::catalog::Producer) owns the broadcast's record tracks and advertises
 //! each in its rendition's `hls` field. On the read side, [`Consumer::subscribe`] reads one
-//! rendition's records and yields decoded [`Event`]s. On the wire each record track is an
-//! uncompressed [`moq_json::window`] whose groups restate the recent records.
+//! rendition's records and yields decoded [`Event`]s. On the wire each record track is a
+//! [`compress`](moq_net::track::Info::compress)ed [`moq_json::window`] whose groups restate the
+//! recent records.
 //!
 //! An edge reads only the records and fetches media per segment request, so it never subscribes to
 //! the media. A record track's subscribers therefore count as demand for its media track: while
@@ -138,13 +139,11 @@ pub(crate) struct Segmenter {
 	last: Option<u64>,
 	/// The newest reported content time in the open segment.
 	frontier: Option<Timestamp>,
-	/// Boundaries not yet reached, in order.
+	/// Boundaries not yet reached, in order: at most the earliest and the latest.
 	cuts: VecDeque<Timestamp>,
 	/// The newest boundary declared, so a repeat of it (several sources declaring the same ones)
 	/// is ignored.
 	cut: Option<Timestamp>,
-	/// A boundary was queued since the newest group started.
-	queued: bool,
 	/// Whether boundaries come only from cuts: the source declares them.
 	manual: bool,
 	ready: VecDeque<Record>,
@@ -169,7 +168,6 @@ impl Segmenter {
 			frontier: None,
 			cuts: VecDeque::new(),
 			cut: None,
-			queued: false,
 			manual: false,
 			ready: VecDeque::new(),
 			closed: false,
@@ -222,9 +220,6 @@ impl Segmenter {
 			}
 		} else {
 			self.begin(group, pts);
-		}
-		if self.last != Some(group) {
-			self.queued = false;
 		}
 		self.last = Some(group);
 		self.advance(pts);
@@ -313,9 +308,13 @@ impl Segmenter {
 	///
 	/// The first cut takes over from grid pacing for good, since the grid would otherwise end a
 	/// segment just before the caller declares where it really ends. A cut at or before an earlier
-	/// one is ignored, so several sources declaring the same boundaries cost nothing. So is a cut
-	/// after one no group has started since: the next group ends the segment at the earlier one, and
-	/// a source declaring segments without sync samples would otherwise queue cuts without bound.
+	/// one is ignored, so several sources declaring the same boundaries cost nothing.
+	///
+	/// Only the earliest and latest pending cuts are kept: a source declaring segments faster than
+	/// it starts groups (an fMP4 `styp` without a sync sample) would otherwise queue them without
+	/// bound. A later group may still start before the earliest, since nothing keeps a keyframe's
+	/// pts from dipping below earlier content, so neither end is safe to drop; a dropped middle one
+	/// only lengthens a segment, which the ceiling still caps.
 	pub fn cut(&mut self, pts: Timestamp) {
 		if self.closed {
 			return;
@@ -325,8 +324,9 @@ impl Segmenter {
 			return;
 		}
 		self.cut = Some(pts);
-		if !std::mem::replace(&mut self.queued, true) {
-			self.cuts.push_back(pts);
+		match self.cuts.len() {
+			0 | 1 => self.cuts.push_back(pts),
+			_ => *self.cuts.back_mut().expect("two pending cuts") = pts,
 		}
 	}
 
@@ -387,6 +387,8 @@ impl Producer {
 			.with_priority(hang::catalog::PRIORITY.catalog)
 			// A joiner asks for a fresh group once the ops outweigh eight headers.
 			.with_refresh(8)
+			// Records are small, repetitive JSON.
+			.with_compress(true)
 	}
 
 	/// Publish onto `track`, starting at record zero.
@@ -1074,19 +1076,36 @@ mod test {
 		);
 	}
 
-	/// A source declaring segments that start no group (no sync sample) queues one cut, which the
-	/// next group meets.
+	/// A hostile source declaring `styp` segments that start no group (no sync sample) keeps the
+	/// earliest and latest cuts, which the next groups meet.
 	#[test]
-	fn cuts_without_a_group_queue_one() {
+	fn styp_segments_without_a_sync_sample_hold_two_cuts() {
 		let mut segmenter = Segmenter::new(Config::default());
 		segmenter.frame(0, ms(0)).unwrap();
 		for step in 1..1_000u64 {
 			segmenter.cut(ms(step));
 			segmenter.frame(0, ms(step)).unwrap();
+			assert!(segmenter.cuts.len() <= 2, "step {step}");
 		}
-		assert_eq!(segmenter.cuts.len(), 1);
+		assert_eq!(segmenter.cuts, [ms(1), ms(999)]);
 		segmenter.frame(1, ms(1_000)).unwrap();
+		assert!(segmenter.cuts.is_empty());
 		assert_eq!(drain(&mut segmenter), [(0, 0, None), (1, 1_000, None)]);
+	}
+
+	/// A group may start before the newest cut, so a cut it passed and the one past it both stand:
+	/// the group at 15 ends the segment on the cut at 10, and the group at 25 on the cut at 20.
+	#[test]
+	fn a_group_between_cuts_keeps_the_later_one() {
+		let mut segmenter = Segmenter::new(Config::default());
+		segmenter.frame(0, ms(0)).unwrap();
+		segmenter.cut(ms(10));
+		segmenter.frame(0, ms(10)).unwrap();
+		segmenter.cut(ms(20));
+		segmenter.frame(0, ms(20)).unwrap();
+		segmenter.frame(1, ms(15)).unwrap();
+		segmenter.frame(2, ms(25)).unwrap();
+		assert_eq!(drain(&mut segmenter), [(0, 0, None), (1, 15, None), (2, 25, None)]);
 	}
 
 	/// A segment spends the cuts it reached however it starts: on a cut, at the ceiling, or after

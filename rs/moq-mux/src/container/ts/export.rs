@@ -220,7 +220,7 @@ where
 	video_start: Option<Timestamp>,
 	/// The jitter buffer key of the first video frame out since `video_start` was set.
 	/// Until one has gone, what the other tracks release is dropped: a video track whose
-	/// start group was cut before it went out starts at its next keyframe instead
+	/// start group went stale before it went out starts at its next keyframe instead
 	/// ([`jitter::Buffer`]).
 	video_out: Option<Timestamp>,
 	/// Frames dropped before the jitter buffer: ahead of the first video keyframe, or of their
@@ -251,7 +251,7 @@ struct Pending {
 	restart: u64,
 	/// How many times its playhead had jumped, markers included ([`jitter::Arrival::skip`]).
 	skip: u64,
-	/// How many of those jumps cut a group short ([`jitter::Arrival::cut`]).
+	/// How many of those jumps cut a group short ([`ExportSource::cuts`]).
 	cut: u64,
 	/// When it landed in this node's cache ([`moq_net::frame::Frame::arrived`]), so a stall
 	/// that holds the export back too does not hide that it came late.
@@ -514,14 +514,13 @@ impl Track {
 					}
 					self.queue(name, pending, input.jitter)?;
 				}
-				// A cut takes a start group it left short now, not with the next group, which may
-				// arrive after that start was due, or with the stream's end.
+				// A cut settles what the decode clock holds of the group it left short now, not with
+				// the next group, which may arrive after those frames were due, or with the stream's end.
 				Poll::Ready(Some(Event::Cut { observed })) => {
 					self.latest = self.latest.max(observed);
 					self.settle = input.waiting_for_header;
 					if !input.waiting_for_header {
 						self.release(name, input.jitter, true)?;
-						input.jitter.cut(&self.key, self.base.2 + self.source.cuts());
 					}
 				}
 				Poll::Ready(Some(Event::GroupEnd)) => self.settle = true,
@@ -732,9 +731,9 @@ impl Track {
 			frame,
 			restart,
 			skip,
-			cut,
 			arrived,
 			read,
+			..
 		} = pending;
 		let dts = dts.filter(|&dts| dts != i128::from(to_ticks(frame.timestamp)));
 		let decode = dts
@@ -771,7 +770,6 @@ impl Track {
 			decode: key.into(),
 			restart,
 			skip,
-			cut,
 			sync,
 			leading,
 			item: Queued {
@@ -2602,7 +2600,7 @@ where
 
 	/// Whether a frame of `kind` released now presents ahead of the video keyframe the stream
 	/// begins on (`video_start`), and so is dropped. A video track whose start group
-	/// was cut or went stale before it went out starts at its next keyframe instead
+	/// went stale before it went out starts at its next keyframe instead
 	/// ([`jitter::Buffer`]), so until video goes out the start is the earliest frame a video
 	/// track holds, and with none held, everything leads the keyframe yet to arrive. Video goes
 	/// out further ahead of its decode time than the other tracks, so what they release before

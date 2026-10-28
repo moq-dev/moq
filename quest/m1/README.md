@@ -153,7 +153,9 @@ removed).
 - [Rust FETCH parity](/quest/m1/ietf-fetch-parity.md) - Rust finishes an answered joining FETCH's head, refuses a lost head with DOES_NOT_EXIST, and sends no timestamps without TIMESCALE, as the JS publisher does
 - [SUBSCRIBE honors the properties opt-out](/quest/m1/subscribe-timestamps.md) - the Rust publisher sends untimed objects to a SUBSCRIBE that declines Track Properties, and the Rust subscriber asks for them when it needs timestamps
 - [JS FETCH timeout test](/quest/m1/js-fetch-timeout-test.md) - a JS joining FETCH still waiting on its SUBSCRIBE at the deadline is refused with TIMEOUT
+- [JS joins at the current group](/quest/m1/ietf-js-join.md) - a late JS moq-transport subscriber gets the group in progress whole through a joining FETCH or fill, as Rust does
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - Rust honors native FILL_TIMEOUT to bound upstream waiting on drafts 18 and 22, alongside local content-age enforcement
+- [Catalog estimates settle](/quest/m1/catalog-estimates.md) - hang quantizes jitter and delay rises, and MSF publishes once its estimates are made and then only for track changes
 - [IETF takeover](/quest/m1/ietf-takeover.md) - carry the shared takeover contract through the negotiated IETF epoch extension
 - [Identity and recovery guide](/quest/m1/identity-guide.md) - explain epochs, pinned catalogs, lazy jobs, restart and version compatibility as they exist; takeover adds its own section
 - [Native rung disable](/quest/m1/simulcast-rung-disable.md) - OBS stops sending the top renditions its grant cannot fund, as the Rust/FFI publishers do, and a shaped uplink through moq-ffi proves the resume
@@ -161,6 +163,8 @@ removed).
 - [A/V clock](/quest/m1/av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
 - [Container reads drop backfill](/quest/m1/read-backfill.md) - the JS container consumer drops groups below its read cursor like Rust
 - [Buffered playback subscribes in ascending order](/quest/m1/buffered-ascending.md) - a buffered `<moq-watch>` asks for the oldest group first, so a voice reply's opening arrives first, and audio's head hold shrinks to the floor
+- [Push-to-talk loses no speech](/quest/m1/push-to-talk/README.md) - consumers hold a disabled rendition, and an unmute encodes at once with the mic still open
+- [Always-on encoding](/quest/m1/eager-encode/README.md) - publishers encode while enabled whatever the demand, so the past exists to fetch; on-demand is opt-in, and audio returns to it through a raw backbuffer
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
 - [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS
 - [CI housekeeping](/quest/m1/ci-housekeeping.md) - remove the actionlint queue ignore once a release after 1.7.12 reaches the dev shell
@@ -170,10 +174,8 @@ removed).
 - [HLS and DASH segment conformance](/quest/m1/hls-conformance.md) - nightly ffprobe checks that advertised timing, sync flags, and bytes match the media served
 - [Bindings name every session code](/quest/m1/ffi-malformed-auth-kind.md) - MALFORMED_AUTH_TOKEN and its siblings reach moq-ffi, moq-c, and the wrappers
 - [Unbounded groups](/quest/m1/unbounded-groups/README.md) - groups and frames lose their size caps; the cache sheds parts of a group under pressure and refills the holes in place
-- [Segment cuts hold bounded state](/quest/m1/segmenter-cuts.md) - the HLS segmenter keeps one pending cut, so `styp` input without sync samples cannot grow it
 - [Next Object on a cold Rust copy](/quest/m1/next-object-cold-copy.md) - a join after an upstream group report starts at the first frame received, never skipping
 - [Container consumers buffer by backpressure](/quest/m1/container-backpressure.md) - Rust and JS container consumers decode ahead only a byte budget, so a hostile publisher cannot grow them
-- [One moq-ffi build definition](/quest/m1/ffi-build-flags.md) - every binding takes moq-ffi's default features from one place
 - [gofmt-clean Go wrapper](/quest/m1/go-gofmt.md) - `just go check` fails on unformatted Go
 - [moqsrc max-delay](/quest/m1/gst-max-delay.md) - GStreamer's `moqsrc` takes a `max-delay` property instead of a hard-coded 1 s budget
 - [JS SETUP rejection ownership](/quest/m1/js-setup-rejection.md) - reproduce an unhandled version-refusal rejection without weakening the refusal

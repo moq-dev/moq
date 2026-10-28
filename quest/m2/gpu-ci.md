@@ -68,3 +68,4 @@ Public API: none. Wire: none.
 ## Related
 
 - [Video hardware validation](/quest/m3/video-hardware.md) - hardware paths nothing runs yet
+- [Video quality hardware rows](/quest/m2/video-quality/hardware.md) - the nightly quality job that also needs this runner's GPU

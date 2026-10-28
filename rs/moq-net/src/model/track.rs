@@ -3483,8 +3483,8 @@ impl Producer {
 	/// may still observe its final state. `Err(producer)` leaves the track unchanged
 	/// so the caller can continue serving and wait for the next unused wake.
 	///
-	/// The abort is the same as [`Self::abort`]: a group consumer that outlived the track's
-	/// consumers ends with `err`, and the group's writer fails.
+	/// The abort is the same as [`Self::abort`]. A reader still in a group it was handed
+	/// counts as a consumer until it reads the group's end.
 	#[cfg_attr(
 		target_pointer_width = "64",
 		expect(
@@ -4010,6 +4010,11 @@ impl TrackWeak {
 		!self.state.is_closed() && self.state.is_used()
 	}
 
+	/// A [`Demand`] on the cached track, for a broadcast to watch.
+	pub(super) fn demand(&self) -> Demand {
+		Demand::new(self.name.clone(), self.state.clone())
+	}
+
 	/// The readers' aggregate demand and contribution count, or `None` without one.
 	pub(super) fn subscription(&self) -> Option<(Subscription, usize)> {
 		let state = self.state.read();
@@ -4066,7 +4071,9 @@ impl super::WeakEntry for TrackWeak {
 /// Obtained from [`Producer::demand`], [`Request::demand`], or [`Requests::demand`].
 /// A publisher uses it to learn which group anyone subscribed, querying, or fetching
 /// wants (on-demand capture / encoding) without being able to publish frames or close the
-/// track. A bare [`Consumer`] is not demand. It's a weak handle, so it neither keeps
+/// track. A bare [`Consumer`] is not demand. A group a subscription or fetch handed out
+/// keeps its track wanted until a reader reads its end, and a wanted track makes its
+/// broadcast wanted ([`broadcast::Demand`]). It's a weak handle, so it neither keeps
 /// the track alive nor pins its cached groups; once the owning [`Producer`]
 /// goes away, [`poll_wanted_changed`](Self::poll_wanted_changed) reports the track's
 /// closure. Each clone watches on its own, so its first
@@ -5469,6 +5476,7 @@ impl kio::Task for Fetching {
 		// own start. Coverage was checked first, so this can only skip frames they excluded.
 		let expiry: Arc<dyn group::Expiry> = Arc::new(FetchExpiry {
 			state: state.weak(),
+			reading: Reading::new(state.clone()),
 			sequence,
 			max_delay: self.max_delay,
 			superseded: Superseded::default(),
@@ -5663,12 +5671,8 @@ struct Drift {
 
 /// Keeps one handed-out group tied to the subscription whose cursor selected it.
 struct GroupExpiry {
-	/// Weak so a handed-out group never joins the track's consumer count, which is what
-	/// [`Demand`] reads to decide the track still has readers. A group
-	/// outlives the cursor that produced it (a relay serves one for the life of its
-	/// stream), and pinning demand on that would hold an upstream subscription open past
-	/// the last real subscriber.
 	state: kio::ConsumerWeak<TrackState>,
+	reading: Reading,
 	subscription: kio::Consumer<Subscription>,
 	/// What the cursor can be served; see [`Cursor::published`].
 	servable: kio::Consumer<Published>,
@@ -5676,12 +5680,35 @@ struct GroupExpiry {
 	superseded: Superseded,
 }
 
-/// Keeps one fetched group tied to this caller's age budget without adding live demand.
+/// Keeps one fetched group tied to this caller's age budget.
 struct FetchExpiry {
 	state: kio::ConsumerWeak<TrackState>,
+	reading: Reading,
 	sequence: u64,
 	max_delay: Option<Duration>,
 	superseded: Superseded,
+}
+
+/// The track demand a handed-out group holds for its readers, and the frames they take,
+/// until one of them reads the group's end: from then on the track owes it nothing.
+struct Reading(Mutex<Option<kio::Consumer<TrackState>>>);
+
+impl Reading {
+	fn new(track: kio::Consumer<TrackState>) -> Self {
+		Self(Mutex::new(Some(track)))
+	}
+
+	/// The same hold on the copy a reader moved to, unless the group already ended.
+	fn moved(&self, track: &kio::ConsumerWeak<TrackState>) -> Self {
+		let held = self.0.lock().unwrap_or_else(PoisonError::into_inner).is_some();
+		Self(Mutex::new(held.then(|| track.consume())))
+	}
+
+	fn release(&self) {
+		let track = self.0.lock().unwrap_or_else(PoisonError::into_inner).take();
+		// Dropped outside the lock: the last reader leaving wakes the track's watchers.
+		drop(track);
+	}
 }
 
 /// The successor a handed-out group was last judged by, so the group stays judgeable once
@@ -5701,12 +5728,18 @@ impl group::Expiry for FetchExpiry {
 	fn for_track(&self, track: &Consumer) -> Arc<dyn group::Expiry> {
 		// A replacement copy is always one track instance; the fallback is never read.
 		let state = track.with_state(|state| state.cloned());
+		let state = state.unwrap_or_else(|| self.state.clone());
 		Arc::new(Self {
-			state: state.unwrap_or_else(|| self.state.clone()),
+			reading: self.reading.moved(&state),
+			state,
 			sequence: self.sequence,
 			max_delay: self.max_delay,
 			superseded: Superseded::default(),
 		})
+	}
+
+	fn ended(&self) {
+		self.reading.release();
 	}
 
 	fn is_expired(&self, max_delay: Option<Duration>, waiter: &kio::Waiter) -> bool {
@@ -5727,13 +5760,19 @@ impl group::Expiry for GroupExpiry {
 	fn for_track(&self, track: &Consumer) -> Arc<dyn group::Expiry> {
 		// A replacement copy is always one track instance; the fallback is never read.
 		let state = track.with_state(|state| state.cloned());
+		let state = state.unwrap_or_else(|| self.state.clone());
 		Arc::new(Self {
-			state: state.unwrap_or_else(|| self.state.clone()),
+			reading: self.reading.moved(&state),
+			state,
 			subscription: self.subscription.clone(),
 			servable: self.servable.clone(),
 			sequence: self.sequence,
 			superseded: Superseded::default(),
 		})
+	}
+
+	fn ended(&self) {
+		self.reading.release();
 	}
 
 	fn is_expired(&self, max_delay: Option<Duration>, waiter: &kio::Waiter) -> bool {
@@ -6601,6 +6640,7 @@ impl Cursor {
 		let sequence = group.sequence;
 		group.with_expiry(Arc::new(GroupExpiry {
 			state: self.state.weak(),
+			reading: Reading::new(self.state.clone()),
 			subscription: self.subscription.consume(),
 			servable: self.published.consume(),
 			sequence,
@@ -13110,11 +13150,11 @@ mod test {
 		assert!(matches!(write, Err(Error::Cancel)), "{write:?}");
 	}
 
-	/// Aborting an unused track aborts an open group whose reader outlived the track's
-	/// consumers.
+	/// A reader still in an open group keeps the track used after its subscription leaves,
+	/// so only its leaving lets an unused abort end the group's writer.
 	#[test]
 	#[cfg(feature = "async")]
-	fn abort_unused_ends_a_pulled_open_group() {
+	fn abort_unused_waits_for_a_pulled_open_group() {
 		let producer = track_producer("test", Info::timed());
 		let mut consumer = producer.subscribe(None);
 		let mut writer = producer.append_group().unwrap();
@@ -13125,9 +13165,11 @@ mod test {
 		assert!(group.read_frame().now_or_never().unwrap().unwrap().is_some());
 		drop(consumer);
 
+		let producer = producer
+			.abort_unused(Error::Cancel)
+			.expect_err("the group's reader keeps the track");
+		drop(group);
 		assert!(producer.abort_unused(Error::Cancel).is_ok());
-		let read = group.read_frame().now_or_never().expect("should not block");
-		assert!(matches!(read, Err(Error::Cancel)), "{read:?}");
 		let write = writer.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"y"));
 		assert!(matches!(write, Err(Error::Cancel)), "{write:?}");
 	}
@@ -17630,6 +17672,80 @@ mod test {
 			assert_eq!(producer.demand().wanted(), Some(wanted), "{delta} byte delta");
 			assert_eq!(subscriber.assert_group().sequence, 0, "{delta} byte delta");
 		}
+	}
+
+	/// A handed-out group keeps its track wanted once its subscription leaves, until a
+	/// reader reads its end: a finished group owes nothing more, even while still held.
+	#[test]
+	fn a_group_read_keeps_its_track_wanted_until_its_end() {
+		let producer = track_producer("test", Info::timed());
+		let mut subscriber = producer.subscribe(None);
+		let mut writing = producer.append_group().unwrap();
+		writing.write_frame(Timestamp::ZERO, &b"key"[..]).unwrap();
+		let mut group = subscriber.assert_group();
+		let other = group.clone();
+		drop(subscriber);
+		assert_eq!(producer.demand().wanted(), Some(0), "the group is read");
+
+		writing.finish().unwrap();
+		assert_eq!(producer.demand().wanted(), Some(0), "not read to its end yet");
+		let waiter = kio::Waiter::noop();
+		assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
+		assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(None))));
+		assert_eq!(
+			producer.demand().wanted(),
+			None,
+			"a clone reading the end ends it for all"
+		);
+		drop(other);
+	}
+
+	/// A reader stopping at its range cap has not reached the group's end: the group is
+	/// still open, so it keeps its track wanted for the others and for a raised cap.
+	#[test]
+	fn a_range_cap_is_not_the_groups_end() {
+		let producer = track_producer("test", Info::timed());
+		let mut subscriber = producer.subscribe(None);
+		let mut writing = producer.append_group().unwrap();
+		writing.write_frame(Timestamp::ZERO, &b"key"[..]).unwrap();
+		let group = subscriber.assert_group();
+		let mut capped = group.clone().with_range(..1);
+		drop(subscriber);
+
+		let waiter = kio::Waiter::noop();
+		assert!(matches!(capped.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
+		assert!(matches!(capped.poll_read_frame(&waiter), Poll::Ready(Ok(None))));
+		assert!(matches!(capped.poll_finished(&waiter), Poll::Ready(Ok(1))));
+		assert_eq!(producer.demand().wanted(), Some(0), "the cap is not the group's end");
+		drop(group);
+		let producer = producer
+			.abort_unused(Error::Cancel)
+			.expect_err("the capped reader can raise its cap");
+
+		writing.write_frame(Timestamp::ZERO, &b"delta"[..]).unwrap();
+		let mut capped = capped.with_range(..);
+		assert!(matches!(capped.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
+		writing.finish().unwrap();
+		assert!(matches!(capped.poll_read_frame(&waiter), Poll::Ready(Ok(None))));
+		assert_eq!(producer.demand().wanted(), None, "read to the group's end");
+	}
+
+	/// A fetched group keeps its track wanted after the fetch resolved, while it is read.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_fetched_group_keeps_its_track_wanted() {
+		let producer = track_producer("test", Info::timed());
+		let mut writing = producer.append_group().unwrap();
+		writing.write_frame(Timestamp::ZERO, &b"key"[..]).unwrap();
+		let group = producer
+			.consume()
+			.fetch_group(0, None)
+			.now_or_never()
+			.expect("cached")
+			.unwrap();
+		assert_eq!(producer.demand().wanted(), Some(0));
+		drop(group);
+		assert_eq!(producer.demand().wanted(), None);
 	}
 
 	/// A datagram past the newest group took the sequence after it, so a join over the

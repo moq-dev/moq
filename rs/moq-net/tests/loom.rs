@@ -206,6 +206,52 @@ fn subscriber_wakes_parked_demand() {
 	});
 }
 
+/// A publisher waiting on `broadcast::Demand` while one reader hands over to the next:
+/// the last reader leaves and a new one arrives straight from the track producer, which
+/// never touches the broadcast's own state. Whatever the publisher's poll saw, it must be
+/// woken for the newcomer.
+#[test]
+fn broadcast_demand_sees_a_reader_return() {
+	model(|| {
+		let broadcast = broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let video = broadcast.create_track("video", None).expect("create track");
+		let mut demand = broadcast.demand();
+		let first = block_on(consumer.track("video").expect("track").subscribe(None)).expect("subscribe");
+
+		let reader = thread::spawn(move || {
+			drop(first);
+			let next = video.subscribe(None);
+			// Returned, so neither the reader nor the track goes before the join.
+			(video, next)
+		});
+
+		// The first call reports whatever the swap left; a reader gone must not stay unseen.
+		while !block_on(demand.wanted_changed()).expect("the returning reader was missed") {}
+		drop(reader.join().unwrap());
+	});
+}
+
+/// A publisher waiting on `broadcast::Demand` while a reader comes and goes straight
+/// through the track producer: its leaving must wake the publisher.
+#[test]
+fn broadcast_demand_sees_a_reader_leave() {
+	model(|| {
+		let broadcast = broadcast::Info::new().produce();
+		let video = broadcast.create_track("video", None).expect("create track");
+		let mut demand = broadcast.demand();
+		let reader = video.subscribe(None);
+
+		let leaver = thread::spawn(move || {
+			drop(reader);
+			video
+		});
+
+		while block_on(demand.wanted_changed()).expect("the reader leaving was missed") {}
+		drop(leaver.join().unwrap());
+	});
+}
+
 /// A reader taking and dropping a track around the front's demand poll. The front must
 /// see it go: one that missed the edge keeps its source subscribed for nobody, which
 /// shows up here as a deadlock waiting for the source to go unread.

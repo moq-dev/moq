@@ -41,7 +41,9 @@ state again).
   break. Nested so a later join mechanism that is not a fixed grid can sit
   beside it.
   moq-mux declares the interval from its GOP hint, and `@moq/publish` does
-  too. A broadcast without one is not HLS-renderable.
+  too. moq-c's `group_duration_us` hint
+  ([#7068](https://github.com/moq-dev/moq/pull/7068)), which declares the `hls`
+  duration today, then declares the interval. A broadcast without one is not HLS-renderable.
 - **Each group belongs to one segment, numbered by grid line**: the first
   line it contains, so an edge finds segment N from a `Time` start at pts
   N × interval, the group that resolves to. A group containing no line

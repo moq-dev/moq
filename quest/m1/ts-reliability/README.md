@@ -88,7 +88,8 @@ owner that retires it. Those quests rank ahead of the remaining rows. Rejected: 
 decode time in every frame container, one shared ingest byte budget,
 and replacing the demux with GStreamer or another parser (it fixes neither
 cause). Out of scope for now: decoupling catalog publication from mux-rate
-measurement. Re-planned the same day: decode order covers MKV and FLV too and
+measurement, except for a supervised restart, which reuses its predecessor's
+measurement (decided 2026-10-28). Re-planned the same day: decode order covers MKV and FLV too and
 absorbs the release audit's export-reorder quest, and the shared parser lands
 before the open stream-routes and PAT drafts, which rebase onto it.
 
@@ -98,8 +99,10 @@ catalog linger (#5305).
 
 ## Required
 
+- [A timebase step restarts the TS import](/quest/m1/ts-reliability/step-restart.md) - an unflagged step or a rewind republishes under a new epoch instead of ending the import and every subscriber's export
+- [Export re-acquires a step](/quest/m1/ts-reliability/export-reacquire.md) - `moq export ts` re-acquires an unmarked timeline step instead of exiting on fake drift
+- [A restart keeps its catalog](/quest/m1/ts-reliability/restart-catalog.md) - a restarted import publishes its catalog with its first media
 - [PAT changes](/quest/m1/ts-reliability/pat-lifecycle.md) - a running export follows a moved PMT PID
-- [TS workflow passes](/quest/m1/ts-reliability/validation-green.md) - the scheduled TS lanes pass on main again, with no lane loosened
 - [A demoted subscriber priority reaches the publisher](/quest/m1/ts-reliability/stitch-catch-up.md) - a mid-stream priority demotion reaches the publisher on lite-07 and moq-transport, including an old instance after an epoch switch
 
 ## Related

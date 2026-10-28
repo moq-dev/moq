@@ -205,7 +205,7 @@ Hold the owned `BandwidthConsumer` returned by `session->recv_bandwidth()` to re
 
 ## Compressed tracks
 
-`moq::TrackInfo::compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. `@moq/net` cannot read a compressed track yet.
+`moq::TrackInfo::compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
 
 ## Track demand
 

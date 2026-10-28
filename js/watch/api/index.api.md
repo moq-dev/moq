@@ -120,7 +120,7 @@ export { BufferedRange } from "@moq/hang/container";
 
 export { BufferedRanges } from "@moq/hang/container";
 
-export const CATALOG_FORMATS: readonly ["hang", "msf", "hangz", "manual"];
+export const CATALOG_FORMATS: readonly ["hang", "msf", "manual"];
 
 export type CatalogFormat = typeof CATALOG_FORMATS[number];
 
