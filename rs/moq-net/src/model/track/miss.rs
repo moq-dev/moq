@@ -491,6 +491,11 @@ impl Misses {
 			self.judged.insert(run.clone());
 		}
 		let start = state.start_sequence.unwrap_or(0);
+		// Below the start its publisher resolved from the budget, such a copy cannot tell a
+		// group a reader's budget reaches, so it leaves them to the feed's re-offer.
+		if state.fills_from_start && start > 0 {
+			candidates.remove(0..start);
+		}
 		for run in candidates.iter() {
 			// Backfill another reader's fill cached is no hole, yet the arrival walk never
 			// reaches it: this reader takes it as filled where it would ask for a hole.

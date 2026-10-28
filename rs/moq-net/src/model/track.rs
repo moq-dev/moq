@@ -444,6 +444,10 @@ pub(crate) struct TrackState {
 	anchored: bool,
 	// This copy can translate only anchors its cache has already settled.
 	cached_anchors: bool,
+	// Whether readers ask no fills below `start_sequence`: its publisher resolved it from the
+	// budget, but neither this copy's timestamps nor a fill can judge an older group against
+	// a reader's budget. A widened budget reaches lower groups through the feed's re-offer.
+	fills_from_start: bool,
 	// Sequences the upstream publisher gave up, with the error each was given up with: an
 	// incoming SUBSCRIBE_DROP or a producer cut. Kept apart from the cache so reclaiming a
 	// slot cannot erase a disposition a relay must forward, and as ranges so a wide DROP
@@ -3247,6 +3251,15 @@ impl Producer {
 		if let Ok(mut state) = self.modify() {
 			state.anchored = true;
 			state.cached_anchors = true;
+		}
+	}
+
+	/// Have this received copy's readers ask no fills below the start its publisher resolved
+	/// from the budget, for a wire whose fills and timestamps cannot bound them by it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn fills_from_start(&self) {
+		if let Ok(mut state) = self.modify() {
+			state.fills_from_start = true;
 		}
 	}
 
@@ -17777,6 +17790,39 @@ mod test {
 			dynamic.poll_requested_fill(&waiter).is_pending(),
 			"a refusal is not asked again"
 		);
+	}
+
+	/// A copy whose fills cannot carry a reader's budget asks none below the start its
+	/// publisher resolved from that budget, and names nothing there dropped: what a wider
+	/// budget reaches comes through the feed's re-offer, which a reader takes as it arrives.
+	#[test]
+	#[cfg(feature = "async")]
+	fn no_fill_below_a_start_resolved_from_the_budget() {
+		let write = |producer: &Producer, sequence| {
+			let mut group = producer.create_group(group::Info { sequence }).unwrap();
+			group.write_frame(None, &b"x"[..]).unwrap();
+			group.finish().unwrap();
+		};
+		let mut producer = track_producer("test", Info::default());
+		producer.fills_from_start();
+		let dynamic = producer.requests();
+		let mut subscriber = producer.subscribe(replay().with_range(0..));
+		producer.request_start(None).unwrap();
+		producer.start_at(2).unwrap();
+		write(&producer, 2);
+		write(&producer, 3);
+		let waiter = kio::Waiter::noop();
+		assert_eq!(drain_groups(&mut subscriber), [2, 3]);
+		assert!(
+			dynamic.poll_requested_fill(&waiter).is_pending(),
+			"below the start is no miss"
+		);
+		assert!(drained_drops(&mut subscriber).is_empty());
+
+		// The re-offer of a widened budget.
+		write(&producer, 1);
+		assert_eq!(drain_groups(&mut subscriber), [1]);
+		assert!(dynamic.poll_requested_fill(&waiter).is_pending());
 	}
 
 	/// A reader arriving after another's fill cached the groups under the start reads them
