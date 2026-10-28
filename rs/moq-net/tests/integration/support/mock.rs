@@ -520,10 +520,7 @@ impl poll::Session for MockSession {
 		err.map_or(Poll::Pending, |err| Poll::Ready(Err(err)))
 	}
 
-	fn poll_accept_bi(
-		&self,
-		waiter: &kio::Waiter,
-	) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
+	fn poll_accept_bi(&self, waiter: &kio::Waiter) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 		let err = self.side.inc.route(&self.inner, waiter);
 		if let Poll::Ready(Ok(((send, back), (recv, forward)))) = self.side.inc.ready_bi.poll_pop(waiter) {
 			return Poll::Ready(Ok((self.send(send, back), self.recv(recv, forward))));
@@ -826,7 +823,7 @@ impl MockSession {
 	/// The code and reason the connection was closed with, once either side closed it.
 	pub fn close_reason(&self) -> Option<(u32, String)> {
 		let waiter = &kio::Waiter::noop();
-		match poll::Session::poll_closed(&mut self.inner.clone(), waiter) {
+		match poll::Session::poll_closed(&self.inner.clone(), waiter) {
 			Poll::Ready(err) => moq_net::transport::Error::session_error(&err),
 			Poll::Pending => None,
 		}

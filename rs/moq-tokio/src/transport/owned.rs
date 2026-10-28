@@ -85,12 +85,7 @@ impl<S: super::Grouped<SendStream: 'static, RecvStream: 'static>> poll::Session 
 			let session = session.clone();
 			Box::pin(async move { session.accept_bi().await })
 		})
-		.map_ok(|(send, recv)| {
-			(
-				BridgedSend::new(send),
-				S::recv(super::RecvStream::new(recv)),
-			)
-		})
+		.map_ok(|(send, recv)| (BridgedSend::new(send), S::recv(super::RecvStream::new(recv))))
 		.map_err(Error)
 	}
 	fn poll_open_uni(
@@ -116,7 +111,12 @@ impl<S: super::Grouped<SendStream: 'static, RecvStream: 'static>> poll::Session 
 			let session = session.clone();
 			Box::pin(async move { session.open_bi().await })
 		})
-		.map_ok(|(send, recv)| (BridgedSend::scheduled(send, options), S::recv(super::RecvStream::new(recv))))
+		.map_ok(|(send, recv)| {
+			(
+				BridgedSend::scheduled(send, options),
+				S::recv(super::RecvStream::new(recv)),
+			)
+		})
 		.map_err(Error)
 	}
 
@@ -131,7 +131,12 @@ impl<S: super::Grouped<SendStream: 'static, RecvStream: 'static>> poll::Session 
 			Box::pin(async move { session.open_request().await })
 		})
 		.map_ok(|streams| {
-			streams.map(|(send, recv)| (BridgedSend::scheduled(send, options), S::recv(super::RecvStream::new(recv))))
+			streams.map(|(send, recv)| {
+				(
+					BridgedSend::scheduled(send, options),
+					S::recv(super::RecvStream::new(recv)),
+				)
+			})
 		})
 		.map_err(Error)
 	}
@@ -244,11 +249,7 @@ impl poll::RecvStream for crate::quic::web::RecvStream {
 	type Error = Error<crate::quic::web::ReadError>;
 	type Lease<'a> = crate::quic::driver::Lease<'a>;
 
-	fn poll_lease(
-		&mut self,
-		waiter: &moq_net::kio::Waiter,
-		want: usize,
-	) -> Poll<Result<Self::Lease<'_>, Self::Error>> {
+	fn poll_lease(&mut self, waiter: &moq_net::kio::Waiter, want: usize) -> Poll<Result<Self::Lease<'_>, Self::Error>> {
 		crate::quic::web::RecvStream::poll_lease(self, &mut waiter.context(), want).map_err(Error)
 	}
 	fn set_priority(&mut self, priority: i64) {

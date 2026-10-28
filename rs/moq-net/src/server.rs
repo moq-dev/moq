@@ -953,10 +953,7 @@ mod tests {
 		type RecvStream = FakeRecv;
 		type Error = FakeError;
 
-		fn poll_accept_uni(
-			&self,
-			_waiter: &kio::Waiter,
-		) -> std::task::Poll<Result<Self::RecvStream, Self::Error>> {
+		fn poll_accept_uni(&self, _waiter: &kio::Waiter) -> std::task::Poll<Result<Self::RecvStream, Self::Error>> {
 			match self.uni.lock().unwrap().pop_front() {
 				Some(data) => std::task::Poll::Ready(Ok(crate::transport::poll::Buffered::new(FakeChunks {
 					data: data.into(),
@@ -1019,10 +1016,7 @@ mod tests {
 		) -> Result<(), Self::Error> {
 			Ok(())
 		}
-		fn poll_recv_datagram(
-			&self,
-			_waiter: &kio::Waiter,
-		) -> std::task::Poll<Result<Bytes, Self::Error>> {
+		fn poll_recv_datagram(&self, _waiter: &kio::Waiter) -> std::task::Poll<Result<Bytes, Self::Error>> {
 			std::task::Poll::Pending
 		}
 		fn max_datagram_size(&self) -> usize {
@@ -1049,11 +1043,7 @@ mod tests {
 	impl crate::transport::poll::SendStream for FakeSend {
 		type Error = FakeError;
 		type Group = crate::transport::poll::Ungrouped;
-		fn poll_write(
-			&mut self,
-			_waiter: &kio::Waiter,
-			buf: &[u8],
-		) -> std::task::Poll<Result<usize, Self::Error>> {
+		fn poll_write(&mut self, _waiter: &kio::Waiter, buf: &[u8]) -> std::task::Poll<Result<usize, Self::Error>> {
 			match self.withheld {
 				true => std::task::Poll::Pending,
 				false => std::task::Poll::Ready(Ok(buf.len())),
@@ -1448,7 +1438,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn accept_request_reads_buffered_setup_after_transport_close() {
 		let mut session = FakeSession::new(ALPN_LITE_05, [lite05_setup(Some("/closed"), None, None)]);
-		crate::transport::poll::Session::close(&mut session, SessionError::Cancel.to_code(), "closed");
+		crate::transport::poll::Session::close(&session, SessionError::Cancel.to_code(), "closed");
 		let request = Server::new().accept_request(moq_clock::now(), session).await.unwrap();
 		assert_eq!(request.path(), "/closed");
 	}

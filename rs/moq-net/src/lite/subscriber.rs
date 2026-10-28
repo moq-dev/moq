@@ -1521,7 +1521,7 @@ impl ProbeStream {
 					if self.subscriber.going_away.is_set() {
 						return Poll::Ready(Ok(()));
 					}
-					let mut stream = ready!(Stream::poll_open(&mut self.session, self.subscriber.version, waiter))?;
+					let mut stream = ready!(Stream::poll_open(&self.session, self.subscriber.version, waiter))?;
 					stream = stream.with_stats(self.subscriber.origin.stats());
 					stream.writer.buffer(&lite::ControlType::Probe)?;
 					self.state = ProbeState::Send { stream };
@@ -1630,7 +1630,7 @@ impl AnnouncePrefix {
 			match &mut self.state {
 				PrefixState::Open => {
 					let mut stream = ready!(Stream::poll_open_request(
-						&mut self.subscriber.session,
+						&self.subscriber.session,
 						self.subscriber.version,
 						waiter
 					))?;
@@ -1915,7 +1915,7 @@ impl TracksRecv {
 		let stream = match &mut self.stream {
 			Some(stream) => stream,
 			None => {
-				let mut stream = ready!(Stream::poll_open_request(&mut self.session, version, waiter))?;
+				let mut stream = ready!(Stream::poll_open_request(&self.session, version, waiter))?;
 				stream = stream.with_stats(source.subscriber.origin.stats());
 				stream.writer.buffer(&lite::ControlType::Tracks)?;
 				stream.writer.buffer(&lite::Tracks {
@@ -6994,7 +6994,7 @@ impl Establish {
 			match &mut self.state {
 				EstablishState::Open => {
 					let mut stream = ready!(Stream::poll_open_request(
-						&mut self.session,
+						&self.session,
 						self.serve.subscriber.version,
 						waiter
 					))?;
@@ -7182,13 +7182,7 @@ impl kio::Task for TrackServeRun {
 		// its tracks end.
 		if !matches!(self.state, TrackRunState::Finish(_))
 			&& self.gate.poll_denied(waiter).is_ready()
-			&& self
-				.serve
-				.subscriber
-				.session
-				.clone()
-				.poll_closed(waiter)
-				.is_pending()
+			&& self.serve.subscriber.session.clone().poll_closed(waiter).is_pending()
 		{
 			self.revoke();
 			return Poll::Ready(());
@@ -7340,7 +7334,7 @@ impl TrackInfoFetch {
 			match &mut self.state {
 				TrackInfoState::Open => {
 					let mut stream = ready!(Stream::poll_open_request(
-						&mut self.session,
+						&self.session,
 						serve.subscriber.version,
 						waiter
 					))?;
@@ -7828,7 +7822,6 @@ impl ServeLoop {
 					return Poll::Pending;
 				}
 				ServeMode::Select => {
-
 					if let Some(writer) = &mut self.closing
 						&& writer.poll_close(waiter).is_ready()
 					{
@@ -8311,19 +8304,16 @@ impl kio::Task for FetchServeRun {
 					ready!(self.gate.poll_ready(waiter));
 					// The fill already has readers holding its demand. Backpressure keeps their
 					// owned request alive; abandoning it above releases this wait too.
-					let mut stream = match ready!(Stream::poll_open(
-						&mut self.session,
-						self.serve.subscriber.version,
-						waiter
-					)) {
-						Ok(stream) => stream,
-						Err(err) => {
-							tracing::warn!(track = %self.serve.name, %err, "fetch stream open failed");
-							request.take().expect("request pending").reject(err);
-							self.state = FetchRunState::Done;
-							return Poll::Ready(());
-						}
-					};
+					let mut stream =
+						match ready!(Stream::poll_open(&self.session, self.serve.subscriber.version, waiter)) {
+							Ok(stream) => stream,
+							Err(err) => {
+								tracing::warn!(track = %self.serve.name, %err, "fetch stream open failed");
+								request.take().expect("request pending").reject(err);
+								self.state = FetchRunState::Done;
+								return Poll::Ready(());
+							}
+						};
 
 					// Only once the stream opens: credit and its header can wait, and
 					// re-polls this state, so logging before it repeats per poll.

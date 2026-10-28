@@ -367,7 +367,10 @@ pub mod poll {
 
 		/// Open a unidirectional stream scheduled by `options`, waiting for stream credit if
 		/// necessary.
-		fn open_uni<'a>(&'a self, options: SendOptions<'a, <Self::SendStream as SendStream>::Group>) -> OpenUni<'a, Self> {
+		fn open_uni<'a>(
+			&'a self,
+			options: SendOptions<'a, <Self::SendStream as SendStream>::Group>,
+		) -> OpenUni<'a, Self> {
 			OpenUni {
 				session: self,
 				options,
@@ -377,7 +380,10 @@ pub mod poll {
 
 		/// Open a bidirectional stream, its sending half scheduled by `options`, waiting for
 		/// stream credit if necessary.
-		fn open_bi<'a>(&'a self, options: SendOptions<'a, <Self::SendStream as SendStream>::Group>) -> OpenBi<'a, Self> {
+		fn open_bi<'a>(
+			&'a self,
+			options: SendOptions<'a, <Self::SendStream as SendStream>::Group>,
+		) -> OpenBi<'a, Self> {
 			OpenBi {
 				session: self,
 				options,

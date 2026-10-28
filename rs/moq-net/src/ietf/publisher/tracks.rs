@@ -389,8 +389,7 @@ impl Publisher {
 					if session.poll_closed(waiter).is_ready() {
 						return Poll::Ready(Event::Closed);
 					}
-					if let Poll::Ready(res) =
-						self.poll_listing_cancel(&mut stream, &mut finished, &mut goaways, waiter)
+					if let Poll::Ready(res) = self.poll_listing_cancel(&mut stream, &mut finished, &mut goaways, waiter)
 					{
 						return Poll::Ready(Event::Cancelled(res));
 					}
@@ -621,7 +620,7 @@ impl Publisher {
 		};
 		let mut entries = Entries::default();
 		let mut publishes = TaskSet::owned();
-		let mut session = self.session.clone();
+		let session = self.session.clone();
 		// The listing ended, the request did, or the route was withdrawn: nothing more to add.
 		let mut adding = true;
 		let mut withdrawn = false;
@@ -713,7 +712,7 @@ impl Publisher {
 					return Poll::Ready(Some(Event::Regrant(permit)));
 				}
 				if entries.staged.is_some()
-					&& let Poll::Ready(opened) = Stream::poll_open(&mut session, self.version, waiter)
+					&& let Poll::Ready(opened) = Stream::poll_open(&session, self.version, waiter)
 				{
 					return Poll::Ready(Some(Event::Opened(opened)));
 				}

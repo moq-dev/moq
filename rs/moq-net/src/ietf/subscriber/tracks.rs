@@ -1749,8 +1749,7 @@ mod tests {
 			.await
 			.unwrap();
 		let mut peer = h.peer.clone();
-		let closed =
-			kio::wait(move |waiter| crate::transport::poll::Session::poll_closed(&mut peer, waiter));
+		let closed = kio::wait(move |waiter| crate::transport::poll::Session::poll_closed(&peer, waiter));
 		moq_clock::timeout(TIMEOUT, closed)
 			.await
 			.expect("the session stayed up");

@@ -466,8 +466,7 @@ mod tests {
 			poll::Session::metrics(&session).rtt(),
 			Some(std::time::Duration::from_millis(7))
 		);
-		let Poll::Ready(Ok((mut send, mut recv))) =
-			poll::Session::poll_open_bi(&session, waiter, Default::default())
+		let Poll::Ready(Ok((mut send, mut recv))) = poll::Session::poll_open_bi(&session, waiter, Default::default())
 		else {
 			panic!("open failed")
 		};

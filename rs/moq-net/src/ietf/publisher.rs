@@ -3799,8 +3799,7 @@ impl Publisher {
 			let request_waiter = request
 				.waiter
 				.get_or_insert_with(|| kio::Waiter::new(woken.waker(suffix.clone())));
-			if let Poll::Ready(answer) = request.messages.poll_next(&mut request.stream.reader, request_waiter)
-			{
+			if let Poll::Ready(answer) = request.messages.poll_next(&mut request.stream.reader, request_waiter) {
 				// The rest stay woken for the next pass.
 				woken.suffixes.lock().unwrap().append(&mut suffixes);
 				let answer = answer.and_then(|answer| {
@@ -5166,11 +5165,7 @@ impl<T: crate::transport::poll::SendStream> crate::transport::poll::SendStream f
 		inner.stream.poll_write(waiter, buf)
 	}
 
-	fn poll_write_buf<B: bytes::Buf>(
-		&mut self,
-		waiter: &kio::Waiter,
-		buf: &mut B,
-	) -> Poll<Result<usize, Self::Error>> {
+	fn poll_write_buf<B: bytes::Buf>(&mut self, waiter: &kio::Waiter, buf: &mut B) -> Poll<Result<usize, Self::Error>> {
 		let inner = self.get_mut();
 		inner.follow(waiter);
 		inner.stream.poll_write_buf(waiter, buf)

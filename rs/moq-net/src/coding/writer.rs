@@ -283,7 +283,6 @@ impl<S: crate::transport::poll::SendStream, V> Drop for Writer<S, V> {
 mod tests {
 	use super::*;
 	use crate::lite::test_transport::{Log, SinkSend};
-	
 
 	#[derive(Debug, Clone, thiserror::Error)]
 	#[error("stream stopped with {0}")]

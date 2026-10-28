@@ -571,10 +571,7 @@ mod tests {
 
 		// A body cut short inside its declared size is malformed, and never counted.
 		reader.stream.get_mut().chunks.push_back(&[1, 0x80]);
-		assert!(matches!(
-			reader.poll_decode::<lite::Probe>(waiter),
-			Poll::Ready(Err(_))
-		));
+		assert!(matches!(reader.poll_decode::<lite::Probe>(waiter), Poll::Ready(Err(_))));
 		assert_eq!(counted(), [vec![auth], probes(2)].concat());
 	}
 
@@ -904,10 +901,7 @@ mod tests {
 		// The tail completes the frame, so the loop returns without a wake of its own.
 		// The commit is what publishes it, and the commit is the caller's to make.
 		reader.stream.get_mut().chunks.push_back(b"baz");
-		assert!(matches!(
-			reader.poll_read_frame(noop, &mut frame),
-			Poll::Ready(Ok(()))
-		));
+		assert!(matches!(reader.poll_read_frame(noop, &mut frame), Poll::Ready(Ok(()))));
 		assert_eq!(wakes.count(), 1, "a full frame woke before it was committed");
 
 		let _group = frame.finish().unwrap();

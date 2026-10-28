@@ -1025,7 +1025,7 @@ pub(super) fn stop_on_error<R: crate::transport::poll::RecvStream>(
 
 /// Accept incoming bidi streams, leaving each request to read its own header.
 async fn run_dispatch(
-	mut session: Transport,
+	session: Transport,
 	publisher: Publisher,
 	subscriber: Subscriber,
 	peer_setup: peer::PeerSetup,
@@ -1084,7 +1084,7 @@ async fn run_dispatch(
 				{
 					return Poll::Ready(Err(err));
 				}
-				Stream::poll_accept(&mut session, version, waiter)
+				Stream::poll_accept(&session, version, waiter)
 			})
 			.await;
 		let stream = match accepted {
@@ -3297,8 +3297,7 @@ mod tests {
 		for version in [Version::Draft18, Version::Draft22] {
 			let request_id = (version == Version::Draft18).then_some(0);
 			let two = [goaway(version, request_id), goaway(version, request_id)].concat();
-			let session =
-				crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![two]);
+			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![two]);
 			let stream = kio::wait(|waiter| session.poll_accept_uni(waiter)).await.unwrap();
 			let (handle, protocol) = crate::goaway::Handle::new(false);
 

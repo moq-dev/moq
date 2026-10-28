@@ -126,7 +126,7 @@ mod tests {
 			let waiter = &kio::Waiter::noop();
 			for _ in 0..2 {
 				assert!(matches!(
-					Stream::poll_open_request(&mut session, version, waiter),
+					Stream::poll_open_request(&session, version, waiter),
 					Poll::Ready(Err(Error::NoStreamCredit))
 				));
 			}
@@ -148,7 +148,7 @@ mod tests {
 		let gate = kio::Producer::new(false);
 		let mut session = ScriptedSession::gated_open(Vec::new(), gate.consume());
 		let waiter = &kio::Waiter::noop();
-		assert!(Stream::poll_open_request(&mut session, Version::Lite07, waiter).is_pending());
+		assert!(Stream::poll_open_request(&session, Version::Lite07, waiter).is_pending());
 		{
 			let Ok(mut open) = gate.write() else {
 				panic!("gate is still live");
@@ -156,7 +156,7 @@ mod tests {
 			*open = true;
 		}
 		assert!(matches!(
-			Stream::poll_open_request(&mut session, Version::Lite07, waiter),
+			Stream::poll_open_request(&session, Version::Lite07, waiter),
 			Poll::Ready(Ok(_))
 		));
 		assert_eq!(session.log.bi_opens(), 1);

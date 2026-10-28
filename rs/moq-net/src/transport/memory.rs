@@ -744,10 +744,7 @@ mod tests {
 		let count = Arc::new(Count::default());
 		let waiter = kio::Waiter::new(Waker::from(count.clone()));
 		let mut next = Bytes::from_static(b"x");
-		assert!(
-			send.poll_write_buf(&waiter, &mut next)
-				.is_pending()
-		);
+		assert!(send.poll_write_buf(&waiter, &mut next).is_pending());
 		assert_eq!(next, "x");
 
 		// Only that stream is full.
@@ -796,10 +793,7 @@ mod tests {
 		finished.finish().unwrap();
 		let mut recv = ready(b.poll_accept_uni(&noop())).unwrap();
 		assert_eq!(text(read(&mut recv, usize::MAX)), "x");
-		assert!(
-			open(&a, &waiter).is_pending(),
-			"an unread FIN keeps the credit"
-		);
+		assert!(open(&a, &waiter).is_pending(), "an unread FIN keeps the credit");
 		assert_eq!(ready(read(&mut recv, usize::MAX)).unwrap(), None);
 		assert!(count.0.load(Ordering::Relaxed) > 0);
 		let _third = ready(open(&a, &noop())).unwrap();
@@ -813,10 +807,7 @@ mod tests {
 
 		// A parked open fails once the session closes.
 		b.close(1, "bye");
-		assert!(matches!(
-			ready(open(&a, &noop())),
-			Err(Error::Session { code: 1, .. })
-		));
+		assert!(matches!(ready(open(&a, &noop())), Err(Error::Session { code: 1, .. })));
 	}
 
 	/// A bidi stream holds its opener's credit until the peer is done with both halves.
@@ -837,10 +828,7 @@ mod tests {
 		send.finish().unwrap();
 		let (mut peer_send, mut peer_recv) = ready(b.poll_accept_bi(&noop())).unwrap();
 		assert_eq!(ready(read(&mut peer_recv, usize::MAX)).unwrap(), None);
-		assert!(
-			open(&a, &waiter).is_pending(),
-			"the peer still writes"
-		);
+		assert!(open(&a, &waiter).is_pending(), "the peer still writes");
 
 		peer_send.finish().unwrap();
 		assert!(count.0.load(Ordering::Relaxed) > 0);
@@ -987,10 +975,7 @@ mod tests {
 		drop(a);
 		assert!(b.poll_closed(&noop()).is_pending());
 		drop(clone);
-		assert!(matches!(
-			ready(b.poll_closed(&noop())),
-			Error::Session { code: 0, .. }
-		));
+		assert!(matches!(ready(b.poll_closed(&noop())), Error::Session { code: 0, .. }));
 	}
 
 	#[test]

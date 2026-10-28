@@ -1122,9 +1122,7 @@ impl poll::Session for ScriptedSession {
 	) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		let credit = self.credit.consume();
 		if credit
-			.poll(waiter, |credit| {
-				if **credit { Poll::Ready(()) } else { Poll::Pending }
-			})
+			.poll(waiter, |credit| if **credit { Poll::Ready(()) } else { Poll::Pending })
 			.is_pending()
 		{
 			return Poll::Pending;
@@ -1235,7 +1233,7 @@ fn a_local_close_preserves_scripted_uni_bytes_and_ends_accepts() {
 		if fin {
 			session.close(Close::Fin);
 		}
-		poll::Session::close(&mut session, 0, "done");
+		poll::Session::close(&session, 0, "done");
 		let waiter = &kio::Waiter::noop();
 		assert!(session.poll_closed(waiter).is_ready());
 		let Poll::Ready(Ok(mut recv)) = session.poll_accept_uni(waiter) else {

@@ -169,11 +169,7 @@ impl super::Metrics for Metrics {
 trait ErasedSession: MaybeSend + MaybeSync {
 	fn poll_accept_uni(&self, waiter: &kio::Waiter) -> Poll<Result<RecvStream, Error>>;
 	fn poll_accept_bi(&self, waiter: &kio::Waiter) -> Poll<Result<(SendStream, RecvStream), Error>>;
-	fn poll_open_uni(
-		&self,
-		waiter: &kio::Waiter,
-		options: SendOptions<'_, Group>,
-	) -> Poll<Result<SendStream, Error>>;
+	fn poll_open_uni(&self, waiter: &kio::Waiter, options: SendOptions<'_, Group>) -> Poll<Result<SendStream, Error>>;
 	fn poll_open_bi(
 		&self,
 		waiter: &kio::Waiter,
@@ -257,11 +253,7 @@ impl<S: poll::Boxable> ErasedSession for S {
 		poll::Session::poll_accept_bi(self, waiter).map(|res| res.map(bi::<S>).map_err(Error::new))
 	}
 
-	fn poll_open_uni(
-		&self,
-		waiter: &kio::Waiter,
-		options: SendOptions<'_, Group>,
-	) -> Poll<Result<SendStream, Error>> {
+	fn poll_open_uni(&self, waiter: &kio::Waiter, options: SendOptions<'_, Group>) -> Poll<Result<SendStream, Error>> {
 		poll::Session::poll_open_uni(self, waiter, unbox(options))
 			.map(|res| res.map(|send| SendStream(Box::new(send))).map_err(Error::new))
 	}
@@ -425,11 +417,7 @@ impl poll::Session for Session {
 		self.inner.poll_accept_bi(waiter)
 	}
 
-	fn poll_open_uni(
-		&self,
-		waiter: &kio::Waiter,
-		options: SendOptions<'_, Group>,
-	) -> Poll<Result<SendStream, Error>> {
+	fn poll_open_uni(&self, waiter: &kio::Waiter, options: SendOptions<'_, Group>) -> Poll<Result<SendStream, Error>> {
 		self.inner.poll_open_uni(waiter, options)
 	}
 

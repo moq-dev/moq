@@ -468,7 +468,6 @@ impl Driver {
 	}
 
 	fn poll_protocol(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-
 		// Presenting tokens ends the session only when the peer breaks the protocol.
 		if let Poll::Ready(err) = self.auth.poll(waiter) {
 			return Poll::Ready(Err(err));
@@ -646,7 +645,7 @@ impl PresentToken {
 					}
 					let token = token.clone();
 					let answered = *answered;
-					let mut stream = match ready!(Stream::poll_open_request(&mut self.session, self.version, waiter)) {
+					let mut stream = match ready!(Stream::poll_open_request(&self.session, self.version, waiter)) {
 						Ok(stream) => stream,
 						Err(err) => return Poll::Ready(err),
 					};
@@ -874,7 +873,7 @@ impl SendGoaway {
 					self.state = SendGoawayState::Open { payload };
 				}
 				SendGoawayState::Open { payload } => {
-					let mut stream = match ready!(Stream::poll_open(&mut self.session, self.version, waiter)) {
+					let mut stream = match ready!(Stream::poll_open(&self.session, self.version, waiter)) {
 						Ok(stream) => stream,
 						Err(err) => {
 							tracing::warn!(%err, "failed to send goaway");

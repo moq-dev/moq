@@ -164,7 +164,10 @@ mod tests {
 	fn every_parked_waiter_wakes() {
 		let bridge = Bridge::new(Handle::default());
 		let counts: Vec<_> = (0..3).map(|_| Arc::new(Count::default())).collect();
-		let waiters: Vec<_> = counts.iter().map(|count| Waiter::new(Waker::from(count.clone()))).collect();
+		let waiters: Vec<_> = counts
+			.iter()
+			.map(|count| Waiter::new(Waker::from(count.clone())))
+			.collect();
 		for waiter in &waiters {
 			assert!(bridge.poll(waiter, Handle::poll_ready).is_pending());
 		}

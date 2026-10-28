@@ -3004,13 +3004,13 @@ impl Subscriber {
 				(request_id, stream, messages)
 			}
 			None => {
-				let mut opening = self.session.clone();
+				let opening = self.session.clone();
 				let stream = match kio::wait(|waiter| {
 					if gate.poll_denied(waiter).is_ready() {
 						return Poll::Ready(Err(Error::Unauthorized));
 					}
 					validity.check(waiter)?;
-					Stream::poll_open_request(&mut opening, self.version, waiter)
+					Stream::poll_open_request(&opening, self.version, waiter)
 				})
 				.await
 				{
@@ -4068,13 +4068,13 @@ impl Subscriber {
 				// This subscription owns its joining fetch, so wait for stream credit.
 				// No ID is spent while opening a stream, so dropping a blocked open
 				// cannot leave a gap in the peer's sequential request IDs.
-				let mut opening = this.session.clone();
+				let opening = this.session.clone();
 				let mut stream = kio::wait(|waiter| {
 					validity.check(waiter)?;
 					if let Poll::Ready(err) = track.poll_aborted(waiter) {
 						return Poll::Ready(Err(err));
 					}
-					Stream::poll_open(&mut opening, this.version, waiter)
+					Stream::poll_open(&opening, this.version, waiter)
 				})
 				.await?;
 				stream = stream.with_stats(this.origin.stats());
@@ -4237,13 +4237,13 @@ impl Subscriber {
 		gate: &mut crate::auth::Gate,
 	) -> Option<Idle> {
 		let validity = self.validity.start();
-		let mut opening = self.session.clone();
+		let opening = self.session.clone();
 		let mut stream = match kio::wait(|waiter| {
 			if gate.poll_denied(waiter).is_ready() {
 				return Poll::Ready(Err(Error::Unauthorized));
 			}
 			validity.check(waiter)?;
-			Stream::poll_open_request(&mut opening, self.version, waiter)
+			Stream::poll_open_request(&opening, self.version, waiter)
 		})
 		.await
 		{
@@ -5331,7 +5331,7 @@ impl Subscriber {
 		// token-authorized announce outside the session scope. Its abort ends this job.
 		// The fill is already owned by waiting readers; credit backpressures it until
 		// their demand leaves instead of refusing accepted work.
-		let mut opening = self.session.clone();
+		let opening = self.session.clone();
 		let mut stream = match kio::wait(|waiter| {
 			validity.check(waiter)?;
 			if let Poll::Ready(err) = fill.poll_aborted(waiter) {
@@ -5340,7 +5340,7 @@ impl Subscriber {
 			if fill.poll_unwanted_groups(run.clone(), waiter).is_ready() {
 				return Poll::Ready(Err(Error::Cancel));
 			}
-			Stream::poll_open(&mut opening, self.version, waiter)
+			Stream::poll_open(&opening, self.version, waiter)
 		})
 		.await
 		{

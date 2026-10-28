@@ -349,7 +349,10 @@ impl Link {
 		let mut config = memory::Config::default();
 		config.protocol = Some(version.alpn().to_string());
 		let (client_transport, server_transport) = memory::pair(config);
-		let gate = Gate(std::sync::Arc::new(std::sync::Mutex::new((uni, kio::WaiterList::new()))));
+		let gate = Gate(std::sync::Arc::new(std::sync::Mutex::new((
+			uni,
+			kio::WaiterList::new(),
+		))));
 		let server_transport = Gated {
 			inner: server_transport,
 			gate: gate.clone(),
@@ -395,7 +398,10 @@ impl Link {
 		let mut config = memory::Config::default();
 		config.protocol = Some(version.alpn().to_string());
 		let (client_transport, server_transport) = memory::pair(config);
-		let gate = Gate(std::sync::Arc::new(std::sync::Mutex::new((usize::MAX, kio::WaiterList::new()))));
+		let gate = Gate(std::sync::Arc::new(std::sync::Mutex::new((
+			usize::MAX,
+			kio::WaiterList::new(),
+		))));
 		let server_transport = Gated {
 			inner: server_transport,
 			gate: gate.clone(),
@@ -457,10 +463,7 @@ impl moq_net::transport::poll::Session for Gated {
 	type RecvStream = <moq_net::transport::memory::Session as moq_net::transport::poll::Session>::RecvStream;
 	type Error = <moq_net::transport::memory::Session as moq_net::transport::poll::Session>::Error;
 
-	fn poll_accept_uni(
-		&self,
-		waiter: &kio::Waiter,
-	) -> std::task::Poll<Result<Self::RecvStream, Self::Error>> {
+	fn poll_accept_uni(&self, waiter: &kio::Waiter) -> std::task::Poll<Result<Self::RecvStream, Self::Error>> {
 		{
 			let mut gate = self.gate.0.lock().unwrap();
 			if gate.0 == 0 {

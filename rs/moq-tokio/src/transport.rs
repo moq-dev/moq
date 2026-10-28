@@ -1098,7 +1098,6 @@ mod tests {
 	// joined during the FIN watch reclaims the stream, which still retransmits.
 	#[test]
 	fn send_defers_a_group_across_an_inflight_write() {
-		
 		let fake = FakeSend::default();
 		fake.blocked.store(true, Ordering::SeqCst);
 		let mut send = SendStream::new(fake.clone());
