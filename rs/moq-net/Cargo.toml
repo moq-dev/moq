@@ -117,6 +117,12 @@ name = "codec"
 harness = false
 required-features = ["fuzz"]
 
+# Isolates the full fuzz round trip from the message-codec executable.
+[[bench]]
+name = "parameters"
+harness = false
+required-features = ["fuzz"]
+
 # Reaches the private lite codec through the hidden `fuzz` module.
 [[bench]]
 name = "varint"
