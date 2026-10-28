@@ -53,3 +53,4 @@ Public API: none. Wire: none.
 - [Swapped Rust to JS Opus](/quest/m0/test-flakes-2/swapped-js-opus.md) - the `rust-swapped -> js` interop cell stops timing out under load
 - [JS host-task yields follow the clock](/quest/m0/test-flakes-2/js-host-yields.md) - `Budget` and `nextTask` yield through the injected clock, so `Manual` tests stop racing them
 - [Runner VM test under load](/quest/m0/test-flakes-2/runner-vm.md) - the runner VM check passes when it rebuilds in a merge group, and a failed flake check prints its full log
+- [Fake timers to Manual](/quest/m0/test-flakes-2/fake-timers.md) - the remaining bun fake-timer tests run on the `Manual` clock
