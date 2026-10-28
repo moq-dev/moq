@@ -45,8 +45,7 @@ The epic's own work, once the children land:
   replay = local subscriber"), [iOS capture](/quest/m2/mobile-capture-ios.md),
   [video hardware](/quest/m3/video-hardware.md), and
   [time-addressed consumers](/quest/m1/time-addressing/consumers.md)'s
-  HLS-only-viewer clause. [An HLS viewer starts capture](/quest/m1/hls-record-demand.md)
-  narrows to the opt-in mode.
+  HLS-only-viewer clause.
 
 ## Required
 
