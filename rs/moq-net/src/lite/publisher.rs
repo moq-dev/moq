@@ -388,10 +388,13 @@ impl Control {
 				ControlState::Auth(serve) => return serve.poll(waiter),
 				ControlState::Goaway { stream } => {
 					let mut cx = waiter.context();
-					let msg = ready!(stream.reader.poll_decode::<lite::Goaway>(&mut cx))?;
-					tracing::info!(uri = %msg.uri, "received goaway");
+					let version = self.shared.version;
+					let uri =
+						ready!(stream.reader.poll_decode_with(&mut cx, |r| {
+							Ok(lite::Goaway::decode(r, version)?.uri.into_owned())
+						}))?;
+					tracing::info!(%uri, "received goaway");
 
-					let uri = msg.uri.into_owned();
 					if !self.shared.client && !uri.is_empty() {
 						return Poll::Ready(Err(Error::ProtocolViolation));
 					}
@@ -1492,10 +1495,13 @@ trait Request: Sized {
 	/// Whether the request stays open past its reply, keeping what serving it took, until
 	/// the requester closes its side.
 	const HOLDS: bool;
-	/// The message that opens the stream.
-	type Message: Decode<Version> + std::fmt::Debug;
+	/// The message that opens the stream, owned so it outlives the bytes it came from.
+	type Message: std::fmt::Debug;
 	/// What the requester may send after the request; [`NoUpdate`] for nothing.
-	type Update: Decode<Version> + std::fmt::Debug;
+	type Update: for<'a> Decode<'a, Version> + std::fmt::Debug;
+
+	/// Decode the message that opens the stream.
+	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self::Message, DecodeError>;
 
 	/// The broadcast and track the request names.
 	fn target(msg: &Self::Message) -> (&crate::Path, &str);
@@ -1523,8 +1529,8 @@ trait Request: Sized {
 #[derive(Debug)]
 enum NoUpdate {}
 
-impl Decode<Version> for NoUpdate {
-	fn decode(_: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for NoUpdate {
+	fn decode(_: &mut Decoder<'a>, _: Version) -> Result<Self, DecodeError> {
 		Err(DecodeError::ExpectedEnd)
 	}
 }
@@ -1657,7 +1663,8 @@ impl<R: Request> RequestServe<R> {
 			let stream = self.stream.as_mut().expect("stream present");
 			match &mut self.state {
 				RequestState::Decode => {
-					let msg = ready!(stream.reader.poll_decode::<R::Message>(&mut cx))?;
+					let version = self.shared.version;
+					let msg = ready!(stream.reader.poll_decode_with(&mut cx, |r| R::decode(r, version)))?;
 					let (broadcast, track) = R::target(&msg);
 					self.broadcast = broadcast.clone();
 					self.track = track.to_string();
@@ -1807,6 +1814,10 @@ impl Request for TrackInfoServe {
 	type Message = lite::Track<'static>;
 	type Update = NoUpdate;
 
+	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self::Message, DecodeError> {
+		lite::Track::decode(r, version).map(lite::Track::into_owned)
+	}
+
 	fn target(msg: &Self::Message) -> (&crate::Path, &str) {
 		(&msg.broadcast, &msg.track)
 	}
@@ -1860,6 +1871,10 @@ impl Request for TracksServe {
 	const HOLDS: bool = false;
 	type Message = lite::Tracks;
 	type Update = NoUpdate;
+
+	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self::Message, DecodeError> {
+		lite::Tracks::decode(r, version)
+	}
 
 	fn target(msg: &Self::Message) -> (&crate::Path, &str) {
 		(&msg.broadcast, "")
@@ -1954,6 +1969,10 @@ impl Request for SubscribeServe {
 	const HOLDS: bool = false;
 	type Message = lite::Subscribe<'static>;
 	type Update = lite::SubscribeUpdate;
+
+	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self::Message, DecodeError> {
+		lite::Subscribe::decode(r, version).map(lite::Subscribe::into_owned)
+	}
 
 	fn target(msg: &Self::Message) -> (&crate::Path, &str) {
 		(&msg.broadcast, &msg.track)
@@ -2194,6 +2213,10 @@ impl Request for FetchServe {
 	const HOLDS: bool = false;
 	type Message = lite::Fetch<'static>;
 	type Update = NoUpdate;
+
+	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self::Message, DecodeError> {
+		lite::Fetch::decode(r, version).map(lite::Fetch::into_owned)
+	}
 
 	fn target(msg: &Self::Message) -> (&crate::Path, &str) {
 		(&msg.broadcast, &msg.track)
@@ -2880,8 +2903,8 @@ mod announce_test {
 		fn take_ok(&mut self) -> lite::AnnounceOk {
 			let buf = self.pending();
 			let mut slice = &buf[..];
-			let ok =
-				crate::coding::decode_buf(&mut slice, self.version, lite::AnnounceOk::decode).expect("announce ok");
+			let ok = crate::coding::decode_buf(&mut slice, self.version, |r, v| lite::AnnounceOk::decode(r, v))
+				.expect("announce ok");
 			self.cursor += buf.len() - slice.len();
 			ok
 		}
@@ -2893,7 +2916,7 @@ mod announce_test {
 			let mut msgs = Vec::new();
 			while !slice.is_empty() {
 				msgs.push(
-					crate::coding::decode_buf(&mut slice, self.version, lite::AnnounceBroadcast::decode)
+					crate::coding::decode_buf(&mut slice, self.version, |r, v| lite::AnnounceBroadcast::decode(r, v))
 						.expect("announce message"),
 				);
 			}
@@ -3743,14 +3766,9 @@ impl Subscription {
 			return false;
 		};
 
-		let max = self.session.max_datagram_size();
+		let max = self.session.max_datagram_size().min(lite::Datagram::MAX_SIZE);
 		if body.len() > max {
-			tracing::debug!(
-				sequence,
-				size = body.len(),
-				max,
-				"dropping datagram larger than the transport limit"
-			);
+			tracing::debug!(sequence, size = body.len(), max, "dropping oversized datagram");
 			return false;
 		}
 
@@ -5788,6 +5806,39 @@ mod serve_group_test {
 		assert_eq!(flipped, [(0, 1), (1, -1)], "older groups first");
 	}
 
+	/// The encoded body must fit both the wire cap and the transport's smaller limit.
+	#[moq_clock::test]
+	async fn datagrams_fit_the_wire_and_transport_limits() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			for transport in [900usize, 1200, 1400] {
+				for size in [899usize, 900, 901, 1199, 1200, 1201] {
+					let track = track::Producer::new(
+						Arc::new(broadcast::Info::default()),
+						"test",
+						crate::track::Info::timed(),
+					);
+					let session = SinkSession::new(Log::default()).with_datagrams(transport);
+					let (mut run, _, _) = lite_run(version, session, track.subscribe(None));
+					// The subscribe ID, sequence, and timestamp each use one byte.
+					let sent = run.ctx.serve_datagram(crate::model::datagram::Stored {
+						datagram: crate::Datagram {
+							sequence: 1,
+							timestamp: Some(Timestamp::ZERO),
+							payload: bytes::Bytes::from(vec![0; size - 3]),
+						},
+						wire: None,
+						deflated: None,
+					});
+					assert_eq!(
+						sent,
+						size <= transport.min(1200),
+						"{version}: body {size}, transport {transport}"
+					);
+				}
+			}
+		}
+	}
+
 	/// A datagram goes in its subscription's send group, ranked like the stream carrying
 	/// its group from the start, so the transport merges it into the group order.
 	#[moq_clock::test]
@@ -7458,7 +7509,7 @@ mod tests {
 		let mut slice = bytes;
 		let mut out = Vec::new();
 		while bytes::Buf::remaining(&slice) > 0 {
-			out.push(crate::coding::decode_buf(&mut slice, version, lite::Probe::decode).unwrap());
+			out.push(crate::coding::decode_buf(&mut slice, version, |r, v| lite::Probe::decode(r, v)).unwrap());
 		}
 		out
 	}

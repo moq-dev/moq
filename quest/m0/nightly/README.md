@@ -33,4 +33,3 @@ Public API: none. Wire: none.
 
 - [moq-net compiles in Fuzz and send-depth](/quest/m0/nightly/send-overflow.md) - the ietf publisher future stops overflowing the Send check
 - [Probing beside Cubic](/quest/m0/nightly/competing-cubic.md) - the `competing_cubic` probe test stays within its deadline budget
-- [cargo deny passes](/quest/m0/nightly/cargo-deny.md) - Audit stops failing on the yanked crypto-bigint and moq-studio's egui licenses

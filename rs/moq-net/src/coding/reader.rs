@@ -78,7 +78,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		&mut self,
 		cx: &mut Context<'_>,
 		consume: bool,
-		decode: impl Fn(&mut Decoder<'_>) -> Result<T, DecodeError>,
+		decode: impl FnMut(&mut Decoder<'_>) -> Result<T, DecodeError>,
 	) -> Poll<Result<T, Error>>
 	where
 		V: Into<Form> + Copy,
@@ -91,7 +91,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		&mut self,
 		cx: &mut Context<'_>,
 		consume: bool,
-		decode: impl Fn(&mut Decoder<'_>) -> Result<T, DecodeError>,
+		mut decode: impl FnMut(&mut Decoder<'_>) -> Result<T, DecodeError>,
 	) -> Poll<Result<(T, usize), Error>>
 	where
 		V: Into<Form> + Copy,
@@ -172,7 +172,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		&mut self,
 		cx: &mut Context<'_>,
 		consume: bool,
-		decode: impl Fn(&mut Decoder<'_>) -> Result<T, DecodeError>,
+		decode: impl FnMut(&mut Decoder<'_>) -> Result<T, DecodeError>,
 	) -> Poll<Result<Option<T>, Error>>
 	where
 		V: Into<Form> + Copy,
@@ -185,7 +185,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 	}
 
 	/// Poll for the next message on the stream.
-	pub fn poll_decode<T: Decode<V> + Debug>(&mut self, cx: &mut Context<'_>) -> Poll<Result<T, Error>>
+	pub fn poll_decode<T: for<'a> Decode<'a, V> + Debug>(&mut self, cx: &mut Context<'_>) -> Poll<Result<T, Error>>
 	where
 		V: Into<Form> + Copy,
 	{
@@ -198,7 +198,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 	pub(crate) fn poll_decode_with<T: Debug>(
 		&mut self,
 		cx: &mut Context<'_>,
-		decode: impl Fn(&mut Decoder<'_>) -> Result<T, DecodeError>,
+		decode: impl FnMut(&mut Decoder<'_>) -> Result<T, DecodeError>,
 	) -> Poll<Result<T, Error>>
 	where
 		V: Into<Form> + Copy,
@@ -206,8 +206,21 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		self.poll_with(cx, true, decode)
 	}
 
+	/// [`Self::poll_decode_maybe`] with `decode` in place of the type's own decoder, for a
+	/// message read in place, whose borrowed fields `decode` resolves before the bytes go.
+	pub(crate) fn poll_decode_maybe_with<T: Debug>(
+		&mut self,
+		cx: &mut Context<'_>,
+		decode: impl FnMut(&mut Decoder<'_>) -> Result<T, DecodeError>,
+	) -> Poll<Result<Option<T>, Error>>
+	where
+		V: Into<Form> + Copy,
+	{
+		self.poll_with_maybe(cx, true, decode)
+	}
+
 	/// Decode the next message from the stream.
-	pub async fn decode<T: Decode<V> + Debug>(&mut self) -> Result<T, Error>
+	pub async fn decode<T: for<'a> Decode<'a, V> + Debug>(&mut self) -> Result<T, Error>
 	where
 		V: Into<Form> + Copy,
 	{
@@ -216,7 +229,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 
 	/// [`Self::poll_decode`], also returning the bytes it consumed, for a handshake to
 	/// count once the session's stats are known.
-	pub(crate) fn poll_decode_sized<T: Decode<V> + Debug>(
+	pub(crate) fn poll_decode_sized<T: for<'a> Decode<'a, V> + Debug>(
 		&mut self,
 		cx: &mut Context<'_>,
 	) -> Poll<Result<(T, usize), Error>>
@@ -228,7 +241,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 	}
 
 	/// [`Self::decode`], also returning the bytes it consumed.
-	pub(crate) async fn decode_sized<T: Decode<V> + Debug>(&mut self) -> Result<(T, usize), Error>
+	pub(crate) async fn decode_sized<T: for<'a> Decode<'a, V> + Debug>(&mut self) -> Result<(T, usize), Error>
 	where
 		V: Into<Form> + Copy,
 	{
@@ -236,7 +249,10 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 	}
 
 	/// Poll for the next message unless the stream is closed cleanly first.
-	pub fn poll_decode_maybe<T: Decode<V> + Debug>(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<T>, Error>>
+	pub fn poll_decode_maybe<T: for<'a> Decode<'a, V> + Debug>(
+		&mut self,
+		cx: &mut Context<'_>,
+	) -> Poll<Result<Option<T>, Error>>
 	where
 		V: Into<Form> + Copy,
 	{
@@ -245,7 +261,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 	}
 
 	/// Decode the next message unless the stream is closed.
-	pub async fn decode_maybe<T: Decode<V> + Debug>(&mut self) -> Result<Option<T>, Error>
+	pub async fn decode_maybe<T: for<'a> Decode<'a, V> + Debug>(&mut self) -> Result<Option<T>, Error>
 	where
 		V: Into<Form> + Copy,
 	{
@@ -253,7 +269,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 	}
 
 	/// Poll for the next message without consuming it unless the stream closes cleanly first.
-	pub fn poll_decode_peek_maybe<T: Decode<V> + Debug>(
+	pub fn poll_decode_peek_maybe<T: for<'a> Decode<'a, V> + Debug>(
 		&mut self,
 		cx: &mut Context<'_>,
 	) -> Poll<Result<Option<T>, Error>>
@@ -265,7 +281,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 	}
 
 	/// Peek the next message unless the stream is closed.
-	pub async fn decode_peek_maybe<T: Decode<V> + Debug>(&mut self) -> Result<Option<T>, Error>
+	pub async fn decode_peek_maybe<T: for<'a> Decode<'a, V> + Debug>(&mut self) -> Result<Option<T>, Error>
 	where
 		V: Into<Form> + Copy,
 	{
@@ -702,13 +718,15 @@ mod tests {
 		// A size-prefixed goaway: size 3, then a 2 byte URI.
 		let mut reader = queue(&[b"\x03", b"\x02a"], crate::lite::Version::Lite05);
 		let mut cx = Context::from_waker(std::task::Waker::noop());
-		assert!(reader.poll_decode::<crate::lite::Goaway>(&mut cx).is_pending());
+		let version = crate::lite::Version::Lite05;
+		let mut goaway = |r: &mut Decoder<'_>| Ok(crate::lite::Goaway::decode(r, version)?.uri.into_owned());
+		assert!(reader.poll_decode_with(&mut cx, &mut goaway).is_pending());
 		assert_eq!(reader.want, 4, "the prefix declared the whole message");
 
 		reader.stream.get_mut().chunks.push_back(b"bnext");
 		assert!(matches!(
-			reader.poll_decode::<crate::lite::Goaway>(&mut cx),
-			Poll::Ready(Ok(_))
+			reader.poll_decode_with(&mut cx, &mut goaway),
+			Poll::Ready(Ok(uri)) if uri == "ab"
 		));
 		assert_eq!(leased(&mut reader), 4, "what follows the message stays leased");
 		assert!(reader.scratch.is_empty() || reader.scratch.capacity() <= SCRATCH_KEEP);
@@ -745,14 +763,24 @@ mod tests {
 		);
 	}
 
-	fn refuses_frame<T: Decode<V> + Debug, V: StreamCodes + Into<Form> + Copy>(
+	fn refuses_frame<T: for<'a> Decode<'a, V> + Debug, V: StreamCodes + Into<Form> + Copy>(
 		prefix: &'static [u8],
 		version: V,
 		oversized: bool,
 	) {
+		refuses_frame_with(prefix, version, oversized, |r| T::decode(r, version).map(|_| ()));
+	}
+
+	/// [`refuses_frame`] for a message that borrows, which `decode` reads and drops.
+	fn refuses_frame_with<V: StreamCodes + Into<Form> + Copy>(
+		prefix: &'static [u8],
+		version: V,
+		oversized: bool,
+		decode: impl FnMut(&mut Decoder<'_>) -> Result<(), DecodeError>,
+	) {
 		let mut reader = queue(&[prefix, b"following bytes"], version);
 		let mut cx = Context::from_waker(std::task::Waker::noop());
-		let result = reader.poll_decode::<T>(&mut cx);
+		let result = reader.poll_decode_with(&mut cx, decode);
 		if oversized {
 			assert!(
 				matches!(
@@ -775,8 +803,12 @@ mod tests {
 	fn malformed_complete_frames_are_refused() {
 		use crate::{Version, ietf, lite, setup};
 		refuses_frame::<lite::Setup, _>(&[0], lite::Version::Lite05, false);
-		refuses_frame::<lite::Goaway, _>(&[0], lite::Version::Lite05, false);
-		refuses_frame::<ietf::GoAway, _>(&[0, 0], ietf::Version::Draft22, false);
+		refuses_frame_with(&[0], lite::Version::Lite05, false, |r| {
+			lite::Goaway::decode(r, lite::Version::Lite05).map(|_| ())
+		});
+		refuses_frame_with(&[0, 0], ietf::Version::Draft22, false, |r| {
+			ietf::GoAway::decode(r, ietf::Version::Draft22).map(|_| ())
+		});
 		for version in [lite::Version::Lite01, lite::Version::Lite02] {
 			refuses_frame::<setup::Client, _>(&[0x20, 0, 0], Version::Lite(version), false);
 			refuses_frame::<setup::Server, _>(&[0x21, 0, 0], Version::Lite(version), false);

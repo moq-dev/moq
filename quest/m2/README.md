@@ -36,6 +36,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [HLS and DASH browser playback](/quest/m2/hls-player-test.md) - hls.js and dash.js play, reload, switch, and survive reconfiguration nightly
 - [moq-hls export on kio](/quest/m2/hls-export-kio.md) - export watchers and the init build are owned kio tasks instead of tokio::spawn
 - [Re-init retires timelines](/quest/m2/reinit-retire.md) - fMP4 and MKV re-inits retire the old timeline, so import state stays bounded
+- [Replaced producers retire their records](/quest/m2/producer-retire.md) - encoders and bindings retire a replaced producer's HLS records
 - [Broadcast fairness](/quest/m2/broadcast-fairness.md) - broadcasts share a cluster link fairly, so one tenant's priority never starves another's
 - [Peer grant bound](/quest/m2/peer-grant-bound.md) - a peer's AUTH_OK costs near-linear time in its bytes on every input shape, in Rust and in a browser
 - [Plan: watch worker](/quest/m2/plan-watch-worker.md) - prototype an invisible page worker against app-spawned workers, and land the jank harness that decides

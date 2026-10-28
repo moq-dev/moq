@@ -19376,6 +19376,25 @@ mod test {
 		);
 	}
 
+	/// A report describes a miss, not a delivery: a late group is still handed out once.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_reported_drop_still_allows_a_late_group() {
+		let producer = track_producer("test", Info::timed());
+		let mut subscriber = producer.subscribe(replay());
+		let waiter = kio::Waiter::noop();
+		producer.drop_groups(2..4, StreamError::NotFound);
+		assert_eq!(
+			subscriber.poll_drop(&waiter),
+			Poll::Ready((2..4, StreamError::NotFound))
+		);
+		assert!(subscriber.poll_drop(&waiter).is_pending());
+		write_group(&producer, 3);
+		assert_eq!(drain_groups(&mut subscriber), [3]);
+		assert!(subscriber.poll_drop(&waiter).is_pending());
+		assert!(drain_groups(&mut subscriber).is_empty());
+	}
+
 	/// A drop ends a group still arriving with the drop's error at once, for the reader
 	/// already holding it, before any stream reset or track end. A group that finished here
 	/// stays whole.

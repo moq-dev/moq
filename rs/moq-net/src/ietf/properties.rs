@@ -593,8 +593,10 @@ mod tests {
 	}
 
 	fn round_trip(version: Version, block: &[u8]) -> (Properties, Vec<u8>) {
-		let properties = crate::coding::decode_buf(&mut Bytes::copy_from_slice(block), version, Properties::decode)
-			.unwrap_or_else(|err| panic!("{version}: {err}"));
+		let properties = crate::coding::decode_buf(&mut Bytes::copy_from_slice(block), version, |r, v| {
+			Properties::decode(r, v)
+		})
+		.unwrap_or_else(|err| panic!("{version}: {err}"));
 		let mut buf = Vec::new();
 		properties
 			.encode(&mut Encoder::new(&mut buf, version.into()), version)

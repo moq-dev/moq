@@ -31,7 +31,7 @@ combine, and goes out as the largest delay the wire allows, where today an
 omitted one means the live edge only.
 
 Decided in the 2026-10-05 audit: the producer half of
-[JavaScript FETCH](/quest/m1/js-fetch.md) folds in here, so `@moq/net`'s
+JavaScript FETCH folds in here, so `@moq/net`'s
 on-demand request surface takes range requests from the start instead of the
 per-group `requested_group` shape Rust replaced with `requested_fill`. IETF
 FETCH dispatch onto it is
