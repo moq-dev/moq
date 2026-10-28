@@ -6,6 +6,7 @@ description: JSON over MoQ tracks, as snapshots, streams, or a sliding window
 # @moq/json
 
 [![npm](https://img.shields.io/npm/v/@moq/json)](https://www.npmjs.com/package/@moq/json)
+[![API](https://img.shields.io/badge/API-reference-blue)](/lib/js/api/json)
 
 JSON over [`@moq/net`](/lib/js/net) tracks, in three modes. Snapshot and stream
 are the catalog modes on the [hang](/concept/hang#data-tracks) page. Window is

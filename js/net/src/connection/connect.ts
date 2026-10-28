@@ -163,7 +163,7 @@ export function normalizeVersions(props?: {
 	return props?.versions === undefined ? undefined : checkVersions(props.versions);
 }
 
-/** Options for {@link connect}. */
+/** Options for {@link Connection.connect}. */
 export interface ConnectProps {
 	/** The relay URL. */
 	url: URL;
@@ -289,8 +289,6 @@ const NEVER_ABORTED = new AbortController().signal;
 /**
  * Establishes a connection to a MOQ server.
  *
- * @param url - The URL of the server to connect to
- * @param props - Connection options
  * @returns A promise that resolves to an established session
  */
 export async function connect({ url, ...props }: ConnectProps): Promise<Established> {

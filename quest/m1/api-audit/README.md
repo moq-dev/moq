@@ -77,7 +77,7 @@ Rejected in planning:
 - [Binding publications](/quest/m1/api-audit/binding-publication.md) - moq-ffi, the C ABI, and every wrapper hand out a publication handle that announces, replacing the private adapters
 - [Demand is wanted, everywhere](/quest/m1/api-audit/wanted.md) - every `used`/`unused` pair becomes `wanted()` and `wanted_changed()`, and unused ones go
 - [One meaning for Credential](/quest/m1/api-audit/dial-credential.md) - the internal dial type gets its own name in JS and moq-tokio, and the `Presented` alias goes
-- [One strict path rule](/quest/m1/api-audit/strict-paths.md) - `Relative` refuses empty segments, the error is `path::Error`, and auth mints only strict paths
+- [One strict path rule](/quest/m1/api-audit/strict-paths.md) - `Relative` refuses empty segments, `Path` refuses non-canonical escapes, the error is `path::Error`, and auth mints only strict paths
 - [Unix sockets accept through the allowlist](/quest/m1/api-audit/unix-accept.md) - the public pre-allowlist `unix::Listener::accept` becomes crate-private
 
 ## Related

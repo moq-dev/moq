@@ -6,6 +6,7 @@ description: Subscribe, decode, and render broadcasts in the browser
 # @moq/watch
 
 [![npm](https://img.shields.io/npm/v/@moq/watch)](https://www.npmjs.com/package/@moq/watch)
+[![API](https://img.shields.io/badge/API-reference-blue)](/lib/js/api/watch)
 
 A player: subscribes to a broadcast, picks renditions, decodes with
 WebCodecs, renders video to a canvas and audio through WebAudio, and keeps them
