@@ -972,6 +972,8 @@ impl Schedule {
 		self.last = None;
 		self.ended = false;
 		self.lead = None;
+		// An opening still pending stays: its tables never went out, so the reader has no clock
+		// for the next timeline to continue.
 		self.clocked = 0;
 		self.unclocked.clear();
 	}
