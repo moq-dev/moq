@@ -725,14 +725,14 @@ fn a_reset_stream_keeps_its_header_without_credit() {
 				.with_root_certificates(roots)
 				.with_no_client_auth();
 			crypto.alpn_protocols = vec![b"h3".to_vec()];
-			let mut config = driver::ClientConfig::new(std::sync::Arc::new(
+			let mut config = driver::client::Config::new(std::sync::Arc::new(
 				driver::crypto::rustls::QuicClientConfig::try_from(crypto).expect("quic crypto"),
 			));
 			// Little enough connection credit for the server to run out of
-			let mut transport = driver::TransportConfig::default();
+			let mut transport = driver::transport::Config::default();
 			transport.receive_window(driver::VarInt::from_u32(16 * 1024));
 			config.transport_config(std::sync::Arc::new(transport));
-			let endpoint = driver::Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("endpoint");
+			let endpoint = driver::endpoint::Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("endpoint");
 			let client = moq_tokio::quic::web::Client::new(endpoint, config);
 
 			let request =

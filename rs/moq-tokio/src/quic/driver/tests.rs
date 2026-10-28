@@ -82,7 +82,7 @@ fn handshake_timeout() {
 			.unwrap()
 			.await
 		{
-			Err(crate::quic::driver::ConnectionError::TimedOut) => {}
+			Err(crate::quic::driver::connection::Error::TimedOut) => {}
 			Err(e) => panic!("unexpected error: {e:?}"),
 			Ok(_) => panic!("unexpected success"),
 		}
@@ -116,7 +116,7 @@ async fn close_endpoint() {
 		.unwrap();
 	endpoint.close(0u32.into(), &[]);
 	match conn.await {
-		Err(crate::quic::driver::ConnectionError::LocallyClosed) => (),
+		Err(crate::quic::driver::connection::Error::LocallyClosed) => (),
 		Err(e) => panic!("unexpected error: {e}"),
 		Ok(_) => {
 			panic!("unexpected success");
@@ -251,7 +251,7 @@ async fn ip_blocking() {
 				.await
 				.expect_err("server should have blocked this");
 			assert!(
-				matches!(e, crate::quic::driver::ConnectionError::ConnectionClosed(_)),
+				matches!(e, crate::quic::driver::connection::Error::ConnectionClosed(_)),
 				"wrong error"
 			);
 		},
@@ -297,7 +297,7 @@ impl EndpointFactory {
 		let key = PrivateKeyDer::Pkcs8(self.cert.signing_key.serialize_der().into());
 		let transport_config = Arc::new(transport_config);
 		let mut server_config =
-			crate::quic::driver::ServerConfig::with_single_cert(vec![self.cert.cert.der().clone()], key).unwrap();
+			crate::quic::driver::server::Config::with_single_cert(vec![self.cert.cert.der().clone()], key).unwrap();
 		server_config.transport_config(transport_config.clone());
 
 		let mut roots = RootCertStore::empty();
@@ -455,7 +455,7 @@ fn blocking_server_pair(
 		.unwrap();
 	server_crypto.alpn_protocols = vec![server_alpn.to_vec()];
 	let mut server_config =
-		crate::quic::driver::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_crypto).unwrap()));
+		crate::quic::driver::server::Config::with_crypto(Arc::new(QuicServerConfig::try_from(server_crypto).unwrap()));
 	// Loopback answers in microseconds. The default 333 ms initial RTT would hold every
 	// connection closed before its handshake in draining for three seconds.
 	let transport = Arc::new({
@@ -505,7 +505,7 @@ async fn wait_for_blocked_handshake(blocker: Arc<HandshakeBlocker>) {
 
 async fn accept_with_blocked_start_session(
 	server: Endpoint,
-) -> Result<crate::quic::driver::Connection, crate::quic::driver::ConnectionError> {
+) -> Result<crate::quic::driver::connection::Connection, crate::quic::driver::connection::Error> {
 	let incoming = server.accept().await.unwrap();
 	// The test crypto provider intentionally blocks in `start_session`, so run
 	// accept on the blocking pool rather than parking a Tokio worker thread.
@@ -518,8 +518,12 @@ struct BlockedHandshake {
 	server: Endpoint,
 	blocker: Arc<HandshakeBlocker>,
 	release_guard: HandshakeReleaseGuard,
-	accept: tokio::task::JoinHandle<Result<crate::quic::driver::Connection, crate::quic::driver::ConnectionError>>,
-	connect: tokio::task::JoinHandle<Result<crate::quic::driver::Connection, crate::quic::driver::ConnectionError>>,
+	accept: tokio::task::JoinHandle<
+		Result<crate::quic::driver::connection::Connection, crate::quic::driver::connection::Error>,
+	>,
+	connect: tokio::task::JoinHandle<
+		Result<crate::quic::driver::connection::Connection, crate::quic::driver::connection::Error>,
+	>,
 }
 
 fn blocked_handshake(server_alpn: &[u8], client_alpn: &[u8]) -> BlockedHandshake {
@@ -554,8 +558,10 @@ fn blocked_handshake_with_socket(
 }
 
 async fn await_connection(
-	task: tokio::task::JoinHandle<Result<crate::quic::driver::Connection, crate::quic::driver::ConnectionError>>,
-) -> Result<crate::quic::driver::Connection, crate::quic::driver::ConnectionError> {
+	task: tokio::task::JoinHandle<
+		Result<crate::quic::driver::connection::Connection, crate::quic::driver::connection::Error>,
+	>,
+) -> Result<crate::quic::driver::connection::Connection, crate::quic::driver::connection::Error> {
 	timeout(Duration::from_secs(5), task).await.unwrap().unwrap()
 }
 
@@ -645,7 +651,7 @@ fn wait_idle_returns_when_the_driver_is_dropped() {
 	let _ = waiter.join();
 }
 
-async fn wait_closed(conn: &crate::quic::driver::Connection) -> crate::quic::driver::ConnectionError {
+async fn wait_closed(conn: &crate::quic::driver::connection::Connection) -> crate::quic::driver::connection::Error {
 	timeout(Duration::from_secs(5), conn.closed()).await.unwrap()
 }
 
@@ -757,7 +763,7 @@ fn run_echo(args: EchoArgs) {
 		let key = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
 		let cert = CertificateDer::from(cert.cert);
 		let mut server_config =
-			crate::quic::driver::ServerConfig::with_single_cert(vec![cert.clone()], key.into()).unwrap();
+			crate::quic::driver::server::Config::with_single_cert(vec![cert.clone()], key.into()).unwrap();
 
 		server_config.transport = transport_config.clone();
 		let server_sock = UdpSocket::bind(args.server_addr).unwrap();
@@ -953,7 +959,7 @@ async fn rebind_recv() {
 	}));
 	client.set_default_client_config(client_config);
 
-	let server_config = crate::quic::driver::ServerConfig::with_single_cert(vec![cert.clone()], key.into()).unwrap();
+	let server_config = crate::quic::driver::server::Config::with_single_cert(vec![cert.clone()], key.into()).unwrap();
 	let server = {
 		let _guard = tracing::error_span!("server").entered();
 		Endpoint::server(server_config, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).unwrap()
@@ -1051,7 +1057,7 @@ async fn split_accept_failure_wakes_idle_waiter() {
 	let error = await_connection(accept).await.unwrap_err();
 	assert!(matches!(
 		error,
-		crate::quic::driver::ConnectionError::TransportError(error)
+		crate::quic::driver::connection::Error::TransportError(error)
 			if error.code == moq_quic::TransportErrorCode::crypto(0x78)
 	));
 	// Repolling wait_idle alone would hide a missing notification now that the endpoint is
@@ -1088,18 +1094,24 @@ async fn split_accept_close_during_pending_accept() {
 	match await_connection(accept).await {
 		Ok(conn) => {
 			let err = wait_closed(&conn).await;
-			assert!(matches!(err, crate::quic::driver::ConnectionError::LocallyClosed));
+			assert!(matches!(err, crate::quic::driver::connection::Error::LocallyClosed));
 		}
-		Err(err) => assert!(matches!(err, crate::quic::driver::ConnectionError::LocallyClosed)),
+		Err(err) => assert!(matches!(err, crate::quic::driver::connection::Error::LocallyClosed)),
 	}
 
 	match await_connection(connect).await {
 		Ok(conn) => {
 			let err = wait_closed(&conn).await;
-			assert!(matches!(err, crate::quic::driver::ConnectionError::ConnectionClosed(_)));
+			assert!(matches!(
+				err,
+				crate::quic::driver::connection::Error::ConnectionClosed(_)
+			));
 		}
 		Err(err) => {
-			assert!(matches!(err, crate::quic::driver::ConnectionError::ConnectionClosed(_)));
+			assert!(matches!(
+				err,
+				crate::quic::driver::connection::Error::ConnectionClosed(_)
+			));
 		}
 	}
 
@@ -1161,7 +1173,7 @@ async fn close_refuses_queued_incoming() {
 	let error = timeout(Duration::from_secs(5), connect).await.unwrap().unwrap_err();
 	assert!(matches!(
 		error,
-		crate::quic::driver::ConnectionError::ConnectionClosed(close)
+		crate::quic::driver::connection::Error::ConnectionClosed(close)
 			if close.error_code == moq_quic::TransportErrorCode::CONNECTION_REFUSED
 	));
 }
@@ -2115,7 +2127,7 @@ async fn unroutable_dial_fails_with_no_viable_path() {
 		.expect_err("nothing can be sent to an unroutable address");
 
 	// A swallowed send error waits out the handshake instead and reports `TimedOut`.
-	let crate::quic::driver::ConnectionError::TransportError(err) = err else {
+	let crate::quic::driver::connection::Error::TransportError(err) = err else {
 		panic!("expected a transport error, got {err:?}");
 	};
 	assert_eq!(err.code, moq_quic::TransportErrorCode::NO_VIABLE_PATH);
@@ -2176,7 +2188,7 @@ async fn unreachable_handshake_drains_while_held() {
 	let factory = EndpointFactory::new();
 	let key = PrivateKeyDer::Pkcs8(factory.cert.signing_key.serialize_der().into());
 	let server_config =
-		crate::quic::driver::ServerConfig::with_single_cert(vec![factory.cert.cert.der().clone()], key).unwrap();
+		crate::quic::driver::server::Config::with_single_cert(vec![factory.cert.cert.der().clone()], key).unwrap();
 	let outage = Arc::new(Outage::default());
 	outage.active.store(true, Ordering::SeqCst);
 	let server = Endpoint::new_with_abstract_socket(
@@ -2197,7 +2209,7 @@ async fn unreachable_handshake_drains_while_held() {
 	client.close(0u32.into(), b"done");
 	drop(connecting);
 
-	let crate::quic::driver::ConnectionError::TransportError(err) = connecting_server.await.unwrap_err() else {
+	let crate::quic::driver::connection::Error::TransportError(err) = connecting_server.await.unwrap_err() else {
 		panic!("expected a transport error");
 	};
 	assert_eq!(err.code, moq_quic::TransportErrorCode::NO_VIABLE_PATH);

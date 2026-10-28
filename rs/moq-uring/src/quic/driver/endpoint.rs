@@ -1,6 +1,6 @@
 //! The endpoint: one socket, many moq-quic connections.
 //!
-//! moq-quic's own [`moq_quic::Endpoint`] is the routing table: it parses
+//! moq-quic's own [`moq_quic::endpoint::Endpoint`] is the routing table: it parses
 //! each datagram, hands it to the connection its destination id names, mints
 //! and retires ids as peers consume them, and answers an unsupported version
 //! itself. What is left for us is the socket, the accept backlog, and a driver
@@ -41,7 +41,7 @@ pub(crate) struct Inner {
 	socket: Rc<udp::Socket>,
 	local: SocketAddr,
 	/// The routing table, and the server configuration it accepts with.
-	endpoint: RefCell<moq_quic::Endpoint>,
+	endpoint: RefCell<moq_quic::endpoint::Endpoint>,
 	accepting: RefCell<Option<Accepting>>,
 	/// Every live connection, looked up per received datagram.
 	///
@@ -105,7 +105,7 @@ impl Endpoint {
 		// Every `udp::Socket` refuses to fragment, so a probe too large for the
 		// path is lost rather than delivered in pieces, and discovery can trust
 		// what arrives. Each connection's transport still decides whether to probe.
-		let endpoint = moq_quic::Endpoint::new(
+		let endpoint = moq_quic::endpoint::Endpoint::new(
 			super::endpoint_config(socket.shard(), config.reset_secret.as_ref()),
 			server,
 			true,
@@ -433,7 +433,7 @@ impl Inner {
 	}
 
 	/// Register `conn`, spawn its driver, and arrange its teardown.
-	fn launch(self: &Rc<Self>, key: ConnectionHandle, conn: moq_quic::Connection) -> connection::Shared {
+	fn launch(self: &Rc<Self>, key: ConnectionHandle, conn: moq_quic::connection::Connection) -> connection::Shared {
 		let peer = conn.remote_address();
 		let (shared, driver) = connection::launch(&self.owner, self.socket.clone(), Rc::downgrade(self), key, conn);
 		self.conns.borrow_mut().insert(key, shared.clone());

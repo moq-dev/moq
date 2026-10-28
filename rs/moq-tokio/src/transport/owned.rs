@@ -228,7 +228,7 @@ fn close_kind(error: &(dyn std::error::Error + 'static)) -> moq::CloseKind {
 	}
 	#[cfg(feature = "quic")]
 	if let Some(error) = error.downcast_ref::<crate::quic::web::SessionError>() {
-		use crate::quic::{driver::ConnectionError, web::SessionError};
+		use crate::quic::{driver::connection::Error, web::SessionError};
 		return match error {
 			SessionError::ConnectionError(ConnectionError::TimedOut) => moq::CloseKind::IdleTimeout,
 			SessionError::ConnectionError(ConnectionError::LocallyClosed) => moq::CloseKind::Closed,
@@ -250,7 +250,7 @@ fn close_kind(error: &(dyn std::error::Error + 'static)) -> moq::CloseKind {
 #[cfg(all(test, feature = "quic"))]
 mod outcome_tests {
 	use super::*;
-	use crate::quic::{driver::ConnectionError, web::SessionError};
+	use crate::quic::{driver::connection::Error, web::SessionError};
 	use moq_net::transport::Error as _;
 
 	#[test]

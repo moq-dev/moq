@@ -3,7 +3,7 @@
 //! TLS goes through rustls, which is what the rest of this workspace speaks,
 //! so a build selecting this backend links one TLS stack instead of two.
 //!
-//! [`moq_quic::Endpoint`] holds the connection-id routing table, mints and
+//! [`moq_quic::endpoint::Endpoint`] holds the connection-id routing table, mints and
 //! retires ids, answers unsupported versions, and buffers half-open
 //! handshakes. So [`Endpoint`] here is mostly the socket plumbing around it,
 //! plus the parts that are ours: the accept backlog, shard steering, and the
@@ -60,9 +60,9 @@ fn ecn_from_quic(ecn: moq_quic::EcnCodepoint) -> udp::Ecn {
 	}
 }
 
-impl From<moq_quic::ConnectionError> for Error {
-	fn from(err: moq_quic::ConnectionError) -> Self {
-		use moq_quic::ConnectionError;
+impl From<moq_quic::connection::Error> for Error {
+	fn from(err: moq_quic::connection::Error) -> Self {
+		use moq_quic::connection::Error;
 		match err {
 			ConnectionError::ApplicationClosed(close) => Self::App {
 				code: close.error_code.into_inner(),
@@ -100,8 +100,8 @@ fn provider() -> Arc<rustls::crypto::CryptoProvider> {
 pub(crate) fn endpoint_config(
 	shard: Option<moq_sock::shard::Shard>,
 	reset_secret: Option<&[u8; 32]>,
-) -> Arc<moq_quic::EndpointConfig> {
-	let mut config = moq_quic::EndpointConfig::default();
+) -> Arc<moq_quic::endpoint::Config> {
+	let mut config = moq_quic::endpoint::Config::default();
 	// The random ids below validate a predecessor's too, so the reset reaches them.
 	if let Some(secret) = reset_secret {
 		config.reset_secret(secret);
@@ -122,7 +122,7 @@ pub(crate) fn endpoint_config(
 }
 
 /// Dial as `config` says.
-pub(crate) fn client_config(config: &client::Config) -> Result<moq_quic::ClientConfig, Error> {
+pub(crate) fn client_config(config: &client::Config) -> Result<moq_quic::client::Config, Error> {
 	let provider = provider();
 	let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
 		.with_protocol_versions(&[&rustls::version::TLS13])
@@ -165,7 +165,7 @@ pub(crate) fn client_config(config: &client::Config) -> Result<moq_quic::ClientC
 	tls.alpn_protocols = alpn(&config.alpn);
 
 	let crypto = QuicClientConfig::try_from(tls).map_err(|err| Error::Tls(err.to_string()))?;
-	let mut client = moq_quic::ClientConfig::new(Arc::new(crypto));
+	let mut client = moq_quic::client::Config::new(Arc::new(crypto));
 	let transport = transport_config(&config.transport)?;
 	#[cfg(feature = "qlog")]
 	let transport = with_qlog(transport, &config.transport, qlog::Side::Client);
@@ -174,9 +174,9 @@ pub(crate) fn client_config(config: &client::Config) -> Result<moq_quic::ClientC
 }
 
 /// Serve as `config` says.
-pub(crate) fn server_config(config: &server::Config) -> Result<moq_quic::ServerConfig, Error> {
+pub(crate) fn server_config(config: &server::Config) -> Result<moq_quic::server::Config, Error> {
 	let crypto = QuicServerConfig::try_from(config.tls.clone()).map_err(|err| Error::Tls(err.to_string()))?;
-	let mut server = moq_quic::ServerConfig::with_crypto(Arc::new(crypto));
+	let mut server = moq_quic::server::Config::with_crypto(Arc::new(crypto));
 	let transport = transport_config(&config.transport)?;
 	#[cfg(feature = "qlog")]
 	let transport = with_qlog(transport, &config.transport, qlog::Side::Server);
@@ -233,15 +233,15 @@ pub(crate) fn identity_server_config(
 /// connection's qlog `group_id` either way.
 #[cfg(feature = "qlog")]
 fn with_qlog(
-	mut transport: moq_quic::TransportConfig,
+	mut transport: moq_quic::transport::Config,
 	config: &Transport,
 	side: qlog::Side,
-) -> moq_quic::TransportConfig {
+) -> moq_quic::transport::Config {
 	let Some(sink) = config.qlog.clone() else {
 		return transport;
 	};
 
-	let mut qlog = moq_quic::QlogConfig::default();
+	let mut qlog = moq_quic::transport::qlog::Config::default();
 	qlog.writer(sink.trace(side));
 	transport.qlog_stream(qlog.into_stream());
 
@@ -249,7 +249,7 @@ fn with_qlog(
 }
 
 /// The per-connection knobs both roles share.
-fn transport_config(config: &Transport) -> Result<moq_quic::TransportConfig, Error> {
+fn transport_config(config: &Transport) -> Result<moq_quic::transport::Config, Error> {
 	use moq_quic::VarInt;
 
 	let idle = moq_quic::IdleTimeout::try_from(config.idle_timeout)
@@ -257,7 +257,7 @@ fn transport_config(config: &Transport) -> Result<moq_quic::TransportConfig, Err
 	let streams = VarInt::from_u64(config.max_streams)
 		.map_err(|_| Error::Quic(format!("stream limit out of range: {}", config.max_streams)))?;
 
-	let mut transport = moq_quic::TransportConfig::default();
+	let mut transport = moq_quic::transport::Config::default();
 	transport.max_idle_timeout(Some(idle));
 	transport.keep_alive_interval(config.keep_alive);
 	transport.max_concurrent_bidi_streams(streams);
@@ -392,7 +392,7 @@ mod tests {
 	/// moq-quic keeps the windows private, but its `Debug` prints them. The leading
 	/// space keeps `receive_window` from matching `stream_receive_window`, and
 	/// the trailing comma keeps a shorter value from matching a longer one.
-	fn has_window(config: &moq_quic::TransportConfig, name: &str, value: u64) -> bool {
+	fn has_window(config: &moq_quic::transport::Config, name: &str, value: u64) -> bool {
 		format!("{config:?}").contains(&format!(" {name}: {value},"))
 	}
 

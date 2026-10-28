@@ -28,7 +28,7 @@ const TRAIN_SEGMENTS: usize = 63;
 /// operation can mutate the connection, drop that borrow, and then register a
 /// waiter without ever holding both.
 pub(crate) struct Inner {
-	pub(crate) conn: RefCell<moq_quic::Connection>,
+	pub(crate) conn: RefCell<moq_quic::connection::Connection>,
 	/// Updated by packet ingress and egress, so readers never wake the worker to sample.
 	pub(crate) wire: moq_net::transport::Wire,
 	/// The session's probe target, read before every egress, or `None` when the congestion
@@ -412,7 +412,7 @@ pub(crate) fn launch(
 	socket: Rc<udp::Socket>,
 	endpoint: Weak<endpoint::Inner>,
 	key: ConnectionHandle,
-	conn: moq_quic::Connection,
+	conn: moq_quic::connection::Connection,
 ) -> (Shared, impl Future<Output = ()> + use<>) {
 	// The handshake's first datagrams arrived before this driver existed.
 	let stats = conn.stats();

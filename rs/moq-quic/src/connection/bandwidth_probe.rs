@@ -13,9 +13,10 @@ use std::{ops::Bound, time::Duration};
 
 use super::{Connection, SentPacket, StreamsState, sent_packets::SentPackets};
 use crate::{
-	Instant, TransportConfig,
+	Instant,
 	frame::{self, FrameStruct},
 	packet::SpaceId,
+	transport,
 };
 
 /// The probe's state on a connection
@@ -48,7 +49,7 @@ pub(super) enum Ready {
 }
 
 impl BandwidthProbe {
-	pub(super) fn new(config: &TransportConfig, now: Instant) -> Self {
+	pub(super) fn new(config: &transport::Config, now: Instant) -> Self {
 		let mtu = u64::from(config.get_initial_mtu());
 		Self {
 			target: 0,

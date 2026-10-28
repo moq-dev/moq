@@ -25,7 +25,7 @@
 
 use super::server;
 
-pub use super::driver::Endpoint;
+pub use super::driver::endpoint::Endpoint;
 
 /// What an endpoint serves, beyond dialing.
 #[derive(Clone)]

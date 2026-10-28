@@ -875,7 +875,7 @@ async fn uring_forwards_the_setup_token() {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
 	let tls = config.tls.build().unwrap();
-	let client = driver::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+	let client = driver::endpoint::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
 	for webtransport in [false, true] {
 		let mut tls = tls.clone();
 		tls.alpn_protocols = vec![if webtransport {
@@ -886,7 +886,7 @@ async fn uring_forwards_the_setup_token() {
 		let crypto = driver::crypto::rustls::QuicClientConfig::try_from(tls).unwrap();
 		let conn = client
 			.connect_with(
-				driver::ClientConfig::new(std::sync::Arc::new(crypto)),
+				driver::client::Config::new(std::sync::Arc::new(crypto)),
 				addr,
 				"localhost",
 			)
@@ -1081,13 +1081,13 @@ fn uring_workers_bound_stalled_handshakes() {
 			let mut tls = tls.clone();
 			tls.alpn_protocols = vec![alpn.to_vec()];
 			let crypto = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("QUIC crypto");
-			let mut transport = driver::TransportConfig::default();
+			let mut transport = driver::transport::Config::default();
 			transport.congestion_controller_factory(std::sync::Arc::new(moq_congestion::Unlimited));
-			let mut config = driver::ClientConfig::new(std::sync::Arc::new(crypto));
+			let mut config = driver::client::Config::new(std::sync::Arc::new(crypto));
 			config.transport_config(std::sync::Arc::new(transport));
 			config
 		};
-		let client = driver::Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("client");
+		let client = driver::endpoint::Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("client");
 
 		// TLS: the relay never hears more than the ClientHello. Once it answers, its
 		// deadline is armed, and passing it is the only way the handshake can end:
@@ -1104,7 +1104,7 @@ fn uring_workers_bound_stalled_handshakes() {
 		clock.advance(LISTEN);
 		let error = stalled.await.unwrap();
 		assert!(
-			!matches!(error, driver::ConnectionError::TimedOut),
+			!matches!(error, driver::connection::Error::TimedOut),
 			"the relay must close a stalled QUIC handshake: {error}"
 		);
 

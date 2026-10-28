@@ -149,7 +149,8 @@ impl Recv {
 	/// `false` the new window should only be transmitted if a previous transmission
 	/// had failed.
 	pub(super) fn max_stream_data(&mut self, stream_receive_window: u64) -> (u64, ShouldTransmit) {
-		let max_stream_data = self.assembler.bytes_read() + stream_receive_window;
+		// A window shrunk since the last announcement cannot take back credit already granted.
+		let max_stream_data = (self.assembler.bytes_read() + stream_receive_window).max(self.sent_max_stream_data);
 
 		// Only announce a window update if it's significant enough
 		// to make it worthwhile sending a MAX_STREAM_DATA frame.
@@ -323,7 +324,7 @@ impl<'a> Chunks<'a> {
 			Entry::Vacant(_) => return Err(ReadableError::ClosedStream),
 		};
 
-		let recv = get_or_insert_recv(entry.get_mut(), streams.stream_receive_window);
+		let recv = get_or_insert_recv(entry.get_mut(), streams.initial_stream_receive_window);
 		if recv.stopped {
 			return Err(ReadableError::ClosedStream);
 		}

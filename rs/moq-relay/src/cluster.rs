@@ -3612,7 +3612,7 @@ mod tests {
 	fn bare_quic_server(
 		connect: &moq_tokio::connect::Config,
 		idle: std::time::Duration,
-	) -> moq_tokio::quic::driver::Endpoint {
+	) -> moq_tokio::quic::driver::endpoint::Endpoint {
 		use moq_tokio::quic::driver;
 		let key = rcgen::KeyPair::generate().expect("keypair");
 		let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
@@ -3633,11 +3633,11 @@ mod tests {
 			.map(|alpn| alpn.as_bytes().to_vec())
 			.collect();
 		let crypto = driver::crypto::rustls::QuicServerConfig::try_from(tls).expect("quic crypto");
-		let mut transport = driver::TransportConfig::default();
+		let mut transport = driver::transport::Config::default();
 		transport.max_idle_timeout(Some(idle.try_into().expect("idle timeout")));
-		let mut server_config = driver::ServerConfig::with_crypto(Arc::new(crypto));
+		let mut server_config = driver::server::Config::with_crypto(Arc::new(crypto));
 		server_config.transport_config(Arc::new(transport));
-		driver::Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).expect("server")
+		driver::endpoint::Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).expect("server")
 	}
 
 	/// Cancelling `run` aborts the dials a peer list started, which run outside
@@ -3745,7 +3745,7 @@ mod tests {
 			.await
 			.expect("the peer heard no close before its idle timeout");
 		match err {
-			driver::ConnectionError::ApplicationClosed(close) => assert_eq!(&close.reason[..], b"client shutdown"),
+			driver::connection::Error::ApplicationClosed(close) => assert_eq!(&close.reason[..], b"client shutdown"),
 			other => panic!("the link ended with {other:?}, not the shutdown close"),
 		}
 	}

@@ -177,7 +177,7 @@ pub struct PathStats {
 /// Connection statistics
 #[derive(Debug, Default, Copy, Clone)]
 #[non_exhaustive]
-pub struct ConnectionStats {
+pub struct Stats {
 	/// Statistics about UDP datagrams transmitted on a connection
 	pub udp_tx: UdpStats,
 	/// Statistics about UDP datagrams received on a connection

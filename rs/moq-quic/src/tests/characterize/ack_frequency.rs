@@ -35,9 +35,9 @@ fn server_acks(pair: &mut Pair, client_ch: ConnectionHandle, server_ch: Connecti
 }
 
 /// A client asking the server for `config`
-fn client_asking(config: AckFrequencyConfig) -> ClientConfig {
+fn client_asking(config: transport::ack_frequency::Config) -> client::Config {
 	client_with(|transport| {
-		transport.ack_frequency_config(Some(config));
+		transport.ack_frequency = Some(config);
 	})
 }
 
@@ -51,8 +51,8 @@ fn request_respects_peer_min_ack_delay() {
 	for configured in [1, 10] {
 		let _guard = subscribe();
 		let mut pair = pair_with(|_| {});
-		let mut config = AckFrequencyConfig::default();
-		config.max_ack_delay(Some(Duration::from_millis(configured)));
+		let mut config = transport::ack_frequency::Config::default();
+		config.max_ack_delay = Some(Duration::from_millis(configured));
 		let (client_ch, server_ch) = pair.connect_with(client_asking(config));
 
 		pair.client_conn_mut(client_ch)
@@ -125,9 +125,9 @@ fn threshold_default_is_one() {
 fn reordering_ack_declares_loss() {
 	let _guard = subscribe();
 	let mut pair = pair_with(|_| {});
-	let mut config = AckFrequencyConfig::default();
+	let mut config = transport::ack_frequency::Config::default();
 	// High enough that only the gap elicits an ACK
-	config.ack_eliciting_threshold(VarInt(10));
+	config.ack_eliciting_threshold = VarInt(10);
 	let (client_ch, server_ch) = pair.connect_with(client_asking(config));
 
 	// An ACK of a few pings gives the gap a Largest Acked to measure from

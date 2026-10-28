@@ -338,7 +338,7 @@ impl RecvStream<'_> {
 		let Some(slot) = self.state.recv.get_mut(&self.id) else {
 			return;
 		};
-		let lease = &mut get_or_insert_recv(slot, self.state.stream_receive_window).lease;
+		let lease = &mut get_or_insert_recv(slot, self.state.initial_stream_receive_window).lease;
 		if lease.ranked {
 			self.state.ranks.remove(&lease.rank(self.id));
 			self.state.ranks.insert((priority, Reverse(self.id)));
@@ -351,7 +351,7 @@ impl RecvStream<'_> {
 		let Some(slot) = self.state.recv.get_mut(&self.id) else {
 			return Err(LeaseError::ClosedStream);
 		};
-		let recv = get_or_insert_recv(slot, self.state.stream_receive_window);
+		let recv = get_or_insert_recv(slot, self.state.initial_stream_receive_window);
 		if recv.lease.evicted {
 			return Err(LeaseError::Evicted);
 		}

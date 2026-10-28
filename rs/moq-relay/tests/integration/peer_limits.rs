@@ -60,10 +60,10 @@ async fn probe(port: u16, peer: bool) -> Seen {
 	let mut tls = connect.tls.build().expect("tls config");
 	tls.alpn_protocols = vec![b"moq-lite-06".to_vec()];
 	let crypto = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("quic crypto");
-	let endpoint = driver::Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("endpoint");
+	let endpoint = driver::endpoint::Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("endpoint");
 	let conn = endpoint
 		.connect_with(
-			driver::ClientConfig::new(std::sync::Arc::new(crypto)),
+			driver::client::Config::new(std::sync::Arc::new(crypto)),
 			([127, 0, 0, 1], port).into(),
 			"localhost",
 		)
@@ -215,7 +215,7 @@ async fn unadvertisable_quic_limits_are_refused_at_load() {
 /// A bare QUIC server speaking the dial template's ALPNs: the dialer's stream
 /// limit is a transport parameter, so the handshake alone shows it. Its idle
 /// timeout is far past any test's, so only a close ends a link in time.
-pub(crate) fn bare_server(connect: &moq_tokio::connect::Config) -> driver::Endpoint {
+pub(crate) fn bare_server(connect: &moq_tokio::connect::Config) -> driver::endpoint::Endpoint {
 	let key = rcgen::KeyPair::generate().expect("keypair");
 	let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
 		.expect("cert params")
@@ -235,19 +235,19 @@ pub(crate) fn bare_server(connect: &moq_tokio::connect::Config) -> driver::Endpo
 		.map(|alpn| alpn.as_bytes().to_vec())
 		.collect();
 	let crypto = driver::crypto::rustls::QuicServerConfig::try_from(tls).expect("quic crypto");
-	let mut transport = driver::TransportConfig::default();
+	let mut transport = driver::transport::Config::default();
 	transport.max_idle_timeout(Some(BARE_IDLE.try_into().expect("idle timeout")));
-	let mut config = driver::ServerConfig::with_crypto(std::sync::Arc::new(crypto));
+	let mut config = driver::server::Config::with_crypto(std::sync::Arc::new(crypto));
 	config.transport_config(std::sync::Arc::new(transport));
-	driver::Endpoint::server(config, "127.0.0.1:0".parse().unwrap()).expect("server endpoint")
+	driver::endpoint::Endpoint::server(config, "127.0.0.1:0".parse().unwrap()).expect("server endpoint")
 }
 
 /// Start a cluster whose one static peer is `server`, and accept its dial.
 async fn static_dial(
-	server: &driver::Endpoint,
+	server: &driver::endpoint::Endpoint,
 	connect: moq_tokio::connect::Config,
 	quic: moq_tokio::quic::Config,
-) -> (driver::Connection, tokio::task::JoinHandle<anyhow::Result<()>>) {
+) -> (driver::connection::Connection, tokio::task::JoinHandle<anyhow::Result<()>>) {
 	let port = server.local_addr().expect("server addr").port();
 	let mut options = moq_relay::cluster::Options::new(Default::default());
 	options.config.connect = vec![moq_relay::cluster::Peer::new(format!("moql://127.0.0.1:{port}/"))];
