@@ -134,7 +134,7 @@ removed).
 - [Announcement takeover](/quest/m1/announce-takeover.md) - a new independent route explicitly continues instances served through its predecessor, with shared Rust/JS semantics and lite-07 wire
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - a lite-07 SUBSCRIBE asks for past and live ranges with absolute or relative ends, in either order, and replaces FETCH; merged ranges never starve a subscriber; relays fill misses by range, including over moq-transport
 - [Drop set](/quest/m1/drop-set.md) - each cursor judges missing groups against its own budget, so a narrow reader drops promptly and a widening re-offers groups already reported dropped on lite-07
-- [Broadcast archives](/quest/m1/archive/README.md) - ANNOUNCE, TRACKS, and a SUBSCRIBE per track record every track under a prefix to any object_store, a host serves a stored broadcast back, and the catalog drops its archive pointer for an opt-in `hls` field
+- [Broadcast archives](/quest/m1/archive/README.md) - ANNOUNCE, TRACKS, and a SUBSCRIBE per track record every track under a prefix to any object_store, a host serves a stored broadcast back, and the catalog drops its archive pointer for a per-rendition `hls` field
 - [HLS recorder target](/quest/m1/hls-record-target.md) - the moq-cli HLS recorder takes its target duration from the declared `hls` duration
 - [Compressed tracks](/quest/m1/compress/README.md) - a track flagged `compress` is DEFLATEd per group by moq-net, forwarded compressed, and inflated once on the relay for peers that cannot signal it; `catalog.json.z` and moq-flate go away
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
@@ -180,6 +180,7 @@ removed).
 - [An HLS viewer starts capture](/quest/m1/hls-record-demand.md) - a record-track subscriber counts as demand for its rendition's media
 - [One moq-ffi build definition](/quest/m1/ffi-build-flags.md) - every binding takes moq-ffi's default features from one place
 - [moqsrc max-delay](/quest/m1/gst-max-delay.md) - GStreamer's `moqsrc` takes a `max-delay` property instead of a hard-coded 1 s budget
+- [JS SETUP rejection ownership](/quest/m1/js-setup-rejection.md) - reproduce an unhandled version-refusal rejection without weakening the refusal
 - [moq-clock moves into kio::clock](/quest/m1/kio-clock.md) - moq-clock and its test macro become `kio::clock` and `#[kio::test]` before the cut publishes them
 - [Poll-first async](/quest/m1/poll-first/README.md) - library crates compile no coroutines by default: async wrappers are generated from `poll_*` and gated behind an `async` feature
 - [Every package's release backport ships](/quest/m1/release-versions.md) - a bot bumps every hand-versioned package changed on `release`, so backports publish without a manual bump

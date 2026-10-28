@@ -23,7 +23,6 @@ edge, which embeds moq-relay; it moved there on 2026-09-28.
 - [Nightly passes on main](/quest/m0/nightly/README.md) - the scheduled Nightly passes end to end, so red means a new break
 - [Interop and Video pass on main](/quest/m0/interop-green/README.md) - the scheduled Interop and Video workflows pass, so red means a new break
 - [Release shutdown backport](/quest/m0/ffi-shutdown-backport.md) - `release` publishes a non-breaking moq-ffi with an async `drain()` and qmux sessions on the QUIC stream limit
-- [Backport IETF close codes](/quest/m0/backport-ietf-close-codes.md) - `@moq/net` on `release` closes moq-transport sessions with the right error for three hostile cases
 - [Backport @moq/flate bounds](/quest/m0/backport-flate-budget.md) - `@moq/flate` on `release` stops inflating past its cap and stops pinning pako scratch
 - [Backport the frame-start refusal](/quest/m0/backport-frame-start.md) - `@moq/net` on `release` refuses a nonzero lite frame start instead of misnumbering frames
 - [Resolve the remaining external Smoke interoperability failures](/quest/m0/smoke-released.md) - every external Docker interop cell in Smoke passes, fixed at its cause
