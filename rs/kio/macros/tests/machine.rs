@@ -220,5 +220,8 @@ fn stores_typed_tuples() {
 	};
 	values.try_push(1).unwrap();
 	values.try_push(0).unwrap();
-	assert_eq!(pair.poll_pair(&kio::Waiter::noop()), Poll::Ready(Ok("1-2-1".to_string())));
+	assert_eq!(
+		pair.poll_pair(&kio::Waiter::noop()),
+		Poll::Ready(Ok("1-2-1".to_string()))
+	);
 }

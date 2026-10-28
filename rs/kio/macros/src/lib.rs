@@ -56,8 +56,9 @@ use syn::{
 /// - `wait!(Step => poll)` starts a top-level statement, as in `let x: T = wait!(Step =>
 ///   poll)?;`. It evaluates `poll`, any `Poll<_>` expression, on every call until it is
 ///   ready, then continues with its value. Inside `poll`, earlier locals are `&mut`
-///   borrows of the stored state, so moving one (`drop(x)`) is an error, and a `return`
-///   or `ready!` leaves the machine at the wait.
+///   borrows of the stored state, so moving one (`drop(x)`) is an error, and the poll
+///   can reach `self`'s other fields but not its `&mut self` methods. A `return` or
+///   `ready!` inside it leaves the machine at the wait.
 /// - `#[every_poll]` statements lead the body and run on every call, before resuming.
 /// - Every other statement runs once, so it must not return `Poll::Pending` or use
 ///   `ready!`.
@@ -203,8 +204,11 @@ fn storage(variant: &Variant) -> TokenStream {
 	}
 
 	// The auto impl, written out so that a `!Send` local reports its own `let` (the
-	// bound) and its wait (the impl) instead of only the enum. The bound is
+	// bound) and its wait (the impl) instead of only the enum. Each bound is
 	// higher-ranked so rustc checks it where `Send` is needed, not here.
+	//
+	// SAFETY: the bounds are the auto impl's own conditions, every field's type being
+	// `Send`, and the struct has no fields but these.
 	let bounds = variant.stored.iter().map(|local| {
 		let ty = &local.ty;
 		let send = quote_spanned!(local.ident.span()=> ::core::marker::Send);
@@ -213,9 +217,6 @@ fn storage(variant: &Variant) -> TokenStream {
 	let header = quote_spanned!(variant.name.span()=> unsafe impl ::core::marker::Send for #name);
 	quote! {
 		#def
-
-		// SAFETY: these are the auto impl's own conditions, every field's type being
-		// `Send`; the fields above are all there is.
 		#header where #(#bounds),* {}
 	}
 }
