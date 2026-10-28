@@ -41,7 +41,7 @@ async def wait_phase(session: moq.Session, phase: moq.ConnectionPhase) -> moq.Co
 
 async def test_server_client_roundtrip():
     """Server publishes a broadcast; a client connects and receives a frame."""
-    async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
+    async with moq.Server("127.0.0.1:0", versions=["moq-lite-07-wip"], tls_generate=["localhost"]) as server:
         # Publish a broadcast on the server side.
         broadcast = server.create_broadcast("hello")
         media = moq.media.TrackProducer.audio(
@@ -68,6 +68,7 @@ async def test_server_client_roundtrip():
                 f"https://{server.local_addr}",
                 tls=moq.ClientTls(insecure=True),
                 bind="127.0.0.1:0",
+                versions=["moq-lite-07-wip"],
             ) as client:
                 async for announcement in routes(client.announced()):
                     assert announcement.prefix == "hello"

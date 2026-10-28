@@ -16,6 +16,8 @@ fn relay_default() -> String {
 async fn spawn_relay(set: impl FnOnce(&mut Config)) -> (u16, moq_relay::auth::Admissions, tokio::task::JoinHandle<()>) {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	let mut config = Config::default();
+	config.listen.version = vec!["moq-lite-07-wip".parse().expect("lite-07")];
+	config.connect.version = config.listen.version.clone();
 	config.listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
 	set(&mut config);
 	let mut relay = Relay::load(config).await.expect("load relay");
@@ -55,12 +57,13 @@ async fn the_relay_and_client_exchange_implementations() {
 
 		let transport = qmux::tcp::connect(("127.0.0.1", port), {
 			let mut config = qmux::Config::new(qmux::Version::QMux01);
-			config.protocol = qmux::Protocol::Negotiate(vec!["moq-lite-06".into()]);
+			config.protocol = qmux::Protocol::Negotiate(vec!["moq-lite-07-wip".into()]);
 			config
 		})
 		.await
 		.expect("connect TCP");
 		let (session, driver) = moq_net::Client::new()
+			.with_versions("moq-lite-07-wip".parse::<moq_net::Version>().expect("lite-07").into())
 			.with_implementation("app/1 moq-net-rs/9")
 			.connect(moq_net::time::Instant::now(), transport)
 			.await
