@@ -199,9 +199,10 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// PMT ES-level descriptors per PID, stashed when a PMT is parsed so a decoded
 	/// media track can record them (language, registration, ...) once its track exists.
 	es_descriptors: HashMap<u16, Vec<catalog::Descriptor>>,
-	/// Decoded media PIDs already recorded into `mpegts.tracks`, so the reconcile in
-	/// [`Self::flush`] runs once per track rather than on every frame.
-	recorded_media: HashSet<Pid>,
+	/// Decoded media PIDs already recorded into `mpegts.tracks`, by the track name recorded, so the
+	/// reconcile in [`Self::flush`] runs once per track rather than on every frame, and moves the
+	/// entry when a format change publishes the PID under a new name.
+	recorded_media: HashMap<Pid, String>,
 	/// The program-level descriptors the catalog advertises, rewritten in place as the PMT
 	/// revises them.
 	program_info: Vec<catalog::Descriptor>,
@@ -294,7 +295,7 @@ impl<E: catalog::Catalog> Import<E> {
 			sections: HashMap::new(),
 			supports_mpegts,
 			es_descriptors: HashMap::new(),
-			recorded_media: HashSet::new(),
+			recorded_media: HashMap::new(),
 			program_info,
 			listed: HashMap::new(),
 			si,
@@ -1125,8 +1126,8 @@ impl<E: catalog::Catalog> Import<E> {
 		units += self.finish_stream(pid)?;
 		if let Some(stream) = self.streams.get(&pid) {
 			// A verbatim entry leaves with its stream; a decoded track's is recorded here.
-			if self.recorded_media.remove(&pid)
-				&& let Some(name) = stream.media_track_name()
+			if let Some(name) = self.recorded_media.remove(&pid)
+				&& stream.media_track_name().is_some()
 				&& let Some(mpegts) = self.catalog.modify()?.ext.mpegts_mut()
 			{
 				mpegts.tracks.remove(&name);
@@ -1654,27 +1655,29 @@ impl<E: catalog::Catalog> Import<E> {
 	/// once per track. No-op without the `mpegts` section, before the track exists,
 	/// or for verbatim streams (which self-register).
 	fn record_media_track(&mut self, pid: Pid) -> anyhow::Result<()> {
-		if !self.supports_mpegts || self.recorded_media.contains(&pid) {
+		if !self.supports_mpegts {
 			return Ok(());
 		}
-		let (name, descriptors) = {
-			let Some(name) = self.streams.get(&pid).and_then(|s| s.media_track_name()) else {
-				return Ok(());
-			};
-			(
-				name,
-				self.es_descriptors.get(&pid.as_u16()).cloned().unwrap_or_default(),
-			)
+		let Some(name) = self.streams.get(&pid).and_then(|s| s.media_track_name()) else {
+			return Ok(());
 		};
+		if self.recorded_media.get(&pid) == Some(&name) {
+			return Ok(());
+		}
+		let descriptors = self.es_descriptors.get(&pid.as_u16()).cloned().unwrap_or_default();
 		if let Some(mpegts) = self.catalog.modify()?.ext.mpegts_mut() {
+			// A format change moved the PID to a new track, whose entry replaces the ended one's.
+			if let Some(previous) = self.recorded_media.get(&pid) {
+				mpegts.tracks.remove(previous);
+			}
 			let entry = mpegts
 				.tracks
-				.entry(name)
+				.entry(name.clone())
 				.or_insert_with(|| catalog::Track::new(pid.as_u16()));
 			entry.pid = pid.as_u16();
 			entry.descriptors = descriptors;
 		}
-		self.recorded_media.insert(pid);
+		self.recorded_media.insert(pid, name);
 		Ok(())
 	}
 
@@ -5966,9 +5969,9 @@ pub(super) mod test {
 	}
 
 	/// Read every retained frame of the single audio rendition in `catalog`.
-	async fn read_audio_frames(
+	async fn read_audio_frames<E: crate::catalog::hang::CatalogExt>(
 		consumer: &moq_net::broadcast::Consumer,
-		catalog: &crate::catalog::Producer,
+		catalog: &crate::catalog::Producer<E>,
 	) -> Vec<crate::container::Frame> {
 		let name = catalog
 			.snapshot()
@@ -6398,7 +6401,11 @@ pub(super) mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
+		)
+		.unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 		let mut mux = Mux {
 			out: synth_pmt(&[(StreamType::AdtsAac, AAC_PID)], false),
@@ -6432,6 +6439,12 @@ pub(super) mod test {
 		assert_ne!(name, &first, "the 44.1 kHz frames publish under a new name");
 		assert_eq!(config.sample_rate, 44_100);
 		assert_eq!(catalog.hls_tracks(), records, "the 48 kHz track's HLS records retire");
+		let recorded: Vec<_> = snapshot.ext.mpegts.tracks.keys().cloned().collect();
+		assert_eq!(
+			recorded,
+			vec![name.clone()],
+			"the PID's mpegts entry moves to the new track"
+		);
 		import.finish().unwrap();
 		let frames = read_audio_frames(&consumer, &catalog).await;
 		assert_eq!(

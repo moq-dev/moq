@@ -750,6 +750,18 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		self.stage(config)?.commit()
 	}
 
+	/// Advertise `bitrate` as a supplied value that measurement no longer replaces, leaving every
+	/// other field, measured or not, as published.
+	pub(crate) fn supply_bitrate(&mut self, bitrate: u64) -> crate::Result<()> {
+		let mut config = self.config()?;
+		let mut estimate = config.estimate();
+		estimate.bitrate = Some(bitrate);
+		config.set_estimate(estimate);
+		self.replace(config)?;
+		self.supplied.bitrate = Some(bitrate);
+		Ok(())
+	}
+
 	/// Write `config` into the catalog, leaving the caller to choose how the guard publishes it.
 	fn stage(&mut self, config: C) -> crate::Result<super::Guard<'_, E>> {
 		if !self.present {

@@ -108,6 +108,7 @@ trait Rendition<R>: Send {
 	fn config(&self) -> crate::Result<R>;
 	fn replace(&mut self, config: R) -> crate::Result<()>;
 	fn estimate(&mut self, estimate: crate::catalog::Estimate) -> crate::Result<()>;
+	fn supply_bitrate(&mut self, bitrate: u64) -> crate::Result<()>;
 	fn fresh(
 		&self,
 		container: crate::catalog::hang::Container,
@@ -157,6 +158,10 @@ where
 
 	fn estimate(&mut self, estimate: crate::catalog::Estimate) -> crate::Result<()> {
 		self.estimate(estimate)
+	}
+
+	fn supply_bitrate(&mut self, bitrate: u64) -> crate::Result<()> {
+		self.supply_bitrate(bitrate)
 	}
 }
 
@@ -230,6 +235,15 @@ where
 	/// Publish or replace this track's catalog config.
 	pub fn set(&mut self, config: R) -> crate::Result<()> {
 		self.rendition.as_mut().ok_or(crate::Error::NotPublished)?.set(config)
+	}
+
+	/// Advertise `bitrate` as the rendition's maximum, such as an encoder's retuned target, which
+	/// later measurement no longer replaces. Every other published field stays as it is.
+	pub fn set_bitrate(&mut self, bitrate: u64) -> crate::Result<()> {
+		self.rendition
+			.as_mut()
+			.ok_or(crate::Error::NotPublished)?
+			.supply_bitrate(bitrate)
 	}
 
 	/// Modify the published catalog config.

@@ -295,10 +295,16 @@ impl Producer {
 	/// Retune the live encoder to `bitrate`.
 	pub fn set_bitrate(&mut self, bitrate: moq_net::bandwidth::Rate) -> Result<(), Error> {
 		let encoder = self.encoder.as_mut().ok_or(moq_net::Error::Closed)?;
+		let previous = encoder.bitrate();
 		encoder.set_bitrate(bitrate)?;
+		// Advertise the configured target in place, so encoded-byte estimates cannot replace it.
+		if let Err(err) = self.track.set_bitrate(encoder.bitrate().as_bps()) {
+			// Keep the encoder on what the catalog still advertises. It accepted that rate before,
+			// so the publish error is the one to report.
+			let _ = encoder.set_bitrate(previous);
+			return Err(err.into());
+		}
 		self.bitrate = encoder.bitrate();
-		// Pin the configured target so encoded-byte estimates cannot replace it.
-		self.track.set(encoder.catalog())?;
 		Ok(())
 	}
 
