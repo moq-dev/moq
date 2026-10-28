@@ -1,25 +1,29 @@
-# [M] Interop covers late join and FETCH
+# [S] Interop covers late join and FETCH
 
 ## Goal
 
-On the IETF matrix (`just test interop --versions ietf`), a
-subscriber that joins mid-group receives the current group from object 0
-(a joining FETCH before draft 22, a fill from draft 22) and a standalone
-FETCH of a past group returns exactly its objects, for Rust and JS
-publishers and subscribers.
+On the IETF matrix (`just test interop --tail --versions ietf`), the four
+`late join` cells with a native JS publisher (`js-native-node` and
+`js-native-bun` to `rust`, drafts 18 and 22) pass. Every other late-join and
+CLI FETCH cell already passes there.
 
 ## Plan
 
-Decided with the maintainer on 2026-10-21: an in-tree case, not proposed to
-the runner's spec.
+The late-join lane and the per-publisher CLI FETCH round landed in
+`test/interop` (see its README). The four cells fail because
+`@moq/web-transport` (0.1.5, the Node and Bun polyfill from
+moq-dev/web-transport) surfaces a peer's RESET_STREAM as a plain
+`Error("RESET_STREAM: 1")` with no `source` or `streamErrorCode`.
+`malformed()` in `js/net/src/ietf/request_stream.ts` then reads the relay's
+cancellation of a request (Rust cancels a FETCH by resetting its stream) as a
+malformed message and closes the session with PROTOCOL_VIOLATION. Browsers
+report a `WebTransportError` with `source: "stream"`, so only native JS is
+affected. With resets recognized, all four cells pass.
 
-This is the path the draft-22 public relay failures of 2026-10-21 hit: a
-catalog written once is lost when a relay narrows a join to Next Object, and
-the JS publisher refuses every FETCH. Publish a track whose first group
-outlives the subscriber's arrival (a catalog written once, and a slow video
-GOP) so the case cannot pass on timing.
-
-Decided 2026-10-27 (maintainer): this needs only the cached and joining half
-of JavaScript FETCH, not the on-demand half that waits on JS ranges.
+Fix it in the polyfill: reject reads and writes with a
+`WebTransportError`-shaped error carrying `source: "stream"` and the peer's
+code, and send the real code from `abort()` and `cancel()` instead of 0.
+Release it, bump `@moq/web-transport` here, and rerun
+`just test interop --tail --versions ietf`.
 
 Public API: none. Wire: none.
