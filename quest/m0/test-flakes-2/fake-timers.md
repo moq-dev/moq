@@ -12,7 +12,9 @@ hang's consumer startup.
 Follows [moq-dev/moq#6988](https://github.com/moq-dev/moq/pull/6988), which
 made `Budget` yield through the clock and moved three tests. Bun's fake
 timers cannot see a yield, so these pass today only because nothing yields
-at the wrong moment. Prove each converted test still fails when its behavior
-breaks, and that it passes with `Budget` forced to yield on every call.
+at the wrong moment. Each converted test installs its `Manual` clock and
+restores the ambient clock when it finishes, as the existing `Manual` tests
+do, so no fake clock leaks into the next test. Prove each converted test
+still fails when its behavior breaks, and that it passes with `Budget` forced to yield on every call.
 
 Public API: none.

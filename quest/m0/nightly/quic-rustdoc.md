@@ -8,7 +8,9 @@
 
 ## Plan
 
-Fix the doc build, and add the all-features rustdoc build to whichever lane
-should have caught it.
+Fix the doc build. The gate's Rust lint builds workspace rustdoc without
+`--all-features`, and `rs doctest` runs `cargo test --doc`, so nothing builds
+this. Add `cargo doc -p moq-quic --all-features` to Nightly's feature lane
+(`just rs features`), and name the lane in the PR.
 
 Public API: none.
