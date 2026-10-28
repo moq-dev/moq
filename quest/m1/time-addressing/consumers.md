@@ -35,10 +35,11 @@ state again).
 
 - **A catalog `media` section** holds what applies to every audio and video
   track. `media.join.interval` promises that each one starts a group at least
-  that often, and is the export's grid, so every rendition shares segment
-  numbers. It is fixed for the broadcast instance, since the numbering
-  depends on it. The root `clock` moves to `media.clock` in the same break. Nested
-  so a later join mechanism that is not a fixed grid can sit beside it.
+  that often outside a pause, and is the export's grid, so every rendition
+  shares segment numbers. It is fixed for the broadcast instance, since the
+  numbering depends on it. The root `clock` moves to `media.clock` in the same
+  break. Nested so a later join mechanism that is not a fixed grid can sit
+  beside it.
   moq-mux declares the interval from its GOP hint, and `@moq/publish` does
   too. A broadcast without one is not HLS-renderable.
 - **Segment N starts at the group containing pts N × interval**, the group a
