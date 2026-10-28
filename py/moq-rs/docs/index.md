@@ -180,6 +180,7 @@ broadcast, and producers advertise it in the catalog.
    OriginProducer
    OriginConsumer
    OriginRequests
+   Publication
    AnnounceConsumer
    AnnouncedBroadcast
    Announce
