@@ -21644,7 +21644,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqvideoproducer_finish() != 40208) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqvideoproducer_reservation() != 25410) {
+  if (uniffi_moq_ffi_checksum_method_moqvideoproducer_reservation() != 1052) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqvideoproducer_set_bitrate() != 19081) {
