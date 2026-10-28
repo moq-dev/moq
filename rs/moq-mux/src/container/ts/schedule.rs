@@ -603,6 +603,9 @@ pub(super) struct Schedule {
 	/// Packets a reader places on the program clock, held until the opening's PCR interval is
 	/// out ([`Self::push_clocked`]).
 	unclocked: Vec<u8>,
+	/// The unit held packets last went out in, by `seq`: what is muxed after them waits until it
+	/// has finished, as it rides a lane of its own.
+	deferred: Option<u64>,
 }
 
 impl Schedule {
@@ -627,6 +630,7 @@ impl Schedule {
 			opening: false,
 			clocked: 0,
 			unclocked: Vec::new(),
+			deferred: None,
 		}
 	}
 
@@ -638,9 +642,18 @@ impl Schedule {
 	}
 
 	/// Whether a unit pushed now could go out before the opening's PCR interval is out, or
-	/// ahead of packets still held for it on the same PID.
+	/// ahead of packets still held for it.
 	pub fn clocking(&self) -> bool {
-		self.opening || !self.unclocked.is_empty() || self.next.is_some_and(|next| next < self.clocked)
+		self.opening
+			|| !self.unclocked.is_empty()
+			|| self.deferring()
+			|| self.next.is_some_and(|next| next < self.clocked)
+	}
+
+	/// Whether the unit held packets last went out in has some still to send.
+	fn deferring(&self) -> bool {
+		self.deferred
+			.is_some_and(|seq| self.units.iter().any(|unit| unit.seq == seq))
 	}
 
 	/// Hold `packets`, which a reader places on the program clock and which ride no unit of their
@@ -976,6 +989,7 @@ impl Schedule {
 		// for the next timeline to continue.
 		self.clocked = 0;
 		self.unclocked.clear();
+		self.deferred = None;
 	}
 
 	/// The first slot `unit` may go out in: [`ahead`] of its due slot, and never before the
@@ -1049,13 +1063,15 @@ impl Schedule {
 		if self.opening && self.next.is_none() {
 			self.clocked = index + OPENING;
 		}
-		if !self.opening && index >= self.clocked && !self.unclocked.is_empty() {
+		// Those held behind earlier ones wait for them to finish.
+		if !self.opening && index >= self.clocked && !self.unclocked.is_empty() && !self.deferring() {
 			let packets = std::mem::take(&mut self.unclocked);
 			let by = (index + 1) * PCR_INTERVAL.as_nanos();
 			// They follow no unit, so the next one pushed keeps its own start.
 			let last = self.last;
-			self.enqueue(pid(&packets), Timing { by, decode: by }, packets, None)
-				.late = true;
+			let unit = self.enqueue(pid(&packets), Timing { by, decode: by }, packets, None);
+			unit.late = true;
+			self.deferred = Some(unit.seq);
 			self.last = last;
 		}
 		self.next = Some(index + 1);
@@ -1871,6 +1887,51 @@ mod tests {
 			assert_eq!(held, Some(OPENING), "{rate:?}: slots {indexes:?}");
 			assert_eq!(indexes, (0..=OPENING).collect::<Vec<_>>(), "{rate:?}");
 			assert!(!schedule.clocking());
+		}
+	}
+
+	/// Packets held for the opening that take more than one slot to go out keep SI muxed after
+	/// them held behind them until the last has, padded or not.
+	#[test]
+	fn clocked_packets_stay_ahead_until_they_finish() {
+		for rate in [None, Some(RATE)] {
+			let mut schedule = Schedule::new(Duration::ZERO);
+			schedule.set_rate(rate);
+			schedule.set_tables(100);
+			schedule.set_clock(1);
+			schedule.set_buffer(1, VIDEO);
+			schedule.set_buffer(0x11, Buffer::SYSTEM);
+			schedule.open();
+			schedule.push_clocked(unit(0x11, 100));
+			schedule.lead(Tables {
+				packets: [unit(0, 1), unit(100, 1)].concat(),
+				clock: 1,
+				rate,
+				added: vec![1],
+			});
+			schedule.push(1, timing(10), unit(1, 3), true).unwrap();
+			let mut sent = 0;
+			let mut slots = Vec::new();
+			while let Some(slot) = schedule.next(None).unwrap() {
+				let packets = slot.packets.as_chunks::<{ TsPacket::SIZE }>().0;
+				let held = packets.iter().filter(|&packet| pid(packet) == 0x11).count();
+				if held > 0 {
+					slots.push(slot.index);
+				}
+				sent += held;
+				if sent < 100 {
+					assert!(
+						schedule.clocking(),
+						"{rate:?}: {sent} of 100 out by slot {}",
+						slot.index
+					);
+				}
+			}
+			assert_eq!(sent, 100, "{rate:?}");
+			assert!(!schedule.clocking(), "{rate:?}");
+			if rate.is_some() {
+				assert!(slots.len() > 1, "the held packets span slots {slots:?}");
+			}
 		}
 	}
 
