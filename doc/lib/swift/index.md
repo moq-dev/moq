@@ -69,7 +69,8 @@ for try await event in try session.consume.announced(prefix: "live/", filter: "*
 ```swift
 // Publish encoded frames, or raw pixels with the codec inside the binding (VideoToolbox).
 // opusInit, packet, pts, and rgba come from your encoder or capture source.
-let broadcast = try session.publish.createBroadcast(path: "my-stream.hang")
+let publication = try session.publish.createBroadcast(path: "my-stream.hang")
+let broadcast = publication.broadcast
 let audio = try Media.TrackProducer.audio(broadcast: broadcast, initData: Media.AudioInit(format: .opus, data: opusInit))
 try audio.writeFrame(packet, timestampUs: 20_000)
 try audio.cut() // audio has no keyframes, so this is what gives it groups
@@ -81,7 +82,7 @@ let video = try Video.Producer(
     track: "camera"
 )
 try video.write(VideoFrame(timestampUs: pts, data: rgba))
-try broadcast.announce(route: AnnounceRoute(epoch: mintEpoch())) // a fresh epoch per run
+try publication.announce(route: AnnounceRoute(epoch: mintEpoch())) // a fresh epoch per run
 try audio.finish()
 try video.finish()
 try broadcast.close()

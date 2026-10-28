@@ -137,12 +137,12 @@ void main() {
       await pending.cancel();
       await error;
       final next = cursor.next();
-      final broadcast = origin.createBroadcast(path: 'still-listening');
+      final publication = origin.createBroadcast(path: 'still-listening');
       try {
-        broadcast.announce(route: MoqAnnounceRoute());
+        publication.announce(route: MoqAnnounceRoute());
         expect(await next, isA<StartMoqAnnounceEvent>());
       } finally {
-        broadcast.close();
+        publication.broadcast().close();
       }
     } finally {
       cursor.cancel();

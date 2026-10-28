@@ -37,6 +37,8 @@ typealias Transport = uniffi.moq.MoqTransport
 // Origin (broadcast discovery / announcement).
 /** The publish side of an origin: create broadcasts so subscribers can discover them. */
 typealias OriginProducer = uniffi.moq.MoqOriginProducer
+/** An origin's handle on one broadcast: `broadcast()` to fill it, `announce` and `unannounce` to advertise it. */
+typealias Publication = uniffi.moq.MoqPublication
 /** Config for creating an origin, such as its total cache budget. */
 typealias OriginConfig = uniffi.moq.MoqOriginConfig
 /** The subscribe side of an origin: discover and request published broadcasts. */

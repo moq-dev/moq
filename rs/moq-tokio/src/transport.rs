@@ -139,20 +139,19 @@ type RequestResult<S> = Result<
 	<S as web_transport_trait::Session>::Error,
 >;
 
-/// A stored in-flight operation: `None` when idle.
-///
-/// The Mutex is never locked: every access goes through `get_mut`, which is free
-/// on an exclusive borrow. It exists only to make the slot `Sync`, since a boxed
-/// future is not, and sessions are shared behind `&` between the driver's tasks.
-type OpSlot<T> = std::sync::Mutex<Option<OpBox<T>>>;
+/// A stored in-flight operation, `None` when idle, which every task polling it shares.
+type OpSlot<T> = moq_net::kio::Bridge<Option<OpBox<T>>>;
 
 /// Lazily start and poll the operation in `slot`, clearing it when it resolves.
-fn poll_op<T>(slot: &mut OpSlot<T>, cx: &mut Context<'_>, start: impl FnOnce() -> OpBox<T>) -> Poll<T> {
-	let slot = slot.get_mut().unwrap();
-	let fut = slot.get_or_insert_with(start);
-	let output = ready!(fut.as_mut().poll(cx));
-	*slot = None;
-	Poll::Ready(output)
+///
+/// Whichever caller polls it once it resolves takes the output; the rest start the next.
+fn poll_op<T>(slot: &OpSlot<T>, waiter: &moq_net::kio::Waiter, start: impl FnOnce() -> OpBox<T>) -> Poll<T> {
+	slot.poll(waiter, |slot, cx| {
+		let fut = slot.get_or_insert_with(start);
+		let output = ready!(fut.as_mut().poll(cx));
+		*slot = None;
+		Poll::Ready(output)
+	})
 }
 
 impl<S: web_transport_trait::Session> Session<S> {
@@ -181,94 +180,6 @@ impl<S: web_transport_trait::Session> Clone for Session<S> {
 			polled_wire: self.polled_wire.clone(),
 			..Self::new(self.session.clone(), self.address)
 		}
-	}
-}
-
-impl<S> wt_poll::Session for Session<S>
-where
-	S: Grouped,
-	S::SendStream: 'static,
-	S::RecvStream: 'static,
-{
-	type SendStream = SendStream<S::SendStream>;
-	type RecvStream = RecvStream<S::RecvStream>;
-	type Error = S::Error;
-
-	fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
-		let session = &self.session;
-		poll_op(&mut self.accept_uni, cx, || {
-			let session = session.clone();
-			async move { session.accept_uni().await }.boxed()
-		})
-		.map(|res| res.map(RecvStream::new))
-	}
-
-	fn poll_accept_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<wt_poll::BiStreams<Self>, Self::Error>> {
-		let session = &self.session;
-		poll_op(&mut self.accept_bi, cx, || {
-			let session = session.clone();
-			async move { session.accept_bi().await }.boxed()
-		})
-		.map(|res| res.map(|(send, recv)| (SendStream::new(send), RecvStream::new(recv))))
-	}
-
-	fn poll_open_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
-		let session = &self.session;
-		poll_op(&mut self.open_uni, cx, || {
-			let session = session.clone();
-			async move { session.open_uni().await }.boxed()
-		})
-		.map(|res| res.map(SendStream::new))
-	}
-
-	fn poll_open_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<wt_poll::BiStreams<Self>, Self::Error>> {
-		let session = &self.session;
-		poll_op(&mut self.open_bi, cx, || {
-			let session = session.clone();
-			async move { session.open_bi().await }.boxed()
-		})
-		.map(|res| res.map(|(send, recv)| (SendStream::new(send), RecvStream::new(recv))))
-	}
-
-	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-		// The async interface's send is non-blocking (the transport queues or
-		// drops), so there is never a reason to return Pending.
-		Poll::Ready(web_transport_trait::Session::send_datagram(
-			&self.session,
-			Bytes::copy_from_slice(payload),
-		))
-	}
-
-	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
-		let session = &self.session;
-		poll_op(&mut self.recv_datagram, cx, || {
-			let session = session.clone();
-			async move { session.recv_datagram().await }.boxed()
-		})
-	}
-
-	fn max_datagram_size(&self) -> usize {
-		self.session.max_datagram_size()
-	}
-
-	fn protocol(&self) -> Option<&str> {
-		self.session.protocol()
-	}
-
-	fn close(&mut self, code: u32, reason: &str) {
-		self.session.close(code, reason);
-	}
-
-	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
-		let session = &self.session;
-		poll_op(&mut self.closed, cx, || {
-			let session = session.clone();
-			async move { session.closed().await }.boxed()
-		})
-	}
-
-	fn stats(&self) -> impl web_transport_trait::Stats {
-		self.session.stats()
 	}
 }
 
@@ -1187,15 +1098,14 @@ mod tests {
 	// joined during the FIN watch reclaims the stream, which still retransmits.
 	#[test]
 	fn send_defers_a_group_across_an_inflight_write() {
-		use moq_net::transport::poll;
 		let fake = FakeSend::default();
 		fake.blocked.store(true, Ordering::SeqCst);
 		let mut send = SendStream::new(fake.clone());
 		let mut cx = cx();
 
 		assert!(send.poll_write(&mut cx, b"queued").is_pending());
-		poll::SendStream::set_group(&mut send, &FakeGroup(1));
-		poll::SendStream::set_priority(&mut send, i64::MAX);
+		send.join(&FakeGroup(1));
+		send.prioritize(i64::MAX);
 		assert!(fake.groups.lock().unwrap().is_empty(), "deferred while in flight");
 
 		fake.blocked.store(false, Ordering::SeqCst);
@@ -1206,7 +1116,7 @@ mod tests {
 		fake.never_ack.store(true, Ordering::SeqCst);
 		send.finish().unwrap();
 		assert!(send.poll_closed(&mut cx).is_pending());
-		poll::SendStream::set_group(&mut send, &FakeGroup(2));
+		send.join(&FakeGroup(2));
 		assert!(send.poll_closed(&mut cx).is_pending());
 		assert_eq!(fake.groups.lock().unwrap().as_slice(), &[1, 2]);
 	}
@@ -1537,10 +1447,10 @@ mod tests {
 	fn owned_poll_adapter_forwards_writes_and_resets() {
 		use moq_net::transport::poll;
 		let fake = FakeSend::default();
-		let mut send = SendStream::new(fake.clone());
-		let mut cx = cx();
+		let mut send = owned::BridgedSend::new(fake.clone());
+		let waiter = &moq_net::kio::Waiter::noop();
 		assert!(matches!(
-			poll::SendStream::poll_write(&mut send, &mut cx, b"hello"),
+			poll::SendStream::poll_write(&mut send, waiter, b"hello"),
 			Poll::Ready(Ok(5))
 		));
 		poll::SendStream::set_priority(&mut send, 7);
@@ -1550,10 +1460,10 @@ mod tests {
 		assert_eq!(fake.resets.lock().unwrap().as_slice(), &[0x33]);
 		for address in [moq_net::transport::Address::Uri, moq_net::transport::Address::Setup] {
 			let session = Session::new(FakeSession, address);
-			let mut cloned = session.clone();
+			let cloned = session.clone();
 			assert_eq!(poll::Session::address(&session), address);
 			assert_eq!(poll::Session::address(&cloned), address);
-			assert!(poll::Session::poll_accept_uni(&mut cloned, &mut cx).is_pending());
+			assert!(poll::Session::poll_accept_uni(&cloned, waiter).is_pending());
 		}
 	}
 }

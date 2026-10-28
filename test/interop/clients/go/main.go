@@ -145,10 +145,11 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	defer client.Close()
 
 	// Hold the producer for the lifetime of the publish loop; Close unpublishes.
-	producer, err := client.CreateBroadcast(broadcast)
+	publication, err := client.CreateBroadcast(broadcast)
 	if err != nil {
 		return err
 	}
+	producer := publication.Broadcast()
 	defer producer.Close()
 
 	catalog, err := moqmedia.NewCatalogProducer(producer)
@@ -175,7 +176,7 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	if err != nil {
 		return err
 	}
-	if err := producer.Announce(moq.AnnounceRoute{}); err != nil {
+	if err := publication.Announce(moq.AnnounceRoute{}); err != nil {
 		return err
 	}
 	fmt.Printf("publishing %q (Annex-B H.264 from stdin + a %v Hz tone) to %s\n", broadcast, tones, url)
@@ -236,10 +237,11 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	if err := producer.Close(); err != nil {
 		return err
 	}
-	health, err := client.CreateBroadcast(broadcast + ".health")
+	healthPublication, err := client.CreateBroadcast(broadcast + ".health")
 	if err != nil {
 		return err
 	}
+	health := healthPublication.Broadcast()
 	defer health.Close()
 	live, err := health.PublishTrack("live", nil)
 	if err != nil {
@@ -251,7 +253,7 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	if err := live.Finish(); err != nil {
 		return err
 	}
-	if err := health.Announce(moq.AnnounceRoute{}); err != nil {
+	if err := healthPublication.Announce(moq.AnnounceRoute{}); err != nil {
 		return err
 	}
 	ack, err := os.Open(finishAck)

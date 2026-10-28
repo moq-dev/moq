@@ -59,7 +59,8 @@ import moq
 
 async def main():
     async with moq.Client("https://cdn.moq.dev/anon") as client:
-        broadcast = client.create_broadcast("my-stream")
+        publication = client.create_broadcast("my-stream")
+        broadcast = publication.broadcast
 
         # Publish an Opus audio track (init bytes from your encoder)
         audio = moq.media.TrackProducer.audio(
@@ -74,7 +75,7 @@ async def main():
         audio.cut()
 
         # A fresh epoch per run tells viewers a restart is a new broadcast.
-        broadcast.announce(moq.AnnounceRoute(epoch=moq.mint_epoch()))
+        publication.announce(moq.AnnounceRoute(epoch=moq.mint_epoch()))
 
         # Clean up
         audio.finish()
@@ -93,9 +94,9 @@ import moq
 
 async def main():
     async with moq.Server("127.0.0.1:4443", tls_generate=["localhost"]) as server:
-        broadcast = server.create_broadcast("hello")
-        track = broadcast.publish_track("events")
-        broadcast.announce()
+        publication = server.create_broadcast("hello")
+        track = publication.broadcast.publish_track("events")
+        publication.announce()
         print(f"listening on https://{server.local_addr}")
 
         sessions = []
@@ -149,7 +150,7 @@ client = moq.Client(
   - `keylog`. Write TLS session secrets to the file `SSLKEYLOGFILE` names, for decrypting a capture; without `SSLKEYLOGFILE` entering the server fails.
   - `.local_addr`. The bound address (useful when binding to port `0`).
   - `.cert_fingerprints()`. SHA-256 fingerprints of the configured TLS certificates, for `serverCertificateHashes` browser cert pinning.
-  - `.create_broadcast(path) → BroadcastProducer`. Create an unannounced broadcast, invisible to everyone; `announce()` makes it discoverable and reachable; `close()` ends it.
+  - `.create_broadcast(path) → Publication`. Create an unannounced broadcast, invisible to everyone; fill `.broadcast`, then `announce()` makes it discoverable and reachable; `.broadcast.close()` ends it.
 - **`Request`**. An incoming session, yielded by `async for request in server`.
   - `.url`, `.path`, `.query`, `.transport`. The query-free path is uniform across transports; the root or missing path is `""`. The encoded query may contain credentials.
   - `await .accept(*, publish=None, consume=None) → Session`. Origins are captured when accept starts; None inherits the server default and a supplied origin replaces it. Pass fresh origins for isolation, or the same origin on both sides to share it. A second response raises `AlreadyResponded`; calls after cancel raise `Cancelled`. Complete the handshake (hold the result to keep the connection alive).
@@ -250,9 +251,12 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
 - **`OriginProducer(*, cache_capacity_bytes=None)`**. Manage broadcast announcements. Set `cache_capacity_bytes` to bound cached groups under this origin.
   - `.consume() → OriginConsumer`
   - `.requests(prefix) → OriginRequests`
-  - `.create_broadcast(path) → BroadcastProducer`
+  - `.create_broadcast(path) → Publication`
+- **`Publication`**. A broadcast published on an origin. Dropping it keeps the route; closing the broadcast ends it.
+  - `.broadcast → BroadcastProducer`. The broadcast to fill.
+  - `.announce(route=None)`, `.unannounce()`. Advertise or retract its exact path; both raise `Closed` once the broadcast closed.
 - **`OriginRequests`**. Async source of broadcasts requested by consumers.
-  - `await .requested_broadcast() → BroadcastRequest`. Call `.prepare(mint_epoch())`, fill its `.broadcast`, then `.publish()` to serve it under a new epoch, or `.reject(code)` to fail the requester.
+  - `await .requested_broadcast() → BroadcastRequest`. Call `.prepare(mint_epoch())`, fill its `.broadcast`, then `.publish() → Publication` to serve it under a new epoch, or `.reject(code)` to fail the requester.
   - Async iterator yielding `BroadcastRequest`
 - **`OriginConsumer`**. Discover broadcasts.
   - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator of `AnnounceEvent`: `AnnounceEventStart`, `AnnounceEventUpdate`, `AnnounceEventEnd`, or `AnnounceEventRestart`, each carrying an `Announce` whose `.route.epoch` names the publisher run; on a restart, request the path again); `filter` is a pattern relative to the literal prefix, while each `Announce.prefix` stays origin-relative and `.captures` reports wildcard matches

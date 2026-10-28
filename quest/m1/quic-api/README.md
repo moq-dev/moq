@@ -38,7 +38,7 @@ Decided with the maintainer:
   it, since CONNECT and authorization need the finished handshake.
 - 2026-10-25: moq-quic owns every wait as a `poll_*` on `&kio::Waiter`
   ([waits](/quest/m1/quic-api/waits.md)), and moq-net's `transport::poll`
-  traits join the epic ([net-poll](/quest/m1/quic-api/net-poll.md)) so all
+  traits join the epic so all
   three layers share the `&self, &kio::Waiter` shape.
 
 This README's own work, after the children: read the three layers' rustdoc
@@ -52,7 +52,6 @@ side by side and fix any name or signature that still differs, and check
 - [Config](/quest/m1/quic-api/config.md) - plain config structs, `Limits` as the one spelling, one endpoint constructor and `connect` that own the socket, v1-only `Version`, a local-close event
 - [Waits](/quest/m1/quic-api/waits.md) - moq-quic owns every wait as a `poll_*` on `&kio::Waiter`, deleting `StreamEvent` and the drivers' and qmux's waiter tables
 - [Poll forms](/quest/m1/quic-api/poll.md) - both drivers' waits poll as `&self, &kio::Waiter` forwards to moq-quic, the async forms wrap them, and `send::Finished` is a future
-- [moq-net polls on kio waiters](/quest/m1/quic-api/net-poll.md) - moq-net's `transport::poll` traits take `&kio::Waiter`, `Session` ops take `&self`, and `Session` drops `Clone`
 - [Native WebTransport](/quest/m1/quic-api/native-web.md) - `quic::web` in both crates implements moq-net's poll traits, deleting the QUIC paths of the async-to-poll adapter
 
 ## Related

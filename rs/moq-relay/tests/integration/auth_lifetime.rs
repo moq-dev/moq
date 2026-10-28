@@ -455,7 +455,7 @@ async fn forwards_the_setup_token() {
 		let encoded = [&[0x03, 0x00][..], &value].concat();
 		let params = [&[0x03, encoded.len() as u8][..], &encoded].concat();
 		let setup = [&[0xaf, 0x00][..], &(params.len() as u16).to_be_bytes(), &params].concat();
-		let mut session = if websocket {
+		let session = if websocket {
 			qmux::ws::Client::new()
 				.with_protocol("moqt-18", &[qmux::Version::QMux01])
 				.connect(&format!("ws://127.0.0.1:{port}/room?source=setup"))
@@ -1914,7 +1914,7 @@ async fn websocket_refusal_is_in_band() {
 		let script = Script::new(grant(Duration::from_secs(3600)));
 		script.on_connect(answer);
 		let (port, relay) = spawn_ws_relay(build_auth(script.spawn().await)).await;
-		let mut session = qmux::ws::Client::new()
+		let session = qmux::ws::Client::new()
 			.with_protocol("moq-lite-06", &[qmux::Version::QMux01])
 			.connect(&format!("ws://127.0.0.1:{port}/room"))
 			.await
