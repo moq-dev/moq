@@ -630,7 +630,8 @@ impl MoqPublication {
 	/// Retract the advertisement, if any, keeping the filled tracks alive.
 	///
 	/// Local consumers and peers alike stop discovering and requesting it;
-	/// tracks already in flight carry on. Announcing again brings it back.
+	/// tracks already in flight carry on. Announcing again brings it back. Errors with
+	/// `Closed` once the broadcast closed.
 	pub fn unannounce(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		self.broadcast.with_state(|_| {
