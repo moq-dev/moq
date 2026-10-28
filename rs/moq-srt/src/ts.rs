@@ -51,17 +51,20 @@ pub struct Publisher {
 }
 
 enum Importer {
-	One {
-		instance: Box<Instance>,
-		/// What the next instance publishes with when the source's clock steps.
-		origin: origin::Producer,
-		path: String,
-		config: moq_mux::catalog::Config,
-		program: Option<u16>,
-	},
+	One(Box<One>),
 	/// Each program's broadcast is created once the first PAT names it, and announced once its PMT
 	/// declares its tracks.
 	All(Box<ts::Programs>),
+}
+
+/// One program's broadcast, and what the next instance publishes with when the source's
+/// clock steps.
+struct One {
+	instance: Instance,
+	origin: origin::Producer,
+	path: String,
+	config: moq_mux::catalog::Config,
+	program: Option<u16>,
 }
 
 /// One program's broadcast, under one epoch.
@@ -141,13 +144,13 @@ impl Publisher {
 				};
 				let (instance, epoch) = Instance::publish(origin, path, config.clone(), program)?;
 				tracing::info!(%path, ?program, %epoch, "publishing ingest broadcast");
-				Importer::One {
-					instance: Box::new(instance),
+				Importer::One(Box::new(One {
+					instance,
 					origin: origin.clone(),
 					path: path.to_string(),
 					config,
 					program,
-				}
+				}))
 			}
 		};
 
@@ -167,13 +170,14 @@ impl Publisher {
 	/// per-stream counters.
 	pub fn feed(&mut self, data: Bytes) -> Result<()> {
 		match &mut self.importer {
-			Importer::One {
-				instance,
-				origin,
-				path,
-				config,
-				program,
-			} => {
+			Importer::One(one) => {
+				let One {
+					instance,
+					origin,
+					path,
+					config,
+					program,
+				} = &mut **one;
 				let mut data = data;
 				while let Err(err) = instance.import.decode(&data) {
 					let restart = err.downcast::<ts::Restart>().map_err(moq_mux::Error::from)?;
@@ -184,7 +188,7 @@ impl Publisher {
 					let (next, epoch) = Instance::publish(origin, path, config.clone(), *program)?;
 					tracing::warn!(%path, step = %restart.step, %epoch, "the source's clock stepped; republishing");
 					// The finished broadcast ends with its publication.
-					**instance = next;
+					*instance = next;
 					self.log = ts::stats::Log::default();
 					data = restart.remainder;
 				}
@@ -201,7 +205,7 @@ impl Publisher {
 
 	fn stats(&self) -> ts::stats::Snapshot {
 		match &self.importer {
-			Importer::One { instance, .. } => instance.import.stats(),
+			Importer::One(one) => one.instance.import.stats(),
 			Importer::All(programs) => programs.stats(),
 		}
 	}
@@ -210,9 +214,9 @@ impl Publisher {
 	/// finished broadcast up for `linger`.
 	pub fn finish(mut self, linger: Duration) -> Result<moq_mux::Linger<Self>> {
 		let finished = match &mut self.importer {
-			Importer::One { instance, .. } => {
-				instance.finish()?;
-				vec![instance.broadcast.broadcast().clone()]
+			Importer::One(one) => {
+				one.instance.finish()?;
+				vec![one.instance.broadcast.broadcast().clone()]
 			}
 			Importer::All(programs) => programs.finish().map_err(moq_mux::Error::from)?,
 		};
@@ -227,8 +231,8 @@ impl Publisher {
 	/// Consumes the publisher and closes the broadcasts.
 	pub fn abort(self, err: moq_net::Error) {
 		match self.importer {
-			Importer::One { instance, .. } => {
-				let Instance { import, broadcast, .. } = *instance;
+			Importer::One(one) => {
+				let Instance { import, broadcast, .. } = one.instance;
 				import.abort(err);
 				broadcast.close();
 			}

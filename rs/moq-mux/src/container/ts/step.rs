@@ -21,7 +21,7 @@ use mpeg2ts::ts::TsPacket;
 
 use super::demux::Demux;
 use super::health::{Delta, PTS_LIMIT};
-use super::import::{Framer, Payload, adaptation_valid, discontinuity_indicator, payload, pcr};
+use super::import::{Framer, Payload, STAGING_BYTES_MAX, adaptation_valid, discontinuity_indicator, payload, pcr};
 use super::mux_rate::PCR_WRAP;
 use super::passthrough::PCR_HZ;
 use super::psi::PesStart;
@@ -30,8 +30,6 @@ use super::psi::PesStart;
 const LEAP: Duration = Duration::from_secs(10);
 const PTS_HZ: u64 = 90_000;
 const PTS_WRAP: u64 = 1 << 33;
-/// The most input held while a step is judged: the staging bound of the import it ends.
-const HOLD_MAX: u64 = moq_net::group::MAX_CACHE_BYTES / 2;
 
 /// The source's clock stepped onto another timeline, so the [`Import`](super::Import) ended its
 /// instance there.
@@ -50,6 +48,7 @@ pub struct Restart {
 
 /// How the source's clock stepped, ending an import's instance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Step {
 	/// Back by `by`, after a `discontinuity_indicator` when `flagged`.
 	Rewind {
@@ -204,6 +203,8 @@ struct Ahead {
 	heard: HashSet<u16>,
 	/// How far back the first PID to step back went, which a flagged rewind reports.
 	back: Option<Duration>,
+	/// The first PCR read since, which times how long the silent streams are waited for.
+	since: Option<u64>,
 	/// The next input offset to read, and the framer's state there.
 	scan: u64,
 	framer: Framer,
@@ -320,6 +321,7 @@ impl Steps {
 			pids,
 			heard: HashSet::new(),
 			back: None,
+			since: None,
 			scan,
 			framer,
 			confirmed: None,
@@ -349,7 +351,8 @@ impl Ahead {
 	) -> Option<Result<Step, u64>> {
 		let last_pcr = clock.and_then(|(_, last)| last);
 		loop {
-			if self.scan - self.at > HOLD_MAX {
+			// Held no longer than the import stages bytes awaiting a timestamp.
+			if self.scan - self.at > STAGING_BYTES_MAX as u64 {
 				return Some(Err(self.scan));
 			}
 			let (at, pkt) = demux.peek(&mut self.scan, &mut self.framer)?;
@@ -365,6 +368,17 @@ impl Ahead {
 					return Some(Err(end));
 				}
 				self.pcr = false;
+			}
+			// A cadenced stream speaks within TR 101 290's PTS interval, so one still silent
+			// that long after the step dropped out with the old source: those that spoke decide.
+			if let Some(value) = marks.pcr {
+				let since = *self.since.get_or_insert(value);
+				if let Delta::Forward(elapsed) = Delta::between(since, value, PCR_WRAP)
+					&& elapsed >= PTS_LIMIT
+					&& !self.pcr
+				{
+					return Some(self.verdict(end, !self.heard.is_empty()));
+				}
 			}
 			// Every PID with a timestamp to step from has its say, once: a sparse one too, which
 			// only the cadenced ones are waited for.
@@ -387,13 +401,20 @@ impl Ahead {
 			}
 
 			if !self.pcr && self.pids.is_empty() {
-				return Some(match self.stepped {
-					Some((Way::Back, by)) => Ok(Step::Rewind { by, flagged: false }),
-					Some((Way::Leap, by)) => Ok(Step::Leap { by }),
-					// A flagged break no PID has stepped back from is a splice.
-					None => self.back.map(|by| Step::Rewind { by, flagged: true }).ok_or(end),
-				});
+				return Some(self.verdict(end, true));
 			}
+		}
+	}
+
+	/// The step every clock heard from agreed on, `stepped` when that is enough to end the
+	/// instance, or the offset judged through when it is not.
+	fn verdict(&self, end: u64, stepped: bool) -> Result<Step, u64> {
+		match self.stepped {
+			Some((Way::Back, by)) if stepped => Ok(Step::Rewind { by, flagged: false }),
+			Some((Way::Leap, by)) if stepped => Ok(Step::Leap { by }),
+			Some(_) => Err(end),
+			// A flagged break no PID has stepped back from is a splice.
+			None => self.back.map(|by| Step::Rewind { by, flagged: true }).ok_or(end),
 		}
 	}
 }

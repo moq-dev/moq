@@ -197,6 +197,31 @@ fn a_step_under_the_bound_carries_on() {
 	assert!(err.is_none(), "{err:?}");
 }
 
+/// A stream the new source does not carry is waited for only as long as a cadenced stream may
+/// stay silent: the clocks that stepped decide, and the instance does not stall.
+#[test]
+fn a_stream_the_new_source_lacks_is_not_waited_for() {
+	let (mut data, second) = replay(-SWITCH, |_| 0);
+	let audio = audio_pid(CLIP);
+	let without: Vec<u8> = data[second..]
+		.chunks_exact(188)
+		.filter(|pkt| pid(pkt) != audio)
+		.flatten()
+		.copied()
+		.collect();
+	data.truncate(second);
+	data.extend(&without);
+
+	let (err, rest) = feed(&data, 188 * 7);
+	let err = err.expect("the switch ends the instance");
+	let restart = err.downcast_ref::<Restart>().expect("a restart");
+	assert!(
+		matches!(restart.step, Step::Rewind { flagged: false, .. }),
+		"{restart:?}"
+	);
+	assert!(without.ends_with(&rest) && rest.len() >= first_timed(&without).len());
+}
+
 /// One clock stepping without the rest is not another source, so the import judges it as
 /// before: a PCR alone, or the streams with a stream left behind on the old timeline.
 #[test]

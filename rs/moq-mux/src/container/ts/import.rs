@@ -376,13 +376,13 @@ impl<E: catalog::Catalog> Import<E> {
 	/// now completes. The buffer is fully consumed; a trailing partial packet
 	/// (< 188 bytes) is retained for the next call.
 	///
-	/// A step of the source's clock onto another timeline ends the instance with [`Restart`]:
-	/// the program clock and every timed stream stepping together without
-	/// `discontinuity_indicator`, forward by more than 10 s or back, or the streams stepping back
-	/// after a flagged break. Until the streams have spoken, which a cadenced one does within
-	/// 0.7 s, the input after a suspected step is held rather than published, up to half a
-	/// group's bytes. Every later call repeats the [`Restart`]; [`finish`](Self::finish) ends the
-	/// instance before the step.
+	/// A step of the source's clock onto another timeline ends the instance with
+	/// [`Restart`](super::Restart): the program clock and every timed stream stepping together
+	/// without `discontinuity_indicator`, forward by more than 10 s or back, or the streams
+	/// stepping back after a flagged break. Until the streams have spoken, which a cadenced one
+	/// does within 0.7 s, the input after a suspected step is held rather than published, up to
+	/// half a group's bytes. Every later call repeats the restart; [`finish`](Self::finish) ends
+	/// the instance before the step.
 	pub fn decode(&mut self, data: &[u8]) -> anyhow::Result<()> {
 		let mut demux = std::mem::take(&mut self.demux);
 		let result = self.decode_with(&mut demux, data);
@@ -2023,7 +2023,7 @@ fn section_framed(stream_type: u8, cuei: bool) -> bool {
 }
 
 // Match the raw TS accumulator: half a MoQ group bounds one program's staged input.
-const STAGING_BYTES_MAX: usize = (moq_net::group::MAX_CACHE_BYTES / 2) as usize;
+pub(super) const STAGING_BYTES_MAX: usize = (moq_net::group::MAX_CACHE_BYTES / 2) as usize;
 const STAGING_UNITS_MAX: usize = moq_net::group::MAX_GROUP_FRAMES / 2;
 
 #[derive(Default)]
