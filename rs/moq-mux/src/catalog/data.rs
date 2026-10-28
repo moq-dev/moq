@@ -4,15 +4,14 @@ use super::{Estimator, Rendition, RenditionConfig};
 /// The config a data producer ([`Producer::json_stream`](super::Producer::json_stream) and the
 /// like) publishes as its catalog entry.
 ///
-/// Implemented for the [`json::Config`](crate::json::Config) and
-/// [`binary::Config`](crate::binary::Config) builders, which list the track in the `json` or
-/// `binary` section. Also implemented for any [`RenditionConfig`] that embeds the data config `D`
-/// ([`JsonConfig`](hang::catalog::JsonConfig) or [`BinaryConfig`](hang::catalog::BinaryConfig))
-/// through [`AsMut`], which is how an application lists a data track in its own section beside its
-/// own per-track fields; see the [`RenditionConfig`] example.
+/// Implemented for the [`json::Config`](crate::json::Config) builder, which lists the track in the
+/// `json` section. Also implemented for any [`RenditionConfig`] that embeds the data config `D`
+/// ([`JsonConfig`](hang::catalog::JsonConfig)) through [`AsMut`], which is how an application lists
+/// a data track in its own section beside its own per-track fields; see the [`RenditionConfig`]
+/// example.
 ///
-/// The producer sets the embedded config's `mode`, encodes the track with its `compression`, and
-/// owns the entry: it is written when the producer is created and removed when it drops.
+/// The producer sets the embedded config's `mode` and owns the entry: it is written when the
+/// producer is created and removed when it drops.
 pub trait IntoRendition<E: CatalogExt, D> {
 	/// The catalog entry, embedding `D`.
 	type Config: RenditionConfig<E> + AsMut<D>;
