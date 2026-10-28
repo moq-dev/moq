@@ -3809,7 +3809,10 @@ impl<E: CatalogExt> AacStream<E> {
 					"AAC format changed mid-stream, starting a new track"
 				);
 				import.finish()?;
+				let name = import.name().to_string();
+				// The name is never published again, so its HLS records end once its recorder is gone.
 				self.import = None;
+				self.timebase.retire(&name)?;
 			}
 			let import = match &mut self.import {
 				Some(import) => {
@@ -4449,7 +4452,10 @@ impl<E: CatalogExt> LegacyStream<E> {
 					"audio format changed mid-stream, starting a new track"
 				);
 				import.finish()?;
+				let name = import.name().to_string();
+				// The name is never published again, so its HLS records end once its recorder is gone.
 				self.import = None;
+				self.timebase.retire(&name)?;
 			}
 			let import = match &mut self.import {
 				Some(import) => import,
@@ -6363,6 +6369,7 @@ pub(super) mod test {
 		let mono = [mp2_frame(0xAA), mp2_frame(0xBB)].concat();
 		import.decode(&audio_pes_packet(MP2_PID, 0, 90_000, &mono)).unwrap();
 		let first = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
+		let records = catalog.hls_tracks();
 		let both = [stereo(0xCC), stereo(0xDD)].concat();
 		import.decode(&audio_pes_packet(MP2_PID, 1, 180_000, &both)).unwrap();
 		import.decode(&audio_pes_packet(MP2_PID, 2, 270_000, &both)).unwrap();
@@ -6372,6 +6379,7 @@ pub(super) mod test {
 		let (name, config) = snapshot.audio.renditions.iter().next().unwrap();
 		assert_ne!(name, &first, "the stereo frames publish under a new name");
 		assert_eq!(config.channel_count, 2);
+		assert_eq!(catalog.hls_tracks(), records, "the mono track's HLS records retire");
 		import.finish().unwrap();
 		let frames = read_audio_frames(&consumer, &catalog).await;
 		assert_eq!(frames[0].payload, stereo(0xCC), "the new track starts at the change");
@@ -6405,6 +6413,7 @@ pub(super) mod test {
 		));
 		import.decode(&mux.out).unwrap();
 		let first = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
+		let records = catalog.hls_tracks();
 
 		mux.out.clear();
 		for pts in [180_000, 270_000] {
@@ -6422,6 +6431,7 @@ pub(super) mod test {
 		let (name, config) = snapshot.audio.renditions.iter().next().unwrap();
 		assert_ne!(name, &first, "the 44.1 kHz frames publish under a new name");
 		assert_eq!(config.sample_rate, 44_100);
+		assert_eq!(catalog.hls_tracks(), records, "the 48 kHz track's HLS records retire");
 		import.finish().unwrap();
 		let frames = read_audio_frames(&consumer, &catalog).await;
 		assert_eq!(

@@ -578,6 +578,11 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		self.catalog.media(track, container, rendition, None, hls_hint)
 	}
 
+	/// Finish and forget the HLS records of `track`, a predecessor this rendition replaced.
+	pub(crate) fn retire(&self, track: &str) -> crate::Result<()> {
+		self.catalog.retire(track)
+	}
+
 	fn new(reserved: Reserved<E>, name: String) -> crate::Result<Self> {
 		Self::owned(reserved.producer(), Some(reserved), name)
 	}

@@ -330,6 +330,7 @@ mod tests {
 		let mut config = hang::catalog::VideoConfig::new("avc1.42c01e".parse::<hang::catalog::VideoCodec>().unwrap());
 		config.description = Some(bytes::Bytes::from_static(b"first"));
 		publishing.publish(&mut track, config.clone()).unwrap();
+		let records = catalog.hls_tracks();
 		track
 			.write(Frame {
 				timestamp: moq_net::Timestamp::ZERO,
@@ -373,6 +374,7 @@ mod tests {
 		publishing.publish(&mut track, config).unwrap();
 		assert_ne!(track.name(), "video");
 		assert_ne!(track.name(), second);
+		assert_eq!(catalog.hls_tracks(), records, "each predecessor's HLS records retire");
 		track.finish().unwrap();
 	}
 }

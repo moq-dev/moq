@@ -114,6 +114,7 @@ trait Rendition<R>: Send {
 		info: moq_net::track::Info,
 		hls_hint: Option<std::time::Duration>,
 	) -> crate::Result<Producer<crate::catalog::hang::Container, R>>;
+	fn retire(&self, track: &str) -> crate::Result<()>;
 }
 
 impl<E, R> Rendition<R> for crate::catalog::tracks::Rendition<E, R>
@@ -132,6 +133,10 @@ where
 		hls_hint: Option<std::time::Duration>,
 	) -> crate::Result<Producer<crate::catalog::hang::Container, R>> {
 		self.fresh(container, info, hls_hint)
+	}
+
+	fn retire(&self, track: &str) -> crate::Result<()> {
+		self.retire(track)
 	}
 
 	fn timestamp(&self, hint: Option<moq_net::Timestamp>) -> crate::Result<moq_net::Timestamp> {
@@ -287,8 +292,15 @@ impl Producer<crate::catalog::hang::Container, hang::catalog::VideoConfig> {
 		next.buffer_duration = self.buffer_duration;
 		next.set(config)?;
 		self.finish()?;
-		*self = next;
-		Ok(())
+		// The old name is never published again, so its HLS records end with it. They can only
+		// retire once its recorder is gone.
+		let old = std::mem::replace(self, next);
+		let name = old.name().to_string();
+		drop(old);
+		match &self.rendition {
+			Some(rendition) => rendition.retire(&name),
+			None => Ok(()),
+		}
 	}
 }
 
