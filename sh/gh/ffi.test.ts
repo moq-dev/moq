@@ -72,7 +72,10 @@ test("wrapper gates preserve trusted tag inputs and inspect only their publisher
 	}
 });
 
-test("privileged workflow_run jobs require a release tag before running its code", async () => {
+// The tag patterns the `release tags` ruleset protects (infra/README.md).
+const PROTECTED = /^moq-(relay|cli|boy|c|gst|ffi|dart)-v$/;
+
+test("privileged workflow_run jobs require a protected release tag before running its code", async () => {
 	for (const [file, job] of [
 		["release-go", "ffi-release"],
 		["release-kt-lib", "ffi-release"],
@@ -81,7 +84,13 @@ test("privileged workflow_run jobs require a release tag before running its code
 		["release-brew", "publish"],
 		["release-winget", "publish"],
 	]) {
-		const steps = (await read(file)).jobs[job].steps ?? [];
+		const gated = (await read(file)).jobs[job];
+		// Every accepted head_branch prefix must be one the `release tags` ruleset
+		// protects, or a pusher could create a matching tag on their own commit.
+		const prefixes = [...(gated.if ?? "").matchAll(/head_branch, '([^']+)'\)/g)].map((match) => match[1]);
+		expect([file, prefixes.length > 0]).toEqual([file, true]);
+		for (const prefix of prefixes) expect([file, prefix]).toEqual([file, expect.stringMatching(PROTECTED)]);
+		const steps = gated.steps ?? [];
 		const gate = steps.findIndex((step) => step.name === "Require a release tag at the run's commit");
 		expect([file, gate]).not.toEqual([file, -1]);
 		expect(steps[gate].env).toEqual({
