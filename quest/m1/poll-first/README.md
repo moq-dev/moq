@@ -43,6 +43,15 @@ and their alternatives:
   coloring only because its evented backend parks whole stacks. kio's `&Waiter`
   parameter is the stackless half of that idea. Sans-IO is the other: the protocol
   never does I/O and each runtime drives it.
+- **Sans-IO compared** in [moq-dev/moq#7058](https://github.com/moq-dev/moq/pull/7058),
+  on the lite subscriber's upstream SUBSCRIBE (prototype on
+  [`spike/sansio-upstream`](https://github.com/moq-dev/moq/tree/spike/sansio-upstream)).
+  moq-net already takes I/O through its transport traits and runs on any executor,
+  so sans-IO only buys a core without waiters. That core translated through rust2-ts
+  with 4 refusals, but the serve loop driving it still had 919, so translating a
+  session still waits on the model. Rules became plain `#[test]`s, while
+  interleaving bugs stay in driver tests. Compile cost and the benches were flat.
+  The cost is an effect enum per model touch (+206 lines on this path).
 - **Gate the wrappers regardless** of the build measurement, because poll-first is
   the style moq wants. kixelated/rust2's
   [semantic API hash quest](https://github.com/kixelated/rust2/blob/main/quest/m3/api-cutoff.md)
@@ -53,5 +62,4 @@ and their alternatives:
 
 - [Generated async wrappers behind a feature](/quest/m1/poll-first/async-feature.md) - each library's `async fn` wrappers are generated from its `poll_*` signatures and compile only with its `async` feature
 - [A kio macro for poll bodies](/quest/m1/poll-first/poll-macro.md) - spike a proc macro that writes a `poll_*` state machine from straight-line code with wait points
-- [Sans-IO compared](/quest/m1/poll-first/sansio-compare.md) - one moq-net protocol path as a sans-IO core, compared with kio poll
 - [Libraries spawn nothing](/quest/m1/poll-first/no-spawn.md) - web-async goes, and moq-ffi, moq-stats, moq-wasm and moq-relay's cluster and auth run as polled `kio::Tasks` children instead of spawned tasks
