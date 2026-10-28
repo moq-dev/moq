@@ -8,6 +8,13 @@
 //! samples measure the path. A duplicate needs no wire change, and repairs a loss of its
 //! original. It is never retransmitted, and a reset stream's data is never sent again, so a
 //! probe never sends past a group's expiry.
+//!
+//! An attempt that ends short of the target found the path's ceiling, and another would only
+//! spend the same duplicates finding it again. So each miss in a row doubles how long the probe
+//! sits out before retrying the target, up to a bound that finds capacity which returns within a
+//! few seconds. A miss shows within two round trips, as a round of duplicates that raised
+//! nothing, while the controller's probe lasts several rounds more before it sees the plateau
+//! itself, so an attempt stops there.
 
 use std::{ops::Bound, time::Duration};
 
@@ -19,10 +26,22 @@ use crate::{
 	transport,
 };
 
+/// How long the probe sits out after its first miss in a row, doubling with each further miss:
+/// the longest BBR3 waits between its own probes
+const BACKOFF: Duration = Duration::from_secs(3);
+/// The longest the probe sits out, which bounds how late it finds capacity that returns
+const MAX_BACKOFF: Duration = Duration::from_secs(4);
+
 /// The probe's state on a connection
 pub(super) struct BandwidthProbe {
-	/// The rate to probe up to, in bytes per second; zero turns probing off
+	/// The rate the caller asked to probe up to, in bytes per second; zero turns probing off
 	target: u64,
+	/// The attempt in progress, from its first probe packet until it reaches the target or misses
+	attempt: Option<Attempt>,
+	/// Attempts in a row that missed the target
+	misses: u32,
+	/// Until when the probe sits out after a miss
+	resume: Option<Instant>,
 	/// Holds everything sent while probing to `target`, which the controller's probing gain
 	/// alone may reach past
 	pacing: Bucket,
@@ -34,6 +53,13 @@ pub(super) struct BandwidthProbe {
 	/// A stream's reset, its stop, and an acknowledgment are all final, so a packet found with
 	/// nothing to resend never has any again, and each packet is searched past once.
 	floor: u64,
+}
+
+/// Probing toward the target since one instant
+struct Attempt {
+	since: Instant,
+	/// The bandwidth estimate then, in bytes per second
+	estimate: u64,
 }
 
 /// Whether a probe packet may be sent now
@@ -53,6 +79,9 @@ impl BandwidthProbe {
 		let mtu = u64::from(config.get_initial_mtu());
 		Self {
 			target: 0,
+			attempt: None,
+			misses: 0,
+			resume: None,
 			// One packet of credit, resized to the target on first use
 			pacing: Bucket {
 				capacity: mtu,
@@ -64,8 +93,36 @@ impl BandwidthProbe {
 		}
 	}
 
+	/// Probe up to `bytes_per_second`, retrying a changed target at once
 	pub(super) fn set_target(&mut self, bytes_per_second: u64) {
-		self.target = bytes_per_second;
+		if bytes_per_second != self.target {
+			self.target = bytes_per_second;
+			self.attempt = None;
+			self.misses = 0;
+			self.resume = None;
+		}
+	}
+
+	/// Judge the attempt in progress by `estimate`, returning whether the probe may fill the
+	/// controller's probe now
+	fn judge(&mut self, probing: bool, estimate: Option<u64>, rtt: Duration, now: Instant) -> bool {
+		let estimate = estimate.unwrap_or(0);
+		if estimate >= self.target {
+			self.attempt = None;
+			self.misses = 0;
+			self.resume = None;
+			return false;
+		}
+		if let Some(attempt) = &self.attempt {
+			let stalled = now > attempt.since + 2 * rtt && estimate <= attempt.estimate;
+			if !probing || stalled {
+				self.attempt = None;
+				self.misses = self.misses.saturating_add(1);
+				let backoff = BACKOFF.saturating_mul(2u32.saturating_pow(self.misses - 1));
+				self.resume = Some(now + backoff.min(MAX_BACKOFF));
+			}
+		}
+		probing && self.resume.is_none_or(|resume| now >= resume)
 	}
 
 	/// Count a packet of `size` bytes in flight against the target
@@ -106,12 +163,17 @@ impl Connection {
 			return Ready::Idle;
 		}
 		let metrics = self.path.congestion.metrics();
+		let probing = metrics.probe_inflight.is_some();
+		let rtt = self.path.rtt.get();
+		if !self
+			.bandwidth_probe
+			.judge(probing, metrics.bandwidth_estimate, rtt, now)
+		{
+			return Ready::Idle;
+		}
 		let Some(inflight) = metrics.probe_inflight else {
 			return Ready::Idle;
 		};
-		if metrics.bandwidth_estimate.is_some_and(|estimate| estimate >= target) {
-			return Ready::Idle;
-		}
 		if !self.find_bandwidth_probe_source() {
 			return Ready::Idle;
 		}
@@ -119,10 +181,14 @@ impl Connection {
 			return Ready::Blocked(None);
 		}
 		let mtu = self.path.current_mtu();
-		match self.bandwidth_probe.pacing.delay(target, bytes, mtu, now) {
-			Some(at) => Ready::Blocked(Some(at)),
-			None => Ready::Send,
+		if let Some(at) = self.bandwidth_probe.pacing.delay(target, bytes, mtu, now) {
+			return Ready::Blocked(Some(at));
 		}
+		let estimate = metrics.bandwidth_estimate.unwrap_or(0);
+		self.bandwidth_probe
+			.attempt
+			.get_or_insert(Attempt { since: now, estimate });
+		Ready::Send
 	}
 
 	/// Move the cursor to the next in-flight packet holding STREAM data to resend, returning
@@ -223,4 +289,94 @@ fn sources(packets: &SentPackets, floor: u64, cursor: u64) -> impl Iterator<Item
 		.range((Bound::Included(cursor), Bound::Unbounded))
 		.chain(packets.range((Bound::Included(floor), Bound::Excluded(cursor))))
 		.filter(|(_, packet)| !packet.bandwidth_probe && packet.size != 0 && !packet.stream_frames.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	const RTT: Duration = Duration::from_millis(200);
+	const TARGET: u64 = 500_000;
+	/// The path's rate, short of the target
+	const PATH: u64 = 375_000;
+	const MS: Duration = Duration::from_millis(1);
+
+	fn probe(now: Instant) -> BandwidthProbe {
+		let mut probe = BandwidthProbe::new(&TransportConfig::default(), now);
+		probe.set_target(TARGET);
+		probe
+	}
+
+	/// Begin an attempt at `now`, as the first probe packet does
+	fn attempt(probe: &mut BandwidthProbe, now: Instant, estimate: u64) {
+		assert!(probe.judge(true, Some(estimate), RTT, now), "sitting out at {now:?}");
+		probe.attempt.get_or_insert(Attempt { since: now, estimate });
+	}
+
+	/// Miss at `now` with an attempt whose round of duplicates raised nothing
+	fn stall(probe: &mut BandwidthProbe, now: Instant) -> Instant {
+		attempt(probe, now, PATH);
+		assert!(
+			probe.judge(true, Some(PATH), RTT, now + 2 * RTT),
+			"stopped before a round came back"
+		);
+		let missed = now + 2 * RTT + MS;
+		assert!(
+			!probe.judge(true, Some(PATH), RTT, missed),
+			"kept filling a stalled attempt"
+		);
+		missed
+	}
+
+	/// Each miss in a row sits out longer, up to the bound
+	#[test]
+	fn backs_off_each_miss() {
+		let mut now = Instant::now();
+		let mut probe = probe(now);
+		for backoff in [BACKOFF, MAX_BACKOFF, MAX_BACKOFF] {
+			now = stall(&mut probe, now);
+			assert!(!probe.judge(true, Some(PATH), RTT, now + backoff - MS));
+			now += backoff;
+		}
+	}
+
+	/// An attempt that raises the estimate goes on until the controller's probe ends, which misses
+	/// if it is still short of the target
+	#[test]
+	fn rising_attempt_misses_at_its_end() {
+		let now = Instant::now();
+		let mut probe = probe(now);
+		attempt(&mut probe, now, PATH);
+		let later = now + 4 * RTT;
+		assert!(probe.judge(true, Some(PATH + 1), RTT, later));
+		assert!(!probe.judge(false, Some(PATH + 1), RTT, later));
+		assert!(!probe.judge(true, Some(PATH + 1), RTT, later + BACKOFF - MS));
+		assert!(probe.judge(true, Some(PATH + 1), RTT, later + BACKOFF));
+	}
+
+	/// Reaching the target, or the caller changing it, retries the target at once
+	#[test]
+	fn reach_or_new_target_resets() {
+		let mut now = Instant::now();
+		let mut probe = probe(now);
+		now = stall(&mut probe, now);
+		now = stall(&mut probe, now + BACKOFF);
+
+		// The estimate reached the target, then aged below it
+		assert!(!probe.judge(true, Some(TARGET), RTT, now));
+		now = stall(&mut probe, now);
+		assert!(
+			probe.judge(true, Some(PATH), RTT, now + BACKOFF),
+			"the misses before still count"
+		);
+
+		now = stall(&mut probe, now + BACKOFF);
+		probe.set_target(TARGET);
+		assert!(
+			!probe.judge(true, Some(PATH), RTT, now),
+			"the same target retried at once"
+		);
+		probe.set_target(2 * TARGET);
+		assert!(probe.judge(true, Some(PATH), RTT, now));
+	}
 }

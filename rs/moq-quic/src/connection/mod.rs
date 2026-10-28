@@ -1504,9 +1504,10 @@ impl Connection {
 	/// ([`probe_inflight`](crate::congestion::ControllerMetrics::probe_inflight)) with duplicates
 	/// of STREAM data still in flight, sending no more than the target in all, so the probe
 	/// measures the path. Duplicates count against congestion control, as
-	/// [`PathStats::sent_bandwidth_probe_bytes`]. A reset stream's data is never sent again. A
-	/// controller that never probes ([`Controller::probes`]) ignores the target, and zero, the
-	/// default, never probes.
+	/// [`PathStats::sent_bandwidth_probe_bytes`]. A reset stream's data is never sent again. An
+	/// attempt that misses the target sits out a few seconds before retrying it, and a changed
+	/// target is retried at once. A controller that never probes ([`Controller::probes`])
+	/// ignores the target, and zero, the default, never probes.
 	pub fn set_probe_target(&mut self, bytes_per_second: u64) {
 		self.bandwidth_probe.set_target(bytes_per_second);
 	}
