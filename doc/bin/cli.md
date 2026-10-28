@@ -154,12 +154,6 @@ moq --connect https://relay.example.com/anon --broadcast camera.hang \
     import rtsp --connect rtsp://admin:secret@192.168.1.64/stream1
 ```
 
-`--hls` publishes [HLS segment records](/bin/hls#how-export-works) beside each
-video and audio rendition, which `export hls` needs to serve the broadcast.
-Renditions' segments line up wherever the source's keyframes share timestamps.
-The stdin formats, `hls`, `rtsp`, and `capture` take it; the other gateways build their
-own catalog and refuse it.
-
 ## Export
 
 The `fmp4`, `mkv`, `flv`, `h264`, and `h265` exports pick renditions with
@@ -366,7 +360,7 @@ over one connection:
 
 ```bash
 moq --connect https://relay.example.com/anon \
-    import --broadcast event.hang --hls rtsp --connect rtsp://camera.local/stream1 \
+    import --broadcast event.hang srt --listen 0.0.0.0:9000 \
     -- export --broadcast event.hang hls --listen 0.0.0.0:8080 \
     -- export --broadcast event.hang archive file:///recordings
 ```

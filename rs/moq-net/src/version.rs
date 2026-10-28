@@ -201,7 +201,7 @@ impl TryFrom<coding::Version> for Version {
 	}
 }
 
-impl coding::Decode<Version> for Version {
+impl<'a> coding::Decode<'a, Version> for Version {
 	fn decode(r: &mut coding::Decoder<'_>, version: Version) -> Result<Self, coding::DecodeError> {
 		coding::Version::decode(r, version).and_then(|v| v.try_into().map_err(|_| coding::DecodeError::InvalidValue))
 	}

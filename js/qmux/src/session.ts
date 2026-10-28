@@ -16,7 +16,7 @@ import {
 	type WebSocketStreamLike,
 } from "./web-socket-stream.ts";
 
-/** The QMux wire-format versions a caller can advertise. */
+/** The QMux wire-format versions a caller can advertise. @reexport */
 export type Version = WireFormat;
 
 /** Options for a new outgoing stream. `@types/web` doesn't declare `waitUntilAvailable` yet. */

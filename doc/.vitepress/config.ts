@@ -1,10 +1,30 @@
-import { defineConfig } from "vitepress";
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { type DefaultTheme, defineConfig } from "vitepress";
 import llmstxt from "vitepress-plugin-llms";
 import { syncDrafts } from "./drafts";
 
 // Generated before VitePress enumerates routes, so the pages and this sidebar
 // list stay in sync with the kramdown-rfc sources under drafts/.
 const drafts = syncDrafts();
+
+// The JS API reference under lib/js/api/, generated the same way from the
+// packages' TSDoc. TypeDoc runs in its own process, since it holds the whole
+// program in memory and needs its own TypeScript. A build always regenerates
+// it; the dev server reuses the last one until a package changes.
+const generator = fileURLToPath(new URL("./api/index.ts", import.meta.url));
+const build = process.argv.slice(2).includes("build");
+execFileSync("bun", build ? [generator] : [generator, "--cached"], { stdio: "inherit" });
+const reference = (items: DefaultTheme.SidebarItem[], parent?: string): DefaultTheme.SidebarItem[] =>
+	items
+		// A package with several entrypoints lists its main one again under itself.
+		.filter((item) => item.link !== parent)
+		.map((item) => {
+			const link = item.link?.replace(/\.md$/, "");
+			return { ...item, link, items: item.items && reference(item.items, item.link) };
+		});
+const api = reference(JSON.parse(readFileSync(new URL("../lib/js/api/typedoc-sidebar.json", import.meta.url), "utf8")));
 
 export default defineConfig({
 	title: "Media over QUIC",
@@ -205,6 +225,7 @@ export default defineConfig({
 								{ text: "@moq/clock", link: "/lib/js/clock" },
 								{ text: "@moq/json", link: "/lib/js/json" },
 								{ text: "@moq/flate", link: "/lib/js/flate" },
+								{ text: "API reference", link: "/lib/js/api/" },
 							],
 						},
 						{ text: "Swift", link: "/lib/swift/" },
@@ -217,6 +238,11 @@ export default defineConfig({
 						{ text: "Layers", link: "/lib/layers" },
 					],
 				},
+			],
+
+			"/lib/js/api/": [
+				{ text: "TypeScript", link: "/lib/js/" },
+				{ text: "API reference", link: "/lib/js/api/", items: api },
 			],
 		},
 
@@ -275,6 +301,9 @@ export default defineConfig({
 				domain: "https://doc.moq.dev",
 				// Static files are already served verbatim.
 				ignoreFiles: ["public/**"],
+				// llms.txt still indexes the API reference and each page has its .md twin,
+				// but inlining its 1.2 MB of signatures would more than double llms-full.txt.
+				ignoreFilesPerOutput: { llmsFullTxt: ["lib/js/api/**"] },
 			}),
 		],
 	},

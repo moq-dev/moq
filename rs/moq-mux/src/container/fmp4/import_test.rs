@@ -1414,11 +1414,6 @@ async fn test_msf_catalog_roundtrip() {
 	assert!(matches!(audio.container, Container::Cmaf { .. }));
 }
 
-/// A catalog publishing HLS records.
-fn hls() -> crate::catalog::Config {
-	crate::catalog::Config::default().with_hls(crate::hls::Config::default())
-}
-
 /// Subscribe to `track`'s HLS records, before the catalog may advertise them.
 async fn subscribe(consumer: &moq_net::broadcast::Consumer, track: &str) -> crate::hls::Consumer {
 	let hls = hang::catalog::Hls::new(hang::hls::default_name(track), std::time::Duration::ZERO);
@@ -1451,7 +1446,7 @@ async fn groups(records: &mut crate::hls::Consumer) -> Vec<(u64, u64)> {
 async fn import_populates_the_hls_records() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast, hls()).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 
 	let data = include_bytes!("test_data/bbb.mp4");
@@ -1812,7 +1807,7 @@ async fn segmented_source_indexes_one_group_per_record_in(passthrough: bool) {
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast, hls()).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve()).with_passthrough(passthrough);
 	fmp4.decode(&init).unwrap();
 
@@ -1867,7 +1862,7 @@ async fn records_with_skew(video_offset_us: i64, passthrough: bool) -> (Vec<(u64
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast, hls()).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve()).with_passthrough(passthrough);
 	fmp4.decode(&init).unwrap();
 
@@ -2317,7 +2312,7 @@ async fn import_session(chunks: &[Vec<u8>]) -> Imported {
 	let (init, _, _) = bbb_init();
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast, hls()).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 	fmp4.decode(&init).unwrap();
 

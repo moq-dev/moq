@@ -89,9 +89,8 @@ fn synth_flv() -> Vec<u8> {
 
 /// A rendition must never be advertised when its media producer could not be built.
 ///
-/// Publishing the media producer is fallible (with HLS records enabled it mints the track's record
-/// track, which can collide), so publishing the catalog entry first would
-/// leave consumers a rendition that is announced but has no producer behind it and is therefore
+/// Publishing the media producer is fallible (it mints the track's HLS record track, which can
+/// collide), so publishing the catalog entry first would leave consumers a rendition that is announced but has no producer behind it and is therefore
 /// never served.
 #[tokio::test(start_paused = true)]
 async fn rendition_is_not_published_when_the_media_track_fails() {
@@ -110,8 +109,7 @@ async fn rendition_is_not_published_when_the_media_track_fails() {
 	};
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let config = crate::catalog::Config::default().with_hls(crate::hls::Config::default());
-	let catalog = crate::catalog::Producer::new(&mut broadcast, config).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 
 	// Squat the rendition's HLS record track, so enrolling it (and with it building its media
 	// producer) fails. The handle must stay alive: the broadcast tracks names weakly, so
@@ -463,6 +461,80 @@ async fn import_multitrack_video_many_codecs() {
 	importer.finish().unwrap();
 
 	assert_eq!(catalog.snapshot().video.renditions.len(), 2);
+}
+
+/// A publisher that keeps changing its audio and video config replaces each track under a fresh
+/// name. A replaced track flushes its last frame and ends, and the importer retires it, so the HLS
+/// records it holds stay those of the live renditions. Dropping the importer ends and retires those.
+#[tokio::test(start_paused = true)]
+async fn config_churn_keeps_flat_state() {
+	const NALU: [u8; 9] = [0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00];
+	// AAC-LC stereo at 44.1 kHz, then at 48 kHz.
+	let ascs = [ASC, [0x11, 0x90]];
+	let avccs = [avcc_level(0x1f), avcc_level(0x1e)];
+	// One config change on both tracks, each followed by a frame.
+	let round = |round: u32| {
+		let mut out = Vec::new();
+		let config = round as usize % 2;
+		let timestamp = round * 40;
+		let video = (super::FRAME_TYPE_KEY << 4) | super::VIDEO_CODEC_AVC;
+
+		let mut vseq = vec![video, super::AVC_SEQUENCE_HEADER, 0, 0, 0];
+		vseq.extend_from_slice(&avccs[config]);
+		write_tag(&mut out, super::TAG_VIDEO, timestamp, &vseq);
+		let mut aseq = vec![super::AAC_AUDIO_TAG_HEADER, super::AAC_SEQUENCE_HEADER];
+		aseq.extend_from_slice(&ascs[config]);
+		write_tag(&mut out, super::TAG_AUDIO, timestamp, &aseq);
+
+		let mut vframe = vec![video, super::AVC_NALU, 0, 0, 0];
+		vframe.extend_from_slice(&NALU);
+		write_tag(&mut out, super::TAG_VIDEO, timestamp, &vframe);
+		let aframe = [super::AAC_AUDIO_TAG_HEADER, super::AAC_RAW, 0x21, 0x00];
+		write_tag(&mut out, super::TAG_AUDIO, timestamp, &aframe);
+		out
+	};
+
+	let mut producer = moq_net::broadcast::Info::new().produce();
+	let consumer = producer.consume();
+	let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
+	let mut importer = Import::new(producer, catalog.reserve());
+	let mut first = flv_header(0x05);
+	first.extend_from_slice(&round(0));
+	importer.decode(&first).unwrap();
+	let replaced = catalog.snapshot().video.renditions.into_keys().next().unwrap();
+	let replaced = consumer
+		.track(&replaced)
+		.unwrap()
+		.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+		.await
+		.unwrap();
+
+	for n in 1..100 {
+		importer.decode(&round(n)).unwrap();
+	}
+	let snap = catalog.snapshot();
+	assert_eq!(snap.video.renditions.len(), 1);
+	assert_eq!(snap.audio.renditions.len(), 1);
+	assert_eq!(catalog.hls_tracks(), 2, "only the live renditions keep records");
+
+	let live = consumer
+		.track(snap.video.renditions.keys().next().unwrap())
+		.unwrap()
+		.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+		.await
+		.unwrap();
+	drop(importer);
+	assert_eq!(catalog.hls_tracks(), 0, "a dropped importer retires its records");
+
+	for (track, label) in [(replaced, "replaced"), (live, "dropped")] {
+		let mut track = crate::container::Consumer::new(
+			track,
+			crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+		);
+		let frame = track.read_frame().await.unwrap();
+		assert_eq!(frame.expect(label).payload.as_ref(), &NALU, "{label}");
+		assert!(track.read_frame().await.unwrap().is_none(), "the {label} track ends");
+	}
 }
 
 #[tokio::test(start_paused = true)]

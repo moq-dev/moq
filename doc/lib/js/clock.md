@@ -5,6 +5,9 @@ description: Logical time and timers with a manual clock for deterministic tests
 
 # @moq/clock
 
+[![npm](https://img.shields.io/npm/v/@moq/clock)](https://www.npmjs.com/package/@moq/clock)
+[![API](https://img.shields.io/badge/API-reference-blue)](/lib/js/api/clock)
+
 Use `@moq/clock` when a deadline and the elapsed time beside it must come from
 one clock. Its default backend reads the host's monotonic and wall clocks;
 a test installs a `Manual` clock without patching the host's timers.

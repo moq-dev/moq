@@ -78,7 +78,7 @@ export type StreamCode = number & { readonly [STREAM_CODE]: true };
  * Codes a peer sends when resetting a stream, mirroring the Rust `Stream`.
  *
  * The counterpart to {@link SessionCode}, and a disjoint space: a stream reset of 0 is
- * {@link StreamCode.Internal}, not a cancellation ({@link StreamCode.Cancel} is 1). Call
+ * `StreamCode.Internal`, not a cancellation (`StreamCode.Cancel` is 1). Call
  * `StreamCode(code)` to construct an application code in the 64+ range.
  *
  * Conditions the shared codes don't cover are assigned in moq-lite's own 48-63 range, so a
@@ -372,12 +372,12 @@ interface TransportErrorOptions {
  * means. Mirrors the Rust `From<&Error> for Stream`.
  *
  * Lossy on purpose. An error describes what went wrong here, while the registry is what the peer
- * can act on, so anything without a code of its own degrades to {@link StreamCode.Internal}
- * rather than inventing one. A {@link Session} is {@link StreamCode.Unroutable}: a stream that
+ * can act on, so anything without a code of its own degrades to {@link StreamCode | StreamCode.Internal}
+ * rather than inventing one. A {@link Session} is {@link StreamCode | StreamCode.Unroutable}: a stream that
  * can still be reset outlived the session that failed, so that was the route it was served
  * through, and forwarding the session's code would mistranslate it across disjoint registries.
  * An application code is the exception, since both registries share the 64+ range. A session
- * that failed at the transport, with no code at all, is {@link StreamCode.Unroutable} too.
+ * that failed at the transport, with no code at all, is {@link StreamCode | StreamCode.Unroutable} too.
  *
  * On an IETF stream the code has to be one the negotiated draft assigns the same meaning to,
  * so a condition it does not register degrades to INTERNAL_ERROR as well. See
@@ -418,10 +418,10 @@ export class NoStreamCredit extends Error {
 }
 
 /**
- * The {@link StreamCode.ControlTimeout} error for a control request the peer never answered.
+ * The {@link StreamCode | StreamCode.ControlTimeout} error for a control request the peer never answered.
  *
  * A control request that outlives its deadline is not late content, so it does not go out as
- * {@link StreamCode.DeliveryTimeout} the way a bare {@link TimeoutError} would. Callers that
+ * {@link StreamCode | StreamCode.DeliveryTimeout} the way a bare {@link TimeoutError} would. Callers that
  * bound a request's response build this instead.
  *
  * @internal
@@ -432,7 +432,7 @@ export function controlTimeout(cause: unknown): Stream {
 }
 
 /**
- * The {@link StreamCode.Unauthorized} error for a request the grant does not cover, naming
+ * The {@link StreamCode | StreamCode.Unauthorized} error for a request the grant does not cover, naming
  * the broadcast. Unlike {@link SessionCode.Unauthorized}, it ends only this stream.
  *
  * @internal
@@ -453,7 +453,8 @@ export function unauthorized(broadcast: string): Stream {
  * the same `instanceof` as one raised here.
  *
  * On an IETF stream a code keeps its value unless moq-lite claims that number for something
- * the draft does not, such as its own 48-63 range. Those read as {@link StreamCode.Internal} with the wire value kept in the message, since
+ * the draft does not, such as its own 48-63 range. Those read as
+ * {@link StreamCode | StreamCode.Internal} with the wire value kept in the message, since
  * {@link StreamCode} is one numeric space and cannot hold a foreign code without lying about
  * it. A code moq-lite names nothing for survives intact: nothing can misread it.
  *
@@ -492,7 +493,7 @@ const legacyWebTransportErrors = new WeakSet<object>();
  *
  * Both the WebTransport spec and the WebSocket fallback take the reset code from a
  * `WebTransportError`'s `streamErrorCode` and send 0 for anything else, a plain `Error`
- * included. Since 0 is {@link StreamCode.Internal}, cancelling with a bare `Error` tells the
+ * included. Since 0 is {@link StreamCode | StreamCode.Internal}, cancelling with a bare `Error` tells the
  * peer we failed rather than that we are done.
  *
  * The native constructor exists exactly where native WebTransport does, which is where the

@@ -18,7 +18,7 @@ async fn spawn_relay(set: impl FnOnce(&mut Config)) -> (u16, moq_relay::auth::Ad
 	let mut config = Config::default();
 	config.listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
 	set(&mut config);
-	let mut relay = Relay::load(config).await.expect("load relay");
+	let mut relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.tcp_addr().expect("TCP listener is configured").port();
 	let admissions = relay.admissions().expect("embedded auth");
 	let task = tokio::spawn(async move {

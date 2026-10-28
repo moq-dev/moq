@@ -23,8 +23,7 @@ Decided 2026-10-25 (maintainer), from the spike:
   SUBSCRIBE_END, SUBSCRIBE_DROP, and datagrams address by start. Drops name
   time spans with no group to deliver, not sequence ranges. `Relative(n)`
   stays a group count.
-- Positions stay (start, frame index), so
-  [frame offsets](/quest/m1/transport-frame-offsets.md) carry over.
+- Positions stay (start, frame index), preserving transport frame offsets.
 
 Update `drafts/draft-lcurley-moq-lite.md` (fields, the group-end rules, and the
 lite-07 changelog) and `doc/concept/moq-lite.md`, and run `just drafts check`

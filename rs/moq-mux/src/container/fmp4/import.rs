@@ -156,7 +156,7 @@ struct Passthrough<E: crate::catalog::hang::CatalogExt> {
 	/// The latest group's start, which the next group may not start below.
 	start: Option<Timestamp>,
 
-	// Reports this track's groups into its HLS records, when enabled. Passthrough writes groups by
+	// Reports this track's groups into its HLS records, unless disabled. Passthrough writes groups by
 	// hand (no `container::Producer`), so the recorder is fed directly rather than through
 	// `with_recorder`.
 	recorder: Option<crate::hls::Recorder>,
@@ -192,6 +192,25 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			group.finish()?;
 		}
 		Ok(())
+	}
+
+	/// Close the open group and finish the track.
+	fn finish(&mut self) -> crate::Result<()> {
+		self.close()?;
+		self.track.finish()?;
+		// The importer may be kept around, but its media stops holding the other tracks back.
+		self.estimator.discontinuity();
+		// Dropping the recorder stops the open HLS segment, so the track is advertised.
+		self.recorder = None;
+		Ok(())
+	}
+
+	/// [`finish`](Self::finish) the track unless it already ended, for an importer about to drop it.
+	fn end(&mut self) -> crate::Result<()> {
+		if self.track.finished().is_some() || self.track.is_closed() {
+			return Ok(());
+		}
+		self.finish()
 	}
 }
 
@@ -1362,20 +1381,16 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// No frame follows to anchor the clock, so publish the declared track set now.
 		self.initial_reservation = None;
 		for track in self.tracks.values_mut() {
-			media!(&mut track.output, producer => producer.finish()?, passthrough => {
-				passthrough.close()?;
-				passthrough.track.finish()?;
-				// The importer may be kept around, but its media stops holding the other tracks back.
-				passthrough.estimator.discontinuity();
-				// Dropping the recorder stops the open HLS segment, so the track is advertised.
-				passthrough.recorder = None;
-			});
+			media!(&mut track.output, producer => producer.finish()?, passthrough => passthrough.finish()?);
 		}
 		Ok(())
 	}
 
 	/// Abort all tracks with `err` instead of finishing, so subscribers see the real
 	/// cause rather than [`moq_net::Error::Dropped`]. Consumes the importer.
+	///
+	/// Unlike a drop, this leaves the tracks' HLS records to the catalog, whose abort fails them
+	/// rather than ending them as a complete recording.
 	pub fn abort(mut self, err: moq_net::Error) {
 		for track in std::mem::take(&mut self.text).into_values() {
 			track.producer.abort(err.clone());
@@ -1431,5 +1446,27 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			track.last_decode_time = None;
 		}
 		Ok(())
+	}
+}
+
+impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {
+	/// End each track, then retire its HLS records: every track takes a fresh name, so nothing
+	/// publishes it again, as when an HLS import replaces this init segment's importer.
+	fn drop(&mut self) {
+		for track in self.text.values_mut() {
+			if let Err(err) = track.producer.end() {
+				tracing::warn!(%err, "failed to end a dropped fMP4 text track");
+			}
+		}
+		for mut track in std::mem::take(&mut self.tracks).into_values() {
+			let (name, ended) = media!(&mut track.output,
+				producer => (producer.name().to_string(), producer.end()),
+				passthrough => (passthrough.track.name().to_string(), passthrough.end()));
+			drop(track);
+			if let Err(err) = ended {
+				tracing::warn!(%err, "failed to end a dropped fMP4 track");
+			}
+			self.catalog.retire_dropped(&name);
+		}
 	}
 }
