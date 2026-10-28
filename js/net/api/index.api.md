@@ -2,6 +2,7 @@
 
 ```ts
 import { $ZodBranded } from "zod/v4/core";
+import { Instant } from "@moq/clock";
 import { Milli } from "@moq/clock";
 import { ZodMiniBigInt } from "@zod/mini";
 import { infer } from "@zod/mini";
@@ -309,6 +310,7 @@ export namespace Error {
 
 export namespace Group {
 	export class Consumer {
+		get arrived(): Instant;
 		close(): void;
 		get closed(): Signals.GetPromise<Error | null>;
 		get done(): boolean;
@@ -329,6 +331,7 @@ export namespace Group {
 		} & Group.Frame | undefined;
 	}
 	export interface Frame {
+		arrived?: Instant;
 		payload: Uint8Array;
 		timestamp?: Time.Timestamp;
 	}

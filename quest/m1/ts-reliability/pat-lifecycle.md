@@ -21,7 +21,9 @@ The maintainer's plan, from closing
 follows a new `program.pmtPid` with a new PAT, built on the table rework
 that lays the PAT and PMT from the current table state when their slot is
 laid instead of riding queued units, so a move is one more state change
-rather than a rewrite of queued copies. That rework has not landed.
+rather than a rewrite of queued copies. That rework is its own quest,
+[tables from current state](/quest/m1/ts-reliability/psi-state.md)
+(planned 2026-10-28), so this quest keeps only the PMT move and its tests.
 
 The draft then says that `pmtPid` can change in place, and when a consumer
 rebuilding the stream moves the PMT.
@@ -34,3 +36,7 @@ old one after it, and a move while every copy is still queued goes out as
 one PAT naming the new PID. `revision_test`'s
 `a_track_recorded_on_the_pmt_pid_after_the_catalog_moves_it_takes_another`
 then pins the move instead of the PMT staying put.
+
+## Required
+
+- [Tables from current state](/quest/m1/ts-reliability/psi-state.md) - the export lays the PAT and PMT from current state, so a move is one more state change

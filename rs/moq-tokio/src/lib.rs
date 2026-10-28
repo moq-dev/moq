@@ -56,6 +56,14 @@ pub mod panic;
 pub mod quic;
 #[cfg(any(feature = "quic", feature = "tcp", feature = "websocket"))]
 mod resolve;
+#[cfg(any(
+	feature = "net",
+	feature = "driver",
+	feature = "jemalloc",
+	feature = "mdns",
+	all(feature = "watch", feature = "_certs")
+))]
+mod runtime;
 pub mod secret;
 #[cfg(feature = "_transport")]
 pub mod server;
