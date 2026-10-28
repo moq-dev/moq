@@ -21,17 +21,7 @@ net = ["dep:moq-net", "dep:web-transport-trait"]
 # the MoQ backend. Needs a crypto-provider feature.
 driver = ["dep:moq-congestion", "dep:moq-quic", "dep:pin-project-lite", "dep:rustc-hash"]
 # QUIC and WebTransport over moq-quic, for `https://`, `moqt://`, and `moql://`.
-quic = [
-    "_transport",
-    "_certs",
-    "driver",
-    "dep:http",
-    "dep:kio",
-    "dep:web-transport-proto",
-    "dep:reqwest",
-    "watch",
-    "dep:dns-lookup",
-]
+quic = ["_transport", "_certs", "driver", "dep:http", "dep:kio", "dep:web-transport-proto", "dep:reqwest", "watch", "dep:dns-lookup"]
 # Server-side certificate handling: chains loaded from disk, self-signed generation,
 # in-memory identities, and per-SNI selection. Not one to enable on its own, since
 # nothing turns it into a listener: every QUIC backend needs it for its own TLS, and
