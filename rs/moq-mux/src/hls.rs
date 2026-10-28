@@ -256,6 +256,10 @@ impl Segmenter {
 
 	/// Start a segment with group `group` at `pts`.
 	fn begin(&mut self, group: u64, pts: Timestamp) {
+		// However the segment starts, a cut it reached is spent.
+		while self.cuts.front().is_some_and(|cut| cut.as_micros() <= pts.as_micros()) {
+			self.cuts.pop_front();
+		}
 		self.open = Some(pts);
 		self.frontier = Some(pts);
 		self.cell = self.cell(pts);
@@ -266,6 +270,7 @@ impl Segmenter {
 	/// Whether a group starting at `pts` in grid cell `cell` ends the segment that started at
 	/// `start`.
 	fn boundary(&mut self, start: Timestamp, pts: Timestamp, cell: u128) -> bool {
+		// A cut declared after its segment had already started is spent.
 		while self
 			.cuts
 			.front()
@@ -273,13 +278,10 @@ impl Segmenter {
 		{
 			self.cuts.pop_front();
 		}
-		if self.cuts.front().is_some_and(|cut| cut.as_micros() <= pts.as_micros()) {
-			while self.cuts.front().is_some_and(|cut| cut.as_micros() <= pts.as_micros()) {
-				self.cuts.pop_front();
-			}
-			return true;
+		match self.cuts.front() {
+			Some(cut) if cut.as_micros() <= pts.as_micros() => true,
+			_ => !self.manual && cell > self.cell,
 		}
-		!self.manual && cell > self.cell
 	}
 
 	/// Report that the content extends to `pts`, without a frame starting there.
@@ -993,6 +995,26 @@ mod test {
 		assert_eq!(segmenter.cuts.len(), 1);
 		segmenter.frame(1, ms(1_000)).unwrap();
 		assert_eq!(drain(&mut segmenter), [(0, 0, None), (1, 1_000, None)]);
+	}
+
+	/// A segment spends the cuts it reached however it starts: on a cut, at the ceiling, or after
+	/// a skipped group.
+	#[test]
+	fn every_segment_start_spends_its_cuts() {
+		let mut segmenter = Segmenter::new(Config::default());
+		segmenter.frame(0, ms(0)).unwrap();
+		segmenter.cut(ms(1_000));
+		segmenter.frame(1, ms(1_000)).unwrap();
+		// A one-second declaration puts the ceiling at three, so each later group ends a segment there.
+		for group in 2..100u64 {
+			let pts = ms(1_000 + (group - 1) * 3_000);
+			segmenter.cut(pts);
+			segmenter.frame(group, pts).unwrap();
+			assert!(segmenter.cuts.is_empty(), "group {group}");
+		}
+		segmenter.cut(ms(1_000_000));
+		segmenter.frame(200, ms(1_000_000)).unwrap();
+		assert!(segmenter.cuts.is_empty(), "after a skipped group");
 	}
 
 	#[test]
