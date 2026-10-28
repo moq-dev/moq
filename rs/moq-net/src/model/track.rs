@@ -602,6 +602,15 @@ impl Slot {
 		}
 	}
 
+	/// Whether nothing this slot promised a reader is still in flight: the copy serving its
+	/// end finished, even one a transport bound cut short, or no copy is left serving it. An
+	/// aborted copy delivers nothing more, so a live group cut or evicted under a fetched
+	/// head is judged by the head.
+	fn is_settled(&self) -> bool {
+		let group = self.serving();
+		group.is_aborted() || group.is_settled()
+	}
+
 	/// Every copy this slot holds, the live group first.
 	fn copies(&self) -> impl Iterator<Item = &group::Handle> {
 		std::iter::once(&self.group).chain(self.head.as_deref())
@@ -2434,14 +2443,14 @@ impl TrackState {
 	}
 
 	/// Whether the declared end is reached, the pending tail owes nothing below it, and
-	/// every cached copy below it finished, even one a transport bound cut short, so
-	/// nothing the end promised is still in flight.
+	/// every cached slot below it settled ([`Slot::is_settled`]), so nothing the end
+	/// promised is still in flight.
 	fn is_settled(&self) -> bool {
 		let Some(fin) = self.final_sequence() else {
 			return false;
 		};
 		let reached = self.sealed || self.reaches(fin);
-		reached && !self.owes(fin) && self.lookup.range(..fin).all(|(_, slot)| slot.group.is_settled())
+		reached && !self.owes(fin) && self.lookup.range(..fin).all(|(_, slot)| slot.is_settled())
 	}
 
 	/// Record that the end settled before a write that could reopen it: an abort, a late
@@ -2608,15 +2617,19 @@ impl TrackState {
 			return Poll::Ready(Ok(()));
 		}
 		if self.is_complete() {
-			// An abort after the end settled keeps the clean end; until then a group below it
-			// may still abort, which would cut the track off, so wait for each to finish. One
-			// that aborts leaves the outcome to the track's own abort or drop.
+			// An abort after the end settled keeps the clean end; until then the track's abort
+			// would end a group below it still in flight, cutting the track off, so wait for
+			// each slot to settle ([`Slot::is_settled`]): its serving copy finishes or aborts.
 			if self.abort.is_none()
 				&& let Some(fin) = self.final_sequence()
 			{
-				for (_, slot) in self.lookup.range(..fin) {
-					// One poll, so a group finishing meanwhile is seen rather than slept on.
-					if !matches!(slot.group.poll_closed(waiter), Poll::Ready(Ok(()))) {
+				for (_, slot) in self.lookup.range(..fin).filter(|(_, slot)| !slot.is_settled()) {
+					// Watch every copy, since a serving head that aborts hands the slot back to
+					// the live group, then judge again so a copy closing meanwhile is seen.
+					for group in slot.copies() {
+						let _ = group.poll_closed(waiter);
+					}
+					if !slot.is_settled() {
 						return Poll::Pending;
 					}
 				}
@@ -13941,6 +13954,37 @@ mod test {
 		assert!(matches!(res, Err(Error::Timeout)));
 	}
 
+	/// A group aborted below the declared end, whether the publisher cut it or it was
+	/// cancelled, has nothing left in flight, so the end settles over it rather than waiting
+	/// for the slot to expire, and a later abort still ends clean.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_aborted_group_below_the_end_lets_it_settle() {
+		let waiter = kio::Waiter::noop();
+		for (err, expected) in [(Error::App(5), &[0, 1][..]), (Error::Cancel, &[1][..])] {
+			let mut producer = track_producer("test", Info::timed());
+			let mut consumer = producer.subscribe(replay());
+			let mut aborted = producer.append_group().unwrap();
+			aborted.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
+			producer.append_group().unwrap().finish().unwrap();
+			producer.finish_at(Position::group(2)).unwrap();
+			assert!(producer.poll_closed(&waiter).is_pending(), "group 0 is still written");
+
+			aborted.abort(err.clone()).unwrap();
+			assert!(matches!(producer.poll_closed(&waiter), Poll::Ready(Ok(()))), "{err:?}");
+			// A cut is still handed out; a cancelled group stays a hole.
+			let sequences: Vec<u64> = expected.iter().map(|_| consumer.assert_group().sequence).collect();
+			assert_eq!(sequences, expected, "{err:?}");
+
+			producer.clone().abort(Error::Timeout).unwrap();
+			assert!(matches!(producer.poll_closed(&waiter), Poll::Ready(Ok(()))), "{err:?}");
+			assert!(
+				matches!(consumer.recv_group().now_or_never(), Some(Ok(None))),
+				"{err:?}"
+			);
+		}
+	}
+
 	/// A local session closing is a dead route to the origin, not finished content, so a
 	/// replacement route can take over where it left off.
 	#[test]
@@ -16095,6 +16139,85 @@ mod test {
 		head.finish().unwrap();
 		assert_eq!(fetch.await.unwrap().index(), 0);
 		(live, head)
+	}
+
+	/// A live group cut or evicted under a fetched head that serves it to its end settles the
+	/// declared end once the head finishes, and a later abort keeps that clean end, whether
+	/// `closed()` saw it first or only the abort did.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn an_aborted_live_copy_settles_by_its_fetched_head() {
+		use std::sync::atomic::{AtomicBool, Ordering};
+
+		for err in [Error::Cancel, Error::Evicted] {
+			for polled in [false, true] {
+				let mut producer = track_producer("test", Info::timed());
+				let dynamic = producer.requests();
+				let consumer = producer.consume();
+
+				let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
+				live.start_at(1).unwrap();
+				live.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"delta"))
+					.unwrap();
+				let _fetch = consumer.fetch_group(0, None);
+				let mut head = dynamic
+					.requested_fill_group()
+					.await
+					.unwrap()
+					.accept(Info::timed())
+					.unwrap();
+				for payload in [&b"snapshot"[..], b"delta"] {
+					head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(payload))
+						.unwrap();
+				}
+
+				live.abort(err.clone()).unwrap();
+				producer.finish_at(Position::group(1)).unwrap();
+				let woken = Arc::new(AtomicBool::new(false));
+				let waiter = kio::Waiter::new(futures::task::waker(Arc::new(FlagWake(woken.clone()))));
+				if polled {
+					assert!(producer.poll_closed(&waiter).is_pending(), "{err:?}: the head still writes");
+				}
+				head.finish().unwrap();
+				if polled {
+					assert!(woken.load(Ordering::SeqCst), "{err:?}: the head finishing wakes the wait");
+					assert!(
+						matches!(producer.poll_closed(&waiter), Poll::Ready(Ok(()))),
+						"{err:?}"
+					);
+				}
+
+				producer.clone().abort(Error::Timeout).unwrap();
+				let noop = kio::Waiter::noop();
+				assert!(
+					matches!(producer.poll_closed(&noop), Poll::Ready(Ok(()))),
+					"{err:?} polled={polled}"
+				);
+				assert!(
+					matches!(consumer.poll_complete(&noop), Poll::Ready(Ok(()))),
+					"{err:?} polled={polled}"
+				);
+			}
+		}
+	}
+
+	/// A finished fetched head serves its group to the end, so the declared end settles while
+	/// the live copy beside it is still written, and that copy aborting later keeps it clean.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_finished_head_settles_the_end_over_an_open_live_copy() {
+		let mut producer = track_producer("test", Info::timed());
+		let consumer = producer.consume();
+		let noop = kio::Waiter::noop();
+		let (live, _head) = live_group_with_head(&producer).await;
+
+		producer.finish_at(Position::group(1)).unwrap();
+		assert!(matches!(producer.poll_closed(&noop), Poll::Ready(Ok(()))));
+
+		live.abort(Error::Cancel).unwrap();
+		producer.clone().abort(Error::Timeout).unwrap();
+		assert!(matches!(producer.poll_closed(&noop), Poll::Ready(Ok(()))));
+		assert!(matches!(consumer.poll_complete(&noop), Poll::Ready(Ok(()))));
 	}
 
 	/// A fetched head still writing holds the largest stream open after the live copy
