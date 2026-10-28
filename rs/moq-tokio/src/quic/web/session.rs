@@ -150,7 +150,7 @@ impl Session {
 
 		// Run a background task to read capsules from the CONNECT recv stream.
 		let conn2 = this.conn.clone();
-		tokio::spawn(Self::run_recv(conn2, connect.recv, close));
+		crate::runtime::spawn(Self::run_recv(conn2, connect.recv, close));
 
 		this
 	}
@@ -227,20 +227,23 @@ impl Session {
 		conn: crate::quic::driver::connection::Connection,
 		request: impl Into<ConnectRequest>,
 	) -> Result<Session, ClientError> {
-		let request = request.into();
+		crate::runtime::scope(async move {
+			let request = request.into();
 
-		// Perform the H3 handshake by sending/receiving SETTINGS frames.
-		let settings = Settings::connect(&conn).await?;
+			// Perform the H3 handshake by sending/receiving SETTINGS frames.
+			let settings = Settings::connect(&conn).await?;
 
-		// Send the HTTP/3 CONNECT request.
-		let connect = Connected::open(&conn, request).await?;
+			// Send the HTTP/3 CONNECT request.
+			let connect = Connected::open(&conn, request).await?;
 
-		// Return the resulting session with a reference to the control/connect streams.
-		// If either stream is closed, then the session will be closed, so we need to keep them
-		// around.
-		let session = Session::new(conn, settings, connect);
+			// Return the resulting session with a reference to the control/connect streams.
+			// If either stream is closed, then the session will be closed, so we need to keep them
+			// around.
+			let session = Session::new(conn, settings, connect);
 
-		Ok(session)
+			Ok(session)
+		})
+		.await
 	}
 
 	/// Accept a new unidirectional stream. See [`crate::quic::driver::Connection::accept_uni`].
@@ -454,7 +457,7 @@ impl Session {
 				// control and QPACK streams before the capsule is delivered, which a
 				// browser treats as a connection error, losing the code and reason.
 				let session = self.clone();
-				tokio::spawn(async move {
+				crate::runtime::spawn(async move {
 					session.close_with_capsule(send, capsule, code, timeout).await;
 				});
 			}

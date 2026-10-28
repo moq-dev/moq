@@ -11,12 +11,12 @@ use super::hang::{Catalog, CatalogExt};
 /// removal on drop, and optional jitter/bitrate detection. [`VideoConfig`](hang::catalog::VideoConfig)
 /// and [`AudioConfig`](hang::catalog::AudioConfig) implement it for every extension; a custom
 /// config implements it for the one [`CatalogExt`] that holds it. Publish a media track under it
-/// with [`Reserved::track`], or a data track with [`Producer::binary_stream`] and the like when it
+/// with [`Reserved::track`], or a data track with [`Producer::json_stream`] and the like when it
 /// embeds a data config (see [`IntoRendition`](super::IntoRendition)):
 ///
 /// ```
 /// # use std::collections::BTreeMap;
-/// # use hang::catalog::{BinaryConfig, Mode};
+/// # use hang::catalog::{JsonConfig, Mode};
 /// # use moq_mux::catalog::{Estimate, RenditionConfig};
 /// # use moq_mux::catalog::hang::{Catalog, CatalogExt};
 /// # use serde::{Deserialize, Serialize};
@@ -29,12 +29,12 @@ use super::hang::{Catalog, CatalogExt};
 ///
 /// #[derive(Serialize, Deserialize, Clone)]
 /// struct Mavlink {
-///     config: BinaryConfig,
+///     config: JsonConfig,
 ///     sysid: u8,
 /// }
 ///
-/// impl AsMut<BinaryConfig> for Mavlink {
-///     fn as_mut(&mut self) -> &mut BinaryConfig {
+/// impl AsMut<JsonConfig> for Mavlink {
+///     fn as_mut(&mut self) -> &mut JsonConfig {
 ///         &mut self.config
 ///     }
 /// }
@@ -71,12 +71,12 @@ use super::hang::{Catalog, CatalogExt};
 /// #     broadcast: &mut moq_net::broadcast::Producer,
 /// #     catalog: &moq_mux::catalog::Producer<Ext>,
 /// # ) -> moq_mux::Result<()> {
-/// let info = moq_net::track::Info::default();
+/// let info = moq_net::track::Info::default().with_compress(true);
 /// let track = broadcast.create_track("telemetry", info)?;
 /// // The producer fixes the mode, so the one passed here is only a placeholder.
-/// let entry = Mavlink { config: BinaryConfig::new(Mode::Stream), sysid: 1 };
-/// let mut telemetry = catalog.binary_stream(track, entry)?;
-/// telemetry.append(&b"\xfd..."[..])?;
+/// let entry = Mavlink { config: JsonConfig::new(Mode::Stream), sysid: 1 };
+/// let mut telemetry = catalog.json_stream::<serde_json::Value>(track, entry)?;
+/// telemetry.append(&serde_json::json!({ "heartbeat": 1 }))?;
 /// # Ok(())
 /// # }
 /// ```

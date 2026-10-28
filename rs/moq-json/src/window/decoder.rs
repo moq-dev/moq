@@ -10,21 +10,12 @@ use super::op::{Header, Op};
 use crate::{Error, Result};
 
 /// Configuration for a [`Decoder`], and so for the [`Consumer`](super::Consumer) wrapping one.
+///
+/// Empty for now. Build from [`Default`]; the struct is `#[non_exhaustive]`, so new options stay
+/// additive.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
-pub struct ConsumerConfig {
-	/// Read frames written with
-	/// [`ProducerConfig::compression`](super::ProducerConfig::compression) on.
-	pub compression: bool,
-}
-
-impl ConsumerConfig {
-	/// Set [`compression`](Self::compression) (a builder, since the struct is `#[non_exhaustive]`).
-	pub fn with_compression(mut self, compression: bool) -> Self {
-		self.compression = compression;
-		self
-	}
-}
+pub struct ConsumerConfig {}
 
 /// One change to the window, as the consumer sees it.
 ///
@@ -63,19 +54,13 @@ pub struct Group<'a, T> {
 
 /// Group-local decoding state used by both [`Group`] and [`Consumer`](super::Consumer).
 pub(super) struct Codec {
-	/// The group's DEFLATE decoder, `Some` while reading compressed frames.
-	flate: Option<moq_flate::Decoder>,
-
 	/// Whether the required frame-zero header has been decoded.
 	positioned: bool,
 }
 
 impl Codec {
 	pub(super) fn new() -> Self {
-		Self {
-			flate: None,
-			positioned: false,
-		}
+		Self { positioned: false }
 	}
 }
 
@@ -87,10 +72,8 @@ impl Codec {
 ///
 /// Group rolls are invisible here on purpose. A header restates the window, and this decoder emits
 /// only what is new, so a reader sees one continuous stream of edits no matter how often the
-/// publisher rolled for compression's sake.
+/// publisher rolled.
 pub struct Decoder<T> {
-	config: ConsumerConfig,
-
 	/// Absolute index of the window's front, once a group header has positioned us.
 	front: u64,
 
@@ -110,9 +93,8 @@ pub struct Decoder<T> {
 
 impl<T> Decoder<T> {
 	/// Create a decoder that has not yet been positioned by a group header.
-	pub fn new(config: ConsumerConfig) -> Self {
+	pub fn new(_config: ConsumerConfig) -> Self {
 		Self {
-			config,
 			front: 0,
 			len: 0,
 			delivered: None,
@@ -158,12 +140,7 @@ impl<T> Decoder<T> {
 
 impl<T: DeserializeOwned> Decoder<T> {
 	/// Decode one frame, queueing the events it implies.
-	pub(super) fn decode(&mut self, group: &mut Codec, payload: &[u8]) -> Result<()> {
-		let inflated = match self.config.compression {
-			true => Some(group.flate.get_or_insert_with(moq_flate::Decoder::new).frame(payload)?),
-			false => None,
-		};
-		let bytes = inflated.as_deref().unwrap_or(payload);
+	pub(super) fn decode(&mut self, group: &mut Codec, bytes: &[u8]) -> Result<()> {
 		crate::strict::check(bytes, &self.check)?;
 
 		if !group.positioned {

@@ -18,7 +18,6 @@ default-members = [
     "rs/moq-e2ee",
     # "rs/moq-ffi",   # requires Python/maturin
     # "rs/moq-gst",   # requires GStreamer
-    "rs/moq-flate",
     "rs/moq-hls",
     "rs/moq-ice",
     "rs/moq-json",
@@ -142,7 +141,6 @@ moq-auth = { version = "0.2.1", path = "rs/moq-auth" }
 moq-clock = { version = "0.11.0", path = "rs/moq-clock" }
 moq-clock-macros = { version = "0.1.0", path = "rs/moq-clock/macros" }
 moq-congestion = { version = "0.1.0", path = "rs/moq-congestion" }
-moq-flate = { version = "0.2.0", path = "rs/moq-flate" }
 moq-hls = { version = "0.5.11", path = "rs/moq-hls", default-features = false }
 moq-ice = { version = "0.1.0", path = "rs/moq-ice" }
 moq-json = { version = "0.5.8", path = "rs/moq-json" }
