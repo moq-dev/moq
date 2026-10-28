@@ -120,11 +120,13 @@ Opaque bytes go on a plain `TrackProducer`.
 ```go
 import moqjson "moq.dev/moq/json"
 
-broadcast, _ := client.CreateBroadcast("room")
+publication, _ := client.CreateBroadcast("room")
+broadcast := publication.Broadcast()
 // JSON is small and repetitive, so compress the track on the wire.
 track, _ := broadcast.PublishTrack("status", &moq.TrackInfo{Compress: true})
 status, _ := moqjson.NewSnapshotProducer(broadcast, track, moqjson.SnapshotOptions{})
 _ = status.Update(map[string]any{"viewers": 42}, nil)
+_ = publication.Announce(moq.AnnounceRoute{})
 ```
 
 Snapshot and window producers take `SnapshotOptions` or `WindowOptions`; the stream producer and

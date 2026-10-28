@@ -3933,6 +3933,57 @@ mod test {
 		}
 	}
 
+	/// A group handed out from a replaced copy, then moved to the serving copy once the
+	/// replaced route gave it up, reads on to its last frame after that copy is let go,
+	/// in either read order.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_moved_group_outlives_the_replaced_copy_it_was_handed_out_from() {
+		for ordered in [false, true] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&logical, HOUR);
+			let b = copy();
+			let dynamic = b.requests();
+			routes.serve(b.consume());
+
+			// The serving route has nothing yet, so group 8 comes from the replaced one.
+			let mut open = a.create_group(group::Info { sequence: 8 }).unwrap();
+			open.write_frame(ts(8), b"a".as_ref()).unwrap();
+			let res = match ordered {
+				true => sub.poll_next_group(&kio::Waiter::noop()),
+				false => sub.poll_recv_group(&kio::Waiter::noop()),
+			};
+			let Poll::Ready(Ok(Some(mut reading))) = res else {
+				panic!("expected group 8");
+			};
+			assert_eq!(reading.sequence, 8);
+			assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+
+			// The replaced route gives it up, so the rest is fetched from the serving route.
+			open.abort(Error::Stream(StreamError::DeliveryTimeout)).unwrap();
+			assert!(reading.read_frame().now_or_never().is_none());
+			let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
+			assert_eq!((request.sequence(), request.frame_start()), (8, 1));
+			let mut rest = request.accept(None).unwrap();
+			assert!(reading.read_frame().now_or_never().is_none());
+
+			// The serving copy's first group bounds the replaced one, which is let go.
+			write(&b, 9);
+			assert_eq!(drain(&mut sub, ordered), [9]);
+			assert_eq!(copies(&routes), 1, "ordered={ordered}");
+
+			rest.write_frame(ts(9), b"b".as_ref()).unwrap();
+			rest.write_frame(ts(10), b"c".as_ref()).unwrap();
+			rest.finish().unwrap();
+			assert_eq!(read(&mut reading), Some(b"b".to_vec()), "ordered={ordered}");
+			assert_eq!(read(&mut reading), Some(b"c".to_vec()));
+			assert_eq!(read(&mut reading), None);
+		}
+	}
+
 	/// A group the new copy replays, already handed out, does not bound the replaced copy:
 	/// the old route's next group still arrives.
 	#[test]

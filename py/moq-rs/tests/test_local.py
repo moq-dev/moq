@@ -22,9 +22,9 @@ async def until_wanted(demand: moq.TrackDemand, wanted: bool = True) -> None:
 
 
 def create_announced(origin: moq.OriginProducer, path: str) -> moq.BroadcastProducer:
-    broadcast = origin.create_broadcast(path)
-    broadcast.announce()
-    return broadcast
+    publication = origin.create_broadcast(path)
+    publication.announce()
+    return publication.broadcast
 
 
 async def routes(announced: moq.AnnounceConsumer):
@@ -384,25 +384,25 @@ async def test_announced_epoch_restarts():
     origin = moq.OriginProducer()
     consumer = origin.consume()
     announced = consumer.announced()
-    broadcast = origin.create_broadcast("epoch")
+    publication = origin.create_broadcast("epoch")
 
     first = moq.mint_epoch()
-    broadcast.announce(moq.AnnounceRoute(epoch=first))
+    publication.announce(moq.AnnounceRoute(epoch=first))
     start = await next_route(announced)
     assert isinstance(start, moq.AnnounceEventStart)
     assert start.announce.route.epoch == first
 
     second = moq.mint_epoch()
-    broadcast.announce(moq.AnnounceRoute(epoch=second))
+    publication.announce(moq.AnnounceRoute(epoch=second))
     restart = await next_route(announced)
     assert isinstance(restart, moq.AnnounceEventRestart)
     assert restart.announce.route.epoch == second
 
     with pytest.raises(moq.Error.InvalidEpoch):
-        broadcast.announce(moq.AnnounceRoute(epoch=first.upper()))
+        publication.announce(moq.AnnounceRoute(epoch=first.upper()))
     with pytest.raises(moq.Error.InvalidEpoch):
-        broadcast.announce(moq.AnnounceRoute(epoch="not-an-epoch"))
-    broadcast.close()
+        publication.announce(moq.AnnounceRoute(epoch="not-an-epoch"))
+    publication.broadcast.close()
 
 
 async def test_finish_serves_until_closed():
@@ -750,6 +750,7 @@ async def test_dynamic_broadcast_request():
     prepared = request.prepare(moq.mint_epoch())
     track = prepared.broadcast.publish_track("status", moq.TrackInfo(timescale=1_000_000))
     served = prepared.publish()
+    assert served.broadcast is prepared.broadcast
     with pytest.raises(Exception):
         _ = request.path
 
@@ -763,7 +764,7 @@ async def test_dynamic_broadcast_request():
     assert frame.payload == payload
     assert frame.timestamp == timedelta(microseconds=20_000)
     track.finish()
-    served.close()
+    served.broadcast.close()
 
 
 async def test_dynamic_broadcast_request_can_reject():
@@ -1563,32 +1564,64 @@ async def test_decode_video_frame():
 
 async def test_broadcast_is_reachable_only_while_announced():
     origin = moq.OriginProducer()
-    broadcast = origin.create_broadcast("live")
-    track = broadcast.publish_track("events")
+    publication = origin.create_broadcast("live")
+    track = publication.broadcast.publish_track("events")
     consumer = origin.consume()
     with pytest.raises(Exception):
         await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)
 
-    broadcast.announce()
+    publication.announce()
     announced = consumer.announced()
     first = await next_route(announced)
     assert isinstance(first, moq.AnnounceEventStart)
     assert first.announce.prefix == "live"
 
-    broadcast.unannounce()
+    publication.unannounce()
     retracted = await next_route(announced)
     assert isinstance(retracted, moq.AnnounceEventEnd)
     assert retracted.announce.prefix == "live"
     with pytest.raises(Exception):
         await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)
 
-    broadcast.announce()
+    publication.announce()
     back = await next_route(announced)
     assert isinstance(back, moq.AnnounceEventStart)
     await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)
     announced.cancel()
     track.finish()
+    publication.broadcast.close()
+
+
+async def test_dropping_a_publication_keeps_its_route():
+    origin = moq.OriginProducer()
+    consumer = origin.consume()
+    publication = origin.create_broadcast("live")
+    broadcast = publication.broadcast
+    assert publication.broadcast is broadcast
+    publication.announce()
+    del publication
+    await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)
+
     broadcast.close()
+    with pytest.raises(moq.Error.Protocol):
+        await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)
+
+
+async def test_a_stale_publication_leaves_its_replacement_alone():
+    origin = moq.OriginProducer()
+    consumer = origin.consume()
+    stale = origin.create_broadcast("live")
+    stale.announce()
+    stale.broadcast.close()
+
+    replacement = origin.create_broadcast("live")
+    replacement.announce()
+    with pytest.raises(moq.Error.Closed):
+        stale.announce()
+    with pytest.raises(moq.Error.Closed):
+        stale.unannounce()
+    await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)
+    replacement.broadcast.close()
 
 
 async def test_announced_pattern_captures():
@@ -1626,7 +1659,7 @@ async def test_dynamic_serves_a_request_under_a_prefix():
     served = request.prepare(moq.mint_epoch()).publish()
     await asyncio.wait_for(pending, timeout=5.0)
     dynamic.cancel()
-    served.close()
+    served.broadcast.close()
 
 
 async def test_dynamic_and_json_handles_are_async_context_managers():

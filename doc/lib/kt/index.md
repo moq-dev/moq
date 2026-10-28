@@ -69,7 +69,8 @@ Moq.connect("https://relay.example.com", ClientConfig(tls = ClientTls(roots = li
 // Publish encoded frames, or raw pixels with the codec inside the binding.
 // opusInit, packet, pts, and rgba come from your encoder or capture source.
 Moq.connect("https://relay.example.com").use { moq ->
-    val broadcast = moq.createBroadcast("my-stream.hang")
+    val publication = moq.createBroadcast("my-stream.hang")
+    val broadcast = publication.broadcast()
     val audio = dev.moq.media.TrackProducer.audio(broadcast, Named(null), AudioInit(format = AudioFormat.OPUS, data = opusInit))
     audio.writeFrame(Frame(payload = packet, timestampUs = 20_000u))
     audio.cut() // audio has no keyframes, so this is what gives it groups
@@ -80,7 +81,7 @@ Moq.connect("https://relay.example.com").use { moq ->
         output = VideoEncoderOutput(codec = VideoCodec.H264, bitrate = null, gop = null, kind = autoEncoder), track = "camera"),
     )
     video.write(VideoFrame(timestampUs = pts, data = rgba))
-    broadcast.announce(AnnounceRoute(epoch = mintEpoch())) // a fresh epoch per run
+    publication.announce(AnnounceRoute(epoch = mintEpoch())) // a fresh epoch per run
     audio.finish()
     video.finish()
     broadcast.end()
@@ -97,7 +98,7 @@ The rest of the [shared feature list](/lib/#what-every-binding-can-do) maps
 one to one; the API reference has the names, and [Layers](/lib/layers)
 shows which module holds each.
 
-- **`end`, not `close`.** `broadcast.end()` ends a broadcast for good. `close()`, or leaving `use { }`, releases the handle, which ends the broadcast only once no `requests()` handle remains.
+- **`end`, not `close`.** `broadcast.end()` ends a broadcast for good. `close()`, or leaving `use { }`, releases the handle, which ends the broadcast only once no other handle to it remains, such as its publication or a `requests()` handle.
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `cut()`: after every frame, or at a segment cadence to align with video.
 - **Timeline breaks.** On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
 - **Media reads.** `dev.moq.media.TrackConsumer`, `dev.moq.audio.Consumer`, and `dev.moq.video.Consumer` return a `Read` in order: `ReadFrame`, a `ReadGap` where media was lost, or a `ReadEnd` where the publisher stopped its encoder. A gap breaks continuity. An encoder end is not stream EOF: following frames before its endpoint are the old encoder's drain; the first at or past it starts fresh.

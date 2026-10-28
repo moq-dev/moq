@@ -40,30 +40,22 @@ pub use varint::{VarInt, VarIntBoundsExceeded};
 mod bloom_token_log;
 use bloom_token_log::BloomTokenLog;
 
-mod connection;
+pub mod connection;
 pub use crate::connection::{
-	Chunk, Chunks, ClosedStream, Connection, ConnectionError, ConnectionStats, CreditStats, Datagrams, Event,
-	FinishError, FrameStats, LeaseError, Leased, PathStats, ReadError, ReadableError, RecvStream, SendDatagramError,
-	SendGroup, SendGroups, SendOptions, SendStream, ShouldTransmit, StreamEvent, Streams, UdpStats, WriteError,
-	Written,
+	Chunk, Chunks, ClosedStream, CreditStats, Datagrams, Event, FinishError, FrameStats, LeaseError, Leased, PathStats,
+	ReadError, ReadableError, RecvStream, SendDatagramError, SendGroup, SendGroups, SendOptions, SendStream,
+	ShouldTransmit, StreamEvent, Streams, UdpStats, WriteError, Written,
 };
 #[cfg(feature = "mux")]
 #[doc(hidden)]
 pub use connection::mux;
-#[cfg(feature = "qlog")]
-pub use connection::qlog::QlogStream;
 
 #[cfg(any(feature = "ring", feature = "aws-lc-rs"))]
 pub use rustls;
 
 mod config;
 mod limits;
-#[cfg(feature = "qlog")]
-pub use config::QlogConfig;
-pub use config::{
-	AckFrequencyConfig, ClientConfig, ConfigError, EndpointConfig, IdleTimeout, MtuDiscoveryConfig, ServerConfig,
-	TransportConfig, ValidationTokenConfig,
-};
+pub use config::{ConfigError, client, server, transport};
 pub use limits::{Limits, LimitsError};
 
 pub mod crypto;
@@ -72,10 +64,7 @@ mod frame;
 use crate::frame::Frame;
 pub use crate::frame::{ApplicationClose, ConnectionClose, Datagram, FrameType};
 
-mod endpoint;
-pub use crate::endpoint::{
-	AcceptError, Accepted, Accepting, ConnectError, ConnectionHandle, DatagramEvent, Endpoint, Incoming, RetryError,
-};
+pub mod endpoint;
 
 mod packet;
 pub use packet::SpaceId;
@@ -104,16 +93,31 @@ pub(crate) use moq_clock::{Instant, Wall};
 pub(crate) use std::time::Duration;
 pub(crate) const UNIX_EPOCH: Wall = Wall::UNIX_EPOCH;
 
-/// The QUIC protocol version implemented.
-pub const DEFAULT_SUPPORTED_VERSIONS: &[u32] = &[
-	0x00000001,
-	0xff00_001d,
-	0xff00_001e,
-	0xff00_001f,
-	0xff00_0020,
-	0xff00_0021,
-	0xff00_0022,
-];
+/// A QUIC version this crate speaks
+#[derive(Debug, Copy, Clone, Default, Eq, PartialEq, Hash)]
+#[non_exhaustive]
+pub enum Version {
+	/// QUIC version 1, [RFC 9000](https://www.rfc-editor.org/rfc/rfc9000.html)
+	#[default]
+	V1,
+}
+
+impl Version {
+	/// Every version, in preference order
+	const ALL: &[Self] = &[Self::V1];
+
+	/// The version's number on the wire
+	pub(crate) fn wire(self) -> u32 {
+		match self {
+			Self::V1 => 0x0000_0001,
+		}
+	}
+
+	/// The version a wire number names, if this crate speaks it
+	pub(crate) fn from_wire(version: u32) -> Option<Self> {
+		Self::ALL.iter().copied().find(|v| v.wire() == version)
+	}
+}
 
 /// Whether an endpoint was the initiator of a connection
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -241,8 +245,8 @@ impl coding::Codec for StreamId {
 #[derive(Debug)]
 #[must_use]
 pub struct Transmit {
-	/// The socket this datagram should be sent to
-	pub destination: SocketAddr,
+	/// The address to send the datagram to
+	pub remote: SocketAddr,
 	/// Explicit congestion notification bits to set on the packet
 	pub ecn: Option<EcnCodepoint>,
 	/// Amount of data written to the caller-supplied buffer
@@ -250,8 +254,8 @@ pub struct Transmit {
 	/// The segment size if this transmission contains multiple datagrams.
 	/// This is `None` if the transmit only contains a single datagram
 	pub segment_size: Option<usize>,
-	/// Optional source IP address for the datagram
-	pub src_ip: Option<IpAddr>,
+	/// The local IP address to send the datagram from, if the socket chooses one
+	pub local_ip: Option<IpAddr>,
 }
 
 //

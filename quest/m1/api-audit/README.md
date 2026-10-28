@@ -75,7 +75,6 @@ Rejected in planning:
 
 - [Two broadcast resolutions](/quest/m1/api-audit/resolve.md) - Rust, JS, and the bindings resolve a broadcast with `request(path, epoch)` or `follow(path, epoch)`, and every racy two-step caller is gone
 - [Bindings default to zero max delay](/quest/m1/api-audit/binding-max-delay.md) - a no-argument subscription skips superseded groups in every binding, as Rust, JS, and Python do, and no subscriber limit is asked for explicitly
-- [Binding publications](/quest/m1/api-audit/binding-publication.md) - moq-ffi, the C ABI, and every wrapper hand out a publication handle that announces, replacing the private adapters
 - [Demand is wanted, everywhere](/quest/m1/api-audit/wanted.md) - every `used`/`unused` pair becomes `wanted()` and `wanted_changed()`, and unused ones go
 - [One strict path rule](/quest/m1/api-audit/strict-paths.md) - `Relative` refuses empty segments, `Path` refuses non-canonical escapes, the error is `path::Error`, and auth mints only strict paths
 

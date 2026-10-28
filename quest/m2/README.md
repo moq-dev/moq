@@ -221,6 +221,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [moq-transport finish interop](/quest/m2/ietf-finish.md) - the interop `finish` case runs on every even moq-transport draft instead of being skipped
 - [Join after a quick finish](/quest/m2/ietf-join-after-finish.md) - a pre-draft-22 joining FETCH that arrives after its subscription finished is still answered, within a bound the peer already negotiates
 - [JS joining FETCH](/quest/m2/ietf-js-joining-fetch.md) - the JS publisher answers a joining FETCH that arrives after a quick finish, mirroring the Rust bound
+- [JS IETF FETCH requester](/quest/m2/js-ietf-fetch-requester.md) - decide whether `@moq/net` sends IETF FETCH, from the use cases that would need it
 - [ashpd uses maintained D-Bus crates](/quest/m2/ashpd-maintained.md) - wait for a stable zbus 6 port, then remove the portal dependency exceptions
 - [Askama uses a maintained TOML parser](/quest/m2/askama-maintained.md) - wait for a stable parser migration, then remove the generator dependency exception
 - [Dependency and alternatives audit](/quest/m2/audit-deps.md) - dependencies are current, deduplicated, needed, and the best maintained option

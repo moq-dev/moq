@@ -1,51 +1,36 @@
-# [M] Live PAT changes keep programs honest
+# [S] A live export follows a moved PMT PID
 
 ## Goal
 
-A live TS source whose PAT changes mid-stream keeps every broadcast meaning
-one program. A moved PMT PID, a program added, and a program removed or
-returning each have one observable outcome: followed, published, retired,
-or published as a new epoch. None is silently ignored.
+A running `export ts` whose catalog moves `program.pmtPid` follows it: a PAT
+at the next `version_number` names the new PID before any PMT goes out
+there, and nothing goes out on the old PID after it. The output stays one
+program throughout, and no two PATs at one version name different PIDs.
 
 ## Plan
 
-What the code does today:
+The import follows the PAT: a moved PMT PID moves its reassembler and
+`program.pmtPid`, and `Programs` publishes, retires and republishes programs
+as the PAT adds, drops and restores them. A running export still keeps the
+PMT on the PID its tables first went out on, whatever `program.pmtPid` later
+records: its output stays consistent, but a move is followed only by an
+export started after it.
 
-- A PAT naming another PMT PID for the program adds a reassembler but never
-  drops the old one, and `program.pmtPid` keeps the first.
-- `Programs` ignores a program a later PAT adds, without a warning. Its
-  PIDs hold back the unclaimed-PID count for 0.5 s of program clock, then
-  count as unclaimed in `ts::stats`, since no program reads them.
-- Under `--program all`, the shared parser hands a later PAT that removes one
-  program to every program's `Import`; the removed program's `handle_pat`
-  errors, `Programs::decode` propagates it, and the whole multiplex ingest
-  stops, including unrelated programs. `Programs` sees each whole PAT first
-  (`Packet::pat`), so it can retire or start programs there instead. A
-  program still waiting for its PMT is already dropped there, or moved to
-  the PMT PID the later PAT names.
-- A PAT naming another `transport_stream_id`, or a single-program import's
-  PAT naming another program, already refuses the import.
+The maintainer's plan, from closing
+[moq-dev/moq#6301](https://github.com/moq-dev/moq/pull/6301): the export
+follows a new `program.pmtPid` with a new PAT, built on the table rework
+that lays the PAT and PMT from the current table state when their slot is
+laid instead of riding queued units, so a move is one more state change
+rather than a rewrite of queued copies. That rework has not landed.
 
-Decided 2026-10-20 by the maintainer:
+The draft then says that `pmtPid` can change in place, and when a consumer
+rebuilding the stream moves the PMT.
 
-- A new PMT PID for the same program moves the reassembler and updates
-  `program.pmtPid`, which the export follows with a new PAT. `Programs`
-  publishes a program a later PAT adds as its own broadcast, as it does for
-  the first PAT, rather than ignoring it.
-- A later PAT that removes a program retires that program's broadcast: its
-  tracks finish and it is unannounced, while the other programs carry on.
-  If the program returns, it publishes a new epoch of its broadcast, never
-  the retired instance's names for new content. A single-program import
-  whose selected program leaves the PAT ends, as today.
-- Open: a PAT that names a program whose PMT never arrives. `Programs`
-  creates a program's broadcast only once its PMT lists a stream, so such a
-  program waits holding only its PAT entry. Decide whether the import refuses
-  it instead, and which clock bounds the wait (found in
-  [moq-dev/moq#6122](https://github.com/moq-dev/moq/pull/6122)).
+Rust: `rs/moq-mux` TS export (`pmt_pid`, `build_psi`, the PSI schedule).
 
-Rust: `rs/moq-mux` TS `Import::handle_pat` and `Programs`.
-
-Tests use the generated `fixture::Mux` builder: a PMT PID move, and a
-`--program all` MPTS whose PAT adds a program, drops one and later restores
-it: the other program runs uninterrupted, and the returning one publishes a
-new epoch.
+Tests: a live export whose catalog moves `pmtPid` emits PATs at versions 0
+then 1, with nothing on the new PID before the moving PAT and nothing on the
+old one after it, and a move while every copy is still queued goes out as
+one PAT naming the new PID. `revision_test`'s
+`a_track_recorded_on_the_pmt_pid_after_the_catalog_moves_it_takes_another`
+then pins the move instead of the PMT staying put.

@@ -20,54 +20,57 @@ No caller can assemble a racy two-step resolve, and no crate hand-rolls
 
 Decided 2026-10-22 (API audit, maintainer approved the recommendation).
 
-Rust `origin::Consumer` today has five overlapping operations
-(`rs/moq-net/src/model/origin.rs`): `routed(path) -> Option<Route>` (swallows
-errors), `follow(path) -> Follow` (route level), `routed_broadcast(path)` (no
-epoch), `announced_broadcast(path, epoch)`, and `request_broadcast(path,
-epoch)`. Per `rs/moq-net/MIGRATE.md`, `request_broadcast` on a client fails
-`Unroutable` for a path no reader watches, even when the peer announces it,
-and the bindings promote it as a top-level convenience.
+The behavioral checkpoint makes `request_broadcast` own scoped discovery and
+retry route churn. It reports table absence only after sync; a selected handler's
+explicit refusal stays terminal, including a dropped Prepared answer. The front
+records that refusal privately at its existing standing-route decision, rather
+than guessing from unrelated mutations of the table. The old immediate lookup
+is private to sessions. `Requesting::is_queued` and the public `Routing` task are
+gone; `Requesting` is the owned task. The stats reader uses it instead of its
+own retry on `is_queued`; the mux binding keeps its pinned `routed_broadcast`
+wait. Rust and JS have same-epoch follow-return coverage, and every JS request
+owns its discovery watch from creation. A pending plain JS request fails
+`Unroutable` once that discovery syncs with no route for it, matching Rust. JS
+announcement-following no longer silently uses a blind peer. The existing
+`routed_broadcast` helper retains its route-change retry policy for the CLI,
+gateway, mux binding, and relay HTTP consumers. Its removal belongs to the remaining rollout.
 
-- Rust: `request(path, epoch) -> Pending<Requesting>` takes
-  `routed_broadcast`'s semantics plus the epoch pin and the synced
-  `Unroutable` answer, with no wall clock (relays never block on peers).
-  `follow(path, epoch)` is today's `announced_broadcast`. Delete `routed`,
-  `routed_broadcast`, and `Requesting::is_queued`. The immediate table lookup
-  (today's `request_broadcast`) and the route-level `Follow` become
-  `pub(crate)` for the sessions; route inspection stays where a consumer
-  needs it (the `routed()` callers in moq-cli reporting move to whatever
-  route observation remains public, or drop the report).
-- JS (`js/net/src/origin.ts` `Consumer.request(path, {announced, epoch})`):
-  two methods, `request(path, {epoch})` and `follow(path, {epoch})`. Fix the
-  mismatch where `{announced: true, epoch}` closes when the instance ends
-  while Rust's pinned follow hands back the same instance if it returns. Drop
-  the silent fallback that turns `announced: true` into a blind request when
-  discovery is unavailable. `Producer.request`/`announced` pass-throughs stay
-  only if `Table` needs them. moq.pro's five `{announced: true}` sites move
-  to `follow`.
-- Bindings: `request_broadcast(path, epoch)` and `announced_broadcast(path,
-  epoch)` map onto the two operations under the same names as Rust, and the
-  Kotlin, Dart, Go, and Python top-level shortcuts follow.
-- Callers to fix: `rs/moq-wasm/src/lib.rs` (`routed()` then
-  `request_broadcast()`, error hidden by `.ok()`), `rs/moq-srt/src/ts.rs`
-  `Subscriber::new` (production), `rs/moq-cli/src/subscribe.rs` and
-  `report.rs`, `rs/moq-transcode/examples/transcode.rs`,
-  `rs/moq-bench/src/connection.rs`, the hand-rolled resolvers in
-  `rs/moq-mux/src/source.rs` (with `moq_mux::follow` on `announced_broadcast`), `rs/moq-hls/src/server/mod.rs` (wall-clock
-  `RESOLVE_TIMEOUT`) and `rs/moq-stats/src/aggregate.rs`, the
-  `rs/moq-relay/src/web.rs` fetch deadline, the `rs/moq-e2ee/MIGRATE.md`
-  advice to read the epoch via `routed()` (supersede it in the Impact bullet), and
-  `demo/carla/sim/moq_carla_sim/publish.py`, which reads the epoch from an
-  announce and then requests unpinned.
+The approved public method names have not rolled out. What remains:
 
-The prior audit's race claim is narrower than stated: discovery lingers 2 s
-after `routed()` drops its follower, so the window is a route retraction or
-failover between the two calls.
+- Rust: name the owned operation `request(path, epoch)` and today's
+  `announced_broadcast` operation `follow(path, epoch)`. Keep the immediate
+  table lookup private. Delete `routed` and `routed_broadcast` and fix their
+  callers. Preserve terminal selected-handler refusals, private deferred
+  validity checks, and instance identity across route churn.
+- Move the remaining route-level `Follow` consumers before making it private:
+  the moq-hls server's resolve and the tests that read its events. `moq play`
+  and `moqsrc` already follow through `moq_mux::Source::follow`. Do not add a
+  new public route API or compatibility shim to make the privatization pass.
+- JS: expose `request(path, {epoch})` and `follow(path, {epoch})` instead of the
+  `announced` option and migrate actual callers. Keep the checkpoint's
+  synced-absence `Unroutable` for `request` while `follow` stays open, and its
+  pending retry through a route gap without retargeting a resolved instance.
+  Retain synchronous request peeks and path-local wakeups.
+  `Producer` pass-throughs stay only where `Table` needs them.
+- Bindings: mirror `request` and `follow`, including the optional epoch, in
+  the FFI and every actual wrapper/consumer. Regenerate from source, update
+  package migrations, and run all-language interop. Existing binding names
+  currently inherit the owned-discovery behavior, not the final naming.
+- Callers: remove the racy two-step lookup and hidden error in moq-wasm,
+  route waits in moq-cli subscribe/report, and the HLS hand-rolled discovery
+  and `RESOLVE_TIMEOUT`. Review SRT, transcode, benchmark connections, relay
+  HTTP fetch deadlines, the e2ee epoch advice, and the demo's announce-derived
+  epoch pin. No caller should hand-roll synced resolution or rely on a wall
+  clock to decide table absence.
 
-Tests: a lite client resolves an announced but unwatched path; a pinned
-`follow` hands back the same instance when its route returns, in Rust and JS.
+Tests cover an announced but unwatched path over lite-05/06/07-wip, Rust and JS
+synced absence, discovery retention and release, pinned follow return, no follower
+fallback on a blind peer, and unchanged explicit refusal. Finish the API and
+caller rollout with the same lifecycle and churn checks, then the required
+Nix gate and all-language interop.
 
-Public API: breaking in moq-net, `@moq/net`, moq-ffi, and every wrapper.
+Public API: breaking task shape in moq-net; behavior changes in `@moq/net` and
+the bindings. Final method/epoch naming remains breaking across every wrapper.
 Wire: none.
 
 ## Related

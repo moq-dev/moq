@@ -80,7 +80,7 @@ fn lite_session_over_the_worker() {
 	let client_sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("client socket");
-	let mut dial = quic::client::Config::new(server_addr, "localhost");
+	let mut dial = quic::client::Config::default();
 	dial.alpn = vec![ALPN.to_string()];
 	// The server's certificate is our own self-signed one; this is loopback.
 	dial.verify = false;
@@ -110,7 +110,9 @@ fn lite_session_over_the_worker() {
 	let sub = sub_origin.clone();
 	let payload = worker
 		.block_on(async move {
-			let conn = quic::client::connect(client_sock, &dial).await.expect("quic connect");
+			let conn = quic::client::connect(client_sock, &dial, server_addr, "localhost")
+				.await
+				.expect("quic connect");
 			assert_eq!(
 				web_transport_trait::poll::Session::protocol(&conn),
 				Some(ALPN),
@@ -246,7 +248,7 @@ fn two_lite_sessions_share_the_server_socket() {
 		}
 	});
 
-	let mut dial = quic::client::Config::new(server_addr, "localhost");
+	let mut dial = quic::client::Config::default();
 	dial.alpn = vec![ALPN.to_string()];
 	dial.verify = false;
 
@@ -257,7 +259,9 @@ fn two_lite_sessions_share_the_server_socket() {
 				let client_sock = handle
 					.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 					.expect("client socket");
-				let conn = quic::client::connect(client_sock, &dial).await.expect("quic connect");
+				let conn = quic::client::connect(client_sock, &dial, server_addr, "localhost")
+					.await
+					.expect("quic connect");
 				let (session, driver) = moq_net::Client::new()
 					.with_subscriber(sub.clone())
 					.connect(
@@ -331,7 +335,7 @@ fn configured_roots_verify_the_server() {
 	let client_sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("client socket");
-	let mut dial = quic::client::Config::new(server_addr, "localhost");
+	let mut dial = quic::client::Config::default();
 	dial.alpn = vec![ALPN.to_string()];
 	// Verification on, trusting nothing but the certificate this server
 	// presents. The platform store is off, so if it leaked in, an unrelated
@@ -347,7 +351,9 @@ fn configured_roots_verify_the_server() {
 
 	worker
 		.block_on(async move {
-			let conn = quic::client::connect(client_sock, &dial).await.expect("quic connect");
+			let conn = quic::client::connect(client_sock, &dial, server_addr, "localhost")
+				.await
+				.expect("quic connect");
 			assert_eq!(
 				web_transport_trait::poll::Session::protocol(&conn),
 				Some(ALPN),
@@ -397,7 +403,7 @@ fn required_client_auth_refuses_an_anonymous_client() {
 	.expect("endpoint");
 	let server_addr = endpoint.local_addr();
 
-	let mut dial = quic::client::Config::new(server_addr, "localhost");
+	let mut dial = quic::client::Config::default();
 	dial.alpn = vec![ALPN.to_string()];
 	dial.verify = false;
 	// No identity: this client is anonymous.
@@ -412,7 +418,7 @@ fn required_client_auth_refuses_an_anonymous_client() {
 
 	worker
 		.block_on(async move {
-			match quic::client::connect(client_sock, &dial).await {
+			match quic::client::connect(client_sock, &dial, server_addr, "localhost").await {
 				// The dial itself was refused; done.
 				Err(_) => {}
 				// Established locally, but the server's refusal closes it.
@@ -455,7 +461,7 @@ fn a_root_bundle_is_loaded_whole() {
 	let client_sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("client socket");
-	let mut dial = quic::client::Config::new(server_addr, "localhost");
+	let mut dial = quic::client::Config::default();
 	dial.alpn = vec![ALPN.to_string()];
 	dial.system_roots = false;
 	dial.roots = vec![bundle.roots.clone()];
@@ -468,7 +474,9 @@ fn a_root_bundle_is_loaded_whole() {
 
 	worker
 		.block_on(async move {
-			let conn = quic::client::connect(client_sock, &dial).await.expect("quic connect");
+			let conn = quic::client::connect(client_sock, &dial, server_addr, "localhost")
+				.await
+				.expect("quic connect");
 			assert_eq!(
 				web_transport_trait::poll::Session::protocol(&conn),
 				Some(ALPN),
