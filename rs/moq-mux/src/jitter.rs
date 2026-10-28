@@ -211,6 +211,8 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		self.active.acquired();
 		for track in self.active.tracks.values_mut() {
 			let cut = std::mem::take(&mut track.queue).len() as u64;
+			// A cancel resumes the old publisher, whose next frames may reference the cut ones.
+			track.waiting |= cut > 0;
 			match track.started {
 				true => self.active.dropped += cut,
 				false => self.active.trimmed += cut,
@@ -1606,6 +1608,37 @@ mod tests {
 		assert_eq!((next.item, next.generation), ("C", 1));
 		buffer.adopted();
 		assert_eq!(buffer.reporting().dropped(), 0);
+	}
+
+	/// A cancel after commit resumes the old publisher at its next sync frame, since the frames
+	/// after its cut tail may reference it.
+	#[moq_clock::test]
+	async fn a_cancelled_commit_resumes_the_old_publisher_at_a_sync_frame() {
+		let start = moq_clock::now();
+		let delay = Duration::from_millis(500);
+		let mut buffer = Buffer::new(delay).replay();
+		buffer.push(0u16, arrival(start, 0, "A0")).unwrap();
+		buffer.push(0, arrival(start, 100, "A tail")).unwrap();
+		buffer.start([1], [1]);
+		buffer.push(1, arrival(start, 10_000, "B")).unwrap();
+		moq_clock::sleep(delay).await;
+		assert_eq!(due(&mut buffer), ["A0"]);
+		let Poll::Ready(first) = buffer.poll_pending(&kio::Waiter::noop()) else {
+			panic!("B ready");
+		};
+		buffer.commit(first).unwrap();
+		buffer.cancel();
+		assert_eq!(buffer.reporting().dropped(), 1);
+		let delta = Arrival {
+			sync: false,
+			..arrival(moq_clock::now(), 200, "A delta")
+		};
+		assert_eq!(buffer.push(0, delta).unwrap(), Push::Waiting);
+		assert_eq!(buffer.reporting().dropped(), 2);
+		let key = arrival(moq_clock::now(), 300, "A key");
+		assert_eq!(buffer.push(0, key).unwrap(), Push::Queued);
+		moq_clock::sleep(delay).await;
+		assert_eq!(due(&mut buffer), ["A key"]);
 	}
 
 	/// A restart the old publisher is still acquiring at commit is dropped with the old tail.
