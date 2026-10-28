@@ -13,12 +13,15 @@ keywords = ["async", "producer", "consumer", "state", "sync"]
 categories = ["asynchronous", "concurrency"]
 
 [features]
+# `#[kio::machine]`, which writes a `poll_*` state machine from straight-line code.
+macros = ["dep:kio-macros"]
 # Per-task Ready poll accounting for deterministic simulators, never production.
 _sim = []
 
 [dependencies]
 # Frees a log's evicted segments once no read that could reach them is running.
 crossbeam-epoch = "0.9.21"
+kio-macros = { workspace = true, optional = true }
 smallvec = { version = "1.15", features = ["union"] }
 
 # Loom swaps in its own Arc/Mutex/atomics so it can permute every interleaving.
