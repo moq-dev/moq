@@ -61,6 +61,30 @@ if (session < 0)
     return fail(moq_error());
 ```
 
+## Publish
+
+```c
+const char *path = "my-stream.hang";
+uint32_t broadcast;
+int publication = moq_origin_create_broadcast(origin, path, strlen(path), &broadcast);
+if (publication < 0)
+    return fail(moq_error());
+// Fill tracks on broadcast here; announce on the publication.
+
+char epoch[MOQ_EPOCH_LEN];
+moq_mint_epoch(epoch, sizeof(epoch)); // a fresh epoch per run
+moq_announce_route route;
+memset(&route, 0, sizeof(route));     // zeroed means cost 0 and no epoch
+route.epoch = epoch;
+route.epoch_len = sizeof(epoch);
+if (moq_publication_announce((uint32_t)publication, &route) < 0)
+    return fail(moq_error());
+```
+
+A route carries only a cost and an epoch; relays add the hops. Mint a fresh epoch each
+time the publisher starts, so viewers see a restart (`MOQ_ANNOUNCE_KIND_RESTART`) instead of
+a stalled broadcast. Redundant publishers of the same bytes share one.
+
 Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Publication track names stay separate from codec settings. For simulcast, give each rendition the next one down as the `lower` handle in its `moq_video_encode_options`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers. A rung only disables while the session probes for bandwidth, which on native transports takes moq-quic with BBR3.
 
 ## Things to know
