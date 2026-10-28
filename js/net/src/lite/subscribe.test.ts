@@ -378,3 +378,19 @@ test("wanted groups refuse malformed input before writing bytes", async () => {
 		await expect(encodeMessage(Version.DRAFT_07, update)).rejects.toThrow(RangeError);
 	}
 });
+
+for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
+	test(`SUBSCRIBE_DROP refuses reversed ranges while retaining empty ranges on ${version}`, async () => {
+		const malformed = new Reader(undefined, new Uint8Array([3, 3, 1, 0]), version);
+		await expect(SubscribeDrop.decode(malformed)).rejects.toThrow("invalid dropped range");
+		await expect(encode(version, { drop: new SubscribeDrop({ start: 3, end: 1, error: 0 }) })).rejects.toThrow();
+		for (const [start, end] of [
+			[2, 1],
+			[Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER],
+		]) {
+			const got = await responseRoundtrip(version, { drop: new SubscribeDrop({ start, end, error: 0 }) });
+			if (!("drop" in got)) throw new Error("missing drop");
+			expect([got.drop.start, got.drop.end]).toEqual([start, end]);
+		}
+	});
+}

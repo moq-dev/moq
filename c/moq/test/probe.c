@@ -271,8 +271,11 @@ int main(void) {
     ok(moq_broadcast_producer_announce(broadcast, &route), "announce");
 
     const char *generate[] = {"localhost"};
+    const char *versions[] = {"moq-lite-07-wip"};
     moq_server_config server_config = moq_server_config_default();
     server_config.bind = "127.0.0.1:0";
+    server_config.versions.data = versions;
+    server_config.versions.len = 1;
     server_config.tls.generate.data = generate;
     server_config.tls.generate.len = 1;
     server_config.publish = origin;
@@ -286,6 +289,7 @@ int main(void) {
     /* Both halves of the handshake are pending at once, and complete on this thread. */
     moq_client_config client_config = moq_client_config_default();
     client_config.tls.insecure = true;
+    client_config.versions = server_config.versions;
     client_config.implementation = MOQ_IMPLEMENTATION;
     moq_client *client = NULL;
     ok(moq_client_new(&client_config, &client), "client new");
@@ -344,8 +348,8 @@ int main(void) {
     CHECK(received);
     CHECK(received->payload.len == sizeof(hello));
     CHECK(memcmp(received->payload.data, hello, sizeof(hello)) == 0);
-    /* The default moq-lite-06 session drops received timestamps, so the track arrives untimed. */
-    CHECK(!received->timestamp_us.has_value);
+    /* Lite-07 carries both the Implementation parameter and frame timestamps. */
+    CHECK(received->timestamp_us.has_value && received->timestamp_us.value == 1000);
     moq_frame_free(received);
     CHECK(!cancelled.done);
 
