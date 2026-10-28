@@ -32,7 +32,7 @@ fn dial_template() -> (moq_tokio::connect::Config, moq_tokio::quic::Config) {
 }
 
 fn peer_url(server: &driver::endpoint::Endpoint) -> String {
-	let port = server.local_addr().expect("server addr").port();
+	let port = server.local_addr().port();
 	format!("moql://127.0.0.1:{port}/")
 }
 
@@ -53,7 +53,7 @@ async fn assert_closed_by_shutdown(conn: driver::connection::Connection) {
 		.await
 		.expect("the peer heard no close before its idle timeout");
 	match err {
-		driver::connection::Error::ApplicationClosed(close) => assert_eq!(&close.reason[..], b"client shutdown"),
+		driver::connection::Error::ApplicationClosed(close) => assert_eq!(close.reason, "client shutdown"),
 		other => panic!("the link ended with {other:?}, not the shutdown close"),
 	}
 }

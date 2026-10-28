@@ -7,9 +7,10 @@ const REMOTE: &str = "[::2]:7890";
 
 /// An endpoint config whose CIDs come from a hashed generator with a known key
 fn endpoint_config() -> crate::endpoint::Config {
-	let mut config = crate::endpoint::Config::default();
-	config.cid_generator = Some(Arc::new(|| Box::new(HashedConnectionIdGenerator::from_key(CID_KEY))));
-	config
+	crate::endpoint::Config {
+		cid_generator: Some(Arc::new(|| Box::new(HashedConnectionIdGenerator::from_key(CID_KEY)))),
+		..crate::endpoint::Config::default()
+	}
 }
 
 /// A server endpoint running [`endpoint_config`], or a client-only one
@@ -95,7 +96,7 @@ impl Answer {
 		let Self::Response(packet) = self else {
 			return false;
 		};
-		let token = ResetToken::new(&*endpoint.reset_key(), cid);
+		let token = ResetToken::new(endpoint.reset_key(), cid);
 		packet[0] & 0xc0 == 0x40 && packet.ends_with(&token[..])
 	}
 }
@@ -147,8 +148,10 @@ fn invalid_cid_is_dropped() {
 #[test]
 fn zero_length_cid_short_packet_is_dropped() {
 	let _guard = subscribe();
-	let mut config = crate::endpoint::Config::default();
-	config.cid_generator = Some(Arc::new(|| Box::new(RandomConnectionIdGenerator::new(0))));
+	let config = crate::endpoint::Config {
+		cid_generator: Some(Arc::new(|| Box::new(RandomConnectionIdGenerator::new(0)))),
+		..crate::endpoint::Config::default()
+	};
 	let mut server = Endpoint::new(config.with_server(server_config()), true).unwrap();
 	assert_eq!(answer(&mut server, Instant::now(), &short(&[], 100)), Answer::Nothing);
 }
@@ -273,8 +276,10 @@ fn client_endpoint_sends_stateless_reset() {
 
 /// A server whose one-byte CID space is three-quarters used
 fn exhausted() -> Pair {
-	let mut config = crate::endpoint::Config::default();
-	config.cid_generator = Some(Arc::new(|| Box::new(RandomConnectionIdGenerator::new(1))));
+	let config = crate::endpoint::Config {
+		cid_generator: Some(Arc::new(|| Box::new(RandomConnectionIdGenerator::new(1)))),
+		..crate::endpoint::Config::default()
+	};
 	let mut server_config = server_config();
 	server_config.transport = transport();
 	let server = Endpoint::new(

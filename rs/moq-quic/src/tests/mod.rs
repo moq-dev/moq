@@ -90,7 +90,7 @@ fn pending_incoming_survives_server_config_change() {
 						remote: pair.client.addr,
 						local_ip: None,
 						ecn,
-						data: data
+						data
 					},
 					&mut response
 				)
@@ -508,8 +508,10 @@ fn stats_include_congestion_controller_bandwidth_estimate() {
 		}
 	}
 
-	let mut transport = transport::Config::default();
-	transport.congestion = Arc::new(TestControllerFactory);
+	let transport = transport::Config {
+		congestion: Arc::new(TestControllerFactory),
+		..transport::Config::default()
+	};
 	let mut config = client_config();
 	config.transport = transport;
 
@@ -526,9 +528,11 @@ fn server_stateless_reset() {
 	let _guard = subscribe();
 	let mut secret = [0; 32];
 	rand::rng().fill_bytes(&mut secret);
-	let mut endpoint_config = endpoint::Config::default();
-	endpoint_config.reset_secret = Some(secret);
-	endpoint_config.cid_generator = Some(Arc::new(move || Box::new(HashedConnectionIdGenerator::from_key(0))));
+	let endpoint_config = endpoint::Config {
+		reset_secret: Some(secret),
+		cid_generator: Some(Arc::new(move || Box::new(HashedConnectionIdGenerator::from_key(0)))),
+		..endpoint::Config::default()
+	};
 
 	let mut pair = Pair::new(endpoint_config.clone(), server_config());
 	let (client_ch, _) = pair.connect();
@@ -560,9 +564,11 @@ fn client_stateless_reset() {
 	let _guard = subscribe();
 	let mut secret = [0; 32];
 	rand::rng().fill_bytes(&mut secret);
-	let mut endpoint_config = endpoint::Config::default();
-	endpoint_config.reset_secret = Some(secret);
-	endpoint_config.cid_generator = Some(Arc::new(move || Box::new(HashedConnectionIdGenerator::from_key(0))));
+	let endpoint_config = endpoint::Config {
+		reset_secret: Some(secret),
+		cid_generator: Some(Arc::new(move || Box::new(HashedConnectionIdGenerator::from_key(0)))),
+		..endpoint::Config::default()
+	};
 
 	let mut pair = Pair::new(endpoint_config.clone(), server_config());
 	let (_, server_ch) = pair.connect();
@@ -600,10 +606,9 @@ fn client_stateless_reset() {
 /// next packet for the old connection drew a stateless reset
 fn restarted_server_resets(restart: &[u8; 32]) -> bool {
 	let _guard = subscribe();
-	let config = |secret: &[u8; 32]| {
-		let mut config = endpoint::Config::default();
-		config.reset_secret = Some(*secret);
-		config
+	let config = |secret: &[u8; 32]| endpoint::Config {
+		reset_secret: Some(*secret),
+		..endpoint::Config::default()
 	};
 
 	let mut pair = Pair::new(config(&[1; 32]), server_config());
@@ -642,8 +647,10 @@ fn reset_secret_must_match() {
 #[test]
 fn reset_secret_resets_connections_each_millisecond() {
 	let _guard = subscribe();
-	let mut config = endpoint::Config::default();
-	config.reset_secret = Some([1; 32]);
+	let config = endpoint::Config {
+		reset_secret: Some([1; 32]),
+		..endpoint::Config::default()
+	};
 	let (_, mut cids) = config.resolve().unwrap();
 	let mut endpoint = Endpoint::new(
 		endpoint::Config {
@@ -820,8 +827,10 @@ fn server_closes_and_forgets(pair: &mut Pair, server_ch: ConnectionHandle, reaso
 fn stateless_reset_limit() {
 	let _guard = subscribe();
 	let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 42);
-	let mut endpoint_config = endpoint::Config::default();
-	endpoint_config.cid_generator = Some(Arc::new(move || Box::new(RandomConnectionIdGenerator::new(8))));
+	let endpoint_config = endpoint::Config {
+		cid_generator: Some(Arc::new(move || Box::new(RandomConnectionIdGenerator::new(8)))),
+		..endpoint::Config::default()
+	};
 	let mut endpoint = Endpoint::new(
 		endpoint::Config {
 			server: Some(server_config()),
@@ -1168,8 +1177,10 @@ fn high_latency_handshake() {
 #[test]
 fn deferred_accept_uses_handshake_idle_timeout() {
 	let _guard = subscribe();
-	let mut transport = transport::Config::default();
-	transport.idle_timeout = Some(Duration::from_secs(2));
+	let transport = transport::Config {
+		idle_timeout: Some(Duration::from_secs(2)),
+		..transport::Config::default()
+	};
 	let mut server = server_config();
 	server.transport = transport;
 	let mut pair = Pair::new(Default::default(), server);
@@ -3034,10 +3045,8 @@ fn tail_loss_respect_max_datagrams() {
 	let _guard = subscribe();
 	let client_config = {
 		let mut c_config = client_config();
-		let mut t_config = transport::Config::default();
 		//Disabling GSO, so only a single segment should be sent per iops
-		t_config.segmentation_offload = false;
-		c_config.transport = t_config.into();
+		c_config.transport.segmentation_offload = false;
 		c_config
 	};
 	let mut pair = Pair::default();
@@ -3253,9 +3262,11 @@ fn datagram_max_size_fills_peer_frame_limit() {
 		},
 		..server_config()
 	};
-	let mut transport = transport::Config::default();
-	transport.initial_mtu = 1452;
-	transport.mtu = None;
+	let transport = transport::Config {
+		initial_mtu: 1452,
+		mtu: None,
+		..transport::Config::default()
+	};
 	let mut client = client_config();
 	client.transport = transport;
 	let mut pair = Pair::new(Default::default(), server);
@@ -3270,7 +3281,7 @@ fn datagram_larger_than_send_buffer_is_too_large() {
 	let mut client_config = client_config();
 	let mut transport_config = transport::Config::default();
 	transport_config.datagram.send_buffer = 1;
-	client_config.transport = transport_config.into();
+	client_config.transport = transport_config;
 	let (client_ch, _) = pair.connect_with(client_config);
 
 	assert_matches!(
@@ -3923,8 +3934,10 @@ fn lost_handshake_ack_repeats_in_next_packet() {
 fn handshake_outlasts_short_idle_timeout() {
 	let _guard = subscribe();
 	let mut pair = Pair::default();
-	let mut transport = transport::Config::default();
-	transport.idle_timeout = Some(Duration::from_secs(2));
+	let transport = transport::Config {
+		idle_timeout: Some(Duration::from_secs(2)),
+		..transport::Config::default()
+	};
 	let mut client = client_config();
 	client.transport = transport;
 
@@ -3954,8 +3967,10 @@ fn handshake_outlasts_short_idle_timeout() {
 #[test]
 fn unbounded_handshake_idle_timeout() {
 	let _guard = subscribe();
-	let mut transport = transport::Config::default();
-	transport.handshake_timeout = Duration::MAX;
+	let transport = transport::Config {
+		handshake_timeout: Duration::MAX,
+		..transport::Config::default()
+	};
 	let mut server = server_config();
 	server.transport = transport.clone();
 	let mut client = client_config();
@@ -3971,8 +3986,10 @@ fn unbounded_handshake_idle_timeout() {
 fn established_idles_out_at_negotiated_timeout() {
 	let _guard = subscribe();
 	let mut pair = Pair::default();
-	let mut transport = transport::Config::default();
-	transport.idle_timeout = Some(Duration::from_secs(2));
+	let transport = transport::Config {
+		idle_timeout: Some(Duration::from_secs(2)),
+		..transport::Config::default()
+	};
 	let mut client = client_config();
 	client.transport = transport;
 
@@ -4006,9 +4023,11 @@ fn established_idles_out_at_negotiated_timeout() {
 #[test]
 fn server_can_send_3_inital_packets() {
 	let _guard = subscribe();
-	let mut transport = transport::Config::default();
-	// Assume a low-latency connection so pacing doesn't interfere with the test
-	transport.initial_rtt = Duration::from_millis(10);
+	let transport = transport::Config {
+		// Assume a low-latency connection so pacing doesn't interfere with the test
+		initial_rtt: Duration::from_millis(10),
+		..transport::Config::default()
+	};
 
 	let (cert, key) = big_cert_and_key();
 	let mut server = server_config_with_cert(cert.clone(), key);
@@ -4509,9 +4528,11 @@ fn single_ack_eliciting_packet_with_ce_bit_triggers_immediate_ack() {
 
 fn setup_ack_frequency_test(max_ack_delay: Duration) -> (Pair, ConnectionHandle, ConnectionHandle) {
 	let mut client_config = client_config_with_deterministic_pns();
-	let mut ack_freq_config = transport::ack_frequency::Config::default();
-	ack_freq_config.ack_eliciting_threshold = 10u32.into();
-	ack_freq_config.max_ack_delay = Some(max_ack_delay);
+	let ack_freq_config = transport::ack_frequency::Config {
+		ack_eliciting_threshold: 10u32.into(),
+		max_ack_delay: Some(max_ack_delay),
+		..transport::ack_frequency::Config::default()
+	};
 	client_config.transport.ack_frequency = Some(ack_freq_config);
 	client_config.transport.mtu = None; // To keep traffic cleaner
 	client_config.transport.initial_rtt = Duration::from_millis(10); // To avoid delays from pacing
@@ -4963,10 +4984,12 @@ fn gso_truncation() {
 fn pad_initial_to_min_mtu() {
 	let _guard = subscribe();
 	for min_mtu in [INITIAL_MTU, 1280, 1333] {
-		let mut transport = transport::Config::default();
-		transport.initial_mtu = 1452;
-		transport.min_mtu = min_mtu;
-		transport.mtu = None;
+		let transport = transport::Config {
+			initial_mtu: 1452,
+			min_mtu,
+			mtu: None,
+			..transport::Config::default()
+		};
 		let mut config = client_config();
 		config.transport = transport;
 		let mut pair = Pair::default();
@@ -4997,9 +5020,11 @@ fn pad_initial_to_min_mtu() {
 fn min_mtu_does_not_pad_application_data() {
 	let _guard = subscribe();
 	const MTU: u16 = 1333;
-	let mut transport = transport::Config::default();
-	transport.min_mtu = MTU;
-	transport.mtu = None;
+	let transport = transport::Config {
+		min_mtu: MTU,
+		mtu: None,
+		..transport::Config::default()
+	};
 	let mut config = client_config();
 	config.transport = transport;
 	let mut pair = Pair::default();
@@ -5022,11 +5047,13 @@ fn min_mtu_limits_application_loss_probes() {
 	let _guard = subscribe();
 	const MIN_MTU: u16 = 1280;
 	const MTU: u16 = 1452;
-	let mut transport = transport::Config::default();
-	transport.initial_mtu = MTU;
-	transport.min_mtu = MIN_MTU;
-	transport.mtu = None;
-	transport.pad_to_mtu = true;
+	let transport = transport::Config {
+		initial_mtu: MTU,
+		min_mtu: MIN_MTU,
+		mtu: None,
+		pad_to_mtu: true,
+		..transport::Config::default()
+	};
 	let mut config = client_config();
 	config.transport = transport;
 	let mut pair = Pair::default();
@@ -5056,10 +5083,12 @@ fn min_mtu_limits_application_loss_probes() {
 fn pad_server_initial_to_min_mtu() {
 	let _guard = subscribe();
 	const MIN_MTU: u16 = 1333;
-	let mut transport = transport::Config::default();
-	transport.initial_mtu = 1452;
-	transport.min_mtu = MIN_MTU;
-	transport.mtu = None;
+	let transport = transport::Config {
+		initial_mtu: 1452,
+		min_mtu: MIN_MTU,
+		mtu: None,
+		..transport::Config::default()
+	};
 	let mut config = server_config();
 	config.transport = transport;
 	let mut pair = Pair::new(Default::default(), config);
@@ -5079,9 +5108,11 @@ fn pad_server_initial_to_min_mtu() {
 fn min_mtu_respects_peer_max_udp_payload_size() {
 	let _guard = subscribe();
 	const PEER_MAX: u16 = 1280;
-	let mut transport = transport::Config::default();
-	transport.min_mtu = 1452;
-	transport.mtu = None;
+	let transport = transport::Config {
+		min_mtu: 1452,
+		mtu: None,
+		..transport::Config::default()
+	};
 	let mut config = server_config();
 	config.transport = transport;
 	let server = Endpoint::new(
@@ -5092,8 +5123,10 @@ fn min_mtu_respects_peer_max_udp_payload_size() {
 		true,
 	)
 	.unwrap();
-	let mut endpoint_config = endpoint::Config::default();
-	endpoint_config.max_udp_payload_size = PEER_MAX;
+	let endpoint_config = endpoint::Config {
+		max_udp_payload_size: PEER_MAX,
+		..endpoint::Config::default()
+	};
 	let client = Endpoint::new(endpoint_config, true).unwrap();
 	let mut pair = Pair::new_from_endpoint(client, server);
 	let client_ch = pair.begin_connect(client_config());
@@ -5121,7 +5154,7 @@ fn pad_to_mtu() {
 			pad_to_mtu: true,
 			..transport::Config::default()
 		};
-		c_config.transport = t_config.into();
+		c_config.transport = t_config;
 		c_config
 	};
 	let mut pair = Pair::default();
@@ -5604,11 +5637,15 @@ fn qlog_packet_lost_trigger() {
 
 	let _guard = subscribe();
 	let qlog = SharedBuffer::default();
-	let mut qlog_config = transport::qlog::Config::default();
-	qlog_config.writer = Some(Box::new(qlog.clone()));
-	let mut transport = transport::Config::default();
-	transport.deterministic_packet_numbers = true;
-	transport.qlog = qlog_config.into_stream();
+	let qlog_config = transport::qlog::Config {
+		writer: Some(Box::new(qlog.clone())),
+		..transport::qlog::Config::default()
+	};
+	let transport = transport::Config {
+		deterministic_packet_numbers: true,
+		qlog: qlog_config.into_stream(),
+		..transport::Config::default()
+	};
 	let mut config = client_config();
 	config.transport = transport;
 	let mut pair = Pair::default();
@@ -5662,16 +5699,16 @@ fn qlog_pacing_rate_is_bits_per_second() {
 
 	const BYTES_PER_SECOND: u64 = 125_000;
 	let qlog = SharedBuffer::default();
-	let mut qlog_config = transport::qlog::Config::default();
-	qlog_config.writer = Some(Box::new(qlog.clone()));
-	let mut transport = transport::Config::default();
-	transport.congestion = Arc::new(PacketRecorderFactory {
+	let qlog_config = transport::qlog::Config {
+		writer: Some(Box::new(qlog.clone())),
+		..transport::qlog::Config::default()
+	};
+	let mut config = client_config();
+	config.transport.congestion = Arc::new(PacketRecorderFactory {
 		pacing_rate: Some(BYTES_PER_SECOND),
 		..Default::default()
 	});
-	transport.qlog = qlog_config.into_stream();
-	let mut config = client_config();
-	config.transport = transport;
+	config.transport.qlog = qlog_config.into_stream();
 	let mut pair = Pair::default();
 	pair.connect_with(config);
 
@@ -5789,12 +5826,10 @@ fn cwnd_limited_is_not_reported_when_only_pacing_blocks() {
 	let _guard = subscribe();
 	let reports = Arc::new(AtomicU64::new(0));
 
-	let mut transport = transport::Config::default();
-	transport.congestion = Arc::new(PacingOnlyConfig {
+	let mut client_cfg = client_config();
+	client_cfg.transport.congestion = Arc::new(PacingOnlyConfig {
 		cwnd_limited_reports: reports.clone(),
 	});
-	let mut client_cfg = client_config();
-	client_cfg.transport = transport;
 
 	let mut pair = Pair::default();
 	let (client_ch, _) = pair.connect_with(client_cfg);
@@ -5871,12 +5906,10 @@ fn send_quantum_bounds_the_gso_batch() {
 
 	let _guard = subscribe();
 
-	let mut transport = transport::Config::default();
-	transport.congestion = Arc::new(FixedQuantumController {
+	let mut client_cfg = client_config();
+	client_cfg.transport.congestion = Arc::new(FixedQuantumController {
 		send_quantum: QUANTUM_DATAGRAMS as u64 * DEFAULT_MTU as u64,
 	});
-	let mut client_cfg = client_config();
-	client_cfg.transport = transport;
 
 	let mut pair = Pair::default();
 	let (client_ch, _) = pair.connect_with(client_cfg);
@@ -6066,9 +6099,11 @@ fn check_packet_resolution(log: &PacketLog) -> Vec<PacketEvent> {
 fn congestion_callbacks_resolve_each_packet_once() {
 	let _guard = subscribe();
 	let factory = Arc::new(PacketRecorderFactory::default());
-	let mut transport = transport::Config::default();
-	transport.deterministic_packet_numbers = true;
-	transport.congestion = factory.clone();
+	let transport = transport::Config {
+		deterministic_packet_numbers: true,
+		congestion: factory.clone(),
+		..transport::Config::default()
+	};
 
 	let mut server_cfg = server_config();
 	server_cfg.transport = transport.clone();
@@ -6112,8 +6147,10 @@ fn congestion_callbacks_resolve_each_packet_once() {
 /// Connects a pair whose controllers record their callbacks, returning the client's log.
 fn recorded_pair(factory: PacketRecorderFactory) -> (Pair, ConnectionHandle, PacketLog) {
 	let factory = Arc::new(factory);
-	let mut transport = transport::Config::default();
-	transport.congestion = factory.clone();
+	let transport = transport::Config {
+		congestion: factory.clone(),
+		..transport::Config::default()
+	};
 
 	let mut server_cfg = server_config();
 	server_cfg.transport = transport.clone();
@@ -6192,9 +6229,11 @@ fn invalid_ecn_feedback_reports_no_congestion() {
 fn padded_ack_only_packets_resolve_exactly() {
 	let _guard = subscribe();
 	let factory = Arc::new(PacketRecorderFactory::default());
-	let mut transport = transport::Config::default();
-	transport.congestion = factory.clone();
-	transport.pad_to_mtu = true;
+	let transport = transport::Config {
+		congestion: factory.clone(),
+		pad_to_mtu: true,
+		..transport::Config::default()
+	};
 	let mut server_cfg = server_config();
 	server_cfg.transport = transport.clone();
 	let mut pair = Pair::new(Default::default(), server_cfg);
@@ -6411,7 +6450,7 @@ fn lease_spends_connection_window_only() {
 	let mut pair = Pair::new(
 		Default::default(),
 		server::Config {
-			transport: transport,
+			transport,
 			..server_config()
 		},
 	);
@@ -6481,8 +6520,10 @@ fn receiver_credit_is_starvation() {
 	let mut server_cfg = server_config();
 	server_cfg.transport = server_transport;
 	let mut pair = Pair::new(Default::default(), server_cfg);
-	let mut client_transport = transport::Config::default();
-	client_transport.congestion = factory.clone();
+	let client_transport = transport::Config {
+		congestion: factory.clone(),
+		..transport::Config::default()
+	};
 	let mut client_cfg = client_config();
 	client_cfg.transport = client_transport;
 	let (ch, _) = pair.connect_with(client_cfg);
@@ -6511,8 +6552,10 @@ fn receiver_credit_is_starvation() {
 fn congestion_callbacks_identify_the_initial_a_retry_acks() {
 	let _guard = subscribe();
 	let factory = Arc::new(PacketRecorderFactory::default());
-	let mut transport = transport::Config::default();
-	transport.congestion = factory.clone();
+	let transport = transport::Config {
+		congestion: factory.clone(),
+		..transport::Config::default()
+	};
 	let mut client_cfg = client_config();
 	client_cfg.transport = transport;
 
@@ -6601,14 +6644,12 @@ fn bbr_burst_after_long_idle_keeps_learned_bandwidth() {
 
 	let _guard = subscribe();
 	entropy::reseed(SEED);
-	let mut transport = transport::Config::default();
-	// Only the sender pings. A ping from the receiver would reset the sender's keep-alive timer,
-	// leaving its controller nothing to sample during the idle.
-	transport.keep_alive = Some(Duration::from_secs(10));
 	let mut pair = Pair::default();
 	pair.latency = Duration::from_millis(25);
 	let mut client_cfg = client_config();
-	client_cfg.transport = transport;
+	// Only the sender pings. A ping from the receiver would reset the sender's keep-alive timer,
+	// leaving its controller nothing to sample during the idle.
+	client_cfg.transport.keep_alive = Some(Duration::from_secs(10));
 	let (client_ch, server_ch) = pair.connect_with(client_cfg);
 	pair.to_server.bottleneck = Some(Bottleneck::new(BPS_LIMIT, 100_000, false));
 

@@ -58,8 +58,10 @@ pub(super) struct Pair {
 impl Pair {
 	pub(super) fn default_with_deterministic_pns() -> Self {
 		let mut cfg = server_config();
-		let mut transport = transport::Config::default();
-		transport.deterministic_packet_numbers = true;
+		let transport = transport::Config {
+			deterministic_packet_numbers: true,
+			..transport::Config::default()
+		};
 		cfg.transport = transport;
 		Self::new(Default::default(), cfg)
 	}
@@ -850,8 +852,10 @@ pub(super) fn client_config() -> client::Config {
 
 pub(super) fn client_config_with_deterministic_pns() -> client::Config {
 	let mut cfg = client::Config::new(Arc::new(client_crypto()));
-	let mut transport = transport::Config::default();
-	transport.deterministic_packet_numbers = true;
+	let transport = transport::Config {
+		deterministic_packet_numbers: true,
+		..transport::Config::default()
+	};
 	cfg.transport = transport;
 	cfg
 }
@@ -861,9 +865,10 @@ pub(super) fn client_config_with_deterministic_pns() -> client::Config {
 /// At zero RTT the window-derived pacer stops pacing, so a lockstep script sees whole windows
 /// leave at once, while BBR3 paces from its own rate and releases a burst nanoseconds later.
 pub(super) fn cubic_transport() -> transport::Config {
-	let mut transport = transport::Config::default();
-	transport.congestion = Arc::new(congestion::CubicConfig::default());
-	transport
+	transport::Config {
+		congestion: Arc::new(congestion::CubicConfig::default()),
+		..transport::Config::default()
+	}
 }
 
 pub(super) fn client_config_with_certs(certs: Vec<CertificateDer<'static>>) -> client::Config {

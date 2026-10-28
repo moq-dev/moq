@@ -100,10 +100,12 @@ fn restart(reset_secret: bool) -> Result<driver::connection::Error, tokio::time:
 		tls.alpn_protocols = vec![b"moq-lite-06".to_vec()];
 		let quic = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("quic config");
 
-		let endpoint = driver::endpoint::Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("endpoint");
+		let endpoint =
+			driver::endpoint::Endpoint::new(Default::default(), std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+				.expect("endpoint");
 		let conn = endpoint
-			.connect_with(
-				driver::client::Config::new(Arc::new(quic)),
+			.connect(
+				&driver::client::Config::new(Arc::new(quic)),
 				([127, 0, 0, 1], port).into(),
 				"localhost",
 			)

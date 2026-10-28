@@ -829,7 +829,7 @@ impl Server {
 	pub fn local_addr(&self) -> crate::Result<net::SocketAddr> {
 		#[cfg(feature = "quic")]
 		if let Some(quic) = self.quic.as_ref() {
-			return Ok(quic.local_addr()?);
+			return Ok(quic.local_addr());
 		}
 		// No QUIC backend (e.g. a stream-only `--listen-tcp-bind`).
 		Err(Error::NoBackend("no QUIC listener configured"))

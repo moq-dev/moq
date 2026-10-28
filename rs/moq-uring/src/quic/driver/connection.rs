@@ -7,7 +7,7 @@ use std::rc::{Rc, Weak};
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
-use moq_quic::{ConnectionHandle, Dir, StreamId, VarInt};
+use moq_quic::{Dir, StreamId, VarInt, endpoint::ConnectionHandle};
 use rustc_hash::FxHashMap;
 
 use super::super::Error;
@@ -86,10 +86,9 @@ pub(crate) struct State {
 	/// waiting out a drain it could never transmit.
 	dead: bool,
 
-	/// The close this side asked for, until the driver has put it on the wire.
-	/// moq-quic raises no event for it, so this is what the terminal error is
-	/// built from.
-	local_close: Option<(u64, String)>,
+	/// The close this side asked for, as moq-quic reported it, until the driver
+	/// has put it on the wire.
+	local_close: Option<Error>,
 }
 
 impl State {
@@ -238,16 +237,9 @@ impl Inner {
 		self.conn.borrow_mut().close(
 			self.owner.now(),
 			VarInt::from_u64(code).unwrap_or(VarInt::MAX),
-			Bytes::copy_from_slice(reason.as_bytes()),
+			reason.to_string(),
 		);
-		// moq-quic raises no event for a close the application asked for, so the
-		// terminal error is ours to publish. Not here though: the driver
-		// publishes it once it has staged the CONNECTION_CLOSE, so a caller
-		// that stops driving the worker the moment `poll_closed` resolves has
-		// at least handed the packet over first.
-		let mut state = self.state.borrow_mut();
-		state.local_close.get_or_insert((code, reason.to_string()));
-		state.driver.wake();
+		self.state.borrow_mut().driver.wake();
 	}
 }
 
@@ -857,6 +849,12 @@ impl Driver {
 					state.established = true;
 					state.establish_waiters.wake();
 				}
+				// The driver publishes a local close once it has staged the
+				// CONNECTION_CLOSE, so a caller that stops driving the worker the
+				// moment `poll_closed` resolves has at least handed the packet over.
+				moq_quic::Event::ConnectionLost {
+					reason: reason @ moq_quic::connection::Error::LocallyClosed { .. },
+				} => state.local_close = Some(reason.into()),
 				moq_quic::Event::ConnectionLost { reason } => state.fail(reason.into()),
 				moq_quic::Event::DatagramReceived => state.datagram_recv_waiters.wake(),
 				moq_quic::Event::HandshakeDataReady => {}
@@ -869,18 +867,16 @@ impl Driver {
 
 	/// Publish the terminal error for a close this side asked for.
 	///
-	/// moq-quic raises no event for it, so the driver is what reports it, and
-	/// only once the CONNECTION_CLOSE is staged (or the drain is over), since
+	/// Only once the CONNECTION_CLOSE is staged (or the drain is over), since
 	/// an application is free to stop driving the worker the moment
 	/// `poll_closed` resolves. Staged is not delivered: the send is
 	/// fire-and-forget, so a worker torn down in the same breath can still
 	/// take the packet with it and leave the peer to idle out.
 	fn publish_close(&mut self) {
 		let mut state = self.shared.state.borrow_mut();
-		let Some((code, reason)) = state.local_close.take() else {
-			return;
-		};
-		state.fail(Error::App { code, reason });
+		if let Some(err) = state.local_close.take() {
+			state.fail(err);
+		}
 	}
 
 	/// Stage one GSO train, then yield so another connection sharing the

@@ -175,14 +175,17 @@ impl Session {
 				if !close.set(err.into()) {
 					return;
 				}
-				conn.close(http3_code, reason.as_bytes());
+				conn.close(http3_code, &reason);
 			}
 			None => {
-				let err = crate::quic::driver::connection::Error::LocallyClosed.into();
-				if !close.set(err) {
+				let err = crate::quic::driver::connection::Error::LocallyClosed {
+					code: http3_code,
+					reason: String::new(),
+				};
+				if !close.set(err.into()) {
 					return;
 				}
-				conn.close(http3_code, b"");
+				conn.close(http3_code, "");
 			}
 		};
 	}
@@ -420,14 +423,17 @@ impl Session {
 	/// that keeps the session alive until then, so the caller may drop it right away.
 	/// `await` [`Session::closed()`] to learn when the connection is gone. Session
 	/// operations will fail once the QUIC connection is closed.
-	pub fn close(&self, code: u32, reason: &[u8]) {
+	pub fn close(&self, code: u32, reason: &str) {
 		// First close wins: a no-op if the connection already closed, the background
 		// task recorded a remote close, or close() was already called.
 		if let Some(err) = self.conn.close_reason() {
 			self.close.set(self.map_error(err));
 			return;
 		}
-		let err = SessionError::ConnectionError(crate::quic::driver::connection::Error::LocallyClosed);
+		let err = SessionError::ConnectionError(crate::quic::driver::connection::Error::LocallyClosed {
+			code: code.into(),
+			reason: reason.to_string(),
+		});
 		if !self.close.set(err) {
 			return;
 		}
@@ -437,8 +443,10 @@ impl Session {
 			let send = self.connect_send.lock().unwrap().take();
 
 			if let Some(send) = send {
-				let reason = String::from_utf8_lossy(reason).into_owned();
-				let capsule = web_transport_proto::Capsule::CloseWebTransportSession { code, reason };
+				let capsule = web_transport_proto::Capsule::CloseWebTransportSession {
+					code,
+					reason: reason.to_string(),
+				};
 				let timeout = (self.conn.rtt() * 3).max(Duration::from_millis(100));
 
 				// The task owns a clone of the whole session, not just the connection:
@@ -476,7 +484,7 @@ impl Session {
 		Frame::DATA.encode(&mut frame);
 		let Ok(len) = VarInt::try_from(capsule_bytes.len()) else {
 			tracing::warn!("capsule too large to encode as DATA frame");
-			self.conn.close(http3_code, b"");
+			self.conn.close(http3_code, "");
 			return;
 		};
 		len.encode(&mut frame);
@@ -485,14 +493,14 @@ impl Session {
 		// Write the DATA frame to the CONNECT send stream.
 		if let Err(e) = send.write_all(&frame).await {
 			tracing::warn!(?e, "failed to write CloseWebTransportSession capsule");
-			self.conn.close(http3_code, b"");
+			self.conn.close(http3_code, "");
 			return;
 		}
 
 		// FIN the send stream so the peer knows no more capsules are coming.
 		if let Err(e) = send.finish() {
 			tracing::warn!(?e, "failed to finish CONNECT send stream");
-			self.conn.close(http3_code, b"");
+			self.conn.close(http3_code, "");
 			return;
 		}
 
@@ -503,7 +511,7 @@ impl Session {
 			Ok(None) => {}
 			Ok(Some(code)) => {
 				tracing::debug!(?code, "peer stopped the CONNECT stream during close");
-				self.conn.close(http3_code, b"");
+				self.conn.close(http3_code, "");
 				return;
 			}
 			Err(e) => {
@@ -515,7 +523,7 @@ impl Session {
 		// Wait for the peer to close the CONNECT stream after receiving the capsule.
 		if moq_clock::timeout(timeout, self.conn.closed()).await.is_err() {
 			tracing::debug!("timeout waiting for peer to close; force-closing connection");
-			self.conn.close(http3_code, b"");
+			self.conn.close(http3_code, "");
 		}
 	}
 
@@ -1033,7 +1041,7 @@ impl web_transport_trait::Session for Session {
 	}
 
 	fn close(&self, code: u32, reason: &str) {
-		Self::close(self, code, reason.as_bytes());
+		Self::close(self, code, reason);
 	}
 
 	async fn closed(&self) -> Self::Error {
@@ -1097,47 +1105,36 @@ mod tests {
 		gate: Arc<Gate>,
 	}
 
-	#[derive(Debug)]
-	struct Sender {
-		inner: Pin<Box<dyn crate::quic::driver::UdpSender>>,
-		gate: Arc<Gate>,
-	}
-
-	impl crate::quic::driver::UdpSender for Sender {
-		fn poll_send(
-			self: Pin<&mut Self>,
-			transmit: &moq_sock::udp::Transmit<'_>,
-			cx: &mut Context<'_>,
-		) -> Poll<io::Result<()>> {
-			let this = self.get_mut();
-			let mut wakers = this.gate.wakers.lock().unwrap();
-			if this.gate.blocked.load(Ordering::SeqCst) {
-				if !wakers.iter().any(|waker| waker.will_wake(cx.waker())) {
-					wakers.push(cx.waker().clone());
-				}
-				this.gate.attempted.notify_one();
-				return Poll::Pending;
-			}
-			drop(wakers);
-			this.inner.as_mut().poll_send(transmit, cx)
-		}
-	}
-
 	impl crate::quic::driver::endpoint::AsyncUdpSocket for Socket {
-		fn create_sender(&self) -> Pin<Box<dyn crate::quic::driver::UdpSender>> {
-			Box::pin(Sender {
-				inner: self.inner.create_sender(),
-				gate: self.gate.clone(),
-			})
-		}
 		fn poll_recv(
-			&mut self,
+			&self,
 			cx: &mut Context<'_>,
 			bufs: &mut [IoSliceMut<'_>],
 			meta: &mut [moq_sock::udp::RecvMeta],
 		) -> Poll<io::Result<usize>> {
 			self.inner.poll_recv(cx, bufs, meta)
 		}
+
+		fn try_send(&self, transmit: &moq_sock::udp::Transmit<'_>) -> io::Result<()> {
+			if self.gate.blocked.load(Ordering::SeqCst) {
+				self.gate.attempted.notify_one();
+				return Err(io::ErrorKind::WouldBlock.into());
+			}
+			self.inner.try_send(transmit)
+		}
+
+		fn poll_writable(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+			let mut wakers = self.gate.wakers.lock().unwrap();
+			if self.gate.blocked.load(Ordering::SeqCst) {
+				if !wakers.iter().any(|waker| waker.will_wake(cx.waker())) {
+					wakers.push(cx.waker().clone());
+				}
+				return Poll::Pending;
+			}
+			drop(wakers);
+			self.inner.poll_writable(cx)
+		}
+
 		fn local_addr(&self) -> io::Result<SocketAddr> {
 			self.inner.local_addr()
 		}
@@ -1179,28 +1176,29 @@ mod tests {
 
 		let mut server_config =
 			crate::quic::driver::server::Config::with_single_cert(vec![cert.der().clone()], key).unwrap();
-		server_config.transport_config(Arc::new(server_transport));
+		server_config.transport = server_transport;
 		let udp = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
 		let gate = Arc::new(Gate::default());
 		let socket = Socket {
 			inner: crate::quic::driver::wrap_udp_socket(udp).unwrap(),
 			gate: gate.clone(),
 		};
-		let server = crate::quic::driver::endpoint::Endpoint::new_with_abstract_socket(
-			Default::default(),
-			Some(server_config),
-			Box::new(socket),
+		let socket: Box<dyn crate::quic::driver::endpoint::AsyncUdpSocket> = Box::new(socket);
+		let server = crate::quic::driver::endpoint::Endpoint::new(
+			crate::quic::driver::endpoint::Config::default().with_server(server_config),
+			socket,
 		)
 		.unwrap();
 
 		let mut roots = rustls::RootCertStore::empty();
 		roots.add(cert.der().clone()).unwrap();
 		let mut client_config = crate::quic::driver::client::Config::with_root_certificates(Arc::new(roots)).unwrap();
-		client_config.transport_config(Arc::new(client_transport));
-		let client = crate::quic::driver::endpoint::Endpoint::client((Ipv4Addr::LOCALHOST, 0).into()).unwrap();
+		client_config.transport = client_transport;
+		let udp = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+		let client = crate::quic::driver::endpoint::Endpoint::new(Default::default(), udp).unwrap();
 
 		let connecting = client
-			.connect_with(client_config, server.local_addr().unwrap(), "localhost")
+			.connect(&client_config, server.local_addr(), "localhost")
 			.unwrap();
 		let accept = async { server.accept().await.unwrap().accept().unwrap().await.unwrap() };
 		let (client_conn, server_conn) = tokio::join!(async { connecting.await.unwrap() }, accept);
@@ -1212,7 +1210,7 @@ mod tests {
 	async fn request_credit_refusal_does_not_leave_an_open() {
 		use moq_net::transport::poll::{SendStream as _, Session as _};
 		let mut transport = crate::quic::driver::transport::Config::default();
-		transport.max_concurrent_bidi_streams(1_u32.into());
+		transport.limits.max_streams = std::num::NonZeroU64::new(1);
 		let (client, server, _endpoints, _) = gated_pair_with_transport(transport, Default::default()).await;
 		let mut client = crate::transport::Session::new(Session::raw(client), moq_net::transport::Address::Setup);
 		let mut server = crate::transport::Session::new(Session::raw(server), moq_net::transport::Address::Setup);
@@ -1243,15 +1241,16 @@ mod tests {
 	async fn request_header_send_pressure_keeps_its_admitted_stream() {
 		use moq_net::transport::poll::Session as _;
 		let mut server_transport = crate::quic::driver::transport::Config::default();
-		server_transport.max_concurrent_bidi_streams(1_u32.into());
+		server_transport.limits.max_streams = std::num::NonZeroU64::new(1);
 		let mut client_transport = crate::quic::driver::transport::Config::default();
-		client_transport.send_window(0);
+		// One byte, so the two-byte header cannot fully enter the send window.
+		client_transport.limits.send_window = std::num::NonZeroU64::new(1);
 		let (client, _server, _endpoints, _) = gated_pair_with_transport(server_transport, client_transport).await;
 		let mut web = Session::raw(client.clone());
 		web.header_bi = vec![0x41, 0];
 		let mut session = crate::transport::Session::new(web, moq_net::transport::Address::Setup);
 		let mut cx = Context::from_waker(std::task::Waker::noop());
-		// The only stream credit is consumed, but the header cannot enter the send window.
+		// The only stream credit is consumed, but the header cannot fully enter the send window.
 		assert!(session.poll_open_request(&mut cx, Default::default()).is_pending());
 		assert!(client.open_request().unwrap().is_none());
 		// Polling the admitted request never rechecks credit or starts another open.
@@ -1282,7 +1281,7 @@ mod tests {
 		let settings = Arc::downgrade(server.settings.as_ref().unwrap());
 		tokio::time::pause();
 		gate.blocked.store(true, Ordering::SeqCst);
-		server.close(2, b"unauthorized");
+		server.close(2, "unauthorized");
 		drop(server);
 		gate.attempted.notified().await;
 		tokio::time::advance(Duration::from_secs(1)).await;
@@ -1293,7 +1292,7 @@ mod tests {
 		);
 
 		if cancel {
-			conn.close(0u32.into(), b"drain deadline");
+			conn.close(0u32.into(), "drain deadline");
 			conn.closed().await;
 			tokio::task::yield_now().await;
 			assert_eq!(
@@ -1340,7 +1339,7 @@ mod tests {
 		send.write_all(&[0x21, 0x00]).await.unwrap();
 		let (_send, recv) = server.accept_bi().await.unwrap();
 
-		client.close(0u32.into(), b"done");
+		client.close(0u32.into(), "done");
 		assert!(Session::read_capsules(&server, recv).await.is_none());
 		assert!(!logs_contain("failed to read capsule"), "an ordinary close warned");
 	}
@@ -1374,7 +1373,7 @@ mod tests {
 			.unwrap();
 		send.finish().unwrap();
 		assert!(send.stopped().await.unwrap().is_none());
-		client.close(0u32.into(), b"done");
+		client.close(0u32.into(), "done");
 		server.closed().await;
 		let mut accept = SessionAccept::new(server, SESSION, Arc::new(CloseReason::new(false)), Vec::new());
 		let mut recv = kio::wait(|waiter| accept.poll_accept_uni(waiter))
@@ -1625,7 +1624,7 @@ mod tests {
 		let (client, server, _endpoints) = pair().await;
 		let mut send = client.open_uni(Default::default()).await.unwrap();
 		send.write_all(&[0x02]).await.unwrap();
-		client.close(0u32.into(), b"done");
+		client.close(0u32.into(), "done");
 		assert!(crate::quic::web::Request::accept(server).await.is_err());
 	}
 }

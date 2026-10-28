@@ -18,10 +18,11 @@ mod schedule;
 
 /// The transport every characterization pair runs: Cubic with deterministic packet numbers
 fn transport() -> transport::Config {
-	let mut transport = transport::Config::default();
-	transport.congestion = Arc::new(congestion::CubicConfig::default());
-	transport.deterministic_packet_numbers = true;
-	transport
+	transport::Config {
+		congestion: Arc::new(congestion::CubicConfig::default()),
+		deterministic_packet_numbers: true,
+		..transport::Config::default()
+	}
 }
 
 /// A pair whose server runs [`transport`] with `configure` applied

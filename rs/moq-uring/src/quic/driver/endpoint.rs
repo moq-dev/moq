@@ -12,11 +12,13 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, VecDeque};
 use std::net::SocketAddr;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::task::Poll;
 
 use bytes::BytesMut;
-use moq_quic::{ConnectionHandle, DatagramEvent, Incoming, Transmit};
+use moq_quic::{
+	Transmit,
+	endpoint::{ConnectionHandle, DatagramEvent, Dial, Incoming, Received},
+};
 use rustc_hash::FxHashMap;
 
 use super::super::{Error, endpoint::Config};
@@ -96,8 +98,8 @@ impl Endpoint {
 				let mut server = super::server_config(server)?;
 				// moq-quic buffers half-open handshakes itself, so it enforces
 				// the same bound the accept queue does.
-				server.max_incoming(config.backlog);
-				Some(Arc::new(server))
+				server.max_incoming = config.backlog;
+				Some(server)
 			}
 			None => None,
 		};
@@ -106,10 +108,9 @@ impl Endpoint {
 		// path is lost rather than delivered in pieces, and discovery can trust
 		// what arrives. Each connection's transport still decides whether to probe.
 		let endpoint = moq_quic::endpoint::Endpoint::new(
-			super::endpoint_config(socket.shard(), config.reset_secret.as_ref()),
-			server,
+			super::endpoint_config(socket.shard(), config.reset_secret, server),
 			true,
-		);
+		)?;
 
 		let inner = Rc::new(Inner {
 			activity: config.activity,
@@ -174,7 +175,14 @@ impl Endpoint {
 			.inner
 			.endpoint
 			.borrow_mut()
-			.connect(self.inner.owner.now(), client, config.peer, &config.server_name)
+			.connect(
+				self.inner.owner.now(),
+				Dial {
+					config: &client,
+					remote: config.peer,
+					server_name: &config.server_name,
+				},
+			)
 			.map_err(|err| Error::Quic(err.to_string()))?;
 		let shared = self.inner.launch(key, conn);
 		// Flush the Initial flight; the demux task takes it from here.
@@ -283,10 +291,13 @@ impl Inner {
 			buf.clear();
 			// The local address lets moq-quic answer from the one the peer
 			// reached, which a wildcard bind on a multihomed host needs.
-			let event = self
-				.endpoint
-				.borrow_mut()
-				.handle(self.owner.now(), from, dst_ip, ecn, segment, &mut buf);
+			let received = Received {
+				remote: from,
+				local_ip: dst_ip,
+				ecn,
+				data: segment,
+			};
+			let event = self.endpoint.borrow_mut().handle(self.owner.now(), received, &mut buf);
 			match event {
 				Some(DatagramEvent::ConnectionEvent(key, event)) => {
 					let conn = self.conns.borrow().get(&key).cloned();
@@ -364,7 +375,7 @@ impl Inner {
 			.handshake
 			.timeout
 			.and_then(|timeout| self.owner.now().checked_add(timeout));
-		let accepted = self.endpoint.borrow_mut().accept(incoming, self.owner.now(), buf, None);
+		let accepted = self.endpoint.borrow_mut().accept(incoming, self.owner.now(), buf);
 		let (key, conn) = match accepted {
 			Ok(accepted) => accepted,
 			Err(err) => {

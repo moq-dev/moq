@@ -69,3 +69,41 @@ impl AsyncUdpSocket for UdpSocket {
 		self.inner.may_fragment()
 	}
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+	use std::net::SocketAddr;
+
+	use super::*;
+
+	/// A real socket hands a send that finds no route back to the connection rather than logging
+	/// it as loss. Linux refuses a v4-mapped destination on an IPv6-only socket with
+	/// `ENETUNREACH`, an unroutable family without touching the host's routes.
+	#[tokio::test]
+	async fn socket_returns_unreachable_sends() {
+		let socket = socket2::Socket::new(
+			socket2::Domain::IPV6,
+			socket2::Type::DGRAM,
+			Some(socket2::Protocol::UDP),
+		)
+		.unwrap();
+		socket.set_only_v6(true).unwrap();
+		socket.set_nonblocking(true).unwrap();
+		socket
+			.bind(&SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, 0)).into())
+			.unwrap();
+		let slot = super::super::Slot::new(wrap_udp_socket(socket.into()).unwrap());
+
+		let transmit = moq_sock::udp::Transmit {
+			destination: SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.to_ipv6_mapped().into(), 1),
+			ecn: None,
+			contents: b"hello",
+			segment_size: None,
+			src_ip: None,
+		};
+		let result = std::future::poll_fn(|cx| slot.poll_send(&transmit, cx)).await;
+
+		let err = result.expect_err("an unroutable send must reach the connection");
+		assert_eq!(err.kind(), io::ErrorKind::NetworkUnreachable);
+	}
+}

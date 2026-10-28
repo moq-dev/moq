@@ -215,8 +215,10 @@ mod tests {
 	#[test]
 	fn configured_max_ack_delay_stays_below_limit() {
 		let state = AckFrequencyState::new(Duration::from_millis(25));
-		let mut config = ack_frequency::Config::default();
-		config.max_ack_delay = Some(MAX_ACK_DELAY_LIMIT);
+		let config = ack_frequency::Config {
+			max_ack_delay: Some(MAX_ACK_DELAY_LIMIT),
+			..ack_frequency::Config::default()
+		};
 		let delay = state.candidate_max_ack_delay(MAX_ACK_DELAY_LIMIT * 2, &config, &TransportParameters::default());
 		assert_eq!(delay, MAX_ACK_DELAY_LIMIT - Duration::from_micros(1));
 	}
@@ -241,8 +243,10 @@ mod tests {
 			(Some(100), 50, 50),
 			(Some(100), 200, 100),
 		] {
-			let mut config = ack_frequency::Config::default();
-			config.max_ack_delay = configured.map(ms);
+			let config = ack_frequency::Config {
+				max_ack_delay: configured.map(ms),
+				..ack_frequency::Config::default()
+			};
 			let delay = state.candidate_max_ack_delay(ms(rtt), &config, &params);
 			assert_eq!(delay, ms(requested), "configured {configured:?} ms, RTT {rtt} ms");
 		}

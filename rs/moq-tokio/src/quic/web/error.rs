@@ -28,13 +28,6 @@ pub enum ClientError {
 
 	#[error("quic error: {0}")]
 	ConnectError(#[from] crate::quic::driver::endpoint::ConnectError),
-
-	#[error("invalid DNS name: {0}")]
-	InvalidDnsName(String),
-
-	#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
-	#[error("rustls error: {0}")]
-	Rustls(#[from] rustls::Error),
 }
 
 /// An errors returned by [`crate::quic::web::Session`], split based on if they are underlying QUIC errors or
@@ -57,9 +50,7 @@ impl From<crate::quic::driver::connection::Error> for SessionError {
 		match &e {
 			crate::quic::driver::connection::Error::ApplicationClosed(close) => {
 				match web_transport_proto::error_from_http3(close.error_code.into_inner()) {
-					Some(code) => {
-						WebTransportError::Closed(code, String::from_utf8_lossy(&close.reason).into_owned()).into()
-					}
+					Some(code) => WebTransportError::Closed(code, close.reason.clone()).into(),
 					None => SessionError::ConnectionError(e),
 				}
 			}
@@ -152,9 +143,7 @@ impl CloseReason {
 		match conn {
 			Some(crate::quic::driver::connection::Error::ApplicationClosed(close)) if self.raw => {
 				match u32::try_from(close.error_code.into_inner()) {
-					Ok(code) => {
-						WebTransportError::Closed(code, String::from_utf8_lossy(&close.reason).into_owned()).into()
-					}
+					Ok(code) => WebTransportError::Closed(code, close.reason.clone()).into(),
 					Err(_) => err,
 				}
 			}

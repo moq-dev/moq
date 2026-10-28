@@ -217,18 +217,22 @@ impl Endpoint {
 		self.inner.state.lock().unwrap().inner.open_connections()
 	}
 
-	/// Close every connection and refuse new ones, wait until each has sent its close to the
-	/// peer, then release the socket
+	/// Close every connection and refuse new ones at once; await the returned future to wait
+	/// until each has sent its close to the peer, then release the socket
 	///
 	/// Every connection closes with `error_code` and `reason`; see [`Connection::close()`].
-	/// Unlike waiting for the endpoint to go idle, this does not sit out each connection's
-	/// closing period, which only repeats the close to a peer that already has it.
+	/// The wait does not sit out each connection's closing period, which only repeats the
+	/// close to a peer that already has it. Dropping the future without awaiting it still
+	/// closes the connections, and the socket is released once they finish.
 	///
 	/// [`Connection::close()`]: crate::quic::driver::connection::Connection::close
-	pub async fn close(&self, error_code: VarInt, reason: &str) {
+	pub fn close(&self, error_code: VarInt, reason: &str) -> impl Future<Output = ()> + Send + 'static {
 		self.close_now(error_code, reason);
-		self.wait_all_draining().await;
-		self.inner.slot.release();
+		let endpoint = self.clone();
+		async move {
+			endpoint.wait_all_draining().await;
+			endpoint.inner.slot.release();
+		}
 	}
 
 	/// Close every connection and refuse new ones, without waiting for the closes to go out
@@ -278,7 +282,7 @@ impl Endpoint {
 	/// peer never answered the handshake, or once its closing period ends otherwise. An attempt
 	/// queued for [`accept()`](Self::accept) or partway through [`Incoming::accept`] still counts
 	/// as active.
-	async fn wait_all_draining(&self) {
+	pub(crate) async fn wait_all_draining(&self) {
 		loop {
 			{
 				let endpoint = &mut *self.inner.state.lock().unwrap();
@@ -290,6 +294,19 @@ impl Endpoint {
 			}
 			.await;
 		}
+	}
+
+	/// Set the client configuration [`dial`](Self::dial) uses, so tests need not carry it
+	#[cfg(test)]
+	pub(crate) fn set_default_client_config(&self, config: client::Config) {
+		*self.inner.default_client.lock().unwrap() = Some(config);
+	}
+
+	/// [`connect`](Self::connect) with the [default client config](Self::set_default_client_config)
+	#[cfg(test)]
+	pub(crate) fn dial(&self, addr: SocketAddr, server_name: &str) -> Result<Connecting, ConnectError> {
+		let config = self.inner.default_client.lock().unwrap().clone();
+		self.connect(&config.expect("a default client config"), addr, server_name)
 	}
 
 	/// Wait until a connection attempt is queued for [`accept()`](Endpoint::accept)
@@ -392,6 +409,9 @@ pub(crate) struct EndpointInner {
 	pub(crate) slot: Arc<Slot>,
 	/// Where the endpoint's and its connections' tasks run
 	pub(crate) runtime: tokio::runtime::Handle,
+	/// What [`Endpoint::dial`] connects with
+	#[cfg(test)]
+	default_client: Mutex<Option<client::Config>>,
 }
 
 impl EndpointInner {
@@ -754,6 +774,8 @@ impl EndpointRef {
 		Self(Arc::new(EndpointInner {
 			slot: Arc::new(slot),
 			runtime,
+			#[cfg(test)]
+			default_client: Mutex::new(None),
 			shared: Shared {
 				incoming: Notify::new(),
 				idle: Notify::new(),
@@ -804,6 +826,9 @@ impl std::ops::Deref for EndpointRef {
 	}
 }
 
+/// A receive from one of the endpoint's sockets, as [`AsyncUdpSocket::poll_recv`]
+type PollRecv<'a> = dyn FnMut(&mut Context<'_>, &mut [IoSliceMut<'_>], &mut [RecvMeta]) -> Poll<io::Result<usize>> + 'a;
+
 /// State directly involved in handling incoming packets
 struct RecvState {
 	incoming: VecDeque<moq_quic::endpoint::Incoming>,
@@ -840,7 +865,7 @@ impl RecvState {
 		&mut self,
 		cx: &mut Context<'_>,
 		endpoint: &mut moq_quic::endpoint::Endpoint,
-		recv: &mut dyn FnMut(&mut Context<'_>, &mut [IoSliceMut<'_>], &mut [RecvMeta]) -> Poll<io::Result<usize>>,
+		recv: &mut PollRecv<'_>,
 		slot: &Slot,
 		now: Instant,
 	) -> Result<PollProgress, io::Error> {

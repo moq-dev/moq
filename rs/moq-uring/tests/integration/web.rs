@@ -65,13 +65,11 @@ fn tokio_client(
 			.build()
 			.expect("tokio runtime");
 		rt.block_on(async move {
-			let client = moq_tokio::quic::web::ClientBuilder::new()
-				.dangerous()
-				.with_no_certificate_verification()
-				.expect("client");
 			let request = moq_tokio::quic::web::proto::ConnectRequest::new(url::Url::parse(&url).expect("url"))
 				.with_protocol(PROTO);
-			let session = client.connect(request).await.expect("connect");
+			let session = crate::support::web_connect(request, Default::default())
+				.await
+				.expect("connect");
 			body(session).await;
 		});
 	})
@@ -149,7 +147,7 @@ fn webtransport_echo_end_to_end() {
 			assert_eq!(&echoed[..], PAYLOAD, "datagram echo");
 
 			// The close code and reason must reach the server intact.
-			session.close(CLOSE_CODE, CLOSE_REASON.as_bytes());
+			session.close(CLOSE_CODE, CLOSE_REASON);
 			session.closed().await;
 		})
 	});
@@ -222,7 +220,7 @@ fn webtransport_accepts_a_buffered_uni_after_the_peer_close() {
 			send.write_all(PAYLOAD).await.expect("write");
 			send.finish().expect("finish");
 			assert!(send.stopped().await.expect("FIN delivered").is_none());
-			session.close(0, b"done");
+			session.close(0, "done");
 			session.closed().await;
 		})
 	});
@@ -391,20 +389,19 @@ fn tokio_client_err(url: String) -> std::thread::JoinHandle<moq_tokio::quic::web
 			.build()
 			.expect("tokio runtime");
 		rt.block_on(async move {
-			let client = moq_tokio::quic::web::ClientBuilder::new()
-				.dangerous()
-				.with_no_certificate_verification()
-				.expect("client");
 			let request = moq_tokio::quic::web::proto::ConnectRequest::new(url::Url::parse(&url).expect("url"))
 				.with_protocol(PROTO);
 			// The server answers by closing, so the failure has to arrive as
 			// that close. Waiting out the idle timeout would "fail" too, ten
 			// seconds later, which is what a peer sees when a close is
 			// published to the application before it reaches the wire.
-			tokio::time::timeout(std::time::Duration::from_secs(3), client.connect(request))
-				.await
-				.expect("the CONNECT must fail before the idle timeout")
-				.expect_err("the CONNECT must fail")
+			tokio::time::timeout(
+				std::time::Duration::from_secs(3),
+				crate::support::web_connect(request, Default::default()),
+			)
+			.await
+			.expect("the CONNECT must fail before the idle timeout")
+			.expect_err("the CONNECT must fail")
 		})
 	})
 }
@@ -563,7 +560,7 @@ fn a_dropped_stream_carries_a_webtransport_code() {
 				"got {err:?}"
 			);
 
-			session.close(CLOSE_CODE, CLOSE_REASON.as_bytes());
+			session.close(CLOSE_CODE, CLOSE_REASON);
 			session.closed().await;
 		})
 	});
@@ -705,7 +702,6 @@ fn a_reset_stream_keeps_its_header_without_credit() {
 	let certs = support::certs().expect("certificates");
 	let endpoint = h3_endpoint(&handle, &certs);
 	let addr = endpoint.local_addr();
-	let cert = std::fs::read(&certs.cert).expect("certificate");
 
 	let client = std::thread::spawn(move || {
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -714,31 +710,13 @@ fn a_reset_stream_keeps_its_header_without_credit() {
 			.build()
 			.expect("tokio runtime");
 		rt.block_on(async move {
-			use moq_tokio::quic::driver;
-			use rustls::pki_types::{CertificateDer, pem::PemObject as _};
-
-			let mut roots = rustls::RootCertStore::empty();
-			roots
-				.add(CertificateDer::from_pem_slice(&cert).expect("pem"))
-				.expect("root");
-			let mut crypto = rustls::ClientConfig::builder()
-				.with_root_certificates(roots)
-				.with_no_client_auth();
-			crypto.alpn_protocols = vec![b"h3".to_vec()];
-			let mut config = driver::client::Config::new(std::sync::Arc::new(
-				driver::crypto::rustls::QuicClientConfig::try_from(crypto).expect("quic crypto"),
-			));
 			// Little enough connection credit for the server to run out of
-			let mut transport = driver::transport::Config::default();
-			transport.receive_window(driver::VarInt::from_u32(16 * 1024));
-			config.transport_config(std::sync::Arc::new(transport));
-			let endpoint = driver::endpoint::Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("endpoint");
-			let client = moq_tokio::quic::web::Client::new(endpoint, config);
-
+			let mut transport = moq_tokio::quic::driver::transport::Config::default();
+			transport.limits.receive_window = std::num::NonZeroU64::new(16 * 1024);
 			let request =
 				moq_tokio::quic::web::proto::ConnectRequest::new(url::Url::parse(&format!("https://{addr}/")).unwrap())
 					.with_protocol(PROTO);
-			let session = client.connect(request).await.expect("connect");
+			let session = crate::support::web_connect(request, transport).await.expect("connect");
 
 			// Reading the filler returns the credit the reset stream waits on.
 			let mut filler = session.accept_uni().await.expect("accept_uni");
@@ -750,7 +728,7 @@ fn a_reset_stream_keeps_its_header_without_credit() {
 			let err = recv.read_chunk(usize::MAX).await.expect_err("the server reset it");
 			assert!(matches!(err, moq_tokio::quic::web::ReadError::Reset(7)), "got {err:?}");
 			// Only now, so the close cannot overtake the reset stream.
-			session.close(CLOSE_CODE, CLOSE_REASON.as_bytes());
+			session.close(CLOSE_CODE, CLOSE_REASON);
 			session.closed().await;
 		});
 	});

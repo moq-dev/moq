@@ -260,38 +260,6 @@ mod tests {
 		assert!(matches!(slot.poll_send(&transmit(), &mut cx), Poll::Ready(Ok(()))));
 	}
 
-	/// A real socket hands a send that finds no route back to the connection rather than logging
-	/// it as loss. Linux refuses a v4-mapped destination on an IPv6-only socket with
-	/// `ENETUNREACH`, an unroutable family without touching the host's routes.
-	#[cfg(target_os = "linux")]
-	#[tokio::test]
-	async fn socket_returns_unreachable_sends() {
-		let socket = socket2::Socket::new(
-			socket2::Domain::IPV6,
-			socket2::Type::DGRAM,
-			Some(socket2::Protocol::UDP),
-		)
-		.unwrap();
-		socket.set_only_v6(true).unwrap();
-		socket.set_nonblocking(true).unwrap();
-		socket
-			.bind(&SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, 0)).into())
-			.unwrap();
-		let slot = Slot::new(wrap_udp_socket(socket.into()).unwrap());
-
-		let transmit = Transmit {
-			destination: SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.to_ipv6_mapped().into(), 1),
-			ecn: None,
-			contents: b"hello",
-			segment_size: None,
-			src_ip: None,
-		};
-		let result = std::future::poll_fn(|cx| slot.poll_send(&transmit, cx)).await;
-
-		let err = result.expect_err("an unroutable send must reach the connection");
-		assert_eq!(err.kind(), io::ErrorKind::NetworkUnreachable);
-	}
-
 	fn transmit() -> Transmit<'static> {
 		Transmit {
 			destination: SocketAddr::from(([127, 0, 0, 1], 4433)),

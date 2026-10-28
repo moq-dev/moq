@@ -187,7 +187,7 @@ async fn within<T>(handle: &moq_uring::Handle, what: &str, future: impl Future<O
 /// the client's dial going through a path of `mtu`.
 fn endpoints(
 	handle: &moq_uring::Handle,
-	transport: &quic::Transport,
+	transport: &quic::transport::Config,
 	mtu: usize,
 ) -> (quic::Endpoint, quic::Endpoint, quic::client::Config, Path) {
 	let certs = support::certs().expect("certificates");
@@ -273,7 +273,7 @@ async fn transfer(handle: &moq_uring::Handle, from: &mut quic::Connection, to: &
 fn a_path_at_the_ipv6_minimum_connects() {
 	let Some(mut worker) = worker() else { return };
 	let handle = worker.handle();
-	let (server, client, dial, path) = endpoints(&handle, &quic::Transport::default(), IPV6_MIN);
+	let (server, client, dial, path) = endpoints(&handle, &quic::transport::Config::default(), IPV6_MIN);
 
 	worker
 		.block_on(async move {
@@ -291,7 +291,7 @@ fn a_path_at_the_ipv6_minimum_connects() {
 fn discovery_stays_off_by_default() {
 	let Some(mut worker) = worker() else { return };
 	let handle = worker.handle();
-	let (server, client, dial, path) = endpoints(&handle, &quic::Transport::default(), ETHERNET);
+	let (server, client, dial, path) = endpoints(&handle, &quic::transport::Config::default(), ETHERNET);
 
 	worker
 		.block_on(async move {
@@ -321,7 +321,7 @@ async fn discover(handle: &moq_uring::Handle, from: &mut quic::Connection, to: &
 fn discovery_finds_a_larger_mtu() {
 	let Some(mut worker) = worker() else { return };
 	let handle = worker.handle();
-	let mut transport = quic::Transport::default();
+	let mut transport = quic::transport::Config::default();
 	transport.mtu_discovery = true;
 	let (server, client, dial, path) = endpoints(&handle, &transport, ETHERNET);
 
@@ -357,7 +357,7 @@ fn discovery_finds_a_larger_mtu() {
 fn a_shrinking_path_falls_back_to_the_floor() {
 	let Some(mut worker) = worker() else { return };
 	let handle = worker.handle();
-	let mut transport = quic::Transport::default();
+	let mut transport = quic::transport::Config::default();
 	transport.mtu_discovery = true;
 	let (server, client, dial, path) = endpoints(&handle, &transport, ETHERNET);
 

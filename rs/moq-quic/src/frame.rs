@@ -273,7 +273,7 @@ impl From<TransportError> for ConnectionClose {
 		Self {
 			error_code: x.code,
 			frame_type: x.frame,
-			reason: x.reason.into(),
+			reason: x.reason,
 		}
 	}
 }

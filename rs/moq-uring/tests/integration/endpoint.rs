@@ -338,12 +338,7 @@ fn unsupported_version_is_negotiated_only_by_servers() {
 		.iter()
 		.map(|version| u32::from_be_bytes(*version))
 		.collect::<Vec<_>>();
-	assert!(
-		versions
-			.iter()
-			.any(|version| moq_quic::DEFAULT_SUPPORTED_VERSIONS.contains(version)),
-		"the supported version is offered: {versions:?}"
-	);
+	assert!(versions.contains(&1), "QUIC v1 is offered: {versions:?}");
 	drop((endpoint, dial_only));
 }
 

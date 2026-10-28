@@ -1,3 +1,5 @@
+//! A single connection: its streams, datagrams, and why it ends.
+
 use std::{
 	any::Any,
 	fmt,

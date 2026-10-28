@@ -683,6 +683,11 @@ impl Server {
 		self.quic.local_addr()
 	}
 
+	/// Close every connection without waiting for the closes to go out, as a drop must.
+	pub fn close(&self) {
+		drop(self.quic.close(driver::VarInt::from_u32(0), "server shutdown"));
+	}
+
 	/// Close every connection, wait until each has sent its close to the peer,
 	/// then release the socket.
 	pub async fn shutdown(self) {

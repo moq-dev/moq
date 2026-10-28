@@ -98,8 +98,8 @@ fn endpoints(
 			.server(&[ALPN], quic::server::ClientAuth::None)
 			.expect("tls"),
 	);
-	server_config.transport.receive_window = Some(window as u64);
-	server_config.transport.stream_receive_window = Some(stream_window as u64);
+	server_config.transport.limits.receive_window = std::num::NonZeroU64::new(window as u64);
+	server_config.transport.limits.stream_receive_window = std::num::NonZeroU64::new(stream_window as u64);
 	let server = quic::Endpoint::new(
 		socket(handle),
 		quic::endpoint::Config::default().with_server(server_config),
@@ -244,7 +244,7 @@ fn chunked_writes_stop_at_the_window() {
 			.server(&[ALPN], quic::server::ClientAuth::None)
 			.expect("tls"),
 	);
-	server_config.transport.stream_receive_window = Some(STREAM_WINDOW as u64);
+	server_config.transport.limits.stream_receive_window = std::num::NonZeroU64::new(STREAM_WINDOW as u64);
 	let server = quic::Endpoint::new(
 		socket(&handle),
 		quic::endpoint::Config::default().with_server(server_config),

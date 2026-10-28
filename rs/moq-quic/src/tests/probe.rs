@@ -253,9 +253,11 @@ fn run(scenario: &Scenario) -> Outcome {
 
 	let mut transport = transport::Config::default();
 	if let Some(threshold) = scenario.ack_threshold {
-		let mut ack = transport::ack_frequency::Config::default();
-		ack.ack_eliciting_threshold = threshold.into();
-		ack.max_ack_delay = Some(Duration::from_millis(25));
+		let ack = transport::ack_frequency::Config {
+			ack_eliciting_threshold: threshold.into(),
+			max_ack_delay: Some(Duration::from_millis(25)),
+			..transport::ack_frequency::Config::default()
+		};
 		transport.ack_frequency = Some(ack);
 	}
 	let mut config = client_config();

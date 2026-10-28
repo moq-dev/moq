@@ -642,8 +642,10 @@ mod tests {
 
 	#[test]
 	fn mtu_discovery_after_complete_reactivates_when_interval_elapsed() {
-		let mut config = mtu::Config::default();
-		config.upper_bound = 9_000;
+		let config = mtu::Config {
+			upper_bound: 9_000,
+			..mtu::Config::default()
+		};
 		let mut mtud = MtuDiscovery::new(1_200, 1_200, None, config);
 		let now = Instant::now();
 		drive_to_completion(&mut mtud, now, 1_500);
@@ -743,8 +745,10 @@ mod tests {
 
 	#[test]
 	fn mtu_discovery_with_1500_limit_and_10000_upper_bound() {
-		let mut config = mtu::Config::default();
-		config.upper_bound = 10_000;
+		let config = mtu::Config {
+			upper_bound: 10_000,
+			..mtu::Config::default()
+		};
 		let mut mtud = MtuDiscovery::new(1_200, 1_200, None, config);
 
 		let probed_sizes = drive_to_completion(&mut mtud, Instant::now(), 1500);
@@ -760,8 +764,10 @@ mod tests {
 
 	#[test]
 	fn mtu_discovery_no_lost_probes_finds_maximum_udp_payload() {
-		let mut config = mtu::Config::default();
-		config.upper_bound = MAX_UDP_PAYLOAD;
+		let config = mtu::Config {
+			upper_bound: MAX_UDP_PAYLOAD,
+			..mtu::Config::default()
+		};
 		let mut mtud = MtuDiscovery::new(1200, 1200, None, config);
 
 		drive_to_completion(&mut mtud, Instant::now(), u16::MAX);
@@ -772,8 +778,10 @@ mod tests {
 
 	#[test]
 	fn mtu_discovery_lost_half_of_probes_finds_maximum_udp_payload() {
-		let mut config = mtu::Config::default();
-		config.upper_bound = MAX_UDP_PAYLOAD;
+		let config = mtu::Config {
+			upper_bound: MAX_UDP_PAYLOAD,
+			..mtu::Config::default()
+		};
 		let mut mtud = MtuDiscovery::new(1200, 1200, None, config);
 
 		let now = Instant::now();
@@ -819,8 +827,10 @@ mod tests {
 
 	#[test]
 	fn search_state_lower_bound_higher_than_upper_bound_clamps_upper_bound() {
-		let mut config = mtu::Config::default();
-		config.upper_bound = 1400;
+		let config = mtu::Config {
+			upper_bound: 1400,
+			..mtu::Config::default()
+		};
 
 		let state = SearchState::new(1500, u16::MAX, &config);
 		assert_eq!(state.lower_bound, 1500);
@@ -829,8 +839,10 @@ mod tests {
 
 	#[test]
 	fn search_state_lower_bound_higher_than_peer_max_udp_payload_size_clamps_lower_bound() {
-		let mut config = mtu::Config::default();
-		config.upper_bound = 9000;
+		let config = mtu::Config {
+			upper_bound: 9000,
+			..mtu::Config::default()
+		};
 
 		let state = SearchState::new(1500, 1300, &config);
 		assert_eq!(state.lower_bound, 1300);
@@ -839,8 +851,10 @@ mod tests {
 
 	#[test]
 	fn search_state_upper_bound_higher_than_peer_max_udp_payload_size_clamps_upper_bound() {
-		let mut config = mtu::Config::default();
-		config.upper_bound = 9000;
+		let config = mtu::Config {
+			upper_bound: 9000,
+			..mtu::Config::default()
+		};
 
 		let state = SearchState::new(1200, 1450, &config);
 		assert_eq!(state.lower_bound, 1200);

@@ -29,7 +29,7 @@ pub struct Config {
 	pub identity: Option<Identity>,
 	/// The per-connection transport settings (timeouts, stream limits,
 	/// congestion control).
-	pub transport: super::Transport,
+	pub transport: super::transport::Config,
 }
 
 impl Config {
@@ -43,7 +43,7 @@ impl Config {
 			roots: Vec::new(),
 			system_roots: true,
 			identity: None,
-			transport: super::Transport::default(),
+			transport: super::transport::Config::default(),
 		}
 	}
 }

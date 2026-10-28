@@ -225,11 +225,14 @@ impl Peer {
 		});
 		// A fixed seed per side keeps connection IDs and packet number skips stable across
 		// runs; the reset and token keys still draw their own randomness.
-		let mut endpoint = endpoint::Config::default();
-		endpoint.rng_seed = Some([side as u8; 32]);
+		let endpoint = endpoint::Config {
+			server,
+			rng_seed: Some([side as u8; 32]),
+			..Default::default()
+		};
 		Self {
 			side,
-			endpoint: Endpoint::new(endpoint::Config { server, ..endpoint }, true).unwrap(),
+			endpoint: Endpoint::new(endpoint, true).unwrap(),
 			addr: SocketAddr::new(Ipv6Addr::LOCALHOST.into(), port),
 			conn: None,
 			connected: false,
