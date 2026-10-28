@@ -1870,6 +1870,21 @@ async fn close_releases_the_port_under_live_connections() {
 	drop(conns);
 }
 
+/// Closing right after a rebind releases the old port too, which the endpoint keeps receiving on
+/// until traffic arrives on the new socket.
+#[tokio::test]
+async fn close_releases_the_port_left_by_a_rebind() {
+	let _guard = subscribe();
+
+	let endpoint = endpoint();
+	let old = endpoint.local_addr();
+	endpoint
+		.rebind(bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).unwrap())
+		.unwrap();
+	endpoint.close(0u32.into(), "done").await;
+	UdpSocket::bind(old).expect("close released the old port");
+}
+
 #[tokio::test]
 async fn dropped_connection_cleans_up() {
 	let _guard = subscribe();
