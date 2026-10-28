@@ -156,7 +156,6 @@ surface and zero-copy texture import, land before the cut.
 - [HLS and DASH segment conformance](/quest/m1/hls-conformance.md) - nightly ffprobe checks that advertised timing, sync flags, and bytes match the media served
 - [Bindings name every session code](/quest/m1/ffi-malformed-auth-kind.md) - MALFORMED_AUTH_TOKEN and its siblings reach moq-ffi, moq-c, and the wrappers
 - [Unbounded groups](/quest/m1/unbounded-groups/README.md) - groups and frames lose their size caps; the cache sheds parts of a group under pressure and refills the holes in place
-- [Bindings decode media as media](/quest/m1/obs-data-decode.md) - moq-ffi decodes a media rendition with its kind, so OBS stops losing every other group
 - [Relay demand gaps](/quest/m1/relay-demand-gaps.md) - pre-07 backlog, IETF warm-relay newcomer, and double upstream pulls are fixed or ruled out
 - [Segment cuts hold bounded state](/quest/m1/segmenter-cuts.md) - the HLS segmenter keeps one pending cut, so `styp` input without sync samples cannot grow it
 - [Next Object on a cold Rust copy](/quest/m1/next-object-cold-copy.md) - a join after an upstream group report starts at the first frame received, never skipping

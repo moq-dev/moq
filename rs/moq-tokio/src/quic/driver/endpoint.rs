@@ -140,9 +140,8 @@ impl Endpoint {
 
 	/// Get the next incoming connection attempt from a client
 	///
-	/// Yields [`Incoming`]s, or `None` if the endpoint is [`close`](Self::close)d. [`Incoming`]
-	/// can be `await`ed to obtain the [`Connection`](crate::quic::driver::Connection) after
-	/// its handshake completes.
+	/// Yields [`Incoming`]s, or `None` if the endpoint is [`close`](Self::close)d.
+	/// Call [`Incoming::accept`] and await its [`Connecting`](super::Connecting) to finish the handshake.
 	pub fn accept(&self) -> impl Future<Output = Option<Incoming>> + '_ {
 		Accept {
 			endpoint: self,
