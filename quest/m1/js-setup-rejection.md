@@ -18,6 +18,9 @@ from `js/net/src/connection/accept.ts:187`.
 The failure is not reproduced: clean current main passed the focused test,
 all 44 connection-file tests, and all 2,507 net-package tests. No matching
 open quest or PR was found, including deleted quest history.
+A [later report](https://github.com/moq-dev/moq/pull/6997#issuecomment-6459139941)
+saw the same test fail twice, intermittently, while iterating on
+[moq-dev/moq#6906](https://github.com/moq-dev/moq/pull/6906).
 
 Reproduce and trace rejection ownership before changing code. The test
 creates `accepting = accept(...)`, then awaits `Stream.open` and
