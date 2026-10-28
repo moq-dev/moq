@@ -30,11 +30,11 @@ const PAYLOAD: usize = TsPacket::SIZE - 4;
 const BACKFILL: u128 = 40;
 /// The longest a transport buffer may go without emptying (ISO 13818-1 2.4.2.3).
 const TB_EMPTY: Duration = Duration::from_secs(1);
-/// How many slots after the one the first program tables finish in a timeline that
-/// [opens](Schedule::open) places nothing. A reader learns the clock PID from the PMT, so it
-/// times nothing by the PCR opening their slot; the next slot's PCR is the first it reads, and
-/// the one after closes the first interval, which it needs to place a section or whole PES on
-/// the program clock.
+/// How many slots after the one its first program tables finish in a timeline that
+/// [opens](Schedule::open) holds what a reader places on the program clock. The reader learns
+/// the clock PID from the PMT, so it times nothing by the PCR opening their slot; the next
+/// slot's PCR is the first it reads, and the one after closes the first interval, which it
+/// needs to place a section or whole PES.
 const OPENING: u128 = 2;
 /// One tick of the system clock, in whole nanoseconds rounded up.
 const TICK: i128 = 1_000_000_000_u128.div_ceil(SYSTEM_CLOCK) as i128;
@@ -600,6 +600,9 @@ pub(super) struct Schedule {
 	/// The first slot a placed unit may go out in: [`OPENING`] slots after the one the first
 	/// tables finish in, on a timeline that opens.
 	clocked: u128,
+	/// Packets a reader places on the program clock, held until the opening's PCR interval is
+	/// out ([`Self::push_clocked`]).
+	unclocked: Vec<u8>,
 }
 
 impl Schedule {
@@ -623,6 +626,7 @@ impl Schedule {
 			lead: None,
 			opening: false,
 			clocked: 0,
+			unclocked: Vec::new(),
 		}
 	}
 
@@ -636,6 +640,12 @@ impl Schedule {
 	/// Whether a unit pushed now could go out before the opening's PCR interval is out.
 	pub fn clocking(&self) -> bool {
 		self.opening || self.next.is_some_and(|next| next < self.clocked)
+	}
+
+	/// Hold `packets`, which a reader places on the program clock and which ride no unit of their
+	/// own, until the opening's PCR interval is out: they then go out first, as soon as they can.
+	pub fn push_clocked(&mut self, packets: Vec<u8>) {
+		self.unclocked.extend(packets);
 	}
 
 	/// Whether every source has ended, so what is queued still goes out, late if it must.
@@ -933,15 +943,17 @@ impl Schedule {
 		true
 	}
 
-	/// Whether a unit is still to go out.
+	/// Whether a unit, or packets held for the opening's clock, are still to go out.
 	#[cfg(test)]
 	pub fn queued(&self) -> bool {
-		!self.units.is_empty()
+		!self.units.is_empty() || !self.unclocked.is_empty()
 	}
 
 	/// Whether nothing is left to lay out: every unit sent, and the clock past its decode time.
 	pub fn is_empty(&self) -> bool {
+		// Packets held for the clock count once a slot has gone out, so slots run on to it.
 		self.units.is_empty()
+			&& (self.unclocked.is_empty() || self.next.is_none())
 			&& self
 				.horizon
 				.is_none_or(|horizon| self.next.is_some_and(|next| next > horizon))
@@ -960,6 +972,7 @@ impl Schedule {
 		self.ended = false;
 		self.lead = None;
 		self.clocked = 0;
+		self.unclocked.clear();
 	}
 
 	/// The first slot `unit` may go out in: [`ahead`] of its due slot, and never before the
@@ -1027,6 +1040,15 @@ impl Schedule {
 		// placed unit beside them there would go out ahead of its clock.
 		if self.opening && self.next.is_none() {
 			self.clocked = index + OPENING;
+		}
+		if !self.opening && index >= self.clocked && !self.unclocked.is_empty() {
+			let packets = std::mem::take(&mut self.unclocked);
+			let by = (index + 1) * PCR_INTERVAL.as_nanos();
+			// They follow no unit, so the next one pushed keeps its own start.
+			let last = self.last;
+			self.enqueue(pid(&packets), Timing { by, decode: by }, packets, None)
+				.late = true;
+			self.last = last;
 		}
 		self.next = Some(index + 1);
 		if let Some(rate) = self.rate {
@@ -1209,7 +1231,8 @@ impl Schedule {
 			while let Some(Reverse((by, lane))) = ready.pop() {
 				let i = *lanes[lane].front().unwrap();
 				let unit = &self.units[i];
-				// First tables that finish past the first slot hold back what was released beside them.
+				// First tables that finish past the first slot hold back what was released beside
+				// them.
 				if holding.get(&unit.pid).is_some_and(|&seq| seq < unit.seq) || self.release(unit) > index {
 					passed.push(Reverse((by, lane)));
 					continue;
@@ -1760,6 +1783,40 @@ mod tests {
 			let (_, before, early) = first(false);
 			assert_eq!(media, before, "{rate:?}: the media keeps its slot");
 			assert!(early < placed, "{rate:?}: without the opening it goes in slot {early}");
+		}
+	}
+
+	/// Packets held for the opening's clock go out once its PCR interval is, without holding
+	/// back the unit they were muxed ahead of, padded or not.
+	#[test]
+	fn clocked_packets_follow_the_opening_without_the_media() {
+		for rate in [None, Some(RATE)] {
+			let mut schedule = Schedule::new(Duration::ZERO);
+			schedule.set_rate(rate);
+			schedule.set_tables(100);
+			schedule.set_clock(1);
+			schedule.set_buffer(1, VIDEO);
+			schedule.set_buffer(0x11, Buffer::SYSTEM);
+			schedule.open();
+			schedule.push_clocked(unit(0x11, 1));
+			schedule.lead(Tables {
+				packets: [unit(0, 1), unit(100, 1)].concat(),
+				clock: 1,
+				rate,
+				added: vec![1],
+			});
+			schedule.push(1, timing(10), unit(1, 3), true).unwrap();
+			assert!(schedule.clocking());
+			let slots = drain(&mut schedule);
+			assert!(!schedule.clocking());
+			let on = |pid: u16| {
+				slots
+					.iter()
+					.find(|(_, pids, _)| pids.contains_key(&pid))
+					.map(|&(index, ..)| index)
+			};
+			assert_eq!((on(100), on(1)), (Some(0), Some(0)), "{rate:?}");
+			assert_eq!(on(0x11), Some(OPENING), "{rate:?}");
 		}
 	}
 

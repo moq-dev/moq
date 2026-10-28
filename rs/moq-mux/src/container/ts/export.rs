@@ -103,7 +103,9 @@ fn sanitize_mux_rate(rate: u64) -> Option<u64> {
 /// Use [`next`](Self::next) to pull one [`Frame`] per PCR grid slot: its `payload`
 /// is the TS packets belonging to that slot, stamped at the slot's boundary. The
 /// leading PAT/PMT rides on the first frame (so it inherits a real timestamp), and
-/// is re-emitted at video keyframes and periodically for mid-stream tune-in.
+/// is re-emitted at video keyframes and periodically for mid-stream tune-in. SI and
+/// whole PES or sections wait until a PCR interval has followed it, since a reader
+/// places them on the program clock and the PMT is what names it.
 /// Returns `None` when the broadcast ends.
 ///
 /// A rendition the catalog moves to another track (a new `track` or `broadcast`) goes on out
@@ -3136,7 +3138,6 @@ where
 				(*pid, si.active.sections().cloned().collect())
 			})
 			.collect();
-		let si = pending.first().map(|(pid, _)| *pid);
 		for (pid, sections) in pending {
 			self.program.schedule.set_buffer(pid, Buffer::SYSTEM);
 			for section in &sections {
@@ -3144,15 +3145,10 @@ where
 			}
 		}
 		// A reader drops SI it cannot place on the program clock, so while the opening's PCR
-		// interval may still be ahead of the unit this frame goes in, the SI goes on its own,
-		// placed at the frame's decode time, rather than hold back the media it would lead. A
-		// placed frame waits for the clock anyway.
-		if let Some(pid) = si.filter(|_| !kind.placed() && self.program.schedule.clocking()) {
-			let place = decode.as_nanos();
-			let si = std::mem::take(&mut out);
-			self.program
-				.schedule
-				.push_placed(pid, (place, place), 1, si, false, Vec::new())?;
+		// interval may still be ahead of the unit this frame goes in, the schedule holds the SI
+		// for it rather than the media it would lead.
+		if self.program.schedule.clocking() {
+			self.program.schedule.push_clocked(std::mem::take(&mut out));
 		}
 
 		// The tables lead the unit that carries this frame, behind whatever went before it.

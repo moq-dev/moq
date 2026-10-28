@@ -126,11 +126,6 @@ where
 	(out, exporter.stats())
 }
 
-/// An adaptation-field-only single-packet frame: the exporter's PCR carriage.
-fn is_pcr_frame(frame: &Frame) -> bool {
-	frame.payload.len() == 188 && frame.payload[3] & 0x30 == 0x20
-}
-
 fn assert_packet_aligned(ts: &[u8]) {
 	assert!(!ts.is_empty(), "no TS output");
 	assert_eq!(ts.len() % 188, 0, "output not a whole number of 188-byte packets");
@@ -5647,12 +5642,17 @@ async fn late_join_matches_a_running_exporter_without_video() {
 	let (a, b) = export_twice(false).await;
 
 	// The joiner's first frame leads with PAT/PMT, while the running exporter has no
-	// reason to repeat them there. It can spread over several PCR slices, so compare
-	// from the next PAT/PMT refresh, which both exporters anchor to the media grid.
+	// reason to repeat them there, and its SDT waits for a PCR interval after them. They can
+	// spread over several PCR slices, so compare from the next PAT/PMT refresh past that SDT,
+	// which both exporters anchor to the media grid.
+	let sdt = b
+		.iter()
+		.find(|frame| count_pid(std::slice::from_ref(*frame), 0x0011) > 0)
+		.expect("the joiner's SDT")
+		.timestamp;
 	let from = b
 		.iter()
-		.filter(|frame| count_pid(std::slice::from_ref(*frame), 0) > 0)
-		.nth(1)
+		.find(|frame| frame.timestamp > sdt && count_pid(std::slice::from_ref(*frame), 0) > 0)
 		.expect("a periodic PAT/PMT refresh")
 		.timestamp;
 	assert_only_continuity_differs(&a, &b, from);
@@ -6475,18 +6475,18 @@ async fn si_revision_after_final_media_frame_is_flushed() {
 	)
 	.await
 	.unwrap();
-	let first = loop {
+	// v1 goes out with the media frame's slices, once the export's PCR interval is out.
+	let contains = |haystack: &[u8], needle: &[u8]| haystack.windows(needle.len()).any(|w| w == needle);
+	loop {
 		let frame = tokio::time::timeout(DRAIN, exporter.next())
 			.await
-			.expect("the only media frame")
+			.expect("v1 goes out (control)")
 			.unwrap()
-			.unwrap();
-		if !is_pcr_frame(&frame) {
-			break frame;
+			.expect("v1 goes out (control)");
+		if contains(&frame.payload, &sdt_v1) {
+			break;
 		}
-	};
-	let contains = |haystack: &[u8], needle: &[u8]| haystack.windows(needle.len()).any(|w| w == needle);
-	assert!(contains(&first.payload, &sdt_v1), "v1 rode the media frame (control)");
+	}
 
 	// The revision lands after the last media frame; only the trailing flush can
 	// carry it. Closing the catalog lets the exporter reach end of stream.
