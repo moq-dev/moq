@@ -28,7 +28,7 @@ async fn acquisition(version: &str, carries_epoch: bool) {
 	let publisher = origin(1);
 	let subscriber = origin(2);
 	let broadcast = publisher.create_broadcast("live").unwrap();
-	let mut dynamic = broadcast.dynamic();
+	let mut dynamic = broadcast.requests();
 	broadcast
 		.announce(origin::Route::default().with_epoch(moq_net::Epoch::mint()))
 		.unwrap();
@@ -80,6 +80,6 @@ async fn epochless_replacement_refuses_pending_catalog() {
 #[moq_clock::test]
 async fn same_epoch_replacement_acquires_pending_catalog() {
 	acquisition("moq-lite-07-wip", true).await;
-	acquisition("moq-transport-17", true).await;
+	acquisition("moq-transport-18", true).await;
 	acquisition("moq-transport-22", true).await;
 }

@@ -141,16 +141,26 @@ def run(action, plan):
             concurrency = [] if os.environ.get("GITHUB_ACTIONS") == "true" else ["--sequential"]
             command("bun", "run", *concurrency, *filters, "--elide-lines=0", verb)
 
+    def reports():
+        # Each published package's API reports against its fresh build; `just fix` sets
+        # MOQ_API_REPORT=update to rewrite them. No package build runs this, so a consumer
+        # building one from source needs none of the report toolchain.
+        directories = [package["directory"] for package in packages.values()
+                       if "release" in package["manifest"].get("scripts", {})]
+        if directories:
+            command("bun", "js/common/api.ts", "check", *directories)
+
     command("bun", "install", "--frozen-lockfile")
     if action == "test":
         command("python3", "sh/js/playwright.test.py")
-        command("bun", "test", "js/common/declarations.test.ts", "js/common/deps.test.ts",
-                "js/common/docs.test.ts", "js/common/worklet.test.ts", "js/common/release.test.ts")
+        command("bun", "test", "js/common/api.test.ts", "js/common/deps.test.ts", "js/common/worklet.test.ts",
+                "js/common/release.test.ts")
         scripts("test")
         return
     if action == "build":
         # No build script reads the WASM bindings, and `just js wasm` builds them.
         scripts("build")
+        reports()
         return
 
     missing = unmapped(ROOT, plan["inputs"])
@@ -191,6 +201,7 @@ def run(action, plan):
     command("bun", "biome", "check", "--error-on-warnings", *(["js", "bench/browser", "test", "doc", "demo"] if plan["all"] else
                                        [p["directory"] for p in packages.values()] + ["js/common"]))
     scripts("build")
+    reports()
     for name in ("@moq/watch", "@moq/publish"):
         if name in packages:
             path = "./" + packages[name]["directory"] + "/dist/index.js"

@@ -32,5 +32,5 @@ ergonomic layer, and the gating proceeds regardless of the build measurement.
   helper") to say the helper is generated and feature-gated.
 
 Public API: every library crate gains an `async` feature, and its async wrappers
-move behind it. Add a MIGRATE entry for the published crates, if their default
-features change.
+move behind it. Add an Impact migration note for the published crates whenever
+a consumer must enable `async`, including with `default-features = false`.

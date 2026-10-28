@@ -186,7 +186,7 @@ mod tests {
 		let params = Params {
 			tp,
 			max_record_size: VarInt::from_u32(32_768),
-			protocols: Some(vec!["moq-lite-03".into(), "moqt-16".into()]),
+			protocols: Some(vec!["moq-lite-03".into(), "moqt-18".into()]),
 		};
 		let mut buf = Vec::new();
 		params.encode(&mut buf);

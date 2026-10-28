@@ -427,9 +427,9 @@ impl TrackState {
 
 	/// Give up on this rendition's current importer generation after repeated failures.
 	///
-	/// Dropping the importer closes its recorders and retires its catalog entries, so players
-	/// stop selecting a rendition that no longer advances; a later successful step rebuilds it
-	/// from the init segment.
+	/// Dropping the importer ends its tracks and retires their catalog entries and HLS records, so
+	/// players stop selecting a rendition that no longer advances; a later successful step rebuilds
+	/// it from the init segment.
 	fn evict(&mut self) {
 		self.importer = None;
 		self.map = None;
@@ -654,7 +654,7 @@ impl TrackState {
 			importer.seek(group_sequence)?;
 		}
 		// Every playlist entry is a source segment boundary, so declare it even when the media
-		// carries no styp. Every rendition declares the same ones; the timeline drops a cut
+		// carries no styp. Every rendition declares the same ones; the HLS segmenter drops a cut
 		// that would land inside its minimum segment duration, so the duplicates cost nothing.
 		importer.cut()?;
 		importer.decode(&bytes).map_err(|err| match err {
@@ -979,7 +979,7 @@ impl Import {
 			self.video.push(track);
 		}
 
-		let audio_url = self.audio.as_ref().map(|a| a.playlist.to_string());
+		let audio_url = self.audio.as_ref().map(|a| redact(&a.playlist).to_string());
 		info!(
 			video_variants = variants.len(),
 			audio = audio_url.as_deref().unwrap_or("none"),
@@ -2207,6 +2207,20 @@ mod tests {
 		old_groups: Vec<(u64, u128)>,
 		terminal: Option<moq_net::Error>,
 		new_groups: Vec<(u64, u128)>,
+		/// The first generation's HLS record track has ended.
+		old_records_ended: bool,
+	}
+
+	/// Whether `subscriber` has ended, after draining the groups it already holds.
+	fn ended(subscriber: &mut moq_net::track::Ordered) -> bool {
+		loop {
+			match subscriber.poll_next_group(&kio::Waiter::noop()) {
+				Poll::Ready(Ok(Some(_))) => continue,
+				Poll::Ready(Ok(None)) => return true,
+				Poll::Pending => return false,
+				Poll::Ready(Err(error)) => panic!("the record track failed: {error:?}"),
+			}
+		}
 	}
 
 	/// A one-track fMP4 muxer for synthesized VP8 video or Opus audio.
@@ -2236,7 +2250,7 @@ mod tests {
 				payload: Bytes::from_static(&[0x78, 0x00, 0x00, 0x00]),
 				keyframe: true,
 			};
-			let fragment = muxer.fragment(index as u32, &[frame]).unwrap();
+			let fragment = muxer.fragment(index as u32, &[frame], None).unwrap();
 			std::fs::write(dir.join(format!("{prefix}{index}.m4s")), fragment).unwrap();
 		}
 	}
@@ -2287,6 +2301,13 @@ mod tests {
 			.await
 			.unwrap()
 			.ordered();
+		let mut old_records = consumer
+			.track(&hang::hls::default_name(&before_name))
+			.unwrap()
+			.subscribe(replay.clone())
+			.await
+			.unwrap()
+			.ordered();
 		let after = format!(
 			"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:1,\n0.m4s\n{tags}#EXTINF:1,\n1.m4s\n"
 		);
@@ -2294,6 +2315,7 @@ mod tests {
 		let result = track.consume_segments(&local, &after, &base).await;
 		let after_name = name(&catalog.snapshot());
 		let (old_groups, terminal) = group_stamps(&mut old);
+		let old_records_ended = ended(&mut old_records);
 		let new_groups = if before_name != after_name {
 			let mut new = consumer
 				.track(&after_name)
@@ -2316,6 +2338,7 @@ mod tests {
 			old_groups,
 			terminal,
 			new_groups,
+			old_records_ended,
 		}
 	}
 
@@ -2426,6 +2449,7 @@ mod tests {
 					case.result.unwrap();
 					assert!(case.terminal.is_none(), "{terminal:?}", terminal = case.terminal);
 					assert_ne!(case.before, case.after);
+					assert!(case.old_records_ended, "the replaced generation retires its records");
 					assert_eq!(case.old_groups, [(0, 5_000_000)]);
 					assert_eq!(case.new_groups, [(moq_sequence(1, 1).unwrap(), u128::from(after_us))]);
 				}
@@ -2539,6 +2563,26 @@ mod tests {
 
 		let audio = hls.audio.as_ref().expect("separate audio rendition");
 		assert!(audio.select.has_audio() && !audio.select.has_video());
+	}
+
+	#[tokio::test]
+	#[tracing_test::traced_test]
+	async fn discovery_logs_redact_playlist_credentials() {
+		let audio = signed(&Url::parse("https://example.com/audio.m3u8").unwrap());
+		let master = format!(
+			"#EXTM3U\n\
+			#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"en\",URI=\"{audio}\"\n\
+			#EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS=\"avc1.4d401f,mp4a.40.2\",AUDIO=\"aud\"\n\
+			video.m3u8?jwt=s3cret#f4ag\n"
+		);
+		let hls = discover(&master).await;
+		assert_eq!(hls.audio.as_ref().unwrap().playlist, audio);
+
+		assert!(logs_contain("selected master playlist renditions"));
+		assert!(logs_contain("audio=\"https://example.com/audio.m3u8\""));
+		for credential in ["alice", "hunter2", "jwt", "s3cret", "f4ag"] {
+			assert!(!logs_contain(credential), "log leaked {credential}");
+		}
 	}
 
 	/// A master whose variant carries muxed A/V (no separate audio group) publishes

@@ -16,7 +16,7 @@ fn grant(prefix: &str) -> Grant {
 
 struct Fixture {
 	_connections: Vec<moq_tokio::Connection>,
-	_tokens: Vec<moq_net::auth::Auth>,
+	_tokens: Vec<moq_net::auth::Credential>,
 	producers: Vec<lease::Producer>,
 	selected: usize,
 	watch: moq_net::auth::Watch,
@@ -84,8 +84,9 @@ impl Fixture {
 			let added = futures::future::join_all((0..tokens).map(|index| auth.add(format!("token{index}")))).await;
 			let added: Vec<_> = added.into_iter().map(|added| added.unwrap().0).collect();
 			if session == 0 {
-				let mut observed = added.last().unwrap().grant();
-				observed.changed().await.unwrap();
+				// `add` resolves once the peer grants the token, so its grant is already current.
+				let observed = added.last().unwrap().grant();
+				assert!(observed.peek().is_some());
 				watch = Some(observed);
 			}
 			for _ in 0..tokens {

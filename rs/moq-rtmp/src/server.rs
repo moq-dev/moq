@@ -26,7 +26,7 @@
 //! the established stream to [`accept_stream`]; everything here is generic over
 //! the [`Stream`] trait.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -40,7 +40,7 @@ use crate::rml::sessions::{
 };
 use crate::rml::time::RtmpTimestamp;
 use futures::StreamExt;
-use futures::future::BoxFuture;
+use futures::future::{AbortHandle, Abortable, BoxFuture};
 use futures::stream::FuturesUnordered;
 use hang::catalog::{AudioCodec, AudioCodecKind, VideoCodecKind, VideoConfig};
 use moq_mux::catalog::{CatalogFormat, Stream as CatalogStream};
@@ -63,15 +63,18 @@ const READ_BUFFER: usize = 16 * 1024;
 /// of a client that connects but never does either, so idle or half-open
 /// connections can't accumulate without limit. With TLS this also covers the TLS
 /// handshake.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Maximum number of accepted sockets that can be handshaking or waiting for a
-/// publish/play request at once.
+/// publish/play request at once; a new socket evicts the oldest waiter.
 const MAX_PENDING_REQUESTS: usize = 128;
 
-/// Maximum gap between media packets from an accepted publisher.
+/// Budget for the TLS and RTMP handshake, before any application request.
+pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Maximum gap between media packets from an accepted publisher or a dialed pull.
 ///
-/// Note this bounds the PUBLISH direction only; a play session has no equivalent,
+/// A listener's play session has no equivalent,
 /// which is why [`configure_socket`]'s keepalive is not optional.
 pub const PUBLISH_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -245,7 +248,9 @@ pub struct Server {
 
 	/// In-flight handshakes; each resolves to a ready [`Request`], or `None` if
 	/// the connection closed or errored before issuing a publish or play.
-	pending: FuturesUnordered<BoxFuture<'static, Option<Request<Conn>>>>,
+	pending: FuturesUnordered<BoxFuture<'static, (u64, Option<Request<Conn>>)>>,
+	pending_order: BTreeMap<u64, AbortHandle>,
+	next_pending: u64,
 
 	/// Delay after a failed `accept`, doubling per consecutive failure. Lives on the server rather
 	/// than inside [`accept`](Self::accept) so the escalation survives across calls, and resets on
@@ -269,6 +274,8 @@ impl Server {
 			tls: None,
 			plaintext: true,
 			pending: FuturesUnordered::new(),
+			pending_order: BTreeMap::new(),
+			next_pending: 0,
 			accept_delay: ACCEPT_RETRY_MIN,
 			accept_retry: None,
 		})
@@ -334,8 +341,11 @@ impl Server {
 			let retry = self.accept_retry;
 
 			tokio::select! {
+				biased;
+				// Drain cancelled handshakes before accepting another socket, bounding the futures too.
 				// A handshake finished: yield its request, or skip a dead connection.
-				Some(maybe) = self.pending.next(), if !self.pending.is_empty() => {
+				Some((id, maybe)) = self.pending.next(), if !self.pending.is_empty() => {
+					self.pending_order.remove(&id);
 					if let Some(request) = maybe {
 						return Some(request);
 					}
@@ -345,51 +355,59 @@ impl Server {
 
 				// A new TCP connection: start its (TLS +) handshake concurrently. Paused while a
 				// failed accept is backing off, so a persistent error doesn't busy-spin.
-				res = self.listener.accept(), if retry.is_none() && self.pending.len() < MAX_PENDING_REQUESTS => match res {
+				res = self.listener.accept(), if retry.is_none() => match res {
 					Ok((stream, peer)) => {
 						// A connection got through, so whatever the last failure was has cleared.
 						self.accept_delay = ACCEPT_RETRY_MIN;
 						configure_socket(&stream, peer);
 						#[cfg(feature = "tls")]
 						let (tls, plaintext) = (self.tls.clone(), self.plaintext);
-						self.pending.push(Box::pin(async move {
-							// The TLS handshake (if any) and the RTMP handshake share one
-							// budget, so a client that stalls either is dropped.
-							let outcome = moq_clock::timeout(REQUEST_TIMEOUT, async move {
-								#[cfg(feature = "tls")]
-								let conn = match tls {
-									Some(acceptor) if starts_tls(&stream).await? => Conn::Tls(Box::new(
-										acceptor
-											.accept(stream)
-											.await
-											.map_err(|e| anyhow::anyhow!("rtmps tls handshake: {e}"))?,
-									)),
-									_ if !plaintext => {
-										tracing::warn!(%peer, "refusing plaintext RTMP: this listener requires TLS (rtmps://)");
-										return Ok(None);
-									}
-									_ => Conn::Plain(stream),
-								};
-								#[cfg(not(feature = "tls"))]
-								let conn = Conn::Plain(stream);
-								accept_until_request(conn, peer).await
-							})
-							.await;
-							match outcome {
-								Ok(Ok(request)) => request,
-								Ok(Err(err)) => {
-									tracing::warn!(%peer, %err, "RTMP connection closed before publish/play");
-									None
-								}
-								Err(_) => {
-									tracing::warn!(%peer, "RTMP connection did not publish or play before timeout");
-									None
-								}
-							}
-						}));
-						if self.pending.len() == MAX_PENDING_REQUESTS {
-							tracing::warn!(pending = MAX_PENDING_REQUESTS, "RTMP pending request limit reached");
+						if self.pending_order.len() == MAX_PENDING_REQUESTS {
+							let (_, oldest) = self.pending_order.pop_first().unwrap();
+							oldest.abort();
 						}
+						let id = self.next_pending;
+						self.next_pending = self.next_pending.wrapping_add(1);
+						let (abort, registration) = AbortHandle::new_pair();
+						self.pending_order.insert(id, abort);
+						self.pending.push(Box::pin(async move {
+							let request = Abortable::new(async move {
+								// The TLS handshake (if any) and the RTMP handshake share one
+								// budget, so a client that stalls either is dropped.
+								let outcome = moq_clock::timeout(REQUEST_TIMEOUT, async move {
+									#[cfg(feature = "tls")]
+									let conn = match tls {
+										Some(acceptor) if starts_tls(&stream).await? => Conn::Tls(Box::new(
+											moq_clock::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream))
+												.await
+												.map_err(|_| anyhow::anyhow!("RTMPS handshake timed out"))?
+												.map_err(|e| anyhow::anyhow!("rtmps tls handshake: {e}"))?,
+										)),
+										_ if !plaintext => {
+											tracing::warn!(%peer, "refusing plaintext RTMP: this listener requires TLS (rtmps://)");
+											return Ok(None);
+										}
+										_ => Conn::Plain(stream),
+									};
+									#[cfg(not(feature = "tls"))]
+									let conn = Conn::Plain(stream);
+									accept_until_request(conn, peer).await
+								})
+								.await;
+								match outcome {
+									Ok(Ok(request)) => request,
+									Ok(Err(err)) => {
+										tracing::warn!(%peer, %err, "RTMP connection closed before publish/play");
+										None
+									}
+									Err(_) => {
+										tracing::warn!(%peer, "RTMP connection did not publish or play before timeout");
+										None
+									}
+								}
+							}, registration).await.ok().flatten();
+							(id, request)
+						}));
 					}
 					Err(err) => {
 						// A failed accept must not take the listener down: the usual causes
@@ -419,7 +437,11 @@ const TLS_HANDSHAKE_RECORD: u8 = 0x16;
 #[cfg(feature = "tls")]
 async fn starts_tls(stream: &TcpStream) -> io::Result<bool> {
 	let mut first = [0u8; 1];
-	if stream.peek(&mut first).await? == 0 {
+	if moq_clock::timeout(HANDSHAKE_TIMEOUT, stream.peek(&mut first))
+		.await
+		.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "TLS detection timed out"))??
+		== 0
+	{
 		return Err(io::ErrorKind::UnexpectedEof.into());
 	}
 	Ok(first[0] == TLS_HANDSHAKE_RECORD)
@@ -470,9 +492,8 @@ pub fn configure_socket(stream: &TcpStream, peer: SocketAddr) {
 /// `peer` is the remote address, used for logging and [`Request::peer`].
 ///
 /// Returns `Ok(None)` if the client disconnects before issuing `publish` or
-/// `play`. Unlike [`Server`], this applies no timeout: wrap the call in
-/// [`moq_clock::timeout`] to bound how long a connected-but-idle client can
-/// hold the task.
+/// `play`. The handshake must finish in five seconds; wrap the call in
+/// [`moq_clock::timeout`] to also bound the wait for a publish or play request.
 pub async fn accept_stream<S: Stream>(stream: S, peer: SocketAddr) -> Result<Option<Request<S>>> {
 	Ok(accept_until_request(stream, peer).await?)
 }
@@ -630,8 +651,8 @@ impl<S: Stream> Publish<S> {
 	/// stays up for the [linger](Self::with_linger), and the future resolves after that.
 	/// Dropping the future ends the linger early. A connection that drops without
 	/// unpublishing closes the broadcast at once.
-	pub async fn accept(mut self, origin: &origin::Producer, path: impl moq_net::AsPath) -> Result<()> {
-		let path = path.as_path();
+	pub async fn accept(mut self, origin: &origin::Producer, path: impl Into<moq_net::Path>) -> Result<()> {
+		let path: moq_net::Path = path.into();
 		// Reserve the broadcast path before telling the client the publish succeeded:
 		// if the origin refuses `path`, reject cleanly instead of accepting and then
 		// dropping the connection a moment later.
@@ -789,8 +810,8 @@ impl<S: Stream> Play<S> {
 	/// before the publisher), cancelling cleanly if the viewer disconnects first.
 	/// This future resolves when playback ends, so callers usually run it on its
 	/// own task.
-	pub async fn accept(mut self, origin: &origin::Consumer, path: impl moq_net::AsPath) -> Result<()> {
-		let path = path.as_path();
+	pub async fn accept(mut self, origin: &origin::Consumer, path: impl Into<moq_net::Path>) -> Result<()> {
+		let path: moq_net::Path = path.into();
 		// Wait for the broadcast before telling the client playback started. Feed the
 		// client's bytes through the session (not discard them) so its deserializer
 		// stays in sync for everything `play_pump` parses next.
@@ -1100,7 +1121,9 @@ fn fourcc_label(fourcc: &[u8; 4]) -> String {
 /// Run one connection's handshake and connect exchange, returning a [`Request`]
 /// once the client issues `publish` or `play` (or `None` if it disconnects first).
 async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> anyhow::Result<Option<Request<S>>> {
-	let remaining = run_handshake(&mut stream, peer).await?;
+	let remaining = moq_clock::timeout(HANDSHAKE_TIMEOUT, run_handshake(&mut stream, peer))
+		.await
+		.map_err(|_| anyhow::anyhow!("RTMP handshake timed out"))??;
 
 	let (mut session, initial) =
 		ServerSession::new(ServerSessionConfig::new()).map_err(|e| anyhow::anyhow!("rtmp session init: {e:?}"))?;
@@ -1240,23 +1263,19 @@ async fn pump<S: Stream>(
 		while let Some(result) = work.pop_front() {
 			match result {
 				ServerSessionResult::OutboundResponse(packet) => {
-					stream.write_all(&packet.bytes).await?;
+					moq_clock::timeout_at(media_deadline, stream.write_all(&packet.bytes))
+						.await
+						.map_err(|_| anyhow::anyhow!("peer blocked RTMP control output before the media deadline"))??;
 				}
 				ServerSessionResult::RaisedEvent(event) => match event {
-					// A frame that fails to demux is dropped, not fatal: the importer
-					// consumes whole tags atomically, so one bad frame doesn't desync
-					// the stream, and tearing down a live publish over it would be worse.
+					// A timestamp restart ends this publisher; isolated malformed tags are skipped.
 					ServerSessionEvent::AudioDataReceived { data, timestamp, .. } => {
 						media_deadline = moq_clock::Instant::now() + PUBLISH_IDLE_TIMEOUT;
-						if let Err(err) = publisher.push(flv::TAG_AUDIO, timestamp.value, &data) {
-							tracing::warn!(%peer, %err, "dropping RTMP audio frame that failed to demux");
-						}
+						publisher.push(flv::TAG_AUDIO, timestamp.value, &data)?;
 					}
 					ServerSessionEvent::VideoDataReceived { data, timestamp, .. } => {
 						media_deadline = moq_clock::Instant::now() + PUBLISH_IDLE_TIMEOUT;
-						if let Err(err) = publisher.push(flv::TAG_VIDEO, timestamp.value, &data) {
-							tracing::warn!(%peer, %err, "dropping RTMP video frame that failed to demux");
-						}
+						publisher.push(flv::TAG_VIDEO, timestamp.value, &data)?;
 					}
 					ServerSessionEvent::PublishStreamFinished { .. } => finished = true,
 					// onMetaData and other script data: the FLV importer reads codec
@@ -1517,14 +1536,7 @@ impl Publisher {
 
 	/// Re-wrap one RTMP audio/video message body as an FLV tag and demux it.
 	fn push(&mut self, tag_type: u8, timestamp: u32, body: &[u8]) -> anyhow::Result<()> {
-		// FLV's tag DataSize is 24-bit. A larger body would truncate, declaring a
-		// wrong size that desyncs the demuxer on the next tag. Drop it instead.
-		anyhow::ensure!(
-			body.len() <= 0xFF_FFFF,
-			"RTMP message body {} exceeds FLV's 24-bit tag size limit",
-			body.len()
-		);
-		Ok(self.importer.decode(&flv::tag(tag_type, timestamp, body))?)
+		flv::import(&mut self.importer, tag_type, timestamp, body)
 	}
 
 	/// Flush any buffered media and finish every track, the catalog included, keeping the
@@ -1564,6 +1576,108 @@ impl Publisher {
 )]
 mod tests {
 	use super::*;
+
+	#[tokio::test(start_paused = true)]
+	async fn a_silent_peer_cannot_hold_a_handshake() {
+		let (_client, server) = tokio::io::duplex(4096);
+		let start = moq_clock::Instant::now();
+		let result = accept_stream(server, "127.0.0.1:1935".parse().unwrap()).await;
+		assert!(result.is_err());
+		assert_eq!(start.elapsed(), HANDSHAKE_TIMEOUT);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn blocked_control_output_cannot_bypass_the_publish_idle_budget() {
+		let (mut stream, _peer) = tokio::io::duplex(1);
+		let (mut session, _) = ServerSession::new(ServerSessionConfig::new()).unwrap();
+		let (packet, _) = session.send_ping_request().unwrap();
+		let mut work = VecDeque::from([ServerSessionResult::OutboundResponse(packet)]);
+		let origin = moq_tokio::origin::spawn();
+		let mut publisher = Publisher::new(&origin, "idle", Default::default()).unwrap();
+		let start = moq_clock::Instant::now();
+		assert!(
+			pump(
+				&mut stream,
+				&mut session,
+				&mut work,
+				&mut publisher,
+				"127.0.0.1:1935".parse().unwrap()
+			)
+			.await
+			.is_err()
+		);
+		assert_eq!(start.elapsed(), PUBLISH_IDLE_TIMEOUT);
+		publisher.abort(moq_net::Error::Cancel);
+	}
+
+	#[tokio::test]
+	async fn a_full_pending_set_evicts_the_oldest_instead_of_stopping_accepts() {
+		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+		for id in 0..MAX_PENDING_REQUESTS as u64 {
+			let (abort, registration) = AbortHandle::new_pair();
+			server.pending_order.insert(id, abort);
+			server.pending.push(Box::pin(async move {
+				let request = Abortable::new(std::future::pending::<Option<Request<Conn>>>(), registration)
+					.await
+					.ok()
+					.flatten();
+				(id, request)
+			}));
+		}
+		server.next_pending = MAX_PENDING_REQUESTS as u64;
+		let addr = server.local_addr().unwrap();
+		let client = tokio::spawn(async move {
+			run_client(TcpStream::connect(addr).await.unwrap(), ClientMode::Publish).await;
+		});
+		let request = server.accept().await.unwrap();
+		assert!(matches!(request, Request::Publish(_)));
+		assert_eq!(server.pending_order.len(), MAX_PENDING_REQUESTS - 1);
+		assert_eq!(*server.pending_order.first_key_value().unwrap().0, 1);
+		assert_eq!(server.pending.len(), MAX_PENDING_REQUESTS - 1);
+		drop(request);
+		client.await.unwrap();
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_timestamp_rewind_ends_the_publish() {
+		let (mut stream, _peer) = tokio::io::duplex(1024);
+		let (mut session, _) = ServerSession::new(ServerSessionConfig::new()).unwrap();
+		let origin = moq_tokio::origin::spawn();
+		let mut publisher = Publisher::new(&origin, "rewind", Default::default()).unwrap();
+		let mut work = VecDeque::new();
+		for (timestamp, data) in [
+			(0, &[0xaf, 0, 0x12, 0x10][..]),
+			(0, &[0xaf, 1, 0][..]),
+			(1000, &[0xaf, 1, 0][..]),
+			(0, &[0xaf, 1, 0][..]),
+		] {
+			work.push_back(ServerSessionResult::RaisedEvent(
+				ServerSessionEvent::AudioDataReceived {
+					app_name: "live".into(),
+					stream_key: "rewind".into(),
+					data: bytes::Bytes::copy_from_slice(data),
+					timestamp: RtmpTimestamp::new(timestamp),
+				},
+			));
+		}
+		work.push_back(ServerSessionResult::RaisedEvent(
+			ServerSessionEvent::PublishStreamFinished {
+				app_name: "live".into(),
+				stream_key: "rewind".into(),
+			},
+		));
+		let result = pump(
+			&mut stream,
+			&mut session,
+			&mut work,
+			&mut publisher,
+			"127.0.0.1:1935".parse().unwrap(),
+		)
+		.await;
+		publisher.abort(moq_net::Error::Cancel);
+		assert!(result.is_err(), "a restarted timestamp domain kept publishing");
+	}
+
 	#[tokio::test(start_paused = true)]
 	#[tracing_test::traced_test]
 	async fn publish_metadata_drops_warn_once() {
@@ -1740,7 +1854,11 @@ mod tests {
 		let Some(Request::Publish(publish)) = accept_stream(stream, peer).await.unwrap() else {
 			panic!("expected a publish request");
 		};
-		publish.with_linger(linger).accept(&origin, "live/cam0").await.unwrap();
+		publish
+			.with_linger(linger)
+			.accept(&origin, moq_net::Path::from_static("live/cam0"))
+			.await
+			.unwrap();
 	}
 
 	/// An unpublish is a clean end: the finished broadcast stays up for the linger, then
@@ -2090,7 +2208,7 @@ mod tests {
 		let consumer = origin.consume();
 		consumer.routed("live/cam0").await.unwrap();
 		let broadcast = consumer.request_broadcast("live/cam0", None).await.unwrap();
-		let info = broadcast.track("0.flv-v").unwrap().query().await.unwrap();
+		let info = broadcast.track("0.flv-v").unwrap().info().await.unwrap();
 		assert_eq!(info.max_age, Some(Duration::from_secs(3)));
 	}
 
@@ -2137,7 +2255,9 @@ mod tests {
 			let Request::Play(play) = request else {
 				panic!("expected a play request");
 			};
-			play.accept(&consumer, "live/cam0").await.unwrap();
+			play.accept(&consumer, moq_net::Path::from_static("live/cam0"))
+				.await
+				.unwrap();
 		});
 
 		let stream = TcpStream::connect(addr).await.unwrap();
@@ -2203,7 +2323,7 @@ mod tests {
 			let Some(Request::Play(play)) = server.accept().await else {
 				panic!("expected a play request");
 			};
-			play.accept(&play_origin, "live/cam0").await
+			play.accept(&play_origin, moq_net::Path::from_static("live/cam0")).await
 		});
 		let (tx, mut media) = tokio::sync::mpsc::unbounded_channel();
 		let client = tokio::spawn(play_client(TcpStream::connect(addr).await.unwrap(), 0, &[], tx));
@@ -2271,7 +2391,9 @@ mod tests {
 			let Request::Play(play) = request else {
 				panic!("expected a play request");
 			};
-			play.accept(&consumer, "live/cam0").await.unwrap();
+			play.accept(&consumer, moq_net::Path::from_static("live/cam0"))
+				.await
+				.unwrap();
 		});
 
 		let stream = TcpStream::connect(addr).await.unwrap();
@@ -2546,7 +2668,9 @@ mod tests {
 			let Request::Play(play) = request else {
 				panic!("expected a play request");
 			};
-			play.accept(&consumer, "live/cam0").await.unwrap();
+			play.accept(&consumer, moq_net::Path::from_static("live/cam0"))
+				.await
+				.unwrap();
 		});
 
 		// The player advertises multitrack; collect the four video messages (two
@@ -2602,7 +2726,9 @@ mod tests {
 
 		tokio::time::pause();
 		let server_task = tokio::spawn(async move {
-			play.accept(&consumer, "live/missing").await.unwrap();
+			play.accept(&consumer, moq_net::Path::from_static("live/missing"))
+				.await
+				.unwrap();
 		});
 
 		tokio::task::yield_now().await;
@@ -2664,7 +2790,7 @@ mod tests {
 					panic!("expected a publish request");
 				};
 				let origin = origin.clone();
-				tokio::spawn(async move { publish.accept(&origin, "live/cam0").await });
+				tokio::spawn(async move { publish.accept(&origin, moq_net::Path::from_static("live/cam0")).await });
 			}
 		});
 

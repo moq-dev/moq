@@ -24,7 +24,7 @@ This README's own work, after the children:
   there: the audio near-zero p95 row belongs to
   [audio jitter target](/quest/m1/audio-jitter-target/README.md), the
   macOS `receive_credit` timeout to
-  [test flakes](/quest/m1/test-flakes-2/README.md), and the paired bench
+  [test flakes](/quest/m0/test-flakes-2/README.md), and the paired bench
   threshold to [bench CI](/quest/m1/bench-ci.md).
 
 Public API: none. Wire: none.
@@ -32,8 +32,6 @@ Public API: none. Wire: none.
 ## Required
 
 - [moq-net compiles in Fuzz and send-depth](/quest/m0/nightly/send-overflow.md) - the ietf publisher future stops overflowing the Send check
-- [The Python sdist builds](/quest/m0/nightly/py-sdist.md) - the sdist carries every workspace crate moq-ffi needs
-- [OBS audio-candidate test](/quest/m0/nightly/obs-audio-candidate.md) - the failed audio candidate check passes under TSan and load, fixed at its reproduced cause
-- [moq-net builds without async](/quest/m0/nightly/net-async-free.md) - the no-default-features lane stops pulling `async` back in
-- [qmux builds clean for iOS](/quest/m0/nightly/qmux-ios-dead-code.md) - `TcpStats` is gated to the platforms that implement it, so the iOS simulator build has no dead code
-- [Probe against Cubic](/quest/m0/nightly/competing-cubic.md) - the `competing_cubic` probe test stops resending a stream after its reset
+- [Probing beside Cubic](/quest/m0/nightly/competing-cubic.md) - the `competing_cubic` probe test stays within its deadline budget
+- [Gate stops hanging](/quest/m0/nightly/gate-hang.md) - `just gate` finishes instead of hanging to the timeout, and a hang names its module
+- [moq-quic rustdoc](/quest/m0/nightly/quic-rustdoc.md) - `--all-features` rustdoc for moq-quic builds and a lane checks it

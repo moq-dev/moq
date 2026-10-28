@@ -44,8 +44,7 @@ Rules every child follows:
 Already gated elsewhere, so not a child: the binary-to-flate fold is followed
 by flate's removal ([compress migrate](/quest/m1/compress/migrate.md)), in m1,
 so the cut waits for it. hang's
-`Archive::replay_epoch` goes with the root `archive` section in
-[catalog HLS](/quest/m1/archive/catalog-hls.md).
+`Archive::replay_epoch` went with the root `archive` section in catalog HLS.
 
 Kept public though only moq-transport uses them (decided 2026-10-23), so an
 audit skips them:
@@ -75,14 +74,10 @@ Rejected in planning:
 ## Required
 
 - [Two broadcast resolutions](/quest/m1/api-audit/resolve.md) - Rust, JS, and the bindings resolve a broadcast with `request(path, epoch)` or `follow(path, epoch)`, and every racy two-step caller is gone
+- [Bindings default to zero max delay](/quest/m1/api-audit/binding-max-delay.md) - a no-argument subscription skips superseded groups in every binding, as Rust, JS, and Python do, and no subscriber limit is asked for explicitly
 - [Binding publications](/quest/m1/api-audit/binding-publication.md) - moq-ffi, the C ABI, and every wrapper hand out a publication handle that announces, replacing the private adapters
-- [Bindings read gaps and ends](/quest/m1/api-audit/decode-read-bindings.md) - moq-ffi and every wrapper surface `Gap` and `End` instead of discarding them
-- [Encoded consumers read gaps and ends](/quest/m1/api-audit/encoded-read-bindings.md) - moq-ffi, moq-c, and every wrapper read encoded media with the tagged-record shape the decoded consumers use
-- [One lifecycle vocabulary](/quest/m1/api-audit/lifecycle.md) - finish, abort, closed, and close mean one thing on every handle, and Rust and JS observers fire alike
-- [moq-net names say one thing](/quest/m1/api-audit/net-names.md) - demand says `wanted`, colliding stats and transport names are renamed, and Rust and JS info lookups mirror
-- [Request handlers are named requests](/quest/m1/api-audit/requests.md) - `dynamic()` and `Dynamic` become `requests()` and `Requests` at every layer
 - [Demand is wanted, everywhere](/quest/m1/api-audit/wanted.md) - every `used`/`unused` pair becomes `wanted()` and `wanted_changed()`, and unused ones go
-- [One meaning for Credential](/quest/m1/api-audit/dial-credential.md) - the internal dial type gets its own name in JS and moq-tokio, and the `Presented` alias goes
+- [One strict path rule](/quest/m1/api-audit/strict-paths.md) - `Relative` refuses empty segments, `Path` refuses non-canonical escapes, the error is `path::Error`, and auth mints only strict paths
 
 ## Related
 

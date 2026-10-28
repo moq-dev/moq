@@ -8,9 +8,7 @@
 //! preference puts `A` ahead. Losing `A` moves `S` to `B`, and `A` returning moves it
 //! back. Between lite-07 routes with the same epoch each move resumes the subscription.
 //! A moq-transport `B` with the MoQ Epoch extension carries the epoch, but its copy's
-//! track info records the draft, so the move onto it is refused. A moq-transport `B`
-//! that cannot carry the epoch (before draft-17) makes each move a restart and a
-//! re-request.
+//! track info records the draft, so the move onto it is refused.
 
 use crate::support;
 
@@ -355,59 +353,5 @@ async fn transport_secondary_is_refused() {
 /// The same over the first draft that can carry the epoch.
 #[moq_clock::test]
 async fn transport_17_secondary_is_refused() {
-	refused_across_protocols("moq-transport-17").await;
-}
-
-/// A moq-transport `B` before draft-17 carries no epoch, so `S` cannot resume onto it:
-/// losing `A` restarts the path and ends the subscription, and a re-request lands on `B`.
-/// `A` returning is another restart, and a re-request lands back on `A`.
-#[moq_clock::test]
-async fn epochless_secondary_restarts() {
-	moq_clock::timeout(TEST_TIMEOUT, async {
-		let mut topology = Topology::new("moq-transport-16".parse().unwrap()).await;
-		let mut announced = topology.subscriber.consume().announced();
-		let start = announced.next().await.expect("announced");
-		assert!(via_a(&start), "{start:?}");
-
-		let mut rx = topology.subscribe().await;
-		let seen = topology.group_through_a(&mut rx).await;
-		assert_continuous(&seen, 1);
-
-		topology.lose_a().await;
-		let restart = announced.next().await.expect("announced");
-		assert!(
-			matches!(restart, announce::Event::Restart(_)) && !via_a(&restart),
-			"no epoch over B: {restart:?}"
-		);
-		topology.group();
-		settle().await;
-		match moq_clock::timeout(Duration::from_secs(10), rx.next())
-			.await
-			.expect("reader hung")
-		{
-			None | Some((_, Err(_))) => {}
-			Some((group, Ok(_))) => panic!("resumed onto B at group {group}"),
-		}
-
-		// A re-request lands on B, the only CDN left. It may start at the latest group,
-		// written while nobody was subscribed, before reaching the next one.
-		let mut rx = topology.subscribe().await;
-		topology.group();
-		while next(&mut rx).await.0 != 2 {}
-
-		topology.restore_a().await;
-		let restart = announced.next().await.expect("announced");
-		assert!(
-			matches!(restart, announce::Event::Restart(_)) && via_a(&restart),
-			"back on A: {restart:?}"
-		);
-		// A re-request lands on A: the next group arrives while B holds back its own.
-		let mut rx = topology.subscribe().await;
-		topology.s_to_b.server_transport.hold_unis();
-		topology.group();
-		while next(&mut rx).await.0 != 3 {}
-		topology.s_to_b.server_transport.release_unis();
-	})
-	.await
-	.expect("timed out");
+	refused_across_protocols("moq-transport-18").await;
 }

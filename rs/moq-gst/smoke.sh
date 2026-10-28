@@ -31,7 +31,7 @@ if ! command -v gst-inspect-1.0 >/dev/null 2>&1; then
     exit 0
 fi
 
-echo "Smoke testing against $(gst-inspect-1.0 --version | head -1)..."
+echo "Smoke testing against $(gst-inspect-1.0 --version | sed -n '1p')..."
 
 # Isolate discovery to $plugin_dir:
 #   - GST_PLUGIN_PATH_1_0 alone is additive, so a system-installed moq
@@ -51,8 +51,10 @@ out="$(
         GST_REGISTRY_1_0="$tmp_registry" \
         gst-inspect-1.0 moq
 )"
-if ! echo "$out" | grep -qE '^[[:space:]]+moqsink:' ||
-    ! echo "$out" | grep -qE '^[[:space:]]+moqsrc:'; then
+# Read captured output without a producer pipe: grep -q can close it early,
+# making a successful inspection fail with SIGPIPE under pipefail.
+if ! grep -qE '^[[:space:]]+moqsink:' <<<"$out" ||
+    ! grep -qE '^[[:space:]]+moqsrc:' <<<"$out"; then
     echo "Error: gst-inspect-1.0 didn't find moqsink/moqsrc in the plugin." >&2
     echo "$out" >&2
     exit 1

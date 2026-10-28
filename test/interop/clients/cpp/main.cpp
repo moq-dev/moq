@@ -32,6 +32,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #ifdef _WIN32
@@ -137,10 +138,10 @@ std::shared_ptr<moq::Session> connect(const std::string &url, const Dial &dial, 
     auto client = ok(moq::Client::init(config), "client init");
     open_session = until(client->connect(url), deadline, "connect");
     if (dial.grant) {
-        auto auth = open_session->auth();
-        auto grant = auth->grant();
+        auto grants = open_session->grants();
+        auto grant = grants->grant();
         while (!grant) {
-            grant = until(auth->grant_changed(), deadline, "grant");
+            grant = until(grants->changed(), deadline, "grant");
         }
         std::fprintf(
             stderr, "auth granted publish=%s subscribe=%s\n", patterns(grant->publish).c_str(),
@@ -298,10 +299,20 @@ void decode_audio(
     const size_t frame_bytes = sizeof(float) * audio.channel_count;
     uint64_t decoded = 0;
     while (decoded * 1000 < audio_ms * audio.sample_rate) {
-        auto frame = until(decoder->next(), deadline, "audio frame");
-        if (!frame) {
+        auto read = until(decoder->next(), deadline, "audio frame");
+        if (!read) {
             fail("audio track ended early");
         }
+        // moq-audio reports a hole it saw directly; tone.py checks the timestamps too.
+        if (std::holds_alternative<moq::AudioRead::kGap>(read->get_variant())) {
+            fail("audio gap");
+        }
+        const auto *variant = std::get_if<moq::AudioRead::kFrame>(&read->get_variant());
+        if (!variant) {
+            fail("audio track ended early");
+        }
+        const auto *frame = &variant->frame;
+
         const size_t samples = frame->data.size() / frame_bytes;
         log << frame->timestamp_us << " " << samples << "\n";
         pcm.write(reinterpret_cast<const char *>(frame->data.data()), static_cast<std::streamsize>(frame->data.size()));
@@ -367,12 +378,13 @@ int subscribe(
 
     size_t total = 0, frames = 0;
     while (finish || total == 0) {
-        auto frame = until(media->next(), read_deadline, "next frame");
-        if (!frame) {
-            break;
-        }
-        total += frame->payload.size();
-        if (!frame->payload.empty()) ++frames;
+        auto read = until(media->next(), read_deadline, "next read");
+        if (!read) { break; }
+        if (std::holds_alternative<moq::MediaRead::kGap>(read->get_variant())) fail("media gap");
+        const auto *frame = std::get_if<moq::MediaRead::kFrame>(&read->get_variant());
+        if (!frame) continue; // Encoder ends do not terminate the subscription.
+        total += frame->frame.payload.size();
+        if (!frame->frame.payload.empty()) ++frames;
     }
     if (total == 0) {
         fail("no frame data received");

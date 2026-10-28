@@ -1,4 +1,4 @@
-//! Fills: the groups readers miss, asked of a [`Dynamic`](super::Dynamic) handler by range.
+//! Fills: the groups readers miss, asked of a [`Requests`](super::Requests) handler by range.
 //!
 //! A miss is a sequence a reader wants that the cache doesn't hold and the live feed will
 //! never deliver. A reader joins the fill already covering it, or queues a new one, and a
@@ -26,7 +26,7 @@ use crate::{Error, Result, StreamError, group};
 /// The fills a track's readers asked for, queued or taken by a handler, under one lock.
 #[derive(Default)]
 pub(in crate::model) struct FillState {
-	// Live `Dynamic` handles: a fill queues only while one can take it.
+	// Live `Requests` handles: a fill queues only while one can take it.
 	handlers: usize,
 	next: u64,
 	// Every fill not yet ended, queued or taken, by id.
@@ -42,6 +42,8 @@ pub(in crate::model) struct FillState {
 struct Pending {
 	start: Position,
 	end: u64,
+	// Exclusive frame cap in the last group; None asks through the original end.
+	frame_end: Option<u64>,
 	// What its joins ask with now, shared with them and its handler.
 	asks: kio::Shared<Asks>,
 	queued: bool,
@@ -181,6 +183,9 @@ pub(crate) struct Outcome {
 	// Accepted or refused, kept as answers arrive so a fill answered group by group costs
 	// the runs each answer touches, not every answer before it.
 	resolved: RangeSet<u64>,
+	// Each accepted copy short of the whole group, which a later copy may displace from the
+	// cache before a reader takes it. A whole copy covers every other, so none displaces it.
+	partial: BTreeMap<u64, group::Handle>,
 }
 
 impl Outcome {
@@ -191,6 +196,11 @@ impl Outcome {
 
 	pub(super) fn is_accepted(&self, sequence: u64) -> bool {
 		self.accepted.contains(&sequence)
+	}
+
+	/// The partial copy accepted for `sequence`, if it still holds `frames`.
+	pub(super) fn partial(&self, sequence: u64, frames: group::Bounds) -> Option<group::Handle> {
+		self.partial.get(&sequence).filter(|copy| copy.covers(frames)).cloned()
 	}
 
 	/// The sequences of `span` accepted, lowest first.
@@ -282,6 +292,7 @@ impl Eq for Refusal {}
 pub(super) struct Ask {
 	pub start: Position,
 	pub end: u64,
+	pub frame_end: Option<u64>,
 	pub asking: Asking,
 }
 
@@ -456,6 +467,18 @@ impl FillState {
 					}
 				}
 			}
+			if !groups.is_empty() && groups.end == pending.end {
+				let end = if groups.end == ask.end { ask.frame_end } else { None };
+				if pending.frame_end.is_some_and(|cap| end.is_none_or(|end| end > cap)) {
+					if pending.queued {
+						pending.frame_end = end;
+					} else {
+						// The source already saw the cap: the missing suffix asks for its own copy.
+						gaps.push(groups.end - 1..groups.end);
+						groups.end -= 1;
+					}
+				}
+			}
 			if groups.is_empty() {
 				continue;
 			}
@@ -509,6 +532,7 @@ impl FillState {
 				Pending {
 					start,
 					end: groups.end,
+					frame_end: if groups.end == ask.end { ask.frame_end } else { None },
 					asks,
 					queued: true,
 					wants: RangeMap::from_iter([(groups.clone(), 1)]),
@@ -626,7 +650,7 @@ pub(super) fn poll_requested(
 	}) {
 		let id = guard.pop().expect("predicate guaranteed a fill");
 		let pending = guard.pending.get(&id).expect("popped fill is pending");
-		let (start, end) = (pending.start, pending.end);
+		let (start, end, frame_end) = (pending.start, pending.end, pending.frame_end);
 		let (asks, result) = (pending.asks.clone(), pending.result.clone());
 		drop(guard);
 		// Built with the fills unlocked, so no other lock nests under theirs.
@@ -636,6 +660,7 @@ pub(super) fn poll_requested(
 			id,
 			start,
 			end,
+			frame_end,
 			asks,
 			result,
 		};
@@ -653,7 +678,7 @@ pub(super) fn poll_requested(
 	}
 }
 
-/// A run of groups readers miss, for a [`Dynamic`](super::Dynamic) handler to serve.
+/// A run of groups readers miss, for a [`Requests`](super::Requests) handler to serve.
 ///
 /// It names `start.group` up to the exclusive [`end`](Self::end), the first group from
 /// [`start`](Self::start)'s frame. Its [`priority`](Self::priority),
@@ -676,6 +701,8 @@ struct Inner {
 	id: u64,
 	start: Position,
 	end: u64,
+	// Exclusive frame cap in the last group; None asks through the original end.
+	frame_end: Option<u64>,
 	asks: kio::Shared<Asks>,
 	result: kio::Producer<Outcome>,
 }
@@ -778,7 +805,7 @@ impl Fill {
 	}
 
 	/// How many answer runs the fill still holds for its readers.
-	#[cfg(test)]
+	#[cfg(all(test, feature = "async"))]
 	pub(super) fn answers(&self) -> usize {
 		let outcome = self.inner.result.read();
 		outcome.refused.iter().count() + outcome.accepted.iter().count()
@@ -802,7 +829,7 @@ impl Fill {
 				.inner
 				.state
 				.read()
-				.covering_group(sequence, self.inner.frame_start(sequence))
+				.covering_range(sequence, self.inner.bounds(sequence))
 				.is_some();
 			if !cached {
 				return Some(sequence);
@@ -881,10 +908,10 @@ impl Fill {
 			.map(drop)
 	}
 
-	/// Poll until the track closes, with its abort error.
+	/// Poll until the track is aborted, with its abort error.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
-		TrackState::poll_closed(&self.inner.state, waiter)
+	pub(crate) fn poll_aborted(&self, waiter: &kio::Waiter) -> Poll<Error> {
+		TrackState::poll_aborted(&self.inner.state, waiter)
 	}
 
 	/// The track the fill serves.
@@ -894,7 +921,7 @@ impl Fill {
 	}
 
 	/// The fill's answers, kept open as long as this handle lives.
-	#[cfg(test)]
+	#[cfg(all(test, feature = "async"))]
 	pub(crate) fn joined(&self) -> kio::Producer<Outcome> {
 		self.inner.result.clone()
 	}
@@ -922,6 +949,7 @@ impl Fill {
 			inner: self.inner.clone(),
 			sequence,
 			frame_start: self.inner.frame_start(sequence),
+			frame_end: self.inner.bounds(sequence).end,
 			priority: self.priority(),
 			max_delay: self.max_delay(),
 		}
@@ -970,7 +998,22 @@ impl Inner {
 		}
 	}
 
+	fn bounds(&self, sequence: u64) -> group::Bounds {
+		group::Bounds {
+			start: self.frame_start(sequence),
+			end: if sequence.checked_add(1) == Some(self.end) {
+				self.frame_end
+			} else {
+				None
+			},
+		}
+	}
+
 	fn accept(&self, sequence: u64, info: Option<Info>) -> Result<group::Producer> {
+		self.accept_from(sequence, info, self.bounds(sequence))
+	}
+
+	fn accept_from(&self, sequence: u64, info: Option<Info>, frames: group::Bounds) -> Result<group::Producer> {
 		if !self.contains(sequence) {
 			return Err(Error::InvalidRange);
 		}
@@ -981,10 +1024,15 @@ impl Inner {
 			return Err(Error::Duplicate);
 		}
 		// Cache the group before answering: readers resolve an accept through the cache.
-		let res = TrackState::modify(&self.state)
-			.and_then(|mut state| state.insert_group_request(sequence, self.frame_start(sequence), info));
+		let res =
+			TrackState::modify(&self.state).and_then(|mut state| state.insert_group_request(sequence, frames, info));
 		if let Ok(mut outcome) = self.result.write() {
 			outcome.accept(sequence..end);
+			if let Ok(group) = &res
+				&& (frames.start > 0 || frames.end.is_some())
+			{
+				outcome.partial.insert(sequence, group.handle());
+			}
 		}
 		uncover(&self.fills, self.id, sequence..end);
 		res
@@ -1190,6 +1238,7 @@ pub(crate) struct GroupFill {
 	inner: Arc<Inner>,
 	sequence: u64,
 	frame_start: u64,
+	frame_end: Option<u64>,
 	priority: i8,
 	max_delay: Option<Duration>,
 }
@@ -1217,6 +1266,16 @@ impl GroupFill {
 		self.frame_start
 	}
 
+	/// The requested exclusive last frame, if this copy is bounded at the back.
+	pub(crate) fn frame_end(&self) -> Option<u64> {
+		self.frame_end
+	}
+
+	/// Accept the actual wire range, which an older or compressed upstream may have widened.
+	pub(crate) fn accept_from(&self, info: Info, frames: group::Bounds) -> Result<group::Producer> {
+		self.inner.accept_from(self.sequence, Some(info), frames)
+	}
+
 	/// Poll until no reader waits on this group, as [`Fill::poll_unwanted`].
 	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.inner.poll_unwanted(self.sequence, waiter)
@@ -1240,6 +1299,7 @@ impl GroupFill {
 	}
 
 	/// Insert the group into the cache, as [`Fill::accept`].
+	#[cfg(test)]
 	pub(crate) fn accept(self, info: impl Into<Option<Info>>) -> Result<group::Producer> {
 		self.inner.accept(self.sequence, info.into())
 	}

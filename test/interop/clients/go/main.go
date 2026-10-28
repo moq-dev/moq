@@ -115,10 +115,11 @@ func dial(ctx context.Context, url string, opts dialOptions, timeout time.Durati
 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	auth := client.Session().Auth()
-	grant := auth.Grant()
+	grants := client.Session().Grants()
+	defer grants.Close()
+	grant := grants.Grant()
 	for grant == nil {
-		if grant, err = auth.GrantChanged(ctx); err != nil {
+		if grant, err = grants.Changed(ctx); err != nil {
 			client.Close()
 			return nil, fmt.Errorf("grant: %w", err)
 		}
@@ -342,13 +343,21 @@ func finishSubscribe(ctx context.Context, client *moq.Client, broadcast string, 
 	defer media.Cancel()
 	count := 0
 	for {
-		frame, err := media.Next(ctx)
+		read, err := media.Next(ctx)
 		if err != nil {
 			return err
 		}
-		if frame == nil {
+		if read == nil {
 			break
 		}
+		if _, gap := read.(moqmedia.ReadGap); gap {
+			return errors.New("media gap")
+		}
+		value, frameRead := read.(moqmedia.ReadFrame)
+		if !frameRead {
+			continue
+		}
+		frame := value.Frame
 		// Empty payloads carry endpoint metadata, not codec frames.
 		if len(frame.Payload) == 0 {
 			continue
@@ -473,14 +482,22 @@ func decodeAudio(ctx context.Context, consumer *moq.BroadcastConsumer, id string
 	frameBytes := 4 * int(rendition.ChannelCount)
 	decoded := 0
 	for decoded*1000 < audioMs*int(rendition.SampleRate) {
-		frame, err := decoder.Next(ctx)
+		read, err := decoder.Next(ctx)
 		if err != nil {
 			return err
 		}
-		if frame == nil {
+		var frame moqaudio.Frame
+		switch read := read.(type) {
+		case moqaudio.ReadFrame:
+			frame = read.Frame
+		// moq-audio reports a hole it saw directly; tone.py checks the timestamps too.
+		case moqaudio.ReadGap:
+			return fmt.Errorf("audio gap after %d samples", decoded)
+		default: // nil, the track's end, or a ReadEnd, the encoder's
 			return errors.New("audio track ended early")
 		}
 		samples := len(frame.Data) / frameBytes
+
 		fmt.Fprintf(log, "%d %d\n", frame.Timestamp.Microseconds(), samples)
 		if _, err := pcm.Write(frame.Data); err != nil {
 			return err
@@ -550,13 +567,21 @@ func subscribe(ctx context.Context, url, broadcast string, opts dialOptions, tim
 
 	total := 0
 	for total == 0 {
-		frame, err := media.Next(ctx)
+		read, err := media.Next(ctx)
 		if err != nil {
 			return err
 		}
-		if frame == nil {
+		if read == nil {
 			break
 		}
+		if _, gap := read.(moqmedia.ReadGap); gap {
+			return errors.New("media gap")
+		}
+		value, frameRead := read.(moqmedia.ReadFrame)
+		if !frameRead {
+			continue
+		}
+		frame := value.Frame
 		total += len(frame.Payload)
 	}
 	if total == 0 {

@@ -4,6 +4,23 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
+
+Publishing, serving, or requesting a broadcast at a path with a leading, trailing, or doubled `/` returns an error instead of collapsing it. Pass the canonical path, such as `room/cam`.
+
+### Request handlers are `Requests()` ([#6752](https://github.com/moq-dev/moq/pull/6752))
+
+Rename `Dynamic()` on `OriginProducer`, `BroadcastProducer`, `TrackProducer`, and `TrackRequest` to `Requests()`.
+Their handles `OriginDynamic`, `BroadcastDynamic`, and `TrackDynamic` are `OriginRequests`, `BroadcastRequests`, and `TrackRequests`; their methods are unchanged.
+
+### `Allocator` ([#6751](https://github.com/moq-dev/moq/pull/6751))
+
+`Bandwidth` is `Allocator`, `Session.Bandwidth()` is `Session.Allocator()`, and `Reservation.Grant()` is `Reservation.Rate()`. The `Bandwidth` field of `ProducerOptions` keeps its name and takes a `*moq.Allocator`.
+
+### Decoders read gaps and ends
+
+`audio.Consumer.Next` and `video.Consumer.Next` return a `Read` (and `All` ranges over them) instead of a frame pointer. Switch on `ReadFrame` and take its `Frame` where you used the frame; `ReadGap` marks lost media and `ReadEnd` where the publisher stopped its encoder, and what follows either does not continue what came before. A nil `Read` still means the track ended.
+
 ### Durations cross as `time.Duration`
 
 The re-exported records carry `time.Duration` instead of microseconds: `FetchGroupOptions.MaxDelay`, `media.Audio.Jitter`, and the raw `AudioDecoderOutput.{MaxDelay, Delay}`, `AudioEncoderOutput.FrameDuration`, and `VideoDecoderOutput.MaxDelay`, each a `*time.Duration` where it was a `*uint64` `...Us` field.

@@ -19,6 +19,7 @@ async function prepare(config: Workload): Promise<void> {
 			websocket: { enabled: false },
 		});
 		cleanup.push(() => {
+			track.finish();
 			track.close();
 			broadcast.close();
 			connection.abort();
@@ -29,11 +30,10 @@ async function prepare(config: Workload): Promise<void> {
 				while (demand.peek() === undefined && track.closed.peek() === undefined)
 					await Promise.race([demand.changed(), track.closed]);
 				if (track.closed.peek() !== undefined) return;
-				const group = new Moq.Group.Producer(config.sequence);
+				const group = track.createGroup(config.sequence);
 				for (const [frame, bytes] of fixtures.entries())
 					group.writeFrame({ payload: bytes, timestamp: Moq.Time.Timestamp.fromMillis(frame) });
-				group.close();
-				track.writeGroup(group);
+				group.finish();
 				// Keep the track and broadcast served until every reader completes. No timing arm or tail-close race.
 			})(),
 		);

@@ -2,6 +2,7 @@ import { Micro, Milli } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import { Legacy } from "@moq/hang/container";
 import { Origin, Path } from "@moq/net";
+import { Signal } from "@moq/signals";
 import { Player } from "@moq/watch";
 
 // Real WebCodecs and rendering, with publication controlled independently of wall time.
@@ -41,7 +42,11 @@ async function poster(audio: boolean, buffered: boolean) {
 	producerPublication.announce();
 	const canvas = document.createElement("canvas");
 	document.body.append(canvas);
+	const enabled = new Signal(true);
+	const paused = new Signal(false);
 	const player = new Player({
+		enabled,
+		paused,
 		origin,
 		name,
 		catalogFormat: "manual",
@@ -81,6 +86,8 @@ async function poster(audio: boolean, buffered: boolean) {
 	};
 	return {
 		push,
+		enabled: (value: boolean) => enabled.set(value),
+		paused: (value: boolean) => paused.set(value),
 		async audio() {
 			if (!audioGroup) throw new Error("no audio track");
 			const encode = new AudioEncoder({
@@ -115,6 +122,8 @@ async function poster(audio: boolean, buffered: boolean) {
 			const rgba = context.getImageData(32, 16, 1, 1).data;
 			return {
 				timestamp: player.renderer.out.frame.peek()?.timestamp,
+				decoded: !!player.video.out.frame.peek(),
+				downloading: player.video.in.enabled.peek(),
 				playing: player.sync.playing.peek(),
 				color: rgba[0] > 160 ? "red" : rgba[2] > 160 ? "blue" : "black",
 				audioTimestamp: player.audio.out.timestamp.peek(),
@@ -123,8 +132,8 @@ async function poster(audio: boolean, buffered: boolean) {
 		},
 		close() {
 			player.close();
-			group.close();
-			audioGroup?.close();
+			group.finish();
+			audioGroup?.finish();
 			producer.close();
 			origin.close();
 			canvas.remove();

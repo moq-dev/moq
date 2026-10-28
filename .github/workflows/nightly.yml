@@ -28,7 +28,7 @@ name: Nightly
 # release PRs on them.
 #
 # Main PRs run no cloud CI beyond the merge queue's Check, so every
-# path-filtered gate (Android, C++, WASM, X11, the audio replays, the OSS
+# path-filtered gate (Android, C, C++, WASM, X11, the audio replays, the OSS
 # Scanner image, platform.yml and the release dry-runs) runs here on main too,
 # and release-gate.yml runs them on release PRs.
 #
@@ -71,6 +71,9 @@ jobs:
 
   android:
     uses: ./.github/workflows/android.yml
+
+  c:
+    uses: ./.github/workflows/c.yml
 
   cpp:
     uses: ./.github/workflows/cpp.yml
@@ -574,6 +577,16 @@ jobs:
     needs: [release-shared-ffi]
     if: ${{ always() && !cancelled() }}
     uses: ./.github/workflows/release-cpp.yml
+    with:
+      reuse-native: true
+    permissions:
+      contents: write
+
+  release-c:
+    name: Release C
+    needs: [release-shared-ffi]
+    if: ${{ always() && !cancelled() }}
+    uses: ./.github/workflows/release-c.yml
     with:
       reuse-native: true
     permissions:

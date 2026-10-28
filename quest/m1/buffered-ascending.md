@@ -72,15 +72,8 @@ Implementation:
   every reply decodes from its first frame, plain and barge-in, with no
   overflow.
 
-### Runtime mode switch (2026-10-24 pre-cut audit)
-
-Changing `buffer` at runtime does not switch the audio ring's mode:
-`js/watch/src/audio/decoder.ts:293` captures `sync.out.buffered` once when it
-builds the worklet, and `#order()` (`:679`) peeks it once per attempt, so
-going from live to buffered after playback started leaves `Backpressure`
-and the worklet `Init` live (future-dated TTS audio is shed), and the
-reverse leaves a live player in play-through. Key the ring and `Order` on
-`sync.out.buffered`: rebuild the ring, or post a mode message plus a reset.
+Runtime buffer changes switch the audio ring and reader mode. This quest
+keeps waiting on lite-07 for the head-hold simplification.
 
 ## Required
 

@@ -40,7 +40,9 @@ publication.announce({ epoch: generation.epoch });
 
 const group = video.appendGroup();
 await group.writeFrame(Time.Timestamp.now(), frame);
-group.close();
+group.finish();
+video.finish();
+video.close();
 ```
 
 A subscriber resolves `credential.path(semantic)`, takes the epoch from the announced
@@ -57,6 +59,14 @@ consumer runs one serial pump: one AEAD call in flight. Producer net writes land
 order, so a frame's index always matches its transport position. Await each write for
 backpressure. Consumer reads wait for the network outside the pump, so a stalled group
 never holds up another group's opens.
+
+Finish each group with `group.finish()` and declare the track's end with `track.finish()`.
+Groups already created remain writable until they finish or the track is released.
+`track.close()` releases the producer, draining a declared end; without `finish()` it
+cancels the unfinished track. Use `abort(error)` on a group or track to end it with an
+error, and await its `closed` outcome to observe completion. A group finish drains its
+queued writes unless the track aborts. A track's declared end remains abortable until
+its outcome settles or the producer is released.
 
 A grouped authentication failure ends the track with `Failure` code `authentication`; a
 datagram that fails to open is dropped as an `identity`, `oversize`, or `authentication`

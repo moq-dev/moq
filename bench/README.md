@@ -118,14 +118,25 @@ or `heap` (jemalloc retained heap and allocation churn):
 ```bash
 nix develop --command just bench-profile lock
 nix develop --command just bench-profile "cpu heap" fanout-heavy "4 16"
+nix develop --command just bench-profile "cpu heap" audio "4 16" io-uring-workers
+nix develop --command just bench-profile cpu chat 4 io-uring-workers origin/main
 ```
 
 This builds the relay with `[profile.profiling]` and frame pointers, then runs
-the workload on Tokio workers at each count twice per mode: an unprofiled
-control, then a profiled run, so the throughput and CPU difference shows the
-profiler's overhead. Each mode captures only the relay process, never the load
+the workload on the selected runtime (`tokio-workers` by default, or
+`io-uring-workers`) at each count twice per mode: an unprofiled control, then a
+profiled run, so the throughput and CPU difference shows the profiler's overhead. Each mode captures only the relay process, never the load
 generator, during the profiled run's 5 s steady window, the same window as the
-summary's throughput. Linux only.
+summary's throughput. Linux only. Both runtimes use the runtime comparison's
+feature build; io\_uring uses its kernel support check too. Readiness verifies the
+selected backend and exact worker count from the relay's actual thread names,
+retained as `runtime.json`, before the generator starts.
+
+The optional final argument selects a base revision. The current harness builds
+it in a temporary worktree and drives both revisions with the current generator,
+sampler, workload and capture settings. This also works when the base's own
+profiling harness has no runtime selector. Results live under `relay/base/` and
+`relay/current/`, with one unprofiled control per revision, worker count and mode.
 
 ### Lock wait
 
@@ -172,6 +183,11 @@ refused rather than reported.
 ```bash
 sudo sysctl -w kernel.perf_event_paranoid=-1
 ```
+
+The maintainer's 24-core `desktop` workstation is the profiling host: it
+keeps `kernel.perf_event_paranoid=-1`. Profile there only while it is quiet,
+with no other agents running and load near zero, since other work on the
+host shows up as lock waits and CPU the relay did not cause.
 
 ### Heap
 
@@ -236,7 +252,8 @@ source files. The retained path is printed at the end, including on failure.
 Choose an evidence parent outside disposable worktrees when the report must survive
 worktree removal. Criterion case discovery uses isolated short measurements and
 their full JSON IDs, since `--list` truncates display names; discovery samples
-are retained separately and never used in the comparison.
+are retained separately and never used in the comparison. A target that writes
+no Criterion samples, such as one that prints its own table, is listed as skipped.
 
 Each comparison reports the median of the paired percentage deltas, their median
 absolute deviation and range, and flags fewer than three observations or a sign
@@ -347,11 +364,12 @@ Crashes, wrong bytes, missing frames, a window that presents nothing, or an
 unavailable CPU clock fail the run; timing never does. The nightly runs
 `--smoke` and keeps its run directory as the `bench-browser` artifact.
 
-The in-memory frame and retained-history paths also run directly in Chromium:
+The in-memory frame, retained-history, and gap ledger paths also run directly in Chromium:
 
 ```bash
 nix develop --command bun bench/browser/micro.ts --bench frames --out .tmp/frames.json base=/path/to/release current=. aa=.
 nix develop --command bun bench/browser/micro.ts --bench drift --out .tmp/drift.json before=/path/to/main current=. aa=.
+nix develop --command bun bench/browser/micro.ts --bench ledger --out .tmp/ledger.json before=/path/to/main current=. aa=.
 ```
 
 Each variant uses its own workspace source and a persistent page, with one full
@@ -360,8 +378,17 @@ warmup before three alternating measured rounds. `aa` must bundle identically to
 runs the checkout's existing `js/net/bench/frames.ts`; `drift` uses the same fixture
 against every checkout, sweeping retained groups, publishers, and readers. Replay
 and group setup stay outside drift timing; each parked read checks its live
-payload. The browser smoke lane preserves one measured round of both fixtures, and drift
-also runs in the nightly JS benchmark leg. Timing is
+payload. `ledger` uses one fixture against every checkout's internal ledger, sweeping
+ascending, descending, shuffled, and rolling-expiration arrivals over the retained
+gap count. It includes each arrival's expiration and coverage checks.
+The drift sweep includes untimed controls and timed groups with decode-order
+B-frames, independently varying publisher and reader counts and retained history.
+Its `time_mode` column is 0 for untimed, 1 for millisecond timestamps, and 2
+for mixed millisecond/microsecond timestamps, which exercise exact cross-scale
+comparison.
+
+The browser smoke lane preserves one measured round of all three fixtures, and drift
+and ledger also run in the nightly JS benchmark leg. Timing is
 observational, with the A/A spread showing the host's noise floor.
 
 ## Pattern and container coverage

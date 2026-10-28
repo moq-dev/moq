@@ -6,9 +6,9 @@ use crate::origin;
 use crate::time::{Deadlines, Instant};
 use crate::transport::poll::Session as _;
 use crate::{
-	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_22, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05,
-	ALPN_LITE_06, ALPN_LITE_07_WIP, Consume, Error, NEGOTIATED, Session, SessionError, Version, Versions,
-	coding::{Decode, Encode, Stream},
+	ALPN_18, ALPN_22, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05, ALPN_LITE_06, ALPN_LITE_07_WIP, Consume,
+	Error, NEGOTIATED, Session, SessionError, Version, Versions,
+	coding::{Encode, Stream},
 	ietf, lite,
 	setup::{self, Role},
 	stats,
@@ -210,6 +210,7 @@ impl Server {
 				stats: self.stats.clone(),
 				goaway: start.goaway,
 				auth: start.auth,
+				credential: start.credential,
 				estimate: Some(start.estimate),
 				bandwidth: crate::bandwidth::Allocator::default(),
 				peer_implementation: start.peer_implementation,
@@ -217,70 +218,39 @@ impl Server {
 		))
 	}
 
-	async fn handshake_lite(&self, runtime: Deadlines, mut session: Transport) -> Result<Handshake, Error> {
-		let (path, role, origin, peer_implementation, handshake) = match session.protocol() {
-			Some(alpn @ (ALPN_LITE_05 | ALPN_LITE_06 | ALPN_LITE_07_WIP)) => {
-				let version = match alpn {
-					ALPN_LITE_07_WIP => lite::Version::Lite07,
-					ALPN_LITE_06 => lite::Version::Lite06,
-					_ => lite::Version::Lite05,
-				};
-				self.versions.select(Version::Lite(version)).ok_or(Error::Version)?;
-				// Gate on the client's SETUP: read it before serving so the
-				// caller can scope by the advertised path. Seeded back into
-				// `start` on `ok()` so PROBE gating resolves without
-				// re-reading the (consumed) Setup Stream.
-				let client_setup = lite::accept_setup(&mut session, version).await?;
-				(
-					client_setup.setup.path.clone(),
-					client_setup.setup.role,
-					client_setup.setup.hop,
-					client_setup.setup.implementation.clone(),
-					PausedHandshake::LiteSetup {
-						session,
-						version,
-						client_setup,
-					},
-				)
-			}
-			Some(ALPN_LITE_04) => {
-				self.versions
-					.select(Version::Lite(lite::Version::Lite04))
-					.ok_or(Error::Version)?;
-				(
-					None,
-					None,
-					None,
-					None,
-					PausedHandshake::LiteBare {
-						session,
-						version: lite::Version::Lite04,
-					},
-				)
-			}
-			Some(ALPN_LITE_03) => {
-				self.versions
-					.select(Version::Lite(lite::Version::Lite03))
-					.ok_or(Error::Version)?;
-				(
-					None,
-					None,
-					None,
-					None,
-					PausedHandshake::LiteBare {
-						session,
-						version: lite::Version::Lite03,
-					},
-				)
-			}
-			_ => return Err(Error::Version),
+	async fn handshake_lite(
+		&self,
+		runtime: Deadlines,
+		mut session: Transport,
+		version: lite::Version,
+	) -> Result<Handshake, Error> {
+		self.versions.select(Version::Lite(version)).ok_or(Error::Version)?;
+		let (path, role, origin, peer_implementation, handshake) = if version.has_setup_stream() {
+			// Gate on the client's SETUP: read it before serving so the
+			// caller can scope by the advertised path. Seeded back into
+			// `start` on `ok()` so PROBE gating resolves without
+			// re-reading the (consumed) Setup Stream.
+			let client_setup = lite::accept_setup(&mut session, version).await?;
+			(
+				client_setup.setup.path.clone(),
+				client_setup.setup.role,
+				client_setup.setup.hop,
+				client_setup.setup.implementation.clone(),
+				PausedHandshake::LiteSetup {
+					session,
+					version,
+					client_setup,
+				},
+			)
+		} else {
+			(None, None, None, None, PausedHandshake::LiteBare { session, version })
 		};
 
 		let auth = crate::auth::Link::new(match &handshake {
 			PausedHandshake::LiteBare { version, .. } | PausedHandshake::LiteSetup { version, .. } => {
 				version.has_auth()
 			}
-			PausedHandshake::IetfModern(_) | PausedHandshake::Legacy(_) => false,
+			PausedHandshake::Ietf(_) | PausedHandshake::Negotiated(_) => false,
 		});
 		let token = match &handshake {
 			PausedHandshake::LiteSetup { client_setup, .. } => client_setup.setup.token.clone(),
@@ -348,52 +318,35 @@ impl Server {
 	}
 
 	async fn handshake(&self, runtime: Deadlines, mut session: Transport) -> Result<Handshake, Error> {
-		let (encoding, supported) = match session.protocol() {
-			Some(alpn @ (ALPN_22 | ALPN_18 | ALPN_17)) => {
+		let supported = match session.protocol() {
+			Some(alpn @ (ALPN_22 | ALPN_18)) => {
 				let draft = match alpn {
 					ALPN_22 => ietf::Version::Draft22,
-					ALPN_18 => ietf::Version::Draft18,
-					_ => ietf::Version::Draft17,
+					_ => ietf::Version::Draft18,
 				};
 
 				self.versions.select(Version::Ietf(draft)).ok_or(Error::Version)?;
-				return self.accept_ietf_modern(runtime, session, draft).await;
+				return self.accept_ietf(runtime, session, draft).await;
 			}
-			Some(ALPN_16) => {
-				let v = self
-					.versions
-					.select(Version::Ietf(ietf::Version::Draft16))
-					.ok_or(Error::Version)?;
-				(v, v.into())
+			Some(alpn @ (ALPN_LITE_07_WIP | ALPN_LITE_06 | ALPN_LITE_05 | ALPN_LITE_04 | ALPN_LITE_03)) => {
+				let version = match alpn {
+					ALPN_LITE_07_WIP => lite::Version::Lite07,
+					ALPN_LITE_06 => lite::Version::Lite06,
+					ALPN_LITE_05 => lite::Version::Lite05,
+					ALPN_LITE_04 => lite::Version::Lite04,
+					_ => lite::Version::Lite03,
+				};
+				return self.handshake_lite(runtime, session, version).await;
 			}
-			Some(ALPN_15) => {
-				let v = self
-					.versions
-					.select(Version::Ietf(ietf::Version::Draft15))
-					.ok_or(Error::Version)?;
-				(v, v.into())
-			}
-			Some(ALPN_14) => {
-				let v = self
-					.versions
-					.select(Version::Ietf(ietf::Version::Draft14))
-					.ok_or(Error::Version)?;
-				(v, v.into())
-			}
-			Some(ALPN_LITE_07_WIP | ALPN_LITE_06 | ALPN_LITE_05 | ALPN_LITE_04 | ALPN_LITE_03) => {
-				return self.handshake_lite(runtime, session).await;
-			}
-			Some(ALPN_LITE) | None => {
-				let supported = self.versions.filter(&NEGOTIATED.into()).ok_or(Error::Version)?;
-				(Version::Ietf(ietf::Version::Draft14), supported)
-			}
+			// No ALPN, or `moql`: negotiate moq-lite in a bidi SETUP.
+			Some(ALPN_LITE) | None => self.versions.filter(&NEGOTIATED.into()).ok_or(Error::Version)?,
 			Some(p) => return Err(Error::UnknownAlpn(p.to_string())),
 		};
 
-		// Legacy bidi SETUP exchange (IETF 14-16, lite 01/02). Read the client's
-		// SETUP to choose the version; `ok()` sends the server SETUP and starts.
+		// Read the client's SETUP to choose the version; `ok()` sends the server SETUP and starts.
 		// Stats attach in `ok()`: a caller may still replace them on the handshake.
-		let mut stream = Stream::accept(&mut session, encoding).await?;
+		// The SETUP keeps lite-01's framing whichever version it offers.
+		let mut stream = Stream::accept(&mut session, Version::Lite(lite::Version::Lite01)).await?;
 		let (client, client_setup_size) = stream.reader.decode_sized::<setup::Client>().await?;
 
 		let version = client
@@ -402,73 +355,50 @@ impl Server {
 			.flat_map(|v| Version::try_from(*v).ok())
 			.find(|v| supported.contains(v))
 			.ok_or(Error::Version)?;
-
-		// Pull the request path and max request ID out now (IETF only) so `ok()`
-		// doesn't re-decode the consumed parameters. moq-transport carries the path
-		// in its SETUP just like lite-05.
-		let (path, token, request_id_max, peer_declared, peer_implementation) = match version {
-			Version::Ietf(v) => {
-				let (params, _) = ietf::Parameters::decode_slice(&client.parameters, v)?;
-				let path = match params.get_bytes(ietf::ParameterBytes::Path) {
-					Some(bytes) => Some(
-						std::str::from_utf8(bytes)
-							.map_err(|_| Error::Decode(crate::DecodeError::InvalidValue))?
-							.to_owned(),
-					),
-					None => None,
-				};
-				let token = ietf::token::from_setup(&params, v)?;
-				let request_id_max = params
-					.get_varint(ietf::ParameterVarInt::MaxRequestId)
-					.map(ietf::RequestId);
-				let peer_declared = ietf::peer::Peer {
-					solicit: ietf::solicit::from_setup(&params, v)?,
-					hidden: ietf::hidden::from_setup(&params, v),
-					max_age: ietf::max_age::from_setup(&params, v),
-					active_count: ietf::active_count::from_setup(&params, v),
-					flate: ietf::flate::from_setup(&params, v)?,
-					..Default::default()
-				};
-				let implementation =
-					setup::decode_implementation(params.get_bytes(ietf::ParameterBytes::Implementation))?;
-				(path, token, request_id_max, peer_declared, implementation)
-			}
-			Version::Lite(_) => (None, None, None, ietf::peer::Peer::default(), None),
+		let Version::Lite(version) = version else {
+			return Err(Error::Version);
 		};
 
+		// Answer, close the stream, and continue as that version's ALPN would. Waiting for the
+		// acknowledgement keeps the reply from being discarded by the reset a dropped stream sends.
+		if Version::Lite(version).hands_off() {
+			let Stream { mut writer, .. } = stream;
+			writer
+				.encode(&setup::Server {
+					version: Version::Lite(version).into(),
+					parameters: lite::Parameters::default().encode_bytes(version)?,
+				})
+				.await?;
+			writer.close().await?;
+			return self.handshake_lite(runtime, session, version).await;
+		}
+
 		Ok(Handshake {
-			path,
+			path: None,
 			role: None,
 			origin: None,
-			token,
-			peer_implementation: peer_implementation.clone(),
+			token: None,
+			peer_implementation: None,
 			assigned_hop: crate::Hop::random(),
-			// Lite 01/02 and moq-transport 14-16 carry no AUTH, though a moq-transport request
-			// still carries a token.
-			auth: match version {
-				Version::Ietf(_) => crate::auth::Link::ietf(false),
-				Version::Lite(_) => crate::auth::Link::new(false),
-			},
+			// Lite 01/02 carry no AUTH.
+			auth: crate::auth::Link::new(false),
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
 				deadline: None,
-				handshake: PausedHandshake::Legacy(PausedLegacy {
+				handshake: PausedHandshake::Negotiated(PausedNegotiated {
 					session,
 					stream,
 					version,
-					request_id_max,
-					peer_declared,
-					peer_implementation,
 					client_setup_size,
 				}),
 			}),
 		})
 	}
 
-	/// Read a draft-17/18 client's SETUP (with its request path) off its uni stream,
+	/// Read a moq-transport client's SETUP (with its request path) off its uni stream,
 	/// then pause. `ok()` starts the session and hands the stream back for GOAWAY.
-	async fn accept_ietf_modern(
+	async fn accept_ietf(
 		&self,
 		runtime: Deadlines,
 		mut session: Transport,
@@ -491,7 +421,7 @@ impl Server {
 				server: self.clone(),
 				runtime,
 				deadline: None,
-				handshake: PausedHandshake::IetfModern(PausedIetfModern {
+				handshake: PausedHandshake::Ietf(PausedIetf {
 					session,
 					version,
 					peer_setup,
@@ -550,20 +480,20 @@ enum PausedHandshake {
 		version: lite::Version,
 		client_setup: lite::AcceptedSetup,
 	},
-	IetfModern(PausedIetfModern),
-	Legacy(PausedLegacy),
+	Ietf(PausedIetf),
+	Negotiated(PausedNegotiated),
 }
 
-/// Modern IETF (17+): the client's SETUP (with its request path) has been
+/// moq-transport: the client's SETUP (with its request path) has been
 /// read off its uni stream; `ok` starts the session, handing that stream back
 /// for GOAWAY monitoring.
-struct PausedIetfModern {
+struct PausedIetf {
 	session: Transport,
 	version: ietf::Version,
 	peer_setup: ietf::PeerSetup,
 }
 
-impl PausedIetfModern {
+impl PausedIetf {
 	/// Complete the handshake with the final server config.
 	fn ok(
 		self,
@@ -577,19 +507,18 @@ impl PausedIetfModern {
 			version,
 			peer_setup,
 		} = self;
-		server.stats.control(stats::Control::Session, peer_setup.size, true);
+		server.stats.control(stats::Message::Session, peer_setup.size, true);
 		let (publish, subscribe) = server.stat_tagged_origins();
 		let peer_implementation = setup::PeerImplementation::known(peer_setup.implementation);
 
 		// The client's SETUP was read at the pause; hand the stream back
 		// for GOAWAY. A server never advertises a path, hence `None`.
-		let (protocol, goaway) = ietf::start(ietf::Config {
+		let (protocol, goaway, credential) = ietf::start(ietf::Config {
 			runtime: runtime.clone(),
 			stats: server.stats.clone(),
 			limits: server.limits,
 			session: session.clone(),
-			setup: None,
-			request_id_max: None,
+
 			client: false,
 			publish,
 			subscribe,
@@ -619,6 +548,7 @@ impl PausedIetfModern {
 				stats: server.stats.clone(),
 				goaway,
 				auth,
+				credential,
 				estimate: None,
 				bandwidth: crate::bandwidth::Allocator::default(),
 				peer_implementation,
@@ -627,23 +557,17 @@ impl PausedIetfModern {
 	}
 }
 
-/// Legacy IETF (draft 14-16) and lite 01/02: the client SETUP has been read
-/// off the bidi stream (including its request path) but the server SETUP
-/// hasn't been sent; `ok` finishes it.
-struct PausedLegacy {
+/// moq-lite 01/02: the client SETUP has been read off the bidi stream but the server
+/// SETUP hasn't been sent; `ok` finishes it.
+struct PausedNegotiated {
 	session: Transport,
 	stream: Stream<Transport, Version>,
-	version: Version,
-	request_id_max: Option<ietf::RequestId>,
-	/// What the client's SETUP declared, for the options `ok` acts on.
-	peer_declared: ietf::peer::Peer,
-	/// The implementation the client's SETUP advertised.
-	peer_implementation: Option<String>,
+	version: lite::Version,
 	/// The client SETUP's encoded size, counted under the final stats.
 	client_setup_size: usize,
 }
 
-impl PausedLegacy {
+impl PausedNegotiated {
 	/// Send the server SETUP and start the session.
 	async fn ok(
 		self,
@@ -656,126 +580,50 @@ impl PausedLegacy {
 			session,
 			stream,
 			version,
-			request_id_max,
-			peer_declared,
-			peer_implementation,
 			client_setup_size,
 		} = self;
 		let mut stream = stream.with_stats(&server.stats);
-		server.stats.control(stats::Control::Session, client_setup_size, true);
+		server.stats.control(stats::Message::Session, client_setup_size, true);
 		let (publish, subscribe) = server.stat_tagged_origins();
 
-		// Encode parameters using the version-appropriate type.
-		let parameters = match version {
-			Version::Ietf(v) => {
-				let mut parameters = ietf::Parameters::default();
-				// The client's requests, admitted up to our limits and granted back as they close.
-				parameters.set_varint(
-					ietf::ParameterVarInt::MaxRequestId,
-					ietf::initial_max_request_id(server.limits.window(), true),
-				);
-				if let Some(implementation) = server.implementation() {
-					parameters.set_bytes(ietf::ParameterBytes::Implementation, implementation.into_bytes());
-				}
-				if server.extensions.solicit {
-					ietf::solicit::into_setup(&mut parameters, v);
-				}
-				ietf::hidden::into_setup(&mut parameters, v);
-				ietf::max_age::into_setup(&mut parameters, v);
-				ietf::active_count::into_setup(&mut parameters, v);
-				ietf::flate::into_setup(&mut parameters, v);
-				parameters.encode_bytes(v)?
-			}
-			Version::Lite(v) => lite::Parameters::default().encode_bytes(v)?,
-		};
-
 		let server_setup = setup::Server {
-			version: version.into(),
-			parameters,
+			version: Version::Lite(version).into(),
+			parameters: lite::Parameters::default().encode_bytes(version)?,
 		};
 		stream.writer.encode(&server_setup).await?;
 
-		let (recv_bw, protocol, goaway, auth, estimate, peer_implementation) = match version {
-			Version::Lite(v) => {
-				let stream = stream.with_version(v);
-				// Pre-lite-05: no Setup Stream, so nothing to advertise or seed.
-				let start = lite::start(lite::Config {
-					runtime: runtime.clone(),
-					stats: server.stats.clone(),
-					client: false,
-					limits: server.limits,
-					session: session.clone(),
-					setup_stream: Some(stream),
-					publish,
-					subscribe,
-					peer_hop,
-					version: v,
-					our_setup: lite::Setup::default(),
-					peer_setup: None,
-					auth,
-				})?;
-				(
-					start.recv_bandwidth,
-					crate::driver::Protocol::Lite(Box::new(start.driver)),
-					start.goaway,
-					start.auth,
-					Some(start.estimate),
-					start.peer_implementation,
-				)
-			}
-			Version::Ietf(v) => {
-				let stream = stream.with_version(v);
-				let peer_implementation = setup::PeerImplementation::known(peer_implementation);
-				// Draft 14-16: path came in the bidi SETUP, no uni SETUP to hand back.
-				let (protocol, goaway) = ietf::start(ietf::Config {
-					runtime: runtime.clone(),
-					stats: server.stats.clone(),
-					limits: server.limits,
-					session: session.clone(),
-					setup: Some(stream),
-					request_id_max,
-					client: false,
-					publish,
-					subscribe,
-					peer_hop,
-					cost: None,
-					version: v,
-					path: None,
-					authority: None,
-					token: None,
-					peer_setup_stream: None,
-					peer_declared: Some(peer_declared),
-					auth: auth.clone(),
-					early_unis: Vec::new(),
-					extensions: server.extensions,
-					// Already sent on the bidi SETUP above.
-					implementation: None,
-					peer_implementation: peer_implementation.clone(),
-				})?;
-				(
-					None,
-					crate::driver::Protocol::Ietf(protocol),
-					goaway,
-					auth,
-					None,
-					peer_implementation,
-				)
-			}
-		};
+		let stream = stream.with_version(version);
+		// Pre-lite-05: no Setup Stream, so nothing to advertise or seed.
+		let start = lite::start(lite::Config {
+			runtime: runtime.clone(),
+			stats: server.stats.clone(),
+			client: false,
+			limits: server.limits,
+			session: session.clone(),
+			setup_stream: Some(stream),
+			publish,
+			subscribe,
+			peer_hop,
+			version,
+			our_setup: lite::Setup::default(),
+			peer_setup: None,
+			auth,
+		})?;
 
 		Ok(Session::new(
 			runtime,
 			session,
-			version,
-			recv_bw,
-			protocol,
+			version.into(),
+			start.recv_bandwidth,
+			crate::driver::Protocol::Lite(Box::new(start.driver)),
 			crate::session::Handles {
 				stats: server.stats.clone(),
-				goaway,
-				auth,
-				estimate,
+				goaway: start.goaway,
+				auth: start.auth,
+				credential: start.credential,
+				estimate: Some(start.estimate),
 				bandwidth: crate::bandwidth::Allocator::default(),
-				peer_implementation,
+				peer_implementation: start.peer_implementation,
 			},
 		))
 	}
@@ -807,7 +655,7 @@ impl Handshake {
 	/// The Hop ID declared by the peer, when the negotiated protocol carries one.
 	///
 	/// A moq-lite-05+ endpoint declares this when it attaches a publish or subscribe
-	/// origin; a `moqt-17`+ endpoint declares it via the MoQ Cluster extension. Older
+	/// origin; a moq-transport endpoint declares it via the MoQ Cluster extension. Older
 	/// versions and endpoints without one return `None`.
 	///
 	/// Self-declared, so treat it as a correlation hint rather than an
@@ -939,12 +787,12 @@ impl Handshake {
 					version,
 					client_setup,
 				} => {
-					server.stats.control(stats::Control::Session, client_setup.size, true);
+					server.stats.control(stats::Message::Session, client_setup.size, true);
 					server.start_lite(runtime, session, version, Some(client_setup), peer_hop, auth)
 				}
-				PausedHandshake::IetfModern(paused) => paused.ok(server, runtime, peer_hop, auth),
+				PausedHandshake::Ietf(paused) => paused.ok(server, runtime, peer_hop, auth),
 				// Boxed so the bidi SETUP write of these old versions doesn't size every caller's future.
-				PausedHandshake::Legacy(paused) => Box::pin(paused.ok(server, runtime, peer_hop, auth)).await,
+				PausedHandshake::Negotiated(paused) => Box::pin(paused.ok(server, runtime, peer_hop, auth)).await,
 			}
 		};
 		let res = match deadline {
@@ -1001,8 +849,8 @@ impl PausedHandshake {
 			Self::LiteBare { session, version } | Self::LiteSetup { session, version, .. } => {
 				(session.clone(), (*version).into())
 			}
-			Self::IetfModern(paused) => (paused.session.clone(), paused.version.into()),
-			Self::Legacy(paused) => (paused.session.clone(), paused.version),
+			Self::Ietf(paused) => (paused.session.clone(), paused.version.into()),
+			Self::Negotiated(paused) => (paused.session.clone(), paused.version.into()),
 		}
 	}
 }
@@ -1192,9 +1040,6 @@ mod tests {
 		fn poll_closed(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Error> {
 			std::task::Poll::Pending
 		}
-		fn stats(&self) -> impl crate::transport::Stats {
-			crate::transport::StatsUnavailable
-		}
 	}
 
 	#[derive(Clone, Default)]
@@ -1274,7 +1119,7 @@ mod tests {
 		buf
 	}
 
-	/// Encode a draft-17+ Setup Stream: the unified SETUP message, whose parameters
+	/// Encode a moq-transport Setup Stream: the unified SETUP message, whose parameters
 	/// carry the request path the same way lite-05's does.
 	fn ietf_setup(version: ietf::Version, path: Option<&str>) -> Vec<u8> {
 		let mut params = ietf::Parameters::default();
@@ -1297,17 +1142,15 @@ mod tests {
 		buf
 	}
 
-	/// Encode a draft 14-16 CLIENT_SETUP, sent on the control bidi stream.
-	fn legacy_setup(version: ietf::Version, params: ietf::Parameters) -> Vec<u8> {
+	/// A moq-lite-02 CLIENT_SETUP, sent on the bidi stream the `moql` ALPN negotiates over.
+	fn moql_setup() -> Vec<u8> {
+		let version = crate::Version::Lite(lite::Version::Lite02);
 		let mut buf = Vec::new();
 		setup::Client {
-			versions: crate::coding::Versions::from([crate::Version::Ietf(version).into()]),
-			parameters: params.encode_bytes(version).unwrap(),
+			versions: crate::coding::Versions::from([version.into()]),
+			parameters: Bytes::new(),
 		}
-		.encode(
-			&mut crate::coding::Encoder::new(&mut buf, (crate::Version::Ietf(version)).into()),
-			crate::Version::Ietf(version),
-		)
+		.encode(&mut crate::coding::Encoder::new(&mut buf, version.into()), version)
 		.unwrap();
 		buf
 	}
@@ -1329,21 +1172,13 @@ mod tests {
 	/// session the driver then runs, through the REAL accept path (`accept_request` -> `ok`).
 	/// The session's own `auth()` (the handle the driver polls) routes a request token to that
 	/// pre-ok consumer instead of falling to the `Unsupported` default, and granting admits.
-	/// Both a no-AUTH-extension legacy session (draft-14, `Handle::new(false)`) and the modern
-	/// uni-SETUP path (draft-18); a QUIC server has no other point to install the verifier.
+	/// A QUIC server has no other point to install the verifier.
 	#[moq_clock::test]
 	async fn a_pre_ok_verifier_governs_the_session() {
-		let cases = [
-			(
-				FakeSession::new(ALPN_14, [])
-					.with_bi(legacy_setup(ietf::Version::Draft14, ietf::Parameters::default())),
-				ietf::Version::Draft14,
-			),
-			(
-				FakeSession::new(ALPN_18, [ietf_setup(ietf::Version::Draft18, Some("room/alice"))]),
-				ietf::Version::Draft18,
-			),
-		];
+		let cases = [(
+			FakeSession::new(ALPN_18, [ietf_setup(ietf::Version::Draft18, Some("room/alice"))]),
+			ietf::Version::Draft18,
+		)];
 
 		for (session, version) in cases {
 			let mut request = Server::new()
@@ -1377,9 +1212,9 @@ mod tests {
 	#[moq_clock::test]
 	async fn a_reply_the_peer_never_takes_fails_at_the_deadline() {
 		let registry = stats::Registry::new(Default::default());
-		let version = ietf::Version::Draft16;
-		let session = FakeSession::new(ALPN_16, [])
-			.with_bi(legacy_setup(version, ietf::Parameters::default()))
+		let version = Version::Lite(lite::Version::Lite02);
+		let session = FakeSession::new(ALPN_LITE, [])
+			.with_bi(moql_setup())
 			.withholding_credit();
 		let start = moq_clock::now();
 		let deadline = start + std::time::Duration::from_secs(10);
@@ -1387,17 +1222,18 @@ mod tests {
 			.accept_request(start, session.clone())
 			.await
 			.unwrap()
-			.with_stats(registry.tier(Default::default()).session("room"))
+			.with_stats(
+				registry
+					.tier(Default::default())
+					.session(crate::Path::from_static("room")),
+			)
 			.with_deadline(deadline);
 		let Err(err) = request.ok().await else {
 			panic!("a reply the peer never took completed");
 		};
 		assert!(matches!(err, Error::Timeout), "{err:?}");
 		assert_eq!(moq_clock::now(), deadline);
-		assert_eq!(
-			session.close_code(),
-			Some(Version::Ietf(version).session_code(&SessionError::Timeout))
-		);
+		assert_eq!(session.close_code(), Some(version.session_code(&SessionError::Timeout)));
 		let failed = registry.snapshot().sessions()[0].1.sessions_failed;
 		assert_eq!(failed.count(stats::Failure::Application), 1, "{failed:?}");
 	}
@@ -1407,21 +1243,22 @@ mod tests {
 	#[moq_clock::test]
 	async fn an_abandoned_reply_fails_like_the_deadline() {
 		let registry = stats::Registry::new(Default::default());
-		let version = ietf::Version::Draft16;
-		let session = FakeSession::new(ALPN_16, [])
-			.with_bi(legacy_setup(version, ietf::Parameters::default()))
+		let version = Version::Lite(lite::Version::Lite02);
+		let session = FakeSession::new(ALPN_LITE, [])
+			.with_bi(moql_setup())
 			.withholding_credit();
 		let request = Server::new()
 			.accept_request(moq_clock::now(), session.clone())
 			.await
 			.unwrap()
-			.with_stats(registry.tier(Default::default()).session("room"));
+			.with_stats(
+				registry
+					.tier(Default::default())
+					.session(crate::Path::from_static("room")),
+			);
 		let abandoned = moq_clock::timeout(std::time::Duration::from_secs(1), request.ok()).await;
 		assert!(abandoned.is_err(), "a reply the peer never took completed");
-		assert_eq!(
-			session.close_code(),
-			Some(Version::Ietf(version).session_code(&SessionError::Timeout))
-		);
+		assert_eq!(session.close_code(), Some(version.session_code(&SessionError::Timeout)));
 		let failed = registry.snapshot().sessions()[0].1.sessions_failed;
 		assert_eq!(failed.count(stats::Failure::Application), 1, "{failed:?}");
 	}
@@ -1441,7 +1278,11 @@ mod tests {
 				.accept_request(moq_clock::now(), session)
 				.await
 				.unwrap()
-				.with_stats(registry.tier(Default::default()).session("room"))
+				.with_stats(
+					registry
+						.tier(Default::default())
+						.session(crate::Path::from_static("room")),
+				)
 				.close(err.clone());
 			let failures = registry.snapshot().sessions()[0].1.sessions_failed;
 			for kind in stats::Failure::ALL {
@@ -1453,21 +1294,15 @@ mod tests {
 
 	#[moq_clock::test]
 	async fn accept_request_exposes_the_setup_token() {
-		let modern = FakeSession::new(
+		let ietf = FakeSession::new(
 			ALPN_22,
 			[ietf_setup_with(
 				ietf::Version::Draft22,
 				token_params(ietf::Version::Draft22),
 			)],
 		);
-		let legacy = FakeSession::new(ALPN_16, []).with_bi(legacy_setup(
-			ietf::Version::Draft16,
-			token_params(ietf::Version::Draft16),
-		));
-		for (name, session) in [("draft-22", modern), ("draft-16", legacy)] {
-			let request = Server::new().accept_request(moq_clock::now(), session).await.unwrap();
-			assert_eq!(request.token(), Some(&setup_token()), "{name}");
-		}
+		let request = Server::new().accept_request(moq_clock::now(), ietf).await.unwrap();
+		assert_eq!(request.token(), Some(&setup_token()));
 	}
 
 	#[moq_clock::test]
@@ -1480,8 +1315,7 @@ mod tests {
 		}
 	}
 
-	/// A SETUP the server refuses closes the session with the code naming why, on both
-	/// the draft-17+ uni stream and the draft 14-16 bidi stream.
+	/// A SETUP the server refuses closes the session with the code naming why.
 	#[moq_clock::test]
 	async fn a_refused_setup_token_closes_with_its_code() {
 		let delete = [0x0, 0x7]; // DELETE alias 7
@@ -1493,25 +1327,18 @@ mod tests {
 			let mut params = ietf::Parameters::default();
 			params.set_bytes(ietf::ParameterBytes::AuthorizationToken, raw.to_vec());
 
-			let modern = FakeSession::new(ALPN_22, [ietf_setup_with(ietf::Version::Draft22, params.clone())]);
-			let legacy = FakeSession::new(ALPN_16, []).with_bi(legacy_setup(ietf::Version::Draft16, params));
-			for (name, session) in [("draft-22", modern), ("draft-16", legacy)] {
-				let result = Server::new().accept_request(moq_clock::now(), session.clone()).await;
-				assert!(result.is_err(), "{name}");
-				assert_eq!(session.close_code(), Some(code.to_code()), "{name} {code}");
-			}
+			let session = FakeSession::new(ALPN_22, [ietf_setup_with(ietf::Version::Draft22, params)]);
+			let result = Server::new().accept_request(moq_clock::now(), session.clone()).await;
+			assert!(result.is_err());
+			assert_eq!(session.close_code(), Some(code.to_code()), "{code}");
 		}
 	}
 
 	#[moq_clock::test]
 	async fn accept_request_reads_ietf_path() {
-		// Every draft-17+ version gates on the SETUP stream before starting, so the
+		// Every draft gates on the SETUP stream before starting, so the
 		// path is known at authorization time just like lite-05.
-		for (alpn, version) in [
-			(ALPN_17, ietf::Version::Draft17),
-			(ALPN_18, ietf::Version::Draft18),
-			(ALPN_22, ietf::Version::Draft22),
-		] {
+		for (alpn, version) in [(ALPN_18, ietf::Version::Draft18), (ALPN_22, ietf::Version::Draft22)] {
 			let session = FakeSession::new(alpn, [ietf_setup(version, Some("/team/room"))]);
 			let request = Server::new().accept_request(moq_clock::now(), session).await.unwrap();
 			assert_eq!(request.path(), "/team/room", "{alpn}");
@@ -1666,7 +1493,7 @@ mod tests {
 				server: Server::new().with_publisher(&origin),
 				runtime: Deadlines::new(moq_clock::now()),
 				deadline: None,
-				handshake: PausedHandshake::IetfModern(PausedIetfModern {
+				handshake: PausedHandshake::Ietf(PausedIetf {
 					session: Transport::new(transport),
 					version,
 					peer_setup: ietf::PeerSetup {

@@ -30,8 +30,8 @@ function isEpoch(text: string): boolean {
 
 /**
  * Zod schema for the publisher instance a catalog reference names: an entry's `epoch` beside its
- * `broadcast`, or the archive's `replayEpoch`. A lowercase hyphenated UUIDv7, the same text MoQ
- * routes carry; anything else refuses the catalog.
+ * `broadcast`. A lowercase hyphenated UUIDv7, the same text MoQ routes carry; anything else
+ * refuses the catalog.
  */
 export const EpochSchema: z.ZodMiniType<ReferenceEpoch, string> = z.pipe(
 	z.string().check(z.refine(isEpoch, "expected a lowercase hyphenated UUIDv7")),

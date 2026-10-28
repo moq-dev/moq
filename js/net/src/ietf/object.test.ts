@@ -5,7 +5,7 @@ import { FetchHeader } from "./fetch.ts";
 import { decodeObjectTime, encodeObjectExtensions, Group } from "./object.ts";
 import { Version } from "./version.ts";
 
-const VERSION = Version.DRAFT_17;
+const VERSION = Version.DRAFT_18;
 
 /** `timestamp` written at `timescale` and read back. */
 async function roundtrip(timestamp: Timestamp, timescale: Timescale): Promise<Timestamp | undefined> {
@@ -33,7 +33,7 @@ test("a conversion past what a Timestamp holds is refused before anything is wri
 });
 
 test("a data stream's header goes out in one write, stream type included", async () => {
-	for (const version of [Version.DRAFT_14, Version.DRAFT_22]) {
+	for (const version of [Version.DRAFT_22]) {
 		const chunks: Uint8Array[] = [];
 		const writer = new Writer(
 			new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),

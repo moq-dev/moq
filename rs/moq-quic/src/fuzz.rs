@@ -10,7 +10,8 @@
 //! `fuzz/fuzz_targets/`. Compiled only under `cfg(test)` or the `fuzz` feature, so none
 //! of this is part of the published API. See `fuzz/README.md` for the workflow.
 //!
-//! [`Plaintext`] is the crypto the `connection` target and the benchmarks run on.
+//! [`Plaintext`] is the crypto the `connection` target and the benchmarks run on, and
+//! [`SentPackets`] is the sent-packet storage its benchmark drives.
 
 mod connection;
 mod plaintext;
@@ -31,6 +32,8 @@ use crate::{
 	transport_parameters::{PreferredAddress, TransportParameters},
 };
 
+#[cfg(feature = "fuzz")]
+pub use crate::connection::BenchSentPackets as SentPackets;
 pub use connection::connection;
 pub use plaintext::Plaintext;
 

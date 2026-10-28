@@ -48,7 +48,8 @@ export type SourceInput = {
 	probe: Getter<Moq.Connection.Probe | undefined>;
 };
 
-type SourceOutput = {
+/** Signals the source derives. */
+export type SourceOutput = {
 	catalog: Signal<Catalog.Video | undefined>;
 	available: Signal<Record<string, Catalog.VideoConfig>>;
 
@@ -351,7 +352,7 @@ export class Source {
 	 *
 	 * Each enabled filter returns matching renditions sorted by preference.
 	 * The first rendition present in every filter's output is selected.
-	 * If no rendition satisfies all filters, a warning is logged.
+	 * If the rankings conflict, the first ranking's best rendition is selected.
 	 */
 	#select(renditions: Record<string, Catalog.VideoConfig>, target?: Target): string | undefined {
 		const entries = Object.entries(renditions);
@@ -388,8 +389,8 @@ export class Source {
 			}
 		}
 
-		console.warn("conflicting rendition filters, no rendition satisfies all criteria");
-		return undefined;
+		console.warn("conflicting rendition filters, using the first ranking's preferred rendition");
+		return rankings[0][0];
 	}
 
 	/** Stop and release everything this holds. */

@@ -115,7 +115,7 @@ jobs:
           nix develop --command just test interop "${args[@]}"
         shell: bash -leo pipefail {0}
         env:
-          INTEROP_ARGS: ${{ github.event_name == 'pull_request' && '--publishers rust --subscribers rust,js-native-node,js-native-bun --versions moq-transport-14,moq-transport-22' || '--all --versions ietf' }}
+          INTEROP_ARGS: ${{ github.event_name == 'pull_request' && '--publishers rust --subscribers rust,js-native-node,js-native-bun --versions moq-transport-18,moq-transport-22' || '--all --versions ietf' }}
           HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
           HARNESS_RESULTS: ${{ runner.temp }}/moq-test-runs/results.jsonl
 

@@ -26,6 +26,8 @@
 //! `track_sparse_read` hands out groups from a feed with every other sequence missing,
 //! holding a fixed number of gaps the reader still remembers: each hand-out must cost the
 //! same however many gaps it holds, so a walk over them shows up as a slope.
+//! `track_sparse_poll` repeats a parked read without changing the feed, so revisiting
+//! deferred gaps on an otherwise unchanged poll shows up independently of delivery.
 //!
 //! `track_sparse_expire` opens one new gap while one old gap expires, so a full expiry
 //! rescan on each arrival shows up as a slope over the gaps still within budget.
@@ -1292,6 +1294,26 @@ fn bench_sparse_read(c: &mut Criterion) {
 	group.finish();
 }
 
+fn bench_sparse_poll(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_sparse_poll");
+	for (name, info) in [("untimed", track::Info::default()), ("timed", timed())] {
+		for gaps in [16u64, 256, 4096] {
+			group.bench_function(BenchmarkId::new(name, gaps), |b| {
+				b.iter_custom(|iterations| {
+					let mut sparse = Sparse::new(info.clone(), gaps);
+					let waiter = kio::Waiter::noop();
+					let start = WallInstant::now();
+					for _ in 0..iterations {
+						assert!(black_box(sparse.sub.poll_recv_group(&waiter)).is_pending());
+					}
+					start.elapsed()
+				});
+			});
+		}
+	}
+	group.finish();
+}
+
 /// A sparse feed that opens one gap per millisecond, keeping `gaps` within its budget.
 struct Expiring {
 	sparse: Sparse,
@@ -1751,7 +1773,7 @@ fn bench_time_end(c: &mut Criterion) {
 struct Fills {
 	_broadcast: broadcast::Producer,
 	_track: track::Producer,
-	dynamic: track::Dynamic,
+	dynamic: track::Requests,
 	readers: Vec<track::Subscriber>,
 	runs: u64,
 }
@@ -1760,7 +1782,7 @@ impl Fills {
 	fn new(readers: usize, runs: u64) -> Self {
 		let broadcast = broadcast::Info::default().produce();
 		let mut track = broadcast.create_track("bench", timed()).unwrap();
-		let dynamic = track.dynamic();
+		let dynamic = track.requests();
 		// The feed starts past every run, so each is a miss asked at once.
 		let start = runs * 2;
 		track.start_at(start).unwrap();
@@ -1835,7 +1857,7 @@ fn bench_fill(c: &mut Criterion) {
 struct RangeFills {
 	_broadcast: broadcast::Producer,
 	_track: track::Producer,
-	dynamic: track::Dynamic,
+	dynamic: track::Requests,
 	reader: track::Subscriber,
 	groups: u64,
 }
@@ -1844,7 +1866,7 @@ impl RangeFills {
 	fn new(ranges: u64, span: u64) -> Self {
 		let broadcast = broadcast::Info::default().produce();
 		let mut track = broadcast.create_track("bench", timed()).unwrap();
-		let dynamic = track.dynamic();
+		let dynamic = track.requests();
 		// The feed starts past every range, so each is a miss asked at once. A gap between
 		// neighbors keeps every range its own fill.
 		let start = ranges * (span + 1);
@@ -1940,6 +1962,7 @@ criterion_group!(
 	bench_datagram_pressure,
 	bench_parked_read,
 	bench_sparse_read,
+	bench_sparse_poll,
 	bench_sparse_expire,
 	bench_gap_flush,
 	bench_wall,

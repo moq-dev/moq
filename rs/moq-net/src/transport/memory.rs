@@ -31,7 +31,7 @@ use std::{
 
 use bytes::{Buf, Bytes};
 
-use super::{StatsUnavailable, poll};
+use super::poll;
 
 /// The largest datagram either side sends: QUIC's minimum MTU, so a payload that fits
 /// here fits any QUIC path.
@@ -427,10 +427,6 @@ impl poll::Session for Session {
 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Error> {
 		poll_close(&self.side.conn.close, self.closed.hold(cx))
-	}
-
-	fn stats(&self) -> impl super::Stats {
-		StatsUnavailable
 	}
 }
 

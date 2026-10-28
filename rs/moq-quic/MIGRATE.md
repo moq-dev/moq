@@ -16,14 +16,18 @@ Rustls configs disable early data, including caller-supplied configs, while sess
 `RecvStream::read()` and `Chunks::next(max)` always return ordered bytes.
 Drop the ordering flag and `Chunk::offset`; track bytes consumed if an application needs its own offset.
 `ReadableError::IllegalOrderedRead` is gone.
-Use `Connection::set_limits` with `Limits` instead of individual stream-count and window setters.
-Use inherent `VarInt::encode` instead of the removed public `coding::Codec` trait.
+Use `Connection::set_limits` with `Limits` instead of `set_max_concurrent_streams`, `set_send_window`, and `set_receive_window`.
+`Limits::max_streams` sets both directions, so code that raised only `Dir::Uni` now raises the bidirectional limit too.
+Each field is a `NonZeroU64`, and `None` leaves that limit unchanged, so a live connection cannot set a stream limit or window to 0; set a per-direction or zero stream limit at construction with `TransportConfig::max_concurrent_uni_streams` and `max_concurrent_bidi_streams`.
+Use inherent `VarInt::encode` instead of the removed public `coding` module and its `Codec` trait.
+Nothing public decodes a `VarInt` or the other former `Codec` types (`StreamId`, `FrameType`, `TransportErrorCode`) anymore; parse them with your own decoder.
 
-Packet parsers and headers, `HashedConnectionIdGenerator`, `BloomTokenLog`, `TokenMemoryCache`, token policy traits, `ClientConfig::token_store`, and `ValidationTokenConfig::log` are internal.
+Packet parsers and headers, `HashedConnectionIdGenerator` (with `set_lifetime`), `BloomTokenLog`, `TokenMemoryCache`, token policy traits (`TokenLog`, `TokenStore`, and `TokenReuseError`), `NoneTokenLog`, `NoneTokenStore`, `ClientConfig::token_store`, and `ValidationTokenConfig::log` are internal.
 Use `Endpoint` to parse incoming datagrams, `RandomConnectionIdGenerator` or a consumer's `ConnectionIdGenerator`, and the default token policy.
 `TimeSource`, `StdSystemTime`, and `ServerConfig::time_source` are gone; address validation uses `moq_clock::wall()`, including an installed simulated clock.
 Unused `Connection::local_ip`, `min_rtt`, `has_pending_retransmits`, `ping`, `force_key_update`, `path_changed`, and `max_concurrent_streams` accessors are no longer public.
 `Endpoint::set_server_config`, `incoming_buffer_bytes`, and `Incoming::orig_dst_cid` are also internal or removed; configure the endpoint at construction.
+To rotate TLS certificates on a running endpoint, give the `ServerConfig`'s rustls config a `ResolvesServerCert` that returns the current certificate, as moq-tokio's `tls::Serve` does.
 Use `Connection::stats` for RTT metrics and receive metadata for local addresses.
 
 ### `mux` is an internal integration surface

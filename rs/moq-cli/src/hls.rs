@@ -499,7 +499,7 @@ mod test {
 				payload: bytes::Bytes::from_static(&[0x78, 0x00, 0x00, 0x00]),
 				keyframe: true,
 			};
-			let fragment = muxer.fragment(index as u32, &[frame]).unwrap();
+			let fragment = muxer.fragment(index as u32, &[frame], None).unwrap();
 			std::fs::write(dir.path().join(format!("{index}.m4s")), fragment).unwrap();
 		}
 		let live = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:1,\n0.m4s\n";

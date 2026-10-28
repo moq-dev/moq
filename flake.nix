@@ -32,7 +32,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:kixelated/quest/ed657ba9362a941b3be9bbea55120a3c5a90374c";
+      url = "github:kixelated/quest/fd1d88fb19317afc1c0cbca34cc23e9cf4d32375";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
@@ -389,17 +389,18 @@
           doCheck = false;
         };
 
-        # uniffi-bindgen-cpp renders rs/moq-ffi for cpp/moq's CMake build. Not in
-        # nixpkgs, so build it from source; without it `just check` skips the
-        # cpp module, which CI_STRICT turns into a failure in CI.
+        # uniffi-bindgen-cpp renders rs/moq-ffi for the CMake builds of cpp/moq and,
+        # with its C backend, c/moq. Not in nixpkgs, so build it from source;
+        # without it `just check` skips the c and cpp modules, which CI_STRICT
+        # turns into a failure in CI.
         #
         # Like uniffi-bindgen-go, the tag pairs the generator's version with the
         # uniffi release it reads, so it moves with the `uniffi` dependency in
         # rs/moq-ffi/Cargo.toml. The other places name the same tag and must be
         # bumped together: the `cargo install` lines in rs/moq-ffi/build.sh,
-        # cpp/moq/README.md, .github/workflows/cpp.yml,
-        # .github/workflows/platform.yml, .github/workflows/release-cpp.yml, and
-        # .github/workflows/release-shared-ffi.yml.
+        # cpp/moq/README.md, .github/workflows/{c,cpp}.yml,
+        # .github/workflows/platform.yml, .github/workflows/release-{c,cpp}.yml,
+        # and .github/workflows/release-shared-ffi.yml.
         #
         # This points at a fork of LiveKit's async branch (livekit/uniffi-bindgen-cpp
         # PR #1): neither LiveKit nor NordSecurity has a uniffi 0.32 generator,

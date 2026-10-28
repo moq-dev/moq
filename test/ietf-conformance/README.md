@@ -6,12 +6,10 @@ builds the Moxygen revision and matching Meta dependencies pinned in
 `conformance_test.sh` through this checkout's relay. This is separate from the
 published-package smoke matrix.
 
-Sections 1-7 run on both shared drafts, 16 and 18, through one relay, and on
-draft 18 through a two-relay cluster joined by native lite-07. Draft 16 has no
-cluster cell: its TRACK\_STATUS\_OK has no Track Properties block, so the
-cluster's origin cannot learn the track's priority from it. Each cell
+Sections 1-7 run on draft 18, the one draft both support, through one relay
+and through a two-relay cluster joined by native lite-07. Each cell
 runs 29 upstream SUBSCRIBE cases. A direct-origin control runs the same cases
-once per draft, separating suite or pin failures from relay behavior. FETCH is
+once, separating suite or pin failures from relay behavior. FETCH is
 skipped using upstream's `SKIP_FETCH`; section 8 uses PUBLISH and is outside the
 relay's support. Cases using forwarding modes 1 or 2 send
 nonzero subgroups and are explicitly excluded. Modes 0 and 3 are retained.
@@ -21,8 +19,8 @@ these exclusions and failure sensitivity, and refuse a changed script anchor.
 
 The publisher advertises the `moq-test-00` prefix. The client subscribes to
 16-field namespaces below it. Mock-clock integration tests in
-[`ietf_conformance.rs`](../../rs/moq-net/tests/integration/ietf_conformance.rs)
-prove this routing path on both drafts, through one relay and through two
+[`ietf_conformance.rs`](../../rs/moq-net-tests/tests/integration/ietf_conformance.rs)
+prove this routing path on draft 18, through one relay and through two
 relays joined with native lite-07. The live harness waits for that prefix at the
 relay before starting
 cases and rejects upstream publisher reconnects, so a recovered session cannot
@@ -61,7 +59,6 @@ direct-origin and one-relay cells:
 
 | Draft | Direct origin | One relay | Two relays |
 | --- | --- | --- | --- |
-| 16 | 29 pass | 29 pass | not run |
 | 18 | 29 pass | 29 pass | 29 pass |
 
 ## Local Moxygen patches

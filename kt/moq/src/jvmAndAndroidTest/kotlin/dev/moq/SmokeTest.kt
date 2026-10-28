@@ -2,9 +2,11 @@ package dev.moq
 
 import dev.moq.media.*
 import dev.moq.audio.Consumer as AudioConsumer
+import dev.moq.audio.ReadFrame as AudioReadFrame
 import dev.moq.audio.Producer as AudioProducer
 import dev.moq.audio.ProducerOptions as AudioProducerOptions
 import dev.moq.video.Consumer as VideoConsumer
+import dev.moq.video.ReadFrame as VideoReadFrame
 import dev.moq.video.Producer as VideoProducer
 import dev.moq.video.ProducerOptions as VideoProducerOptions
 import dev.moq.video.FrameRate as VideoFrameRate
@@ -174,7 +176,7 @@ class SmokeTest {
     fun `origin alias constructs and consumes`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
             origin.consume().use { /* lifecycle smoke */ }
-            origin.dynamic("").use { /* dynamic origin smoke */ }
+            origin.requests("").use { /* dynamic origin smoke */ }
         }
     }
 
@@ -227,7 +229,7 @@ class SmokeTest {
     @Test
     fun `ending a broadcast ends it while a dynamic handle remains`() = runTest {
         BroadcastProducer().use { broadcast ->
-            broadcast.dynamic().use {
+            broadcast.requests().use {
                 val consumer = broadcast.consume()
                 // Releasing the producer alone would leave the dynamic handle holding it open.
                 broadcast.end()
@@ -399,9 +401,10 @@ class SmokeTest {
      * by the interop test (`just test interop`).
      */
     @Test
-    fun `video consumer exposes a frames flow like audio does`() {
-        val video: (dev.moq.video.Consumer) -> Flow<VideoDecodedFrame> = dev.moq.video.Consumer::frames
-        val audio: (dev.moq.audio.Consumer) -> Flow<dev.moq.audio.Frame> = dev.moq.audio.Consumer::frames
+    fun `video consumer exposes a reads flow like audio does`() {
+        val video: (dev.moq.video.Consumer) -> Flow<dev.moq.video.Read> = dev.moq.video.Consumer::reads
+        val audio: (dev.moq.audio.Consumer) -> Flow<dev.moq.audio.Read> = dev.moq.audio.Consumer::reads
+
         assertNotNull(video)
         assertNotNull(audio)
     }
@@ -529,8 +532,8 @@ class SmokeTest {
 
     @Test
     fun `sessions advertise the wrapper ahead of moq-ffi`() = runTest {
-        Server.listen(ServerConfig(bind = "127.0.0.1:0", tls = ServerTls(generate = listOf("localhost")))).use { server ->
-            Moq.connect("https://${server.localAddr}", ClientConfig(tls = ClientTls(insecure = true))).use {
+        Server.listen(ServerConfig(bind = "127.0.0.1:0", versions = listOf("moq-lite-07-wip"), tls = ServerTls(generate = listOf("localhost")))).use { server ->
+            Moq.connect("https://${server.localAddr}", ClientConfig(versions = listOf("moq-lite-07-wip"), tls = ClientTls(insecure = true))).use {
                 server.requests().first().use { request ->
                     val advertised = request.peerImplementation()
                     assertTrue(advertised?.startsWith("moq-kt/") == true, "advertised: $advertised")
@@ -612,7 +615,7 @@ class SmokeTest {
     @Test
     fun `dynamic serves a request under a prefix`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
-            origin.dynamic("live").use { dynamic ->
+            origin.requests("live").use { dynamic ->
                 val pending = async {
                     origin.consume().requestBroadcast("live/cam")
                 }
@@ -690,13 +693,15 @@ class SmokeTest {
             )
             moq.use {
                 val everything = Grant(publish = listOf("**"), subscribe = listOf("**"), expires = null)
-                assertEquals(everything, moq.auth().grants().first { it != null })
+                assertEquals(everything, moq.grants().updates().first { it != null })
                 val session = accepted.await()
-                assertEquals(everything, session.auth().grants().first { it != null })
+                assertEquals(everything, session.grants().updates().first { it != null })
                 assertNull(everything.expires)
+                assertNull(session.tokens(), "an accepted session presents no tokens")
 
-                assertFailsWith<MoqException.Unsupported> { moq.auth().add("extra") }
-                assertEquals(everything, moq.auth().grant())
+                moq.tokens().set(listOf("extra"))
+                assertFailsWith<MoqException.Unsupported> { moq.tokens().answered() }
+                assertEquals(everything, moq.grants().grant())
                 session.cancel(0u)
             }
         }
@@ -745,8 +750,8 @@ class SmokeTest {
                 for (i in 0 until 2) {
                     audio.write(AudioFrame(timestampUs = i.toULong() * 20_000uL, data = ByteArray(960 * 4)))
                 }
-                assertNotNull(fixed.next())
-                assertNotNull(estimated.next())
+                assertIs<AudioReadFrame>(fixed.next())
+                assertIs<AudioReadFrame>(estimated.next())
 
                 assertEquals(java.time.Duration.ofMillis(80), fixed.delay())
                 assertTrue(estimated.delay() != initial, "the estimate should move as frames are read")
@@ -791,7 +796,8 @@ class SmokeTest {
                     video.write(VideoFrame(timestampUs = i.toULong() * 33_333uL, data = rgba))
                 }
 
-                decoder.next()!!.use { frame ->
+                assertIs<VideoReadFrame>(decoder.next()).frame.use { frame ->
+
                     // The frame outlives its consumer's cancellation.
                     decoder.cancel()
 

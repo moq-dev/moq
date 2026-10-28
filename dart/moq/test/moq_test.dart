@@ -183,25 +183,27 @@ void main() {
 
     expectEverything(
       await client
-          .auth()
           .grants()
+          .updates()
           .firstWhere((g) => g != null)
           .timeout(timeout),
     );
     expectEverything(
       await serverSession
-          .auth()
           .grants()
+          .updates()
           .firstWhere((g) => g != null)
           .timeout(timeout),
     );
+    expect(serverSession.tokens(), isNull);
 
     // A peer that verifies no tokens of its own refuses another one.
+    client.tokens().set_(tokens: ['extra']);
     await expectLater(
-      client.auth().add(token: 'extra').timeout(timeout),
+      client.tokens().answered().timeout(timeout),
       throwsA(isA<UnsupportedMoqException>()),
     );
-    expectEverything(client.auth().grant());
+    expectEverything(client.grants().grant());
 
     // The client drains first: cancelling the server session would fail its shutdown.
     await client.close();
@@ -236,7 +238,7 @@ void main() {
       ),
     ).timeout(timeout);
     final serverSession = await accepted;
-    expect(client.bandwidth(), isA<MoqBandwidth>());
+    expect(client.allocator(), isA<MoqAllocator>());
 
     final announcement = client.announced().updates().firstWhere(
       (event) => event is AnnounceEventStart,
@@ -284,6 +286,7 @@ void main() {
       options: const ListenOptions(
         bind: '127.0.0.1:0',
         tlsGenerate: ['localhost'],
+        versions: ['moq-lite-07-wip'],
       ),
     ).timeout(timeout);
     expect(server.certFingerprints(), isNotEmpty);
@@ -302,7 +305,7 @@ void main() {
       options: ConnectOptions(
         tls: ClientTls(insecure: true, hostName: 'localhost'),
         bind: '127.0.0.1:0',
-        versions: versions(),
+        versions: const ['moq-lite-07-wip'],
         timeout: Duration(seconds: 5),
         race: Duration.zero,
         resolutionDelay: Duration.zero,
@@ -495,7 +498,7 @@ void main() {
 
   test('dynamic serves a request under a prefix', () async {
     final origin = MoqOriginProducer(config: MoqOriginConfig());
-    final dynamic = origin.dynamic_(prefix: 'live');
+    final dynamic = origin.requests(prefix: 'live');
     final pending = origin.consume().requestBroadcast(path: 'live/cam');
     final request = await dynamic.requestedBroadcast().timeout(timeout);
     expect(request.path(), 'live/cam');
@@ -640,10 +643,11 @@ void main() {
       );
     }
 
-    final frame = await decoder.next().timeout(timeout);
+    final read = await decoder.next().timeout(timeout);
+    final frame = (read as moq_video.ReadFrame).frame;
     // The frame outlives its consumer's cancellation.
     decoder.cancel();
-    final pixels = frame!.width() * frame.height();
+    final pixels = frame.width() * frame.height();
     expect(
       frame.pixels(format: moq_video.PixelFormat.i420).length,
       pixels * 3 ~/ 2,
@@ -711,8 +715,8 @@ void main() {
         ),
       );
     }
-    expect(await fixed.next().timeout(timeout), isNotNull);
-    expect(await estimated.next().timeout(timeout), isNotNull);
+    expect(await fixed.next().timeout(timeout), isA<moq_audio.ReadFrame>());
+    expect(await estimated.next().timeout(timeout), isA<moq_audio.ReadFrame>());
 
     expect(fixed.delay(), const Duration(milliseconds: 80));
     expect(estimated.delay(), isNot(initial));

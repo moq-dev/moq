@@ -26,7 +26,7 @@ mod skipped;
 // The DEFLATE codec behind compressed tracks.
 mod flate;
 pub(crate) mod object;
-mod requests;
+mod request_queue;
 mod resume;
 mod subscription;
 mod time;
@@ -36,7 +36,7 @@ mod weak_cache;
 #[cfg(test)]
 mod test_tracing;
 
-use requests::Requests;
+use request_queue::RequestQueue;
 use weak_cache::{WeakCache, WeakEntry};
 
 pub use bytes::*;
@@ -50,8 +50,8 @@ pub use timed::Timed;
 pub mod origin {
 	pub use super::follow::AnnouncedBroadcast;
 	pub use super::origin_impl::{
-		Config, Consumer, Cost, Driver, Dynamic, HopLimit, Link, Preference, Prepared, Producer, Publication, Request,
-		Requesting, Route, Routing, Source,
+		Config, Consumer, Cost, Driver, HopLimit, Link, Preference, Prepared, Producer, Publication, Request,
+		Requesting, Requests, Route, Routing, Source,
 	};
 }
 
@@ -82,4 +82,4 @@ pub(crate) use origin_impl::{InterestChange, Interests};
 pub(crate) use origin_impl::AnnounceProducer;
 
 #[cfg(all(test, feature = "async"))]
-pub(crate) use origin_impl::ProduceTest;
+pub(crate) use origin_impl::{ProduceTest, TestSelection};

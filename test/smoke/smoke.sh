@@ -233,7 +233,7 @@ run_swift() {
 # ships include/moq.h, lib/libmoq.a, lib/pkgconfig/moq.pc and lib/cmake/moq/.
 libmoq_fetch() {
     [[ -n "$LIBMOQ_ROOT" && -d "$LIBMOQ_ROOT" ]] && return 0
-    local target tag ver url hdr=()
+    local target tag ver url release
     have curl || {
         echo "curl required" >&2
         return 1
@@ -258,17 +258,8 @@ libmoq_fetch() {
         # libva symbols and a libva-less host just falls back to another encoder.
         *) LIBMOQ_OS_LIBS="-lpthread -ldl -lm -lstdc++" ;;
     esac
-    # Latest libmoq-v* release, never pinned. Authenticated if a token is around
-    # (CI) to dodge the 60/hr anonymous GitHub API limit.
-    [[ -n "${GITHUB_TOKEN:-}" ]] && hdr=(-H "Authorization: Bearer $GITHUB_TOKEN")
-    # macOS ships bash 3.2, where "${hdr[@]}" on an empty array trips `set -u`;
-    # the ${arr[@]+...} guard expands to nothing when the array is unset/empty.
-    tag=$(curl -sf --retry 3 --retry-all-errors ${hdr[@]+"${hdr[@]}"} "https://api.github.com/repos/moq-dev/moq/releases?per_page=100" |
-        jq -r '.[].tag_name' | grep '^libmoq-v' | head -1)
-    [[ -n "$tag" ]] || {
-        echo "no libmoq-v* release found" >&2
-        return 1
-    }
+    release=$("$SMOKE_DIR/release.sh" libmoq-v) || return 1
+    tag=$(jq -er '.tag_name' <<<"$release") || return 1
     ver=${tag#libmoq-v}
     url="https://github.com/moq-dev/moq/releases/download/$tag/moq-$ver-$target.tar.gz"
     echo "libmoq $tag ($target)"
@@ -349,7 +340,7 @@ c_build_cmake() {
 # needs. (Local nix shells have no GStreamer, and a prebuilt plugin wouldn't link
 # against nixpkgs' gst anyway, so this cell wants a real system gst install.)
 gst_prepare() {
-    local target tag asset_name url root releases hdr=()
+    local target tag asset_name url root release
     have gst-launch-1.0 || {
         echo "gst-launch-1.0 not on PATH (apt install gstreamer1.0-tools / brew install gstreamer)" >&2
         return 1
@@ -395,34 +386,23 @@ gst_prepare() {
             return 1
             ;;
     esac
-    # Latest moq-gst-v* release, never pinned. Authenticated if a token is around
-    # (CI) to dodge the 60/hr anonymous GitHub API limit.
-    [[ -n "${GITHUB_TOKEN:-}" ]] && hdr=(-H "Authorization: Bearer $GITHUB_TOKEN")
-    releases="$TMP/moq-gst-releases.json"
-    curl -sf --retry 3 --retry-all-errors ${hdr[@]+"${hdr[@]}"} \
-        "https://api.github.com/repos/moq-dev/moq/releases?per_page=100" -o "$releases" || {
-        echo "failed to query moq-gst releases" >&2
-        return 1
-    }
-    tag=$(jq -r '.[].tag_name' "$releases" | grep '^moq-gst-v' | head -1)
-    [[ -n "$tag" ]] || {
-        echo "no moq-gst-v* release found" >&2
-        return 1
-    }
+    release="$TMP/moq-gst-release.json"
+    "$SMOKE_DIR/release.sh" moq-gst-v >"$release" || return 1
+    tag=$(jq -er '.tag_name' "$release") || return 1
     # Release asset names are part of the release metadata, not a derivation of
     # the crate version. In particular, 0.3.7 added the tag's `v` to the archive
     # and extracted-directory name. Select the platform asset that was actually
     # published so future naming changes fail as a missing asset, not a guessed URL.
-    asset_name=$(jq -r --arg tag "$tag" --arg suffix "-$target.tar.gz" \
-        '.[] | select(.tag_name == $tag) | .assets[].name |
-        select(startswith("moq-gst-") and endswith($suffix))' "$releases" | head -1)
+    asset_name=$(jq -r --arg suffix "-$target.tar.gz" \
+        '.assets[].name |
+        select(startswith("moq-gst-") and endswith($suffix))' "$release" | head -1)
     [[ -n "$asset_name" ]] || {
         echo "no moq-gst asset for $target in release $tag" >&2
         return 1
     }
-    url=$(jq -r --arg tag "$tag" --arg name "$asset_name" \
-        '.[] | select(.tag_name == $tag) | .assets[] |
-        select(.name == $name) | .browser_download_url' "$releases" | head -1)
+    url=$(jq -r --arg name "$asset_name" \
+        '.assets[] |
+        select(.name == $name) | .browser_download_url' "$release" | head -1)
     [[ -n "$url" ]] || {
         echo "moq-gst asset has no download URL: $asset_name" >&2
         return 1
@@ -839,7 +819,7 @@ negotiated() {
     # negotiated <log>: the wire version a client reported, or nothing. The Rust
     # and native-JS clients log `connected version=moq-transport-18`; the browser page logs the
     # WebTransport subprotocol it was handed (see clients/js/jsdelivr/setup.js),
-    # whose `moqt-16` ALPN spelling is normalized to match.
+    # whose `moqt-18` ALPN spelling is normalized to match.
     [[ -f "$1" ]] || return 0
     sed 's/\x1b\[[0-9;]*m//g' "$1" |
         grep -oE 'connected version=[^ ]+|negotiated protocol: [^ ]+' | tail -1 |

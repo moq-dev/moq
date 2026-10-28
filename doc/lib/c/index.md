@@ -36,6 +36,16 @@ target, and `nix build .#moq-c` produces the release layout. A bare
 pkg-config file, and omits the OpenH264 software fallback unless given
 `--features openh264`.
 
+`moq-c` and the C++ package each link in their own copy of the Rust core, so a
+program links one of the two, never both.
+
+Encoded media callbacks from `moq_consume_audio` and `moq_consume_video` deliver read
+handles. Inspect each with `moq_consume_read` and match `moq_media_read.kind`, using the
+same frame/gap/end tags as decoded audio and video. Release every kind with
+`moq_consume_read_free`; frame payload pointers borrow that handle. A gap breaks
+continuity. An encoder end is not callback EOF: frames before its endpoint are the old
+encoder's drain, and the first at or past it starts fresh. Callback 0 ends the stream.
+
 ## Connect
 
 ```c
@@ -51,7 +61,7 @@ if (session < 0)
     return fail(moq_error());
 ```
 
-Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Publication track names stay separate from codec settings.
+Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Publication track names stay separate from codec settings. For simulcast, give each rendition the next one down as the `lower` handle in its `moq_video_encode_options`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers. A rung only disables while the session probes for bandwidth, which on native transports takes moq-quic with BBR3.
 
 ## Things to know
 
@@ -71,7 +81,7 @@ inside. The header is the reference: each function carries a doc comment.
 - **Ending cleanly.** When the input ends, finish every track, then call `moq_publish_catalog_finish()` to finish the catalog, which ends the content. The broadcast stays announced and keeps serving the finished tracks, so a subscriber still catching up can drain them, until `moq_publish_close()` takes it offline. How long to keep it up is yours to decide. A track still open at the close ends with `UNROUTABLE`, which readers take as the publisher leaving, and its handle is released.
 - **Timeline breaks.** On a seek or pause, call `moq_publish_media_discontinuity`, then keep timestamps moving forward and resume video on a keyframe.
 - **JSON values.** `moq_consume_json_value` fills `moq_json_value` with the document and its frame's `timestamp_us`, rounded down to a whole microsecond; `timestamp_present` is false on an untimed track. A snapshot consumer's callback fires for each state in order, but a group superseded before it is read is skipped.
-- **Decoded frames hold decoder buffers.** Free each frame id with `moq_decode_video_frame_free` promptly, or the decoder stalls.
+- **Decoded reads.** `moq_decode_audio` and `moq_decode_video` deliver read ids in order: a frame, a gap where media was lost, or an end where the publisher stopped its encoder. Check `kind` on what `moq_decode_audio_read` or `moq_decode_video_read` writes. Free each id with `moq_decode_audio_read_free` or `moq_decode_video_read_free` promptly: a held video frame holds a decoder buffer, and the decoder stalls.
 - **Stats.** `moq_session_stats()` fills `moq_connection_stats` with `rtt_us`, `estimated_send_rate_bps`, and the byte and packet counters (`bytes_sent`, `bytes_received`, `bytes_lost`, `packets_sent`, `packets_received`, `packets_lost`). Each has a `<field>_valid` flag, false when the transport does not report it, which is not the same as zero. `moq_session_snapshot()` adds the negotiated `protocol`. A failed dial or dropped connection reaches the session's `on_state` with its `failure` code, and `moq_error()` gives the reason during that callback. Hold the handle returned by `moq_session_recv_bandwidth()` to request receive estimates. `moq_bandwidth_consumer_peek()` reads the estimate and `moq_bandwidth_consumer_changed()` waits for a change. `moq_bandwidth_consumer_close()` releases demand; the last consumer stops PROBE. Stats snapshots do not request it.
 - **Demand.** A watcher from `moq_publish_track_demand()` (or the media, video, and audio variants) calls back `MOQ_DEMAND_USED` or `MOQ_DEMAND_UNUSED`, again whenever the wanted group moves. `moq_publish_demand_wanted()` reads that group: start a new one once it passes your largest. Set `refresh` in `moq_track_info` to have a joining subscriber ask for a new group once the newest has grown past `refresh` times its first frame.
 - **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode.

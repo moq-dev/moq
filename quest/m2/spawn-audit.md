@@ -20,8 +20,8 @@ tests, benches, and binaries before starting.
 Convert where an owner already polls the work; report the rest. Split per
 crate group if the PR gets large, keeping one problem per PR.
 
-Public API: constructors that spawned return a handle to poll instead; MIGRATE
-entries per published crate. Wire: none.
+Public API: constructors that spawned return a handle to poll instead; an Impact
+migration note per published crate. Wire: none.
 
 ## Required
 

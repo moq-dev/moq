@@ -22,17 +22,16 @@ use crate::driver::Transport;
 use std::sync::Arc;
 
 use super::*;
-use crate::AsPath as _;
 use crate::ietf::request_stream::{self, Framed, Messages};
 
 /// A listed track, by its namespace and name.
-pub(super) type TrackKey = (PathOwned, Arc<str>);
+pub(super) type TrackKey = (Path, Arc<str>);
 
 /// How a PUBLISH_DONE leaves the listing: only TRACK_ENDED removes the track. Any other
 /// status, INTERNAL_ERROR included, fails the listing, so it asks again rather than hide a
 /// track that may still be live.
 pub(super) fn listing_end(done: &ietf::PublishDone, version: Version) -> Result<(), Error> {
-	match done.status_code == ietf::PublishDoneStatus::TrackEnded.code(version) {
+	match done.status_code == ietf::PublishDoneStatus::TrackEnded.code() {
 		true => Ok(()),
 		false => Err(done
 			.end(version)
@@ -89,7 +88,7 @@ impl Drop for Entry {
 
 /// A broadcast listed through this session.
 struct Listener {
-	path: PathOwned,
+	path: Path,
 	lister: Arc<broadcast::Lister>,
 	/// Set to the error that fails the listing.
 	failed: kio::Producer<Option<Error>>,
@@ -97,7 +96,7 @@ struct Listener {
 
 /// One SUBSCRIBE_TRACKS, from when it is wanted until the peer has closed it.
 struct Request {
-	prefix: PathOwned,
+	prefix: Path,
 	/// Dropped to cancel it; `None` once cancelled, while it leaves the wire.
 	live: Option<kio::Producer<()>>,
 	/// Closes once it is off the wire, so an overlapping one may go out.
@@ -116,7 +115,7 @@ pub(super) struct Listings {
 /// A SUBSCRIBE_TRACKS for its task to send.
 struct Opening {
 	key: u64,
-	prefix: PathOwned,
+	prefix: Path,
 	/// The overlapping requests that must leave the wire first.
 	blockers: Vec<kio::Consumer<()>>,
 	live: kio::Consumer<()>,
@@ -130,14 +129,14 @@ impl Listings {
 	}
 
 	/// The standing request that covers `namespace`; at most one does.
-	fn covering(&self, namespace: &PathOwned) -> Option<u64> {
+	fn covering(&self, namespace: &Path) -> Option<u64> {
 		self.requests
 			.iter()
 			.find(|(_, request)| request.live.is_some() && namespace.has_prefix(&request.prefix))
 			.map(|(key, _)| *key)
 	}
 
-	fn listers<'a>(&'a self, namespace: &'a PathOwned) -> impl Iterator<Item = &'a broadcast::Lister> + 'a {
+	fn listers<'a>(&'a self, namespace: &'a Path) -> impl Iterator<Item = &'a broadcast::Lister> + 'a {
 		self.listeners
 			.values()
 			.filter(move |listener| &listener.path == namespace)
@@ -146,7 +145,7 @@ impl Listings {
 
 	fn listen(
 		&mut self,
-		path: PathOwned,
+		path: Path,
 		lister: Arc<broadcast::Lister>,
 	) -> (u64, kio::Consumer<Option<Error>>, Option<Opening>) {
 		// What a broader listing already holds is listed at once.
@@ -224,7 +223,7 @@ impl Listings {
 				request.live = None;
 			}
 		}
-		let standing: Vec<PathOwned> = self
+		let standing: Vec<Path> = self
 			.requests
 			.values()
 			.filter(|request| request.live.is_some())
@@ -236,7 +235,7 @@ impl Listings {
 
 	/// Fail every listing the request covering `namespace` serves with `err`, and cancel it:
 	/// they ask again rather than miss a track that may still be live.
-	fn fail(&mut self, namespace: &PathOwned, err: Error) {
+	fn fail(&mut self, namespace: &Path, err: Error) {
 		let Some(key) = self.covering(namespace) else {
 			return;
 		};
@@ -348,7 +347,7 @@ enum Offer {
 impl Subscriber {
 	/// List `path`'s tracks into `lister` until the returned guard drops, through a
 	/// SUBSCRIBE_TRACKS covering it.
-	pub(super) fn listen(&self, path: PathOwned, lister: Arc<broadcast::Lister>) -> Listening {
+	pub(super) fn listen(&self, path: Path, lister: Arc<broadcast::Lister>) -> Listening {
 		let (key, failed, opening) = self.listings.lock().listen(path, lister);
 		if let Some(opening) = opening {
 			let this = self.clone();
@@ -390,7 +389,7 @@ impl Subscriber {
 
 	async fn subscribe_tracks(
 		&self,
-		prefix: &PathOwned,
+		prefix: &Path,
 		blockers: Vec<kio::Consumer<()>>,
 		live: &kio::Consumer<()>,
 	) -> Result<(), Error> {
@@ -426,14 +425,13 @@ impl Subscriber {
 		let Some(stream) = opened else {
 			return Ok(());
 		};
-		let mut stream = request_stream::with_stats(stream?, self.origin.stats(), self.version);
-		// No draft with SUBSCRIBE_TRACKS has MAX_REQUEST_ID, so this never waits on credit.
-		let request_id = kio::wait(|waiter| self.control.poll_next_request_id(waiter)).await;
+		let mut stream = stream?.with_stats(self.origin.stats());
+		let request_id = self.control.next_request_id();
 		stream.writer.buffer_message(
 			ietf::SubscribeTracks::ID,
 			&ietf::SubscribeTracks {
 				request_id,
-				prefix: prefix.as_path(),
+				prefix: prefix.clone(),
 				forward: false,
 				subscriber_priority: None,
 				group_order: None,
@@ -445,7 +443,7 @@ impl Subscriber {
 				authorization_token: None,
 			},
 		)?;
-		tracing::debug!(prefix = %self.origin.absolute(prefix), id = %request_id, "subscribe_tracks started");
+		tracing::debug!(prefix = %crate::path::Rooted(self.origin.root(), prefix), id = %request_id, "subscribe_tracks started");
 
 		let mut messages = Messages::new(self.session.clone(), self.control.client());
 		let mut established = false;
@@ -498,7 +496,9 @@ impl Subscriber {
 					let skipped = body
 						.message::<ietf::PublishSkipped>(self.version)
 						.map_err(|err| messages.failed(err.into()))?;
-					let namespace = prefix.join(&skipped.suffix);
+					let namespace = prefix
+						.join(&skipped.suffix)
+						.map_err(|err| messages.failed(err.into()))?;
 					self.skipped(namespace, skipped.track_name.as_ref().into());
 				}
 				_ => return Err(messages.failed(Error::UnexpectedMessage)),
@@ -508,7 +508,7 @@ impl Subscriber {
 		// Cancelled: close our half (FIN on draft-18, RESET_STREAM from draft-22, where a
 		// FIN is not a cancel), then read until the peer closes its own. The PUBLISHes it
 		// made stay ours.
-		tracing::debug!(prefix = %self.origin.absolute(prefix), "subscribe_tracks cancelled");
+		tracing::debug!(prefix = %crate::path::Rooted(self.origin.root(), prefix), "subscribe_tracks cancelled");
 		let Stream { mut writer, mut reader } = stream;
 		match request_stream::fin_cancels(self.version) {
 			true => {
@@ -533,7 +533,7 @@ impl Subscriber {
 	}
 
 	/// A fresh subscription of ours to `name` in `namespace`, and its info once accepted.
-	fn subscribed(&self, namespace: &PathOwned, name: &str) -> Option<(RequestId, Option<track::Info>)> {
+	fn subscribed(&self, namespace: &Path, name: &str) -> Option<(RequestId, Option<track::Info>)> {
 		let state = self.state.lock();
 		let aliases = state.aliases.read();
 		// A paused one is on its way out with the entry it held.
@@ -551,7 +551,7 @@ impl Subscriber {
 
 	/// The peer skipped a listed track: list it through a subscription of ours, opening
 	/// one paused if we have none.
-	fn skipped(&self, namespace: PathOwned, name: Arc<str>) {
+	fn skipped(&self, namespace: Path, name: Arc<str>) {
 		let key = (namespace, name);
 		let mut listings = self.listings.lock();
 		if listings.entries.contains_key(&key) || listings.covering(&key.0).is_none() {
@@ -621,8 +621,8 @@ impl Subscriber {
 		let Some(stream) = opened else {
 			return Ok(None);
 		};
-		let mut stream = request_stream::with_stats(stream?, self.origin.stats(), self.version);
-		let request_id = kio::wait(|waiter| self.control.poll_next_request_id(waiter)).await;
+		let mut stream = stream?.with_stats(self.origin.stats());
+		let request_id = self.control.next_request_id();
 		self.state.lock().subscribes.insert(
 			request_id,
 			TrackState {
@@ -638,7 +638,7 @@ impl Subscriber {
 					max_age: None,
 					new_group: None,
 					request_id,
-					track_namespace: key.0.as_path(),
+					track_namespace: key.0.clone(),
 					track_name: key.1.as_ref().into(),
 					subscriber_priority: super::super::priority::DEFAULT_WIRE,
 					// No update can change it, so it takes the order a reader gets by default.
@@ -673,7 +673,7 @@ impl Subscriber {
 			Ok(Some(accepted)) => accepted,
 			Ok(None) => {
 				self.remove_subscribe(request_id);
-				self.cancel_subscribe(stream, request_id).await;
+				self.cancel_subscribe(stream).await;
 				return Ok(None);
 			}
 			Err(err) => {
@@ -683,12 +683,12 @@ impl Subscriber {
 		};
 		if let Some(err) = refused(&accepted.properties, self.version, self.peer_setup.get().await.flate) {
 			self.remove_subscribe(request_id);
-			self.cancel_subscribe(stream, request_id).await;
+			self.cancel_subscribe(stream).await;
 			return Err(err);
 		}
 		if let Err(err) = self.bind_alias(request_id, accepted.alias) {
 			self.remove_subscribe(request_id);
-			self.cancel_subscribe(stream, request_id).await;
+			self.cancel_subscribe(stream).await;
 			return Err(err);
 		}
 		let info = accepted_info(&accepted.properties, self.version);
@@ -708,7 +708,7 @@ impl Subscriber {
 		};
 		if !listed {
 			self.remove_subscribe(request_id);
-			self.cancel_subscribe(stream, request_id).await;
+			self.cancel_subscribe(stream).await;
 			return Ok(None);
 		}
 		Ok(Some(Upstream {
@@ -747,9 +747,9 @@ impl Subscriber {
 	pub(super) async fn serve_publish(
 		&mut self,
 		mut stream: Stream<Transport, Version>,
-		msg: ietf::Publish<'_>,
+		msg: ietf::Publish<'static>,
 	) -> Result<(), Error> {
-		let key: TrackKey = (msg.track_namespace.to_owned(), msg.track_name.as_ref().into());
+		let key: TrackKey = (msg.track_namespace.clone(), msg.track_name.as_ref().into());
 		let info = accepted_info(&msg.properties, self.version);
 		let flate = self.peer_setup.get().await.flate;
 		let offer = {
@@ -827,7 +827,6 @@ impl Subscriber {
 			Offer::Refuse(code, reason) => {
 				tracing::debug!(broadcast = %key.0, track = %key.1, reason, "refusing publish");
 				let error = ietf::RequestError {
-					request_id: None,
 					error_code: code,
 					reason_phrase: reason.into(),
 					retry_interval: 0,
@@ -856,7 +855,6 @@ impl Subscriber {
 			stream.writer.buffer_message(
 				id,
 				&ietf::PublishOk {
-					request_id: None,
 					forward: false,
 					subscriber_priority: None,
 					group_order: None,
@@ -877,7 +875,7 @@ impl Subscriber {
 			}
 			return Ok(());
 		}
-		tracing::debug!(broadcast = %self.origin.absolute(&key.0), track = %key.1, id = %request_id, "holding publish");
+		tracing::debug!(broadcast = %crate::path::Rooted(self.origin.root(), &key.0), track = %key.1, id = %request_id, "holding publish");
 		let upstream = Upstream {
 			stream,
 			messages: Messages::new(self.session.clone(), self.control.client()),
@@ -938,12 +936,12 @@ impl Subscriber {
 						}
 					};
 					self.remove_subscribe(upstream.request_id);
-					self.cancel_subscribe(upstream.stream, upstream.request_id).await;
+					self.cancel_subscribe(upstream.stream).await;
 					return;
 				}
 				Step::Gone => {
 					self.remove_subscribe(upstream.request_id);
-					self.cancel_subscribe(upstream.stream, upstream.request_id).await;
+					self.cancel_subscribe(upstream.stream).await;
 					return;
 				}
 				Step::Message(Ok(Some(Framed(id, body)))) => match id {
@@ -1073,7 +1071,7 @@ impl Subscriber {
 				true => this.watch(key, upstream, handoff).await,
 				false => {
 					this.remove_subscribe(upstream.request_id);
-					this.cancel_subscribe(upstream.stream, upstream.request_id).await;
+					this.cancel_subscribe(upstream.stream).await;
 				}
 			}
 		});
@@ -1135,14 +1133,11 @@ impl Subscriber {
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 		forward: &Forward,
 	) -> Result<(), Error> {
-		let request_id = self.control.next_request_id(&self.runtime).await?;
+		let request_id = self.control.next_request_id();
 		writer
 			.encode_message(&ietf::SubscribeUpdate {
 				max_age: forward.max_age,
 				request_id,
-				subscription_request_id: None,
-				start_location: ietf::Location { group: 0, object: 0 },
-				end_group: 0,
 				subscriber_priority: forward.priority.map(super::super::priority::to_wire),
 				forward: Some(forward.forward),
 				filter: forward.filter,
@@ -1268,7 +1263,7 @@ mod tests {
 			crate::time::sim(),
 			crate::driver::Transport::new(session.clone()),
 			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
-			Control::new(None, false),
+			Control::new(false),
 			None,
 			peer::PeerSetup::declared(peer::Peer::default()),
 			crate::Hop::new(1).unwrap(),
@@ -1278,9 +1273,9 @@ mod tests {
 			Default::default(),
 		);
 		let broadcast = crate::broadcast::Info::default().produce();
-		let lister = Arc::new(broadcast.dynamic().lister().unwrap());
+		let lister = Arc::new(broadcast.requests().lister().unwrap());
 		let tracks = broadcast.consume().tracks().unwrap();
-		let listening = subscriber.listen(PathOwned::from("bcast"), lister);
+		let listening = subscriber.listen(crate::Path::from_static("bcast"), lister);
 		Harness {
 			subscriber,
 			peer,
@@ -1302,7 +1297,7 @@ mod tests {
 			.expect("the subscriber sent nothing")
 	}
 
-	async fn write<M: ietf::Message + std::fmt::Debug>(stream: &mut PeerStream, id: u64, msg: &M) {
+	async fn write<'m, M: ietf::Message<'m> + std::fmt::Debug>(stream: &mut PeerStream, id: u64, msg: &M) {
 		stream.writer.varint(id).await.unwrap();
 		stream.writer.encode(msg).await.unwrap();
 		settle().await;
@@ -1336,7 +1331,6 @@ mod tests {
 			assert_eq!(msg.prefix.as_str(), "bcast");
 			assert!(!msg.forward, "the listing asks for every track's objects");
 			let ok = ietf::RequestOk {
-				request_id: None,
 				active: None,
 				largest: None,
 			};
@@ -1364,14 +1358,14 @@ mod tests {
 			kio::Pending<crate::track::Subscribing>,
 			moq_clock::sim::JoinHandle<()>,
 		) {
-			let mut dynamic = self._broadcast.dynamic();
+			let mut dynamic = self._broadcast.requests();
 			let track = self._broadcast.consume().track(name).unwrap();
 			let reader = track.subscribe(None);
 			let request = dynamic.requested_track().await.expect("no track requested");
 			let mut subscriber = self.subscriber.clone();
 			let serving = moq_clock::sim::spawn(async move {
 				subscriber
-					.run_subscribe(Path::new("bcast"), dynamic, None, request)
+					.run_subscribe(Path::from_static("bcast"), dynamic, None, request)
 					.await;
 			});
 			(track, reader, serving)
@@ -1392,7 +1386,6 @@ mod tests {
 			let resume: ietf::SubscribeUpdate = body.message(self.version).unwrap();
 			assert_eq!(resume.forward, Some(true));
 			let ok = ietf::RequestOk {
-				request_id: None,
 				active: None,
 				largest: None,
 			};
@@ -1436,7 +1429,7 @@ mod tests {
 			let mut subscriber = self.subscriber.clone();
 			let version = self.version;
 			moq_clock::sim::spawn(async move {
-				let msg: ietf::Publish = body.message(version).unwrap();
+				let msg = body.message::<ietf::Publish>(version).unwrap().into_owned();
 				let _ = subscriber.serve_publish(ours, msg).await;
 			});
 			let (id, body) = read(&mut stream).await;
@@ -1448,7 +1441,7 @@ mod tests {
 	fn offered<'a>(namespace: &'a str, name: &'a str, request_id: u64) -> ietf::Publish<'a> {
 		ietf::Publish {
 			request_id: RequestId(request_id),
-			track_namespace: Path::new(namespace),
+			track_namespace: Path::new(namespace).unwrap(),
 			track_name: name.into(),
 			track_alias: request_id,
 			largest_location: None,
@@ -1492,8 +1485,7 @@ mod tests {
 		assert_eq!(event(&mut h.tracks).as_deref(), Some("+video"));
 
 		let done = ietf::PublishDone {
-			request_id: None,
-			status_code: ietf::PublishDoneStatus::TrackEnded.code(version),
+			status_code: ietf::PublishDoneStatus::TrackEnded.code(),
 			stream_count: 0,
 			reason_phrase: "".into(),
 		};
@@ -1517,8 +1509,7 @@ mod tests {
 			assert_eq!(event(&mut h.tracks).as_deref(), Some("+video"));
 
 			let done = ietf::PublishDone {
-				request_id: None,
-				status_code: status.code(version),
+				status_code: status.code(),
 				stream_count: 0,
 				reason_phrase: "".into(),
 			};
@@ -1545,7 +1536,6 @@ mod tests {
 
 		// SUBSCRIPTION_ENDED, which draft 18 registers.
 		let done = ietf::PublishDone {
-			request_id: None,
 			status_code: 0x3,
 			stream_count: 0,
 			reason_phrase: "".into(),
@@ -1563,7 +1553,7 @@ mod tests {
 			let mut h = harness(version);
 			let mut listing = h.establish().await;
 			let skipped = ietf::PublishSkipped {
-				suffix: Path::new(""),
+				suffix: Path::from_static(""),
 				track_name: "audio".into(),
 			};
 			write(&mut listing, ietf::PublishSkipped::ID, &skipped).await;
@@ -1588,7 +1578,6 @@ mod tests {
 			assert!(!msg.forward, "{version}: the SUBSCRIBE forwards");
 
 			let ok = ietf::SubscribeOk {
-				request_id: None,
 				track_alias: 3,
 				largest: None,
 				properties: ietf::Properties {
@@ -1608,7 +1597,7 @@ mod tests {
 		let mut h = harness(version);
 		let mut listing = h.establish().await;
 		let skipped = ietf::PublishSkipped {
-			suffix: Path::new(""),
+			suffix: Path::from_static(""),
 			track_name: "audio".into(),
 		};
 		write(&mut listing, ietf::PublishSkipped::ID, &skipped).await;
@@ -1621,7 +1610,6 @@ mod tests {
 		.unwrap();
 		let _ = read(&mut stream).await;
 		let refused = ietf::RequestError {
-			request_id: None,
 			error_code: 0x3,
 			reason_phrase: "".into(),
 			retry_interval: 0,
@@ -1704,8 +1692,7 @@ mod tests {
 			Some(true)
 		);
 		let done = ietf::PublishDone {
-			request_id: None,
-			status_code: ietf::PublishDoneStatus::TrackEnded.code(version),
+			status_code: ietf::PublishDoneStatus::TrackEnded.code(),
 			stream_count: 0,
 			reason_phrase: "".into(),
 		};
@@ -1738,8 +1725,7 @@ mod tests {
 		assert!(!serving.is_finished(), "the copy did not linger");
 
 		let done = ietf::PublishDone {
-			request_id: None,
-			status_code: ietf::PublishDoneStatus::InternalError.code(version),
+			status_code: ietf::PublishDoneStatus::InternalError.code(),
 			stream_count: 0,
 			reason_phrase: "".into(),
 		};
@@ -1792,7 +1778,6 @@ mod tests {
 			let _held = match case {
 				"refused" => {
 					let refused = ietf::RequestError {
-						request_id: None,
 						error_code: 0x3,
 						reason_phrase: "".into(),
 						retry_interval: 0,
@@ -1831,7 +1816,6 @@ mod tests {
 			let msg: ietf::Subscribe = body.message(version).unwrap();
 			assert!(msg.forward, "{case}: a paused SUBSCRIBE");
 			let ok = ietf::SubscribeOk {
-				request_id: None,
 				track_alias: 7,
 				largest: None,
 				properties: ietf::Properties::default(),

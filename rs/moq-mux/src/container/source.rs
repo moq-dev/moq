@@ -73,7 +73,7 @@ enum SourceState {
 /// be, and the track's name there.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Target {
-	path: moq_net::PathOwned,
+	path: moq_net::Path,
 	epoch: Option<moq_net::Epoch>,
 	track: String,
 }
@@ -438,7 +438,7 @@ impl ExportSource {
 		loop {
 			match ready!(self.poll_event(waiter))? {
 				Some(Event::Frame { frame, .. }) => return Poll::Ready(Ok(Some(frame))),
-				Some(Event::GroupEnd | Event::FrameEnd { .. } | Event::Cut) => continue,
+				Some(Event::GroupEnd | Event::FrameEnd { .. } | Event::Cut { .. }) => continue,
 				None => return Poll::Ready(Ok(None)),
 			}
 		}
@@ -610,10 +610,10 @@ impl ExportSource {
 						return Poll::Ready(Ok(Some(Event::GroupEnd)));
 					}
 					// The skip is counted with the gap the next group reads.
-					Some(Item::Cut) => {
+					Some(Item::Cut { observed }) => {
 						self.finish_ends();
 						self.cuts += u64::from(std::mem::take(&mut self.open));
-						return Poll::Ready(Ok(Some(Event::Cut)));
+						return Poll::Ready(Ok(Some(Event::Cut { observed })));
 					}
 					None => {
 						self.finish_ends();
@@ -661,6 +661,13 @@ impl ExportSource {
 		self.instance
 			.as_ref()
 			.is_some_and(|instance| instance.poll_closed(waiter).is_ready())
+	}
+
+	/// Release a replaced instance's subscription while keeping its resolved metadata.
+	pub(crate) fn stop(&mut self) {
+		self.finish_ends();
+		self.state = SourceState::Ended;
+		self.instance = None;
 	}
 
 	/// End the rendition with its instance.
@@ -790,14 +797,14 @@ mod tests {
 			inline: true,
 		});
 		config.container = Container::Legacy;
-		config.broadcast = broadcast.map(|b| Relative::new(b).into_owned());
+		config.broadcast = broadcast.map(|rel| Relative::new(rel).unwrap());
 		config
 	}
 
 	fn audio(broadcast: Option<&str>) -> AudioConfig {
 		let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
 		config.container = Container::Legacy;
-		config.broadcast = broadcast.map(|b| Relative::new(b).into_owned());
+		config.broadcast = broadcast.map(|rel| Relative::new(rel).unwrap());
 		config
 	}
 

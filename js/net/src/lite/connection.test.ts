@@ -245,7 +245,8 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 			fin.enable();
 			const last = producer.appendGroup();
 			last.writeFrame(textFrame("last"));
-			last.close();
+			last.finish();
+			producer.finish();
 			producer.close();
 			const closing = server.close();
 
@@ -287,7 +288,7 @@ async function servedRawSubscription() {
 
 	const group = producer.appendGroup();
 	group.writeFrame(textFrame("last"));
-	group.close();
+	group.finish();
 
 	const subscriber = await Stream.open(pair.client, { version });
 	await subscriber.writer.u53(StreamId.Subscribe);
@@ -302,6 +303,7 @@ async function servedRawSubscription() {
 
 	// Finish the track only once it is served: a track closed before anyone subscribed is gone.
 	expect("start" in (await decodeSubscribeResponse(subscriber.reader, version))).toBe(true);
+	producer.finish();
 	producer.close();
 	// SUBSCRIBE_END, then the publisher's FIN.
 	await subscriber.reader.readAll();
@@ -389,7 +391,7 @@ test("close waits for a served FETCH to be acknowledged", async () => {
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const group = producer.appendGroup();
 	group.writeFrame(textFrame("last"));
-	group.close();
+	group.finish();
 	const server = new Connection({
 		url: new URL("https://relay.example/"),
 		quic: pair.server,
@@ -442,7 +444,7 @@ test("close waits for a request served while withdrawals are in flight", async (
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const group = producer.appendGroup();
 	group.writeFrame(textFrame("last"));
-	group.close();
+	group.finish();
 	const url = new URL("https://localhost/test");
 	const [client, server] = await Promise.all([
 		connect({ url, transport: pair.client, consume: destination }),
@@ -471,6 +473,7 @@ test("close waits for a request served while withdrawals are in flight", async (
 			startGroup: 0,
 		}).encode(subscriber.writer, version);
 		expect("start" in (await decodeSubscribeResponse(subscriber.reader, version))).toBe(true);
+		producer.finish();
 		producer.close();
 		await subscriber.reader.readAll();
 
@@ -615,50 +618,74 @@ for (const [alpn, version] of [
 	});
 }
 
-// A group stream that breaks the protocol ends the session, so a hostile peer cannot repeat
-// it on every stream.
+// A transport tail keeps its absolute frame numbers and the session open. A group past
+// the declared end still ends the session, so a hostile peer cannot repeat that violation.
 for (const violation of ["a partial group", "a group past the declared end"] as const) {
-	test(`${violation} closes the session with PROTOCOL_VIOLATION`, async () => {
-		const version = Version.DRAFT_07;
-		const pair = createMockTransportPair(ALPN_07_WIP);
-		const connection = new Connection({ url: new URL("https://relay.example/"), quic: pair.client, version });
-		try {
-			const track = wireOf(connection).consume(Path.from("room")).track("video").subscribe();
+	test(
+		violation === "a partial group"
+			? "a partial group keeps its indices and the session open"
+			: "a group past the declared end closes the session with PROTOCOL_VIOLATION",
+		async () => {
+			const version = Version.DRAFT_07;
+			const pair = createMockTransportPair(ALPN_07_WIP);
+			const connection = new Connection({ url: new URL("https://relay.example/"), quic: pair.client, version });
+			try {
+				const track = wireOf(connection).consume(Path.from("room")).track("video").subscribe();
 
-			// The publisher, played by hand: answer TRACK_INFO, start the subscription, and
-			// leave any other stream the session opens (such as PROBE) open.
-			let sub: Stream | undefined;
-			while (!sub) {
-				const stream = await Stream.accept(pair.server, version);
-				if (!stream) throw new Error("the subscriber never subscribed");
-				const id = await stream.reader.u53();
-				if (id === StreamId.Track) {
-					await TrackMessage.decode(stream.reader, version);
-					await new TrackInfo({ maxAge: 60_000, timescale: Timescale.MILLI }).encode(stream.writer, version);
-					stream.close();
-				} else if (id === StreamId.Subscribe) {
-					await Subscribe.decode(stream.reader, version);
-					sub = stream;
+				// The publisher, played by hand: answer TRACK_INFO, start the subscription, and
+				// leave any other stream the session opens (such as PROBE) open.
+				let sub: Stream | undefined;
+				while (!sub) {
+					const stream = await Stream.accept(pair.server, version);
+					if (!stream) throw new Error("the subscriber never subscribed");
+					const id = await stream.reader.u53();
+					if (id === StreamId.Track) {
+						await TrackMessage.decode(stream.reader, version);
+						await new TrackInfo({ maxAge: 60_000, timescale: Timescale.MILLI }).encode(
+							stream.writer,
+							version,
+						);
+						stream.close();
+					} else if (id === StreamId.Subscribe) {
+						await Subscribe.decode(stream.reader, version);
+						sub = stream;
+					}
 				}
-			}
-			await encodeSubscribeResponse(sub.writer, { start: new SubscribeStart(0) }, version);
+				await encodeSubscribeResponse(sub.writer, { start: new SubscribeStart(0) }, version);
 
-			let group: GroupMessage;
-			if (violation === "a partial group") {
-				// The subscriber never asked to start mid-group.
-				group = new GroupMessage({ subscribe: 0n, sequence: 0, frameStart: 5 });
-			} else {
-				await encodeSubscribeResponse(sub.writer, { end: new SubscribeEnd(2) }, version);
-				group = new GroupMessage({ subscribe: 0n, sequence: 2 });
-			}
-			const writer = await Writer.open(pair.server, { version });
-			await writer.u53(DataType.Group);
-			await group.encode(writer, version);
+				let group: GroupMessage;
+				if (violation === "a partial group") {
+					// A received tail uses its wire position even without a locally retained prefix.
+					group = new GroupMessage({ subscribe: 0n, sequence: 0, frameStart: 5 });
+				} else {
+					await encodeSubscribeResponse(sub.writer, { end: new SubscribeEnd(2) }, version);
+					group = new GroupMessage({ subscribe: 0n, sequence: 2 });
+				}
+				const writer = await Writer.open(pair.server, { version });
+				await writer.u53(DataType.Group);
+				await group.encode(writer, version);
 
-			expect((await pair.client.closed).closeCode).toBe(SessionCode.ProtocolViolation);
-			track.close();
-		} finally {
-			connection.abort();
-		}
-	});
+				if (violation === "a partial group") {
+					await writer.u62(2000n); // timestamp 1000, zigzag delta from 0
+					await writer.u53(1);
+					await writer.write(new Uint8Array([7]));
+					writer.close();
+					const received = await track.recvGroup();
+					expect((await received?.readFrameSequence())?.sequence).toBe(5);
+					expect(await received?.readFrameSequence()).toBeUndefined();
+					received?.close();
+					const goaway = await Stream.open(pair.server, { version });
+					await goaway.writer.u53(StreamId.Goaway);
+					await new Goaway("").encode(goaway.writer, version);
+					goaway.writer.close();
+					expect((await wireOf(connection).goaway).uri).toBe("");
+				} else {
+					expect((await pair.client.closed).closeCode).toBe(SessionCode.ProtocolViolation);
+				}
+				track.close();
+			} finally {
+				connection.abort();
+			}
+		},
+	);
 }

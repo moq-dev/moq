@@ -31,8 +31,9 @@ defaulted to wall clock timestamps, but we should pass them through instead."
   pass that through as the track's time.
 
 Update the draft's lite-05/06 receiver text and changelog,
-`doc/concept/moq-lite.md`, and the `MIGRATE.md` entries #6150 added, in Rust
-and `@moq/net` alike. Test a lite-06 hop between two relays: a timed track
+`doc/concept/moq-lite.md`, and the PR's Impact migration note, in Rust
+and `@moq/net` alike. The cut's migration audit reconciles the existing #6150
+notes with that Impact section. Test a lite-06 hop between two relays: a timed track
 arrives timed with its values, and an out-of-order fetched group from an
 untimed origin is accepted on lite-05/06.
 

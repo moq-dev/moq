@@ -115,5 +115,10 @@ name = "wire"
 harness = false
 required-features = ["fuzz"]
 
+[[bench]]
+name = "sent_packets"
+harness = false
+required-features = ["fuzz"]
+
 [lints]
 workspace = true

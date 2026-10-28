@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `claims` refuses an identity with an empty segment ([#6648](https://github.com/moq-dev/moq/pull/6648))
+
+`claims(room, identity)` throws on an identity with a leading, trailing, or doubled `/` instead of collapsing it: pass `alice`, not `alice/`.
+
 ### Chat events carry their send time
 
 `Chat.Subscriber.recv()` returns `{ value, at }`: `value` is the event `recv()` used to return, and `at` is its frame's timestamp.

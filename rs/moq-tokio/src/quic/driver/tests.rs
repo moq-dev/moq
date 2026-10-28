@@ -148,7 +148,14 @@ fn read_after_close() {
 	const MSG: &[u8] = b"goodbye!";
 	let endpoint2 = endpoint.clone();
 	runtime.spawn(async move {
-		let new_conn = endpoint2.accept().await.expect("endpoint").await.expect("connection");
+		let new_conn = endpoint2
+			.accept()
+			.await
+			.expect("endpoint")
+			.accept()
+			.expect("accept")
+			.await
+			.expect("connection");
 		let mut s = new_conn.open_uni(Default::default()).await.unwrap();
 		s.write_all(MSG).await.unwrap();
 		s.finish().unwrap();
@@ -190,7 +197,16 @@ fn export_keying_material() {
 		});
 		let incoming_conn_fut = tokio::spawn({
 			let endpoint = endpoint.clone();
-			async move { endpoint.accept().await.expect("endpoint").await.expect("connection") }
+			async move {
+				endpoint
+					.accept()
+					.await
+					.expect("endpoint")
+					.accept()
+					.expect("accept")
+					.await
+					.expect("connection")
+			}
 		});
 		let outgoing_conn = outgoing_conn_fut.await.unwrap();
 		let incoming_conn = incoming_conn_fut.await.unwrap();
@@ -221,7 +237,7 @@ async fn ip_blocking() {
 			if accepting.remote_address() == client_1_addr {
 				accepting.refuse();
 			} else if accepting.remote_address_validated() {
-				accepting.await.expect("connection");
+				accepting.accept().expect("accept").await.expect("connection");
 			} else {
 				accepting.retry().unwrap();
 			}
@@ -589,7 +605,7 @@ fn wait_idle_returns_when_the_driver_is_dropped() {
 		std::thread::spawn(move || {
 			handle.block_on(async {
 				let incoming = endpoint.accept().await.expect("incoming");
-				incoming.await.expect("accept")
+				incoming.accept().expect("accept").await.expect("accept")
 			})
 		})
 	};
@@ -791,7 +807,7 @@ fn run_echo(args: EchoArgs) {
 				assert_eq!(None, incoming.local_ip());
 			}
 
-			let new_conn = incoming.await.unwrap();
+			let new_conn = incoming.accept().expect("accept").await.unwrap();
 			tokio::spawn(async move {
 				while let Ok(stream) = new_conn.accept_bi().await {
 					tokio::spawn(echo(stream));
@@ -907,7 +923,7 @@ async fn retry_after_rebind() {
 
 		let incoming = server.accept().await.unwrap();
 		assert!(incoming.remote_address_validated());
-		let (accepted, connected) = join!(incoming, connecting);
+		let (accepted, connected) = join!(incoming.accept().unwrap(), connecting);
 		let _server_connection = accepted.unwrap();
 		let _client_connection = connected.unwrap();
 		server.close(0u32.into(), b"done");
@@ -951,7 +967,7 @@ async fn rebind_recv() {
 	let connected_send = Arc::new(tokio::sync::Notify::new());
 	let connected_recv = connected_send.clone();
 	let server = tokio::spawn(async move {
-		let connection = server.accept().await.unwrap().await.unwrap();
+		let connection = server.accept().await.unwrap().accept().unwrap().await.unwrap();
 		info!("got conn");
 		connected_send.notify_one();
 		write_recv.notified().await;
@@ -1236,7 +1252,7 @@ async fn remote_address_follows_migration() {
 	let trigger_migration_clone = trigger_migration.clone();
 
 	let server_task = tokio::spawn(async move {
-		let conn = server.accept().await.unwrap().await.unwrap();
+		let conn = server.accept().await.unwrap().accept().unwrap().await.unwrap();
 		let old_remote = conn.remote_address();
 
 		trigger_migration_clone.notify_one();
@@ -1295,7 +1311,7 @@ async fn foreign_send_group_panics_cleanly() {
 	let connect = || async {
 		tokio::try_join!(
 			endpoint.connect(endpoint.local_addr().unwrap(), "localhost").unwrap(),
-			async { endpoint.accept().await.unwrap().await }
+			async { endpoint.accept().await.unwrap().accept().unwrap().await }
 		)
 		.unwrap()
 	};
@@ -1335,7 +1351,7 @@ async fn stream_id_flow_control() {
 
 	let (client, server) = tokio::join!(
 		endpoint.connect(endpoint.local_addr().unwrap(), "localhost").unwrap(),
-		async { endpoint.accept().await.unwrap().await }
+		async { endpoint.accept().await.unwrap().accept().unwrap().await }
 	);
 	let client = client.unwrap();
 	let server = server.unwrap();
@@ -1365,7 +1381,7 @@ async fn two_datagram_readers() {
 
 	let (client, server) = tokio::join!(
 		endpoint.connect(endpoint.local_addr().unwrap(), "localhost").unwrap(),
-		async { endpoint.accept().await.unwrap().await }
+		async { endpoint.accept().await.unwrap().accept().unwrap().await }
 	);
 	let client = client.unwrap();
 	let server = server.unwrap();
@@ -1425,8 +1441,8 @@ async fn multiple_conns_with_zero_length_cids() {
 	}
 	.instrument(error_span!("client2"));
 	let server = async move {
-		let client1 = server.accept().await.unwrap().await.unwrap();
-		let client2 = server.accept().await.unwrap().await.unwrap();
+		let client1 = server.accept().await.unwrap().accept().unwrap().await.unwrap();
+		let client2 = server.accept().await.unwrap().accept().unwrap().await.unwrap();
 		// Both connections are now concurrently live.
 		client1.close(42u32.into(), &[]);
 		client2.close(42u32.into(), &[]);
@@ -1472,7 +1488,7 @@ async fn stream_stopped() {
 	};
 	let client = timeout(Duration::from_millis(100), client).instrument(error_span!("client"));
 	let server = async move {
-		let conn = server.accept().await.unwrap().await.unwrap();
+		let conn = server.accept().await.unwrap().accept().unwrap().await.unwrap();
 		let mut stream = conn.accept_uni().await.unwrap();
 		let mut buf = [0u8; 2];
 		stream.read_exact(&mut buf).await.unwrap();
@@ -1492,7 +1508,7 @@ async fn stream_stopped_2() {
 
 	let (conn, _server_conn) = tokio::try_join!(
 		endpoint.connect(endpoint.local_addr().unwrap(), "localhost").unwrap(),
-		async { endpoint.accept().await.unwrap().await }
+		async { endpoint.accept().await.unwrap().accept().unwrap().await }
 	)
 	.unwrap();
 	let mut send_stream = conn.open_uni(Default::default()).await.unwrap();
@@ -1521,7 +1537,7 @@ async fn dropped_send_stream_resets() {
 
 	let (conn, server_conn) = tokio::try_join!(
 		endpoint.connect(endpoint.local_addr().unwrap(), "localhost").unwrap(),
-		async { endpoint.accept().await.unwrap().await }
+		async { endpoint.accept().await.unwrap().accept().unwrap().await }
 	)
 	.unwrap();
 	let mut send_stream = conn.open_uni(Default::default()).await.unwrap();
@@ -1544,7 +1560,7 @@ async fn finished_send_stream_survives_drop() {
 
 	let (conn, server_conn) = tokio::try_join!(
 		endpoint.connect(endpoint.local_addr().unwrap(), "localhost").unwrap(),
-		async { endpoint.accept().await.unwrap().await }
+		async { endpoint.accept().await.unwrap().accept().unwrap().await }
 	)
 	.unwrap();
 	let mut send_stream = conn.open_uni(Default::default()).await.unwrap();
@@ -1561,7 +1577,7 @@ async fn finished_send_stream_survives_drop() {
 async fn connect_self(endpoint: &Endpoint) -> (Connection, Connection) {
 	tokio::try_join!(
 		endpoint.connect(endpoint.local_addr().unwrap(), "localhost").unwrap(),
-		async { endpoint.accept().await.unwrap().await }
+		async { endpoint.accept().await.unwrap().accept().unwrap().await }
 	)
 	.unwrap()
 }
@@ -1729,7 +1745,7 @@ async fn stream_drop_removes_blocked_reader() {
 		let client = endpoint_factory.endpoint();
 
 		let server_task = tokio::spawn(async move {
-			let conn = server.accept().await.unwrap().await.unwrap();
+			let conn = server.accept().await.unwrap().accept().unwrap().await.unwrap();
 			let mut stream = conn.accept_uni().await.unwrap();
 
 			// read "hello"
@@ -1790,7 +1806,7 @@ async fn recv_stream_cancel_stop_drop() {
 	let recv_dropped = tokio::sync::SetOnce::new();
 	join!(
 		async {
-			let conn = server.accept().await.unwrap().await.unwrap();
+			let conn = server.accept().await.unwrap().accept().unwrap().await.unwrap();
 			let mut recv = conn.accept_uni().await.unwrap();
 			// Create a future to read from the stream, poll it once, then immediately drop it
 			{
@@ -1843,7 +1859,7 @@ async fn dropped_connection_cleans_up() {
 				.await
 				.unwrap()
 		},
-		async { endpoint.accept().await.unwrap().await.unwrap() }
+		async { endpoint.accept().await.unwrap().accept().unwrap().await.unwrap() }
 	);
 	endpoint.wait_idle().await;
 }
@@ -1861,7 +1877,7 @@ async fn leases_spend_the_connection_window() {
 
 	let (client, server) = tokio::try_join!(
 		endpoint.connect(endpoint.local_addr().unwrap(), "localhost").unwrap(),
-		async { endpoint.accept().await.unwrap().await }
+		async { endpoint.accept().await.unwrap().accept().unwrap().await }
 	)
 	.unwrap();
 	let mut send = client.open_uni(Default::default()).await.unwrap();
@@ -1904,19 +1920,19 @@ async fn stuck_window_evicts_the_lower_priority() {
 
 	let (client, server) = tokio::try_join!(
 		endpoint.connect(endpoint.local_addr().unwrap(), "localhost").unwrap(),
-		async { endpoint.accept().await.unwrap().await }
+		async { endpoint.accept().await.unwrap().accept().unwrap().await }
 	)
 	.unwrap();
-	let writers = [
+	let streams = [
 		client.open_uni(Default::default()).await.unwrap(),
 		client.open_uni(Default::default()).await.unwrap(),
-	]
-	.map(|mut send| {
+	];
+	let low_id = streams[0].id();
+	let writers = streams.map(|mut send| {
 		let id = send.id();
 		let writer = tokio::spawn(async move {
-			// Queuing the whole write and FIN can succeed before the peer evicts the stream.
-			// Only the peer's final outcome proves whether it was stopped.
-			if send.write_all(&[7; WINDOW]).await.is_ok() {
+			// Keep the low stream open: an acknowledged FIN wins over a later STOP_SENDING.
+			if send.write_all(&[7; WINDOW]).await.is_ok() && id != low_id {
 				send.finish().unwrap();
 			}
 			send.stopped().await.unwrap()
@@ -1926,6 +1942,9 @@ async fn stuck_window_evicts_the_lower_priority() {
 
 	let mut low = server.accept_uni().await.unwrap();
 	let mut high = server.accept_uni().await.unwrap();
+	if low.id() != low_id {
+		std::mem::swap(&mut low, &mut high);
+	}
 	low.set_priority(-1);
 	high.set_priority(1);
 	let leased = tokio::join!(
@@ -1939,7 +1958,6 @@ async fn stuck_window_evicts_the_lower_priority() {
 	);
 	assert_eq!(leased, (Err(ReadError::Evicted), Ok(WINDOW)));
 
-	let low_id = low.id();
 	// The peer hears of the eviction once the stream is stopped. Drain the survivor to FIN
 	// instead of dropping unread data, which would stop that stream too.
 	drop(low);
@@ -2127,7 +2145,7 @@ async fn unreachable_sends_are_loss_once_established() {
 
 	let (client_conn, server_conn) = join!(
 		async { client.connect(server.local_addr().unwrap(), "localhost").unwrap().await },
-		async { server.accept().await.unwrap().await }
+		async { server.accept().await.unwrap().accept().unwrap().await }
 	);
 	let client_conn = client_conn.unwrap();
 	let server_conn = server_conn.unwrap();

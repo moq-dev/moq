@@ -20,7 +20,7 @@ default = ["async"]
 # Runtime-backed helpers and Lite/IETF sessions; explicit-time model drivers stay available.
 async = ["dep:futures", "moq-clock/runtime"]
 
-# Exposes the wire codecs to the `fuzz/` harness and the announce, codec, varint, and frame benches,
+# Exposes the wire codecs to the `fuzz/` harness and the announce, codec, path, varint, frame, and canonical storage benches,
 # and session views of an origin to the viewers bench, through the hidden `fuzz` module. Off by
 # default and hidden from the docs.
 fuzz = ["async"]
@@ -32,6 +32,7 @@ bytes = { workspace = true }
 # space left but the flush unfinished, silently truncating the frame.
 flate2 = { workspace = true, features = ["zlib-rs", "runtime_detection"] }
 futures = { workspace = true, optional = true }
+hashbrown = { workspace = true }
 hashlink = { workspace = true }
 kio = { workspace = true }
 moq-clock = { version = "0.11.0", path = "../moq-clock", default-features = false }
@@ -56,10 +57,6 @@ criterion = { workspace = true }
 futures = { workspace = true }
 # The tests' executor, with simulated time.
 moq-clock = { path = "../moq-clock", features = ["sim"] }
-moq-json = { path = "../moq-json" }
-# The integration tests that land peer claims through the hidden `fuzz` module run in the
-# default merge gate.
-moq-net = { path = ".", features = ["fuzz"] }
 serde_json = { workspace = true }
 # The benches run on tokio. test-util (tokio::time::pause/advance) is test-only and
 # is NOT supported on wasm, so it must not leak into the normal dependency feature set.
@@ -178,11 +175,6 @@ harness = false
 required-features = ["async"]
 
 [[bench]]
-name = "request-ids"
-harness = false
-required-features = ["fuzz"]
-
-[[bench]]
 name = "refresh"
 harness = false
 
@@ -207,6 +199,17 @@ required-features = ["async"]
 name = "memory"
 harness = false
 required-features = ["async"]
+
+[[bench]]
+name = "path"
+harness = false
+required-features = ["fuzz"]
+
+# Uses private weak-index ownership rather than timing deferred log retirement.
+[[bench]]
+name = "canonical"
+harness = false
+required-features = ["fuzz"]
 
 [lints]
 workspace = true

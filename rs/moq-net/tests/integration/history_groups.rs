@@ -25,8 +25,7 @@ const VERSIONS: &[&str] = &[
 	"moq-lite-03",
 	"moq-lite-05",
 	"moq-lite-07-wip",
-	"moq-transport-14",
-	"moq-transport-17",
+	"moq-transport-18",
 	"moq-transport-22",
 ];
 

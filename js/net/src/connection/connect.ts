@@ -5,7 +5,6 @@ import type * as Auth from "../auth.ts";
 import { vacant } from "../auth_session.ts";
 import { ConnectTimeout, error, fromClose, ProtocolViolation, sessionCause } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
-import * as Message from "../ietf/message.ts";
 import { IMPLEMENTATION } from "../implementation.ts";
 import * as Lite from "../lite/index.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
@@ -17,14 +16,11 @@ import { isWebTransportSupported } from "./browser.ts";
 import type { Established } from "./established.ts";
 import * as Extensions from "./extensions.ts";
 import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
-import { exchangeSetup, legacyPeerImplementation } from "./handshake.ts";
-import { type Credential, credential, fallback, hold } from "./tokens.ts";
+import { DEFAULT_TIMEOUT, exchangeSetup, handsOff } from "./handshake.ts";
+import { credential, fallback, hold, type Presentation } from "./tokens.ts";
 
 // Default head start for WebTransport before attempting the WebSocket fallback.
 const DEFAULT_WEBSOCKET_DELAY_MS = Milli(500);
-
-// Default bound on one connect, the dial and the MoQ handshake; matches the Rust client.
-const DEFAULT_TIMEOUT = Milli(30_000);
 
 // How long the first WebTransport dial may stay unopened before a second one dials alongside
 // it. The same moment as the WebSocket's default head start, so a fresh WebTransport flow
@@ -88,30 +84,25 @@ export interface WebTransportProps extends Omit<WebTransportOptions, "serverCert
 	serverCertificate?: string | BufferSource;
 }
 
-type SetupVersion = Lite.Version | Ietf.Version;
-
-// Each version name, most preferred first, with the ALPN that negotiates it. Names sharing
-// `moql` then negotiate in SETUP, where `setup` is the version code offered.
-const VERSIONS: Record<string, { alpn: string; setup?: SetupVersion }> = {
-	"moq-lite-07-wip": { alpn: Lite.ALPN_07_WIP },
-	"moq-lite-06": { alpn: Lite.ALPN_06 },
-	"moq-lite-05": { alpn: Lite.ALPN_05 },
-	"moq-lite-04": { alpn: Lite.ALPN_04 },
-	"moq-lite-03": { alpn: Lite.ALPN_03 },
+// Each version name, most preferred first, with the ALPN that negotiates it. `setup` is the
+// version code offered in SETUP, used when the transport negotiated `moql` or no ALPN at all;
+// moq-transport has no version list in SETUP.
+const VERSIONS: Record<string, { alpn: string; setup?: Lite.Version }> = {
+	"moq-lite-07-wip": { alpn: Lite.ALPN_07_WIP, setup: Lite.Version.DRAFT_07 },
+	"moq-lite-06": { alpn: Lite.ALPN_06, setup: Lite.Version.DRAFT_06 },
+	"moq-lite-05": { alpn: Lite.ALPN_05, setup: Lite.Version.DRAFT_05 },
+	"moq-lite-04": { alpn: Lite.ALPN_04, setup: Lite.Version.DRAFT_04 },
+	"moq-lite-03": { alpn: Lite.ALPN_03, setup: Lite.Version.DRAFT_03 },
 	"moq-lite-02": { alpn: Lite.ALPN, setup: Lite.Version.DRAFT_02 },
 	"moq-lite-01": { alpn: Lite.ALPN, setup: Lite.Version.DRAFT_01 },
 	"moq-transport-22": { alpn: Ietf.ALPN.DRAFT_22 },
 	"moq-transport-18": { alpn: Ietf.ALPN.DRAFT_18 },
-	"moq-transport-17": { alpn: Ietf.ALPN.DRAFT_17 },
-	"moq-transport-16": { alpn: Ietf.ALPN.DRAFT_16 },
-	"moq-transport-15": { alpn: Ietf.ALPN.DRAFT_15 },
-	"moq-transport-14": { alpn: Lite.ALPN, setup: Ietf.Version.DRAFT_14 },
 };
 
 // Experimental lite-07 is offered only when named.
 const DEFAULT_VERSIONS = Object.keys(VERSIONS).filter((name) => name !== "moq-lite-07-wip");
 
-// moq-transport-18 and newer are pinned to qmux-01. Every other ALPN is currently
+// moq-transport is pinned to qmux-01. Every other ALPN is currently
 // negotiated as `qmux-00.{alpn}`, but `null` lets the polyfill advertise every QMux draft
 // it knows and the server pick one.
 const QMUX: Record<string, QmuxVersion | QmuxVersion[] | null> = {
@@ -119,10 +110,10 @@ const QMUX: Record<string, QmuxVersion | QmuxVersion[] | null> = {
 	[Ietf.ALPN.DRAFT_18]: "qmux-01",
 };
 
-/** What one version list offers: the ALPNs in preference order, and the SETUP versions behind `moql`. */
+/** What one version list offers: the ALPNs in preference order, and the versions offered in SETUP. */
 interface Offer {
 	alpns: string[];
-	setup: SetupVersion[];
+	setup: Lite.Version[];
 	/** Whether the caller named the versions, so the peer must pick one of them. */
 	explicit: boolean;
 	/** Whether every offered version carries the connection credential in SETUP. */
@@ -137,7 +128,7 @@ function hasSetupToken(name: string): boolean {
 function offer(versions?: readonly string[]): Offer {
 	const names = versions ?? DEFAULT_VERSIONS;
 	const alpns = new Set<string>();
-	const setup: SetupVersion[] = [];
+	const setup: Lite.Version[] = [];
 	for (const name of names) {
 		const version = VERSIONS[name];
 		if (!version) throw new TypeError(`unsupported version: ${name}`);
@@ -145,6 +136,18 @@ function offer(versions?: readonly string[]): Offer {
 		if (version.setup !== undefined) setup.push(version.setup);
 	}
 	return { alpns: [...alpns], setup, explicit: versions !== undefined, setupToken: names.every(hasSetupToken) };
+}
+
+/** Copy a version list that can be offered, throwing a `TypeError` if it is empty or has an unsupported or duplicate name. */
+export function checkVersions(versions: readonly string[]): string[] {
+	if (versions.length === 0) throw new TypeError("versions must not be empty");
+	const seen = new Set<string>();
+	for (const name of versions) {
+		if (!Object.hasOwn(VERSIONS, name)) throw new TypeError(`unsupported version: ${name}`);
+		if (seen.has(name)) throw new TypeError(`duplicate version: ${name}`);
+		seen.add(name);
+	}
+	return [...versions];
 }
 
 /** Validate and snapshot an ordered version list before acquiring a connection. @internal */
@@ -157,19 +160,10 @@ export function normalizeVersions(props?: {
 		throw new TypeError("webtransport.protocols was removed; set versions instead");
 	if (props?.websocket && "protocols" in props.websocket)
 		throw new TypeError("websocket.protocols was removed; set versions instead");
-	const versions = props?.versions;
-	if (versions === undefined) return undefined;
-	if (versions.length === 0) throw new TypeError("versions must not be empty");
-	const seen = new Set<string>();
-	for (const name of versions) {
-		if (!Object.hasOwn(VERSIONS, name)) throw new TypeError(`unsupported version: ${name}`);
-		if (seen.has(name)) throw new TypeError(`duplicate version: ${name}`);
-		seen.add(name);
-	}
-	return [...versions];
+	return props?.versions === undefined ? undefined : checkVersions(props.versions);
 }
 
-/** Options for {@link connect}. */
+/** Options for {@link Connection.connect}. */
 export interface ConnectProps {
 	/** The relay URL. */
 	url: URL;
@@ -177,9 +171,9 @@ export interface ConnectProps {
 	/**
 	 * Protocol versions to offer on every transport, most preferred first, spelled like
 	 * `moq-lite-06`. Defaults to every supported version except the work-in-progress
-	 * `moq-lite-07-wip`; list every fallback you still want. A peer that negotiates no
-	 * subprotocol (such as WebTransport in Firefox before 155) is refused unless the list
-	 * includes `moq-lite-02`, `moq-lite-01` or `moq-transport-14`, which negotiate in SETUP.
+	 * `moq-lite-07-wip`; list every fallback you still want. With a peer that negotiates no
+	 * subprotocol (such as WebTransport in Firefox before 155), the version is negotiated in
+	 * SETUP instead, which moq-transport cannot do.
 	 */
 	versions?: readonly string[];
 
@@ -242,7 +236,7 @@ export interface ConnectProps {
 
 	/**
 	 * Build the session on `auth`, so it presents every token the handle holds and a route
-	 * naming one of its `Auth`s keeps it across a reconnect. Omit to give the session a handle
+	 * naming one of its `Credential`s keeps it across a reconnect. Omit to give the session a handle
 	 * of its own, which ends with it.
 	 *
 	 * The handle backs one active session at a time, plus the ones draining after a GOAWAY or a
@@ -295,8 +289,6 @@ const NEVER_ABORTED = new AbortController().signal;
 /**
  * Establishes a connection to a MOQ server.
  *
- * @param url - The URL of the server to connect to
- * @param props - Connection options
  * @returns A promise that resolves to an established session
  */
 export async function connect({ url, ...props }: ConnectProps): Promise<Established> {
@@ -365,12 +357,12 @@ async function connectInner(
 	tokens: readonly string[],
 	props: Omit<ConnectProps, "url">,
 	abort: Promise<void>,
-): Promise<[Established, Credential]> {
+): Promise<[Established, Presentation]> {
 	const offered = offer(props.versions);
 	const dial = credential(raw, tokens, offered.setupToken);
 	const url = dialable(dial.url);
 	const fallbackDial = props.websocket?.url && fallback(raw, props.websocket.url, tokens, offered.setupToken);
-	const wiring = (presented: Credential): SessionProps => ({
+	const wiring = (presented: Presentation): SessionProps => ({
 		publish: props.publish,
 		handle: props.auth,
 		client: true,
@@ -454,7 +446,7 @@ async function connectTransport(
 	url: URL,
 	session: WebTransport,
 	wiring: SessionProps,
-	setup: SetupVersion[],
+	setup: Lite.Version[],
 ): Promise<Established> {
 	const closed = session.closed.then(fromClose, error);
 	const terminal = closed.then((cause) => {
@@ -487,33 +479,26 @@ async function connectTransport(
 // Negotiate the MoQ protocol over an established transport. The caller races this against
 // the session closing so a close code is not lost behind a failed or stalled SETUP stream.
 // `setup` lists the versions a `moql` or ALPN-less session offers in SETUP.
+// A moq-lite version newer than 02 selected there continues as its ALPN would.
 async function negotiate(
 	url: URL,
 	session: WebTransport,
 	wiring: SessionProps,
-	setup: SetupVersion[],
+	setup: Lite.Version[],
 ): Promise<Established> {
 	// The DOM lib has no `protocol` property yet. It is "" when none was negotiated, and
 	// undefined in a browser that predates subprotocols (Firefox before 155).
 	const protocol: string | undefined = (session as { protocol?: string }).protocol || undefined;
 	console.debug(redact(url), "negotiated ALPN:", protocol ?? "(none)");
 
-	// Choose setup encoding based on negotiated WebTransport protocol (if any).
-	let setupVersion: Ietf.Version;
-	const modernVersion =
+	const ietf =
 		protocol === Ietf.ALPN.DRAFT_22
 			? Ietf.Version.DRAFT_22
 			: protocol === Ietf.ALPN.DRAFT_18
 				? Ietf.Version.DRAFT_18
-				: protocol === Ietf.ALPN.DRAFT_17
-					? Ietf.Version.DRAFT_17
-					: undefined;
-	if (modernVersion !== undefined) {
-		return await handshakeAlpn(url, session, modernVersion, wiring);
-	} else if (protocol === Ietf.ALPN.DRAFT_16) {
-		setupVersion = Ietf.Version.DRAFT_16;
-	} else if (protocol === Ietf.ALPN.DRAFT_15) {
-		setupVersion = Ietf.Version.DRAFT_15;
+				: undefined;
+	if (ietf !== undefined) {
+		return await handshakeAlpn(url, session, ietf, wiring);
 	} else if (protocol === Lite.ALPN_07_WIP) {
 		return new Lite.Connection({ url, quic: session, version: Lite.Version.DRAFT_07, ...wiring });
 	} else if (protocol === Lite.ALPN_06) {
@@ -524,74 +509,29 @@ async function negotiate(
 		return new Lite.Connection({ url, quic: session, version: Lite.Version.DRAFT_04, ...wiring });
 	} else if (protocol === Lite.ALPN_03) {
 		return new Lite.Connection({ url, quic: session, version: Lite.Version.DRAFT_03, ...wiring });
-	} else if (protocol === Lite.ALPN || protocol === "" || protocol === undefined) {
-		setupVersion = Ietf.Version.DRAFT_14;
-	} else {
+	} else if (protocol !== Lite.ALPN && protocol !== undefined) {
 		throw new Error(`unsupported WebTransport protocol: ${protocol}`);
 	}
 
-	const stream = await Stream.open(session, { version: setupVersion });
-
-	const params = new Ietf.SetupOptions();
-	params.setVarint(Ietf.SetupOption.MaxRequestId, Ietf.initialMaxRequestId(false));
-	Ietf.implementationIntoSetup(params, wiring.implementation);
-	Extensions.intoSetup(params, wiring.extensions, setupVersion);
-	Ietf.hiddenIntoSetup(params);
-	Ietf.maxAgeIntoSetup(params);
-	Ietf.activeCountIntoSetup(params, setupVersion);
-	if (wiring.token) Ietf.tokenIntoSetup(params, { kind: Ietf.TOKEN_OUT_OF_BAND, value: wiring.token }, setupVersion);
-
-	const client = new Ietf.ClientSetup({
-		versions:
-			setupVersion === Ietf.Version.DRAFT_16
-				? [Ietf.Version.DRAFT_16]
-				: setupVersion === Ietf.Version.DRAFT_15
-					? [Ietf.Version.DRAFT_15]
-					: setup,
-		parameters: params,
-	});
-	await Message.write(stream.writer, Lite.StreamId.ClientCompat, client, setupVersion);
-
-	const serverCompat = await stream.reader.u53();
-	if (serverCompat !== Lite.StreamId.ServerCompat) {
-		throw new Error(`unsupported server message type: ${serverCompat.toString()}`);
+	// `moql`, or no subprotocol: negotiate moq-lite in SETUP, which keeps lite-02's framing
+	// whichever version it offers.
+	if (setup.length === 0) throw new Error("no version negotiates in SETUP");
+	const stream = await Stream.open(session, { version: Lite.Version.DRAFT_02 });
+	await new Lite.ClientSetup(setup).encode(stream.writer);
+	const server = await Lite.ServerSetup.decode(stream.reader);
+	const version = setup.find((v) => v === server.version);
+	if (version === undefined) throw new Error(`unsupported server version: 0x${server.version.toString(16)}`);
+	if (handsOff(version)) {
+		// The server ends the stream after its SETUP; nothing else may follow.
+		if (!(await stream.reader.done())) throw new Error("unexpected data after SERVER_SETUP");
+		stream.close();
+		return new Lite.Connection({ url, quic: session, version, ...wiring });
 	}
-
-	const server = await Ietf.ServerSetup.decode(stream.reader, setupVersion);
-
-	if (Object.values(Lite.Version).includes(server.version as Lite.Version)) {
-		return new Lite.Connection({
-			url,
-			quic: session,
-			version: server.version as Lite.Version,
-			session: stream,
-			...wiring,
-		});
-	} else if (Object.values(Ietf.Version).includes(server.version as Ietf.Version)) {
-		const maxRequestId = server.parameters.getVarint(Ietf.SetupOption.MaxRequestId) ?? 0n;
-		// The IETF session code loads on demand, since most sessions negotiate lite.
-		const { Connection } = await import("../ietf/connection.ts");
-		return new Connection({
-			...wiring,
-			client: true,
-			url,
-			quic: session,
-			control: stream,
-			maxRequestId,
-			version: server.version as Ietf.IetfVersion,
-			solicit: Ietf.solicitFromSetup(server.parameters),
-			hidden: Ietf.hiddenFromSetup(server.parameters),
-			maxAge: Ietf.maxAgeFromSetup(server.parameters),
-			activeCount: Ietf.activeCountFromSetup(server.parameters, server.version as Ietf.IetfVersion),
-			peerImplementation: legacyPeerImplementation(session, server.parameters),
-		});
-	} else {
-		throw new Error(`unsupported server version: ${server.version.toString()}`);
-	}
+	return new Lite.Connection({ url, quic: session, version, session: stream, ...wiring });
 }
 
 /**
- * Draft-17+ client handshake. ALPN already pinned the version; SETUP is
+ * Moq-transport client handshake. ALPN already pinned the version; SETUP is
  * exchanged over a pair of uni streams using stream type 0x2F00.
  */
 async function handshakeAlpn(
@@ -614,8 +554,6 @@ async function handshakeAlpn(
 		url,
 		quic: session,
 		...setup,
-		// v17+ uses NativeSession which manages its own request IDs; maxRequestId is unused.
-		maxRequestId: 0n,
 		version,
 	});
 }

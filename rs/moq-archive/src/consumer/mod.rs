@@ -4,7 +4,7 @@
 //! stored track on a `moq_net` broadcast, the archived catalog included, with its stored
 //! timescale and priority and no max age: the store's retention bounds what it holds. Each
 //! track's live feed starts at its newest stored sequence, and every older group is served on
-//! demand from the store through [`track::Dynamic`](moq_net::track::Dynamic) fills, each sequence in its recorded form: a
+//! demand from the store through [`track::Requests`](moq_net::track::Requests) fills, each sequence in its recorded form: a
 //! group as a group, a datagram as a datagram.
 //!
 //! A growing archive is followed: every [`Config::refresh`], one delimiter LIST of the prefix
@@ -83,7 +83,7 @@ pub struct Consumer<S> {
 	shared: Arc<Shared<S>>,
 	broadcast: broadcast::Producer,
 	/// Answers requests for names the archive does not hold, and says when the broadcast closed.
-	requests: broadcast::Dynamic,
+	requests: broadcast::Requests,
 	refresh: Duration,
 	tracks: HashMap<String, Track>,
 	/// Whether the prefix held `.end`, so every track ended and nothing is refreshed.
@@ -98,7 +98,7 @@ struct Shared<S> {
 struct Track {
 	index: Arc<Mutex<Index>>,
 	live: track::Live,
-	dynamic: moq_net::track::Dynamic,
+	dynamic: moq_net::track::Requests,
 }
 
 /// What one refresh found, applied to the served tracks at once.
@@ -137,7 +137,7 @@ impl<S: ObjectStore> Consumer<S> {
 		});
 		let mut consumer = Self {
 			shared,
-			requests: broadcast.dynamic(),
+			requests: broadcast.requests(),
 			broadcast,
 			refresh: config.refresh,
 			tracks: HashMap::new(),
@@ -237,7 +237,7 @@ impl<S: ObjectStore> Consumer<S> {
 	fn apply(&mut self, refreshed: Refreshed) -> Result<()> {
 		for (name, info, index) in refreshed.added {
 			let producer = self.broadcast.create_track(name.as_str(), info)?;
-			let dynamic = producer.dynamic();
+			let dynamic = producer.requests();
 			self.tracks.insert(
 				name,
 				Track {

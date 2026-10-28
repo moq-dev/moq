@@ -35,15 +35,15 @@ func TestOriginEndsWithItsProducer(t *testing.T) {
 	}
 }
 
-// An OriginDynamic owns its origin: once the collector finalizes the last
+// An OriginRequests owns its origin: once the collector finalizes the last
 // OriginProducer, the route still serves and a consumer made earlier still
 // resolves through it.
-func TestDynamicKeepsTheOrigin(t *testing.T) {
+func TestRequestsKeepTheOrigin(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	origin := NewOriginProducer()
-	dynamic, err := origin.Dynamic("")
+	dynamic, err := origin.Requests("")
 	if err != nil {
 		t.Fatal(err)
 	}

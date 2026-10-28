@@ -30,14 +30,15 @@ feature set in another job is a miss, however warm the cache.
   (`cargo hakari disable`), and show each still fails on a planted violation.
 - Unifying features means some packages build features they don't use. Measure
   whether that costs more CPU than the cache hits save; target, profile, and
-  `RUSTFLAGS` differences still split keys, and Nix's flags are unified in
-  [crate2nix](/quest/m0/ci/crate2nix.md).
-- Start from the hit report in [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md),
-  which lists the compilations that miss only because their features or flags
-  differ.
+  `RUSTFLAGS` differences still split keys.
+- Measure the baseline here, before generating the hack: across jobs, which
+  compilations one job misses although another job built the same crate at
+  the same version, grouped by what differs (features, profile, `RUSTFLAGS`,
+  target). Repeat it after, from the same commit.
+
+Decided 2026-10-27 (maintainer): this quest no longer waits on
+[Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md). It measures its own
+before and after baseline, so the cross-job miss report moved here from that
+quest, which stays a waiting quest for the R2 numbers alone.
 
 Public API: none; the workspace-hack crate is not published.
-
-## Required
-
-- [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - its cross-job hit report is this quest's baseline

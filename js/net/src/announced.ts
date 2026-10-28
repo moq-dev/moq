@@ -68,6 +68,9 @@ class AnnounceState {
 	// A reader holds the last event it took before syncing until it asks for the next
 	// one, so whatever it does with that event lands before synced flips.
 	reading = false;
+	// Open consumer handles; the stream is wanted while any is.
+	consumers = 0;
+	wanted = new Signal(false);
 }
 
 // Synced once nothing is owed and the reader has come back for more.
@@ -107,6 +110,14 @@ export class Producer {
 	/** A read handle for this announcement stream. */
 	consume(): Consumer {
 		return makeConsumer(this.#state);
+	}
+
+	/**
+	 * Whether any consumer still holds the stream: false before the first {@link consume} and
+	 * once the last one {@link Consumer.close}s, which is how a reader cancels it.
+	 */
+	get wanted(): Getter<boolean> {
+		return this.#state.wanted;
 	}
 
 	/** Writes an event to the queue. */
@@ -155,19 +166,22 @@ let makeConsumer: (state: AnnounceState) => Consumer;
 /**
  * The read side of an announcement stream.
  *
- * Created internally: obtain one from {@link Producer.consume} or the connection's
- * `announced(scope)`.
+ * Created internally: obtain one from an origin or the connection's `announced(scope)`.
  *
  * @public
  */
 export class Consumer {
 	#state: AnnounceState;
+	// Set once this handle closes, ending its own reads and guarding the consumer count.
+	#released = new Signal(false);
 
 	private constructor(state: AnnounceState) {
 		this.#state = state;
+		state.consumers++;
+		state.wanted.set(true);
 	}
 
-	/** Settles once the stream closes; see {@link Producer.closed}. */
+	/** Settles once the stream closes: `null` on a clean close, or the abort {@link Error}. */
 	get closed(): GetPromise<Error | null> {
 		return this.#state.closed;
 	}
@@ -198,12 +212,13 @@ export class Consumer {
 		}
 	}
 
-	/** Returns the next event, or undefined once the stream closes. */
+	/** Returns the next event, or undefined once the stream or this handle closes. */
 	async next(): Promise<Event | undefined> {
 		const state = this.#state;
 		state.reading = false;
 		settle(state);
 		for (;;) {
+			if (this.#released.peek()) return undefined;
 			const announce = state.queue.peek().shift();
 			if (announce) {
 				if (state.owed) state.owed -= 1;
@@ -215,12 +230,18 @@ export class Consumer {
 			if (closed instanceof Error) throw closed;
 			if (closed !== undefined) return undefined;
 
-			await Signal.race(this.#state.queue, this.#state.closed);
+			await Signal.race(state.queue, state.closed, this.#released);
 		}
 	}
 
-	/** Closes the reader. Idempotent. */
-	close(abort?: Error) {
-		closeState(this.#state, abort);
+	/**
+	 * Release this handle, like dropping a Rust handle: other consumers keep reading, and the
+	 * producer sees the stream as no longer wanted once the last one closes.
+	 * Idempotent.
+	 */
+	close() {
+		if (this.#released.peek()) return;
+		this.#released.set(true);
+		if (--this.#state.consumers === 0) this.#state.wanted.set(false);
 	}
 }

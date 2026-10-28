@@ -9,7 +9,7 @@ const OLD = Version.DRAFT_18;
 const NEW = Version.DRAFT_22;
 
 test("legacy live joins do not exclude the prefix without a joining FETCH", () => {
-	for (const version of [Version.DRAFT_14, Version.DRAFT_15, Version.DRAFT_16, Version.DRAFT_17, Version.DRAFT_18]) {
+	for (const version of [Version.DRAFT_18]) {
 		expect([...Filter.encode(joinFilter(version), version)]).toEqual([3, 0, 0]);
 	}
 	expect([...Filter.encode(joinFilter(NEW), NEW)]).toEqual([0x01, 0x01]);
@@ -192,6 +192,7 @@ test("draft-22 fill carries the Location Filter Type", () => {
 	// A uint8, a typed filter, then another uint8: the filter must stop at its own fields.
 	expect(Filter.decodeFill(new Uint8Array([0x03, 0x20, 0x80, 0x01, 0x05, 0x01, 0x01]), NEW)).toEqual({
 		filter: { kind: "nextObject" },
+		groupOrder: "ascending",
 		rangeFilters: false,
 	});
 });
@@ -204,8 +205,43 @@ for (const version of [Version.DRAFT_22]) {
 		for (const value of [1, 2]) {
 			expect(Filter.decodeFill(new Uint8Array([1, 0x22, value]), version)).toEqual({
 				filter: undefined,
+				groupOrder: value === 1 ? "ascending" : "descending",
 				rangeFilters: false,
 			});
 		}
 	});
 }
+
+test("fill preserves its group order with inherited and explicit filters", () => {
+	for (const [groupOrder, wire] of [
+		["ascending", 1],
+		["descending", 2],
+	] as const) {
+		for (const [filter, prefix] of [
+			[undefined, [1, 0x22]],
+			[{ kind: "relative", groups: 1n }, [2, 0x21, 1, 1, 1]],
+		] as const) {
+			const fill: Filter.Fill = { filter, groupOrder, rangeFilters: false };
+			const encoded = new Uint8Array([...prefix, wire]);
+			expect(Filter.encodeFill(fill, NEW)).toEqual(encoded);
+			expect(Filter.decodeFill(encoded, NEW)).toEqual(fill);
+		}
+	}
+});
+
+test("fill retains its group order between ignored parameter values", () => {
+	// Priority is a raw uint8; the range filter after GROUP_ORDER is length-prefixed.
+	const encoded = new Uint8Array([3, 0x20, 0x80, 2, 1, 3, 0]);
+	expect(Filter.decodeFill(encoded, NEW)).toEqual({
+		filter: undefined,
+		groupOrder: "ascending",
+		rangeFilters: true,
+	});
+});
+
+test("fill refuses repeated group order even when the values agree", () => {
+	for (const repeated of [1, 2]) {
+		const encoded = new Uint8Array([2, 0x22, 1, 0, repeated]);
+		expect(() => Filter.decodeFill(encoded, NEW)).toThrow(/duplicate GROUP_ORDER/);
+	}
+});

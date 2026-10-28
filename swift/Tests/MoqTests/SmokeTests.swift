@@ -128,18 +128,20 @@ final class SmokeTests: XCTestCase {
         defer { watchdog.cancel() }
 
         let everything = Grant(publish: ["**"], subscribe: ["**"], expires: nil)
-        for auth in [session.auth(), peer.auth()] {
-            var grant = auth.grant()
-            while grant != everything {
-                grant = try await auth.grantChanged()
+        for side in [session, peer] {
+            for try await grant in side.grants() where grant == everything {
+                break
             }
         }
+        XCTAssertNil(peer.tokens(), "an accepted session presents no tokens")
 
+        guard let tokens = session.tokens() else { return XCTFail("a client session has tokens") }
+        try tokens.set(["extra"])
         do {
-            _ = try await session.auth().add(token: "extra")
+            try await tokens.answered()
             XCTFail("the default acceptor refuses a token")
         } catch MoqError.Unsupported {}
-        XCTAssertEqual(session.auth().grant(), everything)
+        XCTAssertEqual(session.grants().grant(), everything)
 
         peer.cancel(code: 0)
         session.cancel(code: 0)
@@ -162,7 +164,7 @@ final class SmokeTests: XCTestCase {
     func testOriginProducerIsConstructible() throws {
         let origin = OriginProducer(cacheCapacityBytes: 4096)
         _ = origin.consume()
-        _ = try origin.dynamic(prefix: "")
+        _ = try origin.requests(prefix: "")
     }
 
     func testBroadcastIsReachableOnlyWhileAnnounced() async throws {
@@ -236,7 +238,7 @@ final class SmokeTests: XCTestCase {
 
     func testDynamicServesARequestUnderAPrefix() async throws {
         let origin = OriginProducer()
-        let dynamic = try origin.dynamic(prefix: "live")
+        let dynamic = try origin.requests(prefix: "live")
         let pending = Task {
             try await origin.consume().requestBroadcast(path: "live/cam")
         }
@@ -655,8 +657,11 @@ final class SmokeTests: XCTestCase {
         }
 
         let next = try await decoder.next()
-        let frame = try XCTUnwrap(next)
+        guard case .frame(let frame) = try XCTUnwrap(next) else {
+            return XCTFail("expected a decoded frame")
+        }
         decoder.cancel()
+
 
         let planar = try frame.pixels(format: .i420)
         XCTAssertEqual(planar.count, Int(frame.width()) * Int(frame.height()) * 3 / 2)

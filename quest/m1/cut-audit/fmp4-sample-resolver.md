@@ -1,45 +1,43 @@
-# [M] One fMP4 sample resolver for import and decode
+# [M] Counted field-less trun entries
 
 ## Goal
 
-The fMP4 importer and the CMAF subscriber decode resolve samples through
-one resolver that enforces non-empty, in-bounds, disjoint, and correctly
-based samples. A moof of field-less truns can no longer cost gigabytes and
-hundreds of thousands of groups, and ffmpeg output that uses
-`base_data_offset` (the common `frag_keyframe+empty_moov` pipe recipe)
-imports or is refused with a typed error instead of failing on a bogus
-range.
+Parsing a moof allocates in proportion to its bytes: a `trun` whose samples
+inherit every field from `tfhd`/`trex` decodes as a count, not one
+materialized entry per sample. Land that counted representation in
+kixelated/mp4-atom, release it, and adopt it in moq-mux so field-less runs
+cannot amplify before the sample resolver sees the mdat.
 
 ## Plan
 
-Found by the 2026-10-24 pre-cut audit at 151a529670.
+[moq-dev/moq#6864](https://github.com/moq-dev/moq/pull/6864) put fMP4
+import, subtitle import, and CMAF decode on one lazy `sample::Resolver`. It
+refuses empty samples, out-of-bounds or overlapping ranges, and absolute
+`base_data_offset`, so output is bounded by the mdat. The parser is not:
+mp4-atom 0.16.2 pushes one `TrunEntry` per sample even when the run carries
+no per-sample field, capped only at 4096 per run. A 16 KB moof of 1000 such
+runs materializes 4.1 million entries before the resolver refuses anything.
 
-- **Zero-size samples** (reproduced; per-sample fan-out new on main from
-  [moq-dev/moq#6250](https://github.com/moq-dev/moq/pull/6250)): a moof of
-  1000 field-less truns of 4096 entries with tfhd default size 0 is 4.1M
-  samples in 16 KB, since mp4-atom 0.16.2 materializes 4096 entries for a
-  trun without per-entry fields. Through import it took 6.3 GB RSS, 66-81 s
-  of CPU, and about 720k groups. Paths:
-  `rs/moq-mux/src/container/fmp4/import.rs:1052` (`with_capacity(total_samples)`),
-  `:1095-1128` (a 0-byte sample passes), `fmp4/sample.rs:87`
-  (`Claimed::take` returns early on empty), `import.rs:1380` (each sync
-  sample opens a group), and the subscriber-side `Wire::decode`
-  (`fmp4/mod.rs:533`), reached by any Rust subscriber of a cmaf track.
-- **`base_data_offset`** (reproduced with ffmpeg 9.0.2, inherited):
-  `import.rs:1049-1069` and `fmp4/text.rs:72` treat the absolute file offset
-  as an mdat-relative one, failing the first fragment with
-  `SampleRangeOutOfBounds`. Resolve it against the moof's absolute position
-  with a per-source byte counter, or refuse it with a typed error as
-  `decode()` does at `mod.rs:523`.
+Settled (2026-10-26, maintainer): a counted representation, not a refusal.
+[kixelated/mp4-atom#248](https://github.com/kixelated/mp4-atom/pull/248)
+refuses nonempty field-less runs and breaks the AV1, BBB, and ESDS fixtures,
+which are valid files; close or rework it rather than weaken those tests. Do
+not add another sample-count cap or duplicate the atom parser in moq-mux.
 
-Fix: refuse zero-size media samples in the shared resolver, so each sample
-costs at least one input byte, and make field-less truns bounded by design
-in mp4-atom (refuse, or store a count) instead of its 4096 constant. The two
-sample loops have drifted through repeated fixes
-([moq-dev/moq#5078](https://github.com/moq-dev/moq/pull/5078),
-[moq-dev/moq#6379](https://github.com/moq-dev/moq/pull/6379),
-[moq-dev/moq#6686](https://github.com/moq-dev/moq/pull/6686)); one resolver
-is a net deletion. If the mp4-atom change needs a release, land the
-resolver here and track the bump separately.
+- mp4-atom: replace `Trun.entries: Vec<TrunEntry>` with a shape that stores a
+  field-less run (including a first-sample-flags-only run) as a count and
+  yields entries through an iterator, without allocating from
+  `sample_count`. Encode must round-trip both forms. The API shape is the
+  maintainer's call; propose it in the mp4-atom PR. This is breaking, so
+  aim for the 0.17.0 release that
+  [VR fields](/quest/m2/mux-vr-fields.md) is waiting on.
+- moq-mux re-exports `mp4_atom`, so the bump is a breaking change to its
+  public API. Migrate `sample::Resolver::resolve`, the segment-start scan,
+  and `kept`/`fragment` in `import.rs`, plus the tests that build `Trun`
+  literals.
+- Verify with the fMP4 tests and the interleaved container benchmark,
+  including its 1-byte samples, and a test that a moof of many field-less
+  runs decodes without a per-sample allocation.
 
-Public API: possibly a new `fmp4::Error` variant. Wire: none.
+Public API: breaking `mp4_atom::Trun` through moq-mux's re-export. MoQ wire:
+none.

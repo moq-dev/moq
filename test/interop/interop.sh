@@ -79,7 +79,7 @@ FINISH_ONLY=0
 # except the clients the harness reads a grant from, which offer $AUTH_VERSION alone. Any other
 # entry pins every client in its pass to that version, and `ietf` expands to IETF_VERSIONS.
 VERSIONS="auto"
-IETF_VERSIONS="moq-transport-14,moq-transport-16,moq-transport-18,moq-transport-22"
+IETF_VERSIONS="moq-transport-18,moq-transport-22"
 
 # Cargo profile for the relay/cli/moq-c builds. Debug compiles faster, which is
 # what an interop test wants; the workload (320x240@30) is trivial either way.
@@ -459,15 +459,7 @@ plan_pass() {
             record "not run" case="wire track status" publisher=rust subscriber="$runtime"
             record "not run" case=goaway publisher=rust subscriber="$runtime"
             [[ "$runtime" != js-native-bun ]] || record "not run" case=goaway publisher="$runtime" subscriber=rust
-            case "$VERSION" in
-                moq-transport-14 | moq-transport-16)
-                    record "not run" case="request credit" publisher="$runtime" subscriber=rust
-                    [[ "$runtime" != js-native-bun ]] || record "not run" case="request credit" publisher="$runtime" subscriber="$runtime"
-                    ;;
-                *)
-                    record "not run" case="track status" publisher="$runtime" subscriber=rust
-                    ;;
-            esac
+            record "not run" case="track status" publisher="$runtime" subscriber=rust
         fi
     done
     [[ "$VERSION" == auto ]] || return 0
@@ -771,13 +763,10 @@ prepare_gst() {
         return
     fi
     GST_PLUGIN_DIR="$TARGET_BASE/$PROFILE"
-    # gst-inspect exits 0 even when the .so fails to load, so grep for the
-    # factory. Isolate discovery to our dir + a temp registry so a system-wide moq
-    # plugin can't shadow it (mirrors rs/moq-gst/smoke.sh).
-    if ! GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" GST_PLUGIN_SYSTEM_PATH_1_0="" \
-        GST_REGISTRY_1_0="$HARNESS_RUN/gst-registry.bin" \
-        gst-inspect-1.0 moq 2>/dev/null | grep -qE '^[[:space:]]+moqsrc:'; then
+    # Use the packaging smoke check's isolated discovery and factory assertions.
+    if ! "$WORKSPACE/rs/moq-gst/smoke.sh" "$GST_PLUGIN_DIR" >"$HARNESS_RUN/gst-inspect.log" 2>&1; then
         mark_broken gst "moqsrc not exposed (plugin failed to load against this GStreamer)"
+        sed 's/^/        /' "$HARNESS_RUN/gst-inspect.log" >&2 || true
         return
     fi
     # The audio check decodes through these, from the system's plugins.
@@ -906,7 +895,7 @@ rust_connect() {
 
 # The pattern a cell's token grants its publisher, or its subscribers, on <broadcast>. The `auto`
 # pass mints patterns no prefix could carry, so AUTH must deliver them as minted. moq-transport's
-# AUTH extension (draft-17 on) carries prefixes alone and refuses a narrower grant, closing the
+# AUTH extension carries prefixes alone and refuses a narrower grant, closing the
 # session, so a pinned pass grants the broadcast's subtree.
 publish_grant() {
     if [[ "$VERSION" == auto ]]; then printf '%s' "$1"; else printf '%s/**' "$1"; fi
@@ -1114,7 +1103,7 @@ run_native() {
     local out
     out=$( (cd "$NATIVE_DIR" && "$@") 2>&1) || true
     printf '%s\n' "$out" >&2
-    printf '%s\n' "$out" | grep -q '^received '
+    grep -q '^received ' <<<"$out"
 }
 
 # Write a track name and the group the compat client's live subscription saw on it to
@@ -2109,15 +2098,10 @@ run_control_case() {
     local command=("$TARGET_BASE/$PROFILE/examples/interop-control" "$kind" "$version" "${runtime##*-}")
     case "$kind" in
         status) cell=(case="wire track status" publisher=rust subscriber="$runtime" log="$LOGS/$name.log") ;;
-        credit) cell=(case="request credit" publisher="$runtime" subscriber=rust log="$LOGS/$name.log") ;;
         goaway) command=("$TARGET_BASE/$PROFILE/examples/interop-goaway" "$version" "${runtime##*-}") ;;
         reverse-goaway)
             command=("$TARGET_BASE/$PROFILE/examples/interop-goaway-client" "$version")
             cell=(case=goaway publisher="$runtime" subscriber=rust log="$LOGS/$name.log")
-            ;;
-        js-credit)
-            command=(bun "$CLIENTS/js-native/server.ts" credit "$version")
-            cell=(case="request credit" publisher="$runtime" subscriber="$runtime" log="$LOGS/$name.log")
             ;;
     esac
     if is_broken "$runtime"; then
@@ -2155,15 +2139,7 @@ run_tails() {
                 run_control_case "$runtime" status
                 run_control_case "$runtime" goaway
                 [[ "$runtime" != js-native-bun ]] || run_control_case "$runtime" reverse-goaway
-                case "$VERSION" in
-                    moq-transport-14 | moq-transport-16)
-                        run_control_case "$runtime" credit
-                        [[ "$runtime" != js-native-bun ]] || run_control_case "$runtime" js-credit
-                        ;;
-                    *)
-                        run_tail_pair "$runtime" rust "track status"
-                        ;;
-                esac
+                run_tail_pair "$runtime" rust "track status"
             fi
         fi
     done
