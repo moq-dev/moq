@@ -3572,6 +3572,123 @@ async fn a_reimport_keeps_the_first_si() {
 	}
 }
 
+/// A gap longer than a skip after the first frame still leaves the opening's PCR interval
+/// whole: the first SI follows two PCRs a reader can measure, and a re-import places it
+/// instead of dropping it until it repeats, padded or not.
+#[tokio::test(start_paused = true)]
+async fn a_reimport_keeps_the_first_si_across_a_gap() {
+	for rate in [None, Some(5_000_000)] {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let mut catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+		)
+		.unwrap();
+
+		let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap();
+		let track = broadcast
+			.create_track(
+				broadcast.unique_name(".avc1"),
+				hang::container::track_info(hang::catalog::PRIORITY.video),
+			)
+			.unwrap();
+		let name = track.name().to_string();
+		let mut sdt_track = broadcast.create_track("0x0011-0x42.si", timed()).unwrap();
+		sdt_track
+			.write_frame(
+				Timestamp::ZERO,
+				Bytes::from(make_long_section(0x42, 1, 0, 0, 0, &[0xaa; 8])),
+			)
+			.unwrap();
+		{
+			let mut guard = catalog.modify().unwrap();
+			let mut cfg = VideoConfig::new(H264 {
+				profile: 0x64,
+				constraints: 0,
+				level: 0x1f,
+				inline: false,
+			});
+			cfg.container = Container::Legacy;
+			cfg.description = Some(avcc);
+			guard.video.renditions.insert(name.clone(), cfg);
+			guard.ext.mpegts.si.entry(0x0011).or_default().insert(
+				0x42,
+				tscat::SiEntry {
+					track: "0x0011-0x42.si".to_string(),
+					interval: Some(Duration::from_secs(2)),
+					..Default::default()
+				},
+			);
+		}
+
+		// Five seconds between frames, past the second a skip keeps before what comes next.
+		let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
+		for (sec, slice) in [(0, 0x65u8), (5, 0x41)] {
+			producer
+				.write(Frame {
+					timestamp: Timestamp::from_micros(sec * 1_000_000).unwrap(),
+					duration: None,
+					payload: length_prefixed(&[&[slice; 300]]),
+					keyframe: sec == 0,
+				})
+				.unwrap();
+		}
+		producer.finish().unwrap();
+
+		// No delay: each frame settles the slots before it, so the gap is skipped at once.
+		let mut export = open_ts(
+			crate::source::announced(&consumer).await,
+			crate::catalog::CatalogFormat::Hang,
+		)
+		.await
+		.unwrap()
+		.with_replay();
+		if let Some(rate) = rate {
+			export = export.with_mux_rate(rate);
+		}
+		let mut ts = BytesMut::new();
+		while let Ok(frame) = tokio::time::timeout(DRAIN, export.next()).await {
+			let Some(frame) = frame.expect("exporter error") else {
+				break;
+			};
+			ts.extend_from_slice(&frame.payload);
+		}
+		assert_packet_aligned(&ts);
+
+		// The two PCRs between the PMT and the first SI step forward by at most a valid interval.
+		let packets = ts.as_chunks::<188>().0;
+		let pid = |packet: &[u8; 188]| u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2]);
+		let pmt = packets.iter().position(|packet| pid(packet) == 0x1000).expect("a PMT");
+		let first = packets.iter().position(|packet| pid(packet) == 0x0011).expect("SI");
+		let pcrs: Vec<u64> = packets[pmt..first].iter().filter_map(super::import::pcr).collect();
+		let [.., before, last] = pcrs[..] else {
+			panic!("{rate:?}: {} PCRs between the PMT and the first SI", pcrs.len());
+		};
+		let step = (last + super::mux_rate::PCR_WRAP - before) % super::mux_rate::PCR_WRAP;
+		assert!(
+			(1..=super::mux_rate::MAX_INTERVAL).contains(&step),
+			"{rate:?}: the PCR steps {before} to {last} before the first SI"
+		);
+
+		let mut broadcast2 = moq_net::broadcast::Info::new().produce();
+		let catalog2 = crate::catalog::Producer::new(
+			&mut broadcast2,
+			crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+		)
+		.unwrap();
+		let mut import = crate::container::ts::Import::new(broadcast2, catalog2.reserve());
+		import.decode(&BytesMut::from(ts.as_ref())).unwrap();
+		import.finish().unwrap();
+		for (pid, stream) in &import.stats().streams {
+			assert_eq!(
+				stream.unplaced, 0,
+				"{rate:?}: PID {pid:#x} dropped what it could not place"
+			);
+		}
+	}
+}
+
 /// Each SI PID must be re-emitted on its own interval, independently of the PSI cadence
 /// and of video keyframes. The fixtures are a fraction of a second long, so nothing else
 /// distinguishes a correct interval from "emitted once and never again": this builds a

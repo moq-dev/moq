@@ -637,9 +637,10 @@ impl Schedule {
 		self.opening = true;
 	}
 
-	/// Whether a unit pushed now could go out before the opening's PCR interval is out.
+	/// Whether a unit pushed now could go out before the opening's PCR interval is out, or
+	/// ahead of packets still held for it on the same PID.
 	pub fn clocking(&self) -> bool {
-		self.opening || self.next.is_some_and(|next| next < self.clocked)
+		self.opening || !self.unclocked.is_empty() || self.next.is_some_and(|next| next < self.clocked)
 	}
 
 	/// Hold `packets`, which a reader places on the program clock and which ride no unit of their
@@ -1008,7 +1009,12 @@ impl Schedule {
 			(None, Some(first)) => Some(first),
 			// Skip the empty slots of a long gap, keeping the second before what comes next.
 			(Some(next), first) => {
-				let target = first.or(known);
+				let mut target = first.or(known);
+				// The opening's PCR interval runs slot by slot to its gate, so what it holds goes
+				// out on a clock the reader has measured.
+				if self.opening || !self.unclocked.is_empty() {
+					target = target.map(|target| target.min(self.clocked));
+				}
 				Some(next.max(target.map_or(0, |target| target.saturating_sub(BACKFILL))))
 			}
 		}
@@ -1817,6 +1823,46 @@ mod tests {
 			};
 			assert_eq!((on(100), on(1)), (Some(0), Some(0)), "{rate:?}");
 			assert_eq!(on(0x11), Some(OPENING), "{rate:?}");
+		}
+	}
+
+	/// A gap after the first frames skips no slot of the opening's PCR interval, so packets held
+	/// for it go out after consecutive PCRs rather than after a jump the reader cannot measure,
+	/// padded or not. Until they do, SI muxed after them is held behind them.
+	#[test]
+	fn clocked_packets_follow_the_opening_across_a_gap() {
+		for rate in [None, Some(RATE)] {
+			let mut schedule = Schedule::new(Duration::ZERO);
+			schedule.set_rate(rate);
+			schedule.set_tables(100);
+			schedule.set_clock(1);
+			schedule.set_buffer(1, VIDEO);
+			schedule.set_buffer(0x11, Buffer::SYSTEM);
+			schedule.open();
+			schedule.push_clocked(unit(0x11, 1));
+			schedule.lead(Tables {
+				packets: [unit(0, 1), unit(100, 1)].concat(),
+				clock: 1,
+				rate,
+				added: vec![1],
+			});
+			schedule.push(1, timing(10), unit(1, 1), true).unwrap();
+			// The next frame is ten seconds out, far past a skip.
+			let known = Some(400);
+			let mut indexes = Vec::new();
+			let mut held = None;
+			while let Some(slot) = schedule.next(known).unwrap() {
+				indexes.push(slot.index);
+				if slot.packets.as_chunks::<{ TsPacket::SIZE }>().0.iter().any(|packet| pid(packet) == 0x11) {
+					held = Some(slot.index);
+					break;
+				}
+				// SI muxed now goes behind what is held for the same PID, never ahead of it.
+				assert!(schedule.clocking(), "{rate:?}: after slot {}", slot.index);
+			}
+			assert_eq!(held, Some(OPENING), "{rate:?}: slots {indexes:?}");
+			assert_eq!(indexes, (0..=OPENING).collect::<Vec<_>>(), "{rate:?}");
+			assert!(!schedule.clocking());
 		}
 	}
 
