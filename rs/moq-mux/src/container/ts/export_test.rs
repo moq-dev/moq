@@ -3474,9 +3474,9 @@ async fn service_layer_survives_roundtrip() {
 	assert_eq!(program2.pmt_pid, program.pmt_pid, "PMT PID survived");
 }
 
-/// An export leads with its PAT and PMT, then a PCR interval on the clock they name, then
-/// its SI and media: a re-import places every SI table's first emission instead of dropping
-/// it until it repeats, padded or not, and every PES with it.
+/// An export leads with its PAT and PMT, then a PCR interval on the clock they name, before
+/// its SI: a re-import places every SI table's first emission instead of dropping it until it
+/// repeats, padded or not, and every PES with it.
 #[tokio::test(start_paused = true)]
 async fn a_reimport_keeps_the_first_si() {
 	let data = include_bytes!("test_data/bbb.ts");
@@ -3523,7 +3523,7 @@ async fn a_reimport_keeps_the_first_si() {
 		let ts = drain_with(export).await;
 		assert_packet_aligned(&ts);
 
-		// Nothing but the tables and the clock goes out before the PMT and two PCRs after it.
+		// No SI goes out before the PMT and two PCRs after it.
 		let packets = ts.as_chunks::<188>().0;
 		let pid = |packet: &[u8; 188]| u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2]);
 		let pmt = packets.iter().position(|packet| pid(packet) == 0x1000).expect("a PMT");
@@ -3537,11 +3537,11 @@ async fn a_reimport_keeps_the_first_si() {
 			.0;
 		let first = packets
 			.iter()
-			.position(|packet| ![0, 0x1000, 0x1fff].contains(&pid(packet)) && packet[3] & 0x10 != 0)
-			.expect("SI and media");
+			.position(|packet| [0x0010, 0x0011].contains(&pid(packet)))
+			.expect("SI");
 		assert!(
-			first >= clock,
-			"{rate:?}: a payload at packet {first}, the PMT at {pmt} and its second PCR at {clock}"
+			first > clock,
+			"{rate:?}: SI at packet {first}, the PMT at {pmt} and its second PCR at {clock}"
 		);
 
 		let mut broadcast2 = moq_net::broadcast::Info::new().produce();

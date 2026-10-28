@@ -3136,11 +3136,23 @@ where
 				(*pid, si.active.sections().cloned().collect())
 			})
 			.collect();
+		let si = pending.first().map(|(pid, _)| *pid);
 		for (pid, sections) in pending {
 			self.program.schedule.set_buffer(pid, Buffer::SYSTEM);
 			for section in &sections {
 				self.write_section(&mut out, pid, section)?;
 			}
+		}
+		// A reader drops SI it cannot place on the program clock, so while the opening's PCR
+		// interval may still be ahead of the unit this frame goes in, the SI goes on its own,
+		// placed at the frame's decode time, rather than hold back the media it would lead. A
+		// placed frame waits for the clock anyway.
+		if let Some(pid) = si.filter(|_| !kind.placed() && self.program.schedule.clocking()) {
+			let place = decode.as_nanos();
+			let si = std::mem::take(&mut out);
+			self.program
+				.schedule
+				.push_placed(pid, (place, place), 1, si, false, Vec::new())?;
 		}
 
 		// The tables lead the unit that carries this frame, behind whatever went before it.
