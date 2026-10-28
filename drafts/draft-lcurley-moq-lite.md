@@ -553,7 +553,7 @@ A subscriber opens a Fetch Stream (0x3) to request a single Group from a Track.
 The subscriber sends a FETCH message containing the broadcast path, track name, priority, group sequence, and the frame range within that group.
 Unlike SUBSCRIBE, FETCH works on both live and ended broadcasts; it is the only way to read an ended one.
 The publisher responds with FRAME messages directly on the same bidirectional stream — there is no response header.
-The Subscribe ID, Group Sequence, and index of the first returned frame are implicit, taken from the original FETCH request.
+The Group Sequence and index of the first returned frame are implicit, taken from the original FETCH request.
 Because there is no response header, a publisher that cannot serve the requested frame range in full MUST reset the stream rather than return a shorter run; the subscriber has no way to learn where a truncated response actually started.
 As with a subscription, the subscriber MUST already have the track's [TRACK_INFO](#track-info) to parse the returned frames; because the properties are immutable, a single Track Stream lookup is reused across every FETCH of that track (group-by-group fetches do not re-fetch it).
 The publisher FINs the stream after the last frame, or resets the stream on error.
@@ -855,6 +855,8 @@ A group whose frame does not fit is simply not eligible for datagram delivery.
 
 # Encoding
 This section covers the encoding of each message.
+Unless specified otherwise, `(s)` is UTF-8 text and `(b)` is raw bytes, each prefixed by its byte length as an `(i)`.
+A SETUP Parameter Value uses its enclosing Parameter Length, and a FRAME or datagram Payload uses its enclosing length or boundary.
 
 ## Variable-Length Integers {#varint}
 A field marked `(i)` is a variable-length integer.
@@ -1567,6 +1569,7 @@ SUBSCRIBE_DROP Message {
 ~~~
 
 **Group Start** and **Group End** are the inclusive range of group sequences the publisher gave up.
+`Group Start = Group End + 1` is an empty range; a larger Group Start is a PROTOCOL_VIOLATION.
 **Error Code** is a [stream error code](#error-codes) saying why the groups were given up, as a reset retaining the Group Stream header would: for example NOT_FOUND for a sequence the publisher never had, or OLD for one past its budget.
 A subscriber MUST end the readers of a dropped group it holds with that error, including a group whose stream is still arriving, rather than end it cleanly.
 
@@ -1826,6 +1829,8 @@ The `Message Length` describes the payload size on the wire.
 
 ## moq-lite-07
 
+- Refuse a SUBSCRIBE_DROP whose Group Start is greater than Group End plus one on every version that carries it. SETUP parameter counts are bounded by Message Length, without a separate count cap.
+
 - Limited a broadcast path to 32 segments and 4,096 bytes.
 
 - A session without a negotiated subprotocol negotiates the version in a draft-14 CLIENT_SETUP and SERVER_SETUP exchange. Implementations apply this to moq-lite-03 through moq-lite-06 too.
@@ -1869,7 +1874,6 @@ The `Message Length` describes the payload size on the wire.
 - A subscriber MAY cancel by FIN on its Subscribe Stream, and the publisher then FINs without SUBSCRIBE_END.
 - A publisher MAY FIN a subscription whose every Range has an End, once each Group in them is sent or dropped, without SUBSCRIBE_END. The FIN ends the subscription, not the Track. Earlier versions hold a bounded subscription open until SUBSCRIBE_END, since their subscribers read a FIN as the Track's end.
 - Removed the NO_CAPACITY stream error and its one re-resolution. Every refusal is terminal, including at another route of the same prefix.
-- Assigned 0x3B UNAUTHORIZED in the stream error table: a request reset because the endpoint does not authorize it, or no longer does, distinct from SESSION_CLOSED.
 - A relay resets with UNROUTABLE, rather than INTERNAL_ERROR, a stream served through an upstream session that ended.
 - A GOAWAY recipient MAY keep opening requests on the current session until it has moved to a replacement session; previously it MUST NOT open new streams. The sender SHOULD keep answering them and MAY reset one with GOING_AWAY, which the recipient SHOULD retry on another route.
 - Replaced Warm and Cold Route Cost with one static Route Cost in moq-lite-07-wip; lite-06 retains both fields, reading Warm and writing Cold at saturation.
@@ -1954,6 +1958,7 @@ The `Message Length` describes the payload size on the wire.
 - Ranked a path that contains a 0 Hop ID below every fully identified path before comparing Route Cost. A received 0 is forwarded unchanged, and bridging an upstream that sent no hop list writes 0 for that hop. An assigned identity is local selection state and MUST NOT be forwarded.
 
 ## moq-lite-05
+- Assigned 0x3B UNAUTHORIZED to a request reset because the endpoint does not authorize it, or no longer does, distinct from SESSION_CLOSED.
 - Renamed ANNOUNCE_INTEREST to ANNOUNCE_REQUEST and ANNOUNCE to ANNOUNCE_BROADCAST.
 - Added a SETUP message and Setup Stream (0x1).
 - Added a SETUP `Probe` parameter.

@@ -1,15 +1,14 @@
+use std::collections::HashSet;
+
 use crate::coding::*;
 
 use super::Version;
-
-const MAX_PARAMS: u64 = 64;
 
 /// A bag of `id -> raw bytes` parameters, the body shared by SETUP (and any other
 /// parameterized message). Encoded as a varint count followed by `id, length, value`
 /// triples; duplicate ids are rejected on decode.
 ///
-/// A handful at most, so a linear scan beats hashing, and the encoding keeps the
-/// order the parameters were set or decoded in.
+/// The encoding keeps the order the parameters were set or decoded in.
 #[derive(Default, Debug, Clone)]
 pub struct Parameters(Vec<(u64, Vec<u8>)>);
 
@@ -56,13 +55,17 @@ impl Decode<Version> for Parameters {
 
 		// I hate this encoding so much; let me encode my role and get on with my life.
 		let count = r.varint()?;
-		if count > MAX_PARAMS {
-			return Err(DecodeError::TooMany);
-		}
-
+		// Grow only as entries arrive; the enclosing message bounds the bag.
+		// Linear lookup avoids hashing and another allocation for small SETUPs.
+		// Larger bags need a set so duplicate detection cannot grow quadratically.
+		let mut seen = (count > 64).then(HashSet::new);
 		for _ in 0..count {
 			let kind = r.varint()?;
-			if params.get_bytes(kind).is_some() {
+			let duplicate = match &mut seen {
+				Some(seen) => !seen.insert(kind),
+				None => params.get_bytes(kind).is_some(),
+			};
+			if duplicate {
 				return Err(DecodeError::Duplicate);
 			}
 
@@ -75,10 +78,6 @@ impl Decode<Version> for Parameters {
 
 impl Encode<Version> for Parameters {
 	fn encode(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
-		if self.0.len() as u64 > MAX_PARAMS {
-			return Err(EncodeError::TooMany);
-		}
-
 		w.varint(self.0.len() as u64)?;
 
 		for (kind, value) in &self.0 {
@@ -87,5 +86,45 @@ impl Encode<Version> for Parameters {
 		}
 
 		Ok(())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn large_bags_preserve_order_and_reject_duplicates() {
+		let version = Version::Lite07;
+		let mut params = Parameters::default();
+		for kind in 100..1124 {
+			params.set_bytes(kind, Vec::new());
+		}
+		let encoded = params.encode_bytes(version).unwrap();
+		let mut reader = Decoder::new(&encoded, version.into());
+		assert_eq!(Parameters::decode(&mut reader, version).unwrap().0, params.0);
+
+		let mut duplicate = Vec::new();
+		let mut writer = Encoder::new(&mut duplicate, version.into());
+		writer.varint(1025).unwrap();
+		for kind in (100..1124).chain([100]) {
+			writer.varint(kind).unwrap();
+			writer.bytes(&[]).unwrap();
+		}
+		assert!(matches!(
+			Parameters::decode(&mut Decoder::new(&duplicate, version.into()), version),
+			Err(DecodeError::Duplicate)
+		));
+	}
+
+	#[test]
+	fn a_declared_count_does_not_allocate_before_its_entries_arrive() {
+		let version = Version::Lite07;
+		let mut data = Vec::new();
+		Encoder::new(&mut data, version.into()).varint(u64::MAX).unwrap();
+		assert!(matches!(
+			Parameters::decode(&mut Decoder::new(&data, version.into()), version),
+			Err(DecodeError::Short)
+		));
 	}
 }

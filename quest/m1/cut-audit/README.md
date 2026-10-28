@@ -67,7 +67,6 @@ leaving JS-only redesigns of `js/net` to [rs2ts](/quest/m2/rs2ts/README.md).
 - [Lite datagrams obey one size limit](/quest/m1/cut-audit/datagram-size.md) - no datagram one hop accepts is dropped by the next for size
 - [Every relay runtime honors or refuses each listen setting](/quest/m1/cut-audit/uring-listen-config.md) - io_uring stops ignoring preferred addresses
 - [A route's terminal state is one phase](/quest/m1/cut-audit/route-phase.md) - three resume flags collapse into one check
-- [Lite's version gates, refusals, and draft text agree](/quest/m1/cut-audit/lite-wire-nits.md) - small wire and draft mismatches fixed
 
 ## Related
 

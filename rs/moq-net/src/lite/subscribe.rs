@@ -679,11 +679,15 @@ impl Message for SubscribeDrop {
 			_ => {}
 		}
 
-		Ok(Self {
+		let msg = Self {
 			start: r.varint()?,
 			end: r.varint()?,
 			error: r.varint()?,
-		})
+		};
+		if msg.start.saturating_sub(msg.end) > 1 {
+			return Err(DecodeError::InvalidValue);
+		}
+		Ok(msg)
 	}
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -692,6 +696,10 @@ impl Message for SubscribeDrop {
 				return Err(EncodeError::Version);
 			}
 			_ => {}
+		}
+
+		if self.start.saturating_sub(self.end) > 1 {
+			return Err(EncodeError::InvalidState);
 		}
 
 		w.varint(self.start)?;
@@ -776,6 +784,36 @@ impl Decode<Version> for SubscribeResponse {
 #[cfg(test)]
 mod test {
 	use super::*;
+
+	#[test]
+	fn drop_ranges_refuse_reversed_and_allow_empty_or_maximum_ends() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			assert!(matches!(
+				SubscribeDrop::decode_slice(&[3, 3, 1, 0], version),
+				Err(DecodeError::InvalidValue)
+			));
+			assert!(
+				SubscribeDrop {
+					start: 3,
+					end: 1,
+					error: 0
+				}
+				.encode_bytes(version)
+				.is_err()
+			);
+			let max = if version == Version::Lite07 {
+				u64::MAX
+			} else {
+				(1 << 62) - 1
+			};
+			for (start, end) in [(2, 1), (max, max)] {
+				let msg = SubscribeDrop { start, end, error: 0 };
+				let data = msg.encode_bytes(version).unwrap();
+				let (decoded, _) = SubscribeDrop::decode_slice(&data, version).unwrap();
+				assert_eq!((decoded.start, decoded.end), (start, end));
+			}
+		}
+	}
 
 	#[test]
 	fn subscribe_start_roundtrips_on_lite05() {

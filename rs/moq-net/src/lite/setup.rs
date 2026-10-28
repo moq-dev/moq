@@ -296,7 +296,11 @@ impl Message for ReceivedSetup {
 		let hop = params
 			.get_varint(PARAM_HOP, version)?
 			.and_then(|id| crate::Hop::new(id).ok());
-		let implementation = crate::setup::decode_implementation(params.get_bytes(PARAM_IMPLEMENTATION))?;
+		let implementation = if version.has_implementation() {
+			crate::setup::decode_implementation(params.get_bytes(PARAM_IMPLEMENTATION))?
+		} else {
+			None
+		};
 		// An older version does not know these parameters, so it ignores them like any other.
 		let token = match params.get_bytes(PARAM_TOKEN) {
 			Some([]) if version.has_auth() => return Err(DecodeError::InvalidValue),
@@ -744,6 +748,22 @@ mod tests {
 			Setup::decode_slice(&buf, Version::Lite07),
 			Err(DecodeError::InvalidValue)
 		));
+	}
+
+	#[test]
+	fn older_versions_ignore_implementation_before_parsing_it() {
+		for version in [Version::Lite05, Version::Lite06] {
+			for value in [b"x/1".as_slice(), &[0xff]] {
+				let mut params = Parameters::default();
+				params.set_bytes(PARAM_IMPLEMENTATION, value.to_vec());
+				let mut data = Vec::new();
+				let mut writer = Encoder::new(&mut data, version.into());
+				let prefix = writer.prefix_varint();
+				params.encode(&mut writer, version).unwrap();
+				writer.fill(prefix).unwrap();
+				assert!(Setup::decode_slice(&data, version).unwrap().0.implementation.is_none());
+			}
+		}
 	}
 
 	#[test]
