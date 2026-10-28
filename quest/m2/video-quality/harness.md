@@ -16,8 +16,9 @@ Decisions are recorded in the [epic](/quest/m2/video-quality/README.md).
   per-row floors and ceilings in a budgets file measured from nightlies by the
   same rule, and an entry in `test/README.md`.
 - Scorer: the `vmaf` CLI from nixpkgs `libvmaf` (3.0.0 as of 2026-10-28). It
-  reads two Y4M files and writes per-frame JSON, including PSNR and SSIM, so
-  it does not need `ffmpeg-full` in the shell.
+  reads two Y4M files and writes per-frame JSON, so it does not need
+  `ffmpeg-full` in the shell. PSNR and SSIM are opt-in features
+  (`--feature psnr --feature float_ssim`).
 - Two layers, both encoding through moq-video so backend choice stays the
   one used in production:
   - Encoder rows: Y4M in, `moq_video::encode::Encoder` on an explicit
@@ -31,12 +32,14 @@ Decisions are recorded in the [epic](/quest/m2/video-quality/README.md).
 - Report, per frame: VMAF, bytes, and frame type. Per GoP: mean and minimum
   VMAF, bytes, and both pop ratios as the epic defines them. Leave out IDRs
   that land on a source scene cut (a large source frame difference), since
-  quality legitimately changes there.
+  quality legitimately changes there. Such a GoP reports its boundary as
+  excluded and does not count toward the pop gate.
 - Include a static screen-content clip and a constant-color synthetic clip,
   so the pop metric's floored divisor is exercised, both clean and with an
   injected boundary step.
 - Publish per-frame plots as a nightly artifact, and feed per-row mean VMAF,
-  minimum VMAF, and worst pop ratio into the benchmark history format.
+  minimum VMAF, and worst pop ratio into the benchmark history format through
+  `just gh benchmark-report`, as the other nightly sources do.
 - Corpus manifest: synthetic clips generated at run time (cheap, always
   available), open clips such as Blender open movies (CC-BY) with each license
   checked before listing, and private clips from the

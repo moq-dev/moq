@@ -14,13 +14,15 @@ Dangan GB2 for motion and Big2Small for calm scenes) with scripted input, and
 write Y4M. Only the ROM fetch touches the network.
 
 Today (`rs/moq-boy/src/video.rs`) moq-boy encodes the native 160x144 frame at
-60 fps through OpenH264 in camera mode. Hardware encoders refuse a frame that
-small. The bitrate is the 0.07 bits-per-pixel default (about 97 kbps), with a
-2 s GOP.
+60 fps through OpenH264 in camera mode, because a frame that small is below
+the hardware encoders' minimum size. The bitrate is the 0.07 bits-per-pixel
+default (about 97 kbps), with a 2 s GOP.
 
-Score the way the player displays the video. Upscale the reference and the
-decoded output with nearest neighbor to the player's display size, then run
-VMAF. Report PSNR at native size alongside.
+Score the way the player displays the video, at a size fixed in the
+harness rather than read from a window. Upscale the reference and the
+decoded output by one integer factor with nearest neighbor (7x, 1120x1008, is
+closest to VMAF's 1080p model), then run VMAF. Report PSNR at native size
+alongside.
 
 Candidates to measure:
 

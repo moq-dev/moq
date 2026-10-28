@@ -19,7 +19,10 @@ online with its labels. Delete this quest once they are listed.
   `/dev/nvidia*` or `/dev/dri`.
 - These runners take only the scheduled or manually dispatched
   video-quality job from `main`, never `pull_request`. The workflow has
-  read-only permissions, plus the corpus read token.
+  read-only permissions. The corpus read token lives in a GitHub environment
+  whose deployment branch rule allows only `main`, because a dispatched run
+  uses the workflow file from whichever branch is chosen, so a job-level `if`
+  cannot protect it.
 - Follow `nixos`'s sandboxed runner containers where the host allows it,
   binding in only the GPU device nodes and the host driver's libraries.
 - The [rented gate host](/quest/m3/ci-host.md) does not change this. The

@@ -24,7 +24,7 @@ Decided in planning (2026-10-28):
   (✅ "Yes, plus fix moq-boy" over "Yes" and "Narrower: pops only").
 - Corpus: a public manifest in the repo (name, sha256, license, URL,
   geometry) with the blobs in R2. Open clips are public-read; private clips
-  sit under a prefix that a CI secret reads. A selected clip that cannot be
+  sit in a separate, non-public bucket that a CI secret reads. A selected clip that cannot be
   fetched fails the run instead of being skipped (✅ "Manifest + R2" over "Private
   repo (moq.pro)" and "Synthetic + open only").
 - Gating: each row (host, backend, clip, rung) gets a VMAF floor and a pop
@@ -74,6 +74,6 @@ Decided in planning (2026-10-28):
 - [Harness](/quest/m2/video-quality/harness.md) - `just test video-quality` scores OpenH264 rows with per-frame VMAF and boundary pops against floors, nightly
 - [On-demand pops](/quest/m2/video-quality/on-demand.md) - cold starts, resubscribes, and fetch-encoded groups spliced with live ones stay under the pop ceiling
 - [moq-boy quality](/quest/m2/video-quality/moq-boy.md) - moq-boy's encode is measured on generated clips and fixed
-- [Corpus bucket](/quest/m2/video-quality/corpus-bucket.md) - R2 serves open clips publicly and private clips to a read-only CI secret
+- [Corpus buckets](/quest/m2/video-quality/corpus-bucket.md) - R2 serves open clips publicly and private clips, from a separate bucket, to a read-only CI secret
 - [GPU runners](/quest/m2/video-quality/gpu-runners.md) - `nixos2` and the desktop host self-hosted runners for the nightly job
 - [Hardware rows](/quest/m2/video-quality/hardware.md) - NVENC and VA-API rows from three GPU hosts gate the nightly and compare side by side
