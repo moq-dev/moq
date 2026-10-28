@@ -33,5 +33,4 @@ Public API: default behavior change for audio. Wire: none.
 
 ## Required
 
-- [@moq/publish encodes while enabled](/quest/m1/eager-encode/js.md) - the JS always-on path this switches from
 - [moq-audio captures while enabled](/quest/m1/eager-encode/audio.md) - the Rust always-on path this switches from

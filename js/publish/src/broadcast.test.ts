@@ -149,8 +149,33 @@ test("rendition.close() unregisters the name and drops it from the catalog", asy
 	broadcast.close();
 });
 
-test("subscriber demand hands the producer to the rendition and clears it when the track closes", async () => {
+test("hands the producer to the rendition without a subscriber and clears it when the track closes", async () => {
 	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name: Path.from("test.hang") });
+	await settle();
+
+	const rendition = broadcast.video("video");
+	await settle();
+
+	// Encoding needs no subscriber, so its groups wait in the cache for a late one.
+	const track = rendition.track.peek();
+	expect(track).toBeDefined();
+
+	// Closing the producer (encoder error / teardown) clears the signal, with no lingering effect watching it.
+	track?.finish();
+	track?.close();
+	await settle();
+	expect(rendition.track.peek()).toBeUndefined();
+
+	broadcast.close();
+});
+
+test("on demand hands the producer to the rendition only while a subscriber is attached", async () => {
+	const broadcast = new Broadcast({
+		enabled: true,
+		origin: new Origin.Producer(),
+		name: Path.from("test.hang"),
+		onDemand: true,
+	});
 	await settle();
 
 	const net = broadcast.net.peek();
@@ -158,21 +183,24 @@ test("subscriber demand hands the producer to the rendition and clears it when t
 
 	const rendition = broadcast.video("video");
 	await settle();
+	expect(rendition.track.peek()).toBeUndefined();
+
 	const subscriber = net.track("video").subscribe();
 	await settle();
-
-	// The request loop accepted the subscription and handed the producer to the rendition.
 	const track = rendition.track.peek();
 	expect(track).toBeDefined();
 
-	// Closing the producer (encoder error / teardown) clears the signal, with no lingering per-subscription
-	// effect watching it.
-	track?.finish();
-	track?.close();
+	// The last subscriber leaving takes it back, but the broadcast keeps the track open for the next one.
+	subscriber.close();
 	await settle();
 	expect(rendition.track.peek()).toBeUndefined();
+	expect(track?.closed.peek()).toBeUndefined();
 
-	subscriber.close();
+	const again = net.track("video").subscribe();
+	await settle();
+	expect(rendition.track.peek()).toBe(track);
+
+	again.close();
 	broadcast.close();
 });
 
@@ -501,7 +529,8 @@ test("a served decoder identity change moves the rendition to a fresh track name
 		expect(config?.track).toBe("video/1");
 		expect(config?.codec).toBe("vp8");
 		expect(track.closed.peek()).toBeNull();
-		expect(video.track.peek()).toBeUndefined();
+		// The replacement is handed over at once, with or without a subscriber.
+		expect(video.track.peek()?.name).toBe("video/1");
 		expect(broadcast.net.peek()).toBe(net);
 		expect(announced?.active.peek()?.epoch).toBe(epoch);
 

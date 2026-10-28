@@ -58,13 +58,23 @@ export type BroadcastInput = {
 	 * so changing this publishes a new network broadcast.
 	 */
 	maxAge: Getter<Milli | undefined>;
+
+	/**
+	 * Whether every rendition encodes only while a subscriber is attached. Defaults to false: an
+	 * enabled rendition encodes with or without a subscriber, so its recent groups sit in the
+	 * track's cache for a late subscription's `maxDelay` or a fetch to reach within `maxAge`.
+	 *
+	 * On demand saves the encode while nobody watches, but a subscriber then finds no past to reach
+	 * back into: each one starts at the keyframe its arrival forces. Capture stays open either way.
+	 */
+	onDemand: Getter<boolean>;
 };
 
 /**
  * A published broadcast: the network broadcast plus a catalog producer and its rendition tracks.
  *
  * Register renditions with {@link video} / {@link audio}; each returns a {@link Rendition} whose
- * producer (usually an encoder) fills the catalog config and encodes into the demand-gated track.
+ * producer (usually an encoder) fills the catalog config and encodes into its track.
  * The broadcast owns only its own network/catalog wiring, so {@link close} does not close the
  * renditions' producers.
  */
@@ -107,7 +117,8 @@ export class Broadcast {
 	readonly #renditions = new Signal<Record<string, Rendition<unknown>>>({});
 
 	// The writable track producer signals backing each Rendition's read-only `track`, keyed by name.
-	// A static network track is exposed here only while at least one subscriber uses it.
+	// A static network track is exposed here while it is open, and with `onDemand` only while at
+	// least one subscriber uses it.
 	readonly #tracks = new Map<string, Signal<Moq.Track.Producer | undefined>>();
 
 	// The kind of each rendition track in the current network broadcast. A new one starts over.
@@ -141,6 +152,7 @@ export class Broadcast {
 			flip: getter(props?.flip ?? false),
 			rotation: getter(props?.rotation ?? 0),
 			maxAge: getter(props?.maxAge),
+			onDemand: getter(props?.onDemand ?? false),
 		};
 
 		this.#signals.run(this.#runCatalog.bind(this));
@@ -410,8 +422,9 @@ export class Broadcast {
 			broadcastPublication.announce({ epoch });
 		});
 
-		// Static tracks fan out to every subscriber. Keep the encoder-facing handle demand-gated
-		// so capture and encoding still stop when the final subscriber leaves.
+		// Static tracks fan out to every subscriber. The encoder-facing handle stays set while the
+		// track is open, so its groups wait in the cache for a late subscriber. On demand gates it on
+		// a subscriber too, so encoding stops when the final one leaves.
 		effect.run((inner) => {
 			const renditions = inner.get(this.#renditions);
 			const names = inner.get(this.#names);
@@ -457,8 +470,10 @@ export class Broadcast {
 						if (cause) served.abort(cause);
 					});
 				}
-				inner.run((demand) => {
-					demand.set(signal, demand.get(served.demand().wanted) !== undefined ? served : undefined);
+				inner.run((gate) => {
+					if (gate.get(served.closed) !== undefined) return;
+					if (gate.get(this.in.onDemand) && gate.get(served.demand().wanted) === undefined) return;
+					gate.set(signal, served);
 				});
 			}
 		});
