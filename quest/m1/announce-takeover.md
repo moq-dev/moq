@@ -67,8 +67,8 @@ fallback, including the accepted cold-start reset before this lands.
 
 Decided 2026-10-27 (maintainer): this no longer waits on
 [Routes and announces](/quest/m1/cluster-routing/routes.md), and needs no
-minted epochs: an epochless route stays ineligible for an epoch-bound
-request, as above. Takeover builds on
+relay-minted route epochs, only the job's own epoch above: an epochless
+route stays ineligible for an epoch-bound request, as above. Takeover builds on
 what lite-07-wip and `main` already have: stream-local Announce IDs,
 ANNOUNCE_RESTART, Base compression, `Request::prepare`/`publish`, and the
 claim helpers. Its ANNOUNCE_START field layout overlaps with routes (hops
