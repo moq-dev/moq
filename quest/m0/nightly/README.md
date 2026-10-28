@@ -33,3 +33,4 @@ Public API: none. Wire: none.
 
 - [moq-net compiles in Fuzz and send-depth](/quest/m0/nightly/send-overflow.md) - the ietf publisher future stops overflowing the Send check
 - [Probing beside Cubic](/quest/m0/nightly/competing-cubic.md) - the `competing_cubic` probe test stays within its deadline budget
+- [Gate stops hanging](/quest/m0/nightly/gate-hang.md) - `just gate` finishes instead of hanging to the timeout, and a hang names its module

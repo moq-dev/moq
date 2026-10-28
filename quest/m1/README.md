@@ -172,6 +172,7 @@ removed).
 - [One moq-ffi build definition](/quest/m1/ffi-build-flags.md) - every binding takes moq-ffi's default features from one place
 - [moq-clock moves into kio::clock](/quest/m1/kio-clock.md) - moq-clock and its test macro become `kio::clock` and `#[kio::test]` before the cut publishes them
 - [Poll-first async](/quest/m1/poll-first/README.md) - library crates compile no coroutines by default: async wrappers are generated from `poll_*` and gated behind an `async` feature
+- [Every package's release backport ships](/quest/m1/release-versions.md) - a bot bumps every hand-versioned package changed on `release`, so backports publish without a manual bump
 
 ## Related
 
