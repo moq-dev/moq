@@ -205,7 +205,7 @@ export class Connection implements Established {
 		this.#auth.violated.subscribe((err) => {
 			if (!err) return;
 			closeViolation(this.#quic, err);
-			this.abort();
+			this.#fail(err);
 		});
 
 		this.#publisher = new Publisher(this.#quic, this.#version, this.hop, publish, {
@@ -273,6 +273,12 @@ export class Connection implements Established {
 		}
 	}
 
+	// Set the received tracks' terminal cause before abort's deliberate local teardown.
+	#fail(err: Error): void {
+		this.#subscriber.close(err);
+		this.abort();
+	}
+
 	async #run(): Promise<void> {
 		const tasks: Promise<void>[] = [this.#runSession(), this.#runBidis(), this.#runUnis()];
 
@@ -312,8 +318,7 @@ export class Connection implements Established {
 			this.#peerImplementation.resolve(undefined);
 			// The session died under every track it was receiving, so they end with its
 			// error. A deliberate close() already ended them cleanly, which makes this a no-op.
-			this.#subscriber.close(fatal ?? (await closeError(this.#quic)));
-			this.abort();
+			this.#fail(fatal ?? (await closeError(this.#quic)));
 		}
 	}
 
@@ -370,7 +375,8 @@ export class Connection implements Established {
 					stream.writer.reset(err);
 					// A protocol violation on one stream is the peer breaking the session.
 					// Resetting that stream would leave it free to repeat malformed input.
-					if (closeViolation(this.#quic, err)) this.abort();
+					const violation = closeViolation(this.#quic, err);
+					if (violation) this.#fail(violation);
 				})
 				.finally(() => {
 					stream.writer.close();
@@ -448,7 +454,10 @@ export class Connection implements Established {
 				})
 				.catch((err: unknown) => {
 					stream.stop(err);
-					if (err instanceof ProtocolViolation) closeViolation(this.#quic, err);
+					if (err instanceof ProtocolViolation) {
+						closeViolation(this.#quic, err);
+						this.#fail(err);
+					}
 				});
 		}
 	}

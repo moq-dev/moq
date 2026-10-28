@@ -58,6 +58,10 @@ the hosted runners, so its noise is near zero, and it is free for open source.
 It does not measure syscalls, I/O, or contention, so the relay load, uring,
 transport, and session sweeps stay on the paired hosted comparison.
 
+The A/A calibration includes moq-quic's windowed `benches/streams.rs` cases:
+on a shared host the unchanged base alone varied 17 to 43% between
+back-to-back runs ([moq-dev/moq#6950](https://github.com/moq-dev/moq/pull/6950)).
+
 ## Related
 
 - [Benchmark reporting](/bench/README.md) - the paired comparison and the trend table
