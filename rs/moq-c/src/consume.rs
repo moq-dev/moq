@@ -58,9 +58,6 @@ pub(crate) trait Media: hang::catalog::Reference + Clone {
 
 	/// Its renditions, keyed by ID.
 	fn renditions(catalog: &moq_mux::catalog::hang::Catalog<moq_mux::catalog::hang::Extra>) -> &BTreeMap<String, Self>;
-
-	/// Whether the publisher is serving this rendition.
-	fn enabled(&self) -> bool;
 }
 
 impl Media for hang::catalog::VideoConfig {
@@ -69,10 +66,6 @@ impl Media for hang::catalog::VideoConfig {
 	fn renditions(catalog: &moq_mux::catalog::hang::Catalog<moq_mux::catalog::hang::Extra>) -> &BTreeMap<String, Self> {
 		&catalog.video.renditions
 	}
-
-	fn enabled(&self) -> bool {
-		self.enabled
-	}
 }
 
 impl Media for hang::catalog::AudioConfig {
@@ -80,10 +73,6 @@ impl Media for hang::catalog::AudioConfig {
 
 	fn renditions(catalog: &moq_mux::catalog::hang::Catalog<moq_mux::catalog::hang::Extra>) -> &BTreeMap<String, Self> {
 		&catalog.audio.renditions
-	}
-
-	fn enabled(&self) -> bool {
-		self.enabled
 	}
 }
 
@@ -478,9 +467,6 @@ impl Consume {
 		for<'a> moq_mux::catalog::hang::Container: TryFrom<&'a C, Error = moq_mux::Error>,
 	{
 		let (consume, name, config) = self.select::<C>(catalog, index)?;
-		if !config.enabled() {
-			return Err(moq_net::Error::NotFound.into());
-		}
 		let name = hang::catalog::Reference::track(config, name).to_string();
 		// Consume with the container the catalog actually advertises (Legacy / Cmaf / Loc)
 		// instead of assuming Legacy, otherwise CMAF/fMP4 sources (e.g. ffmpeg moqenc,
