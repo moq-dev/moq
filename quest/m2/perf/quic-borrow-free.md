@@ -23,7 +23,7 @@ Compare:
   task holds the connection and passes it into its children's polls
   (`kio::Tasks`), like Zig's explicit `std.Io`. Cost to measure: moq-net's
   per-subscription tasks become children of the session task, and
-  [net-poll](/quest/m1/quic-api/net-poll.md)'s `&self` shape flips to `&mut`
+  moq-net's `transport::poll` `&self` shape flips to `&mut`
   plus context.
 - **Driver-owned state, handles as channel ends.** The driver alone owns
   moq-quic. A send stream is the writer of a per-stream lock-free log (the
@@ -53,4 +53,3 @@ Public API: none; prototypes stay on a branch. The adoption is its own quest.
 
 - [QUIC lock contention](/quest/m2/perf/quic-lock-contention.md) - measures the lock this would remove; its staging queue is a partial form of the channel approach
 - [moq-quic owns its waits](/quest/m1/quic-api/waits.md) - the wait shape every prototype keeps
-- [moq-net polls on kio waiters](/quest/m1/quic-api/net-poll.md) - the trait shape context passing would revisit
