@@ -4,7 +4,7 @@ import { Writer } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
 import { U64 } from "../util/u64.ts";
 import { DEFAULT_WIRE } from "./priority.ts";
-import type { IetfVersion } from "./version.ts";
+import { type IetfVersion, Version } from "./version.ts";
 
 // Implementation limit for object extension blocks, independent of the IETF draft.
 const MAX_OBJECT_EXTENSIONS = 64 * 1024;
@@ -376,9 +376,12 @@ export interface FetchPosition {
 	group: number;
 	/** The object's id within that group. */
 	object: number;
-	/** Whether this is the stream's first object, which is what carries the absolute ids. */
+	/**
+	 * Whether this is the stream's first object, which carries the priority the rest inherit,
+	 * and its absolute ids unless an End of Range came before it.
+	 */
 	first: boolean;
-	/** The prior emitted group when this object starts a different group. */
+	/** The group of the prior object or End of Range when this object starts a different group. */
 	previousGroup?: number;
 }
 
@@ -411,13 +414,12 @@ export class FetchFrame {
 		version: IetfVersion,
 	): Promise<void> {
 		const stamped = this.timestamp !== undefined && timescale !== undefined;
-		if (position.first || position.previousGroup !== undefined) {
+		const previous = position.previousGroup;
+		if (position.first || previous !== undefined) {
 			// Include the priority too: "same as the prior object" has no prior to refer to.
 			const properties = stamped ? FETCH_PROPERTIES : 0;
 			await w.u53(FETCH_GROUP_ID | FETCH_OBJECT_ID | (position.first ? FETCH_PRIORITY : 0) | properties);
-			await w.u53(
-				position.first ? position.group : Math.abs(position.group - (position.previousGroup as number)) - 1,
-			);
+			await w.u53(previous === undefined ? position.group : Math.abs(position.group - previous) - 1);
 			await w.u53(position.object);
 			if (position.first) await w.u8(0);
 		} else {
@@ -437,5 +439,47 @@ export class FetchFrame {
 		if (this.payload.byteLength > 0) {
 			await w.write(this.payload);
 		}
+	}
+}
+
+/** Why the Locations a {@link FetchEndOfRange} closes are left out of a fetch stream. */
+export const EndOfRange = {
+	/** They do not exist. */
+	NonExistent: 0x8c,
+	/** Their state is unknown, which before draft-22 includes a FILL_TIMEOUT running out. */
+	Unknown: 0x10c,
+	/** The FILL_TIMEOUT ran out before they arrived, from draft-22. */
+	TimedOut: 0x20c,
+} as const;
+
+/** A reason {@link EndOfRange} names. */
+export type EndOfRange = (typeof EndOfRange)[keyof typeof EndOfRange];
+
+/**
+ * An End of Range on a fetch stream: every Location after the prior object, through this
+ * one, is missing for its reason.
+ *
+ * Its Group and Object IDs are absolute, wherever it falls. Read as deltas, the Group ID could
+ * never name the group it follows, and every implementation reads them as absolute
+ * (moq-wg/moq-transport#1861). Nothing follows them: no payload length.
+ */
+export class FetchEndOfRange {
+	reason: EndOfRange;
+	group: bigint;
+	object: bigint;
+
+	constructor({ reason, group, object }: { reason: EndOfRange; group: bigint; object: bigint }) {
+		this.reason = reason;
+		this.group = group;
+		this.object = object;
+	}
+
+	async encode(w: Writer, version: IetfVersion): Promise<void> {
+		if (this.reason === EndOfRange.TimedOut && version === Version.DRAFT_18) {
+			throw new Error("End of Timed-Out Range needs draft-22");
+		}
+		await w.u53(this.reason);
+		await w.u62(this.group);
+		await w.u62(this.object);
 	}
 }

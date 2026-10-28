@@ -1212,15 +1212,15 @@ mod tests {
 		let mut transport = crate::quic::driver::transport::Config::default();
 		transport.limits.max_streams = std::num::NonZeroU64::new(1);
 		let (client, server, _endpoints, _) = gated_pair_with_transport(transport, Default::default()).await;
-		let mut client = crate::transport::Session::new(Session::raw(client), moq_net::transport::Address::Setup);
-		let mut server = crate::transport::Session::new(Session::raw(server), moq_net::transport::Address::Setup);
-		let mut cx = Context::from_waker(std::task::Waker::noop());
-		let Poll::Ready(Ok(Some((mut send, mut recv)))) = client.poll_open_request(&mut cx, Default::default()) else {
+		let client = crate::transport::Session::new(Session::raw(client), moq_net::transport::Address::Setup);
+		let server = crate::transport::Session::new(Session::raw(server), moq_net::transport::Address::Setup);
+		let waiter = &moq_net::kio::Waiter::noop();
+		let Poll::Ready(Ok(Some((mut send, mut recv)))) = client.poll_open_request(waiter, Default::default()) else {
 			panic!("initial request has credit");
 		};
 		for _ in 0..2 {
 			assert!(matches!(
-				client.poll_open_request(&mut cx, Default::default()),
+				client.poll_open_request(waiter, Default::default()),
 				Poll::Ready(Ok(None))
 			));
 		}
@@ -1232,7 +1232,7 @@ mod tests {
 		drop((send, recv, peer_send, peer_recv));
 		let _fresh = client.open_bi(Default::default()).await.unwrap();
 		assert!(matches!(
-			client.poll_open_request(&mut cx, Default::default()),
+			client.poll_open_request(waiter, Default::default()),
 			Poll::Ready(Ok(None))
 		));
 	}
@@ -1248,13 +1248,13 @@ mod tests {
 		let (client, _server, _endpoints, _) = gated_pair_with_transport(server_transport, client_transport).await;
 		let mut web = Session::raw(client.clone());
 		web.header_bi = vec![0x41, 0];
-		let mut session = crate::transport::Session::new(web, moq_net::transport::Address::Setup);
-		let mut cx = Context::from_waker(std::task::Waker::noop());
+		let session = crate::transport::Session::new(web, moq_net::transport::Address::Setup);
+		let waiter = &moq_net::kio::Waiter::noop();
 		// The only stream credit is consumed, but the header cannot fully enter the send window.
-		assert!(session.poll_open_request(&mut cx, Default::default()).is_pending());
+		assert!(session.poll_open_request(waiter, Default::default()).is_pending());
 		assert!(client.open_request().unwrap().is_none());
 		// Polling the admitted request never rechecks credit or starts another open.
-		assert!(session.poll_open_request(&mut cx, Default::default()).is_pending());
+		assert!(session.poll_open_request(waiter, Default::default()).is_pending());
 	}
 
 	/// A queued capsule must survive a stalled socket beyond the teardown grace.

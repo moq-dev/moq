@@ -604,7 +604,7 @@ impl Target {
 		finished: &mut bool,
 		goaways: &mut super::request_stream::Messages,
 		version: Version,
-		cx: &mut std::task::Context<'_>,
+		waiter: &kio::Waiter,
 	) -> Poll<NamespaceEvent> {
 		use super::request_stream::{NamespaceUpdate, Next};
 
@@ -612,7 +612,7 @@ impl Target {
 			return Poll::Pending;
 		};
 		while !*finished {
-			match stream.reader.poll_decode_maybe::<Next<NamespaceUpdate>>(cx) {
+			match stream.reader.poll_decode_maybe::<Next<NamespaceUpdate>>(waiter) {
 				Poll::Ready(Ok(Some(Next::Message(update)))) => return Poll::Ready(NamespaceEvent::Request(update)),
 				Poll::Ready(Ok(Some(Next::GoAway { redirect }))) => {
 					if let Err(err) = goaways.receive(redirect) {
@@ -625,7 +625,7 @@ impl Target {
 				Poll::Pending => break,
 			}
 		}
-		stream.writer.poll_closed(cx).map(NamespaceEvent::Closed)
+		stream.writer.poll_closed(waiter).map(NamespaceEvent::Closed)
 	}
 }
 
@@ -1156,7 +1156,7 @@ impl Publisher {
 					crate::auth::Direction::Publish,
 				);
 				async move {
-					let mut session = this.session.clone();
+					let session = this.session.clone();
 					match this.serve_subscribe_namespace_stream(stream, msg, gate).await {
 						// Such as a malformed answer to an advertisement this request solicited.
 						Err(err) if super::subscriber::is_protocol_violation(&err) => session.close(
@@ -1651,11 +1651,10 @@ impl Publisher {
 		stream: &mut Stream<Transport, Version>,
 		waiter: &kio::Waiter,
 	) -> Poll<()> {
-		let mut cx = waiter.context();
-		if session.poll_closed(&mut cx).is_ready() {
+		if session.poll_closed(waiter).is_ready() {
 			return Poll::Ready(());
 		}
-		super::request_stream::poll_withdrawn(stream, self.version, &mut cx)
+		super::request_stream::poll_withdrawn(stream, self.version, waiter)
 	}
 
 	/// Poll `step` of a request's setup until ready, or `None` once [`Self::poll_withdrawn`] is.
@@ -1676,9 +1675,9 @@ impl Publisher {
 
 	/// Wait until no token verification holds `credit`'s request any more, or the session closes.
 	async fn released(&self, credit: &kio::Producer<()>) {
-		let mut session = self.session.clone();
+		let session = self.session.clone();
 		kio::wait(|waiter| {
-			if session.poll_closed(&mut waiter.context()).is_ready() || credit.poll_unused(waiter).is_ready() {
+			if session.poll_closed(waiter).is_ready() || credit.poll_unused(waiter).is_ready() {
 				return Poll::Ready(());
 			}
 			Poll::Pending
@@ -1702,14 +1701,13 @@ impl Publisher {
 		};
 		let request_id = track_serve.request_id;
 		let mut marker = std::pin::pin!(track_serve.write_end_of_track(end));
-		let mut closed_session = self.session.clone();
+		let closed_session = self.session.clone();
 		let written = kio::wait(|waiter| {
 			if let Poll::Ready(res) = waiter.poll_future(marker.as_mut()) {
 				return Poll::Ready(res);
 			}
-			let mut cx = waiter.context();
-			if super::request_stream::poll_cancel(stream, request_finished, goaways, self.version, &mut cx).is_ready()
-				|| closed_session.poll_closed(&mut cx).is_ready()
+			if super::request_stream::poll_cancel(stream, request_finished, goaways, self.version, waiter).is_ready()
+				|| closed_session.poll_closed(waiter).is_ready()
 			{
 				return Poll::Ready(Err(Error::Cancel));
 			}
@@ -1768,7 +1766,7 @@ impl Publisher {
 		fill: impl std::future::Future<Output = ()>,
 		request_grant: Option<crate::auth::RequestGrant>,
 	) -> Option<Served> {
-		let mut session = self.session.clone();
+		let session = self.session.clone();
 		let mut fill = std::pin::pin!(fill);
 		let mut fill_done = false;
 		let mut served = None;
@@ -1805,11 +1803,10 @@ impl Publisher {
 			let mut queued = waiting.is_none().then(|| renewal.next()).flatten();
 
 			let turn = kio::wait(|waiter| {
-				let mut cx = waiter.context();
-				if session.poll_closed(&mut cx).is_ready() {
+				if session.poll_closed(waiter).is_ready() {
 					return Poll::Ready(Turn::Cancelled);
 				}
-				if stream.writer.poll_closed(&mut cx).is_ready() {
+				if stream.writer.poll_closed(waiter).is_ready() {
 					return Poll::Ready(Turn::Cancelled);
 				}
 				if let Poll::Ready(renewed) = renewal.poll(waiter) {
@@ -1832,7 +1829,7 @@ impl Publisher {
 					return Poll::Ready(Turn::Update(update));
 				}
 				if waiting.is_none() {
-					match self.poll_update(stream, finished, goaways, &mut cx) {
+					match self.poll_update(stream, finished, goaways, waiter) {
 						Poll::Ready(UpdateRead::Update(update)) => return Poll::Ready(Turn::Update(update)),
 						Poll::Ready(UpdateRead::Cancelled) => return Poll::Ready(Turn::Cancelled),
 						Poll::Ready(UpdateRead::Malformed(err)) => return Poll::Ready(Turn::Malformed(err)),
@@ -2054,17 +2051,16 @@ impl Publisher {
 		goaways: &mut super::request_stream::Messages,
 		msg: &mut ietf::Subscribe<'_>,
 	) -> Result<(), Option<Served>> {
-		let mut session = self.session.clone();
+		let session = self.session.clone();
 		loop {
 			let read = kio::wait(|waiter| {
-				let mut cx = waiter.context();
-				if session.poll_closed(&mut cx).is_ready() {
+				if session.poll_closed(waiter).is_ready() {
 					return Poll::Ready(UpdateRead::Cancelled);
 				}
-				if stream.writer.poll_closed(&mut cx).is_ready() {
+				if stream.writer.poll_closed(waiter).is_ready() {
 					return Poll::Ready(UpdateRead::Cancelled);
 				}
-				self.poll_update(stream, finished, goaways, &mut cx)
+				self.poll_update(stream, finished, goaways, waiter)
 			})
 			.await;
 			let update = match read {
@@ -2124,11 +2120,11 @@ impl Publisher {
 		stream: &mut Stream<Transport, Version>,
 		finished: &mut bool,
 		goaways: &mut super::request_stream::Messages,
-		cx: &mut std::task::Context<'_>,
+		waiter: &kio::Waiter,
 	) -> Poll<UpdateRead> {
 		use super::request_stream::{Next, Update};
 		while !*finished {
-			match ready!(stream.reader.poll_decode_maybe::<Next<Update>>(cx)) {
+			match ready!(stream.reader.poll_decode_maybe::<Next<Update>>(waiter)) {
 				Ok(Some(Next::Message(mut update))) => {
 					if let Err(err) = self.control.accept(update.request_id) {
 						if matches!(err, Error::GoingAway) {
@@ -2321,7 +2317,7 @@ impl Publisher {
 
 		let mut rank = rank;
 		let options = rank.as_mut().map(Rank::options).unwrap_or_default();
-		let mut session = self.session.clone();
+		let session = self.session.clone();
 		let stream = match session.open_uni(options).await {
 			Ok(stream) => stream,
 			Err(err) => {
@@ -2992,8 +2988,7 @@ impl Publisher {
 				compression,
 			));
 			kio::wait(|waiter| {
-				let mut cx = waiter.context();
-				if super::request_stream::poll_cancel(&mut stream, &mut finished, &mut messages, self.version, &mut cx)
+				if super::request_stream::poll_cancel(&mut stream, &mut finished, &mut messages, self.version, waiter)
 					.is_ready()
 				{
 					return Poll::Ready(None);
@@ -3164,8 +3159,7 @@ impl Publisher {
 		let res = {
 			let mut respond = std::pin::pin!(respond);
 			kio::wait(|waiter| {
-				let mut cx = waiter.context();
-				if super::request_stream::poll_cancel(&mut stream, &mut finished, &mut messages, self.version, &mut cx)
+				if super::request_stream::poll_cancel(&mut stream, &mut finished, &mut messages, self.version, waiter)
 					.is_ready()
 				{
 					return Poll::Ready(None);
@@ -3223,9 +3217,8 @@ impl Publisher {
 			let mut pending = false;
 			let mut deadline = crate::time::Deadline::after(&self.runtime, Duration::from_secs(10));
 			kio::wait(|waiter| {
-				let mut cx = waiter.context();
 				// The request reader is what the subscriber FINs or resets.
-				if super::request_stream::poll_cancel(stream, finished, messages, self.version, &mut cx).is_ready() {
+				if super::request_stream::poll_cancel(stream, finished, messages, self.version, waiter).is_ready() {
 					return Poll::Ready(Err(Error::Cancel));
 				}
 				let joins = self.joins.poll(waiter, |joins| match joins.get(&subscribe_id) {
@@ -3322,8 +3315,7 @@ impl Publisher {
 			let mut finished = false;
 			let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
 			kio::wait(|waiter| {
-				let mut cx = waiter.context();
-				if super::request_stream::poll_cancel(&mut stream, &mut finished, &mut messages, self.version, &mut cx)
+				if super::request_stream::poll_cancel(&mut stream, &mut finished, &mut messages, self.version, waiter)
 					.is_ready()
 				{
 					return Poll::Ready(None);
@@ -3351,7 +3343,7 @@ impl Publisher {
 				properties,
 			};
 			stream.writer.buffer_message(ietf::TrackStatusOk::ID, &ok)?;
-			std::future::poll_fn(|cx| stream.writer.poll_flush(cx)).await?;
+			kio::wait(|waiter| stream.writer.poll_flush(waiter)).await?;
 			Ok::<(), Error>(())
 		};
 		let res = {
@@ -3663,7 +3655,7 @@ impl Publisher {
 				auth,
 				queued: false,
 				pending: None,
-				waker: None,
+				waiter: None,
 			},
 		);
 		Ok(Refused::No)
@@ -3794,20 +3786,20 @@ impl Publisher {
 		inflight: &mut VecDeque<(crate::time::Instant, crate::Path)>,
 		woken: &Arc<Woken>,
 		now: crate::time::Instant,
-		cx: &mut std::task::Context<'_>,
+		waiter: &kio::Waiter,
 	) -> Poll<(crate::Path, Result<Answer, Error>)> {
 		// Registered before the take, so a wake landing between them is not lost.
-		*woken.owner.lock().unwrap() = Some(cx.waker().clone());
+		*woken.owner.lock().unwrap() = Some(waiter.waker().clone());
 		let mut suffixes = std::mem::take(&mut *woken.suffixes.lock().unwrap());
 		while let Some(suffix) = suffixes.pop() {
 			let Some(request) = requests.get_mut(&suffix) else {
 				continue;
 			};
-			let waker = request.waker.get_or_insert_with(|| woken.waker(suffix.clone())).clone();
-			if let Poll::Ready(answer) = request
-				.messages
-				.poll_next(&mut request.stream.reader, &mut std::task::Context::from_waker(&waker))
-			{
+			// Kept on the request, so its registrations outlive this pass.
+			let request_waiter = request
+				.waiter
+				.get_or_insert_with(|| kio::Waiter::new(woken.waker(suffix.clone())));
+			if let Poll::Ready(answer) = request.messages.poll_next(&mut request.stream.reader, request_waiter) {
 				// The rest stay woken for the next pass.
 				woken.suffixes.lock().unwrap().append(&mut suffixes);
 				let answer = answer.and_then(|answer| {
@@ -4277,14 +4269,13 @@ impl Publisher {
 					if let Poll::Ready(permit) = permit {
 						return Poll::Ready(NamespaceEvent::Regrant(permit));
 					}
-					let mut cx = waiter.context();
-					if let Poll::Ready(event) = target.poll_event(&mut finished, &mut goaways, self.version, &mut cx) {
+					if let Poll::Ready(event) = target.poll_event(&mut finished, &mut goaways, self.version, waiter) {
 						return Poll::Ready(event);
 					}
 					// Each update in flight is answered on its own stream, so many renew at
 					// once and none holds up the announcements behind it.
 					let now = self.runtime.now();
-					if let Poll::Ready((suffix, answer)) = Self::poll_answer(requests, inflight, woken, now, &mut cx) {
+					if let Poll::Ready((suffix, answer)) = Self::poll_answer(requests, inflight, woken, now, waiter) {
 						return Poll::Ready(NamespaceEvent::Answered(suffix, answer));
 					}
 					// The front is now the earliest update still waiting.
@@ -4583,7 +4574,7 @@ impl TrackServe {
 		let dynamic = track.info().refresh.is_some();
 		let priority = kio::Producer::new(track.subscription().priority);
 		let publisher = track.info().priority;
-		let mut session = session;
+		let session = session;
 		let ranking = Ranking {
 			queue: PriorityQueue::default(),
 			group: session.send_group(crate::priority::group(track.subscription().priority, publisher)),
@@ -4786,7 +4777,7 @@ impl TrackServe {
 			object: end.frame,
 		});
 		let options = rank.options();
-		let stream = std::future::poll_fn(|cx| self.session.poll_open_uni(cx, options))
+		let stream = kio::wait(|waiter| self.session.poll_open_uni(waiter, options))
 			.await
 			.map_err(Error::from_transport)?;
 		self.opened.fetch_add(1, Ordering::Relaxed);
@@ -5130,25 +5121,34 @@ impl<G: Clone> Ranking<G> {
 /// polls its close to notice the subscriber leaving, so a move reaches the transport
 /// whatever the stream waits on.
 struct Ranked<T: crate::transport::poll::SendStream> {
+	// Locked only by `poll_closed`, which observes through `&self` yet must still apply a
+	// move; every other method reaches it through `get_mut`, which is free.
+	inner: std::sync::Mutex<RankedInner<T>>,
+}
+
+struct RankedInner<T: crate::transport::poll::SendStream> {
 	stream: T,
 	/// Absent for a stream that only carries a refusal.
 	rank: Option<Rank<T::Group>>,
-	park: kio::Park,
 }
 
 impl<T: crate::transport::poll::SendStream> Ranked<T> {
 	/// Wrap a stream opened with its rank's [options](Rank::options).
 	fn new(stream: T, rank: Option<Rank<T::Group>>) -> Self {
 		Self {
-			stream,
-			rank,
-			park: kio::Park::default(),
+			inner: std::sync::Mutex::new(RankedInner { stream, rank }),
 		}
 	}
 
-	fn follow(&mut self, cx: &std::task::Context<'_>) {
+	fn get_mut(&mut self) -> &mut RankedInner<T> {
+		self.inner.get_mut().unwrap()
+	}
+}
+
+impl<T: crate::transport::poll::SendStream> RankedInner<T> {
+	fn follow(&mut self, waiter: &kio::Waiter) {
 		if let Some(rank) = &mut self.rank
-			&& let Some(order) = rank.poll_moved(self.park.hold(cx))
+			&& let Some(order) = rank.poll_moved(waiter)
 		{
 			self.stream.set_priority(order);
 		}
@@ -5159,39 +5159,38 @@ impl<T: crate::transport::poll::SendStream> crate::transport::poll::SendStream f
 	type Error = T::Error;
 	type Group = T::Group;
 
-	fn poll_write(&mut self, cx: &mut std::task::Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
-		self.follow(cx);
-		self.stream.poll_write(cx, buf)
+	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
+		let inner = self.get_mut();
+		inner.follow(waiter);
+		inner.stream.poll_write(waiter, buf)
 	}
 
-	fn poll_write_buf<B: bytes::Buf>(
-		&mut self,
-		cx: &mut std::task::Context<'_>,
-		buf: &mut B,
-	) -> Poll<Result<usize, Self::Error>> {
-		self.follow(cx);
-		self.stream.poll_write_buf(cx, buf)
+	fn poll_write_buf<B: bytes::Buf>(&mut self, waiter: &kio::Waiter, buf: &mut B) -> Poll<Result<usize, Self::Error>> {
+		let inner = self.get_mut();
+		inner.follow(waiter);
+		inner.stream.poll_write_buf(waiter, buf)
 	}
 
 	fn set_priority(&mut self, order: i64) {
-		self.stream.set_priority(order);
+		self.get_mut().stream.set_priority(order);
 	}
 
 	fn set_group(&mut self, group: &Self::Group) {
-		self.stream.set_group(group);
+		self.get_mut().stream.set_group(group);
 	}
 
 	fn finish(&mut self) -> Result<(), Self::Error> {
-		self.stream.finish()
+		self.get_mut().stream.finish()
 	}
 
 	fn reset(&mut self, code: u32) {
-		self.stream.reset(code);
+		self.get_mut().stream.reset(code);
 	}
 
-	fn poll_closed(&mut self, cx: &mut std::task::Context<'_>) -> Poll<Result<(), Self::Error>> {
-		self.follow(cx);
-		self.stream.poll_closed(cx)
+	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
+		let mut inner = self.inner.lock().unwrap();
+		inner.follow(waiter);
+		inner.stream.poll_closed(waiter)
 	}
 }
 
@@ -5202,7 +5201,7 @@ impl<T: crate::transport::poll::SendStream> crate::transport::poll::SendStream f
 /// is released. Once acknowledged, the stream is released and dropping the writer resets nothing.
 async fn settle<T: crate::transport::poll::SendStream>(writer: &mut Writer<Ranked<T>, Version>) -> Result<(), Error> {
 	writer.finish()?;
-	std::future::poll_fn(|cx| writer.poll_close(cx)).await
+	kio::wait(|waiter| writer.poll_close(waiter)).await
 }
 
 /// A group stream's place in the session's send order: its subscription's priority, then
@@ -5460,7 +5459,7 @@ impl GroupServe {
 		}
 		// The current rank, so a move while parked applies to the stream as it opens.
 		let _ = self.rank.poll_moved(waiter);
-		let stream = match ready!(self.session.poll_open_uni(&mut waiter.context(), self.rank.options())) {
+		let stream = match ready!(self.session.poll_open_uni(waiter, self.rank.options())) {
 			Ok(stream) => stream,
 			Err(err) => {
 				self.state = GroupState::Done;
@@ -5489,7 +5488,6 @@ impl GroupServe {
 			self.state = GroupState::Done;
 			return Poll::Ready(Err(Error::Cancel));
 		}
-		let mut cx = waiter.context();
 		// A REQUEST_UPDATE can move the subscriber priority while this stream is open, and
 		// the session's other group streams can move its rank. Serve and Closed, the only
 		// states holding a writer, apply the change; Open reads the current rank once it
@@ -5513,14 +5511,14 @@ impl GroupServe {
 						writer.set_priority(priority);
 					}
 					// The peer closing first cancels the group.
-					if writer.poll_closed(&mut cx).is_ready() {
+					if writer.poll_closed(waiter).is_ready() {
 						self.state = GroupState::Done;
 						return Poll::Ready(Err(Error::Cancel));
 					}
 					let res = 'serve: {
 						loop {
 							ready!(self.budget.poll_yield(waiter));
-							match writer.poll_flush(&mut cx) {
+							match writer.poll_flush(waiter) {
 								Poll::Ready(Ok(())) => {}
 								Poll::Ready(Err(err)) => break 'serve Err(err),
 								// Parking on the transport is the one stall the group cursor cannot
@@ -5535,7 +5533,7 @@ impl GroupServe {
 								}
 							}
 							if let Some(pending) = chunk {
-								match writer.poll_write(&mut cx, pending) {
+								match writer.poll_write(waiter, pending) {
 									Poll::Ready(Ok(_)) => {
 										if !bytes::Buf::has_remaining(pending) {
 											*chunk = None;
@@ -5726,7 +5724,7 @@ impl GroupServe {
 					// Wait until everything is acknowledged by the peer so we can still
 					// cancel the stream. poll_close releases the stream on completion so
 					// the Drop fallback cannot reset the acknowledged stream.
-					let res = match writer.poll_close(&mut cx) {
+					let res = match writer.poll_close(waiter) {
 						Poll::Ready(res) => res,
 						// Those bytes still hold the connection until acknowledged, so a
 						// group gone stale meanwhile releases them like one still serving:
@@ -5857,7 +5855,7 @@ struct NamespaceRequest {
 	/// When to give up on the update in flight, which has no answer yet.
 	pending: Option<crate::time::Instant>,
 	/// Marks this request woken when its stream has an answer.
-	waker: Option<std::task::Waker>,
+	waiter: Option<kio::Waiter>,
 }
 
 #[cfg(test)]
@@ -6902,20 +6900,20 @@ mod serve_tests {
 				auth: None,
 				queued: false,
 				pending: None,
-				waker: None,
+				waiter: None,
 			},
 		);
 		let woken = Arc::new(Woken::default());
 		woken.suffixes.lock().unwrap().push(suffix.clone());
 		let mut inflight = VecDeque::new();
 		let runtime = crate::time::sim();
-		let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
-		assert!(Publisher::poll_answer(&mut requests, &mut inflight, &woken, runtime.now(), &mut cx).is_pending());
+		let waiter = &kio::Waiter::noop();
+		assert!(Publisher::poll_answer(&mut requests, &mut inflight, &woken, runtime.now(), waiter).is_pending());
 		assert!(session.log.closes().is_empty());
 		session.push(&[0x10, 0, 2, 0, 0]);
 		woken.suffixes.lock().unwrap().push(suffix);
 		assert!(matches!(
-			Publisher::poll_answer(&mut requests, &mut inflight, &woken, runtime.now(), &mut cx),
+			Publisher::poll_answer(&mut requests, &mut inflight, &woken, runtime.now(), waiter),
 			Poll::Ready((_, Err(Error::ProtocolViolation)))
 		));
 		assert_eq!(session.log.closes()[0].0, 0x03);
@@ -6995,7 +6993,7 @@ mod serve_tests {
 			}
 			// The same reader now watches cancellation while the final marker waits for credit.
 			session.push(&[0x10, 0, 2, 0, 0]);
-			let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+			let waiter = &kio::Waiter::noop();
 			assert!(
 				matches!(
 					super::super::request_stream::poll_cancel(
@@ -7003,7 +7001,7 @@ mod serve_tests {
 						&mut finished,
 						&mut goaways,
 						version,
-						&mut cx
+						waiter
 					),
 					Poll::Ready(Err(Error::ProtocolViolation))
 				),
