@@ -1670,7 +1670,6 @@ mod tests {
 				decode: ms(u64::from(key) * 100_000 + (now - start).as_millis() as u64).into(),
 				restart: 0,
 				skip: 0,
-				cut: 0,
 				sync: true,
 				leading: false,
 				item: now,
