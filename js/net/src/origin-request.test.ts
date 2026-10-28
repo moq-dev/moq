@@ -144,10 +144,22 @@ test("only a plain request can use a session without discovery", async () => {
 	expect(wire.blind(slot)).toBe(false);
 	const requested = origin.request(path);
 	expect(wire.blind(slot)).toBe(true);
+	// The blind answer lands in the shared slot, but only the plain handle takes it.
+	const source = new BroadcastProducer();
+	const withdraw = wire.answer(path, source.consume());
+	await settle();
+	expect(requested.active.peek()?.closed).toBe(source.closed);
+	expect(followed.active.peek()).toBeUndefined();
+	const joined = origin.request(path, { announced: true });
+	await settle();
+	expect(joined.active.peek()).toBeUndefined();
+	joined.close();
 	requested.close();
 	await settle();
 	expect(wire.blind(slot)).toBe(false);
 	followed.close();
+	withdraw?.();
+	source.close();
 	detach();
 	origin.close();
 });

@@ -639,12 +639,24 @@ class OriginState {
 	}
 
 	#settled(): void {
-		const prefixes = [...this.#unsettled];
-		this.#unsettled.clear();
-		for (const [path, slot] of [...(this.requests.peek() ?? [])]) {
-			if (slot.absent.size === 0 || !prefixes.some((prefix) => Path.hasPrefix(prefix, path))) continue;
-			for (const absent of [...slot.absent]) absent();
+		const requests = this.requests.peek();
+		const visited = new Set<WatchNode>();
+		for (const prefix of this.#unsettled) {
+			// Every request watches its own path, so the watches beneath the prefix name exactly
+			// the requests it can settle, without scanning the rest of the table.
+			let node: WatchNode | undefined = this.#watches;
+			for (const part of prefix === Path.empty() ? [] : prefix.split("/")) node = node?.children.get(part);
+			const stack = node ? [node] : [];
+			for (let next = stack.pop(); next; next = stack.pop()) {
+				if (visited.has(next)) continue;
+				visited.add(next);
+				// Children first: settling a request may prune its node.
+				stack.push(...next.children.values());
+				const slot = requests?.get(next.path);
+				if (slot) for (const absent of [...slot.absent]) absent();
+			}
 		}
+		this.#unsettled.clear();
 	}
 
 	/** Whether every attached session discovers and none owes an initial set covering `path`. */
@@ -1902,7 +1914,9 @@ export class Consumer {
 		let logical: Front | undefined;
 		const own = (resolution: Resolution | undefined): broadcast.Consumer | undefined => {
 			if (released) return undefined;
-			const front = epoch === undefined || resolution?.epoch === epoch ? resolution?.front : undefined;
+			// A follower takes only a front something announced; a blind answer is for plain handles.
+			const offered = announced && !resolution?.source ? undefined : resolution?.front;
+			const front = epoch === undefined || resolution?.epoch === epoch ? offered : undefined;
 			if (logical && source?.epoch !== undefined && resolution?.epoch === source.epoch) {
 				// Between routes of the instance, readers wait for the next one to answer.
 				if (front) logical.serve(front);
@@ -1938,7 +1952,11 @@ export class Consumer {
 		// when the watch opens, so a fresh request waits for its peer's answer. A follower
 		// keeps waiting for a start, and a resolved request ends only with its instance.
 		const absent = () => {
-			if (released || source || closed.peek() !== undefined) return;
+			if (released || closed.peek() !== undefined) return;
+			if (source) {
+				taken.absent.delete(absent);
+				return;
+			}
 			const resolution = route.peek();
 			if (resolution && (epoch === undefined || resolution.epoch === epoch)) return;
 			if (!this.#state.synced(path)) return;
