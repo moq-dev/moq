@@ -39,7 +39,6 @@ Public API: none. Wire: none.
 - [A Firefox late join reaches live playback](/quest/m0/nightly/firefox-late-join.md) - a Firefox player joining a live broadcast catches up within the media harness's derived playback deadline
 - [A stitched restart signals every TS discontinuity](/quest/m0/nightly/stitch-discontinuity.md) - a restarted publisher exported with stitching signals the program break on every affected PID
 - [Resolve the paired network microbenchmark regressions](/quest/m0/nightly/paired-net.md) - the reported network microbenchmark regressions are attributed and genuine extra costs are fixed with paired measurements
-- [Resolve the paired catalog fanout regressions](/quest/m0/nightly/paired-shared.md) - the reported catalog fanout regressions are attributed and genuine extra costs are fixed with paired measurements
 - [Resolve the paired relay-session regressions](/quest/m0/nightly/paired-relay.md) - the reported relay-session regressions are attributed and genuine extra costs are fixed with paired measurements
 - [Probing beside Cubic](/quest/m0/nightly/competing-cubic.md) - the `competing_cubic` probe test stays within its deadline budget
 - [Gate stops hanging](/quest/m0/nightly/gate-hang.md) - `just gate` finishes instead of hanging to the timeout, and a hang names its module
