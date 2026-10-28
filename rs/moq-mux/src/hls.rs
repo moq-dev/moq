@@ -30,8 +30,9 @@
 //!
 //! [`catalog::Producer`](crate::catalog::Producer) owns the broadcast's record tracks and advertises
 //! each in its rendition's `hls` field. On the read side, [`Consumer::subscribe`] reads one
-//! rendition's records and yields decoded [`Event`]s. On the wire each record track is an
-//! uncompressed [`moq_json::window`] whose groups restate the recent records.
+//! rendition's records and yields decoded [`Event`]s. On the wire each record track is a
+//! [`compress`](moq_net::track::Info::compress)ed [`moq_json::window`] whose groups restate the
+//! recent records.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -382,6 +383,8 @@ impl Producer {
 			.with_priority(hang::catalog::PRIORITY.catalog)
 			// A joiner asks for a fresh group once the ops outweigh eight headers.
 			.with_refresh(8)
+			// Records are small, repetitive JSON.
+			.with_compress(true)
 	}
 
 	/// Publish onto `track`, starting at record zero.
