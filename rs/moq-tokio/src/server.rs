@@ -829,7 +829,7 @@ impl Server {
 	pub fn local_addr(&self) -> crate::Result<net::SocketAddr> {
 		#[cfg(feature = "quic")]
 		if let Some(quic) = self.quic.as_ref() {
-			return Ok(quic.local_addr()?);
+			return Ok(quic.local_addr());
 		}
 		// No QUIC backend (e.g. a stream-only `--listen-tcp-bind`).
 		Err(Error::NoBackend("no QUIC listener configured"))
@@ -1635,7 +1635,7 @@ pub struct Request {
 	handshake: Box<moq_net::server::Handshake>,
 	/// The connection under a QUIC or WebTransport request, for [`Request::quic`].
 	#[cfg(feature = "quic")]
-	quic: Option<crate::quic::driver::Connection>,
+	quic: Option<crate::quic::driver::connection::Connection>,
 	/// What remains of the handshake deadline, which also bounds [`Request::ok`].
 	deadline: Option<Deadline>,
 }
@@ -1683,7 +1683,7 @@ impl Request {
 	/// The QUIC connection under this request, to change its limits before answering
 	/// SETUP. `None` on a transport moq-quic does not drive (qmux streams, iroh).
 	#[cfg(feature = "quic")]
-	pub fn quic(&self) -> Option<&crate::quic::driver::Connection> {
+	pub fn quic(&self) -> Option<&crate::quic::driver::connection::Connection> {
 		self.quic.as_ref()
 	}
 

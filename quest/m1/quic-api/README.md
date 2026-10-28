@@ -49,7 +49,6 @@ side by side and fix any name or signature that still differs, and check
 
 - [Streams](/quest/m1/quic-api/streams.md) - `send::`/`recv::` namespaces, one error per direction, `finish(self) -> send::Finished`, consuming `reset`/`stop`, `Buf` writes, both drivers mirrored
 - [Crypto](/quest/m1/quic-api/crypto.md) - crypto traits sealed to rustls, concrete peer identity and handshake data
-- [Config](/quest/m1/quic-api/config.md) - plain config structs, `Limits` as the one spelling, one endpoint constructor and `connect` that own the socket, v1-only `Version`, a local-close event
 - [Waits](/quest/m1/quic-api/waits.md) - moq-quic owns every wait as a `poll_*` on `&kio::Waiter`, deleting `StreamEvent` and the drivers' and qmux's waiter tables
 - [Poll forms](/quest/m1/quic-api/poll.md) - both drivers' waits poll as `&self, &kio::Waiter` forwards to moq-quic, the async forms wrap them, and `send::Finished` is a future
 - [Native WebTransport](/quest/m1/quic-api/native-web.md) - `quic::web` in both crates implements moq-net's poll traits, deleting the QUIC paths of the async-to-poll adapter

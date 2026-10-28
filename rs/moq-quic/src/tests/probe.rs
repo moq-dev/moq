@@ -244,35 +244,36 @@ struct Reading {
 
 fn run(scenario: &Scenario) -> Outcome {
 	entropy::reseed(scenario.seed);
-	let mut server_transport = TransportConfig::default();
+	let mut server_transport = transport::Config::default();
 	if let Some(window) = scenario.receive_window {
-		server_transport
-			.receive_window(window.into())
-			.stream_receive_window(window.into());
+		server_transport.limits.receive_window = NonZeroU64::new(window.into());
+		server_transport.limits.stream_receive_window = NonZeroU64::new(window.into());
 	}
-	server_transport.max_concurrent_uni_streams(1000u32.into());
+	server_transport.limits.max_streams = NonZeroU64::new(1000);
 	let mut server_config = server_config();
-	server_config.transport = Arc::new(server_transport);
+	server_config.transport = server_transport;
 	let mut pair = Pair::new(Default::default(), server_config);
 	pair.latency = scenario.latency;
 
-	let mut transport = TransportConfig::default();
+	let mut transport = transport::Config::default();
 	if let Some(threshold) = scenario.ack_threshold {
-		let mut ack = AckFrequencyConfig::default();
-		ack.ack_eliciting_threshold(threshold.into())
-			.max_ack_delay(Some(Duration::from_millis(25)));
-		transport.ack_frequency_config(Some(ack));
+		let ack = transport::ack_frequency::Config {
+			ack_eliciting_threshold: threshold.into(),
+			max_ack_delay: Some(Duration::from_millis(25)),
+			..transport::ack_frequency::Config::default()
+		};
+		transport.ack_frequency = Some(ack);
 	}
 	let mut config = client_config();
-	config.transport = Arc::new(transport);
+	config.transport = transport;
 	let (client_ch, server_ch) = pair.connect_with(config);
 	let competitor = scenario.competitor.map(|upload| {
-		let mut transport = TransportConfig::default();
+		let mut transport = transport::Config::default();
 		if let Upload::Cubic = upload {
-			transport.congestion_controller_factory(Arc::new(CubicConfig::default()));
+			transport.congestion = Arc::new(CubicConfig::default());
 		}
 		let mut config = client_config();
-		config.transport = Arc::new(transport);
+		config.transport = transport;
 		pair.connect_with(config)
 	});
 

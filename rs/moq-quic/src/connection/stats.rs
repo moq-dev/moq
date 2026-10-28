@@ -164,7 +164,7 @@ pub struct PathStats {
 	pub lost_plpmtud_probes: u64,
 	/// The amount of packets sent on this path that resend in-flight stream data to probe for
 	/// bandwidth (also counted by `sent_packets`); see
-	/// [`Connection::set_probe_target`](crate::Connection::set_probe_target)
+	/// [`Connection::set_probe_target`](crate::connection::Connection::set_probe_target)
 	pub sent_bandwidth_probes: u64,
 	/// The bytes of those packets, which carry no new data
 	pub sent_bandwidth_probe_bytes: u64,
@@ -177,7 +177,7 @@ pub struct PathStats {
 /// Connection statistics
 #[derive(Debug, Default, Copy, Clone)]
 #[non_exhaustive]
-pub struct ConnectionStats {
+pub struct Stats {
 	/// Statistics about UDP datagrams transmitted on a connection
 	pub udp_tx: UdpStats,
 	/// Statistics about UDP datagrams received on a connection

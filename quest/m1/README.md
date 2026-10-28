@@ -147,6 +147,7 @@ removed).
 - [moq-quic's API improves on quinn's](/quest/m1/quic-api/README.md) - moq-quic and both QUIC drivers ship one mirrored API: `send::`/`recv::` namespaces, one error per direction, consuming terminal operations, plain configs, no quinn baggage
 - [Drop web-transport-trait](/quest/m1/drop-web-transport-trait.md) - iroh, wasm, and ffi implement moq-net's `transport::poll` traits, and the remaining `web_transport_trait` adapters are deleted
 - [On-demand JavaScript FETCH](/quest/m1/js-fetch-on-demand.md) - browser publishers answer IETF FETCH for evicted or uncached groups through the JS ranges request surface
+- [JS evicted FETCH groups are unknown](/quest/m1/js-fetch-evicted-unknown.md) - a group evicted between listing and writing goes out as End of Unknown Range on drafts 18 and 22, not a silent skip
 - [Rust FETCH parity](/quest/m1/ietf-fetch-parity.md) - Rust finishes an answered joining FETCH's head, refuses a lost head with DOES_NOT_EXIST, and sends no timestamps without TIMESCALE, as the JS publisher does
 - [SUBSCRIBE honors the properties opt-out](/quest/m1/subscribe-timestamps.md) - the Rust publisher sends untimed objects to a SUBSCRIBE that declines Track Properties, and the Rust subscriber asks for them when it needs timestamps
 - [JS FETCH timeout test](/quest/m1/js-fetch-timeout-test.md) - a JS joining FETCH still waiting on its SUBSCRIBE at the deadline is refused with TIMEOUT
@@ -174,6 +175,7 @@ removed).
 - [Container consumers buffer by backpressure](/quest/m1/container-backpressure.md) - Rust and JS container consumers decode ahead only a byte budget, so a hostile publisher cannot grow them
 - [An HLS viewer starts capture](/quest/m1/hls-record-demand.md) - a record-track subscriber counts as demand for its rendition's media
 - [One moq-ffi build definition](/quest/m1/ffi-build-flags.md) - every binding takes moq-ffi's default features from one place
+- [gofmt-clean Go wrapper](/quest/m1/go-gofmt.md) - `just go check` fails on unformatted Go
 - [moqsrc max-delay](/quest/m1/gst-max-delay.md) - GStreamer's `moqsrc` takes a `max-delay` property instead of a hard-coded 1 s budget
 - [JS SETUP rejection ownership](/quest/m1/js-setup-rejection.md) - reproduce an unhandled version-refusal rejection without weakening the refusal
 - [moq-clock moves into kio::clock](/quest/m1/kio-clock.md) - moq-clock and its test macro become `kio::clock` and `#[kio::test]` before the cut publishes them
