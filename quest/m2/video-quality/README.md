@@ -45,8 +45,12 @@ Decided in planning (2026-10-28):
     the change the encoder added that the source did not have.
 
   Each is divided by the median of the same quantity at non-IDR frames, so a
-  ceiling is a ratio that holds across content. Per-GoP bytes are still
-  reported, just not gated.
+  ceiling is a ratio that holds across content. Static content can make that
+  median zero, so the divisor is floored at a just-noticeable change: a fixed
+  VMAF step and a fixed mean luma difference, set once in the harness
+  and applied to every row. A static clip then grades its boundary against
+  that floor instead of dividing by zero. Per-GoP bytes are still reported,
+  just not gated.
 - On-demand pops: the on-demand quest measures them and fixes what it finds
   (✅ "Measure and fix" over "Measure only").
 - Hardware: three self-hosted hosts run nightly and add rows. All rows have

@@ -32,6 +32,9 @@ Decisions are recorded in the [epic](/quest/m2/video-quality/README.md).
   VMAF, bytes, and both pop ratios as the epic defines them. Leave out IDRs
   that land on a source scene cut (a large source frame difference), since
   quality legitimately changes there.
+- Include a static screen-content clip and a constant-color synthetic clip,
+  so the pop metric's floored divisor is exercised, both clean and with an
+  injected boundary step.
 - Publish per-frame plots as a nightly artifact, and feed per-row mean VMAF,
   minimum VMAF, and worst pop ratio into the benchmark history format.
 - Corpus manifest: synthetic clips generated at run time (cheap, always
