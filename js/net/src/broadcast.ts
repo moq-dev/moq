@@ -9,7 +9,7 @@ import { NotFound, StreamCode, StreamError } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import type { Route } from "./hop.ts";
 import { hooks } from "./internal.ts";
-import { Lister, Listing, listTracks, type Tracks } from "./listing.ts";
+import { Listing, listTracks, makeLister, type Tracks } from "./listing.ts";
 import * as Path from "./path.ts";
 import * as track from "./track.ts";
 import { untilAborted } from "./util/abort.ts";
@@ -383,7 +383,7 @@ export class Producer {
 			fetchGroup: (name, sequence, options) => fetchGroup(this.#state, name, sequence, options),
 			requested: () => requested(this.#state),
 			tracks: (owner) => listTracks(this.#state.listing, owner),
-			lister: () => new Lister(this.#state.listing),
+			lister: () => makeLister(this.#state.listing),
 		});
 	}
 
@@ -538,7 +538,7 @@ export class Consumer {
 			fetchGroup: (name, sequence, options) => fetchGroup(this.#state, name, sequence, options),
 			requested: () => requested(this.#state),
 			tracks: (owner) => this.#tracks(owner),
-			lister: () => new Lister(this.#state.listing),
+			lister: () => makeLister(this.#state.listing),
 		});
 	}
 

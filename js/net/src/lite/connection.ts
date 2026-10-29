@@ -76,7 +76,7 @@ export interface ConnectionProps {
 /**
  * Represents a connection to a MoQ server.
  *
- * @public
+ * @internal
  */
 export class Connection implements Established {
 	#closing?: Promise<void>;

@@ -211,7 +211,6 @@ export namespace Preview {
 }
 
 export class Rendition<Config> {
-	constructor();
 	close(): void;
 	readonly config: Signals.Signal<Config | undefined>;
 	readonly kind: Kind;
