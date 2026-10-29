@@ -41,7 +41,6 @@ clap_builder = { version = "4", default-features = false, features = ["cargo", "
 const-oid = { version = "0.9", default-features = false, features = ["db"] }
 cpal = { version = "0.18", features = ["pipewire", "pulseaudio"] }
 crc32fast = { version = "1" }
-crossbeam-epoch = { version = "0.9" }
 crossbeam-utils = { version = "0.8" }
 crypto-common-6f8ce4dd05d13bba = { package = "crypto-common", version = "0.2", default-features = false, features = ["getrandom"] }
 crypto-common-c65f7effa3be6d31 = { package = "crypto-common", version = "0.1", default-features = false, features = ["std"] }
@@ -101,7 +100,6 @@ rand-274715c4dabd11b0 = { package = "rand", version = "0.9" }
 rand-c38e5c1d305a1b54 = { package = "rand", version = "0.8" }
 rand_chacha = { version = "0.3", default-features = false, features = ["std"] }
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem", "ring", "x509-parser"] }
-regex = { version = "1" }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-build", "dfa-onepass", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "std", "unicode"] }
 regex-syntax = { version = "0.8" }
 reqwest = { version = "0.13", default-features = false, features = ["gzip", "http2", "json", "rustls", "rustls-no-provider", "stream"] }
@@ -150,7 +148,6 @@ usage-rs = { version = "7", features = ["completions", "config"] }
 uuid = { version = "1", features = ["js", "v4", "v7"] }
 winnow-dff4ba8e3ae991db = { package = "winnow", version = "1", features = ["simd"] }
 x509-parser = { version = "0.18", features = ["verify", "verify-aws"] }
-zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 zeroize = { version = "1", features = ["derive"] }
 
 [build-dependencies]
@@ -172,7 +169,6 @@ clap_builder = { version = "4", default-features = false, features = ["cargo", "
 const-oid = { version = "0.9", default-features = false, features = ["db"] }
 cpal = { version = "0.18", features = ["pipewire", "pulseaudio"] }
 crc32fast = { version = "1" }
-crossbeam-epoch = { version = "0.9" }
 crossbeam-utils = { version = "0.8" }
 crypto-common-6f8ce4dd05d13bba = { package = "crypto-common", version = "0.2", default-features = false, features = ["getrandom"] }
 crypto-common-c65f7effa3be6d31 = { package = "crypto-common", version = "0.1", default-features = false, features = ["std"] }
@@ -236,7 +232,6 @@ rand-274715c4dabd11b0 = { package = "rand", version = "0.9" }
 rand-c38e5c1d305a1b54 = { package = "rand", version = "0.8" }
 rand_chacha = { version = "0.3", default-features = false, features = ["std"] }
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem", "ring", "x509-parser"] }
-regex = { version = "1" }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-build", "dfa-onepass", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "std", "unicode"] }
 regex-syntax = { version = "0.8" }
 reqwest = { version = "0.13", default-features = false, features = ["gzip", "http2", "json", "rustls", "rustls-no-provider", "stream"] }
@@ -289,12 +284,12 @@ uuid = { version = "1", features = ["js", "v4", "v7"] }
 winnow-ca01ad9e24f5d932 = { package = "winnow", version = "0.7" }
 winnow-dff4ba8e3ae991db = { package = "winnow", version = "1", features = ["simd"] }
 x509-parser = { version = "0.18", features = ["verify", "verify-aws"] }
-zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 zeroize = { version = "1", features = ["derive"] }
 
 [target.aarch64-apple-darwin.dependencies]
 arrayvec = { version = "0.7" }
 block2 = { version = "0.6" }
+crossbeam-epoch = { version = "0.9" }
 dispatch2 = { version = "0.3" }
 errno = { version = "0.3" }
 half = { version = "2", features = ["num-traits"] }
@@ -313,6 +308,7 @@ objc2-foundation = { version = "0.3" }
 objc2-metal = { version = "0.3" }
 objc2-quartz-core = { version = "0.3", default-features = false, features = ["CALayer", "CAMediaTiming", "CAMetalLayer", "objc2-core-foundation", "objc2-core-graphics", "objc2-metal", "std"] }
 quick-xml-b32c9ddb6d93a9d2 = { package = "quick-xml", version = "0.42", features = ["serialize"] }
+regex = { version = "1" }
 rustix = { version = "1", features = ["event", "fs", "net", "pipe", "process", "termios", "time"] }
 security-framework-sys = { version = "2" }
 spin-93f6ce9d446188ac = { package = "spin", version = "0.10", default-features = false, features = ["once", "rwlock", "spin_mutex"] }
@@ -325,10 +321,12 @@ wgpu-core = { version = "30", features = ["dx12", "fragile-send-sync-non-atomic-
 wgpu-hal = { version = "30", default-features = false, features = ["fragile-send-sync-non-atomic-wasm", "metal", "portable-atomic"] }
 wgpu-types = { version = "30", default-features = false, features = ["fragile-send-sync-non-atomic-wasm", "std", "web"] }
 winit = { version = "0.30" }
+zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 
 [target.aarch64-apple-darwin.build-dependencies]
 arrayvec = { version = "0.7" }
 block2 = { version = "0.6" }
+crossbeam-epoch = { version = "0.9" }
 dispatch2 = { version = "0.3" }
 errno = { version = "0.3" }
 half = { version = "2", features = ["num-traits"] }
@@ -347,6 +345,7 @@ objc2-foundation = { version = "0.3" }
 objc2-metal = { version = "0.3" }
 objc2-quartz-core = { version = "0.3", default-features = false, features = ["CALayer", "CAMediaTiming", "CAMetalLayer", "objc2-core-foundation", "objc2-core-graphics", "objc2-metal", "std"] }
 quick-xml-b32c9ddb6d93a9d2 = { package = "quick-xml", version = "0.42", features = ["serialize"] }
+regex = { version = "1" }
 rustix = { version = "1", features = ["event", "fs", "net", "pipe", "process", "termios", "time"] }
 security-framework-sys = { version = "2" }
 spin-93f6ce9d446188ac = { package = "spin", version = "0.10", default-features = false, features = ["once", "rwlock", "spin_mutex"] }
@@ -359,10 +358,12 @@ wgpu-core = { version = "30", features = ["dx12", "fragile-send-sync-non-atomic-
 wgpu-hal = { version = "30", default-features = false, features = ["fragile-send-sync-non-atomic-wasm", "metal", "portable-atomic"] }
 wgpu-types = { version = "30", default-features = false, features = ["fragile-send-sync-non-atomic-wasm", "std", "web"] }
 winit = { version = "0.30" }
+zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 
 [target.aarch64-unknown-linux-gnu.dependencies]
 arrayvec = { version = "0.7" }
 bytemuck = { version = "1", default-features = false, features = ["aarch64_simd"] }
+crossbeam-epoch = { version = "0.9" }
 cudarc = { version = "0.19", default-features = false, features = ["cuda-12020", "driver", "fallback-dynamic-loading", "nvrtc"] }
 event-listener = { version = "5" }
 event-listener-strategy = { version = "0.5" }
@@ -383,6 +384,7 @@ pipewire = { version = "0.10", default-features = false, features = ["v0_3_53"] 
 proc-macro2 = { version = "1" }
 quick-xml-4beaf6d1349630b6 = { package = "quick-xml", version = "0.41", features = ["overlapped-lists", "serialize"] }
 quote = { version = "1" }
+regex = { version = "1" }
 rustc-hash = { version = "1" }
 rustix = { version = "1", features = ["event", "net", "param", "pipe", "process", "shm", "system", "termios", "thread", "time"] }
 spin-93f6ce9d446188ac = { package = "spin", version = "0.10", default-features = false, features = ["once", "rwlock", "spin_mutex"] }
@@ -398,11 +400,13 @@ wgpu-core = { version = "30", features = ["dx12", "fragile-send-sync-non-atomic-
 wgpu-hal = { version = "30", default-features = false, features = ["dx12", "fragile-send-sync-non-atomic-wasm", "gles", "portable-atomic", "renderdoc", "vulkan"] }
 wgpu-types = { version = "30", default-features = false, features = ["fragile-send-sync-non-atomic-wasm", "std", "web"] }
 winit = { version = "0.30" }
+zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 
 [target.aarch64-unknown-linux-gnu.build-dependencies]
 arrayvec = { version = "0.7" }
 bytemuck = { version = "1", default-features = false, features = ["aarch64_simd"] }
 clang-sys = { version = "1", default-features = false, features = ["clang_11_0", "runtime"] }
+crossbeam-epoch = { version = "0.9" }
 cudarc = { version = "0.19", default-features = false, features = ["cuda-12020", "driver", "fallback-dynamic-loading", "nvrtc"] }
 event-listener = { version = "5" }
 event-listener-strategy = { version = "0.5" }
@@ -421,6 +425,7 @@ nix = { version = "0.31", features = ["net", "uio"] }
 nom-15128469a54ed75a = { package = "nom", version = "7" }
 pipewire = { version = "0.10", default-features = false, features = ["v0_3_53"] }
 quick-xml-4beaf6d1349630b6 = { package = "quick-xml", version = "0.41", features = ["overlapped-lists", "serialize"] }
+regex = { version = "1" }
 rustc-hash = { version = "1" }
 rustix = { version = "1", features = ["event", "net", "param", "pipe", "process", "shm", "system", "termios", "thread", "time"] }
 spin-93f6ce9d446188ac = { package = "spin", version = "0.10", default-features = false, features = ["once", "rwlock", "spin_mutex"] }
@@ -435,13 +440,16 @@ wgpu-core = { version = "30", features = ["dx12", "fragile-send-sync-non-atomic-
 wgpu-hal = { version = "30", default-features = false, features = ["dx12", "fragile-send-sync-non-atomic-wasm", "gles", "portable-atomic", "renderdoc", "vulkan"] }
 wgpu-types = { version = "30", default-features = false, features = ["fragile-send-sync-non-atomic-wasm", "std", "web"] }
 winit = { version = "0.30" }
+zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 
 [target.x86_64-pc-windows-msvc.dependencies]
 arrayvec = { version = "0.7" }
+crossbeam-epoch = { version = "0.9" }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
 image = { version = "0.25", default-features = false, features = ["bmp", "jpeg", "png"] }
+regex = { version = "1" }
 spin-93f6ce9d446188ac = { package = "spin", version = "0.10", default-features = false, features = ["once", "rwlock", "spin_mutex"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
@@ -458,13 +466,16 @@ windows-result = { version = "0.4" }
 windows-sys-b21d60becc0929df = { package = "windows-sys", version = "0.52", features = ["Win32_Devices_HumanInterfaceDevice", "Win32_Foundation", "Win32_Globalization", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Media", "Win32_Networking_WinSock", "Win32_Security", "Win32_System_Com_StructuredStorage", "Win32_System_IO", "Win32_System_LibraryLoader", "Win32_System_Ole", "Win32_System_SystemInformation", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_System_WindowsProgramming", "Win32_UI_Accessibility", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_Input_Ime", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Input_Pointer", "Win32_UI_Input_Touch", "Win32_UI_Shell", "Win32_UI_TextServices", "Win32_UI_WindowsAndMessaging"] }
 windows-sys-d4189bed749088b6 = { package = "windows-sys", version = "0.61", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Wdk_System_IO", "Win32_Graphics_Gdi", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_Security_Authentication_Identity", "Win32_Security_Credentials", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Console", "Win32_System_DataExchange", "Win32_System_Diagnostics_Debug", "Win32_System_IO", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Pipes", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_System_WindowsProgramming", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 winit = { version = "0.30" }
+zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 
 [target.x86_64-pc-windows-msvc.build-dependencies]
 arrayvec = { version = "0.7" }
+crossbeam-epoch = { version = "0.9" }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
 image = { version = "0.25", default-features = false, features = ["bmp", "jpeg", "png"] }
+regex = { version = "1" }
 spin-93f6ce9d446188ac = { package = "spin", version = "0.10", default-features = false, features = ["once", "rwlock", "spin_mutex"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
@@ -481,10 +492,12 @@ windows-result = { version = "0.4" }
 windows-sys-b21d60becc0929df = { package = "windows-sys", version = "0.52", features = ["Win32_Devices_HumanInterfaceDevice", "Win32_Foundation", "Win32_Globalization", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Media", "Win32_Networking_WinSock", "Win32_Security", "Win32_System_Com_StructuredStorage", "Win32_System_IO", "Win32_System_LibraryLoader", "Win32_System_Ole", "Win32_System_SystemInformation", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_System_WindowsProgramming", "Win32_UI_Accessibility", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_Input_Ime", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Input_Pointer", "Win32_UI_Input_Touch", "Win32_UI_Shell", "Win32_UI_TextServices", "Win32_UI_WindowsAndMessaging"] }
 windows-sys-d4189bed749088b6 = { package = "windows-sys", version = "0.61", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Wdk_System_IO", "Win32_Graphics_Gdi", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_Security_Authentication_Identity", "Win32_Security_Credentials", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Console", "Win32_System_DataExchange", "Win32_System_Diagnostics_Debug", "Win32_System_IO", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Pipes", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_System_WindowsProgramming", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 winit = { version = "0.30" }
+zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 
 [target.x86_64-unknown-linux-gnu.dependencies]
 arrayvec = { version = "0.7" }
 bytemuck = { version = "1", default-features = false, features = ["aarch64_simd"] }
+crossbeam-epoch = { version = "0.9" }
 cudarc = { version = "0.19", default-features = false, features = ["cuda-12020", "driver", "fallback-dynamic-loading", "nvrtc"] }
 event-listener = { version = "5" }
 event-listener-strategy = { version = "0.5" }
@@ -505,6 +518,7 @@ pipewire = { version = "0.10", default-features = false, features = ["v0_3_53"] 
 proc-macro2 = { version = "1" }
 quick-xml-4beaf6d1349630b6 = { package = "quick-xml", version = "0.41", features = ["overlapped-lists", "serialize"] }
 quote = { version = "1" }
+regex = { version = "1" }
 rustc-hash = { version = "1" }
 rustix = { version = "1", features = ["event", "net", "param", "pipe", "process", "shm", "system", "termios", "thread", "time"] }
 spin-93f6ce9d446188ac = { package = "spin", version = "0.10", default-features = false, features = ["once", "rwlock", "spin_mutex"] }
@@ -520,11 +534,13 @@ wgpu-core = { version = "30", features = ["dx12", "fragile-send-sync-non-atomic-
 wgpu-hal = { version = "30", default-features = false, features = ["dx12", "fragile-send-sync-non-atomic-wasm", "gles", "portable-atomic", "renderdoc", "vulkan"] }
 wgpu-types = { version = "30", default-features = false, features = ["fragile-send-sync-non-atomic-wasm", "std", "web"] }
 winit = { version = "0.30" }
+zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 
 [target.x86_64-unknown-linux-gnu.build-dependencies]
 arrayvec = { version = "0.7" }
 bytemuck = { version = "1", default-features = false, features = ["aarch64_simd"] }
 clang-sys = { version = "1", default-features = false, features = ["clang_11_0", "runtime"] }
+crossbeam-epoch = { version = "0.9" }
 cudarc = { version = "0.19", default-features = false, features = ["cuda-12020", "driver", "fallback-dynamic-loading", "nvrtc"] }
 event-listener = { version = "5" }
 event-listener-strategy = { version = "0.5" }
@@ -543,6 +559,7 @@ nix = { version = "0.31", features = ["net", "uio"] }
 nom-15128469a54ed75a = { package = "nom", version = "7" }
 pipewire = { version = "0.10", default-features = false, features = ["v0_3_53"] }
 quick-xml-4beaf6d1349630b6 = { package = "quick-xml", version = "0.41", features = ["overlapped-lists", "serialize"] }
+regex = { version = "1" }
 rustc-hash = { version = "1" }
 rustix = { version = "1", features = ["event", "net", "param", "pipe", "process", "shm", "system", "termios", "thread", "time"] }
 spin-93f6ce9d446188ac = { package = "spin", version = "0.10", default-features = false, features = ["once", "rwlock", "spin_mutex"] }
@@ -557,5 +574,6 @@ wgpu-core = { version = "30", features = ["dx12", "fragile-send-sync-non-atomic-
 wgpu-hal = { version = "30", default-features = false, features = ["dx12", "fragile-send-sync-non-atomic-wasm", "gles", "portable-atomic", "renderdoc", "vulkan"] }
 wgpu-types = { version = "30", default-features = false, features = ["fragile-send-sync-non-atomic-wasm", "std", "web"] }
 winit = { version = "0.30" }
+zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 
 ### END HAKARI SECTION

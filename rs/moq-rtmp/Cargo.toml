@@ -53,7 +53,7 @@ tokio-rustls = { workspace = true, optional = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-criterion = { workspace = true }
+criterion = { package = "bench-harness", path = "../bench-harness" }
 moq-clock = { path = "../moq-clock", features = ["sim"] }
 # The RTMPS test borrows moq-tokio's self-signed cert generation to build a
 # `rustls::ServerConfig`. No transport feature: a QUIC backend here would be

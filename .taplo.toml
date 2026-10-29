@@ -1,6 +1,6 @@
-# Skip vendored / build trees so `taplo format` doesn't recurse into them.
+# Skip vendored, build, and scratch trees so `taplo format` doesn't recurse into them.
 # `cargo hakari` owns the workspace-hack's formatting; `just rs lint` checks it.
-exclude = ["**/node_modules/**", "**/target/**", "**/dist/**", "**/.venv/**", "**/.direnv/**", "rs/workspace-hack/Cargo.toml"]
+exclude = ["**/node_modules/**", "**/target/**", "**/dist/**", "**/.venv/**", "**/.direnv/**", "**/.tmp/**", "rs/workspace-hack/Cargo.toml"]
 
 # Match the existing repo style (4-space indent on Cargo.toml, lines up
 # to ~120 chars) so the initial format pass stays minimal.

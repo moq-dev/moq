@@ -32,7 +32,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:kixelated/quest/fd1d88fb19317afc1c0cbca34cc23e9cf4d32375";
+      url = "github:kixelated/quest/21d2159d504295c629d545a126f0cefd6da80149";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
@@ -124,6 +124,24 @@
           }
         );
 
+        # The CodSpeed Criterion build (`just rs codspeed`). 6.0 runs each benchmark in its own
+        # process, so allocator state no longer carries between them; nixpkgs still has 5.x.
+        cargo-codspeed = pkgs.cargo-codspeed.overrideAttrs (
+          finalAttrs: old: {
+            version = "6.0.0";
+            src = pkgs.fetchFromGitHub {
+              owner = "CodSpeedHQ";
+              repo = "codspeed-rust";
+              tag = "v${finalAttrs.version}";
+              hash = "sha256-qY+IQx2apIOGTkRXUnbNCJT4Jo6TESY/80SXyknUBWY=";
+            };
+            cargoDeps = pkgs.rustPlatform.fetchCargoVendor {
+              inherit (finalAttrs) pname version src;
+              hash = "sha256-qiyA74h80sT3tM/TToZxPDGMmnEwB8MYhFM84Wu2ySs=";
+            };
+          }
+        );
+
         # Rust dependencies
         rustDeps =
           with pkgs;
@@ -159,6 +177,7 @@
             # The workspace-hack that gives every build one feature set per dependency.
             cargo-hakari
             cargo-nextest
+            cargo-codspeed
             # Source-based test coverage (`just rs coverage`).
             # Its LLVM test helpers must read the compiler's profile format.
             (cargo-llvm-cov.override {

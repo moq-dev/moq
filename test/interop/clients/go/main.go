@@ -41,8 +41,11 @@ import (
 
 const readChunk = 64 * 1024
 
-// media.TrackConsumer max delay: how much reordering the jitter buffer tolerates.
-const maxDelay = time.Second
+// How far a read may fall behind live before it skips. A gap fails the run, which a reader skipping
+// behind live would cause itself: the matrix starts every subscriber at once, and a runtime starved
+// by the others can fall a second behind. That is this reader's speed, not the delivery under test.
+// A track's max-age caps it, so interop.sh's Rust publisher keeps its media at least this long.
+const maxDelay = 5 * time.Second
 
 // finishLinger is how long a finished publisher stays up for the late readers.
 const finishLinger = 10 * time.Second
@@ -145,10 +148,11 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	defer client.Close()
 
 	// Hold the producer for the lifetime of the publish loop; Close unpublishes.
-	producer, err := client.CreateBroadcast(broadcast)
+	publication, err := client.CreateBroadcast(broadcast)
 	if err != nil {
 		return err
 	}
+	producer := publication.Broadcast()
 	defer producer.Close()
 
 	catalog, err := moqmedia.NewCatalogProducer(producer)
@@ -175,7 +179,7 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	if err != nil {
 		return err
 	}
-	if err := producer.Announce(moq.AnnounceRoute{}); err != nil {
+	if err := publication.Announce(moq.AnnounceRoute{}); err != nil {
 		return err
 	}
 	fmt.Printf("publishing %q (Annex-B H.264 from stdin + a %v Hz tone) to %s\n", broadcast, tones, url)
@@ -236,10 +240,11 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	if err := producer.Close(); err != nil {
 		return err
 	}
-	health, err := client.CreateBroadcast(broadcast + ".health")
+	healthPublication, err := client.CreateBroadcast(broadcast + ".health")
 	if err != nil {
 		return err
 	}
+	health := healthPublication.Broadcast()
 	defer health.Close()
 	live, err := health.PublishTrack("live", nil)
 	if err != nil {
@@ -251,7 +256,7 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	if err := live.Finish(); err != nil {
 		return err
 	}
-	if err := health.Announce(moq.AnnounceRoute{}); err != nil {
+	if err := healthPublication.Announce(moq.AnnounceRoute{}); err != nil {
 		return err
 	}
 	ack, err := os.Open(finishAck)
