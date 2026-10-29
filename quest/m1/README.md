@@ -173,7 +173,6 @@ removed).
 - [crates.io trusts the workflow](/quest/m1/crates-trusted-publisher.md) - maintainer action: every published crate gets a trusted publisher for `release-rs.yml`
 - [Rust releases publish through OIDC](/quest/m1/release-rs-oidc.md) - release-plz publishes with trusted publishing and `CARGO_REGISTRY_TOKEN` is revoked
 - [moq-clock's tests pass under cargo test](/quest/m1/clock-test-process.md) - `paused_runtimes_own_their_anchors` stops depending on being first in its process
-- [kio's log tests pass in a workspace build](/quest/m1/kio-workspace-tests.md) - the eviction tests pass under the workspace's unified features, or eviction is fixed
 - [The JS stalled-consumer eviction test ages its groups](/quest/m1/js-cache-age-test.md) - the test drives the clock the cache reads, so it can fail
 - [Main is no slower than release](/quest/m1/release-perf/README.md) - every benchmark where main is slower than release is fixed or accepted with a reason, checked by a final paired run before the cut
 - [Interop coverage](/quest/m1/interop-coverage/README.md) - the riskiest moq-transport features moq-net exposes get cross-implementation tests over drafts 18 and 22
