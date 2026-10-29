@@ -35,12 +35,23 @@ JSR's repository OIDC trust while the token is unset. The repository's
 `MBX_R2_*` pair is read-only: a branch's write to `mbx-moq-dev` is refused
 with AccessDenied.
 
+Prepared in [moq-dev/moq#7202](https://github.com/moq-dev/moq/pull/7202): the
+workflow backport to `release`, including its legacy Cachix publishers and
+JSR token handling. It remains draft pending the tag-policy decision below.
+No secrets or trusted publisher accounts have been changed.
+
 What remains, in order. Deleting a repository-level secret earlier breaks a
 publish, since jobs that do not name `publish` still read it:
 
-1. Backport the workflow changes to `release`. Release pushes and release
-   tags run `release`'s own copies of the workflows, which differ widely from
-   `main`'s.
+1. Settle the legacy tag policy and land the backport. `publish` currently
+   admits `main`, `release`, and CLI, relay, and FFI tags, but `release`'s
+   Cachix publisher also handles `moq-boy-v*`, `moq-gst-v*`, and `libmoq-v*`.
+   Recommendation: preserve those publications by admitting these three tag
+   patterns to `publish` and protecting `libmoq-v*` creation, update, and
+   deletion in the `release tags` ruleset. The other two patterns are already
+   protected. Otherwise explicitly retire those legacy Cachix publications.
+   Release pushes and tags run `release`'s own workflow copies, so the backport
+   must land before repository credentials are removed.
 2. The maintainer copies each value into the `publish` Environment:
    `CARGO_REGISTRY_TOKEN`, `CLOUDFLARE_API_TOKEN`, `DOCKER_USERNAME`,
    `DOCKER_PASSWORD`, `MAVEN_CENTRAL_USERNAME`, `MAVEN_CENTRAL_PASSWORD`,
@@ -50,7 +61,7 @@ publish, since jobs that do not name `publish` still read it:
    shadows the organization's) and `DISCORD_WEBHOOK`.
 3. Then deletes those repository secrets, the unused ones
    (`GCP_SERVICE_ACCOUNT_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`,
-   `META_MODEL_API_KEY`, `APP_ID`), and this repository's access to the
+   `META_MODEL_API_KEY`), and this repository's access to the
    organization's `APP_PRIVATE_KEY` and `DISCORD_WEBHOOK`. `APP_CLIENT_ID`
    and `APP_ID` are identifiers and can stay. `MBX_R2_*` stays.
 4. The maintainer names the Environment in each trusted publisher: npm's
