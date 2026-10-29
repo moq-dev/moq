@@ -186,3 +186,52 @@ test("a hole is late from the earliest arrival past it", async () => {
 		installed.close();
 	}
 });
+
+test("a hole in a drained backlog is late from the earliest arrival past it, not the first admitted", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const track = new Track.Producer("data");
+	const marker = (sequence: number) => {
+		const group = track.createGroup(sequence);
+		group.writeFrame({ payload: new Uint8Array(), timestamp: Time.Timestamp.fromMicros(sequence * 10_000) });
+		group.finish();
+	};
+	const first = track.createGroup(0);
+	first.writeFrame({ payload: encodeFrame(new Uint8Array([1]), Micro(0)), timestamp: Time.Timestamp.fromMicros(0) });
+	first.finish();
+	marker(5);
+	await clock.advance(Nano.fromMilli(Milli(900)));
+	marker(3);
+	await clock.advance(Nano.fromMilli(Milli(100)));
+
+	// Joined now, the backlog drains in sequence order: group 3 before group 5, which landed first.
+	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
+		format: new Format("data"),
+		maxDelay: Milli(500),
+	});
+	const results: Read[] = [];
+	const reading = (async () => {
+		for (;;) {
+			const read = await consumer.next();
+			if (!read) return;
+			results.push(read);
+		}
+	})();
+	try {
+		await flush();
+		// Group 5 landed a second ago, so the holes before groups 3 and 5 both expired.
+		expect(results.map((read) => (read.kind === "end" ? `end ${read.group}` : read.kind))).toEqual([
+			"frame",
+			"gap",
+			"end 3",
+			"gap",
+			"end 5",
+		]);
+	} finally {
+		consumer.close();
+		track.finish();
+		track.close();
+		await reading;
+		installed.close();
+	}
+});

@@ -11,8 +11,8 @@ host publishes at a path of its choosing. Track, group, and frame structure and
 payloads survive byte for byte, so any consumer of the live broadcast, HLS
 included, works on the stored one.
 
-The catalog carries no archive pointer. Timelines survive only as an opt-in
-`hls` field for HLS compatibility.
+The catalog carries no archive pointer. Timelines survive only as a
+per-rendition `hls` field for HLS compatibility.
 
 ## Plan
 
@@ -68,7 +68,7 @@ archive (per-track `.timeline.z` records named by the catalog's root
 - **Seek by time.** A `Time(pts)` range end
   ([Subscribe ranges](/quest/m1/subscribe-ranges/README.md)) is resolved by
   whoever holds the track, the cache or an archive consumer. DVR seeks with it.
-- **`hls` is for HLS only, and opt-in.** A per-rendition catalog field names a
+- **`hls` is for HLS only.** A per-rendition catalog field names a
   track whose (first group, pts) records mark each HLS segment, each rendition
   cutting its own on a pts grid so they line up wherever keyframes do
   (Catalog HLS field, landed). The root `archive`
@@ -88,6 +88,5 @@ from a host. Each child fixes the stale docs it touches.
 
 ## Related
 
-- [Rust identity enforcement](/quest/m1/catalog-identity-rs.md) - a track's definition never changes for its name, so the archived catalog describes every group of the tracks it lists
 - [e2ee](/quest/m2/e2ee/README.md) - protected broadcasts are excluded initially
 - [DVR rewind](/quest/m2/archive-dvr.md) - seeks back through the cache, then an archive, with time ranges

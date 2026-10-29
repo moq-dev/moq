@@ -29,9 +29,9 @@ default = ["audio", "video"]
 audio = ["dep:moq-audio"]
 video = ["dep:moq-video", "dep:pollster"]
 # The OpenH264 software H.264 fallback (vendored C++) for `video`. Off for
-# development and linting; `build.sh`, maturin, and CI's tests turn it on. It is
-# the only encoder on API-24 Android and the Apple simulators, so every release
-# build needs it.
+# development and linting; `cargo build-ffi` (.cargo/config.toml), maturin, and
+# CI's tests turn it on. It is the only encoder on API-24 Android and the Apple
+# simulators, so every release build needs it.
 openh264 = ["moq-video?/openh264"]
 # qlog trace capture (`MoqQuicConfig::qlog`). Off by default: it compiles the qlog
 # machinery in and is only wanted for debugging; `moq_qlog_supported` reports it.

@@ -7,6 +7,6 @@
 	},
 	"dependencies": {
 		"@moq/net": "workspace:*",
-		"@moq/web-transport": "^0.1.5"
+		"@moq/web-transport": "^0.1.6"
 	}
 }

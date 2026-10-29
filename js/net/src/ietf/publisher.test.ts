@@ -531,36 +531,6 @@ test("a SUBSCRIBE withdrawn while resuming releases its demand", async () => {
 	}
 });
 
-// Legal requests we don't serve are refused NOT_SUPPORTED one at a time.
-test("FETCH gets NOT_SUPPORTED", async () => {
-	const refusal = async (version: IetfVersion, run: (pub: Publisher, stream: Stream) => Promise<void>) => {
-		const pair = createMockTransportPair(ALPN.DRAFT_18);
-		const session = new NativeSession(pair.server, version, true);
-		const { pub, origin } = publisher(pair.server, { session });
-		const written: Uint8Array[] = [];
-		const stream = new Stream({
-			readable: new ReadableStream<Uint8Array>(),
-			writable: new WritableStream<Uint8Array>({
-				write: (chunk) => {
-					written.push(new Uint8Array(chunk));
-				},
-			}),
-			version,
-		});
-		await run(pub, stream);
-		await stream.writer.closed;
-		origin.close();
-		return written.flatMap((chunk) => Array.from(chunk));
-	};
-
-	for (const version of [Version.DRAFT_22] as const) {
-		const fetch = await refusal(version, (pub, stream) => pub.runFetch(new Fetch({ requestId: 7n }), stream));
-		// FETCH_ERROR on draft-14, REQUEST_ERROR after; the code follows the Length and any Request ID.
-		expect(fetch[0]).toBe(0x05);
-		expect(fetch[3]).toBe(0x3);
-	}
-});
-
 test("Range Filters over MAX_FILTER_RANGES zero get INVALID_FILTER", async () => {
 	for (const version of [Version.DRAFT_22]) {
 		const pair = createMockTransportPair(ALPNS[version]);
@@ -1652,7 +1622,20 @@ test("EPOCH on a request without MoQ Epoch is a protocol violation", async () =>
 		),
 	).rejects.toThrow(ProtocolViolation);
 	await expect(
-		pub.runFetch(new Fetch({ requestId: 7n, trackNamespace, epoch }), requestStream(VERSION).stream),
+		pub.runFetch(
+			new Fetch({
+				requestId: 7n,
+				type: {
+					kind: "standalone",
+					trackNamespace,
+					trackName: "video",
+					start: { group: 0n, object: 0n },
+					end: { group: 0n, object: 0n },
+				},
+				epoch,
+			}),
+			requestStream(VERSION).stream,
+		),
 	).rejects.toThrow(ProtocolViolation);
 
 	origin.close();
@@ -2364,7 +2347,10 @@ interface ServedGroup {
 interface ServedFill {
 	/** The request id the FETCH_HEADER named, when it survived a reset. */
 	requestId?: bigint;
-	/** Each object's group, absolute id, and payload. */
+	/**
+	 * Each object's group, absolute id, and payload, and each End of Range's group and id
+	 * with `end <reason in hex>` for its payload.
+	 */
 	objects: { group: number; id: number; payload: string }[];
 	/**
 	 * The error the stream ended with, when the publisher reset it instead of finishing.
@@ -2532,6 +2518,13 @@ async function readFill(
 	try {
 		while (!(await reader.done())) {
 			const flags = await reader.u53();
+			// Absolute ids, and nothing after them.
+			if (flags >= 0x80) {
+				group = Number(await reader.u62());
+				id = Number(await reader.u62());
+				objects.push({ group, id, payload: `end ${flags.toString(16)}` });
+				continue;
+			}
 			if (flags & 0x08) {
 				const value = await reader.u53();
 				group = objects.length === 0 ? value : order === "ascending" ? group + value + 1 : group - value - 1;
@@ -2948,22 +2941,13 @@ async function subscribeOkLargest(version: IetfVersion): Promise<SubscribeOk["la
 }
 
 /**
- * What LARGEST_OBJECT names has to match where the subscription actually starts. Below
- * draft-22 the filter is ignored and the whole group is served, and the only way to ask for a
- * head we skipped is a joining FETCH, which we answer with an empty stream. Advertising the
- * mid-group edge there promises a backfill nothing can deliver, so the Location drops to the
- * start of the group.
+ * LARGEST_OBJECT is the live edge on every draft: a Next Object subscription starts right
+ * after it, and the head before it comes back by a fill or a joining FETCH that ends there.
  */
-test.each([
-	["draft-17", Version.DRAFT_18],
-	["draft-18", Version.DRAFT_18],
-] as const)("%s: LARGEST_OBJECT is the start of the group it serves", async (_draft, version) => {
-	expect(await subscribeOkLargest(version)).toEqual({ groupId: 5n, objectId: 0n });
-});
-
-/** Draft-22 serves a skipped head with a FILL, so it advertises the true live edge. */
-test("draft-22: LARGEST_OBJECT is the live edge", async () => {
-	expect(await subscribeOkLargest(Version.DRAFT_22)).toEqual({ groupId: 5n, objectId: 3n });
+test("LARGEST_OBJECT is the live edge", async () => {
+	for (const version of IETF_VERSIONS) {
+		expect(await subscribeOkLargest(version)).toEqual({ groupId: 5n, objectId: 3n });
+	}
 });
 
 /**
@@ -3305,10 +3289,51 @@ test("draft-22: the subscriber leaving ends a fill still reading its group", asy
 		client.close();
 
 		// A reset discards what the peer has not acknowledged, so the objects already written
-		// may or may not survive it. That it ends at all, with the cancellation as its reason,
-		// is the whole point.
+		// may or may not survive it. That it ends at all, reset as CANCELLED, is the whole point.
 		const served = await reading;
-		expect(served.reset?.message).toContain("unsubscribed");
+		expect(served.reset).toMatchObject({ code: StreamCode.Cancel });
+	} finally {
+		open.finish();
+		fx.close();
+		client.close();
+	}
+});
+
+// A fill's FILL_TIMEOUT bounds its wait as a FETCH's does. Zero takes only what is cached, so
+// the open group's missing tail is a Timed-Out gap rather than a wait the fill never ends.
+test("draft-22: a fill's FILL_TIMEOUT marks what it did not wait for", async () => {
+	using _clock = manual();
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const open = track.appendGroup();
+	open.writeFrame({ payload: new TextEncoder().encode("0.0"), timestamp: Timestamp.now() });
+	writeGroup(track, 1);
+
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "nextObject" },
+			fill: {
+				filter: { kind: "absolute", startGroup: 0n, startObject: 0n, endGroup: 0n },
+				fillTimeout: Milli(0),
+				rangeFilters: false,
+			},
+		}),
+	);
+
+	try {
+		const fill = await nextUni(fx.uni);
+		if (!fill) throw new Error("no fetch stream for the requested fill");
+		const served = await readFill(fill);
+		expect(served.reset).toBeUndefined();
+		expect(served.objects).toEqual([
+			{ group: 0, id: 0, payload: "0.0" },
+			{ group: 0, id: Number(2n ** 62n - 1n), payload: "end 20c" },
+		]);
 	} finally {
 		open.finish();
 		fx.close();
@@ -4394,7 +4419,7 @@ test("draft-22: narrowing gives up an excluded group's open stream", async () =>
 		await new SubscribeUpdate({ requestId: 2n, parameters }).encode(client.writer, fx.version);
 		expect(await client.reader.u53()).toBe(RequestOk.id);
 		await RequestOk.decode(client.reader, fx.version);
-		expect((await reading)?.message).toContain("range update");
+		expect(await reading).toMatchObject({ code: StreamCode.Cancel });
 		// The publisher remains usable; only this subscription stopped its old group.
 		open.writeFrame({ payload: new Uint8Array([2]), timestamp: Timestamp.now() });
 		writeGroup(track, 1);
@@ -4629,7 +4654,7 @@ test.each([
 			expect(await client.reader.u53()).toBe(RequestOk.id);
 			await RequestOk.decode(client.reader, fx.version);
 		}
-		expect((await reading)?.message).toContain("range update");
+		expect(await reading).toMatchObject({ code: StreamCode.Cancel });
 		open.writeFrame({ payload: new TextEncoder().encode("1.1"), timestamp: Timestamp.now() });
 		open.finish();
 		expect((await readServed(fx.uni, 2)).sort()).toEqual(["0.0", "1.0", "1.1"]);

@@ -506,9 +506,41 @@ pub struct MoqVideoProducer {
 	follow: std::sync::Mutex<Option<Follow>>,
 	/// Last bitrate applied by the follow loop or [`set_bitrate`](Self::set_bitrate).
 	applied: Arc<AtomicU64>,
-	/// Held so the reservation's registry outlives extra bandwidth handles.
-	_bandwidth: Option<Arc<MoqAllocator>>,
+	/// The next lower rendition's ceiling, kept to follow a new track with.
+	lower: Option<kio::Consumer<moq_net::bandwidth::Rate>>,
+	/// Held so the reservation's registry outlives extra bandwidth handles, and to reserve
+	/// against the track a decoder identity change moves the rendition to.
+	bandwidth: Option<Arc<MoqAllocator>>,
 	children: crate::producer::Children,
+}
+
+impl MoqVideoProducer {
+	/// Move the bandwidth claim and its follower onto `demand`, the track a decoder identity change
+	/// moved the rendition to: the old track's demand ended with it.
+	///
+	/// The follower takes the producer's lock, so call this without holding it.
+	fn follow_track(&self, demand: &moq_net::track::Demand, ceiling: moq_net::bandwidth::Rate) -> Result<(), MoqError> {
+		let Some(bandwidth) = &self.bandwidth else {
+			return Ok(());
+		};
+		let stopped = self
+			.follow
+			.lock()
+			.unwrap()
+			.take()
+			.map_or(Ok(()), |mut follow| follow.stop());
+		let reservation = bandwidth.reserve_demand(demand, ceiling.as_bps());
+		let follow = spawn_follow(Followed {
+			inner: self.inner.clone(),
+			lower: self.lower.clone(),
+			consumer: reservation.consume(),
+			ceiling,
+			applied: self.applied.clone(),
+		});
+		*self.reservation.lock().unwrap() = Some(reservation);
+		*self.follow.lock().unwrap() = Some(follow);
+		stopped
+	}
 }
 
 // Dropped or closed before its finish, the track ends the way a publisher leaving does.
@@ -574,9 +606,20 @@ impl MoqVideoProducer {
 	pub fn write(&self, frame: MoqVideoFrame) -> Result<(), MoqError> {
 		self.check()?;
 		let _guard = crate::ffi::runtime().enter();
-		let mut guard = self.inner.lock().map_err(|_| panic_error())?;
-		let producer = guard.as_mut().ok_or(MoqError::Closed)?;
-		producer.write(frame)
+		let moved = {
+			let mut guard = self.inner.lock().map_err(|_| panic_error())?;
+			let producer = guard.as_mut().ok_or(MoqError::Closed)?;
+			let before = producer.producer.demand();
+			producer.write(frame)?;
+			// A frame whose decoder identity changed, such as a resume at a ceiling past the
+			// declared level, moved the rendition to a newly named track.
+			let after = producer.producer.demand();
+			(after.name() != before.name()).then(|| (after, *producer.ceiling.read()))
+		};
+		match moved {
+			Some((demand, ceiling)) => self.follow_track(&demand, ceiling),
+			None => Ok(()),
+		}
 	}
 
 	/// Cut a new group at the next written frame.
@@ -649,7 +692,9 @@ impl MoqVideoProducer {
 
 	/// This encoder's bandwidth reservation, if it was published against a
 	/// [`MoqAllocator`]. Dropping the handle does not release the claim; the
-	/// producer holds it until [`finish`](Self::finish).
+	/// producer holds it until [`finish`](Self::finish). A frame that changes the
+	/// decoder identity publishes under a new track name and reserves against that
+	/// track instead, so read this again after [`write`](Self::write).
 	pub fn reservation(&self) -> Option<Arc<MoqReservation>> {
 		self.reservation.lock().unwrap().clone()
 	}
@@ -801,7 +846,7 @@ impl MoqVideoProducer {
 		let follow = reserved.as_ref().map(|reservation| {
 			spawn_follow(Followed {
 				inner: inner.clone(),
-				lower,
+				lower: lower.clone(),
 				consumer: reservation.consume(),
 				ceiling,
 				applied: applied.clone(),
@@ -813,7 +858,8 @@ impl MoqVideoProducer {
 			reservation: std::sync::Mutex::new(reserved),
 			follow: std::sync::Mutex::new(follow),
 			applied,
-			_bandwidth: bandwidth,
+			lower,
+			bandwidth,
 			children: children.clone(),
 		}))
 	}
@@ -1763,6 +1809,41 @@ mod rung_tests {
 		assert_eq!(lower_ceiling(&lower, &waiter), None);
 	}
 
+	/// A rung resumed at a ceiling past its declared level publishes a new track, and its
+	/// bandwidth claim moves there with it rather than watching the track that ended.
+	#[tokio::test]
+	async fn a_rung_resumed_past_its_level_reserves_on_the_new_track() {
+		let ladder = ladder();
+		ladder.high.write(frame(0)).unwrap();
+		let before = ladder.high.reservation().unwrap();
+		let apply = |target| {
+			let mut guard = ladder.high.inner.lock().unwrap();
+			guard.as_mut().unwrap().apply(target).unwrap();
+		};
+		apply(Target::Disabled);
+		// 3 Mbps takes H.264 level 2.1, past the 2.0 the 2 Mbps rung declared.
+		ladder.high.set_bitrate(3_000_000).unwrap();
+		apply(Target::Enabled(Rate::from_kbps(3_000)));
+		ladder.high.write(frame(1)).unwrap();
+
+		let names = ladder
+			.broadcast
+			.with_state(|state| {
+				Ok(state
+					.catalog
+					.snapshot()
+					.video
+					.renditions
+					.into_keys()
+					.collect::<Vec<_>>())
+			})
+			.unwrap();
+		assert!(names.contains(&"high/1".to_string()), "{names:?} has no new track");
+		let after = ladder.high.reservation().unwrap();
+		assert!(!Arc::ptr_eq(&before, &after), "the claim still watches the ended track");
+		ladder.high.finish().unwrap();
+	}
+
 	/// A disabled rung advertises itself disabled, drops the frames written to it, and
 	/// resumes on a keyframe in a new group, its advertised maximum untouched throughout.
 	#[tokio::test]
@@ -1804,7 +1885,9 @@ mod rung_tests {
 			ladder.high.write(frame(i)).unwrap();
 		}
 		ladder.high.cut().unwrap();
-		ladder.high.set_bitrate(3_000_000).unwrap();
+		// Within the level the rung declared: a ceiling past it reopens the encoder at a new
+		// level, which is a new codec string and so a new track.
+		ladder.high.set_bitrate(1_500_000).unwrap();
 
 		apply(Target::Enabled(Rate::from_kbps(1_500)));
 		assert!(enabled(&ladder.broadcast, "high"));

@@ -1,7 +1,7 @@
 use std::task::{Poll, ready};
 
 use super::WeakEntry;
-use super::origin_impl::{Announce, AnnounceConsumer, AnnounceEvent, Consumer, Routing};
+use super::origin_impl::{Announce, AnnounceConsumer, AnnounceEvent, Consumer, Requesting};
 use crate::{Epoch, Error, Path, broadcast};
 
 /// The announcements covering one path, as one broadcast coming online, being replaced, and
@@ -202,7 +202,7 @@ pub struct AnnouncedBroadcast {
 	/// An instance serves the path that was not handed out yet.
 	unseen: bool,
 	/// The resolution in flight, kept across a dropped wait so a retry picks it up.
-	resolving: Option<Routing>,
+	resolving: Option<Requesting>,
 	/// The broadcast handed out last, until the path goes offline. Weak, so it never keeps an
 	/// instance the caller let go of from retiring.
 	last: Option<broadcast::WeakConsumer>,
@@ -587,6 +587,37 @@ mod tests {
 		let mut unpinned = origin.consume().announced_broadcast("live", None).unwrap();
 		let current = available(&mut unpinned).await;
 		assert_ne!(current.info().epoch.as_ref(), Some(&epoch));
+	}
+
+	#[moq_clock::test]
+	async fn announced_pinned_hands_out_its_instance_after_a_gap() {
+		let origin = Hop::new(1).unwrap().produce();
+		let epoch = Epoch::mint();
+		let first = origin.publish("live", route(&epoch)).unwrap();
+		let mut announced = origin.consume().announced_broadcast("live", epoch.clone()).unwrap();
+		assert_eq!(available(&mut announced).await.info().epoch.as_ref(), Some(&epoch));
+		first.unannounce();
+		none(&mut announced).await;
+		first.announce(route(&epoch)).unwrap();
+		assert_eq!(available(&mut announced).await.info().epoch.as_ref(), Some(&epoch));
+	}
+
+	#[moq_clock::test]
+	async fn announced_reports_a_dropped_prepared_answer() {
+		let origin = Hop::new(1).unwrap().produce();
+		let claim = origin.requests("live").unwrap();
+		let mut announced = origin.consume().announced_broadcast("live", None).unwrap();
+		let (result, ()) = futures::join!(
+			moq_clock::timeout(Duration::from_secs(1), announced.available()),
+			async {
+				let prepared = requested(&claim).await.prepare(Epoch::mint()).unwrap();
+				drop(prepared);
+			}
+		);
+		assert!(matches!(
+			result.expect("the selected refusal must answer"),
+			Err(Error::Unroutable)
+		));
 	}
 
 	/// A path no pattern can spell is refused rather than followed through the whole scope,

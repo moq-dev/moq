@@ -1751,7 +1751,7 @@ test("integration: an announced request waits for a late publisher", async () =>
 	clientOrigin.close();
 });
 
-test("integration: an announced request consumes blind without discovery", async () => {
+test("integration: only a plain request consumes blind without discovery", async () => {
 	withoutDiscovery();
 	const pair = createMockTransportPair(Lite.ALPN_06);
 	const origin = new OriginProducer();
@@ -1770,13 +1770,16 @@ test("integration: an announced request consumes blind without discovery", async
 		}
 	})();
 
-	// No announcement ever arrives, so waiting for one would hang. Subscribe anyway.
-	const watched = clientOrigin.request(Path.from("test"), { announced: true });
+	const followed = clientOrigin.request(Path.from("test"), { announced: true });
+	await until(() => clientOrigin.discovery.peek() === false);
+	expect(followed.active.peek()).toBeUndefined();
+	const watched = clientOrigin.request(Path.from("test"));
 	const active = await waitFor(watched.active, (b) => b !== undefined);
 	if (!active) throw new Error("expected an active broadcast");
 	expect(await active.track("video").subscribe().ordered().readString()).toBe("blind");
 
 	watched.close();
+	followed.close();
 	broadcast.close();
 	await serving;
 	client.abort();
@@ -1923,7 +1926,7 @@ test("integration: a blind handle picks up a publisher that arrives late", async
 	]);
 
 	// Without discovery there is no announcement to wait for, so the handle consumes blind.
-	const watched = clientOrigin.request(Path.from("later"), { announced: true });
+	const watched = clientOrigin.request(Path.from("later"));
 	const blind = await waitFor(watched.active, (b) => b !== undefined);
 	if (!blind) throw new Error("expected a blind consumer");
 
@@ -1962,7 +1965,7 @@ test("integration: a blind handle goes offline when the session dies", async () 
 		accept(pair.server, url, { publish: origin.consume() }),
 	]);
 
-	const watched = clientOrigin.request(Path.from("whatever"), { announced: true });
+	const watched = clientOrigin.request(Path.from("whatever"));
 	await waitFor(watched.active, (b) => b !== undefined);
 
 	// The gated path goes offline when the announcement stream ends with the session. There is
@@ -1987,7 +1990,7 @@ test("integration: ietf blind handle picks up a publisher that arrives late", as
 		accept(pair.server, url, { publish: origin.consume() }),
 	]);
 
-	const watched = clientOrigin.request(Path.from("later"), { announced: true });
+	const watched = clientOrigin.request(Path.from("later"));
 	const blind = await waitFor(watched.active, (b) => b !== undefined);
 	if (!blind) throw new Error("expected a blind consumer");
 
@@ -2171,7 +2174,7 @@ test("origin: one origin on both directions consumes locally and never echoes", 
 	serverSees.close();
 });
 
-test("origin: a plain request resolves blind without opening discovery", async () => {
+test("origin: a plain request discovers the peer cannot announce before resolving blind", async () => {
 	const refused = withoutDiscovery();
 	const pair = createMockTransportPair(Lite.ALPN_05);
 	const serverOrigin = new OriginProducer();
@@ -2192,8 +2195,7 @@ test("origin: a plain request resolves blind without opening discovery", async (
 	})();
 
 	const reader = clientOrigin.consume();
-	// Nothing watches, so the session never asks about announcements and never learns the
-	// relay would refuse: the table stays empty and a plain request answers blind.
+	// A request owns discovery, so it learns that this peer needs a blind request.
 	expect(wireOf(reader).routes(Path.from("blind"))).toBe(false);
 
 	const request = reader.request(Path.from("blind"));
@@ -2203,8 +2205,8 @@ test("origin: a plain request resolves blind without opening discovery", async (
 	const track = front?.track("chat").subscribe().ordered();
 	if (!track) throw new Error("expected a track");
 	expect(await track.readString()).toBe("found you");
-	expect(refused()).toBe(0);
-	expect(reader.discovery.peek()).toBe(true);
+	expect(refused()).toBe(1);
+	expect(reader.discovery.peek()).toBe(false);
 
 	track.close();
 	request.close();
@@ -2375,6 +2377,7 @@ test.each([Ietf.ALPN.DRAFT_18])(
 );
 
 test("origin: a blind request ends with its session, and the next session answers a fresh one", async () => {
+	withoutDiscovery();
 	const original = globalThis.WebTransport;
 	const reconnectUrl = new URL("https://example.com/re-request");
 

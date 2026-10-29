@@ -21,6 +21,7 @@ lite-07; bitrate enforcement is not part of this release.
 ## Required
 
 - [Release execution](/quest/m2/release/README.md) - publication, installed-artifact proof, cleanup, and downstream adoption after m1
+- [Video quality](/quest/m2/video-quality/README.md) - a nightly VMAF harness grades every encoder backend and on-demand GoP pops against floors, and moq-boy's encode is fixed under it
 - [noq adopts moq-congestion](/quest/m2/noq-congestion.md) - noq's BBR3 and Cubic delegate to the published crate behind noq's unchanged API
 - [Byte streams](/quest/m2/stream/README.md) - TCP connections ride MoQ losslessly through relays, proxied per hop rather than as IP packets
 - [Mesh](/quest/m2/mesh/README.md) - `moq mesh` enrolls a host or robot and reaches any node by endpoint ID or name for SSH, forwards, and agents
@@ -36,6 +37,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [HLS and DASH browser playback](/quest/m2/hls-player-test.md) - hls.js and dash.js play, reload, switch, and survive reconfiguration nightly
 - [moq-hls export on kio](/quest/m2/hls-export-kio.md) - export watchers and the init build are owned kio tasks instead of tokio::spawn
 - [Re-init retires timelines](/quest/m2/reinit-retire.md) - fMP4 and MKV re-inits retire the old timeline, so import state stays bounded
+- [Replaced producers retire their records](/quest/m2/producer-retire.md) - encoders and bindings retire a replaced producer's HLS records
 - [Broadcast fairness](/quest/m2/broadcast-fairness.md) - broadcasts share a cluster link fairly, so one tenant's priority never starves another's
 - [Cache fair share](/quest/m2/cache-fairness.md) - one tenant cannot crowd another out of the relay's shared group cache
 - [Peer grant bound](/quest/m2/peer-grant-bound.md) - a peer's AUTH_OK costs near-linear time in its bytes on every input shape, in Rust and in a browser
@@ -221,6 +223,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [moq-transport finish interop](/quest/m2/ietf-finish.md) - the interop `finish` case runs on every even moq-transport draft instead of being skipped
 - [Join after a quick finish](/quest/m2/ietf-join-after-finish.md) - a pre-draft-22 joining FETCH that arrives after its subscription finished is still answered, within a bound the peer already negotiates
 - [JS joining FETCH](/quest/m2/ietf-js-joining-fetch.md) - the JS publisher answers a joining FETCH that arrives after a quick finish, mirroring the Rust bound
+- [JS IETF FETCH requester](/quest/m2/js-ietf-fetch-requester.md) - decide whether `@moq/net` sends IETF FETCH, from the use cases that would need it
 - [ashpd uses maintained D-Bus crates](/quest/m2/ashpd-maintained.md) - wait for a stable zbus 6 port, then remove the portal dependency exceptions
 - [Askama uses a maintained TOML parser](/quest/m2/askama-maintained.md) - wait for a stable parser migration, then remove the generator dependency exception
 - [Dependency and alternatives audit](/quest/m2/audit-deps.md) - dependencies are current, deduplicated, needed, and the best maintained option

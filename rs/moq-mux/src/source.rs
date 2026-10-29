@@ -362,7 +362,7 @@ enum Bound {
 	Ready(moq_net::broadcast::Consumer),
 	/// A request issued when the binding was made, resolved once something announces the path.
 	Requested {
-		routing: Box<Mutex<moq_net::origin::Routing>>,
+		routing: Box<Mutex<moq_net::origin::Requesting>>,
 		/// Where the answer is pinned, the first for its path winning.
 		pins: Pins,
 		path: moq_net::Path,

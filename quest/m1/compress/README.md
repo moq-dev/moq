@@ -1,4 +1,4 @@
-# Compressed tracks in moq-net
+# [S] Compressed tracks in moq-net
 
 ## Goal
 
@@ -78,10 +78,6 @@ This README owns the end-to-end proof and the guide once every child lands:
   moq-relay inflated, from one inflate on the relay.
 - A short guide under `doc/` on when to set `compress`, what each protocol
   version receives, and the cost on the relay.
-
-## Required
-
-- [Migrate](/quest/m1/compress/migrate.md) - catalogs, stats, and timelines publish one compressed track; moq-flate, @moq/flate, and every `.z` name are gone
 
 ## Related
 

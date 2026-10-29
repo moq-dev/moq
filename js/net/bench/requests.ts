@@ -1,4 +1,4 @@
-/** Sweep request restart and cancellation over independent origin and waiter dimensions. */
+/** Sweep request restart, cancellation, and discovery settlement over independent origin and waiter dimensions. */
 import { Producer as Broadcast } from "../src/broadcast";
 import * as Epoch from "../src/epoch";
 import { Publisher as IetfPublisher } from "../src/ietf/publisher";
@@ -92,6 +92,40 @@ for (const unrelated of [8, 128, 2048])
 		console.log(`${unrelated},${waiters},${samples[3].toFixed(2)}`);
 		for (const request of held) request.close();
 		origin.close();
+	}
+
+// An initial set landing settles only the pending requests beneath its prefix, never every
+// request in the table, however many land in one task.
+console.log("pending,landed,settle_us");
+for (const pending of [128, 1024, 8192])
+	for (const landed of [1, 16, 128]) {
+		const samples: number[] = [];
+		for (let round = 0; round < 5; round++) {
+			const origin = new Producer();
+			const wire = wireOf(origin);
+			const detach = wire.attach(true);
+			const initialSets = new Map<Path.Valid, () => void>();
+			const stop = wire.interests((prefix, wanted) => {
+				if (wanted) initialSets.set(prefix, wire.snapshot(prefix));
+			});
+			const held = Array.from({ length: pending }, (_, i) => origin.request(Path.from(`held/${i}`)));
+			const touched = Array.from({ length: landed }, (_, i) => origin.request(Path.from(`touched/${i}`)));
+			await settle();
+			const start = performance.now();
+			for (let i = 0; i < landed; i++) initialSets.get(Path.from(`touched/${i}`))?.();
+			// The settlement is one microtask queued by the first landing, ahead of this one.
+			await Promise.resolve();
+			if (round > 0) samples.push((performance.now() - start) * 1000);
+			if (touched.some((request) => request.closed.peek() === undefined)) throw new Error("absence unsettled");
+			if (held.some((request) => request.closed.peek() !== undefined)) throw new Error("unsynced path settled");
+			for (const request of [...held, ...touched]) request.close();
+			for (const release of initialSets.values()) release();
+			stop();
+			detach();
+			origin.close();
+		}
+		samples.sort((a, b) => a - b);
+		console.log(`${pending},${landed},${samples[2].toFixed(2)}`);
 	}
 
 // Keep old instances on distinct same-epoch failovers, then cancel new demand.

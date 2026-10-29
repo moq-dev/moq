@@ -29,8 +29,6 @@ pub enum SubscribeFormat {
 #[derive(usage_rs::ValueEnum, Clone, Copy)]
 pub enum CatalogFormatArg {
 	Hang,
-	#[usage(name = "hangz")]
-	HangZ,
 	Msf,
 }
 
@@ -38,7 +36,6 @@ impl From<CatalogFormatArg> for CatalogFormat {
 	fn from(format: CatalogFormatArg) -> Self {
 		match format {
 			CatalogFormatArg::Hang => Self::Hang,
-			CatalogFormatArg::HangZ => Self::HangZ,
 			CatalogFormatArg::Msf => Self::Msf,
 		}
 	}
@@ -309,7 +306,7 @@ impl Subscribe {
 	}
 
 	/// Build the catalog stream, narrowed by the rendition selection flags. The
-	/// catalog source honors the requested format (e.g. compressed `HangZ` or `Msf`).
+	/// catalog source honors the requested format (e.g. `Msf`).
 	async fn stream(&self) -> anyhow::Result<catalog::Select<catalog::Consumer>> {
 		let consumer = self.source.catalog(self.catalog).await?;
 		Ok(consumer.select(self.args.selection()?))

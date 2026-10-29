@@ -39,6 +39,14 @@ Align the two stacks while each gets its impl:
   WebTransport-over-moq-quic library usable without MoQ, documented, no
   longer `#[doc(hidden)]`, with the same names and signatures in moq-tokio
   and moq-uring and the driver's `send::`/`recv::` shapes and errors.
+- moq-uring's header classification (`classify_uni`, `classify_bi` in
+  `web.rs`) re-polls every pending stream and rebuilds the pending `Vec`
+  whenever any stream arrives or wakes, so a peer that opens N streams with
+  partial headers costs O(N²) CPU, with N up to its stream limit. moq-tokio
+  keeps them in a `FuturesUnordered`, which polls only the woken ones. Bring
+  uring to the same shape. Test with pending × ready headers and fragmented
+  arrival, preserving FIN handling, the held control streams, and stream
+  credit (2026-10-27 audit, maintainer).
 - Report the public API impact per crate: deleted `Grouped`/`GroupedSend`
   and `web_transport_trait` impls, new `poll::Session` impls.
 
@@ -48,7 +56,6 @@ the same workload.
 ## Required
 
 - [Poll forms](/quest/m1/quic-api/poll.md) - the leak-free driver polls these impls forward to
-- [moq-net polls on kio waiters](/quest/m1/quic-api/net-poll.md) - the `&self, &kio::Waiter` trait shape these impls implement
 
 ## Related
 

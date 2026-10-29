@@ -65,7 +65,7 @@ fn a_connection_writes_a_trace() {
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("client socket");
 
-	let mut dial = quic::client::Config::new(server_addr, "localhost");
+	let mut dial = quic::client::Config::default();
 	dial.alpn = vec![ALPN.to_string()];
 	dial.verify = false;
 	dial.transport.qlog = Some(sink.clone());
@@ -80,7 +80,9 @@ fn a_connection_writes_a_trace() {
 
 	worker
 		.block_on(async move {
-			let conn = quic::client::connect(client_sock, &dial).await.expect("quic connect");
+			let conn = quic::client::connect(client_sock, &dial, server_addr, "localhost")
+				.await
+				.expect("quic connect");
 			assert_eq!(
 				web_transport_trait::poll::Session::protocol(&conn),
 				Some(ALPN),
