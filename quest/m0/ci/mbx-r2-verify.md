@@ -53,16 +53,21 @@ found through Git history (`previous_build_identities` in `mbx-cache-cargo`,
 `inherit_task_manifest` in `mbx-cache-core`). Without a prediction, a
 compilation is "not looked up".
 
-- Windows: 0 hits on 1.28.0, which reports that "a manifest predicting 124
-  compilations was loaded, but none matched this build". The preceding
-  `cargo install uniffi-bindgen-cpp` step recorded those 124, and the build
-  then published 1253 predictions, 124 plus its own 1129. So the install,
-  run from the checkout, appears to claim the workspace's identity first, and
-  mbx skips inheritance for an identity that already has a manifest. Confirm
-  it repeats on the 2026-10-28 Nightly before changing the step.
-- macOS: the build did try to inherit the previous Nightly's manifest, which
-  was the oversized `0d4f4e3f...`. The 2026-10-28 Nightly is the first fair
-  test.
+- Windows: 0 hits on 1.28.0 on both 2026-10-27 and
+  [2026-10-28](https://github.com/moq-dev/moq/actions/runs/40698329026), each
+  reporting that "a manifest predicting 124 compilations was loaded, but none
+  matched this build". The preceding `cargo install uniffi-bindgen-cpp` step,
+  run from the checkout, takes the workspace's identity and publishes those
+  124 first, and mbx skips inheritance for an identity that already has a
+  manifest. Reported upstream as
+  [jdx/mr-boxington#869](https://github.com/jdx/mr-boxington/issues/869).
+  Decided 2026-10-28 (maintainer): `platform.yml` now installs it after
+  `Rust compile and tests`, on Windows and macOS. Check that the first
+  scheduled Nightly after that change loads a manifest of more than 124
+  predictions and hits on Windows.
+- macOS: on 2026-10-28 the install (122 hits) also ran first and the build
+  hit 13, with 1565 compilations not looked up, which fits the same cause.
+  Judge it on the same Nightly as Windows.
 - Linux: Nightly's Linux jobs check out at depth 1, so mbx finds no earlier
   lockfile and reuses only a manifest written for the identical `Cargo.lock`.
   The doctest job hit 0 on 2026-10-24 and 2026-10-27, 115 on 2026-10-25, and
