@@ -44,12 +44,13 @@ sibling-restart tests, the moq-mux missing-sequence test,
 `js/common/worklet.test.ts`, and the IETF datagram range test in
 [moq-dev/moq#6593](https://github.com/moq-dev/moq/pull/6593)).
 
+The `rust-swapped -> js` and `rust -> js` browser audio timeouts were a lite-06
+catalog group dropped mid-read ending the player's catalog, fixed by
+[moq-dev/moq#6820](https://github.com/moq-dev/moq/pull/6820).
+
 Public API: none. Wire: none.
 
 ## Required
 
-- [FFI publisher audio gaps](/quest/m0/test-flakes-2/ffi-audio-gap.md) - interop tone checks stop finding gaps from FFI publishers
 - [IETF22 fallback](/quest/m0/test-flakes-2/ietf22-fallback.md) - an IETF22 browser viewer follows a fallback within the media lane's bound, keeping its session and its audio
-- [Swapped Rust to JS Opus](/quest/m0/test-flakes-2/swapped-js-opus.md) - the `rust-swapped -> js` interop cell stops timing out under load
-- [JS host-task yields follow the clock](/quest/m0/test-flakes-2/js-host-yields.md) - `Budget` and `nextTask` yield through the injected clock, so `Manual` tests stop racing them
-- [Fake timers to Manual](/quest/m0/test-flakes-2/fake-timers.md) - the remaining bun fake-timer tests run on the `Manual` clock
+- [Tests own their temp directories](/quest/m0/test-flakes-2/temp-paths.md) - concurrent test processes stop overwriting each other's fixed temp files

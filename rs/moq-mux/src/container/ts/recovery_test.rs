@@ -158,14 +158,73 @@ impl Encode {
 			"mpegts",
 			"pipe:1",
 		]);
-		let output = std::process::Command::new("ffmpeg")
-			.args(&args)
-			.output()
-			.expect("ffmpeg is in the dev shell");
-		let stderr = String::from_utf8_lossy(&output.stderr);
-		assert!(output.status.success() && stderr.is_empty(), "ffmpeg: {stderr}");
-		output.stdout
+		cached(&args, &[])
 	}
+}
+
+/// Run FFmpeg on `input` and return what it writes, failing on any error it logs.
+fn ffmpeg(args: &[&str], input: &[u8]) -> Result<Vec<u8>, String> {
+	use std::io::Write as _;
+	let mut child = std::process::Command::new("ffmpeg")
+		.args(args)
+		.stdin(std::process::Stdio::piped())
+		.stdout(std::process::Stdio::piped())
+		.stderr(std::process::Stdio::piped())
+		.spawn()
+		.expect("ffmpeg is in the dev shell");
+	let mut stdin = child.stdin.take().unwrap();
+	let output = std::thread::scope(|scope| {
+		// FFmpeg may stop reading at its first error, which the status reports.
+		scope.spawn(move || stdin.write_all(input));
+		child.wait_with_output().unwrap()
+	});
+	let stderr = String::from_utf8_lossy(&output.stderr);
+	if !output.status.success() || !stderr.is_empty() {
+		return Err(format!("FFmpeg failed ({}): {stderr}", output.status));
+	}
+	Ok(output.stdout)
+}
+
+/// [`ffmpeg`], run once per FFmpeg build for the same arguments and input. Nextest runs each
+/// test in a process of its own, so the clips and their reference decodes are kept beside the
+/// test binary, and the first process to need one makes it while the rest wait.
+fn cached(args: &[&str], input: &[u8]) -> Vec<u8> {
+	use std::hash::{Hash, Hasher};
+	static FFMPEG: std::sync::OnceLock<(std::path::PathBuf, String)> = std::sync::OnceLock::new();
+	let (dir, build) = FFMPEG.get_or_init(|| {
+		// The binary `Command` runs, named by its resolved path (in the Nix dev shell, a store
+		// path that changes with any of its inputs) and when it last changed.
+		let name = format!("ffmpeg{}", std::env::consts::EXE_SUFFIX);
+		let path = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+			.map(|dir| dir.join(&name))
+			.find(|path| path.is_file())
+			.expect("ffmpeg is in the dev shell");
+		let path = std::fs::canonicalize(path).unwrap();
+		let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+		let exe = std::env::current_exe().unwrap();
+		let dir = exe.parent().unwrap().with_file_name("recovery-ffmpeg");
+		std::fs::create_dir_all(&dir).unwrap();
+		(dir, format!("{} {modified:?}", path.display()))
+	});
+	let mut hasher = std::hash::DefaultHasher::new();
+	(build, args, input).hash(&mut hasher);
+	let path = dir.join(format!("{:016x}", hasher.finish()));
+
+	let lock = (std::fs::OpenOptions::new().create(true).truncate(false).write(true))
+		.open(path.with_extension("lock"))
+		.unwrap();
+	lock.lock().unwrap();
+	match std::fs::read(&path) {
+		Ok(output) => return output,
+		Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+		Err(err) => panic!("{}: {err}", path.display()),
+	}
+	let output = ffmpeg(args, input).unwrap();
+	// Renamed into place, so a process killed mid-write leaves no entry behind.
+	let partial = path.with_extension("partial");
+	std::fs::write(&partial, &output).unwrap();
+	std::fs::rename(&partial, &path).unwrap();
+	output
 }
 
 /// A generated clip, and the encodes its pictures come from.
@@ -176,7 +235,7 @@ struct Clip {
 }
 
 impl Profile {
-	/// The clip, generated once per process.
+	/// The clip, loaded once per process.
 	fn clip(self) -> &'static Clip {
 		static CLIPS: [std::sync::OnceLock<Clip>; 8] = [const { std::sync::OnceLock::new() }; 8];
 		CLIPS[self as usize].get_or_init(|| {
@@ -1078,7 +1137,11 @@ struct Decoded {
 /// Decode `ts` with software FFmpeg, its audio too unless `video_only`, failing on any error it
 /// logs. Pictures keep their own size, so a resolution change hashes each at its own.
 fn decode(ts: &[u8], video_only: bool) -> Result<Decoded, String> {
-	use std::io::Write as _;
+	parse(&ffmpeg(&decoder(video_only), ts)?, video_only)
+}
+
+/// The FFmpeg arguments [`decode`] runs with.
+fn decoder(video_only: bool) -> Vec<&'static str> {
 	let mut args = vec![
 		"-nostdin",
 		"-hide_banner",
@@ -1106,28 +1169,16 @@ fn decode(ts: &[u8], video_only: bool) -> Result<Decoded, String> {
 		args.extend(["-map", "0:a:0", "-c:a", "pcm_s16le"]);
 	}
 	args.extend(["-f", "framemd5", "pipe:1"]);
-	let mut child = std::process::Command::new("ffmpeg")
-		.args(&args)
-		.stdin(std::process::Stdio::piped())
-		.stdout(std::process::Stdio::piped())
-		.stderr(std::process::Stdio::piped())
-		.spawn()
-		.expect("ffmpeg is in the dev shell");
-	let mut stdin = child.stdin.take().unwrap();
-	let input = ts.to_vec();
-	let feed = std::thread::spawn(move || stdin.write_all(&input));
-	let output = child.wait_with_output().unwrap();
-	// FFmpeg may stop reading at its first error, which the status reports.
-	let _ = feed.join().unwrap();
-	let stderr = String::from_utf8_lossy(&output.stderr);
-	if !output.status.success() || !stderr.is_empty() {
-		return Err(format!("FFmpeg failed ({}): {stderr}", output.status));
-	}
+	args
+}
+
+/// What [`decoder`] wrote.
+fn parse(output: &[u8], video_only: bool) -> Result<Decoded, String> {
 	let mut decoded = Decoded {
 		pictures: Vec::new(),
 		samples: 0,
 	};
-	for line in String::from_utf8(output.stdout).unwrap().lines() {
+	for line in std::str::from_utf8(output).unwrap().lines() {
 		if line.starts_with("#tb 0:") {
 			assert_eq!(line, "#tb 0: 1/90000", "pictures are stamped at 90 kHz");
 		}
@@ -1162,7 +1213,7 @@ impl Reference {
 		// Each encode decoded on its own, from its start, keeping the pictures the clip took.
 		let source: Vec<(u64, String)> = (profile.clip().parts.iter())
 			.flat_map(|(ts, range)| {
-				let pictures = decode(ts, false).unwrap().pictures;
+				let pictures = parse(&cached(&decoder(false), ts), false).unwrap().pictures;
 				pictures.into_iter().filter(|(pts, _)| range.contains(pts))
 			})
 			.collect();

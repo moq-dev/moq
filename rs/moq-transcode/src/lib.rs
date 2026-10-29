@@ -1029,8 +1029,6 @@ mod tests {
 
 	/// A source that resizes mid-stream takes the ladder with it.
 	///
-	/// `moq_video::encode::publish_capture` opens its source twice by design (once
-	/// to probe the mode, once when the first subscriber arrives), and a window
 	/// A source that changes aspect ratio keeps every rung height while moving
 	/// every rung width, so a rung retires and its replacement serves the same
 	/// height. That replacement must not reuse the retired track's name: it is a

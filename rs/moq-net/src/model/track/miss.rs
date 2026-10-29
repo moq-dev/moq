@@ -12,7 +12,8 @@
 //!
 //! A start is no promise, since a group below it may still arrive late. A hole under it is
 //! asked at once, but a refusal is final only once the ledger gives up on it too; until
-//! then the live feed may still deliver it.
+//! then the live feed may still deliver it. Under a received copy's start, only what the
+//! reader may still want is a hole: see [`Misses::judge`].
 
 use std::{
 	collections::{BTreeMap, BTreeSet},
@@ -349,11 +350,17 @@ impl Misses {
 	}
 
 	/// Judge the holes in `target` the last probe has not, returning the runs to ask a
-	/// fill for. Gives up a run already stale under this reader's budget.
+	/// fill for. Gives up a run already stale under this reader's budget. `named` is the
+	/// lowest group the reader's ranges name, which may reach below the feed's start.
+	#[expect(
+		clippy::too_many_arguments,
+		reason = "one probe's inputs, borrowed apart from its cursor"
+	)]
 	pub fn judge(
 		&mut self,
 		state: &TrackState,
 		key: (u64, u64, Option<u64>),
+		named: Option<u64>,
 		mut target: impl FnMut(RangeInclusive<u64>) -> RangeInclusiveSet<u64>,
 		drift: &Drift,
 		given_up: &mut GivenUp,
@@ -491,9 +498,21 @@ impl Misses {
 			self.judged.insert(run.clone());
 		}
 		let start = state.start_sequence.unwrap_or(0);
-		// Below the start its publisher resolved from the budget, such a copy cannot tell a
-		// group a reader's budget reaches, so it leaves them to the feed's re-offer.
-		if state.fills_from_start && start > 0 {
+		let (stale_below, unasked) = match state.start_budget {
+			// Its publisher skipped every older group as stale under a budget no tighter
+			// than this reader's, so they are stale for it too.
+			Some(budget) if drift.budget <= budget => (start, false),
+			// Such a copy cannot tell a group a looser reader's budget reaches, so it leaves
+			// them to the feed's re-offer.
+			Some(_) => (0, state.fills_from_start),
+			// The feed began at the live edge or the floor the copy asked for, so older
+			// groups are history only a reader naming them asked for.
+			None => (
+				0,
+				state.fills_from_start || state.received && named.is_none_or(|named| named >= start),
+			),
+		};
+		if unasked && start > 0 {
 			candidates.remove(0..start);
 		}
 		for run in candidates.iter() {
@@ -556,8 +575,10 @@ impl Misses {
 		// budget is stale throughout.
 		let stale: Vec<ops::Range<u64>> = asks
 			.iter()
-			.filter(|run| state.drifted(run.end - 1, &drift.edge, drift.budget))
-			.cloned()
+			.filter_map(|run| match state.drifted(run.end - 1, &drift.edge, drift.budget) {
+				true => Some(run.clone()),
+				false => Some(run.start..run.end.min(stale_below)).filter(|run| !run.is_empty()),
+			})
 			.collect();
 		for run in stale {
 			asks.remove(run.clone());
@@ -824,6 +845,7 @@ mod tests {
 		let asks = misses.judge(
 			&state,
 			(0, 0, None),
+			None,
 			|span| [span].into_iter().collect(),
 			&drift,
 			&mut given_up,
@@ -862,6 +884,7 @@ mod tests {
 		misses.judge(
 			&state,
 			(0, 0, None),
+			None,
 			|_| panic!("the edge has not moved"),
 			&drift,
 			&mut given_up,
@@ -885,6 +908,7 @@ mod tests {
 		misses.judge(
 			&state,
 			(0, 0, None),
+			None,
 			|_| panic!("recreation extends no span"),
 			&drift,
 			&mut given_up,
@@ -925,6 +949,7 @@ mod tests {
 		let asks = misses.judge(
 			&state,
 			(0, 0, None),
+			None,
 			|span| [span].into_iter().collect(),
 			&drift,
 			&mut given_up,
@@ -957,6 +982,7 @@ mod tests {
 		let asks = misses.judge(
 			&state,
 			(0, 0, None),
+			None,
 			|_| panic!("the edge has not moved"),
 			&drift,
 			&mut given_up,
@@ -992,6 +1018,7 @@ mod tests {
 				.judge(
 					&state,
 					(0, 0, None),
+					None,
 					|span| [span].into_iter().collect(),
 					&drift,
 					&mut given_up,
@@ -1006,6 +1033,7 @@ mod tests {
 				.judge(
 					&state,
 					(0, 0, None),
+					None,
 					|_| panic!("an unchanged probe rebuilds no span"),
 					&drift,
 					&mut given_up,
@@ -1025,6 +1053,7 @@ mod tests {
 				.judge(
 					&state,
 					(0, 0, None),
+					None,
 					|_| panic!("a late arrival extends no span"),
 					&drift,
 					&mut given_up,
@@ -1040,6 +1069,7 @@ mod tests {
 		let asks = misses.judge(
 			&state,
 			(0, 0, None),
+			None,
 			|_| panic!("a due gap extends no span"),
 			&drift,
 			&mut given_up,

@@ -8,9 +8,7 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
-
 import "package:ffi/ffi.dart";
-
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -6591,6 +6589,13 @@ enum MoqProtocolKind {
   unknown,
   tooManyRequests,
   expired,
+  authTokenCacheOverflow,
+  malformedAuthToken,
+  unknownAuthTokenAlias,
+  invalidRequestId,
+  invalidPath,
+  invalidAuthority,
+  tooManyRequestUpdates,
 }
 
 class FfiConverterMoqProtocolKind {
@@ -6645,6 +6650,20 @@ class FfiConverterMoqProtocolKind {
         return LiftRetVal(MoqProtocolKind.tooManyRequests, 4);
       case 24:
         return LiftRetVal(MoqProtocolKind.expired, 4);
+      case 25:
+        return LiftRetVal(MoqProtocolKind.authTokenCacheOverflow, 4);
+      case 26:
+        return LiftRetVal(MoqProtocolKind.malformedAuthToken, 4);
+      case 27:
+        return LiftRetVal(MoqProtocolKind.unknownAuthTokenAlias, 4);
+      case 28:
+        return LiftRetVal(MoqProtocolKind.invalidRequestId, 4);
+      case 29:
+        return LiftRetVal(MoqProtocolKind.invalidPath, 4);
+      case 30:
+        return LiftRetVal(MoqProtocolKind.invalidAuthority, 4);
+      case 31:
+        return LiftRetVal(MoqProtocolKind.tooManyRequestUpdates, 4);
       default:
         throw UniffiInternalError(
           UniffiInternalError.unexpectedEnumCase,
@@ -21169,7 +21188,7 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqaudioconsumer_subscribe() !=
-      43304) {
+      10630) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqaudioencoder_new() != 52616) {
@@ -21253,7 +21272,7 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqvideoconsumer_subscribe() !=
-      44639) {
+      15507) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqvideoencoder_new() != 22531) {

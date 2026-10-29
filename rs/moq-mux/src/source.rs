@@ -6,7 +6,7 @@
 //! broadcast's own path and an [`moq_net::origin::Consumer`] to fetch the
 //! referenced broadcast from. [`Source`] bundles the two, and resolves every
 //! referenced broadcast through the same origin so
-//! [`request_broadcast`](moq_net::origin::Consumer::request_broadcast) deduplicates
+//! [`request`](moq_net::origin::Consumer::request) deduplicates
 //! shared subscriptions.
 
 use std::collections::HashMap;
@@ -55,7 +55,7 @@ impl Source {
 	/// `broadcast` is the catalog broadcast as resolved through `origin`: a rendition's relative
 	/// `broadcast` reference resolves against its [path](moq_net::broadcast::Info::path), and the
 	/// referenced broadcast is fetched via
-	/// [`origin.request_broadcast`](moq_net::origin::Consumer::request_broadcast), so it must be
+	/// [`origin.request`](moq_net::origin::Consumer::request), so it must be
 	/// reachable through `origin` (by exact path, or served by a dynamic handler). A standalone
 	/// broadcast has an empty path, so it is its own root and any `..` reference escapes.
 	pub fn new(origin: moq_net::origin::Consumer, broadcast: moq_net::broadcast::Consumer) -> Self {
@@ -140,18 +140,25 @@ impl Source {
 	/// The broadcast `path` is pinned to, or a lookup that waits for the path's first
 	/// announcement and pins its answer, either checked against `epoch` on every read.
 	pub(crate) fn request_path(&self, path: &moq_net::Path, epoch: Option<&moq_net::Epoch>) -> Binding {
-		let bound = match self.pins.lock().expect("pins poisoned").get(path) {
-			Some(pinned) => Bound::Ready(pinned.clone()),
+		let pinned = self.pins.lock().expect("pins poisoned").get(path).cloned();
+		let bound = match pinned {
+			Some(pinned) => Bound::Ready(pinned),
 			// Unpinned even with an epoch: an epochless route still answers, best effort, and
 			// the read refuses a route that proves another instance.
 			None => {
-				let mut routing = self.origin.routed_broadcast(path).into_inner();
+				let mut following = self.origin.follow(path, None);
 				// Issue the request now: a handler answers it whether or not anyone reads yet.
-				let _ = kio::Task::poll(&mut routing, &kio::Waiter::noop());
-				Bound::Requested {
-					routing: Box::new(Mutex::new(routing)),
-					pins: self.pins.clone(),
-					path: path.clone(),
+				match poll_first(&mut following, &kio::Waiter::noop()) {
+					// The follower hands an instance out once, so an answer on hand is pinned now.
+					Poll::Ready(Ok(broadcast)) => {
+						let mut pins = self.pins.lock().expect("pins poisoned");
+						Bound::Ready(pins.entry(path.clone()).or_insert(broadcast).clone())
+					}
+					_ => Bound::Requested {
+						following: Box::new(Mutex::new(following)),
+						pins: self.pins.clone(),
+						path: path.clone(),
+					},
 				}
 			}
 		};
@@ -342,7 +349,7 @@ pub(crate) fn check_epoch(
 /// A held broadcast or the retained result of one eagerly issued broadcast request.
 ///
 /// A pending request waits for a path nothing announces yet and rides out route churn until it
-/// resolves (see [`routed_broadcast`](moq_net::origin::Consumer::routed_broadcast)). Once the
+/// resolves (see [`follow`](moq_net::origin::Consumer::follow)). Once the
 /// path is pinned, reading the binding answers that pin and never looks the path up again, even
 /// after its publisher is replaced or goes. Issuing a request does not establish an epoch
 /// relationship with a separate catalog broadcast. A binding made with an epoch refuses a
@@ -360,9 +367,10 @@ pub struct Binding {
 enum Bound {
 	/// A broadcast the caller already holds.
 	Ready(moq_net::broadcast::Consumer),
-	/// A request issued when the binding was made, resolved once something announces the path.
+	/// A request issued when the binding was made, resolved once something announces the path,
+	/// or the failure it ended with.
 	Requested {
-		routing: Box<Mutex<moq_net::origin::Requesting>>,
+		following: Box<Mutex<Following>>,
 		/// Where the answer is pinned, the first for its path winning.
 		pins: Pins,
 		path: moq_net::Path,
@@ -390,17 +398,17 @@ impl Binding {
 	pub fn poll_broadcast(&self, waiter: &kio::Waiter) -> Poll<crate::Result<moq_net::broadcast::Consumer>> {
 		let broadcast = match &self.bound {
 			Bound::Ready(broadcast) => broadcast.clone(),
-			Bound::Requested { routing, pins, path } => {
+			Bound::Requested { following, pins, path } => {
+				// The follower stays locked until its answer is pinned: it hands each instance
+				// out once, so a concurrent read that polled it in between would wait for the next.
+				let mut following = following.lock().expect("following poisoned");
 				// Once a path is pinned, its pin is the answer: a request that raced another for
-				// the path takes the one pinned first, and the routing is never polled again, since
+				// the path takes the one pinned first, and the follower is never polled again, since
 				// it would wait out the gap after the pinned instance goes.
 				if let Some(pinned) = pins.lock().expect("pins poisoned").get(path) {
 					pinned.clone()
 				} else {
-					let broadcast = {
-						let mut routing = routing.lock().expect("routing poisoned");
-						ready!(kio::Task::poll(&mut *routing, waiter))?
-					};
+					let broadcast = ready!(poll_first(&mut following, waiter))?;
 					// The path's first answer is pinned even when it fails this binding's epoch, so
 					// no later reference resolves the path independently.
 					let mut pins = pins.lock().expect("pins poisoned");
@@ -417,6 +425,25 @@ impl Binding {
 	pub async fn broadcast(&self) -> crate::Result<moq_net::broadcast::Consumer> {
 		kio::wait(|waiter| self.poll_broadcast(waiter)).await
 	}
+}
+
+/// A binding's follower, or the failure it ended with.
+type Following = Result<moq_net::origin::Following, moq_net::Error>;
+
+/// Poll a binding's follower for its first instance, keeping the failure it ends with so every
+/// later read answers the same.
+fn poll_first(
+	following: &mut Following,
+	waiter: &kio::Waiter,
+) -> Poll<Result<moq_net::broadcast::Consumer, moq_net::Error>> {
+	let result = match following {
+		Ok(following) => ready!(following.poll_available(waiter)),
+		Err(err) => Err(err.clone()),
+	};
+	if let Err(err) = &result {
+		*following = Err(err.clone());
+	}
+	Poll::Ready(result)
 }
 
 /// Test helper: build an origin producer, spawning its driver on the ambient runtime.
@@ -437,10 +464,7 @@ pub(crate) fn produce_origin() -> moq_net::origin::Producer {
 #[cfg(test)]
 pub(crate) async fn resolved(origin: &moq_net::origin::Producer, path: &str) -> Source {
 	let consumer = origin.consume();
-	let broadcast = consumer
-		.request_broadcast(path, None)
-		.await
-		.expect("the broadcast resolves");
+	let broadcast = consumer.request(path, None).await.expect("the broadcast resolves");
 	Source::new(consumer, broadcast)
 }
 
@@ -547,7 +571,7 @@ mod tests {
 		let _old = origin.publish("live", Default::default()).unwrap();
 		settle().await;
 		let consumer = origin.consume();
-		let first = consumer.request_broadcast("live", None).await.unwrap();
+		let first = consumer.request("live", None).await.unwrap();
 
 		let new = origin.publish("live", Default::default()).unwrap();
 		let _late = new.create_track("late", None).unwrap();
@@ -577,7 +601,7 @@ mod tests {
 
 		let timeout = std::time::Duration::from_secs(5);
 		let consumer = subscriber.consume();
-		let catalog = tokio::time::timeout(timeout, consumer.routed_broadcast("a/pub"))
+		let catalog = tokio::time::timeout(timeout, consumer.follow("a/pub", None).unwrap().available())
 			.await
 			.expect("the catalog resolves")
 			.unwrap();

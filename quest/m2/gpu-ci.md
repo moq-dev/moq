@@ -19,7 +19,9 @@ skipping inside the Nix shell.
   and `safe::session::tests::start_session_refuses_held_frames` in `rs/moq-nvenc`
   need hardware and match none of them. Find them by
   their driver probes (`hw_available`, `driver_libs_present`, `Api::get` and
-  friends in `moq-nvenc` and `moq-video`). Recommendation: follow the
+  friends in `moq-nvenc` and `moq-video`, and `hardware_available` in
+  `moq-transcode`, whose `live_multi_rung_hardware` and
+  `end_to_end_hardware` pass on Linux without a GPU). Recommendation: follow the
   existing `#[ignore = "requires ..."]` convention (as `frame/vulkan_test.rs`
   does) and put them in `nvidia` test modules, so hosted CI reports them
   ignored instead of passed and one filter, `--run-ignored only -E

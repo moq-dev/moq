@@ -1387,13 +1387,24 @@ mod tests {
 
 	#[moq_clock::test]
 	async fn uri_address_rejects_setup_path_presence() {
-		for alpn in [ALPN_LITE_05, ALPN_LITE_06, ALPN_LITE_07_WIP] {
-			for path in ["", "/team/room"] {
-				let mut session = FakeSession::new(alpn, [lite05_setup(Some(path), None, None)]);
+		for version in [
+			Version::Lite(lite::Version::Lite05),
+			Version::Lite(lite::Version::Lite06),
+			Version::Lite(lite::Version::Lite07),
+			Version::Ietf(ietf::Version::Draft18),
+			Version::Ietf(ietf::Version::Draft22),
+		] {
+			let alpn = version.alpn();
+			for path in ["", "/team/room?jwt=other"] {
+				let setup = match version {
+					Version::Lite(_) => lite05_setup(Some(path), None, None),
+					Version::Ietf(version) => ietf_setup(version, Some(path)),
+				};
+				let mut session = FakeSession::new(alpn, [setup]);
 				session.address = crate::transport::Address::Uri;
 				let observed = session.clone();
 				let result = Server::new()
-					.with_versions(alpn.parse::<Version>().unwrap().into())
+					.with_versions(version.into())
 					.accept_request(moq_clock::now(), session)
 					.await;
 				assert!(
@@ -1407,10 +1418,27 @@ mod tests {
 
 	#[moq_clock::test]
 	async fn uri_address_accepts_setup_without_path() {
-		let mut session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, None)]);
-		session.address = crate::transport::Address::Uri;
-		let request = Server::new().accept_request(moq_clock::now(), session).await.unwrap();
-		assert_eq!(request.path(), "");
+		for version in [
+			Version::Lite(lite::Version::Lite05),
+			Version::Lite(lite::Version::Lite06),
+			Version::Lite(lite::Version::Lite07),
+			Version::Ietf(ietf::Version::Draft18),
+			Version::Ietf(ietf::Version::Draft22),
+		] {
+			let alpn = version.alpn();
+			let setup = match version {
+				Version::Lite(_) => lite05_setup(None, None, None),
+				Version::Ietf(version) => ietf_setup(version, None),
+			};
+			let mut session = FakeSession::new(alpn, [setup]);
+			session.address = crate::transport::Address::Uri;
+			let request = Server::new()
+				.with_versions(version.into())
+				.accept_request(moq_clock::now(), session)
+				.await
+				.unwrap();
+			assert_eq!(request.path(), "");
+		}
 	}
 
 	#[moq_clock::test]

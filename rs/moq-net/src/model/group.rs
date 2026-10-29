@@ -678,6 +678,21 @@ impl GroupState {
 		slots
 	}
 
+	/// Store a whole frame: count its bytes, extend the timeline, and charge its slot plus,
+	/// unless canonical content already owns the payload, its bytes.
+	///
+	/// Returns the coarse tick it stamped, like [`cache::Charge::add`].
+	fn commit(&mut self, entry: Entry) -> Option<u64> {
+		let size = entry.frame.payload.len() as u64;
+		if let Some(flate) = &mut self.flate {
+			flate.inflated += entry.inflated;
+		}
+		self.cache += size;
+		self.stamp(entry.frame.timestamp);
+		let slots = self.push(entry);
+		self.charge.add(slots + if self.content.is_none() { size } else { 0 })
+	}
+
 	/// Whether a compressed group's content failed to inflate.
 	fn malformed(&self) -> bool {
 		self.flate.as_ref().is_some_and(|flate| flate.plain.malformed())
@@ -1438,15 +1453,8 @@ impl Producer {
 		if let Err(err) = state.canonicalize(state.next_index, &mut entry) {
 			return Err(self.abort_conflict(state, err));
 		}
-		state.cache += size;
-		if let Some(flate) = &mut state.flate {
-			flate.inflated += inflated;
-		}
-		let slots = state.push(entry);
-		let charged = slots + if state.content.is_none() { size } else { 0 };
-		let now = state.charge.add(charged);
+		let now = state.commit(entry);
 		state.next_index = next_index;
-		state.stamp(timestamp);
 		let bound = state.settle(origin);
 		self.handle.alive.checked.store(true, Ordering::Relaxed);
 		self.advance_largest(&state);
@@ -1532,8 +1540,13 @@ impl Producer {
 		let mut latest = None;
 		let mut deflated = deflated.into_iter();
 		let arrived = super::clock::now();
+		// Validation is done, so the batch is taken by value: a conflict below fails the group,
+		// which the buffer need not survive, and moving each payload spares a refcount round trip.
+		// Only shared canonical content can refuse a frame, so only a group holding it prepares
+		// the whole batch before storing any; any other stores each frame as it goes.
+		let canonical = state.content.is_some();
 		let mut prepared = arrayvec::ArrayVec::<Entry, N>::new();
-		for (index, frame) in frames.filled().iter().enumerate() {
+		for (index, frame) in frames.drain().enumerate() {
 			let timestamp =
 				on_track(frame.timestamp, self.handle.track.timescale).expect("timestamp scale checked above");
 			let (payload, inflated) = match state.flate.is_some() {
@@ -1541,7 +1554,7 @@ impl Producer {
 					deflated.next().expect("one slice per frame"),
 					frame.payload.len() as u64,
 				),
-				false => (frame.payload.clone(), 0),
+				false => (frame.payload, 0),
 			};
 			let mut entry = Entry::plain(
 				Cached {
@@ -1551,23 +1564,18 @@ impl Producer {
 				},
 				inflated,
 			);
+			latest = latest.max(timestamp);
+			if !canonical {
+				now = state.commit(entry);
+				continue;
+			}
 			if let Err(err) = state.canonicalize(state.next_index + index, &mut entry) {
 				return Err(self.abort_conflict(state, err));
 			}
 			prepared.push(entry);
 		}
-		frames.drain().for_each(drop);
 		for entry in prepared {
-			let size = entry.frame.payload.len() as u64;
-			if let Some(flate) = &mut state.flate {
-				flate.inflated += entry.inflated;
-			}
-			state.cache += size;
-			state.stamp(entry.frame.timestamp);
-			latest = latest.max(entry.frame.timestamp);
-			let slots = state.push(entry);
-			let charged = slots + if state.content.is_none() { size } else { 0 };
-			now = state.charge.add(charged);
+			now = state.commit(entry);
 		}
 		state.next_index = next_index;
 		let bound = state.settle(origin);
@@ -1812,6 +1820,7 @@ impl Producer {
 			.as_ref()
 			.filter(|partial| !partial.scratch && state.content.is_some())
 			.map(|partial| partial.buf.shared());
+		let owned = owner.is_some();
 		let fields = partial.and_then(|partial| partial.fields);
 		let mut entry = Entry {
 			owner: Mutex::new(owner),
@@ -1819,7 +1828,7 @@ impl Producer {
 			fields,
 			inflated,
 		};
-		if entry.owner.lock().unwrap_or_else(PoisonError::into_inner).is_none() {
+		if !owned {
 			state.canonicalize(state.next_index - 1, &mut entry)?;
 		}
 		// The slot was reserved and charged by `charge_partial` above.
@@ -4189,6 +4198,29 @@ mod test {
 	/// A track is all timed or all untimed, so a frame that doesn't match it is refused.
 	#[test]
 	fn a_mismatched_frame_is_refused() {
+		for timed in [false, true] {
+			let mut group = if timed {
+				Info { sequence: 0 }.produce()
+			} else {
+				Info { sequence: 0 }.produce_untimed()
+			};
+			let mut frames = frame::Buffer::<2>::new();
+			frames
+				.push(Frame::new(timed.then_some(Timestamp::ZERO), Bytes::from_static(b"a")))
+				.unwrap();
+			frames
+				.push(Frame::new(
+					(!timed).then_some(Timestamp::ZERO),
+					Bytes::from_static(b"b"),
+				))
+				.unwrap();
+			assert!(matches!(group.write_frames(&mut frames), Err(Error::TimestampMismatch)));
+			assert_eq!(frames.len(), 2, "a refused tail leaves the whole batch intact");
+			assert_eq!(group.frame_count(), 0, "a refused tail publishes no prefix");
+			assert!(!group.is_aborted(), "a bad timestamp does not fail the group");
+			group.finish().unwrap();
+		}
+
 		let mut untimed = Info { sequence: 0 }.produce_untimed();
 		assert!(matches!(
 			untimed.write_frame(Timestamp::ZERO, Bytes::from_static(b"x")),
@@ -5867,34 +5899,37 @@ mod test {
 		assert!(matches!(read_plain(&mut consumer), Err(Error::Lagged)));
 	}
 
-	/// A frame another copy of the group holds differently is refused after compressing it,
-	/// so the refusal fails the group: its later frames would decompress against history no
-	/// reader gets. Written whole or in a batch.
+	/// A conflict with shared content fails the whole group, including when a batch's
+	/// prefix matched. A compressed copy cannot continue with its advanced encoder.
 	#[test]
-	fn a_refused_compressed_write_fails_the_group() {
-		let cache = cache::Track::new(cache::Pool::unbounded(), Default::default(), kio::Weak::new());
-		let info = track::Info::default().with_compress(true);
-		let mut first = Producer::new(Info::from(0u64), info.clone(), cache.clone());
-		first.write_frame(None, verbose(0)).unwrap();
-		let content = first.handle.activate_content().unwrap().unwrap();
-		let copy = || {
-			let copy = Producer::new(Info::from(0u64), info.clone(), cache.clone());
-			copy.handle.share_content(content.clone());
-			copy
-		};
+	fn a_refused_shared_write_fails_the_group() {
+		for compress in [false, true] {
+			let cache = cache::Track::new(cache::Pool::unbounded(), Default::default(), kio::Weak::new());
+			let info = track::Info::default().with_compress(compress);
+			let mut first = Producer::new(Info::from(0u64), info.clone(), cache.clone());
+			first.write_frame(None, verbose(0)).unwrap();
+			first.write_frame(None, verbose(1)).unwrap();
+			let content = first.handle.activate_content().unwrap().unwrap();
+			let copy = || {
+				let copy = Producer::new(Info::from(0u64), info.clone(), cache.clone());
+				copy.handle.share_content(content.clone());
+				copy
+			};
 
-		let mut whole = copy();
-		assert!(matches!(
-			whole.write_frame(None, verbose(10)),
-			Err(Error::ProtocolViolation)
-		));
-		assert!(whole.handle.is_aborted());
+			let mut whole = copy();
+			assert!(matches!(
+				whole.write_frame(None, verbose(10)),
+				Err(Error::ProtocolViolation)
+			));
+			assert!(whole.handle.is_aborted());
 
-		let mut batch = copy();
-		let mut frames = frame::Buffer::<1>::new();
-		frames.push(Frame::new(None, verbose(10))).unwrap();
-		assert!(matches!(batch.write_frames(&mut frames), Err(Error::ProtocolViolation)));
-		assert!(batch.handle.is_aborted());
+			let mut batch = copy();
+			let mut frames = frame::Buffer::<2>::new();
+			frames.push(Frame::new(None, verbose(0))).unwrap();
+			frames.push(Frame::new(None, verbose(10))).unwrap();
+			assert!(matches!(batch.write_frames(&mut frames), Err(Error::ProtocolViolation)));
+			assert!(batch.handle.is_aborted());
+		}
 	}
 
 	/// A received slice that inflates to other than its declared size fails the read.

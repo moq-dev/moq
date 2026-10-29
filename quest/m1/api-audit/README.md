@@ -11,7 +11,7 @@ to migrate.
 Non-goals: redesigning surfaces that already have their own quest
 ([subscribe ranges](/quest/m1/subscribe-ranges/README.md),
 [archives](/quest/m1/archive/README.md),
-[compressed tracks](/quest/m1/compress/README.md),
+[compressed tracks](/doc/concept/compression.md),
 [A/V clock](/quest/m1/av-clock.md)), and inherited debt that a later quest
 already reshapes.
 
@@ -42,7 +42,7 @@ Rules every child follows:
   bullet says how to migrate.
 
 The binary-to-flate fold was followed by flate's removal in the
-[compression migration](/quest/m1/compress/README.md), so moq-flate, `@moq/flate`, and
+[compression migration](https://github.com/moq-dev/moq/pull/7046), so moq-flate, `@moq/flate`, and
 `moq-mux::binary` have no API left to audit. hang's
 `Archive::replay_epoch` went with the root `archive` section in catalog HLS.
 
@@ -77,6 +77,9 @@ Rejected in planning:
 - [Bindings default to zero max delay](/quest/m1/api-audit/binding-max-delay.md) - a no-argument subscription skips superseded groups in every binding, as Rust, JS, and Python do, and no subscriber limit is asked for explicitly
 - [Demand is wanted, everywhere](/quest/m1/api-audit/wanted.md) - every `used`/`unused` pair becomes `wanted()` and `wanted_changed()`, and unused ones go
 - [One strict path rule](/quest/m1/api-audit/strict-paths.md) - `Relative` refuses empty segments, `Path` refuses non-canonical escapes, the error is `path::Error`, and auth mints only strict paths
+- [QMux datagrams obey or refuse their policy](/quest/m1/api-audit/qmux-datagrams.md) - `Session.datagrams` is the DOM interface, its high-water mark is live, and the inert settings throw
+- [No constructible internal handles](/quest/m1/api-audit/internal-constructors.md) - `Rendition`, `Lister`, `Arrivals`, and e2ee's generations get private constructors, and a lint rule stops new ones
+- [moq-congestion's first-publish names](/quest/m1/api-audit/congestion-names.md) - `bbr3::Config`, `cubic::Config`, `Metrics`, `Factory`, and no `into_any`
 
 ## Related
 

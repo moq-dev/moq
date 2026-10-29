@@ -1615,7 +1615,15 @@ impl Cluster {
 		}
 
 		// Build here so malformed API roots fail startup, before background work.
-		let http = if self.config.api.url.as_deref().is_some_and(connect_api_is_http) {
+		let http = if self
+			.config
+			.api
+			.url
+			.as_deref()
+			.map(connect_api_is_http)
+			.transpose()?
+			.unwrap_or(false)
+		{
 			let tls = self
 				.connect
 				.as_ref()
@@ -1901,16 +1909,13 @@ impl Cluster {
 	/// stale-if-error are handled by the HTTP cache middleware on `http`, so this
 	/// just issues the request and parses the (possibly cache-served) body.
 	async fn fetch_peer_list(http: &ClientWithMiddleware, url: Url) -> anyhow::Result<Vec<Peer>> {
-		let body = http
-			.get(url)
-			.send()
-			.await
-			.context("cluster.api.url request failed")?
-			.error_for_status()
-			.context("cluster.api.url returned an error status")?
-			.text()
-			.await
-			.context("failed to read cluster.api.url body")?;
+		let response = http.get(url).send().await.context("cluster.api.url request failed")?;
+		anyhow::ensure!(
+			response.status().is_success(),
+			"cluster.api.url returned {}",
+			response.status()
+		);
+		let body = response.text().await.context("failed to read cluster.api.url body")?;
 
 		serde_json::from_str(&body).context("cluster.api.url response is not a JSON array of peers")
 	}
@@ -2233,8 +2238,18 @@ fn strip_jwt(url: &mut Url) {
 
 /// Whether a `--cluster-api-url` source is an http(s) URL (otherwise it's
 /// treated as a local file path, which needs no TLS client).
-fn connect_api_is_http(source: &str) -> bool {
-	Url::parse(source).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+fn connect_api_is_http(source: &str) -> anyhow::Result<bool> {
+	let Ok(url) = Url::parse(source) else { return Ok(false) };
+	if url.scheme() == "http" {
+		let loopback = match url.host() {
+			Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+			Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+			Some(url::Host::Domain(host)) => host == "localhost",
+			None => false,
+		};
+		anyhow::ensure!(loopback, "--cluster-api-url requires HTTPS except on loopback");
+	}
+	Ok(matches!(url.scheme(), "http" | "https"))
 }
 
 /// Resolve a cluster peer to the URL we dial.
@@ -2423,7 +2438,7 @@ mod tests {
 			.expect("publish at the fleet path");
 		let subscriber = cluster.subscriber(&token).expect("subscribe grant").consume();
 		let broadcast = subscriber
-			.request_broadcast(".svc/foo", None)
+			.request(".svc/foo", None)
 			.await
 			.expect("resolves through the mount");
 		assert_eq!(broadcast.info().path.as_str(), ".svc/foo");
@@ -2483,25 +2498,22 @@ mod tests {
 
 		let path = moq_net::Path::from_static(".stats/node/test");
 		let consumer = cluster.origin.consume();
-		let route = tokio::time::timeout(std::time::Duration::from_secs(5), consumer.routed(&path))
-			.await
-			.expect("stats broadcast announced within 5s")
-			.expect("stats broadcast present");
-		assert!(route.epoch.is_some(), "stats announce under an epoch");
-		let broadcast = consumer
-			.request_broadcast(&path, None)
-			.await
-			.expect("stats broadcast resolves");
+		let broadcast = tokio::time::timeout(
+			std::time::Duration::from_secs(5),
+			consumer.follow(&path, None).unwrap().available(),
+		)
+		.await
+		.expect("stats broadcast announced within 5s")
+		.expect("stats broadcast resolves");
+		assert!(broadcast.info().epoch.is_some(), "stats announce under an epoch");
 
 		// Several publish intervals (1s each by default) after the handle went out
-		// of scope, the task is still running and its broadcast still open. The
-		// re-check is bounded: without the keepalive the broadcast is gone and
-		// `routed` waits forever, which must read as a failure rather
-		// than a hung test.
+		// of scope, the task is still running and its broadcast still announced: a
+		// request refuses a front whose route retracted.
 		tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
-		let still_live = tokio::time::timeout(std::time::Duration::from_secs(2), consumer.routed(&path)).await;
+		let still_live = consumer.request(&path, None).await;
 		assert!(
-			matches!(still_live, Ok(Some(_))),
+			still_live.is_ok(),
 			"stats broadcast unannounced after the producer handle was dropped: \
 			 the publish task stopped while the cluster kept serving"
 		);
@@ -3088,16 +3100,19 @@ mod tests {
 		assert!(pool.used() > 0, "writes charge the constructed cache pool");
 
 		let consumer = cluster.origin.consume();
-		tokio::time::timeout(Duration::from_secs(2), consumer.request_broadcast("cam", None))
+		tokio::time::timeout(Duration::from_secs(2), consumer.request("cam", None))
 			.await
 			.expect("broadcast resolves")
 			.expect("broadcast present");
 
 		let stats_path = moq_net::Path::from_static(".stats/node/test");
-		tokio::time::timeout(Duration::from_secs(5), consumer.routed(&stats_path))
-			.await
-			.expect("stats announced")
-			.expect("stats present");
+		tokio::time::timeout(
+			Duration::from_secs(5),
+			consumer.follow(&stats_path, None).unwrap().available(),
+		)
+		.await
+		.expect("stats announced")
+		.expect("stats present");
 	}
 
 	/// The reserved `cluster.id` 0 is rejected, since it cannot be excluded for loop
@@ -3475,6 +3490,60 @@ mod tests {
 			Some("https://api.example.com/cluster/connect")
 		);
 		assert_eq!(config.cluster.api.tls.root, vec![PathBuf::from("api.pem")]);
+	}
+
+	#[tokio::test]
+	async fn remote_plaintext_api_refuses_startup() {
+		let _ = moq_tokio::crypto::install_default();
+		for url in ["http://api.example.com/", "http://192.0.2.1/", "http://[2001:db8::1]/"] {
+			let mut config = Config::default();
+			config.api.url = Some(url.into());
+			let result = new_cluster(config)
+				.unwrap()
+				.with_connect(Default::default(), Default::default())
+				.start()
+				.await;
+			let Err(err) = result else { panic!("accepted {url}") };
+			assert!(err.to_string().contains("loopback"), "{err}");
+		}
+	}
+
+	#[test]
+	fn cluster_api_supports_loopback_http_and_local_files() {
+		for source in [
+			"http://localhost/",
+			"http://127.0.0.2/",
+			"http://[::1]/",
+			"https://api.example.com/",
+		] {
+			assert!(connect_api_is_http(source).unwrap(), "{source}");
+		}
+		for source in ["peers.json", "/etc/moq/peers.json", "file:///etc/moq/peers.json"] {
+			assert!(!connect_api_is_http(source).unwrap(), "{source}");
+		}
+		assert!(connect_api_is_http("http://localhost.example.com/").is_err());
+	}
+
+	#[tokio::test]
+	async fn cluster_api_rejects_redirect_bodies() {
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+		let _ = moq_tokio::crypto::install_default();
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let url = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
+		let server = async move {
+			let (mut stream, _) = listener.accept().await.unwrap();
+			let mut data = [0; 4096];
+			assert!(stream.read(&mut data).await.unwrap() > 0);
+			// No Location header: refusing to follow alone does not reject this body.
+			stream
+				.write_all(b"HTTP/1.1 302 Found\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]")
+				.await
+				.unwrap();
+		};
+		let tls = moq_tokio::tls::Connect::default().build().unwrap();
+		let client = crate::http_client::build(&tls, &[]).unwrap();
+		let (peers, ()) = tokio::join!(Cluster::fetch_peer_list(&client, url), server);
+		assert!(peers.unwrap_err().to_string().contains("302"));
 	}
 
 	/// Two in-process origins share broadcasts both ways over one
