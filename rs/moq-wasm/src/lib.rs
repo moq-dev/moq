@@ -160,10 +160,7 @@ impl Session {
 		let session = self.inner.clone();
 		let consumer = self.consumer.clone();
 		future_to_promise(async move {
-			let request = pin!(async {
-				consumer.routed(path.as_str()).await?;
-				consumer.request_broadcast(path.as_str(), None).await.ok()
-			});
+			let request = pin!(async { consumer.follow(path.as_str(), None).ok()?.available().await.ok() });
 			// The origin outlives the session, so its wait alone never ends on a close.
 			let closed = pin!(session.closed());
 			match select(request, closed).await {

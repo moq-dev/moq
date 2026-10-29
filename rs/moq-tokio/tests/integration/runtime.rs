@@ -86,7 +86,7 @@ fn sessions_without_a_runtime() {
 
 			announced.next().await.expect("origin closed");
 			let broadcast = consumer
-				.request_broadcast("test", None)
+				.request("test", None)
 				.await
 				.expect("announced broadcast resolves");
 			let mut track = broadcast

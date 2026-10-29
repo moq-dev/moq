@@ -42,9 +42,13 @@ relay bounds a sparse FETCH only if the model can request ranges:
   upstream's live group (which arrives via SUBSCRIBE), so it never blocks.
   moq-transport caps a FETCH at the Largest Object, so it can return the live
   group's existing prefix but never wait for its future objects. Downstream,
-  an IETF FETCH is served from the model's ranges, ending at the Largest
-  Object's group, which it reads whole even while open (maintainer,
-  2026-10-25): the cache cannot know an open group's real Largest Object.
+  our publishers answer only a one-group FETCH or fill and refuse wider ones
+  (maintainer, 2026-10-28,
+  [one group](/quest/m1/ietf-publisher-one-group.md)), until
+  [hole markers](/quest/m2/ietf-hole-marker.md) let a cache that knows every
+  group answer a range. A FETCH of the open largest group reads it whole
+  (maintainer, 2026-10-25): the cache cannot know an open group's real
+  Largest Object.
 - **Relative ends** (maintainer, 2026-10-11, superseding the 10-07 `Live`
   flag and closing #5085). Each range end is `Absolute(group)` or
   `Relative(n)`, naming the group n before the latest; either end may be
@@ -107,5 +111,4 @@ every sequence delivered or dropped.
 
 ## Related
 
-- [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - bounds upstream waiting independently of content age
 - [Rust groups by start](/quest/m1/time-addressing/model.md) - the cut reworks `Absolute(group)` ends and sequence-range drops onto times

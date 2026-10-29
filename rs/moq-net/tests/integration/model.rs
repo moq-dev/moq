@@ -29,7 +29,7 @@ fn origin_front_serves_media_with_only_explicit_polls() {
 	broadcast.announce(origin::Route::default()).unwrap();
 
 	// Resolving and subscribing pass through the origin's core front tasks.
-	let mut requesting = origin.consume().request_broadcast("room/live", None);
+	let mut requesting = origin.consume().request("room/live", None);
 	assert!(requesting.poll_ok(&waiter).is_pending());
 	driver.poll(now, &waiter).unwrap();
 	let receiving: broadcast::Consumer = ready(requesting.poll_ok(&waiter)).unwrap();
@@ -48,30 +48,28 @@ fn origin_front_serves_media_with_only_explicit_polls() {
 }
 
 #[test]
-fn routed_broadcast_resolves_with_only_explicit_polls() {
-	use kio::Task;
-
+fn follow_resolves_with_only_explicit_polls() {
 	let now = moq_net::time::Instant::now();
 	let waiter = kio::Waiter::noop();
 	let (origin, mut driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
 	driver.poll(now, &waiter).unwrap();
 
-	// Nothing covers the path yet: the first ask fails `Unroutable` and parks on the routes.
-	let mut routing = origin.consume().routed_broadcast("room/live");
-	assert!(routing.poll(&waiter).is_pending());
+	// Nothing covers the path yet: the follower waits for an announcement.
+	let mut following = origin.consume().follow("room/live", None).unwrap();
+	assert!(following.poll_available(&waiter).is_pending());
 	let broadcast = origin.create_broadcast("room/live").unwrap();
-	assert!(routing.poll(&waiter).is_pending());
+	assert!(following.poll_available(&waiter).is_pending());
 
-	// Announcing moves the routes, so the next poll asks again and the driver serves it.
+	// Announcing starts the path, so the next poll asks and the driver serves it.
 	broadcast.announce(origin::Route::default()).unwrap();
-	assert!(routing.poll(&waiter).is_pending());
+	assert!(following.poll_available(&waiter).is_pending());
 	driver.poll(now, &waiter).unwrap();
-	let resolved = ready(routing.poll(&waiter)).unwrap();
+	let resolved = ready(following.poll_available(&waiter)).unwrap();
 	assert_eq!(resolved.info().path.as_str(), "room/live");
 
-	// A closed origin ends a parked resolution.
-	let mut routing = origin.consume().routed_broadcast("room/other");
-	assert!(routing.poll(&waiter).is_pending());
+	// A closed origin ends a parked follower.
+	let mut following = origin.consume().follow("room/other", None).unwrap();
+	assert!(following.poll_available(&waiter).is_pending());
 	drop(driver);
-	assert!(matches!(ready(routing.poll(&waiter)), Err(Error::Closed)));
+	assert!(matches!(ready(following.poll_available(&waiter)), Err(Error::Closed)));
 }

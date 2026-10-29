@@ -36,8 +36,7 @@ fn origin(hop: u64) -> origin::Producer {
 
 async fn subscribe(relay: &origin::Producer) -> track::Subscriber {
 	let consumer = relay.consume();
-	consumer.routed("live").await.unwrap();
-	let remote = consumer.request_broadcast("live", None).await.unwrap();
+	let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
 	remote
 		.track("video")
 		.unwrap()

@@ -50,8 +50,6 @@ The epic's own work, once the children land:
 ## Required
 
 - [@moq/publish encodes while enabled](/quest/m1/eager-encode/js.md) - audio and video encoders drop the demand gate, with an on-demand opt-in
-- [moq-video captures while enabled](/quest/m1/eager-encode/video.md) - the camera stays open and encodes while enabled, with an on-demand opt-in
-- [moq-cli on-demand flag](/quest/m1/eager-encode/cli.md) - `moq publish` capture encodes always, unless `--on-demand`
 - [Raw audio on demand](/quest/m1/eager-encode/raw-audio.md) - audio encodes on demand again, from raw frames kept up to `maxAge`
 
 ## Related
