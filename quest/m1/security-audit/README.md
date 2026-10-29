@@ -55,7 +55,6 @@ Dropped, with reasons:
 
 ## Required
 
-- [SETUP Path refused on URL bindings](/quest/m1/security-audit/setup-path.md) - a WebSocket or WebTransport client that also sends a SETUP Path is closed with PROTOCOL_VIOLATION, the same in moq-tokio and moq-uring
 - [fMP4 import streams mdat](/quest/m1/security-audit/fmp4-stream-mdat.md) - a box header declaring a huge size cannot pin importer memory across segments
 - [MKV import streams blocks](/quest/m1/security-audit/mkv-stream-blocks.md) - a declared block, metadata master, or ignored element cannot pin importer memory
 - [moq-c handles wrap like PIDs](/quest/m1/security-audit/c-handle-wrap.md) - long-running hosts never exhaust handle IDs, and a wrap never reuses a live one
