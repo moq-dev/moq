@@ -3478,7 +3478,6 @@ mod test {
 		super::super::Reading {
 			estimate: super::super::Estimate::default().with_delay(std::time::Duration::from_millis(ms)),
 			period: Some(std::time::Duration::from_millis(10)),
-			framerate: false,
 		}
 	}
 
@@ -3609,6 +3608,33 @@ mod test {
 		assert!(wire(&catalog).audio.renditions["a"].bitrate > declared);
 		assert_eq!(msf_sent(&catalog), Some(0));
 		assert_eq!(msf_wire(&catalog).tracks[0].bitrate, declared);
+	}
+
+	/// Unhinted video settles with its bitrate, before its framerate window has closed, so MSF
+	/// declares the framerate absent and keeps it absent once hang measures one.
+	#[tokio::test(start_paused = true)]
+	async fn unhinted_video_declares_no_framerate() {
+		let (_broadcast, catalog, mut renditions) = estimating(&["v"]);
+		let v = &mut renditions[0];
+
+		// 25 fps in 2 s groups.
+		let mut estimator = super::super::Estimator::new();
+		for i in 0..=100u64 {
+			let ts = moq_net::Timestamp::from_micros(i * 40_000).unwrap();
+			if i % 50 == 0 {
+				estimator.cut(Some(ts));
+			}
+			estimator.write(ts, 1_000);
+			v.estimate(estimator.reading()).unwrap();
+			if i < 50 {
+				assert_eq!(msf_sent(&catalog), None, "frame {i} is inside the first group");
+			}
+		}
+		assert_eq!(wire(&catalog).video.renditions["v"].framerate, Some(25.0));
+		assert_eq!(msf_sent(&catalog), Some(0));
+		let track = &msf_wire(&catalog).tracks[0];
+		assert!(track.bitrate.is_some());
+		assert_eq!(track.framerate, None);
 	}
 
 	/// A track whose every estimated field is hinted has nothing to wait for.

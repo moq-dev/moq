@@ -195,7 +195,6 @@ impl Estimator {
 		Reading {
 			estimate: self.estimate(),
 			period: self.framerate.shortest,
-			framerate: self.framerate.measured,
 		}
 	}
 
@@ -220,18 +219,11 @@ pub(crate) struct Reading {
 	/// The shortest advance between frames, which a published `jitter` or `delay` rises in whole
 	/// steps of when no framerate says the frame duration.
 	pub period: Option<Duration>,
-	/// Whether the framerate's first window has closed. It opens on the first group boundary and
-	/// closes a [`RATE_WINDOW`] later.
-	pub framerate: bool,
 }
 
 impl From<Estimate> for Reading {
 	fn from(estimate: Estimate) -> Self {
-		Self {
-			estimate,
-			period: None,
-			framerate: false,
-		}
+		Self { estimate, period: None }
 	}
 }
 
@@ -338,8 +330,6 @@ struct Framerate {
 	/// Frames written since the window opened.
 	frames: u64,
 	max: Option<f64>,
-	/// Whether a window has closed, whether or not its rate snapped.
-	measured: bool,
 	/// The shortest advance of the highest timestamp: a frame's duration, or a reordered group's
 	/// span of them.
 	shortest: Option<Duration>,
@@ -380,7 +370,6 @@ impl Framerate {
 		{
 			self.max = Some(framerate);
 		}
-		self.measured = true;
 		self.open = Some(high);
 		self.frames = 0;
 	}
@@ -389,7 +378,6 @@ impl Framerate {
 	fn discontinuity(&mut self) {
 		*self = Self {
 			max: self.max,
-			measured: self.measured,
 			shortest: self.shortest,
 			..Self::default()
 		};

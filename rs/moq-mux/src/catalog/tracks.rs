@@ -734,11 +734,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 	/// Calling this before [`set`](Self::set) is not wasted: the measurement is remembered and seeds
 	/// the config once it lands.
 	pub(crate) fn estimate(&mut self, reading: impl Into<super::Reading>) -> crate::Result<()> {
-		let super::Reading {
-			estimate,
-			period,
-			framerate: rated,
-		} = reading.into();
+		let super::Reading { estimate, period } = reading.into();
 		if !C::detects() {
 			return Ok(());
 		}
@@ -746,10 +742,9 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 			self.detected = estimate;
 			return Ok(());
 		}
-		// The bitrate's first window closes on the first group boundary after a window of media, and
-		// a framerate to measure takes its own window after that.
-		let framerate = self.supplied.framerate.is_none() && msf_framerate::<C>() == Some(true);
-		let settles = !self.settled && estimate.bitrate.is_some() && (!framerate || rated);
+		// The bitrate's first window closes on the first group boundary after a window of media. An
+		// unhinted framerate takes its own window after that, so MSF declares it absent.
+		let settles = !self.settled && estimate.bitrate.is_some();
 		self.publish(estimate, period)?;
 		if settles {
 			self.settle()?;
