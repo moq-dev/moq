@@ -15,42 +15,29 @@ qmux crate.
 
 ## Plan
 
-Decided 2026-10-27 from the release-to-main API audit (maintainer picked each
-option):
+Implementation checkpoint 2026-10-29:
 
-- Today ([js/qmux/src/session.ts](/js/qmux/src/session.ts) `Datagrams`):
-  `incomingHighWaterMark` is copied into the readable's `highWaterMark` at
-  construction, so a later assignment does nothing. The audit reproduced
-  `incomingHighWaterMark = 1` still queueing two packets. The other three
-  fields are never read. No consumer in this repository or moq.pro sets any
-  of them, and nothing outside qmux imports `Datagrams`, `push`, or
-  `setMaxDatagramSize`.
-- **Live high-water mark, refuse the rest** (chosen over implementing all
-  four, which adds an age-stamped inbound queue and an outbound queue with no
-  consumer, and over refusing all four, which drops a cheap live-media
-  control). `push` drops once the queue length reaches the current
-  `incomingHighWaterMark`. Count the queue yourself instead of relying on the
-  stream's fixed `desiredSize`. Each of the other three becomes an accessor
-  that throws `NotSupportedError` for a non-default value and accepts the
-  default, so code written for the native interface that never changes them
-  keeps working.
-- The high-water mark setter follows the WebTransport draft: `NaN` or a
-  negative value throws `RangeError`, and a value below 1 is stored as 1, so
-  no assignment can disable dropping or drop everything. Lowering it applies
-  to later pushes; datagrams already queued stay until read.
-- **The DOM type is the public view** (chosen over a new qmux-owned
-  interface). Stop exporting `Datagrams` from
-  [js/qmux/src/index.ts](/js/qmux/src/index.ts). Declare `Session.datagrams`
-  as `WebTransportDatagramDuplexStream`. The restriction must hold at
-  runtime, not only in the types: `push`, the size update, and `close`
-  become `#` private members that the session reaches through module-private
-  functions assigned in a `static {}` block (the `Origin` pattern, as in
-  [no constructible internal handles](/quest/m1/api-audit/internal-constructors.md)),
-  with a private constructor.
-- Tests: a lowered high-water mark sheds later overflow, a raised one admits
-  more, `NaN` and negative values throw, reads drain and cancel the readable
-  cleanly after a change, and each refused setter throws while its default
-  is accepted.
+- The live inbound high-water mark, unsupported-policy refusal, and DOM-only
+  public/runtime view are implemented in JS QMux. The internal class has a
+  private constructor and runtime construction guard; only module-private
+  functions can deliver packets, update negotiated size, or end the receive
+  side. No expiry or outbound-queue machinery was added.
+- Reproduced the original live-policy failures before changing production
+  code. All 233 QMux tests now pass, including live lower/raise behavior,
+  backlog retention, draining, pending reads, cancellation, malformed policy
+  input, refused setters, failure, and runtime privacy.
+- Package type-check, build/publint, emitted-declaration consumer checks,
+  updated API report, and the receive-backlog benchmark pass. Local
+  self-review found no remaining QMux finding.
+- The full `quest gate just ci` attempt failed because the local mbx Cargo
+  shim reports `Argument list too long (os error 7)`. This prevents the WASM
+  build selected for JS dependents and the unrelated Rust test-build lint
+  regression from running. Other completed lanes passed. Do not change JS
+  QMux to work around this tool-launch failure.
+- Remaining: rerun the full local gate in a working build environment,
+  resolve relevant failures and review findings, then delete this quest and
+  its links and mark the PR ready. Keep the PR a draft until that validation
+  is complete. Do not merge, enqueue, or wait for online checks or reviews.
 
 Public API: breaking in `@moq/qmux` (the `Datagrams` export and its mutators
 go, and three setters now throw). The PR's Impact bullet says: stop
