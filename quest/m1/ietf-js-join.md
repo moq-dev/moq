@@ -30,7 +30,8 @@ Decided 2026-10-28 (maintainer), from [#7088](https://github.com/moq-dev/moq/iss
   its own. A refusal costs only that group's head, as in Rust
   ([#6407](https://github.com/moq-dev/moq/pull/6407)).
 - **No FETCH_OK deadline**, matching Rust: the joining FETCH lives as long as
-  the subscription. FILL_TIMEOUT is a separate publisher-side bound.
+  the subscription. Our publishers accept and ignore FILL_TIMEOUT
+  ([one group](/quest/m1/ietf-publisher-one-group.md)).
 - **Rust's strictness on duplicates.** A whole group from object 0 that
   arrives before the head wins and the FETCH is discarded. One that arrives
   after the head is refused.
@@ -41,9 +42,8 @@ Decided 2026-10-28 (maintainer), from [#7088](https://github.com/moq-dev/moq/iss
   draft-22 fill. The author keeps credit, and the review history stays with
   the PR.
 
-Update the notes this makes stale: [IETF fill timeout](/quest/m1/ietf-fill-timeout.md)'s
-"JS sends no IETF FETCH", and the interop README's claim that a JS subscriber
-requests neither a joining FETCH nor a fill.
+Update the note this makes stale: the interop README's claim that a JS
+subscriber requests neither a joining FETCH nor a fill.
 
 Tests: the unit tests in #7089 minus the knob, plus a draft-22 fill. The
 interop late-join lane passes with a JS subscriber against a strict publisher

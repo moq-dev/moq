@@ -68,7 +68,8 @@ SIZE="${INTEROP_SIZE:-320x240}"
 # Empty means "any reserved port"; INTEROP_PORT pins one instead.
 PORT="${INTEROP_PORT:-}"
 URL=""
-KEY="" # the HMAC key every cell's token is signed with (set once the relay's auth server starts)
+KEY=""         # the HMAC key every cell's token is signed with (set once the relay's auth server starts)
+METRICS_URL="" # the relay's internal /metrics, served only by an in-tree run's relay
 NEGATIVE=0
 MEDIA=0
 MEDIA_CASES=""
@@ -323,6 +324,9 @@ SUITE=interop
 DROP_VERSIONS=(moq-lite-05 moq-lite-06 moq-lite-07-wip)
 # The lite drafts the compressed-track lanes cross: lite-07 carries the flag, lite-06 gets inflated bytes.
 COMPRESS_VERSIONS=(moq-lite-07-wip moq-lite-06)
+# The compressed catalog's concurrent readers: lite-07 carries the flag, and lite-06 and a
+# moq-transport reader that does not offer FLATE share the relay's one inflated copy.
+CATALOG_VERSIONS=(moq-lite-07-wip moq-lite-06 moq-transport-22)
 
 # Every publisher in this checkout sends a tone per audio channel, and every subscriber decodes
 # AUDIO_MS of it for tone.py (the browser: its page) to check against the publisher's list. This
@@ -473,6 +477,7 @@ plan_pass() {
             record "not run" case=compress publisher=rust subscriber="$runtime" version="$version"
             record "not run" case=compress publisher="$runtime" subscriber=rust version="$version"
         done
+        record "not run" case="compressed catalog" publisher=rust subscriber="$runtime"
     done
     needs js-native-node || return 0
     for version in "${DROP_VERSIONS[@]}"; do
@@ -550,7 +555,7 @@ build_relay_cli() {
         exit 1
     }
     if [[ "$MEDIA" -eq 0 ]]; then
-        (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-cli --example interop-tail --example interop-audio --example interop-control --example interop-goaway --example interop-goaway-client --example interop-finish)
+        (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-cli --example interop-tail --example interop-catalog --example interop-audio --example interop-control --example interop-goaway --example interop-goaway-client --example interop-finish)
     fi
     [[ -n "$RELAY" ]] || RELAY="$TARGET_BASE/$PROFILE/moq-relay"
     # The `moq-cli` crate ships its binary as `moq` (a `[[bin]]` override).
@@ -858,6 +863,11 @@ if [[ "$COMPAT" -eq 1 ]]; then
 else
     sed -e "s|:4443\"|:${PORT}\"|g" -e "s|http://127.0.0.1:4440/|${AUTH_URL}|" \
         "$INTEROP_DIR/interop.toml" >"$HARNESS_RUN/relay.toml"
+    # The compressed-catalog lane reads the relay's inflate counter from /metrics, which counts
+    # only while stats are enabled.
+    harness_port metrics
+    METRICS_URL="http://127.0.0.1:${HARNESS_PORT}/metrics"
+    printf '\n[internal]\nlisten = "127.0.0.1:%s"\n\n[stats]\nenabled = true\n' "$HARNESS_PORT" >>"$HARNESS_RUN/relay.toml"
 fi
 # Connection spans and clean closes must survive an inherited warn-only filter.
 harness_spawn relay "$HARNESS_RUN/relay.log" env \
@@ -2192,6 +2202,86 @@ run_control_case() {
     fi
 }
 
+# The bytes the relay has inflated for plain readers, summed over every tier and role.
+relay_inflated() {
+    curl -sf --max-time 5 "$METRICS_URL" | awk '/^moq_relay_inflated_bytes_total\{/ { sum += $2 } END { print sum + 0 }'
+}
+
+# shellcheck disable=SC2329  # invoked indirectly via harness_spawn
+run_catalog_publisher() {
+    local fifo="$1"
+    shift
+    timeout -k 3 $((TIMEOUT * 2)) "$TARGET_BASE/$PROFILE/examples/interop-catalog" "$@" <"$fifo" 9>&-
+}
+
+# shellcheck disable=SC2329  # invoked indirectly via harness_spawn
+run_catalog_reader() {
+    local runtime="$1"
+    shift
+    case "$runtime" in
+        js-native-node) (cd "$CLIENTS/js-native" && timeout -k 3 "$TIMEOUT" node --import tsx catalog.ts "$@") ;;
+        js-native-bun) (cd "$CLIENTS/js-native" && timeout -k 3 "$TIMEOUT" bun catalog.ts "$@") ;;
+    esac
+}
+
+# A Rust publisher's compressed catalog reaches a native JS reader on each of CATALOG_VERSIONS at
+# once through the relay, which must inflate the stored DEFLATE group exactly once for the plain
+# readers: its inflate counter grows by the catalog's inflated size, not a multiple of it.
+run_catalog_fanout() {
+    local runtime="$1" started=$SECONDS pid reader version before after bytes from got want readers=() why=""
+    local name="catalog-$1" fifo="$LOGS/catalog-ack" broadcast="catalog-$1-$$-$RANDOM"
+    local cell=(case="compressed catalog" publisher=rust subscriber="$runtime" log="$LOGS/$name-pub.log")
+    if is_broken "$runtime"; then
+        echo "  FAIL  compressed catalog rust -> $runtime (client unavailable)"
+        record fail "${cell[@]}" detail="client unavailable"
+        overall=1
+        return
+    fi
+    mkfifo "$fifo"
+    exec 9<>"$fifo"
+    from=$(relay_next_line)
+    before=$(relay_inflated) || why="relay metrics unavailable"
+    # Subtree grants, which moq-transport's AUTH extension can carry too.
+    harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_catalog_publisher "$fifo" "$(token_url --publish "$broadcast/**")" "$broadcast"
+    pid="$HARNESS_PID"
+    for version in "${CATALOG_VERSIONS[@]}"; do
+        harness_spawn "$name-$version" "$LOGS/$name-$version.log" run_catalog_reader "$runtime" "$(token_url --subscribe "$broadcast/**")" "$broadcast" "$version"
+        readers+=("$HARNESS_PID")
+    done
+    for reader in "${readers[@]}"; do harness_wait "$reader" || true; done
+    for version in "${CATALOG_VERSIONS[@]}"; do
+        want="catalog compress=false video=hd,sd audio=en,fr"
+        [[ "$version" != moq-lite-07-wip ]] || want="catalog compress=true video=hd,sd audio=en,fr"
+        # Like run_native, a verified result survives the NAPI addon's exit crash.
+        grep -qx "$want" "$LOGS/$name-$version.log" || why="${why:-$version reader did not report: $want}"
+    done
+    printf 'clean end\n' >&9
+    harness_wait "$pid" || true
+    after=$(relay_inflated) || why="${why:-relay metrics unavailable}"
+    bytes=$(sed -n 's/^catalog bytes=\([0-9]*\)$/\1/p' "$LOGS/$name-pub.log")
+    got=$(relay_log_since "$from" | sed -n 's/.*conn{id=[0-9]* .*negotiated version=\([^ ]*\).*/\1/p' | sort | tr '\n' ' ')
+    if [[ -z "$why" ]] && ! grep -qx 'catalog acknowledged' "$LOGS/$name-pub.log"; then
+        why="publisher did not acknowledge"
+    elif [[ -z "$why" && "$got" != "moq-lite-06 moq-lite-07-wip moq-lite-07-wip moq-transport-22 " ]]; then
+        why="relay connections negotiated ${got:-nothing}"
+    elif [[ -z "$why" && "$((after - before))" != "$bytes" ]]; then
+        why="relay inflated $((after - before)) bytes, not the catalog's ${bytes:-?} once"
+    fi
+    if [[ -z "$why" ]]; then
+        echo "  PASS  compressed catalog rust -> $runtime (${CATALOG_VERSIONS[*]}; one ${bytes}-byte inflate)"
+        record pass "${cell[@]}" seconds=$((SECONDS - started))
+    else
+        echo "  FAIL  compressed catalog rust -> $runtime ($why)"
+        record fail "${cell[@]}" seconds=$((SECONDS - started)) detail="$why"
+        overall=1
+        for version in "${CATALOG_VERSIONS[@]}"; do cat "$LOGS/$name-$version.log"; done
+        cat "$LOGS/$name-pub.log"
+        harness_reap "$pid"
+    fi
+    exec 9>&-
+    rm "$fifo"
+}
+
 # This checkout's CLI FETCH and finite track tails in this pass, then the lite drop lanes.
 run_tails() {
     local runtime version
@@ -2224,7 +2314,7 @@ run_tails() {
             fi
         fi
     done
-    # The compress and drop lanes pin their own lite versions.
+    # The compress, compressed catalog, and drop lanes pin their own versions.
     [[ "$VERSION" == auto ]] || return 0
     for runtime in js-native-node js-native-bun; do
         needs "$runtime" || continue
@@ -2232,6 +2322,7 @@ run_tails() {
             run_tail_pair rust "$runtime" compress "$version"
             run_tail_pair "$runtime" rust compress "$version"
         done
+        run_catalog_fanout "$runtime"
     done
     if needs js-native-node; then
         for version in "${DROP_VERSIONS[@]}"; do

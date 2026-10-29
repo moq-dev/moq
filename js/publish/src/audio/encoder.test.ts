@@ -1,6 +1,7 @@
 import { describe, expect, mock, spyOn, test } from "bun:test";
 import { Micro, Milli } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
+import * as Container from "@moq/hang/container";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import { Signal } from "@moq/signals";
@@ -325,7 +326,7 @@ async function setup(order = new Order(), codec?: Codec, groupDuration?: Milli) 
 // resume. Written after the marker, they would put pre-gap media on the live edge, and a rounding
 // step below the marker aborts every subscriber. The resumed chunks have to carry the capture clock,
 // not the encoder's gap-blind one, or they trail the next gap's marker and are dropped as pre-gap.
-test("a demand gap marks where submitted audio ends and drops the chunks held across it", async () => {
+test("an on-demand gap marks where submitted audio ends and drops the chunks held across it", async () => {
 	using _webcodecs = installFakeWebCodecs();
 	using env = await setup();
 	const { track, rendition, feed, written, writes } = env;
@@ -929,10 +930,73 @@ test.each(["failure first", "config first"])(
 			expect(config?.track).toBeDefined();
 			expect(config?.track).not.toBe("audio");
 			expect(encoder.out.error.peek()).toBeUndefined();
-			expect(encoder.out.active.peek()).toBe(false);
+			// Encoding resumes on the fresh track without waiting for a subscriber.
+			expect(encoder.out.active.peek()).toBe(true);
 			expect(broadcast.net.peek()).toBe(net);
 		} finally {
 			catalogSubscriber?.close();
+			encoder.close();
+			broadcast.close();
+		}
+	},
+);
+
+// Audio encoded with nobody listening waits in the cache for a late subscriber's maxDelay, and the
+// last subscriber leaving ends no epoch. On demand, a subscriber finds only what its arrival started.
+test.each([false, true])(
+	"a late subscriber reaches audio encoded before it arrived unless on demand (%p)",
+	async (onDemand) => {
+		using _webcodecs = installFakeWebCodecs();
+		const broadcast = new Broadcast({
+			origin: new Moq.Origin.Producer(),
+			name: Moq.Path.from("eager.hang"),
+			onDemand,
+		});
+		const feed = new Feed();
+		const configuring = configured();
+		const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(feed) as never });
+		const discontinuity = spyOn(Container.Legacy.Producer.prototype, "discontinuity");
+		let late: Moq.Track.Subscriber | undefined;
+		try {
+			await configuring;
+			await settle();
+			const net = broadcast.net.peek();
+			if (!net) throw new Error("expected network broadcast");
+			expect(encoder.out.active.peek()).toBe(!onDemand);
+
+			// One 20ms Opus frame per push, each its own group.
+			let index = 0;
+			const push = async (count: number) => {
+				for (let i = 0; i < count; i++, index++) {
+					await feed.push({ timestamp: Micro(index * 20_000), channels: [new Float32Array(960)] });
+				}
+				await feed.drain();
+			};
+
+			await push(4); // unwatched: two written, two held
+			late = net.track("audio").subscribe({ maxDelay: Milli(10_000) });
+			await settle();
+			expect(encoder.out.active.peek()).toBe(true);
+			await push(3);
+
+			const group = await late.ordered().nextGroup();
+			if (!group) throw new Error("expected a group");
+			const frame = await group.readFrame();
+			if (!frame) throw new Error("expected a frame");
+			const [timestamp] = Moq.Varint.decode(frame.payload);
+			// On demand, nothing was submitted before the subscriber arrived.
+			expect(group.sequence).toBe(0);
+			expect(timestamp).toBe(onDemand ? 80_000 : 0);
+
+			// Only on demand does the last subscriber leaving end the epoch.
+			late.close();
+			late = undefined;
+			await settle();
+			expect(discontinuity).toHaveBeenCalledTimes(onDemand ? 1 : 0);
+			expect(encoder.out.active.peek()).toBe(!onDemand);
+		} finally {
+			discontinuity.mockRestore();
+			late?.close();
 			encoder.close();
 			broadcast.close();
 		}

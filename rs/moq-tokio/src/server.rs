@@ -2772,7 +2772,7 @@ mod tests {
 			.expect("origin closed");
 		assert_eq!(update.prefix.as_str(), "test");
 		assert!(active);
-		let broadcast = consumer.request_broadcast("test", None).await.expect("resolve");
+		let broadcast = consumer.request("test", None).await.expect("resolve");
 
 		let mut track = broadcast
 			.track("video")
