@@ -2158,7 +2158,7 @@ pub(crate) mod tests {
 			.await
 			.unwrap();
 		assert_ne!(next(&mut import).await, first, "the new instance has its own epoch");
-		let broadcast = origin.consume().request_broadcast("demo", None).await.unwrap();
+		let broadcast = origin.consume().request("demo", None).await.unwrap();
 		let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&broadcast).await.unwrap();
 		let catalog = catalogs.next().await.unwrap().expect("a catalog");
 		assert!(catalog.echo.is_some(), "the new instance solicits feedback too");
