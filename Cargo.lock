@@ -249,6 +249,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "approx"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cab112f0a86d568ea0e627cc1d6be74a1e9cd55214684db5561995f6dad897c6"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "arbitrary"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -841,6 +850,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba62675e8242a4c4e806d12f11d136e626e6c8361d6b829310732241652a178a"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "bench-harness"
+version = "0.0.1"
+dependencies = [
+ "codspeed-criterion-compat",
+ "criterion",
 ]
 
 [[package]]
@@ -1465,6 +1482,63 @@ dependencies = [
 ]
 
 [[package]]
+name = "codspeed"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e7c21807b937b8e535f2745cd83c525fc250524021cd662b9ba4d3e399bb504"
+dependencies = [
+ "anyhow",
+ "cc",
+ "colored",
+ "getrandom 0.4.3",
+ "glob",
+ "nix",
+ "serde",
+ "serde_json",
+ "statrs",
+]
+
+[[package]]
+name = "codspeed-criterion-compat"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a14939cf9e46182bdfbf6de618a8a110361c15a27eccff8f5ad4380249e9c14"
+dependencies = [
+ "clap",
+ "codspeed",
+ "codspeed-criterion-compat-walltime",
+ "colored",
+ "regex",
+]
+
+[[package]]
+name = "codspeed-criterion-compat-walltime"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af785573a72d17af663e661a45e1d617a2bab9f3a13a219ca0ae6ef9412ea1d8"
+dependencies = [
+ "anes",
+ "cast",
+ "ciborium",
+ "clap",
+ "codspeed",
+ "criterion-plot 0.5.0",
+ "is-terminal",
+ "itertools 0.10.5",
+ "num-traits",
+ "once_cell",
+ "oorandom",
+ "plotters",
+ "rayon",
+ "regex",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "tinytemplate",
+ "walkdir",
+]
+
+[[package]]
 name = "color"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1806,7 +1880,7 @@ dependencies = [
  "cast",
  "ciborium",
  "clap",
- "criterion-plot",
+ "criterion-plot 0.8.2",
  "itertools 0.13.0",
  "num-traits",
  "oorandom",
@@ -1818,6 +1892,16 @@ dependencies = [
  "serde_json",
  "tinytemplate",
  "walkdir",
+]
+
+[[package]]
+name = "criterion-plot"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b50826342786a51a89e2da3a28f1c32b06e387201bc2d19791f622c673706b1"
+dependencies = [
+ "cast",
+ "itertools 0.10.5",
 ]
 
 [[package]]
@@ -4340,10 +4424,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "is-terminal"
+version = "0.4.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
+dependencies = [
+ "hermit-abi",
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
+
+[[package]]
+name = "itertools"
+version = "0.10.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0fd2260e829bddf4cb6ea802289de2f86d6a7a690192fbe91b3f46e0f2c8473"
+dependencies = [
+ "either",
+]
 
 [[package]]
 name = "itertools"
@@ -4598,7 +4702,7 @@ dependencies = [
 name = "kio"
 version = "0.6.2"
 dependencies = [
- "criterion",
+ "bench-harness",
  "crossbeam-epoch",
  "futures",
  "loom",
@@ -5001,8 +5105,8 @@ version = "0.0.11"
 dependencies = [
  "async-trait",
  "axum",
+ "bench-harness",
  "bytes",
- "criterion",
  "futures",
  "kio 0.6.2",
  "moq-clock",
@@ -5024,10 +5128,10 @@ dependencies = [
 name = "moq-audio"
 version = "0.1.10"
 dependencies = [
+ "bench-harness",
  "block2 0.6.2",
  "bytes",
  "cpal",
- "criterion",
  "dispatch2",
  "hang",
  "kio 0.6.2",
@@ -5279,8 +5383,8 @@ version = "0.0.11"
 dependencies = [
  "aws-lc-rs",
  "base64 0.23.1",
+ "bench-harness",
  "bytes",
- "criterion",
  "hex",
  "kio 0.6.2",
  "moq-net",
@@ -5323,8 +5427,8 @@ name = "moq-gst"
 version = "0.4.12"
 dependencies = [
  "anyhow",
+ "bench-harness",
  "bytes",
- "criterion",
  "futures",
  "gst-plugin-version-helper",
  "gstreamer",
@@ -5390,8 +5494,8 @@ dependencies = [
 name = "moq-json"
 version = "0.5.8"
 dependencies = [
+ "bench-harness",
  "bytes",
- "criterion",
  "futures",
  "json-patch",
  "kio 0.6.2",
@@ -5428,9 +5532,9 @@ version = "0.10.11"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
+ "bench-harness",
  "bytes",
  "crc",
- "criterion",
  "ebml-iterable",
  "futures",
  "h264-parser",
@@ -5472,8 +5576,8 @@ name = "moq-net"
 version = "0.3.10"
 dependencies = [
  "arrayvec",
+ "bench-harness",
  "bytes",
- "criterion",
  "flate2",
  "futures",
  "getrandom 0.4.3",
@@ -5531,7 +5635,7 @@ dependencies = [
 name = "moq-pattern"
 version = "0.1.2"
 dependencies = [
- "criterion",
+ "bench-harness",
  "moq-pattern 0.1.2",
  "serde",
  "serde_json",
@@ -5553,9 +5657,9 @@ dependencies = [
  "arbitrary",
  "assert_matches",
  "aws-lc-rs",
+ "bench-harness",
  "bytes",
  "cpu-time",
- "criterion",
  "fastbloom",
  "getrandom 0.4.3",
  "hex-literal",
@@ -5598,9 +5702,9 @@ dependencies = [
  "aws-lc-rs",
  "axum",
  "axum-server",
+ "bench-harness",
  "bytes",
  "bytesize",
- "criterion",
  "futures",
  "h2",
  "hex",
@@ -5692,9 +5796,9 @@ name = "moq-rtmp"
 version = "0.3.11"
 dependencies = [
  "anyhow",
+ "bench-harness",
  "byteorder",
  "bytes",
- "criterion",
  "futures",
  "hang",
  "hmac 0.13.0",
@@ -5808,7 +5912,7 @@ dependencies = [
 name = "moq-stats"
 version = "0.2.12"
 dependencies = [
- "criterion",
+ "bench-harness",
  "futures",
  "moq-clock",
  "moq-json",
@@ -5957,8 +6061,8 @@ name = "moq-uring"
 version = "0.0.12"
 dependencies = [
  "anyhow",
+ "bench-harness",
  "bytes",
- "criterion",
  "http",
  "io-uring",
  "kio 0.6.2",
@@ -10056,6 +10160,16 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
+
+[[package]]
+name = "statrs"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a3fe7c28c6512e766b0874335db33c94ad7b8f9054228ae1c2abd47ce7d335e"
+dependencies = [
+ "approx",
+ "num-traits",
+]
 
 [[package]]
 name = "stats_alloc"

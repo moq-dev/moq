@@ -84,11 +84,11 @@ See the [epic](/quest/m1/unbounded-groups/README.md) for the decisions.
   object is `Evicted`.
 - Downstream encoders that roll groups by the removed constants (moq-json,
   moq-mux TS, moq-stats) keep their own local roll triggers if they still
-  need one. The [m1 compression migration](/quest/m1/compress/README.md)
+  need one. The [m1 compression migration](https://github.com/moq-dev/moq/pull/7046)
   deleted moq-flate; recheck the surviving JSON stream budget and track
   compression paths instead of retaining a deleted helper's cap.
 - Compressed groups keep the existing prefix-before-inflate contract
-  ([compressed tracks](/quest/m1/compress/README.md)). Today
+  ([compressed tracks](/doc/concept/compression.md)). Today
   `GroupState::inflate` refuses a nonzero cached offset. Front eviction must
   refill the needed compressed prefix before inflation or retain equivalent
   decoder state, with compressed storage, the shared inflated copy, and

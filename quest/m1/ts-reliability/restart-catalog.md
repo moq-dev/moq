@@ -9,8 +9,8 @@ mux-rate window, so subscribers lose only the splice, not the catalog hold.
 ## Plan
 
 Measured in [#7102](https://github.com/moq-dev/moq/issues/7102): a supervised
-restart cost a subscriber 2.8 s. 1.2 s was the old instance's tail (the
-[stitch catch-up](/quest/m1/ts-reliability/stitch-catch-up.md)). 1.6 s was
+restart cost a subscriber 2.8 s. 1.2 s was the old instance's tail, which
+[moq-dev/moq#7049](https://github.com/moq-dev/moq/pull/7049) dropped. 1.6 s was
 the restarted import holding its catalog for its first mux-rate window.
 
 Decided 2026-10-28 (maintainer): scoped to supervised restarts. The new

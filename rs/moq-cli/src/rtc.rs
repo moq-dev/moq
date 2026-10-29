@@ -115,19 +115,20 @@ pub async fn connect_import(target: ImportTarget, url: Url, epoch: moq_net::Epoc
 
 /// WHIP client: push a broadcast from the Origin to a remote (export).
 pub async fn connect_export(origin: moq_net::origin::Consumer, url: Url, name: String) -> anyhow::Result<()> {
-	// Confirm the broadcast is reachable (and wait for it to be announced) before dialing;
-	// the egress re-resolves it (and any referenced sibling broadcast) through the origin.
-	origin
+	// Wait for the broadcast to be announced before dialing; the egress resolves any
+	// referenced sibling broadcast through the same origin.
+	let broadcast = origin
 		.follow(name.as_str(), None)?
 		.available()
 		.await
 		.with_context(|| format!("failed to resolve broadcast `{name}`"))?;
+	let source = moq_mux::Source::new(origin, broadcast);
 
 	tracing::info!(url = %RedactedUrl::new(&url), %name, "WHIP client pushing");
 	notify_ready();
 
 	let client = moq_rtc::Client::new(moq_rtc::client::Config::default());
-	client.publish(url, origin, &name).await?;
+	client.publish(url, source).await?;
 	Ok(())
 }
 

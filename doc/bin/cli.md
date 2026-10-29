@@ -245,7 +245,11 @@ audio-device dependencies:
 cargo install moq-cli --no-default-features --features "quic,websocket,play,openh264"
 ```
 
-`moq play` skips disabled renditions. If none are enabled, it waits for a later catalog. Disabling the current rendition stops it and selects an enabled replacement.
+`moq play` skips disabled renditions when it picks one. If no enabled rendition
+matches its name and codec filters, it waits for a later catalog. Disabling the
+current rendition switches to an enabled one of its kind that matches the
+filters; with none, it stays subscribed, so re-enabling it (an unmute) plays at
+once.
 
 ## Capture
 
@@ -492,12 +496,13 @@ continuity error, and the rest carry on. It takes neither `--follow`,
 `--stitch` nor `--mux-rate`. Only the hang catalog names the track, so an
 `.msf` broadcast needs `--catalog-format hang`.
 
-A stdout export ends with the broadcast. `export ts --follow 10s` waits that
-long for the same publisher instance to come back, and carries on with the same
-stream. A return that refuses its catalog keeps it waiting for the next
-announcement; if the follow runs out first, it exits 1 with that refusal. One
-that goes before serving, such as one still routed through a dead session, is
-no return. A replacement (a restarted publisher, under a new
+A stdout export ends with the broadcast. A publisher that leaves still gets
+what the export buffered of it out on schedule first. `export ts --follow 10s`
+then waits that long for the same publisher instance to come back, and carries
+on with the same stream. A return that refuses its catalog keeps it waiting
+for the next announcement; if the follow runs out first, it exits 1 with that
+refusal. One that goes before serving, such as one still routed through a dead
+session, is no return. A replacement (a restarted publisher, under a new
 [epoch](/concept/moq-lite#publisher-epochs)) exits 1 unless `--stitch` follows
 it as a full program switch: a new PMT from its catalog, with every PID flagging
 the break. A stitch waits for the replacement's first catalog snapshot until it

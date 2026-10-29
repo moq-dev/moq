@@ -487,7 +487,7 @@ defaults a missing field to zero, so it can read an older relay.
 ## Encoding
 
 Every stats track is a [moq-json](/lib/rs/moq-json) snapshot track that sets
-the track's [compressed](/concept/moq-lite#subscriptions) flag, so a session
+the track's [compressed](/concept/compression) flag, so a session
 that can signal compression carries it DEFLATEd and every other reads an
 inflated copy. Stats frames change little between ticks, so the deltas and
 compression together cost a fraction of the full objects' bytes.

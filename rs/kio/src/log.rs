@@ -29,7 +29,7 @@ use std::{
 use crossbeam_epoch as epoch;
 use smallvec::SmallVec;
 
-use crate::sync::{Arc, AtomicPtr, AtomicU64, AtomicUsize, UnsafeCell};
+use crate::sync::{Arc, AtomicPtr, AtomicU64, AtomicUsize, UnsafeCell, fence};
 
 /// Slots in the first segment: one, since many logs never hold more.
 const FIRST_SEGMENT: usize = 1;
@@ -442,7 +442,7 @@ impl<T> Reader<T> {
 		}
 		Read {
 			reader: self,
-			_guard: guard,
+			_guard: ReadGuard { _pin: guard },
 		}
 	}
 }
@@ -470,7 +470,29 @@ impl<T> fmt::Debug for Reader<T> {
 /// drop it before parking.
 pub struct Read<'a, T> {
 	reader: &'a mut Reader<T>,
-	_guard: epoch::Guard,
+	_guard: ReadGuard,
+}
+
+/// The pin behind a [`Read`], released only after the read's accesses.
+///
+/// A wrapper rather than a `Drop` on `Read` itself, which would hold the `Reader` borrow
+/// until the end of the scope instead of the last use.
+struct ReadGuard {
+	_pin: epoch::Guard,
+}
+
+impl Drop for ReadGuard {
+	/// Order the read's accesses before whatever the thread pins next, then unpin.
+	///
+	/// The collector frees a segment once it sees every thread unpinned or pinned anew,
+	/// and the free must happen after the reads it waited out. Seeing the unpin, a
+	/// Release store, orders them. Seeing a later pin may not: off x86, crossbeam-epoch
+	/// 0.9 pins with a Relaxed store, which carries nothing of the pin before it. This
+	/// fence makes every later store to the thread's epoch carry these reads to the
+	/// collector's Acquire fence. On x86 it compiles to nothing.
+	fn drop(&mut self) {
+		fence(Ordering::Release);
+	}
 }
 
 impl<T> Read<'_, T> {
