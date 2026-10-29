@@ -585,6 +585,28 @@ test("each reader reads only its own ranges, whatever the union asks for", () =>
 	expect(hooks.tryRecvGroup(sparse, false)).toEqual({ kind: "done" });
 });
 
+test("an ordered reader keeps a group between its ranges until the cursor passes it", () => {
+	const producer = new TrackProducer("test");
+	const track = producer
+		.subscribe({
+			maxDelay: null,
+			ranges: [
+				{ start: { absolute: 0 }, end: { absolute: 1 } },
+				{ start: { absolute: 3 }, end: { absolute: 4 } },
+			],
+		})
+		.ordered();
+	for (const sequence of [0, 1]) producer.createGroup(sequence).finish();
+	expect(track.tryNextGroup()?.sequence).toBe(0);
+	expect(track.tryNextGroup()).toBeUndefined();
+
+	track.update({ maxDelay: null, ranges: [{ start: { absolute: 0 }, end: { absolute: 4 } }] });
+	expect(track.tryNextGroup()?.sequence).toBe(1);
+	track.close();
+	producer.finish();
+	producer.close();
+});
+
 test("a relative range counts back from the latest group, or waits for the first", () => {
 	const producer = new TrackProducer("test");
 	for (let sequence = 0; sequence < 5; sequence++) producer.createGroup(sequence).finish();

@@ -2988,15 +2988,10 @@ export class Subscriber {
 		for (let index = 0; ; ) {
 			const group = groups[index];
 			if (!group || (cursor.end !== undefined && group.sequence >= cursor.end)) break;
+			// Out of range for now, but kept until the cursor passes it: an anchor still
+			// resolving, or an update widening the ranges, may take it in.
 			if (!this.#window.contains(group.sequence)) {
-				// Kept while an anchor still resolves, which may take it in.
-				if (!this.#window.settled) {
-					index++;
-					continue;
-				}
-				// Out of range for now: an update taking it in offers it again from the cache.
-				groups.splice(index, 1);
-				group.close();
+				index++;
 				continue;
 			}
 			groups.splice(index, 1);

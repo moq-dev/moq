@@ -123,8 +123,8 @@ pub(in crate::model) struct Window {
 	/// A relative anchor waits on a first group, so nothing is filtered yet.
 	pending: bool,
 	/// The ranges, by index, whose time start waits on a group starting, so they read
-	/// nothing yet.
-	waiting: Vec<usize>,
+	/// nothing yet, with the latest group their relative end counts back from.
+	waiting: Vec<(usize, Option<u64>)>,
 	/// Nothing is left to resolve: see [`Self::is_settled`]. Kept so a read checks it once
 	/// per group, not once per range.
 	settled: bool,
@@ -363,7 +363,9 @@ impl Window {
 			return !self.pending;
 		}
 		let mut moved = false;
-		for index in std::mem::take(&mut self.waiting) {
+		// A relative end keeps counting back from the latest group it was asked against, not
+		// one that arrived while the start waited.
+		for (index, latest) in std::mem::take(&mut self.waiting) {
 			moved |= self.span(index, latest, holdings);
 		}
 		for span in &mut self.spans {
@@ -587,7 +589,7 @@ impl Window {
 		let (start, floored) = match start(range.start, latest, holdings) {
 			Start::At(start, floored) => (start, floored),
 			Start::Waiting => {
-				self.waiting.push(index);
+				self.waiting.push((index, latest));
 				return false;
 			}
 			Start::Pending => {
@@ -1147,6 +1149,26 @@ mod tests {
 		};
 		let window = Window::new(&ranges, Some(9), &groups).unwrap();
 		assert_eq!(window.resolved()[0], Some(Resolved { start: 0, end: None }));
+	}
+
+	/// A relative end counts back from the latest group it was asked against, however many
+	/// arrive while its time start waits.
+	#[test]
+	fn a_waiting_time_start_keeps_its_relative_end() {
+		let mut groups = Groups::new((2..11).map(|sequence| (sequence, Held::Pending)));
+		let ranges = [range(time(2500), Anchor::Relative(0))];
+		let mut window = Window::new(&ranges, Some(9), &groups).unwrap();
+		assert!(!window.settle(Some(10), &groups), "nothing started");
+
+		groups.held.insert(2, Held::Started(at(2000)));
+		assert!(window.settle(Some(10), &groups));
+		assert_eq!(
+			window.resolved()[0],
+			Some(Resolved {
+				start: 2,
+				end: Some(10)
+			})
+		);
 	}
 
 	#[test]

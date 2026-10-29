@@ -511,8 +511,11 @@ export class Window {
 	#runs: Run[] = [];
 	/** A relative anchor waits on a first group, so nothing is filtered yet. */
 	#pending = false;
-	/** The ranges, by index, whose time start waits on a group starting, so they read nothing yet. */
-	#waiting: number[] = [];
+	/**
+	 * The ranges, by index, whose time start waits on a group starting, so they read nothing yet,
+	 * with the latest group their relative end counts back from.
+	 */
+	#waiting: { index: number; latest: number | undefined }[] = [];
 	/** Nothing is left to resolve as groups arrive and start. */
 	#settled = false;
 
@@ -545,8 +548,9 @@ export class Window {
 		let moved = false;
 		const waiting = this.#waiting;
 		this.#waiting = [];
-		for (const index of waiting) {
-			// Its end resolved against `latest` now, as a relative start resolves once one exists.
+		// A relative end keeps counting back from the latest group it was asked against, not
+		// one that arrived while the start waited.
+		for (const { index, latest } of waiting) {
 			if (this.#span(index, latest, holdings)) moved = true;
 		}
 		for (const span of this.#spans) {
@@ -691,7 +695,7 @@ export class Window {
 		if (isEmpty(range)) return false;
 		const start = startOf(range.start, latest, holdings);
 		if (start === "waiting") {
-			this.#waiting.push(index);
+			this.#waiting.push({ index, latest });
 			return false;
 		}
 		const until = endOf(range.end, latest);

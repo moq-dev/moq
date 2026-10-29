@@ -200,6 +200,16 @@ test("a time start is the group containing it, and an end stops past it once a l
 	expect(new Window([{ start: time(1000) }], 4, complete).floor()).toBe(0);
 });
 
+test("a waiting time start keeps the relative end it was asked with", () => {
+	const groups = new Groups(Array.from({ length: 9 }, (_, index): [number, Held] => [index + 2, "pending"]));
+	const window = new Window([{ start: time(2500), end: { relative: 0 } }], 9, groups);
+	expect(window.settle(10, groups)).toBe(false);
+
+	groups.held.set(2, started(2000));
+	expect(window.settle(10, groups)).toBe(true);
+	expect(window.resolved()).toEqual([{ start: 2, end: 10 }]);
+});
+
 test("a time end settles once nothing below its end can arrive", () => {
 	const groups = new Groups([
 		[3, started(3000)],
