@@ -399,16 +399,16 @@ impl Binding {
 		let broadcast = match &self.bound {
 			Bound::Ready(broadcast) => broadcast.clone(),
 			Bound::Requested { following, pins, path } => {
+				// The follower stays locked until its answer is pinned: it hands each instance
+				// out once, so a concurrent read that polled it in between would wait for the next.
+				let mut following = following.lock().expect("following poisoned");
 				// Once a path is pinned, its pin is the answer: a request that raced another for
 				// the path takes the one pinned first, and the follower is never polled again, since
 				// it would wait out the gap after the pinned instance goes.
 				if let Some(pinned) = pins.lock().expect("pins poisoned").get(path) {
 					pinned.clone()
 				} else {
-					let broadcast = {
-						let mut following = following.lock().expect("following poisoned");
-						ready!(poll_first(&mut following, waiter))?
-					};
+					let broadcast = ready!(poll_first(&mut following, waiter))?;
 					// The path's first answer is pinned even when it fails this binding's epoch, so
 					// no later reference resolves the path independently.
 					let mut pins = pins.lock().expect("pins poisoned");

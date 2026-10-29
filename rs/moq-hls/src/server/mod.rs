@@ -262,7 +262,7 @@ impl Inner {
 /// Follow `name`'s instances into `followed` until nothing serves the path, then forget it, so the
 /// next request follows the path afresh. Holds both weakly, so it never keeps the server's state
 /// alive; dropping `followed` aborts it. `served` is the instance `followed` starts on, which the
-/// follower hands out first unless another took over since.
+/// follower hands out first unless another took over since, or folds away if it closed first.
 async fn run_follow(
 	inner: Weak<Inner>,
 	name: String,
@@ -277,7 +277,15 @@ async fn run_follow(
 				return Poll::Ready(None);
 			};
 			followed.forget_closed(waiter);
-			instances.poll_next(waiter).map(Some)
+			if let Poll::Ready(next) = instances.poll_next(waiter) {
+				return Poll::Ready(Some(next));
+			}
+			// The follower folds away an instance that started and ended before its first poll,
+			// so the served instance closing before it is handed out means nothing serves the path.
+			match &served {
+				Some(served) => served.poll_closed(waiter).map(|()| Some(Ok(follow::Event::End))),
+				None => Poll::Pending,
+			}
 		})
 		.await;
 		let (Some(inner), Some(followed)) = (inner.upgrade(), followed.upgrade()) else {
@@ -525,6 +533,24 @@ mod tests {
 
 		drop(new);
 		eventually(async || server.inner.broadcasts.lock().unwrap().is_empty()).await;
+	}
+
+	/// An instance that goes before the follower first runs is folded away by it, so the served
+	/// instance closing is what tells the server that nothing serves the path.
+	#[tokio::test(start_paused = true)]
+	async fn an_instance_gone_before_the_follower_runs_is_forgotten() {
+		let origin = produce_origin();
+		let server = Server::new(origin.consume(), Config::default());
+		let publication = origin
+			.publish("live", moq_net::origin::Route::default())
+			.expect("publish allowed");
+		settle().await;
+
+		// Nothing yields between spawning the follower and returning, so it has not run yet.
+		let broadcaster = server.broadcaster("live").await.expect("broadcast announced");
+		drop(publication);
+		eventually(async || server.inner.broadcasts.lock().unwrap().is_empty()).await;
+		assert!(broadcaster.is_closed());
 	}
 
 	/// A request that finds the listed instance closed before the follower does resolves the path

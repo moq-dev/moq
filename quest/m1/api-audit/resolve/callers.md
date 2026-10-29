@@ -25,6 +25,3 @@ List every caller in the PR with what it now uses. Run the affected packages'
 tests and `just test interop --all`.
 
 Public API: none beyond the callers' own surfaces. Wire: none.
-
-## Required
-
