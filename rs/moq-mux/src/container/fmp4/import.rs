@@ -1491,3 +1491,38 @@ impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {
 		}
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn importer() -> Import {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		Import::new(broadcast, catalog.reserve())
+	}
+
+	#[test]
+	fn skipped_boxes_do_not_retain_their_payload() {
+		for kind in [b"free", b"skip", b"sidx", b"emsg", b"uuid"] {
+			let mut import = importer();
+			let mut header = Vec::new();
+			mp4_atom::Header {
+				kind: (*kind).into(),
+				size: Some(1usize << 62),
+			}
+			.encode(&mut header)
+			.unwrap();
+			for byte in &header {
+				import.decode(&[*byte]).unwrap();
+			}
+			// Each call can be another segment: a never-ending ignored box must not
+			// pin that segment, or any earlier segment, in the importer's buffer.
+			for _ in 0..256 {
+				import.cut().unwrap();
+				import.decode(&[0xA5; 1024]).unwrap();
+				assert!(import.buffer.is_empty(), "{kind:?}: {} held bytes", import.buffer.len());
+			}
+		}
+	}
+}

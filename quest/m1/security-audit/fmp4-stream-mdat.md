@@ -25,12 +25,45 @@ frame cap so a sample can be large. Since
 [8d2fa6653a](https://github.com/moq-dev/moq/commit/8d2fa6653a) a fragment can
 hold several GOPs, so a fragment-sized cap would also refuse legal input.
 
-Open, for the maintainer before building: `moov` and `moof` are parsed whole
-today, so a header declaring a huge one still pins input. Bring options with
-a recommendation, such as parsing them incrementally (a `moof` is a run of
-small child boxes) or bounding them by the work they describe; a plain byte
-cap is ruled out above. Settle this together with the same question in
+Decided 2026-10-28 (AFK implementation choice, explicitly authorized in the
+implementation brief): parse metadata children incrementally so a `moov` or
+`moof` declaration cannot force whole-box buffering. Do not introduce a
+blanket byte cap. Apply the same principle to
 [MKV import streams blocks](/quest/m1/security-audit/mkv-stream-blocks.md).
+
+The draft adds a hostile ignored-box test that expects no retained input
+across chunks and segment boundaries. It has no production fix yet: the
+reproduction run could not enter the host's build gate and was stopped
+under the AFK instruction to stop stalled work. The test is expected to fail
+against the current importer; it has not been executed.
+
+Remaining implementation:
+
+- Read top-level headers incrementally and discard ignored bodies directly
+  from input. Count discarded bytes for moof-relative offsets, preserve
+  segment boundaries, and treat a zero-sized box as extending to EOF rather
+  than the end of a decode call. Cover split headers, malformed sizes, and
+  recovery at the next box boundary.
+- Parse metadata containers and their children incrementally, retaining only
+  fields used for track setup and sample resolution. Variable-sized leaves
+  need structural parsing too; moving the whole-box wait down one level is
+  not sufficient. mp4-atom 0.16.2 and upstream `main` expose header decoding,
+  but their body readers still buffer whole bodies.
+- Resolve every sample before publishing payload, preserving `Resolver` and
+  `Claimed` checks, then stream media into output frames, discarding gaps and
+  unselected samples. Preserve passthrough timing, edits, grouping, catalog
+  estimation, HLS records, and text reconstruction.
+- Settle non-monotonic byte layouts: the resolver currently accepts disjoint
+  runs whose byte order differs from decode order. A MoQ group permits only
+  one unfinished frame, so direct streaming cannot publish those samples in
+  decode order without retaining earlier input. Recommend refusing backwards
+  per-track ranges before publishing any fragment payload; interleaving
+  tracks and forward gaps remain supported. This input-contract decision is
+  left for review, not silently applied by the draft.
+- Add huge metadata/mdat, unfinished-sample, truncation, and cross-segment
+  tests against retained input and output-owned bytes, plus streamed-import
+  benchmarks. The existing frame cap remains owned by the unbounded-groups
+  work; do not substitute it for streaming.
 
 Keep `sample::Resolver`'s range checks and `Claimed`'s no-reuse rule. Tests
 feed a huge declared `moof`, `moov`, `mdat`, and skipped box in small chunks
