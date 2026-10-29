@@ -15,6 +15,12 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Moq from "@moq/net";
 import { install } from "@moq/web-transport";
 
+// An origin from either side of the `follow(path)` rename, since `latest` may predate it.
+type Resolver = {
+	follow?(path: Moq.Path.Valid): Moq.Origin.Requesting;
+	request(path: Moq.Path.Valid, options: { announced: true }): Moq.Origin.Requesting;
+};
+
 // globalThis.WebTransport = the polyfill (no-op if a native one already exists).
 // @moq/net's connect() reads globalThis.WebTransport at call time, so this just
 // has to run before run() below.
@@ -65,9 +71,12 @@ async function run(): Promise<void> {
 
 	// Wait for the broadcast to be announced before subscribing. Subscribing to a
 	// track on a broadcast the publisher hasn't announced yet races the relay,
-	// which resets the catalog stream (RESET_STREAM). `announced: true` folds that
-	// wait into the request; the outer timeout below bounds it.
-	const request = origin.request(Moq.Path.from(broadcast as string), { announced: true });
+	// which resets the catalog stream (RESET_STREAM). Following folds that wait
+	// into the request; the outer timeout below bounds it. Packages before
+	// `follow(path)` follow with `request(path, { announced: true })`.
+	const path = Moq.Path.from(broadcast as string);
+	const resolver = origin as unknown as Resolver;
+	const request = resolver.follow ? resolver.follow(path) : resolver.request(path, { announced: true });
 	try {
 		let bc = request.active.peek();
 		while (!bc) bc = await request.active.changed();

@@ -5328,7 +5328,6 @@ dependencies = [
  "uniffi 0.32.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "url",
  "web-async",
- "web-transport-trait",
  "web-transport-wasm",
 ]
 
@@ -5931,6 +5930,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "toml 1.1.6+spec-1.1.0",
  "tracing",
  "tracing-android",
@@ -6094,7 +6094,6 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-async",
- "web-transport-trait",
  "web-transport-wasm",
 ]
 
