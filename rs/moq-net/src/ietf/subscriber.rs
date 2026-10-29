@@ -3685,17 +3685,12 @@ impl Subscriber {
 							track_name.to_owned(),
 							requested,
 							timescale,
+							Some(Heading {
+								request_id,
+								fill: fill.clone(),
+							}),
 						);
-						// A join asks for the head of the group it lands in, which this
-						// subscription's own fill is already bringing. A FETCH racing it can
-						// cache that group first, and then the tail stream, which is what
-						// ends the group for live readers, is refused as a duplicate. So the
-						// miss waits for the head, and the cache answers it once that lands.
-						let heading = fill.clone();
-						group_fetches.push(async move {
-							kio::wait(|waiter| poll_headed(&heading, waiter)).await;
-							fetch.await
-						});
+						group_fetches.push(fetch);
 					}
 					End::Idle => {
 						tracing::debug!(broadcast = %crate::path::Rooted(self.origin.root(), broadcast_path), track = %track_name, "subscribe cancelled (idle)");
@@ -3914,9 +3909,13 @@ impl Subscriber {
 
 			match step {
 				Step::Fill(fill) => {
-					let fetch =
-						self.clone()
-							.serve_fill(broadcast_path.clone(), track_name.to_owned(), fill, idle.timescale);
+					let fetch = self.clone().serve_fill(
+						broadcast_path.clone(),
+						track_name.to_owned(),
+						fill,
+						idle.timescale,
+						None,
+					);
 					group_fetches.push(fetch);
 				}
 				Step::Subscribe => break true,
@@ -5275,25 +5274,53 @@ impl Subscriber {
 	/// group always goes alone: a run including the group its source is still writing would
 	/// hold the earlier groups until it finishes, or be cut short at the Largest Object by a
 	/// publisher following draft-22 section 9.11.
-	async fn serve_fill(self, broadcast: Path, name: String, fill: track::Fill, timescale: Option<Timescale>) {
+	///
+	/// `heading` is the subscription's own fill, when it may be bringing a joined group's
+	/// head. That group waits for it instead: a FETCH racing it can cache the group first,
+	/// and then the tail stream, which is what ends the group for live readers, is refused
+	/// as a duplicate. The cache answers the group once the head lands, and a fill that
+	/// settles without one leaves it to a FETCH. Only that group waits, and only while a
+	/// reader still wants it.
+	async fn serve_fill(
+		self,
+		broadcast: Path,
+		name: String,
+		fill: track::Fill,
+		timescale: Option<Timescale>,
+		heading: Option<Heading>,
+	) {
 		let fill = std::sync::Arc::new(fill);
 		let mut last = None;
 		while fill.is_used()
 			&& let Some(run) = fill.next_run()
 		{
-			let run = match fill.live_group() {
-				Some(live) if run.contains(&live) => {
-					let mut pieces = [run.start..live, live..live + 1, live + 1..run.end]
-						.into_iter()
-						.filter(|piece| !piece.is_empty());
-					let piece = match fill.order() {
-						track::Order::Ascending => pieces.next(),
-						track::Order::Descending => pieces.next_back(),
-					};
-					piece.expect("the run holds the live group")
-				}
-				_ => run,
+			let mut run = match fill.live_group() {
+				Some(live) => first_piece(run, live, fill.order()),
+				None => run,
 			};
+			if let Some(heading) = &heading
+				&& let Some(head) = heading.pending(&self.state)
+			{
+				if let Head::Group(group) = head {
+					run = first_piece(run, group, fill.order());
+				}
+				if head.overlaps(&run) {
+					let waited = kio::wait(|waiter| {
+						if let Poll::Ready(err) = fill.poll_aborted(waiter) {
+							return Poll::Ready(Err(err));
+						}
+						if fill.poll_unwanted_groups(run.clone(), waiter).is_ready() {
+							return Poll::Ready(Ok(()));
+						}
+						heading.poll_changed(&self.state, head, waiter).map(Ok)
+					})
+					.await;
+					if let Err(err) = waited {
+						fill.reject_groups(run, err);
+					}
+					continue;
+				}
+			}
 			// Every fetch answers its run, so the same one coming back is a bug; ending the
 			// fill names it dropped rather than fetching it forever.
 			if last.as_ref() == Some(&run) {
@@ -5895,6 +5922,74 @@ fn poll_headed(fill: &kio::Producer<Fill>, waiter: &kio::Waiter) -> Poll<()> {
 		Poll::Pending => Poll::Pending,
 		Poll::Ready(_) => Poll::Ready(()),
 	}
+}
+
+/// A subscription's own fill, which may still be bringing the head of the group it joined.
+struct Heading {
+	request_id: RequestId,
+	fill: kio::Producer<Fill>,
+}
+
+/// The group a subscription's fill may still bring a head for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Head {
+	/// A widening's fill awaits the answer that names its group, so it could be any.
+	Unnamed,
+	/// The group the subscription joined, whose head is on its way.
+	Group(u64),
+}
+
+impl Head {
+	fn overlaps(self, run: &std::ops::Range<u64>) -> bool {
+		match self {
+			Head::Unnamed => true,
+			Head::Group(group) => run.contains(&group),
+		}
+	}
+}
+
+impl Heading {
+	/// The group whose head the fill may still bring, or `None` once the head landed or
+	/// none is coming.
+	fn pending(&self, state: &Lock<State>) -> Option<Head> {
+		// The state lock first, as SUBSCRIBE_OK takes it to name the group and serve the fill.
+		let state = state.lock();
+		let largest = state
+			.subscribes
+			.get(&self.request_id)
+			.and_then(|held| held.fill_largest);
+		match *self.fill.read() {
+			Fill::Requested => Some(Head::Unnamed),
+			Fill::Serving(_) | Fill::Active => largest.map(Head::Group),
+			Fill::Ready { .. } | Fill::Done | Fill::Ended => None,
+		}
+	}
+
+	/// Ready once [`Self::pending`] no longer answers `head`.
+	fn poll_changed(&self, state: &Lock<State>, head: Head, waiter: &kio::Waiter) -> Poll<()> {
+		// Registered before reading, so a change after the read still wakes us. The group
+		// only changes with the fill's state.
+		let _ = self.fill.poll_ref(waiter, |_| Poll::<()>::Pending);
+		match self.pending(state) == Some(head) {
+			true => Poll::Pending,
+			false => Poll::Ready(()),
+		}
+	}
+}
+
+/// The first piece of `run` in `order` once `group` is split off into a run of its own.
+fn first_piece(run: std::ops::Range<u64>, group: u64, order: track::Order) -> std::ops::Range<u64> {
+	if !run.contains(&group) {
+		return run;
+	}
+	let mut pieces = [run.start..group, group..group + 1, group + 1..run.end]
+		.into_iter()
+		.filter(|piece| !piece.is_empty());
+	let piece = match order {
+		track::Order::Ascending => pieces.next(),
+		track::Order::Descending => pieces.next_back(),
+	};
+	piece.expect("the run holds the group")
 }
 
 /// A Normal object's timestamp: none on an untimed track, and required on a timed one,
@@ -15191,6 +15286,28 @@ mod joining_fetch_tests {
 		*fill.write().ok().unwrap() = Fill::Done;
 		settle().await;
 		assert_eq!(fetches(), 1, "a settled fill leaves the miss to a FETCH");
+	}
+
+	/// Only the joined group waits for the subscription's fill. A head that never arrives
+	/// leaves its fill outstanding for as long as the subscription lasts, which must not hold
+	/// back older groups it brings nothing for.
+	#[moq_clock::test]
+	async fn a_miss_for_older_history_skips_the_fill_wait() {
+		let version = Version::Draft22;
+		let largest = Some(ietf::Location { group: 4, object: 1 });
+		let run = JoinRun::start(version, None, subscribe_ok(version, largest), fetch_ok(version)).await;
+		let fetches = || {
+			decode_messages(&run.session.log, version)
+				.iter()
+				.filter(|(id, _)| *id == ietf::Fetch::ID)
+				.count()
+		};
+		assert!(run.fill_outstanding(), "the subscription asked for a fill");
+
+		let mut fetch = Box::pin(run._hold.1.fetch_group(3, None));
+		assert!(futures::poll!(fetch.as_mut()).is_pending());
+		settle().await;
+		assert_eq!(fetches(), 1, "group 3 is fetched without waiting for group 4's head");
 	}
 
 	/// A malformed answer to the joining FETCH is not a refusal: the peer broke the
