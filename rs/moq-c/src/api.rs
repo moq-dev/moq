@@ -721,62 +721,68 @@ pub struct moq_section {
 	pub json_len: usize,
 }
 
-/// A route advertisement: hops and a static cost.
+/// The length in bytes of an epoch's UUIDv7 text, which [moq_mint_epoch] writes.
+pub const MOQ_EPOCH_LEN: usize = 36;
+
+/// How a publication advertises its exact path: a static cost and the publisher epoch.
 ///
-/// Pair with [moq_publication_announce] or [moq_origin_requests]. Zeroed (NULL hops,
-/// hops_len 0, cost 0) is the default route. `hops` is borrowed for the duration
-/// of the call that reads it.
+/// Pass one to [moq_publication_announce]. The hop chain is the origin's to build,
+/// so a local publisher cannot claim relay hops it never took. Zeroed (cost 0, NULL
+/// epoch) is the default route. `epoch` is borrowed for the duration of the call.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct moq_announce_route {
+	/// Preference among routes covering the same prefix: lower wins. A publisher
+	/// sets its production cost here: zero for content it is already producing,
+	/// larger for content it would have to start producing on demand.
+	pub cost: u64,
+	/// The publisher instance the route serves, as UUIDv7 text, NOT NULL terminated,
+	/// or NULL (or empty) when unknown.
+	///
+	/// A publisher that can restart sets a fresh one per run from [moq_mint_epoch], so
+	/// viewers see a restart instead of a stalled broadcast. Routes with the same epoch
+	/// serve the same bytes, so redundant publishers share one. Among routes at a
+	/// prefix the newest epoch wins, and changing it is a `MOQ_ANNOUNCE_KIND_RESTART`.
+	pub epoch: *const c_char,
+	/// The length in bytes of `epoch`.
+	pub epoch_len: usize,
+}
+
+/// An observed route: hops, a static cost, and the publisher epoch.
 ///
-/// `cost` is the static production and link price; lower wins.
+/// Carried by [moq_announce_event]. Its pointers borrow the announcement's storage.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct moq_route {
-	/// Hop ids, oldest first. NULL when `hops_len` is 0. 0 is the anonymous
-	/// mark and is legal on a received chain.
+	/// Hop ids of the relay hops the route traversed, oldest first. 0 is the
+	/// anonymous mark, which ranks the route below every fully identified one.
+	/// A route announced on this origin has none.
 	pub hops: *const u64,
 	/// The number of entries in `hops`.
 	pub hops_len: usize,
 	/// Preference among routes covering the same prefix: lower wins.
 	pub cost: u64,
+	/// The publisher instance the route serves, as UUIDv7 text; empty when unknown.
+	pub epoch: moq_string,
 }
 
-impl Default for moq_route {
-	fn default() -> Self {
-		Self {
-			hops: std::ptr::null(),
-			hops_len: 0,
-			cost: 0,
-		}
-	}
-}
-
-/// Parse a [moq_route], treating NULL as the default.
+/// Parse a [moq_announce_route], treating NULL as the default.
 ///
 /// # Safety
-/// `route` may be NULL, or must point at a readable [moq_route] whose `hops`
-/// pointer is valid for `hops_len` elements.
-unsafe fn parse_route(route: *const moq_route) -> Result<moq_net::origin::Route, Error> {
+/// `route` may be NULL, or must point at a readable [moq_announce_route] whose `epoch`
+/// pointer is valid for `epoch_len` bytes.
+unsafe fn parse_announce_route(route: *const moq_announce_route) -> Result<moq_net::origin::Route, Error> {
 	let Some(route) = (unsafe { route.as_ref() }) else {
 		return Ok(moq_net::origin::Route::default());
 	};
-	let mut route_hops = moq_net::Hops::new();
-	if route.hops_len > 0 {
-		if route.hops.is_null() {
-			return Err(Error::InvalidPointer);
-		}
-		let hops = unsafe { std::slice::from_raw_parts(route.hops, route.hops_len) };
-		for id in hops {
-			let hop = if *id == 0 {
-				moq_net::Hop::UNKNOWN
-			} else {
-				moq_net::Hop::new(*id).map_err(|e| Error::InvalidConfig(e.to_string()))?
-			};
-			route_hops.push(hop).map_err(|e| Error::InvalidConfig(e.to_string()))?;
-		}
+	let mut out = moq_net::origin::Route::default().with_cost(moq_net::origin::Cost::new(route.cost));
+	if let Some(epoch) = unsafe { ffi::parse_str_optional(route.epoch, route.epoch_len)? } {
+		let epoch = epoch
+			.parse()
+			.map_err(|_| Error::InvalidConfig(format!("epoch {epoch:?} is not canonical UUIDv7 text")))?;
+		out = out.with_epoch(epoch);
 	}
-	Ok(moq_net::origin::Route::default()
-		.with_cost(moq_net::origin::Cost::new(route.cost))
-		.with_hops(route_hops))
+	Ok(out)
 }
 
 /// Which broadcasts [moq_origin_announced] lists.
@@ -836,6 +842,10 @@ pub struct moq_announce_event {
 
 	/// Which event this is.
 	pub kind: moq_announce_kind,
+
+	/// The route serving the prefix. On `MOQ_ANNOUNCE_KIND_END` it carries the last
+	/// advertised route.
+	pub route: moq_route,
 }
 
 /// Where a session is in its lifecycle, reported by [moq_connection_state].
@@ -1068,6 +1078,34 @@ pub unsafe extern "C" fn moq_versions(dst: *mut moq_string, count: usize) -> i32
 		}
 
 		Ok(VERSION_NAMES.len())
+	})
+}
+
+/// Mint a fresh publisher epoch from the wall clock and secure randomness, ordered newest last.
+///
+/// Writes its [MOQ_EPOCH_LEN] bytes of UUIDv7 text, NOT NULL terminated, to `dst`. Pass
+/// it as [moq_announce_route]'s `epoch` or to [moq_broadcast_request_prepare]; a
+/// publisher that can restart mints one per run.
+///
+/// Returns [MOQ_EPOCH_LEN] on success, or a negative code when `dst` is NULL or
+/// `dst_len` is shorter.
+///
+/// # Safety
+/// - `dst` must be NULL or point at `dst_len` writable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_mint_epoch(dst: *mut c_char, dst_len: usize) -> i32 {
+	ffi::enter(move || {
+		if dst.is_null() {
+			return Err(Error::InvalidPointer);
+		}
+		if dst_len < MOQ_EPOCH_LEN {
+			return Err(Error::InvalidConfig(format!(
+				"an epoch needs {MOQ_EPOCH_LEN} bytes, got {dst_len}"
+			)));
+		}
+		let dst = unsafe { std::slice::from_raw_parts_mut(dst.cast::<u8>(), MOQ_EPOCH_LEN) };
+		dst.copy_from_slice(moq_net::Epoch::mint().as_str().as_bytes());
+		Ok(MOQ_EPOCH_LEN)
 	})
 }
 
@@ -2173,19 +2211,20 @@ pub extern "C" fn moq_origin_close(origin: u32) -> i32 {
 
 /// Advertise a publication's exact path as a route.
 ///
-/// Announcing again re-prices the route in place. A NULL `route` uses the default
-/// (no hops, cost 0). Until announced, the broadcast is invisible and unroutable for
-/// local consumers and peers alike. Fails once the broadcast closed.
+/// Announcing again re-prices the route in place, or restarts it under a new epoch. A
+/// NULL `route` uses the default (cost 0, no epoch). Until announced, the broadcast is
+/// invisible and unroutable for local consumers and peers alike. Fails once the
+/// broadcast closed, or when `epoch` is not UUIDv7 text.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
 /// # Safety
-/// - `route` may be NULL, or must point at a readable [moq_route].
+/// - `route` may be NULL, or must point at a readable [moq_announce_route].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_publication_announce(publication: u32, route: *const moq_route) -> i32 {
+pub unsafe extern "C" fn moq_publication_announce(publication: u32, route: *const moq_announce_route) -> i32 {
 	ffi::enter(move || {
 		let publication = ffi::parse_id(publication)?;
-		let route = unsafe { parse_route(route)? };
+		let route = unsafe { parse_announce_route(route)? };
 		State::lock().publish.announce(publication, route)
 	})
 }
