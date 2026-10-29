@@ -17,9 +17,8 @@ child per distinct cause, each landing on its own. The PR gate keeps
 skipping benches and examples; a green Nightly catches them within a day.
 
 Decided 2026-10-27 (maintainer), from the coverage audit's triage of run
-[40506938673](https://github.com/moq-dev/moq/actions/runs/40506938673): six
-more children for the causes nothing owned. The three one-line breaks share
-one child rather than one each, and TS's stale env var rides along with them.
+[40506938673](https://github.com/moq-dev/moq/actions/runs/40506938673): more
+children for the causes nothing owned.
 
 This README's own work, after the children:
 
@@ -36,15 +35,12 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [kio's log survives Loom's eviction model](/quest/m0/nightly/loom-log.md) - the Loom causality violation in kio's log reader is fixed at its cause, possibly a use-after-free
 - [The software renderer tests both capability paths](/quest/m0/nightly/render-capabilities.md) - the software-renderer lane verifies output selection with and without DMA-BUF import support without requiring hardware the runner lacks
 - [The browser backend baseline completes on IETF22](/quest/m0/nightly/browser-baseline.md) - the WASM and UniFFI backend baseline completes every supported transport case without an internal error
 - [Resolve the paired catalog fanout regressions](/quest/m0/nightly/paired-shared.md) - the reported catalog fanout regressions are attributed and genuine extra costs are fixed with paired measurements
 - [Probing beside Cubic](/quest/m0/nightly/competing-cubic.md) - the `competing_cubic` probe test stays within its deadline budget
-- [Three mechanical scheduled-run breaks](/quest/m0/nightly/small-breaks.md) - Features' dead-code `refuse`, the stale drill mutation, and TS's stale `MOQ_TEST_RUNS`
-- [Software rendering runs every group](/quest/m0/nightly/render-sw.md) - the DMA-BUF assertion stops failing render-sw's first group under software Vulkan
 - [OBS TSan passes without a wall-clock bound](/quest/m0/nightly/obs-tsan.md) - `destroySource` asserts ordering instead of `elapsed < 500ms`
 - [Paired bench regressions bisected](/quest/m0/nightly/bench-regressions.md) - retirement/selection's +21-24% and two 10% rows fixed or shown to be noise
-- [Nightly browser legs pass](/quest/m0/nightly/browser-legs.md) - serve-bench's 0/1024 streams, wasm-baseline's missing frame, and Firefox's unclosed VideoFrame
+- [Firefox's player closes every VideoFrame](/quest/m0/nightly/firefox-videoframe.md) - the Media job's Firefox player stops leaking an unclosed VideoFrame
 - [Gate stops hanging](/quest/m0/nightly/gate-hang.md) - `just gate` finishes instead of hanging to the timeout, and a hang names its module
 - [moq-quic rustdoc](/quest/m0/nightly/quic-rustdoc.md) - `--all-features` rustdoc for moq-quic builds and a lane checks it

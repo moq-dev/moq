@@ -25,7 +25,3 @@ Decided 2026-10-27 (maintainer):
   `cargo deny` and alert through `alert.yml`.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [cargo deny passes](/quest/m0/nightly/cargo-deny.md) - the Rust audit these join
