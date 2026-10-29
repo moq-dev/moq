@@ -11292,7 +11292,7 @@ async fn a_switch_follows_the_last_pat_out() {
 
 	let (new, mut new_catalog) = publish_live::<tscat::Ext>(&origin, route());
 	let mut audio = aac_rendition(&mut new.broadcast().clone(), &mut new_catalog, "b.aac");
-	let replacement = origin.consume().request_broadcast("live", None).await.unwrap();
+	let replacement = origin.consume().request("live", None).await.unwrap();
 	let stream = crate::catalog::Consumer::new(&replacement, Default::default())
 		.await
 		.unwrap();
