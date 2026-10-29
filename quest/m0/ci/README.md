@@ -138,3 +138,4 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Padding runs](/quest/m0/ci/quic-padding.md) - moq-quic parses a PADDING run as one frame, keeping the padding stats' meaning
 - [tracing-test filter](/quest/m0/ci/tracing-filter.md) - moq-tokio's tests stop forcing every crate to format at TRACE
 - [Stats oversize](/quest/m0/ci/stats-oversize.md) - moq-stats refuses an oversized plain snapshot before parsing it back
+- [Cargo aliases in nested checkouts](/quest/m0/ci/cargo-alias-strings.md) - `cargo build-ffi` and `cargo moq` work from a worktree nested inside another checkout

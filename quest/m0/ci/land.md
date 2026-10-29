@@ -82,6 +82,10 @@ Decided 2026-10-26 (maintainer):
   review, and moq-bot joins that bypass list here. Decide with the bypass list
   whether `main` keeps deploying to `publish`, or publishing narrows to
   `release` and release tags. Ask the maintainer; settings changes are theirs.
+- The gate tests each PR on the latest `main`, not the PR's own base. On
+  2026-10-29 [moq-dev/moq#7162](https://github.com/moq-dev/moq/pull/7162)
+  passed its own CI but broke in the queue on API renames that landed after
+  its last base merge; that is the case the gate must catch before `main`.
 
 Work in this repository:
 
