@@ -51,7 +51,7 @@ impl<'a> Message<'a> for TrackStatus<'a> {
 
 		// Only the opt-out is worth bytes, and an older peer would read the
 		// parameter as unknown, which is a protocol violation.
-		let include_properties = (!self.properties_wanted && Filter::is_draft22(version)).then_some(false);
+		let include_properties = (!self.properties_wanted && Filter::is_draft20(version)).then_some(false);
 		let epoch = self.epoch.clone();
 		encode_params!(w, version,
 			0x35 => include_properties,
@@ -177,7 +177,7 @@ mod tests {
 		assert_eq!(decoded.track_name, "video");
 	}
 
-	const ALL: [Version; 2] = [Version::Draft18, Version::Draft22];
+	const ALL: [Version; 3] = [Version::Draft18, Version::Draft20, Version::Draft22];
 
 	/// INCLUDE_PROPERTIES only exists from draft-22, so the opt-out is dropped before it,
 	/// and the default (1) is never written.
@@ -195,7 +195,7 @@ mod tests {
 				let wire = encode_message(&msg, version);
 
 				let decoded: TrackStatus = decode_message(&wire, version).unwrap_or_else(|e| panic!("{version}: {e}"));
-				let expected = wanted || !Filter::is_draft22(version);
+				let expected = wanted || !Filter::is_draft20(version);
 				assert_eq!(decoded.properties_wanted, expected, "{version} wanted={wanted}");
 			}
 		}

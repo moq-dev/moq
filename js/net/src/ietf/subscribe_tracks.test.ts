@@ -20,7 +20,7 @@ import { Subscribe } from "./subscribe.ts";
 import { PublishSkipped, SubscribeTracks } from "./subscribe_tracks.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
 
-const drafts = [Version.DRAFT_18, Version.DRAFT_22];
+const drafts = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22];
 
 /** A client and server WebTransport, connected to each other. */
 type Pair = { client: WebTransport; server: WebTransport };
@@ -118,7 +118,7 @@ function fixture(
 
 async function publishOk(stream: Stream, version: IetfVersion) {
 	const parameters = new Parameters();
-	if (version < Version.DRAFT_22) parameters.forward = false;
+	if (version < Version.DRAFT_20) parameters.forward = false;
 	await stream.writer.u53(RequestOk.id);
 	await new RequestOk({ parameters }).encode(stream.writer, version);
 }

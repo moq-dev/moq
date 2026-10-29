@@ -265,7 +265,7 @@ pub(crate) mod request {
 	mod tests {
 		use super::*;
 
-		const ALL: [Version; 2] = [Version::Draft18, Version::Draft22];
+		const ALL: [Version; 3] = [Version::Draft18, Version::Draft20, Version::Draft22];
 
 		const KINDS: [Kind; 6] = [
 			Kind::Subscribe,

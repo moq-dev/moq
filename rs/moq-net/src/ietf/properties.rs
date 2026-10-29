@@ -490,7 +490,7 @@ mod tests {
 
 	#[test]
 	fn publisher_priority_is_bounded_to_a_byte() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let mut buf = Vec::new();
 			Encoder::new(&mut buf, version.into()).varint(0x0eu64).unwrap();
 			Encoder::new(&mut buf, version.into()).varint(256u64).unwrap();

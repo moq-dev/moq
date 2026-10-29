@@ -249,13 +249,13 @@ impl<'a> Message<'a> for Publish<'a> {
 		// PROTOCOL_VIOLATION), and from draft-22 one of the subscription's parameters, which
 		// moved here. The publisher's preference is a DEFAULT_PUBLISHER_GROUP_ORDER track
 		// property instead.
-		let draft22 = Filter::is_draft22(version);
+		let draft20 = Filter::is_draft20(version);
 		encode_params!(w, version,
 			0x09 => self.largest_location,
 			0x10 => self.forward,
-			0x20 => self.subscriber_priority.filter(|_| draft22),
-			0x21 => self.filter.filter(|_| draft22),
-			0x22 => self.group_order.filter(|_| draft22),
+			0x20 => self.subscriber_priority.filter(|_| draft20),
+			0x21 => self.filter.filter(|_| draft20),
+			0x22 => self.group_order.filter(|_| draft20),
 		);
 
 		// Track Properties are the final field, so nothing may follow.
@@ -278,15 +278,15 @@ impl<'a> Message<'a> for Publish<'a> {
 		// session instead of letting the request reach NOT_SUPPORTED. The timeouts are
 		// dropped.
 		decode_params!(r, version,
-			0x02 => _object_delivery_timeout: Option<u64> where Filter::is_draft22(version),
+			0x02 => _object_delivery_timeout: Option<u64> where Filter::is_draft20(version),
 			0x03 => authorization_token: Vec<super::token::RequestToken>,
-			0x06 => _subgroup_delivery_timeout: Option<u64> where Filter::is_draft22(version),
+			0x06 => _subgroup_delivery_timeout: Option<u64> where Filter::is_draft20(version),
 			0x08 => _expires: Option<u64>,
 			0x09 => largest_location: Option<Location>,
 			0x10 => forward: Option<bool>,
-			0x20 => subscriber_priority: Option<u8> where Filter::is_draft22(version),
-			0x21 => filter: Option<Filter> where Filter::is_draft22(version),
-			0x22 => group_order: Option<GroupOrder> where Filter::is_draft22(version),
+			0x20 => subscriber_priority: Option<u8> where Filter::is_draft20(version),
+			0x21 => filter: Option<Filter> where Filter::is_draft20(version),
+			0x22 => group_order: Option<GroupOrder> where Filter::is_draft20(version),
 		);
 		let properties = Properties::decode(r, version)?;
 		// Last, so a malformed field closes the session before a token refusal.
@@ -327,7 +327,7 @@ impl<'a> Message<'a> for PublishOk {
 		match version {
 			// Draft-22 moved the subscription parameters out of PUBLISH_OK; they belong to
 			// PUBLISH and REQUEST_UPDATE now, so a PUBLISH_OK carries none of them.
-			_ if Filter::is_draft22(version) => encode_params!(w, version,),
+			_ if Filter::is_draft20(version) => encode_params!(w, version,),
 			_ => {
 				// GROUP_ORDER left PUBLISH_OK in draft-22. Sending it there is a parameter
 				// on the wrong message, which closes the session.
@@ -354,12 +354,12 @@ impl<'a> Message<'a> for PublishOk {
 		// moved the subscription parameters off PUBLISH_OK, GROUP_ORDER
 		// included.
 		decode_params!(r, version,
-			0x02 => _delivery_timeout: Option<u64> where !Filter::is_draft22(version),
+			0x02 => _delivery_timeout: Option<u64> where !Filter::is_draft20(version),
 			0x06 => _subgroup_delivery_timeout: Option<u64> where matches!(version, Version::Draft18),
 			0x08 => _expires: Option<u64>,
-			0x10 => forward: Option<bool> where !Filter::is_draft22(version),
-			0x20 => subscriber_priority: Option<u8> where !Filter::is_draft22(version),
-			0x21 => filter: Option<Filter> where !Filter::is_draft22(version),
+			0x10 => forward: Option<bool> where !Filter::is_draft20(version),
+			0x20 => subscriber_priority: Option<u8> where !Filter::is_draft20(version),
+			0x21 => filter: Option<Filter> where !Filter::is_draft20(version),
 			0x22 => group_order: Option<GroupOrder> where matches!(version, Version::Draft18),
 			0x32 => new_group: Option<u64> where matches!(version, Version::Draft18),
 		);
@@ -507,7 +507,7 @@ mod tests {
 			reason_phrase: "".into(),
 		};
 
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			assert!(done(0x2).end(version).is_ok(), "{version:?}");
 			assert!(
 				matches!(done(0x1).end(version), Err(crate::Error::Unauthorized)),
@@ -558,7 +558,7 @@ mod tests {
 
 	#[test]
 	fn publish_priority_property_bytes_on_every_draft() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let mut msg = Publish {
 				request_id: RequestId(1),
 				track_namespace: Path::from_static("ns"),

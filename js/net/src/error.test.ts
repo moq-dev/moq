@@ -375,7 +375,7 @@ test("toStreamCode: a control timeout keeps its own code", () => {
 	expect(toStreamCode(timeout)).toBe(StreamCode.ControlTimeout);
 
 	// The moq-transport registry has no value for it, so every draft reads it as INTERNAL_ERROR.
-	for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 		expect(toStreamCode(timeout, { version })).toBe(StreamCode.Internal);
 	}
 

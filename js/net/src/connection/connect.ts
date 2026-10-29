@@ -96,6 +96,7 @@ const VERSIONS: Record<string, { alpn: string; setup?: Lite.Version }> = {
 	"moq-lite-02": { alpn: Lite.ALPN, setup: Lite.Version.DRAFT_02 },
 	"moq-lite-01": { alpn: Lite.ALPN, setup: Lite.Version.DRAFT_01 },
 	"moq-transport-22": { alpn: Ietf.ALPN.DRAFT_22 },
+	"moq-transport-20": { alpn: Ietf.ALPN.DRAFT_20 },
 	"moq-transport-18": { alpn: Ietf.ALPN.DRAFT_18 },
 };
 
@@ -107,6 +108,7 @@ const DEFAULT_VERSIONS = Object.keys(VERSIONS).filter((name) => name !== "moq-li
 // it knows and the server pick one.
 const QMUX: Record<string, QmuxVersion | QmuxVersion[] | null> = {
 	[Ietf.ALPN.DRAFT_22]: "qmux-01",
+	[Ietf.ALPN.DRAFT_20]: "qmux-01",
 	[Ietf.ALPN.DRAFT_18]: "qmux-01",
 };
 
@@ -494,9 +496,11 @@ async function negotiate(
 	const ietf =
 		protocol === Ietf.ALPN.DRAFT_22
 			? Ietf.Version.DRAFT_22
-			: protocol === Ietf.ALPN.DRAFT_18
-				? Ietf.Version.DRAFT_18
-				: undefined;
+			: protocol === Ietf.ALPN.DRAFT_20
+				? Ietf.Version.DRAFT_20
+				: protocol === Ietf.ALPN.DRAFT_18
+					? Ietf.Version.DRAFT_18
+					: undefined;
 	if (ietf !== undefined) {
 		return await handshakeAlpn(url, session, ietf, wiring);
 	} else if (protocol === Lite.ALPN_07_WIP) {

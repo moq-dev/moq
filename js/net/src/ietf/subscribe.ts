@@ -53,7 +53,7 @@ function decodeGroupOrder(value: number): Order {
  * Earlier drafts request unfiltered delivery because this client does not send joining FETCH.
  */
 export function joinFilter(version: IetfVersion): Filter.Filter {
-	return Filter.isDraft22(version) ? { kind: "relative", groups: 1n } : { kind: "unfiltered" };
+	return Filter.isDraft20(version) ? { kind: "relative", groups: 1n } : { kind: "unfiltered" };
 }
 
 export class Subscribe {
@@ -151,7 +151,7 @@ export class Subscribe {
 		// FILL_PARAMETERS and INCLUDE_PROPERTIES arrived in draft-22. An older peer reads
 		// either as an unknown parameter, which is a protocol violation, so they are
 		// dropped rather than downgraded.
-		if (Filter.isDraft22(version)) {
+		if (Filter.isDraft20(version)) {
 			if (this.fill) {
 				params.fillParameters = Filter.encodeFill(this.fill, version);
 			}
@@ -185,7 +185,7 @@ export class Subscribe {
 		// additions. An unknown message parameter is a protocol violation, so
 		// they stay rejected on the drafts that predate them rather than being quietly
 		// tolerated.
-		const draft22 = Filter.isDraft22(version);
+		const draft22 = Filter.isDraft20(version);
 		if ((params.fillParameters !== undefined || params.includeProperties !== undefined) && !draft22) {
 			throw new Error("FILL_PARAMETERS and INCLUDE_PROPERTIES need draft-22");
 		}

@@ -5,6 +5,7 @@ use std::fmt;
 #[non_exhaustive]
 pub enum Version {
 	Draft18,
+	Draft20,
 	Draft22,
 }
 
@@ -12,6 +13,7 @@ impl fmt::Display for Version {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
 			Self::Draft18 => write!(f, "moq-transport-18"),
+			Self::Draft20 => write!(f, "moq-transport-20"),
 			Self::Draft22 => write!(f, "moq-transport-22"),
 		}
 	}

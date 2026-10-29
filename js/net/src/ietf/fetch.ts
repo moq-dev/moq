@@ -145,7 +145,7 @@ export class Fetch {
 		params.fillTimeout = this.fillTimeout;
 
 		const type = this.type;
-		if (Filter.isDraft22(version)) {
+		if (Filter.isDraft20(version)) {
 			// The joining forms and the Fetch Type tag are gone in draft-22.
 			if (type.kind !== "filtered") throw new Error(`${type.kind} FETCH needs draft-18`);
 			await Namespace.encodeTrack(w, type.trackNamespace, type.trackName);
@@ -191,7 +191,7 @@ export class Fetch {
 		const requestId = await r.u62();
 
 		let type: FetchType;
-		if (Filter.isDraft22(version)) {
+		if (Filter.isDraft20(version)) {
 			// Draft-22 names the track up front and moves the range into LOCATION_FILTER.
 			const { namespace, name } = await Namespace.decodeTrack(r);
 			// Placeholder until the parameters name the filter.

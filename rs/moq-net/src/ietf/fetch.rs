@@ -949,7 +949,7 @@ mod cache_duration_tests {
 	/// subscription still learns its retention window.
 	#[test]
 	fn max_cache_duration_is_read_in_each_drafts_field() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			for age in [0u64, 30_000] {
 				let mut payload = vec![0, 0, 0, 0, 4];
 				Encoder::new(&mut payload, version.into()).varint(age).unwrap();

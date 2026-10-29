@@ -538,7 +538,7 @@ mod tests {
 	/// to survive decode rather than being stripped with the bit.
 	#[test]
 	fn first_object_round_trips() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			for first_object in [true, false] {
 				let flags = GroupFlags {
 					first_object,

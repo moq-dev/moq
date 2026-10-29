@@ -1546,7 +1546,7 @@ mod tests {
 	/// A skipped track is listed through a paused SUBSCRIBE of ours, once it answers.
 	#[moq_clock::test]
 	async fn a_skipped_track_lists_once_its_paused_subscribe_answers() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let mut h = harness(version);
 			let mut listing = h.establish().await;
 			let skipped = ietf::PublishSkipped {
@@ -1645,7 +1645,7 @@ mod tests {
 	/// objects refused unseen. On draft-18 our PUBLISH_OK pauses it.
 	#[moq_clock::test]
 	async fn a_forwarding_publish_fails_the_listing_on_draft_22() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let mut h = harness(version);
 			let _listing = h.establish().await;
 			let forwarding = ietf::Publish {
