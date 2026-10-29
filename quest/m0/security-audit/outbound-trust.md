@@ -38,3 +38,9 @@ Backport: `release` has the same coupling (`config.auth.init(node,
 backport in a separate PR against `release`.
 
 Public API: a new auth trust option in relay config and CLI. Wire: none.
+
+Implementation on `main`: [moq-dev/moq#7199](https://github.com/moq-dev/moq/pull/7199)
+isolates auth trust with `--auth-root` / `auth.root`, refuses API redirects
+including redirect bodies, and rejects remote plaintext API URLs at startup.
+Remaining: implement and verify the separate `release` backport before
+completing this quest.
