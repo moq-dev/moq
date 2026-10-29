@@ -453,6 +453,8 @@ test("a client refuses an IETF version selected in the moql SETUP", async () => 
 	const restore = stubWebTransport(pair.client);
 	try {
 		const connecting = connect(url, { websocket: { enabled: false } });
+		// The SETUP write may yield a task, during which the refusal can already land.
+		void connecting.catch(() => {});
 		const stream = await Stream.accept(pair.server, Lite.DRAFT_02);
 		if (!stream) throw new Error("no SETUP stream");
 		await ClientSetup.decode(stream.reader);

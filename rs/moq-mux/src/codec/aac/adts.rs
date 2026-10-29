@@ -7,33 +7,58 @@
 
 use anyhow::Context;
 
-/// ISO 14496-3 sampling-frequency-index table.
-const SAMPLE_RATES: [u32; 13] = [
-	96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350,
-];
+use super::SAMPLE_RATES;
+
+/// An invalid ADTS header or frame.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+	/// The fixed header is incomplete.
+	#[error("ADTS header truncated")]
+	Truncated,
+	/// The header does not start with an ADTS syncword.
+	#[error("missing ADTS syncword")]
+	Syncword,
+	/// The header names a reserved sample rate.
+	#[error("reserved ADTS sample rate index")]
+	SampleRate,
+	/// The declared frame cannot contain its header.
+	#[error("ADTS frame length smaller than its header")]
+	FrameLength,
+	/// A packet does not contain exactly one complete ADTS frame.
+	#[error("ADTS packet must contain exactly one complete frame")]
+	PacketLength,
+}
 
 /// Bytes needed to attempt a header parse: the fixed header without a CRC.
-pub(super) const MIN_HEADER_LEN: usize = 7;
+pub(crate) const MIN_HEADER_LEN: usize = 7;
 
 /// Fields decoded from an ADTS fixed+variable header.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct Header {
+pub struct Header {
 	/// audioObjectType (ADTS `profile` + 1). AAC-LC is 2.
 	pub object_type: u8,
+	/// The sampling rate signaled by the ADTS core.
 	pub sample_rate: u32,
 	/// channelConfiguration; 0 means a program config element in the raw data block describes the channels.
 	pub channel_config: u8,
 	/// Total access-unit length, header included.
-	pub frame_len: usize,
-	/// Header length: 7 without CRC, 9 with.
-	pub header_len: usize,
+	pub(crate) frame_len: usize,
+	/// The number of raw AAC blocks carried by this frame.
+	pub blocks: u8,
+	/// Header length, including CRC and raw-block position fields when present.
+	pub(crate) header_len: usize,
 }
 
 impl Header {
 	/// Parse the ADTS header at the start of `data`.
-	pub fn parse(data: &[u8]) -> anyhow::Result<Self> {
-		anyhow::ensure!(data.len() >= MIN_HEADER_LEN, "ADTS header truncated");
-		anyhow::ensure!(data[0] == 0xFF && (data[1] & 0xF0) == 0xF0, "missing ADTS syncword");
+	pub fn parse(data: &[u8]) -> Result<Self, Error> {
+		if data.len() < MIN_HEADER_LEN {
+			return Err(Error::Truncated);
+		}
+		if data[0] != 0xFF || data[1] & 0xF6 != 0xF0 {
+			return Err(Error::Syncword);
+		}
 
 		let protection_absent = data[1] & 0x01;
 		let profile = (data[2] >> 6) & 0x03;
@@ -45,22 +70,37 @@ impl Header {
 		let sample_rate = SAMPLE_RATES
 			.get(freq_index as usize)
 			.copied()
-			.context("reserved ADTS sample rate index")?;
-		let header_len = if protection_absent == 1 { 7 } else { 9 };
-		anyhow::ensure!(frame_len >= header_len, "ADTS frame length smaller than its header");
+			.ok_or(Error::SampleRate)?;
+		let blocks = 1 + (data[6] & 3);
+		let header_len = if protection_absent == 1 {
+			7
+		} else {
+			7 + 2 * usize::from(blocks)
+		};
+		if frame_len < header_len {
+			return Err(Error::FrameLength);
+		}
 
 		Ok(Self {
 			object_type: profile + 1,
 			sample_rate,
 			channel_config,
 			frame_len,
+			blocks,
 			header_len,
 		})
+	}
+	/// Borrow the payload after the header of one complete ADTS frame.
+	pub fn payload<'a>(&self, packet: &'a [u8]) -> Result<&'a [u8], Error> {
+		if packet.len() != self.frame_len || self.header_len > packet.len() {
+			return Err(Error::PacketLength);
+		}
+		Ok(&packet[self.header_len..])
 	}
 }
 
 /// Build a 7-byte ADTS header (no CRC) for a raw AAC frame of `raw_len` bytes.
-pub(super) fn write_header(
+pub(crate) fn write_header(
 	object_type: u8,
 	sample_rate: u32,
 	channel_config: u8,
@@ -105,16 +145,6 @@ fn freq_index_from_rate(sample_rate: u32) -> anyhow::Result<u8> {
 		.with_context(|| format!("sample rate {sample_rate} not representable in ADTS"))
 }
 
-/// Map a channel count to the ADTS `channel_config` (ISO 14496-3 Table 1.19) naming it, refusing a
-/// count that none does rather than guess a layout.
-pub(super) fn channel_config_from_count(channel_count: u32) -> anyhow::Result<u8> {
-	match channel_count {
-		1..=6 => Ok(channel_count as u8),
-		8 => Ok(7),
-		_ => anyhow::bail!("{channel_count} channels have no ADTS channelConfiguration"),
-	}
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -151,19 +181,54 @@ mod tests {
 	}
 
 	#[test]
-	fn channel_counts_without_a_configuration_are_refused() {
-		assert_eq!(channel_config_from_count(8).unwrap(), 7);
-		for count in [0, 7, 9, 24] {
-			assert!(channel_config_from_count(count).is_err());
-		}
-	}
-
-	#[test]
 	fn frame_len_for_5_1() {
 		let header = write_header(2, 44_100, 6, 512).unwrap();
 		let parsed = Header::parse(&header).unwrap();
 		assert_eq!(parsed.channel_config, 6);
 		assert_eq!(parsed.sample_rate, 44_100);
 		assert_eq!(parsed.frame_len, 519);
+	}
+
+	#[test]
+	fn a_packet_holds_one_whole_frame_including_its_crc() {
+		for crc in [false, true] {
+			let mut packet = write_header(2, 44_100, 1, 3 + usize::from(crc) * 2).unwrap().to_vec();
+			if crc {
+				packet[1] &= !1;
+				packet.extend_from_slice(&[0, 0]);
+			}
+			packet.extend_from_slice(&[1, 2, 3]);
+			let header = Header::parse(&packet).unwrap();
+			assert_eq!(header.payload(&packet).unwrap(), [1, 2, 3]);
+			for end in 0..packet.len() {
+				assert!(header.payload(&packet[..end]).is_err());
+			}
+			packet.push(0);
+			assert!(
+				header.payload(&packet).is_err(),
+				"trailing bytes are not part of the frame"
+			);
+		}
+	}
+
+	#[test]
+	fn an_adts_syncword_has_zero_layer_bits() {
+		let mut packet = write_header(2, 44_100, 1, 1).unwrap();
+		for layer in 1..=3 {
+			packet[1] = 0xf1 | layer << 1;
+			assert!(matches!(Header::parse(&packet), Err(Error::Syncword)));
+		}
+	}
+
+	#[test]
+	fn protected_multi_block_frames_keep_their_position_table_in_the_header() {
+		let mut packet = write_header(2, 44_100, 1, 11).unwrap().to_vec();
+		packet[1] &= !1;
+		packet[6] |= 3;
+		packet.extend_from_slice(&[0; 8]);
+		packet.extend_from_slice(&[1, 2, 3]);
+		let header = Header::parse(&packet).unwrap();
+		assert_eq!(header.blocks, 4);
+		assert_eq!(header.payload(&packet).unwrap(), [1, 2, 3]);
 	}
 }

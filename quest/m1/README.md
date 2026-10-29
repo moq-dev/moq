@@ -184,7 +184,6 @@ removed).
 - [Unbounded groups](/quest/m1/unbounded-groups/README.md) - groups and frames lose their size caps; the cache sheds parts of a group under pressure and refills the holes in place
 - [Next Object on a cold Rust copy](/quest/m1/next-object-cold-copy.md) - a join after an upstream group report starts at the first frame received, never skipping
 - [moqsrc max-delay](/quest/m1/gst-max-delay.md) - GStreamer's `moqsrc` takes a `max-delay` property instead of a hard-coded 1 s budget
-- [JS SETUP rejection ownership](/quest/m1/js-setup-rejection.md) - reproduce an unhandled version-refusal rejection without weakening the refusal
 - [moq-clock moves into kio::clock](/quest/m1/kio-clock.md) - moq-clock and its test macro become `kio::clock` and `#[kio::test]` before the cut publishes them
 - [Poll-first async](/quest/m1/poll-first/README.md) - library crates compile no coroutines by default: async wrappers are generated from `poll_*` and gated behind an `async` feature
 - [Every package's release backport ships](/quest/m1/release-versions.md) - a bot bumps every hand-versioned package changed on `release`, so backports publish without a manual bump

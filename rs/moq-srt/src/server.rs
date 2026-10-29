@@ -929,6 +929,7 @@ mod tests {
 		{
 			let mut guard = catalog.modify().unwrap();
 			let mut config = hang::catalog::AudioConfig::new(hang::catalog::AAC { profile: 2 }, 48_000, 2);
+			config.description = Some(Bytes::from_static(&[0x11, 0x90]));
 			config.container = hang::catalog::Container::Legacy;
 			guard.audio.renditions.insert(track.name().to_string(), config);
 		}
@@ -1035,6 +1036,7 @@ mod tests {
 				.create_track(track, hang::container::track_info(hang::catalog::PRIORITY.audio))
 				.unwrap();
 			let mut config = hang::catalog::AudioConfig::new(hang::catalog::AAC { profile: 2 }, 48_000, 2);
+			config.description = Some(Bytes::from_static(&[0x11, 0x90]));
 			config.container = hang::catalog::Container::Legacy;
 			catalog
 				.modify()

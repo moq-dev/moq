@@ -8,23 +8,28 @@ moqsrc, moq-audio, TS export) decodes it the same way.
 
 ## Plan
 
-Found by the 2026-10-24 pre-cut audit at 151a529670. Source-inferred and
-spot-verified, inherited.
+Decided 2026-10-25 (maintainer): ADTS, matching WebCodecs. For legacy and
+LOC payloads, an absent `description` means one complete ADTS frame; an
+AudioSpecificConfig means raw AAC. CMAF samples remain raw.
 
-Today `rs/moq-gst/src/source/imp.rs:1769` advertises `stream-format=adts`,
-`js/watch/src/audio/decoder.ts:488` configures WebCodecs with no description
-(which WebCodecs reads as ADTS), `rs/moq-audio/src/aac.rs:68` synthesizes an
-AudioSpecificConfig and decodes the frames as raw, and
-`rs/moq-mux/src/container/ts/export.rs:3823` treats them as raw and adds
-ADTS headers. Whichever form a publisher sends, half the consumers break.
+The draft implements ADTS stripping in moq-audio and pass-through in TS
+export, fixes GStreamer's raw-AAC caps spelling, and states the format in
+the hang draft. Both native mismatches reproduced before the fixes: ADTS
+produced different PCM from its raw block, and TS prepended a second header.
+Tests cover both description modes in all four consumers, CRC framing,
+truncated packets, publication metadata, and CMAF's raw samples.
 
-Decided 2026-10-25 (maintainer): ADTS, matching WebCodecs, the browser
-path most viewers use. moq-audio parses ADTS headers and TS export passes
-the frames through.
+First-party AAC publishers retain an AudioSpecificConfig: the codec
+importer, TS/FLV/fMP4/MKV importers, moq-audio's encoder, moqsink, and the JS
+publisher. The raw codec importer now refuses to publish without one.
 
-State the choice in `drafts/draft-lcurley-moq-hang.md` and add a test per
-consumer with a description-less fixture. Check which first-party
-publishers emit description-less AAC today, so none starts producing the
-other form.
+Remaining maintainer choice: the shared parser moves from TS's private
+module to the additive `moq_mux::codec::aac::adts::{Header, Error}` API,
+used by both moq-audio and TS. Recommend this existing parser over a second
+copy or a new internal crate. Approve that public shape, or choose a
+sharing boundary, before treating the quest as complete. Finish the local
+CI and all-language interop evidence before readiness.
 
-Public API: none. Wire: a format clarification in the hang draft.
+Public API: additive ADTS parser and a typed missing-description refusal
+for the raw AAC importer. Wire: the hang format clarification; no MoQ
+protocol framing changes.

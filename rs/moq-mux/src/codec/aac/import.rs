@@ -28,6 +28,11 @@ impl Import {
 		reserved: crate::catalog::Reserved<E>,
 		config: hang::catalog::AudioConfig,
 	) -> crate::Result<Self> {
+		if config.description.is_none() {
+			let err = crate::Error::from(super::Error::MissingDescription);
+			track.abort(err.reason())?;
+			return Err(err);
+		}
 		tracing::debug!(name = ?track.name(), ?config, "starting track");
 		// The caller's config names the container; the writer is built from that same value so the
 		// wire cannot disagree with what the rendition advertises.
@@ -144,4 +149,27 @@ fn catalog_config(config: &Config) -> hang::catalog::AudioConfig {
 	);
 	audio.container = hang::catalog::Container::Legacy;
 	audio
+}
+
+#[cfg(test)]
+mod tests {
+	#[tokio::test(start_paused = true)]
+	async fn raw_publication_needs_a_description_before_advertising() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let mut subscriber = track.subscribe(None);
+		let config = hang::catalog::AudioConfig::new(hang::catalog::AAC { profile: 2 }, 48_000, 2);
+		assert!(matches!(
+			super::Import::new(track, catalog.reserve(), config),
+			Err(crate::Error::Aac(super::super::Error::MissingDescription))
+		));
+		assert!(catalog.snapshot().audio.renditions.is_empty());
+		assert!(matches!(
+			subscriber.poll_finished(&kio::Waiter::noop()),
+			std::task::Poll::Ready(Err(_))
+		));
+	}
 }

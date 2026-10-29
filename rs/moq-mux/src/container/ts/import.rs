@@ -3768,10 +3768,12 @@ impl<E: CatalogExt> AacStream<E> {
 						// the next PES extends the buffer, rather than trusting it now.
 						break;
 					} else {
-						adts::Header::parse(&data[end..]).map(|_| (header, end)).map_err(Some)
+						adts::Header::parse(&data[end..])
+							.map(|_| (header, end))
+							.map_err(|err| Some(err.into()))
 					}
 				}
-				Err(err) => Err(Some(err)),
+				Err(err) => Err(Some(err.into())),
 			};
 
 			let (header, end) = match parsed {
