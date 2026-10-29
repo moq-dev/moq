@@ -58,7 +58,7 @@ pub struct Producer<C: Container, R = ()> {
 	/// Set by [`Self::seek`] and consumed on the next group creation.
 	pending_sequence: Option<u64>,
 
-	/// Reports each written group into this rendition's HLS records, when the catalog enabled them.
+	/// Reports each written group into this rendition's HLS records, unless the catalog disabled them.
 	recorder: Option<crate::hls::Recorder>,
 
 	/// The furthest presentation point written, i.e. `max(timestamp + duration)`. Reported to
@@ -107,7 +107,15 @@ trait Rendition<R>: Send {
 	fn set(&mut self, config: R) -> crate::Result<()>;
 	fn config(&self) -> crate::Result<R>;
 	fn replace(&mut self, config: R) -> crate::Result<()>;
-	fn estimate(&mut self, estimate: crate::catalog::Estimate) -> crate::Result<()>;
+	fn estimate(&mut self, reading: crate::catalog::Reading) -> crate::Result<()>;
+	fn supply_bitrate(&mut self, bitrate: u64) -> crate::Result<()>;
+	fn fresh(
+		&self,
+		container: crate::catalog::hang::Container,
+		info: moq_net::track::Info,
+		hls_hint: Option<std::time::Duration>,
+	) -> crate::Result<Producer<crate::catalog::hang::Container, R>>;
+	fn retire(&self, track: &str) -> crate::Result<()>;
 }
 
 impl<E, R> Rendition<R> for crate::catalog::tracks::Rendition<E, R>
@@ -117,6 +125,19 @@ where
 {
 	fn name(&self) -> &str {
 		self.name()
+	}
+
+	fn fresh(
+		&self,
+		container: crate::catalog::hang::Container,
+		info: moq_net::track::Info,
+		hls_hint: Option<std::time::Duration>,
+	) -> crate::Result<Producer<crate::catalog::hang::Container, R>> {
+		self.fresh(container, info, hls_hint)
+	}
+
+	fn retire(&self, track: &str) -> crate::Result<()> {
+		self.retire(track)
 	}
 
 	fn timestamp(&self, hint: Option<moq_net::Timestamp>) -> crate::Result<moq_net::Timestamp> {
@@ -135,8 +156,12 @@ where
 		self.replace(config)
 	}
 
-	fn estimate(&mut self, estimate: crate::catalog::Estimate) -> crate::Result<()> {
-		self.estimate(estimate)
+	fn estimate(&mut self, reading: crate::catalog::Reading) -> crate::Result<()> {
+		self.estimate(reading)
+	}
+
+	fn supply_bitrate(&mut self, bitrate: u64) -> crate::Result<()> {
+		self.supply_bitrate(bitrate)
 	}
 }
 
@@ -212,6 +237,15 @@ where
 		self.rendition.as_mut().ok_or(crate::Error::NotPublished)?.set(config)
 	}
 
+	/// Advertise `bitrate` as the rendition's maximum, such as an encoder's retuned target, which
+	/// later measurement no longer replaces. Every other published field stays as it is.
+	pub fn set_bitrate(&mut self, bitrate: u64) -> crate::Result<()> {
+		self.rendition
+			.as_mut()
+			.ok_or(crate::Error::NotPublished)?
+			.supply_bitrate(bitrate)
+	}
+
 	/// Modify the published catalog config.
 	///
 	/// Estimate fields the config left to detection at [`set`](Self::set) stay owned by detection:
@@ -236,7 +270,7 @@ where
 
 	fn publish_estimate(&mut self) -> crate::Result<()> {
 		if let Some(rendition) = self.rendition.as_mut() {
-			rendition.estimate(self.estimator.estimate())?;
+			rendition.estimate(self.estimator.reading())?;
 		}
 		Ok(())
 	}
@@ -251,6 +285,36 @@ where
 	/// A watch-only handle to this track's subscriber demand.
 	pub fn demand(&self) -> moq_net::track::Demand {
 		self.inner.demand()
+	}
+}
+
+impl Producer<crate::catalog::hang::Container, hang::catalog::VideoConfig> {
+	/// Publish a decoder change under a fresh raw track name.
+	pub(crate) fn reconfigure(&mut self, config: hang::catalog::VideoConfig) -> crate::Result<()> {
+		let rendition = self.rendition.as_ref().ok_or(crate::Error::NotPublished)?;
+		let previous = match rendition.config() {
+			Ok(previous) => previous,
+			Err(crate::Error::NotPublished) => return self.set(config),
+			Err(err) => return Err(err),
+		};
+		if previous.same_identity(&config) {
+			return self.set(config);
+		}
+		let container = crate::catalog::hang::Container::try_from(&config)?;
+		let hls_hint = self.recorder.as_ref().and_then(|recorder| recorder.declared());
+		let mut next = rendition.fresh(container, self.inner.info().clone(), hls_hint)?;
+		next.buffer_duration = self.buffer_duration;
+		next.set(config)?;
+		self.finish()?;
+		// The old name is never published again, so its HLS records end with it. They can only
+		// retire once its recorder is gone.
+		let old = std::mem::replace(self, next);
+		let name = old.name().to_string();
+		drop(old);
+		match &self.rendition {
+			Some(rendition) => rendition.retire(&name),
+			None => Ok(()),
+		}
 	}
 }
 
@@ -361,8 +425,12 @@ where
 		self
 	}
 
-	/// Report each written group through `recorder` into the track's HLS records.
-	pub(crate) fn with_recorder(mut self, recorder: Option<crate::hls::Recorder>) -> Self {
+	/// Report each written group through `recorder` into the track's HLS records, whose readers
+	/// count as demand for this track.
+	pub(crate) fn with_recorder(mut self, mut recorder: Option<crate::hls::Recorder>) -> Self {
+		if let Some(recorder) = recorder.as_mut() {
+			recorder.lend(&self.inner);
+		}
 		self.recorder = recorder;
 		self
 	}
@@ -746,6 +814,14 @@ where
 		// still declares a duration and is advertised.
 		self.recorder = None;
 		Ok(())
+	}
+
+	/// [`finish`](Self::finish) the track unless it already ended, for an owner about to drop it.
+	pub(crate) fn end(&mut self) -> crate::Result<()> {
+		if self.inner.finished().is_some() || self.inner.is_closed() {
+			return Ok(());
+		}
+		self.finish()
 	}
 
 	/// Abort the track and any open group with the given error.

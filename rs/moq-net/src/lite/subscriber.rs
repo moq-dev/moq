@@ -10,7 +10,7 @@ use std::{
 
 use crate::{
 	Error, Path, Timescale, Timestamp, bandwidth,
-	coding::{Reader, Stream, varint::MAX_QUIC},
+	coding::{Decode as _, Reader, Stream, varint::MAX_QUIC},
 	lite,
 	track::{Anchor, Position, Subscription},
 };
@@ -473,6 +473,9 @@ impl Subscriber {
 
 	/// Decode one datagram body and hand it to the matching subscription's producer.
 	fn route_datagram(&self, payload: bytes::Bytes) -> Result<(), Error> {
+		if payload.len() > lite::Datagram::MAX_SIZE {
+			return Ok(());
+		}
 		// Write through the map rather than cloning the entry out: a `TrackEntry` clone
 		// is a handful of atomic bumps on every datagram, and a producer held past its
 		// removal would keep the track (its cached groups, its stats subscription) alive.
@@ -751,9 +754,8 @@ impl UniAccept {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let _ = self.children.poll(waiter);
 
-		let mut cx = waiter.context();
 		loop {
-			match self.accept.poll_accept_uni(&mut cx) {
+			match self.accept.poll_accept_uni(waiter) {
 				Poll::Ready(Ok(stream)) => {
 					self.children.push(UniServe {
 						subscriber: self.subscriber.clone(),
@@ -837,10 +839,9 @@ impl UniServe {
 		loop {
 			match &mut self.state {
 				UniState::Start { reader } => {
-					let mut cx = waiter.context();
 					// A decode error here is only logged; the peer hung up or spoke garbage
 					// before the stream had a type.
-					let kind = ready!(reader.poll_decode::<lite::DataType>(&mut cx))?;
+					let kind = ready!(reader.poll_decode::<lite::DataType>(waiter))?;
 					// Claim before decoding the body, so two incomplete SETUPs are duplicates too.
 					if matches!(kind, lite::DataType::Setup) && self.subscriber.version.has_setup_stream() {
 						self.subscriber.peer_setup.claim()?;
@@ -867,8 +868,7 @@ impl UniServe {
 						self.abort(&err);
 						return Poll::Ready(Ok(()));
 					}
-					let mut cx = waiter.context();
-					let res = ready!(reader.poll_decode::<lite::setup::ReceivedSetup>(&mut cx));
+					let res = ready!(reader.poll_decode::<lite::setup::ReceivedSetup>(waiter));
 					match res {
 						Ok(setup) => {
 							tracing::debug!(?setup, "received peer setup");
@@ -890,10 +890,9 @@ impl UniServe {
 						return Poll::Ready(Ok(()));
 					}
 					// Reading rather than cancelling returns credit as each chunk arrives.
-					let mut cx = waiter.context();
 					loop {
 						ready!(budget.poll_yield(waiter));
-						if ready!(reader.poll_read_chunk(&mut cx, usize::MAX))?.is_none() {
+						if ready!(reader.poll_read_chunk(waiter, usize::MAX))?.is_none() {
 							return Poll::Ready(Ok(()));
 						}
 					}
@@ -976,8 +975,7 @@ impl GroupRecv {
 						return Poll::Pending;
 					};
 					self.setup_wait = None;
-					let mut cx = waiter.context();
-					let hdr = ready!(self.reader.poll_decode::<lite::Group>(&mut cx))?;
+					let hdr = ready!(self.reader.poll_decode::<lite::Group>(waiter))?;
 
 					let (group, track, framing, reading) = {
 						let mut subs = self.subscriber.subscribes.lock();
@@ -1187,11 +1185,11 @@ impl FrameIngest {
 	fn poll_header_varint<R: crate::transport::poll::RecvStream>(
 		&self,
 		reader: &mut Reader<R, Version>,
-		cx: &mut std::task::Context<'_>,
+		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<u64>, Error>> {
 		match self.records {
-			Some(_) => reader.poll_varint(cx).map_ok(Some),
-			None => reader.poll_varint_maybe(cx),
+			Some(_) => reader.poll_varint(waiter).map_ok(Some),
+			None => reader.poll_varint_maybe(waiter),
 		}
 	}
 
@@ -1204,11 +1202,10 @@ impl FrameIngest {
 		group: &mut crate::recv::Group,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<(), Error>> {
-		let mut cx = waiter.context();
 		loop {
 			match &mut self.phase {
 				IngestPhase::State => {
-					let state = ready!(reader.poll_varint(&mut cx))?;
+					let state = ready!(reader.poll_varint(waiter))?;
 					let wire = lite::ietf::decode_state(state, self.frame_start)?;
 					let relayed = wire.is_some();
 					// A track published over moq-lite has no moq-transport state.
@@ -1228,7 +1225,7 @@ impl FrameIngest {
 					self.phase = IngestPhase::Object;
 				}
 				IngestPhase::Object => {
-					let Some(code) = ready!(reader.poll_varint_maybe(&mut cx))? else {
+					let Some(code) = ready!(reader.poll_varint_maybe(waiter))? else {
 						return Poll::Ready(Ok(()));
 					};
 					let records = self.records.as_mut().expect("the Group State came first");
@@ -1246,14 +1243,14 @@ impl FrameIngest {
 					let len = match size {
 						Some(len) => *len,
 						None => {
-							let len = ready!(reader.poll_varint(&mut cx))?;
+							let len = ready!(reader.poll_varint(waiter))?;
 							if len > lite::ietf::MAX_PROPERTIES as u64 {
 								return Poll::Ready(Err(Error::BoundsExceeded(crate::coding::BoundsExceeded)));
 							}
 							*size.insert(len as usize)
 						}
 					};
-					let block = ready!(reader.poll_read_exact(&mut cx, len))?;
+					let block = ready!(reader.poll_read_exact(waiter, len))?;
 					let (id, end) = (*id, *end);
 					let records = self.records.as_mut().expect("the Group State came first");
 					if (end && !records.relayed) || (!block.is_empty() && !records.extensions) {
@@ -1273,7 +1270,7 @@ impl FrameIngest {
 					}
 				}
 				IngestPhase::Ended => {
-					if ready!(reader.poll_has_more(&mut cx))? {
+					if ready!(reader.poll_has_more(waiter))? {
 						return Poll::Ready(Err(Error::ProtocolViolation));
 					}
 					return Poll::Ready(Ok(()));
@@ -1284,7 +1281,7 @@ impl FrameIngest {
 						continue;
 					};
 					// The timestamp delta doubles as the per-frame sentinel.
-					let Some(zz) = ready!(self.poll_header_varint(reader, &mut cx))? else {
+					let Some(zz) = ready!(self.poll_header_varint(reader, waiter))? else {
 						return Poll::Ready(Ok(()));
 					};
 					let next: u64 = (self.prev_ts as i128 + crate::coding::varint::unzigzag(zz) as i128)
@@ -1308,7 +1305,7 @@ impl FrameIngest {
 						};
 						continue;
 					}
-					let Some(inflated) = ready!(self.poll_header_varint(reader, &mut cx))? else {
+					let Some(inflated) = ready!(self.poll_header_varint(reader, waiter))? else {
 						return Poll::Ready(Ok(()));
 					};
 					self.phase = IngestPhase::Size {
@@ -1318,7 +1315,7 @@ impl FrameIngest {
 				}
 				IngestPhase::Size { timestamp, inflated } => {
 					let (timestamp, inflated) = (*timestamp, *inflated);
-					let Some(size) = ready!(self.poll_header_varint(reader, &mut cx))? else {
+					let Some(size) = ready!(self.poll_header_varint(reader, waiter))? else {
 						return Poll::Ready(Ok(()));
 					};
 					// A frame that says nothing a plain frame would not keeps no fields.
@@ -1349,7 +1346,7 @@ impl FrameIngest {
 					self.phase = IngestPhase::Payload { frame };
 				}
 				IngestPhase::Payload { frame } => {
-					let failed = ready!(reader.poll_read_frame(&mut cx, frame)).err();
+					let failed = ready!(reader.poll_read_frame(waiter, frame)).err();
 
 					let next = self.next_frame();
 					let IngestPhase::Payload { frame } = std::mem::replace(&mut self.phase, next) else {
@@ -1397,9 +1394,8 @@ impl DatagramRecv {
 		if !self.enabled {
 			return Poll::Ready(Ok(()));
 		}
-		let mut cx = waiter.context();
 		loop {
-			let payload = ready!(self.recv.poll_recv_datagram(&mut cx)).map_err(crate::lite::error::from_transport)?;
+			let payload = ready!(self.recv.poll_recv_datagram(waiter)).map_err(crate::lite::error::from_transport)?;
 			if let Err(err) = self.subscriber.route_datagram(payload) {
 				tracing::debug!(%err, "dropping datagram");
 			}
@@ -1517,7 +1513,6 @@ impl ProbeStream {
 	}
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		let mut cx = waiter.context();
 		loop {
 			match &mut self.state {
 				ProbeState::Open => {
@@ -1526,13 +1521,13 @@ impl ProbeStream {
 					if self.subscriber.going_away.is_set() {
 						return Poll::Ready(Ok(()));
 					}
-					let mut stream = ready!(Stream::poll_open(&mut self.session, self.subscriber.version, &mut cx))?;
+					let mut stream = ready!(Stream::poll_open(&self.session, self.subscriber.version, waiter))?;
 					stream = stream.with_stats(self.subscriber.origin.stats());
 					stream.writer.buffer(&lite::ControlType::Probe)?;
 					self.state = ProbeState::Send { stream };
 				}
 				ProbeState::Send { stream } => {
-					ready!(stream.writer.poll_flush(&mut cx))?;
+					ready!(stream.writer.poll_flush(waiter))?;
 					let ProbeState::Send { stream } = std::mem::replace(&mut self.state, ProbeState::Open) else {
 						unreachable!()
 					};
@@ -1541,7 +1536,7 @@ impl ProbeStream {
 				ProbeState::Read { stream } => {
 					let bandwidth = self.subscriber.recv_bandwidth.as_ref().expect("gated by RecvBandwidth");
 					loop {
-						let Some(probe) = ready!(stream.reader.poll_decode_maybe::<lite::Probe>(&mut cx))? else {
+						let Some(probe) = ready!(stream.reader.poll_decode_maybe::<lite::Probe>(waiter))? else {
 							return Poll::Ready(Ok(()));
 						};
 						bandwidth.set(probe.bitrate.map(bandwidth::Rate::from_bps))?;
@@ -1631,14 +1626,13 @@ impl AnnouncePrefix {
 	}
 
 	fn poll_run(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		let mut cx = waiter.context();
 		loop {
 			match &mut self.state {
 				PrefixState::Open => {
 					let mut stream = ready!(Stream::poll_open_request(
-						&mut self.subscriber.session,
+						&self.subscriber.session,
 						self.subscriber.version,
-						&mut cx
+						waiter
 					))?;
 
 					stream = stream.with_stats(self.subscriber.origin.stats());
@@ -1659,7 +1653,7 @@ impl AnnouncePrefix {
 					self.state = PrefixState::Send { stream };
 				}
 				PrefixState::Send { stream } => {
-					ready!(stream.writer.poll_flush(&mut cx))?;
+					ready!(stream.writer.poll_flush(waiter))?;
 					let PrefixState::Send { stream } = std::mem::replace(&mut self.state, PrefixState::Open) else {
 						unreachable!()
 					};
@@ -1682,7 +1676,7 @@ impl AnnouncePrefix {
 					// Lite05+: the publisher reports its own origin id, which we stamp onto
 					// every received Announce's hop chain since it no longer does so itself.
 					// Lite05/06 mark the initial set by count; lite07 waits for SYNCED.
-					let ok = ready!(stream.reader.poll_decode::<lite::AnnounceOk>(&mut cx))?;
+					let ok = ready!(stream.reader.poll_decode::<lite::AnnounceOk>(waiter))?;
 					if ok.active == 0 && !self.subscriber.version.has_synced() {
 						self.snapshot = None;
 					}
@@ -1734,7 +1728,7 @@ impl AnnouncePrefix {
 					let msg = ready!(
 						stream
 							.reader
-							.poll_decode_with(&mut cx, |r| lite::AnnounceInit::decode_within(r, version, budget))
+							.poll_decode_with(waiter, |r| lite::AnnounceInit::decode_within(r, version, budget))
 					)?;
 					for suffix in msg.suffixes {
 						let path = self.prefix.join(&suffix)?;
@@ -1777,7 +1771,7 @@ impl AnnouncePrefix {
 						run.announced.limit(&permit, &self.subscriber);
 					}
 					loop {
-						match stream.reader.poll_decode_maybe::<lite::AnnounceBroadcast>(&mut cx) {
+						match stream.reader.poll_decode_maybe::<lite::AnnounceBroadcast>(waiter) {
 							Poll::Ready(Ok(Some(announce))) => {
 								if matches!(announce, lite::AnnounceBroadcast::Synced) {
 									if self.snapshot.take().is_none() {
@@ -1884,6 +1878,22 @@ struct TracksRecv {
 	unanswered: Option<crate::model::broadcast::RequestValidity>,
 }
 
+/// A TRACKS event, with its name resolved against what the listing holds.
+#[derive(Debug)]
+enum Listing {
+	Added(Arc<str>, lite::TrackInfo),
+	/// The listed name, or `None` if nothing by that name is listed.
+	Removed(Option<Arc<str>>),
+	/// Like [`Self::Removed`].
+	Finished(Option<Arc<str>>),
+	Synced,
+}
+
+/// The key `listed` holds for `name`, shared rather than copied.
+fn known(listed: &HashMap<Arc<str>, crate::session::Slot>, name: &str) -> Option<Arc<str>> {
+	listed.get_key_value(name).map(|(name, _)| name.clone())
+}
+
 impl TracksRecv {
 	/// Apply the peer's events until it ends the listing, or the error that ends it.
 	fn poll(&mut self, source: &SourceServe, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
@@ -1901,12 +1911,11 @@ impl TracksRecv {
 			// upstream, so the peer's tracks follow as live adds.
 			source.lister.synced();
 		}
-		let mut cx = waiter.context();
 		let version = source.subscriber.version;
 		let stream = match &mut self.stream {
 			Some(stream) => stream,
 			None => {
-				let mut stream = ready!(Stream::poll_open_request(&mut self.session, version, &mut cx))?;
+				let mut stream = ready!(Stream::poll_open_request(&self.session, version, waiter))?;
 				stream = stream.with_stats(source.subscriber.origin.stats());
 				stream.writer.buffer(&lite::ControlType::Tracks)?;
 				stream.writer.buffer(&lite::Tracks {
@@ -1916,17 +1925,26 @@ impl TracksRecv {
 				self.stream.insert(stream)
 			}
 		};
-		ready!(stream.writer.poll_flush(&mut cx))?;
+		ready!(stream.writer.poll_flush(waiter))?;
 		loop {
 			ready!(self.budget.poll_yield(waiter));
-			let event = ready!(stream.reader.poll_decode_maybe::<lite::TracksEvent>(&mut cx))?;
+			// Resolved while the name is still the wire's: only a new listing copies it, and
+			// a removal is a lookup.
+			let listed = &self.listed;
+			let event = ready!(stream.reader.poll_decode_maybe_with(waiter, |r| {
+				Ok(match lite::TracksEvent::decode(r, version)? {
+					lite::TracksEvent::Added { name, info } => Listing::Added(name.as_ref().into(), info),
+					lite::TracksEvent::Removed { name } => Listing::Removed(known(listed, &name)),
+					lite::TracksEvent::Finished { name } => Listing::Finished(known(listed, &name)),
+					lite::TracksEvent::Synced => Listing::Synced,
+				})
+			}))?;
 			self.unanswered = None;
 			let Some(event) = event else {
 				return Poll::Ready(Ok(()));
 			};
 			match event {
-				lite::TracksEvent::Added { name, info } => {
-					let name: Arc<str> = name.as_ref().into();
+				Listing::Added(name, info) => {
 					if self.listed.contains_key(&name) {
 						return Poll::Ready(Err(Error::ProtocolViolation));
 					}
@@ -1934,19 +1952,17 @@ impl TracksRecv {
 					source.lister.add(name.clone(), info.into())?;
 					self.listed.insert(name, slot);
 				}
-				lite::TracksEvent::Removed { name } => {
-					if self.listed.remove(name.as_ref()).is_none() {
-						return Poll::Ready(Err(Error::ProtocolViolation));
-					}
+				Listing::Removed(name) => {
+					let name = name.ok_or(Error::ProtocolViolation)?;
+					self.listed.remove(&name);
 					source.lister.remove(&name)?;
 				}
-				lite::TracksEvent::Finished { name } => {
-					if self.listed.remove(name.as_ref()).is_none() {
-						return Poll::Ready(Err(Error::ProtocolViolation));
-					}
+				Listing::Finished(name) => {
+					let name = name.ok_or(Error::ProtocolViolation)?;
+					self.listed.remove(&name);
 					source.lister.finish(&name)?;
 				}
-				lite::TracksEvent::Synced => {
+				Listing::Synced => {
 					// This hop synced its readers when the listing began; only the order matters here.
 					if std::mem::replace(&mut self.synced, true) {
 						return Poll::Ready(Err(Error::ProtocolViolation));
@@ -2043,9 +2059,8 @@ impl kio::Task for SourceServe {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		let _ = self.tracks.poll(waiter);
 
-		let mut cx = waiter.context();
 		loop {
-			if self.closed.poll_closed(&mut cx).is_ready() {
+			if self.closed.poll_closed(waiter).is_ready() {
 				// Session gone.
 				return Poll::Ready(());
 			}
@@ -2128,6 +2143,7 @@ mod tests {
 				.unwrap(),
 			id: 0,
 			max_delay: Duration::ZERO,
+			requested_max_delay: Duration::ZERO,
 			start: None,
 			priority: 0,
 			requested: None,
@@ -2263,6 +2279,7 @@ mod tests {
 					.unwrap(),
 				id: 0,
 				max_delay: Duration::ZERO,
+				requested_max_delay: Duration::ZERO,
 				start: Some(floor),
 				priority: 0,
 				requested: Some(floor),
@@ -2726,6 +2743,7 @@ mod tests {
 			stream,
 			id: 0,
 			max_delay: Duration::ZERO,
+			requested_max_delay: Duration::ZERO,
 			start: Some(2),
 			priority: 0,
 			requested: Some(2),
@@ -2967,7 +2985,7 @@ mod tests {
 			}
 			.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
 			.unwrap();
-			let mut session = crate::lite::test_transport::ScriptedSession::eof(script);
+			let session = crate::lite::test_transport::ScriptedSession::eof(script);
 			let subscriber = Subscriber::new(SubscriberConfig {
 				runtime: crate::time::sim(),
 				session: crate::driver::Transport::new(session.clone()),
@@ -3056,7 +3074,7 @@ mod tests {
 		for value in body {
 			encoder.varint(*value).unwrap();
 		}
-		let mut session = crate::lite::test_transport::ScriptedSession::eof(script);
+		let session = crate::lite::test_transport::ScriptedSession::eof(script);
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup).offer_ietf(true);
 		peer_setup.set(lite::Setup {
 			ietf: true,
@@ -3247,7 +3265,7 @@ mod tests {
 			encoder.varint(crate::coding::varint::zigzag(*delta)).unwrap();
 			encoder.bytes(b"frame").unwrap();
 		}
-		let mut session = crate::lite::test_transport::ScriptedSession::eof(script);
+		let session = crate::lite::test_transport::ScriptedSession::eof(script);
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -3359,7 +3377,7 @@ mod tests {
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
 		.unwrap();
-		let mut session = crate::lite::test_transport::ScriptedSession::eof(script);
+		let session = crate::lite::test_transport::ScriptedSession::eof(script);
 		let clock = crate::time::Deadlines::new(crate::time::Instant::now());
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: clock.clone(),
@@ -3874,19 +3892,19 @@ mod tests {
 			},
 		);
 
-		let payload = |sequence| {
+		let payload = |sequence, size| {
 			lite::Datagram {
 				subscribe: 7,
 				sequence,
 				timestamp: Some(sequence),
-				payload: bytes::Bytes::from_static(b"x"),
+				payload: bytes::Bytes::from(vec![0; size]),
 				inflated: None,
 				ietf: None,
 			}
 			.encode_bytes(VERSION)
 			.unwrap()
 		};
-		subscriber.route_datagram(payload(1)).unwrap();
+		subscriber.route_datagram(payload(1, 1)).unwrap();
 		assert_eq!(
 			received
 				.recv_datagram()
@@ -3898,8 +3916,20 @@ mod tests {
 			1
 		);
 
+		let oversized = payload(2, 1198);
+		assert_eq!(oversized.len(), 1201);
+		subscriber.route_datagram(oversized).unwrap();
+		assert!(
+			received.recv_datagram().now_or_never().is_none(),
+			"oversized body was delivered"
+		);
+		let boundary = payload(3, 1197);
+		assert_eq!(boundary.len(), 1200);
+		subscriber.route_datagram(boundary).unwrap();
+		assert_eq!(received.recv_datagram().await.unwrap().unwrap().sequence, 3);
+
 		subscriber.remove_subscribe(7);
-		subscriber.route_datagram(payload(2)).unwrap();
+		subscriber.route_datagram(payload(4, 1)).unwrap();
 		// Dropping the last producer is an abrupt teardown, so the track resolves with
 		// `Dropped` rather than parking. A route that outlived the removal would keep the
 		// producer alive and leave this pending forever.
@@ -4368,10 +4398,10 @@ mod tests {
 		let writes = session.log.writes.lock().unwrap().clone();
 		let mut wire = writes.as_slice();
 		assert_eq!(
-			crate::coding::decode_buf(&mut wire, VERSION, lite::ControlType::decode).unwrap(),
+			crate::coding::decode_buf(&mut wire, VERSION, |r, v| lite::ControlType::decode(r, v)).unwrap(),
 			lite::ControlType::Subscribe
 		);
-		let msg = crate::coding::decode_buf(&mut wire, VERSION, lite::Subscribe::decode).unwrap();
+		let msg = crate::coding::decode_from(&mut wire, VERSION, lite::Subscribe::decode).unwrap();
 		assert_eq!(msg.id, 0);
 		assert_eq!(msg.track, "catalog.json");
 		assert!(wire.is_empty(), "a second SUBSCRIBE trailed the first");
@@ -4522,7 +4552,7 @@ mod tests {
 	async fn internal_session_end_gives_back_live_and_finishes_ended() {
 		use crate::transport::poll::Session as _;
 		for ended in [false, true] {
-			let (session, mut peer) = crate::transport::memory::pair(Default::default());
+			let (session, peer) = crate::transport::memory::pair(Default::default());
 			let subscriber = Subscriber::new(SubscriberConfig {
 				runtime: crate::time::sim(),
 				session: crate::driver::Transport::new(session.clone()),
@@ -4577,7 +4607,7 @@ mod tests {
 		use crate::transport::poll::{RecvStream as _, SendStream as _, Session as _};
 		for reset in [false, true] {
 			let version = Version::Lite06;
-			let (session, mut peer) = crate::transport::memory::pair(Default::default());
+			let (session, peer) = crate::transport::memory::pair(Default::default());
 			let subscriber = Subscriber::new(SubscriberConfig {
 				runtime: crate::time::sim(),
 				session: crate::driver::Transport::new(session.clone()),
@@ -4605,7 +4635,7 @@ mod tests {
 			assert!(matches!(serving.sub, Sub::Active(_)), "the SUBSCRIBE is on the wire");
 
 			// The publisher ends the subscription and stops reading the stream.
-			let (mut send, mut recv) = std::future::poll_fn(|cx| peer.poll_accept_bi(cx)).await.unwrap();
+			let (mut send, mut recv) = kio::wait(|waiter| peer.poll_accept_bi(waiter)).await.unwrap();
 			recv.stop(crate::StreamError::Cancel.to_code());
 			if reset {
 				send.reset(crate::StreamError::NotFound.to_code());
@@ -4614,7 +4644,7 @@ mod tests {
 				lite::SubscribeResponse::End(lite::SubscribeEnd { group: 0 })
 					.encode(&mut crate::coding::Encoder::new(&mut end, version.into()), version)
 					.unwrap();
-				std::future::poll_fn(|cx| send.poll_write(cx, &end)).await.unwrap();
+				kio::wait(|waiter| send.poll_write(waiter, &end)).await.unwrap();
 				send.finish().unwrap();
 			}
 
@@ -4853,7 +4883,9 @@ mod tests {
 			let mut wire = &wire[established..];
 			let mut wanted = Vec::new();
 			while !wire.is_empty() {
-				let msg = crate::coding::decode_buf(&mut wire, Version::Lite07, lite::SubscribeUpdate::decode).unwrap();
+				let msg =
+					crate::coding::decode_buf(&mut wire, Version::Lite07, |r, v| lite::SubscribeUpdate::decode(r, v))
+						.unwrap();
 				wanted.extend(msg.wanted_group);
 			}
 			wanted
@@ -6147,7 +6179,7 @@ mod tests {
 				encoder.varint(crate::coding::varint::zigzag(0)).unwrap();
 				encoder.bytes(&vec![index as u8; 1024]).unwrap();
 			}
-			let mut incoming = crate::lite::test_transport::ScriptedSession::eof(script);
+			let incoming = crate::lite::test_transport::ScriptedSession::eof(script);
 			let (_, recv) = incoming.open_bi(Default::default()).await.unwrap();
 			let mut group = GroupRecv::new(
 				subscriber.clone(),
@@ -6270,6 +6302,9 @@ struct SubStream {
 	/// start sits elsewhere the request-tracked floor stands instead, and demand
 	/// returning here makes the declaration valid again.
 	requested: Option<u64>,
+	/// The max delay the SUBSCRIBE itself carried, fixed for the stream's life: a lite-06+
+	/// SUBSCRIBE_START resolves the start from it, skipping older groups as stale.
+	requested_max_delay: Duration,
 	/// The groups received for this subscription, shared with its [`TrackEntry`].
 	tail: kio::Producer<Tail>,
 	/// The first group the publisher serves (SUBSCRIBE_START), once declared.
@@ -6889,7 +6924,7 @@ impl TrackServe {
 			}
 			Begin::None => {
 				if let Sub::Active(active) = sub {
-					std::future::poll_fn(|cx| active.stream.writer.poll_flush(cx)).await?;
+					kio::wait(|waiter| active.stream.writer.poll_flush(waiter)).await?;
 				}
 			}
 		}
@@ -6961,14 +6996,13 @@ enum EstablishState {
 impl Establish {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<SubStream, Error>> {
 		self.validity.check(waiter)?;
-		let mut cx = waiter.context();
 		loop {
 			match &mut self.state {
 				EstablishState::Open => {
 					let mut stream = ready!(Stream::poll_open_request(
-						&mut self.session,
+						&self.session,
 						self.serve.subscriber.version,
-						&mut cx
+						waiter
 					))?;
 
 					let msg = lite::Subscribe {
@@ -6987,7 +7021,7 @@ impl Establish {
 					self.state = EstablishState::Send { stream };
 				}
 				EstablishState::Send { stream } => {
-					ready!(stream.writer.poll_flush(&mut cx))?;
+					ready!(stream.writer.poll_flush(waiter))?;
 					let EstablishState::Send { stream } = std::mem::replace(&mut self.state, EstablishState::Open)
 					else {
 						unreachable!()
@@ -6999,10 +7033,10 @@ impl Establish {
 					return Poll::Ready(Ok(self.activate(stream, false)));
 				}
 				EstablishState::WaitOk { stream } => {
-					if let Poll::Ready(err) = self.closed.poll_closed(&mut cx) {
+					if let Poll::Ready(err) = self.closed.poll_closed(waiter) {
 						return Poll::Ready(Err(crate::lite::error::from_transport(err)));
 					}
-					let resp = ready!(stream.reader.poll_decode::<lite::SubscribeResponse>(&mut cx))?;
+					let resp = ready!(stream.reader.poll_decode::<lite::SubscribeResponse>(waiter))?;
 					if !matches!(resp, lite::SubscribeResponse::Ok(_)) {
 						return Poll::Ready(Err(Error::ProtocolViolation));
 					}
@@ -7031,6 +7065,7 @@ impl Establish {
 			stream,
 			id: self.id,
 			max_delay: wire_max_delay(self.subscription.max_delay),
+			requested_max_delay: wire_max_delay(self.subscription.max_delay),
 			start: self.subscription.start(),
 			ranges: self.ranges.clone(),
 			priority: self.subscription.priority,
@@ -7154,13 +7189,7 @@ impl kio::Task for TrackServeRun {
 		// its tracks end.
 		if !matches!(self.state, TrackRunState::Finish(_))
 			&& self.gate.poll_denied(waiter).is_ready()
-			&& self
-				.serve
-				.subscriber
-				.session
-				.clone()
-				.poll_closed(&mut waiter.context())
-				.is_pending()
+			&& self.serve.subscriber.session.clone().poll_closed(waiter).is_pending()
 		{
 			self.revoke();
 			return Poll::Ready(());
@@ -7235,8 +7264,7 @@ impl kio::Task for TrackServeRun {
 					return Poll::Ready(());
 				}
 				TrackRunState::Finish(writer) => {
-					let mut cx = std::task::Context::from_waker(waiter.waker());
-					let _ = ready!(writer.poll_close(&mut cx));
+					let _ = ready!(writer.poll_close(waiter));
 					self.state = TrackRunState::Done;
 				}
 				TrackRunState::Done => return Poll::Ready(()),
@@ -7309,14 +7337,13 @@ impl TrackInfoFetch {
 		{
 			return Poll::Ready(Err(Error::Unroutable));
 		}
-		let mut cx = waiter.context();
 		loop {
 			match &mut self.state {
 				TrackInfoState::Open => {
 					let mut stream = ready!(Stream::poll_open_request(
-						&mut self.session,
+						&self.session,
 						serve.subscriber.version,
-						&mut cx
+						waiter
 					))?;
 					stream = stream.with_stats(serve.subscriber.origin.stats());
 					stream.writer.buffer(&lite::ControlType::Track)?;
@@ -7328,7 +7355,7 @@ impl TrackInfoFetch {
 					self.state = TrackInfoState::Send { stream };
 				}
 				TrackInfoState::Send { stream } => {
-					ready!(stream.writer.poll_flush(&mut cx))?;
+					ready!(stream.writer.poll_flush(waiter))?;
 					let TrackInfoState::Send { stream } = std::mem::replace(&mut self.state, TrackInfoState::Open)
 					else {
 						unreachable!()
@@ -7336,11 +7363,11 @@ impl TrackInfoFetch {
 					self.state = TrackInfoState::Read { stream };
 				}
 				TrackInfoState::Read { stream } => {
-					if let Poll::Ready(err) = self.closed.poll_closed(&mut cx) {
+					if let Poll::Ready(err) = self.closed.poll_closed(waiter) {
 						return Poll::Ready(Err(crate::lite::error::from_transport(err)));
 					}
 					let ietf = ready!(serve.subscriber.peer_setup.poll_ietf(waiter));
-					let info = ready!(stream.reader.poll_decode::<lite::TrackInfo>(&mut cx))?;
+					let info = ready!(stream.reader.poll_decode::<lite::TrackInfo>(waiter))?;
 					let TrackInfoState::Read { stream } = std::mem::replace(&mut self.state, TrackInfoState::Open)
 					else {
 						unreachable!()
@@ -7357,10 +7384,10 @@ impl TrackInfoFetch {
 					self.state = TrackInfoState::Properties { stream, info: model };
 				}
 				TrackInfoState::Properties { stream, info } => {
-					if let Poll::Ready(err) = self.closed.poll_closed(&mut cx) {
+					if let Poll::Ready(err) = self.closed.poll_closed(waiter) {
 						return Poll::Ready(Err(crate::lite::error::from_transport(err)));
 					}
-					let properties = ready!(stream.reader.poll_decode::<lite::ietf::TrackProperties>(&mut cx))?;
+					let properties = ready!(stream.reader.poll_decode::<lite::ietf::TrackProperties>(waiter))?;
 					// Refused as moq-transport ingress refuses it.
 					if let Some(err) = properties.0.as_ref().and_then(|properties| properties.refused(info)) {
 						return Poll::Ready(Err(err));
@@ -7679,6 +7706,9 @@ impl ServeLoop {
 		if serve.subscriber.version.resolves_anchors() {
 			serving.anchored();
 		}
+		if serve.subscriber.version.fills_from_start() {
+			serving.fills_from_start();
+		}
 		let serving = serving.commit();
 		Self {
 			edge: serving.consume(),
@@ -7793,8 +7823,7 @@ impl ServeLoop {
 					// The publisher already ended the track, so a session that dies now
 					// finishes it, as `SubscriptionCleanup` does, rather than hand it to
 					// another route. A copy whose subscription alone ended is handed back.
-					let mut cx = std::task::Context::from_waker(waiter.waker());
-					if let Poll::Ready(err) = self.closed.poll_closed(&mut cx) {
+					if let Poll::Ready(err) = self.closed.poll_closed(waiter) {
 						return Poll::Ready(match track {
 							true => ServeEnd::Finished,
 							false => ServeEnd::GiveBack(crate::lite::error::from_transport(err)),
@@ -7803,10 +7832,8 @@ impl ServeLoop {
 					return Poll::Pending;
 				}
 				ServeMode::Select => {
-					let mut cx = waiter.context();
-
 					if let Some(writer) = &mut self.closing
-						&& writer.poll_close(&mut cx).is_ready()
+						&& writer.poll_close(waiter).is_ready()
 					{
 						self.closing = None;
 					}
@@ -7827,7 +7854,7 @@ impl ServeLoop {
 					// Deliver any buffered SUBSCRIBE_UPDATE before selecting, so the
 					// demand that produced it is on the wire.
 					if let Sub::Active(active) = &mut self.sub {
-						match active.stream.writer.poll_flush(&mut cx) {
+						match active.stream.writer.poll_flush(waiter) {
 							Poll::Ready(Ok(())) => {}
 							// The publisher stopped reading, as it does once it finishes the
 							// track. The update is dropped, and the responses decide how the
@@ -7926,7 +7953,7 @@ impl ServeLoop {
 						&& let Poll::Ready(res) = active
 							.stream
 							.reader
-							.poll_decode_maybe::<lite::SubscribeResponse>(&mut cx)
+							.poll_decode_maybe::<lite::SubscribeResponse>(waiter)
 					{
 						// The publisher answered the SUBSCRIBE, so its demand stands on the
 						// subscription now. A query still held once that subscription ends
@@ -7983,7 +8010,12 @@ impl ServeLoop {
 										// moved back restores it); elsewhere the
 										// request-tracked floor stands rather than a guess.
 										if active.start == active.requested {
-											let _ = self.serving.start_at(start.group);
+											let _ = match serve.subscriber.version.resolves_start() {
+												true => {
+													self.serving.start_resolved(start.group, active.requested_max_delay)
+												}
+												false => self.serving.start_at(start.group),
+											};
 										}
 										active.served = Some(start.group);
 										// The groups the SUBSCRIBE asked for below it are not
@@ -8076,7 +8108,7 @@ impl ServeLoop {
 
 					// (5) The session died: hand the track back for another route, with
 					// the session's error in case none takes it.
-					if let Poll::Ready(err) = self.closed.poll_closed(&mut cx) {
+					if let Poll::Ready(err) = self.closed.poll_closed(waiter) {
 						return Poll::Ready(ServeEnd::GiveBack(crate::lite::error::from_transport(err)));
 					}
 
@@ -8267,7 +8299,6 @@ impl kio::Task for FetchServeRun {
 			}
 			return Poll::Ready(());
 		}
-		let mut cx = waiter.context();
 		loop {
 			// A fetch nobody waits on any more is cancelled upstream, so the publisher stops
 			// serving it (and a relay there releases its own FETCH). Ingest has its own check.
@@ -8288,19 +8319,16 @@ impl kio::Task for FetchServeRun {
 					ready!(self.gate.poll_ready(waiter));
 					// The fill already has readers holding its demand. Backpressure keeps their
 					// owned request alive; abandoning it above releases this wait too.
-					let mut stream = match ready!(Stream::poll_open(
-						&mut self.session,
-						self.serve.subscriber.version,
-						&mut cx
-					)) {
-						Ok(stream) => stream,
-						Err(err) => {
-							tracing::warn!(track = %self.serve.name, %err, "fetch stream open failed");
-							request.take().expect("request pending").reject(err);
-							self.state = FetchRunState::Done;
-							return Poll::Ready(());
-						}
-					};
+					let mut stream =
+						match ready!(Stream::poll_open(&self.session, self.serve.subscriber.version, waiter)) {
+							Ok(stream) => stream,
+							Err(err) => {
+								tracing::warn!(track = %self.serve.name, %err, "fetch stream open failed");
+								request.take().expect("request pending").reject(err);
+								self.state = FetchRunState::Done;
+								return Poll::Ready(());
+							}
+						};
 
 					// Only once the stream opens: credit and its header can wait, and
 					// re-polls this state, so logging before it repeats per poll.
@@ -8360,7 +8388,7 @@ impl kio::Task for FetchServeRun {
 					};
 				}
 				FetchRunState::Send { stream, .. } => {
-					if let Err(err) = ready!(stream.writer.poll_flush(&mut cx)) {
+					if let Err(err) = ready!(stream.writer.poll_flush(waiter)) {
 						let FetchRunState::Send { request, stream, .. } =
 							std::mem::replace(&mut self.state, FetchRunState::Done)
 						else {
@@ -8392,7 +8420,7 @@ impl kio::Task for FetchServeRun {
 					// stream instead. Accepting before the first byte (or a FIN, for an
 					// empty group) would resolve every joined `fetch_group` to a group
 					// that only fails on its first read, so wait for the answer.
-					let answered = ready!(stream.reader.poll_has_more(&mut cx));
+					let answered = ready!(stream.reader.poll_has_more(waiter));
 					let FetchRunState::Answer {
 						request,
 						stream,

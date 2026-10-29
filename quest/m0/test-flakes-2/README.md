@@ -48,7 +48,6 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [moq-cli relay tests under load](/quest/m0/test-flakes-2/cli-relay-load.md) - the fetch and announced tests wait on events, not timing
 - [FFI publisher audio gaps](/quest/m0/test-flakes-2/ffi-audio-gap.md) - interop tone checks stop finding gaps from FFI publishers
 - [IETF22 fallback](/quest/m0/test-flakes-2/ietf22-fallback.md) - an IETF22 browser viewer follows a fallback within the media lane's bound, keeping its session and its audio
 - [Swapped Rust to JS Opus](/quest/m0/test-flakes-2/swapped-js-opus.md) - the `rust-swapped -> js` interop cell stops timing out under load

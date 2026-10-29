@@ -153,6 +153,17 @@ pub struct PublishDone<'a> {
 }
 
 impl PublishDone<'_> {
+	/// Copy the borrowed reason, so the message outlives the bytes it came from.
+	pub fn into_owned(self) -> PublishDone<'static> {
+		PublishDone {
+			status_code: self.status_code,
+			stream_count: self.stream_count,
+			reason_phrase: Cow::Owned(self.reason_phrase.into_owned()),
+		}
+	}
+}
+
+impl PublishDone<'_> {
 	/// How the publisher ended the subscription: cleanly, or with the error its status names.
 	pub(crate) fn end(&self, version: Version) -> Result<(), crate::Error> {
 		match self.status_code {
@@ -166,7 +177,7 @@ impl PublishDone<'_> {
 	}
 }
 
-impl Message for PublishDone<'_> {
+impl<'a> Message<'a> for PublishDone<'a> {
 	const ID: u64 = 0x0b;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
@@ -176,10 +187,10 @@ impl Message for PublishDone<'_> {
 		Ok(())
 	}
 
-	fn decode_msg(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, _: Version) -> Result<Self, DecodeError> {
 		let status_code = r.varint()?;
 		let stream_count = r.varint()?;
-		let reason_phrase = Cow::Owned(r.string()?);
+		let reason_phrase = Cow::Borrowed(r.str()?);
 
 		Ok(Self {
 			status_code,
@@ -208,7 +219,25 @@ pub struct Publish<'a> {
 	pub filter: Option<Filter>,
 }
 
-impl Message for Publish<'_> {
+impl Publish<'_> {
+	/// Copy the borrowed track name, so the request outlives the bytes it came from.
+	pub fn into_owned(self) -> Publish<'static> {
+		Publish {
+			request_id: self.request_id,
+			track_namespace: self.track_namespace,
+			track_name: Cow::Owned(self.track_name.into_owned()),
+			track_alias: self.track_alias,
+			largest_location: self.largest_location,
+			forward: self.forward,
+			properties: self.properties,
+			subscriber_priority: self.subscriber_priority,
+			group_order: self.group_order,
+			filter: self.filter,
+		}
+	}
+}
+
+impl<'a> Message<'a> for Publish<'a> {
 	const ID: u64 = 0x1D;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -235,10 +264,10 @@ impl Message for Publish<'_> {
 		Ok(())
 	}
 
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
 		let (track_namespace, track_name) = decode_track(r)?;
-		let track_name = Cow::Owned(track_name);
+		let track_name = Cow::Borrowed(track_name);
 		let track_alias = r.varint()?;
 
 		// GROUP_ORDER is legal on PUBLISH from draft-22, when the subscription parameters
@@ -291,7 +320,7 @@ pub struct PublishOk {
 	pub new_group: Option<u64>,
 }
 
-impl Message for PublishOk {
+impl<'a> Message<'a> for PublishOk {
 	const ID: u64 = 0x1E;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -319,7 +348,7 @@ impl Message for PublishOk {
 		Ok(())
 	}
 
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		// EXPIRES is ignored, as in SUBSCRIBE_OK. Delivery timeouts are legal on the drafts
 		// that list them and dropped: nothing here acts on a publisher's timeout. Draft-22
 		// moved the subscription parameters off PUBLISH_OK, GROUP_ORDER
@@ -389,16 +418,16 @@ mod tests {
 		Ok(())
 	}
 
-	fn encode_message<M: Message>(msg: &M, version: Version) -> Vec<u8> {
+	fn encode_message<'m, M: Message<'m>>(msg: &M, version: Version) -> Vec<u8> {
 		let mut buf = Vec::new();
 		msg.encode_msg(&mut Encoder::new(&mut buf, version.into()), version)
 			.unwrap();
 		buf.to_vec()
 	}
 
-	fn decode_message<M: Message>(bytes: &[u8], version: Version) -> Result<M, DecodeError> {
-		let mut buf = bytes::Bytes::from(bytes.to_vec());
-		crate::coding::decode_buf(&mut buf, version, M::decode_msg)
+	fn decode_message<'m, M: Message<'m>>(bytes: &'m [u8], version: Version) -> Result<M, DecodeError> {
+		let mut buf = bytes;
+		crate::coding::decode_from(&mut buf, version, |r, v| M::decode_msg(r, v))
 	}
 
 	fn publish_with_param(version: Version, key: u64, value: u64) -> Vec<u8> {
@@ -650,7 +679,9 @@ mod tests {
 			filter: None,
 			new_group: Some(9),
 		};
-		let decoded: PublishOk = decode_message(&encode_message(&msg, version), version).unwrap();
+		let wire = encode_message(&msg, version);
+
+		let decoded: PublishOk = decode_message(&wire, version).unwrap();
 		assert_eq!(decoded.new_group, Some(9), "{version}");
 	}
 

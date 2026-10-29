@@ -1,4 +1,4 @@
-import { expect, jest, spyOn, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano, sleep } from "@moq/clock";
 import { ConnectTimeout, SessionCode, SessionError } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
@@ -300,7 +300,8 @@ test("connect without a signal still works", async () => {
 // A session-level stream failure promises an authoritative session close, even when the
 // browser publishes that close after the reset-only fallback would otherwise fire.
 test("SETUP preserves a delayed session close code", async () => {
-	jest.useFakeTimers();
+	const clock = new Manual();
+	const installed = clock.install();
 	const closed = Promise.withResolvers<WebTransportCloseInfo>();
 	let localCloses = 0;
 	const transport = {
@@ -319,10 +320,7 @@ test("SETUP preserves a delayed session close code", async () => {
 		(cause: unknown) => cause,
 	);
 	try {
-		// Drain the finite async setup chain before advancing the mocked clock.
-		for (let i = 0; i < 64; i++) await Promise.resolve();
-		jest.advanceTimersByTime(1_000);
-		for (let i = 0; i < 64; i++) await Promise.resolve();
+		await clock.advance(Nano.fromMilli(Milli(1_000)));
 		expect(localCloses).toBe(0);
 		closed.resolve({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
 		const cause = await result;
@@ -331,7 +329,7 @@ test("SETUP preserves a delayed session close code", async () => {
 	} finally {
 		closed.resolve({ closeCode: 0, reason: "test cleanup" });
 		await result;
-		jest.useRealTimers();
+		installed.close();
 	}
 });
 

@@ -1,5 +1,7 @@
 //! Allocation counting for the announce hot paths: decoding the paths a peer
-//! announces, and revisiting a cursor whose winning route is unchanged.
+//! announces, and revisiting a cursor whose winning route is unchanged. Also the
+//! messages around them: a decoded field allocates only once kept, and encoding
+//! copies nothing.
 //!
 //! Every route change at a prefix revisits each cursor presenting it, and on a
 //! dense mesh most of those visits find the cursor's winner unchanged: a worse
@@ -10,7 +12,11 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
-use moq_net::{Hop, Hops, Pattern, Patterns, fuzz::decode_path, origin};
+use moq_net::{
+	Hop, Hops, Path, Pattern, Patterns,
+	fuzz::{decode_path, decode_subscribe, encode_path, encode_subscribe},
+	origin,
+};
 
 thread_local! {
 	/// Fresh allocations made by *this* thread. Per-thread because the harness may
@@ -106,17 +112,24 @@ fn allocs<R>(f: impl FnOnce() -> R) -> usize {
 	allocs
 }
 
-/// A path decodes straight into the one shared buffer it keeps: moq-lite reads it in
-/// place, and a moq-transport tuple joins its fields into one escaped string first.
+const SHORT: &str = "room/alice";
+const LONG: &str = "1234/private/channel_7/stream-health-1700000000";
+
+/// The one buffer a decoded path keeps: none for a path short enough to store inline.
+fn path_buffers(path: &str) -> usize {
+	(path.len() > 22) as usize
+}
+
+/// A path decodes straight into the one shared buffer it keeps, or inline when short:
+/// moq-lite reads it in place, and a moq-transport tuple joins its fields on the stack.
 #[test]
 fn a_decoded_path_allocates_only_its_buffer() {
-	let long = "1234/private/channel_7/stream-health-1700000000";
-	for path in ["room/alice", long] {
+	for path in [SHORT, LONG] {
 		let mut wire = vec![path.len() as u8];
 		wire.extend_from_slice(path.as_bytes());
 		assert_eq!(decode_path(&wire, false).as_str(), path);
 		let lite = allocs(|| decode_path(&wire, false));
-		assert!(lite <= 1, "{lite} allocations for a moq-lite {path:?}");
+		assert_eq!(lite, path_buffers(path), "allocations for a moq-lite {path:?}");
 
 		let parts: Vec<&str> = path.split('/').collect();
 		let mut wire = vec![parts.len() as u8];
@@ -126,6 +139,42 @@ fn a_decoded_path_allocates_only_its_buffer() {
 		}
 		assert_eq!(decode_path(&wire, true).as_str(), path);
 		let ietf = allocs(|| decode_path(&wire, true));
-		assert!(ietf <= 2, "{ietf} allocations for a moq-transport {path:?}");
+		assert_eq!(ietf, path_buffers(path), "allocations for a moq-transport {path:?}");
+	}
+}
+
+/// Encoding a path writes its fields straight from its text, whatever the wire.
+#[test]
+fn an_encoded_path_allocates_nothing() {
+	for path in [SHORT, LONG, r"room/a\/b", r"room/a\\/b"] {
+		let path = Path::new(path).unwrap();
+		for ietf in [false, true] {
+			let mut wire = Vec::with_capacity(64);
+			let encoded = allocs(|| encode_path(&path, ietf, &mut wire));
+			assert_eq!(encoded, 0, "allocations encoding {path:?} (ietf: {ietf})");
+			assert_eq!(decode_path(&wire, ietf), path);
+		}
+	}
+}
+
+/// A SUBSCRIBE's track name is only looked up, so decoding one borrows it from the wire:
+/// what allocates is the path it keeps and, on moq-lite, its list of ranges.
+#[test]
+fn a_decoded_subscribe_borrows_its_track_name() {
+	for path in [SHORT, LONG] {
+		let broadcast = Path::new(path).unwrap();
+		for ietf in [false, true] {
+			let mut wire = Vec::new();
+			encode_subscribe(&broadcast, "video/hd", ietf, &mut wire);
+			assert_eq!(decode_subscribe(&wire, ietf), (broadcast.clone(), "video/hd".len()));
+
+			let ranges = !ietf as usize;
+			let decoded = allocs(|| decode_subscribe(&wire, ietf));
+			assert_eq!(
+				decoded,
+				path_buffers(path) + ranges,
+				"allocations decoding a SUBSCRIBE for {path:?} (ietf: {ietf})"
+			);
+		}
 	}
 }

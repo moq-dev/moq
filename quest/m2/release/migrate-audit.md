@@ -27,8 +27,8 @@ m1 quest on 2026-10-22.
   `MIGRATE.md`. Known gaps: breaking releases cut after the
   2026-09-23 train have no transition section yet (moq-json 0.4 -> 0.5
   and possibly moq-audio and moq-video), because their breaks predate the
-  backfill's merge base. The [compression migration](/quest/m1/compress/migrate.md)
-  deletes moq-flate before this cut: audit the migration from its published
+  backfill's merge base. The [compression migration](/quest/m1/compress/README.md)
+  deleted moq-flate before this cut: audit the migration from its published
   API to ordinary tracks with `compress`, rather than promising a new
   moq-flate transition release.
 - Each version-transition section, starting from the `## Unreleased`
@@ -37,6 +37,11 @@ m1 quest on 2026-10-22.
   API audit). Collapse entries a later change reversed or reshaped (an API
   removed then reintroduced, a default changed twice) into the net change,
   and drop the intermediate history.
+- Read the API-diff report's auto-trait changes too, not only renamed or
+  removed items (added 2026-10-27, from an external release-to-main audit
+  that found lost `Sync` on JSON consumers, fMP4/HLS importers, video decode
+  consumers, and relay state). Restore an accidental loss at its source;
+  otherwise the migration note says how to share the type instead.
 - Compile-check the code in every `MIGRATE.md` section the cut ships against
   the candidate. Nothing else builds it.
 - Required by the cut, after m1's breaking work has landed.

@@ -77,7 +77,7 @@ Decided 2026-10-26 (maintainer):
   reference the Environment. Only the hosted land job reads it, never the job
   that runs PR code.
 
-Work in this repository, once [the bump](/quest/m0/ci/land-bump.md) lands:
+Work in this repository:
 
 - The workflow: queue events (landing requested through `quest merge
   --land`, a push dequeuing), one concurrency group, inputs resolved on a
@@ -101,7 +101,3 @@ Work in this repository, once [the bump](/quest/m0/ci/land-bump.md) lands:
   against the baseline, and record both in the PR.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Bump quest to `quest land`](/quest/m0/ci/land-bump.md) - kixelated/quest shipped `quest land` in kixelated/quest#229; bump the flake input

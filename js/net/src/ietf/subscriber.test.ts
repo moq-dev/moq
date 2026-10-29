@@ -1,5 +1,5 @@
 import { expect, jest, onTestFinished, spyOn, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Manual, Milli, Nano } from "@moq/clock";
 import { Once } from "@moq/signals";
 import type * as announce from "../announced.ts";
 import * as Epoch from "../epoch.ts";
@@ -921,7 +921,8 @@ test("SUBSCRIBE_OK's largest is known before any group arrives", async () => {
 });
 
 test.each(["acceptance", "timeout"])("returning demand preserves pending setup until %s", async (outcome) => {
-	jest.useFakeTimers();
+	const clock = new Manual();
+	const installed = clock.install();
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session });
@@ -961,7 +962,7 @@ test.each(["acceptance", "timeout"])("returning demand preserves pending setup u
 		return request;
 	});
 	const first = broadcast.track("video").subscribe();
-	// Restore real timers even if an injection promise outlives the test.
+	// Restore the ambient clock even if an injection promise outlives the test.
 	onTestFinished(() => {
 		captured.mockRestore();
 		unwantedSpy.mockRestore();
@@ -970,13 +971,13 @@ test.each(["acceptance", "timeout"])("returning demand preserves pending setup u
 		returned?.close();
 		broadcast.close();
 		session.close();
-		jest.useRealTimers();
+		installed.close();
 	});
 	const peer = await nextStream(pair.client);
 	if (!peer) throw new Error("missing pending subscribe");
 	expect(await peer.reader.u53()).toBe(Subscribe.id);
 	await Subscribe.decode(peer.reader, VERSION);
-	jest.advanceTimersByTime(6_000);
+	await clock.advance(Nano.fromMilli(Milli(6_000)));
 	first.close();
 	await resumed.promise;
 	if (!returned) throw new Error("demand did not return");
@@ -993,7 +994,7 @@ test.each(["acceptance", "timeout"])("returning demand preserves pending setup u
 		expect(await info).toMatchObject({ priority: 127 - 128 });
 		expect(returned.closed.peek()).toBeUndefined();
 	} else {
-		jest.advanceTimersByTime(4_000);
+		await clock.advance(Nano.fromMilli(Milli(4_000)));
 		expect(await info).toBeInstanceOf(Error);
 		expect(((await info) as Error).message).toContain("request timed out after 10000ms");
 	}

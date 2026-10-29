@@ -456,7 +456,7 @@ mod supervision_tests {
 			})
 			.unwrap();
 		let mut publish = crate::publish::Publish::default();
-		let broadcast = publish
+		let (publication, _broadcast) = publish
 			.create_publication(origins.create_broadcast(origin, "retained").unwrap())
 			.unwrap();
 		origins.close(origin).unwrap();
@@ -466,13 +466,13 @@ mod supervision_tests {
 		assert!(matches!(completion.finished().await, Err(Error::Panic)));
 		drop(completion);
 		assert!(matches!(
-			publish.announce(broadcast, Default::default()),
+			publish.announce(publication, Default::default()),
 			Err(Error::Panic)
 		));
 		let healthy = origins.create().unwrap();
-		let broadcast = publish
+		let (publication, _broadcast) = publish
 			.create_publication(origins.create_broadcast(healthy, "healthy").unwrap())
 			.unwrap();
-		publish.announce(broadcast, Default::default()).unwrap();
+		publish.announce(publication, Default::default()).unwrap();
 	}
 }

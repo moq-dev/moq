@@ -212,8 +212,8 @@ impl<V> Encode<V> for Hop {
 	}
 }
 
-impl<V> Decode<V> for Hop {
-	fn decode(r: &mut Decoder<'_>, _: V) -> Result<Self, DecodeError> {
+impl<'a, V> Decode<'a, V> for Hop {
+	fn decode(r: &mut Decoder<'a>, _: V) -> Result<Self, DecodeError> {
 		Ok(Self::from_wire(r.varint()?))
 	}
 }
@@ -384,8 +384,8 @@ impl<V: Copy> Encode<V> for Hops {
 	}
 }
 
-impl<V: Copy> Decode<V> for Hops {
-	fn decode(r: &mut Decoder<'_>, version: V) -> Result<Self, DecodeError> {
+impl<'a, V: Copy> Decode<'a, V> for Hops {
+	fn decode(r: &mut Decoder<'a>, version: V) -> Result<Self, DecodeError> {
 		let count = r.varint()? as usize;
 		if count > MAX_HOPS {
 			return Err(DecodeError::BoundsExceeded);
@@ -1391,8 +1391,7 @@ struct ServeState {
 	served: WeakCache<Path, broadcast::WeakConsumer>,
 
 	// How many times the route changed instance: a front compares it to the count when
-	// it asked to tell a released request from an answered one. Shared outside the lock,
-	// since the release wakes the front while the updater still holds it.
+	// it asked to tell a released request from an answered one without taking this lock.
 	renewals: Arc<AtomicU64>,
 
 	// Set when the announcement is retracted or the origin tears down: new requests
@@ -2872,21 +2871,12 @@ impl AnnounceProducer {
 	/// waiting on its queue. Idempotent, and what dropping the advertisement does.
 	fn retract(&self, withdrawn: bool) {
 		let mut shared = self.shared.lock();
+		let mut servers = Vec::new();
 		for (prefix, id) in &self.entries {
 			let Some(entry) = shared.routes.remove(prefix, *id) else {
 				continue;
 			};
-			// Reject anything still waiting on this route's server; a request
-			// already handed to the handler resolves through its own `Request`.
-			if let Some(server) = &entry.server {
-				let mut server = server.lock();
-				server.closed = true;
-				for producer in server.requests.drain_all() {
-					if let Ok(mut request) = producer.write() {
-						request.resolved.get_or_insert(Err(Error::Unroutable));
-					}
-				}
-			}
+			servers.extend(entry.server.clone());
 			// A peer remains reachable while any of its sessions advertises this
 			// prefix. Remove this session's route before testing the remaining
 			// claims, under the same lock, so overlapping withdrawals cannot
@@ -2904,6 +2894,23 @@ impl AnnounceProducer {
 			}
 			shared.sync_route(&entry.prefix, &entry.claim);
 			shared.prune_withdrawn(&entry.prefix);
+		}
+		drop(shared);
+		// Reject anything still waiting on this route's server; a request already
+		// handed to the handler resolves through its own `Request`. Closing wakes
+		// the server's waiters, so it runs after the table unlocks; the entries
+		// already left it, so nothing new routes here meanwhile.
+		for server in servers {
+			let released = {
+				let mut server = server.lock();
+				server.closed = true;
+				server.requests.drain_all()
+			};
+			for producer in released {
+				if let Ok(mut request) = producer.write() {
+					request.resolved.get_or_insert(Err(Error::Unroutable));
+				}
+			}
 		}
 	}
 }
@@ -3030,9 +3037,12 @@ impl DriverState {
 		// handler: the teardown is terminal, so a handler resolving late must not
 		// beat it (resolution is first-write-wins).
 		for server in servers {
-			let mut server = server.lock();
-			server.closed = true;
-			for producer in server.requests.drain_all() {
+			let released = {
+				let mut server = server.lock();
+				server.closed = true;
+				server.requests.drain_all()
+			};
+			for producer in released {
 				if let Ok(mut request) = producer.write() {
 					request.resolved.get_or_insert(Err(Error::Closed));
 				}
@@ -3426,6 +3436,13 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 
 	loop {
 		while let Some(event) = events.pop_front() {
+			let refused = matches!(
+				&event,
+				Event::Resolved {
+					result: Err(Refusal { standing: true, .. }),
+					..
+				}
+			);
 			let answered = match &event {
 				Event::TrackInfo { track, source, .. } => Some((track.clone(), *source)),
 				_ => None,
@@ -3477,8 +3494,8 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 						if serve.closed {
 							// Retracted under us, or its handler dropped while the
 							// announcement stands: it cannot serve. A retraction
-							// leaves the table before it closes the server, under
-							// the same lock, so the table tells the two apart.
+							// leaves the table before it closes the server, so the
+							// table tells the two apart.
 							drop(serve);
 							events.push_back(Event::Resolved {
 								route,
@@ -3690,6 +3707,7 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 							.fronts
 							.remove_if(&(path.clone(), horizon), |front| front.request.same_channel(&request));
 						if let Ok(mut pending) = request.write() {
+							pending.refused = refused;
 							pending.resolved.get_or_insert(Err(err.clone()));
 						}
 						// Ending the broadcast only retracts it: no new requesters or
@@ -5402,6 +5420,8 @@ struct PendingFront {
 	/// was minted for, then each one it selects. Written under the table's lock, so a
 	/// request never joins a front that picked an instance the request saw beaten.
 	selected: Instance,
+	/// The selected serving handler refused, rather than the route disappearing.
+	refused: bool,
 }
 
 /// What a front resolved: the instance its first source serves, and the route that
@@ -5812,13 +5832,9 @@ impl Drop for Request {
 	}
 }
 
-/// The pollable result of [`Consumer::request_broadcast`].
-///
-/// Awaited via the [`kio::Pending`] wrapper; resolves to the [`broadcast::Consumer`]
-/// immediately when the broadcast was already announced, or once a [`Requests`]
-/// handler serves the request. Resolves to an error if the request is rejected or every
-/// handler drops before serving it.
-pub struct Requesting {
+/// The immediate table lookup serving a peer without initiating application discovery.
+// private: capability gap
+pub(crate) struct Lookup {
 	inner: RequestState,
 	// The path the requester asked for, relative to its cursor's root. Stamped on the
 	// resolved broadcast (see [`broadcast::Info::path`]) because a handler is free to
@@ -5844,25 +5860,13 @@ enum RequestState {
 	},
 }
 
-impl Requesting {
+impl Lookup {
 	fn failed(error: Error) -> Self {
 		Self::new(RequestState::Failed(error))
 	}
 
 	fn queued(front: kio::Consumer<PendingFront>, broadcast: broadcast::Consumer) -> Self {
 		Self::new(RequestState::Pending { front, broadcast })
-	}
-
-	/// Whether the request was handed to a serving route, rather than decided on
-	/// the spot.
-	///
-	/// Fixed at request time, so it distinguishes the two ways
-	/// [`Error::Unroutable`] arises: a queued request that fails was killed by
-	/// its serving route retracting, and the table may already hold a
-	/// replacement worth retrying against (`Consumer::routed_broadcast` does),
-	/// while an unqueued failure means nothing could serve the path at all.
-	pub fn is_queued(&self) -> bool {
-		matches!(self.inner, RequestState::Pending { .. })
 	}
 
 	fn new(inner: RequestState) -> Self {
@@ -5923,7 +5927,7 @@ impl Requesting {
 	}
 }
 
-impl kio::Task for Requesting {
+impl kio::Task for Lookup {
 	type Output = Result<broadcast::Consumer, Error>;
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {
@@ -5931,8 +5935,8 @@ impl kio::Task for Requesting {
 	}
 }
 
-/// The pollable result of [`Consumer::routed_broadcast`].
-pub struct Routing {
+/// An owned broadcast resolution, driven by polling or awaiting it.
+pub struct Requesting {
 	consumer: Consumer,
 	path: Path,
 	// Asks sessions to discover the path for as long as this waits on it.
@@ -5940,20 +5944,61 @@ pub struct Routing {
 	// The covering routes, watched since the generation the last ask saw.
 	watch: Option<(Watch, u64)>,
 	// The ask in flight, dropped once it fails `Unroutable` until the routes move.
-	request: Option<Requesting>,
+	request: Option<Lookup>,
 	// The publisher instance every ask is pinned to, if any.
 	epoch: Option<crate::Epoch>,
+	// A finite request owns discovery and can conclude absence once its initial set lands.
+	discovery: Option<crate::announce::Follow>,
+	routed: bool,
+	// Legacy route-wait callers retry refusals only after the covering routes move.
+	terminal_refusal: bool,
 }
 
-impl kio::Task for Routing {
-	type Output = Result<broadcast::Consumer, Error>;
-
-	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {
+impl Requesting {
+	/// Poll for the requested instance, retrying only after its covering routes change.
+	pub fn poll_ok(&mut self, waiter: &kio::Waiter) -> Poll<Result<broadcast::Consumer, Error>> {
 		loop {
+			if let Some(discovery) = &mut self.discovery {
+				loop {
+					match discovery.poll_next(waiter) {
+						Poll::Ready(Some(AnnounceEvent::End(_))) => self.routed = false,
+						Poll::Ready(Some(
+							AnnounceEvent::Start(announce)
+							| AnnounceEvent::Restart(announce)
+							| AnnounceEvent::Update(announce),
+						)) => {
+							self.routed = self.epoch.is_none() || announce.route.epoch == self.epoch;
+						}
+						Poll::Ready(None) => return Poll::Ready(Err(Error::Closed)),
+						Poll::Pending => break,
+					}
+				}
+				// Sync is an event, not a deadline: sessions hold it from the moment the
+				// interest is created until the initial announcement set is delivered.
+				let synced = discovery.poll_synced(waiter).is_ready();
+				if self.request.is_none()
+					&& synced && (!self.routed || self.watch.as_ref().is_some_and(|(watch, seen)| watch.seen() == *seen))
+				{
+					return Poll::Ready(Err(Error::Unroutable));
+				}
+			}
+
 			match (&self.watch, &self.request) {
 				(_, Some(request)) => match ready!(request.poll_ok(waiter)) {
 					Ok(broadcast) => return Poll::Ready(Ok(broadcast)),
-					Err(Error::Unroutable) => self.request = None,
+					Err(Error::Unroutable) => {
+						// The front already distinguishes a selected handler's refusal
+						// from route churn; retain that verdict rather than infer it from
+						// unrelated changes a prepared answer makes to the table.
+						let refused = match &request.inner {
+							RequestState::Pending { front, .. } => front.read().refused,
+							RequestState::Failed(_) => false,
+						};
+						if self.terminal_refusal && refused {
+							return Poll::Ready(Err(Error::Unroutable));
+						}
+						self.request = None;
+					}
 					Err(err) => return Poll::Ready(Err(err)),
 				},
 				(Some((watch, seen)), None) => {
@@ -5982,7 +6027,7 @@ impl kio::Task for Routing {
 					};
 					let watch = table.watch(&self.consumer.shared, &resolved);
 					let seen = watch.seen();
-					if self.interest.is_none() && self.consumer.interested {
+					if self.interest.is_none() && self.discovery.is_none() && self.consumer.interested {
 						let resolved = resolved.clone();
 						self.interest = Some(Interest::new(&mut table, &self.consumer.shared, resolved));
 					}
@@ -5996,6 +6041,14 @@ impl kio::Task for Routing {
 				}
 			}
 		}
+	}
+}
+
+impl kio::Task for Requesting {
+	type Output = Result<broadcast::Consumer, Error>;
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {
+		self.poll_ok(waiter)
 	}
 }
 
@@ -6451,37 +6504,41 @@ impl Consumer {
 	/// [`Error::Unauthorized`] for a path outside this consumer's scope,
 	/// [`Error::Closed`] once the origin closes, and any other resolution
 	/// failure as-is. Await it, or poll it through [`kio::Task`].
-	pub fn routed_broadcast(&self, path: impl TryInto<Path, Error: Into<Error>>) -> kio::Pending<Routing> {
-		let routing = match path::convert(path) {
+	pub fn routed_broadcast(&self, path: impl TryInto<Path, Error: Into<Error>>) -> kio::Pending<Requesting> {
+		let mut request = match path::convert(path) {
 			Ok(path) => self.routing(path, None),
-			Err(err) => Routing {
-				consumer: self.clone(),
-				path: Path::empty(),
-				interest: None,
-				watch: None,
-				request: Some(Requesting::failed(err)),
-				epoch: None,
-			},
+			Err(err) => self.failed(err),
 		};
-		kio::Pending::new(routing)
+		request.terminal_refusal = false;
+		kio::Pending::new(request)
 	}
 
-	/// [`Self::routed_broadcast`], refusing any instance but `epoch` when one is pinned.
-	pub(super) fn routing(&self, path: Path, epoch: Option<crate::Epoch>) -> Routing {
+	/// A resolution that already failed with `err`.
+	fn failed(&self, err: Error) -> Requesting {
+		let mut request = self.routing(Path::empty(), None);
+		request.request = Some(Lookup::failed(err));
+		request
+	}
+
+	/// Resolve a routed instance, returning a selected handler's refusal directly.
+	pub(super) fn routing(&self, path: Path, epoch: Option<crate::Epoch>) -> Requesting {
 		// The scope keeps narrower permissions intact: if the whole path is not
 		// reachable, no route can ever cover it, so bail rather than loop forever.
 		let request = match self.root.join(&path) {
 			Ok(named) if self.scope.permits(&named) => None,
-			Ok(_) => Some(Requesting::failed(Error::Unauthorized)),
-			Err(err) => Some(Requesting::failed(err.into())),
+			Ok(_) => Some(Lookup::failed(Error::Unauthorized)),
+			Err(err) => Some(Lookup::failed(err.into())),
 		};
-		Routing {
+		Requesting {
 			consumer: self.clone(),
 			path,
 			interest: None,
 			watch: None,
 			request,
 			epoch,
+			discovery: None,
+			routed: false,
+			terminal_refusal: true,
 		}
 	}
 
@@ -6489,7 +6546,7 @@ impl Consumer {
 	///
 	/// The Rust form of JS `request(path, { announced: true })`. The first
 	/// [`available`](AnnouncedBroadcast::poll_available) resolves the instance serving the path
-	/// once one is announced, riding out churn as [`Self::routed_broadcast`] does. Each
+	/// once one is announced, retrying route churn but returning a selected handler's refusal. Each
 	/// later call waits for another instance to take over (an
 	/// [`AnnounceEvent::Restart`]), or for the path to be served again after an
 	/// [`AnnounceEvent::End`], even by the same instance. Drop what was read from the
@@ -6557,13 +6614,11 @@ impl Consumer {
 	/// when requesting and when an asynchronous answer resolves. `None` leaves lookup
 	/// unpinned. A pinned request never resumes on a route whose epoch disappeared.
 	///
-	/// The returned future fails with [`Error::Unroutable`] at once when no
-	/// announced route covers the path, including a broadcast created on this
-	/// origin but not announced. A client session only discovers what this
-	/// origin's readers watch, so a path no [`Self::announced`],
-	/// [`Self::routed_broadcast`], or [`Self::announced_broadcast`] watches is
-	/// unroutable on it. A broadcast resolved through a discovered route keeps its
-	/// path watched until dropped.
+	/// The request owns discovery for its path and retries when its covering routes change.
+	/// It reports [`Error::Unroutable`] once discovery has synced without a covering route
+	/// for the requested instance. A selected handler's explicit refusal is returned as-is.
+	/// A broadcast resolved through a discovered route keeps
+	/// its path watched until dropped; no separate announcement watcher is needed.
 	/// A route claims capability, not inventory: resolving a covered path
 	/// succeeds optimistically, and a path that names nothing surfaces as
 	/// [`Error::NotFound`] on its tracks instead.
@@ -6572,23 +6627,39 @@ impl Consumer {
 		path: impl TryInto<Path, Error: Into<Error>>,
 		epoch: impl Into<Option<crate::Epoch>>,
 	) -> kio::Pending<Requesting> {
-		let epoch = epoch.into();
-		match path::convert(path) {
-			Ok(path) => self.request(path, epoch.as_ref()),
-			Err(err) => kio::Pending::new(Requesting::failed(err)),
+		let path = match path::convert(path) {
+			Ok(path) => path,
+			Err(err) => return kio::Pending::new(self.failed(err)),
+		};
+		let mut routing = self.routing(path.clone(), epoch.into());
+		match self.follow(&path) {
+			Ok(discovery) => {
+				routing.discovery = Some(discovery);
+				if let Some(resolved) = self.root.join(&path).ok().and_then(|named| self.scope.resolve(&named)) {
+					let mut table = self.shared.lock();
+					let watch = table.watch(&self.shared, &resolved);
+					let seen = watch.seen();
+					drop(table);
+					routing.watch = Some((watch, seen));
+				}
+				// A requests handler hears an already-routed request at creation time.
+				routing.request = Some(self.request(path, routing.epoch.as_ref()).into_inner());
+			}
+			Err(err) => routing.request = Some(Lookup::failed(err)),
 		}
+		kio::Pending::new(routing)
 	}
 
 	/// [`Self::request_broadcast`], refused with [`Error::Unroutable`] unless the
 	/// winning route serves `epoch`: a peer asking for one publisher instance must
 	/// not be handed another.
-	pub(crate) fn request(&self, path: Path, epoch: Option<&crate::Epoch>) -> kio::Pending<Requesting> {
+	pub(crate) fn request(&self, path: Path, epoch: Option<&crate::Epoch>) -> kio::Pending<Lookup> {
 		// The path as this handle names it, absolute: what its scope authorizes and
 		// what its egress is counted under, so a read through a mount bills where
 		// the reader asked.
 		let named = match self.root.join(&path) {
 			Ok(named) => named,
-			Err(err) => return kio::Pending::new(Requesting::failed(err.into())),
+			Err(err) => return kio::Pending::new(Lookup::failed(err.into())),
 		};
 		let scope = self.stats.egress(&named);
 		// The resolved handle is named by what *this* cursor asked for, not by the absolute
@@ -6598,20 +6669,20 @@ impl Consumer {
 
 		// Routes only cover paths within this consumer's scope.
 		if !self.scope.permits(&named) {
-			return kio::Pending::new(Requesting::failed(Error::Unauthorized));
+			return kio::Pending::new(Lookup::failed(Error::Unauthorized));
 		}
 
 		// Key requests by the absolute path on the origin, past any mount, so scoped,
 		// rooted, and mounted consumers and handlers agree on the same entry and front.
 		let Some(absolute) = self.scope.resolve(&named) else {
-			return kio::Pending::new(Requesting::failed(BoundsExceeded.into()));
+			return kio::Pending::new(Lookup::failed(BoundsExceeded.into()));
 		};
 
 		let mut state = self.shared.lock();
 
 		// The origin's driver dropped: nothing will ever serve this.
 		if state.closed {
-			return kio::Pending::new(Requesting::failed(Error::Closed));
+			return kio::Pending::new(Lookup::failed(Error::Closed));
 		}
 
 		let horizon = self.horizon.effective(&state.routes, &absolute);
@@ -6621,7 +6692,7 @@ impl Consumer {
 		// route retracted takes no newcomers.
 		let best = match state.best_route(&absolute, horizon, &HashSet::new(), |_| true) {
 			Some(best) if epoch.is_none_or(|epoch| best.epoch.as_ref() == Some(epoch)) => best.instance(),
-			_ => return kio::Pending::new(Requesting::failed(Error::Unroutable)),
+			_ => return kio::Pending::new(Lookup::failed(Error::Unroutable)),
 		};
 
 		// Join the live front for this path and horizon, if any: its watcher
@@ -6650,7 +6721,7 @@ impl Consumer {
 			if let Some(held) = held {
 				state.next_route += 1;
 				front.joined.store(state.next_route, Ordering::Release);
-				let pending = Requesting::queued(front.request.consume(), held)
+				let pending = Lookup::queued(front.request.consume(), held)
 					.with_path(requested)
 					.with_stats(scope)
 					.with_epoch(epoch.cloned());
@@ -6674,6 +6745,7 @@ impl Consumer {
 		let request = kio::Producer::new(PendingFront {
 			resolved: None,
 			selected: best,
+			refused: false,
 		});
 		let consumer = request.consume();
 		// The front starts held by this request; see [`Front::new`].
@@ -6706,7 +6778,7 @@ impl Consumer {
 			self.tasks.clone(),
 		));
 		kio::Pending::new(
-			Requesting::queued(consumer, held)
+			Lookup::queued(consumer, held)
 				.with_path(requested)
 				.with_stats(scope)
 				.with_epoch(epoch.cloned()),
@@ -9552,6 +9624,7 @@ mod tests {
 			request: kio::Producer::new(PendingFront {
 				resolved: None,
 				selected: Instance::Route(0),
+				refused: false,
 			}),
 			joined: Arc::default(),
 			timers: consumer.timers.clone(),
@@ -11395,6 +11468,58 @@ mod tests {
 		};
 		drop(driver);
 		assert!(matches!(request.producer.read().resolved, Some(Err(Error::Closed))));
+	}
+
+	/// An inline native executor can re-enter both tables from the rejection's wake.
+	#[test]
+	#[cfg(not(target_family = "wasm"))]
+	fn refusing_route_requests_wakes_after_unlocking() {
+		struct Reenter {
+			table: SendCell<kio::Shared<OriginState>>,
+			server: kio::Shared<ServeState>,
+			woken: AtomicBool,
+		}
+		impl Wake for Reenter {
+			fn wake(self: Arc<Self>) {
+				let _table = self.table.lock();
+				let _server = self.server.read();
+				self.woken.store(true, Ordering::SeqCst);
+			}
+		}
+
+		for teardown in [false, true] {
+			let (producer, mut driver) = Producer::new(Config::new(origin(1)));
+			let server = producer.requests_route("room", Route::default()).unwrap();
+			let _pending = producer.consume().request_broadcast("room/alice", None);
+			driver.poll(Instant::ZERO, &kio::Waiter::noop()).unwrap();
+			let channel = server
+				.state
+				.read()
+				.requests
+				.get(&Path::from_static("room/alice"))
+				.unwrap()
+				.consume();
+			// Park on both the request's channel and the server's queue.
+			let reenter = || {
+				Arc::new(Reenter {
+					table: producer.shared.clone(),
+					server: server.state.clone(),
+					woken: AtomicBool::new(false),
+				})
+			};
+			let (request, queue) = (reenter(), reenter());
+			let waiter = kio::Waiter::new(std::task::Waker::from(request.clone()));
+			assert!(channel.poll(&waiter, |_| Poll::<()>::Pending).is_pending());
+			let waiter = kio::Waiter::new(std::task::Waker::from(queue.clone()));
+			assert!(server.state.poll(&waiter, |_| Poll::Pending).is_pending());
+			if teardown {
+				drop(driver);
+			} else {
+				drop(server);
+			}
+			assert!(request.woken.load(Ordering::SeqCst));
+			assert!(queue.woken.load(Ordering::SeqCst));
+		}
 	}
 
 	/// One live subscription reading a track through a remote front, plus the

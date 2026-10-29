@@ -478,12 +478,9 @@ impl Publish {
 		args: &CaptureArgs,
 		bandwidth: moq_net::bandwidth::Allocator,
 		max_age: Option<std::time::Duration>,
-		hls: bool,
 	) -> anyhow::Result<Self> {
 		let mut broadcast = publication.broadcast().clone();
-		let config = moq_mux::catalog::Config::default()
-			.with_max_age(max_age)
-			.with_hls(hls.then(moq_mux::hls::Config::default));
+		let config = moq_mux::catalog::Config::default().with_max_age(max_age);
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
 
 		let video = if args.no_video {
@@ -592,10 +589,9 @@ impl Publish {
 				// Each enabled medium publishes its own track onto the shared
 				// broadcast + catalog. Both stamp frames on the catalog's
 				// advertised clock, so HLS/DASH wall times match the mapping on
-				// the wire. Video encodes on demand (camera opens only while
-				// subscribed). Both run on this task rather than a spawn: on
-				// macOS the audio future holds ObjC handles across an await,
-				// so it is `!Send`.
+				// the wire. Video captures for the whole run. Both run on this
+				// task rather than a spawn: on macOS the audio future holds ObjC
+				// handles across an await, so it is `!Send`.
 				let video_fut = {
 					let broadcast = broadcast.clone();
 					let catalog = catalog.clone();

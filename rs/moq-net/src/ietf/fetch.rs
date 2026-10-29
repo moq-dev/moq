@@ -81,13 +81,13 @@ impl Encode<Version> for FetchType<'_> {
 	}
 }
 
-impl Decode<Version> for FetchType<'_> {
-	fn decode(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for FetchType<'a> {
+	fn decode(buf: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let fetch_type = buf.varint()?;
 		Ok(match fetch_type {
 			0x1 => {
 				let (namespace, track) = decode_track(buf)?;
-				let track = Cow::Owned(track);
+				let track = Cow::Borrowed(track);
 				let start = Location::decode(buf, version)?;
 				let end = Location::decode(buf, version)?;
 				FetchType::Standalone {
@@ -140,7 +140,59 @@ pub struct Fetch<'a> {
 	pub epoch: Option<crate::Epoch>,
 }
 
-impl Message for Fetch<'_> {
+impl Fetch<'_> {
+	/// Copy the borrowed track name, so the request outlives the bytes it came from.
+	pub fn into_owned(self) -> Fetch<'static> {
+		let fetch_type = match self.fetch_type {
+			FetchType::Standalone {
+				namespace,
+				track,
+				start,
+				end,
+			} => FetchType::Standalone {
+				namespace,
+				track: Cow::Owned(track.into_owned()),
+				start,
+				end,
+			},
+			FetchType::RelativeJoining {
+				subscriber_request_id,
+				group_offset,
+			} => FetchType::RelativeJoining {
+				subscriber_request_id,
+				group_offset,
+			},
+			FetchType::AbsoluteJoining {
+				subscriber_request_id,
+				group_id,
+			} => FetchType::AbsoluteJoining {
+				subscriber_request_id,
+				group_id,
+			},
+			FetchType::Filtered {
+				namespace,
+				track,
+				filter,
+			} => FetchType::Filtered {
+				namespace,
+				track: Cow::Owned(track.into_owned()),
+				filter,
+			},
+		};
+		Fetch {
+			request_id: self.request_id,
+			subscriber_priority: self.subscriber_priority,
+			group_order: self.group_order,
+			fetch_type,
+			range_filters: self.range_filters,
+			fill_timeout: self.fill_timeout,
+			properties_wanted: self.properties_wanted,
+			epoch: self.epoch,
+		}
+	}
+}
+
+impl<'a> Message<'a> for Fetch<'a> {
 	const ID: u64 = 0x16;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -185,7 +237,7 @@ impl Message for Fetch<'_> {
 		Ok(())
 	}
 
-	fn decode_msg(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(buf: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(buf, version)?;
 
 		// The token decodes but grants nothing: the session's grant is what authorizes the request.
@@ -215,7 +267,7 @@ impl Message for Fetch<'_> {
 				// Draft-22 names the track up front and moves the range into LOCATION_FILTER.
 				_ => {
 					let (namespace, track) = decode_track(buf)?;
-					let track = Cow::Owned(track);
+					let track = Cow::Borrowed(track);
 					decode_params!(buf, version,
 						0x03 => authorization_token: Vec<super::token::RequestToken>,
 						0x0A => fill_timeout: Option<u64>,
@@ -290,7 +342,7 @@ pub struct FetchOk {
 	/// The track's properties, as SUBSCRIBE_OK carries them.
 	pub properties: super::Properties,
 }
-impl Message for FetchOk {
+impl<'a> Message<'a> for FetchOk {
 	const ID: u64 = 0x18;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -304,7 +356,7 @@ impl Message for FetchOk {
 		Ok(())
 	}
 
-	fn decode_msg(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(buf: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let end_of_track = buf.bool()?;
 		let end_location = Location::decode(buf, version)?;
 		// FETCH_OK lists no parameters, so any closes the session.
@@ -337,8 +389,8 @@ impl Encode<Version> for FetchHeader {
 	}
 }
 
-impl Decode<Version> for FetchHeader {
-	fn decode(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for FetchHeader {
+	fn decode(buf: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(buf, version)?;
 		Ok(Self { request_id })
 	}
@@ -482,8 +534,8 @@ impl Encode<Version> for FetchObject {
 	}
 }
 
-impl Decode<Version> for FetchObject {
-	fn decode(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for FetchObject {
+	fn decode(buf: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let flags = buf.varint()?;
 
 		// Anything at or above 128 is a named value rather than a set of flags, and only
@@ -548,16 +600,16 @@ impl Decode<Version> for FetchObject {
 mod tests {
 	use super::*;
 
-	fn encode_message<M: Message>(msg: &M, version: Version) -> Vec<u8> {
+	fn encode_message<'m, M: Message<'m>>(msg: &M, version: Version) -> Vec<u8> {
 		let mut buf = Vec::new();
 		msg.encode_msg(&mut Encoder::new(&mut buf, version.into()), version)
 			.unwrap();
 		buf.to_vec()
 	}
 
-	fn decode_message<M: Message>(bytes: &[u8], version: Version) -> Result<M, DecodeError> {
-		let mut buf = bytes::Bytes::from(bytes.to_vec());
-		crate::coding::decode_buf(&mut buf, version, M::decode_msg)
+	fn decode_message<'m, M: Message<'m>>(bytes: &'m [u8], version: Version) -> Result<M, DecodeError> {
+		let mut buf = bytes;
+		crate::coding::decode_from(&mut buf, version, |r, v| M::decode_msg(r, v))
 	}
 
 	#[test]
@@ -776,7 +828,7 @@ mod object_tests {
 			.expect("encode");
 
 		let mut bytes = bytes::Bytes::from(buf.to_vec());
-		let decoded = crate::coding::decode_buf(&mut bytes, VERSION, FetchObject::decode).expect("decode");
+		let decoded = crate::coding::decode_buf(&mut bytes, VERSION, |r, v| FetchObject::decode(r, v)).expect("decode");
 		assert!(!bytes.has_remaining(), "the object header is fully consumed");
 
 		(buf.to_vec(), decoded)
@@ -884,7 +936,7 @@ mod object_tests {
 	fn an_undefined_value_is_refused() {
 		// 0x8D, one past End of Non-Existent Range, in the leading-ones form.
 		let mut bytes = bytes::Bytes::from_static(&[0x80, 0x8D, 0x00, 0x00]);
-		assert!(crate::coding::decode_buf(&mut bytes, VERSION, FetchObject::decode).is_err());
+		assert!(crate::coding::decode_buf(&mut bytes, VERSION, |r, v| FetchObject::decode(r, v)).is_err());
 	}
 }
 

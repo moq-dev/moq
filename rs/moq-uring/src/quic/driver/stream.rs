@@ -477,7 +477,7 @@ impl std::fmt::Debug for RecvStream {
 ///
 /// Borrows the connection for as long as it lives.
 pub struct Lease<'a> {
-	conn: RefMut<'a, moq_quic::Connection>,
+	conn: RefMut<'a, moq_quic::connection::Connection>,
 	shared: &'a Shared,
 	id: StreamId,
 }
