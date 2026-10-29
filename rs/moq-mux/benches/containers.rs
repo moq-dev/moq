@@ -132,10 +132,20 @@ fn cmaf_import(passthrough: bool) -> (moq_mux::catalog::Producer, moq_mux::conta
 }
 
 fn import_cmaf(
-	(catalog, mut import): (moq_mux::catalog::Producer, moq_mux::container::fmp4::Import),
+	import: (moq_mux::catalog::Producer, moq_mux::container::fmp4::Import),
 	data: &Bytes,
 ) -> (moq_mux::catalog::Producer, moq_mux::container::fmp4::Import) {
-	import.decode(data).unwrap();
+	import_cmaf_chunks(import, data, data.len())
+}
+
+fn import_cmaf_chunks(
+	(catalog, mut import): (moq_mux::catalog::Producer, moq_mux::container::fmp4::Import),
+	data: &Bytes,
+	chunk: usize,
+) -> (moq_mux::catalog::Producer, moq_mux::container::fmp4::Import) {
+	for chunk in data.chunks(chunk) {
+		import.decode(chunk).unwrap();
+	}
 	import.finish().unwrap();
 	(catalog, import)
 }
@@ -271,16 +281,22 @@ fn interleaved_runs(c: &mut Criterion) {
 				for (direction, passthrough) in [("import", true), ("unwrap", false)] {
 					let mut group = c.benchmark_group(format!("cmaf-interleaved-{direction}"));
 					group.throughput(Throughput::Bytes(data.len() as u64));
-					group.bench_function(
-						BenchmarkId::new(format!("{tracks}tracks"), format!("{runs}runs-{size}bytes")),
-						|b| {
-							b.iter_batched(
-								|| cmaf_import(passthrough),
-								|import| import_cmaf(import, std::hint::black_box(&data)),
-								BatchSize::PerIteration,
-							);
-						},
-					);
+					for chunk in [1, 1024, data.len()] {
+						group.bench_function(
+							BenchmarkId::new(
+								format!("{tracks}tracks"),
+								format!("{runs}runs-{size}bytes-{chunk}chunk"),
+							),
+							|b| {
+								b.iter_batched(
+									|| cmaf_import(passthrough),
+									|import| import_cmaf_chunks(import, std::hint::black_box(&data), chunk),
+									BatchSize::PerIteration,
+								);
+							},
+						);
+					}
+
 					group.finish();
 				}
 			}

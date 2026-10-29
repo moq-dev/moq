@@ -187,6 +187,10 @@ pub enum Error {
 	#[error("invalid data offset")]
 	InvalidDataOffset,
 
+	/// Streaming import requires each track's sample bytes in decode order.
+	#[error("backwards per-track data offset is unsupported for streaming import")]
+	BackwardsDataOffset,
+
 	/// Absolute file offsets cannot be resolved in a standalone fragment.
 	#[error("absolute base_data_offset is unsupported; use moof-relative offsets")]
 	UnsupportedBaseDataOffset,

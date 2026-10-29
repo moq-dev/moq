@@ -101,6 +101,45 @@ pub struct Producer<C: Container, R = ()> {
 	sent: Option<std::sync::Arc<crate::stats::Sent>>,
 }
 
+impl<R: Clone + Send + 'static> Producer<crate::catalog::hang::Container, R> {
+	// The fMP4 importer always constructs an unbuffered Legacy producer.
+	pub(crate) fn start_sample(&mut self, frame: &Frame, size: usize) -> crate::Result<moq_net::frame::Producer> {
+		debug_assert!(matches!(self.container, crate::catalog::hang::Container::Legacy(_)));
+		debug_assert!(self.buffer_duration.is_zero());
+		let mut prefix = bytes::BytesMut::new();
+		hang::container::Frame {
+			timestamp: frame.timestamp,
+			payload: Bytes::new(),
+		}
+		.encode(&mut prefix)?;
+		self.prepare(frame)?;
+		let group = self.group.take().expect("prepare opens a group");
+		let mut writer = group.create_frame(moq_net::frame::Info {
+			timestamp: Some(frame.timestamp),
+			size: size.checked_add(prefix.len()).ok_or(moq_net::Error::WrongSize)? as u64,
+		})?;
+		writer.write(prefix.freeze())?;
+		Ok(writer)
+	}
+
+	pub(crate) fn finish_sample(
+		&mut self,
+		writer: moq_net::frame::Producer,
+		frame: &Frame,
+		size: usize,
+	) -> crate::Result<()> {
+		let group = writer.finish()?;
+		if let Some(recorder) = self.recorder.as_mut() {
+			recorder.frame(group.sequence, frame.timestamp);
+		}
+		self.group = Some(group);
+		self.estimator.write(frame.timestamp, size);
+		self.count(size, frame.keyframe);
+		self.observe_end(frame.timestamp, frame.duration);
+		Ok(())
+	}
+}
+
 trait Rendition<R>: Send {
 	fn name(&self) -> &str;
 	fn timestamp(&self, hint: Option<moq_net::Timestamp>) -> crate::Result<moq_net::Timestamp>;
@@ -498,6 +537,54 @@ where
 	/// broadcast. Frames may still dip below the previous group's content: B-frames, open-GOP
 	/// leading pictures, and a keyframe that overlaps the previous group's last frame.
 	pub fn write(&mut self, frame: Frame) -> crate::Result<()> {
+		self.prepare(&frame)?;
+
+		// Buffer or write the frame.
+		if self.buffer_duration.is_zero() {
+			let group = self.group.as_mut().unwrap();
+			let (timestamp, duration, bytes) = (frame.timestamp, frame.duration, frame.payload.len());
+			let (sequence, keyframe) = (group.sequence, frame.keyframe);
+			self.container.write(group, &[frame])?;
+			// The HLS records absorb publish failures themselves (they are an optional sidecar), so
+			// reporting can't abort the media write.
+			if let Some(recorder) = self.recorder.as_mut() {
+				recorder.frame(sequence, timestamp);
+			}
+
+			// Only what the container accepted is measured. A rejected frame (too large for the
+			// group, a timestamp that won't convert) leaves the producer usable, and the estimate's
+			// extrema never fall, so counting one would inflate the catalog for good.
+			self.estimator.write(timestamp, bytes);
+			self.count(bytes, keyframe);
+			self.observe_end(timestamp, duration);
+		} else {
+			// Buffered frames count toward the rates on the way in instead. The flush that eventually
+			// writes them takes the track down with it when it fails, so there is nothing to unwind.
+			// Their place in the write order waits for that flush, which is when the transport has them.
+			self.estimator.rate(frame.timestamp, frame.payload.len());
+			self.observe_end(frame.timestamp, frame.duration);
+			self.buffer.push(frame);
+
+			// Flush if the buffered span has reached the buffer duration. Compute
+			// min/max across the buffer rather than first/last: frames within a track
+			// are in *decode* order, and B-frames have non-monotonic PTS, so
+			// `last - first` can shrink as a B-frame lands between two earlier-PTS
+			// frames. The min/max pair captures the actual presentation span.
+			if self.buffer.len() >= 2 {
+				let mut iter = self.buffer.iter().map(|f| std::time::Duration::from(f.timestamp));
+				let first = iter.next().unwrap();
+				let (min, max) = iter.fold((first, first), |(min, max), d| (min.min(d), max.max(d)));
+				if max.saturating_sub(min) >= self.buffer_duration {
+					self.flush_buffer(None)?;
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	// Shared by complete-frame writes and the fMP4 importer's streamed Legacy samples.
+	fn prepare(&mut self, frame: &Frame) -> crate::Result<()> {
 		let floor = match frame.keyframe {
 			true => self.start,
 			false => self.floor,
@@ -539,47 +626,6 @@ where
 			self.floor = self.start;
 			self.start = Some(frame.timestamp);
 			self.group = Some(group);
-		}
-
-		// Buffer or write the frame.
-		if self.buffer_duration.is_zero() {
-			let group = self.group.as_mut().unwrap();
-			let (timestamp, duration, bytes) = (frame.timestamp, frame.duration, frame.payload.len());
-			let (sequence, keyframe) = (group.sequence, frame.keyframe);
-			self.container.write(group, &[frame])?;
-			// The HLS records absorb publish failures themselves (they are an optional sidecar), so
-			// reporting can't abort the media write.
-			if let Some(recorder) = self.recorder.as_mut() {
-				recorder.frame(sequence, timestamp);
-			}
-
-			// Only what the container accepted is measured. A rejected frame (too large for the
-			// group, a timestamp that won't convert) leaves the producer usable, and the estimate's
-			// extrema never fall, so counting one would inflate the catalog for good.
-			self.estimator.write(timestamp, bytes);
-			self.count(bytes, keyframe);
-			self.observe_end(timestamp, duration);
-		} else {
-			// Buffered frames count toward the rates on the way in instead. The flush that eventually
-			// writes them takes the track down with it when it fails, so there is nothing to unwind.
-			// Their place in the write order waits for that flush, which is when the transport has them.
-			self.estimator.rate(frame.timestamp, frame.payload.len());
-			self.observe_end(frame.timestamp, frame.duration);
-			self.buffer.push(frame);
-
-			// Flush if the buffered span has reached the buffer duration. Compute
-			// min/max across the buffer rather than first/last: frames within a track
-			// are in *decode* order, and B-frames have non-monotonic PTS, so
-			// `last - first` can shrink as a B-frame lands between two earlier-PTS
-			// frames. The min/max pair captures the actual presentation span.
-			if self.buffer.len() >= 2 {
-				let mut iter = self.buffer.iter().map(|f| std::time::Duration::from(f.timestamp));
-				let first = iter.next().unwrap();
-				let (min, max) = iter.fold((first, first), |(min, max), d| (min.min(d), max.max(d)));
-				if max.saturating_sub(min) >= self.buffer_duration {
-					self.flush_buffer(None)?;
-				}
-			}
 		}
 
 		Ok(())

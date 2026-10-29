@@ -9,12 +9,12 @@ HLS segments.
 
 ## Plan
 
-From the 2026-10-27 audit (MUX-2), verified worse than reported:
-`rs/moq-mux/src/container/fmp4/import.rs` appends input to `self.buffer` and
-waits for `mp4_atom::Any::decode_maybe` to see a whole box. A declared size
-past what is buffered keeps returning `None`, and the HLS importer carries a
-trailing partial atom into the next segment, so one bogus header accumulates
-every later segment.
+The 2026-10-27 audit (MUX-2) found whole-box decoding in
+`rs/moq-mux/src/container/fmp4/import.rs`: an incomplete box retained all
+subsequent input until its declared size arrived. HLS carries an incomplete
+box across segment boundaries, so one bogus header could accumulate every
+later segment. This checkpoint removes that wait from media and ignored
+boxes; metadata and subtitle accumulation remain below.
 
 Decided 2026-10-27 (maintainer): no byte cap. Stream each mdat sample into
 its frame as bytes arrive, resolving sample ranges from the parsed `moof` as
@@ -31,45 +31,69 @@ implementation brief): parse metadata children incrementally so a `moov` or
 blanket byte cap. Apply the same principle to
 [MKV import streams blocks](/quest/m1/security-audit/mkv-stream-blocks.md).
 
-The draft adds a hostile ignored-box test that expects no retained input
-across chunks and segment boundaries. It has no production fix yet: the
-reproduction run could not enter the host's build gate and was stopped
-under the AFK instruction to stop stalled work. The test is expected to fail
-against the current importer; it has not been executed.
+Decided 2026-10-29 (maintainer implementation brief, with AFK covering
+recommended code choices): refuse backwards per-track byte ranges before
+publishing any fragment payload. Forward gaps and interleaved tracks remain
+supported. A sequential MoQ group writer cannot stream decode-ordered
+samples whose physical bytes arrive backwards without retaining earlier
+payload. This settles the draft's remaining input-contract decision.
 
-Remaining implementation:
+Implementation checkpoint, 2026-10-29:
 
-- Read top-level headers incrementally and discard ignored bodies directly
-  from input. Count discarded bytes for moof-relative offsets, preserve
-  segment boundaries, and treat a zero-sized box as extending to EOF rather
-  than the end of a decode call. Cover split headers, malformed sizes, and
-  recovery at the next box boundary.
-- Parse metadata containers and their children incrementally, retaining only
+- Top-level headers are read incrementally. Ignored bodies are discarded as
+  input arrives, including across `cut()` calls; a zero-sized ignored box
+  extends to EOF. Discarded bytes count toward moof-relative offsets.
+- `begin_mdat` resolves selected media and text samples before opening media
+  writers. The importer's streaming resolver preserves `Claimed` checks and
+  rejects backwards ranges per track; the complete-frame CMAF decoder keeps
+  its existing random-access behavior.
+- Media samples stream into MoQ frame writers. Passthrough writes rewritten
+  per-track moof+mdat headers first, then each track's sample bytes directly
+  into its own writer. Gaps and unused trailing mdat bytes are discarded.
+- Text resolution is separated from reconstruction, but each text sample
+  still accumulates in a `BytesMut` before rewriting. `Body::Metadata` still
+  buffers whole `moov` and `moof` bodies. These remain unbounded input-owned
+  paths: this checkpoint does not resolve MUX-2 and must stay a draft.
+- Added tests cover backwards-range refusal before output, huge/EOF-sized
+  mdat with a partially output-owned sample and discarded trailing bytes,
+  cache accounting, and repeated cuts. The existing ignored-box hostile
+  test remains. The interleaved-run benchmark now sweeps input chunk size
+  as well as track, run, and sample counts. These assertions and benchmarks
+  have not yet run successfully.
+
+Remaining work:
+
+- Parse metadata containers and children incrementally, retaining only
   fields used for track setup and sample resolution. Variable-sized leaves
   need structural parsing too; moving the whole-box wait down one level is
-  not sufficient. mp4-atom 0.16.2 and upstream `main` expose header decoding,
-  but their body readers still buffer whole bodies.
-- Resolve every sample before publishing payload, preserving `Resolver` and
-  `Claimed` checks, then stream media into output frames, discarding gaps and
-  unselected samples. Preserve passthrough timing, edits, grouping, catalog
-  estimation, HLS records, and text reconstruction.
-- Settle non-monotonic byte layouts: the resolver currently accepts disjoint
-  runs whose byte order differs from decode order. A MoQ group permits only
-  one unfinished frame, so direct streaming cannot publish those samples in
-  decode order without retaining earlier input. Recommend refusing backwards
-  per-track ranges before publishing any fragment payload; interleaving
-  tracks and forward gaps remain supported. This input-contract decision is
-  left for review, not silently applied by the draft.
-- Add huge metadata/mdat, unfinished-sample, truncation, and cross-segment
-  tests against retained input and output-owned bytes, plus streamed-import
-  benchmarks. The existing frame cap remains owned by the unbounded-groups
-  work; do not substitute it for streaming.
+  insufficient. mp4-atom 0.16.2 exposes incremental header decoding but its
+  body readers buffer whole bodies. No blanket byte cap.
+- Remove input-owned accumulation of subtitle samples while preserving VTT
+  and TTML reconstruction. Output ownership must bound staging and any
+  rewriting expansion. Do not substitute the transport's current frame cap
+  for source-level memory bounds; the unbounded-groups quest owns that cap.
+- Verify abort, truncated headers/metadata/samples, explicit EOF, and
+  seek/discontinuity while a frame holds its group's writer. In particular,
+  ensure controls cannot open a replacement group underneath an unfinished
+  sample. Validate passthrough header sizing and offset arithmetic too.
+- Reproduce the hostile ignored-box failure against the pre-fix source, then
+  run the focused fMP4 tests, source memory/cache assertions, shared producer
+  tests, streamed-import benchmarks, and `just ci`. Add huge `moov`/`moof`
+  and structural-leaf tests with the metadata implementation. Every case
+  must run in CI. Keep the MKV implementation independently reviewable.
 
-Keep `sample::Resolver`'s range checks and `Claimed`'s no-reuse rule. Tests
-feed a huge declared `moof`, `moov`, `mdat`, and skipped box in small chunks
-and assert the importer's held bytes stay bounded.
+Validation at this checkpoint: the first focused compile was admitted and
+reported missing `Clone + Send` bounds on the private streaming producer
+implementation; those bounds are now corrected. Its rerun, the baseline
+reproduction, and `just ci` remained at the host build gate and were stopped
+for handoff. `quest check`, `quest check --base origin/main` (664 documents),
+`cargo fmt --all --check` in the Nix environment, and `git diff --check`
+passed. No passing build, test, benchmark, or memory measurement is claimed.
 
-Public API: none expected. Wire: none.
+Public API: no signature change. Adds `Error::BackwardsDataOffset` to the
+non-exhaustive error enum; streaming import now refuses backwards per-track
+layouts, so such input must be repackaged in forwards per-track byte order.
+Wire: none.
 
 ## Related
 
