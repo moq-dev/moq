@@ -1117,7 +1117,7 @@ mod tests {
 		let full = |span| [span].into_iter().collect();
 		assert!(
 			misses
-				.judge(&state, (0, 0, None), full, &drift, &mut given_up, &waiter)
+				.judge(&state, (0, 0, None), None, full, &drift, &mut given_up, &waiter)
 				.is_empty()
 		);
 		assert!(misses.deferred.runs.is_empty(), "a contiguous feed defers nothing");
@@ -1132,6 +1132,7 @@ mod tests {
 				.judge(
 					&state,
 					(0, 0, None),
+					None,
 					|_| panic!("nothing deferred: the new grace waits for a change"),
 					&drift,
 					&mut given_up,
@@ -1150,7 +1151,7 @@ mod tests {
 		let opened = state.cache.pool().now_wall();
 		assert!(
 			misses
-				.judge(&state, (0, 0, None), full, &drift, &mut given_up, &waiter)
+				.judge(&state, (0, 0, None), None, full, &drift, &mut given_up, &waiter)
 				.is_empty()
 		);
 		assert_eq!(misses.deferred.overlapping(0..5).collect::<Vec<_>>(), vec![3..4]);
