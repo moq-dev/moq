@@ -288,6 +288,14 @@ case needs an update to arrive between START and the first group. Cover it
 deterministically, through the track hooks rather than wire timing, when the
 drop runs are reworked here.
 
+### A covered cut is still reported
+
+`DropCursor::cut` reports a group as cut even when a fetched copy covers it,
+noted in [moq-dev/moq#7053](https://github.com/moq-dev/moq/pull/7053) and again
+by [moq-dev/moq#7149](https://github.com/moq-dev/moq/pull/7149), which made a
+fetched copy settle such a group. Decided 2026-10-29 (maintainer): settle it
+here, where a cut run gets a reason and a covering copy can clear it.
+
 ### Cancelled fetches hold the end
 
 Found 2026-10-28 by [moq-dev/moq#7149](https://github.com/moq-dev/moq/pull/7149):
