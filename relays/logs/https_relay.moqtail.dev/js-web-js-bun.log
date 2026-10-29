@@ -11,14 +11,14 @@ announced: broadcast=moqtail/ch02 active=true
 announced: broadcast=moqtail/testsrc active=true
 announced: broadcast=moqtail/ch03 active=true
 announced: broadcast=moqtail/ch00 active=true
-announced: broadcast=smoke-js-web-4713-32206.hang active=true
-subscribe start: id=2 broadcast=smoke-js-web-4713-32206.hang track=catalog.json
-subscribe written: id=2 broadcast=smoke-js-web-4713-32206.hang track=catalog.json
-subscribe ok: id=2 broadcast=smoke-js-web-4713-32206.hang track=catalog.json
-subscribe start: id=4 broadcast=smoke-js-web-4713-32206.hang track=video
-subscribe written: id=4 broadcast=smoke-js-web-4713-32206.hang track=video
-subscribe ok: id=4 broadcast=smoke-js-web-4713-32206.hang track=video
-received 7366 bytes from smoke-js-web-4713-32206.hang
+announced: broadcast=smoke-js-web-4842-7630.hang active=true
+subscribe start: id=2 broadcast=smoke-js-web-4842-7630.hang track=catalog.json
+subscribe written: id=2 broadcast=smoke-js-web-4842-7630.hang track=catalog.json
+subscribe ok: id=2 broadcast=smoke-js-web-4842-7630.hang track=catalog.json
+subscribe start: id=4 broadcast=smoke-js-web-4842-7630.hang track=video
+subscribe written: id=4 broadcast=smoke-js-web-4842-7630.hang track=video
+subscribe ok: id=4 broadcast=smoke-js-web-4842-7630.hang track=video
+received 7366 bytes from smoke-js-web-4842-7630.hang
 subscribe_namespace error: connection error: closed (source=session)
 announced: broadcast=moqtail/ch04 active=false
 announced: broadcast=moqtail/ch07 active=false
@@ -29,7 +29,7 @@ announced: broadcast=moqtail/ch02 active=false
 announced: broadcast=moqtail/testsrc active=false
 announced: broadcast=moqtail/ch03 active=false
 announced: broadcast=moqtail/ch00 active=false
-announced: broadcast=smoke-js-web-4713-32206.hang active=false
+announced: broadcast=smoke-js-web-4842-7630.hang active=false
 broadcast discovery failed; broadcasts resolve on request only. WebTransportError {
   source: "session",
   streamErrorCode: null,
@@ -63,5 +63,5 @@ broadcast discovery failed; broadcasts resolve on request only. WebTransportErro
   DATA_CLONE_ERR: 25,
   toString: [Function: toString],
 }
-subscribe error: id=4 broadcast=smoke-js-web-4713-32206.hang track=video error=remote error: 0 (connection error: closed)
-subscribe error: id=2 broadcast=smoke-js-web-4713-32206.hang track=catalog.json error=remote error: 0 (connection error: closed)
+subscribe error: id=2 broadcast=smoke-js-web-4842-7630.hang track=catalog.json error=remote error: 0 (connection error: closed)
+subscribe error: id=4 broadcast=smoke-js-web-4842-7630.hang track=video error=remote error: 0 (connection error: closed)

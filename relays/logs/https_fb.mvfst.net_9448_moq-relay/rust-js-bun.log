@@ -2,21 +2,21 @@ https://fb.mvfst.net:9448/moq-relay connected via WebTransport
 https://fb.mvfst.net:9448/moq-relay negotiated ALPN: moqt-16
 connected version=moq-transport-16
 subscribe_namespace written: requestId=0
-announced: broadcast=smoke-rust-4713-25879.hang active=true
-subscribe start: id=2 broadcast=smoke-rust-4713-25879.hang track=catalog.json
-subscribe written: id=2 broadcast=smoke-rust-4713-25879.hang track=catalog.json
-subscribe ok: id=2 broadcast=smoke-rust-4713-25879.hang track=catalog.json
-subscribe start: id=4 broadcast=smoke-rust-4713-25879.hang track=0.avc3
-subscribe written: id=4 broadcast=smoke-rust-4713-25879.hang track=0.avc3
-subscribe ok: id=4 broadcast=smoke-rust-4713-25879.hang track=0.avc3
+announced: broadcast=smoke-rust-4842-2032.hang active=true
+subscribe start: id=2 broadcast=smoke-rust-4842-2032.hang track=catalog.json
+subscribe written: id=2 broadcast=smoke-rust-4842-2032.hang track=catalog.json
+subscribe ok: id=2 broadcast=smoke-rust-4842-2032.hang track=catalog.json
+subscribe start: id=4 broadcast=smoke-rust-4842-2032.hang track=0.avc3
+subscribe written: id=4 broadcast=smoke-rust-4842-2032.hang track=0.avc3
+subscribe ok: id=4 broadcast=smoke-rust-4842-2032.hang track=0.avc3
 dropping a group with no head: alias=4 group=2
 adapter: closing stream requestId=4
-subscribe error: id=4 broadcast=smoke-rust-4713-25879.hang track=0.avc3 error=publish done: status=0x0 reason=Write after stream complete or reset
+subscribe error: id=4 broadcast=smoke-rust-4842-2032.hang track=0.avc3 error=publish done: status=0x0 reason=Write after stream complete or reset
 adapter: close() called
 error: publish done: status=0x0 reason=Write after stream complete or reset
-subscribe error: id=2 broadcast=smoke-rust-4713-25879.hang track=catalog.json error=subscribe stream ended without PUBLISH_DONE
+subscribe error: id=2 broadcast=smoke-rust-4842-2032.hang track=catalog.json error=subscribe stream ended without PUBLISH_DONE
 subscribe_namespace error: remote error: 386759528
-announced: broadcast=smoke-rust-4713-25879.hang active=false
+announced: broadcast=smoke-rust-4842-2032.hang active=false
 broadcast discovery failed; broadcasts resolve on request only. Stream: remote error: 386759528
  code: 0,
 

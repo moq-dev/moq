@@ -1,14 +1,14 @@
 [page] negotiated protocol: moqt-22
 [page] subscribe_namespace written: requestId=0
-[page] announced: broadcast=smoke-rust-4713-29850.hang active=true
-[page] subscribe start: id=2 broadcast=smoke-rust-4713-29850.hang track=catalog.json
-[page] subscribe written: id=2 broadcast=smoke-rust-4713-29850.hang track=catalog.json
-[page] subscribe ok: id=2 broadcast=smoke-rust-4713-29850.hang track=catalog.json
-[page] received catalog hang smoke-rust-4713-29850.hang {video: Object, audio: Object, archive: Object, clock: Object}
-[page] subscribe start: id=4 broadcast=smoke-rust-4713-29850.hang track=0.avc3
-[page] subscribe written: id=4 broadcast=smoke-rust-4713-29850.hang track=0.avc3
-[page] subscribe ok: id=4 broadcast=smoke-rust-4713-29850.hang track=0.avc3
+[page] announced: broadcast=smoke-rust-4842-19540.hang active=true
+[page] subscribe start: id=2 broadcast=smoke-rust-4842-19540.hang track=catalog.json
+[page] subscribe written: id=2 broadcast=smoke-rust-4842-19540.hang track=catalog.json
+[page] subscribe ok: id=2 broadcast=smoke-rust-4842-19540.hang track=catalog.json
+[page] received catalog hang smoke-rust-4842-19540.hang {video: Object, audio: Object, archive: Object, clock: Object}
+[page] subscribe start: id=4 broadcast=smoke-rust-4842-19540.hang track=0.avc3
+[page] subscribe written: id=4 broadcast=smoke-rust-4842-19540.hang track=0.avc3
+[page] subscribe ok: id=4 broadcast=smoke-rust-4842-19540.hang track=0.avc3
 [page] dropping a group with no head: alias=1 group=2
 [page] spawn error DataError: Failed to execute 'decode' on 'VideoDecoder': A key frame is required after configure() or flush(). If you're using AVC formatted H.264 you must fill out the description field in the VideoDecoderConfig.
-    at http://localhost:45961/assets/index-D-ZqNDdQ.js:782:10680
-decoded 1 frames from smoke-rust-4713-29850.hang (vite)
+    at http://localhost:35631/assets/index-D-ZqNDdQ.js:782:10680
+decoded 1 frames from smoke-rust-4842-19540.hang (vite)

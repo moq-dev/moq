@@ -2,13 +2,13 @@ https://relay.moqtail.dev:8244/ connected via WebTransport
 https://relay.moqtail.dev:8244/ negotiated ALPN: moqt-22
 connected version=moq-transport-22
 subscribe_namespace written: requestId=0
-announced: broadcast=smoke-js-web-4713-14790.hang active=true
-subscribe start: id=2 broadcast=smoke-js-web-4713-14790.hang track=catalog.json
-subscribe written: id=2 broadcast=smoke-js-web-4713-14790.hang track=catalog.json
-subscribe ok: id=2 broadcast=smoke-js-web-4713-14790.hang track=catalog.json
+announced: broadcast=smoke-js-web-4842-12232.hang active=true
+subscribe start: id=2 broadcast=smoke-js-web-4842-12232.hang track=catalog.json
+subscribe written: id=2 broadcast=smoke-js-web-4842-12232.hang track=catalog.json
+subscribe ok: id=2 broadcast=smoke-js-web-4842-12232.hang track=catalog.json
 error: timed out waiting for data
 subscribe_namespace error: connection error: closed (source=session)
-announced: broadcast=smoke-js-web-4713-14790.hang active=false
+announced: broadcast=smoke-js-web-4842-12232.hang active=false
 broadcast discovery failed; broadcasts resolve on request only. WebTransportError {
   source: "session",
   streamErrorCode: null,
@@ -42,4 +42,4 @@ broadcast discovery failed; broadcasts resolve on request only. WebTransportErro
   DATA_CLONE_ERR: 25,
   toString: [Function: toString],
 }
-subscribe error: id=2 broadcast=smoke-js-web-4713-14790.hang track=catalog.json error=remote error: 0 (connection error: closed)
+subscribe error: id=2 broadcast=smoke-js-web-4842-12232.hang track=catalog.json error=remote error: 0 (connection error: closed)

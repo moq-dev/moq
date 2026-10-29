@@ -2,27 +2,28 @@ https://moqt.nokiaresearch.com:8443/moq connected via WebTransport
 https://moqt.nokiaresearch.com:8443/moq negotiated ALPN: moqt-19
 connected version=moq-transport-19
 subscribe_namespace written: requestId=0
-announced: broadcast=smoke-rust-4713-3142.hang active=true
-subscribe start: id=2 broadcast=smoke-rust-4713-3142.hang track=catalog.json
+announced: broadcast=smoke-rust-4842-10194.hang active=true
+subscribe start: id=2 broadcast=smoke-rust-4842-10194.hang track=catalog.json
 announced: broadcast=moq-test/3033/interop/namespace-discovery active=true
+announced: broadcast=video active=true
 announced: broadcast=demo active=true
 announced: broadcast=simulcast active=true
-announced: broadcast=video active=true
-subscribe written: id=2 broadcast=smoke-rust-4713-3142.hang track=catalog.json
-subscribe ok: id=2 broadcast=smoke-rust-4713-3142.hang track=catalog.json
-subscribe start: id=4 broadcast=smoke-rust-4713-3142.hang track=0.avc3
-subscribe written: id=4 broadcast=smoke-rust-4713-3142.hang track=0.avc3
-subscribe ok: id=4 broadcast=smoke-rust-4713-3142.hang track=0.avc3
-dropping a group with no head: alias=3002 group=2
-dropping a group with no head: alias=3002 group=2
-dropping a group with no head: alias=3002 group=2
-received 7683 bytes from smoke-rust-4713-3142.hang
+subscribe written: id=2 broadcast=smoke-rust-4842-10194.hang track=catalog.json
+subscribe ok: id=2 broadcast=smoke-rust-4842-10194.hang track=catalog.json
+subscribe start: id=4 broadcast=smoke-rust-4842-10194.hang track=0.avc3
+subscribe written: id=4 broadcast=smoke-rust-4842-10194.hang track=0.avc3
+subscribe ok: id=4 broadcast=smoke-rust-4842-10194.hang track=0.avc3
+dropping a group with no head: alias=3016 group=2
+dropping a group with no head: alias=3016 group=2
+dropping a group with no head: alias=3016 group=2
+received 7683 bytes from smoke-rust-4842-10194.hang
+dropping a group with no head: alias=3016 group=2
 subscribe_namespace error: connection error: closed (source=session)
-announced: broadcast=smoke-rust-4713-3142.hang active=false
+announced: broadcast=smoke-rust-4842-10194.hang active=false
 announced: broadcast=moq-test/3033/interop/namespace-discovery active=false
+announced: broadcast=video active=false
 announced: broadcast=demo active=false
 announced: broadcast=simulcast active=false
-announced: broadcast=video active=false
 broadcast discovery failed; broadcasts resolve on request only. WebTransportError {
   source: "session",
   streamErrorCode: null,
@@ -56,5 +57,5 @@ broadcast discovery failed; broadcasts resolve on request only. WebTransportErro
   DATA_CLONE_ERR: 25,
   toString: [Function: toString],
 }
-subscribe error: id=2 broadcast=smoke-rust-4713-3142.hang track=catalog.json error=remote error: 0 (connection error: closed)
-subscribe error: id=4 broadcast=smoke-rust-4713-3142.hang track=0.avc3 error=remote error: 0 (connection error: closed)
+subscribe error: id=2 broadcast=smoke-rust-4842-10194.hang track=catalog.json error=remote error: 0 (connection error: closed)
+subscribe error: id=4 broadcast=smoke-rust-4842-10194.hang track=0.avc3 error=remote error: 0 (connection error: closed)
