@@ -15,7 +15,7 @@ gets the draft's fill-failure signal (its fetch stream reset right after
 FETCH_HEADER, as `FillServe::Unsupported` already does), so its SUBSCRIBE
 stays up. FILL_TIMEOUT is accepted and ignored on both sides.
 
-Non-goals: our subscribers. `rs/moq-net/src/ietf/subscriber.rs` keeps sending
+Non-goals: changing our subscribers' range requests. `rs/moq-net/src/ietf/subscriber.rs` keeps sending
 range FETCH and multi-group fills upstream, one per run of misses, as
 [moq-dev/moq#6724](https://github.com/moq-dev/moq/pull/6724) does. Sending
 is cheap and correct, since the upstream answers with its own gap markers.
@@ -64,11 +64,23 @@ Decision prompts:
 
 Implementation is checkpointed in [moq-dev/moq#7204](https://github.com/moq-dev/moq/pull/7204): both publishers serve one-group FETCH and the largest-group fill, ignore FILL_TIMEOUT, and no longer serve ranges. Subscriber range requests are unchanged. The publisher-only model helpers and timeout machinery are removed; fixtures and benchmarks use the kept forms.
 
-Remaining decision: a refused fill can reset before its FETCH_HEADER is received. Our subscriber cannot associate that stream with its request, so its sole fill slot remains outstanding. `run_subscribe` defers every subsequent widening while that slot is outstanding. The existing `draft22_updates_both_bounds_across_cached_groups` integration test now stalls after `2..4 -> 0..6 -> 4..5 -> 0..`, losing live group 6 even though the subscription remains open. The memory transport's `reset_drops_queued_messages` test and the subscriber's deferred-update comment describe this case.
+AFK scope choice on 2026-10-29: ✅ adopt the draft's recommended narrow
+subscriber fill-ownership fix; accept permanently stalled widening was rejected.
+Keep subscriber range FETCH and multi-group fill requests unchanged. A reset may
+discard FETCH_HEADER, so later widening must be able to retire a fill that has
+no identified stream without allowing its late header to claim a newer fill.
 
-Recommendation: permit a narrow subscriber fill-ownership fix that lets later updates retire an unidentifiable failed fill without changing the range FETCH or multi-group fill requests it sends. That exceeds the settled publisher-only scope and needs the maintainer's decision. Accepting permanently stalled widening is the alternative, not a test change to conceal it.
+Reproduced before code changes at `5b2485fb4749dbed31e13eb9229b694d3956a5a7`:
+`just rs test -p moq-net --test integration draft22_updates_both_bounds_across_cached_groups`
+fails at the final live group assertion (`None` instead of `Some(6)`,
+`relay=false`). The fill slot remains outstanding after the refused stream's
+header is discarded.
 
-After that decision, finish local checks and `just test interop --all`, then remove this quest and its links. The compatibility lane currently stops before session cells because accepted pins name moq-cli 0.14.8 while 0.14.9 is published. [moq-dev/moq#7061](https://github.com/moq-dev/moq/pull/7061) already owns that blocked remeasurement; do not repin it here without new evidence of a break from this change.
+Remaining: implement request-owned fill state, resolve conflicts with current
+main, and finish local checks and `just test interop --all`. Remove this quest
+and its links once implementation and validation are complete. Compatibility
+pin remeasurement remains owned by
+[moq-dev/moq#7061](https://github.com/moq-dev/moq/pull/7061); do not repin here.
 
 Public API: none. Wire: our publishers refuse multi-group FETCH with
 NOT_SUPPORTED, fail multi-group fills, and ignore FILL_TIMEOUT.
