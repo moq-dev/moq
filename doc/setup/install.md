@@ -76,12 +76,15 @@ Every archive, binary, and package attached to a `moq` or `moq-relay` release
 carries a build provenance attestation; older releases have none.
 `SHA256SUMS` comes from the same release, so it only catches a corrupt
 download. To check that a file was built by this repository's release
-workflow, use the [GitHub CLI](https://cli.github.com/):
+workflow for the tag you expect, use the
+[GitHub CLI](https://cli.github.com/); `--source-ref` rejects a genuine file
+from another release:
 
 ```bash
 gh attestation verify moq-cli-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz \
   --repo moq-dev/moq \
-  --signer-workflow moq-dev/moq/.github/workflows/release-binary.yml
+  --signer-workflow moq-dev/moq/.github/workflows/release-binary.yml \
+  --source-ref refs/tags/moq-cli-vX.Y.Z
 ```
 
 ## Debian and Ubuntu
