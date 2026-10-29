@@ -60,6 +60,9 @@ Use the existing reader/range and route/consumer sweeps to verify scaling.
 [moq-dev/moq#7253](https://github.com/moq-dev/moq/pull/7253) is an unfinished
 checkpoint: both isolated builds waited at `quest gate` without reaching Cargo,
 so it contains no new timings, instruction counts, or validated code fix.
+`quest check` and the Markdown check passed. `just ci` stopped in the unchanged
+Clippy-gate tooling test because `mbx` could not start Cargo (`Argument list too
+long`, OS error 7); the full local gate remains outstanding.
 Agents never dispatch Nightly. Bench-ci owns calibration; this quest owns the
 five cases above.
 
