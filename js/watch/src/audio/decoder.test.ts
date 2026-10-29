@@ -310,7 +310,7 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 	// The catalog broadcast's instance, identified by its `closed` handle.
 	const active = new Signal({ closed: {} });
 	const broadcast = new Signal<Broadcast | undefined>({
-		in: { enabled },
+		in: { enabled, name: new Signal(Moq.Path.from("watched")) },
 		out: { catalog, active },
 		relativeBroadcast,
 	} as unknown as Broadcast);
@@ -976,7 +976,7 @@ async function livePlayback(burst: number) {
 	let producer = new Moq.Broadcast.Producer();
 	const media = new Signal<Moq.Broadcast.Consumer>(producer.consume());
 	const broadcast = new Signal<Broadcast | undefined>({
-		in: { enabled: new Signal(true) },
+		in: { enabled: new Signal(true), name: new Signal(Moq.Path.from("watched")) },
 		out: { catalog, active: new Signal({ closed: {} }) },
 		relativeBroadcast: (effect: Effect) => effect.get(media),
 	} as unknown as Broadcast);
@@ -1368,7 +1368,7 @@ it("a rejected audio support probe does not leave buffered video waiting on a pe
 	const logged = spyOn(console, "warn").mockImplementation(() => {});
 	const source = new Source({
 		broadcast: {
-			in: { enabled: new Signal(true) },
+			in: { enabled: new Signal(true), name: new Signal(Moq.Path.from("watched")) },
 			out: {
 				catalog: new Signal({
 					audio: {

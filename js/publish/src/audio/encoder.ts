@@ -14,6 +14,7 @@ import {
 	Signal,
 } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
+import type { RenditionStats } from "../rendition";
 import { errors } from "../internal";
 import { Estimator, type Order } from "../order";
 import type { AudioFrame, Capture, Format } from "./capture";
@@ -82,6 +83,9 @@ export interface Stats {
 
 	/** Total bytes encoded while serving. Monotonic; diff over an interval for an upload bitrate. */
 	bytes: number;
+
+	/** The bitrate the encoder targets now, in bits per second, or undefined while none is resolved. */
+	bitrate?: number;
 }
 
 /** Signals the encoder reads. */
@@ -127,7 +131,7 @@ export type EncoderOutput = {
 	root: Signal<AudioNode | undefined>;
 	// True when a subscriber is attached and we're encoding.
 	active: Signal<boolean>;
-	// Cumulative output totals (frames, bytes) measured while serving.
+	// Cumulative output totals (frames, bytes) measured while serving, and the target bitrate.
 	stats: Signal<Stats>;
 };
 
@@ -291,6 +295,10 @@ export class Encoder {
 		this.#signals.run(this.#runSettingsRecovery.bind(this));
 		this.#signals.run(this.#runCaptureRecovery.bind(this));
 		this.#signals.run(this.#runRegister.bind(this));
+		this.#signals.run((effect) => {
+			const bitrate = effect.get(this.#config)?.encoder.bitrate;
+			this.#out.stats.update((stats) => ({ ...stats, bitrate }));
+		});
 	}
 
 	// Pump PCM off the capture into whatever is currently publishing, applying the volume knobs on
@@ -387,6 +395,7 @@ export class Encoder {
 
 		// Publish the resolved config; undefined (no capture) drops it from the catalog.
 		effect.proxy(rendition.config, this.out.catalog);
+		effect.proxy<RenditionStats | undefined>(rendition.stats, this.out.stats);
 
 		// The pipeline outlives any one subscription: it is built as soon as capture runs and
 		// #encode reads the live producer per frame rather than subscribing to it. Rebuilding on a
@@ -644,6 +653,7 @@ export class Encoder {
 						}
 
 						this.#out.stats.update((stats) => ({
+							...stats,
 							frames: stats.frames + 1,
 							bytes: stats.bytes + frame.byteLength,
 						}));

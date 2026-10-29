@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
+import { Stats } from "@moq/hang";
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import { Origin, Path, Track } from "@moq/net";
@@ -718,4 +719,107 @@ test("identity changes before the first announce keep the catalog ID as the trac
 	expect((await catalog.latest())?.value.video?.renditions.video?.track).toBe("video/1");
 
 	broadcast.close();
+});
+
+test("stats names a track in the catalog and reports each listed rendition while subscribed", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const stats = new Signal(false);
+	const probe = new Signal({ rtt: Milli(12.7) });
+	const broadcast = new Broadcast({
+		enabled: true,
+		origin: new Origin.Producer(),
+		name: Path.from("test.hang"),
+		stats,
+		probe,
+	});
+	try {
+		const video = broadcast.video("video");
+		video.config.set(videoConfig);
+		video.stats.set({ frames: 3, bytes: 300, keyframes: 1, skipped: 2, bitrate: 1_000_000 });
+		// A rendition without a config is not in the catalog, so it is not reported either.
+		broadcast.audio("audio").stats.set({ frames: 1 });
+		await settle();
+		expect((await readCatalog(broadcast))?.stats).toBeUndefined();
+
+		stats.set(true);
+		await settle();
+		expect((await readCatalog(broadcast))?.stats).toEqual({ track: Broadcast.STATS_TRACK });
+
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected a network producer once connected");
+		const subscriber = net.track(Broadcast.STATS_TRACK).subscribe();
+		const consumer = new Json.Snapshot.Consumer<Stats.Snapshot>({ track: subscriber, schema: Stats.SnapshotSchema });
+		await settle();
+		await clock.advance(Nano.fromMilli(Milli(1000)));
+		// Sub-millisecond durations are floored on the wire.
+		expect((await consumer.latest())?.value).toEqual({
+			transport: { rtt: 12 },
+			renditions: { video: { frames: 3, bytes: 300, keyframes: 1, skipped: 2, bitrate: 1_000_000 } },
+		});
+		subscriber.close();
+
+		stats.set(false);
+		await settle();
+		expect((await readCatalog(broadcast))?.stats).toBeUndefined();
+	} finally {
+		broadcast.close();
+		installed.close();
+	}
+});
+
+test("an unsubscribed stats track writes nothing", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const broadcast = new Broadcast({
+		enabled: true,
+		origin: new Origin.Producer(),
+		name: Path.from("test.hang"),
+		stats: true,
+	});
+	try {
+		const video = broadcast.video("video");
+		video.config.set(videoConfig);
+		video.stats.set({ frames: 1 });
+		await settle();
+		await clock.advance(Nano.fromMilli(Milli(3000)));
+
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected a network producer once connected");
+		const subscriber = net.track(Broadcast.STATS_TRACK).subscribe();
+		await settle();
+		await clock.advance(Nano.fromMilli(Milli(1000)));
+		// Nothing was written while nobody subscribed, so the first report opens the first group.
+		expect((await subscriber.recvGroup())?.sequence).toBe(0);
+		subscriber.close();
+	} finally {
+		broadcast.close();
+		installed.close();
+	}
+});
+
+test("echo solicits feedback in the catalog unless it walks above the root", async () => {
+	const echo = new Signal<Path.Relative | undefined>(Path.normalizeRelative("viewers"));
+	const name = new Signal(Path.from("room/live.hang"));
+	const broadcast = new Broadcast({ enabled: true, name, echo });
+	try {
+		await settle();
+		expect((await readCatalog(broadcast))?.echo).toEqual({ path: "viewers" });
+
+		// From `room/live.hang`, `../../viewers` walks above the root, which every viewer refuses.
+		echo.set(Path.normalizeRelative("../../viewers"));
+		await settle();
+		expect((await readCatalog(broadcast))?.echo).toBeUndefined();
+
+		// A deeper name brings the same path back within the root.
+		name.set(Path.from("org/room/live.hang"));
+		await settle();
+		expect((await readCatalog(broadcast))?.echo).toEqual({ path: "../../viewers" });
+
+		echo.set(undefined);
+		await settle();
+		expect((await readCatalog(broadcast))?.echo).toBeUndefined();
+	} finally {
+		broadcast.close();
+	}
 });

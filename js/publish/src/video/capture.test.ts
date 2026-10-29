@@ -434,7 +434,7 @@ test("an encoder resuming on a still source encodes a keyframe of the current pi
 	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MILLI });
 	// No subscriber yet, so the encoder idles while the source sends its only frame.
 	const live = new Signal<Moq.Track.Producer | undefined>(undefined);
-	const rendition = { config: new Signal(undefined), track: live, close: () => {} };
+	const rendition = { config: new Signal(undefined), stats: new Signal(undefined), track: live, close: () => {} };
 	const encoder = new Encoder("video", {
 		enabled: true,
 		broadcast: { video: () => rendition, order: new Order() } as never,
@@ -541,7 +541,7 @@ test("an encoder torn down while a frame is in flight closes that frame", async 
 	const capture = new Capture({ source: input.source });
 	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MILLI });
 	const live = new Signal<Moq.Track.Producer | undefined>(undefined);
-	const rendition = { config: new Signal(undefined), track: live, close: () => {} };
+	const rendition = { config: new Signal(undefined), stats: new Signal(undefined), track: live, close: () => {} };
 	const encoder = new Encoder("video", {
 		enabled: true,
 		broadcast: { video: () => rendition, order: new Order() } as never,

@@ -36,6 +36,7 @@ let sources = 0;
 function watchBroadcast(catalog: Signal<Catalog.Root>): Broadcast {
 	const media = closedConsumer(`source-${sources++}`);
 	return {
+		in: { name: new Signal(Moq.Path.from("watched")) },
 		out: { catalog, active: new Signal(undefined) },
 		relativeBroadcast: () => media,
 	} as unknown as Broadcast;
@@ -300,6 +301,7 @@ async function guardedPlayback(
 	const media = new Signal<Moq.Broadcast.Consumer>(producer.consume());
 	const catalog = new Signal<Catalog.Root>({ video: { renditions: { video } } });
 	const broadcast = new Signal<Broadcast | undefined>({
+		in: { name: new Signal(Moq.Path.from("watched")) },
 		out: { catalog, active },
 		relativeBroadcast: (effect: Effect) => effect.get(media),
 	} as unknown as Broadcast);
@@ -578,7 +580,13 @@ for (const kind of ["legacy", "cmaf"] as const) {
 		try {
 			expect(playback.submitted).toEqual([1000, 1100, 1200]);
 			// Rejected payloads were still received, but never counted as frames.
-			expect(playback.decoder.out.stats.peek()).toEqual({ frameCount: 3, bytesReceived: 5 });
+			expect(playback.decoder.out.stats.peek()).toMatchObject({ frameCount: 3, bytesReceived: 5 });
+			// Feedback counts every frame received, under the rendition's ID in the watched catalog.
+			expect(playback.decoder.feedback(Moq.Path.from("watched")).video).toMatchObject({
+				frames: 5,
+				bytes: 5,
+				decoded: 3,
+			});
 		} finally {
 			playback.close();
 		}

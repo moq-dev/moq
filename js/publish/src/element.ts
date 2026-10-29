@@ -39,7 +39,19 @@ function parseVersions(value: string | null): string[] | undefined {
 }
 
 /** The attributes the element observes. */
-const OBSERVED = ["url", "versions", "name", "muted", "invisible", "source", "preview", "backend", "announce"] as const;
+const OBSERVED = [
+	"url",
+	"versions",
+	"name",
+	"muted",
+	"invisible",
+	"source",
+	"preview",
+	"backend",
+	"announce",
+	"stats",
+	"echo-path",
+] as const;
 
 /** The built-in capture sources selectable via the `source` attribute. */
 export type SourceType = "camera" | "screen" | "file";
@@ -83,6 +95,11 @@ function parsePreview(value: string | null): Preview.Mode {
 	throw invalidAttribute("preview", value, '"encoded", "source", or "none"');
 }
 
+// Parse the `echo-path` attribute: a path relative to the broadcast, or undefined when absent.
+function parseEchoPath(value: string | null): Moq.Path.Relative | undefined {
+	return value === null ? undefined : Moq.Path.normalizeRelative(value);
+}
+
 function parseBackend(value: string | null): Preview.Backend {
 	if (value === null) return "auto";
 	const trimmed = value.trim();
@@ -111,6 +128,10 @@ export default class MoqPublish extends HTMLElement {
 		// When to advertise the broadcast: always, or only once a source is live. Undefined while the
 		// `announce` attribute is invalid, which never announces.
 		announce: new Signal<AnnounceMode | undefined>("source"),
+		// Whether to publish a stats track named in the catalog.
+		stats: new Signal(false),
+		// Where viewers may publish feedback, relative to the broadcast, or undefined to solicit none.
+		echoPath: new Signal<Moq.Path.Relative | undefined>(undefined),
 	};
 
 	/**
@@ -223,6 +244,9 @@ export default class MoqPublish extends HTMLElement {
 			display: this.#capture.out.display,
 			flip: this.#flip,
 			rotation: this.#capture.out.rotation,
+			stats: this.controls.stats,
+			probe: this.connection.probe,
+			echo: this.controls.echoPath,
 		});
 		this.signals.cleanup(() => this.broadcast.close());
 
@@ -342,6 +366,8 @@ export default class MoqPublish extends HTMLElement {
 		this.signals.run((effect) => this.#reflect(effect, "preview", effect.get(this.controls.preview)));
 		this.signals.run((effect) => this.#reflect(effect, "backend", effect.get(this.controls.backend)));
 		this.signals.run((effect) => this.#reflect(effect, "announce", effect.get(this.controls.announce)));
+		this.signals.run((effect) => this.#reflect(effect, "stats", effect.get(this.controls.stats) ? "" : undefined));
+		this.signals.run((effect) => this.#reflect(effect, "echo-path", effect.get(this.controls.echoPath)));
 		this.signals.run(this.#runSource.bind(this));
 	}
 
@@ -371,6 +397,8 @@ export default class MoqPublish extends HTMLElement {
 			else if (name === "invisible") this.invisible = parseBoolean(newValue, false);
 			else if (name === "preview") this.preview = parsePreview(newValue);
 			else if (name === "backend") this.backend = parseBackend(newValue);
+			else if (name === "stats") this.stats = parseBoolean(newValue, false);
+			else if (name === "echo-path") this.echoPath = parseEchoPath(newValue);
 			else {
 				const exhaustive: never = name;
 				throw new Error(`Invalid attribute: ${exhaustive}`);
@@ -587,6 +615,34 @@ export default class MoqPublish extends HTMLElement {
 	set announce(value: AnnounceMode) {
 		this.controls.announce.set(parseAnnounce(value));
 		this.#accept("announce");
+	}
+
+	/**
+	 * Whether to publish a stats track, mirrored by the `stats` attribute. The catalog names it in its
+	 * `stats` section, and it reports what each rendition has sent plus the connection's PROBE
+	 * round-trip time, about once a second while someone subscribes.
+	 */
+	get stats(): boolean {
+		return this.controls.stats.peek();
+	}
+
+	set stats(value: boolean) {
+		this.controls.stats.set(value);
+		this.#accept("stats");
+	}
+
+	/**
+	 * Where viewers may publish feedback, relative to the broadcast as a rendition reference is (from
+	 * `room/live`, `viewers` is `room/viewers`), mirrored by the `echo-path` attribute. Sets the
+	 * catalog's `echo` section, so a `<moq-watch echo>` publishes its feedback there. Undefined solicits none.
+	 */
+	get echoPath(): Moq.Path.Relative | undefined {
+		return this.controls.echoPath.peek();
+	}
+
+	set echoPath(value: string | undefined) {
+		this.controls.echoPath.set(parseEchoPath(value ?? null));
+		this.#accept("echo-path");
 	}
 }
 

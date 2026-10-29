@@ -1,4 +1,5 @@
-import { Milli } from "@moq/clock";
+import { Milli, Nano } from "@moq/clock";
+import { Report, Stats } from "@moq/hang";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Json from "@moq/json";
@@ -8,7 +9,7 @@ import { rotateVideoDimensions } from "@moq/video";
 import { CatalogProducer } from "./catalog";
 import { errors } from "./internal";
 import { Order } from "./order";
-import { type Kind, Rendition } from "./rendition";
+import { type Kind, Rendition, type RenditionStats } from "./rendition";
 
 // The refresh ratio video tracks advertise: a joiner forces a keyframe once a group's deltas
 // outweigh twice its keyframe. Matches moq-video's capture `REFRESH`; see it for the measurements.
@@ -58,6 +59,27 @@ export type BroadcastInput = {
 	 * so changing this publishes a new network broadcast.
 	 */
 	maxAge: Getter<Milli | undefined>;
+
+	/**
+	 * Whether to publish a stats track and name it in the catalog's `stats` section. Defaults to
+	 * false. The track reports each rendition's {@link Rendition.stats} under its ID, plus the
+	 * connection's PROBE round-trip time, about once a second while someone subscribes.
+	 */
+	stats: Getter<boolean>;
+
+	/**
+	 * The connection's PROBE estimates, whose round-trip time the stats track reports. Observed only
+	 * while the stats track has a subscriber, since observing it asks the peer for PROBE updates.
+	 */
+	probe: Getter<Moq.Connection.Probe | undefined>;
+
+	/**
+	 * Where viewers may publish feedback, relative to the broadcast as a rendition's `broadcast`
+	 * reference is: from `room/live`, `viewers` is `room/viewers`. Sets the catalog's `echo` section,
+	 * which solicits it; undefined (the default) solicits none. A path that walks above the root from
+	 * the broadcast name is left out of the catalog with a warning, since every viewer would refuse it.
+	 */
+	echo: Getter<Moq.Path.Relative | undefined>;
 };
 
 /**
@@ -71,6 +93,9 @@ export type BroadcastInput = {
 export class Broadcast {
 	/** The catalog track name served to subscribers. */
 	static readonly CATALOG_TRACK = Catalog.TRACK;
+
+	/** The stats track name, named in the catalog's `stats` section while {@link BroadcastInput.stats} is set. */
+	static readonly STATS_TRACK = "stats.json";
 
 	/** The wired inputs, read-only. */
 	readonly in: Readonlys<BroadcastInput>;
@@ -139,9 +164,13 @@ export class Broadcast {
 			flip: getter(props?.flip ?? false),
 			rotation: getter(props?.rotation ?? 0),
 			maxAge: getter(props?.maxAge),
+			stats: getter(props?.stats ?? false),
+			probe: getter(props?.probe),
+			echo: getter(props?.echo),
 		};
 
 		this.#signals.run(this.#runCatalog.bind(this));
+		this.#signals.run(this.#runEcho.bind(this));
 		this.#signals.run(this.#run.bind(this));
 	}
 
@@ -291,6 +320,61 @@ export class Broadcast {
 		if (Object.keys(renamed).length > 0) this.#names.update((names) => ({ ...names, ...renamed }));
 	}
 
+	// Solicit feedback in the catalog's `echo` section. A path above the root names no broadcast, and a
+	// viewer refuses the whole catalog for it, so it is left out instead.
+	#runEcho(effect: Effect) {
+		const path = effect.get(this.in.echo);
+		if (path === undefined) return;
+		const name = effect.get(this.in.name);
+		if (Moq.Path.tryResolve(name, path) === undefined) {
+			console.warn(`not soliciting feedback: echo path ${JSON.stringify(path)} walks above the root from ${name}`);
+			return;
+		}
+		this.catalog.mutate((catalog) => {
+			catalog.echo = { path };
+		});
+		effect.cleanup(() =>
+			this.catalog.mutate((catalog) => {
+				delete catalog.echo;
+			}),
+		);
+	}
+
+	// Name the stats track in the catalog and write a report every interval while someone subscribes.
+	// The track lives as long as the network broadcast, so disabling stats only stops reporting.
+	#runStats(effect: Effect, report: () => Report.Writer<Stats.Snapshot>) {
+		if (!effect.get(this.in.stats)) return;
+		const writer = report();
+
+		this.catalog.mutate((catalog) => {
+			catalog.stats = { track: Broadcast.STATS_TRACK };
+		});
+		effect.cleanup(() =>
+			this.catalog.mutate((catalog) => {
+				delete catalog.stats;
+			}),
+		);
+
+		// Observing the probe asks the peer for PROBE updates, so only do it while someone reads them.
+		const watched = effect.computed((demand) => demand.get(writer.track.demand().wanted) !== undefined);
+		effect.run((demand) => {
+			if (demand.get(watched)) demand.get(this.in.probe);
+		});
+
+		effect.interval(() => writer.update(this.#stats() as Stats.Snapshot), Nano.fromMilli(Milli(Report.INTERVAL)));
+	}
+
+	// What each listed rendition has sent, keyed by its catalog ID, and the connection's round-trip time.
+	#stats(): { transport?: { rtt: number }; renditions: Record<string, RenditionStats> } {
+		const renditions: Record<string, RenditionStats> = {};
+		for (const rendition of Object.values(this.#renditions.peek())) {
+			const stats = rendition.stats.peek();
+			if (stats && rendition.config.peek() !== undefined) renditions[rendition.name] = stats;
+		}
+		const rtt = this.in.probe.peek()?.rtt;
+		return rtt === undefined ? { renditions } : { transport: { rtt: Math.floor(rtt) }, renditions };
+	}
+
 	// The next unused `<id>/<n>` track name in the current network broadcast. This publisher owns the
 	// namespace and reserves `<id>/` for the rendition (see `net`), so skipping every name it has
 	// served, registered, or listed in the catalog (including an application's own sections) is
@@ -369,6 +453,15 @@ export class Broadcast {
 			for (const { track } of tracks.values()) track.close();
 			if (this.#kinds === kinds) this.#kinds = new Map();
 		});
+
+		// Created on first use and kept with the broadcast, like a rendition's track.
+		let stats: Report.Writer<Stats.Snapshot> | undefined;
+		const report = () => {
+			stats ??= new Report.Writer(broadcast, Broadcast.STATS_TRACK, Stats.SnapshotSchema);
+			return stats;
+		};
+		effect.cleanup(() => stats?.finish());
+		effect.run((inner) => this.#runStats(inner, report));
 
 		let serving = false;
 		effect.run((inner) => {

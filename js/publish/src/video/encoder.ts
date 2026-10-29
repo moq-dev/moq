@@ -14,6 +14,7 @@ import {
 	Signal,
 } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
+import type { RenditionStats } from "../rendition";
 import { errors } from "../internal";
 import { Estimator, type Order } from "../order";
 import { hardwareReliable } from "../support/video";
@@ -30,6 +31,12 @@ export interface Stats {
 
 	/** Total keyframes encoded while serving. Divide frames by this for the average GOP length. */
 	keyframes: number;
+
+	/** Total captured frames skipped while serving because the encoder still had a frame queued. */
+	skipped: number;
+
+	/** The bitrate the encoder targets now, in bits per second, or undefined while none is resolved. */
+	bitrate?: number;
 }
 
 // TODO support signals?
@@ -111,7 +118,8 @@ export type EncoderOutput = {
 	resolved: Signal<VideoEncoderConfig | undefined>;
 	// True when a subscriber is attached and we're encoding.
 	active: Signal<boolean>;
-	// Cumulative output totals (frames, bytes, keyframes) measured while serving.
+	// Cumulative output totals (frames, bytes, keyframes, skipped) measured while serving, and the
+	// target bitrate.
 	stats: Signal<Stats>;
 };
 
@@ -151,7 +159,7 @@ export class Encoder {
 		catalog: new Signal<Catalog.VideoConfig | undefined>(undefined),
 		resolved: new Signal<VideoEncoderConfig | undefined>(undefined),
 		active: new Signal<boolean>(false),
-		stats: new Signal<Stats>({ frames: 0, bytes: 0, keyframes: 0 }),
+		stats: new Signal<Stats>({ frames: 0, bytes: 0, keyframes: 0, skipped: 0 }),
 	};
 	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
@@ -270,6 +278,10 @@ export class Encoder {
 		this.#signals.run(this.#runSettingsRecovery.bind(this));
 		this.#signals.run(this.#runCaptureRecovery.bind(this));
 		this.#signals.run(this.#runRegister.bind(this));
+		this.#signals.run((effect) => {
+			const bitrate = effect.get(this.#out.resolved)?.bitrate;
+			this.#out.stats.update((stats) => ({ ...stats, bitrate }));
+		});
 	}
 
 	// What this rendition advertised on `broadcast`'s track.
@@ -337,6 +349,7 @@ export class Encoder {
 
 		// Publish the resolved catalog config; undefined (until one resolves) leaves it out of the catalog.
 		effect.proxy(rendition.config, this.out.catalog);
+		effect.proxy<RenditionStats | undefined>(rendition.stats, this.out.stats);
 
 		// Encode only while enabled and a subscriber is attached (the demand gate).
 		effect.run((effect) => {
@@ -414,6 +427,7 @@ export class Encoder {
 					}
 
 					this.#out.stats.update((stats) => ({
+						...stats,
 						frames: stats.frames + 1,
 						bytes: stats.bytes + frame.byteLength,
 						keyframes: key ? stats.keyframes + 1 : stats.keyframes,
@@ -479,7 +493,10 @@ export class Encoder {
 							// A pending input means the codec is saturated. Keep capture live instead of
 							// growing a stale encode queue whose lateness becomes permanent catalog delay.
 							// Drop before answering a keyframe request or advancing the frame-rate cursor.
-							if (encoder.encodeQueueSize > 0) continue;
+							if (encoder.encodeQueueSize > 0) {
+								this.#out.stats.update((stats) => ({ ...stats, skipped: stats.skipped + 1 }));
+								continue;
+							}
 
 							// This doesn't need to be reactive.
 							const config = this.config.peek();

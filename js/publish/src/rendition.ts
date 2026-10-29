@@ -5,6 +5,23 @@ import { type Getter, Signal } from "@moq/signals";
 export type Kind = "video" | "audio" | "text";
 
 /**
+ * What a rendition's producer has sent, as the broadcast's stats track reports it. Counters are
+ * cumulative and a missing one means zero; `bitrate` is a gauge, absent when unknown.
+ */
+export interface RenditionStats {
+	/** Media frames sent. */
+	frames?: number;
+	/** Media payload bytes sent. */
+	bytes?: number;
+	/** Keyframes sent. */
+	keyframes?: number;
+	/** Frames skipped before sending, such as those an overloaded encoder had no room for. */
+	skipped?: number;
+	/** The latest target encoder bitrate in bits per second. */
+	bitrate?: number;
+}
+
+/**
  * A registered rendition track on a {@link Broadcast}: the catalog slot plus the demand-gated track.
  *
  * Constructed only by {@link Broadcast} via `broadcast.video(name)` / `broadcast.audio(name)`; the
@@ -26,6 +43,12 @@ export class Rendition<Config> {
 	 * broadcast owns `broadcast` and `track`, so a config setting either is refused.
 	 */
 	readonly config = new Signal<Config | undefined>(undefined);
+
+	/**
+	 * What the producer has sent under this rendition, written by the producer and reported under
+	 * its ID on the broadcast's stats track. `undefined` leaves the rendition out of the report.
+	 */
+	readonly stats = new Signal<RenditionStats | undefined>(undefined);
 
 	/**
 	 * The live track producer while a subscriber is attached, `undefined` otherwise.
