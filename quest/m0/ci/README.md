@@ -135,7 +135,6 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [First shared FFI release](/quest/m0/ci/nightly-ffi-reuse.md) - condition: the backport merges and the next `moq-ffi-v*` tag runs `Release FFI`; verify the wrappers
 - [Fewer BTreeMap instantiations](/quest/m0/ci/btree-keys.md) - moq-net shares BTreeMap key and value types, kept only if its CPU time drops
 - [Halve the slowest tests' CPU](/quest/m0/ci/slow-tests.md) - the slowest 1% of tests take under half their 289 CPU-seconds, with coverage kept
-- [Recovery clips once](/quest/m0/ci/recovery-clips.md) - `recovery_test`'s FFmpeg clips encode once per run, not once per process
 - [Padding runs](/quest/m0/ci/quic-padding.md) - moq-quic parses a PADDING run as one frame, keeping the padding stats' meaning
 - [tracing-test filter](/quest/m0/ci/tracing-filter.md) - moq-tokio's tests stop forcing every crate to format at TRACE
 - [Stats oversize](/quest/m0/ci/stats-oversize.md) - moq-stats refuses an oversized plain snapshot before parsing it back

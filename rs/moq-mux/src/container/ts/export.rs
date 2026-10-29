@@ -106,7 +106,8 @@ fn sanitize_mux_rate(rate: u64) -> Option<u64> {
 /// is re-emitted at video keyframes and periodically for mid-stream tune-in. SI and
 /// whole PES or sections wait until a PCR interval has followed it, since a reader
 /// places them on the program clock and the PMT is what names it.
-/// Returns `None` when the broadcast ends.
+/// Returns `None` when the broadcast ends. A publisher that leaves instead fails the
+/// export with its cause once what was already buffered has gone out on schedule.
 ///
 /// A rendition the catalog moves to another track (a new `track` or `broadcast`) goes on out
 /// of its PID from the new track's first sync frame past what was read, when the PMT can
@@ -133,6 +134,8 @@ where
 {
 	id: u64,
 	retired: bool,
+	/// Why the publisher left, reported once the output it buffered has gone out.
+	left: Option<crate::Error>,
 	expected: Vec<TrackKey>,
 	expected_changed: bool,
 	source: crate::Source,
@@ -1316,6 +1319,7 @@ where
 		Self {
 			id: 0,
 			retired: false,
+			left: None,
 			expected: Vec::new(),
 			expected_changed: false,
 			source,
@@ -1467,11 +1471,7 @@ where
 			self.stop_old(waiter)?;
 		}
 		if let Err(err) = self.prepare(waiter) {
-			if self.pending.is_none() || !super::follower::left(&err) {
-				return Poll::Ready(Err(err));
-			}
-			self.follow_until = Some(moq_clock::now());
-			self.stop_old(waiter)?;
+			self.leave(err)?;
 		}
 		if self.pending.is_some() {
 			loop {
@@ -1643,7 +1643,7 @@ where
 				// a zero-delay slot may need another frame to prove the slot is complete.
 				let track = self.program.tracks.get_mut(&name).expect("the released frame's track");
 				let finished = track.finished;
-				track.fill(
+				let filled = track.fill(
 					&name,
 					waiter,
 					&mut Input {
@@ -1652,8 +1652,12 @@ where
 						jitter: &mut self.jitter,
 						trimmed: &mut self.program.trimmed,
 					},
-				)?;
-				if !finished && track.finished {
+				);
+				let ended = !finished && track.finished;
+				if let Err(err) = filled {
+					self.leave(err)?;
+				}
+				if ended || self.program.retired {
 					self.program
 						.schedule
 						.set_ended(self.program.tracks.values().all(|track| track.finished));
@@ -1726,7 +1730,7 @@ where
 
 		// End of stream once the catalog is closed too: nothing more can appear.
 		if self.pending.is_none() && self.program.catalog_ended && (drained || self.program.tracks.is_empty()) {
-			return Poll::Ready(Ok(None));
+			return Poll::Ready(self.program.left.take().map_or(Ok(None), Err));
 		}
 
 		Poll::Pending
@@ -1921,6 +1925,26 @@ where
 		Ok(true)
 	}
 
+	/// The program playing failed with `err`. Only a publisher that left is survivable: its
+	/// input stops at once, as a follow that runs out stops it, but what it already buffered
+	/// goes out on schedule. Without a replacement, the export then reports `err`, so a
+	/// [`Follower`](super::Follower) waits for a return only after the old output has ended,
+	/// rather than leaving it buffered to go out late, behind the gap, once something returns.
+	///
+	/// The program keeps its catalog, whose format the follower subscribes a return with.
+	fn leave(&mut self, err: crate::Error) -> crate::Result<()> {
+		if !super::follower::left(&err) {
+			return Err(err);
+		}
+		tracing::debug!(target: "moq_mux::container::ts::handoff", phase = "left", now = ?moq_clock::now(), program = self.program.id, committed = self.jitter.is_committed(), %err);
+		if self.pending.is_none() {
+			self.program.left = Some(err);
+		}
+		self.follow_timer = None;
+		self.follow_until = None;
+		self.retire()
+	}
+
 	fn stop_old(&mut self, waiter: &kio::Waiter) -> crate::Result<()> {
 		if self.program.retired {
 			return Ok(());
@@ -1940,10 +1964,16 @@ where
 			return Ok(());
 		}
 		tracing::debug!(target: "moq_mux::container::ts::handoff", phase = "follow-expired", now = ?moq_clock::now(), program = self.program.id, committed = self.jitter.is_committed());
-		self.program.retired = true;
 		self.follow_timer = None;
 		self.follow_until = None;
 		self.program.catalog = None;
+		self.retire()
+	}
+
+	/// Stop the program's input. What it already buffered still goes out, unless a
+	/// committed replacement's switch drops it.
+	fn retire(&mut self) -> crate::Result<()> {
+		self.program.retired = true;
 		self.program.catalog_ended = true;
 		for (name, track) in &mut self.program.tracks {
 			if !track.finished {
@@ -2628,6 +2658,7 @@ where
 		self.program.catalog_ended = false;
 		self.program.cataloged = false;
 		self.program.retired = false;
+		self.program.left = None;
 		self.program.si_flushed = false;
 		for si in self.program.si.values_mut() {
 			si.track.clear();
