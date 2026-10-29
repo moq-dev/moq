@@ -3,6 +3,7 @@
 # including the separately packaged UniFFI generator.
 members = ["demo/carla/bridge", "rs/*", "rs/moq-clock/macros", "rs/moq-net/fuzz", "rs/moq-quic/fuzz"]
 default-members = [
+    "rs/bench-harness",
     "rs/kio",
     "rs/hang",
     # "rs/moq-c",     # requires C toolchain
@@ -101,7 +102,6 @@ bitflags = "2"
 block2 = "0.6.2"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
-criterion = "0.8"
 # CUDA driver bindings for the NVENC/NVDEC path. dlopen'd at runtime
 # (`fallback-dynamic-loading`), so nothing links against libcuda at build time.
 cudarc = { version = "0.19", default-features = false, features = ["driver", "fallback-dynamic-loading", "cuda-12020"] }
