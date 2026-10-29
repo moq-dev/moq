@@ -30,7 +30,7 @@ test("the rendition count is the publisher's to choose", () => {
 });
 
 test("the shared containment check covers every section carrying a broadcast reference", () => {
-	// @moq/watch runs this same check on the hangz, MSF, and manual catalogs, so a section left
+	// @moq/watch runs this same check on the hang, MSF, and manual catalogs, so a section left
 	// out here would exempt its tracks everywhere.
 	const base = Moq.Path.from("a/b");
 	for (const [section, key] of [

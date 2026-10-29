@@ -35,6 +35,10 @@ const LATE: f64 = 0.005;
 const FAIRNESS: f64 = 0.9;
 /// Rise budget: how soon after the path opens up the estimate reaches the target
 const RISE: Duration = Duration::from_secs(5);
+/// Fall budget: how soon after the path drops the estimate comes within the ProbeBW_UP gain of
+/// it: two cycles of BBR3's max-bw window, each waiting at most 3s to probe, plus the probe's
+/// rounds and a ProbeRTT
+const FALL: Duration = Duration::from_secs(8);
 
 /// The seeds the acceptance suite runs each scenario over, probing and as the baseline
 const SEEDS: ops::RangeInclusive<u64> = 1..=8;
@@ -240,35 +244,36 @@ struct Reading {
 
 fn run(scenario: &Scenario) -> Outcome {
 	entropy::reseed(scenario.seed);
-	let mut server_transport = TransportConfig::default();
+	let mut server_transport = transport::Config::default();
 	if let Some(window) = scenario.receive_window {
-		server_transport
-			.receive_window(window.into())
-			.stream_receive_window(window.into());
+		server_transport.limits.receive_window = NonZeroU64::new(window.into());
+		server_transport.limits.stream_receive_window = NonZeroU64::new(window.into());
 	}
-	server_transport.max_concurrent_uni_streams(1000u32.into());
+	server_transport.limits.max_streams = NonZeroU64::new(1000);
 	let mut server_config = server_config();
-	server_config.transport = Arc::new(server_transport);
+	server_config.transport = server_transport;
 	let mut pair = Pair::new(Default::default(), server_config);
 	pair.latency = scenario.latency;
 
-	let mut transport = TransportConfig::default();
+	let mut transport = transport::Config::default();
 	if let Some(threshold) = scenario.ack_threshold {
-		let mut ack = AckFrequencyConfig::default();
-		ack.ack_eliciting_threshold(threshold.into())
-			.max_ack_delay(Some(Duration::from_millis(25)));
-		transport.ack_frequency_config(Some(ack));
+		let ack = transport::ack_frequency::Config {
+			ack_eliciting_threshold: threshold.into(),
+			max_ack_delay: Some(Duration::from_millis(25)),
+			..transport::ack_frequency::Config::default()
+		};
+		transport.ack_frequency = Some(ack);
 	}
 	let mut config = client_config();
-	config.transport = Arc::new(transport);
+	config.transport = transport;
 	let (client_ch, server_ch) = pair.connect_with(config);
 	let competitor = scenario.competitor.map(|upload| {
-		let mut transport = TransportConfig::default();
+		let mut transport = transport::Config::default();
 		if let Upload::Cubic = upload {
-			transport.congestion_controller_factory(Arc::new(CubicConfig::default()));
+			transport.congestion = Arc::new(CubicConfig::default());
 		}
 		let mut config = client_config();
-		config.transport = Arc::new(transport);
+		config.transport = transport;
 		pair.connect_with(config)
 	});
 
@@ -626,13 +631,32 @@ fn rises(trials: &[Trial], from: Duration) {
 	);
 }
 
-/// Reports how long after `from` each run's estimate fell to within the ProbeBW_UP gain of `rate`
-fn report_fall(label: &str, trials: &[Trial], from: Duration, rate: u64) {
-	for trial in trials {
-		for (run, outcome) in [("probing", &trial.probing), ("baseline", &trial.baseline)] {
-			let fell = outcome.first(from..Duration::MAX, |estimate| estimate <= rate * 5 / 4);
-			info!(label, seed = trial.seed, run, age = ?fell.map(|at| at - from), "estimate age after the path fell");
-		}
+/// Asserts the estimate, probing or not, falls to within the ProbeBW_UP gain of `rate` within
+/// [`FALL`] of `from` on the mean
+fn falls(trials: &[Trial], from: Duration, rate: u64) {
+	for (run, pick) in [
+		("probing", (|t| &t.probing) as fn(&Trial) -> &Outcome),
+		("baseline", |t| &t.baseline),
+	] {
+		let falls = trials.iter().map(|trial| {
+			let outcome = pick(trial);
+			let fell = outcome
+				.first(from..Duration::MAX, |estimate| estimate <= rate * 5 / 4)
+				.unwrap_or_else(|| {
+					panic!(
+						"seed {} {run}: estimate {} B/s never fell to {rate} B/s after {from:?}",
+						trial.seed,
+						outcome.samples.last().expect("sampled").estimate
+					)
+				});
+			(fell - from).as_secs_f64()
+		});
+		let fall = falls.sum::<f64>() / trials.len() as f64;
+		info!(run, fall, "estimate fell to {rate} B/s on the mean");
+		assert!(
+			fall <= FALL.as_secs_f64(),
+			"{run}: estimate fell to {rate} B/s {fall:.1}s after {from:?} on the mean"
+		);
 	}
 }
 
@@ -663,6 +687,37 @@ fn rises_to_target() {
 		..Scenario::default()
 	};
 	rises(&compare("rises", scenario, GATE), Duration::from_secs(5));
+}
+
+/// A path short of the target, behind a queue a second deep: each attempt that misses sits out
+/// past the longest BBR3 waits between its own probes, and the path opening up is still found
+#[test]
+fn backs_off_unreachable_target() {
+	let _guard = subscribe();
+	let opens = Duration::from_secs(20);
+	let outcome = run(&Scenario {
+		rates: vec![(Duration::ZERO, 375_000), (opens, 1_500_000)],
+		buffer: 375_000,
+		duration: Duration::from_secs(25),
+		..Scenario::default()
+	});
+	outcome.report("backoff");
+
+	// When each attempt began: probe bytes in a sample after one without any
+	let mut starts = Vec::new();
+	for pair in outcome.samples.windows(3) {
+		let [before, quiet, sent] = pair else { unreachable!() };
+		if before.at < opens && quiet.redundant == before.redundant && sent.redundant > quiet.redundant {
+			starts.push(sent.at);
+		}
+	}
+	assert!(starts.len() > 2, "attempts began at {starts:?}");
+	for gap in starts.windows(2).map(|w| w[1] - w[0]) {
+		// The samples are 100ms apart
+		assert!(gap > Duration::from_millis(2900), "attempts began at {starts:?}");
+	}
+	let rise = outcome.rise(opens).expect("reached the target");
+	assert!(rise <= RISE, "reached the target {rise:?} after the path opened");
 }
 
 /// Below the media's bitrate groups expire, and none is resent after its reset
@@ -755,7 +810,7 @@ fn steps_keyframes() {
 	let _guard = subscribe();
 	let trials = compare("steps keyframes", steps(), SEEDS);
 	rises(&trials, Duration::from_secs(20));
-	report_fall("steps keyframes", &trials, Duration::from_secs(40), 375_000);
+	falls(&trials, Duration::from_secs(40), 375_000);
 }
 
 #[test]
@@ -765,7 +820,7 @@ fn steps_constant() {
 	let scenario = Scenario { keyframe: 0, ..steps() };
 	let trials = compare("steps constant", scenario, SEEDS);
 	rises(&trials, Duration::from_secs(20));
-	report_fall("steps constant", &trials, Duration::from_secs(40), 375_000);
+	falls(&trials, Duration::from_secs(40), 375_000);
 }
 
 /// Nothing is in flight while the media pauses, so nothing is resent
@@ -788,19 +843,26 @@ fn idle_restart() {
 	}
 }
 
-/// An estimate learned before the path fell holds above the target, so the probe stays idle
-/// until the controller lowers it
+/// An estimate learned before the path fell ages out, though the probe stays idle while it
+/// covers the target: on a path still above the media's bitrate, which the media never fills,
+/// and on one below it, behind a queue that overflows
 #[test]
 #[ignore = "nightly: just rs quic-sim"]
 fn stale_estimate() {
 	let _guard = subscribe();
-	let scenario = Scenario {
-		rates: vec![(Duration::ZERO, 1_500_000), (Duration::from_nanos(1), 375_000)],
-		warmup: 3_000_000,
-		..Scenario::default()
-	};
-	let trials = compare("stale", scenario, SEEDS);
-	report_fall("stale", &trials, Duration::ZERO, 375_000);
+	for rate in [375_000, 187_500] {
+		let scenario = Scenario {
+			rates: vec![(Duration::ZERO, 1_500_000), (Duration::from_nanos(1), rate)],
+			warmup: 3_000_000,
+			duration: Duration::from_secs(15),
+			..Scenario::default()
+		};
+		let trials = compare(&format!("stale {rate}"), scenario, SEEDS);
+		falls(&trials, Duration::ZERO, rate);
+		for outcome in trials.iter().flat_map(|t| [&t.probing, &t.baseline]) {
+			assert!(rate > MEDIA || outcome.queue.dropped > 0, "the queue never overflowed");
+		}
+	}
 }
 
 /// Resent data needs no new credit, so a receive window that limits the media does not limit
