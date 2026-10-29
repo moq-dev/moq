@@ -29,14 +29,11 @@ option):
   built. Check the selection another way (such as observable behavior or
   metrics) or drop an assertion that only restates the `match`. noq's adapter
   keeps its own `into_any` on its side of the boundary.
-- [The QUIC config](/quest/m1/quic-api/config.md) nests whatever names land
-  here in `transport::Config`. Whichever lands second adopts the other's
-  names.
+- moq-quic's `transport::Config` already nests the controller factory
+  (`congestion: Arc<dyn congestion::ControllerFactory + ...>`, defaulting to
+  `congestion::Bbr3Config`); rename its uses, its tests, and its bench to the
+  new names here.
 
 Public API: breaking in moq-congestion (unpublished) and in the moq-quic,
 moq-tokio, and moq-uring re-exports or signatures that name these types.
 Wire: none.
-
-## Related
-
-- [QUIC config](/quest/m1/quic-api/config.md) - nests the controller config these names define

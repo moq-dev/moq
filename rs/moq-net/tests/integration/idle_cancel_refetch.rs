@@ -40,11 +40,7 @@ async fn a_group_cut_by_an_idle_cancel_is_refetched_whole() {
 	let _pair = connect_mock(options).await;
 
 	let consumer = client.consume();
-	moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
-		.await
-		.unwrap()
-		.unwrap();
-	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
+	let remote = moq_clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.unwrap()
 		.unwrap();

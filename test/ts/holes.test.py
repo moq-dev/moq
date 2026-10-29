@@ -40,6 +40,42 @@ class Holes(unittest.TestCase):
         self.assertEqual(holes.step([0]), 0)
 
 
+# Two B-pyramid groups of 25 frames in decode order (I P B b b ...), in 40 ms frames.
+PYRAMID = [0] + [i + d for i in range(1, 25, 4) for d in (3, 1, 0, 2)]
+
+
+class PerGroupDecodeTimes(unittest.TestCase):
+    PTS = [(g * 25 + i) * 3600 for g in range(2) for i in PYRAMID]
+    # The export decodes each group's first two frames a tick apart just below its earliest
+    # presentation, so its decode timestamps step at every group with nothing lost.
+    DTS = [g * 25 * 3600 + (i - 2 if i < 2 else (i - 2) * 3600) for g in range(2) for i in range(25)]
+
+    def test_decode_steps_at_groups_are_not_holes(self):
+        self.assertTrue(holes.holes(self.DTS, 3600))
+        self.assertEqual(holes.holes(sorted(self.PTS), holes.step(sorted(self.PTS))), [])
+
+    def test_a_lost_b_picture_is_a_hole(self):
+        lost = self.PTS[:10] + self.PTS[11:]
+        self.assertEqual(len(holes.holes(sorted(lost), holes.step(sorted(self.PTS)))), 1)
+
+    def grade(self, kept: list[int]) -> int:
+        def stream(index):
+            dts, pts = [self.DTS[i] for i in index], [self.PTS[i] for i in index]
+            return holes.Stream(
+                {"codec_name": "h264", "time_base": "1/90000"}, dts, pts, [True] * len(pts),
+                tuple(Fraction(t, 90_000) for t in (min(pts), max(pts), dts[-1])),
+            )
+        with patch.object(holes, "probe", side_effect=[{"0x101": stream(kept)}, {"0x101": stream(range(50))}]), \
+                patch.object(sys, "argv", ["holes.py", "capture.ts", "source.ts"]), \
+                contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as exit:
+            holes.main()
+        return exit.exception.code
+
+    def test_main_grades_presentation_timestamps(self):
+        self.assertEqual(self.grade(range(50)), 0)
+        self.assertEqual(self.grade([i for i in range(50) if i != 10]), 1)
+
+
 class Shed(unittest.TestCase):
     # Four groups of 25 frames, each opening on a sync frame, with each P picture decoded ahead
     # of the B picture it presents after.
