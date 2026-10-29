@@ -71,7 +71,7 @@ async function run(config: Sample) {
 				});
 				await Promise.all(
 					Array.from({ length: config.publishers }, async (_, publisher) => {
-						const request = origin.request(net.Path.from(`${config.id}/${publisher}`), { announced: true });
+						const request = origin.follow(net.Path.from(`${config.id}/${publisher}`));
 						disposers.push(() => request.close());
 						let broadcast = request.active.peek();
 						while (!broadcast) {

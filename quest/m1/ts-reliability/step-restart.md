@@ -57,6 +57,5 @@ Public API: the importer's error gains a restart cause. Wire: none.
 
 ## Related
 
-- [Export re-acquires a step](/quest/m1/ts-reliability/export-reacquire.md) - the export-side defense for non-moq TS sources
 - [A restart keeps its catalog](/quest/m1/ts-reliability/restart-catalog.md) - removes the catalog hold a restart pays
 - [Decide whether a stitched export demotes its old leg](/quest/m1/ts-reliability/stitch-catch-up.md) - may speed the replacement's first keyframe at each restart's switch
