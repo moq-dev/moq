@@ -75,9 +75,9 @@ Implementation:
 - **JS publisher.** Same rules in `#answerFetch` and `#runFill`. Remove the
   FILL_TIMEOUT deadline and its timed-out markers from
   [moq-dev/moq#7051](https://github.com/moq-dev/moq/pull/7051). Keep the End
-  of Range encoding, which
-  [JS evicted FETCH groups are unknown](/quest/m1/js-fetch-evicted-unknown.md)
-  uses for a group lost after FETCH_OK.
+  of Range encoding, which `FetchWriter.unknown()` from
+  [moq-dev/moq#7150](https://github.com/moq-dev/moq/pull/7150) uses for a
+  group evicted after it was listed.
 - **Tests.** Unit tests in both publishers for each refusal and for each
   kept form on drafts 18 and 22. `warm_backfill` in
   `rs/moq-net/tests/integration` keeps draft 22 out of its backfill and

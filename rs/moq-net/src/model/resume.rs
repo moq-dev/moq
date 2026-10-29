@@ -627,6 +627,30 @@ impl Subscriber {
 		&self.subscription
 	}
 
+	/// A handle that mirrors the reader's preferences into its copies; see [`Mirror`].
+	pub(super) fn mirror(&self) -> Mirror {
+		Mirror(Arc::downgrade(&self.reader))
+	}
+}
+
+/// Mirrors a reader's changed preferences into its copies at once, so the change reaches
+/// their sources without waiting for the reader's next poll: a reader that demotes a track
+/// it has stopped reading would otherwise keep its old priority upstream.
+#[derive(Clone)]
+pub(super) struct Mirror(Weak<Mutex<Reader>>);
+
+impl Mirror {
+	pub(super) fn sync(&self) {
+		if let Some(reader) = self.0.upgrade() {
+			reader
+				.lock()
+				.unwrap_or_else(PoisonError::into_inner)
+				.sync(&kio::Waiter::noop());
+		}
+	}
+}
+
+impl Subscriber {
 	/// Poll for the next group not in `delivered`: in arrival order, or in sequence order
 	/// for `ordered`.
 	pub(super) fn poll_group(
@@ -4493,6 +4517,25 @@ mod test {
 		let mut sub = subscribe(&front, Duration::from_secs(30));
 		sub.update(sub.subscription().with_ranges(ranges)).unwrap();
 		assert!(matches!(sub.recv_group().now_or_never(), Some(Err(Error::Unsupported))));
+	}
+
+	/// A changed preference reaches the serving copy without the reader polling again,
+	/// through the subscriber or its control: a reader demoting a track it stopped reading
+	/// would otherwise keep its old priority upstream.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_update_reaches_the_copy_without_a_read() {
+		let routes = Producer::new();
+		let front = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&front, Duration::from_secs(30));
+		assert_eq!(a.subscription().unwrap().priority, 0);
+
+		sub.update(sub.subscription().with_priority(-2)).unwrap();
+		assert_eq!(a.subscription().unwrap().priority, -2);
+		sub.control().update(sub.subscription().with_priority(3)).unwrap();
+		assert_eq!(a.subscription().unwrap().priority, 3);
 	}
 
 	/// Capping a replaced copy never replaces a time end it has not settled: the copy keeps
