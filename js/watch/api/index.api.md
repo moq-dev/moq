@@ -101,10 +101,10 @@ export class Broadcast {
 }
 
 export type BroadcastInput = {
-	announced: Signals.Getter<boolean>;
 	catalog: Signals.Getter<Hang.Catalog.Root | undefined>;
 	catalogFormat: Signals.Getter<CatalogFormat | undefined>;
 	enabled: Signals.Getter<boolean>;
+	follow: Signals.Getter<boolean>;
 	name: Signals.Getter<Net.Path.Valid>;
 	origin: Signals.Getter<Net.Origin.Table | undefined>;
 };
@@ -148,7 +148,6 @@ export class Player {
 }
 
 export type PlayerInput = {
-	announced: Signals.Getter<boolean>;
 	audio: {
 		muted: Signals.Getter<boolean>;
 		target: Signals.Getter<Audio.Target | undefined>;
@@ -159,6 +158,7 @@ export type PlayerInput = {
 	catalogFormat: Signals.Getter<CatalogFormat | undefined>;
 	delay: Signals.Getter<Delay>;
 	enabled: Signals.Getter<boolean>;
+	follow: Signals.Getter<boolean>;
 	name: Signals.Getter<Net.Path.Valid>;
 	origin: Signals.Getter<Net.Origin.Table | undefined>;
 	paused: Signals.Getter<boolean>;

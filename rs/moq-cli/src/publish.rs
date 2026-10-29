@@ -134,6 +134,13 @@ pub struct CaptureArgs {
 	/// Capture video only (no microphone).
 	#[usage(long, conflicts("--microphone", "--system-audio"))]
 	pub no_audio: bool,
+
+	/// Capture and encode each source only while its track has a subscriber,
+	/// releasing it when the last one leaves. Video still opens its source once
+	/// at startup to probe the mode. By default capture runs for the whole
+	/// publish, so a late subscriber can fetch the recent past.
+	#[usage(long)]
+	pub on_demand: bool,
 }
 
 enum PublishDecoder {
@@ -295,7 +302,7 @@ enum Source {
 		broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer,
 		video: Option<moq_video::encode::Capture>,
-		audio: Option<(moq_audio::capture::Config, moq_audio::encode::Options)>,
+		audio: Option<moq_audio::encode::Capture>,
 	},
 }
 
@@ -488,7 +495,7 @@ impl Publish {
 		} else {
 			Some(args.video_capture(bandwidth.clone())?)
 		};
-		let audio = (!args.no_audio).then(|| (args.audio_config(), args.audio_encode(bandwidth)));
+		let audio = (!args.no_audio).then(|| args.audio_capture(bandwidth));
 		anyhow::ensure!(video.is_some() || audio.is_some(), "nothing to capture");
 
 		Ok(Self {
@@ -589,9 +596,10 @@ impl Publish {
 				// Each enabled medium publishes its own track onto the shared
 				// broadcast + catalog. Both stamp frames on the catalog's
 				// advertised clock, so HLS/DASH wall times match the mapping on
-				// the wire. Video captures for the whole run. Both run on this
-				// task rather than a spawn: on macOS the audio future holds ObjC
-				// handles across an await, so it is `!Send`.
+				// the wire. Both capture for the whole run, or only while
+				// subscribed with `--on-demand`. Both run on this task rather
+				// than a spawn: on macOS the audio future holds ObjC handles
+				// across an await, so it is `!Send`.
 				let video_fut = {
 					let broadcast = broadcast.clone();
 					let catalog = catalog.clone();
@@ -606,14 +614,9 @@ impl Publish {
 				};
 				let audio_fut = async move {
 					match audio {
-						Some((config, encode)) => {
-							let mut options = moq_audio::encode::Capture::default();
-							options.capture = config;
-							options.encode = encode;
-							moq_audio::encode::publish_capture(broadcast, catalog, options)
-								.await
-								.map_err(anyhow::Error::from)
-						}
+						Some(options) => moq_audio::encode::publish_capture(broadcast, catalog, options)
+							.await
+							.map_err(anyhow::Error::from),
 						None => Ok(()),
 					}
 				};
@@ -824,6 +827,7 @@ impl CaptureArgs {
 			moq_video::encode::Kind::Auto
 		};
 		options.bandwidth = bandwidth;
+		options.on_demand = self.on_demand;
 		Ok(options)
 	}
 
@@ -845,15 +849,24 @@ impl CaptureArgs {
 		config
 	}
 
-	/// The audio counterpart to [`video_encode`](Self::video_encode). `track` is
-	/// left unset so the name derives from the codec, the way the video side
-	/// names its track; consumers find it through the catalog either way.
+	/// The audio encode settings. `track` is left unset so the name derives
+	/// from the codec, the way the video side names its track; consumers find
+	/// it through the catalog either way.
 	fn audio_encode(&self, bandwidth: moq_net::bandwidth::Allocator) -> moq_audio::encode::Options {
 		let mut options = moq_audio::encode::Options::default();
 		options.config.bitrate = self
 			.audio_bitrate
 			.map(|bps| moq_net::bandwidth::Rate::from_bps(bps.into()));
 		options.bandwidth = bandwidth;
+		options
+	}
+
+	/// The audio counterpart to [`video_capture`](Self::video_capture).
+	fn audio_capture(&self, bandwidth: moq_net::bandwidth::Allocator) -> moq_audio::encode::Capture {
+		let mut options = moq_audio::encode::Capture::default();
+		options.capture = self.audio_config();
+		options.encode = self.audio_encode(bandwidth);
+		options.on_demand = self.on_demand;
 		options
 	}
 }
@@ -897,6 +910,20 @@ pub(crate) mod tests {
 		assert!(args.no_audio);
 		assert_eq!(args.window, Some(None));
 		assert_eq!(capture_args(&["--window"]).window, Some(None));
+	}
+
+	#[cfg(feature = "capture")]
+	#[test]
+	fn capture_runs_always_unless_on_demand() {
+		use moq_net::bandwidth::Allocator;
+
+		let args = capture_args(&[]);
+		assert!(!args.video_capture(Allocator::unlimited()).unwrap().on_demand);
+		assert!(!args.audio_capture(Allocator::unlimited()).on_demand);
+
+		let args = capture_args(&["--on-demand"]);
+		assert!(args.video_capture(Allocator::unlimited()).unwrap().on_demand);
+		assert!(args.audio_capture(Allocator::unlimited()).on_demand);
 	}
 
 	#[cfg(feature = "capture")]

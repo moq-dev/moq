@@ -52,7 +52,6 @@ Wire: none.
 
 ## Required
 
-- [The watch player's follow prop](/quest/m1/api-audit/resolve/watch.md) - `@moq/watch`'s `Broadcast` names its resolution choice `follow` instead of `announced`
 - [Callers resolve once](/quest/m1/api-audit/resolve/callers.md) - no caller hand-rolls synced resolution or decides table absence by wall clock
 
 ## Related
