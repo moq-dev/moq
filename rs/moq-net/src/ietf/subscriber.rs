@@ -15294,6 +15294,47 @@ mod joining_fetch_tests {
 		assert_eq!(fetches(), 1, "a settled fill leaves the miss to a FETCH");
 	}
 
+	/// The head landing ends the wait, and the cache answers the miss: no FETCH duplicates
+	/// the group the fill wrote.
+	#[moq_clock::test]
+	async fn a_miss_is_answered_by_the_head_its_fill_lands() {
+		let version = Version::Draft22;
+		let largest = Some(ietf::Location { group: 4, object: 1 });
+		let run = JoinRun::start(version, None, subscribe_ok(version, largest), fetch_ok(version)).await;
+		let fetches = || {
+			decode_messages(&run.session.log, version)
+				.iter()
+				.filter(|(id, _)| *id == ietf::Fetch::ID)
+				.count()
+		};
+
+		let mut fetch = Box::pin(run._hold.1.fetch_group(4, None));
+		assert!(futures::poll!(fetch.as_mut()).is_pending());
+		settle().await;
+		assert_eq!(fetches(), 0, "the miss waits for the subscription's fill");
+
+		// The fill writes the head, as `run_fill` does.
+		let (mut track, fill) = {
+			let state = run.subscriber.state.lock();
+			let held = state.subscribes.values().next().unwrap();
+			(held.producer.clone().unwrap(), held.fill.clone())
+		};
+		let mut head = None;
+		open_fill_group(&mut track, &mut head, 4).unwrap();
+		let (sequence, next, producer) = head.unwrap();
+		*fill.write().ok().unwrap() = Fill::Ready {
+			sequence,
+			next,
+			producer: producer.into_inner(),
+		};
+		settle().await;
+		assert_eq!(fetches(), 0, "the cache answers the miss");
+		let Poll::Ready(Ok(group)) = futures::poll!(fetch.as_mut()) else {
+			panic!("the miss must resolve from the cache");
+		};
+		assert_eq!(group.sequence, 4);
+	}
+
 	/// Only the joined group waits for the subscription's fill. A head that never arrives
 	/// leaves its fill outstanding for as long as the subscription lasts, which must not hold
 	/// back older groups it brings nothing for.
