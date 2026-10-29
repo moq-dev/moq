@@ -224,9 +224,11 @@ impl Headers {
 		let Payload::Bytes(payload) = payload(pkt) else {
 			return (Some(chain), None);
 		};
+		// A PES start abandons whatever header was begun before it, as the import's does.
+		let begun = chain.begun.take();
 		let header = if pkt[1] & 0x40 != 0 {
 			payload.to_vec()
-		} else if let Some(mut begun) = chain.begun.take() {
+		} else if let Some(mut begun) = begun {
 			begun.extend_from_slice(payload);
 			begun
 		} else {
@@ -528,10 +530,8 @@ mod tests {
 		}
 	}
 
-	/// One PES start on `pid` with `pts` (90 kHz), its header split at each of `splits` across
-	/// packets, as a muxer padding them with adaptation stuffing leaves it. The packet holding
-	/// fragment `repeat` is sent twice, as ISO 13818-1 allows a retransmission.
-	fn pes(cc: &mut u8, pid: u16, pts: u64, splits: &[usize], repeat: Option<usize>) -> Vec<u8> {
+	/// A video PES at `pts` (90 kHz), with a short body.
+	fn pes_bytes(pts: u64) -> Vec<u8> {
 		let mut pes = vec![0, 0, 1, 0xe0, 0, 0, 0x80, 0x80, 5];
 		pes.extend_from_slice(&[
 			0x21 | ((pts >> 29) & 0x0e) as u8,
@@ -541,24 +541,37 @@ mod tests {
 			0x01 | ((pts << 1) & 0xfe) as u8,
 		]);
 		pes.extend_from_slice(&[0xaa; 32]);
+		pes
+	}
+
+	/// One packet on `pid` carrying `payload`, padded with adaptation stuffing as a muxer does.
+	fn ts(cc: &mut u8, pid: u16, start: bool, payload: &[u8]) -> [u8; 188] {
+		let mut pkt = [0xff; 188];
+		pkt[..3].copy_from_slice(&[0x47, u8::from(start) << 6 | (pid >> 8) as u8, pid as u8]);
+		pkt[3] = 0x30 | *cc;
+		pkt[4] = (183 - payload.len()) as u8;
+		pkt[5] = 0x00;
+		pkt[188 - payload.len()..].copy_from_slice(payload);
+		*cc = (*cc + 1) & 0x0f;
+		pkt
+	}
+
+	/// One PES start on `pid` with `pts` (90 kHz), its header split at each of `splits` across
+	/// packets. The packet holding fragment `repeat` is sent twice, as ISO 13818-1 allows a
+	/// retransmission.
+	fn pes(cc: &mut u8, pid: u16, pts: u64, splits: &[usize], repeat: Option<usize>) -> Vec<u8> {
+		let pes = pes_bytes(pts);
 		let bounds: Vec<usize> = std::iter::once(0)
 			.chain(splits.iter().copied())
 			.chain(std::iter::once(pes.len()))
 			.collect();
 		let mut out = Vec::new();
 		for (i, range) in bounds.windows(2).enumerate() {
-			let payload = &pes[range[0]..range[1]];
-			let mut pkt = [0xff; 188];
-			pkt[..3].copy_from_slice(&[0x47, u8::from(i == 0) << 6 | (pid >> 8) as u8, pid as u8]);
-			pkt[3] = 0x30 | *cc;
-			pkt[4] = (183 - payload.len()) as u8;
-			pkt[5] = 0x00;
-			pkt[188 - payload.len()..].copy_from_slice(payload);
+			let pkt = ts(cc, pid, i == 0, &pes[range[0]..range[1]]);
 			out.extend_from_slice(&pkt);
 			if repeat == Some(i) {
 				out.extend_from_slice(&pkt);
 			}
-			*cc = (*cc + 1) & 0x0f;
 		}
 		out
 	}
@@ -596,6 +609,24 @@ mod tests {
 		// and the next two. Joining the repeat would read `21 00 05 00 05`, PTS 65,538: back.
 		mux.packet(CLOCK, Flags::pcr(PCR_WRAP + PCR_HZ + FRAME - SWITCH));
 		mux.out.extend(pes(&mut cc, VIDEO, 93_600, &[10, 12], Some(1)));
+		second(&mut mux, &mut cc, PCR_HZ + 2 * FRAME, true);
+		assert_eq!(judge(&mux.out, &[VIDEO]), None);
+	}
+
+	/// A PES start abandons the header begun before it, as the import's does, so the new PES's
+	/// body cannot complete the old header and read as a stream stepping with a lone PCR glitch.
+	#[test]
+	fn a_pes_start_abandons_the_header_begun() {
+		let (mut mux, mut cc) = (Mux::default(), 0);
+		mux.packet(CLOCK, Flags::pcr(PCR_HZ));
+		mux.out.extend(pes(&mut cc, VIDEO, 90_000, &[7], None));
+		// A PES start cut short after nine bytes, then a whole one at PTS 93,600.
+		mux.out.extend(ts(&mut cc, VIDEO, true, &pes_bytes(90_000)[..9]));
+		mux.out.extend(ts(&mut cc, VIDEO, true, &pes_bytes(93_600)));
+		// One corrupt PCR, then a body that, joined to the cut-short header, reads PTS 65,538: back.
+		mux.packet(CLOCK, Flags::pcr(PCR_WRAP + PCR_HZ + FRAME - SWITCH));
+		mux.out
+			.extend(ts(&mut cc, VIDEO, false, &[0x21, 0x00, 0x05, 0x00, 0x05]));
 		second(&mut mux, &mut cc, PCR_HZ + 2 * FRAME, true);
 		assert_eq!(judge(&mux.out, &[VIDEO]), None);
 	}
