@@ -146,7 +146,6 @@ removed).
 - [Moxygen minimal interop](/quest/m1/smoke-moxygen.md) - waiting on Moxygen to send a registered filter type, then the smoke lane stops hiding its failure
 - [Smoke token subject](/quest/m1/smoke-token-subject.md) - condition: grant subject ships; then the release smoke test signs with `--subject`
 - [Moxygen pin bump](/quest/m1/moxygen-pin-bump.md) - waiting on moxygen#264, then the TRACK_STATUS patch is dropped
-- [Upgrade notes match the code](/quest/m1/upgrade-guide-facts.md) - the upgrade and CLI migration guides stop promising drafts 19-21, capped grants, and an ignored `MOQ_EPOCH`
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break says how to migrate
 - [moq-transport 18 and 22 only](/quest/m1/ietf-drop/README.md) - drafts 14-17 and 19-21 are deleted from Rust, JS, tests, interop lanes, and docs, removing the legacy control-stream adapter and its request limit
 - [Our moq-transport publishers serve at most one group](/quest/m1/ietf-publisher-one-group.md) - a wider FETCH gets NOT_SUPPORTED and a wider draft-22 fill fails, FILL_TIMEOUT is ignored, and our subscribers still send ranges
