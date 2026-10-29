@@ -5,9 +5,11 @@
 `@moq/publish` on `release` gains `Audio.Encoder`'s `groupDuration`, as
 [moq-dev/moq#4910](https://github.com/moq-dev/moq/pull/4910) added on main,
 and publishes it as 0.5.4 (npm has up to 0.5.3). A publisher can then pack
-several Opus frames per group, which keeps audio alive on relays that end a
-subscription when a newer group starts while an older one is still arriving
-([cloudflare/moq-rs#238](https://github.com/cloudflare/moq-rs/issues/238)).
+several Opus frames per group. On relays that end a subscription when a newer
+group starts while an older one is still arriving
+([cloudflare/moq-rs#238](https://github.com/cloudflare/moq-rs/issues/238)),
+that makes the bug rarer but does not avoid it: congestion near a group
+boundary can still trigger it.
 
 ## Plan
 
