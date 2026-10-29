@@ -25,4 +25,3 @@ Public API: none beyond the callers' own surfaces. Wire: none.
 ## Required
 
 - [Rust request and follow](/quest/m1/api-audit/resolve/rust.md) - the Rust names the callers move to
-- [JS request and follow](/quest/m1/api-audit/resolve/js.md) - the JS names the callers move to

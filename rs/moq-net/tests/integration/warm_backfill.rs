@@ -4,9 +4,10 @@
 //! from its cache.
 //!
 //! Where the upstream starts the copy at its live edge, as moq-transport and moq-lite 05
-//! do, the backlog below that start arrives through fills, outside the live feed's arrival
-//! walk. A newcomer finds those groups cached, so it neither walks nor asks for them, and
-//! read only the live edge until it took the cached backfill as filled.
+//! do, the backlog a reader's floor names below that start arrives through fills, outside
+//! the live feed's arrival walk. A newcomer finds those groups cached, so it neither walks
+//! nor asks for them, and read only the live edge until it took the cached backfill as
+//! filled.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -23,13 +24,9 @@ const GROUPS: u64 = 10;
 /// Reaches every group, however long the readers take.
 const BUDGET: Duration = Duration::from_secs(100);
 
-const VERSIONS: &[&str] = &[
-	"moq-lite-05",
-	"moq-lite-06",
-	"moq-lite-07-wip",
-	"moq-transport-18",
-	"moq-transport-22",
-];
+/// Moq-transport-22 is left out: its cold relay serves an absolute floor only from the
+/// live edge.
+const VERSIONS: &[&str] = &["moq-lite-05", "moq-lite-06", "moq-lite-07-wip", "moq-transport-18"];
 
 fn origin(hop: u64) -> origin::Producer {
 	let (origin, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
@@ -44,7 +41,7 @@ async fn subscribe(relay: &origin::Producer) -> track::Subscriber {
 	remote
 		.track("video")
 		.unwrap()
-		.subscribe(Subscription::default().with_max_delay(BUDGET))
+		.subscribe(Subscription::default().with_max_delay(BUDGET).with_range(0..))
 		.await
 		.unwrap()
 }

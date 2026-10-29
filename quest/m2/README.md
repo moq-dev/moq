@@ -39,6 +39,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [Re-init retires timelines](/quest/m2/reinit-retire.md) - fMP4 and MKV re-inits retire the old timeline, so import state stays bounded
 - [Replaced producers retire their records](/quest/m2/producer-retire.md) - encoders and bindings retire a replaced producer's HLS records
 - [Broadcast fairness](/quest/m2/broadcast-fairness.md) - broadcasts share a cluster link fairly, so one tenant's priority never starves another's
+- [Cache fair share](/quest/m2/cache-fairness.md) - one tenant cannot crowd another out of the relay's shared group cache
 - [Peer grant bound](/quest/m2/peer-grant-bound.md) - a peer's AUTH_OK costs near-linear time in its bytes on every input shape, in Rust and in a browser
 - [Plan: watch worker](/quest/m2/plan-watch-worker.md) - prototype an invisible page worker against app-spawned workers, and land the jank harness that decides
 - [Watch worker](/quest/m2/watch-worker.md) - watch playback runs in a worker onto an OffscreenCanvas, so main-thread jank never stalls video or audio
@@ -240,7 +241,8 @@ lite-07; bitrate enforcement is not part of this release.
 - [Artifact size audit](/quest/m2/audit-size.md) - repeat the shipping, native, WASM and browser attribution after the release ships
 - [Compile time audit](/quest/m2/audit-compile-time.md) - build-time hotspots are measured against the m1 baselines, starting with the transport share now that moq-net compiles once, and the worst are fixed or planned
 - [Lint override and deprecation audit](/quest/m2/audit-lints.md) - repeat the suppression and deprecation audit after the release ships, starting with clippy on the macOS and Windows targets
-- [Bound cmsg payload reads](/quest/m2/cmsg-decode-bound.md) - `CMsg::decode` refuses a short control message
+- [Bound cmsg payload reads](/quest/m2/cmsg-decode-bound.md) - `CMsg::decode` refuses a short control message, and Tokio sockets keep the ECN mark
+- [Tenant matrix on both runtimes](/quest/m2/tenant-matrix.md) - tenant, mount, HTTP, normalization, and revalidation boundaries are tested on Tokio and io_uring
 - [One typed SETUP parse](/quest/m2/setup-parse-once.md) - one function replaces three SETUP parameter parses
 - [Archive reads against a real store](/quest/m2/archive-store-bench.md) - LIST/GET counts and latency over track count
 - [Quiet logs for clean ends](/quest/m2/quiet-clean-close-logs.md) - clean probe ends and unroutable requests log at debug

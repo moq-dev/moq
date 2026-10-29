@@ -425,8 +425,12 @@ where
 		self
 	}
 
-	/// Report each written group through `recorder` into the track's HLS records.
-	pub(crate) fn with_recorder(mut self, recorder: Option<crate::hls::Recorder>) -> Self {
+	/// Report each written group through `recorder` into the track's HLS records, whose readers
+	/// count as demand for this track.
+	pub(crate) fn with_recorder(mut self, mut recorder: Option<crate::hls::Recorder>) -> Self {
+		if let Some(recorder) = recorder.as_mut() {
+			recorder.lend(&self.inner);
+		}
 		self.recorder = recorder;
 		self
 	}

@@ -435,6 +435,10 @@ pub(crate) struct TrackState {
 	// [`Subscriber::poll_start`]) wait on it; everything else treats the floor as usual.
 	start_pending: bool,
 
+	// The budget the publisher resolved `start_sequence` from (a lite-06+ SUBSCRIBE_START),
+	// skipping every older group as stale under it. Cleared by any other declaration.
+	start_budget: Option<Duration>,
+
 	// A copy received from a remote publisher, whose declared end waits for groups still
 	// in flight below it (see `tail`), and whose readers' relative and time anchors are
 	// refused unless `anchored` (see `Holdings::drops_anchors`).
@@ -484,6 +488,10 @@ pub(crate) struct TrackState {
 	// registers under that lock instead of writing back into the track state.
 	// Kept here (rather than threaded through every handle) so any holder reaches it.
 	subscriptions: kio::Lock<Subscriptions>,
+
+	// Demand wakes a write owes, fired once the state guard is released (see
+	// [`Self::deferred`]). A woken waker may read this track, so none fires under its lock.
+	deferred: Vec<kio::WaiterList>,
 
 	// The fills readers queued for groups they miss (see [`Fill`]), same reasoning: a miss
 	// queues here and a `Requests` drains.
@@ -1898,11 +1906,21 @@ impl TrackState {
 	/// changes it, even one below a reached end.
 	///
 	/// `answers` when it is a group subscribers receive, which answers a pending refresh.
+	///
+	/// The demand wakes it owes wait in [`Self::deferred`] for the caller to fire once its guard
+	/// is released.
 	fn advance(&mut self, sequence: u64, answers: bool) {
 		self.max_sequence = Some(self.max_sequence.map_or(sequence, |max| max.max(sequence)));
 		self.cache.advance_largest(Position::group(sequence));
-		let mut wakes = self.subscriptions.lock().wrote(sequence, answers);
-		wakes.wake();
+		let wakes = self.subscriptions.lock().wrote(sequence, answers);
+		if !wakes.is_empty() {
+			self.deferred.push(wakes);
+		}
+	}
+
+	/// Take the wakes [`Self::advance`] deferred, to fire once the state guard is released.
+	pub(super) fn deferred(&mut self) -> Deferred {
+		Deferred(std::mem::take(&mut self.deferred))
 	}
 
 	/// The sequence the next append takes: one past this track's own writes.
@@ -2278,6 +2296,7 @@ impl TrackState {
 		self.latch_settled();
 		self.start_sequence = start_sequence;
 		self.start_pending = pending;
+		self.start_budget = None;
 		if let Some(start) = start_sequence {
 			self.cache.wakes().arrived(..start);
 			let now = self.cache.pool().now_wall();
@@ -2744,6 +2763,18 @@ impl TrackState {
 	}
 }
 
+/// Demand wakes taken out of the track state, fired once its guard is gone.
+#[must_use = "fire the wakes once the guard is released"]
+pub(super) struct Deferred(Vec<kio::WaiterList>);
+
+impl Deferred {
+	pub(super) fn wake(self) {
+		for mut wakes in self.0 {
+			wakes.wake();
+		}
+	}
+}
+
 /// Record `err` and close the track, the shared tail of every abort, returning the open
 /// groups to abort once the guard is gone.
 fn commit_abort(mut state: kio::Mut<'_, TrackState>, err: Error) -> OpenGroups {
@@ -2965,6 +2996,9 @@ impl Producer {
 		}
 		state.cap(&group.handle())?;
 		state.commit_group(&group.handle());
+		let deferred = state.deferred();
+		drop(state);
+		deferred.wake();
 		Ok(group)
 	}
 
@@ -2988,6 +3022,9 @@ impl Producer {
 			group::Producer::new(group::Info { sequence }, track, state.cache.clone()).with_meter(self.stats.meter());
 		state.cap(&group.handle())?;
 		state.commit_group(&group.handle());
+		let deferred = state.deferred();
+		drop(state);
+		deferred.wake();
 
 		Ok(group)
 	}
@@ -3048,7 +3085,9 @@ impl Producer {
 		meter.datagram(datagram.stored_len());
 		state.push_datagram(datagram);
 		let cache = state.cache.clone();
+		let deferred = state.deferred();
 		drop(state);
+		deferred.wake();
 		cache.settle(None);
 		Ok(sequence)
 	}
@@ -3098,7 +3137,9 @@ impl Producer {
 		meter.datagram(datagram.stored_len());
 		state.push_datagram(datagram);
 		let cache = state.cache.clone();
+		let deferred = state.deferred();
 		drop(state);
+		deferred.wake();
 		cache.settle(None);
 		Ok(())
 	}
@@ -3221,6 +3262,16 @@ impl Producer {
 	/// Resolves a start a subscriber session left pending.
 	pub fn start_at(&mut self, sequence: impl Into<Option<u64>>) -> Result<()> {
 		self.modify()?.set_start(sequence.into(), false);
+		Ok(())
+	}
+
+	/// [`Self::start_at`] a start the publisher resolved from `budget`: every older group
+	/// is stale under it, so a reader whose budget is no looser gives them up unasked.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn start_resolved(&mut self, sequence: u64, budget: Duration) -> Result<()> {
+		let mut state = self.modify()?;
+		state.set_start(Some(sequence), false);
+		state.start_budget = Some(budget);
 		Ok(())
 	}
 
@@ -6633,6 +6684,7 @@ impl Cursor {
 			misses.judge(
 				&state,
 				(from, revision, cap),
+				window.named(),
 				|span| {
 					let end = cap.map_or(*span.end(), |cap| (*span.end()).min(cap.saturating_sub(1)));
 					if cap == Some(0) || *span.start() > end {
@@ -18012,6 +18064,33 @@ mod test {
 		write(&producer, 1);
 		assert_eq!(drain_groups(&mut subscriber), [1]);
 		assert!(dynamic.poll_requested_fill(&waiter).is_pending());
+	}
+
+	/// Below a start its publisher resolved from a budget, a reader no looser than it gives
+	/// every group up unasked, while a looser one may still reach some, so it asks.
+	#[test]
+	#[cfg(feature = "async")]
+	fn below_a_start_resolved_from_a_budget_only_a_looser_reader_asks() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let mut narrow = producer.subscribe(replay());
+		let mut wide = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(60)));
+		producer.start_resolved(2, Duration::from_secs(30)).unwrap();
+		write_group(&producer, 2);
+		write_group(&producer, 3);
+		let waiter = kio::Waiter::noop();
+		assert_eq!(drain_groups(&mut narrow), [2, 3]);
+		assert_eq!(drained_drops(&mut narrow), [(0, 2)]);
+		assert!(
+			dynamic.poll_requested_fill(&waiter).is_pending(),
+			"the narrow reader asks nothing"
+		);
+
+		assert_eq!(drain_groups(&mut wide), [2, 3]);
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the wide reader asks below the start");
+		};
+		assert_eq!((fill.start().group, fill.end()), (0, 2));
 	}
 
 	/// A reader arriving after another's fill cached the groups under the start reads them
