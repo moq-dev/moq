@@ -11,6 +11,11 @@ listing, and the archive that uses it, still learns an IETF peer's tracks.
 
 ## Plan
 
+Checkpoint 2026-10-29: the draft contains only an initial JS refusal test.
+Both production publishers remain unchanged, so the Goal is not implemented.
+The agent stopped when its selected model reached capacity; finish the
+implementation and validate the test before marking the PR ready.
+
 Decided with the maintainer on 2026-10-28 (`/quest-plan`, "what's not worth
 supporting in IETF").
 
