@@ -5,6 +5,12 @@
 	"version": "0.1.0",
 	"description": "MoQ CARLA Demo - Drive simulated vehicles over MoQ",
 	"license": "(MIT OR Apache-2.0)",
+	"exports": {
+		"./element": "./src/element.ts"
+	},
+	"sideEffects": [
+		"./src/element.ts"
+	],
 	"scripts": {
 		"dev": "vite --open",
 		"build": "vite build",
@@ -22,7 +28,6 @@
 		"@types/bun": "^1.4.3",
 		"rolldown": "^1.2.12",
 		"typescript": "7.0.2",
-		"vite": "^8.3.2",
-		"wrangler": "^4.151.1"
+		"vite": "^8.3.2"
 	}
 }

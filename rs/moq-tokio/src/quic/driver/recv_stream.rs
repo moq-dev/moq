@@ -6,7 +6,9 @@ use std::{
 };
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use moq_quic::{Chunk, Chunks, ClosedStream, ConnectionError, LeaseError, ReadableError, StreamId};
+use moq_quic::{
+	Chunk, Chunks, ClosedStream, LeaseError, ReadableError, StreamId, connection::Error as ConnectionError,
+};
 use thiserror::Error;
 use tokio::io::ReadBuf;
 
@@ -51,7 +53,7 @@ use crate::quic::driver::{
 /// [`SendStream::finish`]: crate::quic::driver::SendStream::finish
 /// [`WriteError::Stopped`]: crate::quic::driver::WriteError::Stopped
 /// [`id`]: RecvStream::id
-/// [`Connection::accept_bi`]: crate::quic::driver::Connection::accept_bi
+/// [`Connection::accept_bi`]: crate::quic::driver::connection::Connection::accept_bi
 #[derive(Debug)]
 pub struct RecvStream {
 	conn: ConnectionRef,

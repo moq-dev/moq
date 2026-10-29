@@ -215,9 +215,10 @@ final class Moq {
 
   /// Create an unannounced broadcast at [path], invisible to everyone until announced.
   ///
-  /// Advertise it with `announce` after populating tracks. Create, `requests`
-  /// if tracks are served on demand, populate, then announce.
-  BroadcastProducer createBroadcast(String path) =>
+  /// Populate its `broadcast`, calling `requests` first if tracks are served
+  /// on demand, then advertise it with `announce`. Disposing the publication
+  /// keeps the route; closing the broadcast ends it.
+  Publication createBroadcast(String path) =>
       session.publish().createBroadcast(path: path);
 
   /// Discover routes matching [options]; prefixes stay relative to the origin.

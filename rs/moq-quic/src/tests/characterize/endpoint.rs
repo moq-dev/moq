@@ -6,20 +6,28 @@ const CID_KEY: u64 = 0x1234_5678;
 const REMOTE: &str = "[::2]:7890";
 
 /// An endpoint config whose CIDs come from a hashed generator with a known key
-fn endpoint_config() -> EndpointConfig {
-	let mut config = EndpointConfig::default();
-	config.cid_generator(Arc::new(|| Box::new(HashedConnectionIdGenerator::from_key(CID_KEY))));
-	config
+fn endpoint_config() -> crate::endpoint::Config {
+	crate::endpoint::Config {
+		cid_generator: Some(Arc::new(|| Box::new(HashedConnectionIdGenerator::from_key(CID_KEY)))),
+		..crate::endpoint::Config::default()
+	}
 }
 
 /// A server endpoint running [`endpoint_config`], or a client-only one
 fn endpoint(server: bool) -> Endpoint {
 	let server = server.then(|| {
 		let mut config = server_config();
-		config.transport = Arc::new(transport());
-		Arc::new(config)
+		config.transport = transport();
+		config
 	});
-	Endpoint::new(Arc::new(endpoint_config()), server, true)
+	Endpoint::new(
+		crate::endpoint::Config {
+			server,
+			..endpoint_config()
+		},
+		true,
+	)
+	.unwrap()
 }
 
 /// A CID the endpoint would accept as its own, without a connection behind it
@@ -55,7 +63,16 @@ fn long(ty: u8, version: u32, dst_cid: &[u8], len: usize) -> Vec<u8> {
 /// What `endpoint` answers `packet` with, at `now`
 fn answer(endpoint: &mut Endpoint, now: Instant, packet: &[u8]) -> Answer {
 	let mut buf = Vec::new();
-	match endpoint.handle(now, REMOTE.parse().unwrap(), None, None, packet.into(), &mut buf) {
+	match endpoint.handle(
+		now,
+		Received {
+			remote: REMOTE.parse().unwrap(),
+			local_ip: None,
+			ecn: None,
+			data: packet.into(),
+		},
+		&mut buf,
+	) {
 		None => Answer::Nothing,
 		Some(DatagramEvent::Response(transmit)) => Answer::Response(buf[..transmit.size].to_vec()),
 		Some(DatagramEvent::NewConnection(incoming)) => {
@@ -79,7 +96,7 @@ impl Answer {
 		let Self::Response(packet) = self else {
 			return false;
 		};
-		let token = ResetToken::new(&*endpoint.config().reset_key, cid);
+		let token = ResetToken::new(endpoint.reset_key(), cid);
 		packet[0] & 0xc0 == 0x40 && packet.ends_with(&token[..])
 	}
 }
@@ -99,7 +116,7 @@ fn unknown_cid_gets_stateless_reset() {
 	assert!(reset.len() < packet.len());
 
 	assert_eq!(answer(&mut server, now, &packet), Answer::Nothing);
-	let later = now + server.config().min_reset_interval;
+	let later = now + server.min_reset_interval();
 	assert!(matches!(answer(&mut server, later, &packet), Answer::Response(_)));
 }
 
@@ -131,9 +148,11 @@ fn invalid_cid_is_dropped() {
 #[test]
 fn zero_length_cid_short_packet_is_dropped() {
 	let _guard = subscribe();
-	let mut config = EndpointConfig::default();
-	config.cid_generator(Arc::new(|| Box::new(RandomConnectionIdGenerator::new(0))));
-	let mut server = Endpoint::new(Arc::new(config), Some(Arc::new(server_config())), true);
+	let config = crate::endpoint::Config {
+		cid_generator: Some(Arc::new(|| Box::new(RandomConnectionIdGenerator::new(0)))),
+		..crate::endpoint::Config::default()
+	};
+	let mut server = Endpoint::new(config.with_server(server_config()), true).unwrap();
 	assert_eq!(answer(&mut server, Instant::now(), &short(&[], 100)), Answer::Nothing);
 }
 
@@ -142,7 +161,7 @@ fn zero_length_cid_short_packet_is_dropped() {
 fn long_header_for_unknown_connection_is_dropped() {
 	let _guard = subscribe();
 	let now = Instant::now();
-	let packet = long(2, DEFAULT_SUPPORTED_VERSIONS[0], &valid_cid(), 1200);
+	let packet = long(2, Version::V1.wire(), &valid_cid(), 1200);
 	assert_eq!(answer(&mut endpoint(true), now, &packet), Answer::Nothing);
 }
 
@@ -151,7 +170,7 @@ fn long_header_for_unknown_connection_is_dropped() {
 #[test]
 fn short_initial_is_dropped() {
 	let _guard = subscribe();
-	let packet = long(0, DEFAULT_SUPPORTED_VERSIONS[0], &[0x11; 8], 1199);
+	let packet = long(0, Version::V1.wire(), &[0x11; 8], 1199);
 	assert_eq!(answer(&mut endpoint(true), Instant::now(), &packet), Answer::Nothing);
 
 	let mut pair = pair_with(|_| {});
@@ -167,7 +186,7 @@ fn short_initial_is_dropped() {
 #[test]
 fn initial_with_short_cid_is_refused() {
 	let _guard = subscribe();
-	let packet = long(0, DEFAULT_SUPPORTED_VERSIONS[0], &[0x11; 7], 1200);
+	let packet = long(0, Version::V1.wire(), &[0x11; 7], 1200);
 	let answer = answer(&mut endpoint(true), Instant::now(), &packet);
 	let Answer::Response(close) = answer else {
 		panic!("expected an Initial close, got {answer:?}");
@@ -183,7 +202,7 @@ fn undecryptable_initial() {
 	let _guard = subscribe();
 	let mut server = endpoint(true);
 	let now = Instant::now();
-	let mut packet = long(0, DEFAULT_SUPPORTED_VERSIONS[0], &[0x11; 8], 1200);
+	let mut packet = long(0, Version::V1.wire(), &[0x11; 8], 1200);
 	assert_eq!(answer(&mut server, now, &packet), Answer::Nothing);
 
 	// Vary the header protection sample, 4 bytes past the packet number at byte 22, until the
@@ -192,14 +211,23 @@ fn undecryptable_initial() {
 	let incoming = (0..=u8::MAX)
 		.find_map(|byte| {
 			packet[26] = byte;
-			match server.handle(now, REMOTE.parse().unwrap(), None, None, packet[..].into(), &mut buf) {
+			match server.handle(
+				now,
+				Received {
+					remote: REMOTE.parse().unwrap(),
+					local_ip: None,
+					ecn: None,
+					data: packet[..].into(),
+				},
+				&mut buf,
+			) {
 				Some(DatagramEvent::NewConnection(incoming)) => Some(incoming),
 				None => None,
 				Some(_) => panic!("unexpected response"),
 			}
 		})
 		.expect("some sample unmasks valid reserved bits");
-	let error = server.accept(incoming, now, &mut buf, None).unwrap_err();
+	let error = server.accept(incoming, now, &mut buf).unwrap_err();
 	assert_matches!(error.cause, ConnectionError::TransportError(_));
 	assert!(error.response.is_none());
 	assert_eq!(server.open_connections(), 0);
@@ -213,7 +241,7 @@ fn undecodable_datagram_is_dropped() {
 	assert_eq!(answer(&mut endpoint(true), now, &[0xc0, 0, 0]), Answer::Nothing);
 	// An Initial whose two-byte length field, after its 20 bytes of header, runs past the
 	// datagram
-	let mut packet = long(0, DEFAULT_SUPPORTED_VERSIONS[0], &[0x11; 8], 1200);
+	let mut packet = long(0, Version::V1.wire(), &[0x11; 8], 1200);
 	packet[20..22].copy_from_slice(&[0x7f, 0xff]);
 	assert_eq!(answer(&mut endpoint(true), now, &packet), Answer::Nothing);
 }
@@ -241,20 +269,28 @@ fn client_endpoint_sends_stateless_reset() {
 	assert!(answer(&mut client, now, &short(&cid, 100)).is_reset_for(&client, cid));
 
 	let dst_cid = ConnectionId::new(&[0x11; 8]);
-	let packet = long(0, DEFAULT_SUPPORTED_VERSIONS[0], &dst_cid, 1200);
+	let packet = long(0, Version::V1.wire(), &dst_cid, 1200);
 	let mut client = endpoint(false);
 	assert!(answer(&mut client, now, &packet).is_reset_for(&client, dst_cid));
 }
 
 /// A server whose one-byte CID space is three-quarters used
 fn exhausted() -> Pair {
-	let mut config = EndpointConfig::default();
-	config.cid_generator(Arc::new(|| Box::new(RandomConnectionIdGenerator::new(1))));
-	let config = Arc::new(config);
+	let config = crate::endpoint::Config {
+		cid_generator: Some(Arc::new(|| Box::new(RandomConnectionIdGenerator::new(1)))),
+		..crate::endpoint::Config::default()
+	};
 	let mut server_config = server_config();
-	server_config.transport = Arc::new(transport());
-	let server = Endpoint::new(config, Some(Arc::new(server_config)), true);
-	let client = Endpoint::new(Arc::new(EndpointConfig::default()), None, true);
+	server_config.transport = transport();
+	let server = Endpoint::new(
+		crate::endpoint::Config {
+			server: Some(server_config),
+			..config
+		},
+		true,
+	)
+	.unwrap();
+	let client = Endpoint::new(crate::endpoint::Config::default(), true).unwrap();
 	Pair::new_from_endpoint(client, server)
 }
 
@@ -263,12 +299,19 @@ fn exhaust(pair: &mut Pair) -> usize {
 	let mut made = 0;
 	loop {
 		let remote = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 1);
-		match pair.server.connect(pair.time, client_with(|_| {}), remote, "localhost") {
+		match pair.server.connect(
+			pair.time,
+			Dial {
+				config: &client_with(|_| {}),
+				remote,
+				server_name: "localhost",
+			},
+		) {
 			Ok((ch, conn)) => {
 				pair.server.connections.insert(ch, conn);
 				made += 1;
 			}
-			Err(ConnectError::CidsExhausted) => return made,
+			Err(crate::endpoint::ConnectError::CidsExhausted) => return made,
 			Err(e) => panic!("{e}"),
 		}
 	}

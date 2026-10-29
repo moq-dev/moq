@@ -164,8 +164,8 @@ func (c ClientConfig) ffi() (ffi.MoqClientConfig, error) {
 		keylog = &c.QUIC.Keylog
 	}
 	cfg := ffi.MoqClientConfig{
-		Bind:              str(c.Bind),
-		Versions:          c.Versions,
+		Bind:            str(c.Bind),
+		Versions:        c.Versions,
 		Tokens:          c.Tokens,
 		Timeout:         c.Timeout,
 		Race:            c.Race,
@@ -303,7 +303,7 @@ func Dial(ctx context.Context, url string, config ClientConfig) (*Client, error)
 // CreateBroadcast creates an unannounced broadcast at path, invisible to everyone until announced. Announce it after populating tracks.
 //
 // See [OriginProducer.CreateBroadcast].
-func (c *Client) CreateBroadcast(path string) (*BroadcastProducer, error) {
+func (c *Client) CreateBroadcast(path string) (*Publication, error) {
 	return c.publisher.CreateBroadcast(path)
 }
 
