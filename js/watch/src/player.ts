@@ -5,6 +5,7 @@ import { Path } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, Signal } from "@moq/signals";
 import * as Audio from "./audio";
 import { Broadcast, type CatalogFormat } from "./broadcast";
+import { Echo } from "./echo";
 import { type Delay, Sync } from "./sync";
 import * as Text from "./text";
 import * as Video from "./video";
@@ -23,8 +24,13 @@ export type PlayerInput = {
 	catalogFormat: Getter<CatalogFormat | undefined>;
 	/** Catalog supplied when the format is `manual`. */
 	catalog: Getter<Catalog.Root | undefined>;
-	/** Connection probe used for rendition selection. */
+	/** Connection probe used for rendition selection, and whose round-trip time feedback reports. */
 	probe: Getter<Moq.Connection.Probe | undefined>;
+	/**
+	 * The viewer's name, one path segment, under which to publish feedback once the catalog solicits
+	 * it: `<echo path>/<name>.echo`. Undefined (the default) publishes none.
+	 */
+	echo: Getter<string | undefined>;
 	/** Pause media and captions. */
 	paused: Getter<boolean>;
 	/** Playback distance from the live edge. */
@@ -90,6 +96,8 @@ export class Player {
 	readonly emitter: Audio.Emitter;
 	/** Caption overlay output. */
 	readonly textRenderer: Text.Renderer;
+	/** Feedback published where the catalog solicits it. */
+	readonly echo: Echo;
 
 	#videoEnabled = new Signal(false);
 	#audioEnabled = new Signal(false);
@@ -108,6 +116,7 @@ export class Player {
 			catalogFormat: getter<CatalogFormat | undefined>(props.catalogFormat),
 			catalog: getter(props.catalog),
 			probe: getter(props.probe),
+			echo: getter(props.echo),
 			paused: getter(props.paused ?? false),
 			delay: getter(props.delay ?? "auto"),
 			buffer: getter(props.buffer ?? Milli.zero),
@@ -184,6 +193,16 @@ export class Player {
 			enabled: this.#captionsEnabled,
 		});
 		this.#signals.cleanup(() => this.textRenderer.close());
+
+		this.echo = new Echo({
+			broadcast: this.broadcast,
+			origin: this.in.origin,
+			enabled: this.in.enabled,
+			name: this.in.echo,
+			probe: this.in.probe,
+			sources: [this.video, this.audio],
+		});
+		this.#signals.cleanup(() => this.echo.close());
 
 		this.#signals.run((effect) => {
 			this.#captionsEnabled.set(effect.get(this.in.enabled) && !effect.get(this.in.paused));

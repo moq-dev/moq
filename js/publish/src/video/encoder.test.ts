@@ -115,6 +115,7 @@ test("encoding tracks encoder config in its child effect", async () => {
 	const track = new Moq.Track.Producer("video/hd").accept({ timescale: Moq.Time.Timescale.MILLI });
 	const rendition = {
 		config: new Signal(undefined),
+		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		close: () => {
 			track.finish();
@@ -156,6 +157,7 @@ test("a demand gap marks a discontinuity and leaves the broadcast-owned track op
 	const live = new Signal<Moq.Track.Producer | undefined>(track);
 	const rendition = {
 		config: new Signal(undefined),
+		stats: new Signal(undefined),
 		track: live,
 		close: () => {
 			track.finish();
@@ -210,6 +212,7 @@ test("a bandwidth estimate updates the bitrate without blanking the config or re
 	const sub = track.subscribe();
 	const rendition = {
 		config: new Signal(undefined),
+		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		close: () => {
 			track.finish();
@@ -295,6 +298,7 @@ test("every published config fits a probe for its own codec", async () => {
 	const sub = track.subscribe();
 	const rendition = {
 		config: new Signal(undefined),
+		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		close: () => {
 			track.finish();
@@ -628,6 +632,7 @@ test("disabling encodes one black keyframe and keeps the rendition with enabled:
 	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MILLI });
 	const rendition = {
 		config: new Signal(undefined),
+		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		close: () => {
 			track.finish();
@@ -795,6 +800,7 @@ test("the probe encodes with the frame rate and bitrate ceiling", async () => {
 	const sub = track.subscribe();
 	const rendition = {
 		config: new Signal(undefined),
+		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		close: () => {
 			track.finish();
@@ -971,6 +977,7 @@ async function recordKeyframes(
 	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MICRO, ...info });
 	const rendition = {
 		config: new Signal(undefined),
+		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		close: () => {
 			track.finish();
@@ -1246,6 +1253,7 @@ test("a shrinking capture resizes in band below the advertised ceiling", async (
 	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MILLI });
 	const rendition = {
 		config: new Signal(undefined),
+		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		close: () => {
 			track.finish();
@@ -1318,6 +1326,7 @@ test("the catalog bitrate and frame rate only rise", async () => {
 	const sub = track.subscribe();
 	const rendition = {
 		config: new Signal(undefined),
+		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		close: () => {
 			track.finish();
@@ -1374,6 +1383,7 @@ test("each broadcast keeps its own ceiling and maxima", async () => {
 	using _videoEncoder = installFakeVideoEncoder();
 	const rendition = () => ({
 		config: new Signal(undefined),
+		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(undefined),
 		close: () => {},
 	});

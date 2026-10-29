@@ -39,6 +39,7 @@ in sync at the latency you ask for.
 | `backend` | How the canvas is drawn; see [@moq/video](/lib/js/video). `auto` (default), `webgpu`, or `2d`. |
 | `follow` | Follow the broadcast's announcements (default on): wait for one before subscribing, so a player can mount before the stream exists, and move to each restart. Off requests the name once. |
 | `catalog-format` | `hang`, `msf`, or `manual`; detected from the name by default. |
+| `echo` | The viewer's name for [feedback](/concept/stats#media-reports), one path segment not starting with `.`. Once the catalog solicits feedback, the player publishes `<echo path>/<name>.echo`. Absent publishes none. |
 
 Every attribute is also a reactive property, and property or UI changes reflect
 back into the attributes. An invalid value is refused rather than defaulted: the
@@ -67,6 +68,20 @@ ends while a covering prefix still serves the name, it moves to the prefix. A
 name outside the origin's scope is an `error`. A restarted publisher at the same name is followed at
 once, with a fresh catalog, and video, audio, and the clock start over on its
 timeline instead of waiting for it to catch up to the old one.
+
+## Feedback
+
+A publisher solicits feedback with the catalog's `echo` section, such as
+`<moq-publish echo-path="viewers">`. Given `echo="alice"`, the player resolves
+that path against the broadcast and publishes `alice.echo` there, with one
+`feedback.json` track reporting what each rendition was received and played
+under its catalog ID: frames, bytes, decoded, late, decode errors, stalls and
+stalled time, audio underruns, and the newest arrival, plus the PROBE
+round-trip time. It writes about once a second while someone subscribes, and
+follows the catalog: a removed or moved section retracts the broadcast. Players
+on one connection watching the same catalog under one name share it and add
+their counts. The decoders' `out.stats` and the stats panel read the same
+counters. The token must allow publishing under the echo path.
 
 ## Binding from a framework
 

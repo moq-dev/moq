@@ -111,6 +111,7 @@ test("a slower-than-realtime encoder drops input instead of ratcheting catalog l
 	const audio = new Estimator();
 	const rendition = {
 		config: new Signal(undefined),
+		stats: new Signal(undefined),
 		track: new Signal(track),
 		close: () => {
 			track.finish();

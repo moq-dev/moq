@@ -79,6 +79,10 @@ const metaSignal = new Signals.Signal<unknown>(undefined);
 // tile's <moq-watch> follow it reactively.
 const relayUrl = new Signals.Signal<URL | undefined>(new URL(RELAY_URL));
 
+// This page's feedback name: a tile whose catalog solicits feedback publishes `<echo path>/<VIEWER>.echo`,
+// which `moq export echo` reads. Tiles of one broadcast share it and add their counts.
+const VIEWER = `viewer-${crypto.randomUUID().slice(0, 8)}`;
+
 // Discovery connection (the tiles each open their own connection internally).
 const connection = new Net.Connection({ url: relayUrl });
 
@@ -119,6 +123,7 @@ function createTile(name: string): WatchTile {
 	// `broadcast` and decoders, so the shared inspector panel reflects the active tile.
 	const watch = document.createElement("moq-watch") as MoqWatch;
 	watch.name = name;
+	watch.echo = VIEWER;
 	watch.muted = true; // unmuted only while active (see below)
 	const canvas = document.createElement("canvas");
 	canvas.style.cssText = "width: 100%; height: auto;";

@@ -15,9 +15,6 @@ grade's limits are re-measured against browser reporters.
   only for a connection's sole broadcast until then.
 - Consumers: preflight is planned in [Preflight](/quest/m2/stats/preflight.md);
   add the demo dashboard and a `moq` CLI sink.
-- Re-measure the thresholds in `rs/hang/src/health.rs` once
-  [Browser reporters](/quest/m2/stats/js.md) publish real numbers.
-
-## Required
-
-- [Browser reporters](/quest/m2/stats/js.md) - the browser numbers the limits are measured against
+- Re-measure the thresholds in `rs/hang/src/health.rs` against the numbers
+  the browser reporters publish (`<moq-publish stats>` and
+  `<moq-watch echo>`).
