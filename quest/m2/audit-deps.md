@@ -47,6 +47,15 @@ generator).
 The uniffi `>=0.33` ignore blocks nothing until 0.33 ships; keep it, since it
 ties uniffi to the Go generator.
 
+The QUIC hard fork has no advisory feed: `cargo deny` can't match quinn
+advisories against `rs/moq-quic` (quinn-proto) or `rs/moq-sock` (quinn-udp),
+as `SECURITY.md` notes. List quinn-proto and quinn-udp advisories (RustSec,
+and GHSA on quinn-rs/quinn) and the upstream commits since the last reviewed
+one, port any security fix, and record the newest reviewed commit in
+`rs/moq-quic/README.md` beside the fork point (`7616e6b2`). Added 2026-10-28
+(maintainer) from the second external security audit, instead of a separate
+CI watcher.
+
 Open at the end of the m1 run:
 
 - vt100 0.17 and 0.18 (moq-cli dev-dependency) were still inside the
