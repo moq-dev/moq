@@ -100,30 +100,22 @@ export default class MoqPublishUi extends HTMLElement {
 		player.append(scrimTop, center(effect, publish), chrome, panel);
 		DOM.render(effect, this.#root, player);
 
-		// Keep the player box from jumping when video toggles off: reserve the
-		// last live preview's aspect ratio (defaults to 16:9) instead of snapping.
+		// Capture can be live without a preview. Reserve the last rendered aspect
+		// ratio whenever the slotted content has no height, including hidden previews.
 		let lastAspect = 16 / 9;
-		effect.run((e) => {
-			const capture = e.get(publish.video.in.capture);
-			const src = capture ? e.get(capture.in.source) : undefined;
-			if (src) {
+		const resize = new ResizeObserver(([entry]) => {
+			const { width, height } = entry.contentRect;
+			if (width > 0 && height > 0) {
+				lastAspect = width / height;
 				player.classList.remove("player--empty");
 				player.style.aspectRatio = "";
-				const video = this.querySelector("video") as HTMLVideoElement | null;
-				if (video) {
-					const measure = () => {
-						if (video.videoWidth > 0 && video.videoHeight > 0)
-							lastAspect = video.videoWidth / video.videoHeight;
-					};
-					measure();
-					e.event(video, "loadedmetadata", measure);
-					e.event(video, "resize", measure);
-				}
 			} else {
 				player.style.aspectRatio = String(lastAspect);
 				player.classList.add("player--empty");
 			}
 		});
+		resize.observe(publish);
+		effect.cleanup(() => resize.disconnect());
 
 		this.#wireChrome(effect, publish, state, player);
 	}

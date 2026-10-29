@@ -7,16 +7,23 @@ shows no `<video>` or `<canvas>` preview.
 
 ## Plan
 
-Found 2026-10-28 by [moq-dev/moq#7157](https://github.com/moq-dev/moq/pull/7157),
-and present on main: the controls box is sized by whether a camera source
-exists, not by whether a preview is showing, so it collapses to zero height
-and the controls leave the screen. #7157's browser test added a `<video>`
-preview to its page to work around it.
+Reproduced on main by waiting for real camera capture in the existing
+no-preview browser fixture: the player height becomes exactly zero. The
+previous test raced capture startup, so its clicks could miss the collapse.
+
+The implementation observes the slotted content's rendered size, retaining
+the last rendered aspect ratio when empty (initially 16:9), rather than
+inferring a preview from capture state. The demo's canvas consumer needs no
+API change.
+
+Remaining: validate the implementation in
+`test/interop/clients/js/publish-ui.browser.ts`, including live capture without
+a preview and video/canvas previews added, hidden, and removed. Run `just ci`
+and exercise `just dev` in a real browser before completing the quest.
+Host admission prevented these checks from running after the fix; formatting
+and whitespace checks passed. The stale version-list browser expectations
+have their own [fix PR](https://github.com/moq-dev/moq/pull/7060).
 
 Decided 2026-10-28 (maintainer): m1.
-
-Size the box by what it shows, and cover it in
-`test/interop/clients/js/publish-ui.browser.ts` with a page that has no
-preview.
 
 Public API: none. Wire: none.
