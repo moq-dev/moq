@@ -171,7 +171,8 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::BinaryConfig {
 /// dimensions from an SPS, ...) always wins, so a detected change just updates the catalog. A
 /// [`codec`](Self::codec) alone is enough to publish the catalog before the first keyframe (the
 /// decoder config then arrives in band). Use it for fields the stream can't reveal (bitrate) or to
-/// skip that wait.
+/// skip that wait. The MSF catalog declares only hinted estimates (`bitrate`, `framerate`, `jitter`,
+/// `delay`), never measured ones, so an MSF track carries only those set here.
 ///
 /// Video importers take one because they build the [`VideoConfig`](hang::catalog::VideoConfig)
 /// themselves, out of the bitstream, so the caller never holds the config to set these on. An audio
@@ -382,28 +383,6 @@ fn quantize(published: Option<Duration>, measured: Option<Duration>, period: Dur
 	}
 }
 
-/// Whether config `C` is listed as an MSF track whose estimates the MSF catalog waits for, and if so
-/// whether it carries a framerate. Text detects nothing and data tracks aren't listed in MSF.
-fn msf_framerate<C: 'static>() -> Option<bool> {
-	use std::any::TypeId;
-	let ty = TypeId::of::<C>();
-	if ty == TypeId::of::<hang::catalog::VideoConfig>() {
-		Some(true)
-	} else if ty == TypeId::of::<hang::catalog::AudioConfig>() {
-		Some(false)
-	} else {
-		None
-	}
-}
-
-/// Whether `supplied` hints every field an MSF track's estimate would otherwise wait on.
-fn hinted(supplied: &Estimate, framerate: bool) -> bool {
-	supplied.jitter.is_some()
-		&& supplied.bitrate.is_some()
-		&& supplied.delay.is_some()
-		&& (!framerate || supplied.framerate.is_some())
-}
-
 /// Refuse an edit that redefines rendition `name`'s track identity in place: a publisher whose
 /// decoder identity changed publishes under a new name instead.
 fn check_identity<E: CatalogExt>(previous: &Catalog<E>, next: &Catalog<E>, name: &str) -> crate::Result<()> {
@@ -586,15 +565,13 @@ pub(crate) struct Rendition<E: CatalogExt, C: RenditionConfig<E>> {
 	/// SPS) holds the handle without a catalog entry, and drops without a spurious removal.
 	present: bool,
 	/// The fields the config carried at [`set`](Self::set): authoritative, never overwritten by
-	/// detection. Whatever is absent here is what detection fills.
+	/// detection. Whatever is absent here is what detection fills, and stays absent from MSF.
 	supplied: Estimate,
 	/// The last estimate handed to [`estimate`](Self::estimate), kept so a config set afterwards
 	/// starts from whatever was already measured.
 	detected: Estimate,
 	/// The last estimate written to the config, so an unchanged one doesn't republish the catalog.
 	published: Option<Estimate>,
-	/// Whether the estimates the MSF catalog freezes have been made, so it no longer waits on them.
-	settled: bool,
 	_config: PhantomData<fn() -> C>,
 }
 
@@ -643,7 +620,6 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 			supplied: Estimate::default(),
 			detected: Estimate::default(),
 			published: None,
-			settled: false,
 			_config: PhantomData,
 		})
 	}
@@ -672,9 +648,9 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 	///
 	/// Whatever [`Estimate`] fields `config` already carries are authoritative and left alone; the
 	/// rest are filled by [`estimate`](Self::estimate), seeded with anything already measured before
-	/// the rendition existed (a dirty start or a B-frame reorder). A caller who wants to pre-empt
-	/// detection sets the field on the config, or (for a config an importer builds out of the
-	/// bitstream) hands the importer a hint like [`VideoHint`].
+	/// the rendition existed (a dirty start or a B-frame reorder). Only the authoritative ones reach
+	/// the MSF catalog. A caller who wants to pre-empt detection sets the field on the config, or (for
+	/// a config an importer builds out of the bitstream) hands the importer a hint like [`VideoHint`].
 	pub(crate) fn set(&mut self, mut config: C) -> crate::Result<()> {
 		let supplied = config.estimate();
 		let resolved = Self::resolved(&supplied, &self.detected);
@@ -690,10 +666,9 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 			self.present = true;
 			*guard = next;
 			guard.list::<C>(&self.name);
-			// Every estimated field hinted leaves nothing to wait for.
-			self.settled |= msf_framerate::<C>().is_none_or(|framerate| hinted(&supplied, framerate));
-			// A replaced config that hints everything releases the hold its predecessor took.
-			guard.unsettled::<C>(&self.name, !self.settled);
+			if C::detects() {
+				guard.hint::<C>(&self.name, supplied.clone());
+			}
 			guard.commit()?;
 		}
 		self.supplied = supplied;
@@ -741,30 +716,6 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 			self.detected = estimate;
 			return Ok(());
 		}
-		// The bitrate's first window closes on the first group boundary after a window of media. An
-		// unhinted framerate takes its own window after that, so MSF declares it absent.
-		let settles = !self.settled && estimate.bitrate.is_some();
-		self.publish(estimate, period)?;
-		if settles {
-			self.settle()?;
-		}
-		Ok(())
-	}
-
-	/// Stop holding the MSF catalog back for this rendition's estimates: they are made, or the track
-	/// has ended and they never will be.
-	pub(crate) fn settle(&mut self) -> crate::Result<()> {
-		if std::mem::replace(&mut self.settled, true) || !self.present {
-			return Ok(());
-		}
-		// A closed catalog has nothing left to publish.
-		if let Ok(guard) = self.catalog.modify() {
-			guard.settle::<C>(&self.name)?;
-		}
-		Ok(())
-	}
-
-	fn publish(&mut self, estimate: Estimate, period: Option<Duration>) -> crate::Result<()> {
 		let mut resolved = Self::resolved(&self.supplied, &estimate);
 		// A measurement never lowers the published jitter or delay, including one raised through
 		// `modify`.
@@ -839,8 +790,15 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		let mut estimate = config.estimate();
 		estimate.bitrate = Some(bitrate);
 		config.set_estimate(estimate);
-		self.replace(config)?;
-		self.supplied.bitrate = Some(bitrate);
+		let mut supplied = self.supplied.clone();
+		supplied.bitrate = Some(bitrate);
+		let name = self.name.clone();
+		let mut guard = self.stage(config)?;
+		if C::detects() {
+			guard.hint::<C>(&name, supplied.clone());
+		}
+		guard.commit()?;
+		self.supplied = supplied;
 		Ok(())
 	}
 

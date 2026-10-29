@@ -108,7 +108,6 @@ trait Rendition<R>: Send {
 	fn config(&self) -> crate::Result<R>;
 	fn replace(&mut self, config: R) -> crate::Result<()>;
 	fn estimate(&mut self, reading: crate::catalog::Reading) -> crate::Result<()>;
-	fn settle(&mut self) -> crate::Result<()>;
 	fn supply_bitrate(&mut self, bitrate: u64) -> crate::Result<()>;
 	fn fresh(
 		&self,
@@ -159,10 +158,6 @@ where
 
 	fn estimate(&mut self, reading: crate::catalog::Reading) -> crate::Result<()> {
 		self.estimate(reading)
-	}
-
-	fn settle(&mut self) -> crate::Result<()> {
-		self.settle()
 	}
 
 	fn supply_bitrate(&mut self, bitrate: u64) -> crate::Result<()> {
@@ -809,10 +804,6 @@ where
 		self.cut(None)?;
 		self.inner.finish()?;
 		self.publish_estimate()?;
-		// Its estimates are as made as they will be, so the MSF catalog stops waiting on them.
-		if let Some(rendition) = self.rendition.as_mut() {
-			rendition.settle()?;
-		}
 		// A finished track may be kept around, but its media stops holding the other tracks back.
 		self.estimator.discontinuity();
 		// Dropping the recorder stops the open HLS segment, so a track that ends before its catalog

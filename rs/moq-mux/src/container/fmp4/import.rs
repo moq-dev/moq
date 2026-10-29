@@ -105,13 +105,6 @@ impl<E: crate::catalog::hang::CatalogExt> Rendition<E> {
 			Self::Audio(rendition) => rendition.estimate(reading),
 		}
 	}
-
-	fn settle(&mut self) -> crate::Result<()> {
-		match self {
-			Self::Video(rendition) => rendition.settle(),
-			Self::Audio(rendition) => rendition.settle(),
-		}
-	}
 }
 
 struct Fmp4Track<E: crate::catalog::hang::CatalogExt> {
@@ -205,8 +198,6 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 	fn finish(&mut self) -> crate::Result<()> {
 		self.close()?;
 		self.track.finish()?;
-		// Its estimates are as made as they will be, so the MSF catalog stops waiting on them.
-		self.rendition.settle()?;
 		// The importer may be kept around, but its media stops holding the other tracks back.
 		self.estimator.discontinuity();
 		// Dropping the recorder stops the open HLS segment, so the track is advertised.
