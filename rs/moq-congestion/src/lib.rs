@@ -8,17 +8,18 @@
 use moq_clock::Instant;
 use std::time::Duration;
 
-use std::any::Any;
 use std::sync::Arc;
 
-mod bbr3;
-mod cubic;
+/// BBRv3 congestion control.
+pub mod bbr3;
+/// CUBIC congestion control.
+pub mod cubic;
 mod pacer;
 mod rate;
 mod unlimited;
 
-pub use bbr3::{Bbr3, Bbr3Config};
-pub use cubic::{Cubic, CubicConfig};
+pub use bbr3::Bbr3;
+pub use cubic::Cubic;
 pub use rate::Packet;
 pub use unlimited::Unlimited;
 
@@ -99,8 +100,8 @@ pub trait Controller: Send + Sync {
 
     /// Retrieve implementation-specific metrics used to populate connection statistics and `qlog`
     /// traces when they are enabled
-    fn metrics(&self) -> ControllerMetrics {
-        ControllerMetrics {
+    fn metrics(&self) -> Metrics {
+        Metrics {
             congestion_window: self.window(),
             ssthresh: None,
             pacing_rate: None,
@@ -109,7 +110,7 @@ pub trait Controller: Send + Sync {
         }
     }
 
-    /// Whether the controller ever reports [`ControllerMetrics::probe_inflight`], so an
+    /// Whether the controller ever reports [`Metrics::probe_inflight`], so an
     /// application-limited sender can probe for bandwidth through it
     fn probes(&self) -> bool {
         false
@@ -117,9 +118,6 @@ pub trait Controller: Send + Sync {
 
     /// Duplicate the controller's state
     fn clone_box(&self) -> Box<dyn Controller>;
-
-    /// Returns Self for use in down-casting to extract implementation details
-    fn into_any(self: Box<Self>) -> Box<dyn Any>;
 }
 
 /// A packet the transport just sent.
@@ -198,7 +196,7 @@ pub struct Ce {
 
 /// Common congestion controller metrics used for statistics and logging
 #[derive(Default)]
-pub struct ControllerMetrics {
+pub struct Metrics {
     /// Congestion window (bytes)
     pub congestion_window: u64,
     /// Slow start threshold (bytes)
@@ -229,7 +227,7 @@ pub struct Init {
 }
 
 /// Constructs controllers on demand
-pub trait ControllerFactory {
+pub trait Factory {
     /// Construct a fresh `Controller`
     fn build(self: Arc<Self>, init: Init) -> Box<dyn Controller>;
 }

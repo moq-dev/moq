@@ -8,12 +8,12 @@
 //! `just rs quic-sim`, holding each budget on the mean across [`SEEDS`], since one seed's outcome
 //! beside a competing upload is a coin flip.
 //!
-//! The same media trace without a target also checks when BBR3 skips ProbeRTT.
+//! The same media trace without a target also checks keyframe delivery deadlines.
 
 use std::collections::HashMap;
 
 use super::*;
-use crate::congestion::{Bbr3, CubicConfig};
+use crate::congestion::cubic;
 
 /// The media's bitrate, 2 Mbit/s, which the probe has to see past
 const MEDIA: u64 = 250_000;
@@ -131,10 +131,6 @@ struct Outcome {
 	expired: u64,
 	/// Samples taken while the controller allowed a probe
 	probing: u64,
-	/// ProbeRTT entries the samples caught, each lasting longer than the sampling interval
-	probe_rtts: u64,
-	/// The largest minimum RTT the controller's model held at a sample
-	min_rtt: Duration,
 	/// The most media bytes written and not yet read at a sample: the sender's backlog plus
 	/// what is in flight
 	unread: u64,
@@ -211,8 +207,6 @@ impl Outcome {
 			competitor = self.competitor,
 			expired = self.expired,
 			probing = self.probing,
-			probe_rtts = self.probe_rtts,
-			min_rtt = ?self.min_rtt,
 			unread = self.unread,
 			"Mbit/s {estimates}"
 		);
@@ -270,7 +264,7 @@ fn run(scenario: &Scenario) -> Outcome {
 	let competitor = scenario.competitor.map(|upload| {
 		let mut transport = transport::Config::default();
 		if let Upload::Cubic = upload {
-			transport.congestion = Arc::new(CubicConfig::default());
+			transport.congestion = Arc::new(cubic::Config::default());
 		}
 		let mut config = client_config();
 		config.transport = transport;
@@ -293,7 +287,6 @@ fn run(scenario: &Scenario) -> Outcome {
 	let mut next_frame = 0u64;
 	let mut next_sample = start;
 	let mut next_rate = 1;
-	let mut probing_rtt = false;
 	let mut competing = competitor.map(|(client, server)| {
 		let id = pair.client_streams(client).open(Dir::Uni, Default::default()).unwrap();
 		(client, server, id, None::<StreamId>)
@@ -367,15 +360,6 @@ fn run(scenario: &Scenario) -> Outcome {
 		if now >= next_sample {
 			let estimate = conn.stats().path.bandwidth_estimate.unwrap_or(0);
 			outcome.probing += conn.congestion_state().metrics().probe_inflight.is_some() as u64;
-			let bbr = conn
-				.congestion_state()
-				.clone_box()
-				.into_any()
-				.downcast::<Bbr3>()
-				.expect("BBR3");
-			outcome.probe_rtts += (bbr.probing_rtt() && !probing_rtt) as u64;
-			probing_rtt = bbr.probing_rtt();
-			outcome.min_rtt = outcome.min_rtt.max(bbr.min_rtt());
 			let read: u64 = readings.values().map(|r| r.read).sum();
 			outcome.unread = outcome.unread.max(outcome.unique - read);
 			outcome.samples.push(Sample {
@@ -979,7 +963,7 @@ fn rtt_200ms() {
 /// past the deadline, but between bursts the flow is application-limited without loss, so it
 /// skips ProbeRTT.
 #[test]
-fn borderline_skips_probe_rtt() {
+fn borderline_frames_meet_deadline() {
 	let _guard = subscribe();
 	let outcome = run(&Scenario {
 		target: 0,
@@ -987,33 +971,6 @@ fn borderline_skips_probe_rtt() {
 		..Scenario::default()
 	});
 	outcome.report("borderline");
-	assert_eq!(outcome.probe_rtts, 0);
 	let slowest = *outcome.delays.last().expect("delivered");
 	assert!(slowest < DEADLINE, "a frame took {slowest:?}");
-}
-
-/// Below the media's bitrate, behind a queue that holds a standing delay and still overflows
-///
-/// The overflow's losses deny every skip, so the flow enters each ProbeRTT due, one per 5s
-/// interval after its exit, and the model's minimum stays below the path's mean RTT rather than
-/// creeping up through the queue.
-#[test]
-fn overflow_keeps_probe_rtt() {
-	let _guard = subscribe();
-	let scenario = Scenario {
-		target: 0,
-		rates: vec![(Duration::ZERO, 187_500)],
-		buffer: 15_000,
-		..Scenario::default()
-	};
-	let outcome = run(&scenario);
-	outcome.report("overflow");
-	assert!(outcome.queue.dropped > 0, "the queue never overflowed");
-	assert!(outcome.probe_rtts >= scenario.duration.as_secs() / 5 - 1);
-	let mean_rtt = 2 * scenario.latency + outcome.queue.mean_delay();
-	assert!(
-		outcome.min_rtt < mean_rtt,
-		"min RTT {:?} crept past the mean RTT {mean_rtt:?}",
-		outcome.min_rtt
-	);
 }

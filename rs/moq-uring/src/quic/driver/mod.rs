@@ -266,9 +266,9 @@ fn transport_config(config: &transport::Config) -> Result<moq_quic::transport::C
 	}
 	transport.congestion = match config.congestion {
 		Congestion::Loss => {
-			Arc::new(moq_congestion::CubicConfig::default()) as Arc<dyn moq_congestion::ControllerFactory + Send + Sync>
+			Arc::new(moq_congestion::cubic::Config::default()) as Arc<dyn moq_congestion::Factory + Send + Sync>
 		}
-		Congestion::Delay => Arc::new(moq_congestion::Bbr3Config::default()),
+		Congestion::Delay => Arc::new(moq_congestion::bbr3::Config::default()),
 		Congestion::None => Arc::new(moq_congestion::Unlimited),
 	};
 	// A value that cannot go on the wire is an error: clamping it would ignore what was set.

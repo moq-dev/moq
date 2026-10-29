@@ -1501,7 +1501,7 @@ impl Connection {
 	/// A congestion controller stops raising its estimate once the application sends less than
 	/// the path carries. While the controller probes for bandwidth below this target, the sender
 	/// fills the inflight it allows
-	/// ([`probe_inflight`](crate::congestion::ControllerMetrics::probe_inflight)) with duplicates
+	/// ([`probe_inflight`](crate::congestion::Metrics::probe_inflight)) with duplicates
 	/// of STREAM data still in flight, sending no more than the target in all, so the probe
 	/// measures the path. Duplicates count against congestion control, as
 	/// [`PathStats::sent_bandwidth_probe_bytes`]. A reset stream's data is never sent again. An

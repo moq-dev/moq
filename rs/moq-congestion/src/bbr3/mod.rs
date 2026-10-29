@@ -2,7 +2,6 @@
 mod bench;
 mod max_filter;
 
-use std::any::Any;
 #[cfg(test)]
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -14,8 +13,7 @@ use crate::bbr3::max_filter::MaxFilter;
 use crate::pacer::{Pacer, Rate};
 use crate::rate::{Sample, Sampler};
 use crate::{
-    Ack, BASE_DATAGRAM_SIZE, Ce, Controller, ControllerFactory, ControllerMetrics, Init, Loss,
-    Lost, Packet, Sent,
+    Ack, BASE_DATAGRAM_SIZE, Ce, Controller, Factory, Init, Loss, Lost, Metrics, Packet, Sent,
 };
 use crate::{Duration, Instant};
 
@@ -523,20 +521,8 @@ pub struct Bbr3 {
 }
 
 impl Bbr3 {
-    /// Whether the controller is in ProbeRTT, for transport tests.
-    #[cfg(any(test, feature = "testing"))]
-    pub fn probing_rtt(&self) -> bool {
-        self.state == BbrState::ProbeRtt
-    }
-
-    /// The windowed minimum RTT the model uses, for transport tests.
-    #[cfg(any(test, feature = "testing"))]
-    pub fn min_rtt(&self) -> Duration {
-        self.min_rtt
-    }
-
     /// equivalent to BBROnInit <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.2.1>
-    fn new(config: Arc<Bbr3Config>, init: Init) -> Self {
+    fn new(config: Arc<Config>, init: Init) -> Self {
         let probe_rng = if let Some(probe_seed) = config.probe_rng_seed {
             Pcg32::from_seed(probe_seed)
         } else {
@@ -1937,8 +1923,8 @@ impl Controller for Bbr3 {
         Some(self.send_quantum)
     }
 
-    fn metrics(&self) -> ControllerMetrics {
-        ControllerMetrics {
+    fn metrics(&self) -> Metrics {
+        Metrics {
             congestion_window: self.window(),
             ssthresh: None,
             pacing_rate: Some(self.pacing_rate.round() as u64),
@@ -1954,10 +1940,6 @@ impl Controller for Bbr3 {
     fn clone_box(&self) -> Box<dyn Controller> {
         Box::new(self.clone())
     }
-
-    fn into_any(self: Box<Self>) -> Box<dyn Any> {
-        self
-    }
 }
 
 /// Configuration for the `Bbr3` congestion controller
@@ -1969,7 +1951,7 @@ impl Controller for Bbr3 {
 /// `pacing_margin_percent` is used to set a margin when calculating the `pacing_rate` in order
 /// to not send at 100% capacity when calculating pacing.
 #[derive(Debug, Clone)]
-pub struct Bbr3Config {
+pub struct Config {
     initial_window: u64,
     probe_rng_seed: Option<[u8; 16]>,
     startup_pacing_gain: Option<f64>,
@@ -1983,7 +1965,7 @@ pub struct Bbr3Config {
     default_cwnd_gain: Option<f64>,
 }
 
-impl Bbr3Config {
+impl Config {
     /// Default limit on the amount of outstanding data in bytes.
     ///
     /// Recommended value: `min(10 * max_datagram_size, max(2 * max_datagram_size, 14720))`
@@ -2000,7 +1982,7 @@ impl Bbr3Config {
     }
 }
 
-impl Default for Bbr3Config {
+impl Default for Config {
     fn default() -> Self {
         Self {
             // Bounded by the datagram size a path starts at, not [`MAX_DATAGRAM_SIZE`] (the
@@ -2020,7 +2002,7 @@ impl Default for Bbr3Config {
     }
 }
 
-impl ControllerFactory for Bbr3Config {
+impl Factory for Config {
     fn build(self: Arc<Self>, init: Init) -> Box<dyn Controller> {
         Box::new(Bbr3::new(self, init))
     }
@@ -2048,7 +2030,7 @@ mod test {
     }
 
     impl Driver {
-        fn new(config: Arc<Bbr3Config>, mtu: u16) -> Self {
+        fn new(config: Arc<Config>, mtu: u16) -> Self {
             let init = Init {
                 now: Instant::now(),
                 mtu,
@@ -2184,7 +2166,7 @@ mod test {
     }
 
     impl Sim {
-        fn new(config: Bbr3Config, mss: u64, bw: f64, rtt_ns: u64) -> Self {
+        fn new(config: Config, mss: u64, bw: f64, rtt_ns: u64) -> Self {
             Self {
                 bbr: Driver::new(Arc::new(config), mss as u16),
                 base: Instant::now(),
@@ -2370,8 +2352,8 @@ mod test {
 
     #[test]
     fn default_probe_schedule_replays() {
-        let mut first = Driver::new(Arc::new(Bbr3Config::default()), 2500);
-        let mut replay = Driver::new(Arc::new(Bbr3Config::default()), 2500);
+        let mut first = Driver::new(Arc::new(Config::default()), 2500);
+        let mut replay = Driver::new(Arc::new(Config::default()), 2500);
         for _ in 0..8 {
             first.pick_probe_wait();
             replay.pick_probe_wait();
@@ -2384,7 +2366,7 @@ mod test {
     #[test]
     fn test_probe_rng() {
         let seed: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        let config = Bbr3Config {
+        let config = Config {
             initial_window: 14720.clamp(2 * BASE_DATAGRAM_SIZE, 10 * BASE_DATAGRAM_SIZE),
             probe_rng_seed: Some(seed),
             startup_pacing_gain: None,
@@ -2435,7 +2417,7 @@ mod test {
         const RTT_NS: u64 = 100_000_000;
 
         // Drive the production default configuration.
-        let mut sim = Sim::new(Bbr3Config::default(), MSS, BW, RTT_NS);
+        let mut sim = Sim::new(Config::default(), MSS, BW, RTT_NS);
         assert_eq!(sim.bbr.state, BbrState::Startup);
 
         // captured on the STARTUP -> DRAIN edge (DRAIN is only ever entered from
@@ -2513,7 +2495,7 @@ mod test {
         let btl_service_ns: u64 = (MSS as f64 / BW * 1e9).round() as u64;
 
         // Drive the production default configuration.
-        let mut bbr = Driver::new(Arc::new(Bbr3Config::default()), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(Config::default()), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
@@ -2673,7 +2655,7 @@ mod test {
         const RTT_NS: u64 = 100_000_000;
 
         // Drive the production default configuration.
-        let mut sim = Sim::new(Bbr3Config::default(), MSS, BW, RTT_NS);
+        let mut sim = Sim::new(Config::default(), MSS, BW, RTT_NS);
         assert_eq!(sim.bbr.state, BbrState::Startup);
 
         // pacing_gain observed on the STARTUP -> DRAIN edge (0.5), and the round
@@ -2772,7 +2754,7 @@ mod test {
         const DRAIN_BW_FACTOR: f64 = 0.8 * DRAIN_PACING_GAIN;
 
         // Drive the production default configuration.
-        let mut bbr = Driver::new(Arc::new(Bbr3Config::default()), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(Config::default()), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
@@ -2943,7 +2925,7 @@ mod test {
         const RTT_NS: u64 = 100_000_000;
 
         // Drive the production default configuration.
-        let mut sim = Sim::new(Bbr3Config::default(), MSS, BW, RTT_NS);
+        let mut sim = Sim::new(Config::default(), MSS, BW, RTT_NS);
         assert_eq!(sim.bbr.state, BbrState::Startup);
 
         // Whether the flow has reached the PROBE_UP phase of PROBE_BW; the go-down
@@ -2995,7 +2977,7 @@ mod test {
     /// Loss probing does not require an ACK's delivery-rate observation.
     #[test]
     fn loss_before_first_ack_bounds_inflight() {
-        let mut sim = Sim::new(Bbr3Config::default(), 1200, 1_250_000.0, 100 * MS);
+        let mut sim = Sim::new(Config::default(), 1200, 1_250_000.0, 100 * MS);
         sim.send(0, 10);
         assert!(sim.bbr.rs.is_none());
         sim.bbr.bw_probe_samples = true;
@@ -3013,7 +2995,7 @@ mod test {
     /// Loss uses its packet's labels without relabeling the preceding or following ACK.
     #[test]
     fn loss_between_acks_preserves_ack_sample() {
-        let mut sim = Sim::new(Bbr3Config::default(), 1200, 1_250_000.0, 100 * MS);
+        let mut sim = Sim::new(Config::default(), 1200, 1_250_000.0, 100 * MS);
         sim.send(0, 10);
         sim.bbr.rate.app_limited = 1;
         sim.send(MS, 1);
@@ -3094,7 +3076,7 @@ mod test {
         let btl_service_ns: u64 = (MSS as f64 / BW * 1e9).round() as u64;
 
         // Drive the production default configuration.
-        let mut bbr = Driver::new(Arc::new(Bbr3Config::default()), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(Config::default()), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
@@ -3286,7 +3268,7 @@ mod test {
         let btl_service_ns: u64 = (MSS as f64 / BW * 1e9).round() as u64;
 
         // Drive the production default configuration.
-        let mut bbr = Driver::new(Arc::new(Bbr3Config::default()), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(Config::default()), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
@@ -3467,7 +3449,7 @@ mod test {
         const RTT_NS: u64 = 100_000_000;
 
         // Drive the production default configuration.
-        let mut sim = Sim::new(Bbr3Config::default(), MSS, BW, RTT_NS);
+        let mut sim = Sim::new(Config::default(), MSS, BW, RTT_NS);
         assert_eq!(sim.bbr.state, BbrState::Startup);
 
         // Whether the flow has reached the PROBE_UP phase; the PROBE_DOWN we care
@@ -3607,9 +3589,9 @@ mod test {
         // Drive the production default configuration with a fixed probe RNG seed so
         // bw_probe_wait is deterministic; its exact value does not matter here since
         // the deadline is computed from it below.
-        let config = Bbr3Config {
+        let config = Config {
             probe_rng_seed: Some([6; 16]),
-            ..Bbr3Config::default()
+            ..Config::default()
         };
         let mut sim = Sim::new(config, MSS, BW, RTT_NS);
         assert_eq!(sim.bbr.state, BbrState::Startup);
@@ -3756,7 +3738,7 @@ mod test {
         const RTT_NS: u64 = 100_000_000;
 
         // Held constant (no queue-shaping hacks) so the min RTT floor is deterministic.
-        let mut sim = Sim::new(Bbr3Config::default(), MSS, BW, RTT_NS);
+        let mut sim = Sim::new(Config::default(), MSS, BW, RTT_NS);
         assert_eq!(sim.bbr.state, BbrState::Startup);
 
         // Whether the flow reached PROBE_BW with full_bw_reached before PROBE_RTT.
@@ -3940,7 +3922,7 @@ mod test {
 
         let btl_service_ns: u64 = (MSS as f64 / BW * 1e9).round() as u64;
 
-        let mut bbr = Driver::new(Arc::new(Bbr3Config::default()), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(Config::default()), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
@@ -4194,7 +4176,7 @@ mod test {
         let btl_service_ns: u64 = (MSS as f64 / BW * 1e9).round() as u64;
 
         // Drive the production default configuration.
-        let mut bbr = Driver::new(Arc::new(Bbr3Config::default()), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(Config::default()), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
@@ -4393,7 +4375,7 @@ mod test {
         let btl_service_ns: u64 = (MSS as f64 / BW * 1e9).round() as u64;
 
         // Drive the production default configuration.
-        let mut bbr = Driver::new(Arc::new(Bbr3Config::default()), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(Config::default()), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
@@ -4695,9 +4677,9 @@ mod test {
         // Seed the probe RNG so the PROBE_BW bw-probe wait (hence the cruise sojourn length) is
         // deterministic and the pair-count target below is not flaky.
         let seed: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        let config = Bbr3Config {
+        let config = Config {
             probe_rng_seed: Some(seed),
-            ..Bbr3Config::default()
+            ..Config::default()
         };
         let mut bbr = Driver::new(Arc::new(config), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
@@ -4977,9 +4959,9 @@ mod test {
         // Seed the probe RNG so the PROBE_BW cycle timing (hence when PROBE_UP is entered) is
         // deterministic.
         let seed: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        let config = Bbr3Config {
+        let config = Config {
             probe_rng_seed: Some(seed),
-            ..Bbr3Config::default()
+            ..Config::default()
         };
         let mut bbr = Driver::new(Arc::new(config), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
@@ -5227,9 +5209,9 @@ mod test {
 
         // Seed the probe RNG so the PROBE_BW cycle timing is deterministic.
         let seed: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        let config = Bbr3Config {
+        let config = Config {
             probe_rng_seed: Some(seed),
-            ..Bbr3Config::default()
+            ..Config::default()
         };
         let mut bbr = Driver::new(Arc::new(config), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
@@ -5448,9 +5430,9 @@ mod test {
 
         // Seed the probe RNG so the PROBE_BW cycle timing is deterministic.
         let seed: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        let config = Bbr3Config {
+        let config = Config {
             probe_rng_seed: Some(seed),
-            ..Bbr3Config::default()
+            ..Config::default()
         };
         let mut bbr = Driver::new(Arc::new(config), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
@@ -5670,9 +5652,9 @@ mod test {
         // Seed the probe RNG so the PROBE_BW cycle timing (hence when PROBE_UP is entered) is
         // deterministic.
         let seed: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        let config = Bbr3Config {
+        let config = Config {
             probe_rng_seed: Some(seed),
-            ..Bbr3Config::default()
+            ..Config::default()
         };
         let mut bbr = Driver::new(Arc::new(config), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
@@ -5935,9 +5917,9 @@ mod test {
         // Seed the probe RNG so the PROBE_BW cycle timing (hence when PROBE_UP is entered) is
         // deterministic.
         let seed: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        let config = Bbr3Config {
+        let config = Config {
             probe_rng_seed: Some(seed),
-            ..Bbr3Config::default()
+            ..Config::default()
         };
         let mut bbr = Driver::new(Arc::new(config), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
@@ -6211,7 +6193,7 @@ mod test {
         let btl_service_ns: u64 = (MSS as f64 / BW * 1e9).round() as u64;
 
         // Drive the production default configuration.
-        let mut bbr = Driver::new(Arc::new(Bbr3Config::default()), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(Config::default()), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
@@ -6472,9 +6454,9 @@ mod test {
         // Seed the probe RNG so the PROBE_BW cycle timing (hence when each PROBE_UP is
         // entered) is deterministic.
         let seed: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        let config = Bbr3Config {
+        let config = Config {
             probe_rng_seed: Some(seed),
-            ..Bbr3Config::default()
+            ..Config::default()
         };
         let mut bbr = Driver::new(Arc::new(config), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
@@ -6714,9 +6696,9 @@ mod test {
         // Pin this scenario's probe schedule: once app-limiting lifts at the
         // PROBE_REFILL -> PROBE_UP edge the flow does genuine PROBE_BW cycling, whose
         // phase timing is RNG-driven (cf. sibling probing tests).
-        let config = Bbr3Config {
+        let config = Config {
             probe_rng_seed: Some([6; 16]),
-            ..Bbr3Config::default()
+            ..Config::default()
         };
         let mut bbr = Driver::new(Arc::new(config), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
@@ -6953,7 +6935,7 @@ mod test {
 
     /// A scripted `Sim` with 1200-byte packets; the link parameters are unused.
     fn scripted() -> Sim {
-        Sim::new(Bbr3Config::default(), 1200, 1e6, 10 * MS)
+        Sim::new(Config::default(), 1200, 1e6, 10 * MS)
     }
 
     /// The first ACK's sample reaches the model: 1200 bytes in 10ms is 120 KB/s.
@@ -8033,9 +8015,9 @@ mod test {
     #[test]
     fn sustained_ce_bounds_the_queue_and_recovers() {
         const SEC: u64 = 1_000_000_000;
-        let config = || Bbr3Config {
+        let config = || Config {
             probe_rng_seed: Some([7; 16]),
-            ..Bbr3Config::default()
+            ..Config::default()
         };
         let mut control = Sim::new(config(), 1200, LINK_BW, LINK_RTT);
         let mut marked = Sim::new(config(), 1200, LINK_BW, LINK_RTT);

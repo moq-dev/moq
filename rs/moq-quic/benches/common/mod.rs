@@ -8,7 +8,6 @@
 //! host descheduling the benchmark does not inflate them.
 
 use std::{
-	any::Any,
 	collections::{HashMap, VecDeque},
 	net::{Ipv6Addr, SocketAddr},
 	num::NonZeroU64,
@@ -23,7 +22,7 @@ use criterion::{
 	measurement::{Measurement, ValueFormatter, WallTime},
 };
 use moq_clock::Instant;
-use moq_congestion::{Ack, Ce, Controller, ControllerFactory, ControllerMetrics, Init, Loss, Packet, Sent};
+use moq_congestion::{Ack, Ce, Controller, Factory, Init, Loss, Metrics, Packet, Sent};
 use moq_quic::{
 	ConnectionId, ConnectionIdGenerator, Event, LeaseError, RandomConnectionIdGenerator, ReadError, StreamEvent,
 	StreamId, VarInt, client,
@@ -705,8 +704,8 @@ impl Controller for Unlimited {
 		None
 	}
 
-	fn metrics(&self) -> ControllerMetrics {
-		ControllerMetrics {
+	fn metrics(&self) -> Metrics {
+		Metrics {
 			congestion_window: WINDOW,
 			probe_inflight: self.probe.then_some(WINDOW),
 			..Default::default()
@@ -720,13 +719,9 @@ impl Controller for Unlimited {
 	fn clone_box(&self) -> Box<dyn Controller> {
 		Box::new(*self)
 	}
-
-	fn into_any(self: Box<Self>) -> Box<dyn Any> {
-		self
-	}
 }
 
-impl ControllerFactory for Unlimited {
+impl Factory for Unlimited {
 	fn build(self: Arc<Self>, _init: Init) -> Box<dyn Controller> {
 		Box::new(*self)
 	}
