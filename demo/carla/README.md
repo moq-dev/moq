@@ -209,9 +209,8 @@ at login.
 
 The player is a `<moq-carla>` custom element: importing
 `@moq/demo-carla/element` registers it, and its `url` attribute names the relay.
-It runs live at [moq.dev/car](https://moq.dev/car) against
-`https://cdn.moq.dev/demo`, and `just carla web` serves it on a local dev page.
-With no simulator publishing, it says so.
+`just carla web` serves it on a local dev page. With no simulator publishing,
+it says so.
 
 Hover a truck on the map to stream its 240p preview; click it for 720p. A drive
 key, a wheel movement, or **Take control** claims the lease, and **Esc**

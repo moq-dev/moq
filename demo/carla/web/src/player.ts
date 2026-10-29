@@ -16,7 +16,7 @@ import { COLLISION_ALERT_MS, collisionAge, collisionLabel, diverged, divergence 
 import { drawDivergence, drawDriveHud, drawGuide } from "./guides.ts";
 import { controlHint } from "./hint.ts";
 import { applyKeys, canShift, REST, stepDrive } from "./input.ts";
-import { focusFromHash, hashWithFocus, Interaction } from "./interaction.ts";
+import { focusFromHash, hashWithFocus, Interaction, ownsKey } from "./interaction.ts";
 import {
 	expandToAspect,
 	fitPoints,
@@ -505,11 +505,20 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 				return;
 			}
 			const k = KEY(e);
+			// E-stop works from anywhere on the page, but claims the key only while
+			// there is a truck to stop.
 			if (k === "e") {
-				safetyTruck()?.emergencyStop();
-				e.preventDefault();
+				const truck = safetyTruck();
+				if (truck) {
+					truck.emergencyStop();
+					e.preventDefault();
+				}
 				return;
 			}
+			// The window sees the host element as the target, so read the focused node
+			// inside the shadow root instead.
+			const target = e.composedPath()[0];
+			if (!ownsKey(target, root)) return;
 			if (e.metaKey || e.ctrlKey || e.altKey) return;
 			if (k === "tab" && hasTruck(focused.peek())) {
 				const controls = [
@@ -532,18 +541,13 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 				e.preventDefault();
 				return;
 			}
+			// The rest only steer a focused truck; without one, keys keep their native
+			// meaning, such as Space activating a button or scrolling the host page.
+			if (!focused.peek()) return;
 			if (k === "g" || k === " ") {
-				// Keep native Space activation for STOP and map navigation. In the
-				// driving view it shifts even if Take control or Close still has focus.
-				// The window sees the host element as the target, so read the focused node
-				// inside the shadow root instead.
-				const target = e.composedPath()[0];
-				if (
-					k === " " &&
-					target instanceof HTMLElement &&
-					(target.closest(".estop-btn, input, select, textarea") ||
-						(!focused.peek() && target.closest("button, summary")))
-				)
+				// Keep native Space activation for STOP. In the driving view it shifts
+				// even if Take control or Close still has focus.
+				if (k === " " && target instanceof HTMLElement && target.closest(".estop-btn, input, select, textarea"))
 					return;
 				e.preventDefault();
 				if (e.repeat) return;

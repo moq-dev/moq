@@ -5,8 +5,8 @@ description: The web demo, MoQ Boy, and CARLA
 
 # Demos
 
-Each runs locally from a checkout and also lives at [moq.dev](https://moq.dev).
-CARLA's simulator needs a Linux host with an NVIDIA GPU.
+Each runs locally from a checkout. The web demo and MoQ Boy also live at
+[moq.dev](https://moq.dev); CARLA's simulator needs a Linux host with an NVIDIA GPU.
 
 ## Web demo
 
@@ -54,7 +54,6 @@ shape covers teleoperation: swap the emulator for a robot.
 
 Teleoperation over MoQ: simulated trucks drive themselves through one
 [CARLA](https://carla.org) world until you take one over from the browser.
-Live at [moq.dev/car](https://moq.dev/car) while the trucks are publishing.
 The simulator needs a Linux host with an NVIDIA GPU and an image built by
 [moq-dev/carla](https://github.com/moq-dev/carla); the player runs anywhere.
 

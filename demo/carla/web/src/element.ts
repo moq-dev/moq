@@ -13,7 +13,9 @@ import { mount, PREVIEW } from "./player.ts";
 /** The attributes the element observes. */
 const OBSERVED = ["url"] as const;
 
-const cleanup = new FinalizationRegistry<Moq.Signals.Effect>((signals) => signals.close());
+// Closes the connection of an element collected while still open. The held value
+// must not reach the element, or the registry would keep it alive.
+const cleanup = new FinalizationRegistry<Moq.Connection>((connection) => connection.close());
 
 /**
  * `<moq-carla>` web component: renders the CARLA player in a Shadow DOM.
@@ -28,17 +30,14 @@ export default class MoqCarla extends HTMLElement {
 	/** The relay connection, open while the element is in a document. */
 	readonly connection: Moq.Connection;
 
-	readonly #signals = new Moq.Signals.Effect();
 	// Set when the element is connected to the DOM.
 	readonly #connected = new Moq.Signals.Signal(false);
 	#dispose?: () => void;
 
 	constructor() {
 		super();
-		cleanup.register(this, this.#signals);
-
 		this.connection = new Moq.Connection({ enabled: PREVIEW ? false : this.#connected });
-		this.#signals.cleanup(() => this.connection.close());
+		cleanup.register(this, this.connection);
 	}
 
 	/** Called by the browser when the element joins a document. */
