@@ -9,18 +9,18 @@ depending on being the first test in its process to read the clock.
 ## Plan
 
 Decided 2026-10-29 (maintainer), a follow-up of
-[moq-dev/moq#7161](https://github.com/moq-dev/moq/pull/7161), whose agent hit
-it. The test (`rs/moq-clock/src/runtime.rs`, from
-[moq-dev/moq#5681](https://github.com/moq-dev/moq/pull/5681)) builds its two
-paused runtimes before anything reads the clock, "so in a fresh process each
-counts from its own origin". `cargo test` runs a crate's tests in one
-process, so another test usually takes the origin first and the assertion fails,
-every run. CI runs nextest, one process per test, so it
-passes there and the failure only bites local `cargo test` runs.
+[moq-dev/moq#7161](https://github.com/moq-dev/moq/pull/7161): keep proving
+that a paused runtime counting from its own origin anchors on its own clock.
 
-Make the test independent of process state, for example by giving it a
-fresh origin through the module's own test hooks or by running its body in a
-child process, rather than marking it nextest-only. Keep what it proves: a
-paused runtime counting from its own origin anchors on its own clock.
+[moq-dev/moq#7243](https://github.com/moq-dev/moq/pull/7243) isolates the test
+with the existing `test-env` helper and asserts that both runtimes use their own
+origins. Default and single-threaded cargo tests, nextest, and the crate's lint
+checks pass. Bypassing per-runtime anchor selection still makes the test fail.
+
+Remaining: validate the full `just ci` gate on a capable host, then remove this
+quest and its link and mark the PR ready. The current host's full gate fails
+because the mbx Cargo launcher reports `Argument list too long` and the Nix VM
+image check cannot write `/proc/self/uid_map`. Keep those environment fixes out
+of this test-only change.
 
 Public API: none. Wire: none.
