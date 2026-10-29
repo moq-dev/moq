@@ -99,10 +99,17 @@ enum Rendition<E: crate::catalog::hang::CatalogExt> {
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Rendition<E> {
-	fn estimate(&mut self, estimate: crate::catalog::Estimate) -> crate::Result<()> {
+	fn estimate(&mut self, reading: crate::catalog::Reading) -> crate::Result<()> {
 		match self {
-			Self::Video(rendition) => rendition.estimate(estimate),
-			Self::Audio(rendition) => rendition.estimate(estimate),
+			Self::Video(rendition) => rendition.estimate(reading),
+			Self::Audio(rendition) => rendition.estimate(reading),
+		}
+	}
+
+	fn settle(&mut self) -> crate::Result<()> {
+		match self {
+			Self::Video(rendition) => rendition.settle(),
+			Self::Audio(rendition) => rendition.settle(),
 		}
 	}
 }
@@ -179,9 +186,9 @@ struct Passthrough<E: crate::catalog::hang::CatalogExt> {
 
 impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 	fn publish_estimate(&mut self) -> crate::Result<()> {
-		let estimate = self.estimator.estimate();
-		self.claim.update(&self.track.demand(), estimate.bitrate);
-		self.rendition.estimate(estimate)
+		let reading = self.estimator.reading();
+		self.claim.update(&self.track.demand(), reading.estimate.bitrate);
+		self.rendition.estimate(reading)
 	}
 
 	/// Close the open group, so the next fragment opens one at `pending_sequence` or the next.
@@ -198,6 +205,8 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 	fn finish(&mut self) -> crate::Result<()> {
 		self.close()?;
 		self.track.finish()?;
+		// Its estimates are as made as they will be, so the MSF catalog stops waiting on them.
+		self.rendition.settle()?;
 		// The importer may be kept around, but its media stops holding the other tracks back.
 		self.estimator.discontinuity();
 		// Dropping the recorder stops the open HLS segment, so the track is advertised.

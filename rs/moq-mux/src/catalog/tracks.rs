@@ -367,6 +367,43 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::TextConfig {
 	}
 }
 
+/// How far short of a whole frame duration a value still counts as reaching it, as a fraction of the
+/// period: a reorder of exactly one frame must not miss its step to rounding in the frame duration.
+const STEP_SLACK: u32 = 100;
+
+/// `measured` if it reaches a whole `period` beyond the one `published` sits in, else `published`.
+fn quantize(published: Option<Duration>, measured: Option<Duration>, period: Duration) -> Option<Duration> {
+	let step =
+		|value: Option<Duration>| value.map_or(0, |value| (value + period / STEP_SLACK).as_nanos() / period.as_nanos());
+	if step(measured) > step(published) {
+		measured
+	} else {
+		published
+	}
+}
+
+/// Whether config `C` is listed as an MSF track whose estimates the MSF catalog waits for, and if so
+/// whether it carries a framerate. Text detects nothing and data tracks aren't listed in MSF.
+fn msf_framerate<C: 'static>() -> Option<bool> {
+	use std::any::TypeId;
+	let ty = TypeId::of::<C>();
+	if ty == TypeId::of::<hang::catalog::VideoConfig>() {
+		Some(true)
+	} else if ty == TypeId::of::<hang::catalog::AudioConfig>() {
+		Some(false)
+	} else {
+		None
+	}
+}
+
+/// Whether `supplied` hints every field an MSF track's estimate would otherwise wait on.
+fn hinted(supplied: &Estimate, framerate: bool) -> bool {
+	supplied.jitter.is_some()
+		&& supplied.bitrate.is_some()
+		&& supplied.delay.is_some()
+		&& (!framerate || supplied.framerate.is_some())
+}
+
 /// Refuse an edit that redefines rendition `name`'s track identity in place: a publisher whose
 /// decoder identity changed publishes under a new name instead.
 fn check_identity<E: CatalogExt>(previous: &Catalog<E>, next: &Catalog<E>, name: &str) -> crate::Result<()> {
@@ -556,6 +593,8 @@ pub(crate) struct Rendition<E: CatalogExt, C: RenditionConfig<E>> {
 	detected: Estimate,
 	/// The last estimate written to the config, so an unchanged one doesn't republish the catalog.
 	published: Option<Estimate>,
+	/// Whether the estimates the MSF catalog freezes have been made, so it no longer waits on them.
+	settled: bool,
 	_config: PhantomData<fn() -> C>,
 }
 
@@ -604,6 +643,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 			supplied: Estimate::default(),
 			detected: Estimate::default(),
 			published: None,
+			settled: false,
 			_config: PhantomData,
 		})
 	}
@@ -650,6 +690,11 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 			self.present = true;
 			*guard = next;
 			guard.list::<C>(&self.name);
+			// Every estimated field hinted leaves nothing to wait for.
+			self.settled |= msf_framerate::<C>().is_none_or(|framerate| hinted(&supplied, framerate));
+			if !self.settled {
+				guard.unsettled::<C>(&self.name);
+			}
 			guard.commit()?;
 		}
 		self.supplied = supplied;
@@ -679,15 +724,21 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 	/// Publish a measured [`Estimate`], filling only the fields the config didn't supply at
 	/// [`set`](Self::set).
 	///
-	/// Mint the estimate from an [`Estimator`](super::Estimator), usually the one owned by a
+	/// Mint the reading from an [`Estimator`](super::Estimator), usually the one owned by a
 	/// [`container::Producer`](crate::container::Producer). Call it after every write: an estimate
-	/// that resolves to what the catalog already carries doesn't republish it, and a `jitter` or
-	/// `delay` rise republishes at most once a second (see
-	/// [`Guard::commit_estimate`](super::Guard::commit_estimate)), going out on a later call.
+	/// that resolves to what the catalog already carries doesn't republish it. A `jitter` or `delay`
+	/// rise republishes only once it reaches the next whole frame duration above the published value,
+	/// and then at most once a second (see [`Guard::commit_estimate`](super::Guard::commit_estimate)),
+	/// going out on a later call.
 	///
 	/// Calling this before [`set`](Self::set) is not wasted: the measurement is remembered and seeds
 	/// the config once it lands.
-	pub(crate) fn estimate(&mut self, estimate: Estimate) -> crate::Result<()> {
+	pub(crate) fn estimate(&mut self, reading: impl Into<super::Reading>) -> crate::Result<()> {
+		let super::Reading {
+			estimate,
+			period,
+			framerate: rated,
+		} = reading.into();
 		if !C::detects() {
 			return Ok(());
 		}
@@ -695,6 +746,31 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 			self.detected = estimate;
 			return Ok(());
 		}
+		// The bitrate's first window closes on the first group boundary after a window of media, and
+		// a framerate to measure takes its own window after that.
+		let framerate = self.supplied.framerate.is_none() && msf_framerate::<C>() == Some(true);
+		let settles = !self.settled && estimate.bitrate.is_some() && (!framerate || rated);
+		self.publish(estimate, period)?;
+		if settles {
+			self.settle()?;
+		}
+		Ok(())
+	}
+
+	/// Stop holding the MSF catalog back for this rendition's estimates: they are made, or the track
+	/// has ended and they never will be.
+	pub(crate) fn settle(&mut self) -> crate::Result<()> {
+		if std::mem::replace(&mut self.settled, true) || !self.present {
+			return Ok(());
+		}
+		// A closed catalog has nothing left to publish.
+		if let Ok(guard) = self.catalog.modify() {
+			guard.settle::<C>(&self.name)?;
+		}
+		Ok(())
+	}
+
+	fn publish(&mut self, estimate: Estimate, period: Option<Duration>) -> crate::Result<()> {
 		let mut resolved = Self::resolved(&self.supplied, &estimate);
 		// A measurement never lowers the published jitter or delay, including one raised through
 		// `modify`.
@@ -702,6 +778,18 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		let published = config.estimate();
 		resolved.jitter = resolved.jitter.max(published.jitter);
 		resolved.delay = resolved.delay.max(published.delay);
+		// Measurement creeps up as the encoder's latency does, a step per frame at worst; only a whole
+		// frame's rise is worth a republish. Until a period is known the throttle alone paces it.
+		let period = resolved
+			.framerate
+			.filter(|framerate| *framerate > 0.0)
+			.and_then(|framerate| Duration::try_from_secs_f64(framerate.recip()).ok())
+			.or(period)
+			.filter(|period| !period.is_zero());
+		if let Some(period) = period {
+			resolved.jitter = quantize(published.jitter, resolved.jitter, period);
+			resolved.delay = quantize(published.delay, resolved.delay, period);
+		}
 		self.detected = estimate;
 		if self.published.as_ref() == Some(&resolved) {
 			// Still an observation: it releases a rise held back until its window ended. A closed
@@ -1092,7 +1180,7 @@ mod tests {
 			let t = ts(i * 40_000);
 			estimator.cut(Some(t));
 			estimator.write(t, 100_000);
-			rendition.estimate(estimator.estimate()).unwrap();
+			rendition.estimate(estimator.reading()).unwrap();
 		}
 	}
 

@@ -1381,6 +1381,9 @@ async fn test_msf_catalog_roundtrip() {
 	let buf = bytes::BytesMut::from(&data[..]);
 	// Trailing fragments may error out (e.g. partial mdat); ignore.
 	let _ = fmp4.decode(&buf);
+	// The clip is shorter than a second, so its estimates are never made: the MSF catalog waits for
+	// the tracks to end.
+	fmp4.finish().unwrap();
 
 	let track = consumer
 		.track(moq_msf::DEFAULT_NAME)

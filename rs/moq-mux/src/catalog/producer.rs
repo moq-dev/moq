@@ -53,6 +53,9 @@ struct State<E: CatalogExt> {
 	/// The last revision [`Producer::fresh_track`] handed out per base name, so a successor never
 	/// reuses a name.
 	revisions: std::collections::HashMap<String, u64>,
+
+	/// What the MSF catalog has declared, and what it still waits for.
+	msf: Msf,
 }
 
 impl<E: CatalogExt> State<E> {
@@ -106,6 +109,89 @@ impl Throttle {
 		if std::mem::take(&mut self.pending) {
 			self.last = Some(moq_clock::now());
 		}
+	}
+}
+
+/// The MSF catalog's publish state.
+///
+/// MSF-01 §5.3 fixes a declared track's attributes, so the MSF catalog waits for each track's
+/// estimates to be made, declares them once, and then changes only when the track list or a track's
+/// identity does. The hang catalog keeps updating its estimates in place.
+#[derive(Default)]
+struct Msf {
+	/// The listed video and audio renditions whose estimates are still being made, keyed like
+	/// [`State::owned`]. Any enabled one holds the MSF catalog back.
+	unsettled: std::collections::BTreeSet<(std::any::TypeId, String)>,
+	/// The estimates each MSF track was first declared with, by namespace and name.
+	declared: HashMap<(Option<String>, String), Declared>,
+	/// The last MSF catalog written, so an identical one isn't written again.
+	last: Option<String>,
+}
+
+impl Msf {
+	/// The MSF catalog to write for `catalog`, or `None` while a track's estimates are still being
+	/// made or when it matches the last one written.
+	fn render<E: CatalogExt>(&mut self, catalog: &Catalog<E>, base: &moq_net::Path) -> crate::Result<Option<String>> {
+		if self.waits(catalog) {
+			return Ok(None);
+		}
+		let mut msf = to_msf(catalog, base);
+		// Rebuilt from the listed tracks, so a removed track's declaration goes with it.
+		let mut declared = HashMap::with_capacity(msf.tracks.len());
+		for track in &mut msf.tracks {
+			let key = (track.namespace.clone(), track.name.clone());
+			let first = self.declared.remove(&key).unwrap_or_else(|| Declared::of(track));
+			first.apply(track);
+			declared.insert(key, first);
+		}
+		self.declared = declared;
+
+		// The MSF catalog is derived from our own types, so a serialize failure means an extension
+		// broke the shape; report it like any other JSON failure rather than panicking.
+		let json = msf.to_json().map_err(moq_json::Error::from)?;
+		if self.last.as_ref() == Some(&json) {
+			return Ok(None);
+		}
+		self.last = Some(json.clone());
+		Ok(Some(json))
+	}
+
+	/// Whether an enabled rendition still has estimates to make. A disabled one promises no frames.
+	fn waits<E: CatalogExt>(&self, catalog: &Catalog<E>) -> bool {
+		use std::any::TypeId;
+		self.unsettled.iter().any(|(ty, name)| {
+			if *ty == TypeId::of::<hang::catalog::VideoConfig>() {
+				catalog.video.renditions.get(name).is_some_and(|config| config.enabled)
+			} else {
+				catalog.audio.renditions.get(name).is_some_and(|config| config.enabled)
+			}
+		})
+	}
+}
+
+/// The estimated fields an MSF track was first declared with.
+struct Declared {
+	bitrate: Option<u64>,
+	framerate: Option<f64>,
+	jitter: Option<std::time::Duration>,
+	delay: Option<std::time::Duration>,
+}
+
+impl Declared {
+	fn of(track: &moq_msf::Track) -> Self {
+		Self {
+			bitrate: track.bitrate,
+			framerate: track.framerate,
+			jitter: track.jitter,
+			delay: track.delay,
+		}
+	}
+
+	fn apply(&self, track: &mut moq_msf::Track) {
+		track.bitrate = self.bitrate;
+		track.framerate = self.framerate;
+		track.jitter = self.jitter;
+		track.delay = self.delay;
 	}
 }
 
@@ -219,8 +305,9 @@ impl<E: CatalogExt> Outputs<E> {
 		std::borrow::Cow::Owned(catalog)
 	}
 
-	/// Emit the catalog to hang and MSF.
-	fn emit(&mut self, catalog: &Catalog<E>) -> crate::Result<()> {
+	/// Emit the catalog to hang and, unless `msf` holds it back, to MSF. Neither writes a catalog
+	/// identical to its last.
+	fn emit(&mut self, catalog: &Catalog<E>, msf: &mut Msf) -> crate::Result<()> {
 		let catalog = self.advertise(catalog);
 		let catalog = catalog.as_ref();
 		// Every consumer refuses a catalog that fails this, so refuse it before it reaches one.
@@ -229,16 +316,18 @@ impl<E: CatalogExt> Outputs<E> {
 		self.hang
 			.update(moq_net::Timed::from(catalog).at(moq_net::Timestamp::now()))?;
 
-		// The MSF catalog is derived from our own types, so a serialize failure means an extension broke
-		// the shape; report it like any other JSON failure rather than panicking. `abort` below is
-		// what keeps the tracks consistent if this fails after the hang tracks were updated.
-		let msf = to_msf(catalog, &self.msf_track.broadcast().path)
-			.to_json()
-			.map_err(moq_json::Error::from)?;
+		// `abort` is what keeps the tracks consistent if this fails after the hang track was updated.
+		self.emit_msf(catalog, msf)
+	}
+
+	/// Emit the catalog to MSF alone, unless `msf` holds it back or it matches the last one.
+	fn emit_msf(&mut self, catalog: &Catalog<E>, msf: &mut Msf) -> crate::Result<()> {
+		let Some(msf) = msf.render(catalog, &self.msf_track.broadcast().path)? else {
+			return Ok(());
+		};
 		let mut group = self.msf_track.append_group()?;
 		group.write_frame(moq_net::Timestamp::now(), msf)?;
 		group.finish()?;
-
 		Ok(())
 	}
 
@@ -452,6 +541,7 @@ impl<E: CatalogExt> Producer<E> {
 				anchored,
 				estimates: Throttle::default(),
 				revisions: Default::default(),
+				msf: Msf::default(),
 			})),
 			hls: config.hls,
 			max_age: config.max_age,
@@ -760,28 +850,26 @@ impl<E: CatalogExt> Producer<E> {
 
 	/// Publish the buffered snapshot once, if buffering has just finished with a change staged.
 	pub(super) fn flush_if_ready(&mut self) {
-		// Snapshot under the lock and emit outside it, since emitting writes to the catalog tracks.
-		let catalog = {
-			let mut state = take(&self.current);
-			let r = &state.reservations;
-			// Nothing was staged (e.g. every stream was ignored): stay unpublished so a later change
-			// still triggers the first emit, rather than publishing an empty catalog now. The track
-			// scan runs last, so releasing each of many reservations stays linear.
-			if r.published || r.reservers != 0 || !r.pending || !state.lists_track() {
-				return;
-			}
-			let r = &mut state.reservations;
-			r.pending = false;
-			r.published = true;
-			// A snapshot on the wire is a mapping a reader may have copied.
-			state.anchored = true;
-			state.estimates.fold();
-			state.catalog.clone()
-		};
-		if let Err(err) = self.outputs.emit(&catalog) {
+		let mut state = take(&self.current);
+		let r = &state.reservations;
+		// Nothing was staged (e.g. every stream was ignored): stay unpublished so a later change
+		// still triggers the first emit, rather than publishing an empty catalog now. The track
+		// scan runs last, so releasing each of many reservations stays linear.
+		if r.published || r.reservers != 0 || !r.pending || !state.lists_track() {
+			return;
+		}
+		let r = &mut state.reservations;
+		r.pending = false;
+		r.published = true;
+		// A snapshot on the wire is a mapping a reader may have copied.
+		state.anchored = true;
+		state.estimates.fold();
+		// Emitted under the lock, as a guard's publish is, since the MSF state belongs to it.
+		let state = &mut *state;
+		if let Err(err) = self.outputs.emit(&state.catalog, &mut state.msf) {
 			tracing::error!(%err, "failed to publish the catalog, aborting its tracks");
 			self.outputs.abort(&err);
-			take(&self.current).closed = Some(err);
+			state.closed = Some(err);
 		}
 	}
 
@@ -927,7 +1015,8 @@ impl<E: CatalogExt> Producer<E> {
 			if state.closed.is_some() || !state.reservations.published {
 				return;
 			}
-			if let Err(err) = outputs.emit(&state.catalog) {
+			let state = &mut *state;
+			if let Err(err) = outputs.emit(&state.catalog, &mut state.msf) {
 				tracing::error!(%err, "failed to publish an HLS declaration, aborting catalog tracks");
 				outputs.abort(&err);
 				state.closed = Some(err);
@@ -1121,7 +1210,8 @@ impl<E: CatalogExt> Guard<'_, E> {
 		self.state.anchored = true;
 
 		// Folded only once it is on the wire, so a failed emit leaves the estimate held.
-		self.outputs.emit(&self.state.catalog)?;
+		let state = &mut *self.state;
+		self.outputs.emit(&state.catalog, &mut state.msf)?;
 		self.state.estimates.fold();
 		Ok(())
 	}
@@ -1148,6 +1238,25 @@ impl<E: CatalogExt> Guard<'_, E> {
 		self.publish()
 	}
 
+	/// Hold the MSF catalog back until the rendition holding `name` in `C`'s section has made its
+	/// estimates.
+	pub(super) fn unsettled<C: super::RenditionConfig<E>>(&mut self, name: &str) {
+		self.state.msf.unsettled.insert(owner_key::<C>(name));
+	}
+
+	/// Stop holding the MSF catalog back for the rendition holding `name` in `C`'s section,
+	/// publishing it if nothing else does.
+	///
+	/// Only MSF goes out: a hang estimate held by [`commit_estimate`](Self::commit_estimate) stays
+	/// held, and an initial catalog still withheld carries MSF along once its gate opens.
+	pub(super) fn settle<C: super::RenditionConfig<E>>(mut self, name: &str) -> crate::Result<()> {
+		if !self.state.msf.unsettled.remove(&owner_key::<C>(name)) || !self.state.reservations.published {
+			return Ok(());
+		}
+		let state = &mut *self.state;
+		self.outputs.emit_msf(&state.catalog, &mut state.msf)
+	}
+
 	/// Mark the rendition holding `name` in `C`'s section as listed, so it counts toward the
 	/// initial publish's [track requirement](State::lists_track).
 	pub(super) fn list<C: super::RenditionConfig<E>>(&mut self, name: &str) {
@@ -1167,6 +1276,7 @@ impl<E: CatalogExt> Guard<'_, E> {
 	/// name is not: nothing would ever reserve it again.
 	pub(super) fn release<C: super::RenditionConfig<E>>(&mut self, name: &str, present: bool) {
 		self.state.owned.remove(&owner_key::<C>(name));
+		self.state.msf.unsettled.remove(&owner_key::<C>(name));
 
 		if present {
 			C::remove(&mut self.state.catalog, name);
@@ -3362,5 +3472,168 @@ mod test {
 		assert_eq!(wire_jitter(&catalog, "v"), Some(std::time::Duration::from_millis(1)));
 		v.estimate(jitter(2)).unwrap();
 		assert_eq!(sent(&catalog), Some(0), "the gated publish opened a window");
+	}
+
+	fn delay(ms: u64) -> super::super::Reading {
+		super::super::Reading {
+			estimate: super::super::Estimate::default().with_delay(std::time::Duration::from_millis(ms)),
+			period: Some(std::time::Duration::from_millis(10)),
+			framerate: false,
+		}
+	}
+
+	/// A measured delay creeping a millisecond at a time republishes once per frame duration it
+	/// crosses, carrying the value measured then. Regression: every rise republished, once a second.
+	#[tokio::test(start_paused = true)]
+	async fn a_creeping_delay_republishes_once_per_frame() {
+		let (_broadcast, catalog, mut renditions) = estimating(&["v"]);
+		let v = &mut renditions[0];
+		let initial = sent(&catalog).unwrap();
+
+		let mut published = Vec::new();
+		for ms in 1..=35 {
+			// Past the once-a-second window, so only the frame step holds a rise back.
+			tokio::time::advance(std::time::Duration::from_secs(2)).await;
+			let before = sent(&catalog);
+			v.estimate(delay(ms)).unwrap();
+			if sent(&catalog) != before {
+				published.push(wire(&catalog).video.renditions["v"].delay.unwrap().as_millis());
+			}
+		}
+		assert_eq!(published, [10, 20, 30]);
+		assert_eq!(sent(&catalog), Some(initial + 3));
+		assert_eq!(
+			catalog.snapshot().video.renditions["v"].delay,
+			Some(std::time::Duration::from_millis(30)),
+			"a rise short of a frame is not even staged"
+		);
+	}
+
+	/// A known framerate sets the step, whatever shorter advance the timestamps show.
+	#[tokio::test(start_paused = true)]
+	async fn a_framerate_sets_the_delay_step() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		let reserved = catalog.reserve();
+		let mut v = reserved.init::<VideoConfig>("v").unwrap();
+		let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		config.framerate = Some(25.0);
+		v.set(config).unwrap();
+		drop(reserved);
+
+		v.estimate(delay(39)).unwrap();
+		assert_eq!(wire(&catalog).video.renditions["v"].delay, None);
+		v.estimate(delay(40)).unwrap();
+		assert_eq!(
+			wire(&catalog).video.renditions["v"].delay,
+			Some(std::time::Duration::from_millis(40))
+		);
+	}
+
+	/// How many MSF catalogs have gone out on the wire.
+	fn msf_sent(catalog: &Producer) -> Option<u64> {
+		catalog.outputs.msf_track.largest().map(|position| position.group)
+	}
+
+	/// The last MSF catalog on the wire.
+	fn msf_wire(catalog: &Producer) -> moq_msf::Catalog<()> {
+		let state = take(&catalog.current);
+		moq_msf::Catalog::from_str(state.msf.last.as_deref().expect("a published MSF catalog")).unwrap()
+	}
+
+	/// A change MSF doesn't carry republishes hang but not MSF.
+	#[test]
+	fn identical_msf_content_publishes_once() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		catalog
+			.mutate(|catalog| {
+				catalog
+					.video
+					.renditions
+					.insert("v".to_string(), VideoConfig::new(hang::catalog::VideoCodec::VP8));
+			})
+			.unwrap();
+		assert_eq!(msf_sent(&catalog), Some(0));
+		let hang = sent(&catalog);
+
+		catalog
+			.mutate(|catalog| {
+				catalog.video.display = Some(hang::catalog::Display {
+					width: 1280,
+					height: 720,
+				})
+			})
+			.unwrap();
+		assert_ne!(sent(&catalog), hang);
+		assert_eq!(msf_sent(&catalog), Some(0));
+	}
+
+	/// An unhinted track holds the MSF catalog back until its first groups close over a second of
+	/// media, so even 20 ms audio groups declare a bitrate, which later estimates leave alone.
+	#[tokio::test(start_paused = true)]
+	async fn msf_waits_for_estimates_and_freezes_them() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		let reserved = catalog.reserve();
+		let mut audio = reserved.init::<AudioConfig>("a").unwrap();
+		audio
+			.set(AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2))
+			.unwrap();
+		drop(reserved);
+		assert_eq!(sent(&catalog), Some(0), "hang publishes at once");
+		assert_eq!(msf_sent(&catalog), None);
+
+		let mut estimator = super::super::Estimator::new();
+		let frame = |estimator: &mut super::super::Estimator, i: u64, bytes: usize| {
+			let ts = moq_net::Timestamp::from_micros(i * 20_000).unwrap();
+			estimator.cut(Some(ts));
+			estimator.write(ts, bytes);
+		};
+		for i in 0..50 {
+			frame(&mut estimator, i, 100);
+			audio.estimate(estimator.reading()).unwrap();
+			assert_eq!(msf_sent(&catalog), None, "frame {i} is inside the first second");
+		}
+		frame(&mut estimator, 50, 100);
+		audio.estimate(estimator.reading()).unwrap();
+		assert_eq!(msf_sent(&catalog), Some(0));
+		let declared = msf_wire(&catalog).tracks[0].bitrate;
+		assert_eq!(declared, Some(40_000));
+
+		// A louder second raises the hang bitrate; MSF keeps what it declared.
+		for i in 51..200 {
+			frame(&mut estimator, i, 400);
+			audio.estimate(estimator.reading()).unwrap();
+		}
+		assert!(wire(&catalog).audio.renditions["a"].bitrate > declared);
+		assert_eq!(msf_sent(&catalog), Some(0));
+		assert_eq!(msf_wire(&catalog).tracks[0].bitrate, declared);
+	}
+
+	/// A track whose every estimated field is hinted has nothing to wait for.
+	#[test]
+	fn a_fully_hinted_track_publishes_msf_at_once() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		let reserved = catalog.reserve();
+		let mut video = reserved.init::<VideoConfig>("v").unwrap();
+		let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		config.bitrate = Some(1_000_000);
+		config.framerate = Some(30.0);
+		config.jitter = Some(std::time::Duration::from_millis(1));
+		config.delay = Some(std::time::Duration::from_millis(1));
+		video.set(config).unwrap();
+		drop(reserved);
+		assert_eq!(msf_sent(&catalog), Some(0));
+	}
+
+	/// A track that ends before its estimates are made stops holding the MSF catalog back.
+	#[test]
+	fn a_settled_track_releases_msf() {
+		let (_broadcast, catalog, mut renditions) = estimating(&["v"]);
+		assert_eq!(msf_sent(&catalog), None);
+		renditions[0].settle().unwrap();
+		assert_eq!(msf_sent(&catalog), Some(0));
 	}
 }
