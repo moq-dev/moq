@@ -26,11 +26,27 @@ so the recorded looser one makes some readers skip history they could have
 filled. It loses history only in that window; it does not bring back #7168's
 over-fetch.
 
-Record the budget the start was actually resolved under. Track it per
-update, or take it from the update in effect when SUBSCRIBE_START arrives.
-Add an integration test in `rs/moq-net/tests/integration`, direct and
-through a relay: subscribe, tighten before the start, then a second reader
-widens partly. It fails on `main` and passes with the fix.
+Record the budget the start was actually resolved under. SUBSCRIBE_START
+carries a group, not which update it was picked under, and updates can cross
+it in flight, so the budget current when START arrives is not enough: an
+update sent after the publisher picked the start would be recorded in its
+place, too loose after a widening or too tight after a tightening. When the
+subscriber cannot tell which of its sent budgets the publisher applied,
+record the loosest of them. That keeps today's history loss in the
+ambiguous window but never brings back the over-fetch.
+
+Add integration tests in `rs/moq-net/tests/integration`, direct and through
+a relay: subscribe, tighten before the start, then a second reader widens
+partly, which fails on `main` and passes with the fix; and a tightening and
+a widening that each cross an already-picked START, where the recorded
+budget must never be tighter than the one the start was picked under.
+
+Open question for whoever starts this: which lite-06 ordering, if any, tells
+the subscriber the publisher applied a tightening before picking the start.
+Without one, every tightening sent before START arrives stays ambiguous, the
+loosest-budget rule records the SUBSCRIBE budget as today, and the Goal is
+out of reach on the released wire. Then propose rewriting this quest to a
+wire change for a later draft, or deleting it.
 
 ## Related
 
