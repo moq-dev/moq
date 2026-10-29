@@ -105,6 +105,8 @@ pub(super) struct Steps {
 	cleared: u64,
 	/// The step being judged, from the next packet to route on.
 	ahead: Option<Ahead>,
+	/// The PES headers begun on the timed PIDs, as routed.
+	headers: Headers,
 }
 
 /// A PID's last timestamp.
@@ -157,12 +159,14 @@ struct Marks {
 	flagged: bool,
 	/// A PCR on the clock PID.
 	pcr: Option<u64>,
-	/// The DTS, or PTS without one, of a PES this packet starts on a timed PID.
+	/// The DTS, or PTS without one, of a PES header this packet completes on a timed PID.
 	pes: Option<u64>,
+	/// What it does to a PES header its PID has begun.
+	header: Header,
 }
 
 impl Marks {
-	fn read(pkt: &[u8; TsPacket::SIZE], routes: &Routes) -> Self {
+	fn read(pkt: &[u8; TsPacket::SIZE], routes: &Routes, headers: &Headers) -> Self {
 		let mut marks = Self::default();
 		// A packet the demodulator flagged corrupt, or whose adaptation field overruns itself,
 		// says nothing the import trusts.
@@ -174,17 +178,74 @@ impl Marks {
 			marks.flagged = discontinuity_indicator(pkt);
 			marks.pcr = pcr(pkt);
 		}
-		// A PES start whose header the packet holds whole, in the clear.
-		if pkt[1] & 0x40 != 0
-			&& pkt[3] & 0xc0 == 0
-			&& (routes.timed)(pid)
-			&& let Payload::Bytes(payload) = payload(pkt)
-			&& let Ok(pes) = PesStart::parse(payload)
-			&& let Some(pts) = pes.pts
-		{
-			marks.pes = Some(pes.dts.unwrap_or(pts));
+		if (routes.timed)(pid) {
+			marks.header = headers.read(pid, pkt);
+			if let Header::Read(ticks) = marks.header {
+				marks.pes = Some(ticks);
+			}
 		}
 		marks
+	}
+}
+
+/// What one packet does to its PID's PES header.
+#[derive(Default)]
+enum Header {
+	/// Nothing: no header is begun, or the packet carries no payload.
+	#[default]
+	Keep,
+	/// Completes one with this DTS, or PTS without one.
+	Read(u64),
+	/// Begins or continues one it does not complete.
+	Hold(Vec<u8>),
+	/// Ends one without a timestamp: none was carried, or it is unreadable.
+	Clear,
+}
+
+/// The PES headers begun on each timed PID, so one split across packets still reads.
+#[derive(Clone, Default)]
+struct Headers(HashMap<u16, Vec<u8>>);
+
+impl Headers {
+	/// What `pkt` does to the header begun on `pid`, without retaining it.
+	fn read(&self, pid: u16, pkt: &[u8; TsPacket::SIZE]) -> Header {
+		if pkt[3] & 0xc0 != 0 {
+			return Header::Clear;
+		}
+		let Payload::Bytes(payload) = payload(pkt) else {
+			return Header::Keep;
+		};
+		let header = if pkt[1] & 0x40 != 0 {
+			std::borrow::Cow::Borrowed(payload)
+		} else if let Some(begun) = self.0.get(&pid) {
+			std::borrow::Cow::Owned([begun.as_slice(), payload].concat())
+		} else {
+			return Header::Keep;
+		};
+		// The optional fields are at most 255 bytes, so a held header stays small.
+		match PesStart::header_len(&header) {
+			Ok(len) if header.len() >= len => match PesStart::parse(&header) {
+				Ok(PesStart {
+					pts: Some(pts), dts, ..
+				}) => Header::Read(dts.unwrap_or(pts)),
+				_ => Header::Clear,
+			},
+			Ok(_) => Header::Hold(header.into_owned()),
+			Err(_) => Header::Clear,
+		}
+	}
+
+	/// Retain what `header` leaves begun on `pid`.
+	fn apply(&mut self, pid: u16, header: Header) {
+		match header {
+			Header::Keep => {}
+			Header::Hold(begun) => {
+				self.0.insert(pid, begun);
+			}
+			Header::Read(_) | Header::Clear => {
+				self.0.remove(&pid);
+			}
+		}
 	}
 }
 
@@ -201,6 +262,8 @@ struct Ahead {
 	pids: HashSet<u16>,
 	/// The PIDs whose first PES since was judged.
 	heard: HashSet<u16>,
+	/// The PES headers begun on the timed PIDs, as read ahead.
+	headers: Headers,
 	/// How far back the first PID to step back went, which a flagged rewind reports.
 	back: Option<Duration>,
 	/// The first PCR read since, which times how long the silent streams are waited for.
@@ -224,13 +287,13 @@ impl Steps {
 			return Verdict::Route;
 		};
 		let pid = (u16::from(pkt[1] & 0x1f) << 8) | u16::from(pkt[2]);
-		let marks = Marks::read(pkt, routes);
+		let marks = Marks::read(pkt, routes, &self.headers);
 
 		if self.ahead.is_none() && at >= self.cleared {
 			self.ahead = self.trigger(at, pid, &marks, routes, start);
 		}
 		let Some(ahead) = &mut self.ahead else {
-			self.observe(pid, &marks, routes);
+			self.observe(pid, marks, routes);
 			return Verdict::Route;
 		};
 		if let Some(step) = ahead.confirmed {
@@ -244,7 +307,7 @@ impl Steps {
 			Some(Err(cleared)) => {
 				self.cleared = cleared;
 				self.ahead = None;
-				self.observe(pid, &marks, routes);
+				self.observe(pid, marks, routes);
 				Verdict::Route
 			}
 			None => Verdict::Hold,
@@ -265,6 +328,7 @@ impl Steps {
 	/// `pid` changed route: its timestamps no longer continue the last.
 	pub(super) fn forget(&mut self, pid: u16) {
 		self.pids.remove(&pid);
+		self.headers.0.remove(&pid);
 	}
 
 	/// Start judging a step at the packet at `at` if it shows one, with the clocks expected to
@@ -320,6 +384,7 @@ impl Steps {
 			pcr: !marks.flagged && last_pcr.is_some(),
 			pids,
 			heard: HashSet::new(),
+			headers: self.headers.clone(),
 			back: None,
 			since: None,
 			scan,
@@ -329,13 +394,14 @@ impl Steps {
 	}
 
 	/// Record the readings of a packet routed.
-	fn observe(&mut self, pid: u16, marks: &Marks, routes: &Routes) {
+	fn observe(&mut self, pid: u16, marks: Marks, routes: &Routes) {
 		if let (Some(value), Some((_, last))) = (marks.pcr, &mut self.clock) {
 			*last = Some(value);
 		}
 		if let Some(ticks) = marks.pes {
 			self.pids.insert(pid, Seen { ticks, at: routes.now });
 		}
+		self.headers.apply(pid, marks.header);
 	}
 }
 
@@ -358,7 +424,7 @@ impl Ahead {
 			let (at, pkt) = demux.peek(&mut self.scan, &mut self.framer)?;
 			let end = at + TsPacket::SIZE as u64;
 			let pid = (u16::from(pkt[1] & 0x1f) << 8) | u16::from(pkt[2]);
-			let marks = Marks::read(pkt, routes);
+			let marks = Marks::read(pkt, routes, &self.headers);
 
 			if self.pcr
 				&& let (Some(value), Some(last)) = (marks.pcr, last_pcr)
@@ -399,8 +465,10 @@ impl Ahead {
 				}
 				self.back.get_or_insert(by);
 			}
+			self.headers.apply(pid, marks.header);
 
-			if !self.pcr && self.pids.is_empty() {
+			// A clock alone, such as one corrupt PCR, needs a stream to step with it.
+			if !self.pcr && self.pids.is_empty() && (self.stepped.is_none() || !self.heard.is_empty()) {
 				return Some(self.verdict(end, true));
 			}
 		}
@@ -416,5 +484,102 @@ impl Ahead {
 			// A flagged break no PID has stepped back from is a splice.
 			None => self.back.map(|by| Step::Rewind { by, flagged: true }).ok_or(end),
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::super::fixture::{Flags, Mux};
+	use super::*;
+
+	const CLOCK: u16 = 0x1ff;
+	const VIDEO: u16 = 0x100;
+	/// 40 ms of program clock, in 27 MHz ticks.
+	const FRAME: u64 = PCR_HZ / 25;
+	/// The step the issue's contribution took, in 27 MHz ticks.
+	const SWITCH: u64 = 16_844 * PCR_HZ + PCR_HZ / 2;
+
+	/// Judge each packet of `ts` and route it, as an import does, with `timed` the PIDs that
+	/// carry timestamped PES. Returns the first restart.
+	fn judge(ts: &[u8], timed: &[u16]) -> Option<Step> {
+		let mut demux = Demux::default();
+		demux.push(ts);
+		let mut steps = Steps::default();
+		let timed = |pid| timed.contains(&pid);
+		let routes = Routes {
+			pcr_pid: Some(CLOCK),
+			timed: &timed,
+			now: None,
+		};
+		loop {
+			match steps.judge(&demux, &routes) {
+				Verdict::Restart(step) => return Some(step),
+				Verdict::Hold => return None,
+				Verdict::Route => demux.next()?,
+			};
+		}
+	}
+
+	/// One PES start on `pid` with `pts` (90 kHz), its header split after `split` bytes across
+	/// two packets, as a muxer padding the first with adaptation stuffing leaves it.
+	fn split_pes(cc: &mut u8, pid: u16, pts: u64, split: usize) -> Vec<u8> {
+		let mut pes = vec![0, 0, 1, 0xe0, 0, 0, 0x80, 0x80, 5];
+		pes.extend_from_slice(&[
+			0x21 | ((pts >> 29) & 0x0e) as u8,
+			(pts >> 22) as u8,
+			0x01 | ((pts >> 14) & 0xfe) as u8,
+			(pts >> 7) as u8,
+			0x01 | ((pts << 1) & 0xfe) as u8,
+		]);
+		pes.extend_from_slice(&[0xaa; 32]);
+		let mut out = Vec::new();
+		for (pusi, payload) in [(true, &pes[..split]), (false, &pes[split..])] {
+			let mut pkt = [0xff; 188];
+			pkt[..3].copy_from_slice(&[0x47, u8::from(pusi) << 6 | (pid >> 8) as u8, pid as u8]);
+			pkt[3] = 0x30 | *cc;
+			pkt[4] = (183 - payload.len()) as u8;
+			pkt[5] = 0x00;
+			pkt[188 - payload.len()..].copy_from_slice(payload);
+			out.extend_from_slice(&pkt);
+			*cc = (*cc + 1) & 0x0f;
+		}
+		out
+	}
+
+	/// A second of the clock and the video on it, from `start` (27 MHz).
+	fn second(mux: &mut Mux, cc: &mut u8, start: u64, video: bool) {
+		for frame in 0..25 {
+			let clock = (start + frame * FRAME) % PCR_WRAP;
+			mux.packet(CLOCK, Flags::pcr(clock));
+			if video {
+				mux.out
+					.extend(split_pes(cc, VIDEO, (clock / 300 + 9_000) % PTS_WRAP, 7));
+			}
+		}
+	}
+
+	/// A program clock stepping with no stream to step with it, such as one corrupt PCR in a
+	/// program whose streams are idle, is not another source.
+	#[test]
+	fn a_clock_alone_does_not_restart() {
+		let (mut mux, mut cc) = (Mux::default(), 0);
+		second(&mut mux, &mut cc, PCR_HZ, false);
+		second(&mut mux, &mut cc, PCR_WRAP + 2 * PCR_HZ - SWITCH, false);
+		assert_eq!(judge(&mux.out, &[VIDEO]), None);
+	}
+
+	/// A PES header split across packets still times its stream, so the switch is seen.
+	#[test]
+	fn a_split_pes_header_steps_with_the_clock() {
+		let (mut mux, mut cc) = (Mux::default(), 0);
+		second(&mut mux, &mut cc, PCR_HZ, true);
+		second(&mut mux, &mut cc, PCR_WRAP + 2 * PCR_HZ - SWITCH, true);
+		let Some(Step::Rewind { by, flagged: false }) = judge(&mux.out, &[VIDEO]) else {
+			panic!("the switch was missed");
+		};
+		assert!(
+			by.abs_diff(Duration::from_millis(16_844_460)) < Duration::from_millis(100),
+			"{by:?}"
+		);
 	}
 }
