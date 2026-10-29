@@ -26,7 +26,6 @@ edge, which embeds moq-relay; it moved there on 2026-09-28.
 - [Interop and Video pass on main](/quest/m0/interop-green/README.md) - the scheduled Interop and Video workflows pass, so red means a new break
 - [Release shutdown backport](/quest/m0/ffi-shutdown-backport.md) - `release` publishes a non-breaking moq-ffi with an async `drain()` and qmux sessions on the QUIC stream limit
 - [Backport @moq/flate bounds](/quest/m0/backport-flate-budget.md) - `@moq/flate` on `release` stops inflating past its cap and stops pinning pako scratch
-- [Backport the frame-start refusal](/quest/m0/backport-frame-start.md) - `@moq/net` on `release` refuses a nonzero lite frame start instead of misnumbering frames
 - [Resolve the remaining external Smoke interoperability failures](/quest/m0/smoke-released.md) - every external Docker interop cell in Smoke passes, fixed at its cause
 - [CI cost and latency](/quest/m0/ci/README.md) - cloud CI runs only in a batched merge gate as one `just ci` pass per batch, expensive checks run nightly and gate `release`, caches move to R2, and runners are chosen last
 - [More tests under load](/quest/m0/test-flakes-2/README.md) - load-only and queue failures, one quest per flake, fixed at the cause, since each one fails a whole batch

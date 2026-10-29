@@ -25,15 +25,6 @@ worker *ARGS:
 web url='http://localhost:4443':
     cd web && VITE_RELAY_URL="{{ url }}" bun --bun vite --open
 
-# Build the player for carla.moq.dev, against the public demo relay.
-build-web:
-    bun install --frozen-lockfile
-    cd web && VITE_RELAY_URL=https://cdn.moq.dev/demo bun run build
-
-# Deploy the player to carla.moq.dev.
-deploy: build-web
-    cd web && bun wrangler deploy
-
 # Build the worker's virtualenv, with moq's Python bindings from this checkout.
 venv:
     sim/venv.sh

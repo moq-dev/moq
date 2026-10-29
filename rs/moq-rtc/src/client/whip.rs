@@ -17,14 +17,8 @@ use url::Url;
 
 use crate::{Error, Result, client::Client, egress::EgressSource, session};
 
-pub(crate) async fn dial(
-	client: &Client,
-	url: Url,
-	origin: moq_net::origin::Consumer,
-	path: impl TryInto<moq_net::Path, Error: Into<moq_net::Error>>,
-) -> Result<()> {
-	let broadcast = origin.request(path, None).await?;
-	let source = EgressSource::new(moq_mux::Source::new(origin, broadcast)).await?;
+pub(crate) async fn dial(client: &Client, url: Url, source: moq_mux::Source) -> Result<()> {
+	let source = EgressSource::new(source).await?;
 	let codecs = source.catalog_codecs();
 	if codecs.is_empty() {
 		return Err(Error::NoRenditions);
