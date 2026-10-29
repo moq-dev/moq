@@ -916,8 +916,8 @@ struct Held {
 	epoch: Option<crate::Epoch>,
 }
 
-/// A joining request may be abandoned before it takes an ID. Once committed, its header
-/// must still reach the peer, which otherwise remembers the ID it never saw.
+/// A joining request may be abandoned before it takes an ID. Once committed, the session
+/// owns ending it on the wire.
 struct JoiningTask {
 	work: Option<MaybeSendBox<'static, Result<(), Error>>>,
 	state: kio::Shared<JoiningState>,
@@ -950,8 +950,9 @@ impl Drop for JoiningTask {
 			state.committed
 		};
 		if committed && let Some(work) = self.work.take() {
-			// The session owns the remaining send, including after the subscription
-			// ends. It closes the request immediately after delivering its header.
+			// The session owns cancelling the request, including after the subscription
+			// ends: closing it once its header is out, or resetting it while the peer's
+			// send window still holds the header back.
 			self.tasks.push(async move {
 				let _ = work.await;
 			});
@@ -1422,9 +1423,11 @@ impl Subscriber {
 			namespace: prefix.clone(),
 			hidden,
 		};
-		stream.writer.encode_message(&msg).await?;
+		// Flushed while waiting for the answer, so `live` closing still ends a request the
+		// peer's send window holds back.
+		stream.writer.buffer_message(ietf::SubscribeNamespace::ID, &msg)?;
 
-		tracing::debug!(%prefix, "subscribe_namespace sent");
+		tracing::debug!(%prefix, "subscribe_namespace started");
 
 		// Read response
 		let Some(framed) = self.next_namespace_message(request, live).await? else {
@@ -1480,6 +1483,7 @@ impl Subscriber {
 			if live.poll_closed(waiter).is_ready() {
 				return Poll::Ready(Ok(None));
 			}
+			ready!(stream.writer.poll_flush(waiter))?;
 			messages
 				.poll_next(&mut stream.reader, waiter)
 				.map(|next| next.map(Some))
@@ -1503,6 +1507,13 @@ impl Subscriber {
 		} = request;
 		// Nothing went out, so there is nothing to end.
 		if request_id.is_none() {
+			return;
+		}
+		// The request never reached the peer whole, so it holds nothing to wait on.
+		if !writer.is_flushed() {
+			tracing::debug!(%prefix, "subscribe_namespace abandoned before it was sent");
+			reader.abort(&Error::Cancel);
+			writer.abort(&Error::Cancel);
 			return;
 		}
 		tracing::debug!(%prefix, "unsubscribe_namespace");
@@ -2922,7 +2933,7 @@ impl Subscriber {
 		&mut self,
 		broadcast_path: &Path,
 		track_name: &str,
-		target: Target,
+		mut target: Target,
 		group_fetches: &mut TaskSet,
 		gate: &mut crate::auth::Gate,
 	) -> Option<Idle> {
@@ -2961,20 +2972,49 @@ impl Subscriber {
 		let adopted = match &self.want(&key) {
 			None => None,
 			Some(handoff) => {
-				let adopted = kio::wait(|waiter| {
-					if gate.poll_denied(waiter).is_ready() {
-						return Poll::Ready(Err(Error::Unauthorized));
-					}
-					validity.check(waiter)?;
-					Self::poll_handoff(handoff, waiter).map(Ok)
-				})
-				.await;
-				match adopted {
-					Ok(adopted) => adopted,
-					Err(err) => {
-						self.unwant(key, handoff);
-						target.fail(err);
-						return None;
+				// The handoff waits for the held stream to flush, which a peer withholding
+				// credit can stall, so nobody wanting the track any more ends the wait too.
+				enum Abandon {
+					Failed(Error),
+					Unused,
+				}
+				loop {
+					let adopt = kio::wait(|waiter| {
+						if gate.poll_denied(waiter).is_ready() {
+							return Poll::Ready(Err(Abandon::Failed(Error::Unauthorized)));
+						}
+						if let Err(err) = validity.check(waiter) {
+							return Poll::Ready(Err(Abandon::Failed(err)));
+						}
+						if let Poll::Ready(adopted) = Self::poll_handoff(handoff, waiter) {
+							return Poll::Ready(Ok(adopted));
+						}
+						let unwanted = match &mut target {
+							Target::Request(request) => crate::util::poll_unwanted(&mut request.demand(), waiter),
+							Target::Resume(idle) => crate::util::poll_unwanted(&mut idle.demand, waiter),
+						};
+						unwanted.map(|_| Err(Abandon::Unused))
+					})
+					.await;
+					match adopt {
+						Ok(adopted) => break adopted,
+						Err(Abandon::Failed(err)) => {
+							self.unwant(key, handoff);
+							target.fail(err);
+							return None;
+						}
+						// Nobody wants the track: a resumed copy lingers again, a request is refused.
+						Err(Abandon::Unused) => match target {
+							Target::Resume(idle) => {
+								self.unwant(key, handoff);
+								return Some(idle);
+							}
+							Target::Request(ref request) if request.reject_unused(Error::Cancel) => {
+								self.unwant(key, handoff);
+								return None;
+							}
+							Target::Request(_) => continue,
+						},
 					}
 				}
 			}
@@ -3069,6 +3109,8 @@ impl Subscriber {
 		let order = aggregate.map(|s| s.order).unwrap_or_default();
 		// Without an Established subscription, a relay includes the request it holds.
 		let new_group = target.new_group();
+		// Buffered only: the wait for the answer flushes it, so the local terminals still end a
+		// request the peer's send window holds back.
 		let written = match &held {
 			// Resume the held subscription: its group order is the one it was made with,
 			// since no update can change it. Its groups wait on the answer from here.
@@ -3083,37 +3125,32 @@ impl Subscriber {
 					// Only a track declaring DYNAMIC_GROUPS takes one on an update.
 					new_group: new_group.filter(|_| held.properties.dynamic_groups),
 				};
-				self.write_forward(&mut stream.writer, &forward).await
+				self.buffer_forward(&mut stream.writer, &forward)
 			}
-			None => {
-				async {
-					stream
-						.writer
-						.encode_message(&ietf::Subscribe {
-							max_age,
-							new_group,
-							request_id,
-							track_namespace: broadcast_path.clone(),
-							track_name: track_name.into(),
-							subscriber_priority: super::priority::to_wire(priority),
-							group_order: order.into(),
-							filter: join.filter,
-							fill: join.fill,
-							// A resumed copy already knows the track, from the answer that accepted it.
-							properties_wanted: matches!(target, Target::Request(_)),
-							forward: true,
-							rendezvous: false,
-							range_filters: false,
-							authorization_token: None,
-							epoch: self.epoch.clone(),
-						})
-						.await
-				}
-				.await
-			}
+			None => stream.writer.buffer_message(
+				ietf::Subscribe::ID,
+				&ietf::Subscribe {
+					max_age,
+					new_group,
+					request_id,
+					track_namespace: broadcast_path.clone(),
+					track_name: track_name.into(),
+					subscriber_priority: super::priority::to_wire(priority),
+					group_order: order.into(),
+					filter: join.filter,
+					fill: join.fill,
+					// A resumed copy already knows the track, from the answer that accepted it.
+					properties_wanted: matches!(target, Target::Request(_)),
+					forward: true,
+					rendezvous: false,
+					range_filters: false,
+					authorization_token: None,
+					epoch: self.epoch.clone(),
+				},
+			),
 		};
 		if let Err(err) = written {
-			tracing::debug!(%err, "failed to write subscribe");
+			tracing::debug!(%err, "failed to encode subscribe");
 			self.remove_subscribe(request_id);
 			self.entry_ended(&key, request_id, Err(err.clone()));
 			target.fail(err);
@@ -3154,7 +3191,10 @@ impl Subscriber {
 		// A local terminal ended the wait, so the peer still holds the request to cancel.
 		let mut unanswered = false;
 		let setup = {
-			let mut response = std::pin::pin!(self.read_answer(&mut stream, &mut messages, held.as_mut()));
+			let mut response = std::pin::pin!(async {
+				kio::wait(|waiter| stream.writer.poll_flush(waiter)).await?;
+				self.read_answer(&mut stream, &mut messages, held.as_mut()).await
+			});
 			loop {
 				let setup = kio::wait(|waiter| {
 					let response = waiter.poll_future(response.as_mut());
@@ -3246,7 +3286,7 @@ impl Subscriber {
 					owed: held.owed + 1,
 					copy: resumed.as_ref().map(|idle| idle.track.clone()),
 				};
-				self.pause(key, upstream).await;
+				self.pause(key, upstream);
 				return resumed;
 			}
 			// The publisher may already be serving before it answers. A session abort
@@ -3437,6 +3477,8 @@ impl Subscriber {
 			Fill(track::Fill),
 			Update(Update),
 			Invalid(Error),
+			/// An update failed to go out.
+			Failed(Error),
 		}
 
 		// The NEW_GROUP_REQUEST last sent, the SUBSCRIBE's included. It stays outstanding
@@ -3488,6 +3530,11 @@ impl Subscriber {
 				let end = kio::wait(|waiter| {
 					if gate.poll_denied(waiter).is_ready() {
 						return Poll::Ready(End::Revoked);
+					}
+					// An update the peer's send window holds back goes out from here, so it never
+					// holds back the ends below.
+					if let Poll::Ready(Err(err)) = stream.writer.poll_flush(waiter) {
+						return Poll::Ready(End::Failed(err));
 					}
 					if !fetch_done
 						&& let Some(fut) = fetching.as_mut()
@@ -3652,7 +3699,7 @@ impl Subscriber {
 							sent_bounds = wanted_bounds.clone().expect("validated update bounds");
 						}
 						let (asked, new_group, asked_age) = (update.priority, update.new_group, update.max_age);
-						if let Err(err) = self.write_update(&mut stream.writer, request_id, update).await {
+						if let Err(err) = self.buffer_update(&mut stream.writer, request_id, update) {
 							tracing::debug!(%err, "failed to update the subscription");
 							ended = Some(Err(err.clone()));
 							let _ = track.clone().abort(err);
@@ -3671,6 +3718,12 @@ impl Subscriber {
 							requested = Some(value);
 						}
 						unanswered.fetch_add(1, Ordering::Relaxed);
+					}
+					End::Failed(err) => {
+						tracing::debug!(%err, "failed to update the subscription");
+						ended = Some(Err(err.clone()));
+						let _ = track.clone().abort(err);
+						break false;
 					}
 					End::Revoked => {
 						tracing::info!(broadcast = %crate::path::Rooted(self.origin.root(), broadcast_path), track = %track_name, "subscription no longer authorized");
@@ -3764,7 +3817,7 @@ impl Subscriber {
 			}
 		};
 
-		// Release an unallocated join now, or let the session finish its committed header.
+		// Release an unallocated join now, or let the session cancel its committed request.
 		drop(fetching);
 
 		if let Some(end) = ended {
@@ -3781,7 +3834,7 @@ impl Subscriber {
 				owed: unanswered.load(Ordering::Relaxed),
 				copy: Some(track.clone()),
 			};
-			self.pause(key, upstream).await;
+			self.pause(key, upstream);
 			return Some(Idle {
 				demand: track.demand(),
 				track,
@@ -3795,8 +3848,14 @@ impl Subscriber {
 		let aborted = self.remove_subscribe(request_id).is_none();
 
 		if !idle {
-			// The publisher already ended the request, so a FIN is all we owe it.
-			stream.writer.finish().ok();
+			// The publisher already ended the request, so a FIN is all we owe it, unless an
+			// update its send window held back would go out truncated behind it.
+			match stream.writer.is_flushed() {
+				true => {
+					stream.writer.finish().ok();
+				}
+				false => stream.writer.abort(&Error::Cancel),
+			}
 			// A reader may still miss history the publisher holds, such as a group whose
 			// fetch was in flight as the track ended, so a finished copy keeps serving fills.
 			return (finished && !aborted).then(|| Idle {
@@ -3983,9 +4042,9 @@ impl Subscriber {
 		}
 	}
 
-	/// Update an Established subscription: REQUEST_UPDATE carrying only what changed, under a
-	/// Request ID of its own.
-	async fn write_update(
+	/// Buffer the update to an Established subscription, for its wait to flush:
+	/// REQUEST_UPDATE carrying only what changed, under a Request ID of its own.
+	fn buffer_update(
 		&self,
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 		subscription: RequestId,
@@ -4006,8 +4065,9 @@ impl Subscriber {
 			}
 			state.fetches.insert(request_id, FillRequest::Update(subscription));
 		}
-		writer
-			.encode_message(&ietf::SubscribeUpdate {
+		writer.buffer_message(
+			ietf::SubscribeUpdate::ID,
+			&ietf::SubscribeUpdate {
 				max_age: update.max_age,
 				request_id,
 				subscriber_priority: update.priority.map(super::priority::to_wire),
@@ -4016,8 +4076,8 @@ impl Subscriber {
 				authorization_token: None,
 				new_group: update.new_group,
 				fill: update.fill,
-			})
-			.await
+			},
+		)
 	}
 
 	/// Tell the publisher to stop serving a subscription we are walking away from.
@@ -4040,7 +4100,7 @@ impl Subscriber {
 		// Finishing alone would leave the writer's Drop free to RESET_STREAM, and a stream
 		// that has sent its FIN is still retransmitting: the reset would discard what we
 		// already wrote. Closing consumes the writer, removing that fallback, and waits for
-		// the acknowledgement.
+		// the acknowledgement. A request the peer's send window held back resets instead.
 		if let Err(err) = writer.close().await {
 			tracing::debug!(%err, "failed to close the subscribe stream");
 		}
@@ -4087,33 +4147,27 @@ impl Subscriber {
 						state.fetches.insert(fetch_id, FillRequest::Joining(subscribe_id));
 					}
 				}
-				if let Err(err) = async {
-					stream
-						.writer
-						.encode_message(&ietf::Fetch {
-							request_id: fetch_id,
-							subscriber_priority: super::priority::to_wire(
-								track.subscription().map(|s| s.priority).unwrap_or(0),
-							),
-							group_order: GroupOrder::Ascending,
-							fetch_type: FetchType::RelativeJoining {
-								subscriber_request_id: subscribe_id,
-								group_offset: 0,
-							},
-							range_filters: false,
-							fill_timeout: false,
-							properties_wanted: true,
-							// Served by the subscription it joins, which named the instance.
-							epoch: None,
-						})
-						.await?;
-					Ok::<(), Error>(())
-				}
-				.await
-				{
-					tracing::debug!(%err, "failed to write joining FETCH");
-					return Err(err);
-				}
+				// Flushed while waiting for the answer, so a cancellation still ends a request the
+				// peer's send window holds back.
+				stream.writer.buffer_message(
+					ietf::Fetch::ID,
+					&ietf::Fetch {
+						request_id: fetch_id,
+						subscriber_priority: super::priority::to_wire(
+							track.subscription().map(|s| s.priority).unwrap_or(0),
+						),
+						group_order: GroupOrder::Ascending,
+						fetch_type: FetchType::RelativeJoining {
+							subscriber_request_id: subscribe_id,
+							group_offset: 0,
+						},
+						range_filters: false,
+						fill_timeout: false,
+						properties_wanted: true,
+						// Served by the subscription it joins, which named the instance.
+						epoch: None,
+					},
+				)?;
 				this.finish_joining_fetch(stream, progress).await
 			}
 			.await;
@@ -4160,7 +4214,10 @@ impl Subscriber {
 		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
 		let res = async {
 			let answer = {
-				let mut response = std::pin::pin!(self.read_fetch_response(&mut stream, &mut messages));
+				let mut response = std::pin::pin!(async {
+					kio::wait(|waiter| stream.writer.poll_flush(waiter)).await?;
+					self.read_fetch_response(&mut stream, &mut messages).await
+				});
 				kio::wait(|waiter| {
 					if cancelled(waiter).is_ready() {
 						return Poll::Ready(None);
@@ -4256,19 +4313,18 @@ impl Subscriber {
 		stream = stream.with_stats(self.origin.stats());
 		let request_id = self.control.next_request_id();
 
-		let written = async {
-			stream
-				.writer
-				.encode_message(&ietf::TrackStatus {
-					request_id,
-					track_namespace: broadcast_path.clone(),
-					track_name: track_name.into(),
-					properties_wanted: true,
-					epoch: self.epoch.clone(),
-				})
-				.await
-		}
-		.await;
+		// Flushed while waiting for the answer, so the terminals below still end a request
+		// the peer's send window holds back.
+		let written = stream.writer.buffer_message(
+			ietf::TrackStatus::ID,
+			&ietf::TrackStatus {
+				request_id,
+				track_namespace: broadcast_path.clone(),
+				track_name: track_name.into(),
+				properties_wanted: true,
+				epoch: self.epoch.clone(),
+			},
+		);
 		if let Err(err) = written {
 			request.reject(err);
 			return None;
@@ -4279,7 +4335,10 @@ impl Subscriber {
 		let mut demand = request.demand();
 		let closed = self.session.clone();
 		let response = {
-			let mut response = std::pin::pin!(self.read_track_status_response(&mut stream));
+			let mut response = std::pin::pin!(async {
+				kio::wait(|waiter| stream.writer.poll_flush(waiter)).await?;
+				self.read_track_status_response(&mut stream).await
+			});
 			loop {
 				let res = kio::wait(|waiter| {
 					let response = waiter.poll_future(response.as_mut());
@@ -5381,30 +5440,31 @@ impl Subscriber {
 				end: ietf::Location { group: last, object: 0 },
 			},
 		};
-		let res = async {
-			stream
-				.writer
-				.encode_message(&ietf::Fetch {
-					request_id: fetch_id,
-					subscriber_priority: super::priority::to_wire(fill.priority()),
-					group_order: GroupOrder::Ascending,
-					fetch_type,
-					range_filters: false,
-					fill_timeout: false,
-					// The copy learned the track before any fetch, from SUBSCRIBE_OK or
-					// TRACK_STATUS_OK, so a FETCH_OK repeating it is waste.
-					properties_wanted: false,
-					epoch: self.epoch.clone(),
-				})
-				.await?;
-			Ok::<_, Error>(())
-		}
-		.await;
+		// Flushed while waiting for the answer, so the terminals below still end a request the
+		// peer's send window holds back.
+		let res = stream.writer.buffer_message(
+			ietf::Fetch::ID,
+			&ietf::Fetch {
+				request_id: fetch_id,
+				subscriber_priority: super::priority::to_wire(fill.priority()),
+				group_order: GroupOrder::Ascending,
+				fetch_type,
+				range_filters: false,
+				fill_timeout: false,
+				// The copy learned the track before any fetch, from SUBSCRIBE_OK or
+				// TRACK_STATUS_OK, so a FETCH_OK repeating it is waste.
+				properties_wanted: false,
+				epoch: self.epoch.clone(),
+			},
+		);
 		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
 		let res = match res {
 			Err(err) => SetupResponse::Response(Err(err)),
 			Ok(()) => {
-				let mut response = std::pin::pin!(self.read_fetch_response(&mut stream, &mut messages));
+				let mut response = std::pin::pin!(async {
+					kio::wait(|waiter| stream.writer.poll_flush(waiter)).await?;
+					self.read_fetch_response(&mut stream, &mut messages).await
+				});
 				kio::wait(|waiter| {
 					let response = waiter.poll_future(response.as_mut());
 					if let Poll::Ready(Err(err)) = response {
@@ -6309,6 +6369,58 @@ mod tests {
 
 		assert_eq!(occurrences(&log, b"cam"), 1, "asked the peer for our scope");
 		assert_eq!(occurrences(&log, b"rootns"), 0, "asked the peer for our local root");
+	}
+
+	/// A SUBSCRIBE_NAMESPACE the peer's send window holds back part-way still ends as soon as
+	/// `live` closes, resetting the stream: a FIN would hand the peer a truncated request,
+	/// and there is no answer to wait for.
+	#[moq_clock::test]
+	async fn a_namespace_request_stalled_on_credit_ends_when_cancelled() {
+		for version in [Version::Draft18, Version::Draft22] {
+			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_send_window(1);
+			let log = session.log.clone();
+			let (tasks, _task_set) = crate::util::TaskSet::new();
+			let mut subscriber = Subscriber::new(
+				crate::time::sim(),
+				crate::driver::Transport::new(session.clone()),
+				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				Control::new(false),
+				None,
+				peer::PeerSetup::declared(peer::Peer::default()),
+				crate::Hop::new(1).unwrap(),
+				None,
+				version,
+				tasks,
+				Default::default(),
+			);
+
+			let (cancel, live) = live();
+			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+				.await
+				.unwrap();
+			let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(
+				stream,
+				Path::from_static("room"),
+				crate::model::Snapshot::landed(),
+				live
+			));
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			assert_eq!(log.writes.lock().unwrap().len(), 1, "{version}: stalled mid-message");
+
+			drop(cancel);
+			let Poll::Ready(res) = futures::poll!(run.as_mut()) else {
+				panic!("{version}: the cancelled request stayed alive");
+			};
+			assert!(matches!(res, Ok(namespaces::Ended::Local)), "{version}: {res:?}");
+			assert_eq!(log.resets(), vec![crate::ietf::error::CANCELLED], "{version}");
+			assert_eq!(log.stops(), vec![crate::ietf::error::CANCELLED], "{version}");
+			assert!(
+				!log.trail()
+					.iter()
+					.any(|(_, sent)| matches!(sent, crate::lite::test_transport::Sent::Finish)),
+				"{version}: finished a truncated request"
+			);
+		}
 	}
 
 	/// The peer's REQUEST_OK followed by one NAMESPACE, framed exactly as
@@ -7490,9 +7602,13 @@ mod tests {
 	#[derive(Clone, Copy, Debug)]
 	enum SetupWait {
 		SubscribeOpen,
+		/// The request's first message, stalled part-way on send credit.
+		SubscribeWrite,
 		StatusOpen,
+		StatusWrite,
 		StatusResponse,
 		FetchOpen,
+		FetchWrite,
 		FetchResponse,
 	}
 
@@ -7511,9 +7627,15 @@ mod tests {
 			stage,
 			SetupWait::SubscribeOpen | SetupWait::StatusOpen | SetupWait::FetchOpen
 		);
+		let writing = matches!(
+			stage,
+			SetupWait::SubscribeWrite | SetupWait::StatusWrite | SetupWait::FetchWrite
+		);
 		let open = kio::Producer::new(false);
 		let session = if opening {
 			crate::lite::test_transport::ScriptedSession::gated_open(Vec::new(), open.consume())
+		} else if writing {
+			crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_send_window(1)
 		} else {
 			crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_unacked_fin()
 		};
@@ -7555,7 +7677,7 @@ mod tests {
 		let mut group = None;
 		let mut accepted = None;
 		let work: std::pin::Pin<Box<dyn std::future::Future<Output = ()>>> = match stage {
-			SetupWait::SubscribeOpen => Box::pin(async {
+			SetupWait::SubscribeOpen | SetupWait::SubscribeWrite => Box::pin(async {
 				assert!(
 					subscriber
 						.subscribe_once(
@@ -7569,7 +7691,7 @@ mod tests {
 						.is_none()
 				);
 			}),
-			SetupWait::StatusOpen | SetupWait::StatusResponse => Box::pin(async {
+			SetupWait::StatusOpen | SetupWait::StatusWrite | SetupWait::StatusResponse => Box::pin(async {
 				assert!(
 					subscriber
 						.track_status(&Path::from_static("broadcast"), "video", request, &mut gate)
@@ -7597,6 +7719,13 @@ mod tests {
 		assert!(futures::poll!(work.as_mut()).is_pending(), "{stage:?}/{version}");
 		if opening {
 			assert!(log.writes.lock().unwrap().is_empty());
+		}
+		if writing {
+			assert_eq!(
+				log.writes.lock().unwrap().len(),
+				1,
+				"{stage:?}/{version}: stalled mid-message"
+			);
 		}
 		let expected = match cause {
 			Invalidated::Retired => {
@@ -7640,6 +7769,25 @@ mod tests {
 		if opening {
 			assert!(done, "{stage:?}/{version}/{cause:?}: cancelled wait stayed alive");
 			assert!(log.writes.lock().unwrap().is_empty());
+		} else if writing {
+			assert!(done, "{stage:?}/{version}/{cause:?}: cancelled write stayed alive");
+			// A FIN would hand the peer a truncated message.
+			assert_eq!(
+				log.resets(),
+				vec![crate::ietf::error::CANCELLED],
+				"{stage:?}/{version}/{cause:?}"
+			);
+			assert!(
+				!log.trail()
+					.iter()
+					.any(|(_, sent)| matches!(sent, crate::lite::test_transport::Sent::Finish)),
+				"{stage:?}/{version}/{cause:?}: finished a truncated request"
+			);
+			assert_eq!(
+				log.stops(),
+				vec![crate::ietf::error::CANCELLED],
+				"{stage:?}/{version}/{cause:?}"
+			);
 		} else {
 			assert_eq!(
 				log.stops(),
@@ -7668,9 +7816,12 @@ mod tests {
 	}
 
 	setup_wait_test!(invalid_subscribe_open_is_refused, SubscribeOpen, [Draft22]);
+	setup_wait_test!(invalid_subscribe_write_is_refused, SubscribeWrite, [Draft18, Draft22]);
 	setup_wait_test!(invalid_status_open_is_refused, StatusOpen, [Draft22]);
+	setup_wait_test!(invalid_status_write_is_refused, StatusWrite, [Draft18, Draft22]);
 	setup_wait_test!(invalid_status_response_is_refused, StatusResponse, [Draft22]);
 	setup_wait_test!(invalid_fetch_open_is_refused, FetchOpen, [Draft22]);
+	setup_wait_test!(invalid_fetch_write_is_refused, FetchWrite, [Draft18, Draft22]);
 	setup_wait_test!(invalid_fetch_response_is_refused, FetchResponse, [Draft22]);
 
 	/// The control messages that actually reached the wire, by type id.
@@ -7717,6 +7868,118 @@ mod tests {
 				"{version:?}: the send side must be closed, not reset out from under the cancellation",
 			);
 		}
+	}
+
+	/// Run a draft-22 subscription to Established over a peer whose request stream takes only
+	/// `window` bytes. Returns the session, the running task, the track, and its first reader.
+	async fn update_under_window(
+		window: Option<usize>,
+	) -> (
+		crate::lite::test_transport::ScriptedSession,
+		moq_clock::sim::JoinHandle<()>,
+		crate::track::Consumer,
+		kio::Pending<track::Subscribing>,
+	) {
+		let version = Version::Draft22;
+		let subscribe_ok = message(
+			ietf::SubscribeOk::ID,
+			&ietf::SubscribeOk {
+				track_alias: 7,
+				largest: None,
+				properties: Default::default(),
+			},
+			version,
+		);
+		let mut session = crate::lite::test_transport::ScriptedSession::new(subscribe_ok);
+		if let Some(window) = window {
+			session = session.with_send_window(window);
+		}
+		let (tasks, task_set) = crate::util::TaskSet::new();
+		std::mem::forget(task_set);
+		let mut subscriber = Subscriber::new(
+			crate::time::sim(),
+			crate::driver::Transport::new(session.clone()),
+			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			Control::new(false),
+			None,
+			peer::PeerSetup::declared(peer::Peer::default()),
+			crate::Hop::new(1).unwrap(),
+			None,
+			version,
+			tasks,
+			Default::default(),
+		);
+		let producer = crate::broadcast::Info::default().produce();
+		let mut dynamic = producer.requests();
+		let track = producer.consume().track("video").unwrap();
+		let first = track.subscribe(None);
+		let request = dynamic.requested_track().await.expect("no track requested");
+		let serving = moq_clock::sim::spawn(async move {
+			let _producer = producer;
+			subscriber
+				.run_subscribe(Path::from_static("broadcast"), dynamic, None, request)
+				.await;
+		});
+		settle().await;
+		(session, serving, track, first)
+	}
+
+	/// A REQUEST_UPDATE the peer's send window holds back part-way is still buffered when
+	/// PUBLISH_DONE ends the subscription, so the stream resets rather than FIN a truncated
+	/// update.
+	#[moq_clock::test]
+	async fn a_stalled_update_resets_when_the_publisher_ends() {
+		// The SUBSCRIBE alone, measured over an open window.
+		let subscribe = {
+			let (session, serving, _track, _first) = update_under_window(None).await;
+			serving.abort();
+			session.log.writes.lock().unwrap().len()
+		};
+
+		let (session, serving, track, _first) = update_under_window(Some(subscribe + 1)).await;
+		let _raised = track
+			.subscribe(track::Subscription {
+				priority: 5,
+				..Default::default()
+			})
+			.await
+			.unwrap();
+		settle().await;
+		assert_eq!(
+			session.log.writes.lock().unwrap().len(),
+			subscribe + 1,
+			"the update stalled mid-message"
+		);
+
+		session.push(&message(
+			ietf::PublishDone::ID,
+			&ietf::PublishDone {
+				status_code: 0x2,
+				stream_count: 0,
+				reason_phrase: "done".into(),
+			},
+			Version::Draft22,
+		));
+		// The script push wakes nothing, so a subscription change re-polls the loop.
+		let _again = track
+			.subscribe(track::Subscription {
+				priority: 7,
+				..Default::default()
+			})
+			.await
+			.unwrap();
+		// Past the grace PUBLISH_DONE waits out for its data streams; the copy then lingers.
+		moq_clock::sleep(crate::ledger::GRACE * 2).await;
+		assert_eq!(session.log.resets(), vec![crate::ietf::error::CANCELLED]);
+		assert!(
+			!session
+				.log
+				.trail()
+				.iter()
+				.any(|(_, sent)| matches!(sent, crate::lite::test_transport::Sent::Finish)),
+			"finished a truncated update"
+		);
+		serving.abort();
 	}
 
 	/// When `conflict` is set, an alias-7 binding for the same full track name is seeded
@@ -15052,6 +15315,31 @@ mod joining_fetch_tests {
 			session.grant_credit();
 			assert!(joining.poll(&kio::Waiter::noop()).is_pending());
 			assert_eq!(session.log.bi_opens(), 1, "{version}: credit releases the FETCH");
+		}
+	}
+
+	/// A committed joining FETCH the peer's send window holds back part-way is reset once
+	/// its subscription lets go, rather than waiting for credit to finish the header.
+	#[moq_clock::test]
+	async fn a_joining_fetch_stalled_on_credit_resets_when_cancelled() {
+		for version in JOINING_DRAFTS {
+			let session = ScriptedSession::new(Vec::new()).with_send_window(1);
+			let log = session.log.clone();
+			let (subscriber, track, mut tasks) = pending_join(crate::driver::Transport::new(session.clone()), version);
+			let mut joining = subscriber.start_joining_fetch(RequestId(99), &track).unwrap();
+			assert!(joining.poll(&kio::Waiter::noop()).is_pending());
+			assert_eq!(log.writes.lock().unwrap().len(), 1, "{version}: stalled mid-message");
+
+			// The session's tasks now own the request.
+			drop(joining);
+			let _ = tasks.poll(&kio::Waiter::noop());
+			assert_eq!(log.resets(), vec![crate::ietf::error::CANCELLED], "{version}");
+			assert!(
+				!log.trail()
+					.iter()
+					.any(|(_, sent)| matches!(sent, crate::lite::test_transport::Sent::Finish)),
+				"{version}: finished a truncated request"
+			);
 		}
 	}
 

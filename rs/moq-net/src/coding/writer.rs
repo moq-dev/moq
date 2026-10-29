@@ -152,6 +152,11 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 		kio::wait(|waiter| self.poll_write_all(waiter, buf)).await
 	}
 
+	/// Whether every buffered byte has hit the stream, so a FIN would not cut a message short.
+	pub fn is_flushed(&self) -> bool {
+		self.buffer.is_empty()
+	}
+
 	/// Mark the stream as finished.
 	///
 	/// Only valid once the buffer has flushed; the callers that finish
@@ -184,7 +189,15 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 	/// discards it, so the [`Drop`] fallback below can throw away bytes the peer never read.
 	/// Consuming the writer is what removes that fallback, and waiting for the acknowledgement
 	/// is what makes the bytes safe.
+	///
+	/// A message still partly buffered resets the stream with [`Error::Cancel`] instead: a FIN
+	/// would hand the peer a truncated message, and flushing the rest could wait forever on
+	/// credit the peer withholds.
 	pub async fn close(mut self) -> Result<(), Error> {
+		if !self.is_flushed() {
+			self.abort(&Error::Cancel);
+			return Err(Error::Cancel);
+		}
 		let Some(mut stream) = self.stream.take() else {
 			return Ok(());
 		};
@@ -363,6 +376,29 @@ mod tests {
 		}
 
 		assert_eq!(log.priorities(), (0u8..=255).collect::<Vec<_>>());
+	}
+
+	/// A message the stream has not taken whole cannot be finished, so closing resets rather
+	/// than hand the peer a truncated message.
+	#[moq_clock::test]
+	async fn closing_an_unflushed_message_resets() {
+		let log = Log::default();
+		let budget = kio::Producer::new(0);
+		let mut writer = Writer::new(
+			SinkSend::stepped(log.clone(), budget.consume()),
+			crate::lite::Version::Lite05,
+		);
+		writer.buffer_varint(5).unwrap();
+		assert!(writer.poll_flush(&kio::Waiter::noop()).is_pending());
+		assert!(!writer.is_flushed());
+
+		assert!(matches!(writer.close().await, Err(Error::Cancel)));
+		assert_eq!(log.resets(), vec![StreamError::Cancel.to_code()]);
+		assert!(
+			!log.trail()
+				.iter()
+				.any(|(_, sent)| matches!(sent, crate::lite::test_transport::Sent::Finish))
+		);
 	}
 
 	/// Writes some bytes, then errors: the shape of a partial encode.

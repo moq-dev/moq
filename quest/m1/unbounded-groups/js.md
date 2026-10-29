@@ -2,8 +2,9 @@
 
 ## Goal
 
-`@moq/net` has no group frame-count, group byte, or frame size cap. A reader
-that falls behind an evicted front gets the same refill-or-`Evicted` behavior
+`@moq/net` has no group frame-count, group byte, or frame size cap. A group
+holds a 32 MB tail and sheds its front past it, as Rust does, and a reader
+that falls behind the shed front gets the same refresh-or-`Evicted` behavior
 as Rust.
 
 ## Plan
@@ -19,12 +20,13 @@ holes. The chunked frame read and the byte-offset wire mirror moved to
 - Today `js/net/src/group.ts` caps frames and bytes and throws
   `GroupTooLarge`, and JS has no byte pool. Its eviction is whole groups by
   idle time, which never fires on a group that is still being written.
-  Removing the caps therefore needs a front trigger first. Shed front runs
-  older than the cache window, so a long-lived group holds about one window
-  of media. Port the Rust pool if a browser workload needs a byte bound
-  instead. Otherwise match the Rust contract.
-- Test a single group written continuously for several windows: memory
-  stays near one window, and a reader that falls behind gets refill or
+  Removing the caps therefore needs a front trigger first: shed the front
+  past a 32 MB tail, matching Rust (decided 2026-10-28, maintainer,
+  replacing a front trigger by the cache window's age). Port the Rust pool
+  only if a browser workload needs a smaller byte bound. Otherwise match
+  the Rust contract.
+- Test a single group written continuously past several times the tail:
+  memory stays near 32 MB, and a reader that falls behind refreshes or gets
   `Evicted`.
 - Update `js/json` and its tests, which lean on the removed constants, and
   the compression paths now in `js/net`. The

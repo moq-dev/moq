@@ -36,6 +36,11 @@ pub enum Program {
 /// next call (the same pattern `moq-cli import ... stdin ts` uses against stdin).
 /// [`Self::finish`] keeps the finished broadcasts up for a linger; dropping the
 /// publisher ends them and unannounces their paths.
+///
+/// A step of the source's clock onto another timeline ([`ts::Restart`]), such as a
+/// changeover between two encoders whose clocks were never locked, finishes the broadcast
+/// and republishes the rest of the input on the same path under a new epoch, on the same
+/// connection. [`Program::All`] still ends the ingest there.
 pub struct Publisher {
 	importer: Importer,
 	// The importer's per-stream counters, logged as `moq import ts` logs them, under a
@@ -46,19 +51,67 @@ pub struct Publisher {
 }
 
 enum Importer {
-	One {
-		// TS carries undecoded elementary streams (SCTE-35, teletext, DVB AC-3, ...)
-		// verbatim, so the importer uses the `mpegts` catalog extension rather than the
-		// media-only `()`, which would route those PIDs to `Stream::Ignored` and drop them.
-		import: Box<ts::Import<ts::Ext>>,
-		// Finished at a clean end, so the finished broadcast keeps serving the catalog.
-		catalog: Box<moq_mux::catalog::Producer<ts::Ext>>,
-		// Controls publication while the importer fills it, including finish or close at EOF.
-		broadcast: moq_net::origin::Publication,
-	},
+	One(Box<One>),
 	/// Each program's broadcast is created once the first PAT names it, and announced once its PMT
 	/// declares its tracks.
 	All(Box<ts::Programs>),
+}
+
+/// One program's broadcast, and what the next instance publishes with when the source's
+/// clock steps.
+struct One {
+	instance: Instance,
+	origin: origin::Producer,
+	path: String,
+	config: moq_mux::catalog::Config,
+	program: Option<u16>,
+}
+
+/// One program's broadcast, under one epoch.
+struct Instance {
+	// TS carries undecoded elementary streams (SCTE-35, teletext, DVB AC-3, ...)
+	// verbatim, so the importer uses the `mpegts` catalog extension rather than the
+	// media-only `()`, which would route those PIDs to `Stream::Ignored` and drop them.
+	import: ts::Import<ts::Ext>,
+	// Finished at a clean end, so the finished broadcast keeps serving the catalog.
+	catalog: moq_mux::catalog::Producer<ts::Ext>,
+	// Controls publication while the importer fills it, including finish or close at EOF.
+	broadcast: moq_net::origin::Publication,
+}
+
+impl Instance {
+	/// Publish `path` under a new epoch, importing `program` of the input, or its only one.
+	///
+	/// Each instance is its own publisher, so an encoder reconnecting under the same stream id,
+	/// or a source whose clock stepped, replaces the stale broadcast instead of resuming into it.
+	fn publish(
+		origin: &origin::Producer,
+		path: &str,
+		config: moq_mux::catalog::Config,
+		program: Option<u16>,
+	) -> Result<(Self, moq_net::Epoch)> {
+		let epoch = moq_net::Epoch::mint();
+		let broadcast = origin.publish(path, moq_net::origin::Route::default().with_epoch(epoch.clone()))?;
+		let config = config.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config)?;
+		let mut import = ts::Import::new(broadcast.broadcast().clone(), catalog.reserve());
+		if let Some(program) = program {
+			import = import.with_program(program);
+		}
+		let instance = Self {
+			import,
+			catalog,
+			broadcast,
+		};
+		Ok((instance, epoch))
+	}
+
+	/// Flush the buffered media and finish every track, the catalog included.
+	fn finish(&mut self) -> Result<()> {
+		self.import.finish().map_err(moq_mux::Error::from)?;
+		self.catalog.finish()?;
+		Ok(())
+	}
 }
 
 impl Publisher {
@@ -74,33 +127,32 @@ impl Publisher {
 		config: moq_mux::catalog::Config,
 		program: Option<Program>,
 	) -> Result<Self> {
-		// Each connection is its own publisher instance, so an encoder reconnecting
-		// under the same stream id replaces the stale broadcast instead of resuming into
-		// it. `ts::Programs` mints one per program likewise.
-		let mut epoch = None;
 		let importer = match program {
-			Some(Program::All) => Importer::All(Box::new(ts::Programs::new(
-				origin.clone(),
-				moq_net::Path::new(path).map_err(moq_net::Error::from)?,
-				config,
-			))),
+			// `ts::Programs` mints an epoch per program.
+			Some(Program::All) => {
+				tracing::info!(%path, ?program, "publishing ingest broadcasts");
+				Importer::All(Box::new(ts::Programs::new(
+					origin.clone(),
+					moq_net::Path::new(path).map_err(moq_net::Error::from)?,
+					config,
+				)))
+			}
 			Some(Program::One(_)) | None => {
-				let route = moq_net::origin::Route::default().with_epoch(epoch.insert(moq_net::Epoch::mint()).clone());
-				let broadcast = origin.publish(path, route)?;
-				let config = config.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
-				let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config)?;
-				let mut import = ts::Import::new(broadcast.broadcast().clone(), catalog.reserve());
-				if let Some(Program::One(program)) = program {
-					import = import.with_program(program);
-				}
-				Importer::One {
-					import: Box::new(import),
-					catalog: Box::new(catalog),
-					broadcast,
-				}
+				let program = match program {
+					Some(Program::One(program)) => Some(program),
+					_ => None,
+				};
+				let (instance, epoch) = Instance::publish(origin, path, config.clone(), program)?;
+				tracing::info!(%path, ?program, %epoch, "publishing ingest broadcast");
+				Importer::One(Box::new(One {
+					instance,
+					origin: origin.clone(),
+					path: path.to_string(),
+					config,
+					program,
+				}))
 			}
 		};
-		tracing::info!(%path, ?program, epoch = epoch.as_ref().map(tracing::field::display), "publishing ingest broadcast");
 
 		Ok(Self {
 			importer,
@@ -118,10 +170,31 @@ impl Publisher {
 	/// per-stream counters.
 	pub fn feed(&mut self, data: Bytes) -> Result<()> {
 		match &mut self.importer {
-			Importer::One { import, .. } => import.decode(&data),
-			Importer::All(programs) => programs.decode(&data),
+			Importer::One(one) => {
+				let One {
+					instance,
+					origin,
+					path,
+					config,
+					program,
+				} = &mut **one;
+				let mut data = data;
+				while let Err(err) = instance.import.decode(&data) {
+					let restart = err.downcast::<ts::Restart>().map_err(moq_mux::Error::from)?;
+					// The instance before the step finishes; the rest of the input republishes
+					// the path under a new epoch.
+					instance.finish()?;
+					self.span.in_scope(|| self.log.finish(&instance.import.stats()));
+					let (next, epoch) = Instance::publish(origin, path, config.clone(), *program)?;
+					tracing::warn!(%path, step = %restart.step, %epoch, "the source's clock stepped; republishing");
+					// The finished broadcast ends with its publication.
+					*instance = next;
+					self.log = ts::stats::Log::default();
+					data = restart.remainder;
+				}
+			}
+			Importer::All(programs) => programs.decode(&data).map_err(moq_mux::Error::from)?,
 		}
-		.map_err(moq_mux::Error::from)?;
 		if self.sampled.elapsed() >= ts::stats::Log::INTERVAL {
 			self.sampled = moq_net::time::Instant::now();
 			let _span = self.span.enter();
@@ -132,7 +205,7 @@ impl Publisher {
 
 	fn stats(&self) -> ts::stats::Snapshot {
 		match &self.importer {
-			Importer::One { import, .. } => import.stats(),
+			Importer::One(one) => one.instance.import.stats(),
 			Importer::All(programs) => programs.stats(),
 		}
 	}
@@ -141,14 +214,9 @@ impl Publisher {
 	/// finished broadcast up for `linger`.
 	pub fn finish(mut self, linger: Duration) -> Result<moq_mux::Linger<Self>> {
 		let finished = match &mut self.importer {
-			Importer::One {
-				import,
-				catalog,
-				broadcast,
-			} => {
-				import.finish().map_err(moq_mux::Error::from)?;
-				catalog.finish()?;
-				vec![broadcast.broadcast().clone()]
+			Importer::One(one) => {
+				one.instance.finish()?;
+				vec![one.instance.broadcast.broadcast().clone()]
 			}
 			Importer::All(programs) => programs.finish().map_err(moq_mux::Error::from)?,
 		};
@@ -163,7 +231,8 @@ impl Publisher {
 	/// Consumes the publisher and closes the broadcasts.
 	pub fn abort(self, err: moq_net::Error) {
 		match self.importer {
-			Importer::One { import, broadcast, .. } => {
+			Importer::One(one) => {
+				let Instance { import, broadcast, .. } = one.instance;
 				import.abort(err);
 				broadcast.close();
 			}
@@ -359,19 +428,104 @@ mod tests {
 		out
 	}
 
-	/// Publish `ts` on `path` one SRT payload (7 packets) at a time, each delivered when the
-	/// program clock says it is due.
-	async fn ingest(origin: &moq_net::origin::Producer, path: &str, ts: &[u8]) {
+	/// Publish each of `passes` on `path` through one connection, one SRT payload (7 packets) at
+	/// a time, each delivered when its pass's program clock says it is due. A pass starts as the
+	/// one before ends, whatever its clock reads.
+	async fn ingest(origin: &moq_net::origin::Producer, path: &str, passes: &[&[u8]]) {
 		let mut publisher = Publisher::new(origin, path, Default::default(), None).unwrap();
-		let mut clock = Duration::ZERO;
-		for payload in timed(ts).collect::<Vec<_>>().chunks(7) {
-			let (due, _) = payload[0];
-			tokio::time::advance(due.saturating_sub(clock)).await;
-			clock = clock.max(due);
-			let bytes: Vec<u8> = payload.iter().flat_map(|(_, pkt)| pkt.iter().copied()).collect();
-			publisher.feed(bytes.into()).unwrap();
+		let (mut clock, mut start) = (Duration::ZERO, Duration::ZERO);
+		for ts in passes {
+			for payload in timed(ts).collect::<Vec<_>>().chunks(7) {
+				let due = start + payload[0].0;
+				tokio::time::advance(due.saturating_sub(clock)).await;
+				clock = clock.max(due);
+				let bytes: Vec<u8> = payload.iter().flat_map(|(_, pkt)| pkt.iter().copied()).collect();
+				publisher.feed(bytes.into()).unwrap();
+			}
+			start = clock + Duration::from_millis(40);
 		}
 		drop(publisher.finish(Duration::ZERO).unwrap());
+	}
+
+	/// `ts` with every PCR, PTS and DTS moved by `by` 90 kHz ticks, modulo the 33-bit wrap,
+	/// and no `discontinuity_indicator`: the same programme from another encoder's clock.
+	fn shift(ts: &[u8], by: i64) -> Vec<u8> {
+		const WRAP: i64 = 1 << 33;
+		let mut out = ts.to_vec();
+		for pkt in out.as_chunks_mut::<188>().0 {
+			if let Some(pcr) = pcr(pkt) {
+				let base = (pcr as i64 / 300 + by).rem_euclid(WRAP);
+				pkt[6] = (base >> 25) as u8;
+				pkt[7] = (base >> 17) as u8;
+				pkt[8] = (base >> 9) as u8;
+				pkt[9] = (base >> 1) as u8;
+				pkt[10] = (pkt[10] & 0x7f) | ((base as u8 & 1) << 7);
+			}
+			// A PES start's PTS, and DTS after it, when its header fits the packet.
+			if pkt[1] & 0x40 == 0 || pkt[3] & 0x10 == 0 {
+				continue;
+			}
+			let start = if pkt[3] & 0x20 != 0 { 5 + usize::from(pkt[4]) } else { 4 };
+			if pkt.len() < start + 19 || pkt[start..start + 3] != [0, 0, 1] {
+				continue;
+			}
+			let fields = match pkt[start + 7] >> 6 {
+				0b10 => 1,
+				0b11 => 2,
+				_ => 0,
+			};
+			for field in 0..fields {
+				let f = &mut pkt[start + 9 + 5 * field..start + 14 + 5 * field];
+				let t = (i64::from(f[0] >> 1 & 0x07) << 30)
+					| (i64::from(f[1]) << 22)
+					| (i64::from(f[2] >> 1) << 15)
+					| (i64::from(f[3]) << 7)
+					| i64::from(f[4] >> 1);
+				let t = (t + by).rem_euclid(WRAP);
+				f[0] = (f[0] & 0xf1) | ((t >> 29) as u8 & 0x0e);
+				f[1] = (t >> 22) as u8;
+				f[2] = ((t >> 14) as u8 & 0xfe) | 1;
+				f[3] = (t >> 7) as u8;
+				f[4] = ((t << 1) as u8 & 0xfe) | 1;
+			}
+		}
+		out
+	}
+
+	/// A source switched between two encoders whose clocks started hours apart, without a
+	/// `discontinuity_indicator`, either way: the ingest republishes under a new epoch on the
+	/// same connection, and an egress that stitches replacements carries on into it.
+	#[tokio::test(start_paused = true)]
+	async fn a_clock_step_republishes_under_a_new_epoch() {
+		// The issue's step: two encoders started about 4 h 40 m apart.
+		const SWITCH: i64 = 16_844 * 90_000 + 45_000;
+		for step in [-SWITCH, SWITCH] {
+			let origin = produce_origin();
+			let options = Options {
+				latency: Duration::from_secs(1),
+				follow: Duration::from_secs(30),
+				stitch: true,
+			};
+			let consumer = origin.consume();
+			let egress = tokio::spawn(async move {
+				let mut subscriber = Subscriber::new(&consumer, "ingest", options).await.unwrap().unwrap();
+				// The frames each program clock generation carried.
+				let mut generations = std::collections::BTreeMap::<u64, usize>::new();
+				while let Some(frame) = subscriber.next().await.expect("the egress follows the restart") {
+					if !frame.payload.is_empty() {
+						*generations.entry(subscriber.discontinuity()).or_default() += 1;
+					}
+				}
+				generations
+			});
+			let second = shift(BBB5S, step);
+			ingest(&origin, "ingest", &[BBB5S, &second]).await;
+			let generations = egress.await.unwrap();
+			assert!(
+				generations.len() >= 2 && generations.values().all(|&frames| frames > 0),
+				"{step}: the egress switched programs: {generations:?}"
+			);
+		}
 	}
 
 	/// One payload-only TS packet carrying a complete PSI section (PUSI + pointer_field
@@ -623,9 +777,9 @@ mod tests {
 	async fn publisher_reports_a_silent_pid() {
 		const VIDEO: u16 = 0x100;
 		let origin = produce_origin();
-		ingest(&origin, "intact", BBB5S).await;
+		ingest(&origin, "intact", &[BBB5S]).await;
 		let stimulus = suppress(BBB5S, VIDEO, Duration::from_millis(1500), Duration::from_millis(3500));
-		ingest(&origin, "silent", &stimulus).await;
+		ingest(&origin, "silent", &[&stimulus]).await;
 
 		logs_assert(|lines: &[&str]| {
 			let stopped: Vec<_> = lines
