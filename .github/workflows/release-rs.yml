@@ -36,6 +36,9 @@ jobs:
 
     runs-on: ubuntu-latest
     if: ${{ github.repository_owner == 'moq-dev' && github.ref == 'refs/heads/release' }}
+    # Write credentials live in the `publish` Environment, which only protected
+    # refs can deploy to. The R2 cache pair stays the repository's read key.
+    environment: publish
 
     env:
       # release-plz copies each crate into its own temp directory to compare it

@@ -61,6 +61,8 @@ jobs:
             rust: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
+    # The Cachix write token lives in the protected `publish` Environment.
+    environment: publish
 
     steps:
       - name: Free disk space
