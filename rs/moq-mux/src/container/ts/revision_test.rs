@@ -1306,6 +1306,33 @@ async fn a_pmt_moved_onto_a_draining_stream_waits_for_it() {
 	);
 }
 
+/// A catalog that stops recording a PMT PID while a move waits for a draining stream cancels
+/// the move: the PMT stays where it is once the stream has drained.
+#[tokio::test(start_paused = true)]
+async fn a_catalog_dropping_the_pmt_pid_cancels_a_waiting_move() {
+	let (mut broadcast, consumer, mut catalog) = broadcast();
+	catalog.modify().unwrap().ext.mpegts.program = Some(program(PMT_PID));
+	let (_, mut audio) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
+	let (name, mut leaving) = aac_track(&mut broadcast, &mut catalog, Some(OTHER_AUDIO_PID));
+	let mut frames = Vec::new();
+	let start = tokio::time::Instant::now();
+	let mut export = export_of(&consumer).await;
+	let mut tracks = [(&mut audio, 0x21), (&mut leaving, 0x22)];
+	live(&mut export, &mut frames, start, &mut tracks, 0, 3_000).await;
+	remove(&mut catalog, &name);
+	catalog.modify().unwrap().ext.mpegts.program = Some(program(OTHER_AUDIO_PID));
+	live(&mut export, &mut frames, start, &mut tracks, 3_000, 3_500).await;
+	catalog.modify().unwrap().ext.mpegts.program = Some(program(0));
+	live(&mut export, &mut frames, start, &mut tracks, 3_500, 4_000).await;
+	leaving.finish().unwrap();
+	live(&mut export, &mut frames, start, &mut [(&mut audio, 0x21)], 4_000, 6_000).await;
+	audio.finish().unwrap();
+	catalog.finish().unwrap();
+	drain(&mut export, &mut frames).await;
+
+	assert_eq!(pats(&frames), [(0, PMT_PID)]);
+}
+
 /// A catalog that gives a stream back the PID the PMT waits to move onto fails the export.
 #[tokio::test(start_paused = true)]
 async fn a_stream_returning_to_the_pid_the_pmt_waits_for_fails_the_export() {

@@ -2828,6 +2828,10 @@ where
 	/// the PMT where it is.
 	fn move_pmt(&mut self, mpegts: &catalog::Mpegts) -> anyhow::Result<()> {
 		let Some(pid) = self.program.program.as_ref().map(|s| s.pmt_pid).filter(|&pid| pid != 0) else {
+			// The catalog no longer asks for a move, so drop one that is still waiting.
+			if let Some(psi) = self.program.psi.as_mut() {
+				psi.moving = None;
+			}
 			return Ok(());
 		};
 		let Some(psi) = self.program.psi.as_mut() else {
