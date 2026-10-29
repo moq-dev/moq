@@ -83,12 +83,19 @@ cannot claim a newer fill, including handlers already waiting for an answer.
 The unchanged widening integration case now passes. All 3,139 enabled moq-net
 tests pass (12 skipped), including the new delayed-header ownership case.
 
-Remaining: finish feasible local CI and `just test interop --all`. The initial
-interop run passed all nine Rust/JS protocol tests, then hit the local Cargo
-cache wrapper's `Argument list too long` error while building client binaries.
-A run using the same pinned Nix toolchain directly is queued through `quest gate`.
-Compatibility pin remeasurement remains owned by
-[moq-dev/moq#7061](https://github.com/moq-dev/moq/pull/7061); do not repin here.
+`just test interop --all` passed in full, including all nine Rust/JS protocol
+tests, every language client, finished streams, tails, compression, and resets.
+Net TypeScript (including examples and benchmarks), Biome, Rust formatting, and
+quest validation passed. The earlier JS fill benchmark completed its
+cached-groups × subscribers sweep.
+
+Remaining: complete the running local CI gate, then remove this quest and its
+links. The local Cargo-cache wrapper failed with `Argument list too long`;
+interop succeeded using the pinned Nix toolchain with BASH_ENV disabled, and CI
+is running in that same environment. Compatibility preflight confirms stale
+planned pins (moq-cli 0.14.8 versus published 0.14.9). Pin remeasurement remains
+owned by [moq-dev/moq#7061](https://github.com/moq-dev/moq/pull/7061); do not
+repin here.
 
 Public API: none. Wire: our publishers refuse multi-group FETCH with
 NOT_SUPPORTED, fail multi-group fills, and ignore FILL_TIMEOUT.
