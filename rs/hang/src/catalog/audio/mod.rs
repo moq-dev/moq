@@ -235,6 +235,21 @@ impl AudioConfig {
 			hls: None,
 		}
 	}
+
+	/// Whether `other` keeps this config's track identity: the fields a consumer cannot change
+	/// without reinitializing its decoder or demuxer (`codec`, `description`, `container`,
+	/// `sample_rate`, and `channel_count`).
+	///
+	/// A track name always means the same content, so a publisher that changes any of them
+	/// publishes under a new name; every other field may update in place. See the draft's
+	/// [Track Identity](https://github.com/moq-dev/moq/blob/main/drafts/draft-lcurley-moq-hang.md#identity).
+	pub fn same_identity(&self, other: &Self) -> bool {
+		self.codec == other.codec
+			&& self.description == other.description
+			&& self.container == other.container
+			&& self.sample_rate == other.sample_rate
+			&& self.channel_count == other.channel_count
+	}
 }
 
 #[cfg(test)]

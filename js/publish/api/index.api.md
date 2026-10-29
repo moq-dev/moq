@@ -117,7 +117,6 @@ export namespace Audio {
 export class Broadcast {
 	constructor(props?: Signals.Inputs<BroadcastInput>);
 	static readonly CATALOG_TRACK: "catalog.json";
-	static readonly CATALOG_TRACK_COMPRESSED: "catalog.json.z";
 	audio(name: string): Rendition<Hang.Catalog.Audio.AudioConfig>;
 	readonly catalog: CatalogProducer;
 	close(): void;
@@ -137,6 +136,7 @@ export type BroadcastInput = {
 	flip: Signals.Getter<boolean>;
 	maxAge: Signals.Getter<Clock.Milli | undefined>;
 	name: Signals.Getter<Net.Path.Valid>;
+	onDemand: Signals.Getter<boolean>;
 	origin: Signals.Getter<Net.Origin.Table | undefined>;
 	rotation: Signals.Getter<number>;
 };
@@ -144,9 +144,7 @@ export type BroadcastInput = {
 export class CatalogProducer {
 	constructor();
 	mutate(fn: (catalog: Hang.Catalog.Root) => void): void;
-	serve(track: Net.Track.Producer, effect: Signals.Effect, opts?: {
-		compression?: boolean;
-	}): void;
+	serve(track: Net.Track.Producer, effect: Signals.Effect): void;
 }
 
 export * as Clock from "@moq/clock";

@@ -21,6 +21,7 @@ lite-07; bitrate enforcement is not part of this release.
 ## Required
 
 - [Release execution](/quest/m2/release/README.md) - publication, installed-artifact proof, cleanup, and downstream adoption after m1
+- [Video quality](/quest/m2/video-quality/README.md) - a nightly VMAF harness grades every encoder backend and on-demand GoP pops against floors, and moq-boy's encode is fixed under it
 - [noq adopts moq-congestion](/quest/m2/noq-congestion.md) - noq's BBR3 and Cubic delegate to the published crate behind noq's unchanged API
 - [Byte streams](/quest/m2/stream/README.md) - TCP connections ride MoQ losslessly through relays, proxied per hop rather than as IP packets
 - [Mesh](/quest/m2/mesh/README.md) - `moq mesh` enrolls a host or robot and reaches any node by endpoint ID or name for SSH, forwards, and agents
@@ -28,6 +29,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [rust2 publishes its UniFFI fork](/quest/m2/rust2-uniffi.md) - waiting on kixelated/rust2 to import UniFFI and moq's generators and publish them
 - [Switch to rust2's UniFFI](/quest/m2/uniffi-fork.md) - moq-ffi and every wrapper build from kixelated/rust2's fork under one pin, and moq's generator code is deleted
 - [Generated C bindings](/quest/m2/c/README.md) - C generated from moq-ffi ships as `moq-c` 0.8.0 and replaces the hand-written crate
+- [A runtime-free QUIC driver](/quest/m2/quic-sansio-driver.md) - a caller's own loop moves UDP datagrams and polls moq sessions over moq-quic, for rust2's bindings
 - [MoQ on rind](/quest/m2/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto
 - [Benchmark sources](/quest/m2/bench-sources.md) - every measuring nightly benchmark feeds the regression table, and none is a smoke run
 - [Poll-native async](/quest/m2/ffi-poll-migrate.md) - moq-ffi's pure-kio async exports poll their state directly instead of going through `ffi::Task`
@@ -38,6 +40,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [Re-init retires timelines](/quest/m2/reinit-retire.md) - fMP4 and MKV re-inits retire the old timeline, so import state stays bounded
 - [Replaced producers retire their records](/quest/m2/producer-retire.md) - encoders and bindings retire a replaced producer's HLS records
 - [Broadcast fairness](/quest/m2/broadcast-fairness.md) - broadcasts share a cluster link fairly, so one tenant's priority never starves another's
+- [Cache fair share](/quest/m2/cache-fairness.md) - one tenant cannot crowd another out of the relay's shared group cache
 - [Peer grant bound](/quest/m2/peer-grant-bound.md) - a peer's AUTH_OK costs near-linear time in its bytes on every input shape, in Rust and in a browser
 - [Plan: watch worker](/quest/m2/plan-watch-worker.md) - prototype an invisible page worker against app-spawned workers, and land the jank harness that decides
 - [Watch worker](/quest/m2/watch-worker.md) - watch playback runs in a worker onto an OffscreenCanvas, so main-thread jank never stalls video or audio
@@ -76,6 +79,8 @@ lite-07; bitrate enforcement is not part of this release.
 - [Wire stats](/quest/m2/wire-stats/README.md) - `Presence` counts each root's transport bytes on the wire, `wire_tx` and `wire_rx`, from QUIC, WebSocket, and embedder gateway sources
 - [Performance survey follow-ups](/quest/m2/performance-survey/README.md) - benchmark the source audit's transport, browser, media and serving risks before optimizing
 - [Transport x version benches](/quest/m2/bench-transport-sweep.md) - the session benches sweep transports as well as versions
+- [Shared group serving and ingest](/quest/m2/shared-serve.md) - Rust's moq-lite and moq-transport sessions serve and ingest groups through one poll machine each, with only wire encoding per protocol
+- [Shared group serving and ingest in JS](/quest/m2/shared-serve-js.md) - the same split in js/net, following the Rust seam
 - [Paired bench BASE](/quest/m2/bench-base-paired.md) - `just bench <base>` uses the nightly's paired comparison and the old one is deleted
 - [Relay NixOS module](/quest/m2/nix-relay-module.md) - module edits run moq-relay's tests, and `cluster.rootUrl` takes several peers
 - [Read-only lookup](/quest/m2/read-only-lookup.md) - a live track lookup stops waking the front and every demand watcher
@@ -103,8 +108,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [PulseAudio capture periods](/quest/m2/pulseaudio-capture-period.md) - capture on cpal's PulseAudio host arrives in short periods, not the server's 2 s default fragment, proven on the null sink's monitor
 - [Bindings size profile](/quest/m2/ffi-size-profile.md) - a benchmark decides whether the moq-ffi builds ship at opt-level "s", which halves the dylib
 - [The catalog publish path compiles once](/quest/m2/catalog-publish-once.md) - the catalog producer and its JSON diff codegen in `moq-mux` instead of once per importer crate, about 1 MiB of the CLI
-- [crates.io trusts the workflow](/quest/m2/crates-trusted-publisher.md) - maintainer action: every published crate gets a trusted publisher for `release-rs.yml`
-- [Rust releases publish through OIDC](/quest/m2/release-rs-oidc.md) - release-plz publishes with trusted publishing and `CARGO_REGISTRY_TOKEN` is revoked
 - [Go module proxy](/quest/m2/go-module-proxy.md) - `moq.dev/moq-ffi` ships from a static GOPROXY we host, so its staticlibs stop growing git history by ~61 MiB per release
 - [Go per-platform lib modules](/quest/m2/go-ffi-platform-modules.md) - a Go build downloads only the host's staticlib, and `go mod vendor` works
 - [Go cancelled results](/quest/m2/go-cancelled-result.md) - a Go call cancelled as it completes destroys the handle it produced instead of leaving it to the finalizer
@@ -119,6 +122,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [Resume as producer replacement](/quest/m2/resume-redesign.md) - route changes replace the writer of one track state, deleting the per-reader resume path in Rust and JS
 - [moq-transport requests end through one lease](/quest/m2/ietf-request-lease.md) - every IETF request ends through one polled lease, and the two 18k-line files split by mechanism
 - [A moq-transport group head fills its hole in place](/quest/m2/ietf-fill-refill.md) - fills and joining FETCHes write into the tail's group, deleting the `Fill` handoff
+- [moq-transport hole markers](/quest/m2/ietf-hole-marker.md) - a negotiated extension names a SUBSCRIBE's holes, so our publishers answer multi-group FETCH from caches that know every group
 - [Announce interest streams share one route table](/quest/m2/announce-interest-memory.md) - per-stream announce cost follows what is in flight, not every route
 - [One relay serve path for every runtime](/quest/m2/relay-serve-path.md) - io_uring serves through the shared `Connection::serve` and config mapping
 - [A parked read of a resumed group reads its budget without re-syncing](/quest/m2/recover-budget.md) - measure, then drop the per-frame reader sync
@@ -226,6 +230,9 @@ lite-07; bitrate enforcement is not part of this release.
 - [Dependency and alternatives audit](/quest/m2/audit-deps.md) - dependencies are current, deduplicated, needed, and the best maintained option
 - [Dead code and API surface audit](/quest/m2/audit-dead-code.md) - repeat the removal audit before the next major release
 - [Typecheck with bun check](/quest/m2/bun-check.md) - workspace packages typecheck through bun once nixpkgs ships bun 1.4.4
+- [Upgrade Biome to 2.6](/quest/m2/biome-2-6.md) - the workspace runs Biome 2.6.4+ with its new formatters off and no file reformatted
+- [Format YAML with Biome](/quest/m2/biome-yaml.md) - `just check` fails on unformatted YAML
+- [Format Markdown with Biome](/quest/m2/biome-markdown.md) - Biome formats every Markdown file and remark is gone, landed in a quiet window
 - [Test coverage audit](/quest/m2/audit-test-coverage.md) - repeat the coverage audit against the m1 baselines after the next release ships
 - [Documentation audit](/quest/m2/audit-docs.md) - repeat the docs audit after the release ships, against the m1 baselines
 - [Test cost audit](/quest/m2/audit-test-cost.md) - the slowest, flakiest, and least valuable tests are fixed, deleted, or planned once the release ships
@@ -238,7 +245,8 @@ lite-07; bitrate enforcement is not part of this release.
 - [Artifact size audit](/quest/m2/audit-size.md) - repeat the shipping, native, WASM and browser attribution after the release ships
 - [Compile time audit](/quest/m2/audit-compile-time.md) - build-time hotspots are measured against the m1 baselines, starting with the transport share now that moq-net compiles once, and the worst are fixed or planned
 - [Lint override and deprecation audit](/quest/m2/audit-lints.md) - repeat the suppression and deprecation audit after the release ships, starting with clippy on the macOS and Windows targets
-- [Bound cmsg payload reads](/quest/m2/cmsg-decode-bound.md) - `CMsg::decode` refuses a short control message
+- [Bound cmsg payload reads](/quest/m2/cmsg-decode-bound.md) - `CMsg::decode` refuses a short control message, and Tokio sockets keep the ECN mark
+- [Tenant matrix on both runtimes](/quest/m2/tenant-matrix.md) - tenant, mount, HTTP, normalization, and revalidation boundaries are tested on Tokio and io_uring
 - [One typed SETUP parse](/quest/m2/setup-parse-once.md) - one function replaces three SETUP parameter parses
 - [Archive reads against a real store](/quest/m2/archive-store-bench.md) - LIST/GET counts and latency over track count
 - [Quiet logs for clean ends](/quest/m2/quiet-clean-close-logs.md) - clean probe ends and unroutable requests log at debug

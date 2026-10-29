@@ -17,12 +17,12 @@ slices for iOS 16+, the iOS Simulator, and macOS 12.3+.
 `.named(name:)` or `.requested(request)` target. `Media.CatalogProducer(broadcast:)`
 updates catalog properties and sections without keeping the broadcast open.
 Its writes fail after closing or releasing the broadcast.
-`Flate.SnapshotProducer` / `StreamProducer` publish opaque bytes with an optional `timestampUs`.
+Publish JSON tracks with `TrackInfo(compress: true)`; a `Json` consumer reads one with no option of its own.
 A missing data timestamp stays untimed; the library never substitutes zero or now.
 `Json` consumers yield `Json.Timed` (`value`, `timestampUs`); a snapshot consumer yields each state in order,
 and `latest()` skips to the newest. Read timestamps are rounded down to a whole microsecond.
 Raw tracks with a `nil` timescale are untimed on both publish and receive.
-`MoqTrackInfo.compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. `@moq/net` cannot read a compressed track yet.
+`MoqTrackInfo.compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
 Timed raw/data tracks require caller-supplied timestamps. Use `Media.CatalogProducer.now()` to stamp a locally
 created event on the broadcast clock; reading it fixes that clock for later media producers.
@@ -109,7 +109,7 @@ shows which module holds each.
 - **Authorization.** On `moq-lite-07-wip` (opt in with `Client(versions:)`) and on moq-transport draft-18+ with the [MoQ Auth extension](/draft/moq-auth), `for try await grant in session.grants()` yields the `Grant` the relay sent back and each change, `nil` until it answers and while a client session reconnects. Cancelling the iterating task cancels the native wait.
 - **Tokens.** Pass `Client(tokens: [...])` instead of putting the credential in the URL. The first is the connection credential, sent in SETUP and, while an offered version can't carry it there (lite before 07), as the URL's `?jwt=`; each other token widens the grant over AUTH. `try session.tokens()?.set([...])` replaces them before they expire: the next dial presents them, a live AUTH session at once, and after an authorization refusal the session redials only if they changed. `try await tokens.answered()` returns once the relay accepts them and throws its refusal with the relay's code. A `?jwt=` already in the URL stays the connection credential, which is how to reach a relay older than this release.
 - **Errors.** Diagnostic cases use the `reason:` argument label; match their associated value to inspect it. Protocol errors carry `details`.
-- **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode.
+- **Disabled renditions.** A rendition with `enabled: false` has no frames coming until its publisher re-enables it. Select an enabled rendition from the latest catalog before opening a decoder. Keep one already playing while every rendition of its kind is disabled: the convenience decoders accept a disabled configuration, and a re-enable, such as an unmute, then plays without a resubscribe. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode.
 - **Track demand.** Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
 
 ## Runtime

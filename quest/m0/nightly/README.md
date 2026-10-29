@@ -31,7 +31,9 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [moq-net compiles in Fuzz and send-depth](/quest/m0/nightly/send-overflow.md) - the ietf publisher future stops overflowing the Send check
+- [The software renderer tests both capability paths](/quest/m0/nightly/render-capabilities.md) - the software-renderer lane verifies output selection with and without DMA-BUF import support without requiring hardware the runner lacks
+- [The browser backend baseline completes on IETF22](/quest/m0/nightly/browser-baseline.md) - the WASM and UniFFI backend baseline completes every supported transport case without an internal error
+- [Resolve the paired catalog fanout regressions](/quest/m0/nightly/paired-shared.md) - the reported catalog fanout regressions are attributed and genuine extra costs are fixed with paired measurements
 - [Probing beside Cubic](/quest/m0/nightly/competing-cubic.md) - the `competing_cubic` probe test stays within its deadline budget
 - [Gate stops hanging](/quest/m0/nightly/gate-hang.md) - `just gate` finishes instead of hanging to the timeout, and a hang names its module
 - [moq-quic rustdoc](/quest/m0/nightly/quic-rustdoc.md) - `--all-features` rustdoc for moq-quic builds and a lane checks it
