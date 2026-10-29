@@ -16,9 +16,11 @@ skips are the "Gone since it was listed" path in `#answerFetch` and the
 
 Decided with the maintainer on 2026-10-28:
 
-- **`0x10C` on both drafts.** Both define End of Unknown Range, and the
-  FILL_TIMEOUT path already sends it on draft 18. Nothing ends the FETCH
-  early, and FETCH_OK's end is unchanged.
+- **`0x10C` on both drafts.** Both define End of Unknown Range. Nothing ends
+  the FETCH early, and FETCH_OK's end is unchanged. Once
+  [one group](/quest/m1/ietf-publisher-one-group.md) lands, a FETCH or fill
+  lists at most one group and the FILL_TIMEOUT markers are gone, so this is
+  the one path that still sends `0x10C`.
 - **In m1**, so both JS gap paths are honest at the cut.
 
 Test on mocked time: evict a listed group between listing and writing, on

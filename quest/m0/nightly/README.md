@@ -35,7 +35,6 @@ Public API: none. Wire: none.
 - [The software renderer tests both capability paths](/quest/m0/nightly/render-capabilities.md) - the software-renderer lane verifies output selection with and without DMA-BUF import support without requiring hardware the runner lacks
 - [The browser publisher completes its fairness sweep](/quest/m0/nightly/publisher-fairness.md) - the publisher fairness benchmark completes its backlog on the hosted ARM runner, yielding browser tasks while serving every group
 - [The browser backend baseline completes on IETF22](/quest/m0/nightly/browser-baseline.md) - the WASM and UniFFI backend baseline completes every supported transport case without an internal error
-- [A Firefox late join reaches live playback](/quest/m0/nightly/firefox-late-join.md) - a Firefox player joining a live broadcast catches up within the media harness's derived playback deadline
 - [A stitched restart signals every TS discontinuity](/quest/m0/nightly/stitch-discontinuity.md) - a restarted publisher exported with stitching signals the program break on every affected PID
 - [Resolve the paired network microbenchmark regressions](/quest/m0/nightly/paired-net.md) - the reported network microbenchmark regressions are attributed and genuine extra costs are fixed with paired measurements
 - [Resolve the paired catalog fanout regressions](/quest/m0/nightly/paired-shared.md) - the reported catalog fanout regressions are attributed and genuine extra costs are fixed with paired measurements
