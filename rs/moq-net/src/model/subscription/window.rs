@@ -363,8 +363,8 @@ impl Window {
 			return !self.pending;
 		}
 		let mut moved = false;
-		// A relative end keeps counting back from the latest group it was asked against, not
-		// one that arrived while the start waited.
+		// A relative end counts back from the latest group when asked, or the first observed
+		// group on an empty track, even while the time start waits.
 		for (index, latest) in std::mem::take(&mut self.waiting) {
 			moved |= self.span(index, latest, holdings);
 		}
@@ -586,6 +586,10 @@ impl Window {
 		if range.is_empty() {
 			return false;
 		}
+		let Some(end) = end(range.end, latest) else {
+			self.pending = true;
+			return false;
+		};
 		let (start, floored) = match start(range.start, latest, holdings) {
 			Start::At(start, floored) => (start, floored),
 			Start::Waiting => {
@@ -596,10 +600,6 @@ impl Window {
 				self.pending = true;
 				return false;
 			}
-		};
-		let Some(end) = end(range.end, latest) else {
-			self.pending = true;
-			return false;
 		};
 		let end = match end {
 			End::Time(mut time) => {
@@ -1155,20 +1155,27 @@ mod tests {
 	/// arrive while its time start waits.
 	#[test]
 	fn a_waiting_time_start_keeps_its_relative_end() {
-		let mut groups = Groups::new((2..11).map(|sequence| (sequence, Held::Pending)));
-		let ranges = [range(time(2500), Anchor::Relative(0))];
-		let mut window = Window::new(&ranges, Some(9), &groups).unwrap();
-		assert!(!window.settle(Some(10), &groups), "nothing started");
+		for latest in [None, Some(9)] {
+			let mut groups = Groups::default();
+			let ranges = [range(time(2500), Anchor::Relative(0))];
+			let mut window = Window::new(&ranges, latest, &groups).unwrap();
+			assert_eq!(window.is_pending(), latest.is_none());
+			groups.held.extend((2..10).map(|sequence| (sequence, Held::Pending)));
+			window.settle(Some(9), &groups);
+			assert!(!window.is_pending());
+			groups.held.insert(10, Held::Pending);
+			assert!(!window.settle(Some(10), &groups), "nothing started");
 
-		groups.held.insert(2, Held::Started(at(2000)));
-		assert!(window.settle(Some(10), &groups));
-		assert_eq!(
-			window.resolved()[0],
-			Some(Resolved {
-				start: 2,
-				end: Some(10)
-			})
-		);
+			groups.held.insert(2, Held::Started(at(2000)));
+			assert!(window.settle(Some(10), &groups));
+			assert_eq!(
+				window.resolved()[0],
+				Some(Resolved {
+					start: 2,
+					end: Some(10)
+				})
+			);
+		}
 	}
 
 	#[test]

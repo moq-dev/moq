@@ -548,8 +548,8 @@ export class Window {
 		let moved = false;
 		const waiting = this.#waiting;
 		this.#waiting = [];
-		// A relative end keeps counting back from the latest group it was asked against, not
-		// one that arrived while the start waited.
+		// A relative end counts back from the latest group when asked, or the first observed
+		// group on an empty track, even while the time start waits.
 		for (const { index, latest } of waiting) {
 			if (this.#span(index, latest, holdings)) moved = true;
 		}
@@ -693,13 +693,17 @@ export class Window {
 	#span(index: number, latest: number | undefined, holdings: Holdings): boolean {
 		const range = this.ranges[index];
 		if (isEmpty(range)) return false;
+		const until = endOf(range.end, latest);
+		if (until === undefined) {
+			this.#pending = true;
+			return false;
+		}
 		const start = startOf(range.start, latest, holdings);
 		if (start === "waiting") {
 			this.#waiting.push({ index, latest });
 			return false;
 		}
-		const until = endOf(range.end, latest);
-		if (start === undefined || until === undefined) {
+		if (start === undefined) {
 			this.#pending = true;
 			return false;
 		}
