@@ -110,9 +110,10 @@ export type BroadcastInput = {
 	// The broadcast name.
 	name: Getter<Moq.Path.Valid>;
 
-	// Whether to wait for the broadcast to be announced before subscribing.
-	// Defaults to true; pass false to subscribe immediately without waiting for an announcement.
-	announced: Getter<boolean>;
+	// Whether to follow the broadcast's announcements (`Origin.follow`), waiting for one before
+	// subscribing and moving to each restart. Defaults to true; pass false to request it once
+	// (`Origin.request`), subscribing immediately without waiting for an announcement.
+	follow: Getter<boolean>;
 
 	// Which catalog format to use. When `undefined` (the default), the format is
 	// auto-detected from the broadcast name extension (`.hang`, `.msf`), falling
@@ -133,7 +134,7 @@ export type BroadcastOutput = {
 	active: Signal<Moq.Broadcast.Consumer | undefined>;
 
 	// Why the origin refused the broadcast, while `status` is "error". A refusal is final:
-	// only a fresh request (a new `name`, `origin`, or `announced`, or re-enabling) clears it and asks again.
+	// only a fresh request (a new `name`, `origin`, or `follow`, or re-enabling) clears it and asks again.
 	error: Signal<Error | undefined>;
 
 	// The effective catalog: the fetched one, or a copy of input.catalog in manual mode, minus
@@ -168,7 +169,7 @@ export class Broadcast {
 	// Requests are shared by callers; each owns its restart watch in the origin.
 	readonly #references = new Map<
 		Moq.Path.Valid,
-		{ origin: Moq.Origin.Table; announced: boolean; request: Moq.Origin.Requesting; users: number }
+		{ origin: Moq.Origin.Table; follow: boolean; request: Moq.Origin.Requesting; users: number }
 	>();
 
 	// The catalog as published, before renditions this consumer cannot use are dropped. Kept
@@ -182,15 +183,15 @@ export class Broadcast {
 	#signals: Effect;
 
 	constructor(props?: Inputs<BroadcastInput>) {
-		if (props && "reload" in props) {
-			throw new Error("Watch.Broadcast: `reload` was renamed to `announced`");
+		for (const renamed of ["reload", "announced"]) {
+			if (props && renamed in props) throw new Error(`Watch.Broadcast: \`${renamed}\` was renamed to \`follow\``);
 		}
 		this.#signals = new Effect();
 		this.in = {
 			origin: getter(props?.origin),
 			name: getter(props?.name ?? Path.empty()),
 			enabled: getter(props?.enabled ?? true),
-			announced: getter(props?.announced ?? true),
+			follow: getter(props?.follow ?? true),
 			catalogFormat: getter<CatalogFormat | undefined>(props?.catalogFormat),
 			catalog: getter(props?.catalog),
 		};
@@ -248,11 +249,11 @@ export class Broadcast {
 		origin: Moq.Origin.Table,
 		path: Moq.Path.Valid,
 	): Moq.Broadcast.Consumer | undefined {
-		const announced = effect.get(this.in.announced);
+		const follow = effect.get(this.in.follow);
 		let entry = this.#references.get(path);
-		if (!entry || entry.origin !== origin || entry.announced !== announced) {
+		if (!entry || entry.origin !== origin || entry.follow !== follow) {
 			entry?.request.close();
-			entry = { origin, announced, request: announced ? origin.follow(path) : origin.request(path), users: 0 };
+			entry = { origin, follow, request: follow ? origin.follow(path) : origin.request(path), users: 0 };
 			this.#references.set(path, entry);
 		}
 
@@ -279,11 +280,11 @@ export class Broadcast {
 		if (!origin) return;
 
 		const name = effect.get(this.in.name);
-		const announced = effect.get(this.in.announced);
+		const follow = effect.get(this.in.follow);
 
 		let request: Moq.Origin.Requesting;
 		try {
-			request = announced ? origin.follow(name) : origin.request(name);
+			request = follow ? origin.follow(name) : origin.request(name);
 		} catch (err) {
 			effect.set(this.#out.error, err instanceof Error ? err : new Error(String(err)), undefined);
 			return;
@@ -301,7 +302,7 @@ export class Broadcast {
 			// A follower outlives its instances, so only a refusal ends it. A plain request
 			// ends with its accepted instance, which reads as offline rather than an error.
 			const offline =
-				!announced && resolved && closed instanceof NetError.Stream && closed.code === StreamCode.Unroutable;
+				!follow && resolved && closed instanceof NetError.Stream && closed.code === StreamCode.Unroutable;
 			if (!offline) nested.set(this.#out.error, closed, undefined);
 		});
 	}
@@ -435,7 +436,7 @@ export class Broadcast {
 		// resolve blind rather than waiting for an announcement that never comes. With the
 		// gate, only report the path usable once it is announced: the request then resolves
 		// from the table, never blind.
-		if (effect.get(this.in.announced) && effect.get(origin.discovery) !== false) {
+		if (effect.get(this.in.follow) && effect.get(origin.discovery) !== false) {
 			if (!this.#isPathAnnounced(effect, origin, resolved)) return undefined;
 		}
 
