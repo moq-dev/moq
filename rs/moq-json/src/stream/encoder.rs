@@ -5,41 +5,28 @@ use std::marker::PhantomData;
 use bytes::Bytes;
 use serde::Serialize;
 
-use crate::{Compression, Error, Result};
+use crate::Result;
 
 /// Codec options for an [`Encoder`], and so for the [`Producer`](super::Producer) wrapping one.
 ///
-/// Build from [`Default`] and override fields (the struct is `#[non_exhaustive]`, so new
-/// options stay additive).
+/// Empty for now. Build from [`Default`]; the struct is `#[non_exhaustive]`, so new options stay
+/// additive.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
-pub struct Config {
-	/// Compress the group as one sync-flushed DEFLATE stream, so each record reuses the earlier
-	/// ones as context and shrinks sharply.
-	///
-	/// [`Compression::None`] (the default) emits plaintext JSON frames. A [`Decoder`](super::Decoder)
-	/// reading them must set the same [`compression`](Self::compression).
-	pub compression: Compression,
-}
+pub struct Config {}
 
 /// An encoded record the caller has not yet acknowledged writing.
 ///
 /// Returned by [`Encoder::encode`]. Write the [`payload`](Self::payload), then
 /// [`commit`](Self::commit).
 ///
-/// A frame that is never committed never reached the wire. With compression on that is
-/// unrecoverable within the group: the window is ahead of what the consumer holds, and a log has no
-/// keyframe to resynchronize on the way [`snapshot`](crate::snapshot) does. So the encoder refuses
-/// to encode anything further ([`Error::Desync`]) until the caller rolls a new group and calls
-/// [`Encoder::reset`]. Without compression each record stands alone, so a dropped one leaves a gap
-/// in the log but nothing undecodable, and encoding continues.
-#[must_use = "write and commit the record; an uncommitted compressed record stops the encoder"]
+/// A frame that is never committed never reached the wire. Each record stands alone, so a dropped
+/// one leaves a gap in the log but nothing undecodable, and encoding continues; it is just not
+/// charged to the group's budget.
+#[must_use = "write and commit the record so it counts against the group's budget"]
 pub struct Pending<'a, T> {
 	encoder: &'a mut Encoder<T>,
 	payload: Bytes,
-	/// What the record costs the group's budget: its plaintext or its slice, whichever is larger.
-	charge: u64,
-	committed: bool,
 }
 
 impl<T> Pending<'_, T> {
@@ -48,45 +35,26 @@ impl<T> Pending<'_, T> {
 		&self.payload
 	}
 
-	/// Acknowledge that the record reached the wire, keeping the encoder's window.
+	/// Acknowledge that the record reached the wire, charging it to the group's budget.
 	///
 	/// Only call this once the write has actually succeeded.
-	pub fn commit(mut self) {
-		self.committed = true;
+	pub fn commit(self) {
 		self.encoder.frames += 1;
-		self.encoder.bytes += self.charge;
+		self.encoder.bytes += self.payload.len() as u64;
 	}
 }
 
-impl<T> Drop for Pending<'_, T> {
-	fn drop(&mut self) {
-		if !self.committed {
-			self.encoder.desync();
-		}
-	}
-}
-
-/// Encodes JSON records into frame payloads, sharing one DEFLATE window across the log.
+/// Encodes JSON records into frame payloads.
 ///
 /// The track-free core of [`Producer`](super::Producer). Unlike
 /// [`snapshot::Encoder`](crate::snapshot::Encoder) there are no group boundaries to report: a log is
 /// an unbroken sequence of self-contained records, so every payload is simply the next frame.
 ///
-/// The window spans everything encoded so far, so payloads must reach the wire in order and be
-/// decoded in the same order. If the caller does roll a group, call [`reset`](Self::reset) so the
-/// next record starts a cold window that the new group's decoder can follow.
+/// Payloads must reach the wire in order. If the caller does roll a group, call
+/// [`reset`](Self::reset) so the budget restarts with it.
 pub struct Encoder<T> {
-	/// The DEFLATE encoder (one window for the whole log), `Some` while compressing.
-	flate: Option<moq_flate::Encoder>,
-	compression: bool,
-
-	/// Set when a compressed record was encoded but never written. The window is then ahead of the
-	/// consumer for the rest of the group, so encoding stops until the caller rolls a new one.
-	desynced: bool,
-
 	/// Frames and bytes committed to the current group, checked against moq-net's group budget
-	/// before each record is encoded. A compressed record is charged its plaintext (or its slice, if
-	/// larger), since a reader's DEFLATE window is held to the same budget.
+	/// before each record is encoded.
 	frames: usize,
 	bytes: u64,
 
@@ -94,35 +62,19 @@ pub struct Encoder<T> {
 }
 
 impl<T> Encoder<T> {
-	/// Create an encoder with a cold window.
-	pub fn new(config: Config) -> Self {
+	/// Create an encoder for an empty group.
+	pub fn new(_config: Config) -> Self {
 		Self {
-			flate: config.compression.is_deflate().then(moq_flate::Encoder::new),
-			compression: config.compression.is_deflate(),
-			desynced: false,
 			frames: 0,
 			bytes: 0,
 			_marker: PhantomData,
 		}
 	}
 
-	/// Start a cold DEFLATE window, for a caller that has just rolled a group.
-	///
-	/// This is also how a caller clears an [`Error::Desync`]: roll a new group so the consumer starts
-	/// its own cold window, then reset.
+	/// Restart the group's budget, for a caller that has just rolled a group.
 	pub fn reset(&mut self) {
-		self.flate = self.compression.then(moq_flate::Encoder::new);
-		self.desynced = false;
 		self.frames = 0;
 		self.bytes = 0;
-	}
-
-	/// Mark the window as ahead of the consumer, after a record that was never written.
-	///
-	/// Only meaningful while compressing: an uncompressed record carries no shared state, so losing
-	/// one leaves a gap in the log rather than an undecodable stream.
-	fn desync(&mut self) {
-		self.desynced = self.compression;
 	}
 }
 
@@ -130,45 +82,20 @@ impl<T: Serialize> Encoder<T> {
 	/// Encode one record into the next frame payload.
 	///
 	/// The record comes back as a [`Pending`] the caller writes and then
-	/// [`commit`](Pending::commit)s. Errors with [`Error::Desync`] if a previous compressed record
-	/// was left uncommitted, since every frame after it would be undecodable.
+	/// [`commit`](Pending::commit)s.
 	///
-	/// Errors with [`moq_net::Error::GroupTooLarge`] if the record might not fit in what is left of
+	/// Errors with [`moq_net::Error::GroupTooLarge`] if the record does not fit in what is left of
 	/// the group's budget ([`moq_net::group::MAX_CACHE_BYTES`] and
 	/// [`moq_net::group::MAX_GROUP_FRAMES`]), counting every record committed since the last
 	/// [`reset`](Self::reset). The refused record leaves the encoder untouched.
 	pub fn encode(&mut self, value: &T) -> Result<Pending<'_, T>> {
-		if self.desynced {
-			return Err(Error::Desync);
-		}
-
-		let bytes = serde_json::to_vec(value)?;
-
-		// Check before compressing: encoding advances the window, so a record refused afterwards
-		// would leave the encoder ahead of every reader. The worst case is checked rather than the
-		// actual size for the same reason; it also covers the plaintext a reader inflates.
-		let size = bytes.len() as u64;
-		let bound = if self.compression {
-			moq_flate::Encoder::bound(size)
-		} else {
-			size
-		};
+		let payload = Bytes::from(serde_json::to_vec(value)?);
 		if self.frames >= moq_net::group::MAX_GROUP_FRAMES
-			|| self.bytes.saturating_add(bound) > moq_net::group::MAX_CACHE_BYTES
+			|| self.bytes.saturating_add(payload.len() as u64) > moq_net::group::MAX_CACHE_BYTES
 		{
 			return Err(moq_net::Error::GroupTooLarge.into());
 		}
 
-		let payload = match self.flate.as_mut() {
-			Some(flate) => flate.frame(&bytes),
-			None => Bytes::from(bytes),
-		};
-
-		Ok(Pending {
-			encoder: self,
-			charge: size.max(payload.len() as u64),
-			payload,
-			committed: false,
-		})
+		Ok(Pending { encoder: self, payload })
 	}
 }

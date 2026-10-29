@@ -140,7 +140,7 @@ fn a_steered_group_serves_a_shared_port() {
 	// accepted is the steering assertion (see the module docs).
 	let mut client_worker = client_worker;
 	let handle = client_worker.handle();
-	let mut dial = quic::client::Config::new(addr, "localhost");
+	let mut dial = quic::client::Config::default();
 	dial.alpn = vec![ALPN.to_string()];
 	dial.verify = false;
 
@@ -150,7 +150,9 @@ fn a_steered_group_serves_a_shared_port() {
 				let socket = handle
 					.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 					.expect("client socket");
-				let mut conn = quic::client::connect(socket, &dial).await.expect("connect");
+				let mut conn = quic::client::connect(socket, &dial, addr, "localhost")
+					.await
+					.expect("connect");
 				assert_eq!(
 					web_transport_trait::poll::Session::protocol(&conn),
 					Some(ALPN),

@@ -460,6 +460,20 @@ impl Window {
 		self.spans.iter().map(|span| span.start).min()
 	}
 
+	/// The lowest group a range names, `None` when none does or an anchor waits.
+	/// Unlike [`Self::start`], a range reaching back to the oldest group names nothing.
+	pub fn named(&self) -> Option<u64> {
+		match self.pending || !self.waiting.is_empty() {
+			true => None,
+			false => self
+				.spans
+				.iter()
+				.filter(|span| span.floored)
+				.map(|span| span.start)
+				.min(),
+		}
+	}
+
 	/// Each range resolved, in the order given: `None` for one that is empty or whose start
 	/// still waits. An unsettled time end is reported open, never at its cap.
 	pub fn resolved(&self) -> Vec<Option<Resolved>> {

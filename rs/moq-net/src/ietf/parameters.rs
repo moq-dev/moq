@@ -59,8 +59,8 @@ pub struct Parameters {
 	bytes: Vec<(ParameterBytes, Vec<u8>)>,
 }
 
-impl Decode<Version> for Parameters {
-	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for Parameters {
+	fn decode(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let mut params = Self::default();
 
 		// No count: the pairs run to the end of the buffer. The types are delta-encoded;

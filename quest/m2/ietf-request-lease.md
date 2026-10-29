@@ -28,7 +28,7 @@ one terminal at one await:
 [#6433](https://github.com/moq-dev/moq/pull/6433),
 [#6643](https://github.com/moq-dev/moq/pull/6643), plus the open
 [cancel quest](/quest/m1/ietf-request-cancel.md) and the
-[withdraw fix](/quest/m1/cut-audit/ietf-withdraw-resolve.md). Each request
+[withdraw fix](https://github.com/moq-dev/moq/pull/6964). Each request
 is a long `async fn` whose every `kio::wait` closure re-lists the right
 subset of about 46 terminal checks; the two files hold 227 `pin!` sites
 against lite's 31, a pattern `rs/AGENTS.md` calls a smell.

@@ -1,5 +1,5 @@
-import { afterEach, expect, jest, mock, spyOn, test } from "bun:test";
-import { Milli, Nano } from "@moq/clock";
+import { afterEach, expect, mock, onTestFinished, spyOn, test } from "bun:test";
+import { Manual, Milli, Nano } from "@moq/clock";
 import type { Getter } from "@moq/signals";
 import type * as Announce from "./announce.ts";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
@@ -1778,7 +1778,7 @@ async function waitFor<T>(signal: Getter<T>, pred: (value: T) => boolean): Promi
 	}
 }
 
-test("integration: an announced request waits for a late publisher", async () => {
+test("integration: a follower waits for a late publisher", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_06);
 	const origin = new OriginProducer();
 	const clientOrigin = new OriginProducer();
@@ -1798,7 +1798,7 @@ test("integration: an announced request waits for a late publisher", async () =>
 
 	// Nobody publishes this path yet. A blind consume would be reset (see the
 	// "subscribe to non-existent broadcast" test); the handle just stays offline.
-	const watched = clientOrigin.request(Path.from("late"), { announced: true });
+	const watched = clientOrigin.follow(Path.from("late"));
 	await sleep(50);
 	expect(watched.active.peek()).toBeUndefined();
 
@@ -1837,7 +1837,7 @@ test("integration: an announced request waits for a late publisher", async () =>
 	clientOrigin.close();
 });
 
-test("integration: an announced request consumes blind without discovery", async () => {
+test("integration: only a request consumes blind without discovery", async () => {
 	withoutDiscovery();
 	const pair = createMockTransportPair(Lite.ALPN_06);
 	const origin = new OriginProducer();
@@ -1856,13 +1856,16 @@ test("integration: an announced request consumes blind without discovery", async
 		}
 	})();
 
-	// No announcement ever arrives, so waiting for one would hang. Subscribe anyway.
-	const watched = clientOrigin.request(Path.from("test"), { announced: true });
+	const followed = clientOrigin.follow(Path.from("test"));
+	await until(() => clientOrigin.discovery.peek() === false);
+	expect(followed.active.peek()).toBeUndefined();
+	const watched = clientOrigin.request(Path.from("test"));
 	const active = await waitFor(watched.active, (b) => b !== undefined);
 	if (!active) throw new Error("expected an active broadcast");
 	expect(await active.track("video").subscribe().ordered().readString()).toBe("blind");
 
 	watched.close();
+	followed.close();
 	broadcast.close();
 	await serving;
 	client.abort();
@@ -1890,7 +1893,7 @@ test("integration: a republish is not served from the previous generation's cach
 	const first = publish(origin, Path.from("shared"));
 	const servingFirst = serve(first, "old");
 
-	const watched = clientOrigin.request(Path.from("shared"), { announced: true });
+	const watched = clientOrigin.follow(Path.from("shared"));
 	const active = await waitFor(watched.active, (b) => b !== undefined);
 	if (!active) throw new Error("expected an active broadcast");
 	expect(await active.track("video").subscribe().ordered().readString()).toBe("old");
@@ -1910,7 +1913,7 @@ test("integration: a republish is not served from the previous generation's cach
 	const second = publish(origin, Path.from("shared"));
 	const servingSecond = serve(second, "new");
 
-	const again = clientOrigin.request(Path.from("shared"), { announced: true });
+	const again = clientOrigin.follow(Path.from("shared"));
 	const republished = await waitFor(again.active, (b) => b !== undefined);
 	if (!republished) throw new Error("expected a republished broadcast");
 	expect(await republished.track("video").subscribe().ordered().readString()).toBe("new");
@@ -1945,7 +1948,7 @@ async function runRepublishCycle(protocol: string) {
 		}
 	};
 
-	const watched = clientOrigin.request(Path.from("toggle"), { announced: true });
+	const watched = clientOrigin.follow(Path.from("toggle"));
 	let previous: BroadcastConsumer | undefined;
 	for (let generation = 0; generation < 3; generation++) {
 		const payload = `gen${generation}`;
@@ -2009,7 +2012,7 @@ test("integration: a blind handle picks up a publisher that arrives late", async
 	]);
 
 	// Without discovery there is no announcement to wait for, so the handle consumes blind.
-	const watched = clientOrigin.request(Path.from("later"), { announced: true });
+	const watched = clientOrigin.request(Path.from("later"));
 	const blind = await waitFor(watched.active, (b) => b !== undefined);
 	if (!blind) throw new Error("expected a blind consumer");
 
@@ -2048,7 +2051,7 @@ test("integration: a blind handle goes offline when the session dies", async () 
 		accept(pair.server, url, { publish: origin.consume() }),
 	]);
 
-	const watched = clientOrigin.request(Path.from("whatever"), { announced: true });
+	const watched = clientOrigin.request(Path.from("whatever"));
 	await waitFor(watched.active, (b) => b !== undefined);
 
 	// The gated path goes offline when the announcement stream ends with the session. There is
@@ -2073,7 +2076,7 @@ test("integration: ietf blind handle picks up a publisher that arrives late", as
 		accept(pair.server, url, { publish: origin.consume() }),
 	]);
 
-	const watched = clientOrigin.request(Path.from("later"), { announced: true });
+	const watched = clientOrigin.request(Path.from("later"));
 	const blind = await waitFor(watched.active, (b) => b !== undefined);
 	if (!blind) throw new Error("expected a blind consumer");
 
@@ -2257,7 +2260,7 @@ test("origin: one origin on both directions consumes locally and never echoes", 
 	serverSees.close();
 });
 
-test("origin: a plain request resolves blind without opening discovery", async () => {
+test("origin: a request discovers the peer cannot announce before resolving blind", async () => {
 	const refused = withoutDiscovery();
 	const pair = createMockTransportPair(Lite.ALPN_05);
 	const serverOrigin = new OriginProducer();
@@ -2278,8 +2281,7 @@ test("origin: a plain request resolves blind without opening discovery", async (
 	})();
 
 	const reader = clientOrigin.consume();
-	// Nothing watches, so the session never asks about announcements and never learns the
-	// relay would refuse: the table stays empty and a plain request answers blind.
+	// A request owns discovery, so it learns that this peer needs a blind request.
 	expect(wireOf(reader).routes(Path.from("blind"))).toBe(false);
 
 	const request = reader.request(Path.from("blind"));
@@ -2289,8 +2291,8 @@ test("origin: a plain request resolves blind without opening discovery", async (
 	const track = front?.track("chat").subscribe().ordered();
 	if (!track) throw new Error("expected a track");
 	expect(await track.readString()).toBe("found you");
-	expect(refused()).toBe(0);
-	expect(reader.discovery.peek()).toBe(true);
+	expect(refused()).toBe(1);
+	expect(reader.discovery.peek()).toBe(false);
 
 	track.close();
 	request.close();
@@ -2362,8 +2364,11 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 );
 
 for (const alpn of [Lite.ALPN_06, Lite.ALPN_07_WIP]) {
-	for (const announced of [false, true]) {
-		test(`${alpn}: a request outlives the listing it resolved through (announced: ${announced})`, async () => {
+	for (const method of ["request", "follow"] as const) {
+		test(`${alpn}: a ${method} outlives the listing it resolved through`, async () => {
+			const clock = new Manual();
+			const installed = clock.install();
+			onTestFinished(() => installed.close());
 			const run = LitePublisher.prototype.runAnnounce;
 			let started = 0;
 			let ended = 0;
@@ -2396,18 +2401,14 @@ for (const alpn of [Lite.ALPN_06, Lite.ALPN_07_WIP]) {
 			const reader = clientOrigin.consume();
 			const listing = reader.announced(Path.Pattern.subtree(Path.from("room")));
 			expect((await listing.next())?.kind).toBe("start");
-			const request = reader.request(Path.from("room/cam"), { announced });
+			const request = reader[method](Path.from("room/cam"));
 			await until(() => request.active.peek() !== undefined);
 			const front = request.active.peek();
 
 			// The listing leaves. Its announce request stays open for the request beneath it rather
 			// than handing the route to a narrower one, so the instance never changes.
-			jest.useFakeTimers();
 			listing.close();
-			for (let i = 0; i < 64; i++) await new Promise((resolve) => setImmediate(resolve));
-			jest.advanceTimersByTime(2000);
-			jest.useRealTimers();
-			await sleep(20);
+			await clock.advance(Nano.fromMilli(Milli(2000)));
 			expect([started, ended]).toEqual([1, 0]);
 			expect(request.closed.peek()).toBeUndefined();
 			expect(request.active.peek()).toBe(front);
@@ -2416,12 +2417,9 @@ for (const alpn of [Lite.ALPN_06, Lite.ALPN_07_WIP]) {
 			track?.close();
 
 			// Once the request goes too, the announce request lingers out.
-			jest.useFakeTimers();
 			request.close();
-			for (let i = 0; i < 64; i++) await new Promise((resolve) => setImmediate(resolve));
-			jest.advanceTimersByTime(2000);
-			jest.useRealTimers();
-			await until(() => ended === 1);
+			await clock.advance(Nano.fromMilli(Milli(2000)));
+			expect(ended).toBe(1);
 
 			broadcast.close();
 			await serving;
@@ -2461,6 +2459,7 @@ test.each([Ietf.ALPN.DRAFT_18])(
 );
 
 test("origin: a blind request ends with its session, and the next session answers a fresh one", async () => {
+	withoutDiscovery();
 	const original = globalThis.WebTransport;
 	const reconnectUrl = new URL("https://example.com/re-request");
 
@@ -2520,7 +2519,7 @@ test("origin: a reactive handle follows announcements across a republish", async
 		accept(pair.server, url, { publish: serverOrigin.consume() }),
 	]);
 
-	const watch = clientOrigin.request(Path.from("show"), { announced: true });
+	const watch = clientOrigin.follow(Path.from("show"));
 
 	// Nothing published yet: the handle waits instead of subscribing blind.
 	for (let i = 0; i < 5; i++) await sleep(1);

@@ -20,7 +20,7 @@ a fresh SUBSCRIBE on the same track when that FIN leaves the demand uncovered.
 What remains:
 
 - **On-demand request surface.** Decided in the 2026-10-05 audit: the producer
-  half of [JavaScript FETCH](/quest/m1/js-fetch.md) folds in here, so
+  half of JavaScript FETCH folds in here, so
   `@moq/net`'s on-demand request surface takes range requests from the start
   instead of the per-group `requested_group` shape Rust replaced with
   `requested_fill`. IETF FETCH dispatch onto it is
@@ -37,6 +37,12 @@ What remains:
     concurrent requests, and cancellation while awaiting a reply.
 - **`fetchGroup`.** Becomes a one-range subscription on the request surface
   above, or is removed.
+- **Fills.** Mirror Rust's rule from [#7168](https://github.com/moq-dev/moq/pull/7168)
+  (decided 2026-10-29, maintainer): give up a run below a start already
+  resolved under a budget at least as loose as the reader's, and on a pre-06
+  wire fill below the start only when the reader names a floor. `js/net`
+  requests no fills today, so nothing over-fetches yet; this keeps it that way
+  once it does.
 
 Ranges stay whole groups ([moq-dev/moq#6465](https://github.com/moq-dev/moq/pull/6465)),
 so the group model keeps refusing a nonzero lite `frameStart` as a protocol

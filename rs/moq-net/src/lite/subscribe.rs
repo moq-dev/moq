@@ -31,6 +31,22 @@ pub struct Subscribe<'a> {
 	pub order: Order,
 }
 
+impl Subscribe<'_> {
+	/// Copy the borrowed track name, so the request outlives the bytes it came from.
+	pub fn into_owned(self) -> Subscribe<'static> {
+		Subscribe {
+			id: self.id,
+			broadcast: self.broadcast,
+			epoch: self.epoch,
+			track: Cow::Owned(self.track.into_owned()),
+			priority: self.priority,
+			max_delay: self.max_delay,
+			ranges: self.ranges,
+			order: self.order,
+		}
+	}
+}
+
 /// One end of a [`Range`], as the wire carries it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Anchor {
@@ -104,13 +120,13 @@ impl Version {
 	}
 }
 
-impl Message for Subscribe<'_> {
+impl<'a> Message<'a> for Subscribe<'a> {
 	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Subscribe);
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let id = r.varint()?;
 		let broadcast = Path::decode(r, version)?;
 		let epoch = super::epoch::decode_epoch(r, version)?;
-		let track = Cow::Owned(r.string()?);
+		let track = Cow::Borrowed(r.str()?);
 		let priority = super::priority::from_wire(r.u8()?);
 
 		let (order, max_delay, ranges) = match version {
@@ -424,7 +440,7 @@ pub struct SubscribeOk {
 	pub end_group: Option<u64>,
 }
 
-impl Message for SubscribeOk {
+impl<'a> Message<'a> for SubscribeOk {
 	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Subscribe);
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		match version {
@@ -446,7 +462,7 @@ impl Message for SubscribeOk {
 		Ok(())
 	}
 
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Lite01 => Ok(Self {
 				priority: super::priority::from_wire(r.u8()?),
@@ -494,9 +510,9 @@ pub struct SubscribeStart {
 	pub largest: Option<crate::track::Position>,
 }
 
-impl Message for SubscribeStart {
+impl<'a> Message<'a> for SubscribeStart {
 	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Subscribe);
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_track_stream() {
 			return Err(DecodeError::Version);
 		}
@@ -539,9 +555,9 @@ pub struct SubscribeEnd {
 	pub group: u64,
 }
 
-impl Message for SubscribeEnd {
+impl<'a> Message<'a> for SubscribeEnd {
 	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Subscribe);
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_track_stream() {
 			return Err(DecodeError::Version);
 		}
@@ -573,9 +589,9 @@ pub struct SubscribeUpdate {
 	pub order: Order,
 }
 
-impl Message for SubscribeUpdate {
+impl<'a> Message<'a> for SubscribeUpdate {
 	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Subscribe);
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Lite01 | Version::Lite02 => {
 				return Err(DecodeError::Version);
@@ -669,9 +685,9 @@ impl SubscribeDrop {
 	}
 }
 
-impl Message for SubscribeDrop {
+impl<'a> Message<'a> for SubscribeDrop {
 	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Subscribe);
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Lite01 | Version::Lite02 => {
 				return Err(DecodeError::Version);
@@ -679,11 +695,15 @@ impl Message for SubscribeDrop {
 			_ => {}
 		}
 
-		Ok(Self {
+		let msg = Self {
 			start: r.varint()?,
 			end: r.varint()?,
 			error: r.varint()?,
-		})
+		};
+		if msg.start.saturating_sub(msg.end) > 1 {
+			return Err(DecodeError::InvalidValue);
+		}
+		Ok(msg)
 	}
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -692,6 +712,10 @@ impl Message for SubscribeDrop {
 				return Err(EncodeError::Version);
 			}
 			_ => {}
+		}
+
+		if self.start.saturating_sub(self.end) > 1 {
+			return Err(EncodeError::InvalidState);
 		}
 
 		w.varint(self.start)?;
@@ -718,7 +742,12 @@ pub enum SubscribeResponse {
 }
 
 /// Write a `type` varint followed by the size-prefixed message body.
-fn encode_typed<M: Message>(w: &mut Encoder<'_>, typ: u64, msg: &M, version: Version) -> Result<(), EncodeError> {
+fn encode_typed<'m, M: Message<'m>>(
+	w: &mut Encoder<'_>,
+	typ: u64,
+	msg: &M,
+	version: Version,
+) -> Result<(), EncodeError> {
 	w.varint(typ)?;
 	msg.encode(w, version)
 }
@@ -748,8 +777,8 @@ impl Encode<Version> for SubscribeResponse {
 	}
 }
 
-impl Decode<Version> for SubscribeResponse {
-	fn decode(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for SubscribeResponse {
+	fn decode(buf: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Lite01 | Version::Lite02 => Ok(Self::Ok(SubscribeOk::decode(buf, version)?)),
 			Version::Lite03 | Version::Lite04 => {
@@ -778,6 +807,36 @@ mod test {
 	use super::*;
 
 	#[test]
+	fn drop_ranges_refuse_reversed_and_allow_empty_or_maximum_ends() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			assert!(matches!(
+				SubscribeDrop::decode_slice(&[3, 3, 1, 0], version),
+				Err(DecodeError::InvalidValue)
+			));
+			assert!(
+				SubscribeDrop {
+					start: 3,
+					end: 1,
+					error: 0
+				}
+				.encode_bytes(version)
+				.is_err()
+			);
+			let max = if version == Version::Lite07 {
+				u64::MAX
+			} else {
+				(1 << 62) - 1
+			};
+			for (start, end) in [(2, 1), (max, max)] {
+				let msg = SubscribeDrop { start, end, error: 0 };
+				let data = msg.encode_bytes(version).unwrap();
+				let (decoded, _) = SubscribeDrop::decode_slice(&data, version).unwrap();
+				assert_eq!((decoded.start, decoded.end), (start, end));
+			}
+		}
+	}
+
+	#[test]
 	fn subscribe_start_roundtrips_on_lite05() {
 		let resp = SubscribeResponse::Start(SubscribeStart {
 			group: 42,
@@ -787,7 +846,7 @@ mod test {
 		resp.encode(&mut Encoder::new(&mut buf, Version::Lite05.into()), Version::Lite05)
 			.unwrap();
 		let mut slice = buf.as_slice();
-		match crate::coding::decode_buf(&mut slice, Version::Lite05, SubscribeResponse::decode).unwrap() {
+		match crate::coding::decode_buf(&mut slice, Version::Lite05, |r, v| SubscribeResponse::decode(r, v)).unwrap() {
 			SubscribeResponse::Start(start) => assert_eq!(start.group, 42),
 			other => panic!("expected Start, got {other:?}"),
 		}
@@ -832,7 +891,7 @@ mod test {
 		// Type, length, exclusive final group.
 		assert_eq!(buf, [1, 1, 7]);
 		let mut slice = buf.as_slice();
-		match crate::coding::decode_buf(&mut slice, Version::Lite05, SubscribeResponse::decode).unwrap() {
+		match crate::coding::decode_buf(&mut slice, Version::Lite05, |r, v| SubscribeResponse::decode(r, v)).unwrap() {
 			SubscribeResponse::End(end) => assert_eq!(end.group, 7),
 			other => panic!("expected End, got {other:?}"),
 		}
@@ -846,7 +905,7 @@ mod test {
 			.unwrap();
 		assert_eq!(buf, [1, 1, 7]);
 		let mut slice = buf.as_slice();
-		match crate::coding::decode_buf(&mut slice, Version::Lite07, SubscribeResponse::decode).unwrap() {
+		match crate::coding::decode_buf(&mut slice, Version::Lite07, |r, v| SubscribeResponse::decode(r, v)).unwrap() {
 			SubscribeResponse::End(end) => assert_eq!(end.group, 7),
 			other => panic!("expected End, got {other:?}"),
 		}
@@ -863,7 +922,11 @@ mod test {
 		resp.encode(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07)
 			.unwrap();
 		assert_eq!(buf, [2, 3, 1, 3, 7]);
-		match crate::coding::decode_buf(&mut buf.as_slice(), Version::Lite07, SubscribeResponse::decode).unwrap() {
+		match crate::coding::decode_buf(&mut buf.as_slice(), Version::Lite07, |r, v| {
+			SubscribeResponse::decode(r, v)
+		})
+		.unwrap()
+		{
 			SubscribeResponse::Drop(drop) => assert_eq!((drop.start, drop.end, drop.error), (1, 3, 7)),
 			other => panic!("expected Drop, got {other:?}"),
 		}
@@ -883,7 +946,7 @@ mod test {
 		assert_eq!(buf[0], 2);
 
 		let mut slice = buf.as_slice();
-		match crate::coding::decode_buf(&mut slice, Version::Lite05, SubscribeResponse::decode).unwrap() {
+		match crate::coding::decode_buf(&mut slice, Version::Lite05, |r, v| SubscribeResponse::decode(r, v)).unwrap() {
 			SubscribeResponse::Drop(drop) => assert_eq!((drop.start, drop.end), (1, 3)),
 			other => panic!("expected Drop, got {other:?}"),
 		}
@@ -929,7 +992,9 @@ mod test {
 		let mut buf = Vec::new();
 		msg.encode_msg(&mut Encoder::new(&mut buf, version.into()), version)
 			.unwrap();
-		crate::coding::decode_buf(&mut buf.as_slice(), version, Subscribe::decode_msg).unwrap()
+		crate::coding::decode_from(&mut buf.as_slice(), version, Subscribe::decode_msg)
+			.unwrap()
+			.into_owned()
 	}
 
 	fn encode(msg: &Subscribe<'_>, version: Version) -> Result<Vec<u8>, EncodeError> {
@@ -975,7 +1040,10 @@ mod test {
 		assert_eq!(&lite06[..spliced.len()], &spliced[..]);
 		assert_eq!(&lite06[spliced.len()..], &[0, 0]);
 
-		let got = crate::coding::decode_buf(&mut lite05.as_slice(), Version::Lite05, Subscribe::decode_msg).unwrap();
+		let got = crate::coding::decode_from(&mut lite05.as_slice(), Version::Lite05, |r, v| {
+			Subscribe::decode_msg(r, v)
+		})
+		.unwrap();
 		assert_eq!(got.ranges, msg.ranges);
 	}
 
@@ -1004,7 +1072,10 @@ mod test {
 		msg.ranges[0].start = absolute(0, 0);
 		let zero = encode(&msg, Version::Lite06).unwrap();
 		assert_eq!(absent, zero);
-		let got = crate::coding::decode_buf(&mut zero.as_slice(), Version::Lite06, Subscribe::decode_msg).unwrap();
+		let got = crate::coding::decode_from(&mut zero.as_slice(), Version::Lite06, |r, v| {
+			Subscribe::decode_msg(r, v)
+		})
+		.unwrap();
 		assert_eq!(got.ranges, [Range::OLDEST]);
 
 		// On the pre-06 wire an explicit group 0 is sequence + 1, distinct from an
@@ -1055,7 +1126,7 @@ mod test {
 		w.varint(0).unwrap(); // frame start
 		w.varint(8).unwrap(); // frame end: 7
 		assert!(matches!(
-			crate::coding::decode_buf(&mut buf.as_slice(), version, Subscribe::decode_msg),
+			crate::coding::decode_from(&mut buf.as_slice(), version, Subscribe::decode_msg),
 			Err(DecodeError::InvalidSubscribeLocation)
 		));
 	}
@@ -1093,7 +1164,8 @@ mod test {
 			order: crate::track::Order::Ascending,
 		};
 		let buf = update.encode_bytes(Version::Lite07).unwrap();
-		let got = crate::coding::decode_buf(&mut buf.as_ref(), Version::Lite07, SubscribeUpdate::decode).unwrap();
+		let got = crate::coding::decode_buf(&mut buf.as_ref(), Version::Lite07, |r, v| SubscribeUpdate::decode(r, v))
+			.unwrap();
 		assert_eq!(got.ranges, msg.ranges);
 	}
 
@@ -1114,7 +1186,7 @@ mod test {
 		buf[at] = 0;
 		buf.truncate(at + 1);
 		assert!(matches!(
-			crate::coding::decode_buf(&mut buf.as_slice(), version, Subscribe::decode_msg),
+			crate::coding::decode_from(&mut buf.as_slice(), version, Subscribe::decode_msg),
 			Err(DecodeError::InvalidSubscribeLocation)
 		));
 
@@ -1122,7 +1194,7 @@ mod test {
 		let last = buf.len() - 1;
 		buf[last] = 4;
 		assert!(matches!(
-			crate::coding::decode_buf(&mut buf.as_slice(), version, Subscribe::decode_msg),
+			crate::coding::decode_from(&mut buf.as_slice(), version, Subscribe::decode_msg),
 			Err(DecodeError::InvalidValue)
 		));
 	}
@@ -1186,7 +1258,8 @@ mod test {
 					order: crate::track::Order::Descending,
 				};
 				let buf = update.encode_bytes(version).unwrap();
-				let got = crate::coding::decode_buf(&mut buf.as_ref(), version, SubscribeUpdate::decode).unwrap();
+				let got = crate::coding::decode_buf(&mut buf.as_ref(), version, |r, v| SubscribeUpdate::decode(r, v))
+					.unwrap();
 				assert_eq!(got.wanted_group, if version.has_refresh() { wanted } else { None });
 			}
 		}
@@ -1217,12 +1290,13 @@ mod test {
 				.unwrap();
 			// The priority, then the order.
 			assert_eq!(buf[1], u8::from(order == Order::Ascending));
-			let got = crate::coding::decode_buf(&mut buf.as_slice(), version, SubscribeUpdate::decode_msg).unwrap();
+			let got = crate::coding::decode_buf(&mut buf.as_slice(), version, |r, v| SubscribeUpdate::decode_msg(r, v))
+				.unwrap();
 			assert_eq!(got.order, order);
 
 			buf[1] = 2;
 			assert!(matches!(
-				crate::coding::decode_buf(&mut buf.as_slice(), version, SubscribeUpdate::decode_msg),
+				crate::coding::decode_buf(&mut buf.as_slice(), version, |r, v| SubscribeUpdate::decode_msg(r, v)),
 				Err(DecodeError::InvalidValue)
 			));
 		}
@@ -1245,7 +1319,7 @@ mod test {
 			let ascending = encode(&msg, version).unwrap();
 			assert_eq!(ascending, descending, "{version}");
 
-			let got = crate::coding::decode_buf(&mut ascending.as_slice(), version, Subscribe::decode_msg).unwrap();
+			let got = crate::coding::decode_from(&mut ascending.as_slice(), version, Subscribe::decode_msg).unwrap();
 			assert_eq!(got.order, Order::Descending, "{version}");
 		}
 	}

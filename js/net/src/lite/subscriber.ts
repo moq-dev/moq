@@ -140,6 +140,11 @@ interface SubscribeEntry {
 	// (SUBSCRIBE_END), once it declares them.
 	start?: number;
 	end?: number;
+	// Set by the subscribe stream's FIN before lite-05, the track's only end there.
+	finished?: boolean;
+	// Settles once the subscribe stream's responses are read to its FIN or reset, which
+	// Subscriber.drain waits on.
+	responses?: Promise<void>;
 	// Whether the stream ever asked for a bounded range, which a lite-07 publisher FINs without
 	// SUBSCRIBE_END once it covers it.
 	bounded: boolean;
@@ -1035,11 +1040,11 @@ export class Subscriber {
 			// don't carry SUBSCRIBE_UPDATE on the wire, so skip the watcher there
 			// and just wait on the stream/track like before.
 			//
-			// On lite-05+ the publisher sends SUBSCRIBE_START/END/DROP on this stream until
-			// its FIN; older drafts just close it. Either way group streams can still be in
-			// flight, so the track ends only once the tail is accounted for. A reset rejects
-			// instead, so the track ends with that error rather than a clean tail.
-			const responses = hasTrackStream(this.version) ? this.runResponses(stream, entry) : stream.reader.closed;
+			// The publisher sends responses on this stream until its FIN. Group streams can
+			// still be in flight, so the track ends only once the tail is accounted for. A reset
+			// rejects instead, so the track ends with that error rather than a clean tail.
+			const responses = this.runResponses(stream, entry);
+			entry.responses = responses.catch(() => {});
 			let tailSettled = false;
 			// Set when the publisher ended the subscription short of the demand.
 			let short = false;
@@ -1083,10 +1088,14 @@ export class Subscriber {
 
 			// A publisher that covered the range before reading an update widening it sent fewer
 			// groups than the demand asks for, so the caller asks again for the rest. Otherwise
-			// only a received SUBSCRIBE_END declares the track's end: a range covered or a
-			// subscription nobody wants anymore is a released copy, not finished content.
+			// only a received SUBSCRIBE_END, or before lite-05 a FIN, declares the track's end:
+			// a range covered or a subscription nobody wants anymore is a released copy, not
+			// finished content.
 			const reopen = short && reason_ !== idle && hooks.trackReleased(producer).peek() === undefined;
-			if (!reopen) hooks.releaseTrack(producer);
+			if (!reopen) {
+				if (tailSettled && entry.finished) producer.finish();
+				hooks.releaseTrack(producer);
+			}
 			// A settled lite07 tail acknowledges completion with FIN, without cancelling
 			// the publisher's already-finished receive half.
 			if (tailSettled && waitsForSubscriberFin(this.version)) stream.writer.close();
@@ -1536,11 +1545,13 @@ export class Subscriber {
 		}
 	}
 
-	// Reads SUBSCRIBE_START/END/DROP on the subscribe stream until FIN (lite-05+), recording
-	// the range the tail is accounted against. SUBSCRIBE_END declares the track's end right
-	// away, so a consumer learns it before the last groups arrive. The publisher must declare
-	// the end before FIN unless we cancelled locally, or on lite-07 it covered a bounded range;
-	// resets and malformed responses reject.
+	// Reads the subscribe stream's responses until FIN, recording the range the tail is
+	// accounted against: SUBSCRIBE_START/END/DROP on lite-05+, and any SUBSCRIBE_DROP after the
+	// OK before then, where the FIN itself ends the track. Reading to the FIN, rather than
+	// awaiting it, matters: a pull-driven transport stream closes only on a read.
+	// SUBSCRIBE_END declares the track's end right away, so a consumer learns it before the
+	// last groups arrive. The publisher must declare the end before FIN unless we cancelled
+	// locally, or on lite-07 it covered a bounded range; resets and malformed responses reject.
 	private async runResponses(stream: Stream, entry: SubscribeEntry): Promise<void> {
 		for (;;) {
 			const resp = await decodeSubscribeResponseMaybe(stream.reader, this.version);
@@ -1550,6 +1561,11 @@ export class Subscriber {
 			entry.answered?.();
 			entry.answered = undefined;
 			if (!resp) {
+				// Before lite-05 the FIN is the track's only end.
+				if (!hasTrackStream(this.version)) {
+					entry.finished = true;
+					return;
+				}
 				// A bounded range may have widened since, in an update the publisher never read.
 				const covered = hasRanges(this.version) && entry.bounded;
 				if (entry.end === undefined && !covered && hooks.trackReleased(entry.track).peek() === undefined)
@@ -1557,6 +1573,7 @@ export class Subscriber {
 				return;
 			}
 
+			if ("ok" in resp) throw new ProtocolViolation("duplicate SUBSCRIBE_OK");
 			if ("start" in resp) {
 				entry.start = resp.start.group;
 				hooks.startTrack(entry.track, { start: entry.start, requested: entry.requested });
@@ -1771,12 +1788,6 @@ export class Subscriber {
 		const read = tail.open(group.sequence);
 
 		try {
-			// This side never asks for a group from a later frame, so a stream that skips the
-			// first ones is a peer bug. Read as a whole group, its frames would be misnumbered,
-			// and resumption and deduplication rely on those positions.
-			if (group.frameStart !== 0) {
-				throw new ProtocolViolation(`group ${group.sequence} starts at frame ${group.frameStart}`);
-			}
 			// The publisher contradicted its own end, which no later group can repair. lite-05
 			// specified an inclusive end, so its last group lands on it: the write below drops
 			// only that group there.
@@ -1787,7 +1798,7 @@ export class Subscriber {
 				track.abort(violation);
 				throw violation;
 			}
-			producer = track.createGroup(group.sequence);
+			producer = hooks.receiveGroup(track, { sequence: group.sequence, start: group.frameStart });
 
 			await readFrames(stream, producer, {
 				scale: timescale,
@@ -1860,6 +1871,7 @@ export class Subscriber {
 	// Decode one datagram body and hand it to the matching subscription's producer. Drops the
 	// datagram (best-effort) if the subscription is unknown or closed.
 	async #routeDatagram(payload: Uint8Array): Promise<void> {
+		if (payload.byteLength > DatagramMessage.MAX_SIZE) return;
 		// An unknown subscription's datagram is dropped below, however it parses.
 		const dg = await DatagramMessage.decode(payload, this.version, (id) => ({
 			timed: !!this.#subscribes.get(id)?.timescale,
@@ -1955,8 +1967,19 @@ export class Subscriber {
 	}
 
 	/**
+	 * Wait until every subscribe stream's responses are read to its FIN or reset. Bounded only
+	 * once the transport is closed, so that its reads end.
+	 *
+	 * @internal
+	 */
+	async drain(): Promise<void> {
+		await Promise.all(Array.from(this.#subscribes.values(), (entry) => entry.responses));
+	}
+
+	/**
 	 * Ends every subscribed track: cleanly without declaring an end for a deliberate close, or
 	 * with `err` when the session died, since those tracks were cut off rather than ended.
+	 * A track whose publisher already ended it finishes either way.
 	 */
 	close(err?: Error) {
 		// A fetch or setup exchange cut off by the session is incomplete even on a deliberate
@@ -1964,7 +1987,8 @@ export class Subscriber {
 		const cut = err ?? new StreamError(StreamCode.SessionClosed, { message: "session closed" });
 		this.#closed.abort(cut);
 
-		for (const { track } of this.#subscribes.values()) {
+		for (const { track, finished } of this.#subscribes.values()) {
+			if (finished) track.finish();
 			if (err) track.abort(err);
 			else hooks.releaseTrack(track);
 		}

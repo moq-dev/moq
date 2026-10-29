@@ -16,6 +16,77 @@ const TEST_APP_NAME: &str = "some_app";
 const TEST_STREAM_KEY: &str = "stream_key";
 
 #[test]
+fn a_connection_request_cannot_be_replaced_while_authorization_is_pending() {
+	let (_, mut serializer, mut session) = common_basic_setup();
+	let payload = create_connect_message(TEST_APP_NAME.to_owned(), 0, 0, 0.0);
+	let packet = serializer.serialize(&payload, true, false).unwrap();
+	session.handle_input(&packet.bytes).unwrap();
+	let packet = serializer.serialize(&payload, true, false).unwrap();
+	assert!(session.handle_input(&packet.bytes).is_err());
+}
+
+#[test]
+fn publish_and_play_require_the_connections_created_stream() {
+	for name in ["publish", "play"] {
+		let (mut deserializer, mut serializer, mut session) = common_basic_setup();
+		perform_connection(TEST_APP_NAME, &mut session, &mut serializer, &mut deserializer);
+		let message = RtmpMessage::Amf0Command {
+			command_name: name.to_owned(),
+			transaction_id: 5.0,
+			command_object: Amf0Value::Null,
+			additional_arguments: vec![
+				Amf0Value::Utf8String(TEST_STREAM_KEY.to_owned()),
+				Amf0Value::Utf8String("live".to_owned()),
+			],
+		};
+		let payload = message.into_message_payload(RtmpTimestamp::new(0), 1).unwrap();
+		let packet = serializer.serialize(&payload, true, false).unwrap();
+		let results = session.handle_input(&packet.bytes).unwrap();
+		let (responses, events) = split_results(&mut deserializer, results);
+		assert!(events.is_empty(), "an invalid stream reached authorization");
+		assert!(matches!(&responses[0].1, RtmpMessage::Amf0Command { command_name, .. } if command_name == "_error"));
+	}
+}
+
+#[test]
+fn a_stream_has_one_authorization_and_cannot_be_replaced() {
+	let (mut deserializer, mut serializer, mut session) = common_basic_setup();
+	perform_connection(TEST_APP_NAME, &mut session, &mut serializer, &mut deserializer);
+	create_active_stream(&mut session, &mut serializer, &mut deserializer);
+	let results = session.handle_command_create_stream(9.0).unwrap();
+	let (responses, events) = split_results(&mut deserializer, results);
+	assert!(events.is_empty());
+	assert!(matches!(&responses[0].1, RtmpMessage::Amf0Command { command_name, .. } if command_name == "_error"));
+	let message = RtmpMessage::Amf0Command {
+		command_name: "publish".into(),
+		transaction_id: 5.0,
+		command_object: Amf0Value::Null,
+		additional_arguments: vec![
+			Amf0Value::Utf8String(TEST_STREAM_KEY.into()),
+			Amf0Value::Utf8String("live".into()),
+		],
+	};
+	let payload = message.into_message_payload(RtmpTimestamp::new(0), 1).unwrap();
+	let packet = serializer.serialize(&payload, true, false).unwrap();
+	let first = session.handle_input(&packet.bytes).unwrap();
+	let (_, events) = split_results(&mut deserializer, first);
+	assert!(matches!(
+		&events[0],
+		ServerSessionEvent::PublishStreamRequested { request_id: 1, .. }
+	));
+	for _ in 0..100 {
+		let packet = serializer.serialize(&payload, true, false).unwrap();
+		let results = session.handle_input(&packet.bytes).unwrap();
+		let (responses, events) = split_results(&mut deserializer, results);
+		assert!(events.is_empty());
+		assert!(matches!(&responses[0].1, RtmpMessage::Amf0Command { command_name, .. } if command_name == "_error"));
+	}
+	assert!(session.accept_request(0).is_err());
+	session.accept_request(1).unwrap();
+	assert!(session.accept_request(1).is_err());
+}
+
+#[test]
 fn new_config_creates_initial_responses() {
 	let config = get_basic_config();
 	let mut deserializer = ChunkDeserializer::new();
@@ -814,7 +885,7 @@ fn publish_finished_event_raised_when_close_stream_invoked_on_publishing_stream(
 }
 
 #[test]
-fn can_request_publishing_on_closed_stream() {
+fn a_closed_stream_cannot_publish_a_second_epoch() {
 	let (mut deserializer, mut serializer, mut session) = common_basic_setup();
 	perform_connection(TEST_APP_NAME, &mut session, &mut serializer, &mut deserializer);
 	let stream_id = create_active_stream(&mut session, &mut serializer, &mut deserializer);
@@ -842,22 +913,9 @@ fn can_request_publishing_on_closed_stream() {
 		.unwrap();
 	let publish_packet = serializer.serialize(&publish_payload, false, false).unwrap();
 	let publish_results = session.handle_input(&publish_packet.bytes[..]).unwrap();
-	let (_, events) = split_results(&mut deserializer, publish_results);
-
-	assert_eq!(events.len(), 1, "Unexpected number of events returned");
-	match events[0] {
-		ServerSessionEvent::PublishStreamRequested {
-			ref app_name,
-			ref stream_key,
-			request_id: _,
-			mode: PublishMode::Live,
-		} => {
-			assert_eq!(app_name, &TEST_APP_NAME, "Unexpected app name");
-			assert_eq!(stream_key, &TEST_STREAM_KEY, "Unexpected stream key");
-		}
-
-		_ => panic!("Unexpected first event found: {:?}", events[0]),
-	}
+	let (responses, events) = split_results(&mut deserializer, publish_results);
+	assert!(events.is_empty());
+	assert!(matches!(&responses[0].1, RtmpMessage::Amf0Command { command_name, .. } if command_name == "_error"));
 }
 
 #[test]

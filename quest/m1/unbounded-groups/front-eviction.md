@@ -36,18 +36,14 @@ See the [epic](/quest/m1/unbounded-groups/README.md) for the decisions.
   single request, as `FillState` does. Fold today's `Slot.head` tail copy
   into this.
 - A refill asks for exactly the hole: from the reader's missing frame to the
-  first frame still cached, over a frame-precise range end. Today's fills
-  always run to the group's end (`end_frame: None`), which on a live group
-  would duplicate the live edge. If more is evicted while the refill runs,
+  first frame still cached, using the transport fill's private frame-precise
+  range end instead of duplicating the live edge. If more is evicted while the refill runs,
   the reader hits the next hole and refills again, one RTT per hole.
 - Decided 2026-10-25 (maintainer): the application API stays whole-group,
   but the transport may start a group at a frame offset as an optimization,
-  and a front-eviction refill is one. The lite draft's rule that a
-  subscriber "MUST send 0 unless it already holds every frame below" forbids
-  this refill, since the relay evicted the frames below the hole, so
-  [transport frame offsets](/quest/m1/transport-frame-offsets.md) amends it
-  first. A relay asked for frame k of a group it holds nothing of widens to
-  frame 0 upstream.
+  and a front-eviction refill is one. The lite draft allows that start
+  without holding the prefix. A relay asked for frame k of a group it holds
+  nothing of widens to frame 0 upstream.
 - Refills are unpaced (decided 2026-10-24, maintainer). Pacing a refill on
   its fastest reader, and shared "trains" of readers that merge into the
   run ahead, were rejected as not worth their complexity. `FillState`
@@ -88,11 +84,11 @@ See the [epic](/quest/m1/unbounded-groups/README.md) for the decisions.
   object is `Evicted`.
 - Downstream encoders that roll groups by the removed constants (moq-json,
   moq-mux TS, moq-stats) keep their own local roll triggers if they still
-  need one. The [m1 compression migration](/quest/m1/compress/migrate.md)
-  deletes moq-flate; recheck the surviving JSON stream budget and track
+  need one. The [m1 compression migration](https://github.com/moq-dev/moq/pull/7046)
+  deleted moq-flate; recheck the surviving JSON stream budget and track
   compression paths instead of retaining a deleted helper's cap.
 - Compressed groups keep the existing prefix-before-inflate contract
-  ([compressed tracks](/quest/m1/compress/README.md)). Today
+  ([compressed tracks](/doc/concept/compression.md)). Today
   `GroupState::inflate` refuses a nonzero cached offset. Front eviction must
   refill the needed compressed prefix before inflation or retain equivalent
   decoder state, with compressed storage, the shared inflated copy, and
@@ -105,7 +101,3 @@ See the [epic](/quest/m1/unbounded-groups/README.md) for the decisions.
 Public API: removes `MAX_GROUP_FRAMES`, and `MAX_CACHE_BYTES` stops capping
 groups. A reader that used to see `GroupTooLarge` now refills or sees
 `Evicted`. Wire: none beyond the amended frame offset rule.
-
-## Required
-
-- [Transport frame offsets](/quest/m1/transport-frame-offsets.md) - the lite draft lets a refill start at the missing frame without holding the frames below it

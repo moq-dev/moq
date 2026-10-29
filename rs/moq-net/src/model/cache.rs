@@ -41,6 +41,7 @@
 //! every origin so the whole process caches into a single policy.
 
 use crate::sync::Mutex;
+use crate::util::SendCell;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, PoisonError, Weak};
@@ -131,7 +132,9 @@ impl Config {
 /// payments, and the always-protected live edge all let usage transiently exceed it.
 #[derive(Clone)]
 pub struct Pool {
-	inner: Arc<Inner>,
+	// Every track and handoff registry reaches back into group state, so the cell
+	// proves `Send` once here instead of inside every origin and broadcast handle.
+	inner: Arc<SendCell<Inner>>,
 }
 
 impl Default for Pool {
@@ -213,7 +216,7 @@ impl Pool {
 			ms.max(1).div_ceil(TICK_MS).saturating_mul(TICK_MS)
 		});
 		Self {
-			inner: Arc::new(Inner {
+			inner: Arc::new(SendCell::new(Inner {
 				used: AtomicU64::new(0),
 				capacity: AtomicU64::new(config.capacity.unwrap_or(u64::MAX)),
 				expiry,
@@ -226,7 +229,7 @@ impl Pool {
 				wall_micros: AtomicU64::new(0),
 				wall: kio::Lock::default(),
 				held: Mutex::default(),
-			}),
+			})),
 		}
 	}
 
@@ -638,7 +641,7 @@ impl std::fmt::Debug for Pool {
 /// nothing can cache into it any more.
 #[derive(Clone)]
 pub struct PoolWeak {
-	inner: std::sync::Weak<Inner>,
+	inner: std::sync::Weak<SendCell<Inner>>,
 }
 
 impl PoolWeak {
@@ -721,8 +724,8 @@ pub(super) struct Track {
 #[derive(Default)]
 struct Largest {
 	position: Option<Position>,
-	// The largest group's content may still grow: no copy of it finished, and it is not a
-	// datagram. An aborted one stays open, since it can be recreated or fetched.
+	// The largest group's content may still grow: no copy of the whole group finished, and it
+	// is not a datagram. An aborted one stays open, since it can be recreated or fetched.
 	open: bool,
 	// The track ended, so no newer position can follow.
 	ended: bool,
@@ -738,8 +741,8 @@ impl Track {
 		}
 	}
 
-	/// Group `sequence` holds every frame it will have: a copy finished, or it is a datagram.
-	/// A group name fixes its content, so no legal write raises the largest past it.
+	/// Group `sequence` holds every frame it will have: a whole copy finished, or it is a
+	/// datagram. A group name fixes its content, so no legal write raises the largest past it.
 	pub(super) fn finish_largest(&self, sequence: u64) {
 		let mut largest = self.largest.lock();
 		if largest.position.is_some_and(|position| position.group == sequence) {
@@ -1157,6 +1160,21 @@ impl Charge {
 	/// The group's full cached footprint: payload bytes plus overhead.
 	pub(super) fn size(&self) -> u64 {
 		self.bytes
+	}
+
+	/// Move already-accounted payload to a shared content owner without recording a write.
+	pub(super) fn transfer(&mut self, bytes: u64) -> Extra {
+		if self.track.is_none() {
+			return Extra::default();
+		}
+		self.bytes = self
+			.bytes
+			.checked_sub(bytes)
+			.expect("transferred payload must already be charged");
+		Extra {
+			track: self.track.clone(),
+			bytes: AtomicU64::new(bytes),
+		}
 	}
 
 	/// The shared handle to this group's last-access stamp, so the group can read it

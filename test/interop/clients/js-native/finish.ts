@@ -13,8 +13,8 @@ export async function readFinish(
 ): Promise<string> {
 	const source = origin.consume();
 	const routes = source.announced();
-	const request = origin.request(Moq.Path.from(path), { announced: true });
-	const healthRequest = origin.request(Moq.Path.from(`${path}.health`), { announced: true });
+	const request = origin.follow(Moq.Path.from(path));
+	const healthRequest = origin.follow(Moq.Path.from(`${path}.health`));
 	try {
 		let broadcast = request.active.peek();
 		while (!broadcast) {
