@@ -35,7 +35,7 @@ impl Resolver {
 	pub fn spawn(commands: mpsc::Sender<Command>, lookup: impl Lookup) -> Self {
 		let (batches, rx) = mpsc::channel(1);
 		use tracing::Instrument;
-		let task = tokio::spawn(run(rx, commands, lookup).instrument(tracing::Span::current()));
+		let task = crate::runtime::spawn(run(rx, commands, lookup).instrument(tracing::Span::current()));
 		Self {
 			batches,
 			_task: AbortOnDrop::new(task),

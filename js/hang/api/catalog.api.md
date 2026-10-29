@@ -247,7 +247,6 @@ export type BinaryConfig = infer<typeof BinaryConfigSchema>;
 export const BinaryConfigSchema: ZodMiniObject<{
 	bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
 	broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-	compression: ZodMiniOptional<ZodMiniString<string>>;
 	delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
 	epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
 	jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
@@ -260,7 +259,6 @@ export const BinarySchema: ZodMiniObject<{
 	tracks: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
 		bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
 		broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-		compression: ZodMiniOptional<ZodMiniString<string>>;
 		delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
 		epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
 		jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
@@ -284,10 +282,6 @@ export type CmafContainer = Extract<Container, {
 export import Color = Video.Color;
 
 export import ColorSchema = Video.ColorSchema;
-
-export type Compression = infer<typeof CompressionSchema>;
-
-export const CompressionSchema: ZodMiniString<string>;
 
 export type Container = infer<typeof ContainerSchema>;
 
@@ -356,7 +350,6 @@ export type JsonConfig = infer<typeof JsonConfigSchema>;
 export const JsonConfigSchema: ZodMiniObject<{
 	bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
 	broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-	compression: ZodMiniOptional<ZodMiniString<string>>;
 	delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
 	epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
 	jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
@@ -369,7 +362,6 @@ export const JsonSchema: ZodMiniObject<{
 	tracks: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
 		bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
 		broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-		compression: ZodMiniOptional<ZodMiniString<string>>;
 		delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
 		epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
 		jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
@@ -378,8 +370,6 @@ export const JsonSchema: ZodMiniObject<{
 		track: ZodMiniOptional<ZodMiniString<string>>;
 	}, $loose>>;
 }, $strip>;
-
-export type KnownCompression = "deflate";
 
 export type KnownMode = "snapshot" | "stream";
 
@@ -576,7 +566,6 @@ export const RootSchema: ZodMiniObject<{
 		tracks: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
 			bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
 			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			compression: ZodMiniOptional<ZodMiniString<string>>;
 			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
 			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
 			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
@@ -596,7 +585,6 @@ export const RootSchema: ZodMiniObject<{
 		tracks: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
 			bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
 			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			compression: ZodMiniOptional<ZodMiniString<string>>;
 			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
 			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
 			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
@@ -1033,8 +1021,6 @@ export const StatsSchema: ZodMiniObject<{
 }, $strip>;
 
 export const TRACK: "catalog.json";
-
-export const TRACK_COMPRESSED: "catalog.json.z";
 
 export type Text = infer<typeof TextSchema>;
 
@@ -1688,8 +1674,6 @@ export import VideoSchema = Video.VideoSchema;
 export function checkRenditions(root: Root): Root;
 
 export function checkResolvable(root: Root, base: Net.Path.Valid): Root;
-
-export function compressionSupported(compression: Compression): compression is "deflate";
 
 export function containerSupported(container: Container): boolean;
 

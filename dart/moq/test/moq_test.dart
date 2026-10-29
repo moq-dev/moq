@@ -4,7 +4,6 @@ import 'dart:typed_data';
 
 import 'package:moq/audio.dart' as moq_audio;
 import 'package:moq/media.dart' as moq_media;
-import 'package:moq/flate.dart' as moq_flate;
 import 'package:moq/json.dart' as moq_json;
 import 'package:moq/moq.dart';
 import 'package:moq/video.dart' as moq_video;
@@ -55,39 +54,6 @@ void main() {
     );
     expect(() => catalog.now(), throwsA(isA<ClosedMoqException>()));
   });
-
-  for (final timestamp in <int?>[null, 123456]) {
-    for (final mode in ['snapshot', 'stream']) {
-      test('flate $mode preserves timestamp $timestamp', () async {
-        final broadcast = BroadcastProducer();
-        final info = timestamp == null ? null : TrackInfo(timescale: 1000000);
-        final track = broadcast.publishTrack(name: 'data', info: info);
-        final consumer = track.consume(subscription: null);
-        final payload = utf8.encode('payload');
-        if (mode == 'snapshot') {
-          final producer = moq_flate.SnapshotProducer(
-            broadcast: broadcast,
-            track: track,
-            config: moq_flate.Config(),
-          );
-          producer.update(payload: payload, timestampUs: timestamp);
-          producer.finish();
-        } else {
-          final producer = moq_flate.StreamProducer(
-            broadcast: broadcast,
-            track: track,
-            config: moq_flate.Config(),
-          );
-          producer.append(payload: payload, timestampUs: timestamp);
-          producer.finish();
-        }
-        final frame = await consumer.readFrame().timeout(timeout);
-        expect(frame?.payload, payload);
-        expect(frame?.timestampUs, timestamp);
-        broadcast.close();
-      });
-    }
-  }
 
   test('raw writes without timestamps stay untimed', () async {
     final broadcast = BroadcastProducer();
@@ -544,7 +510,7 @@ void main() {
       broadcast: broadcast,
       track: broadcast.publishTrack(
         name: 'status',
-        info: MoqTrackInfo(timescale: 1000000),
+        info: MoqTrackInfo(timescale: 1000000, compress: true),
       ),
       config: moq_json.SnapshotConfig(),
     );
@@ -552,10 +518,7 @@ void main() {
         .consume()
         .subscribeTrack(name: 'status', subscription: null)
         .timeout(timeout);
-    final consumer = moq_json.SnapshotConsumer(
-      track: track,
-      config: moq_json.SnapshotConfig(),
-    );
+    final consumer = moq_json.SnapshotConsumer(track: track);
 
     for (var n = 1; n <= 4; n++) {
       producer.update(value: jsonEncode({'n': n}), timestampUs: n * 1000);
@@ -581,18 +544,15 @@ void main() {
     final producer = moq_json.WindowProducer(
       track: broadcast.publishTrack(
         name: 'log',
-        info: MoqTrackInfo(timescale: 1000000),
+        info: MoqTrackInfo(timescale: 1000000, compress: true),
       ),
-      config: moq_json.WindowConfig(compression: true),
+      config: moq_json.WindowConfig(),
     );
     final track = await broadcast
         .consume()
         .subscribeTrack(name: 'log', subscription: null)
         .timeout(timeout);
-    final consumer = moq_json.WindowConsumer(
-      track: track,
-      config: moq_json.WindowConfig(compression: true),
-    );
+    final consumer = moq_json.WindowConsumer(track: track);
 
     for (var n = 0; n < 3; n++) {
       producer.push(value: jsonEncode({'n': n}), timestampUs: n * 1000);

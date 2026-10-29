@@ -99,7 +99,7 @@ Decided 2026-10-16 (maintainer interview):
 - JS is a separate quest. Docs change inline: the lite draft, `doc/concept`,
   the relay cache docs, the JSON and moq-net compression docs, and the e2ee
   draft's 32 MiB interop cap. The
-  [m1 compression migration](/quest/m1/compress/migrate.md) deletes the flate packages. There is no new page.
+  [m1 compression migration](/quest/m1/compress/README.md) deleted the flate packages. There is no new page.
 
 The refill API is the `track::Requests` fill (`track::Fill`). A handler serves a range by writing into a
 group producer bounded to that range, the same API as a live write, so an

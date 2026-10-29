@@ -168,11 +168,7 @@ fn rand_seed() -> u64 {
 /// Broadcast `room`, once the peer announces it into `origin`.
 async fn room(origin: &moq_net::origin::Producer) -> moq_net::broadcast::Consumer {
 	let consumer = origin.consume();
-	tokio::time::timeout(TIMEOUT, consumer.routed("room"))
-		.await
-		.expect("announce timeout")
-		.expect("routed");
-	tokio::time::timeout(TIMEOUT, consumer.request_broadcast("room", None))
+	tokio::time::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves")

@@ -53,7 +53,7 @@ the reverse (decided 2026-10-20, maintainer):
   catalog track is itself compressed, so a subscriber would need the flag
   before it could inflate the catalog that carries it. The
   [E2EE epic](/quest/m2/e2ee/README.md) also keeps catalog formats out of
-  moq-e2ee, and [migrate](/quest/m1/compress/migrate.md) drops hang's
+  moq-e2ee, and the [compression migration](/quest/m1/compress/README.md) dropped hang's
   `compression` field. The subscriber needs the flag before inflating,
   without changing moq-net's `track(name)`; propose the encoding in the PR.
   Record it in `draft-lcurley-moq-e2ee.md`, replacing the Catalogs section's

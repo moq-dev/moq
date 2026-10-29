@@ -379,10 +379,9 @@ final class SmokeTests: XCTestCase {
         let broadcast = try BroadcastProducer()
         let producer = try Json.SnapshotProducer<Status>(
             broadcast: broadcast,
-            track: try broadcast.publishTrack(name: "status", info: TrackInfo(timescale: 1_000_000)),
-            compression: true)
+            track: try broadcast.publishTrack(name: "status", info: TrackInfo(timescale: 1_000_000, compress: true)))
         let consumer = try Json.SnapshotConsumer<Status>(
-            track: try await broadcast.consume().subscribeTrack(name: "status"), compression: true)
+            track: try await broadcast.consume().subscribeTrack(name: "status"))
 
         for viewers in 1...4 {
             try producer.update(Status(state: "live", viewers: viewers), timestampUs: UInt64(viewers) * 1000)
@@ -430,9 +429,9 @@ final class SmokeTests: XCTestCase {
 
         let broadcast = try BroadcastProducer()
         let producer = try Json.WindowProducer<Event>(
-            track: try broadcast.publishTrack(name: "log", info: TrackInfo(timescale: 1_000_000)), compression: true)
+            track: try broadcast.publishTrack(name: "log", info: TrackInfo(timescale: 1_000_000, compress: true)))
         let consumer = try Json.WindowConsumer<Event>(
-            track: try await broadcast.consume().subscribeTrack(name: "log"), compression: true)
+            track: try await broadcast.consume().subscribeTrack(name: "log"))
 
         for n in 0..<3 {
             try producer.push(Event(n: n), timestampUs: UInt64(n) * 1000)
@@ -485,32 +484,6 @@ final class SmokeTests: XCTestCase {
         while try await streamDemand.wantedChanged() != nil {}
 
         try broadcast.close()
-    }
-
-    func testFlateTimestampsRoundTrip() async throws {
-        for timestamp in [nil, UInt64(123_456)] {
-            for mode in ["snapshot", "stream"] {
-                let broadcast = try BroadcastProducer()
-                let info: TrackInfo? = timestamp.map { _ in TrackInfo(timescale: 1_000_000) }
-                let track = try broadcast.publishTrack(name: "data", info: info)
-                let consumer = try track.consume()
-                let payload = Data("payload".utf8)
-                if mode == "snapshot" {
-                    let producer = try Flate.SnapshotProducer(broadcast: broadcast, track: track)
-                    try producer.update(payload, timestampUs: timestamp)
-                    try producer.finish()
-                } else {
-                    let producer = try Flate.StreamProducer(broadcast: broadcast, track: track)
-                    try producer.append(payload, timestampUs: timestamp)
-                    try producer.finish()
-                }
-                let received = try await consumer.readFrame()
-                let frame = try XCTUnwrap(received)
-                XCTAssertEqual(frame.payload, payload)
-                XCTAssertEqual(frame.timestampUs, timestamp)
-                try broadcast.close()
-            }
-        }
     }
 
     func testRawTrackWithoutTimestampStaysUntimed() async throws {
