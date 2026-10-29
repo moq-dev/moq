@@ -35,7 +35,6 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [The software renderer tests both capability paths](/quest/m0/nightly/render-capabilities.md) - the software-renderer lane verifies output selection with and without DMA-BUF import support without requiring hardware the runner lacks
 - [The browser backend baseline completes on IETF22](/quest/m0/nightly/browser-baseline.md) - the WASM and UniFFI backend baseline completes every supported transport case without an internal error
 - [Resolve the paired catalog fanout regressions](/quest/m0/nightly/paired-shared.md) - the reported catalog fanout regressions are attributed and genuine extra costs are fixed with paired measurements
 - [Probing beside Cubic](/quest/m0/nightly/competing-cubic.md) - the `competing_cubic` probe test stays within its deadline budget

@@ -173,7 +173,6 @@ removed).
 - [crates.io trusts the workflow](/quest/m1/crates-trusted-publisher.md) - maintainer action: every published crate gets a trusted publisher for `release-rs.yml`
 - [Rust releases publish through OIDC](/quest/m1/release-rs-oidc.md) - release-plz publishes with trusted publishing and `CARGO_REGISTRY_TOKEN` is revoked
 - [moq-clock's tests pass under cargo test](/quest/m1/clock-test-process.md) - `paused_runtimes_own_their_anchors` stops depending on being first in its process
-- [kio's log tests pass in a workspace build](/quest/m1/kio-workspace-tests.md) - the eviction tests pass under the workspace's unified features, or eviction is fixed
 - [The JS stalled-consumer eviction test ages its groups](/quest/m1/js-cache-age-test.md) - the test drives the clock the cache reads, so it can fail
 - [moq-transport-22 FETCH cost](/quest/m1/ietf22-fetch-poll-cost.md) - #7042's +12.8% instructions on draft-22 FETCH is fixed or attributed
 - [An idle track poll exits cheaply](/quest/m1/idle-poll-exit.md) - a reader's poll on a track with nothing new costs a small constant, not ~3,800 instructions
@@ -182,13 +181,11 @@ removed).
 - [Interop coverage](/quest/m1/interop-coverage/README.md) - the riskiest moq-transport features moq-net exposes get cross-implementation tests over drafts 18 and 22
 - [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - A/A and deliberately slowed Nightly runs set the paired comparison's threshold, so its regression alerts can be trusted
 - [HLS and DASH segment conformance](/quest/m1/hls-conformance.md) - nightly ffprobe checks that advertised timing, sync flags, and bytes match the media served
-- [Bindings name every session code](/quest/m1/ffi-malformed-auth-kind.md) - MALFORMED_AUTH_TOKEN and its siblings reach moq-ffi, moq-c, and the wrappers
 - [Unbounded groups](/quest/m1/unbounded-groups/README.md) - groups and frames lose their size caps; a group keeps a 32 MB tail, and readers behind it replay through paced flights or refresh
 - [Next Object on a cold Rust copy](/quest/m1/next-object-cold-copy.md) - a join after an upstream group report starts at the first frame received, never skipping
 - [moqsrc max-delay](/quest/m1/gst-max-delay.md) - GStreamer's `moqsrc` takes a `max-delay` property instead of a hard-coded 1 s budget
 - [moq-clock moves into kio::clock](/quest/m1/kio-clock.md) - moq-clock and its test macro become `kio::clock` and `#[kio::test]` before the cut publishes them
 - [Poll-first async](/quest/m1/poll-first/README.md) - library crates compile no coroutines by default: async wrappers are generated from `poll_*` and gated behind an `async` feature
-- [Every package's release backport ships](/quest/m1/release-versions.md) - a bot bumps every hand-versioned package changed on `release`, so backports publish without a manual bump
 
 ## Related
 
