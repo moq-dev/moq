@@ -31,7 +31,7 @@ Decided 2026-10-28 (maintainer), from [#7088](https://github.com/moq-dev/moq/iss
   ([#6407](https://github.com/moq-dev/moq/pull/6407)).
 - **No FETCH_OK deadline**, matching Rust: the joining FETCH lives as long as
   the subscription. Our publishers accept and ignore FILL_TIMEOUT
-  ([one group](/quest/m1/ietf-publisher-one-group.md)).
+  ([moq-dev/moq#7204](https://github.com/moq-dev/moq/pull/7204)).
 - **Rust's strictness on duplicates.** A whole group from object 0 that
   arrives before the head wins and the FETCH is discarded. One that arrives
   after the head is refused.

@@ -149,7 +149,6 @@ removed).
 - [Upgrade notes match the code](/quest/m1/upgrade-guide-facts.md) - the upgrade and CLI migration guides stop promising drafts 19-21, capped grants, and an ignored `MOQ_EPOCH`
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break says how to migrate
 - [moq-transport 18 and 22 only](/quest/m1/ietf-drop/README.md) - drafts 14-17 and 19-21 are deleted from Rust, JS, tests, interop lanes, and docs, removing the legacy control-stream adapter and its request limit
-- [Our moq-transport publishers serve at most one group](/quest/m1/ietf-publisher-one-group.md) - a wider FETCH gets NOT_SUPPORTED and a wider draft-22 fill fails, FILL_TIMEOUT is ignored, and our subscribers still send ranges
 - [Our moq-transport publishers refuse SUBSCRIBE_TRACKS](/quest/m1/ietf-tracks-refuse.md) - a peer's listing gets NOT_SUPPORTED, while Rust still lists an IETF peer's tracks upstream for the archive
 - [A moq-transport request token is one auth per distinct token](/quest/m1/ietf-token-auth.md) - requests naming the same token share one verification and grant, on any request type, ending with the last such request
 - [moq-transport carries no epoch](/quest/m1/ietf-epoch-cut.md) - Rust and JS moq-transport sessions stop negotiating MoQ Epoch, so every moq-transport hop is epochless; the draft stays
