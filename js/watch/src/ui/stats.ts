@@ -73,6 +73,9 @@ export function statsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 	const videoCard = card("video", "Video", videoIcon);
 	const vRes = line(videoCard.grid, "Resolution");
 	const vCodec = line(videoCard.grid, "Codec");
+	// The same decoder counters the viewer's feedback reports.
+	const vLate = line(videoCard.grid, "Late frames");
+	const vStalls = line(videoCard.grid, "Stalls");
 	const vBitrateGraph = graph(parent, "Bitrate", { color: "#a855f7", format: formatBitrate });
 	const vFpsGraph = graph(parent, "Frame rate", { color: "#facc15", format: formatFps });
 	videoCard.el.append(vBitrateGraph.el, vFpsGraph.el);
@@ -89,6 +92,7 @@ export function statsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 	const aChannels = line(audioCard.grid, "Channels");
 	const aBitrate = line(audioCard.grid, "Bitrate");
 	const aUnderruns = line(audioCard.grid, "Underruns");
+	const aLate = line(audioCard.grid, "Late frames");
 	track(parent, audioCard, {
 		catalog: watch.audio.source.out.catalog,
 		flag: watch.controls.audio.muted,
@@ -130,6 +134,8 @@ export function statsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 		vBitrateGraph.push(vBitrate);
 		vFpsGraph.push(fps);
 		if (vStats) vPrev = { frames: vStats.frameCount, bytes: vStats.bytesReceived, when: now };
+		vLate.textContent = vStats ? `${vStats.late}` : "—";
+		vStalls.textContent = vStats ? `${vStats.stalls} (${formatMillis(vStats.stalled)})` : "—";
 
 		// Audio.
 		const aConf = watch.audio.source.out.config.peek();
@@ -144,6 +150,7 @@ export function statsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 		// A non-zero count means the target is below what arrivals actually need.
 		const aUnder = aStats?.underruns ?? 0;
 		aUnderruns.textContent = watch.audio.out.stalled.peek() ? `${aUnder} (buffering)` : `${aUnder}`;
+		aLate.textContent = aStats ? `${aStats.late}` : "—";
 
 		// Network. "Estimated max" is the congestion controller / PROBE estimate;
 		// "Actual" is the goodput we measure from the video + audio byte counters.

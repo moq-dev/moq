@@ -327,7 +327,9 @@ export class Broadcast {
 		if (path === undefined) return;
 		const name = effect.get(this.in.name);
 		if (Moq.Path.tryResolve(name, path) === undefined) {
-			console.warn(`not soliciting feedback: echo path ${JSON.stringify(path)} walks above the root from ${name}`);
+			console.warn(
+				`not soliciting feedback: echo path ${JSON.stringify(path)} walks above the root from ${name}`,
+			);
 			return;
 		}
 		this.catalog.mutate((catalog) => {

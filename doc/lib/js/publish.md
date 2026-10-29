@@ -35,6 +35,8 @@ WebCodecs, writes the catalog, and publishes a hang broadcast.
 | `preview` | What the nested element shows: the raw `source` (default), a decoded copy of the `encoded` stream to see what viewers get, or `none`. |
 | `backend` | How a `<canvas>` preview is drawn; see [@moq/video](/lib/js/video). `auto` (default), `webgpu`, or `2d`. |
 | `announce` | When to advertise: once the `source` is live (default), or `always`. Nobody can see or subscribe to the broadcast until it is announced. To keep it out of discovery, use a hidden name with a `.`-prefixed segment; it is still subscribable by name. |
+| `stats` | Publish a [stats track](/concept/stats#media-reports) named in the catalog. Off by default. |
+| `echo-path` | Solicit viewer feedback under this path, relative to the broadcast as a rendition reference is: from `room/live`, `viewers` is `room/viewers`. Sets the catalog's `echo` section; absent solicits none. |
 
 Every attribute is also a reactive property, and property or UI changes reflect
 back into the attributes. An invalid value is refused rather than defaulted: the
@@ -48,6 +50,23 @@ Capture failures, such as `NotAllowedError` when permission is refused, land in
 `out.error` on the camera or microphone in `el.sources.video` and
 `el.sources.audio`, and `<moq-publish-ui>` shows them. A refused capture waits
 for a permission, device, or settings change instead of prompting again.
+
+## Stats and feedback
+
+With `stats`, the catalog names a `stats.json` track that reports, about once a
+second while someone subscribes, what each rendition has sent under its catalog
+ID: frames, bytes, keyframes, frames skipped because the encoder was still
+busy, and the target bitrate. Its `transport` carries only the PROBE round-trip
+time, since browsers report no usable WebTransport statistics. The encoders'
+`out.stats` and the stats panel read the same counters, and a custom producer
+reports through its rendition's `stats` signal. The `Broadcast` takes the same
+options as `stats`, `probe`, and `echo` inputs.
+
+`echo-path` only asks for feedback: a `<moq-watch echo="alice">` that reads the
+catalog publishes `room/viewers/alice.echo`, and `moq export echo` or a dashboard
+reads it there. Issue tokens that let viewers publish under that path. A path
+that walks above the root from the broadcast name is left out of the catalog
+with a warning, since every viewer would refuse it.
 
 ## Encoding
 

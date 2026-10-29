@@ -749,11 +749,14 @@ test("stats names a track in the catalog and reports each listed rendition while
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected a network producer once connected");
 		const subscriber = net.track(Broadcast.STATS_TRACK).subscribe();
-		const consumer = new Json.Snapshot.Consumer<Stats.Snapshot>({ track: subscriber, schema: Stats.SnapshotSchema });
+		const consumer = new Json.Snapshot.Consumer<Stats.Snapshot>({
+			track: subscriber,
+			schema: Stats.SnapshotSchema,
+		});
 		await settle();
 		await clock.advance(Nano.fromMilli(Milli(1000)));
 		// Sub-millisecond durations are floored on the wire.
-		expect((await consumer.latest())?.value).toEqual({
+		expect((await consumer.latest())?.value as unknown).toEqual({
 			transport: { rtt: 12 },
 			renditions: { video: { frames: 3, bytes: 300, keyframes: 1, skipped: 2, bitrate: 1_000_000 } },
 		});
@@ -804,7 +807,7 @@ test("echo solicits feedback in the catalog unless it walks above the root", asy
 	const broadcast = new Broadcast({ enabled: true, name, echo });
 	try {
 		await settle();
-		expect((await readCatalog(broadcast))?.echo).toEqual({ path: "viewers" });
+		expect((await readCatalog(broadcast))?.echo as unknown).toEqual({ path: "viewers" });
 
 		// From `room/live.hang`, `../../viewers` walks above the root, which every viewer refuses.
 		echo.set(Path.normalizeRelative("../../viewers"));
@@ -814,7 +817,7 @@ test("echo solicits feedback in the catalog unless it walks above the root", asy
 		// A deeper name brings the same path back within the root.
 		name.set(Path.from("org/room/live.hang"));
 		await settle();
-		expect((await readCatalog(broadcast))?.echo).toEqual({ path: "../../viewers" });
+		expect((await readCatalog(broadcast))?.echo as unknown).toEqual({ path: "../../viewers" });
 
 		echo.set(undefined);
 		await settle();

@@ -76,9 +76,10 @@ The simplest way to watch a stream:
 | `buffer`         | duration                   | `0ms`         | Future-dated media held before playback skips ahead. |
 | `captions`       | string                     | off           | Text rendition to render. |
 | `catalog-format` | hang, msf, manual          | auto-detected | The catalog format; detected from the name suffix unless set. |
+| `echo`           | path segment               | —             | The viewer's feedback name: once the catalog solicits feedback, publish `<echo path>/<name>.echo` reporting what each rendition received and played. |
 
 Property and built-in UI changes reflect into attributes. Invalid URLs, numbers, durations,
-version lists, and rendering/catalog modes are refused: their property setters throw, and malformed markup
+version lists, echo names, and rendering/catalog modes are refused: their property setters throw, and malformed markup
 reports a browser `error` event and suspends media until corrected or removed. Defaults apply
 when attributes are absent.
 

@@ -14,9 +14,9 @@ import {
 	Signal,
 } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
-import type { RenditionStats } from "../rendition";
 import { errors } from "../internal";
 import { Estimator, type Order } from "../order";
+import type { RenditionStats } from "../rendition";
 import { hardwareReliable } from "../support/video";
 import type { Capture } from "./capture";
 import { normalizeSource, type Source } from "./types";

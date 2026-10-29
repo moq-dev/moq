@@ -71,7 +71,10 @@ test("publishes feedback where the catalog solicits it and follows the solicitat
 		origin,
 		name: "alice",
 		probe: { rtt: Milli(20) },
-		sources: [source("room/live.hang", { video: { frames: 2, bytes: 20 } }), source("room/live.hang", { audio: { underruns: 1 } })],
+		sources: [
+			source("room/live.hang", { video: { frames: 2, bytes: 20 } }),
+			source("room/live.hang", { audio: { underruns: 1 } }),
+		],
 	});
 	try {
 		await flush();
@@ -81,7 +84,7 @@ test("publishes feedback where the catalog solicits it and follows the solicitat
 		catalog.set({ echo: { path: "viewers" } } as Catalog.Root);
 		await flush();
 		expect([...paths]).toEqual(["room/viewers/alice.echo"]);
-		expect(await read(origin, "room/viewers/alice.echo", clock)).toEqual({
+		expect((await read(origin, "room/viewers/alice.echo", clock)) as unknown).toEqual({
 			transport: { rtt: 20 },
 			renditions: { video: { frames: 2, bytes: 20 }, audio: { underruns: 1 } },
 		});
@@ -117,13 +120,15 @@ test("reporters resolving one feedback path share its broadcast and add their co
 				broadcast,
 				origin,
 				name: "alice",
-				sources: [source("room/live.hang", { video: { frames: n + 1, arrival: { timestamp: n, wall: 100 + n } } })],
+				sources: [
+					source("room/live.hang", { video: { frames: n + 1, arrival: { timestamp: n, wall: 100 + n } } }),
+				],
 			}),
 	);
 	try {
 		await flush();
 		expect([...paths]).toEqual(["room/viewers/alice.echo"]);
-		expect(await read(origin, "room/viewers/alice.echo", clock)).toEqual({
+		expect((await read(origin, "room/viewers/alice.echo", clock)) as unknown).toEqual({
 			renditions: { video: { frames: 3, arrival: { timestamp: 1, wall: 101 } } },
 		});
 
@@ -131,7 +136,7 @@ test("reporters resolving one feedback path share its broadcast and add their co
 		reporters[1].close();
 		await flush();
 		expect([...paths]).toEqual(["room/viewers/alice.echo"]);
-		expect((await read(origin, "room/viewers/alice.echo", clock))?.renditions?.video.frames).toBe(3);
+		expect((await read(origin, "room/viewers/alice.echo", clock))?.renditions?.video.frames as unknown).toBe(3);
 
 		// The last one leaving retracts it.
 		reporters[0].close();

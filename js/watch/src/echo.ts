@@ -1,5 +1,5 @@
 import { Milli, Nano } from "@moq/clock";
-import { Echo as Schema, Report } from "@moq/hang";
+import { Report, Echo as Schema } from "@moq/hang";
 import * as Moq from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys } from "@moq/signals";
 import type { Broadcast } from "./broadcast";
