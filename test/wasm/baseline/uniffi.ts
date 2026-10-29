@@ -12,7 +12,7 @@ export interface Uniffi<Config = unknown, Tls = unknown> {
 }
 
 interface Session {
-	consume(): { announcedBroadcast(path: string): { available(): Promise<Broadcast> } };
+	consume(): { follow(path: string): { available(): Promise<Broadcast> } };
 	cancel(code: number): void;
 }
 

@@ -37,8 +37,10 @@ per language and one for the callers, so each reviews on its own. Rust has
 landed: `request(path, epoch)` and `follow(path, epoch)` (returning
 `origin::Following`), with `routed`, `routed_broadcast`, and the route-level
 `announce::Follow` gone, and its in-tree callers following the path where they
-used to wait for a route. JS proceeds in parallel; the bindings follow Rust,
-and the callers follow both.
+used to wait for a route. JS has landed `follow(path, {epoch})`. The bindings
+have landed too: moq-ffi, the C ABI, and every wrapper name them `request` and
+`follow` with an optional epoch, `follow` returning `Following`. The callers
+follow both.
 
 This README's own work, once every child lands: the lifecycle and churn checks
 across languages, the required Nix gate, and all-language interop
@@ -50,7 +52,6 @@ Wire: none.
 
 ## Required
 
-- [Bindings request and follow](/quest/m1/api-audit/resolve/bindings.md) - moq-ffi, the C ABI, and every wrapper mirror `request` and `follow` with an optional epoch
 - [The watch player's follow prop](/quest/m1/api-audit/resolve/watch.md) - `@moq/watch`'s `Broadcast` names its resolution choice `follow` instead of `announced`
 - [Callers resolve once](/quest/m1/api-audit/resolve/callers.md) - no caller hand-rolls synced resolution or decides table absence by wall clock
 

@@ -40,7 +40,7 @@ type (
 	// Announce is a route over a prefix: the origin-relative Prefix, what each filter
 	// wildcard matched (nil Captures for a route that only overlaps the scope), and the
 	// Route serving it. It carries no broadcast; resolve a path with
-	// [OriginConsumer.RequestBroadcast].
+	// [OriginConsumer.Request].
 	Announce = ffi.MoqAnnounce
 	// AnnounceEvent is what an AnnounceConsumer yields: AnnounceEventStart,
 	// AnnounceEventUpdate, AnnounceEventEnd, or AnnounceEventRestart.

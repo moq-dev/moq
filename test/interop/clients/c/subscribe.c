@@ -64,7 +64,7 @@ struct ctx {
     int32_t origin;
     int32_t session;
     int32_t broadcast_wait;
-    int32_t broadcast; // handle delivered by moq_origin_announced_broadcast (0 until it arrives)
+    int32_t broadcast; // handle delivered by moq_origin_follow (0 until it arrives)
     int32_t catalog;
     int32_t video_track; // handle from moq_consume_video (0 until on_catalog starts it)
 
@@ -85,7 +85,7 @@ struct ctx {
 // on main's stack and moq-c keeps the pointer until each registration's
 // terminal (<= 0) callback fires, so main must not return until every one of
 // them has. Closing the session ends its state registration alone;
-// moq_origin_announced_broadcast, moq_consume_catalog and moq_consume_video each
+// moq_origin_follow, moq_consume_catalog and moq_consume_video each
 // keep the pointer until their own terminal. See drain() at the bottom.
 static void done(ctx_t *c, int *flag) {
     pthread_mutex_lock(&c->mu);
@@ -635,12 +635,12 @@ int main(int argc, char **argv) {
     }
 
     // The broadcast arrives over the network after connect, so wait for it to be
-    // announced. moq_origin_announced_broadcast resolves via on_broadcast once it's
+    // announced. moq_origin_follow resolves via on_broadcast once it's
     // available; we block on the condvar until then (or the deadline).
     c.broadcast_wait =
         moq_origin_follow((uint32_t)c.origin, broadcast, strlen(broadcast), NULL, 0, on_broadcast, &c);
     if (c.broadcast_wait <= 0) {
-        fail("error: moq_origin_announced_broadcast failed: %d\n", c.broadcast_wait);
+        fail("error: moq_origin_follow failed: %d\n", c.broadcast_wait);
     }
 
     pthread_mutex_lock(&c.mu);

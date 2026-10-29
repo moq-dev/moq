@@ -163,7 +163,7 @@ async function run(config: Sample) {
 					Array.from({ length: config.publishers }, async (_, publisher) => {
 						const broadcast = await session
 							.consume()
-							.announcedBroadcast(`${config.id}/${publisher}`)
+							.follow(`${config.id}/${publisher}`)
 							.available();
 						const track = await broadcast.subscribeTrack("data", undefined);
 						disposers.push(() => track.cancel());

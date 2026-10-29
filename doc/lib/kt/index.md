@@ -59,7 +59,7 @@ Moq.connect("https://relay.example.com", ClientConfig(tls = ClientTls(roots = li
         }
         // Prefixes stay origin-relative; captures reports what each wildcard matched.
         println(announce.captures)
-        val broadcast = moq.requestBroadcast(announce.prefix)
+        val broadcast = moq.request(announce.prefix)
         println(catalog(broadcast))
     }
 }

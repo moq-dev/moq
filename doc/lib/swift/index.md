@@ -59,7 +59,7 @@ for try await event in try session.consume.announced(prefix: "live/", filter: "*
     }
     // Prefixes stay origin-relative; captures reports what each wildcard matched.
     print(announcement.captures ?? [])
-    let broadcast = try await session.consume.requestBroadcast(path: announcement.prefix)
+    let broadcast = try await session.consume.request(path: announcement.prefix)
     for try await catalog in try await Media.CatalogConsumer.subscribe(broadcast: broadcast) {
         print(catalog)
     }
