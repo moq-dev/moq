@@ -20,11 +20,6 @@ was declined.
 - Prove equivalence with the existing `sh/dispatch-query.test.py` and
   `sh/changed.test.py`, plus a before/after diff of `just ci-select` output for
   a few representative diffs.
-- Waits for the select audit, which is editing the same script.
-
-## Required
-
-- [Replay full-run failures against CI's selected gate](/quest/m0/ci/select-audit.md) - lands its `dispatch.sh` changes first
 
 ## Related
 
