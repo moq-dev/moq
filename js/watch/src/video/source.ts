@@ -224,7 +224,8 @@ export class Source {
 	#held?: { broadcast: Broadcast; track: string };
 
 	// The broadcast `available` was probed for. It lags a broadcast switch until the new probe lands.
-	#probed?: Broadcast;
+	// A signal, since the new broadcast's renditions can equal the old ones and leave `available` unchanged.
+	#probed = new Signal<Broadcast | undefined>(undefined);
 
 	#signals = new Effect();
 	#supportCache = new WeakMap<Supported, Map<string, { key: string; supported: boolean }>>();
@@ -317,7 +318,7 @@ export class Source {
 			} else {
 				this.#out.error.set(undefined);
 			}
-			this.#probed = broadcast;
+			this.#probed.set(broadcast);
 			this.#out.available.set(available);
 			this.#pending.set(false);
 		});
@@ -326,12 +327,13 @@ export class Source {
 	#runSelected(effect: Effect): void {
 		const broadcast = effect.get(this.in.broadcast);
 		const all = effect.get(this.#out.available);
+		const probed = effect.get(this.#probed);
 		const available = enabledRenditions(all);
 		const target = effect.get(this.in.target);
 
 		const selected = this.#choose(effect, available, target) ?? this.#hold(broadcast, all);
 		// A pick from the previous broadcast's renditions is not this broadcast's selection to hold.
-		this.#held = selected && broadcast && this.#probed === broadcast ? { broadcast, track: selected } : undefined;
+		this.#held = selected && broadcast && probed === broadcast ? { broadcast, track: selected } : undefined;
 		if (!selected) return;
 
 		effect.set(this.#out.track, selected);

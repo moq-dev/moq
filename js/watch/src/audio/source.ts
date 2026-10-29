@@ -64,7 +64,8 @@ export class Source {
 	#held?: { broadcast: Broadcast; track: string };
 
 	// The broadcast `available` was probed for. It lags a broadcast switch until the new probe lands.
-	#probed?: Broadcast;
+	// A signal, since the new broadcast's renditions can equal the old ones and leave `available` unchanged.
+	#probed = new Signal<Broadcast | undefined>(undefined);
 
 	#signals = new Effect();
 
@@ -126,7 +127,7 @@ export class Source {
 					console.warn("no supported audio renditions found:", renditions);
 				}
 
-				this.#probed = broadcast;
+				this.#probed.set(broadcast);
 				this.#out.available.set(available);
 			} finally {
 				this.#pending.set(false);
@@ -137,6 +138,7 @@ export class Source {
 	#runSelected(effect: Effect): void {
 		const broadcast = effect.get(this.in.broadcast);
 		const all = effect.get(this.#out.available);
+		const probed = effect.get(this.#probed);
 		const target = effect.get(this.in.target);
 
 		// A disabled rendition has no frames coming, so it is never newly selected, even by name.
@@ -147,7 +149,7 @@ export class Source {
 				? target.name
 				: (this.#select(available) ?? this.#hold(broadcast, all));
 		// A pick from the previous broadcast's renditions is not this broadcast's selection to hold.
-		this.#held = track && broadcast && this.#probed === broadcast ? { broadcast, track } : undefined;
+		this.#held = track && broadcast && probed === broadcast ? { broadcast, track } : undefined;
 		if (!track) return;
 
 		const config = all[track];

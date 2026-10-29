@@ -173,3 +173,24 @@ test("does not hold an enabled selection into another broadcast's disabled rendi
 		source.close();
 	}
 });
+
+test("holds on a broadcast whose renditions match the previous one", async () => {
+	const current = new Signal<Broadcast | undefined>(broadcast({ mic: config("opus") }).broadcast);
+	const source = new Source({ broadcast: current, supported: async () => true });
+	try {
+		await settled(source);
+
+		// The new probe publishes an equal `available`, so only its broadcast tag changes.
+		const next = broadcast({ mic: config("opus") });
+		current.set(next.broadcast);
+		await settled(source);
+		expect(source.out.track.peek()).toBe("mic");
+
+		next.catalog.set({ audio: { renditions: { mic: config("opus", { enabled: false }) } } });
+		await settled(source);
+		expect(source.out.track.peek()).toBe("mic");
+		expect(source.out.config.peek()?.enabled).toBe(false);
+	} finally {
+		source.close();
+	}
+});

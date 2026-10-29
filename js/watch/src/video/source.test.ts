@@ -315,6 +315,28 @@ describe("Source disabled rendition selection", () => {
 		source.close();
 	});
 
+	it("holds on a broadcast whose renditions match the previous one", async () => {
+		const current = new Signal<Broadcast | undefined>(
+			mutableBroadcast({ high: config("avc1.640028", { bitrate: 2_000_000 }) }).broadcast,
+		);
+		const source = new Source({ broadcast: current, supported: async () => true });
+		await settle();
+
+		// The new probe publishes an equal `available`, so only its broadcast tag changes.
+		const next = mutableBroadcast({ high: config("avc1.640028", { bitrate: 2_000_000 }) });
+		current.set(next.broadcast);
+		await settle();
+		expect(source.out.track.peek()).toBe("high");
+
+		next.catalog.set({
+			video: { renditions: { high: config("avc1.640028", { bitrate: 2_000_000, enabled: false }) } },
+		});
+		await settle();
+		expect(source.out.track.peek()).toBe("high");
+		expect(source.out.config.peek()?.enabled).toBe(false);
+		source.close();
+	});
+
 	it("ignores a legacy stalled flag", async () => {
 		const source = new Source({
 			broadcast: mockBroadcast({
