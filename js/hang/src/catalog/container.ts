@@ -1,7 +1,7 @@
 import * as z from "@zod/mini";
 
 /** The container kinds this build knows how to decode. */
-const KNOWN_KINDS = ["legacy", "cmaf", "loc"];
+const KNOWN_KINDS = ["legacy", "cmaf", "loc", "ietf-loc"];
 
 /**
  * A container this build does not recognize, preserved verbatim.
@@ -34,8 +34,11 @@ export const UnknownContainerSchema = z.pipe(
  *             Timestamps are in microseconds.
  * - "cmaf": Fragmented MP4 container - frames contain complete moof+mdat fragments.
  *           The init segment (ftyp+moov) is base64-encoded in the catalog.
- * - "loc": Low Overhead Container (draft-ietf-moq-loc). Each frame has a small
- *          property block followed by the codec payload.
+ * - "loc": Low Overhead Container properties (draft-ietf-moq-loc) in a small block at the
+ *          start of each frame, followed by the codec payload. Works on every transport.
+ * - "ietf-loc": draft-ietf-moq-loc-04's own framing: the properties are the MoQ Object
+ *               Properties and the frame is the bare codec payload. Only moq-transport carries
+ *               it, so a moq-lite subscriber cannot decode it.
  *
  * Anything else parses as {@link UnknownContainerSchema} instead of throwing, so one rendition
  * using a future container does not take down the rest of the catalog.
@@ -50,8 +53,10 @@ export const ContainerSchema = z._default(
 				kind: z.literal("cmaf"),
 				init: z.base64(),
 			}),
-			// Low Overhead Container.
+			// Low Overhead Container, properties in the payload.
 			z.object({ kind: z.literal("loc") }),
+			// Low Overhead Container, properties in the MoQ Object Properties.
+			z.object({ kind: z.literal("ietf-loc") }),
 		]),
 		UnknownContainerSchema,
 	]),

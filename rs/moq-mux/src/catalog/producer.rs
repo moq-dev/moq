@@ -1254,7 +1254,10 @@ fn video_sap_type(codec: &hang::catalog::VideoCodec) -> Option<u8> {
 fn packaging_of(container: &hang::catalog::Container) -> Option<moq_msf::Packaging> {
 	match container {
 		hang::catalog::Container::Cmaf { .. } => Some(moq_msf::Packaging::Cmaf),
-		hang::catalog::Container::Loc => Some(moq_msf::Packaging::Loc),
+		// MSF's `loc` is draft-ietf-moq-loc-04's framing, in the Object Properties. hang's `loc` puts
+		// the properties at the head of the payload, so announcing it as `loc` would have a receiver
+		// read that block as codec bitstream, and MSF has no packaging for it.
+		hang::catalog::Container::Loc => None,
 		hang::catalog::Container::Legacy => Some(moq_msf::Packaging::Legacy),
 		hang::catalog::Container::Unknown(unknown) => {
 			unknown.kind().map(|kind| moq_msf::Packaging::Unknown(kind.to_string()))
@@ -1436,7 +1439,7 @@ mod test {
 			};
 			let mut producer = Producer::new(&mut broadcast, Config::default()).unwrap();
 			let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
-			config.container = Container::Loc;
+			config.container = Container::Legacy;
 			config.broadcast = Some(moq_net::path::Relative::new("./left").unwrap());
 			producer
 				.modify()
@@ -1579,7 +1582,7 @@ mod test {
 			config.label = Some("Español".into());
 			config.jitter = Some(std::time::Duration::from_millis(7));
 			config.delay = Some(std::time::Duration::from_millis(11));
-			config.container = Container::Loc;
+			config.container = Container::Legacy;
 			let mut catalog = hang::Catalog::<()>::default();
 			catalog.text.insert("text", config.clone()).unwrap();
 			let msf = to_msf_media::<()>(&catalog, &moq_net::Path::empty());
@@ -1620,9 +1623,9 @@ mod test {
 	fn cross_broadcast_renditions_round_trip_through_msf() {
 		let base = moq_net::Path::from_static("room/catalog");
 		let catalog = hang::Catalog::<()>::from_str(r#"{
-			"video": {"renditions": {"view": {"broadcast": "./left", "track": "video", "codec": "vp8", "container": {"kind": "loc"}}}},
-			"audio": {"renditions": {"sound": {"broadcast": "./right", "track": "audio", "codec": "opus", "sampleRate": 48000, "numberOfChannels": 2, "container": {"kind": "loc"}}}},
-			"text": {"renditions": {"words": {"broadcast": "../captions", "track": "text", "format": "vtt", "role": "caption", "container": {"kind": "loc"}}}}
+			"video": {"renditions": {"view": {"broadcast": "./left", "track": "video", "codec": "vp8", "container": {"kind": "legacy"}}}},
+			"audio": {"renditions": {"sound": {"broadcast": "./right", "track": "audio", "codec": "opus", "sampleRate": 48000, "numberOfChannels": 2, "container": {"kind": "legacy"}}}},
+			"text": {"renditions": {"words": {"broadcast": "../captions", "track": "text", "format": "vtt", "role": "caption", "container": {"kind": "legacy"}}}}
 		}"#).unwrap();
 		let msf = to_msf_media::<()>(&catalog, &base);
 		let wire = msf.to_json().unwrap();
@@ -1663,7 +1666,7 @@ mod test {
 		for reference in ["../catalog", "./catalog/room/catalog"] {
 			let mut catalog = hang::Catalog::<()>::default();
 			let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
-			config.container = Container::Loc;
+			config.container = Container::Legacy;
 			config.broadcast = Some(moq_net::path::Relative::new(reference).unwrap());
 			catalog.video.renditions.insert("video".into(), config);
 			assert!(to_msf_media::<()>(&catalog, &base).tracks.is_empty(), "{reference}");
@@ -1700,7 +1703,7 @@ mod test {
 		let mut catalog = hang::Catalog::<()>::default();
 		for (id, width) in [("a", 640), ("b", 1280)] {
 			let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
-			config.container = Container::Loc;
+			config.container = Container::Legacy;
 			config.track = Some("video".into());
 			config.coded_width = Some(width);
 			catalog.video.renditions.insert(id.into(), config);
@@ -2962,8 +2965,8 @@ mod test {
 		assert_eq!(audio.jitter, None);
 	}
 
-	// A LOC rendition must advertise `packaging: loc`. MSF-01 has no legacy packaging, so falling into
-	// the legacy arm published a catalog that named a container the receiver would not find on the wire.
+	// hang's LOC is not MSF's: `packaging: loc` is LOC-04's Object Properties framing, so a hang LOC
+	// rendition stays out of MSF rather than naming a framing the receiver would not find on the wire.
 	#[test]
 	fn convert_video_loc_container() {
 		let mut video_config = VideoConfig::new(H264 {
@@ -2981,8 +2984,7 @@ mod test {
 		catalog.video.renditions = video_renditions;
 
 		let msf = to_msf_media::<()>(&catalog, &moq_net::Path::empty());
-		assert_eq!(msf.tracks.len(), 1);
-		assert_eq!(msf.tracks[0].packaging, moq_msf::Packaging::Loc);
+		assert!(msf.tracks.is_empty());
 	}
 
 	#[test]
@@ -2997,8 +2999,7 @@ mod test {
 		catalog.audio.renditions = audio_renditions;
 
 		let msf = to_msf_media::<()>(&catalog, &moq_net::Path::empty());
-		assert_eq!(msf.tracks.len(), 1);
-		assert_eq!(msf.tracks[0].packaging, moq_msf::Packaging::Loc);
+		assert!(msf.tracks.is_empty());
 	}
 
 	// An unrecognized container keeps its wire kind instead of posing as legacy: hang says such a

@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### The `ietf-loc` container kind
+
+`Catalog.Container` gains `{ kind: "ietf-loc" }`, draft-ietf-moq-loc-04's own framing: the properties are the moq-transport Object Properties and the payload is the bare codec bitstream. The existing `loc` kind is unchanged.
+A `switch` over `container.kind` that is exhaustive needs a case for it; decode it with `Container.Loc.ObjectFormat`, or skip the rendition.
+`Container.Format.decode` takes the frame's Object Properties as an optional third argument, and a decoded `Frame` may carry the codec `config` that replaces the catalog's `description`. A format that ignores both needs no change.
+
 ### The catalog rendition cap is removed
 
 `Catalog.MAX_RENDITIONS` and `Catalog.TooManyRenditions` are gone: `checkRenditions`, `encode`, and `watch` accept any number of renditions.

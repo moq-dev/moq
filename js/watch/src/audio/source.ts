@@ -174,6 +174,12 @@ export class Source {
 		}
 
 		for (const [track, config] of entries) {
+			if (config.container.kind === "ietf-loc") {
+				return { track, config };
+			}
+		}
+
+		for (const [track, config] of entries) {
 			if (config.container.kind === "cmaf") {
 				return { track, config };
 			}

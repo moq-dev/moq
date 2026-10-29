@@ -341,7 +341,7 @@ export class Consumer {
 		// A malformed payload is not loss: it ends the reader where it sits, rather than truncating the group.
 		let decoded: Frame[];
 		try {
-			decoded = this.#format.decode(wire.payload, wire.timestamp);
+			decoded = this.#format.decode(wire.payload, wire.timestamp, wire.properties);
 		} catch (err) {
 			group.fault = err instanceof Error ? err : new Error(String(err));
 			return;
@@ -381,6 +381,7 @@ export class Consumer {
 				// contiguous next group looks one frame past the end. Undefined for Legacy (no duration).
 				duration: sample.duration,
 			};
+			if (sample.config !== undefined) frame.config = sample.config;
 
 			if (!marker) {
 				group.index++;

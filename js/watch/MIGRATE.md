@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### MSF `loc` packaging plays as LOC-04
+
+An MSF track with `packaging: "loc"` maps to the hang `ietf-loc` container: it plays over moq-transport only, from the Object Properties, and its objects are refused over moq-lite instead of decoding.
+An MSF catalog from an older moq-mux announced hang's in-payload LOC as `loc`, which no longer plays correctly. Watch that broadcast through its hang catalog, or upgrade the publisher, which leaves those renditions out of MSF.
+
 ### Element reflection and invalid configuration
 
 Property and built-in UI changes now reflect into attributes. Invalid rendering/catalog modes, URLs, numbers, durations, and version lists throw instead of selecting defaults; remove an attribute to use its default.

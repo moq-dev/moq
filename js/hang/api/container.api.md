@@ -34,12 +34,13 @@ export interface ConsumerProps {
 export const DEFAULT_MAX_BUFFER: number;
 
 export interface Format {
-	decode(payload: Uint8Array, timestamp: Net.Time.Timestamp | undefined): Frame[];
+	decode(payload: Uint8Array, timestamp: Net.Time.Timestamp | undefined, properties?: Net.Group.ObjectProperties): Frame[];
 	end?(frame: Frame): Micro | undefined;
 	readonly kind?: "audio" | "video" | "data";
 }
 
 export interface Frame {
+	config?: Uint8Array;
 	duration?: Micro;
 	keyframe: boolean;
 	payload: Uint8Array;

@@ -185,7 +185,8 @@ The `container.kind` on each rendition says how frames are framed:
 | --- | --- | --- |
 | `legacy` | varint microsecond timestamp + codec payload | The default. Cheapest. |
 | `cmaf` | `moof` + `mdat` | fMP4 passthrough for HLS/DASH interop; ~100 bytes per frame. |
-| `loc` | small property block + payload | The IETF [LOC](/concept/standard#loc) container. |
+| `loc` | small property block + payload | [LOC](/concept/standard#loc) properties on any transport. Not announced in MSF. |
+| `ietf-loc` | bare payload, properties in the object | The LOC draft's own framing, MSF `loc`. moq-transport only. |
 
 A consumer skips renditions with a kind it doesn't recognize and carries them
 through when republishing the catalog.

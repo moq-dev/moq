@@ -333,6 +333,7 @@ export namespace Group {
 	export interface Frame {
 		arrived?: Instant;
 		payload: Uint8Array;
+		properties?: Group.ObjectProperties;
 		timestamp?: Time.Timestamp;
 	}
 	export interface Info {
@@ -340,6 +341,7 @@ export namespace Group {
 	}
 	export const MAX_GROUP_CACHE_BYTES: number;
 	export const MAX_GROUP_FRAMES: 8192;
+	export type ObjectProperties = ReadonlyMap<bigint, bigint | Uint8Array>;
 	export class Producer {
 		constructor(sequence: number);
 		abort(error: Error): void;

@@ -40,7 +40,9 @@ function toContainer(track: Msf.Track): ContainerInfo | undefined {
 			if (!track.initData || !initBytes) return undefined;
 			return { container: { kind: "cmaf", init: track.initData }, description: undefined };
 		case "loc":
-			return { container: { kind: "loc" }, description };
+			// MSF's LOC is draft-ietf-moq-loc-04's framing, in the Object Properties, not hang's `loc`
+			// block at the head of the payload.
+			return { container: { kind: "ietf-loc" }, description };
 		case "legacy":
 			return { container: { kind: "legacy" }, description };
 		default:

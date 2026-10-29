@@ -1,4 +1,5 @@
 import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.ts";
+import type { ObjectProperties } from "../group.ts";
 import type { Cursor, Reader } from "../stream.ts";
 import { Writer } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
@@ -57,7 +58,23 @@ export async function encodeObjectExtensions(
 
 /** Decode the Timestamp an object's Properties block carries, consuming the whole block. */
 export function decodeObjectTime(c: Cursor, timescale: Timescale): Timestamp | undefined {
-	let timestamp: bigint | undefined;
+	return objectTime(decodeObjectProperties(c), timescale);
+}
+
+// The Timestamp in `properties`, in the track's `timescale`.
+function objectTime(properties: ObjectProperties, timescale: Timescale): Timestamp | undefined {
+	const timestamp = properties.get(PROP_TIMESTAMP);
+	if (typeof timestamp !== "bigint") return undefined;
+	return new Timestamp(Number(timestamp), timescale);
+}
+
+/**
+ * Decode an object's whole Properties block, by id. A repeated Timestamp is malformed, as Rust
+ * refuses it; any other repeated id keeps its first value, since a relay may forward a list
+ * whose unknown properties repeat.
+ */
+export function decodeObjectProperties(c: Cursor): ObjectProperties {
+	const properties = new Map<bigint, bigint | Uint8Array>();
 	let prevType = 0n;
 	let first = true;
 
@@ -67,21 +84,14 @@ export function decodeObjectTime(c: Cursor, timescale: Timescale): Timestamp | u
 		first = false;
 		prevType = id;
 
-		if (id % 2n === 0n) {
-			const value = c.u62();
-			if (id === PROP_TIMESTAMP) {
-				timestamp = value;
-			}
-		} else {
-			c.read(c.u53());
+		const value = id % 2n === 0n ? c.u62() : c.read(c.u53());
+		if (!properties.has(id)) properties.set(id, value);
+		else if (id === PROP_TIMESTAMP) {
+			throw new StreamError(StreamCode.MalformedTrack, { message: "object Timestamp repeats" });
 		}
 	}
 
-	if (timestamp === undefined) {
-		return undefined;
-	}
-
-	return new Timestamp(Number(timestamp), timescale);
+	return properties;
 }
 
 export interface GroupFlags {
@@ -238,6 +248,8 @@ export class Frame {
 	payload?: Uint8Array;
 	/** The presentation timestamp carried in object properties, when present. */
 	timestamp?: Timestamp;
+	/** Every Object Property the object arrived with, its Timestamp included; absent when it had none. */
+	properties?: ObjectProperties;
 	/**
 	 * An END_OF_TRACK marker: no object at or past its location exists. At object 0 its group
 	 * does not exist either, so the track ends at that group; later in a group it ends after it.
@@ -316,28 +328,29 @@ export class Frame {
 		}
 
 		let timestamp: Timestamp | undefined;
-		let hasProperties = false;
+		let properties: ObjectProperties | undefined;
 		if (flags.hasExtensions) {
 			const extensionsLength = c.u53();
 			if (extensionsLength > MAX_OBJECT_EXTENSIONS) {
 				throw new StreamError(StreamCode.MalformedTrack, { message: "object extensions exceed 64 KiB" });
 			}
-			hasProperties = extensionsLength !== 0;
-			// A track that declared no timescale is untimed, so its objects stay untimed even
-			// if one carries a Timestamp: there are no units to read it in.
-			if (timescale !== undefined) {
-				timestamp = c.exact(extensionsLength, (e) => decodeObjectTime(e, timescale));
-			} else {
-				c.read(extensionsLength);
+			if (extensionsLength !== 0) {
+				properties = c.exact(extensionsLength, decodeObjectProperties);
+				// A track that declared no timescale is untimed, so its objects stay untimed even
+				// if one carries a Timestamp: there are no units to read it in.
+				if (timescale !== undefined) timestamp = objectTime(properties, timescale);
 			}
 		}
+		const hasProperties = properties !== undefined;
 
 		const payloadLength = c.u53();
 
 		if (payloadLength > 0) {
 			if (delta !== 0) throw new ObjectIdGap(delta);
 			const payload = c.read(payloadLength);
-			return new Frame({ payload, timestamp });
+			const frame = new Frame({ payload, timestamp });
+			frame.properties = properties;
+			return frame;
 		}
 
 		const status = c.u53();
@@ -357,7 +370,11 @@ export class Frame {
 		// and imquic sends both.
 		if (status === GROUP_END) return new Frame();
 
-		if (status === 0) return new Frame({ payload: new Uint8Array(0), timestamp });
+		if (status === 0) {
+			const frame = new Frame({ payload: new Uint8Array(0), timestamp });
+			frame.properties = properties;
+			return frame;
+		}
 
 		throw new Error(`Unsupported object status: ${status}`);
 	}

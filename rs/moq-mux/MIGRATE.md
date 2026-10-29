@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### LOC renditions leave the MSF catalog
+
+The MSF catalog `catalog::Producer` publishes no longer lists `Container::Loc` renditions.
+MSF `packaging: "loc"` is draft-ietf-moq-loc-04's framing, with the properties in the moq-transport Object Properties, while hang's `loc` carries them in the payload, so announcing one as the other had receivers misread the payload.
+A consumer of moq-dev LOC reads the hang catalog (`catalog.json`), which still lists them. Publish `Container::Legacy` or `Container::Cmaf` to appear in MSF.
+
 ### Compression moves to the track
 
 `catalog.json.z` is gone: `catalog::Producer` publishes one `catalog.json` with `compress: true` (the MSF `catalog` stays uncompressed), and HLS record tracks are compressed too.

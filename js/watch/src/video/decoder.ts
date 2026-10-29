@@ -580,10 +580,13 @@ class DecoderTrack {
 	}
 
 	#runLegacy(effect: Effect, sub: Moq.Track.Subscriber, decoder: VideoDecoder): void {
+		const kind = this.config.container.kind;
 		const format =
-			this.config.container.kind === "loc"
+			kind === "loc"
 				? new Container.Loc.Format("video")
-				: new Container.Legacy.Format(this.config);
+				: kind === "ietf-loc"
+					? new Container.Loc.ObjectFormat("video")
+					: new Container.Legacy.Format(this.config);
 		const consumer = this.#consume(effect, sub, format);
 
 		// Combine network jitter buffer with decode buffer
@@ -650,6 +653,7 @@ class DecoderTrack {
 
 				latest = next.group;
 				this.#resetAtKeyframe(decoder, frame.keyframe);
+				this.#reconfigure(decoder, frame);
 				decoder.decode(chunk);
 				if (!this.sync.playing.peek())
 					await this.#waitStartup(effect, Milli.fromMicro(frame.timestamp as Micro));
@@ -808,6 +812,15 @@ class DecoderTrack {
 		this.#configure(decoder);
 	}
 
+	// Adopt the codec configuration a frame carries (LOC's Video Config). It can only change where
+	// the decoder needs no references, so a delta that changes it is refused.
+	#reconfigure(decoder: VideoDecoder, frame: Container.Frame): void {
+		if (frame.config === undefined || bytesEqual(frame.config, this.#description)) return;
+		if (!frame.keyframe) throw new Error("video: codec config changed on a delta frame");
+		this.#description = frame.config;
+		if (decoder.state !== "closed") this.#configure(decoder);
+	}
+
 	#configure(decoder: VideoDecoder): void {
 		decoder.configure({
 			codec: this.config.codec,
@@ -928,3 +941,7 @@ async function supported(config: Catalog.VideoConfig): Promise<boolean> {
 }
 
 Object.assign(supported, { [supportCacheKey]: decoderConfigKey });
+
+function bytesEqual(a: Uint8Array, b: Uint8Array | undefined): boolean {
+	return a === b || (b !== undefined && a.byteLength === b.byteLength && a.every((byte, i) => byte === b[i]));
+}

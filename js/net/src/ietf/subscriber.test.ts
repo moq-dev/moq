@@ -8,7 +8,7 @@ import { type Hop, HopSchema, UNKNOWN_HOP } from "../hop.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
-import { Reader, Stream } from "../stream.ts";
+import { encodeVarint, Reader, Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
@@ -802,6 +802,48 @@ test("an object-scope Timescale is never applied", async () => {
 	const frame = await group?.readFrame();
 	expect(frame?.timestamp?.scale).toBe(Timescale.MICRO);
 	expect(frame?.timestamp?.value).toBe(5);
+	track.close();
+});
+
+test("an object's Properties reach the reader, its Timestamp included on an untimed track", async () => {
+	const { subscriber, track } = await subscribeTrack();
+
+	// Timescale (0x08) 15360, Video Frame Marking (0x09) [0x20], Video Config (0x0d) [1 2 3], then
+	// Timestamp (0x10) 7, each id a delta from the last.
+	const properties = [0x08, ...encodeVarint(15360, VERSION), 0x01, 1, 0x20, 0x04, 3, 1, 2, 3, 0x03, 7];
+	await subscriber.handleGroup(stampedGroup(0), new Reader(undefined, encodeStamped(properties), VERSION));
+	const frame = await (await track.ordered().nextGroup())?.readFrame();
+	expect(frame?.timestamp).toBeUndefined();
+	expect(frame?.properties).toEqual(
+		new Map<bigint, bigint | Uint8Array>([
+			[0x08n, 15360n],
+			[0x09n, new Uint8Array([0x20])],
+			[0x0dn, new Uint8Array([1, 2, 3])],
+			[0x10n, 7n],
+		]),
+	);
+	track.close();
+});
+
+test("an object without Properties has none on the reader", async () => {
+	const { subscriber, track } = await subscribeTrack();
+	await subscriber.handleGroup(stampedGroup(0), new Reader(undefined, encodeStamped([]), VERSION));
+	const frame = await (await track.ordered().nextGroup())?.readFrame();
+	expect(frame?.payload).toEqual(new Uint8Array([42]));
+	expect(frame?.properties).toBeUndefined();
+	track.close();
+});
+
+test("a repeated object Timestamp is malformed", async () => {
+	const { subscriber, track } = await subscribeTrack();
+	const reader = new Reader(undefined, encodeStamped([0x10, 5, 0x00, 6]), VERSION);
+	const stop = spyOn(reader, "stop");
+
+	await subscriber.handleGroup(stampedGroup(0), reader);
+
+	expect(stop).toHaveBeenCalledTimes(1);
+	expect((stop.mock.calls[0][0] as StreamError).code).toBe(StreamCode.MalformedTrack);
+	stop.mockRestore();
 	track.close();
 });
 

@@ -110,7 +110,7 @@ test("rounds a fractional MSF jitter up, keeps zero, and rejects a negative one"
 	}
 });
 
-test("keeps loc packaging as the loc container", () => {
+test("maps loc packaging to LOC-04's Object Properties framing, not hang's loc container", () => {
 	const catalog: Msf.Catalog = {
 		tracks: [
 			{
@@ -122,7 +122,7 @@ test("keeps loc packaging as the loc container", () => {
 		],
 	};
 
-	expect(toHang(catalog).video?.renditions.video?.container).toEqual({ kind: "loc" });
+	expect(toHang(catalog).video?.renditions.video?.container).toEqual({ kind: "ietf-loc" });
 });
 
 test("keeps legacy packaging as the legacy container", () => {
@@ -175,7 +175,7 @@ test("converts timed text without guessing its format", () => {
 		expect(text?.role).toBe("caption");
 		expect(text?.lang).toBe("en");
 		expect(text?.label).toBe("SDH");
-		expect(text?.container).toEqual({ kind: "loc" });
+		expect(text?.container).toEqual({ kind: "ietf-loc" });
 	}
 });
 

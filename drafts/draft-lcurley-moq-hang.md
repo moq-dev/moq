@@ -861,7 +861,8 @@ A rendition declares its container via the `container` field of its catalog entr
 type Container =
   { "kind": "legacy" } |
   { "kind": "cmaf", "init": string } |
-  { "kind": "loc" }
+  { "kind": "loc" } |
+  { "kind": "ietf-loc" }
 ~~~
 
 The `kind` field selects the framing; a consumer MUST ignore a rendition whose `kind` it does not recognize.
@@ -923,11 +924,22 @@ The `init` field is the initialization segment (`ftyp`+`moov`) for the track, ba
 A consumer MUST feed `init` to the decoder before the first frame.
 
 ## loc
-Each frame is a Low Overhead Container frame {{!I-D.ietf-moq-loc}}: a property block, carrying the timestamp among other properties, followed by the codec payload.
+Each frame carries Low Overhead Container properties {{!I-D.ietf-moq-loc}} in the payload: a property block, carrying the timestamp among other properties, followed by the codec payload.
+This framing works on any transport, including one without Object Properties, and is not the LOC draft's own framing ({{ietf-loc}}), so an MSF {{moqmsf}} gateway MUST NOT announce it as MSF `loc` packaging.
 
 For audio and video, consumers accept empty codec payload metadata with the same video-duration and audio-terminal-trimming meanings as the legacy container.
 Data tracks retain empty payloads as data.
 A consumer MUST NOT submit it to a decoder.
+
+## ietf-loc {#ietf-loc}
+Each object is framed as {{!I-D.ietf-moq-loc}} defines: its LOC properties are the MoQ Object Properties, and its payload is the bare codec payload.
+This is MSF `loc` packaging, so an MSF gateway maps one to the other.
+Only moq-transport carries Object Properties; a consumer MUST refuse an object without them rather than read its payload.
+
+The timestamp is the Timestamp property, in units of the object's Timescale property, else of the track's TIMESCALE, else microseconds.
+A Video Config or Audio Config property replaces the rendition's `description` from that object on, and MAY change only at a keyframe.
+A Video Frame Marking property flags a keyframe within a group.
+Empty payloads have the same meanings as in `loc`.
 
 
 # Compression {#compression}
@@ -1125,6 +1137,7 @@ This document has no IANA actions.
 ## moq-hang-04
 {:numbered="false"}
 
+- Added the `ietf-loc` container ({{ietf-loc}}), the LOC draft's own framing in the MoQ Object Properties, which MSF `loc` packaging maps to. A `loc` rendition is no longer announced as MSF `loc`.
 - Removed `catalog.json.z` and the data track `compression` field: compression is a track property the transport carries ({{compression}}), so each compressed track is one name, and the catalog, `stats` and `echo` snapshots, HLS record tracks, and JSON data tracks SHOULD be compressed.
 - Replaced the root `archive` section and its per-track timelines with an optional, per-rendition `hls` field on video and audio ({{hls}}). Each record is a segment's first `group` and `pts` in milliseconds, with an optional `duration` where zero marks a stop; frame positions, `end`, `keyframe`, `timescale`, `replay`, `replayEpoch`, `store`, and `version` are gone. Each rendition numbers its own segments, and an edge maps a rendition's record `n` to its segment `n`. The record track is named `<track>.hls` and is compressed ({{compression}}).
 - A reader refuses a JSON frame in which an object repeats a member name.

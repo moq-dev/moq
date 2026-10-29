@@ -1467,7 +1467,7 @@ export class Subscriber {
 						message: `object without a Timestamp on a track with TIMESCALE: group=${group.groupId}`,
 					});
 				}
-				open().writeFrame({ payload: frame.payload, timestamp: frame.timestamp });
+				open().writeFrame({ payload: frame.payload, timestamp: frame.timestamp, properties: frame.properties });
 				nextObject += 1;
 			}
 

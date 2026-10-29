@@ -47,7 +47,21 @@ export interface Frame {
 	 * reading. A write ignores it and stamps its own.
 	 */
 	arrived?: Instant;
+	/**
+	 * The MoQ Object Properties a moq-transport object arrived with, absent when it had none.
+	 *
+	 * Read side only: the moq-transport subscriber records them and no publisher sends them on,
+	 * so they never reach another hop, and moq-lite carries none. They exist for a container that
+	 * frames media in them, as LOC does (draft-ietf-moq-loc-04 section 2.2).
+	 */
+	properties?: ObjectProperties;
 }
+
+/**
+ * A moq-transport object's Properties by id, each once: an even id holds a varint, an odd id
+ * its bytes. A repeated id keeps its first value.
+ */
+export type ObjectProperties = ReadonlyMap<bigint, bigint | Uint8Array>;
 
 /** Options for a sequence-aware frame read. */
 export interface ReadOptions {
@@ -120,6 +134,9 @@ class Landed implements Frame {
 	}
 	get timestamp(): Timestamp | undefined {
 		return this.#frame.timestamp;
+	}
+	get properties(): ObjectProperties | undefined {
+		return this.#frame.properties;
 	}
 }
 
@@ -936,6 +953,7 @@ export class Consumer {
 				payload: slice?.payload ?? buffered.payload,
 				timestamp: buffered.timestamp,
 				arrived: buffered.arrived,
+				properties: buffered.properties,
 			};
 		} catch (error) {
 			this.#terminal = error instanceof Error ? error : new Error(String(error));

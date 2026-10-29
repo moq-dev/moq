@@ -13,7 +13,7 @@ with it, while shipping a simpler profile you can use today.
 | --- | --- | --- |
 | [moq-transport](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/) | The IETF pub/sub protocol | Drafts 18 and 22 negotiated by ALPN; [moq-lite](/concept/moq-lite) is a forward-compatible subset |
 | [MSF](https://datatracker.ietf.org/doc/draft-ietf-moq-msf/) | The IETF catalog format | Read and written; broadcasts ending in `.msf` select it |
-| [LOC](https://datatracker.ietf.org/doc/draft-ietf-moq-loc/) | The IETF low-overhead container | Supported as a hang container kind |
+| [LOC](https://datatracker.ietf.org/doc/draft-ietf-moq-loc/) | The IETF low-overhead container | Two hang container kinds, see [LOC](#loc) |
 | [moq-lite](/draft/moq-lite), [hang](/draft/moq-hang), [e2ee](/draft/moq-e2ee), and friends | This project's own drafts | Normative for the implementation, published to the datatracker from [`drafts/`](https://github.com/moq-dev/moq/tree/main/drafts) |
 
 ## moq-transport
@@ -150,9 +150,18 @@ broadcast resolves only when both sides share a root.
 ## LOC
 
 The Low Overhead Container carries a timestamp and a few properties per frame
-with none of CMAF's per-frame `moof` cost. It is close to hang's `legacy`
-container and is selectable per track (`container=loc` in the
-[GStreamer plugin](/bin/gstreamer)).
+with none of CMAF's per-frame `moof` cost. hang has two framings for it:
+
+- `loc` puts the properties at the head of each payload, so it works over
+  moq-lite too. It is close to hang's `legacy` container and is selectable per
+  track (`container=loc` in the [GStreamer plugin](/bin/gstreamer)). It is not
+  the LOC draft's framing, so MSF output leaves these renditions out; read
+  them through the hang catalog.
+- `ietf-loc` is the draft's own framing: the properties are the moq-transport
+  Object Properties and the payload is the bare codec bitstream. MSF `loc`
+  packaging means this, and the browser player plays it over moq-transport
+  only, taking the timestamp, codec config, and keyframe flag from the
+  properties.
 
 ## Interop testing
 

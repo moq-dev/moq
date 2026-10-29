@@ -17,6 +17,9 @@ export interface Frame {
 	 * waiting out the max delay budget.
 	 */
 	duration?: Micro;
+
+	/** The codec configuration (WebCodecs `description`) the container carried with this frame, which replaces the catalog's from here on. */
+	config?: Uint8Array;
 }
 
 /** A media frame carrying its local transport ingress time. */

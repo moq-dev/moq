@@ -42,6 +42,8 @@ export namespace Audio {
 			kind: ZodMiniLiteral<"cmaf">;
 		}, $strip>, ZodMiniObject<{
 			kind: ZodMiniLiteral<"loc">;
+		}, $strip>, ZodMiniObject<{
+			kind: ZodMiniLiteral<"ietf-loc">;
 		}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
 			kind: ZodMiniString<string>;
 		}, $loose>, ZodMiniTransform<{
@@ -82,6 +84,8 @@ export namespace Audio {
 				kind: ZodMiniLiteral<"cmaf">;
 			}, $strip>, ZodMiniObject<{
 				kind: ZodMiniLiteral<"loc">;
+			}, $strip>, ZodMiniObject<{
+				kind: ZodMiniLiteral<"ietf-loc">;
 			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
 				kind: ZodMiniString<string>;
 			}, $loose>, ZodMiniTransform<{
@@ -122,6 +126,8 @@ export namespace Audio {
 				kind: ZodMiniLiteral<"cmaf">;
 			}, $strip>, ZodMiniObject<{
 				kind: ZodMiniLiteral<"loc">;
+			}, $strip>, ZodMiniObject<{
+				kind: ZodMiniLiteral<"ietf-loc">;
 			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
 				kind: ZodMiniString<string>;
 			}, $loose>, ZodMiniTransform<{
@@ -167,6 +173,8 @@ export namespace Audio {
 				} | {
 					kind: "loc";
 				} | {
+					kind: "ietf-loc";
+				} | {
 					kind: "unknown";
 					raw: {
 						[x: string]: unknown;
@@ -202,6 +210,8 @@ export namespace Audio {
 				kind: "cmaf";
 			} | {
 				kind: "loc";
+			} | {
+				kind: "ietf-loc";
 			} | {
 				kind: "unknown";
 				raw: {
@@ -292,6 +302,8 @@ export const ContainerSchema: ZodMiniDefault<ZodMiniUnion<readonly [ZodMiniDiscr
 	kind: ZodMiniLiteral<"cmaf">;
 }, $strip>, ZodMiniObject<{
 	kind: ZodMiniLiteral<"loc">;
+}, $strip>, ZodMiniObject<{
+	kind: ZodMiniLiteral<"ietf-loc">;
 }, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
 	kind: ZodMiniString<string>;
 }, $loose>, ZodMiniTransform<{
@@ -415,6 +427,8 @@ export const RootSchema: ZodMiniObject<{
 				kind: ZodMiniLiteral<"cmaf">;
 			}, $strip>, ZodMiniObject<{
 				kind: ZodMiniLiteral<"loc">;
+			}, $strip>, ZodMiniObject<{
+				kind: ZodMiniLiteral<"ietf-loc">;
 			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
 				kind: ZodMiniString<string>;
 			}, $loose>, ZodMiniTransform<{
@@ -455,6 +469,8 @@ export const RootSchema: ZodMiniObject<{
 				kind: ZodMiniLiteral<"cmaf">;
 			}, $strip>, ZodMiniObject<{
 				kind: ZodMiniLiteral<"loc">;
+			}, $strip>, ZodMiniObject<{
+				kind: ZodMiniLiteral<"ietf-loc">;
 			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
 				kind: ZodMiniString<string>;
 			}, $loose>, ZodMiniTransform<{
@@ -500,6 +516,8 @@ export const RootSchema: ZodMiniObject<{
 				} | {
 					kind: "loc";
 				} | {
+					kind: "ietf-loc";
+				} | {
 					kind: "unknown";
 					raw: {
 						[x: string]: unknown;
@@ -535,6 +553,8 @@ export const RootSchema: ZodMiniObject<{
 				kind: "cmaf";
 			} | {
 				kind: "loc";
+			} | {
+				kind: "ietf-loc";
 			} | {
 				kind: "unknown";
 				raw: {
@@ -606,6 +626,8 @@ export const RootSchema: ZodMiniObject<{
 				kind: ZodMiniLiteral<"cmaf">;
 			}, $strip>, ZodMiniObject<{
 				kind: ZodMiniLiteral<"loc">;
+			}, $strip>, ZodMiniObject<{
+				kind: ZodMiniLiteral<"ietf-loc">;
 			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
 				kind: ZodMiniString<string>;
 			}, $loose>, ZodMiniTransform<{
@@ -681,6 +703,8 @@ export const RootSchema: ZodMiniObject<{
 				kind: ZodMiniLiteral<"cmaf">;
 			}, $strip>, ZodMiniObject<{
 				kind: ZodMiniLiteral<"loc">;
+			}, $strip>, ZodMiniObject<{
+				kind: ZodMiniLiteral<"ietf-loc">;
 			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
 				kind: ZodMiniString<string>;
 			}, $loose>, ZodMiniTransform<{
@@ -779,6 +803,8 @@ export const RootSchema: ZodMiniObject<{
 				kind: ZodMiniLiteral<"cmaf">;
 			}, $strip>, ZodMiniObject<{
 				kind: ZodMiniLiteral<"loc">;
+			}, $strip>, ZodMiniObject<{
+				kind: ZodMiniLiteral<"ietf-loc">;
 			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
 				kind: ZodMiniString<string>;
 			}, $loose>, ZodMiniTransform<{
@@ -883,6 +909,8 @@ export const RootSchema: ZodMiniObject<{
 				} | {
 					kind: "loc";
 				} | {
+					kind: "ietf-loc";
+				} | {
 					kind: "unknown";
 					raw: {
 						[x: string]: unknown;
@@ -969,6 +997,8 @@ export const RootSchema: ZodMiniObject<{
 			} | {
 				kind: "loc";
 			} | {
+				kind: "ietf-loc";
+			} | {
 				kind: "unknown";
 				raw: {
 					[x: string]: unknown;
@@ -1035,6 +1065,8 @@ export const TextConfigSchema: ZodMiniObject<{
 		kind: ZodMiniLiteral<"cmaf">;
 	}, $strip>, ZodMiniObject<{
 		kind: ZodMiniLiteral<"loc">;
+	}, $strip>, ZodMiniObject<{
+		kind: ZodMiniLiteral<"ietf-loc">;
 	}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
 		kind: ZodMiniString<string>;
 	}, $loose>, ZodMiniTransform<{
@@ -1073,6 +1105,8 @@ export const TextSchema: ZodMiniObject<{
 			kind: ZodMiniLiteral<"cmaf">;
 		}, $strip>, ZodMiniObject<{
 			kind: ZodMiniLiteral<"loc">;
+		}, $strip>, ZodMiniObject<{
+			kind: ZodMiniLiteral<"ietf-loc">;
 		}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
 			kind: ZodMiniString<string>;
 		}, $loose>, ZodMiniTransform<{
@@ -1227,6 +1261,8 @@ export namespace Video {
 			kind: ZodMiniLiteral<"cmaf">;
 		}, $strip>, ZodMiniObject<{
 			kind: ZodMiniLiteral<"loc">;
+		}, $strip>, ZodMiniObject<{
+			kind: ZodMiniLiteral<"ietf-loc">;
 		}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
 			kind: ZodMiniString<string>;
 		}, $loose>, ZodMiniTransform<{
@@ -1329,6 +1365,8 @@ export namespace Video {
 				kind: ZodMiniLiteral<"cmaf">;
 			}, $strip>, ZodMiniObject<{
 				kind: ZodMiniLiteral<"loc">;
+			}, $strip>, ZodMiniObject<{
+				kind: ZodMiniLiteral<"ietf-loc">;
 			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
 				kind: ZodMiniString<string>;
 			}, $loose>, ZodMiniTransform<{
@@ -1427,6 +1465,8 @@ export namespace Video {
 				kind: ZodMiniLiteral<"cmaf">;
 			}, $strip>, ZodMiniObject<{
 				kind: ZodMiniLiteral<"loc">;
+			}, $strip>, ZodMiniObject<{
+				kind: ZodMiniLiteral<"ietf-loc">;
 			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
 				kind: ZodMiniString<string>;
 			}, $loose>, ZodMiniTransform<{
@@ -1531,6 +1571,8 @@ export namespace Video {
 				} | {
 					kind: "loc";
 				} | {
+					kind: "ietf-loc";
+				} | {
 					kind: "unknown";
 					raw: {
 						[x: string]: unknown;
@@ -1616,6 +1658,8 @@ export namespace Video {
 				kind: "cmaf";
 			} | {
 				kind: "loc";
+			} | {
+				kind: "ietf-loc";
 			} | {
 				kind: "unknown";
 				raw: {

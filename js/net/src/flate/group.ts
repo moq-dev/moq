@@ -1,5 +1,5 @@
 import type { Instant } from "@moq/clock";
-import type { Frame } from "../group.ts";
+import type { Frame, ObjectProperties } from "../group.ts";
 import type { Timestamp } from "../time.ts";
 import { Decoder } from "./decoder.ts";
 import { Encoder } from "./encoder.ts";
@@ -16,10 +16,12 @@ export interface Stored {
 class SliceFrame implements Frame {
 	readonly timestamp: Timestamp | undefined;
 	readonly arrived: Instant | undefined;
+	readonly properties: ObjectProperties | undefined;
 	#read: () => Uint8Array;
-	constructor(timestamp: Timestamp | undefined, arrived: Instant | undefined, read: () => Uint8Array) {
-		this.timestamp = timestamp;
-		this.arrived = arrived;
+	constructor(frame: Omit<Frame, "payload">, read: () => Uint8Array) {
+		this.timestamp = frame.timestamp;
+		this.arrived = frame.arrived;
+		this.properties = frame.properties;
 		this.#read = read;
 	}
 	get payload(): Uint8Array {
@@ -47,7 +49,7 @@ export function datagramSlice(payload: Uint8Array, inflated?: number): Stored {
 /** One reader's lazy plain view of a slice, so no queue retains a copy another reader inflated. */
 export function sliceView(timestamp: Timestamp | undefined, slice: Stored): Frame {
 	let plain: Uint8Array | undefined;
-	const frame = new SliceFrame(timestamp, undefined, () => {
+	const frame = new SliceFrame({ timestamp }, () => {
 		plain ??= new Decoder().frame(slice.payload, slice.inflated);
 		return plain;
 	});
@@ -82,7 +84,7 @@ export class Compression {
 		this.bytes += slice.payload.length;
 		const index = this.#frames.length;
 		this.#frames.push(slice);
-		const result = new SliceFrame(frame.timestamp, frame.arrived, () => this.#inflate(index));
+		const result = new SliceFrame(frame, () => this.#inflate(index));
 		slices.set(result, slice);
 		return result;
 	}

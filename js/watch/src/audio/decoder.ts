@@ -468,8 +468,13 @@ export class Decoder {
 		const preSkip =
 			config.codec === "opus" && config.description ? Util.Opus.preSkip(Util.Hex.toBytes(config.description)) : 0;
 		this.#terminal.clear(preSkip, Micro.fromMilli(Milli(config.warmup ?? 0)));
+		const kind = config.container.kind;
 		const format =
-			config.container.kind === "loc" ? new Container.Loc.Format("audio") : new Container.Legacy.Format(config);
+			kind === "loc"
+				? new Container.Loc.Format("audio")
+				: kind === "ietf-loc"
+					? new Container.Loc.ObjectFormat("audio")
+					: new Container.Legacy.Format(config);
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.
 		// TODO include JITTER_UNDERHEAD
 		const { consumer, read } = this.#consume(effect, sub, format, { config, path });
@@ -641,7 +646,7 @@ export class Decoder {
 				this.#reprime(decoder, config, order);
 			}
 			if (!order.admit(read)) continue;
-			if (!(await this.#decode(effect, decoder, read.frame))) return false;
+			if (!(await this.#decode(effect, decoder, config, read.frame))) return false;
 		}
 		return true;
 	}
@@ -655,7 +660,12 @@ export class Decoder {
 	}
 
 	// Decode one frame once backpressure admits it, reporting whether to keep going.
-	async #decode(effect: Effect, decoder: AudioDecoder, frame: Container.ReceivedFrame): Promise<boolean> {
+	async #decode(
+		effect: Effect,
+		decoder: AudioDecoder,
+		config: AudioDecoderConfig,
+		frame: Container.ReceivedFrame,
+	): Promise<boolean> {
 		const ring = await this.#ready(effect);
 		if (!ring) return false;
 
@@ -668,6 +678,13 @@ export class Decoder {
 		// A fatal decode error closes the decoder, so decoding again throws InvalidStateError out
 		// of the loop. Stop instead: the error callback already reported the real failure.
 		if (decoder.state === "closed") return false;
+		// Adopt the codec configuration a frame carries (LOC's Audio Config) in decode order, so the
+		// frames before it decode with the old one. A reprime reuses `config`, so it keeps it too.
+		// Opus decodes raw packets without a description, as everywhere else here.
+		if (frame.config !== undefined && config.codec !== "opus" && !bytesEqual(frame.config, config.description)) {
+			config.description = frame.config;
+			decoder.configure(config);
+		}
 		decoder.decode(
 			new EncodedAudioChunk({
 				// WebCodecs audio chunks are key even inside a MoQ group.
@@ -994,4 +1011,10 @@ function queuedRanges(reads: FrameRead[], config: DecoderConfig): Container.Buff
 		else ranges.push({ start, end });
 	}
 	return ranges;
+}
+
+function bytesEqual(a: Uint8Array, b: AllowSharedBufferSource | undefined): boolean {
+	if (a === b) return true;
+	if (!(b instanceof Uint8Array) || a.byteLength !== b.byteLength) return false;
+	return a.every((byte, i) => byte === b[i]);
 }

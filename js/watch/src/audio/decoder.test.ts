@@ -157,8 +157,11 @@ let decodeThrows: Error | undefined;
 let deferAudioOutput = false;
 let pendingAudio: (() => void)[] = [];
 let audioInputs: number[] = [];
+// The description of every configure, and the input count when it came.
+let audioConfigures: { description: unknown; at: number }[] = [];
 
 beforeEach(() => {
+	audioConfigures = [];
 	frameTimestamp = 0;
 	codecs = 0;
 	codecErrors = [];
@@ -180,7 +183,8 @@ beforeEach(() => {
 			codecErrors.push(init.error);
 			codecs++;
 		}
-		configure() {
+		configure(config: AudioDecoderConfig) {
+			audioConfigures.push({ description: config.description, at: audioInputs.length });
 			this.needsKey = true;
 		}
 		reset() {
@@ -278,7 +282,7 @@ function feed() {
 	};
 }
 
-async function play(initial: Delay, buffered = false, cmaf = false) {
+async function play(initial: Delay, buffered = false, cmaf = false, codec = "opus") {
 	// These cases test timeline handover after the optional decoder has loaded.
 	if (cmaf) await import("@moq/hang/cmaf");
 	const { push, buffered: queued } = feed();
@@ -290,7 +294,7 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 	let consumer = producer.consume();
 	const relativeBroadcast = mock(() => consumer);
 	let audio = Catalog.AudioConfigSchema.parse({
-		codec: "opus",
+		codec,
 		container: { kind: "legacy" },
 		sampleRate: 48_000,
 		numberOfChannels: 2,
@@ -391,6 +395,27 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 		},
 	};
 }
+
+it("adopts a frame's codec config in decode order, once", async () => {
+	const playback = await play(Milli(100), false, false, "mp4a.40.2");
+	try {
+		const asc = new Uint8Array([0x11, 0x90]);
+		for (let n = 0; n < 3; n++) {
+			const read = frame();
+			if (n > 0) read.frame.config = asc;
+			playback.push(read);
+			await microtasks();
+		}
+		expect(audioInputs).toHaveLength(3);
+		// The catalog's (none), then the frame's, before the second frame decodes and never again.
+		expect(audioConfigures).toEqual([
+			{ description: undefined, at: 0 },
+			{ description: asc, at: 1 },
+		]);
+	} finally {
+		playback.close();
+	}
+});
 
 for (const cmaf of [false, true]) {
 	it(`a ${cmaf ? "CMAF" : "legacy"} gap releases accounting for codec outputs it discarded`, async () => {

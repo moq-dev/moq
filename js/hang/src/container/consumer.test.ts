@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { Manual, type Micro, Milli, Nano } from "@moq/clock";
-import { Format as LocFormat } from "@moq/loc";
+import { Format as LocFormat, ObjectFormat as LocObjectFormat } from "@moq/loc";
 import { type Group, Error as NetError, SessionCode, StreamCode, Time, Track, Varint } from "@moq/net";
 import { decodeInitSegment, type InitSegment } from "../cmaf/decode.ts";
 import { Format as CmafFormat } from "../cmaf/format.ts";
@@ -1022,6 +1022,44 @@ test("Consumer reads an empty LOC payload as the frame's duration", async () => 
 	expect(media.payload).toEqual(new Uint8Array([0xde, 0xad]));
 	expect(media.duration).toBeUndefined();
 	expect(await consumer.next()).toBeUndefined();
+	consumer.close();
+});
+
+test("Consumer hands a format the Object Properties, and keeps the codec config it reads", async () => {
+	const track = new Track.Producer("test");
+	const group = track.appendGroup();
+	const config = new Uint8Array([0x01, 0x42]);
+	const object = (ticks: bigint, marking: number) =>
+		new Map<bigint, bigint | Uint8Array>([
+			[0x08n, 15360n],
+			[0x09n, new Uint8Array([marking])],
+			[0x0dn, config],
+			[0x10n, ticks],
+		]);
+	for (const [ticks, marking] of [
+		[0n, 0x00],
+		[512n, 0x20],
+	] as const) {
+		group.writeFrame({
+			payload: new Uint8Array([0x65]),
+			timestamp: Time.Timestamp.fromMicros(0),
+			properties: object(ticks, marking),
+		});
+	}
+	group.finish();
+	track.finish();
+	track.close();
+
+	const consumer = new Consumer(replay(track), { format: new LocObjectFormat("video"), maxDelay: 500 as Milli });
+	await settle();
+	const first = frameOf(await consumer.next());
+	// The group start is a keyframe whatever its Frame Marking says.
+	expect(first.keyframe).toBe(true);
+	expect(first.config).toBe(config);
+	const second = frameOf(await consumer.next());
+	expect(second.timestamp).toBe(33_333 as Micro);
+	expect(second.keyframe).toBe(true);
+	expect(second.config).toBe(config);
 	consumer.close();
 });
 

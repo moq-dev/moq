@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import type { Micro } from "@moq/clock";
-import { Varint } from "@moq/net";
-import { Format } from "./index.ts";
+import { Time, Varint } from "@moq/net";
+import { Format, type Frame as LocFrame, ObjectFormat } from "./index.ts";
 
 const PROP_TIMESCALE = 0x08;
 const PROP_TIMESTAMP = 0x10;
@@ -154,4 +154,124 @@ test("Format skips an unknown property whose value needs all 62 bits", () => {
 test("Format rejects a timestamp past 2^53 - 1 instead of rounding", () => {
 	const props = concat(Varint.encode(PROP_TIMESTAMP), Varint.encode(2n ** 53n));
 	expect(() => new Format().decode(buildFrame(props, new Uint8Array()))).toThrow(/larger than 53-bits/);
+});
+
+// draft-ietf-moq-loc-04 framing: the public properties arrive as the MoQ Object Properties, which
+// js/net hands over by id, and the payload is the bare codec bitstream.
+
+const AVC_IDR = new Uint8Array([0x00, 0x00, 0x00, 0x05, 0x65, 0x88, 0x84, 0x00, 0x33]);
+const AVCC = new Uint8Array([0x01, 0x42, 0xe0, 0x1e, 0xff, 0xe1, 0x00, 0x04, 0x67, 0x42, 0xe0, 0x1e]);
+const AAC_FRAME = new Uint8Array([0x21, 0x10, 0x04, 0x60, 0x8c, 0x1c]);
+const AAC_ASC = new Uint8Array([0x11, 0x90]);
+
+function props(entries: [number, bigint | Uint8Array][]): Map<bigint, bigint | Uint8Array> {
+	return new Map(entries.map(([id, value]) => [BigInt(id), value]));
+}
+
+test("ObjectFormat decodes a bare AVC payload with its video properties", () => {
+	const fmt = new ObjectFormat("video");
+	const [frame] = fmt.decode(
+		AVC_IDR,
+		undefined,
+		props([
+			[0x08, 15360n],
+			[0x09, new Uint8Array([0xa0])],
+			[0x0d, AVCC],
+			[0x10, 15360n * 3n + 512n],
+		]),
+	);
+	expect(frame.payload).toBe(AVC_IDR);
+	expect(frame.timestamp).toBe(3_033_333 as Micro);
+	expect(frame.keyframe).toBe(true);
+	expect(frame.config).toBe(AVCC);
+});
+
+test("ObjectFormat decodes a bare AAC payload with its audio properties", () => {
+	const [frame] = new ObjectFormat("audio").decode(
+		AAC_FRAME,
+		undefined,
+		props([
+			[0x08, 48000n],
+			[0x0d, AVCC],
+			[0x0f, AAC_ASC],
+			[0x10, 96_000n],
+		]),
+	);
+	expect(frame.payload).toBe(AAC_FRAME);
+	expect(frame.timestamp).toBe(2_000_000 as Micro);
+	// Audio takes its own config, never a video one.
+	expect(frame.config).toBe(AAC_ASC);
+});
+
+test("ObjectFormat reads a Timestamp without a Timescale as microseconds", () => {
+	const [frame] = new ObjectFormat("video").decode(AVC_IDR, undefined, props([[0x10, 1_700_000_000_123_456n]]));
+	expect(frame.timestamp).toBe(1_700_000_000_123_456 as Micro);
+	// No Frame Marking: only the group start is a keyframe, which the consumer decides.
+	expect(frame.keyframe).toBe(false);
+	// No Video Config: the catalog's description stands.
+	expect(frame.config).toBeUndefined();
+});
+
+test("ObjectFormat takes the track's TIMESCALE when the object states none", () => {
+	const [frame] = new ObjectFormat("video").decode(
+		AVC_IDR,
+		new Time.Timestamp(30, Time.Timescale(15)),
+		props([[0x10, 30n]]),
+	);
+	expect(frame.timestamp).toBe(2_000_000 as Micro);
+});
+
+test("ObjectFormat's object Timescale outranks the track's", () => {
+	const [frame] = new ObjectFormat("video").decode(
+		AVC_IDR,
+		new Time.Timestamp(30, Time.Timescale(15)),
+		props([
+			[0x08, 10n],
+			[0x10, 30n],
+		]),
+	);
+	expect(frame.timestamp).toBe(3_000_000 as Micro);
+});
+
+test("ObjectFormat marks a delta frame from its Frame Marking", () => {
+	const [frame] = new ObjectFormat("video").decode(
+		AVC_IDR,
+		undefined,
+		props([
+			[0x09, new Uint8Array([0x80])],
+			[0x10, 1n],
+		]),
+	);
+	expect(frame.keyframe).toBe(false);
+});
+
+test("ObjectFormat refuses an object without Object Properties instead of reading the payload", () => {
+	// An in-payload LOC frame, as moq-lite would deliver it.
+	const inline = buildFrame(concat(Varint.encode(PROP_TIMESTAMP), Varint.encode(5)), new Uint8Array([1]));
+	expect(() => new ObjectFormat("video").decode(inline, undefined, undefined)).toThrow(/Object Properties/);
+	expect(() => new ObjectFormat("video").decode(AVC_IDR, undefined, props([[0x08, 1000n]]))).toThrow(/Timestamp/);
+});
+
+test("ObjectFormat refuses malformed properties", () => {
+	const decode = (entries: [number, bigint | Uint8Array][]) =>
+		new ObjectFormat("video").decode(AVC_IDR, undefined, props([...entries, [0x10, 1n]]));
+	expect(() => decode([[0x08, 0n]])).toThrow(/Timescale/);
+	expect(() => decode([[0x09, new Uint8Array()]])).toThrow(/Frame Marking/);
+	expect(() => new ObjectFormat().decode(AVC_IDR, undefined, props([[0x10, 2n ** 53n]]))).toThrow(/2\^53/);
+});
+
+test("ObjectFormat decodes no frame from a data track's empty object", () => {
+	expect(new ObjectFormat("data").decode(new Uint8Array(), undefined, undefined)).toEqual([]);
+});
+
+test("Format still reads the in-payload block, whatever Object Properties came with it", () => {
+	const frame = buildFrame(concat(Varint.encode(PROP_TIMESTAMP), Varint.encode(7)), AVC_IDR);
+	// Through the container interface, which hands every format the object's properties.
+	const format: { decode(payload: Uint8Array, timestamp: undefined, properties: unknown): LocFrame[] } = new Format(
+		"video",
+	);
+	const [decoded] = format.decode(frame, undefined, props([[0x10, 99n]]));
+	expect(decoded.timestamp).toBe(7 as Micro);
+	expect(decoded.payload).toEqual(AVC_IDR);
+	expect(decoded.config).toBeUndefined();
 });

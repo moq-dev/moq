@@ -650,6 +650,31 @@ for (const kind of ["legacy", "cmaf"] as const) {
 	});
 }
 
+// A frame that carries its own codec configuration, as LOC's Video Config does.
+function configured(read: Read, config: Uint8Array): Read {
+	if (read.kind !== "frame") throw new Error("not a frame");
+	return { ...read, frame: { ...read.frame, config } };
+}
+
+it("adopts a frame's codec config at a keyframe and refuses one that changes on a delta", async () => {
+	const avcc = new Uint8Array([0x01, 0x42, 0xe0, 0x1e]);
+	const other = new Uint8Array([0x01, 0x4d, 0x40, 0x1f]);
+	const playback = await guardedPlayback("legacy", [
+		configured(sample(10, 1000), avcc),
+		configured(sample(10, 2000, false), avcc),
+		configured(sample(10, 3000, false), other),
+	]);
+	try {
+		await microtasks();
+		// The catalog's description first, then the frame's, once and before the keyframe decodes.
+		expect(playback.configures.map((config) => config.description)).toEqual([expect.anything(), avcc]);
+		expect(playback.submitted).toEqual([1000, 2000]);
+		expect(playback.decoder.out.error.peek()?.message).toMatch(/delta/);
+	} finally {
+		playback.close();
+	}
+});
+
 it("releases a failed video subscription and recovers only on a new source", async () => {
 	const close = spyOn(Moq.Track.Subscriber.prototype, "close");
 	const playback = await guardedPlayback("legacy", []);
