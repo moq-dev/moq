@@ -63,6 +63,7 @@ leaving JS-only redesigns of `js/net` to [rs2ts](/quest/m2/rs2ts/README.md).
 - [Peer-driven receive loops yield on a per-message budget](/quest/m1/cut-audit/peer-loop-budget.md) - small-message floods cannot monopolize a session driver
 - [Removing a stale front is O(1)](/quest/m1/cut-audit/weak-cache-remove.md) - a restart wave is linear under the origin lock
 - [Rust and JS skip a backlog by the same measure](/quest/m1/cut-audit/catalog-parity.md) - a backlog join starts at the same group in every player
+- [Every catalog section skips a malformed entry](/quest/m1/cut-audit/catalog-section-skip.md) - text and data entries follow the video and audio skip rule, `__proto__` included
 - [Every relay runtime honors or refuses each listen setting](/quest/m1/cut-audit/uring-listen-config.md) - io_uring stops ignoring preferred addresses
 - [Lite's version gates, refusals, and draft text agree](/quest/m1/cut-audit/lite-wire-nits.md) - small wire and draft mismatches fixed
 
