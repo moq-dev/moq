@@ -1682,7 +1682,7 @@ impl<R: Request> RequestServe<R> {
 						// errors when there is none.
 						let origin = ready!(self.shared.poll_serving_origin(waiter));
 						let path = R::target(msg).0.clone();
-						*requesting = Some(origin.request(path, R::epoch(msg)).into_inner());
+						*requesting = Some(origin.lookup(path, R::epoch(msg)).into_inner());
 					}
 					let broadcast = ready!(requesting.as_ref().expect("requesting").poll_ok(waiter))?;
 					// Any placeholder but `Decode`, so a failed start is answered on the stream.
@@ -5942,7 +5942,7 @@ mod serve_group_test {
 							.tier(Default::default())
 							.session(crate::Path::from_static("egress")),
 					);
-					let served = tagged.request_broadcast("room", None).await.unwrap();
+					let served = tagged.request("room", None).await.unwrap();
 					let copy = served.track("test").unwrap();
 					let subscriber = copy.subscribe(None).await.unwrap();
 					let session = SinkSession::new(Log::default()).with_datagrams(max);
@@ -6583,7 +6583,7 @@ mod serve_group_test {
 				broadcast.announce(Default::default()).unwrap();
 				let relay = origin(2);
 				let _upstream = connect(version, &publisher, &relay).await;
-				let remote = relay.consume().routed_broadcast("room").await.unwrap();
+				let remote = relay.consume().follow("room", None).unwrap().available().await.unwrap();
 				let mut keeper = match warm {
 					true => Some(
 						remote
@@ -6608,7 +6608,13 @@ mod serve_group_test {
 				moq_clock::sim::advance(Duration::from_secs(1)).await;
 				let subscriber = origin(3);
 				let _downstream = connect(version, &relay, &subscriber).await;
-				let remote = subscriber.consume().routed_broadcast("room").await.unwrap();
+				let remote = subscriber
+					.consume()
+					.follow("room", None)
+					.unwrap()
+					.available()
+					.await
+					.unwrap();
 				let mut live = remote
 					.track("test")
 					.unwrap()
@@ -7342,15 +7348,11 @@ mod tests {
 		let serving = kio::wait(|waiter| publisher.shared.poll_serving_origin(waiter)).await;
 		use futures::FutureExt;
 		assert!(
-			serving
-				.request_broadcast("echoed/x", None)
-				.now_or_never()
-				.unwrap()
-				.is_err(),
+			serving.request("echoed/x", None).now_or_never().unwrap().is_err(),
 			"served the peer its own route"
 		);
 		assert!(
-			serving.request_broadcast("local/x", None).now_or_never().is_none(),
+			serving.request("local/x", None).now_or_never().is_none(),
 			"withheld an independent route"
 		);
 	}
