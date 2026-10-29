@@ -9,7 +9,9 @@
 //!
 //! Deterministic: simulated time over the mock transport. The relay's group streams to
 //! the subscriber are held, with a one-message stream buffer, so the relay still holds
-//! most of each track when the upstream session ends.
+//! most of each track when the upstream session ends. The publisher's FINs are
+//! acknowledged on arrival, as QUIC does, so its close can drain before the relay reads
+//! them.
 
 use crate::support;
 
@@ -130,6 +132,7 @@ async fn round(name: &str, end: End) -> Vec<Outcome> {
 			.expect("no subscriber appeared");
 	}
 
+	upstream.server_transport.ack_fins();
 	// The subscriber now reads nothing until the upstream session is gone.
 	downstream.server_transport.hold_unis();
 	for track in &tracks {
@@ -173,10 +176,10 @@ async fn round(name: &str, end: End) -> Vec<Outcome> {
 	outcomes
 }
 
-/// Every frame of every track, then a clean end. Lite03 and Lite04 declare no end, so the
-/// relay is still waiting out its tail grace when the session goes, and on a close each
-/// track's SUBSCRIBE FIN is its only end: the transport acknowledges it, which lets the
-/// close drain, before the relay has read it.
+/// Every frame of every track, then a clean end. On a close the transport acknowledges each
+/// track's SUBSCRIBE FIN, which lets the close drain, before the relay has read it, so the
+/// relay must still read it from the closed session. Lite03 and Lite04 declare no end, so
+/// there the relay is still waiting out its tail grace and the FIN is the track's only end.
 #[moq_clock::test]
 async fn relay_delivers_finished_tracks_after_upstream_closes() {
 	let want: Vec<(u64, u64)> = (0..GROUPS)
