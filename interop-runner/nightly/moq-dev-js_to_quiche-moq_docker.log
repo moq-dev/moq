@@ -4,11 +4,11 @@ Running interop tests...
   Relay:  ghcr.io/englishm/moq-interop-runner-quiche-moq-relay:latest
   Client: ghcr.io/englishm/moq-interop-runner-moq-dev-js-client:latest
   URL:    https://relay:4443
-time="2026-10-28T15:13:59Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-10-28T15:13:59Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-10-28T15:13:59Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-10-28T15:13:59Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
-time="2026-10-28T15:13:59Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+time="2026-10-29T01:59:06Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-10-29T01:59:06Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-10-29T01:59:06Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-10-29T01:59:06Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+time="2026-10-29T01:59:06Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
  Container runner-upstream-relay-1  Recreate
  Container runner-upstream-relay-1  Recreated
  Container runner-upstream-test-client-1  Recreate
@@ -18,65 +18,63 @@ relay-1        | Starting quiche-moq relay on port 4443
 relay-1        |   Cert: /certs/cert.pem
 relay-1        |   Key:  /certs/priv.key
 test-client-1  | TAP version 14
-test-client-1  | # moq-dev-js-client v0.1.0 (@moq/net 0.4.4)
+test-client-1  | # moq-dev-js-client v0.1.0 (@moq/net 0.4.7)
 test-client-1  | # Relay: https://relay:4443
 test-client-1  | 1..8
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-18
 test-client-1  | ok 1 - setup-only
 test-client-1  |   ---
-test-client-1  |   duration_ms: 198
+test-client-1  |   duration_ms: 187
 test-client-1  |   ...
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-18
 test-client-1  | ok 2 - announce-only
 test-client-1  |   ---
-test-client-1  |   duration_ms: 609
+test-client-1  |   duration_ms: 606
 test-client-1  |   ...
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-18
 test-client-1  | ok 3 - publish-namespace-done
 test-client-1  |   ---
-test-client-1  |   duration_ms: 809
+test-client-1  |   duration_ms: 806
 test-client-1  |   ...
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-18
 test-client-1  | subscribe_namespace written: requestId=0
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-18
-test-client-1  | announced: broadcast=moq-test/interop/subscribe-namespace-lifecycle/4a93d035651b18b2b4085b88565f8b4e active=true
-test-client-1  | not ok 4 - subscribe-namespace-lifecycle
+test-client-1  | announced: broadcast=moq-test/interop/subscribe-namespace-lifecycle/416e4de07b85b2aa6446e051a19f5de1 active=true
+test-client-1  | announced: broadcast=moq-test/interop/subscribe-namespace-lifecycle/416e4de07b85b2aa6446e051a19f5de1 active=false
+test-client-1  | ok 4 - subscribe-namespace-lifecycle
 test-client-1  |   ---
-test-client-1  |   duration_ms: 3014
+test-client-1  |   duration_ms: 214
 test-client-1  |   test_spec_revision: 1
-test-client-1  |   message: "timeout after 3000ms: NAMESPACE_DONE"
 test-client-1  |   ...
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-18
 test-client-1  | subscribe start: id=2 broadcast=nonexistent/namespace track=test-track
 test-client-1  | subscribe_namespace written: requestId=0
 test-client-1  | subscribe written: id=2 broadcast=nonexistent/namespace track=test-track
-test-client-1  | announced: broadcast=moq-test/interop/subscribe-namespace-lifecycle/4a93d035651b18b2b4085b88565f8b4e active=true
 test-client-1  | subscribe error: id=2 broadcast=nonexistent/namespace track=test-track error=SUBSCRIBE error: does_not_exist (code=16) not found
 test-client-1  | subscribe_namespace error: session error: connection error: closed
-test-client-1  | announced: broadcast=moq-test/interop/subscribe-namespace-lifecycle/4a93d035651b18b2b4085b88565f8b4e active=false
-test-client-1  | broadcast discovery failed; broadcasts resolve on request only. 162 |         if (!this.#reader) {
-test-client-1  | 163 |             return false;
-test-client-1  | 164 |         }
-test-client-1  | 165 |         // Every read of this stream funnels through here, so decoding the peer's reset code
-test-client-1  | 166 |         // once is enough to keep the raw transport error out of every caller (and every app).
-test-client-1  | 167 |         const result = await this.#reader.read().catch((err) => {
+test-client-1  | broadcast discovery failed; broadcasts resolve on request only. 172 |         if (!this.#reader) {
+test-client-1  | 173 |             return false;
+test-client-1  | 174 |         }
+test-client-1  | 175 |         // Every read of this stream funnels through here, so decoding the peer's reset code
+test-client-1  | 176 |         // once is enough to keep the raw transport error out of every caller (and every app).
+test-client-1  | 177 |         const result = await this.#reader.read().catch((err) => {
 test-client-1  |                                                        ^
 test-client-1  | error: session error: connection error: closed
 test-client-1  |  code: "GenericFailure"
 test-client-1  | 
-test-client-1  |       at async #fill (/app/node_modules/@moq/net/stream.js:167:50)
-test-client-1  |       at async done (/app/node_modules/@moq/net/stream.js:333:29)
+test-client-1  |       at async #fill (/app/node_modules/@moq/net/stream.js:177:50)
+test-client-1  |       at async done (/app/node_modules/@moq/net/stream.js:343:29)
 test-client-1  |       at async <anonymous> (/app/node_modules/@moq/net/ietf/subscriber.js:278:58)
 test-client-1  | 
 test-client-1  | ok 5 - subscribe-error
 test-client-1  |   ---
-test-client-1  |   duration_ms: 417
+test-client-1  |   duration_ms: 410
 test-client-1  |   ...
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-18
@@ -85,7 +83,6 @@ test-client-1  | https://relay:4443/ negotiated ALPN: moqt-18
 test-client-1  | subscribe_namespace written: requestId=0
 test-client-1  | announced: broadcast=moq-test/interop active=true
 test-client-1  | subscribe start: id=2 broadcast=moq-test/interop track=test-track
-test-client-1  | announced: broadcast=moq-test/interop/subscribe-namespace-lifecycle/4a93d035651b18b2b4085b88565f8b4e active=true
 test-client-1  | subscribe written: id=2 broadcast=moq-test/interop track=test-track
 test-client-1  | publish ok: broadcast=moq-test/interop track=test-track
 test-client-1  | subscribe ok: id=2 broadcast=moq-test/interop track=test-track
@@ -94,29 +91,27 @@ test-client-1  | subscribe error: id=2 broadcast=moq-test/interop track=test-tra
 test-client-1  | publish done: broadcast=moq-test/interop track=test-track
 test-client-1  | publish error: broadcast=moq-test/interop track=test-track error=session error: connection error: closed
 test-client-1  | subscribe_namespace error: session error: connection error: closed
-test-client-1  | announced: broadcast=moq-test/interop/subscribe-namespace-lifecycle/4a93d035651b18b2b4085b88565f8b4e active=false
-test-client-1  | broadcast discovery failed; broadcasts resolve on request only. 162 |         if (!this.#reader) {
-test-client-1  | 163 |             return false;
-test-client-1  | 164 |         }
-test-client-1  | 165 |         // Every read of this stream funnels through here, so decoding the peer's reset code
-test-client-1  | 166 |         // once is enough to keep the raw transport error out of every caller (and every app).
-test-client-1  | 167 |         const result = await this.#reader.read().catch((err) => {
+test-client-1  | broadcast discovery failed; broadcasts resolve on request only. 172 |         if (!this.#reader) {
+test-client-1  | 173 |             return false;
+test-client-1  | 174 |         }
+test-client-1  | 175 |         // Every read of this stream funnels through here, so decoding the peer's reset code
+test-client-1  | 176 |         // once is enough to keep the raw transport error out of every caller (and every app).
+test-client-1  | 177 |         const result = await this.#reader.read().catch((err) => {
 test-client-1  |                                                        ^
 test-client-1  | error: session error: connection error: closed
 test-client-1  |  code: "GenericFailure"
 test-client-1  | 
-test-client-1  |       at async #fill (/app/node_modules/@moq/net/stream.js:167:50)
-test-client-1  |       at async done (/app/node_modules/@moq/net/stream.js:333:29)
+test-client-1  |       at async #fill (/app/node_modules/@moq/net/stream.js:177:50)
+test-client-1  |       at async done (/app/node_modules/@moq/net/stream.js:343:29)
 test-client-1  |       at async <anonymous> (/app/node_modules/@moq/net/ietf/subscriber.js:278:58)
 test-client-1  | 
 test-client-1  | ok 6 - announce-subscribe
 test-client-1  |   ---
-test-client-1  |   duration_ms: 520
+test-client-1  |   duration_ms: 516
 test-client-1  |   ...
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-18
 test-client-1  | subscribe_namespace written: requestId=0
-test-client-1  | announced: broadcast=moq-test/interop/subscribe-namespace-lifecycle/4a93d035651b18b2b4085b88565f8b4e active=true
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-18
 test-client-1  | announced: broadcast=moq-test/interop active=true
@@ -129,19 +124,18 @@ test-client-1  | subscribe error: id=2 broadcast=moq-test/interop track=test-tra
 test-client-1  | publish done: broadcast=moq-test/interop track=test-track
 test-client-1  | publish error: broadcast=moq-test/interop track=test-track error=session error: connection error: closed
 test-client-1  | subscribe_namespace error: session error: connection error: closed
-test-client-1  | announced: broadcast=moq-test/interop/subscribe-namespace-lifecycle/4a93d035651b18b2b4085b88565f8b4e active=false
-test-client-1  | broadcast discovery failed; broadcasts resolve on request only. 162 |         if (!this.#reader) {
-test-client-1  | 163 |             return false;
-test-client-1  | 164 |         }
-test-client-1  | 165 |         // Every read of this stream funnels through here, so decoding the peer's reset code
-test-client-1  | 166 |         // once is enough to keep the raw transport error out of every caller (and every app).
-test-client-1  | 167 |         const result = await this.#reader.read().catch((err) => {
+test-client-1  | broadcast discovery failed; broadcasts resolve on request only. 172 |         if (!this.#reader) {
+test-client-1  | 173 |             return false;
+test-client-1  | 174 |         }
+test-client-1  | 175 |         // Every read of this stream funnels through here, so decoding the peer's reset code
+test-client-1  | 176 |         // once is enough to keep the raw transport error out of every caller (and every app).
+test-client-1  | 177 |         const result = await this.#reader.read().catch((err) => {
 test-client-1  |                                                        ^
 test-client-1  | error: session error: connection error: closed
 test-client-1  |  code: "GenericFailure"
 test-client-1  | 
-test-client-1  |       at async #fill (/app/node_modules/@moq/net/stream.js:167:50)
-test-client-1  |       at async done (/app/node_modules/@moq/net/stream.js:333:29)
+test-client-1  |       at async #fill (/app/node_modules/@moq/net/stream.js:177:50)
+test-client-1  |       at async done (/app/node_modules/@moq/net/stream.js:343:29)
 test-client-1  |       at async <anonymous> (/app/node_modules/@moq/net/ietf/subscriber.js:278:58)
 test-client-1  | 
 test-client-1  | ok 7 - subscribe-before-announce
@@ -153,39 +147,39 @@ test-client-1  | https://relay:4443/ negotiated ALPN: moqt-18
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-18
 test-client-1  | subscribe_namespace written: requestId=0
-test-client-1  | announced: broadcast=moq-test/data-subgroup-basic/ddc6b5add3d7c8ec11b672fa93492373 active=true
-test-client-1  | subscribe start: id=2 broadcast=moq-test/data-subgroup-basic/ddc6b5add3d7c8ec11b672fa93492373/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
-test-client-1  | subscribe written: id=2 broadcast=moq-test/data-subgroup-basic/ddc6b5add3d7c8ec11b672fa93492373/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
-test-client-1  | publish ok: broadcast=moq-test/data-subgroup-basic/ddc6b5add3d7c8ec11b672fa93492373/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
-test-client-1  | subscribe ok: id=2 broadcast=moq-test/data-subgroup-basic/ddc6b5add3d7c8ec11b672fa93492373/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
-test-client-1  | publish done: broadcast=moq-test/data-subgroup-basic/ddc6b5add3d7c8ec11b672fa93492373/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
-test-client-1  | subscribe error: id=2 broadcast=moq-test/data-subgroup-basic/ddc6b5add3d7c8ec11b672fa93492373/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track error=publish done: status=0x4 reason=Publisher is gone
-test-client-1  | announced: broadcast=moq-test/data-subgroup-basic/ddc6b5add3d7c8ec11b672fa93492373 active=false
+test-client-1  | announced: broadcast=moq-test/data-subgroup-basic/4ec933424243149c86b3f0cc4597fa18 active=true
+test-client-1  | subscribe start: id=2 broadcast=moq-test/data-subgroup-basic/4ec933424243149c86b3f0cc4597fa18/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
+test-client-1  | subscribe written: id=2 broadcast=moq-test/data-subgroup-basic/4ec933424243149c86b3f0cc4597fa18/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
+test-client-1  | publish ok: broadcast=moq-test/data-subgroup-basic/4ec933424243149c86b3f0cc4597fa18/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
+test-client-1  | subscribe ok: id=2 broadcast=moq-test/data-subgroup-basic/4ec933424243149c86b3f0cc4597fa18/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
+test-client-1  | publish done: broadcast=moq-test/data-subgroup-basic/4ec933424243149c86b3f0cc4597fa18/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
+test-client-1  | subscribe error: id=2 broadcast=moq-test/data-subgroup-basic/4ec933424243149c86b3f0cc4597fa18/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track error=publish done: status=0x4 reason=Publisher is gone
+test-client-1  | announced: broadcast=moq-test/data-subgroup-basic/4ec933424243149c86b3f0cc4597fa18 active=false
 test-client-1  | subscribe_namespace error: session error: connection error: closed
-test-client-1  | broadcast discovery failed; broadcasts resolve on request only. 162 |         if (!this.#reader) {
-test-client-1  | 163 |             return false;
-test-client-1  | 164 |         }
-test-client-1  | 165 |         // Every read of this stream funnels through here, so decoding the peer's reset code
-test-client-1  | 166 |         // once is enough to keep the raw transport error out of every caller (and every app).
-test-client-1  | 167 |         const result = await this.#reader.read().catch((err) => {
+test-client-1  | broadcast discovery failed; broadcasts resolve on request only. 172 |         if (!this.#reader) {
+test-client-1  | 173 |             return false;
+test-client-1  | 174 |         }
+test-client-1  | 175 |         // Every read of this stream funnels through here, so decoding the peer's reset code
+test-client-1  | 176 |         // once is enough to keep the raw transport error out of every caller (and every app).
+test-client-1  | 177 |         const result = await this.#reader.read().catch((err) => {
 test-client-1  |                                                        ^
 test-client-1  | error: session error: connection error: closed
 test-client-1  |  code: "GenericFailure"
 test-client-1  | 
-test-client-1  |       at async #fill (/app/node_modules/@moq/net/stream.js:167:50)
-test-client-1  |       at async done (/app/node_modules/@moq/net/stream.js:333:29)
+test-client-1  |       at async #fill (/app/node_modules/@moq/net/stream.js:177:50)
+test-client-1  |       at async done (/app/node_modules/@moq/net/stream.js:343:29)
 test-client-1  |       at async <anonymous> (/app/node_modules/@moq/net/ietf/subscriber.js:278:58)
 test-client-1  | 
 test-client-1  | ok 8 - data-subgroup-basic
 test-client-1  |   ---
-test-client-1  |   duration_ms: 251
+test-client-1  |   duration_ms: 246
 test-client-1  |   test_spec_revision: 2
 test-client-1  |   ...
-[Ktest-client-1 exited with code 1
+[Ktest-client-1 exited with code 0
 Aborting on container exit...
  Container runner-upstream-test-client-1  Stopping
  Container runner-upstream-test-client-1  Stopped
  Container runner-upstream-relay-1  Stopping
  Container runner-upstream-relay-1  Stopped
 
-make: *** [Makefile:86: test] Error 1
+Test results in mlog/

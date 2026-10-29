@@ -120,20 +120,20 @@
 <body>
     <div class="container">
         <h1>MoQT Interop Test Results</h1>
-        <p class="meta"><a href="../index.html">&larr; All Runs</a> | Generated: 2026-10-28T15:10:22Z | Interop target: <code>draft-18</code></p>
+        <p class="meta"><a href="../index.html">&larr; All Runs</a> | Generated: 2026-10-29T01:56:25Z | Interop target: <code>draft-18</code></p>
         
 
         <div class="summary">
             <div class="stat">
-                <div class="stat-value">38</div>
+                <div class="stat-value">29</div>
                 <div class="stat-label">Total Runs</div>
             </div>
             <div class="stat">
-                <div class="stat-value pass">14</div>
+                <div class="stat-value pass">20</div>
                 <div class="stat-label">Passed</div>
             </div>
             <div class="stat">
-                <div class="stat-value fail">24</div>
+                <div class="stat-value fail">9</div>
                 <div class="stat-label">Failed</div>
             </div>
 
@@ -142,7 +142,7 @@
             Version breakdown:
             <span class="count at">19</span> at target &middot;
             <span class="count ahead">10</span> ahead &middot;
-            <span class="count behind">9</span> behind
+            <span class="count behind">0</span> behind
         </p>
 
         <h2>Interop Matrix</h2>
@@ -153,13 +153,10 @@
                     <th>imquic</th>
                     <th>moq-dev-rs</th>
                     <th>moq-go</th>
-                    <th>moq-rs</th>
-                    <th>moq-rs-draft-14</th>
                     <th>moq-rs-draft-18</th>
                     <th>moqlivemock</th>
                     <th>quic-zig</th>
                     <th>quiche-moq</th>
-                    <th>xquic</th>
                     <th>xquic-draft-18</th>
                 </tr>
             </thead>
@@ -167,9 +164,6 @@
                 <tr><td><strong>aiomoqt</strong></td>
                     <td><span class="cell none">-</span></td>
                     <td><a href="#detail-aiomoqt_to_moq-dev-rs" class="matrix-link"><span class="status partial">9/12</span><span class="version-tag ahead " title="Negotiated draft-22; predicted draft-22">22</span></a></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
                     <td><span class="cell none">-</span></td>
                     <td><span class="cell none">-</span></td>
                     <td><span class="cell none">-</span></td>
@@ -186,42 +180,30 @@
                     <td><span class="cell none">-</span></td>
                     <td><span class="cell none">-</span></td>
                     <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
                 </tr>
                 <tr><td><strong>moq-dev-js</strong></td>
-                    <td><a href="#detail-moq-dev-js_to_imquic" class="matrix-link"><span class="status partial">6/8</span><span class="version-tag ahead predicted" title="Predicted draft-22; the client reported no negotiated version">22</span></a></td>
+                    <td><a href="#detail-moq-dev-js_to_imquic" class="matrix-link"><span class="status partial">7/8</span><span class="version-tag ahead predicted" title="Predicted draft-22; the client reported no negotiated version">22</span></a></td>
                     <td><a href="#detail-moq-dev-js_to_moq-dev-rs" class="matrix-link"><span class="status pass">8/8</span><span class="version-tag ahead predicted" title="Predicted draft-22; the client reported no negotiated version">22</span></a></td>
-                    <td><a href="#detail-moq-dev-js_to_moq-go" class="matrix-link"><span class="status partial">7/8</span><span class="version-tag ahead predicted" title="Predicted draft-22; the client reported no negotiated version">22</span></a></td>
-                    <td><a href="#detail-moq-dev-js_to_moq-rs" class="matrix-link"><span class="status pass">8/8</span><span class="version-tag behind predicted" title="Predicted draft-16; the client reported no negotiated version">16</span></a></td>
-                    <td><a href="#detail-moq-dev-js_to_moq-rs-draft-14" class="matrix-link"><span class="status partial">5/8</span><span class="version-tag behind predicted" title="Predicted draft-14; the client reported no negotiated version">14</span></a></td>
-                    <td><a href="#detail-moq-dev-js_to_moq-rs-draft-18" class="matrix-link"><span class="status partial">7/8</span><span class="version-tag at predicted" title="Predicted draft-18; the client reported no negotiated version">18</span></a></td>
+                    <td><a href="#detail-moq-dev-js_to_moq-go" class="matrix-link"><span class="status pass">8/8</span><span class="version-tag ahead predicted" title="Predicted draft-22; the client reported no negotiated version">22</span></a></td>
+                    <td><a href="#detail-moq-dev-js_to_moq-rs-draft-18" class="matrix-link"><span class="status pass">8/8</span><span class="version-tag at predicted" title="Predicted draft-18; the client reported no negotiated version">18</span></a></td>
                     <td><a href="#detail-moq-dev-js_to_moqlivemock" class="matrix-link"><span class="status fail">0/8</span><span class="version-tag at predicted" title="Predicted draft-18; the client reported no negotiated version">18</span></a></td>
-                    <td><a href="#detail-moq-dev-js_to_quic-zig" class="matrix-link"><span class="status partial">7/8</span><span class="version-tag at predicted" title="Predicted draft-18; the client reported no negotiated version">18</span></a></td>
-                    <td><a href="#detail-moq-dev-js_to_quiche-moq" class="matrix-link"><span class="status partial">7/8</span><span class="version-tag at predicted" title="Predicted draft-18; the client reported no negotiated version">18</span></a></td>
-                    <td><a href="#detail-moq-dev-js_to_xquic" class="matrix-link"><span class="status fail">0/8</span><span class="version-tag behind predicted" title="Predicted draft-14; the client reported no negotiated version">14</span></a></td>
+                    <td><a href="#detail-moq-dev-js_to_quic-zig" class="matrix-link"><span class="status pass">8/8</span><span class="version-tag at predicted" title="Predicted draft-18; the client reported no negotiated version">18</span></a></td>
+                    <td><a href="#detail-moq-dev-js_to_quiche-moq" class="matrix-link"><span class="status pass">8/8</span><span class="version-tag at predicted" title="Predicted draft-18; the client reported no negotiated version">18</span></a></td>
                     <td><a href="#detail-moq-dev-js_to_xquic-draft-18" class="matrix-link"><span class="status fail">0/8</span><span class="version-tag at predicted" title="Predicted draft-18; the client reported no negotiated version">18</span></a></td>
                 </tr>
                 <tr><td><strong>moq-dev-rs</strong></td>
                     <td><a href="#detail-moq-dev-rs_to_imquic" class="matrix-link"><span class="status pass">6/8</span><span class="version-tag ahead predicted" title="Predicted draft-22; the client reported no negotiated version">22</span></a></td>
                     <td><a href="#detail-moq-dev-rs_to_moq-dev-rs" class="matrix-link"><span class="status pass">6/8</span><span class="version-tag ahead predicted" title="Predicted draft-22; the client reported no negotiated version">22</span></a></td>
                     <td><a href="#detail-moq-dev-rs_to_moq-go" class="matrix-link"><span class="status pass">6/8</span><span class="version-tag ahead predicted" title="Predicted draft-22; the client reported no negotiated version">22</span></a></td>
-                    <td><a href="#detail-moq-dev-rs_to_moq-rs" class="matrix-link"><span class="status partial">5/8</span><span class="version-tag behind predicted" title="Predicted draft-16; the client reported no negotiated version">16</span></a></td>
-                    <td><a href="#detail-moq-dev-rs_to_moq-rs-draft-14" class="matrix-link"><span class="status partial">3/8</span><span class="version-tag behind predicted" title="Predicted draft-14; the client reported no negotiated version">14</span></a></td>
                     <td><a href="#detail-moq-dev-rs_to_moq-rs-draft-18" class="matrix-link"><span class="status pass">6/8</span><span class="version-tag at predicted" title="Predicted draft-18; the client reported no negotiated version">18</span></a></td>
                     <td><a href="#detail-moq-dev-rs_to_moqlivemock" class="matrix-link"><span class="status pass">6/8</span><span class="version-tag at predicted" title="Predicted draft-18; the client reported no negotiated version">18</span></a></td>
                     <td><a href="#detail-moq-dev-rs_to_quic-zig" class="matrix-link"><span class="status partial">5/8</span><span class="version-tag at predicted" title="Predicted draft-18; the client reported no negotiated version">18</span></a></td>
                     <td><a href="#detail-moq-dev-rs_to_quiche-moq" class="matrix-link"><span class="status pass">6/8</span><span class="version-tag at predicted" title="Predicted draft-18; the client reported no negotiated version">18</span></a></td>
-                    <td><a href="#detail-moq-dev-rs_to_xquic" class="matrix-link"><span class="status fail">0/8</span><span class="version-tag behind predicted" title="Predicted draft-14; the client reported no negotiated version">14</span></a></td>
                     <td><a href="#detail-moq-dev-rs_to_xquic-draft-18" class="matrix-link"><span class="status partial">3/8</span><span class="version-tag at predicted" title="Predicted draft-18; the client reported no negotiated version">18</span></a></td>
                 </tr>
                 <tr><td><strong>moq-go</strong></td>
                     <td><span class="cell none">-</span></td>
-                    <td><a href="#detail-moq-go_to_moq-dev-rs" class="matrix-link"><span class="status fail">0/6</span><span class="version-tag ahead predicted" title="Predicted draft-22; the client reported no negotiated version">22</span></a></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
+                    <td><a href="#detail-moq-go_to_moq-dev-rs" class="matrix-link"><span class="status pass">6/6</span><span class="version-tag ahead predicted" title="Predicted draft-22; the client reported no negotiated version">22</span></a></td>
                     <td><span class="cell none">-</span></td>
                     <td><span class="cell none">-</span></td>
                     <td><span class="cell none">-</span></td>
@@ -238,42 +220,10 @@
                     <td><span class="cell none">-</span></td>
                     <td><span class="cell none">-</span></td>
                     <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                </tr>
-                <tr><td><strong>moq-rs</strong></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><a href="#detail-moq-rs_to_moq-dev-rs" class="matrix-link"><span class="status fail">0/8</span><span class="version-tag behind predicted" title="Predicted draft-16; the client reported no negotiated version">16</span></a></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                </tr>
-                <tr><td><strong>moq-rs-draft-14</strong></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><a href="#detail-moq-rs-draft-14_to_moq-dev-rs" class="matrix-link"><span class="status fail">0/6</span><span class="version-tag behind predicted" title="Predicted draft-14; the client reported no negotiated version">14</span></a></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
                 </tr>
                 <tr><td><strong>moq-rs-draft-18</strong></td>
                     <td><span class="cell none">-</span></td>
                     <td><a href="#detail-moq-rs-draft-18_to_moq-dev-rs" class="matrix-link"><span class="status partial">7/18</span><span class="version-tag at predicted" title="Predicted draft-18; the client reported no negotiated version">18</span></a></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
                     <td><span class="cell none">-</span></td>
                     <td><span class="cell none">-</span></td>
                     <td><span class="cell none">-</span></td>
@@ -290,16 +240,10 @@
                     <td><span class="cell none">-</span></td>
                     <td><span class="cell none">-</span></td>
                     <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
                 </tr>
                 <tr><td><strong>moqlivemock</strong></td>
                     <td><span class="cell none">-</span></td>
                     <td><a href="#detail-moqlivemock_to_moq-dev-rs" class="matrix-link"><span class="status pass">6/6</span><span class="version-tag at predicted" title="Predicted draft-18; the client reported no negotiated version">18</span></a></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
                     <td><span class="cell none">-</span></td>
                     <td><span class="cell none">-</span></td>
                     <td><span class="cell none">-</span></td>
@@ -316,16 +260,10 @@
                     <td><span class="cell none">-</span></td>
                     <td><span class="cell none">-</span></td>
                     <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
                 </tr>
                 <tr><td><strong>moqx</strong></td>
                     <td><span class="cell none">-</span></td>
-                    <td><a href="#detail-moqx_to_moq-dev-rs" class="matrix-link"><span class="status partial">6/7</span><span class="version-tag at " title="Negotiated draft-18; predicted draft-18">18</span></a></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
+                    <td><a href="#detail-moqx_to_moq-dev-rs" class="matrix-link"><span class="status pass">7/7</span><span class="version-tag at " title="Negotiated draft-18; predicted draft-18">18</span></a></td>
                     <td><span class="cell none">-</span></td>
                     <td><span class="cell none">-</span></td>
                     <td><span class="cell none">-</span></td>
@@ -335,10 +273,7 @@
                 </tr>
                 <tr><td><strong>moxygen</strong></td>
                     <td><span class="cell none">-</span></td>
-                    <td><a href="#detail-moxygen_to_moq-dev-rs" class="matrix-link"><span class="status partial">6/7</span><span class="version-tag at mismatch" title="Negotiated draft-18; predicted draft-22">18</span></a></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
+                    <td><a href="#detail-moxygen_to_moq-dev-rs" class="matrix-link"><span class="status pass">7/7</span><span class="version-tag at mismatch" title="Negotiated draft-18; predicted draft-22">18</span></a></td>
                     <td><span class="cell none">-</span></td>
                     <td><span class="cell none">-</span></td>
                     <td><span class="cell none">-</span></td>
@@ -355,9 +290,6 @@
                     <td><span class="cell none">-</span></td>
                     <td><span class="cell none">-</span></td>
                     <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
                 </tr>
                 <tr><td><strong>stitcher-moq</strong></td>
                     <td><span class="cell none">-</span></td>
@@ -368,27 +300,8 @@
                     <td><span class="cell none">-</span></td>
                     <td><span class="cell none">-</span></td>
                     <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                </tr>
-                <tr><td><strong>xquic</strong></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><a href="#detail-xquic_to_moq-dev-rs" class="matrix-link"><span class="status fail">0/6</span><span class="version-tag behind predicted" title="Predicted draft-14; the client reported no negotiated version">14</span></a></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
                 </tr>
                 <tr><td><strong>xquic-draft-18</strong></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
-                    <td><span class="cell none">-</span></td>
                     <td><span class="cell none">-</span></td>
                     <td><span class="cell none">-</span></td>
                     <td><span class="cell none">-</span></td>
@@ -418,18 +331,18 @@
                 <tr class="section-header"><td colspan="6">At Target</td></tr>
 <tr id="detail-moq-rs-draft-18_to_moq-dev-rs"><td>moq-rs-draft-18</td><td>moq-dev-rs</td><td><code class="at predicted" title="Predicted; the client reported no negotiated version. At interop target (draft-18)">draft-18</code></td><td>docker</td><td><span class="status partial">7/18</span></td><td><a href="moq-rs-draft-18_to_moq-dev-rs_docker.log">log</a></td></tr>
 <tr id="detail-moqlivemock_to_moq-dev-rs"><td>moqlivemock</td><td>moq-dev-rs</td><td><code class="at predicted" title="Predicted; the client reported no negotiated version. At interop target (draft-18)">draft-18</code></td><td>docker</td><td><span class="status pass">6/6</span></td><td><a href="moqlivemock_to_moq-dev-rs_docker.log">log</a></td></tr>
-<tr id="detail-moqx_to_moq-dev-rs"><td>moqx</td><td>moq-dev-rs</td><td><code class="at" title="Negotiated draft-18. At interop target (draft-18)">draft-18</code></td><td>docker</td><td><span class="status partial">6/7</span></td><td><a href="moqx_to_moq-dev-rs_docker.log">log</a></td></tr>
+<tr id="detail-moqx_to_moq-dev-rs"><td>moqx</td><td>moq-dev-rs</td><td><code class="at" title="Negotiated draft-18. At interop target (draft-18)">draft-18</code></td><td>docker</td><td><span class="status pass">7/7</span></td><td><a href="moqx_to_moq-dev-rs_docker.log">log</a></td></tr>
 <tr id="detail-xquic-draft-18_to_moq-dev-rs"><td>xquic-draft-18</td><td>moq-dev-rs</td><td><code class="at predicted" title="Predicted; the client reported no negotiated version. At interop target (draft-18)">draft-18</code></td><td>docker</td><td><span class="status fail">FAIL</span></td><td><a href="xquic-draft-18_to_moq-dev-rs_docker.log">log</a></td></tr>
 <tr id="detail-moq5_to_moq-dev-rs"><td>moq5</td><td>moq-dev-rs</td><td><code class="at predicted" title="Predicted; the client reported no negotiated version. At interop target (draft-18)">draft-18</code></td><td>docker</td><td><span class="status pass">6/6</span></td><td><a href="moq5_to_moq-dev-rs_docker.log">log</a></td></tr>
 <tr id="detail-moqtopus_to_moq-dev-rs"><td>moqtopus</td><td>moq-dev-rs</td><td><code class="at predicted" title="Predicted; the client reported no negotiated version. At interop target (draft-18)">draft-18</code></td><td>docker</td><td><span class="status fail">0/6</span></td><td><a href="moqtopus_to_moq-dev-rs_docker.log">log</a></td></tr>
 <tr id="detail-moq-playa_to_moq-dev-rs"><td>moq-playa</td><td>moq-dev-rs</td><td><code class="at predicted" title="Predicted; the client reported no negotiated version. At interop target (draft-18)">draft-18</code></td><td>docker</td><td><span class="status pass">6/6</span></td><td><a href="moq-playa_to_moq-dev-rs_docker.log">log</a></td></tr>
 <tr id="detail-quic-zig_to_moq-dev-rs"><td>quic-zig</td><td>moq-dev-rs</td><td><code class="at" title="Negotiated draft-18. At interop target (draft-18)">draft-18</code></td><td>docker</td><td><span class="status pass">7/7</span></td><td><a href="quic-zig_to_moq-dev-rs_docker.log">log</a></td></tr>
-<tr id="detail-moxygen_to_moq-dev-rs"><td>moxygen</td><td>moq-dev-rs</td><td><code class="at mismatch" title="Negotiated draft-18; predicted draft-22. At interop target (draft-18)">draft-18</code></td><td>docker</td><td><span class="status partial">6/7</span></td><td><a href="moxygen_to_moq-dev-rs_docker.log">log</a></td></tr>
-<tr id="detail-moq-dev-js_to_moq-rs-draft-18"><td>moq-dev-js</td><td>moq-rs-draft-18</td><td><code class="at predicted" title="Predicted; the client reported no negotiated version. At interop target (draft-18)">draft-18</code></td><td>docker</td><td><span class="status partial">7/8</span></td><td><a href="moq-dev-js_to_moq-rs-draft-18_docker.log">log</a></td></tr>
+<tr id="detail-moxygen_to_moq-dev-rs"><td>moxygen</td><td>moq-dev-rs</td><td><code class="at mismatch" title="Negotiated draft-18; predicted draft-22. At interop target (draft-18)">draft-18</code></td><td>docker</td><td><span class="status pass">7/7</span></td><td><a href="moxygen_to_moq-dev-rs_docker.log">log</a></td></tr>
+<tr id="detail-moq-dev-js_to_moq-rs-draft-18"><td>moq-dev-js</td><td>moq-rs-draft-18</td><td><code class="at predicted" title="Predicted; the client reported no negotiated version. At interop target (draft-18)">draft-18</code></td><td>docker</td><td><span class="status pass">8/8</span></td><td><a href="moq-dev-js_to_moq-rs-draft-18_docker.log">log</a></td></tr>
 <tr id="detail-moq-dev-js_to_moqlivemock"><td>moq-dev-js</td><td>moqlivemock</td><td><code class="at predicted" title="Predicted; the client reported no negotiated version. At interop target (draft-18)">draft-18</code></td><td>docker</td><td><span class="status fail">0/8</span></td><td><a href="moq-dev-js_to_moqlivemock_docker.log">log</a></td></tr>
-<tr id="detail-moq-dev-js_to_quiche-moq"><td>moq-dev-js</td><td>quiche-moq</td><td><code class="at predicted" title="Predicted; the client reported no negotiated version. At interop target (draft-18)">draft-18</code></td><td>docker</td><td><span class="status partial">7/8</span></td><td><a href="moq-dev-js_to_quiche-moq_docker.log">log</a></td></tr>
+<tr id="detail-moq-dev-js_to_quiche-moq"><td>moq-dev-js</td><td>quiche-moq</td><td><code class="at predicted" title="Predicted; the client reported no negotiated version. At interop target (draft-18)">draft-18</code></td><td>docker</td><td><span class="status pass">8/8</span></td><td><a href="moq-dev-js_to_quiche-moq_docker.log">log</a></td></tr>
 <tr id="detail-moq-dev-js_to_xquic-draft-18"><td>moq-dev-js</td><td>xquic-draft-18</td><td><code class="at predicted" title="Predicted; the client reported no negotiated version. At interop target (draft-18)">draft-18</code></td><td>docker</td><td><span class="status fail">0/8</span></td><td><a href="moq-dev-js_to_xquic-draft-18_docker.log">log</a></td></tr>
-<tr id="detail-moq-dev-js_to_quic-zig"><td>moq-dev-js</td><td>quic-zig</td><td><code class="at predicted" title="Predicted; the client reported no negotiated version. At interop target (draft-18)">draft-18</code></td><td>docker</td><td><span class="status partial">7/8</span></td><td><a href="moq-dev-js_to_quic-zig_docker.log">log</a></td></tr>
+<tr id="detail-moq-dev-js_to_quic-zig"><td>moq-dev-js</td><td>quic-zig</td><td><code class="at predicted" title="Predicted; the client reported no negotiated version. At interop target (draft-18)">draft-18</code></td><td>docker</td><td><span class="status pass">8/8</span></td><td><a href="moq-dev-js_to_quic-zig_docker.log">log</a></td></tr>
 <tr id="detail-moq-dev-rs_to_moq-rs-draft-18"><td>moq-dev-rs</td><td>moq-rs-draft-18</td><td><code class="at predicted" title="Predicted; the client reported no negotiated version. At interop target (draft-18)">draft-18</code></td><td>docker</td><td><span class="status pass">6/8</span></td><td><a href="moq-dev-rs_to_moq-rs-draft-18_docker.log">log</a></td></tr>
 <tr id="detail-moq-dev-rs_to_moqlivemock"><td>moq-dev-rs</td><td>moqlivemock</td><td><code class="at predicted" title="Predicted; the client reported no negotiated version. At interop target (draft-18)">draft-18</code></td><td>docker</td><td><span class="status pass">6/8</span></td><td><a href="moq-dev-rs_to_moqlivemock_docker.log">log</a></td></tr>
 <tr id="detail-moq-dev-rs_to_quiche-moq"><td>moq-dev-rs</td><td>quiche-moq</td><td><code class="at predicted" title="Predicted; the client reported no negotiated version. At interop target (draft-18)">draft-18</code></td><td>docker</td><td><span class="status pass">6/8</span></td><td><a href="moq-dev-rs_to_quiche-moq_docker.log">log</a></td></tr>
@@ -440,22 +353,12 @@
 <tr id="detail-imquic_to_moq-dev-rs"><td>imquic</td><td>moq-dev-rs</td><td><code class="ahead predicted" title="Predicted; the client reported no negotiated version. Ahead of interop target (draft-18)">draft-22</code></td><td>docker</td><td><span class="status pass">7/7</span></td><td><a href="imquic_to_moq-dev-rs_docker.log">log</a></td></tr>
 <tr id="detail-moq-dev-js_to_moq-dev-rs"><td>moq-dev-js</td><td>moq-dev-rs</td><td><code class="ahead predicted" title="Predicted; the client reported no negotiated version. Ahead of interop target (draft-18)">draft-22</code></td><td>docker</td><td><span class="status pass">8/8</span></td><td><a href="moq-dev-js_to_moq-dev-rs_docker.log">log</a></td></tr>
 <tr id="detail-moq-dev-rs_to_moq-dev-rs"><td>moq-dev-rs</td><td>moq-dev-rs</td><td><code class="ahead predicted" title="Predicted; the client reported no negotiated version. Ahead of interop target (draft-18)">draft-22</code></td><td>docker</td><td><span class="status pass">6/8</span></td><td><a href="moq-dev-rs_to_moq-dev-rs_docker.log">log</a></td></tr>
-<tr id="detail-moq-go_to_moq-dev-rs"><td>moq-go</td><td>moq-dev-rs</td><td><code class="ahead predicted" title="Predicted; the client reported no negotiated version. Ahead of interop target (draft-18)">draft-22</code></td><td>docker</td><td><span class="status fail">0/6</span></td><td><a href="moq-go_to_moq-dev-rs_docker.log">log</a></td></tr>
+<tr id="detail-moq-go_to_moq-dev-rs"><td>moq-go</td><td>moq-dev-rs</td><td><code class="ahead predicted" title="Predicted; the client reported no negotiated version. Ahead of interop target (draft-18)">draft-22</code></td><td>docker</td><td><span class="status pass">6/6</span></td><td><a href="moq-go_to_moq-dev-rs_docker.log">log</a></td></tr>
 <tr id="detail-stitcher-moq_to_moq-dev-rs"><td>stitcher-moq</td><td>moq-dev-rs</td><td><code class="ahead predicted" title="Predicted; the client reported no negotiated version. Ahead of interop target (draft-18)">draft-22</code></td><td>docker</td><td><span class="status pass">5/7</span></td><td><a href="stitcher-moq_to_moq-dev-rs_docker.log">log</a></td></tr>
-<tr id="detail-moq-dev-js_to_imquic"><td>moq-dev-js</td><td>imquic</td><td><code class="ahead predicted" title="Predicted; the client reported no negotiated version. Ahead of interop target (draft-18)">draft-22</code></td><td>docker</td><td><span class="status partial">6/8</span></td><td><a href="moq-dev-js_to_imquic_docker.log">log</a></td></tr>
-<tr id="detail-moq-dev-js_to_moq-go"><td>moq-dev-js</td><td>moq-go</td><td><code class="ahead predicted" title="Predicted; the client reported no negotiated version. Ahead of interop target (draft-18)">draft-22</code></td><td>docker</td><td><span class="status partial">7/8</span></td><td><a href="moq-dev-js_to_moq-go_docker.log">log</a></td></tr>
+<tr id="detail-moq-dev-js_to_imquic"><td>moq-dev-js</td><td>imquic</td><td><code class="ahead predicted" title="Predicted; the client reported no negotiated version. Ahead of interop target (draft-18)">draft-22</code></td><td>docker</td><td><span class="status partial">7/8</span></td><td><a href="moq-dev-js_to_imquic_docker.log">log</a></td></tr>
+<tr id="detail-moq-dev-js_to_moq-go"><td>moq-dev-js</td><td>moq-go</td><td><code class="ahead predicted" title="Predicted; the client reported no negotiated version. Ahead of interop target (draft-18)">draft-22</code></td><td>docker</td><td><span class="status pass">8/8</span></td><td><a href="moq-dev-js_to_moq-go_docker.log">log</a></td></tr>
 <tr id="detail-moq-dev-rs_to_imquic"><td>moq-dev-rs</td><td>imquic</td><td><code class="ahead predicted" title="Predicted; the client reported no negotiated version. Ahead of interop target (draft-18)">draft-22</code></td><td>docker</td><td><span class="status pass">6/8</span></td><td><a href="moq-dev-rs_to_imquic_docker.log">log</a></td></tr>
 <tr id="detail-moq-dev-rs_to_moq-go"><td>moq-dev-rs</td><td>moq-go</td><td><code class="ahead predicted" title="Predicted; the client reported no negotiated version. Ahead of interop target (draft-18)">draft-22</code></td><td>docker</td><td><span class="status pass">6/8</span></td><td><a href="moq-dev-rs_to_moq-go_docker.log">log</a></td></tr>
-                <tr class="section-header"><td colspan="6">Behind Target</td></tr>
-<tr id="detail-moq-rs_to_moq-dev-rs"><td>moq-rs</td><td>moq-dev-rs</td><td><code class="behind predicted" title="Predicted; the client reported no negotiated version. Behind interop target (draft-18)">draft-16</code></td><td>docker</td><td><span class="status fail">0/8</span></td><td><a href="moq-rs_to_moq-dev-rs_docker.log">log</a></td></tr>
-<tr id="detail-moq-rs-draft-14_to_moq-dev-rs"><td>moq-rs-draft-14</td><td>moq-dev-rs</td><td><code class="behind predicted" title="Predicted; the client reported no negotiated version. Behind interop target (draft-18)">draft-14</code></td><td>docker</td><td><span class="status fail">0/6</span></td><td><a href="moq-rs-draft-14_to_moq-dev-rs_docker.log">log</a></td></tr>
-<tr id="detail-xquic_to_moq-dev-rs"><td>xquic</td><td>moq-dev-rs</td><td><code class="behind predicted" title="Predicted; the client reported no negotiated version. Behind interop target (draft-18)">draft-14</code></td><td>docker</td><td><span class="status fail">0/6</span></td><td><a href="xquic_to_moq-dev-rs_docker.log">log</a></td></tr>
-<tr id="detail-moq-dev-js_to_moq-rs"><td>moq-dev-js</td><td>moq-rs</td><td><code class="behind predicted" title="Predicted; the client reported no negotiated version. Behind interop target (draft-18)">draft-16</code></td><td>docker</td><td><span class="status pass">8/8</span></td><td><a href="moq-dev-js_to_moq-rs_docker.log">log</a></td></tr>
-<tr id="detail-moq-dev-js_to_moq-rs-draft-14"><td>moq-dev-js</td><td>moq-rs-draft-14</td><td><code class="behind predicted" title="Predicted; the client reported no negotiated version. Behind interop target (draft-18)">draft-14</code></td><td>docker</td><td><span class="status partial">5/8</span></td><td><a href="moq-dev-js_to_moq-rs-draft-14_docker.log">log</a></td></tr>
-<tr id="detail-moq-dev-js_to_xquic"><td>moq-dev-js</td><td>xquic</td><td><code class="behind predicted" title="Predicted; the client reported no negotiated version. Behind interop target (draft-18)">draft-14</code></td><td>docker</td><td><span class="status fail">0/8</span></td><td><a href="moq-dev-js_to_xquic_docker.log">log</a></td></tr>
-<tr id="detail-moq-dev-rs_to_moq-rs"><td>moq-dev-rs</td><td>moq-rs</td><td><code class="behind predicted" title="Predicted; the client reported no negotiated version. Behind interop target (draft-18)">draft-16</code></td><td>docker</td><td><span class="status partial">5/8</span></td><td><a href="moq-dev-rs_to_moq-rs_docker.log">log</a></td></tr>
-<tr id="detail-moq-dev-rs_to_moq-rs-draft-14"><td>moq-dev-rs</td><td>moq-rs-draft-14</td><td><code class="behind predicted" title="Predicted; the client reported no negotiated version. Behind interop target (draft-18)">draft-14</code></td><td>docker</td><td><span class="status partial">3/8</span></td><td><a href="moq-dev-rs_to_moq-rs-draft-14_docker.log">log</a></td></tr>
-<tr id="detail-moq-dev-rs_to_xquic"><td>moq-dev-rs</td><td>xquic</td><td><code class="behind predicted" title="Predicted; the client reported no negotiated version. Behind interop target (draft-18)">draft-14</code></td><td>docker</td><td><span class="status fail">0/8</span></td><td><a href="moq-dev-rs_to_xquic_docker.log">log</a></td></tr>
             </tbody>
         </table>
     </div>
