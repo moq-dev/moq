@@ -168,7 +168,6 @@ struct Reservations {
 struct Outputs<E: CatalogExt> {
 	hang: moq_json::snapshot::Producer<Catalog<E>>,
 	hang_track: moq_net::track::Producer,
-	hangz: moq_json::snapshot::Producer<Catalog<E>>,
 	msf_track: moq_net::track::Producer,
 	/// The broadcast's HLS record tracks, unless [`Config::with_hls`] disabled them.
 	hls: Option<crate::hls::Tracks>,
@@ -182,7 +181,6 @@ impl<E: CatalogExt> Clone for Outputs<E> {
 		Self {
 			hang: self.hang.clone(),
 			hang_track: self.hang_track.clone(),
-			hangz: self.hangz.clone(),
 			msf_track: self.msf_track.clone(),
 			hls: self.hls.clone(),
 			broadcast: self.broadcast.clone(),
@@ -221,16 +219,14 @@ impl<E: CatalogExt> Outputs<E> {
 		std::borrow::Cow::Owned(catalog)
 	}
 
-	/// Emit the catalog to hang, compressed hang, and MSF.
+	/// Emit the catalog to hang and MSF.
 	fn emit(&mut self, catalog: &Catalog<E>) -> crate::Result<()> {
 		let catalog = self.advertise(catalog);
 		let catalog = catalog.as_ref();
 		// Every consumer refuses a catalog that fails this, so refuse it before it reaches one.
 		catalog.check_renditions()?;
-		// One snapshot per group while deltas are disabled; the `.z` track carries the identical catalog.
+		// One snapshot per group while deltas are disabled.
 		self.hang
-			.update(moq_net::Timed::from(catalog).at(moq_net::Timestamp::now()))?;
-		self.hangz
 			.update(moq_net::Timed::from(catalog).at(moq_net::Timestamp::now()))?;
 
 		// The MSF catalog is derived from our own types, so a serialize failure means an extension broke
@@ -248,13 +244,12 @@ impl<E: CatalogExt> Outputs<E> {
 
 	/// Abort every catalog track after a publish nobody could return the error for.
 	///
-	/// The three tracks carry one catalog, so a failure part way through `emit` must not leave some
+	/// The two tracks carry one catalog, so a failure part way through `emit` must not leave some
 	/// of them serving a newer catalog than the others. Consumers see the error instead.
 	fn abort(&mut self, err: &crate::Error) {
 		let reason = err.reason();
 		// Idempotent: a track that is already closed keeps its first reason.
 		let _ = self.hang.clone().abort(reason.clone());
-		let _ = self.hangz.clone().abort(reason.clone());
 		let _ = self.msf_track.clone().abort(reason);
 	}
 }
@@ -424,24 +419,18 @@ impl<E: CatalogExt> Producer<E> {
 		};
 		catalog.clock = clock.wall();
 
+		// Compressed, as `default_track_info` sets: catalog JSON is small and repetitive.
 		let hang_track = broadcast.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())?;
-		let hangz_track =
-			broadcast.create_track(hang::Catalog::COMPRESSED_NAME, hang::Catalog::default_track_info())?;
 		// The MSF track is the same catalog in another encoding, so it takes the same
 		// priority. Leaving it at the default would rank a subscriber reading MSF
-		// below every media track on a relay's upstream leg.
-		let msf_info = hang::Catalog::default_track_info();
+		// below every media track on a relay's upstream leg. It stays uncompressed: MSF is
+		// read by other implementations, which hang's compression decisions don't cover.
+		let msf_info = hang::Catalog::default_track_info().with_compress(false);
 		let msf_track = broadcast.create_track(moq_msf::DEFAULT_NAME, msf_info)?;
 
 		// Disable deltas for now to stay byte-compatible with consumers that only read snapshots.
-		let mut json_config = moq_json::snapshot::Config::default();
-		json_config.deltas = false;
-		let hang = moq_json::snapshot::Producer::new(hang_track.clone(), json_config.clone());
-
-		// The `.z` track carries the same catalog, DEFLATE-compressed. Deltas stay off for parity
-		// with the plaintext track; only the per-group compression differs.
-		json_config.compression = moq_json::Compression::Deflate;
-		let hangz = moq_json::snapshot::Producer::new(hangz_track, json_config);
+		let json_config = moq_json::snapshot::Config::default().with_deltas(false);
+		let hang = moq_json::snapshot::Producer::new(hang_track.clone(), json_config);
 
 		let hls = config.hls.as_ref().map(|_| crate::hls::Tracks::new(broadcast));
 
@@ -449,7 +438,6 @@ impl<E: CatalogExt> Producer<E> {
 			outputs: Outputs {
 				hang,
 				hang_track,
-				hangz,
 				msf_track,
 				hls,
 				broadcast: broadcast.clone(),
@@ -973,13 +961,13 @@ impl<E: CatalogExt> Producer<E> {
 	///
 	/// The caller creates the track on the broadcast, as it does for a media track; this writes its
 	/// catalog entry and removes the entry when the returned handle drops. The catalog key is
-	/// [`track.name()`](moq_net::track::Producer::name) verbatim, with no `.z` suffix even when
-	/// compressed, since the entry's compression flag is what a consumer reads.
+	/// [`track.name()`](moq_net::track::Producer::name) verbatim. Create `track` with
+	/// [`compress`](moq_net::track::Info::compress) set: JSON is small and repetitive.
 	///
 	/// `config` is a [`json::Config`](crate::json::Config) for the `json` section, or an
 	/// application's own entry embedding a [`JsonConfig`](hang::catalog::JsonConfig) (see
-	/// [`IntoRendition`](super::IntoRendition)). The producer sets its `mode`, encodes the track
-	/// with its `compression`, and fills an absent `bitrate` from what it writes. `options`
+	/// [`IntoRendition`](super::IntoRendition)). The producer sets its `mode` and fills an absent
+	/// `bitrate` from what it writes. `options`
 	/// configures the encoder and is not written into the catalog entry. With
 	/// [`deltas`](crate::json::Options::deltas), create `track` with a
 	/// [`refresh`](moq_net::track::Info::refresh) ratio and drive
@@ -987,7 +975,7 @@ impl<E: CatalogExt> Producer<E> {
 	///
 	/// Errors if the entry's section already carries that name, for example an entry seeded
 	/// through [`Config::with_catalog`] or one pointing at a sibling broadcast, or if the entry
-	/// declares a compression this build can't write or references another broadcast.
+	/// references another broadcast.
 	pub fn json_snapshot<T: serde::Serialize>(
 		&self,
 		track: moq_net::track::Producer,
@@ -1009,33 +997,6 @@ impl<E: CatalogExt> Producer<E> {
 	) -> crate::Result<crate::json::Stream<T>> {
 		let rendition = self.data_entry(track.name())?;
 		crate::json::Stream::new(track, rendition, config.into_rendition())
-	}
-
-	/// Publish `track` as a latest-value binary track, advertising it in the catalog.
-	///
-	/// See [`json_snapshot`](Self::json_snapshot) for the lifecycle; this differs only in that the
-	/// payloads are opaque bytes, and `config` is a [`binary::Config`](crate::binary::Config) or an
-	/// entry embedding a [`BinaryConfig`](hang::catalog::BinaryConfig).
-	pub fn binary_snapshot(
-		&self,
-		track: moq_net::track::Producer,
-		config: impl super::IntoRendition<E, hang::catalog::BinaryConfig>,
-	) -> crate::Result<crate::binary::Snapshot> {
-		let rendition = self.data_entry(track.name())?;
-		crate::binary::Snapshot::new(track, rendition, config.into_rendition())
-	}
-
-	/// Publish `track` as an append-log binary track, advertising it in the catalog.
-	///
-	/// See [`binary_snapshot`](Self::binary_snapshot); this differs only in that every payload is
-	/// preserved rather than superseded.
-	pub fn binary_stream(
-		&self,
-		track: moq_net::track::Producer,
-		config: impl super::IntoRendition<E, hang::catalog::BinaryConfig>,
-	) -> crate::Result<crate::binary::Stream> {
-		let rendition = self.data_entry(track.name())?;
-		crate::binary::Stream::new(track, rendition, config.into_rendition())
 	}
 
 	/// Reserve the catalog entry a data producer owns, keyed by its track name.
@@ -1088,7 +1049,6 @@ impl<E: CatalogExt> Producer<E> {
 			state.closed = Some(moq_net::Error::Closed.into());
 		}
 		self.outputs.hang.finish()?;
-		self.outputs.hangz.finish()?;
 		self.outputs.msf_track.finish()?;
 		if let Some(hls) = &self.outputs.hls {
 			hls.finish();
@@ -1102,7 +1062,7 @@ impl<E: CatalogExt> Producer<E> {
 /// Obtained via [`Producer::modify`]. Derefs to the [`Catalog<E>`](super::hang::Catalog), so base
 /// sections are editable directly and application sections are editable through `ext`.
 ///
-/// On drop, the hang, compressed-hang, and MSF catalog tracks are updated if the catalog was
+/// On drop, the hang and MSF catalog tracks are updated if the catalog was
 /// mutated. That publish cannot return an error, so a failure (an extension that won't serialize,
 /// a catalog too large for a frame) aborts the catalog tracks instead: consumers see the error and
 /// the next [`Producer::modify`] returns it. Call [`commit`](Self::commit) when the caller can act
@@ -1517,11 +1477,7 @@ mod test {
 		let catalog = Producer::<()>::new(&mut broadcast, Config::default()).unwrap();
 		let mut copy = catalog.clone();
 		let mut readers = Vec::new();
-		for name in [
-			hang::Catalog::DEFAULT_NAME,
-			hang::Catalog::COMPRESSED_NAME,
-			moq_msf::DEFAULT_NAME,
-		] {
+		for name in [hang::Catalog::DEFAULT_NAME, moq_msf::DEFAULT_NAME] {
 			readers.push(broadcast.consume().track(name).unwrap().subscribe(None).await.unwrap());
 		}
 		catalog.abort(moq_net::Error::Unauthorized);
@@ -1600,12 +1556,7 @@ mod test {
 		let _recorder = catalog.enroll("video", None).unwrap();
 
 		let consumer = broadcast.consume();
-		for name in [
-			hang::Catalog::DEFAULT_NAME,
-			hang::Catalog::COMPRESSED_NAME,
-			moq_msf::DEFAULT_NAME,
-			"video.hls",
-		] {
+		for name in [hang::Catalog::DEFAULT_NAME, moq_msf::DEFAULT_NAME, "video.hls"] {
 			let track = consumer.track(name).expect("track");
 			let info = track.info().await.expect("info");
 			assert_eq!(info.priority, PRIORITY.catalog, "{name} should rank with the catalog");
@@ -1799,12 +1750,14 @@ mod test {
 	}
 
 	#[test]
-	fn publishes_plain_and_compressed_tracks() {
+	fn publishes_one_compressed_catalog_track() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
 
-		let mut plain = Consumer::new(catalog.outputs.hang.consume());
-		let mut compressed = Consumer::compressed(catalog.outputs.hangz.consume());
+		let track = catalog.outputs.hang.consume();
+		assert!(catalog.outputs.hang_track.info().compress, "catalog.json is compressed");
+		assert!(!catalog.outputs.msf_track.info().compress, "the MSF catalog is not");
+		let mut consumer = Consumer::new(track);
 
 		{
 			let mut guard = catalog.modify().unwrap();
@@ -1816,17 +1769,11 @@ mod test {
 		let expected = catalog.snapshot();
 
 		let waiter = kio::Waiter::noop();
-		let got_plain = match plain.poll_next(&waiter) {
+		let got = match consumer.poll_next(&waiter) {
 			Poll::Ready(Ok(Some(c))) => c,
-			other => panic!("expected plain catalog, got {other:?}"),
+			other => panic!("expected a catalog, got {other:?}"),
 		};
-		let got_compressed = match compressed.poll_next(&waiter) {
-			Poll::Ready(Ok(Some(c))) => c,
-			other => panic!("expected compressed catalog, got {other:?}"),
-		};
-
-		assert_eq!(got_plain, expected);
-		assert_eq!(got_compressed, expected);
+		assert_eq!(got, expected);
 	}
 
 	#[test]

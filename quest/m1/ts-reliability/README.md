@@ -102,6 +102,7 @@ catalog linger (#5305).
 - [A timebase step restarts the TS import](/quest/m1/ts-reliability/step-restart.md) - an unflagged step or a rewind republishes under a new epoch instead of ending the import and every subscriber's export
 - [Export re-acquires a step](/quest/m1/ts-reliability/export-reacquire.md) - `moq export ts` re-acquires an unmarked timeline step instead of exiting on fake drift
 - [A restart keeps its catalog](/quest/m1/ts-reliability/restart-catalog.md) - a restarted import publishes its catalog with its first media
+- [Tables from current state](/quest/m1/ts-reliability/psi-state.md) - the TS export lays its PAT and PMT from current state when their slot comes up, with byte-identical output for a static program
 - [PAT changes](/quest/m1/ts-reliability/pat-lifecycle.md) - a running export follows a moved PMT PID
 - [A demoted subscriber priority reaches the publisher](/quest/m1/ts-reliability/stitch-catch-up.md) - a mid-stream priority demotion reaches the publisher on lite-07 and moq-transport, including an old instance after an epoch switch
 

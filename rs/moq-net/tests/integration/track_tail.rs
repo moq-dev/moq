@@ -104,8 +104,9 @@ async fn connect(version: &str) -> Pair {
 }
 
 /// Publish a group below the declared end (or none for an empty track), hold its stream
-/// back until the subscription ends, then deliver or lose it.
-async fn round(version: &str, late: Late, final_sequence: u64) -> Outcome {
+/// back until the subscription ends, then deliver or lose it. The subscriber reads with
+/// `max_delay`.
+async fn round(version: &str, late: Late, final_sequence: u64, max_delay: Option<Duration>) -> Outcome {
 	let Pair {
 		pair,
 		mut track,
@@ -114,7 +115,9 @@ async fn round(version: &str, late: Late, final_sequence: u64) -> Outcome {
 	} = connect(version).await;
 
 	let reader = moq_clock::sim::spawn(async move {
-		let subscription = moq_net::track::Subscription::default().with_range(0..);
+		let subscription = moq_net::track::Subscription::default()
+			.with_range(0..)
+			.with_max_delay(max_delay);
 		let mut sub = remote
 			.track("video")
 			.unwrap()
@@ -188,26 +191,33 @@ async fn round(version: &str, late: Late, final_sequence: u64) -> Outcome {
 }
 
 /// A group whose header arrives after the subscription's end is delivered, then the track
-/// ends cleanly.
+/// ends cleanly. An unbounded max delay waits for it too: its grace never runs out.
 #[moq_clock::test]
 async fn a_group_after_the_end_is_delivered() {
 	for version in VERSIONS {
-		let outcome = round(version, Late::Delivered, 1).await;
-		assert!(
-			outcome.err.is_none() && outcome.frames == [PAYLOAD],
-			"{version}: got {} frame(s), err={:?}",
-			outcome.frames.len(),
-			outcome.err,
-		);
-
-		// Drafts that say where the track ends, or how many streams the publisher opened,
-		// end as soon as the last group arrives rather than waiting out the grace.
-		if *version != "moq-lite-03" {
+		// moq-lite-03 declares no end, so an unbounded subscription there waits forever.
+		let delays: &[Option<Duration>] = match *version {
+			"moq-lite-03" => &[Some(Duration::ZERO)],
+			_ => &[Some(Duration::ZERO), None],
+		};
+		for &max_delay in delays {
+			let outcome = round(version, Late::Delivered, 1, max_delay).await;
 			assert!(
-				outcome.elapsed < GRACE / 10,
-				"{version}: ended after {:?}",
-				outcome.elapsed
+				outcome.err.is_none() && outcome.frames == [PAYLOAD],
+				"{version} max_delay={max_delay:?}: got {} frame(s), err={:?}",
+				outcome.frames.len(),
+				outcome.err,
 			);
+
+			// Drafts that say where the track ends, or how many streams the publisher
+			// opened, end as soon as the last group arrives rather than waiting out the grace.
+			if *version != "moq-lite-03" {
+				assert!(
+					outcome.elapsed < GRACE / 10,
+					"{version} max_delay={max_delay:?}: ended after {:?}",
+					outcome.elapsed
+				);
+			}
 		}
 	}
 }
@@ -217,7 +227,7 @@ async fn a_group_after_the_end_is_delivered() {
 #[moq_clock::test]
 async fn a_lost_group_ends_the_track_after_the_grace() {
 	for version in VERSIONS {
-		let outcome = round(version, Late::Lost, 1).await;
+		let outcome = round(version, Late::Lost, 1, Some(Duration::ZERO)).await;
 		assert!(
 			outcome.err.is_none() && outcome.frames.is_empty(),
 			"{version}: got {} frame(s), err={:?}",
@@ -236,7 +246,7 @@ async fn a_lost_group_ends_the_track_after_the_grace() {
 #[moq_clock::test]
 async fn skipped_groups_end_without_the_grace() {
 	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
-		let outcome = round(version, Late::Delivered, 3).await;
+		let outcome = round(version, Late::Delivered, 3, Some(Duration::ZERO)).await;
 		assert!(outcome.err.is_none(), "{version}: {:?}", outcome.err);
 		assert_eq!(outcome.frames, [PAYLOAD], "{version}");
 		assert!(
@@ -250,7 +260,7 @@ async fn skipped_groups_end_without_the_grace() {
 /// An empty track leaves no tail to wait for.
 #[moq_clock::test]
 async fn lite07_empty_track_ends_without_the_grace() {
-	let outcome = round("moq-lite-07-wip", Late::Delivered, 0).await;
+	let outcome = round("moq-lite-07-wip", Late::Delivered, 0, Some(Duration::ZERO)).await;
 	assert!(outcome.err.is_none());
 	assert!(outcome.frames.is_empty());
 	assert!(outcome.elapsed < GRACE / 10, "ended after {:?}", outcome.elapsed);

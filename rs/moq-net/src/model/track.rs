@@ -2381,11 +2381,13 @@ impl TrackState {
 	/// still worth waiting for; see [`Self::tail_deadline`].
 	fn owes(&self, fin: u64) -> bool {
 		self.tail_deadline(fin)
-			.is_some_and(|at| self.cache.pool().now_wall() < at)
+			.is_some_and(|at| at.is_none_or(|at| self.cache.pool().now_wall() < at))
 	}
 
 	/// When a received copy's declared end stops waiting for its tail: the latest instant a
-	/// sequence below `fin` it still misses is given up. `None` when nothing is missing.
+	/// sequence below `fin` it still misses is given up, or `Some(None)` when one is never given
+	/// up, as under an unbounded max delay, whose grace runs past the clock's range. `None`
+	/// when nothing is missing.
 	///
 	/// A missing sequence is one no live group or datagram delivered and the publisher did
 	/// not drop. A gap below an arrival is given up a grace after that arrival opened it, as
@@ -2393,7 +2395,7 @@ impl TrackState {
 	/// the end or a start was declared, or a group last arrived, so a feed still delivering toward an
 	/// end declared ahead of it is not cut off. Judged by the arrivals, not the cache, so an evicted group or a
 	/// datagram counts as delivered, and the check costs the same however much is cached.
-	fn tail_deadline(&self, fin: u64) -> Option<crate::time::Instant> {
+	fn tail_deadline(&self, fin: u64) -> Option<Option<crate::time::Instant>> {
 		let active = self.tail?;
 		let grace = self.arrival_grace();
 		// Fetched backfill never reaches a reader in arrival order, so only the live feed's
@@ -2407,26 +2409,22 @@ impl TrackState {
 					.arrivals
 					.gaps(0..fin)
 					.any(|(gap, _)| self.drops.gaps(&gap).next().is_some());
-				return missing.then(|| active.checked_add(grace)).flatten();
+				return missing.then(|| active.checked_add(grace));
 			}
 			None => self.arrivals.first().unwrap_or(0),
 		};
-		let owed = floor.min(fin)..fin;
-		let top = self.arrivals.end().unwrap_or(0)..fin;
+		// Nothing opened the gap above the last arrival, so its grace runs from `active`.
 		self.arrivals
-			.folds(grace)
-			.chain(active.checked_add(grace).map(|at| (top, at)))
-			.filter(|(gap, _)| {
-				let gap = gap.start.max(owed.start)..gap.end.min(owed.end);
-				!gap.is_empty() && self.drops.gaps(&gap).next().is_some()
-			})
-			.map(|(_, at)| at)
-			.max()
+			.gaps(floor.min(fin)..fin)
+			.filter(|(gap, _)| self.drops.gaps(gap).next().is_some())
+			.map(|(_, opened)| opened.unwrap_or(active).checked_add(grace))
+			// A gap that is never given up holds the end for good.
+			.reduce(|a, b| a.zip(b).map(|(a, b)| a.max(b)))
 	}
 
 	/// Wake `waiter` when a received copy's declared end stops waiting for its tail.
 	fn watch_tail(&self, waiter: &kio::Waiter) {
-		if let Some(at) = self.final_sequence().and_then(|fin| self.tail_deadline(fin))
+		if let Some(Some(at)) = self.final_sequence().and_then(|fin| self.tail_deadline(fin))
 			&& self.cache.pool().now_wall() < at
 		{
 			self.cache.watch_wall(at, waiter);
@@ -13617,6 +13615,41 @@ mod test {
 				"end {end}: the grace never woke the reader"
 			);
 			assert!(matches!(arrival.poll_recv_group(&waiter), Poll::Ready(Ok(None))));
+		}
+	}
+
+	/// An unbounded max delay never gives up on a hole, below an arrival or above the last
+	/// one, until it fills.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_unbounded_tail_holds_readers_at_a_hole() {
+		// Hole 0 sits below arrival 1; hole 1 sits above arrival 0.
+		for (arrived, missing) in [(1, 0), (0, 1)] {
+			let mut producer = track_producer("test", None);
+			producer.received();
+			let mut arrival = producer.subscribe(replay().with_max_delay(None));
+			producer.start_at(0).unwrap();
+			producer.finish_at(Position::group(2)).unwrap();
+			producer
+				.create_group(group::Info { sequence: arrived })
+				.unwrap()
+				.finish()
+				.unwrap();
+			assert_eq!(arrival.assert_group().sequence, arrived);
+
+			elapse(&producer, Duration::from_secs(3600));
+			assert!(
+				arrival.recv_group().now_or_never().is_none(),
+				"hole {missing}: given up on"
+			);
+
+			producer
+				.create_group(group::Info { sequence: missing })
+				.unwrap()
+				.finish()
+				.unwrap();
+			assert_eq!(arrival.assert_group().sequence, missing);
+			assert!(arrival.recv_group().now_or_never().unwrap().unwrap().is_none());
 		}
 	}
 

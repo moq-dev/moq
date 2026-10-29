@@ -35,7 +35,6 @@ see [Applications](/bin/). [Examples](/setup/examples) links runnable consumers;
 | [moq-auth](/lib/rs/moq-auth) | Relay authorization: JWT signing and verification, and the auth server contract. |
 | [moq-room](/lib/rs/moq-room) | Workspace-only native rooms; use the published JS room API for applications. |
 | [moq-json](/lib/rs/moq-json) | JSON over tracks: snapshots with merge-patch deltas, or append logs. |
-| [moq-flate](/lib/rs/moq-flate) | Opaque payloads over tracks, optionally compressed with group-scoped DEFLATE: snapshots or append logs. |
 | [moq-e2ee](https://github.com/moq-dev/moq/tree/main/rs/moq-e2ee) | Workspace-only end-to-end encryption of groups, datagrams, and track names, scoped to a publisher epoch. |
 | [moq-loc](https://docs.rs/moq-loc), [moq-msf](https://docs.rs/moq-msf) | The IETF LOC container and MSF catalog. |
 | [moq-stats](https://docs.rs/moq-stats) | Publish and consume relay traffic counters as tracks. |

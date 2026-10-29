@@ -338,28 +338,31 @@ impl Client {
 	/// the peer connection.
 	#[cfg(feature = "webrtc")]
 	pub async fn connect_webrtc(&self, peer: &crate::webrtc::Offerer) -> crate::Result<moq_net::Session> {
-		let protocol = peer.protocol();
-		if !self.versions.alpns().contains(&protocol) {
-			return Err(crate::webrtc::Error::Protocol(protocol.to_string()).into());
-		}
+		crate::runtime::scope(async move {
+			let protocol = peer.protocol();
+			if !self.versions.alpns().contains(&protocol) {
+				return Err(crate::webrtc::Error::Protocol(protocol.to_string()).into());
+			}
 
-		let attempt = async {
-			let opened = peer.channel().await?;
-			let config = opened.config;
-			let session = qmux::Session::connect(opened.channel, config)
-				.await
-				.map_err(crate::webrtc::Error::from)?;
-			Ok::<_, Error>(connect_session(&self.moq, session).await?)
-		};
+			let attempt = async {
+				let opened = peer.channel().await?;
+				let config = opened.config;
+				let session = qmux::Session::connect(opened.channel, config)
+					.await
+					.map_err(crate::webrtc::Error::from)?;
+				Ok::<_, Error>(connect_session(&self.moq, session).await?)
+			};
 
-		let session = match self.timeout.is_zero() {
-			true => attempt.await?,
-			false => moq_clock::timeout(self.timeout, attempt)
-				.await
-				.map_err(|_| Error::ConnectTimeout(self.timeout))??,
-		};
-		tracing::info!(version = %session.version(), transport = %crate::Transport::WebRtc, "connected");
-		Ok(session)
+			let session = match self.timeout.is_zero() {
+				true => attempt.await?,
+				false => moq_clock::timeout(self.timeout, attempt)
+					.await
+					.map_err(|_| Error::ConnectTimeout(self.timeout))??,
+			};
+			tracing::info!(version = %session.version(), transport = %crate::Transport::WebRtc, "connected");
+			Ok(session)
+		})
+		.await
 	}
 
 	/// What a dial to `url` presents of `tokens`, given the versions this client offers.
@@ -387,7 +390,7 @@ impl Client {
 	///
 	/// The scheme picks the transport, and `https://` races QUIC against the
 	/// WebSocket fallback so a blocked UDP path still connects. The session's
-	/// protocol driver is spawned on the current tokio runtime; the session
+	/// protocol driver is spawned on the current tokio runtime, else the fallback; the session
 	/// closes once the last returned handle drops.
 	#[cfg(any(
 		feature = "quic",

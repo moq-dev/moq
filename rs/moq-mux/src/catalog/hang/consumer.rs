@@ -2,13 +2,12 @@ use std::task::Poll;
 
 use super::{Catalog, CatalogExt};
 use crate::Result;
-use crate::catalog::CatalogFormat;
 
 /// A catalog consumer, used to receive catalog updates and discover tracks.
 ///
 /// This wraps [`hang::catalog::Consumer`], which reconstructs the JSON catalog from the latest
-/// group's snapshot and checks its renditions, remembering which [`CatalogFormat`] it reads and
-/// reporting failures as this crate's [`Error`](crate::Error).
+/// group's snapshot and checks its renditions, reporting failures as this crate's
+/// [`Error`](crate::Error).
 ///
 /// Generic over the application extension `E` (defaulting to `()`); yields a
 /// [`Catalog<E>`](super::Catalog).
@@ -18,30 +17,14 @@ use crate::catalog::CatalogFormat;
 /// A catalog that misuses that reference is rejected outright (see [`Self::poll_next`]).
 pub struct Consumer<E: CatalogExt = ()> {
 	inner: hang::catalog::Consumer<E>,
-	format: CatalogFormat,
 }
 
 impl<E: CatalogExt> Consumer<E> {
-	/// Create a new catalog consumer from a MoQ track subscriber (uncompressed `catalog.json`).
+	/// Create a new catalog consumer from a `catalog.json` track subscriber, compressed or not.
 	pub fn new(track: moq_net::track::Subscriber) -> Self {
 		Self {
 			inner: hang::catalog::Consumer::new(track),
-			format: CatalogFormat::Hang,
 		}
-	}
-
-	/// Create a consumer for the DEFLATE-compressed catalog track (`catalog.json.z`).
-	///
-	/// The track must be the compressed one (see [`hang::Catalog::COMPRESSED_NAME`]).
-	pub fn compressed(track: moq_net::track::Subscriber) -> Self {
-		Self {
-			inner: hang::catalog::Consumer::compressed(track),
-			format: CatalogFormat::HangZ,
-		}
-	}
-
-	pub(crate) fn format(&self) -> CatalogFormat {
-		self.format
 	}
 
 	/// Poll for the next catalog update.

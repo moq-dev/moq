@@ -66,24 +66,15 @@ fn docs(fields: usize, changed_percent: usize) -> (Value, Value) {
 	(Value::Object(old), Value::Object(new))
 }
 
-fn measure(fields: usize, changed_percent: usize, compressed: bool) -> (usize, usize) {
+fn measure(fields: usize, changed_percent: usize) -> (usize, usize) {
 	let (old, new) = docs(fields, changed_percent);
-	let compression = if compressed {
-		moq_json::Compression::Deflate
-	} else {
-		moq_json::Compression::None
-	};
-	let mut config = snapshot::Config::default().with_deltas(true);
-	config.compression = compression;
-	let mut encoder = Encoder::<Value>::new(config);
-	let mut decoder_config = snapshot::consumer::Config::default();
-	decoder_config.compression = compression;
-	let mut decoder = Decoder::<Value>::new(decoder_config);
+	let mut encoder = Encoder::<Value>::new(snapshot::Config::default().with_deltas(true));
+	let mut decoder = Decoder::<Value>::new(snapshot::consumer::Config::default());
 	let snapshot = encoder.update(&old).unwrap().unwrap();
 	decoder.snapshot(&snapshot.payload).unwrap();
 	snapshot.commit();
 
-	// Warm the reusable key buffers and both compression windows.
+	// Warm the reusable key buffers.
 	if let Some(frame) = encoder.update(&new).unwrap() {
 		decoder.delta(&frame.payload).unwrap();
 		frame.commit();
@@ -111,13 +102,11 @@ fn main() {
 	if std::env::args().any(|arg| arg == "--list") {
 		return;
 	}
-	println!("fields changed% compression encoder_allocs decoder_allocs");
-	for compressed in [false, true] {
-		for fields in [16, 128, 1024, 8192] {
-			for changed in [0, 1, 10, 100] {
-				let (encoder, decoder) = black_box(measure(fields, changed, compressed));
-				println!("{fields:>6} {changed:>8} {compressed:>11} {encoder:>14} {decoder:>14}");
-			}
+	println!("fields changed% encoder_allocs decoder_allocs");
+	for fields in [16, 128, 1024, 8192] {
+		for changed in [0, 1, 10, 100] {
+			let (encoder, decoder) = black_box(measure(fields, changed));
+			println!("{fields:>6} {changed:>8} {encoder:>14} {decoder:>14}");
 		}
 	}
 }
