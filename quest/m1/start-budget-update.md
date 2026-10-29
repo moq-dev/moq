@@ -25,11 +25,17 @@ the loosest sent budget when provenance is absent. No update revisions or
 per-update STARTs are added; range responses and start bookkeeping retain
 their own scope and branches.
 
-Remaining: complete `just ci`, `just test interop --all`, and published-wire
-compatibility validation; resolve relevant failures, then remove this quest
-and mark the PR ready. The deterministic crossed-update tests, direct and
-relayed intermediate-budget history-fill test, and exact published-wire
-fixtures are implemented. Do not merge, enqueue, or watch this PR.
+The crossed-update Rust/JS tests, direct and relayed intermediate-budget
+history-fill test, and exact published-wire fixtures pass. `just drafts check`
+and all 173 `just test interop --all` checks pass.
+
+Remaining: finish the local CI gate and published-release compatibility
+validation, then remove this quest and mark ready. `just test wire-compat`
+stops before its session cases because main's accepted pins still name
+moq-cli 0.14.8 instead of published 0.14.9. The existing
+[wire compatibility prerequisite](https://github.com/moq-dev/moq/pull/7061)
+owns the blocked remeasurement; this change does not repin releases.
+Do not merge, enqueue, or watch this PR.
 
 ## Related
 
