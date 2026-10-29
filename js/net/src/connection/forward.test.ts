@@ -63,12 +63,16 @@ class FakeSession {
 	closed: Promise<Error | null>;
 	#die!: (reason: Error | null) => void;
 
-	/** `exclusive` stands in for a peer that refuses overlapping requests. */
-	constructor({ exclusive = false } = {}) {
+	/**
+	 * `exclusive` stands in for a peer that refuses overlapping requests, and `provesAbsence`
+	 * false for one whose initial set has no end, as moq-transport's without MoQ Active Count.
+	 */
+	constructor({ exclusive = false, provesAbsence = true } = {}) {
 		registerWire(this, {
 			consume: (path) => this.consume(path),
 			goaway: new Once(),
 			exclusive,
+			provesAbsence,
 			auth: new AuthSession({ peerGrant: { publish: new Path.Patterns(), subscribe: new Path.Patterns() } }),
 		});
 		this.closed = new Promise((resolve) => {
@@ -761,6 +765,39 @@ test("a scoped session refuses blind requests outside its allowed paths", async 
 	expect(session.consumes(Path.from("room/bob/video"))).toBe(0);
 	allowed.close();
 	denied.close();
+	session.die();
+	origin.close();
+});
+
+test("a plain request answers blind through discovery that cannot prove absence", async () => {
+	const origin = new OriginProducer();
+	const session = new FakeSession({ provesAbsence: false });
+	forwardAnnounced(session.session, origin);
+	const path = Path.from("room");
+	const request = origin.request(path);
+	const follower = origin.follow(path);
+	await settle();
+	expect(session.open()).toEqual(["room/**"]);
+	session.stream("room/**").synced();
+	await settle();
+	expect(origin.discovery.peek()).toBe(true);
+	expect(request.closed.peek()).toBeUndefined();
+	const blind = request.active.peek();
+	expect(blind).toBeDefined();
+	expect(follower.active.peek()).toBeUndefined();
+	expect(session.consumes(path)).toBe(1);
+
+	// An announcement arriving later is a route, which a request prefers over a blind answer.
+	start(session.stream("room/**"), "room");
+	await settle();
+	expect(session.consumes(path)).toBe(2);
+	expect(request.active.peek()).toBeDefined();
+	expect(request.active.peek()).not.toBe(blind);
+	expect(follower.active.peek()).toBeDefined();
+	expect(request.closed.peek()).toBeUndefined();
+
+	request.close();
+	follower.close();
 	session.die();
 	origin.close();
 });

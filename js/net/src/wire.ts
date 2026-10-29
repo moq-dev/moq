@@ -58,7 +58,11 @@ export interface OriginProducer {
 		prefix: Path.Valid,
 		route?: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"]; auth?: Route["auth"] },
 	): origin.Requests;
-	attach(discovery: boolean): Dispose;
+	/**
+	 * Count a session, and whether it discovers, until the returned dispose. One whose discovery
+	 * cannot prove absence never syncs a request into `Unroutable` and still answers blind.
+	 */
+	attach(discovery: boolean, provesAbsence?: boolean): Dispose;
 	/**
 	 * Hold the origin's announcement streams overlapping `prefix` unsynced until
 	 * the returned dispose: a session holds one while its peer's initial set is in flight.
@@ -122,6 +126,11 @@ export interface Established {
 	 * discovery never holds two where one covers the other.
 	 */
 	readonly exclusive: boolean;
+	/**
+	 * Whether the peer marks where a discovery stream's initial set ends, so a synced stream
+	 * without a path proves the peer cannot serve it.
+	 */
+	readonly provesAbsence: boolean;
 	// private: plumbing
 	/**
 	 * This session's side of its auth handle.

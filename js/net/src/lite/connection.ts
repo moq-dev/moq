@@ -234,6 +234,8 @@ export class Connection implements Established {
 			consume: (path) => this.#subscriber.consume(path),
 			goaway: this.#goaway,
 			exclusive: false,
+			// A moq-lite peer announces every broadcast it serves.
+			provesAbsence: true,
 			auth: this.#auth,
 		});
 

@@ -77,10 +77,10 @@ interface Reported {
  */
 export function forwardAnnounced(conn: Established, origin: OriginProducer): void {
 	const originWire = wireOf(origin);
-	const exclusive = wireOf(conn).exclusive;
+	const { exclusive, provesAbsence } = wireOf(conn);
 	// Reassigned on a downgrade, so the origin stops counting this session as discovering.
 	// Called through a closure so the session's death always detaches the current one.
-	let detach = originWire.attach(true);
+	let detach = originWire.attach(true, provesAbsence);
 	let dead = false;
 	let blind = false;
 

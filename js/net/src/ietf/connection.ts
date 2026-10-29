@@ -241,6 +241,8 @@ export class Connection implements Established {
 			// The drafts refuse overlapping SUBSCRIBE_NAMESPACEs (PREFIX_OVERLAP). A peer that
 			// declared MoQ Solicit is ours and holds both; any other may enforce it.
 			exclusive: solicit === undefined,
+			// moq-transport ends no initial set, so only MoQ Active Count says one is complete.
+			provesAbsence: activeCount,
 			auth: this.#auth,
 		});
 

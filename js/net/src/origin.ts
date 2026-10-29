@@ -243,7 +243,7 @@ class CoveringRoot {
  * @internal
  */
 export interface RequestSlot {
-	/** Open plain handles that can use a peer without discovery. */
+	/** Open plain handles that can use a peer whose discovery cannot prove them absent. */
 	blind: number;
 	answer?: broadcast.Consumer;
 	readonly handles: Set<Once<Error | null>>;
@@ -600,9 +600,9 @@ class OriginState {
 	// retain their old broadcast without participating in routing or same-epoch failover.
 	retained = new WeakSet<RequestSlot>();
 
-	// How many sessions are attached, and how many of those support broadcast discovery.
-	// What backs the public `discovery` getter.
-	sessions = new Signal({ total: 0, discovery: 0 });
+	// How many sessions are attached, how many of those support broadcast discovery, and how
+	// many of those can prove a path absent. The first two back the public `discovery` getter.
+	sessions = new Signal({ total: 0, discovery: 0, proven: 0 });
 
 	// The prefixes whose initial announcements a session is still delivering, counted. An
 	// announcement stream overlapping one has not synced yet.
@@ -659,10 +659,10 @@ class OriginState {
 		this.#unsettled.clear();
 	}
 
-	/** Whether every attached session discovers and none owes an initial set covering `path`. */
+	/** Whether every attached session proves absence and none owes an initial set covering `path`. */
 	synced(path: Path.Valid): boolean {
-		const { total, discovery } = this.sessions.peek();
-		if (total === 0 || discovery < total) return false;
+		const { total, proven } = this.sessions.peek();
+		if (total === 0 || proven < total) return false;
 		const snapshots = this.snapshots.peek();
 		for (const prefix of coveringPrefixes(path)) if (snapshots.has(prefix)) return false;
 		return true;
@@ -923,11 +923,11 @@ class OriginState {
 		}
 	}
 
-	/** Whether a plain request needs the non-discovery session's blind answer. */
+	/** Whether a plain request needs the blind answer of a session that cannot prove it absent. */
 	blind(slot: RequestSlot): boolean {
 		if (slot.blind === 0) return false;
-		const { total, discovery } = this.sessions.peek();
-		return discovery < total;
+		const { total, proven } = this.sessions.peek();
+		return proven < total;
 	}
 
 	/**
@@ -1197,7 +1197,7 @@ export class Producer implements Table {
 				});
 			},
 			accepts: (prefix) => this.#scope.overlaps(Path.join(this.#scope.root, prefix)),
-			attach: (discovery) => this.#attach(discovery),
+			attach: (discovery, provesAbsence = discovery) => this.#attach(discovery, discovery && provesAbsence),
 			snapshot: (prefix) =>
 				this.#borrowed?.closed ? () => {} : this.#hold(this.#state.addSnapshot(this.#scope.prefix(prefix))),
 			get requests() {
@@ -1426,18 +1426,19 @@ export class Producer implements Table {
 	 *
 	 * @internal
 	 */
-	#attach(discovery: boolean): Dispose {
+	#attach(discovery: boolean, proven: boolean): Dispose {
 		if (this.#borrowed?.closed) return () => {};
-		this.#sessions(1, discovery);
-		return this.#hold(() => this.#sessions(-1, discovery));
+		this.#sessions(1, discovery, proven);
+		return this.#hold(() => this.#sessions(-1, discovery, proven));
 	}
 
-	#sessions(delta: number, discovery: boolean): void {
-		this.#state.sessions.update(({ total, discovery: d }) => ({
+	#sessions(delta: number, discovery: boolean, proven: boolean): void {
+		this.#state.sessions.update(({ total, discovery: d, proven: p }) => ({
 			total: total + delta,
 			discovery: d + (discovery ? delta : 0),
+			proven: p + (proven ? delta : 0),
 		}));
-		// Losing a session without discovery can leave every pending request synced.
+		// Losing a session that cannot prove absence can leave every pending request synced.
 		this.#state.settle(Path.empty());
 	}
 
@@ -1748,7 +1749,9 @@ export class Consumer {
 	 *
 	 * The request owns discovery of its path until closed and retries route churn while
 	 * pending. It fails `Unroutable` once every session's discovery has synced without a
-	 * route for it, and can use a session without discovery instead. Once resolved it keeps
+	 * route for it. A session whose discovery cannot prove that answers it blind instead: one
+	 * without discovery, or a moq-transport peer, whose initial set has no end unless both
+	 * sides declare MoQ Active Count. Once resolved it keeps
 	 * that instance, ending when the instance stops serving. Use {@link follow} to move on
 	 * to the next one.
 	 */

@@ -14,6 +14,7 @@ import {
 import * as Epoch from "./epoch.ts";
 import { SessionCode, SessionError, StreamCode, StreamError, TooFarBehind } from "./error.ts";
 import * as Ietf from "./ietf/index.ts";
+import * as Message from "./ietf/message.ts";
 import { Parameters } from "./ietf/parameters.ts";
 import { Publisher as IetfPublisher } from "./ietf/publisher.ts";
 import { RequestOk } from "./ietf/request.ts";
@@ -2012,6 +2013,152 @@ test("integration: ietf blind handle picks up a publisher that arrives late", as
 	watched.close();
 	producer.close();
 	await serving;
+	client.abort();
+	server.abort();
+	clientOrigin.close();
+});
+
+/**
+ * Have every moq-transport peer accept SUBSCRIBE_NAMESPACE and announce nothing, the way a
+ * relay that serves by origin pull does, while still serving SUBSCRIBE. Without
+ * `activeCount` neither side declares MoQ Active Count, so nothing marks the initial set.
+ */
+function withoutAnnouncements(version: Ietf.Version, { activeCount = false } = {}) {
+	if (!activeCount) {
+		const set = Ietf.SetupOptions.prototype.setVarint;
+		spyOn(Ietf.SetupOptions.prototype, "setVarint").mockImplementation(function (
+			this: Ietf.SetupOptions,
+			id,
+			value,
+		) {
+			if (id !== Ietf.SetupOption.ActiveCount) set.call(this, id, value);
+		});
+	}
+	const counts = { answered: 0, subscribes: 0 };
+	spyOn(IetfPublisher.prototype, "runSubscribeNamespace").mockImplementation(async (_msg, stream) => {
+		const parameters = new Parameters();
+		if (activeCount) parameters.activeCount = 0;
+		await Message.write(stream.writer, RequestOk.id, new RequestOk({ parameters }), version);
+		counts.answered++;
+		await stream.reader.closed.catch(() => {});
+	});
+	const run = IetfPublisher.prototype.runSubscribe;
+	spyOn(IetfPublisher.prototype, "runSubscribe").mockImplementation(function (this: IetfPublisher, msg, stream) {
+		counts.subscribes++;
+		return run.call(this, msg, stream);
+	});
+	return counts;
+}
+
+const IETF_VERSIONS = [
+	[Ietf.ALPN.DRAFT_18, Ietf.Version.DRAFT_18],
+	[Ietf.ALPN.DRAFT_22, Ietf.Version.DRAFT_22],
+] as const;
+
+test.each(IETF_VERSIONS)(
+	"%s: a plain request subscribes through a peer that announces nothing",
+	async (alpn, version) => {
+		const counts = withoutAnnouncements(version);
+		const pair = createMockTransportPair(alpn);
+		const origin = new OriginProducer();
+		const clientOrigin = new OriginProducer();
+		const [client, server] = await Promise.all([
+			connect(url, { transport: pair.client, consume: clientOrigin }),
+			accept(pair.server, url, { publish: origin.consume() }),
+		]);
+		const producer = publish(origin, Path.from("pulled"));
+		const serving = (async () => {
+			for (;;) {
+				const req = await wireOf(producer).requested();
+				if (!req) break;
+				req.accept({ timescale: Timescale.MILLI }).writeFrame(textFrame("pulled"));
+			}
+		})();
+
+		const request = clientOrigin.request(Path.from("pulled"));
+		await until(() => counts.answered === 1);
+		await sleep(10);
+		// Accepted discovery that lists nothing proves nothing absent here.
+		expect(request.closed.peek()).toBeUndefined();
+		const active = await waitFor(request.active, (b) => b !== undefined);
+		expect(await active?.track("video").subscribe().ordered().readString()).toBe("pulled");
+		expect(counts.subscribes).toBe(1);
+
+		request.close();
+		producer.close();
+		await serving;
+		client.abort();
+		server.abort();
+		clientOrigin.close();
+	},
+);
+
+test.each(IETF_VERSIONS)("%s: a plain request ends its track with the peer's refusal", async (alpn, version) => {
+	const counts = withoutAnnouncements(version);
+	const pair = createMockTransportPair(alpn);
+	const clientOrigin = new OriginProducer();
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client, consume: clientOrigin }),
+		accept(pair.server, url, { publish: new OriginProducer().consume() }),
+	]);
+
+	const request = clientOrigin.request(Path.from("missing"));
+	await until(() => counts.answered === 1);
+	await until(() => request.active.peek() !== undefined);
+	const track = request.active.peek()?.track("video").subscribe();
+	const err = await withTimeout(Promise.resolve(track?.closed), Nano.fromMilli(Milli(1000)), "track never closed");
+	expect((err as Error).message).toContain("does_not_exist");
+	expect(counts.subscribes).toBe(1);
+
+	request.close();
+	client.abort();
+	server.abort();
+	clientOrigin.close();
+});
+
+test.each(IETF_VERSIONS)(
+	"%s: a follower never subscribes through a peer that announces nothing",
+	async (alpn, version) => {
+		const counts = withoutAnnouncements(version);
+		const pair = createMockTransportPair(alpn);
+		const origin = new OriginProducer();
+		const clientOrigin = new OriginProducer();
+		const [client, server] = await Promise.all([
+			connect(url, { transport: pair.client, consume: clientOrigin }),
+			accept(pair.server, url, { publish: origin.consume() }),
+		]);
+		const producer = publish(origin, Path.from("pulled"));
+
+		const follower = clientOrigin.follow(Path.from("pulled"));
+		await until(() => counts.answered === 1);
+		await sleep(10);
+		expect(follower.active.peek()).toBeUndefined();
+		expect(follower.closed.peek()).toBeUndefined();
+		expect(counts.subscribes).toBe(0);
+
+		follower.close();
+		producer.close();
+		client.abort();
+		server.abort();
+		clientOrigin.close();
+	},
+);
+
+test.each(IETF_VERSIONS)("%s: a counted empty initial set leaves a plain request unroutable", async (alpn, version) => {
+	const counts = withoutAnnouncements(version, { activeCount: true });
+	const pair = createMockTransportPair(alpn);
+	const clientOrigin = new OriginProducer();
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client, consume: clientOrigin }),
+		accept(pair.server, url, { publish: new OriginProducer().consume() }),
+	]);
+
+	const request = clientOrigin.request(Path.from("pulled"));
+	const err = await withTimeout(Promise.resolve(request.closed), Nano.fromMilli(Milli(1000)), "request never closed");
+	expect(err).toBeInstanceOf(StreamError);
+	expect((err as StreamError).code).toBe(StreamCode.Unroutable);
+	expect(counts).toEqual({ answered: 1, subscribes: 0 });
+
 	client.abort();
 	server.abort();
 	clientOrigin.close();

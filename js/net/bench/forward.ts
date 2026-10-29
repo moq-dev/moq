@@ -37,6 +37,7 @@ class FakeSession {
 			consume: () => new BroadcastProducer().consume(),
 			goaway: new Once(),
 			exclusive: false,
+			provesAbsence: true,
 			auth: new AuthSession({ peerGrant: { publish: new Path.Patterns(), subscribe: new Path.Patterns() } }),
 		});
 		this.closed = new Promise((resolve) => {
