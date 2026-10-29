@@ -1124,6 +1124,26 @@ mod tests {
 	use webm_iterable::{WebmWriter, WriteOptions};
 
 	#[test]
+	fn ignored_payload_does_not_accumulate_under_a_large_metadata_master() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut import = Import::new(broadcast, catalog.reserve());
+		// A 1 GiB EBML header containing a nearly 1 GiB Void. Neither declaration is
+		// a reason to retain ignored bytes while waiting for the master to finish.
+		import.decode(&[0x1a, 0x45, 0xdf, 0xa3, 0x08, 0x40, 0, 0, 0]).unwrap();
+		import.decode(&[0xec, 0x08, 0x3f, 0xff, 0xff, 0xfa]).unwrap();
+		for _ in 0..64 {
+			import.decode(&[0; 1024]).unwrap();
+			assert!(
+				import.buffer.len() <= 12,
+				"ignored bytes retained: {}",
+				import.buffer.len()
+			);
+		}
+		assert!(import.finish().is_err(), "truncated ignored payload must fail");
+	}
+
+	#[test]
 	fn completed_live_elements_do_not_accumulate_a_metadata_prefix() {
 		let mut header = Vec::new();
 		{
