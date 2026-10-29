@@ -163,7 +163,7 @@ impl std::fmt::Display for Role {
 /// lite-05+ only. The two endpoints' SETUP messages are independent: neither side
 /// blocks on the peer's before opening other streams, but a stream whose encoding
 /// depends on a negotiated capability (e.g. PROBE) must wait for it.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct Setup {
 	/// The probe capability this endpoint supports. [`ProbeLevel::None`] when absent.
 	pub probe: ProbeLevel,
@@ -200,6 +200,25 @@ pub struct Setup {
 	/// The sender's implementation, as space-separated `name/version` product tokens
 	/// (`moq-net-rs/0.3.10`). Opaque; `None` omits the parameter.
 	pub implementation: Option<String>,
+}
+
+impl std::fmt::Debug for Setup {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Setup")
+			.field("probe", &self.probe)
+			// Native transports carry the JWT in this request target.
+			.field(
+				"path",
+				&self.path.as_deref().map(|path| path.split('?').next().unwrap()),
+			)
+			.field("role", &self.role)
+			.field("cost", &self.cost)
+			.field("hop", &self.hop)
+			.field("token", &self.token)
+			.field("ietf", &self.ietf)
+			.field("implementation", &self.implementation)
+			.finish()
+	}
 }
 
 impl<'a> Message<'a> for Setup {

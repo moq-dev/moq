@@ -147,7 +147,7 @@ pub enum Denial {
 	#[error("the token is invalid: {0}")]
 	InvalidToken(String),
 	/// The token's root does not overlap the dialed path.
-	#[error("the token root `{root}` does not overlap the dialed path `{path}`")]
+	#[error("the token root {root:?} does not overlap the dialed path {path:?}")]
 	RootMismatch {
 		/// The token's root.
 		root: String,
@@ -155,7 +155,7 @@ pub enum Denial {
 		path: String,
 	},
 	/// Nothing is granted at the dialed path.
-	#[error("nothing is granted at `{path}`")]
+	#[error("nothing is granted at {path:?}")]
 	NoAccess {
 		/// The dialed path.
 		path: String,
@@ -544,7 +544,7 @@ async fn handle(State(server): State<Server>, Json(request): Json<Request>) -> R
 		// The reason rides in the body, so an operator reading the relay's log knows
 		// which rule refused without the server saying anything to the client.
 		Err(denial) => {
-			tracing::debug!(id = %request.id, path = %request.path, %denial, "refused");
+			tracing::debug!(id = ?request.id, path = ?request.path, ?denial, "refused");
 			(StatusCode::FORBIDDEN, Json(denial.body(server.policy.tier.clone()))).into_response()
 		}
 	}
@@ -568,6 +568,60 @@ mod tests {
 		let mut request = Request::new("relay-1", Transport::Quic, path);
 		request.remote = Some("203.0.113.9:4433".parse().unwrap());
 		request
+	}
+
+	#[tokio::test(start_paused = true)]
+	#[tracing_test::traced_test]
+	async fn refusal_fields_are_escaped_and_credentials_are_redacted() {
+		let secret = "credential-that-must-not-be-logged";
+		let mut facts = with_token(request("/room\nforged-record\r\x1b[31m"), secret);
+		facts.id = "id\nforged-id".into();
+		facts.token = Some(Token {
+			kind: Token::OUT_OF_BAND,
+			value: secret.as_bytes().to_vec(),
+		});
+		tracing::trace!(request = ?facts, "admission diagnostics");
+		let response = handle(State(Server::new(Policy::default()).unwrap()), Json(facts)).await;
+		assert_eq!(response.status(), StatusCode::FORBIDDEN);
+		assert!(logs_contain("refused"));
+		assert!(!logs_contain(secret));
+		let decimal = format!("{:?}", secret.as_bytes());
+		assert!(!logs_contain(&decimal[1..decimal.len() - 1]));
+		assert!(!logs_contain("\nforged-record"));
+		assert!(!logs_contain("\nforged-id"));
+
+		let (dir, key) = key_dir();
+		let root = "root\nforged-root\r\x1b[31m";
+		let jwt = sign(&key, root, &["**"], &[], None);
+		let policy = Policy {
+			keys: Some(Keys::Dir(dir.path().into())),
+			..Default::default()
+		};
+		let response = handle(
+			State(Server::new(policy).unwrap()),
+			Json(with_token(request("/elsewhere"), &jwt)),
+		)
+		.await;
+		assert_eq!(response.status(), StatusCode::FORBIDDEN);
+		assert!(logs_contain("RootMismatch"));
+		assert!(!logs_contain(&jwt));
+		assert!(!logs_contain("\nforged-root"));
+		for err in [
+			Denial::RootMismatch {
+				root: root.into(),
+				path: "path\nforged-path".into(),
+			}
+			.to_string(),
+			Denial::NoAccess {
+				root: None,
+				path: "path\nforged-path".into(),
+			}
+			.to_string(),
+			crate::Error::RootMismatch("path\nforged-path".into()).to_string(),
+			crate::Error::NoAccess("path\nforged-path".into()).to_string(),
+		] {
+			assert!(!err.contains('\n'));
+		}
 	}
 
 	#[moq_clock::test]

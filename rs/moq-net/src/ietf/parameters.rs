@@ -53,10 +53,19 @@ pub enum ParameterBytes {
 /// SETUP parameters, in the order they were set or decoded.
 ///
 /// A handful at most, so a linear scan beats hashing, and the encoding is deterministic.
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Clone)]
 pub struct Parameters {
 	vars: Vec<(ParameterVarInt, u64)>,
 	bytes: Vec<(ParameterBytes, Vec<u8>)>,
+}
+
+impl std::fmt::Debug for Parameters {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Parameters")
+			.field("vars", &self.vars)
+			.field("bytes_count", &self.bytes.len())
+			.finish()
+	}
 }
 
 impl<'a> Decode<'a, Version> for Parameters {

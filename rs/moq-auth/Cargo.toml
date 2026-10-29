@@ -47,6 +47,7 @@ moq-clock = { path = "../moq-clock", features = ["sim"] }
 moq-token = "0.7"
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+tracing-test = { workspace = true }
 wiremock = "0.6"
 
 [lints]

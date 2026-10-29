@@ -9,33 +9,26 @@ fields, so a path or root cannot forge a log record.
 
 ## Plan
 
-From the 2026-10-27 audit (AUTH-3, AUTH-4, RELAY-8), verified at
-[8d2fa6653a](https://github.com/moq-dev/moq/commit/8d2fa6653a). The audit
-called these latent; they are reached today:
+The main-branch fix is in
+[moq-dev/moq#7200](https://github.com/moq-dev/moq/pull/7200): redacting
+diagnostics on the existing credential types, opaque SETUP parameters,
+request-target queries, CONNECT requests, auth requests, and cluster peers;
+escaped refusal fields; captured trace tests for SETUP, AUTH, CONNECT, and
+refusal. All four tests reproduced leaks before the fix.
 
-- Every decoded message is logged with `trace!(?msg)`
-  (`rs/moq-net/src/lite/message.rs`, `ietf/message.rs`), and `lite::Auth`,
-  `ietf::Auth`, and `moq_auth::Token` derive `Debug` over the raw token.
-- `rs/moq-tokio/src/quic/web/connect.rs` logs the whole WebTransport CONNECT
-  request at **debug**, including every lite-06-and-older browser client's
-  `?jwt=` and all headers.
-- `rs/moq-relay/src/config.rs` traces the resolved config, and `Peer`'s
-  `Debug` (`cluster.rs`) redacts `token` but prints `url`, where
-  `--cluster-connect https://host/?jwt=` keeps it.
-- `rs/moq-auth/src/serve.rs` renders the refusal's `path` (client-chosen) and
-  verified `root` with `%`, unescaped.
+One maintainer decision remains: the original plan requested a token type
+shared by moq-net and moq-auth, which currently have independent public token
+types and no dependency on each other. Recommend keeping their public shapes
+and the manual redacting `Debug` implementations in this PR. A shared type
+would need a new common crate or a new dependency across those API layers,
+and changing their public byte fields would break callers. If a shared type
+is required, settle its owning crate and public shape before implementing it.
 
-Fix at the type, not per call site: one redacting token type with a manual
-`Debug` shared by both protocols and moq-auth, and URL `Debug`/log output that
-strips the `jwt` query (the HLS and js/net redaction commits
-[ce17f7e76a](https://github.com/moq-dev/moq/commit/ce17f7e76a) and
-[3a82ece225](https://github.com/moq-dev/moq/commit/3a82ece225) are prior
-art). Log refusal fields with `?`. A test asserts a known token never appears
-in captured output at trace level for a full SETUP, CONNECT, and refusal.
+After the main fix merges, backport the leaks present on `release` in a
+separate PR against `release`, preserving its published API, per
+`CONTRIBUTING.md`. Its SETUP token still derives `Debug`; its protocol and
+transport layouts differ from main, so port behavior rather than applying
+the patch blindly. This quest stays open until the release backport lands.
 
-Backport: `release` lays these out differently (moq-lite, web-transport
-crates); check each leak there and backport the ones present in a separate PR
-against `release` per `CONTRIBUTING.md`.
-
-Public API: `Debug` output changes only; if the shared token type is exported,
-report it. Wire: none.
+Public API: only diagnostic output changes in the current implementation.
+Wire: none.
