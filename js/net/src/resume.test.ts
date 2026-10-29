@@ -1781,6 +1781,27 @@ test("track info waits for the copy being read to say what the track is", async 
 	b.close();
 });
 
+test("a serving track verdict keeps its cause after delivering", async () => {
+	const front = new Front();
+	const source = new BroadcastProducer();
+	const track = copy(source);
+	front.serve(source.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	try {
+		track.write(0);
+		const first = await sub.recvGroup();
+		expect(first?.sequence).toBe(0);
+		first?.close();
+		const cause = new StreamError(StreamCode.FrameTooLarge);
+		track.producer.abort(cause);
+		await expect(sub.recvGroup()).rejects.toBe(cause);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		source.close();
+	}
+});
+
 test("a refusal from the copy being read is the track's answer, for its readers and fetches alike", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();

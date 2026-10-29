@@ -35,7 +35,7 @@ arrivals and duplicates, and terminal DROP behavior by supported version.
 Do not claim unimplemented behavior: identify current capabilities and link
 pending work rather than turning the guide into a release gate for every
 future extension. In particular, End+Start cannot invalidate arbitrary old
-IETF caches, and FILL_TIMEOUT is a waiting approximation, not exact age control.
+IETF caches, and our moq-transport publishers ignore FILL_TIMEOUT.
 
 Use a small decision table and one lazy-job lifecycle example. Verify examples
 against the implemented APIs and link protocol-specific wire details instead

@@ -73,7 +73,7 @@ async function prepare(config: Transport): Promise<string> {
 		websocket: { enabled: false },
 	});
 	if (connection.transport !== "webtransport") throw new Error(`consumer negotiated ${connection.transport}`);
-	const request = origin.request(Moq.Path.from(config.path), { announced: true });
+	const request = origin.follow(Moq.Path.from(config.path));
 	cleanup.push(() => {
 		request.close();
 		connection.abort();

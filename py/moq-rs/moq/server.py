@@ -8,8 +8,7 @@ from collections.abc import Sequence
 from moq_ffi import MoqQuicConfig, MoqRequest, MoqServer, MoqServerConfig, MoqServerTls, MoqTransport
 
 from ._records import _implementation, _strs
-from .origin import OriginProducer
-from .publish import BroadcastProducer
+from .origin import OriginProducer, Publication
 from .session import Session
 
 # The network transport carrying an incoming session.
@@ -95,8 +94,8 @@ class Server:
     In simple mode (no origin provided), creates an internal origin automatically::
 
         async with Server("127.0.0.1:4443", tls_generate=["localhost"]) as server:
-            broadcast = server.create_broadcast("live")
-            broadcast.announce()  # unannounced broadcasts are invisible
+            publication = server.create_broadcast("live")
+            publication.announce()  # unannounced broadcasts are invisible
             await server.serve()
 
     Or hand-roll the accept loop if you need per-request control::
@@ -206,7 +205,7 @@ class Server:
             raise StopAsyncIteration
         return Request(request)
 
-    def create_broadcast(self, path: str) -> BroadcastProducer:
+    def create_broadcast(self, path: str) -> Publication:
         """Create a live broadcast at ``path``, served to incoming sessions.
 
         See :meth:`OriginProducer.create_broadcast`.

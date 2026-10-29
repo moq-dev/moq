@@ -6,7 +6,7 @@ This is a polyglot monorepo with Rust (server/native) and TypeScript (browser) i
 Start with [doc/setup/repository.md](doc/setup/repository.md) to locate a feature, its examples, and its tests.
 Use this checkout's source and docs for repository work; published API references may describe a different version.
 
-- Read `CONTRIBUTING.md` when dealing with PRs.
+- Read `CONTRIBUTING.md` when dealing with PRs, and `REVIEW.md` when reviewing one or triaging review findings.
 - Read `PROMPTING.md` before instructing other agents via context, memory, plans, or reviews.
 - Before editing, read each `AGENTS.md` along the path from the root to the file, including package-level instructions. Use `rg --files -g AGENTS.md` to find them; root-level sessions may not load nested instructions automatically.
 - `doc/` is the feature entry point, not a reference. Update it only when a change alters what a user would do; see `doc/AGENTS.md`.

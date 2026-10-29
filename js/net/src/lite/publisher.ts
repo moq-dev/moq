@@ -1,4 +1,4 @@
-import { Instant, Milli, Nano, now, sleep } from "@moq/clock";
+import { Instant, Milli, Nano, now, sleep, yieldNow } from "@moq/clock";
 import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Gate } from "../auth_gate.ts";
@@ -21,7 +21,6 @@ import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { nextChange } from "../util/change.ts";
 import { untilGivenUp } from "../util/given_up.ts";
-import { nextTask } from "../util/yield.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
 import { AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
@@ -1270,10 +1269,11 @@ export class Publisher {
 							moveCursor();
 							// A microtask is too short: decoding one framed update crosses several
 							// awaits, each of which can requeue behind the serving continuation. A
-							// task boundary lets the decoder finish whatever the transport already
-							// delivered before the next group pop. Updates are rare, so groups do
-							// not pay this scheduling cost on the normal path.
-							await nextTask();
+							// task boundary usually lets the decoder finish whatever the transport
+							// already delivered before the next group pop. It orders nothing: an update
+							// decoded later applies from the pop after it. Updates are rare, so groups
+							// do not pay this scheduling cost on the normal path.
+							await yieldNow();
 							continue;
 						}
 					}
@@ -1615,7 +1615,7 @@ export class Publisher {
 	/**
 	 * Forwards a track's datagrams best-effort over QUIC datagrams (lite-05 §6.4), parallel to
 	 * its groups. Each datagram is dropped (there is no group fallback) if the encoded body
-	 * doesn't fit the transport's datagram limit or the send fails. Returns once the track
+	 * doesn't fit the wire and transport datagram limits or the send fails. Returns once the track
 	 * finishes; a failure never tears down the subscription.
 	 *
 	 * @internal
@@ -1632,7 +1632,7 @@ export class Publisher {
 		const { sub, stamp, served, bounds } = options;
 		const writer = this.#datagramWriter;
 		if (!writer) return; // Only reached with a writer (see the #datagramWriter gate).
-		const maxSize = DatagramStream.maxDatagramSize(this.#quic);
+		const maxSize = Math.min(DatagramMessage.MAX_SIZE, DatagramStream.maxDatagramSize(this.#quic));
 
 		try {
 			for (;;) {
