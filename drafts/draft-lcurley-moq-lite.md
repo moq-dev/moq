@@ -1289,6 +1289,7 @@ A value of 0 is a PROTOCOL_VIOLATION, since a subscription that asks for nothing
 **Range**:
 A span of the Track to deliver, from its `Start` up to its `End`.
 The subscription is the union of its Ranges: the publisher delivers each Group inside any of them once, in `Group Order` across all of them, and accounts with SUBSCRIBE_DROP for every Group it will not deliver.
+Each Range implicitly takes the next Range ID on the stream, starting at 0, which a [SUBSCRIBE_UPDATE](#subscribe-update) uses to retire it.
 
 **Anchor Type**:
 Which fields follow, and what the Anchor names:
@@ -1312,10 +1313,11 @@ An Absolute `Start` past frame 0 delivers its group from that frame; a start res
 A subscriber MAY name any start frame, as described in [Positions](#positions).
 An Absolute `End` past frame 0 delivers its group up to that frame.
 
-## SUBSCRIBE_UPDATE
+## SUBSCRIBE_UPDATE {#subscribe-update}
 A subscriber can modify a subscription with a SUBSCRIBE_UPDATE message.
 A subscriber MAY send multiple SUBSCRIBE_UPDATE messages to update the subscription.
-Its Ranges replace the previous ones, growing or shrinking the subscription.
+Every field but the Ranges restates the subscription, and the latest one applies.
+The Ranges are an edit: the update retires the live Ranges it names by Range ID, then adds its own, each taking the next Range ID.
 Lowering a `Start` covers the groups below the old one that the publisher still holds, not only those that arrive later; a group already sent is not sent again.
 
 ~~~
@@ -1324,6 +1326,8 @@ SUBSCRIBE_UPDATE Message {
   Subscriber Priority (8)
   Group Order (8)
   Subscriber Max Age (i)
+  Remove Count (i)
+  Range ID (i) ...
   Range Count (i)
   Range (..) ...
   Wanted Group (i)
@@ -1333,6 +1337,14 @@ SUBSCRIBE_UPDATE Message {
 See [SUBSCRIBE](#subscribe) for information about each field.
 Moving a `Start` forward within a group that is already being delivered does not retract frames the publisher has already sent; it only bounds what the publisher sends from here on.
 
+**Remove Count** and **Range ID**:
+The live Ranges to retire.
+A Range ID that was never assigned, or is already retired, including earlier in the same list, is a PROTOCOL_VIOLATION.
+
+**Range Count** and **Range**:
+The Ranges to add, which may be none.
+The live Ranges after the edit MUST NOT be empty, and MUST fit in one SUBSCRIBE: once encoded they take at most 65,535 bytes.
+A receiver closes the session with a PROTOCOL_VIOLATION otherwise.
 
 **Wanted Group**:
 The newest group the subscriber's live-edge joins want, encoded as the sequence plus one; `0` means none.
@@ -1865,6 +1877,7 @@ The `Message Length` describes the payload size on the wire.
 
 - SUBSCRIBE_OK `Group` names where delivery starts when the subscription resolves, which need not be the first group sent. It is not a new floor. A subscriber does not wait for a group between the requested floor and it, but a publisher still delivers one that arrives later within Subscriber Max Age.
 - Replaced `Group Start`, `Group End`, `Frame Start`, and `Frame End` in SUBSCRIBE and SUBSCRIBE_UPDATE with a non-empty list of Ranges. Each end is an Anchor: none, an absolute Position (exclusive as an end), a count of Groups back from the latest, or a presentation time.
+- Each Range takes an implicit Range ID, and SUBSCRIBE_UPDATE edits the live Ranges instead of restating them: `Remove Count` Range IDs to retire, then the Ranges to add. The live Ranges must stay non-empty and fit in one SUBSCRIBE.
 - A subscription's range bounds datagrams like groups, and FETCH never returns a datagram.
 - A SUBSCRIBE_UPDATE that lowers a `Start` covers the groups below the old start that the publisher still holds, not only those that arrive later. A group already sent is not sent again.
 - A publisher SHOULD order a datagram among the subscription's streams as if it were its Group's stream, ahead of that stream when both exist. It SHOULD drop a datagram rather than block when the transport has no room for it, where it previously sent one only if the congestion controller could transmit it immediately.

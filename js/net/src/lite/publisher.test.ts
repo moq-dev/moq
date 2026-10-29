@@ -25,6 +25,7 @@ import { Publisher } from "./publisher.ts";
 import {
 	decodeSubscribeResponse,
 	decodeSubscribeResponseMaybe,
+	LiveRanges,
 	Subscribe,
 	type SubscribeEnd,
 	SubscribeUpdate,
@@ -42,8 +43,10 @@ function publish(origin: OriginProducer, path: Path.Valid) {
 // Scheduling tests intentionally stall groups, so keep latency enforcement out of their scope.
 const TEST_MAX_DELAY_MS = Milli(30_000);
 
+// Carries the live ranges a decoded SUBSCRIBE would, so the publisher resolves lite-07 updates.
 function replaySubscribe(props: ConstructorParameters<typeof Subscribe>[0]) {
-	return new Subscribe({ ...props, maxDelay: TEST_MAX_DELAY_MS });
+	const live = LiveRanges.sent({ ...props, startFrame: props.startFrame ?? 0 });
+	return new Subscribe({ ...props, maxDelay: TEST_MAX_DELAY_MS, live });
 }
 
 function replayUpdate(props: ConstructorParameters<typeof SubscribeUpdate>[0]) {
@@ -287,7 +290,7 @@ async function groupSendOrders(options: {
 	try {
 		for (const [index, sequence] of sequences.entries()) {
 			if (index === 1 && update !== undefined) {
-				await replayUpdate({ priority: update }).encode(client.writer, version);
+				await replayUpdate({ priority: update }).encode(client.writer, version, LiveRanges.sent(msg));
 				// Wait for the publisher to apply it, rather than assuming it beat the next group.
 				while (track.subscription.peek()?.priority !== update) await track.subscription.changed();
 			}
@@ -752,6 +755,8 @@ async function servedSubscription(
 
 	return {
 		client,
+		// The ranges the publisher holds, which the client's lite-07 updates edit.
+		live: LiveRanges.sent(msg),
 		datagrams: pair.client.datagrams.readable,
 		track,
 		serving,
@@ -938,7 +943,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 		try {
 			sub.serve(5);
 			expect(await sub.servedSequence()).toBe(5);
-			await replayUpdate({ priority: 0, startGroup: 2 }).encode(sub.client.writer, version);
+			await replayUpdate({ priority: 0, startGroup: 2 }).encode(sub.client.writer, version, sub.live);
 			await flush();
 			sub.track.finish();
 			sub.track.close();
@@ -1009,6 +1014,7 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])("lite %s: datagrams honor group 
 		await replayUpdate({ priority: 0, startGroup: 0, startFrame: 0, endGroup: 4, endFrame: 0 }).encode(
 			sub.client.writer,
 			version,
+			sub.live,
 		);
 		await applied(5);
 		send([2, 3, 5, 4]);
@@ -1016,6 +1022,7 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])("lite %s: datagrams honor group 
 		await replayUpdate({ priority: 0, startGroup: 6, startFrame: 1, endGroup: 7, endFrame: 0 }).encode(
 			sub.client.writer,
 			version,
+			sub.live,
 		);
 		await applied(8);
 		send([6, 8, 7]);

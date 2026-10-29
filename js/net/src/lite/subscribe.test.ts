@@ -8,6 +8,7 @@ import {
 	encodeSubscribeResponse,
 	exclusiveGroupEnd,
 	inclusiveGroupEnd,
+	LiveRanges,
 	Subscribe,
 	SubscribeDrop,
 	SubscribeEnd,
@@ -57,17 +58,27 @@ async function encodeSubscribe(msg: Subscribe): Promise<void> {
 
 async function encodeMessage(
 	version: Version,
-	message: { encode(writer: Writer, version: Version): Promise<void> },
+	message: { encode(writer: Writer, version: Version, live?: LiveRanges): Promise<void> },
 ): Promise<Uint8Array> {
 	const written: Uint8Array[] = [];
 	const writer = new Writer(
 		new WritableStream<Uint8Array>({ write: (chunk) => void written.push(new Uint8Array(chunk)) }),
 		version,
 	);
-	await message.encode(writer, version);
+	await message.encode(writer, version, oldest());
 	writer.close();
 	await writer.closed;
 	return concat(written);
+}
+
+/** The live ranges of a SUBSCRIBE that asked for everything: one range, Range ID 0. */
+function oldest(): LiveRanges {
+	return LiveRanges.sent({ startFrame: 0 });
+}
+
+/** Decode a SUBSCRIBE_UPDATE that edits {@link oldest}. */
+function decodeUpdate(bytes: Uint8Array, version: Version): Promise<SubscribeUpdate> {
+	return SubscribeUpdate.decode(new Reader(undefined, bytes, version), version, oldest());
 }
 
 test("SubscribeOk round-trips priority/groups on draft-04", async () => {
@@ -195,13 +206,11 @@ test("lite-07 carries the span as its only range, exclusive at the end", async (
 test("a lite-07 list decodes as the span covering it", async () => {
 	// Priority, order, and max delay as SubscribeUpdate writes them, then the ranges and
 	// an absent wanted group.
+	// Each retires the SUBSCRIBE's one range (Range ID 0) before adding its own.
 	const head = (await encodeMessage(Version.DRAFT_07, new SubscribeUpdate({ priority: 0 }))).slice(1, 4);
 	const update = (ranges: number[]) => {
-		const body = [...head, ...ranges, 0];
-		return SubscribeUpdate.decode(
-			new Reader(undefined, new Uint8Array([body.length, ...body]), Version.DRAFT_07),
-			Version.DRAFT_07,
-		);
+		const body = [...head, 1, 0, ...ranges, 0];
+		return decodeUpdate(new Uint8Array([body.length, ...body]), Version.DRAFT_07);
 	};
 
 	// Groups 2 through 4 and 7 through frame 1 of group 9.
@@ -330,14 +339,12 @@ test.each(["ascending", "descending"] as const)("lite-07 round-trips a %s group 
 	// The length prefix, the priority byte, then the order.
 	expect(update[1]).toBe(3 + 128);
 	expect(update[2]).toBe(order === "ascending" ? 1 : 0);
-	const decoded = await SubscribeUpdate.decode(new Reader(undefined, update, version), version);
+	const decoded = await decodeUpdate(update, version);
 	expect(decoded.order).toBe(order);
 
 	const invalid = new Uint8Array(update);
 	invalid[2] = 2;
-	await expect(SubscribeUpdate.decode(new Reader(undefined, invalid, version), version)).rejects.toThrow(
-		ProtocolViolation,
-	);
+	await expect(decodeUpdate(invalid, version)).rejects.toThrow(ProtocolViolation);
 });
 
 // No earlier wire has `Group Order`, so an ascending subscription falls back to descending,
@@ -364,7 +371,7 @@ test("wanted group survives lite-07 and disappears on legacy wires", async () =>
 		for (const wantedGroup of [undefined, 0, 3, Number.MAX_SAFE_INTEGER]) {
 			const update = new SubscribeUpdate({ priority: 7, wantedGroup });
 			const encoded = await encodeMessage(version, update);
-			const decoded = await SubscribeUpdate.decode(new Reader(undefined, encoded, version), version);
+			const decoded = await decodeUpdate(encoded, version);
 			expect(decoded.wantedGroup).toBe(version === Version.DRAFT_07 ? wantedGroup : undefined);
 		}
 	}
@@ -394,3 +401,47 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 		}
 	});
 }
+
+test("a lite-07 update sends only a changed span, and the publisher resolves the same one", async () => {
+	const version = Version.DRAFT_07;
+	const sent = oldest();
+	const live = oldest();
+	const send = async (span: { startGroup?: number; endGroup?: number }) => {
+		const update = new SubscribeUpdate({ priority: 0, ...span });
+		const written: Uint8Array[] = [];
+		const writer = new Writer(
+			new WritableStream<Uint8Array>({ write: (chunk) => void written.push(new Uint8Array(chunk)) }),
+			version,
+		);
+		await update.encode(writer, version, sent);
+		writer.close();
+		await writer.closed;
+		const bytes = concat(written);
+		const got = await SubscribeUpdate.decode(new Reader(undefined, bytes, version), version, live);
+		return { bytes, got };
+	};
+
+	// Unchanged: no ids retired and no ranges added.
+	const same = await send({});
+	expect([...same.bytes.slice(4, 6)]).toEqual([0, 0]);
+	// Changed: Range ID 0 retires and the new span takes Range ID 1.
+	const moved = await send({ startGroup: 4, endGroup: 9 });
+	expect([moved.got.startGroup, moved.got.endGroup]).toEqual([4, 9]);
+	expect([...moved.bytes.slice(4, 7)]).toEqual([1, 0, 1]);
+	const back = await send({ startGroup: 4, endGroup: 9 });
+	expect([...back.bytes.slice(4, 6)]).toEqual([0, 0]);
+	const next = await send({});
+	expect([...next.bytes.slice(4, 6)]).toEqual([1, 1]);
+
+	// Only a live Range ID can be retired, and the live set never empties.
+	const fresh = () => oldest();
+	const body = (remove: number[], add: number[]) => {
+		const bytes = [128, 0, 0, remove.length, ...remove, ...add, 0];
+		return new Uint8Array([bytes.length, ...bytes]);
+	};
+	const decode = (bytes: Uint8Array) =>
+		SubscribeUpdate.decode(new Reader(undefined, bytes, version), version, fresh());
+	await expect(decode(body([1], [1, 0, 0]))).rejects.toThrow(ProtocolViolation);
+	await expect(decode(body([0, 0], [1, 0, 0]))).rejects.toThrow(ProtocolViolation);
+	await expect(decode(body([0], [0]))).rejects.toThrow(ProtocolViolation);
+});
