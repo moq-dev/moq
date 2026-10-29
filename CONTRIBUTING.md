@@ -55,7 +55,7 @@ Never bypass the queue with `--admin`, with one exception: the maintainer's pre-
 
 # AI
 
-AI-assisted issues, pull requests, reviews, and comments are welcome.
+AI-assisted issues, pull requests, reviews, and comments are encouraged.
 Especially bug reports; dive deep into the root issue before proposing a solution.
 
 GitHub issues are the public front door for brainstorming.

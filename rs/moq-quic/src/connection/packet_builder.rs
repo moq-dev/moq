@@ -46,7 +46,7 @@ impl PacketBuilder {
 		ack_eliciting: bool,
 		conn: &mut Connection,
 	) -> Option<Self> {
-		let version = conn.version;
+		let version = conn.version.wire();
 		// Initiate key update if we're approaching the confidentiality limit
 		let sent_with_keys = conn.spaces[space_id].sent_with_keys;
 		if space_id == SpaceId::Data {
@@ -69,7 +69,7 @@ impl PacketBuilder {
 					Close::Connection(frame::ConnectionClose {
 						error_code: TransportErrorCode::AEAD_LIMIT_REACHED,
 						frame_type: None,
-						reason: Bytes::from_static(b"confidentiality limit reached"),
+						reason: "confidentiality limit reached".to_string(),
 					}),
 				)
 			} else if sent_with_keys > confidentiality_limit {
@@ -261,8 +261,7 @@ impl PacketBuilder {
 			.finish(packet_buf, header_crypto, Some((self.exact_number, packet_crypto)));
 
 		let len = buffer.len() - encode_start;
-		conn.config
-			.qlog_sink
+		conn.qlog
 			.emit_packet_sent(self.exact_number, len, self.space, now, conn.orig_rem_cid);
 
 		(len, pad)

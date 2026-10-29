@@ -104,20 +104,16 @@ describe("unsupported catalog", () => {
 		}
 	});
 
-	for (const format of ["hang", "hangz"] as const) {
-		it(`reports a fetched ${format} catalog needing a newer player and clears stale media`, async () => {
+	for (const compress of [false, true]) {
+		it(`reports a fetched catalog (compress=${compress}) needing a newer player and clears stale media`, async () => {
 			const logged = spyOn(console, "error").mockImplementation(() => {});
 			const owner = new Origin.Producer();
 			const name = Path.from("room/live.hang");
 			const published = publish(owner, name);
-			const track = published.createTrack(format === "hang" ? Catalog.TRACK : Catalog.TRACK_COMPRESSED);
-			const producer = new Json.Snapshot.Producer<Catalog.Root>({
-				track,
-				deltas: false,
-				compression: format === "hangz" ? "deflate" : "none",
-			});
+			const track = published.createTrack(Catalog.TRACK, { compress });
+			const producer = new Json.Snapshot.Producer<Catalog.Root>({ track, deltas: false });
 			const enabled = new Signal(true);
-			const source = new Broadcast({ origin: owner, name, catalogFormat: format, enabled });
+			const source = new Broadcast({ origin: owner, name, catalogFormat: "hang", enabled });
 			try {
 				const ready = source.out.catalog.changed();
 				producer.update({ value: {} });
@@ -535,7 +531,7 @@ it("a blind broadcast does not follow another publisher instance", async () => {
 });
 
 describe("restart", () => {
-	it("follows a republish through its announced request", async () => {
+	it("follows a republish through its follower", async () => {
 		const announced = true;
 		const owner = new Origin.Producer();
 		const name = Path.from("live.hang");
@@ -580,9 +576,9 @@ describe("restart", () => {
 
 		// Count every request the player opens and closes.
 		let open = 0;
-		const request = owner.request.bind(owner);
-		owner.request = (path, options) => {
-			const opened = request(path, options);
+		const follow = owner.follow.bind(owner);
+		owner.follow = (path, options) => {
+			const opened = follow(path, options);
 			open += 1;
 			const close = opened.close.bind(opened);
 			let closed = false;

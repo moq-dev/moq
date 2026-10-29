@@ -2260,6 +2260,77 @@ mod test {
 		}
 	}
 
+	/// A short-budget reader sharing the replacement copy never settles a refused group for
+	/// an hour-budget one, whichever recovers first: each reader subscribes to the new route
+	/// before judging, so the copy's combined budget always covers its own. Nor does the
+	/// hour-budget reader keep the short one waiting past its own budget.
+	#[moq_clock::test]
+	async fn a_refused_group_waits_for_its_own_readers_grace() {
+		let waiter = kio::Waiter::noop();
+		let short = Duration::from_millis(100);
+		let hour = Duration::from_secs(3600);
+		for short_first in [true, false] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut quick = subscribe(&logical, short);
+			let mut patient = subscribe(&logical, hour);
+			let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+			open.write_frame(ts(0), b"first".as_ref()).unwrap();
+			let mut quick_held = recv(&mut quick);
+			let mut patient_held = recv(&mut patient);
+			assert_eq!(read(&mut quick_held), Some(b"first".to_vec()));
+			assert_eq!(read(&mut patient_held), Some(b"first".to_vec()));
+
+			let b = copy();
+			let dynamic = b.requests();
+			let mut newer = b.create_group(group::Info { sequence: 1 }).unwrap();
+			newer.write_frame(ts(1), b"newer".as_ref()).unwrap();
+			newer.finish().unwrap();
+			routes.serve(b.consume());
+			open.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+				.unwrap();
+			a.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+				.unwrap();
+			let mut held = [&mut quick_held, &mut patient_held];
+			if !short_first {
+				held.reverse();
+			}
+			for group in held {
+				assert!(group.poll_read_frame(&waiter).is_pending());
+			}
+			let mut refused = 0;
+			while let Poll::Ready(request) = dynamic.poll_requested_fill_group(&waiter) {
+				request.unwrap().reject(Error::NotFound);
+				refused += 1;
+			}
+			assert!(refused > 0, "short_first={short_first}: the recovery fetch arrives");
+
+			moq_clock::sleep(short).await;
+			let res = quick_held.poll_read_frame(&waiter);
+			assert!(
+				matches!(res, Poll::Ready(Err(Error::Old | Error::NotFound))),
+				"short_first={short_first}: {res:?}"
+			);
+			assert!(
+				patient_held.poll_read_frame(&waiter).is_pending(),
+				"short_first={short_first}: still within the hour"
+			);
+			drop(quick_held);
+			drop(quick);
+			let mut late = b.create_group(group::Info { sequence: 0 }).unwrap();
+			late.write_frame(ts(0), b"first".as_ref()).unwrap();
+			late.write_frame(ts(1), b"continued".as_ref()).unwrap();
+			late.finish().unwrap();
+			assert_eq!(
+				read(&mut patient_held),
+				Some(b"continued".to_vec()),
+				"short_first={short_first}"
+			);
+		}
+	}
+
 	#[test]
 	fn a_route_preserves_a_mid_group_end() {
 		let routes = Producer::new();
@@ -3929,6 +4000,57 @@ mod test {
 				.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
 				.unwrap();
 			assert_eq!(read(&mut reading), Some(b"b".to_vec()));
+			assert_eq!(read(&mut reading), None);
+		}
+	}
+
+	/// A group handed out from a replaced copy, then moved to the serving copy once the
+	/// replaced route gave it up, reads on to its last frame after that copy is let go,
+	/// in either read order.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_moved_group_outlives_the_replaced_copy_it_was_handed_out_from() {
+		for ordered in [false, true] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&logical, HOUR);
+			let b = copy();
+			let dynamic = b.requests();
+			routes.serve(b.consume());
+
+			// The serving route has nothing yet, so group 8 comes from the replaced one.
+			let mut open = a.create_group(group::Info { sequence: 8 }).unwrap();
+			open.write_frame(ts(8), b"a".as_ref()).unwrap();
+			let res = match ordered {
+				true => sub.poll_next_group(&kio::Waiter::noop()),
+				false => sub.poll_recv_group(&kio::Waiter::noop()),
+			};
+			let Poll::Ready(Ok(Some(mut reading))) = res else {
+				panic!("expected group 8");
+			};
+			assert_eq!(reading.sequence, 8);
+			assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+
+			// The replaced route gives it up, so the rest is fetched from the serving route.
+			open.abort(Error::Stream(StreamError::DeliveryTimeout)).unwrap();
+			assert!(reading.read_frame().now_or_never().is_none());
+			let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
+			assert_eq!((request.sequence(), request.frame_start()), (8, 1));
+			let mut rest = request.accept(None).unwrap();
+			assert!(reading.read_frame().now_or_never().is_none());
+
+			// The serving copy's first group bounds the replaced one, which is let go.
+			write(&b, 9);
+			assert_eq!(drain(&mut sub, ordered), [9]);
+			assert_eq!(copies(&routes), 1, "ordered={ordered}");
+
+			rest.write_frame(ts(9), b"b".as_ref()).unwrap();
+			rest.write_frame(ts(10), b"c".as_ref()).unwrap();
+			rest.finish().unwrap();
+			assert_eq!(read(&mut reading), Some(b"b".to_vec()), "ordered={ordered}");
+			assert_eq!(read(&mut reading), Some(b"c".to_vec()));
 			assert_eq!(read(&mut reading), None);
 		}
 	}

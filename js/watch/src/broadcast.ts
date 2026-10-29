@@ -88,12 +88,10 @@ function filterCatalog(catalog: Catalog.Root, usable: Usable): Catalog.Root {
 }
 
 /**
- * Watch supports the on-the-wire catalog formats from `@moq/hang`, plus "hangz" (the
- * DEFLATE-compressed `catalog.json.z` track) and a "manual" mode where the user supplies the
- * catalog directly without fetching. "hangz" is opt-in only: it shares the `.hang` broadcast suffix
- * and is never auto-detected, so set it explicitly via `catalogFormat`.
+ * Watch supports the on-the-wire catalog formats from `@moq/hang`, plus a "manual" mode where the
+ * user supplies the catalog directly without fetching.
  */
-export const CATALOG_FORMATS = [...Catalog.FORMATS, "hangz", "manual"] as const;
+export const CATALOG_FORMATS = [...Catalog.FORMATS, "manual"] as const;
 /** A catalog format the watcher can read; see {@link CATALOG_FORMATS}. */
 export type CatalogFormat = (typeof CATALOG_FORMATS)[number];
 
@@ -119,8 +117,7 @@ export type BroadcastInput = {
 	// Which catalog format to use. When `undefined` (the default), the format is
 	// auto-detected from the broadcast name extension (`.hang`, `.msf`), falling
 	// back to `"hang"` if the name has no recognized extension. Set to a
-	// specific value to override auto-detection. `"hangz"` (the compressed
-	// `catalog.json.z` track) is opt-in only and never auto-detected.
+	// specific value to override auto-detection.
 	catalogFormat: Getter<CatalogFormat | undefined>;
 
 	// The manual-mode catalog source. Used directly when catalogFormat is "manual";
@@ -255,7 +252,7 @@ export class Broadcast {
 		let entry = this.#references.get(path);
 		if (!entry || entry.origin !== origin || entry.announced !== announced) {
 			entry?.request.close();
-			entry = { origin, announced, request: origin.request(path, { announced }), users: 0 };
+			entry = { origin, announced, request: announced ? origin.follow(path) : origin.request(path), users: 0 };
 			this.#references.set(path, entry);
 		}
 
@@ -286,7 +283,7 @@ export class Broadcast {
 
 		let request: Moq.Origin.Requesting;
 		try {
-			request = origin.request(name, { announced });
+			request = announced ? origin.follow(name) : origin.request(name);
 		} catch (err) {
 			effect.set(this.#out.error, err instanceof Error ? err : new Error(String(err)), undefined);
 			return;
@@ -301,7 +298,7 @@ export class Broadcast {
 		effect.run((nested) => {
 			const closed = nested.get(request.closed);
 			if (!closed) return;
-			// An announced request outlives its instances, so only a refusal ends it. A blind one
+			// A follower outlives its instances, so only a refusal ends it. A plain request
 			// ends with its accepted instance, which reads as offline rather than an error.
 			const offline =
 				!announced && resolved && closed instanceof NetError.Stream && closed.code === StreamCode.Unroutable;
@@ -356,19 +353,15 @@ export class Broadcast {
 
 		this.#out.status.set("loading");
 
-		const trackName = format === "hang" ? Catalog.TRACK : format === "hangz" ? Catalog.TRACK_COMPRESSED : "catalog";
+		const trackName = format === "hang" ? Catalog.TRACK : "catalog";
 		const track = broadcast.track(trackName).subscribe({ priority: Catalog.PRIORITY.catalog });
 		effect.cleanup(() => track.close());
 
-		// The hang catalog is reconstructed from snapshots (and future deltas) via @moq/json, with
-		// "hangz" decompressing the `.z` track; MSF stays on its own one-blob-per-group fetch.
+		// The hang catalog is reconstructed from snapshots (and future deltas) via @moq/json, which reads
+		// it compressed or not; MSF stays on its own one-blob-per-group fetch.
 		let fetchNext: () => Promise<Catalog.Root | undefined>;
-		if (format === "hang" || format === "hangz") {
-			const consumer = new Json.Snapshot.Consumer<Catalog.Root>({
-				track,
-				schema: Catalog.RootSchema,
-				compression: format === "hangz" ? "deflate" : "none",
-			});
+		if (format === "hang") {
+			const consumer = new Json.Snapshot.Consumer<Catalog.Root>({ track, schema: Catalog.RootSchema });
 			fetchNext = async () => (await consumer.latest())?.value;
 		} else {
 			const ordered = track.ordered();
