@@ -557,7 +557,7 @@ async fn the_same_instance_within_the_follow_continues() {
 	}
 	export.output_past(0).await;
 	assert!(split < LONG.len(), "the capture has a tail after the export joined");
-	let old = relay.origin.request_broadcast("demo", None).await.unwrap();
+	let old = relay.origin.request("demo", None).await.unwrap();
 	assert_eq!(old.info().epoch.as_ref(), Some(&epoch));
 	let clock = catalog.snapshot().clock;
 	connection.abort(moq_net::Error::Cancel);
@@ -567,7 +567,7 @@ async fn the_same_instance_within_the_follow_continues() {
 		.expect("the relay observes the lost publication");
 	let mark = output.lock().unwrap().len().next_multiple_of(188);
 	let connection = client.connect(url).established().await.unwrap();
-	let back = tokio::time::timeout(TIMEOUT, relay.origin.routed_broadcast("demo"))
+	let back = tokio::time::timeout(TIMEOUT, relay.origin.follow("demo", None).unwrap().available())
 		.await
 		.expect("the relay observes the returning publication")
 		.unwrap();
@@ -1042,7 +1042,7 @@ async fn redundant_failover(bufferbloat: bool) {
 }
 
 /// The epoch of the next route announced for the path.
-async fn next_epoch(announced: &mut moq_net::announce::Follow) -> moq_net::Epoch {
+async fn next_epoch(announced: &mut moq_net::announce::Consumer) -> moq_net::Epoch {
 	tokio::time::timeout(TIMEOUT, async {
 		loop {
 			match announced.next().await.expect("the relay stays up") {
@@ -1063,7 +1063,8 @@ async fn next_epoch(announced: &mut moq_net::announce::Follow) -> moq_net::Epoch
 #[ignore = "real-time process test: just rs cli-export"]
 async fn a_passthrough_export_ends_with_its_redundant_importer() {
 	let relay = relay().await;
-	let mut announced = relay.origin.follow("demo").unwrap();
+	let demo = moq_net::Patterns::from(moq_net::Pattern::literal("demo").unwrap());
+	let mut announced = relay.origin.scope("", &demo).unwrap().announced();
 	let (feed, feeding) = redundant_feed();
 	let mut first = redundant_import(&relay, &feed, &["--passthrough"]);
 	let incumbent = next_epoch(&mut announced).await;

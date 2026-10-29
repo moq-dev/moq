@@ -76,11 +76,7 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 	let downstream = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
-		.await
-		.expect("announce timeout")
-		.expect("routed");
-	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
+	let remote = moq_clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");

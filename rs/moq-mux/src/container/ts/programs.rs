@@ -1222,7 +1222,7 @@ mod test {
 		programs.finish().unwrap();
 		assert_eq!(programs.programs.len(), 1, "only program 50 has a PMT");
 
-		let consumer = origin.consume().request_broadcast("event/50.hang", None).await.unwrap();
+		let consumer = origin.consume().request("event/50.hang", None).await.unwrap();
 		let catalog = hang::catalog::Catalog::<()>::subscribe(&consumer)
 			.await
 			.unwrap()
@@ -1262,7 +1262,7 @@ mod test {
 
 	/// How many audio renditions the catalog `path` publishes lists.
 	async fn renditions(origin: &moq_net::origin::Producer, path: &str) -> usize {
-		let consumer = origin.consume().request_broadcast(path, None).await.unwrap();
+		let consumer = origin.consume().request(path, None).await.unwrap();
 		let catalog = hang::catalog::Catalog::<()>::subscribe(&consumer)
 			.await
 			.unwrap()
@@ -1725,7 +1725,7 @@ mod test {
 		let after = moq_clock::wall();
 
 		for (path, fills) in [("event/1.hang", [0xAA, 0xBB]), ("event/2.hang", [0xCC, 0xDD])] {
-			let consumer = origin.consume().request_broadcast(path, None).await.unwrap();
+			let consumer = origin.consume().request(path, None).await.unwrap();
 			let catalog = hang::catalog::Catalog::<()>::subscribe(&consumer)
 				.await
 				.unwrap()

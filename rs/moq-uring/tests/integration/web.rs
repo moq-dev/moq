@@ -292,9 +292,10 @@ fn lite_session_over_webtransport() {
 
 			let bc = {
 				let consumer = sub_origin.consume();
-				consumer.routed("test").await.expect("broadcast announced");
 				consumer
-					.request_broadcast("test", None)
+					.follow("test", None)
+					.unwrap()
+					.available()
 					.await
 					.expect("broadcast resolves")
 			};

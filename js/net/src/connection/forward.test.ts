@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, jest, spyOn, test } from "bun:test";
+import { type Installed, Manual, Milli, Nano } from "@moq/clock";
 import { Once } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import { AuthSession } from "../auth_session.ts";
@@ -14,19 +15,28 @@ import { forwardAnnounced } from "./forward.ts";
 
 const LINGER = 2000;
 
+let clock: Manual;
+let installed: Installed;
+
 beforeEach(() => {
-	jest.useFakeTimers();
+	clock = new Manual();
+	installed = clock.install();
 	spyOn(console, "warn").mockImplementation(() => {});
 });
 
 afterEach(() => {
-	jest.useRealTimers();
+	installed.close();
 	jest.restoreAllMocks();
 });
 
-/** Drain the reactive microtasks; timers only move through `jest.advanceTimersByTime`. */
-async function settle() {
-	for (let i = 0; i < 64; i++) await Promise.resolve();
+/** Drain the reactive work without moving time. */
+function settle(): Promise<void> {
+	return clock.advance(Nano.zero);
+}
+
+/** Move time forward, draining the reactive work at each deadline on the way. */
+function advance(ms: number): Promise<void> {
+	return clock.advance(Nano.fromMilli(Milli(ms)));
 }
 
 /**
@@ -46,6 +56,9 @@ class FakeSession {
 
 	/** Whether each request is synced as it opens, as one with no initial set to wait for is. */
 	syncedAtOnce = false;
+
+	/** Called as the forwarder closes a request, before its stream can wind down. */
+	onClose?: () => void;
 
 	closed: Promise<Error | null>;
 	#die!: (reason: Error | null) => void;
@@ -68,6 +81,11 @@ class FakeSession {
 		this.requests.push({ scope: scope.text, hidden: options?.hidden, stream });
 		if (this.syncedAtOnce) stream.synced();
 		const consumer = stream.consume();
+		const close = consumer.close.bind(consumer);
+		consumer.close = () => {
+			this.onClose?.();
+			close();
+		};
 		// The last reader leaving cancels the request, as a session's does.
 		closeUnwanted(stream);
 		return consumer;
@@ -124,7 +142,7 @@ function record(stream: Announce.Consumer): string[] {
 	return events;
 }
 
-test("a plain request discovers an unwatched path and waits for its initial set", async () => {
+test("a request discovers an unwatched path and waits for its initial set", async () => {
 	const origin = new OriginProducer();
 	const session = new FakeSession();
 	forwardAnnounced(session.session, origin);
@@ -157,22 +175,16 @@ test("a watch opens its request, and the request closes once the linger expires"
 
 	// Unwatching keeps the request open for the linger, so a watcher rebuilt in that window reuses it.
 	watch.close();
-	await settle();
-	jest.advanceTimersByTime(LINGER - 1);
-	await settle();
+	await advance(LINGER - 1);
 	expect(session.open()).toEqual(["room/**"]);
 
 	const again = origin.announced(Path.Pattern.subtree(Path.from("room")));
-	await settle();
-	jest.advanceTimersByTime(LINGER);
-	await settle();
+	await advance(LINGER);
 	expect(session.open()).toEqual(["room/**"]);
 	expect(session.requests.length).toBe(1);
 
 	again.close();
-	await settle();
-	jest.advanceTimersByTime(LINGER);
-	await settle();
+	await advance(LINGER);
 	expect(session.open()).toEqual([]);
 	// Closing it on purpose is not a discovery failure.
 	expect(origin.discovery.peek()).toBe(true);
@@ -192,13 +204,16 @@ test("a watch arriving as the linger expires opens a fresh request", async () =>
 	await settle();
 
 	// The expiry closes the old request, and the next watch lands before its stream winds down.
-	jest.advanceTimersByTime(LINGER);
-	const again = origin.announced(Path.Pattern.subtree(Path.from("room")));
-	await settle();
+	let again: Announce.Consumer | undefined;
+	session.onClose = () => {
+		again ??= origin.announced(Path.Pattern.subtree(Path.from("room")));
+	};
+	await advance(LINGER);
+	expect(again).toBeDefined();
 	expect(session.requests.length).toBe(2);
 	expect(session.open()).toEqual(["room/**"]);
 
-	again.close();
+	again?.close();
 	session.die();
 	origin.close();
 });
@@ -209,17 +224,17 @@ test("a watch change reports only its prefix and the watches it covers", () => {
 	const unlisten = wireOf(origin).interests((prefix, wanted) => events.push(`${wanted ? "+" : "-"}${prefix}`));
 	const state = origin.consume();
 
-	const ab = state.request(Path.from("a/b"), { announced: true });
-	const ac = state.request(Path.from("a/c"), { announced: true });
-	const x = state.request(Path.from("x"), { announced: true });
+	const ab = state.follow(Path.from("a/b"));
+	const ac = state.follow(Path.from("a/c"));
+	const x = state.follow(Path.from("x"));
 	expect(events.splice(0)).toEqual(["+a/b", "+a/c", "+x"]);
 
 	// The broader watch opens first, then releases the ones it now covers; unrelated `x` is untouched.
-	const a = state.request(Path.from("a"), { announced: true });
+	const a = state.follow(Path.from("a"));
 	expect(events.splice(0)).toEqual(["+a", "-a/b", "-a/c"]);
 
 	// A watch beneath a covered prefix changes nothing.
-	const abd = state.request(Path.from("a/b/d"), { announced: true });
+	const abd = state.follow(Path.from("a/b/d"));
 	abd.close();
 	expect(events.splice(0)).toEqual([]);
 
@@ -237,12 +252,12 @@ test("a watch change reports only its prefix and the watches it covers", () => {
 	origin.close();
 });
 
-test("an announced request is a watch on its path", async () => {
+test("a follower is a watch on its path", async () => {
 	const origin = new OriginProducer();
 	const session = new FakeSession();
 	forwardAnnounced(session.session, origin);
 
-	const request = origin.request(Path.from("room/alice"), { announced: true });
+	const request = origin.follow(Path.from("room/alice"));
 	await settle();
 	expect(session.open()).toEqual(["room/alice/**"]);
 	// Gated on the announcement, so nothing answers it blind meanwhile.
@@ -253,9 +268,7 @@ test("an announced request is a watch on its path", async () => {
 	expect(request.active.peek()).toBeDefined();
 
 	request.close();
-	await settle();
-	jest.advanceTimersByTime(LINGER);
-	await settle();
+	await advance(LINGER);
 	expect(session.open()).toEqual([]);
 
 	session.die();
@@ -295,18 +308,14 @@ test("a narrower watch rides an open broader request and keeps it open", async (
 	// The broader watch leaves, but its request stays open for the narrower one, so no request
 	// takes its routes over and nothing restarts.
 	broad.close();
-	await settle();
-	jest.advanceTimersByTime(LINGER);
-	await settle();
+	await advance(LINGER);
 	expect(session.open()).toEqual(["a/**"]);
 	expect(wireOf(origin).routes(Path.from("a/b/x"))).toBe(true);
 	expect(events).toEqual(["start a/b/x"]);
 
 	// Once nothing beneath it is watched, it lingers out.
 	narrow.close();
-	await settle();
-	jest.advanceTimersByTime(LINGER);
-	await settle();
+	await advance(LINGER);
 	expect(session.open()).toEqual([]);
 	expect(wireOf(origin).routes(Path.from("a/b/x"))).toBe(false);
 
@@ -330,20 +339,15 @@ test("a narrower request stays open until the broader one covering it goes", asy
 	const events = record(broad);
 	await settle();
 	narrow.close();
-	await settle();
-	jest.advanceTimersByTime(LINGER);
-	await settle();
+	await advance(LINGER);
 	expect(session.open()).toEqual(["a/b/**", "a/**"]);
 	expect(wireOf(origin).routes(Path.from("a/b/x"))).toBe(true);
 	expect(events).toEqual(["start a/b/x"]);
 
 	// Once the broader request lingers out, the narrower one it held follows.
 	broad.close();
-	await settle();
-	jest.advanceTimersByTime(LINGER);
-	await settle();
-	jest.advanceTimersByTime(LINGER);
-	await settle();
+	await advance(LINGER);
+	await advance(LINGER);
 	expect(session.open()).toEqual([]);
 	expect(wireOf(origin).routes(Path.from("a/b/x"))).toBe(false);
 
@@ -378,14 +382,10 @@ test("an exclusive session closes every request beneath a broader one before it 
 
 	// The narrower watch rides the broader request from here on.
 	broad.close();
-	await settle();
-	jest.advanceTimersByTime(LINGER);
-	await settle();
+	await advance(LINGER);
 	expect(session.open()).toEqual(["a/**"]);
 	narrow.close();
-	await settle();
-	jest.advanceTimersByTime(LINGER);
-	await settle();
+	await advance(LINGER);
 	expect(session.open()).toEqual([]);
 	expect(session.requests.map(({ scope }) => scope)).toEqual(["a/b/**", "a/c/**", "a/**"]);
 
@@ -461,7 +461,7 @@ test("a refused announce request downgrades the session once, and later watches 
 	const path = Path.from("room");
 	forwardAnnounced(session.session, origin);
 
-	const watched = origin.request(path, { announced: true });
+	const watched = origin.follow(path);
 	await settle();
 	expect(origin.discovery.peek()).toBe(true);
 	expect(watched.active.peek()).toBeUndefined();
@@ -495,7 +495,7 @@ test("a discovery failure under a live session retracts what it fed and answers 
 	const path = Path.from("room");
 	forwardAnnounced(session.session, origin);
 
-	const watched = origin.request(path, { announced: true });
+	const watched = origin.follow(path);
 	await settle();
 	start(session.stream("room/**"), "room");
 	await settle();
@@ -604,16 +604,12 @@ test("a scoped origin narrows a root watch to its disjoint literal heads", async
 	// nothing.
 	let inside = origin.announced(Path.Pattern.subtree(Path.from("room/alice/chat")));
 	const outside = origin.announced(Path.Pattern.subtree(Path.from("elsewhere")));
-	await settle();
-	jest.advanceTimersByTime(LINGER);
-	await settle();
+	await advance(LINGER);
 	expect(session.open()).toEqual(["room/**"]);
 
 	// With nothing open above it, a watch inside a head asks for itself.
 	inside.close();
-	await settle();
-	jest.advanceTimersByTime(LINGER);
-	await settle();
+	await advance(LINGER);
 	expect(session.open()).toEqual([]);
 	inside = origin.announced(Path.Pattern.subtree(Path.from("room/alice/chat")));
 	await settle();

@@ -41,7 +41,7 @@ qlog = ["moq-quic?/qlog"]
 # A provider is also all it takes to sign and serve certificates, so each turns on
 # `_certs` even where there is no QUIC backend to serve them for.
 aws-lc-rs = ["_certs", "rustls/aws-lc-rs", "rcgen/aws_lc_rs", "moq-quic?/rustls-aws-lc-rs"]
-iroh = ["_transport", "dep:web-transport-iroh", "dep:web-transport-proto", "dep:noq-proto"]
+iroh = ["_transport", "dep:web-transport-iroh", "dep:web-transport-proto", "dep:noq-proto", "dep:tokio-util"]
 # LAN peer discovery over mDNS (the `mdns` module).
 mdns = ["dep:mdns-sd", "dep:hmac", "dep:sha2", "dep:subtle"]
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
@@ -103,6 +103,7 @@ tikv-jemalloc-ctl = { version = "0.7", optional = true }
 tikv-jemallocator = { version = "0.7", features = ["profiling", "unprefixed_malloc_on_supported_platforms"], optional = true }
 time = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true, features = ["io"], optional = true }
 toml = { workspace = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
