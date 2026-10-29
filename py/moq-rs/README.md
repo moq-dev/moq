@@ -226,8 +226,9 @@ subscriber waits. `.cut()` / `.seek(sequence)` draw group boundaries; `.finish()
 optional capture time. A window keeps a sliding run of records a reader can join at any point,
 and `.cut()` ends its open group so the next edit opens one restating the window; the catalog has
 no window mode, so `WindowProducer` takes only the track.
-`moq.flate.SnapshotProducer` and `moq.flate.StreamProducer` offer the same operations for bytes.
-Omitting time leaves data untimed; choose the track's `timescale` to match.
+Omitting time leaves data untimed; choose the track's `timescale` to match. Publish JSON tracks with
+`TrackInfo(compress=True)`: the track compresses each group on the wire, and consumers read it the
+same either way. Opaque bytes go on a plain `TrackProducer`.
 
 ### Subscribing
 
@@ -261,7 +262,7 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
 - **`OriginConsumer`**. Discover broadcasts.
   - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator of `AnnounceEvent`: `AnnounceEventStart`, `AnnounceEventUpdate`, `AnnounceEventEnd`, or `AnnounceEventRestart`, each carrying an `Announce` whose `.route.epoch` names the publisher run; on a restart, request the path again); `filter` is a pattern relative to the literal prefix, while each `Announce.prefix` stays origin-relative and `.captures` reports wildcard matches
   - `.announced_broadcast(path) → AnnouncedBroadcast` (awaitable, waits until something serves the path)
-  - `.request_broadcast(path) → BroadcastConsumer` (awaitable; announced now or a dynamic fallback, else raises)
+  - `.request_broadcast(path) → BroadcastConsumer` (awaitable; owns discovery and resolves one instance, or raises once synced without a route)
 
 ### Types
 

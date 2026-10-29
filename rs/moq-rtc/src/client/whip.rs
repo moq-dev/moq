@@ -23,7 +23,7 @@ pub(crate) async fn dial(
 	origin: moq_net::origin::Consumer,
 	path: impl TryInto<moq_net::Path, Error: Into<moq_net::Error>>,
 ) -> Result<()> {
-	let broadcast = origin.request_broadcast(path, None).await?;
+	let broadcast = origin.request(path, None).await?;
 	let source = EgressSource::new(moq_mux::Source::new(origin, broadcast)).await?;
 	let codecs = source.catalog_codecs();
 	if codecs.is_empty() {

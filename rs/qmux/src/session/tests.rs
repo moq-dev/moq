@@ -127,8 +127,8 @@ async fn every_version_establishes_and_negotiates_in_band() {
 async fn reading_returns_flow_control_credit() {
 	for &version in Version::ALL {
 		let mut small = config(version);
-		small.receive_window = 64 * 1024;
-		small.stream_receive_window = 16 * 1024;
+		small.limits.receive_window = std::num::NonZeroU64::new(64 * 1024);
+		small.limits.stream_receive_window = std::num::NonZeroU64::new(16 * 1024);
 		let (client, server) = pair(config(version), small).await;
 
 		let data = payload(1 << 20, 3);
@@ -200,7 +200,7 @@ async fn resets_and_stops_carry_their_codes() {
 #[tokio::test(start_paused = true)]
 async fn the_peer_limits_concurrent_streams() {
 	let mut server = config(Version::QMux02);
-	server.max_streams_uni = 1;
+	server.limits.max_streams = std::num::NonZeroU64::new(1);
 	let (client, server) = pair(config(Version::QMux02), server).await;
 
 	let mut first = client.open_uni(SendOptions::default()).await.unwrap();
@@ -220,7 +220,7 @@ async fn the_peer_limits_concurrent_streams() {
 #[tokio::test(start_paused = true)]
 async fn request_credit_is_refused_without_parking_an_open() {
 	let mut server_config = config(Version::QMux02);
-	server_config.max_streams_bidi = 1;
+	server_config.limits.max_streams = std::num::NonZeroU64::new(1);
 	let (client, server) = pair(config(Version::QMux02), server_config).await;
 	let waiter = &kio::Waiter::noop();
 	let Poll::Ready(Ok(Some((mut send, mut recv)))) = client.poll_open_request(waiter, Default::default()) else {

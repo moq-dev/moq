@@ -10,11 +10,10 @@ use crate::Result;
 
 /// Consumes a sliding window of JSON records from a track, yielding one event per change.
 ///
-/// A [`Decoder`] that owns its track: it reads groups, starts a cold DEFLATE window at each
-/// boundary, and turns each group's header into just the changes this reader has not been told
+/// A [`Decoder`] that owns its track: it reads groups and turns each group's header into just the changes this reader has not been told
 /// about. When something else already owns the track, use the [`Decoder`] directly.
 ///
-/// Group rolls never surface. A publisher rolls for compression's sake, and a header restating the
+/// Group rolls never surface. A header restating the
 /// window yields nothing for records already delivered, so this reads as one continuous stream of
 /// [`Event`]s regardless of how the publisher framed them.
 ///

@@ -1,7 +1,7 @@
 //! Adapts the async transport interface to the poll one moq-net requires.
 //!
 //! moq-net accepts its own `moq_net::transport::poll` traits.
-//! A backend that offers only the async interface (iroh, quic) is wrapped
+//! Native QUIC, which still offers only the async interface, is wrapped
 //! in [`Session`] here, at the edge where async already lives. The wrapping
 //! costs one allocation per operation and one copy per write, and its
 //! closed-watch emulation is weaker than a native implementation (see
@@ -64,15 +64,14 @@ impl std::fmt::Display for Transport {
 
 /// A stored in-flight operation future. Native transports are Send, so the
 /// plain boxed flavor suffices.
-type OpBox<T> = futures::future::BoxFuture<'static, T>;
+pub(crate) type OpBox<T> = futures::future::BoxFuture<'static, T>;
 
 /// A stream op that hands the stream back with its result, or `None` if interrupted.
 type StreamOp<S, T, E> = OpBox<(S, Option<Result<T, E>>)>;
 
-/// Adapts one of this crate's async backends (qmux, iroh, quic) to the poll interface
-/// moq-net requires.
+/// Adapts this crate's async QUIC backend to the poll interface moq-net requires.
 ///
-/// Only those backends fit: the bound goes through a sealed trait, so another
+/// Only that backend fits: the bound goes through a sealed trait, so another
 /// [`web_transport_trait::Session`] cannot be wrapped. A custom transport implements
 /// moq-net's `transport::poll` traits instead.
 ///
@@ -140,12 +139,12 @@ type RequestResult<S> = Result<
 >;
 
 /// A stored in-flight operation, `None` when idle, which every task polling it shares.
-type OpSlot<T> = moq_net::kio::Bridge<Option<OpBox<T>>>;
+pub(crate) type OpSlot<T> = moq_net::kio::Bridge<Option<OpBox<T>>>;
 
 /// Lazily start and poll the operation in `slot`, clearing it when it resolves.
 ///
 /// Whichever caller polls it once it resolves takes the output; the rest start the next.
-fn poll_op<T>(slot: &OpSlot<T>, waiter: &moq_net::kio::Waiter, start: impl FnOnce() -> OpBox<T>) -> Poll<T> {
+pub(crate) fn poll_op<T>(slot: &OpSlot<T>, waiter: &moq_net::kio::Waiter, start: impl FnOnce() -> OpBox<T>) -> Poll<T> {
 	slot.poll(waiter, |slot, cx| {
 		let fut = slot.get_or_insert_with(start);
 		let output = ready!(fut.as_mut().poll(cx));
@@ -523,14 +522,12 @@ impl<S: GroupedSend + 'static> Drop for SendStream<S> {
 			// terminal action then. A deferred reset fired the interrupt when it
 			// was recorded, so the salvage task never waits on blocked I/O; a
 			// deferred finish lets the write complete first (the FIN follows the
-			// data). Without a runtime the default drop stands.
+			// data).
 			Some(SendState::Writing { fut, .. }) => {
 				let reset = self.reset.take();
 				let finish = std::mem::take(&mut self.finish);
-				if (reset.is_some() || finish)
-					&& let Ok(handle) = tokio::runtime::Handle::try_current()
-				{
-					handle.spawn(async move {
+				if reset.is_some() || finish {
+					crate::runtime::spawn(async move {
 						let (mut stream, _) = fut.await;
 						match reset {
 							Some(code) => stream.reset(code),
@@ -546,10 +543,8 @@ impl<S: GroupedSend + 'static> Drop for SendStream<S> {
 			Some(SendState::Closing(fut)) => {
 				let reset = self.reset.take();
 				let finish = std::mem::take(&mut self.finish);
-				if (reset.is_some() || finish)
-					&& let Ok(handle) = tokio::runtime::Handle::try_current()
-				{
-					handle.spawn(async move {
+				if reset.is_some() || finish {
+					crate::runtime::spawn(async move {
 						let (mut stream, _) = fut.await;
 						match reset {
 							Some(code) => stream.reset(code),
@@ -795,12 +790,10 @@ impl<S: web_transport_trait::RecvStream + 'static> Drop for RecvStream<S> {
 			// the deferred code the peer classifies the abort by. Finish the
 			// read on the runtime and stop with the real code then; a deferred
 			// stop fired the interrupt when it was recorded, so the task never
-			// waits on blocked I/O. Without a runtime the default drop stands.
+			// waits on blocked I/O.
 			Some(RecvState::Reading(fut)) => {
-				if let Some(code) = self.stop.take()
-					&& let Ok(handle) = tokio::runtime::Handle::try_current()
-				{
-					handle.spawn(async move {
+				if let Some(code) = self.stop.take() {
+					crate::runtime::spawn(async move {
 						let (mut stream, _) = fut.await;
 						stream.stop(code);
 					});
@@ -824,15 +817,15 @@ impl Grouped for crate::quic::web::Session {
 	}
 
 	fn wire(&self) -> Option<moq_net::transport::Wire> {
-		Some(crate::quic::driver::Connection::wire(self))
+		Some(crate::quic::driver::connection::Connection::wire(self))
 	}
 
 	fn probe(&self) -> Option<moq_net::transport::Probe> {
-		crate::quic::driver::Connection::probe(self)
+		crate::quic::driver::connection::Connection::probe(self)
 	}
 
 	fn streams_evicted(&self) -> Option<u64> {
-		Some(crate::quic::driver::Connection::stats(self).credit.evicted)
+		Some(crate::quic::driver::connection::Connection::stats(self).credit.evicted)
 	}
 
 	fn send_group(&self, priority: i64) -> Option<crate::quic::driver::SendGroup> {
@@ -870,24 +863,6 @@ impl GroupedSend for crate::quic::web::SendStream {
 impl moq_net::transport::poll::SendGroup for crate::quic::driver::SendGroup {
 	fn set_priority(&mut self, priority: i64) {
 		Self::set_priority(self, priority)
-	}
-}
-
-#[cfg(feature = "iroh")]
-impl Grouped for web_transport_iroh::Session {
-	type Recv = moq_net::transport::poll::Buffered<RecvStream<Self::RecvStream>>;
-
-	fn recv(stream: RecvStream<Self::RecvStream>) -> Self::Recv {
-		moq_net::transport::poll::Buffered::new(stream)
-	}
-}
-
-#[cfg(feature = "iroh")]
-impl GroupedSend for web_transport_iroh::SendStream {
-	type Group = moq_net::transport::poll::Ungrouped;
-
-	fn set_group(&mut self, group: &Self::Group) {
-		match *group {}
 	}
 }
 

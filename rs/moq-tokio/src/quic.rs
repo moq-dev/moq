@@ -20,10 +20,6 @@ mod backend;
 pub use backend::Error;
 #[cfg(feature = "quic")]
 pub(crate) use backend::{Client, Closer, Options, Server, accept};
-/// The flow-control limits a live QUIC connection can change; see [`driver::Connection::set_limits`].
-#[cfg(feature = "driver")]
-pub use moq_quic::{Limits, LimitsError};
-
 #[cfg(feature = "driver")]
 pub mod driver;
 
@@ -543,9 +539,53 @@ impl Config {
 			Some(_) if cfg!(not(feature = "qlog")) => Err(crate::Error::QlogUnsupported),
 			_ => Ok(()),
 		}?;
-		validate_idle_timeout(Some(self.resolve().idle_timeout))?;
-		validate_streams(self.max_streams)?;
-		validate_windows(self)
+		self.validate_limits()
+	}
+
+	/// Reject limits QUIC cannot advertise, through moq-quic's own checks.
+	#[cfg(feature = "_transport")]
+	fn validate_limits(&self) -> crate::Result<()> {
+		use moq_quic::{ConfigError, LimitsError};
+
+		// Zero credits nothing, so it would wedge the connection rather than tighten it, and
+		// `Limits` would read it as unset. Refuse it here, where the message can name the knob.
+		if self.max_streams == Some(0) {
+			return Err(crate::Error::StreamsRange);
+		}
+		for (name, window) in [
+			("receive_window", self.receive_window),
+			("stream_receive_window", self.stream_receive_window),
+			("send_window", self.send_window),
+		] {
+			if window == Some(0) {
+				return Err(crate::Error::WindowRange(name));
+			}
+		}
+
+		let resolved = self.resolve();
+		let mut transport = moq_quic::transport::Config::default();
+		transport.limits = resolved.limits();
+		transport.idle_timeout = Some(resolved.idle_timeout);
+		match transport.validate() {
+			Ok(()) => {}
+			Err(ConfigError::Limits(LimitsError::MaxStreams)) => return Err(crate::Error::StreamsRange),
+			Err(ConfigError::Limits(LimitsError::ReceiveWindow)) => {
+				return Err(crate::Error::WindowRange("receive_window"));
+			}
+			Err(ConfigError::Limits(LimitsError::StreamReceiveWindow)) => {
+				return Err(crate::Error::WindowRange("stream_receive_window"));
+			}
+			Err(ConfigError::IdleTimeout) => return Err(crate::Error::IdleTimeoutRange),
+			Err(err) => unreachable!("only the limits and idle timeout are set: {err}"),
+		}
+
+		// Incomplete messages hold connection credit until they are complete.
+		match self.receive_window {
+			Some(window) if window < moq_net::transport::MIN_RECEIVE_WINDOW => Err(
+				crate::Error::ReceiveWindowTooSmall(moq_net::transport::MIN_RECEIVE_WINDOW),
+			),
+			_ => Ok(()),
+		}
 	}
 
 	/// The per-connection knobs with defaults applied, ready to hand to a backend.
@@ -573,72 +613,6 @@ impl Config {
 			qlog: self.qlog.clone(),
 			keylog: self.keylog.clone(),
 		}
-	}
-}
-
-/// QUIC carries `max_idle_timeout` as a varint of milliseconds, so anything past this
-/// can't go on the wire.
-#[cfg(feature = "_transport")]
-const MAX_IDLE_TIMEOUT: Duration = Duration::from_millis((1 << 62) - 1);
-
-/// Reject an idle timeout no QUIC connection can express.
-///
-/// Checked here rather than in each backend because the conversion the backends do is
-/// infallible-by-panic, and this config reaches them from a TOML file or a C caller.
-#[cfg(feature = "_transport")]
-fn validate_idle_timeout(idle_timeout: Option<Duration>) -> crate::Result<()> {
-	match idle_timeout {
-		Some(timeout) if timeout > MAX_IDLE_TIMEOUT => Err(crate::Error::IdleTimeoutRange),
-		_ => Ok(()),
-	}
-}
-
-/// The largest value a QUIC varint can carry, which bounds every flow-control
-/// limit that goes on the wire as a transport parameter.
-#[cfg(feature = "_transport")]
-const MAX_VARINT: u64 = (1 << 62) - 1;
-
-/// The largest stream limit QUIC can advertise: a stream ID is a varint whose
-/// low two bits are its type, so RFC 9000 caps the count at 2^60.
-#[cfg(feature = "_transport")]
-const MAX_STREAMS: u64 = 1 << 60;
-
-/// Reject a stream limit no connection can honor: zero lets the peer open
-/// nothing, and past 2^60 a peer refuses it with FRAME_ENCODING_ERROR.
-#[cfg(feature = "_transport")]
-fn validate_streams(max_streams: Option<u64>) -> crate::Result<()> {
-	match max_streams {
-		Some(0) => Err(crate::Error::StreamsRange),
-		Some(streams) if streams > MAX_STREAMS => Err(crate::Error::StreamsRange),
-		_ => Ok(()),
-	}
-}
-
-/// Reject a flow-control window no connection can honor.
-///
-/// Zero is rejected everywhere: a window of zero credits nothing, so it would wedge
-/// the connection rather than tighten it. The receive windows additionally have to
-/// fit a varint, since they are sent as transport parameters; the send window is
-/// local bookkeeping and only has to be non-zero. The connection receive window has
-/// to fit the largest message, which holds its credit until it is complete.
-#[cfg(feature = "_transport")]
-fn validate_windows(quic: &Config) -> crate::Result<()> {
-	for (name, window, wire) in [
-		("receive_window", quic.receive_window, true),
-		("stream_receive_window", quic.stream_receive_window, true),
-		("send_window", quic.send_window, false),
-	] {
-		match window {
-			Some(0) => return Err(crate::Error::WindowRange(name)),
-			Some(window) if wire && window > MAX_VARINT => return Err(crate::Error::WindowRange(name)),
-			_ => {}
-		}
-	}
-	match quic.receive_window {
-		Some(window) if window < moq_net::transport::MIN_RECEIVE_WINDOW => Err(crate::Error::ReceiveWindowTooSmall(
-			moq_net::transport::MIN_RECEIVE_WINDOW,
-		)),
-		_ => Ok(()),
 	}
 }
 
@@ -720,11 +694,37 @@ impl Resolved {
 	pub(crate) fn gso_disabled(&self) -> bool {
 		self.gso == Some(false)
 	}
+
+	/// The flow-control limits as moq-quic spells them.
+	#[cfg(feature = "_transport")]
+	pub(crate) fn limits(&self) -> moq_quic::Limits {
+		use std::num::NonZeroU64;
+
+		let mut limits = moq_quic::Limits::default();
+		limits.max_streams = NonZeroU64::new(self.max_streams);
+		limits.receive_window = NonZeroU64::new(self.receive_window);
+		limits.stream_receive_window = NonZeroU64::new(self.stream_receive_window);
+		limits.send_window = NonZeroU64::new(self.send_window);
+		limits
+	}
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// QUIC carries `max_idle_timeout` as a varint of milliseconds, so anything past this
+	/// can't go on the wire.
+	#[cfg(feature = "_transport")]
+	const MAX_IDLE_TIMEOUT: Duration = Duration::from_millis((1 << 62) - 1);
+
+	/// The largest value a QUIC varint can carry.
+	#[cfg(feature = "_transport")]
+	const MAX_VARINT: u64 = (1 << 62) - 1;
+
+	/// The largest stream limit QUIC can advertise, 2^60.
+	#[cfg(feature = "_transport")]
+	const MAX_STREAMS: u64 = 1 << 60;
 	/// A minimal parser so we can exercise the `--quic-*` args (and the legacy
 	/// role-prefixed spellings) in isolation.
 	#[derive(usage_rs::Cli)]

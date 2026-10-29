@@ -21,7 +21,9 @@ capture or playback is enabled.
 | `playback` | One output device mixing every track in a call, with click-free volume ramps |
 | `aec` | Acoustic echo cancellation (a port of WebRTC's), so a laptop with no headset doesn't feed itself back |
 
-The microphone opens only while someone listens, and can be swapped without
+The microphone captures and encodes while enabled, whether or not anyone
+listens, so a late subscriber can fetch the recent past. `encode::Capture::on_demand`
+opens it only while someone listens instead. Either way it can be swapped without
 changing the track subscribers know. Opus packs 20 ms per packet by default,
 or 10 ms with a shorter `frame_duration`. Groups carry at least 20 ms by default,
 so 10 ms packets pair up. `encode::Options::group_duration`

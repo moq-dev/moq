@@ -41,7 +41,9 @@ state again).
   break. Nested so a later join mechanism that is not a fixed grid can sit
   beside it.
   moq-mux declares the interval from its GOP hint, and `@moq/publish` does
-  too. A broadcast without one is not HLS-renderable.
+  too. moq-c's `group_duration_us` hint
+  ([#7068](https://github.com/moq-dev/moq/pull/7068)), which declares the `hls`
+  duration today, then declares the interval. A broadcast without one is not HLS-renderable.
 - **Each group belongs to one segment, numbered by grid line**: the first
   line it contains, so an edge finds segment N from a `Time` start at pts
   N × interval, the group that resolves to. A group containing no line
@@ -56,11 +58,12 @@ state again).
   deviation beside
   [fixed target duration](/quest/m1/archive/hls-target.md)'s overrun rule,
   whose target then comes from the interval.
-- **Segments run under twice the interval** even without an overrun, since
-  the group containing a line can start up to one interval before it. Open
-  for the maintainer: a target of twice the interval (RFC 8216 compliant,
-  but players hold back twice as far) or the interval itself with longer
-  segments listed under the overrun rule.
+- **The target duration is the interval** (maintainer, 2026-10-28). A
+  segment can run up to twice the interval even without an overrun, since
+  the group containing a line can start up to one interval before it;
+  regular GOPs never do. One whose rounded `EXTINF` exceeds the target is
+  listed under the overrun rule. Rejected: twice the interval, which is
+  RFC 8216 compliant but doubles every player's hold-back.
 - DASH lists the same segments by `$Time$`.
 
 Pin the segmentation with table-driven tests over pauses that end between
