@@ -57,7 +57,3 @@ coverage were not planned, since they can't run the syscall and C-caller
 paths and the audit's unsafe review found nothing.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [SETUP Path refused on URL bindings](/quest/m1/security-audit/setup-path.md) - its both-runtime test can share this matrix's setup
