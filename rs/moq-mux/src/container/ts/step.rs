@@ -20,7 +20,7 @@ use bytes::Bytes;
 use mpeg2ts::ts::TsPacket;
 
 use super::demux::Demux;
-use super::health::{Delta, PTS_LIMIT};
+use super::health::{Continuation, Continuity, Delta, PTS_LIMIT};
 use super::import::{Framer, Payload, STAGING_BYTES_MAX, adaptation_valid, discontinuity_indicator, payload, pcr};
 use super::mux_rate::PCR_WRAP;
 use super::passthrough::PCR_HZ;
@@ -161,90 +161,98 @@ struct Marks {
 	pcr: Option<u64>,
 	/// The DTS, or PTS without one, of a PES header this packet completes on a timed PID.
 	pes: Option<u64>,
-	/// What it does to a PES header its PID has begun.
-	header: Header,
+	/// Its timed PID's chain after it, or `None` when it leaves the chain as it was.
+	chain: Option<Chain>,
 }
 
 impl Marks {
 	fn read(pkt: &[u8; TsPacket::SIZE], routes: &Routes, headers: &Headers) -> Self {
 		let mut marks = Self::default();
+		let pid = (u16::from(pkt[1] & 0x1f) << 8) | u16::from(pkt[2]);
+		// A timed PID's chain follows every packet the import's does, the damaged ones too.
+		if (routes.timed)(pid) {
+			(marks.chain, marks.pes) = headers.read(pid, pkt);
+		}
 		// A packet the demodulator flagged corrupt, or whose adaptation field overruns itself,
 		// says nothing the import trusts.
 		if pkt[1] & 0x80 != 0 || !adaptation_valid(pkt) {
 			return marks;
 		}
-		let pid = (u16::from(pkt[1] & 0x1f) << 8) | u16::from(pkt[2]);
 		if routes.pcr_pid == Some(pid) {
 			marks.flagged = discontinuity_indicator(pkt);
 			marks.pcr = pcr(pkt);
-		}
-		if (routes.timed)(pid) {
-			marks.header = headers.read(pid, pkt);
-			if let Header::Read(ticks) = marks.header {
-				marks.pes = Some(ticks);
-			}
 		}
 		marks
 	}
 }
 
-/// What one packet does to its PID's PES header.
-#[derive(Default)]
-enum Header {
-	/// Nothing: no header is begun, or the packet carries no payload.
-	#[default]
-	Keep,
-	/// Completes one with this DTS, or PTS without one.
-	Read(u64),
-	/// Begins or continues one it does not complete.
-	Hold(Vec<u8>),
-	/// Ends one without a timestamp: none was carried, or it is unreadable.
-	Clear,
+/// One timed PID's packets so far: whether they still chain, and the PES header begun on it.
+#[derive(Clone, Default)]
+struct Chain {
+	continuity: Continuity,
+	begun: Option<Vec<u8>>,
 }
 
 /// The PES headers begun on each timed PID, so one split across packets still reads.
+///
+/// Packets join under the import's continuity rules, so a retransmission or a loss cannot
+/// splice a timestamp out of bytes the import never joins.
 #[derive(Clone, Default)]
-struct Headers(HashMap<u16, Vec<u8>>);
+struct Headers(HashMap<u16, Chain>);
 
 impl Headers {
-	/// What `pkt` does to the header begun on `pid`, without retaining it.
-	fn read(&self, pid: u16, pkt: &[u8; TsPacket::SIZE]) -> Header {
-		if pkt[3] & 0xc0 != 0 {
-			return Header::Clear;
+	/// What `pkt` does on `pid` without retaining it: the chain after it, `None` when unchanged,
+	/// and the DTS, or PTS without one, of a header it completes.
+	fn read(&self, pid: u16, pkt: &[u8; TsPacket::SIZE]) -> (Option<Chain>, Option<u64>) {
+		let mut chain = self.0.get(&pid).cloned().unwrap_or_default();
+		match chain.continuity.observe(pkt) {
+			// The import ignores a retransmission entirely.
+			Continuation::Duplicate => return (None, None),
+			Continuation::Contiguous => {}
+			// The bytes joined so far are lost, as the import's partial PES is.
+			Continuation::Broken => chain.begun = None,
+			Continuation::Corrupt => {
+				chain.begun = None;
+				return (Some(chain), None);
+			}
+		}
+		// The import refuses a malformed adaptation field and cannot read a scrambled payload.
+		if !adaptation_valid(pkt) || pkt[3] & 0xc0 != 0 {
+			chain.begun = None;
+			return (Some(chain), None);
 		}
 		let Payload::Bytes(payload) = payload(pkt) else {
-			return Header::Keep;
+			return (Some(chain), None);
 		};
 		let header = if pkt[1] & 0x40 != 0 {
-			std::borrow::Cow::Borrowed(payload)
-		} else if let Some(begun) = self.0.get(&pid) {
-			std::borrow::Cow::Owned([begun.as_slice(), payload].concat())
+			payload.to_vec()
+		} else if let Some(mut begun) = chain.begun.take() {
+			begun.extend_from_slice(payload);
+			begun
 		} else {
-			return Header::Keep;
+			return (Some(chain), None);
 		};
 		// The optional fields are at most 255 bytes, so a held header stays small.
-		match PesStart::header_len(&header) {
+		let ticks = match PesStart::header_len(&header) {
 			Ok(len) if header.len() >= len => match PesStart::parse(&header) {
 				Ok(PesStart {
 					pts: Some(pts), dts, ..
-				}) => Header::Read(dts.unwrap_or(pts)),
-				_ => Header::Clear,
+				}) => Some(dts.unwrap_or(pts)),
+				_ => None,
 			},
-			Ok(_) => Header::Hold(header.into_owned()),
-			Err(_) => Header::Clear,
-		}
+			Ok(_) => {
+				chain.begun = Some(header);
+				None
+			}
+			Err(_) => None,
+		};
+		(Some(chain), ticks)
 	}
 
-	/// Retain what `header` leaves begun on `pid`.
-	fn apply(&mut self, pid: u16, header: Header) {
-		match header {
-			Header::Keep => {}
-			Header::Hold(begun) => {
-				self.0.insert(pid, begun);
-			}
-			Header::Read(_) | Header::Clear => {
-				self.0.remove(&pid);
-			}
+	/// Retain the chain a packet left on `pid`.
+	fn apply(&mut self, pid: u16, chain: Option<Chain>) {
+		if let Some(chain) = chain {
+			self.0.insert(pid, chain);
 		}
 	}
 }
@@ -401,7 +409,7 @@ impl Steps {
 		if let Some(ticks) = marks.pes {
 			self.pids.insert(pid, Seen { ticks, at: routes.now });
 		}
-		self.headers.apply(pid, marks.header);
+		self.headers.apply(pid, marks.chain);
 	}
 }
 
@@ -465,7 +473,7 @@ impl Ahead {
 				}
 				self.back.get_or_insert(by);
 			}
-			self.headers.apply(pid, marks.header);
+			self.headers.apply(pid, marks.chain);
 
 			// A clock alone, such as one corrupt PCR, needs a stream to step with it.
 			if !self.pcr && self.pids.is_empty() && (self.stepped.is_none() || !self.heard.is_empty()) {
@@ -520,9 +528,10 @@ mod tests {
 		}
 	}
 
-	/// One PES start on `pid` with `pts` (90 kHz), its header split after `split` bytes across
-	/// two packets, as a muxer padding the first with adaptation stuffing leaves it.
-	fn split_pes(cc: &mut u8, pid: u16, pts: u64, split: usize) -> Vec<u8> {
+	/// One PES start on `pid` with `pts` (90 kHz), its header split at each of `splits` across
+	/// packets, as a muxer padding them with adaptation stuffing leaves it. The packet holding
+	/// fragment `repeat` is sent twice, as ISO 13818-1 allows a retransmission.
+	fn pes(cc: &mut u8, pid: u16, pts: u64, splits: &[usize], repeat: Option<usize>) -> Vec<u8> {
 		let mut pes = vec![0, 0, 1, 0xe0, 0, 0, 0x80, 0x80, 5];
 		pes.extend_from_slice(&[
 			0x21 | ((pts >> 29) & 0x0e) as u8,
@@ -532,15 +541,23 @@ mod tests {
 			0x01 | ((pts << 1) & 0xfe) as u8,
 		]);
 		pes.extend_from_slice(&[0xaa; 32]);
+		let bounds: Vec<usize> = std::iter::once(0)
+			.chain(splits.iter().copied())
+			.chain(std::iter::once(pes.len()))
+			.collect();
 		let mut out = Vec::new();
-		for (pusi, payload) in [(true, &pes[..split]), (false, &pes[split..])] {
+		for (i, range) in bounds.windows(2).enumerate() {
+			let payload = &pes[range[0]..range[1]];
 			let mut pkt = [0xff; 188];
-			pkt[..3].copy_from_slice(&[0x47, u8::from(pusi) << 6 | (pid >> 8) as u8, pid as u8]);
+			pkt[..3].copy_from_slice(&[0x47, u8::from(i == 0) << 6 | (pid >> 8) as u8, pid as u8]);
 			pkt[3] = 0x30 | *cc;
 			pkt[4] = (183 - payload.len()) as u8;
 			pkt[5] = 0x00;
 			pkt[188 - payload.len()..].copy_from_slice(payload);
 			out.extend_from_slice(&pkt);
+			if repeat == Some(i) {
+				out.extend_from_slice(&pkt);
+			}
 			*cc = (*cc + 1) & 0x0f;
 		}
 		out
@@ -553,7 +570,7 @@ mod tests {
 			mux.packet(CLOCK, Flags::pcr(clock));
 			if video {
 				mux.out
-					.extend(split_pes(cc, VIDEO, (clock / 300 + 9_000) % PTS_WRAP, 7));
+					.extend(pes(cc, VIDEO, (clock / 300 + 9_000) % PTS_WRAP, &[7], None));
 			}
 		}
 	}
@@ -565,6 +582,21 @@ mod tests {
 		let (mut mux, mut cc) = (Mux::default(), 0);
 		second(&mut mux, &mut cc, PCR_HZ, false);
 		second(&mut mux, &mut cc, PCR_WRAP + 2 * PCR_HZ - SWITCH, false);
+		assert_eq!(judge(&mux.out, &[VIDEO]), None);
+	}
+
+	/// A retransmitted fragment of a split PES header is ignored, as the import ignores it, so
+	/// it cannot read as the stream stepping with a lone PCR glitch.
+	#[test]
+	fn a_repeated_header_fragment_does_not_step() {
+		let (mut mux, mut cc) = (Mux::default(), 0);
+		mux.packet(CLOCK, Flags::pcr(PCR_HZ));
+		mux.out.extend(pes(&mut cc, VIDEO, 90_000, &[7], None));
+		// One corrupt PCR, then the next frame on time, its PTS 93,600 split after its first byte
+		// and the next two. Joining the repeat would read `21 00 05 00 05`, PTS 65,538: back.
+		mux.packet(CLOCK, Flags::pcr(PCR_WRAP + PCR_HZ + FRAME - SWITCH));
+		mux.out.extend(pes(&mut cc, VIDEO, 93_600, &[10, 12], Some(1)));
+		second(&mut mux, &mut cc, PCR_HZ + 2 * FRAME, true);
 		assert_eq!(judge(&mux.out, &[VIDEO]), None);
 	}
 
