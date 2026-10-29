@@ -692,9 +692,8 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 			guard.list::<C>(&self.name);
 			// Every estimated field hinted leaves nothing to wait for.
 			self.settled |= msf_framerate::<C>().is_none_or(|framerate| hinted(&supplied, framerate));
-			if !self.settled {
-				guard.unsettled::<C>(&self.name);
-			}
+			// A replaced config that hints everything releases the hold its predecessor took.
+			guard.unsettled::<C>(&self.name, !self.settled);
 			guard.commit()?;
 		}
 		self.supplied = supplied;

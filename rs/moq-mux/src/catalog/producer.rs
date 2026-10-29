@@ -1238,10 +1238,15 @@ impl<E: CatalogExt> Guard<'_, E> {
 		self.publish()
 	}
 
-	/// Hold the MSF catalog back until the rendition holding `name` in `C`'s section has made its
-	/// estimates.
-	pub(super) fn unsettled<C: super::RenditionConfig<E>>(&mut self, name: &str) {
-		self.state.msf.unsettled.insert(owner_key::<C>(name));
+	/// Whether the MSF catalog waits for the rendition holding `name` in `C`'s section to make its
+	/// estimates. Released, it goes out with the next publish.
+	pub(super) fn unsettled<C: super::RenditionConfig<E>>(&mut self, name: &str, unsettled: bool) {
+		let key = owner_key::<C>(name);
+		if unsettled {
+			self.state.msf.unsettled.insert(key);
+		} else {
+			self.state.msf.unsettled.remove(&key);
+		}
 	}
 
 	/// Stop holding the MSF catalog back for the rendition holding `name` in `C`'s section,
@@ -3652,6 +3657,22 @@ mod test {
 		video.set(config).unwrap();
 		drop(reserved);
 		assert_eq!(msf_sent(&catalog), Some(0));
+	}
+
+	/// Replacing an unhinted config with one hinting every estimated field releases the MSF hold.
+	/// Regression: the rendition counted itself settled while the catalog still waited on it.
+	#[test]
+	fn a_fully_hinted_replacement_releases_msf() {
+		let (_broadcast, catalog, mut renditions) = estimating(&["v"]);
+		assert_eq!(msf_sent(&catalog), None);
+		let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		config.bitrate = Some(1_000_000);
+		config.framerate = Some(30.0);
+		config.jitter = Some(std::time::Duration::from_millis(1));
+		config.delay = Some(std::time::Duration::from_millis(1));
+		renditions[0].set(config).unwrap();
+		assert_eq!(msf_sent(&catalog), Some(0));
+		assert_eq!(msf_wire(&catalog).tracks[0].framerate, Some(30.0));
 	}
 
 	/// A track that ends before its estimates are made stops holding the MSF catalog back.
