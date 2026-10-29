@@ -7,9 +7,9 @@ persistent-object edits, including nested nulls, empty objects, added and
 removed keys, type changes, arrays, non-object roots, and prototype-named keys.
 They route every emitted frame through the Decoder, commit it, and compare the
 reconstructed JSON after every update, including updates that emit nothing.
-Each sequence varies the delta ratio, compression, and explicit encoder resets.
+Each sequence varies the delta ratio and explicit encoder resets.
 
-Window traces contain pushes, clamped pops, explicit resets, compression, op
+Window traces contain pushes, clamped pops, explicit resets, op
 ratios, and optional checkpoint bounds. A separate unbounded logical window
 checks the exact push, pop, and skip events for readers following every group,
 joining late, or dropping whole groups. The model never reads the encoder's
@@ -19,7 +19,7 @@ window, pushes are unique, and skips never cover received records. Shared
 
 `just test json-properties` runs all four properties with 4096 cases and a fresh
 seed, prints that seed, then sweeps JS codec cost over document size and changed
-keys, with and without compression. Nightly runs this recipe. Replay a failure
+keys. Nightly runs this recipe. Replay a failure
 with its printed settings:
 
 ```sh
@@ -34,7 +34,7 @@ mean matching generated sequences across the languages.
 
 A failure's fix keeps the minimized case: use the shared
 `rs/moq-json/tests/vectors.json` when it reduces to a value pair; otherwise add a
-codec sequence regression with its compression, delta ratio, and reset steps.
+codec sequence regression with its delta ratio and reset steps.
 Do not replace the failing seed or weaken the property.
 
 Window failures retain the minimized configuration, edits, reset flags, join

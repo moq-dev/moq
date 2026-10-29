@@ -114,7 +114,7 @@ Breaking wire changes are extremely rare.
 
 ## Development
 
-Contributions are welcome, including AI-assisted issues, pull requests, reviews, and comments. See [CONTRIBUTING.md](CONTRIBUTING.md#ai) for the attribution policy and guidance on when to open an issue before writing code.
+Contributions are welcome, and AI-assisted issues, pull requests, reviews, and comments are encouraged. See [CONTRIBUTING.md](CONTRIBUTING.md#ai) for the attribution policy and guidance on when to open an issue before writing code.
 
 ```sh
 # See all available commands

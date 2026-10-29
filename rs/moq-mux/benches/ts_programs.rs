@@ -1,7 +1,7 @@
 //! `--program all` TS ingest across program count and per-program bitrate, over one second of
 //! a generated multiplex. Throughput is the whole input, so a parse that repeats per program
-//! shows as a falling rate with program count. A PAT that also names programs no PMT
-//! describes shows what a program costs before it starts. Stray PIDs no table lists sweep the
+//! shows as a falling rate with program count. A PAT that also names programs whose PMT lists
+//! no stream shows what a program costs before it starts. Stray PIDs no table lists sweep the
 //! unclaimed-PID accounting, against the same packets sent as null stuffing, which skips it.
 
 use std::time::Duration;
@@ -54,8 +54,8 @@ fn video_pid(program: u16) -> u16 {
 	0x0200 + program
 }
 
-/// The PMT PID a PAT names for an undescribed program, clear of every PID that carries data.
-fn undescribed_pid(program: u16) -> u16 {
+/// The PMT PID a PAT names for an idle program, clear of every PID that carries data.
+fn idle_pid(program: u16) -> u16 {
 	0x1000 + program
 }
 
@@ -142,8 +142,8 @@ impl Mux {
 /// What the multiplex carries besides its described programs.
 #[derive(Clone, Copy)]
 struct Extra {
-	/// Programs the PAT names whose PMT never arrives.
-	undescribed: u16,
+	/// Programs the PAT names whose PMT lists no stream, so they wait without starting.
+	idle: u16,
 	/// PIDs no table lists, one packet each per frame.
 	strays: u16,
 	/// Send the strays' packets as null stuffing instead.
@@ -153,16 +153,12 @@ struct Extra {
 /// One second of `programs` H.264 programs at `bitrate` bits per second each, interleaved
 /// frame by frame, each program carrying its PCR on its video PID, beside `extra`.
 fn multiplex(programs: u16, extra: Extra, bitrate: u64) -> Vec<u8> {
-	let Extra {
-		undescribed,
-		strays,
-		null,
-	} = extra;
+	let Extra { idle, strays, null } = extra;
 	let packets = (bitrate / FPS / 8).div_ceil(188) as usize;
 	let mut mux = Mux::default();
 	let entries: Vec<u8> = (1..=programs)
 		.map(|program| (program, pmt_pid(program)))
-		.chain((programs + 1..=programs + undescribed).map(|program| (program, undescribed_pid(program))))
+		.chain((programs + 1..=programs + idle).map(|program| (program, idle_pid(program))))
 		.flat_map(|(program, pid)| {
 			let [a, b] = program.to_be_bytes();
 			let [c, d] = (0xe000 | pid).to_be_bytes();
@@ -186,6 +182,10 @@ fn multiplex(programs: u16, extra: Extra, bitrate: u64) -> Vec<u8> {
 			section(0x02, program, 0, 0, &body)
 		})
 		.collect();
+	// No PCR PID, no program info, no stream.
+	let idle_pmts: Vec<_> = (programs + 1..=programs + idle)
+		.map(|program| section(0x02, program, 0, 0, &[0xff, 0xff, 0xf0, 0x00]))
+		.collect();
 	for frame in 0..FPS {
 		if frame % PSI_EVERY == 0 {
 			for pat in &pat {
@@ -193,6 +193,9 @@ fn multiplex(programs: u16, extra: Extra, bitrate: u64) -> Vec<u8> {
 			}
 			for (program, pmt) in (1..=programs).zip(&pmts) {
 				mux.psi(pmt_pid(program), pmt);
+			}
+			for (program, pmt) in (programs + 1..).zip(&idle_pmts) {
+				mux.psi(idle_pid(program), pmt);
 			}
 		}
 		let pts = 90_000 + frame * 90_000 / FPS;
@@ -236,27 +239,23 @@ fn programs(c: &mut Criterion) {
 	group.sample_size(10);
 	let mut cases = Vec::new();
 	for programs in [1u16, 4, 16] {
-		for undescribed in [0u16, 1000] {
+		for idle in [0u16, 1000] {
 			for mbps in [1u64, 4] {
 				let extra = Extra {
-					undescribed,
+					idle,
 					strays: 0,
 					null: false,
 				};
-				let name = match undescribed {
+				let name = match idle {
 					0 => format!("{programs}"),
-					_ => format!("{programs}+{undescribed}"),
+					_ => format!("{programs}+{idle}"),
 				};
 				cases.push((programs, extra, mbps, name));
 			}
 		}
 		for strays in [16u16, 256] {
 			for (lane, null) in [("null", true), ("stray", false)] {
-				let extra = Extra {
-					undescribed: 0,
-					strays,
-					null,
-				};
+				let extra = Extra { idle: 0, strays, null };
 				cases.push((programs, extra, 1, format!("{programs}-{lane}{strays}")));
 			}
 		}
