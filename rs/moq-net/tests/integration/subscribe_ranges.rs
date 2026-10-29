@@ -330,7 +330,7 @@ async fn draft22_updates_both_bounds_across_cached_groups() {
 		)
 		.await
 		.expect("the narrowed range never reached the publisher");
-		reader.update(initial.with_range(6..)).unwrap();
+		reader.update(initial.with_range(0..)).unwrap();
 		let mut group = fixture
 			.track
 			.create_group(moq_net::group::Info { sequence: 6 })
@@ -339,7 +339,7 @@ async fn draft22_updates_both_bounds_across_cached_groups() {
 			.write_frame(Timestamp::from_millis(6000).unwrap(), b"later".as_slice())
 			.unwrap();
 		group.finish().unwrap();
-		assert_eq!(next(&mut reader).await, Some(6));
+		assert_eq!(next(&mut reader).await, Some(6), "relay={relay}");
 	}
 }
 
@@ -460,7 +460,7 @@ async fn draft18_updates_narrow_then_widen() {
 		}
 		seen.sort_unstable();
 		assert_eq!(seen, [5], "{version} relay={relay}");
-		reader.update(initial.clone().with_range(4..5)).unwrap();
+		reader.update(initial.clone().with_range(6..7)).unwrap();
 		moq_clock::timeout(
 			TIMEOUT,
 			kio::wait(|waiter| {
@@ -469,7 +469,7 @@ async fn draft18_updates_narrow_then_widen() {
 					if fixture
 						.track
 						.subscription()
-						.is_some_and(|subscription| subscription.ranges == [Range::groups(4..5)])
+						.is_some_and(|subscription| subscription.ranges == [Range::groups(6..7)])
 					{
 						return std::task::Poll::Ready(());
 					}

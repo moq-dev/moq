@@ -62,37 +62,13 @@ Decision prompts:
 - Rank: ✅ before the other FETCH quests, right after
   [moq-transport 18 and 22 only](/quest/m1/ietf-drop/README.md); at m1's end.
 
-Implementation:
+Implementation is checkpointed in [moq-dev/moq#7204](https://github.com/moq-dev/moq/pull/7204): both publishers serve one-group FETCH and the largest-group fill, ignore FILL_TIMEOUT, and no longer serve ranges. Subscriber range requests are unchanged. The publisher-only model helpers and timeout machinery are removed; fixtures and benchmarks use the kept forms.
 
-- **Rust publisher.** Refuse a standalone FETCH spanning several groups with
-  NOT_SUPPORTED, alongside the existing joining-FETCH refusal
-  (`a_joining_fetch_spanning_several_groups_is_refused`). Resolve a
-  draft-22 fill to `FillServe::Group` for the largest group or
-  `FillServe::Unsupported`, deleting `FillServe::Range` and the range half of
-  `fill_range`. Accept FILL_TIMEOUT instead of the `"FILL_TIMEOUT not
-  supported"` refusal. Delete the end-location, `LOCATION_FILTER`, and
-  multi-group ordering rules only the range path needs, with their tests.
-- **JS publisher.** Same rules in `#answerFetch` and `#runFill`. Remove the
-  FILL_TIMEOUT deadline and its timed-out markers from
-  [moq-dev/moq#7051](https://github.com/moq-dev/moq/pull/7051). Keep the End
-  of Range encoding, which
-  [JS evicted FETCH groups are unknown](/quest/m1/js-fetch-evicted-unknown.md)
-  uses for a group lost after FETCH_OK.
-- **Tests.** Unit tests in both publishers for each refusal and for each
-  kept form on drafts 18 and 22. `warm_backfill` in
-  `rs/moq-net/tests/integration` keeps draft 22 out of its backfill and
-  instead asserts that a `0..` fill fails while the subscription delivers
-  live. This replaces the deleted cold-floor quest from
-  [moq-dev/moq#7168](https://github.com/moq-dev/moq/pull/7168): our publisher
-  now refuses that fill on purpose. Narrow `moq fetch` and the interop FETCH
-  cells to one group where they asked for more.
-- **Compat.** If a released-version cell in `test/interop/compat.sh` breaks
-  (the FETCH capability cell, or a cell that fetched a range), add a planned
-  break to `test/interop/compat/planned-breaks.json`.
-- **Docs.** Rewrite the "History is fetched in ranges" and "Refused, not
-  fatal" bullets of `doc/concept/standard.md`.
+Remaining decision: a refused fill can reset before its FETCH_HEADER is received. Our subscriber cannot associate that stream with its request, so its sole fill slot remains outstanding. `run_subscribe` defers every subsequent widening while that slot is outstanding. The existing `draft22_updates_both_bounds_across_cached_groups` integration test now stalls after `2..4 -> 0..6 -> 4..5 -> 0..`, losing live group 6 even though the subscription remains open. The memory transport's `reset_drops_queued_messages` test and the subscriber's deferred-update comment describe this case.
 
-Run `just check`, `just test interop --all`, and the compat lane.
+Recommendation: permit a narrow subscriber fill-ownership fix that lets later updates retire an unidentifiable failed fill without changing the range FETCH or multi-group fill requests it sends. That exceeds the settled publisher-only scope and needs the maintainer's decision. Accepting permanently stalled widening is the alternative, not a test change to conceal it.
+
+After that decision, finish local checks and `just test interop --all`, then remove this quest and its links. The compatibility lane currently stops before session cells because accepted pins name moq-cli 0.14.8 while 0.14.9 is published. [moq-dev/moq#7061](https://github.com/moq-dev/moq/pull/7061) already owns that blocked remeasurement; do not repin it here without new evidence of a break from this change.
 
 Public API: none. Wire: our publishers refuse multi-group FETCH with
 NOT_SUPPORTED, fail multi-group fills, and ignore FILL_TIMEOUT.
