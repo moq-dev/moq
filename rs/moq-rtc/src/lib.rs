@@ -284,11 +284,7 @@ mod tests {
 		let source = origin.consume();
 		let pushed = tokio::spawn(async move { client.publish(url, source, "source").await });
 		let ingested = ingest_origin.consume();
-		tokio::time::timeout(TIMEOUT, ingested.routed("ingested"))
-			.await
-			.expect("WHIP negotiation timed out")
-			.expect("the ingest origin closed");
-		let ingested = ingested.request_broadcast("ingested", None).await.unwrap();
+		let ingested = ingested.follow("ingested", None).unwrap().available().await.unwrap();
 		let mut played = opus_output(&ingested).await;
 		assert_eq!(next_payload(&mut played).await, OPUS_PACKET);
 
@@ -438,11 +434,7 @@ mod tests {
 			.unwrap();
 		// The DELETE ended the ingest cleanly, so it serves the finished broadcast for the
 		// linger; dropping the session, as an interrupt does, ends that at once.
-		let ingested = server_origin
-			.consume()
-			.request_broadcast("ingested", None)
-			.await
-			.unwrap();
+		let ingested = server_origin.consume().request("ingested", None).await.unwrap();
 		assert!(!ingested.is_closed(), "the finished ingest lingers");
 		whip_task.abort();
 		let stopped = tokio::time::timeout(TIMEOUT, whip_task).await.unwrap();

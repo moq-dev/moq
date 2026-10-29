@@ -957,7 +957,7 @@ impl Consumer {
 		let current = {
 			let mut state = self.state.lock();
 			// An ended broadcast serves nothing new, not even a track it still has:
-			// the lookup answers what a fresh `request_broadcast` for the path would.
+			// the lookup answers what a fresh `request` for the path would.
 			// Tracks already handed out are untouched.
 			if state.closing {
 				return Err(Error::Unroutable);

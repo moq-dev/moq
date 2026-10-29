@@ -34,6 +34,9 @@ jobs:
       github.event.pull_request.user.login == 'dependabot[bot]' &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
+    # The moq-bot key lives in the `publish` Environment, which only protected
+    # refs can deploy to; pull_request_target runs on the base branch.
+    environment: publish
 
     steps:
       # Smoke's flake and npm Playwright pin move together through its updater.

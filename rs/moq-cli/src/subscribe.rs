@@ -246,8 +246,6 @@ impl SubscribeArgs {
 
 /// Exports one broadcast from the Origin to stdout in the requested format.
 pub struct Subscribe {
-	origin: moq_net::origin::Consumer,
-	path: moq_net::Path,
 	source: moq_mux::Source,
 	catalog: CatalogFormat,
 	args: SubscribeArgs,
@@ -280,13 +278,11 @@ impl Subscribe {
 	) -> anyhow::Result<Self> {
 		let path = moq_net::Path::new(path)?;
 		let broadcast = origin
-			.request_broadcast(&path, None)
+			.request(&path, None)
 			.await
 			.with_context(|| format!("failed to resolve broadcast `{path}`"))?;
-		let source = moq_mux::Source::new(origin.clone(), broadcast);
+		let source = moq_mux::Source::new(origin, broadcast);
 		Ok(Self {
-			origin,
-			path,
 			source,
 			catalog,
 			args,
@@ -390,12 +386,6 @@ impl Subscribe {
 	}
 
 	async fn run_ts(self) -> anyhow::Result<()> {
-		self.origin.routed(&self.path).await.with_context(|| {
-			format!(
-				"broadcast `{}` is outside the session's scope, or the origin closed before it was announced",
-				self.path
-			)
-		})?;
 		if self.args.passthrough {
 			return self.run_ts_passthrough().await;
 		}

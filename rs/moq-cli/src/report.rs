@@ -413,12 +413,9 @@ async fn snapshot(
 /// track its catalog's `stats` section names, until the catalog and that track have both ended.
 pub async fn print_report(origin: moq_net::origin::Consumer, path: String) -> anyhow::Result<()> {
 	let mut stdout = tokio::io::stdout();
-	origin
-		.routed(&path)
-		.await
-		.ok_or_else(|| anyhow::anyhow!("origin closed before broadcast `{path}` was announced"))?;
 	let broadcast = origin
-		.request_broadcast(path.as_str(), None)
+		.follow(path.as_str(), None)?
+		.available()
 		.await
 		.with_context(|| format!("failed to resolve broadcast `{path}`"))?;
 	let source = moq_mux::Source::new(origin, broadcast.clone());
@@ -569,7 +566,7 @@ impl Readers {
 /// Send a line for each feedback snapshot the broadcast at `path` publishes, until it ends.
 async fn read_echo(origin: moq_net::origin::Consumer, path: moq_net::Path, lines: tokio::sync::mpsc::Sender<String>) {
 	let read = async {
-		let broadcast = origin.request_broadcast(&path, None).await?;
+		let broadcast = origin.request(&path, None).await?;
 		let subscriber = broadcast.track(hang::echo::TRACK)?.subscribe(None).await?;
 		let mut track = reader(subscriber);
 		while let Some(moq_net::Timed { value: feedback, .. }) = track.latest().await? {
