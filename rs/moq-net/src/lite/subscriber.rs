@@ -2233,7 +2233,11 @@ mod tests {
 		assert_eq!(active.covered(), Some(vec![0..1, 10..11, 20..20]));
 
 		active.updated = true;
-		assert_eq!(active.covered(), Some(vec![0..1, 0..11, 0..20]), "an update leaves only the lowest");
+		assert_eq!(
+			active.covered(),
+			Some(vec![0..1, 0..11, 0..20]),
+			"an update leaves only the lowest"
+		);
 	}
 
 	/// QUIC does not order streams, so group 2's header can reach the relay before group 1's.
@@ -8063,7 +8067,9 @@ impl ServeLoop {
 										// request-tracked floor stands rather than a guess.
 										if active.start == active.requested {
 											let _ = match (serve.subscriber.version.resolves_start(), served) {
-												(true, Some(served)) => self.serving.start_resolved(served, active.requested_max_delay),
+												(true, Some(served)) => {
+													self.serving.start_resolved(served, active.requested_max_delay)
+												}
 												_ => self.serving.start_at(served),
 											};
 										}
