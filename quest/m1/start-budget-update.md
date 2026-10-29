@@ -29,8 +29,13 @@ The crossed-update Rust/JS tests, direct and relayed intermediate-budget
 history-fill test, and exact published-wire fixtures pass. `just drafts check`
 and all 173 `just test interop --all` checks pass.
 
-Remaining: finish the local CI gate and published-release compatibility
-validation, then remove this quest and mark ready. `just test wire-compat`
+Remaining: complete the local CI gate and published-release compatibility
+validation, then remove this quest and mark ready. All code, feature, and
+static checks passed; the workspace test run passed 8,525 tests, then stopped
+on two unchanged moq-uring UDP tests whose worker setup exhausted this user's
+8 MiB `RLIMIT_MEMLOCK`. 472 selected tests were not run after fail-fast.
+Validate on a host with sufficient io-uring locked memory; do not weaken or
+disable those assertions. `just test wire-compat`
 stops before its session cases because main's accepted pins still name
 moq-cli 0.14.8 instead of published 0.14.9. The existing
 [wire compatibility prerequisite](https://github.com/moq-dev/moq/pull/7061)
