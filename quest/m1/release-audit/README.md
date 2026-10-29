@@ -88,6 +88,73 @@ The 2026-10-22 binding and OBS audit at main
 rate recovery child. Its two OBS findings went to m2 next to the other OBS
 work, because obs-moq ships on its own schedule.
 
+### Candidate recheck (2026-10-28)
+
+The source candidate is
+[main 487759f62a](https://github.com/moq-dev/moq/commit/487759f62a9ef39d916fe5b92df06dcff83478ce),
+with
+[release 7fad611aae](https://github.com/moq-dev/moq/commit/7fad611aae4ef4e7fa856ed077a0bb467f2de9be)
+as the current shipping branch. Main contains the resolved audit fixes and is
+usable for their combined source checks. It is not the final cut tree: release
+has not been merged into main, and the existing release reviews remain open.
+No release, version bump, or merge is authorized by this checkpoint.
+
+Checks at this candidate:
+
+- Native protocol, auth, media, relay, archive, FFI/C, and QMux suites passed:
+  7,697 tests, 43 skipped. The FFI used its OpenH264 feature.
+- JS lint/type/build checks and the unit-test phase passed (4,779 tests).
+  Python passed 104 tests; C, C++, Kotlin, and Go checks passed. Draft checks
+  and the OBS ThreadSanitizer suite passed, including reordered timestamps
+  and EOF draining. These are workspace builds, not registry-install proof.
+- Dart analysis and all 45 raw/wrapper tests passed, including idle stream
+  cancellation. Its publish dry-run failed because the staged package inside
+  ignored `.tmp/` inherited the checkout's ignore rules (hidden pubspec,
+  missing LICENSE). The existing
+  [moq-dev/moq#7117](https://github.com/moq-dev/moq/pull/7117) fixes that exact
+  staging failure; no duplicate fix is made here. This is not evidence of a
+  broken published Dart artifact.
+- `just test interop --all` passed nine native interop tests and all 176
+  configured harness cells: media and denied auth, finite finish, late join,
+  FETCH/tails, compression, and partial-group drops. Its two indefinite Rust
+  publisher runs needed forced cleanup after the stop grace period. The
+  finite-finish and tail checks passed independently; all children were reaped
+  and ports released. This was the default negotiated-version matrix, not the
+  optional complete IETF draft matrix.
+- The QMux record and CMAF declared-count benchmark sweeps passed. CMAF
+  refused the hostile 4,294,967,295-sample declarations over both payload sizes.
+- The release-mode track benchmark passed all 27 expiry-budget, fetch-park,
+  and datagram-pressure cases. These are quick, single-candidate measurements
+  on a shared host, not a new paired main-versus-release performance verdict.
+
+The full Linux gate is not proven here: the runner-image build was denied
+user namespaces, and the local flake probe rejected a scratch Unix socket.
+The full native feature-matrix run was stopped in favor of the focused
+regression suites above. Swift was skipped on this Linux host. Platform,
+installed-artifact, public-API diff, and full OBS runtime proofs retain their
+existing owners. Checks used the Nix toolchain with the inherited `BASH_ENV`
+hook disabled; that host hook otherwise caused Cargo launches to fail with
+`Argument list too long`.
+
+The registry resolver selects moq-cli 0.14.9, moq-relay 0.17.9, hang 0.21.18,
+`@moq/net` 0.4.7, `@moq/auth` 0.2.2, `@moq/hang` 0.5.4, `@moq/json` 0.4.3,
+and `@moq/web-transport` 0.1.6. The normal compatibility guard refuses the
+accepted exception because it still pins moq-cli 0.14.8. The owning
+[moq-dev/moq#7061](https://github.com/moq-dev/moq/pull/7061) has already run the
+full remeasurement and found failing stable published CLI controls at these
+same registry pins; it leaves the exception unchanged. Do not duplicate that
+fix or repin from the source-only results here.
+
+Remaining work: repeat the Dart publish check after its existing staging fix
+lands, and complete normal published-wire compatibility after its owner
+resolves the stable control failure. Refresh affected source checks if the
+candidate changes, then delete this epic and give the completed evidence to
+the cut quest.
+Recommendation: investigate and publish the corrected CLI through the existing
+compatibility quest before closing this audit. Deferring that proof to the
+breaking cut is a maintainer decision, not an inferred acceptance of the
+published failure.
+
 ## Related
 
 - [JS subscription ranges](/quest/m1/subscribe-ranges/js.md) - range lists and frame offsets build on the bounds fixed here
@@ -96,5 +163,6 @@ work, because obs-moq ships on its own schedule.
 - [Measured release performance](/quest/m1/release-perf/README.md) - existing paired benchmark regressions and their confirmation runs
 - [Transport performance audit](/quest/m2/audit-perf.md) - congestion-control coverage remains outstanding
 - [Binding timestamps](/quest/m1/binding-timestamps.md) - exact timestamps across language APIs
+- [Published-wire comparison](/quest/m0/interop-green/wire-compat-remeasure.md) - stable published controls and the planned-break refresh
 - [Dependency audit](/quest/m2/audit-deps.md) - existing advisory inventory
 - [Publish and adopt](/quest/m2/release/README.md) - API/feature review, merge order, candidate checks, publication, and installed-artifact proof
