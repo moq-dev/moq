@@ -53,8 +53,8 @@ async fn stalled_read(version: Version, budget: Duration) -> BTreeSet<u64> {
 	let _downstream = connect_mock(downstream).await;
 
 	let consumer = viewer.consume();
-	consumer.routed("live").await.unwrap();
-	let remote = consumer.request_broadcast("live", None).await.unwrap();
+	crate::support::announced(&consumer, "live").await;
+	let remote = consumer.request("live", None).await.unwrap();
 	let subscription = track::Subscription::default().with_max_delay(budget);
 	let mut reader = remote.track("audio").unwrap().subscribe(subscription).await.unwrap();
 	moq_clock::timeout(TIMEOUT, subscribed(&source)).await.unwrap();
@@ -68,11 +68,16 @@ async fn stalled_read(version: Version, budget: Duration) -> BTreeSet<u64> {
 		group.finish().unwrap();
 		moq_clock::sleep(Duration::from_secs(1)).await;
 	}
+	source.finish().unwrap();
 	*gate.write().ok().unwrap() = true;
 
+	// Read until the track ends, so a skipped group can't be one that merely arrived late.
 	let mut got = BTreeSet::new();
-	while let Ok(group) = moq_clock::timeout(Duration::from_secs(1), reader.recv_group()).await {
-		let mut group = group.unwrap().expect("the track is live");
+	while let Some(mut group) = moq_clock::timeout(TIMEOUT, reader.recv_group())
+		.await
+		.unwrap_or_else(|_| panic!("{version}: the track never finished"))
+		.unwrap()
+	{
 		let sequence = group.sequence;
 		let frame = group.read_frame().await;
 		assert!(
