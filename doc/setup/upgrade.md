@@ -43,9 +43,9 @@ These land with the next breaking release.
   Mixed versions only differ in how an unset priority ranks against a set one,
   so upgrade publishers and players in either order.
 - **moq-transport drafts 14 through 17 are dropped.** Rust and JavaScript
-  speak moq-transport drafts 18 through 22 only, and the `moql` SETUP
+  speak moq-transport drafts 18 and 22 only, and the `moql` SETUP
   negotiates moq-lite only. A peer that offers nothing newer fails
-  to connect instead of falling back, so move such peers to draft 18 or a
+  to connect instead of falling back, so move such peers to draft 18, draft 22, or a
   moq-lite version before upgrading what they connect to.
 - **WebSocket needs a QMux subprotocol** (#6231). Relays answer a WebSocket
   upgrade that offers no `qmux-NN` subprotocol with 400 instead of falling back
@@ -57,10 +57,9 @@ These land with the next breaking release.
 - **Auth requests name `webtransport`** (#5293). Relays report a WebTransport
   session as `webtransport` instead of `quic`, and older auth servers reject the
   new value, so upgrade auth servers before relays.
-- **Capped grants need upgraded verifiers** (#5697). A token whose `publish`
-  or `subscribe` carries a `rate` cap encodes that role as an object, which
-  released verifiers reject, so upgrade every auth server and verifier before
-  issuing capped tokens.
+- **Auth roles are pattern arrays.** Uncapped tokens and grants keep their
+  format. An object role, including one with a `rate` cap, is refused; use
+  pattern arrays for `publish` and `subscribe`.
 - **HLS records replace archive timelines.** The hang catalog's root `archive`
   section is gone. A video or audio rendition carries its own `hls` field
   naming a `<track>.hls` record track, which Rust publishers write by default.

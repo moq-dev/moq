@@ -340,15 +340,11 @@ are not checked. Rust relays preserve them across moq-lite 07 when both peers
 negotiate the [ietf extension](/draft/moq-ietf), which carries their origin and
 keeps them unchecked. A moq-lite peer without it receives that track untimed.
 
-A publisher may compress a track, which pays off for repetitive data such as
-JSON and not for media. Each group's frames become one DEFLATE stream
-([moq-flate](/draft/moq-flate)), and a datagram
-compresses alone. Only the work-in-progress moq-lite 07 carries the compressed
-bytes. A relay forwards them as received and inflates each group once for every
-other subscriber, moq-transport included, so readers always see the original
-frames. Rust and JavaScript publish compressed tracks by setting `compress: true`
-on the track's info. Application writes stay synchronous and readers receive plain
-payloads; compression is useful for repetitive data, not already compressed media.
+A publisher may [compress](/concept/compression) a track, which pays off for
+repetitive data such as JSON and not for media. Each group's frames become one
+DEFLATE stream, which only the work-in-progress moq-lite 07 carries. A relay
+forwards it as received and inflates each group once for every other
+subscriber, moq-transport included, so readers always see the original frames.
 
 A relay cancels its upstream subscription once nobody subscribes, but keeps its
 copy of the track for 30 seconds after the last reader leaves, so a returning

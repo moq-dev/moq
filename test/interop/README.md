@@ -379,7 +379,10 @@ from an engine name. Playwright WebKit is not Safari; Safari device/transport
 bugs and real Firefox transport negotiation still require manual evidence.
 
 Firefox only resumes Web Audio on an output device, so each Linux run gets a
-private null sink from `test/lib/pulse.py`. Chromium plays to its fake output instead,
+private null sink from `test/lib/pulse.py`. That sink renders in 50 ms blocks, so a fresh
+player's context starts in tens of milliseconds, as on a real device; the null sink's
+default 2 s block held a late joiner's audio, and with it live playback, for up to 2 s.
+Chromium plays to its fake output instead,
 with or without a host sound server.
 
 Nightly runs the Firefox player only. Playwright's Linux WebKit 27.2 fails two
@@ -503,6 +506,7 @@ varint.ts               the JS side of the varint check, driven by moq-net's tes
 clients/
   rust/audio.rs           the Rust subscriber's audio decode via rs/moq-audio (`interop-audio`)
   rust/tail.rs            the finite raw-track client (`interop-tail`)
+  rust/catalog.rs         the compressed-catalog publisher (`interop-catalog`)
   python/interop.py       publish/subscribe via py/moq-rs (import moq)
   go/main.go              publish/subscribe via go/wrapper (import moq-go/moq)
   cpp/main.cpp            publish/subscribe via cpp/moq (find_package(moq-cpp))
@@ -518,6 +522,7 @@ clients/
     src/instrument.ts     live counts of the platform resources the page holds
     src/close.ts          the refused session, read off `WebTransport.closed`
   js-native/subscribe.ts  subscribe via @moq/net + @moq/hang + the WebTransport polyfill
+  js-native/catalog.ts    the compressed-catalog reader, pinned to one version
   c/subscribe.c           subscribe via rs/moq-c
 ```
 
@@ -595,3 +600,9 @@ subscriber reads them.
 The finite-tail matrix also publishes compressed tracks from Rust and native JS through
 the relay, in both directions on lite-07 and lite-06. It checks multiple frames in each
 DEFLATE window, empty frames, the plain fallback and the received track's codec flag.
+
+The compressed-catalog lane then fans one Rust hang catalog out to three native JS
+readers at once, each pinned to lite-07, lite-06, or moq-transport-22 and reading it as
+`@moq/watch` does. Only the lite-07 reader sees the flag; the other two share the relay's
+inflated copy, so `moq_relay_inflated_bytes_total` must grow by exactly the catalog's
+inflated size. The harness enables the relay's `[stats]` and `[internal]` listener for it.

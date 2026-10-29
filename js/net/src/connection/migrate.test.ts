@@ -1,12 +1,11 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
-import { Instant, Manual, Milli, Nano } from "@moq/clock";
+import { Instant, Manual, Milli, Nano, yieldNow } from "@moq/clock";
 import { RefusedRedirect } from "../error.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
-import { nextTask } from "../util/yield.ts";
 import { accept } from "./accept.ts";
 import { Connection, resetShared } from "./pool.ts";
 import { Redirects, Reload } from "./reload.ts";
@@ -298,7 +297,7 @@ test("the connection's tokens ride every session across a GOAWAY", async () => {
 	// so the reconnect's delay passes long before the draining session's handover.
 	const until = async (done: () => boolean) => {
 		for (let i = 0; i < 100 && !done(); i++) {
-			await nextTask();
+			await yieldNow();
 			await clock.advance(Nano.fromMilli(Milli(1)));
 		}
 		expect(done()).toBe(true);
@@ -351,13 +350,13 @@ test("the connection's tokens ride every session across a GOAWAY", async () => {
 		// session keeps presenting it beside its successor.
 		await until(() => relays[1]?.tokens.includes("token") === true);
 		await until(() => token.grant.peek() !== undefined && reload.established.peek() !== undefined);
-		await nextTask();
+		await yieldNow();
 		expect(first.withdrawn).not.toContain("token");
 		let ended = false;
 		void token.closed.then(() => {
 			ended = true;
 		});
-		await nextTask();
+		await yieldNow();
 		expect(ended).toBe(false);
 
 		// The tokens end with the loop.

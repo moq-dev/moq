@@ -149,8 +149,33 @@ test("rendition.close() unregisters the name and drops it from the catalog", asy
 	broadcast.close();
 });
 
-test("subscriber demand hands the producer to the rendition and clears it when the track closes", async () => {
+test("hands the producer to the rendition without a subscriber and clears it when the track closes", async () => {
 	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name: Path.from("test.hang") });
+	await settle();
+
+	const rendition = broadcast.video("video");
+	await settle();
+
+	// Encoding needs no subscriber, so its groups wait in the cache for a late one.
+	const track = rendition.track.peek();
+	expect(track).toBeDefined();
+
+	// Closing the producer (encoder error / teardown) clears the signal, with no lingering effect watching it.
+	track?.finish();
+	track?.close();
+	await settle();
+	expect(rendition.track.peek()).toBeUndefined();
+
+	broadcast.close();
+});
+
+test("on demand hands the producer to the rendition only while a subscriber is attached", async () => {
+	const broadcast = new Broadcast({
+		enabled: true,
+		origin: new Origin.Producer(),
+		name: Path.from("test.hang"),
+		onDemand: true,
+	});
 	await settle();
 
 	const net = broadcast.net.peek();
@@ -158,21 +183,24 @@ test("subscriber demand hands the producer to the rendition and clears it when t
 
 	const rendition = broadcast.video("video");
 	await settle();
+	expect(rendition.track.peek()).toBeUndefined();
+
 	const subscriber = net.track("video").subscribe();
 	await settle();
-
-	// The request loop accepted the subscription and handed the producer to the rendition.
 	const track = rendition.track.peek();
 	expect(track).toBeDefined();
 
-	// Closing the producer (encoder error / teardown) clears the signal, with no lingering per-subscription
-	// effect watching it.
-	track?.finish();
-	track?.close();
+	// The last subscriber leaving takes it back, but the broadcast keeps the track open for the next one.
+	subscriber.close();
 	await settle();
 	expect(rendition.track.peek()).toBeUndefined();
+	expect(track?.closed.peek()).toBeUndefined();
 
-	subscriber.close();
+	const again = net.track("video").subscribe();
+	await settle();
+	expect(rendition.track.peek()).toBe(track);
+
+	again.close();
 	broadcast.close();
 });
 
@@ -501,7 +529,8 @@ test("a served decoder identity change moves the rendition to a fresh track name
 		expect(config?.track).toBe("video/1");
 		expect(config?.codec).toBe("vp8");
 		expect(track.closed.peek()).toBeNull();
-		expect(video.track.peek()).toBeUndefined();
+		// The replacement is handed over at once, with or without a subscriber.
+		expect(video.track.peek()?.name).toBe("video/1");
 		expect(broadcast.net.peek()).toBe(net);
 		expect(announced?.active.peek()?.epoch).toBe(epoch);
 
@@ -690,15 +719,28 @@ test("a name returning with a different identity takes a fresh track name", asyn
 	broadcast.close();
 });
 
-// Nobody has seen an unserved catalog, so its renditions settle without minting names.
-test("identity changes before the first announce keep the catalog ID as the track name", async () => {
+// Regression: identity was fixed only at the first announce, but an eager encoder caches groups
+// before then. A codec change while unannounced kept the name, so a late subscriber or a fetch read
+// the old codec's groups under the new catalog config.
+test("identity changes before the first announce take a fresh track name", async () => {
 	const announce = new Signal(false);
 	const broadcast = new Broadcast({ origin: new Origin.Producer(), name: Path.from("unserved.hang"), announce });
 	const video = broadcast.video("video");
 	video.config.set({ ...videoConfig, bitrate: Catalog.u53(1_000_000) });
 	await settle();
+	// The encoder writes before anyone can find the broadcast.
+	const cached = video.track.peek();
+	if (!cached) throw new Error("expected the track to be handed over before the first announce");
+	cached.appendGroup().finish();
+
+	// Everything except identity still updates the track in place.
+	video.config.set({ ...videoConfig, bitrate: Catalog.u53(500_000) });
+	await settle();
+	expect(video.track.peek()).toBe(cached);
+
 	video.config.set({ ...videoConfig, codec: "vp8", bitrate: Catalog.u53(500_000) });
 	await settle();
+	expect(cached.closed.peek()).toBeDefined();
 
 	announce.set(true);
 	await settle();
@@ -710,12 +752,12 @@ test("identity changes before the first announce keep the catalog ID as the trac
 	const config = (await catalog.latest())?.value.video?.renditions.video;
 	expect(config?.codec).toBe("vp8");
 	expect(config?.bitrate).toBe(Catalog.u53(500_000));
-	expect(config?.track).toBeUndefined();
+	expect(config?.track).toBe("video/1");
 
-	// The first snapshot fixed the name's identity.
-	video.config.set(videoConfig);
-	await settle();
-	expect((await catalog.latest())?.value.video?.renditions.video?.track).toBe("video/1");
+	// The replacement starts empty, so no group from the old codec reads under the new config.
+	const replacement = video.track.peek();
+	expect(replacement?.name).toBe("video/1");
+	expect(replacement?.appendGroup().sequence).toBe(0);
 
 	broadcast.close();
 });

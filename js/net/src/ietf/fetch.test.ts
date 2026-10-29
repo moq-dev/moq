@@ -9,6 +9,7 @@ import * as Path from "../path.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import type { Order, Producer as TrackProducer } from "../track.ts";
+import { wireOf } from "../wire.ts";
 import { Fetch, FetchHeader, FetchOk, type FetchType, type Location } from "./fetch.ts";
 import type * as Filter from "./filter.ts";
 import { Group as GroupMessage } from "./object.ts";
@@ -27,6 +28,7 @@ const ALPNS: Record<IetfVersion, string> = { [D18]: ALPN.DRAFT_18, [D20]: ALPN.D
 const SUBSCRIBE_ID = 7n;
 const FETCH_ID = 9n;
 
+const TIMEOUT = 0x2;
 const NOT_SUPPORTED = 0x3;
 const UNAUTHORIZED = 0x1;
 const DOES_NOT_EXIST = 0x10;
@@ -53,6 +55,7 @@ function serve(version: IetfVersion, grant?: Signal<Grant | undefined>) {
 	return {
 		pair,
 		pub,
+		broadcast: publication.broadcast,
 		track,
 		uni,
 		version,
@@ -596,6 +599,49 @@ test("a timed-out group with nothing yet keeps the groups before it nonexistent"
 	}
 });
 
+// A group the cache evicts between listing it for the answer and writing it is unknown, not
+// skipped, which would say it never existed. Waiting on the open Largest Object's group, before
+// FETCH_OK, gives the older groups time to age out of the cache; the newer one stays.
+test("a group evicted after it was listed is unknown", async () => {
+	for (const version of VERSIONS) {
+		for (const order of ["ascending", "descending"] as const) {
+			using clock = manual();
+			using fx = serve(version);
+			// Group 0 never existed; groups 1 and 2 age out.
+			writeGroup(fx.track, 1, ["1-0", "1-1"]);
+			writeGroup(fx.track, 2, ["2-0", "2-1"]);
+			await clock.advance(ms(25_000));
+			writeGroup(fx.track, 3, ["3-0", "3-1"]);
+			const live = writeGroup(fx.track, 4, ["4-0"], false);
+
+			const type = range(version, at(0, 0), at(4, 0));
+			const msg = new Fetch({ requestId: FETCH_ID, type, groupOrder: order, fillTimeout: Milli(20_000) });
+			const answer = served(await clock.drive(fetch(fx, msg)));
+			expect(answer.ok.endLocation).toEqual({ group: 4n, object: version === D18 ? 0n : MAX_OBJECT });
+
+			const newest: [number, number, string][] = [[4, 0, "4-0"], gap(4, MAX_OBJECT, timedOut(version))];
+			expect(answer.objects).toEqual(
+				order === "ascending"
+					? [
+							gap(0, MAX_OBJECT, "8c"),
+							gap(1, MAX_OBJECT, "10c"),
+							gap(2, MAX_OBJECT, "10c"),
+							...pairs([3]),
+							...newest,
+						]
+					: [
+							...newest,
+							...pairs([3]),
+							gap(3, MAX_OBJECT, "8c"),
+							gap(2, MAX_OBJECT, "10c"),
+							gap(1, MAX_OBJECT, "10c"),
+						],
+			);
+			live.finish();
+		}
+	}
+});
+
 // Every FETCH keeps its own budget, even for the same open group, and one without FILL_TIMEOUT,
 // as an older peer sends, waits for the group as it always has.
 test("each FETCH keeps its own FILL_TIMEOUT", async () => {
@@ -618,8 +664,8 @@ test("each FETCH keeps its own FILL_TIMEOUT", async () => {
 	}
 });
 
-/** Open a draft-18 SUBSCRIBE of `room/video` with `filter`, returning its SUBSCRIBE_OK. */
-async function subscribe(fx: Served, filter: Filter.Filter = { kind: "nextObject" }) {
+/** Start a draft-18 Largest Object SUBSCRIBE of `room/video`, or as `fields` override, without reading its answer. */
+async function startSubscribe(fx: Served, fields: Partial<ConstructorParameters<typeof Subscribe>[0]> = {}) {
 	const client = await Stream.open(fx.pair.client, { version: fx.version });
 	const server = await Stream.accept(fx.pair.server, fx.version);
 	if (!server) throw new Error("publisher never accepted the subscribe stream");
@@ -628,9 +674,15 @@ async function subscribe(fx: Served, filter: Filter.Filter = { kind: "nextObject
 		trackNamespace: Path.from("room"),
 		trackName: "video",
 		subscriberPriority: 0,
-		filter,
+		filter: { kind: "nextObject" },
+		...fields,
 	});
-	const serving = fx.pub.runSubscribe(msg, server);
+	return { client, serving: fx.pub.runSubscribe(msg, server) };
+}
+
+/** Open a draft-18 SUBSCRIBE of `room/video` with `filter`, returning its SUBSCRIBE_OK. */
+async function subscribe(fx: Served, filter: Filter.Filter = { kind: "nextObject" }) {
+	const { client, serving } = await startSubscribe(fx, { filter });
 	expect(await client.reader.u53()).toBe(SubscribeOk.id);
 	const ok = await SubscribeOk.decode(client.reader, fx.version);
 	return { client, ok, serving };
@@ -803,6 +855,26 @@ test("draft-18: a joining FETCH waits for the subscription it names", async () =
 	client.close();
 });
 
+// A subscription still being set up when the FETCH's request budget runs out is refused TIMEOUT,
+// rather than as one the publisher never saw.
+test("draft-18: a joining FETCH times out on a subscription still being set up", async () => {
+	using fx = serve(D18);
+	// Serve tracks on demand and never answer the request, so the SUBSCRIBE never resolves.
+	const requested = wireOf(fx.broadcast).requested();
+	const { client, serving } = await startSubscribe(fx, { trackName: "audio" });
+	expect((await requested)?.name).toBe("audio");
+
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		expect(refused(await clock.drive(fetch(fx, joining())))).toBe(TIMEOUT);
+	} finally {
+		installed.close();
+		client.close();
+		await serving;
+	}
+});
+
 // A subscription refused while a joining FETCH waits on it answers the FETCH at once.
 test("draft-18: a joining FETCH whose subscription is refused is refused", async () => {
 	using fx = serve(D18);
@@ -811,18 +883,7 @@ test("draft-18: a joining FETCH whose subscription is refused is refused", async
 	const task = fx.pub.runFetch(joining(), request.stream);
 	await flush();
 
-	const client = await Stream.open(fx.pair.client, { version: D18 });
-	const server = await Stream.accept(fx.pair.server, D18);
-	if (!server) throw new Error("publisher never accepted the subscribe stream");
-	const msg = new Subscribe({
-		requestId: SUBSCRIBE_ID,
-		trackNamespace: Path.from("room"),
-		trackName: "video",
-		subscriberPriority: 0,
-		filter: { kind: "nextObject" },
-		rangeFilters: true,
-	});
-	const serving = fx.pub.runSubscribe(msg, server);
+	const { client, serving } = await startSubscribe(fx, { rangeFilters: true });
 	expect(await client.reader.u53()).toBe(RequestError.id);
 	await serving;
 

@@ -991,7 +991,7 @@ impl Publisher {
 			return Ok(None);
 		};
 		// The immediate lookup: answering a peer never starts discovery of its own.
-		let requesting = origin.request(path.clone(), epoch.as_ref());
+		let requesting = origin.lookup(path.clone(), epoch.as_ref());
 		self.until_withdrawn(stream, |waiter| requesting.poll_ok(waiter))
 			.await
 			.transpose()
@@ -10912,7 +10912,7 @@ mod serve_tests {
 		let broadcast = upstream.publish("room", crate::origin::Route::default()).unwrap();
 		let _track = broadcast.create_track("video", info).unwrap();
 		let (downstream, _sessions) = crate::lite::ietf::test_hop(&upstream, "room", [true, true]).await;
-		let broadcast = downstream.consume().request_broadcast("room", None).await.unwrap();
+		let broadcast = downstream.consume().request("room", None).await.unwrap();
 		broadcast.track("video").unwrap().info().await.unwrap()
 	}
 

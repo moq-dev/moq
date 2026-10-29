@@ -1,4 +1,4 @@
-import { Instant, Milli, Nano, now, sleep } from "@moq/clock";
+import { Instant, Milli, Nano, now, sleep, yieldNow } from "@moq/clock";
 import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Gate } from "../auth_gate.ts";
@@ -15,13 +15,12 @@ import { finalSequence, hiddenBelow, hooks, insertRun, presented, type Run, runG
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Priority, sendOrder } from "../priority.ts";
-import { type Reader, type Stream, Writer } from "../stream.ts";
+import { concat, encodeVarint, type Reader, type Stream, type StreamVersion, Writer } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { nextChange } from "../util/change.ts";
 import { untilGivenUp } from "../util/given_up.ts";
-import { nextTask } from "../util/yield.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
 import { AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
@@ -66,6 +65,19 @@ const PROBE_RTT_DELTA = 0.25;
 /** Map a signed delta to an unsigned zigzag varint value (mirrors Rust `varint::zigzag`). */
 function zigzag(delta: bigint): bigint {
 	return delta >= 0n ? delta << 1n : (-delta << 1n) - 1n;
+}
+
+/**
+ * A frame's fields ahead of its payload, built in memory for one write: a stream write is far
+ * costlier than a varint, and a backlog pays it for every frame. The timestamp `delta` is present
+ * when the track is stamped, and `inflated` when the frame was decompressed.
+ */
+function frameHeader(version: StreamVersion, delta: bigint | undefined, inflated: number | undefined, size: number) {
+	const parts: Uint8Array[] = [];
+	if (delta !== undefined) parts.push(encodeVarint(zigzag(delta), version));
+	if (inflated !== undefined) parts.push(encodeVarint(inflated, version));
+	parts.push(encodeVarint(size, version));
+	return concat(parts);
 }
 
 /** How a lite hop stamps a track's frames and datagrams. */
@@ -1270,10 +1282,11 @@ export class Publisher {
 							moveCursor();
 							// A microtask is too short: decoding one framed update crosses several
 							// awaits, each of which can requeue behind the serving continuation. A
-							// task boundary lets the decoder finish whatever the transport already
-							// delivered before the next group pop. Updates are rare, so groups do
-							// not pay this scheduling cost on the normal path.
-							await nextTask();
+							// task boundary usually lets the decoder finish whatever the transport
+							// already delivered before the next group pop. It orders nothing: an update
+							// decoded later applies from the pop after it. Updates are rare, so groups
+							// do not pay this scheduling cost on the normal path.
+							await yieldNow();
 							continue;
 						}
 					}
@@ -1689,14 +1702,14 @@ export class Publisher {
 			if (!read) break;
 			const frame = read.frame;
 
+			let delta: bigint | undefined;
 			if (stamp !== undefined) {
 				const ts = BigInt(wireTime(frame.timestamp, stamp));
-				await stream.u62(zigzag(ts - prevTs));
+				delta = ts - prevTs;
 				prevTs = ts;
 			}
 
-			if (read.inflated !== undefined) await stream.u53(read.inflated);
-			await stream.u53(frame.payload.byteLength);
+			await stream.write(frameHeader(stream.version, delta, read.inflated, frame.payload.byteLength));
 			if (frame.payload.length > 0) await stream.write(frame.payload);
 		}
 	}
@@ -1799,16 +1812,16 @@ export class Publisher {
 				if (read.sequence < startFrame) continue;
 				if (endFrame !== undefined && read.sequence > endFrame) break;
 
+				let delta: bigint | undefined;
 				if (stamp !== undefined) {
 					// Convert each frame to the track's wire timescale.
 					const ts = BigInt(wireTime(read.frame.timestamp, stamp));
-					await write(() => stream.u62(zigzag(ts - prevTs)));
+					delta = ts - prevTs;
 					prevTs = ts;
 				}
 
-				const inflated = read.inflated;
-				if (inflated !== undefined) await write(() => stream.u53(inflated));
-				await write(() => stream.u53(read.frame.payload.byteLength));
+				const header = frameHeader(stream.version, delta, read.inflated, read.frame.payload.byteLength);
+				await write(() => stream.write(header));
 				if (read.frame.payload.length > 0) await write(() => stream.write(read.frame.payload));
 			}
 

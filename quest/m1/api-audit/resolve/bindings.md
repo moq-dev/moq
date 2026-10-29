@@ -19,7 +19,3 @@ Regenerate bindings from source, update every wrapper's tests, READMEs and
 `just test interop --all`.
 
 Public API: breaking in moq-ffi, the C ABI, and every wrapper. Wire: none.
-
-## Required
-
-- [Rust request and follow](/quest/m1/api-audit/resolve/rust.md) - the Rust names the bindings mirror

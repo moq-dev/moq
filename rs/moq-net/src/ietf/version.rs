@@ -5,8 +5,8 @@ use std::fmt;
 #[non_exhaustive]
 pub enum Version {
 	Draft18,
-	Draft20,
 	Draft22,
+	Draft20,
 }
 
 impl fmt::Display for Version {

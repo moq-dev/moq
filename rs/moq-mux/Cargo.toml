@@ -45,7 +45,7 @@ url = { workspace = true }
 webm-iterable = "0.7"
 
 [dev-dependencies]
-criterion = { workspace = true }
+criterion = { package = "bench-harness", path = "../bench-harness" }
 futures = { workspace = true }
 moq-clock = { workspace = true, features = ["sim"] }
 proptest = { workspace = true }

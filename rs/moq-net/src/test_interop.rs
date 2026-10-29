@@ -429,8 +429,11 @@ fn ietf_datagram_interop() {
 	use crate::coding::Decode;
 	use crate::{Timescale, Timestamp};
 
-	let all = [ietf::Version::Draft18, ietf::Version::Draft20, ietf::Version::Draft22];
-	for (draft, version) in [18, 22].into_iter().zip(all) {
+	for (draft, version) in [
+		(18, ietf::Version::Draft18),
+		(20, ietf::Version::Draft20),
+		(22, ietf::Version::Draft22),
+	] {
 		let mut properties = Vec::new();
 		let mut w = Encoder::new(&mut properties, version.into());
 		ietf::encode_object_time(&mut w, Timestamp::from_millis(1234).unwrap(), Timescale::MILLI).unwrap();
@@ -594,8 +597,11 @@ fn ietf_track_status_interop() {
 	use crate::coding::Decode;
 	use crate::ietf::error::request;
 
-	let all = [ietf::Version::Draft18, ietf::Version::Draft20, ietf::Version::Draft22];
-	for (draft, version) in [18, 22].into_iter().zip(all) {
+	for (draft, version) in [
+		(18, ietf::Version::Draft18),
+		(20, ietf::Version::Draft20),
+		(22, ietf::Version::Draft22),
+	] {
 		let request = |id: u64, namespace: &str, wanted: bool| {
 			let mut buf = Vec::new();
 			let mut w = Encoder::new(&mut buf, version.into());
@@ -630,7 +636,7 @@ fn ietf_track_status_interop() {
 			assert!(r.is_empty(), "{version}: trailing bytes");
 
 			let expected = match version {
-				// Only draft-22 can carry the opt-out.
+				// Draft 20 and later can carry the opt-out.
 				_ if !wanted && ietf::Filter::is_draft20(version) => ietf::Properties::default(),
 				_ => ietf::Properties {
 					unknown: Default::default(),

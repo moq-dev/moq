@@ -20,25 +20,25 @@ No caller can assemble a racy two-step resolve, and no crate hand-rolls
 
 Decided 2026-10-22 (API audit, maintainer approved the recommendation).
 
-The behavioral checkpoint makes `request_broadcast` own scoped discovery and
+The behavioral checkpoint makes the Rust request own scoped discovery and
 retry route churn. It reports table absence only after sync; a selected handler's
 explicit refusal stays terminal, including a dropped Prepared answer. The front
 records that refusal privately at its existing standing-route decision, rather
 than guessing from unrelated mutations of the table. The old immediate lookup
 is private to sessions. `Requesting::is_queued` and the public `Routing` task are
 gone; `Requesting` is the owned task. The stats reader uses it instead of its
-own retry on `is_queued`; the mux binding keeps its pinned `routed_broadcast`
-wait. Rust and JS have same-epoch follow-return coverage, and every JS request
-owns its discovery watch from creation. A pending plain JS request fails
-`Unroutable` once that discovery syncs with no route for it, matching Rust. JS
-announcement-following no longer silently uses a blind peer. The existing
-`routed_broadcast` helper retains its route-change retry policy for the CLI,
-gateway, mux binding, and relay HTTP consumers. Its removal belongs to the remaining rollout.
+own retry on `is_queued`. Rust and JS have same-epoch follow-return coverage,
+and every JS request owns its discovery watch from creation. A pending plain JS
+request fails `Unroutable` once that discovery syncs with no route for it,
+matching Rust. JS announcement-following no longer silently uses a blind peer.
 
-The approved public method names have not rolled out. Decided 2026-10-28
-(maintainer, /quest-plan): the rollout splits into the four children below, so
-each language and the callers review on their own. Rust and JS proceed in
-parallel; the bindings follow Rust, and the callers follow both.
+Decided 2026-10-28 (maintainer, /quest-plan): the rollout splits into a child
+per language and one for the callers, so each reviews on its own. Rust has
+landed: `request(path, epoch)` and `follow(path, epoch)` (returning
+`origin::Following`), with `routed`, `routed_broadcast`, and the route-level
+`announce::Follow` gone, and its in-tree callers following the path where they
+used to wait for a route. JS proceeds in parallel; the bindings follow Rust,
+and the callers follow both.
 
 This README's own work, once every child lands: the lifecycle and churn checks
 across languages, the required Nix gate, and all-language interop
@@ -50,9 +50,9 @@ Wire: none.
 
 ## Required
 
-- [Rust request and follow](/quest/m1/api-audit/resolve/rust.md) - Rust names the two resolutions `request` and `follow`, deletes `routed` and `routed_broadcast`, and makes the route-level `Follow` private
 - [Bindings request and follow](/quest/m1/api-audit/resolve/bindings.md) - moq-ffi, the C ABI, and every wrapper mirror `request` and `follow` with an optional epoch
-- [Callers resolve once](/quest/m1/api-audit/resolve/callers.md) - no caller hand-rolls synced resolution or decides table absence by wall clock
+- [The player takes any read-side origin](/quest/m1/api-audit/resolve/watch-origin.md) - `@moq/watch`'s `Player` and `Broadcast` accept a read-only `Origin.Consumer` as well as a `Table`
+- [The carla demo pins its driver epoch](/quest/m1/api-audit/resolve/callers.md) - the demo's driver watcher requests each run pinned to its announced epoch
 
 ## Related
 

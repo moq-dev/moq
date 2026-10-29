@@ -601,7 +601,7 @@ impl Publisher {
 
 		// Resolving may wait on a route for the broadcast, which its going ends.
 		let resolved = {
-			let mut requesting = std::pin::pin!(request.origin.request_broadcast(&suffix, epoch));
+			let mut requesting = std::pin::pin!(request.origin.request(&suffix, epoch));
 			kio::wait(|waiter| {
 				if route.poll_closed(waiter).is_ready() || request.live.poll_closed(waiter).is_ready() {
 					return Poll::Ready(None);
