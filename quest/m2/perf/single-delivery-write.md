@@ -22,4 +22,10 @@ lock-free path here, in m2.
 - Keep the shared reservation and canonical-content rules #6922 added.
 - A measured no-win abandons the quest.
 
+Also in scope (decided 2026-10-29, from [moq-dev/moq#7139](https://github.com/moq-dev/moq/pull/7139)):
+after #7139, batched `write_frames` still costs about 20% more instructions per
+frame than before #6922 (459 against 380; 6 to 12% wall clock), from the same
+canonical-storage design. Measure the `group_write_frames/batch32/*` cases
+beside lite FETCH, and fix both paths together where they share the cost.
+
 Public API: none. Wire: none.
