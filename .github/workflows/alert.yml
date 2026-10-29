@@ -39,7 +39,6 @@ on:
       - Release RS
       - Release Swift FFI
       - Release Swift Lib
-      - Release tag
       - release-winget
       - rpm-repo
       - Smoke

@@ -342,35 +342,6 @@ jobs:
     uses: ./.github/workflows/features.yml
     secrets: inherit
 
-  # A backport must bump each hand-versioned package whose shipped sources it
-  # changes, or its release workflow skips the fix as already published. Only a
-  # human picks the version, so this checks and never edits. The cut (a PR from
-  # `main`) only reports: it carries changes that need no release, which only
-  # the maintainer judges.
-  versions:
-    name: Versions
-    if: github.event.action != 'closed'
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          # `release`'s first-parent history and the release tags say which
-          # version of each package shipped.
-          fetch-depth: 0
-      - uses: ./.github/actions/just
-      - name: Check versions
-        run: |
-          mode=()
-          # Only this repository's own `main` is the cut; a fork's `main` is a backport.
-          [[ "$HEAD_REF" != main || "$HEAD_REPO" != "$GITHUB_REPOSITORY" ]] || mode=(--report)
-          just gh versions check --base "origin/$BASE_REF" "${mode[@]}"
-        env:
-          BASE_REF: ${{ github.base_ref }}
-          HEAD_REF: ${{ github.head_ref }}
-          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-
   android:
     name: Android
     needs: scope
@@ -540,7 +511,6 @@ jobs:
       - scope
       - platform
       - features
-      - versions
       - android
       - api-diff
       - audio-quality

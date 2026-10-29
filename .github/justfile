@@ -49,7 +49,6 @@ test:
     bun sh/gh/queue.test.ts
     python3 sh/gh/install-formula.test.py
     sh/gh/release.test.sh
-    python3 sh/gh/versions.test.py
     python3 sh/gh/ffi.test.py
     bun test sh/gh/ffi.test.ts sh/gh/cpp.test.ts
     python3 sh/rs/package-rename.test.py
@@ -70,11 +69,6 @@ test:
 [positional-arguments]
 release *args:
     sh/gh/release.sh "$@"
-
-# Check a `release` PR bumps the hand-versioned packages it changes, or push their release tags: `just gh versions check|tag`.
-[positional-arguments]
-versions *args:
-    python3 sh/gh/versions.py "$@"
 
 # Post a failed run to Discord, or check cron and publishing alert coverage.
 [positional-arguments]
