@@ -27,7 +27,9 @@ curl http://localhost:4443/fetch/demo/bbb.hang/catalog.json
 
 With [stats](/concept/stats) enabled, `/fetch` and `/announced` count as requests
 on the token's tier and root. Fetched payload counts against its broadcast path;
-neither endpoint counts as a connected session.
+neither endpoint counts as a connected session. Both endpoints return private,
+non-cacheable responses. `/fetch` serves binary data, so save it to a file or
+parse it as the track's format.
 
 GET routes on the public router, including ones an embedder merges in, get a
 wildcard CORS origin unless the route sets its own. Tokens sent over plain HTTP
@@ -39,6 +41,12 @@ are visible on the wire, so use HTTPS in production.
 [internal]
 listen = "127.0.0.1:9101"
 ```
+
+The listener is unauthenticated and must stay on loopback or a trusted private
+network. Requests carrying an `Origin` header are refused. Ops tools must use
+the listener's literal IP and port, or `localhost` on loopback; other hostnames
+are refused to prevent DNS rebinding. A proxy must preserve that authority
+rather than forward the caller's `Host`.
 
 ### GET /metrics
 
