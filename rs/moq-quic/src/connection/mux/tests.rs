@@ -279,6 +279,18 @@ fn rejects_empty_records() {
 }
 
 #[test]
+fn draft00_counts_each_padding_byte_as_a_frame() {
+	let mut pair = Pair::new(config(Version::QMux00));
+	pair.server.handle_record(Bytes::from_static(&[0x00]), pair.now);
+	assert!(!pair.server.is_closed());
+	pair.server.handle_record(Bytes::from_static(&[0x00, 0x00]), pair.now);
+	assert_eq!(
+		transport_error(&mut pair.server).code,
+		TransportErrorCode::FRAME_ENCODING_ERROR
+	);
+}
+
+#[test]
 fn draft00_rejects_qx_ping() {
 	for ty in [0x348c67529ef8c7bd_u64, 0x348c67529ef8c7be] {
 		let mut pair = Pair::new(config(Version::QMux00));
