@@ -30,8 +30,10 @@ or short control message is never read past its end:
   packet info present and the ECN mark omitted, so CE marks never reach
   moq-quic on this runtime. moq-uring sizes its own buffer per family
   (`CONTROL_LEN` in `rs/moq-uring/src/udp.rs`), carries no timestamp, and
-  drops a `MSG_CTRUNC` receive, so it is unaffected; reuse its
-  `cmsg_space` sum over the enabled options for `cmsg::LEN`.
+  drops a `MSG_CTRUNC` receive, so it is unaffected. Size `cmsg::LEN` the
+  way its `CONTROL_LEN` is sized, as a compile-time `cmsg_space` sum, but
+  over this socket's own option set per target and family, timestamp
+  included; `CONTROL_LEN` itself is too small here.
 - On `MSG_CTRUNC` despite the sizing, keep the datagram and log once rather
   than drop it. Losing metadata beats losing the packet.
 - A Linux test enables every option and sends an ECT(0) GSO train
@@ -39,7 +41,8 @@ or short control message is never read past its end:
   GRO message and pktinfo, timestamp, and ECN alone (88 bytes for IPv4, 96
   for IPv6) already fit today's buffer. Over both `recvmsg` and `recvmmsg`,
   it asserts no `MSG_CTRUNC` and that `RecvMeta` carries the GRO stride, the
-  ECN mark, a timestamp, and the destination address, for IPv4 and IPv6.
+  ECN mark, a timestamp, the destination address, and the interface index,
+  for IPv4 and IPv6.
 
 Decided 2026-10-28 (maintainer): one quest for the bound, the sizing, and
 `MSG_CTRUNC`, since they're the same decoder and buffer.

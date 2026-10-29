@@ -43,7 +43,8 @@ SAFETY comments require only that the pointer stay valid. Decided 2026-10-28
 (maintainer): document it here rather than in its own quest. Name the
 callback thread under Threading in `doc/lib/c/index.md`, add the
 thread-safety precondition to the callback typedefs' doc comments (cbindgen
-copies them into the header), and state it in each `unsafe impl Send`'s
-SAFETY comment.
+copies them into the header), and state it in the `# Safety` sections of
+`OnStatus::new` and `OnState::new` and in each `unsafe impl Send`'s SAFETY
+comment.
 
 Public API: doc change only. Wire: none.
