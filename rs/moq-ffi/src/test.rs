@@ -5830,7 +5830,10 @@ async fn an_epoch_pins_request_and_follow() {
 		.await
 		.expect("timed out requesting the pinned instance")
 		.unwrap();
-	assert_eq!(pinned.inner().info().epoch.as_ref().map(ToString::to_string), Some(epoch.clone()));
+	assert_eq!(
+		pinned.inner().info().epoch.as_ref().map(ToString::to_string),
+		Some(epoch.clone())
+	);
 	let err = tokio::time::timeout(TIMEOUT, consumer.request("live".into(), Some(moq_mint_epoch())))
 		.await
 		.expect("timed out requesting another instance")

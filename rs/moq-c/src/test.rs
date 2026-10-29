@@ -3903,10 +3903,7 @@ fn follow_close_cancels() {
 
 	assert_eq!(moq_origin_follow_cancel(task), 0);
 	assert_eq!(cb.recv_terminal(), 0, "close delivers terminal 0");
-	assert!(
-		moq_origin_follow_cancel(task) < 0,
-		"double-close should fail"
-	);
+	assert!(moq_origin_follow_cancel(task) < 0, "double-close should fail");
 
 	assert_eq!(moq_origin_close(origin), 0);
 }
@@ -4045,7 +4042,11 @@ fn resolve_pinned(call: Resolve, origin: u32, epoch: &str, cb: &Callback) -> i32
 fn an_epoch_pins_request_and_follow() {
 	let origin = id(moq_origin_create());
 	let epoch = moq_net::Epoch::mint();
-	let first = publish(origin, "live", moq_net::origin::Route::default().with_epoch(epoch.clone()));
+	let first = publish(
+		origin,
+		"live",
+		moq_net::origin::Route::default().with_epoch(epoch.clone()),
+	);
 	let epoch = epoch.to_string();
 
 	let cb = Callback::new();
@@ -4053,7 +4054,12 @@ fn an_epoch_pins_request_and_follow() {
 	assert_eq!(moq_consume_close(id(cb.recv())), 0);
 	assert_eq!(cb.recv_terminal(), 0);
 	let cb = Callback::new();
-	id(resolve_pinned(moq_origin_request, origin, &moq_net::Epoch::mint().to_string(), &cb));
+	id(resolve_pinned(
+		moq_origin_request,
+		origin,
+		moq_net::Epoch::mint().as_ref(),
+		&cb,
+	));
 	assert!(cb.recv() < 0, "another instance resolved");
 	assert!(resolve_pinned(moq_origin_follow, origin, "not-an-epoch", &Callback::new()) < 0);
 
