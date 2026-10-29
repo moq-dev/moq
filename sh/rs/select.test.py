@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -112,6 +113,33 @@ class SelectTest(unittest.TestCase):
                 calls = self.selected(path, action="test")
                 self.assertTrue(any("/demo/carla/bridge#moq-carla-bridge" in call for call in calls), calls)
         self.assertEqual(self.selected("demo/carla/web/src/main.ts"), [])
+
+    def test_out_of_crate_target_selects_its_crate(self):
+        # moq-cli builds the Rust interop clients as examples from outside its crate.
+        for path in ("test/interop/clients/rust/tail.rs", "test/interop/clients/rust/added.rs"):
+            for action in ("lint", "fix"):
+                with self.subTest(path=path, action=action):
+                    calls = self.selected(path, action=action)
+                    self.assertTrue(any(call.startswith(f"rs {action} ") and "/rs/moq-cli#" in call
+                                        for call in calls), calls)
+        self.assertEqual(self.selected("test/interop/compat/container.rs"), [])
+
+    def test_dispatch_scope_covers_out_of_crate_targets(self):
+        scope = re.search(r"^\s*\[rs\]='([^']*)'", (ROOT / "sh/dispatch.sh").read_text(), re.M).group(1)
+        metadata = json.loads(subprocess.check_output(
+            ["cargo", "metadata", "--format-version", "1", "--no-deps"], cwd=ROOT, text=True))
+        root = Path(metadata["workspace_root"])
+        directories = set()
+        for package in metadata["packages"]:
+            crate = Path(package["manifest_path"]).parent
+            for target in package["targets"]:
+                source = Path(os.path.normpath(target["src_path"]))
+                if not source.is_relative_to(crate):
+                    directories.add(source.parent.relative_to(root).as_posix())
+        self.assertIn("test/interop/clients/rust", directories)
+        for directory in sorted(directories):
+            with self.subTest(directory=directory):
+                self.assertRegex(f"{directory}/added.rs", scope)
 
     def test_a_bench_selects_only_its_crate(self):
         bench = "rs/moq-stats/benches/producer_tick.rs"

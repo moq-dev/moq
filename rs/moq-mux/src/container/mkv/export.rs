@@ -536,7 +536,6 @@ impl<S: Stream> Export<S> {
 						decode: frame.timestamp.into(),
 						restart: track.source.markers(),
 						skip: track.source.skips(),
-						cut: track.source.cuts(),
 						sync: track.kind == TrackKind::Audio || frame.keyframe,
 						leading: false,
 						item: frame,

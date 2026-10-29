@@ -157,7 +157,7 @@ fn reset_codes() {
 #[test]
 fn reset_returns_stream_credit_once_observed() {
 	let _guard = subscribe();
-	let (mut pair, client_ch, server_ch) = connected_with(|t| _ = t.max_concurrent_uni_streams(VarInt(1)), |_| {});
+	let (mut pair, client_ch, server_ch) = connected_with(|t| t.limits.max_streams = NonZeroU64::new(1), |_| {});
 	let s = open(&mut pair, client_ch, server_ch, b"hello");
 	pair.client_send(client_ch, s).reset(CODE).unwrap();
 	pair.drive();
@@ -177,7 +177,8 @@ const WINDOW: u32 = 4000;
 
 /// A connected pair whose server's connection window is filled by an unread client stream
 fn blocked() -> (Pair, ConnectionHandle, ConnectionHandle, StreamId) {
-	let (mut pair, client_ch, server_ch) = connected_with(|t| _ = t.receive_window(VarInt::from_u32(WINDOW)), |_| {});
+	let (mut pair, client_ch, server_ch) =
+		connected_with(|t| t.limits.receive_window = NonZeroU64::new(WINDOW.into()), |_| {});
 	let s = open(&mut pair, client_ch, server_ch, &[0; WINDOW as usize]);
 	// The window is spent, so nothing more can be written
 	let other = pair

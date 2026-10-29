@@ -257,7 +257,7 @@ impl<S: Stream> Client<S> {
 		let queued = std::mem::take(&mut self.work);
 		self.drain(queued).await?;
 
-		let broadcast = origin.request_broadcast(path, None).await?;
+		let broadcast = origin.request(path, None).await?;
 		let source = moq_mux::Source::new(origin, broadcast);
 		let catalog = source
 			.catalog::<()>(moq_mux::catalog::CatalogFormat::default())
@@ -818,8 +818,7 @@ mod tests {
 			});
 
 			let consumer = downstream.consume();
-			consumer.routed("live/cam0").await.unwrap();
-			let copy = consumer.request_broadcast("live/cam0", None).await.unwrap();
+			let copy = consumer.follow("live/cam0", None).unwrap().available().await.unwrap();
 			// The catalog goes out once the keyframe landed, so the copy holds media to linger with.
 			let mut listed = copy.track("catalog.json").unwrap().subscribe(None).await.unwrap();
 			assert!(listed.recv_group().await.unwrap().is_some());
@@ -899,8 +898,7 @@ mod tests {
 
 		// Read what reaches the remote back out as FLV.
 		let consumer = downstream.consume();
-		consumer.routed("live/cam0").await.unwrap();
-		let copy = consumer.request_broadcast("live/cam0", None).await.unwrap();
+		let copy = consumer.follow("live/cam0", None).unwrap().available().await.unwrap();
 		let source = moq_mux::Source::new(consumer, copy);
 		let catalog = source
 			.catalog::<()>(moq_mux::catalog::CatalogFormat::default())
@@ -994,11 +992,12 @@ mod tests {
 		});
 
 		// The republished broadcast should show up in the client's origin.
-		tokio::time::timeout(Duration::from_secs(5), announced.routed("pulled/cam0"))
+		let broadcast = announced
+			.follow("pulled/cam0", None)
+			.unwrap()
+			.available()
 			.await
-			.expect("client republish timed out")
-			.expect("broadcast announced in client origin");
-		let broadcast = announced.request_broadcast("pulled/cam0", None).await.unwrap();
+			.unwrap();
 
 		// It should carry a hang catalog track (proof the FLV demux produced real
 		// media on the far side): subscribe to it and read one catalog frame.

@@ -1101,7 +1101,8 @@ async fn serve_fetch(
 		// NOTE: The auth token is already scoped to the broadcast.
 		// Block until a route covers the broadcast (within the fetch deadline) so
 		// freshly-connected subscribers don't get a spurious 404 before the announce arrives.
-		let broadcast = origin.routed_broadcast("").await.map_err(|_| StatusCode::NOT_FOUND)?;
+		let mut following = origin.follow("", None).map_err(|_| StatusCode::NOT_FOUND)?;
+		let broadcast = following.available().await.map_err(|_| StatusCode::NOT_FOUND)?;
 		let sequence = match params.group {
 			FetchGroup::Num(sequence) => Some(sequence),
 			FetchGroup::Latest => None,

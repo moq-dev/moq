@@ -29,7 +29,13 @@ async fn export_echo_reports_where_the_import_solicits() {
 	let mut import = ts::Import::new(broadcast, catalog.reserve());
 	import.decode(&CLIP[..HALF]).unwrap();
 	publication.announce(Default::default()).unwrap();
-	origin.consume().routed("demo").await.unwrap();
+	origin
+		.consume()
+		.follow("demo", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap();
 
 	let args = SubscribeArgs {
 		format: SubscribeFormat::Ts,

@@ -61,11 +61,7 @@ async fn setup(version: Version) -> Setup {
 	let pair = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	kio::clock::timeout(TIMEOUT, consumer.routed("room"))
-		.await
-		.expect("announce timeout")
-		.expect("routed");
-	let remote = kio::clock::timeout(TIMEOUT, consumer.request_broadcast("room", None))
+	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");

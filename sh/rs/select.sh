@@ -25,8 +25,6 @@ select_packages() {
         return
     fi
 
-    grep -qE '^(rs|demo)/' "$list" || return 0
-
     # `--no-deps` keeps this to workspace members and off the network.
     local metadata
     metadata=$(cargo metadata --format-version 1 --no-deps)
@@ -53,11 +51,26 @@ select_packages() {
     # depend on and the test build never compiles, so it selects that crate alone
     # (for its lint) rather than every dependent's tests.
     benches=$(sed -n 's|^rs/\([^/]*\)/benches/.*|\1|p' "$list")
+    # A target can also sit outside its crate, as moq-cli's interop examples
+    # under test/interop/clients/rust/ do, so a change in the directory of a
+    # target's root file, which holds that file's modules, seeds its crate.
+    # Cargo leaves the manifest's `..` in `src_path`, so they are resolved here.
+    # sh/dispatch.sh's `rs` scope must match those directories too; the
+    # selector's tests check that.
     seeds=$({
         sed -n '\|^rs/[^/]*/benches/|d; s|^rs/\([^/]*\)/.*|\1|p' "$list"
-        jq -r --rawfile list "$list" '($list | split("\n")) as $paths | .packages[]
-            | (.manifest_path | split("/")) as $p | select($p[-4] == "demo")
-            | select(any($paths[]; startswith("demo/\($p[-3])/\($p[-2])/"))) | .name' <<<"$metadata"
+        jq -r --rawfile list "$list" '
+            def resolve: gsub("\\\\"; "/") | reduce split("/")[] as $s ([];
+                if $s == ".." then .[:-1] elif $s == "." then . else . + [$s] end) | join("/");
+            ($list | split("\n") | map(select(. != ""))) as $paths
+            | ((.workspace_root | resolve) + "/") as $root
+            | .packages[]
+            | (.manifest_path | split("/")) as $p
+            | ($p[:-1] | join("/") + "/") as $crate
+            | select(($p[-4] == "demo" and any($paths[]; startswith("demo/\($p[-3])/\($p[-2])/")))
+                or any(.targets[].src_path | resolve | select(startswith($crate) | not)
+                    | ltrimstr($root) | sub("[^/]*$"; ""); . as $dir | any($paths[]; startswith($dir))))
+            | .name' <<<"$metadata"
     } | sort -u)
     edges=$(jq -r '.packages[] | .name as $name | .dependencies[] | "\($name) \(.name)"' <<<"$metadata")
 

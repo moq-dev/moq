@@ -231,7 +231,7 @@ mod tests {
 		let session = accept(&server, &origin, moq_net::Path::from_static("live/cam0"), &offer())
 			.await
 			.unwrap();
-		let broadcast = consumer.request_broadcast("live/cam0", None).await.unwrap();
+		let broadcast = consumer.request("live/cam0", None).await.unwrap();
 		let mut catalog = broadcast
 			.track(hang::Catalog::DEFAULT_NAME)
 			.unwrap()
@@ -262,7 +262,7 @@ mod tests {
 		let _stale_session = accept(&server, &origin, moq_net::Path::from_static("live/cam0"), &offer())
 			.await
 			.unwrap();
-		let stale = consumer.request_broadcast("live/cam0", None).await.unwrap();
+		let stale = consumer.request("live/cam0", None).await.unwrap();
 		let mut catalog = stale
 			.track(hang::Catalog::DEFAULT_NAME)
 			.unwrap()
@@ -284,7 +284,7 @@ mod tests {
 		})
 		.await;
 		assert!(stale_viewer.is_err(), "the stale viewer ended: {stale_viewer:?}");
-		let fresh = consumer.request_broadcast("live/cam0", None).await.unwrap();
+		let fresh = consumer.request("live/cam0", None).await.unwrap();
 		assert!(!fresh.is_clone(&stale), "viewers reach the reconnected session");
 	}
 }

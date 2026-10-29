@@ -10,11 +10,11 @@
 //! pull-style pump).
 //!
 //! Two screen quirks worth knowing:
-//! - `publish_capture` releases the capture while unwatched and reopens it on
-//!   demand. A fresh portal session would re-prompt the picker every time, so the
-//!   portal's restore token is kept with the selection and consumed by the
-//!   next [`open`], which restores the same grant without a dialog (on
-//!   compositors that support persistence). The token is forgotten when the
+//! - An on-demand `publish_capture` releases the capture while unwatched and
+//!   reopens it for the next viewer. A fresh portal session would re-prompt the
+//!   picker every time, so the portal's restore token is kept with the selection
+//!   and consumed by the next [`open`], which restores the same grant without a
+//!   dialog (on compositors that support persistence). The token is forgotten when the
 //!   compositor ends the stream (the user hit "stop sharing"), so a revoked
 //!   grant is asked for again rather than silently resumed.
 //! - Compositors only deliver frames on damage, so a static screen would starve
@@ -154,7 +154,7 @@ async fn start(config: &Config, capture: Capture, session: Option<SessionGuard>)
 				return_tx,
 			}) {
 				// Surface a setup failure through the awaiting `open`; a mid-stream
-				// failure just ends the stream (the encode loop reopens on demand).
+				// failure just ends the stream (the encode loop reopens it).
 				match state.borrow_mut().geo_tx.take() {
 					Some(tx) => drop(tx.send(Err(e))),
 					None => chan.fail(e),
@@ -301,8 +301,8 @@ async fn portal_negotiate(cursor: bool, selection: &portal::Selection) -> Result
 }
 
 /// Closes the portal session when dropped, so the compositor's "screen is being
-/// shared" indicator turns off and sessions don't pile up across demand-driven
-/// reopens. The close call is async and `Drop` is not, so a task spawned here
+/// shared" indicator turns off and sessions don't pile up across an on-demand
+/// capture's reopens. The close call is async and `Drop` is not, so a task spawned here
 /// waits for the guard to drop. Closing does not invalidate the restore token.
 struct SessionGuard {
 	_close: tokio::sync::oneshot::Sender<()>,
@@ -863,7 +863,7 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 				if done {
 					// The producer ended the stream while our loop was live (the
 					// user hit "stop sharing", or the output or camera went away).
-					// Forget the screen restore token so the demand-driven reopen
+					// Forget the screen restore token so the next reopen
 					// asks again instead of silently resuming a grant the user just
 					// revoked. Our own teardown quits the loop before anything
 					// disconnects, so it never reaches this path.

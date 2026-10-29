@@ -36,8 +36,7 @@ async fn an_empty_group_arrives_empty() {
 		broadcast.announce(Default::default()).unwrap();
 
 		let consumer = subscriber.consume();
-		consumer.routed("room").await.unwrap();
-		let remote = kio::clock::timeout(TIMEOUT, consumer.request_broadcast("room", None))
+		let remote = kio::clock::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())
 			.await
 			.expect("resolve timeout")
 			.expect("broadcast resolves");

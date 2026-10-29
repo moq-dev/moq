@@ -38,6 +38,10 @@ pub struct Stats {
 	/// Completed group deliveries across all subscriptions (the displayed total).
 	/// A group the relay failed part-way is omitted and counted as lost.
 	pub groups_recv: AtomicU64,
+	/// Completed deliveries older than their subscription's first group, such as
+	/// cached history filled in after the subscribe. Included in `groups_recv`,
+	/// excluded from `groups_expected`, and never counted as loss.
+	pub groups_history: AtomicU64,
 	/// Settled sequence spans plus any failed live-frontier groups.
 	pub groups_expected: AtomicU64,
 	/// Completed deliveries within `groups_expected`. The shortfall is the gaps
@@ -69,6 +73,7 @@ impl Stats {
 			frames_recv: AtomicU64::new(0),
 			bytes_recv: AtomicU64::new(0),
 			groups_recv: AtomicU64::new(0),
+			groups_history: AtomicU64::new(0),
 			groups_expected: AtomicU64::new(0),
 			groups_present: AtomicU64::new(0),
 			groups_lost: AtomicU64::new(0),
@@ -168,6 +173,7 @@ impl Stats {
 				recv_mbps = format_args!("{recv_mbps:.1}"),
 				recv_fps = format_args!("{recv_fps:.0}"),
 				recv_groups = now.groups_recv,
+				history_groups = now.groups_history,
 				lost_groups = now.groups_lost,
 				loss = format_args!("{loss:.2}%"),
 				latency_samples = now.latency_samples,
@@ -256,6 +262,7 @@ struct Snapshot {
 	frames_recv: u64,
 	bytes_recv: u64,
 	groups_recv: u64,
+	groups_history: u64,
 	groups_expected: u64,
 	groups_present: u64,
 	groups_lost: u64,
@@ -362,6 +369,7 @@ impl Snapshot {
 			frames_recv: stats.frames_recv.load(Ordering::Relaxed),
 			bytes_recv: stats.bytes_recv.load(Ordering::Relaxed),
 			groups_recv: stats.groups_recv.load(Ordering::Relaxed),
+			groups_history: stats.groups_history.load(Ordering::Relaxed),
 			groups_expected: stats.groups_expected.load(Ordering::Relaxed),
 			groups_present,
 			groups_lost,

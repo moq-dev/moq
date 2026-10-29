@@ -1,3 +1,5 @@
+//! The endpoint: one socket's connection routing, and how connections are dialed and accepted.
+
 use std::{
 	collections::{HashMap, hash_map},
 	convert::TryFrom,
@@ -8,30 +10,34 @@ use std::{
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
-use rand::{Rng, RngExt, SeedableRng, rngs::StdRng};
+use rand::{Rng, RngExt, rngs::StdRng};
 use rustc_hash::FxHashMap;
 use slab::Slab;
 use thiserror::Error;
 use tracing::{debug, error, trace, warn};
 
+pub use crate::config::endpoint::{CidGenerator, Config};
 use crate::{
-	INITIAL_MTU, Instant, MAX_CID_SIZE, MIN_INITIAL_SIZE, RESET_TOKEN_SIZE, ResetToken, Side, Transmit,
-	TransportConfig, TransportError,
+	ConfigError, INITIAL_MTU, Instant, MAX_CID_SIZE, MIN_INITIAL_SIZE, RESET_TOKEN_SIZE, ResetToken, Side, Transmit,
+	TransportError, Version,
 	cid_generator::ConnectionIdGenerator,
+	client,
 	coding::BufMutExt,
-	config::{ClientConfig, EndpointConfig, ServerConfig},
-	connection::{Connection, ConnectionArgs, ConnectionError, SideArgs},
-	crypto::{self, Keys, UnsupportedVersion},
+	config::endpoint::Resolved,
+	connection::{Connection, ConnectionArgs, Error as ConnectionError, SideArgs},
+	crypto::{self, Keys},
 	frame,
 	packet::{
 		FixedLengthConnectionIdParser, Header, InitialHeader, InitialPacket, PacketDecodeError, PacketNumber,
 		PartialDecode, ProtectedInitialHeader,
 	},
+	server,
 	shared::{
 		ConnectionEvent, ConnectionEventInner, ConnectionId, DatagramConnectionEvent, EcnCodepoint, EndpointEvent,
 		EndpointEventInner, IssuedCid,
 	},
 	token::{IncomingToken, InvalidRetryTokenError, Token, TokenPayload},
+	transport,
 	transport_parameters::{PreferredAddress, TransportParameters},
 };
 
@@ -44,8 +50,8 @@ pub struct Endpoint {
 	index: ConnectionIndex,
 	connections: Slab<ConnectionMeta>,
 	local_cid_generator: Box<dyn ConnectionIdGenerator>,
-	config: Arc<EndpointConfig>,
-	server_config: Option<Arc<ServerConfig>>,
+	config: Resolved,
+	server_config: Option<Arc<server::Config>>,
 	/// Whether the underlying UDP socket promises not to fragment packets
 	allow_mtud: bool,
 	/// Time at which a stateless reset was most recently sent
@@ -62,31 +68,36 @@ impl Endpoint {
 	/// better performance. This requires that outgoing packets are never fragmented, which can be
 	/// achieved via e.g. the `IPV6_DONTFRAG` socket option.
 	///
-	/// Panics if the endpoint cannot be seeded from the operating system random source.
-	pub fn new(config: Arc<EndpointConfig>, server_config: Option<Arc<ServerConfig>>, allow_mtud: bool) -> Self {
-		Self {
+	/// Errors on a configuration [`Config::validate`] refuses. Panics if the endpoint cannot be
+	/// seeded from the operating system random source.
+	#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+	pub fn new(config: Config, allow_mtud: bool) -> Result<Self, ConfigError> {
+		use rand::SeedableRng;
+
+		let (resolved, cid_generator) = config.resolve()?;
+		Ok(Self {
 			rng: match config.rng_seed {
 				Some(seed) => StdRng::from_seed(seed),
 				None => crate::entropy::std_rng(),
 			},
 			index: ConnectionIndex::default(),
 			connections: Slab::new(),
-			local_cid_generator: (config.connection_id_generator_factory.as_ref())(),
-			config,
-			server_config,
+			local_cid_generator: cid_generator,
+			config: resolved,
+			server_config: config.server.map(Arc::new),
 			allow_mtud,
 			last_stateless_reset: None,
 			incoming_buffers: Slab::new(),
 			all_incoming_buffers_total_bytes: 0,
-		}
+		})
 	}
 
 	/// Replace the server configuration, affecting new incoming connections only
 	///
 	/// Pending incoming connections retain the configuration active when they first arrived.
 	#[cfg(test)]
-	pub(crate) fn set_server_config(&mut self, server_config: Option<Arc<ServerConfig>>) {
-		self.server_config = server_config;
+	pub(crate) fn set_server_config(&mut self, server_config: Option<server::Config>) {
+		self.server_config = server_config.map(Arc::new);
 	}
 
 	/// Process `EndpointEvent`s emitted from related `Connection`s
@@ -131,21 +142,21 @@ impl Endpoint {
 	}
 
 	/// Process an incoming UDP datagram
-	pub fn handle(
-		&mut self,
-		now: Instant,
-		remote: SocketAddr,
-		local_ip: Option<IpAddr>,
-		ecn: Option<EcnCodepoint>,
-		data: BytesMut,
-		buf: &mut Vec<u8>,
-	) -> Option<DatagramEvent> {
+	///
+	/// A response the endpoint sends itself is written to `buf` and described by the
+	/// [`DatagramEvent::Response`].
+	pub fn handle(&mut self, now: Instant, received: Received, buf: &mut Vec<u8>) -> Option<DatagramEvent> {
+		let Received {
+			remote,
+			local_ip,
+			ecn,
+			data,
+		} = received;
 		// Partially decode packet or short-circuit if unable
 		let datagram_len = data.len();
 		let mut event = match PartialDecode::new(
 			data,
 			&FixedLengthConnectionIdParser::new(self.local_cid_generator.cid_len()),
-			&self.config.supported_versions,
 			self.config.grease_quic_bit,
 		) {
 			Ok((first_decode, remaining)) => DatagramConnectionEvent {
@@ -184,15 +195,15 @@ impl Endpoint {
 					0x0a1a_2a3a => 0x0a1a_2a4a,
 					_ => 0x0a1a_2a3a,
 				});
-				for &version in &self.config.supported_versions {
-					buf.write(version);
+				for version in Version::ALL {
+					buf.write(version.wire());
 				}
 				return Some(DatagramEvent::Response(Transmit {
-					destination: remote,
+					remote,
 					ecn: None,
 					size: buf.len(),
 					segment_size: None,
-					src_ip: local_ip,
+					local_ip,
 				}));
 			}
 			Err(e) => {
@@ -208,7 +219,6 @@ impl Endpoint {
 			let (first_decode, remaining) = PartialDecode::new(
 				data,
 				&FixedLengthConnectionIdParser::new(self.local_cid_generator.cid_len()),
-				&self.config.supported_versions,
 				self.config.grease_quic_bit,
 			)
 			.ok()?;
@@ -318,30 +328,27 @@ impl Endpoint {
 		debug_assert!(buf.len() < inciting_dgram_len);
 
 		Some(Transmit {
-			destination: addresses.remote,
+			remote: addresses.remote,
 			ecn: None,
 			size: buf.len(),
 			segment_size: None,
-			src_ip: addresses.local_ip,
+			local_ip: addresses.local_ip,
 		})
 	}
 
 	/// Initiate a connection
-	pub fn connect(
-		&mut self,
-		now: Instant,
-		config: ClientConfig,
-		remote: SocketAddr,
-		server_name: &str,
-	) -> Result<(ConnectionHandle, Connection), ConnectError> {
+	pub fn connect(&mut self, now: Instant, dial: Dial<'_>) -> Result<(ConnectionHandle, Connection), ConnectError> {
+		let Dial {
+			config,
+			remote,
+			server_name,
+		} = dial;
+		config.transport.validate()?;
 		if self.cids_exhausted() {
 			return Err(ConnectError::CidsExhausted);
 		}
 		if remote.port() == 0 || remote.ip().is_unspecified() {
 			return Err(ConnectError::InvalidRemoteAddress(remote));
-		}
-		if !self.config.supported_versions.contains(&config.version) {
-			return Err(ConnectError::UnsupportedVersion);
 		}
 
 		let remote_id = (config.initial_dst_cid_provider)();
@@ -359,6 +366,7 @@ impl Endpoint {
 		);
 		let tls = config
 			.crypto
+			.clone()
 			.start_session(config.version, server_name, &params)
 			.inspect_err(|_| {
 				// Remove just issued connection id
@@ -374,9 +382,9 @@ impl Endpoint {
 			FourTuple { remote, local_ip: None },
 			now,
 			tls,
-			config.transport,
+			Arc::new(config.transport.clone()),
 			SideArgs::Client {
-				token_store: config.token_store,
+				token_store: config.token_store.clone(),
 				server_name: server_name.into(),
 			},
 		);
@@ -445,22 +453,13 @@ impl Endpoint {
 			return None;
 		}
 
-		let crypto = match server_config.crypto.initial_keys(header.version, dst_cid) {
-			Ok(keys) => keys,
-			Err(UnsupportedVersion) => {
-				// This probably indicates that the user set supported_versions incorrectly in
-				// `EndpointConfig`.
-				debug!(
-					"ignoring initial packet version {:#x} unsupported by cryptographic layer",
-					header.version
-				);
-				return None;
-			}
-		};
+		// Decoding refused every other version.
+		let version = Version::from_wire(header.version)?;
+		let crypto = server_config.crypto.initial_keys(version, dst_cid);
 
 		if let Err(reason) = self.early_validate_first_packet(header) {
 			return Some(DatagramEvent::Response(self.initial_close(
-				header.version,
+				version,
 				addresses,
 				&crypto,
 				header.src_cid,
@@ -493,7 +492,7 @@ impl Endpoint {
 			Err(InvalidRetryTokenError) => {
 				debug!("rejecting invalid retry token");
 				return Some(DatagramEvent::Response(self.initial_close(
-					header.version,
+					version,
 					addresses,
 					&crypto,
 					header.src_cid,
@@ -512,6 +511,7 @@ impl Endpoint {
 
 		Some(DatagramEvent::NewConnection(Incoming {
 			received_at: event.now,
+			version,
 			addresses,
 			ecn: event.ecn,
 			packet: InitialPacket {
@@ -537,9 +537,8 @@ impl Endpoint {
 		incoming: Incoming,
 		now: Instant,
 		buf: &mut Vec<u8>,
-		server_config: Option<Arc<ServerConfig>>,
 	) -> Result<(ConnectionHandle, Connection), Box<AcceptError>> {
-		let accepting = self.start_accept(incoming, now, buf, server_config)?;
+		let accepting = self.start_accept(incoming, now, buf)?;
 		self.finish_accept(accepting.accept(), buf)
 	}
 
@@ -555,9 +554,9 @@ impl Endpoint {
 	/// the connection and delivers the buffered datagrams to it, or releases the reserved state if
 	/// the handshake failed.
 	///
-	/// Until `finish_accept`, the attempt counts toward [`ServerConfig::max_incoming()`], and
-	/// datagrams buffered for it toward [`ServerConfig::incoming_buffer_size()`] and
-	/// [`ServerConfig::incoming_buffer_size_total()`].
+	/// Until `finish_accept`, the attempt counts toward [`server::Config::max_incoming`], and
+	/// datagrams buffered for it toward [`server::Config::incoming_buffer_size`] and
+	/// [`server::Config::incoming_buffer_size_total`].
 	///
 	/// On error, no endpoint state remains reserved for the attempt.
 	// box err to avoid clippy::result_large_err
@@ -566,24 +565,18 @@ impl Endpoint {
 		mut incoming: Incoming,
 		now: Instant,
 		buf: &mut Vec<u8>,
-		server_config: Option<Arc<ServerConfig>>,
 	) -> Result<Accepting, Box<AcceptError>> {
 		let remote_address_validated = incoming.remote_address_validated();
 
 		let packet_number = incoming.packet.header.number.expand(0);
-		let InitialHeader {
-			src_cid,
-			dst_cid,
-			version,
-			..
-		} = incoming.packet.header;
-		let server_config =
-			server_config.unwrap_or_else(|| self.incoming_buffers[incoming.incoming_idx].server_config.clone());
+		let version = incoming.version;
+		let InitialHeader { src_cid, dst_cid, .. } = incoming.packet.header;
+		let server_config = self.incoming_buffers[incoming.incoming_idx].server_config.clone();
 
 		// Still handshaking, so the handshake idle timeout applies, not the idle timeout.
 		if incoming
 			.received_at
-			.checked_add(server_config.transport.handshake_idle_timeout)
+			.checked_add(server_config.transport.handshake_timeout)
 			.is_some_and(|deadline| deadline <= now)
 		{
 			debug!("abandoning accept of stale initial");
@@ -673,8 +666,8 @@ impl Endpoint {
 		self.rng.fill_bytes(&mut rng_seed);
 		let server_crypto = server_config.crypto.clone();
 		let args = ConnectionArgs {
-			endpoint_config: self.config.clone(),
-			transport_config: server_config.transport.clone(),
+			grease_quic_bit: self.config.grease_quic_bit,
+			transport_config: Arc::new(server_config.transport.clone()),
 			init_cid: dst_cid,
 			loc_cid,
 			rem_cid: src_cid,
@@ -792,7 +785,7 @@ impl Endpoint {
 		incoming.improper_drop_warner.dismiss();
 
 		self.initial_close(
-			incoming.packet.header.version,
+			incoming.version,
 			incoming.addresses,
 			&incoming.crypto,
 			incoming.packet.header.src_cid,
@@ -836,19 +829,19 @@ impl Endpoint {
 
 		let encode = header.encode(buf);
 		buf.put_slice(&token);
-		buf.extend_from_slice(&server_config.crypto.retry_tag(
-			incoming.packet.header.version,
-			incoming.packet.header.dst_cid,
-			buf,
-		));
+		buf.extend_from_slice(
+			&server_config
+				.crypto
+				.retry_tag(incoming.version, incoming.packet.header.dst_cid, buf),
+		);
 		encode.finish(buf, &*incoming.crypto.header.local, None);
 
 		Ok(Transmit {
-			destination: incoming.addresses.remote,
+			remote: incoming.addresses.remote,
 			ecn: None,
 			size: buf.len(),
 			segment_size: None,
-			src_ip: incoming.addresses.local_ip,
+			local_ip: incoming.addresses.local_ip,
 		})
 	}
 
@@ -880,14 +873,14 @@ impl Endpoint {
 	fn add_connection(
 		&mut self,
 		ch: ConnectionHandle,
-		version: u32,
+		version: Version,
 		init_cid: ConnectionId,
 		loc_cid: ConnectionId,
 		rem_cid: ConnectionId,
 		addresses: FourTuple,
 		now: Instant,
 		tls: Box<dyn crypto::Session>,
-		transport_config: Arc<TransportConfig>,
+		transport_config: Arc<transport::Config>,
 		side_args: SideArgs,
 	) -> Connection {
 		let mut rng_seed = [0; 32];
@@ -897,7 +890,7 @@ impl Endpoint {
 		let conn = Connection::new(
 			tls,
 			ConnectionArgs {
-				endpoint_config: self.config.clone(),
+				grease_quic_bit: self.config.grease_quic_bit,
 				transport_config,
 				init_cid,
 				loc_cid,
@@ -975,7 +968,7 @@ impl Endpoint {
 
 	fn initial_close(
 		&mut self,
-		version: u32,
+		version: Version,
 		addresses: FourTuple,
 		crypto: &Keys,
 		remote_id: ConnectionId,
@@ -992,7 +985,7 @@ impl Endpoint {
 			src_cid: local_id,
 			number,
 			token: Bytes::new(),
-			version,
+			version: version.wire(),
 		});
 
 		let partial_encode = header.encode(buf);
@@ -1001,17 +994,30 @@ impl Endpoint {
 		buf.resize(buf.len() + crypto.packet.local.tag_len(), 0);
 		partial_encode.finish(buf, &*crypto.header.local, Some((0, &*crypto.packet.local)));
 		Transmit {
-			destination: addresses.remote,
+			remote: addresses.remote,
 			ecn: None,
 			size: buf.len(),
 			segment_size: None,
-			src_ip: addresses.local_ip,
+			local_ip: addresses.local_ip,
 		}
 	}
 
-	/// Access the configuration used by this endpoint
-	pub fn config(&self) -> &EndpointConfig {
-		&self.config
+	/// The largest UDP payload this endpoint accepts from peers
+	#[cfg(test)]
+	pub(crate) fn max_udp_payload_size(&self) -> u64 {
+		self.config.max_udp_payload_size.into_inner()
+	}
+
+	/// The key this endpoint signs stateless reset tokens with
+	#[cfg(test)]
+	pub(crate) fn reset_key(&self) -> &dyn crypto::HmacKey {
+		&*self.config.reset_key
+	}
+
+	/// The minimum interval between outgoing stateless resets this endpoint keeps
+	#[cfg(test)]
+	pub(crate) fn min_reset_interval(&self) -> crate::Duration {
+		self.config.min_reset_interval
 	}
 
 	/// Number of connections that are currently open
@@ -1070,7 +1076,6 @@ impl fmt::Debug for Endpoint {
 			.field("rng", &self.rng)
 			.field("index", &self.index)
 			.field("connections", &self.connections)
-			.field("config", &self.config)
 			.field("server_config", &self.server_config)
 			// incoming_buffers too large
 			.field("incoming_buffers.len", &self.incoming_buffers.len())
@@ -1084,7 +1089,7 @@ impl fmt::Debug for Endpoint {
 
 /// Buffered Initial messages for a pending incoming connection
 struct IncomingBuffer {
-	server_config: Arc<ServerConfig>,
+	server_config: Arc<server::Config>,
 	datagrams: Vec<DatagramConnectionEvent>,
 	total_bytes: u64,
 }
@@ -1225,6 +1230,30 @@ pub(crate) struct ConnectionMeta {
 	reset_token: Option<(SocketAddr, ResetToken)>,
 }
 
+/// A UDP datagram for [`Endpoint::handle`]
+#[derive(Debug)]
+pub struct Received {
+	/// The address the datagram came from
+	pub remote: SocketAddr,
+	/// The local IP address the datagram was sent to, if the socket reports it
+	pub local_ip: Option<IpAddr>,
+	/// The explicit congestion notification bits the datagram arrived with
+	pub ecn: Option<EcnCodepoint>,
+	/// The datagram's payload, which may hold several coalesced QUIC packets
+	pub data: BytesMut,
+}
+
+/// An outgoing connection for [`Endpoint::connect`]
+#[derive(Debug, Clone, Copy)]
+pub struct Dial<'a> {
+	/// How to dial
+	pub config: &'a client::Config,
+	/// The address to dial
+	pub remote: SocketAddr,
+	/// The name the server's certificate must cover
+	pub server_name: &'a str,
+}
+
 /// Internal identifier for a `Connection` currently associated with an endpoint
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct ConnectionHandle(pub usize);
@@ -1261,6 +1290,7 @@ pub enum DatagramEvent {
 /// An incoming connection for which the server has not yet begun its part of the handshake.
 pub struct Incoming {
 	received_at: Instant,
+	version: Version,
 	addresses: FourTuple,
 	ecn: Option<EcnCodepoint>,
 	packet: InitialPacket,
@@ -1329,7 +1359,7 @@ impl IncomingImproperDropWarner {
 impl Drop for IncomingImproperDropWarner {
 	fn drop(&mut self) {
 		warn!(
-			"moq_quic::Incoming dropped without passing to Endpoint::accept/refuse/retry/ignore \
+			"moq_quic::endpoint::Incoming dropped without passing to Endpoint::accept/refuse/retry/ignore \
                (may cause memory leak and eventual inability to accept new connections)"
 		);
 	}
@@ -1358,6 +1388,7 @@ impl Drop for AcceptDropGuard {
 ///
 /// These arise before any I/O has been performed.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ConnectError {
 	/// The endpoint can no longer create new connections
 	///
@@ -1377,14 +1408,9 @@ pub enum ConnectError {
 	/// Examples include attempting to connect to port 0, or using an inappropriate address family.
 	#[error("invalid remote address: {0}")]
 	InvalidRemoteAddress(SocketAddr),
-	/// No default client configuration was set up
-	///
-	/// Use `Endpoint::connect_with` to specify a client configuration.
-	#[error("no default client config")]
-	NoDefaultClientConfig,
-	/// The local endpoint does not support the QUIC version specified in the client configuration
-	#[error("unsupported QUIC version")]
-	UnsupportedVersion,
+	/// The client configuration is invalid
+	#[error("invalid client config: {0}")]
+	Config(#[from] ConfigError),
 }
 
 /// Error type for attempting to accept an [`Incoming`]
@@ -1495,7 +1521,7 @@ pub struct Accepted {
 	pref_addr_cid: Option<ConnectionId>,
 	addresses: FourTuple,
 	// For the close response if the handshake failed
-	version: u32,
+	version: Version,
 	src_cid: ConnectionId,
 	crypto: Keys,
 	result: Result<Connection, ConnectionError>,

@@ -229,7 +229,7 @@ mod tests {
 
 			// Every broadcast is on the relay before anything follows it.
 			for (path, _) in &broadcasts {
-				tokio::time::timeout(TIMEOUT, relay.routed_broadcast(*path))
+				tokio::time::timeout(TIMEOUT, relay.follow(*path, None).unwrap().available())
 					.await
 					.expect("relay routes the broadcast")
 					.expect("broadcast");

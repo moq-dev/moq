@@ -113,8 +113,9 @@ pub enum Source {
 
 	/// A screen or window chosen through the Linux system picker.
 	///
-	/// Clone the selection for demand-driven reopens; create a new one to ask
-	/// for a different source. Restoration depends on compositor support.
+	/// Clone the selection to reopen the same source, as an on-demand capture
+	/// does for each viewer; create a new one to ask for a different source.
+	/// Restoration depends on compositor support.
 	#[cfg(all(target_os = "linux", feature = "pipewire"))]
 	Portal(portal::Selection),
 }
@@ -424,6 +425,11 @@ impl Synthetic {
 	/// End the stream, as a device that stops delivering does.
 	pub(crate) fn close(&self) {
 		self.chan.close();
+	}
+
+	/// Whether the stream reading this device was dropped, as a closed camera is.
+	pub(crate) fn released(&self) -> bool {
+		Arc::strong_count(&self.chan) == 1
 	}
 }
 

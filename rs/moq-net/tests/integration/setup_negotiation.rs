@@ -66,7 +66,7 @@ async fn every_lite_version_negotiates_in_setup() {
 			assert_eq!(session.version(), version, "{name}");
 		}
 		// The session runs on the selected version, not on the SETUP stream.
-		downstream.consume().routed("room").await.expect(name);
+		crate::support::announced(&downstream.consume(), "room").await;
 	}
 }
 

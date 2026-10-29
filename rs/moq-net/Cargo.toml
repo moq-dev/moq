@@ -143,6 +143,10 @@ name = "tracks"
 harness = false
 
 [[bench]]
+name = "demand"
+harness = false
+
+[[bench]]
 name = "tail"
 harness = false
 required-features = ["fuzz"]

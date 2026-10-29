@@ -85,13 +85,18 @@ impl Lazy {
 			.announced()
 	}
 
-	/// Whether the client's origin routes `path` right now.
+	/// Inspect the current table without running discovery for the observation itself.
 	async fn routes(&self, path: &str) -> bool {
-		match self.subscriber.consume().request_broadcast(path, None).await {
-			Ok(_) => true,
-			Err(Error::Unroutable) => false,
-			Err(err) => panic!("{path}: {err}"),
-		}
+		let consumer = self
+			.subscriber
+			.consume()
+			.scope("", &Patterns::from(Pattern::literal(path).unwrap()))
+			.unwrap();
+		let mut announced = consumer.announced();
+		matches!(
+			announced.poll_next(&kio::Waiter::noop()),
+			std::task::Poll::Ready(Some(announce::Event::Start(_)))
+		)
 	}
 }
 
@@ -258,7 +263,7 @@ async fn a_resolved_broadcast_keeps_its_route() {
 		let lazy = Lazy::new(version).await;
 		let mut watch = lazy.watch("a");
 		synced(&mut watch).await;
-		let broadcast = lazy.subscriber.consume().request_broadcast("a/x", None).await.unwrap();
+		let broadcast = lazy.subscriber.consume().request("a/x", None).await.unwrap();
 		drop(watch);
 
 		kio::clock::sleep(LINGERED).await;
@@ -275,11 +280,11 @@ async fn waiting_on_a_path_asks_about_it() {
 	for version in VERSIONS {
 		let lazy = Lazy::new(version).await;
 		let consumer = lazy.subscriber.consume();
-		kio::clock::timeout(SETTLE, consumer.routed_broadcast("a/x"))
+		kio::clock::timeout(SETTLE, consumer.follow("a/x", None).unwrap().available())
 			.await
 			.expect("routed in time")
 			.unwrap();
-		let mut followed = consumer.announced_broadcast("b/y", None).unwrap();
+		let mut followed = consumer.follow("b/y", None).unwrap();
 		kio::clock::timeout(SETTLE, followed.available())
 			.await
 			.expect("announced in time")
@@ -303,7 +308,7 @@ async fn a_relay_link_asks_for_everything() {
 			assert_eq!(lazy.requests(), 1, "{version}");
 			// Read through a plain handle: one taken from an upstream link hides its routes.
 			for path in ["a/x", "b/y"] {
-				relay.consume().request_broadcast(path, None).await.unwrap();
+				relay.consume().request(path, None).await.unwrap();
 			}
 		}
 	}
@@ -322,7 +327,7 @@ async fn a_server_asks_for_everything() {
 		options.server_subscribe = Some(relay.clone());
 		let _pair = connect_mock(options).await;
 		kio::clock::sleep(SETTLE).await;
-		relay.consume().request_broadcast("a/x", None).await.unwrap();
+		relay.consume().request("a/x", None).await.unwrap();
 	}
 }
 
@@ -352,10 +357,57 @@ async fn serving_the_peer_asks_nothing() {
 			.filter(|kind| *kind == ANNOUNCE)
 			.count();
 		assert_eq!(requests, 0, "{version}");
-		assert!(matches!(
-			local.consume().request_broadcast("a/x", None).await,
-			Err(Error::Unroutable)
-		));
+		// An application request is a reader, unlike the peer's serving view.
+		let _read = local.consume().request("a/x", None).await.unwrap();
+		let requests = pair
+			.client_transport
+			.bidi_types()
+			.into_iter()
+			.filter(|kind| *kind == ANNOUNCE)
+			.count();
+		assert_eq!(requests, 1, "{version}: only the application request starts discovery");
+	}
+}
+
+/// Resolving a path owns the discovery that makes the peer's announcement visible.
+#[kio::test]
+async fn requesting_an_unwatched_path_discovers_its_instance() {
+	for version in VERSIONS {
+		let lazy = Lazy::new(version).await;
+		assert_eq!(lazy.requests(), 0, "{version}");
+		let broadcast = lazy
+			.subscriber
+			.consume()
+			.request("a/x", None)
+			.await
+			.expect("request discovers the announced instance without a separate watcher");
+		assert_eq!(broadcast.info().path.as_str(), "a/x");
+		assert_eq!(lazy.requests(), 1, "{version}");
+	}
+}
+
+/// Absence is answered by the peer's sync boundary, without a timer in resolution.
+#[kio::test]
+async fn an_unwatched_missing_path_is_unroutable_after_sync() {
+	for version in VERSIONS {
+		let lazy = Lazy::new(version).await;
+		let result = kio::clock::timeout(SETTLE, lazy.subscriber.consume().request("missing", None))
+			.await
+			.expect("the peer synced");
+		assert!(matches!(result, Err(Error::Unroutable)), "{version}");
+		assert_eq!(lazy.requests(), 1, "{version}");
+		let broadcast = lazy.subscriber.consume().request("a/x", None).await.unwrap();
+		kio::clock::sleep(LINGERED).await;
+		assert!(
+			lazy.routes("a/x").await,
+			"{version}: request ownership keeps discovery alive"
+		);
+		drop(broadcast);
+		kio::clock::sleep(LINGERED).await;
+		assert!(
+			!lazy.routes("a/x").await,
+			"{version}: dropping the last reader releases discovery"
+		);
 	}
 }
 
@@ -471,7 +523,7 @@ async fn ietf_waiting_on_a_path_asks_about_it() {
 	for version in IETF {
 		let lazy = Lazy::new(version).await;
 		let consumer = lazy.subscriber.consume();
-		kio::clock::timeout(SETTLE, consumer.routed_broadcast("a/x"))
+		kio::clock::timeout(SETTLE, consumer.follow("a/x", None).unwrap().available())
 			.await
 			.expect("routed in time")
 			.unwrap();
@@ -486,7 +538,7 @@ async fn ietf_a_relay_link_asks_for_everything() {
 		let relay = produce_origin(2);
 		let _lazy = Lazy::with(version, relay.clone().with_link(moq_net::origin::Link::Peer)).await;
 		for path in ["a/x", "b/y"] {
-			relay.consume().request_broadcast(path, None).await.unwrap();
+			relay.consume().request(path, None).await.unwrap();
 		}
 	}
 }

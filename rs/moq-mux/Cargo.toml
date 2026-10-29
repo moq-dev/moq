@@ -23,7 +23,6 @@ h264-reader = "0.9.0"
 hang = { workspace = true }
 kio = { workspace = true, features = ["runtime"] }
 memchr = "2"
-moq-flate = { workspace = true }
 moq-json = { workspace = true }
 moq-loc = { workspace = true }
 moq-msf = { workspace = true }

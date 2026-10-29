@@ -16,12 +16,12 @@ x86\_64) and desktop JVM (Linux x86\_64/aarch64, macOS arm64, Windows x64).
 `dev.moq.media` owns catalogs, encoded imports, and container consumers. `TrackProducer.audio`
 / `.video` take a broadcast, a `Named` or `Requested` target, and an init record.
 `CatalogProducer(broadcast)` holds its broadcast weakly and fails with `Closed` after it closes.
-`dev.moq.flate.SnapshotProducer` / `StreamProducer` publish opaque bytes with an optional `timestampUs`.
+Publish JSON tracks with `TrackInfo(compress = true)`; a `dev.moq.json` consumer reads one with no option of its own.
 A missing data timestamp stays untimed; the library never substitutes zero or now.
 `dev.moq.json` consumers' `values()` emits `Value` (`value`, `timestamp`) and `valuesAs<T>()` emits `Timed<T>`;
 a snapshot consumer yields each state in order, and `latest()` skips to the newest. Read timestamps are rounded down to a whole microsecond.
 Raw tracks with a `null` timescale are untimed on both publish and receive.
-`MoqTrackInfo.compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. `@moq/net` cannot read a compressed track yet.
+`MoqTrackInfo.compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
 Timed raw/data tracks require caller-supplied timestamps. Use `CatalogProducer.now()` to stamp a locally
 created event on the broadcast clock; reading it fixes that clock for later media producers.
@@ -69,7 +69,8 @@ Moq.connect("https://relay.example.com", ClientConfig(tls = ClientTls(roots = li
 // Publish encoded frames, or raw pixels with the codec inside the binding.
 // opusInit, packet, pts, and rgba come from your encoder or capture source.
 Moq.connect("https://relay.example.com").use { moq ->
-    val broadcast = moq.createBroadcast("my-stream.hang")
+    val publication = moq.createBroadcast("my-stream.hang")
+    val broadcast = publication.broadcast()
     val audio = dev.moq.media.TrackProducer.audio(broadcast, Named(null), AudioInit(format = AudioFormat.OPUS, data = opusInit))
     audio.writeFrame(Frame(payload = packet, timestampUs = 20_000u))
     audio.cut() // audio has no keyframes, so this is what gives it groups
@@ -80,7 +81,7 @@ Moq.connect("https://relay.example.com").use { moq ->
         output = VideoEncoderOutput(codec = VideoCodec.H264, bitrate = null, gop = null, kind = autoEncoder), track = "camera"),
     )
     video.write(VideoFrame(timestampUs = pts, data = rgba))
-    broadcast.announce(AnnounceRoute(epoch = mintEpoch())) // a fresh epoch per run
+    publication.announce(AnnounceRoute(epoch = mintEpoch())) // a fresh epoch per run
     audio.finish()
     video.finish()
     broadcast.end()
@@ -97,7 +98,7 @@ The rest of the [shared feature list](/lib/#what-every-binding-can-do) maps
 one to one; the API reference has the names, and [Layers](/lib/layers)
 shows which module holds each.
 
-- **`end`, not `close`.** `broadcast.end()` ends a broadcast for good. `close()`, or leaving `use { }`, releases the handle, which ends the broadcast only once no `requests()` handle remains.
+- **`end`, not `close`.** `broadcast.end()` ends a broadcast for good. `close()`, or leaving `use { }`, releases the handle, which ends the broadcast only once no other handle to it remains, such as its publication or a `requests()` handle.
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `cut()`: after every frame, or at a segment cadence to align with video.
 - **Timeline breaks.** On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
 - **Media reads.** `dev.moq.media.TrackConsumer`, `dev.moq.audio.Consumer`, and `dev.moq.video.Consumer` return a `Read` in order: `ReadFrame`, a `ReadGap` where media was lost, or a `ReadEnd` where the publisher stopped its encoder. A gap breaks continuity. An encoder end is not stream EOF: following frames before its endpoint are the old encoder's drain; the first at or past it starts fresh.

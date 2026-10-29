@@ -286,7 +286,6 @@ impl FlvTrack {
 			read,
 			restart,
 			skip,
-			cut,
 			sync,
 			leading,
 			item,
@@ -300,7 +299,6 @@ impl FlvTrack {
 				decode: moq_net::Timestamp::from_millis(u64::from(timestamp))?.into(),
 				restart,
 				skip,
-				cut,
 				sync,
 				leading,
 				item: Tag {
@@ -514,7 +512,6 @@ impl<S: Stream> Export<S> {
 							decode: frame.timestamp.into(),
 							restart: track.source.markers(),
 							skip: track.source.skips(),
-							cut: track.source.cuts(),
 							sync: kind == 1 || frame.keyframe,
 							leading: false,
 							item: frame,

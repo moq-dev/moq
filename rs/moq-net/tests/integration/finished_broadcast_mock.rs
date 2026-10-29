@@ -50,11 +50,7 @@ async fn round(finish_broadcast: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>)
 	let pair: MockPair = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	kio::clock::timeout(TIMEOUT, consumer.routed("bcast"))
-		.await
-		.expect("announce timeout")
-		.expect("routed");
-	let remote = kio::clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
+	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");

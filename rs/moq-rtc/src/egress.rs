@@ -929,7 +929,7 @@ mod tests {
 		};
 		point(&mut catalog, "a", None);
 
-		let broadcast = origin.consume().request_broadcast("live", None).await.unwrap();
+		let broadcast = origin.consume().request("live", None).await.unwrap();
 		let mut egress = EgressSource::new(moq_mux::Source::new(origin.consume(), broadcast))
 			.await
 			.unwrap();

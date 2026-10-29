@@ -17,7 +17,6 @@ default-members = [
     "rs/moq-e2ee",
     # "rs/moq-ffi",   # requires Python/maturin
     # "rs/moq-gst",   # requires GStreamer
-    "rs/moq-flate",
     "rs/moq-hls",
     "rs/moq-ice",
     "rs/moq-json",
@@ -140,7 +139,6 @@ moq-archive = { version = "0.0.11", path = "rs/moq-archive" }
 moq-audio = { version = "0.1.10", path = "rs/moq-audio", default-features = false }
 moq-auth = { version = "0.2.1", path = "rs/moq-auth" }
 moq-congestion = { version = "0.1.0", path = "rs/moq-congestion" }
-moq-flate = { version = "0.2.0", path = "rs/moq-flate" }
 moq-hls = { version = "0.5.11", path = "rs/moq-hls", default-features = false }
 moq-ice = { version = "0.1.0", path = "rs/moq-ice" }
 moq-json = { version = "0.5.8", path = "rs/moq-json" }
@@ -234,6 +232,7 @@ thiserror = "2"
 time = "0.3"
 tokio = "1.48"
 tokio-rustls = { version = "0.26", default-features = false }
+tokio-util = "0.7"
 toml = "1.1"
 tower-http = { version = "0.7", features = ["cors"] }
 tracing = "0.1"
