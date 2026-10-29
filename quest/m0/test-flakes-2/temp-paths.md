@@ -8,10 +8,15 @@ CI shards) cannot overwrite each other's files.
 
 ## Plan
 
-moq-relay's `config` and `cluster` tests and moq-bench's `config` and `stats`
-tests write under fixed `std::env::temp_dir()` subdirectories such as
-`moq-relay-config-test`. Found while landing
-[moq-dev/moq#6986](https://github.com/moq-dev/moq/pull/6986).
+The implementation is in [moq-dev/moq#7260](https://github.com/moq-dev/moq/pull/7260).
+Finish local validation before marking it ready. `quest gate just ci` is
+blocked by mbx failing to launch Cargo with `Argument list too long` (Rust
+lint and the gate's lint regression), and the flake runner check failing
+`unshare` with `Operation not permitted` while writing `/proc/self/uid_map`.
+Resolve the tooling/environment blockers, rerun the gate, then remove this
+quest and its links. The affected crates' default-feature tests pass. The
+two changed `cluster-lan` fixture tests still need validation; their gated
+command was stopped before it started while host capacity was unavailable.
 
 Decided 2026-10-28 (maintainer): cover every fixed temp path in the
 workspace, not just the three moq-relay tests first seen. Each test takes its

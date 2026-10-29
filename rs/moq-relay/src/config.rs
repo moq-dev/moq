@@ -834,9 +834,8 @@ root = ["ca.pem"]
 			return;
 		}
 
-		let dir = std::env::temp_dir().join("moq-relay-config-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("released-quic-table.toml");
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("released-quic-table.toml");
 		std::fs::write(&path, "[server.quic]\nmax_streams = 4096\n").unwrap();
 
 		let err = Config::parse_and_merge([
@@ -932,9 +931,8 @@ node = "localhost"
 depth = 2
 linger = "2m"
 "#;
-		let dir = std::env::temp_dir().join("moq-relay-config-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("toml-wins.toml");
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("toml-wins.toml");
 		std::fs::write(&path, toml).unwrap();
 
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
@@ -987,9 +985,8 @@ ws = false
 "#;
 		#[cfg(feature = "websocket")]
 		let toml = format!("{toml}\n[connect.websocket]\nenabled = false\n");
-		let dir = std::env::temp_dir().join("moq-relay-config-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("runtime-toml-wins.toml");
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("runtime-toml-wins.toml");
 		std::fs::write(&path, toml.as_bytes()).unwrap();
 
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
@@ -1227,11 +1224,10 @@ ws = false
 
 	/// Merge each case's file and flags, then check the value and the source it names.
 	fn check_provenance(cases: &[Case]) {
-		let dir = std::env::temp_dir().join("moq-relay-provenance");
-		std::fs::create_dir_all(&dir).unwrap();
+		let dir = tempfile::tempdir().unwrap();
 
 		for case in cases {
-			let path = dir.join(format!("{}.toml", case.name));
+			let path = dir.path().join(format!("{}.toml", case.name));
 			std::fs::write(&path, case.toml).unwrap();
 			let mut args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
 			args.extend(case.cli.iter().map(std::ffi::OsString::from));
@@ -1548,9 +1544,8 @@ ws = false
 		);
 
 		let toml = "[auth]\npublic = \"anon/**\"\n";
-		let dir = std::env::temp_dir().join("moq-relay-config-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("auth-public-toml.toml");
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("auth-public-toml.toml");
 		std::fs::write(&path, toml).unwrap();
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
 		let config = Config::parse_and_merge(args).expect("toml load");
@@ -1579,9 +1574,8 @@ ws = false
 	/// Merge `body` as the config file named `name` with `cli`, and require that the
 	/// listener refuses to start with an error containing `needle`.
 	fn refuse_quic_lb(name: &str, body: &str, cli: &[&str], needle: &str) {
-		let dir = std::env::temp_dir().join("moq-relay-lb-refusals");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join(name);
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join(name);
 		std::fs::write(&path, body).unwrap();
 		let mut args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
 		args.extend(cli.iter().copied().map(std::ffi::OsString::from));
@@ -1616,9 +1610,8 @@ ws = false
 
 		#[cfg(feature = "quic")]
 		{
-			let dir = std::env::temp_dir().join("moq-relay-lb-refusals");
-			std::fs::create_dir_all(&dir).unwrap();
-			let path = dir.join("typed.toml");
+			let dir = tempfile::tempdir().unwrap();
+			let path = dir.path().join("typed.toml");
 			std::fs::write(&path, "[listen.lb]\nid = \"ab\"\nnonce = 8\n").unwrap();
 			let config =
 				Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.clone().into()]).expect("typed");
