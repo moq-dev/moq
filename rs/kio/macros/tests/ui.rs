@@ -2,8 +2,12 @@
 
 #[test]
 fn ui() {
-	// `just rs test` builds through clippy, which prints types with their full paths.
-	if !test_env::Env::without(&["RUSTC_WORKSPACE_WRAPPER"]).isolate() {
+	// Compiler wrappers change diagnostic types and paths. Prevent nested Cargo
+	// from restoring mbx's saved environment and reintroducing those wrappers.
+	if !test_env::Env::without(&["RUSTC_WORKSPACE_WRAPPER", "RUSTC_WRAPPER", "MBX_SESSION_RESTORE"])
+		.set("MBX_DISABLE", "1")
+		.isolate()
+	{
 		return;
 	}
 	trybuild::TestCases::new().compile_fail("tests/ui/*.rs");

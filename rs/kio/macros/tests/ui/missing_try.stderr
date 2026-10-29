@@ -1,5 +1,5 @@
 error[E0308]: mismatched types
-  --> ${workspace}/rs/kio/macros/tests/ui/missing_try.rs:18:16
+  --> tests/ui/missing_try.rs:18:16
    |
 13 | #[kio::machine(self.state: MState)]
    | ----------------------------------- in this attribute macro expansion

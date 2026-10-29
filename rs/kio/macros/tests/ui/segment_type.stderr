@@ -1,5 +1,5 @@
 error[E0308]: mismatched types
-  --> ${workspace}/rs/kio/macros/tests/ui/segment_type.rs:17:23
+  --> tests/ui/segment_type.rs:17:23
    |
 17 |         let label: String = a;
    |                    ------   ^ expected `String`, found `u64`

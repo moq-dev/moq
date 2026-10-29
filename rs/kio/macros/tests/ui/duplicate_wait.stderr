@@ -1,11 +1,11 @@
 error: a second `wait!(A => ..)`
-  --> ${workspace}/rs/kio/macros/tests/ui/duplicate_wait.rs:18:22
+  --> tests/ui/duplicate_wait.rs:18:22
    |
 18 |         let b: u64 = wait!(A => self.values.poll_pop(waiter))?;
    |                            ^
 
 error: the first is here
-  --> ${workspace}/rs/kio/macros/tests/ui/duplicate_wait.rs:16:22
+  --> tests/ui/duplicate_wait.rs:16:22
    |
 16 |         let a: u64 = wait!(A => self.values.poll_pop(waiter))?;
    |                            ^
