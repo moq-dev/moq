@@ -111,7 +111,7 @@ test("an origin handle resolves a local publish with no session attached", async
 	const origin = new OriginProducer();
 	const path = p("loopback");
 
-	const watch = origin.request(path, { announced: true });
+	const watch = origin.follow(path);
 	await settle();
 	expect(watch.active.peek()).toBeUndefined();
 
@@ -149,7 +149,7 @@ test("the local route wins over a blind request on a no-discovery origin", async
 	const detach = wireOf(origin).attach(false);
 	const broadcast = publish(origin, path);
 
-	const watch = origin.request(path, { announced: true });
+	const watch = origin.follow(path);
 	await settle();
 	expect(watch.active.peek()).toBeDefined();
 

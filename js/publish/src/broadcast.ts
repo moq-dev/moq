@@ -71,8 +71,6 @@ export type BroadcastInput = {
 export class Broadcast {
 	/** The catalog track name served to subscribers. */
 	static readonly CATALOG_TRACK = Catalog.TRACK;
-	/** The DEFLATE-compressed catalog track, served alongside {@link CATALOG_TRACK} with identical content. */
-	static readonly CATALOG_TRACK_COMPRESSED = Catalog.TRACK_COMPRESSED;
 
 	/** The wired inputs, read-only. */
 	readonly in: Readonlys<BroadcastInput>;
@@ -386,25 +384,22 @@ export class Broadcast {
 				serving = true;
 				// From here a name keeps the identity this first snapshot gives it.
 				this.#served = new Map(this.#listed);
-				for (const [name, compression] of [
-					[Broadcast.CATALOG_TRACK, false],
-					[Broadcast.CATALOG_TRACK_COMPRESSED, true],
-				] as const) {
-					// A catalog may publish once and stay unchanged for the broadcast's whole life. Keep
-					// that sole closed snapshot replayable so a viewer arriving after the ordinary media
-					// retention window can still bootstrap.
-					const track = broadcast.createTrack(name, {
-						// Each catalog snapshot is stamped when written.
-						timescale: Moq.Time.Timescale.MILLI,
-						maxAge: Milli(Number.MAX_SAFE_INTEGER),
-						priority: Catalog.PRIORITY.catalog,
-					});
-					effect.cleanup(() => {
-						track.finish();
-						track.close();
-					});
-					this.catalog.serve(track, effect, { compression });
-				}
+				// A catalog may publish once and stay unchanged for the broadcast's whole life. Keep that
+				// sole closed snapshot replayable so a viewer arriving after the ordinary media retention
+				// window can still bootstrap.
+				const track = broadcast.createTrack(Broadcast.CATALOG_TRACK, {
+					// Each catalog snapshot is stamped when written.
+					timescale: Moq.Time.Timescale.MILLI,
+					maxAge: Milli(Number.MAX_SAFE_INTEGER),
+					priority: Catalog.PRIORITY.catalog,
+					// Catalog JSON is small and repetitive.
+					compress: true,
+				});
+				effect.cleanup(() => {
+					track.finish();
+					track.close();
+				});
+				this.catalog.serve(track, effect);
 			}
 
 			broadcastPublication.announce({ epoch });

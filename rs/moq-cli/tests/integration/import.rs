@@ -92,7 +92,7 @@ async fn import_delivers_the_catalog_finish_at_eof() {
 		panic!("the first announce event is {event:?}, not a start");
 	};
 	assert_eq!(announce.prefix.as_str(), "demo");
-	let broadcast = running(&mut child, "the broadcast", consumer.request_broadcast("demo", None))
+	let broadcast = running(&mut child, "the broadcast", consumer.request("demo", None))
 		.await
 		.expect("announced broadcast resolves");
 	let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&broadcast)
@@ -167,7 +167,7 @@ async fn a_short_import_drains_its_media_to_a_waiting_subscriber() {
 	running(&mut child, "the announce", announced.next())
 		.await
 		.expect("origin closed");
-	let broadcast = running(&mut child, "the broadcast", consumer.request_broadcast("demo", None))
+	let broadcast = running(&mut child, "the broadcast", consumer.request("demo", None))
 		.await
 		.expect("announced broadcast resolves");
 	let mut catalogs = running(

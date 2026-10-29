@@ -72,9 +72,7 @@ async fn run_subscribe(consumer: moq_net::origin::Consumer) -> anyhow::Result<()
 
 // Resolve an announced broadcast and read media frames.
 async fn play(consumer: moq_net::origin::Consumer, announce: moq_net::announce::Announce) -> anyhow::Result<()> {
-	let broadcast = consumer
-		.request_broadcast(&announce.prefix, announce.route.epoch)
-		.await?;
+	let broadcast = consumer.request(&announce.prefix, announce.route.epoch).await?;
 
 	// Read the catalog to discover available tracks.
 	let catalog_track = broadcast
