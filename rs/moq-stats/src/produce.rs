@@ -1444,7 +1444,7 @@ mod tests {
 			let (route, active) = next_update(&mut events).await.unwrap();
 			assert!(active);
 			assert_eq!(route.prefix.as_str(), ".stats/node");
-			let broadcast = consumer.request_broadcast(".stats/node", None).await.unwrap();
+			let broadcast = consumer.request(".stats/node", None).await.unwrap();
 			let name = presence_track(moq_net::Path::from_static("room"));
 			let mut previous = None;
 			for (reading, delta) in [(40, 11), (1_000, 7)] {
@@ -1651,7 +1651,7 @@ mod tests {
 
 		let (_, active) = next_update(&mut announced).await.expect("announce");
 		assert!(active);
-		let consumer = egress.request_broadcast(path, None).await.expect("resolve");
+		let consumer = egress.request(path, None).await.expect("resolve");
 
 		let sub = if subscribe {
 			let mut sub = consumer
@@ -1692,11 +1692,7 @@ mod tests {
 		tokio::time::advance(Duration::from_millis(1)).await;
 		let (update, active) = next_update(&mut consumer).await.expect("expected announce");
 		assert!(active);
-		let broadcast = origin
-			.consume()
-			.request_broadcast(&update.prefix, None)
-			.await
-			.expect("resolve");
+		let broadcast = origin.consume().request(&update.prefix, None).await.expect("resolve");
 		(update.prefix.as_str().to_string(), broadcast)
 	}
 
@@ -1852,7 +1848,7 @@ mod tests {
 		step(0).await;
 		let broadcast = origin
 			.consume()
-			.request_broadcast(".stats/node/sjc", None)
+			.request(".stats/node/sjc", None)
 			.await
 			.expect("resolve");
 		let mut totals = reader::<TotalsFrame>(&broadcast, crate::TOTALS).await;
@@ -1949,11 +1945,7 @@ mod tests {
 		let [(path, true, before)] = &take_epochs(&mut events)[..] else {
 			panic!("expected one announce");
 		};
-		let stats = origin
-			.consume()
-			.request_broadcast(path.as_str(), None)
-			.await
-			.expect("resolve");
+		let stats = origin.consume().request(path.as_str(), None).await.expect("resolve");
 		let mut old = subscribe(&stats, &crate::group_track(moq_net::Path::from_static(""))).await;
 		while try_next_frame(&mut old).is_some() {}
 
@@ -1967,11 +1959,7 @@ mod tests {
 		assert!(after > before);
 		drop(old);
 
-		let stats = origin
-			.consume()
-			.request_broadcast(path.as_str(), None)
-			.await
-			.expect("resolve");
+		let stats = origin.consume().request(path.as_str(), None).await.expect("resolve");
 		assert_eq!(read_egress(&stats).await["foo/bar"].bytes, 30);
 	}
 
@@ -2085,7 +2073,7 @@ mod tests {
 		);
 
 		async fn view(egress: &origin::Consumer, video: &mut track::Producer, size: usize) {
-			let broadcast = egress.request_broadcast("foo/bar", None).await.expect("resolve");
+			let broadcast = egress.request("foo/bar", None).await.expect("resolve");
 			let mut sub = broadcast
 				.track("video")
 				.expect("track")
@@ -2368,11 +2356,7 @@ mod tests {
 			drain.publish(moq_clock::now());
 			drain.node.presence.len()
 		};
-		let broadcast = origin
-			.consume()
-			.request_broadcast(".stats/node", None)
-			.await
-			.expect("resolve");
+		let broadcast = origin.consume().request(".stats/node", None).await.expect("resolve");
 
 		// Let the request reach the stats broadcast's queue before the drain.
 		let subscribing = broadcast
@@ -2538,7 +2522,7 @@ mod tests {
 				.tier(Tier::default())
 				.session(moq_net::Path::from_static("viewer")),
 		);
-		let broadcast = egress.request_broadcast("acme/live", None).await.expect("resolve");
+		let broadcast = egress.request("acme/live", None).await.expect("resolve");
 		let mut subs = Vec::new();
 		for _ in 0..300 {
 			let track = broadcast.track("video").expect("track");
@@ -2627,11 +2611,7 @@ mod tests {
 			drain.publish(moq_clock::now());
 			drain.node.prefixes.len()
 		};
-		let broadcast = origin
-			.consume()
-			.request_broadcast(".stats/node", None)
-			.await
-			.expect("resolve");
+		let broadcast = origin.consume().request(".stats/node", None).await.expect("resolve");
 
 		let subscribing = broadcast
 			.track(&prefix_track(moq_net::Path::from_static("acme")))
@@ -2953,7 +2933,7 @@ mod tests {
 		let (route, active) = next_update(&mut announced).await.unwrap();
 		assert!(active);
 		assert_eq!(route.prefix.as_str(), ".stats/node");
-		let broadcast = consumer.request_broadcast(".stats/node", None).await.unwrap();
+		let broadcast = consumer.request(".stats/node", None).await.unwrap();
 		let mut tracks = broadcast.tracks().unwrap();
 		assert_eq!(next_listed(&mut drain, start, &mut tracks).await, ("acme".into(), true));
 

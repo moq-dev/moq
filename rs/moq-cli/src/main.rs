@@ -924,9 +924,10 @@ async fn run_stdout(
 	// resolves it, and any sibling broadcast a rendition's `broadcast` field references
 	// (e.g. "./source") through the same origin.
 	consumer
-		.routed(&name)
+		.follow(name.as_str(), None)?
+		.available()
 		.await
-		.ok_or_else(|| anyhow::anyhow!("origin closed before broadcast `{name}` was announced"))?;
+		.with_context(|| format!("failed to resolve broadcast `{name}`"))?;
 
 	let subscribe = Subscribe::new(consumer, &name, catalog, args).await?;
 	let Some(echo) = echo else {
@@ -1265,7 +1266,13 @@ mod tests {
 					.unwrap();
 				// Media proves the CLI admitted the session, even on a transport that establishes early.
 				let payload = tokio::time::timeout(TIMEOUT, async {
-					let broadcast = listening.consumer.routed_broadcast("probe").await.unwrap();
+					let broadcast = listening
+						.consumer
+						.follow("probe", None)
+						.unwrap()
+						.available()
+						.await
+						.unwrap();
 					let mut track = broadcast
 						.track("status")
 						.unwrap()
@@ -1360,9 +1367,10 @@ mod tests {
 		group.finish().unwrap();
 
 		let reader = relay.consume();
-		reader.routed("demo").await.unwrap();
 		let mut live = reader
-			.request_broadcast("demo", None)
+			.follow("demo", None)
+			.unwrap()
+			.available()
 			.await
 			.unwrap()
 			.track("live")

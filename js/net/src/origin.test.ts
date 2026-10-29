@@ -740,7 +740,7 @@ test("discovery reflects the attached sessions", async () => {
 	origin.close();
 });
 
-test("announced requests share no subscription and follow discovery", () => {
+test("followers share no subscription and follow discovery", () => {
 	const origin = new Producer();
 	const wire = wireOf(origin);
 
@@ -756,7 +756,7 @@ test("announced requests share no subscription and follow discovery", () => {
 
 	const requests = [];
 	try {
-		for (let i = 0; i < 200; i++) requests.push(origin.request(Path.from(`user${i}`), { announced: true }));
+		for (let i = 0; i < 200; i++) requests.push(origin.follow(Path.from(`user${i}`)));
 	} finally {
 		spy.mockRestore();
 	}
@@ -2018,7 +2018,7 @@ test("closing a derived handle withdraws the sessions and answers attached throu
 
 	// The session stops asking its peer for announcements, now and for later watches.
 	expect(interests.splice(0)).toEqual(["-"]);
-	consumer.request(Path.from("later"), { announced: true }).close();
+	consumer.follow(Path.from("later")).close();
 	expect(interests).toEqual([]);
 
 	// The answer, the attached session, and the initial set in flight went with the handle.

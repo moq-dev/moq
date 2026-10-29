@@ -162,7 +162,7 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 			.expect("origin closed");
 		assert_eq!(update.prefix.as_str(), "test");
 		assert!(active, "expected announce, got retraction");
-		let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test", None))
+		let broadcast = tokio::time::timeout(TIMEOUT, consumer.request("test", None))
 			.await
 			.unwrap_or_else(|_| panic!("subscriber {index} request timeout"))
 			.expect("announced broadcast resolves");
@@ -267,7 +267,7 @@ async fn uring_workers_serve_every_configured_version() {
 			// moq-lite-02 has no in-band path, so a raw QUIC session sits at the root.
 			let path = update.prefix.as_str().to_owned();
 			assert!(active && path.ends_with("test"), "{scheme} {name}: announced {path}");
-			let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast(&path, None))
+			let broadcast = tokio::time::timeout(TIMEOUT, consumer.request(&path, None))
 				.await
 				.unwrap_or_else(|_| panic!("{scheme} {name}: request timeout"))
 				.expect("announced broadcast resolves");
@@ -625,7 +625,7 @@ async fn an_mtls_client_authenticates_without_a_token() {
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce, got retraction");
-	let announced = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test", None))
+	let announced = tokio::time::timeout(TIMEOUT, consumer.request("test", None))
 		.await
 		.expect("request timeout")
 		.expect("announced broadcast resolves");

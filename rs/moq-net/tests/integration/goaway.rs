@@ -390,8 +390,12 @@ async fn goaway_keeps_new_subscribes(version: Version) {
 
 		// Subscribe BEFORE the GOAWAY and receive a first group.
 		let sub = sub_origin.consume();
-		sub.routed("test").await.expect("route announced");
-		let bc = sub.request_broadcast("test", None).await.expect("broadcast resolves");
+		let bc = sub
+			.follow("test", None)
+			.unwrap()
+			.available()
+			.await
+			.expect("broadcast resolves");
 		let mut existing = bc.track("video").unwrap().subscribe(None).await.expect("subscribe");
 
 		let mut group = track.append_group().expect("append group");
@@ -490,7 +494,7 @@ async fn goaway_drains_routes(version: Version) {
 		let MockPair { client, server, .. } = connect_mock(opts).await;
 
 		let sub = sub_origin.consume();
-		let route = sub.routed("test").await.expect("route announced");
+		let route = crate::support::announced(&sub, "test").await;
 		assert_ne!(
 			route.cost,
 			moq_net::origin::Cost::DRAIN,

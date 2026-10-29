@@ -73,6 +73,7 @@ For each finding:
 
 Wait for a review from any reviewer other than Grok.
 Codex (OpenAI) reacts with a thumbs up when it has no findings; that counts as a review.
+An automated review posted from the maintainer's account also counts.
 A push that gets no new review once CI finishes was judged trivial, so the earlier review still covers it.
 Skipped or rate-limited reviews do not count.
 For a fork with no automatic non-Grok review, ask the maintainer to arrange one.

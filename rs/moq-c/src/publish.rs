@@ -1491,7 +1491,7 @@ mod supervision_tests {
 	async fn admission_must_match_the_broadcast_it_filled() {
 		let origin = moq_tokio::origin::spawn();
 		let claim = origin.requests("room").unwrap();
-		let pending = origin.consume().request_broadcast("room/first", None);
+		let pending = origin.consume().request("room/first", None);
 		let prepared = claim
 			.requested_broadcast()
 			.await
@@ -1520,7 +1520,7 @@ mod supervision_tests {
 		pending.await.unwrap();
 		publish.unannounce(publication).unwrap();
 
-		let pending = origin.consume().request_broadcast("room/second", None);
+		let pending = origin.consume().request("room/second", None);
 		let prepared = claim
 			.requested_broadcast()
 			.await

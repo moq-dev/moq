@@ -40,7 +40,7 @@ async fn a_segmented_frame_crosses_whole() {
 		options.client_subscribe = Some(viewer.clone());
 		let _pair = connect_mock(options).await;
 
-		let remote = moq_clock::timeout(TIMEOUT, viewer.consume().routed_broadcast("room"))
+		let remote = moq_clock::timeout(TIMEOUT, viewer.consume().follow("room", None).unwrap().available())
 			.await
 			.expect("broadcast timeout")
 			.unwrap();
