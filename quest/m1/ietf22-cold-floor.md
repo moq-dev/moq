@@ -11,8 +11,8 @@ still holds, not only the latest. `warm_backfill` in
 
 Decided 2026-10-29 (maintainer, `/quest-plan` of moq.pro's announce ramp
 loss follow-ups): its own quest in m1, beside the other IETF fill and FETCH
-quests. No quest owns Rust's draft-22 fills, and
-[Rust FETCH parity](/quest/m1/ietf-fetch-parity.md) excludes them.
+quests. This quest owns the draft-22 absolute-floor backfill, and
+[Rust FETCH parity](/quest/m1/ietf-fetch-parity.md) excludes it.
 
 Found while landing [#7168](https://github.com/moq-dev/moq/pull/7168), which
 dropped moq-transport-22 from `warm_backfill` for this. On `main`, the copy
