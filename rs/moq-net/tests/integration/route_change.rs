@@ -8,8 +8,7 @@
 //! every frame exactly once, in order, whether the route changes between groups or
 //! in the middle of one, and however it changes.
 //!
-//! moq-transport carries the epoch with the MoQ Epoch extension, so it behaves the
-//! same. Older lite versions cannot carry the epoch, so `R` cannot tell the
+//! moq-transport and older lite versions carry no epoch, so `R` cannot tell the
 //! two routes serve the same bytes: its subscription stays on its route and ends with
 //! it, while a better route restarts the path for new requests.
 //!
@@ -467,8 +466,6 @@ macro_rules! route_change_tests {
 
 route_change_tests! {
 	lite_07: "moq-lite-07-wip",
-	ietf_18: "moq-transport-18",
-	ietf_22: "moq-transport-22",
 }
 
 macro_rules! pinned_tests {
@@ -507,6 +504,8 @@ macro_rules! pinned_tests {
 }
 
 pinned_tests! {
+	ietf_18: "moq-transport-18",
+	ietf_22: "moq-transport-22",
 	lite_06: "moq-lite-06",
 	lite_05: "moq-lite-05",
 	lite_04: "moq-lite-04",

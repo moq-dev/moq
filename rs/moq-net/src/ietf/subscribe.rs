@@ -11,7 +11,6 @@ use crate::{
 use super::token::RequestToken;
 
 use super::Message;
-use super::epoch;
 use super::namespace::{decode_track, encode_track};
 
 use super::Version;
@@ -47,9 +46,6 @@ pub struct Subscribe<'a> {
 	pub new_group: Option<u64>,
 	/// Subscriber max age in milliseconds (MoQ Timestamp), if negotiated.
 	pub max_age: Option<u64>,
-	/// The publisher instance the subscriber expects (MoQ Epoch). Only on a
-	/// session that negotiated it; the session refuses one that arrives otherwise.
-	pub epoch: Option<crate::Epoch>,
 }
 
 impl Subscribe<'_> {
@@ -70,7 +66,6 @@ impl Subscribe<'_> {
 			authorization_token: self.authorization_token,
 			new_group: self.new_group,
 			max_age: self.max_age,
-			epoch: self.epoch,
 		}
 	}
 }
@@ -104,7 +99,6 @@ impl<'a> Message<'a> for Subscribe<'a> {
 			0x28 => object_property_filter: Vec<Opaque> where has_range_filters(version),
 			0x32 => new_group: Option<u64>,
 			0x35 => include_properties: Option<bool> where Filter::is_draft22(version),
-			epoch::EPOCH_PARAM => epoch: Option<crate::Epoch>,
 			super::max_age::PARAMETER => max_age: Option<u64>,
 		);
 		let authorization_token = super::token::single(authorization_token)?;
@@ -145,7 +139,6 @@ impl<'a> Message<'a> for Subscribe<'a> {
 			authorization_token,
 			new_group,
 			max_age: super::max_age::validate(max_age)?,
-			epoch,
 		})
 	}
 
@@ -162,8 +155,6 @@ impl<'a> Message<'a> for Subscribe<'a> {
 		// arrived in draft-22, and an older peer would read it as an unknown
 		// parameter, which is a protocol violation.
 		let include_properties = (!self.properties_wanted && Filter::is_draft22(version)).then_some(false);
-		// Only a session that negotiated MoQ Epoch names one.
-		let epoch = self.epoch.clone();
 
 		encode_params!(w, version,
 			0x03 => self.authorization_token.clone(),
@@ -174,7 +165,6 @@ impl<'a> Message<'a> for Subscribe<'a> {
 			0x23 => fill,
 			0x32 => self.new_group,
 			0x35 => include_properties,
-			epoch::EPOCH_PARAM => epoch,
 			super::max_age::PARAMETER => self.max_age,
 		);
 
@@ -344,7 +334,6 @@ mod tests {
 					range_filters: false,
 					authorization_token: None,
 					new_group: None,
-					epoch: None,
 				};
 				let wire = encode_message(&msg, version);
 
@@ -385,7 +374,6 @@ mod tests {
 			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
-			epoch: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft18);
@@ -420,7 +408,6 @@ mod tests {
 				rendezvous: false,
 				range_filters: false,
 				authorization_token: None,
-				epoch: None,
 			};
 			let wire = encode_message(&subscribe, version);
 
@@ -512,7 +499,6 @@ mod tests {
 			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
-			epoch: None,
 		};
 
 		for version in [Version::Draft18, Version::Draft22] {
@@ -548,7 +534,6 @@ mod tests {
 			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
-			epoch: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft18);
@@ -672,7 +657,6 @@ mod tests {
 				rendezvous: false,
 				range_filters: false,
 				authorization_token: None,
-				epoch: None,
 			};
 
 			let encoded = encode_message(&msg, version);
@@ -745,7 +729,6 @@ mod tests {
 			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
-			epoch: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft18);
@@ -933,7 +916,6 @@ mod tests {
 			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
-			epoch: None,
 		};
 
 		#[rustfmt::skip]
@@ -990,7 +972,6 @@ mod tests {
 				rendezvous: false,
 				range_filters: false,
 				authorization_token: None,
-				epoch: None,
 			};
 			let wire = encode_message(&msg, version);
 

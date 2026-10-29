@@ -21,7 +21,6 @@ pub mod cluster;
 #[cfg(feature = "async")]
 mod control;
 mod datagram;
-pub(crate) mod epoch;
 pub(crate) mod error;
 mod fetch;
 mod filter;
@@ -98,7 +97,6 @@ mod tests {
 			("HIDDEN", hidden::HIDDEN, 0x40B5C),
 			("AUTH", auth::AUTH, 0x40B70),
 			("ACTIVE_COUNT", active_count::ACTIVE_COUNT, 0x40B64),
-			("EPOCH", epoch::EPOCH, 0x40B68),
 		] {
 			assert_eq!(key, spec, "{name}");
 		}
@@ -112,7 +110,6 @@ mod tests {
 			("ROUTE_COST", cluster::ROUTE_COST, 0x40B58),
 			("HIDDEN", hidden::HIDDEN_PARAM, 0x40B5E),
 			("ACTIVE_COUNT", active_count::ACTIVE_COUNT_PARAM, 0x40B66),
-			("EPOCH", epoch::EPOCH_PARAM, 0x40B69),
 		] {
 			assert_eq!(key, spec, "{name}");
 		}

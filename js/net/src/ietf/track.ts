@@ -1,4 +1,3 @@
-import type * as Epoch from "../epoch.ts";
 import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Filter from "./filter.ts";
@@ -18,27 +17,22 @@ export class TrackStatusRequest {
 	trackName: string;
 	/** Whether the requester wants Track Properties on the answer (INCLUDE_PROPERTIES, draft-22). */
 	propertiesWanted: boolean;
-	/** The publisher instance the requester expects (EPOCH, MoQ Epoch). */
-	epoch?: Epoch.Valid;
 
 	constructor({
 		requestId,
 		trackNamespace,
 		trackName,
 		propertiesWanted = true,
-		epoch,
 	}: {
 		requestId: bigint;
 		trackNamespace: Path.Valid;
 		trackName: string;
 		propertiesWanted?: boolean;
-		epoch?: Epoch.Valid;
 	}) {
 		this.requestId = requestId;
 		this.trackNamespace = trackNamespace;
 		this.trackName = trackName;
 		this.propertiesWanted = propertiesWanted;
-		this.epoch = epoch;
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
@@ -49,7 +43,6 @@ export class TrackStatusRequest {
 		// INCLUDE_PROPERTIES as unknown, which is a protocol violation.
 		const params = new Parameters();
 		if (!this.propertiesWanted && Filter.isDraft22(version)) params.includeProperties = false;
-		params.epoch = this.epoch;
 		await params.encode(w, version);
 	}
 
@@ -63,8 +56,8 @@ export class TrackStatusRequest {
 	 * subscription for it to configure.
 	 */
 	static async decode(r: Reader, version: IetfVersion): Promise<TrackStatusRequest> {
-		const { requestId, trackNamespace, trackName, propertiesWanted, epoch } = await Subscribe.decode(r, version);
-		return new TrackStatusRequest({ requestId, trackNamespace, trackName, propertiesWanted, epoch });
+		const { requestId, trackNamespace, trackName, propertiesWanted } = await Subscribe.decode(r, version);
+		return new TrackStatusRequest({ requestId, trackNamespace, trackName, propertiesWanted });
 	}
 }
 

@@ -10,7 +10,7 @@ use crate::{
 };
 
 use super::{
-	Control, Message, Publisher, Subscriber, Version, active_count, auth, cluster, epoch, hidden, max_age, peer,
+	Control, Message, Publisher, Subscriber, Version, active_count, auth, cluster, hidden, max_age, peer,
 	request_update, solicit, subscriber::is_protocol_violation,
 };
 
@@ -192,7 +192,7 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle, Option<cr
 	// What the peer declared in its SETUP. Seeded now when that stream was already
 	// read (the legacy handshake, or a gated server accept), and filled by the uni
 	// loop otherwise.
-	let mut peer_setup = peer::PeerSetup::new(extensions).with_implementation(peer_implementation);
+	let mut peer_setup = peer::PeerSetup::default().with_implementation(peer_implementation);
 	let setup_read = peer_declared.is_some();
 	match peer_declared {
 		Some(declared) => peer_setup.set(declared),
@@ -603,7 +603,6 @@ fn peer_from_params(params: &ietf::Parameters, version: Version) -> Result<peer:
 		max_age: max_age::from_setup(params, version),
 		auth: auth::from_setup(params) == Some(true),
 		active_count: active_count::from_setup(params),
-		epoch: epoch::from_setup(params),
 		flate: super::flate::from_setup(params)?,
 	})
 }
@@ -666,9 +665,6 @@ async fn run_setup(
 		auth::into_setup(&mut parameters);
 	}
 	active_count::into_setup(&mut parameters);
-	if extensions.epoch {
-		epoch::into_setup(&mut parameters);
-	}
 	request_update::into_setup(&mut parameters, version);
 	super::flate::into_setup(&mut parameters);
 	let parameters = parameters.encode_bytes(version)?;
@@ -1046,8 +1042,6 @@ async fn run_dispatch(
 		true => serve,
 		false => None,
 	};
-	// Whether requests and PUBLISH_NAMESPACE may carry EPOCH (MoQ Epoch).
-	let epoch = declared_setup.epoch;
 
 	// From the same slot, so this costs nothing extra: it decides whether an unsolicited
 	// advertisement is the peer ignoring our own SETUP (MoQ Solicit).
@@ -1064,7 +1058,6 @@ async fn run_dispatch(
 		publisher,
 		subscriber,
 		peer,
-		epoch,
 		declared,
 		serve,
 		version,
@@ -1118,8 +1111,6 @@ struct Bidi {
 	publisher: Publisher,
 	subscriber: Subscriber,
 	peer: cluster::Peer,
-	/// Whether both sides negotiated MoQ Epoch.
-	epoch: bool,
 	declared: Option<bool>,
 	serve: Option<auth::Serve>,
 	version: Version,
@@ -1133,7 +1124,6 @@ impl Bidi {
 			publisher,
 			mut subscriber,
 			peer,
-			epoch,
 			declared,
 			serve,
 			version,
@@ -1188,11 +1178,11 @@ impl Bidi {
 			| ietf::SubscribeNamespace::ID
 			| ietf::SubscribeTracks::ID
 			| ietf::TrackStatus::ID => {
-				publisher.handle_stream(id, data, stream, epoch)?.await;
+				publisher.handle_stream(id, data, stream)?.await;
 			}
 			// Subscriber handles: Publish, PublishNamespace
 			ietf::Publish::ID | ietf::PublishNamespace::ID => {
-				subscriber.handle_stream(id, data, stream, peer, epoch, declared)?.await;
+				subscriber.handle_stream(id, data, stream, peer, declared)?.await;
 			}
 			auth::Auth::ID if let Some(serve) = serve => {
 				let mut data = data.decoder(version);
@@ -1449,7 +1439,6 @@ mod tests {
 									track_namespace: crate::Path::from_static("test"),
 									track_name: "video".into(),
 									properties_wanted: true,
-									epoch: None,
 								}
 								.encode_msg(&mut encoder, version)
 								.unwrap();
@@ -2753,7 +2742,6 @@ mod tests {
 			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
-			epoch: None,
 		}
 		.encode(&mut encoder, VERSION)
 		.unwrap();

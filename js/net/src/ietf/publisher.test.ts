@@ -43,7 +43,7 @@ function publish(origin: OriginProducer, path: Path.Valid) {
 const VERSION = Version.DRAFT_18;
 
 /** A session that negotiated MoQ Cluster alone. */
-const CLUSTER = { cluster: true, epoch: false };
+const CLUSTER = { cluster: true };
 
 /** How long to wait for a stream before calling it absent, which is how a regression reports. */
 const STREAM_WAIT = 1000;
@@ -163,7 +163,6 @@ function publisher(
 		grant,
 		activeCount,
 		auth,
-		epoch,
 	}: {
 		requiresSolicitation?: boolean;
 		session?: Session;
@@ -171,7 +170,6 @@ function publisher(
 		grant?: Signal<Grant | undefined>;
 		activeCount?: boolean;
 		auth?: Tokens;
-		epoch?: boolean;
 	} = {},
 ): { pub: Publisher; origin: OriginProducer } {
 	const origin = new OriginProducer();
@@ -186,7 +184,6 @@ function publisher(
 			grant,
 			activeCount,
 			auth,
-			epoch,
 		}),
 		origin,
 	};
@@ -1435,214 +1432,6 @@ test("an advertisement carries our hop id once the peer declared one", async () 
 	}
 });
 
-/** A session that negotiated MoQ Epoch alone. */
-const EPOCH = { cluster: false, epoch: true };
-
-/**
- * An advertisement names the publisher instance once the peer declared MoQ Epoch. A peer
- * that did not has not read the parameter, so sending it would be a protocol violation.
- */
-test("an advertisement carries its epoch only once negotiated", async () => {
-	for (const negotiated of [true, false]) {
-		const pair = createMockTransportPair(ALPN.DRAFT_18);
-		const { pub, origin } = publisher(pair.server, { epoch: negotiated });
-		const epoch = Epoch.mint();
-		origin.createBroadcast(Path.from("mine")).announce({ epoch });
-		void pub.runPublishNamespaces();
-
-		const stream = await nextStream(pair.client);
-		if (!stream) throw new Error("no PUBLISH_NAMESPACE for the broadcast");
-		expect(await stream.reader.u53()).toBe(PublishNamespace.id);
-		const msg = await PublishNamespace.decode(stream.reader, VERSION, EPOCH);
-		expect(msg.params.epoch).toBe(negotiated ? epoch : undefined);
-		await acceptPublishNamespace(stream);
-
-		origin.close();
-	}
-});
-
-/**
- * A new instance at a path is other content, but the namespace never goes absent: the new
- * epoch is advertised first, and the old one withdrawn only once the peer accepted it,
- * since the two streams are unordered. A peer without MoQ Epoch cannot tell the two apart,
- * so it still sees the old one withdrawn first.
- */
-test.each([true, false])(
-	"an epoch change advertises the new epoch before withdrawing the old (negotiated: %p)",
-	async (negotiated) => {
-		using clock = manual();
-		const pair = createMockTransportPair(ALPN.DRAFT_18);
-		const { pub, origin } = publisher(pair.server, { epoch: negotiated });
-		const streams = accepted(pair.client);
-		try {
-			const broadcast = origin.createBroadcast(Path.from("mine"));
-			const first = Epoch.mint();
-			broadcast.announce({ epoch: first });
-			void pub.runPublishNamespaces();
-
-			const old = await take(clock, streams);
-			expect(await old.reader.u53()).toBe(PublishNamespace.id);
-			expect((await PublishNamespace.decode(old.reader, VERSION, EPOCH)).params.epoch).toBe(
-				negotiated ? first : undefined,
-			);
-			await acceptPublishNamespace(old);
-
-			const second = Epoch.mint();
-			broadcast.announce({ ...broadcast.route, epoch: second });
-			const withdrawn = watch(old.reader.done());
-
-			const next = await take(clock, streams);
-			expect(await next.reader.u53()).toBe(PublishNamespace.id);
-			expect((await PublishNamespace.decode(next.reader, VERSION, EPOCH)).params.epoch).toBe(
-				negotiated ? second : undefined,
-			);
-			await clock.advance(Nano.zero);
-			expect(withdrawn.state).toBe(negotiated ? "pending" : "rejected");
-
-			await acceptPublishNamespace(next);
-			expect(await old.reader.done().catch(error)).toMatchObject({ code: StreamCode.Cancel });
-		} finally {
-			origin.close();
-		}
-	},
-);
-
-/** On a SUBSCRIBE_NAMESPACE stream, another epoch is one NAMESPACE and no NAMESPACE_DONE. */
-test("a solicited namespace takes another epoch as one NAMESPACE and no NAMESPACE_DONE", async () => {
-	using clock = manual();
-	const pair = createMockTransportPair(ALPN.DRAFT_18);
-	const { pub, origin } = publisher(pair.server, { requiresSolicitation: true, epoch: true });
-	try {
-		const broadcast = origin.createBroadcast(Path.from("mine"));
-		const first = Epoch.mint();
-		broadcast.announce({ epoch: first });
-
-		const subscription = await Stream.open(pair.client, { version: VERSION });
-		const stream = await Stream.accept(pair.server, VERSION);
-		if (!stream) throw new Error("the subscription stream was never accepted");
-		void pub.runSubscribeNamespace(new SubscribeNamespace({ requestId: 0n, namespace: Path.empty() }), stream);
-		const entry = async () => {
-			expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntry.id);
-			return await SubscribeNamespaceEntry.decode(subscription.reader, VERSION, EPOCH);
-		};
-
-		expect(await subscription.reader.u53()).toBe(RequestOk.id);
-		await RequestOk.decode(subscription.reader, VERSION);
-		expect(await entry()).toMatchObject({ suffix: Path.from("mine"), params: { epoch: first } });
-
-		const second = Epoch.mint();
-		broadcast.announce({ ...broadcast.route, epoch: second });
-		expect(await entry()).toMatchObject({ suffix: Path.from("mine"), params: { epoch: second } });
-
-		const more = watch(subscription.reader.u53());
-		await clock.advance(Nano.zero);
-		expect(more.state).toBe("pending");
-		subscription.close();
-	} finally {
-		origin.close();
-	}
-});
-
-/** A request that names an instance is served by that one alone, or refused as gone. */
-test("a request pinned to another epoch is refused DOES_NOT_EXIST", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_18);
-	const session = new NativeSession(pair.server, VERSION, true);
-	const { pub, origin } = publisher(pair.server, { session, epoch: true });
-	const epoch = Epoch.mint();
-	const broadcastPublication = origin.createBroadcast(Path.from("room"));
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce({ epoch });
-	broadcast.createTrack("video");
-	origin.createBroadcast(Path.from("epochless")).announce();
-
-	const status = async (namespace: string, pinned: Epoch.Valid | undefined) => {
-		const { stream, wire } = requestStream(VERSION);
-		const request = new TrackStatusRequest({
-			requestId: 7n,
-			trackNamespace: Path.from(namespace),
-			trackName: "video",
-			epoch: pinned,
-		});
-		await pub.runTrackStatusRequest(request, stream);
-		return wire();
-	};
-
-	// Control: the named instance, or none at all, is served.
-	expect(await (await status("room", epoch)).u53()).toBe(TrackStatusOk.id);
-	expect(await (await status("room", undefined)).u53()).toBe(TrackStatusOk.id);
-
-	const missing = toRequestCode("does_not_exist", "track_status", VERSION);
-	expect(await refusalCode(await status("room", Epoch.mint()), VERSION)).toBe(missing);
-	expect(await refusalCode(await status("epochless", epoch), VERSION)).toBe(missing);
-
-	// An instance never comes back, so asking to wait for a gone one changes nothing.
-	for (const rendezvous of [false, true]) {
-		for (const [namespace, pinned] of [
-			["room", Epoch.mint()],
-			["epochless", epoch],
-		] as const) {
-			const subscribe = requestStream(VERSION);
-			await pub.runSubscribe(
-				new Subscribe({
-					requestId: 7n,
-					trackNamespace: Path.from(namespace),
-					trackName: "video",
-					subscriberPriority: 0,
-					rendezvous,
-					epoch: pinned,
-				}),
-				subscribe.stream,
-			);
-			const r = subscribe.wire();
-			expect(await r.u53()).toBe(RequestError.id);
-			expect((await RequestError.decode(r, VERSION)).errorCode).toBe(
-				toRequestCode("does_not_exist", "subscribe", VERSION),
-			);
-		}
-	}
-
-	origin.close();
-});
-
-/** Only a session that negotiated MoQ Epoch may name an instance. */
-test("EPOCH on a request without MoQ Epoch is a protocol violation", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_18);
-	const { pub, origin } = publisher(pair.server);
-	const epoch = Epoch.mint();
-	const trackNamespace = Path.from("room");
-
-	await expect(
-		pub.runSubscribe(
-			new Subscribe({ requestId: 7n, trackNamespace, trackName: "video", subscriberPriority: 0, epoch }),
-			requestStream(VERSION).stream,
-		),
-	).rejects.toThrow(ProtocolViolation);
-	await expect(
-		pub.runTrackStatusRequest(
-			new TrackStatusRequest({ requestId: 7n, trackNamespace, trackName: "video", epoch }),
-			requestStream(VERSION).stream,
-		),
-	).rejects.toThrow(ProtocolViolation);
-	await expect(
-		pub.runFetch(
-			new Fetch({
-				requestId: 7n,
-				type: {
-					kind: "standalone",
-					trackNamespace,
-					trackName: "video",
-					start: { group: 0n, object: 0n },
-					end: { group: 0n, object: 0n },
-				},
-				epoch,
-			}),
-			requestStream(VERSION).stream,
-		),
-	).rejects.toThrow(ProtocolViolation);
-
-	origin.close();
-});
-
 /** Advance time in steps until `done` holds, failing once `limit` has passed without it. */
 async function advanceUntil(clock: Manual, done: () => boolean, limit: number, step = 50) {
 	for (let elapsed = 0; !done(); elapsed += step) {
@@ -2256,7 +2045,7 @@ test.each([
 	const stream = await nextStream(pair.client);
 	if (!stream) throw new Error("no PUBLISH_NAMESPACE for the broadcast");
 	expect(await stream.reader.u53()).toBe(PublishNamespace.id);
-	const msg = await PublishNamespace.decode(stream.reader, VERSION, { cluster: peer !== undefined, epoch: false });
+	const msg = await PublishNamespace.decode(stream.reader, VERSION, { cluster: peer !== undefined });
 	expect(msg.trackNamespace).toBe(Path.from("mine"));
 	await acceptPublishNamespace(stream);
 

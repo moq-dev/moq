@@ -3,7 +3,6 @@
 export * from "./active_count.ts";
 export * as Auth from "./auth_setup.ts";
 export * as Cluster from "./cluster.ts";
-export * as Epoch from "./epoch.ts";
 export * from "./hidden.ts";
 export * from "./max_age.ts";
 export * from "./setup.ts";

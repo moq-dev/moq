@@ -77,6 +77,7 @@ const WITHIN_HOLD: Duration = Duration::from_millis(10);
 const PAST_HOLD: Duration = Duration::from_millis(500);
 
 async fn replace(version: &str, epoch: Option<Epoch>) {
+	let carried = (version == "moq-lite-07-wip").then_some(epoch.clone()).flatten();
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
 	let viewer = produce_origin(3);
@@ -91,7 +92,10 @@ async fn replace(version: &str, epoch: Option<Epoch>) {
 	let _first = link(version, &publisher, &viewer).await;
 	let mut announced = viewer.consume().announced();
 	match next_event(&mut announced).await {
-		announce::Event::Start(announce) => assert_eq!(announce.prefix.as_str(), "cam"),
+		announce::Event::Start(announce) => {
+			assert_eq!(announce.prefix.as_str(), "cam");
+			assert_eq!(announce.route.epoch, carried, "{version}: carried epoch");
+		}
 		other => panic!("{version}: expected the broadcast, got {other:?}"),
 	}
 
@@ -112,7 +116,7 @@ async fn replace(version: &str, epoch: Option<Epoch>) {
 	write(&audio, "audio:0");
 	assert_eq!(read(&mut late).await, "audio:0", "{version}");
 
-	if epoch.is_some() {
+	if carried.is_some() {
 		// The epoch continues across the replacement: nothing to restart, and the old
 		// handle keeps serving.
 		if let Ok(event) = moq_clock::timeout(PAST_HOLD, announced.next()).await {
@@ -171,9 +175,9 @@ async fn epoch_lite07() {
 		.expect("timed out");
 }
 
-/// moq-transport carries the epoch with the MoQ Epoch extension.
+/// A local epoch never crosses a moq-transport hop.
 #[moq_clock::test]
-async fn epoch_ietf() {
+async fn epoch_is_stripped_ietf() {
 	for version in ["moq-transport-18", "moq-transport-22"] {
 		moq_clock::timeout(TEST_TIMEOUT, replace(version, Some(epoch())))
 			.await
@@ -184,7 +188,7 @@ async fn epoch_ietf() {
 /// Without one, a moq-transport replacement restarts as it does over lite.
 #[moq_clock::test]
 async fn epochless_ietf() {
-	for version in ["moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22"] {
 		moq_clock::timeout(TEST_TIMEOUT, replace(version, None))
 			.await
 			.expect("timed out");

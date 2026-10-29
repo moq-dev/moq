@@ -136,13 +136,8 @@ authorization and hidden names work exactly as without one.
   name instead of stalling viewers on the old sequence. A relay drops its copy
   of the old instance, so a new subscriber never sees its cached groups.
 
-The epoch and the restart message travel on moq-lite 07, which is opt-in.
-moq-transport carries the epoch when both sides offer the [epoch
-extension](/draft/moq-epoch), on by default. A restart onto another epoch is
-advertised before the old one is withdrawn, so the path is never absent, and one
-that gains or loses an epoch is an end then a start. Older moq-lite versions
-and a side that declines the extension carry no
-epoch. Without an epoch, any other route winning is a restart, even a reconnect
+The epoch and the restart message travel only on moq-lite 07, which is opt-in.
+moq-transport and older moq-lite versions carry no epoch. Without an epoch, any other route winning is a restart, even a reconnect
 over the same path, since nothing says it serves the same bytes. A peer that
 ignores the end and start may keep cached objects of the old run under the same
 names, so an end and a start is not a cache flush.
@@ -163,8 +158,7 @@ compared. A subscription uses the preferred link that has a route and moves to t
 next when that route goes; a publisher pushes the same broadcast to every CDN.
 
 The move resumes without a seam only between routes with the same epoch, which
-needs moq-lite 07, or moq-transport with the epoch extension,
-on both links. A CDN link that carries no epoch makes moving onto it, or back
+needs moq-lite 07 on both links. A CDN link that carries no epoch makes moving onto it, or back
 off it, a restart, and the player requests the path again. Both links must
 also speak the same protocol and draft: a copy's track info records the
 moq-transport draft it crossed, and a copy whose track info differs is refused,

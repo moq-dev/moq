@@ -1,4 +1,4 @@
-//! Follow a real JS QMux server's redirect, retaining the reader across the epoch-proven handover.
+//! Follow a real JS QMux server's epochless redirect through its replacement announcement.
 use std::process::Stdio;
 
 use anyhow::{Context, ensure};
@@ -40,7 +40,8 @@ async fn main() -> anyhow::Result<()> {
 		connection.version() == Some(version.parse().map_err(anyhow::Error::msg)?),
 		"wrong negotiated version"
 	);
-	let broadcast = consumer.follow("handover", None)?.available().await?;
+	let mut following = consumer.follow("handover", None)?;
+	let broadcast = following.available().await?;
 	let mut track = broadcast.track("video")?.subscribe(None).await?;
 	let input = child.stdin.as_mut().context("stdin")?;
 	for sequence in 0..2 {
@@ -62,6 +63,9 @@ async fn main() -> anyhow::Result<()> {
 				marker.read_frame().await?.context("marker frame")?.payload.as_ref() == [42],
 				"wrong marker"
 			);
+			let restarted = following.available().await?;
+			ensure!(!restarted.is_clone(&broadcast), "redirect did not restart the instance");
+			track = restarted.track("video")?.subscribe(None).await?;
 			input.write_all(b"replacement ready\n").await?;
 		}
 	}
@@ -69,6 +73,6 @@ async fn main() -> anyhow::Result<()> {
 	ensure!(child.wait().await?.success(), "JS server failed");
 	let _ = connection.close().await;
 	client.close().await;
-	eprintln!("reverse goaway resumed {version}");
+	eprintln!("reverse goaway restarted {version}");
 	Ok(())
 }

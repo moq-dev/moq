@@ -198,13 +198,6 @@ interface Target {
 	/** Advertise a namespace the peer does not hold. */
 	advertise(key: Path.Valid, next: Advertised): Promise<Answer>;
 
-	/**
-	 * Replace the instance behind a namespace the peer holds with another (MoQ Epoch): the
-	 * new advertisement goes out before the old is withdrawn, so the peer never sees the
-	 * namespace absent.
-	 */
-	replace(key: Path.Valid, next: Advertised): Promise<Answer>;
-
 	/** Reprice a namespace the peer holds: the same broadcast at a new hop chain or cost. */
 	update(key: Path.Valid, next: Advertised, reprice: Reprice): Promise<Answer>;
 
@@ -379,10 +372,6 @@ export class Publisher {
 	// back came from us. `undefined` when nothing negotiated it.
 	#advert?: Cluster.Advert;
 
-	// Whether both SETUPs offered MoQ Epoch: every advertisement names its route's epoch, and
-	// a request may name the one it expects.
-	#epoch: boolean;
-
 	// Our grant (MoQ Auth): only what it lets us publish is advertised and served, and a
 	// shrink withdraws what it no longer covers. Undefined until the peer answers, which
 	// allows everything.
@@ -410,7 +399,6 @@ export class Publisher {
 		hidden = false,
 		activeCount = false,
 		cluster,
-		epoch = false,
 		grant = new Signal<Grant | undefined>(undefined),
 		auth,
 		ready = Promise.resolve(),
@@ -429,8 +417,6 @@ export class Publisher {
 		activeCount?: boolean;
 		/** The Hop IDs the SETUP exchange settled (MoQ Cluster). */
 		cluster?: Cluster.Hops;
-		/** Whether both SETUPs offered MoQ Epoch. */
-		epoch?: boolean;
 		/** The union of our tokens' grants (MoQ Auth), which bounds what we publish. */
 		grant?: Getter<Grant | undefined>;
 		/** This session's tokens, which a route names for its request to carry. */
@@ -451,7 +437,6 @@ export class Publisher {
 		this.#hidden = hidden;
 		this.#activeCount = activeCount;
 		this.#advert = Cluster.advertise(cluster);
-		this.#epoch = epoch;
 		this.#datagramWriter = DatagramStream.datagramWriter(quic);
 	}
 
@@ -478,7 +463,6 @@ export class Publisher {
 	}
 
 	async #runSubscribe(msg: Subscribe, request: RequestStream) {
-		this.#pinned(msg.epoch);
 		// Draft-22 replaced joining FETCH with fills.
 		const joinable = !Filter.isDraft22(this.#session.version);
 		if (joinable) this.#setJoin(msg.requestId, "pending");
@@ -530,9 +514,7 @@ export class Publisher {
 
 		// Legal requests we can't honor are refused one at a time: serving a Range Filter
 		// unfiltered would deliver objects it excluded.
-		// An instance never comes back, so a request pinned to a gone one is missing, not
-		// worth waiting for.
-		const rendezvous = msg.rendezvous && msg.epoch === undefined;
+		const rendezvous = msg.rendezvous;
 
 		if (msg.rangeFilters) {
 			refusal = { condition: "invalid_filter", reasonPhrase: "range filters not supported" };
@@ -542,7 +524,7 @@ export class Publisher {
 			refusal = { condition: "unauthorized", reasonPhrase: "not granted" };
 		} else {
 			try {
-				broadcast = await this.#resolve(name, left.signal, msg.epoch);
+				broadcast = await this.#resolve(name, left.signal);
 			} catch (err: unknown) {
 				// Nobody is left to refuse.
 				if (left.signal.aborted) {
@@ -1598,16 +1580,14 @@ export class Publisher {
 			// replacement, so repricing one is just sending it again, a new original
 			// publisher included, as Rust does.
 			const namespace = async (suffix: Path.Valid, snap: Advertised): Promise<Answer> => {
-				// Either extension puts the Parameters field on NAMESPACE, even an empty one.
-				const params = this.#advert !== undefined || this.#epoch ? this.#params(snap.route) : undefined;
+				// MoQ Cluster puts the Parameters field on NAMESPACE.
+				const params = this.#advert !== undefined ? this.#params(snap.route) : undefined;
 				const entry = new SubscribeNamespaceEntry({ suffix, params });
 				await Message.write(request.writer, SubscribeNamespaceEntry.id, entry, version);
 				return "held";
 			};
 			const target: Target = {
 				advertise: namespace,
-				// A repeat under another epoch replaces the instance in place.
-				replace: namespace,
 				update: namespace,
 				held: () => undefined,
 				carry: () => undefined,
@@ -1726,7 +1706,6 @@ export class Publisher {
 		const requests: Requests = new Map();
 		const target: Target = {
 			advertise: (path, snap) => this.#advertise(path, requests, snap.route),
-			replace: (path, snap) => this.#replace(path, requests, snap.route),
 			update: (path, _snap, reprice) => this.#update(path, requests, reprice),
 			withdraw: (path) => this.#withdraw(path, requests),
 			held: (path) => requests.get(path)?.auth,
@@ -1830,9 +1809,8 @@ export class Publisher {
 	 * Bring the peer's view in line with `updated`, one namespace at a time, and report
 	 * whether anything it should hold is still missing and worth coming back for.
 	 *
-	 * Nothing the peer cannot see is sent, a reprice updates the namespace in place, another
-	 * epoch replaces it in place (MoQ Epoch), and anything else is withdrawn first so a
-	 * republish reads as withdraw-then-advertise.
+	 * Nothing the peer cannot see is sent, a reprice updates the namespace in place, and
+	 * a changed instance is withdrawn before it is advertised again.
 	 * `ns` records what the peer holds rather than what we attempted: a declined
 	 * advertisement or update stays out of it, so the next turn offers it fresh instead
 	 * of believing it is already up.
@@ -1856,7 +1834,7 @@ export class Publisher {
 		const held = new Map(ns.active);
 		for (const [key, snap] of ns.active) {
 			const next = updated.get(key);
-			if (this.#change(key, snap, next, target) !== "restart" || this.#replaces(snap, next)) continue;
+			if (this.#change(key, snap, next, target) !== "restart") continue;
 			await target.withdraw(key);
 			held.delete(key);
 		}
@@ -1869,9 +1847,6 @@ export class Publisher {
 			let answer: Answer;
 			if (prev !== undefined && diff !== "restart") {
 				answer = await target.update(key, snap, diff);
-			} else if (prev !== undefined) {
-				// Still held through a restart: another epoch replacing it.
-				answer = await target.replace(key, snap);
 			} else {
 				// A fresh offer waits for what a refusal asked for, whatever brought us back.
 				if (!this.#offerable(key, ns.refused)) continue;
@@ -1923,16 +1898,6 @@ export class Publisher {
 		return { ...(diff === "same" ? {} : diff), token: to };
 	}
 
-	/**
-	 * Whether `next` replaces the instance the peer holds in `held` with another, both named
-	 * by an epoch on the wire (MoQ Epoch). Gaining or losing one is withdrawn and advertised
-	 * afresh, and so is any instance change on a peer that cannot tell them apart.
-	 */
-	#replaces(held: Advertised, next: Advertised | undefined): boolean {
-		const [from, to] = [held.route.epoch, next?.route.epoch];
-		return this.#epoch && from !== undefined && to !== undefined && from !== to;
-	}
-
 	/** `auth` when a request of this session can carry it. */
 	#carry(auth: Credential | undefined): Credential | undefined {
 		return this.#auth?.carried(auth) === undefined ? undefined : auth;
@@ -1973,11 +1938,10 @@ export class Publisher {
 	}
 
 	/**
-	 * The extension parameters an advertisement of `route` carries. The epoch is forwarded
-	 * as the route names it, and never invented for one without.
+	 * The extension parameters an advertisement of `route` carries.
 	 */
 	#params(route: Route): AdvertParams {
-		return { cluster: clusterFor(this.#advert, route), epoch: this.#epoch ? route.epoch : undefined };
+		return { cluster: clusterFor(this.#advert, route) };
 	}
 
 	/**
@@ -2165,19 +2129,6 @@ export class Publisher {
 		return answer;
 	}
 
-	/**
-	 * Replace the PUBLISH_NAMESPACE request for `path` with one for another instance. The two
-	 * streams are unordered, so the old one is withdrawn only once the peer answered the new
-	 * one, refused or not: it serves another instance either way.
-	 */
-	async #replace(path: Path.Valid, requests: Requests, route: Route): Promise<Answer> {
-		const old = requests.get(path);
-		requests.delete(path);
-		const answer = await this.#advertise(path, requests, route);
-		if (old) await this.#end(old);
-		return answer;
-	}
-
 	async #withdraw(path: Path.Valid, requests: Requests) {
 		const request = requests.get(path);
 		if (!request) return;
@@ -2208,7 +2159,6 @@ export class Publisher {
 	}
 
 	async #runTrackStatusRequest(msg: TrackStatusRequest, request: RequestStream) {
-		this.#pinned(msg.epoch);
 		if (Namespace.reserved(msg.trackNamespace, this.#session.version)) {
 			await refuseReserved(request);
 			return;
@@ -2247,7 +2197,7 @@ export class Publisher {
 		try {
 			let answer: TrackStatusOk;
 			try {
-				const broadcast = await this.#resolve(name, hold.signal, msg.epoch);
+				const broadcast = await this.#resolve(name, hold.signal);
 				const info = await wireOf(broadcast).resolveTrackInfo(msg.trackName, hold.signal);
 				const largest = wireOf(broadcast).largest(msg.trackName);
 				answer = new TrackStatusOk({
@@ -2910,7 +2860,6 @@ export class Publisher {
 	}
 
 	async #runFetch(msg: Fetch, request: RequestStream) {
-		this.#pinned(msg.epoch);
 		// The FILL_TIMEOUT counts from the request's arrival, whatever it waits on.
 		const deadline = fillDeadline(msg.fillTimeout);
 		const version = this.#session.version;
@@ -3054,7 +3003,7 @@ export class Publisher {
 			return { condition: "invalid_range", reasonPhrase: "empty range" };
 		}
 
-		const broadcast = await this.#resolve(named.trackNamespace, signal, msg.epoch);
+		const broadcast = await this.#resolve(named.trackNamespace, signal);
 		const priority = fromWire(msg.subscriberPriority);
 		const cache = broadcast.track(named.trackName).subscribe({ priority, maxDelay: Milli(Varint.MAX_U53) });
 		let answer: FetchAnswer | undefined;
@@ -3367,21 +3316,13 @@ export class Publisher {
 	/**
 	 * Resolve the broadcast a request names for serving: a local publish, or else the
 	 * origin's routes and dynamic handlers. Rejects with the abort once `signal` aborts.
-	 *
-	 * A request naming an `epoch` is served only by that instance: one now serving another
-	 * epoch, or none, refuses it as gone rather than answering with other content.
 	 */
-	async #resolve(name: Path.Valid, signal: AbortSignal, epoch: Epoch.Valid | undefined): Promise<broadcast.Consumer> {
+	async #resolve(name: Path.Valid, signal: AbortSignal, epoch?: Epoch.Valid): Promise<broadcast.Consumer> {
 		const broadcast =
 			this.#publish &&
 			(wireOf(this.#publish).local(name, epoch) ?? (await wireOf(this.#publish).demand(name, epoch, signal)));
 		if (!broadcast) throw new NotFound(`broadcast ${name}`);
 		return broadcast;
-	}
-
-	/** Break a session whose peer names an epoch it was never told about: MoQ Epoch was not negotiated. */
-	#pinned(epoch: Epoch.Valid | undefined) {
-		if (epoch !== undefined && !this.#epoch) throw new ProtocolViolation("EPOCH without MoQ Epoch");
 	}
 }
 

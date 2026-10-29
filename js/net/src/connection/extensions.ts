@@ -10,8 +10,6 @@ export interface Extensions {
 	auth?: boolean;
 	/** The MoQ Solicit extension: the peer answers our SUBSCRIBE_NAMESPACE rather than announcing unasked. */
 	solicit?: boolean;
-	/** The MoQ Epoch extension: announcements and requests carry the publisher's epoch, as moq-lite does (draft-18+). */
-	epoch?: boolean;
 }
 
 /** Every extension resolved to whether it is offered. */
@@ -22,7 +20,6 @@ export function offered(extensions?: Extensions): Offered {
 	return {
 		auth: extensions?.auth ?? true,
 		solicit: extensions?.solicit ?? true,
-		epoch: extensions?.epoch ?? true,
 	};
 }
 
@@ -30,5 +27,4 @@ export function offered(extensions?: Extensions): Offered {
 export function intoSetup(params: Ietf.SetupOptions, extensions: Offered) {
 	if (extensions.solicit) Ietf.solicitIntoSetup(params);
 	if (extensions.auth) Ietf.Auth.intoSetup(params);
-	if (extensions.epoch) Ietf.Epoch.intoSetup(params);
 }

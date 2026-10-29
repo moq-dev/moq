@@ -387,8 +387,7 @@ rtsp` one per RTSP session, and `import ts --program all` one per program.
 A restarted process takes the name at once: viewers see the broadcast restart,
 and their next subscribe reaches the new run instead of waiting for its group
 numbers to catch up. Epochs cross a connection only on moq-lite 07, which is
-opt-in, and on moq-transport, and order by the host's clock
-there, so a host whose clock runs behind the old run's waits for it to close.
+opt-in, and order by the host's clock there, so a host whose clock runs behind the old run's waits for it to close.
 Other versions carry no epoch, so a restart from another session is the newest
 route at an equal cost, or a better one.
 

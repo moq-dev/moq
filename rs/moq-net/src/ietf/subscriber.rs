@@ -752,12 +752,11 @@ struct TrackState {
 	// stream and the subgroup stream carrying the rest of the group.
 	fill: kio::Producer<Fill>,
 
-	// The broadcast this track was subscribed from. With the track name and the instance
-	// it names, it forms the full track name, which is what decides whether a repeated
+	// The broadcast this track was subscribed from. With the track name, it forms the
+	// full track name, which is what decides whether a repeated
 	// alias is the fatal collision (one alias, two tracks) or the legal sharing of an alias
 	// across subscriptions.
 	broadcast: Path,
-	epoch: Option<crate::Epoch>,
 
 	// Units for this track's object Timestamps, from the TIMESCALE Track Property in
 	// SUBSCRIBE_OK. `None` until it arrives, and for a track that declares none: its
@@ -805,7 +804,6 @@ impl TrackState {
 			name,
 			alias: None,
 			broadcast,
-			epoch: None,
 			timescale: None,
 			fill_largest: None,
 			fill_start: None,
@@ -885,14 +883,6 @@ struct Advertised {
 	route: crate::origin::Route,
 }
 
-impl Advertised {
-	/// The publisher instance the advertisement named (MoQ Epoch), taken as given.
-	fn with_epoch(mut self, epoch: Option<crate::Epoch>) -> Self {
-		self.route.epoch = epoch;
-		self
-	}
-}
-
 /// One NAMESPACE a SUBSCRIBE_NAMESPACE stream holds, live on the wire until its
 /// NAMESPACE_DONE whether or not its route is attached.
 struct Advertisement {
@@ -900,8 +890,6 @@ struct Advertisement {
 	/// [`Subscriber::update_announce`]; `None` while it loops back through us or falls
 	/// outside the scope.
 	id: Option<u64>,
-	/// The publisher instance it names: a repeat may name another, but not gain or lose one.
-	epoch: Option<crate::Epoch>,
 	/// Counts it against the session's announce cap until its NAMESPACE_DONE, attached or
 	/// not; the namespace's route shares it rather than taking a second.
 	slot: crate::auth::Hold,
@@ -911,9 +899,6 @@ struct Advertisement {
 struct Held {
 	/// The MoQ Cluster parameters, which a REQUEST_UPDATE carries only when they change.
 	cluster: Option<cluster::Advert>,
-	/// The MoQ Epoch instance, fixed for the advertisement's life: REQUEST_UPDATE cannot
-	/// carry one.
-	epoch: Option<crate::Epoch>,
 }
 
 /// A joining request may be abandoned before it takes an ID. Once committed, its header
@@ -963,10 +948,6 @@ impl Drop for JoiningTask {
 pub(super) struct Subscriber {
 	// Scoped to a minted source on the clone that serves its requests.
 	validity: crate::model::broadcast::RequestValidity,
-	// The publisher instance the minted source was resolved under (MoQ Epoch), named on
-	// every request for it, so the peer refuses rather than answer from another. Scoped
-	// like `validity`, and only ever set on a session that negotiated the extension.
-	epoch: Option<crate::Epoch>,
 	// Arms the track-alias and request-id timeouts.
 	runtime: crate::time::Deadlines,
 	session: Transport,
@@ -1104,7 +1085,6 @@ impl Subscriber {
 			announces: Default::default(),
 			listings: Default::default(),
 			validity: Default::default(),
-			epoch: None,
 		}
 	}
 
@@ -1321,8 +1301,7 @@ impl Subscriber {
 		let (Some(held), Some(new)) = (state.subscribes.get(&holder), state.subscribes.get(&request_id)) else {
 			return false;
 		};
-
-		held.broadcast == new.broadcast && held.epoch == new.epoch && held.name == new.name
+		held.broadcast == new.broadcast && held.name == new.name
 	}
 
 	/// Take the origin request back out of a subscription that is still setting up.
@@ -1461,7 +1440,6 @@ impl Subscriber {
 		let peer = self.peer().await;
 		let negotiated = ietf::Negotiated {
 			cluster: peer.negotiated(),
-			epoch: declared.epoch,
 		};
 
 		self.run_namespace_entries(request, &peer, negotiated, Initial { initial, snapshot }, live)
@@ -1570,22 +1548,14 @@ impl Subscriber {
 					let path = prefix.join(&msg.suffix)?;
 					let params = msg.params.unwrap_or_default();
 					let held = match live.entry(path.clone()) {
-						// A repeat under another epoch replaces the instance in place, but one that
-						// gains or loses an epoch skipped the NAMESPACE_DONE it needs.
-						Entry::Occupied(entry) if entry.get().epoch.is_some() != params.epoch.is_some() => {
-							tracing::warn!(%path, "namespace repeated gaining or losing an epoch");
-							return Err(Error::ProtocolViolation);
-						}
 						Entry::Occupied(entry) => entry.into_mut(),
 						// The peer holds the namespace until its NAMESPACE_DONE whatever we make
 						// of it, so it takes its announce slot before the decision.
 						Entry::Vacant(entry) => entry.insert(Advertisement {
 							id: None,
-							epoch: None,
 							slot: std::sync::Arc::new(self.acquire_announce()?),
 						}),
 					};
-					held.epoch = params.epoch.clone();
 					let Some(advert) = self.route(params.cluster.as_ref(), peer) else {
 						// Looped back through us: forwarding it would extend the loop and
 						// subscribing through it would route us back to ourselves.
@@ -1594,20 +1564,18 @@ impl Subscriber {
 						// replacement retracts the route we were holding. Keeping it would
 						// leave subscriptions on a path the peer no longer offers.
 						//
-						// The advertisement itself stays live on the wire, epoch and all.
+						// The advertisement itself stays live on the wire.
 						tracing::debug!(%path, "dropping reflected namespace");
 						if let Some(id) = held.id.take() {
 							let _ = self.stop_announce(path, id, false);
 						}
 						continue;
 					};
-					let advert = advert.with_epoch(params.epoch.clone());
 
-					tracing::debug!(%path, hops = advert.route.hops.len(), cost = ?advert.route.cost, epoch = ?params.epoch, "namespace");
+					tracing::debug!(%path, hops = advert.route.hops.len(), cost = ?advert.route.cost, "namespace");
 					match held.id {
 						// A repeat replaces the advertisement atomically; nothing is torn
-						// down merely because an update arrived, and another epoch restarts
-						// the route without it ever going absent.
+						// down merely because an update arrived.
 						Some(id) => self.update_announce(path, id, advert)?,
 						None => {
 							match self.start_announce(path.clone(), advert, Admit::Session(Some(held.slot.clone()))) {
@@ -1653,7 +1621,6 @@ impl Subscriber {
 		body: ietf::Body,
 		stream: Stream<Transport, Version>,
 		peer: cluster::Peer,
-		epoch: bool,
 		declared: Option<bool>,
 	) -> Result<MaybeSendBox<'static, ()>, Error> {
 		let mut this = self.clone();
@@ -1688,7 +1655,6 @@ impl Subscriber {
 				// the dispatcher turns into the protocol violation the draft requires.
 				let negotiated = ietf::Negotiated {
 					cluster: peer.negotiated(),
-					epoch,
 				};
 				let msg = match ietf::PublishNamespace::decode_body(&mut data, this.version, negotiated) {
 					Err(err) if super::token::refuses_request(&err) => {
@@ -1830,7 +1796,6 @@ impl Subscriber {
 
 		// A path that already contains our own Hop ID looped back. Reject it rather
 		// than attaching a source we would then have to route around.
-		let epoch = msg.params.epoch.clone();
 		let Some(advert) = self.route(msg.params.cluster.as_ref(), &peer) else {
 			tracing::debug!(%path, "dropping reflected publish_namespace");
 			self.write_error(&mut stream, &Error::Unroutable, "route loops through this relay")
@@ -1838,7 +1803,6 @@ impl Subscriber {
 			let _ = stream.writer.close().await;
 			return Ok(());
 		};
-		let advert = advert.with_epoch(epoch.clone());
 
 		// Our authorization of the peer (the limit) admits an announce without a token, and
 		// holds back one it does not cover until it does. An AUTHORIZATION TOKEN on the
@@ -1916,7 +1880,6 @@ impl Subscriber {
 				&path,
 				Held {
 					cluster: msg.params.cluster,
-					epoch,
 				},
 				peer,
 				&mut attached,
@@ -1977,10 +1940,7 @@ impl Subscriber {
 		attached: &mut Option<u64>,
 		token_grant: Option<crate::auth::RequestGrant>,
 	) -> Result<Withdraw, Error> {
-		let Held {
-			cluster: mut held,
-			epoch,
-		} = held;
+		let Held { cluster: mut held } = held;
 		// A REQUEST_UPDATE carrying a fresh token refreshes the announce's request grant (MoQ
 		// request-token); its verify is raced against the stream in the loop's single wait
 		// (never a bare await), so a peer ending the announce ends it whatever the acceptor
@@ -2191,8 +2151,6 @@ impl Subscriber {
 						Ok(())
 					}
 					Some(advert) => {
-						// The epoch is the advertisement's for as long as it stands.
-						let advert = advert.with_epoch(epoch.clone());
 						tracing::debug!(%path, hops = advert.route.hops.len(), cost = ?advert.route.cost, "publish_namespace update");
 						match *attached {
 							Some(id) => self.update_announce(path.clone(), id, advert),
@@ -2450,18 +2408,12 @@ impl Subscriber {
 			Entry::Occupied(entry) => {
 				let entry = entry.into_mut();
 				match entry.adverts.iter().position(|(advert, _)| *advert == id) {
-					// A repeat under another epoch is a newer advertisement, so it becomes the
-					// newest; one of the same instance stays where it is.
-					Some(index) if entry.adverts[index].1.epoch != route.epoch => {
-						entry.adverts.remove(index);
-						entry.adverts.push((id, route));
-					}
 					Some(index) => entry.adverts[index].1 = route,
 					None => entry.adverts.push((id, route)),
 				}
 				// The newest advertisement stands, and an update to an older one changes
 				// nothing. A repeat of the same instance re-prices in place and in-flight
-				// tracks keep flowing; another epoch restarts it.
+				// tracks keep flowing.
 				let (newest, route) = entry.adverts.last().expect("just recorded");
 				if *newest == id {
 					entry.route = route.clone();
@@ -2652,22 +2604,19 @@ impl Subscriber {
 				Some(requested) => requested.clone(),
 				None => continue,
 			};
-			// The source serves the instance the route names now: every request for it names
-			// that epoch when the peer can read one, and the source takes new tracks only
-			// while the peer still selects that instance.
-			let (validity, epoch) = {
+			// The source takes new tracks only while the peer still selects that instance.
+			let validity = {
 				let state = self.state.lock();
 				let entry = state
 					.broadcasts
 					.get(&path)
 					.filter(|entry| entry.generation == generation);
-				let validity = entry
+				entry
 					.and_then(|entry| entry.dynamic.as_ref())
 					.map(|route| crate::model::broadcast::RequestValidity::for_source(route, request.path()))
 					.unwrap_or_else(|| {
 						crate::model::broadcast::RequestValidity::token(Some(kio::Producer::new(()).consume()))
-					});
-				(validity, entry.and_then(|entry| entry.route.epoch.clone()))
+					})
 			};
 			let source =
 				crate::model::broadcast::SourceGuard::new(self.origin.create_source(requested.clone(), validity));
@@ -2692,7 +2641,6 @@ impl Subscriber {
 
 			let mut this = self.clone();
 			this.validity = dynamic.validity().clone();
-			this.epoch = epoch;
 			broadcasts.push(async move {
 				if let Err(err) = this.run_broadcast(requested, source, dynamic, route).await {
 					tracing::debug!(%err, "error running broadcast");
@@ -3050,7 +2998,6 @@ impl Subscriber {
 				TrackState {
 					// A resumed copy is the session's to abort from here on.
 					producer: target.producer().cloned(),
-					epoch: self.epoch.clone(),
 					alias,
 					tail,
 					..TrackState::pending(track_name.to_owned(), broadcast_path.clone(), fill.clone())
@@ -3105,7 +3052,6 @@ impl Subscriber {
 							rendezvous: false,
 							range_filters: false,
 							authorization_token: None,
-							epoch: self.epoch.clone(),
 						})
 						.await
 				}
@@ -4104,7 +4050,6 @@ impl Subscriber {
 							fill_timeout: false,
 							properties_wanted: true,
 							// Served by the subscription it joins, which named the instance.
-							epoch: None,
 						})
 						.await?;
 					Ok::<(), Error>(())
@@ -4264,7 +4209,6 @@ impl Subscriber {
 					track_namespace: broadcast_path.clone(),
 					track_name: track_name.into(),
 					properties_wanted: true,
-					epoch: self.epoch.clone(),
 				})
 				.await
 		}
@@ -5394,7 +5338,6 @@ impl Subscriber {
 					// The copy learned the track before any fetch, from SUBSCRIBE_OK or
 					// TRACK_STATUS_OK, so a FETCH_OK repeating it is waste.
 					properties_wanted: false,
-					epoch: self.epoch.clone(),
 				})
 				.await?;
 			Ok::<_, Error>(())
@@ -6408,101 +6351,6 @@ mod tests {
 		);
 	}
 
-	/// A NAMESPACE that loops back through us detaches its route, but the advertisement
-	/// stays live on the wire until its NAMESPACE_DONE: a repeat that restores a clean path
-	/// while gaining or losing an epoch is still the violation it would be without the loop.
-	#[moq_clock::test]
-	async fn a_reflected_namespace_keeps_its_epoch_live() {
-		const VERSION: Version = Version::Draft18;
-		let us = crate::Hop::new(5).unwrap();
-		let epoch = crate::Epoch::mint();
-
-		for (reflected, drops) in [(false, true), (true, true), (true, false)] {
-			let log = crate::lite::test_transport::Log::default();
-			let mut writer = crate::coding::Writer::new(
-				crate::transport::boxed::SendStream::new(crate::lite::test_transport::SinkSend::new(log.clone())),
-				VERSION,
-			);
-			writer.varint(ietf::RequestOk::ID).await.unwrap();
-			writer
-				.encode(&ietf::RequestOk {
-					largest: None,
-					active: None,
-				})
-				.await
-				.unwrap();
-			let mut adverts = vec![(hop_path(&[7, 9]), Some(epoch.clone()))];
-			if reflected {
-				adverts.push((hop_path(&[7, 5, 9]), Some(epoch.clone())));
-			}
-			adverts.push((hop_path(&[7, 9]), (!drops).then(|| epoch.clone())));
-			for (hops, epoch) in adverts {
-				writer.varint(ietf::Namespace::ID).await.unwrap();
-				writer
-					.encode(&ietf::Namespace {
-						suffix: crate::Path::from_static("room"),
-						params: Some(ietf::AdvertParams {
-							cluster: Some(cluster::Advert { hops, cost: 0 }),
-							epoch,
-						}),
-					})
-					.await
-					.unwrap();
-			}
-			let script = log.writes.lock().unwrap().clone();
-
-			let origin = crate::origin::Config::new(us).produce();
-			let session = crate::lite::test_transport::ScriptedSession::new(script);
-			let (tasks, _task_set) = crate::util::TaskSet::new();
-			let peer_setup = peer::PeerSetup::default();
-			peer_setup.set(peer::Peer {
-				cluster: cluster::Peer {
-					hop: Some(crate::Hop::new(9).unwrap()),
-					cost: None,
-				},
-				epoch: true,
-				..Default::default()
-			});
-			let mut subscriber = Subscriber::new(
-				crate::time::sim(),
-				crate::driver::Transport::new(session.clone()),
-				origin,
-				Control::new(false),
-				None,
-				peer_setup,
-				us,
-				None,
-				VERSION,
-				tasks,
-				Default::default(),
-			);
-
-			let prefix = crate::model::interest_prefixes(&subscriber.origin.allowed())
-				.pop()
-				.expect("one prefix");
-			let (_live, live) = live();
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
-				.await
-				.unwrap();
-			let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(
-				stream,
-				prefix,
-				crate::model::Snapshot::landed(),
-				live
-			));
-			let mut result = None;
-			for _ in 0..100 {
-				if let std::task::Poll::Ready(done) = futures::poll!(run.as_mut()) {
-					result = Some(done);
-					break;
-				}
-				settle().await;
-			}
-			let violated = matches!(result, Some(Err(ref err)) if is_protocol_violation(err));
-			assert_eq!(violated, drops, "reflected: {reflected}, drops: {drops}: {result:?}");
-		}
-	}
-
 	/// A namespace the peer holds on a SUBSCRIBE_NAMESPACE stream takes an announce slot
 	/// whatever we make of it, so reflected ones the origin never sees still exhaust the
 	/// session's budget, and a NAMESPACE_DONE gives the slot back.
@@ -6528,7 +6376,6 @@ mod tests {
 					hops: hop_path(&[7, 5, 9]),
 					cost: 0,
 				}),
-				epoch: None,
 			}),
 		};
 		writer.varint(ietf::Namespace::ID).await.unwrap();
@@ -8673,7 +8520,6 @@ mod tests {
 								hops: hop_path(&[7, 9]),
 								cost,
 							}),
-							epoch: None,
 						}),
 					})
 					.await
@@ -9063,98 +8909,6 @@ mod tests {
 		assert!(routed_now(&consumer, "room/host").is_none());
 	}
 
-	/// MoQ Epoch: a publisher replacing its instance withdraws one advertisement and makes
-	/// another, on separate streams that arrive in either order. The newest advertisement
-	/// stands, so neither the old one's late update nor its withdrawal reverts the route
-	/// to the instance it named.
-	#[moq_clock::test]
-	async fn a_reordered_replacement_keeps_the_new_instance() {
-		let (mut subscriber, origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
-		let consumer = origin.consume();
-		let path = crate::Path::from_static("room/host");
-		let peer = cluster::Peer::default();
-		let (old, new) = (crate::Epoch::mint(), crate::Epoch::mint());
-		let advert = |subscriber: &Subscriber, epoch: &crate::Epoch| {
-			subscriber
-				.route(None, &peer)
-				.expect("route")
-				.with_epoch(Some(epoch.clone()))
-		};
-		let epoch_now = || routed_now(&consumer, "room/host").and_then(|route| route.epoch);
-
-		let first = advert(&subscriber, &old);
-		let first = subscriber
-			.start_announce(path.clone(), first, Admit::Session(None))
-			.unwrap();
-		assert_eq!(epoch_now(), Some(old.clone()));
-
-		// The replacement's PUBLISH_NAMESPACE beats the old one's PUBLISH_NAMESPACE_DONE.
-		let second = advert(&subscriber, &new);
-		let second = subscriber
-			.start_announce(path.clone(), second, Admit::Session(None))
-			.unwrap();
-		assert_eq!(epoch_now(), Some(new.clone()));
-
-		// A late update to the old advertisement changes nothing.
-		let stale = advert(&subscriber, &old);
-		subscriber.update_announce(path.clone(), first, stale).unwrap();
-		assert_eq!(epoch_now(), Some(new.clone()), "a stale update reverted the instance");
-
-		// Its withdrawal, arriving last, leaves the new instance standing.
-		subscriber.stop_announce(path.clone(), first, false).unwrap();
-		assert_eq!(
-			epoch_now(),
-			Some(new.clone()),
-			"the old withdrawal retracted the new instance"
-		);
-
-		subscriber.stop_announce(path, second, false).unwrap();
-		assert_eq!(routed_now(&consumer, "room/host"), None);
-	}
-
-	/// MoQ Epoch: a namespace advertised both inline and by a later PUBLISH_NAMESPACE takes
-	/// another epoch from either. An inline repeat under the new epoch is the newest
-	/// advertisement, not an update to the older of the two.
-	#[moq_clock::test]
-	async fn a_repeat_under_another_epoch_becomes_the_newest() {
-		let (mut subscriber, origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
-		let consumer = origin.consume();
-		let path = crate::Path::from_static("room/host");
-		let peer = cluster::Peer::default();
-		let (old, new) = (crate::Epoch::mint(), crate::Epoch::mint());
-		let advert = |subscriber: &Subscriber, epoch: &crate::Epoch| {
-			subscriber
-				.route(None, &peer)
-				.expect("route")
-				.with_epoch(Some(epoch.clone()))
-		};
-		let epoch_now = || routed_now(&consumer, "room/host").and_then(|route| route.epoch);
-
-		let inline = advert(&subscriber, &old);
-		let inline = subscriber
-			.start_announce(path.clone(), inline, Admit::Session(None))
-			.unwrap();
-		let request = advert(&subscriber, &old);
-		let request = subscriber
-			.start_announce(path.clone(), request, Admit::Session(None))
-			.unwrap();
-		assert_eq!(epoch_now(), Some(old.clone()));
-
-		let repeat = advert(&subscriber, &new);
-		subscriber.update_announce(path.clone(), inline, repeat).unwrap();
-		assert_eq!(
-			epoch_now(),
-			Some(new.clone()),
-			"the older request kept the old instance"
-		);
-
-		// The old instance's withdrawal leaves the new one standing.
-		subscriber.stop_announce(path.clone(), request, false).unwrap();
-		assert_eq!(epoch_now(), Some(new));
-		subscriber.stop_announce(path, inline, false).unwrap();
-		assert_eq!(routed_now(&consumer, "room/host"), None);
-	}
-
 	/// Two *separate* advertisements for one namespace refcount a single route:
 	/// it takes both retractions to retract it.
 	#[moq_clock::test]
@@ -9424,7 +9178,6 @@ mod tests {
 				&path,
 				Held {
 					cluster: Some(clean.clone()),
-					epoch: None
 				},
 				peer,
 				&mut attached,
@@ -9474,7 +9227,6 @@ mod tests {
 				&path,
 				Held {
 					cluster: Some(clean.clone()),
-					epoch: None
 				},
 				peer,
 				&mut attached,
@@ -9564,7 +9316,6 @@ mod tests {
 				&path,
 				Held {
 					cluster: Some(clean.clone()),
-					epoch: None
 				},
 				peer,
 				&mut attached,
@@ -9637,7 +9388,6 @@ mod tests {
 				&path,
 				Held {
 					cluster: Some(held.clone()),
-					epoch: None
 				},
 				peer,
 				&mut attached,
@@ -9689,7 +9439,6 @@ mod tests {
 				&path,
 				Held {
 					cluster: Some(clean.clone()),
-					epoch: None
 				},
 				peer,
 				&mut attached,
@@ -9743,7 +9492,6 @@ mod tests {
 				&path,
 				Held {
 					cluster: Some(clean.clone()),
-					epoch: None
 				},
 				peer,
 				&mut attached,
@@ -9791,7 +9539,6 @@ mod tests {
 							cost: 0,
 							..clean.clone()
 						}),
-						epoch: None,
 					},
 					authorization_token: None,
 				})
@@ -9812,7 +9559,6 @@ mod tests {
 			&path,
 			Held {
 				cluster: Some(clean.clone()),
-				epoch: None
 			},
 			peer,
 			&mut attached,
@@ -12582,7 +12328,6 @@ mod stitch_tests {
 				range_filters: false,
 				fill_timeout: false,
 				properties_wanted: true,
-				epoch: None,
 			}
 			.encode_msg(&mut Encoder::new(&mut body, egress.into()), egress)
 			.unwrap();
@@ -12603,7 +12348,6 @@ mod stitch_tests {
 				rendezvous: false,
 				range_filters: false,
 				authorization_token: None,
-				epoch: None,
 			}
 			.encode_msg(&mut Encoder::new(&mut body, egress.into()), egress)
 			.unwrap();
@@ -12613,7 +12357,7 @@ mod stitch_tests {
 			.await
 			.unwrap();
 		publisher
-			.handle_stream(id, ietf::Body(body.into()), stream, false)
+			.handle_stream(id, ietf::Body(body.into()), stream)
 			.unwrap()
 			.await;
 		let mut streams = std::collections::BTreeMap::<usize, Vec<u8>>::new();
@@ -13110,7 +12854,6 @@ mod stitch_tests {
 				rendezvous: false,
 				range_filters: false,
 				authorization_token: None,
-				epoch: None,
 			};
 			let mut body = Vec::new();
 			subscribe
@@ -13120,7 +12863,7 @@ mod stitch_tests {
 				.await
 				.unwrap();
 			publisher
-				.handle_stream(ietf::Subscribe::ID, ietf::Body(body.into()), stream, false)
+				.handle_stream(ietf::Subscribe::ID, ietf::Body(body.into()), stream)
 				.unwrap()
 				.await;
 			let sent = downstream.log.datagrams.lock().unwrap();
@@ -14439,7 +14182,6 @@ mod stitch_tests {
 				range_filters: false,
 				fill_timeout: false,
 				properties_wanted: false,
-				epoch: None,
 			}
 			.encode_msg(&mut Encoder::new(&mut body, version.into()), version)
 			.unwrap();
@@ -14461,7 +14203,7 @@ mod stitch_tests {
 			moq_clock::timeout(
 				Duration::from_secs(1),
 				publisher
-					.handle_stream(ietf::Fetch::ID, ietf::Body(body.into()), stream, false)
+					.handle_stream(ietf::Fetch::ID, ietf::Body(body.into()), stream)
 					.unwrap(),
 			)
 			.await

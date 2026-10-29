@@ -1411,7 +1411,7 @@ mod tests {
 			.unwrap();
 			let id = accepted.reader.varint().await.unwrap();
 			let body: ietf::Body = accepted.reader.decode().await.unwrap();
-			let task = self.publisher.handle_stream(id, body, accepted, false).unwrap();
+			let task = self.publisher.handle_stream(id, body, accepted).unwrap();
 			moq_clock::sim::spawn(task);
 			stream
 		}
@@ -1800,7 +1800,6 @@ mod tests {
 				rendezvous: false,
 				range_filters: false,
 				authorization_token: None,
-				epoch: None,
 				max_age: None,
 				new_group: None,
 			};
@@ -2313,7 +2312,6 @@ mod tests {
 			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
-			epoch: None,
 			max_age: None,
 			new_group: None,
 		};

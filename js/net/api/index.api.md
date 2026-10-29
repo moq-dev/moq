@@ -165,7 +165,6 @@ export namespace Connection {
 	}
 	export interface Extensions {
 		auth?: boolean;
-		epoch?: boolean;
 		solicit?: boolean;
 	}
 	export interface Goaway {

@@ -38,10 +38,9 @@ publishes under a new epoch, which replaces the old broadcast instead of
 resuming it; the RTMP, SRT, and WHIP ingests mint one per connection. Epochs
 order by creation time, so a reconnect to a different gateway assumes the two
 gateways' clocks roughly agree. Seamless failover needs a publisher that
-announces an epoch and, on every link the route crosses, moq-lite 07 or
-moq-transport with the [epoch extension](/draft/moq-epoch). A route
-without an epoch, including every route on moq-lite 06 and older or a
-moq-transport link without the extension, keeps its subscriptions until it goes or a track fails
+announces an epoch and, on every link the route crosses, moq-lite 07. A route
+without an epoch, including every route on moq-lite 06 and older or
+moq-transport, keeps its subscriptions until it goes or a track fails
 upstream, and any other route winning it is announced as a restart. Viewers
 re-request on a restart, and a relay drops its copy of the old instance,
 including every path beneath a prefix claim when one of them moves to another

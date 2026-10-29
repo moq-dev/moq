@@ -7,8 +7,7 @@
 //! [`origin::Producer::with_preference`] while pricing `B` cheaper, so only the
 //! preference puts `A` ahead. Losing `A` moves `S` to `B`, and `A` returning moves it
 //! back. Between lite-07 routes with the same epoch each move resumes the subscription.
-//! A moq-transport `B` with the MoQ Epoch extension carries the epoch, but its copy's
-//! track info records the draft, so the move onto it is refused.
+//! A moq-transport `B` carries no epoch, so moving onto it restarts the path.
 
 use crate::support;
 
@@ -311,11 +310,8 @@ async fn preferred_cdn_fails_over_and_back() {
 	fails_over_and_back("moq-lite-07-wip").await;
 }
 
-/// A moq-transport `B` with the MoQ Epoch extension carries `P`'s epoch, so losing `A` is
-/// an update, not a restart. Its copy's track info differs from `A`'s, recording the draft
-/// it crossed, and one epoch means identical content: `S` refuses the copy, so the track
-/// ends with no frame of `B`'s.
-async fn refused_across_protocols(secondary: &str) {
+/// Losing the epoch-carrying route restarts onto the epochless moq-transport route.
+async fn restarts_across_protocols(secondary: &str) {
 	moq_clock::timeout(TEST_TIMEOUT, async {
 		let mut topology = Topology::new(secondary.parse().unwrap()).await;
 		let mut announced = topology.subscriber.consume().announced();
@@ -329,16 +325,23 @@ async fn refused_across_protocols(secondary: &str) {
 		topology.lose_a().await;
 		let update = announced.next().await.expect("announced");
 		assert!(
-			matches!(update, announce::Event::Update(_)) && !via_a(&update),
-			"same epoch over B: {update:?}"
+			matches!(update, announce::Event::Restart(_)) && !via_a(&update),
+			"epochless route over B: {update:?}"
 		);
 		topology.group();
 		settle().await;
 		let rest: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
 		assert!(
-			matches!(rest.as_slice(), [(u64::MAX, Err(Error::Unsupported))]),
-			"the track did not end with the refusal: {rest:?}"
+			matches!(
+				rest.as_slice(),
+				[(u64::MAX, Err(Error::Session(moq_net::SessionError::Cancel)))]
+			),
+			"the old route did not end its track: {rest:?}"
 		);
+		let mut fresh = topology.subscribe().await;
+		let (sequence, _, bytes) = next(&mut fresh).await;
+		assert_eq!(sequence, 1, "the fresh subscription joins the current group");
+		assert_eq!(bytes, payload(1, 0));
 		drop((topology.publisher, topology.cdn_b));
 	})
 	.await
@@ -346,12 +349,12 @@ async fn refused_across_protocols(secondary: &str) {
 }
 
 #[moq_clock::test]
-async fn transport_secondary_is_refused() {
-	refused_across_protocols("moq-transport-22").await;
+async fn transport_secondary_restarts() {
+	restarts_across_protocols("moq-transport-22").await;
 }
 
-/// The same over the first draft that can carry the epoch.
+/// The same over the oldest supported moq-transport draft.
 #[moq_clock::test]
-async fn transport_17_secondary_is_refused() {
-	refused_across_protocols("moq-transport-18").await;
+async fn transport_18_secondary_restarts() {
+	restarts_across_protocols("moq-transport-18").await;
 }

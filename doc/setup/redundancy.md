@@ -29,9 +29,7 @@ promise.
    both. Give both publishers permission to announce the same full path.
 2. Publish the same broadcast name under the same auth path. Each publisher
    keeps its own epoch; `moq` creates one automatically.
-3. Use epoch-capable connections on every hop: moq-lite 07, which is opt-in,
-   or moq-transport with the [epoch extension](/draft/moq-epoch)
-   enabled. Keep the publisher hosts' clocks synchronized, since epochs order
+3. Use moq-lite 07, which is opt-in, on every hop to carry epochs. Keep the publisher hosts' clocks synchronized, since epochs order
    by their UUIDv7 creation time.
 
 For example, two HLS importers can publish `event.hang` through different

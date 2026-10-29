@@ -68,9 +68,8 @@ These land with the next breaking release.
   publishers together.
 - **Announce restarts.** moq-lite 07 adds `ANNOUNCE_RESTART` (0x3): another
   publisher instance now serves the prefix. lite-06's `ANNOUNCE_RESTART` is
-  named `ANNOUNCE_UPDATE`, as it always meant. moq-transport with the epoch
-  extension advertise another epoch before withdrawing the old
-  one. Elsewhere, a restart is still an end then a start.
+  named `ANNOUNCE_UPDATE`, as it always meant. moq-transport carries no epoch;
+  a restart is still an end then a start.
 - **Publisher epochs ride the route** (#4942). moq-lite 07 carries the epoch
   after the path in `ANNOUNCE_START`, `TRACK`, `SUBSCRIBE`, and `FETCH`.
   Routes without an epoch no longer resume across routes, so default lite-06

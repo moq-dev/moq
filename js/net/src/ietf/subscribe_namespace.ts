@@ -67,10 +67,9 @@ export const SUBSCRIBE_TRACKS_ID = 0x51;
 /**
  * NAMESPACE message (0x08), sent on the SUBSCRIBE_NAMESPACE bidi stream.
  *
- * The base message carries only the suffix. A session that negotiated the MoQ Cluster or
- * MoQ Epoch extension uses the extended form instead, which appends one Parameters field
- * for both, so the advertisement can carry its HOP_PATH and ROUTE_COST (see `cluster.ts`)
- * and its EPOCH (see `epoch.ts`).
+ * The base message carries only the suffix. A session that negotiated the MoQ Cluster
+ * extension uses the extended form instead, which appends one Parameters field
+ * so the advertisement can carry its HOP_PATH and ROUTE_COST (see `cluster.ts`).
  */
 export class SubscribeNamespaceEntry {
 	static id = 0x08;
