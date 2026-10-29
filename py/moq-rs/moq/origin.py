@@ -14,11 +14,13 @@ from moq_ffi import (
     MoqOriginConsumer,
     MoqOriginProducer,
     MoqOriginRequests,
+    MoqPublication,
 )
 
 from ._stream import _Stream
 from .publish import BroadcastProducer
 from .subscribe import BroadcastConsumer
+from .types import AnnounceRoute
 
 Announce = MoqAnnounce
 """A route over a prefix: the origin-relative ``prefix``, what each filter wildcard
@@ -127,15 +129,47 @@ class BroadcastPrepared:
 
     def __init__(self, inner: MoqBroadcastPrepared) -> None:
         self._inner = inner
+        self._broadcast = BroadcastProducer._from_inner(inner.broadcast())
 
     @property
     def broadcast(self) -> BroadcastProducer:
         """The unannounced broadcast to fill before publishing; only `publish` announces it."""
-        return BroadcastProducer._from_inner(self._inner.broadcast())
+        return self._broadcast
 
-    def publish(self) -> BroadcastProducer:
+    def publish(self) -> Publication:
         """Announce the filled broadcast and resolve waiting requesters."""
-        return BroadcastProducer._from_inner(self._inner.publish())
+        return Publication(self._inner.publish(), self._broadcast)
+
+
+class Publication:
+    """A broadcast published on an origin: the broadcast to fill and its announcement.
+
+    Dropping it does not retract the route; :meth:`BroadcastProducer.close` does.
+    """
+
+    def __init__(self, inner: MoqPublication, broadcast: BroadcastProducer) -> None:
+        self._inner = inner
+        self._broadcast = broadcast
+
+    @property
+    def broadcast(self) -> BroadcastProducer:
+        """The broadcast to fill, without announcement control."""
+        return self._broadcast
+
+    def announce(self, route: AnnounceRoute | None = None) -> None:
+        """Advertise the broadcast's exact path as a route, or re-price it in place.
+
+        Until announced, the broadcast is invisible and unroutable for local
+        consumers and peers alike. Raises ``moq.Error.Closed`` once the broadcast closed.
+        """
+        self._inner.announce(route if route is not None else AnnounceRoute())
+
+    def unannounce(self) -> None:
+        """Retract the advertisement, if any, keeping the filled tracks alive.
+
+        Announcing again brings it back. Raises ``moq.Error.Closed`` once the broadcast closed.
+        """
+        self._inner.unannounce()
 
 
 class OriginRequests(_Stream[BroadcastRequest]):
@@ -204,7 +238,7 @@ class OriginProducer:
     Call :meth:`create_broadcast` to publish at a path, :meth:`consume` for a
     matching :class:`OriginConsumer`, or :meth:`requests` to advertise a prefix
     and serve on-demand requests. Create, :meth:`requests` if tracks are served
-    on demand, populate, then :meth:`BroadcastProducer.announce`.
+    on demand, populate, then :meth:`Publication.announce`.
     """
 
     def __init__(self, *, cache_capacity_bytes: int | None = None) -> None:
@@ -231,14 +265,15 @@ class OriginProducer:
         """
         return OriginRequests(self._inner.requests(prefix))
 
-    def create_broadcast(self, path: str) -> BroadcastProducer:
-        """Create a broadcast at ``path``, returning the producer that feeds it.
+    def create_broadcast(self, path: str) -> Publication:
+        """Create a broadcast at ``path``, returning its :class:`Publication`.
 
-        The broadcast is invisible and unroutable, for this origin's consumers
-        and peers alike, until :meth:`BroadcastProducer.announce`. Announce it
-        after populating tracks. Create,
+        Fill :attr:`Publication.broadcast`. The broadcast is invisible and
+        unroutable, for this origin's consumers and peers alike, until
+        :meth:`Publication.announce`. Announce it after populating tracks. Create,
         :meth:`requests` if tracks are served on demand, populate, then announce.
-        :meth:`BroadcastProducer.close` ends it for good; dropping the last
-        handle does the same.
+        :meth:`BroadcastProducer.close` ends it for good; dropping its last
+        handle, the publication included, does the same.
         """
-        return BroadcastProducer._from_inner(self._inner.create_broadcast(path))
+        inner = self._inner.create_broadcast(path)
+        return Publication(inner, BroadcastProducer._from_inner(inner.broadcast()))

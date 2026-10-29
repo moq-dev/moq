@@ -223,18 +223,24 @@ pub unsafe extern "C" fn moq_bandwidth_consumer_changed(
 			*pending = Some(cancel);
 		}
 		tokio::spawn(async move {
+			// The cleanup runs inside `ffi::run` too, so a panic there still reaches the callback,
+			// and the wait has its own so the slot is cleared even when the wait panics.
 			let result = ffi::run(async {
-				tokio::select! {
-					_ = cancelled => Err(moq_net::Error::Cancel.into()),
-					result = kio::wait(|waiter| {
-						let mut inner = consumer.inner.lock().unwrap();
-						let Some(inner) = inner.as_mut() else { return std::task::Poll::Ready(Err(Error::NotFound)); };
-						inner.poll_changed(waiter).map(|result| result.map(|_| 1).map_err(Into::into))
-					}) => result,
-				}
+				let result = ffi::run(async {
+					tokio::select! {
+						_ = cancelled => Err(moq_net::Error::Cancel.into()),
+						result = kio::wait(|waiter| {
+							let mut inner = consumer.inner.lock().unwrap();
+							let Some(inner) = inner.as_mut() else { return std::task::Poll::Ready(Err(Error::NotFound)); };
+							inner.poll_changed(waiter).map(|result| result.map(|_| 1).map_err(Into::into))
+						}) => result,
+					}
+				})
+				.await;
+				consumer.changed.lock().unwrap().take();
+				result
 			})
 			.await;
-			consumer.changed.lock().unwrap().take();
 			callback.call(result);
 		});
 		Ok(())
@@ -260,6 +266,7 @@ pub extern "C" fn moq_bandwidth_consumer_close(consumer: u32) -> i32 {
 #[cfg(test)]
 mod consumer_tests {
 	use super::*;
+	use crate::ffi::ReturnCode;
 
 	extern "C" fn changed(user_data: *mut std::ffi::c_void, code: i32) {
 		let sender = unsafe { Box::from_raw(user_data as *mut tokio::sync::mpsc::UnboundedSender<i32>) };
@@ -301,5 +308,32 @@ mod consumer_tests {
 		assert_eq!(moq_bandwidth_consumer_close(id.into()), 0);
 		assert!(!producer.is_used(), "closing releases demand before the callback runs");
 		assert!(receiver.recv().await.unwrap() < 0);
+	}
+
+	#[tokio::test]
+	async fn changed_cleanup_panic_still_delivers_callback() {
+		let producer = moq_net::bandwidth::Producer::new();
+		let consumer = Arc::new(Consumer {
+			inner: std::sync::Mutex::new(Some(producer.consume())),
+			changed: Default::default(),
+		});
+		let id = State::lock().bandwidth.consumers.insert(consumer.clone()).unwrap();
+		let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+		let user_data = Box::into_raw(Box::new(sender)) as *mut std::ffi::c_void;
+		assert_eq!(
+			unsafe { moq_bandwidth_consumer_changed(id.into(), user_data, Some(changed)) },
+			0
+		);
+		// Poison the slot the wait clears once it completes.
+		let poisoner = consumer.clone();
+		std::thread::spawn(move || {
+			let _pending = poisoner.changed.lock().unwrap();
+			panic!("poison the pending wait");
+		})
+		.join()
+		.unwrap_err();
+		producer.set(Some(moq_net::bandwidth::Rate::from_bps(321))).unwrap();
+		assert_eq!(receiver.recv().await, Some(Error::Panic.code()));
+		State::lock().bandwidth.consumers.remove(id);
 	}
 }

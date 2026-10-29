@@ -95,7 +95,7 @@ async fn replace(version: &str, epoch: Option<Epoch>) {
 		other => panic!("{version}: expected the broadcast, got {other:?}"),
 	}
 
-	let old = viewer.consume().request_broadcast("cam", None).await.unwrap();
+	let old = viewer.consume().request("cam", None).await.unwrap();
 	let mut sticky = subscribe(&old, "video").await.unwrap();
 	write(&video, "video:0");
 	assert_eq!(read(&mut sticky).await, "video:0", "{version}");
@@ -137,7 +137,7 @@ async fn replace(version: &str, epoch: Option<Epoch>) {
 	}
 
 	// Following the restart resolves the path afresh, and the new handle serves.
-	let fresh = viewer.consume().request_broadcast("cam", None).await.unwrap();
+	let fresh = viewer.consume().request("cam", None).await.unwrap();
 	assert!(!fresh.is_clone(&old), "{version}: joined the retired broadcast");
 	let mut followed = subscribe(&fresh, "meta").await.unwrap();
 	write(&meta, "meta:0");
@@ -215,7 +215,7 @@ async fn route_death(version: &str, relayed: bool, wait: Duration) {
 	let mut announced = viewer.consume().announced();
 	next_event(&mut announced).await;
 
-	let old = viewer.consume().request_broadcast("cam", None).await.unwrap();
+	let old = viewer.consume().request("cam", None).await.unwrap();
 	let mut sticky = subscribe(&old, "video").await.unwrap();
 	write(&video, "video:0");
 	assert_eq!(read(&mut sticky).await, "video:0", "{version}");
@@ -293,7 +293,7 @@ async fn restart_while_the_old_session_lingers(version: &str, old_hop: u64, new_
 	let _new_session = link(version, &new, &viewer).await;
 	moq_clock::sleep(PAST_HOLD).await;
 
-	let cam = viewer.consume().request_broadcast("cam", None).await.unwrap();
+	let cam = viewer.consume().request("cam", None).await.unwrap();
 	let mut video = subscribe(&cam, "video")
 		.await
 		.unwrap_or_else(|err| panic!("{version} ({old_hop} -> {new_hop}): {err}"));
