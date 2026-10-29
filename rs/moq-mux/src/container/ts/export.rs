@@ -2076,7 +2076,6 @@ where
 		self.program
 			.si
 			.retain(|key, _| mpegts.si.get(&key.0).is_some_and(|t| t.contains_key(&key.1)));
-		self.move_pmt(&mpegts)?;
 		reject_colliding_si_pids(&mpegts, self.pmt_pid(), &[])?;
 		for (pid, tables) in mpegts.si.iter() {
 			for (table_id, entry) in tables.iter() {
@@ -2167,6 +2166,7 @@ where
 				}
 			}
 			self.revise()?;
+			self.move_pmt(&mpegts)?;
 		}
 
 		// Assign a PID to every desired track the PMT does not list yet: prefer the original
@@ -2821,8 +2821,10 @@ where
 	}
 
 	/// Follow a catalog that moves the PMT to another PID: the PAT of the next tables names it,
-	/// at the next version ([`Psi::current`]). A PID a stream, the clock or SI rides keeps the
-	/// PMT where it is, as does a catalog that records no PID.
+	/// at the PAT's next version ([`Psi::current`]). A move onto a PID a stream the catalog
+	/// dropped still drains on waits for it ([`Self::follow_pmt`]); one onto a PID the catalog
+	/// gives a stream or SI, the clock's own PID, or no PID at all is refused. A catalog that
+	/// records no PID keeps the PMT where it is.
 	fn move_pmt(&mut self, mpegts: &catalog::Mpegts) -> anyhow::Result<()> {
 		let Some(psi) = &self.program.psi else {
 			return Ok(());
@@ -2833,36 +2835,38 @@ where
 		if pid == psi.moving.unwrap_or(psi.pmt_pid) {
 			return Ok(());
 		}
-		let taken = pid >= 0x1fff
-			|| psi.own_clock() == Some(pid)
-			|| self.program.tracks.values().any(|track| track.pid == pid)
-			|| mpegts.si.contains_key(&pid);
-		if taken {
-			tracing::warn!(
-				pmt_pid = psi.pmt_pid,
-				to = pid,
-				"keeping the PMT on its PID: the catalog moves it onto one in use"
-			);
-			return Ok(());
-		}
+		anyhow::ensure!(pid < 0x1fff, "TS export cannot move the PMT to PID {pid:#06x}");
+		let taken = psi.own_clock() == Some(pid)
+			|| mpegts.si.contains_key(&pid)
+			|| self
+				.program
+				.tracks
+				.values()
+				.any(|track| track.cataloged && track.pid == pid);
+		anyhow::ensure!(
+			!taken,
+			"TS export cannot move the PMT from PID {:#06x} to {pid:#06x}, which another stream rides",
+			psi.pmt_pid
+		);
 		let psi = self.program.psi.as_mut().expect("checked above");
 		psi.moving = (pid != psi.pmt_pid).then_some(pid);
 		self.follow_pmt()
 	}
 
 	/// Move the PMT to the PID the catalog moved it to once no copy of the tables is on its way,
-	/// so each copy goes out whole on the PID its PAT names, and lead the next frame with them.
-	/// Every copy not yet begun takes the move.
+	/// so each copy goes out whole on the PID its PAT names, and no stream is left on the PID,
+	/// and lead the next frame with them. Every copy not yet begun takes the move.
 	fn follow_pmt(&mut self) -> anyhow::Result<()> {
 		let Some(psi) = self.program.psi.as_mut() else {
 			return Ok(());
 		};
-		if !psi.sending.is_empty() {
-			return Ok(());
-		}
-		let Some(pid) = psi.moving.take() else {
+		let Some(pid) = psi.moving else {
 			return Ok(());
 		};
+		if !psi.sending.is_empty() || self.program.tracks.values().any(|track| track.pid == pid) {
+			return Ok(());
+		}
+		psi.moving = None;
 		let old = std::mem::replace(&mut psi.pmt_pid, pid);
 		psi.left.retain(|&left| left != pid);
 		psi.left.push(old);
@@ -3128,6 +3132,8 @@ where
 		}
 		if changed {
 			self.revise()?;
+			// A move may have waited for a stream that just retired.
+			self.follow_pmt()?;
 		}
 		for name in free {
 			let parked = std::mem::take(&mut self.program.tracks.get_mut(&name).expect("collected above").parked);
