@@ -155,7 +155,7 @@ kind `ProtocolKindTooManyRequests`. Reduce
 the simultaneous announcements or subscriptions, or ask the relay operator
 to adjust the [session limits](/bin/relay/config#session-and-peer), before
 reconnecting with the same workload.
-A session closed because its credential expired reports `ProtocolKindExpired`, and a request refused for an expired token raises `moq.ErrExpired`; refresh the token before retrying.
+A session closed because its credential expired reports `ProtocolKindExpired`, and a request refused for an expired token raises `moq.ErrExpired`; refresh the token before retrying. Malformed credentials report `ProtocolKindMalformedAuthToken`; correct the token before reconnecting with it.
 A catalog that needs a newer moq-hang draft than this build reads raises `moq.ErrUnsupportedCatalog`; upgrade the library to read it.
 
 ## Reference

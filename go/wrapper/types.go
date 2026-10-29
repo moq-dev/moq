@@ -258,6 +258,20 @@ const (
 	ProtocolKindUnknown = ffi.MoqProtocolKindUnknown
 	// ProtocolKindTooManyRequests identifies an exceeded session request cap.
 	ProtocolKindTooManyRequests = ffi.MoqProtocolKindTooManyRequests
+	// ProtocolKindAuthTokenCacheOverflow identifies an exceeded token cache limit.
+	ProtocolKindAuthTokenCacheOverflow = ffi.MoqProtocolKindAuthTokenCacheOverflow
+	// ProtocolKindMalformedAuthToken identifies an unparseable authorization token.
+	ProtocolKindMalformedAuthToken = ffi.MoqProtocolKindMalformedAuthToken
+	// ProtocolKindUnknownAuthTokenAlias identifies an unregistered token alias.
+	ProtocolKindUnknownAuthTokenAlias = ffi.MoqProtocolKindUnknownAuthTokenAlias
+	// ProtocolKindInvalidRequestId identifies an invalid request ID.
+	ProtocolKindInvalidRequestId = ffi.MoqProtocolKindInvalidRequestId
+	// ProtocolKindInvalidPath identifies an invalid session path.
+	ProtocolKindInvalidPath = ffi.MoqProtocolKindInvalidPath
+	// ProtocolKindInvalidAuthority identifies an invalid session authority.
+	ProtocolKindInvalidAuthority = ffi.MoqProtocolKindInvalidAuthority
+	// ProtocolKindTooManyRequestUpdates identifies an exceeded request update limit.
+	ProtocolKindTooManyRequestUpdates = ffi.MoqProtocolKindTooManyRequestUpdates
 )
 
 // AudioSampleFormat values: the raw PCM sample layout fed to or returned from the
