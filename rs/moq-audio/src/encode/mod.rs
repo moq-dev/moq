@@ -18,6 +18,7 @@
 //! feature, so a default-feature rustdoc build has nothing to link to.
 
 mod backend;
+mod backlog;
 mod encoded;
 mod encoder;
 mod producer;

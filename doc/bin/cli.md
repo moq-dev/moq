@@ -250,16 +250,16 @@ moq ... import capture --display --system-audio          # share a screen with i
 moq ... import capture --window 39193 --no-audio         # one window (macOS, Windows, X11)
 moq ... import capture --window --no-audio               # system window picker (Linux Portal)
 moq ... import capture --camera 0 --width 1280 --height 720 --fps 30 --bitrate 3000000 --codec h265
-moq ... import capture --on-demand                       # capture only while someone watches
+moq ... import capture --on-demand                       # also gate video on demand
 ```
 
 Video goes through the platform hardware encoder, with an H.264 software
 fallback when built with `openh264`, and audio is Opus; [moq-video](/lib/rs/moq-video) lists the
-backends. The camera and microphone stay open and encode while publishing,
-so a late subscriber can fetch the recent past. `--on-demand` captures and
-encodes each source only while its track has a subscriber, and leaves nothing
-to fetch from before the first viewer; video still opens its source once at
-startup to probe the mode it negotiates. `--bitrate` is a ceiling that
+backends. Video encodes continuously; audio keeps raw PCM while nobody listens
+and encodes that retained history when a subscriber arrives. The microphone
+stays open. `--on-demand=false` encodes both continuously. `--on-demand` also
+gates video capture and encoding, losing video's unsubscribed past; video still
+opens its source once at startup to probe the mode it negotiates. `--bitrate` is a ceiling that
 backends with live bitrate control lower to fit the connection.
 `moq devices` prints every source id. On Windows, `display:N` is an
 enumeration index rather than a stable monitor id, so re-run `moq devices` if a

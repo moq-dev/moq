@@ -469,6 +469,9 @@ jobs:
       - name: Browser publisher fairness benchmark
         run: nix develop --command just js serve-bench
         shell: bash -leo pipefail {0}
+      - name: Raw audio encoding benchmark
+        run: nix develop --command just js raw-audio-bench
+        shell: bash -leo pipefail {0}
       - name: Audio ring benchmark
         run: nix develop --command just js ring-bench
         shell: bash -leo pipefail {0}

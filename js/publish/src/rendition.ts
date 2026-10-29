@@ -29,7 +29,7 @@ export class Rendition<Config> {
 
 	/**
 	 * The open track producer, or `undefined` while the network broadcast is down, after the track
-	 * closes, and, with the broadcast's `onDemand`, while no subscriber is attached. Producers should
+	 * closes, and, for non-audio tracks with the broadcast's `onDemand`, while no subscriber is attached. Producers should
 	 * encode only while this is set, and only media matching the current {@link config}: a new
 	 * identity swaps in a new track.
 	 */

@@ -169,3 +169,9 @@ p2p-bench:
 e2ee-bench:
     bun install --frozen-lockfile
     bun e2ee/bench/pump.ts
+
+# Sweep audio renditions x raw retention through native WebCodecs in Chromium.
+raw-audio-bench:
+    bun install --frozen-lockfile
+    bunx tsc --noEmit --project publish/bench/tsconfig.json
+    bun publish/bench/audio.ts

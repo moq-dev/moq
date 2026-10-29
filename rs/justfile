@@ -505,7 +505,7 @@ bench-feed-fetch *args:
 
 # Device-free mixer and resampler cost, swept over fanout, packetization, and layout.
 bench-playback:
-    bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-audio --features playback --run-ignored only -E 'test(benchmark_mixer_callbacks) | test(benchmark_resampler)' --success-output immediate
+    bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-audio --features playback --run-ignored only -E 'test(benchmark_mixer_callbacks) | test(benchmark_resampler) | test(benchmark_raw_audio)' --success-output immediate
 
 # Sweep retained RTMP chunk-stream IDs independently of message and chunk sizes.
 [positional-arguments]

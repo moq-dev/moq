@@ -34,7 +34,8 @@ const FADE = Milli(50);
 // The WebCodecs/MP4 codec string for AAC-LC. "aac" is our user-facing shorthand.
 const AAC_CODEC = "mp4a.40.2";
 
-import { Micro, Milli } from "@moq/clock";
+import { Micro, Milli, Nano, now } from "@moq/clock";
+import { Backlog } from "./backlog";
 import { Framer } from "./framer";
 
 /**
@@ -138,15 +139,16 @@ export type EncoderOutput = {
 type Pipeline = {
 	channelCount: number;
 	push(frame: AudioFrame): void;
+	drain(): void;
 };
 
 /**
  * A single audio rendition encoder.
  *
  * Registers itself on the {@link Broadcast} under {@link name} (via `broadcast.audio(name)`), pumps PCM
- * off the source via a {@link Capture}, and encodes it while enabled, so a late subscriber or fetch
- * finds the recent groups in the track's cache. The broadcast's `onDemand` encodes only while a
- * subscriber is attached instead. Rename by constructing a new encoder; the name is not a signal.
+ * off the source via a {@link Capture}, and retains raw PCM while enabled. A subscriber triggers encoding of that history followed by
+ * live audio; leaving resumes buffering without ending the epoch. The broadcast's `onDemand: false`
+ * keeps encoding continuously instead. Rename by constructing a new encoder; the name is not a signal.
  */
 export class Encoder {
 	/** The full track name of this rendition, e.g. `"audio/data"`. */
@@ -198,9 +200,9 @@ export class Encoder {
 	// into this; frames that arrive while it's undefined are dropped, which the framer treats as a
 	// discontinuity and re-anchors on.
 	#pipeline: Pipeline | undefined;
+	#encoding = false;
 
-	// The rendition's track and the producer writing into it, or undefined while the broadcast hands
-	// over none (with `onDemand`, while nobody subscribes).
+	// The rendition's track and producer, kept across subscriber changes.
 	// `start` is the open group's first timestamp, undefined until a frame opens one.
 	#live: { track: Moq.Track.Producer; producer: Container.Legacy.Producer; start?: Micro } | undefined;
 
@@ -404,11 +406,12 @@ export class Encoder {
 			const resolved = effect.get(this.#config);
 			if (!enabled || !format || fatal || !resolved) return;
 
-			this.#encode(broadcast.order, format, effect);
+			const maxAge =
+				effect.get(broadcast.in.maxAge) ?? Container.trackInfo({ priority: Catalog.PRIORITY.audio }).maxAge;
+			this.#encode(broadcast.order, format, Micro.fromMilli(maxAge ?? Milli(30_000)), effect);
 		});
 
-		// Each track the broadcast hands over gets its own producer. Losing it (with `onDemand`, the last
-		// subscriber leaving) ends the epoch, as stopping the pipeline does.
+		// A network track change ends the epoch; subscriber changes keep the same producer.
 		effect.run((effect) => {
 			const track = effect.get(rendition.track);
 			if (!track) return;
@@ -435,7 +438,14 @@ export class Encoder {
 			// the real error rather than a track that stays silent.
 			if (fatal) track?.abort(fatal);
 
-			effect.set(this.#out.active, enabled && !!format && !!track && !fatal, false);
+			const onDemand = effect.get(broadcast.in.onDemand) ?? true;
+			const demanded = track && effect.get(track.demand().wanted) !== undefined;
+			this.#encoding = enabled && !!format && !!track && !fatal && (!onDemand || !!demanded);
+			effect.set(this.#out.active, this.#encoding, false);
+			if (this.#encoding) this.#pipeline?.drain();
+			effect.cleanup(() => {
+				this.#encoding = false;
+			});
 		});
 
 		// Claim the configured bitrate while a subscriber is attached, so a co-resident video
@@ -615,7 +625,7 @@ export class Encoder {
 
 	// Encode captured audio frames into whichever track producer is live. The broadcast owns the
 	// track's lifetime, so this never closes it; a fatal encoder error aborts only the live track.
-	#encode(order: Order, format: Format, effect: Effect): void {
+	#encode(order: Order, format: Format, retention: Micro, effect: Effect): void {
 		// The parent owns the config subscription before the async codec scope is opened.
 		const resolved = this.#config.peek();
 		if (!resolved) return;
@@ -693,56 +703,81 @@ export class Encoder {
 				// Where the next frame starts if it continues the last one encoded.
 				let contiguous: Micro | undefined;
 
+				const backlog = new Backlog(retention, config.sampleRate);
+				const deadline = new Signal<Micro | undefined>(undefined);
+				const clock = () => Micro.fromNano(Nano(now()));
+				effect.run((timer) => {
+					const at = timer.get(deadline);
+					if (at === undefined) return;
+					timer.timer(
+						() => {
+							backlog.expire(clock());
+							deadline.set(backlog.deadline);
+						},
+						Nano.fromMicro(Micro(Math.max(0, at - clock()))),
+					);
+				});
+
+				const submit = (data: AudioFrame) => {
+					// Round to whole microseconds once, here, so a chunk's timestamp and the marker
+					// placed at the next frame's start agree exactly.
+					const timestamp = Math.round(data.timestamp) as Micro;
+
+					// Chrome stamps encoder output from the first input's timestamp plus the samples
+					// encoded since, ignoring any later jump. Across a gap (a lost track, or a capture
+					// discontinuity) the output would trail the capture clock by the gap, and the
+					// next gap's marker would then sit ahead of everything encoded after it.
+					// Restarting re-bases the output clock; the chunks it drops predate the gap.
+					if (contiguous !== undefined && timestamp !== contiguous) {
+						encoder.reset();
+						encoder.configure(encoderConfig);
+					}
+
+					const joinedLength = data.channels.reduce((total, channel) => total + channel.length, 0);
+					const joined = new Float32Array(joinedLength);
+
+					data.channels.reduce((offset: number, channel: Float32Array): number => {
+						joined.set(channel, offset);
+						return offset + channel.length;
+					}, 0);
+
+					const frame = new AudioData({
+						format: "f32-planar",
+						sampleRate: config.sampleRate,
+						numberOfFrames: data.channels[0].length,
+						numberOfChannels: data.channels.length,
+						timestamp,
+						data: joined,
+						transfer: [joined.buffer],
+					});
+
+					encoder.encode(frame);
+					frame.close();
+					contiguous = Math.round(
+						data.timestamp + (data.channels[0].length / config.sampleRate) * 1_000_000,
+					) as Micro;
+					this.#next = contiguous;
+				};
 				const pipeline: Pipeline = {
 					channelCount: config.numberOfChannels,
+					drain: () => {
+						backlog.expire(clock());
+						for (let frame = backlog.shift(); frame; frame = backlog.shift()) submit(frame);
+						deadline.set(backlog.deadline);
+					},
 					push: (captured: AudioFrame) => {
 						const input = resampler ? resampler.push(captured) : captured;
 						if (!input) return;
-
 						const frames = framer.push(input);
 						for (const [i, data] of frames.entries()) {
-							// No track (with `onDemand`, no subscriber). The framer still consumes every sample
-							// so its timestamps stay on the capture clock, but there is nowhere to send a chunk.
 							if (!this.#live) continue;
-
-							// Round to whole microseconds once, here, so a chunk's timestamp and the marker
-							// placed at the next frame's start agree exactly.
-							const timestamp = Math.round(data.timestamp) as Micro;
-
-							// Chrome stamps encoder output from the first input's timestamp plus the samples
-							// encoded since, ignoring any later jump. Across a gap (a lost track, or a capture
-							// discontinuity) the output would trail the capture clock by the gap, and the
-							// next gap's marker would then sit ahead of everything encoded after it.
-							// Restarting re-bases the output clock; the chunks it drops predate the gap.
-							if (contiguous !== undefined && timestamp !== contiguous) {
-								encoder.reset();
-								encoder.configure(encoderConfig);
+							if (this.#encoding) submit(data);
+							else {
+								const end = frames[i + 1]?.timestamp ?? framer.next;
+								backlog.push(data, end, clock());
 							}
-
-							const joinedLength = data.channels.reduce((total, channel) => total + channel.length, 0);
-							const joined = new Float32Array(joinedLength);
-
-							data.channels.reduce((offset: number, channel: Float32Array): number => {
-								joined.set(channel, offset);
-								return offset + channel.length;
-							}, 0);
-
-							const frame = new AudioData({
-								format: "f32-planar",
-								sampleRate: config.sampleRate,
-								numberOfFrames: data.channels[0].length,
-								numberOfChannels: data.channels.length,
-								timestamp,
-								data: joined,
-								transfer: [joined.buffer],
-							});
-
-							encoder.encode(frame);
-							frame.close();
-							// One input can complete several frames, and the framer has already advanced past all of them.
-							contiguous = Math.round(frames[i + 1]?.timestamp ?? framer.next) as Micro;
-							this.#next = contiguous;
 						}
+						deadline.set(backlog.deadline);
 					},
 				};
 

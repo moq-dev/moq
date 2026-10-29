@@ -135,12 +135,10 @@ pub struct CaptureArgs {
 	#[usage(long, conflicts("--microphone", "--system-audio"))]
 	pub no_audio: bool,
 
-	/// Capture and encode each source only while its track has a subscriber,
-	/// releasing it when the last one leaves. Video still opens its source once
-	/// at startup to probe the mode. By default capture runs for the whole
-	/// publish, so a late subscriber can fetch the recent past.
-	#[usage(long)]
-	pub on_demand: bool,
+	/// Override encoding demand: true also gates video capture; false keeps audio encoding
+	/// continuously. Omitted, audio buffers raw PCM until subscribed and video encodes continuously.
+	#[usage(long, default_missing = "true", num_args = 0..=1, require_equals = true)]
+	pub on_demand: Option<bool>,
 }
 
 enum PublishDecoder {
@@ -827,7 +825,7 @@ impl CaptureArgs {
 			moq_video::encode::Kind::Auto
 		};
 		options.bandwidth = bandwidth;
-		options.on_demand = self.on_demand;
+		options.on_demand = self.on_demand.unwrap_or(false);
 		Ok(options)
 	}
 
@@ -866,7 +864,7 @@ impl CaptureArgs {
 		let mut options = moq_audio::encode::Capture::default();
 		options.capture = self.audio_config();
 		options.encode = self.audio_encode(bandwidth);
-		options.on_demand = self.on_demand;
+		options.on_demand = self.on_demand.unwrap_or(true);
 		options
 	}
 }
@@ -914,16 +912,19 @@ pub(crate) mod tests {
 
 	#[cfg(feature = "capture")]
 	#[test]
-	fn capture_runs_always_unless_on_demand() {
+	fn capture_defaults_to_buffered_audio_and_continuous_video() {
 		use moq_net::bandwidth::Allocator;
 
 		let args = capture_args(&[]);
 		assert!(!args.video_capture(Allocator::unlimited()).unwrap().on_demand);
-		assert!(!args.audio_capture(Allocator::unlimited()).on_demand);
+		assert!(args.audio_capture(Allocator::unlimited()).on_demand);
 
 		let args = capture_args(&["--on-demand"]);
 		assert!(args.video_capture(Allocator::unlimited()).unwrap().on_demand);
 		assert!(args.audio_capture(Allocator::unlimited()).on_demand);
+		let args = capture_args(&["--on-demand=false"]);
+		assert!(!args.video_capture(Allocator::unlimited()).unwrap().on_demand);
+		assert!(!args.audio_capture(Allocator::unlimited()).on_demand);
 	}
 
 	#[cfg(feature = "capture")]
