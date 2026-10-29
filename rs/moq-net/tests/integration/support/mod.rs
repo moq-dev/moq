@@ -3,7 +3,7 @@
 pub mod harness;
 pub mod mock;
 
-use moq_net::{goaway, track};
+use moq_net::{announce, goaway, origin, track};
 
 /// Wait until anyone wants the track, returning the group they want.
 #[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
@@ -20,6 +20,24 @@ pub async fn wanted(mut demand: track::Demand) -> moq_net::Result<u64> {
 pub async fn unwanted(mut demand: track::Demand) -> moq_net::Result<()> {
 	while demand.wanted_changed().await?.is_some() {}
 	Ok(())
+}
+
+/// Wait until `consumer` sees a route announced at exactly `path`, and return it.
+#[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
+pub async fn announced(consumer: &origin::Consumer, path: &str) -> origin::Route {
+	let mut announced = consumer.announced();
+	loop {
+		match announced.next().await.expect("the origin closed") {
+			announce::Event::Start(announce)
+			| announce::Event::Update(announce)
+			| announce::Event::Restart(announce)
+				if announce.prefix.as_str() == path =>
+			{
+				return announce.route;
+			}
+			_ => {}
+		}
+	}
 }
 
 /// Reads of the peer's GOAWAY over [`goaway::Consumer::poll`].

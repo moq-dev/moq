@@ -28,8 +28,12 @@ async fn release(version: Version) {
 	let track = broadcast.create_track("t", None).unwrap();
 
 	let consumer = relay.consume();
-	consumer.routed("a/b").await.expect("routed");
-	let remote = consumer.request_broadcast("a/b", None).await.expect("resolves");
+	let remote = consumer
+		.follow("a/b", None)
+		.unwrap()
+		.available()
+		.await
+		.expect("resolves");
 	let sub = remote.track("t").unwrap().subscribe(None).await.expect("subscribes");
 	crate::support::wanted(track.demand()).await.unwrap();
 

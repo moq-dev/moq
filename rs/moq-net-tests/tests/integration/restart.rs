@@ -103,7 +103,7 @@ async fn read(subscription: &mut track::Subscriber) -> String {
 }
 
 async fn subscribe(origin: &origin::Producer, path: &str) -> (broadcast::Consumer, track::Subscriber) {
-	let broadcast = origin.consume().request_broadcast(path, None).await.unwrap();
+	let broadcast = origin.consume().request(path, None).await.unwrap();
 	let subscription = broadcast.track("video").unwrap().subscribe(None).await.unwrap();
 	(broadcast, subscription)
 }
@@ -433,7 +433,7 @@ async fn dynamic_epoch_second_route_keeps_winning() {
 			"dropping a shared epoch delivered {event:?}"
 		);
 	}
-	let fresh = origin.consume().request_broadcast("live/cam", None).await.unwrap();
+	let fresh = origin.consume().request("live/cam", None).await.unwrap();
 	assert!(fresh.is_clone(&resolved), "the epoch's broadcast was replaced");
 	assert_eq!((first.answered(), second.answered()), (1, 1));
 	// The same epoch serves the same bytes: group 0 was delivered, so it resumes at 1.
@@ -686,7 +686,7 @@ impl Pool {
 /// subscription through it is reset once the exact route arrives: the cold-start reset
 /// accepted until announce takeover lands.
 async fn claimed(origin: &origin::Producer, path: &str) -> (broadcast::Consumer, track::Subscriber) {
-	let cold = origin.consume().request_broadcast(path, None).await.unwrap();
+	let cold = origin.consume().request(path, None).await.unwrap();
 	drop(cold.track("video").unwrap().subscribe(None).await);
 	settle().await;
 	subscribe(origin, path).await

@@ -3340,7 +3340,7 @@ mod tests {
 		let session_a = tokio::time::timeout(WAIT, accepted_a.recv()).await.unwrap().unwrap();
 
 		let consumer = subscriber.consume();
-		let cam = tokio::time::timeout(WAIT, consumer.routed_broadcast("cam"))
+		let cam = tokio::time::timeout(WAIT, consumer.follow("cam", None).unwrap().available())
 			.await
 			.unwrap()
 			.unwrap();
@@ -3423,7 +3423,7 @@ mod tests {
 		// A broadcast announced after the GOAWAY still arrives: the drained session serves.
 		let late = origin.create_broadcast("late").unwrap();
 		late.announce(Default::default()).unwrap();
-		tokio::time::timeout(WAIT, subscriber.consume().routed("late"))
+		tokio::time::timeout(WAIT, subscriber.consume().follow("late", None).unwrap().available())
 			.await
 			.expect("the drained session stopped serving")
 			.unwrap();

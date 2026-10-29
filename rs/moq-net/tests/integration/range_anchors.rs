@@ -61,18 +61,14 @@ async fn read(version: Option<&str>, range: Range) -> Result<Vec<u64>, Error> {
 	let _pair;
 	let remote = match version {
 		// Through the origin, as a reader of a local route.
-		None => moq_clock::timeout(TIMEOUT, publisher.consume().request_broadcast("room", None))
+		None => moq_clock::timeout(TIMEOUT, publisher.consume().request("room", None))
 			.await
 			.expect("resolve timeout")
 			.expect("broadcast resolves"),
 		Some(version) => {
 			_pair = peer(version.parse::<Version>().unwrap(), &publisher, &subscriber).await;
 			let consumer = subscriber.consume();
-			moq_clock::timeout(TIMEOUT, consumer.routed("room"))
-				.await
-				.expect("announce timeout")
-				.expect("routed");
-			moq_clock::timeout(TIMEOUT, consumer.request_broadcast("room", None))
+			moq_clock::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())
 				.await
 				.expect("resolve timeout")
 				.expect("broadcast resolves")
