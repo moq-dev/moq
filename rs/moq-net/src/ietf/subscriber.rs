@@ -8104,7 +8104,7 @@ mod tests {
 			.into_iter()
 			.flat_map(|version| [(version, true), (version, false)])
 		{
-			// Before draft-22 SUBSCRIBE cannot opt out.
+			// Draft 18's SUBSCRIBE cannot opt out.
 			let wanted = timed || !ietf::Filter::is_draft22(version);
 			let declares = |yes: bool| ietf::Properties {
 				timescale: yes.then_some(declared),

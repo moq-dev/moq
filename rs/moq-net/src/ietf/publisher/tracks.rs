@@ -861,9 +861,6 @@ impl Publisher {
 		// An update may ask for a new group only if the PUBLISH sent DYNAMIC_GROUPS, which
 		// INCLUDE_PROPERTIES=0 leaves out.
 		let dynamic = properties.dynamic_groups;
-		// Objects carry a Timestamp only in units the PUBLISH declared, which
-		// INCLUDE_PROPERTIES=0 also leaves out.
-		let timescale = properties.timescale;
 		let absolute = self.origin.root().rejoin(&namespace);
 
 		// Every wait on the peer for the PUBLISH's bytes lasts only while the track is listed
@@ -998,7 +995,6 @@ impl Publisher {
 						&mut params,
 						how,
 						dynamic,
-						timescale,
 						join.as_ref(),
 						&listed,
 						&mut gate,
@@ -1142,9 +1138,8 @@ impl Publisher {
 		Ok(Served::UpdateFailed(err))
 	}
 
-	/// Forward a paused PUBLISH subscription from the cache with `params`, its objects
-	/// stamped in `timescale`, as a SUBSCRIBE with them would be served, until it pauses again
-	/// or ends. Answers the resuming update
+	/// Forward a paused PUBLISH subscription from the cache with `params`, as a SUBSCRIBE
+	/// with them would be served, until it pauses again or ends. Answers the resuming update
 	/// with where the subscription now joins, when `answer` says one asked. `Err(())` when the
 	/// subscriber cancelled.
 	#[expect(
@@ -1160,7 +1155,6 @@ impl Publisher {
 		params: &mut Params,
 		how: Resume,
 		dynamic: bool,
-		timescale: Option<Timescale>,
 		join: Option<&Join<GroupOf<Transport>>>,
 		listed: &kio::Consumer<bool>,
 		gate: &mut crate::auth::Gate,
@@ -1224,6 +1218,7 @@ impl Publisher {
 		let range = subscribe_range(params.filter, edge, self.version);
 		range.apply(&mut subscription);
 		let _ = subscriber.update(subscription);
+		let timescale = subscriber.info().timescale;
 		let mut serve = TrackServe::new(
 			self.session.clone(),
 			subscriber,
@@ -1665,62 +1660,6 @@ mod tests {
 			assert_eq!(id, ietf::PublishDone::ID, "{version}");
 			let done: ietf::PublishDone = body.message(version).unwrap();
 			assert_eq!(done.stream_count, opened, "{version}");
-		}
-	}
-
-	/// A listing that opted out of Track Properties gets a PUBLISH with no TIMESCALE, so its
-	/// objects go out unstamped, as a SUBSCRIBE's or FETCH's would.
-	#[moq_clock::test]
-	async fn a_publish_stamps_objects_only_with_its_timescale() {
-		let version = Version::Draft22;
-		let stamp = crate::Timestamp::from_millis(123_456).unwrap();
-		let mut stamped = Vec::new();
-		ietf::encode_object_time(
-			&mut crate::coding::Encoder::new(&mut stamped, version.into()),
-			stamp,
-			crate::track::Info::timed().timescale.expect("a timed track"),
-		)
-		.unwrap();
-
-		for wanted in [true, false] {
-			let mut h = harness(version);
-			let video = h.tracks.remove("video").unwrap();
-			let request = ietf::SubscribeTracks {
-				properties_wanted: wanted,
-				..listing(false)
-			};
-			let mut request = h.request(&request).await;
-			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "wanted={wanted}");
-			let mut stream = loop {
-				let (stream, _, name, _) = h.publish().await;
-				if name == "video" {
-					break stream;
-				}
-			};
-			publish_ok(&mut stream).await;
-			send(&mut stream, &update(2, true)).await;
-			assert_eq!(next(&mut stream).await.0, ietf::RequestOk::ID, "wanted={wanted}");
-
-			let mut group = video.append_group().unwrap();
-			group.write_frame(stamp, b"live".as_slice()).unwrap();
-			group.finish().unwrap();
-			let recv = timeout(std::future::poll_fn(|cx| h.peer.poll_accept_uni(cx)))
-				.await
-				.unwrap();
-			let mut reader = crate::coding::Reader::new(crate::transport::boxed::RecvStream::new(recv), version);
-			let mut bytes = Vec::new();
-			while let Some(chunk) = timeout(std::future::poll_fn(|cx| reader.poll_read_chunk(cx, 1024)))
-				.await
-				.unwrap()
-			{
-				bytes.extend_from_slice(&chunk);
-			}
-			assert!(bytes.windows(4).any(|w| w == b"live"), "wanted={wanted}");
-			assert_eq!(
-				bytes.windows(stamped.len()).any(|w| w == stamped),
-				wanted,
-				"wanted={wanted}: stamped only when the PUBLISH declares TIMESCALE"
-			);
 		}
 	}
 
