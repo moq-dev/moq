@@ -263,9 +263,9 @@ impl Path {
 	/// assert_eq!(Path::empty().parts().count(), 0);
 	/// ```
 	pub fn parts(&self) -> impl Iterator<Item = &str> {
-		// Segments are never empty, but splitting the empty path would yield one.
-		let s = self.as_str();
-		(!s.is_empty()).then(|| s.split('/')).into_iter().flatten()
+		// Segments are never empty, so only the empty path ends in an empty substring,
+		// which a terminator split skips; the route table walks this on every lookup.
+		self.as_str().split_terminator('/')
 	}
 
 	/// Whether a segment starts with `.`, which hides the path from announce

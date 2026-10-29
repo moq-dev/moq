@@ -36,7 +36,6 @@ Public API: none. Wire: none.
 - [The browser publisher completes its fairness sweep](/quest/m0/nightly/publisher-fairness.md) - the publisher fairness benchmark completes its backlog on the hosted ARM runner, yielding browser tasks while serving every group
 - [The browser backend baseline completes on IETF22](/quest/m0/nightly/browser-baseline.md) - the WASM and UniFFI backend baseline completes every supported transport case without an internal error
 - [A stitched restart signals every TS discontinuity](/quest/m0/nightly/stitch-discontinuity.md) - a restarted publisher exported with stitching signals the program break on every affected PID
-- [Resolve the paired network microbenchmark regressions](/quest/m0/nightly/paired-net.md) - the reported network microbenchmark regressions are attributed and genuine extra costs are fixed with paired measurements
 - [Resolve the paired catalog fanout regressions](/quest/m0/nightly/paired-shared.md) - the reported catalog fanout regressions are attributed and genuine extra costs are fixed with paired measurements
 - [Resolve the paired relay-session regressions](/quest/m0/nightly/paired-relay.md) - the reported relay-session regressions are attributed and genuine extra costs are fixed with paired measurements
 - [Probing beside Cubic](/quest/m0/nightly/competing-cubic.md) - the `competing_cubic` probe test stays within its deadline budget

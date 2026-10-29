@@ -678,6 +678,21 @@ impl GroupState {
 		slots
 	}
 
+	/// Store a whole frame: count its bytes, extend the timeline, and charge its slot plus,
+	/// unless canonical content already owns the payload, its bytes.
+	///
+	/// Returns the coarse tick it stamped, like [`cache::Charge::add`].
+	fn commit(&mut self, entry: Entry) -> Option<u64> {
+		let size = entry.frame.payload.len() as u64;
+		if let Some(flate) = &mut self.flate {
+			flate.inflated += entry.inflated;
+		}
+		self.cache += size;
+		self.stamp(entry.frame.timestamp);
+		let slots = self.push(entry);
+		self.charge.add(slots + if self.content.is_none() { size } else { 0 })
+	}
+
 	/// Whether a compressed group's content failed to inflate.
 	fn malformed(&self) -> bool {
 		self.flate.as_ref().is_some_and(|flate| flate.plain.malformed())
@@ -1438,15 +1453,8 @@ impl Producer {
 		if let Err(err) = state.canonicalize(state.next_index, &mut entry) {
 			return Err(self.abort_conflict(state, err));
 		}
-		state.cache += size;
-		if let Some(flate) = &mut state.flate {
-			flate.inflated += inflated;
-		}
-		let slots = state.push(entry);
-		let charged = slots + if state.content.is_none() { size } else { 0 };
-		let now = state.charge.add(charged);
+		let now = state.commit(entry);
 		state.next_index = next_index;
-		state.stamp(timestamp);
 		let bound = state.settle(origin);
 		self.handle.alive.checked.store(true, Ordering::Relaxed);
 		self.advance_largest(&state);
@@ -1532,8 +1540,13 @@ impl Producer {
 		let mut latest = None;
 		let mut deflated = deflated.into_iter();
 		let arrived = super::clock::now();
+		// Validation is done, so the batch is taken by value: a conflict below fails the group,
+		// which the buffer need not survive, and moving each payload spares a refcount round trip.
+		// Only shared canonical content can refuse a frame, so only a group holding it prepares
+		// the whole batch before storing any; any other stores each frame as it goes.
+		let canonical = state.content.is_some();
 		let mut prepared = arrayvec::ArrayVec::<Entry, N>::new();
-		for (index, frame) in frames.filled().iter().enumerate() {
+		for (index, frame) in frames.drain().enumerate() {
 			let timestamp =
 				on_track(frame.timestamp, self.handle.track.timescale).expect("timestamp scale checked above");
 			let (payload, inflated) = match state.flate.is_some() {
@@ -1541,7 +1554,7 @@ impl Producer {
 					deflated.next().expect("one slice per frame"),
 					frame.payload.len() as u64,
 				),
-				false => (frame.payload.clone(), 0),
+				false => (frame.payload, 0),
 			};
 			let mut entry = Entry::plain(
 				Cached {
@@ -1551,23 +1564,18 @@ impl Producer {
 				},
 				inflated,
 			);
+			latest = latest.max(timestamp);
+			if !canonical {
+				now = state.commit(entry);
+				continue;
+			}
 			if let Err(err) = state.canonicalize(state.next_index + index, &mut entry) {
 				return Err(self.abort_conflict(state, err));
 			}
 			prepared.push(entry);
 		}
-		frames.drain().for_each(drop);
 		for entry in prepared {
-			let size = entry.frame.payload.len() as u64;
-			if let Some(flate) = &mut state.flate {
-				flate.inflated += entry.inflated;
-			}
-			state.cache += size;
-			state.stamp(entry.frame.timestamp);
-			latest = latest.max(entry.frame.timestamp);
-			let slots = state.push(entry);
-			let charged = slots + if state.content.is_none() { size } else { 0 };
-			now = state.charge.add(charged);
+			now = state.commit(entry);
 		}
 		state.next_index = next_index;
 		let bound = state.settle(origin);
