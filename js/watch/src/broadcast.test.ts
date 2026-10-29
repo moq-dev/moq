@@ -15,7 +15,7 @@ function publish(origin: Origin.Producer, path: Path.Valid) {
 }
 
 // A real origin with local broadcasts at the given paths. Resolution is proven by
-// discrimination: `relativeBroadcast` resolves blind against the table (announced: false), so
+// discrimination: `relativeBroadcast` resolves blind against the table (follow: false), so
 // a defined result means the reference resolved to a published path and nothing else.
 function origin(paths: string[]): Origin.Producer {
 	const producer = new Origin.Producer();
@@ -29,7 +29,7 @@ function broadcast(name: string, paths: string[] = [name]): { source: Broadcast;
 		origin: owner,
 		name: Path.from(name),
 		enabled: true,
-		announced: false,
+		follow: false,
 		catalogFormat: "manual",
 	});
 	return { source, owner };
@@ -65,8 +65,9 @@ const videoRenditions = (source: Broadcast): string[] =>
 const video = (codec: string, broadcast?: string): Catalog.VideoConfig =>
 	({ codec, container: { kind: "legacy" }, broadcast }) as Catalog.VideoConfig;
 
-it("refuses the released reload input", () => {
-	expect(() => new Broadcast({ reload: true } as never)).toThrow("renamed to `announced`");
+it("refuses the renamed reload and announced inputs", () => {
+	expect(() => new Broadcast({ reload: true } as never)).toThrow("`reload` was renamed to `follow`");
+	expect(() => new Broadcast({ announced: true } as never)).toThrow("`announced` was renamed to `follow`");
 });
 
 describe("unsupported catalog", () => {
@@ -242,7 +243,7 @@ describe("relativeBroadcast", () => {
 			origin: owner,
 			name: Path.from("a/b"),
 			enabled: true,
-			announced: false,
+			follow: false,
 			catalogFormat: "manual",
 			catalog,
 		});
@@ -346,7 +347,7 @@ describe("relativeBroadcast", () => {
 			origin: owner,
 			name: Path.from("a/b"),
 			enabled: true,
-			announced: false,
+			follow: false,
 			catalogFormat: "manual",
 		});
 		const effect = new Effect();
@@ -475,7 +476,7 @@ describe("relativeBroadcast", () => {
 
 describe("blind resolution", () => {
 	it("holds a resolved request steady instead of flapping", async () => {
-		// announced: false with nothing routed stands a request; when a session answers, the
+		// follow: false with nothing routed stands a request; when a session answers, the
 		// effect that read `request.active` reruns. That rerun must re-acquire the same
 		// answer, not close the request and re-dial forever.
 		const owner = new Origin.Producer();
@@ -483,7 +484,7 @@ describe("blind resolution", () => {
 			origin: owner,
 			name: Path.from("blind.hang"),
 			enabled: true,
-			announced: false,
+			follow: false,
 			catalogFormat: "manual",
 		});
 
@@ -518,7 +519,7 @@ it("a blind broadcast does not follow another publisher instance", async () => {
 	const owner = new Origin.Producer();
 	const name = Path.from("blind.hang");
 	const first = publish(owner, name);
-	const source = new Broadcast({ origin: owner, name, announced: false, catalogFormat: "manual" });
+	const source = new Broadcast({ origin: owner, name, follow: false, catalogFormat: "manual" });
 	await settle();
 	const second = publish(owner, name);
 	await settle();
@@ -532,11 +533,10 @@ it("a blind broadcast does not follow another publisher instance", async () => {
 
 describe("restart", () => {
 	it("follows a republish through its follower", async () => {
-		const announced = true;
 		const owner = new Origin.Producer();
 		const name = Path.from("live.hang");
 		const first = publish(owner, name);
-		const source = new Broadcast({ origin: owner, name, enabled: true, announced, catalogFormat: "manual" });
+		const source = new Broadcast({ origin: owner, name, enabled: true, follow: true, catalogFormat: "manual" });
 		await settle();
 		const old = source.out.active.peek();
 		expect(old).toBeDefined();
@@ -591,7 +591,7 @@ describe("restart", () => {
 		};
 
 		// The initial start settles just before teardown, so its continuation runs after it.
-		const source = new Broadcast({ origin: owner, name, enabled: true, announced: true, catalogFormat: "manual" });
+		const source = new Broadcast({ origin: owner, name, enabled: true, follow: true, catalogFormat: "manual" });
 		queueMicrotask(() => queueMicrotask(() => source.close()));
 		await settle();
 		expect(open).toBe(0);
@@ -605,7 +605,7 @@ describe("restart", () => {
 		const name = Path.from("pool/job.hang");
 		const pool = owner.requests(Path.from("pool"));
 		const answers = serve(pool);
-		const source = new Broadcast({ origin: owner, name, enabled: true, announced: true, catalogFormat: "manual" });
+		const source = new Broadcast({ origin: owner, name, enabled: true, follow: true, catalogFormat: "manual" });
 		await settle();
 		const old = source.out.active.peek();
 		expect(old).toBeDefined();
@@ -639,7 +639,7 @@ describe("restart", () => {
 		const exactPublication = owner.createBroadcast(name);
 		const exact = exactPublication.broadcast;
 		exactPublication.announce({ epoch });
-		const source = new Broadcast({ origin: owner, name, enabled: true, announced: true, catalogFormat: "manual" });
+		const source = new Broadcast({ origin: owner, name, enabled: true, follow: true, catalogFormat: "manual" });
 		await settle();
 		const old = source.out.active.peek();
 		expect(old).toBeDefined();
@@ -668,7 +668,7 @@ describe("restart", () => {
 		const pool = owner.requests(Path.from("pool"));
 		const answers = serve(pool);
 		const exact = publish(owner, name);
-		const source = new Broadcast({ origin: owner, name, enabled: true, announced: true, catalogFormat: "manual" });
+		const source = new Broadcast({ origin: owner, name, enabled: true, follow: true, catalogFormat: "manual" });
 		await settle();
 		const old = source.out.active.peek();
 		expect(old).toBeDefined();
@@ -700,7 +700,7 @@ describe("refusal", () => {
 		const name = Path.from("room/live.hang");
 		const first = owner.requests(Path.from("room"));
 		const answers = serve(first);
-		const source = new Broadcast({ origin: owner, name, enabled: true, announced: true, catalogFormat: "manual" });
+		const source = new Broadcast({ origin: owner, name, enabled: true, follow: true, catalogFormat: "manual" });
 		await settle();
 		expect(source.out.active.peek()).toBeDefined();
 
@@ -727,7 +727,7 @@ describe("refusal", () => {
 			origin: scoped,
 			name: Path.from("lobby/live.hang"),
 			enabled: true,
-			announced: true,
+			follow: true,
 			catalogFormat: "manual",
 		});
 		await settle();
@@ -740,14 +740,14 @@ describe("refusal", () => {
 		await settle();
 	});
 
-	for (const announced of [true, false]) {
-		it(`reports a refusal until a fresh request (announced: ${announced})`, async () => {
+	for (const follow of [true, false]) {
+		it(`reports a refusal until a fresh request (follow: ${follow})`, async () => {
 			const owner = new Origin.Producer();
 			const route = owner.requests(Path.from("room"));
 			const requests = route.requested();
 			const name = new Signal(Path.from("room/refused.hang"));
 			const enabled = new Signal(true);
-			const source = new Broadcast({ origin: owner, name, enabled, announced, catalogFormat: "hang" });
+			const source = new Broadcast({ origin: owner, name, enabled, follow, catalogFormat: "hang" });
 
 			const first = await requests.next();
 			expect(first.value?.path).toBe(Path.from("room/refused.hang"));
@@ -1139,7 +1139,7 @@ it("subscribes a cross-broadcast MSF rendition on its namespace", async () => {
 		origin: owner,
 		name: Path.from("room/catalog.msf"),
 		enabled: true,
-		announced: false,
+		follow: false,
 	});
 	const effect = new Effect();
 	try {
