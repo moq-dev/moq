@@ -25,13 +25,48 @@ beside ebml-iterable for the block header and payload; prefer an upstream
 ebml-iterable option if one fits. Ignored elements are discarded as their
 bytes arrive instead of buffered.
 
-Open, for the maintainer before building: `Import::new` decodes `Info`,
-`Tracks`, and `TrackEntry` as whole masters, so a header declaring a huge one
-still pins input. Bring options with a recommendation, such as handling
-their children incrementally as the importer already does for Clusters; a
-blanket tag-size cap is ruled out above. Tests feed a huge declared block,
-metadata master, and ignored element in chunks and assert held bytes stay
-bounded. Settle this together with the same question in
-[fMP4 import streams mdat](/quest/m1/security-audit/fmp4-stream-mdat.md).
+Decided 2026-10-28 (maintainer, implementation brief): handle metadata
+children incrementally. `Info`, `Tracks`, and `TrackEntry` must not retain
+all children until the declared master ends. Keep only the active track's
+consumed configuration fields; discard ignored children as bytes arrive.
+Do not introduce a blanket tag-size cap.
+
+Investigation 2026-10-28: ebml-iterable 0.7.1 exposes incremental master
+start/end events, but binary leaves still require the entire payload and
+there is no public skip/stream hook. Removing masters from its capture list
+alone does not stream `SimpleBlock`, `Block`, or ignored binary elements.
+`container::Producer::write` also takes a complete `Frame`, although
+moq-net's underlying frame producer accepts chunks.
+
+A remaining design constraint is `BlockGroup`: `ReferenceBlock` may follow
+`Block`, and its absence decides whether the block opens a keyframe group.
+Subtitle `BlockDuration`, `BlockAdditions`, and `CodecState` may also follow
+the payload. The importer currently consumes that information at master end.
+Streaming the payload into a published frame before reading those children
+cannot preserve the existing grouping and subtitle conversion semantics.
+See [Matroska block semantics](https://www.matroska.org/technical/elements.html#ReferenceBlock).
+
+Remaining work:
+
+- Settle how non-seekable input handles BlockGroup information that arrives
+  after the payload. Recommended: explicitly refuse the cases whose output
+  depends on those trailing fields, unless a seekable-input path can inspect
+  the metadata first. This changes accepted MKV behavior and needs a scope
+  decision. Supporting every existing input instead requires a staging design
+  with explicit storage ownership and bounds; simply buffering the block in
+  another layer does not fix this quest. Metadata child handling is decided.
+- Implement incremental metadata state and a framing reader that streams
+  blocks and discards ignored payloads while preserving EBML hierarchy,
+  parent boundaries, unknown-size Segment/Cluster handling, and EOF errors.
+- Connect block chunks to the container producer without bypassing grouping,
+  timestamp normalization, estimation, catalog, HLS, or selected output framing.
+  Cover lacing, skipped tracks, and subtitle transformation explicitly.
+- Feed huge declared blocks, metadata masters, and ignored elements in chunks;
+  assert retained input stays bounded and output becomes readable before a
+  block completes. Cover trailing BlockGroup fields and every split of the
+  variable-length headers. Extend the existing `mkv-chunks` benchmark.
+
+No importer implementation is included in the current draft. Reproduce the
+buffering with a chunked, huge declared element before changing the importer.
 
 Public API: none expected. Wire: none.
