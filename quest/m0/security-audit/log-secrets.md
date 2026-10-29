@@ -16,13 +16,11 @@ request-target queries, CONNECT requests, auth requests, and cluster peers;
 escaped refusal fields; captured trace tests for SETUP, AUTH, CONNECT, and
 refusal. All four tests reproduced leaks before the fix.
 
-One maintainer decision remains: the original plan requested a token type
-shared by moq-net and moq-auth, which currently have independent public token
-types and no dependency on each other. Recommend keeping their public shapes
-and the manual redacting `Debug` implementations in this PR. A shared type
-would need a new common crate or a new dependency across those API layers,
-and changing their public byte fields would break callers. If a shared type
-is required, settle its owning crate and public shape before implementing it.
+Settled under the user's AFK authorization: ✅ retain the existing credential
+types with manual redacting `Debug`. This replaces the original shared-type
+proposal: moq-net and moq-auth keep their independent public types and byte
+fields, avoiding a common crate, a dependency across API layers, and a caller
+migration. The redaction stays at each credential-bearing type.
 
 After the main fix merges, backport the leaks present on `release` in a
 separate PR against `release`, preserving its published API, per
