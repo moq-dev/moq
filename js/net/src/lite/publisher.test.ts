@@ -1222,6 +1222,26 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 	}
 }
 
+for (const maxDelay of [5_000, 60_000]) {
+	test(`lite draft-07: an update before selection uses its ${maxDelay}ms budget`, async () => {
+		const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 2 });
+		try {
+			await new SubscribeUpdate({ priority: 0, startGroup: 2, maxDelay }).encode(
+				sub.client.writer,
+				Version.DRAFT_07,
+			);
+			while (sub.track.subscription.peek()?.maxDelay !== maxDelay) await sub.track.subscription.changed();
+			sub.serve(6);
+			const response = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_07);
+			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
+			expect(response.start.maxDelay).toBe(maxDelay);
+			expect(await sub.servedSequence()).toBe(6);
+		} finally {
+			await sub.close();
+		}
+	});
+}
+
 for (const updated of [5_000, 60_000]) {
 	test(`lite draft-07: a held selection keeps its 30000ms budget across an update to ${updated}`, async () => {
 		const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 2 });
