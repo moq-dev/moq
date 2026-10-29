@@ -146,9 +146,11 @@ where
 	/// Tracks [`Export::follow`] left on the ended broadcast, resubscribed as the returned
 	/// catalog lists them.
 	stale: HashSet<String>,
-	/// The PAT and PMT `version_number` the program's first tables go out at, advanced by each
-	/// switch to another instance so a demux that caches tables by version reads the new ones.
+	/// The PMT `version_number` the program's first tables go out at, advanced by each switch to
+	/// another instance so a demux that caches tables by version reads the new ones.
 	version: VersionNumber,
+	/// The PAT's, advanced by each switch alike.
+	pat_version: VersionNumber,
 	/// After a switch to another instance, the PIDs whose first packet is queued flagging the
 	/// break. `None` for an export that never switched.
 	flagged: Option<HashSet<u16>>,
@@ -1001,7 +1003,7 @@ struct Psi {
 	out: Option<Laid>,
 }
 
-/// Program tables as a copy of them goes out: the PMT at its version, and the PAT.
+/// Program tables as a copy of them goes out: the PMT and the PAT, each at its version.
 #[derive(Clone)]
 struct Laid {
 	version: VersionNumber,
@@ -1010,6 +1012,7 @@ struct Laid {
 	pmt_pid: u16,
 	/// Whether the PAT lists the network entry, pointing at the NIT the export carries.
 	network: bool,
+	pat_version: VersionNumber,
 	pat: Bytes,
 }
 
@@ -1025,21 +1028,26 @@ impl Psi {
 			.filter(|&pcr| self.pmt.streams.iter().all(|es| es.pid.as_u16() != pcr))
 	}
 
-	/// The tables as they stand, listing the network entry when `network`. Tables that differ
-	/// from the last laid go out at the next version, `first` before any has; the PAT keeps its
-	/// version until its network entry or PMT PID changes, so it never runs ahead of the PMT's.
-	fn current(&self, network: bool, first: VersionNumber) -> anyhow::Result<Laid> {
-		let (version, pat) = match &self.laid {
-			Some(laid) if laid.pmt == self.pmt && laid.network == network && laid.pmt_pid == self.pmt_pid => {
-				return Ok(laid.clone());
-			}
+	/// The tables as they stand, listing the network entry when `network`. Each table that
+	/// differs from the last laid goes out at the version after that one's own, `first` (the PMT's
+	/// and the PAT's) before any has: the PAT changes only with its network entry or PMT PID.
+	fn current(&self, network: bool, first: (VersionNumber, VersionNumber)) -> anyhow::Result<Laid> {
+		let next = |mut version: VersionNumber| {
+			version.increment();
+			version
+		};
+		let (version, pat_version, pat) = match &self.laid {
 			Some(laid) => {
-				let mut version = laid.version;
-				version.increment();
-				let kept = laid.network == network && laid.pmt_pid == self.pmt_pid;
-				(version, kept.then(|| laid.pat.clone()))
+				let version = match laid.pmt == self.pmt {
+					true => laid.version,
+					false => next(laid.version),
+				};
+				match laid.network == network && laid.pmt_pid == self.pmt_pid {
+					true => (version, laid.pat_version, Some(laid.pat.clone())),
+					false => (version, next(laid.pat_version), None),
+				}
 			}
-			None => (first, None),
+			None => (first.0, first.1, None),
 		};
 		let pat = match pat {
 			Some(pat) => pat,
@@ -1048,7 +1056,7 @@ impl Psi {
 				self.pmt.program_number,
 				self.pmt_pid,
 				network,
-				version,
+				pat_version,
 			)?,
 		};
 		Ok(Laid {
@@ -1056,6 +1064,7 @@ impl Psi {
 			pmt: self.pmt.clone(),
 			pmt_pid: self.pmt_pid,
 			network,
+			pat_version,
 			pat,
 		})
 	}
@@ -1337,6 +1346,7 @@ where
 			instance,
 			stale: HashSet::new(),
 			version: VersionNumber::default(),
+			pat_version: VersionNumber::default(),
 			flagged: None,
 			tables: Vec::new(),
 			psi_due: false,
@@ -1986,12 +1996,13 @@ where
 			.psi
 			.as_ref()
 			.and_then(|psi| psi.out.as_ref())
-			.map(|laid| laid.version);
-		next.version = out.unwrap_or(self.program.version);
+			.map(|laid| (laid.version, laid.pat_version));
+		(next.version, next.pat_version) = out.unwrap_or((self.program.version, self.program.pat_version));
 		next.epoch = self.program.epoch;
 		next.emitted_epoch = self.program.emitted_epoch;
 		if out.is_some() {
 			next.version.increment();
+			next.pat_version.increment();
 			next.epoch += 1;
 			next.flagged = Some(HashSet::new());
 			next.pcr_discontinuity = true;
@@ -3153,12 +3164,12 @@ where
 
 	/// Set the program tables as they stand on the schedule, which every copy of them still to
 	/// begin lays. A NIT acquired or lost after the tables went out revises the PAT's network
-	/// entry, at the next version beside the PMT. The first copy after a switch to another
+	/// entry, at the PAT's next version. The first copy after a switch to another
 	/// instance flags the break on each table PID that owes one ([`Self::breaks`]).
 	fn restate(&mut self) -> anyhow::Result<()> {
 		let network = self.carries_nit();
 		let psi = self.program.psi.as_ref().context("PSI not built")?;
-		let tables = psi.current(network, self.program.version)?;
+		let tables = psi.current(network, (self.program.version, self.program.pat_version))?;
 		let pmt_pid = psi.pmt_pid;
 		let clock = psi.pcr_pid().context("PMT without a clock")?;
 		let section = super::psi::encode_pmt(&tables.pmt, tables.version)?;
@@ -4686,13 +4697,13 @@ mod tests {
 	use moq_net::Timestamp;
 
 	use super::{
-		Buffer, DecodeClock, Dolby, Kind, PSI_INTERVAL, PesPacket, Psi, Settle, dolby_removals, due,
+		Buffer, DecodeClock, Dolby, Kind, Laid, PSI_INTERVAL, PesPacket, Psi, Settle, dolby_removals, due,
 		is_complete_section, si_due, slot, unwrap_pts, verbatim_buffer,
 	};
 
 	/// The tables as they stand take the version after the last laid, whatever was set on the
 	/// schedule meanwhile, and the last laid's own when they come back to it. The PAT keeps its
-	/// version until its network entry changes.
+	/// own version until its network entry or PMT PID changes.
 	#[test]
 	fn a_revision_takes_the_version_after_the_last_laid() {
 		use mpeg2ts::ts::{Pid, VersionNumber};
@@ -4722,27 +4733,35 @@ mod tests {
 			sending: Default::default(),
 			out: None,
 		};
-		let first = VersionNumber::from_u8(3).unwrap();
+		let version = |version| VersionNumber::from_u8(version).unwrap();
+		let first = (version(3), version(7));
+		let versions = |laid: &Laid| (laid.version.as_u8(), laid.pat_version.as_u8());
 		let laid = psi.current(false, first).unwrap();
-		assert_eq!(laid.version.as_u8(), 3);
+		assert_eq!(versions(&laid), (3, 7));
 		psi.laid = Some(laid.clone());
 
 		psi.pmt = pmt(&[0x100, 0x101]);
 		let revised = psi.current(false, first).unwrap();
-		assert_eq!(revised.version.as_u8(), 4);
+		assert_eq!(versions(&revised), (4, 7));
 		assert_eq!(revised.pat, laid.pat);
 
 		psi.pmt = pmt(&[0x100]);
-		assert_eq!(psi.current(false, first).unwrap().version.as_u8(), 3);
+		assert_eq!(versions(&psi.current(false, first).unwrap()), (3, 7));
 
 		let network = psi.current(true, first).unwrap();
-		assert_eq!(network.version.as_u8(), 4);
+		assert_eq!(versions(&network), (3, 8));
 		assert_ne!(network.pat, laid.pat);
 
-		// A moved PMT re-encodes the PAT at the next version, naming the new PID.
+		// A moved PMT re-encodes the PAT at its own next version, naming the new PID: after 31
+		// PMT revisions, the PMT's next is the PAT's last.
+		psi.laid = Some(Laid {
+			version: version(31),
+			pat_version: version(0),
+			..laid
+		});
 		psi.pmt_pid = 0x30;
 		let moved = psi.current(false, first).unwrap();
-		assert_eq!((moved.version.as_u8(), moved.pmt_pid), (4, 0x30));
+		assert_eq!(versions(&moved), (31, 1));
 		let pat = super::psi::PatAssembler::default().section(&moved.pat).unwrap();
 		assert_eq!(pat.programs[0].pmt_pid.as_u16(), 0x30);
 	}

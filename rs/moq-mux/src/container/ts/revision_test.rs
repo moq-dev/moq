@@ -1195,7 +1195,7 @@ async fn a_moved_pmt_moves_behind_a_new_pat() {
 	assert_eq!(pats(&frames), [(0, PMT_PID), (1, MOVED_PMT_PID)]);
 	assert_eq!(
 		layouts(&tables(&frames, MOVED_PMT_PID)),
-		[(1, vec![(AUDIO, AUDIO_PID)])]
+		[(0, vec![(AUDIO, AUDIO_PID)])]
 	);
 	let moved = packets(&frames)
 		.position(|packet| pat(packet) == Some((1, MOVED_PMT_PID)))
