@@ -31,4 +31,3 @@ Public API: moq-c gains each m1 binding feature. Wire: none.
 
 - [moq-c decode start](/quest/m1/c/decode-start.md) - a moq-c decoder can read a finished track from its start
 - [JSON windows](/quest/m1/c/json-window.md) - moq-c publishes and reads moq-json windows, as moq-ffi does
-- [Route epochs](/quest/m1/c/route-epoch.md) - a received `moq_route` carries its epoch, so a C subscriber can pin what it saw announced
