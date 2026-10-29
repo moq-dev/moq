@@ -50,4 +50,4 @@ publication; [old-crate retirement](/quest/m2/release/c-retire.md) follows.
 - [Switch to rust2's UniFFI](/quest/m2/uniffi-fork.md) - the C generator comes from rust2's fork
 - [One C name per moq-ffi item](/quest/m2/c/name-clash.md) - rust2's C generator names types in CamelCase and functions in snake_case, so the record `MoqAudioEncoderFinish` and the method `moq_audio_encoder_finish` never share a name
 - [C consumers](/quest/m2/c/consumers.md) - the C interop client and `doc/lib/c` samples move onto the generated API
-- [Async failure contract](/quest/m2/c/async-failure-contract.md) - a generated async call that fails early fires no callback, and one that started always delivers its terminal callback
+- [Async failure contract](/quest/m2/c/async-failure-contract.md) - every generated async call returns a task and calls back exactly once, cancelled when its task was freed first

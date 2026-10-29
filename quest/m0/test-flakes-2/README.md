@@ -51,4 +51,3 @@ Public API: none. Wire: none.
 - [FFI publisher audio gaps](/quest/m0/test-flakes-2/ffi-audio-gap.md) - interop tone checks stop finding gaps from FFI publishers
 - [IETF22 fallback](/quest/m0/test-flakes-2/ietf22-fallback.md) - an IETF22 browser viewer follows a fallback within the media lane's bound, keeping its session and its audio
 - [Swapped Rust to JS Opus](/quest/m0/test-flakes-2/swapped-js-opus.md) - the `rust-swapped -> js` interop cell stops timing out under load
-- [JS host-task yields follow the clock](/quest/m0/test-flakes-2/js-host-yields.md) - `Budget` and `nextTask` yield through the injected clock, so `Manual` tests stop racing them

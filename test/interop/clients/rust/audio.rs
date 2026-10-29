@@ -41,7 +41,7 @@ async fn main() -> anyhow::Result<()> {
 		.established()
 		.await?;
 
-	let broadcast = consumer.routed_broadcast(&args[2]).await?;
+	let broadcast = consumer.follow(&args[2], None)?.available().await?;
 	let source = moq_mux::Source::new(consumer, broadcast.clone());
 	let mut catalogs = moq_mux::catalog::Consumer::<()>::new(&broadcast, CatalogFormat::Hang).await?;
 	// A lazy publisher (the browser) may add audio in a later catalog update.
