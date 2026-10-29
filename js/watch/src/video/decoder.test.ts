@@ -165,11 +165,15 @@ class Picture {
 	displayWidth = 16;
 	displayHeight = 16;
 	readonly timestamp: number;
-	constructor(timestamp: number) {
+	readonly #pictures: Picture[];
+	constructor(timestamp: number, pictures: Picture[]) {
+		this.#pictures = pictures;
+		pictures.push(this);
 		this.timestamp = timestamp;
 	}
 	clone() {
-		return new Picture(this.timestamp);
+		if (this.closed) throw new Error("clone of a closed frame");
+		return new Picture(this.timestamp, this.#pictures);
 	}
 	close() {
 		this.closed = true;
@@ -252,8 +256,7 @@ async function guardedPlayback(
 			submitted.push(chunk.timestamp);
 			const emit = () => {
 				outputs.push(chunk.timestamp);
-				const picture = new Picture(chunk.timestamp);
-				pictures.push(picture);
+				const picture = new Picture(chunk.timestamp, pictures);
 				void this.callbacks.output(picture as unknown as VideoFrame);
 			};
 			if (owed.delete(chunk.timestamp)) {
@@ -322,7 +325,8 @@ async function guardedPlayback(
 		decoder,
 		delay,
 		fail: (error: DOMException, index = -1) => errors.at(index)?.(error),
-		emit: (timestamp: number, index = -1) => frames.at(index)?.(new Picture(timestamp) as unknown as VideoFrame),
+		emit: (timestamp: number, index = -1) =>
+			frames.at(index)?.(new Picture(timestamp, pictures) as unknown as VideoFrame),
 		get codecs() {
 			return errors.length;
 		},
@@ -389,6 +393,40 @@ async function guardedPlayback(
 			}
 		},
 	};
+}
+
+for (const kind of ["legacy", "cmaf"] as const) {
+	for (const teardown of ["replacement", "disable", "failure", "close"] as const) {
+		it(`releases late ${kind} output after ${teardown} without retaining a clone`, async () => {
+			const playback = await guardedPlayback(kind, [sample(0, 1_000)]);
+			try {
+				if (teardown === "replacement") {
+					playback.switchRendition();
+					await microtasks();
+					playback.emit(2_000);
+				} else if (teardown === "disable") playback.enabled.set(false);
+				else if (teardown === "failure") playback.fail(new DOMException("decode failed"));
+				else {
+					// The instant wait has resolved, but its output continuation has not run yet.
+					playback.emit(2_000);
+					playback.decoder.close();
+				}
+				await microtasks();
+
+				const poster = playback.decoder.out.frame.peek();
+				const count = playback.pictures.length;
+				playback.emit(900_000, 0);
+				await microtasks();
+				expect(playback.decoder.out.frame.peek()).toBe(poster);
+				// Cancelled output owns only the incoming handle, never a new poster clone.
+				expect(playback.pictures.slice(count).map((frame) => frame.closed)).toEqual([true]);
+			} finally {
+				playback.close();
+				await microtasks();
+			}
+			expect(playback.pictures.filter((frame) => !frame.closed)).toEqual([]);
+		});
+	}
 }
 
 it("promoting from no active track holds its picture and timestamp until a frame arrives", async () => {
@@ -531,6 +569,7 @@ for (const kind of ["legacy", "cmaf"] as const) {
 		} finally {
 			playback.close();
 			await microtasks();
+			expect(playback.pictures.filter((frame) => !frame.closed)).toEqual([]);
 			clock.installed.close();
 		}
 	}
@@ -1267,7 +1306,8 @@ for (const kind of ["legacy", "cmaf"] as const) {
 			expect(playback.decoder.out.frame.peek()?.timestamp).toBe(0);
 			playback.enabled.set(false);
 			await microtasks();
-			expect(playback.pictures.every((frame) => frame.closed)).toBe(true);
+			const poster = playback.decoder.out.frame.peek() as unknown as Picture;
+			expect(playback.pictures.filter((frame) => !frame.closed)).toEqual([poster]);
 			const codecs = playback.codecs;
 			playback.enabled.set(true);
 			await microtasks();
@@ -1276,6 +1316,9 @@ for (const kind of ["legacy", "cmaf"] as const) {
 			playback.emit(900_000, 0);
 			await microtasks();
 			expect(playback.decoder.out.frame.peek()?.timestamp).toBe(0);
+			playback.close();
+			await microtasks();
+			expect(playback.pictures.filter((frame) => !frame.closed)).toEqual([]);
 		} finally {
 			remove();
 			playback.close();
