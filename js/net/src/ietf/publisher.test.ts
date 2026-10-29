@@ -3330,6 +3330,56 @@ test("draft-22: a fill's FILL_TIMEOUT marks what it did not wait for", async () 
 	}
 });
 
+// A group the cache evicts after the fill listed it is unknown, not skipped, which would say it
+// never existed. Waiting on the open group the fill reaches first gives the older groups time
+// to age out of the cache.
+test("draft-22: a fill marks a group evicted after it was listed unknown", async () => {
+	using clock = manual();
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	// Groups 0 and 1 age out; the open group 2 is the newest the fill covers.
+	writeGroup(track, 2);
+	writeGroup(track, 2);
+	await clock.advance(Nano.fromMilli(Milli(25_000)));
+	const open = track.appendGroup();
+	open.writeFrame({ payload: new TextEncoder().encode("2.0"), timestamp: Timestamp.now() });
+	writeGroup(track, 1);
+
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "nextObject" },
+			fill: {
+				filter: { kind: "absolute", startGroup: 0n, startObject: 0n, endGroup: 2n },
+				fillTimeout: Milli(20_000),
+				rangeFilters: false,
+			},
+		}),
+	);
+
+	try {
+		const fill = await nextUni(fx.uni);
+		if (!fill) throw new Error("no fetch stream for the requested fill");
+		const served = await clock.drive(readFill(fill));
+		expect(served.reset).toBeUndefined();
+		const end = Number(2n ** 62n - 1n);
+		expect(served.objects).toEqual([
+			{ group: 2, id: 0, payload: "2.0" },
+			{ group: 2, id: end, payload: "end 20c" },
+			{ group: 1, id: end, payload: "end 10c" },
+			{ group: 0, id: end, payload: "end 10c" },
+		]);
+	} finally {
+		open.finish();
+		fx.close();
+		client.close();
+	}
+});
+
 /**
  * A broadcast served through `requested()` resolves its track on demand, and a dynamic serve
  * is deliberately one request per peer subscription. Resolving the track again to read the

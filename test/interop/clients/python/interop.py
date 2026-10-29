@@ -32,7 +32,11 @@ from datetime import timedelta
 import moq
 
 READ_CHUNK = 64 * 1024
-MAX_DELAY = timedelta(seconds=1)  # container consumer congestion-control / lookahead window
+# How far a read may fall behind live before it skips. A gap fails the run, which a reader skipping
+# behind live would cause itself: the matrix starts every subscriber at once, and a runtime starved
+# by the others can fall a second behind. That is this reader's speed, not the delivery under test.
+# A track's max-age caps it, so interop.sh's Rust publisher keeps its media at least this long.
+MAX_DELAY = timedelta(seconds=5)
 LINGER = timedelta(seconds=10)  # how long a finished publisher stays up for the late readers
 
 # Synthetic audio: a 48 kHz tone per channel at 0.5 amplitude, encoded as Opus.

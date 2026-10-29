@@ -49,8 +49,11 @@ using Clock = std::chrono::steady_clock;
 
 constexpr size_t READ_CHUNK = 64 * 1024;
 
-// SubscribeMedia max delay: how much reordering the jitter buffer tolerates.
-constexpr std::chrono::nanoseconds MAX_DELAY = std::chrono::seconds(1);
+// How far a read may fall behind live before it skips. A gap fails the run, which a reader skipping
+// behind live would cause itself: the matrix starts every subscriber at once, and a runtime starved
+// by the others can fall a second behind. That is this reader's speed, not the delivery under test.
+// A track's max-age caps it, so interop.sh's Rust publisher keeps its media at least this long.
+constexpr std::chrono::nanoseconds MAX_DELAY = std::chrono::seconds(5);
 
 // Synthetic audio: a 48 kHz tone per channel at 0.5 amplitude, encoded as Opus.
 constexpr const char *AUDIO_TRACK = "tone";
