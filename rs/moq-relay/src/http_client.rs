@@ -1,6 +1,7 @@
 use anyhow::Context;
 use http_cache_reqwest::{Cache, CacheMode, HttpCache, HttpCacheOptions, MokaCache, MokaManager};
 use reqwest_middleware::ClientWithMiddleware;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 /// How long any single request may take.
@@ -10,11 +11,22 @@ pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// `ETag`, `Last-Modified`). The API uses its own server trust while presenting
 /// the supplied client identity, so an mTLS-gated endpoint can identify the relay.
 ///
+/// `localhost` is pinned to loopback instead of resolved, since plaintext HTTP
+/// is accepted only on loopback.
+///
 /// Used by the cluster's peer-list polling (`--cluster-api-url`).
 pub(crate) fn build(tls: &rustls::ClientConfig, roots: &[std::path::PathBuf]) -> anyhow::Result<ClientWithMiddleware> {
 	let client = reqwest::Client::builder()
 		.timeout(REQUEST_TIMEOUT)
 		.redirect(reqwest::redirect::Policy::none())
+		// Port 0 keeps the port from the URL.
+		.resolve_to_addrs(
+			"localhost",
+			&[
+				SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+				SocketAddr::from((Ipv6Addr::LOCALHOST, 0)),
+			],
+		)
 		.use_preconfigured_tls(server_tls(tls, roots)?)
 		.build()
 		.context("failed to build HTTP client")?;
