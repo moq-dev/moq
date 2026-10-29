@@ -204,8 +204,10 @@ fn a_stream_the_new_source_lacks_is_not_waited_for() {
 	let (mut data, second) = replay(-SWITCH, |_| 0);
 	let audio = audio_pid(CLIP);
 	let without: Vec<u8> = data[second..]
-		.chunks_exact(188)
-		.filter(|pkt| pid(pkt) != audio)
+		.as_chunks::<188>()
+		.0
+		.iter()
+		.filter(|pkt| pid(&pkt[..]) != audio)
 		.flatten()
 		.copied()
 		.collect();
