@@ -1269,9 +1269,10 @@ export class Publisher {
 							moveCursor();
 							// A microtask is too short: decoding one framed update crosses several
 							// awaits, each of which can requeue behind the serving continuation. A
-							// task boundary lets the decoder finish whatever the transport already
-							// delivered before the next group pop. Updates are rare, so groups do
-							// not pay this scheduling cost on the normal path.
+							// task boundary usually lets the decoder finish whatever the transport
+							// already delivered before the next group pop. It orders nothing: an update
+							// decoded later applies from the pop after it. Updates are rare, so groups
+							// do not pay this scheduling cost on the normal path.
 							await yieldNow();
 							continue;
 						}

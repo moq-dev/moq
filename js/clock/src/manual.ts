@@ -39,7 +39,7 @@ export class Manual {
 				this.#remove(timer);
 			};
 		},
-		// Yields stay real host tasks, so queued I/O still runs first, but the clock counts them.
+		// Yields stay real host tasks, so the host's other work still gets a turn, but the clock counts them.
 		task: (ready) => {
 			this.#tasks++;
 			this.#revision++;

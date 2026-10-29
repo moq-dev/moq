@@ -49,7 +49,7 @@ export function sleep(duration: Nano, options?: { signal?: AbortSignal; ref?: bo
 	return wait(clock, Instant.add(Instant(clock.now()), duration), options).promise;
 }
 
-/** Complete after a later host task, letting queued tasks run; a `Manual` clock won't advance past it. */
+/** Complete in a later host task, giving the host's other work a turn; a `Manual` clock won't advance past it. */
 export function yieldNow(): Promise<void> {
 	const clock = backend();
 	return new Promise((resolve) => clock.task(resolve));

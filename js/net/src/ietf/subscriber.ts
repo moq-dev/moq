@@ -553,8 +553,12 @@ export class Subscriber {
 						}
 						return count ?? 0;
 					}
-					// A refusal already ended the request, so end ours cleanly before failing it.
-					if (framed.type === RequestError.id) request.close();
+					// A well-formed refusal already ended the request, so end ours cleanly before
+					// failing it. Anything else leaves the stream for the reset.
+					if (framed.type === RequestError.id) {
+						await RequestError.decode(framed.reader, version);
+						request.close();
+					}
 					throw new Error(`SubscribeNamespace rejected: typeId=0x${framed.type.toString(16)}`);
 				})();
 				// A consumer that leaves before the peer answers ends the request now, not on the answer.
@@ -1143,11 +1147,12 @@ export class Subscriber {
 				if (response.type === RequestError.id) {
 					const err = await RequestError.decode(response.reader, version);
 					reasonPhrase = requestReason(err.errorCode, err.reasonPhrase, "subscribe", version);
+					// Only a well-formed refusal ended the request; cleanup resets anything else.
+					state.rejected = true;
 				}
 			} catch {
 				// Decoding error response failed, use default message
 			}
-			state.rejected = true;
 			throw new Error(`SUBSCRIBE error: ${reasonPhrase}`);
 		}
 
