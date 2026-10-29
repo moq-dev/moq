@@ -1,6 +1,6 @@
 // Catalog-update costs with a warmed audio support verdict. Native probes run in browsers;
 // Bun's promise probe isolates selection overhead and probe counts for the nightly series.
-import * as Catalog from "@moq/hang/catalog";
+import type * as Catalog from "@moq/hang/catalog";
 import { Signal } from "@moq/signals";
 import { decoderConfigKey } from "../src/audio/config";
 import { Source } from "../src/audio/source";
@@ -11,7 +11,14 @@ import { supportCacheKey } from "../src/support-cache";
 export async function run(): Promise<void> {
 	const native = typeof AudioDecoder !== "undefined";
 	const probe = native
-		? async (config: Catalog.AudioConfig) => (await AudioDecoder.isConfigSupported(config)).supported ?? false
+		? async (config: Catalog.AudioConfig) =>
+				(
+					await AudioDecoder.isConfigSupported({
+						codec: config.codec,
+						sampleRate: config.sampleRate,
+						numberOfChannels: config.numberOfChannels,
+					})
+				).supported ?? false
 		: async () => true;
 	console.log("probe,renditions,updates,probes,us_per_update");
 	for (const count of [1, 8, 32]) {
@@ -26,12 +33,12 @@ export async function run(): Promise<void> {
 		const renditions: Record<string, Catalog.AudioConfig> = Object.fromEntries(
 			Array.from({ length: count }, (_, i) => [
 				`audio${i}`,
-				Catalog.AudioConfigSchema.parse({
+				{
 					codec: "opus",
 					container: { kind: "legacy" },
 					sampleRate: 48_000,
 					numberOfChannels: 2,
-				}),
+				} as Catalog.AudioConfig,
 			]),
 		);
 		const catalog = new Signal<Catalog.Root>({ audio: { renditions } });
