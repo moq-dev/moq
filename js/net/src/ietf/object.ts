@@ -1,6 +1,6 @@
 import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.ts";
 import type { Cursor, Reader } from "../stream.ts";
-import { Writer } from "../stream.ts";
+import { concat, encodeVarint, Writer } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
 import { U64 } from "../util/u64.ts";
 import { DEFAULT_WIRE } from "./priority.ts";
@@ -22,37 +22,30 @@ const PROP_TIMESTAMP = 0x10n;
 // object 0 is still the payload head; a standalone terminal may name a later ID.
 const FIRST_OBJECT_BIT = 0x40;
 
-async function encodeObjectPropertyType(w: Writer, id: bigint, prev: bigint): Promise<void> {
-	await w.u62(id - prev);
-}
-
-// The units come from the track's TIMESCALE property, not from here: repeating the
-// timescale on every object would cost bytes per frame to restate something fixed for
-// the track's lifetime. The timestamp is converted into the track's units so the value
-// on the wire matches what the track declared.
-async function encodeObjectTime(w: Writer, timestamp: Timestamp, timescale: Timescale): Promise<void> {
-	// The shared conversion: exact at the same scale, and refused before anything is written when
-	// the result leaves the range a Timestamp, and so the receiver, can hold.
-	const value = Math.round(timestamp.as(timescale));
-	await encodeObjectPropertyType(w, PROP_TIMESTAMP, 0n);
-	await w.u62(BigInt(value));
-}
-
 /**
  * Encode an object's Properties block: its Timestamp in `timescale` units, or nothing.
  *
  * Without units (`timescale` undefined) there is no Timestamp to write, even if the frame has one.
+ * Synchronous, like the rest of an object's header: every object of a timed track pays for it.
  */
-export async function encodeObjectExtensions(
+export function encodeObjectExtensions(
 	timestamp: Timestamp | undefined,
 	timescale: Timescale | undefined,
 	version: IetfVersion,
-): Promise<Uint8Array> {
+): Uint8Array {
 	if (timestamp === undefined || timescale === undefined) {
 		return new Uint8Array();
 	}
 
-	return Writer.collect(version, (w) => encodeObjectTime(w, timestamp, timescale));
+	// The units come from the track's TIMESCALE property, not from here: repeating the
+	// timescale on every object would cost bytes per frame to restate something fixed for
+	// the track's lifetime. The timestamp is converted into the track's units so the value
+	// on the wire matches what the track declared. The shared conversion is exact at the same
+	// scale, and refused before anything is written when the result leaves the range a
+	// Timestamp, and so the receiver, can hold.
+	const value = Math.round(timestamp.as(timescale));
+	// The only property, so its type's delta from the previous one is from zero.
+	return concat([encodeVarint(PROP_TIMESTAMP, version), encodeVarint(value, version)]);
 }
 
 /** Decode the Timestamp an object's Properties block carries, consuming the whole block. */
@@ -273,29 +266,27 @@ export class Frame {
 		version: IetfVersion,
 		idDelta = 0,
 	): Promise<void> {
-		await w.u53(idDelta);
+		// Everything before the payload is built in memory and goes out as one write: a stream
+		// write is far costlier than a varint, and a backlog pays it for every object.
+		const header = [encodeVarint(idDelta, version)];
 
 		if (flags.hasExtensions) {
-			const extensions = await encodeObjectExtensions(this.timestamp, timescale, version);
-			await w.u53(extensions.byteLength);
-			await w.write(extensions);
+			const extensions = encodeObjectExtensions(this.timestamp, timescale, version);
+			header.push(encodeVarint(extensions.byteLength, version), extensions);
 		}
 
+		const payload = this.endOfTrack ? undefined : this.payload;
 		if (this.endOfTrack) {
-			await w.u53(0); // length = 0
-			await w.u53(END_OF_TRACK);
-		} else if (this.payload !== undefined) {
-			await w.u53(this.payload.byteLength);
-
-			if (this.payload.byteLength === 0) {
-				await w.u53(0); // status = normal
-			} else {
-				await w.write(this.payload);
-			}
+			header.push(encodeVarint(0, version), encodeVarint(END_OF_TRACK, version)); // length = 0
+		} else if (payload === undefined) {
+			header.push(encodeVarint(0, version), encodeVarint(GROUP_END, version)); // length = 0
 		} else {
-			await w.u53(0); // length = 0
-			await w.u53(GROUP_END);
+			header.push(encodeVarint(payload.byteLength, version));
+			if (payload.byteLength === 0) header.push(encodeVarint(0, version)); // status = normal
 		}
+
+		await w.write(concat(header));
+		if (payload !== undefined && payload.byteLength > 0) await w.write(payload);
 	}
 
 	/** Decode a frame using the group flags, at the cursor's negotiated IETF version. */
@@ -415,27 +406,37 @@ export class FetchFrame {
 	): Promise<void> {
 		const stamped = this.timestamp !== undefined && timescale !== undefined;
 		const previous = position.previousGroup;
+		// Everything before the payload goes out as one write, as in Frame.encode.
+		const header: Uint8Array[] = [];
 		if (position.first || previous !== undefined) {
 			// Include the priority too: "same as the prior object" has no prior to refer to.
 			const properties = stamped ? FETCH_PROPERTIES : 0;
-			await w.u53(FETCH_GROUP_ID | FETCH_OBJECT_ID | (position.first ? FETCH_PRIORITY : 0) | properties);
-			await w.u53(previous === undefined ? position.group : Math.abs(position.group - previous) - 1);
-			await w.u53(position.object);
-			if (position.first) await w.u8(0);
+			header.push(
+				encodeVarint(
+					FETCH_GROUP_ID | FETCH_OBJECT_ID | (position.first ? FETCH_PRIORITY : 0) | properties,
+					version,
+				),
+				encodeVarint(
+					previous === undefined ? position.group : Math.abs(position.group - previous) - 1,
+					version,
+				),
+				encodeVarint(position.object, version),
+			);
+			if (position.first) header.push(Uint8Array.of(0));
 		} else {
 			// Same group and priority; the Object ID is the prior one plus one.
-			await w.u53(stamped ? FETCH_PROPERTIES : 0);
+			header.push(encodeVarint(stamped ? FETCH_PROPERTIES : 0, version));
 		}
 
 		// Omitted entirely rather than written empty when the object carries no timestamp:
 		// the track declared no units, so there is no property to send.
 		if (stamped) {
-			const extensions = await encodeObjectExtensions(this.timestamp, timescale, version);
-			await w.u53(extensions.byteLength);
-			await w.write(extensions);
+			const extensions = encodeObjectExtensions(this.timestamp, timescale, version);
+			header.push(encodeVarint(extensions.byteLength, version), extensions);
 		}
 
-		await w.u53(this.payload.byteLength);
+		header.push(encodeVarint(this.payload.byteLength, version));
+		await w.write(concat(header));
 		if (this.payload.byteLength > 0) {
 			await w.write(this.payload);
 		}

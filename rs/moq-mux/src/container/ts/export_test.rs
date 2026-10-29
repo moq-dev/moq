@@ -11602,6 +11602,74 @@ async fn an_expired_follow_stops_healthy_input_but_drains_its_buffered_tail() {
 	assert!(gap > delay, "no input can bridge B's post-deadline wait: {gap:?}");
 }
 
+/// A publisher that leaves still gets what the export buffered of it out on schedule, and only
+/// then does the export report it gone. Reported at once, the tail sat unpolled while a
+/// follower waited, and went out late, behind the gap, ahead of whatever came back.
+#[tokio::test(start_paused = true)]
+async fn a_publisher_that_leaves_drains_its_buffered_tail_before_the_end() {
+	let origin = crate::source::produce_origin();
+	let (old, mut catalog) = publish_live::<()>(&origin, Default::default());
+	let audio = aac_rendition(&mut old.broadcast().clone(), &mut catalog, "a.aac");
+	let mut publisher = Some((catalog, audio));
+	let delay = Duration::from_millis(500);
+	let left = Duration::from_millis(2000);
+	let step = Duration::from_millis(20);
+	let mut export = open_export(crate::source::resolved(&origin, "live").await)
+		.await
+		.unwrap()
+		.with_delay(delay);
+	let start = tokio::time::Instant::now();
+	let mut frames = Vec::new();
+	let end = loop {
+		let elapsed = start.elapsed();
+		if elapsed < left {
+			write_aac(&mut publisher.as_mut().unwrap().1, elapsed.as_millis() as u64);
+		} else if let Some((catalog, audio)) = publisher.take() {
+			audio.abort(moq_net::Error::Unroutable);
+			catalog.abort(moq_net::Error::Unroutable);
+		}
+		tokio::task::yield_now().await;
+		let end = loop {
+			match export.poll_next(&kio::Waiter::noop()) {
+				std::task::Poll::Ready(Ok(Some(frame))) => frames.push((start.elapsed(), frame)),
+				std::task::Poll::Ready(end) => break Some(end),
+				std::task::Poll::Pending => break None,
+			}
+		};
+		if let Some(end) = end {
+			break end;
+		}
+		assert!(
+			elapsed < left + 4 * delay,
+			"the export never reported the publisher gone"
+		);
+		tokio::time::advance(step).await;
+	};
+	let ended = start.elapsed();
+	assert!(
+		matches!(&end, Err(err) if super::follower::left(err)),
+		"the end reports the publisher leaving: {end:?}"
+	);
+	let slices: Vec<Frame> = frames.iter().map(|(_, frame)| frame.clone()).collect();
+	// When each audio PTS went out, after the publisher left.
+	let tail: Vec<(Duration, u64)> = frames
+		.iter()
+		.zip(audio_pts_by_slice(&slices))
+		.filter(|((at, _), _)| *at >= left)
+		.flat_map(|((at, _), pts)| pts.into_iter().map(move |pts| (*at, pts)))
+		.collect();
+	let (last, pts) = *tail.last().expect("a tail went out after the publisher left");
+	assert!(
+		pts >= (60_000 + left.as_millis() as u64 - 100) * 90,
+		"the tail buffered when the publisher left goes out: {tail:?}"
+	);
+	assert!(
+		last >= left + delay - PCR_INTERVAL - step,
+		"the tail goes out on schedule, not in a burst: {tail:?}"
+	);
+	assert!(ended >= last, "the end follows the tail");
+}
+
 /// A replacement that leaves while it acquires is no switch: the healthy old program plays on.
 #[tokio::test(start_paused = true)]
 async fn a_replacement_leaving_before_it_commits_keeps_the_old_program() {

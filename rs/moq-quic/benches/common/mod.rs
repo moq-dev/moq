@@ -634,8 +634,9 @@ fn transport(receive_window: VarInt, send_window: u64, probe: bool) -> transport
 	transport.idle_timeout = None;
 	transport.limits.max_streams = NonZeroU64::new(4096);
 	transport.limits.stream_receive_window = NonZeroU64::new(16 << 20);
-	transport.limits.receive_window = NonZeroU64::new(receive_window.into_inner());
-	transport.limits.send_window = NonZeroU64::new(send_window);
+	// `None` is the default window, so a zero would silently lift the limit instead.
+	transport.limits.receive_window = Some(NonZeroU64::new(receive_window.into_inner()).expect("zero receive window"));
+	transport.limits.send_window = Some(NonZeroU64::new(send_window).expect("zero send window"));
 	transport.datagram.receive_buffer = Some(DATAGRAM_BUFFER);
 	transport.datagram.send_buffer = DATAGRAM_BUFFER;
 	transport

@@ -164,8 +164,8 @@ func (c ClientConfig) ffi() (ffi.MoqClientConfig, error) {
 		keylog = &c.QUIC.Keylog
 	}
 	cfg := ffi.MoqClientConfig{
-		Bind:              str(c.Bind),
-		Versions:          c.Versions,
+		Bind:            str(c.Bind),
+		Versions:        c.Versions,
 		Tokens:          c.Tokens,
 		Timeout:         c.Timeout,
 		Race:            c.Race,
