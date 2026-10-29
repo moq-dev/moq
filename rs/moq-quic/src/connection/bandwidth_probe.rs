@@ -20,9 +20,10 @@ use std::{ops::Bound, time::Duration};
 
 use super::{Connection, SentPacket, StreamsState, sent_packets::SentPackets};
 use crate::{
-	Instant, TransportConfig,
+	Instant,
 	frame::{self, FrameStruct},
 	packet::SpaceId,
+	transport,
 };
 
 /// How long the probe sits out after its first miss in a row, doubling with each further miss:
@@ -74,7 +75,7 @@ pub(super) enum Ready {
 }
 
 impl BandwidthProbe {
-	pub(super) fn new(config: &TransportConfig, now: Instant) -> Self {
+	pub(super) fn new(config: &transport::Config, now: Instant) -> Self {
 		let mtu = u64::from(config.get_initial_mtu());
 		Self {
 			target: 0,
@@ -301,7 +302,7 @@ mod tests {
 	const MS: Duration = Duration::from_millis(1);
 
 	fn probe(now: Instant) -> BandwidthProbe {
-		let mut probe = BandwidthProbe::new(&TransportConfig::default(), now);
+		let mut probe = BandwidthProbe::new(&transport::Config::default(), now);
 		probe.set_target(TARGET);
 		probe
 	}

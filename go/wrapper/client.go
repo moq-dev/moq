@@ -303,7 +303,7 @@ func Dial(ctx context.Context, url string, config ClientConfig) (*Client, error)
 // CreateBroadcast creates an unannounced broadcast at path, invisible to everyone until announced. Announce it after populating tracks.
 //
 // See [OriginProducer.CreateBroadcast].
-func (c *Client) CreateBroadcast(path string) (*BroadcastProducer, error) {
+func (c *Client) CreateBroadcast(path string) (*Publication, error) {
 	return c.publisher.CreateBroadcast(path)
 }
 

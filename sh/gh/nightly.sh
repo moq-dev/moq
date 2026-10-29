@@ -147,7 +147,6 @@ case "$1" in
         javascript json-stream just js json-stream-bench
         javascript signals just js signals-bench
         javascript json-codec just js json-codec-bench
-        javascript flate-decoder just js flate-decoder-bench
         javascript json-parse just js json-parse-bench
         javascript slow-group just js slow-group-bench
         javascript jitter just js jitter-bench

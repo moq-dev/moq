@@ -6,7 +6,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use moq_quic::{ClosedStream, ConnectionError, FinishError, StreamId, Written};
+use moq_quic::{ClosedStream, FinishError, StreamId, Written, connection::Error as ConnectionError};
 use thiserror::Error;
 
 use crate::quic::driver::{

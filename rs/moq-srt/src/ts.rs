@@ -216,13 +216,17 @@ impl Subscriber {
 	/// consumer's scope, or the origin closed). Otherwise waits for the broadcast
 	/// to be announced, so a caller may connect before the publisher does.
 	pub(crate) async fn new(origin: &origin::Consumer, path: &str, options: Options) -> Result<Option<Self>> {
-		if origin.routed(path).await.is_none() {
+		let Ok(mut following) = origin.follow(path, None) else {
 			return Ok(None);
-		}
+		};
 
-		// Join the broadcast just announced. The export resolves any referenced sibling
+		// Join the broadcast once announced. The export resolves any referenced sibling
 		// broadcast (the catalog `broadcast` field) through the same origin.
-		let broadcast = origin.request_broadcast(path, None).await?;
+		let broadcast = match following.available().await {
+			Ok(broadcast) => broadcast,
+			Err(moq_net::Error::Closed) => return Ok(None),
+			Err(err) => return Err(err.into()),
+		};
 		let source = moq_mux::Source::new(origin.clone(), broadcast);
 		let catalog = source.catalog::<ts::Ext>(moq_mux::catalog::CatalogFormat::Hang).await?;
 		let export = ts::Export::new(source, catalog).with_delay(options.latency.max(MIN_DELAY));
@@ -478,11 +482,7 @@ mod tests {
 	/// announced.
 	async fn program(origin: &moq_net::origin::Producer, path: &str) -> (u16, Vec<u16>) {
 		let consumer = origin.consume();
-		timeout(Duration::from_secs(5), consumer.routed(path))
-			.await
-			.expect("announce timed out")
-			.expect("the broadcast is announced");
-		let broadcast = consumer.request_broadcast(path, None).await.unwrap();
+		let broadcast = consumer.follow(path, None).unwrap().available().await.unwrap();
 		let mut catalog = moq_mux::catalog::Consumer::<ts::Ext>::new(&broadcast, CatalogFormat::Hang)
 			.await
 			.unwrap();
@@ -518,7 +518,7 @@ mod tests {
 		let origin = produce_origin();
 		let consumer = origin.consume();
 		let _stale = Publisher::new(&origin, "ingest", Default::default(), None).unwrap();
-		let stale = consumer.request_broadcast("ingest", None).await.unwrap();
+		let stale = consumer.request("ingest", None).await.unwrap();
 		let mut catalog = stale
 			.track(hang::Catalog::DEFAULT_NAME)
 			.unwrap()
@@ -537,7 +537,7 @@ mod tests {
 		})
 		.await;
 		assert!(stale_viewer.is_err(), "the stale viewer ended: {stale_viewer:?}");
-		let fresh = consumer.request_broadcast("ingest", None).await.unwrap();
+		let fresh = consumer.request("ingest", None).await.unwrap();
 		assert!(!fresh.is_clone(&stale), "viewers reach the reconnected caller");
 	}
 
@@ -559,9 +559,10 @@ mod tests {
 		assert_eq!(program(&origin, "ingest/1").await, (1, vec![0x0101]));
 		assert_eq!(program(&origin, "ingest/2").await, (2, vec![0x0201]));
 		assert!(
-			timeout(Duration::from_secs(1), origin.consume().routed("ingest"))
-				.await
-				.is_err(),
+			matches!(
+				origin.consume().request("ingest", None).await,
+				Err(moq_net::Error::Unroutable)
+			),
 			"nothing is published on the bare path"
 		);
 		drop(publisher.finish(Duration::ZERO).unwrap());
@@ -577,8 +578,7 @@ mod tests {
 		publisher.feed(Bytes::from_static(BBB5S)).unwrap();
 
 		let consumer = origin.consume();
-		consumer.routed("live/cam0").await.unwrap();
-		let broadcast = consumer.request_broadcast("live/cam0", None).await.unwrap();
+		let broadcast = consumer.follow("live/cam0", None).unwrap().available().await.unwrap();
 		let start = tokio::time::Instant::now();
 		let wait = tokio::spawn(publisher.finish(linger).unwrap().wait());
 		tokio::time::sleep(linger / 2).await;
@@ -611,8 +611,7 @@ mod tests {
 		publisher.feed(Bytes::from(ts)).unwrap();
 
 		let consumer = origin.consume();
-		consumer.routed("live/cam0").await.unwrap();
-		let broadcast = consumer.request_broadcast("live/cam0", None).await.unwrap();
+		let broadcast = consumer.follow("live/cam0", None).unwrap().available().await.unwrap();
 		let info = broadcast.track("0.avc3").unwrap().info().await.unwrap();
 		assert_eq!(info.max_age, Some(Duration::from_secs(3)));
 	}
@@ -658,11 +657,7 @@ mod tests {
 		let mut publisher = Publisher::new(&origin, "ingest", Default::default(), None).unwrap();
 
 		let consumer = origin.consume();
-		timeout(Duration::from_secs(5), consumer.routed("ingest"))
-			.await
-			.expect("announce timed out")
-			.expect("the ingest broadcast is announced");
-		let broadcast = consumer.request_broadcast("ingest", None).await.unwrap();
+		let broadcast = consumer.follow("ingest", None).unwrap().available().await.unwrap();
 
 		publisher.feed(bytes::Bytes::from_static(BBB5S)).unwrap();
 

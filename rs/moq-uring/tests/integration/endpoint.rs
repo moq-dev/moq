@@ -40,8 +40,8 @@ fn server_config(certs: &support::Certs) -> quic::server::Config {
 	)
 }
 
-fn dial_config(peer: std::net::SocketAddr) -> quic::client::Config {
-	let mut config = quic::client::Config::new(peer, "localhost");
+fn dial_config() -> quic::client::Config {
+	let mut config = quic::client::Config::default();
 	config.alpn = vec![ALPN.to_string()];
 	config.verify = false;
 	config
@@ -74,9 +74,15 @@ fn dial_and_accept_share_one_socket() {
 
 	worker
 		.block_on(async move {
-			let a_to_b = a.connect(&dial_config(b.local_addr())).await.expect("a dials b");
+			let a_to_b = a
+				.connect(&dial_config(), b.local_addr(), "localhost")
+				.await
+				.expect("a dials b");
 			let b_in = b.accept().await.expect("b accepts a");
-			let b_to_a = b.connect(&dial_config(a.local_addr())).await.expect("b dials a");
+			let b_to_a = b
+				.connect(&dial_config(), a.local_addr(), "localhost")
+				.await
+				.expect("b dials a");
 			let a_in = a.accept().await.expect("a accepts b");
 
 			for conn in [&a_to_b, &b_in, &b_to_a, &a_in] {
@@ -127,7 +133,10 @@ fn dropped_raw_session_closes(explicit: bool) {
 	let client = quic::Endpoint::new(socket(), quic::endpoint::Config::default()).expect("client endpoint");
 	worker
 		.block_on(async move {
-			let conn = client.connect(&dial_config(server.local_addr())).await.expect("dial");
+			let conn = client
+				.connect(&dial_config(), server.local_addr(), "localhost")
+				.await
+				.expect("dial");
 			let mut peer = server.accept().await.expect("accept");
 			let session = quic::web::Session::raw(conn);
 			let mut remaining = session.clone();
@@ -190,7 +199,10 @@ fn a_close_reaches_both_ends_with_its_code() {
 
 	worker
 		.block_on(async move {
-			let mut dialed = client.connect(&dial_config(server.local_addr())).await.expect("dial");
+			let mut dialed = client
+				.connect(&dial_config(), server.local_addr(), "localhost")
+				.await
+				.expect("dial");
 			let closes = |activity: &moq_net::server::Activity| {
 				let mut future = std::pin::pin!(activity.close());
 				std::future::Future::poll(
@@ -219,7 +231,10 @@ fn a_close_reaches_both_ends_with_its_code() {
 				"closed transport releases admission even while handles survive"
 			);
 			assert!(
-				client.connect(&dial_config(server.local_addr())).await.is_err(),
+				client
+					.connect(&dial_config(), server.local_addr(), "localhost")
+					.await
+					.is_err(),
 				"closed activity refuses a new connection at accept"
 			);
 		})
@@ -338,12 +353,7 @@ fn unsupported_version_is_negotiated_only_by_servers() {
 		.iter()
 		.map(|version| u32::from_be_bytes(*version))
 		.collect::<Vec<_>>();
-	assert!(
-		versions
-			.iter()
-			.any(|version| moq_quic::DEFAULT_SUPPORTED_VERSIONS.contains(version)),
-		"the supported version is offered: {versions:?}"
-	);
+	assert!(versions.contains(&1), "QUIC v1 is offered: {versions:?}");
 	drop((endpoint, dial_only));
 }
 
@@ -388,7 +398,10 @@ fn a_peer_stop_reaches_the_accepted_stream() {
 
 	worker
 		.block_on(async move {
-			let mut dialed = client.connect(&dial_config(server.local_addr())).await.expect("dial");
+			let mut dialed = client
+				.connect(&dial_config(), server.local_addr(), "localhost")
+				.await
+				.expect("dial");
 			let mut accepted = server.accept().await.expect("accept");
 
 			// Held, not dropped: dropping the send half would reset it, and
@@ -448,10 +461,11 @@ fn an_unanswered_dial_times_out() {
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("client socket");
 	// The dial ends at moq-quic's handshake idle timeout (10s), not the idle timeout.
-	let dial = dial_config(hole.local_addr().expect("addr"));
+	let hole_addr = hole.local_addr().expect("addr");
+	let dial = dial_config();
 
 	let result = worker
-		.block_on(async move { quic::client::connect(client_sock, &dial).await })
+		.block_on(async move { quic::client::connect(client_sock, &dial, hole_addr, "localhost").await })
 		.expect("worker");
 	assert!(result.is_err(), "a dial into a black hole must time out");
 }
@@ -497,7 +511,7 @@ fn an_unroutable_dial_fails_alone() {
 			match within(
 				&handle,
 				"the unroutable dial to fail",
-				client.connect(&dial_config(unroutable)),
+				client.connect(&dial_config(), unroutable, "localhost"),
 			)
 			.await
 			{
@@ -508,7 +522,7 @@ fn an_unroutable_dial_fails_alone() {
 			let dialed = within(
 				&handle,
 				"a dial on the same socket",
-				client.connect(&dial_config(server.local_addr())),
+				client.connect(&dial_config(), server.local_addr(), "localhost"),
 			)
 			.await;
 			dialed.expect("the socket outlives one unroutable destination");
@@ -546,10 +560,10 @@ fn the_backlog_bounds_pending_handshakes() {
 		.expect("client socket");
 	// The server never answers, so the dial ends at moq-quic's handshake idle
 	// timeout (10s).
-	let dial = dial_config(server);
+	let dial = dial_config();
 
 	let result = worker
-		.block_on(async move { quic::client::connect(client_sock, &dial).await })
+		.block_on(async move { quic::client::connect(client_sock, &dial, server, "localhost").await })
 		.expect("worker");
 	assert!(result.is_err(), "a handshake over the backlog must not complete");
 	assert!(!accepted.get(), "a handshake over the backlog must not be accepted");
@@ -575,16 +589,16 @@ fn the_backlog_bounds_queued_connections() {
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("first client socket");
 	let first = worker
-		.block_on(async { quic::client::connect(first_sock, &dial_config(server)).await })
+		.block_on(async { quic::client::connect(first_sock, &dial_config(), server, "localhost").await })
 		.expect("worker")
 		.expect("first connection");
 
 	let second_sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("second client socket");
-	let second_config = dial_config(server);
+	let second_config = dial_config();
 	let second = worker
-		.block_on(async { quic::client::connect(second_sock, &second_config).await })
+		.block_on(async { quic::client::connect(second_sock, &second_config, server, "localhost").await })
 		.expect("worker");
 	assert!(second.is_err(), "a completed connection must still occupy the backlog");
 
@@ -620,7 +634,7 @@ fn connections_share_one_tx_buffer_fairly() {
 			let first_sock = handle
 				.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 				.expect("first client socket");
-			let first_client = quic::client::connect(first_sock, &dial_config(server))
+			let first_client = quic::client::connect(first_sock, &dial_config(), server, "localhost")
 				.await
 				.expect("first connection");
 			let mut first_server = endpoint.accept().await.expect("first accepted connection");
@@ -688,10 +702,10 @@ fn connections_share_one_tx_buffer_fairly() {
 			let second_sock = handle
 				.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 				.expect("second client socket");
-			let mut second_config = dial_config(server);
+			let mut second_config = dial_config();
 			second_config.transport.idle_timeout = Duration::from_millis(500);
 			let started = moq_clock::now();
-			let second = quic::client::connect(second_sock, &second_config).await;
+			let second = quic::client::connect(second_sock, &second_config, server, "localhost").await;
 			let elapsed = moq_clock::now() - started;
 			running.set(false);
 			let second = second.expect("the second connection must not starve");
@@ -759,7 +773,9 @@ fn an_identity_is_read_once() {
 				.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 				.expect("client socket");
 			handle.spawn(async move {
-				quic::client::connect(sock, &dial_config(server)).await.expect("dial");
+				quic::client::connect(sock, &dial_config(), server, "localhost")
+					.await
+					.expect("dial");
 			});
 			second.accept().await.expect("accepted connection");
 		})
@@ -787,9 +803,9 @@ fn cancelling_a_dial_releases_its_connection() {
 
 	worker
 		.block_on(async {
-			let mut config = dial_config(server.local_addr());
+			let mut config = dial_config();
 			config.transport.idle_timeout = Duration::from_secs(30);
-			let mut dial = Box::pin(client.connect(&config));
+			let mut dial = Box::pin(client.connect(&config, server.local_addr(), "localhost"));
 			std::future::poll_fn(|cx| {
 				assert!(
 					dial.as_mut().poll(cx).is_pending(),
@@ -814,7 +830,7 @@ fn cancelling_a_dial_releases_its_connection() {
 			let dialed = within(
 				&handle,
 				"sibling dial",
-				client.connect(&dial_config(server.local_addr())),
+				client.connect(&dial_config(), server.local_addr(), "localhost"),
 			)
 			.await
 			.expect("sibling dial");

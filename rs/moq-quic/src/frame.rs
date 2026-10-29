@@ -253,16 +253,16 @@ pub struct ConnectionClose {
 	pub error_code: TransportErrorCode,
 	/// Type of frame that caused the close
 	pub frame_type: Option<FrameType>,
-	/// Human-readable reason for the close
-	pub reason: Bytes,
+	/// Human-readable reason for the close, with invalid UTF-8 replaced
+	pub reason: String,
 }
 
 impl fmt::Display for ConnectionClose {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		self.error_code.fmt(f)?;
-		if !self.reason.as_ref().is_empty() {
+		if !self.reason.is_empty() {
 			f.write_str(": ")?;
-			f.write_str(&String::from_utf8_lossy(&self.reason))?;
+			f.write_str(&self.reason)?;
 		}
 		Ok(())
 	}
@@ -273,7 +273,7 @@ impl From<TransportError> for ConnectionClose {
 		Self {
 			error_code: x.code,
 			frame_type: x.frame,
-			reason: x.reason.into(),
+			reason: x.reason,
 		}
 	}
 }
@@ -291,9 +291,9 @@ impl ConnectionClose {
 		let max_len = max_len
 			- 3 - VarInt::from_u64(ty).unwrap().size()
 			- VarInt::from_u64(self.reason.len() as u64).unwrap().size();
-		let actual_len = self.reason.len().min(max_len);
+		let actual_len = self.reason.floor_char_boundary(max_len);
 		out.write_var(actual_len as u64); // <= 8 bytes
-		out.put_slice(&self.reason[0..actual_len]); // whatever's left
+		out.put_slice(&self.reason.as_bytes()[0..actual_len]); // whatever's left
 	}
 }
 
@@ -302,14 +302,14 @@ impl ConnectionClose {
 pub struct ApplicationClose {
 	/// Application-specific reason code
 	pub error_code: VarInt,
-	/// Human-readable reason for the close
-	pub reason: Bytes,
+	/// Human-readable reason for the close, with invalid UTF-8 replaced
+	pub reason: String,
 }
 
 impl fmt::Display for ApplicationClose {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		if !self.reason.as_ref().is_empty() {
-			f.write_str(&String::from_utf8_lossy(&self.reason))?;
+		if !self.reason.is_empty() {
+			f.write_str(&self.reason)?;
 			f.write_str(" (code ")?;
 			self.error_code.fmt(f)?;
 			f.write_str(")")?;
@@ -329,9 +329,9 @@ impl ApplicationClose {
 		out.write(FrameType::APPLICATION_CLOSE); // 1 byte
 		out.write(self.error_code); // <= 8 bytes
 		let max_len = max_len - 1 - self.error_code.size() - VarInt::from_u64(self.reason.len() as u64).unwrap().size();
-		let actual_len = self.reason.len().min(max_len);
+		let actual_len = self.reason.floor_char_boundary(max_len);
 		out.write_var(actual_len as u64); // <= 8 bytes
-		out.put_slice(&self.reason[0..actual_len]); // whatever's left
+		out.put_slice(&self.reason.as_bytes()[0..actual_len]); // whatever's left
 	}
 }
 
@@ -592,11 +592,11 @@ impl Iter {
 					let x = self.bytes.get_var()?;
 					if x == 0 { None } else { Some(FrameType(x)) }
 				},
-				reason: self.take_len()?,
+				reason: String::from_utf8_lossy(&self.take_len()?).into_owned(),
 			})),
 			FrameType::APPLICATION_CLOSE => Frame::Close(Close::Application(ApplicationClose {
 				error_code: self.bytes.get()?,
-				reason: self.take_len()?,
+				reason: String::from_utf8_lossy(&self.take_len()?).into_owned(),
 			})),
 			FrameType::MAX_DATA => Frame::MaxData(self.bytes.get()?),
 			FrameType::MAX_STREAM_DATA => Frame::MaxStreamData {
@@ -988,7 +988,7 @@ mod test {
 	#[test]
 	fn application_close_coding() {
 		for &error_code in APPLICATION_ERROR_CODES {
-			for reason in [Bytes::new(), Bytes::from_static(b"application closed")] {
+			for reason in [String::new(), "application closed".to_string()] {
 				let original = ApplicationClose {
 					error_code: VarInt::from_u64(error_code).unwrap(),
 					reason,
@@ -1004,6 +1004,25 @@ mod test {
 					x => panic!("incorrect frame {x:?}"),
 				}
 			}
+		}
+	}
+
+	/// Truncation never splits a character, so the peer decodes the prefix without replacement
+	#[test]
+	fn close_reason_truncation_keeps_whole_characters() {
+		let original = ApplicationClose {
+			error_code: VarInt(0),
+			reason: "é".repeat(64),
+		};
+		// An odd budget lands mid-character.
+		let mut buf = Vec::new();
+		original.encode(&mut buf, ApplicationClose::SIZE_BOUND + 10);
+		match &frames(buf)[0] {
+			Frame::Close(Close::Application(decoded)) => {
+				assert!(!decoded.reason.is_empty());
+				assert!(original.reason.starts_with(&decoded.reason));
+			}
+			x => panic!("incorrect frame {x:?}"),
 		}
 	}
 
@@ -1023,7 +1042,7 @@ mod test {
 			] {
 				let original = ApplicationClose {
 					error_code: VarInt::from_u64(error_code).unwrap(),
-					reason: (0..reason_len).map(|i| (i % 251) as u8).collect(),
+					reason: (0..reason_len).map(|i| char::from(b'a' + (i % 26) as u8)).collect(),
 				};
 				let mut buf = Vec::new();
 				original.encode(&mut buf, max_len);
@@ -1039,7 +1058,7 @@ mod test {
 						assert_eq!(decoded.error_code, original.error_code);
 						assert!(!decoded.reason.is_empty());
 						assert!(decoded.reason.len() < original.reason.len());
-						assert_eq!(decoded.reason, original.reason.slice(..decoded.reason.len()));
+						assert_eq!(decoded.reason, original.reason[..decoded.reason.len()]);
 					}
 					x => panic!("incorrect frame {x:?}"),
 				}

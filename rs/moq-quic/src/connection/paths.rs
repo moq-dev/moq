@@ -6,7 +6,7 @@ use super::{
 	mtud::MtuDiscovery,
 	spaces::{PacketSpace, SentPacket},
 };
-use crate::{Duration, Instant, TIMER_GRANULARITY, TransportConfig, congestion, packet::SpaceId};
+use crate::{Duration, Instant, TIMER_GRANULARITY, congestion, packet::SpaceId, transport};
 
 #[cfg(feature = "qlog")]
 use qlog::events::{ExData, quic::RecoveryMetricsUpdated};
@@ -53,8 +53,8 @@ pub(super) struct PathData {
 }
 
 /// Builds the configured congestion controller for a path starting now.
-fn build_congestion(now: Instant, config: &TransportConfig) -> Box<dyn congestion::Controller> {
-	config.congestion_controller_factory.clone().build(congestion::Init {
+fn build_congestion(now: Instant, config: &transport::Config) -> Box<dyn congestion::Controller> {
+	config.congestion.clone().build(congestion::Init {
 		now,
 		mtu: config.get_initial_mtu(),
 		rtt: config.initial_rtt,
@@ -69,7 +69,7 @@ impl PathData {
 		peer_max_udp_payload_size: Option<u16>,
 		generation: u64,
 		now: Instant,
-		config: &TransportConfig,
+		config: &transport::Config,
 	) -> Self {
 		Self {
 			remote,
@@ -81,7 +81,7 @@ impl PathData {
 			validated: false,
 			total_sent: 0,
 			total_recvd: 0,
-			mtud: config.mtu_discovery_config.as_ref().filter(|_| allow_mtud).map_or_else(
+			mtud: config.mtu.as_ref().filter(|_| allow_mtud).map_or_else(
 				|| MtuDiscovery::disabled(config.get_initial_mtu(), config.min_mtu),
 				|mtud_config| {
 					MtuDiscovery::new(
@@ -126,7 +126,7 @@ impl PathData {
 	///
 	/// This is useful when it is known the underlying path has changed.
 	#[cfg(test)]
-	pub(super) fn reset(&mut self, now: Instant, config: &TransportConfig) {
+	pub(super) fn reset(&mut self, now: Instant, config: &transport::Config) {
 		self.rtt = RttEstimator::new(config.initial_rtt);
 		self.congestion = build_congestion(now, config);
 		self.mtud.reset(config.get_initial_mtu(), config.min_mtu);
