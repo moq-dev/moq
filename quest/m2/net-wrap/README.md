@@ -11,7 +11,7 @@ and the CLI can be handed an encrypted broadcast or track and publish or
 consume it unchanged. Rust and JS use the same names.
 
 Compression is not a wrapper: it moves into moq-net as a track flag
-([Compressed tracks](/quest/m1/compress/README.md)), which deletes
+([Compressed tracks](/doc/concept/compression.md)), which deletes
 moq-flate, so moq-flate is out of scope.
 
 Non-goals:
@@ -77,4 +77,3 @@ above.
 ## Related
 
 - [E2EE](/quest/m2/e2ee/README.md) - the first wrapper, which publishes and consumes through these traits
-- [Compressed tracks](/quest/m1/compress/README.md) - compression moves into moq-net as a track flag, so it is not a wrapper

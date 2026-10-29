@@ -161,9 +161,49 @@ fn announce_info(announced: u32) -> moq_announce_event {
 		captures_len: 0,
 		has_captures: false,
 		kind: moq_announce_kind::MOQ_ANNOUNCE_KIND_START,
+		route: moq_route {
+			hops: std::ptr::null(),
+			hops_len: 0,
+			cost: 0,
+			epoch: moq_string {
+				data: std::ptr::null(),
+				len: 0,
+			},
+		},
 	};
 	assert_eq!(unsafe { moq_origin_announced_info(announced, &mut info) }, 0);
 	info
+}
+
+/// Mint an epoch through the C ABI.
+fn mint_epoch() -> String {
+	let mut buf = [0u8; MOQ_EPOCH_LEN];
+	assert_eq!(
+		unsafe { moq_mint_epoch(buf.as_mut_ptr().cast(), buf.len()) },
+		MOQ_EPOCH_LEN as i32
+	);
+	String::from_utf8(buf.to_vec()).unwrap()
+}
+
+/// An announce route at `cost` under `epoch`, borrowing it.
+fn announce_route(cost: u64, epoch: &str) -> moq_announce_route {
+	moq_announce_route {
+		cost,
+		epoch: epoch.as_ptr().cast(),
+		epoch_len: epoch.len(),
+	}
+}
+
+/// The epoch a received route carries, or None when unknown.
+fn route_epoch(route: &moq_route) -> Option<String> {
+	(route.epoch.len > 0).then(|| unsafe {
+		std::str::from_utf8(std::slice::from_raw_parts(
+			route.epoch.data.cast::<u8>(),
+			route.epoch.len,
+		))
+		.unwrap()
+		.to_string()
+	})
 }
 
 impl Drop for Callback {
@@ -2822,17 +2862,100 @@ fn create_broadcast_is_unroutable_until_announced() {
 }
 
 #[test]
-fn announce_accepts_an_anonymous_hop() {
+fn mint_epoch_writes_ordered_uuidv7_text() {
+	let epoch = mint_epoch();
+	let parsed: moq_net::Epoch = epoch.parse().expect("a minted epoch parses");
+	assert_eq!(parsed.as_str(), epoch);
+	assert!(mint_epoch() > epoch, "a later mint orders newer");
+
+	let mut short = [0u8; MOQ_EPOCH_LEN - 1];
+	assert!(unsafe { moq_mint_epoch(short.as_mut_ptr().cast(), short.len()) } < 0);
+	assert!(unsafe { moq_mint_epoch(std::ptr::null_mut(), MOQ_EPOCH_LEN) } < 0);
+}
+
+/// A locally announced route carries its cost and epoch, and no hops: the hop chain is
+/// the origin's to build.
+#[test]
+fn announce_route_carries_cost_and_epoch_without_hops() {
 	let origin = id(moq_origin_create());
-	let path = b"anon";
-	let (publication, broadcast) = create_broadcast(origin, path);
-	let hops = [0u64];
-	let route = moq_route {
-		hops: hops.as_ptr(),
-		hops_len: hops.len(),
-		cost: 1,
-	};
+	let cb = Callback::new();
+	let announced_task = id(unsafe { moq_origin_announced(origin, std::ptr::null(), Some(channel_callback), cb.ptr) });
+	let (publication, broadcast) = create_broadcast(origin, b"routed");
+
+	let epoch = mint_epoch();
+	let route = announce_route(7, &epoch);
 	assert_eq!(unsafe { moq_publication_announce(publication, &route) }, 0);
+
+	let (announced, info) = cb.recv_route();
+	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_START);
+	assert_eq!(info.route.hops_len, 0, "a local route claims no hops");
+	assert_eq!(info.route.cost, 7);
+	assert_eq!(route_epoch(&info.route), Some(epoch));
+	assert_eq!(moq_origin_announced_free(announced), 0);
+
+	// A zeroed route is the default: cost 0 and no epoch.
+	let zeroed = moq_announce_route {
+		cost: 0,
+		epoch: std::ptr::null(),
+		epoch_len: 0,
+	};
+	let (publication2, broadcast2) = create_broadcast(origin, b"plain");
+	assert_eq!(unsafe { moq_publication_announce(publication2, &zeroed) }, 0);
+	let (announced, info) = cb.recv_route();
+	assert_eq!(info.route.cost, 0);
+	assert_eq!(route_epoch(&info.route), None);
+	assert_eq!(moq_origin_announced_free(announced), 0);
+
+	// Anything but canonical UUIDv7 text is refused.
+	let upper = mint_epoch().to_uppercase();
+	for bad in ["6ba7b810-9dad-41d1-80b4-00c04fd430c8", upper.as_str(), "not-an-epoch"] {
+		let route = announce_route(0, bad);
+		assert!(
+			unsafe { moq_publication_announce(publication, &route) } < 0,
+			"{bad:?} is not an epoch"
+		);
+	}
+
+	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
+	assert_eq!(cb.recv_announce_terminal(), 0);
+	assert_eq!(moq_publication_free(publication), 0);
+	assert_eq!(moq_publication_free(publication2), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast2), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// Announcing under a fresh epoch is a new publisher instance: subscribers see a restart
+/// rather than a stalled broadcast.
+#[test]
+fn announce_under_a_new_epoch_restarts() {
+	let origin = id(moq_origin_create());
+	let cb = Callback::new();
+	let announced_task = id(unsafe { moq_origin_announced(origin, std::ptr::null(), Some(channel_callback), cb.ptr) });
+	let (publication, broadcast) = create_broadcast(origin, b"restarted");
+
+	let first = mint_epoch();
+	assert_eq!(
+		unsafe { moq_publication_announce(publication, &announce_route(0, &first)) },
+		0
+	);
+	let (announced, info) = cb.recv_route();
+	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_START);
+	assert_eq!(route_epoch(&info.route), Some(first));
+	assert_eq!(moq_origin_announced_free(announced), 0);
+
+	let second = mint_epoch();
+	assert_eq!(
+		unsafe { moq_publication_announce(publication, &announce_route(0, &second)) },
+		0
+	);
+	let (announced, info) = cb.recv_route();
+	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_RESTART);
+	assert_eq!(route_epoch(&info.route), Some(second));
+	assert_eq!(moq_origin_announced_free(announced), 0);
+
+	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
+	assert_eq!(cb.recv_announce_terminal(), 0);
 	assert_eq!(moq_publication_free(publication), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
@@ -3901,7 +4024,7 @@ fn consume_announced_close_cancels() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// Publish `path` on `origin` through `route`, which the C ABI cannot set.
+/// Publish `path` on `origin` through `route` from Rust, keeping the Rust publication.
 fn publish(origin: u32, path: &str, route: moq_net::origin::Route) -> moq_net::origin::Publication {
 	let _runtime = crate::ffi::RUNTIME.enter();
 	let origin = crate::Id::try_from(origin).unwrap();

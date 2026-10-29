@@ -1,8 +1,6 @@
 use std::time::Duration;
 
-use anyhow::Context;
 use hang::catalog::{AudioCodecKind, VideoCodecKind};
-use hang::moq_net;
 use moq_mux::catalog::{self, CatalogFormat, Stream};
 use moq_mux::select;
 use tokio::io::AsyncWriteExt;
@@ -268,26 +266,15 @@ fn log_release(release: &moq_mux::container::ts::stats::Release, message: &'stat
 }
 
 impl Subscribe {
-	/// Resolve the broadcast at `path` on `origin` to export it with the resolved settings;
-	/// [`run`](Self::run) drives it.
-	pub async fn new(
-		origin: moq_net::origin::Consumer,
-		path: &str,
-		catalog: CatalogFormat,
-		args: SubscribeArgs,
-	) -> anyhow::Result<Self> {
-		let path = moq_net::Path::new(path)?;
-		let broadcast = origin
-			.request(&path, None)
-			.await
-			.with_context(|| format!("failed to resolve broadcast `{path}`"))?;
-		let source = moq_mux::Source::new(origin, broadcast);
-		Ok(Self {
+	/// Export the resolved broadcast `source` with the resolved settings; [`run`](Self::run)
+	/// drives it.
+	pub fn new(source: moq_mux::Source, catalog: CatalogFormat, args: SubscribeArgs) -> Self {
+		Self {
 			source,
 			catalog,
 			args,
 			sections: None,
-		})
+		}
 	}
 
 	/// The resolved broadcast, whose [`stats`](moq_mux::Source::stats) count what the export reads.
