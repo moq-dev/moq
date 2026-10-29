@@ -1,17 +1,16 @@
 [page] negotiated protocol: moqt-16
 [page] subscribe_namespace written: requestId=0
-[page] announced: broadcast=smoke-rust-4842-2032.hang active=true
-[page] subscribe start: id=2 broadcast=smoke-rust-4842-2032.hang track=catalog.json
-[page] subscribe written: id=2 broadcast=smoke-rust-4842-2032.hang track=catalog.json
-[page] subscribe ok: id=2 broadcast=smoke-rust-4842-2032.hang track=catalog.json
-[page] received catalog hang smoke-rust-4842-2032.hang {video: Object, audio: Object, archive: Object, clock: Object}
-[page] subscribe start: id=4 broadcast=smoke-rust-4842-2032.hang track=0.avc3
-[page] subscribe written: id=4 broadcast=smoke-rust-4842-2032.hang track=0.avc3
-[page] subscribe ok: id=4 broadcast=smoke-rust-4842-2032.hang track=0.avc3
+[page] announced: broadcast=smoke-rust-4723-18495.hang active=true
+[page] subscribe start: id=2 broadcast=smoke-rust-4723-18495.hang track=catalog.json
+[page] subscribe written: id=2 broadcast=smoke-rust-4723-18495.hang track=catalog.json
+[page] subscribe ok: id=2 broadcast=smoke-rust-4723-18495.hang track=catalog.json
+[page] received catalog hang smoke-rust-4723-18495.hang {video: Object, audio: Object, archive: Object, clock: Object}
+[page] subscribe start: id=4 broadcast=smoke-rust-4723-18495.hang track=0.avc3
+[page] subscribe written: id=4 broadcast=smoke-rust-4723-18495.hang track=0.avc3
+[page] subscribe ok: id=4 broadcast=smoke-rust-4723-18495.hang track=0.avc3
 [page] dropping a group with no head: alias=3 group=2
 [page] adapter: closing stream requestId=4
-[page] subscribe error: id=4 broadcast=smoke-rust-4842-2032.hang track=0.avc3 error=publish done: status=0x0 reason=Write after stream complete or reset
+[page] subscribe error: id=4 broadcast=smoke-rust-4723-18495.hang track=0.avc3 error=publish done: status=0x0 reason=Write after stream complete or reset
 [page] spawn error Error: publish done: status=0x0 reason=Write after stream complete or reset
-    at #x (http://localhost:37537/assets/index-D-ZqNDdQ.js:1:220603)
-[page] received catalog hang smoke-rust-4842-2032.hang {video: Object, audio: Object, archive: Object, clock: Object}
-decoded 0 frames from smoke-rust-4842-2032.hang (vite)
+    at #x (http://localhost:44305/assets/index-B3sTODoC.js:1:220598)
+decoded 0 frames from smoke-rust-4723-18495.hang (vite)

@@ -1,4 +1,4 @@
-publishing smoke-js-web-4842-13595.hang (fake camera, vite) to https://us-west-2.relay.quicr.org:33437/relay
+publishing smoke-js-web-4723-4011.hang (fake camera, vite) to https://us-west-2.relay.quicr.org:33437/relay
 [page] Failed to establish a connection to https://us-west-2.relay.quicr.org:33437/relay: net::ERR_METHOD_NOT_SUPPORTED.
 [page] connection error: AggregateError: All promises were rejected
 [page] Failed to establish a connection to https://us-west-2.relay.quicr.org:33437/relay: net::ERR_METHOD_NOT_SUPPORTED.

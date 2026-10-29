@@ -2,22 +2,22 @@ https://moqt.nokiaresearch.com:4443/moq connected via WebTransport
 https://moqt.nokiaresearch.com:4443/moq negotiated ALPN: moqt-22
 connected version=moq-transport-22
 subscribe_namespace written: requestId=0
+announced: broadcast=smoke-rust-4723-22510.hang active=true
+subscribe start: id=2 broadcast=smoke-rust-4723-22510.hang track=catalog.json
+announced: broadcast=simulcast active=true
 announced: broadcast=demo active=true
 announced: broadcast=video active=true
-announced: broadcast=simulcast active=true
-announced: broadcast=smoke-rust-4842-8366.hang active=true
-subscribe start: id=2 broadcast=smoke-rust-4842-8366.hang track=catalog.json
-subscribe written: id=2 broadcast=smoke-rust-4842-8366.hang track=catalog.json
-subscribe ok: id=2 broadcast=smoke-rust-4842-8366.hang track=catalog.json
-subscribe start: id=4 broadcast=smoke-rust-4842-8366.hang track=0.avc3
-subscribe written: id=4 broadcast=smoke-rust-4842-8366.hang track=0.avc3
-subscribe ok: id=4 broadcast=smoke-rust-4842-8366.hang track=0.avc3
-received 7230 bytes from smoke-rust-4842-8366.hang
+subscribe written: id=2 broadcast=smoke-rust-4723-22510.hang track=catalog.json
+subscribe ok: id=2 broadcast=smoke-rust-4723-22510.hang track=catalog.json
+subscribe start: id=4 broadcast=smoke-rust-4723-22510.hang track=0.avc3
+subscribe written: id=4 broadcast=smoke-rust-4723-22510.hang track=0.avc3
+subscribe ok: id=4 broadcast=smoke-rust-4723-22510.hang track=0.avc3
+received 7230 bytes from smoke-rust-4723-22510.hang
 subscribe_namespace error: connection error: closed (source=session)
+announced: broadcast=smoke-rust-4723-22510.hang active=false
+announced: broadcast=simulcast active=false
 announced: broadcast=demo active=false
 announced: broadcast=video active=false
-announced: broadcast=simulcast active=false
-announced: broadcast=smoke-rust-4842-8366.hang active=false
 broadcast discovery failed; broadcasts resolve on request only. WebTransportError {
   source: "session",
   streamErrorCode: null,
@@ -51,5 +51,5 @@ broadcast discovery failed; broadcasts resolve on request only. WebTransportErro
   DATA_CLONE_ERR: 25,
   toString: [Function: toString],
 }
-subscribe error: id=4 broadcast=smoke-rust-4842-8366.hang track=0.avc3 error=remote error: 0 (connection error: closed)
-subscribe error: id=2 broadcast=smoke-rust-4842-8366.hang track=catalog.json error=remote error: 0 (connection error: closed)
+subscribe error: id=4 broadcast=smoke-rust-4723-22510.hang track=0.avc3 error=remote error: 0 (connection error: closed)
+subscribe error: id=2 broadcast=smoke-rust-4723-22510.hang track=catalog.json error=remote error: 0 (connection error: closed)

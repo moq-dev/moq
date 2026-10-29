@@ -3,14 +3,14 @@ https://34-72-6-160.sslip.io/moq-test negotiated ALPN: moq-lite-06
 announced: prefix=
 connected version=moq-lite-06
 announce: prefix=
-announced: broadcast=smoke-js-web-4842-18446.hang active=true
-subscribe start: id=0 broadcast=smoke-js-web-4842-18446.hang track=catalog.json
-subscribe ok: id=0 broadcast=smoke-js-web-4842-18446.hang track=catalog.json
-subscribe start: id=1 broadcast=smoke-js-web-4842-18446.hang track=video
-subscribe ok: id=1 broadcast=smoke-js-web-4842-18446.hang track=video
-received 5742 bytes from smoke-js-web-4842-18446.hang
-subscribe close: id=0 broadcast=smoke-js-web-4842-18446.hang track=catalog.json
-subscribe close: id=1 broadcast=smoke-js-web-4842-18446.hang track=video
+announced: broadcast=smoke-js-web-4723-20760.hang active=true
+subscribe start: id=0 broadcast=smoke-js-web-4723-20760.hang track=catalog.json
+subscribe ok: id=0 broadcast=smoke-js-web-4723-20760.hang track=catalog.json
+subscribe start: id=1 broadcast=smoke-js-web-4723-20760.hang track=video
+subscribe ok: id=1 broadcast=smoke-js-web-4723-20760.hang track=video
+received 7366 bytes from smoke-js-web-4723-20760.hang
+subscribe close: id=0 broadcast=smoke-js-web-4723-20760.hang track=catalog.json
+subscribe close: id=1 broadcast=smoke-js-web-4723-20760.hang track=video
 broadcast discovery failed; broadcasts resolve on request only. WebTransportError {
   source: "session",
   streamErrorCode: null,

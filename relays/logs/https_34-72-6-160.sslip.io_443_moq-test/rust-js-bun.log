@@ -1,13 +1,1 @@
-https://34-72-6-160.sslip.io/moq-test connected via WebTransport
-https://34-72-6-160.sslip.io/moq-test negotiated ALPN: moq-lite-06
-announced: prefix=
-connected version=moq-lite-06
-announce: prefix=
-announced: broadcast=smoke-rust-4842-2056.hang active=true
-subscribe start: id=0 broadcast=smoke-rust-4842-2056.hang track=catalog.json
-subscribe ok: id=0 broadcast=smoke-rust-4842-2056.hang track=catalog.json
-subscribe start: id=1 broadcast=smoke-rust-4842-2056.hang track=0.avc3
-subscribe ok: id=1 broadcast=smoke-rust-4842-2056.hang track=0.avc3
-received 7230 bytes from smoke-rust-4842-2056.hang
-subscribe close: id=0 broadcast=smoke-rust-4842-2056.hang track=catalog.json
-subscribe close: id=1 broadcast=smoke-rust-4842-2056.hang track=0.avc3
+error: timed out waiting for data

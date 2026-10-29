@@ -4,18 +4,18 @@ connected version=moq-transport-22
 subscribe_namespace written: requestId=0
 announced: broadcast=openmoq/mtt/aiomoqt/bbb_4k30/moq_test_tracks_00/msf/cmaf/catalog/h264/1080/30/6000/2000/0/aac/2/128/1/0/clip/0 active=true
 announced: broadcast=openmoq/mtt/aiomoqt/artemis_directors/moq_test_tracks_00/msf/loc/catalog/h264/1080/30/6000/2000/0/aac/2/128/1/0/clip/0 active=true
-announced: broadcast=smoke-rust-4842-29612.hang active=true
-subscribe start: id=2 broadcast=smoke-rust-4842-29612.hang track=catalog.json
-subscribe written: id=2 broadcast=smoke-rust-4842-29612.hang track=catalog.json
-subscribe ok: id=2 broadcast=smoke-rust-4842-29612.hang track=catalog.json
-subscribe start: id=4 broadcast=smoke-rust-4842-29612.hang track=0.avc3
-subscribe written: id=4 broadcast=smoke-rust-4842-29612.hang track=0.avc3
-subscribe ok: id=4 broadcast=smoke-rust-4842-29612.hang track=0.avc3
-received 6721 bytes from smoke-rust-4842-29612.hang
+announced: broadcast=smoke-rust-4723-21620.hang active=true
+subscribe start: id=2 broadcast=smoke-rust-4723-21620.hang track=catalog.json
+subscribe written: id=2 broadcast=smoke-rust-4723-21620.hang track=catalog.json
+subscribe ok: id=2 broadcast=smoke-rust-4723-21620.hang track=catalog.json
+subscribe start: id=4 broadcast=smoke-rust-4723-21620.hang track=0.avc3
+subscribe written: id=4 broadcast=smoke-rust-4723-21620.hang track=0.avc3
+subscribe ok: id=4 broadcast=smoke-rust-4723-21620.hang track=0.avc3
+received 6721 bytes from smoke-rust-4723-21620.hang
 subscribe_namespace error: connection error: closed (source=session)
 announced: broadcast=openmoq/mtt/aiomoqt/bbb_4k30/moq_test_tracks_00/msf/cmaf/catalog/h264/1080/30/6000/2000/0/aac/2/128/1/0/clip/0 active=false
 announced: broadcast=openmoq/mtt/aiomoqt/artemis_directors/moq_test_tracks_00/msf/loc/catalog/h264/1080/30/6000/2000/0/aac/2/128/1/0/clip/0 active=false
-announced: broadcast=smoke-rust-4842-29612.hang active=false
+announced: broadcast=smoke-rust-4723-21620.hang active=false
 broadcast discovery failed; broadcasts resolve on request only. WebTransportError {
   source: "session",
   streamErrorCode: null,
@@ -49,5 +49,5 @@ broadcast discovery failed; broadcasts resolve on request only. WebTransportErro
   DATA_CLONE_ERR: 25,
   toString: [Function: toString],
 }
-subscribe error: id=2 broadcast=smoke-rust-4842-29612.hang track=catalog.json error=remote error: 0 (connection error: closed)
-subscribe error: id=4 broadcast=smoke-rust-4842-29612.hang track=0.avc3 error=remote error: 0 (connection error: closed)
+subscribe error: id=2 broadcast=smoke-rust-4723-21620.hang track=catalog.json error=remote error: 0 (connection error: closed)
+subscribe error: id=4 broadcast=smoke-rust-4723-21620.hang track=0.avc3 error=remote error: 0 (connection error: closed)

@@ -1,6 +1,6 @@
 {
-  "generated": "2026-10-29T01:52:52Z",
-  "run_url": "https://github.com/moq-dev/moq/actions/runs/40802116385",
+  "generated": "2026-10-29T15:10:24Z",
+  "run_url": "https://github.com/moq-dev/moq/actions/runs/40897117526",
   "registry": "https://raw.githubusercontent.com/englishm/moq-interop-runner/main/implementations.json",
   "pairs": [
     "rust → rust",
@@ -99,32 +99,32 @@
       "url": "https://lminiero.it:9000",
       "transport": "WebTransport",
       "required": false,
-      "ok": true,
+      "ok": false,
       "versions": [
         "moq-transport-22"
       ],
       "cells": {
         "rust → rust": {
-          "status": "PASS",
+          "status": "FAIL",
           "pub_version": "moq-transport-22",
           "sub_version": "moq-transport-22",
-          "reason": "",
+          "reason": "connected, nothing subscribed: session terminated err=transport: connection error: closed",
           "sub_log": "https_lminiero.it_9000/rust-rust.log",
           "pub_log": "https_lminiero.it_9000/pub-rust.log"
         },
         "rust → js-web": {
-          "status": "PASS",
+          "status": "FAIL",
           "pub_version": "moq-transport-22",
           "sub_version": "moq-transport-22",
-          "reason": "",
+          "reason": "connected, nothing subscribed",
           "sub_log": "https_lminiero.it_9000/rust-js-web.log",
           "pub_log": "https_lminiero.it_9000/pub-rust.log"
         },
         "rust → js-bun": {
-          "status": "PASS",
+          "status": "FAIL",
           "pub_version": "moq-transport-22",
           "sub_version": "moq-transport-22",
-          "reason": "",
+          "reason": "connected, nothing subscribed: error: timed out waiting for data",
           "sub_log": "https_lminiero.it_9000/rust-js-bun.log",
           "pub_log": "https_lminiero.it_9000/pub-rust.log"
         },
@@ -160,16 +160,16 @@
       "url": "moqt://lminiero.it:9000",
       "transport": "QUIC",
       "required": false,
-      "ok": true,
+      "ok": false,
       "versions": [
         "moq-transport-22"
       ],
       "cells": {
         "rust → rust": {
-          "status": "PASS",
+          "status": "FAIL",
           "pub_version": "moq-transport-22",
           "sub_version": "moq-transport-22",
-          "reason": "",
+          "reason": "connected, nothing subscribed: session terminated err=transport: connection error: closed",
           "sub_log": "moqt_lminiero.it_9000/rust-rust.log",
           "pub_log": "moqt_lminiero.it_9000/pub-rust.log"
         }
@@ -914,7 +914,7 @@
           "status": "FAIL",
           "pub_version": "moq-transport-14",
           "sub_version": "moq-transport-16",
-          "reason": "SUBSCRIBE_OK for 0.avc3, only headless groups: subscribe error: id=4 broadcast=smoke-rust-4842-2032.hang track=0.avc3 error=publish done: status=0x0 reason=Write after stream complete or reset",
+          "reason": "SUBSCRIBE_OK for 0.avc3, only headless groups: subscribe error: id=4 broadcast=smoke-rust-4723-18495.hang track=0.avc3 error=publish done: status=0x0 reason=Write after stream complete or reset",
           "sub_log": "https_fb.mvfst.net_9448_moq-relay/rust-js-web.log",
           "pub_log": "https_fb.mvfst.net_9448_moq-relay/pub-rust.log"
         },
@@ -922,7 +922,7 @@
           "status": "FAIL",
           "pub_version": "moq-transport-14",
           "sub_version": "moq-transport-16",
-          "reason": "SUBSCRIBE_OK for 0.avc3, only headless groups: subscribe error: id=4 broadcast=smoke-rust-4842-2032.hang track=0.avc3 error=publish done: status=0x0 reason=Write after stream complete or reset",
+          "reason": "SUBSCRIBE_OK for 0.avc3, only headless groups: subscribe error: id=4 broadcast=smoke-rust-4723-18495.hang track=0.avc3 error=publish done: status=0x0 reason=Write after stream complete or reset",
           "sub_log": "https_fb.mvfst.net_9448_moq-relay/rust-js-bun.log",
           "pub_log": "https_fb.mvfst.net_9448_moq-relay/pub-rust.log"
         },
@@ -994,7 +994,7 @@
           "status": "FAIL",
           "pub_version": "",
           "sub_version": "",
-          "reason": "not connected: Failed to establish a connection to https://quichemoq.dev/: net::ERR_QUIC_PROTOCOL_ERROR.QUIC_NETWORK_IDLE_TIMEOUT (No recent network activity after 4001951us. Timeout:4s num_undecryptable_packets: 0 {}).",
+          "reason": "not connected: Failed to establish a connection to https://quichemoq.dev/: net::ERR_QUIC_PROTOCOL_ERROR.QUIC_NETWORK_IDLE_TIMEOUT (No recent network activity after 4002645us. Timeout:4s num_undecryptable_packets: 0 {}).",
           "sub_log": "https_quichemoq.dev_443/rust-js-web.log",
           "pub_log": "https_quichemoq.dev_443/pub-rust.log"
         },
@@ -1018,7 +1018,7 @@
           "status": "FAIL",
           "pub_version": "",
           "sub_version": "",
-          "reason": "not connected: Failed to establish a connection to https://quichemoq.dev/: net::ERR_QUIC_PROTOCOL_ERROR.QUIC_NETWORK_IDLE_TIMEOUT (No recent network activity after 4002124us. Timeout:4s num_undecryptable_packets: 0 {}).",
+          "reason": "not connected: Failed to establish a connection to https://quichemoq.dev/: net::ERR_QUIC_PROTOCOL_ERROR.QUIC_NETWORK_IDLE_TIMEOUT (No recent network activity after 4001976us. Timeout:4s num_undecryptable_packets: 0 {}).",
           "sub_log": "https_quichemoq.dev_443/js-web-js-web.log",
           "pub_log": "https_quichemoq.dev_443/pub-js-web.log"
         },
@@ -1092,7 +1092,7 @@
           "status": "FAIL",
           "pub_version": "moq-transport-22",
           "sub_version": "moq-transport-22",
-          "reason": "connected, nothing subscribed",
+          "reason": "connected, nothing subscribed: session terminated err=transport: connection error: closed",
           "sub_log": "https_moq-relay.red5.net_4433_moq/js-web-rust.log",
           "pub_log": "https_moq-relay.red5.net_4433_moq/pub-js-web.log"
         },
@@ -1120,32 +1120,32 @@
       "url": "https://34-72-6-160.sslip.io:443/moq-test",
       "transport": "WebTransport",
       "required": false,
-      "ok": true,
+      "ok": false,
       "versions": [
         "moq-lite-06"
       ],
       "cells": {
         "rust → rust": {
-          "status": "PASS",
-          "pub_version": "moq-lite-06",
-          "sub_version": "moq-lite-06",
-          "reason": "",
+          "status": "FAIL",
+          "pub_version": "",
+          "sub_version": "",
+          "reason": "not connected: connection loop exited err=reconnect timed out after 10s: timed out connecting to https://34-72-6-160.sslip.io",
           "sub_log": "https_34-72-6-160.sslip.io_443_moq-test/rust-rust.log",
           "pub_log": "https_34-72-6-160.sslip.io_443_moq-test/pub-rust.log"
         },
         "rust → js-web": {
-          "status": "PASS",
-          "pub_version": "moq-lite-06",
+          "status": "FAIL",
+          "pub_version": "",
           "sub_version": "moq-lite-06",
-          "reason": "",
+          "reason": "connected, nothing subscribed",
           "sub_log": "https_34-72-6-160.sslip.io_443_moq-test/rust-js-web.log",
           "pub_log": "https_34-72-6-160.sslip.io_443_moq-test/pub-rust.log"
         },
         "rust → js-bun": {
-          "status": "PASS",
-          "pub_version": "moq-lite-06",
-          "sub_version": "moq-lite-06",
-          "reason": "",
+          "status": "FAIL",
+          "pub_version": "",
+          "sub_version": "",
+          "reason": "not connected: error: timed out waiting for data",
           "sub_log": "https_34-72-6-160.sslip.io_443_moq-test/rust-js-bun.log",
           "pub_log": "https_34-72-6-160.sslip.io_443_moq-test/pub-rust.log"
         },

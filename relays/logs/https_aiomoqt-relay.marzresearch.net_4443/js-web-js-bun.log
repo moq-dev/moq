@@ -4,18 +4,18 @@ connected version=moq-transport-22
 subscribe_namespace written: requestId=0
 announced: broadcast=openmoq/mtt/aiomoqt/bbb_4k30/moq_test_tracks_00/msf/cmaf/catalog/h264/1080/30/6000/2000/0/aac/2/128/1/0/clip/0 active=true
 announced: broadcast=openmoq/mtt/aiomoqt/artemis_directors/moq_test_tracks_00/msf/loc/catalog/h264/1080/30/6000/2000/0/aac/2/128/1/0/clip/0 active=true
-announced: broadcast=smoke-js-web-4842-28795.hang active=true
-subscribe start: id=2 broadcast=smoke-js-web-4842-28795.hang track=catalog.json
-subscribe written: id=2 broadcast=smoke-js-web-4842-28795.hang track=catalog.json
-subscribe ok: id=2 broadcast=smoke-js-web-4842-28795.hang track=catalog.json
-subscribe start: id=4 broadcast=smoke-js-web-4842-28795.hang track=video
-subscribe written: id=4 broadcast=smoke-js-web-4842-28795.hang track=video
-subscribe ok: id=4 broadcast=smoke-js-web-4842-28795.hang track=video
-received 6916 bytes from smoke-js-web-4842-28795.hang
+announced: broadcast=smoke-js-web-4723-30903.hang active=true
+subscribe start: id=2 broadcast=smoke-js-web-4723-30903.hang track=catalog.json
+subscribe written: id=2 broadcast=smoke-js-web-4723-30903.hang track=catalog.json
+subscribe ok: id=2 broadcast=smoke-js-web-4723-30903.hang track=catalog.json
+subscribe start: id=4 broadcast=smoke-js-web-4723-30903.hang track=video
+subscribe written: id=4 broadcast=smoke-js-web-4723-30903.hang track=video
+subscribe ok: id=4 broadcast=smoke-js-web-4723-30903.hang track=video
+received 7043 bytes from smoke-js-web-4723-30903.hang
 subscribe_namespace error: connection error: closed (source=session)
 announced: broadcast=openmoq/mtt/aiomoqt/bbb_4k30/moq_test_tracks_00/msf/cmaf/catalog/h264/1080/30/6000/2000/0/aac/2/128/1/0/clip/0 active=false
 announced: broadcast=openmoq/mtt/aiomoqt/artemis_directors/moq_test_tracks_00/msf/loc/catalog/h264/1080/30/6000/2000/0/aac/2/128/1/0/clip/0 active=false
-announced: broadcast=smoke-js-web-4842-28795.hang active=false
+announced: broadcast=smoke-js-web-4723-30903.hang active=false
 broadcast discovery failed; broadcasts resolve on request only. WebTransportError {
   source: "session",
   streamErrorCode: null,
@@ -49,5 +49,5 @@ broadcast discovery failed; broadcasts resolve on request only. WebTransportErro
   DATA_CLONE_ERR: 25,
   toString: [Function: toString],
 }
-subscribe error: id=2 broadcast=smoke-js-web-4842-28795.hang track=catalog.json error=remote error: 0 (connection error: closed)
-subscribe error: id=4 broadcast=smoke-js-web-4842-28795.hang track=video error=remote error: 0 (connection error: closed)
+subscribe error: id=2 broadcast=smoke-js-web-4723-30903.hang track=catalog.json error=remote error: 0 (connection error: closed)
+subscribe error: id=4 broadcast=smoke-js-web-4723-30903.hang track=video error=remote error: 0 (connection error: closed)
