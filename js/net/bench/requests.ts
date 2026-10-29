@@ -34,7 +34,7 @@ for (const touched of ["watched", "unrelated"])
 				broadcastPublication.announce();
 				return broadcast;
 			});
-			const requests = Array.from({ length: followers }, () => origin.request(path, { announced: true }));
+			const requests = Array.from({ length: followers }, () => origin.follow(path));
 			await settle();
 			let current = broadcasts[0];
 			let unrelated: (typeof broadcasts)[number] | undefined;

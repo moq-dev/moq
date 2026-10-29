@@ -36,17 +36,9 @@ pub enum Error {
 	#[error("json: {0}")]
 	Json(#[from] moq_json::Error),
 
-	/// Error publishing or consuming opaque payloads over a track.
-	#[error("flate: {0}")]
-	Flate(#[from] moq_flate::Error),
-
 	/// A catalog entry declares a track mode this build does not implement.
 	#[error("unsupported track mode: {0}")]
 	UnsupportedMode(String),
-
-	/// A catalog entry declares a compression this build does not implement.
-	#[error("unsupported track compression: {0}")]
-	UnsupportedCompression(String),
 
 	/// A locally published track's catalog entry points at another broadcast.
 	#[error("a locally published track can't reference another broadcast")]

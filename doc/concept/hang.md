@@ -19,8 +19,9 @@ payloads follow [moq-e2ee](/draft/moq-e2ee). See [Encryption](#encryption).
 ## Catalog
 
 `catalog.json` is a JSON track listing the renditions of each media kind and
-the decoder config for each. It updates live as tracks come and go, and a
-compressed twin (`catalog.json.z`) is published alongside it.
+the decoder config for each. It updates live as tracks come and go, and is a
+[compressed track](/concept/moq-lite#subscriptions), so a reader sees plain JSON
+whether or not its session carries the compression.
 
 ```json
 {
@@ -113,7 +114,7 @@ as plain tracks, split by whether a generic consumer can parse the payload.
 {
   "json": {
     "tracks": {
-      "chat": { "mode": "stream", "compression": "deflate" },
+      "chat": { "mode": "stream", "schema": "https://example.com/chat.schema.json" },
       "status": { "mode": "snapshot" }
     }
   },
@@ -137,17 +138,16 @@ A sliding window, a bounded log a reader can join in the middle, is a framing
 in [`moq-json`](/lib/rs/moq-json) rather than a catalog mode. Both ends opt
 into it on a raw track.
 
-The rest is descriptive: `compression` (`deflate`, the same group-scoped
-`deflate-raw` the catalog uses), `schema` on a JSON track, `mime` on a binary
-one, `bitrate`, `jitter`, and `delay` with the same meaning as for media, plus
+The rest is descriptive: `schema` on a JSON track, `mime` on a binary one, `bitrate`, `jitter`, and `delay` with the same meaning as for media, plus
 the optional `broadcast` reference and `track` name. A publisher measures `delay`
 only from payloads stamped with their capture time on the broadcast clock. A
-consumer that doesn't recognize a `mode` or `compression` ignores that track and
-round-trips it verbatim.
+consumer that doesn't recognize a `mode` ignores that track and round-trips it
+verbatim. Compression is not a catalog field: a JSON track is a compressed track,
+and moq-net hands every reader plain frames.
 
 The catalog entry lives as long as its producer: dropping it retracts the
-track. [`moq-json`](/lib/rs/moq-json) and [`moq-flate`](/lib/rs/moq-flate) (and
-their TypeScript twins) are what read and write the payloads.
+track. [`moq-json`](/lib/rs/moq-json) (and its TypeScript twin) reads and writes
+JSON payloads; a binary track's payloads are the frames themselves.
 
 An application with its own per-track fields can list a data track in its own
 root section instead, nesting the JSON or binary config in a `config` field

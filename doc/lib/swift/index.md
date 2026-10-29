@@ -17,12 +17,12 @@ slices for iOS 16+, the iOS Simulator, and macOS 12.3+.
 `.named(name:)` or `.requested(request)` target. `Media.CatalogProducer(broadcast:)`
 updates catalog properties and sections without keeping the broadcast open.
 Its writes fail after closing or releasing the broadcast.
-`Flate.SnapshotProducer` / `StreamProducer` publish opaque bytes with an optional `timestampUs`.
+Publish JSON tracks with `TrackInfo(compress: true)`; a `Json` consumer reads one with no option of its own.
 A missing data timestamp stays untimed; the library never substitutes zero or now.
 `Json` consumers yield `Json.Timed` (`value`, `timestampUs`); a snapshot consumer yields each state in order,
 and `latest()` skips to the newest. Read timestamps are rounded down to a whole microsecond.
 Raw tracks with a `nil` timescale are untimed on both publish and receive.
-`MoqTrackInfo.compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. `@moq/net` cannot read a compressed track yet.
+`MoqTrackInfo.compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
 Timed raw/data tracks require caller-supplied timestamps. Use `Media.CatalogProducer.now()` to stamp a locally
 created event on the broadcast clock; reading it fixes that clock for later media producers.

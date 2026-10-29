@@ -21,9 +21,8 @@
  * @module
  */
 
-export type { Compression } from "./compression.ts";
 export { type Diff, deepEqual, diff, merge } from "./diff.ts";
-export { Desync, DuplicateKey, MissingSnapshot } from "./error.ts";
+export { DuplicateKey, MissingSnapshot } from "./error.ts";
 /** Lossy latest-value JSON publishing. */
 export * as Snapshot from "./snapshot/index.ts";
 /** Lossless append-log JSON publishing. */

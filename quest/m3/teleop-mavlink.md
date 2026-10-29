@@ -75,7 +75,7 @@ in one ordered group. Note the scope in
 recoverable after a lag or a reconnect, so these MAVLink services keep relying
 on their own retransmission across a link drop.
 
-The [compression migration](/quest/m1/compress/migrate.md) deletes the
+The [compression migration](/quest/m1/compress/README.md) deleted the
 moq-flate snapshot and stream helpers. Keep these framing rules on plain
 tracks, setting `compress` when useful, rather than depending on those helpers.
 

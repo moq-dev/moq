@@ -471,7 +471,6 @@ impl Error {
 			Self::InvalidScheme
 			| Self::UnsupportedScheme(_)
 			| Self::InvalidDnsName
-			| Self::CreateEndpoint(driver::endpoint::Error::NoRuntime)
 			| Self::Config(_)
 			| Self::NoInitialCipherSuite
 			| Self::ConnectRejected(_)

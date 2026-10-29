@@ -44,8 +44,7 @@ Decided 2026-10-22 (maintainer): this waits on the work that replaces the
 session clones and boxed opens at the top of this profile; re-profile after
 it lands before fixing what remains. Since 2026-10-23 the QUIC half of that
 removal is [native WebTransport](/quest/m1/quic-api/native-web.md), so the
-relay's QUIC profile waits on it rather than on all of
-[dropping web-transport-trait](/quest/m1/drop-web-transport-trait.md).
+relay's QUIC profile waits on it.
 
 Public API: none expected. Wire: none.
 

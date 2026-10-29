@@ -217,10 +217,10 @@ async fn custom_selected_catalog_drives_export_and_follow() {
 	}
 }
 
-/// A follower built after EOF keeps the explicit compressed encoding without keeping its reader.
+/// A follower built after EOF keeps an explicit non-default encoding without keeping its reader.
 #[tokio::test(start_paused = true)]
-async fn a_follower_keeps_hangz_after_catalog_eof() {
-	use crate::catalog::{CatalogFormat, hang::Catalog};
+async fn a_follower_keeps_msf_after_catalog_eof() {
+	use crate::catalog::CatalogFormat;
 	use std::task::Poll;
 
 	let origin = crate::source::produce_origin();
@@ -228,26 +228,24 @@ async fn a_follower_keeps_hangz_after_catalog_eof() {
 	let publish = || {
 		let broadcast = origin.create_broadcast("live").unwrap();
 		let track = broadcast
-			.create_track(hang::Catalog::COMPRESSED_NAME, hang::Catalog::default_track_info())
+			.create_track(moq_msf::DEFAULT_NAME, hang::Catalog::default_track_info())
 			.unwrap();
-		let mut config = moq_json::snapshot::Config::default();
-		config.compression = moq_json::Compression::Deflate;
-		let mut catalog = moq_json::snapshot::Producer::<Catalog>::new(track.clone(), config);
-		catalog
-			.update(moq_net::Timed::from(&Catalog::default()).at(moq_net::Timestamp::now()))
-			.unwrap();
+		let msf = moq_msf::Catalog::<()>::new(Vec::new()).to_json().unwrap();
+		let mut group = track.append_group().unwrap();
+		group.write_frame(moq_net::Timestamp::now(), msf).unwrap();
+		group.finish().unwrap();
 		broadcast
 			.announce(moq_net::origin::Route::default().with_epoch(epoch.clone()))
 			.unwrap();
-		(broadcast, track, catalog)
+		(broadcast, track)
 	};
-	let (broadcast, mut track, mut catalog) = publish();
-	catalog.finish().unwrap();
+	let (broadcast, mut track) = publish();
+	track.finish().unwrap();
 	let source = crate::source::resolved(&origin, "live").await;
-	let stream = source.catalog::<()>(CatalogFormat::HangZ).await.unwrap();
+	let stream = source.catalog::<()>(CatalogFormat::Msf).await.unwrap();
 	let mut export = Export::new(source, stream);
 	assert!(export.next().await.unwrap().is_none());
-	assert_eq!(export.catalog_format(), CatalogFormat::HangZ);
+	assert_eq!(export.catalog_format(), CatalogFormat::Msf);
 	// The routed subscription is released when the origin driver observes the local drop.
 	tokio::time::timeout(Duration::from_secs(1), async {
 		while track.subscription().is_some() {
@@ -255,18 +253,18 @@ async fn a_follower_keeps_hangz_after_catalog_eof() {
 		}
 	})
 	.await
-	.expect("EOF must release the first compressed reader");
-	drop((broadcast, track, catalog));
+	.expect("EOF must release the first MSF reader");
+	drop((broadcast, track));
 	let mut follower = super::Follower::new(export)
 		.unwrap()
 		.with_follow(Duration::from_secs(1));
-	let (broadcast, track, mut catalog) = publish();
-	// Only catalog.json.z exists, so falling back to the default encoding cannot subscribe.
+	let (broadcast, track) = publish();
+	// Only the MSF catalog exists, so falling back to the default encoding cannot subscribe.
 	tokio::time::timeout(
 		Duration::from_secs(1),
 		kio::wait(|waiter| {
 			if let Poll::Ready(Err(err)) = follower.poll_next(waiter) {
-				panic!("compressed return failed: {err:?}");
+				panic!("MSF return failed: {err:?}");
 			}
 			if track.subscription().is_some() {
 				Poll::Ready(())
@@ -276,10 +274,10 @@ async fn a_follower_keeps_hangz_after_catalog_eof() {
 		}),
 	)
 	.await
-	.expect("compressed catalog resubscribed");
-	assert_eq!(follower.export().catalog_format(), CatalogFormat::HangZ);
-	catalog.finish().unwrap();
-	drop((follower, broadcast, track, catalog));
+	.expect("MSF catalog resubscribed");
+	assert_eq!(follower.export().catalog_format(), CatalogFormat::Msf);
+	track.finish().unwrap();
+	drop((follower, broadcast, track));
 }
 
 #[tokio::test(start_paused = true)]
@@ -8774,7 +8772,13 @@ async fn same_instance_returns(finish: bool) {
 	tokio::time::sleep(Duration::from_secs(1)).await;
 	let (broadcast, mut catalog) = publish_live::<()>(&origin, route());
 	std::ops::DerefMut::deref_mut(&mut catalog.modify().unwrap());
-	let back = origin.consume().routed_broadcast("live").await.unwrap();
+	let back = origin
+		.consume()
+		.follow("live", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap();
 	let stream = crate::catalog::Consumer::new(&back, Default::default()).await.unwrap();
 	let mut export = export.follow(back, stream).unwrap();
 	frames.extend(drain_frames(&mut export).await);
@@ -8846,7 +8850,13 @@ async fn a_return_keeps_catalog_and_group_history() {
 	crate::clock::fake_host_wall(wall + start.elapsed());
 	broadcast.announce(route).unwrap();
 	assert_eq!(catalog.snapshot().clock, clock, "a return must keep the catalog clock");
-	let back = origin.consume().routed_broadcast("live").await.unwrap();
+	let back = origin
+		.consume()
+		.follow("live", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap();
 	assert_eq!(back.info().epoch.as_ref(), Some(&epoch));
 	assert!(!back.is_clone(&old), "the withdrawn front is replaced");
 	let stream = crate::catalog::Consumer::new(&back, Default::default()).await.unwrap();
@@ -8894,7 +8904,7 @@ async fn a_switch_carries_through_an_instance_that_never_built_its_tables() {
 
 	// Switched to an instance whose catalog lists nothing, so it never builds its tables...
 	let (_bare, _bare_catalog) = publish_live::<()>(&origin, route());
-	let bare = origin.consume().request_broadcast("live", None).await.unwrap();
+	let bare = origin.consume().request("live", None).await.unwrap();
 	let stream = crate::catalog::Consumer::new(&bare, Default::default()).await.unwrap();
 	let mut export = export.follow(bare, stream).unwrap();
 	assert!(
@@ -8905,7 +8915,7 @@ async fn a_switch_carries_through_an_instance_that_never_built_its_tables() {
 	// ...and then to another.
 	let (new, mut new_catalog) = publish_live::<()>(&origin, route());
 	let mut new_audio = aac_rendition(&mut new.broadcast().clone(), &mut new_catalog, "b.aac");
-	let replacement = origin.consume().request_broadcast("live", None).await.unwrap();
+	let replacement = origin.consume().request("live", None).await.unwrap();
 	let stream = crate::catalog::Consumer::new(&replacement, Default::default())
 		.await
 		.unwrap();
@@ -8956,7 +8966,7 @@ async fn another_instance_is_a_full_program_switch() {
 	let (new, mut new_catalog) = publish_live::<()>(&origin, route());
 	let mut video = h264_rendition(&mut new.broadcast().clone(), &mut new_catalog, "video.avc1");
 	let mut new_audio = aac_rendition(&mut new.broadcast().clone(), &mut new_catalog, "b.aac");
-	let replacement = origin.consume().request_broadcast("live", None).await.unwrap();
+	let replacement = origin.consume().request("live", None).await.unwrap();
 	let stream = crate::catalog::Consumer::new(&replacement, Default::default())
 		.await
 		.unwrap();
@@ -9066,7 +9076,7 @@ async fn a_switch_moving_the_pmt_advances_the_pat() {
 	let before = drain_frames(&mut export).await;
 
 	let (_new, mut new_catalog, mut new_track) = publish(0x200);
-	let replacement = origin.consume().request_broadcast("live", None).await.unwrap();
+	let replacement = origin.consume().request("live", None).await.unwrap();
 	let stream = crate::catalog::Consumer::new(&replacement, Default::default())
 		.await
 		.unwrap();
@@ -9124,7 +9134,13 @@ async fn export_stats_count_only_returned_output() {
 	drop((broadcast, catalog, track));
 	let (broadcast, mut catalog) = publish_live::<()>(&origin, route());
 	let mut track = aac_rendition(&mut broadcast.broadcast().clone(), &mut catalog, "a.aac");
-	let back = origin.consume().routed_broadcast("live").await.unwrap();
+	let back = origin
+		.consume()
+		.follow("live", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap();
 	let stream = crate::catalog::Consumer::new(&back, Default::default()).await.unwrap();
 	let mut export = export.follow(back, stream).unwrap();
 	for ms in (1_000..1_200).step_by(20) {
@@ -10401,7 +10417,7 @@ async fn a_switch_reads_the_instance_it_followed() {
 	for ms in (0..200).step_by(20) {
 		write_aac(&mut followed_audio, ms);
 	}
-	let broadcast = origin.consume().request_broadcast("live", None).await.unwrap();
+	let broadcast = origin.consume().request("live", None).await.unwrap();
 
 	// Replaced again, ten seconds ahead, before the switched export requests its track.
 	let (newer, mut newer_catalog) = publish_live::<()>(&origin, Default::default());
@@ -11102,7 +11118,13 @@ async fn a_track_renamed_on_its_pid_across_returns_retires_the_one_before() {
 	for round in 1..=4 {
 		tokio::time::sleep(Duration::from_secs(1)).await;
 		let (broadcast, mut catalog) = publish_live::<tscat::Ext>(&origin, route());
-		let back = origin.consume().routed_broadcast("live").await.unwrap();
+		let back = origin
+			.consume()
+			.follow("live", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap();
 		let stream = crate::catalog::Consumer::new(&back, Default::default()).await.unwrap();
 		export = export.follow(back, stream).unwrap();
 		drain_frames(&mut export).await;
@@ -11162,7 +11184,13 @@ async fn a_track_renamed_on_its_pid_across_a_return_is_quiet_from_its_listing() 
 
 	tokio::time::sleep(Duration::from_secs(10)).await;
 	let (broadcast, mut catalog) = publish_live::<tscat::Ext>(&origin, route());
-	let back = origin.consume().routed_broadcast("live").await.unwrap();
+	let back = origin
+		.consume()
+		.follow("live", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap();
 	let stream = crate::catalog::Consumer::new(&back, Default::default()).await.unwrap();
 	let mut export = export.follow(back, stream).unwrap();
 	drain_frames(&mut export).await;
@@ -11215,7 +11243,7 @@ async fn a_switch_follows_the_last_pmt_out() {
 
 	let (new, mut new_catalog) = publish_live::<tscat::Ext>(&origin, route());
 	let mut audio = aac_rendition(&mut new.broadcast().clone(), &mut new_catalog, "b.aac");
-	let replacement = origin.consume().request_broadcast("live", None).await.unwrap();
+	let replacement = origin.consume().request("live", None).await.unwrap();
 	let stream = crate::catalog::Consumer::new(&replacement, Default::default())
 		.await
 		.unwrap();
@@ -11243,7 +11271,7 @@ async fn a_switch_past_an_instance_that_laid_no_tables_follows_the_last_pmt_out(
 	let origin = crate::source::produce_origin();
 	let route = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
 	let follow = async |export: Export<_>| {
-		let replacement = origin.consume().request_broadcast("live", None).await.unwrap();
+		let replacement = origin.consume().request("live", None).await.unwrap();
 		let stream = crate::catalog::Consumer::new(&replacement, Default::default())
 			.await
 			.unwrap();
@@ -11316,7 +11344,7 @@ async fn a_stitched_switch_keeps_the_healthy_legs_held_frames() {
 	assert!(held > 0, "the old healthy leg has future output buffered");
 	let (new, mut new_catalog) = publish_live::<()>(&origin, route());
 	let _new_audio = aac_rendition(&mut new.broadcast().clone(), &mut new_catalog, "a.aac");
-	let replacement = origin.consume().request_broadcast("live", None).await.unwrap();
+	let replacement = origin.consume().request("live", None).await.unwrap();
 	let stream = crate::catalog::Consumer::new(&replacement, Default::default())
 		.await
 		.unwrap();
@@ -11503,7 +11531,13 @@ async fn an_expired_follow_stops_healthy_input_but_drains_its_buffered_tail() {
 		if elapsed == selected {
 			let (new, mut catalog) = publish_live::<()>(&origin, route());
 			let audio = aac_rendition(&mut new.broadcast().clone(), &mut catalog, "a.aac");
-			let target = origin.consume().routed_broadcast("live").await.unwrap();
+			let target = origin
+				.consume()
+				.follow("live", None)
+				.unwrap()
+				.available()
+				.await
+				.unwrap();
 			let stream = crate::catalog::Consumer::new(&target, Default::default())
 				.await
 				.unwrap();
@@ -11586,7 +11620,13 @@ async fn a_replacement_leaving_before_it_commits_keeps_the_old_program() {
 		if ms == 1000 {
 			let (new, mut catalog) = publish_live::<()>(&origin, route());
 			let audio = aac_rendition(&mut new.broadcast().clone(), &mut catalog, "a.aac");
-			let target = origin.consume().routed_broadcast("live").await.unwrap();
+			let target = origin
+				.consume()
+				.follow("live", None)
+				.unwrap()
+				.available()
+				.await
+				.unwrap();
 			let stream = crate::catalog::Consumer::new(&target, Default::default())
 				.await
 				.unwrap();
@@ -11646,7 +11686,7 @@ async fn a_newer_pending_instance_discards_the_unemitted_held_replacement() {
 	for ms in (0..1000).step_by(20) {
 		write_aac(&mut b_audio, 100_000 + ms);
 	}
-	let replacement = origin.consume().request_broadcast("live", None).await.unwrap();
+	let replacement = origin.consume().request("live", None).await.unwrap();
 	let catalog = crate::catalog::Consumer::new(&replacement, Default::default())
 		.await
 		.unwrap();
@@ -11660,7 +11700,7 @@ async fn a_newer_pending_instance_discards_the_unemitted_held_replacement() {
 	for ms in (0..1000).step_by(20) {
 		write_aac(&mut c_audio, 200_000 + ms);
 	}
-	let replacement = origin.consume().request_broadcast("live", None).await.unwrap();
+	let replacement = origin.consume().request("live", None).await.unwrap();
 	let catalog = crate::catalog::Consumer::new(&replacement, Default::default())
 		.await
 		.unwrap();
@@ -11704,7 +11744,13 @@ async fn an_empty_finished_replacement_drains_the_old_program() {
 	}
 	let (_new, mut empty) = publish_live::<()>(&origin, route());
 	empty.finish().unwrap();
-	let replacement = origin.consume().routed_broadcast("live").await.unwrap();
+	let replacement = origin
+		.consume()
+		.follow("live", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap();
 	let stream = crate::catalog::Consumer::new(&replacement, Default::default())
 		.await
 		.unwrap();
@@ -11756,7 +11802,13 @@ async fn cold_same_epoch_return(pending: bool) {
 		video.finish().unwrap();
 		audio.finish().unwrap();
 		catalog.finish().unwrap();
-		let target = origin.consume().routed_broadcast("live").await.unwrap();
+		let target = origin
+			.consume()
+			.follow("live", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap();
 		let stream = crate::catalog::Consumer::new(&target, Default::default())
 			.await
 			.unwrap();
@@ -11777,7 +11829,13 @@ async fn cold_same_epoch_return(pending: bool) {
 	let (back, mut catalog) = publish_live::<()>(&origin, moq_net::origin::Route::default().with_epoch(returned_epoch));
 	let mut video = h264_rendition(&mut back.broadcast().clone(), &mut catalog, "v.avc1");
 	let mut audio = aac_rendition(&mut back.broadcast().clone(), &mut catalog, "a.aac");
-	let target = origin.consume().routed_broadcast("live").await.unwrap();
+	let target = origin
+		.consume()
+		.follow("live", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap();
 	let stream = crate::catalog::Consumer::new(&target, Default::default())
 		.await
 		.unwrap();
