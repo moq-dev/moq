@@ -15,11 +15,12 @@ Decided 2026-10-25 (maintainer), extending the `wanted` shape that
 
 - Yes/no demand returns `bool`; `track::Demand::wanted() -> Option<u64>`
   keeps its meaning.
-- Broadcast demand is deleted: Rust's `broadcast::Demand` went in
-  [#6744](https://github.com/moq-dev/moq/pull/6744), and the `@internal` JS
-  `Broadcast.Demand` (read only by tests and a bench) goes too. The origin
-  closes a superseded producer explicitly instead of a publisher watching
-  demand.
+- Rust's `broadcast::Demand`, deleted in
+  [#6744](https://github.com/moq-dev/moq/pull/6744), is back in the `wanted`
+  shape for publishers that steer on whether anyone reads a broadcast. The
+  `@internal` JS `Broadcast.Demand` (read only by tests and a bench) goes. The
+  origin closes a superseded producer explicitly instead of a publisher
+  watching demand.
 - `group::Demand` already says `wanted`. The JS group demand stays internal.
 - `bandwidth::Producer` gets a `demand()` handle with `wanted() -> bool` and
   `wanted_changed()`, like track.

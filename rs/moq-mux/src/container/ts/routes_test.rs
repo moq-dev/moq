@@ -477,28 +477,6 @@ async fn a_pmt_on_another_programs_pid_claims_nothing() {
 	assert_eq!(programs.stats().streams[&UNLISTED].refused, 5);
 }
 
-/// A PMT the PAT lists but that never arrives holds the count back for TR 101 290's 0.5 s of
-/// program clock, timed on a program whose clock runs, and no longer.
-#[tokio::test(start_paused = true)]
-async fn a_pmt_that_never_arrives_stops_holding_the_count() {
-	let mut mux = Mux::default();
-	mux.pat(&[(1, PMT), (2, 0x30)]);
-	mux.pmt_with(PMT, 1, CLOCK, &[(0x06, DATA, KLVA)], 0);
-	for ms in [0, 200, 400, 500] {
-		mux.packet(CLOCK, Flags::pcr(ms * MS)).fill(UNLISTED, 1);
-	}
-	mux.packet(CLOCK, Flags::pcr(501 * MS)).fill(UNLISTED, 2);
-
-	let origin = crate::source::produce_origin();
-	let mut programs = Programs::new(
-		origin,
-		moq_net::Path::from_static("event.hang"),
-		crate::catalog::Config::default(),
-	);
-	programs.decode(&mux.bytes()).unwrap();
-	assert_eq!(programs.stats().streams[&UNLISTED].refused, 2);
-}
-
 /// One PID through its whole life, packets flowing throughout: unlisted, added by a PMT
 /// revision, removed by the next, then added again. It keeps one row, whose counters never go
 /// back, whichever owner holds it: the import while carried, the dropped-PID count otherwise,

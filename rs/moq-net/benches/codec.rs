@@ -4,7 +4,7 @@
 //! Run with `cargo bench -p moq-net --features fuzz --bench codec`.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use moq_net::fuzz::{Messages, decode_varints, encode_varints, lite_wire};
+use moq_net::fuzz::{Messages, decode_varints, encode_varints};
 
 type Encode = fn(&Messages, &mut Vec<u8>);
 type Decode = fn(&Messages, &[u8]);
@@ -43,22 +43,6 @@ fn bench(c: &mut Criterion) {
 		});
 		group.bench_function(BenchmarkId::new("decode", name), |b| {
 			b.iter(|| decode(&messages, &encoded))
-		});
-	}
-	group.finish();
-
-	let mut group = c.benchmark_group("setup_parameters");
-	for count in [4, 16, 64, 256, 1024, 4096] {
-		let values: Vec<u64> = std::iter::once(count)
-			.chain((100..100 + count).flat_map(|kind| [kind, 0]))
-			.collect();
-		// The existing fuzz adapter round-trips the private parameter codec on lite-07.
-		let mut wire = vec![6, 20];
-		encode_varints(&values, true, &mut wire);
-		group.throughput(Throughput::Elements(count));
-		group.bench_with_input(BenchmarkId::from_parameter(count), &wire, |b, wire| {
-			assert!(lite_wire(wire));
-			b.iter(|| lite_wire(std::hint::black_box(wire)));
 		});
 	}
 	group.finish();

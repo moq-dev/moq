@@ -31,6 +31,5 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [Draft-18 tail ends cleanly](/quest/m0/interop-green/tail-empty-group.md) - a Rust tail subscriber joining a JS publisher over moq-transport-18 gets every group and a clean end
 - [Browser tests expect current behavior](/quest/m0/interop-green/stale-browser-tests.md) - the renderer and element version tests match the shipped validation and version list
 - [Remeasure the planned wire break](/quest/m0/interop-green/wire-compat-remeasure.md) - the lite-07-wip planned break is measured against `@moq/net` 0.4.6

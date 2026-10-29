@@ -16,7 +16,7 @@ use crate::connection::assembler::Assembler;
 ///
 /// They keep their connection flow control credit until released, so the connection receive
 /// window bounds what every lease on the connection holds together. Borrowed with
-/// [`RecvStream::lease()`] or [`Connection::leased()`](crate::Connection::leased).
+/// [`RecvStream::lease()`] or [`Connection::leased()`](crate::connection::Connection::leased).
 #[derive(Debug, Default)]
 pub struct Leased {
 	chunks: VecDeque<Bytes>,
@@ -233,7 +233,7 @@ pub enum LeaseError {
 
 impl RecvStream<'_> {
 	/// Lease the stream's unreleased bytes once at least `want` have arrived in order, or the
-	/// stream ended, then read them with [`Connection::leased()`](crate::Connection::leased).
+	/// stream ended, then read them with [`Connection::leased()`](crate::connection::Connection::leased).
 	///
 	/// The bytes stay buffered, with their connection credit, until [`Self::advance()`] or
 	/// [`Self::take()`] moves past them, and keep that credit until [`Self::release()`]; leasing
@@ -338,7 +338,7 @@ impl RecvStream<'_> {
 		let Some(slot) = self.state.recv.get_mut(&self.id) else {
 			return;
 		};
-		let lease = &mut get_or_insert_recv(slot, self.state.stream_receive_window).lease;
+		let lease = &mut get_or_insert_recv(slot, self.state.initial_stream_receive_window).lease;
 		if lease.ranked {
 			self.state.ranks.remove(&lease.rank(self.id));
 			self.state.ranks.insert((priority, Reverse(self.id)));
@@ -351,7 +351,7 @@ impl RecvStream<'_> {
 		let Some(slot) = self.state.recv.get_mut(&self.id) else {
 			return Err(LeaseError::ClosedStream);
 		};
-		let recv = get_or_insert_recv(slot, self.state.stream_receive_window);
+		let recv = get_or_insert_recv(slot, self.state.initial_stream_receive_window);
 		if recv.lease.evicted {
 			return Err(LeaseError::Evicted);
 		}

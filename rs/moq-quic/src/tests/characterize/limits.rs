@@ -28,7 +28,7 @@ fn finish_all(pair: &mut Pair, client_ch: ConnectionHandle, server_ch: Connectio
 #[test]
 fn max_concurrent_streams_raised() {
 	let _guard = subscribe();
-	let (mut pair, client_ch, server_ch) = connected_with(|t| _ = t.max_concurrent_uni_streams(VarInt(1)), |_| {});
+	let (mut pair, client_ch, server_ch) = connected_with(|t| t.limits.max_streams = NonZeroU64::new(1), |_| {});
 	assert_eq!(openable(&mut pair, client_ch).len(), 1);
 
 	pair.server_conn_mut(server_ch)
@@ -43,7 +43,7 @@ fn max_concurrent_streams_raised() {
 #[test]
 fn max_concurrent_streams_lowered() {
 	let _guard = subscribe();
-	let (mut pair, client_ch, server_ch) = connected_with(|t| _ = t.max_concurrent_uni_streams(VarInt(3)), |_| {});
+	let (mut pair, client_ch, server_ch) = connected_with(|t| t.limits.max_streams = NonZeroU64::new(3), |_| {});
 	pair.server_conn_mut(server_ch)
 		.set_max_concurrent_streams(Dir::Uni, VarInt(1));
 	assert_eq!(pair.server_conn_mut(server_ch).max_concurrent_streams(Dir::Uni), 3);
@@ -84,7 +84,8 @@ const WINDOW: u32 = 4000;
 #[test]
 fn receive_window_raised() {
 	let _guard = subscribe();
-	let (mut pair, client_ch, server_ch) = connected_with(|t| _ = t.receive_window(VarInt::from_u32(WINDOW)), |_| {});
+	let (mut pair, client_ch, server_ch) =
+		connected_with(|t| t.limits.receive_window = NonZeroU64::new(WINDOW.into()), |_| {});
 	assert_eq!(writable(&mut pair, client_ch, 2 * WINDOW as usize), WINDOW as usize);
 	pair.drive();
 
@@ -98,8 +99,10 @@ fn receive_window_raised() {
 #[test]
 fn receive_window_lowered() {
 	let _guard = subscribe();
-	let (mut pair, client_ch, server_ch) =
-		connected_with(|t| _ = t.receive_window(VarInt::from_u32(2 * WINDOW)), |_| {});
+	let (mut pair, client_ch, server_ch) = connected_with(
+		|t| t.limits.receive_window = NonZeroU64::new((2 * WINDOW).into()),
+		|_| {},
+	);
 	assert_eq!(writable(&mut pair, client_ch, 4 * WINDOW as usize), 2 * WINDOW as usize);
 	pair.drive();
 
@@ -135,8 +138,8 @@ fn set_limits_raises_what_it_sets() {
 	let _guard = subscribe();
 	let (mut pair, client_ch, server_ch) = connected_with(
 		|t| {
-			t.max_concurrent_uni_streams(VarInt(1));
-			t.receive_window(VarInt::from_u32(WINDOW));
+			t.limits.max_streams = NonZeroU64::new(1);
+			t.limits.receive_window = NonZeroU64::new(WINDOW.into());
 		},
 		|_| {},
 	);
@@ -154,11 +157,46 @@ fn set_limits_raises_what_it_sets() {
 	assert_eq!(openable(&mut pair, client_ch).len(), 2);
 }
 
+/// A stream window changed on a live connection applies as each stream's credit is next
+/// extended, while a new stream still starts with the credit the handshake announced
+#[test]
+fn set_limits_changes_the_stream_window() {
+	let _guard = subscribe();
+	let (mut pair, client_ch, server_ch) = connected_with(
+		|t| t.limits.stream_receive_window = NonZeroU64::new(WINDOW.into()),
+		|_| {},
+	);
+	let mut streams = Vec::new();
+
+	let mut limits = Limits {
+		stream_receive_window: NonZeroU64::new(4 * u64::from(WINDOW)),
+		..Default::default()
+	};
+	pair.server_conn_mut(server_ch).set_limits(limits).unwrap();
+	let s = pair
+		.client_streams(client_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	let data = vec![0; 8 * WINDOW as usize];
+	assert_eq!(pair.client_send(client_ch, s).write(&data), Ok(WINDOW as usize));
+	pair.drive();
+	assert_eq!(read_buffered(&mut pair, server_ch, &mut streams), WINDOW as usize);
+	pair.drive();
+	assert_eq!(pair.client_send(client_ch, s).write(&data), Ok(4 * WINDOW as usize));
+
+	limits.stream_receive_window = NonZeroU64::new(100);
+	pair.server_conn_mut(server_ch).set_limits(limits).unwrap();
+	assert_eq!(writable(&mut pair, client_ch, 2 * WINDOW as usize), WINDOW as usize);
+	pair.drive();
+	assert_eq!(read_buffered(&mut pair, server_ch, &mut streams), 5 * WINDOW as usize);
+	assert!(!pair.server_conn_mut(server_ch).is_closed());
+}
+
 /// Limits a peer would reject change nothing, rather than applying the ones that fit
 #[test]
 fn set_limits_refuses_without_changing_anything() {
 	let _guard = subscribe();
-	let (mut pair, _, server_ch) = connected_with(|t| _ = t.max_concurrent_uni_streams(VarInt(1)), |_| {});
+	let (mut pair, _, server_ch) = connected_with(|t| t.limits.max_streams = NonZeroU64::new(1), |_| {});
 
 	let limits = Limits {
 		max_streams: NonZeroU64::new(3),
