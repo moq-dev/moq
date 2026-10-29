@@ -1,35 +1,34 @@
-# [M] Rust consumers hold a disabled rendition
+# [M] moqsrc holds a disabled rendition
 
 ## Goal
 
-Every first-party Rust consumer keeps its selected rendition, and its
+Every first-party Rust player keeps its selected rendition, and its
 subscription, while the publisher has it disabled and no enabled alternative
-exists, as [@moq/watch does](/quest/m1/push-to-talk/hold-js.md).
+exists, as `@moq/watch` does. Exports keep dropping a disabled rendition.
 
 ## Plan
 
-Decided 2026-10-28 (maintainer): the hold applies in every first-party
-consumer, with the same rule as the JS quest. Initial selection skips disabled
-renditions, an enabled alternative wins, and a removed rendition is dropped.
+Decided 2026-10-28 (maintainer): the hold applies in every first-party player.
+The rule matches `@moq/watch`: initial selection skips disabled renditions, an
+enabled alternative wins, and a removed rendition is dropped.
 
-- `rs/moq-mux/src/select.rs:93,121`: the selection filters require
-  `config.enabled`.
-- `rs/moq-cli/src/play/media.rs:192-193,445-452`: `stop_disabled` drops demand
-  on the playing rendition.
-- `rs/moq-ffi/src/audio.rs:613-616`: a disabled rendition returns `NotFound`.
-  It should keep a held one, and the wrappers' docs follow.
+Already holding: `moq_mux::select::Broadcast::retain` and `catalog::Select`,
+`moq play`, moq-ffi's audio and video consumers, and moq-c's `moq_consume_*`.
 
-[moq-audio follows the grant](/quest/m2/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md)
-already expects a held listener to keep demand on a single audio rendition
-disabled below the codec floor.
+Left: moq-gst `moqsrc`. `reconcile` (`rs/moq-gst/src/source/imp.rs`) stops a
+disabled rendition's reader and holds its pad idle. Keep the reader running
+while no rendition of its kind is enabled. The disable tests
+(`a_reenabled_rendition_resumes_on_the_same_pad`,
+`a_reenabled_sibling_rendition_plays_the_next_instance_after_a_finish`)
+change with it.
 
-The spec wording lands with whichever hold quest lands first.
-
-Tests: the JS quest's cases, in moq-mux select and moq-ffi.
-
-Public API: moq-ffi returns a held disabled rendition where it returned
-`NotFound`. Wire: none.
+Decided 2026-10-28 (maintainer): exports do not hold. That covers every
+fMP4/TS/MKV/FLV/Annex B export through `Source::retain_selectable`
+(`rs/moq-mux/src/source.rs`), plus the HLS export, WebRTC egress and RTMP
+play. A held track sends nothing, so an interleaving muxer or an HLS player
+may wait on it, and an export has no unmute latency at stake the way a
+listener does.
 
 ## Related
 
-- [JS consumers hold a disabled rendition](/quest/m1/push-to-talk/hold-js.md) - the same rule in JS
+- [OBS source picks renditions by the catalog contract](/quest/m2/obs-source-renditions.md) - holds through moq-c

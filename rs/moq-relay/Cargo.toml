@@ -106,7 +106,7 @@ moq-uring = { workspace = true, optional = true }
 sd-notify = { workspace = true }
 
 [dev-dependencies]
-criterion = { workspace = true }
+criterion = { package = "bench-harness", path = "../bench-harness" }
 # An HTTP/2 client, so the admission bench can hold many requests on one connection.
 h2 = { workspace = true }
 kio = { path = "../kio" }
