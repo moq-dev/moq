@@ -2148,6 +2148,7 @@ mod tests {
 			priority: 0,
 			requested: None,
 			ranges: vec![lite::Range::OLDEST],
+			live: lite::LiveRanges::new(Version::Lite04, &[lite::Range::OLDEST]),
 			tail: tail.clone(),
 			served: None,
 			end: None,
@@ -2284,6 +2285,7 @@ mod tests {
 				priority: 0,
 				requested: Some(floor),
 				ranges: vec![lite::Range::span(Some(floor), 0, None, None)],
+				live: lite::LiveRanges::new(Version::Lite04, &[lite::Range::span(Some(floor), 0, None, None)]),
 				tail: Default::default(),
 				served: None,
 				end: None,
@@ -2748,6 +2750,7 @@ mod tests {
 			priority: 0,
 			requested: Some(2),
 			ranges: vec![lite::Range::span(Some(2), 0, None, None)],
+			live: lite::LiveRanges::new(VERSION, &[lite::Range::span(Some(2), 0, None, None)]),
 			tail: Default::default(),
 			served: None,
 			end: Some(lite::SubscribeEnd { group: 10 }),
@@ -6294,6 +6297,8 @@ struct SubStream {
 	start: Option<u64>,
 	/// The ranges on the wire, never empty.
 	ranges: Vec<lite::Range>,
+	/// The ranges the publisher holds by Range ID, which each update edits.
+	live: lite::LiveRanges,
 	priority: i8,
 	order: crate::track::Order,
 	/// The start the SUBSCRIBE itself carried, fixed for the stream's life. A
@@ -6958,7 +6963,7 @@ fn buffer_update(active: &mut SubStream) -> Result<(), Error> {
 		wanted_group: active.wanted,
 		priority: active.priority,
 		max_delay: active.max_delay,
-		ranges: active.ranges.clone(),
+		ranges: active.live.edit(&active.ranges)?,
 		order: active.order,
 	})
 }
@@ -7068,6 +7073,7 @@ impl Establish {
 			requested_max_delay: wire_max_delay(self.subscription.max_delay),
 			start: self.subscription.start(),
 			ranges: self.ranges.clone(),
+			live: lite::LiveRanges::new(self.serve.subscriber.version, &self.ranges),
 			priority: self.subscription.priority,
 			order: self.subscription.order,
 			requested: self.subscription.start(),

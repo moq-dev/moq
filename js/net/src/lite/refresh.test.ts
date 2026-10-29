@@ -25,9 +25,10 @@ test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s
 		this: SubscribeUpdate,
 		writer,
 		version,
+		live,
 	) {
 		if (this.wantedGroup !== undefined) updates.push(this.wantedGroup);
-		return encode.call(this, writer, version);
+		return encode.call(this, writer, version, live);
 	});
 	const peers: { abort(): void }[] = [];
 	try {

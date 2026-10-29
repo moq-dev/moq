@@ -271,7 +271,7 @@ pub fn lite_wire(data: &[u8]) -> bool {
 		7 => roundtrip::<lite::SubscribeOk, _>(rest, &mut Vec::new(), version),
 		8 => roundtrip::<lite::SubscribeStart, _>(rest, &mut Vec::new(), version),
 		9 => roundtrip::<lite::SubscribeEnd, _>(rest, &mut Vec::new(), version),
-		10 => roundtrip::<lite::SubscribeUpdate, _>(rest, &mut Vec::new(), version),
+		10 => roundtrip::<lite::SubscribeUpdate<lite::RangeEdit>, _>(rest, &mut Vec::new(), version),
 		11 => roundtrip::<lite::SubscribeDrop, _>(rest, &mut Vec::new(), version),
 		12 => roundtrip::<lite::SubscribeResponse, _>(rest, &mut Vec::new(), version),
 		13 => roundtrip::<lite::Fetch<'_>, _>(rest, &mut Vec::new(), version),
@@ -791,7 +791,7 @@ pub fn varint(data: &[u8]) -> bool {
 /// order. The mix leans on the messages every subscription pays for.
 pub struct Messages {
 	lite_subscribe: lite::Subscribe<'static>,
-	lite_update: lite::SubscribeUpdate,
+	lite_update: lite::SubscribeUpdate<lite::RangeEdit>,
 	lite_start: lite::SubscribeResponse,
 	lite_info: lite::TrackInfo,
 	lite_group: lite::Group,
@@ -823,10 +823,10 @@ impl Default for Messages {
 				order: crate::track::Order::Descending,
 				priority: 4,
 				max_delay: Duration::from_millis(500),
-				ranges: vec![lite::Range {
+				ranges: lite::RangeEdit::Replace(vec![lite::Range {
 					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
 					end: Some(lite::Anchor::Absolute(crate::track::Position::group(2_001))),
-				}],
+				}]),
 			},
 			lite_start: lite::SubscribeResponse::Start(lite::SubscribeStart {
 				group: 1_234,
@@ -903,7 +903,7 @@ impl Messages {
 		let v = BENCH_LITE;
 		let r = &mut Decoder::new(data, v.into());
 		lite::Subscribe::decode(r, v).unwrap();
-		lite::SubscribeUpdate::decode(r, v).unwrap();
+		lite::SubscribeUpdate::<lite::RangeEdit>::decode(r, v).unwrap();
 		lite::SubscribeResponse::decode(r, v).unwrap();
 		lite::TrackInfo::decode(r, v).unwrap();
 		lite::Group::decode(r, v).unwrap();

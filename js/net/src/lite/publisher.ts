@@ -31,6 +31,7 @@ import { Probe } from "./probe.ts";
 import {
 	encodeSubscribeResponse,
 	exclusiveGroupEnd,
+	type LiveRanges,
 	type Subscribe,
 	SubscribeDrop,
 	SubscribeEnd,
@@ -222,6 +223,8 @@ type SubscriptionControlOptions = {
 	reader: Reader;
 	writer: Writer;
 	version: Version;
+	/** The ranges the SUBSCRIBE carried, which each lite-07 update edits. */
+	live?: LiveRanges;
 	apply: (update: SubscribeUpdate) => void;
 };
 
@@ -314,12 +317,12 @@ class SubscriptionControls {
 		this.#changed.update((value) => value + 1);
 	}
 
-	async #decode({ reader, version, apply, quic }: SubscriptionControlOptions) {
+	async #decode({ reader, version, live, apply, quic }: SubscriptionControlOptions) {
 		try {
 			// Runs until the peer's half ends, even past our own FIN: a lite-07 publisher waits
 			// for that end, and every other teardown stops the reader.
 			for (;;) {
-				const update = await SubscribeUpdate.decodeMaybe(reader, version);
+				const update = await SubscribeUpdate.decodeMaybe(reader, version, live);
 				if (!update) break;
 				apply(update);
 				this.#update = update;
@@ -929,6 +932,7 @@ export class Publisher {
 				reader: stream.reader,
 				writer: stream.writer,
 				version: this.version,
+				live: msg.live,
 				apply: (update) => {
 					Object.assign(datagramBounds, {
 						startGroup: update.startGroup,

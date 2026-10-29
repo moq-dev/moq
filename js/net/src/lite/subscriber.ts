@@ -59,6 +59,7 @@ import {
 	emptyRange,
 	exclusiveGroupEnd,
 	inclusiveGroupEnd,
+	LiveRanges,
 	Subscribe,
 	SubscribeUpdate,
 } from "./subscribe.ts";
@@ -1579,6 +1580,9 @@ export class Subscriber {
 			},
 		};
 
+		// The ranges the publisher holds, which each lite-07 update edits.
+		const live = LiveRanges.sent(msg);
+
 		// The wanted group is subscription state: an update announces each new one past our
 		// largest, and every later update restates it. Joins asking for the same group
 		// coalesce into that one update.
@@ -1626,7 +1630,7 @@ export class Subscriber {
 				endGroup: inclusiveGroupEnd(bounds.end),
 			});
 			// Encoded apart from the write, so a bound the wire can't carry still fails the track.
-			const encoded = await Writer.collect(this.version, (w) => update.encode(w, this.version));
+			const encoded = await Writer.collect(this.version, (w) => update.encode(w, this.version, live));
 			// A failed write means the publisher stopped reading, as it does once it finishes the
 			// track. The responses decide how the track ends, cleanly at the FIN or with a reset's error.
 			try {

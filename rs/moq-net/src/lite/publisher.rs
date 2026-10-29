@@ -1490,8 +1490,8 @@ trait Request: Sized {
 	const HOLDS: bool;
 	/// The message that opens the stream, owned so it outlives the bytes it came from.
 	type Message: std::fmt::Debug;
-	/// What the requester may send after the request; [`NoUpdate`] for nothing.
-	type Update: for<'a> Decode<'a, Version> + std::fmt::Debug;
+	/// What the requester may send after the request, as it travels; [`NoUpdate`] for nothing.
+	type Update: Resolve<Self::Message>;
 
 	/// Decode the message that opens the stream.
 	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self::Message, DecodeError>;
@@ -1506,7 +1506,7 @@ trait Request: Sized {
 	fn start(shared: &Shared, msg: Self::Message, broadcast: crate::broadcast::Consumer) -> Result<Self, Error>;
 
 	/// Apply an update from the requester.
-	fn update(&mut self, update: Self::Update);
+	fn update(&mut self, update: Resolved<Self>);
 
 	/// Write the reply: `Continue` after each unit of work, so the requester is checked
 	/// between them even while work stays ready, and `Break` once all of it is buffered.
@@ -1518,6 +1518,19 @@ trait Request: Sized {
 	) -> Poll<Result<ControlFlow<()>, Error>>;
 }
 
+/// An update as it travels, resolved against what the stream carried before it.
+trait Resolve<M>: for<'a> Decode<'a, Version> + std::fmt::Debug {
+	/// What the stream carried so far, seeded by the request.
+	type State;
+	/// The update [`Request::update`] applies.
+	type Resolved: std::fmt::Debug;
+
+	fn state(msg: &M, version: Version) -> Self::State;
+	fn resolve(self, state: &mut Self::State) -> Result<Self::Resolved, DecodeError>;
+}
+
+type Resolved<R> = <<R as Request>::Update as Resolve<<R as Request>::Message>>::Resolved;
+
 /// The update of a request that takes none: any byte after the request is a violation.
 #[derive(Debug)]
 enum NoUpdate {}
@@ -1525,6 +1538,37 @@ enum NoUpdate {}
 impl<'a> Decode<'a, Version> for NoUpdate {
 	fn decode(_: &mut Decoder<'a>, _: Version) -> Result<Self, DecodeError> {
 		Err(DecodeError::ExpectedEnd)
+	}
+}
+
+impl<M> Resolve<M> for NoUpdate {
+	type State = ();
+	type Resolved = Self;
+
+	fn state(_: &M, _: Version) {}
+
+	fn resolve(self, _: &mut ()) -> Result<Self, DecodeError> {
+		match self {}
+	}
+}
+
+/// Each lite-07 update edits the live ranges, which only the stream's history names.
+impl Resolve<lite::Subscribe<'static>> for lite::SubscribeUpdate<lite::RangeEdit> {
+	type State = lite::LiveRanges;
+	type Resolved = lite::SubscribeUpdate;
+
+	fn state(msg: &lite::Subscribe<'static>, version: Version) -> lite::LiveRanges {
+		lite::LiveRanges::new(version, &msg.ranges)
+	}
+
+	fn resolve(self, live: &mut lite::LiveRanges) -> Result<lite::SubscribeUpdate, DecodeError> {
+		Ok(lite::SubscribeUpdate {
+			ranges: live.apply(self.ranges)?,
+			wanted_group: self.wanted_group,
+			priority: self.priority,
+			max_delay: self.max_delay,
+			order: self.order,
+		})
 	}
 }
 
@@ -1544,8 +1588,10 @@ struct RequestServe<R: Request> {
 	owing: bool,
 	// A subscription's place in the session's subscriptions peak.
 	_subscription: Option<crate::session::Slot>,
+	// What resolves each update, seeded once the request decodes.
+	updates: Option<<R::Update as Resolve<R::Message>>::State>,
 	// The latest update to arrive before the reply started. Each one replaces the last.
-	update: Option<R::Update>,
+	update: Option<Resolved<R>>,
 	/// Ends the request, even mid-reply, once the session stops allowing its broadcast.
 	gate: Option<crate::auth::Gate>,
 	// Log context, filled in after the decode. Relative to the origin's root, so a path
@@ -1589,6 +1635,7 @@ impl<R: Request> RequestServe<R> {
 			state: RequestState::Decode,
 			owing: true,
 			_subscription: None,
+			updates: None,
 			update: None,
 			gate: None,
 			broadcast: Default::default(),
@@ -1657,6 +1704,7 @@ impl<R: Request> RequestServe<R> {
 				RequestState::Decode => {
 					let version = self.shared.version;
 					let msg = ready!(stream.reader.poll_decode_with(waiter, |r| R::decode(r, version)))?;
+					self.updates = Some(R::Update::state(&msg, version));
 					let (broadcast, track) = R::target(&msg);
 					self.broadcast = broadcast.clone();
 					self.track = track.to_string();
@@ -1775,6 +1823,13 @@ impl<R: Request> RequestServe<R> {
 				Err(err) => {
 					self.malformed = matches!(err, Error::Decode(_));
 					return Poll::Ready(Err(err));
+				}
+			};
+			let update = match update.resolve(self.updates.as_mut().expect("seeded by the request")) {
+				Ok(update) => update,
+				Err(err) => {
+					self.malformed = true;
+					return Poll::Ready(Err(Error::Decode(err)));
 				}
 			};
 			match &mut self.state {
@@ -1960,7 +2015,7 @@ impl Request for SubscribeServe {
 	const SUBSCRIPTION: bool = true;
 	const HOLDS: bool = false;
 	type Message = lite::Subscribe<'static>;
-	type Update = lite::SubscribeUpdate;
+	type Update = lite::SubscribeUpdate<lite::RangeEdit>;
 
 	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self::Message, DecodeError> {
 		lite::Subscribe::decode(r, version).map(lite::Subscribe::into_owned)
@@ -8132,12 +8187,16 @@ mod tests {
 		let mut serve = RequestServe::<SubscribeServe>::new(publisher.shared.clone(), stream);
 		assert!(!drive(&mut serve).await);
 
+		// The ranges stay as the SUBSCRIBE asked, so each update edits none of them.
 		let update = |wanted_group, priority| lite::SubscribeUpdate {
 			wanted_group,
 			order: crate::track::Order::Descending,
 			priority,
 			max_delay: Duration::ZERO,
-			ranges: vec![lite::Range::span(Some(1), 0, None, None)],
+			ranges: lite::RangeEdit::Edit {
+				remove: Vec::new(),
+				add: Vec::new(),
+			},
 		};
 		session.push(&update(Some(2), 3).encode_bytes(version).unwrap());
 		session.push(&update(Some(2), 7).encode_bytes(version).unwrap());
