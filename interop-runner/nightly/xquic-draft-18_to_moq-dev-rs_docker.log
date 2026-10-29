@@ -4,19 +4,19 @@ Running interop tests...
   Relay:  moq-interop-relay:local
   Client: ghcr.io/englishm/moq-interop-runner-xquic-moq-client-draft-18:latest
   URL:    https://relay:4443
-time="2026-10-29T01:56:59Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-10-29T01:56:59Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-10-29T01:56:59Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-10-29T01:56:59Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
-time="2026-10-29T01:56:59Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+time="2026-10-29T15:18:19Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-10-29T15:18:19Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-10-29T15:18:19Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-10-29T15:18:19Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+time="2026-10-29T15:18:19Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
  Container runner-upstream-test-client-1  Recreate
  Container runner-upstream-test-client-1  Recreated
 Attaching to relay-1, test-client-1
-relay-1        | [2m2026-10-29T01:56:59.731535Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
-relay-1        | [2m2026-10-29T01:56:59.731551Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
-relay-1        | [2m2026-10-29T01:56:59.731737Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m3919809255302418 [3mconfigured[0m[2m=[0mfalse
-relay-1        | [2m2026-10-29T01:56:59.731830Z[0m [32m INFO[0m [2mmoq_relay::relay[0m[2m:[0m listening [3maddr[0m[2m=[0m[::]:4443 [3mkind[0m[2m=[0m"quic"
-relay-1        | [2m2026-10-29T01:56:59.731979Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
+relay-1        | [2m2026-10-29T15:18:20.151786Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
+relay-1        | [2m2026-10-29T15:18:20.151804Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
+relay-1        | [2m2026-10-29T15:18:20.152017Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m6820372994706844 [3mconfigured[0m[2m=[0mfalse
+relay-1        | [2m2026-10-29T15:18:20.152063Z[0m [32m INFO[0m [2mmoq_relay::relay[0m[2m:[0m listening [3maddr[0m[2m=[0m[::]:4443 [3mkind[0m[2m=[0m"quic"
+relay-1        | [2m2026-10-29T15:18:20.152296Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
 test-client-1  | error: draft-18 interop cases currently support raw QUIC (moqt://) only
 [Ktest-client-1 exited with code 127
 Aborting on container exit...

@@ -4,11 +4,11 @@ Running interop tests...
   Relay:  ghcr.io/englishm/moq-interop-runner-xquic-moq-relay-draft-18:latest
   Client: ghcr.io/englishm/moq-interop-runner-moq-dev-js-client:latest
   URL:    moqt://relay:4443
-time="2026-10-29T01:59:16Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-10-29T01:59:16Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-10-29T01:59:16Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-10-29T01:59:16Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
-time="2026-10-29T01:59:16Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+time="2026-10-29T15:20:40Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-10-29T15:20:40Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-10-29T15:20:40Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-10-29T15:20:40Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+time="2026-10-29T15:20:40Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
  Container runner-upstream-relay-1  Recreate
  Container runner-upstream-relay-1  Recreated
  Container runner-upstream-test-client-1  Recreate
@@ -23,20 +23,20 @@ test-client-1  | # moq-dev-js-client v0.1.0 (@moq/net 0.4.7)
 test-client-1  | # Relay: moqt://relay:4443
 test-client-1  | 1..8
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
-relay-1        | -- server_accept user_session :0x562a6f1dd200, user_conn: 0x562a6f1dd208
+relay-1        | -- server_accept user_session :0x559bd2865200, user_conn: 0x559bd2865208
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
 test-client-1  | not ok 1 - setup-only
 test-client-1  |   ---
-test-client-1  |   duration_ms: 2004
+test-client-1  |   duration_ms: 2005
 test-client-1  |   message: "timeout after 2000ms: connect"
 test-client-1  |   ...
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
-relay-1        | -- server_accept user_session :0x562a6f1fd9e0, user_conn: 0x562a6f1fd9e8
+relay-1        | -- server_accept user_session :0x559bd28859e0, user_conn: 0x559bd28859e8
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1599 (xqc_server_refuse)
-relay-1        | -- server_refuse user_session :0x562a6f1dd200, user_conn: 0x562a6f1dd208
+relay-1        | -- server_refuse user_session :0x559bd2865200, user_conn: 0x559bd2865208
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
-relay-1        | -- server_accept user_session :0x562a6f1e4600, user_conn: 0x562a6f1e4608
+relay-1        | -- server_accept user_session :0x559bd286c600, user_conn: 0x559bd286c608
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
 test-client-1  | not ok 2 - announce-only
 test-client-1  |   ---
@@ -44,139 +44,139 @@ test-client-1  |   duration_ms: 2003
 test-client-1  |   message: "timeout after 2000ms: connect"
 test-client-1  |   ...
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
-relay-1        | -- server_accept user_session :0x562a6f21f220, user_conn: 0x562a6f21f228
+relay-1        | -- server_accept user_session :0x559bd28a7360, user_conn: 0x559bd28a7368
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1599 (xqc_server_refuse)
-relay-1        | -- server_refuse user_session :0x562a6f1fd9e0, user_conn: 0x562a6f1fd9e8
+relay-1        | -- server_refuse user_session :0x559bd28859e0, user_conn: 0x559bd28859e8
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
-relay-1        | -- server_accept user_session :0x562a6f204f70, user_conn: 0x562a6f204f78
+relay-1        | -- server_accept user_session :0x559bd288d0b0, user_conn: 0x559bd288d0b8
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1599 (xqc_server_refuse)
-relay-1        | -- server_refuse user_session :0x562a6f1e4600, user_conn: 0x562a6f1e4608
+relay-1        | -- server_refuse user_session :0x559bd286c600, user_conn: 0x559bd286c608
 test-client-1  | not ok 3 - publish-namespace-done
 test-client-1  |   ---
-test-client-1  |   duration_ms: 2001
+test-client-1  |   duration_ms: 2002
 test-client-1  |   message: "timeout after 2000ms: connect"
 test-client-1  |   ...
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
-relay-1        | -- server_accept user_session :0x562a6f204870, user_conn: 0x562a6f204878
+relay-1        | -- server_accept user_session :0x559bd288c9b0, user_conn: 0x559bd288c9b8
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1599 (xqc_server_refuse)
-relay-1        | -- server_refuse user_session :0x562a6f21f220, user_conn: 0x562a6f21f228
+relay-1        | -- server_refuse user_session :0x559bd28a7360, user_conn: 0x559bd28a7368
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
-relay-1        | -- server_accept user_session :0x562a6f1e3a60, user_conn: 0x562a6f1e3a68
+relay-1        | -- server_accept user_session :0x559bd286ba60, user_conn: 0x559bd286ba68
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
-relay-1        | -- server_accept user_session :0x562a6f242d60, user_conn: 0x562a6f242d68
+relay-1        | -- server_accept user_session :0x559bd28caf30, user_conn: 0x559bd28caf38
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1599 (xqc_server_refuse)
-relay-1        | -- server_refuse user_session :0x562a6f204f70, user_conn: 0x562a6f204f78
+relay-1        | -- server_refuse user_session :0x559bd288d0b0, user_conn: 0x559bd288d0b8
 test-client-1  | not ok 4 - subscribe-namespace-lifecycle
 test-client-1  |   ---
-test-client-1  |   duration_ms: 2002
+test-client-1  |   duration_ms: 2001
 test-client-1  |   test_spec_revision: 1
 test-client-1  |   message: "timeout after 2000ms: subscriber connect"
 test-client-1  |   ...
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
-relay-1        | -- server_accept user_session :0x562a6f212fa0, user_conn: 0x562a6f212fa8
+relay-1        | -- server_accept user_session :0x559bd289b1c0, user_conn: 0x559bd289b1c8
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1599 (xqc_server_refuse)
-relay-1        | -- server_refuse user_session :0x562a6f204870, user_conn: 0x562a6f204878
+relay-1        | -- server_refuse user_session :0x559bd288c9b0, user_conn: 0x559bd288c9b8
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
-relay-1        | -- server_accept user_session :0x562a6f1d74e0, user_conn: 0x562a6f1d74e8
+relay-1        | -- server_accept user_session :0x559bd285f4e0, user_conn: 0x559bd285f4e8
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
-relay-1        | -- server_accept user_session :0x562a6f240250, user_conn: 0x562a6f240258
+relay-1        | -- server_accept user_session :0x559bd28c80c0, user_conn: 0x559bd28c80c8
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1599 (xqc_server_refuse)
-relay-1        | -- server_refuse user_session :0x562a6f1e3a60, user_conn: 0x562a6f1e3a68
+relay-1        | -- server_refuse user_session :0x559bd286ba60, user_conn: 0x559bd286ba68
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1599 (xqc_server_refuse)
-relay-1        | -- server_refuse user_session :0x562a6f242d60, user_conn: 0x562a6f242d68
+relay-1        | -- server_refuse user_session :0x559bd28caf30, user_conn: 0x559bd28caf38
 test-client-1  | not ok 5 - subscribe-error
 test-client-1  |   ---
 test-client-1  |   duration_ms: 2001
 test-client-1  |   message: "timeout after 2000ms: connect"
 test-client-1  |   ...
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
-relay-1        | -- server_accept user_session :0x562a6f211190, user_conn: 0x562a6f211198
+relay-1        | -- server_accept user_session :0x559bd28bf3e0, user_conn: 0x559bd28bf3e8
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1599 (xqc_server_refuse)
-relay-1        | -- server_refuse user_session :0x562a6f212fa0, user_conn: 0x562a6f212fa8
+relay-1        | -- server_refuse user_session :0x559bd289b1c0, user_conn: 0x559bd289b1c8
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
-relay-1        | -- server_accept user_session :0x562a6f212fa0, user_conn: 0x562a6f212fa8
+relay-1        | -- server_accept user_session :0x559bd289b1c0, user_conn: 0x559bd289b1c8
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
-relay-1        | -- server_accept user_session :0x562a6f26e4d0, user_conn: 0x562a6f26e4d8
+relay-1        | -- server_accept user_session :0x559bd28a6d60, user_conn: 0x559bd28a6d68
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1599 (xqc_server_refuse)
-relay-1        | -- server_refuse user_session :0x562a6f1d74e0, user_conn: 0x562a6f1d74e8
+relay-1        | -- server_refuse user_session :0x559bd285f4e0, user_conn: 0x559bd285f4e8
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1599 (xqc_server_refuse)
-relay-1        | -- server_refuse user_session :0x562a6f240250, user_conn: 0x562a6f240258
+relay-1        | -- server_refuse user_session :0x559bd28c80c0, user_conn: 0x559bd28c80c8
 test-client-1  | not ok 6 - announce-subscribe
 test-client-1  |   ---
 test-client-1  |   duration_ms: 2002
 test-client-1  |   message: "timeout after 2000ms: publisher connect"
 test-client-1  |   ...
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
-relay-1        | -- server_accept user_session :0x562a6f279670, user_conn: 0x562a6f279678
+relay-1        | -- server_accept user_session :0x559bd288c0e0, user_conn: 0x559bd288c0e8
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1599 (xqc_server_refuse)
-relay-1        | -- server_refuse user_session :0x562a6f211190, user_conn: 0x562a6f211198
+relay-1        | -- server_refuse user_session :0x559bd28bf3e0, user_conn: 0x559bd28bf3e8
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
-relay-1        | -- server_accept user_session :0x562a6f211190, user_conn: 0x562a6f211198
+relay-1        | -- server_accept user_session :0x559bd28bf3e0, user_conn: 0x559bd28bf3e8
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
-relay-1        | -- server_accept user_session :0x562a6f2482b0, user_conn: 0x562a6f2482b8
+relay-1        | -- server_accept user_session :0x559bd2890210, user_conn: 0x559bd2890218
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1599 (xqc_server_refuse)
-relay-1        | -- server_refuse user_session :0x562a6f212fa0, user_conn: 0x562a6f212fa8
+relay-1        | -- server_refuse user_session :0x559bd289b1c0, user_conn: 0x559bd289b1c8
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1599 (xqc_server_refuse)
-relay-1        | -- server_refuse user_session :0x562a6f26e4d0, user_conn: 0x562a6f26e4d8
+relay-1        | -- server_refuse user_session :0x559bd28a6d60, user_conn: 0x559bd28a6d68
 test-client-1  | not ok 7 - subscribe-before-announce
 test-client-1  |   ---
-test-client-1  |   duration_ms: 2001
+test-client-1  |   duration_ms: 2002
 test-client-1  |   message: "timeout after 2000ms: subscriber connect"
 test-client-1  |   ...
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
-relay-1        | -- server_accept user_session :0x562a6f27d550, user_conn: 0x562a6f27d558
+relay-1        | -- server_accept user_session :0x559bd289b1c0, user_conn: 0x559bd289b1c8
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1599 (xqc_server_refuse)
-relay-1        | -- server_refuse user_session :0x562a6f279670, user_conn: 0x562a6f279678
+relay-1        | -- server_refuse user_session :0x559bd288c0e0, user_conn: 0x559bd288c0e8
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
-relay-1        | -- server_accept user_session :0x562a6f279670, user_conn: 0x562a6f279678
+relay-1        | -- server_accept user_session :0x559bd288c0e0, user_conn: 0x559bd288c0e8
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
-relay-1        | -- server_accept user_session :0x562a6f1f1ea0, user_conn: 0x562a6f1f1ea8
+relay-1        | -- server_accept user_session :0x559bd28a6d60, user_conn: 0x559bd28a6d68
+relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
-relay-1        | -- server_accept user_session :0x562a6f2863c0, user_conn: 0x562a6f2863c8
-relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
-relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
-relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1599 (xqc_server_refuse)
-relay-1        | -- server_refuse user_session :0x562a6f211190, user_conn: 0x562a6f211198
-relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1599 (xqc_server_refuse)
-relay-1        | -- server_refuse user_session :0x562a6f2482b0, user_conn: 0x562a6f2482b8
-relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1599 (xqc_server_refuse)
-relay-1        | -- server_refuse user_session :0x562a6f27d550, user_conn: 0x562a6f27d558
-relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
-relay-1        | -- server_accept user_session :0x562a6f1eec60, user_conn: 0x562a6f1eec68
-relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
-relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
-relay-1        | -- server_accept user_session :0x562a6f27d550, user_conn: 0x562a6f27d558
-relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
-relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
-relay-1        | -- server_accept user_session :0x562a6f213ed0, user_conn: 0x562a6f213ed8
+relay-1        | -- server_accept user_session :0x559bd290e5f0, user_conn: 0x559bd290e5f8
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1599 (xqc_server_refuse)
-relay-1        | -- server_refuse user_session :0x562a6f279670, user_conn: 0x562a6f279678
+relay-1        | -- server_refuse user_session :0x559bd28bf3e0, user_conn: 0x559bd28bf3e8
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1599 (xqc_server_refuse)
-relay-1        | -- server_refuse user_session :0x562a6f1f1ea0, user_conn: 0x562a6f1f1ea8
+relay-1        | -- server_refuse user_session :0x559bd2890210, user_conn: 0x559bd2890218
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1599 (xqc_server_refuse)
-relay-1        | -- server_refuse user_session :0x562a6f2863c0, user_conn: 0x562a6f2863c8
+relay-1        | -- server_refuse user_session :0x559bd289b1c0, user_conn: 0x559bd289b1c8
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
-relay-1        | -- server_accept user_session :0x562a6f279670, user_conn: 0x562a6f279678
+relay-1        | -- server_accept user_session :0x559bd289b1c0, user_conn: 0x559bd289b1c8
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
-relay-1        | -- server_accept user_session :0x562a6f27b5a0, user_conn: 0x562a6f27b5a8
+relay-1        | -- server_accept user_session :0x559bd28bd9a0, user_conn: 0x559bd28bd9a8
+relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
+relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
+relay-1        | -- server_accept user_session :0x559bd28c5680, user_conn: 0x559bd28c5688
+relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
+relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1599 (xqc_server_refuse)
+relay-1        | -- server_refuse user_session :0x559bd288c0e0, user_conn: 0x559bd288c0e8
+relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1599 (xqc_server_refuse)
+relay-1        | -- server_refuse user_session :0x559bd28a6d60, user_conn: 0x559bd28a6d68
+relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1599 (xqc_server_refuse)
+relay-1        | -- server_refuse user_session :0x559bd290e5f0, user_conn: 0x559bd290e5f8
+relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
+relay-1        | -- server_accept user_session :0x559bd288c0e0, user_conn: 0x559bd288c0e8
+relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
+relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
+relay-1        | -- server_accept user_session :0x559bd28a6d60, user_conn: 0x559bd28a6d68
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
 test-client-1  | not ok 8 - data-subgroup-basic
 test-client-1  |   ---

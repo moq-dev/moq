@@ -4,11 +4,11 @@ Running interop tests...
   Relay:  ghcr.io/eyevinn/mlmrel:latest
   Client: ghcr.io/englishm/moq-interop-runner-moq-dev-js-client:latest
   URL:    moqt://relay:4443
-time="2026-10-29T01:58:55Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-10-29T01:58:55Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-10-29T01:58:55Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-10-29T01:58:55Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
-time="2026-10-29T01:58:55Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+time="2026-10-29T15:20:19Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-10-29T15:20:19Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-10-29T15:20:19Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-10-29T15:20:19Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+time="2026-10-29T15:20:19Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
  Container runner-upstream-relay-1  Recreate
  Container runner-upstream-relay-1  Recreated
  Container runner-upstream-test-client-1  Recreate
@@ -19,15 +19,15 @@ relay-1        |   Cert: /certs/cert.pem
 relay-1        |   Key:  /certs/priv.key
 relay-1        |   Mlog: /mlog
 relay-1        | WARNING: /mlog is not writable; qlog goes to stderr
-relay-1        | time=2026-10-29T01:58:56.098Z level=INFO msg="Starting MoQ server" addr=0.0.0.0:4443
-relay-1        | time=2026-10-29T01:58:56.099Z level=INFO msg="failed to sufficiently increase receive buffer size (was: 1024 kiB, wanted: 7168 kiB, got: 2048 kiB). See https://github.com/quic-go/quic-go/wiki/UDP-Buffer-Sizes for details."
+relay-1        | time=2026-10-29T15:20:19.730Z level=INFO msg="Starting MoQ server" addr=0.0.0.0:4443
+relay-1        | time=2026-10-29T15:20:19.731Z level=INFO msg="failed to sufficiently increase receive buffer size (was: 1024 kiB, wanted: 7168 kiB, got: 2048 kiB). See https://github.com/quic-go/quic-go/wiki/UDP-Buffer-Sizes for details."
 test-client-1  | TAP version 14
 test-client-1  | # moq-dev-js-client v0.1.0 (@moq/net 0.4.7)
 test-client-1  | # Relay: moqt://relay:4443
 test-client-1  | 1..8
 test-client-1  | not ok 1 - setup-only
 test-client-1  |   ---
-test-client-1  |   duration_ms: 504
+test-client-1  |   duration_ms: 506
 test-client-1  |   message: ""
 test-client-1  |   ...
 test-client-1  | not ok 2 - announce-only
@@ -48,22 +48,22 @@ test-client-1  |   message: ""
 test-client-1  |   ...
 test-client-1  | not ok 5 - subscribe-error
 test-client-1  |   ---
-test-client-1  |   duration_ms: 501
+test-client-1  |   duration_ms: 502
 test-client-1  |   message: ""
 test-client-1  |   ...
 test-client-1  | not ok 6 - announce-subscribe
 test-client-1  |   ---
-test-client-1  |   duration_ms: 503
+test-client-1  |   duration_ms: 502
 test-client-1  |   message: ""
 test-client-1  |   ...
 test-client-1  | not ok 7 - subscribe-before-announce
 test-client-1  |   ---
-test-client-1  |   duration_ms: 502
+test-client-1  |   duration_ms: 501
 test-client-1  |   message: ""
 test-client-1  |   ...
 test-client-1  | not ok 8 - data-subgroup-basic
 test-client-1  |   ---
-test-client-1  |   duration_ms: 502
+test-client-1  |   duration_ms: 503
 test-client-1  |   test_spec_revision: 2
 test-client-1  |   message: ""
 test-client-1  |   ...
