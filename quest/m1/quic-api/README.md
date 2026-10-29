@@ -9,7 +9,8 @@ error type per direction, terminal operations that consume their handle,
 plain config structs, and no quinn compatibility baggage. Consumers lose the
 workarounds quinn's shape forced on them.
 
-Non-goals: the congestion controller API (redesigned in another quest), a
+Non-goals: the congestion controller API
+([its names](/quest/m1/api-audit/congestion-names.md)), a
 buffer pool ([QUIC I/O boundary](/quest/m2/quic-io-boundary.md)), and the
 non-QUIC backends' move off `web_transport_trait`, which has landed.
 

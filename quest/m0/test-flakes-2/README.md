@@ -52,5 +52,5 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [FFI publisher audio gaps](/quest/m0/test-flakes-2/ffi-audio-gap.md) - interop tone checks stop finding gaps from FFI publishers
 - [IETF22 fallback](/quest/m0/test-flakes-2/ietf22-fallback.md) - an IETF22 browser viewer follows a fallback within the media lane's bound, keeping its session and its audio
+- [Tests own their temp directories](/quest/m0/test-flakes-2/temp-paths.md) - concurrent test processes stop overwriting each other's fixed temp files
