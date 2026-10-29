@@ -66,7 +66,9 @@ int32_t moq_origin_announced_cancel(uint32_t announced);
 // config (NULL for everything): filter is relative to the literal prefix, or NULL for **. hidden also lists `.`-named paths. Updates stay relative to the origin.
 
 // Publishing: Announcement (a publication from moq_origin_create_broadcast or moq_broadcast_prepared_publish)
-int32_t moq_publication_announce(uint32_t publication, const moq_route *route);
+int32_t moq_publication_announce(uint32_t publication, const moq_announce_route *route);
+// route (NULL for the default): a cost and an optional epoch from moq_mint_epoch. Hops are the origin's to add.
+int32_t moq_mint_epoch(char *dst, uintptr_t dst_len);
 int32_t moq_publication_unannounce(uint32_t publication);
 int32_t moq_publication_free(uint32_t publication);
 

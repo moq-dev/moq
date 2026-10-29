@@ -20,7 +20,7 @@ payloads follow [moq-e2ee](/draft/moq-e2ee). See [Encryption](#encryption).
 
 `catalog.json` is a JSON track listing the renditions of each media kind and
 the decoder config for each. It updates live as tracks come and go, and is a
-[compressed track](/concept/moq-lite#subscriptions), so a reader sees plain JSON
+[compressed track](/concept/compression), so a reader sees plain JSON
 whether or not its session carries the compression.
 
 ```json
