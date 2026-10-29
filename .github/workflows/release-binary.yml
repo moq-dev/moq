@@ -206,7 +206,7 @@ jobs:
           name: ${{ inputs.crate }}-${{ matrix.target }}
           path: dist/*
 
-  # Signs a build provenance attestation over every attached file, so a user
+  # Signs a build provenance attestation over every built file, so a user
   # can check one came from this workflow with `gh attestation verify` instead
   # of trusting the SHA256SUMS uploaded beside it. Its own job keeps the
   # signing grant off the build jobs, which run on nightly dry runs too, and

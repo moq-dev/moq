@@ -72,11 +72,11 @@ Static binaries for Linux (x86\_64, aarch64), macOS (Apple Silicon), and Windows
 source. Nix asks before trusting it; `--accept-flake-config` says yes for one
 command.
 
-Each file attached to a `moq` or `moq-relay` release carries a build
-provenance attestation; older releases have none. `SHA256SUMS` comes from the
-same release, so it only catches a corrupt download. To check that a file was
-built by this repository's release workflow, use the
-[GitHub CLI](https://cli.github.com/):
+Every archive, binary, and package attached to a `moq` or `moq-relay` release
+carries a build provenance attestation; older releases have none.
+`SHA256SUMS` comes from the same release, so it only catches a corrupt
+download. To check that a file was built by this repository's release
+workflow, use the [GitHub CLI](https://cli.github.com/):
 
 ```bash
 gh attestation verify moq-cli-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz \
