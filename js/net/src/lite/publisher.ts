@@ -1,4 +1,4 @@
-import { Instant, Milli, Nano, now, sleep } from "@moq/clock";
+import { Instant, Milli, Nano, now, sleep, yieldNow } from "@moq/clock";
 import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Gate } from "../auth_gate.ts";
@@ -15,13 +15,12 @@ import { finalSequence, hiddenBelow, hooks, insertRun, presented, type Run, runG
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Priority, sendOrder } from "../priority.ts";
-import { type Reader, type Stream, Writer } from "../stream.ts";
+import { concat, encodeVarint, type Reader, type Stream, type StreamVersion, Writer } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { nextChange } from "../util/change.ts";
 import { untilGivenUp } from "../util/given_up.ts";
-import { nextTask } from "../util/yield.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
 import { AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
@@ -66,6 +65,19 @@ const PROBE_RTT_DELTA = 0.25;
 /** Map a signed delta to an unsigned zigzag varint value (mirrors Rust `varint::zigzag`). */
 function zigzag(delta: bigint): bigint {
 	return delta >= 0n ? delta << 1n : (-delta << 1n) - 1n;
+}
+
+/**
+ * A frame's fields ahead of its payload, built in memory for one write: a stream write is far
+ * costlier than a varint, and a backlog pays it for every frame. The timestamp `delta` is present
+ * when the track is stamped, and `inflated` when the frame was decompressed.
+ */
+function frameHeader(version: StreamVersion, delta: bigint | undefined, inflated: number | undefined, size: number) {
+	const parts: Uint8Array[] = [];
+	if (delta !== undefined) parts.push(encodeVarint(zigzag(delta), version));
+	if (inflated !== undefined) parts.push(encodeVarint(inflated, version));
+	parts.push(encodeVarint(size, version));
+	return concat(parts);
 }
 
 /** How a lite hop stamps a track's frames and datagrams. */
@@ -1001,7 +1013,7 @@ export class Publisher {
 		let fetched: group.Consumer | undefined;
 		const watch = this.#gate.watch(msg.broadcast, () => {
 			console.debug(`fetch revoked: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group}`);
-			fetched?.close(revoked);
+			if (fetched) hooks.releaseGroupReader(fetched, revoked);
 			stream.abort(revoked);
 		});
 		try {
@@ -1075,7 +1087,7 @@ export class Publisher {
 				serving(group);
 				// Revoked while the group resolved: the watch already reset the stream.
 				if (watch.revoked()) {
-					group.close(unauthorized(msg.broadcast));
+					hooks.releaseGroupReader(group, unauthorized(msg.broadcast));
 					return;
 				}
 				await this.#runFetchGroup(group, stream.writer, {
@@ -1093,7 +1105,7 @@ export class Publisher {
 				console.warn(
 					`fetch error: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group} error=${reason(e)}`,
 				);
-				group?.close(e);
+				if (group) hooks.releaseGroupReader(group, e);
 				stream.abort(e);
 			}
 		} finally {
@@ -1177,7 +1189,7 @@ export class Publisher {
 		// Lite cannot name a frame, so a mid-group end rounds up past its group, whose own
 		// stream FIN says where it stops.
 		const boundary = () => {
-			const end = track.end();
+			const end = hooks.subscriberEnd(track);
 			return end ? finalSequence(end) : (hooks.latestSequence(track) ?? -1) + 1;
 		};
 
@@ -1210,6 +1222,9 @@ export class Publisher {
 			for (;;) {
 				if (startSequence !== undefined && skipped.length > 0) {
 					for (const range of skipped) {
+						// What was given up below the start is never named, so a wider budget may serve it.
+						if (range.start < startSequence)
+							hooks.unreport(track, range.start, Math.min(range.end, startSequence));
 						if (!(await drop(Math.max(range.start, startSequence), range.end, range.error))) return false;
 					}
 					skipped.length = 0;
@@ -1267,10 +1282,11 @@ export class Publisher {
 							moveCursor();
 							// A microtask is too short: decoding one framed update crosses several
 							// awaits, each of which can requeue behind the serving continuation. A
-							// task boundary lets the decoder finish whatever the transport already
-							// delivered before the next group pop. Updates are rare, so groups do
-							// not pay this scheduling cost on the normal path.
-							await nextTask();
+							// task boundary usually lets the decoder finish whatever the transport
+							// already delivered before the next group pop. It orders nothing: an update
+							// decoded later applies from the pop after it. Updates are rare, so groups
+							// do not pay this scheduling cost on the normal path.
+							await yieldNow();
 							continue;
 						}
 					}
@@ -1320,7 +1336,7 @@ export class Publisher {
 							}
 						}
 						// A declared end goes out while lower groups are still being produced.
-						if (!endSent && track.end() !== undefined) {
+						if (!endSent && hooks.subscriberEnd(track) !== undefined) {
 							if (!(await sendEnd())) return false;
 							continue;
 						}
@@ -1612,7 +1628,7 @@ export class Publisher {
 	/**
 	 * Forwards a track's datagrams best-effort over QUIC datagrams (lite-05 §6.4), parallel to
 	 * its groups. Each datagram is dropped (there is no group fallback) if the encoded body
-	 * doesn't fit the transport's datagram limit or the send fails. Returns once the track
+	 * doesn't fit the wire and transport datagram limits or the send fails. Returns once the track
 	 * finishes; a failure never tears down the subscription.
 	 *
 	 * @internal
@@ -1629,7 +1645,7 @@ export class Publisher {
 		const { sub, stamp, served, bounds } = options;
 		const writer = this.#datagramWriter;
 		if (!writer) return; // Only reached with a writer (see the #datagramWriter gate).
-		const maxSize = DatagramStream.maxDatagramSize(this.#quic);
+		const maxSize = Math.min(DatagramMessage.MAX_SIZE, DatagramStream.maxDatagramSize(this.#quic));
 
 		try {
 			for (;;) {
@@ -1672,10 +1688,11 @@ export class Publisher {
 		// The response carries no header, so the receiver numbers the first frame it gets
 		// as `startFrame`. Skipping the head here is the only thing keeping those numbers
 		// honest; a group that ends before we reach it can't be served at all.
-		for (let i = 0; i < startFrame; i++) {
+		if (hooks.groupIndex(group) > startFrame) throw new Error(`group lacks frame ${startFrame}`);
+		while (hooks.groupIndex(group) < startFrame) {
 			const skipped = await race([hooks.readGroupFrame(group, compress), stream.closed]);
 			if (!skipped) {
-				throw new Error(`fetch group ended at frame ${i}, before the requested start ${startFrame}`);
+				throw new Error(`fetch group ended before the requested start ${startFrame}`);
 			}
 		}
 
@@ -1685,14 +1702,14 @@ export class Publisher {
 			if (!read) break;
 			const frame = read.frame;
 
+			let delta: bigint | undefined;
 			if (stamp !== undefined) {
 				const ts = BigInt(wireTime(frame.timestamp, stamp));
-				await stream.u62(zigzag(ts - prevTs));
+				delta = ts - prevTs;
 				prevTs = ts;
 			}
 
-			if (read.inflated !== undefined) await stream.u53(read.inflated);
-			await stream.u53(frame.payload.byteLength);
+			await stream.write(frameHeader(stream.version, delta, read.inflated, frame.payload.byteLength));
 			if (frame.payload.length > 0) await stream.write(frame.payload);
 		}
 	}
@@ -1733,13 +1750,13 @@ export class Publisher {
 			}
 			if (!stream) {
 				const failed = failure ?? new Error("no stream slot");
-				group.close(failed);
+				hooks.releaseGroupReader(group, failed);
 				return failed;
 			}
 			return stream;
 		} catch (err: unknown) {
 			const failed = error(err);
-			group.close(failed);
+			hooks.releaseGroupReader(group, failed);
 			return failed;
 		}
 	}
@@ -1751,8 +1768,7 @@ export class Publisher {
 	 */
 	async #serveGroup(stream: Writer, options: RunGroup) {
 		const { sub, group, stamp, compress, priority, start: startFrame, end: endFrame } = options;
-		// This model holds whole groups, so frame `startFrame` is always reachable unless
-		// the group ends first. Declaring it up front keeps the stream self-describing.
+		// The header names the requested position, so a copy missing it must be refused.
 		const msg = new GroupMessage({ subscribe: sub, sequence: group.sequence, frameStart: startFrame });
 		// The subscription's budget, or an eviction of what is left to read, may give up on the
 		// group mid-write, which abandons the stream. A group already given up never starts the write.
@@ -1763,6 +1779,7 @@ export class Publisher {
 		// Everything past this point runs inside the cleanup scope, so a failure never leaves
 		// a finished group's stream being ranked.
 		try {
+			if (hooks.groupIndex(group) > startFrame) throw new Error(`group lacks frame ${startFrame}`);
 			// A SUBSCRIBE_UPDATE re-ranks the subscription, so a group already on the wire
 			// follows it too rather than keeping a stale rank until it finishes.
 			priority.add(stream, group.sequence, startFrame);
@@ -1774,8 +1791,8 @@ export class Publisher {
 
 			let prevTs = 0n;
 			// Whether the cursor ever reached the requested start, which decides how the
-			// end of the group is read below.
-			let reached = startFrame === 0;
+			// end of the group is read below. A received tail may already begin there.
+			let reached = hooks.groupIndex(group) === startFrame;
 
 			for (;;) {
 				const read = await race([hooks.readGroupFrame(group, compress), stream.closed]);
@@ -1795,16 +1812,16 @@ export class Publisher {
 				if (read.sequence < startFrame) continue;
 				if (endFrame !== undefined && read.sequence > endFrame) break;
 
+				let delta: bigint | undefined;
 				if (stamp !== undefined) {
 					// Convert each frame to the track's wire timescale.
 					const ts = BigInt(wireTime(read.frame.timestamp, stamp));
-					await write(() => stream.u62(zigzag(ts - prevTs)));
+					delta = ts - prevTs;
 					prevTs = ts;
 				}
 
-				const inflated = read.inflated;
-				if (inflated !== undefined) await write(() => stream.u53(inflated));
-				await write(() => stream.u53(read.frame.payload.byteLength));
+				const header = frameHeader(stream.version, delta, read.inflated, read.frame.payload.byteLength);
+				await write(() => stream.write(header));
 				if (read.frame.payload.length > 0) await write(() => stream.write(read.frame.payload));
 			}
 
@@ -1818,7 +1835,7 @@ export class Publisher {
 		} catch (err: unknown) {
 			const e = error(err);
 			stream.reset(e);
-			group.close(e);
+			hooks.releaseGroupReader(group, e);
 			return e;
 		} finally {
 			priority.remove(stream);

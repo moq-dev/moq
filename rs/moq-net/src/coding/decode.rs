@@ -6,13 +6,15 @@ use super::{BoundsExceeded, Form, varint};
 /// Read the value from a [`Decoder`] using the given version.
 ///
 /// If [DecodeError::Short] is returned, the caller should try again with more data.
+/// The value may borrow from the buffer for `'a`, so only a caller that keeps a field
+/// copies it; an owned value implements this for every `'a`.
 #[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-pub trait Decode<V>: Sized {
+pub trait Decode<'a, V>: Sized {
 	/// Decode the value from the front of the decoder.
-	fn decode(r: &mut Decoder<'_>, version: V) -> Result<Self, DecodeError>;
+	fn decode(r: &mut Decoder<'a>, version: V) -> Result<Self, DecodeError>;
 
 	/// Decode the value from the front of `buf`, returning it and the bytes it took.
-	fn decode_slice(buf: &[u8], version: V) -> Result<(Self, usize), DecodeError>
+	fn decode_slice(buf: &'a [u8], version: V) -> Result<(Self, usize), DecodeError>
 	where
 		V: Into<Form> + Copy,
 	{
@@ -71,21 +73,9 @@ pub enum DecodeError {
 		max: usize,
 	},
 
-	/// The stream ended where a payload was required.
-	#[error("expected data")]
-	ExpectedData,
-
 	/// A parameter or field appeared more than once.
 	#[error("duplicate")]
 	Duplicate,
-
-	/// A required parameter or field was absent.
-	#[error("missing")]
-	Missing,
-
-	/// The value is well-formed but this implementation does not handle it.
-	#[error("unsupported")]
-	Unsupported,
 
 	/// Bytes remained after the value was fully decoded.
 	#[error("trailing bytes")]
@@ -142,7 +132,7 @@ pub struct Decoder<'a> {
 	/// See [`Self::need`].
 	need: usize,
 	/// The control message read, counted once the read is consumed.
-	pub(crate) control: Option<crate::stats::Control>,
+	pub(crate) control: Option<crate::stats::Message>,
 	/// Leading bytes left out of the `control` count: a type selector the sender writes
 	/// apart from the message, and so never counts.
 	pub(crate) uncounted: usize,
@@ -184,7 +174,7 @@ impl<'a> Decoder<'a> {
 	}
 
 	/// How many bytes have been read.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn position(&self) -> usize {
 		self.len - self.buf.len()
 	}
@@ -276,10 +266,21 @@ impl<'a> Decoder<'a> {
 		self.slice(len).inspect_err(|_| self.buf = start)
 	}
 
+	/// Read a varint length, then that many bytes of UTF-8, borrowed from the buffer.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub fn str(&mut self) -> Result<&'a str, DecodeError> {
+		let bytes = self.bytes()?;
+		match std::str::from_utf8(bytes) {
+			Ok(s) => Ok(s),
+			// The error carries an owned copy, so only invalid input pays for one.
+			Err(_) => Err(String::from_utf8(bytes.to_vec()).unwrap_err().into()),
+		}
+	}
+
 	/// Read a varint length, then that many bytes of UTF-8.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn string(&mut self) -> Result<String, DecodeError> {
-		Ok(String::from_utf8(self.bytes()?.to_vec())?)
+		Ok(self.str()?.to_owned())
 	}
 }
 

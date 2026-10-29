@@ -22,7 +22,7 @@ wakeups a latency sample needs.
 Add one method to `SendStream`, in the trait's poll style:
 
 ```rust
-fn poll_acked(&mut self, cx: &mut Context, offset: u64) -> Poll<Result<Option<()>, Self::Error>>;
+fn poll_acked(&self, waiter: &kio::Waiter, offset: u64) -> Poll<Result<Option<()>, Self::Error>>;
 ```
 
 It is ready with `Some` once every byte below `offset` has been acknowledged.
@@ -44,8 +44,8 @@ with an async wrapper:
 
 ```rust
 impl send::Stream {
-    pub fn poll_acked(&mut self, cx: &mut Context<'_>, offset: u64) -> Poll<Result<(), send::Error>>;
-    pub async fn acked(&mut self, offset: u64) -> Result<(), send::Error>;
+    pub fn poll_acked(&self, waiter: &kio::Waiter, offset: u64) -> Poll<Result<(), send::Error>>;
+    pub async fn acked(&self, offset: u64) -> Result<(), send::Error>;
 }
 ```
 
@@ -54,28 +54,24 @@ The same pair goes on `send::Finished`, the handle `finish(self)` returns
 opaque `send::Offset`, the methods take it instead of a `u64`. The
 `send::Error` says why the bytes will never be acknowledged: a reset, the
 peer's STOP_SENDING, the connection's loss, or an offset past the data
-written. Both drivers sit on `moq-quic`'s `send::Stream::acked(offset)`, whose
-`false` asks for a `stream::Event::Acked { id, offset }` once the acknowledged
-prefix reaches the offset. Neither driver handles that event today
-(moq-tokio's catch-all arm, moq-uring's `sweep_stream`), so waking the
-stream's waiter on it is the core of the work. Four traps:
+written. Both drivers forward to `moq-quic`'s own `poll_acked` wait, which
+[waits](/quest/m1/quic-api/waits.md) makes of today's `acked(offset)` and
+`StreamEvent::Acked`. Four traps, each settled in moq-quic where the wait
+lives:
 
-- Once a stream is freed, `acked` fails with `ClosedStream`, which cannot tell
-  a finished stream whose every byte was acknowledged from a reset one. The
-  driver answers from how the handle saw the stream end: finished, with no
-  reset or STOP_SENDING, means delivered. moq-uring's driver already records
-  that end; moq-tokio's handle tracks `finished` and, since #6196, the reset.
-- `moq-quic`'s `acked` panics on an offset past the data written to an
-  unreset stream. The driver returns the error instead, since a panic under
-  the connection lock poisons it for every handle. (Once quic-api streams
-  lands, `moq-quic` returns the error itself.)
+- A finished stream whose every byte was acknowledged must not look like a
+  reset one. moq-quic answers from the queryable send-stream end
+  [streams](/quest/m1/quic-api/streams.md) keeps until the id is released:
+  finished, with no reset or STOP_SENDING, means delivered.
+- An offset past the data written returns an error, never a panic, since a
+  panic under the connection lock poisons it for every handle (streams
+  makes moq-quic return it).
 - `reset_at` below the acknowledged prefix, or STOP_SENDING after a reset
-  (which truncates to 0), reports `Acked` with a smaller offset than before.
-  The waiters fail anyway, but the event's doc promises a prefix; make the
-  reported offset monotonic or document the exception.
+  (which truncates to 0), shrinks the acknowledged prefix. The waiters fail
+  anyway; keep the prefix a `poll_acked` reports monotonic.
 - The offset counts bytes on the QUIC stream. The trait method takes a byte
-  offset, like `moq-quic` (decided 2026-10-17 on #5817), and the starvation
-  quest's writer counts the bytes it writes, so neither driver needs a public
+  offset, like `moq-quic` (decided 2026-10-17 on #5817), and the lag
+  histogram's writer counts the bytes it writes, so neither driver needs a public
   `offset()`. A layer that writes its own prefix adds its length: `quic::web`
   already tracks its WebTransport header for `reset_at`.
 
@@ -83,13 +79,16 @@ The moq-tokio and moq-uring adapters implement the trait method over the
 driver's. Leave the browser transport on the default; the browser's `WebTransportSendStream.getStats()` is
 unimplemented in shipping Chrome and its `bytesAcknowledged` is at risk in the
 W3C draft. Decided 2026-10-22 (maintainer): qmux's `poll_acked` reports
-unsupported too, since writing into TCP is not delivery; over qmux the
-histogram stays at group granularity.
+unsupported too, since writing into TCP is not delivery. Decided 2026-10-26
+(maintainer, on [moq-dev/moq#6791](https://github.com/moq-dev/moq/pull/6791)):
+over qmux and the browser transport, the lag histogram, `dropped`, and the
+delivery-delay histogram are absent, never zero; group granularity is
+rejected as a fallback.
 
-Acceptance includes the first two traps, in each driver: a finished stream
-that `moq-quic` has freed (so it answers `ClosedStream`) resolves `poll_acked`
-as delivered, while a reset one resolves it with the error; and an offset past
-the data written returns an error, not a panic, before and after finish.
+Acceptance includes the first two traps, through each driver: a finished
+stream whose bytes were all acknowledged resolves `poll_acked` as delivered,
+while a reset one resolves it with the error; and an offset past the data
+written returns an error, not a panic, before and after finish.
 
 Tests also cover: offset already acknowledged before the first poll, an
 offset in the middle of an in-flight frame, several waiters on one stream in
@@ -97,15 +96,11 @@ offset order, reset by sender, STOP_SENDING by the receiver, and session
 close.
 
 
-Decided in the 2026-09-30 audit: moved to m2 with its only consumer,
-[frame-granularity starvation](/quest/m2/starvation-frames.md).
+Decided in the 2026-09-30 audit: moved to m2 with its consumers, the
+[viewer lag histogram](/quest/m2/qos/lag-histogram.md) and the
+[delivery-delay histogram](/quest/m2/delivery-delay.md).
 
 ## Required
 
-- [QUIC driver poll waits](/quest/m1/quic-api/poll.md) - the leak-free poll
-  shape and waiter lists `poll_acked` joins
-
-## Related
-
-- [Starvation at frame granularity](/quest/m2/starvation-frames.md) - the
-  moq-net consumer
+- [QUIC driver poll waits](/quest/m1/quic-api/poll.md) - the `&self, &kio::Waiter`
+  driver shape `poll_acked` takes

@@ -13,7 +13,7 @@ use support::harness::{MockConnectOptions, connect_mock};
 /// and through a forwarding origin, even beyond JavaScript's exact number range.
 #[moq_clock::test]
 async fn largest_quic_sequence_reaches_the_subscriber() {
-	for alpn in ["moq-lite-02", "moq-lite-06", "moq-transport-19"] {
+	for alpn in ["moq-lite-02", "moq-lite-06", "moq-transport-18"] {
 		for relayed in [false, true] {
 			let version: Version = alpn.parse().unwrap();
 			let publisher = produce_origin(1);
@@ -35,8 +35,13 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 			} else {
 				None
 			};
-			client.consume().routed("ladder").await.unwrap();
-			let remote = client.consume().request_broadcast("ladder", None).await.unwrap();
+			let remote = client
+				.consume()
+				.follow("ladder", None)
+				.unwrap()
+				.available()
+				.await
+				.unwrap();
 			let mut sub = remote.track("data").unwrap().subscribe(None).await.unwrap();
 			for sequence in [5, 1 << 32, (1 << 53) - 1, (1 << 53) + 1, (1 << 62) - 1] {
 				// Timestamps stop at 2^61 - 1, the most lite-05/06 can zigzag as a first frame.
@@ -53,7 +58,7 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 				let frame = got.read_frame().await.unwrap().unwrap();
 				assert_eq!(frame.payload, b"ladder".as_ref());
 				// Lite-02 carries no timestamps, and a lite-06 subscriber drops them.
-				let timed = alpn == "moq-transport-19";
+				let timed = alpn == "moq-transport-18";
 				assert_eq!(frame.timestamp, timed.then_some(timestamp), "{alpn} relayed={relayed}");
 			}
 		}
@@ -100,14 +105,18 @@ async fn wide_sequence_fails_only_its_subscription() {
 	let _downstream = connect_mock(options).await;
 
 	// lite-07 carries the full 64 bits, so the relay holds the group.
-	relay.consume().routed("bench").await.unwrap();
-	let cached = relay.consume().request_broadcast("bench", None).await.unwrap();
+	let cached = relay
+		.consume()
+		.follow("bench", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap();
 	let mut sub = cached.track("wide").unwrap().subscribe(None).await.unwrap();
 	assert_eq!(sub.recv_group().await.unwrap().unwrap().sequence, WIDE);
 
 	let consumer = client.consume();
-	consumer.routed("bench").await.unwrap();
-	let remote = consumer.request_broadcast("bench", None).await.unwrap();
+	let remote = consumer.follow("bench", None).unwrap().available().await.unwrap();
 
 	let result = moq_clock::timeout(Duration::from_secs(5), async {
 		let mut sub = remote.track("wide").unwrap().subscribe(None).await?;
@@ -156,8 +165,7 @@ async fn a_later_wide_group_fails_only_that_subscription() {
 	let _downstream = connect_mock(options).await;
 
 	let consumer = client.consume();
-	consumer.routed("bench").await.unwrap();
-	let remote = consumer.request_broadcast("bench", None).await.unwrap();
+	let remote = consumer.follow("bench", None).unwrap().available().await.unwrap();
 
 	let mut sub = remote.track("wide").unwrap().subscribe(None).await.unwrap();
 	let mut group = sub.recv_group().await.unwrap().unwrap();

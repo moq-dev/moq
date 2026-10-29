@@ -21,7 +21,10 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 
 fn client() -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
-	config.websocket.delay = Some((Duration::ZERO).into());
+	#[cfg(feature = "websocket")]
+	{
+		config.websocket.delay = Some((Duration::ZERO).into());
+	}
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
 	config
 		.init(Default::default())
@@ -116,10 +119,7 @@ async fn first_broadcast(url: url::Url) -> String {
 	.expect("announcement timeout");
 	let name = update.prefix.to_string();
 
-	let broadcast = consumer
-		.request_broadcast(&name, None)
-		.await
-		.expect("broadcast resolves");
+	let broadcast = consumer.request(&name, None).await.expect("broadcast resolves");
 	let mut track = broadcast
 		.track("video")
 		.unwrap()

@@ -35,7 +35,6 @@ see [Applications](/bin/). [Examples](/setup/examples) links runnable consumers;
 | [moq-auth](/lib/rs/moq-auth) | Relay authorization: JWT signing and verification, and the auth server contract. |
 | [moq-room](/lib/rs/moq-room) | Workspace-only native rooms; use the published JS room API for applications. |
 | [moq-json](/lib/rs/moq-json) | JSON over tracks: snapshots with merge-patch deltas, or append logs. |
-| [moq-flate](/lib/rs/moq-flate) | Opaque payloads over tracks, optionally compressed with group-scoped DEFLATE: snapshots or append logs. |
 | [moq-e2ee](https://github.com/moq-dev/moq/tree/main/rs/moq-e2ee) | Workspace-only end-to-end encryption of groups, datagrams, and track names, scoped to a publisher epoch. |
 | [moq-loc](https://docs.rs/moq-loc), [moq-msf](https://docs.rs/moq-msf) | The IETF LOC container and MSF catalog. |
 | [moq-stats](https://docs.rs/moq-stats) | Publish and consume relay traffic counters as tracks. |
@@ -65,7 +64,7 @@ let mut announced = consumer.announced();
 while let Some(event) = announced.next().await {
     // Skip updates and retractions.
     let moq_net::announce::Event::Start(update) = event else { continue };
-    let broadcast = consumer.request_broadcast(&update.prefix, update.route.epoch).await?;
+    let broadcast = consumer.request(&update.prefix, update.route.epoch).await?;
     let catalog = broadcast
         .track(hang::Catalog::DEFAULT_NAME)?
         .subscribe(hang::Catalog::default_subscription())
@@ -79,7 +78,7 @@ while let Some(event) = announced.next().await {
 let mut broadcast = origin.publish("my-stream.hang", Default::default())?;
 // moq-mux (from a container) or moq-video / moq-audio (from a device) fill it.
 // The route retracts on `unannounce()` or when the broadcast ends. To serve a whole
-// subtree on demand instead, `origin.dynamic("room")?` yields each requested path:
+// subtree on demand instead, `origin.requests("room")?` yields each requested path:
 // `prepare(Epoch::mint())`, fill its broadcast, then `publish()`, or reject it.
 ```
 
@@ -92,8 +91,13 @@ already queued, then `Client::close` sends the QUIC close. Runnable examples:
 [`subscribe.rs`](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/subscribe.rs).
 
 URLs may be `https://` (QUIC or WebTransport, with a WebSocket fallback),
-`moql://`/`moqt://` (raw QUIC), or `iroh://`. A `?jwt=` query carries the
-token. `http://` is for a relay on localhost only: it fetches the certificate
+`moql://`/`moqt://` (raw QUIC), or `iroh://`. Put credentials in
+`connect::Config::tokens` rather than the URL: the first rides SETUP (and
+`?jwt=` while an offered version needs it), each other widens the grant in band,
+and `Connection::tokens().set(...)` replaces them before they expire, with
+`answered().await` reporting the relay's verdict. A `?jwt=`
+already in the URL stays the connection credential, which reaches an older
+relay. `http://` is for a relay on localhost only: it fetches the certificate
 fingerprint unauthenticated, so never send a token over it. QUIC tuning shares
 the relay's settings; see the [relay reference](/bin/relay/config#quic).
 

@@ -45,16 +45,16 @@ public final class BroadcastConsumer: Sendable {
 
 }
 
-/// Write side of a broadcast: open tracks and publish frames.
+/// Write side of a broadcast: open tracks and publish frames. Its `Publication`,
+/// if any, announces it.
 ///
-/// Constructing one directly creates a standalone broadcast for serving dynamic
-/// requests (`BroadcastRequest.accept`) or local pub/sub. To publish at a path,
-/// use `OriginProducer.createBroadcast(path:)` instead.
+/// Constructing one directly creates a standalone broadcast for local pub/sub.
+/// To publish at a path, use `OriginProducer.createBroadcast(path:)` instead.
 public final class BroadcastProducer: Sendable {
     let ffi: MoqBroadcastProducer
 
-    /// Create a standalone broadcast for serving dynamic requests or local
-    /// pub/sub. To publish at a path, use `OriginProducer.createBroadcast(path:)`.
+    /// Create a standalone broadcast for local pub/sub. To publish at a path,
+    /// use `OriginProducer.createBroadcast(path:)`.
     public init() throws {
         ffi = try MoqBroadcastProducer()
     }
@@ -69,22 +69,9 @@ public final class BroadcastProducer: Sendable {
     }
 
     /// Accept subscriptions to tracks that are not published yet. Hold and iterate
-    /// the returned `BroadcastDynamic` while such requests should be served.
-    public func dynamic() throws -> BroadcastDynamic {
-        BroadcastDynamic(try ffi.dynamic())
-    }
-
-    /// Advertise this broadcast's exact path as a route.
-    ///
-    /// Announcing again re-prices the route in place. Until announced, the
-    /// broadcast is invisible and unroutable for local consumers and peers alike.
-    public func announce(route: AnnounceRoute = AnnounceRoute()) throws {
-        try ffi.announce(route: route)
-    }
-
-    /// Retract this broadcast's advertisement, if any, from local consumers and peers alike.
-    public func unannounce() throws {
-        try ffi.unannounce()
+    /// the returned `BroadcastRequests` while such requests should be served.
+    public func requests() throws -> BroadcastRequests {
+        BroadcastRequests(try ffi.requests())
     }
 
     /// Open a track for arbitrary byte payloads, with no codec or container.
@@ -95,7 +82,9 @@ public final class BroadcastProducer: Sendable {
 
     /// End the broadcast for good: retract it and serve no new tracks.
     ///
-    /// Tracks already subscribed carry on to their own end. Closing again is a no-op.
+    /// Tracks still open on it end with `Unroutable`, which readers take as the publisher
+    /// leaving, and their later calls throw `MoqError.Closed`; finish a track first to end it
+    /// cleanly. Closing again is a no-op.
     public func close() throws {
         try ffi.close()
     }

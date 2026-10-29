@@ -137,7 +137,8 @@ impl Default for Config {
 }
 
 impl Config {
-	/// Parse from CLI args, optionally merging a TOML file, then init the logger.
+	/// Parse from CLI args, optionally merging a TOML file, refuse any `MOQ_*`
+	/// variable moq-bench does not read, then init the logger.
 	pub fn load() -> anyhow::Result<Self> {
 		let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
 		// `#[usage(completion)]` installs the `__complete_word__` interception in the
@@ -149,6 +150,7 @@ impl Config {
 			std::process::exit(0);
 		}
 		let config = Self::parse_and_merge(args)?;
+		moq_tokio::cli::check_env(&[Self::spec()], &[])?;
 		config.log.init()?;
 		tracing::trace!(?config, "final config");
 		Ok(config)
@@ -424,9 +426,6 @@ fps = "24:60"
 [client]
 url = "https://example.com"
 tls.insecure = true
-
-[client.websocket]
-enabled = false
 "#;
 		let dir = std::env::temp_dir().join("moq-bench-config-test");
 		std::fs::create_dir_all(&dir).unwrap();
@@ -444,7 +443,6 @@ enabled = false
 		assert_eq!(config.fps(), Range::new(24, 60));
 		assert_eq!(config.client.url.as_ref().unwrap().as_str(), "https://example.com/");
 		assert_eq!(config.client.tls.insecure, Some(true));
-		assert_eq!(config.client.websocket.enabled, Some(false));
 
 		// CLI flag wins over the TOML value.
 		let args = vec![
@@ -453,13 +451,13 @@ enabled = false
 			path.into(),
 			std::ffi::OsString::from("--connections"),
 			std::ffi::OsString::from("5:10"),
-			std::ffi::OsString::from("--connect-websocket-enabled=true"),
+			std::ffi::OsString::from("--connect-tls-insecure=false"),
 		];
 		let config = Config::parse_and_merge(args).unwrap();
 		assert_eq!(config.connections(), Range::new(5, 10));
 		// Untouched TOML field is still intact.
 		assert_eq!(config.fps(), Range::new(24, 60));
-		assert_eq!(config.client.websocket.enabled, Some(true));
+		assert_eq!(config.client.tls.insecure, Some(false));
 	}
 
 	#[test]

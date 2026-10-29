@@ -32,7 +32,7 @@ kind.
   extension, `Merge` wrapper, or flattened generic is needed. One layout for
   relay and clients is given up on purpose.
 - **Publisher: `stats: { track }` in the catalog.** A root section naming one
-  snapshot track: `{ transport, renditions: { <id>: stats::Track } }`,
+  snapshot track: `{ transport, renditions: { <id>: stats::Rendition } }`,
   plus container sections flattened in the way `Catalog<E>` flattens
   `ts::Ext`. The stats stay off the catalog track, which would otherwise churn
   for every viewer on each interval.
@@ -72,11 +72,11 @@ kind.
   tokens let publish under the echo path may report, and no report is
   authenticated beyond that.
 - **Feedback track: one snapshot**, `{ transport, renditions: { <id>:
-  echo::Track } }`, so the publisher looks up its own renditions directly.
+  echo::Rendition } }`, so the publisher looks up its own renditions directly.
 - **One type per role, shared across kinds.**
-  - `stats::Track`: sent frames and bytes, keyframes, skipped frames, target
+  - `stats::Rendition`: sent frames and bytes, keyframes, skipped frames, target
     bitrate.
-  - `echo::Track`: received, decoded, late, decode errors, stalls,
+  - `echo::Rendition`: received, decoded, late, decode errors, stalls,
     stalled duration, underruns, newest arrival, latency.
   - A kind's unused fields are omitted.
   - `transport` is one type at both roles: rtt and rate gauges, cumulative
@@ -85,8 +85,8 @@ kind.
     [#2733](https://github.com/moq-dev/moq/issues/2733)-style counters land.
 - **Encoding**: cumulative counters about once a second through
   `moq_json::snapshot` on one track with `compress: true`, produced whenever
-  stats are enabled. The [m1 compression migration](/quest/m1/compress/migrate.md)
-  removes `.z` siblings; follow the delta policy it retains on the single track. An unsubscribed stats track never leaves the process.
+  stats are enabled. The [m1 compression migration](https://github.com/moq-dev/moq/pull/7046)
+  removed the `.z` siblings and kept merge-patch deltas on the single track. An unsubscribed stats track never leaves the process.
   Gauges are carried but never summed.
 - **On main.** Every change is additive: optional sections on
   `#[non_exhaustive]` catalog types, and new types. The line left the
@@ -105,7 +105,7 @@ reports; no encoder acts on them here.
 
 Decided 2026-10-05 (moq.pro audit): the client health model and preflight
 media checks moq.pro planned against the pre-#4510 `.stats` broadcast are
-generic, so they join this line as [client health](/quest/m2/stats/health.md)
+generic, so they join this line as [client health](/doc/concept/stats.md#health)
 and [preflight](/quest/m2/stats/preflight.md). moq.pro keeps the per-project
 connection view and the dashboard flow.
 
@@ -115,10 +115,9 @@ connection view and the dashboard flow.
   gateways publish stats and feedback, as the CLI remuxes do
 - [Browser reporters](/quest/m2/stats/js.md) - `<moq-publish>` publishes
   stats and `<moq-watch>` publishes feedback
-- [Client health](/quest/m2/stats/health.md) - two snapshots become a
-  health sample and a verdict that names its observer, in Rust and JS
 - [Preflight](/quest/m2/stats/preflight.md) - a bounded test run over a
   broadcast reports which media layer is broken and why
+- [Client health in use](/quest/m2/stats/health-consumers.md) - a per-connection media counter, consumers of the grade, and re-measured limits
 
 ## Related
 

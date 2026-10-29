@@ -9,18 +9,18 @@ import { createMockTransportPair } from "../mock.ts";
 import { Producer as Origin } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
-import { NativeSession } from "./adapter.ts";
 import * as Message from "./message.ts";
 import { Group } from "./object.ts";
 import { Parameters } from "./parameters.ts";
 import { Publish, PublishDone, PublishDoneStatus } from "./publish.ts";
 import { Publisher } from "./publisher.ts";
 import { RequestError, RequestOk } from "./request.ts";
+import { NativeSession } from "./session.ts";
 import { Subscribe } from "./subscribe.ts";
 import { PublishSkipped, SubscribeTracks } from "./subscribe_tracks.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
 
-const drafts = [Version.DRAFT_18, Version.DRAFT_19, Version.DRAFT_20, Version.DRAFT_21, Version.DRAFT_22];
+const drafts = [Version.DRAFT_18, Version.DRAFT_22];
 
 /** A client and server WebTransport, connected to each other. */
 type Pair = { client: WebTransport; server: WebTransport };
@@ -118,7 +118,7 @@ function fixture(
 
 async function publishOk(stream: Stream, version: IetfVersion) {
 	const parameters = new Parameters();
-	if (version < Version.DRAFT_20) parameters.forward = false;
+	if (version < Version.DRAFT_22) parameters.forward = false;
 	await stream.writer.u53(RequestOk.id);
 	await new RequestOk({ parameters }).encode(stream.writer, version);
 }
@@ -145,12 +145,13 @@ for (const version of drafts) {
 		const installed = clock.install();
 		using _installed = { [Symbol.dispose]: () => installed.close() };
 		const fx = fixture(version);
-		const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
-		broadcast.announce();
+		const broadcastPublication = fx.origin.createBroadcast(Path.from("room/live"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		const track = broadcast.createTrack("video");
 		const group = track.appendGroup();
 		group.writeFrame({ payload: new Uint8Array([1]) });
-		group.close();
+		group.finish();
 		const listing = await fx.list();
 		await ok(listing, version);
 		const { stream, publish } = await fx.offered();
@@ -191,12 +192,14 @@ for (const version of drafts) {
 	for (const finished of [true, false]) {
 		test(`an unlisted track's PUBLISH ends ${finished ? "with TRACK_ENDED" : "in error"} (${version})`, async () => {
 			const fx = fixture(version);
-			const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
-			broadcast.announce();
+			const broadcastPublication = fx.origin.createBroadcast(Path.from("room/live"));
+			const broadcast = broadcastPublication.broadcast;
+			broadcastPublication.announce();
 			const track = broadcast.createTrack("video");
 			const listing = await fx.list();
 			await ok(listing, version);
 			const { stream } = await fx.offered();
+			if (finished) track.finish();
 			if (finished) track.close();
 			broadcast.removeTrack("video");
 			expect(await stream.reader.u53()).toBe(PublishDone.id);
@@ -212,12 +215,14 @@ for (const version of drafts) {
 		const installed = clock.install();
 		using _installed = { [Symbol.dispose]: () => installed.close() };
 		const fx = fixture(version);
-		const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
-		broadcast.announce();
+		const broadcastPublication = fx.origin.createBroadcast(Path.from("room/live"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		const track = broadcast.createTrack("video");
 		const listing = await fx.list();
 		await ok(listing, version);
 		const { stream } = await fx.offered(false);
+		track.finish();
 		track.close();
 		broadcast.removeTrack("video");
 		await clock.advance(Nano.zero);
@@ -233,24 +238,32 @@ for (const version of drafts) {
 		const clock = new Manual();
 		const installed = clock.install();
 		using _installed = { [Symbol.dispose]: () => installed.close() };
-		const fx = fixture(version);
-		const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
-		broadcast.announce();
-		const track = broadcast.createTrack("video");
-		const listing = await fx.list();
-		await ok(listing, version);
+		// Spied before listing, since the PUBLISH may go out before the listing's OK is read.
+		// Restored only once the test is done: `Message.write` reads `writer.write` before
+		// awaiting its frame, so restoring mid-write would drop a concurrent write on the stale spy.
 		const resume = Promise.withResolvers<void>();
+		let holding = false;
 		const write = Writer.prototype.write;
 		const held = spyOn(Writer.prototype, "write").mockImplementation(async function (this: Writer, chunk) {
 			await write.call(this, chunk);
-			if (chunk[0] !== Publish.id) return;
-			held.mockRestore();
+			if (holding || chunk[0] !== Publish.id) return;
+			holding = true;
 			await resume.promise;
 		});
+		using _held = { [Symbol.dispose]: () => held.mockRestore() };
+		const fx = fixture(version);
+		const broadcastPublication = fx.origin.createBroadcast(Path.from("room/live"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
+		const track = broadcast.createTrack("video");
+		const listing = await fx.list();
+		await ok(listing, version);
 		const { stream } = await fx.offered(false);
+		track.finish();
 		track.close();
 		broadcast.removeTrack("video");
 		await clock.advance(Nano.zero);
+		expect(holding).toBe(true);
 		resume.resolve();
 		await publishOk(stream, version);
 		expect(await stream.reader.u53()).toBe(PublishDone.id);
@@ -258,10 +271,60 @@ for (const version of drafts) {
 		expect(done.statusCode).toBe(PublishDoneStatus.TRACK_ENDED);
 	});
 
+	// A broadcast closing right after a track finished ends that track's PUBLISH with TRACK_ENDED,
+	// removed first or not and answered or not, while a track left unfinished still ends in error:
+	// PUBLISH_DONE once answered, a reset before.
+	for (const remove of [false, true]) {
+		for (const answer of [true, false]) {
+			const name = `remove=${remove} answer=${answer}`;
+			test(`a clean end keeps its finishes, ${name} (${version})`, async () => {
+				const clock = new Manual();
+				const installed = clock.install();
+				using _installed = { [Symbol.dispose]: () => installed.close() };
+				const fx = fixture(version);
+				const broadcastPublication = fx.origin.createBroadcast(Path.from("room/live"));
+				const broadcast = broadcastPublication.broadcast;
+				broadcastPublication.announce();
+				const video = broadcast.createTrack("video");
+				broadcast.createTrack("audio");
+				const listing = await fx.list();
+				await ok(listing, version);
+				const published = new Map<string, Stream>();
+				for (let i = 0; i < 2; i++) {
+					const { stream, publish } = await fx.offered(answer);
+					published.set(publish.trackName, stream);
+				}
+				await clock.advance(Nano.zero);
+				video.finish();
+				video.close();
+				if (remove) broadcast.removeTrack("video");
+				broadcast.close();
+				await clock.advance(Nano.zero);
+				const videoStream = published.get("video");
+				const audioStream = published.get("audio");
+				if (!videoStream || !audioStream) throw new Error("missing PUBLISH");
+				if (!answer) await publishOk(videoStream, version);
+				expect(await videoStream.reader.u53()).toBe(PublishDone.id);
+				expect((await PublishDone.decode(videoStream.reader, version)).statusCode).toBe(
+					PublishDoneStatus.TRACK_ENDED,
+				);
+				if (!answer) {
+					await expect(audioStream.reader.u53()).rejects.toThrow();
+					return;
+				}
+				expect(await audioStream.reader.u53()).toBe(PublishDone.id);
+				expect((await PublishDone.decode(audioStream.reader, version)).statusCode).toBe(
+					PublishDoneStatus.INTERNAL_ERROR,
+				);
+			});
+		}
+	}
+
 	test(`track listing rejects overlapping prefixes (${version})`, async () => {
 		const fx = fixture(version);
-		const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
-		broadcast.announce();
+		const broadcastPublication = fx.origin.createBroadcast(Path.from("room/live"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		broadcast.createTrack("video");
 		const listing = await fx.list();
 		await ok(listing, version);
@@ -275,8 +338,9 @@ for (const version of drafts) {
 
 	test(`forwarding listings are skipped or refused according to the draft (${version})`, async () => {
 		const fx = fixture(version);
-		const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
-		broadcast.announce();
+		const broadcastPublication = fx.origin.createBroadcast(Path.from("room/live"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		broadcast.createTrack("video");
 		const listing = await fx.list("room", true);
 		if (version === Version.DRAFT_18) {
@@ -295,8 +359,9 @@ for (const version of drafts) {
 test("draft-18 refuses SUBSCRIBE to a PUBLISHed track", async () => {
 	const version = Version.DRAFT_18;
 	const fx = fixture(version);
-	const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
-	broadcast.announce();
+	const broadcastPublication = fx.origin.createBroadcast(Path.from("room/live"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	broadcast.createTrack("video");
 	const listing = await fx.list();
 	await ok(listing, version);
@@ -326,8 +391,9 @@ test("a cancelled listing cannot release its replacement's prefix", async () => 
 	const installed = clock.install();
 	using _installed = { [Symbol.dispose]: () => installed.close() };
 	const fx = fixture(version);
-	const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
-	broadcast.announce();
+	const broadcastPublication = fx.origin.createBroadcast(Path.from("room/live"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	broadcast.createTrack("video");
 	const first = await fx.list();
 	await ok(first, version);
@@ -354,8 +420,9 @@ test("grants hide tracks, revoke PUBLISHes and relist when broadened", async () 
 	const fx = fixture(version, { grant });
 	const listing = await fx.list();
 	await ok(listing, version);
-	const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
-	broadcast.announce();
+	const broadcastPublication = fx.origin.createBroadcast(Path.from("room/live"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	broadcast.createTrack("video");
 	let delivered = false;
 	const offered = fx.offered();
@@ -383,8 +450,9 @@ test("PUBLISH carries listing defaults and honors INCLUDE_PROPERTIES", async () 
 	parameters.includeProperties = false;
 	const listing = await fx.list("room", false, parameters);
 	await ok(listing, version);
-	const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
-	broadcast.announce();
+	const broadcastPublication = fx.origin.createBroadcast(Path.from("room/live"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	broadcast.createTrack("later");
 	const { publish } = await fx.offered();
 	expect(publish.properties).toEqual({});
@@ -399,8 +467,9 @@ test("PUBLISH restates an omitted listing priority as 128", async () => {
 	const fx = fixture(version);
 	const listing = await fx.list("room", false, new Parameters());
 	await ok(listing, version);
-	const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
-	broadcast.announce();
+	const broadcastPublication = fx.origin.createBroadcast(Path.from("room/live"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	broadcast.createTrack("later");
 	const { publish } = await fx.offered();
 	expect(publish.parameters?.subscriberPriority).toBe(128);
@@ -426,8 +495,9 @@ test("an update ends only its listing and frees its prefix", async () => {
 test("session shutdown releases listing tasks while the local origin stays open", async () => {
 	const version = Version.DRAFT_22;
 	const fx = fixture(version);
-	const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
-	broadcast.announce();
+	const broadcastPublication = fx.origin.createBroadcast(Path.from("room/live"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	broadcast.createTrack("video");
 	const listing = await fx.list();
 	await ok(listing, version);
@@ -437,16 +507,17 @@ test("session shutdown releases listing tasks while the local origin stays open"
 	expect(broadcast.createTrack("still-local").name).toBe("still-local");
 });
 
-for (const version of [Version.DRAFT_20, Version.DRAFT_22]) {
-	test(`a paused filter applies on resume, but an active pause/filter update is refused atomically (${version})`, async () => {
+for (const version of [Version.DRAFT_22]) {
+	test(`a filter applied while paused or while pausing is preserved on resume (${version})`, async () => {
 		const fx = fixture(version);
-		const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
-		broadcast.announce();
+		const broadcastPublication = fx.origin.createBroadcast(Path.from("room/live"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		const track = broadcast.createTrack("video");
 		for (let i = 0; i < 2; i++) {
 			const group = track.appendGroup();
 			group.writeFrame({ payload: new Uint8Array([i]) });
-			group.close();
+			group.finish();
 		}
 		await ok(await fx.list(), version);
 		const { stream } = await fx.offered();
@@ -465,7 +536,7 @@ for (const version of [Version.DRAFT_20, Version.DRAFT_22]) {
 		await update(stream, version, 4n, true);
 		const fresh = track.appendGroup();
 		fresh.writeFrame({ payload: new Uint8Array([2]) });
-		fresh.close();
+		fresh.finish();
 		const uni = fx.pair.client.incomingUnidirectionalStreams.getReader();
 		const next = await uni.read();
 		if (!next.value) throw new Error("missing filtered group");
@@ -473,14 +544,19 @@ for (const version of [Version.DRAFT_20, Version.DRAFT_22]) {
 		expect((await Group.decode(reader, version)).groupId).toBe(2);
 		await reader.readAll();
 
-		// The bundled pause never receives REQUEST_OK or leaves a paused publication.
+		// An active pause applies the same filter atomically before its acknowledgement.
 		await filter(6n, 3n);
-		expect(await stream.reader.u53()).toBe(RequestError.id);
-		expect((await RequestError.decode(stream.reader, version)).errorCode).toBe(0x03);
-		expect(await stream.reader.u53()).toBe(PublishDone.id);
-		const done = await PublishDone.decode(stream.reader, version);
-		expect(done.statusCode).toBe(PublishDoneStatus.UPDATE_FAILED);
-		expect(done.streamCount).toBe(1n);
+		await ok(stream, version);
+		while (track.subscription.peek() !== undefined) await track.subscription.changed();
+		const paused = track.appendGroup();
+		paused.writeFrame({ payload: new Uint8Array([3]) });
+		paused.finish();
+		await update(stream, version, 8n, true);
+		const resumed = (await uni.read()).value;
+		if (!resumed) throw new Error("missing group selected while paused");
+		const resumedReader = new Reader(resumed, undefined, version);
+		expect((await Group.decode(resumedReader, version)).groupId).toBe(3);
+		await resumedReader.readAll();
 		uni.releaseLock();
 	});
 }
@@ -490,8 +566,9 @@ const CATALOGS = [4, 64, 512];
 
 /** A broadcast under `room` listing `catalog` tracks. */
 function catalogOf(fx: ReturnType<typeof fixture>, catalog: number) {
-	const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
-	broadcast.announce();
+	const broadcastPublication = fx.origin.createBroadcast(Path.from("room/live"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	for (let i = 0; i < catalog; i++) broadcast.createTrack(`t${i}`);
 }
 
@@ -542,7 +619,7 @@ for (const version of drafts) {
 
 // A FORWARD=1 listing reads its next track only once the request stream has taken the last
 // skip, so a peer that stops reading leaves one skip queued, however many tracks are listed.
-for (const version of [Version.DRAFT_19, Version.DRAFT_22]) {
+for (const version of [Version.DRAFT_22]) {
 	test(`a forwarding listing reads only as skips go out (${version})`, async () => {
 		const clock = new Manual();
 		const installed = clock.install();

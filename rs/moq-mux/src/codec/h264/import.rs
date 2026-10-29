@@ -122,7 +122,8 @@ impl Import {
 		Ok(())
 	}
 
-	/// The MoQ track name this importer publishes on.
+	/// The MoQ track name this importer publishes on, which a decoder identity change replaces
+	/// with a newly minted one.
 	pub fn name(&self) -> &str {
 		self.track.name()
 	}
@@ -130,6 +131,12 @@ impl Import {
 	/// A watch-only handle to this track's subscriber demand.
 	pub fn demand(&self) -> moq_net::track::Demand {
 		self.track.track().demand()
+	}
+
+	/// The track this importer publishes on, which a decoder identity change replaces with a
+	/// newly named one.
+	pub fn track(&self) -> &moq_net::track::Producer {
+		self.track.track()
 	}
 
 	/// Finish the track, flushing any buffered data.
@@ -155,6 +162,14 @@ impl Import {
 	/// [`Producer::discontinuity`](crate::container::Producer::discontinuity).
 	pub fn discontinuity(&mut self) -> Result<()> {
 		self.track.discontinuity()?;
+		Ok(())
+	}
+
+	/// Advertise whether this rendition is being produced, as the catalog's
+	/// [`enabled`](hang::catalog::VideoConfig::enabled): a publisher that stops encoding it
+	/// disables it, so viewers select another rendition rather than wait for frames.
+	pub fn set_enabled(&mut self, enabled: bool) -> Result<()> {
+		self.catalog.set_enabled(&mut self.track, enabled)?;
 		Ok(())
 	}
 
@@ -187,10 +202,7 @@ impl Import {
 		Ok(())
 	}
 
-	/// Apply a resolved config, updating the catalog rendition in place.
-	///
-	/// A changed config (new avcC, or a new inline SPS) just re-mirrors the
-	/// rendition; there are no fixed tracks to reject a reconfiguration.
+	/// Apply a resolved config, minting a track when the decoder identity changes.
 	fn apply_config(&mut self, config: hang::catalog::VideoConfig) -> crate::Result<()> {
 		self.catalog.publish(&mut self.track, config)
 	}
@@ -392,8 +404,49 @@ mod tests {
 		assert_eq!((color.mastering, color.content_light), (None, None));
 	}
 
+	/// A disabled rendition stays disabled across a new SPS, and enabling it republishes.
+	#[tokio::test(start_paused = true)]
+	async fn a_disabled_rendition_survives_a_new_sps() {
+		use crate::codec::h264::fixtures::{PPS, SPS_BT709, SPS_HDR10};
+
+		let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
+		let (track, catalog) = setup("video");
+		let mut import = Import::new(track, catalog.reserve(), Default::default()).unwrap();
+		let mut split = Split::new();
+		let mut keyframe = |import: &mut Import, ms: u64, sps: &[u8]| {
+			let mut annexb = BytesMut::new();
+			for nal in [sps, PPS, idr] {
+				annexb.extend_from_slice(&[0, 0, 0, 1]);
+				annexb.extend_from_slice(nal);
+			}
+			let pts = moq_net::Timestamp::from_millis(ms).unwrap();
+			let mut frames = split.decode(&annexb, pts).expect("split keyframe");
+			frames.extend(split.flush(pts).expect("flush keyframe"));
+			import.decode(frames).expect("decode keyframe");
+		};
+		let enabled = || catalog.snapshot().video.renditions["video"].enabled;
+
+		keyframe(&mut import, 0, SPS_HDR10);
+		assert!(enabled());
+		import.set_enabled(false).unwrap();
+		assert!(!enabled());
+		keyframe(&mut import, 40, SPS_BT709);
+		assert_eq!(
+			catalog.snapshot().video.renditions["video"]
+				.color
+				.as_ref()
+				.unwrap()
+				.primaries,
+			Some(1)
+		);
+		assert!(!enabled(), "a reconfiguration keeps the rendition disabled");
+		import.set_enabled(true).unwrap();
+		assert!(enabled());
+	}
+
 	/// A frame-only SPS declares its reorder depth, which holds for the track's life: a later SPS
-	/// declaring less or none keeps it, and one declaring more is refused.
+	/// declaring less or none keeps it, and one declaring more is refused. An SPS that changes the
+	/// decoder identity mints a new track, which declares its own.
 	#[tokio::test(start_paused = true)]
 	async fn a_declared_reorder_depth_holds_for_the_track() {
 		use crate::codec::h264::fixtures::{PPS, SPS_FIELD, SPS_IPB, SPS_PYRAMID};
@@ -404,7 +457,7 @@ mod tests {
 		let mut deep = Import::new(deep, catalog.reserve(), Default::default()).unwrap();
 		let mut shallow = Import::new(shallow, catalog.reserve(), Default::default()).unwrap();
 		let mut split = Split::new();
-		let mut keyframe = |import: &mut Import, name: &str, ms: u64, sps: &[u8]| {
+		let mut keyframe = |import: &mut Import, ms: u64, sps: &[u8]| {
 			let mut annexb = BytesMut::new();
 			for nal in [sps, PPS, idr] {
 				annexb.extend_from_slice(&[0, 0, 0, 1]);
@@ -415,18 +468,17 @@ mod tests {
 			frames.extend(split.flush(pts).expect("flush keyframe"));
 			import
 				.decode(frames)
-				.map(|()| catalog.snapshot().video.renditions[name].reorder)
+				.map(|()| catalog.snapshot().video.renditions[import.name()].reorder)
 		};
 
-		assert_eq!(keyframe(&mut deep, "deep", 0, SPS_PYRAMID).unwrap(), Some(2));
-		assert_eq!(keyframe(&mut deep, "deep", 40, SPS_IPB).unwrap(), Some(2));
-		assert_eq!(
-			keyframe(&mut deep, "deep", 80, SPS_FIELD).unwrap(),
-			Some(2),
-			"fields declare none"
-		);
-		assert_eq!(keyframe(&mut shallow, "shallow", 0, SPS_IPB).unwrap(), Some(1));
-		assert!(keyframe(&mut shallow, "shallow", 40, SPS_PYRAMID).is_err());
+		assert_eq!(keyframe(&mut deep, 0, SPS_PYRAMID).unwrap(), Some(2));
+		assert_eq!(keyframe(&mut deep, 40, SPS_IPB).unwrap(), Some(2));
+		assert_eq!(deep.name(), "deep");
+		// A field-coded SPS is a new profile, level, and scan: a new track with its own bound.
+		assert_eq!(keyframe(&mut deep, 80, SPS_FIELD).unwrap(), None, "fields declare none");
+		assert_eq!(deep.name(), "deep/1");
+		assert_eq!(keyframe(&mut shallow, 0, SPS_IPB).unwrap(), Some(1));
+		assert!(keyframe(&mut shallow, 40, SPS_PYRAMID).is_err());
 	}
 
 	/// A new out-of-band avcC starts a new coded sequence, so in-band HDR metadata from the last one
@@ -454,7 +506,10 @@ mod tests {
 		let color = || catalog.snapshot().video.renditions["video"].color.clone().unwrap();
 		assert!(color().mastering.is_some());
 
+		// The new avcC is a new description, so it publishes a new track.
 		import.initialize(&avcc(SPS_BT709)).unwrap();
+		assert_eq!(import.name(), "video/1");
+		let color = || catalog.snapshot().video.renditions["video/1"].color.clone().unwrap();
 		assert_eq!(color().primaries, Some(1));
 		assert_eq!((color().mastering, color().content_light), (None, None));
 	}

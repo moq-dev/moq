@@ -1,6 +1,6 @@
 use std::{
 	fmt::Debug,
-	task::{Context, Poll, ready},
+	task::{Poll, ready},
 };
 
 use crate::{Error, StreamError, coding::*, ietf};
@@ -83,10 +83,10 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 	/// Poll until the write buffer has fully hit the stream.
 	///
 	/// A failed stream never takes another byte, so a write error drops the buffer too.
-	pub fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+	pub fn poll_flush(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		while self.flushed < self.buffer.len() {
 			let stream = self.stream.as_mut().unwrap();
-			match ready!(stream.poll_write(cx, &self.buffer[self.flushed..])) {
+			match ready!(stream.poll_write(waiter, &self.buffer[self.flushed..])) {
 				Ok(n) => self.flushed += n,
 				Err(err) => {
 					self.buffer.clear();
@@ -112,7 +112,7 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 		V: Into<Form> + Copy,
 	{
 		self.buffer(msg)?;
-		std::future::poll_fn(|cx| self.poll_flush(cx)).await
+		kio::wait(|waiter| self.poll_flush(waiter)).await
 	}
 
 	/// Encode a varint to the stream, with the same cancellation rules as [`Self::encode`].
@@ -121,26 +121,26 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 		V: Into<Form> + Copy,
 	{
 		self.buffer_varint(value)?;
-		std::future::poll_fn(|cx| self.poll_flush(cx)).await
+		kio::wait(|waiter| self.poll_flush(waiter)).await
 	}
 
 	/// Poll a write of `buf`, flushing any buffered message bytes first so the
 	/// stream never reorders around the buffer.
-	pub fn poll_write<Buf: bytes::Buf>(&mut self, cx: &mut Context<'_>, buf: &mut Buf) -> Poll<Result<usize, Error>> {
-		ready!(self.poll_flush(cx))?;
+	pub fn poll_write<Buf: bytes::Buf>(&mut self, waiter: &kio::Waiter, buf: &mut Buf) -> Poll<Result<usize, Error>> {
+		ready!(self.poll_flush(waiter))?;
 		self.stream
 			.as_mut()
 			.unwrap()
-			.poll_write_buf(cx, buf)
+			.poll_write_buf(waiter, buf)
 			.map_err(|err| self.version.transport_error(err))
 	}
 
 	/// Poll until the entire `Buf` has been written to the stream.
 	///
 	/// NOTE: This can avoid performing a copy when using `Bytes`.
-	pub fn poll_write_all<Buf: bytes::Buf>(&mut self, cx: &mut Context<'_>, buf: &mut Buf) -> Poll<Result<(), Error>> {
+	pub fn poll_write_all<Buf: bytes::Buf>(&mut self, waiter: &kio::Waiter, buf: &mut Buf) -> Poll<Result<(), Error>> {
 		while buf.has_remaining() {
-			ready!(self.poll_write(cx, buf))?;
+			ready!(self.poll_write(waiter, buf))?;
 		}
 		Poll::Ready(Ok(()))
 	}
@@ -149,7 +149,7 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 	///
 	/// NOTE: This can avoid performing a copy when using `Bytes`.
 	pub async fn write_all<Buf: bytes::Buf + Send>(&mut self, buf: &mut Buf) -> Result<(), Error> {
-		std::future::poll_fn(|cx| self.poll_write_all(cx, buf)).await
+		kio::wait(|waiter| self.poll_write_all(waiter, buf)).await
 	}
 
 	/// Mark the stream as finished.
@@ -191,31 +191,31 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 
 		stream.finish().map_err(|err| self.version.transport_error(err))?;
 		let version = &self.version;
-		std::future::poll_fn(|cx| stream.poll_closed(cx).map_err(|err| version.transport_error(err))).await
+		kio::wait(|waiter| stream.poll_closed(waiter).map_err(|err| version.transport_error(err))).await
 	}
 
 	/// Poll until the stream is closed, or the [Self::finish] is acknowledged by the peer.
-	pub fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+	pub fn poll_closed(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let version = &self.version;
 		self.stream
 			.as_mut()
 			.unwrap()
-			.poll_closed(cx)
+			.poll_closed(waiter)
 			.map_err(|err| version.transport_error(err))
 	}
 
 	/// Poll-friendly [`Self::close`] for a finished writer: once the peer acknowledges
 	/// (or the stream dies), the stream is released so the [`Drop`] fallback cannot
 	/// reset an acknowledged stream with a spurious Cancel.
-	pub fn poll_close(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-		let res = ready!(self.poll_closed(cx));
+	pub fn poll_close(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		let res = ready!(self.poll_closed(waiter));
 		self.stream = None;
 		Poll::Ready(res)
 	}
 
 	/// Wait for the stream to be closed, or the [Self::finish] to be acknowledged by the peer.
 	pub async fn closed(&mut self) -> Result<(), Error> {
-		std::future::poll_fn(|cx| self.poll_closed(cx)).await
+		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
 	/// Set the priority within the stream's send group, or session-wide when ungrouped.
@@ -261,9 +261,9 @@ impl<S: crate::transport::poll::SendStream> Writer<S, ietf::Version> {
 
 	/// Encode an IETF `Message` to the stream as `[type_id][size][body]`, with the same
 	/// all-or-nothing buffering as [`Self::buffer_message`] and cancellation rules as [`Self::encode`].
-	pub async fn encode_message<T: ietf::Message>(&mut self, msg: &T) -> Result<(), Error> {
+	pub async fn encode_message<'m, T: ietf::Message<'m>>(&mut self, msg: &T) -> Result<(), Error> {
 		self.buffer_message(T::ID, msg)?;
-		std::future::poll_fn(|cx| self.poll_flush(cx)).await
+		kio::wait(|waiter| self.poll_flush(waiter)).await
 	}
 }
 
@@ -283,7 +283,6 @@ impl<S: crate::transport::poll::SendStream, V> Drop for Writer<S, V> {
 mod tests {
 	use super::*;
 	use crate::lite::test_transport::{Log, SinkSend};
-	use std::task::Waker;
 
 	#[derive(Debug, Clone, thiserror::Error)]
 	#[error("stream stopped with {0}")]
@@ -303,7 +302,7 @@ mod tests {
 		type Error = Self;
 		type Group = crate::transport::poll::Ungrouped;
 
-		fn poll_write(&mut self, _: &mut Context<'_>, _: &[u8]) -> Poll<Result<usize, Self::Error>> {
+		fn poll_write(&mut self, _: &kio::Waiter, _: &[u8]) -> Poll<Result<usize, Self::Error>> {
 			Poll::Ready(Err(self.clone()))
 		}
 
@@ -319,7 +318,7 @@ mod tests {
 
 		fn reset(&mut self, _: u32) {}
 
-		fn poll_closed(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+		fn poll_closed(&self, _: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
 			Poll::Ready(Err(self.clone()))
 		}
 	}
@@ -328,11 +327,7 @@ mod tests {
 	async fn raw_payload_stop_uses_the_negotiated_registry() {
 		for (version, expected) in [
 			(
-				crate::Version::Ietf(crate::ietf::Version::Draft17),
-				Error::Stream(crate::StreamError::Unknown(0x4)),
-			),
-			(
-				crate::Version::Ietf(crate::ietf::Version::Draft20),
+				crate::Version::Ietf(crate::ietf::Version::Draft22),
 				Error::Stream(crate::StreamError::GoingAway),
 			),
 			(
@@ -376,7 +371,7 @@ mod tests {
 
 	impl<V> Encode<V> for Poison {
 		fn encode(&self, w: &mut Encoder<'_>, _: V) -> Result<(), EncodeError> {
-			w.control = Some(crate::stats::Control::Probe);
+			w.control = Some(crate::stats::Message::Probe);
 			w.slice(b"junk");
 			Err(EncodeError::BoundsExceeded)
 		}
@@ -393,19 +388,19 @@ mod tests {
 		writer.buffer_varint(7).unwrap();
 
 		let log = writer.stream.as_ref().unwrap().log.clone();
-		let mut cx = std::task::Context::from_waker(Waker::noop());
-		assert!(writer.poll_flush(&mut cx).is_ready());
+		let waiter = &kio::Waiter::noop();
+		assert!(writer.poll_flush(waiter).is_ready());
 		assert_eq!(*log.writes.lock().unwrap(), vec![5, 7], "the partial encode leaked");
 
 		// A control message's type goes with its body: a bare type would make the next
 		// message, or a FIN, a torn one.
-		let mut writer = Writer::new(SinkSend::new(Log::default()), crate::ietf::Version::Draft17);
+		let mut writer = Writer::new(SinkSend::new(Log::default()), crate::ietf::Version::Draft18);
 		writer.buffer_varint(5).unwrap();
 		writer.buffer_message(0x2, &Poison).unwrap_err();
 		writer.buffer_varint(7).unwrap();
 
 		let log = writer.stream.as_ref().unwrap().log.clone();
-		assert!(writer.poll_flush(&mut cx).is_ready());
+		assert!(writer.poll_flush(waiter).is_ready());
 		assert_eq!(*log.writes.lock().unwrap(), vec![5, 7], "the message type leaked");
 	}
 
@@ -413,10 +408,12 @@ mod tests {
 	fn control_body_counts_successful_encodes_once_before_transport_delivery() {
 		use crate::{
 			lite,
-			stats::{Bytes, Control, Registry, Tier},
+			stats::{Message, Registry, Tier, Totals},
 		};
 		let stats = Registry::new(Default::default());
-		let session = stats.tier(Tier::new("internal")).session("");
+		let session = stats
+			.tier(Tier::new(crate::Path::from_static("internal")))
+			.session(crate::Path::from_static(""));
 		let gate = kio::Producer::new(false);
 		let mut writer =
 			Writer::new(SinkSend::gated(Log::default(), gate.consume()), lite::Version::Lite07).with_stats(&session);
@@ -428,15 +425,19 @@ mod tests {
 		let size = msg.encode_bytes(lite::Version::Lite07).unwrap().len() as u64;
 		writer.buffer(&msg).unwrap();
 		writer.buffer(&Poison).unwrap_err();
-		assert!(writer.poll_flush(&mut Context::from_waker(Waker::noop())).is_pending());
-		assert!(writer.poll_flush(&mut Context::from_waker(Waker::noop())).is_pending());
+		assert!(writer.poll_flush(&kio::Waiter::noop()).is_pending());
+		assert!(writer.poll_flush(&kio::Waiter::noop()).is_pending());
 		assert_eq!(
 			stats.snapshot().control(),
-			vec![(Tier::new("internal"), Control::Probe, Bytes { tx: size, rx: 0 })]
+			vec![(
+				Tier::new(crate::Path::from_static("internal")),
+				Message::Probe,
+				Totals { tx: size, rx: 0 }
+			)]
 		);
 		writer
 			.buffer(&lite::Track {
-				broadcast: "test".into(),
+				broadcast: crate::Path::from_static("test"),
 				epoch: None,
 				track: "video".into(),
 			})
@@ -446,7 +447,7 @@ mod tests {
 				.snapshot()
 				.control()
 				.into_iter()
-				.find(|(_, class, _)| *class == Control::TrackInfo)
+				.find(|(_, class, _)| *class == Message::TrackInfo)
 				.unwrap()
 				.2
 				.tx
@@ -486,8 +487,8 @@ mod tests {
 		let log = writer.stream.as_ref().unwrap().log.clone();
 
 		writer.buffer_varint(5).unwrap();
-		let mut cx = std::task::Context::from_waker(Waker::noop());
-		assert!(writer.poll_flush(&mut cx).is_pending());
+		let waiter = &kio::Waiter::noop();
+		assert!(writer.poll_flush(waiter).is_pending());
 		assert!(log.writes.lock().unwrap().is_empty());
 
 		// The bytes survive the Pending (and a second message queued behind them).
@@ -497,7 +498,7 @@ mod tests {
 		};
 		*open = true;
 		drop(open);
-		assert!(writer.poll_flush(&mut cx).is_ready());
+		assert!(writer.poll_flush(waiter).is_ready());
 		assert_eq!(
 			*log.writes.lock().unwrap(),
 			vec![5, 7],

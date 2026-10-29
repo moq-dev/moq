@@ -16,7 +16,7 @@ use bytes::Bytes;
 use moq_mux::codec::annexb;
 use moq_video::encode::{Encoder, Kind};
 use moq_video::frame::vulkan::{self, Device};
-use moq_video::{Color, Frame, I420, Rate, Size, Surface};
+use moq_video::{Color, Frame, FrameRate, I420, Size, Surface};
 use parking_lot::Mutex;
 
 use crate::protocol::{self, Event, Rendition};
@@ -597,7 +597,7 @@ impl Encoding {
 }
 
 fn config(rendition: &Rendition, device: Device) -> Result<moq_video::encode::Config> {
-    let framerate = Rate::new(rendition.framerate, 1).context("framerate")?;
+    let framerate = FrameRate::new(rendition.framerate, 1).context("framerate")?;
     let mut config = moq_video::encode::Config::new(rendition.width, rendition.height, framerate);
     config.bitrate = Some(moq_net::bandwidth::Rate::from_bps(rendition.bitrate));
     config.kind = Kind::Named("nvenc".into());

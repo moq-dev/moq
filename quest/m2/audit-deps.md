@@ -42,10 +42,25 @@ Dependabot misses three kinds of update, so list them by hand:
   `just js workers` walk every tracked `bun.lock`.
 
 Deliberately uncovered: `dart/moq` (see the comment in
-`.github/dependabot.yml`), `bench/ffi-gen/Cargo.lock` (a one-off BoltFFI
-comparison), and `nix/uniffi-dart-Cargo.lock` (pinned with the generator).
+`.github/dependabot.yml`) and `nix/uniffi-dart-Cargo.lock` (pinned with the
+generator).
 The uniffi `>=0.33` ignore blocks nothing until 0.33 ships; keep it, since it
 ties uniffi to the Go generator.
+
+The QUIC hard fork has no advisory feed: `cargo deny` can't match quinn
+advisories against `rs/moq-quic` (quinn-proto) or `rs/moq-sock` (quinn-udp),
+as `SECURITY.md` notes. List quinn-proto and quinn-udp advisories (RustSec,
+and GHSA on quinn-rs/quinn) and the upstream commits since the last reviewed
+one, port any security fix, and record the newest reviewed commit in
+`rs/moq-quic/README.md` beside the fork point (`7616e6b2`). Added 2026-10-28
+(maintainer) from the second external security audit, instead of a separate
+CI watcher. Check GHSA, not only RustSec: three 2026-09-30 quinn advisories
+(GHSA-53rm-773f-4q8c, GHSA-wppq-2f6r-wfvm, GHSA-6pp4-4cxf-xf88) were in
+GitHub's feed but not the local RustSec database. That audit found every
+known fix already in the fork, each with a regression test. Kept as a
+manual step on 2026-10-28 after that evidence; a machine-readable ledger
+with a failing scheduled job was judged not worth it while the fork is
+current.
 
 Open at the end of the m1 run:
 
@@ -63,7 +78,8 @@ Advisories waiting on upstream:
 
 - ashpd 0.13 pulls zbus 5 and the unmaintained zvariant, zvariant_derive, and
   zbus_names (RUSTSEC-2026-0370, 0371, 0372). Upstream's
-  [zbus 6 port](https://github.com/bilelmoussaoui/ashpd/pull/491) is open.
+  [zbus 6 port](https://github.com/bilelmoussaoui/ashpd/pull/491) merged on
+  2026-10-25; wait for a stable ashpd release that carries it.
 - basic-toml (RUSTSEC-2026-0374) comes through askama_derive's default
   `config` feature in uniffi_bindgen 0.32, which reads its `askama.toml`.
   It only reaches the generator-only uniffi fork and never ships.
@@ -132,6 +148,10 @@ deep-equal pair, and duplicated WebVTT stamps and `jwt=` lookups.
 near copies), which is duplication rather than a dependency question.
 The m1 run came a day after m0's and did not re-review it; check code
 added since.
+- When TypeScript 7.1 is stable, delete `TransportStats` in
+  `js/net/src/connection/stats.ts` and type `getStats()` as the DOM's
+  `WebTransportConnectionStats` (from
+  [moq-dev/moq#6625](https://github.com/moq-dev/moq/pull/6625)).
 
 ## Required
 

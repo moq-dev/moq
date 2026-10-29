@@ -44,8 +44,8 @@ asyncio.run(main())
    Session
    Request
    Transport
-   Auth
-   AuthToken
+   GrantConsumer
+   Tokens
    Grant
 ```
 
@@ -59,11 +59,11 @@ asyncio.run(main())
    :nosignatures:
 
    BroadcastProducer
-   BroadcastDynamic
+   BroadcastRequests
    BroadcastRequest
    TrackProducer
    TrackDemand
-   TrackDynamic
+   TrackRequests
    TrackRequest
    GroupProducer
    Fill
@@ -155,19 +155,6 @@ broadcast, and producers advertise it in the catalog.
    Timed
 ```
 
-## Opaque data
-
-```{eval-rst}
-.. currentmodule:: moq.flate
-
-.. autosummary::
-   :toctree: api
-   :nosignatures:
-
-   SnapshotProducer
-   StreamProducer
-```
-
 ## Origin and announcements
 
 ```{eval-rst}
@@ -179,7 +166,8 @@ broadcast, and producers advertise it in the catalog.
 
    OriginProducer
    OriginConsumer
-   OriginDynamic
+   OriginRequests
+   Publication
    AnnounceConsumer
    AnnouncedBroadcast
    Announce
@@ -245,7 +233,6 @@ Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
    protocol_error
    log_level
    mint_epoch
-   epoch_time
 ```
 
 ```{toctree}

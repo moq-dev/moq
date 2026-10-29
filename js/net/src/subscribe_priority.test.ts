@@ -3,9 +3,8 @@
 // relay case lives with the Rust relay (rs/moq-net/tests/integration/subscribe_priority.rs).
 
 import { expect, spyOn, test } from "bun:test";
-import { Manual } from "@moq/clock";
+import { Manual, yieldNow } from "@moq/clock";
 import { accept, connect, type Established } from "./connection/index.ts";
-import { SessionCode, type Session as SessionError } from "./error.ts";
 import * as Ietf from "./ietf/index.ts";
 import { SubscribeUpdate } from "./ietf/subscribe.ts";
 import * as Lite from "./lite/index.ts";
@@ -15,7 +14,6 @@ import * as Path from "./path.ts";
 import { Writer } from "./stream.ts";
 import { Timescale } from "./time.ts";
 import type { Producer as TrackProducer } from "./track.ts";
-import { nextTask } from "./util/yield.ts";
 import { wireOf } from "./wire.ts";
 
 const url = new URL("https://localhost:4443/test");
@@ -24,20 +22,13 @@ const path = Path.from("test");
 const LOW = -100;
 const HIGH = 100;
 
-// Dial a session that consumes what `origin` serves. Draft-14's ALPN is the generic one, so
-// the server is told the version instead.
+// Dial a session that consumes what `origin` serves.
 async function session(protocol: string, origin: OriginProducer): Promise<[Established, Established]> {
-	const draft14 = protocol === Ietf.ALPN.DRAFT_14;
-	const pair = createMockTransportPair(draft14 ? "" : protocol);
+	const pair = createMockTransportPair(protocol);
 	lateAcks(pair.client);
 	return Promise.all([
 		connect({ url, transport: pair.client }),
-		accept({
-			transport: pair.server,
-			url,
-			publish: origin.consume(),
-			version: draft14 ? Ietf.Version.DRAFT_14 : undefined,
-		}),
+		accept({ transport: pair.server, url, publish: origin.consume() }),
 	]);
 }
 
@@ -69,8 +60,9 @@ test.each([Lite.ALPN_07_WIP, ...Object.values(Ietf.ALPN)])(
 	"%s follows the aggregate priority upstream",
 	async (protocol) => {
 		const origin = new OriginProducer();
-		const broadcast = origin.createBroadcast(path);
-		broadcast.announce();
+		const broadcastPublication = origin.createBroadcast(path);
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 		const [client, server] = await session(protocol, origin);
 
@@ -105,11 +97,12 @@ test.each(Object.values(Ietf.ALPN))("%s ends a subscription mid-update without a
 	const write = Writer.prototype.write;
 	const yielding = spyOn(Writer.prototype, "write").mockImplementation(async function (this: Writer, chunk) {
 		await write.call(this, chunk);
-		await nextTask();
+		await yieldNow();
 	});
 	const origin = new OriginProducer();
-	const broadcast = origin.createBroadcast(path);
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(path);
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const [client, server] = await session(protocol, origin);
 	let closed: Error | null | undefined;
@@ -128,7 +121,7 @@ test.each(Object.values(Ietf.ALPN))("%s ends a subscription mid-update without a
 		low.close();
 		while (video.subscription.peek() !== undefined) await video.subscription.changed();
 		// Each hop is a task or two away, so this lets the subscriber read all the publisher wrote.
-		for (let i = 0; i < 20; i++) await nextTask();
+		for (let i = 0; i < 20; i++) await yieldNow();
 		expect(closed).toBeUndefined();
 		remote.close();
 	} finally {
@@ -144,8 +137,9 @@ test.each(Object.values(Ietf.ALPN))("%s ends a subscription mid-update without a
 // update of defaults first, as on lite and in Rust.
 test.each(Object.values(Ietf.ALPN))("%s sends no update when the last subscriber leaves", async (protocol) => {
 	const origin = new OriginProducer();
-	const broadcast = origin.createBroadcast(path);
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(path);
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const [client, server] = await session(protocol, origin);
 	try {
@@ -168,11 +162,11 @@ test.each(Object.values(Ietf.ALPN))("%s sends no update when the last subscriber
 
 // An update that fails to encode is a bug, not a publisher that stopped reading, so it ends the
 // track with the error rather than leaving it at a stale priority. Nothing reaches the wire.
-// Drafts 14 and 15 require the next request ID, so the one the update spent ends the session.
 test.each(Object.values(Ietf.ALPN))("%s ends the track when an update fails to encode", async (protocol) => {
 	const origin = new OriginProducer();
-	const broadcast = origin.createBroadcast(path);
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(path);
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const [client, server] = await session(protocol, origin);
 	let closed: Error | null | undefined;
@@ -193,11 +187,7 @@ test.each(Object.values(Ietf.ALPN))("%s ends the track when an update fails to e
 			expect(video.subscription.peek()?.priority).toBe(LOW);
 			await video.subscription.changed();
 		}
-		if (protocol === Ietf.ALPN.DRAFT_14 || protocol === Ietf.ALPN.DRAFT_15) {
-			expect(((await server.closed) as SessionError | null)?.code).toBe(SessionCode.Internal);
-		} else {
-			expect(closed).toBeUndefined();
-		}
+		expect(closed).toBeUndefined();
 		remote.close();
 	} finally {
 		encode.mockRestore();

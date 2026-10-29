@@ -10,11 +10,11 @@
 //! pull-style pump).
 //!
 //! Two screen quirks worth knowing:
-//! - `publish_capture` releases the capture while unwatched and reopens it on
-//!   demand. A fresh portal session would re-prompt the picker every time, so the
-//!   portal's restore token is kept with the selection and consumed by the
-//!   next [`open`], which restores the same grant without a dialog (on
-//!   compositors that support persistence). The token is forgotten when the
+//! - An on-demand `publish_capture` releases the capture while unwatched and
+//!   reopens it for the next viewer. A fresh portal session would re-prompt the
+//!   picker every time, so the portal's restore token is kept with the selection
+//!   and consumed by the next [`open`], which restores the same grant without a
+//!   dialog (on compositors that support persistence). The token is forgotten when the
 //!   compositor ends the stream (the user hit "stop sharing"), so a revoked
 //!   grant is asked for again rather than silently resumed.
 //! - Compositors only deliver frames on damage, so a static screen would starve
@@ -124,7 +124,7 @@ async fn start(config: &Config, capture: Capture, session: Option<SessionGuard>)
 	let chan = FrameChannel::new();
 	let framerate = config
 		.framerate
-		.unwrap_or(crate::Rate::integer(DEFAULT_FRAMERATE))
+		.unwrap_or(crate::FrameRate::integer(DEFAULT_FRAMERATE))
 		.rounded();
 	let (geo_tx, geo_rx) = tokio::sync::oneshot::channel();
 	let (quit_tx, quit_rx) = pw::channel::channel::<()>();
@@ -154,7 +154,7 @@ async fn start(config: &Config, capture: Capture, session: Option<SessionGuard>)
 				return_tx,
 			}) {
 				// Surface a setup failure through the awaiting `open`; a mid-stream
-				// failure just ends the stream (the encode loop reopens on demand).
+				// failure just ends the stream (the encode loop reopens it).
 				match state.borrow_mut().geo_tx.take() {
 					Some(tx) => drop(tx.send(Err(e))),
 					None => chan.fail(e),
@@ -301,8 +301,8 @@ async fn portal_negotiate(cursor: bool, selection: &portal::Selection) -> Result
 }
 
 /// Closes the portal session when dropped, so the compositor's "screen is being
-/// shared" indicator turns off and sessions don't pile up across demand-driven
-/// reopens. The close call is async and `Drop` is not, so a task spawned here
+/// shared" indicator turns off and sessions don't pile up across an on-demand
+/// capture's reopens. The close call is async and `Drop` is not, so a task spawned here
 /// waits for the guard to drop. Closing does not invalidate the restore token.
 struct SessionGuard {
 	_close: tokio::sync::oneshot::Sender<()>,
@@ -361,6 +361,15 @@ struct State {
 	dmabuf_modifier: Option<u64>,
 	/// Why a live stream ended, if it was not an intentional restart or teardown.
 	terminal: Option<Error>,
+}
+
+impl State {
+	/// PipeWire freed a buffer of the pool: a lease still out on it must not be
+	/// queued back, and the retained frame may point into it.
+	fn buffer_removed(&mut self) {
+		self.generation = self.generation.wrapping_add(1);
+		self.last = None;
+	}
 }
 
 /// A retained frame for the static-screen pacing tick.
@@ -820,6 +829,10 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 		Kind::Screen => ("moq-screen", "Screen"),
 		Kind::Camera => ("moq-camera", "Camera"),
 	};
+	// When the producer's node goes (the user stopped sharing from the
+	// compositor, the output or camera went away), the stream only pauses, so
+	// the node's removal is what ends the capture.
+	let registry = core.get_registry_rc().map_err(|e| err("pipewire registry", e))?;
 	let stream = pw::stream::StreamRc::new(
 		core,
 		name,
@@ -848,6 +861,7 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 		}
 	});
 
+	let removed_selection = selection.clone();
 	let _listener = stream
 		.add_local_listener::<()>()
 		.state_changed({
@@ -863,7 +877,7 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 				if done {
 					// The producer ended the stream while our loop was live (the
 					// user hit "stop sharing", or the output or camera went away).
-					// Forget the screen restore token so the demand-driven reopen
+					// Forget the screen restore token so the next reopen
 					// asks again instead of silently resuming a grant the user just
 					// revoked. Our own teardown quits the loop before anything
 					// disconnects, so it never reaches this path.
@@ -975,7 +989,7 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					// The compositor reports 0/1 for a variable rate; only a real
 					// rate is worth forwarding to the encoder.
 					let fr = state.format.framerate();
-					let framerate = crate::Rate::new(fr.num, fr.denom).ok();
+					let framerate = crate::FrameRate::new(fr.num, fr.denom).ok();
 					let _ = tx.send(Ok(Geometry {
 						width,
 						height,
@@ -1213,8 +1227,37 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 				}
 			}
 		})
+		.remove_buffer({
+			let state = state.clone();
+			move |_, _, _| state.borrow_mut().buffer_removed()
+		})
 		.register()
 		.map_err(|e| err("pipewire listener", e))?;
+
+	let _node_listener = registry
+		.add_listener_local()
+		.global_remove({
+			let mainloop = mainloop.downgrade();
+			let state = state.clone();
+			move |id| {
+				if id != node_id {
+					return;
+				}
+				// As for `Unconnected` above: the producer ended it.
+				if let Some(selection) = &removed_selection {
+					selection.replace_restore(None);
+				}
+				state.borrow_mut().terminal = Some(Error::SourceUnavailable(format!(
+					"the selected {} is no longer available",
+					role.to_lowercase()
+				)));
+				tracing::debug!(?kind, node = id, "capture node removed");
+				if let Some(mainloop) = mainloop.upgrade() {
+					mainloop.quit();
+				}
+			}
+		})
+		.register();
 
 	// DMA-BUF formats come first so PipeWire prefers them. Each has a matching
 	// shared-memory offer without a modifier as the required fallback.
@@ -1998,6 +2041,41 @@ mod tests {
 		};
 		assert_eq!(lease.current(1), None);
 		assert_eq!(lease.current(2), Some(buffer));
+	}
+
+	/// A buffer PipeWire removes is freed, so a lease taken from it before must
+	/// not be queued back, and the retained frame is dropped with it.
+	#[test]
+	fn removed_buffer_retires_its_leases_and_the_retained_frame() {
+		let frame = nv12_to_i420(
+			&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+			FrameLayout {
+				stride: 4,
+				width: 4,
+				height: 2,
+				source_height: 2,
+			},
+		)
+		.unwrap();
+		let mut state = State {
+			format: VideoInfoRaw::default(),
+			geometry: None,
+			color: None,
+			geo_tx: None,
+			last: Some(Last::I420(frame)),
+			fresh: false,
+			generation: 1,
+			dmabuf_modifier: None,
+			terminal: None,
+		};
+		let buffer = std::ptr::dangling_mut::<pw::sys::pw_buffer>();
+		let lease = Lease {
+			buffer: buffer as usize,
+			generation: state.generation,
+		};
+		state.buffer_removed();
+		assert_eq!(lease.current(state.generation), None);
+		assert!(state.last.is_none());
 	}
 
 	#[test]

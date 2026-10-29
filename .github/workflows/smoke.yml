@@ -44,6 +44,9 @@ jobs:
     # gets longer: compiling a moq HEAD that isn't in cachix yet has taken 43
     # minutes on its own, and that build is what seeds the cache (see below).
     timeout-minutes: ${{ matrix.channel == 'nix' && 75 || 45 }}
+    # CACHIX_AUTH_TOKEN lives in the `publish` Environment, which only
+    # protected refs can deploy to. Without it the cachix push is skipped.
+    environment: ${{ github.ref == 'refs/heads/main' && matrix.channel == 'nix' && 'publish' || '' }}
 
     # smoke.sh resolves the latest libmoq release via the GitHub API. Without a
     # token that call is anonymous (60 req/hr per IP), which the heavily-NAT'd
@@ -209,7 +212,7 @@ jobs:
           cli=$(nix build --refresh --no-link --print-out-paths 'github:moq-dev/moq#moq')
           {
             echo "RELAY_BIN=$relay/bin/moq-relay"
-            echo "MOQ_BIN=$cli/bin/moq"
+            echo "CLI_BIN=$cli/bin/moq"
           } >> "$GITHUB_ENV"
 
       # cachix.yml only pushes release tags, so each new HEAD
@@ -228,25 +231,28 @@ jobs:
             echo "no CACHIX_AUTH_TOKEN secret; not pushing"
             exit 0
           fi
-          nix run nixpkgs#cachix -- push kixelated "${RELAY_BIN%/bin/*}" "${MOQ_BIN%/bin/*}"
+          nix run nixpkgs#cachix -- push kixelated "${RELAY_BIN%/bin/*}" "${CLI_BIN%/bin/*}"
 
       - name: Pull moqdev images (docker channel)
         if: matrix.channel == 'docker'
         # Pull :latest fresh, then point smoke.sh at the wrapper scripts (which
-        # `docker run --network host` the images) via RELAY_BIN/MOQ_BIN. Docker is
+        # `docker run --network host` the images) via RELAY_BIN/CLI_BIN. Docker is
         # preinstalled on the Linux runners.
         run: |
           docker pull moqdev/moq-relay
           docker pull moqdev/moq
           {
             echo "RELAY_BIN=$PWD/clients/docker/moq-relay"
-            echo "MOQ_BIN=$PWD/clients/docker/moq"
+            echo "CLI_BIN=$PWD/clients/docker/moq"
           } >> "$GITHUB_ENV"
 
       # ── browser deps (Chromium runtime libs on Linux) ──────────────────
       - name: Playwright system deps (Linux)
         if: runner.os == 'Linux'
         run: just playwright-deps
+
+      - name: Harness tests
+        run: just harness-check
 
       # Fail loudly if we've drifted off "latest": a committed lock file, a moq
       # package that stopped being requested at latest, or a stale playwright pin.
@@ -290,7 +296,7 @@ jobs:
       # ── token interop ──────────────────────────────────────────────────
       # Independent of the media matrix: prove the published token tooling
       # cross-verifies. `moq auth` rides the same channel as moq-relay/moq
-      # (cargo/apt/brew/nix, on PATH or MOQ_BIN); @moq/auth comes from npm and
+      # (cargo/apt/brew/nix, on PATH or CLI_BIN); @moq/auth comes from npm and
       # runs under both node and bun; rust-docker runs `auth` in the
       # moqdev/moq image. The negative pass inside token.sh confirms each verifier rejects
       # tampered tokens and the wrong key.

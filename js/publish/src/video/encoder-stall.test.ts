@@ -109,7 +109,14 @@ test("a slower-than-realtime encoder drops input instead of ratcheting catalog l
 	const order = new Order();
 	// An on-time audio rendition shares the broadcast, writing each capture as it happens.
 	const audio = new Estimator();
-	const rendition = { config: new Signal(undefined), track: new Signal(track), close: () => track.close() };
+	const rendition = {
+		config: new Signal(undefined),
+		track: new Signal(track),
+		close: () => {
+			track.finish();
+			track.close();
+		},
+	};
 	const encoder = new Encoder("video", {
 		broadcast: { video: () => rendition, order } as never,
 		capture: {
@@ -164,6 +171,7 @@ test("a slower-than-realtime encoder drops input instead of ratcheting catalog l
 	} finally {
 		encoder.close();
 		fanout.close();
+		track.finish();
 		track.close();
 		await clock.advance(Nano.zero);
 		installed.close();

@@ -14,7 +14,7 @@ use super::producer::Reserved;
 use super::{Input, Options, Producer};
 use crate::capture;
 use crate::resample::{Remix, Resampler};
-use crate::{Error, Format, Frame, Layout as PcmLayout};
+use crate::{Error, Format, Frame, Layout as PcmLayout, Level};
 
 /// Backoff bounds for reopening a capture source. The quick first retry covers
 /// a USB device re-enumerating; the ceiling keeps a missing device from spinning.
@@ -27,7 +27,8 @@ const RETRY_MAX: Duration = Duration::from_secs(4);
 pub enum Status {
 	/// Capture was explicitly stopped.
 	Stopped,
-	/// Capture is enabled and waiting for a subscriber.
+	/// Capture is enabled and waiting for a subscriber. Only an
+	/// [`on_demand`](Capture::on_demand) publication waits.
 	Waiting,
 	/// The selected input is being probed or opened.
 	Starting,
@@ -37,47 +38,6 @@ pub enum Status {
 	Failed,
 	/// The MoQ track ended, so the driver has stopped.
 	Ended,
-}
-
-/// The post-processing level of the most recently captured buffer.
-///
-/// Zero while the input is closed. Read it with [`Control::level`] at
-/// whatever rate the meter draws at.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Level {
-	rms: f32,
-	peak: f32,
-}
-
-impl Level {
-	/// Root mean square amplitude on a linear `0.0..=1.0` scale.
-	pub fn rms(&self) -> f32 {
-		self.rms
-	}
-
-	/// Peak absolute amplitude on a linear `0.0..=1.0` scale.
-	pub fn peak(&self) -> f32 {
-		self.peak
-	}
-
-	fn measure(samples: &[f32]) -> Self {
-		if samples.is_empty() {
-			return Self::default();
-		}
-
-		let mut squares = 0.0f64;
-		let mut peak = 0.0f32;
-		for &sample in samples {
-			let sample = sample.clamp(-1.0, 1.0);
-			squares += f64::from(sample) * f64::from(sample);
-			peak = peak.max(sample.abs());
-		}
-
-		Self {
-			rms: (squares / samples.len() as f64).sqrt() as f32,
-			peak,
-		}
-	}
 }
 
 /// A snapshot of a capture-backed publication's lifecycle.
@@ -135,6 +95,13 @@ pub struct Capture {
 	pub capture: capture::Config,
 	/// The track's stable codec and encode settings.
 	pub encode: Options,
+	/// Open the input only while the track has a subscriber, releasing it when
+	/// the last one leaves.
+	///
+	/// Off by default: an enabled input captures and encodes whether or not
+	/// anyone is watching, so the recent past exists for a late subscriber to
+	/// fetch. On demand, nothing is captured while nobody listens.
+	pub on_demand: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -188,10 +155,11 @@ impl fmt::Debug for Control {
 impl Control {
 	/// Register one stable audio track and return its control handle and driver.
 	///
-	/// The initial source is enabled, but opens only while the track has a
-	/// subscriber. On macOS the driver's future is `!Send`, because the permission
-	/// prompt and ScreenCaptureKit hold ObjC handles across an await, so await
-	/// [`Driver::run`] on a local task there; elsewhere it can be spawned.
+	/// The initial source is enabled and opens right away, or only while the
+	/// track has a subscriber with [`Capture::on_demand`]. On macOS the driver's
+	/// future is `!Send`, because the permission prompt and ScreenCaptureKit hold
+	/// ObjC handles across an await, so await [`Driver::run`] on a local task
+	/// there; elsewhere it can be spawned.
 	/// [`Control`] itself is `Send + Sync`, so the controls can live anywhere.
 	///
 	/// The track is registered here, but its catalog rendition describes the
@@ -245,6 +213,7 @@ impl Control {
 			_reservation: None,
 			track: Some(Track::Reserved(reserved)),
 			encode: options.encode,
+			on_demand: options.on_demand,
 			clock,
 			supervisor,
 			desired: desired_tx.consume(),
@@ -347,6 +316,8 @@ pub struct Driver {
 	track: Option<Track>,
 	/// The codec settings the rendition is built from once the layout is known.
 	encode: Options,
+	/// Whether the input opens only while the track has a subscriber.
+	on_demand: bool,
 	/// The catalog's clock, so samples land on the mapping it advertises.
 	clock: moq_mux::Clock,
 	supervisor: Supervisor,
@@ -509,7 +480,10 @@ impl Driver {
 					.as_mut()
 					.and_then(Track::producer)
 					.expect("the layout is discovered before capture runs");
-				let mut demand = track.demand();
+				let mut demand = Wanted {
+					demand: track.demand(),
+					on_demand: self.on_demand,
+				};
 				let mut output = EncoderOutput {
 					producer,
 					clock: &self.clock,
@@ -553,8 +527,8 @@ impl Driver {
 		tokio::select! {
 			biased;
 			changed = desired_changed(&self.desired, revision) => changed.is_some(),
-			err = track.closed() => {
-				log_track_ended(err);
+			closed = track.closed() => {
+				log_track_ended(closed);
 				false
 			}
 		}
@@ -713,7 +687,7 @@ fn publish_state(
 	published.revision = published.revision.wrapping_add(1);
 }
 
-/// Capture audio on demand and publish it as an encoded MoQ track.
+/// Capture audio and publish it as an encoded MoQ track.
 ///
 /// This convenience function runs a [`Control`] from
 /// `options` without handing back the handle. Use [`Control::new`] directly to
@@ -790,17 +764,39 @@ impl CaptureSource for DeviceSource {
 
 /// Demand for the published track. `false` means the track itself ended.
 trait Demand {
+	/// Whether the input waits for a subscriber at all, so idling reports [`Status::Waiting`].
+	fn gated(&self) -> bool {
+		true
+	}
 	async fn used(&mut self) -> bool;
 	async fn unused(&mut self) -> bool;
 }
 
-impl Demand for moq_net::track::Demand {
+/// The track's subscribers when [`on_demand`](Capture::on_demand), or else a
+/// want that holds until the track ends.
+struct Wanted {
+	demand: moq_net::track::Demand,
+	on_demand: bool,
+}
+
+impl Demand for Wanted {
+	fn gated(&self) -> bool {
+		self.on_demand
+	}
+
 	async fn used(&mut self) -> bool {
-		until_wanted(self, true).await
+		if !self.on_demand {
+			return true;
+		}
+		until_wanted(&mut self.demand, true).await
 	}
 
 	async fn unused(&mut self) -> bool {
-		until_wanted(self, false).await
+		if !self.on_demand {
+			log_track_ended(self.demand.closed().await);
+			return false;
+		}
+		until_wanted(&mut self.demand, false).await
 	}
 }
 
@@ -811,7 +807,7 @@ async fn until_wanted(demand: &mut moq_net::track::Demand, wanted: bool) -> bool
 			Ok(next) if next.is_some() == wanted => return true,
 			Ok(_) => {}
 			Err(err) => {
-				log_track_ended(err);
+				log_track_ended(Err(err));
 				return false;
 			}
 		}
@@ -1063,8 +1059,8 @@ impl Supervisor {
 		}
 	}
 
-	/// Open the source while a listener is subscribed, release it when the last
-	/// one leaves, and rebuild a failed source behind the same producer.
+	/// Open the source while `demand` wants it, release it when it stops, and
+	/// rebuild a failed source behind the same producer.
 	///
 	/// Cancel safety: every wait is a real `.await` (a buffer read or a demand
 	/// transition), so dropping this future (e.g. on Ctrl+C) drops the input and
@@ -1083,8 +1079,10 @@ impl Supervisor {
 	{
 		let output_layout = self.layout.expect("capture format must be discovered before running");
 		'demand: loop {
-			// Idle until a listener subscribes; the track ending is a clean exit.
-			output.waiting();
+			// Idle until the input is wanted; the track ending is a clean exit.
+			if demand.gated() {
+				output.waiting();
+			}
 			if !demand.used().await {
 				return Ok(());
 			}
@@ -1193,9 +1191,14 @@ impl Supervisor {
 	}
 }
 
-/// An application dropping or closing its producer ends publishing normally;
-/// a specific abort (such as a transport reset) stays visible in diagnostics.
-fn log_track_ended(err: moq_net::Error) {
+/// A finished track, or an application dropping or closing its producer, ends
+/// publishing normally; a specific abort (such as a transport reset) stays
+/// visible in diagnostics.
+fn log_track_ended(outcome: Result<(), moq_net::Error>) {
+	let Err(err) = outcome else {
+		tracing::debug!("audio track finished; stopping capture");
+		return;
+	};
 	if matches!(err, moq_net::Error::Dropped | moq_net::Error::Closed) {
 		tracing::debug!("audio track no longer announced; stopping capture");
 	} else {
@@ -2131,12 +2134,23 @@ mod tests {
 			catalog: moq_mux::catalog::Producer,
 			consumer: moq_net::broadcast::Consumer,
 			publication: Control,
+			/// How many times the publication opened its input.
+			opens: Arc<AtomicUsize>,
 			task: tokio::task::JoinHandle<Result<(), Error>>,
 		}
 
 		impl Fixture {
 			/// Run a publication over `opens` on a broadcast whose clock began `behind` ago, at `wall`.
 			fn start(behind: Duration, wall: Wall, opens: impl IntoIterator<Item = Open>) -> Self {
+				Self::build(behind, wall, opens, false)
+			}
+
+			/// Same, opening the input only while the track has a subscriber.
+			fn on_demand(behind: Duration, wall: Wall, opens: impl IntoIterator<Item = Open>) -> Self {
+				Self::build(behind, wall, opens, true)
+			}
+
+			fn build(behind: Duration, wall: Wall, opens: impl IntoIterator<Item = Open>, on_demand: bool) -> Self {
 				let epoch = Instant::now()
 					.checked_sub(behind)
 					.expect("a monotonic clock that far back");
@@ -2149,20 +2163,24 @@ mod tests {
 				let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
 				let mut options = Capture::default();
 				options.encode.track = Some("audio".into());
+				options.on_demand = on_demand;
 				let (publication, driver) =
 					Control::build(broadcast, catalog.clone(), options, Supervisor::exact()).unwrap();
-				let task = tokio::spawn(driver.run_with(source(opens, false)));
+				let source = source(opens, false);
+				let opens = source.attempts.clone();
+				let task = tokio::spawn(driver.run_with(source));
 				Self {
 					epoch,
 					clock,
 					catalog,
 					consumer,
 					publication,
+					opens,
 					task,
 				}
 			}
 
-			/// Subscribe to the audio track, which is what opens the microphone.
+			/// Subscribe to the audio track once the microphone is live, which on demand is what opens it.
 			async fn subscribe(&mut self) -> Track {
 				let track = self
 					.consumer
@@ -2377,6 +2395,46 @@ mod tests {
 			fixture.finish().await;
 		}
 
+		/// An enabled microphone captures with nobody listening, so a late subscriber reads
+		/// back what was published before it arrived.
+		#[tokio::test]
+		async fn captures_without_a_subscriber() {
+			let (samples, input) = stream(None);
+			let mut fixture = Fixture::start(Duration::from_secs(1), moq_clock::wall(), [Open::Stream(input)]);
+			wait_for(&mut fixture.publication, Status::Live).await;
+
+			let captured = Instant::now();
+			samples
+				.try_push(Ok(capture::Samples::at(vec![0.1; 1920], false, captured)))
+				.unwrap();
+			// Published before anyone subscribes: the largest location is read without asking for it.
+			let mut probe = fixture.consumer.track("audio").unwrap();
+			tokio::time::timeout(Duration::from_secs(1), probe.largest())
+				.await
+				.expect("a group published with nobody listening")
+				.expect("the track is still open");
+			let mut track = fixture.subscribe().await;
+			let published = fixture.read_new(&mut track, &[]).await;
+			fixture.assert_captured(published, captured);
+			assert_eq!(fixture.opens.load(Ordering::SeqCst), 1);
+			fixture.finish().await;
+		}
+
+		/// On demand, the microphone stays closed until a subscriber arrives.
+		#[tokio::test]
+		async fn on_demand_waits_for_a_subscriber() {
+			let (samples, input) = stream(None);
+			let mut fixture = Fixture::on_demand(Duration::from_secs(1), moq_clock::wall(), [Open::Stream(input)]);
+			// `Waiting` is announced right before the demand gate, so nothing opens past it unsubscribed.
+			wait_for(&mut fixture.publication, Status::Waiting).await;
+			assert_eq!(fixture.opens.load(Ordering::SeqCst), 0, "opened with nobody listening");
+
+			let mut track = fixture.subscribe().await;
+			assert_eq!(fixture.opens.load(Ordering::SeqCst), 1);
+			fixture.deliver(&samples, &mut track, &[]).await;
+			fixture.finish().await;
+		}
+
 		/// Releasing the microphone while nobody listens keeps the broadcast clock running:
 		/// the buffer after a resume lands after the real idle gap.
 		#[tokio::test]
@@ -2384,7 +2442,7 @@ mod tests {
 			let idle = Duration::from_millis(300);
 			let (first, input) = stream(None);
 			let (second, resumed) = stream(None);
-			let mut fixture = Fixture::start(
+			let mut fixture = Fixture::on_demand(
 				Duration::from_secs(1),
 				moq_clock::wall(),
 				[Open::Stream(input), Open::Stream(resumed)],
@@ -2431,62 +2489,64 @@ mod tests {
 			fixture.finish().await;
 		}
 
-		/// A recording replays what the live edge published: the archive's records
-		/// carry the live timestamps across an idle restart, with the idle gap left in.
+		/// HLS lists what the live edge published: the records carry the live timestamps across an
+		/// on-demand idle restart, with the idle gap left out of every segment.
 		#[tokio::test]
-		async fn retained_archive_playback_keeps_the_live_timestamps() {
+		async fn hls_records_keep_the_live_timestamps() {
 			let (first, input) = stream(None);
 			let (second, resumed) = stream(None);
-			let mut fixture = Fixture::start(
+			let mut fixture = Fixture::on_demand(
 				Duration::from_secs(1),
 				moq_clock::wall(),
 				[Open::Stream(input), Open::Stream(resumed)],
 			);
 			let mut live = Vec::new();
-			let mut timeline = None;
+			let mut hls = None;
 
 			for samples in [&first, &second] {
 				let mut track = fixture.subscribe().await;
 				live.push(fixture.deliver(samples, &mut track, &live).await);
 				drop(track);
-				wait_for(&mut fixture.publication, Status::Waiting).await;
-				// The second run's first group closes the unhinted timeline's first record.
-				if timeline.is_none() && live.len() > 1 {
-					let section = fixture
-						.catalog
-						.snapshot()
-						.archive
-						.expect("the audio track declares its archive after the run closes");
-					timeline = Some(
-						moq_mux::timeline::Consumer::<()>::subscribe(&fixture.consumer, &section, "audio")
-							.await
-							.unwrap(),
+				// The break is marked when the second run resumes, and its stop declares the unhinted
+				// duration.
+				if hls.is_none() && live.len() > 1 {
+					hls = Some(
+						fixture.catalog.snapshot().audio.renditions["audio"]
+							.hls
+							.clone()
+							.expect("the audio track declares its HLS records once the first run stops"),
 					);
 				}
-				// Idle past the minimum segment, so each run is archived as its own record.
-				tokio::time::sleep(moq_mux::timeline::DEFAULT_DURATION_MIN + Duration::from_millis(100)).await;
+				wait_for(&mut fixture.publication, Status::Waiting).await;
+				// Idle past the minimum segment, so each run is listed as its own segment.
+				tokio::time::sleep(moq_mux::hls::DEFAULT_DURATION + Duration::from_millis(100)).await;
 			}
 
-			let (catalog, _consumer) = fixture.finish().await;
-			catalog.timeline().finish();
-			let mut timeline = timeline.unwrap();
-			let mut archived = Vec::new();
-			while let Some(event) = timeline.next().await.unwrap() {
+			let (mut catalog, consumer) = fixture.finish().await;
+			catalog.finish().unwrap();
+			// Read only now: a record reader is demand too, and would have kept the capture from
+			// idling between the runs.
+			let mut records = moq_mux::hls::Consumer::subscribe(&consumer, &hls.unwrap())
+				.await
+				.unwrap();
+			let mut listed = Vec::new();
+			while let Some(event) = records.next().await.unwrap() {
 				match event {
-					moq_mux::timeline::Event::Push { entry, .. } => archived.push(entry),
-					other => panic!("unexpected timeline event {other:?}"),
+					moq_mux::hls::Event::Push { entry, .. } => listed.push(entry),
+					other => panic!("unexpected record event {other:?}"),
 				}
 			}
 
-			assert_eq!(archived.len(), live.len(), "one record per capture run: {archived:?}");
-			for (entry, live) in archived.iter().zip(&live) {
-				// The archive keeps millisecond precision.
-				assert_eq!(entry.pts.as_micros() / 1000, u128::from(*live / 1000), "{archived:?}");
+			// Each run is one segment, stopped where its content reached.
+			assert_eq!(listed.len(), 2 * live.len(), "a segment and a stop per run: {listed:?}");
+			for (pair, live) in listed.chunks(2).zip(&live) {
+				assert!(!pair[0].is_stop() && pair[1].is_stop(), "{listed:?}");
+				// The records keep millisecond precision.
+				assert_eq!(pair[0].pts.as_micros() / 1000, u128::from(*live / 1000), "{listed:?}");
 			}
-			let first = &archived[0];
 			assert!(
-				archived[1].pts.as_micros() >= first.pts.as_micros() + first.duration.as_micros(),
-				"the resumed record overlaps the one before it: {archived:?}"
+				listed[2].pts.as_micros() >= listed[1].pts.as_micros(),
+				"the resumed segment overlaps the one before it: {listed:?}"
 			);
 		}
 	}

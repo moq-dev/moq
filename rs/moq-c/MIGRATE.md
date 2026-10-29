@@ -4,6 +4,44 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Compression moves to the track
+
+`moq_json_snapshot_config.compression`, `moq_json_stream_config`, `moq_binary_config`, and the `moq_publish_binary_snapshot*` and `moq_publish_binary_stream*` functions are removed.
+`moq_publish_json_stream`, `moq_consume_json_snapshot`, and `moq_consume_json_stream` drop their `config` argument.
+JSON tracks are created with `compress` set, and a consumer reads one like a plain track. Publish opaque bytes on a raw track with `moq_publish_track`.
+
+### Authored configs keep their identity ([#7110](https://github.com/moq-dev/moq/pull/7110))
+
+`moq_publish_video_config` and `moq_publish_audio_config` return `MOQ_ERROR_MUX` for a repeat call that changes the rendition's `codec`, `description`, or `container`, or an audio `sample_rate` or `channel_count`.
+Publish media with a new identity under a new name, and remove the old rendition.
+Tracks published with `moq_publish_video` or `moq_publish_audio` take a new name such as `<name>/1` when the stream's decoder identity changes, so read the name from the catalog rather than caching it.
+A frame passed to `moq_encode_video_frame` that moves the rendition to a new track, such as a resume at a ceiling past the declared level, reserves bandwidth against the new track, so call `moq_encode_video_reservation` again rather than holding the first handle.
+
+### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
+
+Every function taking a path, such as `moq_origin_create_broadcast` and `moq_origin_request`, returns an error for a path with a leading, trailing, or doubled `/` instead of collapsing it. Pass the canonical path, such as `room/cam`.
+
+### Request handlers are named requests ([#6752](https://github.com/moq-dev/moq/pull/6752))
+
+The request-handler functions are renamed to match moq-net's `requests()`; their arguments and callbacks are unchanged:
+`moq_origin_dynamic` and `moq_origin_dynamic_cancel` are `moq_origin_requests` and `moq_origin_requests_cancel`,
+`moq_publish_dynamic`, `moq_publish_track_dynamic`, and `moq_track_request_dynamic` are `moq_publish_requests`, `moq_publish_track_requests`, and `moq_track_request_requests`,
+and `moq_publish_dynamic_cancel` is `moq_publish_requests_cancel`.
+
+### Session allocator ([#6751](https://github.com/moq-dev/moq/pull/6751))
+
+`moq_session_bandwidth` is `moq_session_allocator`, `moq_bandwidth_reserve` is `moq_allocator_reserve`, and `moq_bandwidth_close` is `moq_allocator_close`, matching `moq_net::bandwidth::Allocator`. `moq_reservation_grant` is `moq_reservation_rate`, matching `moq_net::bandwidth::Reservation::rate()`. Signatures are unchanged. The receive estimate keeps its names (`moq_session_recv_bandwidth`, `moq_bandwidth_consumer_*`).
+
+### `moq_encode_video` takes a `moq_video_encode_options`
+
+`moq_encode_video`'s fourth argument is a `const moq_video_encode_options *` instead of a `uint32_t bandwidth`: pass `NULL` where you passed `0`, or `&(moq_video_encode_options){.bandwidth = bandwidth}`.
+Its `lower` field takes the handle of the next lower rendition's encoder, to disable this one while its bandwidth grant cannot fund it; that needs a `bandwidth` and a bitrate above the lower encoder's.
+`moq_reservation_rate` reports the slice the track would get back while nothing subscribes to it, instead of no grant.
+
+### Decoders deliver reads
+
+`moq_decode_audio` and `moq_decode_video` call back with a read id per decoded frame, gap, or encoder end instead of a frame id. Replace `moq_decode_audio_frame` / `moq_decode_video_frame` with `moq_decode_audio_read` / `moq_decode_video_read`, which fill a `moq_audio_read` / `moq_video_read`: check `kind` (`MOQ_DECODE_READ_FRAME`, `MOQ_DECODE_READ_GAP`, `MOQ_DECODE_READ_END`) and take the frame from its `frame` field, the lost span from `gap`, or `end_us`. Free every id with `moq_decode_audio_read_free` / `moq_decode_video_read_free` where you called the `_frame_free` functions. Skip gap and end reads to keep the old behavior, or restart playback there, since what follows does not continue what came before.
+
 ### Sessions report a lifecycle snapshot
 
 `moq_session_connect` and `moq_session_request_accept` take a `moq_state_callback` instead of a `moq_status_callback`: `void on_state(void *user_data, const moq_connection_state *state)`.

@@ -10,6 +10,7 @@ on:
     branches: [release]
     paths:
       - "rs/**"
+      - "c/**"
       - "cpp/**"
       - "swift/**"
       - "infra/moq-sh/**"
@@ -25,13 +26,13 @@ on:
   workflow_call:
     inputs:
       benchmarks:
-        description: Measure Swift against Rust baselines on this runner
+        description: Smoke-run the Swift binding benchmark runner
         type: boolean
         default: false
   workflow_dispatch:
     inputs:
       benchmarks:
-        description: Measure Swift against Rust baselines on this runner
+        description: Smoke-run the Swift binding benchmark runner
         type: boolean
         default: false
 
@@ -53,6 +54,7 @@ jobs:
       needed: ${{ steps.scope.outputs.needed }}
       rs: ${{ steps.scope.outputs.rs }}
       swift: ${{ steps.scope.outputs.swift }}
+      c: ${{ steps.scope.outputs.c }}
       cpp: ${{ steps.scope.outputs.cpp }}
       obs: ${{ steps.scope.outputs.obs_compile }}
       moq_sh: ${{ steps.scope.outputs.moq_sh }}
@@ -71,7 +73,7 @@ jobs:
   windows:
     name: Windows
     needs: scope
-    if: needs.scope.outputs.rs == 'true' || needs.scope.outputs.cpp == 'true' || needs.scope.outputs.obs == 'true'
+    if: needs.scope.outputs.rs == 'true' || needs.scope.outputs.c == 'true' || needs.scope.outputs.cpp == 'true' || needs.scope.outputs.obs == 'true'
     # OBS uses the Visual Studio 17 2022 CMake generator.
     runs-on: windows-2022
     # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
@@ -93,7 +95,7 @@ jobs:
       - uses: ./.github/actions/just
       - name: Install nextest
         if: needs.scope.outputs.rs == 'true'
-        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: nextest@0.9.146
       # Nightly writes these platforms; `release` pull requests read.
@@ -103,7 +105,7 @@ jobs:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
       - name: Install uniffi-bindgen-cpp
-        if: needs.scope.outputs.cpp == 'true' || needs.scope.outputs.obs == 'true'
+        if: needs.scope.outputs.c == 'true' || needs.scope.outputs.cpp == 'true' || needs.scope.outputs.obs == 'true'
         shell: bash
         run: cargo install uniffi-bindgen-cpp --locked --git https://github.com/kixelated/uniffi-bindgen-cpp --tag v0.11.0-kixelated.7+v0.32.2
       - name: Rust compile and tests
@@ -114,6 +116,10 @@ jobs:
         run: |
           just rs windows "$CI_BASE"
           just rs windows-test
+      - name: C
+        if: needs.scope.outputs.c == 'true'
+        shell: bash
+        run: just c check
       - name: C++
         if: needs.scope.outputs.cpp == 'true'
         shell: bash
@@ -141,7 +147,7 @@ jobs:
       - uses: ./.github/actions/just
       - name: Install nextest
         if: needs.scope.outputs.rs == 'true'
-        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: nextest@0.9.146
       - name: Rust cache
@@ -165,18 +171,15 @@ jobs:
       - name: Swift
         if: needs.scope.outputs.swift == 'true'
         run: just swift check
-      - name: Swift binding benchmark
-        id: swift-bench
+      # At a token budget, so the runner keeps working at this commit; rust2's
+      # `just bench-ffi` measures it at its pinned moq revision.
+      - name: Swift binding benchmark runner
         if: inputs.benchmarks
-        run: just bench-ffi swift
-      # Only after the benchmark ran, so an earlier failure stays the job's only error.
-      - name: Preserve Swift benchmark
-        if: ${{ !cancelled() && steps.swift-bench.outcome != 'skipped' }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: bench-ffi-swift
-          path: target/bench/ffi/
-          if-no-files-found: error
+        env:
+          MOQ_BENCH_SECONDS: "0.05"
+        run: |
+          just swift bench
+          test -s target/bench/ffi/swift.json
       - name: OBS
         if: needs.scope.outputs.obs == 'true'
         run: just obs package --target aarch64-apple-darwin --output "$RUNNER_TEMP/obs"

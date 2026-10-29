@@ -9,7 +9,7 @@ use bytes::Bytes;
 use crate::{
 	Version,
 	coding::{self, Decode, DecodeError, Decoder, Encode, EncodeError, Encoder},
-	ietf, lite,
+	lite,
 };
 
 /// The session direction a client advertises in its SETUP (moq-lite-05+).
@@ -21,8 +21,8 @@ pub(crate) const MAX_SETUP_SIZE: usize = u16::MAX as usize;
 const CLIENT_SETUP: u8 = 0x20;
 const SERVER_SETUP: u8 = 0x21;
 
-/// Draft-17 unified SETUP message type (varint 0x2F00)
-pub(crate) const SETUP_V17: u64 = 0x2F00;
+/// The moq-transport SETUP message type (varint 0x2F00).
+pub(crate) const SETUP: u64 = 0x2F00;
 
 /// Decode a SETUP Implementation value, refusing one that is not UTF-8.
 pub(crate) fn decode_implementation(bytes: Option<&[u8]>) -> Result<Option<String>, crate::DecodeError> {
@@ -79,13 +79,13 @@ pub(crate) fn implementation(value: &str) -> Option<String> {
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Extensions {
-	/// The MoQ Auth extension: tokens presented and granted on their own stream (draft-17+).
+	/// The MoQ Auth extension: tokens presented and granted on their own stream.
 	pub auth: bool,
 	/// The MoQ Solicit extension: the peer answers our SUBSCRIBE_NAMESPACE rather than
-	/// announcing unasked.
+	/// announcing unasked (moq-transport only).
 	pub solicit: bool,
 	/// The MoQ Epoch extension: announcements and requests carry the publisher's
-	/// [`Epoch`](crate::Epoch), as moq-lite 07 does (draft-17+).
+	/// [`Epoch`](crate::Epoch), as moq-lite 07 does.
 	pub epoch: bool,
 	/// The MoQ IETF extension, off by default: a moq-lite 07 hop between relays carries the
 	/// moq-transport object state a relay preserves, such as Object IDs and properties.
@@ -103,10 +103,11 @@ impl Default for Extensions {
 	}
 }
 
-/// A credential a moq-transport peer presented in its SETUP's `AUTHORIZATION TOKEN` option.
+/// A connection credential presented in SETUP: moq-transport's `AUTHORIZATION TOKEN`
+/// option, or moq-lite-07's Token parameter.
 ///
 /// The transport never reads the bytes; verifying them is the application's job.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Token {
 	/// The wire Token Type, naming how [`value`](Self::value) is encoded.
 	pub kind: u64,
@@ -117,43 +118,42 @@ pub struct Token {
 impl Token {
 	/// Token Type 0: a format the endpoints agreed on out of band, such as a JWT.
 	pub const OUT_OF_BAND: u64 = 0x0;
-	/// Token Type 1: a Common Access Token (draft-ietf-moq-c4m).
-	pub const CAT: u64 = 0x1;
 }
 
-/// Draft-17+ unified SETUP message, with the same encoding for both client and server.
+// SETUP and handshakes are logged with `Debug`, so the credential shows only its type and length.
+impl std::fmt::Debug for Token {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "Token(kind={}, <{} bytes>)", self.kind, self.value.len())
+	}
+}
+
+/// The unified SETUP message, with the same encoding for both client and server.
 #[derive(Debug, Clone)]
 pub(crate) struct Setup {
 	pub parameters: Bytes,
 }
 
-impl Setup {
-	fn check_version(v: Version) {
-		match v {
-			Version::Ietf(ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16)
-			| Version::Lite(_) => unreachable!("Setup is draft-17+ only"),
-			_ => {}
-		}
-	}
-}
-
 impl Encode<Version> for Setup {
 	fn encode(&self, w: &mut Encoder<'_>, v: Version) -> Result<(), EncodeError> {
-		w.control = Some(crate::stats::Control::Session);
-		Self::check_version(v);
-		w.varint(SETUP_V17)?;
+		w.control = Some(crate::stats::Message::Session);
+		if v.is_lite() {
+			return Err(EncodeError::Version);
+		}
+		w.varint(SETUP)?;
 		let prefix = w.prefix_u16();
 		w.slice(&self.parameters);
 		w.fill(prefix)
 	}
 }
 
-impl Decode<Version> for Setup {
-	fn decode(r: &mut Decoder<'_>, v: Version) -> Result<Self, DecodeError> {
-		r.control = Some(crate::stats::Control::Session);
-		Self::check_version(v);
+impl<'a> Decode<'a, Version> for Setup {
+	fn decode(r: &mut Decoder<'a>, v: Version) -> Result<Self, DecodeError> {
+		r.control = Some(crate::stats::Message::Session);
+		if v.is_lite() {
+			return Err(DecodeError::Version);
+		}
 		let kind = r.varint()?;
-		if kind != SETUP_V17 {
+		if kind != SETUP {
 			return Err(DecodeError::InvalidValue);
 		}
 		let size = r.u16()? as usize;
@@ -162,78 +162,39 @@ impl Decode<Version> for Setup {
 	}
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SetupVersion {
-	Draft14,
-	Draft15Plus,
-	/// Draft17+ uses ALPN-only negotiation with no legacy SETUP message.
-	Modern,
-	LiteLegacy,
-	Unsupported,
+/// Whether `v` encodes the `moql` bidi SETUP exchange: moq-lite 01/02, whose draft-14 framing
+/// and QUIC varints it keeps whichever moq-lite version it negotiates.
+fn framed(v: Version) -> bool {
+	matches!(v, Version::Lite(lite::Version::Lite01 | lite::Version::Lite02))
 }
 
-impl SetupVersion {
-	fn from_version(v: Version) -> Self {
-		match v {
-			Version::Ietf(ietf::Version::Draft14) => Self::Draft14,
-			Version::Ietf(ietf::Version::Draft15) | Version::Ietf(ietf::Version::Draft16) => Self::Draft15Plus,
-			Version::Ietf(ietf::Version::Draft17)
-			| Version::Ietf(ietf::Version::Draft18)
-			| Version::Ietf(ietf::Version::Draft19)
-			| Version::Ietf(ietf::Version::Draft20)
-			| Version::Ietf(ietf::Version::Draft21)
-			| Version::Ietf(ietf::Version::Draft22) => Self::Modern,
-			Version::Lite(lite::Version::Lite01) | Version::Lite(lite::Version::Lite02) => Self::LiteLegacy,
-			Version::Lite(_) => Self::Unsupported,
-		}
-	}
-}
-
-/// A version-agnostic setup message sent by the client.
+/// The client half of the `moql` bidi SETUP exchange, offering moq-lite versions.
+///
+/// The framing is moq-transport draft-14's CLIENT_SETUP, which moq-lite borrowed: a
+/// u16 size, the offered versions, then parameters.
 #[derive(Debug, Clone)]
 pub(crate) struct Client {
 	/// The list of supported versions in preferred order.
 	pub versions: coding::Versions,
 
-	/// Parameters, unparsed because the IETF draft changed the encoding.
+	/// Parameters, unparsed: moq-lite defines none here, so neither side reads them.
 	pub parameters: Bytes,
 }
 
-impl Client {
-	fn encode_inner(&self, w: &mut Encoder<'_>, v: Version) -> Result<(), EncodeError> {
-		match SetupVersion::from_version(v) {
-			SetupVersion::Draft15Plus => {
-				// Draft15+: no versions list, parameters only.
-			}
-			SetupVersion::Draft14 | SetupVersion::LiteLegacy => self.versions.encode(w, v)?,
-			SetupVersion::Modern | SetupVersion::Unsupported => return Err(EncodeError::Version),
-		};
-		w.slice(&self.parameters);
-		Ok(())
-	}
-}
-
-impl Decode<Version> for Client {
-	/// Decode a client setup message (draft-14 through draft-16 only).
-	fn decode(r: &mut Decoder<'_>, v: Version) -> Result<Self, DecodeError> {
-		r.control = Some(crate::stats::Control::Session);
+impl<'a> Decode<'a, Version> for Client {
+	fn decode(r: &mut Decoder<'a>, v: Version) -> Result<Self, DecodeError> {
+		r.control = Some(crate::stats::Message::Session);
+		if !framed(v) {
+			return Err(DecodeError::Version);
+		}
 		let kind = r.u8()?;
 		if kind != CLIENT_SETUP {
 			return Err(DecodeError::InvalidValue);
 		}
 
-		let mut msg = decode_body(r, v)?;
-
-		let versions = match SetupVersion::from_version(v) {
-			SetupVersion::Draft15Plus => {
-				// Draft15+: no versions list, parameters only.
-				coding::Versions::from([v.into()])
-			}
-			SetupVersion::Draft14 | SetupVersion::LiteLegacy => {
-				coding::Versions::decode(&mut msg, v).map_err(DecodeError::complete)?
-			}
-			SetupVersion::Modern | SetupVersion::Unsupported => return Err(DecodeError::Version),
-		};
+		let size = r.u16()? as usize;
+		let mut msg = r.sub(size)?;
+		let versions = coding::Versions::decode(&mut msg, v).map_err(DecodeError::complete)?;
 
 		Ok(Self {
 			versions,
@@ -243,42 +204,20 @@ impl Decode<Version> for Client {
 }
 
 impl Encode<Version> for Client {
-	/// Encode a client setup message (draft-14 through draft-16 only).
 	fn encode(&self, w: &mut Encoder<'_>, v: Version) -> Result<(), EncodeError> {
-		w.control = Some(crate::stats::Control::Session);
+		w.control = Some(crate::stats::Message::Session);
+		if !framed(v) {
+			return Err(EncodeError::Version);
+		}
 		w.u8(CLIENT_SETUP);
-		let prefix = prefix_body(w, v)?;
-		self.encode_inner(w, v)?;
+		let prefix = w.prefix_u16();
+		self.versions.encode(w, v)?;
+		w.slice(&self.parameters);
 		fill_body(w, prefix)
 	}
 }
 
-/// Read a pre-draft-17 SETUP body: its size, then that many bytes.
-fn decode_body<'a>(r: &mut Decoder<'a>, v: Version) -> Result<Decoder<'a>, DecodeError> {
-	let size = match SetupVersion::from_version(v) {
-		SetupVersion::Draft14 | SetupVersion::Draft15Plus => r.u16()? as usize,
-		SetupVersion::LiteLegacy => usize::try_from(r.varint()?).map_err(|_| DecodeError::BoundsExceeded)?,
-		SetupVersion::Modern | SetupVersion::Unsupported => return Err(DecodeError::Version),
-	};
-	if size > MAX_SETUP_SIZE {
-		return Err(DecodeError::MessageTooLarge {
-			size,
-			max: MAX_SETUP_SIZE,
-		});
-	}
-	r.sub(size)
-}
-
-/// Reserve the size prefix of a pre-draft-17 SETUP body.
-fn prefix_body(w: &mut Encoder<'_>, v: Version) -> Result<coding::Prefix, EncodeError> {
-	match SetupVersion::from_version(v) {
-		SetupVersion::Draft14 | SetupVersion::Draft15Plus => Ok(w.prefix_u16()),
-		SetupVersion::LiteLegacy => Ok(w.prefix_varint()),
-		SetupVersion::Modern | SetupVersion::Unsupported => Err(EncodeError::Version),
-	}
-}
-
-/// Size a pre-draft-17 SETUP body, refusing one our own receiver would refuse.
+/// Size a SETUP body, refusing one our own receiver would refuse.
 fn fill_body(w: &mut Encoder<'_>, prefix: coding::Prefix) -> Result<(), EncodeError> {
 	if w.since(&prefix) > MAX_SETUP_SIZE {
 		w.discard(prefix);
@@ -287,58 +226,47 @@ fn fill_body(w: &mut Encoder<'_>, prefix: coding::Prefix) -> Result<(), EncodeEr
 	w.fill(prefix)
 }
 
-/// Sent by the server in response to a client setup.
+/// The server half of the `moql` bidi SETUP exchange, selecting a moq-lite version.
+///
+/// The framing is moq-transport draft-14's SERVER_SETUP: a u16 size, the selected version,
+/// then parameters.
 #[derive(Debug, Clone)]
 pub(crate) struct Server {
-	/// The list of supported versions in preferred order.
+	/// The selected version.
 	pub version: coding::Version,
 
-	/// Supported extensions.
+	/// Parameters, unparsed: moq-lite defines none here, so neither side reads them.
 	pub parameters: Bytes,
 }
 
-impl Server {
-	fn encode_inner(&self, w: &mut Encoder<'_>, v: Version) -> Result<(), EncodeError> {
-		match SetupVersion::from_version(v) {
-			SetupVersion::Draft15Plus => {
-				// Draft15+: No version field, parameters only.
-			}
-			SetupVersion::Draft14 | SetupVersion::LiteLegacy => self.version.encode(w, v)?,
-			SetupVersion::Modern | SetupVersion::Unsupported => return Err(EncodeError::Version),
-		};
-		w.slice(&self.parameters);
-		Ok(())
-	}
-}
-
 impl Encode<Version> for Server {
-	/// Encode a server setup message (draft-14 through draft-16 only).
 	fn encode(&self, w: &mut Encoder<'_>, v: Version) -> Result<(), EncodeError> {
-		w.control = Some(crate::stats::Control::Session);
+		w.control = Some(crate::stats::Message::Session);
+		if !framed(v) {
+			return Err(EncodeError::Version);
+		}
 		w.u8(SERVER_SETUP);
-		let prefix = prefix_body(w, v)?;
-		self.encode_inner(w, v)?;
+		let prefix = w.prefix_u16();
+		self.version.encode(w, v)?;
+		w.slice(&self.parameters);
 		fill_body(w, prefix)
 	}
 }
 
-impl Decode<Version> for Server {
-	/// Decode a server setup message (draft-14 through draft-16 only).
-	fn decode(r: &mut Decoder<'_>, v: Version) -> Result<Self, DecodeError> {
-		r.control = Some(crate::stats::Control::Session);
+impl<'a> Decode<'a, Version> for Server {
+	fn decode(r: &mut Decoder<'a>, v: Version) -> Result<Self, DecodeError> {
+		r.control = Some(crate::stats::Message::Session);
+		if !framed(v) {
+			return Err(DecodeError::Version);
+		}
 		let kind = r.u8()?;
 		if kind != SERVER_SETUP {
 			return Err(DecodeError::InvalidValue);
 		}
 
-		let mut msg = decode_body(r, v)?;
-		let version = match SetupVersion::from_version(v) {
-			SetupVersion::Draft15Plus => v.into(),
-			SetupVersion::Draft14 | SetupVersion::LiteLegacy => {
-				coding::Version::decode(&mut msg, v).map_err(DecodeError::complete)?
-			}
-			SetupVersion::Modern | SetupVersion::Unsupported => return Err(DecodeError::Version),
-		};
+		let size = r.u16()? as usize;
+		let mut msg = r.sub(size)?;
+		let version = coding::Version::decode(&mut msg, v).map_err(DecodeError::complete)?;
 
 		Ok(Self {
 			version,
@@ -350,6 +278,29 @@ impl Decode<Version> for Server {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// Deployed lite-01/02 peers frame both halves with draft-14's u16 size, not a varint.
+	#[test]
+	fn the_moql_setup_has_a_u16_size() {
+		for v in [lite::Version::Lite01, lite::Version::Lite02] {
+			let v = Version::Lite(v);
+			let client = Client {
+				versions: coding::Versions::from([v.into()]),
+				parameters: Bytes::from_static(&[0]),
+			};
+			let buf = client.encode_bytes(v).unwrap();
+			assert_eq!(buf[..3], [CLIENT_SETUP, 0, (buf.len() - 3) as u8], "{v}");
+			assert_eq!(Client::decode_slice(&buf, v).unwrap().0.versions, client.versions);
+
+			let server = Server {
+				version: v.into(),
+				parameters: Bytes::from_static(&[0]),
+			};
+			let buf = server.encode_bytes(v).unwrap();
+			assert_eq!(buf[..3], [SERVER_SETUP, 0, (buf.len() - 3) as u8], "{v}");
+			assert_eq!(Server::decode_slice(&buf, v).unwrap().0.version, server.version);
+		}
+	}
 
 	/// Never emit a legacy SETUP our own receiver would refuse.
 	#[test]

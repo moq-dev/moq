@@ -13,6 +13,11 @@
 //! clone-able handles, bounded or unbounded, with separate wake lists for the
 //! push and pop sides.
 //!
+//! [`log`] is an append-only log whose readers take committed entries by index
+//! without a lock, for fan-out state paired with a channel that parks them.
+//!
+//! [`Bridge`] lets many waiters poll one `Context`-based handle, the inverse of [`Park`].
+//!
 //! [`coop`] bounds the passes a loop makes per poll, so one that always finds
 //! work ready still yields.
 
@@ -30,7 +35,9 @@ mod sync;
 mod waiter;
 
 pub mod coop;
+pub mod log;
 
+mod bridge;
 mod consumer;
 mod pending;
 mod producer;
@@ -45,6 +52,7 @@ mod loom;
 #[cfg(all(test, not(loom)))]
 mod tests;
 
+pub use bridge::Bridge;
 pub use consumer::Consumer;
 pub use lock::{Lock, LockGuard};
 pub use pending::Pending;

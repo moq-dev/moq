@@ -30,6 +30,7 @@ from moq_ffi import (
     MoqMediaFrame,
     MoqMediaGroupConfig,
     MoqMediaGroupConsumer,
+    MoqMediaRead,
     MoqMediaTarget,
     MoqMediaTimebase,
     MoqMediaTrackConfig,
@@ -50,6 +51,7 @@ from moq_ffi import (
 )
 
 from . import subscribe as _subscribe
+from ._read import End, Gap, _end, _gap
 from ._records import Frame, Subscription, _from_us, _subscription
 from ._stream import _Stream
 from .publish import BroadcastProducer, TrackDemand, TrackRequest
@@ -113,6 +115,10 @@ class MediaFrame:
     @staticmethod
     def _from_ffi(frame: MoqMediaFrame) -> MediaFrame:
         return MediaFrame(frame.payload, _from_us(frame.timestamp_us), frame.keyframe)
+
+
+Read = MediaFrame | Gap | End
+"""One encoded frame, a lost span, or an encoder end, in delivery order."""
 
 
 class CatalogProducer:
@@ -274,8 +280,8 @@ def _rendition(id: str, rendition: Video | Audio) -> MoqRendition:
     raise TypeError(f"expected a catalog Video or Audio rendition, got {type(rendition).__name__}")
 
 
-class TrackConsumer(_Stream[MediaFrame]):
-    """Async-iterable stream of decoded :class:`MediaFrame` in decode order.
+class TrackConsumer(_Stream[Read]):
+    """Async-iterable encoded frames and the :class:`Gap` and :class:`End` breaks between them.
 
     Construct with :meth:`subscribe`. Iterate with ``async for``;
     usable as an async context manager that cancels on exit.
@@ -297,9 +303,17 @@ class TrackConsumer(_Stream[MediaFrame]):
     def __init__(self, inner: MoqMediaTrackConsumer) -> None:
         self._inner = inner
 
-    async def _next(self) -> MediaFrame | None:
-        frame = await self._inner.next()
-        return None if frame is None else MediaFrame._from_ffi(frame)
+    async def _next(self) -> Read | None:
+        value = await self._inner.next()
+        if value is None:
+            return None
+        if isinstance(value, MoqMediaRead.FRAME):
+            return MediaFrame._from_ffi(value.frame)
+        if isinstance(value, MoqMediaRead.GAP):
+            return _gap(value.timestamp_us, value.duration)
+        if isinstance(value, MoqMediaRead.END):
+            return _end(value.end_us)
+        raise TypeError(f"unknown media read: {value!r}")
 
     def cancel(self) -> None:
         """Cancel the subscription and stop delivering frames."""
@@ -399,6 +413,9 @@ __all__ = [
     "Requested",
     "Target",
     "MediaFrame",
+    "Read",
+    "Gap",
+    "End",
     "CatalogProducer",
     "CatalogConsumer",
     "TrackProducer",

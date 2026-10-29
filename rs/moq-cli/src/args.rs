@@ -154,6 +154,12 @@ impl std::fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
+/// The `MOQ_*` variables read outside the command-line spec.
+#[cfg(any(feature = "capture", feature = "transcode", feature = "play"))]
+const DIRECT_ENV: &[&str] = moq_video::ENV;
+#[cfg(not(any(feature = "capture", feature = "transcode", feature = "play")))]
+const DIRECT_ENV: &[&str] = &[];
+
 /// Whether `flag` is one of the flags `T` declares.
 fn owns<T: usage_rs::spec::CommandArgs>(flag: &usage_rs::Flag<'_>) -> bool {
 	T::COMMAND.flags.iter().any(|own| own.key == flag.key)
@@ -174,7 +180,13 @@ impl Invocation {
 			print!("{reply}");
 			std::process::exit(0);
 		}
-		match Self::try_parse_from(args) {
+		match Self::try_parse_from(args).and_then(|parsed| {
+			// Here rather than in `try_parse_from`, which tests drive under whatever
+			// environment the test runner has.
+			moq_tokio::cli::check_env(&[Cli::spec(), Stage::spec()], DIRECT_ENV)
+				.map_err(|err| ParseError::new(ParseErrorKind::ValueValidation, format!("error: {err}\n")))?;
+			Ok(parsed)
+		}) {
 			Ok(parsed) => parsed,
 			Err(err) => err.exit(),
 		}
@@ -317,6 +329,33 @@ impl Invocation {
 				&& let Some(reason) = import.source.report_refusal()
 			{
 				anyhow::bail!("--report names a track in the catalog the import builds, but {reason}");
+			}
+			if let Command::Import(import) = command
+				&& let Some(path) = &import.echo_path
+			{
+				if let Some(reason) = import.source.catalog_refusal() {
+					anyhow::bail!("--echo-path solicits feedback in the catalog the import builds, but {reason}");
+				}
+				// A reader refuses the whole catalog over a path it cannot resolve.
+				let broadcast = command.broadcast(&self.moq);
+				let rel = hang::moq_net::path::Relative::new(path)
+					.map_err(|err| anyhow::anyhow!("invalid --echo-path: {err}"))?;
+				let broadcast = hang::moq_net::Path::new(&broadcast)
+					.map_err(|err| anyhow::anyhow!("invalid --broadcast: {err}"))?;
+				let Some(prefix) = broadcast.try_resolve(&rel) else {
+					anyhow::bail!("--echo-path `{path}` walks above the connection root from broadcast `{broadcast}`");
+				};
+				// An origin refuses a broadcast a pattern could not name, so no viewer could
+				// publish its `<NAME>.echo` beneath this.
+				let feedback = prefix.join(&hang::moq_net::Path::from_static("viewer.echo"));
+				let literal = feedback
+					.map_err(anyhow::Error::from)
+					.and_then(|feedback| Ok(hang::moq_net::Pattern::literal(feedback.as_str())?));
+				if let Err(err) = literal {
+					anyhow::bail!(
+						"--echo-path `{path}` resolves to `{prefix}`, where no viewer can publish its feedback: {err}"
+					);
+				}
 			}
 			if let Command::Import(import) = command
 				&& import.linger.is_some()
@@ -750,8 +789,8 @@ pub struct Import {
 	/// live, it caps how far back a FETCH can still reach (and how long a subscriber may ask to
 	/// wait for a late group). The default suits a segmented egress (HLS/DASH), which may only
 	/// advertise segments that are still fetchable; lower it when nothing reads history and the
-	/// memory matters. Media tracks only -- the catalog and timeline are read at the live edge,
-	/// which is retained unconditionally.
+	/// memory matters. Media tracks only -- the catalog and HLS records are read at the live
+	/// edge, which is retained unconditionally.
 	#[usage(long)]
 	pub max_age: Option<moq_tokio::cli::Duration>,
 
@@ -773,6 +812,12 @@ pub struct Import {
 	/// track has written, about once a second while subscribed. The stdin imports only.
 	#[usage(long)]
 	pub report: bool,
+
+	/// Solicit viewer feedback in the catalog: `export --echo <NAME>` publishes `<NAME>.echo`
+	/// under this prefix, resolved against the broadcast like a relative URL (`viewers` from
+	/// `room/event` is `room/viewers`). The stdin imports only.
+	#[usage(long, value_name = "PATH")]
+	pub echo_path: Option<String>,
 
 	/// The single source feeding the Origin.
 	#[usage(subcommand)]
@@ -841,9 +886,9 @@ impl ImportSource {
 		})
 	}
 
-	/// Why `--report` can't report this source, or `None` when it can: the CLI builds the one
-	/// catalog of a stdin import, whose tracks `moq-mux` counts.
-	fn report_refusal(&self) -> Option<&'static str> {
+	/// Why the CLI can't add a section to this source's first catalog, or `None` when it can:
+	/// a stdin import's one catalog waits for its importer's tracks.
+	fn catalog_refusal(&self) -> Option<&'static str> {
 		match self {
 			Self::Ts(args) if args.program == Some(TsProgram::All) => {
 				Some("`import ts --program all` builds a catalog per program")
@@ -852,9 +897,19 @@ impl ImportSource {
 				Some("the gateway and archive imports build their own catalogs")
 			}
 			#[cfg(feature = "capture")]
-			Self::Capture(_) => Some("`import capture` encodes, and its encoders do not count yet"),
+			Self::Capture(_) => Some("`import capture` publishes its catalog as its encoders start"),
 			Self::Avc3 | Self::Fmp4(_) | Self::Ts(_) | Self::Flv => None,
 		}
+	}
+
+	/// Why `--report` can't report this source, or `None` when it can: the CLI builds the one
+	/// catalog of a stdin import, whose tracks `moq-mux` counts.
+	fn report_refusal(&self) -> Option<&'static str> {
+		#[cfg(feature = "capture")]
+		if matches!(self, Self::Capture(_)) {
+			return Some("`import capture` encodes, and its encoders do not count yet");
+		}
+		self.catalog_refusal()
 	}
 
 	/// Why `--linger` can't apply to this source, or `None` when it can: only a source with a
@@ -1642,38 +1697,77 @@ mod tests {
 		}
 	}
 
-	/// `--report` goes where the CLI builds the one catalog it names a track in.
+	/// `--report` and `--echo-path` go where the CLI builds the one catalog they add a section to.
 	#[test]
-	fn report_needs_a_catalog_the_cli_builds() {
-		let import = |source: &[&str]| {
+	fn catalog_sections_need_a_catalog_the_cli_builds() {
+		let import = |flags: &[&str], source: &[&str]| {
+			let argv = ["moq", "--connect", "http://relay", "--broadcast", "room", "import"];
+			Invocation::try_parse_from(argv.iter().chain(flags).chain(source).copied()).unwrap()
+		};
+		for flags in [["--report"].as_slice(), &["--echo-path", "viewers"]] {
+			for source in [
+				["ts"].as_slice(),
+				&["fmp4"],
+				&["flv"],
+				&["avc3"],
+				&["ts", "--program", "1"],
+			] {
+				import(flags, source).validate().unwrap();
+			}
+			for source in [
+				["ts", "--program", "all"].as_slice(),
+				&["hls", "http://origin/master.m3u8"],
+				&["rtmp", "--listen", "127.0.0.1:1935"],
+				&["rtsp", "--connect", "rtsp://camera/stream"],
+			] {
+				let err = import(flags, source).validate().unwrap_err().to_string();
+				assert!(err.contains(flags[0]), "{flags:?} {source:?}: {err}");
+			}
+		}
+	}
+
+	/// `--echo-path` resolves against the broadcast. A path above the connection root, which
+	/// every reader would refuse the catalog over, or one no viewer could publish its `.echo`
+	/// beneath, is refused before dialing.
+	#[test]
+	fn echo_path_names_where_viewers_can_publish() {
+		let import = |broadcast: &str, path: &str| {
 			let argv = [
 				"moq",
 				"--connect",
 				"http://relay",
 				"--broadcast",
-				"room",
+				broadcast,
 				"import",
-				"--report",
+				"--echo-path",
+				path,
+				"ts",
 			];
-			Invocation::try_parse_from(argv.iter().chain(source).copied()).unwrap()
+			Invocation::try_parse_from(argv).unwrap().validate()
 		};
-		for source in [
-			["ts"].as_slice(),
-			&["fmp4"],
-			&["flv"],
-			&["avc3"],
-			&["ts", "--program", "1"],
+		// `viewers` from `<n parts>` resolves to n parts, and the feedback sits one beneath.
+		let deep = |parts: usize| (0..parts).map(|i| format!("p{i}")).collect::<Vec<_>>().join("/");
+		let (fits, too_deep) = (
+			deep(hang::moq_net::Path::MAX_PARTS - 1),
+			deep(hang::moq_net::Path::MAX_PARTS),
+		);
+		for (broadcast, path) in [
+			("room", "viewers"),
+			("room/live", "../viewers"),
+			(fits.as_str(), "viewers"),
 		] {
-			import(source).validate().unwrap();
+			import(broadcast, path).unwrap();
 		}
-		for source in [
-			["ts", "--program", "all"].as_slice(),
-			&["hls", "http://origin/master.m3u8"],
-			&["rtmp", "--listen", "127.0.0.1:1935"],
-			&["rtsp", "--connect", "rtsp://camera/stream"],
+		for (broadcast, path) in [
+			("room", "../viewers"),
+			("room/live", "../../viewers"),
+			("room", "*"),
+			("room", "viewers/**"),
+			("room", "view*"),
+			(too_deep.as_str(), "viewers"),
 		] {
-			let err = import(source).validate().unwrap_err().to_string();
-			assert!(err.contains("--report"), "{source:?}: {err}");
+			let err = import(broadcast, path).unwrap_err().to_string();
+			assert!(err.contains("--echo-path"), "{broadcast} {path}: {err}");
 		}
 	}
 
@@ -2973,7 +3067,7 @@ mod tests {
 		}
 	}
 
-	/// Every `*-version` flag offers exactly the versions [`Version::names`] parses.
+	/// Every `*-version` flag offers exactly the versions moq-net parses.
 	///
 	/// The lists are `choices(...)` literals because Usage reads them at expansion
 	/// time, so they are copies. This is what keeps a new protocol draft from
@@ -2995,9 +3089,13 @@ mod tests {
 			}
 		}
 
-		// As a set: `names()` is preference-ordered (newest first) while a choice
-		// list reads ascending, and that ordering is a presentation call.
-		let mut expected: Vec<&str> = hang::moq_net::Version::names().collect();
+		// As a set: a choice list reads ascending, and that ordering is a presentation call.
+		// Every wire code moq-net parses, including the opt-in `-wip` drafts.
+		let codes = (0xff0dad00..=0xff0dadff).chain(0xff000000..=0xff0000ff);
+		let mut expected: Vec<&str> = codes
+			.filter_map(hang::moq_net::Version::from_code)
+			.map(|version| version.as_str())
+			.collect();
 		expected.sort_unstable();
 		let mut found = Vec::new();
 		walk(Cli::spec().root, &mut found);
@@ -3005,7 +3103,7 @@ mod tests {
 		assert!(!found.is_empty(), "no version flag carried a choice list");
 		for (long, choices) in &mut found {
 			choices.sort_unstable();
-			assert_eq!(choices, &expected, "--{long} is out of step with Version::names()");
+			assert_eq!(choices, &expected, "--{long} is out of step with moq-net's versions");
 		}
 	}
 }

@@ -30,7 +30,9 @@ jobs:
     timeout-minutes: 10
     outputs:
       android: ${{ steps.filter.outputs.android }}
+      api-diff: ${{ steps.filter.outputs.api-diff }}
       audio-quality: ${{ steps.filter.outputs.audio-quality }}
+      c: ${{ steps.filter.outputs.c }}
       cpp: ${{ steps.filter.outputs.cpp }}
       interop: ${{ steps.filter.outputs.interop }}
       moq-sh: ${{ steps.filter.outputs.moq-sh }}
@@ -71,7 +73,6 @@ jobs:
               - "rs/moq-loc/**"
               - "rs/moq-msf/**"
               - "rs/moq-json/**"
-              - "rs/moq-flate/**"
               - "rs/moq-pattern/**"
               - "rs/hang/**"
               - "rs/kio/**"
@@ -82,6 +83,21 @@ jobs:
               - "Cargo.lock"
               - "rust-toolchain.toml"
               - ".github/workflows/android.yml"
+            # Anything a published API is built from, including the lockfiles,
+            # since a bumped dependency can change a re-exported type.
+            api-diff:
+              - "rs/**"
+              - ".cargo/config.toml"
+              - "js/**"
+              - "Cargo.toml"
+              - "Cargo.lock"
+              - "package.json"
+              - "bun.lock"
+              - "cpp/moq/uniffi.toml"
+              - "sh/api-diff/**"
+              - "justfile"
+              - ".github/workflows/api-diff.yml"
+              - ".github/workflows/release-gate.yml"
             audio-quality:
               - "js/watch/**"
               # The container consumer decides what a replay delivers, waits for, and skips, on the
@@ -93,10 +109,20 @@ jobs:
               - "test/lib/**"
               - "test/justfile"
               - ".github/workflows/audio-quality.yml"
+            c:
+              - "c/**"
+              - "rs/moq-ffi/**"
+              - ".cargo/config.toml"
+              - "sh/c/**"
+              - "rs/moq-c/native-libs/**"
+              - "cpp/moq/cmake/moq-ffi.cmake"
+              - "Cargo.lock"
+              - ".github/workflows/c.yml"
             cpp:
               - "cpp/moq/**"
               - "cpp/justfile"
               - "rs/moq-ffi/**"
+              - ".cargo/config.toml"
               - "sh/cpp/**"
               - "rs/moq-c/native-libs/**"
               - "doc/lib/cpp/**"
@@ -122,6 +148,7 @@ jobs:
               # The Go client builds against the modules this script stages.
               - "sh/go/**"
               - "cpp/moq/**"
+              - ".cargo/config.toml"
               - ".github/workflows/interop.yml"
             moq-sh:
               - "infra/moq-sh/**"
@@ -131,6 +158,7 @@ jobs:
               - "cpp/moq/**"
               - "sh/obs/**"
               - "rs/moq-ffi/**"
+              - ".cargo/config.toml"
               - "rs/moq-c/**"
               - "doc/lib/c/**"
               - "doc/lib/samples.sh"
@@ -161,6 +189,7 @@ jobs:
               - "dart/moq_ffi/**"
               - "sh/dart/**"
               - "rs/moq-ffi/build.sh"
+              - ".cargo/config.toml"
             release-go-ffi:
               - ".github/workflows/release-go-ffi.yml"
               - ".github/workflows/release-ffi.yml"
@@ -171,6 +200,7 @@ jobs:
               - "sh/go/package-ffi.sh"
               - "sh/go/publish-ffi.sh"
               - "rs/moq-ffi/build.sh"
+              - ".cargo/config.toml"
             release-js:
               - "js/**"
               - ".github/workflows/release-js.yml"
@@ -182,6 +212,7 @@ jobs:
               - ".github/workflows/release-kt-lib.yml"
               - "sh/gh/release.sh"
               - "rs/moq-ffi/build.sh"
+              - ".cargo/config.toml"
             release-swift-lib:
               - "swift/VERSION"
               - "swift/Package.swift.template"
@@ -210,7 +241,6 @@ jobs:
               - "rs/moq-cli/**"
               - "rs/moq-clock/**"
               - "rs/moq-congestion/**"
-              - "rs/moq-flate/**"
               - "rs/moq-hls/**"
               - "rs/moq-ice/**"
               - "rs/moq-json/**"
@@ -318,11 +348,24 @@ jobs:
     if: needs.scope.outputs.android == 'true'
     uses: ./.github/workflows/android.yml
 
+  api-diff:
+    name: API diff
+    needs: scope
+    if: needs.scope.outputs.api-diff == 'true'
+    uses: ./.github/workflows/api-diff.yml
+    secrets: inherit
+
   audio-quality:
     name: Audio quality
     needs: scope
     if: needs.scope.outputs.audio-quality == 'true'
     uses: ./.github/workflows/audio-quality.yml
+
+  c:
+    name: C
+    needs: scope
+    if: needs.scope.outputs.c == 'true'
+    uses: ./.github/workflows/c.yml
 
   cpp:
     name: C++
@@ -469,7 +512,9 @@ jobs:
       - platform
       - features
       - android
+      - api-diff
       - audio-quality
+      - c
       - cpp
       - interop
       - moq-sh

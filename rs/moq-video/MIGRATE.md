@@ -4,6 +4,27 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A capture reopened onto a new identity publishes a new track ([#7110](https://github.com/moq-dev/moq/pull/7110))
+
+When a reopened camera or encoder emits a different codec string than the probed rendition, such as a higher level for a larger mode, `encode::Producer` publishes under the next free `<name>/<n>` and finishes the old track.
+`Producer::demand` follows the current track, so read it again after `publish` rather than holding the first one.
+
+### The renderer refuses GPU frames it cannot import (#6806)
+
+`render::Renderer::render` no longer downloads a GPU surface it cannot import; it returns an error naming the cause and the fix.
+`render::Config::zero_copy` is gone, along with the retry-and-retire fallback behind it.
+CPU frames (`Surface::I420`) upload as before.
+Decode and capture with `render::output(&device)` (`decode::Config::output`, `capture::Config::output`) to receive only frames the renderer on that device draws.
+It picks `Output::Render`, which keeps the surfaces this platform imports on the GPU and downloads the rest, for a device that can import, and `Output::Cpu` for one that cannot (wgpu's GL backend, or a Linux device without DMA-BUF import).
+Either errors on a surface with no download, such as a non-NV12 pixel buffer.
+On Linux, open the device with `wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF` where the adapter has it, or `render::output` picks the CPU.
+To force the CPU path that `zero_copy: false` gave, decode or capture with `Output::Cpu`.
+
+### `Rate` is `FrameRate` (#6653)
+
+`Rate` and `RateError` are `FrameRate` and `FrameRateError`, the name the bindings already use.
+Rename the imports; the methods and error variants are unchanged.
+
 ### Decoded reads carry gaps and encoder ends (#6475)
 
 `decode::Consumer::read()` returns `decode::Read` events instead of bare frames, the same shape as `moq_audio::decode::Read`: `Frame(frame)`, `Gap { timestamp, duration }` for lost media, and `End { end }` where the publisher stopped its encoder; `None` still means the track is finished.
@@ -45,8 +66,8 @@ Set `encode::Config::color` to the first frame's `frame.surface.color()`, and re
 
 ### `encode::Producer` takes a catalog reservation (#5715)
 
-`encode::Producer::new` and `with_track` take a `moq_mux::catalog::Reserved` instead of the `catalog::Producer`, so the caller declares the encoder's GOP as the timeline hint.
-Pass `catalog.reserve().with_timeline_hint(gop)` instead of the catalog.
+`encode::Producer::new` and `with_track` take a `moq_mux::catalog::Reserved` instead of the `catalog::Producer`, so the caller declares the encoder's GOP as the HLS hint.
+Pass `catalog.reserve().with_hls_hint(gop)` instead of the catalog.
 
 ### Capture takes one `encode::Capture`
 

@@ -34,7 +34,11 @@ not the later federation/P2P integrations. Decided 2026-10-13: routes now
 owns the tier/partition correctness tests, so they run before the cut. Peer
 grants and metadata-only subscriptions do not gate it: neither is clustering
 stability. Both are additive and, per the freeze policy, target whichever lite
-wip is current when they land.
+wip is current when they land. Decided 2026-10-25: no routing identity proof
+gates the cut; the key and its proof belong to Peer grants, and lite-07
+routing identities stay declared and unverified. Decided 2026-10-26
+(maintainer): receivers do not stamp per-session identities either, since
+that splits one origin into several identities across a relay mesh.
 
 Decided 2026-10-08: Restart and AUTH join Required, since both change the
 lite-07 wire. Compressed tracks joined on 2026-10-17 and landed
@@ -48,12 +52,9 @@ The cut:
 - Every quest under Required has landed.
 - The identifier becomes `moq-lite-07` in `rs/moq-net` and `js/net`, in the
   draft (whose text already names the rename), and at every site spelling
-  the wip ALPN: `rs/moq-tokio/src/connect.rs` and `listen.rs`,
-  `rs/moq-tokio/tests/`, `rs/moq-relay/src/cluster.rs`,
-  `rs/moq-relay/tests/integration/smoke.rs`,
-  `test/interop/bare-fin.ts`, `test/interop/lite-varint.ts`, and
-  `doc/concept/moq-lite.md`; grep for `moq-lite-07-wip` to catch new ones. A wip peer and a final peer refuse each other by ALPN
-  rather than misparse; no compatibility shim.
+  the wip ALPN: grep the repository for `moq-lite-07-wip`. A wip peer and a
+  final peer refuse each other by ALPN rather than misparse; no
+  compatibility shim.
 - The draft's lite-07 changelog matches the wire and `just drafts check`
   passes.
 - SETUP keeps its stronger rule: #4820 put it under the general Message
@@ -62,17 +63,26 @@ The cut:
   names that rejection, not only the cap.
 
 Decided 2026-10-20 (maintainer): [Drop set](/quest/m1/drop-set.md) joins
-Required, because it adds `Max Age` to lite-07's SUBSCRIBE_DROP. Only
-[Token in band](/quest/m1/auth/token-in-band.md) gates the cut from the auth
-line, because it is that line's lite-07 wire work; the rest is API work that
-does not block the rename.
+Required, because it adds `Max Age` to lite-07's SUBSCRIBE_DROP. Nothing
+else from the auth line gates the cut: its lite-07 wire work, the SETUP Token
+parameter, has landed, and the rest is API work that does not block the rename.
 
 The archive line's TRACKS request (a per-broadcast track listing that
 replaced SUBSCRIBE_ALL) landed in [#6158](https://github.com/moq-dev/moq/pull/6158)
 and [#6167](https://github.com/moq-dev/moq/pull/6167), and the padding stream
 type for the m2 browser [padding probes](/quest/m2/probe/padding.md) landed in
 [#6233](https://github.com/moq-dev/moq/pull/6233).
-The `Time(pts)` range end rides in Subscribe ranges, already Required.
+The `Time(pts)` range end rides in the subscribe-ranges children already Required.
+
+Decided 2026-10-27 (maintainer): of [Subscribe ranges](/quest/m1/subscribe-ranges/README.md),
+only the children that change the lite-07 wire gate the cut:
+[Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md),
+[JS ranges](/quest/m1/subscribe-ranges/js.md), and
+[Remove FETCH from lite-07](/quest/m1/subscribe-ranges/lite07-fetch.md). The
+fill path, fetch as a range, and the start bookkeeping change no wire.
+
+Decided 2026-10-25 (maintainer): addressing groups by timestamp gates the
+cut, since it removes group sequence numbers from the lite-07 wire.
 
 Rust's lite-07 varints already carry the full 64 bits the draft specifies,
 so no codec work waits on the cut.
@@ -91,11 +101,13 @@ timestamp bound in [#6168](https://github.com/moq-dev/moq/pull/6168).
 
 ## Required
 
-- [Token in band](/quest/m1/auth/token-in-band.md) - lite-07 carries the Auth Stream and UNAUTHORIZED (0x3B)
-- [Identity proof](/quest/m1/cluster-routing/identity.md) - lite-07 carries the routing key and its per-session proof
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the hop list gone
 - [Drop set](/quest/m1/drop-set.md) - lite-07's SUBSCRIBE_DROP carries `Max Age`, so a widening re-offers groups reported dropped
-- [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - SUBSCRIBE carries ranges and an order and lite FETCH is gone, in Rust and JS
+- [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - lite-07 SUBSCRIBE carries ranges and an order, and SUBSCRIBE_OK the resolved start
+- [JS ranges](/quest/m1/subscribe-ranges/js.md) - JS speaks lite-07 ranges
+- [Remove FETCH from lite-07](/quest/m1/subscribe-ranges/lite07-fetch.md) - lite FETCH is gone from lite-07, in Rust and JS
+- [Lite-07 by start](/quest/m1/time-addressing/lite07.md) - lite-07 carries group starts, previous-start links, GROUP_END, and time bounds instead of sequence numbers
+- [@moq/net by start](/quest/m1/time-addressing/js.md) - JS speaks the same lite-07 wire
 - [Announcement takeover](/quest/m1/announce-takeover.md) - ANNOUNCE_TAKEOVER preserves a proven instance under a new independent route
 
 ## Related

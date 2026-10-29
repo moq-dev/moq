@@ -31,8 +31,8 @@ const LITE_07: &str = "moq-lite-07-wip";
 const LITE_06: &str = "moq-lite-06";
 /// The lite Auth Stream's type byte.
 const AUTH_STREAM: u8 = 0x7;
-/// The first draft that negotiates MoQ Auth, and the newest.
-const MOQT_17: &str = "moq-transport-17";
+/// The oldest draft we speak, which negotiates MoQ Auth, and the newest.
+const MOQT_18: &str = "moq-transport-18";
 const MOQT_22: &str = "moq-transport-22";
 
 /// Run each case on every version that exchanges AUTH.
@@ -41,8 +41,8 @@ macro_rules! cases {
 		mod lite_07 {
 			$(#[moq_clock::test] async fn $case() { super::$case(super::LITE_07).await })*
 		}
-		mod moqt_17 {
-			$(#[moq_clock::test] async fn $case() { super::$case(super::MOQT_17).await })*
+		mod moqt_18 {
+			$(#[moq_clock::test] async fn $case() { super::$case(super::MOQT_18).await })*
 		}
 		mod moqt_22 {
 			$(#[moq_clock::test] async fn $case() { super::$case(super::MOQT_22).await })*
@@ -62,6 +62,7 @@ cases!(
 	a_revoked_grant_withdraws_and_can_be_restored,
 	a_refused_token_reports_the_code,
 	a_refused_setup_token_grants_nothing,
+	the_setup_token_is_the_connection_credential,
 	dropping_the_requests_refuses_queued_tokens,
 	a_closed_session_holds_no_grant,
 	an_issued_grant_ends_with_its_session,
@@ -87,8 +88,8 @@ async fn lite_07_presents_a_transiently_refused_token_again() {
 
 /// moq-transport's u16 message size is the one a test can overflow quickly.
 #[moq_clock::test]
-async fn moqt_17_a_grant_too_large_for_one_message_is_unsupported() {
-	a_grant_too_large_for_one_message_is_unsupported(MOQT_17).await
+async fn moqt_18_a_grant_too_large_for_one_message_is_unsupported() {
+	a_grant_too_large_for_one_message_is_unsupported(MOQT_18).await
 }
 
 #[moq_clock::test]
@@ -125,35 +126,9 @@ async fn lite_05_has_no_grant() {
 	older_versions_have_no_grant("moq-lite-05").await
 }
 
-/// The #6566 matrix's drafts: one without MoQ Auth, and one with it.
-#[moq_clock::test]
-async fn moqt_16_admits_exact_and_subtree_grants() {
-	exact_and_subtree_grants_admit_their_broadcast("moq-transport-16").await
-}
-
-#[moq_clock::test]
-async fn moqt_18_admits_exact_and_subtree_grants() {
-	exact_and_subtree_grants_admit_their_broadcast("moq-transport-18").await
-}
-
-#[moq_clock::test]
-async fn moqt_16_has_no_grant() {
-	older_versions_have_no_grant("moq-transport-16").await
-}
-
-#[moq_clock::test]
-async fn moqt_16_route_auth_renews_its_announce() {
-	a_route_auth_renews_its_announce("moq-transport-16").await
-}
-
 #[moq_clock::test]
 async fn moqt_22_route_auth_renews_its_announce() {
 	a_route_auth_renews_its_announce(MOQT_22).await
-}
-
-#[moq_clock::test]
-async fn moqt_16_route_auth_survives_a_reconnect() {
-	a_route_auth_survives_a_reconnect("moq-transport-16").await
 }
 
 #[moq_clock::test]
@@ -458,6 +433,8 @@ struct Options {
 	client_extensions: Option<moq_net::setup::Extensions>,
 	server_extensions: Option<moq_net::setup::Extensions>,
 	version: Option<&'static str>,
+	/// The connection credential the client's SETUP presents.
+	client_token: Option<&'static [u8]>,
 	/// The handle the client builds its session on, when not its own.
 	client_auth: Option<auth::Handle>,
 }
@@ -468,6 +445,8 @@ struct Pair {
 	client_transport: MockSession,
 	server_transport: MockSession,
 	requests: Option<auth::Requests>,
+	/// The SETUP token the server's handshake read.
+	setup_token: Option<moq_net::setup::Token>,
 	/// Aborting it drops the server's driver without letting it finish.
 	server_driver: moq_clock::sim::JoinHandle<Error>,
 }
@@ -479,6 +458,12 @@ async fn connect(opts: Options) -> Pair {
 	let (client_transport, server_transport) = create_mock_session_pair(mock);
 
 	let mut client = Client::new().with_versions(version.into());
+	if let Some(token) = opts.client_token {
+		client = client.with_token(moq_net::setup::Token {
+			kind: moq_net::setup::Token::OUT_OF_BAND,
+			value: token.to_vec(),
+		});
+	}
 	if let Some(extensions) = opts.client_extensions {
 		client = client.with_extensions(extensions);
 	}
@@ -515,15 +500,16 @@ async fn connect(opts: Options) -> Pair {
 			.accept_request(now(), server_transport)
 			.await
 			.expect("server handshake");
+		let setup_token = handshake.token().cloned();
 		// Taken before the session starts, the way a relay verifying tokens would.
 		let requests = opts.server_requests.then(|| handshake.requests());
 		let (session, mut driver) = handshake.ok().await.expect("server accept");
 		let driver = moq_clock::sim::spawn(moq_clock::drive(move |now, waiter| {
 			moq_net::time::Driver::poll(&mut driver, now, waiter)
 		}));
-		(session, requests, driver)
+		(session, requests, setup_token, driver)
 	};
-	let (client, (server, requests, server_driver)) = futures::join!(client_fut, server_fut);
+	let (client, (server, requests, setup_token, server_driver)) = futures::join!(client_fut, server_fut);
 
 	Pair {
 		client,
@@ -531,6 +517,7 @@ async fn connect(opts: Options) -> Pair {
 		client_transport: observe,
 		server_transport: observe_server,
 		requests,
+		setup_token,
 		server_driver,
 	}
 }
@@ -853,7 +840,7 @@ async fn a_revoked_grant_withdraws_and_can_be_restored(version: &'static str) {
 		wait_for(pair.client.auth().grant(), |g| g == &Some(Grant::default())).await;
 		wait_announced(&served, "a/x", false).await;
 		// Still published locally, and the session survives the empty union.
-		assert!(publisher.consume().routed("a/x").await.is_some());
+		crate::support::announced(&publisher.consume(), "a/x").await;
 		assert_eq!(pair.client_transport.close_reason(), None);
 
 		let (_again, _) = pair.client.auth().add("again").await.expect("re-authorized");
@@ -916,6 +903,49 @@ async fn a_refused_setup_token_grants_nothing(version: &'static str) {
 		});
 
 		assert_eq!(granted(&pair.client).await, Grant::default());
+	})
+	.await
+	.expect("timed out");
+}
+
+/// The token a client's SETUP presents reaches the server's handshake, and the client's
+/// empty-token AUTH stream learns the grant the server gives it.
+async fn the_setup_token_is_the_connection_credential(version: &'static str) {
+	within(async {
+		let mut pair = connect(Options {
+			version: Some(version),
+			client_publish: Some(produce_origin(2)),
+			server_requests: true,
+			client_token: Some(b"connection-credential"),
+			..Default::default()
+		})
+		.await;
+		assert_eq!(
+			pair.setup_token.map(|token| (token.kind, token.value)),
+			Some((moq_net::setup::Token::OUT_OF_BAND, b"connection-credential".to_vec()))
+		);
+
+		let _issued = serve(pair.requests.take().unwrap(), |token| {
+			token.is_empty().then(|| grant(&["room"], &[]))
+		});
+		assert_eq!(granted(&pair.client).await, grant(&["room"], &[]));
+	})
+	.await
+	.expect("timed out");
+}
+
+/// A lite version without the Token parameter carries none, so the caller's URL query
+/// has to.
+#[moq_clock::test]
+async fn lite_06_sends_no_setup_token() {
+	within(async {
+		let pair = connect(Options {
+			version: Some(LITE_06),
+			client_token: Some(b"connection-credential"),
+			..Default::default()
+		})
+		.await;
+		assert_eq!(pair.setup_token, None);
 	})
 	.await
 	.expect("timed out");
@@ -1067,15 +1097,18 @@ async fn exact_and_subtree_grants_admit_their_broadcast(version: &'static str) {
 			group
 				.write_frame(moq_net::Timestamp::from_millis(0).unwrap(), b"frame".as_ref())
 				.unwrap();
-			let remote = received.consume().routed_broadcast("ch1").await.unwrap();
+			let remote = received
+				.consume()
+				.follow("ch1", None)
+				.unwrap()
+				.available()
+				.await
+				.unwrap();
 			let prefs = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
 			let mut sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
 			sub.recv_group().await.unwrap().expect("a group");
 
-			match version == "moq-transport-16" {
-				true => assert_eq!(pair.client.auth().grant().peek(), None),
-				false => assert_eq!(granted(&pair.client).await.subscribe, scope),
-			}
+			assert_eq!(granted(&pair.client).await.subscribe, scope);
 			assert_eq!(pair.client_transport.close_reason(), None);
 		})
 		.await
@@ -1086,7 +1119,7 @@ async fn exact_and_subtree_grants_admit_their_broadcast(version: &'static str) {
 /// Connect on `version` and wait for a client announcement to reach the server. Each
 /// driver presents its setup token before it handles any other stream, so by then a
 /// version with AUTH has opened its Auth Stream on both sides.
-async fn connect_announced(version: &'static str) -> (Pair, moq_net::broadcast::Producer) {
+async fn connect_announced(version: &'static str) -> (Pair, moq_net::origin::Publication) {
 	let client_origin = produce_origin(2);
 	let broadcast = client_origin.create_broadcast("room/x").unwrap();
 	broadcast.announce(Default::default()).unwrap();
@@ -1125,7 +1158,13 @@ async fn a_live_subscription_survives_union_renewal(version: &'static str) {
 			requests.next().await.unwrap().accept(grant(&[], &["room"]))
 		});
 		let first = first.unwrap();
-		let remote = received.consume().routed_broadcast("room/x").await.unwrap();
+		let remote = received
+			.consume()
+			.follow("room/x", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap();
 		let mut group = published.append_group().unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(0).unwrap(), b"first".as_ref())
@@ -1196,11 +1235,23 @@ async fn a_revoked_grant_cancels_its_subscriptions(version: &'static str) {
 		let mut group = up_track.append_group().unwrap();
 		group.write_frame(ts(0), b"up".as_ref()).unwrap();
 
-		let remote = received.consume().routed_broadcast("room/x").await.unwrap();
+		let remote = received
+			.consume()
+			.follow("room/x", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap();
 		let mut down_sub = remote.track("video").unwrap().subscribe(prefs()).await.unwrap();
 		down_sub.recv_group().await.unwrap().unwrap();
 
-		let remote = server_origin.consume().routed_broadcast("up/y").await.unwrap();
+		let remote = server_origin
+			.consume()
+			.follow("up/y", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap();
 		let mut up_sub = remote.track("video").unwrap().subscribe(prefs()).await.unwrap();
 		up_sub.recv_group().await.unwrap().unwrap();
 
@@ -1493,11 +1544,8 @@ macro_rules! limit_cases {
 		mod limit_lite_07 {
 			$(#[moq_clock::test] async fn $case() { super::$case(super::LITE_07).await })*
 		}
-		mod limit_moqt_16 {
-			$(#[moq_clock::test] async fn $case() { super::$case("moq-transport-16").await })*
-		}
-		mod limit_moqt_17 {
-			$(#[moq_clock::test] async fn $case() { super::$case(super::MOQT_17).await })*
+		mod limit_moqt_18 {
+			$(#[moq_clock::test] async fn $case() { super::$case(super::MOQT_18).await })*
 		}
 	};
 }
@@ -1526,7 +1574,7 @@ async fn lite_07_narrowing_resets_a_fetch_in_flight() {
 
 /// Whether `version` exchanges AUTH, so the peer also hears of a narrowing.
 fn speaks_auth(version: &str) -> bool {
-	matches!(version, LITE_07 | MOQT_17 | MOQT_22)
+	matches!(version, LITE_07 | MOQT_18 | MOQT_22)
 }
 
 /// A revocation as the reader sees it: the local gate's own error, or the peer's
@@ -1576,10 +1624,22 @@ async fn a_narrowing_deafens_one_path(version: &'static str) {
 		let mut group = video_track.append_group().unwrap();
 		group.write_frame(ts(0), b"v".as_ref()).unwrap();
 
-		let remote = received.consume().routed_broadcast("room/alice/audio").await.unwrap();
+		let remote = received
+			.consume()
+			.follow("room/alice/audio", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap();
 		let mut audio_sub = remote.track("opus").unwrap().subscribe(prefs()).await.unwrap();
 		audio_sub.recv_group().await.unwrap().unwrap();
-		let remote = received.consume().routed_broadcast("room/alice/video").await.unwrap();
+		let remote = received
+			.consume()
+			.follow("room/alice/video", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap();
 		let mut video_sub = remote.track("h264").unwrap().subscribe(prefs()).await.unwrap();
 		video_sub.recv_group().await.unwrap().unwrap();
 
@@ -1649,10 +1709,22 @@ async fn a_narrowing_aborts_what_the_peer_published(version: &'static str) {
 		let mut group = cam_track.append_group().unwrap();
 		group.write_frame(ts(0), b"c".as_ref()).unwrap();
 
-		let remote = relay.consume().routed_broadcast("room/bob/mic").await.unwrap();
+		let remote = relay
+			.consume()
+			.follow("room/bob/mic", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap();
 		let mut mic_sub = remote.track("opus").unwrap().subscribe(prefs()).await.unwrap();
 		mic_sub.recv_group().await.unwrap().unwrap();
-		let remote = relay.consume().routed_broadcast("room/bob/cam").await.unwrap();
+		let remote = relay
+			.consume()
+			.follow("room/bob/cam", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap();
 		let mut cam_sub = remote.track("h264").unwrap().subscribe(prefs()).await.unwrap();
 		cam_sub.recv_group().await.unwrap().unwrap();
 
@@ -1697,7 +1769,13 @@ async fn a_narrowing_resets_a_fetch_in_flight(version: &'static str) {
 		})
 		.await;
 
-		let remote = received.consume().routed_broadcast("room/x").await.unwrap();
+		let remote = received
+			.consume()
+			.follow("room/x", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap();
 		let mut fetched = remote.track("video").unwrap().fetch_group(0, None).await.unwrap();
 		let frame = fetched.read_frame().await.unwrap().expect("first frame");
 		assert_eq!(frame.payload.as_ref(), b"first");
@@ -1759,7 +1837,13 @@ async fn a_widening_brings_back_a_deafened_path(version: &'static str) {
 
 		let mut group = audio_track.append_group().unwrap();
 		group.write_frame(ts(0), b"a".as_ref()).unwrap();
-		let remote = received.consume().routed_broadcast("room/alice/audio").await.unwrap();
+		let remote = received
+			.consume()
+			.follow("room/alice/audio", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap();
 		let mut sub = remote.track("opus").unwrap().subscribe(prefs()).await.unwrap();
 		sub.recv_group().await.unwrap().unwrap();
 
@@ -1771,7 +1855,13 @@ async fn a_widening_brings_back_a_deafened_path(version: &'static str) {
 
 		pair.server.auth().authorize(&grant(&[], &["room"]));
 		wait_announced(&received.consume(), "room/alice/audio", true).await;
-		let remote = received.consume().routed_broadcast("room/alice/audio").await.unwrap();
+		let remote = received
+			.consume()
+			.follow("room/alice/audio", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap();
 		let mut sub = remote.track("opus").unwrap().subscribe(prefs()).await.unwrap();
 		let mut group = audio_track.append_group().unwrap();
 		group.write_frame(ts(1), b"a".as_ref()).unwrap();
@@ -1820,7 +1910,13 @@ async fn a_widening_brings_back_what_the_peer_published(version: &'static str) {
 
 		pair.server.auth().authorize(&grant(&["room"], &[]));
 		wait_announced(&relay.consume(), "room/bob/mic", true).await;
-		let remote = relay.consume().routed_broadcast("room/bob/mic").await.unwrap();
+		let remote = relay
+			.consume()
+			.follow("room/bob/mic", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap();
 		let mut sub = remote.track("opus").unwrap().subscribe(prefs()).await.unwrap();
 		let mut group = mic_track.append_group().unwrap();
 		group.write_frame(ts(0), b"m".as_ref()).unwrap();
@@ -1941,7 +2037,9 @@ async fn a_handle_backs_one_active_session(version: &'static str) {
 		assert!(matches!(concurrent, Err(Error::Duplicate)), "{:?}", concurrent.err());
 
 		first.server.drain().send(moq_net::goaway::Goaway::new()).unwrap();
-		first.client.draining().recv().await.expect("the GOAWAY");
+		support::Draining::recv(&first.client.draining())
+			.await
+			.expect("the GOAWAY");
 		let mut second = connect(options()).await;
 		let mut second_tokens = serve(second.requests.take().unwrap(), |_| Some(Grant::all()));
 		let _second_issued = presented(&mut second_tokens).await;

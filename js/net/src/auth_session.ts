@@ -1,10 +1,9 @@
-import { Instant, Milli, Nano, now, sleep, wall } from "@moq/clock";
+import { Instant, Milli, Nano, now, sleep, wall, yieldNow } from "@moq/clock";
 import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
-import type { Auth, Grant, Issued, Request, Requests } from "./auth.ts";
+import type { Credential, Grant, Issued, Request, Requests } from "./auth.ts";
 import { closeReason, error, ProtocolViolation, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
 import * as Path from "./path.ts";
 import type { Reader, Stream, Writer } from "./stream.ts";
-import { nextTask } from "./util/yield.ts";
 
 /** Write a grant's patterns as a count and each one's canonical text, the encoding both wires' AUTH_OK share. @internal */
 export async function encodePatterns(w: Writer, patterns: Path.Patterns) {
@@ -65,6 +64,12 @@ function transient(err: Error | null): boolean {
 			err.code === SessionCode.TooManyRequests ||
 			err.code === SessionCode.Timeout)
 	);
+}
+
+// Whether a token's stream ending with `result` is the peer's verdict on it: a refusal that will
+// not pass, Unsupported, or a clean close after a grant. Anything else left the token undecided.
+function isVerdict(refused: boolean, granted: boolean, result: Error | null): boolean {
+	return (refused && !transient(result)) || result instanceof Unsupported || (result === null && granted);
 }
 
 /** A grant as the wire carries it: the expiry is milliseconds from now. @internal */
@@ -147,7 +152,7 @@ class Presented {
 }
 
 /** A token the application added to a {@link Handle}, presented on every session of it. */
-class Token implements Auth {
+class Token implements Credential {
 	readonly grant = new Signal<Grant | undefined>(undefined);
 	readonly closed: Promise<Error | null>;
 	readonly answered: Promise<void>;
@@ -319,9 +324,9 @@ export function ended(handle: Handle): Error | undefined {
  *
  * A session made without one creates its own, returned by `Established.auth`, which ends with
  * that session. Pass one to `connect` as `auth` instead and it outlives its sessions: each
- * presents every token the handle holds, so an {@link Auth} it returned keeps riding a route's
+ * presents every token the handle holds, so a {@link Credential} it returned keeps riding a route's
  * announcements across a reconnect. It backs one active session at a time, plus the ones
- * draining after a GOAWAY. Mirrors the Rust `moq_net::auth::Handle`.
+ * draining after a GOAWAY or a `close()`. Mirrors the Rust `moq_net::auth::Handle`.
  */
 export class Handle {
 	/** A handle backing no session yet, for `connect`'s `auth` option. */
@@ -341,13 +346,14 @@ export class Handle {
 	 * Present another token on every session of this handle, resolving once a peer answers it.
 	 *
 	 * With no session live it waits for the next one. A refusal that may pass, such as an
-	 * unreachable auth server, is presented again after a backoff on moq-lite. Rejects with
+	 * unreachable auth server, is presented again after a backoff on moq-lite, and so is a token
+	 * whose stream the peer drops without a verdict. Rejects with
 	 * {@link Unsupported} when a session neither carries AUTH nor lets a request carry a token
 	 * (moq-lite without AUTH), with the peer's refusal as an `Error.Session`, or with the
 	 * handle's end. On moq-transport without AUTH it resolves at once with no grant: only a
 	 * request whose route names it carries it.
 	 */
-	async add(token: string | Uint8Array): Promise<Auth> {
+	async add(token: string | Uint8Array): Promise<Credential> {
 		// A copy, so the caller reusing its buffer never changes what a request carries.
 		const bytes = typeof token === "string" ? new TextEncoder().encode(token) : token.slice();
 		const added = stateOf(this).add(bytes);
@@ -539,7 +545,7 @@ export interface AuthSessionProps {
 	peerGrant: Grant;
 	/** The handle the session is built on, or undefined for one of its own that ends with it. */
 	handle?: Handle;
-	/** Whether the session is draining after a GOAWAY, which frees its handle for a successor. */
+	/** Whether the session is draining after a GOAWAY or a local close, which frees its handle for a successor. */
 	draining?: () => boolean;
 }
 
@@ -578,7 +584,7 @@ export class AuthSession {
 	// Whoever answers the peer's tokens is decided once, after the task that established
 	// the session: an app that calls requests() as soon as connect/accept resolves always
 	// wins, however quickly the peer's first token arrives.
-	#decided = nextTask();
+	#decided = yieldNow();
 
 	/** Throws {@link Duplicate} while `handle` backs another active session, or the handle's end. */
 	constructor({ wire, requests, peerGrant, handle, draining }: AuthSessionProps) {
@@ -596,7 +602,7 @@ export class AuthSession {
 		for (const token of [...this.#state.tokens]) this.offer(token);
 	}
 
-	/** Whether the session still takes new work: open, with no GOAWAY received. */
+	/** Whether the session still takes new work: open, neither closing nor past a GOAWAY. */
 	get active(): boolean {
 		return !this.#closed && !this.#draining();
 	}
@@ -673,7 +679,7 @@ export class AuthSession {
 	 * The bytes a request carries for `token`: undefined for none, for one another handle
 	 * issued, or for one that ended here.
 	 */
-	carried(token: Auth | undefined): Uint8Array | undefined {
+	carried(token: Credential | undefined): Uint8Array | undefined {
 		if (!this.#requests || !(token instanceof Token)) return undefined;
 		const presented = this.#byToken.get(token);
 		if (!presented || presented.ended || presented.withdrawn) return undefined;
@@ -858,7 +864,7 @@ export class AuthSession {
 					if ("grant" in reply) {
 						const expires = reply.grant.expires === undefined ? undefined : wall() + reply.grant.expires;
 						presented.grant = { publish: reply.grant.publish, subscribe: reply.grant.subscribe, expires };
-						answered = granted = true;
+						answered = granted = replied = true;
 						delay = undefined;
 						this.#replied = true;
 						this.#answered(presented);
@@ -879,6 +885,9 @@ export class AuthSession {
 					break;
 				}
 			} catch (err: unknown) {
+				// End both halves: a peer that reset only its own leaves ours open, and a retry that
+				// abandoned it would hold the stream's credit until the session ends.
+				presented.stream?.abort(cancel());
 				closed = transportClosed(err);
 				if (presented.withdrawn || presented.ended) {
 					result = null;
@@ -895,10 +904,21 @@ export class AuthSession {
 			}
 			presented.stream = undefined;
 
-			// A refusal that may pass, such as an unreachable auth server: present the token
-			// again after a backoff while it is still wanted here. Only moq-lite's AUTH_ERROR
-			// carries such a code.
-			if (!refused || !transient(result) || this.#closed || presented.withdrawn) break;
+			// Present the token again after a backoff while it is still wanted on an active
+			// session: after a refusal that may pass, such as an unreachable auth server (only
+			// moq-lite's AUTH_ERROR carries such a code), or, on a shared handle, after its stream
+			// was lost without a verdict, so the session never runs on without it. A handle of the
+			// session's own ends a lost token instead, which tells the application.
+			if (
+				isVerdict(refused, granted, result) ||
+				closed ||
+				!this.active ||
+				presented.withdrawn ||
+				presented.ended ||
+				result instanceof ProtocolViolation ||
+				(!refused && this.#state.own)
+			)
+				break;
 			presented.grant = undefined;
 			granted = false;
 			// Unanswered again, as on its first presentation: a request or publication the token
@@ -934,7 +954,8 @@ export class AuthSession {
 		if (owner && this.#byToken.get(owner) === presented) this.#byToken.delete(owner);
 		this.#ended.update((n) => n + 1);
 		// Only the peer's verdict ends one of the handle's tokens on every session: a refusal,
-		// Unsupported, or a clean close after a grant. Anything else leaves it for the next.
+		// Unsupported, or a clean close after a grant. Anything else leaves it for the next
+		// session, since an active one presents it again instead.
 		// A draining session's verdict is stale while an active session still presents the
 		// token: that session's own answer decides, even mid-retry with no grant right now.
 		const superseded =
@@ -942,12 +963,12 @@ export class AuthSession {
 			owner !== undefined &&
 			this.#state.sessions.some((session) => session !== this && session.active && session.presents(owner));
 		// A handle of the session's own has no next session to present it, so any end is final.
-		const verdict =
+		const settled =
 			!this.#closed &&
 			!presented.withdrawn &&
 			!superseded &&
-			(this.#state.own || refused || result instanceof Unsupported || (result === null && granted));
-		if (owner && verdict) this.#state.verdict(owner, result);
+			(this.#state.own || isVerdict(refused, granted, result));
+		if (owner && settled) this.#state.verdict(owner, result);
 		// Closed before the union shrinks, so the scope never reads it as a revocation.
 		if (closed) this.close();
 		this.#recompute();

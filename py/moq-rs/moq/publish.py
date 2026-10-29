@@ -6,21 +6,20 @@ from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from moq_ffi import (
-    MoqBroadcastDynamic,
     MoqBroadcastProducer,
+    MoqBroadcastRequests,
     MoqFill,
     MoqGroupProducer,
     MoqOrder,
     MoqTrackDemand,
-    MoqTrackDynamic,
     MoqTrackProducer,
     MoqTrackRequest,
+    MoqTrackRequests,
 )
 
-from ._records import _opt_from_us, _subscription, _track_info
+from ._records import _subscription, _track_info
 from ._stream import _Stream
 from .types import (
-    AnnounceRoute,
     Frame,
     Subscription,
     TrackInfo,
@@ -105,9 +104,9 @@ class TrackProducer:
         """A watch-only handle to this track's name and whether it has subscribers."""
         return TrackDemand(self._inner.demand())
 
-    def dynamic(self) -> TrackDynamic:
+    def requests(self) -> TrackRequests:
         """Serve fetches for groups that are not currently cached."""
-        return TrackDynamic(self._inner.dynamic())
+        return TrackRequests(self._inner.requests())
 
     def append_group(self) -> GroupProducer:
         """Start a new group; write frames into it, then finish()."""
@@ -181,9 +180,9 @@ class TrackRequest:
         """Watch this track's subscribers, including after accepting it."""
         return TrackDemand(self._inner.demand())
 
-    def dynamic(self) -> TrackDynamic:
+    def requests(self) -> TrackRequests:
         """Create a fetch handler before accepting this requested track."""
-        return TrackDynamic(self._inner.dynamic())
+        return TrackRequests(self._inner.requests())
 
     def abort(self, error_code: int) -> None:
         """Reject the request with an application error code."""
@@ -191,7 +190,7 @@ class TrackRequest:
 
 
 class Fill:
-    """A run of groups readers miss, for a :class:`TrackDynamic` to serve.
+    """A run of groups readers miss, for a :class:`TrackRequests` to serve.
 
     Call :meth:`accept` for each group you have and :meth:`drop_groups` for the rest;
     :meth:`next` names what is still owed, in the fill's order. Dropping the fill names
@@ -226,7 +225,7 @@ class Fill:
     @property
     def max_delay(self) -> timedelta | None:
         """The most tolerant age budget among its readers, ``None`` for the publisher's max age alone."""
-        return _opt_from_us(self._inner.max_delay_us())
+        return self._inner.max_delay()
 
     @property
     def order(self) -> MoqOrder:
@@ -268,13 +267,13 @@ class Fill:
         await self._inner.unwanted(sequence)
 
 
-class TrackDynamic(_Stream[Fill]):
+class TrackRequests(_Stream[Fill]):
     """Async source of the fills readers of one track need: runs of groups the cache lacks.
 
     Usable as an async context manager that cancels on exit.
     """
 
-    def __init__(self, inner: MoqTrackDynamic) -> None:
+    def __init__(self, inner: MoqTrackRequests) -> None:
         self._inner = inner
 
     async def _next(self) -> Fill:
@@ -289,14 +288,14 @@ class TrackDynamic(_Stream[Fill]):
         self._inner.cancel()
 
 
-class BroadcastDynamic(_Stream[TrackRequest]):
+class BroadcastRequests(_Stream[TrackRequest]):
     """Async source of tracks requested by subscribers.
 
     Hold this object while subscriptions to unknown tracks should be accepted.
     Usable as an async context manager that cancels on exit.
     """
 
-    def __init__(self, inner: MoqBroadcastDynamic) -> None:
+    def __init__(self, inner: MoqBroadcastRequests) -> None:
         self._inner = inner
 
     async def _next(self) -> TrackRequest:
@@ -314,9 +313,9 @@ class BroadcastDynamic(_Stream[TrackRequest]):
 class BroadcastProducer:
     """Wraps MoqBroadcastProducer with a cleaner interface.
 
-    Constructing one directly creates a standalone broadcast for serving dynamic
-    requests (:meth:`moq.BroadcastRequest.accept`) or local pub/sub. To publish at
-    a path, use :meth:`moq.OriginProducer.create_broadcast` instead.
+    It fills tracks; announcing belongs to the :class:`moq.Publication` that
+    :meth:`moq.OriginProducer.create_broadcast` returns, the way to publish at a
+    path. Constructing one directly creates a standalone broadcast for local pub/sub.
     """
 
     def __init__(self) -> None:
@@ -329,21 +328,9 @@ class BroadcastProducer:
         self._inner = inner
         return self
 
-    def dynamic(self) -> BroadcastDynamic:
+    def requests(self) -> BroadcastRequests:
         """Accept subscriptions to tracks that are not published yet."""
-        return BroadcastDynamic(self._inner.dynamic())
-
-    def announce(self, route: AnnounceRoute | None = None) -> None:
-        """Advertise this broadcast's exact path as a route.
-
-        Announcing again re-prices the route in place. Until announced, the
-        broadcast is invisible and unroutable for local consumers and peers alike.
-        """
-        self._inner.announce(route if route is not None else AnnounceRoute())
-
-    def unannounce(self) -> None:
-        """Retract this broadcast's advertisement, if any, from local consumers and peers alike."""
-        self._inner.unannounce()
+        return BroadcastRequests(self._inner.requests())
 
     def publish_track(self, name: str, info: TrackInfo | None = None) -> TrackProducer:
         """Create a track. Send any bytes, no codec validation. ``info`` sets track
@@ -359,6 +346,8 @@ class BroadcastProducer:
     def close(self) -> None:
         """End the broadcast for good: retract it and serve no new tracks.
 
-        Tracks already subscribed carry on to their own end. Closing again is a no-op.
+        Tracks still open on it end with ``Unroutable``, which readers take as the publisher
+        leaving, and their later calls raise ``moq.Error.Closed``; finish a track first to end it
+        cleanly. Closing again is a no-op.
         """
         self._inner.close()

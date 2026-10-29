@@ -68,7 +68,7 @@ EPOCH Setup Option {
 
 A receiver MUST ignore the value.
 The extension is negotiated when both endpoints sent the option.
-It relies on Setup Options and Key-Value-Pair parameters, so an endpoint MUST NOT send the option, and MUST ignore it, on a version of {{moqt}} earlier than draft-17.
+It relies on Setup Options and Key-Value-Pair parameters, so an endpoint MUST NOT send the option, and MUST ignore it, on a version of {{moqt}} earlier than draft-18.
 
 An endpoint MUST NOT send the EPOCH parameter ({{parameter}}) on a session that did not negotiate this extension.
 A receiver treats one received on such a session as any unknown parameter, which closes the session.
@@ -191,7 +191,7 @@ The Setup Option is even, so its value is a bare varint; the parameter is odd, s
 # Appendix A: Changelog
 
 ## moq-epoch-00
-- The EPOCH Setup Option (0x40B68) negotiates the extension on draft-17 and later.
+- The EPOCH Setup Option (0x40B68) negotiates the extension on draft-18 and later.
 - The EPOCH parameter (0x40B69), a UUIDv7, names the publisher instance on PUBLISH_NAMESPACE, NAMESPACE, SUBSCRIBE, TRACK_STATUS, and a FETCH that names its track.
 - An advertisement's EPOCH is fixed. Another instance named by an EPOCH is advertised before the old one is withdrawn, so the namespace is never absent; one gaining or losing an EPOCH is withdrawn and advertised again.
 - A request that carries EPOCH is served only by that instance, and refused as a namespace that does not exist otherwise.

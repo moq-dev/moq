@@ -8,16 +8,18 @@ async function prepare(config: Workload): Promise<void> {
 	const fixtures = Array.from({ length: config.frames }, (_, frame) => payload(config.size, frame));
 	for (let index = 0; index < config.publishers; index++) {
 		const origin = new Moq.Origin.Producer();
-		const broadcast = origin.createBroadcast(Moq.Path.from(`${config.id}/${index}`));
+		const broadcastPublication = origin.createBroadcast(Moq.Path.from(`${config.id}/${index}`));
+		const broadcast = broadcastPublication.broadcast;
 		const track = broadcast.createTrack("data", { timescale: Moq.Time.Timescale.MILLI });
 		const demand = track.demand().wanted;
-		broadcast.announce();
+		broadcastPublication.announce();
 		const connection = await Moq.Connection.connect({
 			url: new URL(config.url),
 			publish: origin.consume(),
 			websocket: { enabled: false },
 		});
 		cleanup.push(() => {
+			track.finish();
 			track.close();
 			broadcast.close();
 			connection.abort();
@@ -28,11 +30,10 @@ async function prepare(config: Workload): Promise<void> {
 				while (demand.peek() === undefined && track.closed.peek() === undefined)
 					await Promise.race([demand.changed(), track.closed]);
 				if (track.closed.peek() !== undefined) return;
-				const group = new Moq.Group.Producer(config.sequence);
+				const group = track.createGroup(config.sequence);
 				for (const [frame, bytes] of fixtures.entries())
 					group.writeFrame({ payload: bytes, timestamp: Moq.Time.Timestamp.fromMillis(frame) });
-				group.close();
-				track.writeGroup(group);
+				group.finish();
 				// Keep the track and broadcast served until every reader completes. No timing arm or tail-close race.
 			})(),
 		);

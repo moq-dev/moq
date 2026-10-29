@@ -155,6 +155,9 @@ impl Worker {
 		let clock = Clock::new();
 		let deadlines = moq_clock::Deadlines::new(clock.now());
 		let unpark = Unpark::new(metrics.clone());
+		// A wake CQE can join a larger batch after warmup. Reserve the kernel's
+		// actual queue size so copying those completions does not allocate.
+		let cqes = Vec::with_capacity(ring.params().cq_entries() as usize);
 		Ok(Self {
 			owner: kio::Waiter::new(unpark.waker()),
 			shared: Rc::new(Shared {
@@ -172,7 +175,7 @@ impl Worker {
 			}),
 			tasks: kio::Tasks::new(),
 			park: kio::Park::default(),
-			cqes: Vec::new(),
+			cqes,
 			futex_armed: false,
 			alarm: None,
 		})
@@ -779,7 +782,7 @@ mod tests {
 	}
 
 	fn worker_with(config: Config) -> Option<Worker> {
-		worker_result(Worker::new(config), std::env::var_os("MOQ_STRICT").is_some())
+		worker_result(Worker::new(config), std::env::var_os("CI_STRICT").is_some())
 	}
 
 	/// A worker on a manual clock, which only `advance` moves.
@@ -844,6 +847,53 @@ mod tests {
 			worker.handle().metrics().snapshot().enters,
 			1,
 			"the parked enter carries the staged SQE"
+		);
+	}
+
+	/// A wake-before-arm futex CQE can join a send-sized batch after warmup.
+	#[test]
+	fn a_larger_wake_batch_reuses_completion_storage() {
+		let Some(mut worker) = worker() else { return };
+		for _ in 0..4 {
+			let key = worker.shared.insert(Op::Cancel);
+			worker.shared.push(&opcode::Nop::new().build().user_data(key)).unwrap();
+		}
+		worker.shared.ring.borrow().submitter().submit_and_wait(4).unwrap();
+		worker.reap(None).unwrap();
+		let capacity = worker.cqes.capacity();
+		let before = worker.handle().metrics().snapshot();
+
+		for _ in 0..4 {
+			let key = worker.shared.insert(Op::Cancel);
+			worker.shared.push(&opcode::Nop::new().build().user_data(key)).unwrap();
+		}
+		// The wake lands after committing to park but before the kernel arms it.
+		// FUTEX_WAIT therefore posts EAGAIN beside the four ordinary completions.
+		let unpark = worker.shared.unpark.clone();
+		unpark.word.store(PARKED, Ordering::Release);
+		unpark.unpark();
+		let key = worker.shared.insert(Op::FutexWait);
+		let entry = opcode::FutexWait::new(
+			unpark.word.as_ptr(),
+			PARKED as u64,
+			FUTEX_BITSET_MATCH_ANY,
+			FUTEX2_SIZE_U32 | FUTEX2_PRIVATE,
+		)
+		.build()
+		.user_data(key);
+		worker.shared.push(&entry).unwrap();
+		worker.futex_armed = true;
+		worker.shared.ring.borrow().submitter().submit_and_wait(5).unwrap();
+		worker.reap(None).unwrap();
+
+		let after = worker.handle().metrics().snapshot();
+		assert_eq!(after.completions - before.completions, 5);
+		assert_eq!(after.wakes - before.wakes, 1);
+		assert!(!worker.futex_armed, "the futex completion must be dispatched");
+		assert_eq!(
+			worker.cqes.capacity(),
+			capacity,
+			"a larger steady-state batch grew the scratch buffer"
 		);
 	}
 
@@ -1223,6 +1273,11 @@ mod tests {
 		let Some(worker) = worker() else { return };
 		let cq = worker.shared.ring.borrow().params().cq_entries();
 		assert!(cq >= CQ_ENTRIES, "kernel granted a {cq}-entry CQ, wanted {CQ_ENTRIES}");
+		assert_eq!(
+			worker.cqes.capacity(),
+			cq as usize,
+			"scratch must cover the accepted CQ geometry"
+		);
 	}
 
 	#[test]

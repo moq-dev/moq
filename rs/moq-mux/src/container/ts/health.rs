@@ -61,19 +61,25 @@ impl Errors {
 	/// Fold in another checker's count of the same input. Programs sharing a PAT, PMT or PCR PID
 	/// time the same packets, so each check takes the larger count rather than the sum.
 	pub(super) fn max(&mut self, other: &Self) {
-		self.ts_sync_loss = self.ts_sync_loss.max(other.ts_sync_loss);
-		self.sync_byte_error = self.sync_byte_error.max(other.sync_byte_error);
-		self.pat_error = self.pat_error.max(other.pat_error);
+		self.combine(other, u64::max);
+	}
+
+	/// Set each count to `f` of it and `other`'s, check by check and PID by PID.
+	pub(super) fn combine(&mut self, other: &Self, f: impl Fn(u64, u64) -> u64) {
+		self.ts_sync_loss = f(self.ts_sync_loss, other.ts_sync_loss);
+		self.sync_byte_error = f(self.sync_byte_error, other.sync_byte_error);
+		self.pat_error = f(self.pat_error, other.pat_error);
 		for (pid, theirs) in &other.pids {
 			let ours = self.pids.entry(*pid).or_default();
-			ours.continuity_count_error = ours.continuity_count_error.max(theirs.continuity_count_error);
-			ours.transport_error = ours.transport_error.max(theirs.transport_error);
-			ours.pmt_error = ours.pmt_error.max(theirs.pmt_error);
-			ours.pcr_repetition_error = ours.pcr_repetition_error.max(theirs.pcr_repetition_error);
-			ours.pcr_discontinuity_indicator_error = ours
-				.pcr_discontinuity_indicator_error
-				.max(theirs.pcr_discontinuity_indicator_error);
-			ours.pts_error = ours.pts_error.max(theirs.pts_error);
+			ours.continuity_count_error = f(ours.continuity_count_error, theirs.continuity_count_error);
+			ours.transport_error = f(ours.transport_error, theirs.transport_error);
+			ours.pmt_error = f(ours.pmt_error, theirs.pmt_error);
+			ours.pcr_repetition_error = f(ours.pcr_repetition_error, theirs.pcr_repetition_error);
+			ours.pcr_discontinuity_indicator_error = f(
+				ours.pcr_discontinuity_indicator_error,
+				theirs.pcr_discontinuity_indicator_error,
+			);
+			ours.pts_error = f(ours.pts_error, theirs.pts_error);
 		}
 	}
 
@@ -1000,7 +1006,11 @@ mod test {
 	#[test]
 	fn a_multiplex_counts_each_fault_once() {
 		let origin = crate::source::produce_origin();
-		let mut programs = Programs::new(origin, "event.hang", crate::catalog::Config::default());
+		let mut programs = Programs::new(
+			origin,
+			moq_net::Path::from_static("event.hang"),
+			crate::catalog::Config::default(),
+		);
 		let mut data = super::super::import::test::two_programs();
 		let mut corrupt = vec![0x47, 0x9f, 0xff, 0x10];
 		corrupt.resize(188, 0xff);

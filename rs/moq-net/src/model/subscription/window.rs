@@ -450,6 +450,20 @@ impl Window {
 		self.spans.iter().map(|span| span.start).min()
 	}
 
+	/// The lowest group a range names, `None` when none does or a relative anchor waits.
+	/// Unlike [`Self::start`], a range reaching back to the oldest group names nothing.
+	pub fn named(&self) -> Option<u64> {
+		match self.pending {
+			true => None,
+			false => self
+				.spans
+				.iter()
+				.filter(|span| span.floored)
+				.map(|span| span.start)
+				.min(),
+		}
+	}
+
 	/// Each range resolved, in the order given: `None` for one that is empty or still
 	/// waits on a first group. An unsettled time end is reported open, never at its cap.
 	pub fn resolved(&self) -> Vec<Option<Resolved>> {
@@ -476,6 +490,19 @@ impl Window {
 			Some(run) => run.end().checked_add(1),
 			None => Some(0),
 		}
+	}
+
+	/// Whether `accounted` holds every group in range from `from` up to the exclusive `cap`,
+	/// `false` while a range stays open (see [`Self::end`]).
+	pub fn covered_by(&self, from: u64, cap: Option<u64>, accounted: &rangemap::RangeSet<u64>) -> bool {
+		let Some(end) = self.end() else {
+			return false;
+		};
+		let end = cap.map_or(end, |cap| cap.min(end));
+		self.runs(from).take_while(|run| *run.start() < end).all(|run| {
+			let run_end = run.end().checked_add(1).map_or(end, |next| next.min(end));
+			accounted.gaps(&(*run.start()..run_end)).next().is_none()
+		})
 	}
 
 	/// The groups in range from `from` on, lowest first.

@@ -114,6 +114,15 @@ impl<T> Producer<T> {
 	pub fn finish(&mut self) -> Result<()> {
 		self.inner.lock().unwrap().finish()
 	}
+
+	/// Abort the track with the given error, which consumers see in place of a clean end.
+	///
+	/// Consumes the handle, since nothing can be published afterwards. Clones sharing the track see
+	/// it closed: their next edit fails with [`moq_net::Error::Closed`].
+	pub fn abort(self, err: moq_net::Error) -> Result<()> {
+		self.inner.lock().unwrap().abort(err);
+		Ok(())
+	}
 }
 
 impl<T: Serialize> Producer<T> {
@@ -155,7 +164,7 @@ impl<T> Inner<T> {
 		};
 
 		// A failed write drops the frame uncommitted. The pop is discarded, and the next edit opens a
-		// new group because the attempted frame advanced the group-local compression state.
+		// new group, since a consumer may hold the group the frame was meant for.
 		track.write(count.at, &frame)?;
 		frame.commit();
 		self.at = self.at.max(count.at);
@@ -192,6 +201,16 @@ impl<T> Inner<T> {
 		}
 		self.finished = true;
 		self.track.finish()
+	}
+
+	fn abort(&mut self, err: moq_net::Error) {
+		self.finished = true;
+		// The group first: aborting the track leaves an already-pulled group consumer independent.
+		if let Some(group) = self.track.group.take() {
+			let _ = group.abort(err.clone());
+		}
+		// Idempotent: a track that is already closed keeps its first reason.
+		let _ = self.track.inner.clone().abort(err);
 	}
 
 	fn ensure_open(&self) -> Result<()> {

@@ -144,7 +144,7 @@ use std::{
 use kio::Lock;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::{AsPath, PathOwned, Pattern, Patterns, util::SendCell};
+use crate::{Path, Pattern, Patterns, util::SendCell};
 
 mod outcomes;
 pub use outcomes::{Failure, Failures, RefusalKind, Refusals};
@@ -307,7 +307,7 @@ struct SessionCounters {
 	bytes: Mutex<SessionBytes>,
 	wire_tx: AtomicU64,
 	wire_rx: AtomicU64,
-	control: [[AtomicU64; 2]; Control::ALL.len()],
+	control: [[AtomicU64; 2]; Message::ALL.len()],
 }
 
 impl SessionCounters {
@@ -346,7 +346,7 @@ impl SessionCounters {
 		(presence, empty)
 	}
 
-	fn control(&self, totals: &mut [[u64; 2]; Control::ALL.len()]) {
+	fn control(&self, totals: &mut [[u64; 2]; Message::ALL.len()]) {
 		for (total, counters) in totals.iter_mut().zip(&self.control) {
 			for (total, counter) in total.iter_mut().zip(counters) {
 				*total += counter.load(Ordering::Relaxed);
@@ -641,11 +641,6 @@ impl Traffic {
 		self.stale.add(other.stale);
 	}
 
-	/// True while the broadcast is announced (an announce guard is open).
-	pub fn is_announced(&self) -> bool {
-		self.announces_started > self.announces_ended
-	}
-
 	/// Distinct sessions currently subscribed (viewers on the egress side).
 	pub fn active_broadcasts(&self) -> u64 {
 		self.broadcasts_started.saturating_sub(self.broadcasts_ended)
@@ -654,13 +649,6 @@ impl Traffic {
 	/// Track subscriptions currently open.
 	pub fn active_subscriptions(&self) -> u64 {
 		self.subscriptions_started.saturating_sub(self.subscriptions_ended)
-	}
-
-	/// All bytes attributable to this slice: payload plus announce overhead.
-	/// Both inputs are monotonic, so the sum regresses only when the entry was
-	/// garbage collected and re-created.
-	pub fn total_bytes(&self) -> u64 {
-		self.bytes.saturating_add(self.announced_bytes)
 	}
 
 	/// True once every started counter equals its ended counterpart: no guard is
@@ -823,44 +811,25 @@ impl Presence {
 /// etc. traffic. Each tracked broadcast keeps a per-tier counter set on both its
 /// publisher and subscriber sides.
 ///
-/// The default tier ([`Tier::default`]) is unprefixed: its published tracks are
-/// `publisher.json`, `subscriber.json`, and `sessions.json`. A named tier
-/// prefixes every track with its label, so `Tier::new("region/sjc")` records on
-/// `region/sjc/publisher.json`. The label is an arbitrary path chosen by business
-/// logic; an empty label is the default tier.
+/// Published stats frames key each tier's counters by its label, so
+/// `Tier::new("region/sjc")` records under `"region/sjc"`. The label is an
+/// arbitrary path chosen by business logic; an empty label is the default tier.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
-pub struct Tier(PathOwned);
+pub struct Tier(Path);
 
 impl Tier {
 	/// A tier with the given label. An empty label is the default tier.
-	pub fn new(label: impl Into<PathOwned>) -> Self {
+	pub fn new(label: impl Into<Path>) -> Self {
 		Self(label.into())
 	}
 
 	/// The tier label, empty for the default tier.
-	pub fn label(&self) -> &PathOwned {
+	pub fn label(&self) -> &Path {
 		&self.0
 	}
 
-	/// True for the default (unprefixed) tier.
-	pub fn is_default(&self) -> bool {
-		self.0.is_empty()
-	}
-
-	/// Track name for this tier: `name` on the default tier, else `<tier>/<name>`.
-	/// This is the naming rule the published stats tracks follow.
-	pub fn track_name(&self, name: &str) -> String {
-		if self.0.is_empty() {
-			name.to_string()
-		} else {
-			format!("{}/{}", self.0.as_str(), name)
-		}
-	}
-
 	/// The tier label as used in metrics: empty (`""`) for the default tier,
-	/// otherwise the label (e.g. `"region/sjc"`). Mirrors the
-	/// wire convention, where the default tier is unprefixed and named
-	/// tiers are `<label>/`-prefixed.
+	/// otherwise the label (e.g. `"region/sjc"`), as stats frames key it.
 	pub fn as_str(&self) -> &str {
 		self.0.as_str()
 	}
@@ -878,7 +847,7 @@ impl fmt::Display for Tier {
 /// side statically, so this only surfaces on the aggregate read side.
 ///
 /// This is the direction traffic flowed, not the session role a client advertises
-/// in its SETUP ([`crate::setup::Role`]): one session records on both sides.
+/// in its SETUP: one session records on both sides.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Role {
 	/// Egress: bytes this node published to a peer.
@@ -904,10 +873,10 @@ impl Role {
 	}
 }
 
-/// Cumulative bytes sent and received, returned per [`Control`] class by [`Snapshot::control`].
+/// Cumulative bytes sent and received, returned per [`Message`] class by [`Snapshot::control`].
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct Bytes {
+pub struct Totals {
 	/// Bytes successfully encoded for sending, counted even if the stream later fails.
 	pub tx: u64,
 	/// Bytes of complete messages decoded and consumed.
@@ -921,7 +890,7 @@ pub struct Bytes {
 /// framing decodes, before request validation. Shared reply IDs use [`Self::Other`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum Control {
+pub enum Message {
 	/// Session setup and information.
 	Session,
 	/// Namespace advertisements and listings.
@@ -942,7 +911,7 @@ pub enum Control {
 	Other,
 }
 
-impl Control {
+impl Message {
 	const ALL: [Self; 9] = [
 		Self::Session,
 		Self::Announce,
@@ -989,20 +958,20 @@ pub struct Snapshot {
 	traffic: HashMap<Tier, [Traffic; 2]>,
 	/// Session presence per tier; read via [`Self::sessions`].
 	sessions: HashMap<Tier, Presence>,
-	control: HashMap<Tier, [[u64; 2]; Control::ALL.len()]>,
+	control: HashMap<Tier, [[u64; 2]; Message::ALL.len()]>,
 }
 
 impl Snapshot {
 	/// The `(tier, class, totals)` control-message rows with any traffic, sorted by tier and class.
 	/// Includes prefixes inside complete codec values, but excludes separately coded type selectors,
 	/// media payload, and transport framing, acknowledgements, and retransmissions.
-	pub fn control(&self) -> Vec<(Tier, Control, Bytes)> {
+	pub fn control(&self) -> Vec<(Tier, Message, Totals)> {
 		let mut rows = Vec::new();
 		for (tier, totals) in &self.control {
-			for class in Control::ALL {
+			for class in Message::ALL {
 				let [tx, rx] = totals[class as usize];
 				if tx != 0 || rx != 0 {
-					rows.push((tier.clone(), class, Bytes { tx, rx }));
+					rows.push((tier.clone(), class, Totals { tx, rx }));
 				}
 			}
 		}
@@ -1048,7 +1017,7 @@ pub struct Report {
 #[non_exhaustive]
 pub struct TrafficEntry {
 	/// The broadcast path the counters are keyed by.
-	pub path: PathOwned,
+	pub path: Path,
 	/// The tier the counters recorded under.
 	pub tier: Tier,
 	/// Egress counters (this node publishing to peers).
@@ -1067,7 +1036,7 @@ pub struct SessionEntry {
 	/// The tier the sessions recorded under.
 	pub tier: Tier,
 	/// The label the sessions record under, empty for sessions without one.
-	pub label: PathOwned,
+	pub label: Path,
 	/// Cumulative request admissions and connect/disconnect gauge.
 	pub presence: Presence,
 	/// This is the label's final readout: its last session or request ended, so the
@@ -1122,12 +1091,12 @@ struct Shared {
 	/// Completed entries folded by tier before pruning. Lock before either map
 	/// so a snapshot sees each entry either here or live, never both or neither.
 	retired: Lock<Snapshot>,
-	entries: Lock<HashMap<PathOwned, Arc<BroadcastEntry>>>,
+	entries: Lock<HashMap<Path, Arc<BroadcastEntry>>>,
 	/// Connected-session gauges keyed by `(tier, label)`. Independent of any
 	/// broadcast; surfaced on the per-tier session tracks and in the totals and
 	/// presence tracks. A tier's inner map is
 	/// created the first time a session records under it.
-	sessions: Lock<HashMap<Tier, HashMap<PathOwned, Arc<SessionCounters>>>>,
+	sessions: Lock<HashMap<Tier, HashMap<Path, Arc<SessionCounters>>>>,
 	wire: Lock<Vec<Weak<WireInner>>>,
 }
 
@@ -1195,11 +1164,6 @@ impl Registry {
 		self.shared.is_some()
 	}
 
-	/// The excluded patterns. See [`Config::exclude`].
-	pub fn exclude(&self) -> &Patterns {
-		&self.exclude
-	}
-
 	/// The shared state, panicking for a disabled registry. Tests build enabled
 	/// registries so this is always present.
 	#[cfg(test)]
@@ -1221,7 +1185,7 @@ impl Registry {
 	/// unless a guard still holds it.
 	#[cfg(any(test, feature = "fuzz"))]
 	#[cfg(feature = "async")]
-	pub(crate) fn bump_publisher_bytes(&self, path: impl AsPath, tier: &Tier, n: u64) {
+	pub(crate) fn bump_publisher_bytes(&self, path: impl Into<Path>, tier: &Tier, n: u64) {
 		let Some(entry) = self.entry(path) else {
 			return;
 		};
@@ -1231,7 +1195,7 @@ impl Registry {
 	/// Resolve the pre-label payload meter used as the stats write benchmark's baseline.
 	#[cfg(any(test, feature = "fuzz"))]
 	#[cfg(feature = "async")]
-	pub(crate) fn publisher_meter(&self, path: impl AsPath, tier: &Tier) -> Meter {
+	pub(crate) fn publisher_meter(&self, path: impl Into<Path>, tier: &Tier) -> Meter {
 		Meter {
 			counters: self.entry(path).map(|entry| entry.tier(tier)),
 			traffic: None,
@@ -1239,21 +1203,20 @@ impl Registry {
 		}
 	}
 
-	fn entry(&self, path: impl AsPath) -> Option<Arc<BroadcastEntry>> {
+	fn entry(&self, path: impl Into<Path>) -> Option<Arc<BroadcastEntry>> {
 		// A disabled registry never allocates state.
 		let shared = self.shared.as_ref()?;
-		let path = path.as_path();
+		let path: Path = path.into();
 		// Skip excluded paths (our own stats broadcasts and any sibling category
 		// under the same prefix) so serving a stats broadcast doesn't generate
 		// more stats.
 		if self.exclude.matches(path.as_str()) {
 			return None;
 		}
-		let owned = path.to_owned();
 		let mut entries = shared.entries.lock();
 		Some(
 			entries
-				.entry(owned)
+				.entry(path)
 				.or_insert_with(|| Arc::new(BroadcastEntry::new()))
 				.clone(),
 		)
@@ -1262,9 +1225,9 @@ impl Registry {
 	/// Get-or-create the session gauge for `label` on `tier`. `None` for a
 	/// disabled registry. Unlike [`Self::entry`], labels key sessions rather than
 	/// broadcasts, so no cycle-breaking filter is needed.
-	fn session_counters(&self, tier: &Tier, label: impl AsPath) -> Option<Arc<SessionCounters>> {
+	fn session_counters(&self, tier: &Tier, label: impl Into<Path>) -> Option<Arc<SessionCounters>> {
 		let shared = self.shared.as_ref()?;
-		let owned = label.as_path().to_owned();
+		let owned = label.into();
 		let mut sessions = shared.sessions.lock();
 		Some(
 			sessions
@@ -1411,7 +1374,7 @@ pub struct Handle {
 
 impl Handle {
 	/// Count a session refused outside relay admission under its resolved label and tier.
-	pub fn refuse(&self, label: impl AsPath, reason: RefusalKind) {
+	pub fn refuse(&self, label: impl Into<Path>, reason: RefusalKind) {
 		if let Some(presence) = self.stats.session_counters(&self.tier, label) {
 			presence
 				.sessions_refused
@@ -1420,35 +1383,25 @@ impl Handle {
 		}
 	}
 
-	/// The registry this handle is tied to.
-	pub fn parent(&self) -> &Registry {
-		&self.stats
-	}
-
-	/// The tier this handle bumps into.
-	pub fn tier(&self) -> &Tier {
-		&self.tier
-	}
-
 	/// Record a connected session under `label` on this tier. Hold
 	/// the returned guard for the session's lifetime; dropping it bumps
 	/// `sessions_ended`. Counts presence regardless of any data flow, so a
 	/// session that merely connects is still billable. Surfaced on the session
 	/// track for this tier, keyed by `label`, in its totals, and in `label`'s
 	/// presence track.
-	pub fn session(&self, label: impl AsPath) -> Session {
+	pub fn session(&self, label: impl Into<Path>) -> Session {
 		self.context(label, Context::Session)
 	}
 
 	/// Count one admitted request under `label` and meter its traffic without session presence.
 	///
 	/// A request has no session end to classify, so it never records a failure.
-	pub fn request(&self, label: impl AsPath) -> Session {
+	pub fn request(&self, label: impl Into<Path>) -> Session {
 		self.context(label, Context::Request)
 	}
 
-	fn context(&self, label: impl AsPath, context: Context) -> Session {
-		let label = label.as_path().to_owned();
+	fn context(&self, label: impl Into<Path>, context: Context) -> Session {
+		let label = label.into();
 		let presence = self.stats.session_counters(&self.tier, &label);
 		if let Some(presence) = &presence {
 			match context {
@@ -1627,7 +1580,7 @@ struct SessionInner {
 	/// Egress viewer refcount, keyed by absolute broadcast path: the first active
 	/// subscription this context opens for a broadcast bumps `broadcasts_started`, the last
 	/// to close bumps `broadcasts_ended` on the same counters, even across a tier change.
-	viewers: Mutex<HashMap<PathOwned, Viewer>>,
+	viewers: Mutex<HashMap<Path, Viewer>>,
 	/// What this session holds against each cap right now, so a tier change can seed the
 	/// new tier's peaks with slots it still holds.
 	held: Mutex<Vec<(Cap, Weak<AtomicUsize>)>>,
@@ -1639,7 +1592,7 @@ struct SessionInner {
 struct Current {
 	failure: Option<Failure>,
 	tier: Tier,
-	label: PathOwned,
+	label: Path,
 	/// The presence gauge for `(tier, label)`, or `None` for a disabled registry.
 	presence: Option<Arc<SessionCounters>>,
 }
@@ -1666,8 +1619,8 @@ struct Viewer {
 }
 
 impl Session {
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub(crate) fn control(&self, class: Control, bytes: usize, received: bool) {
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn control(&self, class: Message, bytes: usize, received: bool) {
 		let Some(inner) = &self.inner else { return };
 		let current = inner.current.lock().unwrap_or_else(PoisonError::into_inner);
 		if let Some(counters) = &current.presence {
@@ -1703,6 +1656,7 @@ impl Session {
 	///
 	/// Only a context from [`Handle::session`] has an end to classify: on one from
 	/// [`Handle::request`] this records nothing.
+	#[cfg(any(feature = "async", test))]
 	pub(crate) fn end(&self, err: &crate::Error) {
 		let Some(inner) = &self.inner else { return };
 		if !inner.connected {
@@ -1712,9 +1666,9 @@ impl Session {
 	}
 
 	/// Record later traffic and session presence under `(tier, label)`; a request stays counted where admitted.
-	pub fn retag(&self, tier: Tier, label: impl AsPath) {
+	pub fn retag(&self, tier: Tier, label: impl Into<Path>) {
 		let Some(inner) = &self.inner else { return };
-		let label = label.as_path().to_owned();
+		let label = label.into();
 		let mut current = inner.current.lock().unwrap_or_else(PoisonError::into_inner);
 		if current.tier == tier && current.label == label {
 			return;
@@ -1785,20 +1739,20 @@ impl Session {
 
 	/// Egress (publisher / reads) scope for a broadcast path. The path is the
 	/// absolute broadcast name.
-	pub(crate) fn egress(&self, path: impl AsPath) -> Scope {
+	pub(crate) fn egress(&self, path: impl Into<Path>) -> Scope {
 		self.scope(path, Side::Publisher)
 	}
 
 	/// Ingress (subscriber / writes) scope for a broadcast path.
-	pub(crate) fn ingress(&self, path: impl AsPath) -> Scope {
+	pub(crate) fn ingress(&self, path: impl Into<Path>) -> Scope {
 		self.scope(path, Side::Subscriber)
 	}
 
-	fn scope(&self, path: impl AsPath, side: Side) -> Scope {
+	fn scope(&self, path: impl Into<Path>, side: Side) -> Scope {
 		let Some(inner) = &self.inner else {
 			return Scope::default();
 		};
-		let path = path.as_path().to_owned();
+		let path = path.into();
 		let resolved = inner.resolve(&path);
 		Scope {
 			session: self.clone(),
@@ -1810,7 +1764,7 @@ impl Session {
 
 	/// Register one active egress subscription to `path` recording on `counters`.
 	/// The first bumps `broadcasts_started` there.
-	fn viewer_open(&self, path: &PathOwned, counters: &Arc<TierCounters>) {
+	fn viewer_open(&self, path: &Path, counters: &Arc<TierCounters>) {
 		let Some(inner) = &self.inner else { return };
 		let mut viewers = inner.viewers.lock().unwrap_or_else(PoisonError::into_inner);
 		let viewer = viewers.entry(path.clone()).or_insert_with(|| {
@@ -1825,7 +1779,7 @@ impl Session {
 
 	/// Release one active egress subscription to `path`. The last bumps
 	/// `broadcasts_ended` on the counters the first opened on.
-	fn viewer_close(&self, path: &PathOwned) {
+	fn viewer_close(&self, path: &Path) {
 		let Some(inner) = &self.inner else { return };
 		let mut viewers = inner.viewers.lock().unwrap_or_else(PoisonError::into_inner);
 		let Some(viewer) = viewers.get_mut(path) else { return };
@@ -1846,7 +1800,7 @@ impl Session {
 impl SessionInner {
 	/// The counters `path` records on under the current tier, tagged with the
 	/// generation they were resolved at.
-	fn resolve(&self, path: &PathOwned) -> Resolved {
+	fn resolve(&self, path: &Path) -> Resolved {
 		let (generation, tier) = {
 			let current = self.current.lock().unwrap_or_else(PoisonError::into_inner);
 			(self.generation.load(Ordering::Relaxed), current.tier.clone())
@@ -1990,7 +1944,7 @@ pub(crate) struct Scope {
 	side: Side,
 	/// Absolute broadcast path, used to key the viewer refcount and as the
 	/// `announced_bytes` length.
-	path: PathOwned,
+	path: Path,
 }
 
 /// A [`Scope`]'s counters and the session tier generation they belong to.
@@ -2103,7 +2057,7 @@ pub(crate) struct Subscription {
 	counters: Option<Arc<TierCounters>>,
 	side: Side,
 	/// `Some((session, path))` on the egress side, to release the viewer refcount.
-	viewer: Option<(Session, PathOwned)>,
+	viewer: Option<(Session, Path)>,
 }
 
 impl Drop for Subscription {
@@ -2156,9 +2110,9 @@ mod tests {
 	#[test]
 	fn wire_deltas_follow_label_and_tier_changes() {
 		let registry = test_stats();
-		let old = Tier::new("old");
-		let new = Tier::new("new");
-		let session = registry.tier(old.clone()).session("room");
+		let old = Tier::new(crate::Path::from_static("old"));
+		let new = Tier::new(crate::Path::from_static("new"));
+		let session = registry.tier(old.clone()).session(crate::Path::from_static("room"));
 		let bytes = counters(10, 20);
 		let _wire = session.wire(bytes.clone());
 		let report = drain(&registry);
@@ -2171,7 +2125,7 @@ mod tests {
 		);
 		bytes.set_sent_bytes(15);
 		bytes.set_received_bytes(27);
-		session.retag(new.clone(), "hall");
+		session.retag(new.clone(), crate::Path::from_static("hall"));
 		bytes.set_sent_bytes(25);
 		bytes.set_received_bytes(50);
 		let report = drain(&registry);
@@ -2188,7 +2142,7 @@ mod tests {
 	#[test]
 	fn a_wire_counter_reset_never_lowers_presence() {
 		let registry = test_stats();
-		let session = registry.tier(Tier::default()).session("room");
+		let session = registry.tier(Tier::default()).session(crate::Path::from_static("room"));
 		let bytes = crate::transport::Wire::new();
 		let _wire = session.wire(bytes.clone());
 		for (reading, expected) in [((20, 30), (20, 30)), ((3, 4), (20, 30)), ((8, 10), (25, 36))] {
@@ -2205,7 +2159,7 @@ mod tests {
 	#[test]
 	fn disabled_wire_collection_reports_nothing() {
 		let registry = Registry::disabled();
-		let session = registry.tier(Tier::default()).session("root");
+		let session = registry.tier(Tier::default()).session(crate::Path::from_static("root"));
 		let wire = session.wire(counters(5, 7));
 		assert!(drain(&registry).sessions.is_empty());
 		drop(wire);
@@ -2215,7 +2169,7 @@ mod tests {
 	#[test]
 	fn wire_guards_hold_the_session_until_the_final_reading() {
 		let registry = test_stats();
-		let session = registry.tier(Tier::default()).session("room");
+		let session = registry.tier(Tier::default()).session(crate::Path::from_static("room"));
 		let wire = session.wire(counters(19, 23));
 		drop(session);
 		assert_eq!(drain(&registry).sessions[0].presence.active(), 1);
@@ -2240,11 +2194,14 @@ mod tests {
 	#[test]
 	fn outcomes_survive_clones_tier_changes_and_pruning() {
 		let stats = test_stats();
-		let handle = stats.tier(Tier::new("gateway"));
-		handle.refuse("root", RefusalKind::Forbidden);
-		let session = handle.session("root");
+		let handle = stats.tier(Tier::new(crate::Path::from_static("gateway")));
+		handle.refuse(crate::Path::from_static("root"), RefusalKind::Forbidden);
+		let session = handle.session(crate::Path::from_static("root"));
 		let clone = session.clone();
-		session.retag(Tier::new("next"), "root");
+		session.retag(
+			Tier::new(crate::Path::from_static("next")),
+			crate::Path::from_static("root"),
+		);
 		// A reconnect's later end replaces an earlier one.
 		clone.end(&crate::Error::Transport("lost".into()));
 		session.end(&crate::Error::IdleTimeout);
@@ -2272,10 +2229,12 @@ mod tests {
 		let after = stats.snapshot();
 		assert_eq!(before.sessions(), after.sessions(), "retirement keeps outcomes once");
 		let disabled = Registry::disabled();
-		disabled.tier(Tier::default()).refuse("root", RefusalKind::Refused);
 		disabled
 			.tier(Tier::default())
-			.session("root")
+			.refuse(crate::Path::from_static("root"), RefusalKind::Refused);
+		disabled
+			.tier(Tier::default())
+			.session(crate::Path::from_static("root"))
 			.end(&crate::Error::Expired);
 		assert!(disabled.snapshot().sessions().is_empty());
 	}
@@ -2304,7 +2263,6 @@ mod tests {
 		let tier = Tier::default();
 		assert_eq!(tier.as_str(), "");
 		assert_eq!(tier.to_string(), "");
-		assert_eq!(tier.track_name("publisher.json"), "publisher.json");
 	}
 
 	/// Counters for `(path, tier)`, creating the tier slot if absent.
@@ -2313,19 +2271,18 @@ mod tests {
 			.shared()
 			.entries
 			.lock()
-			.get(&PathOwned::from(path.to_string()))
+			.get(&crate::Path::try_from(path.to_string()).unwrap())
 			.expect("entry")
 			.tier(tier)
 	}
 
 	/// The [`Presence`] for `(tier, label)`, or `None` if absent.
 	fn session_snapshot(stats: &Registry, tier: &Tier, label: &str) -> Option<Presence> {
-		stats
-			.shared()
-			.sessions
-			.lock()
-			.get(tier)
-			.and_then(|labels| labels.get(&PathOwned::from(label.to_string())).map(|c| c.snapshot().0))
+		stats.shared().sessions.lock().get(tier).and_then(|labels| {
+			labels
+				.get(&crate::Path::try_from(label.to_string()).unwrap())
+				.map(|c| c.snapshot().0)
+		})
 	}
 
 	fn test_stats() -> Registry {
@@ -2335,14 +2292,16 @@ mod tests {
 	#[test]
 	fn default_and_named_tiers_are_independent() {
 		let stats = test_stats();
-		let default = stats.tier(Tier::default()).session("root");
-		let regional = stats.tier(Tier::new("region/sjc")).session("root");
+		let default = stats.tier(Tier::default()).session(crate::Path::from_static("root"));
+		let regional = stats
+			.tier(Tier::new(crate::Path::from_static("region/sjc")))
+			.session(crate::Path::from_static("root"));
 
-		default.egress("demo/bbb").meter().bytes(100);
-		regional.ingress("demo/bbb").meter().bytes(7);
+		default.egress(crate::Path::from_static("demo/bbb")).meter().bytes(100);
+		regional.ingress(crate::Path::from_static("demo/bbb")).meter().bytes(7);
 
 		let default_counters = tier_counters(&stats, "demo/bbb", &Tier::default());
-		let regional_counters = tier_counters(&stats, "demo/bbb", &Tier::new("region/sjc"));
+		let regional_counters = tier_counters(&stats, "demo/bbb", &Tier::new(crate::Path::from_static("region/sjc")));
 		assert_eq!(default_counters.publisher.bytes.load(Relaxed), 100);
 		assert_eq!(default_counters.subscriber.bytes.load(Relaxed), 0);
 		assert_eq!(regional_counters.publisher.bytes.load(Relaxed), 0);
@@ -2358,7 +2317,10 @@ mod tests {
 
 		let stats = test_stats();
 		let tier = stats.tier(Tier::default());
-		let (s1, s2) = (tier.session("acme"), tier.session("acme"));
+		let (s1, s2) = (
+			tier.session(crate::Path::from_static("acme")),
+			tier.session(crate::Path::from_static("acme")),
+		);
 		let announces = Slots::new(10).with_stats(&s1, Cap::Announces);
 		let subscriptions = Slots::new(10).with_stats(&s2, Cap::Subscriptions);
 		let other = Slots::new(10).with_stats(&s2, Cap::Announces);
@@ -2390,13 +2352,13 @@ mod tests {
 		use crate::session::Slots;
 
 		let stats = test_stats();
-		let session = stats.tier(Tier::default()).session("acme");
+		let session = stats.tier(Tier::default()).session(crate::Path::from_static("acme"));
 		let subscriptions = Slots::new(10).with_stats(&session, Cap::Subscriptions);
 		let mut held: Vec<_> = (0..5).map(|_| subscriptions.acquire().unwrap()).collect();
 		held.truncate(3);
 
-		let gold = Tier::new("gold");
-		session.retag(gold.clone(), "acme");
+		let gold = Tier::new(crate::Path::from_static("gold"));
+		session.retag(gold.clone(), crate::Path::from_static("acme"));
 
 		let peak = |tier: &Tier| {
 			let (_, presence) = stats
@@ -2415,23 +2377,23 @@ mod tests {
 	fn snapshot_rolls_up_by_tier_role_and_sessions() {
 		let stats = test_stats();
 		let default = stats.tier(Tier::default());
-		let regional = stats.tier(Tier::new("region/sjc"));
+		let regional = stats.tier(Tier::new(crate::Path::from_static("region/sjc")));
 
 		// Two default-tier sessions under one label, one regional; presence sums them.
-		let s1 = default.session("acme");
-		let _s2 = default.session("acme");
-		let s3 = regional.session("peer");
+		let s1 = default.session(crate::Path::from_static("acme"));
+		let _s2 = default.session(crate::Path::from_static("acme"));
+		let s3 = regional.session(crate::Path::from_static("peer"));
 
 		// Default-tier egress across two broadcasts; the snapshot sums them.
 		{
-			let m = s1.egress("demo/aaa").meter();
+			let m = s1.egress(crate::Path::from_static("demo/aaa")).meter();
 			m.bytes(100);
 			m.frames(1);
 			m.group();
 		}
-		s1.egress("demo/bbb").meter().bytes(50);
+		s1.egress(crate::Path::from_static("demo/bbb")).meter().bytes(50);
 		// Regional ingress on a different tier/role stays isolated.
-		s3.ingress("demo/aaa").meter().bytes(7);
+		s3.ingress(crate::Path::from_static("demo/aaa")).meter().bytes(7);
 
 		let snap = stats.snapshot();
 
@@ -2451,10 +2413,13 @@ mod tests {
 		assert_eq!(default_publisher.frames, 1);
 		assert_eq!(default_publisher.groups, 1);
 
-		let regional_subscriber = slot(Tier::new("region/sjc"), Role::Subscriber);
+		let regional_subscriber = slot(Tier::new(crate::Path::from_static("region/sjc")), Role::Subscriber);
 		assert_eq!(regional_subscriber.bytes, 7, "regional ingress isolated by tier/role");
 		assert_eq!(slot(Tier::default(), Role::Subscriber).bytes, 0);
-		assert_eq!(slot(Tier::new("region/sjc"), Role::Publisher).bytes, 0);
+		assert_eq!(
+			slot(Tier::new(crate::Path::from_static("region/sjc")), Role::Publisher).bytes,
+			0
+		);
 
 		let sessions = |tier| {
 			snap.sessions()
@@ -2469,7 +2434,10 @@ mod tests {
 			"two default-tier sessions under one label"
 		);
 		assert_eq!(default_sessions.sessions_ended, 0, "guards still held");
-		assert_eq!(sessions(Tier::new("region/sjc")).sessions_started, 1);
+		assert_eq!(
+			sessions(Tier::new(crate::Path::from_static("region/sjc"))).sessions_started,
+			1
+		);
 	}
 
 	fn drain(stats: &Registry) -> Report {
@@ -2482,8 +2450,10 @@ mod tests {
 	fn report_reuses_capacity() {
 		// A reused report is cleared, not appended to, and keeps its buffers.
 		let stats = test_stats();
-		let ctx = stats.tier(Tier::default()).session("root");
-		let _scopes: Vec<_> = (0..8).map(|i| ctx.egress(format!("b/{i}").as_str())).collect();
+		let ctx = stats.tier(Tier::default()).session(crate::Path::from_static("root"));
+		let _scopes: Vec<_> = (0..8)
+			.map(|i| ctx.egress(crate::Path::new(format!("b/{i}").as_str()).unwrap()))
+			.collect();
 
 		let mut report = Report::default();
 		stats.report(&mut report);
@@ -2504,9 +2474,9 @@ mod tests {
 		// entry across drains while live, and prunes it on the first drain
 		// after the last guard drops (returning the final values that once).
 		let stats = test_stats();
-		let key = PathOwned::from("foo/bar");
-		let ctx = stats.tier(Tier::default()).session("root");
-		let scope = ctx.egress("foo/bar");
+		let key = crate::Path::from_static("foo/bar");
+		let ctx = stats.tier(Tier::default()).session(crate::Path::from_static("root"));
+		let scope = ctx.egress(crate::Path::from_static("foo/bar"));
 		let sub = scope.subscribe();
 		scope.meter().bytes(42);
 
@@ -2552,9 +2522,9 @@ mod tests {
 		// the registry indefinitely: announces_started != announces_ended means a
 		// subscription could still begin at any moment.
 		let stats = test_stats();
-		let key = PathOwned::from("foo/bar");
-		let ctx = stats.tier(Tier::default()).session("root");
-		let scope = ctx.egress("foo/bar");
+		let key = crate::Path::from_static("foo/bar");
+		let ctx = stats.tier(Tier::default()).session(crate::Path::from_static("root"));
+		let scope = ctx.egress(crate::Path::from_static("foo/bar"));
 		let guard = scope.announce();
 
 		for _ in 0..3 {
@@ -2578,7 +2548,7 @@ mod tests {
 		// Once the last session under a label disconnects, the label leaves the
 		// registry on the drain that reports its final gauge.
 		let stats = test_stats();
-		let session = stats.tier(Tier::default()).session("acme");
+		let session = stats.tier(Tier::default()).session(crate::Path::from_static("acme"));
 
 		let report = drain(&stats);
 		let row = report
@@ -2605,15 +2575,15 @@ mod tests {
 	#[test]
 	fn control_body_totals_follow_retags_and_survive_retirement() {
 		let registry = Registry::new(Default::default());
-		let first = Tier::new("internal");
-		let second = Tier::new("edge");
-		let context = registry.tier(first.clone()).session("");
-		context.control(Control::Announce, 17, false);
-		context.retag(second.clone(), "");
-		context.control(Control::TrackInfo, 23, true);
+		let first = Tier::new(crate::Path::from_static("internal"));
+		let second = Tier::new(crate::Path::from_static("edge"));
+		let context = registry.tier(first.clone()).session(crate::Path::from_static(""));
+		context.control(Message::Announce, 17, false);
+		context.retag(second.clone(), crate::Path::from_static(""));
+		context.control(Message::TrackInfo, 23, true);
 		let expected = vec![
-			(second, Control::TrackInfo, Bytes { tx: 0, rx: 23 }),
-			(first, Control::Announce, Bytes { tx: 17, rx: 0 }),
+			(second, Message::TrackInfo, Totals { tx: 0, rx: 23 }),
+			(first, Message::Announce, Totals { tx: 17, rx: 0 }),
 		];
 		assert_eq!(registry.snapshot().control(), expected);
 		drop(context);
@@ -2626,12 +2596,12 @@ mod tests {
 	fn snapshot_preserves_retired_counters() {
 		let stats = test_stats();
 		let tier = Tier::default();
-		let live = stats.tier(tier.clone()).session("live");
-		let scope = live.egress("live/video");
+		let live = stats.tier(tier.clone()).session(crate::Path::from_static("live"));
+		let scope = live.egress(crate::Path::from_static("live/video"));
 		let _live_sub = scope.subscribe();
 		for _ in 0..2 {
-			let session = stats.tier(tier.clone()).session("retired");
-			let scope = session.egress("retired/video");
+			let session = stats.tier(tier.clone()).session(crate::Path::from_static("retired"));
+			let scope = session.egress(crate::Path::from_static("retired/video"));
 			let sub = scope.subscribe();
 			scope.meter().bytes(100);
 			drop(sub);
@@ -2673,8 +2643,13 @@ mod tests {
 		let worker = std::thread::spawn(move || {
 			for i in 0..256 {
 				let path = format!("root/{i}");
-				let session = worker_stats.tier(Tier::default()).session(path.as_str());
-				session.ingress(path.as_str()).meter().bytes(1);
+				let session = worker_stats
+					.tier(Tier::default())
+					.session(crate::Path::new(path.as_str()).unwrap());
+				session
+					.ingress(crate::Path::new(path.as_str()).unwrap())
+					.meter()
+					.bytes(1);
 				drop(session);
 				drain(&worker_stats);
 			}
@@ -2719,8 +2694,8 @@ mod tests {
 		// Our own stats broadcasts (and any sibling category under the same
 		// prefix) must not feed back into the registry.
 		let stats = test_stats();
-		let ctx = stats.tier(Tier::default()).session("root");
-		let scope = ctx.egress(".stats/node/sjc");
+		let ctx = stats.tier(Tier::default()).session(crate::Path::from_static("root"));
+		let scope = ctx.egress(crate::Path::from_static(".stats/node/sjc"));
 		scope.meter().bytes(100);
 		let _guard = scope.announce();
 		let _sub = scope.subscribe();
@@ -2733,8 +2708,8 @@ mod tests {
 		// and bumps are dropped.
 		let stats = Registry::default();
 		assert!(stats.shared.is_none());
-		let ctx = stats.tier(Tier::default()).session("root");
-		let scope = ctx.egress("demo/bbb");
+		let ctx = stats.tier(Tier::default()).session(crate::Path::from_static("root"));
+		let scope = ctx.egress(crate::Path::from_static("demo/bbb"));
 		scope.meter().bytes(100);
 		let _guard = scope.announce();
 		let _sub = scope.subscribe();
@@ -2753,9 +2728,9 @@ mod tests {
 			session_snapshot(&stats, &Tier::default(), label).map(|p| (p.sessions_started, p.sessions_ended))
 		};
 
-		let a1 = ext.session("acme");
-		let a2 = ext.session("acme");
-		let b1 = ext.session("globex");
+		let a1 = ext.session(crate::Path::from_static("acme"));
+		let a2 = ext.session(crate::Path::from_static("acme"));
+		let b1 = ext.session(crate::Path::from_static("globex"));
 		assert_eq!(snap("acme"), Some((2, 0)), "two sessions under one label");
 		assert_eq!(snap("globex"), Some((1, 0)), "a distinct label is counted separately");
 
@@ -2830,7 +2805,7 @@ mod tests {
 			session_snapshot(&stats, &Tier::default(), label).map(|p| (p.sessions_started, p.sessions_ended))
 		};
 
-		let ctx = stats.tier(Tier::default()).session("acme");
+		let ctx = stats.tier(Tier::default()).session(crate::Path::from_static("acme"));
 		assert_eq!(snap("acme"), Some((1, 0)));
 
 		let clone = ctx.clone();
@@ -2845,14 +2820,14 @@ mod tests {
 	#[test]
 	fn retag_moves_presence() {
 		let stats = test_stats();
-		let gold = Tier::new("gold");
+		let gold = Tier::new(crate::Path::from_static("gold"));
 		let snap = |tier: &Tier| session_snapshot(&stats, tier, "acme").map(|p| (p.sessions_started, p.sessions_ended));
 
-		let ctx = stats.tier(Tier::default()).session("acme");
-		ctx.retag(Tier::default(), "acme");
+		let ctx = stats.tier(Tier::default()).session(crate::Path::from_static("acme"));
+		ctx.retag(Tier::default(), crate::Path::from_static("acme"));
 		assert_eq!(snap(&Tier::default()), Some((1, 0)), "the same tier is a no-op");
 
-		ctx.retag(gold.clone(), "acme");
+		ctx.retag(gold.clone(), crate::Path::from_static("acme"));
 		assert_eq!(snap(&Tier::default()), Some((1, 1)));
 		assert_eq!(snap(&gold), Some((1, 0)));
 
@@ -2863,9 +2838,9 @@ mod tests {
 	#[test]
 	fn retag_moves_subsequent_traffic() {
 		let stats = test_stats();
-		let gold = Tier::new("gold");
-		let ctx = stats.tier(Tier::default()).session("acme");
-		let scope = ctx.egress("demo/bbb");
+		let gold = Tier::new(crate::Path::from_static("gold"));
+		let ctx = stats.tier(Tier::default()).session(crate::Path::from_static("acme"));
+		let scope = ctx.egress(crate::Path::from_static("demo/bbb"));
 		let clone = scope.clone();
 
 		let before = scope.meter();
@@ -2873,7 +2848,7 @@ mod tests {
 		let announce = scope.announce();
 		before.bytes(10);
 
-		ctx.retag(gold.clone(), "acme");
+		ctx.retag(gold.clone(), crate::Path::from_static("acme"));
 		// A meter handed out earlier keeps its tier; everything after moves.
 		before.bytes(1);
 		scope.meter().bytes(5);
@@ -2910,11 +2885,19 @@ mod tests {
 	fn retag_moves_presence_between_labels_on_one_tier() {
 		let stats = test_stats();
 		let tier = Tier::default();
-		let session = stats.tier(tier.clone()).session("project/root");
-		session.egress("project/live").meter().bytes(5);
+		let session = stats
+			.tier(tier.clone())
+			.session(crate::Path::from_static("project/root"));
+		session
+			.egress(crate::Path::from_static("project/live"))
+			.meter()
+			.bytes(5);
 
-		session.retag(tier.clone(), "project/key/123");
-		session.egress("project/live").meter().bytes(7);
+		session.retag(tier.clone(), crate::Path::from_static("project/key/123"));
+		session
+			.egress(crate::Path::from_static("project/live"))
+			.meter()
+			.bytes(7);
 
 		let root = session_snapshot(&stats, &tier, "project/root").unwrap();
 		let key = session_snapshot(&stats, &tier, "project/key/123").unwrap();
@@ -2926,12 +2909,12 @@ mod tests {
 	fn retag_back_counts_bytes_once() {
 		let stats = test_stats();
 		let tier = Tier::default();
-		let session = stats.tier(tier.clone()).session("a");
-		let meter = session.ingress("a/live").meter();
+		let session = stats.tier(tier.clone()).session(crate::Path::from_static("a"));
+		let meter = session.ingress(crate::Path::from_static("a/live")).meter();
 		meter.bytes(1);
-		session.retag(tier.clone(), "b");
+		session.retag(tier.clone(), crate::Path::from_static("b"));
 		meter.bytes(2);
-		session.retag(tier.clone(), "a");
+		session.retag(tier.clone(), crate::Path::from_static("a"));
 		meter.bytes(4);
 
 		let received = |label| session_snapshot(&stats, &tier, label).unwrap().received_bytes;
@@ -2942,8 +2925,8 @@ mod tests {
 	fn session_bytes_outlive_the_session() {
 		let stats = test_stats();
 		let tier = Tier::default();
-		let session = stats.tier(tier.clone()).session("acme");
-		let meter = session.egress("acme/live").meter();
+		let session = stats.tier(tier.clone()).session(crate::Path::from_static("acme"));
+		let meter = session.egress(crate::Path::from_static("acme/live")).meter();
 		meter.bytes(3);
 		drop(session);
 
@@ -2967,8 +2950,8 @@ mod tests {
 	fn excluded_paths_skip_session_bytes() {
 		let stats = test_stats();
 		let tier = Tier::default();
-		let session = stats.tier(tier.clone()).session("acme");
-		session.egress(".stats/node").meter().bytes(9);
+		let session = stats.tier(tier.clone()).session(crate::Path::from_static("acme"));
+		session.egress(crate::Path::from_static(".stats/node")).meter().bytes(9);
 		assert_eq!(session_snapshot(&stats, &tier, "acme").unwrap().sent_bytes, 0);
 	}
 
@@ -2976,14 +2959,14 @@ mod tests {
 	fn meter_bumps_the_right_side() {
 		// A payload meter records on its own side only.
 		let stats = test_stats();
-		let ctx = stats.tier(Tier::default()).session("root");
+		let ctx = stats.tier(Tier::default()).session(crate::Path::from_static("root"));
 
-		let egress = ctx.egress("demo/bbb").meter();
+		let egress = ctx.egress(crate::Path::from_static("demo/bbb")).meter();
 		egress.group();
 		egress.frames(3);
 		egress.bytes(100);
 
-		let ingress = ctx.ingress("demo/bbb").meter();
+		let ingress = ctx.ingress(crate::Path::from_static("demo/bbb")).meter();
 		ingress.group();
 		ingress.frames(1);
 		ingress.bytes(7);
@@ -3000,10 +2983,10 @@ mod tests {
 		// An egress subscription bumps `subscriptions_started` and, being the context's first
 		// for the broadcast, `broadcasts_started`. Dropping closes both.
 		let stats = test_stats();
-		let ctx = stats.tier(Tier::default()).session("root");
+		let ctx = stats.tier(Tier::default()).session(crate::Path::from_static("root"));
 		let raw = || tier_counters(&stats, "demo/bbb", &Tier::default()).publisher.snapshot();
 
-		let scope = ctx.egress("demo/bbb");
+		let scope = ctx.egress(crate::Path::from_static("demo/bbb"));
 		let s1 = scope.subscribe();
 		let s2 = scope.subscribe();
 		let r = raw();
@@ -3025,9 +3008,17 @@ mod tests {
 		let stats = test_stats();
 		let raw = || tier_counters(&stats, "demo/bbb", &Tier::default()).publisher.snapshot();
 
-		let v1 = stats.tier(Tier::default()).session("a").egress("demo/bbb").subscribe();
+		let v1 = stats
+			.tier(Tier::default())
+			.session(crate::Path::from_static("a"))
+			.egress(crate::Path::from_static("demo/bbb"))
+			.subscribe();
 		assert_eq!(raw().broadcasts_started, 1);
-		let v2 = stats.tier(Tier::default()).session("b").egress("demo/bbb").subscribe();
+		let v2 = stats
+			.tier(Tier::default())
+			.session(crate::Path::from_static("b"))
+			.egress(crate::Path::from_static("demo/bbb"))
+			.subscribe();
 		assert_eq!(raw().broadcasts_started, 2, "two distinct contexts => two viewers");
 
 		drop(v1);
@@ -3041,8 +3032,8 @@ mod tests {
 		// An ingress (producer-lifetime) subscription bumps subscriptions but never
 		// the viewer refcount, which is egress-only.
 		let stats = test_stats();
-		let ctx = stats.tier(Tier::default()).session("root");
-		let guard = ctx.ingress("demo/bbb").subscribe();
+		let ctx = stats.tier(Tier::default()).session(crate::Path::from_static("root"));
+		let guard = ctx.ingress(crate::Path::from_static("demo/bbb")).subscribe();
 		let sub = tier_counters(&stats, "demo/bbb", &Tier::default())
 			.subscriber
 			.snapshot();
@@ -3061,17 +3052,22 @@ mod tests {
 	#[test]
 	fn request_admission_survives_clones_retiering_and_retirement_without_presence() {
 		let stats = test_stats();
-		let request = stats.tier(Tier::new("old")).request("root");
+		let request = stats
+			.tier(Tier::new(crate::Path::from_static("old")))
+			.request(crate::Path::from_static("root"));
 		let clone = request.clone();
-		request.egress("root/video").meter().bytes(7);
-		request.retag(Tier::new("new"), "root");
-		clone.egress("root/video").meter().bytes(11);
+		request.egress(crate::Path::from_static("root/video")).meter().bytes(7);
+		request.retag(
+			Tier::new(crate::Path::from_static("new")),
+			crate::Path::from_static("root"),
+		);
+		clone.egress(crate::Path::from_static("root/video")).meter().bytes(11);
 		drop(request);
 		drop(clone);
 		let mut report = Report::default();
 		stats.report(&mut report);
 		for (label, requests, bytes) in [("old", 1, 7), ("new", 0, 11)] {
-			let tier = Tier::new(label);
+			let tier = Tier::new(crate::Path::new(label).unwrap());
 			let presence = report.sessions.iter().find(|entry| entry.tier == tier).unwrap();
 			assert_eq!(presence.presence.requests, requests);
 			assert_eq!(presence.presence.active(), 0);
@@ -3121,8 +3117,8 @@ mod tests {
 	fn fetch_counts_separately_from_subscriptions() {
 		// A fetch bumps `fetches`, not `subscriptions_started` or the viewer refcount.
 		let stats = test_stats();
-		let ctx = stats.tier(Tier::default()).session("root");
-		let scope = ctx.egress("demo/bbb");
+		let ctx = stats.tier(Tier::default()).session(crate::Path::from_static("root"));
+		let scope = ctx.egress(crate::Path::from_static("demo/bbb"));
 		scope.fetch();
 		scope.fetch();
 		let r = tier_counters(&stats, "demo/bbb", &Tier::default()).publisher.snapshot();
@@ -3136,10 +3132,10 @@ mod tests {
 		// The announce guard bumps `announces_started` + the path length on open, and
 		// `announces_ended` + the path length again on drop.
 		let stats = test_stats();
-		let ctx = stats.tier(Tier::default()).session("root");
+		let ctx = stats.tier(Tier::default()).session(crate::Path::from_static("root"));
 		let path_len = "demo/bbb".len() as u64;
 
-		let guard = ctx.egress("demo/bbb").announce();
+		let guard = ctx.egress(crate::Path::from_static("demo/bbb")).announce();
 		let r = tier_counters(&stats, "demo/bbb", &Tier::default()).publisher.snapshot();
 		assert_eq!(r.announces_started, 1);
 		assert_eq!(r.announces_ended, 0);
@@ -3159,7 +3155,7 @@ mod tests {
 	fn disabled_context_is_noop() {
 		// A default (disabled) context resolves empty scopes: every bump is dropped.
 		let ctx = Session::default();
-		let scope = ctx.egress("demo/bbb");
+		let scope = ctx.egress(crate::Path::from_static("demo/bbb"));
 		scope.meter().bytes(100);
 		let _guard = scope.announce();
 		let _sub = scope.subscribe();

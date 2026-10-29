@@ -41,7 +41,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts-controls
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
 
       - name: TS pair controls
         if: ${{ !cancelled() }}
@@ -53,14 +53,14 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
       - name: TS fragmented PES headers
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts --fragment-pes
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
       # KLV and DVB AC-3 the importer carries as whole PES: each PES comes back byte-equal
@@ -69,7 +69,16 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts --klv --strict
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      # MPEG-2 video the importer carries as whole PES: FFmpeg decodes the capture to the
+      # source's pictures, and the video passes the T-STD model.
+      - name: TS MPEG-2 video
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --mpeg2
+        env:
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
       # A KLV stream joins the program mid-stream and leaves it: the export announces each
@@ -78,28 +87,28 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts --revision --strict
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
       - name: TS audio-only SCTE-35
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts --clockless audio-scte35
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
       - name: TS sections-only clock
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts --clockless sections
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
       - name: TS whole-PES-only clock
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts --clockless pes
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
       # `import/export ts --passthrough`: from its first packet the capture is the source's
@@ -109,7 +118,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts --passthrough
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
       # The same over a hardware encoder's capture the T-STD model passes, with a dirty start
@@ -118,7 +127,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts-passthrough-capture
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
       # The same over a whole MPTS: two programs on their own PCR PIDs, whose recovery points
@@ -127,7 +136,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts --passthrough --mpts
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
       # The same round-trip at 2 Mb/s, where every keyframe outgrows a 25 ms PCR slot,
@@ -137,7 +146,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts --bitrate 2000000
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
       # 1080p video filling a broadcast-sized 9 Mbit CPB, at the default delay: the
@@ -147,7 +156,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts --hrd
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
       # 1080p video with no HRD at its level's 24 Mb/s leak, so the export has to admit
@@ -156,7 +165,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts --leak
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
       # The same video beside two audio PIDs in a multiplex the source fills with no nulls,
@@ -166,7 +175,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts --full
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
       # The same video beside four audio PIDs in a multiplex faster than its Rx: each slot
@@ -175,7 +184,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts --headroom
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
       # The same round-trip over an open-GOP clip: recovery-group orphans are trimmed,
@@ -184,7 +193,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts --open-gop --strict
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
       # Builds the sparse-EPG and pending-version fixtures and round-trips
@@ -193,7 +202,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts-eit
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
       # The T-STD model must pass a broadcast capture and fail the same capture
@@ -202,7 +211,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts-tstd
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
       # The pair needs enough overlap to grade the slower table cadences.
@@ -210,14 +219,14 @@ jobs:
         if: ${{ !cancelled() && github.event_name != 'pull_request' }}
         run: nix develop --command just test ts --pair
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
 
       # Live timing needs the real-time window to distinguish drift from startup.
       - name: TS live release timing
         if: ${{ !cancelled() && github.event_name != 'pull_request' }}
         run: nix develop --command just test ts --live --duration 120
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
 
       # The subscriber's leg congested the way real paths are, through moq-shaper: 7 Mb/s under
       # the 9 Mb/s video and four audio PIDs, behind a 2 s queue, 25 ms each way. The export must
@@ -226,7 +235,7 @@ jobs:
         if: ${{ !cancelled() && github.event_name != 'pull_request' }}
         run: nix develop --command just test ts --headroom --rate 7000000 --duration 120
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
 
       # The same path behind a 250 ms queue, with the relay's loss-based CUBIC: BBRv3 never fills a
       # queue this deep, CUBIC overflows it every sawtooth. QUIC must recover what the queue drops
@@ -235,7 +244,7 @@ jobs:
         if: ${{ !cancelled() && github.event_name != 'pull_request' }}
         run: nix develop --command just test ts --headroom --rate 7000000 --queue 250ms --duration 120
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
           MOQ_QUIC_CONGESTION_CONTROL: loss
 
       # Passthrough over the overflowing path, under its 10 Mb/s multiplex: what arrives must be
@@ -244,7 +253,7 @@ jobs:
         if: ${{ !cancelled() && github.event_name != 'pull_request' }}
         run: nix develop --command just test ts --passthrough --rate 7000000 --queue 250ms --duration 120
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
           MOQ_QUIC_CONGESTION_CONTROL: loss
 
       # Two minutes of MoQ content faults and a congested bottleneck, on a paused clock: each
@@ -253,7 +262,7 @@ jobs:
         if: ${{ !cancelled() && github.event_name != 'pull_request' }}
         run: nix develop --command just rs ts-recovery
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
 
       - name: Upload failure artifacts
         if: ${{ failure() }}

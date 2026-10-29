@@ -76,13 +76,15 @@ test("a track leaving the table is removed", async () => {
 	const tracks = list(broadcast);
 	expect(await tracks.drain()).toEqual(["+a", "+b", "synced"]);
 	broadcast.removeTrack("a");
-	b.close(new Error("aborted"));
+	b.abort(new Error("aborted"));
 	expect(await tracks.drain()).toEqual(["-a", "-b"]);
 });
 
 test("a finished track is listed while the table holds it", async () => {
 	const broadcast = new BroadcastProducer();
-	broadcast.createTrack("a").close();
+	const a = broadcast.createTrack("a");
+	a.finish();
+	a.close();
 	const tracks = list(broadcast);
 	expect(await tracks.drain()).toEqual(["+a", "synced"]);
 	// It finished before it was removed.
@@ -90,6 +92,17 @@ test("a finished track is listed while the table holds it", async () => {
 	expect(await tracks.drain()).toEqual(["~a"]);
 	broadcast.close();
 	expect(await tracks.drain()).toEqual(["end"]);
+});
+
+test("a track that finished but stays open ends the listing as finished", async () => {
+	const broadcast = new BroadcastProducer();
+	const a = broadcast.createTrack("a");
+	broadcast.createTrack("b");
+	a.finish();
+	const tracks = list(broadcast);
+	expect(await tracks.drain()).toEqual(["+a", "+b", "synced"]);
+	broadcast.close();
+	expect(await tracks.drain()).toEqual(["~a", "end"]);
 });
 
 test("a lister finishes or removes a track", async () => {
@@ -108,7 +121,9 @@ test("a lister finishes or removes a track", async () => {
 
 test("a recreated track leaves as it ended before it is added again", async () => {
 	const broadcast = new BroadcastProducer();
-	broadcast.createTrack("a").close();
+	const a = broadcast.createTrack("a");
+	a.finish();
+	a.close();
 	const tracks = list(broadcast);
 	expect(await tracks.drain()).toEqual(["+a", "synced"]);
 	// The finished track still holds the name; its replacement takes it over.
@@ -194,6 +209,68 @@ test("the broadcast ending ends the listing", async () => {
 	broadcast.close();
 	expect(await tracks.drain()).toEqual(["end"]);
 	expect(() => consumer.tracks()).toThrow("broadcast is closed");
+});
+
+// A clean end reports each track that left before it, and how, but not one the reader never
+// saw; an error ends at once.
+test("a clean end follows the removals before it", async () => {
+	const broadcast = new BroadcastProducer();
+	const a = broadcast.createTrack("a");
+	broadcast.createTrack("b");
+	const live = broadcast.createTrack("live");
+	const tracks = list(broadcast);
+	expect(await tracks.drain()).toEqual(["+a", "+b", "+live", "synced"]);
+	a.finish();
+	a.close();
+	broadcast.removeTrack("a");
+	broadcast.removeTrack("b");
+	broadcast.createTrack("unseen");
+	live.finish();
+	live.close();
+	broadcast.close();
+	expect(await tracks.drain()).toEqual(["~a", "-b", "~live", "end"]);
+
+	// The producer's finished track is what a handler's answer of its name served.
+	const both = new BroadcastProducer();
+	const handler = wireOf(both).lister();
+	handler.add("a", { priority: 0 });
+	handler.synced();
+	const own = both.createTrack("a");
+	const served = list(both);
+	expect(await served.drain()).toEqual(["+a", "synced"]);
+	own.finish();
+	own.close();
+	both.close();
+	expect(await served.drain()).toEqual(["~a", "end"]);
+
+	// A reader that closes itself reads nothing more, even what was queued before the end.
+	const closing = new BroadcastProducer();
+	const gone = closing.createTrack("gone");
+	const reader = list(closing);
+	expect(await reader.drain()).toEqual(["+gone", "synced"]);
+	gone.finish();
+	gone.close();
+	closing.removeTrack("gone");
+	closing.close();
+	reader.tracks.close();
+	expect(await reader.drain()).toEqual(["end"]);
+
+	for (const abort of [false, true]) {
+		const answered = new BroadcastProducer();
+		const lister = wireOf(answered).lister();
+		const reader = list(answered);
+		lister.add("up", { priority: 0 });
+		lister.synced();
+		expect(await reader.drain()).toEqual(["+up", "synced"]);
+		lister.finish("up");
+		if (abort) {
+			lister.abort(new NotFound("broadcast"));
+			expect(await reader.drain()).toEqual([`error: ${StreamCode.NotFound}`]);
+		} else {
+			lister.end();
+			expect(await reader.drain()).toEqual(["~up", "end"]);
+		}
+	}
 });
 
 test("a closed listing reads nothing more, and leaving a loop early closes it", async () => {
@@ -338,5 +415,5 @@ test("a lister sees the broadcast end", async () => {
 	const broadcast = new BroadcastProducer();
 	const lister = wireOf(broadcast).lister();
 	broadcast.close();
-	expect(lister.ended.peek()).toBeNull();
+	expect(lister.closed.peek()).toBeNull();
 });

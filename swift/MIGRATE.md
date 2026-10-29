@@ -4,6 +4,36 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Compression moves to the track
+
+`Flate` is removed: publish opaque bytes on a `TrackProducer`.
+The `Json` producers and consumers drop their `compression` argument. Publish the track with `TrackInfo(compress: true)` instead; a consumer reads a compressed track with no option of its own.
+
+### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
+
+Publishing, serving, or requesting a broadcast at a path with a leading, trailing, or doubled `/` throws instead of collapsing it. Pass the canonical path, such as `room/cam`.
+
+### Request handlers are `requests()` ([#6752](https://github.com/moq-dev/moq/pull/6752))
+
+Rename `dynamic()` on `OriginProducer`, `BroadcastProducer`, `TrackProducer`, and `TrackRequest` to `requests()`.
+Their handles `OriginDynamic`, `BroadcastDynamic`, and `TrackDynamic` are `OriginRequests`, `BroadcastRequests`, and `TrackRequests`; their methods are unchanged.
+
+### `Allocator` ([#6751](https://github.com/moq-dev/moq/pull/6751))
+
+`Bandwidth` is `Allocator`, `Session.bandwidth()` is `allocator()`, and `Reservation.grant()` is `rate()`. `Bandwidth.Consumer`, returned by `recvBandwidth()`, is the top-level `BandwidthConsumer`. The producers' `bandwidth:` parameter keeps its name.
+
+### Decoders read gaps and ends
+
+`Audio.Consumer` and `Video.Consumer` yield `Audio.Read` / `Video.Read` instead of frames. Match `case .frame(let frame)` where you used each element as a frame; `.gap(timestampUs:duration:)` marks lost media and `.end(endUs:)` where the publisher stopped its encoder, and what follows either does not continue what came before.
+
+### Durations are `TimeInterval`
+
+Every duration is a `TimeInterval` in seconds instead of a `UInt64` `...Us` field, and drops the suffix: `Client(timeout:race:resolutionDelay:)`, `Backoff(initial:max:timeout:)`, `QuicConfig(idleTimeout:keepAlive:)`, `WebSocketConfig(delay:)`, `ConnectionStats.rtt`, `Grant.expires`, `TrackInfo.maxAge`, `Subscription.maxDelay`, `Fill.maxDelay`, `Audio.Consumer.delay`, and the decoder outputs' `maxDelay` and `delay`.
+Divide a microsecond value by 1,000,000. A negative interval traps.
+`AudioEncoderOutput.frameDuration` is optional: pass `nil` where you passed `frameDurationUs: 0` for the codec's own frame.
+`Subscription.maxDelay` has no default: pass `0` for the old one.
+`TrackConsumer.info()` no longer throws.
+
 ### Connection state
 
 `Client.connect(to:)` returns a connecting native session. Replace `status()`, `connects()`, and both `failure()` polls with `state()` and `stateChanged(after: state.revision)`. Use `ConnectionState.phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`.

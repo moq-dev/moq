@@ -101,7 +101,7 @@ pub struct AudioConfig {
 	/// Resolve it with [`Path::resolve`](moq_net::Path::resolve): a reference that walks
 	/// above the root names no broadcast, so the catalog is rejected.
 	#[serde(default)]
-	pub broadcast: Option<moq_net::path::RelativeOwned>,
+	pub broadcast: Option<moq_net::path::Relative>,
 
 	/// The track's name in its broadcast, when it differs from this entry's ID: its key in the
 	/// catalog. Absent means the ID is the track name, as in every catalog before this field.
@@ -201,6 +201,11 @@ pub struct AudioConfig {
 	#[serde_as(as = "MillisCeil")]
 	#[serde(default)]
 	pub delay: Option<std::time::Duration>,
+	/// This rendition's HLS segment records, when the publisher opted in. Without it the rendition
+	/// is not HLS-renderable. An undecodable value is absent, so it can never reject the media.
+	#[serde(default)]
+	#[serde_as(as = "serde_with::DefaultOnError<_>")]
+	pub hls: Option<crate::catalog::Hls>,
 }
 
 impl AudioConfig {
@@ -227,7 +232,23 @@ impl AudioConfig {
 			jitter: None,
 			warmup: None,
 			delay: None,
+			hls: None,
 		}
+	}
+
+	/// Whether `other` keeps this config's track identity: the fields a consumer cannot change
+	/// without reinitializing its decoder or demuxer (`codec`, `description`, `container`,
+	/// `sample_rate`, and `channel_count`).
+	///
+	/// A track name always means the same content, so a publisher that changes any of them
+	/// publishes under a new name; every other field may update in place. See the draft's
+	/// [Track Identity](https://github.com/moq-dev/moq/blob/main/drafts/draft-lcurley-moq-hang.md#identity).
+	pub fn same_identity(&self, other: &Self) -> bool {
+		self.codec == other.codec
+			&& self.description == other.description
+			&& self.container == other.container
+			&& self.sample_rate == other.sample_rate
+			&& self.channel_count == other.channel_count
 	}
 }
 

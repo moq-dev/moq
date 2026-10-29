@@ -70,7 +70,7 @@ benchmark result is claimed.
 
 For settings sweeps, record effective values, not only requested ones.
 [Resolved client defaults](/rs/moq-tokio/src/quic.rs) currently allow 10,000
-streams per direction, 64 MiB connection receive credit, 4 MiB per-stream
+streams per direction, 128 MiB connection receive credit, 4 MiB per-stream
 credit and 16 MiB send credit. [Relay peer overrides](/rs/moq-relay/src/limits.rs)
 allow 100,000 streams and 640 MiB each of connection receive and send credit.
 Standalone backend defaults differ again; benchmark the effective settings
@@ -143,9 +143,11 @@ No duplicate quest or workflow edit belongs here.
 
 ### Existing ownership and deliberately deferred work
 
-- [Release performance](/quest/m1/release-perf/README.md) owns sparse gaps,
-  resume duplicates, idle GC, stats drain, FETCH fan-out, JS frame regressions,
-  and paired comparison correctness. Active PRs already address these.
+- [Release performance](/quest/m1/release-perf/README.md) owns the main
+  against release comparison for this cut, including the sparse read slope;
+  it already fixed or accepted resume duplicates, idle GC, stats drain, FETCH
+  fan-out, JS frame regressions, and paired comparison correctness. The
+  [performance audit](/quest/m2/audit-perf.md) repeats it before later cuts.
 - [Perf](/quest/m2/perf/README.md) owns measured channel contention, relay
   allocations, ingest batching, worker quiescence and runtime selection.
 - The [release audit](/quest/m1/release-audit/README.md) bounded the media
@@ -167,9 +169,8 @@ No duplicate quest or workflow edit belongs here.
   `Unlimited`; their numbers cannot establish controller performance. Expand
   reassembly flight/reordering coverage there before proposing another index.
   [BBR study](/quest/m2/quic-bbr-study.md) owns controller behavior.
-- Archive reader internals are being replaced by the
-  [archive consumer](/quest/m1/archive/consumer.md). Do not optimize the
-  outgoing timeline reader. Benchmark the landed replacement when revisiting it.
+- The archive consumer replaced the timeline reader; benchmark it when
+  revisiting archive reads.
 
 ## Required
 

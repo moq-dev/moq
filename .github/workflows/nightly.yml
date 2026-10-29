@@ -28,7 +28,7 @@ name: Nightly
 # release PRs on them.
 #
 # Main PRs run no cloud CI beyond the merge queue's Check, so every
-# path-filtered gate (Android, C++, WASM, X11, the audio replays, the OSS
+# path-filtered gate (Android, C, C++, WASM, X11, the audio replays, the OSS
 # Scanner image, platform.yml and the release dry-runs) runs here on main too,
 # and release-gate.yml runs them on release PRs.
 #
@@ -72,6 +72,9 @@ jobs:
   android:
     uses: ./.github/workflows/android.yml
 
+  c:
+    uses: ./.github/workflows/c.yml
+
   cpp:
     uses: ./.github/workflows/cpp.yml
 
@@ -108,19 +111,6 @@ jobs:
         # Unset keys default to the ARM runner, the plain dev shell, the Rust
         # cache, no perf sampling, and nextest's default profile.
         include:
-          - name: Binding benchmark
-            recipe: bench-ffi
-            artifact: bench-ffi
-            artifact-path: target/bench/ffi
-            benchmark: true
-          # Keeps the BoltFFI and UniFFI slice building and running for the
-          # browser generator comparison, which reuses it. It skips the size
-          # step, whose moq-ffi and moq-wasm builds double the time and are
-          # already built elsewhere.
-          - name: Generator comparison
-            recipe: bench-ffi-gen build bench
-            artifact: bench-ffi-gen
-            artifact-path: target/ffi-gen/results
           - name: Audio grouping relay benchmark
             recipe: bench-audio
           - name: Relay shard sweep
@@ -135,6 +125,8 @@ jobs:
             runner: ubuntu-24.04
           - name: Rust benchmark tests
             recipe: gh nightly rust-test
+          - name: Binding benchmark runners
+            recipe: gh nightly bindings
           - name: Rust bench targets
             recipe: gh nightly rust-bench
             artifact: bench-rust
@@ -145,6 +137,12 @@ jobs:
             recipe: gh nightly rust-shared
             artifact: bench-rust-shared
             artifact-path: target/bench/nightly/rust-shared
+            benchmark: true
+            paired: true
+          - name: Relay session benchmarks
+            recipe: gh nightly rust-relay
+            artifact: bench-rust-relay
+            artifact-path: target/bench/nightly/rust-relay
             benchmark: true
             paired: true
           - name: Rust supplemental benchmarks
@@ -235,7 +233,7 @@ jobs:
         run: nix develop ${{ matrix.shell }} --command just ${{ matrix.recipe }}
         env:
           NEXTEST_PROFILE: default
-          MOQ_BENCH_BASE: ${{ matrix.paired && (inputs.bench-base || 'previous-nightly') || '' }}
+          BENCH_BASE: ${{ matrix.paired && (inputs.bench-base || 'previous-nightly') || '' }}
           GH_TOKEN: ${{ matrix.paired && github.token || '' }}
 
       - name: Record benchmark outcome
@@ -351,12 +349,13 @@ jobs:
       fail-fast: false
       matrix:
         # `rs uring` is a separate feature compile (off the default set), and
-        # MOQ_STRICT fails it below the 6.12 kernel floor. The embedding tests for
+        # CI_STRICT fails it below the 6.12 kernel floor. The embedding tests for
         # io_uring live there; uring.yml also runs it on affected release PRs.
         # `test drain` stands up two relays and drains one under a live JS
         # viewer: diff-independent, since a break can arrive through the relay,
         # js/net, or the wire between them.
         # `rs quic-sim` sweeps moq-quic's simulated workloads from a fresh seed; PRs run a fixed 64.
+        # It also runs the bandwidth probe's acceptance suite, of which PRs run the short cases.
         # `test drill impaired` runs the relay drills over a freshly seeded shaper; PRs run loopback.
         # `rs cli-export` runs moq-cli's export process tests, which take tens of seconds of real time.
         # `gate` runs the queue's Check over every package, catching
@@ -393,7 +392,7 @@ jobs:
         run: nix develop --command just ${{ matrix.recipe }}
         env:
           NEXTEST_PROFILE: ci
-          MOQ_STRICT: 1
+          CI_STRICT: 1
 
   # Media QA with a Firefox player against a Chromium fixture. The Chromium
   # player already runs in interop.yml, nightly and on release PRs. WebKit has
@@ -423,7 +422,7 @@ jobs:
       - name: Media and negative controls
         run: nix develop --command env PLAYWRIGHT_BROWSERS_PATH="${{ runner.temp }}/playwright" just test media --media-engines firefox
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
           # Playwright checks a browser's libraries with the `ldd` on PATH, which in the
           # dev shell is Nix glibc's and can't see the ones `--with-deps` installed, so
           # it refuses a Firefox that launches fine.
@@ -478,16 +477,16 @@ jobs:
         run: nix develop --command just test native-play
         shell: bash -leo pipefail {0}
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
       - name: Audio quality
         if: ${{ !cancelled() }}
         run: nix develop --command just test audio-quality --runtimes chromium --enforce --capture
         shell: bash -leo pipefail {0}
         env:
           # Somewhere upload-artifact can reach; the harness default is under $TMPDIR.
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
           # A passing run is kept too: budgets.json is measured from these nights.
-          MOQ_TEST_KEEP: 1
+          HARNESS_KEEP: 1
       # The native player's rows, graded but not enforced: an intermittent device
       # stall voids about one AAC row in seven, which would fail most nights until
       # it is fixed. Kept beside the browser run so its ceilings can be re-measured.
@@ -496,8 +495,8 @@ jobs:
         run: nix develop --command just test audio-quality --runtimes native
         shell: bash -leo pipefail {0}
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
-          MOQ_TEST_KEEP: 1
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_KEEP: 1
       # The run directory is the diagnosis: each process's log, the shaper's
       # counters, the raw samples, and every row's summary.
       - name: Keep the run
@@ -578,6 +577,16 @@ jobs:
     needs: [release-shared-ffi]
     if: ${{ always() && !cancelled() }}
     uses: ./.github/workflows/release-cpp.yml
+    with:
+      reuse-native: true
+    permissions:
+      contents: write
+
+  release-c:
+    name: Release C
+    needs: [release-shared-ffi]
+    if: ${{ always() && !cancelled() }}
+    uses: ./.github/workflows/release-c.yml
     with:
       reuse-native: true
     permissions:
@@ -674,8 +683,22 @@ jobs:
           toolchain: nightly
       - name: Install cargo-fuzz
         run: cargo install --locked cargo-fuzz
+      - name: Restore corpus
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: rs/*/fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            fuzz-corpus-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-
       - name: Fuzz
         run: nix develop --command just rs fuzz ${{ matrix.target }} -- -max_total_time=300
+      - name: Minimize corpus
+        run: nix develop --command just rs fuzz --minimize ${{ matrix.target }}
+      - name: Save corpus
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: rs/*/fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Preserve failure inputs
         if: ${{ failure() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

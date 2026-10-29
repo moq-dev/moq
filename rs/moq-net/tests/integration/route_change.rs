@@ -8,8 +8,8 @@
 //! every frame exactly once, in order, whether the route changes between groups or
 //! in the middle of one, and however it changes.
 //!
-//! moq-transport carries the epoch with the MoQ Epoch extension (draft-17+), so it
-//! behaves the same. Older wire versions cannot carry the epoch, so `R` cannot tell the
+//! moq-transport carries the epoch with the MoQ Epoch extension, so it behaves the
+//! same. Older lite versions cannot carry the epoch, so `R` cannot tell the
 //! two routes serve the same bytes: its subscription stays on its route and ends with
 //! it, while a better route restarts the path for new requests.
 //!
@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use futures::{StreamExt, channel::mpsc};
-use moq_net::{Error, Hop, Timestamp, Version, announce, broadcast, origin, track};
+use moq_net::{Error, Hop, Timestamp, Version, announce, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -96,7 +96,7 @@ struct Topology {
 	publisher: origin::Producer,
 	relay_b: origin::Producer,
 	subscriber: origin::Producer,
-	_broadcast: broadcast::Producer,
+	_broadcast: moq_net::origin::Publication,
 	track: track::Producer,
 	p_to_a: Option<MockPair>,
 	a_to_r: Option<MockPair>,
@@ -124,8 +124,7 @@ impl Topology {
 		let a_to_r = link(version, &relay_a, &subscriber).await;
 
 		let consumer = subscriber.consume();
-		consumer.routed("live").await.unwrap();
-		let remote = consumer.request_broadcast("live", None).await.unwrap();
+		let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
 		let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(60));
 		let sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
 
@@ -359,7 +358,7 @@ async fn route_dies_without_an_epoch(version: &str, trigger: Trigger) {
 	let remote = topology
 		.subscriber
 		.consume()
-		.request_broadcast("live", None)
+		.request("live", None)
 		.await
 		.expect("B serves a re-request");
 	let sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
@@ -388,7 +387,7 @@ async fn better_route_restarts(version: &str) {
 	let mut group = topology.track.append_group().unwrap();
 	group.write_frame(Timestamp::ZERO, payload(0, 0)).unwrap();
 	assert_eq!(next(&mut rx).await, (0, payload(0, 0)), "{version}");
-	let incumbent = consumer.request_broadcast("live", None).await.unwrap();
+	let incumbent = consumer.request("live", None).await.unwrap();
 
 	topology.trigger(Trigger::BetterRoute).await;
 	match announced.next().await.expect("announced") {
@@ -404,7 +403,7 @@ async fn better_route_restarts(version: &str) {
 	assert_eq!(next(&mut rx).await, (0, payload(0, 1)), "{version}");
 
 	// A re-request resolves the better route on a fresh broadcast.
-	let replaced = consumer.request_broadcast("live", None).await.unwrap();
+	let replaced = consumer.request("live", None).await.unwrap();
 	assert!(!replaced.is_clone(&incumbent), "{version}: joined the replaced front");
 	let sub = replaced.track("video").unwrap().subscribe(None).await.unwrap();
 	let mut fresh = read(sub);
@@ -468,8 +467,7 @@ macro_rules! route_change_tests {
 
 route_change_tests! {
 	lite_07: "moq-lite-07-wip",
-	ietf_17: "moq-transport-17",
-	ietf_19: "moq-transport-19",
+	ietf_18: "moq-transport-18",
 	ietf_22: "moq-transport-22",
 }
 
@@ -512,8 +510,6 @@ pinned_tests! {
 	lite_06: "moq-lite-06",
 	lite_05: "moq-lite-05",
 	lite_04: "moq-lite-04",
-	ietf_14: "moq-transport-14",
-	ietf_16: "moq-transport-16",
 }
 
 /// `P` feeds `A` slowly and `B` promptly, and `R` reads through `A` until that route dies
@@ -530,8 +526,7 @@ async fn lagging_route_dies(version: Version) {
 	}
 	async fn subscribe(origin: &origin::Producer) -> track::Subscriber {
 		let consumer = origin.consume();
-		consumer.routed("live").await.unwrap();
-		let remote = consumer.request_broadcast("live", None).await.unwrap();
+		let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
 		let preferences = track::Subscription::default().with_max_delay(Duration::from_secs(60));
 		remote.track("video").unwrap().subscribe(preferences).await.unwrap()
 	}
@@ -614,7 +609,7 @@ async fn lite_resumes_after_a_lagging_route_dies() {
 
 #[moq_clock::test]
 async fn ietf_17_resumes_after_a_lagging_route_dies() {
-	lagging_route_dies("moq-transport-17".parse().unwrap()).await;
+	lagging_route_dies("moq-transport-18".parse().unwrap()).await;
 }
 
 #[moq_clock::test]
@@ -657,8 +652,7 @@ async fn undetected_outage(budget: Duration) -> BTreeMap<u64, Vec<String>> {
 	let m1_e = link(version, &m1, &e).await;
 
 	let consumer = e.consume();
-	consumer.routed("live").await.unwrap();
-	let remote = consumer.request_broadcast("live", None).await.unwrap();
+	let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
 	let prefs = track::Subscription::default().with_max_delay(budget);
 	let mut rx = read(remote.track("video").unwrap().subscribe(prefs).await.unwrap());
 	let m2_e = priced_link(version, &m2, &e, Some(1_000)).await;
@@ -769,7 +763,7 @@ struct Replica {
 	/// Tags its payloads, so the reader shows which replica served each frame.
 	name: &'static str,
 	origin: origin::Producer,
-	broadcast: broadcast::Producer,
+	broadcast: moq_net::origin::Publication,
 	track: track::Producer,
 	group: Option<moq_net::group::Producer>,
 	link: Option<MockPair>,
@@ -804,7 +798,7 @@ async fn redundant_pair_fails_over(version: &str, loss: Loss) {
 	settle().await;
 
 	let consumer = subscriber.consume();
-	let remote = consumer.request_broadcast("live", None).await.unwrap();
+	let remote = consumer.request("live", None).await.unwrap();
 	let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(60));
 	let mut rx = read(remote.track("video").unwrap().subscribe(prefs).await.unwrap());
 
@@ -913,8 +907,7 @@ async fn replaced_behind_a_relay(version: &str, epoch: Option<moq_net::Epoch>, r
 	let _r_to_d = link(version, &relay, &downstream).await;
 
 	let consumer = downstream.consume();
-	consumer.routed("live").await.unwrap();
-	let remote = consumer.request_broadcast("live", None).await.unwrap();
+	let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
 	let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(60));
 	let mut rx = read(remote.track("video").unwrap().subscribe(prefs).await.unwrap());
 
@@ -1000,6 +993,104 @@ async fn pair_behind_a_relay_ends_lite_06() {
 		.expect("timed out");
 }
 
+/// `P1` publishes a compressed `video` to the relay `R`, and so does `P2` under the same
+/// epoch, compressed only when `compress` is set. `D` reads through `R` over lite-07,
+/// which forwards the compressed bytes. `P1`'s session to `R` dies between groups. A copy
+/// that frames the track the same way resumes. One that doesn't is refused: `D` never
+/// reads `P2`'s groups under `P1`'s framing, and the track ends with the refusal.
+async fn compression_changes_behind_a_relay(compress: bool) {
+	let version: Version = "moq-lite-07-wip".parse().unwrap();
+	let epoch = moq_net::Epoch::mint();
+	let relay = produce_origin(3);
+	let downstream = produce_origin(4);
+	let mut replicas = Vec::new();
+	for (name, hop, cost, compress) in [("P1", 1, None, true), ("P2", 2, Some(1_000), compress)] {
+		let publisher = produce_origin(hop);
+		let broadcast = publisher.create_broadcast("live").unwrap();
+		let track = broadcast
+			.create_track("video", timed().with_compress(compress))
+			.unwrap();
+		broadcast
+			.announce(origin::Route::default().with_epoch(epoch.clone()))
+			.unwrap();
+		let link = priced_link(version, &publisher, &relay, cost).await;
+		replicas.push(Replica {
+			name,
+			origin: publisher,
+			broadcast,
+			track,
+			group: None,
+			link: Some(link),
+		});
+	}
+	let _r_to_d = link(version, &relay, &downstream).await;
+
+	let consumer = downstream.consume();
+	let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
+	let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(60));
+	let mut rx = read(remote.track("video").unwrap().subscribe(prefs).await.unwrap());
+
+	let mut dead = None;
+	for sequence in 0..3 {
+		if sequence == 1 {
+			let replica = replicas.remove(0);
+			let link = replica.link.as_ref().unwrap();
+			link.server.abort(Error::Cancel);
+			link.client.abort(Error::Cancel);
+			dead = Some(replica);
+			settle().await;
+		}
+		for replica in &mut replicas {
+			let mut group = replica.track.append_group().unwrap();
+			for frame in 0..FRAMES {
+				let timestamp = Timestamp::from_micros(1_000_000 + sequence * 100_000 + frame * 1_000).unwrap();
+				group
+					.write_frame(timestamp, tagged(replica.name, sequence, frame))
+					.unwrap();
+			}
+			group.finish().unwrap();
+		}
+		if compress || dead.is_none() {
+			for frame in 0..FRAMES {
+				let expected = (sequence, tagged(replicas[0].name, sequence, frame));
+				assert_eq!(next(&mut rx).await, expected, "compress {compress}");
+			}
+		}
+	}
+	settle().await;
+
+	// The refusal ends the track: no group of `P2`'s reaches the reader, not even
+	// one that fails to decode. `R` refuses with `Unsupported`, which has no stream
+	// code, so it reaches `D` as INTERNAL.
+	let rest: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+	if compress {
+		assert!(rest.is_empty(), "trailing delivery: {rest:?}");
+	} else {
+		assert!(
+			matches!(
+				rest.as_slice(),
+				[(u64::MAX, Err(Error::Stream(moq_net::StreamError::Internal)))]
+			),
+			"the track did not end with the refusal: {rest:?}"
+		);
+	}
+	drop((dead, replicas));
+}
+
+#[moq_clock::test]
+async fn same_compression_resumes_behind_a_relay() {
+	moq_clock::timeout(TEST_TIMEOUT, compression_changes_behind_a_relay(true))
+		.await
+		.expect("timed out");
+}
+
+#[moq_clock::test]
+async fn different_compression_is_refused_behind_a_relay() {
+	moq_clock::timeout(TEST_TIMEOUT, compression_changes_behind_a_relay(false))
+		.await
+		.expect("timed out");
+}
+
 /// `P` serves `video` on demand and replaces its producer partway through the broadcast,
 /// the way a publisher restarts an encoder. The epoch lets `P`'s own front resume the
 /// logical track onto the replacement, so `A` and `R` never see the abort. The
@@ -1012,7 +1103,7 @@ async fn producer_replaced(version: &str) {
 	let subscriber = produce_origin(3);
 
 	let broadcast = publisher.create_broadcast("live").unwrap();
-	let mut dynamic = broadcast.dynamic();
+	let mut dynamic = broadcast.requests();
 	broadcast
 		.announce(origin::Route::default().with_epoch(moq_net::Epoch::mint()))
 		.unwrap();
@@ -1029,8 +1120,7 @@ async fn producer_replaced(version: &str) {
 	let _a_to_r = link(version, &relay, &subscriber).await;
 
 	let consumer = subscriber.consume();
-	consumer.routed("live").await.unwrap();
-	let remote = consumer.request_broadcast("live", None).await.unwrap();
+	let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
 	let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(60));
 	let sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
 	let mut rx = read(sub);
@@ -1054,12 +1144,7 @@ async fn producer_replaced(version: &str) {
 		.expect("the track was not requested again")
 		.unwrap();
 
-	// The application owns where the replacement starts: an append would reuse the first
-	// producer's sequences, so it is refused, and the replacement continues explicitly.
-	assert!(
-		matches!(second.append_group(), Err(Error::Duplicate)),
-		"{version}: the replacement restarted its sequences"
-	);
+	// The application owns where the replacement starts, so it continues explicitly.
 	let mut group = second.create_group(moq_net::group::Info { sequence: 2 }).unwrap();
 	for frame in 0..FRAMES {
 		group.write_frame(Timestamp::ZERO, payload(2, frame)).unwrap();
@@ -1093,6 +1178,6 @@ producer_replaced_tests! {
 	replaced_lite_06: "moq-lite-06",
 	replaced_lite_05: "moq-lite-05",
 	replaced_lite_04: "moq-lite-04",
-	replaced_ietf_19: "moq-transport-19",
+	replaced_ietf_18: "moq-transport-18",
 	replaced_ietf_22: "moq-transport-22",
 }

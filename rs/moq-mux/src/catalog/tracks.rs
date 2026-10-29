@@ -11,12 +11,12 @@ use super::hang::{Catalog, CatalogExt};
 /// removal on drop, and optional jitter/bitrate detection. [`VideoConfig`](hang::catalog::VideoConfig)
 /// and [`AudioConfig`](hang::catalog::AudioConfig) implement it for every extension; a custom
 /// config implements it for the one [`CatalogExt`] that holds it. Publish a media track under it
-/// with [`Reserved::track`], or a data track with [`Producer::binary_stream`] and the like when it
+/// with [`Reserved::track`], or a data track with [`Producer::json_stream`] and the like when it
 /// embeds a data config (see [`IntoRendition`](super::IntoRendition)):
 ///
 /// ```
 /// # use std::collections::BTreeMap;
-/// # use hang::catalog::{BinaryConfig, Mode};
+/// # use hang::catalog::{JsonConfig, Mode};
 /// # use moq_mux::catalog::{Estimate, RenditionConfig};
 /// # use moq_mux::catalog::hang::{Catalog, CatalogExt};
 /// # use serde::{Deserialize, Serialize};
@@ -29,12 +29,12 @@ use super::hang::{Catalog, CatalogExt};
 ///
 /// #[derive(Serialize, Deserialize, Clone)]
 /// struct Mavlink {
-///     config: BinaryConfig,
+///     config: JsonConfig,
 ///     sysid: u8,
 /// }
 ///
-/// impl AsMut<BinaryConfig> for Mavlink {
-///     fn as_mut(&mut self) -> &mut BinaryConfig {
+/// impl AsMut<JsonConfig> for Mavlink {
+///     fn as_mut(&mut self) -> &mut JsonConfig {
 ///         &mut self.config
 ///     }
 /// }
@@ -71,12 +71,12 @@ use super::hang::{Catalog, CatalogExt};
 /// #     broadcast: &mut moq_net::broadcast::Producer,
 /// #     catalog: &moq_mux::catalog::Producer<Ext>,
 /// # ) -> moq_mux::Result<()> {
-/// let info = moq_net::track::Info::default();
+/// let info = moq_net::track::Info::default().with_compress(true);
 /// let track = broadcast.create_track("telemetry", info)?;
 /// // The producer fixes the mode, so the one passed here is only a placeholder.
-/// let entry = Mavlink { config: BinaryConfig::new(Mode::Stream), sysid: 1 };
-/// let mut telemetry = catalog.binary_stream(track, entry)?;
-/// telemetry.append(&b"\xfd..."[..])?;
+/// let entry = Mavlink { config: JsonConfig::new(Mode::Stream), sysid: 1 };
+/// let mut telemetry = catalog.json_stream::<serde_json::Value>(track, entry)?;
+/// telemetry.append(&serde_json::json!({ "heartbeat": 1 }))?;
 /// # Ok(())
 /// # }
 /// ```
@@ -171,7 +171,8 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::BinaryConfig {
 /// dimensions from an SPS, ...) always wins, so a detected change just updates the catalog. A
 /// [`codec`](Self::codec) alone is enough to publish the catalog before the first keyframe (the
 /// decoder config then arrives in band). Use it for fields the stream can't reveal (bitrate) or to
-/// skip that wait.
+/// skip that wait. The MSF catalog declares only hinted estimates (`bitrate`, `framerate`, `jitter`,
+/// `delay`), never measured ones, so an MSF track carries only those set here.
 ///
 /// Video importers take one because they build the [`VideoConfig`](hang::catalog::VideoConfig)
 /// themselves, out of the bitstream, so the caller never holds the config to set these on. An audio
@@ -367,6 +368,37 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::TextConfig {
 	}
 }
 
+/// How far short of a whole frame duration a value still counts as reaching it, as a fraction of the
+/// period: a reorder of exactly one frame must not miss its step to rounding in the frame duration.
+const STEP_SLACK: u32 = 100;
+
+/// `measured` if it reaches a whole `period` beyond the one `published` sits in, else `published`.
+fn quantize(published: Option<Duration>, measured: Option<Duration>, period: Duration) -> Option<Duration> {
+	let step =
+		|value: Option<Duration>| value.map_or(0, |value| (value + period / STEP_SLACK).as_nanos() / period.as_nanos());
+	if step(measured) > step(published) {
+		measured
+	} else {
+		published
+	}
+}
+
+/// Refuse an edit that redefines rendition `name`'s track identity in place: a publisher whose
+/// decoder identity changed publishes under a new name instead.
+fn check_identity<E: CatalogExt>(previous: &Catalog<E>, next: &Catalog<E>, name: &str) -> crate::Result<()> {
+	if let (Some(previous), Some(next)) = (previous.video.renditions.get(name), next.video.renditions.get(name))
+		&& !previous.same_identity(next)
+	{
+		return Err(crate::Error::IdentityChanged(name.to_string()));
+	}
+	if let (Some(previous), Some(next)) = (previous.audio.renditions.get(name), next.audio.renditions.get(name))
+		&& !previous.same_identity(next)
+	{
+		return Err(crate::Error::IdentityChanged(name.to_string()));
+	}
+	Ok(())
+}
+
 /// A clonable reservation context handed to importers so they declare their tracks up front.
 ///
 /// Made via [`Producer::reserve`]. While any `Reserved` clone is alive the track set may still
@@ -380,7 +412,7 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::TextConfig {
 /// timestamps by. Clones share that timebase.
 pub struct Reserved<E: CatalogExt = ()> {
 	timebase: super::Timebase<E>,
-	timeline_hint: Option<std::time::Duration>,
+	hls_hint: Option<std::time::Duration>,
 }
 
 impl<E: CatalogExt> Reserved<E> {
@@ -388,13 +420,14 @@ impl<E: CatalogExt> Reserved<E> {
 		timebase.catalog.add_reserver();
 		Self {
 			timebase,
-			timeline_hint: None,
+			hls_hint: None,
 		}
 	}
 
-	/// Declare the track's regular group duration to its archive timeline.
-	pub fn with_timeline_hint(mut self, duration: impl Into<Option<std::time::Duration>>) -> Self {
-		self.timeline_hint = duration.into();
+	/// Declare the track's regular group duration, which fixes its HLS segment duration up front
+	/// unless [`Config::with_hls`](super::Config::with_hls) disabled HLS records.
+	pub fn with_hls_hint(mut self, duration: impl Into<Option<std::time::Duration>>) -> Self {
+		self.hls_hint = duration.into();
 		self
 	}
 
@@ -471,7 +504,7 @@ impl<E: CatalogExt> Reserved<E> {
 		let rendition = self.init(track.name())?;
 		self.timebase
 			.catalog
-			.media(track, container, rendition, config.into(), self.timeline_hint)
+			.media(track, container, rendition, config.into(), self.hls_hint)
 	}
 
 	/// Resolve a timestamp on the broadcast's shared clock (see [`Producer::timestamp`]).
@@ -498,7 +531,7 @@ impl<E: CatalogExt> Reserved<E> {
 
 impl<E: CatalogExt> Clone for Reserved<E> {
 	fn clone(&self) -> Self {
-		Self::new(self.timebase.clone()).with_timeline_hint(self.timeline_hint)
+		Self::new(self.timebase.clone()).with_hls_hint(self.hls_hint)
 	}
 }
 
@@ -532,7 +565,7 @@ pub(crate) struct Rendition<E: CatalogExt, C: RenditionConfig<E>> {
 	/// SPS) holds the handle without a catalog entry, and drops without a spurious removal.
 	present: bool,
 	/// The fields the config carried at [`set`](Self::set): authoritative, never overwritten by
-	/// detection. Whatever is absent here is what detection fills.
+	/// detection. Whatever is absent here is what detection fills, and stays absent from MSF.
 	supplied: Estimate,
 	/// The last estimate handed to [`estimate`](Self::estimate), kept so a config set afterwards
 	/// starts from whatever was already measured.
@@ -548,6 +581,24 @@ pub(crate) type VideoTrack<E = ()> = Rendition<E, hang::catalog::VideoConfig>;
 pub(crate) type AudioTrack<E = ()> = Rendition<E, hang::catalog::AudioConfig>;
 /// A single text (caption/subtitle) track's catalog rendition. See [`Rendition`].
 impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
+	/// The successor of this rendition's track, under a newly minted name, for a decoder identity
+	/// change. `hls_hint` carries the segment duration the old track declared.
+	pub(crate) fn fresh(
+		&self,
+		container: super::hang::Container,
+		info: moq_net::track::Info,
+		hls_hint: Option<std::time::Duration>,
+	) -> crate::Result<crate::container::Producer<super::hang::Container, C>> {
+		let track = self.catalog.fresh_track(&self.name, info)?;
+		let rendition = self.catalog.rendition(track.name())?;
+		self.catalog.media(track, container, rendition, None, hls_hint)
+	}
+
+	/// Finish and forget the HLS records of `track`, a predecessor this rendition replaced.
+	pub(crate) fn retire(&self, track: &str) -> crate::Result<()> {
+		self.catalog.retire(track)
+	}
+
 	fn new(reserved: Reserved<E>, name: String) -> crate::Result<Self> {
 		Self::owned(reserved.producer(), Some(reserved), name)
 	}
@@ -597,9 +648,9 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 	///
 	/// Whatever [`Estimate`] fields `config` already carries are authoritative and left alone; the
 	/// rest are filled by [`estimate`](Self::estimate), seeded with anything already measured before
-	/// the rendition existed (a dirty start or a B-frame reorder). A caller who wants to pre-empt
-	/// detection sets the field on the config, or (for a config an importer builds out of the
-	/// bitstream) hands the importer a hint like [`VideoHint`].
+	/// the rendition existed (a dirty start or a B-frame reorder). Only the authoritative ones reach
+	/// the MSF catalog. A caller who wants to pre-empt detection sets the field on the config, or (for
+	/// a config an importer builds out of the bitstream) hands the importer a hint like [`VideoHint`].
 	pub(crate) fn set(&mut self, mut config: C) -> crate::Result<()> {
 		let supplied = config.estimate();
 		let resolved = Self::resolved(&supplied, &self.detected);
@@ -609,11 +660,15 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 			let mut guard = self.catalog.modify()?;
 			let mut next = (*guard).clone();
 			config.insert(&mut next, &self.name);
+			check_identity(&guard, &next, &self.name)?;
 			// Serialization must succeed before the reserved snapshot retains the edit.
 			serde_json::to_writer(std::io::sink(), &next).map_err(moq_json::Error::from)?;
 			self.present = true;
 			*guard = next;
 			guard.list::<C>(&self.name);
+			if C::detects() {
+				guard.hint::<C>(&self.name, supplied.clone());
+			}
 			guard.commit()?;
 		}
 		self.supplied = supplied;
@@ -643,15 +698,17 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 	/// Publish a measured [`Estimate`], filling only the fields the config didn't supply at
 	/// [`set`](Self::set).
 	///
-	/// Mint the estimate from an [`Estimator`](super::Estimator), usually the one owned by a
+	/// Mint the reading from an [`Estimator`](super::Estimator), usually the one owned by a
 	/// [`container::Producer`](crate::container::Producer). Call it after every write: an estimate
-	/// that resolves to what the catalog already carries doesn't republish it, and a `jitter` or
-	/// `delay` rise republishes at most once a second (see
-	/// [`Guard::commit_estimate`](super::Guard::commit_estimate)), going out on a later call.
+	/// that resolves to what the catalog already carries doesn't republish it. A `jitter` or `delay`
+	/// rise republishes only once it reaches the next whole frame duration above the published value,
+	/// and then at most once a second (see [`Guard::commit_estimate`](super::Guard::commit_estimate)),
+	/// going out on a later call.
 	///
 	/// Calling this before [`set`](Self::set) is not wasted: the measurement is remembered and seeds
 	/// the config once it lands.
-	pub(crate) fn estimate(&mut self, estimate: Estimate) -> crate::Result<()> {
+	pub(crate) fn estimate(&mut self, reading: impl Into<super::Reading>) -> crate::Result<()> {
+		let super::Reading { estimate, period } = reading.into();
 		if !C::detects() {
 			return Ok(());
 		}
@@ -666,6 +723,18 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		let published = config.estimate();
 		resolved.jitter = resolved.jitter.max(published.jitter);
 		resolved.delay = resolved.delay.max(published.delay);
+		// Measurement creeps up as the encoder's latency does, a step per frame at worst; only a whole
+		// frame's rise is worth a republish. Until a period is known the throttle alone paces it.
+		let period = resolved
+			.framerate
+			.filter(|framerate| *framerate > 0.0)
+			.and_then(|framerate| Duration::try_from_secs_f64(framerate.recip()).ok())
+			.or(period)
+			.filter(|period| !period.is_zero());
+		if let Some(period) = period {
+			resolved.jitter = quantize(published.jitter, resolved.jitter, period);
+			resolved.delay = quantize(published.delay, resolved.delay, period);
+		}
 		self.detected = estimate;
 		if self.published.as_ref() == Some(&resolved) {
 			// Still an observation: it releases a rise held back until its window ended. A closed
@@ -714,6 +783,25 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		self.stage(config)?.commit()
 	}
 
+	/// Advertise `bitrate` as a supplied value that measurement no longer replaces, leaving every
+	/// other field, measured or not, as published.
+	pub(crate) fn supply_bitrate(&mut self, bitrate: u64) -> crate::Result<()> {
+		let mut config = self.config()?;
+		let mut estimate = config.estimate();
+		estimate.bitrate = Some(bitrate);
+		config.set_estimate(estimate);
+		let mut supplied = self.supplied.clone();
+		supplied.bitrate = Some(bitrate);
+		let name = self.name.clone();
+		let mut guard = self.stage(config)?;
+		if C::detects() {
+			guard.hint::<C>(&name, supplied.clone());
+		}
+		guard.commit()?;
+		self.supplied = supplied;
+		Ok(())
+	}
+
 	/// Write `config` into the catalog, leaving the caller to choose how the guard publishes it.
 	fn stage(&mut self, config: C) -> crate::Result<super::Guard<'_, E>> {
 		if !self.present {
@@ -723,6 +811,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		let mut guard = self.catalog.modify()?;
 		let mut next = (*guard).clone();
 		config.insert(&mut next, &self.name);
+		check_identity(&guard, &next, &self.name)?;
 		serde_json::to_writer(std::io::sink(), &next).map_err(moq_json::Error::from)?;
 		*guard = next;
 		Ok(guard)
@@ -778,6 +867,97 @@ mod tests {
 		config.bitrate = bitrate;
 		config.jitter = jitter;
 		config
+	}
+
+	#[test]
+	fn video_identity_edits_are_refused_without_changing_the_catalog() {
+		let original = config(Some(1_000_000), None);
+		let mut changed = Vec::new();
+		let mut codec = original.clone();
+		codec.codec = "avc1.42c01e".parse().unwrap();
+		changed.push(codec);
+		let mut description = original.clone();
+		description.description = Some(bytes::Bytes::from_static(&[1, 2, 3]));
+		changed.push(description);
+		let mut container = original.clone();
+		container.container = hang::catalog::Container::Loc;
+		changed.push(container);
+		let mut width = original.clone();
+		width.display_aspect_width = Some(4);
+		changed.push(width);
+		let mut height = original.clone();
+		height.display_aspect_height = Some(3);
+		changed.push(height);
+		for next in changed {
+			for operation in ["set", "replace", "stage"] {
+				let (_broadcast, catalog, mut rendition) = video_track();
+				rendition.set(original.clone()).unwrap();
+				let refused = match operation {
+					"set" => rendition.set(next.clone()).is_err(),
+					"replace" => rendition.replace(next.clone()).is_err(),
+					"stage" => rendition.stage(next.clone()).is_err(),
+					_ => unreachable!(),
+				};
+				assert!(refused, "{operation} retained identity change {next:?}");
+				assert_eq!(catalog.snapshot().video.renditions["v"], original);
+			}
+		}
+	}
+
+	#[test]
+	fn video_size_and_estimates_can_change_in_place() {
+		let (_broadcast, catalog, mut rendition) = video_track();
+		let mut original = config(Some(1_000_000), None);
+		original.coded_width = Some(1280);
+		original.coded_height = Some(720);
+		original.framerate = Some(60.0);
+		rendition.set(original.clone()).unwrap();
+		let mut next = original;
+		next.coded_width = Some(1920);
+		next.coded_height = Some(1080);
+		next.bitrate = Some(500_000);
+		next.framerate = Some(30.0);
+		rendition.set(next.clone()).unwrap();
+		assert_eq!(catalog.snapshot().video.renditions["v"], next);
+	}
+
+	#[test]
+	fn audio_identity_edits_are_refused_without_changing_the_catalog() {
+		let original = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+		let mut changed = Vec::new();
+		let mut codec = original.clone();
+		codec.codec = hang::catalog::AudioCodec::Flac;
+		changed.push(codec);
+		let mut description = original.clone();
+		description.description = Some(bytes::Bytes::from_static(&[1, 2, 3]));
+		changed.push(description);
+		let mut container = original.clone();
+		container.container = hang::catalog::Container::Loc;
+		changed.push(container);
+		let mut sample_rate = original.clone();
+		sample_rate.sample_rate = 44_100;
+		changed.push(sample_rate);
+		let mut channels = original.clone();
+		channels.channel_count = 1;
+		changed.push(channels);
+		for next in changed {
+			for operation in ["set", "replace", "stage"] {
+				let mut broadcast = moq_net::broadcast::Info::new().produce();
+				let catalog = super::super::Producer::new(&mut broadcast, super::super::Config::default()).unwrap();
+				let reserved = catalog.reserve();
+				let mut rendition = reserved.init::<hang::catalog::AudioConfig>("a").unwrap();
+				drop(reserved);
+				rendition.set(original.clone()).unwrap();
+				let refused = match operation {
+					"set" => rendition.set(next.clone()).is_err(),
+					"replace" => rendition.replace(next.clone()).is_err(),
+					"stage" => rendition.stage(next.clone()).is_err(),
+					_ => unreachable!(),
+				};
+				assert!(refused, "{operation} retained identity change {next:?}");
+				assert_eq!(catalog.snapshot().audio.renditions["a"], original);
+			}
+		}
 	}
 
 	#[test]
@@ -952,7 +1132,7 @@ mod tests {
 			let t = ts(i * 40_000);
 			estimator.cut(Some(t));
 			estimator.write(t, 100_000);
-			rendition.estimate(estimator.estimate()).unwrap();
+			rendition.estimate(estimator.reading()).unwrap();
 		}
 	}
 
@@ -1181,22 +1361,39 @@ mod tests {
 		);
 	}
 
-	/// Every rendition gets its own timeline, advertised together at the catalog root.
+	/// Each rendition gets its own HLS records, advertised in its own entry, and only when enabled.
 	#[test]
-	fn renditions_get_their_own_timelines() {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let mut catalog = super::super::Producer::new(&mut broadcast, super::super::Config::default()).unwrap();
+	fn renditions_get_their_own_hls_records() {
+		for enabled in [false, true] {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog_config = super::super::Config::default().with_hls(enabled.then(crate::hls::Config::default));
+			let mut catalog = super::super::Producer::new(&mut broadcast, catalog_config).unwrap();
 
-		let _video0 = catalog
-			.enroll("video0", Some(std::time::Duration::from_secs(4)))
-			.unwrap();
-		let _video1 = catalog
-			.enroll("video1", Some(std::time::Duration::from_secs(4)))
-			.unwrap();
-		let section = catalog.timeline().section();
-		assert_eq!(section.timelines["video0"].track, "video0.timeline.z");
-		assert_eq!(section.timelines["video1"].track, "video1.timeline.z");
-		assert_eq!(catalog.snapshot().archive, Some(section));
+			let hint = Some(std::time::Duration::from_secs(4));
+			let video0 = catalog.enroll("video0", hint).unwrap();
+			let video1 = catalog.enroll("video1", hint).unwrap();
+			assert_eq!(video0.is_some(), enabled);
+			assert_eq!(video1.is_some(), enabled);
+			{
+				let mut guard = catalog.modify().unwrap();
+				guard.video.insert("video0", config(None, None)).unwrap();
+				guard.video.insert("video1", config(None, None)).unwrap();
+			}
+
+			let snapshot = catalog.snapshot();
+			let hls = |name: &str| snapshot.video.renditions[name].hls.clone();
+			match enabled {
+				true => {
+					let four = std::time::Duration::from_secs(4);
+					assert_eq!(hls("video0"), Some(hang::catalog::Hls::new("video0.hls", four)));
+					assert_eq!(hls("video1"), Some(hang::catalog::Hls::new("video1.hls", four)));
+				}
+				false => {
+					assert_eq!(hls("video0"), None);
+					assert_eq!(hls("video1"), None);
+				}
+			}
+		}
 	}
 
 	mod custom {

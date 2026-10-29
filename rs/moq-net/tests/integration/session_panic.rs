@@ -34,7 +34,7 @@ struct Publisher {
 	server_driver: moq_clock::sim::JoinHandle<moq_net::Error>,
 	/// The client's origin, which it publishes from.
 	origin: origin::Producer,
-	_broadcast: moq_net::broadcast::Producer,
+	_broadcast: moq_net::origin::Publication,
 }
 
 async fn publish(version: Version, relay: &origin::Producer, hop: u64, name: &str) -> Publisher {
@@ -98,7 +98,7 @@ async fn until(announced: &mut announce::Consumer, path: &str, active: bool) {
 
 #[moq_clock::test]
 async fn a_panicking_session_leaves_the_others_serving() {
-	for version in ["moq-lite-07-wip", "moq-transport-20"] {
+	for version in ["moq-lite-07-wip", "moq-transport-22"] {
 		let version: Version = version.parse().unwrap();
 		let relay = produce_origin(100);
 		let mut announced = relay.consume().announced();
@@ -127,7 +127,7 @@ async fn a_panicking_session_leaves_the_others_serving() {
 		let later = healthy.origin.create_broadcast("later").unwrap();
 		later.announce(Default::default()).unwrap();
 		until(&mut announced, "later", true).await;
-		assert!(relay.consume().routed("healthy").await.is_some());
+		crate::support::announced(&relay.consume(), "healthy").await;
 		drop((healthy, broken.client, later));
 	}
 }

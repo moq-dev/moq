@@ -78,12 +78,12 @@ async def _print_grant(client: moq.Client, timeout: float) -> None:
     """Wait for the relay's grant and print it, in the Rust client's `auth granted` shape."""
     session = client.session
     assert session is not None
-    auth = session.auth()
-
     async def first() -> moq.Grant:
-        while (grant := auth.grant()) is None:
-            await auth.grant_changed()
-        return grant
+        async with session.grants() as grants:
+            async for grant in grants:
+                if grant is not None:
+                    return grant
+        raise RuntimeError("the session ended before a grant")
 
     grant = await asyncio.wait_for(first(), timeout)
     print(
@@ -105,7 +105,8 @@ async def publish(
         if grant:
             await _print_grant(client, timeout)
         # Hold the producer for the lifetime of the publish loop.
-        producer = client.create_broadcast(broadcast)
+        publication = client.create_broadcast(broadcast)
+        producer = publication.broadcast
         catalog = moq.media.CatalogProducer(producer)
         media = moq.media.TrackStreamProducer.video(
             producer, moq.media.VideoInit(format=moq.media.VideoFormat.AVC3, data=b"")
@@ -119,7 +120,7 @@ async def publish(
             ),
             track=AUDIO_TRACK,
         )
-        producer.announce()
+        publication.announce()
         print(f"publishing {broadcast!r} (Annex-B H.264 from stdin + a {tones} Hz tone) to {url}")
 
         tone = asyncio.create_task(_publish_tone(audio, tones))
@@ -150,7 +151,7 @@ async def publish(
             await asyncio.sleep(LINGER.total_seconds())
             producer.close()
             health = client.create_broadcast(f"{broadcast}.health")
-            live = health.publish_track("live")
+            live = health.broadcast.publish_track("live")
             live.write_frame(b"session-alive")
             live.finish()
             health.announce()
@@ -194,6 +195,10 @@ async def _finish_subscribe(client: moq.Client, broadcast: str, frames: int) -> 
                 ) as media:
                     count = 0
                     async for frame in media:
+                        if isinstance(frame, moq.media.Gap):
+                            raise RuntimeError("media gap")
+                        if isinstance(frame, moq.media.End):
+                            continue
                         # Empty payloads carry endpoint metadata, not codec frames.
                         if not frame.payload:
                             continue
@@ -253,6 +258,11 @@ async def _decode_audio(
     with open(f"{out}.txt", "x") as log, open(f"{out}.pcm", "xb") as pcm:
         log.write(f"{audio.sample_rate} {audio.channel_count}\n")
         async for frame in decoder:
+            # moq-audio reports a hole it saw directly; tone.py checks the timestamps too.
+            if isinstance(frame, moq.audio.Gap):
+                raise RuntimeError(f"audio gap after {decoded} samples")
+            if isinstance(frame, moq.audio.End):
+                raise RuntimeError("audio track ended early")
             samples = len(frame.data) // frame_bytes
             log.write(f"{frame.timestamp // timedelta(microseconds=1)} {samples}\n")
             pcm.write(frame.data)
@@ -299,6 +309,10 @@ async def subscribe(
         async def drain() -> None:
             nonlocal total
             async for frame in media:
+                if isinstance(frame, moq.media.Gap):
+                    raise RuntimeError("media gap")
+                if isinstance(frame, moq.media.End):
+                    continue
                 total += len(frame.payload)
                 if total > 0:
                     return

@@ -418,8 +418,8 @@ impl Publish {
 	/// Once the stream ends, the finished broadcast stays up for the
 	/// [linger](Self::with_linger), and the future resolves after that. Dropping the future
 	/// ends the linger early. A socket or demux error closes the broadcast at once.
-	pub async fn accept(self, origin: &origin::Producer, path: impl moq_net::AsPath) -> Result<()> {
-		let path = path.as_path();
+	pub async fn accept(self, origin: &origin::Producer, path: impl Into<moq_net::Path>) -> Result<()> {
+		let path: moq_net::Path = path.into();
 		let socket = self.0.request.accept(None).await?;
 		tracing::info!(peer = %self.0.peer, %path, "SRT publish accepted");
 		let config = moq_mux::catalog::Config::default()
@@ -493,8 +493,8 @@ impl Subscribe {
 	/// Waits for the broadcast to be announced (so a caller may connect before the
 	/// publisher), cancelling cleanly if the caller disconnects first. This future
 	/// resolves when playback ends, so callers usually run it on its own task.
-	pub async fn accept(self, origin: &origin::Consumer, path: impl moq_net::AsPath) -> Result<()> {
-		let path = path.as_path();
+	pub async fn accept(self, origin: &origin::Consumer, path: impl Into<moq_net::Path>) -> Result<()> {
+		let path: moq_net::Path = path.into();
 		let socket = self.0.request.accept(None).await?;
 		tracing::info!(peer = %self.0.peer, %path, "SRT subscribe accepted");
 		let options = crate::ts::Options {
@@ -583,7 +583,7 @@ pub(crate) async fn serve_subscribe(
 	mut socket: SrtSocket,
 	options: crate::ts::Options,
 ) -> Result<()> {
-	// Resolve the broadcast, but watch the socket while we wait: `routed`
+	// Resolve the broadcast, but watch the socket while we wait: following it
 	// parks forever for a stream that is never published, and nothing else polls the
 	// socket during that wait, so without this a caller who requests a non-existent
 	// stream (or hangs up before it starts) would leak this task and its socket.
@@ -913,10 +913,10 @@ mod tests {
 
 		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 		tokio::spawn(moq_net::time::run(driver));
-		let mut broadcast = origin.create_broadcast("marker").unwrap();
+		let broadcast = origin.create_broadcast("marker").unwrap();
 		broadcast.announce(moq_net::origin::Route::default()).unwrap();
 		let mut catalog = moq_mux::catalog::Producer::new(
-			&mut broadcast,
+			&mut broadcast.broadcast().clone(),
 			moq_mux::catalog::Config::default().with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default()),
 		)
 		.unwrap();
@@ -964,7 +964,8 @@ mod tests {
 			panic!("m=request must create a subscribe request");
 		};
 		let consumer = origin.consume();
-		let egress = tokio::spawn(async move { subscribe.accept(&consumer, "marker").await });
+		let egress =
+			tokio::spawn(async move { subscribe.accept(&consumer, moq_net::Path::from_static("marker")).await });
 		let mut receiver = caller.await.unwrap();
 
 		// Three seconds of program, then wait until the receiver is actually playing it
@@ -1015,7 +1016,7 @@ mod tests {
 	/// One publisher instance of `live`: an announced broadcast under its own epoch with one
 	/// Legacy AAC track, for the egress tests.
 	struct Instance {
-		_broadcast: moq_net::broadcast::Producer,
+		_broadcast: moq_net::origin::Publication,
 		catalog: moq_mux::catalog::Producer<moq_mux::container::ts::Ext>,
 		audio: moq_mux::container::Producer<moq_mux::catalog::hang::Container>,
 	}
@@ -1023,9 +1024,9 @@ mod tests {
 	impl Instance {
 		fn publish(origin: &moq_net::origin::Producer, track: &str) -> Self {
 			let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
-			let mut broadcast = origin.publish("live", route).unwrap();
+			let broadcast = origin.publish("live", route).unwrap();
 			let mut catalog = moq_mux::catalog::Producer::new(
-				&mut broadcast,
+				&mut broadcast.broadcast().clone(),
 				moq_mux::catalog::Config::default()
 					.with_catalog(moq_mux::catalog::hang::Catalog::<moq_mux::container::ts::Ext>::default()),
 			)
@@ -1102,7 +1103,7 @@ mod tests {
 			subscribe
 				.with_follow(follow)
 				.with_stitch(stitch)
-				.accept(&consumer, "live")
+				.accept(&consumer, moq_net::Path::from_static("live"))
 				.await
 		});
 		(caller.await.unwrap(), task)

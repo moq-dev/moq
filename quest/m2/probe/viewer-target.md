@@ -52,15 +52,14 @@ Decided with the maintainer on 2026-10-17 (see the
   current estimate (BBR's 1.25x phase, padding's 2x cluster) and stays under
   congestion control. Repeated cycles can still walk the estimate up to the
   path's capacity, so a huge target costs the redundant bytes of probing that
-  far, held to the overhead budget [native](/quest/m1/probe-native.md) sets
-  before tuning; a peer that subscribes to more media can already cost the
+  far, held to native probing's overhead budget (redundant bytes at most
+  10% of unique bytes, [moq-dev/moq#6635](https://github.com/moq-dev/moq/pull/6635)); a peer that subscribes to more media can already cost the
   sender that much. Clamp it to the session's rate cap where one exists
   ([rate grant](/quest/m2/rate-grant.md)) rather than adding a constant.
 - **`Increase` only with a sender.** SETUP advertises `Increase` only when
   the session has a sender behind the seam the send target defines: native
   probing on moq-quic, padding in the browser. A browser session on a version
-  [padding](/quest/m2/probe/padding.md) refuses (lite-05, lite-06, IETF
-  drafts 14 to 17) has none, so it keeps `Report`.
+  [padding](/quest/m2/probe/padding.md) refuses (lite-05, lite-06) has none, so it keeps `Report`.
 - **Automatic, opt-out.** Targets are on by default; an application can
   override them or disable probing.
 

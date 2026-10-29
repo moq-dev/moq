@@ -4,6 +4,36 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Compression moves to the track
+
+`package:moq/flate.dart` is removed: publish opaque bytes on a `TrackProducer`.
+`SnapshotConfig` and `WindowConfig` lose `compression`, and `StreamConfig` is removed. Publish the track with `MoqTrackInfo(compress: true)` instead.
+`StreamProducer` drops its `config`, and `SnapshotConsumer`, `StreamConsumer`, and `WindowConsumer` take only the track.
+
+### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
+
+Publishing, serving, or requesting a broadcast at a path with a leading, trailing, or doubled `/` throws instead of collapsing it. Pass the canonical path, such as `room/cam`.
+
+### Request handlers are `requests()` ([#6752](https://github.com/moq-dev/moq/pull/6752))
+
+Rename `dynamic_()` on `OriginProducer`, `BroadcastProducer`, `TrackProducer`, and `TrackRequest` to `requests()`.
+Their handles `OriginDynamic`, `BroadcastDynamic`, and `TrackDynamic` are `OriginRequests`, `BroadcastRequests`, and `TrackRequests`; their methods are unchanged.
+
+### `Allocator` ([#6751](https://github.com/moq-dev/moq/pull/6751))
+
+`Bandwidth` is `Allocator`, `bandwidth()` is `allocator()`, and `Reservation.grant()` is `rate()`. The producers' `bandwidth` option keeps its name.
+
+### Decoders read gaps and ends
+
+`audio.Consumer.next()` and `video.Consumer.next()` return a `Read` instead of a frame. Take `read.frame` from a `ReadFrame` where you used the frame; `ReadGap` marks lost media and `ReadEnd` where the publisher stopped its encoder, and what follows either does not continue what came before.
+
+### Durations are `Duration` fields
+
+The records carry durations as `Duration` fields instead of `*Us` microsecond integers, so the duration extension getters are gone: read `backoff.initial`, `stats.rtt`, `grant.expires`, `info.maxAge`, `fill.maxDelay()`, and `consumer.delay()` directly.
+`audio.EncoderOutput.frameDuration` is nullable: pass null where you passed `frameDurationUs: 0` for the codec's own frame.
+`Subscription.maxDelay` has no default, so a `MoqSubscription()` that omits it gets no staleness limit instead of moq-net's 0: pass `Duration.zero` for the old default.
+A negative `Duration` throws `ArgumentError` wherever it crosses into the native library.
+
 ### Connection state
 
 `Moq.connect` returns a connecting native session. Replace status, connect-count, and failure polls with `session.state()` and `session.stateChanged(after: state.revision)`. `ConnectionState` carries `phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`.
@@ -27,7 +57,7 @@ the matching generated bindings and native library.
 ### Cancelling a stream cancels its pending read
 
 `await subscription.cancel()` on announcements, authorization grants, and server requests now waits for the pending native operation to release, even when no event arrives.
-Announcement subscriptions still own and release their cursor; cancelling a grant or request subscription keeps its shared `Auth` or `Server` usable.
+Announcement and grant subscriptions own and release their consumer; cancelling a request subscription keeps its shared `Server` usable.
 The generated async methods now return `UniffiRustFuture<T>`, a `Future<T>` with `cancel()`; existing `await` and `Future<T>` assignments work unchanged.
 Custom implementations of generated interfaces must return `UniffiRustFuture<T>` instead of a plain `Future<T>`.
 

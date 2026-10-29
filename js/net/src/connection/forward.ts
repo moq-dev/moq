@@ -8,8 +8,8 @@ import { Milli, Nano } from "@moq/clock";
 import { type Dispose, race } from "@moq/signals";
 import type * as Announce from "../announced.ts";
 import { type Route, routesEqual } from "../hop.ts";
-import { coveringPrefixes } from "../internal.ts";
-import type { Dynamic, Producer as OriginProducer, RequestSlot } from "../origin.ts";
+import { coveringPrefixes, hooks } from "../internal.ts";
+import type { Producer as OriginProducer, RequestSlot, Requests } from "../origin.ts";
 import * as Path from "../path.ts";
 import { after } from "../util/timer.ts";
 import { wireOf } from "../wire.ts";
@@ -39,7 +39,7 @@ interface Interest {
  * request handing over to another never retracts it. The first reporter drives it.
  */
 interface Reported {
-	handle: Dynamic;
+	handle: Requests;
 	/** Each request's latest route for the prefix. */
 	readonly reporters: Map<Interest, Route>;
 }
@@ -50,13 +50,18 @@ interface Reported {
  * requests with blind subscriptions.
  *
  * Discovery is lazy. One announce request opens per prefix in the origin's covering set of
- * watches (`announced(scope)` and `request(path, { announced: true })`) that no open request
+ * watches (`announced(scope)` and every `request(path)`) that no open request
  * already covers, and closes {@link LINGER} after nothing at or beneath its prefix is watched.
  * A narrower watch rides an open broader request, and a narrower request already open stays
  * open until the broader one covering it goes, so neither takes the other's routes over
  * before it has synced, which not every version can tell. A route both report is inserted once and
  * driven by its first reporter; if it changes hands anyway (a request failing), it restarts
  * unless one epoch proves both requests saw one instance.
+ *
+ * A peer that refuses overlapping requests gets exclusive discovery instead: a broader request
+ * closes the narrower ones beneath it, and the session keeps it off the wire until they have
+ * left. The routes a closed request carried go with it, and come back once the broader request
+ * reports them.
  *
  * Each active announcement inserts a route covering the announced prefix, served lazily
  * through this connection, so nothing touches the wire until somebody requests a path
@@ -65,13 +70,14 @@ interface Reported {
  * session to the same origin and re-opens whatever is still watched.
  *
  * A peer that refuses or resets an announce request downgrades the whole session to blind
- * answers: gated requests stop waiting for an announcement, and later watches open nothing
- * on it.
+ * answers: plain requests subscribe through it without waiting for an announcement, and
+ * later watches open nothing on it.
  *
  * @internal
  */
 export function forwardAnnounced(conn: Established, origin: OriginProducer): void {
 	const originWire = wireOf(origin);
+	const exclusive = wireOf(conn).exclusive;
 	// Reassigned on a downgrade, so the origin stops counting this session as discovering.
 	// Called through a closure so the session's death always detaches the current one.
 	let detach = originWire.attach(true);
@@ -147,14 +153,25 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 	const downgrade = (failure: unknown) => {
 		if (blind) return;
 		blind = true;
-		// Announcement-gated consumers would wait forever on a table this session cannot fill,
-		// so they fall back to blind answers, which this session still provides.
+		// Plain requests can still use this session's blind answers. Announcement followers
+		// keep waiting for a source that can discover their path.
 		console.warn("broadcast discovery failed; broadcasts resolve on request only.", failure);
 		detach();
 		detach = originWire.attach(false);
 	};
 
 	const open = (prefix: Path.Valid) => {
+		if (exclusive) {
+			for (const [other, narrower] of interests) {
+				if (other === prefix || !Path.hasPrefix(prefix, other)) continue;
+				interests.delete(other);
+				narrower.closing = true;
+				narrower.linger?.();
+				narrower.linger = undefined;
+				narrower.announced.close();
+			}
+		}
+
 		// Hidden routes are mirrored too; each local reader opts in on its own.
 		const interest: Interest = {
 			announced: conn.announced(Path.Pattern.subtree(prefix), { hidden: true }),
@@ -166,10 +183,11 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 
 		// The origin's readers under the prefix wait on this request's initial set. Released
 		// once the session stream has synced, which it reports only after the last of those
-		// events is reported here.
+		// events is reported here. A closing stream also reads as synced, but a failure is not
+		// an answer: the loop below releases it with the downgrade, in one step.
 		const snapshot = originWire.snapshot(prefix);
 		const synced = interest.announced.synced.subscribe((synced) => {
-			if (synced) snapshot();
+			if (synced && interest.announced.closed.peek() === undefined) snapshot();
 		});
 		// A request with no initial set to wait for is synced before the listener exists.
 		if (interest.announced.synced.peek()) snapshot();
@@ -272,11 +290,11 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 }
 
 /** Answer the requests under a received route by consuming them from the session. */
-async function drive(handle: Dynamic, conn: Established): Promise<void> {
+async function drive(handle: Requests, conn: Established): Promise<void> {
 	const session = wireOf(conn);
 	try {
 		for await (const request of handle.requested()) {
-			request.accept(session.consume(request.path));
+			hooks.acceptRequest(request, session.consume(request.path));
 		}
 	} catch {
 		handle.close();

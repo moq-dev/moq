@@ -1,5 +1,4 @@
 import { afterEach, expect, test } from "bun:test";
-import { Milli } from "@moq/clock";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as TrackProducer } from "../track.ts";
@@ -44,10 +43,10 @@ function stubTransport(stats: { estimatedSendRate?: number }): void {
 test("a connection samples the send rate onto the allocator", async () => {
 	stubTransport({ estimatedSendRate: 2_000_000 });
 
-	const connection = new Connection({ url, linger: Milli(20) });
+	const connection = new Connection({ url });
 	try {
 		await waitUntil(() => connection.status.peek() === "connected");
-		const allocator = connection.bandwidth.peek();
+		const allocator = connection.allocator.peek();
 		if (!allocator) throw new Error("missing allocator");
 
 		const track = new TrackProducer("video").accept({ priority: 60 });
@@ -63,14 +62,14 @@ test("a connection samples the send rate onto the allocator", async () => {
 test("two publishers on one connection split the estimate by priority", async () => {
 	stubTransport({ estimatedSendRate: 2_000_000 });
 
-	const first = new Connection({ url, linger: Milli(20) });
+	const first = new Connection({ url });
 	const second = new Connection({ url });
 	try {
 		await waitUntil(() => first.status.peek() === "connected");
 		await waitUntil(() => second.status.peek() === "connected");
 
-		const allocator = first.bandwidth.peek();
-		expect(allocator).toBe(second.bandwidth.peek());
+		const allocator = first.allocator.peek();
+		expect(allocator).toBe(second.allocator.peek());
 		if (!allocator) throw new Error("missing allocator");
 
 		const audio = new TrackProducer("audio").accept({ priority: 80 });
@@ -95,10 +94,10 @@ test("two publishers on one connection split the estimate by priority", async ()
 test("an idle track on a live connection claims nothing", async () => {
 	stubTransport({ estimatedSendRate: 2_000_000 });
 
-	const handle = new Connection({ url, linger: Milli(20) });
+	const handle = new Connection({ url });
 	try {
 		await waitUntil(() => handle.status.peek() === "connected");
-		const allocator = handle.bandwidth.peek();
+		const allocator = handle.allocator.peek();
 		if (!allocator) throw new Error("missing allocator");
 
 		const watched = new TrackProducer("watched").accept({ priority: 60 });
@@ -109,7 +108,8 @@ test("an idle track on a live connection claims nothing", async () => {
 		const idleShare = allocator.reserve(idle.demand(), 4_000_000);
 
 		await waitUntil(() => watchedShare.peek() === 2_000_000);
-		expect(idleShare.peek()).toBeUndefined();
+		// Claims nothing from the watched track, but reads what it would get back.
+		expect(idleShare.peek()).toBe(1_000_000);
 	} finally {
 		handle.close();
 	}
@@ -125,7 +125,7 @@ test("a private connection still exposes an allocator", async () => {
 	});
 	try {
 		await waitUntil(() => connection.status.peek() === "connected");
-		const allocator = connection.bandwidth.peek();
+		const allocator = connection.allocator.peek();
 		if (!allocator) throw new Error("missing allocator");
 
 		const track = new TrackProducer("video").accept({ priority: 60 });

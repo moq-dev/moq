@@ -70,7 +70,8 @@ export function finish(
 			state.result = await readFinish(origin, path, frames, Milli(timeout));
 			return;
 		}
-		const broadcast = origin.createBroadcast(Moq.Path.from(path));
+		const broadcastPublication = origin.createBroadcast(Moq.Path.from(path));
+		const broadcast = broadcastPublication.broadcast;
 		const config: Catalog.VideoConfig = {
 			codec: "avc1.42001e",
 			codedWidth: Catalog.u53(320),
@@ -132,19 +133,21 @@ export function finish(
 			serving,
 		);
 		serving.close();
-		broadcast.announce();
+		broadcastPublication.announce();
 		// Keep the finished broadcast up for the late readers, then take it offline.
 		state.lingerUs = LINGER * 1000;
 		state.ready = true;
 		await sleep(Nano.fromMilli(LINGER));
 		broadcast.close();
-		const health = origin.createBroadcast(Moq.Path.from(`${path}.health`));
+		const healthPublication = origin.createBroadcast(Moq.Path.from(`${path}.health`));
+		const health = healthPublication.broadcast;
 		const healthTrack = health.createTrack("live");
 		const group = healthTrack.appendGroup();
 		group.writeFrame({ payload: new TextEncoder().encode("session-alive") });
-		group.close();
+		group.finish();
+		healthTrack.finish();
 		healthTrack.close();
-		health.announce();
+		healthPublication.announce();
 		state.ended = true;
 		await ack;
 		health.close();

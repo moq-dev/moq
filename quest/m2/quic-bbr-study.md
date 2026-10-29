@@ -15,9 +15,16 @@ quality or performance.
 
 Decided in the 2026-09-30 audit: the Google BBR comparison merged here as
 one study, since both reuse the same media profiles, harness, and baseline.
-On 2026-10-24 the maintainer split ProbeRTT natural-drain credit out to
-[its own quest](/quest/m1/bbr-probe-rtt-skip.md), which ships QUICHE's
-near-floor skip.
+ProbeRTT natural-drain credit is settled: BBR3 skips a due ProbeRTT after an
+interval that was app-limited at least once and saw no loss or CE (QUICHE
+BBRv1's kBBR8, which subsumes its near-floor kBBR7). The maintainer chose
+kBBR8 on 2026-10-25 on the advice of BBR's designer, replacing the
+2026-10-24 kBBR7-only decision. The rejected risk, `min_rtt` ratcheting up
+under a standing queue the flow builds itself, is the known cost; a skip keeps
+the `min_rtt` value rather than taking the queued samples, so it shows up as
+the mirror image: while media stays app-limited and congestion-free, `min_rtt`
+does not follow a base-RTT rise until a lost or CE-marked packet, or an
+interval with no starved poll, brings ProbeRTT back.
 
 ### Harness
 
@@ -67,6 +74,12 @@ BBR3 state machine.
   bound, then accelerate a later probe if feedback is clean. Noq lacks this
   state and transition. Compare queue depths, capacity increases, and
   competing flows on shaped paths with verified overflow drops.
+- Found in [moq-dev/moq#7017](https://github.com/moq-dev/moq/pull/7017):
+  `moq-congestion`'s extra-acked filter is a 10-round Nichols `MaxFilter`
+  (`EXTRA_ACKED_FILTER_LEN` in `rs/moq-congestion/src/bbr3/mod.rs`), while
+  Google Linux keeps two slots of 5 rounds each, the shape #7017 gave the
+  bandwidth filter. Compare aggregation headroom and queue delay under
+  bursty ACKs before changing it.
 
 Report throughput, queue delay, loss, convergence time, and fairness with
 pinned code and configurations. Keep transport differences and QUICHE flags
@@ -88,12 +101,6 @@ to weaken the congestion response or precautionary probe stop. This study
 still decides growth recognition and probe behavior separately; it does not
 adopt either in advance.
 
-## Required
-
-- [Portable controller trait](/quest/m1/congestion/trait.md) - followers land in `moq-congestion` on its trait
-
 ## Related
 
 - [TS validation](/test/ts/README.md) - shaped paths, whole-group shedding, and measured baselines
-- [Native probing](/quest/m1/probe-native.md) - preserving an estimate and discovering spare capacity are separate problems
-- [Skip ProbeRTT after a near-floor RTT](/quest/m1/bbr-probe-rtt-skip.md) - the ProbeRTT natural-drain decision split out of this study

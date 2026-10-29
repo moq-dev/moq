@@ -318,7 +318,7 @@ impl Reader {
 		// A decoder often opens on a track that is already cached: a replacement
 		// decoder subscribes while its predecessor still holds groups, and a
 		// rendition switched away from and back to stays warm on the origin for
-		// `TRACK_IDLE_LINGER` (cached groups, not an upstream subscription). A
+		// `moq_net::model::track::IDLE_LINGER` (cached groups, not an upstream subscription). A
 		// caller that asked for `Start::Latest` wants none of that backlog,
 		// because a cursor starting at sequence zero replays every cached group
 		// at decode speed before reaching live media, which on a thirty-second
@@ -468,12 +468,12 @@ mod tests {
 			moq_mux::catalog::Producer::new(&mut source_broadcast, moq_mux::catalog::Config::default()).unwrap();
 		let config = EncodeConfig {
 			kind: EncodeKind::Software,
-			..EncodeConfig::new(320, 240, crate::Rate::new(30, 1).unwrap())
+			..EncodeConfig::new(320, 240, crate::FrameRate::new(30, 1).unwrap())
 		};
 		let rendition = config.probe().await.unwrap();
 		let reserved = source_catalog
 			.reserve()
-			.with_timeline_hint(config.gop.duration(config.framerate));
+			.with_hls_hint(config.gop.duration(config.framerate));
 		let mut producer = EncodeProducer::new(source_broadcast, reserved, rendition).unwrap();
 		let mut encoder = Encoder::new(&config).unwrap();
 		let rgba = vec![0x80u8; 320 * 240 * 4];
@@ -1025,7 +1025,7 @@ mod tests {
 		const FRAMES: u64 = 5;
 		let config = EncodeConfig {
 			kind: EncodeKind::Software,
-			..EncodeConfig::new(320, 240, crate::Rate::new(30, 1).unwrap())
+			..EncodeConfig::new(320, 240, crate::FrameRate::new(30, 1).unwrap())
 		};
 		let catalog = config.probe().await.expect("probe the software encoder");
 

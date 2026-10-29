@@ -47,12 +47,10 @@ async fn connect(
 fn read_arrivals(origin: moq_net::origin::Producer, order: Order) -> moq_clock::sim::JoinHandle<Vec<u64>> {
 	moq_clock::sim::spawn(async move {
 		let consumer = origin.consume();
-		moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
-			.await
-			.expect("announce timeout")
-			.expect("routed");
 		let remote = consumer
-			.request_broadcast("bcast", None)
+			.follow("bcast", None)
+			.unwrap()
+			.available()
 			.await
 			.expect("broadcast resolves");
 		let subscription = Subscription::default()
@@ -160,8 +158,7 @@ async fn a_backlog_is_served_in_the_subscription_order() {
 		"moq-lite-05",
 		"moq-lite-06",
 		"moq-lite-07-wip",
-		"moq-transport-14",
-		"moq-transport-17",
+		"moq-transport-18",
 		"moq-transport-22",
 	] {
 		for relay in [false, true] {
@@ -186,7 +183,7 @@ async fn a_backlog_is_served_in_the_subscription_order() {
 /// its own subscriber's backlog in that subscriber's order.
 #[moq_clock::test]
 async fn merged_subscribers_keep_their_own_order() {
-	for version in ["moq-lite-07-wip", "moq-transport-17"] {
+	for version in ["moq-lite-07-wip", "moq-transport-18"] {
 		let version: Version = version.parse().unwrap();
 		let publisher = produce_origin(1);
 		let broadcast = publisher.create_broadcast("bcast").unwrap();

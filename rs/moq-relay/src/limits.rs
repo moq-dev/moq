@@ -32,28 +32,17 @@ pub struct Client {
 		setting = "limits.client.announces"
 	)]
 	pub announces: usize,
-	/// Maximum other simultaneously held moq-transport requests, sizing the drafts 14 to 16 request window.
-	#[usage(
-		long = "limits-client-requests",
-		env = "MOQ_LIMITS_CLIENT_REQUESTS",
-		default = "10000",
-		setting = "limits.client.requests"
-	)]
-	pub requests: usize,
 }
 
 impl Default for Client {
 	fn default() -> Self {
-		Self {
-			announces: 1000,
-			requests: 10000,
-		}
+		Self { announces: 1000 }
 	}
 }
 
 impl Client {
 	pub(crate) fn resolve(&self) -> moq_net::session::Limits {
-		resolve(self.announces, self.requests)
+		resolve(self.announces)
 	}
 }
 
@@ -70,14 +59,6 @@ pub struct Peer {
 		setting = "limits.peer.announces"
 	)]
 	pub announces: usize,
-	/// Maximum other simultaneously held moq-transport requests, sizing the drafts 14 to 16 request window.
-	#[usage(
-		long = "limits-peer-requests",
-		env = "MOQ_LIMITS_PEER_REQUESTS",
-		default = "20000",
-		setting = "limits.peer.requests"
-	)]
-	pub requests: usize,
 	/// QUIC limits a peer session widens to (`[limits.peer.quic]`).
 	#[usage(flatten)]
 	pub quic: Quic,
@@ -87,7 +68,6 @@ impl Default for Peer {
 	fn default() -> Self {
 		Self {
 			announces: 100000,
-			requests: 20000,
 			quic: Quic::default(),
 		}
 	}
@@ -95,7 +75,7 @@ impl Default for Peer {
 
 impl Peer {
 	pub(crate) fn resolve(&self) -> moq_net::session::Limits {
-		resolve(self.announces, self.requests)
+		resolve(self.announces)
 	}
 }
 
@@ -147,9 +127,14 @@ impl Quic {
 	/// Refuses limits QUIC cannot advertise, as `[quic]` does, so the accept and
 	/// dial paths never disagree about them.
 	pub(crate) fn validate(&self) -> anyhow::Result<()> {
-		let mut quic = moq_tokio::quic::Config::default();
-		self.dial(&mut quic);
-		quic.validate().context("invalid [limits.peer.quic]")
+		self.limits().validate().context("invalid [limits.peer.quic]")?;
+		// Incomplete messages hold connection credit until they are complete.
+		let min = moq_net::transport::MIN_RECEIVE_WINDOW;
+		anyhow::ensure!(
+			self.receive_window.get() >= min,
+			"invalid [limits.peer.quic]: receive_window must be at least {min} bytes to fit the largest message"
+		);
+		Ok(())
 	}
 
 	/// Apply these limits to the `[quic]` section a peer link is dialed with.
@@ -160,7 +145,6 @@ impl Quic {
 	}
 
 	/// The limits an accepted peer connection widens to, as either QUIC runtime takes them.
-	#[cfg(any(feature = "quic", all(target_os = "linux", feature = "_uring")))]
 	pub(crate) fn limits(&self) -> moq_quic::Limits {
 		let mut limits = moq_quic::Limits::default();
 		limits.max_streams = Some(self.max_streams);
@@ -170,10 +154,9 @@ impl Quic {
 	}
 }
 
-fn resolve(announces: usize, requests: usize) -> moq_net::session::Limits {
+fn resolve(announces: usize) -> moq_net::session::Limits {
 	let mut limits = moq_net::session::Limits::default();
 	limits.announces = announces;
-	limits.requests = requests;
 	limits
 }
 
@@ -189,6 +172,10 @@ pub(crate) struct Legacy {
 	peer_quic_receive_window: Option<u64>,
 	#[usage(long = "peer-quic-send-window", env = "MOQ_PEER_QUIC_SEND_WINDOW", hide = true)]
 	peer_quic_send_window: Option<u64>,
+	#[usage(long = "limits-client-requests", env = "MOQ_LIMITS_CLIENT_REQUESTS", hide = true)]
+	client_requests: Option<u64>,
+	#[usage(long = "limits-peer-requests", env = "MOQ_LIMITS_PEER_REQUESTS", hide = true)]
+	peer_requests: Option<u64>,
 }
 
 impl Legacy {
@@ -228,6 +215,13 @@ impl Legacy {
 				Some("MOQ_PEER_QUIC_SEND_WINDOW"),
 				"--limits-peer-quic-send-window",
 			);
+		}
+		const REQUESTS: &str = "stream flow control bounds requests";
+		if self.client_requests.is_some() {
+			found.removed("--limits-client-requests", Some("MOQ_LIMITS_CLIENT_REQUESTS"), REQUESTS);
+		}
+		if self.peer_requests.is_some() {
+			found.removed("--limits-peer-requests", Some("MOQ_LIMITS_PEER_REQUESTS"), REQUESTS);
 		}
 		found
 	}

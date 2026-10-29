@@ -407,9 +407,8 @@ export class AnnounceHistory {
 			const keep = msg.pathBase.keep;
 			if (keep > head.length) throw new ProtocolViolation(`announce keeps ${keep} of ${head.length} segments`);
 			suffix = Path.join(Path.from(...head.slice(0, keep)), suffix);
-			if (Path.parts(suffix).length > Path.MAX_PARTS) {
-				throw new ProtocolViolation(`path exceeds ${Path.MAX_PARTS} parts`);
-			}
+			const error = Path.check(suffix);
+			if (error) throw new ProtocolViolation(error);
 		}
 		const hops = this.#hops(msg.hops, msg.hopBase);
 		this.#live.set(this.#next++, { suffix, hops });

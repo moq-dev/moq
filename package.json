@@ -21,6 +21,7 @@
 	"overrides": {
 		"chokidar@3": "^4.0.3",
 		"postcss-selector-parser@6": "^7.1.7",
+		"undici@7": "^7.30.1",
 		"vite@5": "^6.4.5"
 	},
 	"private": true,
@@ -33,6 +34,7 @@
 	"workspaces": [
 		"bench/browser",
 		"doc",
+		"doc/.vitepress/api",
 		"js/net",
 		"js/p2p",
 		"js/qmux",
@@ -40,7 +42,6 @@
 		"js/pattern",
 		"js/auth",
 		"js/e2ee",
-		"js/flate",
 		"js/json",
 		"js/libav",
 		"js/hang",

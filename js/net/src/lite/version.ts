@@ -274,6 +274,23 @@ export function hasOrder(version: Version): boolean {
 	}
 }
 
+/** Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry a list of ranges. Added in lite-07; an
+ * earlier subscription carries one span in its group and frame bounds. */
+export function hasRanges(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-07+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
 /** Whether FETCH carries the subscriber's optional max delay. Added in lite-07; an earlier
  * fetch is bounded by the publisher's retention alone. */
 export function hasFetchMaxDelay(version: Version): boolean {
@@ -571,6 +588,21 @@ export function wireTimescale(version: Version, timescale: Timescale | null | un
 
 /** Whether discovery streams mark their initial set with SYNCED rather than a count. */
 export function hasSynced(version: Version): boolean {
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
+/** Whether SETUP recognizes the Implementation parameter, added in lite-07. */
+export function hasImplementation(version: Version): boolean {
 	switch (version) {
 		case Version.DRAFT_01:
 		case Version.DRAFT_02:

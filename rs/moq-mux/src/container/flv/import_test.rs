@@ -89,9 +89,8 @@ fn synth_flv() -> Vec<u8> {
 
 /// A rendition must never be advertised when its media producer could not be built.
 ///
-/// Publishing the media producer is fallible (it enrolls the track in the broadcast timeline, minting the
-/// shared `timeline.z` track, which can collide), so publishing the catalog entry first would
-/// leave consumers a rendition that is announced but has no producer behind it and is therefore
+/// Publishing the media producer is fallible (it mints the track's HLS record track, which can
+/// collide), so publishing the catalog entry first would leave consumers a rendition that is announced but has no producer behind it and is therefore
 /// never served.
 #[tokio::test(start_paused = true)]
 async fn rendition_is_not_published_when_the_media_track_fails() {
@@ -99,27 +98,24 @@ async fn rendition_is_not_published_when_the_media_track_fails() {
 
 	// Control: the same fixture publishes a video rendition when nothing collides, so the
 	// assertion below cannot pass merely because the fixture stopped reaching track import.
-	{
+	let name = {
 		let mut producer = moq_net::broadcast::Info::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 		let mut importer = Import::new(producer, catalog.reserve());
 		importer.decode(&bytes::BytesMut::from(data.as_slice())).unwrap();
-		assert_eq!(
-			catalog.snapshot().video.renditions.len(),
-			1,
-			"fixture must publish a rendition"
-		);
-	}
+		let renditions = catalog.snapshot().video.renditions;
+		assert_eq!(renditions.len(), 1, "fixture must publish a rendition");
+		renditions.into_keys().next().unwrap()
+	};
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 
-	// Squat the catalog's timeline track, so enrolling the first rendition (which enrolls the catalog
-	// too, and with it building its media producer) fails. The handle must stay alive: the broadcast tracks names weakly, so
-	// dropping it frees the name.
-	let _squat = broadcast
-		.create_track(hang::timeline::default_name(hang::Catalog::DEFAULT_NAME), None)
-		.unwrap();
+	// Squat the rendition's HLS record track, so enrolling it (and with it building its media
+	// producer) fails. The handle must stay alive: the broadcast tracks names weakly, so
+	// dropping it frees the name. Unique names are per broadcast, so the track is named as in
+	// the control.
+	let _squat = broadcast.create_track(hang::hls::default_name(&name), None).unwrap();
 
 	let mut importer = Import::new(broadcast, catalog.reserve());
 	// A track it cannot build surfaces in the catalog rather than in this result.
@@ -345,6 +341,48 @@ async fn import_legacy_mp3() {
 	assert!(a.description.is_none(), "MP3 config is in band");
 }
 
+/// A legacy MP3 frame header that changes the channel count is a new decoder identity, so the
+/// frames after it publish on a new track rather than rewriting the first.
+#[tokio::test(start_paused = true)]
+async fn legacy_mp3_channel_change_starts_a_new_track() {
+	// MPEG-1 Layer III, 128 kbps, 44.1 kHz: joint stereo, then mono.
+	let frame = |mode: u8| {
+		let mut mp3 = vec![0xFF, 0xFB, 0x90, mode];
+		mp3.resize(417, 0xAA);
+		let mut tag = vec![super::MP3_AUDIO_TAG_HEADER];
+		tag.extend_from_slice(&mp3);
+		tag
+	};
+	let header = || {
+		let mut out = Vec::new();
+		out.extend_from_slice(b"FLV");
+		out.push(1);
+		out.push(0x04); // audio only
+		out.extend_from_slice(&9u32.to_be_bytes());
+		out.extend_from_slice(&0u32.to_be_bytes());
+		out
+	};
+
+	let mut producer = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
+	let mut importer = Import::new(producer, catalog.reserve());
+	let mut out = header();
+	write_tag(&mut out, super::TAG_AUDIO, 0, &frame(0x44));
+	write_tag(&mut out, super::TAG_AUDIO, 26, &frame(0x44));
+	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
+	let first = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
+
+	let mut out = Vec::new();
+	write_tag(&mut out, super::TAG_AUDIO, 52, &frame(0xC4));
+	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
+	let snap = catalog.snapshot();
+	assert_eq!(snap.audio.renditions.len(), 1, "the stereo track is retired");
+	let (name, a) = snap.audio.renditions.iter().next().unwrap();
+	assert_ne!(name, &first, "the mono frames publish under a new name");
+	assert_eq!(a.channel_count, 1);
+	importer.finish().unwrap();
+}
+
 /// A minimal avcC like [`avcc`], but with a caller-chosen level byte so two video
 /// renditions carry distinct codec configs.
 fn avcc_level(level: u8) -> Vec<u8> {
@@ -465,6 +503,80 @@ async fn import_multitrack_video_many_codecs() {
 	importer.finish().unwrap();
 
 	assert_eq!(catalog.snapshot().video.renditions.len(), 2);
+}
+
+/// A publisher that keeps changing its audio and video config replaces each track under a fresh
+/// name. A replaced track flushes its last frame and ends, and the importer retires it, so the HLS
+/// records it holds stay those of the live renditions. Dropping the importer ends and retires those.
+#[tokio::test(start_paused = true)]
+async fn config_churn_keeps_flat_state() {
+	const NALU: [u8; 9] = [0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00];
+	// AAC-LC stereo at 44.1 kHz, then at 48 kHz.
+	let ascs = [ASC, [0x11, 0x90]];
+	let avccs = [avcc_level(0x1f), avcc_level(0x1e)];
+	// One config change on both tracks, each followed by a frame.
+	let round = |round: u32| {
+		let mut out = Vec::new();
+		let config = round as usize % 2;
+		let timestamp = round * 40;
+		let video = (super::FRAME_TYPE_KEY << 4) | super::VIDEO_CODEC_AVC;
+
+		let mut vseq = vec![video, super::AVC_SEQUENCE_HEADER, 0, 0, 0];
+		vseq.extend_from_slice(&avccs[config]);
+		write_tag(&mut out, super::TAG_VIDEO, timestamp, &vseq);
+		let mut aseq = vec![super::AAC_AUDIO_TAG_HEADER, super::AAC_SEQUENCE_HEADER];
+		aseq.extend_from_slice(&ascs[config]);
+		write_tag(&mut out, super::TAG_AUDIO, timestamp, &aseq);
+
+		let mut vframe = vec![video, super::AVC_NALU, 0, 0, 0];
+		vframe.extend_from_slice(&NALU);
+		write_tag(&mut out, super::TAG_VIDEO, timestamp, &vframe);
+		let aframe = [super::AAC_AUDIO_TAG_HEADER, super::AAC_RAW, 0x21, 0x00];
+		write_tag(&mut out, super::TAG_AUDIO, timestamp, &aframe);
+		out
+	};
+
+	let mut producer = moq_net::broadcast::Info::new().produce();
+	let consumer = producer.consume();
+	let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
+	let mut importer = Import::new(producer, catalog.reserve());
+	let mut first = flv_header(0x05);
+	first.extend_from_slice(&round(0));
+	importer.decode(&first).unwrap();
+	let replaced = catalog.snapshot().video.renditions.into_keys().next().unwrap();
+	let replaced = consumer
+		.track(&replaced)
+		.unwrap()
+		.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+		.await
+		.unwrap();
+
+	for n in 1..100 {
+		importer.decode(&round(n)).unwrap();
+	}
+	let snap = catalog.snapshot();
+	assert_eq!(snap.video.renditions.len(), 1);
+	assert_eq!(snap.audio.renditions.len(), 1);
+	assert_eq!(catalog.hls_tracks(), 2, "only the live renditions keep records");
+
+	let live = consumer
+		.track(snap.video.renditions.keys().next().unwrap())
+		.unwrap()
+		.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+		.await
+		.unwrap();
+	drop(importer);
+	assert_eq!(catalog.hls_tracks(), 0, "a dropped importer retires its records");
+
+	for (track, label) in [(replaced, "replaced"), (live, "dropped")] {
+		let mut track = crate::container::Consumer::new(
+			track,
+			crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+		);
+		let frame = track.read_frame().await.unwrap();
+		assert_eq!(frame.expect(label).payload.as_ref(), &NALU, "{label}");
+		assert!(track.read_frame().await.unwrap().is_none(), "the {label} track ends");
+	}
 }
 
 #[tokio::test(start_paused = true)]
@@ -874,4 +986,50 @@ fn script_metadata_drops_warn_once() {
 			Err(format!("expected one metadata warning, got {warnings}"))
 		}
 	});
+}
+
+#[test]
+fn unsupported_codecs_fail_at_the_public_importer_boundary() {
+	let mut cases = vec![(super::TAG_VIDEO, vec![0x12, 0]), (super::TAG_AUDIO, vec![0xb0, 0])];
+	for (tag, packets) in [
+		(super::TAG_VIDEO, &[0, 1, 2, 3, 4][..]),
+		(super::TAG_AUDIO, &[0, 1, 2, 4][..]),
+	] {
+		for packet in packets {
+			cases.push((tag, vec![0x90 | packet, b'n', b'o', b'p', b'e']));
+			// OneTrack enhanced framing carries the same codec after its framing byte.
+			cases.push((tag, vec![0x95, *packet, b'n', b'o', b'p', b'e', 0]));
+		}
+	}
+
+	for (tag, payload) in cases {
+		let mut data = synth_flv();
+		write_tag(&mut data, tag, 0, &payload);
+		for initial in [false, true] {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+			let init = crate::import::ContainerInit::new(
+				crate::import::ContainerFormat::Flv,
+				if initial {
+					bytes::Bytes::copy_from_slice(&data)
+				} else {
+					bytes::Bytes::new()
+				},
+			);
+			let result = (|| -> crate::Result<()> {
+				let mut import: crate::import::Container =
+					crate::import::Container::new(broadcast, catalog.reserve(), &init)?;
+				if !initial {
+					for chunk in data.chunks(7) {
+						import.decode(chunk)?;
+					}
+				}
+				import.finish()
+			})();
+			assert!(
+				matches!(result, Err(crate::Error::UnknownFormat(_))),
+				"tag {tag}, initial {initial}: {result:?}"
+			);
+		}
+	}
 }

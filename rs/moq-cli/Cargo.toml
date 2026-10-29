@@ -128,6 +128,7 @@ moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs
 moq-transcode = { workspace = true, optional = true }
 moq-video = { workspace = true, optional = true }
 object_store = { workspace = true, features = ["fs"] }
+percent-encoding = { workspace = true }
 pollster = { workspace = true, optional = true }
 reqwest = { workspace = true, features = ["rustls", "json"] }
 rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }
@@ -162,7 +163,7 @@ test-env = { path = "../test-env" }
 # exporter drain timeouts instantly instead of waiting on the wall clock.
 tokio = { workspace = true, features = ["test-util"] }
 # Plays the `announced` view's frames on a virtual terminal, scrolling included.
-vt100 = "0.16.2"
+vt100 = "0.17.0"
 
 [target.'cfg(unix)'.dev-dependencies]
 # Sends the signals the `auth serve` shutdown test checks.
@@ -175,6 +176,10 @@ harness = false
 [[example]]
 name = "interop-tail"
 path = "../../test/interop/clients/rust/tail.rs"
+
+[[example]]
+name = "interop-catalog"
+path = "../../test/interop/clients/rust/catalog.rs"
 
 [[example]]
 name = "interop-goaway"

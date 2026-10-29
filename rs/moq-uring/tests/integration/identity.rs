@@ -2,7 +2,7 @@
 //! endpoint runs where its socket was adopted, whichever handle is in scope,
 //! and a socket whose worker is gone refuses to start anything.
 //!
-//! Unsupported local kernels skip loudly; MOQ_STRICT makes CI refuse them.
+//! Unsupported local kernels skip loudly; CI_STRICT makes CI refuse them.
 
 #![cfg(all(target_os = "linux", feature = "quic"))]
 
@@ -17,7 +17,7 @@ use moq_uring::{Config, Error, Worker, quic, udp};
 fn worker() -> Option<Worker> {
 	match Worker::new(Config::default()) {
 		Ok(worker) => Some(worker),
-		Err(Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
+		Err(Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
 			eprintln!("skipping io_uring identity test: {reason}");
 			None
 		}
@@ -36,8 +36,8 @@ fn server_config(certs: &support::Certs) -> quic::server::Config {
 	)
 }
 
-fn dial_config(peer: std::net::SocketAddr) -> quic::client::Config {
-	let mut config = quic::client::Config::new(peer, "localhost");
+fn dial_config() -> quic::client::Config {
+	let mut config = quic::client::Config::default();
 	config.alpn = vec![ALPN.to_string()];
 	config.verify = false;
 	config
@@ -86,7 +86,7 @@ fn a_stopped_worker_fails_dials_and_accepts() {
 	let peer = endpoint.local_addr();
 	drop(worker);
 
-	match poll_once(endpoint.connect(&dial_config(peer))) {
+	match poll_once(endpoint.connect(&dial_config(), peer, "localhost")) {
 		Poll::Ready(Err(quic::Error::Io(_))) => {}
 		other => panic!("a dial on a stopped worker should fail at once, got {other:?}"),
 	}
@@ -126,7 +126,9 @@ fn an_endpoint_runs_on_the_worker_that_adopted_its_socket() {
 		ready.send(()).expect("test alive");
 		worker
 			.block_on(async move {
-				let mut conn = quic::client::connect(sock, &dial_config(addr)).await.expect("dial");
+				let mut conn = quic::client::connect(sock, &dial_config(), addr, "localhost")
+					.await
+					.expect("dial");
 				std::future::poll_fn(|cx| web_transport_trait::poll::Session::poll_closed(&mut conn, cx)).await
 			})
 			.expect("client loop")

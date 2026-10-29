@@ -4,7 +4,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::protocol::validate_protocol;
 use crate::transport::WsTransport;
-use moq_net::transport::Binding;
+use moq_net::transport::Address;
 use moq_quic::Side;
 
 use crate::{Config, Error, Session, Version, alpn};
@@ -141,7 +141,7 @@ where
 	/// the socket itself. A server that kept a handle on the accepted connection
 	/// can attach it here and get the kernel's RTT (and, on Linux, delivery rate)
 	/// instead of only QMux's own `QX_PING` measurement. See
-	/// [`TcpStats`](crate::TcpStats).
+	/// `TcpStats` (Linux and macOS).
 	pub fn with_socket_stats(mut self, stats: crate::SharedSocketStats) -> Self {
 		self.socket_stats = Some(stats);
 		self
@@ -172,7 +172,7 @@ where
 	}
 
 	fn into_transport(self) -> Result<WsTransport<T>, Error> {
-		let mut transport = WsTransport::new(self.ws, Binding::Uri);
+		let mut transport = WsTransport::new(self.ws, Address::Uri);
 		if let Some(stats) = self.socket_stats {
 			transport = transport.with_socket_stats(stats);
 		}
@@ -315,7 +315,7 @@ impl Client {
 		}
 
 		let config = self.session.clone().with_negotiated(version, protocol);
-		let transport = WsTransport::new(ws_stream, Binding::Uri);
+		let transport = WsTransport::new(ws_stream, Address::Uri);
 		let transport = match self.keep_alive {
 			Some(ka) => transport.with_keep_alive(ka)?,
 			None => transport,
@@ -484,7 +484,7 @@ impl Server {
 			.expect("negotiated must be set after successful handshake");
 
 		let config = self.session.clone().with_negotiated(version, protocol);
-		let transport = WsTransport::new(ws, Binding::Uri);
+		let transport = WsTransport::new(ws, Address::Uri);
 		let transport = match self.keep_alive {
 			Some(ka) => transport.with_keep_alive(ka)?,
 			None => transport,
@@ -514,7 +514,7 @@ mod tests {
 			)
 			.await
 			.unwrap();
-		let mut session = accept.await.unwrap().unwrap();
+		let session = accept.await.unwrap().unwrap();
 
 		// A masked binary frame declaring 1 MiB, with none of its payload sent.
 		let mut frame = vec![0x82, 0x80 | 127];

@@ -1,11 +1,12 @@
 //! Connect to peers and manage MoQ sessions.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use url::Url;
 
-use crate::auth::MoqAuth;
-use crate::bandwidth::MoqBandwidth;
+use crate::auth::MoqGrantConsumer;
+use crate::bandwidth::MoqAllocator;
 use crate::error::MoqError;
 use crate::ffi::Task;
 use crate::origin::{MoqOriginConsumer, MoqOriginProducer};
@@ -30,17 +31,21 @@ pub struct MoqClientConfig {
 	/// Empty offers every supported version; [`moq_versions`] lists them.
 	#[uniffi(default = [])]
 	pub versions: Vec<String>,
-	/// How long one connect may take, dial and handshake together, in microseconds. 0 waits
-	/// forever.
+	/// Credentials each session's dials present. The first is the connection credential, unless
+	/// the URL carries its own `?jwt=`; each other one widens the session's grant. Replace a
+	/// session's through [`MoqSession::tokens`].
+	#[uniffi(default = [])]
+	pub tokens: Vec<String>,
+	/// How long one connect may take, dial and handshake together. 0 waits forever.
 	#[uniffi(default = None)]
-	pub timeout_us: Option<u64>,
-	/// Happy Eyeballs: how long before the next resolved address is also dialed, in
-	/// microseconds. 0 dials every address at once.
+	pub timeout: Option<Duration>,
+	/// Happy Eyeballs: how long before the next resolved address is also dialed. 0 dials
+	/// every address at once.
 	#[uniffi(default = None)]
-	pub race_us: Option<u64>,
-	/// Happy Eyeballs: how long IPv4 waits for the full DNS answer, in microseconds.
+	pub race: Option<Duration>,
+	/// Happy Eyeballs: how long IPv4 waits for the full DNS answer.
 	#[uniffi(default = None)]
-	pub resolution_delay_us: Option<u64>,
+	pub resolution_delay: Option<Duration>,
 	/// Certificate trust and the mTLS identity.
 	#[uniffi(default)]
 	pub tls: MoqClientTls,
@@ -59,6 +64,10 @@ pub struct MoqClientConfig {
 	/// Retry pacing for the automatic reconnect.
 	#[uniffi(default)]
 	pub backoff: MoqBackoff,
+	/// Your own `name/version` product tokens, space-separated, advertised in SETUP ahead of
+	/// moq-ffi's: `my-app/1.0` advertises `my-app/1.0 moq-ffi/0.4.12 moq-net-rs/0.3.10`.
+	#[uniffi(default = None)]
+	pub implementation: Option<String>,
 	/// The origin whose broadcasts are published to the remote.
 	///
 	/// With neither `publish` nor `consume` set, each session's two sides share one fresh
@@ -113,12 +122,12 @@ pub struct MoqQuicConfig {
 	/// endpoint subscribing to many tracks wants this raised.
 	#[uniffi(default = None)]
 	pub max_streams: Option<u64>,
-	/// How long an idle connection survives before it is dropped, in microseconds.
+	/// How long an idle connection survives before it is dropped.
 	#[uniffi(default = None)]
-	pub idle_timeout_us: Option<u64>,
-	/// Keep-alive ping interval, in microseconds. 0 disables it.
+	pub idle_timeout: Option<Duration>,
+	/// Keep-alive ping interval. 0 disables it.
 	#[uniffi(default = None)]
-	pub keep_alive_us: Option<u64>,
+	pub keep_alive: Option<Duration>,
 	/// UDP generic segmentation offload: batches sends into one syscall.
 	#[uniffi(default = None)]
 	pub gso: Option<bool>,
@@ -165,12 +174,8 @@ impl From<MoqQuicConfig> for moq_tokio::quic::Config {
 	fn from(config: MoqQuicConfig) -> Self {
 		let mut quic = Self::default();
 		quic.max_streams = config.max_streams;
-		quic.idle_timeout = config
-			.idle_timeout_us
-			.map(|us| std::time::Duration::from_micros(us).into());
-		quic.keep_alive = config
-			.keep_alive_us
-			.map(|us| std::time::Duration::from_micros(us).into());
+		quic.idle_timeout = config.idle_timeout.map(Into::into);
+		quic.keep_alive = config.keep_alive.map(Into::into);
 		quic.gso = config.gso;
 		quic.mtu_discovery = config.mtu_discovery;
 		quic.congestion_control = config.congestion_control.map(Into::into);
@@ -190,38 +195,52 @@ pub struct MoqWebSocketConfig {
 	/// QUIC, so a failed QUIC dial reports its own error.
 	#[uniffi(default = None)]
 	pub enabled: Option<bool>,
-	/// Head start QUIC gets before the fallback joins the race, in microseconds. Null uses
-	/// 200ms, and 0 races both at once.
+	/// Head start QUIC gets before the fallback joins the race. Null uses 200ms, and 0 races
+	/// both at once.
 	#[uniffi(default = None)]
-	pub delay_us: Option<u64>,
+	pub delay: Option<Duration>,
 }
 
 /// Retry pacing for the automatic reconnect.
 ///
-/// The delay starts at `initial_us`, multiplies by `multiplier` after each failed attempt,
-/// and caps at `max_us`. After `timeout_us` of consecutive failures the connection gives up
+/// The delay starts at `initial`, multiplies by `multiplier` after each failed attempt,
+/// and caps at `max`. After `timeout` of consecutive failures the connection gives up
 /// for good; the window resets whenever a session stays up past 1s. Each null field uses
 /// moq-tokio's default: 1s, x2, 5s, and a 10s window. Zero means off: no wait, no growth,
 /// no cap, or no give-up.
 #[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
 pub struct MoqBackoff {
-	/// Delay before the first reconnect attempt, in microseconds. 0 retries at once.
+	/// Delay before the first reconnect attempt. 0 retries at once.
 	#[uniffi(default = None)]
-	pub initial_us: Option<u64>,
+	pub initial: Option<Duration>,
 	/// Multiplier applied to the delay after each failure.
 	#[uniffi(default = None)]
 	pub multiplier: Option<u32>,
-	/// Maximum delay between reconnect attempts, in microseconds. 0 leaves it uncapped.
+	/// Maximum delay between reconnect attempts. 0 leaves it uncapped.
 	#[uniffi(default = None)]
-	pub max_us: Option<u64>,
-	/// Time spent retrying before giving up, in microseconds. 0 retries forever.
+	pub max: Option<Duration>,
+	/// Time spent retrying before giving up. 0 retries forever.
 	#[uniffi(default = None)]
-	pub timeout_us: Option<u64>,
+	pub timeout: Option<Duration>,
 }
 
-/// What sessions opened through this crate advertise in SETUP: moq-ffi ahead of its core.
-pub(crate) fn implementation() -> String {
-	format!("moq-ffi/{} {}", env!("CARGO_PKG_VERSION"), moq_net::IMPLEMENTATION)
+/// What sessions opened through this crate advertise in SETUP: the caller's `prefix`, then
+/// moq-ffi, then its core.
+pub(crate) fn implementation(prefix: Option<&str>) -> Result<String, MoqError> {
+	let core = format!("moq-ffi/{} {}", env!("CARGO_PKG_VERSION"), moq_net::IMPLEMENTATION);
+	let Some(prefix) = prefix else {
+		return Ok(core);
+	};
+	// An empty token or stray whitespace would corrupt the list every peer splits on spaces.
+	if prefix
+		.split(' ')
+		.any(|token| token.is_empty() || token.contains(|c: char| c.is_whitespace() || c.is_control()))
+	{
+		return Err(MoqError::Config {
+			reason: format!("implementation must be space-separated product tokens: {prefix:?}"),
+		});
+	}
+	Ok(format!("{prefix} {core}"))
 }
 
 /// The settings a default [`MoqClientConfig`] dials with, for a settings UI to show.
@@ -234,8 +253,6 @@ pub(crate) fn implementation() -> String {
 pub fn moq_client_defaults() -> MoqClientConfig {
 	#[cfg(not(target_arch = "wasm32"))]
 	{
-		let micros = |duration: std::time::Duration| u64::try_from(duration.as_micros()).unwrap_or(u64::MAX);
-
 		let connect = moq_tokio::connect::Config::default();
 		let resolved = connect.resolve();
 		let websocket = connect.websocket.resolve();
@@ -243,24 +260,24 @@ pub fn moq_client_defaults() -> MoqClientConfig {
 		let quic = moq_tokio::quic::Config::default().resolve();
 
 		MoqClientConfig {
-			timeout_us: Some(micros(resolved.timeout)),
-			race_us: Some(micros(resolved.race)),
-			resolution_delay_us: Some(micros(resolved.resolution_delay)),
+			timeout: Some(resolved.timeout),
+			race: Some(resolved.race),
+			resolution_delay: Some(resolved.resolution_delay),
 			quic: MoqQuicConfig {
 				max_streams: Some(quic.max_streams),
-				idle_timeout_us: Some(micros(quic.idle_timeout)),
-				keep_alive_us: Some(quic.keep_alive.map_or(0, micros)),
+				idle_timeout: Some(quic.idle_timeout),
+				keep_alive: Some(quic.keep_alive.unwrap_or_default()),
 				..Default::default()
 			},
 			websocket: MoqWebSocketConfig {
 				enabled: Some(websocket.enabled),
-				delay_us: Some(micros(websocket.delay)),
+				delay: Some(websocket.delay),
 			},
 			backoff: MoqBackoff {
-				initial_us: Some(micros(backoff.initial())),
+				initial: Some(backoff.initial()),
 				multiplier: Some(backoff.multiplier),
-				max_us: Some(micros(backoff.max())),
-				timeout_us: Some(micros(backoff.timeout())),
+				max: Some(backoff.max()),
+				timeout: Some(backoff.timeout()),
 			},
 			..Default::default()
 		}
@@ -298,6 +315,20 @@ pub(crate) fn parse_versions(versions: &[String]) -> Result<Vec<moq_net::Version
 		.collect()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_tokens(tokens: Vec<String>) -> Result<Vec<moq_net::auth::Token>, MoqError> {
+	tokens
+		.into_iter()
+		.map(|token| {
+			token
+				.try_into()
+				.map_err(|err: moq_net::auth::EmptyToken| MoqError::Config {
+					reason: err.to_string(),
+				})
+		})
+		.collect()
+}
+
 /// Native QUIC/WebTransport client state: the configured endpoint and the wired origins.
 #[cfg(not(target_arch = "wasm32"))]
 struct Client {
@@ -312,7 +343,7 @@ impl Client {
 		let _guard = crate::ffi::enter();
 
 		let mut connect = moq_tokio::connect::Config::default();
-		connect.implementation = Some(implementation());
+		connect.implementation = Some(implementation(config.implementation.as_deref())?);
 		if let Some(bind) = config.bind {
 			let bind = bind.parse().map_err(|err| MoqError::Config {
 				reason: format!("invalid bind address {bind}: {err}"),
@@ -320,11 +351,10 @@ impl Client {
 			connect.bind = Some(bind);
 		}
 		connect.version = parse_versions(&config.versions)?;
-		connect.timeout = config.timeout_us.map(|us| std::time::Duration::from_micros(us).into());
-		connect.race = config.race_us.map(|us| std::time::Duration::from_micros(us).into());
-		connect.resolution_delay = config
-			.resolution_delay_us
-			.map(|us| std::time::Duration::from_micros(us).into());
+		connect.tokens = parse_tokens(config.tokens)?;
+		connect.timeout = config.timeout.map(Into::into);
+		connect.race = config.race.map(Into::into);
+		connect.resolution_delay = config.resolution_delay.map(Into::into);
 
 		let tls = config.tls;
 		connect.tls.insecure = Some(tls.insecure);
@@ -336,22 +366,22 @@ impl Client {
 		connect.tls.host_name = tls.host_name;
 
 		connect.websocket.enabled = config.websocket.enabled;
-		if let Some(delay) = config.websocket.delay_us {
-			connect.websocket.delay = Some((std::time::Duration::from_micros(delay)).into());
+		if let Some(delay) = config.websocket.delay {
+			connect.websocket.delay = Some(delay.into());
 		}
 
 		let backoff = config.backoff;
-		if let Some(initial) = backoff.initial_us {
-			connect.backoff.initial = Some((std::time::Duration::from_micros(initial)).into());
+		if let Some(initial) = backoff.initial {
+			connect.backoff.initial = Some(initial.into());
 		}
 		if let Some(multiplier) = backoff.multiplier {
 			connect.backoff.multiplier = multiplier;
 		}
-		if let Some(max) = backoff.max_us {
-			connect.backoff.max = Some((std::time::Duration::from_micros(max)).into());
+		if let Some(max) = backoff.max {
+			connect.backoff.max = Some(max.into());
 		}
-		if let Some(timeout) = backoff.timeout_us {
-			connect.backoff.timeout = Some((std::time::Duration::from_micros(timeout)).into());
+		if let Some(timeout) = backoff.timeout {
+			connect.backoff.timeout = Some(timeout.into());
 		}
 
 		let quic = config.quic.into();
@@ -563,6 +593,33 @@ mod tests {
 			..Default::default()
 		};
 		assert!(matches!(MoqClient::new(missing), Err(MoqError::Config { .. })));
+
+		let empty = MoqClientConfig {
+			tokens: vec![String::new()],
+			..Default::default()
+		};
+		assert!(matches!(MoqClient::new(empty), Err(MoqError::Config { .. })));
+
+		for prefix in ["", " app/1", "app/1 ", "app/1  lib/2", "app/1\tlib/2", "app/1\n"] {
+			let implementation = MoqClientConfig {
+				implementation: Some(prefix.into()),
+				..Default::default()
+			};
+			assert!(
+				matches!(MoqClient::new(implementation), Err(MoqError::Config { .. })),
+				"{prefix:?}"
+			);
+		}
+	}
+
+	#[tokio::test]
+	async fn setting_tokens_refuses_an_empty_token() {
+		let client = MoqClient::new(MoqClientConfig::default()).unwrap();
+		let session = client.connect("moqt://localhost:1/".into()).await.unwrap();
+		let tokens = session.tokens().expect("a client session has tokens");
+		tokens.set(vec!["a".into(), "b".into()]).unwrap();
+		assert!(matches!(tokens.set(vec![String::new()]), Err(MoqError::Config { .. })));
+		session.cancel(0);
 	}
 
 	#[test]
@@ -571,9 +628,10 @@ mod tests {
 		MoqClient::new(MoqClientConfig {
 			bind: Some("127.0.0.1:0".into()),
 			versions: vec!["moq-lite-03".into()],
+			tokens: vec!["credential".into()],
 			once: true,
 			backoff: MoqBackoff {
-				timeout_us: Some(0),
+				timeout: Some(Duration::ZERO),
 				..Default::default()
 			},
 			..Default::default()
@@ -592,6 +650,8 @@ struct Client {
 	fingerprints: Vec<Vec<u8>>,
 	/// Offered as ALPNs to WebTransport and then enforced by moq-net, so the two agree.
 	versions: moq_net::Versions,
+	/// What SETUP advertises, with the caller's prefix joined.
+	implementation: String,
 	publish: Option<Arc<MoqOriginProducer>>,
 	consume: Option<Arc<MoqOriginProducer>>,
 }
@@ -602,15 +662,18 @@ impl Client {
 		let MoqClientConfig {
 			bind,
 			versions,
-			timeout_us,
-			race_us,
-			resolution_delay_us,
+			// Presenting tokens needs the native client's dial and AUTH handling.
+			tokens,
+			timeout,
+			race,
+			resolution_delay,
 			tls,
 			quic,
 			websocket,
 			// A browser session never redials, so it dials once either way.
 			once: _,
 			backoff,
+			implementation: prefix,
 			publish,
 			consume,
 		} = config;
@@ -620,9 +683,10 @@ impl Client {
 			..tls.clone()
 		};
 		if bind.is_some()
-			|| timeout_us.is_some()
-			|| race_us.is_some()
-			|| resolution_delay_us.is_some()
+			|| !tokens.is_empty()
+			|| timeout.is_some()
+			|| race.is_some()
+			|| resolution_delay.is_some()
 			|| native_tls != MoqClientTls::default()
 			|| quic != MoqQuicConfig::default()
 			|| websocket != MoqWebSocketConfig::default()
@@ -641,6 +705,7 @@ impl Client {
 				true => moq_net::Versions::default(),
 				false => parse_versions(&versions)?.into(),
 			},
+			implementation: implementation(prefix.as_deref())?,
 			publish,
 			consume,
 		})
@@ -651,15 +716,16 @@ impl Client {
 
 		let versions = self.versions.clone();
 		let fingerprints = self.fingerprints.clone();
+		let client = moq_net::Client::new().with_url(url.clone());
 		let transport = async move {
 			match fingerprints.is_empty() {
 				true => crate::transport::connect(url, &versions).await,
 				false => crate::transport::connect_with_hashes(url, &versions, fingerprints).await,
 			}
 		};
-		let client = moq_net::Client::new()
+		let client = client
 			.with_versions(self.versions.clone())
-			.with_implementation(implementation())
+			.with_implementation(self.implementation.clone())
 			.with_publisher(&publish.inner)
 			.with_subscriber(subscribe.inner.clone());
 
@@ -758,6 +824,57 @@ impl MoqClient {
 	}
 }
 
+/// The credentials a native client session presents, replaceable while it runs.
+///
+/// Returned by [`MoqSession::tokens`], seeded from [`MoqClientConfig::tokens`].
+#[derive(uniffi::Object)]
+pub struct MoqTokens {
+	#[cfg(not(target_arch = "wasm32"))]
+	inner: moq_net::auth::Tokens,
+}
+
+#[uniffi::export]
+impl MoqTokens {
+	/// Replace the credentials every dial presents, such as before the current ones expire.
+	///
+	/// The first is the connection credential, unless the URL carries its own `?jwt=`; each
+	/// other one widens the grant over in-band AUTH. The next dial presents them, and a live
+	/// session that supports in-band AUTH presents them at once, withdrawing each replaced
+	/// token once its replacements are answered, even when one is refused. After an
+	/// authorization refusal the session redials only if they changed.
+	pub fn set(&self, tokens: Vec<String>) -> Result<(), MoqError> {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			self.inner.set(parse_tokens(tokens)?);
+			Ok(())
+		}
+		#[cfg(target_arch = "wasm32")]
+		{
+			let _ = tokens;
+			Err(MoqError::Unsupported)
+		}
+	}
+
+	/// Wait for the peer's first verdict on the tokens the last [`set`](Self::set) newly
+	/// presented: `Ok` once each is granted, in band or as a later dial's connection credential.
+	///
+	/// A token the set kept counts only once refused, and nothing is re-checked after the
+	/// answer. The peer's refusal is a [`MoqError::Protocol`] carrying its code,
+	/// [`MoqError::Unsupported`] when the session cannot carry an in-band token, and the
+	/// connection's end, such as a refused dial, is its close reason.
+	pub async fn answered(&self) -> Result<(), MoqError> {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			let tokens = self.inner.clone();
+			crate::ffi::detached(async move { tokens.answered().await.map_err(MoqError::from) }).await
+		}
+		#[cfg(target_arch = "wasm32")]
+		{
+			Err(MoqError::Unsupported)
+		}
+	}
+}
+
 /// A snapshot of connection statistics for a [`MoqSession`].
 ///
 /// Each field is `None` when the transport backend doesn't report that metric (native QUIC
@@ -766,8 +883,8 @@ impl MoqClient {
 /// not the same as a zero value.
 #[derive(uniffi::Record)]
 pub struct MoqConnectionStats {
-	/// Smoothed round-trip time, in microseconds.
-	pub rtt_us: Option<u64>,
+	/// Smoothed round-trip time.
+	pub rtt: Option<Duration>,
 	/// Estimated send bandwidth from the congestion controller, in bits per second.
 	pub estimated_send_rate_bps: Option<u64>,
 	/// Total bytes sent, including retransmissions and overhead.
@@ -792,7 +909,7 @@ pub struct MoqConnectionStats {
 impl MoqConnectionStats {
 	fn new(stats: moq_net::session::Stats, version: Option<moq_net::Version>) -> Self {
 		Self {
-			rtt_us: stats.rtt.map(|d| d.as_micros() as u64),
+			rtt: stats.rtt.map(crate::ffi::duration),
 			estimated_send_rate_bps: stats.estimated_send_rate.map(moq_net::bandwidth::Rate::as_bps),
 			bytes_sent: stats.bytes_sent,
 			bytes_received: stats.bytes_received,
@@ -944,9 +1061,9 @@ pub struct MoqSession {
 	closed: Task<Inner>,
 	publisher: Arc<MoqOriginProducer>,
 	consumer: Arc<MoqOriginConsumer>,
-	/// One allocator for the session. Every [`bandwidth`](Self::bandwidth) handle
+	/// One allocator for the session. Every [`allocator`](Self::allocator) handle
 	/// clones it, so they share one reservation registry.
-	bandwidth: Arc<MoqBandwidth>,
+	allocator: Arc<MoqAllocator>,
 }
 
 impl MoqSession {
@@ -975,12 +1092,12 @@ impl MoqSession {
 			// Persistent across reconnects: `None` while disconnected, then a grant
 			// again on the next connection. Reservations survive the gap.
 			#[cfg(not(target_arch = "wasm32"))]
-			Inner::Connection(connection) => connection.bandwidth(),
+			Inner::Connection(connection) => connection.allocator(),
 			#[cfg(not(target_arch = "wasm32"))]
-			Inner::Session(session) => session.bandwidth(),
+			Inner::Session(session) => session.allocator(),
 			// Persistent from before the handshake, so a reservation made while dialing counts.
 			#[cfg(target_arch = "wasm32")]
-			Inner::Dial(dial) => dial.bandwidth(),
+			Inner::Dial(dial) => dial.allocator(),
 		}
 	}
 
@@ -990,14 +1107,14 @@ impl MoqSession {
 		// is where the remote's broadcasts land (read via its consumer view).
 		let publisher = Arc::new(MoqOriginProducer::from_inner(publish));
 		let consumer = Arc::new(MoqOriginConsumer::from_inner(subscribe));
-		let bandwidth = Arc::new(MoqBandwidth::new(Self::mint_allocator(&inner)));
+		let allocator = Arc::new(MoqAllocator::new(Self::mint_allocator(&inner)));
 		Self {
 			inner: inner.clone(),
 			shutdown: Default::default(),
 			closed: Task::new(inner.clone()),
 			publisher,
 			consumer,
-			bandwidth,
+			allocator,
 		}
 	}
 
@@ -1190,18 +1307,16 @@ impl MoqSession {
 	/// reconnects: the grant is `None` while disconnected and resumes on the
 	/// next connection. An accepted session with no congestion estimate mints
 	/// an unlimited allocator, which reports `None` for every reservation.
-	pub fn bandwidth(&self) -> Arc<MoqBandwidth> {
-		self.bandwidth.clone()
+	pub fn allocator(&self) -> Arc<MoqAllocator> {
+		self.allocator.clone()
 	}
 
-	/// The session's authorization: the grant its peer gave it, and more tokens to present.
+	/// Follow the grant the peer gave this session.
 	///
-	/// Every call returns a new handle sharing the session's tokens, which tracks its own
-	/// [`grant_changed`](MoqAuth::grant_changed), so concurrent watchers each take one. A client
-	/// session's handle survives reconnects, presenting each added token again on every new
-	/// connection.
-	pub fn auth(&self) -> Arc<MoqAuth> {
-		Arc::new(MoqAuth::new(match &self.inner {
+	/// Every call returns an independent consumer. A client session's grant follows each
+	/// reconnect, reading `None` while offline.
+	pub fn grants(&self) -> Arc<MoqGrantConsumer> {
+		Arc::new(MoqGrantConsumer::new(&match &self.inner {
 			#[cfg(not(target_arch = "wasm32"))]
 			Inner::Connection(connection) => connection.auth(),
 			#[cfg(not(target_arch = "wasm32"))]
@@ -1209,6 +1324,23 @@ impl MoqSession {
 			#[cfg(target_arch = "wasm32")]
 			Inner::Dial(dial) => dial.auth(),
 		}))
+	}
+
+	/// The credentials a native client session presents, to replace while it runs.
+	///
+	/// `None` for a server-accepted session, which presents none, and in the browser, where
+	/// the URL carries the credential.
+	pub fn tokens(&self) -> Option<Arc<MoqTokens>> {
+		match &self.inner {
+			#[cfg(not(target_arch = "wasm32"))]
+			Inner::Connection(connection) => Some(Arc::new(MoqTokens {
+				inner: connection.tokens(),
+			})),
+			#[cfg(not(target_arch = "wasm32"))]
+			Inner::Session(_) => None,
+			#[cfg(target_arch = "wasm32")]
+			Inner::Dial(_) => None,
+		}
 	}
 
 	/// Hold receive-estimate demand until the returned consumer is released.

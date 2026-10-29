@@ -13,9 +13,8 @@ from moq_ffi import (
     moq_versions,
 )
 
-from ._records import Backoff, ClientTls, QuicConfig, WebSocketConfig, _opt_us, _strs
-from .origin import AnnounceConsumer, AnnouncedBroadcast, OriginConsumer, OriginProducer
-from .publish import BroadcastProducer
+from ._records import Backoff, ClientTls, QuicConfig, WebSocketConfig, _implementation, _strs
+from .origin import AnnounceConsumer, AnnouncedBroadcast, OriginConsumer, OriginProducer, Publication
 from .session import Session
 from .subscribe import BroadcastConsumer
 
@@ -65,6 +64,12 @@ class Client:
     ``versions`` restricts the protocol versions offered, most preferred first, spelled
     like ``"moq-lite-03"``; empty offers every supported version, which :func:`versions` lists.
 
+    ``tokens`` are credentials every dial presents. The first is the connection credential,
+    sent in SETUP and, while an offered version can't carry it there, the URL's ``?jwt=``;
+    each other one widens the session's grant over in-band AUTH. A URL that already carries
+    ``?jwt=`` keeps it, and then every token rides AUTH. Replace them before they expire
+    through :meth:`tokens`.
+
     ``timeout`` bounds one connect, dial and handshake together (zero waits forever).
     ``race`` and ``resolution_delay`` pace Happy Eyeballs. ``tls`` sets certificate trust
     and the mTLS identity (:class:`ClientTls`), and ``quic`` tunes the transport
@@ -77,6 +82,7 @@ class Client:
         *,
         bind: str | None = None,
         versions: Sequence[str] = (),
+        tokens: Sequence[str] = (),
         timeout: timedelta | None = None,
         race: timedelta | None = None,
         resolution_delay: timedelta | None = None,
@@ -94,14 +100,16 @@ class Client:
         self._config = MoqClientConfig(
             bind=bind,
             versions=_strs(versions, "versions"),
-            timeout_us=_opt_us(timeout, "timeout"),
-            race_us=_opt_us(race, "race"),
-            resolution_delay_us=_opt_us(resolution_delay, "resolution_delay"),
+            tokens=_strs(tokens, "tokens"),
+            timeout=timeout,
+            race=race,
+            resolution_delay=resolution_delay,
             tls=(tls or ClientTls())._ffi(),
             quic=(quic or QuicConfig())._ffi(),
             websocket=(websocket or WebSocketConfig())._ffi(),
             once=once,
             backoff=(backoff or Backoff())._ffi(),
+            implementation=_implementation(),
             publish=None if publish is None else publish._inner,
             consume=None if consume is None else consume._inner,
         )
@@ -147,7 +155,7 @@ class Client:
                 self._inner.cancel()
                 self._inner = None
 
-    def create_broadcast(self, path: str) -> BroadcastProducer:
+    def create_broadcast(self, path: str) -> Publication:
         """Create an unannounced broadcast at ``path``, invisible until announced. Announce it after populating tracks.
 
         See :meth:`OriginProducer.create_broadcast`.
@@ -193,6 +201,7 @@ def connect(
     *,
     bind: str | None = None,
     versions: Sequence[str] = (),
+    tokens: Sequence[str] = (),
     timeout: timedelta | None = None,
     race: timedelta | None = None,
     resolution_delay: timedelta | None = None,
@@ -215,6 +224,7 @@ def connect(
         url,
         bind=bind,
         versions=versions,
+        tokens=tokens,
         timeout=timeout,
         race=race,
         resolution_delay=resolution_delay,

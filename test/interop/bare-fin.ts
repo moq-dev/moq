@@ -2,8 +2,8 @@
 import assert from "node:assert/strict";
 import { ProtocolViolation } from "../../js/net/src/error.ts";
 import { randomHop } from "../../js/net/src/hop.ts";
-import { NativeSession } from "../../js/net/src/ietf/adapter.ts";
 import { PublishDone } from "../../js/net/src/ietf/publish.ts";
+import { NativeSession } from "../../js/net/src/ietf/session.ts";
 import { Subscribe as IetfSubscribe, SubscribeOk } from "../../js/net/src/ietf/subscribe.ts";
 import { Subscriber as IetfSubscriber } from "../../js/net/src/ietf/subscriber.ts";
 import { Version as IetfVersion } from "../../js/net/src/ietf/version.ts";
@@ -35,7 +35,7 @@ const output = new Writer(
 			bytes.push(...chunk);
 		},
 	}),
-	version ?? IetfVersion.DRAFT_19,
+	version ?? IetfVersion.DRAFT_18,
 );
 let reader: TrackSubscriber;
 let peer: Stream | undefined;
@@ -55,16 +55,16 @@ if (version !== undefined) {
 	if (input.started) await encodeSubscribeResponse(output, { start: new SubscribeStart(0) }, version);
 	if (input.clean) await encodeSubscribeResponse(output, { end: new SubscribeEnd(0) }, version);
 } else {
-	assert.equal(input.version, "moqt-19");
-	const version = IetfVersion.DRAFT_19;
+	assert.equal(input.version, "moqt-18");
+	const version = IetfVersion.DRAFT_18;
 	const subscriber = new IetfSubscriber({ session: new NativeSession(pair.client, version, true) });
 	reader = subscriber.consume(path).track("video").subscribe();
 	peer = await Stream.accept(pair.server, version);
 	assert(peer);
 	assert.equal(await peer.reader.u53(), IetfSubscribe.id);
-	const request = await IetfSubscribe.decode(peer.reader, version);
+	await IetfSubscribe.decode(peer.reader, version);
 	await peer.writer.u53(SubscribeOk.id);
-	await new SubscribeOk({ requestId: request.requestId, trackAlias: 0n }).encode(peer.writer, version);
+	await new SubscribeOk({ trackAlias: 0n }).encode(peer.writer, version);
 	if (input.clean) {
 		await output.u53(PublishDone.id);
 		await new PublishDone({ statusCode: 0x2, streamCount: 0n, reasonPhrase: "done" }).encode(output, version);

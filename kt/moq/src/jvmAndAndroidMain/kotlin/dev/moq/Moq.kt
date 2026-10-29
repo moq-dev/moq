@@ -19,10 +19,10 @@ class Moq internal constructor(
     /**
      * Create an unannounced broadcast at [path], invisible to everyone until announced.
      *
-     * Advertise it with `announce` after populating tracks. `end()` ends it for good; `close()`
-     * (or `use`) releases the handle, which ends it once no `dynamic()` handle remains.
+     * Fill `broadcast()`, then advertise it with `announce`. The broadcast's `end()` ends it for
+     * good, as does releasing its last handle: the publication, each `broadcast()`, and `requests()`.
      */
-    fun createBroadcast(path: String): BroadcastProducer = session.publish().createBroadcast(path)
+    fun createBroadcast(path: String): Publication = session.publish().createBroadcast(path)
 
     /**
      * Discover routes matching [config]; prefixes stay relative to the origin.
@@ -54,19 +54,30 @@ class Moq internal constructor(
     /**
      * The session's bandwidth allocator.
      *
-     * Every call returns a handle to the same registry. [Bandwidth.reserve] a
+     * Every call returns a handle to the same registry. [Allocator.reserve] a
      * share for an app-owned encoder, or pass the handle to an audio or video
      * producer.
      */
-    fun bandwidth(): Bandwidth = session.bandwidth()
+    fun allocator(): Allocator = session.allocator()
 
     /**
-     * The session's authorization: the grant its peer gave it, and more tokens to present.
+     * Follow the grant the peer gave this session.
      *
-     * Collect [Auth.grants] to follow the grant, and [Auth.add] a fresh token before the
-     * current one expires; each added token is presented again on every reconnect.
+     * Collect `grants().updates()` for the current grant and each change. Every call returns
+     * an independent consumer.
      */
-    fun auth(): Auth = session.auth()
+    fun grants(): GrantConsumer = session.grants()
+
+    /**
+     * The credentials every dial presents ([ClientConfig.tokens]), to replace while running.
+     *
+     * [Tokens.set] replaces them, such as before the current ones expire: the next dial presents
+     * them, and a live session with in-band AUTH presents them at once, withdrawing each
+     * replaced token once its replacements are answered, even when one is refused. After an
+     * authorization refusal the session redials only if they changed. An empty token throws
+     * `MoqException.Config`. Suspend on [Tokens.answered] for the relay's verdict.
+     */
+    fun tokens(): Tokens = checkNotNull(session.tokens()) { "a client session presents tokens" }
 
     /**
      * Request a draining close now; await `session.closed()` for its result, then [close]
@@ -99,7 +110,7 @@ class Moq internal constructor(
          * two directions.
          */
         suspend fun connect(url: String, config: ClientConfig = ClientConfig()): Moq {
-            val client = Client(config)
+            val client = Client(config.copy(implementation = implementation(config.implementation)))
             try {
                 return Moq(client.connect(url), client)
             } catch (e: Throwable) {

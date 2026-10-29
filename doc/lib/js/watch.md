@@ -6,6 +6,7 @@ description: Subscribe, decode, and render broadcasts in the browser
 # @moq/watch
 
 [![npm](https://img.shields.io/npm/v/@moq/watch)](https://www.npmjs.com/package/@moq/watch)
+[![API](https://img.shields.io/badge/API-reference-blue)](/lib/js/api/watch)
 
 A player: subscribes to a broadcast, picks renditions, decodes with
 WebCodecs, renders video to a canvas and audio through WebAudio, and keeps them
@@ -29,17 +30,20 @@ in sync at the latency you ask for.
 | Attribute | |
 | --- | --- |
 | `url`, `name` | Relay URL (with `?jwt=` if needed) and broadcast name. |
-| `versions` | Protocol versions to offer, most preferred first, comma-separated like `moq-transport-14,moq-lite-06`. Every stable version by default. |
+| `versions` | Protocol versions to offer, most preferred first, comma-separated like `moq-transport-18,moq-lite-06`. Every stable version by default. |
 | `paused`, `muted`, `volume` | The usual player controls. |
 | `delay` | How far playback trails the live edge: `"auto"` (the default, sized from how late frames arrive; see [audio jitter](/concept/audio-jitter)), a duration like `"300ms"`, or `"instant"` to paint video as it decodes, with no audio. |
 | `buffer` | How far ahead of the live edge media may run; see [buffered playback](#buffered-playback). |
 | `captions` | The caption track to show. |
 | `visible` | Only download video while the element is on screen (or near it). |
 | `backend` | How the canvas is drawn; see [@moq/video](/lib/js/video). `auto` (default), `webgpu`, or `2d`. |
-| `announced` | Wait for the broadcast to be announced before subscribing (default on), so a player can mount before the stream exists. |
-| `catalog-format` | `hang`, `hangz`, `msf`, or `manual`; detected from the name by default. |
+| `follow` | Follow the broadcast's announcements (default on): wait for one before subscribing, so a player can mount before the stream exists, and move to each restart. Off requests the name once. |
+| `catalog-format` | `hang`, `msf`, or `manual`; detected from the name by default. |
 
-Every attribute is also a reactive property. The
+Every attribute is also a reactive property, and property or UI changes reflect
+back into the attributes. An invalid value is refused rather than defaulted: the
+property setter throws, and invalid markup reports a browser `error` event and
+suspends the element until corrected or removed. The
 [README](https://www.npmjs.com/package/@moq/watch) lists types and defaults.
 The overlay adds play/pause, volume, fullscreen, a quality selector, a
 buffering indicator, and a stats panel.
@@ -122,7 +126,7 @@ const dispose = el.signals.run((effect) => {
 
 Call `dispose()` on unmount. The effect re-runs when the catalog or the
 active broadcast changes, so a reconnect resubscribes on its own: the
-broadcast's announced request moves to each start or restart, and switches only
+broadcast's follower moves to each start or restart, and switches only
 when that resolves another broadcast. A request ending is never the trigger, so
 following a restart needs a relay with discovery.
 

@@ -1,4 +1,4 @@
-//! The Rust baselines for the binding benchmark (`just bench-ffi`, see `bench/README.md`).
+//! The Rust baselines for the binding benchmark (see `bench/README.md`).
 //!
 //! Every wrapper runs the same loop, so dividing a wrapper's numbers by these isolates
 //! what it adds: `rust-ffi` calls the exported API without crossing the FFI, and `rust-net`
@@ -238,10 +238,10 @@ async fn rust_ffi() {
 		let origin = MoqOriginProducer::new(MoqOriginConfig {
 			cache_capacity_bytes: Some(CACHE_BYTES),
 		});
-		let broadcast = origin.create_broadcast("bench".into()).unwrap();
+		let broadcast = origin.create_broadcast("bench".into()).unwrap().broadcast();
 		let timed = MoqTrackInfo {
 			priority: 0,
-			max_age_us: None,
+			max_age: None,
 			refresh: None,
 			timescale: Some(1_000_000),
 			compress: false,
@@ -267,7 +267,7 @@ async fn rust_ffi() {
 	});
 	let consumer = track.consume(None).unwrap();
 	report.call("info", || {
-		black_box(black_box(&consumer).info().unwrap());
+		black_box(black_box(&consumer).info());
 	});
 	report.write("rust-ffi");
 }
@@ -308,7 +308,7 @@ async fn rust_net() {
 }
 
 #[tokio::test]
-#[ignore = "benchmark: run by `just bench-ffi`"]
+#[ignore = "benchmark: see bench/README.md"]
 async fn benchmark_ffi() {
 	rust_ffi().await;
 	rust_net().await;

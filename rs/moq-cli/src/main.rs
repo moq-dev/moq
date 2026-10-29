@@ -193,13 +193,7 @@ impl Serving {
 			Err(err) => return Err(anyhow::Error::new(err).context("admission timed out")),
 			Ok(Ok(lease)) => lease,
 			Ok(Err(err)) => {
-				let status = axum::http::StatusCode::from(&err);
-				let reject = match status {
-					axum::http::StatusCode::UNAUTHORIZED => moq_tokio::server::Reject::Unauthorized,
-					axum::http::StatusCode::FORBIDDEN => moq_tokio::server::Reject::Forbidden,
-					status => moq_tokio::server::Reject::App(status.as_u16()),
-				};
-				request.reject(reject).await.ok();
+				request.reject(moq_net::SessionError::from(&err)).await.ok();
 				return Err(anyhow::Error::new(err).context("session refused"));
 			}
 		};
@@ -215,7 +209,7 @@ impl Serving {
 			.then(|| origin.scope(&token.root, &token.publish).ok())
 			.flatten();
 		if publish.is_none() && subscribe.is_none() {
-			request.reject(moq_tokio::server::Reject::Forbidden).await.ok();
+			request.reject(moq_net::SessionError::Unauthorized).await.ok();
 			anyhow::bail!("grant allows nothing this endpoint serves at {}", token.root);
 		}
 
@@ -265,7 +259,7 @@ fn spawn_serve(tasks: &mut JoinSet<anyhow::Result<()>>, mut listener: moq_tokio:
 					return;
 				} else if serving.lan && !is_public_transport(request.transport(), serving.public_quic) {
 					tracing::debug!(path = %request.path(), "refusing a non-peer request on the LAN mesh listener");
-					request.reject(moq_tokio::server::Reject::App(404)).await.ok();
+					request.reject(moq_net::SessionError::App(404)).await.ok();
 					return;
 				} else {
 					match moq_tokio::panic::isolate(serving.serve_client(request)).await {
@@ -482,7 +476,7 @@ async fn spawn_moq(
 		// Read before the handle moves into the task. This allocator is persistent: it
 		// survives reconnects, granting `None` while down, so it can be wired up before
 		// anything connects, and every session probes for its reservations.
-		bandwidth = reconnect.bandwidth();
+		bandwidth = reconnect.allocator();
 		let closed = reconnect.clone();
 		tasks.spawn(async move { Ok(closed.closed().await?) });
 		connection = Some(reconnect);
@@ -592,12 +586,22 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 						claim("stdin", &mut stdin, &name)?;
 					}
 					let report = import.report;
+					let echo = import
+						.echo_path
+						.as_deref()
+						.map(hang::moq_net::path::Relative::new)
+						.transpose()?
+						.map(hang::catalog::Echo::new);
 					if let Some(mut publish) =
 						spawn_import(&origin, import, name, epoch.clone(), bandwidth.clone(), &mut tasks)?
 					{
-						// Before `run` declares a track, so the `stats` section rides the first catalog.
+						// Before `run` declares a track, so the `stats` and `echo` sections ride the
+						// first catalog.
 						if report {
 							publish = publish.with_report(connection.as_ref().map(moq_tokio::Connection::monitor))?;
+						}
+						if let Some(echo) = echo {
+							publish = publish.with_echo(echo)?;
 						}
 						locals.push(publish);
 					}
@@ -745,10 +749,10 @@ fn spawn_import(
 		}) = &import.source
 		{
 			let name = require_broadcast(name, "import ts --program all")?;
-			Publish::ts_programs(origin.clone(), name, config)
+			Publish::ts_programs(origin.clone(), moq_net::Path::new(&name)?, config)
 		} else {
 			let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
-			Publish::new(broadcast, &format, config)?
+			Publish::from_publication(broadcast, &format, config)?
 		}
 		.with_linger(linger);
 		publish.announce(epoch)?;
@@ -916,15 +920,15 @@ async fn run_stdout(
 ) -> anyhow::Result<()> {
 	let catalog = args.catalog_format(&name);
 
-	// Confirm the broadcast is reachable and wait for it to be announced; `Subscribe` then
-	// resolves it, and any sibling broadcast a rendition's `broadcast` field references
-	// (e.g. "./source") through the same origin.
-	consumer
-		.routed(&name)
+	// Wait for the broadcast to be announced; the export resolves any sibling broadcast a
+	// rendition's `broadcast` field references (e.g. "./source") through the same origin.
+	let broadcast = consumer
+		.follow(name.as_str(), None)?
+		.available()
 		.await
-		.ok_or_else(|| anyhow::anyhow!("origin closed before broadcast `{name}` was announced"))?;
+		.with_context(|| format!("failed to resolve broadcast `{name}`"))?;
 
-	let subscribe = Subscribe::new(consumer, &name, catalog, args).await?;
+	let subscribe = Subscribe::new(moq_mux::Source::new(consumer, broadcast), catalog, args);
 	let Some(echo) = echo else {
 		return subscribe.run().await;
 	};
@@ -1144,7 +1148,7 @@ mod tests {
 			connection: moq_tokio::Connection,
 			consumer: moq_net::origin::Consumer,
 			_shutdown: Shutdown,
-			_broadcast: moq_net::broadcast::Producer,
+			_broadcast: moq_net::origin::Publication,
 			_track: moq_net::track::Producer,
 		}
 
@@ -1261,7 +1265,13 @@ mod tests {
 					.unwrap();
 				// Media proves the CLI admitted the session, even on a transport that establishes early.
 				let payload = tokio::time::timeout(TIMEOUT, async {
-					let broadcast = listening.consumer.routed_broadcast("probe").await.unwrap();
+					let broadcast = listening
+						.consumer
+						.follow("probe", None)
+						.unwrap()
+						.available()
+						.await
+						.unwrap();
 					let mut track = broadcast
 						.track("status")
 						.unwrap()
@@ -1356,9 +1366,10 @@ mod tests {
 		group.finish().unwrap();
 
 		let reader = relay.consume();
-		reader.routed("demo").await.unwrap();
 		let mut live = reader
-			.request_broadcast("demo", None)
+			.follow("demo", None)
+			.unwrap()
+			.available()
 			.await
 			.unwrap()
 			.track("live")

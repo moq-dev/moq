@@ -22,8 +22,8 @@ var (
 	GroupConsumer func(any) *ffi.MoqGroupConsumer
 	// TrackDemand wraps a handle as a *moq.TrackDemand.
 	TrackDemand func(*ffi.MoqTrackDemand) any
-	// Bandwidth returns the handle behind a *moq.Bandwidth.
-	Bandwidth func(any) *ffi.MoqBandwidth
+	// Allocator returns the handle behind a *moq.Allocator.
+	Allocator func(any) *ffi.MoqAllocator
 	// Reservation wraps a native reservation as *moq.Reservation.
 	Reservation func(*ffi.MoqReservation) any
 	// CatalogProducer returns the handle behind a *media.CatalogProducer.
@@ -51,6 +51,23 @@ func Duration(d time.Duration, name string) (uint64, error) {
 		return 0, fmt.Errorf("negative %s: %v", name, d)
 	}
 	return uint64(d.Microseconds()), nil
+}
+
+// NonNegative refuses a negative duration, which the generated converter
+// would panic on rather than return an error.
+func NonNegative(value *time.Duration, name string) error {
+	if value != nil && *value < 0 {
+		return fmt.Errorf("negative %s: %v", name, *value)
+	}
+	return nil
+}
+
+// Rendition refuses an audio rendition's negative jitter, for the same reason.
+func Rendition(rendition ffi.MoqRendition) error {
+	if audio, ok := rendition.(ffi.MoqRenditionAudio); ok {
+		return NonNegative(audio.Config.Jitter, "jitter")
+	}
+	return nil
 }
 
 // OptionalDuration converts a caller's time to microseconds, preserving absence.

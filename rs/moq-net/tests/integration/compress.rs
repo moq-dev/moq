@@ -19,10 +19,6 @@ const VERSIONS: &[&str] = &[
 	"moq-lite-07-wip",
 	"moq-lite-06",
 	"moq-lite-03",
-	"moq-transport-14",
-	"moq-transport-15",
-	"moq-transport-16",
-	"moq-transport-17",
 	"moq-transport-18",
 	"moq-transport-22",
 ];
@@ -47,7 +43,7 @@ fn payload(frame: u64) -> Vec<u8> {
 struct Fixture {
 	track: moq_net::track::Producer,
 	subscriber: moq_net::track::Subscriber,
-	_broadcast: moq_net::broadcast::Producer,
+	_broadcast: moq_net::origin::Publication,
 	_hops: Vec<MockPair>,
 	_origins: Vec<moq_net::origin::Producer>,
 }
@@ -55,7 +51,7 @@ struct Fixture {
 /// A track announced by the original publisher, before any relay carries it.
 struct Published {
 	publisher: moq_net::origin::Producer,
-	broadcast: moq_net::broadcast::Producer,
+	broadcast: moq_net::origin::Publication,
 	track: moq_net::track::Producer,
 }
 
@@ -105,8 +101,7 @@ async fn relay(published: Published, hops: [&str; 2], subscription: moq_net::tra
 	let downstream = connect_mock(options).await;
 
 	let consumer = origin.consume();
-	consumer.routed("bcast").await.unwrap();
-	let remote = consumer.request_broadcast("bcast", None).await.unwrap();
+	let remote = consumer.follow("bcast", None).unwrap().available().await.unwrap();
 	let subscriber = remote.track("data").unwrap().subscribe(subscription).await.unwrap();
 	support::harness::subscribed(&track).await;
 
@@ -119,14 +114,8 @@ async fn relay(published: Published, hops: [&str; 2], subscription: moq_net::tra
 	}
 }
 
-/// Hops that carry a start group and negotiate compression: lite-07, and moq-transport
-/// draft-17 and later.
-const RANGED: &[&str] = &[
-	"moq-lite-07-wip",
-	"moq-transport-17",
-	"moq-transport-18",
-	"moq-transport-22",
-];
+/// Hops that carry a start group and negotiate compression: lite-07 and moq-transport.
+const RANGED: &[&str] = &["moq-lite-07-wip", "moq-transport-18", "moq-transport-22"];
 
 /// A subscription starting at a group delivers it whole from its first frame across every
 /// pair of hops, compressed or not, whether the group began before it subscribed or after.
@@ -198,10 +187,7 @@ async fn relay_serves_every_version() {
 			let mut fixture = connect("moq-lite-07-wip", version).await;
 			assert_eq!(
 				fixture.subscriber.info().compress,
-				!matches!(
-					version,
-					"moq-lite-06" | "moq-lite-03" | "moq-transport-14" | "moq-transport-15" | "moq-transport-16"
-				),
+				!matches!(version, "moq-lite-06" | "moq-lite-03"),
 				"{version}: compression declared"
 			);
 
@@ -246,13 +232,7 @@ async fn relay_serves_every_version() {
 /// compressed or inflated.
 #[moq_clock::test]
 async fn datagrams_serve_every_version() {
-	for &version in &[
-		"moq-lite-07-wip",
-		"moq-lite-06",
-		"moq-transport-16",
-		"moq-transport-17",
-		"moq-transport-22",
-	] {
+	for &version in &["moq-lite-07-wip", "moq-lite-06", "moq-transport-18", "moq-transport-22"] {
 		moq_clock::timeout(TIMEOUT, async {
 			let mut fixture = connect("moq-lite-07-wip", version).await;
 			fixture
@@ -296,7 +276,9 @@ async fn datagrams_meter_the_bytes_on_the_wire() {
 			let mut options = MockConnectOptions::new("moq-lite-07-wip".parse::<Version>().unwrap());
 			options.client_publish = Some(publisher.consume());
 			options.server_subscribe = Some(relay.clone());
-			options.server_stats = ingress.tier(Default::default()).session("ingress");
+			options.server_stats = ingress
+				.tier(Default::default())
+				.session(moq_net::Path::from_static("ingress"));
 			let upstream = connect_mock(options).await;
 
 			let origin = produce_origin(3);
@@ -304,12 +286,13 @@ async fn datagrams_meter_the_bytes_on_the_wire() {
 			let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
 			options.server_publish = Some(relay.consume());
 			options.client_subscribe = Some(origin.clone());
-			options.server_stats = egress.tier(Default::default()).session("egress");
+			options.server_stats = egress
+				.tier(Default::default())
+				.session(moq_net::Path::from_static("egress"));
 			let downstream = connect_mock(options).await;
 
 			let consumer = origin.consume();
-			consumer.routed("bcast").await.unwrap();
-			let remote = consumer.request_broadcast("bcast", None).await.unwrap();
+			let remote = consumer.follow("bcast", None).unwrap().available().await.unwrap();
 			let mut subscriber = remote.track("data").unwrap().subscribe(None).await.unwrap();
 			support::harness::subscribed(&track).await;
 
@@ -343,20 +326,11 @@ async fn datagrams_meter_the_bytes_on_the_wire() {
 /// Negotiated IETF ingress stays compressed across a relay to IETF or lite-07 egress.
 #[moq_clock::test]
 async fn ietf_ingress_stays_compressed_across_protocols() {
-	for upstream in ["moq-transport-17", "moq-transport-18", "moq-transport-22"] {
-		for downstream in [
-			"moq-lite-07-wip",
-			"moq-transport-16",
-			"moq-transport-22",
-			"moq-transport-14",
-		] {
+	for upstream in ["moq-transport-18", "moq-transport-22"] {
+		for downstream in ["moq-lite-07-wip", "moq-transport-22"] {
 			moq_clock::timeout(TIMEOUT, async {
 				let mut fixture = connect(upstream, downstream).await;
-				assert_eq!(
-					fixture.subscriber.info().compress,
-					!matches!(downstream, "moq-transport-14" | "moq-transport-16"),
-					"{upstream} -> {downstream}"
-				);
+				assert!(fixture.subscriber.info().compress, "{upstream} -> {downstream}");
 				let mut group = fixture.track.append_group().unwrap();
 				for index in 0..3 {
 					group
@@ -397,7 +371,7 @@ async fn ietf_ingress_stays_compressed_across_protocols() {
 /// A finished compressed track remains fetchable without subscribing to its live feed.
 #[moq_clock::test]
 async fn ietf_fetch_keeps_the_stored_form() {
-	for version in ["moq-transport-16", "moq-transport-18", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22"] {
 		moq_clock::timeout(TIMEOUT, async {
 			let publisher = produce_origin(1);
 			let broadcast = publisher.create_broadcast("bcast").unwrap();
@@ -416,10 +390,15 @@ async fn ietf_fetch_keeps_the_stored_form() {
 			options.server_publish = Some(publisher.consume());
 			options.client_subscribe = Some(origin.clone());
 			let _pair = connect_mock(options).await;
-			origin.consume().routed("bcast").await.unwrap();
-			let remote = origin.consume().request_broadcast("bcast", None).await.unwrap();
+			let remote = origin
+				.consume()
+				.follow("bcast", None)
+				.unwrap()
+				.available()
+				.await
+				.unwrap();
 			let consumer = remote.track("data").unwrap();
-			assert_eq!(consumer.query().await.unwrap().compress, version != "moq-transport-16");
+			assert!(consumer.info().await.unwrap().compress, "{version}");
 			let mut fetched = consumer.fetch_group(0, moq_net::group::Fetch::default()).await.unwrap();
 			for index in 0..3 {
 				assert_eq!(

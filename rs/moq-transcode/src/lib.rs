@@ -75,7 +75,7 @@ pub struct Transcoder {
 	config: Config,
 	derived: moq_mux::catalog::Producer,
 	// Consumers asking for a rung before (or after) it exists queue here.
-	dynamic: moq_net::broadcast::Dynamic,
+	dynamic: moq_net::broadcast::Requests,
 	active: active::Producer,
 }
 
@@ -92,7 +92,7 @@ impl Transcoder {
 		// The catalog starts empty and fills in during `run`, exactly like a
 		// media importer that hasn't seen parameter sets yet.
 		let derived = moq_mux::catalog::Producer::new(&mut output, moq_mux::catalog::Config::default())?;
-		let dynamic = output.dynamic();
+		let dynamic = output.requests();
 
 		Ok(Self {
 			source,
@@ -356,7 +356,7 @@ mod tests {
 	/// to decode while the group is still open.
 	fn write_keyframe(group: &mut moq_net::group::Producer) {
 		let mut encoder = moq_video::encode::Encoder::new(&{
-			let mut config = moq_video::encode::Config::new(320, 240, moq_video::Rate::new(30, 1).unwrap());
+			let mut config = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
 			config.kind = moq_video::encode::Kind::Software;
 			config
 		})
@@ -401,7 +401,7 @@ mod tests {
 		let track = broadcast.create_track("video", info).unwrap();
 
 		let mut encoder = moq_video::encode::Encoder::new(&{
-			let mut config = moq_video::encode::Config::new(320, 240, moq_video::Rate::new(30, 1).unwrap());
+			let mut config = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
 			config.kind = moq_video::encode::Kind::Software;
 			config
 		})
@@ -468,7 +468,7 @@ mod tests {
 
 		let task = tokio::spawn(async move {
 			let mut encoder = moq_video::encode::Sink::open(&{
-				let mut config = moq_video::encode::Config::new(320, 240, moq_video::Rate::new(30, 1).unwrap());
+				let mut config = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
 				config.kind = moq_video::encode::Kind::Software;
 				config
 			})
@@ -633,7 +633,7 @@ mod tests {
 	/// with the NVIDIA driver). Probed through the public API so the hardware
 	/// test skips cleanly on GPU-less CI.
 	fn hardware_available() -> bool {
-		let mut encode = moq_video::encode::Config::new(160, 120, moq_video::Rate::new(30, 1).unwrap());
+		let mut encode = moq_video::encode::Config::new(160, 120, moq_video::FrameRate::new(30, 1).unwrap());
 		encode.kind = moq_video::encode::Kind::Hardware;
 		if moq_video::encode::Encoder::new(&encode).is_err() {
 			return false;
@@ -804,7 +804,7 @@ mod tests {
 			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
-			source: Some(moq_net::path::RelativeOwned::from(".".to_string())),
+			source: Some(moq_net::path::Relative::new(".").unwrap()),
 			..Default::default()
 		};
 
@@ -814,7 +814,7 @@ mod tests {
 		let origin = moq_tokio::origin::spawn();
 		let output = origin.create_broadcast("room/transcode").unwrap();
 		let consumer = output.consume();
-		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output.broadcast().clone(), config));
 
 		// The derivative catalog appears before anything is encoded, with the
 		// rung sized against the source and the passthrough reference. Yield
@@ -1029,14 +1029,10 @@ mod tests {
 
 	/// A source that resizes mid-stream takes the ladder with it.
 	///
-	/// `moq_video::encode::publish_capture` opens its source twice by design (once
-	/// to probe the mode, once when the first subscriber arrives), and a window
 	/// A source that changes aspect ratio keeps every rung height while moving
 	/// every rung width, so a rung retires and its replacement serves the same
-	/// height. That replacement must not reuse the retired track's name: a clean
-	/// end is terminal, and a relay keeps the finished logical track (only an
-	/// *aborted* one is dropped and requested again), so a subscriber asking for
-	/// the old name would get its EOF forever and never reach the transcoder.
+	/// height. That replacement must not reuse the retired track's name: it is a
+	/// different picture, and a name always means the same content.
 	#[tokio::test]
 	async fn a_resized_rung_takes_a_fresh_name() {
 		let mut source = source_catalog(640, 360);
@@ -1088,15 +1084,17 @@ mod tests {
 		assert_eq!(replacement.coded_width, Some(160));
 		assert_eq!(replacement.coded_height, Some(120));
 
-		// The retired name ends cleanly, and the replacement is a track the
-		// transcoder has never finished, so it serves.
+		// The retired name aborts rather than finishing: its source did not finish.
 		let ended = tokio::time::timeout(std::time::Duration::from_secs(5), retired.recv_group())
 			.await
-			.expect("the retired rung never ended its track")
-			.expect("the retired rung aborted instead of finishing");
-		assert!(ended.is_none(), "expected a clean end, got a group");
+			.expect("the retired rung never ended its track");
+		assert!(
+			matches!(ended, Err(moq_net::Error::Cancel)),
+			"a retired rung aborts, since only a source finish ends it: {:?}",
+			ended.as_ref().err()
+		);
 
-		// The replacement is a track the transcoder has never finished, so it serves.
+		// The replacement serves under its own name.
 		subscribe(&consumer, "video/120p.2").await;
 
 		transcoder.abort();
@@ -1121,7 +1119,7 @@ mod tests {
 			.unwrap(),
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
-			source: Some(moq_net::path::RelativeOwned::from(".".to_string())),
+			source: Some(moq_net::path::Relative::new(".").unwrap()),
 			..Default::default()
 		};
 
@@ -1180,14 +1178,16 @@ mod tests {
 			"the passthrough entry should follow the source"
 		);
 
-		// The retired rung ends its track, so a subscriber reselects the way it
-		// would on any other rendition going away, rather than stalling or seeing
-		// an abort it would read as a failure.
+		// The retired rung ends its track, so a subscriber reselects rather than
+		// stalling. It aborts, since its source did not finish.
 		let ended = tokio::time::timeout(std::time::Duration::from_secs(5), retired.recv_group())
 			.await
-			.expect("the retired rung never ended its track")
-			.expect("the retired rung aborted instead of finishing");
-		assert!(ended.is_none(), "expected a clean end, got a group");
+			.expect("the retired rung never ended its track");
+		assert!(
+			matches!(ended, Err(moq_net::Error::Cancel)),
+			"a retired rung aborts, since only a source finish ends it: {:?}",
+			ended.as_ref().err()
+		);
 
 		// The rung the new picture still fits keeps serving: its subscriber sees
 		// nothing at all, since the source has no media.
@@ -1202,8 +1202,8 @@ mod tests {
 	}
 
 	/// Retiring a rung stops taking new work, but a group already being produced
-	/// has to run to a clean end: the consumer reads it out and then sees the
-	/// track finish, rather than the group going away under it.
+	/// has to run to its end: the consumer reads it out before the track is
+	/// aborted, rather than the group going away under it.
 	///
 	/// The held query is demand, so `live` starts the moment the track is
 	/// queried below and produces group 0 from the still-open source group. The fetch below then resolves straight from the track cache. What
@@ -1245,7 +1245,7 @@ mod tests {
 		// wait until the live path has claimed group 0, so the fetch below can only
 		// resolve from the track cache and retirement finds that live group open.
 		let rung = consumer.track("video/120p").unwrap();
-		let mut query = rung.query();
+		let mut query = rung.info();
 		(&mut query).await.unwrap();
 		let mut edge = rung.clone();
 		assert_eq!(edge.largest().await.map(|position| position.group), Some(0));
@@ -1312,7 +1312,7 @@ mod tests {
 		// A held query is demand, so the rung starts encoding and subscribes to the
 		// source.
 		let rung = consumer.track("video/120p").unwrap();
-		let mut query = rung.query();
+		let mut query = rung.info();
 		(&mut query).await.unwrap();
 		let wanted = async {
 			while demand.wanted_changed().await?.is_none() {}
@@ -1338,16 +1338,15 @@ mod tests {
 	}
 
 	/// The other half of the retirement boundary: a fetch that is still opening
-	/// its decoder has claimed no output group, so retirement must not declare a
-	/// final sequence until it has. Finishing at retirement instead computes the
-	/// boundary from the groups produced so far (none) and refuses the very fetch
+	/// its decoder has claimed no output group, so retirement must not end the
+	/// track until it has. Ending it at retirement instead refuses the very fetch
 	/// the handler drained its loop to keep.
 	///
 	/// Reaching the fetch handler takes a group the live path cannot produce.
 	/// The query held to resolve the track is demand that starts the live path,
 	/// and the live path serves the same sequences from the same
 	/// source, so the source publishes no group at all and serves this one
-	/// through a [`moq_net::track::Dynamic`] instead. That handle also parks the
+	/// through a [`moq_net::track::Requests`] instead. That handle also parks the
 	/// fetch at exactly the point in question: past the rung's handler, before
 	/// its `Fill::accept`.
 	#[tokio::test]
@@ -1355,7 +1354,7 @@ mod tests {
 		let mut source = source_catalog(320, 240);
 		// The source track carries no live groups; this serves them on demand, so
 		// the test decides when the rung's fetch gets past its source read.
-		let source_fetches = source._track.dynamic();
+		let source_fetches = source._track.requests();
 
 		let config = Config {
 			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
@@ -1384,7 +1383,7 @@ mod tests {
 		// Resolving the info waits for the transcoder to accept the track, so the
 		// fetch below reaches a rung that is already serving.
 		let rung = consumer.track("video/120p").unwrap();
-		let mut query = rung.query();
+		let mut query = rung.info();
 		(&mut query).await.unwrap();
 		assert!(
 			source._track.subscription_changed().await.unwrap().is_some(),
@@ -1440,7 +1439,7 @@ mod tests {
 	async fn an_abandoned_fetch_encodes_nothing() {
 		let source = source_catalog(320, 240);
 		// Held, not served, until the abandoned fetch has let go of it.
-		let source_fetches = source._track.dynamic();
+		let source_fetches = source._track.requests();
 
 		let config = Config {
 			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
@@ -1468,7 +1467,7 @@ mod tests {
 
 		// No live groups, so group 7 misses and reaches the fetch handler.
 		let rung = consumer.track("video/120p").unwrap();
-		rung.query().await.unwrap();
+		rung.info().await.unwrap();
 
 		let fetching = rung.fetch_group(7, None);
 		let abandoned = tokio::time::timeout(std::time::Duration::from_secs(5), source_fetches.requested_fill())
@@ -1514,11 +1513,10 @@ mod tests {
 	}
 
 	/// A fetch is demand, so it starts the live path, which claims the group the
-	/// source has open. A reader that picked that group up from the cache is not
-	/// demand, so when the fetch ends the live path is left mid-group with
+	/// source has open. When the fetch ends, the live path is left mid-group with
 	/// nobody asking. It finishes the group before leaving its source: a group
-	/// name always means the same content, so the reader gets the whole group
-	/// rather than one aborted under it.
+	/// name always means the same content, so a later reader of that sequence
+	/// gets the whole group rather than one aborted under it.
 	///
 	/// Paused so the runtime settles before the source group ends: the live path
 	/// has seen the demand go away by then, which is the moment that used to
@@ -1529,12 +1527,12 @@ mod tests {
 		let mut source_demand = source._track.demand();
 		// Parks the rung's own fetch of the group below, so that fetch is demand
 		// for as long as the caller holds it and nothing else serves it.
-		let _source_fetches = source._track.dynamic();
+		let _source_fetches = source._track.requests();
 
 		// Two frames, so the output's largest moves once both are encoded.
 		let mut group = source._track.create_group(0u64.into()).unwrap();
 		let mut encoder = moq_video::encode::Encoder::new(&{
-			let mut config = moq_video::encode::Config::new(320, 240, moq_video::Rate::new(30, 1).unwrap());
+			let mut config = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
 			config.kind = moq_video::encode::Kind::Software;
 			config
 		})
@@ -1584,9 +1582,6 @@ mod tests {
 		let mut edge = rung.clone();
 		while edge.largest().await.map(|position| (position.group, position.frame)) != Some((0, 1)) {}
 
-		// Read straight from the cache while the group is still being written.
-		let mut fetched = rung.fetch_group(0, None).await.unwrap();
-
 		// The only demand ends with output group 0 still open.
 		drop(fetching);
 		tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -1599,6 +1594,8 @@ mod tests {
 		group.finish().unwrap();
 		while source_demand.wanted_changed().await.unwrap().is_some() {}
 
+		// Read from the cache after the live path left.
+		let mut fetched = rung.fetch_group(0, None).await.unwrap();
 		let mut frames = 0;
 		while fetched.read_frame().await.expect("group 0 was aborted").is_some() {
 			frames += 1;
@@ -1622,10 +1619,10 @@ mod tests {
 			let mut source_demand = source._track.demand();
 			// Parks the rung's own fetch of the group below, so that fetch is
 			// demand for as long as the caller holds it and nothing else serves it.
-			let _source_fetches = source._track.dynamic();
+			let _source_fetches = source._track.requests();
 
 			let mut encoder = moq_video::encode::Encoder::new(&{
-				let mut config = moq_video::encode::Config::new(320, 240, moq_video::Rate::new(30, 1).unwrap());
+				let mut config = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
 				config.kind = moq_video::encode::Kind::Software;
 				config
 			})
@@ -1817,9 +1814,12 @@ mod tests {
 
 		let ended = tokio::time::timeout(std::time::Duration::from_secs(5), retired.recv_group())
 			.await
-			.expect("the retired rung never ended its track")
-			.expect("the retired rung aborted instead of finishing");
-		assert!(ended.is_none(), "expected a clean end, got a group");
+			.expect("the retired rung never ended its track");
+		assert!(
+			matches!(ended, Err(moq_net::Error::Cancel)),
+			"a retired rung aborts, since only a source finish ends it: {:?}",
+			ended.as_ref().err()
+		);
 		subscribe(&consumer, "video/120p.2").await;
 
 		transcoder.abort();
@@ -1985,5 +1985,49 @@ mod tests {
 
 		let result = tokio::time::timeout(std::time::Duration::from_secs(5), transcoder).await;
 		result.expect("run did not shut down within 5s").unwrap().unwrap();
+	}
+
+	/// A rung finishes only when its source track finishes. Any other end, here
+	/// the source aborting, aborts the rung: a finish would declare an end that a
+	/// later serve of the same name, starting over, could fall below.
+	#[tokio::test(start_paused = true)]
+	async fn a_rung_finishes_only_with_its_source() {
+		for finish in [true, false] {
+			let source = source_catalog(320, 240);
+			let config = Config {
+				ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
+				encoder: moq_video::encode::Kind::Software,
+				decoder: moq_video::decode::Kind::Software,
+				source: None,
+				..Default::default()
+			};
+			let output = moq_net::broadcast::Info::default().produce();
+			let consumer = output.consume();
+			let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+
+			let mut rung = subscribe(&consumer, "video/120p").await;
+			let mut group = source._track.create_group(0u64.into()).unwrap();
+			write_keyframe(&mut group);
+			group.finish().unwrap();
+			match finish {
+				true => source._track.finish().unwrap(),
+				false => source._track.clone().abort(moq_net::Error::Cancel).unwrap(),
+			}
+
+			let ended = loop {
+				match rung.recv_group().await {
+					Ok(Some(_)) => continue,
+					ended => break ended,
+				}
+			};
+			match finish {
+				true => assert!(ended.is_ok(), "a finished source finishes the rung"),
+				false => assert!(
+					matches!(ended, Err(moq_net::Error::Cancel)),
+					"an aborted source aborts the rung"
+				),
+			}
+			transcoder.abort();
+		}
 	}
 }

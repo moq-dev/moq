@@ -24,10 +24,10 @@ func TestReservationUpdateReleasesSubscribedTrack(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
-	// Dial returns while connecting; the grants need the live session's estimate.
+	// Dial returns while connecting; the rates need the live session's estimate.
 	waitConnects(t, ctx, client.Session(), 1)
 	// Grant assertions use a live QUIC estimate, but need no traffic or probing.
-	bandwidth := client.Session().Bandwidth()
+	bandwidth := client.Session().Allocator()
 	broadcast, err := moq.NewBroadcastProducer()
 	if err != nil {
 		t.Fatal(err)
@@ -53,14 +53,14 @@ func TestReservationUpdateReleasesSubscribedTrack(t *testing.T) {
 		}
 		return demand, bandwidth.Reserve(demand, ceiling)
 	}
-	grant := func(reservation *moq.Reservation, want uint64) {
+	rate := func(reservation *moq.Reservation, want uint64) {
 		t.Helper()
-		got := reservation.Grant()
+		got := reservation.Rate()
 		if got == nil {
-			t.Fatalf("grant unavailable, want %d", want)
+			t.Fatalf("rate unavailable, want %d", want)
 		}
 		if *got != want {
-			t.Fatalf("grant = %d, want %d", *got, want)
+			t.Fatalf("rate = %d, want %d", *got, want)
 		}
 	}
 
@@ -69,18 +69,18 @@ func TestReservationUpdateReleasesSubscribedTrack(t *testing.T) {
 	replacement := bandwidth.Reserve(demand, 1)
 	// Even a retained predecessor must relinquish the allocation explicitly.
 	// Priority makes this independent of the live estimate's exact value.
-	grant(sibling, 0)
+	rate(sibling, 0)
 	retired.Update(0)
-	grant(retired, 0)
-	grant(replacement, 1)
-	grant(sibling, 1)
+	rate(retired, 0)
+	rate(replacement, 1)
+	rate(sibling, 1)
 
 	// Zero is reversible and repeated release is harmless.
 	retired.Update(math.MaxUint64)
-	grant(sibling, 0)
+	rate(sibling, 0)
 	retired.Update(0)
 	retired.Update(0)
-	grant(sibling, 1)
+	rate(sibling, 1)
 	if demand.Wanted() == nil {
 		t.Fatal("release ended the track subscription")
 	}

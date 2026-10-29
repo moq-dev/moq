@@ -38,19 +38,22 @@ Decided with the maintainer, 2026-10-13:
 - Keep Babel. A detour longer than the lost route may wait for a sequence
   refresh from the origin; instant failover is not required. Measure failure
   detection, additional routing recovery, and total interruption separately.
-- Mint a fresh routing identity per process or tab restart, shared across
-  that live origin's authenticated sessions: the hash of a per-process key,
-  proven once per session ([identity proof](/quest/m1/cluster-routing/identity.md)).
-  Keep administrative identity separate; `cluster.id` is removed. Session
-  scoping alone cannot identify one publisher through both its CDN and P2P
-  connections. (Decided 2026-10-14.)
-- A connection's own proven identity stays bare everywhere. Identities a
-  connection forwards on behalf of others are filed under
-  `hash(subject, id)`, keyed by the grant's credential subject, when its
-  publish grant is scoped, and stay bare when it is unscoped. The key is
+- An origin declares its own routing identity, fresh per process or tab
+  restart and shared across its live sessions. It is unverified: recognizing
+  a routing identity needs key proof, which
+  [Peer grants](/quest/m2/p2p/peer-grant.md) owns. Receiver-stamped
+  per-session identities were dropped 2026-10-26 (maintainer): in a mesh,
+  two relays stamping their sessions from one origin forward its routes as
+  two identities a third relay cannot recognize as one. Keep administrative
+  identity separate; `cluster.id` is removed. Switching between paths
+  resumes only across a matching explicit epoch.
+- Every identity a connection sends, its own and those it forwards, is filed
+  under `hash(subject, id)`, keyed by the grant's credential subject, when
+  its publish grant is scoped, and stays bare when it is unscoped. The key is
   deterministic, so two uplinks of one subject share it across token refresh,
   and a forger only damages routes inside its own scope. (Decided 2026-10-14;
-  subject decided 2026-10-15.)
+  subject decided 2026-10-15; own identities included 2026-10-26, since they
+  are no longer proven.)
 - Matching explicit epochs authorize resume. Epochless changes retain
   Restart and fresh resolution; neither node identity nor a healthy
   alternate grants permission to splice content.
@@ -95,9 +98,13 @@ Existing mesh deployments remain supported; the full edge/core topology
 migration is independent. Basic outbound federation proves the common routing
 contract without requiring that deployment migration.
 
-Recent baseline: #5375's two-second retraction quarantine reduced stale
-revivals but left residual cases; #5391 bounded its queue under repeated
-same-clock churn. #5382 and #5393 separately reduced idle-session polling.
+Recent baseline: [moq-dev/moq#5375](https://github.com/moq-dev/moq/pull/5375)'s
+two-second retraction quarantine reduced stale revivals but left residual
+cases; [moq-dev/moq#5391](https://github.com/moq-dev/moq/pull/5391) bounded
+its queue under repeated same-clock churn.
+[moq-dev/moq#5382](https://github.com/moq-dev/moq/pull/5382) and
+[moq-dev/moq#5393](https://github.com/moq-dev/moq/pull/5393) separately
+reduced idle-session polling.
 The 300 ms update hold alone is no longer the baseline. Keep regression
 coverage for announcement churn, idle work, active continuity, and retained
 state separately; fewer control bytes does not prove cheaper runtime work.
@@ -119,7 +126,7 @@ setup after the capabilities land.
 
 ## Required
 
-- [Identity proof](/quest/m1/cluster-routing/identity.md) - a routing identity is the hash of a per-process key that every session proves
+- [Grant subject](/quest/m1/cluster-routing/grant-subject.md) - grants carry an issuer-qualified subject, scoped tokens without one are refused, and the routing model drops its `proved` exemption
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - implement the proven route layer with Rust/JS parity and tiered-cluster acceptance
 - [Outbound federation](/quest/m1/cluster-routing/federation.md) - an outbound-only local relay exchanges authorized broadcasts with the CDN and survives partition/healing
 

@@ -16,8 +16,9 @@ for (const retained of [1, 64, 1024])
 			const installed = clock.install();
 			const source = new Producer();
 			const destination = new Producer();
-			const broadcast = source.createBroadcast(Path.from("room"));
-			broadcast.announce();
+			const broadcastPublication = source.createBroadcast(Path.from("room"));
+			const broadcast = broadcastPublication.broadcast;
+			broadcastPublication.announce();
 			const producers = Array.from({ length: tracks }, (_, i) =>
 				broadcast.createTrack(`data${i}`, { refresh: 1 }),
 			);
@@ -39,7 +40,7 @@ for (const retained of [1, 64, 1024])
 				for (let i = 0; i < tracks; i++) {
 					const group = producers[i].appendGroup();
 					group.writeFrame({ payload: new Uint8Array(3) });
-					group.close();
+					group.finish();
 					const received = await baseline[i].recvGroup();
 					if (!received) throw new Error("baseline group missing");
 					await received.readFrame();
@@ -50,7 +51,7 @@ for (const retained of [1, 64, 1024])
 				for (let old = 1; old < retained; old++) {
 					const group = producers[0].appendGroup();
 					group.writeFrame({ payload: new Uint8Array(3) });
-					group.close();
+					group.finish();
 					const received = await baseline[0].recvGroup();
 					if (!received) throw new Error("historical group missing");
 					await received.readFrame();
@@ -62,7 +63,7 @@ for (const retained of [1, 64, 1024])
 					const group = producers[0].appendGroup();
 					group.writeFrame({ payload: new Uint8Array(3) });
 					group.writeFrame({ payload: new Uint8Array(4) });
-					group.close();
+					group.finish();
 					const received = await baseline[0].recvGroup();
 					if (!received) throw new Error("measured group missing");
 					await received.readFrame();

@@ -1,41 +1,34 @@
-//! Logic for controlling the rate at which data is sent
+//! Congestion controllers that any transport can drive.
+//!
+//! A transport reports what it sends, what the peer acknowledges, and what it declares lost, and
+//! asks the controller how much may be in flight and when the next packet may leave. Each sent
+//! packet's [`Packet`] state is stored by the transport and handed back on ACK or loss, so a
+//! controller keeps no per-packet table of its own.
 
 use moq_clock::Instant;
 use std::time::Duration;
 
-mod rtt;
-mod space;
-pub use rtt::RttEstimator;
-pub use space::SpaceId;
 use std::any::Any;
 use std::sync::Arc;
 
 mod bbr3;
 mod cubic;
+mod pacer;
+mod rate;
 mod unlimited;
 
 pub use bbr3::{Bbr3, Bbr3Config};
 pub use cubic::{Cubic, CubicConfig};
+pub use rate::Packet;
 pub use unlimited::Unlimited;
 
 /// Common interface for different congestion controllers
 pub trait Controller: Send + Sync {
-    /// One or more packets were just sent
-    #[allow(
-        unused_variables,
-        reason = "a no-op default that keeps the parameter names for implementors"
-    )]
-    fn on_sent(&mut self, now: Instant, bytes: u64, last_packet_number: u64) {}
-
-    /// One packet was just sent
+    /// A packet counted in flight was just sent.
     ///
-    /// `packet_number` identifies the packet only within `space`; every packet number space
-    /// numbers independently from zero.
-    #[allow(
-        unused_variables,
-        reason = "a no-op default that keeps the parameter names for implementors"
-    )]
-    fn on_packet_sent(&mut self, now: Instant, bytes: u16, packet_number: u64, space: SpaceId) {}
+    /// The transport stores the returned state with the packet and hands it back in [`Acked`] or
+    /// [`Lost`]. A packet sent before the controller was built, or rebuilt, is never handed back.
+    fn on_sent(&mut self, sent: Sent) -> Packet;
 
     /// The connection had data to send but was blocked by the congestion window
     ///
@@ -55,92 +48,20 @@ pub trait Controller: Send + Sync {
     )]
     fn on_app_limited(&mut self, in_flight: u64) {}
 
-    /// Packet deliveries were confirmed
-    ///
-    /// `app_limited` indicates whether the connection was blocked on outgoing
-    /// application data prior to receiving these acknowledgements.
-    /// `pn` identifies the packet only within `space`.
-    #[allow(
-        unused_variables,
-        reason = "a no-op default that keeps the parameter names for implementors"
-    )]
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "a public trait method; reshaping it is a breaking change"
-    )]
-    fn on_ack(
-        &mut self,
-        now: Instant,
-        sent: Instant,
-        bytes: u64,
-        pn: u64,
-        space: SpaceId,
-        app_limited: bool,
-        rtt: &RttEstimator,
-    ) {
-    }
+    /// An ACK newly acknowledged packets.
+    fn on_ack(&mut self, ack: Ack<'_>);
 
-    /// Packets are acked in batches, all with the same `now` argument. This indicates one of those batches has completed.
-    #[allow(
-        unused_variables,
-        reason = "a no-op default that keeps the parameter names for implementors"
-    )]
-    fn on_end_acks(
-        &mut self,
-        now: Instant,
-        in_flight: u64,
-        app_limited: bool,
-        largest_packet_num_acked: Option<u64>,
-        space: SpaceId,
-    ) {
-    }
+    /// Loss detection declared packets lost.
+    fn on_loss(&mut self, loss: Loss<'_>);
 
-    /// Packets were deemed lost or marked congested
-    ///
-    /// `in_persistent_congestion` indicates whether all packets sent within the persistent
-    /// congestion threshold period ending when the most recent packet in this batch was sent were
-    /// lost.
-    /// `lost_bytes` indicates how many bytes were lost. This value will be 0 for ECN triggers.
-    /// `largest_lost` indicates the packet number of the packet with the highest packet number
-    /// in the congestion event, within `space`, and `sent` is its send time. For ECN, that is the
-    /// largest packet acknowledged by the ACK whose CE count increased, and the event fires only
-    /// on such an increase.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "a public trait method; reshaping it is a breaking change"
-    )]
-    fn on_congestion_event(
-        &mut self,
-        now: Instant,
-        sent: Instant,
-        is_persistent_congestion: bool,
-        is_ecn: bool,
-        lost_bytes: u64,
-        largest_lost: u64,
-        space: SpaceId,
-    );
-
-    /// One packet was just lost
-    ///
-    /// `packet_number` identifies the packet only within `space`.
-    #[allow(
-        unused_variables,
-        reason = "a no-op default that keeps the parameter names for implementors"
-    )]
-    fn on_packet_lost(
-        &mut self,
-        lost_bytes: u16,
-        packet_number: u64,
-        space: SpaceId,
-        now: Instant,
-    ) {
-    }
+    /// An ACK reported newly CE-marked packets.
+    fn on_ce(&mut self, ce: Ce);
 
     /// Packets were incorrectly deemed lost
     ///
     /// This function is called when all packets that were deemed lost (for instance because
-    /// of packet reordering) are acknowledged after the congestion event was raised.
-    fn on_spurious_congestion_event(&mut self) {}
+    /// of packet reordering) are acknowledged after the loss was reported.
+    fn on_spurious_loss(&mut self) {}
 
     /// The known MTU for the current network path has been updated
     fn on_mtu_update(&mut self, new_mtu: u16);
@@ -168,51 +89,149 @@ pub trait Controller: Send + Sync {
     /// Number of ack-eliciting bytes that may be in flight
     fn window(&self) -> u64;
 
+    /// When a packet of `bytes` may leave: `None` for now, or the instant to ask again.
+    fn pace(&mut self, now: Instant, bytes: u64) -> Option<Instant>;
+
+    /// The most bytes to hand the network back to back, or `None` for no limit.
+    fn burst(&self) -> Option<u64> {
+        None
+    }
+
     /// Retrieve implementation-specific metrics used to populate connection statistics and `qlog`
     /// traces when they are enabled
-    /// This is also used to alter the pacing of the connection with
-    /// `pacing_rate` and `send_quantum`
     fn metrics(&self) -> ControllerMetrics {
         ControllerMetrics {
             congestion_window: self.window(),
             ssthresh: None,
             pacing_rate: None,
             bandwidth_estimate: None,
-            send_quantum: None,
+            probe_inflight: None,
         }
+    }
+
+    /// Whether the controller ever reports [`ControllerMetrics::probe_inflight`], so an
+    /// application-limited sender can probe for bandwidth through it
+    fn probes(&self) -> bool {
+        false
     }
 
     /// Duplicate the controller's state
     fn clone_box(&self) -> Box<dyn Controller>;
 
-    /// Initial congestion window
-    fn initial_window(&self) -> u64;
-
     /// Returns Self for use in down-casting to extract implementation details
     fn into_any(self: Box<Self>) -> Box<dyn Any>;
 }
 
-/// Common congestion controller metrics used both for logging purposes
-/// but also to alter the pacing of the connection with
-/// `pacing_rate` and `send_quantum`
+/// A packet the transport just sent.
+#[derive(Debug, Clone, Copy)]
+pub struct Sent {
+    /// When it was sent.
+    pub now: Instant,
+    /// Its size in bytes.
+    pub bytes: u16,
+    /// Bytes in flight, including this packet.
+    pub in_flight: u64,
+}
+
+/// An ACK that newly acknowledged packets.
+#[derive(Debug, Clone, Copy)]
+pub struct Ack<'a> {
+    /// When the ACK arrived.
+    pub now: Instant,
+    /// The packets it newly acknowledged that carry controller state, in the order they were sent.
+    /// Empty when it acknowledged only packets without any.
+    pub packets: &'a [Acked],
+    /// Bytes still in flight after this ACK.
+    pub in_flight: u64,
+    /// Whether the connection was blocked on outgoing application data before this ACK.
+    pub app_limited: bool,
+    /// The transport's smoothed RTT, including this ACK's sample.
+    pub rtt: Duration,
+}
+
+/// One packet an ACK newly acknowledged.
+#[derive(Debug, Clone, Copy)]
+pub struct Acked {
+    /// When it was sent.
+    pub sent: Instant,
+    /// Its size in bytes.
+    pub bytes: u16,
+    /// The state [`Controller::on_sent`] returned for it.
+    pub packet: Packet,
+}
+
+/// Packets loss detection declared lost together.
+#[derive(Debug, Clone, Copy)]
+pub struct Loss<'a> {
+    /// When they were declared lost.
+    pub now: Instant,
+    /// The lost packets that carry controller state, in the order they were sent. Never empty.
+    pub packets: &'a [Lost],
+    /// Bytes still in flight after the loss.
+    pub in_flight: u64,
+    /// Whether every packet sent across the persistent congestion period was lost (RFC 9002
+    /// section 7.6).
+    pub persistent: bool,
+}
+
+/// One packet declared lost.
+#[derive(Debug, Clone, Copy)]
+pub struct Lost {
+    /// When it was sent.
+    pub sent: Instant,
+    /// Its size in bytes.
+    pub bytes: u16,
+    /// The state [`Controller::on_sent`] returned for it.
+    pub packet: Packet,
+    /// Whether the packet sent just before it was delivered, so it starts a new run of losses.
+    pub new_burst: bool,
+}
+
+/// An ACK whose ECN counts reported newly CE-marked packets.
+#[derive(Debug, Clone, Copy)]
+pub struct Ce {
+    /// When the ACK arrived.
+    pub now: Instant,
+    /// When the most recently sent packet that ACK acknowledged was sent.
+    pub sent: Instant,
+}
+
+/// Common congestion controller metrics used for statistics and logging
 #[derive(Default)]
 pub struct ControllerMetrics {
     /// Congestion window (bytes)
     pub congestion_window: u64,
     /// Slow start threshold (bytes)
     pub ssthresh: Option<u64>,
-    /// Pacing rate (bytes/s)
+    /// Pacing rate (bytes/s), for a transport that paces on its own
     pub pacing_rate: Option<u64>,
     /// Estimated sustainable path bandwidth (bytes/s)
     pub bandwidth_estimate: Option<u64>,
-    /// Send Quantum (bytes) used to control the size of packet bursts
-    pub send_quantum: Option<u64>,
+    /// Bytes in flight up to which an application-limited sender may resend in-flight data,
+    /// while the controller probes for bandwidth (bytes)
+    ///
+    /// `None` when the controller is not probing, or cannot learn from a sender that fills its
+    /// pacing with redundant data.
+    pub probe_inflight: Option<u64>,
+}
+
+/// The path a controller starts on.
+#[derive(Debug, Clone, Copy)]
+pub struct Init {
+    /// When the controller is built.
+    pub now: Instant,
+    /// The path's current MTU.
+    pub mtu: u16,
+    /// The transport's RTT estimate before any sample.
+    pub rtt: Duration,
+    /// The most bytes per second to pace at, whatever the controller computes.
+    pub max_pacing_rate: Option<u64>,
 }
 
 /// Constructs controllers on demand
 pub trait ControllerFactory {
     /// Construct a fresh `Controller`
-    fn build(self: Arc<Self>, now: Instant, current_mtu: u16) -> Box<dyn Controller>;
+    fn build(self: Arc<Self>, init: Init) -> Box<dyn Controller>;
 }
 
 const BASE_DATAGRAM_SIZE: u64 = 1200;

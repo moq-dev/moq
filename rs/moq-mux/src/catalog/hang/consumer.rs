@@ -2,13 +2,12 @@ use std::task::Poll;
 
 use super::{Catalog, CatalogExt};
 use crate::Result;
-use crate::catalog::CatalogFormat;
 
 /// A catalog consumer, used to receive catalog updates and discover tracks.
 ///
 /// This wraps [`hang::catalog::Consumer`], which reconstructs the JSON catalog from the latest
-/// group's snapshot and checks its renditions, remembering which [`CatalogFormat`] it reads and
-/// reporting failures as this crate's [`Error`](crate::Error).
+/// group's snapshot and checks its renditions, reporting failures as this crate's
+/// [`Error`](crate::Error).
 ///
 /// Generic over the application extension `E` (defaulting to `()`); yields a
 /// [`Catalog<E>`](super::Catalog).
@@ -18,30 +17,14 @@ use crate::catalog::CatalogFormat;
 /// A catalog that misuses that reference is rejected outright (see [`Self::poll_next`]).
 pub struct Consumer<E: CatalogExt = ()> {
 	inner: hang::catalog::Consumer<E>,
-	format: CatalogFormat,
 }
 
 impl<E: CatalogExt> Consumer<E> {
-	/// Create a new catalog consumer from a MoQ track subscriber (uncompressed `catalog.json`).
+	/// Create a new catalog consumer from a `catalog.json` track subscriber, compressed or not.
 	pub fn new(track: moq_net::track::Subscriber) -> Self {
 		Self {
 			inner: hang::catalog::Consumer::new(track),
-			format: CatalogFormat::Hang,
 		}
-	}
-
-	/// Create a consumer for the DEFLATE-compressed catalog track (`catalog.json.z`).
-	///
-	/// The track must be the compressed one (see [`hang::Catalog::COMPRESSED_NAME`]).
-	pub fn compressed(track: moq_net::track::Subscriber) -> Self {
-		Self {
-			inner: hang::catalog::Consumer::compressed(track),
-			format: CatalogFormat::HangZ,
-		}
-	}
-
-	pub(crate) fn format(&self) -> CatalogFormat {
-		self.format
 	}
 
 	/// Poll for the next catalog update.
@@ -119,7 +102,7 @@ mod test {
 
 	fn referencing(rel: &str) -> hang::catalog::AudioConfig {
 		let mut config = opus();
-		config.broadcast = Some(moq_net::path::Relative::new(rel).into_owned());
+		config.broadcast = Some(moq_net::path::Relative::new(rel).unwrap());
 		config
 	}
 
@@ -158,33 +141,32 @@ mod test {
 		publish_catalog(published)
 	}
 
-	/// [`publish_catalog`] against a *standalone* broadcast (no origin, so its own path is
-	/// empty) that a dynamic handler serves at `a/pub`, read back through the requesting
-	/// origin cursor. That is the shape an FFI app takes when it answers an origin request
-	/// with a broadcast it built itself.
+	/// [`publish_catalog`] against the answer a dynamic handler prepares and publishes at
+	/// `a/pub`, read back through the requesting origin cursor. That is the shape an app
+	/// takes when it answers an origin request.
 	async fn publish_catalog_served(published: Catalog<()>) -> Result<Option<Catalog>> {
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let track = broadcast
-			.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
-			.expect("catalog track should create");
-
 		let origin = crate::source::produce_origin();
-		let dynamic = origin.dynamic_route("", Default::default()).unwrap();
-		let requesting = origin.consume().request_broadcast("a/pub", None);
-		let served = broadcast.consume();
+		let dynamic = origin.requests("").unwrap();
+		let requesting = origin.consume().request("a/pub", None);
 		// The handler hands its route back: dropping it would retract the route and end
 		// the broadcast it just served.
 		let handler = tokio::spawn(async move {
-			dynamic
+			let prepared = dynamic
 				.requested_broadcast()
 				.await
 				.expect("handler should be asked for the path")
-				.accept(&served);
-			dynamic
+				.prepare(moq_net::Epoch::mint())
+				.expect("the answer should prepare");
+			let track = prepared
+				.broadcast()
+				.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
+				.expect("catalog track should create");
+			let broadcast = prepared.publish().expect("the answer should publish");
+			(dynamic, broadcast, track)
 		});
 
 		let resolved = requesting.await;
-		let _dynamic = handler.await.expect("handler task");
+		let (_dynamic, _broadcast, track) = handler.await.expect("handler task");
 		let subscriber = resolved
 			.expect("the handler served it")
 			.track(hang::Catalog::DEFAULT_NAME)
@@ -217,7 +199,7 @@ mod test {
 	fn soliciting(reference: &str) -> Catalog {
 		let (mut catalog, _) = catalog_payload("here");
 		catalog.echo = Some(hang::catalog::Echo::new(
-			moq_net::path::Relative::new(reference).into_owned(),
+			moq_net::path::Relative::new(reference).unwrap(),
 		));
 		catalog
 	}
@@ -248,21 +230,6 @@ mod test {
 		);
 		let result = publish_catalog_served(soliciting("../../../elsewhere")).await;
 		assert!(matches!(result, Err(crate::Error::EscapingBroadcast(_))), "{result:?}");
-	}
-
-	#[test]
-	fn refuses_oversized_catalog_before_reconciling_renditions() {
-		let mut published = Catalog::<()>::default();
-		for i in 0..=hang::catalog::MAX_RENDITIONS {
-			published.audio.renditions.insert(format!("audio{i}"), opus());
-		}
-		assert!(matches!(
-			publish_catalog(published),
-			Err(crate::Error::Hang(hang::Error::TooManyRenditions {
-				count: 65,
-				max: 64
-			}))
-		));
 	}
 
 	/// A reference that stops at or below the root names a broadcast, so the catalog stands.
@@ -343,7 +310,7 @@ mod test {
 		published.audio.renditions.insert("here".to_string(), opus());
 
 		let mut text = hang::catalog::TextConfig::new(hang::catalog::TextFormat::Vtt);
-		text.broadcast = Some(moq_net::path::Relative::new("../../../elsewhere").into_owned());
+		text.broadcast = Some(moq_net::path::Relative::new("../../../elsewhere").unwrap());
 		published.text.renditions.insert("captions".to_string(), text);
 
 		match publish_catalog(published) {
@@ -362,16 +329,16 @@ mod test {
 			let mut published = Catalog::<()>::default();
 			published.audio.renditions.insert("here".to_string(), opus());
 
-			let escaping = moq_net::path::Relative::new("../../../elsewhere").into_owned();
+			let escaping = moq_net::path::Relative::new("../../../elsewhere");
 			match section {
 				"json" => {
 					let mut config = hang::catalog::JsonConfig::new(hang::catalog::Mode::Stream);
-					config.broadcast = Some(escaping);
+					config.broadcast = Some(escaping.unwrap());
 					published.json.tracks.insert("chat".to_string(), config);
 				}
 				_ => {
 					let mut config = hang::catalog::BinaryConfig::new(hang::catalog::Mode::Stream);
-					config.broadcast = Some(escaping);
+					config.broadcast = Some(escaping.unwrap());
 					published.binary.tracks.insert("blobs".to_string(), config);
 				}
 			}

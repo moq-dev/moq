@@ -1,4 +1,4 @@
-// The same in-process rounds as bench/ffi.sh's other binding runners.
+// The same in-process rounds as the other binding benchmark runners (see bench/README.md).
 #include <moq/moq.hpp>
 
 #include <algorithm>
@@ -90,7 +90,7 @@ Reader read(Case c, std::shared_ptr<moq::TrackConsumer> consumer,
 
 void throughput(Case c, double budget, std::vector<Result> &results) {
     auto origin = moq::OriginProducer::init({uint64_t(64 << 20)});
-    auto broadcast = ok(origin->create_broadcast("bench"));
+    auto broadcast = ok(origin->create_broadcast("bench"))->broadcast();
     std::vector<std::shared_ptr<moq::TrackProducer>> tracks;
     std::vector<std::shared_ptr<moq::TrackConsumer>> consumers;
     moq::TrackInfo info;
@@ -185,7 +185,7 @@ int main() {
         results.push_back({std::string("call/") + name, "ns", seconds(start) * 1e9 / calls});
     };
     call("sequence", [&] { group->sequence(); });
-    call("info", [&] { ok(consumer->info()); });
+    call("info", [&] { (void)consumer->info(); });
     std::filesystem::create_directories(out);
     std::ofstream file(std::filesystem::path(out) / "cpp.json");
     file.exceptions(std::ios::failbit | std::ios::badbit);

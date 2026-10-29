@@ -30,7 +30,7 @@ the reverse (decided 2026-10-20, maintainer):
 - `track::Info.compress` is logical. Ciphertext doesn't compress, so the
   wrapper compresses each group, and each datagram alone with a fresh
   window, with moq-net's
-  [track compression](/quest/m1/compress/README.md) before AEAD, creates the
+  [track compression](/doc/concept/compression.md) before AEAD, creates the
   physical track uncompressed, and inflates after decryption. Sessions drop
   a sealed datagram past the transport's datagram size as they drop an
   oversized plaintext one, so document that the AEAD tag and any compression
@@ -53,7 +53,7 @@ the reverse (decided 2026-10-20, maintainer):
   catalog track is itself compressed, so a subscriber would need the flag
   before it could inflate the catalog that carries it. The
   [E2EE epic](/quest/m2/e2ee/README.md) also keeps catalog formats out of
-  moq-e2ee, and [migrate](/quest/m1/compress/migrate.md) drops hang's
+  moq-e2ee, and the [compression migration](https://github.com/moq-dev/moq/pull/7046) dropped hang's
   `compression` field. The subscriber needs the flag before inflating,
   without changing moq-net's `track(name)`; propose the encoding in the PR.
   Record it in `draft-lcurley-moq-e2ee.md`, replacing the Catalogs section's
@@ -77,8 +77,9 @@ the reverse (decided 2026-10-20, maintainer):
 - Demand and preference cross the wrapper: an encrypted track's demand is
   its physical track's, and preference updates reach the physical track.
 - Keep the nonce rules the epic specifies: a group producer still owns its
-  frame numbering, and a re-created track name is refused, not dropped (see
-  [rust-publish](/quest/m2/e2ee/rust-publish.md)).
+  frame numbering, and a re-created or re-served track name resumes above
+  its high-water marks (decided 2026-10-25, maintainer, replacing the
+  refusal; see [undeclared names](/quest/m2/e2ee/undeclared-names.md)).
 - Test the wrappers against the questline's pass-through test cases. The
   moq-json round trip through an encrypted track waits for
   [moq-json to take the traits](/quest/m2/net-wrap/json.md).
@@ -90,7 +91,3 @@ and each compressed object's authenticated inflated size.
 ## Required
 
 - [moq-net traits](/quest/m2/net-wrap/traits.md) - the traits this implements
-
-## Related
-
-- [Compressed tracks](/quest/m1/compress/README.md) - the per-group compression the wrapper applies before AEAD

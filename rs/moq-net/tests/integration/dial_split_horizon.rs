@@ -1,12 +1,11 @@
 #![cfg(feature = "async")]
 
-//! A dialed moq-transport session whose peer declares no hop must not be offered
-//! a route learned from that peer, and a SUBSCRIBE that arrives for that route
-//! must not be sent back to the peer that announced it.
+//! A dialed session must not be offered a route learned from its peer, and a
+//! SUBSCRIBE that arrives for that route must not be sent back to the peer that
+//! announced it.
 //!
-//! Draft 16 has no cluster extension, so neither side declares a hop. That is the
-//! anonymous dial: the accepting side already stamps one, and the dialing side
-//! has to as well.
+//! The anonymous dial is the hard case: when the peer declares no hop, the
+//! accepting side already stamps one, and the dialing side has to as well.
 
 use crate::support;
 
@@ -21,12 +20,8 @@ use support::{
 /// Long enough, in virtual time, for an announce or subscribe to cross the mock link.
 const SETTLE: Duration = Duration::from_secs(1);
 
-fn version() -> Version {
-	"moq-transport-16".parse().unwrap()
-}
-
-fn produce(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+fn produce(hop: Hop) -> origin::Producer {
+	let (producer, driver) = origin::Producer::new(origin::Config::new(hop));
 	spawn(driver);
 	producer
 }
@@ -40,10 +35,11 @@ struct Link {
 	registry: stats::Registry,
 }
 
-async fn dial(dialer: &origin::Producer, edge: &origin::Producer) -> Link {
-	let version = version();
+async fn dial(version: Version, dialer: &origin::Producer, edge: &origin::Producer) -> Link {
 	let registry = stats::Registry::new(stats::Config::new());
-	let session_stats = registry.tier(stats::Tier::default()).session("");
+	let session_stats = registry
+		.tier(stats::Tier::default())
+		.session(moq_net::Path::from_static(""));
 	let mut mock = moq_net::transport::memory::Config::default();
 	mock.protocol = Some(version.alpn().to_string());
 	let (client_transport, server_transport) = create_mock_session_pair(mock);
@@ -122,17 +118,33 @@ async fn learned_hop(dialer: &origin::Producer, path: &str) -> Hop {
 	}
 }
 
-/// Draft-16 edges dialed by one origin each get their own hop. The edge that
+fn hop(id: u64) -> Hop {
+	Hop::new(id).unwrap()
+}
+
+/// Edges that declare their own hop over the MoQ Cluster extension.
+#[moq_clock::test]
+async fn dialed_named_session_does_not_echo_or_route_subscribe_back() {
+	split_horizon("moq-transport-18", [hop(2), hop(3)]).await;
+}
+
+/// moq-lite-01 carries no hop, so neither side declares one.
+#[moq_clock::test]
+async fn dialed_anonymous_session_does_not_echo_or_route_subscribe_back() {
+	split_horizon("moq-lite-01", [hop(2), hop(3)]).await;
+}
+
+/// Edges dialed by one origin each get their own hop. The edge that
 /// announced a namespace is not told about it, and the other edge is. A
 /// subscribe from that other edge is fetched from the announcer and is not
 /// sent back to the subscriber.
-#[moq_clock::test]
-async fn dialed_anonymous_session_does_not_echo_or_route_subscribe_back() {
-	let dialer = produce(1);
-	let publisher = produce(2);
-	let subscriber = produce(3);
-	let to_publisher = dial(&dialer, &publisher).await;
-	let to_subscriber = dial(&dialer, &subscriber).await;
+async fn split_horizon(version: &str, [publisher_hop, subscriber_hop]: [Hop; 2]) {
+	let version: Version = version.parse().unwrap();
+	let dialer = produce(hop(1));
+	let publisher = produce(publisher_hop);
+	let subscriber = produce(subscriber_hop);
+	let to_publisher = dial(version, &dialer, &publisher).await;
+	let to_subscriber = dial(version, &dialer, &subscriber).await;
 
 	let broadcast = publisher.create_broadcast("room").unwrap();
 	let track = broadcast.create_track("video", None).unwrap();
@@ -181,7 +193,7 @@ async fn dialed_anonymous_session_does_not_echo_or_route_subscribe_back() {
 	// session it arrived on.
 	let viewed = subscriber
 		.consume()
-		.request_broadcast("room", None)
+		.request("room", None)
 		.await
 		.expect("subscriber resolves the namespace");
 	let subscription = moq_net::track::Subscription::default();

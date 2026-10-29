@@ -65,13 +65,18 @@ The simplest way to publish a stream:
 |-------------|---------|----------|---------------------------------|
 | `url`       | string  | required | Relay server URL                |
 | `name`      | string  | required | Broadcast name                  |
-| `versions`  | string  | stable versions | Comma-separated protocol versions to offer, most preferred first, like `moq-transport-14,moq-lite-06` |
+| `versions`  | string  | stable versions | Comma-separated protocol versions to offer, most preferred first, like `moq-transport-18,moq-lite-06` |
 | `source`    | string  | —        | `"camera"`, `"screen"`, `"file"` |
 | `muted`     | boolean | false    | Mute audio capture              |
 | `invisible` | boolean | false    | Disable video capture           |
 | `preview`   | string  | `"source"` | What the preview renders: `"source"`, `"encoded"`, `"none"` |
 | `backend`   | string  | `"auto"` | Graphics API for a `<canvas>` preview: `"auto"`, `"webgpu"`, `"2d"` |
-| `announce`  | string  | `"source"` | When to advertise: `"always"`, `"never"`, `"source"` (once media is captured). A camera source waits for every enabled track, and `"source"` waits until each captured track's config resolves or fails, so the first catalog lists every rendition. The broadcast is created while connected either way. |
+| `announce`  | string  | `"source"` | When to advertise: `"always"` or `"source"` (once media is captured). A camera source waits for every enabled track, and `"source"` waits until each captured track's config resolves or fails, so the first catalog lists every rendition. After its first announcement, a camera stays announced until deselected or disconnected, including mute, hide, device swaps, and capture retries. The broadcast is created while connected either way. To keep it out of discovery, use a hidden name with a `.`-prefixed segment; it is still subscribable by name. |
+
+Property and built-in UI changes reflect into attributes. Invalid URLs, version lists, and
+source/preview/backend/announce modes are refused: their property setters throw, and malformed markup
+reports a browser `error` event and suspends media until corrected or removed. Defaults apply
+when attributes are absent.
 
 A nested `<video>` shows the raw capture; a `<canvas>` is drawn by the element.
 Camera and microphone failures are observable through `el.sources.video`
@@ -115,8 +120,9 @@ const broadcast = new Publish.Broadcast({
     rotation: capture.out.rotation,
 });
 
-// Each encoder registers its rendition on the broadcast and encodes only while
-// someone is subscribed.
+// Each encoder registers its rendition on the broadcast and encodes while enabled,
+// subscribed or not, so a late viewer can reach back into the cache. Pass
+// `onDemand: true` to the broadcast to encode only while someone is subscribed.
 
 const hd = new Publish.Video.Encoder("video/hd", { broadcast, capture, enabled: true });
 const sd = new Publish.Video.Encoder("video/sd", { broadcast, capture, enabled: true, config: { maxScale: 0.25 } });

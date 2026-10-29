@@ -1,9 +1,11 @@
-import { expect, jest, spyOn, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano, sleep } from "@moq/clock";
 import { ConnectTimeout, SessionCode, SessionError } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
-import { ALPN, ALPN_05, ALPN_06, ALPN_07_WIP } from "../lite/version.ts";
+import { ClientSetup, ServerSetup } from "../lite/compat.ts";
+import { ALPN, ALPN_05, ALPN_06, ALPN_07_WIP, Version as Lite } from "../lite/version.ts";
 import { createMockTransportPair } from "../mock.ts";
+import { Stream } from "../stream.ts";
 import { accept } from "./accept.ts";
 import { type ConnectProps, connect as connectSession } from "./connect.ts";
 
@@ -298,7 +300,8 @@ test("connect without a signal still works", async () => {
 // A session-level stream failure promises an authoritative session close, even when the
 // browser publishes that close after the reset-only fallback would otherwise fire.
 test("SETUP preserves a delayed session close code", async () => {
-	jest.useFakeTimers();
+	const clock = new Manual();
+	const installed = clock.install();
 	const closed = Promise.withResolvers<WebTransportCloseInfo>();
 	let localCloses = 0;
 	const transport = {
@@ -317,10 +320,7 @@ test("SETUP preserves a delayed session close code", async () => {
 		(cause: unknown) => cause,
 	);
 	try {
-		// Drain the finite async setup chain before advancing the mocked clock.
-		for (let i = 0; i < 64; i++) await Promise.resolve();
-		jest.advanceTimersByTime(1_000);
-		for (let i = 0; i < 64; i++) await Promise.resolve();
+		await clock.advance(Nano.fromMilli(Milli(1_000)));
 		expect(localCloses).toBe(0);
 		closed.resolve({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
 		const cause = await result;
@@ -329,12 +329,12 @@ test("SETUP preserves a delayed session close code", async () => {
 	} finally {
 		closed.resolve({ closeCode: 0, reason: "test cleanup" });
 		await result;
-		jest.useRealTimers();
+		installed.close();
 	}
 });
 
 test("versions map to WebTransport ALPNs in order", async () => {
-	const versions = ["moq-lite-07-wip", "moq-lite-06", "moq-transport-22", "moq-lite-02", "moq-transport-14"];
+	const versions = ["moq-lite-07-wip", "moq-lite-06", "moq-transport-22", "moq-lite-02", "moq-lite-01"];
 	expect((await offered(ALPN_07_WIP, { versions })).protocols).toEqual([
 		ALPN_07_WIP,
 		ALPN_06,
@@ -344,7 +344,15 @@ test("versions map to WebTransport ALPNs in order", async () => {
 });
 
 test("versions reject empty, duplicate, unsupported and ALPN spellings", async () => {
-	for (const versions of [[], ["moq-lite-06", "moq-lite-06"], ["moq-lite-99"], ["toString"], [Ietf.ALPN.DRAFT_22]]) {
+	for (const versions of [
+		[],
+		["moq-lite-06", "moq-lite-06"],
+		["moq-lite-99"],
+		["moq-transport-14"],
+		["moq-transport-17"],
+		["toString"],
+		[Ietf.ALPN.DRAFT_22],
+	]) {
 		expect(await connect(url, { versions }).catch((err: unknown) => err)).toBeInstanceOf(TypeError);
 	}
 });
@@ -383,17 +391,43 @@ test("an IETF version name negotiates its ALPN", async () => {
 	}
 });
 
-test("SETUP offers only the named versions to a peer without an ALPN", async () => {
+// Firefox before 155 reports no subprotocol at all, so `protocol` is undefined rather than "".
+for (const protocol of ["", undefined]) {
+	test(`SETUP negotiates the named versions with a peer whose protocol is ${JSON.stringify(protocol)}`, async () => {
+		for (const [versions, want] of [
+			[["moq-lite-07-wip", "moq-lite-06"], "moq-lite-07-wip"],
+			[["moq-lite-06", "moq-lite-02"], "moq-lite-06"],
+			[["moq-lite-01", "moq-lite-06"], "moq-lite-01"],
+			[["moq-lite-04"], "moq-lite-04"],
+		] as const) {
+			const pair = createMockTransportPair("");
+			Object.defineProperty(pair.client, "protocol", { value: protocol });
+			const restore = stubWebTransport(pair.client);
+			try {
+				const [client, server] = await Promise.all([
+					connect(url, { versions, websocket: { enabled: false } }),
+					accept({ url, transport: pair.server }),
+				]);
+				expect(client.version).toBe(want);
+				expect(server.version).toBe(want);
+				client.abort();
+				server.abort();
+			} finally {
+				restore();
+			}
+		}
+	});
+}
+
+test("SETUP refuses a version the client did not name", async () => {
 	const pair = createMockTransportPair("");
 	const restore = stubWebTransport(pair.client);
 	try {
-		const [client, server] = await Promise.all([
-			connect(url, { versions: ["moq-lite-06", "moq-transport-14"], websocket: { enabled: false } }),
-			accept({ url, transport: pair.server }),
-		]);
-		expect(client.version).toBe("moq-transport-14");
-		client.abort();
-		server.abort();
+		const server = accept({ url, transport: pair.server, version: Lite.DRAFT_05 }).catch(() => undefined);
+		await expect(
+			connect(url, { versions: ["moq-lite-07-wip", "moq-lite-06"], websocket: { enabled: false } }),
+		).rejects.toThrow("unsupported server version: 0xff0dad05");
+		(await server)?.abort();
 	} finally {
 		restore();
 	}
@@ -403,12 +437,40 @@ test("a peer without an ALPN is refused when no named version negotiates in SETU
 	const pair = createMockTransportPair("");
 	const restore = stubWebTransport(pair.client);
 	try {
-		await expect(connect(url, { versions: ["moq-lite-06"], websocket: { enabled: false } })).rejects.toThrow(
+		await expect(connect(url, { versions: ["moq-transport-22"], websocket: { enabled: false } })).rejects.toThrow(
 			"server negotiated no protocol",
 		);
 	} finally {
 		restore();
 	}
+});
+
+// The moq-transport draft-14 version code, which the `moql` SETUP once also negotiated.
+const DRAFT_14 = 0xff00000e;
+
+test("a client refuses an IETF version selected in the moql SETUP", async () => {
+	const pair = createMockTransportPair("");
+	const restore = stubWebTransport(pair.client);
+	try {
+		const connecting = connect(url, { websocket: { enabled: false } });
+		const stream = await Stream.accept(pair.server, Lite.DRAFT_02);
+		if (!stream) throw new Error("no SETUP stream");
+		await ClientSetup.decode(stream.reader);
+		await new ServerSetup(DRAFT_14).encode(stream.writer);
+		await expect(connecting).rejects.toThrow("unsupported server version: 0xff00000e");
+	} finally {
+		restore();
+	}
+});
+
+test("a server refuses a client offering only IETF versions in the moql SETUP", async () => {
+	const pair = createMockTransportPair("");
+	const accepting = accept({ url, transport: pair.server });
+	// Handled now, since the refusal can land while the write below yields.
+	accepting.catch(() => {});
+	const stream = await Stream.open(pair.client, { version: Lite.DRAFT_02 });
+	await new ClientSetup([DRAFT_14]).encode(stream.writer);
+	await expect(accepting).rejects.toThrow("no common version found; client offered: ff00000e");
 });
 
 // The WebSocket subprotocols one connect() attempt asks a server for.

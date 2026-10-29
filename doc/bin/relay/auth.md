@@ -30,6 +30,8 @@ certificate. Nothing is parsed on the server's behalf: the `jwt` query parameter
 `subscribe` pattern unions and optionally a `root` alias, read-only `mounts`,
 `expires`, a `revalidate` cadence, a stats `tier` and `label`, and `peer` / `upstream` to
 mark another relay and an [upstream link](/bin/relay/cluster#upstream-links).
+A `tier` is `/`-joined segments of ASCII letters, digits, `.`, `_`, and `-`, such as `region/sjc`,
+because it becomes a metrics label: a grant naming any other tier is an auth server error, and a refusal naming one reads as unattributed.
 The fields are documented on `moq_auth::Request` and `moq_auth::Grant`
 ([Rust](/lib/rs/moq-auth), [TypeScript](/lib/js/auth)).
 
@@ -41,7 +43,8 @@ credential, not to `server_name` alone.
 
 **Connect.** A 2xx with a grant admits. A 403 can carry JSON such as
 `{"reason":"expired","root":"rooms/123","tier":"edge"}`. The reason is
-`refused`, `forbidden`, or `expired`; unknown reason strings read as `refused`.
+`refused`, `forbidden`, `expired`, or `malformed` (the token does not parse);
+unknown reason strings read as `refused`.
 A legacy plain-text 401 or 403 still reads as `refused`. Optional `root` and
 `tier` attribute refusal counters, with an absent tier using the default.
 Only name a root from a verified credential, including an expired token whose
@@ -53,9 +56,9 @@ nothing is admitted because the server was down. A grant that names nothing
 refuses, and so does one already expired: expiry is exact, with no grace for
 clock skew, so keep the auth server's clock in sync. WebSocket admission
 happens after SETUP, just like QUIC, so auth never fails the upgrade: rejected
-credentials (401 or 403) close the session as `Unauthorized`, which stops the
-client's reconnect loop, and an unreachable auth server closes it with
-application code 502.
+credentials (401 or 403) close the session as `Unauthorized`, or as `Expired`
+or `MalformedAuthToken` for those reasons, which stops the client's reconnect
+loop, and an unreachable auth server closes it with application code 502.
 
 **Revalidate.** On the grant's cadence the relay asks again. A grant with the
 same `root` and `mounts` resizes the live session in place, narrower or wider,
@@ -129,20 +132,36 @@ moq auth verify --key public.jwk --in alice.jwt
 moq auth serve --key public.jwk   # or --key-dir /etc/moq/keys/ or --key-set /etc/moq/keys.jwks
 ```
 
-The client dials `https://relay.example.com/rooms/123?jwt=<token>`, with one
-`jwt`: a query carrying two is refused. A
-moq-transport client can instead put the JWT in its SETUP's `AUTHORIZATION
-TOKEN` option with Token Type 0. HMAC, RSA, ECDSA, and EdDSA keys all work. A
+A native client passes it as `--connect-token <token>` (or `MOQ_CONNECT_TOKEN`)
+and dials `https://relay.example.com/rooms/123`. The first token is the
+connection credential, sent in SETUP: moq-lite-07-wip's Token parameter, or
+moq-transport's `AUTHORIZATION TOKEN` option with Token Type 0. While the client
+also offers a version that cannot carry it (moq-lite before 07), it sends the
+same value as `?jwt=`, which `moq auth serve` admits since they match; two
+different values are refused. A URL token can land in server and proxy access
+logs, so to keep it out, offer only versions that carry it in SETUP, such as
+`--connect-version moq-lite-07-wip`; a relay that predates SETUP tokens then
+cannot receive it. Each further token is presented
+[in band](#in-band-renewal) and widens the session's grant. A URL that already
+carries a `?jwt=`, such as a cluster peer's, keeps it as the connection
+credential, and every configured token then rides in band. Dialing
+`?jwt=<token>` directly still works, and reaches relays that predate SETUP
+tokens; a query carrying two `jwt` parameters is refused. HMAC, RSA, ECDSA, and EdDSA keys all work. A private RSA key must be a complete two-prime JWK (see [moq-auth](/lib/rs/moq-auth) for its fields); export one from your provider, or generate one with `moq auth generate --algorithm RS256`. A
 key can itself be **scoped** at generation (`--root`, `--publish`,
 `--subscribe`), after which it can never sign a broader token.
 
 ### In-band renewal
 
-On moq-lite-07-wip or moq-transport draft-17 and later with MoQ Auth negotiated,
+On moq-lite-07-wip or moq-transport draft-18 and later with MoQ Auth negotiated,
 a client can present another JWT without reconnecting. Present its replacement
 before the current grant expires and keep the returned token handle alive.
 The auth handle a reconnecting connection owns (native `Connection::auth()`,
 JavaScript `connection.auth`) presents its tokens again on every reconnect.
+A native client can instead replace its configured tokens through its
+connection's tokens (`Connection::tokens()`, `session.tokens()` in the
+bindings): the next dial presents them, a live session presents them in band and
+withdraws each old one once its replacement is answered, `answered()` reports
+the relay's verdict, and a refusal redials only once the tokens have changed.
 Older versions refuse in-band tokens.
 
 Each accepted token adds its publish and subscribe patterns to the session's

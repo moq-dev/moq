@@ -21,7 +21,8 @@ pub enum Version {
 	/// a `.`-prefixed segment below the requested prefix is left out. SUBSCRIBE_DROP
 	/// accounts for every group the subscription will not deliver.
 	/// ANNOUNCE_START and ANNOUNCE_UPDATE may copy a path head or hop-chain tail from a
-	/// live announcement on the same stream. Adds the Auth Stream. The wire format is
+	/// live announcement on the same stream. Adds the Auth Stream. SUBSCRIBE carries a
+	/// list of ranges. The wire format is
 	/// still work-in-progress, so it is advertised over ALPN as `moq-lite-07-wip` and
 	/// only when explicitly requested; the default version sets leave it out.
 	Lite07,
@@ -30,6 +31,14 @@ pub enum Version {
 // Feature predicates list the old versions explicitly, so a future version falls
 // forward to the newest behavior.
 impl Version {
+	/// Whether SETUP recognizes the Implementation parameter.
+	pub(crate) fn has_implementation(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
 	/// Whether SUBSCRIBE_OK carries the publisher's largest (group, frame), which a
 	/// subscriber takes as where the live feed is. Added in lite-07; an earlier answer
 	/// says nothing about the live edge.
@@ -164,6 +173,16 @@ impl Version {
 		)
 	}
 
+	/// Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry a list of ranges, each end absolute,
+	/// relative to the latest group, or at a presentation time. Added in lite-07; an earlier
+	/// subscription carries one span with absolute ends.
+	pub(crate) fn has_ranges(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
 	/// Whether FETCH carries the subscriber's optional max delay. Added in lite-07; an
 	/// earlier fetch is bounded by the publisher's retention alone.
 	pub(crate) fn has_fetch_max_delay(self) -> bool {
@@ -198,6 +217,13 @@ impl Version {
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05
 		)
+	}
+
+	/// Whether a copy's fills stop at the start its publisher resolved from the budget.
+	/// Lite-06 resolves the start, but drops media time and sends FETCH without a max
+	/// delay, so nothing judges a group below that start against a reader's budget.
+	pub(crate) fn fills_from_start(self) -> bool {
+		self.resolves_start() && !self.has_media_time() && !self.has_fetch_max_delay()
 	}
 
 	/// Whether subscription completion waits for the subscriber's FIN.

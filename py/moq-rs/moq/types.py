@@ -1,6 +1,6 @@
 """Re-export moq-ffi record types without the Moq prefix.
 
-Records with duration fields are owned in `_records` instead, so they read as `timedelta`.
+Records the wrapper gives Python defaults or timestamp conversions are owned in `_records` instead.
 """
 
 from moq_ffi import (

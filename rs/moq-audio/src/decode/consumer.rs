@@ -170,17 +170,9 @@ impl Consumer {
 			.then(|| Remix::new(decoder.layout(), layout))
 			.transpose()?;
 
-		let resampler = if sample_rate == decoder.sample_rate() {
-			None
-		} else {
-			let chunk_frames = (decoder.sample_rate() as usize * 20) / 1000;
-			Some(Resampler::new(
-				decoder.sample_rate(),
-				sample_rate,
-				decoder.layout().channels(),
-				chunk_frames,
-			)?)
-		};
+		if sample_rate == 0 {
+			return Err(Error::Unsupported("output sample rate must be > 0".into()));
+		}
 
 		let name = name.into();
 		let warmup = catalog.warmup.unwrap_or_default();
@@ -231,7 +223,7 @@ impl Consumer {
 			target: Target::new(options.delay, catalog.jitter),
 			decoder,
 			track,
-			resampler,
+			resampler: None,
 			remix,
 			options,
 			max_delay,
@@ -424,6 +416,19 @@ impl Consumer {
 			self.next_start = Some(advance(mux_frame.timestamp, frames + trimmed, rate)?);
 			if decoded.is_empty() {
 				continue;
+			}
+
+			if self.resampler.is_none() && rate != self.resolved_sample_rate {
+				// A decoded frame pays for the channel count. Bound the input
+				// window in frames, and its duration at low rates, so neither
+				// side's allocation grows with a catalog's rate declaration.
+				let chunk_frames = (rate as usize / 50).clamp(1, 960);
+				self.resampler = Some(Resampler::new(
+					rate,
+					self.resolved_sample_rate,
+					self.decoder.layout().channels(),
+					chunk_frames,
+				)?);
 			}
 
 			let (pcm, timestamp) = match self.resampler.as_mut() {
@@ -703,6 +708,95 @@ mod tests {
 	use crate::encode::{Config as EncodeConfig, Encoder, Input, Options as EncodeOptions, Producer};
 	use crate::{Format, Layout};
 
+	#[tokio::test(start_paused = true)]
+	async fn conversion_waits_for_decoded_samples() {
+		for (rate, channels) in [(44_100, 1), (4_000_000_000, 8), (48_000, u32::MAX)] {
+			let broadcast = moq_net::broadcast::Info::new().produce();
+			let _track = broadcast
+				.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+				.unwrap();
+			let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, rate, channels);
+			let consumer = Consumer::new(
+				&broadcast.consume(),
+				&catalog,
+				"audio",
+				Options {
+					output: Output {
+						sample_rate: Some(96_000),
+						..Default::default()
+					},
+					..Default::default()
+				},
+			)
+			.await
+			.unwrap();
+			assert!(consumer.resampler.is_none(), "catalog allocated the resampler");
+		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn conversion_allocation_is_bounded_after_data_arrives() {
+		use std::future::Future;
+		use std::task::{Context, Poll};
+
+		let mut baseline = None;
+		for rate in [96_000, 4_000_000_000] {
+			let broadcast = moq_net::broadcast::Info::new().produce();
+			let track = broadcast
+				.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+				.unwrap();
+			let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, rate, 8);
+			let mut producer = moq_mux::container::Producer::new(
+				track,
+				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+			);
+			let mut consumer = Consumer::new(
+				&broadcast.consume(),
+				&catalog,
+				"audio",
+				Options {
+					output: Output {
+						sample_rate: Some(48_000),
+						..Default::default()
+					},
+					..Default::default()
+				},
+			)
+			.await
+			.unwrap();
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp: Timestamp::ZERO,
+					duration: None,
+					payload: vec![0; 4].into(),
+					keyframe: true,
+				})
+				.unwrap();
+			assert!(matches!(consumer.read().await, Err(Error::Misaligned { .. })));
+			assert!(consumer.resampler.is_none(), "a refused packet allocated the resampler");
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp: Timestamp::ZERO,
+					duration: None,
+					payload: vec![0; 960 * 8 * 4].into(),
+					keyframe: true,
+				})
+				.unwrap();
+			let (read, stats) = crate::allocation::measure(|| {
+				let mut read = std::pin::pin!(consumer.read());
+				read.as_mut().poll(&mut Context::from_waker(std::task::Waker::noop()))
+			});
+			assert!(!matches!(read, Poll::Ready(Err(_))), "{read:?}");
+			assert!(consumer.resampler.is_some());
+			let baseline = *baseline.get_or_insert(stats.bytes);
+			assert!(
+				stats.bytes <= baseline,
+				"{rate} Hz allocated {} bytes, baseline {baseline}",
+				stats.bytes
+			);
+		}
+	}
+
 	async fn warmup_output(start: Start, declared: bool) -> (Vec<u128>, usize) {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
@@ -831,8 +925,7 @@ mod tests {
 		let relay = origin(2);
 		let _link = link(&publisher, &relay).await;
 		let consumer = relay.consume();
-		consumer.routed("bcast").await.unwrap();
-		let remote = consumer.request_broadcast("bcast", None).await.unwrap();
+		let remote = consumer.follow("bcast", None).unwrap().available().await.unwrap();
 
 		// A first reader warms the relay's copy with every group.
 		{

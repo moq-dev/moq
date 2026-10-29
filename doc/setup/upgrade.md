@@ -19,15 +19,16 @@ wire changes that decide the order to upgrade a deployment.
 
 A released flag, environment variable, or config key that was renamed is
 refused at startup with its replacement named, rather than ignored. Fix what the
-error lists and rerun. The one exception is moq-cli's removed `MOQ_HOP`, which is
-ignored; its guide says what replaces it.
+error lists and rerun. Any other `MOQ_*` variable a binary does not read, such as
+moq-cli's removed `MOQ_HOP`, is refused at startup too; its guide says what
+replaces it.
 
 ## Migration guides
 
 - **Binaries:** [moq-relay](https://github.com/moq-dev/moq/blob/main/rs/moq-relay/MIGRATE.md), [moq-cli (`moq`)](https://github.com/moq-dev/moq/blob/main/rs/moq-cli/MIGRATE.md), [moq-gst](https://github.com/moq-dev/moq/blob/main/rs/moq-gst/MIGRATE.md), [obs-moq](https://github.com/moq-dev/moq/blob/main/cpp/obs/MIGRATE.md)
 - **Bindings:** [moq-ffi (UniFFI)](https://github.com/moq-dev/moq/blob/main/rs/moq-ffi/MIGRATE.md), [moq-c (C)](https://github.com/moq-dev/moq/blob/main/rs/moq-c/MIGRATE.md), [Python](https://github.com/moq-dev/moq/blob/main/py/moq-rs/MIGRATE.md), [Go](https://github.com/moq-dev/moq/blob/main/go/wrapper/MIGRATE.md), [Swift](https://github.com/moq-dev/moq/blob/main/swift/MIGRATE.md), [Kotlin](https://github.com/moq-dev/moq/blob/main/kt/moq/MIGRATE.md), [Dart](https://github.com/moq-dev/moq/blob/main/dart/moq/MIGRATE.md), [C++](https://github.com/moq-dev/moq/blob/main/cpp/moq/MIGRATE.md)
-- **Rust:** [hang](https://github.com/moq-dev/moq/blob/main/rs/hang/MIGRATE.md), [kio](https://github.com/moq-dev/moq/blob/main/rs/kio/MIGRATE.md), [moq-archive](https://github.com/moq-dev/moq/blob/main/rs/moq-archive/MIGRATE.md), [moq-audio](https://github.com/moq-dev/moq/blob/main/rs/moq-audio/MIGRATE.md), [moq-auth](https://github.com/moq-dev/moq/blob/main/rs/moq-auth/MIGRATE.md), [moq-boy](https://github.com/moq-dev/moq/blob/main/rs/moq-boy/MIGRATE.md), [moq-clock](https://github.com/moq-dev/moq/blob/main/rs/moq-clock/MIGRATE.md), [moq-clock-macros](https://github.com/moq-dev/moq/blob/main/rs/moq-clock/macros/MIGRATE.md), [moq-e2ee](https://github.com/moq-dev/moq/blob/main/rs/moq-e2ee/MIGRATE.md), [moq-flate](https://github.com/moq-dev/moq/blob/main/rs/moq-flate/MIGRATE.md), [moq-hls](https://github.com/moq-dev/moq/blob/main/rs/moq-hls/MIGRATE.md), [moq-ice](https://github.com/moq-dev/moq/blob/main/rs/moq-ice/MIGRATE.md), [moq-json](https://github.com/moq-dev/moq/blob/main/rs/moq-json/MIGRATE.md), [moq-loc](https://github.com/moq-dev/moq/blob/main/rs/moq-loc/MIGRATE.md), [moq-msf](https://github.com/moq-dev/moq/blob/main/rs/moq-msf/MIGRATE.md), [moq-mux](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/MIGRATE.md), [moq-net](https://github.com/moq-dev/moq/blob/main/rs/moq-net/MIGRATE.md), [moq-nvenc](https://github.com/moq-dev/moq/blob/main/rs/moq-nvenc/MIGRATE.md), [moq-pattern](https://github.com/moq-dev/moq/blob/main/rs/moq-pattern/MIGRATE.md), [moq-quic](https://github.com/moq-dev/moq/blob/main/rs/moq-quic/MIGRATE.md), [moq-room](https://github.com/moq-dev/moq/blob/main/rs/moq-room/MIGRATE.md), [moq-rtc](https://github.com/moq-dev/moq/blob/main/rs/moq-rtc/MIGRATE.md), [moq-rtmp](https://github.com/moq-dev/moq/blob/main/rs/moq-rtmp/MIGRATE.md), [moq-sock](https://github.com/moq-dev/moq/blob/main/rs/moq-sock/MIGRATE.md), [moq-srt](https://github.com/moq-dev/moq/blob/main/rs/moq-srt/MIGRATE.md), [moq-stats](https://github.com/moq-dev/moq/blob/main/rs/moq-stats/MIGRATE.md), [moq-tokio](https://github.com/moq-dev/moq/blob/main/rs/moq-tokio/MIGRATE.md), [moq-transcode](https://github.com/moq-dev/moq/blob/main/rs/moq-transcode/MIGRATE.md), [moq-uring](https://github.com/moq-dev/moq/blob/main/rs/moq-uring/MIGRATE.md), [moq-v4l](https://github.com/moq-dev/moq/blob/main/rs/moq-v4l/MIGRATE.md), [moq-video](https://github.com/moq-dev/moq/blob/main/rs/moq-video/MIGRATE.md), [qmux](https://github.com/moq-dev/moq/blob/main/rs/qmux/MIGRATE.md)
-- **JavaScript:** [`@moq/auth`](https://github.com/moq-dev/moq/blob/main/js/auth/MIGRATE.md), [`@moq/boy`](https://github.com/moq-dev/moq/blob/main/js/moq-boy/MIGRATE.md), [`@moq/clock`](https://github.com/moq-dev/moq/blob/main/js/clock/MIGRATE.md), [`@moq/flate`](https://github.com/moq-dev/moq/blob/main/js/flate/MIGRATE.md), [`@moq/hang`](https://github.com/moq-dev/moq/blob/main/js/hang/MIGRATE.md), [`@moq/json`](https://github.com/moq-dev/moq/blob/main/js/json/MIGRATE.md), [`@moq/loc`](https://github.com/moq-dev/moq/blob/main/js/loc/MIGRATE.md), [`@moq/msf`](https://github.com/moq-dev/moq/blob/main/js/msf/MIGRATE.md), [`@moq/net`](https://github.com/moq-dev/moq/blob/main/js/net/MIGRATE.md), [`@moq/p2p`](https://github.com/moq-dev/moq/blob/main/js/p2p/MIGRATE.md), [`@moq/pattern`](https://github.com/moq-dev/moq/blob/main/js/pattern/MIGRATE.md), [`@moq/publish`](https://github.com/moq-dev/moq/blob/main/js/publish/MIGRATE.md), [`@moq/qmux`](https://github.com/moq-dev/moq/blob/main/js/qmux/MIGRATE.md), [`@moq/room`](https://github.com/moq-dev/moq/blob/main/js/room/MIGRATE.md), [`@moq/signals`](https://github.com/moq-dev/moq/blob/main/js/signals/MIGRATE.md), [`@moq/ui`](https://github.com/moq-dev/moq/blob/main/js/ui/MIGRATE.md), [`@moq/video`](https://github.com/moq-dev/moq/blob/main/js/video/MIGRATE.md), [`@moq/watch`](https://github.com/moq-dev/moq/blob/main/js/watch/MIGRATE.md)
+- **Rust:** [hang](https://github.com/moq-dev/moq/blob/main/rs/hang/MIGRATE.md), [kio](https://github.com/moq-dev/moq/blob/main/rs/kio/MIGRATE.md), [moq-archive](https://github.com/moq-dev/moq/blob/main/rs/moq-archive/MIGRATE.md), [moq-audio](https://github.com/moq-dev/moq/blob/main/rs/moq-audio/MIGRATE.md), [moq-auth](https://github.com/moq-dev/moq/blob/main/rs/moq-auth/MIGRATE.md), [moq-boy](https://github.com/moq-dev/moq/blob/main/rs/moq-boy/MIGRATE.md), [moq-clock](https://github.com/moq-dev/moq/blob/main/rs/moq-clock/MIGRATE.md), [moq-clock-macros](https://github.com/moq-dev/moq/blob/main/rs/moq-clock/macros/MIGRATE.md), [moq-e2ee](https://github.com/moq-dev/moq/blob/main/rs/moq-e2ee/MIGRATE.md), [moq-hls](https://github.com/moq-dev/moq/blob/main/rs/moq-hls/MIGRATE.md), [moq-ice](https://github.com/moq-dev/moq/blob/main/rs/moq-ice/MIGRATE.md), [moq-json](https://github.com/moq-dev/moq/blob/main/rs/moq-json/MIGRATE.md), [moq-loc](https://github.com/moq-dev/moq/blob/main/rs/moq-loc/MIGRATE.md), [moq-msf](https://github.com/moq-dev/moq/blob/main/rs/moq-msf/MIGRATE.md), [moq-mux](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/MIGRATE.md), [moq-net](https://github.com/moq-dev/moq/blob/main/rs/moq-net/MIGRATE.md), [moq-nvenc](https://github.com/moq-dev/moq/blob/main/rs/moq-nvenc/MIGRATE.md), [moq-pattern](https://github.com/moq-dev/moq/blob/main/rs/moq-pattern/MIGRATE.md), [moq-quic](https://github.com/moq-dev/moq/blob/main/rs/moq-quic/MIGRATE.md), [moq-room](https://github.com/moq-dev/moq/blob/main/rs/moq-room/MIGRATE.md), [moq-rtc](https://github.com/moq-dev/moq/blob/main/rs/moq-rtc/MIGRATE.md), [moq-rtmp](https://github.com/moq-dev/moq/blob/main/rs/moq-rtmp/MIGRATE.md), [moq-sock](https://github.com/moq-dev/moq/blob/main/rs/moq-sock/MIGRATE.md), [moq-srt](https://github.com/moq-dev/moq/blob/main/rs/moq-srt/MIGRATE.md), [moq-stats](https://github.com/moq-dev/moq/blob/main/rs/moq-stats/MIGRATE.md), [moq-tokio](https://github.com/moq-dev/moq/blob/main/rs/moq-tokio/MIGRATE.md), [moq-transcode](https://github.com/moq-dev/moq/blob/main/rs/moq-transcode/MIGRATE.md), [moq-uring](https://github.com/moq-dev/moq/blob/main/rs/moq-uring/MIGRATE.md), [moq-v4l](https://github.com/moq-dev/moq/blob/main/rs/moq-v4l/MIGRATE.md), [moq-video](https://github.com/moq-dev/moq/blob/main/rs/moq-video/MIGRATE.md), [qmux](https://github.com/moq-dev/moq/blob/main/rs/qmux/MIGRATE.md)
+- **JavaScript:** [`@moq/auth`](https://github.com/moq-dev/moq/blob/main/js/auth/MIGRATE.md), [`@moq/boy`](https://github.com/moq-dev/moq/blob/main/js/moq-boy/MIGRATE.md), [`@moq/clock`](https://github.com/moq-dev/moq/blob/main/js/clock/MIGRATE.md), [`@moq/hang`](https://github.com/moq-dev/moq/blob/main/js/hang/MIGRATE.md), [`@moq/json`](https://github.com/moq-dev/moq/blob/main/js/json/MIGRATE.md), [`@moq/loc`](https://github.com/moq-dev/moq/blob/main/js/loc/MIGRATE.md), [`@moq/msf`](https://github.com/moq-dev/moq/blob/main/js/msf/MIGRATE.md), [`@moq/net`](https://github.com/moq-dev/moq/blob/main/js/net/MIGRATE.md), [`@moq/p2p`](https://github.com/moq-dev/moq/blob/main/js/p2p/MIGRATE.md), [`@moq/pattern`](https://github.com/moq-dev/moq/blob/main/js/pattern/MIGRATE.md), [`@moq/publish`](https://github.com/moq-dev/moq/blob/main/js/publish/MIGRATE.md), [`@moq/qmux`](https://github.com/moq-dev/moq/blob/main/js/qmux/MIGRATE.md), [`@moq/room`](https://github.com/moq-dev/moq/blob/main/js/room/MIGRATE.md), [`@moq/signals`](https://github.com/moq-dev/moq/blob/main/js/signals/MIGRATE.md), [`@moq/ui`](https://github.com/moq-dev/moq/blob/main/js/ui/MIGRATE.md), [`@moq/video`](https://github.com/moq-dev/moq/blob/main/js/video/MIGRATE.md), [`@moq/watch`](https://github.com/moq-dev/moq/blob/main/js/watch/MIGRATE.md)
 
 ## Unreleased
 
@@ -41,6 +42,11 @@ These land with the next breaking release.
   hang's media priorities now sit above that default rather than below it.
   Mixed versions only differ in how an unset priority ranks against a set one,
   so upgrade publishers and players in either order.
+- **moq-transport drafts 14 through 17 are dropped.** Rust and JavaScript
+  speak moq-transport drafts 18 through 22 only, and the `moql` SETUP
+  negotiates moq-lite only. A peer that offers nothing newer fails
+  to connect instead of falling back, so move such peers to draft 18 or a
+  moq-lite version before upgrading what they connect to.
 - **WebSocket needs a QMux subprotocol** (#6231). Relays answer a WebSocket
   upgrade that offers no `qmux-NN` subprotocol with 400 instead of falling back
   to the legacy `webtransport` format, so upgrade such clients before relays.
@@ -55,15 +61,15 @@ These land with the next breaking release.
   or `subscribe` carries a `rate` cap encodes that role as an object, which
   released verifiers reject, so upgrade every auth server and verifier before
   issuing capped tokens.
-- **Archive timelines declare a duration** (#5715). Each catalog
-  `archive.timelines` entry is an object instead of a track name. Neither side
-  reads the other's shape, and a catalog it can't read keeps its live media but
-  drops the archive, so seeking, recording, and HLS history need publishers and
-  their readers upgraded together.
+- **HLS records replace archive timelines.** The hang catalog's root `archive`
+  section is gone. A video or audio rendition carries its own `hls` field
+  naming a `<track>.hls` record track, which Rust publishers write by default.
+  Neither side reads the other's shape, so upgrade HLS exporters and their
+  publishers together.
 - **Announce restarts.** moq-lite 07 adds `ANNOUNCE_RESTART` (0x3): another
   publisher instance now serves the prefix. lite-06's `ANNOUNCE_RESTART` is
-  named `ANNOUNCE_UPDATE`, as it always meant. moq-transport draft 17 and later
-  with the epoch extension advertise another epoch before withdrawing the old
+  named `ANNOUNCE_UPDATE`, as it always meant. moq-transport with the epoch
+  extension advertise another epoch before withdrawing the old
   one. Elsewhere, a restart is still an end then a start.
 - **Publisher epochs ride the route** (#4942). moq-lite 07 carries the epoch
   after the path in `ANNOUNCE_START`, `TRACK`, `SUBSCRIBE`, and `FETCH`.
@@ -76,7 +82,7 @@ These land with the next breaking release.
   tie-break and ends once the fleet is upgraded.
 - **A track is timed or untimed, and nothing fills in a timestamp on
   receive.** Tracks from moq-lite before 05, and moq-transport tracks without
-  `TIMESCALE` (every track on drafts 14 to 16), arrive untimed instead of
+  `TIMESCALE` arrive untimed instead of
   stamped with their arrival time. moq-lite 05 and 06 can't encode absence and
   carry a send time instead, so their receivers drop every timestamp and those
   tracks arrive untimed too: read media time from the payload. moq-transport

@@ -20,7 +20,6 @@ import * as Moq from "@moq/net";
 /** The generated `@moq/wasm` module, typed from its published `.d.ts`. */
 type Wasm = typeof import("@moq/wasm");
 type Session = import("@moq/wasm").Session;
-type Broadcast = import("@moq/wasm").Broadcast;
 type Track = import("@moq/wasm").Track;
 
 /** One relay the suite runs against, and the version it must negotiate. */
@@ -143,12 +142,13 @@ async function withPublisher<T>(
 	// The session serves an origin rather than individual broadcasts, so the path is
 	// published into the origin and the session announces the table.
 	const origin = new Moq.Origin.Producer();
-	const broadcast = origin.createBroadcast(Moq.Path.from(path));
+	const broadcastPublication = origin.createBroadcast(Moq.Path.from(path));
+	const broadcast = broadcastPublication.broadcast;
 	const track = broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI });
 	const missing = broadcast.createTrack("missing");
 	const used = track.demand().wanted;
 	const missingUsed = missing.demand().wanted;
-	broadcast.announce();
+	broadcastPublication.announce();
 	const connection = await Moq.Connection.connect({ url: new URL(relay.url), publish: origin.consume() });
 
 	let stopped = false;
@@ -172,22 +172,25 @@ async function withPublisher<T>(
 			for (const frame of FIXTURE) {
 				group.writeFrame({ payload: frame, timestamp: Moq.Time.Timestamp.now() });
 			}
-			group.close();
+			group.finish();
 		}
+		track.finish();
 		track.close();
 	})();
 	const rejecting = (async () => {
 		while (missingUsed.peek() === undefined && missing.closed.peek() === undefined) {
 			await Promise.race([missingUsed.changed(), missing.closed]);
 		}
-		if (missingUsed.peek() !== undefined) missing.close(new Error("no such track: missing"));
+		if (missingUsed.peek() !== undefined) missing.abort(new Error("no such track: missing"));
 	})();
 
 	try {
 		return await run(advance);
 	} finally {
 		stopped = true;
+		track.finish();
 		track.close();
+		missing.finish();
 		missing.close();
 		broadcast.close();
 		// Teardown, not a graceful end: the case is over and the harness is not waiting
@@ -208,13 +211,6 @@ async function withSession<T>(wasm: Wasm, relay: RelayFixture, body: (session: S
 		// Dropping the Rust value closes the transport, which ends the driver task.
 		session.free();
 	}
-}
-
-/** Wait for `path` to be announced and return the broadcast, or fail. */
-async function consume(session: Session, path: string): Promise<Broadcast> {
-	const broadcast = await session.consume(path);
-	if (!broadcast) throw new Error(`consume(${path}) resolved without a broadcast`);
-	return broadcast;
 }
 
 /**
@@ -303,7 +299,7 @@ const CASES: Case[] = [
 			const path = `wasm-test/${relay.name}`;
 			await withPublisher(relay, path, async (advance) => {
 				await withSession(wasm, relay, async (session) => {
-					const broadcast = await consume(session, path);
+					const broadcast = await session.consume(path);
 					const track = await broadcast.subscribe(TRACK);
 					try {
 						await expectGroups(track, GROUPS_TO_READ, advance);
@@ -326,7 +322,7 @@ const CASES: Case[] = [
 			const path = `wasm-test/${relay.name}-refuse`;
 			await withPublisher(relay, path, async () => {
 				await withSession(wasm, relay, async (session) => {
-					const broadcast = await consume(session, path);
+					const broadcast = await session.consume(path);
 					let read: string;
 					try {
 						const track = await broadcast.subscribe("missing");
@@ -357,7 +353,7 @@ const CASES: Case[] = [
 			session.free();
 			const resolved = await pending.then(
 				(broadcast) => {
-					broadcast?.free();
+					broadcast.free();
 					return true;
 				},
 				() => false,
@@ -374,7 +370,7 @@ const CASES: Case[] = [
 			const path = `wasm-test/${relay.name}-free`;
 			await withPublisher(relay, path, async () => {
 				await withSession(wasm, relay, async (session) => {
-					const broadcast = await consume(session, path);
+					const broadcast = await session.consume(path);
 					const track = await broadcast.subscribe(TRACK);
 					const pendingTrack = broadcast.subscribe(TRACK);
 					broadcast.free();

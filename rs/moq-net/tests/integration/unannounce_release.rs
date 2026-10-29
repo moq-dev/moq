@@ -28,8 +28,12 @@ async fn release(version: Version) {
 	let track = broadcast.create_track("t", None).unwrap();
 
 	let consumer = relay.consume();
-	consumer.routed("a/b").await.expect("routed");
-	let remote = consumer.request_broadcast("a/b", None).await.expect("resolves");
+	let remote = consumer
+		.follow("a/b", None)
+		.unwrap()
+		.available()
+		.await
+		.expect("resolves");
 	let sub = remote.track("t").unwrap().subscribe(None).await.expect("subscribes");
 	crate::support::wanted(track.demand()).await.unwrap();
 
@@ -46,7 +50,7 @@ async fn release(version: Version) {
 
 #[moq_clock::test]
 async fn unannounced_remote_track_releases_demand() {
-	for name in Version::names() {
-		release(name.parse().unwrap()).await;
+	for version in support::every_version() {
+		release(version).await;
 	}
 }

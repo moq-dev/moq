@@ -1,59 +1,35 @@
-import { error, ProtocolViolation, StreamError } from "../error.ts";
+import { error, ProtocolViolation, StreamCode, StreamError } from "../error.ts";
 import type * as Path from "../path.ts";
 import { Reader, type Stream, type Writer } from "../stream.ts";
-import type { Session } from "./adapter.ts";
 import { type RequestCondition, type RequestKind, toRequestCode } from "./error.ts";
-import { FetchError } from "./fetch.ts";
 import { GoAway } from "./goaway.ts";
 import * as Message from "./message.ts";
 import { Parameters } from "./parameters.ts";
-import { PublishError } from "./publish.ts";
-import { PublishNamespaceError } from "./publish_namespace.ts";
 import { RequestError } from "./request.ts";
-import { SubscribeError } from "./subscribe.ts";
-import { SubscribeNamespaceError } from "./subscribe_namespace.ts";
+import type { Session } from "./session.ts";
 import { MalformedAuthToken } from "./token.ts";
-import { TRACK_STATUS_ERROR_14 } from "./track.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 /** Whether the draft treats the requester finishing its messages as cancellation. */
 function finCancels(version: IetfVersion): boolean {
-	return (
-		version === Version.DRAFT_14 ||
-		version === Version.DRAFT_15 ||
-		version === Version.DRAFT_16 ||
-		version === Version.DRAFT_17 ||
-		version === Version.DRAFT_18
-	);
+	return version === Version.DRAFT_18;
 }
 
 /**
- * Why a request is refused, and which one: only drafts 14-16 name the Request ID.
+ * Why a request is refused.
  * @internal
  */
 export interface Refusal {
-	requestId?: bigint;
 	condition: RequestCondition;
 	reasonPhrase: string;
 }
 
-// Each draft-14 error message has the REQUEST_ERROR body that draft-15 folded them into.
-const ERROR_14: Record<RequestKind, number> = {
-	subscribe: SubscribeError.id,
-	fetch: FetchError.id,
-	publish: PublishError.id,
-	publish_namespace: PublishNamespaceError.id,
-	subscribe_namespace: SubscribeNamespaceError.id,
-	track_status: TRACK_STATUS_ERROR_14,
-};
-
 async function writeRefusal(w: Writer, version: IetfVersion, kind: RequestKind, refusal: Refusal): Promise<void> {
 	const err = new RequestError({
-		requestId: version <= Version.DRAFT_16 ? refusal.requestId : undefined,
 		errorCode: toRequestCode(refusal.condition, kind, version),
 		reasonPhrase: refusal.reasonPhrase,
 	});
-	await Message.write(w, version === Version.DRAFT_14 ? ERROR_14[kind] : RequestError.id, err, version);
+	await Message.write(w, RequestError.id, err, version);
 }
 
 /**
@@ -66,19 +42,16 @@ export async function refuse(stream: Stream, version: IetfVersion, kind: Request
 }
 
 /**
- * Refuse a REQUEST_UPDATE, leaving its request standing. Draft 14 answers no update.
+ * Refuse a REQUEST_UPDATE, leaving its request standing.
  * @internal
  */
-export async function refuseUpdate(
-	w: Writer,
-	version: IetfVersion,
-	kind: RequestKind,
-	refusal: Refusal,
-): Promise<void> {
-	if (version !== Version.DRAFT_14) await writeRefusal(w, version, kind, refusal);
-}
+export const refuseUpdate = writeRefusal;
 
-/** Refuse an unrecognized reserved namespace before it reaches the application. */
+/**
+ * Refuse an unrecognized reserved namespace before it reaches the application.
+ *
+ * @internal
+ */
 export async function refuseReserved(request: RequestStream): Promise<void> {
 	await request.refuse("subscribe", {
 		condition: "does_not_exist",
@@ -98,7 +71,7 @@ const goaways = new WeakMap<Reader, GoAways>();
 
 /**
  * Read the type of a request stream's next message, or undefined once the peer finishes.
- * From draft 18 on, the peer may send one GOAWAY on a request stream, consumed here; a second,
+ * The peer may send one GOAWAY on a request stream, consumed here; a second,
  * or a client's naming a new session, is a protocol violation.
  * @internal
  */
@@ -112,7 +85,7 @@ export async function nextMessage(reader: Reader, version: IetfVersion, client: 
 		for (;;) {
 			if (await reader.done()) return undefined;
 			const type = await reader.u53();
-			if (type !== GoAway.id || version < Version.DRAFT_18) return type;
+			if (type !== GoAway.id) return type;
 			if (goaway.seen) throw new ProtocolViolation("second GOAWAY on a request stream");
 			goaway.seen = true;
 			// Draft-18's Request ID belongs on the control stream only.
@@ -138,18 +111,8 @@ export async function namespaceUpdate(
 	try {
 		return await Message.decode(framed.reader, async (body) => {
 			const requestId = await body.u62();
-			// Drafts 14-16 define no namespace update. The update's own Request ID is all its
-			// refusal names; the target is what the adapter routed it by.
-			if (version <= Version.DRAFT_16) {
-				await body.readAll();
-				return { requestId, refused: "not_supported" };
-			}
 			const params = await Parameters.decode(body, version, "namespace-update");
-			return {
-				requestId,
-				prefix: params.namespacePrefix,
-				refused: undefined,
-			};
+			return { requestId, prefix: params.namespacePrefix };
 		});
 	} catch (err) {
 		if (err instanceof MalformedAuthToken && err.requestId !== undefined)
@@ -230,6 +193,16 @@ export class RequestStream {
 		this.close();
 	}
 
+	/**
+	 * Cancel the request but keep reading, so {@link next} reports when the peer ends its
+	 * half: FIN where that cancels, a CANCELLED reset otherwise.
+	 */
+	cancel(): void {
+		if (this.#closed) return;
+		if (finCancels(this.#session.version)) this.writer.close();
+		else this.writer.reset(new StreamError(StreamCode.Cancel, { message: "cancel" }));
+	}
+
 	/** End the request cleanly: FIN, and stop reading. Only the first close counts. */
 	close(): void {
 		if (this.#closed) return;
@@ -283,13 +256,11 @@ export class RequestStream {
 				},
 				() => this.#end(),
 			);
-			// Drafts 14-16 adapt the request onto the control stream, whose virtual writer
-			// finishes while the request lives.
-			if (version > Version.DRAFT_16)
-				this.writer.closed.then(
-					() => this.#end(),
-					() => this.#end(),
-				);
+			// Our own side finishing or resetting ends the request too.
+			this.writer.closed.then(
+				() => this.#end(),
+				() => this.#end(),
+			);
 		}
 		return this.#ahead;
 	}

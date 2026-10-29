@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Hear the shipped headless player through a private, clocked null audio device.
 set -euo pipefail
+
+if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
+    exec bash "$(dirname "$0")/../../sh/local.sh" bash "$0" "$@"
+fi
 if [[ $(uname -s) != Linux ]]; then
     echo "native-play requires Linux ALSA/cpal and PulseAudio" >&2
     exit 2

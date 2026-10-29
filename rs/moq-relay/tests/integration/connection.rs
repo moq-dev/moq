@@ -14,7 +14,7 @@ const TIMEOUT: Duration = Duration::from_secs(60);
 /// JavaScript's exact number range, on each flavour used by the browser bindings.
 #[tokio::test(start_paused = true)]
 async fn largest_quic_sequence_reaches_the_subscriber() {
-	for alpn in ["moq-lite-02", "moq-lite-06", "moq-transport-19"] {
+	for alpn in ["moq-lite-02", "moq-lite-06", "moq-transport-22"] {
 		let version = alpn.parse().unwrap();
 		let auth = memory::public(&["**"], &[], &[]);
 		let cluster = memory::cluster();
@@ -40,11 +40,13 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 		)
 		.await
 		.unwrap();
-		tokio::time::timeout(TIMEOUT, subscriber.consume().routed("ladder"))
-			.await
+		let remote = subscriber
+			.consume()
+			.follow("ladder", None)
 			.unwrap()
+			.available()
+			.await
 			.unwrap();
-		let remote = subscriber.consume().request_broadcast("ladder", None).await.unwrap();
 		let mut sub = remote.track("data").unwrap().subscribe(None).await.unwrap();
 		for sequence in [5, 1 << 32, (1 << 53) - 1, (1 << 53) + 1, (1 << 62) - 1] {
 			// Timestamps stop at 2^61 - 1, the most lite-05/06 can zigzag as a first frame.
@@ -61,7 +63,7 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 			let frame = got.read_frame().await.unwrap().unwrap();
 			assert_eq!(frame.payload, b"ladder".as_ref());
 			// Lite-02 carries no timestamps, and a lite-06 subscriber drops them.
-			let timed = alpn == "moq-transport-19";
+			let timed = alpn == "moq-transport-22";
 			assert_eq!(frame.timestamp, timed.then_some(timestamp), "{alpn}");
 		}
 	}
@@ -72,7 +74,7 @@ fn publish(
 	name: &str,
 ) -> (
 	moq_net::origin::Producer,
-	moq_net::broadcast::Producer,
+	moq_net::origin::Publication,
 	moq_net::track::Producer,
 ) {
 	let origin = moq_tokio::origin::spawn();
@@ -214,7 +216,7 @@ async fn the_setup_path_reaches_the_decider_and_roots_the_grant() {
 	let (origin, _broadcast, _track) = publish("cam");
 	let publisher = moq_net::Client::new()
 		.with_publisher(origin.consume())
-		.with_path("/room?jwt=token");
+		.with_url("moql://relay.example.com/room?jwt=token".parse().unwrap());
 	let _publisher = connect(publisher, newest(), &cluster, &auth)
 		.await
 		.expect("publisher connects");
@@ -233,7 +235,7 @@ async fn the_setup_path_reaches_the_decider_and_roots_the_grant() {
 	assert_eq!(next_active(&mut announced).await, "room/cam");
 
 	let broadcast = consumer
-		.request_broadcast("room/cam", None)
+		.request("room/cam", None)
 		.await
 		.expect("announced broadcast resolves");
 	let mut track = broadcast

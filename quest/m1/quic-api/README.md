@@ -11,8 +11,7 @@ workarounds quinn's shape forced on them.
 
 Non-goals: the congestion controller API (redesigned in another quest), a
 buffer pool ([QUIC I/O boundary](/quest/m2/quic-io-boundary.md)), and the
-non-QUIC backends' move off `web_transport_trait`
-([drop web-transport-trait](/quest/m1/drop-web-transport-trait.md)).
+non-QUIC backends' move off `web_transport_trait`, which has landed.
 
 ## Plan
 
@@ -36,6 +35,10 @@ Decided with the maintainer:
   change deletes. The maintainer pulled the driver's poll forms and native
   WebTransport into m1 from m2, and deleted 0-RTT entirely: MoQ cannot use
   it, since CONNECT and authorization need the finished handshake.
+- 2026-10-25: moq-quic owns every wait as a `poll_*` on `&kio::Waiter`
+  ([waits](/quest/m1/quic-api/waits.md)), and moq-net's `transport::poll`
+  traits join the epic so all
+  three layers share the `&self, &kio::Waiter` shape.
 
 This README's own work, after the children: read the three layers' rustdoc
 side by side and fix any name or signature that still differs, and check
@@ -43,14 +46,11 @@ side by side and fix any name or signature that still differs, and check
 
 ## Required
 
-- [Reformat](/quest/m1/quic-api/reformat.md) - moq-quic, moq-sock's `udp`, and the tokio driver take the workspace rustfmt; quinn's cherry-pick recipes go
-- [Trim](/quest/m1/quic-api/trim.md) - every public item has a consumer; unordered reads, send domains, duplicate limit setters, unused features, and quinn-era docs are gone
-- [Zero-RTT](/quest/m1/quic-api/zero-rtt.md) - no early data anywhere, and no 0-RTT API or error variants
 - [Streams](/quest/m1/quic-api/streams.md) - `send::`/`recv::` namespaces, one error per direction, `finish(self) -> send::Finished`, consuming `reset`/`stop`, `Buf` writes, both drivers mirrored
 - [Crypto](/quest/m1/quic-api/crypto.md) - crypto traits sealed to rustls, concrete peer identity and handshake data
-- [Config](/quest/m1/quic-api/config.md) - plain config structs, `Limits` as the one spelling, one endpoint constructor and `connect` that own the socket, v1-only `Version`, a local-close event
-- [Poll forms](/quest/m1/quic-api/poll.md) - both drivers' waits poll without leaking, the async forms wrap them, and `send::Finished` is a future
-- [Native WebTransport](/quest/m1/quic-api/native-web.md) - `quic::web` in both crates implements moq-net's poll traits, deleting the QUIC paths of the async-to-poll adapter
+- [Waits](/quest/m1/quic-api/waits.md) - moq-quic owns every wait as a `poll_*` on `&kio::Waiter`, deleting `StreamEvent` and the drivers' and qmux's waiter tables
+- [Poll forms](/quest/m1/quic-api/poll.md) - both drivers' waits poll as `&self, &kio::Waiter` forwards to moq-quic, the async forms wrap them, and `send::Finished` is a future
+- [Native WebTransport](/quest/m1/quic-api/native-web.md) - `quic::web` in both crates implements moq-net's poll traits, deleting the generic `web_transport_trait` adapters and the dependency on it
 
 ## Related
 

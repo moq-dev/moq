@@ -3,8 +3,7 @@
 ## Goal
 
 A fetch-only reader's first FETCH goes upstream together with the request for
-the track's info, on moq-lite and moq-transport (except draft-17, which stays
-serial), at every hop, removing a round trip per hop. The fetched group is still handed out only once that
+the track's info, on moq-lite and moq-transport, at every hop, removing a round trip per hop. The fetched group is still handed out only once that
 route's info is known and passes the origin's consistency check. Peers that
 send them serially keep working unchanged.
 
@@ -44,10 +43,7 @@ What needs the info is decoding the response and approving the group, so:
   lands (which also covers lite-07 untimed framing). On a failed TRACK_INFO,
   reject the fetch and reset the stream.
 - moq-transport: send TRACK_STATUS alongside the FETCH and take timestamps'
-  units from it (or FETCH_OK properties where present). Draft-17's
-  TRACK_STATUS answer carries no properties, and its FETCH_OK timescale is
-  decoded but not surfaced (`ietf/fetch.rs`), so draft-17 keeps #4974's
-  SUBSCRIBE fallback and is not pipelined.
+  units from it (or FETCH_OK properties where present).
 
 The line's shared decisions apply: early response data stays unread in QUIC,
 a failed info fails the fetch, and legacy serial peers keep working.
@@ -62,5 +58,4 @@ Public API: none. Wire: none (ordering only).
 ## Related
 
 - [Pipelined SUBSCRIBE](/quest/m2/pipeline-requests/subscribe.md) - the same change for subscriptions
-- [moq-transport ranges](/quest/m1/subscribe-ranges/ietf.md) - adjacent code in `ietf/subscriber.rs` and `model/origin.rs`; ranges remains in m1; this optional m2 optimization adapts to the landed range API
 - [Retired requests](https://github.com/moq-dev/moq/pull/5294) - staged requests retain their selected instance; retries cannot resolve a replacement by path

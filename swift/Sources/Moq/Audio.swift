@@ -1,3 +1,4 @@
+import Foundation
 import MoqFFI
 
 /// Native audio encoding, publication, and decoding.
@@ -10,10 +11,13 @@ public enum Audio {
     public typealias DecoderOutput = AudioDecoderOutput
     /// Interleaved PCM with its presentation timestamp.
     public typealias Frame = AudioFrame
+    /// One item a `Consumer` reads, in delivery order: `.frame`, a `.gap` where media
+    /// was lost, or an `.end` where the publisher stopped its encoder.
+    public typealias Read = MoqAudioRead
     /// One encoded payload from an `Encoder`.
     public typealias Packet = MoqAudioPacket
     /// The packets an `Encoder` drains on finish and the padded samples to discard.
-    public typealias EncoderFinish = MoqAudioEncoderFinish
+    public typealias EncoderFinish = MoqAudioEncoderFinished
     /// Selects the audio encoder codec. Build one with `Codec.opus()` or `Codec.aac()`.
     public typealias Codec = AudioCodec
     /// The PCM sample layout written to a `Producer` or delivered by a `Consumer`.
@@ -30,7 +34,7 @@ public enum Audio {
             input: EncoderInput,
             output: EncoderOutput,
             track: String? = nil,
-            bandwidth: Bandwidth? = nil
+            bandwidth: Allocator? = nil
         ) throws {
             ffi = try MoqAudioProducer(
                 catalog: catalog.ffi,
@@ -65,10 +69,11 @@ public enum Audio {
     }
 
     /// Read side of a raw-audio track. Iterating yields decoded PCM frames in the
-    /// layout declared by the `DecoderOutput` passed to `subscribe`.
+    /// layout declared by the `DecoderOutput` passed to `subscribe`, and the gaps
+    /// and encoder ends between them.
     public final class Consumer: AsyncSequence, Sendable {
-        /// The decoded PCM audio frame emitted by this sequence.
-        public typealias Element = Frame
+        /// The frame, gap, or end emitted by this sequence.
+        public typealias Element = Read
 
         let ffi: MoqAudioConsumer
 
@@ -91,14 +96,14 @@ public enum Audio {
             ))
         }
 
-        /// The next frame, or `nil` once the track ends or is closed.
-        public func next() async throws -> Frame? {
+        /// The next frame, gap, or end, or `nil` once the track ends or is closed.
+        public func next() async throws -> Read? {
             try await ffi.next()
         }
 
-        /// The playout delay to hold ahead of the playhead, in microseconds: the fixed
-        /// `DecoderOutput.delayUs`, or the estimate from every frame read so far.
-        public var delayUs: UInt64 { ffi.delayUs() }
+        /// The playout delay to hold ahead of the playhead: the fixed `DecoderOutput.delay`,
+        /// or the estimate from every frame read so far.
+        public var delay: TimeInterval { ffi.delay() }
 
         /// Cancel all current and future reads.
         public func cancel() {
@@ -106,7 +111,8 @@ public enum Audio {
         }
 
         /// Create an iterator that cancels native reads when iteration ends.
-        public func makeAsyncIterator() -> AsyncThrowingStream<Frame, Swift.Error>.Iterator {
+        public func makeAsyncIterator() -> AsyncThrowingStream<Read, Swift.Error>.Iterator {
+
             moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
                 try await ffi.next()
             }.makeAsyncIterator()

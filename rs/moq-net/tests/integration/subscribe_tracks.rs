@@ -45,7 +45,7 @@ struct Setup {
 	pair: MockPair,
 	track: moq_net::track::Producer,
 	frames: futures::channel::mpsc::UnboundedReceiver<Vec<u8>>,
-	_broadcast: moq_net::broadcast::Producer,
+	_broadcast: moq_net::origin::Publication,
 }
 
 async fn setup(version: Version) -> Setup {
@@ -61,11 +61,7 @@ async fn setup(version: Version) -> Setup {
 	let pair = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	moq_clock::timeout(TIMEOUT, consumer.routed("room"))
-		.await
-		.expect("announce timeout")
-		.expect("routed");
-	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("room", None))
+	let remote = moq_clock::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
@@ -127,32 +123,26 @@ async fn subscribe_tracks(pair: &MockPair, len: usize) -> Vec<u8> {
 	reply
 }
 
-/// An omitted FORWARD asks for every track's objects, which we never push unasked: from
-/// draft-19 each track is answered with PUBLISH_SKIPPED, and the subscription already on
+/// An omitted FORWARD asks for every track's objects, which we never push unasked: on
+/// draft-22 each track is answered with PUBLISH_SKIPPED, and the subscription already on
 /// the session keeps going.
 #[moq_clock::test]
 async fn subscribe_tracks_skips_every_track() {
-	for version in [
-		"moq-transport-19",
-		"moq-transport-20",
-		"moq-transport-21",
-		"moq-transport-22",
-	] {
-		let mut setup = setup(version.parse().unwrap()).await;
-		deliver(&mut setup, b"before").await;
+	let version = "moq-transport-22";
+	let mut setup = setup(version.parse().unwrap()).await;
+	deliver(&mut setup, b"before").await;
 
-		#[rustfmt::skip]
-		let expected = [
-			0x07, 0x00, 0x01, 0x00, // REQUEST_OK, no parameters
-			0x0f, 0x00, 0x07, // PUBLISH_SKIPPED
-			0x00, // The broadcast is the prefix itself: an empty suffix.
-			0x05, b'v', b'i', b'd', b'e', b'o',
-		];
-		let reply = subscribe_tracks(&setup.pair, expected.len()).await;
-		assert_eq!(reply, expected, "{version}");
+	#[rustfmt::skip]
+	let expected = [
+		0x07, 0x00, 0x01, 0x00, // REQUEST_OK, no parameters
+		0x0f, 0x00, 0x07, // PUBLISH_SKIPPED
+		0x00, // The broadcast is the prefix itself: an empty suffix.
+		0x05, b'v', b'i', b'd', b'e', b'o',
+	];
+	let reply = subscribe_tracks(&setup.pair, expected.len()).await;
+	assert_eq!(reply, expected, "{version}");
 
-		deliver(&mut setup, b"after").await;
-	}
+	deliver(&mut setup, b"after").await;
 }
 
 /// Draft-18 has no PUBLISH_SKIPPED, so a listing that must forward is refused on its own
@@ -168,22 +158,4 @@ async fn subscribe_tracks_needs_forward_0_on_draft_18() {
 	assert_eq!(reply.get(3), Some(&0x03), "not NOT_SUPPORTED: {reply:?}");
 
 	deliver(&mut setup, b"after").await;
-}
-
-/// Before draft-18, 0x51 is not a message at all, so it is still a protocol violation.
-#[moq_clock::test]
-async fn subscribe_tracks_before_draft_18_closes_the_session() {
-	let setup = setup("moq-transport-17".parse().unwrap()).await;
-	let (mut send, _recv) = setup
-		.pair
-		.server_transport
-		.clone()
-		.open_bi(Default::default())
-		.await
-		.expect("open_bi");
-	send.write(SUBSCRIBE_TRACKS).await.expect("write");
-
-	moq_clock::timeout(TIMEOUT, setup.pair.client.closed())
-		.await
-		.expect("the session stayed open");
 }

@@ -30,7 +30,7 @@ use moq_mux::codec::{annexb, h264, h265};
 use moq_net::Timestamp;
 
 use super::backend::{self, Backend, Codec};
-use crate::{Color, Error, Frame, Output, Size, Surface};
+use crate::{Color, Error, Frame, Output, Size};
 
 /// Which decoder implementation to use. `#[non_exhaustive]` so new selection
 /// strategies can be added without breaking external `match`es.
@@ -72,7 +72,10 @@ pub struct Config {
 	/// decode straight to system memory does, the rest download each picture.
 	/// Ask for it when the pixels are headed for the CPU anyway, since a GPU
 	/// surface handed out and downloaded later costs an allocation the backend
-	/// could have skipped.
+	/// could have skipped. [`Output::Render`] keeps the surfaces
+	/// `render::Renderer` imports and downloads the rest; a player that draws
+	/// asks `render::output` of its device, which picks it where the device
+	/// imports.
 	pub output: Output,
 	/// Ask the decoder to scale its output to this size (both dimensions even)
 	/// instead of the stream's native one.
@@ -303,10 +306,7 @@ impl Decoder {
 					self.color = color;
 					self.switches.pop_front();
 				}
-				let mut surface = match self.output {
-					Output::Native => frame.surface,
-					Output::Cpu => Surface::I420(frame.surface.into_i420()?),
-				};
+				let mut surface = self.output.convert(frame.surface)?;
 				if let Some(color) = self.color {
 					surface.label(color);
 				}
@@ -468,7 +468,7 @@ mod tests {
 	fn h264_software_encoder(size: crate::Size) -> Encoder {
 		Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Software,
-			..EncodeConfig::new(size.width, size.height, crate::Rate::new(30, 1).unwrap())
+			..EncodeConfig::new(size.width, size.height, crate::FrameRate::new(30, 1).unwrap())
 		})
 		.expect("openh264 encoder")
 	}
@@ -611,9 +611,10 @@ mod tests {
 
 		let (origin, driver) = moq_net::origin::Producer::new(Default::default());
 		tokio::spawn(moq_net::time::run(driver));
-		let mut source = origin.publish("test", Default::default()).unwrap();
+		let source = origin.publish("test", Default::default()).unwrap();
 		let mut source_catalog =
-			moq_mux::catalog::Producer::new(&mut source, moq_mux::catalog::Config::default()).unwrap();
+			moq_mux::catalog::Producer::new(&mut source.broadcast().clone(), moq_mux::catalog::Config::default())
+				.unwrap();
 		let track = source
 			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
@@ -653,7 +654,7 @@ mod tests {
 			.unwrap();
 		producer.finish().unwrap();
 
-		let broadcast = origin.consume().request_broadcast("test", None).await.unwrap();
+		let broadcast = origin.consume().request("test", None).await.unwrap();
 		let catalog = moq_mux::catalog::Consumer::<()>::new(&broadcast, moq_mux::catalog::CatalogFormat::Hang)
 			.await
 			.unwrap();
@@ -727,7 +728,7 @@ mod tests {
 			let mut encoder = Encoder::new(&EncodeConfig {
 				kind: EncodeKind::Software,
 				color: Some(color),
-				..EncodeConfig::new(size.width, size.height, crate::Rate::new(30, 1).unwrap())
+				..EncodeConfig::new(size.width, size.height, crate::FrameRate::new(30, 1).unwrap())
 			})
 			.unwrap();
 			encoder.cut().unwrap();
@@ -995,7 +996,7 @@ mod tests {
 
 		let encoder = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Named("videotoolbox".into()),
-			..EncodeConfig::new(160, 120, crate::Rate::new(30, 1).unwrap())
+			..EncodeConfig::new(160, 120, crate::FrameRate::new(30, 1).unwrap())
 		});
 		let Ok(mut encoder) = encoder else {
 			eprintln!("skipping: no VideoToolbox H.264 hardware encoder available");
@@ -1024,7 +1025,7 @@ mod tests {
 		let encoder = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Named("videotoolbox".into()),
 			codec: crate::encode::Codec::H265,
-			..EncodeConfig::new(320, 240, crate::Rate::new(30, 1).unwrap())
+			..EncodeConfig::new(320, 240, crate::FrameRate::new(30, 1).unwrap())
 		});
 		let Ok(encoder) = encoder else {
 			eprintln!("skipping: no VideoToolbox H.265 hardware encoder available");
@@ -1211,7 +1212,7 @@ mod tests {
 
 		let encoder = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Named("mediafoundation".into()),
-			..EncodeConfig::new(size.width, size.height, crate::Rate::new(30, 1).unwrap())
+			..EncodeConfig::new(size.width, size.height, crate::FrameRate::new(30, 1).unwrap())
 		});
 		let Ok(mut encoder) = encoder else {
 			eprintln!("skipping: no Media Foundation H.264 hardware encoder available");
@@ -1296,7 +1297,7 @@ mod tests {
 
 		let encoder = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Named("mediafoundation".into()),
-			..EncodeConfig::new(target.width, target.height, crate::Rate::new(30, 1).unwrap())
+			..EncodeConfig::new(target.width, target.height, crate::FrameRate::new(30, 1).unwrap())
 		});
 		let Ok(mut encoder) = encoder else {
 			eprintln!("skipping: no Media Foundation H.264 hardware encoder available");
@@ -1325,7 +1326,7 @@ mod tests {
 		let encoder = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Named("mediafoundation".into()),
 			codec: crate::encode::Codec::H265,
-			..EncodeConfig::new(320, 240, crate::Rate::new(30, 1).unwrap())
+			..EncodeConfig::new(320, 240, crate::FrameRate::new(30, 1).unwrap())
 		});
 		let Ok(encoder) = encoder else {
 			eprintln!("skipping: no Media Foundation H.265 hardware encoder available");

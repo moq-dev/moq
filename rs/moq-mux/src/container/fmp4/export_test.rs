@@ -1894,12 +1894,10 @@ async fn split_h264_parameter_sets_keep_the_sync_point() {
 
 #[tokio::test(start_paused = true)]
 async fn split_h265_parameter_sets_keep_the_sync_point() {
+	use crate::codec::h265::fixtures::{PPS, SPS, VPS};
 	use hang::catalog::{Container, H265, VideoConfig};
 
 	const AUD: &[u8] = &[0x46, 0x01];
-	const VPS: &[u8] = &[0x40, 0x01, 0x0c, 0x01];
-	const SPS: &[u8] = &[0x42, 0x01, 0x01, 0x01, 0x60];
-	const PPS: &[u8] = &[0x44, 0x01, 0xc1, 0x72];
 	const IDR: &[u8] = &[0x26, 0x01, 0xaf, 0x08];
 	const DELTA: &[u8] = &[0x02, 0x01, 0xd0, 0x11];
 
@@ -1928,12 +1926,12 @@ async fn split_h265_parameter_sets_keep_the_sync_point() {
 #[tokio::test(start_paused = true)]
 async fn an_in_band_keyframe_without_parameter_sets_fails() {
 	let mut live = Live::avc3();
-	live.track.write(annexb_frame(0, &[IDR])).unwrap();
-	live.track.finish().unwrap();
-
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await)
 		.with_max_delay(RECORDING_MAX_DELAY);
 	chunk_now(&mut exporter).await.init().expect("init");
+
+	live.track.write(annexb_frame(0, &[IDR])).unwrap();
+	live.track.finish().unwrap();
 	let err = error_now(&mut exporter).await;
 	assert!(
 		matches!(

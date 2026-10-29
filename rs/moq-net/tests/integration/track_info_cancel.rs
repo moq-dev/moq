@@ -31,15 +31,11 @@ async fn abandoned_request_reaches_the_publisher(version: &str, relays: u64) {
 	}
 
 	let broadcast = nodes[0].create_broadcast("room").unwrap();
-	let mut dynamic = broadcast.dynamic();
+	let mut dynamic = broadcast.requests();
 	broadcast.announce(Default::default()).unwrap();
 	moq_clock::sleep(Duration::from_secs(1)).await;
 
-	let consumer = nodes[relays as usize]
-		.consume()
-		.request_broadcast("room", None)
-		.await
-		.unwrap();
+	let consumer = nodes[relays as usize].consume().request("room", None).await.unwrap();
 	let mut waiting = Box::pin(consumer.track("video").unwrap().subscribe(None));
 	let request = match futures::future::select(std::pin::pin!(dynamic.requested_track()), &mut waiting).await {
 		futures::future::Either::Left((request, _)) => request.expect("the request reaches the publisher"),
@@ -75,7 +71,7 @@ async fn withdrawn_broadcast_releases_track_info(version: &str, answered: bool, 
 	let publisher = produce_origin(1);
 	let reader = produce_origin(2);
 	let broadcast = publisher.create_broadcast("room").unwrap();
-	let mut dynamic = broadcast.dynamic();
+	let mut dynamic = broadcast.requests();
 	let mut route = origin::Route::default();
 	if explicit {
 		route.epoch = Some("019a1234-5678-7000-8000-000000000001".parse().unwrap());
@@ -85,8 +81,14 @@ async fn withdrawn_broadcast_releases_track_info(version: &str, answered: bool, 
 	options.server_publish = Some(publisher.consume());
 	options.client_subscribe = Some(reader.clone());
 	let pair = connect_mock(options).await;
-	let remote = reader.consume().routed_broadcast("room").await.unwrap();
-	let mut query = remote.track("video").unwrap().query();
+	let remote = reader
+		.consume()
+		.follow("room", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap();
+	let mut query = remote.track("video").unwrap().info();
 	let request = match futures::future::select(std::pin::pin!(dynamic.requested_track()), &mut query).await {
 		futures::future::Either::Left((request, _)) => request.expect("TRACK reaches the publisher"),
 		futures::future::Either::Right(_) => panic!("nothing answered TRACK"),

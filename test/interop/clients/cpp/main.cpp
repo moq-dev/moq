@@ -32,6 +32,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #ifdef _WIN32
@@ -49,7 +50,7 @@ using Clock = std::chrono::steady_clock;
 constexpr size_t READ_CHUNK = 64 * 1024;
 
 // SubscribeMedia max delay: how much reordering the jitter buffer tolerates.
-constexpr uint64_t MAX_DELAY_US = 1'000'000;
+constexpr std::chrono::nanoseconds MAX_DELAY = std::chrono::seconds(1);
 
 // Synthetic audio: a 48 kHz tone per channel at 0.5 amplitude, encoded as Opus.
 constexpr const char *AUDIO_TRACK = "tone";
@@ -57,8 +58,8 @@ constexpr uint32_t AUDIO_RATE = 48'000;
 constexpr double AUDIO_AMPLITUDE = 0.5;
 constexpr double PI = 3.14159265358979323846;
 // A non-default frame duration, and the shortest Opus offers. 20 ms would pass even if the
-// microsecond field were truncated to milliseconds somewhere.
-constexpr uint32_t AUDIO_FRAME_DURATION_US = 2'500;
+// duration were truncated to milliseconds somewhere.
+constexpr std::chrono::nanoseconds AUDIO_FRAME_DURATION = std::chrono::microseconds(2'500);
 // Written in 20 ms batches, so each write spans eight encoded Opus frames.
 constexpr uint64_t AUDIO_BATCH_US = 20'000;
 constexpr size_t AUDIO_BATCH_SAMPLES = AUDIO_RATE * AUDIO_BATCH_US / 1'000'000;
@@ -137,10 +138,10 @@ std::shared_ptr<moq::Session> connect(const std::string &url, const Dial &dial, 
     auto client = ok(moq::Client::init(config), "client init");
     open_session = until(client->connect(url), deadline, "connect");
     if (dial.grant) {
-        auto auth = open_session->auth();
-        auto grant = auth->grant();
+        auto grants = open_session->grants();
+        auto grant = grants->grant();
         while (!grant) {
-            grant = until(auth->grant_changed(), deadline, "grant");
+            grant = until(grants->changed(), deadline, "grant");
         }
         std::fprintf(
             stderr, "auth granted publish=%s subscribe=%s\n", patterns(grant->publish).c_str(),
@@ -193,14 +194,15 @@ int publish(
     auto session = connect(url, dial, forever);
 
     // Hold the producer for the lifetime of the publish loop; close() unpublishes.
-    auto broadcast = ok(session->publish()->create_broadcast(path), "create_broadcast");
+    auto publication = ok(session->publish()->create_broadcast(path), "create_broadcast");
+    auto broadcast = publication->broadcast();
     auto catalog = ok(moq::MediaCatalogProducer::init(broadcast), "catalog producer");
     auto media = ok(
         moq::MediaTrackStreamProducer::video(broadcast, moq::MediaTarget::kNamed{}, {moq::VideoFormat::kAvc3, {}}),
         "video stream producer"
     );
     moq::AudioEncoderOutput output{moq::AudioCodec::opus()};
-    output.frame_duration_us = AUDIO_FRAME_DURATION_US;
+    output.frame_duration = AUDIO_FRAME_DURATION;
     auto audio = ok(
         moq::AudioProducer::init(
             catalog,
@@ -211,7 +213,7 @@ int publish(
         ),
         "audio producer"
     );
-    ok(broadcast->announce({}), "announce");
+    ok(publication->announce({}), "announce");
     std::printf(
         "publishing \"%s\" (Annex-B H.264 from stdin + a %zu-channel tone) to %s\n", path.c_str(), tones.size(),
         url.c_str()
@@ -254,12 +256,13 @@ int publish(
         ok(broadcast->close(), "broadcast close");
         std::puts("finish ended");
         std::fflush(stdout);
-        auto health = ok(session->publish()->create_broadcast(path + ".health"), "health broadcast");
+        auto health_publication = ok(session->publish()->create_broadcast(path + ".health"), "health broadcast");
+        auto health = health_publication->broadcast();
         auto track = ok(health->publish_track("live", std::nullopt), "health track");
         const std::string payload = "session-alive";
         ok(track->write_frame({std::vector<uint8_t>(payload.begin(), payload.end()), std::nullopt}), "health write");
         ok(track->finish(), "health finish");
-        ok(health->announce({}), "health announce");
+        ok(health_publication->announce({}), "health announce");
         // Only teardown waits on the FIFO; linger has already completed on its own clock.
         std::ifstream ack(finish_ack);
         std::string line;
@@ -289,7 +292,7 @@ void decode_audio(
     }
     moq::AudioDecoderOutput output{};
     output.format = moq::AudioSampleFormat::kF32;
-    output.max_delay_us = MAX_DELAY_US;
+    output.max_delay = MAX_DELAY;
     auto decoder = until(moq::AudioConsumer::subscribe(consumer, id, audio, output), deadline, "audio consumer");
 
     std::ofstream log(out + ".txt");
@@ -298,10 +301,20 @@ void decode_audio(
     const size_t frame_bytes = sizeof(float) * audio.channel_count;
     uint64_t decoded = 0;
     while (decoded * 1000 < audio_ms * audio.sample_rate) {
-        auto frame = until(decoder->next(), deadline, "audio frame");
-        if (!frame) {
+        auto read = until(decoder->next(), deadline, "audio frame");
+        if (!read) {
             fail("audio track ended early");
         }
+        // moq-audio reports a hole it saw directly; tone.py checks the timestamps too.
+        if (std::holds_alternative<moq::AudioRead::kGap>(read->get_variant())) {
+            fail("audio gap");
+        }
+        const auto *variant = std::get_if<moq::AudioRead::kFrame>(&read->get_variant());
+        if (!variant) {
+            fail("audio track ended early");
+        }
+        const auto *frame = &variant->frame;
+
         const size_t samples = frame->data.size() / frame_bytes;
         log << frame->timestamp_us << " " << samples << "\n";
         pcm.write(reinterpret_cast<const char *>(frame->data.data()), static_cast<std::streamsize>(frame->data.size()));
@@ -349,7 +362,8 @@ int subscribe(
     const auto &[id, video] = *catalog->video.begin();
 
     moq::Subscription subscription;
-    subscription.max_delay_us = finish ? static_cast<uint64_t>(timeout * 1e6) : MAX_DELAY_US;
+    subscription.max_delay =
+        finish ? std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<double>(timeout)) : MAX_DELAY;
     auto media = until(
         moq::MediaTrackConsumer::subscribe(consumer, {moq::Rendition::kVideo{id, video}, subscription}), read_deadline,
         "container consumer"
@@ -366,12 +380,13 @@ int subscribe(
 
     size_t total = 0, frames = 0;
     while (finish || total == 0) {
-        auto frame = until(media->next(), read_deadline, "next frame");
-        if (!frame) {
-            break;
-        }
-        total += frame->payload.size();
-        if (!frame->payload.empty()) ++frames;
+        auto read = until(media->next(), read_deadline, "next read");
+        if (!read) { break; }
+        if (std::holds_alternative<moq::MediaRead::kGap>(read->get_variant())) fail("media gap");
+        const auto *frame = std::get_if<moq::MediaRead::kFrame>(&read->get_variant());
+        if (!frame) continue; // Encoder ends do not terminate the subscription.
+        total += frame->frame.payload.size();
+        if (!frame->frame.payload.empty()) ++frames;
     }
     if (total == 0) {
         fail("no frame data received");

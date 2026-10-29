@@ -29,4 +29,10 @@ subscription under `data-subgroup-basic`'s dynamic claim then fails
 [announce takeover](/quest/m1/announce-takeover.md) removes, so check
 whether that has landed before calling it a client bug. The JS client's
 announcement check also moves from `"retracted"` to `"end"` when it takes
-the cut.
+the cut. Its `data-subgroup-basic` subscriber also stalls there: on `main`,
+`follow(path)` asks SUBSCRIBE_NAMESPACE for the
+tuple's own namespace, and a moq-transport relay such as imquic answers only
+with namespaces beneath it, never the shorter routing prefix the publisher
+claimed. 0.4.x asked for the origin's scoped prefix. Untested options: hold
+an `announced(Path.Pattern.subtree(prefix))` stream while requesting, or
+request blindly.

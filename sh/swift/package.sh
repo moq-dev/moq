@@ -100,6 +100,16 @@ mkdir -p "$PKG_STAGE/Sources/Moq" "$PKG_STAGE/Tests/MoqTests"
 cp -R "$SWIFT_DIR/Sources/Moq/." "$PKG_STAGE/Sources/Moq/"
 cp -R "$SWIFT_DIR/Tests/MoqTests/." "$PKG_STAGE/Tests/MoqTests/"
 
+# Sessions advertise the wrapper's version in SETUP; the source tree says `dev`.
+VERSION_SWIFT="$PKG_STAGE/Sources/Moq/Version.swift"
+PLACEHOLDER='let packageVersion = "dev"'
+[[ $(grep -cxF "$PLACEHOLDER" "$VERSION_SWIFT") == 1 ]] || {
+    echo "Error: $VERSION_SWIFT must contain exactly one \`$PLACEHOLDER\`" >&2
+    exit 1
+}
+sed -i.bak "s|^${PLACEHOLDER}\$|let packageVersion = \"${VERSION}\"|" "$VERSION_SWIFT"
+rm -f "$VERSION_SWIFT.bak"
+
 # Swift Package Index reads .spi.yml from the package root to build and host the
 # DocC docs. Ship it in the mirror so SPI documents the tagged release.
 cp "$SWIFT_DIR/.spi.yml" "$PKG_STAGE/.spi.yml"

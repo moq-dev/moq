@@ -61,7 +61,7 @@ fn drain(announced: &mut moq_net::announce::Consumer) -> Vec<String> {
 
 /// How a request for the path answers.
 async fn request(consumer: &origin::Consumer) -> Result<moq_net::broadcast::Consumer, String> {
-	consumer.request_broadcast(PATH, None).await.map_err(|err| match err {
+	consumer.request(PATH, None).await.map_err(|err| match err {
 		Error::Unroutable => "unroutable".to_string(),
 		err => err.to_string(),
 	})
@@ -234,19 +234,9 @@ async fn remote_lite_consumer_sees_what_a_local_one_does() {
 
 #[moq_clock::test]
 async fn remote_ietf_consumer_sees_what_a_local_one_does() {
-	// Drafts 14 to 16 carry each request over the control stream; 17 and later give it
-	// its own stream. Both have to end a finished track the way moq-lite does.
-	for version in [
-		"moq-transport-14",
-		"moq-transport-15",
-		"moq-transport-16",
-		"moq-transport-17",
-		"moq-transport-18",
-		"moq-transport-19",
-		"moq-transport-20",
-		"moq-transport-21",
-		"moq-transport-22",
-	] {
+	// Each request has its own stream, which has to end a finished track the way
+	// moq-lite does.
+	for version in ["moq-transport-18", "moq-transport-22"] {
 		assert_eq!(lifecycle(Observer::Remote(version)).await, EXPECTED, "{version}");
 	}
 }

@@ -45,7 +45,7 @@ export class Producer<T> {
 		try {
 			record = this.#encoder.encode(value);
 		} catch (err) {
-			// Refused before encoding, so nothing is missing from the log and nothing desynced.
+			// Refused before encoding, so nothing is missing from the log.
 			if (err instanceof NetError.GroupTooLarge) throw err;
 
 			// A record that can't be encoded is as lost as one the group rejects: the log is missing it
@@ -60,9 +60,7 @@ export class Producer<T> {
 		try {
 			this.#group ??= this.#track.appendGroup();
 		} catch (err) {
-			// Nothing was published, so a later append may still open a fresh group whose decoder
-			// starts cold. The record never landed, so the window still has to reset, or the desync
-			// latch answers the next append before the track does.
+			// Nothing was published, so a later append may still open a fresh group.
 			this.#encoder.reset();
 			throw err;
 		}
@@ -87,19 +85,21 @@ export class Producer<T> {
 		// Close the group with the same error first. A consumer that already pulled it holds its own
 		// handle, which the track's close no longer reaches, so dropping ours would leave a reader
 		// sitting in the group with a generic error instead of the failure that ended the log.
-		this.#group?.close(abort);
+		this.#group?.abort(abort);
 		this.#group = undefined;
-		this.#track.close(abort);
+		this.#track.abort(abort);
 	}
 
 	/** Finish the track, closing the group. */
 	finish(): void {
-		this.#group?.close();
+		this.#group?.finish();
 		this.#group = undefined;
+		this.#track.finish();
 		this.#track.close();
 	}
 }
 
+/** Types for {@link Producer}. */
 export namespace Producer {
 	/** Stream producer options, including the destination track. */
 	export type Config<T> = CodecConfig<T> & { track: Moq.Track.Producer };

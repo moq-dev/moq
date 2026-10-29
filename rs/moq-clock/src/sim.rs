@@ -68,6 +68,36 @@ struct Time {
 }
 
 impl Runtime {
+	fn enter() -> Rc<Self> {
+		static RUNS: AtomicU64 = AtomicU64::new(0);
+		let runtime = Rc::new(Runtime {
+			id: RUNS.fetch_add(1, Ordering::Relaxed),
+			spawned: RefCell::new(Vec::new()),
+			time: RefCell::new(Time {
+				clock: Manual::new(),
+				anchor: None,
+				next: 0,
+				timers: BTreeMap::new(),
+			}),
+			queues: RefCell::new(Vec::new()),
+			idle: RefCell::new(Vec::new()),
+		});
+		CURRENT.with(|current| {
+			let mut current = current.borrow_mut();
+			assert!(current.is_none(), "moq_clock::sim::run cannot nest");
+			*current = Some(runtime.clone());
+		});
+		runtime
+	}
+
+	fn exit(&self, enter: Enter) {
+		drop(enter);
+		// Timers and idle waiters may hold wakers into the dropped tasks.
+		self.queues.borrow_mut().clear();
+		self.idle.borrow_mut().clear();
+		self.time.borrow_mut().timers.clear();
+	}
+
 	fn now(&self) -> Instant {
 		self.time.borrow().clock.now()
 	}
@@ -189,27 +219,23 @@ impl Drop for Enter {
 /// armed and none awaits [`idle`], which is a deadlock. Also when one root poll
 /// exceeds the ready kio poll limit, or a detached task panics.
 pub fn run<F: IntoFuture>(future: F) -> F::Output {
-	static RUNS: AtomicU64 = AtomicU64::new(0);
-	let runtime = Rc::new(Runtime {
-		id: RUNS.fetch_add(1, Ordering::Relaxed),
-		spawned: RefCell::new(Vec::new()),
-		time: RefCell::new(Time {
-			clock: Manual::new(),
-			anchor: None,
-			next: 0,
-			timers: BTreeMap::new(),
-		}),
-		queues: RefCell::new(Vec::new()),
-		idle: RefCell::new(Vec::new()),
-	});
-	CURRENT.with(|current| {
-		let mut current = current.borrow_mut();
-		assert!(current.is_none(), "moq_clock::sim::run cannot nest");
-		*current = Some(runtime.clone());
-	});
+	let runtime = Runtime::enter();
 	let enter = Enter;
 
 	let mut future = pin!(future.into_future());
+	let mut output = None;
+	{
+		// Keep the caller's future and output on its stack while sharing the executor.
+		let future = pin!(std::future::poll_fn(|cx| {
+			future.as_mut().poll(cx).map(|value| output = Some(value))
+		}));
+		run_inner(&runtime, future);
+	}
+	runtime.exit(enter);
+	output.expect("root future completed")
+}
+
+fn run_inner(runtime: &Runtime, mut future: Pin<&mut dyn Future<Output = ()>>) {
 	let root = Arc::new(Flag(AtomicBool::new(true)));
 	let root_waker = Waker::from(root.clone());
 	let mut root_cx = Context::from_waker(&root_waker);
@@ -221,11 +247,9 @@ pub fn run<F: IntoFuture>(future: F) -> F::Output {
 
 	// The root and the spawned tasks take turns, so a task that keeps waking
 	// itself cannot starve the root: `FuturesUnordered` yields after one pass.
-	let output = loop {
-		if root.0.swap(false, Ordering::SeqCst)
-			&& let Poll::Ready(output) = poll(future.as_mut(), &mut root_cx)
-		{
-			break output;
+	loop {
+		if root.0.swap(false, Ordering::SeqCst) && poll(future.as_mut(), &mut root_cx).is_ready() {
+			break;
 		}
 		tasks.extend(runtime.spawned.take());
 		pool.0.store(false, Ordering::SeqCst);
@@ -245,16 +269,10 @@ pub fn run<F: IntoFuture>(future: F) -> F::Output {
 			settled.set(true);
 			waker.wake();
 		}
-	};
+	}
 
 	drop(tasks);
 	drop(runtime.spawned.take());
-	drop(enter);
-	// Timers and idle waiters may hold wakers into the dropped tasks.
-	runtime.queues.borrow_mut().clear();
-	runtime.idle.borrow_mut().clear();
-	runtime.time.borrow_mut().timers.clear();
-	output
 }
 
 /// Keep `deadlines` in step with simulated time until every clone of it is dropped.
@@ -679,6 +697,44 @@ mod tests {
 
 	fn at(secs: u64) -> Instant {
 		Instant::ZERO + Duration::from_secs(secs)
+	}
+
+	#[test]
+	fn into_future_sees_the_runtime_and_can_borrow() {
+		struct Start<'a>(&'a Rc<str>);
+
+		impl<'a> IntoFuture for Start<'a> {
+			type Output = &'a Rc<str>;
+			type IntoFuture = std::future::Ready<Self::Output>;
+
+			fn into_future(self) -> Self::IntoFuture {
+				assert!(is_running());
+				std::future::ready(self.0)
+			}
+		}
+
+		let value = Rc::<str>::from("borrowed");
+		assert!(Rc::ptr_eq(run(Start(&value)), &value));
+		assert!(!is_running());
+	}
+
+	#[test]
+	fn the_root_future_is_dropped_after_leaving_the_runtime() {
+		struct Dropped(Rc<Cell<Option<bool>>>);
+
+		impl Drop for Dropped {
+			fn drop(&mut self) {
+				self.0.set(Some(is_running()));
+			}
+		}
+
+		let dropped = Rc::new(Cell::new(None));
+		let root = Dropped(dropped.clone());
+		run(std::future::poll_fn(move |_| {
+			let _root = &root;
+			Poll::Ready(())
+		}));
+		assert_eq!(dropped.get(), Some(false));
 	}
 
 	#[crate::test]

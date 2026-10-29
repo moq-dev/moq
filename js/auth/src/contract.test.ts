@@ -125,8 +125,18 @@ test("a grant round trips and is validated", () => {
 	expect(() => GrantSchema.parse({ publish: ["**"], label: "project/*" })).toThrow(/invalid path/);
 });
 
+test("a tier a metrics label would escape is refused", () => {
+	for (const tier of ['a"b', "a\\b", "a\nb", "/edge", "a//b"]) {
+		expect(() => GrantSchema.parse({ publish: ["**"], tier })).toThrow(/invalid tier/);
+		expect(RefusalSchema.safeParse({ reason: "expired", tier }).success).toBe(false);
+	}
+	for (const tier of ["", "region/sjc", "a.b_c-D"]) {
+		expect(GrantSchema.parse({ publish: ["**"], tier }).tier).toBe(tier);
+	}
+});
+
 test("refusal reasons preserve verified attribution and accept future reasons", () => {
-	for (const reason of ["refused", "forbidden", "expired"] as const) {
+	for (const reason of ["refused", "forbidden", "expired", "malformed"] as const) {
 		expect(RefusalSchema.parse({ reason, root: "tenant", tier: "edge" })).toEqual({
 			reason,
 			root: "tenant",

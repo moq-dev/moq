@@ -84,7 +84,7 @@ pub async fn handle_viewers(
 			if !restart && readers.get(&viewer_id).is_some_and(|reader| !reader.is_finished()) {
 				continue;
 			}
-			let Ok(broadcast) = viewer_origin.request_broadcast(&update.prefix, None).await else {
+			let Ok(broadcast) = viewer_origin.request(&update.prefix, None).await else {
 				continue;
 			};
 			tracing::info!(%viewer_id, restart, "viewer connected");
@@ -184,7 +184,7 @@ mod tests {
 	}
 
 	/// Publish a viewer with a live command track.
-	fn viewer(origin: &moq_net::origin::Producer) -> (moq_net::broadcast::Producer, moq_net::track::Producer) {
+	fn viewer(origin: &moq_net::origin::Producer) -> (moq_net::origin::Publication, moq_net::track::Producer) {
 		let broadcast = origin.create_broadcast("alice").unwrap();
 		let track = broadcast
 			.create_track(

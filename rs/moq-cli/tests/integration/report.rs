@@ -1,5 +1,5 @@
-//! `moq import --report` and `moq export --echo` over a real relay, read back through the
-//! `export report` and `export echo` sinks: each report counts what its side carried.
+//! `moq import --report` over a real relay, read back through the `export report` sink:
+//! each report counts what the import carried.
 #![cfg(unix)]
 
 use std::collections::BTreeMap;
@@ -33,20 +33,17 @@ async fn feed(clip: &[u8], mut write: impl AsyncFnMut(&[u8])) {
 struct Relay {
 	url: String,
 	fingerprint: String,
-	origin: moq_net::origin::Producer,
 }
 
 async fn relay() -> Relay {
 	let _ = moq_tokio::crypto::install_default();
 	let fixture = moq_relay::test_relay().await.expect("test relay");
-	let origin = fixture.relay.cluster().origin.clone();
 	let ready = fixture.relay.ready();
 	tokio::spawn(fixture.relay.run());
 	ready.wait().await.expect("relay ready");
 	Relay {
 		url: fixture.url.to_string(),
 		fingerprint: fixture.fingerprint,
-		origin,
 	}
 }
 
@@ -198,10 +195,14 @@ fn suppress(clip: &[u8], pid: u16, from: f64, to: f64) -> Vec<u8> {
 }
 
 /// Each PID's access units in `first` fell short of `last`'s: the rows advance while it runs.
+/// An SI row counts only the sections the program clock could not place, so it has none.
 fn assert_advancing(first: &ts::stats::Snapshot, last: &ts::stats::Snapshot) {
 	assert!(!last.streams.is_empty(), "no elementary stream reported");
 	let first = units(first);
 	for (pid, units) in units(last) {
+		if last.streams[&pid].track == ".si" {
+			continue;
+		}
 		let before = first.get(&pid).copied().unwrap_or(0);
 		assert!(before < units, "PID {pid}: {before} access units, then {units}");
 	}
@@ -370,108 +371,4 @@ async fn a_late_sink_reads_the_final_report() {
 	assert_eq!(report.ext.mpegts.as_ref().map(units), Some(units(&health)));
 	sink.kill().await.unwrap();
 	import.kill().await.unwrap();
-}
-
-/// One line of `export echo`.
-#[derive(serde::Deserialize)]
-struct Feedback {
-	broadcast: String,
-	feedback: hang::echo::Snapshot<ts::stats::Report>,
-}
-
-/// An export asked for feedback publishes it where the catalog solicits it, counting what it
-/// reads as it reads it, with a TS export's per-PID rows and release clock, and `export echo`
-/// finds it under that prefix.
-#[tokio::test]
-async fn export_echo_reports_what_the_export_reads() {
-	let relay = relay().await;
-	let (expected, _) = written(CLIP);
-
-	// A publisher soliciting feedback under `viewers`, a sibling of its broadcast.
-	let mut broadcast = relay.origin.create_broadcast("demo").expect("create the broadcast");
-	let config = moq_mux::catalog::Config::default()
-		.with_max_age(Some(Duration::from_secs(1)))
-		.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
-	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
-	let mut import = ts::Import::new(broadcast.clone(), catalog.reserve());
-	let mut solicit = catalog.modify().unwrap();
-	solicit.echo = Some(hang::catalog::Echo::new("viewers".to_string()));
-	solicit.commit().unwrap();
-	broadcast.announce(moq_net::origin::Route::default()).unwrap();
-
-	let (mut sink, mut lines) = sink(&relay, "viewers", "echo");
-	// Held longer than the feed pauses for the first feedback line, so the pause is no stall.
-	let mut export = moq(&relay, "demo", &["export", "--echo", "alice", "ts", "--delay", "4s"])
-		.stdout(Stdio::piped())
-		.spawn()
-		.expect("spawn the export");
-	let mut output = export.stdout.take().expect("stdout");
-	let draining = tokio::spawn(async move { tokio::io::copy(&mut output, &mut tokio::io::sink()).await });
-
-	// Half the clip, then feedback before the rest, so the export reports while it reads.
-	feed(&CLIP[..HALF], async |chunk| import.decode(chunk).unwrap()).await;
-	let mut feedback: Vec<Feedback> = vec![next(&mut lines).await.expect("feedback mid-export")];
-	feed(&CLIP[HALF..], async |chunk| import.decode(chunk).unwrap()).await;
-	import.finish().unwrap();
-	catalog.finish().unwrap();
-
-	let status = loop {
-		tokio::select! {
-			line = next(&mut lines) => feedback.push(line.expect("the echo sink runs until stopped")),
-			status = export.wait() => break status.expect("wait for the export"),
-		}
-	};
-	assert!(status.success(), "the export finishes cleanly, got {status}");
-	// The export writes its final counts as it exits.
-	while let Ok(Some(line)) = tokio::time::timeout(Duration::from_secs(2), next(&mut lines)).await {
-		feedback.push(line);
-	}
-	draining.await.unwrap().expect("drain the export");
-	sink.kill().await.unwrap();
-	drop(broadcast);
-
-	assert!(
-		feedback.iter().all(|line| line.broadcast == "viewers/alice.echo"),
-		"the feedback is published at the solicited path"
-	);
-	let first = &feedback.first().expect("the sink printed feedback").feedback;
-	let last = &feedback.last().unwrap().feedback;
-	assert!(!last.renditions.is_empty(), "the export reports what it reads");
-	for (name, read) in &last.renditions {
-		assert!(
-			read.frames > 0 && read.frames <= expected[name].frames,
-			"{name}: read {} of {} frames",
-			read.frames,
-			expected[name].frames
-		);
-		let newest = read.arrival.as_ref().expect("an arrival").timestamp;
-		let earliest = first.renditions.get(name).and_then(|read| read.arrival.as_ref());
-		assert!(
-			earliest.is_none_or(|earliest| earliest.timestamp < newest),
-			"{name}: the newest arrival advances over {} lines: {earliest:?} then {:?}",
-			feedback.len(),
-			read.arrival
-		);
-	}
-	assert!(
-		feedback.iter().any(|line| line.feedback.transport.rtt.is_some()),
-		"the export reports its connection"
-	);
-
-	let rows = last.ext.mpegts.as_ref().expect("a TS export reports its rows");
-	assert_clean(rows);
-	let first = feedback
-		.iter()
-		.find_map(|line| line.feedback.ext.mpegts.as_ref())
-		.unwrap();
-	assert_advancing(first, rows);
-	let release = last
-		.ext
-		.release
-		.as_ref()
-		.expect("a TS export reports its release clock");
-	assert!(
-		release.margin.is_some(),
-		"a second of frames gives a margin: {release:?}"
-	);
 }

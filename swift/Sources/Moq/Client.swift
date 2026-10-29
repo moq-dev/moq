@@ -1,3 +1,4 @@
+import Foundation
 import MoqFFI
 
 /// A MoQ client, built from its configuration and then dialed with `connect(to:)`.
@@ -10,9 +11,14 @@ public final class Client: Sendable {
     ///   - bind: The local UDP address to bind; `nil` binds an ephemeral dual-stack port.
     ///   - versions: Protocol versions to offer, most preferred first (`"moq-lite-03"`);
     ///     empty offers every supported version, which `versions()` lists.
-    ///   - timeoutUs: How long one connect may take, dial and handshake together; 0 waits forever.
-    ///   - raceUs: Happy Eyeballs: how long before the next resolved address is also dialed.
-    ///   - resolutionDelayUs: Happy Eyeballs: how long IPv4 waits for the full DNS answer.
+    ///   - tokens: Credentials every dial presents. The first is the connection credential,
+    ///     sent in SETUP and, while an offered version can't carry it there, the URL's `?jwt=`;
+    ///     each other one widens the session's grant over in-band AUTH. A URL that already
+    ///     carries `?jwt=` keeps it, and then every token rides AUTH. Replace a session's
+    ///     through `Session.tokens()`.
+    ///   - timeout: How long one connect may take, dial and handshake together; 0 waits forever.
+    ///   - race: Happy Eyeballs: how long before the next resolved address is also dialed.
+    ///   - resolutionDelay: Happy Eyeballs: how long IPv4 waits for the full DNS answer.
     ///   - tls: Certificate trust (`insecure`, `roots`, `fingerprints`, ...), the SNI override,
     ///     and the mTLS identity.
     ///   - quic: QUIC tuning, such as the peer's inbound stream cap and the idle timeout.
@@ -27,9 +33,10 @@ public final class Client: Sendable {
     public init(
         bind: String? = nil,
         versions: [String] = [],
-        timeoutUs: UInt64? = nil,
-        raceUs: UInt64? = nil,
-        resolutionDelayUs: UInt64? = nil,
+        tokens: [String] = [],
+        timeout: TimeInterval? = nil,
+        race: TimeInterval? = nil,
+        resolutionDelay: TimeInterval? = nil,
         tls: ClientTls = ClientTls(),
         quic: QuicConfig = QuicConfig(),
         websocket: WebSocketConfig = WebSocketConfig(),
@@ -41,14 +48,16 @@ public final class Client: Sendable {
         ffi = try MoqClient(config: MoqClientConfig(
             bind: bind,
             versions: versions,
-            timeoutUs: timeoutUs,
-            raceUs: raceUs,
-            resolutionDelayUs: resolutionDelayUs,
+            tokens: tokens,
+            timeout: timeout,
+            race: race,
+            resolutionDelay: resolutionDelay,
             tls: tls,
             quic: quic,
             websocket: websocket,
             once: once,
             backoff: backoff,
+            implementation: implementation,
             publish: publish?.ffi,
             consume: consume?.ffi
         ))
@@ -137,18 +146,23 @@ public final class Session: Sendable {
         ffi.stats()
     }
 
-    /// The session's authorization: the grant its peer gave it, and more tokens to present.
+    /// Follow the grant the peer gave this session.
     ///
-    /// Each call returns an independent watcher of the grant. A client session's
-    /// handle survives reconnects, presenting each added token again on every new
-    /// connection.
-    public func auth() -> Auth {
-        Auth(ffi.auth())
+    /// Each call returns an independent consumer. A client session's grant follows
+    /// each reconnect, reading `nil` while offline.
+    public func grants() -> GrantConsumer {
+        GrantConsumer(ffi.grants())
+    }
+
+    /// The credentials a native client session presents, to replace while it runs;
+    /// `nil` for a server-accepted session, which presents none.
+    public func tokens() -> Tokens? {
+        ffi.tokens().map(Tokens.init)
     }
 
     /// Hold receive-estimate demand until the returned consumer is released.
-    public func recvBandwidth() -> Bandwidth.Consumer? {
-        ffi.recvBandwidth().map(Bandwidth.Consumer.init)
+    public func recvBandwidth() -> BandwidthConsumer? {
+        ffi.recvBandwidth().map(BandwidthConsumer.init)
     }
 
     /// The session's bandwidth allocator.
@@ -157,7 +171,7 @@ public final class Session: Sendable {
     /// through one are visible to the others. A client handle survives
     /// reconnects: the grant is `nil` while disconnected and resumes on the
     /// next connection.
-    public func bandwidth() -> Bandwidth {
-        Bandwidth(ffi.bandwidth())
+    public func allocator() -> Allocator {
+        Allocator(ffi.allocator())
     }
 }

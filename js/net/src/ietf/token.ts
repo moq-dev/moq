@@ -2,10 +2,9 @@ import { ProtocolViolation, SessionCode } from "../error.ts";
 import * as Varint from "../varint.ts";
 import type { Parameters } from "./parameters.ts";
 import type { SetupOptions } from "./setup_options.ts";
-import { type IetfVersion, Version } from "./version.ts";
 
 /**
- * The `AUTHORIZATION TOKEN` Setup Option (draft-ietf-moq-transport-21 section 9.1.4) and
+ * The `AUTHORIZATION TOKEN` Setup Option (draft-ietf-moq-transport-22 section 9.1.4) and
  * Message Parameter.
  *
  * The value is the Token structure of section 8.9: an Alias Type, then fields that type
@@ -53,11 +52,6 @@ export interface Token {
  */
 export const TOKEN_OUT_OF_BAND = 0x0n;
 
-/** Draft-17 replaced QUIC's two-bit-length varint with a leading-ones one. */
-function leadingOnes(version: IetfVersion): boolean {
-	return version !== Version.DRAFT_14 && version !== Version.DRAFT_15 && version !== Version.DRAFT_16;
-}
-
 /**
  * The token the peer's SETUP presented, if any.
  *
@@ -67,10 +61,10 @@ function leadingOnes(version: IetfVersion): boolean {
  * @throws {ProtocolViolation} carrying the session code to close with.
  * @internal
  */
-export function tokenFromSetup(params: SetupOptions, version: IetfVersion): Token | undefined {
+export function tokenFromSetup(params: SetupOptions): Token | undefined {
 	const raw = params.getBytes(AUTHORIZATION_TOKEN);
 	if (raw === undefined) return undefined;
-	return decode(raw, version, true);
+	return decode(raw, true);
 }
 
 /**
@@ -114,8 +108,8 @@ export function unique(tokens: Token[]) {
  * @throws {ProtocolViolation} carrying the session code to close with.
  * @internal
  */
-export function tokenFromRequest(raw: Uint8Array, version: IetfVersion): Token {
-	return decode(raw, version, false);
+export function tokenFromRequest(raw: Uint8Array): Token {
+	return decode(raw, false);
 }
 
 /**
@@ -125,13 +119,13 @@ export function tokenFromRequest(raw: Uint8Array, version: IetfVersion): Token {
  * `UnknownAuthTokenAlias` for an alias reference on a request (`ProtocolViolation` in SETUP),
  * or `KeyValueFormatting` for a structure that cannot be decoded.
  */
-function decode(raw: Uint8Array, version: IetfVersion, setup: boolean): Token {
+function decode(raw: Uint8Array, setup: boolean): Token {
 	// Section 8.9: a structure that cannot be decoded closes with KEY_VALUE_FORMATTING_ERROR.
 	const malformed = (cause?: unknown) =>
 		new ProtocolViolation("malformed AUTHORIZATION TOKEN", { cause, code: SessionCode.KeyValueFormatting });
 	const unvarint = (buf: Uint8Array): [bigint, Uint8Array] => {
 		try {
-			return leadingOnes(version) ? Varint.decodeLeadingOnes(buf) : Varint.decodeBigInt(buf);
+			return Varint.decodeLeadingOnes(buf);
 		} catch (err) {
 			throw malformed(err);
 		}
@@ -180,8 +174,8 @@ function decode(raw: Uint8Array, version: IetfVersion, setup: boolean): Token {
  *
  * @internal
  */
-export function tokenIntoSetup(params: SetupOptions, token: Token, version: IetfVersion) {
-	params.setBytes(AUTHORIZATION_TOKEN, encode(token, version));
+export function tokenIntoSetup(params: SetupOptions, token: Token) {
+	params.setBytes(AUTHORIZATION_TOKEN, encode(token));
 }
 
 /**
@@ -189,13 +183,13 @@ export function tokenIntoSetup(params: SetupOptions, token: Token, version: Ietf
  *
  * @internal
  */
-export function tokenIntoRequest(params: Parameters, value: Uint8Array, version: IetfVersion) {
-	params.bytes.set(AUTHORIZATION_TOKEN, encode({ kind: TOKEN_OUT_OF_BAND, value }, version));
+export function tokenIntoRequest(params: Parameters, value: Uint8Array) {
+	params.bytes.set(AUTHORIZATION_TOKEN, encode({ kind: TOKEN_OUT_OF_BAND, value }));
 }
 
 /** A Token structure by value: USE_VALUE, its type, then the token. */
-function encode(token: Token, version: IetfVersion): Uint8Array {
-	const varint = (v: bigint) => (leadingOnes(version) ? Varint.encodeLeadingOnes(v) : Varint.encode(v));
+function encode(token: Token): Uint8Array {
+	const varint = Varint.encodeLeadingOnes;
 	const aliasType = varint(USE_VALUE);
 	const kind = varint(token.kind);
 

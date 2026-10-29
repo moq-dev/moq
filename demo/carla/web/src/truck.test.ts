@@ -61,8 +61,8 @@ describe("Truck status", () => {
 
 	function statusOrigin() {
 		const origin = new Moq.Broadcast.Producer();
-		const track = origin.createTrack("status");
-		const producer = new Json.Snapshot.Producer<TruckStatus>({ track, compression: "deflate" });
+		const track = origin.createTrack("status", { compress: true });
+		const producer = new Json.Snapshot.Producer<TruckStatus>({ track });
 		return { origin, producer };
 	}
 
@@ -329,11 +329,9 @@ describe("Truck safety controls", () => {
 		});
 		const front = new Json.Snapshot.Consumer<Record<string, unknown>>({
 			track: safety.broadcast.track("control").subscribe(),
-			compression: "deflate",
 		});
 		const rear = new Json.Snapshot.Consumer<Record<string, unknown>>({
 			track: safety.broadcast.track("control").subscribe(),
-			compression: "deflate",
 		});
 
 		try {

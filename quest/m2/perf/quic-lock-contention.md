@@ -26,6 +26,12 @@ since the async-to-poll adapter and leases that hold the lock both go first.
   an unbounded channel to its connection's task, with a wake per packet
   (`driver/endpoint.rs`, the receive loop), and endpoint events flow back the
   same way. Count channel sends, wakes, and cross-thread hand-offs per packet.
+  The channel is unbounded, and stream credit does not bound encrypted
+  datagrams waiting before the connection task processes them. Measure its
+  depth and bytes when a peer's ingress outruns its connection task (lock
+  wait included). If it grows, bound it by design at the packet boundary
+  (batch dispatch, or backpressure into the socket read) rather than with a
+  queue cap that drops (2026-10-27 audit, maintainer).
 
 Levers, only where the profile shows a cost:
 
@@ -36,9 +42,14 @@ Levers, only where the profile shows a cost:
 - Dispatch a whole GRO batch per connection in one message, coordinated
   with [the I/O boundary redesign](/quest/m2/quic-io-boundary.md), whose
   "one `handle` call takes a whole GRO batch" is the state-machine half.
-- Stream handles that carry a slab key instead of a `StreamId`, removing the
-  driver's three per-stream `FxHashMap`s and moq-quic's lookups. FxHash is
-  cheap, so this is last and only on evidence.
+- Stream handles that carry a slab key instead of a `StreamId`, removing
+  moq-quic's per-stream lookups (the driver's own maps go with
+  [waits](/quest/m1/quic-api/waits.md)). FxHash is cheap, so this is last
+  and only on evidence.
+
+The maintainer wants the connection state free of runtime borrow checks
+altogether (2026-10-25); [borrow-free state](/quest/m2/perf/quic-borrow-free.md)
+designs that, and this profile is its baseline.
 
 A measured no-win is a valid outcome. Report public API and wire impact; the
 staging queue and batch dispatch should need none.
@@ -47,8 +58,10 @@ staging queue and batch dispatch should need none.
 
 - [Native WebTransport](/quest/m1/quic-api/native-web.md) - removes the adapter's per-operation boxing, which would otherwise dominate the profile
 - [Streams](/quest/m1/quic-api/streams.md) - owned writes and lock-free leases
+- [Waits](/quest/m1/quic-api/waits.md) - moves the waiter tables under the lock this profiles
 
 ## Related
 
+- [Borrow-free state](/quest/m2/perf/quic-borrow-free.md) - the lock-free designs this profile is the baseline for
 - [Relay egress profile](/quest/m2/quic-egress-profile.md) - the transmit side of the same path
 - [Relay allocations](/quest/m2/perf/relay-allocs.md) - the allocation profile of the same workload

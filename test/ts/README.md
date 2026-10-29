@@ -21,7 +21,9 @@ software profiles below; it does not certify a hardware IRD or every TS layout.
 - `overhead.py` counts the packets a capture spends on clocks and audio framing
   against its source.
 - `holes.py` finds media missing from a generated clip's capture, from its
-  timestamps against the source's.
+  presentation timestamps against the source's. The export derives each group's
+  decode timestamps from that group alone, so they step at group boundaries with
+  nothing lost.
 - `passthrough.py` places every packet of an `export ts --passthrough` capture
   at its source position and compares the compliance verdicts.
 
@@ -44,6 +46,7 @@ just test ts --leak             # 1080p video with no HRD, filling its level's 2
 just test ts --full             # the same with two audio PIDs, filling its multiplex with no nulls
 just test ts --fragment-pes    # legal headers split across packets, with FFmpeg/TSDuck grading
 just test ts --klv              # KLV and DVB AC-3 carried as whole PES, graded against the source
+just test ts --mpeg2            # MPEG-2 video carried as whole PES, decoded from the capture
 just test ts --revision         # the PMT revised mid-stream, a KLV stream joining and leaving
 just test ts --delay 2s         # pass the exporter's --delay
 just test ts --hrd --rate 7000000 # congest the subscriber's leg below the media rate
@@ -69,6 +72,11 @@ source placement on the program clock, and none after its PTS; and FFmpeg readin
 each as KLV with the same PES and PTS. `holes.py` and the T-STD model grade the
 AC-3, whose buffer drains each sync frame at its own decode time.
 
+`--mpeg2` publishes Main Profile at Main Level MPEG-2 video beside MPEG audio. The
+importer does not decode MPEG-2 video, so it rides its track whole while its PTS
+still paces the program. `mpeg2.py` decodes source and capture with FFmpeg: past
+the GOP the subscriber joins in, every picture is the source's next one, through
+the source's last. `holes.py` and the T-STD model grade the rest.
 `--revision` has `revision.py` add asynchronous KLV to the default clip's null
 slots from a third of its program clock to two thirds, and revise the PMT at each
 end: the next `version_number` lists the stream before its first packet, and the
@@ -155,8 +163,8 @@ decoder (2.4.2; Rec. ITU-T H.222.0, whose 10/2014 edition is a free download),
 fed on the stream's own PCR clock:
 
 ```text
-video (AVC 2.14.3.1, HEVC 2.17.2)   TB --Rx--> MB --Rbx (leak)--> EB --DTS--> decoder
-audio (2.4.2.3)                     TB --Rx--> B  ----------------PTS--> decoder
+video (H.262 2.4.2.3, AVC 2.14.3.1, HEVC 2.17.2)   TB --Rx--> MB --Rbx (leak)--> EB --DTS--> decoder
+audio (2.4.2.3)                                    TB --Rx--> B  ----------------PTS--> decoder
 ```
 
 It fails a stream where TB, MB, EB or B overflows, where TB stays occupied for a
@@ -167,7 +175,7 @@ underflowed access unit finished arriving, and the longest any access unit waite
 
 TSDuck supplies the transport analysis, not this decoder-buffer model. Commercial
 analyzers advertise T-STD checks; no suitable maintained open-source replacement
-was established for this harness. Its parameters are transcribed from the specs: H.264 Table A-1 and H.265 Table A.8 for the level, the
+was established for this harness. Its parameters are transcribed from the specs: H.262 Tables 8-13 and 8-14, H.264 Table A-1 and H.265 Table A.8 for the level, the
 ADTS and "other audio" rates and sizes in H.222.0 2.4.2.3, and ATSC A/52 and A/53
 Part 5 for AC-3 and E-AC-3. TSDuck does the parsing: `tstables` decodes the PMT
 and `tsp -P pes --avc-access-unit` the SPS, AVC and HEVC alike.
@@ -181,6 +189,14 @@ level defaults too. An `AVC_timing_and_HRD_descriptor` or
 `HEVC_timing_and_HRD_descriptor` with `hrd_management_valid` switches MB-to-EB
 transfer to the HRD's own schedule, which is not modelled, so such a stream is
 refused.
+
+MPEG-2 video takes Rx = 1.2 Rmax from its level, Rbx = Rmax at Low and Main level
+and min(1.05 Res, Rmax) at High-1440 and High, EB from the sequence header's
+`vbv_buffer_size`, and MB from what the level's VBV leaves over, as H.222.0 2.4.2.3
+specifies for the leak method. A stream whose `STD_descriptor` clears `leak_valid`
+while its pictures code a `vbv_delay` other than 0xFFFF takes the `vbv_delay`
+method instead, which is not modelled, so it is refused. Its picture, GOP or
+sequence header opens each access unit.
 
 Opus is graded against ADTS's buffers for the same channel count: the Opus-in-TS
 draft gives Rx (2 Mb/s for 1-2 channels, matching ADTS) but leaves the buffer size
@@ -215,9 +231,14 @@ payload twice); only PES bytes of a first copy go on to MB/B. Video access units
 are read from the ES rather than taken from PES boundaries: one opens at the first
 delimiter, parameter set or SEI after the previous picture's slices (H.264
 7.4.1.2.3, H.265 7.4.2.4.4), and H.222.0 requires a delimiter in each. A PES may
-carry several, but only the first takes its timestamp, and deriving the rest from
-the stream's own timing is not modelled, so that layout is refused. Video decode
-times must strictly increase.
+carry several, but only the AU starting in it takes its timestamp once. The model
+can derive later presentation times from anchored POC and explicitly proportional
+VUI timing; AVC also needs the TS timing descriptor's fixed-rate and temporal-POC
+flags. Its frame-only profile supports AVC POC types 0/2 and HEVC without sub-picture
+HRD. Inferred decode times additionally need each picture's HRD DPB output delay;
+PTS is never substituted for DTS. Missing signaling, field/pic-struct timing, AVC
+POC type 1 or MMCO5 with missing timestamps are refused. Video decode times must
+strictly increase.
 
 Audio bytes enter B as they leave TB, so a frame that ends partway through a packet
 is complete once its own last byte has left, not the packet's, and B is checked
@@ -257,6 +278,11 @@ An 8 s FFmpeg AVC Baseline@2.0 clip has no declared NAL HRD, so its MB uses the
 much smaller level defaults. It passes as encoded; restamping only its PCRs at
 4x overflows MB (and TB), closing the separate MB negative-control gap.
 
+Generated AVC and HEVC controls put two AUs in each PES, preserving every ES
+byte's original arrival position. Proportional POC timing and HRD picture timing
+make both pass; removing HRD picture timing makes both refuse their unknown decode
+times. Their no-reordering and B-picture variants exercise separate PTS and DTS.
+
 The packet layouts a capture cannot be edited into are built synthetically: a
 10 Mb/s single-video stream carrying the Kyrion SPS, one access unit per PES, with
 a PCR packet between them. Each case fails without the handling it names:
@@ -264,7 +290,7 @@ a PCR packet between them. Each case fails without the handling it names:
 | Case | Expected |
 |---|---|
 | as built | pass |
-| two access units in one PES | refused |
+| two access units in one PES without a declared clock | refused |
 | four adaptation-only packets after an access unit | TB overflow |
 | an access unit's first packet sent twice | pass |
 | the PMT declares a PCR PID that carries no PCR | `pcr-presence` fails |
@@ -375,7 +401,7 @@ packet advancing the counter. A pipe cannot go through TSDuck first without
 rebuffering the arrivals `release` stamps.
 
 Live runs write `pcr-timing.json` beside `timing.out`. Failures retain their run;
-set `MOQ_TEST_KEEP=1` to retain passing controls too. The JSON report keeps the
+set `HARNESS_KEEP=1` to retain passing controls too. The JSON report keeps the
 graded PID's raw `[packet_index, unwrapped_pcr_ticks, arrival_seconds, pid]` samples,
 the indices that begin new time bases, wrap count, and grading parameters. PCR ticks
 are at 27 MHz; arrivals use the reader's `time.monotonic()` clock and are upper
@@ -700,7 +726,7 @@ acquires at, against the continuous source decode. Each of those points must
 carry its own PAT and PMT, sent after the picture before it. Its graders' failure
 paths run beside it, and `just rs ts-recovery` runs two minutes of the same faults
 nightly, failing if the latency drifts and keeping a failing arm's export and
-ledgers under `$MOQ_TEST_RUNS/ts-recovery/`.
+ledgers under `$HARNESS_RUNS/ts-recovery/`.
 
 ### Lossy path (`--loss`)
 
@@ -868,9 +894,9 @@ the same access unit: AAC overlap and perceptual-noise state differ between a
 cold decoder and a decoder that saw earlier frames. No arbitrary warmup samples
 are discarded. PES boundaries and TS packetization may change.
 
-The suffix is the exporter's to choose, and it starts on a whole group: a join
-whose first group is cut short before anything of it went out starts at the next
-one. Anything lost after that fails. When it does, the harness prints what the
+The suffix is the exporter's to choose, and it starts on a keyframe: a join
+whose start group went stale before anything of it went out starts at the next
+one. Anything lost after the first frame out fails, a group cut short included. When it does, the harness prints what the
 exporter reported: the `TS export release clock` counts (`dropped` late,
 `trimmed` before the output began, `gaps` skipped upstream) and each loss it
 logged.
@@ -905,7 +931,7 @@ browser interop. It runs nightly on `main`, and release PRs touching a workspace
 crate `run.sh` builds (kept in sync by `sh/gh/ts-paths.py`), the harness, or the
 toolchain run it too:
 `just test ts-controls`, `just test ts-pair-controls`, the default and 2 Mb/s round trips, HRD, leak, full, headroom,
-open-GOP, KLV (strict), PMT revision, passthrough (generated, Kyrion and MPTS), EIT, and T-STD controls. Each step runs even after another test fails.
+open-GOP, KLV (strict), MPEG-2 video, PMT revision, passthrough (generated, Kyrion and MPTS), EIT, and T-STD controls. Each step runs even after another test fails.
 All recipes use the same pinned Nix FFmpeg and TSDuck locally and in CI.
 
 Nightly and manual runs also invoke `just test ts --pair`,
@@ -920,7 +946,7 @@ These are actual test invocations, not optional tools installed on a runner.
 
 Failed runs retain source/capture files, process logs and statuses, tool versions,
 decoder commands, frame hashes, PCM, and grader reports under the harness run
-directory. CI uploads that directory for seven days. `MOQ_TEST_KEEP=1` preserves
+directory. CI uploads that directory for seven days. `HARNESS_KEEP=1` preserves
 successful local evidence too. `ts-eit` retains its sparse-schedule and pending
 version fixtures; `ts-tstd` retains its existing model controls.
 

@@ -40,9 +40,9 @@ allow.uid = [1001]
 
 [listen.extensions]                  # moq-transport SETUP extensions to offer, each on by default.
                                      # The relay always offers ietf, for moq-lite-07 relay links.
-auth = false                         # Decline MoQ Auth (draft 17+).
+auth = false                         # Decline MoQ Auth.
 solicit = false                      # Decline MoQ Solicit, so peers may announce unasked.
-epoch = false                        # Decline MoQ Epoch, so routes over moq-transport carry no epoch (draft 17+).
+epoch = false                        # Decline MoQ Epoch, so routes over moq-transport carry no epoch.
 ```
 
 `timeout` bounds the whole handshake, transport through MoQ SETUP and auth
@@ -127,11 +127,9 @@ certificate, route hop, or cluster-looking URL alone does not select peer limits
 ```toml
 [limits.client]
 announces = 1000                     # Simultaneous broadcasts or namespaces.
-requests = 10000                     # Other simultaneous moq-transport requests.
 
 [limits.peer]
 announces = 100000
-requests = 20000
 
 [limits.peer.quic]
 max_streams = 100000                 # Concurrent QUIC streams per direction.
@@ -147,13 +145,10 @@ not throttled by `[quic]` limits sized for one viewer, for example
 `--limits-peer-quic-max-streams=200000`. Peers over WebSocket, TCP, or iroh keep
 their transport's own limits.
 
-These are the defaults. Each subscription and FETCH holds a stream on moq-lite
-and on moq-transport draft 17 and later, as does each PUBLISH a peer's track
-listing gets, so `[quic]` or `[limits.peer.quic]` `max_streams` bounds them
-there, and a peer past it waits rather than fails.
-On drafts 14 to 16, `announces` and `requests` together size the request
-window instead, which every request counts against, so very small values can
-prevent other requests from progressing. Size peer limits
+These are the defaults. Each subscription and FETCH holds a stream, as does each
+PUBLISH a peer's track listing gets, so `[quic]` or `[limits.peer.quic]`
+`max_streams` bounds them, and a peer past it waits rather than fails. The
+removed `requests` limit is refused at startup. Size peer limits
 for the combined traffic they carry, and use session peak counters to check
 announcement and subscription headroom. Exceeding `announces` closes the session
 with `TOO_MANY_REQUESTS`; reconnecting with the same load will exceed it again.
@@ -350,20 +345,22 @@ group of every track is always kept, even past `capacity`.
 ```toml
 [stats]
 enabled = true
-prefix = ".stats"                    # Broadcasts appear under <prefix>/node/<node>.
+prefix = ".stats"                    # The broadcast appears at <prefix>/node/<node>.
 interval = "1s"                      # Time between snapshots. Default.
 node = "sjc/1"                       # Disambiguates relays sharing a cluster.
-depth = 1                            # Also bucket by the first N path segments (per tenant).
-linger = "5m"                        # Keep an empty group's broadcast announced this long. Default.
+depth = 1                            # One group track per first N path segments (per tenant).
+linger = "5m"                        # Keep an empty group's track listed this long. Default.
 ```
 
 Each node publishes its traffic and session counters as MoQ tracks, split by a
 **tier** label from the auth server's grant (`--cluster-tier` for links this
 relay dials and LAN peers it admits), which is what makes billing per customer or per region possible.
-Each run, and each group returning after its linger, announces under a fresh
-[epoch](/concept/moq-lite#publisher-epochs), so a restart is a new broadcast at
-the same path. Each group's totals count everything since its epoch began, so
-billing reads those; per-path traffic and per-label sessions and HTTP requests are for
+Each run announces under a fresh [epoch](/concept/moq-lite#publisher-epochs),
+so a restart is a new broadcast at the same path. Each group is a
+[track](/concept/stats#group-tracks) of that broadcast, and one returning after
+its linger restarts its counters under a new epoch without an announce. The
+node's totals count everything since its epoch began, so billing reads those;
+a group's per-path traffic and per-label sessions and HTTP requests are for
 dashboards. Session counters report how close sessions come to the
 per-session limits, past which one is closed with `TOO_MANY_REQUESTS`.
 [Stats](/concept/stats) describes the paths, tracks, and encodings; read them

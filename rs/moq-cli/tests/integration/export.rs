@@ -516,12 +516,12 @@ async fn the_same_instance_within_the_follow_continues() {
 	let epoch = moq_net::Epoch::mint();
 	let lite07 = ["--connect-version", LITE_07];
 	let origin = moq_tokio::origin::spawn();
-	let mut broadcast = origin.create_broadcast("demo").unwrap();
+	let broadcast = origin.create_broadcast("demo").unwrap();
 	let config = moq_mux::catalog::Config::default()
 		.with_max_age(Some(Duration::from_secs(1)))
 		.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
-	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
-	let mut import = ts::Import::new(broadcast.clone(), catalog.reserve());
+	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config).unwrap();
+	let mut import = ts::Import::new(broadcast.broadcast().clone(), catalog.reserve());
 	broadcast
 		.announce(moq_net::origin::Route::default().with_epoch(epoch.clone()))
 		.unwrap();
@@ -557,7 +557,7 @@ async fn the_same_instance_within_the_follow_continues() {
 	}
 	export.output_past(0).await;
 	assert!(split < LONG.len(), "the capture has a tail after the export joined");
-	let old = relay.origin.request_broadcast("demo", None).await.unwrap();
+	let old = relay.origin.request("demo", None).await.unwrap();
 	assert_eq!(old.info().epoch.as_ref(), Some(&epoch));
 	let clock = catalog.snapshot().clock;
 	connection.abort(moq_net::Error::Cancel);
@@ -567,7 +567,7 @@ async fn the_same_instance_within_the_follow_continues() {
 		.expect("the relay observes the lost publication");
 	let mark = output.lock().unwrap().len().next_multiple_of(188);
 	let connection = client.connect(url).established().await.unwrap();
-	let back = tokio::time::timeout(TIMEOUT, relay.origin.routed_broadcast("demo"))
+	let back = tokio::time::timeout(TIMEOUT, relay.origin.follow("demo", None).unwrap().available())
 		.await
 		.expect("the relay observes the returning publication")
 		.unwrap();
@@ -981,6 +981,7 @@ async fn redundant_failover(bufferbloat: bool) {
 		let mut distinct = versions.clone();
 		distinct.dedup();
 		assert_eq!(distinct, [0, 1, 2, 3], "one marked switch per change");
+		let mut switches = Vec::new();
 		for version in 1..=3 {
 			// A program opens in the slot of its first PAT, with a PCR flagging the break.
 			let all: Vec<_> = packets(&output).collect();
@@ -1006,6 +1007,31 @@ async fn redundant_failover(bufferbloat: bool) {
 				.checked_sub(1)
 				.map_or(Duration::ZERO, |before| arrivals[at].0 - arrivals[before].0);
 			eprintln!("bufferbloat={bufferbloat}, program {version}, viewer output gap={gap:?}");
+			switches.push((version, at, gap));
+		}
+		let arrivals = arrivals.lock().unwrap();
+		let steady = arrivals
+			.windows(2)
+			.enumerate()
+			.filter(|(index, _)| !switches.iter().any(|(_, at, _)| *at == index + 1))
+			.map(|(_, pair)| pair[1].0 - pair[0].0)
+			.max()
+			.expect("steady output between switches");
+		// The output's 25ms PCR grid plus this fixture's 20ms switch polling, on top of the
+		// scheduling noise measured on the same stdout reader.
+		let margin = Duration::from_millis(25 + 20);
+		eprintln!("bufferbloat={bufferbloat}, steady output max={steady:?}, cadence margin={margin:?}");
+		// A healthy switch adds no hole only when the replacement is usable within the follow.
+		// Behind this link, slower than either leg alone, both legs' audio outranks all video,
+		// so the replacement's first keyframe lands only after the follow stops the old input;
+		// its late start then costs whatever the old tail does not cover, the honest result.
+		for (version, _, gap) in switches {
+			if version != 2 && !bufferbloat {
+				assert!(
+					gap <= steady + margin,
+					"healthy program {version} added an output hole: gap={gap:?}, steady={steady:?}, margin={margin:?}"
+				);
+			}
 		}
 	}
 	if let Some(shaper) = shaper {
@@ -1016,7 +1042,7 @@ async fn redundant_failover(bufferbloat: bool) {
 }
 
 /// The epoch of the next route announced for the path.
-async fn next_epoch(announced: &mut moq_net::announce::Follow) -> moq_net::Epoch {
+async fn next_epoch(announced: &mut moq_net::announce::Consumer) -> moq_net::Epoch {
 	tokio::time::timeout(TIMEOUT, async {
 		loop {
 			match announced.next().await.expect("the relay stays up") {
@@ -1037,7 +1063,8 @@ async fn next_epoch(announced: &mut moq_net::announce::Follow) -> moq_net::Epoch
 #[ignore = "real-time process test: just rs cli-export"]
 async fn a_passthrough_export_ends_with_its_redundant_importer() {
 	let relay = relay().await;
-	let mut announced = relay.origin.follow("demo").unwrap();
+	let demo = moq_net::Patterns::from(moq_net::Pattern::literal("demo").unwrap());
+	let mut announced = relay.origin.scope("", &demo).unwrap().announced();
 	let (feed, feeding) = redundant_feed();
 	let mut first = redundant_import(&relay, &feed, &["--passthrough"]);
 	let incumbent = next_epoch(&mut announced).await;

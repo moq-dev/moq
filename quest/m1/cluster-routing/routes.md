@@ -63,7 +63,10 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   counts as the echo.
   The hop list leaves lite-07, and with it the
   `Hop Base`/`Hop Keep` compression; `cluster.max_hops` then stops applying
-  to lite-07.
+  to lite-07. Most of the 62% saving measured in
+  [moq-dev/moq#4196](https://github.com/moq-dev/moq/pull/4196) came from hop
+  chains, so rerun its announce bench on path-less ANNOUNCE and drop
+  `Path Base`/`Path Keep` too unless it still pays for its rules.
 
   ```text
   ROUTE_START  node=0x7a3f seqno=41 metric=12   -> route 0
@@ -112,15 +115,20 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   them was rejected: downstream nodes would lose their only route during the
   drain. Existing readers resume only
   across a matching explicit epoch; epochless changes preserve Restart.
-- Fresh routing identity per process/tab restart, shared across its
-  authenticated live sessions, decided 2026-10-13. It is the hash of a
-  per-process key that every session proves once
-  ([Identity proof](/quest/m1/cluster-routing/identity.md), decided
-  2026-10-14). Keep administrative identity and broadcast epoch separate. The shared identity recognizes an
-  origin reached through CDN and direct links and maps it to a roster peer.
-  The origin advances its seqno whenever its own set of sessions changes:
-  feasibility distances held elsewhere otherwise refuse a restart that reuses
-  an identity, and starve the old neighbors of an origin that moved to a
+- Fresh routing identity per process/tab restart, declared by the origin and
+  shared across its live sessions, decided 2026-10-13. It is unverified:
+  recognizing a routing identity needs key proof, which
+  [Peer grants](/quest/m2/p2p/peer-grant.md) owns (decided 2026-10-25).
+  Decided 2026-10-26 (maintainer): receivers do not stamp a fresh identity
+  per session. In a mesh, two relays stamping their sessions from one origin
+  forward its routes as two identities a third relay cannot recognize as
+  one, and a declared identity kept beside the stamp as a loop hint would
+  stay unverified.
+  Switching between paths resumes only across a matching explicit epoch.
+  Keep administrative identity and broadcast epoch separate. The origin
+  advances its seqno whenever its own set of sessions changes: feasibility
+  distances held elsewhere otherwise refuse a restart that reuses an
+  identity, and starve the old neighbors of an origin that moved to a
   farther attachment (`restart_reusing_identity_is_refused`,
   `reconnect_without_restart_needs_a_seqno_advance`). A random identity alone
   does not keep a dead incarnation away. What bounds it is ordered sessions,
@@ -131,10 +139,13 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   message already in flight on a live session, which delivers the retraction
   next (`collected_incarnation_returns_only_while_its_retraction_is_in_flight`).
   `cluster.id` stops naming a routing identity.
-- Decided 2026-10-14: a connection's own proven identity stays bare. An
-  identity a connection forwards for another origin is subject-qualified:
+- Decided 2026-10-14: every identity a connection sends is subject-qualified:
   filed under `hash(subject, id)` when the connection's publish grant is
-  scoped, and bare when it is unscoped (publish `**` at the root). The hash
+  scoped, and bare when it is unscoped (publish `**` at the root). Its own
+  identity is no exception (2026-10-26): the bare exemption relied on the
+  dropped proof, so an unproven own identity could otherwise claim a
+  victim's. Extend the fixture below to a forger declaring the victim's id as
+  its own, and drop the reference model's `proved` exemption. The hash
   has its own domain, so it cannot collide with a key-derived identity, and is
   collision-resistant at the identity width, since the forwarder picks `id`
   and could otherwise grind another subject's key. The relay that files it
@@ -284,10 +295,8 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   whether a connection is sent routes learned from other connections; it is
   never on the wire. Relays default on; applications choose per P2P
   connection; browser tabs stay off until the Rust-to-TypeScript port.
-- A plain client (`proxy` off) advertises its own origin and publications only. Its
-  authenticated routing identity is shared across its live sessions so P2P
-  can recognize the same origin, superseding the session-only identity plan.
-  Clients receive only authorized, interested claims; opaque ids expose no
+- A plain client (`proxy` off) advertises its own origin and publications only, under
+  the one identity it declares on every live session. Clients receive only authorized, interested claims; opaque ids expose no
   backbone addresses, but are not themselves authorization. A client
   advertises nothing it receives, so it holds no feasibility distance and
   falls back from P2P to the CDN at once. It still echoes every ROUTE_END.
@@ -306,8 +315,7 @@ loss never reports an END:
   seqno advance, claim change, or seqno request that would reach it rotates
   the identity instead, ending the old one everywhere and announcing the
   claims again under a fresh one, so nothing wraps and every advertised
-  seqno leaves room for the successor a request names. A session proves one
-  key once, so rotating closes and reopens every session the origin has up
+  seqno leaves room for the successor a request names
   (`exhausted_counters_rotate_the_identity`).
   A session sends an origin's announcements in batches, each closed by its
   floors: per region, the revision as of which the stream's announcements
@@ -531,12 +539,13 @@ region's knowledge independently: the proof keeps them all or, if any lost
 floor is newer than a kept one, rebuilds them all, a collection whose replay
 is bounded like any other.
 
-Why not a hold-down: #4644 retracted at once and re-announced a replacement
+Why not a hold-down: [moq-dev/moq#4644](https://github.com/moq-dev/moq/pull/4644) retracted at once and re-announced a replacement
 after 1 s, which ended a downstream front whose only path ran through the
 relay, dropping subscribers for about a second while the relay kept serving;
 holding without retracting brought hunting back in measurements, and
 #4642's 300 ms cursor hold was the earlier mitigation. Main also contains
-#5375's two-second retraction quarantine and #5391's same-clock queue dedup.
+[moq-dev/moq#5375](https://github.com/moq-dev/moq/pull/5375)'s two-second retraction quarantine and
+[moq-dev/moq#5391](https://github.com/moq-dev/moq/pull/5391)'s same-clock queue dedup.
 #5375 measured residual stale revivals, so neither longer holds nor one passing
 mesh establish correctness. Separating reachability from claim freshness is
 the direction, not yet a proof. Retire mitigations only after the incident
@@ -591,7 +600,7 @@ broadcast stays live. Pin today's sequence beside the `residual_*` tests;
 the epochless Restart rule above decides what it becomes.
 
 Tests, time mocked: the handoff fixtures and sweep in `handoff.rs`;
-#4644's live-graph withdrawal and failover tests (the PR closed and
+[moq-dev/moq#4644](https://github.com/moq-dev/moq/pull/4644)'s live-graph withdrawal and failover tests (the PR closed and
 its branch is gone; fetch `refs/pull/4644/head`) as acceptance, run on the wip version; a
 link flap with many broadcasts behind one origin costs one ROUTE change per
 link; a ring of three where a stale neighbour cannot revive an ended
@@ -639,9 +648,40 @@ continues to rank feasible transit routes; report it. This may
 split at start (Rust and draft, then JS), as long as both land in one
 release.
 
+Decided 2026-10-27 (maintainer): [Grant subject](/quest/m1/cluster-routing/grant-subject.md)
+split out of this quest, and this quest builds on it. It carries the
+issuer-qualified subject the scoped keys above are named by, and fixes the
+reference model's `proved` exemption.
+
+Decided 2026-10-27 (maintainer): this quest deletes the epochless instance
+machinery in `rs/moq-net/src/model/origin.rs`: `Instance::Route(generation)`
+and its renewals, `restarted_since`, the held-restart Release for epochless
+routes, and Selection retirement, leaving Follow's same-epoch
+Update/Restart split as the only takeover rule. Once each origin is its own
+ANNOUNCE and the first hop pins the request to its identity, the first hop's
+route is the instance, so the per-hop renewal has nothing left to protect.
+An epochless change of serving route stays a Restart, including the
+same-origin next-hop change in the wire sketch above, and the routing
+contract's epochless fixtures keep passing. Minting an epoch for every route
+instead was tried and rejected
+([moq-dev/moq#6948](https://github.com/moq-dev/moq/pull/6948)): each relay
+mints at its own time, so mint order outranks cost, preference, and the
+local-broadcast tie and relays disagree on a pool path's winner, while
+ranking a minted epoch last keeps the renewal it was meant to delete.
+
+Decided 2026-10-27 (maintainer), from
+[grant subject](https://github.com/moq-dev/moq/pull/6992): decide what key
+identities are filed under for sessions allowed to publish part of the tree
+with no subject (public rules, mTLS certificates, or a third-party auth
+server), and whether the relay refuses such a grant when the client
+presented a token. Also from
+[moq-dev/moq#6947](https://github.com/moq-dev/moq/pull/6947): in `js/net`'s
+`origin.ts` a detached request stays on its own route instead of following
+the cheapest one; fix it with the route-selection rework here.
+
 ## Required
 
-- [Identity proof](/quest/m1/cluster-routing/identity.md) - proven own identities and subject-qualified forwarded ones
+- [Grant subject](/quest/m1/cluster-routing/grant-subject.md) - the issuer-qualified subject scoped identities are filed under
 
 ## Related
 

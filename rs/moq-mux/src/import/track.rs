@@ -1145,10 +1145,10 @@ mod tests {
 		let request = broadcast.reserve_track("video").unwrap();
 		let _video = Track::video(request, catalog.reserve(), VideoInit::new(VideoFormat::Vp8, Vec::new())).unwrap();
 
-		let audio = consumer.track("audio").unwrap().query().await.unwrap();
+		let audio = consumer.track("audio").unwrap().info().await.unwrap();
 		assert_eq!(audio.priority, PRIORITY.audio);
 
-		let video = consumer.track("video").unwrap().query().await.unwrap();
+		let video = consumer.track("video").unwrap().info().await.unwrap();
 		assert_eq!(video.priority, PRIORITY.video);
 	}
 

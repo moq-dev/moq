@@ -8,7 +8,7 @@
 //! datagram, and a QUIC close whose CONNECTION_CLOSE is the last thing a
 //! one-shot client ever sends.
 //!
-//! Unsupported local kernels skip loudly; MOQ_STRICT makes CI refuse them.
+//! Unsupported local kernels skip loudly; CI_STRICT makes CI refuse them.
 
 #![cfg(all(target_os = "linux", feature = "quic"))]
 
@@ -27,7 +27,7 @@ const CLOSE_REASON: &str = "done";
 fn worker() -> Option<Worker> {
 	match Worker::new(Config::default()) {
 		Ok(worker) => Some(worker),
-		Err(Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
+		Err(Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
 			eprintln!("skipping io_uring teardown test: {reason}");
 			None
 		}
@@ -78,8 +78,8 @@ fn server_config(certs: &support::Certs) -> quic::server::Config {
 	)
 }
 
-fn dial_config(peer: std::net::SocketAddr) -> quic::client::Config {
-	let mut config = quic::client::Config::new(peer, "localhost");
+fn dial_config() -> quic::client::Config {
+	let mut config = quic::client::Config::default();
 	config.alpn = vec![ALPN.to_string()];
 	config.verify = false;
 	config
@@ -131,7 +131,10 @@ fn a_published_close_has_already_left_the_client() {
 
 	client_worker
 		.block_on(async move {
-			let mut conn = endpoint.connect(&dial_config(server_addr)).await.expect("dial");
+			let mut conn = endpoint
+				.connect(&dial_config(), server_addr, "localhost")
+				.await
+				.expect("dial");
 			conn.close(CLOSE_CODE, CLOSE_REASON);
 			std::future::poll_fn(|cx| conn.poll_closed(cx)).await;
 		})

@@ -3,10 +3,9 @@ import { type AuthWire, decodePatterns, encodePatterns, type WireGrant, type Wir
 import { ProtocolViolation, SessionCode, SessionError, StreamCode, StreamError } from "../error.ts";
 import type * as Path from "../path.ts";
 import type { Reader, Stream, Writer } from "../stream.ts";
-import type { Session } from "./adapter.ts";
-import { supported } from "./auth_setup.ts";
 import * as Message from "./message.ts";
 import { nextMessage } from "./request_stream.ts";
+import type { Session } from "./session.ts";
 import type { IetfVersion } from "./version.ts";
 
 /**
@@ -21,16 +20,12 @@ import type { IetfVersion } from "./version.ts";
 /** The REQUEST_ERROR codes AUTH_ERROR carries. */
 const UNAUTHORIZED = 0x1;
 const NOT_SUPPORTED = 0x3;
+const MALFORMED_AUTH_TOKEN = 0x4;
 const EXPIRED_AUTH_TOKEN = 0x5;
-/** Draft-17 assigned it, the first draft this extension negotiates on. */
 const GOING_AWAY = 0x6;
 
 /** Longest AUTH_ERROR reason, in bytes, matching the Rust decoder. */
 const MAX_REASON = 8192;
-
-function guard(version: IetfVersion) {
-	if (!supported(version)) throw new Error("auth not supported for this version");
-}
 
 /**
  * AUTH: the first message on an Auth request stream, presenting a token. Each message
@@ -49,8 +44,7 @@ export class AuthMessage {
 		this.token = token;
 	}
 
-	async encode(w: Writer, version: IetfVersion): Promise<void> {
-		guard(version);
+	async encode(w: Writer, _version: IetfVersion): Promise<void> {
 		return Message.encode(
 			w,
 			async (wr) => {
@@ -62,8 +56,7 @@ export class AuthMessage {
 		);
 	}
 
-	static async decode(r: Reader, version: IetfVersion): Promise<AuthMessage> {
-		guard(version);
+	static async decode(r: Reader, _version: IetfVersion): Promise<AuthMessage> {
 		return Message.decode(r, async (rd) => {
 			const requestId = await rd.u62();
 			const size = await rd.u53();
@@ -87,8 +80,7 @@ export class AuthOk {
 		this.expires = expires;
 	}
 
-	async encode(w: Writer, version: IetfVersion): Promise<void> {
-		guard(version);
+	async encode(w: Writer, _version: IetfVersion): Promise<void> {
 		return Message.encode(
 			w,
 			async (wr) => {
@@ -105,8 +97,7 @@ export class AuthOk {
 		);
 	}
 
-	static async decode(r: Reader, version: IetfVersion): Promise<AuthOk> {
-		guard(version);
+	static async decode(r: Reader, _version: IetfVersion): Promise<AuthOk> {
 		return Message.decode(r, async (rd) => {
 			const publish = await decodePatterns(rd);
 			const subscribe = await decodePatterns(rd);
@@ -129,8 +120,7 @@ export class AuthError {
 		this.reason = reason;
 	}
 
-	async encode(w: Writer, version: IetfVersion): Promise<void> {
-		guard(version);
+	async encode(w: Writer, _version: IetfVersion): Promise<void> {
 		if (new TextEncoder().encode(this.reason).byteLength > MAX_REASON) {
 			throw new Error("AUTH_ERROR reason exceeds 8,192 bytes");
 		}
@@ -144,8 +134,7 @@ export class AuthError {
 		);
 	}
 
-	static async decode(r: Reader, version: IetfVersion): Promise<AuthError> {
-		guard(version);
+	static async decode(r: Reader, _version: IetfVersion): Promise<AuthError> {
 		return Message.decode(r, async (rd) => {
 			const code = await rd.u53();
 			if (code > 0xffffffff) throw new Error("AUTH_ERROR code exceeds 32 bits");
@@ -160,6 +149,9 @@ export class AuthError {
 	/** What the refusal means to the presenter, preserving an actionable expiry. */
 	toError(): Error {
 		if (this.code === NOT_SUPPORTED) return new Unsupported(this.reason);
+		if (this.code === MALFORMED_AUTH_TOKEN) {
+			return new SessionError(SessionCode.MalformedAuthToken, { reason: this.reason });
+		}
 		if (this.code === EXPIRED_AUTH_TOKEN) return new SessionError(SessionCode.Expired, { reason: this.reason });
 		if (this.code === GOING_AWAY) return new StreamError(StreamCode.GoingAway, { reason: this.reason });
 		return new SessionError(SessionCode.Unauthorized, { reason: this.reason });
@@ -204,7 +196,7 @@ export class IetfAuthWire implements AuthWire {
 	/** The type id is already consumed by the dispatcher. */
 	async accept(stream: Stream): Promise<Uint8Array> {
 		const msg = await AuthMessage.decode(stream.reader, this.#version);
-		this.#session.spendRequest(msg.requestId);
+		this.#session.checkRequestId(msg.requestId);
 		return msg.token;
 	}
 
@@ -222,9 +214,11 @@ export class IetfAuthWire implements AuthWire {
 		const wire =
 			code === SessionCode.Version || code === SessionCode.Unsupported
 				? NOT_SUPPORTED
-				: code === SessionCode.Expired
-					? EXPIRED_AUTH_TOKEN
-					: UNAUTHORIZED;
+				: code === SessionCode.MalformedAuthToken
+					? MALFORMED_AUTH_TOKEN
+					: code === SessionCode.Expired
+						? EXPIRED_AUTH_TOKEN
+						: UNAUTHORIZED;
 		await new AuthError(wire, reason).encode(stream.writer, this.#version);
 	}
 

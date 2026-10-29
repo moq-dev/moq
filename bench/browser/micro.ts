@@ -1,4 +1,4 @@
-/** Run frame and retained-history microbenchmarks in warmed Chromium pages. */
+/** Run networking microbenchmarks in warmed Chromium pages. */
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { chromium, type Page } from "playwright";
@@ -9,12 +9,13 @@ const { values, positionals } = parseArgs({
 	allowPositionals: true,
 	options: {
 		bench: { type: "string", default: "frames" },
-		out: { type: "string", default: ".scratch/browser-micro.json" },
+		out: { type: "string", default: ".tmp/browser-micro.json" },
 		rounds: { type: "string", default: "3" },
 	},
 });
 const benchmark = values.bench;
-if (benchmark !== "frames" && benchmark !== "drift") throw new Error("--bench must be frames or drift");
+if (benchmark !== "frames" && benchmark !== "drift" && benchmark !== "ledger")
+	throw new Error("--bench must be frames, drift, or ledger");
 const rounds = Number(values.rounds);
 if (!Number.isSafeInteger(rounds) || rounds < 1) throw new Error("--rounds must be a positive integer");
 const roots = new Map<string, string>();
@@ -29,7 +30,7 @@ for (const [name, root] of roots) {
 	const entry =
 		benchmark === "frames"
 			? resolve(root, "js/net/bench/frames.ts")
-			: resolve(import.meta.dir, "../../js/net/bench/drift.ts");
+			: resolve(import.meta.dir, `../../js/net/bench/${benchmark}.ts`);
 	const result = await Bun.build({
 		entrypoints: [entry],
 		target: "browser",
@@ -38,9 +39,13 @@ for (const [name, root] of roots) {
 			{
 				name: "repeat-microbenchmark",
 				setup(build) {
-					build.onLoad({ filter: /\/bench\/(frames|drift)\.ts$/ }, async ({ path }) => {
+					// The ledger is internal, so select it explicitly instead of a package export.
+					build.onResolve({ filter: /^\.\.\/src\/ledger\.ts$/ }, () => ({
+						path: resolve(root, "js/net/src/ledger.ts"),
+					}));
+					build.onLoad({ filter: /\/bench\/(frames|drift|ledger)\.ts$/ }, async ({ path }) => {
 						const source = await Bun.file(path).text();
-						if (benchmark === "drift")
+						if (benchmark !== "frames")
 							return { loader: "ts", contents: `${source}\nglobalThis.measure = run;` };
 						const marker =
 							'console.log("protocol,frame_bytes,chunk_bytes,frames_per_chunk,ns_per_frame,first_frame_us");';
@@ -104,7 +109,8 @@ try {
 			rows.set(variant, []);
 			await pages.get(variant)?.evaluate("globalThis.measure()");
 			const measured = rows.get(variant);
-			if (measured?.length !== (benchmark === "frames" ? 26 : 12)) throw new Error(`incomplete rows: ${variant}`);
+			if (measured?.length !== (benchmark === "frames" ? 26 : benchmark === "drift" ? 36 : 12))
+				throw new Error(`incomplete rows: ${variant}`);
 			samples.push({ round, variant, rows: measured });
 			await Bun.write(
 				values.out,

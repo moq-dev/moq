@@ -24,7 +24,7 @@ fn produce_origin(hop: u64) -> origin::Producer {
 /// Read events until the consumer syncs, returning the prefixes then announced.
 async fn read_until_synced(announced: &mut announce::Consumer) -> BTreeSet<String> {
 	let mut seen = BTreeSet::new();
-	while !announced.is_synced() {
+	while !announced.poll_synced(&moq_net::kio::Waiter::noop()).is_ready() {
 		let event = moq_clock::timeout(SETTLE, announced.next())
 			.await
 			.expect("synced in time")
@@ -72,12 +72,7 @@ async fn an_exact_boundary_catches_up_with_the_initial_set() {
 		"moq-lite-05",
 		"moq-lite-06",
 		"moq-lite-07-wip",
-		"moq-transport-16",
-		"moq-transport-17",
 		"moq-transport-18",
-		"moq-transport-19",
-		"moq-transport-20",
-		"moq-transport-21",
 		"moq-transport-22",
 	] {
 		assert_eq!(synced(version).await, both(), "{version}");
@@ -87,7 +82,7 @@ async fn an_exact_boundary_catches_up_with_the_initial_set() {
 /// Versions without a boundary still sync, so nothing waiting on it hangs.
 #[moq_clock::test]
 async fn a_best_effort_boundary_still_catches_up() {
-	for version in ["moq-lite-03", "moq-lite-04", "moq-transport-14", "moq-transport-15"] {
+	for version in ["moq-lite-03", "moq-lite-04"] {
 		synced(version).await;
 	}
 }
@@ -144,5 +139,5 @@ async fn a_cold_relay_syncs_then_forwards_upstream_routes_as_live() {
 	let _upstream = connect_mock(options).await;
 	let event = announced.next().await.unwrap();
 	assert!(matches!(event, announce::Event::Start(route) if route.prefix.as_str() == "room/cam"));
-	assert!(announced.is_synced());
+	assert!(announced.poll_synced(&moq_net::kio::Waiter::noop()).is_ready());
 }

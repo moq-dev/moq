@@ -68,7 +68,7 @@ async fn wire_sources(io_uring: bool) {
 					&& row.wire_tx > 0
 					&& row.wire_rx > 0
 					&& registry.snapshot().control().iter().any(|(_, class, bytes)| {
-						*class == moq_net::stats::Control::Announce && bytes.tx > 0 && bytes.rx > 0
+						*class == moq_net::stats::Message::Announce && bytes.tx > 0 && bytes.rx > 0
 					}) {
 					break row;
 				}
@@ -134,7 +134,7 @@ async fn native_sessions_supply_direct_wire_counters() {
 async fn uring_sessions_supply_direct_wire_counters() {
 	match moq_uring::Worker::new(Default::default()) {
 		Ok(_) => (),
-		Err(moq_uring::Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
+		Err(moq_uring::Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
 			eprintln!("skipping io_uring wire stats test: {reason}");
 			return;
 		}

@@ -6,8 +6,6 @@ import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { publint } from "publint";
 import { formatMessage } from "publint/utils";
-import { problems } from "./declarations.ts";
-import { undocumented } from "./docs.ts";
 
 console.log("✍️  Rewriting package.json...");
 const pkg = JSON.parse(readFileSync("package.json", "utf8"));
@@ -142,32 +140,6 @@ if (messages.length > 0) {
 		console.error(formatMessage(message, lintPkg));
 	}
 	process.exit(1);
-}
-
-console.log("🔍 Checking declaration imports...");
-const declarations = new Map<string, string>();
-for (const rel of new Bun.Glob("**/*.d.ts").scanSync("dist")) {
-	const file = resolve("dist", rel);
-	declarations.set(file, readFileSync(file, "utf8"));
-}
-const unresolved = problems(resolve("dist"), declarations);
-if (unresolved.length > 0) {
-	for (const problem of unresolved) console.error(problem);
-	process.exit(1);
-}
-
-if (published) {
-	console.log("🔍 Checking doc comments...");
-	const entrypoints = Object.values(pkg.exports ?? {}).flatMap((value) => {
-		const types = (value as { types?: string }).types;
-		return types ? [resolve("dist", types)] : [];
-	});
-	const missing = undocumented(resolve("dist"), declarations, entrypoints);
-	if (missing.length > 0) {
-		console.error("Add a /** */ doc comment to each exported symbol and public class member:");
-		for (const problem of missing) console.error(`  dist/${problem}`);
-		process.exit(1);
-	}
 }
 
 console.log("📦 Package built successfully in dist/");

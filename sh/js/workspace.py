@@ -138,18 +138,29 @@ def run(action, plan):
         filters = [f"--filter={name}" for name, package in packages.items()
                    if verb in package["manifest"].get("scripts", {})]
         if filters:
-            command("bun", "run", *filters, "--elide-lines=0", verb)
+            concurrency = [] if os.environ.get("GITHUB_ACTIONS") == "true" else ["--sequential"]
+            command("bun", "run", *concurrency, *filters, "--elide-lines=0", verb)
+
+    def reports():
+        # Each published package's API reports against its fresh build; `just fix` sets
+        # MOQ_API_REPORT=update to rewrite them. No package build runs this, so a consumer
+        # building one from source needs none of the report toolchain.
+        directories = [package["directory"] for package in packages.values()
+                       if "release" in package["manifest"].get("scripts", {})]
+        if directories:
+            command("bun", "js/common/api.ts", "check", *directories)
 
     command("bun", "install", "--frozen-lockfile")
     if action == "test":
         command("python3", "sh/js/playwright.test.py")
-        command("bun", "test", "js/common/declarations.test.ts", "js/common/deps.test.ts",
-                "js/common/docs.test.ts", "js/common/worklet.test.ts")
+        command("bun", "test", "js/common/api.test.ts", "js/common/deps.test.ts", "js/common/worklet.test.ts",
+                "js/common/release.test.ts")
         scripts("test")
         return
     if action == "build":
         # No build script reads the WASM bindings, and `just js wasm` builds them.
         scripts("build")
+        reports()
         return
 
     missing = unmapped(ROOT, plan["inputs"])
@@ -190,6 +201,7 @@ def run(action, plan):
     command("bun", "biome", "check", "--error-on-warnings", *(["js", "bench/browser", "test", "doc", "demo"] if plan["all"] else
                                        [p["directory"] for p in packages.values()] + ["js/common"]))
     scripts("build")
+    reports()
     for name in ("@moq/watch", "@moq/publish"):
         if name in packages:
             path = "./" + packages[name]["directory"] + "/dist/index.js"
@@ -205,6 +217,9 @@ def main():
     if action == "plan":
         print(json.dumps(plan, default=sorted))
     else:
+        if plan["packages"] and os.environ.get("GITHUB_ACTIONS") != "true" and os.environ.get("LOCAL_SUPERVISED") != "1":
+            os.execvp("bash", ["bash", str(ROOT / "sh/local.sh"),
+                               sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]])
         started = time.monotonic()
         run(action, plan)
         print(f"js: {action} finished in {time.monotonic() - started:.2f}s", flush=True)

@@ -5,15 +5,14 @@
 //! resolution, bitrates, and other metadata, plus the `json` and `binary` sections
 //! listing the data tracks that aren't media.
 
-mod archive;
 mod audio;
 mod binary;
 mod clock;
-mod compression;
 mod consumer;
 mod container;
 mod echo;
 mod hex;
+mod hls;
 mod json;
 mod m2ts;
 mod millis;
@@ -25,14 +24,13 @@ mod stats;
 mod text;
 mod video;
 
-pub use archive::*;
 pub use audio::*;
 pub use binary::*;
 pub use clock::*;
-pub use compression::*;
 pub use consumer::*;
 pub use container::*;
 pub use echo::*;
+pub use hls::*;
 pub use json::*;
 pub use m2ts::*;
 pub use mode::*;

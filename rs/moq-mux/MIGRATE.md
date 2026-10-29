@@ -4,6 +4,61 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Compression moves to the track
+
+`catalog.json.z` is gone: `catalog::Producer` publishes one `catalog.json` with `compress: true` (the MSF `catalog` stays uncompressed), and HLS record tracks are compressed too.
+`CatalogFormat::HangZ` and `catalog::hang::Consumer::compressed` are removed; read `CatalogFormat::Hang` with `Consumer::new`, which reads a compressed track like a plain one.
+`json::Config::compression` and `with_compression` are removed: create the track with `moq_net::track::Info::default().with_compress(true)` instead. `Error::UnsupportedCompression` and `Error::Flate` are gone with them.
+The `binary` module and `catalog::Producer::binary_snapshot` and `binary_stream` are deleted, along with the moq-flate dependency: publish opaque bytes on a plain track, or JSON through `json_snapshot` and `json_stream`.
+
+### A decoder identity change publishes a new track ([#7110](https://github.com/moq-dev/moq/pull/7110))
+
+A rendition never changes its identity in place: `codec`, `description`, `container`, `display_aspect_width`/`display_aspect_height`, and `interlaced` for video, and `codec`, `description`, `container`, `sample_rate`, and `channel_count` for audio (see `hang::catalog::VideoConfig::same_identity`).
+`container::Producer::set`, `replace`, and `stage` refuse such a change with `Error::IdentityChanged`; every other field still updates in place.
+The codec importers (H.264, H.265, AV1, VP8, VP9) publish a stream whose identity changes, such as a new SPS profile or level, or a new avcC, under the next free `<name>/<n>` and finish the old track.
+TS AAC, MP2, AC-3, and E-AC-3, and FLV in-band audio start a new track when a frame header changes the format instead of ignoring it.
+Read `name()`, `demand()`, and `track()` from the importer after each write rather than caching them.
+An av1C without a sequence header in its `configOBUs` no longer publishes a rendition: the stream's first sequence header does.
+
+### `moq_net::Path` has no lifetime
+
+`Source::resolve_reference` takes `Option<&Relative>` and returns `Option<Path>`, `ts::Programs::new` takes `impl Into<moq_net::Path>`, so pass a `Path`, and `follow::Instances::new` takes `impl TryInto<moq_net::Path, Error: Into<moq_net::Error>>`. Replace `PathOwned` with `Path` and drop `to_owned()` and `into_owned()` on paths. See moq-net's migration for the rest.
+
+### MKV and FLV import refuse malformed tracks and unsupported codecs (#6908)
+
+MKV import fails on a malformed track, a duplicate or zero `TrackNumber`, a zero `TimestampScale`, a block timestamp outside the `u64` timeline, an unsupported codec or subtitle encoding, or input truncated at `finish()`, instead of skipping the track or wrapping the timestamp. Input after `finish()` fails with `mkv::Error::TracksAfterFinish`.
+FLV import fails with `Error::UnknownFormat` on an unsupported legacy or enhanced codec instead of dropping its tags.
+Supply valid metadata and supported codecs, or transcode or remove unsupported media tracks before import. Tracks of an unsupported role (such as MKV buttons) are still skipped.
+
+### Rate following can disable a simulcast rung
+
+`rate::Follower::next` and `poll_next` return a `rate::Target`, and `rate::Control::update` returns `Option<rate::Target>`: `Target::Enabled(rate)` is the bitrate to encode at, and `Target::Disabled` means stop encoding and advertise the rendition disabled.
+`rate::Policy` gains `lower`, the next lower rendition's ceiling, which only a rendition encoded beside lower ones sets; add `lower: None` to a struct literal, or build it with `Policy::new`.
+Match `Target::Enabled(rate)` where you took the rate before. A policy without `lower` never yields `Target::Disabled`.
+
+### Repeated MSF track names and PMT PIDs keep the last entry
+
+`catalog::msf::Error::DuplicateTrackName` is gone. An MSF catalog naming a track twice keeps the later track as that rendition, and a hang catalog projected to MSF advertises one track per namespace and name, the later rendition's.
+A TS PMT listing a PID twice routes it by the later entry instead of failing the import.
+Delete matches on `DuplicateTrackName`.
+
+### HLS records replace timelines
+
+The `timeline` module is replaced by `hls`, and records are still published by default.
+`catalog::Config::with_timeline(config)` is `with_hls(config)`, and `with_hls(None)` publishes none.
+`catalog::Reserved::with_timeline_hint` is `with_hls_hint`, and `catalog::Producer::timeline()` is gone.
+Each video and audio rendition advertises its own `hls` field and `<track>.hls` record track, cut at group boundaries; untimed and data tracks get none.
+Read records with `hls::Consumer::subscribe(&broadcast, &hls)`, whose `Event::Push` carries an `hls::Entry`, or publish your own with `hls::Producer`.
+`Config::duration_min` is `hls::Config::duration`, `with_duration_min` is `with_duration`, and `DEFAULT_DURATION_MIN` is `DEFAULT_DURATION`.
+It is now the spacing of a pts grid rather than a floor: a group starts a segment when its pts falls in a later multiple of it than the previous group's, so a segment may be shorter.
+Each rendition cuts and numbers its own segments, so they line up across renditions wherever keyframes share timestamps.
+`container::fmp4::Muxer::fragment` takes a third argument, where the content ends, which times the last sample when neither its codec nor a duration marker does; pass `None` to keep the old behavior.
+
+### JSON snapshot encoder options move to `json::Options`
+
+`json::Config::deltas` and `with_deltas` move to the new `json::Options`, which `catalog::Producer::json_snapshot` takes as a third argument, so a custom catalog entry can set them too.
+Pass `json::Options::default()` where you relied on the default, or `json::Options::default().with_deltas(false)` where you called `Config::with_deltas(false)`.
+
 ### `Programs::finish` returns the program broadcasts
 
 `Programs::finish` now returns each program's `broadcast::Producer` instead of `()`.
@@ -102,20 +157,10 @@ Recordings published with `pes` framing no longer export; import their source ag
 `container::fmp4::Wire::new` returns `Result<Wire>`, as `Wire::from_init` already did, and refuses any other handler instead of treating it as data.
 Handle the error from `Wire::new`.
 
-### Timeline durations are hints (#5715)
-
-`timeline::Config::duration_max`, `with_duration_max`, and `DEFAULT_DURATION_MAX` are gone; set `duration_hint` with `with_duration_hint`, the expected record duration such as the GOP, and the split ceiling follows from it.
-`DEFAULT_DURATION_MIN` is 4 s instead of 2 s, so set `with_duration_min` to keep the shorter records.
-
 ### The catalog consumer is opaque (#5630)
 
 Construct `catalog::Consumer` with `Consumer::new(broadcast, format).await`, or convert a `catalog::hang::Consumer` with `.into()`, then read it through `catalog::Stream`.
 Its `Hang`, `Msf`, and `Closed` variants and `catalog::msf::Consumer::track` are private.
-
-### Timelines record untimed tracks (#5720)
-
-`timeline::Segmenter::frame` takes `pts: impl Into<Option<Timestamp>>`, so existing callers compile.
-A segmenter fed the wrong timedness for its track fails with `Error::TimelineTiming` or `Error::TimelineUntimed`.
 
 ### An unset host clock publishes no wall mapping (#5429)
 

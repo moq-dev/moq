@@ -76,10 +76,10 @@ public:
 	};
 	bool TryGetVideoRate(VideoRate *out);
 
-	// Present a fresh publish token on the connected session without reconnecting,
-	// replacing the one presented here before once the relay accepts it. False when
-	// there is no session yet. The outcome is logged, and a refusal is kept for
-	// TokenRefusal(); a session without in-band AUTH refuses it.
+	// Replace the session's tokens with a fresh publish token, presented without
+	// reconnecting and on every reconnect; the one it replaces is withdrawn once the
+	// relay answers. False when there is no session yet. The answer is logged, and a
+	// refusal is kept for TokenRefusal(); a session without in-band AUTH refuses it.
 	bool PresentToken(const std::string &token);
 	// Why the relay refused the token PresentToken() last presented, or empty.
 	std::string TokenRefusal();
@@ -104,10 +104,7 @@ private:
 		bool connected = false;
 		// False while the session is between reconnects.
 		bool live = false;
-		// The latest token PresentToken() got accepted, presented on every reconnect
-		// until it is replaced or the attempt is dropped, and the call presenting the
-		// next one.
-		std::shared_ptr<moq::AuthToken> token;
+		// The wait for the relay's answer to the token PresentToken() set last.
 		std::optional<moq::Continuation> presenting;
 	};
 
@@ -194,7 +191,7 @@ private:
 	std::map<obs_encoder_t *, Track> audio_tracks;
 	// The session's allocator once it connects. It survives reconnects: grants
 	// read empty while disconnected and resume on the next connection.
-	std::shared_ptr<moq::Bandwidth> bandwidth;
+	std::shared_ptr<moq::Allocator> allocator;
 
 	// `closed()` of retired sessions still draining, which the destructor waits
 	// out. Guarded by signal_mutex.

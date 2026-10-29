@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use moq_net::transport::poll::{RecvStream as _, SendOptions, SendStream as _, Session as _};
-use moq_quic::coding::Codec;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::sync::watch;
 
@@ -128,9 +127,9 @@ async fn every_version_establishes_and_negotiates_in_band() {
 async fn reading_returns_flow_control_credit() {
 	for &version in Version::ALL {
 		let mut small = config(version);
-		small.receive_window = 64 * 1024;
-		small.stream_receive_window = 16 * 1024;
-		let (mut client, mut server) = pair(config(version), small).await;
+		small.limits.receive_window = std::num::NonZeroU64::new(64 * 1024);
+		small.limits.stream_receive_window = std::num::NonZeroU64::new(16 * 1024);
+		let (client, server) = pair(config(version), small).await;
 
 		let data = payload(1 << 20, 3);
 		let mut send = client.open_uni(SendOptions::default()).await.unwrap();
@@ -152,7 +151,7 @@ async fn reading_returns_flow_control_credit() {
 #[tokio::test(start_paused = true)]
 async fn bidirectional_streams_carry_both_halves_and_fins() {
 	for &version in Version::ALL {
-		let (mut client, mut server) = pair(config(version), config(version)).await;
+		let (client, server) = pair(config(version), config(version)).await;
 
 		let (mut send, mut recv) = client.open_bi(SendOptions::default()).await.unwrap();
 		write_all(&mut send, Bytes::from_static(b"ping")).await;
@@ -171,7 +170,7 @@ async fn bidirectional_streams_carry_both_halves_and_fins() {
 
 #[tokio::test(start_paused = true)]
 async fn resets_and_stops_carry_their_codes() {
-	let (mut client, mut server) = pair(config(Version::QMux02), config(Version::QMux02)).await;
+	let (client, server) = pair(config(Version::QMux02), config(Version::QMux02)).await;
 
 	let mut send = client.open_uni(SendOptions::default()).await.unwrap();
 	write_all(&mut send, Bytes::from_static(b"partial")).await;
@@ -201,8 +200,8 @@ async fn resets_and_stops_carry_their_codes() {
 #[tokio::test(start_paused = true)]
 async fn the_peer_limits_concurrent_streams() {
 	let mut server = config(Version::QMux02);
-	server.max_streams_uni = 1;
-	let (mut client, mut server) = pair(config(Version::QMux02), server).await;
+	server.limits.max_streams = std::num::NonZeroU64::new(1);
+	let (client, server) = pair(config(Version::QMux02), server).await;
 
 	let mut first = client.open_uni(SendOptions::default()).await.unwrap();
 	let mut opening = std::pin::pin!(client.open_uni(SendOptions::default()));
@@ -221,18 +220,18 @@ async fn the_peer_limits_concurrent_streams() {
 #[tokio::test(start_paused = true)]
 async fn request_credit_is_refused_without_parking_an_open() {
 	let mut server_config = config(Version::QMux02);
-	server_config.max_streams_bidi = 1;
-	let (mut client, mut server) = pair(config(Version::QMux02), server_config).await;
-	let mut cx = Context::from_waker(std::task::Waker::noop());
-	let Poll::Ready(Ok(Some((mut send, mut recv)))) = client.poll_open_request(&mut cx, Default::default()) else {
+	server_config.limits.max_streams = std::num::NonZeroU64::new(1);
+	let (client, server) = pair(config(Version::QMux02), server_config).await;
+	let waiter = &kio::Waiter::noop();
+	let Poll::Ready(Ok(Some((mut send, mut recv)))) = client.poll_open_request(waiter, Default::default()) else {
 		panic!("initial request has credit");
 	};
 	assert!(matches!(
-		client.poll_open_request(&mut cx, Default::default()),
+		client.poll_open_request(waiter, Default::default()),
 		Poll::Ready(Ok(None))
 	));
 	assert!(matches!(
-		client.poll_open_request(&mut cx, Default::default()),
+		client.poll_open_request(waiter, Default::default()),
 		Poll::Ready(Ok(None))
 	));
 	send.finish().unwrap();
@@ -246,7 +245,7 @@ async fn request_credit_is_refused_without_parking_an_open() {
 		.await
 		.expect("only one fresh open consumes returned credit");
 	assert!(matches!(
-		client.poll_open_request(&mut cx, Default::default()),
+		client.poll_open_request(waiter, Default::default()),
 		Poll::Ready(Ok(None))
 	));
 }
@@ -255,10 +254,8 @@ async fn request_credit_is_refused_without_parking_an_open() {
 async fn a_request_before_the_handshake_waits_for_credit() {
 	let (client, server) = tokio::io::duplex(PIPE);
 	// Started like a WebSocket client, without waiting for the server's parameters.
-	let mut client = Session::new(Stream::new(client), Side::Client, config(Version::QMux02)).unwrap();
-	let mut opening = std::pin::pin!(std::future::poll_fn(
-		|cx| client.poll_open_request(cx, Default::default())
-	));
+	let client = Session::new(Stream::new(client), Side::Client, config(Version::QMux02)).unwrap();
+	let mut opening = std::pin::pin!(kio::wait(|waiter| client.poll_open_request(waiter, Default::default())));
 	assert!(
 		futures_poll_once(&mut opening).await.is_none(),
 		"no credit is known before the handshake"
@@ -285,14 +282,14 @@ async fn futures_poll_once<F: std::future::Future + Unpin>(future: &mut F) -> Op
 
 #[tokio::test(start_paused = true)]
 async fn datagrams_need_records() {
-	let (mut client, mut server) = pair(config(Version::QMux02), config(Version::QMux02)).await;
+	let (client, server) = pair(config(Version::QMux02), config(Version::QMux02)).await;
 	assert!(client.max_datagram_size() > 0);
 	client
 		.send_datagram(Bytes::from_static(b"hello"), SendOptions::default())
 		.unwrap();
 	assert_eq!(server.recv_datagram().await.unwrap(), "hello");
 
-	let (mut client, _server) = pair(config(Version::QMux00), config(Version::QMux00)).await;
+	let (client, _server) = pair(config(Version::QMux00), config(Version::QMux00)).await;
 	assert_eq!(client.max_datagram_size(), 0);
 	assert!(matches!(
 		client.send_datagram(Bytes::from_static(b"hello"), SendOptions::default()),
@@ -313,7 +310,7 @@ async fn websocket_keep_alive_needs_room_for_a_pong() {
 		let (socket, _peer) = tokio::io::duplex(PIPE);
 		let ws = WebSocketStream::from_raw_socket(socket, Role::Client, None).await;
 		let keep_alive = KeepAlive::new(Duration::from_secs(interval), Duration::from_secs(timeout));
-		let result = WsTransport::new(ws, Binding::Uri).with_keep_alive(keep_alive);
+		let result = WsTransport::new(ws, Address::Uri).with_keep_alive(keep_alive);
 		assert!(
 			matches!(result, Err(Error::InvalidConfig(_))),
 			"{interval}s / {timeout}s"
@@ -353,11 +350,11 @@ async fn websocket_keep_alive_runs_during_continuous_output() {
 	let mut config = config(Version::QMux02);
 	config.rtt_interval = None;
 	config.idle_timeout = None;
-	let a = WsTransport::new(a, Binding::Uri)
+	let a = WsTransport::new(a, Address::Uri)
 		.with_keep_alive(KeepAlive::new(Duration::from_millis(10), Duration::from_millis(500)))
 		.unwrap();
-	let b = WsTransport::new(b, Binding::Uri);
-	let mut sender = Session::new(a, Side::Client, config.clone()).unwrap();
+	let b = WsTransport::new(b, Address::Uri);
+	let sender = Session::new(a, Side::Client, config.clone()).unwrap();
 	let _receiver = Session::new(b, Side::Server, config).unwrap();
 	while sender.max_datagram_size() == 0 {
 		moq_clock::sleep(Duration::from_millis(1)).await;
@@ -379,10 +376,10 @@ async fn websocket_keep_alive_runs_during_continuous_output() {
 #[tokio::test(start_paused = true)]
 async fn an_application_close_is_delivered() {
 	for &version in Version::ALL {
-		let (mut client, mut server) = pair(config(version), config(version)).await;
+		let (client, server) = pair(config(version), config(version)).await;
 		client.close(42, "bye");
 		// Dropping the handle straight after must not lose the close.
-		let mut watcher = client.clone();
+		let watcher = client.clone();
 		drop(client);
 
 		for err in [server.closed().await, watcher.closed().await] {
@@ -398,7 +395,7 @@ async fn an_application_close_is_delivered() {
 /// hanging.
 #[tokio::test(start_paused = true)]
 async fn a_close_ends_an_unfinished_read_after_its_data() {
-	let (mut client, mut server) = pair(config(Version::QMux02), config(Version::QMux02)).await;
+	let (client, server) = pair(config(Version::QMux02), config(Version::QMux02)).await;
 	let mut send = client.open_uni(SendOptions::default()).await.unwrap();
 	write_all(&mut send, Bytes::from_static(b"tail")).await;
 	let mut recv = server.accept_uni().await.unwrap();
@@ -424,7 +421,7 @@ async fn a_close_ends_an_unfinished_read_after_its_data() {
 
 #[tokio::test(start_paused = true)]
 async fn dropping_the_last_handle_closes_the_session() {
-	let (client, mut server) = pair(config(Version::QMux01), config(Version::QMux01)).await;
+	let (client, server) = pair(config(Version::QMux01), config(Version::QMux01)).await;
 	drop(client);
 	let err = server.closed().await;
 	assert!(matches!(err, Error::ConnectionClosed { code: 0, .. }), "got {err:?}");
@@ -435,7 +432,7 @@ async fn dropping_the_last_handle_closes_the_session() {
 #[tokio::test(start_paused = true)]
 async fn a_close_behind_a_stalled_peer_is_bounded() {
 	let (client, server, up, _down) = link();
-	let (mut client, _server) = establish(client, server, config(Version::QMux02), config(Version::QMux02)).await;
+	let (client, _server) = establish(client, server, config(Version::QMux02), config(Version::QMux02)).await;
 
 	up.send(Flow::Stall).unwrap();
 	// Fill the pipe so the writer is mid-write when the close comes.
@@ -457,7 +454,7 @@ async fn a_close_behind_a_stalled_peer_is_bounded() {
 #[tokio::test(start_paused = true)]
 async fn a_silent_peer_times_out() {
 	let (client, server, up, down) = link();
-	let (mut client, mut server) = establish(client, server, config(Version::QMux02), config(Version::QMux02)).await;
+	let (client, server) = establish(client, server, config(Version::QMux02), config(Version::QMux02)).await;
 
 	up.send(Flow::Drop).unwrap();
 	down.send(Flow::Drop).unwrap();
@@ -470,7 +467,7 @@ async fn a_silent_peer_times_out() {
 /// Pings keep a quiet but present peer alive past the idle timeout.
 #[tokio::test(start_paused = true)]
 async fn an_idle_session_stays_up() {
-	let (mut client, _server) = pair(config(Version::QMux01), config(Version::QMux01)).await;
+	let (client, _server) = pair(config(Version::QMux01), config(Version::QMux01)).await;
 	let closed = moq_clock::timeout(Duration::from_secs(120), client.closed()).await;
 	assert!(closed.is_err(), "closed with {closed:?}");
 }
@@ -494,7 +491,7 @@ async fn an_oversized_record_is_a_protocol_violation() {
 			let (client, mut raw) = tokio::io::duplex(PIPE);
 			let mut config = config(version);
 			config.max_record_size = max_record_size;
-			let mut session = Session::new(Stream::new(client), Side::Client, config).unwrap();
+			let session = Session::new(Stream::new(client), Side::Client, config).unwrap();
 			// A full-sized padding record proves that the configured limit, including
 			// one larger than the default, is the reader's actual boundary.
 			let mut record = BytesMut::new();
@@ -517,7 +514,7 @@ async fn an_oversized_record_is_a_protocol_violation() {
 
 #[tokio::test(start_paused = true)]
 async fn the_wire_counters_track_both_directions() {
-	let (mut client, mut server) = pair(config(Version::QMux02), config(Version::QMux02)).await;
+	let (client, server) = pair(config(Version::QMux02), config(Version::QMux02)).await;
 	let mut send = client.open_uni(SendOptions::default()).await.unwrap();
 	write_all(&mut send, payload(100_000, 1)).await;
 	send.finish().unwrap();
@@ -538,7 +535,7 @@ async fn an_application_close_drains_the_peer() {
 	for &version in Version::ALL {
 		let (client, mut raw) = tokio::io::duplex(64);
 		let config = config(version);
-		let mut session = Session::new(Stream::new(client), Side::Client, config).unwrap();
+		let session = Session::new(Stream::new(client), Side::Client, config).unwrap();
 		session.close(42, "bye");
 
 		let mut sent = Vec::new();

@@ -7,7 +7,7 @@ use std::task::Poll;
 
 /// The publisher instances serving a broadcast, as each comes online, takes over, and goes.
 ///
-/// Built on [`announced_broadcast`](moq_net::origin::Consumer::announced_broadcast). Create one
+/// Built on [`follow`](moq_net::origin::Consumer::follow). Create one
 /// with [`Source::follow`](crate::Source::follow) for a catalog reference, or [`Instances::new`]
 /// for a path.
 pub struct Instances {
@@ -20,7 +20,7 @@ pub struct Instances {
 
 enum Feed {
 	/// Every instance announced at a path.
-	Announced(Box<moq_net::origin::AnnouncedBroadcast>),
+	Announced(Box<moq_net::origin::Following>),
 	/// One instance, handed out once.
 	Fixed(Option<moq_net::broadcast::Consumer>),
 }
@@ -41,10 +41,10 @@ impl Instances {
 	/// [`Source`](crate::Source) for each instance.
 	pub fn new(
 		origin: &moq_net::origin::Consumer,
-		path: impl moq_net::AsPath,
+		path: impl TryInto<moq_net::Path, Error: Into<moq_net::Error>>,
 		epoch: Option<&moq_net::Epoch>,
 	) -> crate::Result<Self> {
-		let announced = origin.announced_broadcast(path, None)?;
+		let announced = origin.follow(path, None)?;
 		Ok(Self::with(Feed::Announced(Box::new(announced)), epoch))
 	}
 
@@ -156,7 +156,7 @@ mod tests {
 		let _catalog = origin.publish("a/pub", Default::default()).unwrap();
 		settle().await;
 		let source = resolved(&origin, "a/pub").await;
-		let mut follow = source.follow(Some(&Relative::new("./source")), None).unwrap();
+		let mut follow = source.follow(Some(&Relative::new("./source").unwrap()), None).unwrap();
 		quiet(&mut follow).await;
 
 		let first = origin.publish("a/source", Default::default()).unwrap();
@@ -182,7 +182,7 @@ mod tests {
 		let _old = origin.publish("a/source", route(&old_epoch)).unwrap();
 		settle().await;
 		let source = resolved(&origin, "a/pub").await;
-		let rel = Relative::new("./source");
+		let rel = Relative::new("./source").unwrap();
 		let mut any = source.follow(Some(&rel), None).unwrap();
 		let mut named = source.follow(Some(&rel), Some(&old_epoch)).unwrap();
 		let old = followed(&mut any).await.unwrap();
@@ -212,7 +212,7 @@ mod tests {
 		settle().await;
 		let source = resolved(&origin, "a/pub").await;
 		let mut named = source
-			.follow(Some(&Relative::new("./source")), Some(&moq_net::Epoch::mint()))
+			.follow(Some(&Relative::new("./source").unwrap()), Some(&moq_net::Epoch::mint()))
 			.unwrap();
 		let _sibling = origin.publish("a/source", Default::default()).unwrap();
 		assert!(followed(&mut named).await.is_some());
@@ -225,7 +225,7 @@ mod tests {
 		let old = origin.publish("a/pub", Default::default()).unwrap();
 		settle().await;
 		let source = resolved(&origin, "a/pub").await;
-		let mut follow = source.follow(Some(&Relative::new("./pub")), None).unwrap();
+		let mut follow = source.follow(Some(&Relative::new("./pub").unwrap()), None).unwrap();
 		assert!(followed(&mut follow).await.unwrap().is_clone(&source.broadcast()));
 
 		let _new = origin.publish("a/pub", Default::default()).unwrap();

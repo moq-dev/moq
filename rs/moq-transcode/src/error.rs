@@ -32,7 +32,7 @@ pub enum Error {
 
 	/// The source catalog declared an invalid frame rate.
 	#[error(transparent)]
-	Framerate(#[from] moq_video::RateError),
+	Framerate(#[from] moq_video::FrameRateError),
 
 	/// Timestamp overflow converting to the moq microsecond timescale.
 	#[error(transparent)]

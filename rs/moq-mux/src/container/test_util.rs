@@ -109,7 +109,7 @@ pub(crate) struct Moving {
 	/// `other`'s track `a`.
 	pub(crate) other: crate::container::Producer<crate::catalog::hang::Container>,
 	origin: moq_net::origin::Producer,
-	_broadcasts: [moq_net::broadcast::Producer; 2],
+	_broadcasts: [moq_net::origin::Publication; 2],
 }
 
 impl Moving {
@@ -119,9 +119,10 @@ impl Moving {
 
 	pub(crate) fn new() -> Self {
 		let origin = crate::source::produce_origin();
-		let mut live = origin.publish("live", Default::default()).unwrap();
-		let mut other = origin.publish("other", Default::default()).unwrap();
-		let catalog = crate::catalog::Producer::new(&mut live, crate::catalog::Config::default()).unwrap();
+		let live = origin.publish("live", Default::default()).unwrap();
+		let other = origin.publish("other", Default::default()).unwrap();
+		let catalog =
+			crate::catalog::Producer::new(&mut live.broadcast().clone(), crate::catalog::Config::default()).unwrap();
 		let track = |broadcast: &mut moq_net::broadcast::Producer, name: &str| {
 			let info = hang::container::track_info(hang::catalog::PRIORITY.video);
 			let track = broadcast.create_track(name, info).unwrap();
@@ -129,9 +130,9 @@ impl Moving {
 			crate::container::Producer::new(track, wire)
 		};
 		let mut moving = Self {
-			a: track(&mut live, "a"),
-			b: track(&mut live, "b"),
-			other: track(&mut other, "a"),
+			a: track(&mut live.broadcast().clone(), "a"),
+			b: track(&mut live.broadcast().clone(), "b"),
+			other: track(&mut other.broadcast().clone(), "a"),
 			catalog,
 			origin,
 			_broadcasts: [live, other],
@@ -171,7 +172,7 @@ impl Moving {
 		config.description =
 			Some(crate::codec::h264::build_avcc(&[Bytes::from_static(sps)], &[Bytes::from_static(PPS)]).unwrap());
 		config.track = Some(track.to_string());
-		config.broadcast = broadcast.map(|broadcast| moq_net::path::Relative::new(broadcast).into_owned());
+		config.broadcast = broadcast.map(|rel| moq_net::path::Relative::new(rel).unwrap());
 		config
 	}
 }
@@ -348,7 +349,10 @@ impl Link {
 		let mut config = memory::Config::default();
 		config.protocol = Some(version.alpn().to_string());
 		let (client_transport, server_transport) = memory::pair(config);
-		let gate = Gate(std::sync::Arc::new(std::sync::Mutex::new((uni, None))));
+		let gate = Gate(std::sync::Arc::new(std::sync::Mutex::new((
+			uni,
+			kio::WaiterList::new(),
+		))));
 		let server_transport = Gated {
 			inner: server_transport,
 			gate: gate.clone(),
@@ -394,7 +398,10 @@ impl Link {
 		let mut config = memory::Config::default();
 		config.protocol = Some(version.alpn().to_string());
 		let (client_transport, server_transport) = memory::pair(config);
-		let gate = Gate(std::sync::Arc::new(std::sync::Mutex::new((usize::MAX, None))));
+		let gate = Gate(std::sync::Arc::new(std::sync::Mutex::new((
+			usize::MAX,
+			kio::WaiterList::new(),
+		))));
 		let server_transport = Gated {
 			inner: server_transport,
 			gate: gate.clone(),
@@ -434,15 +441,13 @@ impl Link {
 	pub(crate) fn open(&self) {
 		let mut gate = self.gate.0.lock().unwrap();
 		gate.0 = usize::MAX;
-		if let Some(waker) = gate.1.take() {
-			waker.wake();
-		}
+		gate.1.wake();
 	}
 }
 
-/// The uni streams a [`Gated`] session may still accept, and its accept's waker.
+/// The uni streams a [`Gated`] session may still accept, and the accepts parked on it.
 #[derive(Clone)]
-struct Gate(std::sync::Arc<std::sync::Mutex<(usize, Option<std::task::Waker>)>>);
+struct Gate(std::sync::Arc<std::sync::Mutex<(usize, kio::WaiterList)>>);
 
 /// A memory session that accepts uni streams only while its [`Gate`] allows.
 #[derive(Clone)]
@@ -458,74 +463,71 @@ impl moq_net::transport::poll::Session for Gated {
 	type RecvStream = <moq_net::transport::memory::Session as moq_net::transport::poll::Session>::RecvStream;
 	type Error = <moq_net::transport::memory::Session as moq_net::transport::poll::Session>::Error;
 
-	fn poll_accept_uni(
-		&mut self,
-		cx: &mut std::task::Context<'_>,
-	) -> std::task::Poll<Result<Self::RecvStream, Self::Error>> {
+	fn poll_accept_uni(&self, waiter: &kio::Waiter) -> std::task::Poll<Result<Self::RecvStream, Self::Error>> {
 		{
 			let mut gate = self.gate.0.lock().unwrap();
 			if gate.0 == 0 {
-				gate.1 = Some(cx.waker().clone());
+				waiter.register(&mut gate.1);
 				return std::task::Poll::Pending;
 			}
 		}
-		let accepted = std::task::ready!(self.inner.poll_accept_uni(cx));
+		let accepted = std::task::ready!(self.inner.poll_accept_uni(waiter));
 		let mut gate = self.gate.0.lock().unwrap();
 		gate.0 = gate.0.saturating_sub(1);
 		std::task::Poll::Ready(accepted)
 	}
 
 	fn poll_accept_bi(
-		&mut self,
-		cx: &mut std::task::Context<'_>,
+		&self,
+		waiter: &kio::Waiter,
 	) -> std::task::Poll<Result<moq_net::transport::poll::BiStreams<Self>, Self::Error>> {
 		if !self.answers {
 			return std::task::Poll::Pending;
 		}
-		self.inner.poll_accept_bi(cx)
+		self.inner.poll_accept_bi(waiter)
 	}
 
 	fn poll_open_uni(
-		&mut self,
-		cx: &mut std::task::Context<'_>,
+		&self,
+		waiter: &kio::Waiter,
 		options: moq_net::transport::poll::SendOptions<'_, moq_net::transport::poll::Ungrouped>,
 	) -> std::task::Poll<Result<Self::SendStream, Self::Error>> {
-		self.inner.poll_open_uni(cx, options)
+		self.inner.poll_open_uni(waiter, options)
 	}
 
 	fn poll_open_bi(
-		&mut self,
-		cx: &mut std::task::Context<'_>,
+		&self,
+		waiter: &kio::Waiter,
 		options: moq_net::transport::poll::SendOptions<'_, moq_net::transport::poll::Ungrouped>,
 	) -> std::task::Poll<Result<moq_net::transport::poll::BiStreams<Self>, Self::Error>> {
-		self.inner.poll_open_bi(cx, options)
+		self.inner.poll_open_bi(waiter, options)
 	}
 
 	fn poll_open_request(
-		&mut self,
-		cx: &mut std::task::Context<'_>,
+		&self,
+		waiter: &kio::Waiter,
 		options: moq_net::transport::poll::SendOptions<
 			'_,
 			<Self::SendStream as moq_net::transport::poll::SendStream>::Group,
 		>,
 	) -> std::task::Poll<Result<Option<moq_net::transport::poll::BiStreams<Self>>, Self::Error>> {
-		self.inner.poll_open_request(cx, options)
+		self.inner.poll_open_request(waiter, options)
 	}
 
-	fn send_group(&mut self, priority: i64) -> Option<moq_net::transport::poll::Ungrouped> {
+	fn send_group(&self, priority: i64) -> Option<moq_net::transport::poll::Ungrouped> {
 		self.inner.send_group(priority)
 	}
 
 	fn send_datagram(
-		&mut self,
+		&self,
 		payload: Bytes,
 		options: moq_net::transport::poll::SendOptions<'_, moq_net::transport::poll::Ungrouped>,
 	) -> Result<(), Self::Error> {
 		self.inner.send_datagram(payload, options)
 	}
 
-	fn poll_recv_datagram(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<Bytes, Self::Error>> {
-		self.inner.poll_recv_datagram(cx)
+	fn poll_recv_datagram(&self, waiter: &kio::Waiter) -> std::task::Poll<Result<Bytes, Self::Error>> {
+		self.inner.poll_recv_datagram(waiter)
 	}
 
 	fn max_datagram_size(&self) -> usize {
@@ -536,19 +538,19 @@ impl moq_net::transport::poll::Session for Gated {
 		self.inner.protocol()
 	}
 
-	fn binding(&self) -> moq_net::transport::Binding {
-		self.inner.binding()
+	fn address(&self) -> moq_net::transport::Address {
+		self.inner.address()
 	}
 
-	fn close(&mut self, code: u32, reason: &str) {
+	fn close(&self, code: u32, reason: &str) {
 		self.inner.close(code, reason)
 	}
 
-	fn poll_closed(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Error> {
-		self.inner.poll_closed(cx)
+	fn poll_closed(&self, waiter: &kio::Waiter) -> std::task::Poll<Self::Error> {
+		self.inner.poll_closed(waiter)
 	}
 
-	fn stats(&self) -> impl moq_net::transport::Stats {
-		self.inner.stats()
+	fn metrics(&self) -> impl moq_net::transport::Metrics {
+		self.inner.metrics()
 	}
 }

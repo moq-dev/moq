@@ -29,7 +29,6 @@ async fn steer(tracks: u16, floors: u64) -> u64 {
 				decode: Timestamp::from_millis(second * 1_000).unwrap().into(),
 				restart: 0,
 				skip: 0,
-				cut: 0,
 				sync: true,
 				leading: false,
 				item: (),
@@ -91,7 +90,6 @@ fn acquisition(c: &mut Criterion) {
 											decode: Timestamp::from_millis(frame * 20).unwrap().into(),
 											restart: 0,
 											skip: 0,
-											cut: 0,
 											sync: frame % 15 == 0,
 											leading: false,
 											item: (),
@@ -109,5 +107,68 @@ fn acquisition(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, steering, acquisition);
+/// An independent instance acquires while the old tracks still hold their tail.
+fn handoff(c: &mut Criterion) {
+	let runtime = tokio::runtime::Builder::new_current_thread()
+		.enable_time()
+		.start_paused(true)
+		.build()
+		.unwrap();
+	let mut group = c.benchmark_group("jitter_handoff");
+	group.measurement_time(Duration::from_secs(1));
+	group.warm_up_time(Duration::from_millis(200));
+	group.sample_size(10);
+	for tracks in [1u16, 4, 16, 64] {
+		for frames in [16u64, 64, 256] {
+			group.bench_function(BenchmarkId::new(tracks.to_string(), frames), |b| {
+				b.iter(|| {
+					runtime.block_on(async {
+						let start = moq_clock::now();
+						let mut buffer = jitter::Buffer::new(Duration::from_millis(500));
+						buffer.expect(1..=tracks);
+						for instance in 0..2 {
+							if instance == 1 {
+								let keys = tracks + 1..=2 * tracks;
+								buffer.expect(keys.clone());
+								buffer.start(keys.clone(), keys);
+							}
+							for track in 1..=tracks {
+								for frame in 0..frames {
+									buffer
+										.push(
+											instance * tracks + track,
+											jitter::Arrival {
+												arrived: start,
+												read: start,
+												decode: Timestamp::from_millis(
+													u64::from(instance) * 10_000 + frame * 20,
+												)
+												.unwrap()
+												.into(),
+												restart: 0,
+												skip: 0,
+												sync: frame % 15 == 0,
+												leading: false,
+												item: (),
+											},
+										)
+										.unwrap();
+								}
+							}
+							let _ = std::hint::black_box(buffer.poll_next(&kio::Waiter::noop()));
+						}
+						tokio::time::advance(Duration::from_secs(1)).await;
+						if let std::task::Poll::Ready(ready) = buffer.poll_pending(&kio::Waiter::noop()) {
+							buffer.commit(ready).unwrap();
+						}
+						assert!(buffer.is_committed());
+					})
+				});
+			});
+		}
+	}
+	group.finish();
+}
+
+criterion_group!(benches, steering, acquisition, handoff);
 criterion_main!(benches);

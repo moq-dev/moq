@@ -6,6 +6,7 @@ description: Capture, encode, and publish from the browser
 # @moq/publish
 
 [![npm](https://img.shields.io/npm/v/@moq/publish)](https://www.npmjs.com/package/@moq/publish)
+[![API](https://img.shields.io/badge/API-reference-blue)](/lib/js/api/publish)
 
 The publisher: captures a camera, microphone, screen, or file, encodes with
 WebCodecs, writes the catalog, and publishes a hang broadcast.
@@ -28,14 +29,17 @@ WebCodecs, writes the catalog, and publishes a hang broadcast.
 | Attribute | |
 | --- | --- |
 | `url`, `name` | Relay URL (with `?jwt=` if needed) and broadcast name. |
-| `versions` | Protocol versions to offer, most preferred first, comma-separated like `moq-transport-14,moq-lite-06`. Every stable version by default. |
+| `versions` | Protocol versions to offer, most preferred first, comma-separated like `moq-transport-18,moq-lite-06`. Every stable version by default. |
 | `source` | `camera`, `screen`, or `file`. |
 | `muted`, `invisible` | Disable audio or video capture. |
 | `preview` | What the nested element shows: the raw `source` (default), a decoded copy of the `encoded` stream to see what viewers get, or `none`. |
 | `backend` | How a `<canvas>` preview is drawn; see [@moq/video](/lib/js/video). `auto` (default), `webgpu`, or `2d`. |
-| `announce` | When to advertise: once the `source` is live (default), `always`, or `never`. Nobody can see or subscribe to the broadcast until it is announced. |
+| `announce` | When to advertise: once the `source` is live (default), or `always`. Nobody can see or subscribe to the broadcast until it is announced. To keep it out of discovery, use a hidden name with a `.`-prefixed segment; it is still subscribable by name. |
 
-Every attribute is also a reactive property. The
+Every attribute is also a reactive property, and property or UI changes reflect
+back into the attributes. An invalid value is refused rather than defaulted: the
+property setter throws, and invalid markup reports a browser `error` event and
+suspends the element until corrected or removed. The
 [README](https://www.npmjs.com/package/@moq/publish) lists types and defaults.
 A nested `<video>` gets the raw capture stream; a `<canvas>` is drawn by the
 element. `<moq-publish-support>` shows what the browser can encode.
@@ -46,6 +50,15 @@ Capture failures, such as `NotAllowedError` when permission is refused, land in
 for a permission, device, or settings change instead of prompting again.
 
 ## Encoding
+
+An enabled encoder encodes whether or not anyone is subscribed, so its recent
+groups wait in the track's cache: a viewer who subscribes late with a
+`maxDelay`, or fetches, reaches back as far as `maxAge` keeps. Pass
+`onDemand: true` to `Publish.Broadcast` to encode every rendition only while
+someone is subscribed instead. That saves the encode while nobody watches, but
+a viewer then starts at the keyframe its arrival forces, with no past to reach.
+Bandwidth is reserved only while someone is subscribed, so an unwatched
+rendition encodes at its configured bitrate.
 
 The video encoder follows its share of the connection's send-rate estimate, so
 several publishers on one connection do not each target the whole uplink.
@@ -95,7 +108,10 @@ signals.run((effect) => {
         timescale: Moq.Time.Timescale.MILLI,
         maxAge: Milli(86_400_000),
     });
-    effect.cleanup(() => track.close());
+    effect.cleanup(() => {
+        track.finish();
+        track.close();
+    });
 
     const meta = new Json.Snapshot.Producer<Meta>({ track });
     meta.update({ value: current, at: Moq.Time.Timestamp.now() });
@@ -136,7 +152,8 @@ const broadcast = new Publish.Broadcast({
 });
 
 // Each encoder registers a rendition on the broadcast (`broadcast.video(name)`) and
-// encodes only while someone is subscribed.
+// encodes while enabled, subscribed or not. Pass `onDemand: true` to the broadcast
+// to encode only while someone is subscribed.
 new Publish.Video.Encoder("video/hd", { broadcast, capture, enabled: true });
 new Publish.Video.Encoder("video/sd", { broadcast, capture, enabled: true, config: { maxScale: 0.25 } });
 const audioSource = new Publish.Signals.Computed((effect) => effect.get(microphone.out.source)?.audio);

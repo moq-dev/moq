@@ -2,6 +2,7 @@ import 'package:moq_ffi/moq_ffi.dart';
 
 import 'aliases.dart';
 import 'stream.dart';
+import 'version.dart';
 
 /// Scope for discovering announcements.
 final class AnnounceOptions {
@@ -24,7 +25,7 @@ final class AnnounceOptions {
 /// the FFI's [MoqClientConfig].
 ///
 /// Every field is optional; a null keeps the native default. A value the native
-/// side cannot use fails [Moq.connect] with `MoqException.Config`.
+/// side cannot use fails [Moq.connect] with `ConfigMoqException`.
 final class ConnectOptions {
   /// Local socket address to bind, e.g. `0.0.0.0:0`.
   final String? bind;
@@ -32,6 +33,13 @@ final class ConnectOptions {
   /// Protocol versions to offer, most preferred first, e.g. `moq-lite-03`.
   /// Null offers every supported version, which [versions] lists.
   final List<String>? versions;
+
+  /// Credentials every dial presents. The first is the connection credential,
+  /// sent in SETUP and, while an offered version can't carry it there, the
+  /// URL's `?jwt=`; each other one widens the session's grant over in-band
+  /// AUTH. A URL that already carries `?jwt=` keeps it, and then every token
+  /// rides AUTH. Replace them before they expire through [Moq.tokens].
+  final List<String>? tokens;
 
   /// How long one connect may take, dial and handshake together; zero waits forever.
   final Duration? timeout;
@@ -68,6 +76,7 @@ final class ConnectOptions {
   const ConnectOptions({
     this.bind,
     this.versions,
+    this.tokens,
     this.timeout,
     this.race,
     this.resolutionDelay,
@@ -83,14 +92,16 @@ final class ConnectOptions {
   MoqClientConfig get _ffi => MoqClientConfig(
     bind: bind,
     versions: versions ?? const [],
-    timeoutUs: _us(timeout, 'timeout'),
-    raceUs: _us(race, 'race'),
-    resolutionDelayUs: _us(resolutionDelay, 'resolutionDelay'),
+    tokens: tokens ?? const [],
+    timeout: timeout,
+    race: race,
+    resolutionDelay: resolutionDelay,
     tls: tls ?? ClientTls(),
     quic: (quic ?? const QuicConfig())._ffi,
     websocket: (websocket ?? const WebSocketConfig())._ffi,
     once: once,
     backoff: backoff ?? MoqBackoff(),
+    implementation: implementation,
     publish: publish,
     consume: consume,
   );
@@ -139,8 +150,8 @@ final class QuicConfig {
 
   MoqQuicConfig get _ffi => MoqQuicConfig(
     maxStreams: maxStreams,
-    idleTimeoutUs: _us(idleTimeout, 'idleTimeout'),
-    keepAliveUs: _us(keepAlive, 'keepAlive'),
+    idleTimeout: idleTimeout,
+    keepAlive: keepAlive,
     gso: gso,
     mtuDiscovery: mtuDiscovery,
     congestionControl: congestionControl,
@@ -163,14 +174,7 @@ final class WebSocketConfig {
   const WebSocketConfig({this.enabled, this.delay});
 
   MoqWebSocketConfig get _ffi =>
-      MoqWebSocketConfig(enabled: enabled, delayUs: _us(delay, 'delay'));
-}
-
-int? _us(Duration? value, String name) {
-  if (value != null && value.isNegative) {
-    throw ArgumentError.value(value, name, 'must not be negative');
-  }
-  return value?.inMicroseconds;
+      MoqWebSocketConfig(enabled: enabled, delay: delay);
 }
 
 /// The protocol versions offered by default, most preferred first, spelled the
@@ -211,9 +215,10 @@ final class Moq {
 
   /// Create an unannounced broadcast at [path], invisible to everyone until announced.
   ///
-  /// Advertise it with `announce` after populating tracks. Create, `dynamic`
-  /// if tracks are served on demand, populate, then announce.
-  BroadcastProducer createBroadcast(String path) =>
+  /// Populate its `broadcast`, calling `requests` first if tracks are served
+  /// on demand, then advertise it with `announce`. Disposing the publication
+  /// keeps the route; closing the broadcast ends it.
+  Publication createBroadcast(String path) =>
       session.publish().createBroadcast(path: path);
 
   /// Discover routes matching [options]; prefixes stay relative to the origin.
@@ -235,17 +240,27 @@ final class Moq {
 
   /// The session's bandwidth allocator.
   ///
-  /// Every call returns a handle to the same registry. [Bandwidth.reserve]
+  /// Every call returns a handle to the same registry. [Allocator.reserve]
   /// a share for an app-owned encoder; dropping the [Reservation] hands
   /// the room back.
-  Bandwidth bandwidth() => session.bandwidth();
+  Allocator allocator() => session.allocator();
 
-  /// The session's authorization: the grant its peer gave it, and more tokens to present.
+  /// Follow the grant the peer gave this session.
   ///
-  /// Listen to [AuthGrants.grants] to follow the grant, and [Auth.add] a fresh
-  /// token before the current one expires; each added token is presented again
-  /// on every reconnect.
-  Auth auth() => session.auth();
+  /// Listen to [GrantConsumerUpdates.updates] for the current grant and each
+  /// change. Every call returns an independent consumer.
+  GrantConsumer grants() => session.grants();
+
+  /// The credentials every dial presents ([ConnectOptions.tokens]), to
+  /// replace while running.
+  ///
+  /// [Tokens.set_] replaces them, such as before the current ones expire: the
+  /// next dial presents them, and a live session with in-band AUTH presents
+  /// them at once, withdrawing each replaced token once its replacements are
+  /// answered, even when one is refused. After an authorization refusal the
+  /// session redials only if they changed. An empty token throws
+  /// `ConfigMoqException`. Await [Tokens.answered] for the relay's verdict.
+  Tokens tokens() => session.tokens()!;
 
   /// Drain within one second, then stop the client.
   ///
@@ -263,13 +278,13 @@ final class Moq {
 }
 
 /// A [Stream] view over a session's grant.
-extension AuthGrants on Auth {
+extension GrantConsumerUpdates on GrantConsumer {
   /// The current grant, then each change, null while there is none.
   ///
-  /// Listens on one [Auth] share its place in the changes, so a second watcher
-  /// takes its own from [Moq.auth]. Cancelling releases only its pending read.
-  /// Ends when the session shuts down, and errors with its close reason otherwise.
-  Stream<Grant?> grants() => _Grants(this);
+  /// Listen once: the consumer is cancelled and released when the subscription
+  /// ends. Ends when the session shuts down, and errors with its close reason
+  /// otherwise.
+  Stream<Grant?> updates() => _Grants(this);
 }
 
 /// A [Stream] view over an announcement cursor.
@@ -282,18 +297,27 @@ extension AnnounceConsumerUpdates on AnnounceConsumer {
 }
 
 final class _Grants extends NativeStream<Grant?> {
-  final Auth auth;
-  _Grants(this.auth);
+  final GrantConsumer grants;
+  _Grants(this.grants);
 
   @override
-  Iterable<Grant?> initial() => [auth.grant()];
+  Iterable<Grant?> initial() => [grants.grant()];
 
   @override
-  UniffiRustFuture<Grant?> read() => auth.grantChanged();
+  UniffiRustFuture<Grant?> read() => grants.changed();
 
   @override
   bool ended(Object error) =>
       error is CancelledMoqException || error is ClosedMoqException;
+
+  @override
+  void release() {
+    try {
+      grants.cancel();
+    } finally {
+      grants.dispose();
+    }
+  }
 }
 
 final class _Updates extends NativeStream<AnnounceEvent?> {

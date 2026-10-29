@@ -8,7 +8,7 @@
 //! JavaScript arm serves WebTransport to a Bun publisher; it needs Bun and runs in the
 //! interop workflow.
 //!
-//! Unsupported local kernels skip loudly; MOQ_STRICT makes CI refuse them.
+//! Unsupported local kernels skip loudly; CI_STRICT makes CI refuse them.
 
 #![cfg(all(target_os = "linux", feature = "quic"))]
 
@@ -29,7 +29,7 @@ const WINDOW: usize = 256 * 1024;
 fn worker() -> Option<Worker> {
 	match Worker::new(Config::default()) {
 		Ok(worker) => Some(worker),
-		Err(Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
+		Err(Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
 			eprintln!("skipping io_uring receive credit test: {reason}");
 			None
 		}
@@ -107,10 +107,11 @@ fn partial_frame_gives_way() {
 			.expect("socket")
 	};
 	let server_sock = socket(&handle);
-	let mut dial = quic::client::Config::new(server_sock.local_addr().expect("server addr"), "localhost");
+	let server_addr = server_sock.local_addr().expect("server addr");
+	let mut dial = quic::client::Config::default();
 	dial.alpn = vec![ALPN.to_string()];
 	dial.verify = false;
-	dial.transport.receive_window = Some(WINDOW as u64);
+	dial.transport.limits.receive_window = std::num::NonZeroU64::new(WINDOW as u64);
 	let client_sock = socket(&handle);
 
 	let server_handle = handle.clone();
@@ -124,7 +125,7 @@ fn partial_frame_gives_way() {
 				moq_net::time::Instant::now(),
 				moq_uring::transport::Local::new(moq_uring::transport::Session::new(
 					quic::web::Session::raw(conn),
-					moq_net::transport::Binding::InBand,
+					moq_net::transport::Address::Setup,
 				)),
 			)
 			.await
@@ -136,14 +137,16 @@ fn partial_frame_gives_way() {
 	let sub = sub_origin.clone();
 	worker
 		.block_on(async move {
-			let conn = quic::client::connect(client_sock, &dial).await.expect("quic connect");
+			let conn = quic::client::connect(client_sock, &dial, server_addr, "localhost")
+				.await
+				.expect("quic connect");
 			let (session, driver) = moq_net::Client::new()
 				.with_subscriber(sub.clone())
 				.connect(
 					moq_net::time::Instant::now(),
 					moq_uring::transport::Local::new(moq_uring::transport::Session::new(
 						quic::web::Session::raw(conn),
-						moq_net::transport::Binding::InBand,
+						moq_net::transport::Address::Setup,
 					)),
 				)
 				.await
@@ -154,12 +157,13 @@ fn partial_frame_gives_way() {
 			});
 
 			let consumer = sub.consume();
-			within(&handle, "the route", consumer.routed("room"))
-				.await
-				.expect("routed");
-			let remote = within(&handle, "the broadcast", consumer.request_broadcast("room", None))
-				.await
-				.expect("broadcast resolves");
+			let remote = within(
+				&handle,
+				"the broadcast",
+				consumer.follow("room", None).unwrap().available(),
+			)
+			.await
+			.expect("broadcast resolves");
 			let subscribe = |name: &str, priority: i8| {
 				let track = remote.track(name).expect("track");
 				async move {
@@ -255,7 +259,7 @@ fn javascript_partial_frame_gives_way() {
 			.server(&["h3"], quic::server::ClientAuth::None)
 			.expect("tls"),
 	);
-	server.transport.receive_window = Some(WINDOW as u64);
+	server.transport.limits.receive_window = std::num::NonZeroU64::new(WINDOW as u64);
 	let sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("socket");
@@ -299,7 +303,7 @@ fn javascript_partial_frame_gives_way() {
 					moq_net::time::Instant::now(),
 					moq_uring::transport::Local::new(moq_uring::transport::Session::new(
 						session,
-						moq_net::transport::Binding::Uri,
+						moq_net::transport::Address::Uri,
 					)),
 				)
 				.await
@@ -310,12 +314,13 @@ fn javascript_partial_frame_gives_way() {
 			});
 
 			let consumer = sub.consume();
-			within(&handle, "the route", consumer.routed("room"))
-				.await
-				.expect("routed");
-			let remote = within(&handle, "the broadcast", consumer.request_broadcast("room", None))
-				.await
-				.expect("broadcast resolves");
+			let remote = within(
+				&handle,
+				"the broadcast",
+				consumer.follow("room", None).unwrap().available(),
+			)
+			.await
+			.expect("broadcast resolves");
 			let subscribe = |name: &str, priority: i8| {
 				let track = remote.track(name).expect("track");
 				async move {

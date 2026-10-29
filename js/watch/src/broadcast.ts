@@ -3,7 +3,16 @@ import * as Json from "@moq/json";
 import * as Msf from "@moq/msf";
 import type * as Moq from "@moq/net";
 import { Error as NetError, Path, StreamCode } from "@moq/net";
-import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
+import {
+	Effect,
+	type Getter,
+	type GetterType,
+	getter,
+	type Inputs,
+	type Readonlys,
+	readonlys,
+	Signal,
+} from "@moq/signals";
 
 import { toHang } from "./msf";
 
@@ -79,18 +88,12 @@ function filterCatalog(catalog: Catalog.Root, usable: Usable): Catalog.Root {
 }
 
 /**
- * Watch supports the on-the-wire catalog formats from @moq/hang, plus "hangz" (the
- * DEFLATE-compressed `catalog.json.z` track) and a "manual" mode where the user supplies the
- * catalog directly without fetching. "hangz" is opt-in only: it shares the `.hang` broadcast suffix
- * and is never auto-detected, so set it explicitly via `catalogFormat`.
+ * Watch supports the on-the-wire catalog formats from `@moq/hang`, plus a "manual" mode where the
+ * user supplies the catalog directly without fetching.
  */
-export const CATALOG_FORMATS = [...Catalog.FORMATS, "hangz", "manual"] as const;
+export const CATALOG_FORMATS = [...Catalog.FORMATS, "manual"] as const;
 /** A catalog format the watcher can read; see {@link CATALOG_FORMATS}. */
 export type CatalogFormat = (typeof CATALOG_FORMATS)[number];
-
-// "error" means the origin refused the broadcast; `out.error` says why.
-// "unsupported" means its catalog requires a newer player.
-type Status = "offline" | "loading" | "live" | "error" | "unsupported";
 
 /**
  * Signals the component reads. Whoever owns the backing Signal (the caller, or
@@ -107,15 +110,15 @@ export type BroadcastInput = {
 	// The broadcast name.
 	name: Getter<Moq.Path.Valid>;
 
-	// Whether to wait for the broadcast to be announced before subscribing.
-	// Defaults to true; pass false to subscribe immediately without waiting for an announcement.
-	announced: Getter<boolean>;
+	// Whether to follow the broadcast's announcements (`Origin.follow`), waiting for one before
+	// subscribing and moving to each restart. Defaults to true; pass false to request it once
+	// (`Origin.request`), subscribing immediately without waiting for an announcement.
+	follow: Getter<boolean>;
 
 	// Which catalog format to use. When `undefined` (the default), the format is
 	// auto-detected from the broadcast name extension (`.hang`, `.msf`), falling
 	// back to `"hang"` if the name has no recognized extension. Set to a
-	// specific value to override auto-detection. `"hangz"` (the compressed
-	// `catalog.json.z` track) is opt-in only and never auto-detected.
+	// specific value to override auto-detection.
 	catalogFormat: Getter<CatalogFormat | undefined>;
 
 	// The manual-mode catalog source. Used directly when catalogFormat is "manual";
@@ -123,12 +126,15 @@ export type BroadcastInput = {
 	catalog: Getter<Catalog.Root | undefined>;
 };
 
-type BroadcastOutput = {
-	status: Signal<Status>;
+/** Signals the component derives. */
+export type BroadcastOutput = {
+	// "error" means the origin refused the broadcast; `error` says why.
+	// "unsupported" means its catalog requires a newer player.
+	status: Signal<"offline" | "loading" | "live" | "error" | "unsupported">;
 	active: Signal<Moq.Broadcast.Consumer | undefined>;
 
 	// Why the origin refused the broadcast, while `status` is "error". A refusal is final:
-	// only a fresh request (a new `name`, `origin`, or `announced`, or re-enabling) clears it and asks again.
+	// only a fresh request (a new `name`, `origin`, or `follow`, or re-enabling) clears it and asks again.
 	error: Signal<Error | undefined>;
 
 	// The effective catalog: the fetched one, or a copy of input.catalog in manual mode, minus
@@ -136,6 +142,8 @@ type BroadcastOutput = {
 	// broadcast appears once that broadcast is announced, so this can change without a new catalog.
 	catalog: Signal<Catalog.Root | undefined>;
 };
+
+type Status = GetterType<BroadcastOutput["status"]>;
 
 /** A catalog source that can wait for announcement before subscribing. */
 export class Broadcast {
@@ -161,7 +169,7 @@ export class Broadcast {
 	// Requests are shared by callers; each owns its restart watch in the origin.
 	readonly #references = new Map<
 		Moq.Path.Valid,
-		{ origin: Moq.Origin.Table; announced: boolean; request: Moq.Origin.Requesting; users: number }
+		{ origin: Moq.Origin.Table; follow: boolean; request: Moq.Origin.Requesting; users: number }
 	>();
 
 	// The catalog as published, before renditions this consumer cannot use are dropped. Kept
@@ -175,15 +183,15 @@ export class Broadcast {
 	#signals: Effect;
 
 	constructor(props?: Inputs<BroadcastInput>) {
-		if (props && "reload" in props) {
-			throw new Error("Watch.Broadcast: `reload` was renamed to `announced`");
+		for (const renamed of ["reload", "announced"]) {
+			if (props && renamed in props) throw new Error(`Watch.Broadcast: \`${renamed}\` was renamed to \`follow\``);
 		}
 		this.#signals = new Effect();
 		this.in = {
 			origin: getter(props?.origin),
 			name: getter(props?.name ?? Path.empty()),
 			enabled: getter(props?.enabled ?? true),
-			announced: getter(props?.announced ?? true),
+			follow: getter(props?.follow ?? true),
 			catalogFormat: getter<CatalogFormat | undefined>(props?.catalogFormat),
 			catalog: getter(props?.catalog),
 		};
@@ -241,11 +249,11 @@ export class Broadcast {
 		origin: Moq.Origin.Table,
 		path: Moq.Path.Valid,
 	): Moq.Broadcast.Consumer | undefined {
-		const announced = effect.get(this.in.announced);
+		const follow = effect.get(this.in.follow);
 		let entry = this.#references.get(path);
-		if (!entry || entry.origin !== origin || entry.announced !== announced) {
+		if (!entry || entry.origin !== origin || entry.follow !== follow) {
 			entry?.request.close();
-			entry = { origin, announced, request: origin.request(path, { announced }), users: 0 };
+			entry = { origin, follow, request: follow ? origin.follow(path) : origin.request(path), users: 0 };
 			this.#references.set(path, entry);
 		}
 
@@ -272,11 +280,11 @@ export class Broadcast {
 		if (!origin) return;
 
 		const name = effect.get(this.in.name);
-		const announced = effect.get(this.in.announced);
+		const follow = effect.get(this.in.follow);
 
 		let request: Moq.Origin.Requesting;
 		try {
-			request = origin.request(name, { announced });
+			request = follow ? origin.follow(name) : origin.request(name);
 		} catch (err) {
 			effect.set(this.#out.error, err instanceof Error ? err : new Error(String(err)), undefined);
 			return;
@@ -291,10 +299,10 @@ export class Broadcast {
 		effect.run((nested) => {
 			const closed = nested.get(request.closed);
 			if (!closed) return;
-			// An announced request outlives its instances, so only a refusal ends it. A blind one
+			// A follower outlives its instances, so only a refusal ends it. A plain request
 			// ends with its accepted instance, which reads as offline rather than an error.
 			const offline =
-				!announced && resolved && closed instanceof NetError.Stream && closed.code === StreamCode.Unroutable;
+				!follow && resolved && closed instanceof NetError.Stream && closed.code === StreamCode.Unroutable;
 			if (!offline) nested.set(this.#out.error, closed, undefined);
 		});
 	}
@@ -346,19 +354,15 @@ export class Broadcast {
 
 		this.#out.status.set("loading");
 
-		const trackName = format === "hang" ? Catalog.TRACK : format === "hangz" ? Catalog.TRACK_COMPRESSED : "catalog";
+		const trackName = format === "hang" ? Catalog.TRACK : "catalog";
 		const track = broadcast.track(trackName).subscribe({ priority: Catalog.PRIORITY.catalog });
 		effect.cleanup(() => track.close());
 
-		// The hang catalog is reconstructed from snapshots (and future deltas) via @moq/json, with
-		// "hangz" decompressing the `.z` track; MSF stays on its own one-blob-per-group fetch.
+		// The hang catalog is reconstructed from snapshots (and future deltas) via @moq/json, which reads
+		// it compressed or not; MSF stays on its own one-blob-per-group fetch.
 		let fetchNext: () => Promise<Catalog.Root | undefined>;
-		if (format === "hang" || format === "hangz") {
-			const consumer = new Json.Snapshot.Consumer<Catalog.Root>({
-				track,
-				schema: Catalog.RootSchema,
-				compression: format === "hangz" ? "deflate" : "none",
-			});
+		if (format === "hang") {
+			const consumer = new Json.Snapshot.Consumer<Catalog.Root>({ track, schema: Catalog.RootSchema });
 			fetchNext = async () => (await consumer.latest())?.value;
 		} else {
 			const ordered = track.ordered();
@@ -432,7 +436,7 @@ export class Broadcast {
 		// resolve blind rather than waiting for an announcement that never comes. With the
 		// gate, only report the path usable once it is announced: the request then resolves
 		// from the table, never blind.
-		if (effect.get(this.in.announced) && effect.get(origin.discovery) !== false) {
+		if (effect.get(this.in.follow) && effect.get(origin.discovery) !== false) {
 			if (!this.#isPathAnnounced(effect, origin, resolved)) return undefined;
 		}
 

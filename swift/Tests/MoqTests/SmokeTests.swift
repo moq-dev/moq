@@ -46,7 +46,7 @@ final class SmokeTests: XCTestCase {
             try group.finish()
         }
         let consumer = try track.consume(subscription: Subscription(
-            maxDelayUs: 10_000_000,
+            maxDelay: 10,
             ranges: [Subscription.Range(start: .relative(groups: 2))],
             order: .ascending
         ))
@@ -114,6 +114,8 @@ final class SmokeTests: XCTestCase {
         defer { client.cancel() }
         let session = try await client.connect(to: "https://\(addr)")
         guard let request = try await accepted else { return XCTFail("server closed before accept") }
+        // The wrapper names itself ahead of moq-ffi, so a server can tell bindings apart.
+        XCTAssertTrue(request.peerImplementation?.hasPrefix("moq-swift/") == true, "\(String(describing: request.peerImplementation))")
         let peer = try await request.accept()
 
         // Ending both sessions ends any wait below, so a grant that never arrives fails
@@ -125,19 +127,21 @@ final class SmokeTests: XCTestCase {
         }
         defer { watchdog.cancel() }
 
-        let everything = Grant(publish: ["**"], subscribe: ["**"], expiresUs: nil)
-        for auth in [session.auth(), peer.auth()] {
-            var grant = auth.grant()
-            while grant != everything {
-                grant = try await auth.grantChanged()
+        let everything = Grant(publish: ["**"], subscribe: ["**"], expires: nil)
+        for side in [session, peer] {
+            for try await grant in side.grants() where grant == everything {
+                break
             }
         }
+        XCTAssertNil(peer.tokens(), "an accepted session presents no tokens")
 
+        guard let tokens = session.tokens() else { return XCTFail("a client session has tokens") }
+        try tokens.set(["extra"])
         do {
-            _ = try await session.auth().add(token: "extra")
+            try await tokens.answered()
             XCTFail("the default acceptor refuses a token")
         } catch MoqError.Unsupported {}
-        XCTAssertEqual(session.auth().grant(), everything)
+        XCTAssertEqual(session.grants().grant(), everything)
 
         peer.cancel(code: 0)
         session.cancel(code: 0)
@@ -160,27 +164,27 @@ final class SmokeTests: XCTestCase {
     func testOriginProducerIsConstructible() throws {
         let origin = OriginProducer(cacheCapacityBytes: 4096)
         _ = origin.consume()
-        _ = try origin.dynamic(prefix: "")
+        _ = try origin.requests(prefix: "")
     }
 
     func testBroadcastIsReachableOnlyWhileAnnounced() async throws {
         let origin = OriginProducer()
-        let broadcast = try origin.createBroadcast(path: "live")
-        _ = try broadcast.publishTrack(name: "events")
+        let publication = try origin.createBroadcast(path: "live")
+        _ = try publication.broadcast.publishTrack(name: "events")
         let consumer = origin.consume()
         do {
             _ = try await consumer.requestBroadcast(path: "live")
             XCTFail("an unannounced broadcast must be unroutable")
         } catch {}
 
-        try broadcast.announce()
+        try publication.announce()
         let announced = try consumer.announced(prefix: "")
         guard case .start(let first) = try await nextRoute(announced) else {
             return XCTFail("expected an announcement")
         }
         XCTAssertEqual(first.prefix, "live")
 
-        try broadcast.unannounce()
+        try publication.unannounce()
         guard case .end(let retracted) = try await nextRoute(announced) else {
             return XCTFail("expected a retraction")
         }
@@ -190,11 +194,52 @@ final class SmokeTests: XCTestCase {
             XCTFail("an unannounced broadcast must be unroutable")
         } catch {}
 
-        try broadcast.announce()
+        try publication.announce()
         guard case .start = try await nextRoute(announced) else {
             return XCTFail("expected a reannouncement")
         }
         _ = try await consumer.requestBroadcast(path: "live")
+    }
+
+    /// Releasing a publication keeps its route; closing the broadcast ends it.
+    func testReleasingAPublicationKeepsItsRoute() async throws {
+        let origin = OriginProducer()
+        let consumer = origin.consume()
+        var publication: Publication? = try origin.createBroadcast(path: "live")
+        let broadcast = try XCTUnwrap(publication?.broadcast)
+        XCTAssertTrue(broadcast === publication?.broadcast)
+        try publication?.announce()
+        publication = nil
+        _ = try await consumer.requestBroadcast(path: "live")
+
+        try broadcast.close()
+        do {
+            _ = try await consumer.requestBroadcast(path: "live")
+            XCTFail("a closed broadcast must be unroutable")
+        } catch {}
+    }
+
+    /// A publication outliving its closed broadcast cannot touch the one replacing it.
+    func testStalePublicationLeavesItsReplacementAlone() async throws {
+        let origin = OriginProducer()
+        let stale = try origin.createBroadcast(path: "live")
+        try stale.announce()
+        try stale.broadcast.close()
+
+        let replacement = try origin.createBroadcast(path: "live")
+        try replacement.announce()
+        XCTAssertThrowsError(try stale.announce()) { error in
+            guard case MoqError.Closed = error else {
+                return XCTFail("expected Closed, got \(error)")
+            }
+        }
+        XCTAssertThrowsError(try stale.unannounce()) { error in
+            guard case MoqError.Closed = error else {
+                return XCTFail("expected Closed, got \(error)")
+            }
+        }
+        _ = try await origin.consume().requestBroadcast(path: "live")
+        try replacement.broadcast.close()
     }
 
     func testAnnouncedPatternCaptures() async throws {
@@ -213,37 +258,38 @@ final class SmokeTests: XCTestCase {
     func testAnnouncedEpochRestarts() async throws {
         let origin = OriginProducer()
         let announced = try origin.consume().announced(prefix: "")
-        let broadcast = try origin.createBroadcast(path: "epoch")
+        let publication = try origin.createBroadcast(path: "epoch")
 
         let first = mintEpoch()
-        XCTAssertEqual(try epochTime("018bcfe5-6800-7000-8000-000000000000"), Date(timeIntervalSince1970: 1_700_000_000))
-        try broadcast.announce(route: AnnounceRoute(epoch: first))
+        try publication.announce(route: AnnounceRoute(epoch: first))
         guard case .start(let start) = try await nextRoute(announced) else {
             return XCTFail("expected an announcement")
         }
         XCTAssertEqual(start.route.epoch, first)
 
         let second = mintEpoch()
-        try broadcast.announce(route: AnnounceRoute(epoch: second))
+        try publication.announce(route: AnnounceRoute(epoch: second))
         guard case .restart(let restart) = try await nextRoute(announced) else {
             return XCTFail("expected a restart")
         }
         XCTAssertEqual(restart.route.epoch, second)
 
-        XCTAssertThrowsError(try epochTime("not-an-epoch"))
+        XCTAssertThrowsError(try publication.announce(route: AnnounceRoute(epoch: "not-an-epoch")))
     }
 
     func testDynamicServesARequestUnderAPrefix() async throws {
         let origin = OriginProducer()
-        let dynamic = try origin.dynamic(prefix: "live")
+        let dynamic = try origin.requests(prefix: "live")
         let pending = Task {
             try await origin.consume().requestBroadcast(path: "live/cam")
         }
         let request = try await dynamic.requestedBroadcast()
         XCTAssertEqual(try request.path, "live/cam")
-        let served = try request.prepare(epoch: mintEpoch()).publish()
+        let prepared = try request.prepare(epoch: mintEpoch())
+        let served = try prepared.publish()
+        XCTAssertTrue(served.broadcast === prepared.broadcast)
         _ = try await pending.value
-        try served.close()
+        try served.broadcast.close()
         dynamic.cancel()
     }
 
@@ -333,10 +379,9 @@ final class SmokeTests: XCTestCase {
         let broadcast = try BroadcastProducer()
         let producer = try Json.SnapshotProducer<Status>(
             broadcast: broadcast,
-            track: try broadcast.publishTrack(name: "status", info: TrackInfo(timescale: 1_000_000)),
-            compression: true)
+            track: try broadcast.publishTrack(name: "status", info: TrackInfo(timescale: 1_000_000, compress: true)))
         let consumer = try Json.SnapshotConsumer<Status>(
-            track: try await broadcast.consume().subscribeTrack(name: "status"), compression: true)
+            track: try await broadcast.consume().subscribeTrack(name: "status"))
 
         for viewers in 1...4 {
             try producer.update(Status(state: "live", viewers: viewers), timestampUs: UInt64(viewers) * 1000)
@@ -384,9 +429,9 @@ final class SmokeTests: XCTestCase {
 
         let broadcast = try BroadcastProducer()
         let producer = try Json.WindowProducer<Event>(
-            track: try broadcast.publishTrack(name: "log", info: TrackInfo(timescale: 1_000_000)), compression: true)
+            track: try broadcast.publishTrack(name: "log", info: TrackInfo(timescale: 1_000_000, compress: true)))
         let consumer = try Json.WindowConsumer<Event>(
-            track: try await broadcast.consume().subscribeTrack(name: "log"), compression: true)
+            track: try await broadcast.consume().subscribeTrack(name: "log"))
 
         for n in 0..<3 {
             try producer.push(Event(n: n), timestampUs: UInt64(n) * 1000)
@@ -441,32 +486,6 @@ final class SmokeTests: XCTestCase {
         try broadcast.close()
     }
 
-    func testFlateTimestampsRoundTrip() async throws {
-        for timestamp in [nil, UInt64(123_456)] {
-            for mode in ["snapshot", "stream"] {
-                let broadcast = try BroadcastProducer()
-                let info: TrackInfo? = timestamp.map { _ in TrackInfo(timescale: 1_000_000) }
-                let track = try broadcast.publishTrack(name: "data", info: info)
-                let consumer = try track.consume()
-                let payload = Data("payload".utf8)
-                if mode == "snapshot" {
-                    let producer = try Flate.SnapshotProducer(broadcast: broadcast, track: track)
-                    try producer.update(payload, timestampUs: timestamp)
-                    try producer.finish()
-                } else {
-                    let producer = try Flate.StreamProducer(broadcast: broadcast, track: track)
-                    try producer.append(payload, timestampUs: timestamp)
-                    try producer.finish()
-                }
-                let received = try await consumer.readFrame()
-                let frame = try XCTUnwrap(received)
-                XCTAssertEqual(frame.payload, payload)
-                XCTAssertEqual(frame.timestampUs, timestamp)
-                try broadcast.close()
-            }
-        }
-    }
-
     func testRawTrackWithoutTimestampStaysUntimed() async throws {
         let broadcast = try BroadcastProducer()
         let track = try broadcast.publishTrack(name: "untimed")
@@ -476,7 +495,7 @@ final class SmokeTests: XCTestCase {
         let frame = try XCTUnwrap(received)
         XCTAssertEqual(frame.payload, Data("payload".utf8))
         XCTAssertNil(frame.timestampUs)
-        XCTAssertNil(try consumer.info().timescale)
+        XCTAssertNil(consumer.info().timescale)
         try track.finish()
         try broadcast.close()
     }
@@ -538,9 +557,8 @@ final class SmokeTests: XCTestCase {
         try broadcast.close()
     }
 
-    /// `frameDurationUs` is microseconds so Opus' 2.5 ms frame is expressible at
-    /// all, and a duration outside the Opus set is refused rather than silently
-    /// rounded.
+    /// Opus' 2.5 ms frame reaches the encoder, and a duration outside the Opus set
+    /// is refused rather than silently rounded.
     func testEncodeAudioFrameDurations() throws {
         let broadcast = try BroadcastProducer()
         let input = AudioEncoderInput(format: .f32, sampleRate: 48_000, channels: 1)
@@ -549,7 +567,7 @@ final class SmokeTests: XCTestCase {
         let fine = try Audio.Producer(
             catalog: catalog,
             input: input,
-            output: AudioEncoderOutput(codec: AudioCodec.opus(),  frameDurationUs: 2_500),
+            output: AudioEncoderOutput(codec: AudioCodec.opus(),  frameDuration: 0.0025),
             track: "fine"
         )
         // 2.5 ms of silence at 48 kHz mono f32: exactly one encoded frame.
@@ -560,7 +578,7 @@ final class SmokeTests: XCTestCase {
             try Audio.Producer(
                 catalog: catalog,
                 input: input,
-                output: AudioEncoderOutput(codec: AudioCodec.opus(),  frameDurationUs: 2_000),
+                output: AudioEncoderOutput(codec: AudioCodec.opus(),  frameDuration: 0.002),
                 track: "coarse"
             )
         ) { error in
@@ -575,14 +593,15 @@ final class SmokeTests: XCTestCase {
     /// as frames are read.
     func testAudioConsumerReportsItsPlayoutDelay() async throws {
         let origin = OriginProducer()
-        let broadcast = try origin.createBroadcast(path: "audio-delay")
+        let publication = try origin.createBroadcast(path: "audio-delay")
+        let broadcast = publication.broadcast
         let audio = try Audio.Producer(
             catalog: Media.CatalogProducer(broadcast: broadcast),
             input: AudioEncoderInput(format: .f32, sampleRate: 48_000, channels: 1),
             output: AudioEncoderOutput(codec: AudioCodec.opus(), ),
             track: "mic"
         )
-        try broadcast.announce()
+        try publication.announce()
 
         let consumer = try await origin.consume().requestBroadcast(path: "audio-delay")
         let catalogs = try await Media.CatalogConsumer.subscribe(broadcast: consumer)
@@ -593,14 +612,14 @@ final class SmokeTests: XCTestCase {
 
         let fixed = try await Audio.Consumer.subscribe(
             broadcast: consumer, id: "mic", rendition: rendition,
-            output: AudioDecoderOutput(format: .f32, delayUs: 80_000)
+            output: AudioDecoderOutput(format: .f32, delay: 0.08)
         )
         let estimated = try await Audio.Consumer.subscribe(
             broadcast: consumer, id: "mic", rendition: rendition,
             output: AudioDecoderOutput(format: .f32)
         )
-        XCTAssertEqual(fixed.delayUs, 80_000)
-        let initial = estimated.delayUs
+        XCTAssertEqual(fixed.delay, 0.08, accuracy: 1e-9)
+        let initial = estimated.delay
 
         // Two 20 ms Opus frames of silence at 48 kHz mono.
         for i in 0..<2 {
@@ -611,8 +630,8 @@ final class SmokeTests: XCTestCase {
         let estimatedFrame = try await estimated.next()
         XCTAssertNotNil(estimatedFrame)
 
-        XCTAssertEqual(fixed.delayUs, 80_000)
-        XCTAssertNotEqual(estimated.delayUs, initial, "the estimate should move as frames are read")
+        XCTAssertEqual(fixed.delay, 0.08, accuracy: 1e-9)
+        XCTAssertNotEqual(estimated.delay, initial, "the estimate should move as frames are read")
 
         fixed.cancel()
         estimated.cancel()
@@ -624,14 +643,15 @@ final class SmokeTests: XCTestCase {
     /// demand and stays readable after its consumer is cancelled.
     func testDecodeVideoFrame() async throws {
         let origin = OriginProducer()
-        let broadcast = try origin.createBroadcast(path: "video-decode-frame")
+        let publication = try origin.createBroadcast(path: "video-decode-frame")
+        let broadcast = publication.broadcast
         let video = try Video.Producer(
             catalog: Media.CatalogProducer(broadcast: broadcast),
             input: VideoEncoderInput(format: .rgba, width: 320, height: 240, framerate: Video.FrameRate(numerator: 30000, denominator: 1001)),
             output: VideoEncoderOutput(codec: .h264, kind: .software),
             track: "camera"
         )
-        try broadcast.announce()
+        try publication.announce()
 
         // Seed the track so a subscriber joining below lands on encoded media.
         let rgba = Data(repeating: 0x80, count: 320 * 240 * 4)
@@ -655,8 +675,11 @@ final class SmokeTests: XCTestCase {
         }
 
         let next = try await decoder.next()
-        let frame = try XCTUnwrap(next)
+        guard case .frame(let frame) = try XCTUnwrap(next) else {
+            return XCTFail("expected a decoded frame")
+        }
         decoder.cancel()
+
 
         let planar = try frame.pixels(format: .i420)
         XCTAssertEqual(planar.count, Int(frame.width()) * Int(frame.height()) * 3 / 2)

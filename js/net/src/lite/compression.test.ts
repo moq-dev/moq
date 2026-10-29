@@ -13,9 +13,10 @@ for (const downstream of [ALPN_06, ALPN_07_WIP]) {
 		const installed = clock.install();
 		const source = new Producer();
 		const destination = new Producer();
-		const broadcast = source.createBroadcast(Path.from("compressed"));
+		const broadcastPublication = source.createBroadcast(Path.from("compressed"));
+		const broadcast = broadcastPublication.broadcast;
 		const track = broadcast.createTrack("data", { compress: true });
-		broadcast.announce();
+		broadcastPublication.announce();
 		const peers: { abort(): void }[] = [];
 		async function link(publish: Producer, consume: Producer, alpn: string) {
 			const pair = createMockTransportPair(alpn);
@@ -45,7 +46,7 @@ for (const downstream of [ALPN_06, ALPN_07_WIP]) {
 			const group = track.appendGroup();
 			const payloads = [new Uint8Array(4096).fill(7), new Uint8Array(), new Uint8Array(4096).fill(7)];
 			for (const payload of payloads) group.writeFrame({ payload });
-			group.close();
+			group.finish();
 			const received = await reader.recvGroup();
 			if (!received) throw new Error("missing group");
 			expect(received.sequence).toBe(0);

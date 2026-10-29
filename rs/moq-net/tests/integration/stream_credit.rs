@@ -29,12 +29,18 @@ async fn one_stream_credit_serves_every_backlogged_group() {
 
 		let mut options = MockConnectOptions::new(version);
 		// Draft 22 keeps its SETUP stream open, so it needs one more for groups.
-		options.transport.max_concurrent_uni_streams = Some(1 + usize::from(version.is_ietf()));
+		options.transport.max_concurrent_uni_streams = Some(1 + usize::from(!version.is_lite()));
 		options.server_publish = Some(publisher.consume());
 		options.client_subscribe = Some(viewer.clone());
 		let _pair = connect_mock(options).await;
 
-		let remote = viewer.consume().routed_broadcast("live").await.unwrap();
+		let remote = viewer
+			.consume()
+			.follow("live", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap();
 		let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(30));
 		let mut subscribers = Vec::new();
 		for i in 0..tracks.len() {

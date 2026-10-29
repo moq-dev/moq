@@ -32,6 +32,13 @@ import type { Source } from "./source";
 // The amount of time to wait before considering the video to be buffering.
 const BUFFERING = Milli(500);
 
+// The startup floor counts received media across holes, without counting the missing spans.
+function startupSpan(ranges: Container.BufferedRanges, first: Milli): { start: Milli; end: Milli } {
+	let duration = 0;
+	for (const range of ranges) duration += Math.max(0, range.end - Math.max(range.start, first));
+	return { start: first, end: Milli(first + duration) };
+}
+
 /** Signals the decoder reads. */
 export type DecoderInput = {
 	/** Whether to download the video track. Defaults to true; the parent may wire it from the renderer's output. */
@@ -55,7 +62,8 @@ export interface Stats {
 	bytesReceived: number;
 }
 
-type DecoderOutput = {
+/** Signals the decoder derives. */
+export type DecoderOutput = {
 	/** Fatal decode failure, cleared when another source is selected. */
 	error: Signal<Error | undefined>;
 	// The current frame to render.
@@ -156,8 +164,7 @@ export class Decoder {
 			const timestamp = effect.get(active.first);
 			if (timestamp === undefined) return null;
 			const ranges = effect.get(active.buffered);
-			const span = ranges.find((range) => range.start <= timestamp && range.end >= timestamp);
-			return span ? { ...span } : { start: timestamp, end: timestamp };
+			return startupSpan(ranges, timestamp);
 		});
 		this.#signals.cleanup(this.sync.register(target, startup));
 		this.#identity = this.#signals.computed((effect) => {
@@ -217,9 +224,9 @@ export class Decoder {
 			// Close the active track when disabled (e.g. paused or not visible).
 			// The pending cleanup won't do this because it was already promoted to #active.
 			this.#active.set(undefined);
-			// A paused or hidden player keeps its picture, but with nothing selectable (every rendition
-			// disabled or removed) it shows black rather than a frozen frame.
-			if (enabled && broadcast && !track) {
+			// Pause and visibility keep the picture while the broadcast is active. Disconnecting
+			// the broadcast or removing every rendition releases it.
+			if (!broadcast || !effect.get(broadcast.out.active) || (enabled && !track)) {
 				this.#clearCurrentFrame();
 				this.#out.buffered.set([]);
 			}
@@ -451,8 +458,10 @@ class DecoderTrack {
 	// Codec description from the last configure, reused after a playhead reset.
 	#description?: Uint8Array;
 
-	// The playhead moved and the next decoded frame decides whether the decoder resets.
+	// A hole or timeline restart makes the next decoded frame decide whether the codec resets.
 	#resetPending = false;
+	// A declared endpoint stays in force through holes until a later group starts a new timeline.
+	#endGroup?: number;
 
 	// The newest consumer reading this track, whose estimate a replacement continues. The predecessor
 	// is only held until the first one opens.
@@ -598,20 +607,19 @@ class DecoderTrack {
 			for (;;) {
 				const next = await nextMedia(consumer);
 				if (!next) break;
+				this.#onRead(next, latest);
 
-				// A gap or a declared end breaks the timeline: re-anchor before decoding further, and
-				// never bridge the buffer across it.
+				// A gap or declared end cuts the decoded span; neither bridges buffered ranges.
 				if (next.kind !== "frame") {
 					if (next.kind === "gap") recovery.gap();
-					if (latest !== undefined) this.#onBreak();
 					previous = undefined;
 					continue;
 				}
 				const { frame } = next;
 
 				// An older keyframe would replace the codec references needed by live deltas. Group
-				// sequences only grow within a subscription, so a break (which a stale marker can
-				// raise) never resets this guard. Rejected payloads still count as received bytes.
+				// sequences only grow within a subscription, so neither a hole nor an endpoint
+				// resets this guard. Rejected payloads still count as received bytes.
 				const stale = latest !== undefined && next.group < latest;
 				const accepted = !stale && recovery.accept(frame);
 				this.stats.update((current) => ({
@@ -643,7 +651,8 @@ class DecoderTrack {
 				latest = next.group;
 				this.#resetAtKeyframe(decoder, frame.keyframe);
 				decoder.decode(chunk);
-				if (!this.sync.playing.peek()) await this.#waitStartup(effect);
+				if (!this.sync.playing.peek())
+					await this.#waitStartup(effect, Milli.fromMicro(frame.timestamp as Micro));
 			}
 		});
 	}
@@ -684,19 +693,19 @@ class DecoderTrack {
 			for (;;) {
 				const next = await nextMedia(consumer);
 				if (!next) break;
+				this.#onRead(next, latest);
 
-				// A gap or a declared end breaks the timeline (see #runLegacy).
+				// Do not bridge buffered ranges across a gap or end (see #runLegacy).
 				if (next.kind !== "frame") {
 					if (next.kind === "gap") recovery.gap();
-					if (latest !== undefined) this.#onBreak();
 					previous = undefined;
 					continue;
 				}
 				const { frame } = next;
 
 				// An older keyframe would replace the codec references needed by live deltas. Group
-				// sequences only grow within a subscription, so a break (which a stale marker can
-				// raise) never resets this guard. Rejected payloads still count as received bytes.
+				// sequences only grow within a subscription, so neither a hole nor an endpoint
+				// resets this guard. Rejected payloads still count as received bytes.
 				const stale = latest !== undefined && next.group < latest;
 				const accepted = !stale && recovery.accept(frame);
 				this.stats.update((current) => ({
@@ -726,39 +735,58 @@ class DecoderTrack {
 						timestamp: frame.timestamp,
 					}),
 				);
-				if (!this.sync.playing.peek()) await this.#waitStartup(effect);
+				if (!this.sync.playing.peek()) await this.#waitStartup(effect, Milli.fromMicro(frame.timestamp));
 			}
 		});
 	}
 
-	// Once this track has filled its floor, leave further media encoded upstream while the other
-	// track fills. Otherwise a missing audio track could retain unbounded decoded GPU frames.
-	async #waitStartup(effect: Effect): Promise<void> {
+	// Decoded pictures park until startup releases, so leave further media encoded upstream once this
+	// track covers its floor, or once `timestamp` sits the max delay past the opening picture: the
+	// most any held frame may lead the playhead, which startup anchors there. Holes keep coverage
+	// short without bound, so only the second limit bounds the parked pictures.
+	async #waitStartup(effect: Effect, timestamp: Milli): Promise<void> {
 		// Some codecs need more input before their first output. Do not park that input
 		// behind a gate that needs the very picture the decoder has not produced yet.
-		if (this.first.peek() === undefined) return;
-		const span = this.#buffered.peek()[0];
-		if (!span || span.end - span.start < this.sync.out.delay.peek()) return;
+		const first = this.first.peek();
+		if (first === undefined) return;
+		const filled = (get: <T>(signal: Getter<T>) => T) => {
+			const span = startupSpan(get(this.#buffered), first);
+			return (
+				span.end - span.start >= get(this.sync.out.delay) || timestamp - first >= get(this.sync.out.maxDelay)
+			);
+		};
+		if (!filled((signal) => signal.peek())) return;
 		const waiting = new Effect();
 		const refill = new Once<true>();
 		waiting.run((inner) => {
 			// An adaptive floor can rise while another track fills. Resume decoding to reach it,
 			// rather than waiting on a clock whose startup now needs more video.
-			if (span.end - span.start < inner.get(this.sync.out.delay)) refill.set(true);
+			if (!filled((signal) => inner.get(signal))) refill.set(true);
 		});
 		try {
-			// Wait on the span's first picture, which is due the moment startup releases, so decoding
+			// Wait on the first picture, which is due the moment startup releases, so decoding
 			// resumes with the whole floor still ahead instead of once it has played out.
-			await effect.race(refill, this.sync.wait(span.start, waiting.abort));
+			await effect.race(refill, this.sync.wait(first, waiting.abort));
 		} finally {
 			waiting.close();
 		}
 	}
 
-	// The container read a gap or a declared end after media. Re-anchor and let the next decoded
-	// frame decide the decoder reset (see #resetAtKeyframe). Clearing `timestamp` keeps a stale
-	// high value from late-rejecting the following frames, which may overlap the previous group's
-	// tail. The held picture stays until the new keyframe renders.
+	// Container gaps restart prediction on the existing clock. Only a declared end followed by
+	// a later group establishes another timeline; a marker from older history cannot end live media.
+	#onRead(read: Container.Read, latest: number | undefined): void {
+		if (read.kind === "gap") {
+			if (latest !== undefined) this.#resetPending = true;
+		} else if (read.kind === "end") {
+			if (latest === undefined || read.group >= latest) this.#endGroup = read.group;
+		} else if (this.#endGroup !== undefined && read.group > this.#endGroup) {
+			this.#endGroup = undefined;
+			this.#onBreak();
+		}
+	}
+
+	// A fresh timeline invalidates parked pictures and its previous decoded span. The held picture
+	// stays until the new keyframe renders; the codec resets before that keyframe is decoded.
 	#onBreak(): void {
 		this.first.set(undefined);
 		this.timestamp.set(undefined);
@@ -767,12 +795,10 @@ class DecoderTrack {
 		this.#resetPending = true;
 	}
 
-	// Call before each decode. After a break, a keyframe starts a new timeline, so drop the
-	// pictures still queued in the decoder: one from later in a group that restarts would
-	// otherwise come out above the new keyframe and late-reject it. A delta continues a group the
-	// break interrupted (a stale marker or a max-delay hole), so it keeps the decoder's references;
-	// a reset would make WebCodecs require a key chunk and throw. `reset()` cannot cancel an
-	// output callback that already holds a frame; the clock epoch it captured rejects that one.
+	// Re-prime at a keyframe after a hole or restart, dropping pictures still queued in the codec.
+	// A delta may continue a group that a max-delay hole interrupted and still need its references;
+	// resetting before it would make WebCodecs require a key chunk. An output callback that already
+	// holds a frame stays parked on Sync; only a new timeline invalidates its clock epoch.
 	#resetAtKeyframe(decoder: VideoDecoder, keyframe: boolean): void {
 		if (!this.#resetPending) return;
 		this.#resetPending = false;
@@ -843,6 +869,7 @@ function hardwareAcceleration(config: { interlaced?: boolean }): HardwareAcceler
 	return config.interlaced ? "prefer-software" : undefined;
 }
 
+/** Whether the WebCodecs video decoder can play this config. */
 async function supported(config: Catalog.VideoConfig): Promise<boolean> {
 	if (!Catalog.containerSupported(config.container)) {
 		// `kind` is the literal "unknown" tag; the container the publisher actually named is in `raw`.

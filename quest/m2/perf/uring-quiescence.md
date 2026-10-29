@@ -5,7 +5,7 @@
 A received packet's QUIC processing and the sends it produces are staged in
 the same drive-loop turn, so one enter carries the reply. Today
 `Tasks::poll` runs one pass over the ready set per turn and a mid-pass wake
-lands in the next turn by design (rs/kio/src/task.rs:246-257, test
+lands in the next turn by design (`Tasks::poll` in rs/kio/src/task.rs, test
 `a_mid_pass_wake_lands_in_the_next_pass`), so a datagram costs three turns:
 dispatch sets the demux bit, the demux drains packets and kicks each
 connection driver (`Endpoint::demux` in
@@ -27,8 +27,9 @@ must not starve the socket.
   (today), 2, 4, and 8.
 - Dispatch runs before the task pass, not after: the loop becomes reap and
   dispatch, then tasks to quiescence, then submit or park. That removes the
-  stale first pass a park-returning turn runs today (worker.rs:180 polls on
-  readiness the previous turn already consumed).
+  stale first pass a park-returning turn runs today (the worker loop in
+  rs/moq-uring/src/worker.rs polls tasks on readiness the previous turn
+  already consumed).
 - The egress driver stages one GSO train of `TRAIN_SEGMENTS = 63` segments
   per turn and then wakes itself (`Driver::flush` in
   rs/moq-uring/src/quic/driver/connection.rs), so a deep backlog pays a
@@ -41,6 +42,9 @@ must not starve the socket.
   Decided in the 2026-09-30 audit: the egress requeue quest merged here, since
   both budgets need the same sweep.
 - Add `passes` per turn to the metrics beside `turns`.
+- [Task capacity](/quest/m2/performance-survey/task-capacity.md) also
+  reshapes the `Tasks::poll` wake-word snapshot. Whichever of the two lands
+  second rebases its benchmark on the other.
 - Ingress fairness: a pass budget does not bound work inside one poll.
   The endpoint's `Inner::poll_run` calls `poll_recv` until `Pending`, so one
   poll drains every queued receive completion, and `Endpoint::demux` drains
@@ -56,7 +60,3 @@ shape, on Linux with the io_uring workers at both base and current, using
 `just bench-runtime` at each revision with the same worker count. The existing
 starvation test keeps its meaning with a budget of 1 and gains a sibling
 proving the budget bound.
-
-## Required
-
-- [Profile the io_uring workers](/quest/m2/perf/uring-profile.md) - the profile that attributes the turns

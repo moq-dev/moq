@@ -3,6 +3,7 @@
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, ready};
+use std::time::Duration;
 
 use crate::error::MoqError;
 use crate::ffi::{Background, Guard, Task};
@@ -23,23 +24,24 @@ fn raw_frame(frame: moq_net::frame::Frame) -> Result<MoqFrame, MoqError> {
 
 /// Subscriber-side delivery preferences, mirroring [`moq_net::track::Subscription`].
 ///
-/// Construct with the fields you care about; the rest default to moq-net's defaults
-/// (priority 0, no staleness tolerance, everything still fresh, newest first).
+/// Set `max_delay`, whose moq-net default is 0, and the other fields you care about; the
+/// rest default to moq-net's defaults (priority 0, everything still fresh, newest first).
 #[derive(Clone, uniffi::Record)]
 pub struct MoqSubscription {
 	/// Delivery priority; higher values preempt lower ones under bandwidth contention.
 	/// The default 0 is the midpoint.
 	#[uniffi(default = 0)]
 	pub priority: i8,
-	/// Maximum age of a non-latest group before it is skipped, in microseconds.
+	/// Maximum age of a non-latest group before it is skipped.
 	/// `0` skips immediately; a larger value tolerates that much reordering; null leaves
 	/// the publisher's max age alone to bound it.
 	///
 	/// Enforced both by the publisher's cache (sent on the wire) and by any local
 	/// buffering, such as [`MoqMediaTrackConsumer`]'s jitter buffer. It caps every range.
-	#[uniffi(default = Some(0))]
-	pub max_delay_us: Option<u64>,
-	/// The spans of the track to deliver, or null for everything `max_delay_us` still
+	///
+	/// It has no binding default because UniFFI cannot spell a duration literal.
+	pub max_delay: Option<Duration>,
+	/// The spans of the track to deliver, or null for everything `max_delay` still
 	/// considers fresh. An empty list asks for nothing.
 	///
 	/// A request to the publisher, aggregated across every subscriber, and this
@@ -144,16 +146,16 @@ pub struct MoqFetchGroupOptions {
 	/// The default 0 is the midpoint.
 	#[uniffi(default = 0)]
 	pub priority: i8,
-	/// Maximum age behind the live edge in microseconds; null uses publisher retention alone.
+	/// Maximum age behind the live edge; null uses publisher retention alone.
 	#[uniffi(default = None)]
-	pub max_delay_us: Option<u64>,
+	pub max_delay: Option<Duration>,
 }
 
 impl From<MoqFetchGroupOptions> for moq_net::group::Fetch {
 	fn from(options: MoqFetchGroupOptions) -> Self {
 		let fetch = moq_net::group::Fetch::default().with_priority(options.priority);
-		match options.max_delay_us {
-			Some(max_delay) => fetch.with_max_delay(std::time::Duration::from_micros(max_delay)),
+		match options.max_delay {
+			Some(max_delay) => fetch.with_max_delay(max_delay),
 			None => fetch,
 		}
 	}
@@ -165,7 +167,7 @@ impl TryFrom<MoqSubscription> for moq_net::track::Subscription {
 	fn try_from(s: MoqSubscription) -> Result<Self, MoqError> {
 		let mut subscription = moq_net::track::Subscription::default()
 			.with_priority(s.priority)
-			.with_max_delay(s.max_delay_us.map(std::time::Duration::from_micros));
+			.with_max_delay(s.max_delay);
 		if let Some(ranges) = s.ranges {
 			subscription = subscription.with_ranges(
 				ranges
@@ -237,7 +239,10 @@ impl MoqBroadcastConsumer {
 			.watch(async {
 				// Normalize before testing emptiness: this is a caller-supplied string, and one made only
 				// of slashes normalizes to the empty reference, which names this broadcast.
-				let reference = reference.map(moq_net::path::Relative::new);
+				let reference = reference
+					.map(moq_net::path::Relative::new)
+					.transpose()
+					.map_err(moq_net::Error::from)?;
 				let epoch: Option<moq_net::Epoch> = epoch.map(str::parse).transpose()?;
 
 				let Some(origin) = self.origin.clone() else {
@@ -631,7 +636,7 @@ impl MoqTrackConsumer {
 	///
 	/// Groups are returned as they arrive on the wire, which may be out of sequence
 	/// order (e.g. if a later group lands before an earlier one on a separate stream).
-	/// One that drifts further behind the live edge than the subscription's `max_delay_us`
+	/// One that drifts further behind the live edge than the subscription's `max_delay`
 	/// is skipped, or ends its pending read if already returned; raise it to keep stalled groups.
 	///
 	/// The first call commits this track to arrival order: sequence-order reads
@@ -707,8 +712,8 @@ impl MoqTrackConsumer {
 	}
 
 	/// Return the publisher-side track properties learned during subscription.
-	pub fn info(&self) -> Result<MoqTrackInfo, MoqError> {
-		MoqTrackInfo::try_from(&self.info)
+	pub fn info(&self) -> MoqTrackInfo {
+		MoqTrackInfo::from(&self.info)
 	}
 
 	/// Change this subscriber's delivery preferences.

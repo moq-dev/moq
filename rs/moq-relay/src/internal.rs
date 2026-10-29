@@ -389,6 +389,25 @@ async fn revalidate_sessions(RawQuery(query): RawQuery, State(state): State<Inte
 	}
 }
 
+/// A Prometheus label value, escaped per the text exposition format so no value
+/// can end its label or line early.
+pub(crate) struct Label<'a>(pub(crate) &'a str);
+
+impl std::fmt::Display for Label<'_> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		use std::fmt::Write as _;
+		for c in self.0.chars() {
+			match c {
+				'\\' => f.write_str("\\\\")?,
+				'"' => f.write_str("\\\"")?,
+				'\n' => f.write_str("\\n")?,
+				c => f.write_char(c)?,
+			}
+		}
+		Ok(())
+	}
+}
+
 /// Render a [`moq_net::stats::Snapshot`] as Prometheus text exposition (v0.0.4).
 ///
 /// Hand-formatted rather than pulling in a metrics registry crate: the atomics
@@ -414,8 +433,8 @@ fn render_metrics(
 			let _ = writeln!(
 				out,
 				"{name}{{tier=\"{}\",role=\"{}\"}} {}",
-				tier.as_str(),
-				role.as_str(),
+				Label(tier.as_str()),
+				Label(role.as_str()),
 				field(totals)
 			);
 		}
@@ -438,6 +457,12 @@ fn render_metrics(
 		"moq_relay_datagrams_total",
 		"Single-frame groups carried over unreliable QUIC datagrams; a subset of groups.",
 		|c| c.datagrams,
+	);
+	counter(
+		&mut out,
+		"moq_relay_inflated_bytes_total",
+		"Payload bytes inflated from compressed groups for peers that cannot carry compression, once per group.",
+		|c| c.inflated,
 	);
 	counter(
 		&mut out,
@@ -521,7 +546,7 @@ fn render_metrics(
 		let _ = writeln!(out, "# HELP {name} {help}");
 		let _ = writeln!(out, "# TYPE {name} counter");
 		for (tier, presence) in snap.sessions() {
-			let _ = writeln!(out, "{name}{{tier=\"{}\"}} {}", tier.as_str(), field(&presence));
+			let _ = writeln!(out, "{name}{{tier=\"{}\"}} {}", Label(tier.as_str()), field(&presence));
 		}
 	}
 
@@ -530,12 +555,12 @@ fn render_metrics(
 		(
 			"moq_relay_control_tx_bytes_total",
 			"Control-message bytes encoded for sending, including codec prefixes; excludes transport overhead.",
-			(|b: &moq_net::stats::Bytes| b.tx) as fn(&moq_net::stats::Bytes) -> u64,
+			(|b: &moq_net::stats::Totals| b.tx) as fn(&moq_net::stats::Totals) -> u64,
 		),
 		(
 			"moq_relay_control_rx_bytes_total",
 			"Control-message bytes decoded, including codec prefixes; excludes transport overhead.",
-			(|b: &moq_net::stats::Bytes| b.rx) as fn(&moq_net::stats::Bytes) -> u64,
+			(|b: &moq_net::stats::Totals| b.rx) as fn(&moq_net::stats::Totals) -> u64,
 		),
 	] {
 		let _ = writeln!(out, "# HELP {name} {help}");
@@ -544,8 +569,8 @@ fn render_metrics(
 			let _ = writeln!(
 				out,
 				"{name}{{tier=\"{}\",class=\"{}\"}} {}",
-				tier.as_str(),
-				class.as_str(),
+				Label(tier.as_str()),
+				Label(class.as_str()),
 				field(bytes)
 			);
 		}
@@ -560,7 +585,7 @@ fn render_metrics(
 		let _ = writeln!(
 			out,
 			"moq_relay_requests_total{{tier=\"{}\"}} {}",
-			tier.as_str(),
+			Label(tier.as_str()),
 			presence.requests
 		);
 	}
@@ -572,7 +597,7 @@ fn render_metrics(
 		let _ = writeln!(
 			out,
 			"moq_relay_sessions_opened_total{{tier=\"{}\"}} {}",
-			tier.as_str(),
+			Label(tier.as_str()),
 			sessions.sessions_started
 		);
 	}
@@ -585,7 +610,7 @@ fn render_metrics(
 		let _ = writeln!(
 			out,
 			"moq_relay_sessions_closed_total{{tier=\"{}\"}} {}",
-			tier.as_str(),
+			Label(tier.as_str()),
 			sessions.sessions_ended
 		);
 	}
@@ -600,8 +625,8 @@ fn render_metrics(
 			let _ = writeln!(
 				out,
 				"moq_relay_sessions_failed_total{{tier=\"{}\",kind=\"{}\"}} {}",
-				tier.as_str(),
-				kind.as_str(),
+				Label(tier.as_str()),
+				Label(kind.as_str()),
 				presence.sessions_failed.count(kind)
 			);
 		}
@@ -645,7 +670,7 @@ fn render_refusals(out: &mut String, refusals: &crate::refusals::Refusals) {
 		let _ = writeln!(
 			out,
 			"moq_relay_sessions_refused_total{{reason=\"{}\"}} {}",
-			refusal.as_str(),
+			Label(refusal.as_str()),
 			counts.count(refusal)
 		);
 	}
@@ -687,8 +712,8 @@ fn render_accepts(out: &mut String, listeners: &[moq_tokio::accept::Health]) {
 			let _ = writeln!(
 				out,
 				"moq_relay_accept_failures_total{{listener=\"{}\",class=\"{}\"}} {}",
-				health.listener(),
-				failure.as_str(),
+				Label(health.listener()),
+				Label(failure.as_str()),
 				health.failures(failure)
 			);
 		}
@@ -703,7 +728,7 @@ fn render_accepts(out: &mut String, listeners: &[moq_tokio::accept::Health]) {
 		let _ = writeln!(
 			out,
 			"moq_relay_accept_stalled_seconds{{listener=\"{}\"}} {}",
-			health.listener(),
+			Label(health.listener()),
 			health.stalled().unwrap_or_default().as_secs_f64()
 		);
 	}
@@ -1207,10 +1232,35 @@ mod tests {
 		}
 	}
 
+	/// A label value carrying a quote, backslash, or newline stays inside its label, so
+	/// it can neither break the exposition nor forge another series.
+	#[test]
+	fn label_values_are_escaped() {
+		let stats = moq_net::stats::Registry::new(Default::default());
+		let tier = "a\\b\"} 9\nmoq_relay_requests_total{tier=\"x";
+		drop(
+			stats
+				.tier(moq_net::stats::Tier::new(moq_net::Path::from_static(tier)))
+				.request(moq_net::Path::from_static("root")),
+		);
+		let body = render_metrics(&stats.snapshot(), &[], &[]);
+		assert!(
+			body.contains(r#"moq_relay_requests_total{tier="a\\b\"} 9\nmoq_relay_requests_total{tier=\"x"} 1"#),
+			"{body}"
+		);
+		assert!(
+			body.lines()
+				.all(|line| !line.starts_with("moq_relay_requests_total{tier=\"x")),
+			"{body}"
+		);
+	}
+
 	#[test]
 	fn request_metrics_never_open_a_session() {
 		let stats = moq_net::stats::Registry::new(Default::default());
-		let request = stats.tier(moq_net::stats::Tier::new("http")).request("root");
+		let request = stats
+			.tier(moq_net::stats::Tier::new(moq_net::Path::from_static("http")))
+			.request(moq_net::Path::from_static("root"));
 		drop(request);
 		let body = render_metrics(&stats.snapshot(), &[], &[]);
 		assert!(body.contains("# TYPE moq_relay_requests_total counter"), "{body}");
@@ -1229,7 +1279,9 @@ mod tests {
 	fn wire_metrics_include_internal_sessions_and_keep_final_totals() {
 		let registry = moq_net::stats::Registry::new(Default::default());
 		for tier in ["internal", "edge"] {
-			let session = registry.tier(moq_net::stats::Tier::new(tier)).session("");
+			let session = registry
+				.tier(moq_net::stats::Tier::new(moq_net::Path::from_static(tier)))
+				.session(moq_net::Path::empty());
 			let source = moq_net::transport::Wire::new();
 			let guard = session.wire(source.clone());
 			source.set_sent_bytes(123);
@@ -1254,8 +1306,11 @@ mod tests {
 	#[tokio::test]
 	async fn announce_metrics_keep_retired_totals() {
 		let stats = moq_net::stats::Registry::new(Default::default());
-		let producer =
-			moq_tokio::origin::spawn().with_stats(stats.tier(moq_net::stats::Tier::new("edge")).session("root"));
+		let producer = moq_tokio::origin::spawn().with_stats(
+			stats
+				.tier(moq_net::stats::Tier::new(moq_net::Path::from_static("edge")))
+				.session(moq_net::Path::from_static("root")),
+		);
 		let broadcast = producer.create_broadcast("demo/retired").unwrap();
 		broadcast.announce(Default::default()).unwrap();
 
@@ -1298,7 +1353,7 @@ mod tests {
 
 		// Default-tier egress: an untagged local publisher writes, a tagged egress
 		// consumer reads it out, so publisher `bytes` advance on the default tier.
-		let default_ctx = stats.tier(Tier::default()).session("acme");
+		let default_ctx = stats.tier(Tier::default()).session(moq_net::Path::from_static("acme"));
 		let pub_origin = moq_tokio::origin::spawn();
 		let egress = pub_origin.consume().with_stats(default_ctx.clone());
 		let mut announced = egress.announced();
@@ -1308,7 +1363,9 @@ mod tests {
 
 		// Named-tier ingress: a tagged ingress producer writes, so subscriber
 		// `bytes` advance on the regional tier.
-		let regional_ctx = stats.tier(Tier::new("region/sjc")).session("peer");
+		let regional_ctx = stats
+			.tier(Tier::new(moq_net::Path::from_static("region/sjc")))
+			.session(moq_net::Path::from_static("peer"));
 		let sub_origin = moq_tokio::origin::spawn().with_stats(regional_ctx.clone());
 		let sub_source = sub_origin.create_broadcast("demo/x").unwrap();
 		sub_source.announce(Default::default()).unwrap();
@@ -1321,10 +1378,7 @@ mod tests {
 		// egress bytes out of the default-tier broadcast.
 		let (update, active) = next_update(&mut announced).await.unwrap();
 		assert!(active);
-		let bc = egress
-			.request_broadcast(moq_net::Path::new(update.prefix.as_str()), None)
-			.await
-			.unwrap();
+		let bc = egress.request(update.prefix.clone(), None).await.unwrap();
 		let mut egress_sub = bc.track("video").unwrap().subscribe(None).await.unwrap();
 		{
 			let mut group = pub_track.append_group().unwrap();
@@ -1382,6 +1436,48 @@ mod tests {
 		assert!(
 			body.contains("moq_relay_sessions_opened_total{tier=\"\"} 1"),
 			"session presence:\n{body}"
+		);
+	}
+
+	/// Two plain egress sessions reading one compressed group share a single inflate.
+	#[tokio::test(start_paused = true)]
+	async fn metrics_count_one_inflate_per_group() {
+		use moq_net::Timestamp;
+		use moq_net::stats::{Registry, Tier};
+
+		let stats = Registry::new(Default::default());
+		let origin = moq_tokio::origin::spawn();
+		let source = origin.create_broadcast("demo/x").unwrap();
+		source.announce(Default::default()).unwrap();
+		let track = source
+			.create_track("catalog.json", timed().with_compress(true))
+			.unwrap();
+		let payload = format!("{{\"pad\":\"{}\"}}", "abc".repeat(300));
+
+		let mut readers = Vec::new();
+		for session in ["a", "b"] {
+			let ctx = stats
+				.tier(Tier::default())
+				.session(moq_net::Path::new(session).unwrap());
+			let egress = origin.consume().with_stats(ctx);
+			let bc = egress.request("demo/x", None).await.unwrap();
+			readers.push(bc.track("catalog.json").unwrap().subscribe(None).await.unwrap());
+		}
+		let mut group = track.append_group().unwrap();
+		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+		group.finish().unwrap();
+		for reader in &mut readers {
+			let mut group = reader.recv_group().await.unwrap().unwrap();
+			assert_eq!(group.read_frame().await.unwrap().unwrap().payload, payload.as_bytes());
+		}
+
+		let body = render_metrics(&stats.snapshot(), &[], &[]);
+		assert!(
+			body.contains(&format!(
+				"moq_relay_inflated_bytes_total{{tier=\"\",role=\"publisher\"}} {}",
+				payload.len()
+			)),
+			"one inflated copy:\n{body}"
 		);
 	}
 }

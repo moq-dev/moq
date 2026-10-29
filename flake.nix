@@ -32,7 +32,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:kixelated/quest/cbd939adf5043f083e24e0302d40f7618c09f427";
+      url = "github:kixelated/quest/21d2159d504295c629d545a126f0cefd6da80149";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
@@ -124,6 +124,24 @@
           }
         );
 
+        # The CodSpeed Criterion build (`just rs codspeed`). 6.0 runs each benchmark in its own
+        # process, so allocator state no longer carries between them; nixpkgs still has 5.x.
+        cargo-codspeed = pkgs.cargo-codspeed.overrideAttrs (
+          finalAttrs: old: {
+            version = "6.0.0";
+            src = pkgs.fetchFromGitHub {
+              owner = "CodSpeedHQ";
+              repo = "codspeed-rust";
+              tag = "v${finalAttrs.version}";
+              hash = "sha256-qY+IQx2apIOGTkRXUnbNCJT4Jo6TESY/80SXyknUBWY=";
+            };
+            cargoDeps = pkgs.rustPlatform.fetchCargoVendor {
+              inherit (finalAttrs) pname version src;
+              hash = "sha256-qiyA74h80sT3tM/TToZxPDGMmnEwB8MYhFM84Wu2ySs=";
+            };
+          }
+        );
+
         # Rust dependencies
         rustDeps =
           with pkgs;
@@ -157,6 +175,7 @@
             # unification would otherwise hide a broken single-crate build.
             cargo-hack
             cargo-nextest
+            cargo-codspeed
             # Source-based test coverage (`just rs coverage`).
             # Its LLVM test helpers must read the compiler's profile format.
             (cargo-llvm-cov.override {
@@ -285,7 +304,7 @@
         ];
 
         # Linters / formatters used by `just check` and `just fix`, which
-        # skip a module whose tools aren't on $PATH. CI sets MOQ_STRICT=1,
+        # skip a module whose tools aren't on $PATH. CI sets CI_STRICT=1,
         # which turns that skip into an error (see the tools map in
         # sh/dispatch.sh), so this list and that one have to stay in step.
         lintDeps = with pkgs; [
@@ -375,10 +394,11 @@
           # The upstream repository ignores Cargo.lock so cargo installs test
           # the unlocked resolver. Nix still consumes committed lock data.
           cargoLock.lockFile = ./nix/uniffi-dart-Cargo.lock;
-          # Carry record converter and per-operation cancellation fixes at the source.
+          # Carry record converter, per-operation cancellation, and negative duration fixes at the source.
           patches = [
             ./nix/uniffi-dart-record-error.patch
             ./nix/uniffi-dart-cancellation.patch
+            ./nix/uniffi-dart-duration-negative.patch
           ];
           postPatch = ''
             cp ${./nix/uniffi-dart-Cargo.lock} Cargo.lock
@@ -388,17 +408,18 @@
           doCheck = false;
         };
 
-        # uniffi-bindgen-cpp renders rs/moq-ffi for cpp/moq's CMake build. Not in
-        # nixpkgs, so build it from source; without it `just check` skips the
-        # cpp module, which MOQ_STRICT turns into a failure in CI.
+        # uniffi-bindgen-cpp renders rs/moq-ffi for the CMake builds of cpp/moq and,
+        # with its C backend, c/moq. Not in nixpkgs, so build it from source;
+        # without it `just check` skips the c and cpp modules, which CI_STRICT
+        # turns into a failure in CI.
         #
         # Like uniffi-bindgen-go, the tag pairs the generator's version with the
         # uniffi release it reads, so it moves with the `uniffi` dependency in
         # rs/moq-ffi/Cargo.toml. The other places name the same tag and must be
         # bumped together: the `cargo install` lines in rs/moq-ffi/build.sh,
-        # cpp/moq/README.md, .github/workflows/cpp.yml,
-        # .github/workflows/platform.yml, .github/workflows/release-cpp.yml, and
-        # .github/workflows/release-shared-ffi.yml.
+        # cpp/moq/README.md, .github/workflows/{c,cpp}.yml,
+        # .github/workflows/platform.yml, .github/workflows/release-{c,cpp}.yml,
+        # and .github/workflows/release-shared-ffi.yml.
         #
         # This points at a fork of LiveKit's async branch (livekit/uniffi-bindgen-cpp
         # PR #1): neither LiveKit nor NordSecurity has a uniffi 0.32 generator,
@@ -633,6 +654,15 @@
           # finds a shim there too. That is the only way mbx reaches a build
           # that spawns Cargo itself, which release-plz does.
           shellHook = ''
+            # `nix develop` points TMPDIR at a fresh nix-shell.* dir that it
+            # never removes. Drop it and keep the caller's TMPDIR, as nix-direnv
+            # does, so nothing piles up there.
+            if [[ ''${NIX_BUILD_TOP-} == */nix-shell.* && -d $NIX_BUILD_TOP ]]; then
+              rm -rf "$NIX_BUILD_TOP"
+              export TMPDIR=''${NIX_BUILD_TOP%/*}
+              unset NIX_BUILD_TOP TMP TEMP TEMPDIR
+            fi
+
             status=$(mbx setup --status 2>/dev/null || true)
             shim=$(printf '%s\n' "$status" | sed -n '1s/.*: //p')
             if [ -x "$shim" ]; then
@@ -643,7 +673,7 @@
           env = {
             # What sh/dispatch.sh checks before a scoped `just check` or `just
             # fix`. IN_NIX_SHELL would also pass inside another project's shell.
-            MOQ_DEV_SHELL = "1";
+            IN_MOQ_DEV_SHELL = "1";
 
             PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
             PLAYWRIGHT_VERSION = pkgs.playwright-driver.version;

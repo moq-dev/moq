@@ -53,8 +53,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Evidence outlives the run, under the benchmark artifact root rather than $TMPDIR.
-export MOQ_TEST_RUNS="${MOQ_TEST_RUNS:-$WORKSPACE/target/bench/browser}"
-export MOQ_TEST_KEEP=1
+export HARNESS_RUNS="${HARNESS_RUNS:-$WORKSPACE/target/bench/browser}"
+export HARNESS_KEEP=1
 PROFILE="${BENCH_PROFILE:-release}"
 RELAY="${RELAY_BIN:-}"
 
@@ -88,7 +88,7 @@ bun install --frozen-lockfile
 
 cd "$HERE"
 # The in-memory paths share Chromium installation and artifact retention with this lane.
-for benchmark in frames drift; do
+for benchmark in frames drift ledger; do
     bun micro.ts --bench "$benchmark" --rounds 1 --out "$HARNESS_RUN/$benchmark.json" \
         current="$WORKSPACE" aa="$WORKSPACE"
 done

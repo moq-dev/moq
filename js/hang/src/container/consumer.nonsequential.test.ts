@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Micro, Milli } from "@moq/clock";
-import { Group, Time, Track, Varint } from "@moq/net";
+import { Time, Track, Varint } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { Format as LegacyFormat } from "./legacy.ts";
 
@@ -41,13 +41,12 @@ test("Consumer waits on a non-sequential hang group because it has no per-frame 
 	});
 
 	// Group A at a large sequence, completed so the cursor advances past it.
-	const a = new Group.Producer(1_000_000);
+	const a = track.createGroup(1_000_000);
 	a.writeFrame({
 		payload: encodeLegacyFrame(0 as Micro, new Uint8Array([0x01])),
 		timestamp: Time.Timestamp.now(),
 	});
-	a.close();
-	track.writeGroup(a);
+	a.finish();
 
 	// Drain A's frame.
 	const firstFrame = await nextFrame(consumer);
@@ -59,8 +58,7 @@ test("Consumer waits on a non-sequential hang group because it has no per-frame 
 	// Open group B at a large jump (+90_000, NOT +1) with a frame far past A's last PTS, and leave it
 	// open. Legacy has no duration, so A's end is unknown -- B could be continuous, or group 1_000_001
 	// could still be coming. We cannot tell, so B must NOT surface yet.
-	const b = new Group.Producer(1_090_000);
-	track.writeGroup(b);
+	const b = track.createGroup(1_090_000);
 	b.writeFrame({
 		payload: encodeLegacyFrame(1_000_000 as Micro, new Uint8Array([0x02])),
 		timestamp: Time.Timestamp.now(),

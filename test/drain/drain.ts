@@ -109,10 +109,11 @@ await new Promise<void>((resolve, reject) => {
 
 // ── publisher on B ────────────────────────────────────────────────────────────
 const published = new Moq.Origin.Producer();
-const broadcast = published.createBroadcast(path);
+const broadcastPublication = published.createBroadcast(path);
+const broadcast = broadcastPublication.broadcast;
 const track = broadcast.createTrack(trackName, { timescale: Moq.Time.Timescale.MILLI });
 // The epoch is what says B's route serves the same broadcast as A's.
-broadcast.announce({ epoch: Moq.Epoch.mint() });
+broadcastPublication.announce({ epoch: Moq.Epoch.mint() });
 const publisher = new Moq.Connection({
 	url: new URL(`http://127.0.0.1:${bPort}/`),
 	publish: published.consume(),
@@ -126,7 +127,7 @@ const ticker = setInterval(() => {
 		payload: new TextEncoder().encode(String(group.sequence)),
 		timestamp: Moq.Time.Timestamp.now(),
 	});
-	group.close();
+	group.finish();
 	lastPublished = group.sequence;
 }, GROUP_INTERVAL_MS);
 
@@ -148,7 +149,7 @@ const viewer = new Moq.Connection({
 
 // One request and one subscription, at the default zero budget, read for the whole run: the
 // route moving from A to B re-sources the track underneath.
-const request = watched.request(path, { announced: true });
+const request = watched.follow(path);
 await until("the broadcast to resolve", () => request.active.peek() !== undefined);
 const active = request.active.peek() as Moq.Broadcast.Consumer;
 log("watching");

@@ -127,8 +127,9 @@ way, awaited.
 
 Public entry points:
 
-- `encode::publish_capture(...)` captures a webcam, encodes it, and publishes on
-  demand: the track and catalog are advertised up front, but the camera opens
+- `encode::publish_capture(...)` captures a webcam, encodes it, and publishes it:
+  the track and catalog are advertised up front, and the camera stays open
+  whether or not anyone is watching. With `Capture::on_demand`, the camera opens
   only while a subscriber is watching and is released when the last one leaves.
 - `encode::Producer` publishes frames you encoded yourself (`publish(&[Encoded])`),
   handling the catalog and framing. Each is published at its own timestamp.
@@ -224,9 +225,14 @@ refused rather than narrowed to 8-bit 4:2:0. Any other rendition yields
 
 `decode::Config::output` says where decoded pictures live: `Output::Native`
 (the default) hands back whatever the backend decoded into, a GPU surface or
-CPU pixels, and `Output::Cpu` delivers every picture as `Surface::I420`,
+CPU pixels, `Output::Cpu` delivers every picture as `Surface::I420`,
 decoded straight to system memory where the backend can and downloaded where it
-cannot. `decode::Config::scale_hint` asks a decoder with a hardware scaler
+cannot, and `Output::Render` keeps only the surfaces `render::Renderer` imports
+and downloads the rest. The renderer refuses any other GPU surface, so a player
+decodes with `render::output(&device)`, which picks `Output::Render` for a
+device that can import and `Output::Cpu` for one that cannot (wgpu's GL
+backend, or Linux without DMA-BUF import). `capture::Config::output` makes the same choice
+for captured frames. `decode::Config::scale_hint` asks a decoder with a hardware scaler
 (NVDEC) to emit that size; it is a hint, so check `Frame::size` and use
 `Frame::resize` for the exact size. `decode::Consumer` takes `decode::Options`,
 which pairs that config with the subscription's `start` and `max_delay`.

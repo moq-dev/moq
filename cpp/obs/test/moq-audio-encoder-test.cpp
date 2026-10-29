@@ -15,6 +15,7 @@
 #include <cstring>
 #include <optional>
 #include <string>
+#include <variant>
 #include <vector>
 
 #include <obs-module.h>
@@ -202,10 +203,11 @@ void CheckSubscriberDecodes(const char *preset, size_t channels)
 		return;
 
 	auto origin = moq::OriginProducer::init(moq::OriginConfig{});
-	auto broadcast = TestOk(origin->create_broadcast("room"), "create_broadcast");
+	auto publication = TestOk(origin->create_broadcast("room"), "create_broadcast");
+	auto broadcast = publication->broadcast();
 	moq::AnnounceRoute route;
 	route.epoch = moq::mint_epoch();
-	TestOk(broadcast->announce(route), "announce");
+	TestOk(publication->announce(route), "announce");
 
 	moq::AudioInit init{};
 	init.format = moq::AudioFormat::kOpus;
@@ -234,7 +236,7 @@ void CheckSubscriberDecodes(const char *preset, size_t channels)
 	moq::AudioDecoderOutput output{moq::AudioSampleFormat::kF32};
 	output.channels = static_cast<uint32_t>(channels);
 	// The packets are written faster than real time, so let none be skipped as stale.
-	output.max_delay_us = 10'000'000;
+	output.max_delay = std::chrono::seconds(10);
 	auto audio = TestOk(moq::AudioConsumer::subscribe(consumer, name, rendition, output).get(), "audio consumer");
 
 	const int count = 50;
@@ -270,9 +272,15 @@ void CheckSubscriberDecodes(const char *preset, size_t channels)
 			CHECK(!"decoded audio stalled");
 			break;
 		}
-		auto frame = TestOk(next.get(), "audio next");
-		if (!frame)
+		auto read = TestOk(next.get(), "audio next");
+		if (!read)
 			break;
+		// Raw packets carry no encoder end, and nothing was lost.
+		const auto *variant = std::get_if<moq::AudioRead::kFrame>(&read->get_variant());
+		CHECK(variant != nullptr);
+		if (!variant)
+			break;
+		const auto *frame = &variant->frame;
 		if (!first_decoded_us)
 			first_decoded_us = frame->timestamp_us;
 		const auto *samples = reinterpret_cast<const float *>(frame->data.data());

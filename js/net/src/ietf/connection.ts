@@ -13,9 +13,7 @@ import * as Path from "../path.ts";
 import { type Reader, Readers, type Stream } from "../stream.ts";
 import { withTimeout } from "../util/timeout.ts";
 import { registerWire } from "../wire.ts";
-import { ControlStreamAdapter, NativeSession, RequestWindowError, type Session } from "./adapter.ts";
 import { AuthMessage, IetfAuthWire } from "./auth.ts";
-import { supported as authSupported } from "./auth_setup.ts";
 import * as Cluster from "./cluster.ts";
 import type { RequestKind } from "./error.ts";
 import { Fetch, FetchHeader } from "./fetch.ts";
@@ -25,13 +23,9 @@ import { Publish } from "./publish.ts";
 import { PublishNamespace } from "./publish_namespace.ts";
 import { Publisher } from "./publisher.ts";
 import { malformed, refuse } from "./request_stream.ts";
+import { NativeSession } from "./session.ts";
 import { Subscribe, SubscribeUpdate } from "./subscribe.ts";
-import {
-	SUBSCRIBE_TRACKS_ID,
-	SubscribeNamespace,
-	SubscribeNamespaceLegacy,
-	SubscribeOptions,
-} from "./subscribe_namespace.ts";
+import { SUBSCRIBE_TRACKS_ID, SubscribeNamespace } from "./subscribe_namespace.ts";
 import { SubscribeTracks } from "./subscribe_tracks.ts";
 import { Subscriber } from "./subscriber.ts";
 import { MalformedAuthToken } from "./token.ts";
@@ -81,8 +75,8 @@ export class Connection implements Established {
 	// the dialing side fails loud on a publication its grant does not cover.
 	#client: boolean;
 
-	// Session abstraction: adapter for v14-v16, native for v17.
-	#session: Session;
+	// Opens request streams and allocates request IDs.
+	#session: NativeSession;
 
 	// Module for contributing tracks.
 	#publisher: Publisher;
@@ -101,8 +95,8 @@ export class Connection implements Established {
 	// Whether both SETUPs offered MoQ Epoch, so advertisements and requests may carry EPOCH.
 	#epoch: boolean;
 
-	// The peer's GOAWAY: read here on v17+, by the control stream adapter before that.
-	#goaway: Once<Drain>;
+	// The peer's GOAWAY, read off its SETUP stream.
+	#goaway = new Once<Drain>();
 
 	// Just to avoid logging when `close()` is called.
 	#closed = false;
@@ -114,8 +108,7 @@ export class Connection implements Established {
 	 * Creates a new Connection instance.
 	 * @param url - The URL of the connection
 	 * @param quic - The WebTransport session
-	 * @param control - The control/setup stream
-	 * @param maxRequestId - The initial max request ID
+	 * @param control - The SETUP stream, which then carries GOAWAY
 	 * @param version - The negotiated protocol version
 	 * @param solicit - What the peer's SETUP declared (undefined when it declared nothing)
 	 * @param cluster - The Hop IDs the SETUP exchange settled, on the versions that negotiate them
@@ -127,7 +120,6 @@ export class Connection implements Established {
 		url,
 		quic,
 		control,
-		maxRequestId,
 		version,
 		client,
 		publish,
@@ -140,14 +132,12 @@ export class Connection implements Established {
 		handle,
 		epoch = false,
 		early = [],
-		requestWindow,
 		extensions,
 		peerImplementation,
 	}: {
 		url: URL;
 		quic: WebTransport;
 		control: Stream;
-		maxRequestId: bigint;
 		version: IetfVersion;
 		/** Whether this peer initiated the session, selecting the even request-ID space. */
 		client: boolean;
@@ -169,16 +159,14 @@ export class Connection implements Established {
 		 * cannot negotiate the extension, as is a `peer` the peer never declared.
 		 */
 		cluster?: Cluster.Hops;
-		/** Whether MoQ Auth is negotiated (draft-17+): offered by both SETUPs. */
+		/** Whether MoQ Auth is negotiated: offered by both SETUPs. */
 		auth?: boolean;
 		/** The auth handle to build the session on, or undefined for one of its own. */
 		handle?: Auth.Handle;
-		/** Whether MoQ Epoch is negotiated (draft-17+): offered by both SETUPs. */
+		/** Whether MoQ Epoch is negotiated: offered by both SETUPs. */
 		epoch?: boolean;
-		/** Uni streams that arrived before the peer's SETUP, type unread (v17+). */
+		/** Uni streams that arrived before the peer's SETUP, type unread. */
 		early?: Reader[];
-		/** Requests the peer may hold open on drafts 14 to 16, the window our SETUP advertised (default `REQUEST_WINDOW`). */
-		requestWindow?: bigint;
 		/** What our own SETUP offered; every extension when omitted. */
 		extensions?: { solicit: boolean };
 		/** The implementation the peer's SETUP advertised, read before the session starts. */
@@ -191,47 +179,22 @@ export class Connection implements Established {
 		this.#client = client;
 		this.peerImplementation = Promise.resolve(peerImplementation);
 
-		// Two-path dispatch: v14-v16 uses adapter, v17+ uses native bidi streams
-		if (version >= Version.DRAFT_17) {
-			this.#session = new NativeSession(quic, version, client);
-			this.#goaway = new Once();
-			// v17+: control/setup stream only carries GoAway
-			void this.#runGoAway(control, version);
-		} else {
-			const adapter = new ControlStreamAdapter(quic, control, version, maxRequestId, client, requestWindow);
-			this.#session = adapter;
-			this.#goaway = adapter.goaway;
-			// Start the adapter read loop (routes control messages to virtual streams)
-			void adapter.run().catch((err: unknown) => {
-				if (this.#closed) return;
-				if (err instanceof RequestWindowError) {
-					this.#close({ closeCode: err.code, reason: err.message });
-					return;
-				}
-				if (sessionClosed(err)) {
-					this.#close();
-					return;
-				}
-				this.#violated(
-					err instanceof ProtocolViolation
-						? err
-						: new ProtocolViolation("control stream failed", { cause: err }),
-				);
-			});
-		}
+		this.#session = new NativeSession(quic, version, client);
+		// The SETUP stream only carries GOAWAY from here on.
+		void this.#runGoAway(control, version);
 
 		// What the peer's connection credential earns by default: publishing anything to us,
 		// since we consume on demand, and subscribing to whatever we publish.
 		const session = this.#session;
 		this.#auth = new AuthSession({
-			wire: auth && authSupported(version) ? new IetfAuthWire(session) : undefined,
+			wire: auth ? new IetfAuthWire(session) : undefined,
 			requests: true,
 			peerGrant: {
 				publish: new Path.Patterns([Path.Pattern.all()]),
 				subscribe: new Path.Patterns(publish ? [Path.Pattern.all()] : []),
 			},
 			handle,
-			draining: () => this.#goaway.peek() !== undefined,
+			draining: () => this.#goaway.peek() !== undefined || this.#closing !== undefined,
 		});
 		// Left before anything observes the close, so a successor on the same handle never
 		// finds this session still active.
@@ -268,7 +231,6 @@ export class Connection implements Established {
 			epoch,
 			hidden,
 			activeCount,
-			solicit,
 			goaway: this.#goaway,
 			grant: this.#auth.scope,
 			auth: this.#auth,
@@ -276,6 +238,9 @@ export class Connection implements Established {
 		registerWire(this, {
 			consume: (path) => this.#subscriber.consume(path),
 			goaway: this.#goaway,
+			// The drafts refuse overlapping SUBSCRIBE_NAMESPACEs (PREFIX_OVERLAP). A peer that
+			// declared MoQ Solicit is ours and holds both; any other may enforce it.
+			exclusive: solicit === undefined,
 			auth: this.#auth,
 		});
 
@@ -332,8 +297,8 @@ export class Connection implements Established {
 	async #run(early: Reader[]): Promise<void> {
 		try {
 			// All run together. runPublishNamespaces is a no-op when the peer asked to be
-			// solicited; otherwise it pushes PUBLISH_NAMESPACE. On draft-16 and later a
-			// SUBSCRIBE_NAMESPACE stream is filled either way. A NAMESPACE is discovery,
+			// solicited; otherwise it pushes PUBLISH_NAMESPACE. A SUBSCRIBE_NAMESPACE stream
+			// is filled either way. A NAMESPACE is discovery,
 			// not a second route.
 			const tasks = [
 				this.#runBidis(),
@@ -363,19 +328,13 @@ export class Connection implements Established {
 		return this.#subscriber.announced(scope, options);
 	}
 
-	/**
-	 * Accepts bidi streams (virtual for v14-v16, real for v17) and dispatches.
-	 */
+	/** Accepts request streams and dispatches them. */
 	async #runBidis() {
 		for (;;) {
 			const stream = await this.#session.acceptBi();
 			if (!stream) break;
 
 			void this.#runBidi(stream).catch((err: unknown) => {
-				if (err instanceof RequestWindowError) {
-					this.#close({ closeCode: err.code, reason: err.message });
-					return;
-				}
 				console.error("error processing bidi stream", err);
 				stream.abort(new Error("bidi stream error"));
 				if (err instanceof ProtocolViolation) this.#violated(err);
@@ -392,60 +351,15 @@ export class Connection implements Established {
 		const typeId = await stream.reader.u62();
 
 		switch (typeId) {
-			// Draft-18 SUBSCRIBE_NAMESPACE (0x50) and the legacy 0x11 message decode
-			// to the same request_id + namespace. We never send PUBLISH, so a legacy
-			// request for PUBLISH alone is refused, and one for both gets only NAMESPACE.
 			case BigInt(SubscribeNamespace.id): {
 				const decoded = SubscribeNamespace.decode(stream.reader, this.#session.version);
 				const msg = await this.#request(stream, "subscribe_namespace", decoded);
 				if (msg) await handed(this.#publisher.runSubscribeNamespace(msg, stream));
 				break;
 			}
-			case BigInt(SubscribeNamespaceLegacy.id): {
-				// Draft-16 carries this on its own stream, so the control adapter never sees the ID.
-				// Draft-14 and 15 already admitted it off the control stream. A refused request
-				// still spends its ID, so it is admitted and released like any other.
-				const adapter =
-					this.#session instanceof ControlStreamAdapter && this.#session.version === Version.DRAFT_16
-						? this.#session
-						: undefined;
-				let legacy: SubscribeNamespaceLegacy;
-				try {
-					legacy = await SubscribeNamespaceLegacy.decode(stream.reader, this.#session.version);
-				} catch (err) {
-					if (!(err instanceof MalformedAuthToken) || err.requestId === undefined)
-						throw malformed(err, "subscribe_namespace");
-					adapter?.admitRequest(err.requestId);
-					this.#spend(err.requestId);
-					try {
-						await this.#refuseToken(stream, "subscribe_namespace", err.requestId);
-					} finally {
-						adapter?.releaseRequest(err.requestId);
-					}
-					break;
-				}
-				if (adapter) adapter.admitRequest(legacy.requestId);
-				this.#spend(legacy.requestId);
-				try {
-					if (legacy.subscribeOptions === SubscribeOptions.PUBLISH) {
-						await handed(this.#publisher.refuseSubscribeNamespace(legacy.requestId, stream));
-					} else {
-						const msg = new SubscribeNamespace({
-							requestId: legacy.requestId,
-							namespace: legacy.namespace,
-							hidden: legacy.hidden,
-						});
-						await handed(this.#publisher.runSubscribeNamespace(msg, stream));
-					}
-				} finally {
-					adapter?.releaseRequest(legacy.requestId);
-				}
-				break;
-			}
 			case BigInt(SubscribeUpdate.id): {
 				// REQUEST_UPDATE (0x02) is a follow-up, not a valid initial message
-				stream.abort(new Error("unexpected REQUEST_UPDATE as initial message"));
-				break;
+				throw new ProtocolViolation("unexpected REQUEST_UPDATE as initial message");
 			}
 			// Publisher handles incoming requests
 			case BigInt(Subscribe.id): {
@@ -455,10 +369,6 @@ export class Connection implements Established {
 				break;
 			}
 			case BigInt(SUBSCRIBE_TRACKS_ID): {
-				// 0x51 is only a message from draft-18 on.
-				if (this.#session.version < Version.DRAFT_18) {
-					throw new ProtocolViolation("SUBSCRIBE_TRACKS before draft-18");
-				}
 				const decoded = SubscribeTracks.decode(stream.reader, this.#session.version);
 				const msg = await this.#request(stream, "subscribe_namespace", decoded);
 				if (msg) await handed(this.#publisher.runSubscribeTracks(msg, stream));
@@ -493,17 +403,10 @@ export class Connection implements Established {
 				// advertising unasked is allowed. So this is a bug in the peer, and a
 				// silent one on both sides if we tolerate it. Without our declaration an
 				// unasked announce is what we invited.
-				//
-				// Draft-14/15 are exempt: they have no inline NAMESPACE, so a
-				// PUBLISH_NAMESPACE request is also how a peer answers our
-				// SUBSCRIBE_NAMESPACE there, and the message alone does not say which.
-				const legacy = this.#session.version === Version.DRAFT_14 || this.#session.version === Version.DRAFT_15;
-				if (this.#declaredSolicit && this.#solicit !== undefined && !legacy) {
-					console.error(
+				if (this.#declaredSolicit && this.#solicit !== undefined) {
+					throw new ProtocolViolation(
 						`unsolicited publish_namespace from a peer that implements MoQ Solicit: broadcast=${msg.trackNamespace}`,
 					);
-					this.#close();
-					break;
 				}
 
 				await handed(this.#subscriber.runPublishNamespace(msg, stream));
@@ -544,22 +447,21 @@ export class Connection implements Established {
 		} catch (err) {
 			if (!(err instanceof MalformedAuthToken) || err.requestId === undefined) throw malformed(err, kind);
 			this.#spend(err.requestId);
-			await this.#refuseToken(stream, kind, err.requestId);
+			await this.#refuseToken(stream, kind);
 			return undefined;
 		}
 		this.#spend(msg.requestId);
 		return msg;
 	}
 
-	/** Spend a request's ID on draft 17+; the control stream adapter already spent it on earlier drafts. */
+	/** Spend a request's ID, closing the session if it was already used. */
 	#spend(requestId: bigint) {
-		if (this.#session instanceof NativeSession) this.#session.spendRequest(requestId);
+		this.#session.checkRequestId(requestId);
 	}
 
 	/** Refuse a request MALFORMED_AUTH_TOKEN, ending its stream. Mirrors Rust's `token::reject`. */
-	async #refuseToken(stream: Stream, kind: RequestKind, requestId: bigint) {
+	async #refuseToken(stream: Stream, kind: RequestKind) {
 		await refuse(stream, this.#session.version, kind, {
-			requestId,
 			condition: "malformed_auth_token",
 			reasonPhrase: "repeated AUTHORIZATION TOKEN",
 		});
@@ -620,7 +522,7 @@ export class Connection implements Established {
 
 		// The receiver MUST discard padding. We read it to the end rather than cancel,
 		// so a peer probing for bandwidth gets the throughput it is measuring.
-		if (type === PADDING && version >= Version.DRAFT_18) {
+		if (type === PADDING) {
 			await stream.discard();
 			return;
 		}
@@ -633,7 +535,7 @@ export class Connection implements Established {
 	}
 
 	/**
-	 * v17+ only: reads GoAway from the setup/control stream.
+	 * Reads GOAWAY from the SETUP stream.
 	 *
 	 * The session keeps serving after a GOAWAY so its groups in flight can finish while the
 	 * caller migrates; only the stream ending, or a second GOAWAY, closes it here.

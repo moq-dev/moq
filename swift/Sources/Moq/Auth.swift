@@ -1,54 +1,98 @@
+import Foundation
 import MoqFFI
 
 /// What the peer lets this side do, in this side's own paths: the broadcast
-/// patterns it may publish and subscribe to, and `expiresUs` until it lapses.
+/// patterns it may publish and subscribe to, and `expires` until it lapses.
 /// An empty pattern list grants nothing in that direction; `**` grants everything.
 public typealias Grant = MoqFFI.MoqGrant
 
-/// A session's authorization: the grant its peer gave it, and more tokens to present.
+/// Follows the grant a session's peer gave it. Iterate directly:
+/// `for try await grant in session.grants() { ... }` yields the current grant,
+/// then each change, `nil` while there is none.
 ///
-/// Returned by `Session.auth()`. AUTH is only on `moq-lite-07-wip` and on
+/// Returned by `Session.grants()`. AUTH is only on `moq-lite-07-wip` and on
 /// moq-transport sessions that negotiate the MoQ Auth extension; elsewhere the
-/// grant stays `nil`.
-public final class Auth: Sendable {
-    let ffi: MoqAuth
+/// grant stays `nil`. The sequence ends when the session does; cancelling the
+/// consuming task cancels the consumer.
+public final class GrantConsumer: AsyncSequence, Sendable {
+    /// The grant emitted by this sequence, `nil` while there is none.
+    public typealias Element = Grant?
 
-    init(_ ffi: MoqAuth) { self.ffi = ffi }
+    let ffi: MoqGrantConsumer
 
-    /// The union of every token's grant, or `nil` until the peer first answers one.
+    init(_ ffi: MoqGrantConsumer) { self.ffi = ffi }
+
+    /// The grant now, or `nil` until the peer first answers a token.
     /// A client session reads `nil` while it reconnects.
     public func grant() -> Grant? { ffi.grant() }
 
-    /// Suspend until the grant differs from the one last reported, or held when this
-    /// handle was made, returning it.
+    /// Suspend until the grant differs from the one this last returned, or held when
+    /// it was made, returning it.
     /// Throws once nothing will change it again: a client's connection or a server's
-    /// session ended. A reconnect is not an end.
-    public func grantChanged() async throws -> Grant? { try await ffi.grantChanged() }
+    /// session ended, or `cancel()`. A reconnect is not an end.
+    public func changed() async throws -> Grant? { try await ffi.changed() }
 
-    /// Present another token, returning once the peer accepts it.
-    ///
-    /// Its grant joins the union until `AuthToken.cancel()`; a client session presents
-    /// it again on every reconnect. The peer's refusal throws `MoqError.Protocol`
-    /// carrying its code, and a session that cannot carry another token throws
-    /// `MoqError.Unsupported`.
-    public func add(token: String) async throws -> AuthToken {
-        AuthToken(try await ffi.add(token: token))
+    /// Cancel all current and future `changed()` calls.
+    public func cancel() { ffi.cancel() }
+
+    /// Create an iterator that cancels the native wait when iteration ends.
+    public func makeAsyncIterator() -> AsyncThrowingStream<Grant?, Swift.Error>.Iterator {
+        let first = First()
+        return moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] () async throws -> Grant?? in
+            if first.take() { return .some(ffi.grant()) }
+            do {
+                return .some(try await ffi.changed())
+            } catch let error as MoqError where error.isShutdown {
+                return nil
+            }
+        }.makeAsyncIterator()
     }
 }
 
-/// One token presented with `Auth.add(token:)`, withdrawn by `cancel()`.
-public final class AuthToken: Sendable {
-    let ffi: MoqAuthToken
+/// Whether the current grant is still to be delivered, taken once.
+private final class First: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pending = true
 
-    init(_ ffi: MoqAuthToken) { self.ffi = ffi }
+    func take() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        defer { pending = false }
+        return pending
+    }
+}
 
-    /// This token's own grant, or `nil` after it ended.
-    public func grant() -> Grant? { ffi.grant() }
+/// The credentials a native client session presents, replaceable while it runs.
+///
+/// Returned by `Session.tokens()`, seeded from `Client(tokens:)`.
+public final class Tokens: Sendable {
+    let ffi: MoqTokens
 
-    /// Suspend until the token ends, throwing the peer's revocation or the end of a client's
-    /// connection or a server's session. A reconnect does not end it.
-    public func closed() async throws { try await ffi.closed() }
+    init(_ ffi: MoqTokens) {
+        self.ffi = ffi
+    }
 
-    /// Withdraw the token, removing its grant from the union.
-    public func cancel() { ffi.cancel() }
+    /// Replace the credentials every dial presents, such as before the current ones expire.
+    ///
+    /// The first is the connection credential, unless the URL carries its own `?jwt=`;
+    /// each other one widens the grant over in-band AUTH. The next dial presents them,
+    /// and a live session with in-band AUTH presents them at once, withdrawing each
+    /// replaced token once its replacements are answered, even when one is refused.
+    /// After an authorization refusal the session redials only if they changed.
+    /// - Throws: `MoqError.Config` for an empty token.
+    public func set(_ tokens: [String]) throws {
+        try ffi.set(tokens: tokens)
+    }
+
+    /// Suspend until the peer's first verdict on the tokens the last `set` newly presented:
+    /// return once each is granted, in band or as a later dial's connection credential.
+    ///
+    /// A token the set kept counts only once refused, and nothing is re-checked after the
+    /// answer. Throws the peer's refusal as `MoqError.Protocol` carrying its code,
+    /// `MoqError.Unsupported` when the session cannot carry an in-band token, or the
+    /// connection's close reason. The native wait ends with that answer, not with the
+    /// calling task.
+    public func answered() async throws {
+        try await ffi.answered()
+    }
 }

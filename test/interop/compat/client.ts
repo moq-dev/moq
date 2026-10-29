@@ -89,7 +89,7 @@ const AUDIO_BUDGET = 5000;
 /** The subscription field holding the latency budget, which the checkout renamed from `maxAge`. */
 function budgetField(): "maxAge" | "maxDelay" {
 	// The checkout refuses the old name, which a throwaway local track shows without a session.
-	const broadcast = new Moq.Origin.Producer().createBroadcast(Moq.Path.from("probe"));
+	const broadcast = new Moq.Broadcast.Producer();
 	try {
 		broadcast
 			.createTrack("probe")
@@ -202,6 +202,9 @@ async function audio(
 /** What a subscriber reads: a video frame and decoded audio, or the group live demand fills on a track. */
 type Read = { kind: "media"; out: string; ms: number } | { kind: "group"; file: string; track?: string };
 
+/** The released origin, which follows a path through `request`. */
+type Released = { request(path: Moq.Path.Valid, options: { announced: true }): Moq.Origin.Requesting };
+
 /** Print `received N bytes` once both media have arrived, or record the observed group. */
 async function subscribe(url: URL, broadcast: string, read: Read) {
 	install();
@@ -210,7 +213,10 @@ async function subscribe(url: URL, broadcast: string, read: Read) {
 	if (read.kind === "media" && !(await Libav.polyfill())) throw new Error("no AudioDecoder");
 	const origin = new Moq.Origin.Producer();
 	const connection = await connect({ url, consume: origin, websocket: { enabled: false } });
-	const requested = origin.request(Moq.Path.from(broadcast), { announced: true });
+	// Released packages follow with `request(path, { announced: true })`; current ones with `follow(path)`.
+	const path = Moq.Path.from(broadcast);
+	const requested =
+		"follow" in origin ? origin.follow(path) : (origin as unknown as Released).request(path, { announced: true });
 	try {
 		let bc = requested.active.peek();
 		while (!bc) {
@@ -287,9 +293,11 @@ if (command === "sign") {
 } else if (command === "publish") {
 	install();
 	const origin = new Moq.Origin.Producer();
-	const broadcast = origin.createBroadcast(Moq.Path.from(args[1]));
+	const publication = origin.createBroadcast(Moq.Path.from(args[1]));
+	// Released packages return the fill producer directly; current ones return its publication.
+	const broadcast = ("broadcast" in publication ? publication.broadcast : publication) as Moq.Broadcast.Producer;
 	const track = broadcast.createTrack("data", { timescale: Moq.Time.Timescale.MICRO });
-	broadcast.announce();
+	publication.announce();
 	const connection = await connect({
 		url: new URL(args[0]),
 		publish: origin.consume(),
@@ -311,7 +319,7 @@ if (command === "sign") {
 		payload: new TextEncoder().encode("compat-fetch"),
 		timestamp: Moq.Time.Timestamp.fromMicros(1 as TimestampMicros),
 	});
-	group.close();
+	group.finish();
 	await connection.closed;
 } else if (command === "subscribe") {
 	// The flags of the interop subscriber this stands in for.

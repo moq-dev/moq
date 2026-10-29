@@ -187,6 +187,14 @@ pub enum Error {
 	#[error("invalid data offset")]
 	InvalidDataOffset,
 
+	/// Absolute file offsets cannot be resolved in a standalone fragment.
+	#[error("absolute base_data_offset is unsupported; use moof-relative offsets")]
+	UnsupportedBaseDataOffset,
+
+	/// Every media sample must contain at least one byte.
+	#[error("empty media sample")]
+	EmptySample,
+
 	/// The frame timestamp carries a fragment's earliest presentation time exactly only when the
 	/// track counts in the same ticks as the media.
 	#[error("track timescale {track:?} doesn't match the CMAF mdhd timescale {mdhd:?}")]
@@ -518,80 +526,35 @@ pub(crate) fn decode(data: Bytes, timestamp: Option<Timestamp>, track: Track) ->
 	let (mdat_start, mdat_data) = mdat.ok_or(Error::NoMdat)?;
 	let traf = moof.traf.first().ok_or(Error::NoTraf)?;
 
-	// Samples are read from the mdat front to back, so each run must start where the previous
-	// one ended. A run's data_offset counts from the moof's first byte (CMAF's default-base-is-moof).
-	if traf.tfhd.base_data_offset.is_some() {
-		return Err(Error::InvalidDataOffset);
-	}
 	let data_start = mdat_start.checked_sub(moof_start).ok_or(Error::InvalidDataOffset)?;
 	let tfdt = traf.tfdt.as_ref().ok_or(Error::NoTfdt)?;
 	let base_dts = tfdt.base_media_decode_time;
-
-	// DTS is reconstructed by accumulating each sample's duration. A non-final sample
-	// with no resolvable duration would leave every following sample stuck at the same
-	// DTS, silently collapsing their timestamps, so reject that fragment instead.
-	let total_samples: usize = traf.trun.iter().map(|t| t.entries.len()).sum();
+	let mut resolver = sample::Resolver::new(data_start, mdat_data.len());
 
 	// Rounded the way `encode` stamps it, so a timestamp the track carried at another scale
 	// lands back on the tick it was written at.
 	let anchor = timestamp.map(|t| timestamp_ticks(t, timescale)).transpose()?;
 
 	let mut frames = Vec::new();
-	let mut ptss = Vec::with_capacity(total_samples);
-	let mut offset = 0usize;
+	let mut ptss = Vec::new();
 	let mut dts = i128::from(base_dts);
-	let mut sample_index = 0usize;
-
-	for trun in &traf.trun {
-		if let Some(data_offset) = trun.data_offset
-			&& usize::try_from(data_offset).ok() != Some(data_start + offset)
-		{
-			return Err(Error::InvalidDataOffset);
-		}
-
-		for entry in &trun.entries {
-			let sample = defaults.resolve(&traf.tfhd, entry);
-			let end = offset + sample.size as usize;
-
-			if end > mdat_data.len() {
-				return Err(Error::SampleRangeOutOfBounds {
-					start: offset,
-					end,
-					len: mdat_data.len(),
-				});
-			}
-
-			ptss.push(dts + i128::from(entry.cts.unwrap_or_default()));
-			let payload = Bytes::copy_from_slice(&mdat_data[offset..end]);
-			let keyframe = kind == Kind::Video && sample.is_sync();
-
-			// Carry the sample-duration through at the track's scale when present, so
-			// the jitter buffer can use it and an exporter can write it back.
-			let sample_duration = sample.duration;
-
-			// The last sample needs no duration (nothing follows it to time), but any
-			// earlier sample without one makes the rest of the fragment's DTS ambiguous.
-			let is_last = sample_index + 1 == total_samples;
-			if sample_duration.is_none() && !is_last {
-				return Err(Error::MissingSampleDuration);
-			}
-
-			let duration = sample_duration
-				.map(|d| Timestamp::new(d as u64, timescale))
-				.transpose()?;
-
-			frames.push(Frame {
-				// Placeholder until the earliest PTS is known.
-				timestamp: Timestamp::ZERO,
-				payload,
-				keyframe,
-				duration,
-			});
-
-			offset = end;
-			dts += i128::from(sample_duration.unwrap_or(0));
-			sample_index += 1;
-		}
+	for resolved in resolver.resolve(traf, defaults)? {
+		let sample::Resolved { sample, cts, range } = resolved?;
+		ptss.push(dts + i128::from(cts));
+		let payload = Bytes::copy_from_slice(&mdat_data[range]);
+		let keyframe = kind == Kind::Video && sample.is_sync();
+		let duration = sample
+			.duration
+			.map(|d| Timestamp::new(d as u64, timescale))
+			.transpose()?;
+		frames.push(Frame {
+			// Placeholder until the earliest PTS is known.
+			timestamp: Timestamp::ZERO,
+			payload,
+			keyframe,
+			duration,
+		});
+		dts += i128::from(sample.duration.unwrap_or(0));
 	}
 
 	let (anchor, earliest) = match anchor {
@@ -1142,7 +1105,7 @@ fn build_audio_trak(track_id: u32, timescale: u32, sample_entry: mp4_atom::Codec
 /// [`extract_init`] normalizes a passed-through trak to match.
 pub(crate) fn encode_init(
 	ftyp: Option<mp4_atom::Ftyp>,
-	traks: Vec<mp4_atom::Trak>,
+	mut traks: Vec<mp4_atom::Trak>,
 	trexs: Vec<mp4_atom::Trex>,
 ) -> Result<Bytes> {
 	use mp4_atom::Encode;
@@ -1152,6 +1115,24 @@ pub(crate) fn encode_init(
 		minor_version: 0x200,
 		compatible_brands: vec![b"isom".into(), b"iso6".into(), b"mp41".into()],
 	});
+	// Hang places every decoded Opus sample one pre-skip before its packet timestamp.
+	// dOps alone describes decoder priming; ISO BMFF needs an edit to express that
+	// presentation shift. Rebuild it after the output track timescales are settled.
+	for trak in &mut traks {
+		if let [mp4_atom::Codec::Opus(opus)] = trak.mdia.minf.stbl.stsd.codecs.as_slice() {
+			let skip = u64::from(opus.dops.pre_skip) * u64::from(trak.mdia.mdhd.timescale) / 48_000;
+			trak.edts = (skip != 0).then(|| mp4_atom::Edts {
+				elst: Some(mp4_atom::Elst {
+					entries: vec![mp4_atom::ElstEntry {
+						// A live edit's duration is implicit in the fragments that follow.
+						segment_duration: 0,
+						media_time: Some(skip),
+						media_rate: mp4_atom::FixedPoint::from(1),
+					}],
+				}),
+			});
+		}
+	}
 	let timescale = traks.first().map(|t| t.mdia.mdhd.timescale).unwrap_or(1000);
 	let next_track_id = traks.iter().map(|t| t.tkhd.track_id).max().unwrap_or(0) + 1;
 
@@ -1537,6 +1518,65 @@ mod tests {
 		let moov = moov(&init);
 		assert_eq!(moov.mvhd.duration, u64::MAX);
 		assert_eq!(moov.trak[0].tkhd.duration, u64::MAX);
+	}
+
+	/// Opus media time counts priming; Hang time places the first kept sample at the
+	/// first frame timestamp. Both init sources must express the same inverse mapping.
+	#[test]
+	fn opus_init_maps_hang_timestamps_to_media() {
+		for timescale in [48_000, 1_000_000] {
+			for pre_skip in [0, 312, u16::MAX] {
+				let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+				config.description = Some(
+					crate::codec::opus::Config::new(48_000, 2)
+						.with_pre_skip(pre_skip)
+						.encode()
+						.unwrap(),
+				);
+				for source_edit in [false, true] {
+					let mut trak = synthesize_audio_trak(1, timescale, &config).unwrap();
+					if source_edit {
+						trak.edts = Some(mp4_atom::Edts {
+							elst: Some(mp4_atom::Elst {
+								entries: vec![mp4_atom::ElstEntry {
+									media_time: Some(96000),
+									..Default::default()
+								}],
+							}),
+						});
+						let mut init = Vec::new();
+						mp4_atom::Encode::encode(
+							&mp4_atom::Moov {
+								trak: vec![trak],
+								..Default::default()
+							},
+							&mut init,
+						)
+						.unwrap();
+						let mut traks = Vec::new();
+						extract_init(&Bytes::from(init), 1, &mut None, &mut traks, &mut Vec::new()).unwrap();
+						trak = traks.pop().unwrap();
+					}
+					let init = encode_init(None, vec![trak], Vec::new()).unwrap();
+					let moov = moov(&init);
+					let trak = &moov.trak[0];
+					let skip = u64::from(pre_skip) * timescale / 48_000;
+					if skip == 0 {
+						assert!(trak.edts.is_none());
+					} else {
+						let entries = &trak.edts.as_ref().unwrap().elst.as_ref().unwrap().entries;
+						assert_eq!(entries.len(), 1);
+						assert_eq!(entries[0].media_time, Some(skip));
+						assert_eq!(entries[0].segment_duration, 0, "the live duration is implicit");
+						assert_eq!(entries[0].media_rate, mp4_atom::FixedPoint::from(1));
+					}
+					let edit = edit::Edit::new(trak, moov.mvhd.timescale).unwrap();
+					for pts in [0, skip, timescale * 10] {
+						assert_eq!(edit.present(pts).unwrap(), Some(pts), "the importer inverts the edit");
+					}
+				}
+			}
+		}
 	}
 
 	// The header defaults are all the "off" value: a track the presentation doesn't claim, a
@@ -1950,10 +1990,9 @@ mod tests {
 		assert!(matches!(err, Error::TimescaleMismatch { .. }), "got {err:?}");
 	}
 
-	/// Samples are read front to back, so a run whose data_offset points anywhere but the next
-	/// sample is refused rather than sliced from the wrong bytes.
+	/// A run whose samples extend beyond the payload is refused.
 	#[test]
-	fn decode_refuses_a_run_that_skips_bytes() {
+	fn decode_refuses_a_run_past_the_payload() {
 		use mp4_atom::{DecodeMaybe, Encode};
 
 		let timescale = moq_net::Timescale::MICRO;
@@ -1972,7 +2011,7 @@ mod tests {
 		skewed.extend_from_slice(mdat);
 
 		let err = decode(Bytes::from(skewed), None, Track::new(timescale, Kind::Video)).unwrap_err();
-		assert!(matches!(err, Error::InvalidDataOffset), "got {err:?}");
+		assert!(matches!(err, Error::SampleRangeOutOfBounds { .. }), "got {err:?}");
 	}
 
 	/// A frame timestamp the track carries at another scale anchors to the nearest tick, the way

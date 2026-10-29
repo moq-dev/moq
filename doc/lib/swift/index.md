@@ -17,12 +17,12 @@ slices for iOS 16+, the iOS Simulator, and macOS 12.3+.
 `.named(name:)` or `.requested(request)` target. `Media.CatalogProducer(broadcast:)`
 updates catalog properties and sections without keeping the broadcast open.
 Its writes fail after closing or releasing the broadcast.
-`Flate.SnapshotProducer` / `StreamProducer` publish opaque bytes with an optional `timestampUs`.
+Publish JSON tracks with `TrackInfo(compress: true)`; a `Json` consumer reads one with no option of its own.
 A missing data timestamp stays untimed; the library never substitutes zero or now.
 `Json` consumers yield `Json.Timed` (`value`, `timestampUs`); a snapshot consumer yields each state in order,
 and `latest()` skips to the newest. Read timestamps are rounded down to a whole microsecond.
 Raw tracks with a `nil` timescale are untimed on both publish and receive.
-`MoqTrackInfo.compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. `@moq/net` cannot read a compressed track yet.
+`MoqTrackInfo.compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
 Timed raw/data tracks require caller-supplied timestamps. Use `Media.CatalogProducer.now()` to stamp a locally
 created event on the broadcast clock; reading it fixes that clock for later media producers.
@@ -69,7 +69,8 @@ for try await event in try session.consume.announced(prefix: "live/", filter: "*
 ```swift
 // Publish encoded frames, or raw pixels with the codec inside the binding (VideoToolbox).
 // opusInit, packet, pts, and rgba come from your encoder or capture source.
-let broadcast = try session.publish.createBroadcast(path: "my-stream.hang")
+let publication = try session.publish.createBroadcast(path: "my-stream.hang")
+let broadcast = publication.broadcast
 let audio = try Media.TrackProducer.audio(broadcast: broadcast, initData: Media.AudioInit(format: .opus, data: opusInit))
 try audio.writeFrame(packet, timestampUs: 20_000)
 try audio.cut() // audio has no keyframes, so this is what gives it groups
@@ -81,7 +82,7 @@ let video = try Video.Producer(
     track: "camera"
 )
 try video.write(VideoFrame(timestampUs: pts, data: rgba))
-try broadcast.announce(route: AnnounceRoute(epoch: mintEpoch())) // a fresh epoch per run
+try publication.announce(route: AnnounceRoute(epoch: mintEpoch())) // a fresh epoch per run
 try audio.finish()
 try video.finish()
 try broadcast.close()
@@ -90,7 +91,7 @@ session.shutdown()
 try await session.closed()
 ```
 
-Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Pass the publication track name to the producer, alongside its input and codec settings.
+Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Pass the publication track name to the producer, alongside its input and codec settings. For simulcast, give each rendition the next one down as `lower`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers. A rung only disables while the session probes for bandwidth, which on native transports takes moq-quic with BBR3.
 
 ## Things to know
 
@@ -100,13 +101,15 @@ shows which module holds each.
 
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `cut()`: after every frame, or at a segment cadence to align with video.
 - **Timeline breaks.** On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
+- **Media reads.** `Media.TrackConsumer`, `Audio.Consumer`, and `Video.Consumer` yield `Read` cases in order: `.frame`, a `.gap` where media was lost, or an `.end` where the publisher stopped its encoder. A gap breaks continuity. An encoder end is not stream EOF: following frames before its endpoint are the old encoder's drain; the first at or past it starts fresh.
 - **Decoded frames hold decoder buffers.** Release each frame from a `Video.Consumer` promptly, or the decoder stalls. `resize` is best effort, so read each frame's `width()` and `height()`.
 - **Closing.** `session.shutdown()` requests a drain immediately; `try await session.closed()` waits up to one second and reports its result. `session.cancel(code:)` closes at once. Finish or abort live tracks first. Application delivery requires explicitly selecting `moq-lite-07-wip` on both peers; older Lite versions (including default lite-06) and IETF wait only for transport ACKs.
-- **Ending cleanly.** When the input ends, finish every track, then call `try finish()` on its `Media.CatalogProducer` to finish the catalog, which ends the content. The broadcast stays announced and keeps serving the finished tracks, so a subscriber still catching up can drain them, until `broadcast.close()` takes it offline. How long to keep it up is yours to decide.
-- **Stats.** `session.stats()` reports `rttUs`, `estimatedSendRateBps`, and the byte and packet counters (`bytesSent`, `bytesReceived`, `bytesLost`, `packetsSent`, `packetsReceived`, `packetsLost`). A field is `nil` when the transport does not report it, which is not the same as zero. `version` names the negotiated protocol. Connect returns a connecting session; read its coherent `state()` snapshot and wait with that snapshot's revision to observe first-dial failures and reconnects. Each watcher keeps its own revision. Hold the owned `Bandwidth.Consumer` returned by `session.recvBandwidth()` to receive bandwidth estimates. `rate()` reads the current estimate in bits per second and `rateChanged()` waits for a new one. Release the consumer or call `cancel()` when finished; releasing the last consumer stops PROBE; the session and stats snapshots do not request it. Client consumers survive reconnects and report no estimate while disconnected.
-- **Authorization.** On `moq-lite-07-wip` (opt in with `Client(versions:)`) and on moq-transport draft-17+ with the [MoQ Auth extension](/draft/moq-auth), `session.auth().grant()` is the `Grant` the relay sent back, `nil` until it answers and while a client session reconnects; `try await auth.grantChanged()` waits for the next one. `try await auth.add(token:)` presents a fresh token without reconnecting, returns an `AuthToken` whose grant joins the union until `cancel()`, and is presented again on every reconnect. A refusal throws with the relay's code.
+- **Ending cleanly.** When the input ends, finish every track, then call `try finish()` on its `Media.CatalogProducer` to finish the catalog, which ends the content. The broadcast stays announced and keeps serving the finished tracks, so a subscriber still catching up can drain them, until `broadcast.close()` takes it offline. How long to keep it up is yours to decide. A track still open at the close, or released without a finish, ends with `Unroutable`, which readers take as the publisher leaving.
+- **Stats.** `session.stats()` reports `rtt`, `estimatedSendRateBps`, and the byte and packet counters (`bytesSent`, `bytesReceived`, `bytesLost`, `packetsSent`, `packetsReceived`, `packetsLost`). A field is `nil` when the transport does not report it, which is not the same as zero. `version` names the negotiated protocol. Connect returns a connecting session; read its coherent `state()` snapshot and wait with that snapshot's revision to observe first-dial failures and reconnects. Each watcher keeps its own revision. Hold the owned `BandwidthConsumer` returned by `session.recvBandwidth()` to receive bandwidth estimates. `rate()` reads the current estimate in bits per second and `rateChanged()` waits for a new one. Release the consumer or call `cancel()` when finished; releasing the last consumer stops PROBE; the session and stats snapshots do not request it. Client consumers survive reconnects and report no estimate while disconnected.
+- **Authorization.** On `moq-lite-07-wip` (opt in with `Client(versions:)`) and on moq-transport draft-18+ with the [MoQ Auth extension](/draft/moq-auth), `for try await grant in session.grants()` yields the `Grant` the relay sent back and each change, `nil` until it answers and while a client session reconnects. Cancelling the iterating task cancels the native wait.
+- **Tokens.** Pass `Client(tokens: [...])` instead of putting the credential in the URL. The first is the connection credential, sent in SETUP and, while an offered version can't carry it there (lite before 07), as the URL's `?jwt=`; each other token widens the grant over AUTH. `try session.tokens()?.set([...])` replaces them before they expire: the next dial presents them, a live AUTH session at once, and after an authorization refusal the session redials only if they changed. `try await tokens.answered()` returns once the relay accepts them and throws its refusal with the relay's code. A `?jwt=` already in the URL stays the connection credential, which is how to reach a relay older than this release.
 - **Errors.** Diagnostic cases use the `reason:` argument label; match their associated value to inspect it. Protocol errors carry `details`.
-- **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode.
+- **Disabled renditions.** A rendition with `enabled: false` has no frames coming until its publisher re-enables it. Select an enabled rendition from the latest catalog before opening a decoder. Keep one already playing while every rendition of its kind is disabled: the convenience decoders accept a disabled configuration, and a re-enable, such as an unmute, then plays without a resubscribe. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode.
 - **Track demand.** Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
 
 ## Runtime

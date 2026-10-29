@@ -29,9 +29,9 @@ fn timed() -> moq_net::track::Info {
 }
 
 /// Raw-driver transport settings with a connection receive window of `window`.
-fn transport(window: u64) -> driver::TransportConfig {
-	let mut transport = driver::TransportConfig::default();
-	transport.receive_window(driver::VarInt::from_u64(window).unwrap());
+fn transport(window: u64) -> driver::transport::Config {
+	let mut transport = driver::transport::Config::default();
+	transport.limits.receive_window = std::num::NonZeroU64::new(window);
 	transport
 }
 
@@ -53,17 +53,17 @@ fn bufferbloat(bits_per_second: u64) -> moq_shaper::Profile {
 /// A server publishing broadcast `room`, and a client subscribed to its origin over a
 /// connection with the given transport settings.
 struct Setup {
-	broadcast: moq_net::broadcast::Producer,
+	broadcast: moq_net::origin::Publication,
 	remote: moq_net::broadcast::Consumer,
 	/// The client's connection, for its credit stats.
-	conn: driver::Connection,
+	conn: driver::connection::Connection,
 	/// The impairment between them, if any.
 	shaper: Option<moq_shaper::Shaper>,
 	_client: moq_net::Session,
-	_endpoint: driver::Endpoint,
+	_endpoint: driver::endpoint::Endpoint,
 }
 
-async fn setup(version: &str, transport: driver::TransportConfig) -> Setup {
+async fn setup(version: &str, transport: driver::transport::Config) -> Setup {
 	setup_through(version, transport, None).await
 }
 
@@ -71,7 +71,7 @@ async fn setup(version: &str, transport: driver::TransportConfig) -> Setup {
 /// `profile`.
 async fn setup_through(
 	version: &str,
-	transport: driver::TransportConfig,
+	transport: driver::transport::Config,
 	profile: Option<moq_shaper::Profile>,
 ) -> Setup {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -119,19 +119,21 @@ async fn setup_through(
 		.with_no_client_auth();
 	tls.alpn_protocols = vec![version.alpn().as_bytes().to_vec()];
 	let quic = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("quic config");
-	let mut client = driver::ClientConfig::new(Arc::new(quic));
-	client.transport_config(Arc::new(transport));
+	let mut client = driver::client::Config::new(Arc::new(quic));
+	client.transport = transport;
 
-	let endpoint = driver::Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("endpoint");
+	let endpoint =
+		driver::endpoint::Endpoint::new(Default::default(), std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+			.expect("endpoint");
 	let conn = endpoint
-		.connect_with(client, dial, "localhost")
+		.connect(&client, dial, "localhost")
 		.expect("connect")
 		.await
 		.expect("handshake");
 
 	let subscriber = moq_tokio::origin::spawn();
 	let session =
-		moq_tokio::transport::Session::new(web::Session::raw(conn.clone()), moq_net::transport::Binding::InBand);
+		moq_tokio::transport::Session::new(web::Session::raw(conn.clone()), moq_net::transport::Address::Setup);
 	let (client, driver) = moq_net::Client::new()
 		.with_versions(version.into())
 		.with_subscriber(subscriber.clone())
@@ -166,11 +168,7 @@ fn rand_seed() -> u64 {
 /// Broadcast `room`, once the peer announces it into `origin`.
 async fn room(origin: &moq_net::origin::Producer) -> moq_net::broadcast::Consumer {
 	let consumer = origin.consume();
-	tokio::time::timeout(TIMEOUT, consumer.routed("room"))
-		.await
-		.expect("announce timeout")
-		.expect("routed");
-	tokio::time::timeout(TIMEOUT, consumer.request_broadcast("room", None))
+	tokio::time::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves")
@@ -284,10 +282,10 @@ async fn the_less_urgent_partial_frame_gives_way(version: &str, profile: Option<
 	assert_eq!(setup.conn.stats().credit.evicted, 1, "{version}");
 	let session = moq_tokio::transport::Session::new(
 		web::Session::raw(setup.conn.clone()),
-		moq_net::transport::Binding::InBand,
+		moq_net::transport::Address::Setup,
 	);
 	assert_eq!(
-		moq_net::transport::Stats::streams_evicted(&moq_net::transport::poll::Session::stats(&session)),
+		moq_net::transport::Metrics::streams_evicted(&moq_net::transport::poll::Session::metrics(&session)),
 		Some(1),
 		"moq-net sees the eviction count, {version}"
 	);
@@ -301,7 +299,7 @@ async fn lite_partial_frame_gives_way() {
 
 #[tokio::test]
 async fn ietf_partial_frame_gives_way() {
-	the_less_urgent_partial_frame_gives_way("moq-transport-16", None).await;
+	the_less_urgent_partial_frame_gives_way("moq-transport-18", None).await;
 }
 
 /// The same recovery when a slow link with a deep queue sits between them.
@@ -339,9 +337,27 @@ async fn bufferbloat_is_not_a_stuck_window() {
 	assert!(stats.down.throttled > 0, "the bottleneck held the sender back: {stats}");
 }
 
-/// A frame larger than the whole window, which can never complete: the stuck window
-/// evicts it like any other, so its reader learns the group was evicted and is not
-/// fetched again.
+/// A frame many windows long still completes, since its credit returns as each storage
+/// segment seals: the window only has to fit one segment, so nothing is evicted.
+#[tokio::test]
+async fn lite_frame_of_many_windows_completes() {
+	// Room for one of moq-net's 1 MiB storage segments and its framing.
+	const SEGMENTED: usize = 4 << 20;
+	let setup = setup("moq-lite-06", transport(SEGMENTED as u64)).await;
+	let (track, mut sub) = setup.subscribe("file", 0).await;
+
+	let payload = Bytes::from((0..4 * SEGMENTED).map(|i| (i % 251) as u8).collect::<Vec<_>>());
+	let mut group = track.append_group().unwrap();
+	group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+	group.finish().unwrap();
+
+	assert!(next_frame(&mut sub).await == payload, "the frame arrived corrupted");
+	assert_eq!(setup.conn.stats().credit.evicted, 0);
+}
+
+/// A frame within one storage segment but larger than the whole window, which can never
+/// complete: the stuck window evicts it like any other, so its reader learns the group
+/// was evicted and is not fetched again.
 #[tokio::test]
 async fn lite_frame_past_the_window_gives_way() {
 	let setup = setup("moq-lite-06", transport(WINDOW as u64)).await;
@@ -382,12 +398,12 @@ async fn lite_frame_past_the_window_gives_way() {
 /// A subscriber served on the raw driver with a connection window of [`WINDOW`], and a
 /// publisher dialing it whose connection can also send raw streams.
 struct Reversed {
-	broadcast: moq_net::broadcast::Producer,
+	broadcast: moq_net::origin::Publication,
 	remote: moq_net::broadcast::Consumer,
 	/// The publisher's connection, for streams no session would send.
-	conn: driver::Connection,
+	conn: driver::connection::Connection,
 	_sessions: (moq_net::Session, moq_net::Session),
-	_endpoints: (driver::Endpoint, driver::Endpoint),
+	_endpoints: (driver::endpoint::Endpoint, driver::endpoint::Endpoint),
 }
 
 async fn reversed(version: &str) -> Reversed {
@@ -404,10 +420,14 @@ async fn reversed(version: &str) -> Reversed {
 		.expect("tls");
 	tls.alpn_protocols = vec![alpn.clone()];
 	let quic = driver::crypto::rustls::QuicServerConfig::try_from(tls).expect("quic config");
-	let mut config = driver::ServerConfig::with_crypto(Arc::new(quic));
-	config.transport_config(Arc::new(transport(WINDOW as u64)));
-	let server = driver::Endpoint::server(config, "127.0.0.1:0".parse().unwrap()).expect("server endpoint");
-	let addr = server.local_addr().expect("addr");
+	let mut config = driver::server::Config::new(Arc::new(quic));
+	config.transport = transport(WINDOW as u64);
+	let server = driver::endpoint::Endpoint::new(
+		driver::endpoint::Config::default().with_server(config),
+		std::net::UdpSocket::bind("127.0.0.1:0").unwrap(),
+	)
+	.expect("server endpoint");
+	let addr = server.local_addr();
 
 	let mut tls = rustls::ClientConfig::builder()
 		.dangerous()
@@ -415,24 +435,34 @@ async fn reversed(version: &str) -> Reversed {
 		.with_no_client_auth();
 	tls.alpn_protocols = vec![alpn];
 	let quic = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("quic config");
-	let client = driver::Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("client endpoint");
+	let client = driver::endpoint::Endpoint::new(Default::default(), std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+		.expect("client endpoint");
 	let (conn, accepted) = tokio::join!(
 		async {
 			client
-				.connect_with(driver::ClientConfig::new(Arc::new(quic)), addr, "localhost")
+				.connect(&driver::client::Config::new(Arc::new(quic)), addr, "localhost")
 				.expect("connect")
 				.await
 				.expect("handshake")
 		},
-		async { server.accept().await.expect("incoming").await.expect("accept") },
+		async {
+			server
+				.accept()
+				.await
+				.expect("incoming")
+				.accept()
+				.expect("accept")
+				.await
+				.expect("accept")
+		},
 	);
 
 	let publisher = moq_tokio::origin::spawn();
 	let broadcast = publisher.create_broadcast("room").expect("broadcast");
 	broadcast.announce(Default::default()).expect("announce");
 	let subscriber = moq_tokio::origin::spawn();
-	let session = |conn: driver::Connection| {
-		moq_tokio::transport::Session::new(web::Session::raw(conn), moq_net::transport::Binding::InBand)
+	let session = |conn: driver::connection::Connection| {
+		moq_tokio::transport::Session::new(web::Session::raw(conn), moq_net::transport::Address::Setup)
 	};
 	// A moq-lite client's driver sends its half of the handshake, so it runs meanwhile.
 	let client_session = tokio::spawn({
@@ -490,10 +520,12 @@ impl Reversed {
 					false => conn.open_uni(Default::default()).await.map(|send| (send, None)),
 				}
 				.expect("open");
-				if send.write_all(&bytes).await.is_ok() {
-					std::future::pending::<()>().await;
+				// The credit an eviction frees can reach the writer before the stop does, letting
+				// the whole write queue, so only the stop itself proves the stream was stopped.
+				let _ = send.write_all(&bytes).await;
+				if let Ok(Some(_)) = send.stopped().await {
+					let _ = tx.send(());
 				}
-				let _ = tx.send(());
 			});
 		}
 		for _ in 0..stopped {
@@ -589,7 +621,7 @@ async fn lite_largest_unit_completes_under_pressure() {
 
 #[tokio::test]
 async fn ietf_largest_unit_completes_under_pressure() {
-	the_largest_unit_completes_under_pressure("moq-transport-16").await;
+	the_largest_unit_completes_under_pressure("moq-transport-18").await;
 }
 
 /// A Bun publisher (`test/receive-credit/sender.ts`) dials a WebTransport server whose
@@ -612,10 +644,14 @@ async fn javascript_partial_frame_gives_way(version: &str) {
 		.expect("tls");
 	tls.alpn_protocols = vec![web::ALPN.as_bytes().to_vec()];
 	let quic = driver::crypto::rustls::QuicServerConfig::try_from(tls).expect("quic config");
-	let mut config = driver::ServerConfig::with_crypto(Arc::new(quic));
-	config.transport_config(Arc::new(transport(WINDOW as u64)));
-	let endpoint = driver::Endpoint::server(config, "127.0.0.1:0".parse().unwrap()).expect("endpoint");
-	let port = endpoint.local_addr().expect("addr").port();
+	let mut config = driver::server::Config::new(Arc::new(quic));
+	config.transport = transport(WINDOW as u64);
+	let endpoint = driver::endpoint::Endpoint::new(
+		driver::endpoint::Config::default().with_server(config),
+		std::net::UdpSocket::bind("127.0.0.1:0").unwrap(),
+	)
+	.expect("endpoint");
+	let port = endpoint.local_addr().port();
 	let mut server = web::Server::new(endpoint);
 
 	let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test/receive-credit/sender.ts");
@@ -647,7 +683,7 @@ async fn javascript_partial_frame_gives_way(version: &str) {
 		.with_subscriber(origin.clone())
 		.accept(
 			moq_net::time::Instant::now(),
-			moq_tokio::transport::Session::new(session, moq_net::transport::Binding::Uri),
+			moq_tokio::transport::Session::new(session, moq_net::transport::Address::Uri),
 		)
 		.await
 		.expect("server handshake");
@@ -691,7 +727,7 @@ async fn javascript_partial_frame_gives_way(version: &str) {
 #[tokio::test]
 #[ignore = "requires Bun; run by just test receive-credit in the interop workflow"]
 async fn javascript_partial_frame_gives_way_tokio() {
-	for version in ["moq-lite-06", "moq-transport-16"] {
+	for version in ["moq-lite-06", "moq-transport-18"] {
 		javascript_partial_frame_gives_way(version).await;
 	}
 }
@@ -739,11 +775,9 @@ struct Measured {
 /// others, so nothing may be evicted, through `profile` or not.
 async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize) -> Measured {
 	let mut transport = transport(cell.window);
-	let max = driver::VarInt::from_u64(moq_tokio::quic::DEFAULT_MAX_STREAMS).unwrap();
-	transport.max_concurrent_uni_streams(max);
-	transport.max_concurrent_bidi_streams(max);
+	transport.limits.max_streams = std::num::NonZeroU64::new(moq_tokio::quic::DEFAULT_MAX_STREAMS);
 	if cell.follow {
-		transport.stream_receive_window(driver::VarInt::from_u64(cell.window).unwrap());
+		transport.limits.stream_receive_window = std::num::NonZeroU64::new(cell.window);
 	}
 	let setup = setup_through("moq-lite-06", transport, profile).await;
 	let mut tracks = Vec::with_capacity(cell.streams);

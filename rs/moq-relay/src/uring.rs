@@ -17,6 +17,7 @@
 //! the handoff free.
 
 use std::net::SocketAddr;
+use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::Poll;
@@ -448,7 +449,7 @@ impl std::fmt::Debug for Workers {
 ///
 /// One qlog sink is built for the whole group and cloned into every worker, so
 /// the traces share a single writer thread however many workers there are.
-fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic::Transport> {
+fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic::transport::Config> {
 	// The tokio path reports this through `moq_tokio::Error::QlogUnsupported`,
 	// which nothing builds here: this listener is the io_uring stack.
 	#[cfg(not(feature = "qlog"))]
@@ -466,7 +467,7 @@ fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic
 		moq_net::transport::MIN_RECEIVE_WINDOW
 	);
 
-	let mut transport = moq_uring::quic::Transport::default();
+	let mut transport = moq_uring::quic::transport::Config::default();
 	#[cfg(feature = "qlog")]
 	if let Some(dir) = quic.qlog.as_deref() {
 		transport.qlog = Some(
@@ -476,14 +477,14 @@ fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic
 		tracing::info!(dir = %dir.display(), "writing qlog");
 	}
 	transport.idle_timeout = quic.idle_timeout;
-	transport.max_streams = quic.max_streams;
 	transport.keep_alive = quic.keep_alive;
 	transport.mtu_discovery = quic.mtu_discovery;
-	// `[quic]` resolves every window, defaults included, so both runtimes run
+	// `[quic]` resolves every limit, defaults included, so both runtimes run
 	// the same ones rather than each backend's own.
-	transport.receive_window = Some(quic.receive_window);
-	transport.stream_receive_window = Some(quic.stream_receive_window);
-	transport.send_window = Some(quic.send_window);
+	transport.limits.max_streams = NonZeroU64::new(quic.max_streams);
+	transport.limits.receive_window = NonZeroU64::new(quic.receive_window);
+	transport.limits.stream_receive_window = NonZeroU64::new(quic.stream_receive_window);
+	transport.limits.send_window = NonZeroU64::new(quic.send_window);
 	transport.congestion = match quic.congestion_control {
 		Some(moq_tokio::quic::CongestionControl::Loss) => moq_uring::quic::Congestion::Loss,
 		// Unset means the backend's own default, and live media wants a steady
@@ -754,13 +755,13 @@ async fn serve_connection(
 	deadline.close = Some(transport.clone());
 	let conn = transport.clone();
 	let server = serve.moq.clone();
-	let binding = match url {
-		Some(_) => moq_net::transport::Binding::Uri,
-		None => moq_net::transport::Binding::InBand,
+	let address = match url {
+		Some(_) => moq_net::transport::Address::Uri,
+		None => moq_net::transport::Address::Setup,
 	};
 	// moq-net boxes the transport with a native `Send` bound, which only a `Local`
 	// session meets; it still never leaves this worker.
-	let session = moq_uring::transport::Local::new(moq_uring::transport::Session::new(transport, binding));
+	let session = moq_uring::transport::Local::new(moq_uring::transport::Session::new(transport, address));
 	let now = moq_net::time::Instant::now();
 	let mut accepted = Accepted {
 		handle,
@@ -848,15 +849,7 @@ async fn serve_request(
 	let (admitted, registration) = match decided {
 		Ok(admitted) => admitted,
 		Err(err) => {
-			// The status is what separates "your credential is bad" from "the auth
-			// server is down". Collapsing both into Unauthorized tells a client to
-			// stop reconnecting through an outage it could have waited out.
-			request.close(match err.status {
-				axum::http::StatusCode::UNAUTHORIZED | axum::http::StatusCode::FORBIDDEN => {
-					moq_net::Error::Unauthorized
-				}
-				other => moq_net::Error::App(other.as_u16()),
-			});
+			request.close(err.code.into());
 			return Err(err.source);
 		}
 	};
@@ -943,9 +936,9 @@ mod tests {
 		quic.send_window = Some(32 << 20);
 
 		let transport = transport(&quic.resolve()).expect("windows must be accepted");
-		assert_eq!(transport.receive_window, Some(128 << 20));
-		assert_eq!(transport.stream_receive_window, Some(8 << 20));
-		assert_eq!(transport.send_window, Some(32 << 20));
+		assert_eq!(transport.limits.receive_window, NonZeroU64::new(128 << 20));
+		assert_eq!(transport.limits.stream_receive_window, NonZeroU64::new(8 << 20));
+		assert_eq!(transport.limits.send_window, NonZeroU64::new(32 << 20));
 	}
 
 	/// `quic.mtu_discovery` reaches the workers as it does the tokio backends: off unless set.
@@ -968,8 +961,8 @@ mod tests {
 
 		quic.receive_window = Some(min);
 		assert_eq!(
-			transport(&quic.resolve()).expect("the minimum").receive_window,
-			Some(min)
+			transport(&quic.resolve()).expect("the minimum").limits.receive_window,
+			NonZeroU64::new(min)
 		);
 	}
 
@@ -997,11 +990,18 @@ mod tests {
 
 			let transport = transport(&resolved).expect("windows must be accepted");
 			let uring = (
-				transport.receive_window,
-				transport.stream_receive_window,
-				transport.send_window,
+				transport.limits.receive_window,
+				transport.limits.stream_receive_window,
+				transport.limits.send_window,
 			);
-			assert_eq!(uring, (Some(tokio.0), Some(tokio.1), Some(tokio.2)));
+			assert_eq!(
+				uring,
+				(
+					NonZeroU64::new(tokio.0),
+					NonZeroU64::new(tokio.1),
+					NonZeroU64::new(tokio.2)
+				)
+			);
 		}
 	}
 
@@ -1025,7 +1025,7 @@ mod tests {
 	async fn a_group_stopped_before_serving_joins() {
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 		if let Err(moq_uring::Error::Unsupported(reason)) = moq_uring::Worker::new(Default::default())
-			&& std::env::var_os("MOQ_STRICT").is_none()
+			&& std::env::var_os("CI_STRICT").is_none()
 		{
 			eprintln!("skipping io_uring relay test: {reason}");
 			return;
@@ -1052,7 +1052,7 @@ mod tests {
 	async fn pending_admission_is_abandoned_at_the_deadline() {
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 		if let Err(moq_uring::Error::Unsupported(reason)) = moq_uring::Worker::new(Default::default())
-			&& std::env::var_os("MOQ_STRICT").is_none()
+			&& std::env::var_os("CI_STRICT").is_none()
 		{
 			eprintln!("skipping io_uring relay test: {reason}");
 			return;
@@ -1109,7 +1109,7 @@ mod tests {
 	async fn pending_admission_is_abandoned_at_the_handshake_deadline() {
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 		if let Err(moq_uring::Error::Unsupported(reason)) = moq_uring::Worker::new(Default::default())
-			&& std::env::var_os("MOQ_STRICT").is_none()
+			&& std::env::var_os("CI_STRICT").is_none()
 		{
 			eprintln!("skipping io_uring relay test: {reason}");
 			return;

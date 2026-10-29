@@ -206,18 +206,18 @@ fn subscriber_wakes_parked_demand() {
 	});
 }
 
-/// A publisher parked on `broadcast::Demand::used` while one reader hands over to the
-/// next: the last reader leaves and a new one arrives straight from the track producer,
-/// which never touches the broadcast's own state. Whatever the publisher's poll saw, it
-/// must be woken for the newcomer.
+/// A publisher waiting on `broadcast::Demand` while one reader hands over to the next:
+/// the last reader leaves and a new one arrives straight from the track producer, which
+/// never touches the broadcast's own state. Whatever the publisher's poll saw, it must be
+/// woken for the newcomer.
 #[test]
 fn broadcast_demand_sees_a_reader_return() {
 	model(|| {
 		let broadcast = broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let video = broadcast.create_track("video", None).expect("create track");
-		let demand = broadcast.demand();
-		let first = consumer.track("video").expect("track").subscribe(None);
+		let mut demand = broadcast.demand();
+		let first = block_on(consumer.track("video").expect("track").subscribe(None)).expect("subscribe");
 
 		let reader = thread::spawn(move || {
 			drop(first);
@@ -226,27 +226,29 @@ fn broadcast_demand_sees_a_reader_return() {
 			(video, next)
 		});
 
-		block_on(demand.used()).expect("the returning reader was missed");
+		// The first call reports whatever the swap left; a reader gone must not stay unseen.
+		while !block_on(demand.wanted_changed()).expect("the returning reader was missed") {}
 		drop(reader.join().unwrap());
 	});
 }
 
-/// A publisher parked on `broadcast::Demand::unused` while a reader comes and goes
-/// straight through the track producer: its leaving must wake the publisher.
+/// A publisher waiting on `broadcast::Demand` while a reader comes and goes straight
+/// through the track producer: its leaving must wake the publisher.
 #[test]
 fn broadcast_demand_sees_a_reader_leave() {
 	model(|| {
 		let broadcast = broadcast::Info::new().produce();
 		let video = broadcast.create_track("video", None).expect("create track");
-		let demand = broadcast.demand();
+		let mut demand = broadcast.demand();
+		let reader = video.subscribe(None);
 
-		let reader = thread::spawn(move || {
-			drop(video.subscribe(None));
+		let leaver = thread::spawn(move || {
+			drop(reader);
 			video
 		});
 
-		block_on(demand.unused()).expect("the reader leaving was missed");
-		drop(reader.join().unwrap());
+		while block_on(demand.wanted_changed()).expect("the reader leaving was missed") {}
+		drop(leaver.join().unwrap());
 	});
 }
 
@@ -268,18 +270,18 @@ fn a_front_sees_a_reader_come_and_go() {
 		let noop = kio::Waiter::noop();
 		let now = moq_net::time::Instant::now();
 
-		let pending = consumer.request_broadcast("room", None);
+		let pending = consumer.request("room", None);
 		driver.poll(now, &noop).unwrap();
 		let room = block_on(pending).expect("resolves");
 
 		// A first reader gets the source asked, then leaves.
-		let first = room.track("video").expect("track").query();
+		let first = room.track("video").expect("track").info();
 		driver.poll(now, &noop).unwrap();
 		assert!(demand.wanted().is_some(), "the front never asked the source");
 		drop(first);
 
 		let racing = room.clone();
-		let reader = thread::spawn(move || drop(racing.track("video").expect("track").query()));
+		let reader = thread::spawn(move || drop(racing.track("video").expect("track").info()));
 		driver.poll(now, &noop).unwrap();
 		reader.join().unwrap();
 
@@ -309,22 +311,22 @@ fn a_front_sees_a_reader_return() {
 		let noop = kio::Waiter::noop();
 		let now = moq_net::time::Instant::now();
 
-		let pending = consumer.request_broadcast("room", None);
+		let pending = consumer.request("room", None);
 		driver.poll(now, &noop).unwrap();
 		let room = block_on(pending).expect("resolves");
 
 		// A first reader comes and goes, which parks the track.
-		let first = room.track("video").expect("track").query();
+		let first = room.track("video").expect("track").info();
 		driver.poll(now, &noop).unwrap();
 		drop(first);
 		driver.poll(now, &noop).unwrap();
 		assert!(demand.wanted().is_none(), "the front kept the source for nobody");
 
-		let leaving = room.track("video").expect("track").query();
+		let leaving = room.track("video").expect("track").info();
 		let racing = room.clone();
 		let reader = thread::spawn(move || {
 			drop(leaving);
-			racing.track("video").expect("track").query()
+			racing.track("video").expect("track").info()
 		});
 		driver.poll(now, &noop).unwrap();
 		let returned = reader.join().unwrap();
@@ -462,7 +464,7 @@ fn a_fetch_never_joins_a_withdrawn_attempt() {
 	model(|| {
 		let broadcast = broadcast::Info::new().produce();
 		let track = broadcast.create_track("video", None).expect("create track");
-		let dynamic = track.dynamic();
+		let dynamic = track.requests();
 		let consumer = track.consume();
 
 		let first = consumer.fetch_group(5, None);
@@ -501,11 +503,11 @@ fn a_request_never_joins_a_retiring_front() {
 		let waiter = kio::Waiter::noop();
 		let now = moq_net::time::Instant::now();
 
-		let pending = consumer.request_broadcast("room", None);
+		let pending = consumer.request("room", None);
 		driver.poll(now, &waiter).unwrap();
 		let first = block_on(pending).expect("resolves");
 
-		let requester = thread::spawn(move || consumer.request_broadcast("room", None));
+		let requester = thread::spawn(move || consumer.request("room", None));
 		drop(first);
 		driver.poll(now, &waiter).unwrap();
 		let pending = requester.join().unwrap();
@@ -523,8 +525,8 @@ fn a_request_never_joins_a_retiring_front() {
 fn a_refused_answer_is_never_announced() {
 	model(|| {
 		let (producer, mut driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
-		let claim = producer.dynamic("room").unwrap();
-		let pending = producer.consume().request_broadcast("room/alice", None);
+		let claim = producer.requests("room").unwrap();
+		let pending = producer.consume().request("room/alice", None);
 		driver
 			.poll(moq_net::time::Instant::now(), &kio::Waiter::noop())
 			.unwrap();
@@ -532,19 +534,27 @@ fn a_refused_answer_is_never_announced() {
 			.expect("requested")
 			.prepare(moq_net::Epoch::mint())
 			.expect("prepare");
-		let answer = prepared.broadcast().clone();
+		// Keep a refused answer alive so dropping it cannot hide a stray announcement.
+		let _answer = prepared.broadcast().clone();
+		// Only the claim and its answer can cover the path, so any start is a covering route.
+		let announced = |consumer: &origin::Consumer| {
+			matches!(
+				consumer.announced().poll_next(&kio::Waiter::noop()),
+				std::task::Poll::Ready(Some(moq_net::announce::Event::Start(_)))
+			)
+		};
 
-		let watch = answer.clone();
+		let watch = producer.consume();
 		let releaser = thread::spawn(move || {
 			drop(claim);
-			watch.route().is_some()
+			announced(&watch)
 		});
 		let published = prepared.publish();
 		let seen = releaser.join().unwrap();
 
 		assert_eq!(
 			published.is_ok(),
-			answer.route().is_some(),
+			announced(&producer.consume()),
 			"the route outlived its answer"
 		);
 		assert!(!seen || published.is_ok(), "a refused answer was announced");
@@ -565,7 +575,7 @@ fn refused_track_race(read: fn(&mut moq_net::track::Subscriber) -> bool) {
 		let noop = kio::Waiter::noop();
 		let now = moq_net::time::Instant::now();
 
-		let pending = consumer.request_broadcast("room", None);
+		let pending = consumer.request("room", None);
 		driver.poll(now, &noop).unwrap();
 		let room = block_on(pending).expect("resolves");
 
@@ -605,4 +615,58 @@ fn an_aborted_parked_group_releases_a_finished_track() {
 		assert!(block_on(subscriber.recv_group()).unwrap().is_none());
 		aborting.join().unwrap();
 	});
+}
+
+/// An arrival takes the track write lock; revealing an already cached group only takes
+/// its read lock. Either path must observe a registered expiry read or leave the
+/// successor visible when that read judges it. The landing hint uses Loom atomics.
+fn landing_wakes_a_parked_expiry(reveal: bool) {
+	model(move || {
+		let broadcast = broadcast::Info::new().produce();
+		let track = broadcast.create_track("video", timed()).unwrap();
+		let mut head = track.append_group().unwrap();
+		head.write_frame(Timestamp::ZERO, Bytes::from_static(b"head")).unwrap();
+		let mut subscriber = track.subscribe(
+			moq_net::track::Subscription::default()
+				.with_range(0..)
+				.with_max_delay(std::time::Duration::from_millis(500)),
+		);
+		let mut held = block_on(subscriber.recv_group()).unwrap().unwrap();
+		assert!(block_on(held.read_frame()).unwrap().is_some());
+
+		let landing = if reveal {
+			let landing = track.append_group().unwrap();
+			let mut edge = track.append_group().unwrap();
+			edge.write_frame(Timestamp::from_millis(2000).unwrap(), Bytes::from_static(b"edge"))
+				.unwrap();
+			edge.finish().unwrap();
+			Some(landing)
+		} else {
+			let mut successor = track.append_group().unwrap();
+			successor
+				.write_frame(Timestamp::from_millis(1000).unwrap(), Bytes::from_static(b"successor"))
+				.unwrap();
+			successor.finish().unwrap();
+			None
+		};
+		let publisher = thread::spawn(move || {
+			let mut landing = landing.unwrap_or_else(|| track.append_group().unwrap());
+			let at = Timestamp::from_millis(if reveal { 1000 } else { 2000 }).unwrap();
+			landing.write_frame(at, Bytes::from_static(b"landing")).unwrap();
+			landing.finish().unwrap();
+			(track, landing)
+		});
+		assert!(matches!(block_on(held.read_frame()), Err(Error::Old)));
+		drop(publisher.join().unwrap());
+	});
+}
+
+#[test]
+fn a_group_arrival_landing_wakes_parked_expiry() {
+	landing_wakes_a_parked_expiry(false);
+}
+
+#[test]
+fn a_group_reveal_landing_wakes_parked_expiry() {
+	landing_wakes_a_parked_expiry(true);
 }

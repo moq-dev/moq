@@ -1,4 +1,4 @@
-//! Follow a real JS QMux server's redirect: retain the reader with an epoch, else re-subscribe.
+//! Follow a real JS QMux server's redirect, retaining the reader across the epoch-proven handover.
 use std::process::Stdio;
 
 use anyhow::{Context, ensure};
@@ -40,23 +40,10 @@ async fn main() -> anyhow::Result<()> {
 		connection.version() == Some(version.parse().map_err(anyhow::Error::msg)?),
 		"wrong negotiated version"
 	);
-	// Drafts 14 and 16 carry no epoch, so nothing proves the replacement serves the same
-	// publisher: the held reader ends with the old route and the application requests again.
-	let legacy = ["moq-transport-14", "moq-transport-16"].contains(&version.as_str());
-	let broadcast = consumer.routed_broadcast("handover").await?;
+	let broadcast = consumer.follow("handover", None)?.available().await?;
 	let mut track = broadcast.track("video")?.subscribe(None).await?;
 	let input = child.stdin.as_mut().context("stdin")?;
 	for sequence in 0..2 {
-		if sequence == 1 && legacy {
-			ensure!(
-				!matches!(track.recv_group().await, Ok(Some(_))),
-				"an epochless route spliced the held reader"
-			);
-			// The server wrote this group just after cutting the original, so only the
-			// replacement, already its largest, can serve it.
-			let broadcast = consumer.routed_broadcast("handover").await?;
-			track = broadcast.track("video")?.subscribe(None).await?;
-		}
 		let mut group = track.recv_group().await?.context("reader ended during GOAWAY")?;
 		ensure!(group.sequence == sequence, "wrong group after migration");
 		ensure!(
@@ -68,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
 			input.write_all(b"first group\n").await?;
 			// The first endpoint's publisher scope excludes this broadcast, so its bytes
 			// prove that the replacement session is serving beyond its SETUP handshake.
-			let ready = consumer.routed_broadcast("replacement").await?;
+			let ready = consumer.follow("replacement", None)?.available().await?;
 			let mut marker = ready.track("ready")?.subscribe(None).await?;
 			let mut marker = marker.recv_group().await?.context("replacement marker")?;
 			ensure!(

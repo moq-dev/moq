@@ -1,65 +1,26 @@
 import { expect, test } from "bun:test";
+import { Milli } from "@moq/clock";
 import { ProtocolViolation } from "../error.ts";
 import { Reader } from "../stream.ts";
 import * as Filter from "./filter.ts";
 import { joinFilter } from "./subscribe.ts";
 import { Version } from "./version.ts";
 
-const OLD = Version.DRAFT_19;
-const NEW = Version.DRAFT_20;
+const OLD = Version.DRAFT_18;
+const NEW = Version.DRAFT_22;
 
 test("legacy live joins do not exclude the prefix without a joining FETCH", () => {
-	for (const version of [
-		Version.DRAFT_14,
-		Version.DRAFT_15,
-		Version.DRAFT_16,
-		Version.DRAFT_17,
-		Version.DRAFT_18,
-		Version.DRAFT_19,
-	]) {
+	for (const version of [Version.DRAFT_18]) {
 		expect([...Filter.encode(joinFilter(version), version)]).toEqual([3, 0, 0]);
 	}
-	expect([...Filter.encode(joinFilter(NEW), NEW)]).toEqual([1]);
+	expect([...Filter.encode(joinFilter(NEW), NEW)]).toEqual([0x01, 0x01]);
 });
 
 function roundTrip(filter: Filter.Filter, version: typeof OLD | typeof NEW): Filter.Filter {
 	return Filter.decode(Filter.encode(filter, version), version);
 }
 
-test("draft-20 selects the meaning by field count", () => {
-	expect([...Filter.encode({ kind: "nextObject" }, NEW)]).toEqual([0x00, 0x00]);
-	expect([...Filter.encode({ kind: "relative", groups: 0n }, NEW)]).toEqual([0x00]);
-	expect([...Filter.encode({ kind: "relative", groups: 1n }, NEW)]).toEqual([0x01]);
-	expect([...Filter.encode({ kind: "absolute", startGroup: 7n, startObject: 3n }, NEW)]).toEqual([0x07, 0x03]);
-	// End is a delta from the start group, not an absolute group id.
-	expect([...Filter.encode({ kind: "absolute", startGroup: 7n, startObject: 3n, endGroup: 9n }, NEW)]).toEqual([
-		0x07, 0x03, 0x02,
-	]);
-});
-
-test("draft-20 round trips", () => {
-	const filters: Filter.Filter[] = [
-		{ kind: "unfiltered" },
-		{ kind: "nextObject" },
-		{ kind: "relative", groups: 0n },
-		{ kind: "relative", groups: 5n },
-		{ kind: "absolute", startGroup: 12n, startObject: 0n, endGroup: undefined },
-		{ kind: "absolute", startGroup: 12n, startObject: 4n, endGroup: 20n },
-	];
-	for (const filter of filters) {
-		expect(roundTrip(filter, NEW)).toEqual(filter);
-	}
-});
-
-// An open ended absolute {0, 0} is defined as equivalent to unfiltered, so it must not
-// collide with the two-zero-field spelling of Next Object.
-test("draft-20 absolute origin is unfiltered", () => {
-	const origin: Filter.Filter = { kind: "absolute", startGroup: 0n, startObject: 0n };
-	expect(Filter.encode(origin, NEW).length).toBe(0);
-	expect(roundTrip(origin, NEW)).toEqual({ kind: "unfiltered" });
-});
-
-test("draft-19 uses tags", () => {
+test("draft-18 uses tags", () => {
 	expect([...Filter.encode({ kind: "nextObject" }, OLD)]).toEqual([0x02]);
 	expect([...Filter.encode({ kind: "relative", groups: 0n }, OLD)]).toEqual([0x01]);
 
@@ -74,9 +35,9 @@ test("draft-19 uses tags", () => {
 	}
 });
 
-// Draft-19 has a tag per case and none of them mean "two groups back", so refuse rather
+// Draft-18 has a tag per case and none of them mean "two groups back", so refuse rather
 // than silently sending a nearby filter the peer would honor.
-test("draft-19 cannot name a relative group", () => {
+test("draft-18 cannot name a relative group", () => {
 	expect(() => Filter.encode({ kind: "relative", groups: 2n }, OLD)).toThrow();
 });
 
@@ -88,26 +49,8 @@ test("rejects a backwards range", () => {
 	}
 });
 
-// The fourth field bounds the last object in the end group. Dropping it on decode would
-// let a publisher deliver past the Location the subscriber asked for.
-test("draft-20 keeps the end object", () => {
-	const bounded: Filter.Filter = {
-		kind: "absolute",
-		startGroup: 7n,
-		startObject: 3n,
-		endGroup: 9n,
-		endObject: 4n,
-	};
-	expect([...Filter.encode(bounded, NEW)]).toEqual([0x07, 0x03, 0x02, 0x04]);
-	expect(roundTrip(bounded, NEW)).toEqual(bounded);
-
-	// Three fields leave the end group whole, which is a different filter.
-	const whole: Filter.Filter = { kind: "absolute", startGroup: 7n, startObject: 3n, endGroup: 9n };
-	expect([...Filter.encode(whole, NEW)]).toEqual([0x07, 0x03, 0x02]);
-});
-
-// Draft-19's AbsoluteRange ends on a group, so an object bound cannot be expressed.
-test("draft-19 cannot bound the end object", () => {
+// Draft-18's AbsoluteRange ends on a group, so an object bound cannot be expressed.
+test("draft-18 cannot bound the end object", () => {
 	expect(() =>
 		Filter.encode({ kind: "absolute", startGroup: 7n, startObject: 0n, endGroup: 9n, endObject: 4n }, OLD),
 	).toThrow();
@@ -123,15 +66,11 @@ test("fill skips a length-prefixed range filter", () => {
 	expect(Filter.decodeFill(encoded, NEW)).toEqual({ filter: undefined, rangeFilters: true });
 });
 
-test("rejects too many fields", () => {
-	expect(() => Filter.decode(new Uint8Array([0, 0, 0, 0, 0]), NEW)).toThrow();
-});
-
 // The canonical current-group join: an empty subscription filter paired with a fill that
 // starts one group back.
 test("fill encodes the current group join", () => {
 	const encoded = Filter.encodeFill({ filter: { kind: "relative", groups: 1n }, rangeFilters: false }, NEW);
-	// count=1, type=0x21, len=1, StartGroup=1
+	// count=1, type=0x21, Relative Start, StartGroup=1
 	expect([...encoded]).toEqual([0x01, 0x21, 0x01, 0x01]);
 	expect(Filter.decodeFill(encoded, NEW)).toEqual({ filter: { kind: "relative", groups: 1n }, rangeFilters: false });
 });
@@ -141,6 +80,13 @@ test("fill round trips", () => {
 		// An omitted filter inherits the subscription's, which is a different request from an
 		// explicit unfiltered one.
 		{ filter: undefined, rangeFilters: false },
+		{ fillTimeout: Milli(0), filter: undefined, rangeFilters: false },
+		{
+			fillTimeout: Milli(250),
+			filter: { kind: "relative", groups: 1n },
+			groupOrder: "ascending",
+			rangeFilters: false,
+		},
 		{ filter: { kind: "unfiltered" }, rangeFilters: false },
 		{ filter: { kind: "relative", groups: 3n }, rangeFilters: false },
 		{ filter: { kind: "absolute", startGroup: 4n, startObject: 0n, endGroup: 9n }, rangeFilters: false },
@@ -148,6 +94,19 @@ test("fill round trips", () => {
 	for (const fill of fills) {
 		expect(Filter.decodeFill(Filter.encodeFill(fill, NEW), NEW)).toEqual(fill);
 	}
+});
+
+// FILL_TIMEOUT sorts first, so the parameters after it are deltas from its id.
+test("fill encodes its FILL_TIMEOUT first", () => {
+	const fill: Filter.Fill = {
+		fillTimeout: Milli(100),
+		filter: { kind: "relative", groups: 1n },
+		rangeFilters: false,
+	};
+	// count=2, 0x0A=100, delta 0x17 -> 0x21 Relative Start, StartGroup=1
+	const encoded = Filter.encodeFill(fill, NEW);
+	expect([...encoded]).toEqual([0x02, 0x0a, 0x64, 0x17, 0x01, 0x01]);
+	expect(Filter.decodeFill(encoded, NEW)).toEqual(fill);
 });
 
 // A parameter the draft does not allow inside the scope is a violation, not something to
@@ -162,9 +121,9 @@ test("fill rejects a disallowed parameter", () => {
 // Draft-17 replaced QUIC's varint with a leading-1-bits one. They agree below 64, so a
 // wrong codec is invisible until group or object ids grow past that, and then Rust and JS
 // stop understanding each other's filters.
-test("draft-20 uses leading-ones varints above 63", () => {
+test("draft-22 uses leading-ones varints above 63", () => {
 	// 128 is 0x80_80 with leading ones, and 0x40_80 with the QUIC form.
-	expect([...Filter.encode({ kind: "relative", groups: 128n }, NEW)]).toEqual([0x80, 0x80]);
+	expect([...Filter.encode({ kind: "relative", groups: 128n }, NEW)]).toEqual([0x01, 0x80, 0x80]);
 	expect(roundTrip({ kind: "relative", groups: 128n }, NEW)).toEqual({ kind: "relative", groups: 128n });
 
 	const wide: Filter.Filter = { kind: "absolute", startGroup: 300n, startObject: 64n };
@@ -174,18 +133,16 @@ test("draft-20 uses leading-ones varints above 63", () => {
 // A uint8 parameter is one raw byte, so a priority of 128 or more would be read as a
 // multi-byte varint prefix and swallow the parameter after it.
 test("fill skips a uint8 parameter whose value has a leading one", () => {
-	// count=2, 0x20 (uint8) = 0x80, delta 1 -> 0x21 len=1 StartGroup=1
+	// count=2, 0x20 (uint8) = 0x80, delta 1 -> 0x21 Relative Start, StartGroup=1
 	const encoded = new Uint8Array([0x02, 0x20, 0x80, 0x01, 0x01, 0x01]);
 	expect(Filter.decodeFill(encoded, NEW)).toEqual({ filter: { kind: "relative", groups: 1n }, rangeFilters: false });
 });
 
 test("fill skips allowed parameters it ignores", () => {
-	// count=2, 0x20 (even, one varint) = 42, delta 1 -> 0x21 (odd, length prefixed)
+	// count=2, 0x20 (even, one varint) = 42, delta 1 -> 0x21 Relative Start, StartGroup=2
 	const encoded = new Uint8Array([0x02, 0x20, 0x2a, 0x01, 0x01, 0x02]);
 	expect(Filter.decodeFill(encoded, NEW)).toEqual({ filter: { kind: "relative", groups: 2n }, rangeFilters: false });
 });
-
-const TYPED = Version.DRAFT_22;
 
 // Draft-22 section 9.20.9: a Location Filter Type, then only the fields it names.
 test("draft-22 carries the Location Filter Type", () => {
@@ -203,48 +160,42 @@ test("draft-22 carries the Location Filter Type", () => {
 		[{ kind: "absolute", startGroup: 0n, startObject: 0n }, [0x02, 0x00, 0x00]],
 	];
 	for (const [filter, bytes] of cases) {
-		expect([...Filter.encode(filter, TYPED)]).toEqual(bytes);
+		expect([...Filter.encode(filter, NEW)]).toEqual(bytes);
 		// No Length: the parameter value is the type and its fields.
-		expect([...Filter.encodeParam(filter, TYPED)]).toEqual(bytes);
-		expect(Filter.decode(new Uint8Array(bytes), TYPED)).toEqual(filter);
+		expect([...Filter.encodeParam(filter, NEW)]).toEqual(bytes);
+		expect(Filter.decode(new Uint8Array(bytes), NEW)).toEqual(filter);
 	}
-
-	// Draft-21 still frames the value with a Length and infers the meaning from it.
-	expect([...Filter.encodeParam({ kind: "nextObject" }, Version.DRAFT_21)]).toEqual([0x02, 0x00, 0x00]);
 });
 
 // With no Length, the type alone says where the value ends, so the bytes after it are left
 // for the next parameter.
 test("draft-22 reads only the named fields", async () => {
-	const r = new Reader(undefined, new Uint8Array([0x05, 0x01, 0x02]), TYPED);
-	expect(await Filter.decodeParam(r, TYPED)).toEqual({ kind: "nextObject" });
+	const r = new Reader(undefined, new Uint8Array([0x05, 0x01, 0x02]), NEW);
+	expect(await Filter.decodeParam(r, NEW)).toEqual({ kind: "nextObject" });
 	expect(await r.u62()).toBe(1n);
 	expect(await r.u62()).toBe(2n);
 });
 
 test("draft-22 rejects an unknown Location Filter Type", async () => {
 	for (const type of [0x06, 0x3f]) {
-		expect(() => Filter.decode(new Uint8Array([type, 0x00, 0x00]), TYPED)).toThrow(ProtocolViolation);
-		const r = new Reader(undefined, new Uint8Array([type, 0x00, 0x00]), TYPED);
-		await expect(Filter.decodeParam(r, TYPED)).rejects.toThrow(ProtocolViolation);
+		expect(() => Filter.decode(new Uint8Array([type, 0x00, 0x00]), NEW)).toThrow(ProtocolViolation);
+		const r = new Reader(undefined, new Uint8Array([type, 0x00, 0x00]), NEW);
+		await expect(Filter.decodeParam(r, NEW)).rejects.toThrow(ProtocolViolation);
 	}
 });
 
 // The nested LOCATION_FILTER carries its type too, and the whole-track form the spec calls
 // zero-length is type 0x00.
 test("draft-22 fill carries the Location Filter Type", () => {
-	// A two-byte group, so the draft-20 Length (4) and the draft-22 type (3) differ.
+	// A two-byte group, so a Length (4) would differ from the type (3).
 	const range: Filter.Filter = { kind: "absolute", startGroup: 128n, startObject: 0n, endGroup: 130n };
 	expect([...Filter.encodeFill({ filter: range, rangeFilters: false }, NEW)]).toEqual([
-		0x01, 0x21, 0x04, 0x80, 0x80, 0x00, 0x02,
-	]);
-	expect([...Filter.encodeFill({ filter: range, rangeFilters: false }, TYPED)]).toEqual([
 		0x01, 0x21, 0x03, 0x80, 0x80, 0x00, 0x02,
 	]);
-	expect([...Filter.encodeFill({ filter: { kind: "nextObject" }, rangeFilters: false }, TYPED)]).toEqual([
+	expect([...Filter.encodeFill({ filter: { kind: "nextObject" }, rangeFilters: false }, NEW)]).toEqual([
 		0x01, 0x21, 0x05,
 	]);
-	expect([...Filter.encodeFill({ filter: { kind: "unfiltered" }, rangeFilters: false }, TYPED)]).toEqual([
+	expect([...Filter.encodeFill({ filter: { kind: "unfiltered" }, rangeFilters: false }, NEW)]).toEqual([
 		0x01, 0x21, 0x00,
 	]);
 
@@ -256,17 +207,18 @@ test("draft-22 fill carries the Location Filter Type", () => {
 		{ filter: range, rangeFilters: false },
 	];
 	for (const fill of fills) {
-		expect(Filter.decodeFill(Filter.encodeFill(fill, TYPED), TYPED)).toEqual(fill);
+		expect(Filter.decodeFill(Filter.encodeFill(fill, NEW), NEW)).toEqual(fill);
 	}
 
 	// A uint8, a typed filter, then another uint8: the filter must stop at its own fields.
-	expect(Filter.decodeFill(new Uint8Array([0x03, 0x20, 0x80, 0x01, 0x05, 0x01, 0x01]), TYPED)).toEqual({
+	expect(Filter.decodeFill(new Uint8Array([0x03, 0x20, 0x80, 0x01, 0x05, 0x01, 0x01]), NEW)).toEqual({
 		filter: { kind: "nextObject" },
+		groupOrder: "ascending",
 		rangeFilters: false,
 	});
 });
 
-for (const version of [Version.DRAFT_20, Version.DRAFT_21, Version.DRAFT_22]) {
+for (const version of [Version.DRAFT_22]) {
 	test(`fill rejects invalid group order on ${version}`, () => {
 		for (const value of [0, 3, 255]) {
 			expect(() => Filter.decodeFill(new Uint8Array([1, 0x22, value]), version)).toThrow(/group order/);
@@ -274,8 +226,43 @@ for (const version of [Version.DRAFT_20, Version.DRAFT_21, Version.DRAFT_22]) {
 		for (const value of [1, 2]) {
 			expect(Filter.decodeFill(new Uint8Array([1, 0x22, value]), version)).toEqual({
 				filter: undefined,
+				groupOrder: value === 1 ? "ascending" : "descending",
 				rangeFilters: false,
 			});
 		}
 	});
 }
+
+test("fill preserves its group order with inherited and explicit filters", () => {
+	for (const [groupOrder, wire] of [
+		["ascending", 1],
+		["descending", 2],
+	] as const) {
+		for (const [filter, prefix] of [
+			[undefined, [1, 0x22]],
+			[{ kind: "relative", groups: 1n }, [2, 0x21, 1, 1, 1]],
+		] as const) {
+			const fill: Filter.Fill = { filter, groupOrder, rangeFilters: false };
+			const encoded = new Uint8Array([...prefix, wire]);
+			expect(Filter.encodeFill(fill, NEW)).toEqual(encoded);
+			expect(Filter.decodeFill(encoded, NEW)).toEqual(fill);
+		}
+	}
+});
+
+test("fill retains its group order between ignored parameter values", () => {
+	// Priority is a raw uint8; the range filter after GROUP_ORDER is length-prefixed.
+	const encoded = new Uint8Array([3, 0x20, 0x80, 2, 1, 3, 0]);
+	expect(Filter.decodeFill(encoded, NEW)).toEqual({
+		filter: undefined,
+		groupOrder: "ascending",
+		rangeFilters: true,
+	});
+});
+
+test("fill refuses repeated group order even when the values agree", () => {
+	for (const repeated of [1, 2]) {
+		const encoded = new Uint8Array([2, 0x22, 1, 0, repeated]);
+		expect(() => Filter.decodeFill(encoded, NEW)).toThrow(/duplicate GROUP_ORDER/);
+	}
+});

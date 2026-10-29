@@ -1,7 +1,6 @@
 //! The sessions a [`Connection`](crate::Connection) serves, whatever transport carries them.
 
 use crate::auth;
-use axum::http;
 
 /// A session whose SETUP awaits the relay's reply: what a [`Connection`](crate::Connection) serves.
 ///
@@ -55,12 +54,12 @@ pub trait Sealed: Sized {
 	/// Finish `work` before the handshake deadline, closing the session if it passes.
 	async fn within<T>(&self, work: impl std::future::Future<Output = T>) -> anyhow::Result<T>;
 
-	/// Refuse the session with the admission's HTTP-style status.
-	async fn reject(self, status: http::StatusCode);
+	/// Refuse the session, closing it with `code`.
+	async fn reject(self, code: moq_net::SessionError);
 
 	/// The QUIC connection under the request, to widen a peer's limits before SETUP OK.
 	#[cfg(feature = "quic")]
-	fn quic(&self) -> Option<&moq_tokio::quic::driver::Connection> {
+	fn quic(&self) -> Option<&moq_tokio::quic::driver::connection::Connection> {
 		None
 	}
 
@@ -99,17 +98,12 @@ impl Sealed for moq_tokio::server::Request {
 		Ok(moq_tokio::server::Request::within(self, work).await?)
 	}
 
-	async fn reject(self, status: http::StatusCode) {
-		let reject = match status {
-			http::StatusCode::UNAUTHORIZED => moq_tokio::server::Reject::Unauthorized,
-			http::StatusCode::FORBIDDEN => moq_tokio::server::Reject::Forbidden,
-			status => moq_tokio::server::Reject::App(status.as_u16()),
-		};
-		let _ = moq_tokio::server::Request::reject(self, reject).await;
+	async fn reject(self, code: moq_net::SessionError) {
+		let _ = moq_tokio::server::Request::reject(self, code).await;
 	}
 
 	#[cfg(feature = "quic")]
-	fn quic(&self) -> Option<&moq_tokio::quic::driver::Connection> {
+	fn quic(&self) -> Option<&moq_tokio::quic::driver::connection::Connection> {
 		moq_tokio::server::Request::quic(self)
 	}
 
@@ -176,11 +170,8 @@ impl Sealed for Accepted {
 		Ok(work.await)
 	}
 
-	async fn reject(self, status: http::StatusCode) {
-		self.handshake.close(match status {
-			http::StatusCode::UNAUTHORIZED | http::StatusCode::FORBIDDEN => moq_net::Error::Unauthorized,
-			status => moq_net::Error::App(status.as_u16()),
-		});
+	async fn reject(self, code: moq_net::SessionError) {
+		self.handshake.close(code.into());
 	}
 
 	fn auth(&self) -> moq_net::auth::Handle {

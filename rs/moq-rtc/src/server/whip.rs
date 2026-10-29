@@ -81,7 +81,13 @@ async fn accept_offer(
 		return Err(Error::InvalidSdp("expected Content-Type: application/sdp".into()));
 	}
 	let offer = std::str::from_utf8(&body).map_err(|err| Error::InvalidSdp(err.to_string()))?;
-	accept(server, publisher, path, offer).await
+	accept(
+		server,
+		publisher,
+		moq_net::Path::new(path).map_err(moq_net::Error::from)?,
+		offer,
+	)
+	.await
 }
 
 #[cfg(feature = "server")]
@@ -114,11 +120,11 @@ async fn delete(State(state): State<RouterState>, Path(path): Path<String>) -> S
 pub async fn accept(
 	server: &Server,
 	publisher: &moq_net::origin::Producer,
-	broadcast: impl moq_net::AsPath,
+	broadcast: impl Into<moq_net::Path>,
 	offer: &str,
 ) -> Result<Response> {
 	let offer = sdp::parse_offer(offer)?;
-	let broadcast = broadcast.as_path();
+	let broadcast: moq_net::Path = broadcast.into();
 
 	// Create the broadcast hidden up front, so an out-of-scope offer is refused before
 	// any mux work. It announces only once negotiation succeeds (below).
@@ -127,7 +133,7 @@ pub async fn accept(
 	let config = moq_mux::catalog::Config::default()
 		.with_max_age(server.config().max_age)
 		.with_bandwidth(server.config().bandwidth.clone());
-	let sink = Box::new(IngestSink::new(producer, config)?);
+	let sink = Box::new(IngestSink::new(producer.broadcast().clone(), config)?);
 
 	// Register a session on the shared media mux: known ICE credentials (so the
 	// demux routes this peer's STUN by ufrag), an inbox to read datagrams from,
@@ -187,7 +193,7 @@ fn is_sdp(headers: &HeaderMap) -> bool {
 #[cfg(feature = "server")]
 fn status_for(err: &Error) -> StatusCode {
 	match err {
-		Error::InvalidSdp(_) => StatusCode::BAD_REQUEST,
+		Error::InvalidSdp(_) | Error::Moq(moq_net::Error::EmptySegment) => StatusCode::BAD_REQUEST,
 		Error::UnsupportedCodec(_) => StatusCode::UNSUPPORTED_MEDIA_TYPE,
 		Error::SessionNotFound => StatusCode::NOT_FOUND,
 		Error::Moq(moq_net::Error::Unauthorized) => StatusCode::UNAUTHORIZED,
@@ -222,8 +228,10 @@ mod tests {
 		let server = Server::new(crate::server::Config::default());
 		let origin = moq_tokio::origin::spawn();
 		let consumer = origin.consume();
-		let session = accept(&server, &origin, "live/cam0", &offer()).await.unwrap();
-		let broadcast = consumer.request_broadcast("live/cam0", None).await.unwrap();
+		let session = accept(&server, &origin, moq_net::Path::from_static("live/cam0"), &offer())
+			.await
+			.unwrap();
+		let broadcast = consumer.request("live/cam0", None).await.unwrap();
 		let mut catalog = broadcast
 			.track(hang::Catalog::DEFAULT_NAME)
 			.unwrap()
@@ -251,8 +259,10 @@ mod tests {
 		let server = Server::new(crate::server::Config::default());
 		let origin = moq_tokio::origin::spawn();
 		let consumer = origin.consume();
-		let _stale_session = accept(&server, &origin, "live/cam0", &offer()).await.unwrap();
-		let stale = consumer.request_broadcast("live/cam0", None).await.unwrap();
+		let _stale_session = accept(&server, &origin, moq_net::Path::from_static("live/cam0"), &offer())
+			.await
+			.unwrap();
+		let stale = consumer.request("live/cam0", None).await.unwrap();
 		let mut catalog = stale
 			.track(hang::Catalog::DEFAULT_NAME)
 			.unwrap()
@@ -260,7 +270,9 @@ mod tests {
 			.await
 			.unwrap();
 
-		let _fresh_session = accept(&server, &origin, "live/cam0", &offer()).await.unwrap();
+		let _fresh_session = accept(&server, &origin, moq_net::Path::from_static("live/cam0"), &offer())
+			.await
+			.unwrap();
 		// The session binds a real UDP socket, so this runs on the wall clock.
 		let stale_viewer = tokio::time::timeout(std::time::Duration::from_millis(200), async {
 			loop {
@@ -272,7 +284,7 @@ mod tests {
 		})
 		.await;
 		assert!(stale_viewer.is_err(), "the stale viewer ended: {stale_viewer:?}");
-		let fresh = consumer.request_broadcast("live/cam0", None).await.unwrap();
+		let fresh = consumer.request("live/cam0", None).await.unwrap();
 		assert!(!fresh.is_clone(&stale), "viewers reach the reconnected session");
 	}
 }

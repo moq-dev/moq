@@ -30,18 +30,14 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 
 async fn resolve(origin: &moq_net::origin::Producer) -> moq_net::broadcast::Consumer {
 	let consumer = origin.consume();
-	moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
-		.await
-		.expect("announce timeout")
-		.expect("routed");
-	moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
+	moq_clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves")
 }
 
 /// Publish a finished track of three groups, and flag any subscription it ever gets.
-fn publish_finished(origin: &moq_net::origin::Producer) -> (moq_net::broadcast::Producer, Arc<AtomicBool>) {
+fn publish_finished(origin: &moq_net::origin::Producer) -> (moq_net::origin::Publication, Arc<AtomicBool>) {
 	let broadcast = origin.create_broadcast("bcast").unwrap();
 	let mut track = broadcast.create_track("video", timed()).unwrap();
 	broadcast.announce(Default::default()).unwrap();
@@ -88,16 +84,7 @@ fn frames(sequence: u64) -> Vec<Vec<u8>> {
 	(0..2).map(|frame| format!("{sequence}-{frame}").into_bytes()).collect()
 }
 
-/// Draft-17 is absent: its TRACK_STATUS answer cannot say whether the track is timed,
-/// so it still SUBSCRIBEs to learn the track.
-const VERSIONS: &[&str] = &[
-	"moq-transport-14",
-	"moq-transport-15",
-	"moq-transport-16",
-	"moq-transport-18",
-	"moq-transport-19",
-	"moq-transport-22",
-];
+const VERSIONS: &[&str] = &["moq-transport-18", "moq-transport-22"];
 
 async fn direct(version: &str) {
 	let version: Version = version.parse().unwrap();
@@ -166,7 +153,7 @@ async fn relayed(version: &str) {
 /// frames: the copy is timed from TRACK_STATUS_OK, and the resumed SUBSCRIBE keeps it so.
 #[moq_clock::test]
 async fn a_subscribe_after_track_status_keeps_timestamps() {
-	for version in ["moq-transport-18", "moq-transport-19", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22"] {
 		moq_clock::timeout(TIMEOUT, async {
 			let publisher = produce_origin(1);
 			let broadcast = publisher.create_broadcast("bcast").unwrap();
@@ -181,7 +168,7 @@ async fn a_subscribe_after_track_status_keeps_timestamps() {
 
 			let remote = resolve(&client).await;
 			let copy = remote.track("video").unwrap();
-			let info = copy.query().await.expect("TRACK_STATUS resolves the track");
+			let info = copy.info().await.expect("TRACK_STATUS resolves the track");
 			assert!(info.timescale.is_some(), "{version}: the copy is untimed");
 			assert!(track.subscription().is_none(), "{version}: the query subscribed");
 

@@ -31,7 +31,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 /// to the relay, with `bcast` resolved at the relay and the far end.
 struct Relayed {
 	_publisher: moq_net::origin::Producer,
-	broadcast: moq_net::broadcast::Producer,
+	broadcast: moq_net::origin::Publication,
 	upstream: MockPair,
 	_downstream: MockPair,
 	relayed: moq_net::broadcast::Consumer,
@@ -40,11 +40,7 @@ struct Relayed {
 
 async fn resolve(origin: &moq_net::origin::Producer) -> moq_net::broadcast::Consumer {
 	let consumer = origin.consume();
-	moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
-		.await
-		.expect("announce timeout")
-		.expect("routed");
-	moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
+	moq_clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves")

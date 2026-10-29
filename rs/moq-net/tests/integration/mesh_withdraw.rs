@@ -13,7 +13,7 @@ use std::{collections::HashMap, time::Duration};
 
 use futures::channel::mpsc;
 
-use moq_net::{Hop, Version, announce, broadcast, cache, origin};
+use moq_net::{Hop, Version, announce, cache, origin};
 use support::harness::{MockConnectOptions, MockPair, connect_mock, peer, peer_with_latency};
 
 fn produce_origin(hop: u64) -> origin::Producer {
@@ -97,7 +97,7 @@ impl Mesh {
 
 	/// Publish `count` broadcasts spread over every relay but the watcher, starting
 	/// at relay `offset`, and require the watcher to see each announced.
-	async fn publish(&mut self, count: usize, offset: usize) -> Vec<broadcast::Producer> {
+	async fn publish(&mut self, count: usize, offset: usize) -> Vec<moq_net::origin::Publication> {
 		let relays = self.nodes.len() - 1;
 		let broadcasts = (0..count)
 			.map(|i| {
@@ -359,7 +359,7 @@ impl Cluster {
 
 	/// Publish `path` from the client and require everyone to see it. Returns
 	/// what the watching client saw.
-	async fn publish(&mut self, path: &str) -> (broadcast::Producer, Vec<Kind>) {
+	async fn publish(&mut self, path: &str) -> (moq_net::origin::Publication, Vec<Kind>) {
 		let broadcast = self.publisher.create_broadcast(path).unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		moq_clock::sim::idle().await;
@@ -373,7 +373,7 @@ impl Cluster {
 	}
 
 	/// Close `broadcast` cleanly: what the watching client, then each relay, saw.
-	async fn close(&mut self, path: &str, broadcast: broadcast::Producer) -> (Vec<Kind>, Vec<Vec<Kind>>) {
+	async fn close(&mut self, path: &str, broadcast: moq_net::origin::Publication) -> (Vec<Kind>, Vec<Vec<Kind>>) {
 		drop(broadcast);
 		moq_clock::sim::idle().await;
 		let client = drain(&mut self.client).remove(path).unwrap();
@@ -631,11 +631,7 @@ async fn hop_limit_bounds_receive_and_send() {
 		"moq-lite-05",
 		"moq-lite-06",
 		"moq-lite-07-wip",
-		"moq-transport-17",
 		"moq-transport-18",
-		"moq-transport-19",
-		"moq-transport-20",
-		"moq-transport-21",
 		"moq-transport-22",
 	] {
 		let version = name.parse().unwrap();
@@ -657,9 +653,9 @@ async fn hop_limit_bounds_receive_and_send() {
 					.unwrap(),
 			)
 		};
-		let _long = source.dynamic_route("long", route(2)).unwrap();
-		let _boundary = source.dynamic_route("boundary", route(1)).unwrap();
-		let short = source.dynamic_route("short", route(0)).unwrap();
+		let _long = source.publish("long", route(2)).unwrap();
+		let _boundary = source.publish("boundary", route(1)).unwrap();
+		let short = source.publish("short", route(0)).unwrap();
 		moq_clock::sim::idle().await;
 		let received = drain(&mut received);
 		assert!(!received.contains_key("long"), "{name}: accepted over-limit path");
@@ -678,12 +674,12 @@ async fn hop_limit_bounds_receive_and_send() {
 				Some(&Kind::End),
 				"{name}"
 			);
-			let _replacement = source.dynamic_route("short", route(1)).unwrap();
+			let _replacement = source.publish("short", route(1)).unwrap();
 			moq_clock::sim::idle().await;
 			assert!(drain(&mut sent).is_empty(), "{name}: forwarded over-limit replacement");
 			continue;
 		}
-		short.update_route(route(1)).unwrap();
+		short.announce(route(1)).unwrap();
 		moq_clock::sim::idle().await;
 		let ended = drain(&mut sent);
 		assert_eq!(
@@ -700,16 +696,7 @@ async fn hop_limit_bounds_receive_and_send() {
 #[moq_clock::test]
 async fn hop_limit_falls_back_to_a_forwardable_route() {
 	// Only wires carrying a route cost can rank a longer route first.
-	for name in [
-		"moq-lite-06",
-		"moq-lite-07-wip",
-		"moq-transport-17",
-		"moq-transport-18",
-		"moq-transport-19",
-		"moq-transport-20",
-		"moq-transport-21",
-		"moq-transport-22",
-	] {
+	for name in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
 		let version = name.parse().unwrap();
 		let near = produce_origin(1);
 		let far = produce_origin(4);
@@ -738,9 +725,9 @@ async fn hop_limit_falls_back_to_a_forwardable_route() {
 				.with_cost(origin::Cost::new(cost))
 		};
 		// Three hops at the relay once the sender is appended: in the cap, but full.
-		let _cheap = far.dynamic_route("room", route(100, 2, 1)).unwrap();
+		let _cheap = far.publish("room", route(100, 2, 1)).unwrap();
 		// Two hops at the relay, so it has room for the relay's own.
-		let pricey = near.dynamic_route("room", route(200, 1, 50)).unwrap();
+		let pricey = near.publish("room", route(200, 1, 50)).unwrap();
 		moq_clock::sim::idle().await;
 		let started = drain(&mut sent);
 		assert_eq!(

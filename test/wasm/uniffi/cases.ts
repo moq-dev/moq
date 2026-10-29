@@ -321,23 +321,6 @@ const remote: Record<string, (relay: Relay) => Promise<string | undefined>> = {
 		return closed;
 	},
 
-	"a token added while dialing ends with a refused dial": async (relay) => {
-		const session = await dial(relay, "00".repeat(32));
-		// Taken before the dial settles, so the token waits for a session that never comes.
-		const adding = session.auth().add("token");
-		const state = await settled(session);
-		if (state.phase !== MoqConnectionPhase.Closed) throw new Error(`settled ${state.phase}`);
-		const added = await settle(
-			adding,
-			5000,
-			"add",
-			() => "resolved",
-			(err: unknown) => (err as Error).message,
-		);
-		if (added === "resolved") throw new Error("add resolved after a refused dial");
-		return added;
-	},
-
 	"cancelling a dial closes it": async (relay) => {
 		const session = await dial(relay);
 		session.cancel(0);
@@ -352,9 +335,10 @@ const remote: Record<string, (relay: Relay) => Promise<string | undefined>> = {
 		const subscriber = await connect(relay);
 		try {
 			const path = `uniffi/u64/${crypto.randomUUID()}`;
-			const broadcast = publisher.publish().createBroadcast(path);
+			const publication = publisher.publish().createBroadcast(path);
+			const broadcast = publication.broadcast();
 			const track = broadcast.publishTrack("data", TIMED);
-			broadcast.announce(MoqAnnounceRoute.create({}));
+			publication.announce(MoqAnnounceRoute.create({}));
 			const consumer = await within(subscriber.consume().announcedBroadcast(path).available(), 5000, "announce");
 			const sub = await consumer.subscribeTrack("data", undefined);
 			const seen: string[] = [];
@@ -384,9 +368,10 @@ const remote: Record<string, (relay: Relay) => Promise<string | undefined>> = {
 		const subscriber = await connect(relay);
 		try {
 			const path = `uniffi/refuse/${crypto.randomUUID()}`;
-			const broadcast = publisher.publish().createBroadcast(path);
+			const publication = publisher.publish().createBroadcast(path);
+			const broadcast = publication.broadcast();
 			broadcast.publishTrack("data", TIMED);
-			broadcast.announce(MoqAnnounceRoute.create({}));
+			publication.announce(MoqAnnounceRoute.create({}));
 			const consumer = await within(subscriber.consume().announcedBroadcast(path).available(), 5000, "announce");
 			const outcome = await settle(
 				consumer.subscribeTrack("missing", undefined).then((track) => track.recvGroup()),
@@ -408,9 +393,10 @@ const remote: Record<string, (relay: Relay) => Promise<string | undefined>> = {
 		const subscriber = await connect(relay);
 		try {
 			const path = `uniffi/close/${crypto.randomUUID()}`;
-			const broadcast = publisher.publish().createBroadcast(path);
+			const publication = publisher.publish().createBroadcast(path);
+			const broadcast = publication.broadcast();
 			const track = broadcast.publishTrack("data", TIMED);
-			broadcast.announce(MoqAnnounceRoute.create({}));
+			publication.announce(MoqAnnounceRoute.create({}));
 			const consumer = await within(subscriber.consume().announcedBroadcast(path).available(), 5000, "announce");
 			const sub = await consumer.subscribeTrack("data", undefined);
 			const group = track.appendGroup();

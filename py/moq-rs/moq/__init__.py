@@ -8,11 +8,10 @@ from moq_ffi import MoqError as Error
 from . import audio as audio
 
 # Layer namespaces stay out of __all__; json would shadow the stdlib module.
-from . import flate as flate
 from . import json as json
 from . import video as video
 from .client import Client, CongestionControl, connect, qlog_supported, versions
-from .epoch import epoch_time, mint_epoch
+from .epoch import mint_epoch
 from .errors import is_auth, is_shutdown, protocol_error
 from .log import log_level
 from .origin import (
@@ -27,21 +26,22 @@ from .origin import (
     BroadcastPrepared,
     BroadcastRequest,
     OriginConsumer,
-    OriginDynamic,
     OriginProducer,
+    OriginRequests,
+    Publication,
 )
 from .publish import (
-    BroadcastDynamic,
     BroadcastProducer,
+    BroadcastRequests,
     Fill,
     GroupProducer,
     TrackDemand,
-    TrackDynamic,
     TrackProducer,
     TrackRequest,
+    TrackRequests,
 )
 from .server import Request, Server, Transport
-from .session import Auth, AuthToken, Bandwidth, Reservation, Session
+from .session import Allocator, BandwidthConsumer, GrantConsumer, Reservation, Session, Tokens
 from .subscribe import (
     BroadcastConsumer,
     GroupConsumer,
@@ -81,6 +81,7 @@ from .types import (
 )
 
 __all__ = [
+    "Allocator",
     "Anchor",
     "Announce",
     "AnnounceConsumer",
@@ -94,12 +95,10 @@ __all__ = [
     "AudioCodec",
     "AudioEncoderInput",
     "AudioSampleFormat",
-    "Auth",
-    "AuthToken",
     "Backoff",
-    "Bandwidth",
+    "BandwidthConsumer",
     "BroadcastConsumer",
-    "BroadcastDynamic",
+    "BroadcastRequests",
     "BroadcastPrepared",
     "BroadcastProducer",
     "BroadcastRequest",
@@ -119,12 +118,14 @@ __all__ = [
     "FetchGroupOptions",
     "Fill",
     "Grant",
+    "GrantConsumer",
     "GroupConsumer",
     "GroupProducer",
     "OriginConsumer",
-    "OriginDynamic",
+    "OriginRequests",
     "OriginProducer",
     "Order",
+    "Publication",
     "Range",
     "Request",
     "Reservation",
@@ -132,9 +133,10 @@ __all__ = [
     "Server",
     "Session",
     "Subscription",
+    "Tokens",
     "TrackConsumer",
     "TrackDemand",
-    "TrackDynamic",
+    "TrackRequests",
     "TrackInfo",
     "TrackProducer",
     "TrackRequest",
@@ -147,7 +149,6 @@ __all__ = [
     "VideoPixelFormat",
     "WebSocketConfig",
     "connect",
-    "epoch_time",
     "is_auth",
     "is_shutdown",
     "log_level",

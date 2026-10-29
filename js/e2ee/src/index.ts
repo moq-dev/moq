@@ -7,21 +7,23 @@
  *
  * A {@link Credential} is what the application distributes out of band. Each publisher instance
  * calls {@link Credential.produce} to mint a {@link Generation.Producer} and wraps its `@moq/net`
- * broadcast in a {@link Broadcast.Producer}. Subscribers discover the epoch from the broadcast
- * route, bind a {@link Generation.Consumer} with {@link Credential.consume}, and wrap the broadcast
- * in a {@link Broadcast.Consumer}. Both sides name tracks by their semantic names; only the
+ * broadcast in a {@link Broadcast.Producer}. Subscribers follow the path, take each instance's
+ * epoch from the broadcast it resolved, bind a {@link Generation.Consumer} with
+ * {@link Credential.consume}, and wrap the broadcast in a {@link Broadcast.Consumer}. Both sides name tracks by their semantic names; only the
  * derived physical names reach `@moq/net`.
  *
  * ```ts
  * const credential = new Credential({ context, kid, secret });
  * const generation = credential.produce();
- * const broadcast = origin.createBroadcast(await credential.path("meeting.hang"));
- * const video = await new Broadcast.Producer(broadcast, generation).createTrack("video", { timescale });
- * broadcast.announce({ epoch: generation.epoch });
+ * const publication = origin.createBroadcast(await credential.path("meeting.hang"));
+ * const video = await new Broadcast.Producer(publication.broadcast, generation).createTrack("video", { timescale });
+ * publication.announce({ epoch: generation.epoch });
  *
  * const group = video.appendGroup();
  * await group.writeFrame(timestamp, frame);
- * group.close();
+ * group.finish();
+ * video.finish();
+ * video.close();
  * ```
  *
  * WebCrypto AES-GCM is asynchronous, so writes return promises and run through a serial pump

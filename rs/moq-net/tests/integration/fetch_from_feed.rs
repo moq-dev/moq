@@ -24,7 +24,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 struct Relay {
 	track: moq_net::track::Producer,
 	remote: moq_net::broadcast::Consumer,
-	_broadcast: moq_net::broadcast::Producer,
+	_broadcast: moq_net::origin::Publication,
 	_pair: support::harness::MockPair,
 	_origins: (moq_net::origin::Producer, moq_net::origin::Producer),
 }
@@ -46,11 +46,7 @@ async fn relay(version: &str) -> Relay {
 	let pair = connect_mock(options).await;
 
 	let consumer = client.consume();
-	moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
-		.await
-		.expect("announce timeout")
-		.expect("routed");
-	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
+	let remote = moq_clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");

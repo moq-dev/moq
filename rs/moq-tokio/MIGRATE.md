@@ -4,6 +4,31 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Connection::allocator` ([#6751](https://github.com/moq-dev/moq/pull/6751))
+
+`Connection::bandwidth()` is `Connection::allocator()`, mirroring `moq_net::Session::allocator()`.
+
+### QUIC connections wait for the handshake
+
+Await `quic::driver::Connecting` instead of calling `into_0rtt()`.
+`Connection::authenticated()` and `RecvStream::is_0rtt()` are gone because every connection handle already completed its handshake.
+Remove `ZeroRttRejected` match arms from `ReadError`, `WriteError`, `ResetError`, and `StoppedError`.
+TLS session tickets still enable resumed 1-RTT connections; application data always waits for the handshake.
+
+### QUIC driver APIs follow their consumers
+
+`quic::driver::RecvStream::read_chunk(max)` reads ordered bytes and has no ordering flag or `Chunk::offset`.
+Replace `read_chunks` with successive `read_chunk` calls. `ReadError::IllegalOrderedRead` is gone.
+Use `Connection::set_limits` with `quic::Limits` instead of `set_max_concurrent_uni_streams`, `set_max_concurrent_bi_streams`, `set_send_window`, and `set_receive_window`.
+`Limits::max_streams` sets both directions, so code that called only `set_max_concurrent_uni_streams(n)` now raises the bidirectional limit too.
+Each field is a `NonZeroU64`, and `None` leaves that limit unchanged, so a live connection cannot set a stream limit or window to 0; set a per-direction or zero stream limit at construction with `TransportConfig::max_concurrent_uni_streams` and `max_concurrent_bidi_streams`.
+The accept, open, and datagram methods return opaque futures; await them without naming the removed `Accept`, `AcceptUni`, `AcceptBi`, `OpenUni`, `OpenBi`, `ReadDatagram`, or `IncomingFuture` types.
+Unused connection accessors (`side`, `local_ip`, `min_rtt`, `force_key_update`, `export_keying_material`, `watch_remote_address` with its `RemoteAddressWatcher`, and `handshake_confirmed`), `Connecting::local_ip`, `Endpoint::stats`, `EndpointStats`, `Endpoint::open_connections`, `set_server_config`, `rebind_abstract`, and unused `Incoming` operations (`accept_with`, `retry` with its `RetryError`, `ignore`, `may_retry`, `refuse`, `local_ip`, `remote_address`, `remote_address_validated`, and `orig_dst_cid`) are no longer public.
+Read peer addresses through `Connection::remote_address` or `Connecting::remote_address`; configure the endpoint at construction and use `Endpoint::rebind` for a new UDP socket.
+To rotate TLS certificates without `set_server_config`, give the `ServerConfig`'s rustls config a `ResolvesServerCert` that returns the current certificate, as `tls::Serve` does.
+The `poll_read_buf` helper is private; use `AsyncRead` or `poll_read`.
+`quic::driver` no longer re-exports `Side`, `TimeSource`, `StdSystemTime`, `BloomTokenLog`, `TokenMemoryCache`, `TokenLog`, `TokenStore`, `NoneTokenLog`, `NoneTokenStore`, or `TokenReuseError`; name `moq_quic::Side` directly, and use the default token policy.
+
 ### The connection receive window is 128 MiB, and has a floor (#5878)
 
 `quic::DEFAULT_RECEIVE_WINDOW` is 128 MiB instead of 64 MiB, since incomplete messages now hold connection credit until complete.
@@ -127,9 +152,9 @@ A stream-only listener with `listen.tls.root` returns `Error::MtlsUnsupported` i
 A WebTransport session reports `Transport::WebTransport` (`"webtransport"` in logs); `Quic` now means raw QUIC only, so match both where you meant either.
 `Connection::transport()` reports the live transport.
 
-### Custom sessions declare their request binding
+### Custom sessions declare their request address
 
-`transport::Session::new` takes the session's `moq_net::transport::Binding`: `Uri` when the transport handshake carries the request URI, `InBand` when SETUP does.
+`transport::Session::new` takes the session's `moq_net::transport::Address`: `Uri` when the transport handshake carries the request URI, `Setup` when SETUP does.
 `Client` and `Server` are unchanged.
 
 ### `Redirect::resolve` is removed (#4854)

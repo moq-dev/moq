@@ -118,8 +118,9 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 			const pair = createMockTransportPair(ALPN_05);
 			const origin = new OriginProducer();
 			const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-			const broadcast = origin.createBroadcast(Path.from("room"));
-			broadcast.announce();
+			const broadcastPublication = origin.createBroadcast(Path.from("room"));
+			const broadcast = broadcastPublication.broadcast;
+			broadcastPublication.announce();
 			const demand = broadcast.demand();
 			const serving = (async () => {
 				for (;;) {
@@ -155,8 +156,9 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 			const pair = createMockTransportPair(ALPN_05);
 			const origin = new OriginProducer();
 			const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-			const broadcast = origin.createBroadcast(Path.from("room"));
-			broadcast.announce();
+			const broadcastPublication = origin.createBroadcast(Path.from("room"));
+			const broadcast = broadcastPublication.broadcast;
+			broadcastPublication.announce();
 			const demand = broadcast.demand();
 			const serving = (async () => {
 				for (;;) {
@@ -201,8 +203,9 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const pair = createMockTransportPair(ALPN_05);
 		const origin = new OriginProducer();
 		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-		const broadcast = origin.createBroadcast(Path.from("room"));
-		broadcast.announce();
+		const broadcastPublication = origin.createBroadcast(Path.from("room"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		const demand = broadcast.demand();
 		let requests = 0;
 		const serving = (async () => {
@@ -243,8 +246,9 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const pair = createMockTransportPair(ALPN_05);
 		const origin = new OriginProducer();
 		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-		const broadcast = origin.createBroadcast(Path.from("room"));
-		broadcast.announce();
+		const broadcastPublication = origin.createBroadcast(Path.from("room"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		const demand = broadcast.demand();
 		let requests = 0;
 		const serving = (async () => {
@@ -302,8 +306,9 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 			const pair = createMockTransportPair(ALPN_05);
 			const origin = new OriginProducer();
 			const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-			const broadcast = origin.createBroadcast(Path.from("room"));
-			broadcast.announce();
+			const broadcastPublication = origin.createBroadcast(Path.from("room"));
+			const broadcast = broadcastPublication.broadcast;
+			broadcastPublication.announce();
 			const demand = broadcast.demand();
 			// Answered by hand, after every requester left.
 			const requested = wireOf(broadcast).requested();
@@ -334,8 +339,9 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const pair = createMockTransportPair(ALPN_05);
 		const origin = new OriginProducer();
 		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-		const broadcast = origin.createBroadcast(Path.from("room"));
-		broadcast.announce();
+		const broadcastPublication = origin.createBroadcast(Path.from("room"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		const demand = broadcast.demand();
 		const requested = wireOf(broadcast).requested();
 
@@ -347,7 +353,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		pair.server.close();
 		expect(await settlesWithin(demand.unused(), 1000)).toBe(true);
 
-		request.reject();
+		request.reject(new Error("request refused"));
 		publisher.close();
 		broadcast.close();
 		origin.close();
@@ -357,8 +363,9 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const pair = createMockTransportPair(ALPN_05);
 		const origin = new OriginProducer();
 		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-		const broadcast = origin.createBroadcast(Path.from("room"));
-		broadcast.announce();
+		const broadcastPublication = origin.createBroadcast(Path.from("room"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		const demand = broadcast.demand();
 		// Answered by hand, after the first TRACK stream has left.
 		const requested = wireOf(broadcast).requested();
@@ -392,8 +399,9 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const pair = createMockTransportPair(ALPN_05);
 		const origin = new OriginProducer();
 		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-		const broadcast = origin.createBroadcast(Path.from("room"));
-		broadcast.announce();
+		const broadcastPublication = origin.createBroadcast(Path.from("room"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		const serving = (async () => {
 			for (;;) {
 				const request = await wireOf(broadcast).requested();

@@ -30,7 +30,7 @@ promise.
 2. Publish the same broadcast name under the same auth path. Each publisher
    keeps its own epoch; `moq` creates one automatically.
 3. Use epoch-capable connections on every hop: moq-lite 07, which is opt-in,
-   or moq-transport draft 17 or later with the [epoch extension](/draft/moq-epoch)
+   or moq-transport with the [epoch extension](/draft/moq-epoch)
    enabled. Keep the publisher hosts' clocks synchronized, since epochs order
    by their UUIDv7 creation time.
 
@@ -40,12 +40,12 @@ relays. Run each command on its publisher host, with its own source URL:
 ```bash
 # Publisher A
 moq --connect https://ingest-a.example.com/anon \
-    --connect-version moq-transport-17 --broadcast event.hang \
+    --connect-version moq-transport-18 --broadcast event.hang \
     import hls https://source-a.example.com/live/index.m3u8
 
 # Publisher B
 moq --connect https://ingest-b.example.com/anon \
-    --connect-version moq-transport-17 --broadcast event.hang \
+    --connect-version moq-transport-18 --broadcast event.hang \
     import hls https://source-b.example.com/live/index.m3u8
 ```
 
@@ -69,15 +69,23 @@ For MPEG-TS output, opt into following replacements:
 
 ```bash
 moq --connect https://edge.example.com/anon \
-    --connect-version moq-transport-17 --broadcast event.hang \
+    --connect-version moq-transport-18 --broadcast event.hang \
     export ts --stitch --follow 10s > event.ts
 ```
 
 `--stitch` follows a replacement as a program switch: its catalog supplies a
 new PMT and every PID flags the discontinuity. Starting a backup can cause
-this switch too. `--follow 10s` bounds waiting for a publisher after an end;
-choose that window for your application. It does not make the switch hitless. Without `--stitch`, the TS export stays on the
-old instance while it is up, then fails on a replacement. Other stdout export
+this switch too. The old instance keeps feeding output until the replacement's
+clock and first media are usable, bounded by `--follow`. The switch then drops
+the old instance's buffered tail, so the new program plays at `--delay` instead
+of carrying that tail as added latency. A replacement usable within `--follow`
+adds no gap to the output. One that is not, such as on a link too slow to carry
+both instances at once, starts after a gap once the old tail runs out. The epochs'
+timestamps are not aligned, so this is still a marked program discontinuity,
+not hitless failover.
+`--follow 10s` also bounds waiting for a publisher after an end; choose that
+window for your application. Without `--stitch`, the TS export stays on the old
+instance while it is up, then fails on a replacement. Other stdout export
 formats end with their broadcast; they do not follow a replacement. TS
 passthrough also cannot stitch. See [CLI retention and latency](/bin/cli#retention-and-latency).
 
@@ -110,7 +118,8 @@ and rank its links. Do not start a second importer to create the second copy.
 
 When the serving route fails or another route with the same epoch wins, the
 subscription resumes from the first frame it lacks. This needs an explicit
-matching epoch across every hop and a surviving route that can still serve
+matching epoch across every hop, routes whose copies report identical track
+info (so the same protocol and draft on each), and a surviving route that can still serve
 those frames within the broadcast's retention. It preserves broadcast
 continuity, but a late recovery can still miss playback deadlines. Losing the
 only publisher cannot be repaired by adding routes to it.
