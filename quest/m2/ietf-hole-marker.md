@@ -9,8 +9,13 @@ A relay's copy ingested over moq-transport then knows its holes ("null")
 instead of leaving them unknown ("undefined"). Our moq-transport publishers
 then answer a multi-group FETCH, and a multi-group draft-22 fill, whenever
 the cache knows every group in the range: a local, moq-lite, or
-extension-carrying copy. Groups go out in order, with each known hole marked
-End of Non-Existent Range (`0x8C`). Any other range stays refused, as
+extension-carrying copy. Groups go out in order. End of Non-Existent Range
+(`0x8C`) marks only a proven hole: a group never produced, or a
+budget-independent drop (a cut, an origin's eviction or expiry). A stale
+drop judged under a narrower budget or range, as in
+[Drop set](/quest/m1/drop-set.md), proves nothing for a wider FETCH. That
+group is unknown, so the publisher fills it or the range is refused. Any
+other range stays refused, as
 [Our moq-transport publishers serve at most one group](/quest/m1/ietf-publisher-one-group.md)
 leaves it.
 
@@ -44,8 +49,10 @@ Open, for this quest's interview:
   order, and where FETCH_OK's End Location falls.
 
 Test across Rust and JS on drafts 18 and 22, with and without the extension.
-A range over a copy whose holes are all known is answered with `0x8C` runs.
-A range with an unknown hole is still refused. Interop with a peer that lacks
+A range over a copy whose holes are all proven is answered with `0x8C` runs.
+A range with an unknown hole is still refused. Regression: an upstream
+reports G stale for a narrow subscriber while still holding G; a wider
+downstream FETCH covering G gets G, or a refusal, never `0x8C`. Interop with a peer that lacks
 the extension is unchanged.
 
 Public API: none. Wire: a new negotiated SETUP option and its drop message.
