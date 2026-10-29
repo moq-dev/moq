@@ -2157,6 +2157,7 @@ mod session_tests {
 		let playback = super::Playback {
 			element: element.downgrade(),
 			broadcast: broadcast.consume(),
+			max_delay: DEFAULT_MAX_DELAY,
 			pads: Pads::default(),
 			timeline: Arc::default(),
 			shutdown: stopped.clone(),
