@@ -23,8 +23,11 @@ handling, and record the reason.
 Decided 2026-10-28 (maintainer): it starts after the three quests below land,
 since each edits the same publisher.
 
+After that narrowing, an answer or fill lists at most one group, so the
+marker covers that group.
+
 Tests: a listed group evicted before it is written, for FETCH on drafts 18
-and 22 in both group orders and for a draft-22 fill, each failing before the
+and 22 and for a draft-22 fill of the largest group, each failing before the
 fix. Run `just test interop --all` if the framing order changes.
 
 Public API: none. Wire: none; the marker exists in both drafts.
@@ -32,5 +35,5 @@ Public API: none. Wire: none; the marker exists in both drafts.
 ## Required
 
 - [Rust FETCH parity](/quest/m1/ietf-fetch-parity.md) - edits the same FETCH answer path
-- [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - edits the same fill path
+- [Our moq-transport publishers serve at most one group](/quest/m1/ietf-publisher-one-group.md) - narrows the same FETCH answer and fill paths to one group
 - [SUBSCRIBE honors the properties opt-out](/quest/m1/subscribe-timestamps.md) - edits the same publisher
