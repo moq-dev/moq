@@ -3881,6 +3881,19 @@ mod tests {
 		let replacement = test.rendition("video0");
 		assert!(!Arc::ptr_eq(&original, &replacement), "a new duration reconfigures");
 		assert_eq!(replacement.target_duration(), 2);
+		drop((original, replacement));
+
+		// A removed rendition that returns serves the same playlist URI, so it keeps its target
+		// even after its last reference drops and a longer rendition registers in between.
+		let video0 = test.catalog.video.renditions.remove("video0").unwrap();
+		test.sync();
+		let mut longer = video_config();
+		longer.hls = declare("video3", 8);
+		test.catalog.video.renditions.insert("video3".into(), longer);
+		test.sync();
+		test.catalog.video.renditions.insert("video0".into(), video0);
+		test.sync();
+		assert_eq!(test.rendition("video0").target_duration(), 2);
 	}
 
 	/// The `Push` events a fresh subscriber to `track`'s records reads before it is caught up.

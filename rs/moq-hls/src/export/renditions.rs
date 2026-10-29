@@ -85,7 +85,9 @@ struct Feed {
 	targets: Vec<Weak<Rendition>>,
 	/// Each rendition's discontinuity count.
 	discontinuities: Discontinuities,
-	/// Each live playlist URI's `EXT-X-TARGETDURATION` (see [`Producer::register`]).
+	/// Each playlist URI's `EXT-X-TARGETDURATION` (see [`Producer::register`]). Never pruned: a
+	/// removed rendition that returns serves the same URI, so it must find its old target. One
+	/// small entry per name the broadcast has ever listed.
 	target_durations: BTreeMap<Key, u64>,
 	/// The longest duration any rendition has declared this run, in whole seconds rounded up.
 	declared: u64,
@@ -419,10 +421,10 @@ impl Producer {
 	/// their own records.
 	///
 	/// Every playlist URI keeps one `EXT-X-TARGETDURATION` for the run (RFC 8216 6.2.1), so a
-	/// reconfigured rendition's replacement keeps its predecessor's. A new one gets the longest
-	/// duration any rendition has declared this run, these included, so renditions listed together
-	/// agree. One added later that declares longer segments raises only its own target and later
-	/// ones': playlists already served never change theirs.
+	/// reconfigured rendition's replacement, or a removed one that returns, keeps its predecessor's.
+	/// A new one gets the longest duration any rendition has declared this run, these included, so
+	/// renditions listed together agree. One added later that declares longer segments raises only
+	/// its own target and later ones': playlists already served never change theirs.
 	fn register(&self, added: Vec<Rendition>) -> Vec<Arc<Rendition>> {
 		// Most catalog updates only revise estimates; writing the feed would wake every cursor.
 		if added.is_empty() {
@@ -457,7 +459,7 @@ impl Producer {
 			})
 			.collect();
 		// Pruned here, so a catalog that keeps replacing renditions holds only the live ones. A
-		// replacement shares its predecessor's name, so its count and target survive.
+		// replacement shares its predecessor's name, so its count survives.
 		feed.targets.retain(|target| target.strong_count() > 0);
 		let live: BTreeSet<Key> = feed
 			.targets
@@ -466,7 +468,6 @@ impl Producer {
 			.map(|rendition| (rendition.kind, rendition.name.clone()))
 			.collect();
 		feed.discontinuities.renditions.retain(|key, _| live.contains(key));
-		feed.target_durations.retain(|key, _| live.contains(key));
 		added
 	}
 
