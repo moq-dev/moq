@@ -27,6 +27,9 @@ func TimestampFromDuration(d time.Duration) (Timestamp, error) {
 // nanosecond, saturating past time.Duration's ~292 years. It panics on a zero
 // Scale, which no read returns.
 func TimestampToDuration(t Timestamp) time.Duration {
+	if t.Scale == 0 {
+		panic("moq: timestamp with a zero scale")
+	}
 	hi, lo := bits.Mul64(t.Value, uint64(time.Second))
 	if hi >= t.Scale {
 		return time.Duration(math.MaxInt64)

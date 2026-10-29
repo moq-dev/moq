@@ -47,3 +47,14 @@ func TestTimestampToDuration(t *testing.T) {
 		}
 	}
 }
+
+// A zero scale, such as an unset Timestamp{}, panics rather than reading as the
+// longest duration.
+func TestTimestampToDurationZeroScale(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("TimestampToDuration(Timestamp{}) did not panic")
+		}
+	}()
+	TimestampToDuration(Timestamp{})
+}
