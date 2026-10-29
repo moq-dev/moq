@@ -71,7 +71,7 @@ async function run(config: Sample) {
 				});
 				await Promise.all(
 					Array.from({ length: config.publishers }, async (_, publisher) => {
-						const request = origin.request(net.Path.from(`${config.id}/${publisher}`), { announced: true });
+						const request = origin.follow(net.Path.from(`${config.id}/${publisher}`));
 						disposers.push(() => request.close());
 						let broadcast = request.active.peek();
 						while (!broadcast) {
@@ -121,7 +121,6 @@ async function run(config: Sample) {
 				await Promise.all(
 					Array.from({ length: config.publishers }, async (_, publisher) => {
 						const broadcast = await session.consume(`${config.id}/${publisher}`);
-						if (!broadcast) throw new Error("missing WASM broadcast");
 						disposers.push(() => broadcast.free());
 						const track = await broadcast.subscribe("data");
 						disposers.push(() => track.free());

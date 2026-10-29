@@ -118,8 +118,12 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 	if err := track.Finish(); err != nil {
 		t.Fatal(err)
 	}
-	if err := served.Close(); err != nil {
+	if err := served.Broadcast().Close(); err != nil {
 		t.Fatal(err)
+	}
+	// The publication fills the prepared broadcast, so closing one closes the other.
+	if _, err := prepared.Broadcast().PublishTrack("late", nil); !errors.Is(err, moq.ErrClosed) {
+		t.Fatalf("PublishTrack after close = %v, want ErrClosed", err)
 	}
 }
 
@@ -247,10 +251,11 @@ func TestAudioConsumerDelay(t *testing.T) {
 	defer cancel()
 
 	origin := newOrigin(t)
-	broadcast, err := origin.CreateBroadcast("audio-delay")
+	publication, err := origin.CreateBroadcast("audio-delay")
 	if err != nil {
 		t.Fatal(err)
 	}
+	broadcast := publication.Broadcast()
 	track := "mic"
 	catalogProducer, err := moqmedia.NewCatalogProducer(broadcast)
 	if err != nil {
@@ -265,7 +270,7 @@ func TestAudioConsumerDelay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := broadcast.Announce(moq.AnnounceRoute{}); err != nil {
+	if err := publication.Announce(moq.AnnounceRoute{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -407,10 +412,11 @@ func testDecodeVideoFrame(t *testing.T, surface bool) {
 	defer cancel()
 
 	origin := newOrigin(t)
-	broadcast, err := origin.CreateBroadcast("video-decode-frame")
+	publication, err := origin.CreateBroadcast("video-decode-frame")
 	if err != nil {
 		t.Fatal(err)
 	}
+	broadcast := publication.Broadcast()
 	track := "camera"
 	catalogProducer, err := moqmedia.NewCatalogProducer(broadcast)
 	if err != nil {
@@ -425,7 +431,7 @@ func testDecodeVideoFrame(t *testing.T, surface bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := broadcast.Announce(moq.AnnounceRoute{}); err != nil {
+	if err := publication.Announce(moq.AnnounceRoute{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -630,15 +636,16 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	defer cancel()
 
 	origin := newOrigin(t)
-	broadcast, err := origin.CreateBroadcast("live")
+	publication, err := origin.CreateBroadcast("live")
 	if err != nil {
 		t.Fatal(err)
 	}
+	broadcast := publication.Broadcast()
 	media, err := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.AudioFormatOpus, Data: opusHead()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := broadcast.Announce(moq.AnnounceRoute{}); err != nil {
+	if err := publication.Announce(moq.AnnounceRoute{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1226,7 +1233,7 @@ func TestRequestBroadcastCancelKeepsTheOrigin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer served.Close()
+	defer served.Broadcast().Close()
 	select {
 	case err := <-resolved:
 		if err != nil {
@@ -1432,10 +1439,11 @@ func TestBroadcastIsReachableOnlyWhileAnnounced(t *testing.T) {
 	defer cancel()
 
 	origin := newOrigin(t)
-	broadcast, err := origin.CreateBroadcast("live")
+	publication, err := origin.CreateBroadcast("live")
 	if err != nil {
 		t.Fatal(err)
 	}
+	broadcast := publication.Broadcast()
 	if _, err := broadcast.PublishTrack("events", nil); err != nil {
 		t.Fatal(err)
 	}
@@ -1444,7 +1452,7 @@ func TestBroadcastIsReachableOnlyWhileAnnounced(t *testing.T) {
 		t.Fatal("an unannounced broadcast must be unroutable")
 	}
 
-	if err := broadcast.Announce(moq.AnnounceRoute{Cost: 3}); err != nil {
+	if err := publication.Announce(moq.AnnounceRoute{Cost: 3}); err != nil {
 		t.Fatal(err)
 	}
 	announced, err := consumer.Announced(moq.AnnounceOptions{})
@@ -1457,7 +1465,7 @@ func TestBroadcastIsReachableOnlyWhileAnnounced(t *testing.T) {
 		t.Fatalf("announce: ann=%+v", ann)
 	}
 
-	if err := broadcast.Unannounce(); err != nil {
+	if err := publication.Unannounce(); err != nil {
 		t.Fatal(err)
 	}
 	event := nextRoute(t, ctx, announced)
@@ -1468,7 +1476,7 @@ func TestBroadcastIsReachableOnlyWhileAnnounced(t *testing.T) {
 		t.Fatal("an unannounced broadcast must be unroutable")
 	}
 
-	if err := broadcast.Announce(moq.AnnounceRoute{}); err != nil {
+	if err := publication.Announce(moq.AnnounceRoute{}); err != nil {
 		t.Fatal(err)
 	}
 	nextAnnounced(t, ctx, announced)
@@ -1477,6 +1485,43 @@ func TestBroadcastIsReachableOnlyWhileAnnounced(t *testing.T) {
 	}
 	if err := broadcast.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A publication outliving its closed broadcast cannot announce or withdraw the
+// broadcast that replaced it at the same path.
+func TestStalePublicationLeavesItsReplacementAlone(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	origin := newOrigin(t)
+	stale, err := origin.CreateBroadcast("live")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stale.Announce(moq.AnnounceRoute{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := stale.Broadcast().Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	replacement, err := origin.CreateBroadcast("live")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replacement.Broadcast().Close()
+	if err := replacement.Announce(moq.AnnounceRoute{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := stale.Announce(moq.AnnounceRoute{}); !errors.Is(err, moq.ErrClosed) {
+		t.Fatalf("stale Announce = %v, want ErrClosed", err)
+	}
+	if err := stale.Unannounce(); !errors.Is(err, moq.ErrClosed) {
+		t.Fatalf("stale Unannounce = %v, want ErrClosed", err)
+	}
+	if _, err := origin.Consume().RequestBroadcast(ctx, "live"); err != nil {
+		t.Fatalf("RequestBroadcast = %v, want the replacement", err)
 	}
 }
 
@@ -1559,12 +1604,12 @@ func TestAnnouncedEpochRestarts(t *testing.T) {
 	}
 	defer announced.Cancel()
 
-	broadcast, err := origin.CreateBroadcast("epoch")
+	publication, err := origin.CreateBroadcast("epoch")
 	if err != nil {
 		t.Fatal(err)
 	}
 	first := moq.MintEpoch()
-	if err := broadcast.Announce(moq.AnnounceRoute{Epoch: &first}); err != nil {
+	if err := publication.Announce(moq.AnnounceRoute{Epoch: &first}); err != nil {
 		t.Fatal(err)
 	}
 	if start := nextAnnounced(t, ctx, announced); start.Route.Epoch == nil || *start.Route.Epoch != first {
@@ -1572,7 +1617,7 @@ func TestAnnouncedEpochRestarts(t *testing.T) {
 	}
 
 	second := moq.MintEpoch()
-	if err := broadcast.Announce(moq.AnnounceRoute{Epoch: &second}); err != nil {
+	if err := publication.Announce(moq.AnnounceRoute{Epoch: &second}); err != nil {
 		t.Fatal(err)
 	}
 	restart, ok := nextRoute(t, ctx, announced).(moq.AnnounceEventRestart)
@@ -1581,7 +1626,7 @@ func TestAnnouncedEpochRestarts(t *testing.T) {
 	}
 
 	bad := "not-an-epoch"
-	if err := broadcast.Announce(moq.AnnounceRoute{Epoch: &bad}); !errors.Is(err, moq.ErrInvalidEpoch) {
+	if err := publication.Announce(moq.AnnounceRoute{Epoch: &bad}); !errors.Is(err, moq.ErrInvalidEpoch) {
 		t.Fatalf("Announce(bad epoch) = %v, want ErrInvalidEpoch", err)
 	}
 }
@@ -1646,7 +1691,7 @@ func TestDynamicServesARequestUnderAPrefix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer served.Close()
+	defer served.Broadcast().Close()
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}

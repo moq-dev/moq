@@ -105,7 +105,8 @@ async def publish(
         if grant:
             await _print_grant(client, timeout)
         # Hold the producer for the lifetime of the publish loop.
-        producer = client.create_broadcast(broadcast)
+        publication = client.create_broadcast(broadcast)
+        producer = publication.broadcast
         catalog = moq.media.CatalogProducer(producer)
         media = moq.media.TrackStreamProducer.video(
             producer, moq.media.VideoInit(format=moq.media.VideoFormat.AVC3, data=b"")
@@ -119,7 +120,7 @@ async def publish(
             ),
             track=AUDIO_TRACK,
         )
-        producer.announce()
+        publication.announce()
         print(f"publishing {broadcast!r} (Annex-B H.264 from stdin + a {tones} Hz tone) to {url}")
 
         tone = asyncio.create_task(_publish_tone(audio, tones))
@@ -150,7 +151,7 @@ async def publish(
             await asyncio.sleep(LINGER.total_seconds())
             producer.close()
             health = client.create_broadcast(f"{broadcast}.health")
-            live = health.publish_track("live")
+            live = health.broadcast.publish_track("live")
             live.write_frame(b"session-alive")
             live.finish()
             health.announce()

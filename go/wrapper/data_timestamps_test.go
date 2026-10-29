@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"moq.dev/moq"
-	"moq.dev/moq/flate"
 	moqjson "moq.dev/moq/json"
 )
 
@@ -30,7 +29,7 @@ func TestDataTimestamps(t *testing.T) {
 		{"zero", &moq.Timestamp{Value: 0, Scale: 90_000}},
 		{"tick", &tick},
 	}
-	for _, mode := range []string{"frame", "json snapshot", "json stream", "flate snapshot", "flate stream"} {
+	for _, mode := range []string{"frame", "json snapshot", "json stream"} {
 		for _, timestamp := range timestamps {
 			t.Run(mode+"/"+timestamp.name, func(t *testing.T) {
 				ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
@@ -99,29 +98,11 @@ func publishData(mode string, broadcast *moq.BroadcastProducer, track *moq.Track
 		}
 		return producer.Finish()
 	case "json stream":
-		producer, err := moqjson.NewStreamProducer(broadcast, track, moqjson.StreamOptions{})
+		producer, err := moqjson.NewStreamProducer(broadcast, track)
 		if err != nil {
 			return err
 		}
 		if err := producer.Append(map[string]int{"n": 1}, timestamp); err != nil {
-			return err
-		}
-		return producer.Finish()
-	case "flate snapshot":
-		producer, err := flate.NewSnapshotProducer(broadcast, track, flate.Options{})
-		if err != nil {
-			return err
-		}
-		if err := producer.Update(payload, timestamp); err != nil {
-			return err
-		}
-		return producer.Finish()
-	case "flate stream":
-		producer, err := flate.NewStreamProducer(broadcast, track, flate.Options{})
-		if err != nil {
-			return err
-		}
-		if err := producer.Append(payload, timestamp); err != nil {
 			return err
 		}
 		return producer.Finish()

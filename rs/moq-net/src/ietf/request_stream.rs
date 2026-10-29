@@ -1,6 +1,6 @@
 use crate::driver::Transport;
 use crate::transport::poll::Session as _;
-use std::task::{Context, Poll, ready};
+use std::task::{Poll, ready};
 
 use super::{Message, Version};
 use crate::{
@@ -18,16 +18,16 @@ pub(super) fn poll_cancel(
 	finished: &mut bool,
 	messages: &mut Messages,
 	version: Version,
-	cx: &mut Context<'_>,
+	waiter: &kio::Waiter,
 ) -> Poll<Result<(), Error>> {
 	if !*finished {
-		match messages.poll_end(&mut stream.reader, cx) {
+		match messages.poll_end(&mut stream.reader, waiter) {
 			Poll::Ready(Ok(())) if !fin_cancels(version) => *finished = true,
 			Poll::Ready(result) => return Poll::Ready(result),
 			Poll::Pending => {}
 		}
 	}
-	stream.writer.poll_closed(cx)
+	stream.writer.poll_closed(waiter)
 }
 
 /// Watch for the requester ending a request it has not been answered on yet, without consuming
@@ -37,12 +37,12 @@ pub(super) fn poll_cancel(
 pub(super) fn poll_withdrawn(
 	stream: &mut Stream<Transport, Version>,
 	version: Version,
-	cx: &mut Context<'_>,
+	waiter: &kio::Waiter,
 ) -> Poll<()> {
-	if stream.writer.poll_closed(cx).is_ready() {
+	if stream.writer.poll_closed(waiter).is_ready() {
 		return Poll::Ready(());
 	}
-	match stream.reader.poll_has_more(cx) {
+	match stream.reader.poll_has_more(waiter) {
 		Poll::Ready(Ok(false)) if fin_cancels(version) => Poll::Ready(()),
 		Poll::Ready(Err(_)) => Poll::Ready(()),
 		_ => Poll::Pending,
@@ -54,8 +54,8 @@ pub(super) fn poll_withdrawn(
 #[derive(Debug)]
 pub(super) struct Framed(pub(super) u64, pub(super) super::Body);
 
-impl Decode<Version> for Framed {
-	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for Framed {
+	fn decode(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let id = r.varint()?;
 		let start = r.position();
 		let body = super::Body::decode(r, version)?;
@@ -76,8 +76,8 @@ pub(super) enum Next<T> {
 	},
 }
 
-impl<T: Decode<Version>> Decode<Version> for Next<T> {
-	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a, T: Decode<'a, Version>> Decode<'a, Version> for Next<T> {
+	fn decode(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let mut peek = r.clone();
 		if peek.varint()? == super::GoAway::ID {
 			*r = peek;
@@ -117,13 +117,13 @@ impl GoAways {
 	}
 
 	/// Read the next `T`, consuming at most one GOAWAY before it.
-	pub fn poll_next<T: Decode<Version> + std::fmt::Debug, R: crate::transport::poll::RecvStream>(
+	pub fn poll_next<T: for<'a> Decode<'a, Version> + std::fmt::Debug, R: crate::transport::poll::RecvStream>(
 		&mut self,
 		reader: &mut crate::coding::Reader<R, Version>,
-		cx: &mut Context<'_>,
+		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<T>, Error>> {
 		loop {
-			match ready!(reader.poll_decode_maybe::<Next<T>>(cx))? {
+			match ready!(reader.poll_decode_maybe::<Next<T>>(waiter))? {
 				Some(Next::GoAway { redirect }) => self.receive(redirect)?,
 				Some(Next::Message(message)) => return Poll::Ready(Ok(Some(message))),
 				None => return Poll::Ready(Ok(None)),
@@ -164,16 +164,16 @@ impl Messages {
 	pub fn poll_next<R: crate::transport::poll::RecvStream>(
 		&mut self,
 		reader: &mut crate::coding::Reader<R, Version>,
-		cx: &mut Context<'_>,
+		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<Framed>, Error>> {
-		self.goaways.poll_next(reader, cx).map_err(|err| self.failed(err))
+		self.goaways.poll_next(reader, waiter).map_err(|err| self.failed(err))
 	}
 
 	pub async fn next<R: crate::transport::poll::RecvStream>(
 		&mut self,
 		reader: &mut crate::coding::Reader<R, Version>,
 	) -> Result<Option<Framed>, Error> {
-		std::future::poll_fn(|cx| self.poll_next(reader, cx)).await
+		kio::wait(|waiter| self.poll_next(reader, waiter)).await
 	}
 
 	pub async fn message<R: crate::transport::poll::RecvStream>(
@@ -188,9 +188,9 @@ impl Messages {
 	pub fn poll_end<R: crate::transport::poll::RecvStream>(
 		&mut self,
 		reader: &mut crate::coding::Reader<R, Version>,
-		cx: &mut Context<'_>,
+		waiter: &kio::Waiter,
 	) -> Poll<Result<(), Error>> {
-		match ready!(self.poll_next(reader, cx))? {
+		match ready!(self.poll_next(reader, waiter))? {
 			None => Poll::Ready(Ok(())),
 			Some(_) => Poll::Ready(Err(self.failed(Error::UnexpectedMessage))),
 		}
@@ -224,7 +224,7 @@ pub(super) async fn write_error<W: crate::transport::poll::SendStream>(
 			retry_interval: 0,
 		},
 	)?;
-	std::future::poll_fn(|cx| writer.poll_flush(cx)).await
+	kio::wait(|waiter| writer.poll_flush(waiter)).await
 }
 
 /// A framed subscription update, preserving omitted preferences.
@@ -311,8 +311,8 @@ impl Update {
 	}
 }
 
-impl Decode<Version> for Update {
-	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for Update {
+	fn decode(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		if r.varint()? != super::SubscribeUpdate::ID {
 			return Err(DecodeError::InvalidValue);
 		}
@@ -349,8 +349,8 @@ impl super::parameters::Param for NamespacePrefix {
 	}
 }
 
-impl<const TRACKS: bool> Decode<Version> for NamespaceUpdate<TRACKS> {
-	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a, const TRACKS: bool> Decode<'a, Version> for NamespaceUpdate<TRACKS> {
+	fn decode(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		if r.varint()? != super::SubscribeUpdate::ID {
 			return Err(DecodeError::InvalidValue);
 		}
@@ -440,12 +440,12 @@ mod tests {
 			let mut messages = Messages::new(crate::driver::Transport::new(session.clone()), false);
 			let mut finished = false;
 			assert!(
-				futures::poll!(std::future::poll_fn(|cx| poll_cancel(
+				futures::poll!(kio::wait(|waiter| poll_cancel(
 					&mut stream,
 					&mut finished,
 					&mut messages,
 					version,
-					cx,
+					waiter,
 				)))
 				.is_pending(),
 				"{version}"
@@ -454,12 +454,12 @@ mod tests {
 			// A second GOAWAY is still session-fatal while the response is pending.
 			session.push(&[0x10, 0, 2, 0, 0]);
 			assert!(matches!(
-				futures::poll!(std::future::poll_fn(|cx| poll_cancel(
+				futures::poll!(kio::wait(|waiter| poll_cancel(
 					&mut stream,
 					&mut finished,
 					&mut messages,
 					version,
-					cx,
+					waiter,
 				))),
 				Poll::Ready(Err(Error::ProtocolViolation))
 			));
@@ -496,12 +496,16 @@ mod tests {
 		const FRAME: &[u8] = &[0x02, 0x00, 0x06, 2, 1, 0x29, 2, 0, 0];
 		let version = Version::Draft22;
 		let mut buf = bytes::Bytes::from_static(FRAME);
-		let update = crate::coding::decode_buf(&mut buf, version, NamespaceUpdate::<true>::decode).unwrap();
+		let update =
+			crate::coding::decode_buf(&mut buf, version, |r, v| NamespaceUpdate::<true>::decode(r, v)).unwrap();
 		assert!(update.refused.is_none(), "{version}: {:?}", update.refused);
 		let mut buf = bytes::Bytes::from_static(FRAME);
-		assert!(crate::coding::decode_buf(&mut buf, version, NamespaceUpdate::<false>::decode).is_err());
+		assert!(crate::coding::decode_buf(&mut buf, version, |r, v| NamespaceUpdate::<false>::decode(r, v)).is_err());
 		let mut buf = bytes::Bytes::from_static(FRAME);
-		assert!(crate::coding::decode_buf(&mut buf, Version::Draft18, NamespaceUpdate::<true>::decode).is_err());
+		assert!(
+			crate::coding::decode_buf(&mut buf, Version::Draft18, |r, v| NamespaceUpdate::<true>::decode(r, v))
+				.is_err()
+		);
 	}
 
 	/// TRACK_NAMESPACE_PREFIX (0x34) updates a SUBSCRIBE_NAMESPACE or SUBSCRIBE_TRACKS only,

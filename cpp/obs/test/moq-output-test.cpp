@@ -453,7 +453,7 @@ std::vector<std::pair<obs_encoder_t *, long long>> updates()
 int main()
 {
 	{
-		TestRelay relay;
+		TestRelay relay(true, {"moq-transport-18"});
 		reset(relay.Url());
 		MoQOutput output(nullptr, OUTPUT);
 		CHECK(output.Start());

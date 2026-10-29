@@ -1,83 +1,114 @@
 use crate::{Path, coding::*, path::Invalid};
 
-fn to_tuple(namespace: &Path) -> Vec<String> {
-	let path = namespace.as_str();
-	if path.is_empty() {
-		return Vec::new();
-	}
-
-	let mut parts = Vec::new();
-	let mut part = String::new();
-	let mut chars = path.chars();
-	while let Some(ch) = chars.next() {
-		match ch {
-			'/' => parts.push(std::mem::take(&mut part)),
-			'\\' => match chars.next() {
-				Some(next @ ('/' | '\\')) => part.push(next),
-				Some(next) => {
-					part.push('\\');
-					part.push(next);
+/// The escaped text of each tuple field in `path`, split at every `/` no escape covers.
+///
+/// `/` and `\` are ASCII, so they never appear inside a multi-byte character and the
+/// scan can step over bytes.
+fn escaped_fields(path: &str) -> impl Iterator<Item = &str> {
+	let mut rest = (!path.is_empty()).then_some(path);
+	std::iter::from_fn(move || {
+		let s = rest?;
+		let bytes = s.as_bytes();
+		let mut i = 0;
+		while i < bytes.len() {
+			match bytes[i] {
+				b'/' => {
+					rest = Some(&s[i + 1..]);
+					return Some(&s[..i]);
 				}
-				None => part.push('\\'),
-			},
-			_ => part.push(ch),
+				// The escaped byte is never a separator.
+				b'\\' => i += 2,
+				_ => i += 1,
+			}
 		}
-	}
-	parts.push(part);
+		rest = None;
+		Some(s)
+	})
+}
 
-	parts
+/// A field's bytes with its `\/` and `\\` escapes undone, in pieces. Any other
+/// backslash stays, as written.
+fn unescape(field: &str) -> impl Iterator<Item = &[u8]> {
+	let mut rest = field.as_bytes();
+	// Where to look for the next escape: never at the byte an escape just produced.
+	let mut from = 0;
+	std::iter::from_fn(move || {
+		if rest.is_empty() {
+			return None;
+		}
+		let mut i = from;
+		while i + 1 < rest.len() {
+			if rest[i] == b'\\' && matches!(rest[i + 1], b'/' | b'\\') {
+				let piece = &rest[..i];
+				rest = &rest[i + 1..];
+				from = 1;
+				return Some(piece);
+			}
+			// Another backslash keeps the byte after it too.
+			i += if rest[i] == b'\\' { 2 } else { 1 };
+		}
+		Some(std::mem::take(&mut rest))
+	})
+}
+
+fn unescaped_len(field: &str) -> usize {
+	unescape(field).map(<[u8]>::len).sum()
 }
 
 // A field ending in `/` escapes to a path with an empty segment, so it is refused, as is a
 // namespace whose separators and escapes push its path past `Path::MAX_BYTES`.
 fn from_tuple(parts: &[&str]) -> Result<Path, Invalid> {
-	// Sized for the common case of no escapes, so building it rarely grows.
-	let mut path = String::with_capacity(parts.iter().map(|part| part.len() + 1).sum());
+	// Joined on the stack, which `arrayvec` leaves uninitialized, so the path's own copy
+	// is the only allocation, and a short path makes none.
+	let mut path = arrayvec::ArrayVec::<u8, { Path::MAX_BYTES }>::new();
+	let mut push = |b| path.try_push(b).map_err(|_| Invalid::TooLong);
 	for (i, part) in parts.iter().enumerate() {
 		if i > 0 {
-			path.push('/');
+			push(b'/')?;
 		}
-
-		for ch in part.chars() {
-			if matches!(ch, '/' | '\\') {
-				path.push('\\');
+		for &b in part.as_bytes() {
+			if matches!(b, b'/' | b'\\') {
+				push(b'\\')?;
 			}
-			path.push(ch);
+			push(b)?;
 		}
 	}
-
-	Path::try_from(path)
+	Path::new(std::str::from_utf8(&path).expect("escaping keeps UTF-8"))
 }
 
 /// Encode a Track Namespace.
 pub fn encode_namespace(w: &mut Encoder<'_>, namespace: &Path) -> Result<(), EncodeError> {
-	write_fields(w, &fields(namespace)?)
+	check_fields(namespace)?;
+	write_fields(w, namespace)
 }
 
 /// Encode a Full Track Name: a Track Namespace, then a Track Name, at most 4096 bytes together.
 pub fn encode_track(w: &mut Encoder<'_>, namespace: &Path, name: &str) -> Result<(), EncodeError> {
-	let parts = fields(namespace)?;
-	if parts.iter().map(String::len).sum::<usize>() + name.len() > MAX_BYTES {
+	check_fields(namespace)?;
+	if escaped_fields(namespace.as_str()).map(unescaped_len).sum::<usize>() + name.len() > MAX_BYTES {
 		return Err(BoundsExceeded.into());
 	}
-	write_fields(w, &parts)?;
+	write_fields(w, namespace)?;
 	w.string(name)
 }
 
-fn fields(namespace: &Path) -> Result<Vec<String>, EncodeError> {
-	let parts = to_tuple(namespace);
+fn check_fields(namespace: &Path) -> Result<(), EncodeError> {
 	// The fields drop the path's separators and escapes, so `Path::MAX_BYTES` already bounds
 	// their bytes. A path's depth is unbounded until it reaches a wire.
-	if parts.len() > Path::MAX_PARTS {
+	if escaped_fields(namespace.as_str()).count() > Path::MAX_PARTS {
 		return Err(BoundsExceeded.into());
 	}
-	Ok(parts)
+	Ok(())
 }
 
-fn write_fields(w: &mut Encoder<'_>, parts: &[String]) -> Result<(), EncodeError> {
-	w.varint(parts.len() as u64)?;
-	for part in parts {
-		w.string(part)?;
+/// Write each field straight from the path's text, so encoding copies nothing first.
+fn write_fields(w: &mut Encoder<'_>, namespace: &Path) -> Result<(), EncodeError> {
+	w.varint(escaped_fields(namespace.as_str()).count() as u64)?;
+	for field in escaped_fields(namespace.as_str()) {
+		w.varint(unescaped_len(field) as u64)?;
+		for piece in unescape(field) {
+			w.slice(piece);
+		}
 	}
 	Ok(())
 }
@@ -128,9 +159,9 @@ pub fn decode_namespace(r: &mut Decoder<'_>) -> Result<Path, DecodeError> {
 }
 
 /// Decode a Full Track Name: a Track Namespace, then a Track Name, at most 4096 bytes together.
-pub fn decode_track(r: &mut Decoder<'_>) -> Result<(Path, String), DecodeError> {
+pub fn decode_track<'a>(r: &mut Decoder<'a>) -> Result<(Path, &'a str), DecodeError> {
 	let (namespace, size) = decode_fields(r)?;
-	let name = r.string()?;
+	let name = r.str()?;
 	if size + name.len() > MAX_BYTES {
 		return Err(DecodeError::BoundsExceeded);
 	}
@@ -287,7 +318,7 @@ mod tests {
 	/// Name holds at most 4096.
 	#[test]
 	fn names_are_bounded() {
-		let decode_track_slice = |bytes: &[u8]| decode_track(&mut Decoder::new(bytes, FORM));
+		let decode_track_slice = |bytes: &[u8]| decode_track(&mut Decoder::new(bytes, FORM)).map(|_| ());
 
 		assert!(decode_namespace(&mut Decoder::new(&encode_tuple(&["a", "", "b"]), FORM)).is_err());
 
@@ -334,7 +365,7 @@ mod tests {
 			match ok {
 				true => assert_eq!(
 					decode_track(&mut Decoder::new(&bytes, FORM)).unwrap(),
-					(namespace.clone(), name)
+					(namespace.clone(), name.as_str())
 				),
 				false => assert!(bytes.is_empty(), "refuse before writing"),
 			}

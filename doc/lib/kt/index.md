@@ -16,14 +16,14 @@ x86\_64) and desktop JVM (Linux x86\_64/aarch64, macOS arm64, Windows x64).
 `dev.moq.media` owns catalogs, encoded imports, and container consumers. `TrackProducer.audio`
 / `.video` take a broadcast, a `Named` or `Requested` target, and an init record.
 `CatalogProducer(broadcast)` holds its broadcast weakly and fails with `Closed` after it closes.
-`dev.moq.flate.SnapshotProducer` / `StreamProducer` publish opaque bytes with an optional `timestamp`.
+Publish JSON tracks with `TrackInfo(compress = true)`; a `dev.moq.json` consumer reads one with no option of its own.
 A missing data timestamp stays untimed; the library never substitutes zero or now.
 `dev.moq.json` consumers' `values()` emits `Value` (`value`, `timestamp`) and `valuesAs<T>()` emits `Timed<T>`;
 a snapshot consumer yields each state in order, and `latest()` skips to the newest.
 A `Timestamp(value, scale)` is exact and reads back at the track's timescale, so a 90 kHz tick republishes unchanged.
 `Duration.toTimestamp()` is exact at nanosecond scale; `Timestamp.toDuration()` rounds down to a whole nanosecond.
 Raw tracks with a `null` timescale are untimed on both publish and receive.
-`MoqTrackInfo.compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. `@moq/net` cannot read a compressed track yet.
+`MoqTrackInfo.compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
 Timed raw/data tracks require caller-supplied timestamps. Use `CatalogProducer.now()` to stamp a locally
 created event on the broadcast clock; reading it fixes that clock for later media producers.
@@ -71,7 +71,8 @@ Moq.connect("https://relay.example.com", ClientConfig(tls = ClientTls(roots = li
 // Publish encoded frames, or raw pixels with the codec inside the binding.
 // opusInit, packet, pts, and rgba come from your encoder or capture source.
 Moq.connect("https://relay.example.com").use { moq ->
-    val broadcast = moq.createBroadcast("my-stream.hang")
+    val publication = moq.createBroadcast("my-stream.hang")
+    val broadcast = publication.broadcast()
     val audio = dev.moq.media.TrackProducer.audio(broadcast, Named(null), AudioInit(format = AudioFormat.OPUS, data = opusInit))
     audio.writeFrame(Frame(payload = packet, timestamp = Timestamp(960u, 48_000u)))
     audio.cut() // audio has no keyframes, so this is what gives it groups
@@ -82,7 +83,7 @@ Moq.connect("https://relay.example.com").use { moq ->
         output = VideoEncoderOutput(codec = VideoCodec.H264, bitrate = null, gop = null, kind = autoEncoder), track = "camera"),
     )
     video.write(VideoFrame(timestamp = pts, data = rgba))
-    broadcast.announce(AnnounceRoute(epoch = mintEpoch())) // a fresh epoch per run
+    publication.announce(AnnounceRoute(epoch = mintEpoch())) // a fresh epoch per run
     audio.finish()
     video.finish()
     broadcast.end()
@@ -99,7 +100,7 @@ The rest of the [shared feature list](/lib/#what-every-binding-can-do) maps
 one to one; the API reference has the names, and [Layers](/lib/layers)
 shows which module holds each.
 
-- **`end`, not `close`.** `broadcast.end()` ends a broadcast for good. `close()`, or leaving `use { }`, releases the handle, which ends the broadcast only once no `requests()` handle remains.
+- **`end`, not `close`.** `broadcast.end()` ends a broadcast for good. `close()`, or leaving `use { }`, releases the handle, which ends the broadcast only once no other handle to it remains, such as its publication or a `requests()` handle.
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `cut()`: after every frame, or at a segment cadence to align with video.
 - **Timeline breaks.** On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
 - **Media reads.** `dev.moq.media.TrackConsumer`, `dev.moq.audio.Consumer`, and `dev.moq.video.Consumer` return a `Read` in order: `ReadFrame`, a `ReadGap` where media was lost, or a `ReadEnd` where the publisher stopped its encoder. A gap breaks continuity. An encoder end is not stream EOF: following frames before its endpoint are the old encoder's drain; the first at or past it starts fresh.
@@ -110,7 +111,7 @@ shows which module holds each.
 - **Authorization.** On `moq-lite-07-wip` (opt in with `ClientConfig(versions = ...)`) and on moq-transport draft-18+ with the [MoQ Auth extension](/draft/moq-auth), collect `moq.grants().updates()` for the `Grant` the relay sent back and each change, `null` until it answers and while a client session reconnects. Ending the collection cancels the consumer.
 - **Tokens.** Pass `ClientConfig(tokens = listOf(...))` instead of putting the credential in the URL. The first is the connection credential, sent in SETUP and, while an offered version can't carry it there (lite before 07), as the URL's `?jwt=`; each other token widens the grant over AUTH. `moq.tokens().set(listOf(...))` replaces them before they expire: the next dial presents them, a live AUTH session at once, and after an authorization refusal the session redials only if they changed. Suspending `tokens().answered()` returns once the relay accepts them and throws its refusal with the relay's code. A `?jwt=` already in the URL stays the connection credential, which is how to reach a relay older than this release.
 - **Errors.** Read diagnostic payloads from `reason` and structured protocol failures from `details`.
-- **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode.
+- **Disabled renditions.** A rendition with `enabled: false` has no frames coming until its publisher re-enables it. Select an enabled rendition from the latest catalog before opening a decoder. Keep one already playing while every rendition of its kind is disabled: the convenience decoders accept a disabled configuration, and a re-enable, such as an unmute, then plays without a resubscribe. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode.
 - **Track demand.** Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
 
 ## Runtime

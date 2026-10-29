@@ -20,7 +20,7 @@ RUN rustup show active-toolchain || rustup toolchain install \
     && curl -LsSf "https://get.nexte.st/latest/$nextest" | tar zxf - -C "$CARGO_HOME/bin" \
     && cargo nextest --version
 
-ARG CRATES="kio hang moq-auth moq-clock moq-e2ee moq-flate moq-hls moq-ice moq-json moq-loc moq-msf moq-mux moq-net moq-pattern moq-quic moq-relay moq-rtc moq-rtmp moq-rtsp moq-sock moq-srt moq-stats moq-tokio moq-uring moq-cli"
+ARG CRATES="kio hang moq-auth moq-clock moq-e2ee moq-hls moq-ice moq-json moq-loc moq-msf moq-mux moq-net moq-pattern moq-quic moq-relay moq-rtc moq-rtmp moq-rtsp moq-sock moq-srt moq-stats moq-tokio moq-uring moq-cli"
 
 # Path specs, because the lockfile also has published copies of some workspace crates.
 # io-uring compiles the relay's io_uring QUIC workers (`--runtime-io-uring`), which the default features leave out.

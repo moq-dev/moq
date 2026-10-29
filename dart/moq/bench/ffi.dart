@@ -41,7 +41,8 @@ Future<void> throughput(
   final origin = OriginProducer(
     config: OriginConfig(cacheCapacityBytes: 64 << 20),
   );
-  final broadcast = origin.createBroadcast(path: 'bench');
+  final publication = origin.createBroadcast(path: 'bench');
+  final broadcast = publication.broadcast();
   final tracks = List.generate(
     c.publishers,
     (p) =>
@@ -123,6 +124,7 @@ Future<void> throughput(
       track.dispose();
     }
     broadcast.dispose();
+    publication.dispose();
     origin.dispose();
   }
 }

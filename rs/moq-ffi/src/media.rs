@@ -130,7 +130,9 @@ pub struct MoqVideo {
 	pub display_aspect: Option<MoqDimensions>,
 	/// The maximum encoded bitrate in bits per second.
 	pub bitrate: Option<u64>,
-	/// Whether this rendition may be selected; when false, no frames are coming.
+	/// Whether the publisher is serving this rendition; when false, no frames are coming until it
+	/// re-enables. Pick an enabled rendition, but keep one already playing while every rendition
+	/// of its kind is disabled, so a re-enable plays without a resubscribe.
 	#[uniffi(default = true)]
 	pub enabled: bool,
 	/// Higher values are preferred; compatibility transcodes use -1 and the default is 0.
@@ -171,7 +173,9 @@ pub struct MoqAudio {
 	pub channel_count: u32,
 	/// The maximum encoded bitrate in bits per second.
 	pub bitrate: Option<u64>,
-	/// Whether this rendition may be selected; when false, no frames are coming.
+	/// Whether the publisher is serving this rendition; when false, no frames are coming until it
+	/// re-enables. Pick an enabled rendition, but keep one already playing while every rendition
+	/// of its kind is disabled, so a re-enable plays without a resubscribe.
 	#[uniffi(default = true)]
 	pub enabled: bool,
 	/// The framing used to carry this rendition.
@@ -255,6 +259,7 @@ pub struct MoqDatagram {
 /// Caller-provided video catalog fields for [`MoqVideoInit`].
 ///
 /// Every field is optional and fills only a gap the stream leaves; a value the stream detects wins.
+/// The MSF catalog declares a bitrate or frame rate only when it is hinted here.
 /// Publishing the catalog before the first keyframe needs at least the codec, which comes from the
 /// [`MoqVideoInit`] format. Audio has no equivalent: it resolves entirely from its init bytes.
 #[derive(Clone, Default, uniffi::Record)]
@@ -825,8 +830,6 @@ impl MoqMediaCatalogProducer {
 struct MediaProducer {
 	// Boxed because the codec splitters/imports make this much larger than the container one.
 	import: Box<moq_mux::import::Track>,
-	/// Subscriber demand (name/used/unused) for the one track this publishes.
-	demand: moq_net::track::Demand,
 }
 
 /// An importer for a container, which may publish several tracks.
@@ -1030,13 +1033,11 @@ impl MoqMediaTrackStreamProducer {
 }
 
 impl MoqMediaTrackProducer {
-	/// Wrap a single-codec importer, capturing the demand handle its track exposes.
+	/// Wrap a single-codec importer.
 	fn from_import(import: moq_mux::import::Track, children: &Children) -> Result<Arc<Self>, MoqError> {
-		let demand = import.demand();
 		children.adopt(Arc::new(Self {
 			inner: std::sync::Mutex::new(Some(MediaProducer {
 				import: Box::new(import),
-				demand,
 			})),
 			children: children.clone(),
 		}))
@@ -1046,10 +1047,13 @@ impl MoqMediaTrackProducer {
 #[uniffi::export]
 impl MoqMediaTrackProducer {
 	/// A watch-only handle to whether this track has subscribers.
+	///
+	/// A frame that changes the decoder identity publishes under a new track name, so read this
+	/// again after [`write_frame`](Self::write_frame) rather than holding the first handle.
 	pub fn demand(&self) -> Result<Arc<MoqTrackDemand>, MoqError> {
 		let guard = self.inner.lock().unwrap();
 		Ok(MoqTrackDemand::new(
-			guard.as_ref().ok_or(MoqError::Closed)?.demand.clone(),
+			guard.as_ref().ok_or(MoqError::Closed)?.import.demand(),
 		))
 	}
 

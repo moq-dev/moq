@@ -6,13 +6,15 @@ use super::{BoundsExceeded, Form, varint};
 /// Read the value from a [`Decoder`] using the given version.
 ///
 /// If [DecodeError::Short] is returned, the caller should try again with more data.
+/// The value may borrow from the buffer for `'a`, so only a caller that keeps a field
+/// copies it; an owned value implements this for every `'a`.
 #[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-pub trait Decode<V>: Sized {
+pub trait Decode<'a, V>: Sized {
 	/// Decode the value from the front of the decoder.
-	fn decode(r: &mut Decoder<'_>, version: V) -> Result<Self, DecodeError>;
+	fn decode(r: &mut Decoder<'a>, version: V) -> Result<Self, DecodeError>;
 
 	/// Decode the value from the front of `buf`, returning it and the bytes it took.
-	fn decode_slice(buf: &[u8], version: V) -> Result<(Self, usize), DecodeError>
+	fn decode_slice(buf: &'a [u8], version: V) -> Result<(Self, usize), DecodeError>
 	where
 		V: Into<Form> + Copy,
 	{

@@ -61,6 +61,30 @@ if (session < 0)
     return fail(moq_error());
 ```
 
+## Publish
+
+```c
+const char *path = "my-stream.hang";
+uint32_t broadcast;
+int publication = moq_origin_create_broadcast(origin, path, strlen(path), &broadcast);
+if (publication < 0)
+    return fail(moq_error());
+// Fill tracks on broadcast here; announce on the publication.
+
+char epoch[MOQ_EPOCH_LEN];
+moq_mint_epoch(epoch, sizeof(epoch)); // a fresh epoch per run
+moq_announce_route route;
+memset(&route, 0, sizeof(route));     // zeroed means cost 0 and no epoch
+route.epoch = epoch;
+route.epoch_len = sizeof(epoch);
+if (moq_publication_announce((uint32_t)publication, &route) < 0)
+    return fail(moq_error());
+```
+
+A route carries only a cost and an epoch; relays add the hops. Mint a fresh epoch each
+time the publisher starts, so viewers see a restart (`MOQ_ANNOUNCE_KIND_RESTART`) instead of
+a stalled broadcast. Redundant publishers of the same bytes share one.
+
 Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Publication track names stay separate from codec settings. For simulcast, give each rendition the next one down as the `lower` handle in its `moq_video_encode_options`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers. A rung only disables while the session probes for bandwidth, which on native transports takes moq-quic with BBR3.
 
 ## Things to know
@@ -75,7 +99,7 @@ inside. The header is the reference: each function carries a doc comment.
 - **Tokens.** Set `moq_client_config.tokens` instead of putting the credential in the URL. The first is the connection credential, sent in SETUP and, while an offered version can't carry it there (lite before 07), as the URL's `?jwt=`; each other token widens the grant over AUTH. A `?jwt=` already in the URL stays the connection credential, which is how to reach a relay older than this release. To replace expiring tokens, close the session and connect again.
 - **Threading.** Call any function from any thread. Raw publish calls block until the codec takes the frame, which paces a publisher.
 - **Zeroed config is the default.** A zeroed `moq_client_config` means the default for every field, so new fields don't break callers. A field whose default isn't zero has a `has_*` flag: `backoff_timeout_us = 0` means "retry forever" only with `has_backoff_timeout = true`.
-- **Compressed tracks.** `moq_track_info.compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. `@moq/net` cannot read a compressed track yet.
+- **Compressed tracks.** `moq_track_info.compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
 - **fMP4 import.** `MOQ_CONTAINER_FORMAT_FMP4` splits each fragment into one frame per sample.
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `moq_publish_media_cut`: after every frame, or at a segment cadence to align with video.
 - **Ending cleanly.** When the input ends, finish every track, then call `moq_publish_catalog_finish()` to finish the catalog, which ends the content. The broadcast stays announced and keeps serving the finished tracks, so a subscriber still catching up can drain them, until `moq_publish_close()` takes it offline. How long to keep it up is yours to decide. A track still open at the close ends with `UNROUTABLE`, which readers take as the publisher leaving, and its handle is released.
@@ -85,7 +109,7 @@ inside. The header is the reference: each function carries a doc comment.
 - **Decoded reads.** `moq_decode_audio` and `moq_decode_video` deliver read ids in order: a frame, a gap where media was lost, or an end where the publisher stopped its encoder. Check `kind` on what `moq_decode_audio_read` or `moq_decode_video_read` writes. Free each id with `moq_decode_audio_read_free` or `moq_decode_video_read_free` promptly: a held video frame holds a decoder buffer, and the decoder stalls.
 - **Stats.** `moq_session_stats()` fills `moq_connection_stats` with `rtt_us`, `estimated_send_rate_bps`, and the byte and packet counters (`bytes_sent`, `bytes_received`, `bytes_lost`, `packets_sent`, `packets_received`, `packets_lost`). Each has a `<field>_valid` flag, false when the transport does not report it, which is not the same as zero. `moq_session_snapshot()` adds the negotiated `protocol`. A failed dial or dropped connection reaches the session's `on_state` with its `failure` code, and `moq_error()` gives the reason during that callback. Hold the handle returned by `moq_session_recv_bandwidth()` to request receive estimates. `moq_bandwidth_consumer_peek()` reads the estimate and `moq_bandwidth_consumer_changed()` waits for a change. `moq_bandwidth_consumer_close()` releases demand; the last consumer stops PROBE. Stats snapshots do not request it.
 - **Demand.** A watcher from `moq_publish_track_demand()` (or the media, video, and audio variants) calls back `MOQ_DEMAND_USED` or `MOQ_DEMAND_UNUSED`, again whenever the wanted group moves. `moq_publish_demand_wanted()` reads that group: start a new one once it passes your largest. Set `refresh` in `moq_track_info` to have a joining subscriber ask for a new group once the newest has grown past `refresh` times its first frame.
-- **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode.
+- **Disabled renditions.** A rendition with `enabled: false` has no frames coming until its publisher re-enables it. Select an enabled rendition from the latest catalog before opening a decoder. Keep one already playing while every rendition of its kind is disabled: the convenience decoders accept a disabled configuration, and a re-enable, such as an unmute, then plays without a resubscribe. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode.
 
 ## Reference
 

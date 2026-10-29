@@ -585,7 +585,8 @@ public:
 		  uint64_t start_us = 1'000'000)
 		: timestamp_us(start_us)
 	{
-		broadcast = TestOk(relay.origin->create_broadcast(path), "create_broadcast");
+		auto publication = TestOk(relay.origin->create_broadcast(path), "create_broadcast");
+		broadcast = publication->broadcast();
 		if (video) {
 			moq::VideoInit init{};
 			init.format = moq::VideoFormat::kAvc3;
@@ -602,7 +603,7 @@ public:
 				TestOk(moq::MediaTrackProducer::audio(broadcast, moq::MediaTarget::kNamed{}, init),
 				       "audio producer");
 		}
-		TestOk(broadcast->announce(moq::AnnounceRoute{}), "announce");
+		TestOk(publication->announce(moq::AnnounceRoute{}), "announce");
 	}
 
 	~Publisher() { (void)broadcast->close(); }
@@ -724,7 +725,7 @@ int main()
 	// audio from the tracks it names. moq-audio decodes the Opus to planar float at
 	// the OBS rate, stamped on the same broadcast timeline as the video.
 	{
-		TestRelay relay;
+		TestRelay relay(true, {"moq-transport-18"});
 		reset(relay.Url());
 		Publisher publisher(relay, "obs/test");
 		void *source = createSource();
@@ -1284,7 +1285,7 @@ int main()
 		auto snapshot = TestOk(catalogs->next().get(), "catalog snapshot");
 		CHECK(snapshot.has_value());
 		auto config = snapshot->video.begin()->second;
-		std::shared_ptr<moq::BroadcastProducer> hidden;
+		std::shared_ptr<moq::Publication> hidden;
 		if (sibling) {
 			hidden = TestOk(relay.origin->create_broadcast("obs/hidden"), "unannounced sibling");
 			config.broadcast = "./hidden";

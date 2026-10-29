@@ -10,8 +10,8 @@ import (
 )
 
 // BroadcastProducer publishes a collection of tracks. Create one at a path with
-// [OriginProducer.CreateBroadcast] (or [Client.CreateBroadcast]), then publish
-// tracks onto it.
+// [OriginProducer.CreateBroadcast] (or [Client.CreateBroadcast]) and take it
+// from the [Publication], then publish tracks onto it.
 type BroadcastProducer struct {
 	inner *ffi.MoqBroadcastProducer
 }
@@ -34,20 +34,6 @@ func (b *BroadcastProducer) Requests() (*BroadcastRequests, error) {
 		return nil, err
 	}
 	return &BroadcastRequests{inner: inner}, nil
-}
-
-// Announce advertises this broadcast's exact path as a route.
-//
-// Announcing again re-prices the route in place. Until announced, the
-// broadcast is invisible and unroutable for local consumers and peers alike.
-func (b *BroadcastProducer) Announce(route AnnounceRoute) error {
-	return b.inner.Announce(route)
-}
-
-// Unannounce retracts this broadcast's exact-path advertisement, if any, from
-// local consumers and peers alike. Tracks already in flight carry on.
-func (b *BroadcastProducer) Unannounce() error {
-	return b.inner.Unannounce()
 }
 
 // PublishTrack creates a track that carries arbitrary byte payloads with no

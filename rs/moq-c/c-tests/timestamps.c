@@ -78,16 +78,17 @@ int main(void) {
     int32_t origin = moq_origin_create();
     CHECK(origin > 0);
     const char *path = "timestamps";
-    int32_t broadcast = moq_origin_create_broadcast((uint32_t)origin, path, strlen(path));
-    CHECK(broadcast > 0);
-    CHECK(moq_publish_announce((uint32_t)broadcast, NULL) == 0);
+    uint32_t broadcast = 0;
+    int32_t publication = moq_origin_create_broadcast((uint32_t)origin, path, strlen(path), &broadcast);
+    CHECK(publication > 0);
+    CHECK(moq_publication_announce((uint32_t)publication, NULL) == 0);
+    CHECK(moq_publication_free((uint32_t)publication) == 0);
     moq_track_info info = {0};
     info.timescale = 90000;
     info.timescale_present = true;
     int32_t track = moq_publish_track((uint32_t)broadcast, "ticks", 5, &info);
     CHECK(track > 0);
-    moq_json_stream_config json_config = {false};
-    int32_t json = moq_publish_json_stream((uint32_t)broadcast, "json", 4, &json_config);
+    int32_t json = moq_publish_json_stream((uint32_t)broadcast, "json", 4);
     CHECK(json > 0);
 
     const uint8_t payload[] = {1, 2, 3};
@@ -107,7 +108,7 @@ int main(void) {
     CHECK(frames > 0);
     int32_t datagrams = moq_consume_datagrams((uint32_t)c.broadcast, "ticks", 5, on_datagram, &c);
     CHECK(datagrams > 0);
-    int32_t values = moq_consume_json_stream((uint32_t)c.broadcast, "json", 4, &json_config, on_value, &c);
+    int32_t values = moq_consume_json_stream((uint32_t)c.broadcast, "json", 4, on_value, &c);
     CHECK(values > 0);
 
     // One group at a time, so the default subscription never skips the older one, and in

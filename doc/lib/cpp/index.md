@@ -127,7 +127,8 @@ A raw `moq::Frame` with `std::nullopt` is untimed.
 // Publish encoded frames, or raw pixels with the codec inside the binding.
 // session is connected as above; opus_init, packet, and rgba come from your
 // encoder or capture source.
-auto broadcast = ok(session->publish()->create_broadcast("my-stream.hang"));
+auto publication = ok(session->publish()->create_broadcast("my-stream.hang"));
+auto broadcast = publication->broadcast(); // fill tracks here; announce on the publication
 auto audio = ok(moq::MediaTrackProducer::audio(broadcast, moq::MediaTarget::kNamed{}, {moq::AudioFormat::kOpus, opus_init}));
 ok(audio->write_frame({packet, moq::Timestamp{960, 48'000}}));   // 20 ms
 
@@ -137,7 +138,7 @@ auto video = ok(moq::VideoProducer::init(catalog, {{moq::VideoPixelFormat::kRgba
 ok(video->write({{0, 30'000}, rgba}));
 moq::AnnounceRoute route;
 route.epoch = moq::mint_epoch(); // a fresh epoch per run
-ok(broadcast->announce(route));
+ok(publication->announce(route));
 ok(broadcast->close());    // keep the producer alive while publishing, then close explicitly
 ```
 
@@ -199,7 +200,7 @@ future completed, which is the executor thread.
 
 ## Disabled renditions
 
-Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode.
+A rendition with `enabled: false` has no frames coming until its publisher re-enables it. Select an enabled rendition from the latest catalog before opening a decoder. Keep one already playing while every rendition of its kind is disabled: the convenience decoders accept a disabled configuration, and a re-enable, such as an unmute, then plays without a resubscribe. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode.
 
 ## Bandwidth estimates
 
@@ -207,7 +208,7 @@ Hold the owned `BandwidthConsumer` returned by `session->recv_bandwidth()` to re
 
 ## Compressed tracks
 
-`moq::TrackInfo::compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. `@moq/net` cannot read a compressed track yet.
+`moq::TrackInfo::compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
 
 ## Track demand
 
