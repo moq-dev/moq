@@ -719,15 +719,28 @@ test("a name returning with a different identity takes a fresh track name", asyn
 	broadcast.close();
 });
 
-// Nobody has seen an unserved catalog, so its renditions settle without minting names.
-test("identity changes before the first announce keep the catalog ID as the track name", async () => {
+// Regression: identity was fixed only at the first announce, but an eager encoder caches groups
+// before then. A codec change while unannounced kept the name, so a late subscriber or a fetch read
+// the old codec's groups under the new catalog config.
+test("identity changes before the first announce take a fresh track name", async () => {
 	const announce = new Signal(false);
 	const broadcast = new Broadcast({ origin: new Origin.Producer(), name: Path.from("unserved.hang"), announce });
 	const video = broadcast.video("video");
 	video.config.set({ ...videoConfig, bitrate: Catalog.u53(1_000_000) });
 	await settle();
+	// The encoder writes before anyone can find the broadcast.
+	const cached = video.track.peek();
+	if (!cached) throw new Error("expected the track to be handed over before the first announce");
+	cached.appendGroup().finish();
+
+	// Everything except identity still updates the track in place.
+	video.config.set({ ...videoConfig, bitrate: Catalog.u53(500_000) });
+	await settle();
+	expect(video.track.peek()).toBe(cached);
+
 	video.config.set({ ...videoConfig, codec: "vp8", bitrate: Catalog.u53(500_000) });
 	await settle();
+	expect(cached.closed.peek()).toBeDefined();
 
 	announce.set(true);
 	await settle();
@@ -739,12 +752,12 @@ test("identity changes before the first announce keep the catalog ID as the trac
 	const config = (await catalog.latest())?.value.video?.renditions.video;
 	expect(config?.codec).toBe("vp8");
 	expect(config?.bitrate).toBe(Catalog.u53(500_000));
-	expect(config?.track).toBeUndefined();
+	expect(config?.track).toBe("video/1");
 
-	// The first snapshot fixed the name's identity.
-	video.config.set(videoConfig);
-	await settle();
-	expect((await catalog.latest())?.value.video?.renditions.video?.track).toBe("video/1");
+	// The replacement starts empty, so no group from the old codec reads under the new config.
+	const replacement = video.track.peek();
+	expect(replacement?.name).toBe("video/1");
+	expect(replacement?.appendGroup().sequence).toBe(0);
 
 	broadcast.close();
 });

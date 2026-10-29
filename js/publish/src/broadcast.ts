@@ -130,12 +130,14 @@ export class Broadcast {
 	// Every replacement track name minted in the current network broadcast, even one never served.
 	#replacements = new Set<string>();
 
-	// The decoder identity of each track name the current network broadcast's catalog has served, or
-	// undefined before it serves one. Kept across a rendition's removal, so a name returning with
+	// The decoder identity of each track name in the current network broadcast, or undefined before
+	// there is one. Fixed from the broadcast's start rather than its first announce, since an encoder
+	// may cache groups on a track before anyone can find it, and a late subscriber or a fetch reads
+	// them under the catalog's config. Kept across a rendition's removal, so a name returning with
 	// different media takes a fresh name too.
 	#served: Map<string, Identity> | undefined;
 
-	// The identity of each track name in the latest catalog fold, recorded when the catalog is first served.
+	// The identity of each track name in the latest catalog fold, recorded when a network broadcast starts.
 	#listed = new Map<string, Identity>();
 
 	#signals = new Effect();
@@ -373,7 +375,8 @@ export class Broadcast {
 		const tracks = new Map<string, { track: Moq.Track.Producer; owner: Rendition<unknown> }>();
 		this.#names.set({});
 		this.#replacements = new Set();
-		this.#served = undefined;
+		// From here a name keeps the identity it is first listed with.
+		this.#served = new Map(this.#listed);
 		const kinds = new Map<string, Kind>();
 		this.#kinds = kinds;
 		effect.cleanup(() => {
@@ -394,8 +397,6 @@ export class Broadcast {
 			// is whatever the catalog holds at announce time.
 			if (!serving) {
 				serving = true;
-				// From here a name keeps the identity this first snapshot gives it.
-				this.#served = new Map(this.#listed);
 				// A catalog may publish once and stay unchanged for the broadcast's whole life. Keep that
 				// sole closed snapshot replayable so a viewer arriving after the ordinary media retention
 				// window can still bootstrap.
