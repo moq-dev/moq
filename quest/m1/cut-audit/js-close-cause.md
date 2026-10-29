@@ -31,7 +31,7 @@ Choose whether to retain that clean local route-close behavior or abort the
 received track with CANCELLED as well. Recommend retaining the mirrored Rust
 behavior, with cancellation at the unfinished-group boundary. No broader
 session redesign is included; the independent FIN-and-peer-close ordering
-work remains in [JS close FIN](/quest/m1/broadcast-lifecycle/js-close-fin.md).
+work lands in [moq-dev/moq#6969](https://github.com/moq-dev/moq/pull/6969).
 
 Public API: breaking in the prepared PR. Callers pass an error to
 `Request.reject`, and finish groups before closing when they need a complete

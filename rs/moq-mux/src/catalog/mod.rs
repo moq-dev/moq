@@ -40,6 +40,7 @@ pub use consumer::Consumer;
 pub use data::IntoRendition;
 pub(crate) use data::Listing;
 pub use entry::Entry;
+pub(crate) use estimate::Reading;
 pub use estimate::{Estimate, Estimator};
 pub use format::*;
 pub use producer::{Config, Guard, Producer};

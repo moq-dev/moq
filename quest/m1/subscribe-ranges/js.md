@@ -30,6 +30,13 @@ Also mirror Rust's optional `Subscription::max_delay`
 combine, and goes out as the largest delay the wire allows, where today an
 omitted one means the live edge only.
 
+Fills mirror Rust's rule from [#7168](https://github.com/moq-dev/moq/pull/7168)
+(decided 2026-10-29, maintainer): give up a run below a start already
+resolved under a budget at least as loose as the reader's, and on a pre-06
+wire fill below the start only when the reader names a floor. `js/net`
+requests no fills today, so nothing over-fetches yet; this keeps it that way
+once it does.
+
 Decided in the 2026-10-05 audit: the producer half of
 JavaScript FETCH folds in here, so `@moq/net`'s
 on-demand request surface takes range requests from the start instead of the

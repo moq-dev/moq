@@ -199,9 +199,10 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// PMT ES-level descriptors per PID, stashed when a PMT is parsed so a decoded
 	/// media track can record them (language, registration, ...) once its track exists.
 	es_descriptors: HashMap<u16, Vec<catalog::Descriptor>>,
-	/// Decoded media PIDs already recorded into `mpegts.tracks`, so the reconcile in
-	/// [`Self::flush`] runs once per track rather than on every frame.
-	recorded_media: HashSet<Pid>,
+	/// Decoded media PIDs already recorded into `mpegts.tracks`, by the track name recorded, so the
+	/// reconcile in [`Self::flush`] runs once per track rather than on every frame, and moves the
+	/// entry when a format change publishes the PID under a new name.
+	recorded_media: HashMap<Pid, String>,
 	/// The program-level descriptors the catalog advertises, rewritten in place as the PMT
 	/// revises them.
 	program_info: Vec<catalog::Descriptor>,
@@ -294,7 +295,7 @@ impl<E: catalog::Catalog> Import<E> {
 			sections: HashMap::new(),
 			supports_mpegts,
 			es_descriptors: HashMap::new(),
-			recorded_media: HashSet::new(),
+			recorded_media: HashMap::new(),
 			program_info,
 			listed: HashMap::new(),
 			si,
@@ -906,9 +907,10 @@ impl<E: catalog::Catalog> Import<E> {
 			Some(StreamType::AdtsAac) => Stream::Aac(Box::new(AacStream {
 				import: None,
 				asc: bytes::Bytes::new(),
+				format: (0, 0, 0),
 				broadcast: self.broadcast.clone(),
 				reserved: Some(self.reserve()),
-				catalog: self.catalog.clone(),
+				timebase: self.timebase.clone(),
 				container: self.container.clone(),
 				tail: Vec::new(),
 				tail_pts: None,
@@ -1000,6 +1002,8 @@ impl<E: catalog::Catalog> Import<E> {
 			import: None,
 			broadcast: self.broadcast.clone(),
 			reserved: Some(self.reserve()),
+			timebase: self.timebase.clone(),
+			format: (0, 0),
 			container: self.container.clone(),
 			tail: Vec::new(),
 			tail_pts: None,
@@ -1134,8 +1138,8 @@ impl<E: catalog::Catalog> Import<E> {
 		units += self.finish_stream(pid)?;
 		if let Some(stream) = self.streams.get(&pid) {
 			// A verbatim entry leaves with its stream; a decoded track's is recorded here.
-			if self.recorded_media.remove(&pid)
-				&& let Some(name) = stream.media_track_name()
+			if let Some(name) = self.recorded_media.remove(&pid)
+				&& stream.media_track_name().is_some()
 				&& let Some(mpegts) = self.catalog.modify()?.ext.mpegts_mut()
 			{
 				mpegts.tracks.remove(&name);
@@ -1663,27 +1667,29 @@ impl<E: catalog::Catalog> Import<E> {
 	/// once per track. No-op without the `mpegts` section, before the track exists,
 	/// or for verbatim streams (which self-register).
 	fn record_media_track(&mut self, pid: Pid) -> anyhow::Result<()> {
-		if !self.supports_mpegts || self.recorded_media.contains(&pid) {
+		if !self.supports_mpegts {
 			return Ok(());
 		}
-		let (name, descriptors) = {
-			let Some(name) = self.streams.get(&pid).and_then(|s| s.media_track_name()) else {
-				return Ok(());
-			};
-			(
-				name,
-				self.es_descriptors.get(&pid.as_u16()).cloned().unwrap_or_default(),
-			)
+		let Some(name) = self.streams.get(&pid).and_then(|s| s.media_track_name()) else {
+			return Ok(());
 		};
+		if self.recorded_media.get(&pid) == Some(&name) {
+			return Ok(());
+		}
+		let descriptors = self.es_descriptors.get(&pid.as_u16()).cloned().unwrap_or_default();
 		if let Some(mpegts) = self.catalog.modify()?.ext.mpegts_mut() {
+			// A format change moved the PID to a new track, whose entry replaces the ended one's.
+			if let Some(previous) = self.recorded_media.get(&pid) {
+				mpegts.tracks.remove(previous);
+			}
 			let entry = mpegts
 				.tracks
-				.entry(name)
+				.entry(name.clone())
 				.or_insert_with(|| catalog::Track::new(pid.as_u16()));
 			entry.pid = pid.as_u16();
 			entry.descriptors = descriptors;
 		}
-		self.recorded_media.insert(pid);
+		self.recorded_media.insert(pid, name);
 		Ok(())
 	}
 
@@ -3665,13 +3671,17 @@ struct AacStream<E: CatalogExt = ()> {
 	/// The AudioSpecificConfig `import` was built with. A program config element in a later frame
 	/// must rebuild it exactly.
 	asc: bytes::Bytes,
+	/// The ADTS object type, sample rate, and channel configuration `import` was built with. A
+	/// frame header that changes them starts a new track.
+	format: (u8, u32, u8),
 	broadcast: moq_net::broadcast::Producer,
 	/// Reservation held from the PMT until the first frame builds the importer, so the catalog stays
 	/// withheld until this deferred rendition resolves (config comes from the first ADTS header).
 	/// Consumed when `import` is built, or released by a frame that cannot build it.
 	reserved: Option<crate::catalog::Reserved<E>>,
-	/// Reserves the rendition anew when `import` is built after `reserved` was released.
-	catalog: crate::catalog::Producer<E>,
+	/// Reserves the rendition anew on the program's timebase when `import` is built after `reserved`
+	/// was released, or for the next track after a config change.
+	timebase: crate::catalog::Timebase<E>,
 	/// The container this importer publishes decoded renditions with.
 	container: hang::catalog::Container,
 	/// Partial frame left at the end of the previous PES. ISO 13818-1 doesn't require
@@ -3811,6 +3821,22 @@ impl<E: CatalogExt> AacStream<E> {
 			};
 
 			let mut block = &data[offset + header.header_len..end];
+			let format = (header.object_type, header.sample_rate, header.channel_config);
+			// A new object type, sample rate, or channel configuration is a new decoder identity:
+			// end this track, and publish the rest under a new name.
+			if let Some(import) = &mut self.import
+				&& format != self.format
+			{
+				tracing::info!(
+					name = import.name(),
+					"AAC format changed mid-stream, starting a new track"
+				);
+				import.finish()?;
+				let name = import.name().to_string();
+				// The name is never published again, so its HLS records end once its recorder is gone.
+				self.import = None;
+				self.timebase.retire(&name)?;
+			}
 			let import = match &mut self.import {
 				Some(import) => {
 					// The description already carries the layout, so a repeated program config
@@ -3852,12 +3878,13 @@ impl<E: CatalogExt> AacStream<E> {
 					config.container = self.container.clone();
 					// Consume the reservation held since the PMT: this resolves the gated rendition,
 					// and carries the catalog's declared media retention onto the track.
-					let reserved = self.reserved.take().unwrap_or_else(|| self.catalog.reserve());
+					let reserved = self.reserved.take().unwrap_or_else(|| self.timebase.reserve());
 					let track = self
 						.broadcast
 						.unique_track(".aac", reserved.track_info(hang::catalog::PRIORITY.audio))?;
 					let aac = aac::Import::new(track, reserved, config)?;
 					self.asc = asc;
+					self.format = format;
 					self.import.insert(aac)
 				}
 			};
@@ -4282,6 +4309,10 @@ struct LegacyStream<E: CatalogExt = ()> {
 	/// withheld until this deferred rendition resolves (config comes from the first frame header).
 	/// Consumed when `import` is built.
 	reserved: Option<crate::catalog::Reserved<E>>,
+	/// Reserves the next track on the program's timebase after a config change.
+	timebase: crate::catalog::Timebase<E>,
+	/// The sample rate and channel count `import` was built with, from the first frame header.
+	format: (u32, u32),
 	/// The container this importer publishes decoded renditions with.
 	container: hang::catalog::Container,
 	/// Partial frame left at the end of the previous PES. ISO 13818-1 doesn't
@@ -4433,6 +4464,22 @@ impl<E: CatalogExt> LegacyStream<E> {
 				}
 			};
 
+			let format = (header.sample_rate, header.channel_count);
+			// A new sample rate or channel count is a new decoder identity: end this track, and
+			// publish the rest under a new name.
+			if let Some(import) = &mut self.import
+				&& format != self.format
+			{
+				tracing::info!(
+					name = import.name(),
+					"audio format changed mid-stream, starting a new track"
+				);
+				import.finish()?;
+				let name = import.name().to_string();
+				// The name is never published again, so its HLS records end once its recorder is gone.
+				self.import = None;
+				self.timebase.retire(&name)?;
+			}
 			let import = match &mut self.import {
 				Some(import) => import,
 				None => {
@@ -4442,13 +4489,15 @@ impl<E: CatalogExt> LegacyStream<E> {
 						container: self.container.clone(),
 					};
 					// Consume the reservation held since the PMT: this resolves the gated rendition,
-					// and carries the catalog's declared media retention onto the track.
-					let reserved = self.reserved.take().expect("legacy reservation already consumed");
+					// and carries the catalog's declared media retention onto the track. A track
+					// after a format change reserves anew on the same timebase.
+					let reserved = self.reserved.take().unwrap_or_else(|| self.timebase.reserve());
 					let track = self.broadcast.unique_track(
 						self.descriptor.track_suffix,
 						reserved.track_info(hang::catalog::PRIORITY.audio),
 					)?;
 					let legacy = legacy::Import::new(self.descriptor, track, reserved, config)?;
+					self.format = format;
 					self.import.insert(legacy)
 				}
 			};
@@ -5940,9 +5989,9 @@ pub(super) mod test {
 	}
 
 	/// Read every retained frame of the single audio rendition in `catalog`.
-	async fn read_audio_frames(
+	async fn read_audio_frames<E: crate::catalog::hang::CatalogExt>(
 		consumer: &moq_net::broadcast::Consumer,
-		catalog: &crate::catalog::Producer,
+		catalog: &crate::catalog::Producer<E>,
 	) -> Vec<crate::container::Frame> {
 		let name = catalog
 			.snapshot()
@@ -6318,6 +6367,111 @@ pub(super) mod test {
 		let mut f = vec![0xFF, 0xF5, 0x18, 0xC0];
 		f.resize(72, fill);
 		f
+	}
+
+	// A frame header that changes the channel count is a new decoder identity: the frames after
+	// it publish on a new track, and the first track is retired rather than rewritten.
+	#[tokio::test(start_paused = true)]
+	async fn legacy_channel_change_starts_a_new_track() {
+		const MP2_PID: u16 = 0x0061;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import
+			.decode(&synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false))
+			.unwrap();
+
+		// The same frame in stereo: the mode bits clear.
+		let stereo = |fill| {
+			let mut frame = mp2_frame(fill);
+			frame[3] = 0x00;
+			frame
+		};
+		let mono = [mp2_frame(0xAA), mp2_frame(0xBB)].concat();
+		import.decode(&audio_pes_packet(MP2_PID, 0, 90_000, &mono)).unwrap();
+		let first = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
+		let records = catalog.hls_tracks();
+		let both = [stereo(0xCC), stereo(0xDD)].concat();
+		import.decode(&audio_pes_packet(MP2_PID, 1, 180_000, &both)).unwrap();
+		import.decode(&audio_pes_packet(MP2_PID, 2, 270_000, &both)).unwrap();
+
+		let snapshot = catalog.snapshot();
+		assert_eq!(snapshot.audio.renditions.len(), 1, "the mono track is retired");
+		let (name, config) = snapshot.audio.renditions.iter().next().unwrap();
+		assert_ne!(name, &first, "the stereo frames publish under a new name");
+		assert_eq!(config.channel_count, 2);
+		assert_eq!(catalog.hls_tracks(), records, "the mono track's HLS records retire");
+		import.finish().unwrap();
+		let frames = read_audio_frames(&consumer, &catalog).await;
+		assert_eq!(frames[0].payload, stereo(0xCC), "the new track starts at the change");
+	}
+
+	// An ADTS header that changes the sample rate is a new decoder identity, so the frames after
+	// it publish on a new track, on the same program timebase.
+	#[tokio::test(start_paused = true)]
+	async fn aac_sample_rate_change_starts_a_new_track() {
+		const AAC_PID: u16 = 0x0060;
+		let frame = |rate| {
+			let mut f = super::adts::write_header(2, rate, 2, 10).unwrap().to_vec();
+			f.resize(f.len() + 10, 0x20);
+			f
+		};
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let mut mux = Mux {
+			out: synth_pmt(&[(StreamType::AdtsAac, AAC_PID)], false),
+			..Default::default()
+		};
+		let cc = mux.cc(AAC_PID);
+		mux.out.extend(audio_pes_packet(
+			AAC_PID,
+			cc,
+			90_000,
+			&[frame(48_000), frame(48_000)].concat(),
+		));
+		import.decode(&mux.out).unwrap();
+		let first = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
+		let records = catalog.hls_tracks();
+
+		mux.out.clear();
+		for pts in [180_000, 270_000] {
+			let cc = mux.cc(AAC_PID);
+			mux.out.extend(audio_pes_packet(
+				AAC_PID,
+				cc,
+				pts,
+				&[frame(44_100), frame(44_100)].concat(),
+			));
+		}
+		import.decode(&mux.out).unwrap();
+		let snapshot = catalog.snapshot();
+		assert_eq!(snapshot.audio.renditions.len(), 1, "the 48 kHz track is retired");
+		let (name, config) = snapshot.audio.renditions.iter().next().unwrap();
+		assert_ne!(name, &first, "the 44.1 kHz frames publish under a new name");
+		assert_eq!(config.sample_rate, 44_100);
+		assert_eq!(catalog.hls_tracks(), records, "the 48 kHz track's HLS records retire");
+		let recorded: Vec<_> = snapshot.ext.mpegts.tracks.keys().cloned().collect();
+		assert_eq!(
+			recorded,
+			vec![name.clone()],
+			"the PID's mpegts entry moves to the new track"
+		);
+		import.finish().unwrap();
+		let frames = read_audio_frames(&consumer, &catalog).await;
+		assert_eq!(
+			frames[0].timestamp,
+			moq_net::Timestamp::from_micros(2_000_000).unwrap(),
+			"the new track keeps the program's timebase"
+		);
 	}
 
 	// The shape a looping mux actually produces, which is not a carried tail: the last PES

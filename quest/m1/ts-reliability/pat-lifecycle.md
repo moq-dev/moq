@@ -19,9 +19,15 @@ export started after it.
 The maintainer's plan, from closing
 [moq-dev/moq#6301](https://github.com/moq-dev/moq/pull/6301): the export
 follows a new `program.pmtPid` with a new PAT, built on the table rework
-that lays the PAT and PMT from the current table state when their slot is
-laid instead of riding queued units, so a move is one more state change
-rather than a rewrite of queued copies. That rework has not landed.
+that lays the PAT and PMT from the current table state when a copy of them
+begins to go out, so a move is one more state change rather than a rewrite
+of queued copies. That rework has landed: the export's `Psi` holds the
+tables as they stand, `Export::restate` hands them to
+`Schedule::set_psi`, which every copy not yet begun lays, and a copy
+already on its way finishes as it began. A move then updates `Psi::pmt_pid`,
+calls `Schedule::set_tables` for the new PID, and restates; `Psi::current`
+gives the PAT the next version when the PID differs from the last laid.
+This quest keeps only the PMT move and its tests.
 
 The draft then says that `pmtPid` can change in place, and when a consumer
 rebuilding the stream moves the PMT.
