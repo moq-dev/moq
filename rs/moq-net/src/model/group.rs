@@ -1820,6 +1820,7 @@ impl Producer {
 			.as_ref()
 			.filter(|partial| !partial.scratch && state.content.is_some())
 			.map(|partial| partial.buf.shared());
+		let owned = owner.is_some();
 		let fields = partial.and_then(|partial| partial.fields);
 		let mut entry = Entry {
 			owner: Mutex::new(owner),
@@ -1827,7 +1828,7 @@ impl Producer {
 			fields,
 			inflated,
 		};
-		if entry.owner.lock().unwrap_or_else(PoisonError::into_inner).is_none() {
+		if !owned {
 			state.canonicalize(state.next_index - 1, &mut entry)?;
 		}
 		// The slot was reserved and charged by `charge_partial` above.
