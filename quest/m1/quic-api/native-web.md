@@ -5,10 +5,13 @@
 `moq_tokio::quic::web` and `moq_uring::quic::web` implement moq-net's
 `transport::poll` traits directly over their drivers' poll forms, keeping
 real send groups. Their `web_transport_trait` impls, the sealed
-`Grouped`/`GroupedSend` pair, and every QUIC-only path through moq-tokio's
-async-to-poll adapter (`transport::Session<S>`) are gone; the adapter is left
-serving iroh alone until
-[drop web-transport-trait](/quest/m1/drop-web-transport-trait.md) finishes it.
+`Grouped`/`GroupedSend` pair, and the generic adapters over
+`web_transport_trait` are gone: moq-tokio's async-to-poll
+`transport::Session<S>` and moq-uring's `transport::Session<S>`, which serve
+only native QUIC now that iroh, moq-wasm and moq-ffi implement moq-net's
+traits themselves. moq-tokio, moq-uring and moq-relay then no longer depend on
+`web-transport-trait`; qmux keeps it as a dev-dependency for its 0.6 interop
+tests, and web-transport-iroh still pulls it in transitively.
 
 ## Plan
 
@@ -39,8 +42,22 @@ Align the two stacks while each gets its impl:
   WebTransport-over-moq-quic library usable without MoQ, documented, no
   longer `#[doc(hidden)]`, with the same names and signatures in moq-tokio
   and moq-uring and the driver's `send::`/`recv::` shapes and errors.
-- Report the public API impact per crate: deleted `Grouped`/`GroupedSend`
-  and `web_transport_trait` impls, new `poll::Session` impls.
+- moq-uring's header classification (`classify_uni`, `classify_bi` in
+  `web.rs`) re-polls every pending stream and rebuilds the pending `Vec`
+  whenever any stream arrives or wakes, so a peer that opens N streams with
+  partial headers costs O(N²) CPU, with N up to its stream limit. moq-tokio
+  keeps them in a `FuturesUnordered`, which polls only the woken ones. Bring
+  uring to the same shape. Test with pending × ready headers and fragmented
+  arrival, preserving FIN handling, the held control streams, and stream
+  credit (2026-10-27 audit, maintainer).
+- `transport::poll_op` and `OpSlot` move to `moq_tokio::iroh`, their last
+  user, when moq-tokio's adapter goes.
+- moq-relay's io_uring server and its tests call the uring session through
+  `web_transport_trait` (`uring.rs`, `tests/integration/runtime_uring.rs`);
+  move them to the new impls.
+- Report the public API impact per crate: deleted `Grouped`/`GroupedSend`,
+  `web_transport_trait` impls, and generic `transport::Session<S>` adapters,
+  and new `poll::Session` impls.
 
 Measure relay CPU per Gbps and allocations per stream before and after on
 the same workload.
@@ -48,7 +65,6 @@ the same workload.
 ## Required
 
 - [Poll forms](/quest/m1/quic-api/poll.md) - the leak-free driver polls these impls forward to
-- [moq-net polls on kio waiters](/quest/m1/quic-api/net-poll.md) - the `&self, &kio::Waiter` trait shape these impls implement
 
 ## Related
 

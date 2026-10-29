@@ -4,6 +4,15 @@
 # would work, but that list is what scopes `just check` and `cargo semver-checks`.
 [alias]
 moq = ["run", "--bin", "moq", "--"]
+# `cargo build-ffi` is the one definition of moq-ffi's default build, which every
+# binding loads from the shared target directory: `openh264`, as releases ship
+# it. Append a profile, `--target`, or `--lib`, never features. A cdylib's file
+# name carries no feature hash, so a build with other features replaces
+# `libmoq_ffi.so` under everyone reading it; such a build takes a target
+# directory of its own (py, `sh/size/collect.sh`, `build.sh --no-default-features`)
+# or a `--target` triple no default build uses (dart's `testing` build).
+# Aliases resolve from the working directory, so run it inside the checkout.
+build-ffi = ["build", "--locked", "--package", "moq-ffi", "--features", "openh264"]
 
 # Browser/WASM (moq-wasm). getrandom needs its wasm_js backend, and web-sys's
 # WebTransport bindings are behind the unstable cfg.

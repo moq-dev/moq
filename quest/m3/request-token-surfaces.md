@@ -27,4 +27,3 @@ per request. Wire: none.
 ## Related
 
 - [#5148](https://github.com/moq-dev/moq/pull/5148) - incoming request tokens in Rust
-- [Relay request tokens](/quest/m3/auth-request-lease.md) - the relay's half, also waiting on a consumer

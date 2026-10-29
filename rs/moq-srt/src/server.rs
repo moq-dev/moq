@@ -583,7 +583,7 @@ pub(crate) async fn serve_subscribe(
 	mut socket: SrtSocket,
 	options: crate::ts::Options,
 ) -> Result<()> {
-	// Resolve the broadcast, but watch the socket while we wait: `routed`
+	// Resolve the broadcast, but watch the socket while we wait: following it
 	// parks forever for a stream that is never published, and nothing else polls the
 	// socket during that wait, so without this a caller who requests a non-existent
 	// stream (or hangs up before it starts) would leak this task and its socket.

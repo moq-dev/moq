@@ -4,6 +4,7 @@
 
 mod adapter;
 
+use adapter::Session;
 use url::Url;
 use web_transport_wasm::{ClientBuilder, Error};
 
@@ -36,6 +37,3 @@ pub async fn connect_with_hashes(
 		.await
 		.map(Session::new)
 }
-
-/// A browser session implementing moq-net's owned poll interface.
-type Session = adapter::Session<web_transport_wasm::Session>;
