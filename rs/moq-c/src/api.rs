@@ -3492,10 +3492,11 @@ pub unsafe extern "C" fn moq_consume_video_config(catalog: u32, index: u32, dst:
 	})
 }
 
-/// Query whether a video rendition may be selected.
+/// Query whether the publisher is serving a video rendition.
 ///
-/// False means no frames are coming and the rendition must not be selected. A catalog that
-/// omits the optional field reads as true.
+/// False means no frames are coming until it re-enables. Pick an enabled rendition, but keep one
+/// already playing while every video rendition is disabled, so a re-enable plays without a
+/// resubscribe. A catalog that omits the optional field reads as true.
 ///
 /// Returns zero on success, or a negative code on failure.
 ///

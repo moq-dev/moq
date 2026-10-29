@@ -22,9 +22,11 @@ Decided 2026-10-28 (maintainer):
 - **Hold, not DTX.** DTX is for silence the app can't predict. Push-to-talk
   knows when it is silent, and a held subscription costs no media bytes and no
   encoder CPU. DTX is off on main anyway ([#4919](https://github.com/moq-dev/moq/pull/4919)).
-- **Consumers hold a disabled rendition**, audio and video, by default, in
-  every first-party consumer. The hang spec weakens from "must not select" to
-  "should not select" a disabled rendition.
+- **Players hold a disabled rendition**, audio and video, by default, in
+  every first-party player. Exports keep dropping it, since a held track
+  sends nothing and an interleaving muxer or HLS player may wait on it. The
+  hang spec weakens from "must not select" to "should not select" a disabled
+  rendition.
 - **The publisher keeps its probe result across a disable**, and the
   element's `muted` and `invisible` leave capture open.
 - **Encoding no longer waits for demand**
@@ -46,7 +48,7 @@ Record both in the PR.
 ## Required
 
 - [JS consumers hold a disabled rendition](/quest/m1/push-to-talk/hold-js.md) - watch keeps a disabled audio or video rendition subscribed, and the hang spec says "should not select"
-- [Rust consumers hold a disabled rendition](/quest/m1/push-to-talk/hold-rs.md) - moq-cli play, moq-ffi and moq-mux select follow the same rule
+- [moqsrc holds a disabled rendition](/quest/m1/push-to-talk/hold-rs.md) - moqsrc keeps its reader running under the selection rule moq play and moq-mux already apply
 - [`muted` and `invisible` keep capture open](/quest/m1/push-to-talk/mute.md) - the element disables only the encoder, so unmute skips getUserMedia and AudioContext setup
 
 ## Closes

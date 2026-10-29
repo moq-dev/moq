@@ -36,6 +36,8 @@ m4's upstream waits in here and moved m2 work with no consumer.
 - [Careful resume on reconnect](/quest/m3/quic-careful-resume.md) - a Rust redial starts at the previous connection's rate
 - [Cut-through](/quest/m3/cut-through/README.md) - a bufferbloat bench decides whether a relay should forward bytes behind a QUIC stream hole; the build is re-planned if it says go
 - [Middle eviction](/quest/m3/middle-eviction.md) - a group too large to keep whole keeps its head for joiners and its tail for live readers, evicting between; speculative, after front eviction
+- [Byte streams in moq-ffi](/quest/m3/ffi-stream.md) - Swift and Kotlin dial and accept byte streams, for moq.pro's T3 Code mobile client
+- [E2EE in moq-ffi](/quest/m3/ffi-e2ee.md) - Swift and Kotlin publish and consume protected broadcasts, for the same client
 - [Unreal prototype](/quest/m3/unreal.md) - a UE5 module on the C++ package with exceptions disabled, rendering a subscribed broadcast to a texture
 - [vcpkg registry](/quest/m3/cpp-vcpkg.md) - a registry we own serves the prebuilt package to `vcpkg` manifests, once a consumer asks
 - [Conan remote](/quest/m3/cpp-conan.md) - a remote we own serves the same tarball to `conan install`

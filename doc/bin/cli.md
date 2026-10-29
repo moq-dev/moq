@@ -236,7 +236,11 @@ audio-device dependencies:
 cargo install moq-cli --no-default-features --features "quic,websocket,play,openh264"
 ```
 
-`moq play` skips disabled renditions. If none are enabled, it waits for a later catalog. Disabling the current rendition stops it and selects an enabled replacement.
+`moq play` skips disabled renditions when it picks one. If no enabled rendition
+matches its name and codec filters, it waits for a later catalog. Disabling the
+current rendition switches to an enabled one of its kind that matches the
+filters; with none, it stays subscribed, so re-enabling it (an unmute) plays at
+once.
 
 ## Capture
 
