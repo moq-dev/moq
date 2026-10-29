@@ -53,7 +53,7 @@ uuid = { workspace = true, features = ["js"] }
 loom = { workspace = true }
 
 [dev-dependencies]
-criterion = { workspace = true }
+criterion = { package = "bench-harness", path = "../bench-harness" }
 futures = { workspace = true }
 # The tests' executor, with simulated time.
 moq-clock = { path = "../moq-clock", features = ["sim"] }
@@ -114,6 +114,12 @@ required-features = ["fuzz"]
 # Reaches the private message codecs through the hidden `fuzz` module.
 [[bench]]
 name = "codec"
+harness = false
+required-features = ["fuzz"]
+
+# Isolates the full fuzz round trip from the message-codec executable.
+[[bench]]
+name = "parameters"
 harness = false
 required-features = ["fuzz"]
 
