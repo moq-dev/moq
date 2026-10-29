@@ -16,7 +16,7 @@ use moq_net::transport::poll::{SendOptions, Session as _};
 use qmux::{Session, Version};
 use tokio::net::TcpListener;
 
-async fn run(mut session: Session, version: Version) -> anyhow::Result<()> {
+async fn run(session: Session, version: Version) -> anyhow::Result<()> {
 	if session.protocol() != Some(PROTOCOL) {
 		bail!("unexpected negotiated protocol: {:?}", session.protocol());
 	}

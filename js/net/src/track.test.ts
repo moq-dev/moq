@@ -1857,7 +1857,7 @@ test("withRange parks recvGroup beyond the cap and a raised cap re-offers", asyn
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe({ maxDelay: Milli(5000) });
 
-	for (let sequence = 0; sequence < 3; sequence++) producer.createGroup(sequence);
+	for (let sequence = 0; sequence < 3; sequence++) producer.createGroup(sequence).finish();
 
 	track.withRange({ end: { excluded: 2 } });
 	expect((await track.recvGroup())?.sequence).toBe(0);
@@ -2450,7 +2450,7 @@ test("a lowered range re-offers a cached cut with its error", async () => {
 test("a lowered range still re-offers after the producer closes", () => {
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe({ maxDelay: Milli(5000), groups: { start: { included: 1 } } });
-	for (const sequence of [0, 1]) producer.createGroup(sequence);
+	for (const sequence of [0, 1]) producer.createGroup(sequence).finish();
 	expect(track.tryRecvGroup()?.sequence).toBe(1);
 	producer.finish();
 	producer.close();
@@ -3485,7 +3485,8 @@ test("an evicted group still bounds, and a late group below it is unverified", a
 		// the group and it is accepted without being trusted to time anything.
 		const track = producer.subscribe({ maxDelay: Milli(60_000) });
 		expect(() => stampGroup(producer, 1, 4000)).toThrow(TimestampMismatch);
-		stampGroup(producer, 1, 500);
+		stampGroup(producer, 1, 500).finish();
+		edge.finish();
 		producer.finish();
 		producer.close();
 
