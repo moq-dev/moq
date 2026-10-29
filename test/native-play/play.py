@@ -156,7 +156,7 @@ def run():
             first, _ = publisher(version + "-first", 440, [])
             player = spawn(version + "-player", [
                 args.moq, "--connect", args.url, "--connect-version", version,
-                "--broadcast", "tone.hang", "play", "--no-video", "--delay", f"{DELAY_MS}ms",
+                "--broadcast", "tone.hang", "play", "--video", "off", "--delay", f"{DELAY_MS}ms",
             ], stdout=subprocess.DEVNULL)
             live = first + [(player, f"{version} player")]
             hear(440, f"{version}-initial", SETUP_S, live)

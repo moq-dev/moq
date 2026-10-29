@@ -1,5 +1,5 @@
 /**
- * Plays one native row: the shipped `moq play --no-video` through the shaper, into the private null
+ * Plays one native row: the shipped `moq play --video off` through the shaper, into the private null
  * sink that `test/lib/pulse.py` runs, with `--metrics` writing what its speaker played.
  *
  * The player dials the shaper with the relay's certificate pinned by hash, so nothing on TCP answers
@@ -85,7 +85,8 @@ const args = [
 	"--broadcast",
 	broadcast,
 	"play",
-	"--no-video",
+	"--video",
+	"off",
 	"--metrics",
 	samplesFile,
 ];
