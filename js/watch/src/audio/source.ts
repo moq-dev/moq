@@ -63,6 +63,9 @@ export class Source {
 	// The last selection, which a disable holds while no enabled rendition remains.
 	#held?: { broadcast: Broadcast; track: string };
 
+	// The broadcast `available` was probed for. It lags a broadcast switch until the new probe lands.
+	#probed?: Broadcast;
+
 	#signals = new Effect();
 
 	constructor(props?: Inputs<SourceInput>) {
@@ -88,7 +91,9 @@ export class Source {
 	}
 
 	#runSupported(effect: Effect): void {
-		const renditions = effect.get(this.#out.catalog)?.renditions ?? {};
+		// Read the catalog from the broadcast itself, so the probe result is tagged with the right one.
+		const broadcast = effect.get(this.in.broadcast);
+		const renditions = (broadcast && effect.get(broadcast.out.catalog)?.audio?.renditions) ?? {};
 		const supported = effect.get(this.in.supported);
 		if (!supported) return;
 
@@ -121,6 +126,7 @@ export class Source {
 					console.warn("no supported audio renditions found:", renditions);
 				}
 
+				this.#probed = broadcast;
 				this.#out.available.set(available);
 			} finally {
 				this.#pending.set(false);
@@ -140,7 +146,8 @@ export class Source {
 			target?.name && target.name in available
 				? target.name
 				: (this.#select(available) ?? this.#hold(broadcast, all));
-		this.#held = track && broadcast ? { broadcast, track } : undefined;
+		// A pick from the previous broadcast's renditions is not this broadcast's selection to hold.
+		this.#held = track && broadcast && this.#probed === broadcast ? { broadcast, track } : undefined;
 		if (!track) return;
 
 		const config = all[track];

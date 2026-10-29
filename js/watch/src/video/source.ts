@@ -223,6 +223,9 @@ export class Source {
 	// The last selection, which a disable holds while no enabled rendition remains.
 	#held?: { broadcast: Broadcast; track: string };
 
+	// The broadcast `available` was probed for. It lags a broadcast switch until the new probe lands.
+	#probed?: Broadcast;
+
 	#signals = new Effect();
 	#supportCache = new WeakMap<Supported, Map<string, { key: string; supported: boolean }>>();
 
@@ -256,7 +259,9 @@ export class Source {
 			return;
 		}
 
-		const renditions = effect.get(this.#out.catalog)?.renditions ?? {};
+		// Read the catalog from the broadcast itself, so the probe result is tagged with the right one.
+		const broadcast = effect.get(this.in.broadcast);
+		const renditions = (broadcast && effect.get(broadcast.out.catalog)?.video?.renditions) ?? {};
 		this.#out.error.set(undefined);
 		let cache = this.#supportCache.get(supported);
 		if (!cache) {
@@ -312,6 +317,7 @@ export class Source {
 			} else {
 				this.#out.error.set(undefined);
 			}
+			this.#probed = broadcast;
 			this.#out.available.set(available);
 			this.#pending.set(false);
 		});
@@ -324,7 +330,8 @@ export class Source {
 		const target = effect.get(this.in.target);
 
 		const selected = this.#choose(effect, available, target) ?? this.#hold(broadcast, all);
-		this.#held = selected && broadcast ? { broadcast, track: selected } : undefined;
+		// A pick from the previous broadcast's renditions is not this broadcast's selection to hold.
+		this.#held = selected && broadcast && this.#probed === broadcast ? { broadcast, track: selected } : undefined;
 		if (!selected) return;
 
 		effect.set(this.#out.track, selected);

@@ -157,3 +157,19 @@ test("does not carry a hold to another broadcast", async () => {
 		source.close();
 	}
 });
+
+test("does not hold an enabled selection into another broadcast's disabled rendition", async () => {
+	const current = new Signal<Broadcast | undefined>(broadcast({ mic: config("opus") }).broadcast);
+	const source = new Source({ broadcast: current, supported: async () => true });
+	try {
+		await settled(source);
+		expect(source.out.track.peek()).toBe("mic");
+
+		current.set(broadcast({ mic: config("opus", { enabled: false }) }).broadcast);
+		for (let i = 0; i < 5; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(source.out.track.peek()).toBeUndefined();
+		expect(source.out.config.peek()).toBeUndefined();
+	} finally {
+		source.close();
+	}
+});

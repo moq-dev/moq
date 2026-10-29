@@ -297,6 +297,24 @@ describe("Source disabled rendition selection", () => {
 		source.close();
 	});
 
+	it("does not hold an enabled selection into another broadcast's disabled rendition", async () => {
+		const current = new Signal<Broadcast | undefined>(
+			mutableBroadcast({ high: config("avc1.640028", { bitrate: 2_000_000 }) }).broadcast,
+		);
+		const source = new Source({ broadcast: current, supported: async () => true });
+
+		await settle();
+		expect(source.out.track.peek()).toBe("high");
+
+		current.set(
+			mutableBroadcast({ high: config("avc1.640028", { bitrate: 2_000_000, enabled: false }) }).broadcast,
+		);
+		await settle();
+		expect(source.out.track.peek()).toBeUndefined();
+		expect(source.out.config.peek()).toBeUndefined();
+		source.close();
+	});
+
 	it("ignores a legacy stalled flag", async () => {
 		const source = new Source({
 			broadcast: mockBroadcast({
