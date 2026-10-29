@@ -499,7 +499,7 @@ impl Client {
 			let endpoint = self.iroh.as_ref().ok_or(Error::IrohDisabled)?;
 			let (session, address) =
 				crate::iroh::connect(endpoint, url, self.iroh_addrs.iter().copied(), &self.versions).await?;
-			let session = connect_session(&moq, crate::transport::Session::new(session, address)).await?;
+			let session = connect_session(&moq, crate::iroh::Session::new(session, address)).await?;
 			return Ok(Dialed::new(session, crate::Transport::Iroh));
 		}
 

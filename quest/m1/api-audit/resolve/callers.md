@@ -28,4 +28,3 @@ Public API: none beyond the callers' own surfaces. Wire: none.
 
 ## Required
 
-- [JS request and follow](/quest/m1/api-audit/resolve/js.md) - the JS names the callers move to

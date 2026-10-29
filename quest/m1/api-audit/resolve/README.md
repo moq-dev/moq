@@ -50,7 +50,6 @@ Wire: none.
 
 ## Required
 
-- [JS request and follow](/quest/m1/api-audit/resolve/js.md) - `@moq/net` exposes `request(path, {epoch})` and `follow(path, {epoch})` instead of the `announced` option
 - [Bindings request and follow](/quest/m1/api-audit/resolve/bindings.md) - moq-ffi, the C ABI, and every wrapper mirror `request` and `follow` with an optional epoch
 - [Callers resolve once](/quest/m1/api-audit/resolve/callers.md) - no caller hand-rolls synced resolution or decides table absence by wall clock
 
