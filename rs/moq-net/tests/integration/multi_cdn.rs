@@ -187,7 +187,7 @@ impl Topology {
 	}
 
 	async fn subscribe(&self) -> mpsc::UnboundedReceiver<Delivery> {
-		let remote = self.subscriber.consume().request_broadcast("live", None).await.unwrap();
+		let remote = self.subscriber.consume().request("live", None).await.unwrap();
 		let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(60));
 		read(remote.track("video").unwrap().subscribe(prefs).await.unwrap())
 	}

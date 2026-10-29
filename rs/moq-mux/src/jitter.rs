@@ -443,12 +443,16 @@ pub(crate) enum Push {
 /// whose clock is acquired the same way, though never ahead of a deadline already given
 /// out. So does a skip after which a frame would be held more than a delay past everything
 /// queued, beyond how far ahead of the others its track is sent: its timeline jumped ahead,
-/// as when the skipped groups held a marker the publisher shed. How far ahead of its decode
-/// time the source sends each track belongs to its mux and survives a restart, so the new
-/// clock does not wait to hear from a track the previous one measured: it is anchored late
-/// enough that the track sent latest keeps the delay when it gets there. A track that has
-/// not reached the restart stays on the previous generation while its frames land there and
-/// go out before the new generation's first frame; one that would follow it drops as late.
+/// as when the skipped groups held a marker the publisher shed. So does a step with no marker
+/// at all, as a changeover between two encoders whose clocks disagree, once the delay cannot
+/// absorb it: read as drift it would fail [`Buffer::push`], and steering on it would let the
+/// step's span of decode time slew the drift in one go. A smaller one is a move in latency.
+/// How far ahead of its decode time the source sends each track belongs to its mux and
+/// survives a restart, so the new clock does not wait to hear from a track the previous one
+/// measured: it is anchored late enough that the track sent latest keeps the delay when it
+/// gets there. A track that has not reached the restart stays on the previous generation
+/// while its frames land there and go out before the new generation's first frame; one that
+/// would follow it drops as late.
 /// One crossing the same restart joins the new generation when the frame lands on its
 /// clock, neither late nor held more than a delay past everything queued, and opens another
 /// otherwise. Before anything has gone out there is nothing to keep in step with, so a
@@ -694,9 +698,12 @@ struct Floor<K> {
 struct Track<T> {
 	/// Frames in arrival order, each with its generation, decode time and deadline.
 	queue: VecDeque<(u64, Decode, Instant, T)>,
-	/// The source's restart and skip counters at the last frame.
+	/// The source's restart and skip counters at the last frame, when it decodes, and when it
+	/// arrived.
 	restart: u64,
 	skip: u64,
+	decode: Decode,
+	arrived: Instant,
 	/// The generation of the last frame.
 	generation: u64,
 	/// Frames are dropped until the next sync frame.
@@ -822,9 +829,20 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 
 	/// Whether a frame moves its track off the clock: a restart, unless the track is crossing
 	/// one another track already opened a generation for and the frame lands on its clock, or
-	/// a frame held past [`Self::bound`] after a skip, or while a generation is acquired. The
-	/// latter is a track reaching the new timeline without a marker of its own, which belongs
-	/// to that generation, not far ahead on the old clock.
+	/// a frame held past [`Self::bound`] after a skip, or while a generation is acquired, or a
+	/// step in its timeline with no marker that the delay cannot absorb. The second is a track
+	/// reaching the new timeline without a marker of its own, which belongs to that generation,
+	/// not far ahead on the old clock.
+	///
+	/// An unmarked step is told apart from drift and queueing by size. Forward, a frame is held
+	/// past [`Self::bound`] and reached us more than a delay earlier against its decode time
+	/// than its track's last: no clock within [`MAX_DRIFT`] moves it that far in the time
+	/// between them, and frames reach us in the order they are sent, so neither a backlog
+	/// draining nor a track whose frames are sparse does. Back, a frame decodes before its
+	/// track's last and is late: a stall only delays what comes next. It is a step on the
+	/// clock's own generation, since a track still on an earlier one is on that timeline.
+	/// Held for the next generation, the frame never steers the old clock. Without a delay
+	/// nothing is held or late, so a step costs nothing there.
 	fn jumps(&self, key: &K, arrival: &Arrival<T>) -> bool {
 		let (Some(clock), Some(track)) = (self.clock, self.tracks.get(key)) else {
 			return false;
@@ -832,9 +850,15 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 		let deadline = self.deadline(&clock, arrival.decode);
 		let restarted = track.restart != arrival.restart
 			&& (track.generation == clock.generation || !self.lands(key, deadline, arrival.arrived));
-		let leapt = (track.skip != arrival.skip || self.acquire.is_some())
-			&& deadline.is_some_and(|deadline| deadline > self.bound(key, arrival.arrived));
-		restarted || leapt
+		let held = deadline.is_some_and(|deadline| deadline > self.bound(key, arrival.arrived));
+		let leapt = (track.skip != arrival.skip || self.acquire.is_some()) && held;
+		let unmarked = !self.delay.is_zero() && track.generation == clock.generation;
+		let elapsed = arrival.decode.as_nanos() - track.decode.as_nanos();
+		let ahead = elapsed - since(track.arrived, arrival.arrived);
+		let drift = (elapsed.abs() as f64 * MAX_DRIFT) as i128;
+		let forward = held && ahead > self.delay.as_nanos() as i128 + drift;
+		let back = elapsed < 0 && deadline.is_none_or(|deadline| deadline < arrival.arrived);
+		restarted || leapt || (unmarked && (forward || back))
 	}
 
 	/// Hold a frame for the generation being acquired, starting one if none is, and anchor it
@@ -928,6 +952,8 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 			queue: VecDeque::new(),
 			restart: arrival.restart,
 			skip: arrival.skip,
+			decode: arrival.decode,
+			arrived: arrival.arrived,
 			generation,
 			waiting: false,
 			resumed: false,
@@ -935,6 +961,8 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 		});
 		track.restart = arrival.restart;
 		track.skip = arrival.skip;
+		track.decode = arrival.decode;
+		track.arrived = arrival.arrived;
 		track.generation = generation;
 		let push = match deadline {
 			_ if stale => {
@@ -2678,6 +2706,103 @@ mod tests {
 				assert!(fed.err.is_none(), "{length} s stall at {at} s: {:?}", fed.err);
 				assert!(fed.dropped > 0, "{length} s stall at {at} s: nothing dropped");
 				assert_eq!(fed.last, Some(Push::Queued), "{length} s stall at {at} s");
+			}
+		}
+	}
+
+	/// What [`unmarked`] saw.
+	struct Stepped {
+		err: Option<anyhow::Error>,
+		dropped: u64,
+		/// Each frame's generation, in the order they went out.
+		out: Vec<u64>,
+		/// The clock's drift just before the step, and at the end.
+		before: f64,
+		after: f64,
+	}
+
+	/// Feed `secs` of 10 fps frames of `shape`'s tracks through its buffer from a source on our
+	/// clock, each sent as it decodes with a few ms of jitter that changes every steering step,
+	/// whose timeline steps by `step` seconds at `at` s with no restart or skip marker.
+	async fn unmarked(shape: &Shape, at: f64, step: f64, secs: f64) -> Stepped {
+		// Where the timeline starts, so a step back stays on it.
+		const BASE: f64 = 20_000.0;
+		let start = moq_clock::now();
+		let clock = moq_clock::Deadlines::new(start);
+		let _entered = clock.enter();
+		let mut buffer = Buffer::new(shape.delay);
+		buffer.expect(shape.tracks.iter().copied());
+		let mut stepped = Stepped {
+			err: None,
+			dropped: 0,
+			out: Vec::new(),
+			before: 0.0,
+			after: 0.0,
+		};
+		for k in 0..(secs * 10.0) as u64 {
+			let sent = k as f64 / 10.0;
+			let jitter = ((k / 20) * 3) % 5;
+			let arrived = start + Duration::from_secs_f64(sent + jitter as f64 * 0.002);
+			clock.advance(arrived.max(clock.now()));
+			if sent < at {
+				stepped.before = buffer.clock.map_or(0.0, |clock| clock.drift);
+			}
+			let decode = BASE + sent + if sent >= at { step } else { 0.0 };
+			for &track in shape.tracks {
+				let frame = Arrival {
+					arrived,
+					read: arrived,
+					decode: Timestamp::from_micros((decode * 1e6).round() as u64).unwrap().into(),
+					restart: 0,
+					skip: 0,
+					sync: true,
+					leading: false,
+					item: "v",
+				};
+				if let Err(err) = buffer.push(track, frame) {
+					stepped.err = Some(err);
+					return stepped;
+				}
+			}
+			stepped
+				.out
+				.extend(released(&mut buffer).into_iter().map(|(_, generation)| generation));
+		}
+		stepped.dropped = buffer.dropped();
+		stepped.after = buffer.clock.map_or(0.0, |clock| clock.drift);
+		stepped
+	}
+
+	/// A timeline that steps with no marker, as a changeover between two encoders whose clocks
+	/// started hours apart, by more than the delay absorbs, either way, before the rate window
+	/// fills or once it has, re-acquires the clock instead of reading the step as drift: one
+	/// new generation, nothing dropped, every frame out, and the step never swings the drift
+	/// further than the slew limit allows over the time that passed.
+	#[tokio::test(start_paused = true)]
+	async fn an_unmarked_step_reacquires_the_clock() {
+		for at in [30.0, 1_200.0] {
+			for step in [16_844.5, -16_844.5, 2.0, -2.0] {
+				let secs = at + 60.0;
+				let run = unmarked(&PAIR, at, step, secs).await;
+				let case = format!("{step:+} s step at {at} s");
+				assert!(run.err.is_none(), "{case}: {:?}", run.err);
+				assert_eq!(run.dropped, 0, "{case}");
+				assert!(run.out.is_sorted(), "{case}: a generation went out after the next");
+				assert_eq!(run.out.last(), Some(&1), "{case}: no single new generation");
+				// What is still held at the end goes out within a delay.
+				let held = (PAIR.delay.as_secs_f64() * 10.0).ceil() as usize + 1;
+				let pushed = (secs * 10.0) as usize * PAIR.tracks.len();
+				assert!(
+					run.out.len() + held * PAIR.tracks.len() >= pushed,
+					"{case}: {} of {pushed} went out",
+					run.out.len()
+				);
+				let swing = (run.after - run.before).abs();
+				assert!(
+					swing <= MAX_SLEW * (secs - at) * (1.0 + 1e-9),
+					"{case}: the drift swung {} ppm",
+					swing * 1e6
+				);
 			}
 		}
 	}

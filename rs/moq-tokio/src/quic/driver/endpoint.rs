@@ -74,9 +74,6 @@ impl From<Box<dyn AsyncUdpSocket>> for Socket {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-	/// The endpoint was built outside a tokio runtime, which its tasks need.
-	#[error("no tokio runtime")]
-	NoRuntime,
 	/// The configuration is invalid.
 	#[error("invalid config: {0}")]
 	Config(#[from] ConfigError),
@@ -100,9 +97,9 @@ pub struct Endpoint {
 impl Endpoint {
 	/// Run an endpoint on `socket`, serving incoming connections if [`Config::server`] is set
 	///
-	/// Must be called within a tokio runtime, which runs the endpoint's tasks.
+	/// The endpoint's tasks run on the caller's tokio runtime, else moq-tokio's fallback.
 	pub fn new(config: Config, socket: impl Into<Socket>) -> Result<Self, Error> {
-		let runtime = tokio::runtime::Handle::try_current().map_err(|_| Error::NoRuntime)?;
+		let runtime = crate::runtime::handle();
 		let socket = socket.into().into_async()?;
 		let addr = socket.local_addr()?;
 		let allow_mtud = !socket.may_fragment();

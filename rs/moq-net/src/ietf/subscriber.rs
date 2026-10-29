@@ -8012,7 +8012,7 @@ mod tests {
 		for version in [Version::Draft18, Version::Draft22] {
 			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 			let source = origin.publish("broadcast", Default::default()).unwrap();
-			let resolved = origin.consume().request_broadcast("broadcast", None).await.unwrap();
+			let resolved = origin.consume().request("broadcast", None).await.unwrap();
 			let peer = Arc::new(Peer {
 				version,
 				dynamic: Mutex::new(Some(source.requests())),
@@ -8484,7 +8484,12 @@ mod tests {
 	/// The current best route covering `path`, if any (synchronous peek).
 	fn routed_now(consumer: &crate::origin::Consumer, path: &str) -> Option<crate::origin::Route> {
 		use futures::FutureExt;
-		consumer.routed(path).now_or_never().flatten()
+		match consumer.routes(path).ok()?.next().now_or_never()?? {
+			crate::announce::Event::End(_) => None,
+			crate::announce::Event::Start(announce)
+			| crate::announce::Event::Update(announce)
+			| crate::announce::Event::Restart(announce) => Some(announce.route),
+		}
 	}
 
 	fn hop_path(ids: &[u64]) -> cluster::HopPath {
@@ -10459,7 +10464,8 @@ mod tests {
 		}
 		let issued = issued.expect("the announce never presented its token");
 
-		let mut routing = std::pin::pin!(consumer.routed_broadcast("room/alice"));
+		let mut following = consumer.follow("room/alice", None).unwrap();
+		let mut routing = std::pin::pin!(following.available());
 		let mut broadcast = None;
 		for _ in 0..500 {
 			assert!(futures::poll!(run.as_mut()).is_pending(), "the announce ended early");

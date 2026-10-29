@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Compression moves to the track
+
+`catalog.json.z` is gone: `catalog::Producer` publishes one `catalog.json` with `compress: true` (the MSF `catalog` stays uncompressed), and HLS record tracks are compressed too.
+`CatalogFormat::HangZ` and `catalog::hang::Consumer::compressed` are removed; read `CatalogFormat::Hang` with `Consumer::new`, which reads a compressed track like a plain one.
+`json::Config::compression` and `with_compression` are removed: create the track with `moq_net::track::Info::default().with_compress(true)` instead. `Error::UnsupportedCompression` and `Error::Flate` are gone with them.
+The `binary` module and `catalog::Producer::binary_snapshot` and `binary_stream` are deleted, along with the moq-flate dependency: publish opaque bytes on a plain track, or JSON through `json_snapshot` and `json_stream`.
+
 ### A decoder identity change publishes a new track ([#7110](https://github.com/moq-dev/moq/pull/7110))
 
 A rendition never changes its identity in place: `codec`, `description`, `container`, `display_aspect_width`/`display_aspect_height`, and `interlaced` for video, and `codec`, `description`, `container`, `sample_rate`, and `channel_count` for audio (see `hang::catalog::VideoConfig::same_identity`).
