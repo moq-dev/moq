@@ -1132,7 +1132,7 @@ fn advance<S: Shape>(
 
 /// Start resolving `path` (relative to the announce cursor) into a broadcast.
 fn resolve<F>(origin: &origin::Consumer, path: &Path, epoch: Option<Epoch>) -> Reader<F> {
-	let pending = origin.request_broadcast(path, epoch);
+	let pending = origin.request(path, epoch);
 	Reader::Resolving(Box::new(pending))
 }
 
@@ -1292,7 +1292,7 @@ mod tests {
 
 		let (_, active) = next_update(&mut announced).await.expect("announce");
 		assert!(active);
-		let consumer = egress.request_broadcast(path, None).await.expect("resolve");
+		let consumer = egress.request(path, None).await.expect("resolve");
 		let mut sub = consumer.track("video").unwrap().subscribe(None).await.unwrap();
 
 		let mut group = track.append_group().unwrap();
@@ -1711,7 +1711,7 @@ mod tests {
 					.announce(origin::Route::default().with_epoch(epoch_b.clone()))
 					.unwrap();
 				new.publish("acme/room", 30);
-				let mut pending = origin.consume().request_broadcast(".stats/node/a", None);
+				let mut pending = origin.consume().request(".stats/node/a", None);
 				let front = futures::executor::block_on(kio::wait(|waiter| {
 					driver.poll(now, waiter).unwrap();
 					pending.poll_ok(waiter)

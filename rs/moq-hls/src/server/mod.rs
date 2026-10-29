@@ -72,7 +72,8 @@ use moq_mux::follow;
 
 use crate::export::{Broadcaster, Config};
 
-/// How long to wait for the relay to say whether a requested broadcast is announced.
+/// How long to wait for the route serving a requested broadcast to answer: a covering
+/// dynamic route may never do so.
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// HLS export HTTP server. Cheap to clone (shared inner).
@@ -205,28 +206,15 @@ impl Server {
 			return Some(followed.clone());
 		}
 
-		// Confirm a route covers the broadcast (and it is in scope) before resolving it. The
-		// source resolves a rendition's sibling `broadcast` reference through the same origin.
-		// Once the origin has synced, a path with no route is not announced, so answer now
-		// rather than wait out a publisher that has gone.
-		let mut routes = self.inner.origin.follow(name).ok()?;
-		let routed = kio::wait(|waiter| match routes.poll_next(waiter) {
-			Poll::Ready(Some(moq_net::announce::Event::End(_)) | None) => Poll::Ready(false),
-			Poll::Ready(Some(_)) => Poll::Ready(true),
-			Poll::Pending => routes.poll_synced(waiter).map(|()| false),
-		});
-		if !moq_clock::timeout(RESOLVE_TIMEOUT, routed).await.unwrap_or(false) {
-			return None;
-		}
-
-		let mut instances = follow::Instances::new(&self.inner.origin, name, None)
+		let instances = follow::Instances::new(&self.inner.origin, name, None)
 			.map_err(|err| tracing::warn!(%err, %name, "failed to follow broadcast"))
 			.ok()?;
-		// A covering dynamic route may never answer, so the resolution is bounded too.
-		let broadcast = match moq_clock::timeout(RESOLVE_TIMEOUT, instances.next()).await {
-			Ok(Ok(follow::Event::Start(broadcast))) => broadcast,
-			// Nothing was handed out, so there is nothing to end.
-			Ok(Ok(follow::Event::End)) => return None,
+		// A request answers once the origin has synced with the relay, so a path with no route
+		// fails now rather than waiting out a publisher that has gone. The source resolves a
+		// rendition's sibling `broadcast` reference through the same origin.
+		let broadcast = match moq_clock::timeout(RESOLVE_TIMEOUT, self.inner.origin.request(name, None)).await {
+			Ok(Ok(broadcast)) => broadcast,
+			Ok(Err(moq_net::Error::Unroutable)) => return None,
 			Ok(Err(err)) => {
 				tracing::warn!(%err, %name, "failed to resolve broadcast");
 				return None;
@@ -236,7 +224,7 @@ impl Server {
 				return None;
 			}
 		};
-		let followed = Arc::new(Followed::new(self.inner.serve(broadcast)));
+		let followed = Arc::new(Followed::new(self.inner.serve(broadcast.clone())));
 
 		{
 			let mut broadcasts = self.inner.broadcasts.lock().unwrap();
@@ -256,6 +244,7 @@ impl Server {
 			name.to_string(),
 			Arc::downgrade(&followed),
 			instances,
+			broadcast,
 		));
 		*followed.task.lock().unwrap() = Some(task);
 		Some(followed)
@@ -272,8 +261,16 @@ impl Inner {
 
 /// Follow `name`'s instances into `followed` until nothing serves the path, then forget it, so the
 /// next request follows the path afresh. Holds both weakly, so it never keeps the server's state
-/// alive; dropping `followed` aborts it.
-async fn run_follow(inner: Weak<Inner>, name: String, followed: Weak<Followed>, mut instances: follow::Instances) {
+/// alive; dropping `followed` aborts it. `served` is the instance `followed` starts on, which the
+/// follower hands out first unless another took over since.
+async fn run_follow(
+	inner: Weak<Inner>,
+	name: String,
+	followed: Weak<Followed>,
+	mut instances: follow::Instances,
+	served: moq_net::broadcast::Consumer,
+) {
+	let mut served = Some(served);
 	let (inner, followed) = loop {
 		let next = kio::wait(|waiter| {
 			let Some(followed) = followed.upgrade() else {
@@ -287,7 +284,11 @@ async fn run_follow(inner: Weak<Inner>, name: String, followed: Weak<Followed>, 
 			return;
 		};
 		match next {
-			Some(Ok(follow::Event::Start(broadcast))) => followed.start(inner.serve(broadcast)),
+			Some(Ok(follow::Event::Start(broadcast))) => {
+				if !served.take().is_some_and(|served| served.is_clone(&broadcast)) {
+					followed.start(inner.serve(broadcast));
+				}
+			}
 			Some(Ok(follow::Event::End)) => break (inner, followed),
 			Some(Err(err)) => {
 				tracing::warn!(%err, %name, "stopped following broadcast");

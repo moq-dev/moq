@@ -1372,7 +1372,7 @@ mod tests {
 		// egress bytes out of the default-tier broadcast.
 		let (update, active) = next_update(&mut announced).await.unwrap();
 		assert!(active);
-		let bc = egress.request_broadcast(update.prefix.clone(), None).await.unwrap();
+		let bc = egress.request(update.prefix.clone(), None).await.unwrap();
 		let mut egress_sub = bc.track("video").unwrap().subscribe(None).await.unwrap();
 		{
 			let mut group = pub_track.append_group().unwrap();

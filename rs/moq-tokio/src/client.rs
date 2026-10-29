@@ -1217,10 +1217,7 @@ mod tests {
 			event => panic!("expected announcement, got {event:?}"),
 		};
 		assert_eq!(update.prefix.as_str(), "test");
-		let broadcast = sub_consumer
-			.request_broadcast("test", None)
-			.await
-			.expect("broadcast resolves");
+		let broadcast = sub_consumer.request("test", None).await.expect("broadcast resolves");
 		let mut track = broadcast
 			.track("video")
 			.unwrap()
