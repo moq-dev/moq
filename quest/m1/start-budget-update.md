@@ -1,54 +1,82 @@
-# [S] A tightened SUBSCRIBE keeps the start's budget honest
+# [M] Bind a resolved start to its subscriber budget
 
 ## Goal
 
-A relay copy remembers the `max_delay` that was in effect when its
-publisher resolved SUBSCRIBE_START, not only the one sent at SUBSCRIBE. If a
-SUBSCRIBE_UPDATE tightens the delay before the start is picked, a later
-reader whose delay is looser than the tightened one, but no looser than the
-original, still fills the history between the two starts. Released wires are
-unchanged.
+A relay copy knows the subscriber `max_delay` used to resolve its upstream
+start, so a later reader with a looser budget fills the history it can use.
+The response proves which budget was applied even when SUBSCRIBE_UPDATE
+crosses it in flight. Published wires remain unchanged; this requires an
+unpublished wire change rather than the originally planned lite-06 fix.
 
 ## Plan
 
-Decided 2026-10-29 (maintainer, `/quest-plan` of moq.pro's announce ramp
-loss follow-ups): its own quest in m1, rather than waiting on
-[Drop set](/quest/m1/drop-set.md) or
-[Delete the old start bookkeeping](/quest/m1/subscribe-ranges/start-bookkeeping.md),
-since it fixes released lite-06 behavior.
+Scope decision pending: the original released-wire Goal is unattainable.
+Recommend keeping this quest for an explicit budget binding on lite-07,
+coordinated with
+[Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) and
+[Delete the old start bookkeeping](/quest/m1/subscribe-ranges/start-bookkeeping.md).
+The alternative is folding this work into that bookkeeping quest or
+abandoning it and accepting the released-wire limitation. No wire design has
+been approved by this investigation.
 
-Found by review of [#7168](https://github.com/moq-dev/moq/pull/7168): the
-lite subscriber sets `requested_max_delay` once, at SUBSCRIBE
-(`rs/moq-net/src/lite/subscriber.rs`). `Misses` then gives up every group
-below the start for any reader whose budget is no looser than that value.
-After a tightening update, the start was resolved under the tighter budget,
-so the recorded looser one makes some readers skip history they could have
-filled. It loses history only in that window; it does not bring back #7168's
-over-fetch.
+### Ordering evidence
 
-Record the budget the start was actually resolved under. SUBSCRIBE_START
-carries a group, not which update it was picked under, and updates can cross
-it in flight, so the budget current when START arrives is not enough: an
-update sent after the publisher picked the start would be recorded in its
-place, too loose after a widening or too tight after a tightening. When the
-subscriber cannot tell which of its sent budgets the publisher applied,
-record the loosest of them. That keeps today's history loss in the
-ambiguous window but never brings back the over-fetch.
+Found by review of [moq-dev/moq#7168](https://github.com/moq-dev/moq/pull/7168):
+the lite subscriber fixes `requested_max_delay` at SUBSCRIBE and passes it to
+`start_resolved`. If the publisher applies a tightening before resolving the
+start, a later reader between the two budgets gives up fillable history.
 
-Add integration tests in `rs/moq-net/tests/integration`, direct and through
-a relay: subscribe, tighten before the start, then a second reader widens
-partly, which fails on `main` and passes with the fix; and a tightening and
-a widening that each cross an already-picked START, where the recorded
-budget must never be tighter than the one the start was picked under.
+There is no lite-06 ordering that identifies the applied update:
 
-Open question for whoever starts this: which lite-06 ordering, if any, tells
-the subscriber the publisher applied a tightening before picking the start.
-Without one, every tightening sent before START arrives stays ambiguous, the
-loosest-budget rule records the SUBSCRIBE budget as today, and the Goal is
-out of reach on the released wire. Then propose rewriting this quest to a
-wire change for a later draft, or deleting it.
+- [`SubscribeStart`](https://github.com/moq-dev/moq/blob/0f68c6f9564e4dbfcd5b1f457eb3b2fdb420faa0/rs/moq-net/src/lite/subscribe.rs#L506)
+  encodes only `group` on lite-06. `largest` is lite-07-only and carries no
+  budget or request revision either. The
+  [TypeScript codec](https://github.com/moq-dev/moq/blob/0f68c6f9564e4dbfcd5b1f457eb3b2fdb420faa0/js/net/src/lite/subscribe.ts#L611)
+  has the same layout.
+- [`SubscribeUpdate`](https://github.com/moq-dev/moq/blob/0f68c6f9564e4dbfcd5b1f457eb3b2fdb420faa0/rs/moq-net/src/lite/subscribe.rs#L581)
+  carries replacement preferences, with no acknowledgment or revision.
+  [The publisher applies them](https://github.com/moq-dev/moq/blob/0f68c6f9564e4dbfcd5b1f457eb3b2fdb420faa0/rs/moq-net/src/lite/publisher.rs#L3904)
+  without sending a fresh START.
+- The [release-branch draft](https://github.com/moq-dev/moq/blob/8677afaa6bc1420a235a249253dd56d09a378d2b/drafts/draft-lcurley-moq-lite.md#L1135)
+  calls the same response SUBSCRIBE_OK and gives it only `Group`.
+  Updates travel subscriber to publisher; the response travels publisher to
+  subscriber. Ordering within each direction does not order the two directions.
+
+For example, send SUBSCRIBE with 30 seconds, then UPDATE with 5 seconds,
+then receive START at group 100. The publisher may have selected group 100
+under 30 seconds before receiving the update, or selected it under 5 seconds
+after applying the update. Both can produce the same received bytes: a start
+does not prove that any earlier group was available under either budget.
+Successful writes, flushes, transport acknowledgments, and local poll order
+do not prove which preferences the publisher used to select it.
+
+Recording the current 5-second budget can mislabel a start selected under
+30 seconds. Recording the loosest possibly applied budget keeps 30 seconds,
+so a later 15-second reader still skips the history this quest sought to
+recover. The same ambiguity applies when a widening crosses START. Do not
+ship either inference as a fix or claim the released-wire Goal is met.
+
+### Remaining implementation after scope approval
+
+1. Define a response binding the resolved start to the budget used to select
+   it on an unpublished wire. Prefer echoing that budget over keeping a
+   history of sent updates solely to recover it. Coordinate the response
+   shape and any per-update responses with the two quests above; sending a
+   fresh START alone does not identify the applied budget.
+2. Carry the budget with the selection through pending publisher state,
+   rather than sampling the current budget when START is serialized. Record
+   that proven budget in the relay's model. Implement Rust and TypeScript
+   together, and update the lite draft and user-facing concepts as needed.
+   Preserve published encodings and do not infer provenance on those wires.
+3. Add deterministic direct and relayed integration coverage for a tightening
+   applied before selection followed by a reader between the budgets, and
+   for tightenings and widenings crossing an already-selected response.
+   Verify which budget selected the start, not just when START arrived.
+4. Run the affected checks, `just drafts check`, and `just test interop --all`,
+   including published-wire compatibility, before completing the quest.
 
 ## Related
 
 - [Drop set](/quest/m1/drop-set.md) - records the budget each drop was judged under, the same idea for drops
-- [Delete the old start bookkeeping](/quest/m1/subscribe-ranges/start-bookkeeping.md) - moves where a subscription starts into the model, which should carry this field
+- [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - owns the resolved-start response for ranges
+- [Delete the old start bookkeeping](/quest/m1/subscribe-ranges/start-bookkeeping.md) - moves start state into the model and considers a response per update
