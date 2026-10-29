@@ -182,11 +182,16 @@ impl Mux {
 	}
 
 	pub(super) fn pat(&mut self, programs: &[(u16, u16)]) -> &mut Self {
+		self.pat_in(1, programs)
+	}
+
+	/// A [`Self::pat`] naming `transport_stream_id`.
+	pub(super) fn pat_in(&mut self, transport_stream_id: u16, programs: &[(u16, u16)]) -> &mut Self {
 		let body: Vec<u8> = programs
 			.iter()
 			.flat_map(|&(number, pmt)| [(number >> 8) as u8, number as u8, 0xe0 | (pmt >> 8) as u8, pmt as u8])
 			.collect();
-		self.section(0, &psi::section(psi::PAT_TABLE_ID, 1, 0, 0, 0, &body))
+		self.section(0, &psi::section(psi::PAT_TABLE_ID, transport_stream_id, 0, 0, 0, &body))
 	}
 
 	/// A PMT whose `program_info` holds `info` bytes of private descriptors, so a large one

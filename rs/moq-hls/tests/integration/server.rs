@@ -50,11 +50,7 @@ async fn a_cursor_records_a_publisher_without_fetch() {
 		let mut publisher = Publisher::new(&pair.publisher, "live", Default::default());
 
 		let origin = pair.subscriber.consume();
-		moq_clock::timeout(TIMEOUT, origin.routed("live"))
-			.await
-			.expect("announce timed out")
-			.expect("routed");
-		let remote = moq_clock::timeout(TIMEOUT, origin.request_broadcast("live", None))
+		let remote = moq_clock::timeout(TIMEOUT, origin.follow("live", None).unwrap().available())
 			.await
 			.expect("request timed out")
 			.expect("remote broadcast");
@@ -119,7 +115,7 @@ async fn a_disconnected_publisher_on_the_catalog_broadcast_answers_404() {
 	let media = media_uri(&app, "live").await;
 	let first = segment(&listed(&app, &media, ".0.m4s").await, 0);
 
-	let remote = moq_clock::timeout(TIMEOUT, pair.subscriber.consume().request_broadcast("live", None))
+	let remote = moq_clock::timeout(TIMEOUT, pair.subscriber.consume().request("live", None))
 		.await
 		.expect("remote resolve timed out")
 		.expect("remote broadcast");
@@ -148,7 +144,7 @@ async fn lookups_ride_the_servers_scope_watch() {
 	// Nothing watches `room/other` on its own, yet the synced lookup already discovered it.
 	pair.subscriber
 		.consume()
-		.request_broadcast("room/other", None)
+		.request("room/other", None)
 		.await
 		.expect("discovered through the scope watch");
 }
@@ -174,7 +170,7 @@ async fn a_sibling_resolves_through_a_client_session() {
 		media.announce(Default::default()).expect("announce media");
 
 		let origin = pair.subscriber.consume();
-		let broadcast = moq_clock::timeout(TIMEOUT, origin.routed_broadcast("room/live"))
+		let broadcast = moq_clock::timeout(TIMEOUT, origin.follow("room/live", None).unwrap().available())
 			.await
 			.expect("catalog resolve timed out")
 			.expect("catalog broadcast");
@@ -223,10 +219,17 @@ async fn a_disconnected_sibling_publisher_answers_404() {
 	let first = segment(&listed(&app, &uri, ".0.m4s").await, 0);
 
 	// Waited on rather than requested once: a client only asks about what it watches.
-	let remote_media = moq_clock::timeout(TIMEOUT, pair.subscriber.consume().routed_broadcast("room/source"))
-		.await
-		.expect("sibling resolve timed out")
-		.expect("sibling broadcast");
+	let remote_media = moq_clock::timeout(
+		TIMEOUT,
+		pair.subscriber
+			.consume()
+			.follow("room/source", None)
+			.unwrap()
+			.available(),
+	)
+	.await
+	.expect("sibling resolve timed out")
+	.expect("sibling broadcast");
 	// Only the sibling goes: the catalog keeps listing the rendition, so the request reaches the
 	// media fetch rather than missing the rendition.
 	media_broadcast.close();

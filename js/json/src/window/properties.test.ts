@@ -88,7 +88,7 @@ function check(config: Config, steps: Step[], join: number): void {
 	if (groups.length === 0) return;
 
 	for (const mode of ["following", "late", "lagging"] as const) {
-		const decoder = new Decoder<Json>(config);
+		const decoder = new Decoder<Json>();
 		const notified = new Set<number>();
 		const received = new Set<number>();
 		const contents = new Map<number, Json>();
@@ -164,7 +164,6 @@ test("window codec property matches every reader's logical window", () => {
 		fc.property(
 			fc.record({
 				ops: fc.boolean(),
-				compression: fc.boolean(),
 				checkpointRecords: fc.option(fc.integer({ min: 1, max: 8 }), { nil: undefined }),
 			}),
 			steps,
