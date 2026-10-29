@@ -263,9 +263,9 @@ impl Path {
 	/// assert_eq!(Path::empty().parts().count(), 0);
 	/// ```
 	pub fn parts(&self) -> impl Iterator<Item = &str> {
-		// Segments are never empty, but splitting the empty path would yield one.
-		let s = self.as_str();
-		(!s.is_empty()).then(|| s.split('/')).into_iter().flatten()
+		// Segments are never empty, so only the empty path ends in an empty substring,
+		// which a terminator split skips; the route table walks this on every lookup.
+		self.as_str().split_terminator('/')
 	}
 
 	/// Whether a segment starts with `.`, which hides the path from announce
@@ -627,8 +627,8 @@ impl From<Invalid> for crate::Error {
 	}
 }
 
-impl<V> Decode<V> for Path {
-	fn decode(r: &mut Decoder<'_>, _: V) -> Result<Self, DecodeError> {
+impl<'a, V> Decode<'a, V> for Path {
+	fn decode(r: &mut Decoder<'a>, _: V) -> Result<Self, DecodeError> {
 		// Borrowed from the wire bytes, so the path's own copy is the only one.
 		let path = Path::new(r.str()?)?;
 		if path.parts().count() > Path::MAX_PARTS {
@@ -659,8 +659,8 @@ impl<V> Encode<V> for Patterns {
 	}
 }
 
-impl<V> Decode<V> for Patterns {
-	fn decode(r: &mut Decoder<'_>, _: V) -> Result<Self, DecodeError> {
+impl<'a, V> Decode<'a, V> for Patterns {
+	fn decode(r: &mut Decoder<'a>, _: V) -> Result<Self, DecodeError> {
 		let count = r.varint()?;
 		// No preallocation: the count is peer-controlled, and the message size limit
 		// is what bounds how many patterns actually fit.
@@ -861,7 +861,7 @@ mod tests {
 			let mut buf = Vec::new();
 			Encoder::new(&mut buf, Version::Lite04.into()).string(s).unwrap();
 			assert!(matches!(
-				crate::coding::decode_buf(&mut bytes::Bytes::from(buf), Version::Lite04, Path::decode),
+				crate::coding::decode_buf(&mut bytes::Bytes::from(buf), Version::Lite04, |r, v| Path::decode(r, v)),
 				Err(DecodeError::InvalidValue)
 			));
 		}
@@ -1077,7 +1077,9 @@ mod tests {
 		));
 
 		// Decode round-trips at the limit.
-		let decoded = crate::coding::decode_buf(&mut bytes::Bytes::from(buf), Version::Lite04, Path::decode).unwrap();
+		let decoded =
+			crate::coding::decode_buf(&mut bytes::Bytes::from(buf), Version::Lite04, |r, v| Path::decode(r, v))
+				.unwrap();
 		assert_eq!(decoded.as_str(), ok);
 
 		// Decode refuses a raw string longer than the limit.
@@ -1086,7 +1088,7 @@ mod tests {
 			.string(too_deep.as_str())
 			.unwrap();
 		assert!(matches!(
-			crate::coding::decode_buf(&mut bytes::Bytes::from(buf), Version::Lite04, Path::decode),
+			crate::coding::decode_buf(&mut bytes::Bytes::from(buf), Version::Lite04, |r, v| Path::decode(r, v)),
 			Err(DecodeError::BoundsExceeded)
 		));
 	}
@@ -1100,7 +1102,7 @@ mod tests {
 
 		// Decode round-trips at the limit.
 		let mut buf = Path::new(&longest).unwrap().encode_bytes(Version::Lite04).unwrap();
-		let decoded = crate::coding::decode_buf(&mut buf, Version::Lite04, Path::decode).unwrap();
+		let decoded = crate::coding::decode_buf(&mut buf, Version::Lite04, |r, v| Path::decode(r, v)).unwrap();
 		assert_eq!(decoded.as_str(), longest);
 
 		// A message carrying the longest path still fits the lite message limit.
@@ -1116,7 +1118,7 @@ mod tests {
 		let mut buf = Vec::new();
 		Encoder::new(&mut buf, Version::Lite04.into()).string(&longer).unwrap();
 		assert!(matches!(
-			crate::coding::decode_buf(&mut bytes::Bytes::from(buf), Version::Lite04, Path::decode),
+			crate::coding::decode_buf(&mut bytes::Bytes::from(buf), Version::Lite04, |r, v| Path::decode(r, v)),
 			Err(DecodeError::BoundsExceeded)
 		));
 	}

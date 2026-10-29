@@ -251,6 +251,7 @@ export class Decoder {
 		if (!broadcast || !effect.get(broadcast.in.enabled)) return;
 
 		const { sampleRate, channels: channelCount } = shape;
+		const buffered = effect.get(this.sync.out.buffered);
 
 		// Expose the rate the graph actually runs at.
 		effect.set(this.#out.sampleRate, sampleRate);
@@ -291,7 +292,7 @@ export class Decoder {
 				channels: channelCount,
 				rate: sampleRate,
 				delay: this.sync.out.delay.peek(),
-				buffered: this.sync.out.buffered.peek(),
+				buffered,
 				playing: this.sync.playing,
 			});
 			effect.cleanup(() => ring.close());
@@ -360,6 +361,8 @@ export class Decoder {
 	}
 
 	#runDecoder(effect: Effect): void {
+		// The reorder policy belongs to the playback mode, so a mode change starts a new reader.
+		effect.get(this.sync.out.buffered);
 		const running = effect.get(this.in.enabled) && !effect.get(this.sync.out.instant);
 		const broadcast = effect.get(this.source.in.broadcast);
 		const track = effect.get(this.source.out.track);
@@ -427,7 +430,7 @@ export class Decoder {
 		}
 		this.#instance = active.closed;
 
-		// The ring outlives this effect (it's keyed on the sample rate and channel count), so a
+		// The ring outlives this effect (it's keyed on the sample rate, channel count, and mode), so a
 		// replacement subscription on the same broadcast (a rendition swap, a return from an absence)
 		// inherits whatever its predecessor decoded. Samples are timestamp indexed, so the replacement
 		// overwrites the slots it lands on, but a publisher writing ahead of real-time leaves seconds

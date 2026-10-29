@@ -1,6 +1,6 @@
 //! HLS segment records: where each of a rendition's HLS segments starts.
 //!
-//! A rendition opts in with its catalog [`hls`](crate::catalog::Hls) field, which names a track
+//! A rendition advertises them with its catalog [`hls`](crate::catalog::Hls) field, which names a track
 //! carrying one [`Record`](crate::hls::Record) per segment. A segment starts at a group boundary, so a record is the
 //! segment's first group and pts. It runs to the next record: it holds every group up to the next
 //! record's `group` and lasts until the next record's `pts`, unless it carries an explicit
@@ -11,7 +11,7 @@
 //! segment starts, so a segment is complete once the next record, or its own duration, says where
 //! it ends.
 //!
-//! Every `pts` and `duration` is in milliseconds. On the wire the track is an uncompressed
+//! Every `pts` and `duration` is in milliseconds. On the wire the track is a compressed
 //! `moq-json` window (see `moq_json::window`): each group starts with a checkpoint and continues
 //! with push and pop operations.
 

@@ -39,5 +39,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [One route phase](/quest/m1/cut-audit/route-phase.md) - the other small resume fix ahead of the cut
 - [Resume as producer replacement](/quest/m2/resume-redesign.md) - the redesign that deletes the two-level reservation

@@ -11,7 +11,7 @@
 diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.rs
 --- a/rs/moq-net/src/lite/subscriber.rs
 +++ b/rs/moq-net/src/lite/subscriber.rs
-@@ -1305,7 +1305,8 @@ struct PrefixRun {
+@@ -1593,7 +1593,8 @@
  	/// it comes from the connect config or the peer's SETUP, neither of which
  	/// changes for the life of the session.
  	link_cost: u64,
@@ -21,7 +21,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  	// Lite06+: announce ids. Each received `active` implicitly assigns the next
  	// per-stream ordinal; `ended`/`restart` reference it instead of repeating the
  	// path, and lite-07 bases name it too. Tracked even for announces we drop
-@@ -1399,7 +1400,7 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
+@@ -1706,7 +1707,7 @@
  					let run = PrefixRun {
  						responder_origin,
  						link_cost,
@@ -29,9 +29,9 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
 +						announced: std::mem::ManuallyDrop::new(Announced::new(self.subscriber.announces.clone())),
  						decoder: lite::AnnounceDecoder::default(),
  						auth_epoch: 0,
- 					};
-@@ -1505,7 +1506,8 @@ struct SourceServe<S: crate::transport::poll::Session> {
- 	subscriber: Subscriber<S>,
+ 						initial,
+@@ -1842,7 +1843,8 @@
+ 	subscriber: Subscriber,
  	path: Path,
  	epoch: Option<crate::Epoch>,
 -	source: crate::model::broadcast::SourceGuard,
@@ -40,8 +40,8 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  	dynamic: crate::broadcast::Requests,
  	route: kio::Consumer<()>,
  	// A dedicated close-watch handle, since each pending operation needs its own.
-@@ -1523,7 +1525,7 @@ impl<S: crate::transport::poll::Session> SourceServe<S> {
- 			validity: minted.validity,
+@@ -1985,7 +1987,7 @@
+ 			subscriber,
  			path: minted.path,
  			epoch: minted.epoch,
 -			source: minted.source,

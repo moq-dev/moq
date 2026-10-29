@@ -386,14 +386,10 @@ export class Request {
 		};
 	}
 
-	/** Reject the request, closing the track optionally with an error. */
-	reject(err?: Error): void {
+	/** Reject the request with the error its subscribers receive. */
+	reject(err: Error): void {
 		this.#pending.delete(this);
-		if (err) this.#producer.abort(err);
-		else {
-			this.#producer.finish();
-			this.#producer.close();
-		}
+		this.#producer.abort(err);
 	}
 }
 
@@ -592,7 +588,7 @@ type CachedGroup = {
 type Start = { sequence: number; start: Timestamp };
 
 // A fresh read handle on a group the producer still caches; assigned in its static block.
-let cachedMirror: (producer: Producer, sequence: number) => GroupConsumer | undefined;
+let cachedMirror: (producer: Producer, sequence: number, from: number) => GroupConsumer | undefined;
 // Whether the producer still caches a group that has not failed; assigned in its static block.
 let cachedHolds: (producer: Producer, sequence: number) => boolean;
 // Mirror the cached groups in `[start, end)` that `offer` accepts into a sink again, cut ones
@@ -774,6 +770,7 @@ export class Producer {
 	}
 
 	static {
+		hooks.receiveGroup = (producer, { sequence, start }) => producer.#createGroup(sequence, start);
 		hooks.writeDatagram = (producer, datagram, inflated) => producer.#insertDatagram(datagram, inflated);
 		sourceStart = (producer) => producer.#served && producer.#feedStart();
 		hooks.producerLargest = (producer) => producer.#state.largest;
@@ -797,10 +794,14 @@ export class Producer {
 			const entry = producer.#cached.get(sequence);
 			return entry !== undefined && !(entry.group.closed.peek() instanceof Error);
 		};
-		cachedMirror = (producer, sequence) => {
+		cachedMirror = (producer, sequence, from) => {
 			const entry = producer.#cached.get(sequence);
 			if (!entry || entry.group.closed.peek() instanceof Error) return undefined;
 			const mirror = entry.group.mirror();
+			if (hooks.groupIndex(mirror) > from) {
+				mirror.close();
+				return undefined;
+			}
 			hooks.arriveGroup(mirror, entry.arrived);
 			return mirror;
 		};
@@ -1195,7 +1196,7 @@ export class Producer {
 		let largest: Position | undefined;
 		for (const { group } of this.#cache) {
 			const count = hooks.groupFrameCount(group);
-			if (count > 0 && (largest === undefined || group.sequence > largest.group)) {
+			if (count > hooks.groupOffset(group) && (largest === undefined || group.sequence > largest.group)) {
 				largest = { group: group.sequence, frame: count - 1 };
 			}
 		}
@@ -1324,7 +1325,7 @@ export class Producer {
 		for (const sink of this.#sinks) this.#mirror(entry, sink);
 		// Follow the group's frames as they land, past the head `#advance` already named.
 		const stop = hooks.groupProgress(group, (total) => {
-			if (total > 0) this.#advanceObject({ group: group.sequence, frame: total - 1 });
+			if (total > hooks.groupOffset(group)) this.#advanceObject({ group: group.sequence, frame: total - 1 });
 		});
 		void group.closed.then((closed) => {
 			stop();
@@ -1419,6 +1420,10 @@ export class Producer {
 	 * checked like {@link appendGroup}'s.
 	 */
 	createGroup(sequence: number): GroupProducer {
+		return this.#createGroup(sequence, 0);
+	}
+
+	#createGroup(sequence: number, start: number): GroupProducer {
 		this.#writable(sequence);
 		const existing = this.#cached.get(sequence);
 		if (existing) {
@@ -1431,6 +1436,8 @@ export class Producer {
 		}
 
 		const group = new GroupProducer(sequence);
+		// Mirrors copy the absolute indices, so set them before publishing to any sink.
+		hooks.startGroup(group, start);
 		this.#bind(group);
 		this.#cap(group);
 		this.#publish(group);
@@ -1687,13 +1694,15 @@ export class Producer {
 		if (abort && (this.#state.outcome.peek() === null || this.#settled())) abort = undefined;
 		// Nobody will finish these, so a subscriber that has not taken one yet never sees it.
 		// Not evicted: a reader already holding one keeps its frames and sees the abort.
-		const open = abort ? this.#cache.filter((entry) => entry.group.closed.peek() === undefined) : [];
+		const open = this.#cache.filter((entry) => entry.group.closed.peek() === undefined);
 		closeTrackState(this.#state, abort);
 		if (this.#state.outcome.peek() === undefined) this.#state.outcome.set(abort ?? null);
-		for (const { group } of this.#cache) {
-			if (abort) group.abort(abort);
-			else group.finish();
-		}
+		// Closing a copy never supplies the missing tail of a group. Already finished groups
+		// ignore the abort and stay readable; unfinished ones retain their truncation cause.
+		const groupError =
+			abort ??
+			new StreamError(StreamCode.Cancel, { message: `track ${this.name} closed with unfinished groups` });
+		for (const { group } of this.#cache) group.abort(groupError);
 		for (const entry of open) {
 			this.#unlink(entry);
 			this.#uncache(entry);
@@ -2080,11 +2089,6 @@ export class Subscriber {
 				narrowest = Math.min(narrowest, judged);
 				continue;
 			}
-			// A sequence already reported dropped stays dropped.
-			if (runGaps(this.#reported, sequence, sequence + 1).length === 0) {
-				this.#skipped.delete(sequence);
-				continue;
-			}
 			this.#skipped.set(sequence, budget);
 			narrowest = budget;
 			sequences.push(sequence);
@@ -2183,10 +2187,10 @@ export class Subscriber {
 				changed: subscriber.#expiryChanged(),
 			};
 		};
-		hooks.cachedGroup = (subscriber, sequence) => {
-			if (subscriber.#resume) return subscriber.#resume.cachedGroup(sequence);
+		hooks.cachedGroup = (subscriber, sequence, from = 0) => {
+			if (subscriber.#resume) return subscriber.#resume.cachedGroup(sequence, from);
 			const producer = subscriber.#state.producer;
-			return producer && cachedMirror(producer, sequence);
+			return producer && cachedMirror(producer, sequence, from);
 		};
 		hooks.holdsGroup = (subscriber, sequence) => {
 			const producer = subscriber.#state.producer;
@@ -2521,12 +2525,6 @@ export class Subscriber {
 			const group = groups[index];
 			if (!group || (end !== undefined && group.sequence >= end)) break;
 			groups.splice(index, 1);
-			// A sequence this cursor already reported dropped stays dropped: the subscriber
-			// accounted for it, so a group re-created under it is not served.
-			if (dispositions && runGaps(this.#reported, group.sequence, group.sequence + 1).length === 0) {
-				group.close();
-				continue;
-			}
 			const failed = group.closed.peek();
 			if (dispositions && failed instanceof Error) {
 				const dropped = this.#report(group.sequence, group.sequence + 1, failed);
@@ -2578,10 +2576,7 @@ export class Subscriber {
 	// one reports what its routes' copies gave up.
 	#tryDrop(): (Recv & { kind: "drop" }) | undefined {
 		if (this.#resume) {
-			const dropped = this.#resume.tryDrop(this.#delivered);
-			// Accounted for as #tryResumed does, so no copy serves it later.
-			if (dropped) this.#delivered.addRun(dropped.start, dropped.end);
-			return dropped;
+			return this.#resume.tryDrop(this.#delivered);
 		}
 		const { start, end } = this.#cursor.peek();
 		// Rescanned only after it changed, so an idle poll costs nothing per drop held.
@@ -2609,8 +2604,6 @@ export class Subscriber {
 		if (closed instanceof Error) return { kind: "error", error: closed };
 		const recv = resume.tryGroup(ordered, this.#delivered, dispositions);
 		if (recv.kind === "group") this.#handOut(recv.group.sequence, ordered);
-		// Accounted for as a group handed out is, so no copy serves it later.
-		else if (recv.kind === "drop") this.#delivered.addRun(recv.start, recv.end);
 		return recv;
 	}
 

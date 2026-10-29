@@ -194,7 +194,8 @@ int publish(
     auto session = connect(url, dial, forever);
 
     // Hold the producer for the lifetime of the publish loop; close() unpublishes.
-    auto broadcast = ok(session->publish()->create_broadcast(path), "create_broadcast");
+    auto publication = ok(session->publish()->create_broadcast(path), "create_broadcast");
+    auto broadcast = publication->broadcast();
     auto catalog = ok(moq::MediaCatalogProducer::init(broadcast), "catalog producer");
     auto media = ok(
         moq::MediaTrackStreamProducer::video(broadcast, moq::MediaTarget::kNamed{}, {moq::VideoFormat::kAvc3, {}}),
@@ -212,7 +213,7 @@ int publish(
         ),
         "audio producer"
     );
-    ok(broadcast->announce({}), "announce");
+    ok(publication->announce({}), "announce");
     std::printf(
         "publishing \"%s\" (Annex-B H.264 from stdin + a %zu-channel tone) to %s\n", path.c_str(), tones.size(),
         url.c_str()
@@ -255,12 +256,13 @@ int publish(
         ok(broadcast->close(), "broadcast close");
         std::puts("finish ended");
         std::fflush(stdout);
-        auto health = ok(session->publish()->create_broadcast(path + ".health"), "health broadcast");
+        auto health_publication = ok(session->publish()->create_broadcast(path + ".health"), "health broadcast");
+        auto health = health_publication->broadcast();
         auto track = ok(health->publish_track("live", std::nullopt), "health track");
         const std::string payload = "session-alive";
         ok(track->write_frame({std::vector<uint8_t>(payload.begin(), payload.end()), std::nullopt}), "health write");
         ok(track->finish(), "health finish");
-        ok(health->announce({}), "health announce");
+        ok(health_publication->announce({}), "health announce");
         // Only teardown waits on the FIFO; linger has already completed on its own clock.
         std::ifstream ack(finish_ack);
         std::string line;

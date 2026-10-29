@@ -238,7 +238,7 @@ async fn rust_ffi() {
 		let origin = MoqOriginProducer::new(MoqOriginConfig {
 			cache_capacity_bytes: Some(CACHE_BYTES),
 		});
-		let broadcast = origin.create_broadcast("bench".into()).unwrap();
+		let broadcast = origin.create_broadcast("bench".into()).unwrap().broadcast();
 		let timed = MoqTrackInfo {
 			priority: 0,
 			max_age: None,

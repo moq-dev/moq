@@ -19,8 +19,9 @@ payloads follow [moq-e2ee](/draft/moq-e2ee). See [Encryption](#encryption).
 ## Catalog
 
 `catalog.json` is a JSON track listing the renditions of each media kind and
-the decoder config for each. It updates live as tracks come and go, and a
-compressed twin (`catalog.json.z`) is published alongside it.
+the decoder config for each. It updates live as tracks come and go, and is a
+[compressed track](/concept/compression), so a reader sees plain JSON
+whether or not its session carries the compression.
 
 ```json
 {
@@ -50,13 +51,13 @@ every video rendition (display size, rotation, flip) sit at the section root.
 
 A track name always means the same content, so a catalog update never
 redefines a track. The fields a decoder can't change without reinitializing
-are fixed: codec, description, container, display aspect, sample rate, and
-channel count. Everything else, such as the coded size, `bitrate`,
+are fixed: codec, description, container, display aspect, interlacing, sample
+rate, and channel count. Everything else, such as the coded size, `bitrate`,
 `framerate`, and `enabled`, updates in place; the picture resizes in band at a
 keyframe unless a `description` pins it. A publisher that needs a new identity
 publishes a new track name, or restarts the broadcast under a new
-[epoch](/concept/moq-lite#publisher-epochs). A player can configure its
-decoder once per track.
+[epoch](/concept/moq-lite#publisher-epochs); the Rust and `@moq/publish`
+publishers take a new name. A player can configure its decoder once per track.
 
 A few things the catalog can express beyond decoder config:
 
@@ -70,7 +71,7 @@ A few things the catalog can express beyond decoder config:
 - **Spatial media.** A video rendition may carry `projection` (flat `rectilinear`, or `equirectangular` with the degrees of longitude it spans, 180 for VR180) and `stereo` (`mono`, `left-right`, or `top-bottom` frame packing), and an audio rendition may carry `layout: "ambisonic"` for AmbiX channels. Readers treat a value they don't recognize as absent. Nothing in `@moq/watch` renders them yet.
 - **Disabled renditions.** An audio or video rendition with `enabled: false` has no frames coming, and a player must not select it. Pausing a rendition in `@moq/publish` keeps it in the catalog this way rather than removing it, so a mute is a one-field update; a disabled video rendition encodes one black keyframe first, so a player that predates the field shows black instead of a frozen picture. The field is written only when false. The older video `stalled` field is no longer written, and readers ignore it.
 - **Preference.** A video rendition may carry a signed `preference`, default `0`. A player keeps only the highest preference it can decode, then picks by size and bitrate within it, as do the single-rendition egresses (RTMP play, WHEP, FLV, the transcoder's source). A publisher that adds its own H.264 copy of an H.265 source marks the copy `-1`, so only a viewer that can't decode H.265 pulls it. Picking a rendition by name still overrides it. The field is written only when nonzero.
-- **HLS records.** A video or audio rendition may opt in with an `hls` field naming a small track of HLS segment records, each segment's first group and pts, plus the nominal segment duration. Each rendition numbers its own segments, and an edge serves a rendition's segment `n` from its record `n`; segments line up across renditions wherever their keyframes do. The records are what let the [HLS gateway](/bin/hls) build playlists without subscribing to media; a rendition without them gets no playlist. Nothing publishes them unless the application enables them, and a reader that cannot decode the field ignores it.
+- **HLS records.** A video or audio rendition may carry an `hls` field naming a small track of HLS segment records, each segment's first group and pts, plus the nominal segment duration. Each rendition numbers its own segments, and an edge serves a rendition's segment `n` from its record `n`; segments line up across renditions wherever their keyframes do. The records are what let the [HLS gateway](/bin/hls) build playlists without subscribing to media; a rendition without them gets no playlist. Rust publishers (`moq-mux` and everything built on it) publish them by default; `@moq/publish` does not yet. A reader that cannot decode the field ignores it.
 - **Clock.** The optional root `clock` maps PTS zero to wall time so every media track and every HLS record share one fixed epoch after timescale conversion. Publish independent sources as sibling broadcasts under one prefix, such as `robot/front.hang` and `robot/rear.hang`; each broadcast's audio and video entries are renditions of that source. In one Rust publisher, pass the same `moq_mux::Clock` to each `catalog::Config::with_clock`; JS publishers on one page already share the page clock. Consumers discover the siblings by prefix and align their timestamps through the advertised wall mapping; `@moq/watch` plays one broadcast at a time.
 - **Version.** The root `version` is the oldest moq-hang draft that reads the catalog correctly, written only when a field needs one newer than 03: a `track` that differs from its ID, or a video `warmup`. Readers ignore fields they don't know, but refuse a `version` above their own with a typed "unsupported catalog version" error, so a player can say to upgrade instead of misreading the catalog. An additive field never raises it.
 - **Extensions.** The root is a loose object. Applications add their own sections (`scte35`, for example) next to the ones hang defines, optionally naming a track that carries the data. Every library exposes a way to write your section without clobbering the built-in ones, and readers ignore what they don't know.
@@ -113,7 +114,7 @@ as plain tracks, split by whether a generic consumer can parse the payload.
 {
   "json": {
     "tracks": {
-      "chat": { "mode": "stream", "compression": "deflate" },
+      "chat": { "mode": "stream", "schema": "https://example.com/chat.schema.json" },
       "status": { "mode": "snapshot" }
     }
   },
@@ -137,17 +138,16 @@ A sliding window, a bounded log a reader can join in the middle, is a framing
 in [`moq-json`](/lib/rs/moq-json) rather than a catalog mode. Both ends opt
 into it on a raw track.
 
-The rest is descriptive: `compression` (`deflate`, the same group-scoped
-`deflate-raw` the catalog uses), `schema` on a JSON track, `mime` on a binary
-one, `bitrate`, `jitter`, and `delay` with the same meaning as for media, plus
+The rest is descriptive: `schema` on a JSON track, `mime` on a binary one, `bitrate`, `jitter`, and `delay` with the same meaning as for media, plus
 the optional `broadcast` reference and `track` name. A publisher measures `delay`
 only from payloads stamped with their capture time on the broadcast clock. A
-consumer that doesn't recognize a `mode` or `compression` ignores that track and
-round-trips it verbatim.
+consumer that doesn't recognize a `mode` ignores that track and round-trips it
+verbatim. Compression is not a catalog field: a JSON track is a compressed track,
+and moq-net hands every reader plain frames.
 
 The catalog entry lives as long as its producer: dropping it retracts the
-track. [`moq-json`](/lib/rs/moq-json) and [`moq-flate`](/lib/rs/moq-flate) (and
-their TypeScript twins) are what read and write the payloads.
+track. [`moq-json`](/lib/rs/moq-json) (and its TypeScript twin) reads and writes
+JSON payloads; a binary track's payloads are the frames themselves.
 
 An application with its own per-track fields can list a data track in its own
 root section instead, nesting the JSON or binary config in a `config` field

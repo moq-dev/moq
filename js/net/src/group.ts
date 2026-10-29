@@ -3,7 +3,7 @@
  *
  * @module
  */
-import { Instant, now } from "@moq/clock";
+import { type Instant, now } from "@moq/clock";
 import { type Dispose, type GetPromise, type Getter, Once, race, Signal } from "@moq/signals";
 import {
 	FrameTooLarge,
@@ -39,6 +39,14 @@ export interface Frame {
 	 * refused with {@link TimestampMismatch}.
 	 */
 	timestamp?: Timestamp;
+	/**
+	 * When the frame landed in this node's group, on the installed clock.
+	 *
+	 * Every frame a group returns carries the instant it was written, received, or fetched
+	 * into it, so a reader judges lateness on that rather than on when it got around to
+	 * reading. A write ignores it and stamps its own.
+	 */
+	arrived?: Instant;
 }
 
 /** Options for a sequence-aware frame read. */
@@ -68,6 +76,8 @@ class GroupState {
 	// Absolute sequence of the frame at the front of `frames`, advanced by a read: the
 	// sequence the next read returns.
 	start = 0;
+	// The wire offset this copy began at; unlike `start`, reads never advance it.
+	offset = 0;
 
 	cacheBytes = 0;
 	compressed?: boolean;
@@ -84,14 +94,32 @@ class GroupState {
 	// so this mirror drives no media-time expiry.
 	unverified = false;
 	// When the group joined the track this mirror belongs to, at this hop: the wall clock a
-	// superseded predecessor ages from. Per track, since one group can join several.
-	arrived = Instant.zero;
+	// superseded predecessor ages from. Per track, since one group can join several. A group
+	// no track holds arrived when it was created.
+	arrived = now();
 	// Called with the frame count on every write, synchronously: a track's largest must not
 	// trail a write that already returned, as a batched `total` notification would.
 	progress = new Set<(total: number) => void>();
 
 	constructor(sequence: number) {
 		this.sequence = sequence;
+	}
+}
+
+// A written frame and when it landed. It keeps the writer's frame rather than copying it, so a
+// lazy payload is read only when a reader takes it.
+class Landed implements Frame {
+	readonly arrived: Instant;
+	#frame: Frame;
+	constructor(frame: Frame, arrived: Instant) {
+		this.#frame = frame;
+		this.arrived = arrived;
+	}
+	get payload(): Uint8Array {
+		return this.#frame.payload;
+	}
+	get timestamp(): Timestamp | undefined {
+		return this.#frame.timestamp;
 	}
 }
 
@@ -217,6 +245,16 @@ export class Producer {
 			}
 			if (state.closed.peek() !== undefined) flate.finish();
 		};
+		hooks.groupOffset = (group) => group.#state.offset;
+		hooks.startGroup = (group, start) => {
+			if (!Number.isSafeInteger(start) || start < 0) throw new RangeError("invalid group frame start");
+			const state = group.#state;
+			if (state.total.peek() !== 0 || state.closed.peek() !== undefined || group.#mirrors?.size)
+				throw new Error("group already started");
+			if (start !== 0 && state.compressed) throw new ProtocolViolation("compressed group lacks its prefix");
+			state.start = state.offset = start;
+			state.total.set(start);
+		};
 		hooks.writeGroupFrame = (group, frame, inflated) => group.#writeFrame(frame, inflated);
 		hooks.groupCacheBytes = (group) => group.#state.flate?.bytes ?? group.#state.cacheBytes;
 		hooks.groupFrameCount = (group) => group.#state.total.peek();
@@ -292,8 +330,11 @@ export class Producer {
 		dst.latest = this.#state.latest;
 		dst.flate = this.#state.flate;
 		dst.compressed = this.#state.compressed;
+		// A track restamps its own mirror with when the group joined it.
+		dst.arrived = this.#state.arrived;
 		for (const frame of this.#state.frames.peek()) appendFrame(dst, frame);
 		dst.start = this.#state.start;
+		dst.offset = this.#state.offset;
 		// The replay only covers what is still buffered, so the count has to come from the
 		// source: it is what names a frame's absolute sequence, and what a publisher reads
 		// to resolve the live edge.
@@ -346,6 +387,8 @@ export class Producer {
 			throw new FrameTooLarge();
 		if (inflated !== undefined && (!this.#state.flate || !Number.isSafeInteger(inflated) || inflated < 0))
 			throw new ProtocolViolation("unexpected inflated frame size");
+		if (this.#state.total.peek() === Number.MAX_SAFE_INTEGER)
+			throw new ProtocolViolation("group frame index exceeds the safe integer range");
 		checkTimed(this.#state.timed, frame);
 		if (this.#limit !== undefined && this.#state.total.peek() >= this.#limit) {
 			throw new Error(`frame ${this.#state.total.peek()} is past the track's end`);
@@ -358,7 +401,7 @@ export class Producer {
 			commits = this.#admits.map((admit) => admit(start));
 		}
 		if (
-			this.#state.total.peek() >= MAX_GROUP_FRAMES ||
+			this.#state.total.peek() - this.#state.offset >= MAX_GROUP_FRAMES ||
 			((!this.#state.flate || inflated !== undefined) &&
 				this.#state.cacheBytes + frame.payload.byteLength > MAX_GROUP_CACHE_BYTES) ||
 			(this.#state.flate?.declared ?? this.#state.cacheBytes) + (inflated ?? frame.payload.length) >
@@ -367,13 +410,15 @@ export class Producer {
 			this.#overflow();
 		}
 
+		const arrived = now();
+		frame = new Landed(frame, arrived);
 		if (this.#state.flate) {
 			frame = this.#state.flate.push(frame, inflated);
 			if (this.#state.flate.stored > MAX_GROUP_CACHE_BYTES) {
 				this.#overflow();
 			}
 		}
-		this.#activity = now();
+		this.#activity = arrived;
 		appendFrame(this.#state, frame);
 		if (commits) {
 			this.#admits = undefined;
@@ -635,10 +680,24 @@ export class Consumer {
 	#expired?: Expired;
 	// Closed by its reader, which ends it whatever is left unread.
 	#released = false;
+	// The arrival of the copy first read, kept once a replacement copy is adopted.
+	#arrived?: Instant;
 
 	private constructor(state: GroupState) {
 		this.#state = state;
 		this.sequence = state.sequence;
+	}
+
+	/**
+	 * When the group joined its track at this hop, before its first frame, on the installed
+	 * clock: its header was received, or it was fetched or created here.
+	 *
+	 * A reader that gets to the group late still measures from when it landed, as
+	 * {@link Frame.arrived} does for each frame. A consumer resumed onto a replacement copy
+	 * keeps the original group's arrival.
+	 */
+	get arrived(): Instant {
+		return this.#arrived ?? this.#state.arrived;
 	}
 
 	/**
@@ -687,13 +746,16 @@ export class Consumer {
 	static {
 		makeConsumer = (state) => new Consumer(state);
 		hooks.releaseGroupReader = (group, abort) => group.#release(abort);
-		hooks.groupTimestamp = (group) => (group.#state.unverified ? undefined : group.#state.timestamp);
+		hooks.groupTimestamp = (group) =>
+			group.#state.unverified || group.#state.offset !== 0 ? undefined : group.#state.timestamp;
 		hooks.groupLatest = (group) => (group.#state.unverified ? undefined : group.#state.latest);
 		hooks.unverifyGroup = (group) => {
 			group.#state.unverified = true;
 		};
 		hooks.groupArrived = (group) => group.#state.arrived;
-		hooks.groupStarted = (group) => group.#state.total.peek() > 0 || group.#state.closed.peek() !== undefined;
+		hooks.groupIndex = (group) => group.#index();
+		hooks.groupStarted = (group) =>
+			group.#state.total.peek() > group.#state.offset || group.#state.closed.peek() !== undefined;
 		hooks.groupFate = (group) => {
 			const state = group.#state;
 			return () => {
@@ -842,6 +904,7 @@ export class Consumer {
 		replacement.adopt();
 		// The copy left behind stops teeing into the state this consumer read.
 		if (this.#state.closed.peek() === undefined) this.#state.closed.set(null);
+		this.#arrived ??= this.#state.arrived;
 		this.#state = next;
 		this.#expiry = replacement.expiry;
 		this.#skip = index;
@@ -869,7 +932,11 @@ export class Consumer {
 		const slice = compressed ? stored(buffered) : undefined;
 		let frame: Frame;
 		try {
-			frame = { payload: slice?.payload ?? buffered.payload, timestamp: buffered.timestamp };
+			frame = {
+				payload: slice?.payload ?? buffered.payload,
+				timestamp: buffered.timestamp,
+				arrived: buffered.arrived,
+			};
 		} catch (error) {
 			this.#terminal = error instanceof Error ? error : new Error(String(error));
 			if (this.#verdict.peek() === undefined) this.#verdict.set(this.#terminal);
@@ -927,7 +994,7 @@ export class Consumer {
 		if (this.#terminal) return undefined;
 		const read = this.#readBufferedFrame();
 		if (!read) return undefined;
-		return { sequence: read.sequence, payload: read.frame.payload, timestamp: read.frame.timestamp };
+		return { sequence: read.sequence, ...read.frame };
 	}
 
 	/** Resolves once {@link readFrame} would not block. */
@@ -969,7 +1036,7 @@ export class Consumer {
 	async readFrameSequence(options?: ReadOptions): Promise<({ sequence: number } & Frame) | undefined> {
 		const read = await this.#readFrame(options?.from ?? 0);
 		if (!read) return undefined;
-		return { sequence: read.sequence, payload: read.frame.payload, timestamp: read.frame.timestamp };
+		return { sequence: read.sequence, ...read.frame };
 	}
 
 	async #readFrame(from: number, compressed = false): Promise<ReadGroupFrame | undefined> {

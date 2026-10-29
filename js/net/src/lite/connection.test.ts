@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
+import Qmux from "@moq/qmux";
 import { accept } from "../connection/accept.ts";
 import { connect } from "../connection/connect.ts";
 import { SessionCode, SessionError } from "../error.ts";
@@ -23,7 +24,17 @@ import {
 	SubscribeStart,
 } from "./subscribe.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
-import { ALPN_04, ALPN_05, ALPN_06, ALPN_07_WIP, Version } from "./version.ts";
+import {
+	ALPN,
+	ALPN_03,
+	ALPN_04,
+	ALPN_05,
+	ALPN_06,
+	ALPN_07_WIP,
+	hasTrackStream,
+	Version,
+	versionName,
+} from "./version.ts";
 
 /** A transport whose `getStats` behaves as described, or is absent entirely. */
 function transport(getStats?: () => Promise<unknown>): WebTransport {
@@ -203,6 +214,70 @@ function holdFins(transport: MockTransport, streams: "uni" | "incoming-bidi") {
 	};
 }
 
+// Hand `transport` each incoming unidirectional stream only once its FIN arrived, buffered outside
+// the transport so a session close cannot discard it. QMux keeps a finished stream's unread bytes
+// across a close this way, so the reads still owed land after the close itself.
+function deliverWhole(transport: MockTransport) {
+	Object.defineProperty(transport, "incomingUnidirectionalStreams", {
+		value: transport.incomingUnidirectionalStreams.pipeThrough(
+			new TransformStream<ReadableStream<Uint8Array>, ReadableStream<Uint8Array>>({
+				transform(stream, controller) {
+					controller.enqueue(
+						new ReadableStream<Uint8Array>({
+							async start(whole) {
+								const chunks = await Array.fromAsync(stream);
+								for (const chunk of chunks) whole.enqueue(chunk);
+								whole.close();
+							},
+						}),
+					);
+				},
+			}),
+		),
+	});
+}
+
+// Deliver the bytes of every bidirectional stream `transport` opens at once, but each FIN only a task
+// after the session closed, so every reaction to the close runs before a SUBSCRIBE FIN sent first.
+function finAfterClose(transport: MockTransport) {
+	const create = transport.createBidirectionalStream.bind(transport);
+	transport.createBidirectionalStream = async (options) => {
+		const stream = await create(options);
+		const readable = stream.readable.pipeThrough(
+			new TransformStream<Uint8Array, Uint8Array>({
+				async flush() {
+					await transport.closed;
+					await new Promise((resolve) => setTimeout(resolve, 0));
+				},
+			}),
+		);
+		return { readable, writable: stream.writable };
+	};
+}
+
+// A qmux session pair over an in-memory socket. Unlike the mock, its receive streams are
+// pull-driven, so a stream's FIN surfaces only to a read.
+function qmuxPair(): { client: WebTransport; server: WebTransport } {
+	const socket = (readable: ReadableStream<Uint8Array>, writable: WritableStream<Uint8Array>) => {
+		const closed = Promise.withResolvers<{ closeCode: number; reason: string }>();
+		return {
+			url: "",
+			opened: Promise.resolve({ readable, writable, extensions: "", protocol: "qmux-01" }),
+			closed: closed.promise,
+			close: () => closed.resolve({ closeCode: 1000, reason: "" }),
+		};
+	};
+	// Copied, since a sender may reuse its buffer once a write resolves.
+	const pipe = () =>
+		new TransformStream<Uint8Array, Uint8Array>({ transform: (chunk, c) => c.enqueue(chunk.slice()) });
+	const up = pipe();
+	const down = pipe();
+	const config = { idleTimeout: null };
+	const client = new Qmux(socket(down.readable, up.writable), { config });
+	const server = Qmux.accept(socket(up.readable, down.writable), { config });
+	return { client, server };
+}
+
 // Holds the one-second close deadline on a manual clock, so a test fires it by hand instead of waiting.
 function mockDeadline() {
 	const clock = new Manual();
@@ -217,9 +292,17 @@ async function settle() {
 	for (let i = 0; i < 5; i++) await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
+for (const [alpn, version] of [
+	[ALPN, Version.DRAFT_01],
+	[ALPN, Version.DRAFT_02],
+	[ALPN_03, Version.DRAFT_03],
+	[ALPN_04, Version.DRAFT_04],
+	[ALPN_05, Version.DRAFT_05],
+	[ALPN_06, Version.DRAFT_06],
+	[ALPN_07_WIP, Version.DRAFT_07],
+] as const) {
 	// A publisher that finishes a track and closes must not cut the final group short.
-	test(`close delivers a finished track's final group over ${alpn}`, async () => {
+	test(`close delivers a finished track's final group over ${versionName(version)}`, async () => {
 		const pair = createMockTransportPair(alpn);
 		const fin = holdFins(pair.server, "uni");
 		const origin = new Producer();
@@ -228,10 +311,8 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 		broadcastPublication.announce();
 		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 		const url = new URL("https://localhost/test");
-		const [client, server] = await Promise.all([
-			connect({ url, transport: pair.client }),
-			accept({ url, transport: pair.server, publish: origin.consume() }),
-		]);
+		const client = new Connection({ url, quic: pair.client, version });
+		const server = new Connection({ url, quic: pair.server, version, publish: origin.consume(), client: false });
 		const remote = wireOf(client).consume(Path.from("room"));
 		const track = remote.track("video").subscribe().ordered();
 		let closed = false;
@@ -239,7 +320,9 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 			closed = true;
 		});
 		try {
-			producer.appendGroup().writeFrame(textFrame("first"));
+			const first = producer.appendGroup();
+			first.writeFrame(textFrame("first"));
+			first.finish();
 			expect(await (await track.nextGroup())?.readString()).toBe("first");
 
 			fin.enable();
@@ -258,6 +341,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 			fin.release();
 			await closing;
 			expect(closed).toBe(true);
+			expect(await track.nextGroup()).toBeUndefined();
 		} finally {
 			fin.release();
 			track.close();
@@ -268,6 +352,100 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 			origin.close();
 		}
 	});
+
+	// The peer's close can overtake the final group or, where it is the track's only end, the
+	// SUBSCRIBE FIN it sent first; the closing session reads them.
+	for (const overtaken of hasTrackStream(version) ? ["group"] : ["group", "fin"]) {
+		test(`a peer close drains the overtaken ${overtaken} over ${versionName(version)}`, async () => {
+			const pair = createMockTransportPair(alpn);
+			deliverWhole(pair.client);
+			if (overtaken === "fin") finAfterClose(pair.client);
+			const origin = new Producer();
+			const broadcastPublication = origin.createBroadcast(Path.from("room"));
+			const broadcast = broadcastPublication.broadcast;
+			broadcastPublication.announce();
+			const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+			const url = new URL("https://localhost/test");
+			const client = new Connection({ url, quic: pair.client, version });
+			const server = new Connection({
+				url,
+				quic: pair.server,
+				version,
+				publish: origin.consume(),
+				client: false,
+			});
+			const remote = wireOf(client).consume(Path.from("room"));
+			const track = remote.track("video").subscribe().ordered();
+			try {
+				const first = producer.appendGroup();
+				first.writeFrame(textFrame("first"));
+				first.finish();
+				expect(await (await track.nextGroup())?.readString()).toBe("first");
+
+				const frames = Array.from({ length: 32 }, (_, i) => `frame ${i}`);
+				const last = producer.appendGroup();
+				for (const frame of frames) last.writeFrame(textFrame(frame));
+				last.finish();
+				producer.finish();
+				producer.close();
+				await server.close();
+
+				const group = await track.nextGroup();
+				for (const frame of frames) expect(await group?.readString()).toBe(frame);
+				expect(await group?.readString()).toBeUndefined();
+				expect(await track.nextGroup()).toBeUndefined();
+			} finally {
+				track.close();
+				remote.close();
+				client.abort();
+				server.abort();
+				broadcast.close();
+				origin.close();
+			}
+		});
+	}
+
+	// The subscriber reads a legacy subscribe stream to its FIN, since QMux closes a stream only
+	// on a read; awaiting the FIN instead would hold the closing session's drain forever.
+	if (!hasTrackStream(version)) {
+		test(`a peer close finishes a FIN'd track over qmux ${versionName(version)}`, async () => {
+			const pair = qmuxPair();
+			const origin = new Producer();
+			const broadcastPublication = origin.createBroadcast(Path.from("room"));
+			const broadcast = broadcastPublication.broadcast;
+			broadcastPublication.announce();
+			const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+			const url = new URL("https://localhost/test");
+			const client = new Connection({ url, quic: pair.client, version });
+			const server = new Connection({
+				url,
+				quic: pair.server,
+				version,
+				publish: origin.consume(),
+				client: false,
+			});
+			const remote = wireOf(client).consume(Path.from("room"));
+			const track = remote.track("video").subscribe().ordered();
+			try {
+				const group = producer.appendGroup();
+				group.writeFrame(textFrame("only"));
+				group.finish();
+				expect(await (await track.nextGroup())?.readString()).toBe("only");
+
+				producer.finish();
+				producer.close();
+				await server.close();
+				expect(await track.nextGroup()).toBeUndefined();
+			} finally {
+				track.close();
+				remote.close();
+				client.abort();
+				server.abort();
+				broadcast.close();
+				origin.close();
+			}
+		});
+	}
 }
 
 /** A lite-07 publisher serving a finished track to a raw subscriber that has read up to the FIN. */
@@ -618,50 +796,74 @@ for (const [alpn, version] of [
 	});
 }
 
-// A group stream that breaks the protocol ends the session, so a hostile peer cannot repeat
-// it on every stream.
+// A transport tail keeps its absolute frame numbers and the session open. A group past
+// the declared end still ends the session, so a hostile peer cannot repeat that violation.
 for (const violation of ["a partial group", "a group past the declared end"] as const) {
-	test(`${violation} closes the session with PROTOCOL_VIOLATION`, async () => {
-		const version = Version.DRAFT_07;
-		const pair = createMockTransportPair(ALPN_07_WIP);
-		const connection = new Connection({ url: new URL("https://relay.example/"), quic: pair.client, version });
-		try {
-			const track = wireOf(connection).consume(Path.from("room")).track("video").subscribe();
+	test(
+		violation === "a partial group"
+			? "a partial group keeps its indices and the session open"
+			: "a group past the declared end closes the session with PROTOCOL_VIOLATION",
+		async () => {
+			const version = Version.DRAFT_07;
+			const pair = createMockTransportPair(ALPN_07_WIP);
+			const connection = new Connection({ url: new URL("https://relay.example/"), quic: pair.client, version });
+			try {
+				const track = wireOf(connection).consume(Path.from("room")).track("video").subscribe();
 
-			// The publisher, played by hand: answer TRACK_INFO, start the subscription, and
-			// leave any other stream the session opens (such as PROBE) open.
-			let sub: Stream | undefined;
-			while (!sub) {
-				const stream = await Stream.accept(pair.server, version);
-				if (!stream) throw new Error("the subscriber never subscribed");
-				const id = await stream.reader.u53();
-				if (id === StreamId.Track) {
-					await TrackMessage.decode(stream.reader, version);
-					await new TrackInfo({ maxAge: 60_000, timescale: Timescale.MILLI }).encode(stream.writer, version);
-					stream.close();
-				} else if (id === StreamId.Subscribe) {
-					await Subscribe.decode(stream.reader, version);
-					sub = stream;
+				// The publisher, played by hand: answer TRACK_INFO, start the subscription, and
+				// leave any other stream the session opens (such as PROBE) open.
+				let sub: Stream | undefined;
+				while (!sub) {
+					const stream = await Stream.accept(pair.server, version);
+					if (!stream) throw new Error("the subscriber never subscribed");
+					const id = await stream.reader.u53();
+					if (id === StreamId.Track) {
+						await TrackMessage.decode(stream.reader, version);
+						await new TrackInfo({ maxAge: 60_000, timescale: Timescale.MILLI }).encode(
+							stream.writer,
+							version,
+						);
+						stream.close();
+					} else if (id === StreamId.Subscribe) {
+						await Subscribe.decode(stream.reader, version);
+						sub = stream;
+					}
 				}
-			}
-			await encodeSubscribeResponse(sub.writer, { start: new SubscribeStart(0) }, version);
+				await encodeSubscribeResponse(sub.writer, { start: new SubscribeStart(0) }, version);
 
-			let group: GroupMessage;
-			if (violation === "a partial group") {
-				// The subscriber never asked to start mid-group.
-				group = new GroupMessage({ subscribe: 0n, sequence: 0, frameStart: 5 });
-			} else {
-				await encodeSubscribeResponse(sub.writer, { end: new SubscribeEnd(2) }, version);
-				group = new GroupMessage({ subscribe: 0n, sequence: 2 });
-			}
-			const writer = await Writer.open(pair.server, { version });
-			await writer.u53(DataType.Group);
-			await group.encode(writer, version);
+				let group: GroupMessage;
+				if (violation === "a partial group") {
+					// A received tail uses its wire position even without a locally retained prefix.
+					group = new GroupMessage({ subscribe: 0n, sequence: 0, frameStart: 5 });
+				} else {
+					await encodeSubscribeResponse(sub.writer, { end: new SubscribeEnd(2) }, version);
+					group = new GroupMessage({ subscribe: 0n, sequence: 2 });
+				}
+				const writer = await Writer.open(pair.server, { version });
+				await writer.u53(DataType.Group);
+				await group.encode(writer, version);
 
-			expect((await pair.client.closed).closeCode).toBe(SessionCode.ProtocolViolation);
-			track.close();
-		} finally {
-			connection.abort();
-		}
-	});
+				if (violation === "a partial group") {
+					await writer.u62(2000n); // timestamp 1000, zigzag delta from 0
+					await writer.u53(1);
+					await writer.write(new Uint8Array([7]));
+					writer.close();
+					const received = await track.recvGroup();
+					expect((await received?.readFrameSequence())?.sequence).toBe(5);
+					expect(await received?.readFrameSequence()).toBeUndefined();
+					received?.close();
+					const goaway = await Stream.open(pair.server, { version });
+					await goaway.writer.u53(StreamId.Goaway);
+					await new Goaway("").encode(goaway.writer, version);
+					goaway.writer.close();
+					expect((await wireOf(connection).goaway).uri).toBe("");
+				} else {
+					expect((await pair.client.closed).closeCode).toBe(SessionCode.ProtocolViolation);
+				}
+				track.close();
+			} finally {
+				connection.abort();
+			}
+		},
+	);
 }
