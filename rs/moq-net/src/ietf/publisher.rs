@@ -756,6 +756,7 @@ impl Served {
 
 /// What woke an announce-forwarding loop.
 enum NamespaceEvent {
+	Denied(crate::auth::Refusal),
 	/// The session or stream ended, with the result to surface.
 	Closed(Result<(), Error>),
 	/// A requester changes the namespace prefix.
@@ -1656,6 +1657,29 @@ impl Publisher {
 			return Poll::Ready(());
 		}
 		super::request_stream::poll_withdrawn(stream, self.version, waiter)
+	}
+
+	/// Verify an incoming request token while keeping its stream credit until verification ends.
+	async fn admit_request(
+		&self,
+		stream: &mut Stream<Transport, Version>,
+		gate: &mut crate::auth::Gate,
+		token: Option<super::token::RequestToken>,
+	) -> std::result::Result<bool, crate::auth::Refusal> {
+		let Some(token) = token.filter(|_| gate.token_decides()) else {
+			return Ok(true);
+		};
+		let credit = kio::Producer::<()>::default();
+		let hold: crate::auth::Hold = Arc::new(credit.consume());
+		let verdict = gate.verify(token.0, Some(hold));
+		let answer = self.until_withdrawn(stream, |waiter| verdict.poll_grant(waiter)).await;
+		let Some(answer) = answer else {
+			drop(verdict);
+			self.released(&credit).await;
+			return Ok(false);
+		};
+		gate.admit(&self.runtime, (verdict, answer))?;
+		Ok(true)
 	}
 
 	/// Poll `step` of a request's setup until ready, or `None` once [`Self::poll_withdrawn`] is.
@@ -2874,6 +2898,14 @@ impl Publisher {
 				let FetchGate::Standalone(mut gate) = admission else {
 					return Err(Error::Unauthorized);
 				};
+				match self
+					.admit_request(&mut stream, &mut gate, msg.authorization_token.clone())
+					.await
+				{
+					Ok(true) => {}
+					Ok(false) => return Ok(()),
+					Err(refusal) => return self.reject_fetch(stream, &refusal.error, &refusal.reason).await,
+				}
 				if !gate.allows() {
 					return self.reject_fetch(stream, &Error::Unauthorized, "not granted").await;
 				}
@@ -3292,6 +3324,14 @@ impl Publisher {
 	) -> Result<(), Error> {
 		if let Some(error) = super::namespace::refusal(&msg.track_namespace, self.version) {
 			return super::request_stream::reject(stream, error).await;
+		}
+		match self
+			.admit_request(&mut stream, &mut gate, msg.authorization_token.clone())
+			.await
+		{
+			Ok(true) => {}
+			Ok(false) => return Ok(()),
+			Err(refusal) => return self.reject_track_status(stream, &refusal.error).await,
 		}
 		if !gate.allows() {
 			return self.reject_track_status(stream, &Error::Unauthorized).await;
@@ -4079,10 +4119,30 @@ impl Publisher {
 		self,
 		mut stream: Stream<Transport, Version>,
 		msg: ietf::SubscribeNamespace,
-		gate: crate::auth::Gate,
+		mut gate: crate::auth::Gate,
 	) -> Result<(), Error> {
 		if let Some(error) = super::namespace::refusal(&msg.namespace, self.version) {
 			return super::request_stream::reject(stream, error).await;
+		}
+		gate = gate.discovery();
+		match self
+			.admit_request(&mut stream, &mut gate, msg.authorization_token.clone())
+			.await
+		{
+			Ok(true) => {}
+			Ok(false) => return Ok(()),
+			Err(refusal) => {
+				super::request_stream::write_error(
+					&mut stream.writer,
+					request::Kind::SubscribeNamespace,
+					&refusal.error,
+					&refusal.reason,
+					self.version,
+				)
+				.await?;
+				let _ = stream.writer.close().await;
+				return Ok(());
+			}
 		}
 		let prefix = msg.namespace.clone();
 
@@ -4142,19 +4202,24 @@ impl Publisher {
 			false => (Vec::new(), None),
 		};
 
-		// Send OK response
-		stream
-			.writer
-			.encode_message(&ietf::RequestOk { largest: None, active })
-			.await?;
+		// Send the acknowledgement only while the token is live, even behind stream credit.
+		crate::auth::until(
+			stream.writer.encode_message(&ietf::RequestOk { largest: None, active }),
+			|waiter| gate.poll_token_ended(waiter),
+		)
+		.await
+		.map_err(|refusal| refusal.error)??;
 
 		let target = Target::Inline(stream);
 
+		let token = gate.token_guard();
 		let mut ns = Namespaces::new(peer, target);
 		ns.gate = Some(gate);
 		ns.hidden = !declared.hidden || msg.hidden || self.origin.includes_hidden();
 		ns.epochs = declared.epoch;
-		self.run_namespaces(announced, prefix, ns, initial).await
+		crate::auth::RequestGrant::guard(token.as_ref(), self.run_namespaces(announced, prefix, ns, initial))
+			.await
+			.map_err(|refusal| refusal.error)?
 	}
 
 	/// Our publish permit as it stands now, with the auth epoch it was read at.
@@ -4261,6 +4326,11 @@ impl Publisher {
 					if self.withdrawal.poll(waiter).is_ready() {
 						return Poll::Ready(NamespaceEvent::Update(None));
 					}
+					if let Some(gate) = gate
+						&& let Poll::Ready(refusal) = gate.poll_token_ended(waiter)
+					{
+						return Poll::Ready(NamespaceEvent::Denied(refusal));
+					}
 					// A grant change applies before the next update, so a namespace it no
 					// longer covers is withdrawn rather than re-sent.
 					let permit = match gate {
@@ -4303,6 +4373,21 @@ impl Publisher {
 			};
 
 			match event {
+				NamespaceEvent::Denied(refusal) => {
+					if let Target::Inline(mut stream) = ns.target {
+						super::request_stream::write_error(
+							&mut stream.writer,
+							request::Kind::SubscribeNamespace,
+							&refusal.error,
+							&refusal.reason,
+							self.version,
+						)
+						.await?;
+						let _ = stream.writer.close().await;
+					}
+					return Ok(());
+				}
+
 				// Only a solicited loop has a stream to close, and its request task closes the
 				// session over a protocol violation.
 				NamespaceEvent::Closed(res) => break res,
@@ -4337,6 +4422,28 @@ impl Publisher {
 						// Dropping a finished writer resets it, which could discard the refusal.
 						stream.writer.finish()?;
 						break stream.writer.closed().await;
+					}
+					if update.authorization_token.is_some() {
+						let stream = ns.target.stream().expect("update has a stream");
+						let gate = ns.gate.as_mut().expect("update has a gate");
+						match self.admit_request(stream, gate, update.authorization_token).await {
+							Ok(true) => {
+								ns.epoch = 0;
+							}
+							Ok(false) => break Ok(()),
+							Err(refusal) => {
+								super::request_stream::write_error(
+									&mut stream.writer,
+									request::Kind::SubscribeNamespace,
+									&refusal.error,
+									&refusal.reason,
+									self.version,
+								)
+								.await?;
+								let _ = stream.writer.close().await;
+								break Ok(());
+							}
+						}
 					}
 					if let Some(next) = update.prefix.filter(|next| next != &prefix) {
 						// DONE still names the old prefix. After OK every suffix is relative
@@ -7166,6 +7273,7 @@ mod serve_tests {
 				.unwrap();
 			let mut fetch_body = Vec::new();
 			ietf::Fetch {
+				authorization_token: None,
 				request_id: FETCH_ID,
 				subscriber_priority: 128,
 				group_order: GroupOrder::Ascending,
@@ -8346,6 +8454,7 @@ mod serve_tests {
 			let mut running = std::pin::pin!(h.publisher.clone().run_subscribe_namespace_stream(
 				stream,
 				ietf::SubscribeNamespace {
+					authorization_token: None,
 					request_id: RequestId(0),
 					namespace: crate::Path::empty(),
 					hidden: false
@@ -8386,6 +8495,7 @@ mod serve_tests {
 			.await
 			.unwrap();
 		let msg = ietf::SubscribeNamespace {
+			authorization_token: None,
 			request_id: RequestId(0),
 			namespace: crate::Path::from_static("room"),
 			hidden: false,
@@ -8430,6 +8540,7 @@ mod serve_tests {
 				.await
 				.unwrap();
 			let msg = ietf::SubscribeNamespace {
+				authorization_token: None,
 				request_id: RequestId(0),
 				namespace: crate::Path::from_static("old"),
 				hidden: false,
@@ -8482,6 +8593,7 @@ mod serve_tests {
 				.await
 				.unwrap();
 			let msg = ietf::SubscribeNamespace {
+				authorization_token: None,
 				request_id: RequestId(0),
 				namespace: crate::Path::from_static(""),
 				hidden: false,
@@ -8620,6 +8732,7 @@ mod serve_tests {
 		let mut subscribe = subscribe(Filter::NextObject, None);
 		subscribe.epoch = Some(epoch.clone());
 		let fetch = ietf::Fetch {
+			authorization_token: None,
 			request_id: RequestId(REQUEST_ID),
 			subscriber_priority: 128,
 			group_order: GroupOrder::Ascending,
@@ -8635,6 +8748,7 @@ mod serve_tests {
 			epoch: Some(epoch.clone()),
 		};
 		let status = ietf::TrackStatus {
+			authorization_token: None,
 			request_id: RequestId(REQUEST_ID),
 			track_namespace: crate::Path::from_static("room"),
 			track_name: "video".into(),
@@ -8773,6 +8887,7 @@ mod serve_tests {
 
 	fn track_status(namespace: &str, wanted: bool, version: Version) -> Vec<u8> {
 		let msg = ietf::TrackStatus {
+			authorization_token: None,
 			request_id: RequestId(REQUEST_ID),
 			track_namespace: crate::Path::new(namespace).unwrap(),
 			track_name: "video".into(),
@@ -8912,28 +9027,29 @@ mod serve_tests {
 		}
 	}
 
-	/// A request's USE_VALUE token decodes but grants nothing yet, so a TRACK_STATUS outside
-	/// the session grant is still refused.
+	/// A TRACK_STATUS uses its own token without admitting the next unnamed request.
 	#[moq_clock::test]
-	async fn a_request_token_does_not_widen_the_grant() {
-		let nothing = crate::auth::Grant {
-			publish: Default::default(),
-			subscribe: Default::default(),
-			expires: None,
-		};
-		for version in [Version::Draft22] {
+	async fn track_status_uses_only_its_named_token() {
+		for version in ALL_VERSIONS {
 			let mut h = serve(version);
 			let auth = crate::auth::Link::new(false);
-			auth.handle().authorize(&nothing);
+			let mut requests = auth.handle().requests();
+			auth.handle().authorize(&crate::auth::Grant::default());
 			h.publisher = h.publisher.clone().with_auth(auth);
-
 			let mut body = track_status("room", true, version);
-			// Replace the empty parameter block with an AUTHORIZATION TOKEN: USE_VALUE, type 0.
-			assert_eq!(body.pop(), Some(0), "{version}");
+			assert_eq!(body.pop(), Some(0));
 			body.extend([0x01, 0x03, 0x03, 0x03, 0x00, 0xAA]);
-
+			let answer = answer_code(&h, body, version);
+			let (code, issued) = futures::join!(answer, async {
+				requests.next().await.unwrap().accept(crate::auth::Grant::all())
+			});
+			assert_eq!(code, None);
+			assert!(matches!(issued.closed().await, Error::Cancel));
 			let unauthorized = request::to_code(&Error::Unauthorized, request::Kind::TrackStatus, version);
-			assert_eq!(answer_code(&h, body, version).await, Some(unauthorized), "{version}");
+			assert_eq!(
+				answer_code(&h, track_status("room", true, version), version).await,
+				Some(unauthorized)
+			);
 		}
 	}
 
@@ -8976,6 +9092,7 @@ mod serve_tests {
 			let mut answer = std::pin::pin!(publisher.clone().run_track_status_stream(
 				stream,
 				ietf::TrackStatus {
+					authorization_token: None,
 					request_id: RequestId(REQUEST_ID),
 					track_namespace: crate::Path::from_static("room"),
 					track_name: "video".into(),
@@ -9120,6 +9237,7 @@ mod serve_tests {
 						.run_fetch_stream(
 							stream,
 							ietf::Fetch {
+								authorization_token: None,
 								request_id: RequestId(REQUEST_ID),
 								subscriber_priority: 128,
 								group_order: GroupOrder::Descending,
@@ -9331,6 +9449,7 @@ mod serve_tests {
 		let mut body = Vec::new();
 		let mut w = Encoder::new(&mut body, version.into());
 		ietf::SubscribeNamespace {
+			authorization_token: None,
 			request_id: RequestId(REQUEST_ID),
 			namespace: crate::Path::from_static(""),
 			hidden: false,
@@ -10094,6 +10213,7 @@ mod serve_tests {
 			.run_fetch_stream(
 				stream,
 				ietf::Fetch {
+					authorization_token: None,
 					request_id: FETCH_ID,
 					subscriber_priority: 128,
 					group_order: GroupOrder::Ascending,
@@ -10417,6 +10537,7 @@ mod serve_tests {
 			.run_fetch_stream(
 				stream,
 				ietf::Fetch {
+					authorization_token: None,
 					request_id: FETCH_ID,
 					subscriber_priority: 128,
 					group_order: GroupOrder::Ascending,
@@ -10649,6 +10770,7 @@ mod serve_tests {
 			.run_fetch_stream(
 				stream,
 				ietf::Fetch {
+					authorization_token: None,
 					request_id: FETCH_ID,
 					subscriber_priority: 128,
 					group_order,
@@ -10744,6 +10866,65 @@ mod serve_tests {
 			assert!(!ok.end_of_track, "{version}");
 			assert_eq!(objects, pairs([2]), "{version}");
 			assert!(h.log.resets().is_empty(), "{version}");
+		}
+	}
+
+	#[moq_clock::test]
+	async fn standalone_fetch_uses_only_its_named_token() {
+		for version in FETCH_DRAFTS {
+			let mut h = serve(version);
+			publish_pairs(&mut h, 1, None);
+			settle().await;
+			let auth = crate::auth::Link::new(false);
+			let mut requests = auth.handle().requests();
+			auth.handle().authorize(&crate::auth::Grant::default());
+			h.publisher = h.publisher.clone().with_auth(auth);
+			let msg = ietf::Fetch {
+				authorization_token: Some(request_token()),
+				request_id: FETCH_ID,
+				subscriber_priority: 128,
+				group_order: GroupOrder::Ascending,
+				fetch_type: fetch_range(
+					version,
+					"video",
+					Location { group: 0, object: 0 },
+					Location { group: 0, object: 0 },
+				),
+				range_filters: false,
+				fill_timeout: false,
+				properties_wanted: true,
+				epoch: None,
+			};
+			let mut body = Vec::new();
+			msg.encode_msg(&mut Encoder::new(&mut body, version.into()), version)
+				.unwrap();
+			let stream = Stream::open(&mut crate::driver::Transport::new(h.session.clone()), version)
+				.await
+				.unwrap();
+			let mark = h.log.writes.lock().unwrap().len();
+			let serving = h
+				.publisher
+				.clone()
+				.handle_stream(ietf::Fetch::ID, ietf::Body(body.into()), stream, false)
+				.unwrap();
+			let ((), issued) = futures::join!(serving, async {
+				requests.next().await.unwrap().accept(crate::auth::Grant::all())
+			});
+			let wire = bytes::Bytes::from(h.log.writes.lock().unwrap()[mark..].to_vec());
+			let (_, objects) = fetch_answer(wire, version);
+			assert_eq!(objects, pairs([0]));
+			assert!(matches!(issued.closed().await, Error::Cancel));
+			let mut unnamed = msg;
+			unnamed.authorization_token = None;
+			let stream = Stream::open(&mut crate::driver::Transport::new(h.session.clone()), version)
+				.await
+				.unwrap();
+			let mark = h.log.writes.lock().unwrap().len();
+			h.publisher.clone().run_fetch_stream(stream, unnamed).await.unwrap();
+			assert_eq!(
+				refusal_code(&h.log.writes.lock().unwrap()[mark..], version),
+				Some(request::to_code(&Error::Unauthorized, request::Kind::Fetch, version))
+			);
 		}
 	}
 
@@ -11672,6 +11853,7 @@ mod serve_tests {
 			let mut fetch = std::pin::pin!(publisher.run_fetch_stream(
 				stream,
 				ietf::Fetch {
+					authorization_token: None,
 					request_id: FETCH_ID,
 					subscriber_priority: 128,
 					group_order: GroupOrder::Ascending,
@@ -11755,6 +11937,7 @@ mod serve_tests {
 		let mut fetch = Box::pin(publisher.run_fetch_stream(
 			stream,
 			ietf::Fetch {
+				authorization_token: None,
 				request_id: FETCH_ID,
 				subscriber_priority: 128,
 				group_order: GroupOrder::Ascending,
@@ -11878,6 +12061,7 @@ mod serve_tests {
 				let mut fetch = std::pin::pin!(publisher.clone().run_fetch_stream(
 					stream,
 					ietf::Fetch {
+						authorization_token: None,
 						request_id: FETCH_ID,
 						subscriber_priority: 128,
 						group_order: GroupOrder::Ascending,
@@ -12003,6 +12187,7 @@ mod serve_tests {
 			let mut fetch = std::pin::pin!(publisher.clone().run_fetch_stream(
 				stream,
 				ietf::Fetch {
+					authorization_token: None,
 					request_id: FETCH_ID,
 					subscriber_priority: 128,
 					group_order: GroupOrder::Ascending,
@@ -12268,6 +12453,7 @@ mod serve_tests {
 						.run_fetch_stream(
 							stream,
 							ietf::Fetch {
+								authorization_token: None,
 								request_id: RequestId(REQUEST_ID),
 								subscriber_priority: 128,
 								group_order: GroupOrder::Ascending,
@@ -12291,6 +12477,7 @@ mod serve_tests {
 						.run_track_status_stream(
 							stream,
 							ietf::TrackStatus {
+								authorization_token: None,
 								request_id: RequestId(REQUEST_ID),
 								track_namespace: crate::Path::from_static("room"),
 								track_name: "video".into(),
@@ -12492,6 +12679,7 @@ mod serve_tests {
 					.run_fetch_stream(
 						stream,
 						ietf::Fetch {
+							authorization_token: None,
 							request_id: FETCH_ID,
 							subscriber_priority: 128,
 							group_order: GroupOrder::Ascending,
@@ -12542,6 +12730,7 @@ mod serve_tests {
 			.run_fetch_stream(
 				stream,
 				ietf::Fetch {
+					authorization_token: None,
 					request_id: FETCH_ID,
 					subscriber_priority: 128,
 					group_order: GroupOrder::Ascending,
@@ -12865,7 +13054,10 @@ mod serve_tests {
 			subscriber_priority: Some(128),
 			forward: Some(forward),
 			filter: None,
-			authorization_token: Some(request_token()),
+			authorization_token: Some(crate::ietf::token::RequestToken(crate::setup::Token {
+				kind: 0,
+				value: 0x40_u64.to_be_bytes().to_vec(),
+			})),
 			fill: None,
 		};
 		writer.varint(ietf::SubscribeUpdate::ID).await.unwrap();
@@ -13054,7 +13246,10 @@ mod serve_tests {
 			subscriber_priority: Some(128),
 			forward: Some(true),
 			filter: None,
-			authorization_token: Some(request_token()),
+			authorization_token: Some(crate::ietf::token::RequestToken(crate::setup::Token {
+				kind: 0,
+				value: rid.to_be_bytes().to_vec(),
+			})),
 			fill: None,
 		};
 		writer.varint(ietf::SubscribeUpdate::ID).await.unwrap();
@@ -14571,6 +14766,7 @@ mod tests {
 			.await
 			.unwrap();
 		let msg = ietf::SubscribeNamespace {
+			authorization_token: None,
 			request_id: RequestId(1),
 			namespace: crate::Path::from_static(""),
 			hidden: false,
@@ -14642,6 +14838,7 @@ mod tests {
 			.await
 			.unwrap();
 		let msg = ietf::SubscribeNamespace {
+			authorization_token: None,
 			request_id: RequestId(1),
 			namespace: crate::Path::from_static(""),
 			hidden: false,
@@ -15106,6 +15303,7 @@ mod tests {
 			.await
 			.unwrap();
 		let msg = ietf::SubscribeNamespace {
+			authorization_token: None,
 			request_id: RequestId(1),
 			namespace: crate::Path::new(prefix).unwrap(),
 			hidden,
@@ -15236,6 +15434,7 @@ mod tests {
 				.await
 				.unwrap();
 			let msg = ietf::SubscribeNamespace {
+				authorization_token: None,
 				request_id: RequestId(1),
 				namespace: crate::Path::from_static(""),
 				hidden: false,
@@ -16687,6 +16886,7 @@ mod tests {
 			.run_fetch_stream(
 				stream,
 				ietf::Fetch {
+					authorization_token: None,
 					request_id: RequestId(1),
 					subscriber_priority: 128,
 					group_order: GroupOrder::Descending,

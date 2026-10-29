@@ -12,6 +12,8 @@ use super::Version;
 /// SUBSCRIBE_NAMESPACE message (type 0x50).
 #[derive(Clone, Debug)]
 pub struct SubscribeNamespace {
+	/// The credential authorizing this request alone.
+	pub authorization_token: Option<super::token::RequestToken>,
 	pub request_id: RequestId,
 	pub namespace: Path,
 	/// MoQ Hidden: also advertise hidden namespaces. Only sent to a peer that declared
@@ -39,23 +41,23 @@ impl<'a> Message<'a> for SubscribeNamespace {
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		encode_namespace(w, &self.namespace)?;
-		encode_params!(w, version, HIDDEN_PARAM => hidden_param(self.hidden));
+		encode_params!(w, version, HIDDEN_PARAM => hidden_param(self.hidden), 0x03 => self.authorization_token.clone());
 		Ok(())
 	}
 
 	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
 		let namespace = decode_namespace(r)?;
-		// The token decodes but grants nothing: the session's grant is what authorizes the request.
 		decode_params!(r, version,
 			0x03 => authorization_token: Vec<super::token::RequestToken>,
 			HIDDEN_PARAM => hidden: Option<u64>,
 		);
 		let hidden = hidden_from_param(hidden)?;
 		// Last, so a malformed field closes the session before a token refusal.
-		super::token::single(authorization_token)?;
+		let authorization_token = super::token::single(authorization_token)?;
 
 		Ok(Self {
+			authorization_token,
 			request_id,
 			namespace,
 			hidden,
@@ -374,6 +376,7 @@ mod tests {
 	fn body_has_no_subscribe_options() {
 		// Request ID (0x00), empty namespace field-count (0x00), Number of Parameters (0x00).
 		let msg = SubscribeNamespace {
+			authorization_token: None,
 			request_id: RequestId(0),
 			namespace: Path::default(),
 			hidden: false,
@@ -384,6 +387,7 @@ mod tests {
 	#[test]
 	fn round_trips() {
 		let msg = SubscribeNamespace {
+			authorization_token: None,
 			request_id: RequestId(4),
 			namespace: Path::from_static("example/meeting"),
 			hidden: false,
@@ -401,6 +405,7 @@ mod tests {
 	fn hidden_round_trips() {
 		for hidden in [false, true] {
 			let msg = SubscribeNamespace {
+				authorization_token: None,
 				request_id: RequestId(4),
 				namespace: Path::from_static("example"),
 				hidden,

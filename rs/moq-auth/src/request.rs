@@ -21,6 +21,9 @@ pub struct Request {
 	/// Random 128-bit hex, unique per session; the key every event for it shares.
 	pub id: String,
 
+	/// The attached credential this event concerns; absent for the connection itself.
+	pub auth: Option<String>,
+
 	/// Which lifecycle event this is, with what an `end` carries.
 	#[serde(flatten)]
 	pub event: Event,
@@ -77,6 +80,7 @@ impl Request {
 		let id: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
 		Self {
 			id,
+			auth: None,
 			event: Event::Connect,
 			node: node.into(),
 			transport,
@@ -131,6 +135,8 @@ pub enum Event {
 		/// What it moved.
 		bytes: Bytes,
 	},
+	/// Another credential asks to join the connection, identified by `auth`.
+	Attach,
 }
 
 /// How a session reached the relay, including QUIC, relay HTTP, and gateways.

@@ -1418,6 +1418,7 @@ impl Subscriber {
 		let stream = &mut request.stream;
 
 		let msg = ietf::SubscribeNamespace {
+			authorization_token: None,
 			request_id,
 			namespace: prefix.clone(),
 			hidden,
@@ -2926,6 +2927,9 @@ impl Subscriber {
 		group_fetches: &mut TaskSet,
 		gate: &mut crate::auth::Gate,
 	) -> Option<Idle> {
+		let mut request_gate = gate.unnamed();
+		let gate = &mut request_gate;
+		let mut token_grant = None;
 		let validity = self.validity.start();
 		let mut resolved = ResolvedRanges::default();
 		let subscription = target
@@ -2986,6 +2990,7 @@ impl Subscriber {
 			Some(upstream) => {
 				self.adopted(&key, upstream.request_id);
 				let tracks::Upstream {
+					token_grant: token,
 					stream,
 					messages,
 					request_id,
@@ -2995,6 +3000,10 @@ impl Subscriber {
 					// This subscription forwards into the copy itself from here.
 					copy: _,
 				} = upstream;
+				if let Some(token) = &token {
+					gate.bind(token.clone());
+				}
+				token_grant = token;
 				held = Some(tracks::Resumed {
 					alias,
 					properties,
@@ -3238,6 +3247,7 @@ impl Subscriber {
 				&& self.state.lock().subscribes.contains_key(&request_id)
 			{
 				let upstream = tracks::Upstream {
+					token_grant: token_grant.clone(),
 					stream,
 					messages,
 					request_id,
@@ -3773,6 +3783,7 @@ impl Subscriber {
 			// A listed track's subscription pauses rather than ends, held again as its entry.
 			track.set_idle();
 			let upstream = tracks::Upstream {
+				token_grant: token_grant.clone(),
 				stream,
 				messages,
 				request_id,
@@ -4091,6 +4102,7 @@ impl Subscriber {
 					stream
 						.writer
 						.encode_message(&ietf::Fetch {
+							authorization_token: None,
 							request_id: fetch_id,
 							subscriber_priority: super::priority::to_wire(
 								track.subscription().map(|s| s.priority).unwrap_or(0),
@@ -4260,6 +4272,7 @@ impl Subscriber {
 			stream
 				.writer
 				.encode_message(&ietf::TrackStatus {
+					authorization_token: None,
 					request_id,
 					track_namespace: broadcast_path.clone(),
 					track_name: track_name.into(),
@@ -5385,6 +5398,7 @@ impl Subscriber {
 			stream
 				.writer
 				.encode_message(&ietf::Fetch {
+					authorization_token: None,
 					request_id: fetch_id,
 					subscriber_priority: super::priority::to_wire(fill.priority()),
 					group_order: GroupOrder::Ascending,
@@ -9894,6 +9908,7 @@ mod tests {
 				.await
 				.unwrap();
 			let msg = ietf::Publish {
+				authorization_token: None,
 				request_id: RequestId(1),
 				track_namespace: crate::Path::from_static("room/host"),
 				track_name: "video".into(),
@@ -10066,7 +10081,10 @@ mod tests {
 			request_id: RequestId(3),
 			hops: None,
 			cost: None,
-			authorization_token: Some(announce_token()),
+			authorization_token: Some(crate::ietf::token::RequestToken(crate::setup::Token {
+				kind: 0,
+				value: 3_u64.to_be_bytes().to_vec(),
+			})),
 		};
 		writer.varint(ietf::PublishNamespaceUpdate::ID).await.unwrap();
 		writer.encode(&msg).await.unwrap();
@@ -10085,7 +10103,10 @@ mod tests {
 			request_id: RequestId(3),
 			hops: Some(hop_path(&[7, 9])),
 			cost: Some(0),
-			authorization_token: Some(announce_token()),
+			authorization_token: Some(crate::ietf::token::RequestToken(crate::setup::Token {
+				kind: 0,
+				value: 3_u64.to_be_bytes().to_vec(),
+			})),
 		};
 		writer.varint(ietf::PublishNamespaceUpdate::ID).await.unwrap();
 		writer.encode(&msg).await.unwrap();
@@ -10878,7 +10899,10 @@ mod tests {
 			request_id: RequestId(rid),
 			hops,
 			cost,
-			authorization_token: Some(announce_token()),
+			authorization_token: Some(crate::ietf::token::RequestToken(crate::setup::Token {
+				kind: 0,
+				value: rid.to_be_bytes().to_vec(),
+			})),
 		};
 		writer.varint(ietf::PublishNamespaceUpdate::ID).await.unwrap();
 		writer.encode(&msg).await.unwrap();
@@ -12575,6 +12599,7 @@ mod stitch_tests {
 				}
 			};
 			ietf::Fetch {
+				authorization_token: None,
 				request_id: RequestId(3),
 				subscriber_priority: 128,
 				group_order: ietf::GroupOrder::Ascending,
@@ -14432,6 +14457,7 @@ mod stitch_tests {
 			};
 			let mut body = Vec::new();
 			ietf::Fetch {
+				authorization_token: None,
 				request_id: RequestId(3),
 				subscriber_priority: 128,
 				group_order: ietf::GroupOrder::Ascending,

@@ -1329,6 +1329,7 @@ pub fn seeds() -> Vec<Seed> {
 		];
 		let Some(encoded) = fetch_types.into_iter().find_map(|fetch_type| {
 			let fetch = ietf::Fetch {
+				authorization_token: None,
 				request_id: ietf::RequestId(0),
 				subscriber_priority: 128,
 				group_order: ietf::GroupOrder::Ascending,

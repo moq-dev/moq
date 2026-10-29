@@ -332,6 +332,7 @@ impl<'a> Decode<'a, Version> for Update {
 /// FORWARD.
 #[derive(Debug)]
 pub(super) struct NamespaceUpdate<const TRACKS: bool = false> {
+	pub(super) authorization_token: Option<super::token::RequestToken>,
 	pub(super) request_id: super::RequestId,
 	pub(super) prefix: Option<crate::Path>,
 	pub(super) refused: Option<Error>,
@@ -368,10 +369,15 @@ impl<'a, const TRACKS: bool> Decode<'a, Version> for NamespaceUpdate<TRACKS> {
 			if !data.is_empty() {
 				return Err(DecodeError::InvalidValue);
 			}
+			let (authorization_token, refused) = match super::token::single(token) {
+				Ok(token) => (token, None),
+				Err(err) => (None, Some(err.into())),
+			};
 			Ok(Self {
 				request_id,
 				prefix: prefix.map(|p| p.0),
-				refused: super::token::single(token).err().map(Into::into),
+				authorization_token,
+				refused,
 			})
 		};
 		let update = decode().map_err(DecodeError::complete)?;

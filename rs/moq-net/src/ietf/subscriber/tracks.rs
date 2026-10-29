@@ -42,6 +42,7 @@ pub(super) fn listing_end(done: &ietf::PublishDone, version: Version) -> Result<
 
 /// A paused upstream subscription and the request stream that controls it.
 pub(super) struct Upstream {
+	pub(super) token_grant: Option<crate::auth::RequestGrant>,
 	pub(super) stream: Stream<Transport, Version>,
 	pub(super) messages: Messages,
 	pub(super) request_id: RequestId,
@@ -710,6 +711,7 @@ impl Subscriber {
 			return Ok(None);
 		}
 		Ok(Some(Upstream {
+			token_grant: None,
 			stream,
 			messages,
 			request_id,
@@ -747,6 +749,54 @@ impl Subscriber {
 		mut stream: Stream<Transport, Version>,
 		msg: ietf::Publish<'static>,
 	) -> Result<(), Error> {
+		let token_grant = if let Some(token) = msg
+			.authorization_token
+			.clone()
+			.filter(|_| self.auth.token_decides(crate::auth::Direction::Subscribe))
+		{
+			let credit = kio::Producer::<()>::default();
+			let hold: crate::auth::Hold = std::sync::Arc::new(credit.consume());
+			let verdict = self.auth.verify_request(token.0, Some(hold));
+			let session = self.session.clone();
+			let verified = kio::wait(|waiter| {
+				if session.poll_closed(waiter).is_ready()
+					|| request_stream::poll_withdrawn(&mut stream, self.version, waiter).is_ready()
+				{
+					return Poll::Ready(None);
+				}
+				verdict.poll_grant(waiter).map(Some)
+			})
+			.await;
+			let Some(verified) = verified else {
+				drop(verdict);
+				kio::wait(|waiter| {
+					if session.poll_closed(waiter).is_ready() || credit.poll_unused(waiter).is_ready() {
+						Poll::Ready(())
+					} else {
+						Poll::Pending
+					}
+				})
+				.await;
+				return Ok(());
+			};
+			match crate::auth::RequestGrant::new(
+				&self.runtime,
+				verdict,
+				verified,
+				msg.track_namespace.clone(),
+				crate::auth::RequestKind::Publish,
+				None,
+			) {
+				Ok(grant) => Some(grant),
+				Err(refusal) => {
+					return self
+						.write_publish_error(&mut stream, &refusal.error, &refusal.reason)
+						.await;
+				}
+			}
+		} else {
+			None
+		};
 		let key: TrackKey = (msg.track_namespace.clone(), msg.track_name.as_ref().into());
 		let info = accepted_info(&msg.properties, self.version);
 		let flate = self.peer_setup.get().await.flate;
@@ -842,7 +892,7 @@ impl Subscriber {
 				..TrackState::pending(key.1.to_string(), key.0.clone(), kio::Producer::new(Fill::Done))
 			},
 		);
-		let ok = async {
+		let ok = crate::auth::RequestGrant::guard(token_grant.as_ref(), async {
 			self.bind_alias(request_id, msg.track_alias)?;
 			// PUBLISH_OK is a REQUEST_OK on draft-22. FORWARD=0 holds it paused on draft-18;
 			// on draft-22 the PUBLISH our FORWARD=0 asked for already is.
@@ -861,8 +911,10 @@ impl Subscriber {
 				},
 			)?;
 			kio::wait(|waiter| stream.writer.poll_flush(waiter)).await
-		}
-		.await;
+		})
+		.await
+		.map_err(|refusal| refusal.error)
+		.and_then(|result| result);
 		if let Err(err) = ok {
 			tracing::debug!(broadcast = %key.0, track = %key.1, %err, "failed to hold publish");
 			self.remove_subscribe(request_id);
@@ -875,6 +927,7 @@ impl Subscriber {
 		}
 		tracing::debug!(broadcast = %crate::path::Rooted(self.origin.root(), &key.0), track = %key.1, id = %request_id, "holding publish");
 		let upstream = Upstream {
+			token_grant,
 			stream,
 			messages: Messages::new(self.session.clone(), self.control.client()),
 			request_id,
@@ -910,6 +963,11 @@ impl Subscriber {
 						true => Step::Gone,
 						false => Step::Wanted,
 					});
+				}
+				if let Some(grant) = &upstream.token_grant
+					&& let Poll::Ready(refusal) = grant.poll_ended(waiter)
+				{
+					return Poll::Ready(Step::Message(Err(refusal.error)));
 				}
 				upstream
 					.messages
@@ -1437,6 +1495,7 @@ mod tests {
 	/// A paused PUBLISH of `name` in `namespace`, aliased by its request ID.
 	fn offered<'a>(namespace: &'a str, name: &'a str, request_id: u64) -> ietf::Publish<'a> {
 		ietf::Publish {
+			authorization_token: None,
 			request_id: RequestId(request_id),
 			track_namespace: Path::new(namespace).unwrap(),
 			track_name: name.into(),
