@@ -489,7 +489,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 		// Enroll every track for HLS records: passthrough writes groups by hand (no
 		// `container::Producer`), so the recorder is fed directly at each fragment.
-		let recorder = self.catalog.enroll(track.name(), None)?;
+		let mut recorder = self.catalog.enroll(track.name(), None)?;
+		if let Some(recorder) = recorder.as_mut() {
+			recorder.lend(&track);
+		}
 
 		// Whatever the descriptor declared (a bitrate) is authoritative; the rest is filled by
 		// `estimate` as fragments arrive.

@@ -288,15 +288,6 @@ fn close_kind(error: &(dyn std::error::Error + 'static)) -> moq::CloseKind {
 			_ => moq::CloseKind::Transport,
 		};
 	}
-	#[cfg(feature = "iroh")]
-	if let Some(error) = error.downcast_ref::<web_transport_iroh::iroh::endpoint::ConnectionError>() {
-		use web_transport_iroh::iroh::endpoint::ConnectionError;
-		return match error {
-			ConnectionError::TimedOut => moq::CloseKind::IdleTimeout,
-			ConnectionError::LocallyClosed => moq::CloseKind::Closed,
-			_ => moq::CloseKind::Transport,
-		};
-	}
 	error.source().map(close_kind).unwrap_or_default()
 }
 
@@ -321,26 +312,6 @@ mod outcome_tests {
 			code: 0u32.into(),
 			reason: String::new(),
 		}));
-		assert!(matches!(
-			moq_net::Error::from_transport(local),
-			moq_net::Error::Session(moq_net::SessionError::Cancel)
-		));
-	}
-}
-
-#[cfg(all(test, feature = "iroh"))]
-mod iroh_outcome_tests {
-	use super::*;
-	use web_transport_iroh::{SessionError, iroh::endpoint::ConnectionError};
-
-	#[test]
-	fn typed_iroh_close_kinds_survive_the_error_source_chain() {
-		let idle = Error(SessionError::ConnectionError(ConnectionError::TimedOut));
-		assert!(matches!(
-			moq_net::Error::from_transport(idle),
-			moq_net::Error::IdleTimeout
-		));
-		let local = Error(SessionError::ConnectionError(ConnectionError::LocallyClosed));
 		assert!(matches!(
 			moq_net::Error::from_transport(local),
 			moq_net::Error::Session(moq_net::SessionError::Cancel)

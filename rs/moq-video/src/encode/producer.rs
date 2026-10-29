@@ -5,7 +5,8 @@
 //! the mode it negotiates, then keeps it open and encodes whether or not anyone is watching, so a
 //! late subscriber can reach the recent past within its `max_delay`. With
 //! `Capture::on_demand` it instead closes the camera between viewers, encoding only while
-//! [`Demand::wanted`](moq_net::track::Demand::wanted) is `Some`.
+//! [`Demand::wanted`](moq_net::track::Demand::wanted) is `Some`: a subscriber is watching, or
+//! reading its HLS records.
 //!
 //! Capture advertises [`track::Info::refresh`](moq_net::track::Info::refresh) when its encoder
 //! is sure to honor a cut, and forces a keyframe whenever a joining subscriber asks for a group
@@ -1627,9 +1628,6 @@ mod tests {
 						.hls
 						.clone()
 						.expect("the video track advertises its HLS records");
-					let mut records = moq_mux::hls::Consumer::subscribe(&fixture.consumer, &hls)
-						.await
-						.unwrap();
 
 					let mut live = Vec::new();
 					for _ in 0..2 {
@@ -1645,8 +1643,11 @@ mod tests {
 						tokio::time::sleep(moq_mux::hls::DEFAULT_DURATION + Duration::from_millis(100)).await;
 					}
 
-					let (mut catalog, _consumer) = fixture.finish().await;
+					let (mut catalog, consumer) = fixture.finish().await;
 					catalog.finish().unwrap();
+					// Read only now: a record reader is demand too, and would have kept the capture
+					// from idling between the runs.
+					let mut records = moq_mux::hls::Consumer::subscribe(&consumer, &hls).await.unwrap();
 					let mut listed = Vec::new();
 					while let Some(event) = records.next().await.unwrap() {
 						match event {
@@ -2099,6 +2100,55 @@ mod tests {
 			let _viewer = watched.subscribe(None);
 			let resumed = settle(run.as_mut(), |set| !set.is_empty()).await;
 			assert!(resumed.iter().all(|&bps| bps <= 500_000), "{resumed:?}");
+		}
+
+		/// On demand, an HLS export subscribes only to a rendition's records, never its media, yet
+		/// that alone opens the camera and records the segment it captures.
+		#[tokio::test(start_paused = true)]
+		async fn an_hls_only_viewer_starts_capture() {
+			local(async {
+				let mut broadcast = moq_net::broadcast::Info::new().produce();
+				let consumer = broadcast.consume();
+				let catalog =
+					moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+				let options = Capture {
+					kind: encoder::Kind::Software,
+					on_demand: true,
+					..Capture::default()
+				};
+				let (control, driver) = Control::new(broadcast.clone(), catalog, options).unwrap();
+				let (_probed, probe) = camera();
+				let (camera, stream) = camera();
+				let source = Streams::new([probe, stream]);
+				let opens = source.opens.clone();
+				let run = tokio::task::spawn_local(driver.run_with(source));
+
+				// The capture is hinted, so the catalog names its records before any segment.
+				let mut catalog =
+					moq_mux::catalog::Consumer::<()>::new(&consumer, moq_mux::catalog::CatalogFormat::Hang)
+						.await
+						.unwrap();
+				let hls = loop {
+					let snapshot = catalog.next().await.unwrap().expect("a catalog");
+					if let Some(hls) = snapshot.video.renditions.values().find_map(|config| config.hls.clone()) {
+						break hls;
+					}
+				};
+				assert_eq!(opens.load(Ordering::SeqCst), 1, "only the probe opened the camera");
+
+				let mut records = moq_mux::hls::Consumer::subscribe(&consumer, &hls).await.unwrap();
+				camera.push_native(surface(), us(0));
+				let event = records.next().await.unwrap().expect("a record");
+				assert!(
+					matches!(event, moq_mux::hls::Event::Push { index: 0, .. }),
+					"unexpected event {event:?}"
+				);
+				assert_eq!(opens.load(Ordering::SeqCst), 2, "the records' reader opened the camera");
+
+				drop(control);
+				run.await.unwrap().unwrap();
+			})
+			.await
 		}
 
 		/// Drop the controls while the driver sits in its `opens`th open, which never finishes.

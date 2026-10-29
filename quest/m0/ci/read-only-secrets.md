@@ -11,6 +11,10 @@ this repository itself, where GitHub hands a branch's workflows the
 repository's secrets. So this is what keeps code nobody has reviewed away
 from publishing and infrastructure credentials.
 
+Done when a throwaway branch's workflow, printing only whether each secret is
+non-empty, sees none of the write secrets listed below, then the branch is
+deleted.
+
 ## Plan
 
 Decided 2026-10-28 (maintainer, in kixelated/quest's
@@ -20,40 +24,48 @@ behind forks. moq-dev/moq is a kix pilot repository, so it should pass
 kix's [read-only CI check](https://github.com/kixelated/quest/blob/main/quest/m0/kix/ci-read-only.md)
 before contributors are invited.
 
-Found on 2026-10-28 from the settings API (the default workflow token is
-already `read`):
+Done in [moq-dev/moq#7166](https://github.com/moq-dev/moq/pull/7166): the
+`publish` and `npm` Environments exist, `pypi` and `pub.dev` admit only
+protected refs, the workflow token can no longer approve pull requests, and on
+`main` every job that uses a write secret or a publisher's OIDC identity names
+an Environment (see `infra/README.md`, "Write credentials"). The `release
+tags` ruleset now also covers `moq-ffi-v*` and `moq-dart-v*`, and `release-js`
+passes `JSR_TOKEN` from the `npm` Environment to `deno publish`, falling back to
+JSR's repository OIDC trust while the token is unset. The repository's
+`MBX_R2_*` pair is read-only: a branch's write to `mbx-moq-dev` is refused
+with AccessDenied.
 
-- **Repository-level secrets** reach every branch's workflows:
-  `CARGO_REGISTRY_TOKEN`, `CLOUDFLARE_API_TOKEN`, `DOCKER_USERNAME`,
-  `DOCKER_PASSWORD`, `MAVEN_CENTRAL_USERNAME`, `MAVEN_CENTRAL_PASSWORD`,
-  `SIGNING_KEY`, `SIGNING_PASSWORD`, `WINGET_TOKEN`, `R2_ACCESS_KEY_ID`,
-  `R2_SECRET_ACCESS_KEY`, `R2_ACCOUNT_ID`, `GCP_SERVICE_ACCOUNT_KEY`,
-  `CACHIX_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `META_MODEL_API_KEY`,
-  `APP_ID`, `APP_PRIVATE_KEY`, `MBX_R2_ACCESS_KEY_ID` and
-  `MBX_R2_SECRET_ACCESS_KEY`. Move each write-capable one into an environment
-  limited to the branches or tags whose workflows use it (`main`, `release`,
-  or release tags). Keep at repository level only those that can't write.
-- **Organization secrets** visible here: `APP_CLIENT_ID`, `APP_ID`,
-  `APP_PRIVATE_KEY` and `DISCORD_WEBHOOK`. The App key can write, so remove
-  this repository's access to the organization secret and supply the key only
-  through a protected environment. Gating the jobs that mint its token is not
-  enough: any branch can add a workflow that reads a visible secret.
-- **`pub.dev` and `pypi`** have no secrets, presumably OIDC trusted
-  publishing, and no deployment branch policy. So a branch's workflow can
-  claim either environment and get an identity the registry may trust. Limit
-  both to the release branch or tags.
-- **`MBX_R2_*` on pull requests**: confirm that the repository-level pair is a
-  read-only credential, not just mbx's read-only mode, since
-  [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) reports
-  "effective read-only" on release pull requests. Writes belong to the
-  `cache-write` pair, which is already limited to protected refs.
-- **`can_approve_pull_request_reviews` is on**, so a workflow's token can
-  approve a pull request. Turn it off unless a workflow needs it.
-- Moving a secret needs its value, so the maintainer does that part. Agents
-  can change workflows, environment policies and workflow permissions, but
-  only with the maintainer's agreement.
-- Verify by pushing a branch with a throwaway workflow that prints which
-  secrets are non-empty (never their values), then delete the branch.
+What remains, in order. Deleting a repository-level secret earlier breaks a
+publish, since jobs that do not name `publish` still read it:
+
+1. Backport the workflow changes to `release`. Release pushes and release
+   tags run `release`'s own copies of the workflows, which differ widely from
+   `main`'s.
+2. The maintainer copies each value into the `publish` Environment:
+   `CARGO_REGISTRY_TOKEN`, `CLOUDFLARE_API_TOKEN`, `DOCKER_USERNAME`,
+   `DOCKER_PASSWORD`, `MAVEN_CENTRAL_USERNAME`, `MAVEN_CENTRAL_PASSWORD`,
+   `SIGNING_KEY`, `SIGNING_PASSWORD`, `WINGET_TOKEN`, `R2_ACCESS_KEY_ID`,
+   `R2_SECRET_ACCESS_KEY`, `R2_ACCOUNT_ID`, `CACHIX_AUTH_TOKEN`,
+   `APP_PRIVATE_KEY` (the value jobs use today, the repository's, which
+   shadows the organization's) and `DISCORD_WEBHOOK`.
+3. Then deletes those repository secrets, the unused ones
+   (`GCP_SERVICE_ACCOUNT_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`,
+   `META_MODEL_API_KEY`, `APP_ID`), and this repository's access to the
+   organization's `APP_PRIVATE_KEY` and `DISCORD_WEBHOOK`. `APP_CLIENT_ID`
+   and `APP_ID` are identifiers and can stay. `MBX_R2_*` stays.
+4. The maintainer names the Environment in each trusted publisher: npm's
+   (`npm`, for every `@moq/*` package), PyPI's (`pypi`, for `moq-rs` and
+   `moq-ffi`) and pub.dev's (`pub.dev`, for `moq` and `moq_ffi`). Until then a
+   branch can still claim their OIDC identity by copying the workflow file.
+5. JSR cannot require an Environment, so the maintainer creates a JSR publish
+   token for the `@moq` scope, adds it as `JSR_TOKEN` in the `npm`
+   Environment, then unlinks the GitHub repository from each JSR package
+   (`@moq/auth`, `clock`, `hang`, `json`, `loc`, `msf`, `net`, `pattern`,
+   `qmux`, `room`, `signals`, `video`) so a branch cannot publish through
+   JSR's OIDC trust. Until the token exists, unlinking pauses JSR
+   publishing.
+6. Verify with the throwaway branch in the Goal, which also confirms each
+   Environment refuses the branch.
 
 ## Related
 
