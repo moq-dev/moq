@@ -1306,6 +1306,44 @@ async fn a_pmt_moved_onto_a_draining_stream_waits_for_it() {
 	);
 }
 
+/// A catalog that gives a stream back the PID the PMT waits to move onto fails the export.
+#[tokio::test(start_paused = true)]
+async fn a_stream_returning_to_the_pid_the_pmt_waits_for_fails_the_export() {
+	let (mut broadcast, consumer, mut catalog) = broadcast();
+	catalog.modify().unwrap().ext.mpegts.program = Some(program(PMT_PID));
+	let (_, mut audio) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
+	let (name, mut leaving) = aac_track(&mut broadcast, &mut catalog, Some(OTHER_AUDIO_PID));
+	let config = catalog.snapshot().audio.renditions[&name].clone();
+	let mut frames = Vec::new();
+	let start = tokio::time::Instant::now();
+	let mut export = export_of(&consumer).await;
+	let mut tracks = [(&mut audio, 0x21), (&mut leaving, 0x22)];
+	live(&mut export, &mut frames, start, &mut tracks, 0, 3_000).await;
+	remove(&mut catalog, &name);
+	catalog.modify().unwrap().ext.mpegts.program = Some(program(OTHER_AUDIO_PID));
+	live(&mut export, &mut frames, start, &mut tracks, 3_000, 3_500).await;
+	{
+		let mut guard = catalog.modify().unwrap();
+		guard.audio.renditions.insert(name.clone(), config);
+		guard
+			.ext
+			.mpegts
+			.tracks
+			.insert(name, super::catalog::Track::new(OTHER_AUDIO_PID));
+	}
+	let err = tokio::time::timeout(DELAY * 2, async {
+		loop {
+			if let Err(err) = export.next().await {
+				return err;
+			}
+		}
+	})
+	.await
+	.expect("the export fails");
+	assert!(err.to_string().contains("another stream rides"), "{err}");
+	assert_eq!(pats(&frames), [(0, PMT_PID)]);
+}
+
 /// A move landing while a copy of the tables is on its way waits for that copy: at a rate low
 /// enough that a copy spans slots, every PMT packet rides the PID the PAT before it names, and
 /// no two PATs at one version name different PIDs.

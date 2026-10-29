@@ -2823,18 +2823,21 @@ where
 	/// Follow a catalog that moves the PMT to another PID: the PAT of the next tables names it,
 	/// at the PAT's next version ([`Psi::current`]). A move onto a PID a stream the catalog
 	/// dropped still drains on waits for it ([`Self::follow_pmt`]); one onto a PID the catalog
-	/// gives a stream or SI, the clock's own PID, or no PID at all is refused. A catalog that
-	/// records no PID keeps the PMT where it is.
+	/// gives a stream or SI, the clock's own PID, or no PID at all is refused, as is a catalog
+	/// that gives the PID to a stream while the move waits. A catalog that records no PID keeps
+	/// the PMT where it is.
 	fn move_pmt(&mut self, mpegts: &catalog::Mpegts) -> anyhow::Result<()> {
-		let Some(psi) = &self.program.psi else {
-			return Ok(());
-		};
 		let Some(pid) = self.program.program.as_ref().map(|s| s.pmt_pid).filter(|&pid| pid != 0) else {
 			return Ok(());
 		};
-		if pid == psi.moving.unwrap_or(psi.pmt_pid) {
+		let Some(psi) = self.program.psi.as_mut() else {
+			return Ok(());
+		};
+		if pid == psi.pmt_pid {
+			psi.moving = None;
 			return Ok(());
 		}
+		let psi = &*psi;
 		anyhow::ensure!(pid < 0x1fff, "TS export cannot move the PMT to PID {pid:#06x}");
 		let taken = psi.own_clock() == Some(pid)
 			|| mpegts.si.contains_key(&pid)
@@ -2848,8 +2851,7 @@ where
 			"TS export cannot move the PMT from PID {:#06x} to {pid:#06x}, which another stream rides",
 			psi.pmt_pid
 		);
-		let psi = self.program.psi.as_mut().expect("checked above");
-		psi.moving = (pid != psi.pmt_pid).then_some(pid);
+		self.program.psi.as_mut().expect("checked above").moving = Some(pid);
 		self.follow_pmt()
 	}
 
