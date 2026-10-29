@@ -76,10 +76,18 @@ fails at the final live group assertion (`None` instead of `Some(6)`,
 `relay=false`). The fill slot remains outstanding after the refused stream's
 header is discarded.
 
-Remaining: implement request-owned fill state, resolve conflicts with current
-main, and finish local checks and `just test interop --all`. Remove this quest
-and its links once implementation and validation are complete. Compatibility
-pin remeasurement remains owned by
+The subscriber fix is implemented: widening atomically retires an unidentified
+pending fill and reserves request-owned state. Active or ready heads retain their
+ownership until handoff. Delayed initial headers and retired update headers
+cannot claim a newer fill, including handlers already waiting for an answer.
+The unchanged widening integration case now passes. All 3,139 enabled moq-net
+tests pass (12 skipped), including the new delayed-header ownership case.
+
+Remaining: finish feasible local CI and `just test interop --all`. The initial
+interop run passed all nine Rust/JS protocol tests, then hit the local Cargo
+cache wrapper's `Argument list too long` error while building client binaries.
+A run using the same pinned Nix toolchain directly is queued through `quest gate`.
+Compatibility pin remeasurement remains owned by
 [moq-dev/moq#7061](https://github.com/moq-dev/moq/pull/7061); do not repin here.
 
 Public API: none. Wire: our publishers refuse multi-group FETCH with

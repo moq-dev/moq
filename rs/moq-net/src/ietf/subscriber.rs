@@ -767,7 +767,7 @@ struct TrackState {
 	// The exact sent update's fill floor; a snapshot below it opens no fill stream.
 	fill_start: Option<ietf::Location>,
 
-	// The joining FETCH's own request id, when one was sent.
+	// The joining FETCH or latest fill update's own request id, when one was sent.
 	fetch_id: Option<RequestId>,
 
 	// The data streams read so far, which PUBLISH_DONE's Stream Count is checked against.
@@ -3435,7 +3435,7 @@ impl Subscriber {
 			Revoked,
 			Done(Result<ietf::PublishDone<'static>, Error>),
 			Fill(track::Fill),
-			Update(Update),
+			Update(RequestId, Update),
 			Invalid(Error),
 		}
 
@@ -3568,21 +3568,7 @@ impl Subscriber {
 						(Some(end), Some(prior)) => end > prior,
 						_ => false,
 					};
-					// A widening's fill would own the head, so it waits for the prior fill to hand
-					// its head off. Nothing else does: a fill stream reset before its header names
-					// no request, so that fill never settles.
-					let deferred = widened
-						&& Filter::is_draft22(self.version)
-						&& fill
-							.poll(waiter, |fill| {
-								if fill.outstanding() {
-									Poll::Pending
-								} else {
-									Poll::Ready(())
-								}
-							})
-							.is_pending();
-					let ranges = if bounds != sent_bounds && !deferred {
+					let ranges = if bounds != sent_bounds {
 						let mut join = if Filter::is_draft22(self.version) {
 							match subscribe_join(bounds.0, bounds.1, self.version) {
 								Ok(join) => join,
@@ -3622,12 +3608,36 @@ impl Subscriber {
 					} else {
 						None
 					};
-					let update = Update {
+					let mut update = Update {
 						filter: ranges.as_ref().map(|join| join.filter),
 						fill: ranges.and_then(|join| join.fill),
 						priority: (priority != sent_priority).then_some(priority),
 						max_age: wanted_max_age.filter(|_| wanted_max_age != sent_max_age),
 						new_group,
+					};
+					let mut state = self.state.lock();
+					let Some(held) = state.subscribes.get_mut(&request_id) else {
+						return Poll::Ready(End::Idle);
+					};
+					// Reserve the new fill while holding the old slot. A stream that already
+					// owns a head must hand it off, but a reset may have discarded a pending
+					// fill's header, leaving nothing that could settle that request.
+					let prior_fill = held.fill.clone();
+					let filling = if update.fill.is_some() {
+						match prior_fill.poll(waiter, |fill| match **fill {
+							Fill::Active | Fill::Ready { .. } => Poll::Pending,
+							_ => Poll::Ready(()),
+						}) {
+							Poll::Ready(Ok(fill)) => Some(fill),
+							Poll::Ready(Err(_)) => return Poll::Ready(End::Invalid(Error::Cancel)),
+							Poll::Pending => {
+								update.filter = None;
+								update.fill = None;
+								None
+							}
+						}
+					} else {
+						None
 					};
 					if update.priority.is_none()
 						&& update.max_age.is_none()
@@ -3636,7 +3646,24 @@ impl Subscriber {
 					{
 						return Poll::Pending;
 					}
-					Poll::Ready(End::Update(update))
+					let update_id = self.control.next_request_id();
+					if let Some(mut filling) = filling {
+						// A handler may already have the old header and be waiting on its
+						// answer. It must keep the old state, never claim the new request.
+						filling.cancel();
+						drop(filling);
+						held.fill = kio::Producer::new(Fill::Requested);
+						held.fill_start = match update.fill.and_then(|fill| fill.filter.or(update.filter)) {
+							Some(Filter::Absolute { start, .. }) => Some(start),
+							_ => None,
+						};
+						let previous = held.fetch_id.replace(update_id);
+						if let Some(previous) = previous {
+							state.fetches.remove(&previous);
+						}
+						state.fetches.insert(update_id, FillRequest::Update(request_id));
+					}
+					Poll::Ready(End::Update(update_id, update))
 				})
 				.await;
 
@@ -3646,13 +3673,26 @@ impl Subscriber {
 						let _ = track.clone().abort(err);
 						break true;
 					}
-					End::Update(update) => {
+					End::Update(update_id, update) => {
 						let changed_range = update.filter.is_some();
 						if changed_range {
 							sent_bounds = wanted_bounds.clone().expect("validated update bounds");
 						}
 						let (asked, new_group, asked_age) = (update.priority, update.new_group, update.max_age);
-						if let Err(err) = self.write_update(&mut stream.writer, request_id, update).await {
+						if let Err(err) = stream
+							.writer
+							.encode_message(&ietf::SubscribeUpdate {
+								max_age: update.max_age,
+								request_id: update_id,
+								subscriber_priority: update.priority.map(super::priority::to_wire),
+								forward: None,
+								filter: update.filter,
+								authorization_token: None,
+								new_group: update.new_group,
+								fill: update.fill,
+							})
+							.await
+						{
 							tracing::debug!(%err, "failed to update the subscription");
 							ended = Some(Err(err.clone()));
 							let _ = track.clone().abort(err);
@@ -3981,43 +4021,6 @@ impl Subscriber {
 				}
 			}
 		}
-	}
-
-	/// Update an Established subscription: REQUEST_UPDATE carrying only what changed, under a
-	/// Request ID of its own.
-	async fn write_update(
-		&self,
-		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
-		subscription: RequestId,
-		update: Update,
-	) -> Result<(), Error> {
-		let request_id = self.control.next_request_id();
-		if update.fill.is_some() {
-			let mut state = self.state.lock();
-			let held = state.subscribes.get_mut(&subscription).ok_or(Error::Cancel)?;
-			*held.fill.write().map_err(|_| Error::Cancel)? = Fill::Requested;
-			held.fill_start = match update.fill.and_then(|fill| fill.filter.or(update.filter)) {
-				Some(Filter::Absolute { start, .. }) => Some(start),
-				_ => None,
-			};
-			let previous = held.fetch_id.replace(request_id);
-			if let Some(previous) = previous {
-				state.fetches.remove(&previous);
-			}
-			state.fetches.insert(request_id, FillRequest::Update(subscription));
-		}
-		writer
-			.encode_message(&ietf::SubscribeUpdate {
-				max_age: update.max_age,
-				request_id,
-				subscriber_priority: update.priority.map(super::priority::to_wire),
-				forward: None,
-				filter: update.filter,
-				authorization_token: None,
-				new_group: update.new_group,
-				fill: update.fill,
-			})
-			.await
 	}
 
 	/// Tell the publisher to stop serving a subscription we are walking away from.
@@ -4980,6 +4983,10 @@ impl Subscriber {
 			let joined = state.fetches.get(&header.request_id).copied();
 			let subscribe_id = joined.map(FillRequest::subscription).unwrap_or(header.request_id);
 			let track = state.subscribes.get(&subscribe_id).ok_or(Error::NotFound)?;
+			// Once an update owns the fill, a delayed initial fill cannot claim its slot.
+			if joined.is_none() && track.fetch_id.is_some() {
+				return Err(Error::Unsupported);
+			}
 			// A fill is one of the subscription's own data streams, so PUBLISH_DONE counts
 			// it. A joining FETCH is a request of its own.
 			let counted = (!matches!(joined, Some(FillRequest::Joining(_))))
@@ -16077,10 +16084,10 @@ mod new_group_tests {
 		relay.serving.abort();
 	}
 
-	/// A fill whose stream reset before its header never settles. It holds back only a
-	/// widening, whose own fill would take the head; a narrowing still goes up.
+	/// An identified fill keeps ownership until its head is handed off. A fill with no
+	/// header can instead be superseded, since a reset may have discarded that header.
 	#[moq_clock::test]
-	async fn an_unsettled_fill_holds_back_only_a_widening() {
+	async fn only_an_identified_fill_holds_back_a_widening() {
 		let (mut relay, mut first) = relay().await;
 		let (mut stream, _) = relay.accept().await;
 		accept(&mut stream, false, 5).await;
@@ -16094,7 +16101,7 @@ mod new_group_tests {
 			.unwrap()
 			.fill
 			.clone();
-		*fill.write().ok().unwrap() = Fill::Serving(None);
+		*fill.write().ok().unwrap() = Fill::Active;
 
 		first.update(track::Subscription::default().with_range(6..)).unwrap();
 		let (id, body) = read(&mut stream).await;
@@ -16107,11 +16114,97 @@ mod new_group_tests {
 		first.update(track::Subscription::default()).unwrap();
 		quiet(&mut stream).await;
 
-		*fill.write().ok().unwrap() = Fill::Done;
+		// No stream claimed the head after all. This request can be retired without
+		// waiting for a failure signal that could never identify the request.
+		*fill.write().ok().unwrap() = Fill::Serving(None);
 		let (id, body) = read(&mut stream).await;
 		assert_eq!(id, ietf::SubscribeUpdate::ID);
 		let msg = ietf::SubscribeUpdate::decode_msg(&mut body.decoder(VERSION), VERSION).unwrap();
-		assert!(msg.fill.is_some(), "the widening went up once the fill settled");
+		assert!(msg.fill.is_some(), "the widening superseded the unidentified fill");
+		assert!(matches!(*fill.read(), Fill::Done), "the old request was retired");
+		relay.serving.abort();
+	}
+
+	/// Delayed headers, including one already waiting for REQUEST_OK, belong to the
+	/// request they answer and cannot consume a later widening's fill.
+	#[moq_clock::test]
+	async fn superseded_fill_headers_cannot_claim_the_new_request() {
+		use crate::{coding::Encode, lite::test_transport::ScriptedSession};
+
+		let header = |request_id| async move {
+			let mut bytes = Vec::new();
+			let mut encoder = crate::coding::Encoder::new(&mut bytes, VERSION.into());
+			encoder.varint(ietf::FetchHeader::TYPE).unwrap();
+			ietf::FetchHeader { request_id }.encode(&mut encoder, VERSION).unwrap();
+			let session = ScriptedSession::per_stream_eof(vec![bytes]);
+			let (_, reader) = session.open_bi(Default::default()).await.unwrap();
+			Reader::new(crate::transport::boxed::RecvStream::new(reader), VERSION)
+		};
+
+		let (mut relay, mut first) = relay().await;
+		let (mut stream, _) = relay.accept().await;
+		accept(&mut stream, false, 5).await;
+		let subscription = *relay.probe.state.lock().subscribes.keys().next().unwrap();
+		first.update(track::Subscription::default().with_range(6..)).unwrap();
+		let _ = read(&mut stream).await;
+		answer(&mut stream).await;
+		first.update(track::Subscription::default().with_range(4..)).unwrap();
+		let (id, body) = read(&mut stream).await;
+		assert_eq!(id, ietf::SubscribeUpdate::ID);
+		let old = ietf::SubscribeUpdate::decode_msg(&mut body.decoder(VERSION), VERSION).unwrap();
+
+		// The initial SUBSCRIBE's delayed header cannot consume this update's slot.
+		let mut initial = header(subscription).await;
+		assert!(matches!(
+			relay.probe.clone().recv_fill(&mut initial).await,
+			Err(Error::Unsupported)
+		));
+
+		// This update's header overtakes its REQUEST_OK and parks on the old slot.
+		let mut early = header(old.request_id).await;
+		let mut receiving = relay.probe.clone();
+		let mut early = std::pin::pin!(receiving.recv_fill(&mut early));
+		assert!(futures::poll!(early.as_mut()).is_pending());
+		stream
+			.writer
+			.encode_message(&ietf::RequestOk {
+				largest: Some(ietf::Location { group: 5, object: 0 }),
+				active: None,
+			})
+			.await
+			.unwrap();
+		settle().await;
+
+		first.update(track::Subscription::default()).unwrap();
+		let (id, body) = read(&mut stream).await;
+		assert_eq!(id, ietf::SubscribeUpdate::ID);
+		let newest = ietf::SubscribeUpdate::decode_msg(&mut body.decoder(VERSION), VERSION).unwrap();
+		assert!(newest.fill.is_some());
+		assert!(matches!(early.await, Err(Error::Unsupported)));
+
+		// The same old header arriving after retirement has no mapping left, either.
+		let mut late = header(old.request_id).await;
+		assert!(matches!(
+			relay.probe.clone().recv_fill(&mut late).await,
+			Err(Error::NotFound)
+		));
+		let fill = relay.probe.state.lock().subscribes[&subscription].fill.clone();
+		assert!(matches!(*fill.read(), Fill::Requested));
+		stream
+			.writer
+			.encode_message(&ietf::RequestOk {
+				largest: Some(ietf::Location { group: 5, object: 0 }),
+				active: None,
+			})
+			.await
+			.unwrap();
+		settle().await;
+		let mut current = header(newest.request_id).await;
+		relay.probe.clone().recv_fill(&mut current).await.unwrap();
+		assert!(
+			matches!(*fill.read(), Fill::Done),
+			"only the current header claimed the slot"
+		);
 		relay.serving.abort();
 	}
 }
