@@ -16,7 +16,8 @@ on 2026-10-28 (maintainer); its Plan holds the behavior already landed in
   resolved instance.
 - Retain synchronous request peeks and path-local wakeups.
 - `Producer` pass-throughs stay only where `Table` needs them.
-- Mirror the Rust names from [Rust request and follow](/quest/m1/api-audit/resolve/rust.md).
+- Mirror the Rust names: `origin::Consumer::request` and `follow`, the latter
+  returning a `Following` whose `available()` hands out each instance.
 
 Tests: synced absence, no follower fallback on a blind peer, pinned follow
 return, and discovery retention and release, on mocked time.

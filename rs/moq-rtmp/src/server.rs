@@ -1878,7 +1878,13 @@ mod tests {
 			let (client, server) = tokio::io::duplex(64 * 1024);
 			let start = tokio::time::Instant::now();
 			let accept = tokio::spawn(accept_publish(server, origin.clone(), Duration::from_secs(10)));
-			let broadcast = async { consumer.follow("live/cam0", None).unwrap().available().await.unwrap() };
+			// A hangup ends the instance at once, before a follower would hand it out, so this
+			// requests it on its announcement instead.
+			let mut announced = consumer.announced();
+			let broadcast = async {
+				announced.next().await.unwrap();
+				consumer.request("live/cam0", None).await.unwrap()
+			};
 			let (broadcast, ()) = tokio::join!(broadcast, publish_one_keyframe(client, leave));
 
 			accept.await.unwrap();

@@ -6278,7 +6278,7 @@ impl Consumer {
 	}
 
 	/// A clone of this consumer with its stats context cleared, so an internal
-	/// lookup stream (e.g. [`Self::routed`]) doesn't drive the egress
+	/// lookup stream (e.g. [`Self::routes`]) doesn't drive the egress
 	/// announce guards; the caller re-attributes the result itself.
 	fn untagged(&self) -> Self {
 		Self {
