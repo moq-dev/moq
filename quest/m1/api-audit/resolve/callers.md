@@ -1,27 +1,27 @@
-# [M] Callers resolve once
+# [XS] The carla demo pins its driver epoch
 
 ## Goal
 
-No caller hand-rolls synced resolution or relies on a wall clock to decide a
-broadcast is absent. Each first-party caller resolves with `request` or
-`follow`.
+The carla demo's driver watcher resolves each driver run pinned to the epoch it
+was announced under, so a lease never reads a newer run's commands.
 
 ## Plan
 
 Split from [Two broadcast resolutions](/quest/m1/api-audit/resolve/README.md)
-on 2026-10-28 (maintainer).
+on 2026-10-28 (maintainer). Every other first-party caller now resolves once
+with `request` or `follow`; see
+[moq-dev/moq#7192](https://github.com/moq-dev/moq/pull/7192).
 
-- Remove the hidden error in moq-wasm's resolve, which follows the path but
-  still discards why it failed.
-- Replace moq-cli's resolve-and-drop waits before its stdout, RTMP, and WHIP
-  exports, which follow the path only to wait for its announcement and then
-  resolve it again.
-- Review SRT, transcode, the benchmark connections, relay HTTP fetch
-  deadlines, the moq-hls server's `RESOLVE_TIMEOUT` handler-stall bound, the
-  e2ee epoch advice, and the demo's announce-derived epoch pin; fix each that
-  hand-rolls resolution or decides absence by time.
+`watch_drivers` in `demo/carla/sim/moq_carla_sim/publish.py` takes each
+driver's epoch from its announcement, then `_pump_driver` requests the path
+unpinned. A newer run that took over in between is read under the old run's
+lease until its own announcement cancels the task. Pass the announced epoch
+to the Python wrapper's `request(path, epoch)` once the bindings expose it.
 
-List every caller in the PR with what it now uses. Run the affected packages'
-tests and `just test interop --all`.
+Run the demo's sim tests (`demo/carla/sim`).
 
-Public API: none beyond the callers' own surfaces. Wire: none.
+Public API: none. Wire: none.
+
+## Required
+
+- [Bindings request and follow](/quest/m1/api-audit/resolve/bindings.md) - the Python wrapper's `request` takes an epoch
