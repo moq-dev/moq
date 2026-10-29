@@ -6,9 +6,10 @@ use crate::Error;
 
 /// Opaque resource identifier returned to C code.
 ///
-/// Non-zero u32 value that uniquely identifies resources like sessions,
-/// origins, broadcasts, tracks, etc. Zero is reserved to indicate "none"
-/// or optional parameters.
+/// Non-zero u32 value that uniquely identifies a live resource of one kind,
+/// such as a session, origin, broadcast, or track. After the counter wraps,
+/// resources of different kinds may share a value. Zero is reserved to
+/// indicate "none" or optional parameters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Id(NonZero<u32>);
 
