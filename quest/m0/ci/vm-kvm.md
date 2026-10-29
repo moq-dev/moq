@@ -17,5 +17,6 @@ spent about 19 minutes before failing this way on a host without KVM.
 - Refuse, don't skip: a skipped check would let a local gate read as passing.
   The message says the check needs KVM and that CI runs it.
 - The other follow-up from #7175, a nested Codex shell's `BASH_ENV` snapshot
-  inflating `PATH` past mbx's exec limit, is reported upstream to Codex
-  rather than planned here.
+  inflating `PATH` past mbx's exec limit, did not reproduce with codex-cli
+  0.162.1 (`BASH_ENV` unset, `PATH` stable across nested shells), so it is
+  neither planned nor reported.
