@@ -589,10 +589,9 @@ impl Publish {
 				// Each enabled medium publishes its own track onto the shared
 				// broadcast + catalog. Both stamp frames on the catalog's
 				// advertised clock, so HLS/DASH wall times match the mapping on
-				// the wire. Video encodes on demand (camera opens only while
-				// subscribed). Both run on this task rather than a spawn: on
-				// macOS the audio future holds ObjC handles across an await,
-				// so it is `!Send`.
+				// the wire. Video captures for the whole run. Both run on this
+				// task rather than a spawn: on macOS the audio future holds ObjC
+				// handles across an await, so it is `!Send`.
 				let video_fut = {
 					let broadcast = broadcast.clone();
 					let catalog = catalog.clone();
@@ -1078,7 +1077,7 @@ pub(crate) mod tests {
 	/// A source for the broadcast at `path`, resolved through `origin`.
 	async fn resolved(origin: &moq_net::origin::Producer, path: &str) -> moq_mux::Source {
 		let consumer = origin.consume();
-		let broadcast = consumer.request_broadcast(path, None).await.unwrap();
+		let broadcast = consumer.request(path, None).await.unwrap();
 		moq_mux::Source::new(consumer, broadcast)
 	}
 
@@ -1342,7 +1341,7 @@ pub(crate) mod tests {
 			// the lead holds; the jump is in the copy after it.
 			const WAIT: Duration = Duration::from_secs(10);
 			decoder.decode_chunk(&lead).unwrap();
-			let consumer = tokio::time::timeout(WAIT, remote.consume().routed_broadcast("pt.hang"))
+			let consumer = tokio::time::timeout(WAIT, remote.consume().follow("pt.hang", None).unwrap().available())
 				.await
 				.unwrap()
 				.unwrap();
@@ -1787,7 +1786,7 @@ pub(crate) mod tests {
 				resolved = async {
 					let event = announced.next().await.expect("origin closed");
 					assert!(matches!(event, moq_net::announce::Event::Start(_)), "{event:?}");
-					let broadcast = consumer.request_broadcast("demo", None).await.unwrap();
+					let broadcast = consumer.request("demo", None).await.unwrap();
 					let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&broadcast).await.unwrap();
 					let catalog = catalogs.next().await.unwrap().expect("a catalog");
 					// A passthrough carries the multiplex on one track, named by its m2ts section.

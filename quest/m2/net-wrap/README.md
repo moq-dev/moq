@@ -16,7 +16,7 @@ moq-flate, so moq-flate is out of scope.
 
 Non-goals:
 - A runtime seam: libraries poll and spawn nothing ([Libraries spawn nothing](/quest/m1/poll-first/no-spawn.md)).
-- The transport seam: [Drop web-transport-trait](/quest/m1/drop-web-transport-trait.md).
+- The transport seam: custom transports implement moq-net's `transport::poll` traits ([native WebTransport](/quest/m1/quic-api/native-web.md) moves the last backend onto them).
 
 ## Plan
 

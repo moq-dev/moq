@@ -765,7 +765,7 @@ impl Server {
 						self.accept.push(async move {
 							let Accepted { session, url, identity, authority, link } = within(deadline, super::iroh::accept(_conn, alpns)).await?;
 							let address = match url { Some(_) => moq_net::transport::Address::Uri, None => moq_net::transport::Address::Setup };
-							let session = crate::transport::Session::new(session, address);
+							let session = crate::iroh::Session::new(session, address);
 							let (request, deadline) = accept_request(&setup.server, session, deadline).await?;
 							Ok(Request {
 								transport: Transport::Iroh,
@@ -2772,7 +2772,7 @@ mod tests {
 			.expect("origin closed");
 		assert_eq!(update.prefix.as_str(), "test");
 		assert!(active);
-		let broadcast = consumer.request_broadcast("test", None).await.expect("resolve");
+		let broadcast = consumer.request("test", None).await.expect("resolve");
 
 		let mut track = broadcast
 			.track("video")

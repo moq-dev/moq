@@ -22,6 +22,7 @@ edge, which embeds moq-relay; it moved there on 2026-09-28.
 
 - [Adopt local reviews](/quest/m0/local-review.md) - PRs are reviewed locally by the other vendor's model before they are pushed, and merging never waits on an online reviewer
 - [Nightly passes on main](/quest/m0/nightly/README.md) - the scheduled Nightly passes end to end, so red means a new break
+- [Release credential leaks](/quest/m0/security-audit/README.md) - tokens stay out of logs and outbound HTTP clients verify their peer, on `main` and `release`
 - [Interop and Video pass on main](/quest/m0/interop-green/README.md) - the scheduled Interop and Video workflows pass, so red means a new break
 - [Release shutdown backport](/quest/m0/ffi-shutdown-backport.md) - `release` publishes a non-breaking moq-ffi with an async `drain()` and qmux sessions on the QUIC stream limit
 - [Backport @moq/flate bounds](/quest/m0/backport-flate-budget.md) - `@moq/flate` on `release` stops inflating past its cap and stops pinning pako scratch

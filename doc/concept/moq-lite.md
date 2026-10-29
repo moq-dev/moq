@@ -252,7 +252,9 @@ per-request token, so there an announcement rides the session's scope.
 A subscriber names a broadcast and track. Delivery starts at the oldest group
 it can still use, which at the default budget is the latest one, so every group
 must begin at a point a fresh subscriber can decode from (a keyframe, a full
-JSON snapshot). Groups can also be fetched by sequence number, which is how the
+JSON snapshot). A moq-lite 05 or moq-transport publisher starts at the latest
+group whatever the budget, so a subscription there reads older groups only from
+a starting group it names. Groups can also be fetched by sequence number, which is how the
 [HLS gateway](/bin/hls) and the relay's [HTTP fetch](/bin/relay/http) serve
 history.
 

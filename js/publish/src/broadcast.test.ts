@@ -245,7 +245,7 @@ test("a re-announce continues the catalog's group sequence", async () => {
 
 	const net = broadcast.net.peek();
 	if (!net) throw new Error("expected a network producer once connected");
-	const announced = broadcast.in.origin.peek()?.request(broadcast.in.name.peek(), { announced: true });
+	const announced = broadcast.in.origin.peek()?.follow(broadcast.in.name.peek());
 	const first = net.track(Broadcast.CATALOG_TRACK).subscribe().ordered();
 	expect((await first.nextGroup())?.sequence).toBe(0);
 
@@ -467,7 +467,7 @@ test("a served decoder identity change moves the rendition to a fresh track name
 
 	const net = broadcast.net.peek();
 	if (!net) throw new Error("expected a network producer once connected");
-	const announced = broadcast.in.origin.peek()?.request(broadcast.in.name.peek(), { announced: true });
+	const announced = broadcast.in.origin.peek()?.follow(broadcast.in.name.peek());
 	const epoch = announced?.active.peek()?.epoch;
 	const catalog = new Json.Snapshot.Consumer<Catalog.Root>({
 		track: net.track(Broadcast.CATALOG_TRACK).subscribe(),
