@@ -19,6 +19,8 @@ use super::Version;
 /// REQUEST_OK.
 #[derive(Clone, Debug)]
 pub struct TrackStatus<'a> {
+	/// The credential authorizing this request alone.
+	pub authorization_token: Option<super::token::RequestToken>,
 	pub request_id: RequestId,
 	pub track_namespace: Path,
 	pub track_name: Cow<'a, str>,
@@ -34,6 +36,7 @@ impl TrackStatus<'_> {
 	pub fn into_owned(self) -> TrackStatus<'static> {
 		TrackStatus {
 			request_id: self.request_id,
+			authorization_token: self.authorization_token,
 			track_namespace: self.track_namespace,
 			track_name: Cow::Owned(self.track_name.into_owned()),
 			properties_wanted: self.properties_wanted,
@@ -55,6 +58,7 @@ impl<'a> Message<'a> for TrackStatus<'a> {
 		let epoch = self.epoch.clone();
 		encode_params!(w, version,
 			0x35 => include_properties,
+			0x03 => self.authorization_token.clone(),
 			super::epoch::EPOCH_PARAM => epoch,
 		);
 		Ok(())
@@ -67,6 +71,7 @@ impl<'a> Message<'a> for TrackStatus<'a> {
 		let subscribe = Subscribe::decode_msg(r, version)?;
 		Ok(Self {
 			request_id: subscribe.request_id,
+			authorization_token: subscribe.authorization_token,
 			track_namespace: subscribe.track_namespace,
 			track_name: subscribe.track_name,
 			properties_wanted: subscribe.properties_wanted,
@@ -162,6 +167,7 @@ mod tests {
 	#[test]
 	fn test_track_status_v18_round_trip() {
 		let msg = TrackStatus {
+			authorization_token: None,
 			request_id: RequestId(1),
 			track_namespace: Path::from_static("test/ns"),
 			track_name: "video".into(),
@@ -186,6 +192,7 @@ mod tests {
 		for version in ALL {
 			for wanted in [true, false] {
 				let msg = TrackStatus {
+					authorization_token: None,
 					request_id: RequestId(1),
 					track_namespace: Path::from_static("ns"),
 					track_name: "video".into(),

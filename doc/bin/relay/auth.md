@@ -20,7 +20,7 @@ path patterns under a root, and the session can only see that part of the tree.
 
 ## The contract
 
-The relay POSTs one JSON body per session event (`connect`, `revalidate`,
+The relay POSTs one JSON body per session event (`connect`, `attach`, `revalidate`,
 `end`) to `--auth-url` and reads a grant back. The request carries everything
 the relay knows: a session id, its own `node` name, the transport, addresses,
 SNI and ALPN, the path and query exactly as dialed, a moq-transport SETUP
@@ -77,7 +77,11 @@ reaches `expires` closes as `Expired` rather than `Unauthorized`, which also
 stops the reconnect loop: refresh the token, then reconnect with the new URL.
 
 **End.** Every close reports `end` with the reason, the duration, and the
-bytes sent and received. A shutdown waits for these reports before exiting.
+bytes sent and received. An event with `auth` names one attached credential;
+its `end` releases only that credential. Without `auth`, `end` closes the
+connection, after every attachment has reported its own end. A shutdown waits
+for these reports before exiting. Auth servers must accept `attach` and handle `auth` before enabling
+in-band credentials. An older server refuses `attach` before a credential is admitted.
 
 **The link.** `https://` presents the relay's `connect.tls` client certificate
 when one is configured, so a remote server can tell which relay is asking;
@@ -174,17 +178,20 @@ The grant reports its real expiry so the client can renew in time.
 
 The relay verifies a presented JWT through the same admission path, replacing
 `jwt` in the original query and preserving the connection's identity. The auth
-server sees another `connect` for the same session id. Attached grants revalidate
-independently but never report `end`; only the connection reports its end, even
-if its first credential expired earlier, after its attached grants stop. Each
-attached JWT counts against its own `--limit-token` cap until the connection
-ends. The initial credential remains responsible for the connection's stats tier.
+server sees `attach` for the same session id, with a fresh `auth` id
+that also names its revalidations and end. Attached grants revalidate and end
+independently. Each JWT counts against its own `--limit-token` cap while any
+credential using it remains on that connection. The initial credential remains
+responsible for the connection's stats tier.
 Certificate sessions cannot renew a certificate in band, and public rules
-cannot verify a presented token; both refuse it as unsupported. A moq-transport
-`AUTHORIZATION TOKEN` on a `SUBSCRIBE` or `PUBLISH_NAMESPACE` is verified the
-same way on any draft, but its grant authorizes only that request and ends with
-it; it never joins the union. A `PUBLISH_NAMESPACE` grant must cover the whole
-namespace: `room/**`, not just `room`. A session verifies at most
+cannot verify a presented token; both refuse it as unsupported. On moq-transport,
+each distinct `AUTHORIZATION TOKEN` is verified once while any open request on
+that session names it. Its grant admits only requests naming that token,
+independently of the session's scope. Discovery reveals only paths it grants;
+a `PUBLISH_NAMESPACE` grant must cover the whole namespace: `room/**`, not just
+`room`. The last naming request ending releases the lease at the auth server;
+a later request verifies the token again. Expiry or revocation ends every
+request naming it. A joining `FETCH` still follows its subscription. A session verifies at most
 128 tokens at once, counting
 checks still running past the admission timeout. Later tokens wait their turn
 rather than being refused. Each HTTP request is admitted on its own, so an

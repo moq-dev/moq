@@ -365,7 +365,7 @@ fn remote(request: &Request) -> Option<IpAddr> {
 /// One live session's share of the limits.
 struct Slot {
 	/// Every JWT presented for this session: its connect, plus each one attached in band.
-	tokens: Vec<u64>,
+	tokens: HashMap<Option<String>, Option<u64>>,
 	remote: Option<IpAddr>,
 	seen: Instant,
 }
@@ -386,19 +386,24 @@ impl Sessions {
 
 	/// Admit a `connect`, refusing over the cap. A known id is the same session
 	/// attaching another credential: it holds no new remote slot, but a JWT new to
-	/// it counts against that JWT's cap until the session ends.
+	/// it counts against that JWT's cap until its last credential ends.
 	fn connect(&mut self, request: &Request, limits: Limits, root: Option<String>) -> Result<(), Denial> {
 		// Decided before counting, so the credential is already known to be one JWT.
 		let token = jwt(request).ok().flatten().as_deref().map(hash);
 		let known = self.slots.get(&request.id);
-		let new_token = token.filter(|token| !known.is_some_and(|slot| slot.tokens.contains(token)));
+		let new_token = token
+			.filter(|token| !known.is_some_and(|slot| slot.tokens.values().any(|value| value.as_ref() == Some(token))));
 		if let (Some(cap), Some(token)) = (limits.token, new_token)
-			&& self.slots.values().filter(|slot| slot.tokens.contains(&token)).count() >= cap
+			&& self
+				.slots
+				.values()
+				.filter(|slot| slot.tokens.values().any(|value| *value == Some(token)))
+				.count() >= cap
 		{
 			return Err(Denial::TokenLimit { root });
 		}
 		if let Some(slot) = self.slots.get_mut(&request.id) {
-			slot.tokens.extend(new_token);
+			slot.tokens.insert(request.auth.clone(), token);
 			slot.seen = Instant::now();
 			return Ok(());
 		}
@@ -411,7 +416,7 @@ impl Sessions {
 		self.slots.insert(
 			request.id.clone(),
 			Slot {
-				tokens: token.into_iter().collect(),
+				tokens: [(request.auth.clone(), token)].into(),
 				remote,
 				seen: Instant::now(),
 			},
@@ -425,20 +430,25 @@ impl Sessions {
 	fn revalidate(&mut self, request: &Request) {
 		let token = jwt(request).ok().flatten().as_deref().map(hash);
 		let slot = self.slots.entry(request.id.clone()).or_insert_with(|| Slot {
-			tokens: Vec::new(),
+			tokens: HashMap::new(),
 			remote: remote(request),
 			seen: Instant::now(),
 		});
-		if let Some(token) = token
-			&& !slot.tokens.contains(&token)
-		{
-			slot.tokens.push(token);
-		}
+		slot.tokens.insert(request.auth.clone(), token);
 		slot.seen = Instant::now();
 	}
 
-	fn end(&mut self, id: &str) {
-		self.slots.remove(id);
+	fn end(&mut self, request: &Request) {
+		match &request.auth {
+			Some(_) => {
+				if let Some(slot) = self.slots.get_mut(&request.id) {
+					slot.tokens.remove(&request.auth);
+				}
+			}
+			None => {
+				self.slots.remove(&request.id);
+			}
+		}
 	}
 }
 
@@ -494,8 +504,11 @@ impl Server {
 
 	/// Answer one event: the grant, or why the session is refused.
 	pub async fn answer(&self, request: &Request) -> Result<Option<Grant>, Denial> {
+		if matches!(request.event, Event::Attach) && request.auth.is_none() {
+			return Err(Denial::MalformedToken("an attachment needs an auth id".into()));
+		}
 		match request.event {
-			Event::Connect => {
+			Event::Connect | Event::Attach => {
 				let (grant, root) = self.policy.decide_root(request).await?;
 				if let Some(cadence) = self.cadence() {
 					let mut sessions = self.sessions.lock().unwrap();
@@ -514,7 +527,7 @@ impl Server {
 				Ok(Some(grant))
 			}
 			Event::End { .. } => {
-				self.sessions.lock().unwrap().end(&request.id);
+				self.sessions.lock().unwrap().end(request);
 				Ok(None)
 			}
 		}
@@ -1344,7 +1357,8 @@ mod tests {
 
 		let attach = |session: &Request| {
 			let mut attach = with_token(session.clone(), &b);
-			attach.id = session.id.clone();
+			attach.auth = Some("attachment".into());
+			attach.event = Event::Attach;
 			attach
 		};
 		server.answer(&attach(&first)).await.unwrap();
@@ -1356,6 +1370,25 @@ mod tests {
 				root: Some("demo".into())
 			}
 		);
+		assert_eq!(server.sessions.lock().unwrap().slots.len(), 2);
+		let mut duplicate = attach(&first);
+		duplicate.auth = Some("duplicate".into());
+		server.answer(&duplicate).await.unwrap();
+		let end = |mut request: Request| {
+			request.event = Event::End {
+				reason: crate::lease::Reason::Dropped,
+				duration: Duration::ZERO,
+				bytes: Default::default(),
+			};
+			request
+		};
+		server.answer(&end(attach(&first))).await.unwrap();
+		assert!(matches!(
+			server.answer(&attach(&second)).await,
+			Err(Denial::TokenLimit { .. })
+		));
+		server.answer(&end(duplicate)).await.unwrap();
+		server.answer(&attach(&second)).await.unwrap();
 		assert_eq!(server.sessions.lock().unwrap().slots.len(), 2);
 	}
 

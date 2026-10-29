@@ -147,6 +147,7 @@ type Skips = kio::Shared<LinkedHashMap<(crate::Path, Arc<str>), ()>>;
 /// What a request's listing shares with the tasks listing each broadcast.
 #[derive(Clone)]
 struct Request {
+	token_grant: Option<crate::auth::RequestGrant>,
 	origin: origin::Consumer,
 	/// The request's prefix, which every PUBLISH namespace starts with.
 	prefix: crate::Path,
@@ -309,6 +310,27 @@ impl Publisher {
 			let error = refuse(request::NOT_SUPPORTED, "SUBSCRIBE_TRACKS needs FORWARD=0");
 			return super::super::request_stream::reject(stream, error).await;
 		}
+		let mut gate =
+			crate::auth::Gate::new(self.auth.clone(), msg.prefix.clone(), crate::auth::Direction::Publish).discovery();
+		match self
+			.admit_request(&mut stream, &mut gate, msg.authorization_token.clone())
+			.await
+		{
+			Ok(true) => {}
+			Ok(false) => return Ok(()),
+			Err(refusal) => {
+				super::super::request_stream::write_error(
+					&mut stream.writer,
+					request::Kind::SubscribeNamespace,
+					&refusal.error,
+					&refusal.reason,
+					self.version,
+				)
+				.await?;
+				let _ = stream.writer.close().await;
+				return Ok(());
+			}
+		}
 		let prefix = msg.prefix.clone();
 		let Some(established) = Established::new(&self.listings, &prefix) else {
 			let error = refuse(request::PREFIX_OVERLAP, "overlaps another SUBSCRIBE_TRACKS");
@@ -337,17 +359,20 @@ impl Publisher {
 			.discovery(!declared.hidden || self.origin.includes_hidden());
 		let mut announced = origin.announced();
 
-		stream
-			.writer
-			.encode_message(&ietf::RequestOk {
+		crate::auth::until(
+			stream.writer.encode_message(&ietf::RequestOk {
 				active: None,
 				largest: None,
-			})
-			.await?;
+			}),
+			|waiter| gate.poll_token_ended(waiter),
+		)
+		.await
+		.map_err(|refusal| refusal.error)??;
 
 		// Dropped when the request is cancelled, which tells every broadcast to stop.
 		let live = kio::Producer::new(());
 		let request = Request {
+			token_grant: gate.token_observer(),
 			origin,
 			prefix: prefix.clone(),
 			forward: msg.forward,
@@ -392,6 +417,9 @@ impl Publisher {
 					if let Poll::Ready(res) = self.poll_listing_cancel(&mut stream, &mut finished, &mut goaways, waiter)
 					{
 						return Poll::Ready(Event::Cancelled(res));
+					}
+					if let Poll::Ready(refusal) = gate.poll_token_ended(waiter) {
+						return Poll::Ready(Event::Cancelled(Err(refusal.error)));
 					}
 					if let Err(err) = Self::poll_write_skips(&mut stream, &request.skips, waiter) {
 						return Poll::Ready(Event::Cancelled(Err(err)));
@@ -438,6 +466,7 @@ impl Publisher {
 		// already sent still ends when its track does.
 		drop(established);
 		drop(live);
+		drop(gate);
 		request.skips.lock().clear();
 		// A refused update left its REQUEST_ERROR buffered, so a cancel flushes before the FIN.
 		let mut closing = match cancelled {
@@ -627,7 +656,11 @@ impl Publisher {
 		// The broadcast's listing, held only while our publish permit covers it: a track
 		// it does not cover is not revealed at all, and one it comes to cover is listed
 		// from scratch.
-		let (permit, mut auth_epoch) = self.permit_now(None);
+		let mut gate = crate::auth::Gate::new(self.auth.clone(), namespace.clone(), crate::auth::Direction::Publish);
+		if let Some(token) = request.token_grant.clone() {
+			gate.bind(token);
+		}
+		let (permit, mut auth_epoch) = self.permit_now(Some(&gate));
 		let mut tracks = None;
 		if permit.matches(namespace.as_str()) {
 			match broadcast.tracks() {
@@ -705,10 +738,7 @@ impl Publisher {
 						Route::Withdrawn => Event::Withdrawn,
 					}));
 				}
-				if let Poll::Ready(permit) =
-					self.auth
-						.poll_permit(crate::auth::Direction::Publish, &mut auth_epoch, waiter)
-				{
+				if let Poll::Ready(permit) = gate.poll_permit(&mut auth_epoch, waiter) {
 					return Poll::Ready(Some(Event::Regrant(permit)));
 				}
 				if entries.staged.is_some()
@@ -880,6 +910,7 @@ impl Publisher {
 
 		tracing::debug!(id = %request_id, broadcast = %absolute, track = %name, "publish started");
 		let publish = ietf::Publish {
+			authorization_token: None,
 			request_id,
 			track_namespace: namespace.clone(),
 			track_name: name.as_ref().into(),
@@ -1057,18 +1088,18 @@ impl Publisher {
 				Wait::Failed(err) => break Served::Track(Err(err)),
 			};
 			// Refused like an update to any subscription: it fails, ending this one.
+			match self
+				.admit_request(&mut stream, &mut gate, update.authorization_token.clone())
+				.await
+			{
+				Ok(true) => {}
+				Ok(false) => return Ok(()),
+				Err(refusal) => break Served::Track(Err(refusal.error)),
+			}
 			let refusal = match update.refused {
 				Some(Error::Decode(err)) => Some((super::super::token::reason(&err), Error::Decode(err))),
 				Some(Error::GoingAway) => Some(("going away", Error::GoingAway)),
 				Some(err) => Some(("REQUEST_UPDATE parameters not supported", err)),
-				None if update.authorization_token.is_some()
-					&& self.auth.token_decides(crate::auth::Direction::Publish) =>
-				{
-					Some((
-						"AUTHORIZATION TOKEN on a request admitted without one",
-						Error::Unsupported,
-					))
-				}
 				None if update.new_group.is_some() && !dynamic => Some((
 					"NEW_GROUP_REQUEST on a track without DYNAMIC_GROUPS",
 					Error::Unsupported,
@@ -1877,6 +1908,7 @@ mod tests {
 				let live = kio::Producer::new(());
 				let route = kio::Producer::new(Route::Replaced);
 				let request = Request {
+					token_grant: None,
 					origin: h._origin.consume(),
 					prefix: crate::Path::from_static(""),
 					forward: true,

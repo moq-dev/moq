@@ -116,7 +116,7 @@ fn admission(c: &mut Criterion) {
 }
 
 /// A client publishing `origin` to its own server, whose session and token requests follow.
-async fn publisher(origin: &origin::Producer) -> (Session, Session, auth::Requests) {
+async fn publisher(origin: &origin::Producer) -> (Session, Session, auth::Requests, origin::Producer) {
 	let version: Version = "moq-transport-22".parse().unwrap();
 	let mut mock = moq_net::transport::memory::Config::default();
 	mock.protocol = Some(version.alpn().to_string());
@@ -143,7 +143,7 @@ async fn publisher(origin: &origin::Producer) -> (Session, Session, auth::Reques
 		let mut request = moq_net::Server::new()
 			.with_versions(version.into())
 			.with_extensions(server_extensions)
-			.with_subscriber(subscribe)
+			.with_subscriber(subscribe.clone())
 			.accept_request(harness::now(), server)
 			.await
 			.unwrap();
@@ -153,7 +153,7 @@ async fn publisher(origin: &origin::Producer) -> (Session, Session, auth::Reques
 		(session, requests)
 	};
 	let (client, (server, requests)) = futures::join!(client, server);
-	(client, server, requests)
+	(client, server, requests, subscribe)
 }
 
 fn renewal(c: &mut Criterion) {
@@ -181,17 +181,25 @@ fn renewal(c: &mut Criterion) {
 						let (origin, driver) = origin::Producer::new(config);
 						harness::spawn(driver);
 						let mut publishers = runtime.block_on(join_all((0..sessions).map(|_| publisher(&origin))));
-						let (session, _, requests) = &mut publishers[0];
+						let (session, _, requests, _) = &mut publishers[0];
 						let handle = session.auth();
-						let auths = runtime
-							.block_on(async { [handle.add("a").await.unwrap().0, handle.add("b").await.unwrap().0] });
+						let auths = runtime.block_on(async {
+							let mut auths = Vec::new();
+							for route in 0..routes {
+								auths.push([
+									handle.add(format!("a/{route}")).await.unwrap().0,
+									handle.add(format!("b/{route}")).await.unwrap().0,
+								]);
+							}
+							auths
+						});
 						let broadcasts: Vec<_> = (0..routes)
 							.map(|route| origin.create_broadcast(format!("room/{route}").as_str()).unwrap())
 							.collect();
-						let mut swap = |auth: &auth::Credential, touched: usize| {
-							for broadcast in broadcasts.iter().take(touched) {
+						let mut swap = |next: usize, touched: usize| {
+							for (index, broadcast) in broadcasts.iter().take(touched).enumerate() {
 								broadcast
-									.announce(origin::Route::default().with_auth(auth.clone()))
+									.announce(origin::Route::default().with_auth(auths[index][next].clone()))
 									.unwrap();
 							}
 							runtime.block_on(async {
@@ -204,10 +212,10 @@ fn renewal(c: &mut Criterion) {
 						};
 						// Each round's grants replace the last round's, which drop once their
 						// renewals are accepted.
-						let mut held = swap(&auths[0], routes);
+						let mut held = swap(0, routes);
 						let mut next = 1;
 						b.iter(|| {
-							let replacements = swap(&auths[next], touched);
+							let replacements = swap(next, touched);
 							drop(held.splice(..touched, replacements));
 							next ^= 1;
 						});
@@ -310,5 +318,78 @@ fn waiting(c: &mut Criterion) {
 	}
 }
 
-criterion_group!(benches, admission, renewal, waiting);
+/// Request-token lookup and shared withdrawal, sweeping distinct tokens and naming requests.
+fn shared_requests(c: &mut Criterion) {
+	let runtime = tokio::runtime::Builder::new_current_thread()
+		.enable_all()
+		.build()
+		.unwrap();
+	let mut group = c.benchmark_group("auth/request_tokens");
+	group.sample_size(10);
+	group.warm_up_time(Duration::from_millis(100));
+	group.measurement_time(Duration::from_millis(300));
+	for tokens in [1, 8, 32] {
+		for requests in [1, 8, 32] {
+			group.throughput(Throughput::Elements((tokens * requests) as u64));
+			group.bench_with_input(
+				BenchmarkId::new(tokens.to_string(), requests),
+				&(tokens, requests),
+				|b, &(tokens, requests)| {
+					let _guard = runtime.enter();
+					let mut config = origin::Config::new(Hop::new(2).unwrap());
+					config.update_hold = Duration::ZERO;
+					let (origin, driver) = origin::Producer::new(config);
+					harness::spawn(driver);
+					let (client, _server, mut pending, receive) = runtime.block_on(publisher(&origin));
+					let mut announced = receive.consume().announced();
+					let auths = runtime.block_on(async {
+						let mut auths = Vec::new();
+						for token in 0..tokens {
+							auths.push(client.auth().add(format!("token/{token}")).await.unwrap().0);
+						}
+						auths
+					});
+					let mut generation = 0;
+					b.iter(|| {
+						runtime.block_on(async {
+							let prefix = format!("round/{generation}");
+							generation += 1;
+							let mut broadcasts = Vec::new();
+							for (token, auth) in auths.iter().enumerate() {
+								for request in 0..requests {
+									broadcasts.push(
+										origin
+											.publish(
+												format!("{prefix}/{token}/{request}").as_str(),
+												origin::Route::default().with_auth(auth.clone()),
+											)
+											.unwrap(),
+									);
+								}
+							}
+							let mut issued = Vec::new();
+							for _ in 0..tokens {
+								issued.push(pending.next().await.unwrap().accept(auth::Grant::all()));
+							}
+							let mut seen = std::collections::HashSet::new();
+							while seen.len() < tokens * requests {
+								if let moq_net::announce::Event::Start(update)
+								| moq_net::announce::Event::Restart(update) = announced.next().await.unwrap()
+									&& update.prefix.as_str().starts_with(&prefix)
+								{
+									seen.insert(update.prefix);
+								}
+							}
+							drop(broadcasts);
+							join_all(issued.iter().map(auth::Issued::closed)).await;
+						})
+					});
+				},
+			);
+		}
+	}
+	group.finish();
+}
+
+criterion_group!(benches, admission, renewal, waiting, shared_requests);
 criterion_main!(benches);

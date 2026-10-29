@@ -30,6 +30,24 @@ Decision prompts:
 - Request types: ✅ any. This takes the incoming half of
   [Token on FETCH](/quest/m3/auth-token-fetch.md).
 
+Implementation checkpoint: [moq-dev/moq#7211](https://github.com/moq-dev/moq/pull/7211)
+contains shared per-session token records, independent verdict readers, request
+gates for supported incoming request types, and an HTTP attachment lifecycle.
+It remains a draft. Before completing this quest:
+
+- Finish introducing a token on an initially unnamed SUBSCRIBE or
+  PUBLISH_NAMESPACE, and a SUBSCRIBE update combining a token with pausing.
+  The settled update rule covers these too. Their current refusal paths still
+  need a shared authority binding so the stream guard and route admission move
+  together.
+- Review the HTTP contract shape: the implementation sends `attach` with a
+  random `auth` id and carries that id on revalidation and `end`. This lets an
+  older auth server refuse the new attachment before admission. Recommendation:
+  retain this explicit lifecycle rather than overloading a connection's end.
+- Run Rust validation, cross-language interop, draft checks, and the token
+  benchmark sweep. Host capacity has held the Rust test command in `quest gate`;
+  JavaScript auth tests, type checks, build, and API report generation passed.
+
 What changes from #5148:
 
 - One verification and one `requests()` auth per distinct T per session,

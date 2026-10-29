@@ -29,7 +29,7 @@ const ATTACH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 #[serde(default)]
 #[non_exhaustive]
 pub struct Config {
-	/// The auth server asked once per session event: `connect`, `revalidate`, and
+	/// The auth server asked once per session event: `connect`, `attach`, `revalidate`, and
 	/// `end`, each one JSON POST carrying everything the relay knows. `https://`
 	/// presents the `--connect-tls-*` identity, `unix://` speaks HTTP over a socket,
 	/// and `http://` is accepted for a loopback host only.
