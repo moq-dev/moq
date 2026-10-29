@@ -1,11 +1,11 @@
-[2m2026-10-28T15:01:17.873618Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m2278356882856610 [3mconfigured[0m[2m=[0mfalse
-[2m2026-10-28T15:01:17.879883Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
-[2m2026-10-28T15:01:17.879903Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m212992
-[2m2026-10-28T15:01:17.885176Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mhttps://moqt.nokiaresearch.com:8443
-[2m2026-10-28T15:01:17.885191Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
-[2m2026-10-28T15:01:18.327908Z[0m [32m INFO[0m [2mmoq_tokio::client[0m[2m:[0m connected [3mversion[0m[2m=[0mmoq-transport-19
-[2m2026-10-28T15:01:18.327946Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connected [3mpeer[0m[2m=[0mhttps://moqt.nokiaresearch.com:8443
-[2m2026-10-28T15:01:18.657956Z[0m [32m INFO[0m [2mmoq_net::ietf::publisher[0m[2m:[0m subscribe started [3mid[0m[2m=[0m1 [3mbroadcast[0m[2m=[0msmoke-rust-5156-9844.hang [3mtrack[0m[2m=[0mcatalog.json
-[2m2026-10-28T15:01:19.980357Z[0m [32m INFO[0m [2mmoq_net::ietf::publisher[0m[2m:[0m subscribe started [3mid[0m[2m=[0m3 [3mbroadcast[0m[2m=[0msmoke-rust-5156-9844.hang [3mtrack[0m[2m=[0m0.avc3
-[2m2026-10-28T15:01:19.991647Z[0m [32m INFO[0m [2mmoq_net::ietf::publisher[0m[2m:[0m subscribe started [3mid[0m[2m=[0m5 [3mbroadcast[0m[2m=[0msmoke-rust-5156-9844.hang [3mtrack[0m[2m=[0m0.avc3
-[2m2026-10-28T15:01:19.992242Z[0m [32m INFO[0m [2mmoq_net::ietf::publisher[0m[2m:[0m subscribe started [3mid[0m[2m=[0m7 [3mbroadcast[0m[2m=[0msmoke-rust-5156-9844.hang [3mtrack[0m[2m=[0m0.avc3
+[2m2026-10-29T01:38:31.265447Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m8506474295191950 [3mconfigured[0m[2m=[0mfalse
+[2m2026-10-29T01:38:31.269760Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
+[2m2026-10-29T01:38:31.269778Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
+[2m2026-10-29T01:38:31.273006Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mhttps://moqt.nokiaresearch.com:8443
+[2m2026-10-29T01:38:31.274236Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
+[2m2026-10-29T01:38:31.863412Z[0m [32m INFO[0m [2mmoq_tokio::client[0m[2m:[0m connected [3mversion[0m[2m=[0mmoq-transport-19
+[2m2026-10-29T01:38:31.863450Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connected [3mpeer[0m[2m=[0mhttps://moqt.nokiaresearch.com:8443
+[2m2026-10-29T01:38:32.326130Z[0m [32m INFO[0m [2mmoq_net::ietf::publisher[0m[2m:[0m subscribe started [3mid[0m[2m=[0m1 [3mbroadcast[0m[2m=[0msmoke-rust-4713-3142.hang [3mtrack[0m[2m=[0mcatalog.json
+[2m2026-10-29T01:38:33.429715Z[0m [32m INFO[0m [2mmoq_net::ietf::publisher[0m[2m:[0m subscribe started [3mid[0m[2m=[0m3 [3mbroadcast[0m[2m=[0msmoke-rust-4713-3142.hang [3mtrack[0m[2m=[0m0.avc3
+[2m2026-10-29T01:38:33.438094Z[0m [32m INFO[0m [2mmoq_net::ietf::publisher[0m[2m:[0m subscribe started [3mid[0m[2m=[0m5 [3mbroadcast[0m[2m=[0msmoke-rust-4713-3142.hang [3mtrack[0m[2m=[0m0.avc3
+[2m2026-10-29T01:38:33.442081Z[0m [32m INFO[0m [2mmoq_net::ietf::publisher[0m[2m:[0m subscribe started [3mid[0m[2m=[0m7 [3mbroadcast[0m[2m=[0msmoke-rust-4713-3142.hang [3mtrack[0m[2m=[0m0.avc3

@@ -1,16 +1,16 @@
-publishing smoke-js-web-5156-1914.hang (fake camera, vite) to https://34-72-6-160.sslip.io:443/moq-test
+publishing smoke-js-web-4713-10134.hang (fake camera, vite) to https://34-72-6-160.sslip.io:443/moq-test
 [page] negotiated protocol: moq-lite-06
 [page] announced: prefix=
 [page] announce: prefix=
-[page] announce: broadcast=smoke-js-web-5156-1914.hang active=true
-[page] track info: broadcast=smoke-js-web-5156-1914.hang track=catalog.json
-[page] track info: broadcast=smoke-js-web-5156-1914.hang track=catalog.json
-[page] publish ok: broadcast=smoke-js-web-5156-1914.hang track=catalog.json
-[page] track info: broadcast=smoke-js-web-5156-1914.hang track=video
-[page] track info: broadcast=smoke-js-web-5156-1914.hang track=video
-[page] publish ok: broadcast=smoke-js-web-5156-1914.hang track=video
-[page] subscribe update: broadcast=smoke-js-web-5156-1914.hang track=video
-[page] publish error: broadcast=smoke-js-web-5156-1914.hang track=video error=remote error: 1
+[page] announce: broadcast=smoke-js-web-4713-10134.hang active=true
+[page] track info: broadcast=smoke-js-web-4713-10134.hang track=catalog.json
+[page] track info: broadcast=smoke-js-web-4713-10134.hang track=catalog.json
+[page] publish ok: broadcast=smoke-js-web-4713-10134.hang track=catalog.json
+[page] track info: broadcast=smoke-js-web-4713-10134.hang track=video
+[page] track info: broadcast=smoke-js-web-4713-10134.hang track=video
+[page] publish ok: broadcast=smoke-js-web-4713-10134.hang track=video
+[page] subscribe update: broadcast=smoke-js-web-4713-10134.hang track=video
+[page] publish error: broadcast=smoke-js-web-4713-10134.hang track=video error=remote error: 1
 [page] datagram send stopped: sub=1 error=remote error: 1
-[page] publish error: broadcast=smoke-js-web-5156-1914.hang track=catalog.json error=The stream was aborted by the remote server
+[page] publish error: broadcast=smoke-js-web-4713-10134.hang track=catalog.json error=The stream was aborted by the remote server
 [page] datagram send stopped: sub=0 error=The stream was aborted by the remote server

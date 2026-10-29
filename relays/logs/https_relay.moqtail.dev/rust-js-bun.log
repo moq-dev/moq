@@ -6,28 +6,28 @@ announced: broadcast=moqtail/ch04 active=true
 announced: broadcast=moqtail/ch07 active=true
 announced: broadcast=moqtail/ch06 active=true
 announced: broadcast=moqtail/ch01 active=true
+announced: broadcast=smoke-rust-4713-20620.hang active=true
+subscribe start: id=2 broadcast=smoke-rust-4713-20620.hang track=catalog.json
 announced: broadcast=moqtail/ch05 active=true
 announced: broadcast=moqtail/ch02 active=true
-announced: broadcast=smoke-rust-5156-29558.hang active=true
-subscribe start: id=2 broadcast=smoke-rust-5156-29558.hang track=catalog.json
 announced: broadcast=moqtail/testsrc active=true
 announced: broadcast=moqtail/ch03 active=true
 announced: broadcast=moqtail/ch00 active=true
-subscribe written: id=2 broadcast=smoke-rust-5156-29558.hang track=catalog.json
-subscribe ok: id=2 broadcast=smoke-rust-5156-29558.hang track=catalog.json
-subscribe start: id=4 broadcast=smoke-rust-5156-29558.hang track=0.avc3
-subscribe written: id=4 broadcast=smoke-rust-5156-29558.hang track=0.avc3
-subscribe ok: id=4 broadcast=smoke-rust-5156-29558.hang track=0.avc3
-dropping a group with no head: alias=116 group=2
-received 398 bytes from smoke-rust-5156-29558.hang
+subscribe written: id=2 broadcast=smoke-rust-4713-20620.hang track=catalog.json
+subscribe ok: id=2 broadcast=smoke-rust-4713-20620.hang track=catalog.json
+subscribe start: id=4 broadcast=smoke-rust-4713-20620.hang track=0.avc3
+subscribe written: id=4 broadcast=smoke-rust-4713-20620.hang track=0.avc3
+subscribe ok: id=4 broadcast=smoke-rust-4713-20620.hang track=0.avc3
+dropping a group with no head: alias=198 group=2
+received 530 bytes from smoke-rust-4713-20620.hang
 subscribe_namespace error: connection error: closed (source=session)
 announced: broadcast=moqtail/ch04 active=false
 announced: broadcast=moqtail/ch07 active=false
 announced: broadcast=moqtail/ch06 active=false
 announced: broadcast=moqtail/ch01 active=false
+announced: broadcast=smoke-rust-4713-20620.hang active=false
 announced: broadcast=moqtail/ch05 active=false
 announced: broadcast=moqtail/ch02 active=false
-announced: broadcast=smoke-rust-5156-29558.hang active=false
 announced: broadcast=moqtail/testsrc active=false
 announced: broadcast=moqtail/ch03 active=false
 announced: broadcast=moqtail/ch00 active=false
@@ -64,5 +64,5 @@ broadcast discovery failed; broadcasts resolve on request only. WebTransportErro
   DATA_CLONE_ERR: 25,
   toString: [Function: toString],
 }
-subscribe error: id=4 broadcast=smoke-rust-5156-29558.hang track=0.avc3 error=remote error: 0 (connection error: closed)
-subscribe error: id=2 broadcast=smoke-rust-5156-29558.hang track=catalog.json error=remote error: 0 (connection error: closed)
+subscribe error: id=2 broadcast=smoke-rust-4713-20620.hang track=catalog.json error=remote error: 0 (connection error: closed)
+subscribe error: id=4 broadcast=smoke-rust-4713-20620.hang track=0.avc3 error=remote error: 0 (connection error: closed)

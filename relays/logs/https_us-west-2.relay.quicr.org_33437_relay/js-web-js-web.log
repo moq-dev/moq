@@ -14,6 +14,4 @@
 [page] connection error: AggregateError: All promises were rejected
 [page] Failed to establish a connection to https://us-west-2.relay.quicr.org:33437/relay: net::ERR_METHOD_NOT_SUPPORTED.
 [page] connection error: AggregateError: All promises were rejected
-[page] Failed to establish a connection to https://us-west-2.relay.quicr.org:33437/relay: net::ERR_METHOD_NOT_SUPPORTED.
-[page] connection error: AggregateError: All promises were rejected
-decoded 0 frames from smoke-js-web-5156-7652.hang (vite)
+decoded 0 frames from smoke-js-web-4713-9350.hang (vite)
