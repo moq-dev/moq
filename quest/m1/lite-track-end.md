@@ -22,13 +22,16 @@ Decided 2026-10-28 (maintainer):
 - Rust aborts like JS, since `finish()` on an unsettled tail reports
   incomplete content as complete. Its cleanup always calls `abort` and relies
   on `track::Producer::abort`'s existing downgrade when the declared end
-  settled.
+  settled. So does `ServeMode::Tail` when the session closes before the tail
+  settles: that branch returns `ServeEnd::Finished` today, which
+  `TrackServeRun` turns into `serving.finish()`, so it must abort instead.
 - Align the end signal in both languages: SUBSCRIBE_END on lite-05+, the
   stream FIN on lite-01..04. On lite-07 a bounded range also FINs, which must
   not end the track.
 
 Cover it with a test in each language for the settled and unsettled cases,
-and an interop case that kills the session with groups unsettled.
+including Rust's `ServeMode::Tail` session close, and an interop case that
+kills the session with groups unsettled.
 
 Public API: none. Wire: none; behavior only. A Rust consumer of an
 unsettled track sees the session error instead of a clean finish.
