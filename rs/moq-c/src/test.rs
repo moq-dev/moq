@@ -4037,7 +4037,8 @@ fn resolve_pinned(call: Resolve, origin: u32, epoch: &str, cb: &Callback) -> i32
 }
 
 /// An epoch pins both resolutions to one publisher instance: a request for another one fails,
-/// a follower never delivers another one taking over, and malformed epoch text is refused.
+/// a follower never delivers another one taking over but delivers its own once it serves again,
+/// and malformed epoch text is refused.
 #[test]
 fn an_epoch_pins_request_and_follow() {
 	let origin = id(moq_origin_create());
@@ -4063,16 +4064,21 @@ fn an_epoch_pins_request_and_follow() {
 	assert!(cb.recv() < 0, "another instance resolved");
 	assert!(resolve_pinned(moq_origin_follow, origin, "not-an-epoch", &Callback::new()) < 0);
 
+	// Another instance takes over before the follow starts. An unpinned request resolves it and
+	// holds the answer, so a follower resolving it joins that answer within its first pass.
+	let second = publish_run(origin, "live");
+	let takeover = id(request_once(origin, b"live"));
 	let cb = Callback::new();
 	let task = id(resolve_pinned(moq_origin_follow, origin, &epoch, &cb));
+	// The runtime is one thread running the tasks spawned from outside it in order, so this one
+	// reports only after the follower's first pass has applied the takeover.
+	let tx = unsafe { &*(cb.ptr as *const mpsc::Sender<i32>) }.clone();
+	crate::ffi::RUNTIME.spawn(async move { tx.send(i32::MAX).unwrap() });
+	assert_eq!(cb.recv(), i32::MAX, "the follower delivered another instance");
+	// Once the takeover goes, the pinned instance serves the path again and is delivered.
+	assert_eq!(moq_consume_close(takeover), 0);
+	second.unannounce();
 	let delivered = id(cb.recv());
-	let second = publish_run(origin, "live");
-	assert!(
-		cb.rx
-			.recv_timeout(moq_net::origin::Config::default().update_hold * 2)
-			.is_err(),
-		"the follower delivered another instance"
-	);
 
 	assert_eq!(moq_consume_close(delivered), 0);
 	assert_eq!(moq_origin_follow_cancel(task), 0);

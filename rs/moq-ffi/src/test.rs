@@ -5861,10 +5861,23 @@ async fn an_epoch_pins_request_and_follow() {
 			..Default::default()
 		})
 		.unwrap();
-	let next = tokio::spawn(async move { followed.available().await });
-	tokio::time::sleep(moq_net::origin::Config::default().update_hold * 2).await;
-	assert!(!next.is_finished(), "the follower handed out another instance");
-	next.abort();
+	// An unpinned request resolves the takeover and holds it, so a follower resolving it joins
+	// that answer at once: one poll, which applies the takeover first, would hand it out.
+	let takeover = tokio::time::timeout(TIMEOUT, consumer.request("live".into(), None))
+		.await
+		.expect("timed out requesting the takeover")
+		.unwrap();
+	assert_ne!(
+		takeover.inner().info().epoch.as_ref().map(ToString::to_string),
+		Some(epoch)
+	);
+	let next = std::pin::pin!(followed.available());
+	assert!(
+		next.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+			.is_pending(),
+		"the follower handed out another instance"
+	);
+	drop(takeover);
 	first.broadcast().close().unwrap();
 	second.broadcast().close().unwrap();
 }
