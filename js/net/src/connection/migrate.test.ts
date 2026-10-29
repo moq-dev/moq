@@ -76,7 +76,7 @@ const url = new URL("https://relay.example/room");
 // Short enough to watch, long enough that a handover visibly overlaps the replacement.
 const handover = Milli(200);
 
-test("an empty GOAWAY migrates the announced request to the replacement session", async () => {
+test("an empty GOAWAY migrates the follower to the replacement session", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const { dials, origin } = fleet();
@@ -93,7 +93,7 @@ test("an empty GOAWAY migrates the announced request to the replacement session"
 		// A session younger than this counts as redirected immediately and backs off first.
 		delay: { initial: Milli(1) },
 	});
-	const watched = consume.request(Path.from("cam"), { announced: true });
+	const watched = consume.follow(Path.from("cam"));
 
 	try {
 		await waitUntil(() => watched.active.peek() !== undefined);
@@ -113,7 +113,7 @@ test("an empty GOAWAY migrates the announced request to the replacement session"
 		expect(reload.status.peek()).toBe("connected");
 
 		// Without an epoch the replacement route is a new publisher instance.
-		// The announced request follows it while the old session finishes draining.
+		// The follower follows it while the old session finishes draining.
 		await elapse(clock, () => watched.active.peek() !== undefined && watched.active.peek() !== served);
 		expect(watched.closed.peek()).toBeUndefined();
 		await elapse(clock, () => drained.closed);

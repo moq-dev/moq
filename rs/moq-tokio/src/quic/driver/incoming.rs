@@ -1,7 +1,7 @@
 #[cfg(test)]
 use std::net::{IpAddr, SocketAddr};
 
-use moq_quic::ConnectionError;
+use moq_quic::connection::Error as ConnectionError;
 
 use crate::quic::driver::{connection::Connecting, endpoint::EndpointRef};
 
@@ -10,7 +10,7 @@ use crate::quic::driver::{connection::Connecting, endpoint::EndpointRef};
 pub struct Incoming(Option<State>);
 
 impl Incoming {
-	pub(crate) fn new(inner: moq_quic::Incoming, endpoint: EndpointRef) -> Self {
+	pub(crate) fn new(inner: moq_quic::endpoint::Incoming, endpoint: EndpointRef) -> Self {
 		Self(Some(State { inner, endpoint }))
 	}
 
@@ -28,7 +28,7 @@ impl Incoming {
 
 	/// Retry an incoming connection in driver tests.
 	#[cfg(test)]
-	pub(super) fn retry(mut self) -> Result<(), moq_quic::RetryError> {
+	pub(super) fn retry(mut self) -> Result<(), moq_quic::endpoint::RetryError> {
 		let state = self.0.take().unwrap();
 		state.endpoint.retry(state.inner)
 	}
@@ -67,6 +67,6 @@ impl Drop for Incoming {
 
 #[derive(Debug)]
 struct State {
-	inner: moq_quic::Incoming,
+	inner: moq_quic::endpoint::Incoming,
 	endpoint: EndpointRef,
 }
