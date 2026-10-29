@@ -534,7 +534,14 @@ struct Viewer {
 impl Viewer {
 	/// Resolve `path` and subscribe to each of its `tracks`.
 	async fn watch(&mut self, path: &str, tracks: &[impl AsRef<str>], subscription: Option<track::Subscription>) {
-		let broadcast = self.origin.consume().routed_broadcast(path).await.unwrap();
+		let broadcast = self
+			.origin
+			.consume()
+			.follow(path, None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap();
 		for track in tracks {
 			self.subscribers.push(
 				broadcast
@@ -594,7 +601,14 @@ impl<B: Backend> Room<B> {
 			let mut viewer = cluster.join((viewer + 1) % shape.relays, false).await;
 			for broadcast in broadcasts {
 				if shape.fetch {
-					let source = viewer.origin.consume().routed_broadcast(path(broadcast)).await.unwrap();
+					let source = viewer
+						.origin
+						.consume()
+						.follow(path(broadcast), None)
+						.unwrap()
+						.available()
+						.await
+						.unwrap();
 					viewer.fetches.push((broadcast, source.track(TRACK).unwrap()));
 				} else {
 					viewer.watch(&path(broadcast), &[TRACK], shape.subscription()).await;
@@ -1267,7 +1281,16 @@ impl<B: Backend> ChurnRoom<B> {
 		for _ in 0..shape.sessions {
 			let mut viewer = cluster.join(0, false).await;
 			viewer.watch(&path(0), &held, None).await;
-			broadcasts.push(viewer.origin.consume().routed_broadcast(path(0)).await.unwrap());
+			broadcasts.push(
+				viewer
+					.origin
+					.consume()
+					.follow(path(0), None)
+					.unwrap()
+					.available()
+					.await
+					.unwrap(),
+			);
 			viewers.push(viewer);
 		}
 		Self {

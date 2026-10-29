@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::quic::driver::connection::ConnectionInner;
 
-/// A send group on a [`Connection`](crate::quic::driver::Connection)
+/// A send group on a [`Connection`](crate::quic::driver::connection::Connection)
 ///
 /// Streams that [join](crate::quic::driver::SendStream::set_group) a group share bytes with
 /// the connection's other groups: a higher priority group preempts every lower one, and groups

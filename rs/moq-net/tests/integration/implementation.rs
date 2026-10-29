@@ -15,8 +15,8 @@ const VERSIONS: [(&str, bool); 9] = [
 	("moq-lite-02", false),
 	("moq-lite-03", false),
 	("moq-lite-04", false),
-	("moq-lite-05", true),
-	("moq-lite-06", true),
+	("moq-lite-05", false),
+	("moq-lite-06", false),
 	("moq-lite-07-wip", true),
 	("moq-transport-18", true),
 	("moq-transport-22", true),
@@ -55,7 +55,7 @@ async fn each_side_reads_the_others_implementation() {
 /// Unconfigured, each side names this crate; configured empty, it advertises nothing.
 #[moq_clock::test]
 async fn the_default_names_the_crate_and_empty_omits_it() {
-	for name in ["moq-lite-06", "moq-transport-22"] {
+	for name in ["moq-lite-07-wip", "moq-transport-22"] {
 		let version: Version = name.parse().unwrap();
 		let (seen_by_server, seen_by_client) = exchange(version, None, Some("")).await;
 		assert_eq!(seen_by_server.as_deref(), Some(moq_net::IMPLEMENTATION), "{name}");

@@ -19,10 +19,11 @@
 //!     that captures the microphone. The handle starts, stops, and replaces
 //!     the input while preserving one track identity, and reports the active
 //!     device, failures, and post-processing level.
-//!   - `encode::publish_capture` is the turnkey shorthand. It encodes strictly
-//!     on demand: the track and catalog are advertised up front, but the device
-//!     opens only while a subscriber is listening and is released when the last
-//!     one leaves.
+//!   - `encode::publish_capture` is the turnkey shorthand. The track and
+//!     catalog are advertised up front, and the device captures and encodes
+//!     whether or not anyone is listening, so a late subscriber can fetch the
+//!     recent past. `encode::Capture::on_demand` opens the device only while a
+//!     subscriber is listening instead, releasing it when the last one leaves.
 //!   - [`encode::Producer`] publishes PCM you hand it.
 //! - [`decode`] subscribes to an encoded track and decodes it back to PCM.
 //!   [`decode::Consumer`] is the mirror of [`encode::Producer`]. It reads AAC-LC

@@ -4,6 +4,22 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `broadcast::Demand` reads like `track::Demand`
+
+Replace `is_used()` with `wanted()`, and `used()`, `unused()`, `poll_used`, and `poll_unused` with a loop over `wanted_changed()` (or `poll_wanted_changed`), which returns the new value each time it changes and errors once the broadcast closes.
+`broadcast::Consumer::demand()` is gone: call `demand()` on the broadcast's `Producer`.
+
+```rust
+// Before
+demand.used().await?;
+demand.unused().await?;
+// After
+while !demand.wanted_changed().await? {}
+while demand.wanted_changed().await? {}
+```
+
+A group a subscription or fetch handed out now keeps its track wanted until the group finishes and a reader reads its end (a range cap is not the end): until then `track::Demand::wanted` stays `Some` and `track::Producer::abort_unused` declines. Drop the group, or read it to its end, to let the demand go.
+
 ### Paths fit moq-transport's 4096-byte namespace ([#6927](https://github.com/moq-dev/moq/pull/6927))
 
 `Path::MAX_BYTES` is 4096, moq-transport's namespace limit, so every path fits every wire and building a longer one fails with `path::Invalid::TooLong`. Keep broadcast paths within 4096 bytes.
@@ -78,7 +94,6 @@ A sender that relied on `None` to hold its rate while unwatched should check its
 
 These had no caller outside tests; replace them as follows.
 
-- `broadcast::Demand` and both `broadcast::{Producer, Consumer}::demand()`: watch each track's `track::Demand` instead.
 - `goaway::Consumer::{peek, recv}`: poll it, `goaway.poll(&kio::Waiter::noop())` to peek or `kio::wait(|waiter| goaway.poll(waiter)).await` to wait.
 - `bandwidth::Producer::{abort, closed}`: drop the last producer to close it.
 - `Version::{names, from_alpn, is_ietf}`: use `Versions::all().iter()` or `Version::from_code`, match `alpn()` yourself, and `!is_lite()`.

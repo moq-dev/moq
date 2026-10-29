@@ -11,8 +11,8 @@ SUBSCRIBE_OK.
 ## Plan
 
 Decided 2026-10-25 (maintainer): honoring Largest Object and serving the
-head moved into [JavaScript FETCH](/quest/m1/js-fetch.md) in m1; only this
-part stays in m2.
+head moved into JavaScript FETCH in m1, which landed; only this part stays
+in m2. A FETCH that resolves before PUBLISH_DONE already finishes its head.
 
 In the tail test the track is finished before SUBSCRIBE_OK goes out, so
 PUBLISH_DONE follows at once and the FETCH arrives to no subscription. Keep a
@@ -30,7 +30,6 @@ refused.
 
 ## Required
 
-- [JavaScript FETCH](/quest/m1/js-fetch.md) - the joining FETCH and the registry this extends
 - [Join after a quick finish](/quest/m2/ietf-join-after-finish.md) - settles the bound this reuses
 
 ## Related
