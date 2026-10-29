@@ -16,6 +16,10 @@ Decided 2026-10-24 (maintainer), from a triage of run
 child per distinct cause, each landing on its own. The PR gate keeps
 skipping benches and examples; a green Nightly catches them within a day.
 
+Decided 2026-10-27 (maintainer), from the coverage audit's triage of run
+[40506938673](https://github.com/moq-dev/moq/actions/runs/40506938673): more
+children for the causes nothing owned.
+
 This README's own work, after the children:
 
 - Nightly's multi-step jobs (Features first) keep going past a failed step
@@ -35,5 +39,8 @@ Public API: none. Wire: none.
 - [The browser backend baseline completes on IETF22](/quest/m0/nightly/browser-baseline.md) - the WASM and UniFFI backend baseline completes every supported transport case without an internal error
 - [Resolve the paired catalog fanout regressions](/quest/m0/nightly/paired-shared.md) - the reported catalog fanout regressions are attributed and genuine extra costs are fixed with paired measurements
 - [Probing beside Cubic](/quest/m0/nightly/competing-cubic.md) - the `competing_cubic` probe test stays within its deadline budget
+- [OBS TSan passes without a wall-clock bound](/quest/m0/nightly/obs-tsan.md) - `destroySource` asserts ordering instead of `elapsed < 500ms`
+- [Paired bench regressions bisected](/quest/m0/nightly/bench-regressions.md) - retirement/selection's +21-24% and two 10% rows fixed or shown to be noise
+- [Firefox's player closes every VideoFrame](/quest/m0/nightly/firefox-videoframe.md) - the Media job's Firefox player stops leaking an unclosed VideoFrame
 - [Gate stops hanging](/quest/m0/nightly/gate-hang.md) - `just gate` finishes instead of hanging to the timeout, and a hang names its module
 - [moq-quic rustdoc](/quest/m0/nightly/quic-rustdoc.md) - `--all-features` rustdoc for moq-quic builds and a lane checks it
