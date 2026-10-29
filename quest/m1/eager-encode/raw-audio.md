@@ -30,7 +30,3 @@ covering the last second receives that second, timestamps matching capture
 time. Memory stays bounded by `maxAge` or the cap.
 
 Public API: default behavior change for audio. Wire: none.
-
-## Required
-
-- [@moq/publish encodes while enabled](/quest/m1/eager-encode/js.md) - the JS always-on path this switches from

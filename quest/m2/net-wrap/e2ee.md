@@ -30,7 +30,7 @@ the reverse (decided 2026-10-20, maintainer):
 - `track::Info.compress` is logical. Ciphertext doesn't compress, so the
   wrapper compresses each group, and each datagram alone with a fresh
   window, with moq-net's
-  [track compression](/quest/m1/compress/README.md) before AEAD, creates the
+  [track compression](/doc/concept/compression.md) before AEAD, creates the
   physical track uncompressed, and inflates after decryption. Sessions drop
   a sealed datagram past the transport's datagram size as they drop an
   oversized plaintext one, so document that the AEAD tag and any compression
@@ -53,7 +53,7 @@ the reverse (decided 2026-10-20, maintainer):
   catalog track is itself compressed, so a subscriber would need the flag
   before it could inflate the catalog that carries it. The
   [E2EE epic](/quest/m2/e2ee/README.md) also keeps catalog formats out of
-  moq-e2ee, and the [compression migration](/quest/m1/compress/README.md) dropped hang's
+  moq-e2ee, and the [compression migration](https://github.com/moq-dev/moq/pull/7046) dropped hang's
   `compression` field. The subscriber needs the flag before inflating,
   without changing moq-net's `track(name)`; propose the encoding in the PR.
   Record it in `draft-lcurley-moq-e2ee.md`, replacing the Catalogs section's
@@ -91,7 +91,3 @@ and each compressed object's authenticated inflated size.
 ## Required
 
 - [moq-net traits](/quest/m2/net-wrap/traits.md) - the traits this implements
-
-## Related
-
-- [Compressed tracks](/quest/m1/compress/README.md) - the per-group compression the wrapper applies before AEAD

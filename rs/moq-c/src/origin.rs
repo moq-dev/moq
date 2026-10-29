@@ -3,7 +3,7 @@ use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;
 use crate::task::Task;
-use crate::{Error, Id, NonZeroSlab, State, moq_announce_event, moq_announce_kind, moq_string};
+use crate::{Error, Id, NonZeroSlab, State, moq_announce_event, moq_announce_kind, moq_route, moq_string};
 
 /// Global state managing all active resources.
 ///
@@ -76,6 +76,10 @@ struct AnnouncedRecord {
 	captures: Option<Vec<String>>,
 	capture_views: Vec<moq_string>,
 	kind: moq_announce_kind,
+	hops: Vec<u64>,
+	cost: u64,
+	/// Empty when the route carries no epoch.
+	epoch: String,
 }
 
 // The raw pointers only borrow immutable String allocations owned by this record.
@@ -112,6 +116,9 @@ impl AnnouncedRecord {
 			captures,
 			capture_views,
 			kind,
+			hops: update.route.hops.iter().map(|hop| hop.id()).collect(),
+			cost: update.route.cost.value(),
+			epoch: update.route.epoch.map(|epoch| epoch.to_string()).unwrap_or_default(),
 		}
 	}
 }
@@ -192,6 +199,15 @@ impl Origin {
 			captures_len: announced.capture_views.len(),
 			has_captures: announced.captures.is_some(),
 			kind: announced.kind,
+			route: moq_route {
+				hops: announced.hops.as_ptr(),
+				hops_len: announced.hops.len(),
+				cost: announced.cost,
+				epoch: moq_string {
+					data: announced.epoch.as_ptr().cast::<c_char>(),
+					len: announced.epoch.len(),
+				},
+			},
 		};
 		Ok(())
 	}

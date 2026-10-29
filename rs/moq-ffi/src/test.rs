@@ -671,6 +671,70 @@ fn tone_power(samples: &[f32], frequency: f64) -> f64 {
 	previous * previous + older * older - coefficient * previous * older
 }
 
+/// A listener holding a muted rendition passes its disabled config, which subscribes and plays
+/// whatever the publisher sends once it unmutes.
+#[cfg(feature = "audio")]
+#[tokio::test]
+async fn audio_subscribes_a_held_disabled_rendition() {
+	use crate::audio::*;
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	let catalogs = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
+	let catalog = MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
+	let audio = MoqAudioProducer::new(
+		&catalog,
+		MoqAudioProducerOptions {
+			input: MoqAudioEncoderInput {
+				format: MoqAudioSampleFormat::F32,
+				sample_rate: 48_000,
+				channels: 2,
+			},
+			output: MoqAudioEncoderOutput {
+				codec: MoqAudioCodec::opus(),
+				sample_rate: None,
+				channels: None,
+				bitrate: None,
+				frame_duration: Some(Duration::from_millis(20)),
+			},
+			track: Some("voice".into()),
+			bandwidth: None,
+		},
+	)
+	.unwrap();
+	let snapshot = catalogs.next().await.unwrap().unwrap();
+	let mut muted = snapshot.audio["voice"].clone();
+	muted.enabled = false;
+	let decoder = MoqAudioConsumer::subscribe(
+		&consumer,
+		"voice".into(),
+		muted,
+		MoqAudioDecoderOutput {
+			max_delay: Some(Duration::from_secs(30)),
+			..audio_output()
+		},
+	)
+	.await
+	.unwrap();
+
+	for index in 0..4 {
+		audio
+			.write(MoqAudioFrame {
+				timestamp_us: index * 20_000,
+				data: audio_tone(index as usize * 960, 960, 2),
+			})
+			.unwrap();
+	}
+	audio.finish().unwrap();
+	let mut frames = 0;
+	while let Some(read) = tokio::time::timeout(TIMEOUT, decoder.next()).await.unwrap().unwrap() {
+		if matches!(read, MoqAudioRead::Frame { .. }) {
+			frames += 1;
+		}
+	}
+	assert!(frames > 0, "the held rendition played nothing");
+	broadcast.close().unwrap();
+}
+
 /// PCM written and finished from separate host threads survives the binding's locking and drain.
 #[cfg(feature = "audio")]
 #[tokio::test]

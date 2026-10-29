@@ -920,16 +920,15 @@ async fn run_stdout(
 ) -> anyhow::Result<()> {
 	let catalog = args.catalog_format(&name);
 
-	// Confirm the broadcast is reachable and wait for it to be announced; `Subscribe` then
-	// resolves it, and any sibling broadcast a rendition's `broadcast` field references
-	// (e.g. "./source") through the same origin.
-	consumer
+	// Wait for the broadcast to be announced; the export resolves any sibling broadcast a
+	// rendition's `broadcast` field references (e.g. "./source") through the same origin.
+	let broadcast = consumer
 		.follow(name.as_str(), None)?
 		.available()
 		.await
 		.with_context(|| format!("failed to resolve broadcast `{name}`"))?;
 
-	let subscribe = Subscribe::new(consumer, &name, catalog, args).await?;
+	let subscribe = Subscribe::new(moq_mux::Source::new(consumer, broadcast), catalog, args);
 	let Some(echo) = echo else {
 		return subscribe.run().await;
 	};

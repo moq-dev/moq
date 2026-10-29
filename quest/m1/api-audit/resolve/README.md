@@ -52,7 +52,7 @@ Wire: none.
 
 ## Required
 
-- [Callers resolve once](/quest/m1/api-audit/resolve/callers.md) - no caller hand-rolls synced resolution or decides table absence by wall clock
+- [The carla demo pins its driver epoch](/quest/m1/api-audit/resolve/callers.md) - the demo's driver watcher requests each run pinned to its announced epoch
 
 ## Related
 
