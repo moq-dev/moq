@@ -1019,7 +1019,7 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])(
 			await answerTrackInfo(await opened(0), version, 1000);
 			const request = await opened(1);
 			await request.reading;
-			await respond(request, version, [{ start: new SubscribeStart(0) }]);
+			await respond(request, version, [{ start: new SubscribeStart(0, undefined, 0) }]);
 			const received = track.recvDatagram();
 			await writer.write(new DatagramMessage(0n, 0, 0, new Uint8Array(1198)).encode(version));
 			await writer.write(new DatagramMessage(0n, 1, 1, new Uint8Array(1197)).encode(version));
@@ -1657,7 +1657,7 @@ test.each([
 		await subscribe.reading;
 
 		if (outcome === "answered") {
-			await respond(subscribe, version, [{ start: new SubscribeStart(0) }]);
+			await respond(subscribe, version, [{ start: new SubscribeStart(0, undefined, 0) }]);
 			await drainReactions();
 			await pool.replace();
 			await drainReactions();
@@ -1666,7 +1666,12 @@ test.each([
 			await pool.withdraw();
 			await drainReactions();
 			expect(track.closed.peek()).toBeUndefined();
-			await respond(subscribe, version, [{ start: new SubscribeStart(0) }, { end: new SubscribeEnd(0) }], true);
+			await respond(
+				subscribe,
+				version,
+				[{ start: new SubscribeStart(0, undefined, 0) }, { end: new SubscribeEnd(0) }],
+				true,
+			);
 			expect(await track.closed).toBeNull();
 		} else {
 			await pool.replace();
@@ -2240,7 +2245,7 @@ test("a lite-07 publisher FIN ends a covered bounded subscription", async () => 
 			new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
 			version,
 		);
-		await encodeSubscribeResponse(writer, { start: new SubscribeStart(0) }, version);
+		await encodeSubscribeResponse(writer, { start: new SubscribeStart(0, undefined, 0) }, version);
 		await encodeSubscribeResponse(
 			writer,
 			{ drop: new SubscribeDrop({ start: 0, end: 1, error: StreamCode.NotFound }) },
@@ -2332,7 +2337,7 @@ test.each([
 			version,
 		);
 		if (start) {
-			await encodeSubscribeResponse(writer, { start: new SubscribeStart(0) }, version);
+			await encodeSubscribeResponse(writer, { start: new SubscribeStart(0, undefined, 0) }, version);
 			await encodeSubscribeResponse(
 				writer,
 				{ drop: new SubscribeDrop({ start: 0, end: 0, error: StreamCode.NotFound }) },

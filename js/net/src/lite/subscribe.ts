@@ -620,7 +620,7 @@ export class SubscribeStart {
 	/** Subscriber Max Age used to select the start, absent before draft-07. */
 	maxDelay?: number;
 
-	constructor(group: number, largest?: Position, maxDelay = 0) {
+	constructor(group: number, largest?: Position, maxDelay?: number) {
 		this.group = group;
 		this.largest = largest;
 		this.maxDelay = maxDelay;
@@ -646,7 +646,6 @@ export class SubscribeStart {
 		return Message.decode(r, async (r) => {
 			const group = await r.u53();
 			const start = new SubscribeStart(group);
-			start.maxDelay = undefined;
 			if (!hasLargest(version)) return start;
 			const largest = await r.u53();
 			if (largest !== 0) start.largest = { group: largest - 1, frame: await r.u53() };

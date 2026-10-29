@@ -218,7 +218,7 @@ test("a lite-07 list decodes as the span covering it", async () => {
 });
 
 test("SubscribeStart round-trips on draft-05", async () => {
-	const got = await responseRoundtrip(Version.DRAFT_05, { start: new SubscribeStart(42) });
+	const got = await responseRoundtrip(Version.DRAFT_05, { start: new SubscribeStart(42, undefined, 0) });
 	expect("start" in got).toBe(true);
 	if (!("start" in got)) throw new Error("expected start");
 	expect(got.start.group).toBe(42);
@@ -226,16 +226,16 @@ test("SubscribeStart round-trips on draft-05", async () => {
 
 test("SubscribeStart carries the largest position on draft-07", async () => {
 	// Type, length, group, largest group + 1, largest frame.
-	expect(await encode(Version.DRAFT_07, { start: new SubscribeStart(4, { group: 3, frame: 2 }) })).toEqual(
+	expect(await encode(Version.DRAFT_07, { start: new SubscribeStart(4, { group: 3, frame: 2 }, 0) })).toEqual(
 		new Uint8Array([0, 4, 4, 4, 2, 0]),
 	);
 	for (const largest of [undefined, { group: 3, frame: 2 }]) {
-		const got = await responseRoundtrip(Version.DRAFT_07, { start: new SubscribeStart(4, largest) });
+		const got = await responseRoundtrip(Version.DRAFT_07, { start: new SubscribeStart(4, largest, 0) });
 		if (!("start" in got)) throw new Error("expected start");
 		expect([got.start.group, got.start.largest]).toEqual([4, largest]);
 	}
 	// Draft-06 has no largest position on the wire.
-	expect(await encode(Version.DRAFT_06, { start: new SubscribeStart(4, { group: 3, frame: 2 }) })).toEqual(
+	expect(await encode(Version.DRAFT_06, { start: new SubscribeStart(4, { group: 3, frame: 2 }, 0) })).toEqual(
 		new Uint8Array([0, 1, 4]),
 	);
 });
@@ -249,6 +249,10 @@ test("SubscribeStart binds its budget only on the unpublished wire", async () =>
 		expect(got.start.maxDelay).toBe(version === Version.DRAFT_07 ? 5000 : undefined);
 		if (version !== Version.DRAFT_07) expect(await encode(version, { start })).toEqual(new Uint8Array([0, 1, 4]));
 	}
+});
+
+test("draft-07 refuses a START without a selecting budget", async () => {
+	await expect(encode(Version.DRAFT_07, { start: new SubscribeStart(4) })).rejects.toThrow("missing start budget");
 });
 
 test("SubscribeEnd round-trips on draft-05", async () => {
