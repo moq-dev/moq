@@ -17,12 +17,12 @@ Import `package:moq/media.dart` with a prefix for catalogs, encoded-media import
 container consumers. `TrackProducer.audio` / `.video` take a broadcast, an init record,
 and a `Named` or `Requested` target. `CatalogProducer(broadcast: ...)` owns catalog properties
 and sections; it holds the broadcast weakly and fails after the broadcast closes.
-`package:moq/flate.dart` exposes opaque `SnapshotProducer` / `StreamProducer` with an optional `timestampUs`.
+Publish JSON tracks with `MoqTrackInfo(compress: true)`; a `package:moq/json.dart` consumer reads one with no option of its own.
 A missing data timestamp stays untimed; the library never substitutes zero or now.
 `package:moq/json.dart` consumers return `Value` (`value`, `timestampUs`) from `next()`; a snapshot consumer
 yields each state in order, and `latest()` skips to the newest. Read timestamps are rounded down to a whole microsecond.
 Raw tracks with a `null` timescale are untimed on both publish and receive.
-`MoqTrackInfo.compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. `@moq/net` cannot read a compressed track yet.
+`MoqTrackInfo.compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
 Timed raw/data tracks require caller-supplied timestamps. Use `CatalogProducer.now()` to stamp a locally
 created event on the broadcast clock; reading it fixes that clock for later media producers.

@@ -46,7 +46,10 @@ Use it for dates, rather than measuring elapsed time. A Rust wall-time
 boundary must convert its units explicitly. A new `Manual` starts at instant
 zero and 2025-01-01 UTC. `await advance()` moves both readings through each due
 timer deadline, draining tasks between deadlines, including timers those tasks
-re-arm before the target. `jump()` moves straight to the target and fires due
+re-arm before the target. `yieldNow()` waits for a later host task, giving the
+host's other work a turn without ordering it; a `Manual` clock moves time only
+once every pending yield has resumed, so a loop that yields mid-work never sees
+a later time. `jump()` moves straight to the target and fires due
 timers late without draining, modeling a stalled event loop. `stepWall()` changes
 only wall time. `fire()` waits for a timer
 to be armed, even by a later host task such as I/O, then advances exactly to the

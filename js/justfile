@@ -128,12 +128,6 @@ json-stream-bench:
     bunx tsc --noEmit --project json/bench/tsconfig.json
     bun json/bench/stream.ts
 
-# Sweep compressed stream decoding over retained frames and oversized slices.
-flate-decoder-bench:
-    bun install --frozen-lockfile
-    bunx tsc --noEmit --project flate/bench/tsconfig.json
-    bun flate/bench/decoder.ts
-
 # Sweep snapshot codec cost over document size and changed keys.
 json-codec-bench:
     bun install --frozen-lockfile

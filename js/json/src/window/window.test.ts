@@ -19,10 +19,11 @@ class Live {
 	events: Event<Rec>[] = [];
 	#next?: Promise<Timed<Event<Rec>> | undefined>;
 
-	constructor(config: { ops?: boolean; compression?: boolean; checkpointRecords?: number } = {}) {
-		const track = new Track.Producer("test");
-		this.producer = new Producer<Rec>({ track, ...config });
-		this.consumer = new Consumer<Rec>({ track: track.subscribe(), compression: config.compression });
+	constructor(config: { ops?: boolean; compress?: boolean; checkpointRecords?: number } = {}) {
+		const { compress, ...producer } = config;
+		const track = new Track.Producer("test").accept({ compress });
+		this.producer = new Producer<Rec>({ track, ...producer });
+		this.consumer = new Consumer<Rec>({ track: track.subscribe() });
 	}
 
 	async push(n: number): Promise<void> {
@@ -201,14 +202,14 @@ test("rolling is invisible to the consumer", async () => {
 });
 
 test("compressed round-trip across rolls", async () => {
-	const live = new Live({ compression: true });
+	const live = new Live({ compress: true });
 	for (let n = 0; n < 40; n++) {
 		await live.push(n);
 		if (n >= 10) await live.pop(1);
 		if (n % 7 === 6) live.producer.cut();
 	}
 
-	// Every roll opens a fresh window; every record still arrives exactly once, in order.
+	// Every roll opens a fresh group; every record still arrives exactly once, in order.
 	expect(pushed(await live.finish())).toEqual(Array.from({ length: 40 }, (_, n) => n));
 });
 
@@ -519,19 +520,15 @@ test("an op that would evict the header rolls first", () => {
 	frame.commit();
 });
 
-// Compression doesn't lift the limit: a reader inflates the header whole, so one past the group budget
-// is refused however small it deflates.
-for (const compression of [false, true]) {
-	test(`a header larger than the group cache is rejected (compression=${compression})`, () => {
-		const encoder = new Encoder<string>({ compression });
+test("a header larger than the group cache is rejected", () => {
+	const encoder = new Encoder<string>();
 
-		expect(() => encoder.push("x".repeat(Group.MAX_GROUP_CACHE_BYTES))).toThrow("group cache limit");
-		expect(encoder.window).toEqual([]);
+	expect(() => encoder.push("x".repeat(Group.MAX_GROUP_CACHE_BYTES))).toThrow("group cache limit");
+	expect(encoder.window).toEqual([]);
 
-		const frame = encoder.push("ok");
-		expect(frame.keyframe).toBeTrue();
-	});
-}
+	const frame = encoder.push("ok");
+	expect(frame.keyframe).toBeTrue();
+});
 
 test("an uncommitted edit leaves the window unchanged", () => {
 	const encoder = new Encoder<number>();

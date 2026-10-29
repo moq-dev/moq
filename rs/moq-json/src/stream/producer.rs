@@ -148,9 +148,7 @@ impl<T: Serialize> Inner<T> {
 		};
 
 		if let Err(err) = result {
-			// The record never reached the wire either way, so the window is ahead of every consumer
-			// and has to be reset. Without this the desync latch answers the next append before the
-			// track does, masking the real reason the log stopped.
+			// The record never reached the wire either way, so it is not charged to the group.
 			drop(record);
 			encoder.reset();
 
@@ -160,7 +158,7 @@ impl<T: Serialize> Inner<T> {
 			// stream is one group" a real invariant rather than the usual case.
 			//
 			// An `open` failure published nothing (it only runs when there is no group), so a later
-			// append opens a fresh group whose decoder starts cold. That path also catches an append
+			// append opens a fresh group. That path also catches an append
 			// onto a track already ended this way, which keeps reporting the error it was aborted with.
 			if published {
 				track.abort(err.clone());
@@ -228,8 +226,7 @@ impl Track {
 	fn finish(&mut self) -> std::result::Result<(), moq_net::Error> {
 		// Finalize both independently rather than short-circuiting on the group. Returning early
 		// would leave the track open with `group` already taken, so a later append would open a
-		// second group, and (with compression) write into it from a window the consumer never
-		// received. That is exactly the split log ending the track exists to prevent.
+		// second group. That is exactly the split log ending the track exists to prevent.
 		let group = match self.group.take() {
 			Some(mut group) => group.finish(),
 			None => Ok(()),
