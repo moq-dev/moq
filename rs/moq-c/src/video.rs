@@ -1341,7 +1341,14 @@ mod tests {
 			follow_grant(&shared).unwrap();
 			let before = shared.lock().as_ref().unwrap().reservation.clone().unwrap();
 			let small = vec![0x80; 320 * 240 * 4];
-			assert!(!shared.lock().as_mut().unwrap().publish_frame(moq_net::Timestamp::ZERO, &small).unwrap());
+			assert!(
+				!shared
+					.lock()
+					.as_mut()
+					.unwrap()
+					.publish_frame(moq_net::Timestamp::ZERO, &small)
+					.unwrap()
+			);
 
 			// Disabled, then resumed onto the larger picture.
 			{
@@ -1354,7 +1361,12 @@ mod tests {
 					.unwrap();
 			}
 			let large = vec![0x80; 640 * 480 * 4];
-			let moved = shared.lock().as_mut().unwrap().publish_frame(moq_net::Timestamp::from_micros(66_666).unwrap(), &large).unwrap();
+			let moved = shared
+				.lock()
+				.as_mut()
+				.unwrap()
+				.publish_frame(moq_net::Timestamp::from_micros(66_666).unwrap(), &large)
+				.unwrap();
 			assert!(moved, "the larger picture is a new codec string");
 			follow_grant(&shared).unwrap();
 			let guard = shared.lock();
