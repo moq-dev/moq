@@ -2070,6 +2070,7 @@ impl RequestGrant {
 	}
 
 	/// The request's slot, for re-attaching what it authorized without taking another.
+	#[cfg(test)]
 	pub(crate) fn hold(&self) -> Option<Hold> {
 		self.held().hold.clone()
 	}
@@ -2163,6 +2164,91 @@ impl RequestGrant {
 			Some(grant) => grant.poll_ended(waiter),
 			None => Poll::Pending,
 		}))
+	}
+}
+
+/// The authority a request names, shared by its update loop and its lifetime guard.
+#[derive(Clone)]
+pub(crate) struct RequestBinding {
+	token: kio::Shared<Option<RequestGrant>>,
+	named: kio::Producer<bool>,
+	clock: crate::time::Deadlines,
+	path: crate::Path,
+	kind: RequestKind,
+	hold: Option<Hold>,
+}
+
+impl RequestBinding {
+	pub(crate) fn new(
+		clock: &crate::time::Deadlines,
+		path: crate::Path,
+		kind: RequestKind,
+		hold: Option<Hold>,
+		token: Option<RequestGrant>,
+	) -> Self {
+		Self {
+			named: kio::Producer::new(token.is_some()),
+			token: kio::Shared::new(token),
+			clock: clock.clone(),
+			path,
+			kind,
+			hold,
+		}
+	}
+
+	pub(crate) fn named(&self) -> bool {
+		*self.named.read()
+	}
+
+	/// Follow a parent's authority without holding its token or verification credit.
+	pub(crate) fn following(&self) -> kio::Consumer<bool> {
+		self.named.consume()
+	}
+
+	pub(crate) fn hold(&self) -> Option<Hold> {
+		self.hold.clone()
+	}
+
+	pub(crate) fn verify(&self, handle: &Link, token: crate::setup::Token) -> RequestVerdict {
+		match &*self.token.read() {
+			Some(grant) => grant.verify_renewal(handle, token),
+			None => handle.verify_request(token, self.hold.clone()),
+		}
+	}
+
+	pub(crate) fn admit(
+		&self,
+		verdict: RequestVerdict,
+		answer: std::result::Result<Grant, Refusal>,
+	) -> std::result::Result<(), Refusal> {
+		let mut token = self.token.lock();
+		match &*token {
+			Some(grant) => grant.renew(verdict, answer),
+			None => {
+				*token = Some(RequestGrant::new(
+					&self.clock,
+					verdict,
+					answer,
+					self.path.clone(),
+					self.kind,
+					self.hold.clone(),
+				)?);
+				*self.named.write().expect("binding is open") = true;
+				Ok(())
+			}
+		}
+	}
+
+	pub(crate) fn poll_ended(&self, waiter: &kio::Waiter) -> Poll<Refusal> {
+		let mut ended = Poll::Pending;
+		// Register even before a token is named, so binding the first one wakes the guard.
+		let _ = self.token.poll(waiter, |token| {
+			if let Some(token) = &**token {
+				ended = token.poll_ended(waiter);
+			}
+			Poll::Pending
+		});
+		ended
 	}
 }
 
@@ -2300,6 +2386,8 @@ enum Part {
 	Granted,
 	/// The peer's grant, and the scope once the announce that stood in for it closes.
 	Announced(kio::Consumer<()>),
+	/// A joining FETCH follows whether its subscription has named a token yet.
+	Joined(kio::Consumer<bool>),
 }
 
 impl Gate {
@@ -2322,6 +2410,11 @@ impl Gate {
 	/// Hold the request to the peer's grant alone, once its own token authorized it.
 	pub(crate) fn named(mut self) -> Self {
 		self.part = Part::Granted;
+		self
+	}
+
+	pub(crate) fn following(mut self, named: kio::Consumer<bool>) -> Self {
+		self.part = Part::Joined(named);
 		self
 	}
 
@@ -2375,6 +2468,7 @@ impl Gate {
 			Part::Both => Part::Both,
 			Part::Granted => Part::Granted,
 			Part::Announced(live) => Part::Announced(live.clone()),
+			Part::Joined(named) => Part::Joined(named.clone()),
 		};
 		gate
 	}
@@ -2413,6 +2507,7 @@ impl Gate {
 				},
 				Part::Granted => true,
 				Part::Announced(live) => self.within_limit || !live.is_closed(),
+				Part::Joined(named) => !named.is_closed() && (*named.read() || self.within_limit),
 			}
 	}
 
@@ -2503,6 +2598,21 @@ impl Gate {
 		if self.poll_token_ended(waiter).is_ready() {
 			return Poll::Ready(());
 		}
+		let mut joined_named = None;
+		if let Part::Joined(named) = &self.part {
+			let mut token = false;
+			if named
+				.poll(waiter, |named| {
+					token = **named;
+					Poll::<()>::Pending
+				})
+				.is_ready()
+			{
+				return Poll::Ready(());
+			}
+			joined_named = Some(token);
+		}
+
 		let mut epoch = self.epoch;
 		while let Poll::Ready(permit) = self.poll_permit(&mut epoch, waiter) {
 			self.epoch = epoch;
@@ -2510,13 +2620,14 @@ impl Gate {
 			self.within_limit = permit.within_limit(path);
 			let allowed = match self.part {
 				Part::Both => permit.matches(path),
-				Part::Granted | Part::Announced(_) => permit.granted(path),
+				Part::Granted | Part::Announced(_) | Part::Joined(_) => permit.granted(path),
 			};
 			if !allowed {
 				return Poll::Ready(());
 			}
 		}
 		match &self.part {
+			Part::Joined(_) if joined_named == Some(false) && !self.within_limit => Poll::Ready(()),
 			Part::Announced(live) if !self.within_limit => live.poll_closed(waiter),
 			_ => Poll::Pending,
 		}
@@ -3324,6 +3435,35 @@ mod request_token_tests {
 				}
 			}
 		}
+	}
+
+	#[moq_clock::test]
+	async fn joining_authority_follows_a_first_token_without_holding_its_lease() {
+		let runtime = crate::time::sim();
+		let handle = Link::new(true);
+		handle.handle().authorize(&Grant::all());
+		let mut requests = handle.handle().requests();
+		let binding = RequestBinding::new(&runtime, subscribe_path(), RequestKind::Subscribe, None, None);
+		let mut joined = Gate::new(handle.clone(), subscribe_path(), Direction::Publish).following(binding.following());
+		let waiter = kio::Waiter::noop();
+		assert!(joined.poll_denied(&waiter).is_pending());
+		let verdict = binding.verify(&handle, token(b"room", 0));
+		let issued = requests.next().await.unwrap().accept(subscribe_only("room"));
+		let answer = verdict.grant().await;
+		binding.admit(verdict, answer).unwrap();
+		handle.handle().authorize(&Grant::default());
+		assert!(
+			!handle.allows(Direction::Publish, "room/alice"),
+			"no grant entered scope"
+		);
+		assert!(joined.poll_denied(&waiter).is_pending(), "parent now names a token");
+		assert!(issued.closed().now_or_never().is_none());
+		drop(binding);
+		assert!(
+			issued.closed().now_or_never().is_some(),
+			"observer held the token's lease"
+		);
+		assert!(joined.poll_denied(&waiter).is_ready(), "parent ended");
 	}
 
 	#[moq_clock::test]

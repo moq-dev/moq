@@ -57,8 +57,8 @@ impl<'a> Message<'a> for TrackStatus<'a> {
 		let include_properties = (!self.properties_wanted && Filter::is_draft22(version)).then_some(false);
 		let epoch = self.epoch.clone();
 		encode_params!(w, version,
-			0x35 => include_properties,
 			0x03 => self.authorization_token.clone(),
+			0x35 => include_properties,
 			super::epoch::EPOCH_PARAM => epoch,
 		);
 		Ok(())

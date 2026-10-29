@@ -41,7 +41,7 @@ impl<'a> Message<'a> for SubscribeNamespace {
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		encode_namespace(w, &self.namespace)?;
-		encode_params!(w, version, HIDDEN_PARAM => hidden_param(self.hidden), 0x03 => self.authorization_token.clone());
+		encode_params!(w, version, 0x03 => self.authorization_token.clone(), HIDDEN_PARAM => hidden_param(self.hidden));
 		Ok(())
 	}
 

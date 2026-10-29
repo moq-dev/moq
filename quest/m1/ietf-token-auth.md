@@ -32,21 +32,36 @@ Decision prompts:
 
 Implementation checkpoint: [moq-dev/moq#7211](https://github.com/moq-dev/moq/pull/7211)
 contains shared per-session token records, independent verdict readers, request
-gates for supported incoming request types, and an HTTP attachment lifecycle.
-It remains a draft. Before completing this quest:
+gates, and an explicit HTTP attachment lifecycle. On 2026-10-29, the user's AFK
+authorization selected ✅ explicit `attach` plus an `auth` identity (recommended),
+instead of a separate lease API. Auth servers must accept the new event and end
+only the named attachment when `auth` is present; a connection end has no `auth`.
 
-- Finish introducing a token on an initially unnamed SUBSCRIBE or
-  PUBLISH_NAMESPACE, and a SUBSCRIBE update combining a token with pausing.
-  The settled update rule covers these too. Their current refusal paths still
-  need a shared authority binding so the stream guard and route admission move
-  together.
-- Review the HTTP contract shape: the implementation sends `attach` with a
-  random `auth` id and carries that id on revalidation and `end`. This lets an
-  older auth server refuse the new attachment before admission. Recommendation:
-  retain this explicit lifecycle rather than overloading a connection's end.
-- Run Rust validation, cross-language interop, draft checks, and the token
-  benchmark sweep. Host capacity has held the Rust test command in `quest gate`;
-  JavaScript auth tests, type checks, build, and API report generation passed.
+The remaining SUBSCRIBE and PUBLISH_NAMESPACE updates now introduce request-local
+authority, and token-plus-pause updates retain that authority across pause/resume.
+Validation checkpoint, 2026-10-29:
+
+- JavaScript auth checks, build/API report, and all draft checks passed. The
+  existing checkpoint also records 124 passing JavaScript auth tests; rerunning
+  those tests stayed in `quest gate` and was stopped before execution.
+- The nine-point shared-token benchmark sweep completed on an intermediate
+  revision (1/8/32 naming requests by 1/8/32 tokens); remeasure the final guard
+  changes before claiming final-head performance validation.
+- A full Rust run completed 3,772 tests: 3,770 passed, including HTTP attachment
+  lifecycle tests, with two failures. Joining FETCH still needed to enforce
+  session scope until its parent introduced a token; the relay integration test
+  also needed to disable SOLICIT on the server to exercise token announcements.
+  Both have source fixes and additional coverage, but the final changes have
+  not compiled or run: the focused rerun and `just ci` stayed in `quest gate`
+  until stopped at handoff. Run them before marking ready.
+- Rust/JS wire interop preflight passed all nine cases. Full
+  `just test interop --all` stopped during its build when the host's Cargo cache
+  shim failed to exec Cargo with `Argument list too long`; resolve that launch
+  failure and complete the matrix.
+- Formatting, `git diff --check`, and `quest check --base origin/main` passed.
+
+Finish validation and any findings, remove this quest and its links, and mark
+ready. No design decision is pending. The PR remains a draft checkpoint.
 
 What changes from #5148:
 

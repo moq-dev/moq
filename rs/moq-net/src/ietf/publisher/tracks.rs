@@ -1275,7 +1275,7 @@ impl Publisher {
 					},
 					cache: track.clone(),
 					namespace: namespace.clone(),
-					token: false,
+					token: None,
 					ranking: serve.ranking.clone(),
 				},
 				(Filter::NextObject, None) => Joined::Empty,
@@ -1301,7 +1301,11 @@ impl Publisher {
 						.await;
 				}
 			};
-			let serving = self.run_subscription(stream, &mut serve, finished, goaways, fill, None);
+			let mut updates = super::SubscriptionUpdates {
+				binding: None,
+				renewal: Default::default(),
+			};
+			let serving = self.run_subscription(stream, &mut serve, finished, goaways, fill, &mut updates);
 			// A track no longer listed ends its PUBLISH even while the track itself goes on,
 			// as when its broadcast's route is withdrawn.
 			crate::auth::until(serving, |waiter| {

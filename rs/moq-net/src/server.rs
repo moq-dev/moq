@@ -1160,8 +1160,8 @@ mod tests {
 
 	/// An acceptor taken with `Handshake::requests()` BEFORE `ok()` must govern the
 	/// session the driver then runs, through the REAL accept path (`accept_request` -> `ok`).
-	/// The session's own `auth()` (the handle the driver polls) routes a request token to that
-	/// pre-ok consumer instead of falling to the `Unsupported` default, and granting admits.
+	/// Its auth link routes a request token to that pre-ok consumer after `ok()`, instead of
+	/// falling to the `Unsupported` default, and granting admits.
 	/// A QUIC server has no other point to install the verifier.
 	#[moq_clock::test]
 	async fn a_pre_ok_verifier_governs_the_session() {
@@ -1178,12 +1178,11 @@ mod tests {
 
 			// Install the verifier before ok(), as a QUIC server must.
 			let mut requests = request.requests();
-			let (net_session, _driver) = request.ok().await.unwrap_or_else(|e| panic!("ok at {version:?}: {e}"));
+			let auth = request.auth.clone();
+			let (_net_session, _driver) = request.ok().await.unwrap_or_else(|e| panic!("ok at {version:?}: {e}"));
 
-			// The session's own handle is the one the driver polls. Verifying a request token on
-			// it must reach the pre-ok consumer; if the handle were not shared it would fall to
-			// the Unsupported default and the consumer would never see this request.
-			let verdict = net_session.auth().verify_request(
+			// The same link passed to the driver must still reach the pre-ok consumer.
+			let verdict = auth.verify_request(
 				crate::setup::Token {
 					kind: crate::setup::Token::OUT_OF_BAND,
 					value: b"jwt".to_vec(),

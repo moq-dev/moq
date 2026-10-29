@@ -175,9 +175,15 @@ async fn spawn_relay_with(
 	auth: moq_relay::auth::Auth,
 	cluster: cluster::Cluster,
 ) -> (u16, tokio::task::JoinHandle<()>) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	spawn_relay_config(auth, cluster, moq_tokio::listen::Config::default()).await
+}
 
-	let mut config = moq_tokio::listen::Config::default();
+async fn spawn_relay_config(
+	auth: moq_relay::auth::Auth,
+	cluster: cluster::Cluster,
+	mut config: moq_tokio::listen::Config,
+) -> (u16, tokio::task::JoinHandle<()>) {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	config.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
 	// Opt in to lite-07 beside the defaults, so a client pinned to it can reach the AUTH stream.
 	config.version = moq_net::Versions::all()
@@ -1834,10 +1840,14 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 #[tokio::test]
 async fn request_token_lease_ends_before_the_connection_and_reopens_later() {
 	let script = Script::new(Grant::new(all(), all()));
-	let (port, relay) = spawn_relay(build_auth(script.spawn().await)).await;
+	let mut server = moq_tokio::listen::Config::default();
+	server.extensions.solicit = false;
+	let cluster = cluster::Cluster::new(cluster::Options::default()).unwrap();
+	let (port, relay) = spawn_relay_config(build_auth(script.spawn().await), cluster, server).await;
 	let mut config = moq_tokio::connect::Config::default();
 	config.version = vec!["moq-transport-22".parse().unwrap()];
 	config.extensions.auth = false;
+	config.extensions.solicit = false;
 	let client = config.init(Default::default()).unwrap().with_reconnect(false);
 	let origin = moq_tokio::origin::spawn();
 	let publisher = client
