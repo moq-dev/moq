@@ -337,16 +337,15 @@ impl Consume {
 		Ok(())
 	}
 
-	/// Return whether a video rendition may be selected.
+	/// Return whether the publisher is serving a video rendition.
 	pub fn video_enabled(&self, catalog: Id, index: usize) -> Result<bool, Error> {
-		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
-		let (_, config) = consume
-			.catalog
-			.video
-			.renditions
-			.iter()
-			.nth(index)
-			.ok_or(Error::NoIndex)?;
+		let (_, _, config) = self.select::<hang::catalog::VideoConfig>(catalog, index)?;
+		Ok(config.enabled)
+	}
+
+	/// Return whether the publisher is serving an audio rendition.
+	pub fn audio_enabled(&self, catalog: Id, index: usize) -> Result<bool, Error> {
+		let (_, _, config) = self.select::<hang::catalog::AudioConfig>(catalog, index)?;
 		Ok(config.enabled)
 	}
 

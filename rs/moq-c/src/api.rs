@@ -1912,6 +1912,7 @@ pub unsafe extern "C" fn moq_broadcast_request_path(request: u32, dst: *mut moq_
 /// Consumes the request handle, writes the new broadcast handle to `broadcast`
 /// (which cannot announce itself; only [moq_broadcast_prepared_publish] does),
 /// and returns a positive prepared-answer handle or a negative error.
+/// A malformed epoch returns `MOQ_ERROR_INVALID_CONFIG` without consuming the request.
 ///
 /// # Safety
 /// - `epoch` must point at `epoch_len` readable bytes containing a UUIDv7 epoch.
@@ -1925,9 +1926,10 @@ pub unsafe extern "C" fn moq_broadcast_request_prepare(
 ) -> i32 {
 	ffi::enter(move || {
 		let request = ffi::parse_id(request)?;
-		let epoch = unsafe { ffi::parse_str(epoch, epoch_len)? }
+		let epoch = unsafe { ffi::parse_str(epoch, epoch_len)? };
+		let epoch = epoch
 			.parse()
-			.map_err(|_| Error::InvalidCode)?;
+			.map_err(|_| Error::InvalidConfig(format!("epoch {epoch:?} is not canonical UUIDv7 text")))?;
 		let broadcast_out = unsafe { broadcast.as_mut() }.ok_or(Error::InvalidPointer)?;
 		let mut state = State::lock();
 		let (pending, driver) = state.origin.broadcast_request_take(request)?;
@@ -3552,6 +3554,30 @@ pub unsafe extern "C" fn moq_consume_audio_config(catalog: u32, index: u32, dst:
 		let index = index as usize;
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
 		State::lock().consume.audio_config(catalog, index, dst)
+	})
+}
+
+/// Query whether the publisher is serving an audio rendition.
+///
+/// False means no frames are coming until it re-enables. Pick an enabled rendition, but keep one
+/// already playing while every audio rendition is disabled, so a re-enable plays without a
+/// resubscribe. A catalog that omits the optional field reads as true.
+///
+/// Returns zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that `dst` points to properly aligned, writable storage for a `bool`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_consume_audio_enabled(catalog: u32, index: u32, dst: *mut bool) -> i32 {
+	ffi::enter(move || {
+		let catalog = ffi::parse_id(catalog)?;
+		if dst.is_null() {
+			return Err(Error::InvalidPointer);
+		}
+
+		let enabled = State::lock().consume.audio_enabled(catalog, index as usize)?;
+		unsafe { dst.write(enabled) };
+		Ok(())
 	})
 }
 

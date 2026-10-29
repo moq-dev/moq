@@ -938,6 +938,118 @@ fn publish_catalog_config_null_pointer() {
 	assert_eq!(moq_publish_close(broadcast), 0);
 }
 
+/// Enablement belongs to each catalog snapshot; holding a disabled rendition keeps its subscription usable.
+#[test]
+fn audio_enabled_snapshots_preserve_a_held_consumer() {
+	let origin = id(moq_origin_create());
+	let path = b"audio-enabled";
+	let broadcast = publish_broadcast(origin, path);
+	let media = id(publish_audio(
+		broadcast,
+		moq_audio_format::MOQ_AUDIO_FORMAT_OPUS,
+		&opus_head(),
+		None,
+	));
+	let consume = request_broadcast(origin, path);
+	let catalogs = Callback::new();
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalogs.ptr) });
+	let initial = id(catalogs.recv());
+	let mut enabled = std::mem::MaybeUninit::<bool>::uninit();
+	assert_eq!(
+		unsafe { moq_consume_audio_enabled(initial, 0, enabled.as_mut_ptr()) },
+		0
+	);
+	assert!(unsafe { enabled.assume_init() }, "omitted enabled defaults to true");
+
+	let set_enabled = |enabled| {
+		let mut state = State::lock();
+		let catalog = state.publish.target(Id::try_from(broadcast).unwrap()).unwrap().catalog;
+		catalog
+			.modify()
+			.unwrap()
+			.audio
+			.renditions
+			.values_mut()
+			.next()
+			.unwrap()
+			.enabled = enabled;
+	};
+	set_enabled(false);
+	let disabled = id(catalogs.recv());
+	assert_eq!(
+		unsafe { moq_consume_audio_enabled(disabled, 0, enabled.as_mut_ptr()) },
+		0
+	);
+	assert!(!unsafe { enabled.assume_init() });
+	assert_eq!(
+		unsafe { moq_consume_audio_enabled(initial, 0, enabled.as_mut_ptr()) },
+		0
+	);
+	assert!(unsafe { enabled.assume_init() }, "an older snapshot remains unchanged");
+
+	let mut preserved = true;
+	assert_eq!(
+		unsafe { moq_consume_audio_enabled(disabled, 1, &mut preserved) },
+		MOQ_ERROR_NO_INDEX
+	);
+	assert!(preserved);
+	assert_eq!(
+		unsafe { moq_consume_audio_enabled(disabled, 0, std::ptr::null_mut()) },
+		MOQ_ERROR_INVALID_POINTER
+	);
+
+	// A held rendition may be opened from a disabled snapshot, then re-enabled without resubscribing.
+	let frames = Callback::new();
+	let track = id(unsafe { moq_consume_audio(disabled, 0, 10_000_000, Some(channel_callback), frames.ptr) });
+	set_enabled(true);
+	let resumed = id(catalogs.recv());
+	assert_eq!(
+		unsafe { moq_consume_audio_enabled(resumed, 0, enabled.as_mut_ptr()) },
+		0
+	);
+	assert!(unsafe { enabled.assume_init() });
+	assert_eq!(
+		unsafe { moq_consume_audio_enabled(disabled, 0, enabled.as_mut_ptr()) },
+		0
+	);
+	assert!(!unsafe { enabled.assume_init() });
+	let payload = b"resumed-audio";
+	assert_eq!(
+		unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), 0) },
+		0
+	);
+	let read = id(frames.recv());
+	let mut frame: moq_frame = unsafe { std::mem::zeroed() };
+	assert_eq!(unsafe { encoded_frame(read, &mut frame) }, 0);
+	assert_eq!(
+		unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) },
+		payload
+	);
+	assert_eq!(moq_consume_read_free(read), 0);
+
+	assert_eq!(moq_consume_audio_cancel(track), 0);
+	assert_eq!(frames.recv_terminal(), 0);
+	for catalog in [initial, disabled, resumed] {
+		assert_eq!(moq_consume_catalog_free(catalog), 0);
+	}
+	assert_eq!(
+		unsafe { moq_consume_audio_enabled(i32::MAX as u32, 0, &mut preserved) },
+		MOQ_ERROR_CATALOG_NOT_FOUND
+	);
+	assert!(preserved);
+	assert_eq!(
+		unsafe { moq_consume_audio_enabled(0, 0, &mut preserved) },
+		MOQ_ERROR_INVALID_ID
+	);
+	assert!(preserved);
+	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
+	assert_eq!(catalogs.recv_catalog_terminal(), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_media_finish(media), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 #[test]
 fn publish_catalog_roundtrip() {
 	let origin = id(moq_origin_create());
@@ -2907,11 +3019,15 @@ fn announce_route_carries_cost_and_epoch_without_hops() {
 	assert_eq!(moq_origin_announced_free(announced), 0);
 
 	// Anything but canonical UUIDv7 text is refused.
-	let upper = mint_epoch().to_uppercase();
-	for bad in ["6ba7b810-9dad-41d1-80b4-00c04fd430c8", upper.as_str(), "not-an-epoch"] {
+	for bad in [
+		"6ba7b810-9dad-41d1-80b4-00c04fd430c8",
+		"00000000-0000-7000-8000-00000000000A",
+		"not-an-epoch",
+	] {
 		let route = announce_route(0, bad);
-		assert!(
-			unsafe { moq_publication_announce(publication, &route) } < 0,
+		assert_eq!(
+			unsafe { moq_publication_announce(publication, &route) },
+			MOQ_ERROR_INVALID_CONFIG,
 			"{bad:?} is not an epoch"
 		);
 	}
@@ -2997,8 +3113,22 @@ fn dynamic_serves_a_request_under_a_prefix() {
 	let got = unsafe { std::str::from_utf8(std::slice::from_raw_parts(info.data.cast::<u8>(), info.len)).unwrap() };
 	assert_eq!(got, "live/cam");
 
-	let epoch = moq_net::Epoch::mint().to_string();
-	let mut served = 0;
+	// Invalid input leaves the request and destination intact, so it can still be answered.
+	let mut served = u32::MAX;
+	for bad in [
+		"",
+		"not-an-epoch",
+		"6ba7b810-9dad-41d1-80b4-00c04fd430c8",
+		"00000000-0000-7000-8000-00000000000A",
+	] {
+		assert_eq!(
+			unsafe { moq_broadcast_request_prepare(request, bad.as_ptr().cast(), bad.len(), &mut served) },
+			MOQ_ERROR_INVALID_CONFIG,
+			"{bad:?} is not an epoch"
+		);
+		assert_eq!(served, u32::MAX);
+	}
+	let epoch = mint_epoch();
 	let prepared =
 		id(unsafe { moq_broadcast_request_prepare(request, epoch.as_ptr().cast(), epoch.len(), &mut served) });
 	let publication = id(moq_broadcast_prepared_publish(prepared));
@@ -6307,6 +6437,80 @@ fn dial_pinned(url: &str, fingerprint: &str, consume: u32, user_data: *mut c_voi
 			user_data,
 		)
 	})
+}
+
+/// Received routes expose each traversed origin in order, rather than an empty local path.
+#[test]
+fn announce_route_hops_cross_a_relay_session() {
+	let source = id(moq_origin_create());
+	let relay = id(moq_origin_create());
+	let sink = id(moq_origin_create());
+	let hops = {
+		let state = State::lock();
+		[source, relay].map(|origin| state.origin.get(Id::try_from(origin).unwrap()).unwrap().hop().id())
+	};
+	let server_cb = Callback::new();
+	let (server, addr, fingerprint) = listen(&server_cb);
+	let url = format!("https://{addr}/");
+
+	let upstream_client_cb = States::new();
+	let upstream_client = dial_pinned(&url, &fingerprint, relay, upstream_client_cb.ptr);
+	let upstream_cb = States::new();
+	let upstream = id(unsafe {
+		moq_session_request_accept(id(server_cb.recv()), source, 0, Some(state_callback), upstream_cb.ptr)
+	});
+	let downstream_client_cb = States::new();
+	let downstream_client = dial_pinned(&url, &fingerprint, sink, downstream_client_cb.ptr);
+	let downstream_cb = States::new();
+	let downstream = id(unsafe {
+		moq_session_request_accept(id(server_cb.recv()), relay, 0, Some(state_callback), downstream_cb.ptr)
+	});
+	for cb in [&upstream_client_cb, &upstream_cb, &downstream_client_cb, &downstream_cb] {
+		assert_eq!(cb.recv().phase, moq_connection_phase::MOQ_CONNECTION_PHASE_CONNECTED);
+	}
+
+	let announced_cb = Callback::new();
+	let task = id(unsafe { moq_origin_announced(sink, std::ptr::null(), Some(channel_callback), announced_cb.ptr) });
+	let (publication, broadcast) = create_broadcast(source, b"relayed");
+	let route = moq_announce_route {
+		cost: 7,
+		epoch: std::ptr::null(),
+		epoch_len: 0,
+	};
+	assert_eq!(unsafe { moq_publication_announce(publication, &route) }, 0);
+	let (announced, info) = announced_cb.recv_route();
+	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_START);
+	assert_eq!(
+		borrowed_string(info.prefix, info.prefix_len).as_deref(),
+		Some("relayed")
+	);
+	assert_eq!(info.route.hops_len, hops.len());
+	assert_eq!(
+		unsafe { std::slice::from_raw_parts(info.route.hops, info.route.hops_len) },
+		hops
+	);
+	assert_eq!(info.route.cost, 9, "each session adds its default cost of one");
+	assert_eq!(route_epoch(&info.route), None);
+	assert_eq!(moq_origin_announced_free(announced), 0);
+
+	assert_eq!(moq_origin_announced_cancel(task), 0);
+	assert_eq!(announced_cb.recv_announce_terminal(), 0);
+	for (session, cb) in [
+		(downstream, &downstream_cb),
+		(downstream_client, &downstream_client_cb),
+		(upstream, &upstream_cb),
+		(upstream_client, &upstream_client_cb),
+	] {
+		assert_eq!(moq_session_close(session), 0);
+		cb.recv_terminal();
+	}
+	assert_eq!(moq_server_close(server), 0);
+	assert_eq!(server_cb.recv_terminal(), 0);
+	assert_eq!(moq_publication_free(publication), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	for origin in [source, relay, sink] {
+		assert_eq!(moq_origin_close(origin), 0);
+	}
 }
 
 #[test]
