@@ -10203,7 +10203,9 @@ mod serve_tests {
 							.flatten()
 							.collect();
 						let mut buf = bytes::Bytes::from(bytes);
-						let header = crate::coding::decode_buf(&mut buf, version, ietf::GroupHeader::decode).ok()?;
+						let header =
+							crate::coding::decode_buf(&mut buf, version, |r, v| ietf::GroupHeader::decode(r, v))
+								.ok()?;
 						(header.group_id == 3).then(|| crate::coding::decode_varint(&mut &buf[..], version).unwrap())
 					})
 					.collect();
