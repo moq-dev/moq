@@ -1,3 +1,5 @@
+//! A single connection: its streams, datagrams, and why it ends.
+
 use std::{
 	any::Any,
 	fmt,
@@ -27,15 +29,15 @@ use crate::quic::driver::{
 	ConnectionEvent, Duration, Instant, VarInt,
 	mutex::Mutex,
 	recv_stream::RecvStream,
-	runtime::UdpSender,
+	runtime::Slot,
 	send_group::{self, SendGroup, SendOptions},
 	send_stream::SendStream,
 	udp_transmit,
 };
 use moq_congestion::Controller;
+pub use moq_quic::connection::{Error, Stats};
 use moq_quic::{
-	ConnectionError, ConnectionHandle, ConnectionStats, Dir, EndpointEvent, StreamEvent, StreamId, TransportError,
-	TransportErrorCode,
+	Dir, EndpointEvent, StreamEvent, StreamId, TransportError, TransportErrorCode, endpoint::ConnectionHandle,
 };
 
 /// In-progress connection attempt future
@@ -55,10 +57,11 @@ pub struct Connecting {
 impl Connecting {
 	pub(crate) fn new(
 		handle: ConnectionHandle,
-		conn: moq_quic::Connection,
+		conn: moq_quic::connection::Connection,
 		endpoint_events: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
 		conn_events: mpsc::UnboundedReceiver<ConnectionEvent>,
-		sender: Pin<Box<dyn UdpSender>>,
+		slot: Arc<Slot>,
+		runtime: &tokio::runtime::Handle,
 	) -> Self {
 		let (on_handshake_data_send, on_handshake_data_recv) = oneshot::channel();
 		let shared = Shared {
@@ -74,14 +77,14 @@ impl Connecting {
 				endpoint_events,
 				conn_events,
 				on_handshake_data_send,
-				sender,
+				slot,
 			)),
 			shared,
 		}));
 		let connected = Box::pin(conn.shared.connected.clone().notified_owned());
 
 		let driver = ConnectionDriver::new(conn.clone());
-		tokio::spawn(
+		runtime.spawn(
 			async {
 				if let Err(e) = driver.await {
 					tracing::error!("I/O error: {e}");
@@ -107,7 +110,7 @@ impl Connecting {
 	/// Peer certificates are not available at this stage; see [`Connection::peer_identity()`].
 	///
 	/// This operation is cancel-safe.
-	pub async fn handshake_data(&mut self) -> Result<Box<dyn Any>, ConnectionError> {
+	pub async fn handshake_data(&mut self) -> Result<Box<dyn Any>, Error> {
 		// Taking &mut self allows us to use a single oneshot channel rather than dealing with
 		// potentially many tasks waiting on the same event. It's a bit of a hack, but keeps things
 		// simple.
@@ -136,7 +139,7 @@ impl Connecting {
 }
 
 impl Future for Connecting {
-	type Output = Result<Connection, ConnectionError>;
+	type Output = Result<Connection, Error>;
 	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
 		Pin::new(&mut self.connected).poll(cx).map(|_| {
 			let conn = self.conn.take().unwrap();
@@ -265,10 +268,7 @@ impl Connection {
 	///
 	/// # Panics
 	/// - when `options.group` belongs to another connection
-	pub fn open_uni<'a>(
-		&'a self,
-		options: SendOptions<'a>,
-	) -> impl Future<Output = Result<SendStream, ConnectionError>> + 'a {
+	pub fn open_uni<'a>(&'a self, options: SendOptions<'a>) -> impl Future<Output = Result<SendStream, Error>> + 'a {
 		OpenUni {
 			conn: &self.0,
 			options,
@@ -291,7 +291,7 @@ impl Connection {
 	/// actually used. Calling [`open_bi()`] then waiting on the [`RecvStream`] without writing
 	/// anything to [`SendStream`] will never succeed.
 	///
-	/// [`open_bi()`]: crate::quic::driver::Connection::open_bi
+	/// [`open_bi()`]: crate::quic::driver::connection::Connection::open_bi
 	/// [`SendStream`]: crate::quic::driver::SendStream
 	/// [`RecvStream`]: crate::quic::driver::RecvStream
 	///
@@ -300,7 +300,7 @@ impl Connection {
 	pub fn open_bi<'a>(
 		&'a self,
 		options: SendOptions<'a>,
-	) -> impl Future<Output = Result<(SendStream, RecvStream), ConnectionError>> + 'a {
+	) -> impl Future<Output = Result<(SendStream, RecvStream), Error>> + 'a {
 		OpenBi {
 			conn: &self.0,
 			options,
@@ -310,7 +310,7 @@ impl Connection {
 
 	/// Open a request stream using only the credit already granted by the peer.
 	#[cfg(feature = "net")]
-	pub(crate) fn open_request(&self) -> Result<Option<(SendStream, RecvStream)>, ConnectionError> {
+	pub(crate) fn open_request(&self) -> Result<Option<(SendStream, RecvStream)>, Error> {
 		let mut state = self.0.state.lock();
 		if let Some(err) = &state.error {
 			return Err(err.clone());
@@ -330,7 +330,7 @@ impl Connection {
 	/// # Cancel safety
 	///
 	/// This method is cancellation safe. If this does not resolve, no streams were consumed.
-	pub fn accept_uni(&self) -> impl Future<Output = Result<RecvStream, ConnectionError>> + '_ {
+	pub fn accept_uni(&self) -> impl Future<Output = Result<RecvStream, Error>> + '_ {
 		AcceptUni {
 			conn: &self.0,
 			notify: self.0.shared.stream_incoming[Dir::Uni as usize].notified(),
@@ -343,15 +343,15 @@ impl Connection {
 	/// before the other `Connection` is able to `accept_bi()`. Calling [`open_bi()`] then
 	/// waiting on the [`RecvStream`] without writing anything to [`SendStream`] will never succeed.
 	///
-	/// [`accept_bi()`]: crate::quic::driver::Connection::accept_bi
-	/// [`open_bi()`]: crate::quic::driver::Connection::open_bi
+	/// [`accept_bi()`]: crate::quic::driver::connection::Connection::accept_bi
+	/// [`open_bi()`]: crate::quic::driver::connection::Connection::open_bi
 	/// [`SendStream`]: crate::quic::driver::SendStream
 	/// [`RecvStream`]: crate::quic::driver::RecvStream
 	///
 	/// # Cancel safety
 	///
 	/// This method is cancellation safe. If this does not resolve, no streams were consumed.
-	pub fn accept_bi(&self) -> impl Future<Output = Result<(SendStream, RecvStream), ConnectionError>> + '_ {
+	pub fn accept_bi(&self) -> impl Future<Output = Result<(SendStream, RecvStream), Error>> + '_ {
 		AcceptBi {
 			conn: &self.0,
 			notify: self.0.shared.stream_incoming[Dir::Bi as usize].notified(),
@@ -363,7 +363,7 @@ impl Connection {
 	/// # Cancel safety
 	///
 	/// This method is cancellation safe. If this does not resolve, no datagrams were consumed.
-	pub fn read_datagram(&self) -> impl Future<Output = Result<Bytes, ConnectionError>> + '_ {
+	pub fn read_datagram(&self) -> impl Future<Output = Result<Bytes, Error>> + '_ {
 		ReadDatagram {
 			conn: &self.0,
 			notify: self.0.shared.datagram_received.notified(),
@@ -373,9 +373,9 @@ impl Connection {
 	/// Wait for the connection to be closed for any reason
 	///
 	/// Despite the return type's name, closed connections are often not an error condition at the
-	/// application layer. Cases that might be routine include [`ConnectionError::LocallyClosed`]
-	/// and [`ConnectionError::ApplicationClosed`].
-	pub async fn closed(&self) -> ConnectionError {
+	/// application layer. Cases that might be routine include [`Error::LocallyClosed`]
+	/// and [`Error::ApplicationClosed`].
+	pub async fn closed(&self) -> Error {
 		{
 			let conn = self.0.state.lock();
 			if let Some(error) = conn.error.as_ref() {
@@ -398,19 +398,19 @@ impl Connection {
 
 	/// Whether the connection is closed, and why.
 	///
-	/// The close_reason is always set to `Some(ConnectionError)` when a socket is
+	/// The close_reason is always set to `Some(Error)` when a socket is
 	/// closed; whether it was closed manually by calling [`Connection::close()`] or due to
 	/// an internal error (such as an idle timeout or the peer closing the
 	/// connection).
 	///
 	/// Note: when the connection is closed, `connection.close_reason().is_some()` will always be true.
-	pub fn close_reason(&self) -> Option<ConnectionError> {
+	pub fn close_reason(&self) -> Option<Error> {
 		self.0.state.lock().error.clone()
 	}
 
 	/// Close the connection immediately.
 	///
-	/// Pending operations will fail immediately with [`ConnectionError::LocallyClosed`]. No
+	/// Pending operations will fail immediately with [`Error::LocallyClosed`]. No
 	/// more data is sent to the peer and the peer may drop buffered data upon receiving
 	/// the CONNECTION_CLOSE frame.
 	///
@@ -425,7 +425,7 @@ impl Connection {
 	/// delivered. The only reliable action it can then take is to close the connection,
 	/// potentially with a custom error code. The delivery of the final CONNECTION_CLOSE
 	/// frame is very likely if both endpoints stay online long enough, and
-	/// [`Endpoint::wait_idle()`] can be used to provide sufficient time. Otherwise, the
+	/// [`Endpoint::close()`](crate::quic::driver::endpoint::Endpoint::close) waits for it. Otherwise, the
 	/// remote peer will time out the connection, provided that the idle timeout is not
 	/// disabled.
 	///
@@ -436,12 +436,10 @@ impl Connection {
 	/// undelivered to the application, including data that was acknowledged as received to
 	/// the local endpoint.
 	///
-	/// [`ConnectionError::LocallyClosed`]: crate::quic::driver::ConnectionError::LocallyClosed
-	/// [`Endpoint::wait_idle()`]: crate::quic::driver::Endpoint::wait_idle
 	/// [`close()`]: Connection::close
-	pub fn close(&self, error_code: VarInt, reason: &[u8]) {
+	pub fn close(&self, error_code: VarInt, reason: &str) {
 		let conn = &mut *self.0.state.lock();
-		conn.close(error_code, Bytes::copy_from_slice(reason), &self.0.shared);
+		conn.close(error_code, reason.to_string(), &self.0.shared);
 	}
 
 	/// Transmit `data` as an unreliable application datagram, scheduled by `options`
@@ -504,7 +502,7 @@ impl Connection {
 	}
 
 	/// Returns connection statistics
-	pub fn stats(&self) -> ConnectionStats {
+	pub fn stats(&self) -> Stats {
 		self.0.state.lock().inner.stats()
 	}
 
@@ -544,7 +542,7 @@ impl Connection {
 	/// [`Connecting::handshake_data()`] succeeds. See that method's documentations for details on
 	/// the returned value.
 	///
-	/// [`Connection::handshake_data()`]: crate::quic::driver::Connecting::handshake_data
+	/// [`Connection::handshake_data()`]: crate::quic::driver::connection::Connecting::handshake_data
 	pub fn handshake_data(&self) -> Option<Box<dyn Any>> {
 		self.0.state.lock().inner.crypto_session().handshake_data()
 	}
@@ -593,7 +591,7 @@ impl Connection {
 			.export_keying_material(output, label, context)
 	}
 
-	/// See [`moq_quic::Connection::set_limits`]
+	/// See [`moq_quic::connection::Connection::set_limits`]
 	pub fn set_limits(&self, limits: moq_quic::Limits) -> Result<(), moq_quic::LimitsError> {
 		let mut conn = self.0.state.lock();
 		conn.inner.set_limits(limits)?;
@@ -614,7 +612,7 @@ pin_project! {
 }
 
 impl Future for OpenUni<'_> {
-	type Output = Result<SendStream, ConnectionError>;
+	type Output = Result<SendStream, Error>;
 	fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
 		let this = self.project();
 		let (conn, id) = ready!(poll_open(ctx, this.conn, *this.options, this.notify, Dir::Uni))?;
@@ -633,7 +631,7 @@ pin_project! {
 }
 
 impl Future for OpenBi<'_> {
-	type Output = Result<(SendStream, RecvStream), ConnectionError>;
+	type Output = Result<(SendStream, RecvStream), Error>;
 	fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
 		let this = self.project();
 		let (conn, id) = ready!(poll_open(ctx, this.conn, *this.options, this.notify, Dir::Bi))?;
@@ -648,7 +646,7 @@ fn poll_open<'a>(
 	options: SendOptions<'_>,
 	mut notify: Pin<&mut Notified<'a>>,
 	dir: Dir,
-) -> Poll<Result<(ConnectionRef, StreamId), ConnectionError>> {
+) -> Poll<Result<(ConnectionRef, StreamId), Error>> {
 	let options = send_group::to_quic(options, &conn.0);
 	let mut state = conn.state.lock();
 	if let Some(e) = &state.error {
@@ -677,7 +675,7 @@ pin_project! {
 }
 
 impl Future for AcceptUni<'_> {
-	type Output = Result<RecvStream, ConnectionError>;
+	type Output = Result<RecvStream, Error>;
 
 	fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
 		let this = self.project();
@@ -696,7 +694,7 @@ pin_project! {
 }
 
 impl Future for AcceptBi<'_> {
-	type Output = Result<(SendStream, RecvStream), ConnectionError>;
+	type Output = Result<(SendStream, RecvStream), Error>;
 
 	fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
 		let this = self.project();
@@ -710,7 +708,7 @@ fn poll_accept<'a>(
 	conn: &'a ConnectionRef,
 	mut notify: Pin<&mut Notified<'a>>,
 	dir: Dir,
-) -> Poll<Result<(ConnectionRef, StreamId), ConnectionError>> {
+) -> Poll<Result<(ConnectionRef, StreamId), Error>> {
 	let mut state = conn.state.lock();
 	// Check for incoming streams before checking `state.error` so that already-received streams,
 	// which are necessarily finite, can be drained from a closed connection.
@@ -741,7 +739,7 @@ pin_project! {
 }
 
 impl Future for ReadDatagram<'_> {
-	type Output = Result<Bytes, ConnectionError>;
+	type Output = Result<Bytes, Error>;
 	fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
 		let mut this = self.project();
 		let mut state = this.conn.state.lock();
@@ -833,7 +831,7 @@ pub(crate) struct Shared {
 }
 
 pub(crate) struct State {
-	pub(crate) inner: moq_quic::Connection,
+	pub(crate) inner: moq_quic::connection::Connection,
 	driver: Option<Waker>,
 	handle: ConnectionHandle,
 	on_handshake_data: Option<oneshot::Sender<()>>,
@@ -846,8 +844,9 @@ pub(crate) struct State {
 	pub(crate) blocked_readers: FxHashMap<StreamId, Waker>,
 	pub(crate) stopped: FxHashMap<StreamId, Arc<StopWaiters>>,
 	/// Always set to Some before the connection becomes drained
-	pub(crate) error: Option<ConnectionError>,
-	sender: Pin<Box<dyn UdpSender>>,
+	pub(crate) error: Option<Error>,
+	/// The endpoint's socket, sent through without keeping it open
+	slot: Arc<Slot>,
 	send_buffer: Vec<u8>,
 	/// We buffer a transmit when the underlying I/O would block
 	buffered_transmit: Option<moq_quic::Transmit>,
@@ -855,12 +854,12 @@ pub(crate) struct State {
 
 impl State {
 	fn new(
-		inner: moq_quic::Connection,
+		inner: moq_quic::connection::Connection,
 		handle: ConnectionHandle,
 		endpoint_events: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
 		conn_events: mpsc::UnboundedReceiver<ConnectionEvent>,
 		on_handshake_data: oneshot::Sender<()>,
-		sender: Pin<Box<dyn UdpSender>>,
+		slot: Arc<Slot>,
 	) -> Self {
 		Self {
 			inner,
@@ -876,7 +875,7 @@ impl State {
 			blocked_readers: FxHashMap::default(),
 			stopped: FxHashMap::default(),
 			error: None,
-			sender,
+			slot,
 			send_buffer: Vec::new(),
 			buffered_transmit: None,
 		}
@@ -886,7 +885,7 @@ impl State {
 		let now = Instant::now();
 		let mut transmits = 0;
 
-		let max_datagrams = self.sender.max_transmit_segments().min(MAX_TRANSMIT_SEGMENTS);
+		let max_datagrams = self.slot.max_transmit_segments().min(MAX_TRANSMIT_SEGMENTS);
 
 		loop {
 			// Retry the last transmit, or get a new one.
@@ -909,11 +908,7 @@ impl State {
 			};
 
 			let len = t.size;
-			match self
-				.sender
-				.as_mut()
-				.poll_send(&udp_transmit(&t, &self.send_buffer[..len]), cx)
-			{
+			match self.slot.poll_send(&udp_transmit(&t, &self.send_buffer[..len]), cx) {
 				Poll::Pending => {
 					self.buffered_transmit = Some(t);
 					return Ok(false);
@@ -946,11 +941,10 @@ impl State {
 	}
 
 	/// If this returns `Err`, the endpoint is dead, so the driver should exit immediately.
-	fn process_conn_events(&mut self, shared: &Shared, cx: &mut Context<'_>) -> Result<(), ConnectionError> {
+	fn process_conn_events(&mut self, shared: &Shared, cx: &mut Context<'_>) -> Result<(), Error> {
 		loop {
 			match self.conn_events.poll_recv(cx) {
-				Poll::Ready(Some(ConnectionEvent::Rebind(sender))) => {
-					self.sender = sender;
+				Poll::Ready(Some(ConnectionEvent::Rebind)) => {
 					self.inner.local_address_changed();
 				}
 				Poll::Ready(Some(ConnectionEvent::Proto(event))) => {
@@ -960,7 +954,7 @@ impl State {
 					self.close(error_code, reason, shared);
 				}
 				Poll::Ready(None) => {
-					return Err(ConnectionError::TransportError(TransportError::new(
+					return Err(Error::TransportError(TransportError::new(
 						TransportErrorCode::INTERNAL_ERROR,
 						"endpoint driver future was dropped".to_string(),
 					)));
@@ -1062,7 +1056,7 @@ impl State {
 	}
 
 	/// Used to wake up all blocked futures when the connection becomes closed for any reason
-	fn terminate(&mut self, reason: ConnectionError, shared: &Shared) {
+	fn terminate(&mut self, reason: Error, shared: &Shared) {
 		self.error = Some(reason.clone());
 		if let Some(x) = self.on_handshake_data.take() {
 			let _ = x.send(());
@@ -1079,15 +1073,16 @@ impl State {
 		shared.connected.notify_waiters();
 	}
 
-	fn close(&mut self, error_code: VarInt, reason: Bytes, shared: &Shared) {
+	fn close(&mut self, error_code: VarInt, reason: String, shared: &Shared) {
 		self.inner.close(Instant::now(), error_code, reason);
-		self.terminate(ConnectionError::LocallyClosed, shared);
+		// Fails pending operations now, with the close's own code and reason.
+		self.forward_app_events(shared);
 		self.wake();
 	}
 
 	/// Close for a reason other than the application's explicit request
 	pub(crate) fn implicit_close(&mut self, shared: &Shared) {
-		self.close(0u32.into(), Bytes::new(), shared);
+		self.close(0u32.into(), String::new(), shared);
 	}
 
 	/// Resolves the stream's `stopped` waiters with the peer's STOP_SENDING code, or `None`
@@ -1146,7 +1141,7 @@ pub enum SendDatagramError {
 	Refused(#[from] moq_quic::SendDatagramError),
 	/// The connection was lost
 	#[error("connection lost")]
-	ConnectionLost(#[from] ConnectionError),
+	ConnectionLost(#[from] Error),
 }
 
 /// The maximum amount of datagrams which will be produced in a single `drive_transmit` call

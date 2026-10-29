@@ -37,7 +37,6 @@ pub mod consumer;
 pub mod demand;
 pub mod error;
 mod ffi;
-pub mod flate;
 pub mod json;
 #[cfg(not(target_arch = "wasm32"))]
 mod log;

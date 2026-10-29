@@ -69,3 +69,12 @@ discarding several times Opus's, the remaining source is the publisher: each
 seven-frame PES flush is seven one-frame groups, delivered newest first, so the
 oldest frame of a flush waits behind every newer group on a path that cannot
 carry them together.
+
+The fourth run, [2026-10-28 nightly](https://github.com/moq-dev/moq/actions/runs/40698329026/job/122851001011),
+breaches six browser ceilings: AAC wide discards 1790.9 ms/min against 460
+and target p95 2023.2 ms against 450; Opus bursty target p95 540 ms against
+370, mild 160 against 120, and wide discards 1913.9 ms/min against 420 and
+target p95 2020 ms against 570. Preserve this run with the other post-cap
+measurements and distinguish startup/runner stalls from sustained estimator
+behavior before re-measuring. The separate publisher fairness timeout is
+tracked by [Nightly](/quest/m0/nightly/publisher-fairness.md).

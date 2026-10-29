@@ -52,6 +52,9 @@ typedef BroadcastRequest = MoqBroadcastRequest;
 /// A claim answer being filled before its exact route is announced.
 typedef BroadcastPrepared = MoqBroadcastPrepared;
 
+/// A broadcast published on an origin: the broadcast to fill and its announcement.
+typedef Publication = MoqPublication;
+
 /// A stream of announce events under a prefix.
 typedef AnnounceConsumer = MoqAnnounceConsumer;
 

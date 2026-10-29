@@ -62,6 +62,15 @@ The A/A calibration includes moq-quic's windowed `benches/streams.rs` cases:
 on a shared host the unchanged base alone varied 17 to 43% between
 back-to-back runs ([moq-dev/moq#6950](https://github.com/moq-dev/moq/pull/6950)).
 
+Confirmed regressions with no extra work behind them, found by
+[moq-dev/moq#7139](https://github.com/moq-dev/moq/pull/7139): every round of
+`moq-net/group_relay_frames/plain/*` (+23%) and `moq-net/origin/serve_idle/3000r`
+(+46%) agreed, yet callgrind counts the same instructions per frame read and per
+poll on both builds. A paired round reruns the same two binaries, so a code or
+heap layout shift between them reads as a stable regression that rounds cannot
+filter. `codec_messages/*/lite` (+31%, +68%) moved only because a new bench group
+in the same binary changed what LTO inlines.
+
 ## Related
 
 - [Benchmark reporting](/bench/README.md) - the paired comparison and the trend table
