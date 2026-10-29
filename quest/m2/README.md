@@ -241,7 +241,8 @@ lite-07; bitrate enforcement is not part of this release.
 - [Artifact size audit](/quest/m2/audit-size.md) - repeat the shipping, native, WASM and browser attribution after the release ships
 - [Compile time audit](/quest/m2/audit-compile-time.md) - build-time hotspots are measured against the m1 baselines, starting with the transport share now that moq-net compiles once, and the worst are fixed or planned
 - [Lint override and deprecation audit](/quest/m2/audit-lints.md) - repeat the suppression and deprecation audit after the release ships, starting with clippy on the macOS and Windows targets
-- [Bound cmsg payload reads](/quest/m2/cmsg-decode-bound.md) - `CMsg::decode` refuses a short control message
+- [Bound cmsg payload reads](/quest/m2/cmsg-decode-bound.md) - `CMsg::decode` refuses a short control message, and Tokio sockets keep the ECN mark
+- [Tenant matrix on both runtimes](/quest/m2/tenant-matrix.md) - tenant, mount, HTTP, normalization, and revalidation boundaries are tested on Tokio and io_uring
 - [One typed SETUP parse](/quest/m2/setup-parse-once.md) - one function replaces three SETUP parameter parses
 - [Archive reads against a real store](/quest/m2/archive-store-bench.md) - LIST/GET counts and latency over track count
 - [Quiet logs for clean ends](/quest/m2/quiet-clean-close-logs.md) - clean probe ends and unroutable requests log at debug

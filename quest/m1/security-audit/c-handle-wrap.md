@@ -5,6 +5,8 @@
 A long-running moq-c host never runs out of handle IDs, and no new handle
 ever takes an ID that is still live. Closing a bandwidth consumer documents
 that its callback still fires once afterward, like every other cancel path.
+The C docs say which thread runs callbacks and that a callback and its
+`user_data` must be safe to use from that thread.
 
 ## Plan
 
@@ -30,5 +32,18 @@ near `i32::MAX`.
 FFI-1: add the "terminal callback fires after close" line to
 `moq_bandwidth_consumer_close` in `rs/moq-c/src/bandwidth.rs`, matching its
 siblings in `api.rs`.
+
+The 2026-10-28 audit repeated the handle finding (frames, datagrams, and
+decoded JSON values each take an ID, so a peer's send rate sets the clock)
+and found an unwritten callback contract. `OnStatus` and `OnState`
+(`rs/moq-c/src/ffi.rs`) are `unsafe impl Send` over the caller's `user_data`,
+and background callbacks run on moq-c's runtime thread, but
+`doc/lib/c/index.md` says only "call any function from any thread" and the
+SAFETY comments require only that the pointer stay valid. Decided 2026-10-28
+(maintainer): document it here rather than in its own quest. Name the
+callback thread under Threading in `doc/lib/c/index.md`, add the
+thread-safety precondition to the callback typedefs' doc comments (cbindgen
+copies them into the header), and state it in each `unsafe impl Send`'s
+SAFETY comment.
 
 Public API: doc change only. Wire: none.
