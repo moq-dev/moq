@@ -46,7 +46,6 @@ Record both in the PR.
 ## Required
 
 - [Rust consumers hold a disabled rendition](/quest/m1/push-to-talk/hold-rs.md) - moq-cli play, moq-ffi and moq-mux select follow the same rule
-- [Re-enable without a probe](/quest/m1/push-to-talk/reenable.md) - the JS audio encoder reuses its probe, so an unmute flips the catalog at once and keeps capture timestamps
 - [`muted` and `invisible` keep capture open](/quest/m1/push-to-talk/mute.md) - the element disables only the encoder, so unmute skips getUserMedia and AudioContext setup
 
 ## Closes

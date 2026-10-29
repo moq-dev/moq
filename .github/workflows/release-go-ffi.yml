@@ -118,6 +118,9 @@ jobs:
     needs: [ffi, package]
     runs-on: ubuntu-latest
     if: github.ref_type == 'tag'
+    # The moq-bot key lives in the `publish` Environment, which only protected
+    # refs can deploy to, `moq-ffi-v*` tags among them.
+    environment: publish
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

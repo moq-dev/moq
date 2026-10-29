@@ -35,15 +35,37 @@ jobs:
     name: Publish formula to homebrew-tap
     # workflow_run has the base repository's privileges and this job checks out
     # the triggering commit, so accept only a successful tag push in this
-    # repository: a fork PR can rename a workflow and its branch to match.
+    # repository: a fork PR can rename a workflow and its branch to match. Only
+    # the tag patterns the `release tags` ruleset protects are accepted.
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_repository.full_name == github.repository &&
-      startsWith(github.event.workflow_run.head_branch, 'moq-')
+      (startsWith(github.event.workflow_run.head_branch, 'moq-relay-v') ||
+       startsWith(github.event.workflow_run.head_branch, 'moq-cli-v') ||
+       startsWith(github.event.workflow_run.head_branch, 'moq-gst-v'))
     runs-on: ubuntu-latest
+    # Write credentials live in the `publish` Environment, which only protected
+    # refs can deploy to; workflow_run runs on `main`.
+    environment: publish
 
     steps:
+      # head_branch names a branch as readily as a tag, and anyone who can push
+      # may name a branch and a workflow after a release. Only a tag the
+      # `release tags` ruleset protects, at the run's commit, is a release.
+      - name: Require a release tag at the run's commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.workflow_run.head_branch }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/$TAG" --jq .sha)
+          if [[ "$commit" != "$SHA" ]]; then
+            echo "::error::$TAG is not a release tag at $SHA"
+            exit 1
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # workflow_run runs the default branch's file, whose checkout would

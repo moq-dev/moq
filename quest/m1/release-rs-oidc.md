@@ -8,6 +8,11 @@ secret is removed and revoked.
 
 ## Plan
 
+Moved from m2 to m1 on 2026-10-29 (maintainer): after
+[moq-dev/moq#7166](https://github.com/moq-dev/moq/pull/7166) moved publish
+secrets into the `publish` Environment, `CARGO_REGISTRY_TOKEN` is the
+remaining long-lived registry token where npm and PyPI already use OIDC.
+
 Decided 2026-10-22 from the repository improvement audit. release-plz (0.3.172
 in the dev shell) exchanges the GitHub OIDC token itself, so no separate
 authentication Action is needed.
@@ -24,4 +29,4 @@ authentication Action is needed.
 
 ## Required
 
-- [crates.io trusts the workflow](/quest/m2/crates-trusted-publisher.md) - every published crate has the trusted publisher configured
+- [crates.io trusts the workflow](/quest/m1/crates-trusted-publisher.md) - every published crate has the trusted publisher configured

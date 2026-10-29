@@ -206,7 +206,8 @@ pub struct moq_video_init {
 ///
 /// Zero the struct and set only the `has_*` flags you want. Hints fill gaps the
 /// bitstream leaves (especially bitrate); a value the stream detects later wins
-/// for dimensions.
+/// for dimensions. The MSF catalog declares a bitrate or frame rate only when
+/// it is hinted here.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct moq_video_hint {
