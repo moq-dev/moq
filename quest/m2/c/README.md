@@ -13,7 +13,9 @@ scope; they already sit on moq-ffi through the generated C++.
 Decided 2026-10-25 (maintainer): this line ships after the cut, once moq builds
 its bindings from rust2's UniFFI fork. The hand-written crate ships at the cut
 with [parity](/quest/m1/c/README.md) instead. The generator fix for the C name
-clash lands in rust2, not in a `kixelated/uniffi-bindgen-cpp` release.
+clash landed in rust2's fork
+([kixelated/rust2#66](https://github.com/kixelated/rust2/pull/66)), not in a
+`kixelated/uniffi-bindgen-cpp` release, and reaches moq with the switch.
 
 Decided earlier, still standing:
 
@@ -35,10 +37,11 @@ Decided earlier, still standing:
   bullet carries the move for the package's `MIGRATE.md`.
 
 The `moq-c` package (`c/moq`, `just c check`) builds the generated header and
-its probe in CI, so drift fails loud. Until name-clash lands, it renames the
-record `MoqAudioEncoderFinish` to `MoqAudioEncoderFinished` so the current
-generator emits the header; the generator fix can revert that rename. No
-`c-v*` tag ships before the cut.
+its probe in CI, so drift fails loud. moq-ffi's record
+`MoqAudioEncoderFinished` was renamed from `MoqAudioEncoderFinish` so moq's
+current generator emits the header;
+[the switch](/quest/m2/uniffi-fork.md) reverts that rename. No `c-v*` tag ships
+before the cut.
 
 The line owns the pre-publication check: every `doc/lib/c` sample and the C
 interop client build and run against the built release archive.
@@ -48,6 +51,5 @@ publication; [old-crate retirement](/quest/m2/release/c-retire.md) follows.
 ## Required
 
 - [Switch to rust2's UniFFI](/quest/m2/uniffi-fork.md) - the C generator comes from rust2's fork
-- [One C name per moq-ffi item](/quest/m2/c/name-clash.md) - rust2's C generator names types in CamelCase and functions in snake_case, so the record `MoqAudioEncoderFinish` and the method `moq_audio_encoder_finish` never share a name
 - [C consumers](/quest/m2/c/consumers.md) - the C interop client and `doc/lib/c` samples move onto the generated API
 - [Async failure contract](/quest/m2/c/async-failure-contract.md) - every generated async call returns a task and calls back exactly once, cancelled when its task was freed first
