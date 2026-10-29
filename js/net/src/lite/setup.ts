@@ -9,7 +9,7 @@ import { type Hop, HopSchema, wireHop } from "../hop.ts";
 import { encodeVarint, Reader, type Writer } from "../stream.ts";
 import { decodeUtf8 } from "../util/utf8.ts";
 import * as Message from "./message.ts";
-import { hasAuth, hasSetupStream, type Version } from "./version.ts";
+import { hasAuth, hasImplementation, hasSetupStream, type Version } from "./version.ts";
 
 const clientParameters = new WeakSet<Setup>();
 
@@ -30,9 +30,6 @@ const PARAM_HOP = 0x5n;
 const PARAM_IMPLEMENTATION = 0x6n;
 /** Setup Parameter id for the client's connection credential (client-only, lite-07+). */
 const PARAM_TOKEN = 0x7n;
-
-/** Cap on the number of parameters in a bag, matching the Rust decoder. */
-const MAX_PARAMS = 64;
 
 /** SETUP only carries negotiation parameters, so it gets a far smaller cap than other messages. */
 const MAX_SETUP_SIZE = 0xffff;
@@ -142,10 +139,6 @@ class Parameters {
 	}
 
 	async encode(w: Writer) {
-		if (this.#entries.size > MAX_PARAMS) {
-			throw new Error("too many parameters");
-		}
-
 		await w.u53(this.#entries.size);
 		for (const [id, value] of this.#entries) {
 			await w.u62(id);
@@ -158,10 +151,6 @@ class Parameters {
 		const params = new Parameters();
 
 		const count = await r.u53();
-		if (count > MAX_PARAMS) {
-			throw new Error("too many parameters");
-		}
-
 		for (let i = 0; i < count; i++) {
 			const id = await r.u62();
 			if (params.#entries.has(id)) {
@@ -303,7 +292,7 @@ export class Setup {
 		const token = hasAuth(version) ? params.getBytes(PARAM_TOKEN) : undefined;
 		if (token?.byteLength === 0) throw new Error("setup token cannot be empty");
 
-		const implementationBytes = params.getBytes(PARAM_IMPLEMENTATION);
+		const implementationBytes = hasImplementation(version) ? params.getBytes(PARAM_IMPLEMENTATION) : undefined;
 		const implementation = implementationBytes === undefined ? undefined : decodeUtf8(implementationBytes);
 
 		const setup = new Setup({ probe, path, role, hop, token, implementation });

@@ -836,10 +836,6 @@ fn grouped_failure_wakes_pending_reads_and_releases_demand() {
 
 	assert!(frame.woken(), "parked frame read was not woken");
 	assert!(track.woken(), "parked group and datagram reads were not woken");
-	assert!(
-		!demand.wanted().is_some(),
-		"track demand stayed live after authentication failure"
-	);
 	assert!(!bad_demand.wanted(), "failed group demand stayed live");
 	assert!(!pair.net.is_closed(), "publisher must stay open");
 
@@ -852,6 +848,11 @@ fn grouped_failure_wakes_pending_reads_and_releases_demand() {
 	assert!(
 		!open_demand.wanted(),
 		"sibling group demand stayed live after its woken read"
+	);
+	// The sibling's reader held the track wanted until that read released it.
+	assert!(
+		!demand.wanted().is_some(),
+		"track demand stayed live after authentication failure"
 	);
 	assert_eq!(
 		track
@@ -873,7 +874,7 @@ fn grouped_failure_wakes_pending_reads_and_releases_demand() {
 }
 
 #[test]
-fn dropping_track_releases_demand_while_group_is_held() {
+fn a_held_group_keeps_demand_after_the_track_drops() {
 	let mut pair = pair("video");
 	let demand = pair.net.demand();
 	let mut open = pair.producer.append_group().unwrap();
@@ -881,12 +882,15 @@ fn dropping_track_releases_demand_while_group_is_held() {
 
 	let mut group = recv_group(&mut pair.consumer);
 	drop(pair.consumer);
-	assert!(!demand.wanted().is_some(), "a held group kept the track subscription");
+	assert!(demand.wanted().is_some(), "a held group keeps its track wanted");
 
 	// The held group is not failed by the unsubscribe.
 	assert_eq!(read_frame(&mut group).plaintext, &b"ok"[..]);
 	open.write_frame(ms(2), b"next").unwrap();
 	assert_eq!(read_frame(&mut group).plaintext, &b"next"[..]);
+
+	drop(group);
+	assert!(demand.wanted().is_none(), "the last reader leaving releases the track");
 }
 
 #[test]

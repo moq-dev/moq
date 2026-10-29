@@ -72,10 +72,13 @@ async fn closed_requests_are_granted_back() {
 
 	for version in VERSIONS {
 		let setup = setup(version, limits(0), ROUNDS).await;
-		let broadcast = moq_clock::timeout(TIMEOUT, setup.client.consume().routed_broadcast("bcast"))
-			.await
-			.expect("announce timeout")
-			.unwrap();
+		let broadcast = moq_clock::timeout(
+			TIMEOUT,
+			setup.client.consume().follow("bcast", None).unwrap().available(),
+		)
+		.await
+		.expect("announce timeout")
+		.unwrap();
 
 		for round in 0..ROUNDS {
 			let track = broadcast.track(&format!("t{round}")).unwrap();
@@ -122,7 +125,7 @@ async fn flow_control_bounds_the_subscriptions_a_peer_holds() {
 		options.server_limits = Some(limits(0));
 		let pair = connect_mock(options).await;
 
-		let remote = moq_clock::timeout(TIMEOUT, client.consume().routed_broadcast("bcast"))
+		let remote = moq_clock::timeout(TIMEOUT, client.consume().follow("bcast", None).unwrap().available())
 			.await
 			.expect("announce timeout")
 			.unwrap();

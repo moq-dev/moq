@@ -66,6 +66,22 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      # head_branch names a branch as readily as a tag, and anyone who can push
+      # may name a branch and a workflow after a release. Only a tag the
+      # `release tags` ruleset protects, at the run's commit, is a release.
+      - name: Require a release tag at the run's commit
+        if: github.event_name == 'workflow_run'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.workflow_run.head_branch }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/$TAG" --jq .sha)
+          if [[ "$commit" != "$SHA" ]]; then
+            echo "::error::$TAG is not a release tag at $SHA"
+            exit 1
+          fi
       - uses: ./.github/actions/just
       - name: Check independent publisher
         id: publisher
@@ -212,6 +228,9 @@ jobs:
     needs: [ffi-release, build, verify]
     runs-on: ubuntu-latest
     if: ${{ needs.build.outputs.publish == 'true' }}
+    # The moq-bot key lives in the `publish` Environment, which only protected
+    # refs can deploy to: `release`, and `main` for workflow_run.
+    environment: publish
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6

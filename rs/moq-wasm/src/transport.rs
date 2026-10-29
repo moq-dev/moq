@@ -8,7 +8,7 @@ use url::Url;
 use web_transport_wasm::{ClientBuilder, Error};
 
 /// The connected browser WebTransport session `moq-net` runs over.
-pub type Session = adapter::Session<web_transport_wasm::Session>;
+pub use adapter::Session;
 
 /// Options for a browser WebTransport connection.
 ///

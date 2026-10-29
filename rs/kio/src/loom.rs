@@ -427,6 +427,11 @@ fn a_log_append_wakes_a_reader_parked_on_its_channel() {
 /// read it isn't ordered after fails the model. The reader keeps a hint into the first
 /// segment from an earlier read, which the eviction may free before its next one.
 ///
+/// Only an ARM run checks the release at the end of each read: off x86, crossbeam-epoch
+/// pins with a Relaxed store, so a collector that sees the reader's second pin is
+/// ordered after its first pin's reads only through that release. On x86 its SeqCst CAS
+/// orders them anyway.
+///
 /// The collector's own atomics run under loom too (`crossbeam_loom`), which makes the
 /// full search intractable, so this one bounds preemptions like moq-net's models.
 #[test]

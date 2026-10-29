@@ -953,10 +953,7 @@ mod tests {
 		type RecvStream = FakeRecv;
 		type Error = FakeError;
 
-		fn poll_accept_uni(
-			&mut self,
-			_cx: &mut std::task::Context<'_>,
-		) -> std::task::Poll<Result<Self::RecvStream, Self::Error>> {
+		fn poll_accept_uni(&self, _waiter: &kio::Waiter) -> std::task::Poll<Result<Self::RecvStream, Self::Error>> {
 			match self.uni.lock().unwrap().pop_front() {
 				Some(data) => std::task::Poll::Ready(Ok(crate::transport::poll::Buffered::new(FakeChunks {
 					data: data.into(),
@@ -967,8 +964,8 @@ mod tests {
 			}
 		}
 		fn poll_accept_bi(
-			&mut self,
-			_cx: &mut std::task::Context<'_>,
+			&self,
+			_waiter: &kio::Waiter,
 		) -> std::task::Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 			match self.bi.lock().unwrap().pop_front() {
 				Some(data) => std::task::Poll::Ready(Ok((
@@ -984,45 +981,42 @@ mod tests {
 			}
 		}
 		fn poll_open_bi(
-			&mut self,
-			_cx: &mut std::task::Context<'_>,
+			&self,
+			_waiter: &kio::Waiter,
 			_: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
 		) -> std::task::Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 			std::task::Poll::Pending
 		}
 
 		fn poll_open_request(
-			&mut self,
-			cx: &mut std::task::Context<'_>,
+			&self,
+			waiter: &kio::Waiter,
 			options: crate::transport::poll::SendOptions<
 				'_,
 				<Self::SendStream as crate::transport::poll::SendStream>::Group,
 			>,
 		) -> std::task::Poll<Result<Option<crate::transport::poll::BiStreams<Self>>, Self::Error>> {
-			self.poll_open_bi(cx, options).map_ok(Some)
+			self.poll_open_bi(waiter, options).map_ok(Some)
 		}
 		fn poll_open_uni(
-			&mut self,
-			_cx: &mut std::task::Context<'_>,
+			&self,
+			_waiter: &kio::Waiter,
 			_: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
 		) -> std::task::Poll<Result<Self::SendStream, Self::Error>> {
 			std::task::Poll::Pending
 		}
-		fn send_group(&mut self, _: i64) -> Option<crate::transport::poll::Ungrouped> {
+		fn send_group(&self, _: i64) -> Option<crate::transport::poll::Ungrouped> {
 			None
 		}
 
 		fn send_datagram(
-			&mut self,
+			&self,
 			_: Bytes,
 			_: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
 		) -> Result<(), Self::Error> {
 			Ok(())
 		}
-		fn poll_recv_datagram(
-			&mut self,
-			_cx: &mut std::task::Context<'_>,
-		) -> std::task::Poll<Result<Bytes, Self::Error>> {
+		fn poll_recv_datagram(&self, _waiter: &kio::Waiter) -> std::task::Poll<Result<Bytes, Self::Error>> {
 			std::task::Poll::Pending
 		}
 		fn max_datagram_size(&self) -> usize {
@@ -1034,10 +1028,10 @@ mod tests {
 		fn protocol(&self) -> Option<&str> {
 			self.protocol
 		}
-		fn close(&mut self, code: u32, _reason: &str) {
+		fn close(&self, code: u32, _reason: &str) {
 			self.closed.lock().unwrap().get_or_insert(code);
 		}
-		fn poll_closed(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Error> {
+		fn poll_closed(&self, _waiter: &kio::Waiter) -> std::task::Poll<Self::Error> {
 			std::task::Poll::Pending
 		}
 	}
@@ -1049,11 +1043,7 @@ mod tests {
 	impl crate::transport::poll::SendStream for FakeSend {
 		type Error = FakeError;
 		type Group = crate::transport::poll::Ungrouped;
-		fn poll_write(
-			&mut self,
-			_cx: &mut std::task::Context<'_>,
-			buf: &[u8],
-		) -> std::task::Poll<Result<usize, Self::Error>> {
+		fn poll_write(&mut self, _waiter: &kio::Waiter, buf: &[u8]) -> std::task::Poll<Result<usize, Self::Error>> {
 			match self.withheld {
 				true => std::task::Poll::Pending,
 				false => std::task::Poll::Ready(Ok(buf.len())),
@@ -1068,7 +1058,7 @@ mod tests {
 			Ok(())
 		}
 		fn reset(&mut self, _code: u32) {}
-		fn poll_closed(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+		fn poll_closed(&self, _waiter: &kio::Waiter) -> std::task::Poll<Result<(), Self::Error>> {
 			std::task::Poll::Ready(Ok(()))
 		}
 	}
@@ -1083,7 +1073,7 @@ mod tests {
 		type Error = FakeError;
 		fn poll_read_chunk(
 			&mut self,
-			_cx: &mut std::task::Context<'_>,
+			_waiter: &kio::Waiter,
 			max: usize,
 		) -> std::task::Poll<Result<Option<Bytes>, Self::Error>> {
 			if self.data.is_empty() {
@@ -1447,8 +1437,8 @@ mod tests {
 
 	#[moq_clock::test]
 	async fn accept_request_reads_buffered_setup_after_transport_close() {
-		let mut session = FakeSession::new(ALPN_LITE_05, [lite05_setup(Some("/closed"), None, None)]);
-		crate::transport::poll::Session::close(&mut session, SessionError::Cancel.to_code(), "closed");
+		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(Some("/closed"), None, None)]);
+		crate::transport::poll::Session::close(&session, SessionError::Cancel.to_code(), "closed");
 		let request = Server::new().accept_request(moq_clock::now(), session).await.unwrap();
 		assert_eq!(request.path(), "/closed");
 	}

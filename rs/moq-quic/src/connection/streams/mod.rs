@@ -132,7 +132,7 @@ impl RecvStream<'_> {
 		let hash_map::Entry::Occupied(mut entry) = self.state.recv.entry(self.id) else {
 			return Err(ClosedStream { _private: () });
 		};
-		let stream = get_or_insert_recv(entry.get_mut(), self.state.stream_receive_window);
+		let stream = get_or_insert_recv(entry.get_mut(), self.state.initial_stream_receive_window);
 
 		// An eviction already discarded the buffer, leaving the peer and the bytes the reader
 		// took to this stop.
@@ -462,7 +462,7 @@ impl<'a> SendStream<'a> {
 	///
 	/// Higher values go first; equal values share bytes round robin. A queued stream moves at
 	/// once, behind the streams already queued at its new priority. With
-	/// [`TransportConfig::send_fairness`](crate::TransportConfig::send_fairness) off, a stream
+	/// [`transport::Config::send_fairness`](crate::transport::Config::send_fairness) off, a stream
 	/// its group is partway through keeps going first until it runs out of data.
 	///
 	/// # Panics

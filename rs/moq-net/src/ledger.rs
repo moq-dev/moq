@@ -196,11 +196,6 @@ impl Ledger {
 		self.runs.first_key_value().map(|(start, _)| *start)
 	}
 
-	/// One past the highest sequence accounted for.
-	pub fn end(&self) -> Option<u64> {
-		self.runs.last_key_value().map(|(_, run)| run.end)
-	}
-
 	/// The exclusive end of the accounted run holding `sequence`, `None` while it is not.
 	pub fn run_end(&self, sequence: u64) -> Option<u64> {
 		self.runs

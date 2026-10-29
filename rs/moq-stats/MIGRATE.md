@@ -12,17 +12,14 @@ Functions that took `impl AsPath` take `impl Into<Path>`, so pass a `Path` rathe
 
 The re-exported `moq_stats::Refusal` follows moq-net's rename: use `moq_stats::RefusalKind`.
 
-### Track names and readers take an `Encoding` (#6472)
+### One compressed track per stats name
 
-`traffic_track`, `sessions_track`, `totals_track`, `presence_track`, and `prefix_track` take an `Encoding` instead of a `compressed: bool`, and `consume::Config` and `aggregate::Config` replace `compression: bool` and `with_compression(bool)` with `encoding: Encoding` and `with_encoding(Encoding)`.
-Pass `Encoding::Plain` for `false` and `Encoding::Compressed` for `true`.
+The `.z` siblings are gone: `totals.json`, `<label>/presence.json`, and `<path>/prefix.json` are each one track with `compress: true`, carrying merge-patch deltas, and moq-net hands every reader plain frames.
+`totals_track`, `presence_track`, and `prefix_track` drop their `compressed: bool` argument, and `consume::Config` and `aggregate::Config` drop `compression` and `with_compression`; `consume::Config` is now empty.
+`COMPRESSED_SUFFIX` is removed. Read the plain name whichever flavor you read before.
+A frame whose uncompressed JSON passes the 32 MB group budget ends the track with `FrameTooLarge`.
 
 The single-broadcast readers are named like the aggregate ones: `consume::Traffic` is now `consume::TrafficConsumer` and `consume::Sessions` is `consume::SessionsConsumer`.
-
-### The `.z` flavor ends with the plain one past 32 MB
-
-A frame whose uncompressed JSON passes the 32 MB group budget now ends both the plain track and its `.z` sibling with `FrameTooLarge`: a reader inflates the whole group, so compression no longer carries a larger frame.
-A reader that fell back to `.z` for very large frames sees the same end the plain reader does.
 
 ### A returning group restarts under a new epoch (#4904)
 

@@ -1,14 +1,14 @@
-import { expect, jest, onTestFinished, spyOn, test } from "bun:test";
-import { Micro, Milli } from "@moq/clock";
+import { expect, onTestFinished, spyOn, test } from "bun:test";
+import { Manual, Micro, Milli, Nano } from "@moq/clock";
 import { type Group, Error as NetError, StreamCode, Time, Track } from "@moq/net";
 import { Consumer, type Read } from "./consumer.ts";
 import { encodeFrame, Format } from "./legacy.ts";
 
-// Drain the in-memory readers and their continuations without advancing mocked time.
-const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
-
 function setup(maxDelay = 100) {
-	jest.useFakeTimers();
+	const clock = new Manual();
+	const installed = clock.install();
+	// Drain the in-memory readers and their continuations without moving time.
+	const flush = () => clock.advance(Nano.zero);
 	const track = new Track.Producer("video");
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
 		format: new Format("video"),
@@ -31,10 +31,10 @@ function setup(maxDelay = 100) {
 			await reading;
 		} finally {
 			warn.mockRestore();
-			jest.useRealTimers();
+			installed.close();
 		}
 	});
-	return { track, consumer, results, warn };
+	return { track, consumer, results, warn, flush };
 }
 
 // Each item as "gap <µs>+<µs>", "<group>@<µs>" for a frame, or "end <group>@<µs>".
@@ -61,7 +61,7 @@ for (const emptySuccessor of [false, true]) {
 	test.each([0, 100])(
 		`Consumer starts across a hole after an empty reset (empty successor: ${emptySuccessor}, maxDelay: %s)`,
 		async (maxDelay) => {
-			const { track, results, warn } = setup(maxDelay);
+			const { track, results, warn, flush } = setup(maxDelay);
 			const stale = track.createGroup(16);
 			await flush();
 			if (emptySuccessor) {
@@ -91,7 +91,7 @@ for (const emptySuccessor of [false, true]) {
 }
 
 test("Consumer preserves a declared marker before its first media across a hole", async () => {
-	const { track, results, warn } = setup();
+	const { track, results, warn, flush } = setup();
 	const marker = track.createGroup(16);
 	write(marker, 0, true);
 	marker.finish();
@@ -109,7 +109,7 @@ test("Consumer preserves a declared marker before its first media across a hole"
 });
 
 test.each([false, true])("Consumer still waits for a gap after media (playhead reset: %s)", async (reset) => {
-	const { track, consumer, results, warn } = setup(1000);
+	const { track, consumer, results, warn, flush } = setup(1000);
 	const first = track.createGroup(16);
 	write(first, 0);
 	first.finish();

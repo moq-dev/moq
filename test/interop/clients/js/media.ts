@@ -270,6 +270,8 @@ async function waitForLive(
 	let lag: number | undefined;
 	let frame: number | undefined;
 	let moved = false;
+	// Live needs audio playing too, so a failure says whether audio or the picture held it back.
+	let audio = "unread";
 	while (Date.now() < (started ? since + LATE_CATCHUP_MS : startup)) {
 		throwPageErrors(publisherErrors);
 		throwPageErrors(playerErrors);
@@ -288,6 +290,10 @@ async function waitForLive(
 			}
 			lag = fixture.frameId - state.frameId;
 			first ??= lag;
+			audio =
+				state.audioContext === "running" && !state.audioStalled
+					? "playing"
+					: `${state.audioContext ?? "not built"}${state.audioStalled ? " and buffering" : ""}`;
 			moved = frame !== undefined && state.frameId !== frame;
 			if (moved && !started) {
 				started = true;
@@ -309,7 +315,7 @@ async function waitForLive(
 	throw new Failure(
 		assertion,
 		`${moved ? "still" : "held a frame"} ${lag === undefined ? "?" : framesToMs(lag)}ms behind the fixture ` +
-			`${started ? LATE_CATCHUP_MS : timeoutMs}ms after the first frame, against a ${framesToMs(LIVE_LAG_FRAMES)}ms bound for playback`,
+			`${started ? LATE_CATCHUP_MS : timeoutMs}ms after the first frame, against a ${framesToMs(LIVE_LAG_FRAMES)}ms bound for playback; audio ${audio}`,
 	);
 }
 

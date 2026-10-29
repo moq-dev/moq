@@ -53,7 +53,7 @@ export class Consumer<T> {
 	 * Skips to the newest group and applies every frame already buffered in it, yielding only the
 	 * last: a late joiner (or any consumer that has fallen behind) catches up to the head in one
 	 * step instead of replaying every superseded state. Frames are still decoded in order (the
-	 * DEFLATE window and merge patches are sequential); only the per-frame yield is skipped. Blocks
+	 * merge patches are sequential); only the per-frame yield is skipped. Blocks
 	 * when nothing newer than the last yield has arrived.
 	 */
 	latest(): Promise<Timed<T> | undefined> {
@@ -137,7 +137,7 @@ export class Consumer<T> {
 /** Types for {@link Consumer}. */
 export namespace Consumer {
 	/** Snapshot consumer options, including the source track. */
-	export type Config<T> = Pick<CodecConfig<T>, "schema" | "compression"> & {
+	export type Config<T> = Pick<CodecConfig<T>, "schema"> & {
 		track: Moq.Track.Subscriber;
 	};
 }

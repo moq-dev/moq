@@ -20,7 +20,6 @@ from moq_ffi import (
 from ._records import _subscription, _track_info
 from ._stream import _Stream
 from .types import (
-    AnnounceRoute,
     Frame,
     Subscription,
     TrackInfo,
@@ -314,9 +313,9 @@ class BroadcastRequests(_Stream[TrackRequest]):
 class BroadcastProducer:
     """Wraps MoqBroadcastProducer with a cleaner interface.
 
-    Constructing one directly creates a standalone broadcast for serving dynamic
-    requests (:meth:`moq.BroadcastRequest.accept`) or local pub/sub. To publish at
-    a path, use :meth:`moq.OriginProducer.create_broadcast` instead.
+    It fills tracks; announcing belongs to the :class:`moq.Publication` that
+    :meth:`moq.OriginProducer.create_broadcast` returns, the way to publish at a
+    path. Constructing one directly creates a standalone broadcast for local pub/sub.
     """
 
     def __init__(self) -> None:
@@ -332,18 +331,6 @@ class BroadcastProducer:
     def requests(self) -> BroadcastRequests:
         """Accept subscriptions to tracks that are not published yet."""
         return BroadcastRequests(self._inner.requests())
-
-    def announce(self, route: AnnounceRoute | None = None) -> None:
-        """Advertise this broadcast's exact path as a route.
-
-        Announcing again re-prices the route in place. Until announced, the
-        broadcast is invisible and unroutable for local consumers and peers alike.
-        """
-        self._inner.announce(route if route is not None else AnnounceRoute())
-
-    def unannounce(self) -> None:
-        """Retract this broadcast's advertisement, if any, from local consumers and peers alike."""
-        self._inner.unannounce()
 
     def publish_track(self, name: str, info: TrackInfo | None = None) -> TrackProducer:
         """Create a track. Send any bytes, no codec validation. ``info`` sets track

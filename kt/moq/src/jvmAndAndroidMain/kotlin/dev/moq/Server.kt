@@ -27,11 +27,11 @@ class Server internal constructor(
     /**
      * Create an unannounced broadcast at [path], served to incoming sessions once announced.
      *
-     * Advertise it with `announce` after populating tracks. `end()` ends it for
-     * good; `close()` (or `use`) releases the handle, which ends it once no
-     * `requests()` handle remains.
+     * Fill `broadcast()`, then advertise it with `announce`. The broadcast's `end()`
+     * ends it for good, as does releasing its last handle: the publication, each
+     * `broadcast()`, and `requests()`.
      */
-    fun createBroadcast(path: String): BroadcastProducer {
+    fun createBroadcast(path: String): Publication {
         val origin = publishOrigin ?: throw IllegalStateException("no publish origin configured")
         return origin.createBroadcast(path)
     }

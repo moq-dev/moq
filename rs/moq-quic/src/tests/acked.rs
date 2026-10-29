@@ -8,8 +8,8 @@ const LATENCY: Duration = Duration::from_millis(10);
 fn pair(reset_stream_at: bool) -> Pair {
 	let mut config = server_config();
 	let mut transport = cubic_transport();
-	transport.reset_stream_at(reset_stream_at);
-	config.transport = Arc::new(transport);
+	transport.reset_stream_at = reset_stream_at;
+	config.transport = transport;
 	let mut pair = Pair::new(Default::default(), config);
 	pair.latency = LATENCY;
 	pair
@@ -276,7 +276,7 @@ fn close_fails() {
 	lose_client_packets(&mut pair);
 
 	let now = pair.time;
-	pair.client_conn_mut(client_ch).close(now, VarInt(0), Bytes::new());
+	pair.client_conn_mut(client_ch).close(now, VarInt(0), String::new());
 	assert_eq!(acked(&mut pair, client_ch, s, offset), Err(ClosedStream::default()));
 }
 

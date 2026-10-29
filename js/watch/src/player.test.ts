@@ -10,6 +10,11 @@ async function flush() {
 	for (let i = 0; i < 10; i++) await Promise.resolve();
 }
 
+test("Player refuses the renamed reload and announced inputs", () => {
+	expect(() => new Player({ reload: true } as never)).toThrow("`reload` was renamed to `follow`");
+	expect(() => new Player({ announced: true } as never)).toThrow("`announced` was renamed to `follow`");
+});
+
 test("Player owns the shared pipeline and feeds output policy into decoders", async () => {
 	const enabled = new Signal(true);
 	const paused = new Signal(false);

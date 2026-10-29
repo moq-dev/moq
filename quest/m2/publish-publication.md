@@ -17,11 +17,8 @@ d0337260a6). The state is spread over five name-keyed maps in `Broadcast`
 (`#kinds`, `#names`, `#replacements`, `#served`, `#listed`), plus a
 per-Broadcast `#advertised` WeakMap and three failure layers in each
 encoder. Replace them with one publication object per network broadcast,
-mirroring Rust's identity rules from
-[Rust identity enforcement](/quest/m1/catalog-identity-rs.md).
+mirroring Rust's identity rules (`hang::catalog::VideoConfig::same_identity`
+and `AudioConfig::same_identity`, enforced by `moq-mux` since
+[moq-dev/moq#7110](https://github.com/moq-dev/moq/pull/7110)).
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Rust identity enforcement](/quest/m1/catalog-identity-rs.md) - settles the identity contract this mirrors

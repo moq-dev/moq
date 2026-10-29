@@ -79,4 +79,3 @@ moq-quic's README fork list and describe migration in the PR's Impact section. W
 - [Poll forms](/quest/m1/quic-api/poll.md) - the drivers' public poll forms forward to these
 - [poll_acked](/quest/m2/quic-ack-hook.md) - its offset wait lives here
 - [QUIC lock contention](/quest/m2/perf/quic-lock-contention.md) - profiles the lock these waits are registered under
-- [Sans-IO compared](/quest/m1/poll-first/sansio-compare.md) - a core that owns kio waits but no I/O is a third data point

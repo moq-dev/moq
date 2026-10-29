@@ -78,7 +78,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts --mpeg2
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
       # A KLV stream joins the program mid-stream and leaves it: the export announces each

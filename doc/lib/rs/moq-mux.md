@@ -25,6 +25,10 @@ arrived. The catalog clock never moves once something uses it: an importer that
 starts after a data track, a capture, another importer, or a pinned clock
 shifts its timestamps onto that clock instead, landing its first frame at now.
 A `catalog::Timebase` gives renditions on one timestamp base one shared shift. A
+stream whose decoder identity changes, such as an SPS with a new profile or level
+or an audio header with a new sample rate, continues under a new track name
+(`<name>/<n>` for the codec importers) while the old track ends; everything else,
+such as the coded size, updates the rendition in place. A
 timeline that rewinds ends the import. fMP4 export fixes its track
 set at the init segment, so a new rendition or a changed configuration ends the
 export. The [CLI page](/bin/cli#import) covers these and the MPEG-TS specifics:

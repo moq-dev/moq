@@ -140,8 +140,8 @@ fn streams_carry_data_and_fin() {
 #[test]
 fn credit_returns_for_unread_and_stopped_streams() {
 	let mut cfg = config(Version::QMux02);
-	cfg.receive_window = VarInt::from_u32(64 << 10);
-	cfg.stream_receive_window = VarInt::from_u32(32 << 10);
+	cfg.limits.receive_window = NonZeroU64::new(64 << 10);
+	cfg.limits.stream_receive_window = NonZeroU64::new(32 << 10);
 	let mut pair = Pair::new(cfg);
 	let chunk = vec![1u8; 16 << 10];
 
@@ -180,20 +180,23 @@ fn credit_returns_for_unread_and_stopped_streams() {
 #[test]
 fn close_delivers_application_close() {
 	let mut pair = Pair::new(config(Version::QMux02));
-	pair.client.close(VarInt::from_u32(42), Bytes::from_static(b"bye"));
+	pair.client.close(VarInt::from_u32(42), "bye".to_string());
 	// The first close wins
-	pair.client.close(VarInt::from_u32(7), Bytes::new());
+	pair.client.close(VarInt::from_u32(7), String::new());
 	assert!(!pair.client.is_drained());
 	pair.drive();
 	assert!(pair.client.is_drained());
 	match lost(&mut pair.server) {
 		Some(ConnectionError::ApplicationClosed(close)) => {
 			assert_eq!(close.error_code, VarInt::from_u32(42));
-			assert_eq!(&close.reason[..], b"bye");
+			assert_eq!(close.reason, "bye");
 		}
 		other => panic!("unexpected {other:?}"),
 	}
-	assert!(matches!(lost(&mut pair.client), Some(ConnectionError::LocallyClosed)));
+	assert!(matches!(
+		lost(&mut pair.client),
+		Some(ConnectionError::LocallyClosed { code, reason }) if code == VarInt::from_u32(42) && reason == "bye"
+	));
 }
 
 /// A record carrying the peer's parameters, then `frame`
@@ -605,7 +608,7 @@ fn handshake_timeout() {
 	let mut server = Connection::new(config(Version::QMux02), Side::Server, now);
 	let deadline = server.poll_timeout().unwrap();
 	server.handle_timeout(deadline);
-	assert!(matches!(lost(&mut server), Some(ConnectionError::TimedOut)));
+	assert!(matches!(lost(&mut server), Some(ConnectionError::HandshakeTimeout)));
 }
 
 #[test]
@@ -674,7 +677,7 @@ fn golden_records() {
 		pair.client.send_stream(id).reset(VarInt::from_u32(5)).unwrap();
 		let reset = record(&mut pair.client, pair.now);
 
-		pair.client.close(VarInt::from_u32(42), Bytes::from_static(b"bye"));
+		pair.client.close(VarInt::from_u32(42), "bye".to_string());
 		let close = record(&mut pair.client, pair.now);
 
 		// STREAM(OFF=0, LEN, FIN) id 2 "hi"; RESET_STREAM id 6 code 5 final size 1;

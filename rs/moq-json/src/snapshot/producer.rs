@@ -34,6 +34,9 @@ fn take<T>(inner: &Mutex<Inner<T>>) -> MutexGuard<'_, Inner<T>> {
 /// it reaches the encoder's caps. Set the track's [`refresh`](moq_net::track::Info::refresh) ratio
 /// when creating it, or joins never ask.
 ///
+/// Set [`compress`](moq_net::track::Info::compress) on that track's info too: JSON is small and
+/// repetitive, and moq-net compresses each delta against the snapshot earlier in its group.
+///
 /// Cheaply clonable: clones share one underlying track and publishing state, like other MoQ
 /// producers.
 pub struct Producer<T> {

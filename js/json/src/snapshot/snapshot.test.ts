@@ -1,9 +1,7 @@
 import { expect, test } from "bun:test";
 import { Milli } from "@moq/clock";
-import { Decoder as Flate } from "@moq/flate";
 import { Group, Error as NetError, StreamCode, Time, Track } from "@moq/net";
 import { Consumer } from "./consumer.ts";
-import { Encoder } from "./encoder.ts";
 import { Producer } from "./producer.ts";
 
 type Value = Record<string, unknown>;
@@ -448,21 +446,21 @@ test("no ratio never refreshes", async () => {
 	expect(await structure(track.subscribe({ maxDelay: REPLAY_LATENCY }).ordered())).toEqual([4]);
 });
 
-test("a compressed refresh opens a fresh window", async () => {
-	const track = new Track.Producer("test").accept({ refresh: 0 });
-	const producer = new Producer<Value>({ track, compression: "deflate" });
+test("a compressed refresh opens a fresh group", async () => {
+	const track = new Track.Producer("test").accept({ refresh: 0, compress: true });
+	const producer = new Producer<Value>({ track });
 	producer.update({ value: { a: 1, b: 1 } });
 	producer.update({ value: { a: 1, b: 2 } });
 
 	const joiner = track.subscribe();
 	await settle();
-	// The change after the restatement rides as a delta in the new group's window.
+	// The change after the restatement rides as a delta in the new group.
 	producer.update({ value: { a: 1, b: 3 } });
 	producer.finish();
 	joiner.close();
 
 	expect(await structure(track.subscribe({ maxDelay: REPLAY_LATENCY }).ordered())).toEqual([2, 2]);
-	const consumer = new Consumer<Value>({ track: track.subscribe(), compression: "deflate" });
+	const consumer = new Consumer<Value>({ track: track.subscribe() });
 	const values: Value[] = [];
 	for await (const { value } of consumer) values.push(value);
 	expect(values).toEqual([
@@ -553,80 +551,6 @@ test("a delta that would overflow the snapshot rolls a new one instead", async (
 	expect(values[values.length - 1]).toEqual({ v: "y".repeat(size) });
 });
 
-// A compressed delta is charged its plaintext too: the reader's window counts what it inflates, so a
-// patch that deflates to almost nothing still rolls the group once its plaintext would overflow the
-// budget. Matches the Rust `a_compressed_delta_is_gated_on_its_inflated_size`.
-test("a compressed delta is gated on its inflated size", () => {
-	const value = { v: "x".repeat(1000) };
-	const patched = { v: "y".repeat(1000) };
-	const encoder = new Encoder<Value>({
-		compression: "deflate",
-		deltas: true,
-		maxGroupBytes: JSON.stringify(value).length + 500,
-	});
-	encoder.update(value)?.commit();
-	const rolled = encoder.update(patched);
-	expect(rolled?.keyframe).toBe(true);
-	expect(rolled?.payload.length).toBeLessThan(500);
-});
-
-// A delta that overflows the group advances the window before the roll is attempted, so a refused roll
-// must not leave that window behind: the next update is a snapshot a reader can decode.
-test("a refused roll resynchronizes", () => {
-	const encoder = new Encoder<Value>({ compression: "deflate", deltas: true, maxGroupBytes: 200 });
-	encoder.update({ a: 1 })?.commit();
-	expect(() => encoder.update({ a: 1, b: "x".repeat(300) })).toThrow(NetError.FrameTooLarge);
-
-	const next = encoder.update({ a: 2 });
-	expect(next?.keyframe).toBe(true);
-	const decoded = new TextDecoder().decode(new Flate().frame(next?.payload ?? new Uint8Array()));
-	expect(JSON.parse(decoded)).toEqual({ a: 2 });
-});
-
-// A compressed snapshot is refused by its plaintext, the way a plain one is, however small it deflates:
-// no reader could inflate it.
-test("a compressed snapshot past the budget is refused", () => {
-	const encoder = new Encoder<Value>({ compression: "deflate", deltas: false, maxGroupBytes: 100 });
-	expect(() => encoder.update({ v: "x".repeat(1000) })).toThrow(NetError.FrameTooLarge);
-});
-
-test("a compressed delta is gated on its encoded size, not its plaintext", async () => {
-	// A sync-flushed DEFLATE frame can come out larger than its input, so the plaintext is not an
-	// upper bound on what lands in the group. A patch that fits the budget by its plaintext but not
-	// by its encoded size would otherwise slip through the gate and overflow the group.
-	const value = { v: "x".repeat(1000) };
-	const patched = { ...value, q: "a" };
-	const plaintext = JSON.stringify({ q: "a" }).length;
-
-	// Measure the frames with the default budget, which admits the delta.
-	const probe = new Encoder<Value>({ compression: "deflate" });
-	const snapshot = probe.update(value);
-	snapshot?.commit();
-	const delta = probe.update(patched);
-	expect(delta?.keyframe).toBe(false);
-	expect(delta?.payload.length).toBeGreaterThan(plaintext);
-
-	// A budget with room for the plaintext patch but not the encoded one. The snapshot is charged its
-	// plaintext, which outweighs its slice.
-	const maxGroupBytes = JSON.stringify(value).length + plaintext;
-	const track = new Track.Producer("test");
-	const producer = new Producer<Value>({ track, compression: "deflate", maxGroupBytes });
-	producer.update({ value: value });
-	producer.update({ value: patched });
-	producer.finish();
-
-	// The patch rolled into a fresh snapshot rather than joining the first group.
-	expect(await structure(track.subscribe({ maxDelay: REPLAY_LATENCY }).ordered())).toEqual([1, 1]);
-
-	const consumer = new Consumer<Value>({
-		track: track.subscribe({ maxDelay: REPLAY_LATENCY }),
-		compression: "deflate",
-	});
-	const values: Value[] = [];
-	for await (const { value } of consumer) values.push(value);
-	expect(values[values.length - 1]).toEqual(patched);
-});
-
 // A publisher gives up a group a reader is still on once a newer one supersedes it, which every
 // moq-lite version reports as OLD. The reader skips to the newer snapshot instead of failing.
 test("snapshot consumer skips a group the publisher dropped mid-read", async () => {
@@ -695,15 +619,15 @@ test("an untimed state reads back untimed", async () => {
 // Each state carries the timestamp of the frame that produced it, snapshot or delta, so a caller can
 // hold it back until a playhead reaches it. `latest()` reports the head's own frame.
 test("each state reads back with its frame's timestamp", async () => {
-	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
-	const producer = new Producer<Value>({ track, deltas: true, compression: "deflate" });
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, compress: true });
+	const producer = new Producer<Value>({ track, deltas: true });
 	for (let n = 1; n <= 3; n++) {
 		producer.update({ value: { n, b: "x".repeat(64) }, at: Time.Timestamp.fromMillis(n * 1_000) });
 	}
 	producer.finish();
 
 	const subscription = { maxDelay: REPLAY_LATENCY };
-	const consumer = new Consumer<Value>({ track: track.subscribe(subscription), compression: "deflate" });
+	const consumer = new Consumer<Value>({ track: track.subscribe(subscription) });
 	const states: [unknown, number | undefined][] = [];
 	for await (const { value, at } of consumer) states.push([value.n, at?.as(Time.Timescale.MILLI)]);
 	expect(states).toEqual([
@@ -712,7 +636,7 @@ test("each state reads back with its frame's timestamp", async () => {
 		[3, 3_000],
 	]);
 
-	const latest = new Consumer<Value>({ track: track.subscribe(subscription), compression: "deflate" });
+	const latest = new Consumer<Value>({ track: track.subscribe(subscription) });
 	const head = await latest.latest();
 	expect(head?.value.n).toBe(3);
 	expect(head?.at?.as(Time.Timescale.MILLI)).toBe(3_000);

@@ -64,7 +64,6 @@ mod test {
 
 	use super::encoder::MAX_DELTA_FRAMES;
 	use super::*;
-	use crate::Compression;
 
 	#[test]
 	fn editing_keeps_the_callers_timestamp_on_commit_and_drop() {
@@ -152,28 +151,14 @@ mod test {
 		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
 	}
 
-	/// An uncompressed config, with or without deltas.
+	/// A config with or without deltas.
 	fn cfg(deltas: bool) -> Config {
 		Config::default().with_deltas(deltas)
 	}
 
-	/// A DEFLATE-compressed config, with or without deltas.
-	fn cfg_deflate(deltas: bool) -> Config {
-		Config {
-			deltas,
-			compression: Compression::Deflate,
-		}
-	}
-
-	/// A consumer reading compressed frames.
-	fn deflate_consumer(track: moq_net::track::Subscriber) -> Consumer<Value> {
-		Consumer::new(
-			track,
-			consumer::Config {
-				compression: Compression::Deflate,
-				..Default::default()
-			},
-		)
+	/// A compressed track.
+	fn compressed() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_compress(true)
 	}
 
 	fn producer(config: Config) -> (Producer<Value>, moq_net::track::Subscriber) {
@@ -1153,8 +1138,8 @@ mod test {
 
 	#[test]
 	fn compressed_late_joiner_collapses_backlog_to_latest() {
-		// Same collapse, exercising the lazy decoder replaying the group's slices to warm its window.
-		let (mut producer, mut track) = producer(cfg_deflate(true));
+		// Same collapse, read through moq-net's inflated copy of the group.
+		let (mut producer, mut track) = producer_on(cfg(true), compressed());
 		for n in 0..=20 {
 			producer.update(&json!({ "n": n })).unwrap();
 		}
@@ -1164,7 +1149,7 @@ mod test {
 			track.largest().now_or_never().flatten().map(|position| position.group),
 			Some(0)
 		);
-		let values = drain_with(deflate_consumer(track));
+		let values = drain(track);
 		assert_eq!(
 			values,
 			vec![json!({ "n": 20 })],
@@ -1174,7 +1159,7 @@ mod test {
 
 	#[test]
 	fn compressed_snapshot_per_group_roundtrips() {
-		let (mut producer, mut track) = producer(cfg_deflate(false));
+		let (mut producer, mut track) = producer_on(cfg(false), compressed());
 		producer.update(&json!({ "a": 1 })).unwrap();
 		producer.update(&json!({ "a": 2 })).unwrap();
 		producer.finish().unwrap();
@@ -1184,15 +1169,15 @@ mod test {
 			track.largest().now_or_never().flatten().map(|position| position.group),
 			Some(1)
 		);
-		let values = drain_with(deflate_consumer(track));
+		let values = drain(track);
 		assert_eq!(values, vec![json!({ "a": 2 })]);
 	}
 
-	/// A refresh on a compressed track opens a fresh DEFLATE window, so a late joiner rebuilds the
-	/// value from the restated group alone, and later deltas compress against it.
+	/// A refresh on a compressed track opens a fresh group, so a late joiner rebuilds the value from
+	/// the restated group alone.
 	#[test]
-	fn a_compressed_refresh_opens_a_fresh_window() {
-		let (mut producer, mut track) = producer_on(cfg_deflate(true), moq_net::track::Info::default().with_refresh(1));
+	fn a_compressed_refresh_opens_a_fresh_group() {
+		let (mut producer, mut track) = producer_on(cfg(true), compressed().with_refresh(1));
 		for n in 0..=40 {
 			producer.update(&json!({ "n": n })).unwrap();
 		}
@@ -1208,52 +1193,7 @@ mod test {
 			track.largest().now_or_never().flatten().map(|position| position.group),
 			Some(1)
 		);
-		assert_eq!(drain_with(deflate_consumer(late)).last().unwrap(), &json!({ "n": 41 }));
-	}
-
-	#[test]
-	fn compression_shrinks_wire_frames() {
-		// A repetitive payload should serialize to fewer wire bytes compressed than plaintext.
-		let value = json!({ "renditions": ["video".repeat(50), "video".repeat(50), "video".repeat(50)] });
-
-		let plaintext_bytes = wire_frame_len(cfg(false), &value);
-		let compressed_bytes = wire_frame_len(cfg_deflate(false), &value);
-		assert!(
-			compressed_bytes < plaintext_bytes,
-			"compressed frame {compressed_bytes} should be smaller than plaintext {plaintext_bytes}"
-		);
-	}
-
-	#[test]
-	fn compressed_deltas_reuse_window() {
-		// The shared per-group window is the whole point: a delta that restates content already in
-		// the snapshot compresses to far fewer bytes than the raw patch.
-		let (mut producer, track) = producer(cfg_deflate(true));
-		let phrase = "Media over QUIC delivers real-time latency at massive scale";
-		producer.update(&json!({ "note": phrase })).unwrap();
-		producer.update(&json!({ "note": phrase, "echo": phrase })).unwrap();
-		producer.finish().unwrap();
-
-		// Both frames land in group 0; read the delta (frame 1) verbatim.
-		let waiter = kio::Waiter::noop();
-		let mut track = track.ordered();
-		let Poll::Ready(Ok(Some(mut group))) = track.poll_next_group(&waiter) else {
-			panic!("expected a group");
-		};
-		let mut frames = Vec::new();
-		while let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) {
-			frames.push(frame.payload);
-		}
-		assert_eq!(frames.len(), 2, "snapshot + one delta in a single group");
-
-		// The raw patch repeats the whole phrase; compressed against the window it's a fraction.
-		let raw_delta = serde_json::to_vec(&json!({ "echo": phrase })).unwrap();
-		assert!(
-			frames[1].len() < raw_delta.len() / 2,
-			"windowed delta {} should be far below the raw patch {}",
-			frames[1].len(),
-			raw_delta.len()
-		);
+		assert_eq!(drain(late).last().unwrap(), &json!({ "n": 41 }));
 	}
 
 	#[test]
@@ -1295,23 +1235,5 @@ mod test {
 			err.to_string(),
 			"json: invalid type: string \"not a map\", expected a map"
 		);
-	}
-
-	/// Publish a single value and return the byte length of the resulting (frame 0) wire frame.
-	fn wire_frame_len(config: Config, value: &Value) -> usize {
-		let (mut producer, track) = producer(config);
-		producer.update(value).unwrap();
-		producer.finish().unwrap();
-
-		let waiter = kio::Waiter::noop();
-		let mut track = track.ordered();
-		let Poll::Ready(Ok(Some(mut group))) = track.poll_next_group(&waiter) else {
-			panic!("expected a group");
-		};
-		// Read the stored (possibly compressed) frame bytes verbatim, without reconstructing JSON.
-		let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
-			panic!("expected a frame");
-		};
-		frame.payload.len()
 	}
 }

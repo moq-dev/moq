@@ -177,14 +177,15 @@ def status_payload(status: Status) -> dict[str, Any]:
 
 
 class StatusPublisher:
-    """The `status` track: DEFLATE-compressed JSON snapshots.
+    """The `status` track: JSON snapshots on a compressed track.
 
     Snapshot rather than stream, because a late joiner wants the truck's current
     state, not the history of every command it ever accepted.
     """
 
     def __init__(self, broadcast: moq.BroadcastProducer) -> None:
-        self._producer = moq.json.SnapshotProducer(broadcast, broadcast.publish_track("status"), compression=True)
+        track = broadcast.publish_track("status", moq.TrackInfo(compress=True))
+        self._producer = moq.json.SnapshotProducer(broadcast, track)
         # Weak: watching demand neither keeps the track open nor locks it.
         self._demand = self._producer.demand()
 
@@ -359,7 +360,7 @@ async def _pump_driver(
     log.info("driver %s connected (epoch %s)", driver_id, epoch)
     try:
         broadcast = await client.request_broadcast(path)
-        control = moq.json.SnapshotConsumer(await broadcast.subscribe_track("control"), compression=True)
+        control = moq.json.SnapshotConsumer(await broadcast.subscribe_track("control"))
         async for message in control:
             command = parse_command(driver_id, message, epoch)
             if command is not None:

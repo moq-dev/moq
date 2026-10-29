@@ -148,8 +148,7 @@ Each group contains a single frame with UTF-8 JSON.
 
 A publisher MUST NOT write multiple frames to a group until a future specification includes a delta-encoding mechanism (via JSON Patch most likely).
 
-A publisher SHOULD also serve the catalog as a `catalog.json.z` track: the identical JSON under the same group and frame rules, differing only by compression ({{compression}}).
-A consumer reads whichever of the two tracks it prefers.
+A publisher SHOULD publish the catalog track compressed ({{compression}}).
 
 ## Root
 The root of the catalog is a JSON document with the following schema:
@@ -569,7 +568,6 @@ A consumer discovers these tracks the same way it discovers media, by reading th
 ~~~
 type JsonSchema = {
   "mode": Mode,
-  "compression": Compression | undefined,
   "schema": string | undefined,
   "broadcast": string | undefined,
   "track": string | undefined,
@@ -586,7 +584,6 @@ It is descriptive: a consumer that does not recognize it MUST still be able to r
 ~~~
 type BinarySchema = {
   "mode": Mode,
-  "compression": Compression | undefined,
   "mime": string | undefined,
   "broadcast": string | undefined,
   "track": string | undefined,
@@ -632,18 +629,6 @@ A group's cache is finite, so a publisher that writes more than it holds evicts 
 A consumer that has not kept up, or that subscribes later, then cannot read the log at all: the read fails once it reaches the evicted prefix, rather than silently resuming at whatever the cache still holds.
 That is the intended behaviour, since a partial log presented as a whole one is exactly what this mode exists to prevent, and under compression ({{compression}}) the retained frames are undecodable anyway without the evicted prefix as context.
 A publisher SHOULD therefore keep a `stream` track's log within what its groups retain, and split anything unbounded across successive tracks; a consumer that needs the whole log SHOULD subscribe before the publisher exceeds that.
-
-### compression {#field-compression}
-~~~
-type Compression = "deflate"
-~~~
-
-The `compression` field names the compression applied to the track's frames.
-If absent, the frames are uncompressed.
-A consumer MUST ignore a track whose `compression` it does not recognize, since it cannot decode the frames.
-
-The `deflate` value is the group-scoped DEFLATE of {{compression}}.
-A `snapshot` group covers a single value (plus any deltas), so its window spans that group alone; a `stream` group's frames compress against the earlier ones in the log.
 
 ### broadcast and track {#data-shared}
 The `broadcast`, `epoch`, and `track` fields carry the same meaning here as they do for a media rendition ({{field-broadcast}}, {{field-epoch}}, {{field-track}}).
@@ -812,9 +797,8 @@ Without `echo`, no feedback is solicited.
 
 An application may already carry its own `stats` or `echo` root key, so a reader MUST treat a `stats` value without a string `track`, or an `echo` value without a string `path`, as absent rather than refuse the catalog.
 
-Both tracks carry JSON snapshots, optionally with the `.z` sibling encoding of JSON snapshots.
-The uncompressed track carries a complete snapshot in a group's single UTF-8 JSON frame.
-The compressed sibling starts each group with a full snapshot and continues with RFC 7396 merge patches in the DEFLATE stream defined in {{compression}}.
+Both tracks carry JSON snapshots, and a publisher SHOULD publish them compressed ({{compression}}).
+Each group starts with a full snapshot as a UTF-8 JSON frame and MAY continue with RFC 7396 merge patches.
 A producer SHOULD update about once per second while observed; a report need not leave the process when unsubscribed.
 A reader takes the newest complete snapshot and treats the reporting broadcast's replacement or decreasing cumulative counters as a reset.
 
@@ -947,14 +931,11 @@ A consumer MUST NOT submit it to a decoder.
 
 
 # Compression {#compression}
-Some metadata tracks are compressed.
+Metadata tracks are small and repetitive, so a publisher SHOULD compress the catalog ({{catalog}}), the `stats` and `echo` snapshots, the HLS record tracks ({{hls}}), and its JSON data tracks ({{json-tracks}}).
 
-Compression is signalled per track, never inferred from the track's name.
-A data track ({{data}}) declares it with the `compression` field ({{field-compression}}).
-The track this specification defines as always compressed, `catalog.json.z` ({{catalog}}), is identified by its role instead.
-The `.z` suffix on that name is a naming convention, and a consumer MUST NOT treat it as a signal.
-
-Such a track is compressed per {{moqflate}}: each group is one raw DEFLATE stream, sync flushed at each frame boundary.
+Compression is a property of the track, carried by the transport rather than the catalog: each group is one raw DEFLATE stream, sync flushed at each frame boundary, per {{moqflate}}.
+A session that cannot signal it delivers the inflated frames instead, so a consumer always reads the frames this specification describes, and the catalog has no field for it.
+A track's name says nothing about its compression.
 
 
 # HLS Records {#hls}
@@ -1009,7 +990,7 @@ Indices MUST NOT exceed 2^53 - 1.
 A publisher MAY roll groups to bound late-join cost.
 Each new group restates a decodable suffix of the retained window, so group boundaries are an encoding detail and MUST NOT surface as duplicate records to the application.
 A consumer that missed records reports their absolute index range as skipped before continuing with the retained suffix.
-The frames are not compressed.
+A publisher SHOULD publish the track compressed ({{compression}}).
 
 ## Records {#hls-records}
 Each record is the start of one segment:
@@ -1144,7 +1125,8 @@ This document has no IANA actions.
 ## moq-hang-04
 {:numbered="false"}
 
-- Replaced the root `archive` section and its per-track timelines with an optional, per-rendition `hls` field on video and audio ({{hls}}). Each record is a segment's first `group` and `pts` in milliseconds, with an optional `duration` where zero marks a stop; frame positions, `end`, `keyframe`, `timescale`, `replay`, `replayEpoch`, `store`, and `version` are gone. Each rendition numbers its own segments, and an edge maps a rendition's record `n` to its segment `n`. The record track is named `<track>.hls` and is not compressed.
+- Removed `catalog.json.z` and the data track `compression` field: compression is a track property the transport carries ({{compression}}), so each compressed track is one name, and the catalog, `stats` and `echo` snapshots, HLS record tracks, and JSON data tracks SHOULD be compressed.
+- Replaced the root `archive` section and its per-track timelines with an optional, per-rendition `hls` field on video and audio ({{hls}}). Each record is a segment's first `group` and `pts` in milliseconds, with an optional `duration` where zero marks a stop; frame positions, `end`, `keyframe`, `timescale`, `replay`, `replayEpoch`, `store`, and `version` are gone. Each rendition numbers its own segments, and an edge maps a rendition's record `n` to its segment `n`. The record track is named `<track>.hls` and is compressed ({{compression}}).
 - A reader refuses a JSON frame in which an object repeats a member name.
 - Added the root `version` ({{catalog-version}}): the oldest draft that reads the catalog, which a consumer refuses when above its own. A `track` other than the entry's ID or a video `warmup` needs 4. Consumers MUST ignore unknown fields.
 - A data track marks a discontinuity with a group of one object with no bytes, since its empty payload is data. An object with no bytes on an audio or video track, or sharing its group, is malformed.

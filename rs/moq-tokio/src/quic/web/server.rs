@@ -1,95 +1,18 @@
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
-use std::sync::Arc;
-
 use futures::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
-use crate::quic::web::{CongestionControl, crypto};
 use crate::quic::web::{
 	Connecting, ServerError, Session, Settings,
 	proto::{ConnectRequest, ConnectResponse},
 };
 
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
-/// Construct a WebTransport [Server] using sane defaults.
-///
-/// This is optional; advanced users may use [Server::new] directly.
-pub struct ServerBuilder {
-	provider: crypto::Provider,
-	addr: std::net::SocketAddr,
-	congestion_controller: Option<Arc<dyn moq_congestion::ControllerFactory + Send + Sync + 'static>>,
-}
-
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
-impl Default for ServerBuilder {
-	fn default() -> Self {
-		Self::new()
-	}
-}
-
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
-impl ServerBuilder {
-	/// Create a server builder with sane defaults.
-	pub fn new() -> Self {
-		Self {
-			provider: crypto::default_provider(),
-			addr: "[::]:443".parse().unwrap(),
-			congestion_controller: None,
-		}
-	}
-
-	/// Listen on the specified address.
-	pub fn with_addr(self, addr: std::net::SocketAddr) -> Self {
-		Self { addr, ..self }
-	}
-
-	/// Enable the specified congestion controller.
-	pub fn with_congestion_control(mut self, algorithm: CongestionControl) -> Self {
-		self.congestion_controller = match algorithm {
-			CongestionControl::LowLatency => Some(Arc::new(moq_congestion::Bbr3Config::default())),
-			// TODO BBR is also higher throughput in theory.
-			CongestionControl::Throughput => Some(Arc::new(moq_congestion::CubicConfig::default())),
-			CongestionControl::Default => None,
-		};
-
-		self
-	}
-
-	/// Supply a certificate used for TLS.
-	// TODO support multiple certs based on...?
-	pub fn with_certificate(
-		self,
-		chain: Vec<CertificateDer<'static>>,
-		key: PrivateKeyDer<'static>,
-	) -> Result<Server, ServerError> {
-		// Standard QUIC endpoint setup
-		let mut config = rustls::ServerConfig::builder_with_provider(self.provider.clone())
-			.with_protocol_versions(&[&rustls::version::TLS13])?
-			.with_no_client_auth()
-			.with_single_cert(chain, key)?;
-
-		config.alpn_protocols = vec![crate::quic::web::ALPN.as_bytes().to_vec()]; // this one is important
-
-		let config: crate::quic::driver::crypto::rustls::QuicServerConfig = config.try_into().unwrap();
-		let config = crate::quic::driver::ServerConfig::with_crypto(Arc::new(config));
-
-		let server =
-			crate::quic::driver::Endpoint::server(config, self.addr).map_err(|e| ServerError::IoError(e.into()))?;
-
-		Ok(Server::new(server))
-	}
-}
-
 /// A WebTransport server that accepts new sessions.
 pub struct Server {
-	endpoint: crate::quic::driver::Endpoint,
+	endpoint: crate::quic::driver::endpoint::Endpoint,
 	accept: FuturesUnordered<BoxFuture<'static, Result<Request, ServerError>>>,
 }
 
 impl core::ops::Deref for Server {
-	type Target = crate::quic::driver::Endpoint;
+	type Target = crate::quic::driver::endpoint::Endpoint;
 
 	fn deref(&self) -> &Self::Target {
 		&self.endpoint
@@ -100,7 +23,7 @@ impl Server {
 	/// Manually create a new server with a manually constructed Endpoint.
 	///
 	/// NOTE: The ALPN must be set to `crate::quic::web::ALPN` for WebTransport to work.
-	pub fn new(endpoint: crate::quic::driver::Endpoint) -> Self {
+	pub fn new(endpoint: crate::quic::driver::endpoint::Endpoint) -> Self {
 		Self {
 			endpoint,
 			accept: Default::default(),
@@ -131,14 +54,14 @@ impl Server {
 /// A mostly complete WebTransport handshake, just awaiting the server's decision on whether to
 /// accept or reject the session based on the URL.
 pub struct Request {
-	conn: crate::quic::driver::Connection,
+	conn: crate::quic::driver::connection::Connection,
 	settings: Settings,
 	connect: Connecting,
 }
 
 impl Request {
 	/// Accept a new WebTransport session from a client.
-	pub async fn accept(conn: crate::quic::driver::Connection) -> Result<Self, ServerError> {
+	pub async fn accept(conn: crate::quic::driver::connection::Connection) -> Result<Self, ServerError> {
 		// Perform the H3 handshake by sending/reciving SETTINGS frames.
 		let settings = Settings::connect(&conn).await?;
 
@@ -173,7 +96,7 @@ impl Request {
 	}
 
 	/// Returns the underlying QUIC connection.
-	pub fn conn(&self) -> &crate::quic::driver::Connection {
+	pub fn conn(&self) -> &crate::quic::driver::connection::Connection {
 		&self.conn
 	}
 

@@ -13,6 +13,7 @@
 {
   lib,
   stdenv,
+  buildPackages,
   stdenvNoCC,
   fetchurl,
   fetchFromGitHub,
@@ -91,6 +92,9 @@ let
         '') sources
       )}
       (cd configs && node ./mkconfig.js ${variant} '${builtins.toJSON fragments}')
+      # As a cross-compile, ffmpeg's configure defaults its host compiler to a
+      # literal `gcc`, which the darwin stdenv doesn't provide.
+      echo "--host-cc=${buildPackages.stdenv.cc}/bin/cc" >> configs/configs/${variant}/ffmpeg-config.txt
     '';
 
     # emcc compiles its system libraries into a cache on first use, and the

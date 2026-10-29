@@ -41,9 +41,12 @@ Every `--report` interval, `moq-bench` logs throughput (`send_mbps`/`recv_mbps`
 and `send_fps`/`recv_fps`) plus delivery accounting for the subscribe side:
 
 - `recv_groups`: cumulative groups read end to end across all subscriptions.
-- `lost_groups`: cumulative groups that were skipped or that the relay gave up
-  on part-way. It never decreases: a group that lands after being counted
-  lost stays lost.
+- `history_groups`: the part of `recv_groups` older than its subscription's
+  first group, such as cached history a relay fills in after the subscribe.
+  These are never counted as lost.
+- `lost_groups`: cumulative groups that were skipped at or after a
+  subscription's first group, or that the relay gave up on part-way. It never
+  decreases: a group that lands after being counted lost stays lost.
 - `loss`: `lost_groups` as a percentage.
 - `latency_p50_ms` / `latency_p90_ms` / `latency_p99_ms` / `latency_max_ms`:
   cumulative one-way delivery latency from each group's keyframe timestamp.
@@ -60,7 +63,10 @@ subscription's sequence span. A span wider than the count received means groups
 in between were skipped, so loss reflects dropped groups rather than QUIC packet
 loss (which the transport already repairs). The newest group is the live frontier
 and is excluded from the count: groups just behind it may still be in flight, so a
-gap is only blamed once a higher group confirms it was truly skipped. A group the
+gap is only blamed once a higher group confirms it was truly skipped. The span
+starts at the first group a subscription receives: an older group that arrives
+later is history, counted in `history_groups` rather than widening the span, so
+a join that over-fetches history never reads as loss. A group the
 relay fails part-way (it gives up on a subscriber that fell behind) ends that
 group alone and lands in the same accounting; the subscription stays for the next
 one, so the offered load holds at the configured count. Subscribers use
@@ -187,7 +193,8 @@ rates, the same convention as `moq-stats` frames. Resource `active` and
 `groups_lost` is the logged `lost_groups`, so its increase over a window is the
 groups lost inside it. `groups_expected - groups_present` is the gaps still
 outstanding, which a late arrival closes; it is not monotonic, so do not diff
-it to count loss.
+it to count loss. `groups_history` is the logged `history_groups`: late history
+included in `groups_recv` but outside `groups_expected`.
 
 Latency is measured from wall-clock milliseconds embedded by the publisher.
 Run each publisher and its subscribers on the same host so a latency sample closes

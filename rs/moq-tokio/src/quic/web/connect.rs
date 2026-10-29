@@ -14,7 +14,7 @@ pub enum ConnectError {
 	ProtoError(#[from] web_transport_proto::ConnectError),
 
 	#[error("connection error")]
-	ConnectionError(#[from] crate::quic::driver::ConnectionError),
+	ConnectionError(#[from] crate::quic::driver::connection::Error),
 
 	#[error("read error")]
 	ReadError(#[from] crate::quic::driver::ReadError),
@@ -40,7 +40,7 @@ pub struct Connecting {
 }
 
 impl Connecting {
-	pub async fn accept(conn: &crate::quic::driver::Connection) -> Result<Self, ConnectError> {
+	pub async fn accept(conn: &crate::quic::driver::connection::Connection) -> Result<Self, ConnectError> {
 		// Accept the stream that will be used to send the HTTP CONNECT request.
 		// If they try to send any other type of HTTP request, we will error out.
 		let (send, mut recv) = conn.accept_bi().await?;
@@ -107,7 +107,7 @@ impl Connected {
 	/// You may add any number of subprotocols allowing the server to select from.
 	/// If the list is empty the field will be omitted in the request header.
 	pub async fn open(
-		conn: &crate::quic::driver::Connection,
+		conn: &crate::quic::driver::connection::Connection,
 		request: impl Into<ConnectRequest>,
 	) -> Result<Self, ConnectError> {
 		let request = request.into();

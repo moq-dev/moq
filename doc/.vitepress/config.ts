@@ -119,6 +119,7 @@ export default defineConfig({
 						{ text: "moq-lite", link: "/concept/moq-lite" },
 						{ text: "hang", link: "/concept/hang" },
 						{ text: "Audio jitter", link: "/concept/audio-jitter" },
+						{ text: "Compressed tracks", link: "/concept/compression" },
 						{ text: "Stats", link: "/concept/stats" },
 						{ text: "Standards", link: "/concept/standard" },
 						{
@@ -206,7 +207,6 @@ export default defineConfig({
 								{ text: "moq-auth", link: "/lib/rs/moq-auth" },
 								{ text: "moq-room", link: "/lib/rs/moq-room" },
 								{ text: "moq-json", link: "/lib/rs/moq-json" },
-								{ text: "moq-flate", link: "/lib/rs/moq-flate" },
 								{ text: "moq-clock", link: "/lib/rs/moq-clock" },
 							],
 						},
@@ -224,7 +224,6 @@ export default defineConfig({
 								{ text: "@moq/signals", link: "/lib/js/signals" },
 								{ text: "@moq/clock", link: "/lib/js/clock" },
 								{ text: "@moq/json", link: "/lib/js/json" },
-								{ text: "@moq/flate", link: "/lib/js/flate" },
 								{ text: "API reference", link: "/lib/js/api/" },
 							],
 						},

@@ -63,7 +63,10 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   counts as the echo.
   The hop list leaves lite-07, and with it the
   `Hop Base`/`Hop Keep` compression; `cluster.max_hops` then stops applying
-  to lite-07.
+  to lite-07. Most of the 62% saving measured in
+  [moq-dev/moq#4196](https://github.com/moq-dev/moq/pull/4196) came from hop
+  chains, so rerun its announce bench on path-less ANNOUNCE and drop
+  `Path Base`/`Path Keep` too unless it still pays for its rules.
 
   ```text
   ROUTE_START  node=0x7a3f seqno=41 metric=12   -> route 0
@@ -665,6 +668,16 @@ instead was tried and rejected
 mints at its own time, so mint order outranks cost, preference, and the
 local-broadcast tie and relays disagree on a pool path's winner, while
 ranking a minted epoch last keeps the renewal it was meant to delete.
+
+Decided 2026-10-27 (maintainer), from
+[grant subject](https://github.com/moq-dev/moq/pull/6992): decide what key
+identities are filed under for sessions allowed to publish part of the tree
+with no subject (public rules, mTLS certificates, or a third-party auth
+server), and whether the relay refuses such a grant when the client
+presented a token. Also from
+[moq-dev/moq#6947](https://github.com/moq-dev/moq/pull/6947): in `js/net`'s
+`origin.ts` a detached request stays on its own route instead of following
+the cheapest one; fix it with the route-selection rework here.
 
 ## Required
 

@@ -26,10 +26,10 @@
 //!   VideoToolbox / Media Foundation / NVENC / VAAPI / V4L2) or H.265
 //!   (VideoToolbox / Media Foundation / NVENC). Entry points:
 //!   - `encode::publish_capture` captures a webcam and publishes it (turnkey).
-//!     It encodes strictly on demand: the track and catalog are advertised up
-//!     front (the camera opens once at startup so they can be exact), and the
-//!     encoder runs only while a subscriber is watching. Requires the `capture`
-//!     feature.
+//!     The track and catalog are advertised up front (the camera opens at
+//!     startup so they can be exact), and the camera stays open and encodes
+//!     whether or not anyone is watching, unless `encode::Capture::on_demand`
+//!     limits it to while a subscriber is. Requires the `capture` feature.
 //!   - [`encode::Encoder`] encodes [`Frame`]s you supply (from capture, a
 //!     decoder, or your own pixels via [`Surface::rgba`]) and
 //!     [`encode::Producer`] publishes the results.

@@ -1,5 +1,4 @@
 import * as z from "zod/mini";
-import { CompressionSchema } from "./compression";
 import { u53Schema } from "./integers";
 import { ModeSchema } from "./mode";
 import { EpochSchema, RelativeBroadcastSchema } from "./path";
@@ -12,7 +11,7 @@ import { EpochSchema, RelativeBroadcastSchema } from "./path";
  * consumer can read them.
  *
  * A *loose* object: fields this build doesn't recognize pass through untouched, so an entry using
- * a future mode or compression round-trips rather than losing the fields that describe it.
+ * a future mode round-trips rather than losing the fields that describe it.
  */
 export const BinaryConfigSchema = z.looseObject({
 	// Optional reference to another broadcast that publishes this track, expressed
@@ -30,9 +29,6 @@ export const BinaryConfigSchema = z.looseObject({
 
 	// Whether the track is a latest-value blob or an append log. Always stated.
 	mode: ModeSchema,
-
-	// The compression applied to each frame, or absent when they are written through untouched.
-	compression: z.optional(CompressionSchema),
 
 	// An optional media type for each payload (e.g. "image/jpeg"). Purely descriptive:
 	// a consumer that doesn't recognize it can still read the track.

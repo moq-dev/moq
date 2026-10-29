@@ -4,28 +4,25 @@
  * records that preserves everything; every {@link Producer.append} writes one JSON object as one
  * frame, nothing is ever superseded, and a {@link Consumer} yields every record in order.
  *
- * The whole log rides a **single group** that is never rolled: with {@link Config.compression}
- * `"deflate"`, that one group is one DEFLATE window, so every record compresses against the earlier ones.
+ * The whole log rides a **single group** that is never rolled: on a track created with `compress`,
+ * that one group is one DEFLATE window, so every record compresses against the earlier ones.
  * There is deliberately no group rolling (and so no catch-up machinery); a caller that wants to
  * bound the record rate throttles at the source. Interoperable on the wire with the Rust
  * `moq_json::stream`.
  *
  * That one group bounds the log at `@moq/net`'s group budget: 32 MiB of payload and 8192 frames. An
- * append that might not fit throws `GroupTooLarge` before it is encoded, and the log stays intact and
- * writable. With compression the check counts the record's raw size plus DEFLATE's worst-case
- * overhead, since the compressed size is only known once the window has moved. The budget covers the
- * whole log, so once it is spent every append throws and a publisher with more to say opens a new
+ * append that does not fit throws `GroupTooLarge` before it is written, and the log stays intact and
+ * writable. Each record is charged its JSON size, compressed or not. The budget covers the whole log, so once it is spent every append throws and a publisher with more to say opens a new
  * track.
  *
  * {@link Producer} and {@link Consumer} own a track: pass `{ track, ... }`. {@link Encoder} and
  * {@link Decoder} are the same logic without it, for when something else is already in charge of the
- * track; they carry the shared DEFLATE window and nothing else, since a log has no group boundaries
- * to report.
+ * track; they carry the group's budget and nothing else, since a log has no group boundaries to
+ * report.
  *
  * @module
  */
 
-export { Desync } from "../error.ts";
 export { Consumer, Rolled } from "./consumer.ts";
 export { Decoder } from "./decoder.ts";
 export { type Config, Encoder, type Pending } from "./encoder.ts";

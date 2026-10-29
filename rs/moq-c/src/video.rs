@@ -390,6 +390,9 @@ pub(crate) struct VideoEncoder {
 	/// The encoded resolution, from the publish config. Frames carry only pixels,
 	/// so this is what says how to read them.
 	size: moq_video::Size,
+	/// The allocator [`follow`](VideoPublish::follow) reserved against, kept to reserve again
+	/// when a decoder identity change moves the rendition to a new track.
+	allocator: Option<moq_net::bandwidth::Allocator>,
 	reservation: Option<Arc<moq_net::bandwidth::Reservation>>,
 	follow: Option<oneshot::Sender<()>>,
 	followed: Option<crate::ffi::Background>,
@@ -499,8 +502,41 @@ fn finalize(
 	}
 }
 
+/// Reserve the encoder's ceiling against its current track and follow the grant, replacing any
+/// earlier claim and its follower: a decoder identity change moves the rendition to a new track,
+/// and the claim has to watch that track's demand.
+fn follow_grant(shared: &Shared<VideoEncoder>) -> Result<(), Error> {
+	let (reservation, ceiling, lower) = {
+		let mut guard = shared.lock();
+		let encoder = guard.as_mut().ok_or(Error::MediaNotFound)?;
+		let Some(allocator) = &encoder.allocator else {
+			return Ok(());
+		};
+		let ceiling = *encoder.ceiling.read();
+		let reservation = Arc::new(allocator.reserve(&encoder.producer.demand(), ceiling));
+		encoder.reservation = Some(reservation.clone());
+		// Dropping the sender stops the previous follower.
+		encoder.follow = None;
+		(reservation, ceiling, encoder.lower.clone())
+	};
+	let (close, closed) = oneshot::channel();
+	shared.lock().as_mut().ok_or(Error::MediaNotFound)?.follow = Some(close);
+	let follower = shared.clone();
+	let background = crate::ffi::Background::new(async move {
+		tokio::select! {
+			biased;
+			_ = closed => {}
+			_ = follow_reservation(follower, lower, reservation.consume(), ceiling) => {}
+		}
+		Ok(())
+	});
+	shared.lock().as_mut().ok_or(Error::MediaNotFound)?.followed = Some(background);
+	Ok(())
+}
+
 impl VideoEncoder {
-	fn publish_frame(&mut self, timestamp_us: u64, data: &[u8]) -> Result<(), Error> {
+	/// Encode and publish one picture, returning whether it moved the rendition to a new track.
+	fn publish_frame(&mut self, timestamp_us: u64, data: &[u8]) -> Result<bool, Error> {
 		if let Some(followed) = &self.followed {
 			followed.check()?;
 		}
@@ -516,14 +552,17 @@ impl VideoEncoder {
 
 		// Disabled: nothing is encoded until the grant resumes the rendition.
 		let Some(encoder) = self.encoder.as_mut() else {
-			return Ok(());
+			return Ok(false);
 		};
 		let frame = moq_video::Frame::new(surface, moq_net::Timestamp::from_micros(timestamp_us)?);
 		// A backend that pipelines hands back an earlier frame's output, so this is
 		// zero or more access units rather than one per call.
 		let encoded = block_on(encoder.encode(frame))?;
+		let before = self.producer.demand();
 		self.producer.publish(&encoded)?;
-		Ok(())
+		// A frame whose decoder identity changed, such as a resume at a ceiling past the declared
+		// level, moved the rendition to a newly named track.
+		Ok(self.producer.demand().name() != before.name())
 	}
 
 	fn publish_cut(&mut self) -> Result<(), Error> {
@@ -688,6 +727,7 @@ impl Video {
 			lower,
 			format,
 			size: config.size(),
+			allocator: None,
 			reservation: None,
 			follow: None,
 			followed: None,
@@ -702,27 +742,8 @@ impl Video {
 	/// Reserve the encoder's ceiling against `allocator` and follow the grant.
 	pub(crate) fn follow(&self, id: Id, allocator: &moq_net::bandwidth::Allocator) -> Result<(), Error> {
 		let shared = self.producer(id)?;
-		let (reservation, ceiling, lower) = {
-			let mut guard = shared.lock();
-			let encoder = guard.as_mut().ok_or(Error::MediaNotFound)?;
-			let ceiling = *encoder.ceiling.read();
-			let reservation = Arc::new(allocator.reserve(&encoder.producer.demand(), ceiling));
-			encoder.reservation = Some(reservation.clone());
-			(reservation, ceiling, encoder.lower.clone())
-		};
-		let (close, closed) = oneshot::channel();
-		shared.lock().as_mut().ok_or(Error::MediaNotFound)?.follow = Some(close);
-		let follower = shared.clone();
-		let background = crate::ffi::Background::new(async move {
-			tokio::select! {
-				biased;
-				_ = closed => {}
-				_ = follow_reservation(follower, lower, reservation.consume(), ceiling) => {}
-			}
-			Ok(())
-		});
-		shared.lock().as_mut().ok_or(Error::MediaNotFound)?.followed = Some(background);
-		Ok(())
+		shared.lock().as_mut().ok_or(Error::MediaNotFound)?.allocator = Some(allocator.clone());
+		follow_grant(&shared)
 	}
 
 	pub(crate) fn reservation(&self, id: Id) -> Result<Option<Arc<moq_net::bandwidth::Reservation>>, Error> {
@@ -1038,11 +1059,16 @@ pub unsafe extern "C" fn moq_encode_video_frame(producer: u32, frame: *const moq
 		let data = unsafe { ffi::parse_slice(frame.data, frame.data_size)? };
 
 		let producer = State::lock().video.producer(producer)?;
-		producer
+		let moved = producer
 			.lock()
 			.as_mut()
 			.ok_or(Error::MediaNotFound)?
-			.publish_frame(frame.timestamp_us, data)
+			.publish_frame(frame.timestamp_us, data)?;
+		// The follower takes the encoder's lock, so it moves with the track after the encode.
+		match moved {
+			true => crate::video::follow_grant(&producer),
+			false => Ok(()),
+		}
 	})
 }
 
@@ -1289,6 +1315,65 @@ mod tests {
 		(producer, track)
 	}
 
+	/// A resume that reopens the encoder onto a larger picture publishes a new track (a higher
+	/// level is a new codec string), and the bandwidth claim moves there with it rather than
+	/// watching the track that ended.
+	#[tokio::test]
+	async fn a_resume_onto_a_new_level_reserves_on_the_new_track() {
+		let (producer, _track) = track_under_test().await;
+		let first = producer.demand().name().to_string();
+		let probed = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
+		let mut config = moq_video::encode::Config::new(640, 480, moq_video::FrameRate::new(30, 1).unwrap());
+		config.kind = moq_video::encode::Kind::Software;
+		let mut opened = probed.clone();
+		opened.kind = moq_video::encode::Kind::Software;
+		let estimate = moq_net::bandwidth::Producer::new();
+		let shared = Shared::new(VideoEncoder {
+			encoder: Some(moq_video::encode::Sink::open(&opened).await.unwrap()),
+			producer,
+			config: config.clone(),
+			priority: hang::catalog::PRIORITY.video,
+			lower: None,
+			format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA,
+			size: probed.size(),
+			allocator: Some(moq_net::bandwidth::Allocator::new(estimate.consume())),
+			reservation: None,
+			follow: None,
+			followed: None,
+			ceiling: kio::Producer::new(moq_net::bandwidth::Rate::from_mbps(1)),
+			children: Default::default(),
+		});
+		let moved = tokio::task::spawn_blocking(move || {
+			follow_grant(&shared).unwrap();
+			let before = shared.lock().as_ref().unwrap().reservation.clone().unwrap();
+			let small = vec![0x80; 320 * 240 * 4];
+			assert!(!shared.lock().as_mut().unwrap().publish_frame(0, &small).unwrap());
+
+			// Disabled, then resumed onto the larger picture.
+			{
+				let mut guard = shared.lock();
+				let video = guard.as_mut().unwrap();
+				video.apply(moq_mux::rate::Target::Disabled).unwrap();
+				video.size = config.size();
+				video
+					.apply(moq_mux::rate::Target::Enabled(moq_net::bandwidth::Rate::from_mbps(1)))
+					.unwrap();
+			}
+			let large = vec![0x80; 640 * 480 * 4];
+			let moved = shared.lock().as_mut().unwrap().publish_frame(66_666, &large).unwrap();
+			assert!(moved, "the larger picture is a new codec string");
+			follow_grant(&shared).unwrap();
+			let guard = shared.lock();
+			let video = guard.as_ref().unwrap();
+			let after = video.reservation.clone().unwrap();
+			assert!(!Arc::ptr_eq(&before, &after), "the claim still watches the ended track");
+			video.producer.demand().name().to_string()
+		})
+		.await
+		.unwrap();
+		assert_eq!(moved, format!("{first}/1"));
+	}
+
 	/// A clean finish reaches the subscriber as the end of the track, which is what
 	/// makes the abort case below meaningful rather than vacuous.
 	#[tokio::test]
@@ -1346,6 +1431,7 @@ mod tests {
 			lower: None,
 			format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420,
 			size: config.size(),
+			allocator: None,
 			reservation: None,
 			follow: None,
 			followed: Some(followed),

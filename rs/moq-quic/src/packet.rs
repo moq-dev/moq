@@ -33,11 +33,10 @@ impl PartialDecode {
 	pub fn new(
 		bytes: BytesMut,
 		cid_parser: &(impl ConnectionIdParser + ?Sized),
-		supported_versions: &[u32],
 		grease_quic_bit: bool,
 	) -> Result<(Self, Option<BytesMut>), PacketDecodeError> {
 		let mut buf = io::Cursor::new(bytes);
-		let plain_header = ProtectedHeader::decode(&mut buf, cid_parser, supported_versions, grease_quic_bit)?;
+		let plain_header = ProtectedHeader::decode(&mut buf, cid_parser, grease_quic_bit)?;
 		let dgram_len = buf.get_ref().len();
 		let packet_len = plain_header
 			.payload_len()
@@ -552,7 +551,6 @@ impl ProtectedHeader {
 	pub fn decode(
 		buf: &mut io::Cursor<impl AsRef<[u8]>>,
 		cid_parser: &(impl ConnectionIdParser + ?Sized),
-		supported_versions: &[u32],
 		grease_quic_bit: bool,
 	) -> Result<Self, PacketDecodeError> {
 		let first = buf.get::<u8>()?;
@@ -582,7 +580,7 @@ impl ProtectedHeader {
 				});
 			}
 
-			if !supported_versions.contains(&version) {
+			if crate::Version::from_wire(version).is_none() {
 				return Err(PacketDecodeError::UnsupportedVersion {
 					src_cid,
 					dst_cid,
@@ -931,7 +929,7 @@ mod tests {
 			src_cid: ConnectionId::new(&[]),
 			dst_cid: dcid,
 			token: Bytes::new(),
-			version: crate::DEFAULT_SUPPORTED_VERSIONS[0],
+			version: crate::Version::V1.wire(),
 		});
 		let encode = header.encode(&mut buf);
 		let header_len = buf.len();
@@ -951,15 +949,9 @@ mod tests {
 		);
 
 		let server = initial_keys(Version::V1, dcid, Side::Server, &suite);
-		let supported_versions = crate::DEFAULT_SUPPORTED_VERSIONS.to_vec();
-		let decode = PartialDecode::new(
-			buf.as_slice().into(),
-			&FixedLengthConnectionIdParser::new(0),
-			&supported_versions,
-			false,
-		)
-		.unwrap()
-		.0;
+		let decode = PartialDecode::new(buf.as_slice().into(), &FixedLengthConnectionIdParser::new(0), false)
+			.unwrap()
+			.0;
 		let mut packet = decode.finish(Some(&*server.header.remote)).unwrap();
 		assert_eq!(
 			packet.header_data[..],

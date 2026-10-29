@@ -40,7 +40,7 @@ func (o *OriginProducer) Consume() *OriginConsumer {
 // A route claims prefix and every path beneath it ("" claims every path). A
 // service that only serves some of them rejects the rest as they are requested.
 // Create, Requests if tracks are served on demand, populate, then
-// [BroadcastProducer.Announce].
+// [Publication.Announce].
 func (o *OriginProducer) Requests(prefix string) (*OriginRequests, error) {
 	inner, err := o.inner.Requests(prefix)
 	if err != nil {
@@ -49,19 +49,52 @@ func (o *OriginProducer) Requests(prefix string) (*OriginRequests, error) {
 	return &OriginRequests{inner: inner}, nil
 }
 
-// CreateBroadcast creates a broadcast at the given path, returning the producer
-// that feeds it.
+// CreateBroadcast creates a broadcast at the given path, returning its publication.
 //
 // The broadcast is invisible and unroutable, for this origin's consumers and
-// peers alike, until [BroadcastProducer.Announce]. Announce it after
-// populating tracks. [BroadcastProducer.Close] ends it for good; dropping the
-// last handle does the same.
-func (o *OriginProducer) CreateBroadcast(path string) (*BroadcastProducer, error) {
+// peers alike, until [Publication.Announce]. Announce it after populating
+// tracks. [BroadcastProducer.Close] ends it for good; dropping the last handle,
+// the publication included, does the same.
+func (o *OriginProducer) CreateBroadcast(path string) (*Publication, error) {
 	inner, err := o.inner.CreateBroadcast(path)
 	if err != nil {
 		return nil, err
 	}
-	return &BroadcastProducer{inner: inner}, nil
+	return newPublication(inner), nil
+}
+
+// Publication is a broadcast published on an origin: the broadcast to fill and
+// its announcement.
+//
+// The collector reclaiming it does not retract the route; [BroadcastProducer.Close] does.
+type Publication struct {
+	inner     *ffi.MoqPublication
+	broadcast *BroadcastProducer
+}
+
+func newPublication(inner *ffi.MoqPublication) *Publication {
+	return &Publication{inner: inner, broadcast: &BroadcastProducer{inner: inner.Broadcast()}}
+}
+
+// Broadcast returns the broadcast to fill, the same one on every call.
+func (p *Publication) Broadcast() *BroadcastProducer {
+	return p.broadcast
+}
+
+// Announce advertises the broadcast's exact path as a route.
+//
+// Announcing again re-prices the route in place. Until announced, the
+// broadcast is invisible and unroutable for local consumers and peers alike.
+// Errors with ErrClosed once the broadcast is closed.
+func (p *Publication) Announce(route AnnounceRoute) error {
+	return p.inner.Announce(route)
+}
+
+// Unannounce retracts the broadcast's exact-path advertisement, if any, from
+// local consumers and peers alike. Tracks already in flight carry on, and
+// Announce brings it back. Errors with ErrClosed once the broadcast is closed.
+func (p *Publication) Unannounce() error {
+	return p.inner.Unannounce()
 }
 
 // OriginRequests streams requests for paths with no existing exact-path broadcast.
@@ -124,13 +157,14 @@ func (p *BroadcastPrepared) Broadcast() *BroadcastProducer {
 	return &BroadcastProducer{inner: p.inner.Broadcast()}
 }
 
-// Publish announces the answer and resolves every waiting requester.
-func (p *BroadcastPrepared) Publish() (*BroadcastProducer, error) {
+// Publish announces the answer and resolves every waiting requester, returning
+// its publication.
+func (p *BroadcastPrepared) Publish() (*Publication, error) {
 	inner, err := p.inner.Publish()
 	if err != nil {
 		return nil, err
 	}
-	return &BroadcastProducer{inner: inner}, nil
+	return newPublication(inner), nil
 }
 
 // Close abandons the answer if it was not published, refusing every waiting requester.

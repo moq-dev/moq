@@ -71,7 +71,7 @@ async fn scenario(version: Version, ours_is_client: bool) {
 		"{version:?}, ours is the {}",
 		if ours_is_client { "client" } else { "server" }
 	);
-	let (mut ours, theirs) = ours_and_theirs(version, ours_is_client).await;
+	let (ours, theirs) = ours_and_theirs(version, ours_is_client).await;
 	assert_eq!(ours.protocol(), Some(PROTOCOL), "{label}");
 	assert_eq!(theirs.protocol(), Some(PROTOCOL), "{label}");
 

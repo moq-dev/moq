@@ -72,7 +72,8 @@ use moq_mux::follow;
 
 use crate::export::{Broadcaster, Config};
 
-/// How long to wait for the relay to say whether a requested broadcast is announced.
+/// How long to wait for the route serving a requested broadcast to answer: a covering
+/// dynamic route may never do so.
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// HLS export HTTP server. Cheap to clone (shared inner).
@@ -205,28 +206,15 @@ impl Server {
 			return Some(followed.clone());
 		}
 
-		// Confirm a route covers the broadcast (and it is in scope) before resolving it. The
-		// source resolves a rendition's sibling `broadcast` reference through the same origin.
-		// Once the origin has synced, a path with no route is not announced, so answer now
-		// rather than wait out a publisher that has gone.
-		let mut routes = self.inner.origin.follow(name).ok()?;
-		let routed = kio::wait(|waiter| match routes.poll_next(waiter) {
-			Poll::Ready(Some(moq_net::announce::Event::End(_)) | None) => Poll::Ready(false),
-			Poll::Ready(Some(_)) => Poll::Ready(true),
-			Poll::Pending => routes.poll_synced(waiter).map(|()| false),
-		});
-		if !moq_clock::timeout(RESOLVE_TIMEOUT, routed).await.unwrap_or(false) {
-			return None;
-		}
-
-		let mut instances = follow::Instances::new(&self.inner.origin, name, None)
+		let instances = follow::Instances::new(&self.inner.origin, name, None)
 			.map_err(|err| tracing::warn!(%err, %name, "failed to follow broadcast"))
 			.ok()?;
-		// A covering dynamic route may never answer, so the resolution is bounded too.
-		let broadcast = match moq_clock::timeout(RESOLVE_TIMEOUT, instances.next()).await {
-			Ok(Ok(follow::Event::Start(broadcast))) => broadcast,
-			// Nothing was handed out, so there is nothing to end.
-			Ok(Ok(follow::Event::End)) => return None,
+		// A request answers once the origin has synced with the relay, so a path with no route
+		// fails now rather than waiting out a publisher that has gone. The source resolves a
+		// rendition's sibling `broadcast` reference through the same origin.
+		let broadcast = match moq_clock::timeout(RESOLVE_TIMEOUT, self.inner.origin.request(name, None)).await {
+			Ok(Ok(broadcast)) => broadcast,
+			Ok(Err(moq_net::Error::Unroutable)) => return None,
 			Ok(Err(err)) => {
 				tracing::warn!(%err, %name, "failed to resolve broadcast");
 				return None;
@@ -236,7 +224,7 @@ impl Server {
 				return None;
 			}
 		};
-		let followed = Arc::new(Followed::new(self.inner.serve(broadcast)));
+		let followed = Arc::new(Followed::new(self.inner.serve(broadcast.clone())));
 
 		{
 			let mut broadcasts = self.inner.broadcasts.lock().unwrap();
@@ -256,6 +244,7 @@ impl Server {
 			name.to_string(),
 			Arc::downgrade(&followed),
 			instances,
+			broadcast,
 		));
 		*followed.task.lock().unwrap() = Some(task);
 		Some(followed)
@@ -272,22 +261,42 @@ impl Inner {
 
 /// Follow `name`'s instances into `followed` until nothing serves the path, then forget it, so the
 /// next request follows the path afresh. Holds both weakly, so it never keeps the server's state
-/// alive; dropping `followed` aborts it.
-async fn run_follow(inner: Weak<Inner>, name: String, followed: Weak<Followed>, mut instances: follow::Instances) {
+/// alive; dropping `followed` aborts it. `served` is the instance `followed` starts on, which the
+/// follower hands out first unless another took over since, or folds away if it closed first.
+async fn run_follow(
+	inner: Weak<Inner>,
+	name: String,
+	followed: Weak<Followed>,
+	mut instances: follow::Instances,
+	served: moq_net::broadcast::Consumer,
+) {
+	let mut served = Some(served);
 	let (inner, followed) = loop {
 		let next = kio::wait(|waiter| {
 			let Some(followed) = followed.upgrade() else {
 				return Poll::Ready(None);
 			};
 			followed.forget_closed(waiter);
-			instances.poll_next(waiter).map(Some)
+			if let Poll::Ready(next) = instances.poll_next(waiter) {
+				return Poll::Ready(Some(next));
+			}
+			// The follower folds away an instance that started and ended before its first poll,
+			// so the served instance closing before it is handed out means nothing serves the path.
+			match &served {
+				Some(served) => served.poll_closed(waiter).map(|()| Some(Ok(follow::Event::End))),
+				None => Poll::Pending,
+			}
 		})
 		.await;
 		let (Some(inner), Some(followed)) = (inner.upgrade(), followed.upgrade()) else {
 			return;
 		};
 		match next {
-			Some(Ok(follow::Event::Start(broadcast))) => followed.start(inner.serve(broadcast)),
+			Some(Ok(follow::Event::Start(broadcast))) => {
+				if !served.take().is_some_and(|served| served.is_clone(&broadcast)) {
+					followed.start(inner.serve(broadcast));
+				}
+			}
 			Some(Ok(follow::Event::End)) => break (inner, followed),
 			Some(Err(err)) => {
 				tracing::warn!(%err, %name, "stopped following broadcast");
@@ -524,6 +533,24 @@ mod tests {
 
 		drop(new);
 		eventually(async || server.inner.broadcasts.lock().unwrap().is_empty()).await;
+	}
+
+	/// An instance that goes before the follower first runs is folded away by it, so the served
+	/// instance closing is what tells the server that nothing serves the path.
+	#[tokio::test(start_paused = true)]
+	async fn an_instance_gone_before_the_follower_runs_is_forgotten() {
+		let origin = produce_origin();
+		let server = Server::new(origin.consume(), Config::default());
+		let publication = origin
+			.publish("live", moq_net::origin::Route::default())
+			.expect("publish allowed");
+		settle().await;
+
+		// Nothing yields between spawning the follower and returning, so it has not run yet.
+		let broadcaster = server.broadcaster("live").await.expect("broadcast announced");
+		drop(publication);
+		eventually(async || server.inner.broadcasts.lock().unwrap().is_empty()).await;
+		assert!(broadcaster.is_closed());
 	}
 
 	/// A request that finds the listed instance closed before the follower does resolves the path

@@ -18,6 +18,7 @@ import {
 	timeout,
 	Wall,
 	wall,
+	yieldNow,
 } from "./index.ts";
 
 const installs: Installed[] = [];
@@ -111,6 +112,21 @@ test("advance drains arbitrarily deep microtasks and newly due timers", async ()
 	await clock.advance(Nano(5));
 	expect(done).toBe(true);
 });
+
+for (const driver of ["advance", "fire"] as const) {
+	test(`${driver} waits out a chain of host-task yields before moving time`, async () => {
+		const clock = manual();
+		void sleep(Nano(10));
+		const seen: number[] = [];
+		void (async () => {
+			for (let i = 0; i < 3; i++) await yieldNow();
+			seen.push(now());
+		})();
+		if (driver === "advance") await clock.advance(Nano(10));
+		else expect<number>(await clock.fire()).toBe(10);
+		expect(seen).toEqual([0]);
+	});
+}
 
 test("a sleep stays on its creation clock and abort releases it", async () => {
 	const first = manual();

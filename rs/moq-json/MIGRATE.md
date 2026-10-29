@@ -4,12 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### A compressed group is held to the group budget
+### Compression moves to the track
 
-A compressed group may inflate to at most `moq_net::group::MAX_CACHE_BYTES` (32 MiB), the most a plain group carries, so a peer's small frames cannot make a reader hold more than an uncompressed track would.
-The encoders charge each frame its plaintext: a compressed snapshot or window header over 32 MiB fails with `moq_net::Error::FrameTooLarge` (snapshot) or the window's group cache error, where it used to pass up to 64 MiB, and deltas and ops roll a new group once a group's plaintext would pass the budget.
-A compressed stream's budget is 32 MiB of record plaintext.
-`snapshot::consumer::Config::max_size` still sets a tighter limit, but no longer stops inflation early; a frame inflates within the group budget and is then refused.
+`Compression`, every `Config::compression` field, the `with_compression` setters, `Error::Flate`, `Error::Desync`, and `stream::Decoder::reset` are gone, along with the moq-flate dependency.
+Frames are plain JSON; set `compress: true` on the `moq_net::track::Info` you create the track with, and moq-net compresses each group on the wire and hands every reader plain frames.
+Drop the `compression` field from your producer and consumer configs: a consumer reads a compressed track with no setting of its own.
+The stream and window consumer configs are now empty, kept for options to come.
+Every frame is charged its JSON size against `moq_net::group::MAX_CACHE_BYTES`, as a compressed one already was.
 
 ### Groups roll on joiner demand
 

@@ -56,15 +56,15 @@ func TestTracks(t *testing.T) {
 	broadcast, consumer := newBroadcast(t)
 
 	scale := uint64(1_000_000)
-	track, err := broadcast.PublishTrack("status", &moq.TrackInfo{Timescale: &scale})
+	track, err := broadcast.PublishTrack("status", &moq.TrackInfo{Timescale: &scale, Compress: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := moqjson.NewSnapshotProducer(broadcast, track, moqjson.SnapshotOptions{Compression: true})
+	snapshot, err := moqjson.NewSnapshotProducer(broadcast, track, moqjson.SnapshotOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshotConsumer, err := moqjson.NewSnapshotConsumer(subscribeTrack(ctx, t, consumer, "status"), moqjson.ConsumerOptions{Compression: true})
+	snapshotConsumer, err := moqjson.NewSnapshotConsumer(subscribeTrack(ctx, t, consumer, "status"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,11 +100,11 @@ func TestTracks(t *testing.T) {
 	value, err = snapshotConsumer.Latest(ctx)
 	expect(value, err, 4)
 
-	stream, err := moqjson.NewStreamProducer(broadcast, publishTrack(t, broadcast, "events"), moqjson.StreamOptions{Compression: true})
+	stream, err := moqjson.NewStreamProducer(broadcast, publishTrack(t, broadcast, "events"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	streamConsumer, err := moqjson.NewStreamConsumer(subscribeTrack(ctx, t, consumer, "events"), moqjson.ConsumerOptions{Compression: true})
+	streamConsumer, err := moqjson.NewStreamConsumer(subscribeTrack(ctx, t, consumer, "events"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,15 +135,15 @@ func TestWindow(t *testing.T) {
 	broadcast, consumer := newBroadcast(t)
 
 	scale := uint64(1_000_000)
-	track, err := broadcast.PublishTrack("log", &moq.TrackInfo{Timescale: &scale})
+	track, err := broadcast.PublishTrack("log", &moq.TrackInfo{Timescale: &scale, Compress: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	window, err := moqjson.NewWindowProducer(track, moqjson.WindowOptions{Compression: true})
+	window, err := moqjson.NewWindowProducer(track, moqjson.WindowOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	windowConsumer, err := moqjson.NewWindowConsumer(subscribeTrack(ctx, t, consumer, "log"), moqjson.ConsumerOptions{Compression: true})
+	windowConsumer, err := moqjson.NewWindowConsumer(subscribeTrack(ctx, t, consumer, "log"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +226,7 @@ func TestDemand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stream, err := moqjson.NewStreamProducer(broadcast, publishTrack(t, broadcast, "events"), moqjson.StreamOptions{})
+	stream, err := moqjson.NewStreamProducer(broadcast, publishTrack(t, broadcast, "events"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,11 +245,11 @@ func TestDemand(t *testing.T) {
 		t.Fatalf("Wanted = %d before any subscriber", *wanted)
 	}
 
-	snapshotConsumer, err := moqjson.NewSnapshotConsumer(subscribeTrack(ctx, t, consumer, "status"), moqjson.ConsumerOptions{})
+	snapshotConsumer, err := moqjson.NewSnapshotConsumer(subscribeTrack(ctx, t, consumer, "status"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	streamConsumer, err := moqjson.NewStreamConsumer(subscribeTrack(ctx, t, consumer, "events"), moqjson.ConsumerOptions{})
+	streamConsumer, err := moqjson.NewStreamConsumer(subscribeTrack(ctx, t, consumer, "events"))
 	if err != nil {
 		t.Fatal(err)
 	}

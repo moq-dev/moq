@@ -1532,12 +1532,12 @@ impl FrameRecv {
 
 	/// Receive every frame, round-robin a chunk at a time, then drop them.
 	pub fn run(mut self) {
-		let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+		let waiter = &kio::Waiter::noop();
 		let mut open = self.streams.len();
 		while open > 0 {
 			for slot in &mut self.streams {
 				let Some((reader, frame)) = slot else { continue };
-				if let std::task::Poll::Ready(res) = reader.poll_read_frame(&mut cx, frame) {
+				if let std::task::Poll::Ready(res) = reader.poll_read_frame(waiter, frame) {
 					res.unwrap();
 					let (_, frame) = slot.take().unwrap();
 					let mut group = frame.finish().unwrap();
@@ -1562,7 +1562,7 @@ impl crate::transport::poll::Chunks for Chunks {
 	// Zero-copy, like the QUIC stacks, so only the frame buffer's own copy is timed.
 	fn poll_read_chunk(
 		&mut self,
-		_cx: &mut std::task::Context<'_>,
+		_waiter: &kio::Waiter,
 		max: usize,
 	) -> std::task::Poll<Result<Option<bytes::Bytes>, NoError>> {
 		self.ready = !self.ready;

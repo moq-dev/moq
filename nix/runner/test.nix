@@ -296,7 +296,9 @@ pkgs.testers.runNixOSTest {
             # re-reads its inputs from disk until the job times out.
             assert elapsed < 60, "the guest thrashed instead of killing memory-hog"
             time.sleep(1)
-        print(guest.succeed("journalctl -u earlyoom | grep -F 'sending SIGTERM to process'"))
+        # earlyoom sends SIGKILL instead of SIGTERM when its poll first lands
+        # below the 5% kill threshold, which depends on how fast the hog fills.
+        print(guest.succeed("journalctl -u earlyoom | grep -E 'sending SIG(TERM|KILL) to process .*${./hog.py}'"))
         guest.succeed("rm /var/tmp/hog-inputs")
         router.wait_until_succeeds("${pkgs.openssh}/bin/ssh-keyscan -t ed25519 -T 5 10.231.0.2 | grep -F ssh-ed25519", timeout=timedelta(minutes=1))
 

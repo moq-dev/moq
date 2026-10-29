@@ -59,8 +59,7 @@ fn publish(origin: &origin::Producer) -> (moq_net::origin::Publication, track::P
 
 async fn request(origin: &origin::Producer) -> broadcast::Consumer {
 	let consumer = origin.consume();
-	consumer.routed("live").await.unwrap();
-	consumer.request_broadcast("live", None).await.unwrap()
+	consumer.follow("live", None).unwrap().available().await.unwrap()
 }
 
 /// Subscribe without a floor and expect the snapshot as group 0.

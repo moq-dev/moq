@@ -165,6 +165,10 @@ pub(crate) struct StreamsState {
 	pub(super) send_window: u64,
 	/// Configured upper bound for how much unacked data the peer can send us per stream
 	pub(super) stream_receive_window: u64,
+	/// The stream receive window our transport parameters announced, which is the credit every
+	/// new stream starts with whatever [`stream_receive_window`](Self::stream_receive_window)
+	/// became since
+	pub(super) initial_stream_receive_window: u64,
 
 	// Pertinent state from the TransportParameters supplied by the peer
 	initial_max_stream_data_uni: VarInt,
@@ -230,6 +234,7 @@ impl StreamsState {
 			buffered_data: 0,
 			send_window,
 			stream_receive_window: stream_receive_window.into(),
+			initial_stream_receive_window: stream_receive_window.into(),
 			initial_max_stream_data_uni: 0u32.into(),
 			initial_max_stream_data_bidi_local: 0u32.into(),
 			initial_max_stream_data_bidi_remote: 0u32.into(),
@@ -287,7 +292,7 @@ impl StreamsState {
 		let Some(rs) = self
 			.recv
 			.get_mut(&id)
-			.map(|opt| get_or_insert_recv(opt, self.stream_receive_window))
+			.map(|opt| get_or_insert_recv(opt, self.initial_stream_receive_window))
 		else {
 			trace!("dropping frame for closed stream");
 			return Ok(ShouldTransmit(false));
@@ -372,7 +377,7 @@ impl StreamsState {
 		let Some(rs) = self
 			.recv
 			.get_mut(&id)
-			.map(|opt| get_or_insert_recv(opt, self.stream_receive_window))
+			.map(|opt| get_or_insert_recv(opt, self.initial_stream_receive_window))
 		else {
 			trace!("received RESET_STREAM on closed stream");
 			return Ok(ShouldTransmit(false));
@@ -1051,6 +1056,12 @@ impl StreamsState {
 		self.send_window = send_window;
 	}
 
+	/// Set the receive window of each stream, which applies as each stream's credit is next
+	/// extended: credit already granted cannot be taken back.
+	pub(crate) fn set_stream_receive_window(&mut self, window: u64) {
+		self.stream_receive_window = window;
+	}
+
 	/// Set the receive_window and returns whether the receive_window has been
 	/// expanded or shrunk: true if expanded, false if shrunk.
 	pub(crate) fn set_receive_window(&mut self, receive_window: VarInt) -> bool {
@@ -1177,7 +1188,7 @@ impl StreamsState {
 	pub(super) fn stream_recv_freed(&mut self, id: StreamId, mut recv: StreamRecv) -> ShouldTransmit {
 		let transmit = self.discard_lease(id, &mut recv.inner_mut().lease);
 		self.unlooked.remove(&id);
-		self.free_recv.push(recv.free(self.stream_receive_window));
+		self.free_recv.push(recv.free(self.initial_stream_receive_window));
 		self.stream_freed(id, StreamHalf::Recv);
 		transmit
 	}

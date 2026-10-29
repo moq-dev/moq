@@ -394,6 +394,22 @@ impl VideoConfig {
 			hls: None,
 		}
 	}
+
+	/// Whether `other` keeps this config's track identity: the fields a consumer cannot change
+	/// without reinitializing its decoder or demuxer (`codec`, `description`, `container`,
+	/// `display_aspect_width`, `display_aspect_height`, and `interlaced`).
+	///
+	/// A track name always means the same content, so a publisher that changes any of them
+	/// publishes under a new name; every other field may update in place. See the draft's
+	/// [Track Identity](https://github.com/moq-dev/moq/blob/main/drafts/draft-lcurley-moq-hang.md#identity).
+	pub fn same_identity(&self, other: &Self) -> bool {
+		self.codec == other.codec
+			&& self.description == other.description
+			&& self.container == other.container
+			&& self.display_aspect_width == other.display_aspect_width
+			&& self.display_aspect_height == other.display_aspect_height
+			&& self.interlaced == other.interlaced
+	}
 }
 
 fn is_zero(value: &i32) -> bool {

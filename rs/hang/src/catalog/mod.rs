@@ -8,7 +8,6 @@
 mod audio;
 mod binary;
 mod clock;
-mod compression;
 mod consumer;
 mod container;
 mod echo;
@@ -28,7 +27,6 @@ mod video;
 pub use audio::*;
 pub use binary::*;
 pub use clock::*;
-pub use compression::*;
 pub use consumer::*;
 pub use container::*;
 pub use echo::*;

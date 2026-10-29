@@ -24,7 +24,6 @@ hang = { workspace = true }
 kio = { workspace = true }
 memchr = "2"
 moq-clock = { workspace = true }
-moq-flate = { workspace = true }
 moq-json = { workspace = true }
 moq-loc = { workspace = true }
 moq-msf = { workspace = true }
@@ -46,7 +45,7 @@ url = { workspace = true }
 webm-iterable = "0.7"
 
 [dev-dependencies]
-criterion = { workspace = true }
+criterion = { package = "bench-harness", path = "../bench-harness" }
 futures = { workspace = true }
 moq-clock = { workspace = true, features = ["sim"] }
 proptest = { workspace = true }

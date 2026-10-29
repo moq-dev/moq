@@ -1,3 +1,4 @@
+import { Milli } from "@moq/clock";
 import * as Epoch from "../epoch.ts";
 import { ProtocolViolation, reason } from "../error.ts";
 import type * as Path from "../path.ts";
@@ -12,7 +13,7 @@ import { type IetfVersion, Version } from "./version.ts";
 
 // Varint parameter IDs (even)
 const MSG_PARAM_DELIVERY_TIMEOUT = 0x02n;
-/// FILL_TIMEOUT, on a FETCH. Refused: we write no Timed-Out gaps.
+/// FILL_TIMEOUT, on a FETCH: the wait for missing objects before they become a gap.
 const MSG_PARAM_FILL_TIMEOUT = 0x0an;
 /// NEW_GROUP_REQUEST. Ignored, as the draft lets a publisher without dynamic groups do.
 const MSG_PARAM_NEW_GROUP_REQUEST = 0x32n;
@@ -412,6 +413,21 @@ export class Parameters {
 
 	set includeProperties(v: boolean) {
 		this.vars.set(MSG_PARAM_INCLUDE_PROPERTIES, v ? 1n : 0n);
+	}
+
+	/**
+	 * FILL_TIMEOUT: the total wait in milliseconds for objects not yet available. A value past
+	 * what a number holds exactly saturates, since no wait lasts that long anyway.
+	 */
+	get fillTimeout(): Milli | undefined {
+		const v = this.vars.get(MSG_PARAM_FILL_TIMEOUT);
+		if (v === undefined) return undefined;
+		return Milli(v > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(v));
+	}
+
+	set fillTimeout(v: Milli | undefined) {
+		if (v === undefined) this.vars.delete(MSG_PARAM_FILL_TIMEOUT);
+		else this.vars.set(MSG_PARAM_FILL_TIMEOUT, BigInt(v));
 	}
 
 	/** HOP_PATH: the hop chain an advertisement traversed, as its raw parameter value. */

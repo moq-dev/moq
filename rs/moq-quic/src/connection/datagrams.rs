@@ -24,7 +24,7 @@ impl Datagrams<'_> {
 	/// go before every group.
 	///
 	/// Sending never blocks. While queued datagrams overflow
-	/// [`TransportConfig::datagram_send_buffer_size`](crate::TransportConfig::datagram_send_buffer_size),
+	/// [`datagram::Config::send_buffer`](crate::transport::datagram::Config::send_buffer),
 	/// the oldest datagram of the lowest-priority group is dropped, and this datagram is dropped
 	/// instead once it is the one to go.
 	///
@@ -33,11 +33,11 @@ impl Datagrams<'_> {
 	/// # Panics
 	/// - when `options.group` was opened on another connection
 	pub fn send(&mut self, data: Bytes, options: SendOptions<'_>) -> Result<(), SendDatagramError> {
-		if self.conn.config.datagram_receive_buffer_size.is_none() {
+		if self.conn.config.datagram.receive_buffer.is_none() {
 			return Err(SendDatagramError::Disabled);
 		}
 		let max = self.max_size().ok_or(SendDatagramError::UnsupportedByPeer)?;
-		let budget = self.conn.config.datagram_send_buffer_size;
+		let budget = self.conn.config.datagram.send_buffer;
 		let datagram = Datagram { data };
 		if datagram.data.len() > max || datagram.size(true) > budget {
 			return Err(SendDatagramError::TooLarge);
@@ -88,7 +88,8 @@ impl Datagrams<'_> {
 	pub fn send_buffer_space(&self) -> usize {
 		self.conn
 			.config
-			.datagram_send_buffer_size
+			.datagram
+			.send_buffer
 			.saturating_sub(self.conn.streams.datagram_bytes())
 			.saturating_sub(Datagram::SIZE_BOUND)
 	}

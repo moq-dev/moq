@@ -13,8 +13,8 @@ Moq.setup(); // install panic/tracing hooks for readable errors
 
 const session = await Moq.Session.connect("https://relay.example.com/anon");
 const broadcast = await session.consume("room/alice");
-const track = await broadcast?.subscribe("video");
-for (let group = await track?.recvGroup(); group; group = await track?.recvGroup()) {
+const track = await broadcast.subscribe("video");
+for (let group = await track.recvGroup(); group; group = await track.recvGroup()) {
 	for (let frame = await group.readFrame(); frame; frame = await group.readFrame()) {
 		// frame: Uint8Array
 	}

@@ -245,18 +245,24 @@ impl Catalog {
 	}
 
 	/// Overlay the hint onto `config` and publish it to `rendition`, unless it matches the last
-	/// publish. A changed config just re-mirrors the rendition; there are no fixed tracks to
-	/// reject a reconfiguration.
+	/// publish. A decoder identity change finishes the previous track and mints a fresh name;
+	/// anything else updates the rendition in place.
 	///
 	/// A declared `reorder` is fixed for the track's life, so a later sequence header declaring
 	/// less or none keeps it, and one declaring more fails: frames reordered that deep would
-	/// break the bound consumers already clock the track by.
+	/// break the bound consumers already clock the track by. A minted track declares its own.
 	pub(crate) fn publish(&mut self, track: &mut Track, mut config: hang::catalog::VideoConfig) -> crate::Result<()> {
 		self.resolved = Some(config.clone());
 		self.hdr.apply(&mut config.color);
 		self.hint.apply(&mut config);
 		config.enabled = self.enabled;
-		if let Some(declared) = self.last.as_ref().and_then(|last| last.reorder) {
+		// A new decoder identity mints a new track, whose bound starts over.
+		let declared = self
+			.last
+			.as_ref()
+			.filter(|last| last.same_identity(&config))
+			.and_then(|last| last.reorder);
+		if let Some(declared) = declared {
 			match config.reorder {
 				Some(reorder) if reorder > declared => {
 					return Err(anyhow::Error::new(Deepened { declared, reorder }).into());
@@ -268,7 +274,7 @@ impl Catalog {
 			return Ok(());
 		}
 		tracing::debug!(name = ?track.name(), ?config, "starting track");
-		track.set(config.clone())?;
+		track.reconfigure(config.clone())?;
 		self.last = Some(config);
 		Ok(())
 	}
@@ -298,5 +304,77 @@ impl Catalog {
 			Some(config) => self.publish(track, config),
 			None => Ok(()),
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::container::Frame;
+
+	#[test]
+	fn decoder_changes_mint_fresh_names_but_size_and_estimates_stay_in_place() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::<()>::new(&mut broadcast, Default::default()).unwrap();
+		let raw = broadcast
+			.create_track("video", catalog.track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let mut track = catalog
+			.video(
+				raw,
+				crate::catalog::hang::Container::Legacy(crate::container::Kind::Video),
+				None,
+			)
+			.unwrap();
+		let mut publishing = Catalog::new(VideoHint::default());
+		let mut config = hang::catalog::VideoConfig::new("avc1.42c01e".parse::<hang::catalog::VideoCodec>().unwrap());
+		config.description = Some(bytes::Bytes::from_static(b"first"));
+		publishing.publish(&mut track, config.clone()).unwrap();
+		let records = catalog.hls_tracks();
+		track
+			.write(Frame {
+				timestamp: moq_net::Timestamp::ZERO,
+				payload: bytes::Bytes::from_static(b"old"),
+				keyframe: true,
+				duration: None,
+			})
+			.unwrap();
+		let old = track.track().clone();
+		config.coded_width = Some(640);
+		config.coded_height = Some(360);
+		config.bitrate = Some(500_000);
+		config.framerate = Some(30.0);
+		publishing.publish(&mut track, config.clone()).unwrap();
+		assert_eq!(track.name(), "video");
+		config.bitrate = Some(250_000);
+		config.framerate = Some(15.0);
+		publishing.publish(&mut track, config.clone()).unwrap();
+		assert_eq!(track.name(), "video");
+		config.description = Some(bytes::Bytes::from_static(b"second"));
+		publishing.publish(&mut track, config.clone()).unwrap();
+		let second = track.name().to_string();
+		assert_ne!(second, "video");
+		assert!(!catalog.snapshot().video.renditions.contains_key("video"));
+		assert_eq!(catalog.snapshot().video.renditions[&second], config);
+		assert_eq!(old.largest().map(|p| p.group), Some(0));
+		assert!(
+			old.poll_closed(&kio::Waiter::noop()).is_ready(),
+			"the previous track ends"
+		);
+		track
+			.write(Frame {
+				timestamp: moq_net::Timestamp::ZERO,
+				payload: bytes::Bytes::from_static(b"new"),
+				keyframe: true,
+				duration: None,
+			})
+			.unwrap();
+		assert_eq!(track.track().largest().map(|p| p.group), Some(0));
+		config.description = Some(bytes::Bytes::from_static(b"first"));
+		publishing.publish(&mut track, config).unwrap();
+		assert_ne!(track.name(), "video");
+		assert_ne!(track.name(), second);
+		assert_eq!(catalog.hls_tracks(), records, "each predecessor's HLS records retire");
+		track.finish().unwrap();
 	}
 }

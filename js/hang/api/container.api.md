@@ -26,9 +26,12 @@ export class Consumer {
 
 export interface ConsumerProps {
 	format: Format;
+	maxBuffer?: number;
 	maxDelay?: Signals.GetterInit<Milli>;
 	predecessor?: Consumer;
 }
+
+export const DEFAULT_MAX_BUFFER: number;
 
 export interface Format {
 	decode(payload: Uint8Array, timestamp: Net.Time.Timestamp | undefined): Frame[];

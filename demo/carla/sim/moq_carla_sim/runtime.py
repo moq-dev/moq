@@ -93,7 +93,7 @@ class TruckSession:
     def __init__(
         self,
         truck: Truck,
-        broadcast: moq.BroadcastProducer,
+        publication: moq.Publication,
         video: BridgeStream,
         location: str | None,
         map_name: str | None,
@@ -106,7 +106,7 @@ class TruckSession:
         self._location = location
         self._map_name = map_name
         self._drive = Drive()
-        self._status = StatusPublisher(broadcast)
+        self._status = StatusPublisher(publication.broadcast)
         # Bounded: drivers are untrusted publishers, so an unbounded queue is a
         # memory-growth path under one that floods; a full queue instead blocks
         # that driver's own task.
@@ -119,7 +119,7 @@ class TruckSession:
         # The stream's are there already: opening it advertised them. The
         # route carries the run's epoch, so viewers see a restarted worker as
         # a restart rather than a stalled broadcast.
-        broadcast.announce(route)
+        publication.announce(route)
 
     def stop_video(self) -> None:
         """End the video tracks cleanly and stop the bridge encoding them."""

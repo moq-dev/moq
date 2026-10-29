@@ -5,7 +5,7 @@ use std::task::Poll;
 use serde::de::DeserializeOwned;
 
 use super::Decoder;
-use crate::{Compression, Result};
+use crate::Result;
 
 /// Track-owning options for a [`Consumer`].
 ///
@@ -14,16 +14,12 @@ use crate::{Compression, Result};
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct Config {
-	/// How the frames are compressed. Must match the encoder's
-	/// [`Config::compression`](super::Config::compression). Defaults to [`Compression::None`].
-	pub compression: Compression,
-
-	/// Maximum bytes in an inflated frame or the compact JSON of the reconstructed value.
+	/// Maximum bytes in a frame or the compact JSON of the reconstructed value.
 	///
-	/// Unset, the group budget is the only bound: a compressed group inflates to at most
-	/// [`MAX_CACHE_BYTES`](moq_net::group::MAX_CACHE_BYTES), the most a plain one carries, so the
-	/// reconstructed value costs no more than an uncompressed track's. Set it to hold a smaller
-	/// document, at the cost of re-measuring the value after every delta.
+	/// Unset, the group budget is the only bound: a group holds at most
+	/// [`MAX_CACHE_BYTES`](moq_net::group::MAX_CACHE_BYTES), compressed or not, so the
+	/// reconstructed value costs no more than that. Set it to hold a smaller document, at the cost
+	/// of re-measuring the value after every delta.
 	pub max_size: Option<usize>,
 }
 
@@ -43,8 +39,7 @@ pub struct Consumer<T> {
 impl<T: DeserializeOwned> Consumer<T> {
 	/// Create a consumer reading from the given track subscriber.
 	///
-	/// Set [`Config::compression`] to read a track written by a producer with the same
-	/// [`compression`](super::Config::compression).
+	/// A [`compress`](moq_net::track::Info::compress)ed track reads the same: moq-net inflates it.
 	pub fn new(track: moq_net::track::Subscriber, config: Config) -> Self {
 		Self {
 			track: track.ordered(),
@@ -139,7 +134,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 							| moq_net::StreamError::GroupTooLarge
 					) =>
 				{
-					// A later group starts a fresh snapshot and compression window.
+					// A later group starts a fresh snapshot.
 					tracing::warn!(track = self.track.name(), group = group.sequence, error = ?err,
 						"snapshot group lost; waiting for a newer one");
 					self.group = None;
@@ -174,35 +169,22 @@ mod timestamps {
 
 	#[test]
 	fn exact_timestamps_survive_reads() {
-		for compression in [crate::Compression::None, crate::Compression::Deflate] {
+		for compress in [false, true] {
 			let scale = moq_net::Timescale::new(90_000).unwrap();
+			let info = moq_net::track::Info::default()
+				.with_timescale(scale)
+				.with_compress(compress);
 			let track = moq_net::broadcast::Info::new()
 				.produce()
-				.create_track("data", moq_net::track::Info::default().with_timescale(scale))
+				.create_track("data", info)
 				.unwrap();
 			let mut subscriber = track.subscribe(None);
 			let mut subscription = subscriber.subscription();
 			subscription.max_delay = None;
 			subscriber.update(subscription).unwrap();
-			let config = crate::snapshot::Config {
-				compression,
-				..Default::default()
-			};
-			let mut producer = crate::snapshot::Producer::new(track, config.clone());
-			let mut consumer = Consumer::<serde_json::Value>::new(
-				subscriber,
-				crate::snapshot::consumer::Config {
-					compression,
-					..Default::default()
-				},
-			);
-			let mut newest = Consumer::<serde_json::Value>::new(
-				producer.consume(),
-				crate::snapshot::consumer::Config {
-					compression,
-					..Default::default()
-				},
-			);
+			let mut producer = crate::snapshot::Producer::new(track, crate::snapshot::Config::default());
+			let mut consumer = Consumer::<serde_json::Value>::new(subscriber, Default::default());
+			let mut newest = Consumer::<serde_json::Value>::new(producer.consume(), Default::default());
 			let times = [0, 810_001, 990_007];
 			for (n, ticks) in times.into_iter().enumerate() {
 				let at = moq_net::Timestamp::new(ticks, scale).unwrap();
@@ -243,21 +225,11 @@ mod timestamps {
 	fn latest_advances_the_same_cursor_as_next() {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("data", moq_net::track::Info::default())
+			.create_track("data", moq_net::track::Info::default().with_compress(true))
 			.unwrap();
 		let subscriber = track.subscribe(None);
-		let config = crate::snapshot::Config {
-			compression: crate::Compression::Deflate,
-			..crate::snapshot::Config::default()
-		};
-		let mut producer = crate::snapshot::Producer::new(track, config.clone());
-		let mut consumer = Consumer::<serde_json::Value>::new(
-			subscriber,
-			crate::snapshot::consumer::Config {
-				compression: crate::Compression::Deflate,
-				..Default::default()
-			},
-		);
+		let mut producer = crate::snapshot::Producer::new(track, crate::snapshot::Config::default());
+		let mut consumer = Consumer::<serde_json::Value>::new(subscriber, Default::default());
 		let waiter = kio::Waiter::noop();
 		for n in 0..3 {
 			producer

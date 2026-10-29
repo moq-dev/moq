@@ -51,6 +51,15 @@ for a permission, device, or settings change instead of prompting again.
 
 ## Encoding
 
+An enabled encoder encodes whether or not anyone is subscribed, so its recent
+groups wait in the track's cache: a viewer who subscribes late with a
+`maxDelay`, or fetches, reaches back as far as `maxAge` keeps. Pass
+`onDemand: true` to `Publish.Broadcast` to encode every rendition only while
+someone is subscribed instead. That saves the encode while nobody watches, but
+a viewer then starts at the keyframe its arrival forces, with no past to reach.
+Bandwidth is reserved only while someone is subscribed, so an unwatched
+rendition encodes at its configured bitrate.
+
 The video encoder follows its share of the connection's send-rate estimate, so
 several publishers on one connection do not each target the whole uplink.
 Codec, resolution, framerate, and bitrate are tunable through
@@ -143,7 +152,8 @@ const broadcast = new Publish.Broadcast({
 });
 
 // Each encoder registers a rendition on the broadcast (`broadcast.video(name)`) and
-// encodes only while someone is subscribed.
+// encodes while enabled, subscribed or not. Pass `onDemand: true` to the broadcast
+// to encode only while someone is subscribed.
 new Publish.Video.Encoder("video/hd", { broadcast, capture, enabled: true });
 new Publish.Video.Encoder("video/sd", { broadcast, capture, enabled: true, config: { maxScale: 0.25 } });
 const audioSource = new Publish.Signals.Computed((effect) => effect.get(microphone.out.source)?.audio);

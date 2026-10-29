@@ -60,9 +60,9 @@ try await session.closed()
 To publish through the auto-created origin:
 
 ```swift
-let broadcast = try session.publish.createBroadcast(path: "my-stream")
-// ... configure tracks on broadcast ...
-try broadcast.announce() // unannounced broadcasts are invisible
+let publication = try session.publish.createBroadcast(path: "my-stream")
+// ... configure tracks on publication.broadcast ...
+try publication.announce() // unannounced broadcasts are invisible
 ```
 
 Cancelling the surrounding Swift `Task` propagates through to the underlying `cancel()` calls on each consumer. `session.shutdown()` requests a drain immediately; `try await session.closed()` waits for it and throws on delivery failure. `cancel(code: 0)` remains immediate.
@@ -90,8 +90,8 @@ JSON tracks live under the `Json` namespace, mirroring the `moq-json` crate, and
 (lossy latest-value, a subscriber only sees the newest value), `Json.StreamProducer`/`Json.StreamConsumer`
 (lossless append-log, every record preserved in order), or `Json.WindowProducer`/`Json.WindowConsumer`
 (a sliding window of records a reader can join at any point, not advertised in the catalog). Values encode/decode at the boundary with
-`JSONEncoder`/`JSONDecoder`; the consumer is an `AsyncSequence` of the decoded type. Pass matching
-`compression` on both sides.
+`JSONEncoder`/`JSONDecoder`; the consumer is an `AsyncSequence` of the decoded type. Publish the
+track with `TrackInfo(compress: true)`; consumers read it the same either way.
 
 ## Local development
 

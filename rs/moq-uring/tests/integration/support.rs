@@ -65,3 +65,37 @@ pub fn bundle() -> anyhow::Result<Bundle> {
 		roots: roots_path,
 	})
 }
+
+/// Open a WebTransport session to `request` from tokio, through the driver's
+/// own `connect`, trusting whatever certificate the server presents.
+pub async fn web_connect(
+	request: moq_tokio::quic::web::proto::ConnectRequest,
+	transport: moq_tokio::quic::driver::transport::Config,
+) -> Result<moq_tokio::quic::web::Session, moq_tokio::quic::web::ClientError> {
+	use moq_tokio::quic::{driver, web};
+
+	let host = request.url.host_str().expect("url host").to_string();
+	let port = request.url.port().unwrap_or(443);
+	let addr = tokio::net::lookup_host((host.as_str(), port))
+		.await
+		.expect("resolve")
+		.next()
+		.expect("an address");
+
+	let mut tls = moq_tokio::tls::Connect::default();
+	tls.insecure = Some(true);
+	let mut crypto = tls.build().expect("tls");
+	crypto.alpn_protocols = vec![web::ALPN.as_bytes().to_vec()];
+	let crypto = driver::crypto::rustls::QuicClientConfig::try_from(crypto).expect("quic crypto");
+	let mut config = driver::client::Config::new(std::sync::Arc::new(crypto));
+	config.transport = transport;
+
+	let bind = match addr {
+		std::net::SocketAddr::V4(_) => "0.0.0.0:0",
+		std::net::SocketAddr::V6(_) => "[::]:0",
+	};
+	let socket = std::net::UdpSocket::bind(bind).expect("bind");
+	let endpoint = driver::endpoint::Endpoint::new(Default::default(), socket).expect("endpoint");
+	let conn = endpoint.connect(&config, addr, &host)?.await?;
+	web::Session::connect(conn, request).await
+}

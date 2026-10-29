@@ -6,12 +6,6 @@ import { Timed } from "@moq/net";
 import { Track } from "@moq/net";
 import { ZodMiniType } from "@zod/mini";
 
-export type Compression = "none" | "deflate";
-
-export class Desync extends Error {
-	constructor();
-}
-
 export interface Diff {
 	forcedSnapshot: boolean;
 	patch: unknown;
@@ -27,13 +21,12 @@ export class MissingSnapshot extends Error {
 
 export namespace Snapshot {
 	export interface Config<T> {
-		compression?: Compression;
 		deltas?: boolean;
 		initial?: T;
 		schema?: ZodMiniType<T>;
 	}
 	export namespace Consumer {
-		export type Config<T> = Pick<Snapshot.Config<T>, "schema" | "compression"> & {
+		export type Config<T> = Pick<Snapshot.Config<T>, "schema"> & {
 			track: Track.Subscriber;
 		};
 	}
@@ -44,7 +37,7 @@ export namespace Snapshot {
 		next(): Promise<Timed<T> | undefined>;
 	}
 	export class Decoder<T> {
-		constructor(config?: Pick<Snapshot.Config<T>, "schema" | "compression">);
+		constructor(config?: Pick<Snapshot.Config<T>, "schema">);
 		decode(): T | undefined;
 		delta(payload: Uint8Array): void;
 		snapshot(payload: Uint8Array): void;
@@ -81,7 +74,6 @@ export namespace Snapshot {
 
 export namespace Stream {
 	export interface Config<T = unknown> {
-		compression?: Compression;
 		schema?: ZodMiniType<T>;
 	}
 	export namespace Consumer {
@@ -97,9 +89,7 @@ export namespace Stream {
 	export class Decoder<T> {
 		constructor(config?: Stream.Config<T>);
 		decode(payload: Uint8Array): T;
-		reset(): void;
 	}
-	export { Desync };
 	export class Encoder<T> {
 		constructor(config?: Stream.Config<T>);
 		encode(value: T): Stream.Pending;
@@ -127,7 +117,6 @@ export namespace Stream {
 export namespace Window {
 	export interface Config {
 		checkpointRecords?: number;
-		compression?: boolean;
 		ops?: boolean;
 	}
 	export class Consumer<T> {
@@ -136,17 +125,14 @@ export namespace Window {
 		next(): Promise<Timed<Window.Event<T>> | undefined>;
 		get offset(): number;
 	}
-	export type ConsumerConfig = Window.DecoderConfig & {
+	export type ConsumerConfig = {
 		track: Track.Subscriber;
 	};
 	export class Decoder<T> {
-		constructor(config?: Window.DecoderConfig);
+		constructor();
 		group(): Window.Group;
 		next(): Window.Event<T> | undefined;
 		get offset(): number;
-	}
-	export interface DecoderConfig {
-		compression?: boolean;
 	}
 	export interface Encoded {
 		keyframe: boolean;

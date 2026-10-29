@@ -77,14 +77,12 @@ fn echo_tokio_peer() {
 			.build()
 			.expect("runtime");
 		runtime.block_on(async move {
-			let client = moq_tokio::quic::web::ClientBuilder::new()
-				.dangerous()
-				.with_no_certificate_verification()
-				.expect("client");
 			let request = moq_tokio::quic::web::proto::ConnectRequest::new(
 				url::Url::parse(&format!("https://{addr}/echo")).expect("url"),
 			);
-			let session = client.connect(request).await.expect("connect");
+			let session = crate::support::web_connect(request, Default::default())
+				.await
+				.expect("connect");
 			let (mut send, mut recv) = session.open_bi(Default::default()).await.expect("open stream");
 			send.write_all(&payload).await.expect("write");
 			send.finish().expect("finish");

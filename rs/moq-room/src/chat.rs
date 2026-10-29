@@ -294,8 +294,7 @@ mod tests {
 		let relay = origin(2);
 		let _link = link(&publisher, &relay).await;
 		let consumer = relay.consume();
-		consumer.routed("room").await.unwrap();
-		let remote = consumer.request_broadcast("room", None).await.unwrap();
+		let remote = consumer.follow("room", None).unwrap().available().await.unwrap();
 
 		// A first reader warms the relay's copy with the first window.
 		{

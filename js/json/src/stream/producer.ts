@@ -45,7 +45,7 @@ export class Producer<T> {
 		try {
 			record = this.#encoder.encode(value);
 		} catch (err) {
-			// Refused before encoding, so nothing is missing from the log and nothing desynced.
+			// Refused before encoding, so nothing is missing from the log.
 			if (err instanceof NetError.GroupTooLarge) throw err;
 
 			// A record that can't be encoded is as lost as one the group rejects: the log is missing it
@@ -60,9 +60,7 @@ export class Producer<T> {
 		try {
 			this.#group ??= this.#track.appendGroup();
 		} catch (err) {
-			// Nothing was published, so a later append may still open a fresh group whose decoder
-			// starts cold. The record never landed, so the window still has to reset, or the desync
-			// latch answers the next append before the track does.
+			// Nothing was published, so a later append may still open a fresh group.
 			this.#encoder.reset();
 			throw err;
 		}

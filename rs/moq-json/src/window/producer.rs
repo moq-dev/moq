@@ -164,7 +164,7 @@ impl<T> Inner<T> {
 		};
 
 		// A failed write drops the frame uncommitted. The pop is discarded, and the next edit opens a
-		// new group because the attempted frame advanced the group-local compression state.
+		// new group, since a consumer may hold the group the frame was meant for.
 		track.write(count.at, &frame)?;
 		frame.commit();
 		self.at = self.at.max(count.at);

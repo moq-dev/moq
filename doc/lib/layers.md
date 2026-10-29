@@ -6,8 +6,8 @@ description: Where each layer the bindings wrap lives in every language
 # Layers
 
 The bindings keep Rust's layers. moq-net sits at the root of each package, and
-each layer above it has its own namespace: `media`, `json`, `flate`, `audio`,
-and `video`. Rust's other crates, such as moq-auth and moq-room, have no
+each layer above it has its own namespace: `media`, `json`, `audio`, and
+`video`. Rust's other crates, such as moq-auth and moq-room, have no
 binding. A type keeps its short name in every language, so Python's
 `moq.json.SnapshotProducer` is `Json.SnapshotProducer` in Swift. Find the layer
 below, then look up its methods in that language's API reference.
@@ -81,21 +81,9 @@ the C API has no window yet.
 
 Go code usually imports it under an alias, next to `encoding/json`.
 
-## flate
-
-Opaque payloads as a latest value or an append log, optionally compressed:
-`SnapshotProducer` and `StreamProducer`.
-
-| Language | Module | Example |
-| --- | --- | --- |
-| Rust | [`moq_flate`](/lib/rs/moq-flate) | `moq_flate::snapshot::Producer` |
-| Python | `moq.flate` | `moq.flate.SnapshotProducer` |
-| Go | `moq.dev/moq/flate` | `flate.SnapshotProducer` |
-| Kotlin | `dev.moq.flate` | `dev.moq.flate.SnapshotProducer` |
-| Swift | `Flate` | `Flate.SnapshotProducer` |
-| Dart | `package:moq/flate.dart` | `flate.SnapshotProducer` |
-| C++ | `moq::Flate*` | `moq::FlateSnapshotProducer` |
-| C | `moq_publish_binary_*` | `moq_publish_binary_snapshot` |
+Compression is the track's, not this layer's: publish a JSON track with
+`compress` set on its track info, and a consumer reads it like any other.
+Opaque bytes go on a raw net track.
 
 ## audio
 

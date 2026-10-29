@@ -704,13 +704,16 @@ export class SubscribeDrop {
 	}
 
 	async #encode(w: Writer) {
+		if (this.start - this.end > 1) throw new RangeError("invalid dropped range");
 		await w.u53(this.start);
 		await w.u53(this.end);
 		await w.u53(this.error);
 	}
 
 	static async #decode(r: Reader): Promise<SubscribeDrop> {
-		return new SubscribeDrop({ start: await r.u53(), end: await r.u53(), error: await r.u53() });
+		const drop = new SubscribeDrop({ start: await r.u53(), end: await r.u53(), error: await r.u53() });
+		if (drop.start - drop.end > 1) throw new ProtocolViolation("invalid dropped range");
+		return drop;
 	}
 
 	async encode(w: Writer): Promise<void> {

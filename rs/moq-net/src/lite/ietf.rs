@@ -991,7 +991,9 @@ pub(crate) async fn test_hop(
 	);
 	downstream
 		.consume()
-		.routed(broadcast)
+		.routes(broadcast)
+		.unwrap()
+		.next()
 		.await
 		.expect("the hop announced the broadcast");
 	(downstream, [client, server])
@@ -1069,7 +1071,7 @@ mod hop_tests {
 	}
 
 	async fn subscribe(origin: &crate::origin::Producer) -> (track::Consumer, track::Subscriber) {
-		let broadcast = moq_clock::timeout(TIMEOUT, origin.consume().request_broadcast("room", None))
+		let broadcast = moq_clock::timeout(TIMEOUT, origin.consume().request("room", None))
 			.await
 			.expect("no broadcast")
 			.unwrap();
@@ -1214,7 +1216,7 @@ mod hop_tests {
 		let _track = broadcast.create_track("video", info).unwrap();
 
 		let (downstream, _sessions) = test_hop(&upstream, "room", [true, true]).await;
-		let broadcast = moq_clock::timeout(TIMEOUT, downstream.consume().request_broadcast("room", None))
+		let broadcast = moq_clock::timeout(TIMEOUT, downstream.consume().request("room", None))
 			.await
 			.expect("no broadcast")
 			.unwrap();
@@ -1454,7 +1456,7 @@ mod hop_tests {
 			head.write_frame(ts(100), b"frame".to_vec()).unwrap();
 			head.finish().unwrap();
 			let (downstream, sessions) = test_hop(&upstream, "room", offer).await;
-			let broadcast = downstream.consume().request_broadcast("room", None).await.unwrap();
+			let broadcast = downstream.consume().request("room", None).await.unwrap();
 			// A listing cannot carry the provenance, so it lists the track untimed even when
 			// negotiated: a relay re-listing it would otherwise advertise it as native lite.
 			let mut tracks = broadcast.tracks().unwrap();

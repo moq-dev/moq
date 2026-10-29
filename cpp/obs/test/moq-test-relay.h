@@ -64,7 +64,7 @@ class TestRelay {
 public:
 	// With `accept` false the relay listens but never completes a handshake, so a
 	// connect to it stays pending.
-	explicit TestRelay(bool accept = true)
+	explicit TestRelay(bool accept = true, const std::vector<std::string> &versions = {})
 	{
 		origin = moq::OriginProducer::init(moq::OriginConfig{});
 		// The fingerprint needs the TCP port matching the UDP one the server drew, which
@@ -74,6 +74,7 @@ public:
 				server->cancel();
 			moq::ServerConfig config;
 			config.bind = "127.0.0.1:0";
+			config.versions = versions;
 			config.tls.generate = {"localhost"};
 			config.publish = origin;
 			config.consume = origin;

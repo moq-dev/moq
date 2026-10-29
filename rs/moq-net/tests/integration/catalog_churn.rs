@@ -265,7 +265,7 @@ impl Topology {
 
 	/// A fresh request for the broadcast; `None` when refused, as with no route right now.
 	async fn request(&self, step: usize) -> Result<Option<moq_net::broadcast::Consumer>, Failure> {
-		let request = self.subscriber.consume().request_broadcast("live", None);
+		let request = self.subscriber.consume().request("live", None);
 		match moq_clock::timeout(READ_TIMEOUT, request).await {
 			Ok(result) => Ok(result.ok()),
 			Err(_) => Err(stuck(format!("{step}: request hung"))),
@@ -291,7 +291,7 @@ async fn execute(version: Version, ops: &[Op]) -> Result<(), Failure> {
 		link(version, &publisher, &relay_b).await,
 	];
 	let a_to_r = link(version, &relay_a, &subscriber).await;
-	subscriber.consume().routed("live").await.unwrap();
+	crate::support::announced(&subscriber.consume(), "live").await;
 	let mut topology = Topology {
 		version,
 		publisher,

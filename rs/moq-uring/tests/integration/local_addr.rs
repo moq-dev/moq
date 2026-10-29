@@ -177,14 +177,10 @@ fn a_wildcard_endpoint_handshakes_on_a_secondary_address() {
 			.build()
 			.expect("runtime");
 		runtime.block_on(async move {
-			let client = moq_tokio::quic::web::ClientBuilder::new()
-				.dangerous()
-				.with_no_certificate_verification()
-				.expect("client");
 			let request = moq_tokio::quic::web::proto::ConnectRequest::new(
 				url::Url::parse(&format!("https://{addr}/")).expect("url"),
 			);
-			moq_clock::timeout(TIMEOUT, client.connect(request))
+			moq_clock::timeout(TIMEOUT, crate::support::web_connect(request, Default::default()))
 				.await
 				.expect("handshake stalled")
 				.expect("connect");

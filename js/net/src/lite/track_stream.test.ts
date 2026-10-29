@@ -353,7 +353,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		pair.server.close();
 		expect(await settlesWithin(demand.unused(), 1000)).toBe(true);
 
-		request.reject();
+		request.reject(new Error("request refused"));
 		publisher.close();
 		broadcast.close();
 		origin.close();

@@ -3,7 +3,7 @@
 // relay case lives with the Rust relay (rs/moq-net/tests/integration/subscribe_priority.rs).
 
 import { expect, spyOn, test } from "bun:test";
-import { Manual } from "@moq/clock";
+import { Manual, yieldNow } from "@moq/clock";
 import { accept, connect, type Established } from "./connection/index.ts";
 import * as Ietf from "./ietf/index.ts";
 import { SubscribeUpdate } from "./ietf/subscribe.ts";
@@ -14,7 +14,6 @@ import * as Path from "./path.ts";
 import { Writer } from "./stream.ts";
 import { Timescale } from "./time.ts";
 import type { Producer as TrackProducer } from "./track.ts";
-import { nextTask } from "./util/yield.ts";
 import { wireOf } from "./wire.ts";
 
 const url = new URL("https://localhost:4443/test");
@@ -98,7 +97,7 @@ test.each(Object.values(Ietf.ALPN))("%s ends a subscription mid-update without a
 	const write = Writer.prototype.write;
 	const yielding = spyOn(Writer.prototype, "write").mockImplementation(async function (this: Writer, chunk) {
 		await write.call(this, chunk);
-		await nextTask();
+		await yieldNow();
 	});
 	const origin = new OriginProducer();
 	const broadcastPublication = origin.createBroadcast(path);
@@ -122,7 +121,7 @@ test.each(Object.values(Ietf.ALPN))("%s ends a subscription mid-update without a
 		low.close();
 		while (video.subscription.peek() !== undefined) await video.subscription.changed();
 		// Each hop is a task or two away, so this lets the subscriber read all the publisher wrote.
-		for (let i = 0; i < 20; i++) await nextTask();
+		for (let i = 0; i < 20; i++) await yieldNow();
 		expect(closed).toBeUndefined();
 		remote.close();
 	} finally {

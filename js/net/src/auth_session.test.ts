@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
+import { yieldNow } from "@moq/clock";
 import { type Getter, Signal } from "@moq/signals";
 import type { Grant } from "./auth.ts";
 import { type AuthSession, enforceGrant } from "./auth_session.ts";
 import * as Path from "./path.ts";
-import { nextTask } from "./util/yield.ts";
 
 /** How many reactions `run` attached to each promise, by `then` on it. */
 async function reactions(run: () => Promise<void>): Promise<number[]> {
@@ -34,7 +34,7 @@ test.each([2, 64])("churn over %i live broadcasts leaves no reaction behind per 
 		// A live table that keeps changing: one broadcast swaps out per update.
 		for (let i = 0; i < 1_000; i++) {
 			advertised.set(new Map(Array.from({ length: live }, (_, j) => [Path.from(`live/${i + j}`), i])));
-			await nextTask();
+			await yieldNow();
 		}
 		close();
 		await enforcing;
@@ -75,11 +75,11 @@ test("a session that closes during an authorization wait ends enforcement withou
 	const enforcing = enforceGrant({ quic, advertised, grant, setupAnswered: Promise.resolve(), auth }).then(() => {
 		done = true;
 	});
-	for (let i = 0; i < 10 && waiting === 0; i++) await nextTask();
+	for (let i = 0; i < 10 && waiting === 0; i++) await yieldNow();
 	expect(waiting).toBe(1);
 
 	close();
-	for (let i = 0; i < 10 && !done; i++) await nextTask();
+	for (let i = 0; i < 10 && !done; i++) await yieldNow();
 	expect(done).toBe(true);
 	expect(closes).toBe(0);
 	await enforcing;

@@ -44,7 +44,7 @@ pub struct Config {
 	pub tls: std::sync::Arc<rustls::ServerConfig>,
 	/// The per-connection transport settings (timeouts, stream limits,
 	/// congestion control).
-	pub transport: super::Transport,
+	pub transport: super::transport::Config,
 }
 
 impl Config {
@@ -52,7 +52,7 @@ impl Config {
 	pub fn new(tls: std::sync::Arc<rustls::ServerConfig>) -> Self {
 		Self {
 			tls,
-			transport: super::Transport::default(),
+			transport: super::transport::Config::default(),
 		}
 	}
 }

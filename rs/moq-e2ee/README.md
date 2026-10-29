@@ -32,9 +32,10 @@ let video = protected.create_track("video", None)?;
 broadcast.announce(Route::default().with_epoch(generation.epoch().clone()))?;
 ```
 
-A subscriber discovers the broadcast at `credential.path(semantic)`, takes the epoch from the
-announced `Route::epoch` (or from the application's channel on a wire older than lite-07),
-binds it with `credential.consume(epoch)`, and wraps the broadcast in a
+A subscriber follows `credential.path(semantic)` with `origin.follow(path, None)`. It takes
+each instance's epoch from the broadcast it resolved, `broadcast.info().epoch` (or from the
+application's channel on a wire older than lite-07), so the key always matches the instance
+it reads. It binds the epoch with `credential.consume(epoch)` and wraps the broadcast in a
 `broadcast::Consumer`. Its `subscribe(semantic, subscription)` opens the track a decrypted
 catalog names. A consuming generation cannot produce. Nothing survives a publisher instance: a restart mints a new epoch.
 

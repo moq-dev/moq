@@ -48,7 +48,7 @@ fn queue(pair: &mut Pair, ch: ConnectionHandle, priority: i64) -> StreamId {
 
 /// A connected pair with the server's flush of post-handshake traffic out of the way
 fn idle(fairness: bool) -> (Pair, ConnectionHandle) {
-	let (mut pair, client_ch, _) = connected_with(|_| {}, |t| _ = t.send_fairness(fairness));
+	let (mut pair, client_ch, _) = connected_with(|_| {}, |t| t.send_fairness = fairness);
 	pair.drive();
 	(pair, client_ch)
 }

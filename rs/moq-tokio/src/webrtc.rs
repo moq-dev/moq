@@ -56,6 +56,9 @@ const SEND_WINDOW: usize = RECORD_SIZE as usize * 4;
 /// ignores it has the channel closed instead of growing memory without limit.
 const READ_SLACK: u64 = 16 * RECORD_SIZE;
 
+/// The connection-level receive window a data channel session grants, qmux's default.
+const RECEIVE_WINDOW: u64 = 1 << 20;
+
 /// The default STUN port (RFC 8489 section 18.10).
 const STUN_PORT: u16 = 3478;
 
@@ -261,7 +264,7 @@ impl Offerer {
 	/// Start a peer connection with a data channel for MoQ `protocol`, the ALPN the
 	/// peers agreed through signaling, returning the offer to send.
 	pub async fn new(config: &Config, protocol: &str) -> Result<(Self, Offer), Error> {
-		Self::with_hosts(config, protocol, hosts()?).await
+		crate::runtime::scope(Self::with_hosts(config, protocol, hosts()?)).await
 	}
 
 	async fn with_hosts(config: &Config, protocol: &str, hosts: Vec<IpAddr>) -> Result<(Self, Offer), Error> {
@@ -345,7 +348,7 @@ impl Answerer {
 	/// Start a peer connection for the remote peer's offer and MoQ `protocol`, the
 	/// ALPN the peers agreed through signaling, returning the answer to send.
 	pub async fn new(config: &Config, offer: &Offer, protocol: &str) -> Result<(Self, Answer), Error> {
-		Self::with_hosts(config, offer, protocol, hosts()?).await
+		crate::runtime::scope(Self::with_hosts(config, offer, protocol, hosts()?)).await
 	}
 
 	async fn with_hosts(
@@ -449,7 +452,7 @@ impl Peer {
 			taken: false,
 		};
 		use tracing::Instrument;
-		tokio::spawn(driver.run().instrument(tracing::Span::current()));
+		crate::runtime::spawn(driver.run().instrument(tracing::Span::current()));
 
 		let resolver = Resolver::spawn(commands.clone(), resolver::Mdns);
 		Ok(Self {
@@ -502,6 +505,8 @@ fn session_config(protocol: &str, max_record_size: u64) -> qmux::Config {
 	config.version = qmux::Version::QMux01;
 	config.protocol = qmux::Protocol::Negotiated(protocol.to_string());
 	config.max_record_size = max_record_size;
+	// Set rather than left to qmux's default, since the read queue is sized from it.
+	config.limits.receive_window = std::num::NonZeroU64::new(RECEIVE_WINDOW);
 	// The binding has no datagrams.
 	config.max_datagram_frame_size = None;
 	config
@@ -758,7 +763,7 @@ impl Driver {
 		};
 
 		let config = session_config(&protocol, max_record_size);
-		let (reads, reader) = channel::queue(config.receive_window + READ_SLACK);
+		let (reads, reader) = channel::queue(RECEIVE_WINDOW + READ_SLACK);
 		let (tx, writes) = mpsc::channel(1);
 		Ok(Open {
 			id,

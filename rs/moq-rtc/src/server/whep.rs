@@ -197,9 +197,9 @@ fn is_sdp(headers: &HeaderMap) -> bool {
 
 /// Resolve `path` on the subscribe origin and wait for its first catalog.
 ///
-/// `routed_broadcast` watches the path while it resolves, which is what makes a lazily
-/// discovering client session ask its peer about it; a plain request would be unroutable
-/// there. The `Source` resolves any sibling broadcast a rendition's catalog `broadcast` field
+/// Following the path watches it while it resolves, which is what makes a lazily
+/// discovering client session ask its peer about it, and waits out a publisher that has not
+/// announced yet. The `Source` resolves any sibling broadcast a rendition's catalog `broadcast` field
 /// references (e.g. `./source`) through the same origin.
 ///
 /// Both waits share one bound, or an unannounced broadcast, or an announced-but-catalog-less
@@ -207,7 +207,8 @@ fn is_sdp(headers: &HeaderMap) -> bool {
 /// [`moq_net::Error::Unroutable`], so the WHEP client sees a 404 and retries (typical).
 async fn resolve(subscriber: &moq_net::origin::Consumer, path: moq_net::Path) -> Result<EgressSource> {
 	let deadline = moq_clock::now() + CATALOG_TIMEOUT;
-	let broadcast = moq_clock::timeout_at(deadline, subscriber.routed_broadcast(path))
+	let mut following = subscriber.follow(path, None)?;
+	let broadcast = moq_clock::timeout_at(deadline, following.available())
 		.await
 		.map_err(|_| Error::Moq(moq_net::Error::Unroutable))??;
 	moq_clock::timeout_at(
@@ -327,15 +328,18 @@ mod tests {
 		let (sub_origin, _connection, accept) = lazy_client(pub_origin).await;
 
 		let _router = super::router(crate::server::Server::new(Default::default()), sub_origin.consume());
-		let missing = sub_origin.consume().follow("missing").expect("follow");
-		moq_clock::timeout(TIMEOUT, missing.synced())
+		let missing = moq_clock::timeout(TIMEOUT, sub_origin.consume().request("missing", None))
 			.await
 			.expect("sync timed out");
+		assert!(
+			matches!(missing, Err(moq_net::Error::Unroutable)),
+			"the missing path resolved"
+		);
 
 		// Nothing watches `other` on its own, yet the synced lookup already discovered it.
 		sub_origin
 			.consume()
-			.request_broadcast("other", None)
+			.request("other", None)
 			.await
 			.expect("discovered through the scope watch");
 

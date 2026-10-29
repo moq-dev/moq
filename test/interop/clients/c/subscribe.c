@@ -55,6 +55,13 @@ typedef struct {
 // The most audio renditions this client decodes; a catalog offering more fails it.
 #define MAX_AUDIO 4
 
+// How far a read may fall behind live before it skips, in microseconds. A gap fails the run, which
+// a reader skipping behind live would cause itself: the matrix starts every subscriber at once, and
+// a runtime starved by the others can fall a second behind. That is this reader's speed, not the
+// delivery under test. A track's max-age caps it, so interop.sh's Rust publisher keeps its media at
+// least this long.
+#define MAX_DELAY_US 5000000
+
 struct ctx {
     pthread_mutex_t mu;
     pthread_cond_t cv;
@@ -238,7 +245,7 @@ static void start_audio(ctx_t *c, int32_t catalog) {
         moq_audio_decoder_output out;
         memset(&out, 0, sizeof(out));
         out.format = MOQ_AUDIO_SAMPLE_FORMAT_F32;
-        out.max_delay_us = 1000000;
+        out.max_delay_us = MAX_DELAY_US;
         int32_t track = moq_decode_audio((uint32_t)catalog, i, &out, on_audio, &c->audio[i]);
         pthread_mutex_lock(&c->mu);
         if (track > 0) c->audio[i].track = track;
@@ -317,7 +324,7 @@ static void on_catalog(void *ud, int32_t catalog) {
         moq_video_config vcfg;
         memset(&vcfg, 0, sizeof(vcfg));
         if (moq_consume_video_config((uint32_t)catalog, 0, &vcfg) == 0) {
-            int32_t track = moq_consume_video((uint32_t)catalog, 0, 1000000, on_frame, ud);
+            int32_t track = moq_consume_video((uint32_t)catalog, 0, MAX_DELAY_US, on_frame, ud);
             if (track > 0) {
                 pthread_mutex_lock(&c->mu);
                 c->video_track = track;

@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { Milli } from "@moq/clock";
 import { ProtocolViolation } from "../error.ts";
 import { Reader } from "../stream.ts";
 import * as Filter from "./filter.ts";
@@ -79,6 +80,13 @@ test("fill round trips", () => {
 		// An omitted filter inherits the subscription's, which is a different request from an
 		// explicit unfiltered one.
 		{ filter: undefined, rangeFilters: false },
+		{ fillTimeout: Milli(0), filter: undefined, rangeFilters: false },
+		{
+			fillTimeout: Milli(250),
+			filter: { kind: "relative", groups: 1n },
+			groupOrder: "ascending",
+			rangeFilters: false,
+		},
 		{ filter: { kind: "unfiltered" }, rangeFilters: false },
 		{ filter: { kind: "relative", groups: 3n }, rangeFilters: false },
 		{ filter: { kind: "absolute", startGroup: 4n, startObject: 0n, endGroup: 9n }, rangeFilters: false },
@@ -86,6 +94,19 @@ test("fill round trips", () => {
 	for (const fill of fills) {
 		expect(Filter.decodeFill(Filter.encodeFill(fill, NEW), NEW)).toEqual(fill);
 	}
+});
+
+// FILL_TIMEOUT sorts first, so the parameters after it are deltas from its id.
+test("fill encodes its FILL_TIMEOUT first", () => {
+	const fill: Filter.Fill = {
+		fillTimeout: Milli(100),
+		filter: { kind: "relative", groups: 1n },
+		rangeFilters: false,
+	};
+	// count=2, 0x0A=100, delta 0x17 -> 0x21 Relative Start, StartGroup=1
+	const encoded = Filter.encodeFill(fill, NEW);
+	expect([...encoded]).toEqual([0x02, 0x0a, 0x64, 0x17, 0x01, 0x01]);
+	expect(Filter.decodeFill(encoded, NEW)).toEqual(fill);
 });
 
 // A parameter the draft does not allow inside the scope is a violation, not something to

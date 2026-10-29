@@ -64,7 +64,7 @@ async fn connect(publisher: &moq_net::origin::Producer, version: &str) -> (moq_n
 }
 
 async fn resolve(origin: &moq_net::origin::Producer, path: &str) -> moq_net::broadcast::Consumer {
-	moq_clock::timeout(TIMEOUT, origin.consume().routed_broadcast(path))
+	moq_clock::timeout(TIMEOUT, origin.consume().follow(path, None).unwrap().available())
 		.await
 		.expect("announce timeout")
 		.expect("routed")

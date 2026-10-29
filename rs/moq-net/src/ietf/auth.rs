@@ -521,9 +521,8 @@ async fn serve_issue(
 
 	loop {
 		let next = kio::wait(|waiter| {
-			let mut cx = std::task::Context::from_waker(waiter.waker());
 			if let Poll::Ready(res) = goaways
-				.poll_next::<Unexpected, _>(&mut stream.reader, &mut cx)
+				.poll_next::<Unexpected, _>(&mut stream.reader, waiter)
 				.map(|res| res.map(|_| ()))
 			{
 				return Poll::Ready(Next::Withdrawn(res));

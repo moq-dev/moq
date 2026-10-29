@@ -40,11 +40,13 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 		)
 		.await
 		.unwrap();
-		tokio::time::timeout(TIMEOUT, subscriber.consume().routed("ladder"))
-			.await
+		let remote = subscriber
+			.consume()
+			.follow("ladder", None)
 			.unwrap()
+			.available()
+			.await
 			.unwrap();
-		let remote = subscriber.consume().request_broadcast("ladder", None).await.unwrap();
 		let mut sub = remote.track("data").unwrap().subscribe(None).await.unwrap();
 		for sequence in [5, 1 << 32, (1 << 53) - 1, (1 << 53) + 1, (1 << 62) - 1] {
 			// Timestamps stop at 2^61 - 1, the most lite-05/06 can zigzag as a first frame.
@@ -233,7 +235,7 @@ async fn the_setup_path_reaches_the_decider_and_roots_the_grant() {
 	assert_eq!(next_active(&mut announced).await, "room/cam");
 
 	let broadcast = consumer
-		.request_broadcast("room/cam", None)
+		.request("room/cam", None)
 		.await
 		.expect("announced broadcast resolves");
 	let mut track = broadcast

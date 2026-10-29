@@ -38,7 +38,13 @@ async fn sequential_viewers_share_the_relays_fetched_groups() {
 			options.server_publish = Some(relay.consume());
 			options.client_subscribe = Some(viewer.clone());
 			let pair = connect_mock(options).await;
-			let remote = viewer.consume().routed_broadcast("room").await.unwrap();
+			let remote = viewer
+				.consume()
+				.follow("room", None)
+				.unwrap()
+				.available()
+				.await
+				.unwrap();
 			viewers.push((viewer, pair, remote));
 		}
 		for round in 0..3 {

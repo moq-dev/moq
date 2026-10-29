@@ -1,10 +1,9 @@
-import { Instant, Milli, Nano, now, sleep, wall } from "@moq/clock";
+import { Instant, Milli, Nano, now, sleep, wall, yieldNow } from "@moq/clock";
 import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
 import type { Credential, Grant, Issued, Request, Requests } from "./auth.ts";
 import { closeReason, error, ProtocolViolation, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
 import * as Path from "./path.ts";
 import type { Reader, Stream, Writer } from "./stream.ts";
-import { nextTask } from "./util/yield.ts";
 
 /** Write a grant's patterns as a count and each one's canonical text, the encoding both wires' AUTH_OK share. @internal */
 export async function encodePatterns(w: Writer, patterns: Path.Patterns) {
@@ -585,7 +584,7 @@ export class AuthSession {
 	// Whoever answers the peer's tokens is decided once, after the task that established
 	// the session: an app that calls requests() as soon as connect/accept resolves always
 	// wins, however quickly the peer's first token arrives.
-	#decided = nextTask();
+	#decided = yieldNow();
 
 	/** Throws {@link Duplicate} while `handle` backs another active session, or the handle's end. */
 	constructor({ wire, requests, peerGrant, handle, draining }: AuthSessionProps) {

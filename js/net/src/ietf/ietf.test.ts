@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { Milli } from "@moq/clock";
 import { ProtocolViolation } from "../error.ts";
 import * as Path from "../path.ts";
 import { type Cursor, Reader, Writer } from "../stream.ts";
@@ -7,7 +8,15 @@ import * as Varint from "../varint.ts";
 import { Fetch } from "./fetch.ts";
 import * as GoAway from "./goaway.ts";
 import * as Namespace from "./namespace.ts";
-import { FetchFrame, type FetchPosition, Frame, Group, type GroupFlags } from "./object.ts";
+import {
+	EndOfRange,
+	FetchEndOfRange,
+	FetchFrame,
+	type FetchPosition,
+	Frame,
+	Group,
+	type GroupFlags,
+} from "./object.ts";
 import { Parameters } from "./parameters.ts";
 import { Publish, PublishDone } from "./publish.ts";
 import * as Announce from "./publish_namespace.ts";
@@ -842,6 +851,44 @@ test("FetchFrame: the first object carries its absolute ids and the rest inherit
 	]);
 });
 
+// An End of Range names absolute ids wherever it falls and carries no payload length, as
+// every implementation reads it (moq-wg/moq-transport#1861). Read as a delta, its group
+// could never name the group it follows.
+test("FetchEndOfRange: absolute ids and nothing after them", async () => {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_22] as const) {
+		const reason = version === Version.DRAFT_18 ? EndOfRange.Unknown : EndOfRange.TimedOut;
+		const { stream, written } = createTestWritableStream();
+		const writer = new Writer(stream, version);
+		await new FetchEndOfRange({ reason, group: 7n, object: 2n ** 62n - 1n }).encode(writer, version);
+		writer.close();
+		await writer.closed;
+
+		const reader = new Reader(undefined, concatChunks(written), version);
+		expect(await reader.u53()).toBe(reason);
+		expect(await reader.u62()).toBe(7n);
+		expect(await reader.u62()).toBe(2n ** 62n - 1n);
+		expect(await reader.done()).toBe(true);
+	}
+
+	// Draft-18 has no Timed-Out marker; a FILL_TIMEOUT there reports Unknown.
+	const marker = new FetchEndOfRange({ reason: EndOfRange.TimedOut, group: 0n, object: 0n });
+	const { stream } = createTestWritableStream();
+	await expect(marker.encode(new Writer(stream, Version.DRAFT_18), Version.DRAFT_18)).rejects.toThrow();
+});
+
+// The first object after an End of Range has no prior object's priority to inherit, but its
+// group is still a delta from the marker's.
+test("FetchFrame: the first object after an End of Range", async () => {
+	const frame = new FetchFrame({ payload: new Uint8Array([0x01]) });
+	const encoded = await encodeFetchFrameVersioned(
+		frame,
+		{ group: 9, object: 0, first: true, previousGroup: 7 },
+		Version.DRAFT_22,
+	);
+	// GROUP_ID | OBJECT_ID | PRIORITY, group 7 + 1 + 1, object 0, priority 0, then the payload.
+	expect(Array.from(encoded)).toEqual([0x1c, 0x01, 0x00, 0x00, 0x01, 0x01]);
+});
+
 // A fetch object has no status field, unlike a subgroup object: a zero payload length is
 // simply an empty object, and writing a status after it would desync the stream.
 test("FetchFrame: an empty payload is a zero length, with no status byte", async () => {
@@ -969,6 +1016,7 @@ test("Fetch draft-22: decodes every legal parameter", async () => {
 
 	const msg = await decodeVersioned(body, Fetch.decode, Version.DRAFT_22);
 	expect(msg.requestId).toBe(1n);
+	expect(msg.fillTimeout).toBe(Milli(100));
 });
 
 // Draft-22's LOCATION_FILTER is a Location Filter Type with no Length, so Next Object is the

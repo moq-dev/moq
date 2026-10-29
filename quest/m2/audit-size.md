@@ -149,6 +149,13 @@ benchmark. This audit does not adopt opt-level s or remove symbols. Recheck thes
 against post-release shipping history before proposing more work. There was no
 new independently justified runtime fix in the m1 run.
 
+Check first (added 2026-10-28): when [moq-dev/moq#7132](https://github.com/moq-dev/moq/pull/7132)
+let the Nightly report the generated C archives, it unmasked growth since
+2026-10-24 that no run has explained: every JS bundle grew 6 to 8% (the largest
+single input is `sorted-btree`, +19 KB raw, from
+[moq-dev/moq#6869](https://github.com/moq-dev/moq/pull/6869)), and the Python
+sdist grew 17% (7,733,152 to 9,016,318 bytes).
+
 ## Required
 
 - [Release cut](/quest/m2/release/cut.md)

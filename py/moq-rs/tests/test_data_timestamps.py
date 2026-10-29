@@ -12,28 +12,6 @@ import pytest
 
 @pytest.mark.parametrize("mode", ["snapshot", "stream"])
 @pytest.mark.parametrize("timestamp", [None, timedelta(microseconds=123_456)])
-async def test_flate_timestamp_round_trip(mode: str, timestamp: timedelta | None):
-    broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("payload", moq.TrackInfo(timescale=None if timestamp is None else 1_000_000))
-    consumer = track.consume()
-    payload = b"opaque payload"
-    if mode == "snapshot":
-        snapshot = moq.flate.SnapshotProducer(broadcast, track, mime="application/octet-stream")
-        snapshot.update(payload, timestamp=timestamp)
-        snapshot.finish()
-    else:
-        stream = moq.flate.StreamProducer(broadcast, track, mime="application/octet-stream")
-        stream.append(payload, timestamp=timestamp)
-        stream.finish()
-    frame = await asyncio.wait_for(consumer.read_frame(), timeout=5.0)
-    assert frame is not None
-    assert frame.payload == payload
-    assert frame.timestamp == timestamp
-    broadcast.close()
-
-
-@pytest.mark.parametrize("mode", ["snapshot", "stream"])
-@pytest.mark.parametrize("timestamp", [None, timedelta(microseconds=123_456)])
 async def test_json_timestamp_round_trip(mode: str, timestamp: timedelta | None):
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("value", moq.TrackInfo(timescale=None if timestamp is None else 1_000_000))

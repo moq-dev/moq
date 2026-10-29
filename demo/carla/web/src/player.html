@@ -1,0 +1,42 @@
+<header>
+	<h1>MoQ CARLA</h1>
+	<button class="wheel" id="wheel" type="button" hidden></button>
+	<span class="status" id="conn">Connecting…</span>
+</header>
+<div id="wheel-cal" hidden>
+	<div class="cal-box">
+		<h2>CALIBRATE STEERING WHEEL</h2>
+		<div class="cal-device"></div>
+		<div class="cal-progress"></div>
+		<p class="cal-prompt"></p>
+		<div class="cal-live"></div>
+		<div class="cal-warn" hidden>
+			That control didn't move far enough to identify. Move it to its stop and capture again.
+		</div>
+		<div class="cal-actions">
+			<button class="cal-capture" type="button">Capture</button>
+			<button class="cal-skip" type="button">Skip</button>
+			<button class="cal-cancel" type="button">Cancel</button>
+		</div>
+		<div class="cal-safety">
+			<button class="estop-btn cal-estop" type="button">E-STOP</button>
+			<span>A vehicle you control is parked while this is open. <kbd>E</kbd> still e-stops the focused vehicle.</span>
+		</div>
+	</div>
+</div>
+<div id="backdrop" hidden></div>
+<div id="inspector"></div>
+<main>
+	<div id="preview-notice" hidden>OFFLINE PREVIEW · No relay connection</div>
+	<section class="map-panel" aria-label="Map">
+		<div id="map">
+			<svg id="roads" preserveAspectRatio="none" aria-label="Road network"><defs><path id="lane-geometry" /></defs><image id="aerial-image" preserveAspectRatio="none"/><use href="#lane-geometry" class="road-shoulder"/><use href="#lane-geometry" class="road-surface"/><use href="#lane-geometry" class="road-line"/></svg>
+			<div id="markers"></div>
+			<div class="compass" role="img" aria-label="North">N<span>↑</span></div>
+			<div id="scale" hidden><span class="label"></span><div class="bar"></div></div>
+			<div id="map-note" hidden></div>
+			<div id="offline" role="status" hidden><h2>Connecting to the relay…</h2><p></p></div>
+		</div>
+	</section>
+</main>
+<footer><details><summary>Controls</summary><p>Select a vehicle, then choose <strong>Take control</strong> or use a drive key. <kbd>W</kbd> throttle · <kbd>S</kbd> brake · <kbd>A</kbd> / <kbd>D</kbd> steer · <kbd>C</kbd> center · <kbd>Space</kbd> / <kbd>G</kbd> gear while braking.</p><p><kbd>E</kbd> emergency stop · <kbd>R</kbd> reset stop · <kbd>Esc</kbd> release control, then return to the map. Keyboard inputs hold when released.</p><p>Plug in a steering wheel and turn it to connect. Select its name in the header to calibrate. Move it with the throttle released to take over.</p></details><span>A generic <a href="https://moq.dev">MoQ</a> relay carries the video, telemetry, and controls.</span></footer>

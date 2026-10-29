@@ -113,10 +113,10 @@ final class Server {
 
   /// Create a broadcast at [path], served to incoming sessions.
   ///
-  /// Advertise it with `announce` after populating tracks. Throws when [listen]
-  /// was given a [ListenOptions.consume] origin but no
+  /// Advertise it with `announce` after populating its `broadcast`. Throws
+  /// when [listen] was given a [ListenOptions.consume] origin but no
   /// [ListenOptions.publish] one, since there is then nothing to serve from.
-  BroadcastProducer createBroadcast(String path) {
+  Publication createBroadcast(String path) {
     final origin = _publishOrigin;
     if (origin == null) throw StateError('no publish origin configured');
     return origin.createBroadcast(path: path);

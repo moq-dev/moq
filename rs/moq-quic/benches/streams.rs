@@ -214,7 +214,7 @@ fn bench_write_size(c: &mut Criterion<ThreadCpu>) {
 	group.finish();
 }
 
-/// Keep `live` writers blocked while `churn` others block and reset, with MAX_DATA held at zero.
+/// Keep `live` writers blocked while `churn` others block and reset, with MAX_DATA spent and never raised.
 /// A fresh connection per sample bounds even the unfixed implementation's retained history.
 fn bench_connection_blocked(c: &mut Criterion<ThreadCpu>) {
 	let mut group = c.benchmark_group("connection_blocked");
@@ -227,9 +227,12 @@ fn bench_connection_blocked(c: &mut Criterion<ThreadCpu>) {
 					b.iter_batched(
 						|| {
 							let mut pair = Pair::new(Setup {
-								server_receive_window: 0u32.into(),
+								server_receive_window: 1u32.into(),
 								..Setup::default()
 							});
+							// A window can't be zero, so one stream spends its only byte.
+							let id = pair.client().streams().open(Dir::Uni, Default::default()).unwrap();
+							assert_eq!(pair.client().send_stream(id).write(b"x"), Ok(1));
 							for _ in 0..live {
 								let id = pair.client().streams().open(Dir::Uni, Default::default()).unwrap();
 								assert_eq!(

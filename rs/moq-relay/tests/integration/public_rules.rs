@@ -119,10 +119,7 @@ async fn first_broadcast(url: url::Url) -> String {
 	.expect("announcement timeout");
 	let name = update.prefix.to_string();
 
-	let broadcast = consumer
-		.request_broadcast(&name, None)
-		.await
-		.expect("broadcast resolves");
+	let broadcast = consumer.request(&name, None).await.expect("broadcast resolves");
 	let mut track = broadcast
 		.track("video")
 		.unwrap()

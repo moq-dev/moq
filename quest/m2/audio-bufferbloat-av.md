@@ -29,6 +29,10 @@ Decided in planning (2026-10-20):
   because an intermittent two-second device stall voids about one AAC native
   row in seven (see `test/audio-quality/README.md`). Reproduce and fix that
   stall at its cause; do not loosen the void rule to get green.
+  Start by re-measuring: [moq-dev/moq#7138](https://github.com/moq-dev/moq/pull/7138)
+  found that the private PulseAudio null sink processed audio in 2-second
+  blocks and capped them at 50 ms (`norewinds=1` in `test/lib/pulse.py`), which
+  is likely this stall. If the rows stop voiding, enforce them.
 
 Recommendations:
 

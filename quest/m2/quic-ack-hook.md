@@ -104,5 +104,3 @@ Decided in the 2026-09-30 audit: moved to m2 with its consumers, the
 
 - [QUIC driver poll waits](/quest/m1/quic-api/poll.md) - the `&self, &kio::Waiter`
   driver shape `poll_acked` takes
-- [moq-net polls on kio waiters](/quest/m1/quic-api/net-poll.md) - the trait
-  shape the moq-net method takes

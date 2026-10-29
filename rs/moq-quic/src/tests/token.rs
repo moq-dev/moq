@@ -21,12 +21,19 @@ fn oversized_cached_initial_token() {
 		(1200, 1500, true),
 	] {
 		let mut config = client_config();
-		Arc::get_mut(&mut config.transport).unwrap().initial_mtu(mtu);
+		config.transport.initial_mtu = mtu;
 		config.token_store.insert("localhost", vec![0; token_len].into());
-		let mut endpoint = Endpoint::new(Arc::new(EndpointConfig::default()), None, true);
+		let mut endpoint = Endpoint::new(endpoint::Config::default(), true).unwrap();
 		let now = Instant::now();
 		let (_, mut conn) = endpoint
-			.connect(now, config, "[::1]:4433".parse().unwrap(), "localhost")
+			.connect(
+				now,
+				Dial {
+					config: &config,
+					remote: "[::1]:4433".parse().unwrap(),
+					server_name: "localhost",
+				},
+			)
 			.unwrap();
 		let mut buf = Vec::new();
 		assert_eq!(
@@ -61,18 +68,23 @@ fn oversized_retry_token() {
 		(1200, false),
 	] {
 		let address = "[::1]:4433".parse().unwrap();
-		let mut endpoint = Endpoint::new(Arc::new(EndpointConfig::default()), None, true);
+		let mut endpoint = Endpoint::new(endpoint::Config::default(), true).unwrap();
 		let now = Instant::now();
-		let (_, mut conn) = endpoint.connect(now, client_config(), address, "localhost").unwrap();
+		let (_, mut conn) = endpoint
+			.connect(
+				now,
+				Dial {
+					config: &client_config(),
+					remote: address,
+					server_name: "localhost",
+				},
+			)
+			.unwrap();
 		let mut buf = Vec::new();
 		let _ = conn.poll_transmit(now, 1, &mut buf).unwrap();
-		let ProtectedHeader::Initial(initial) = ProtectedHeader::decode(
-			&mut Cursor::new(&buf),
-			&FixedLengthConnectionIdParser::new(0),
-			DEFAULT_SUPPORTED_VERSIONS,
-			false,
-		)
-		.unwrap() else {
+		let ProtectedHeader::Initial(initial) =
+			ProtectedHeader::decode(&mut Cursor::new(&buf), &FixedLengthConnectionIdParser::new(0), false).unwrap()
+		else {
 			panic!("expected an Initial packet")
 		};
 		let header = Header::Retry {
@@ -83,13 +95,21 @@ fn oversized_retry_token() {
 		let mut retry = Vec::new();
 		header.encode(&mut retry);
 		retry.resize(retry.len() + token_len, 0);
-		let tag = server_config()
-			.crypto
-			.retry_tag(initial.version, initial.dst_cid, &retry);
+		let tag =
+			server_config()
+				.crypto
+				.retry_tag(Version::from_wire(initial.version).unwrap(), initial.dst_cid, &retry);
 		retry.extend_from_slice(&tag);
-		let Some(DatagramEvent::ConnectionEvent(_, event)) =
-			endpoint.handle(now, address, None, None, BytesMut::from(&retry[..]), &mut buf)
-		else {
+		let Some(DatagramEvent::ConnectionEvent(_, event)) = endpoint.handle(
+			now,
+			Received {
+				remote: address,
+				local_ip: None,
+				ecn: None,
+				data: BytesMut::from(&retry[..]),
+			},
+			&mut buf,
+		) else {
 			panic!("Retry must be routed to the client connection")
 		};
 		conn.handle_event(event);
@@ -125,7 +145,7 @@ fn stateless_retry() {
 		.connections
 		.get_mut(&client_ch)
 		.unwrap()
-		.close(pair.time, VarInt(42), Bytes::new());
+		.close(pair.time, VarInt(42), String::new());
 	pair.drive();
 	assert_eq!(pair.client.known_connections(), 0);
 	assert_eq!(pair.client.known_cids(), 0);
@@ -143,8 +163,8 @@ async fn retry_token_expired() {
 	pair.server.handle_incoming = Box::new(validate_incoming);
 
 	let mut config = server_config();
-	config.retry_token_lifetime(retry_token_lifetime);
-	pair.server.set_server_config(Some(Arc::new(config)));
+	config.retry_token_lifetime = retry_token_lifetime;
+	pair.server.set_server_config(Some(config));
 
 	let client_ch = pair.begin_connect(client_config());
 	pair.drive_client();
@@ -177,7 +197,7 @@ fn use_token() {
 		.connections
 		.get_mut(&client_ch)
 		.unwrap()
-		.close(pair.time, VarInt(42), Bytes::new());
+		.close(pair.time, VarInt(42), String::new());
 	pair.drive();
 	assert_eq!(pair.client.known_connections(), 0);
 	assert_eq!(pair.client.known_cids(), 0);
@@ -194,7 +214,7 @@ fn use_token() {
 		.connections
 		.get_mut(&client_ch_2)
 		.unwrap()
-		.close(pair.time, VarInt(42), Bytes::new());
+		.close(pair.time, VarInt(42), String::new());
 	pair.drive();
 	assert_eq!(pair.client.known_connections(), 0);
 	assert_eq!(pair.client.known_cids(), 0);
@@ -213,7 +233,7 @@ fn retry_then_use_token() {
 		.connections
 		.get_mut(&client_ch)
 		.unwrap()
-		.close(pair.time, VarInt(42), Bytes::new());
+		.close(pair.time, VarInt(42), String::new());
 	pair.drive();
 	assert_eq!(pair.client.known_connections(), 0);
 	assert_eq!(pair.client.known_cids(), 0);
@@ -230,7 +250,7 @@ fn retry_then_use_token() {
 		.connections
 		.get_mut(&client_ch_2)
 		.unwrap()
-		.close(pair.time, VarInt(42), Bytes::new());
+		.close(pair.time, VarInt(42), String::new());
 	pair.drive();
 	assert_eq!(pair.client.known_connections(), 0);
 	assert_eq!(pair.client.known_cids(), 0);
@@ -248,7 +268,7 @@ fn use_token_then_retry() {
 		.connections
 		.get_mut(&client_ch)
 		.unwrap()
-		.close(pair.time, VarInt(42), Bytes::new());
+		.close(pair.time, VarInt(42), String::new());
 	pair.drive();
 	assert_eq!(pair.client.known_connections(), 0);
 	assert_eq!(pair.client.known_cids(), 0);
@@ -278,7 +298,7 @@ fn use_token_then_retry() {
 		.connections
 		.get_mut(&client_ch_2)
 		.unwrap()
-		.close(pair.time, VarInt(42), Bytes::new());
+		.close(pair.time, VarInt(42), String::new());
 	pair.drive();
 	assert_eq!(pair.client.known_connections(), 0);
 	assert_eq!(pair.client.known_cids(), 0);
@@ -308,13 +328,13 @@ fn use_same_token_twice() {
 	let _guard = subscribe();
 	let mut pair = Pair::default();
 	let mut client_config = client_config();
-	client_config.token_store(Arc::new(EvilTokenStore::default()));
+	client_config.token_store = Arc::new(EvilTokenStore::default());
 	let (client_ch, _server_ch) = pair.connect_with(client_config.clone());
 	pair.client
 		.connections
 		.get_mut(&client_ch)
 		.unwrap()
-		.close(pair.time, VarInt(42), Bytes::new());
+		.close(pair.time, VarInt(42), String::new());
 	pair.drive();
 	assert_eq!(pair.client.known_connections(), 0);
 	assert_eq!(pair.client.known_cids(), 0);
@@ -331,7 +351,7 @@ fn use_same_token_twice() {
 		.connections
 		.get_mut(&client_ch_2)
 		.unwrap()
-		.close(pair.time, VarInt(42), Bytes::new());
+		.close(pair.time, VarInt(42), String::new());
 	pair.drive();
 	assert_eq!(pair.client.known_connections(), 0);
 	assert_eq!(pair.client.known_cids(), 0);
@@ -348,7 +368,7 @@ fn use_same_token_twice() {
 		.connections
 		.get_mut(&client_ch_3)
 		.unwrap()
-		.close(pair.time, VarInt(42), Bytes::new());
+		.close(pair.time, VarInt(42), String::new());
 	pair.drive();
 	assert_eq!(pair.client.known_connections(), 0);
 	assert_eq!(pair.client.known_cids(), 0);
@@ -361,7 +381,7 @@ async fn use_token_expired() {
 	let _guard = subscribe();
 	let lifetime = Duration::from_secs(10000);
 	let mut server_config = server_config();
-	server_config.validation_token.lifetime(lifetime);
+	server_config.validation_token.lifetime = lifetime;
 	let mut pair = Pair::new(Default::default(), server_config);
 	let client_config = client_config();
 	let (client_ch, _server_ch) = pair.connect_with(client_config.clone());
@@ -369,7 +389,7 @@ async fn use_token_expired() {
 		.connections
 		.get_mut(&client_ch)
 		.unwrap()
-		.close(pair.time, VarInt(42), Bytes::new());
+		.close(pair.time, VarInt(42), String::new());
 	pair.drive();
 	assert_eq!(pair.client.known_connections(), 0);
 	assert_eq!(pair.client.known_cids(), 0);
@@ -386,7 +406,7 @@ async fn use_token_expired() {
 		.connections
 		.get_mut(&client_ch_2)
 		.unwrap()
-		.close(pair.time, VarInt(42), Bytes::new());
+		.close(pair.time, VarInt(42), String::new());
 	pair.drive();
 	assert_eq!(pair.client.known_connections(), 0);
 	assert_eq!(pair.client.known_cids(), 0);
@@ -405,7 +425,7 @@ async fn use_token_expired() {
 		.connections
 		.get_mut(&client_ch_3)
 		.unwrap()
-		.close(pair.time, VarInt(42), Bytes::new());
+		.close(pair.time, VarInt(42), String::new());
 	pair.drive();
 	assert_eq!(pair.client.known_connections(), 0);
 	assert_eq!(pair.client.known_cids(), 0);

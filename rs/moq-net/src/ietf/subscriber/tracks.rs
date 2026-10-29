@@ -454,16 +454,15 @@ impl Subscriber {
 		}
 		loop {
 			let event = kio::wait(|waiter| {
-				let mut cx = waiter.context();
-				if session.poll_closed(&mut cx).is_ready() {
+				if session.poll_closed(waiter).is_ready() {
 					return Poll::Ready(Ok(Event::Closed));
 				}
 				if live.poll_closed(waiter).is_ready() {
 					return Poll::Ready(Ok(Event::Cancelled));
 				}
-				ready!(stream.writer.poll_flush(&mut cx))?;
+				ready!(stream.writer.poll_flush(waiter))?;
 				messages
-					.poll_next(&mut stream.reader, &mut cx)
+					.poll_next(&mut stream.reader, waiter)
 					.map(|next| next.map(Event::Message))
 			})
 			.await?;
@@ -517,12 +516,11 @@ impl Subscriber {
 			false => writer.abort(&Error::Cancel),
 		}
 		kio::wait(|waiter| {
-			let mut cx = waiter.context();
-			if session.poll_closed(&mut cx).is_ready() {
+			if session.poll_closed(waiter).is_ready() {
 				return Poll::Ready(());
 			}
 			loop {
-				match ready!(messages.poll_next(&mut reader, &mut cx)) {
+				match ready!(messages.poll_next(&mut reader, waiter)) {
 					Ok(Some(_)) => continue,
 					Ok(None) | Err(_) => return Poll::Ready(()),
 				}
@@ -862,7 +860,7 @@ impl Subscriber {
 					new_group: None,
 				},
 			)?;
-			std::future::poll_fn(|cx| stream.writer.poll_flush(cx)).await
+			kio::wait(|waiter| stream.writer.poll_flush(waiter)).await
 		}
 		.await;
 		if let Err(err) = ok {
@@ -892,7 +890,7 @@ impl Subscriber {
 	/// Watch a paused subscription until it ends, its entry is let go, or a subscription
 	/// takes it to resume.
 	async fn watch(&self, key: TrackKey, mut upstream: Upstream, handoff: kio::Shared<Handoff>) {
-		let mut session = self.session.clone();
+		let session = self.session.clone();
 		enum Step {
 			Closed,
 			Gone,
@@ -901,8 +899,7 @@ impl Subscriber {
 		}
 		let end = loop {
 			let step = kio::wait(|waiter| {
-				let mut cx = waiter.context();
-				if session.poll_closed(&mut cx).is_ready() {
+				if session.poll_closed(waiter).is_ready() {
 					return Poll::Ready(Step::Closed);
 				}
 				if let Poll::Ready(handoff) = handoff.poll(waiter, |handoff| match handoff.gone || handoff.wanted {
@@ -916,7 +913,7 @@ impl Subscriber {
 				}
 				upstream
 					.messages
-					.poll_next(&mut upstream.stream.reader, &mut cx)
+					.poll_next(&mut upstream.stream.reader, waiter)
 					.map(Step::Message)
 			})
 			.await;
@@ -1751,9 +1748,8 @@ mod tests {
 			.write_all(&mut &[0x00, 0x02, 0x00, 0xff][..])
 			.await
 			.unwrap();
-		let mut peer = h.peer.clone();
-		let closed =
-			kio::wait(move |waiter| crate::transport::poll::Session::poll_closed(&mut peer, &mut waiter.context()));
+		let peer = h.peer.clone();
+		let closed = kio::wait(move |waiter| crate::transport::poll::Session::poll_closed(&peer, waiter));
 		moq_clock::timeout(TIMEOUT, closed)
 			.await
 			.expect("the session stayed up");

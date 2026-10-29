@@ -38,9 +38,19 @@ Measure estimate changes, demand transitions, ceiling changes and per-frame
 peek separately: CPU, allocations, waker/listener registrations and browser
 main-thread delay. Assert every grant, not merely their sum.
 
+Measured in the 2026-10-27 audit on main
+[`651c30fee9`](https://github.com/moq-dev/moq/commit/651c30fee9d88fd56f4079433dd3e1f98d77f21c):
+reading `Reservation::rate` once for every live reservation, at one
+priority, allocated 64 / 384 / 2,048 times (22 KiB / 350 KiB / 5.5 MiB) at
+16 / 64 / 256 reservations. 4x the reservations cost 16x the allocation
+traffic, because `Share::grant` collects claims, filters demand, and builds
+and sorts tier vectors for every share. That excludes `poll_changed`'s waiter
+registrations, which the sweep must count as well.
+
 Consider calculating a shared allocation once per relevant change, but retain
 strict priority, max-min fairness, rounding, ties, immediate peek behavior and
-closed-demand removal. Cover both languages in this quest. Coordinate with
+closed-demand removal. An idle sender still sees the share it would regain
+without shrinking its active siblings' grants; that is intended. Cover both languages in this quest. Coordinate with
 [viewer targets](/quest/m2/probe/viewer-target.md), which changes how the same
 allocator feeds probes.
 

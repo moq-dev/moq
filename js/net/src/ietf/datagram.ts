@@ -129,7 +129,7 @@ export async function encodeDatagram(
 ): Promise<Uint8Array> {
 	const properties =
 		options.timescale !== undefined
-			? await encodeObjectExtensions(datagram.timestamp, options.timescale, version)
+			? encodeObjectExtensions(datagram.timestamp, options.timescale, version)
 			: undefined;
 	return new ObjectDatagram({
 		trackAlias: options.trackAlias,

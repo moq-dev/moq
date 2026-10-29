@@ -621,7 +621,7 @@ fn peer_from_params(params: &ietf::Parameters, version: Version) -> Result<peer:
 	reason = "private plumbing; a single-use argument struct would only rename the parameters"
 )]
 async fn run_setup(
-	mut session: Transport,
+	session: Transport,
 	version: Version,
 	path: Option<String>,
 	authority: Option<String>,
@@ -684,11 +684,10 @@ async fn run_setup(
 	// a protocol violation the peer closes over.
 	let mut untriggered = false;
 	let payload = kio::wait(|waiter| {
-		let mut cx = waiter.context();
-		if session.poll_closed(&mut cx).is_ready() {
+		if session.poll_closed(waiter).is_ready() {
 			return std::task::Poll::Ready(Ok(None));
 		}
-		if writer.poll_closed(&mut cx).is_ready() {
+		if writer.poll_closed(waiter).is_ready() {
 			return std::task::Poll::Ready(Err(Error::ProtocolViolation));
 		}
 		if !untriggered {
@@ -719,7 +718,7 @@ async fn run_setup(
 			if waiter.poll_future(closed.as_mut()).is_ready() {
 				return std::task::Poll::Ready(Ok(()));
 			}
-			if writer.poll_closed(&mut waiter.context()).is_ready() {
+			if writer.poll_closed(waiter).is_ready() {
 				return std::task::Poll::Ready(Err(Error::ProtocolViolation));
 			}
 			std::task::Poll::Pending
@@ -821,7 +820,7 @@ impl Unis {
 		while self.ended.is_none() {
 			let reader = match self.early.pop_front() {
 				Some(reader) => reader,
-				None => match self.session.poll_accept_uni(&mut waiter.context()) {
+				None => match self.session.poll_accept_uni(waiter) {
 					std::task::Poll::Ready(Ok(recv)) => Reader::new(recv, crate::Version::Ietf(self.uni.version)),
 					std::task::Poll::Ready(Err(err)) => {
 						self.ended = Some(Error::from_transport(err));
@@ -910,7 +909,7 @@ impl Uni {
 		// peer resets with its own codes (moxygen's CANCELLED is 0x1), which the
 		// WebTransport code mapping rejects. If the connection itself died, the next
 		// accept reports it.
-		let kind: u64 = match std::future::poll_fn(|cx| reader.poll_varint_peek(cx)).await {
+		let kind: u64 = match kio::wait(|waiter| reader.poll_varint_peek(waiter)).await {
 			Ok(kind) => kind,
 			Err(err) if died_before_header(&err) => {
 				tracing::debug!(%err, "dropping uni stream that died before its type");
@@ -966,7 +965,7 @@ impl Uni {
 			// The receiver MUST discard padding. We read it to the end rather than cancel,
 			// so a peer probing for bandwidth gets the throughput it is measuring.
 			UniType::Padding => {
-				while let Ok(Some(_)) = std::future::poll_fn(|cx| reader.poll_read_chunk(cx, usize::MAX)).await {}
+				while let Ok(Some(_)) = kio::wait(|waiter| reader.poll_read_chunk(waiter, usize::MAX)).await {}
 			}
 		}
 		Ok(())
@@ -991,7 +990,7 @@ fn died_before_header(err: &Error) -> bool {
 ///
 /// A transport without datagrams never delivers one, so this parks. A transport failure
 /// or a malformed datagram ends the session.
-async fn run_datagrams(mut session: Transport, subscriber: Subscriber) -> Result<(), Error> {
+async fn run_datagrams(session: Transport, subscriber: Subscriber) -> Result<(), Error> {
 	if session.max_datagram_size() == 0 {
 		return Ok(());
 	}
@@ -1026,7 +1025,7 @@ pub(super) fn stop_on_error<R: crate::transport::poll::RecvStream>(
 
 /// Accept incoming bidi streams, leaving each request to read its own header.
 async fn run_dispatch(
-	mut session: Transport,
+	session: Transport,
 	publisher: Publisher,
 	subscriber: Subscriber,
 	peer_setup: peer::PeerSetup,
@@ -1085,8 +1084,7 @@ async fn run_dispatch(
 				{
 					return Poll::Ready(Err(err));
 				}
-				let mut cx = waiter.context();
-				Stream::poll_accept(&mut session, version, &mut cx)
+				Stream::poll_accept(&session, version, waiter)
 			})
 			.await;
 		let stream = match accepted {
@@ -1298,8 +1296,8 @@ async fn read_goaways<R: crate::transport::poll::RecvStream>(
 		// Nothing may follow a GOAWAY on this stream, so bytes already here are a violation.
 		// Caught before the GOAWAY surfaces: the application acting on it can close the
 		// session first, without our code.
-		let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
-		if let std::task::Poll::Ready(Ok(true)) = reader.poll_has_more(&mut cx) {
+		let waiter = &kio::Waiter::noop();
+		if let std::task::Poll::Ready(Ok(true)) = reader.poll_has_more(waiter) {
 			return Err(Error::ProtocolViolation);
 		}
 
@@ -1328,7 +1326,7 @@ impl Drop for AuthClose {
 ///
 /// Judges the publisher's serving origin rather than the raw one: an origin that also
 /// consumes holds what the peer sent us, which is not ours to publish back.
-async fn enforce_grant(auth: crate::auth::Link, publisher: Publisher, mut session: Transport) -> Result<(), Error> {
+async fn enforce_grant(auth: crate::auth::Link, publisher: Publisher, session: Transport) -> Result<(), Error> {
 	let origin = publisher.serving_origin().await;
 	// Checking what we publish is not a local reader asking to discover anything.
 	let mut announced = origin.clone().serving().announced();
@@ -3277,7 +3275,7 @@ mod tests {
 				"{version:?}: {result:?}"
 			);
 
-			let mut session = DeadStreamSession::unis(1);
+			let session = DeadStreamSession::unis(1);
 			let recv = session.accept_uni().await.unwrap();
 			let (_handle, protocol) = crate::goaway::Handle::new(false);
 			let err = run_goaway(
@@ -3299,9 +3297,8 @@ mod tests {
 		for version in [Version::Draft18, Version::Draft22] {
 			let request_id = (version == Version::Draft18).then_some(0);
 			let two = [goaway(version, request_id), goaway(version, request_id)].concat();
-			let mut session =
-				crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![two]);
-			let stream = std::future::poll_fn(|cx| session.poll_accept_uni(cx)).await.unwrap();
+			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![two]);
+			let stream = kio::wait(|waiter| session.poll_accept_uni(waiter)).await.unwrap();
 			let (handle, protocol) = crate::goaway::Handle::new(false);
 
 			let err = read_goaways(

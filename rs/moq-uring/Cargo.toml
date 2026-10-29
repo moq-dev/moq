@@ -53,7 +53,7 @@ web-transport-trait = { workspace = true }
 [dev-dependencies]
 anyhow = "1"
 bytes = { workspace = true }
-criterion = { workspace = true }
+criterion = { package = "bench-harness", path = "../bench-harness" }
 moq-net = { path = "../moq-net" }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }

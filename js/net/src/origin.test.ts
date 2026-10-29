@@ -740,7 +740,7 @@ test("discovery reflects the attached sessions", async () => {
 	origin.close();
 });
 
-test("announced requests share no subscription and follow discovery", () => {
+test("followers share no subscription and follow discovery", () => {
 	const origin = new Producer();
 	const wire = wireOf(origin);
 
@@ -756,7 +756,7 @@ test("announced requests share no subscription and follow discovery", () => {
 
 	const requests = [];
 	try {
-		for (let i = 0; i < 200; i++) requests.push(origin.request(Path.from(`user${i}`), { announced: true }));
+		for (let i = 0; i < 200; i++) requests.push(origin.follow(Path.from(`user${i}`)));
 	} finally {
 		spy.mockRestore();
 	}
@@ -767,12 +767,12 @@ test("announced requests share no subscription and follow discovery", () => {
 	const slots = [...(wire.requests.peek()?.values() ?? [])];
 	expect(slots.length).toBe(200);
 
-	// Gated with no session attached and with full discovery; blind once one session cannot announce.
+	// Following remains gated even when a session cannot announce.
 	expect(slots.some((slot) => wire.blind(slot))).toBe(false);
 	const seeing = wire.attach(true);
 	expect(slots.some((slot) => wire.blind(slot))).toBe(false);
 	const silent = wire.attach(false);
-	expect(slots.every((slot) => wire.blind(slot))).toBe(true);
+	expect(slots.some((slot) => wire.blind(slot))).toBe(false);
 	silent();
 	expect(slots.some((slot) => wire.blind(slot))).toBe(false);
 
@@ -2010,14 +2010,15 @@ test("closing a derived handle withdraws the sessions and answers attached throu
 	expect(request.active.peek()).toBeDefined();
 	expect(consumer.discovery.peek()).toBe(false);
 	expect(announced.synced.peek()).toBe(false);
-	expect(interests.splice(0)).toEqual(["+"]);
+	// The request owns its path's discovery until the root watch covers it.
+	expect(interests.splice(0)).toEqual(["+blind", "+", "-blind"]);
 
 	scoped.close();
 	await settle();
 
 	// The session stops asking its peer for announcements, now and for later watches.
 	expect(interests.splice(0)).toEqual(["-"]);
-	consumer.request(Path.from("later"), { announced: true }).close();
+	consumer.follow(Path.from("later")).close();
 	expect(interests).toEqual([]);
 
 	// The answer, the attached session, and the initial set in flight went with the handle.

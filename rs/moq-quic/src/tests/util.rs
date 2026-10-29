@@ -21,7 +21,7 @@ use tracing::{info_span, trace};
 
 use super::crypto::rustls::{QuicClientConfig, QuicServerConfig, configured_provider};
 use super::*;
-use crate::{Accepting, Duration, Instant, entropy};
+use crate::{Duration, Instant, entropy};
 
 pub(super) const DEFAULT_MTU: usize = 1452;
 
@@ -58,15 +58,24 @@ pub(super) struct Pair {
 impl Pair {
 	pub(super) fn default_with_deterministic_pns() -> Self {
 		let mut cfg = server_config();
-		let mut transport = TransportConfig::default();
-		transport.deterministic_packet_numbers(true);
-		cfg.transport = Arc::new(transport);
+		let transport = transport::Config {
+			deterministic_packet_numbers: true,
+			..transport::Config::default()
+		};
+		cfg.transport = transport;
 		Self::new(Default::default(), cfg)
 	}
 
-	pub(super) fn new(endpoint_config: Arc<EndpointConfig>, server_config: ServerConfig) -> Self {
-		let server = Endpoint::new(endpoint_config.clone(), Some(Arc::new(server_config)), true);
-		let client = Endpoint::new(endpoint_config, None, true);
+	pub(super) fn new(endpoint_config: endpoint::Config, server_config: server::Config) -> Self {
+		let server = Endpoint::new(
+			endpoint::Config {
+				server: Some(server_config),
+				..endpoint_config.clone()
+			},
+			true,
+		)
+		.unwrap();
+		let client = Endpoint::new(endpoint_config, true).unwrap();
 
 		Self::new_from_endpoint(client, server)
 	}
@@ -165,9 +174,9 @@ impl Pair {
 				self.last_spin = spin;
 			}
 			if let Some(socket) = &self.client.socket {
-				socket.send_to(&buffer, packet.destination).unwrap();
+				socket.send_to(&buffer, packet.remote).unwrap();
 			}
-			if self.server.addr == packet.destination {
+			if self.server.addr == packet.remote {
 				let (marked, arrivals) = self
 					.to_server
 					.transmit(&mut self.rng, self.time, self.latency, buffer.len());
@@ -192,9 +201,9 @@ impl Pair {
 				continue;
 			}
 			if let Some(socket) = &self.server.socket {
-				socket.send_to(&buffer, packet.destination).unwrap();
+				socket.send_to(&buffer, packet.remote).unwrap();
 			}
-			if self.client.addr == packet.destination {
+			if self.client.addr == packet.remote {
 				let (marked, arrivals) = self
 					.to_client
 					.transmit(&mut self.rng, self.time, self.latency, buffer.len());
@@ -212,7 +221,7 @@ impl Pair {
 		self.connect_with(client_config())
 	}
 
-	pub(super) fn connect_with(&mut self, config: ClientConfig) -> (ConnectionHandle, ConnectionHandle) {
+	pub(super) fn connect_with(&mut self, config: client::Config) -> (ConnectionHandle, ConnectionHandle) {
 		info!("connecting");
 		let client_ch = self.begin_connect(config);
 		self.drive();
@@ -222,12 +231,19 @@ impl Pair {
 	}
 
 	/// Just start connecting the client
-	pub(super) fn begin_connect(&mut self, config: ClientConfig) -> ConnectionHandle {
+	pub(super) fn begin_connect(&mut self, config: client::Config) -> ConnectionHandle {
 		let span = info_span!("client");
 		let _guard = span.enter();
 		let (client_ch, client_conn) = self
 			.client
-			.connect(self.time, config, self.server.addr, "localhost")
+			.connect(
+				self.time,
+				Dial {
+					config: &config,
+					remote: self.server.addr,
+					server_name: "localhost",
+				},
+			)
 			.unwrap();
 		self.client.connections.insert(client_ch, client_conn);
 		client_ch
@@ -527,12 +543,21 @@ impl TestEndpoint {
 				}
 			}
 		}
-		let buffer_size = self.endpoint.config().get_max_udp_payload_size() as usize;
+		let buffer_size = self.endpoint.max_udp_payload_size() as usize;
 		let mut buf = Vec::with_capacity(buffer_size);
 
 		while self.inbound.front().is_some_and(|x| x.0 <= now) {
 			let (recv_time, ecn, packet) = self.inbound.pop_front().unwrap();
-			if let Some(event) = self.endpoint.handle(recv_time, remote, None, ecn, packet, &mut buf) {
+			if let Some(event) = self.endpoint.handle(
+				recv_time,
+				Received {
+					remote,
+					local_ip: None,
+					ecn,
+					data: packet,
+				},
+				&mut buf,
+			) {
 				match event {
 					DatagramEvent::NewConnection(incoming) => match (self.handle_incoming)(&incoming) {
 						IncomingConnectionBehavior::Accept => {
@@ -567,7 +592,7 @@ impl TestEndpoint {
 	}
 
 	pub(super) fn drive_outgoing(&mut self, now: Instant) {
-		let buffer_size = self.endpoint.config().get_max_udp_payload_size() as usize;
+		let buffer_size = self.endpoint.max_udp_payload_size() as usize;
 		let mut buf = Vec::with_capacity(buffer_size);
 
 		loop {
@@ -641,7 +666,7 @@ impl TestEndpoint {
 
 	pub(super) fn try_accept(&mut self, incoming: Incoming, now: Instant) -> Result<ConnectionHandle, ConnectionError> {
 		let mut buf = Vec::new();
-		match self.endpoint.accept(incoming, now, &mut buf, None) {
+		match self.endpoint.accept(incoming, now, &mut buf) {
 			Ok((ch, conn)) => {
 				self.connections.insert(ch, conn);
 				self.accepted = Some(Ok(ch));
@@ -666,7 +691,7 @@ impl TestEndpoint {
 
 	pub(super) fn start_split_accept(&mut self, incoming: Incoming, now: Instant) -> Accepting {
 		let mut buf = Vec::new();
-		self.endpoint.start_accept(incoming, now, &mut buf, None).unwrap()
+		self.endpoint.start_accept(incoming, now, &mut buf).unwrap()
 	}
 
 	pub(super) fn finish_split_accept(&mut self, accepting: Accepting) -> ConnectionHandle {
@@ -773,17 +798,18 @@ impl Write for SharedBuffer {
 	}
 }
 
-pub(super) fn server_config() -> ServerConfig {
-	let mut config = ServerConfig::with_crypto(Arc::new(server_crypto()));
-	config.transport = Arc::new(TransportConfig::default());
+pub(super) fn server_config() -> server::Config {
+	let mut config = server::Config::new(Arc::new(server_crypto()));
+	config.transport = transport::Config::default();
 
 	config
 }
 
-pub(super) fn server_config_with_cert(cert: CertificateDer<'static>, key: PrivateKeyDer<'static>) -> ServerConfig {
-	let mut config = ServerConfig::with_crypto(Arc::new(server_crypto_with_cert(cert, key)));
-	config.transport = Arc::new(TransportConfig::default());
-	config.validation_token.sent(2).log(Arc::new(SimpleTokenLog::default()));
+pub(super) fn server_config_with_cert(cert: CertificateDer<'static>, key: PrivateKeyDer<'static>) -> server::Config {
+	let mut config = server::Config::new(Arc::new(server_crypto_with_cert(cert, key)));
+	config.transport = transport::Config::default();
+	config.validation_token.sent = 2;
+	config.validation_token.log = Arc::new(SimpleTokenLog::default());
 	config
 }
 
@@ -818,17 +844,19 @@ fn server_crypto_inner(
 	config.try_into().unwrap()
 }
 
-pub(super) fn client_config() -> ClientConfig {
-	let mut cfg = ClientConfig::new(Arc::new(client_crypto()));
-	cfg.transport = Arc::new(TransportConfig::default());
+pub(super) fn client_config() -> client::Config {
+	let mut cfg = client::Config::new(Arc::new(client_crypto()));
+	cfg.transport = transport::Config::default();
 	cfg
 }
 
-pub(super) fn client_config_with_deterministic_pns() -> ClientConfig {
-	let mut cfg = ClientConfig::new(Arc::new(client_crypto()));
-	let mut transport = TransportConfig::default();
-	transport.deterministic_packet_numbers(true);
-	cfg.transport = Arc::new(transport);
+pub(super) fn client_config_with_deterministic_pns() -> client::Config {
+	let mut cfg = client::Config::new(Arc::new(client_crypto()));
+	let transport = transport::Config {
+		deterministic_packet_numbers: true,
+		..transport::Config::default()
+	};
+	cfg.transport = transport;
 	cfg
 }
 
@@ -836,14 +864,15 @@ pub(super) fn client_config_with_deterministic_pns() -> ClientConfig {
 ///
 /// At zero RTT the window-derived pacer stops pacing, so a lockstep script sees whole windows
 /// leave at once, while BBR3 paces from its own rate and releases a burst nanoseconds later.
-pub(super) fn cubic_transport() -> TransportConfig {
-	let mut transport = TransportConfig::default();
-	transport.congestion_controller_factory(Arc::new(congestion::CubicConfig::default()));
-	transport
+pub(super) fn cubic_transport() -> transport::Config {
+	transport::Config {
+		congestion: Arc::new(congestion::CubicConfig::default()),
+		..transport::Config::default()
+	}
 }
 
-pub(super) fn client_config_with_certs(certs: Vec<CertificateDer<'static>>) -> ClientConfig {
-	ClientConfig::new(Arc::new(client_crypto_inner(Some(certs), None)))
+pub(super) fn client_config_with_certs(certs: Vec<CertificateDer<'static>>) -> client::Config {
+	client::Config::new(Arc::new(client_crypto_inner(Some(certs), None)))
 }
 
 pub(super) fn client_crypto() -> QuicClientConfig {
@@ -898,11 +927,11 @@ fn split_transmit(transmit: Transmit, buffer: &[u8]) -> Vec<(Transmit, Bytes)> {
 		let contents = buffer.split_to(end);
 		transmits.push((
 			Transmit {
-				destination: transmit.destination,
+				remote: transmit.remote,
 				size: contents.len(),
 				ecn: transmit.ecn,
 				segment_size: None,
-				src_ip: transmit.src_ip,
+				local_ip: transmit.local_ip,
 			},
 			contents,
 		));

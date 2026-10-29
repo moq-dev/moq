@@ -44,8 +44,3 @@ the mid-group stream arrives and after it. Both drop the group, and the
 subscription keeps delivering whole groups after it.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Late join and FETCH](/quest/m1/interop-coverage/late-join.md) - the
-  joining FETCH that normally supplies the head

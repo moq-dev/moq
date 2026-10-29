@@ -202,16 +202,30 @@ int main() {
     // It prints the message Rust's Display gives.
     CHECK(fingerprints.error().to_string() == "bind: not listening; call listen() first");
 
-    // Publisher: a server whose origin serves one broadcast with one track.
+    // Publisher: a server whose origin serves one broadcast with one track. Dropping the
+    // publication keeps the route, which lasts until the broadcast closes.
     auto origin = moq::OriginProducer::init({});
-    auto broadcast = ok(origin->create_broadcast("probe"), "create_broadcast");
-    moq::TrackInfo info;
-    info.timescale = 1000000;
-    auto track = ok(broadcast->publish_track("data", info), "publish_track");
-    ok(broadcast->announce({}), "announce");
+    std::shared_ptr<moq::BroadcastProducer> broadcast;
+    std::shared_ptr<moq::TrackProducer> track;
+    {
+        auto publication = ok(origin->create_broadcast("probe"), "create_broadcast");
+        broadcast = publication->broadcast();
+        moq::TrackInfo info;
+        info.timescale = 1000000;
+        track = ok(broadcast->publish_track("data", info), "publish_track");
+        ok(publication->announce({}), "announce");
+    }
+
+    // A closed broadcast's publication can no longer announce.
+    auto stale = ok(origin->create_broadcast("stale"), "create_broadcast");
+    ok(stale->broadcast()->close(), "close stale broadcast");
+    auto reannounced = stale->announce({});
+    CHECK(!reannounced);
+    CHECK(std::holds_alternative<moq::Error::kClosed>(reannounced.error().get_variant()));
 
     moq::ServerConfig server_config;
     server_config.bind = "127.0.0.1:0";
+    server_config.versions = {"moq-lite-07-wip"};
     server_config.tls.generate = {"localhost"};
     server_config.publish = origin;
     auto server = ok(moq::Server::init(server_config), "server init");
@@ -221,6 +235,7 @@ int main() {
     // thread blocks on one at a time.
     moq::ClientConfig client_config;
     client_config.tls.insecure = true;
+    client_config.versions = server_config.versions;
     client_config.implementation = moq::IMPLEMENTATION;
     auto client = ok(moq::Client::init(client_config), "client init");
     auto accepting = server->accept();
@@ -262,8 +277,8 @@ int main() {
     CHECK(!reading.valid());
     CHECK(frame.has_value());
     CHECK(frame->payload == bytes("hello"));
-    // The default moq-lite-06 session drops received timestamps, so the track arrives untimed.
-    CHECK(!frame->timestamp_us.has_value());
+    // Lite-07 carries both the Implementation parameter and frame timestamps.
+    CHECK(frame->timestamp_us == 1000);
 
     // A continuation receives the next frame on the executor.
     {

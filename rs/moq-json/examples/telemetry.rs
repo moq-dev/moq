@@ -1,15 +1,15 @@
-//! Measure wire savings of group-scoped DEFLATE + snapshot/delta on a telemetry stream.
+//! Measure the savings of snapshot/delta on a telemetry stream, and check it reads back the same
+//! over a compressed track.
 //!
 //! Simulates a realistic device telemetry blob that ticks once per second: most of the document
 //! is static (identity, config, geo) while a handful of gauges and counters change each tick. This
-//! is exactly the shape `moq-json` targets, so it shows the snapshot/delta and compression knobs
-//! pulling in the same direction.
+//! is exactly the shape `moq-json` targets. The bytes counted are the JSON frames a plain reader
+//! sees; a [`compress`](moq_net::track::Info::compress)ed track shrinks them further on the wire.
 //!
 //! Run with: `cargo run -p moq-json --example telemetry`
 
 use std::task::Poll;
 
-use moq_json::Compression;
 use moq_json::snapshot::{self, Consumer, Producer};
 use serde_json::{Value, json};
 
@@ -75,15 +75,20 @@ fn telemetry(tick: u64) -> Value {
 	})
 }
 
-/// Total wire bytes of every frame across every group for a full run under `config`.
-fn wire_bytes(config: snapshot::Config, ticks: u64) -> usize {
-	let track = moq_net::broadcast::Info::new()
+/// The telemetry track, optionally compressed.
+fn track(compress: bool) -> moq_net::track::Producer {
+	let info = moq_net::track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_compress(compress);
+	moq_net::broadcast::Info::new()
 		.produce()
-		.create_track(
-			"telemetry",
-			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
-		)
-		.unwrap();
+		.create_track("telemetry", info)
+		.unwrap()
+}
+
+/// Total bytes of every frame across every group for a full run under `config`.
+fn frame_bytes(config: snapshot::Config, ticks: u64) -> usize {
+	let track = track(false);
 	let consumer = track.subscribe(None);
 	let mut producer = Producer::<Value>::new(track, config);
 
@@ -94,7 +99,7 @@ fn wire_bytes(config: snapshot::Config, ticks: u64) -> usize {
 	}
 	producer.finish().unwrap();
 
-	// Drain the raw stored frames (compressed if the producer compressed them) and sum their sizes.
+	// Drain the frames and sum their sizes.
 	let waiter = kio::Waiter::noop();
 	let mut total = 0;
 	let mut track = consumer.ordered();
@@ -107,21 +112,12 @@ fn wire_bytes(config: snapshot::Config, ticks: u64) -> usize {
 }
 
 /// Drive a producer and a live consumer in lockstep, asserting that EVERY tick reconstructs to the
-/// exact input value after decompression and delta application (not just the final one).
-fn verify(producer_config: snapshot::Config, ticks: u64) {
-	let track = moq_net::broadcast::Info::new()
-		.produce()
-		.create_track(
-			"telemetry",
-			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
-		)
-		.unwrap();
+/// exact input value after delta application (not just the final one).
+fn verify(producer_config: snapshot::Config, compress: bool, ticks: u64) {
+	let track = track(compress);
 	let consumer = track.subscribe(None);
-	let mut producer = Producer::<Value>::new(track, producer_config.clone());
-
-	let mut consumer_config = snapshot::consumer::Config::default();
-	consumer_config.compression = producer_config.compression;
-	let mut consumer = Consumer::<Value>::new(consumer, consumer_config);
+	let mut producer = Producer::<Value>::new(track, producer_config);
+	let mut consumer = Consumer::<Value>::new(consumer, Default::default());
 	let waiter = kio::Waiter::noop();
 
 	for tick in 0..ticks {
@@ -130,7 +126,7 @@ fn verify(producer_config: snapshot::Config, ticks: u64) {
 			.update(moq_net::Timed::from(&expected).at(moq_net::Timestamp::now()))
 			.unwrap();
 		// The producer emits exactly one frame per update, so the live consumer yields exactly one
-		// reconstructed value: it must match the input byte-for-byte after decompression + patching.
+		// reconstructed value: it must match the input byte-for-byte after patching.
 		match consumer.poll_latest(&waiter) {
 			Poll::Ready(Ok(Some(value))) => assert_eq!(value.value, expected, "tick {tick} reconstruction mismatch"),
 			other => panic!("tick {tick}: expected a value, got {other:?}"),
@@ -146,21 +142,15 @@ fn verify(producer_config: snapshot::Config, ticks: u64) {
 }
 
 /// A consumer that joins only after the whole stream exists must still rebuild the latest value from
-/// the newest group's snapshot + deltas. For the compressed path this exercises the lazy decoder
-/// replaying the group's already-stored slices to warm its window before decoding the final frame.
+/// the newest group's snapshot + deltas. For a compressed track this reads moq-net's inflated copy
+/// of the group.
 ///
 /// Returns how many values the late joiner surfaced to the application: with backlog collapsing this
 /// is far below `ticks`, since stale intermediate reconstructions are applied internally but skipped.
-fn verify_late_joiner(producer_config: snapshot::Config, ticks: u64) -> usize {
-	let track = moq_net::broadcast::Info::new()
-		.produce()
-		.create_track(
-			"telemetry",
-			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
-		)
-		.unwrap();
+fn verify_late_joiner(producer_config: snapshot::Config, compress: bool, ticks: u64) -> usize {
+	let track = track(compress);
 	let consumer = track.subscribe(None);
-	let mut producer = Producer::<Value>::new(track, producer_config.clone());
+	let mut producer = Producer::<Value>::new(track, producer_config);
 	for tick in 0..ticks {
 		producer
 			.update(moq_net::Timed::from(&telemetry(tick)).at(moq_net::Timestamp::now()))
@@ -168,9 +158,7 @@ fn verify_late_joiner(producer_config: snapshot::Config, ticks: u64) -> usize {
 	}
 	producer.finish().unwrap();
 
-	let mut consumer_config = snapshot::consumer::Config::default();
-	consumer_config.compression = producer_config.compression;
-	let mut consumer = Consumer::<Value>::new(consumer, consumer_config);
+	let mut consumer = Consumer::<Value>::new(consumer, Default::default());
 	let waiter = kio::Waiter::noop();
 	let mut last = None;
 	let mut yielded = 0;
@@ -186,17 +174,6 @@ fn verify_late_joiner(producer_config: snapshot::Config, ticks: u64) -> usize {
 	yielded
 }
 
-fn cfg(deltas: bool, compression: bool) -> snapshot::Config {
-	let mut config = snapshot::Config::default();
-	config.deltas = deltas;
-	config.compression = if compression {
-		Compression::Deflate
-	} else {
-		Compression::None
-	};
-	config
-}
-
 fn main() {
 	const TICKS: u64 = 60;
 
@@ -207,33 +184,33 @@ fn main() {
 	let snapshot_len = serde_json::to_vec(&telemetry(0)).unwrap().len();
 
 	let combos = [
-		("snapshot-per-group, plaintext", cfg(false, false)),
-		("snapshot-per-group, deflate   ", cfg(false, true)),
-		("snapshot+delta,     plaintext", cfg(true, false)),
-		("snapshot+delta,     deflate   ", cfg(true, true)),
+		("snapshot-per-group", snapshot::Config::default().with_deltas(false)),
+		("snapshot+delta", snapshot::Config::default().with_deltas(true)),
 	];
 
 	println!("Telemetry stream: {TICKS} ticks, ~{snapshot_len} bytes per snapshot\n");
 	println!("Raw JSON (one blob per tick):        {raw:>8} bytes  (baseline)\n");
 
-	println!("{:<32} {:>10} {:>10} {:>9}", "config", "wire", "vs raw", "saved");
+	println!("{:<32} {:>10} {:>10} {:>9}", "config", "frames", "vs raw", "saved");
 	println!("{}", "-".repeat(64));
 	for (name, config) in combos.clone() {
-		verify(config.clone(), TICKS);
-		verify_late_joiner(config.clone(), TICKS);
-		let bytes = wire_bytes(config, TICKS);
+		for compress in [false, true] {
+			verify(config.clone(), compress, TICKS);
+			verify_late_joiner(config.clone(), compress, TICKS);
+		}
+		let bytes = frame_bytes(config, TICKS);
 		let pct = 100.0 * bytes as f64 / raw as f64;
 		let saved = 100.0 - pct;
 		println!("{name:<32} {bytes:>8} B {pct:>8.1}% {saved:>7.1}%");
 	}
 
-	println!("\nVerified: every tick reconstructs exactly (live + late joiner) for all 4 configs.");
+	println!("\nVerified: every tick reconstructs exactly (live + late joiner), plain and compressed.");
 
 	// Late-joiner collapse: a consumer joining after all {TICKS} ticks exist gets the head in one
 	// step, not a replay of every superseded state.
 	println!("\nLate joiner: values surfaced to the app (was {TICKS} per-frame, now collapsed):");
 	for (name, config) in combos {
-		let yielded = verify_late_joiner(config, TICKS);
+		let yielded = verify_late_joiner(config, false, TICKS);
 		println!("  {name:<32} {yielded:>3} value(s)");
 	}
 }

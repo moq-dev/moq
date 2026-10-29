@@ -172,9 +172,12 @@ fn publish(origin: &origin::Producer, path: &str) -> Publisher {
 /// Subscribe to `path` through `origin`'s routes and read one frame.
 async fn read_frame(origin: &origin::Producer, path: &str) {
 	let consumer = origin.consume();
-	let broadcast = within(&format!("route to {path}"), consumer.routed_broadcast(path))
-		.await
-		.unwrap_or_else(|err| panic!("{path} unroutable: {err}"));
+	let broadcast = within(
+		&format!("route to {path}"),
+		consumer.follow(path, None).unwrap().available(),
+	)
+	.await
+	.unwrap_or_else(|err| panic!("{path} unroutable: {err}"));
 	let subscription = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1));
 	let mut track = within(
 		&format!("subscribe to {path}"),

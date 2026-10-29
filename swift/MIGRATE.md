@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Compression moves to the track
+
+`Flate` is removed: publish opaque bytes on a `TrackProducer`.
+The `Json` producers and consumers drop their `compression` argument. Publish the track with `TrackInfo(compress: true)` instead; a consumer reads a compressed track with no option of its own.
+
 ### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
 
 Publishing, serving, or requesting a broadcast at a path with a leading, trailing, or doubled `/` throws instead of collapsing it. Pass the canonical path, such as `room/cam`.

@@ -37,8 +37,13 @@ async fn control_classes_cross_lite_and_ietf_sessions_without_counting_payload()
 			)
 			.unwrap();
 		broadcast.announce(Default::default()).unwrap();
-		subscriber.consume().routed("room").await.unwrap();
-		let remote = subscriber.consume().request_broadcast("room", None).await.unwrap();
+		let remote = subscriber
+			.consume()
+			.follow("room", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap();
 		let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
 		subscribed(&track).await;
 		let mut group = track.append_group().unwrap();

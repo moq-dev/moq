@@ -7,7 +7,7 @@
 
 /** Re-export of {@link https://jsr.io/@moq/loc | @moq/loc}, the LOC container. */
 export * as Loc from "@moq/loc";
-export { Consumer, type ConsumerProps, type Read } from "./consumer";
+export { Consumer, type ConsumerProps, DEFAULT_MAX_BUFFER, type Read } from "./consumer";
 export type { Format } from "./format";
 /** The legacy varint container. */
 export * as Legacy from "./legacy";

@@ -193,7 +193,7 @@ async fn split_horizon(version: &str, [publisher_hop, subscriber_hop]: [Hop; 2])
 	// session it arrived on.
 	let viewed = subscriber
 		.consume()
-		.request_broadcast("room", None)
+		.request("room", None)
 		.await
 		.expect("subscriber resolves the namespace");
 	let subscription = moq_net::track::Subscription::default();

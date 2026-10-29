@@ -50,7 +50,7 @@ interface Reported {
  * requests with blind subscriptions.
  *
  * Discovery is lazy. One announce request opens per prefix in the origin's covering set of
- * watches (`announced(scope)` and `request(path, { announced: true })`) that no open request
+ * watches (`announced(scope)` and every `request(path)`) that no open request
  * already covers, and closes {@link LINGER} after nothing at or beneath its prefix is watched.
  * A narrower watch rides an open broader request, and a narrower request already open stays
  * open until the broader one covering it goes, so neither takes the other's routes over
@@ -70,8 +70,8 @@ interface Reported {
  * session to the same origin and re-opens whatever is still watched.
  *
  * A peer that refuses or resets an announce request downgrades the whole session to blind
- * answers: gated requests stop waiting for an announcement, and later watches open nothing
- * on it.
+ * answers: plain requests subscribe through it without waiting for an announcement, and
+ * later watches open nothing on it.
  *
  * @internal
  */
@@ -153,8 +153,8 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 	const downgrade = (failure: unknown) => {
 		if (blind) return;
 		blind = true;
-		// Announcement-gated consumers would wait forever on a table this session cannot fill,
-		// so they fall back to blind answers, which this session still provides.
+		// Plain requests can still use this session's blind answers. Announcement followers
+		// keep waiting for a source that can discover their path.
 		console.warn("broadcast discovery failed; broadcasts resolve on request only.", failure);
 		detach();
 		detach = originWire.attach(false);
@@ -183,10 +183,11 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 
 		// The origin's readers under the prefix wait on this request's initial set. Released
 		// once the session stream has synced, which it reports only after the last of those
-		// events is reported here.
+		// events is reported here. A closing stream also reads as synced, but a failure is not
+		// an answer: the loop below releases it with the downgrade, in one step.
 		const snapshot = originWire.snapshot(prefix);
 		const synced = interest.announced.synced.subscribe((synced) => {
-			if (synced) snapshot();
+			if (synced && interest.announced.closed.peek() === undefined) snapshot();
 		});
 		// A request with no initial set to wait for is synced before the listener exists.
 		if (interest.announced.synced.peek()) snapshot();

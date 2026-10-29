@@ -76,10 +76,11 @@ moq --connect https://edge.example.com/anon \
 `--stitch` follows a replacement as a program switch: its catalog supplies a
 new PMT and every PID flags the discontinuity. Starting a backup can cause
 this switch too. The old instance keeps feeding output until the replacement's
-clock and first media are usable, bounded by `--follow`; its buffered tail then
-drains before the new program. A replacement usable within `--follow` adds no
-gap to the output. One that is not, such as on a link too slow to carry both
-instances at once, starts after a gap once the old tail runs out. The epochs'
+clock and first media are usable, bounded by `--follow`. The switch then drops
+the old instance's buffered tail, so the new program plays at `--delay` instead
+of carrying that tail as added latency. A replacement usable within `--follow`
+adds no gap to the output. One that is not, such as on a link too slow to carry
+both instances at once, starts after a gap once the old tail runs out. The epochs'
 timestamps are not aligned, so this is still a marked program discontinuity,
 not hitless failover.
 `--follow 10s` also bounds waiting for a publisher after an end; choose that

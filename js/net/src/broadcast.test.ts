@@ -1,7 +1,7 @@
 import { expect, setSystemTime, test } from "bun:test";
 import { Milli } from "@moq/clock";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
-import { GroupTooLarge, NotFound } from "./error.ts";
+import { GroupTooLarge, NotFound, StreamCode } from "./error.ts";
 import { MAX_GROUP_FRAMES } from "./group.ts";
 import { hooks } from "./internal.ts";
 import { textFrame } from "./mock.ts";
@@ -161,7 +161,7 @@ test("createTrack does not take over a request a handler already pulled", async 
 
 	// The handler holds it, so the name stays duplicate until it answers, as in Rust.
 	expect(() => broadcast.createTrack("media")).toThrow("duplicate track");
-	request.reject();
+	request.reject(new Error("request refused"));
 	broadcast.close();
 });
 
@@ -340,11 +340,11 @@ test("closing a broadcast rejects a dequeued request", async () => {
 	const request = await pulled;
 	if (!request) throw new Error("expected request");
 	broadcast.close();
-	await expect(subscriber.info()).rejects.toThrow("track closed before info was known");
+	await expect(subscriber.info()).rejects.toMatchObject({ code: StreamCode.Internal });
 
 	const producer = request.accept({ timescale: Timescale.MILLI });
 	expect(() => producer.appendGroup()).toThrow("track is closed");
-	await expect(subscriber.info()).rejects.toThrow("track closed before info was known");
+	await expect(subscriber.info()).rejects.toMatchObject({ code: StreamCode.Internal });
 	subscriber.close();
 	producer.finish();
 	producer.close();
@@ -735,7 +735,7 @@ test("broadcast demand watches static and pending tracks rather than broadcast h
 	await unwanted(requested);
 	await demand.unused();
 	expect(demand.used.peek()).toBe(false);
-	request.reject();
+	request.reject(new Error("request refused"));
 	video.finish();
 	video.close();
 	broadcast.close();

@@ -3433,7 +3433,7 @@ mod session_tests {
 	}
 
 	/// Block until the path's announcements report an event `wanted` accepts.
-	fn await_event(follow: &mut moq_net::announce::Follow, wanted: impl Fn(&moq_net::announce::Event) -> bool) {
+	fn await_event(follow: &mut moq_net::announce::Consumer, wanted: impl Fn(&moq_net::announce::Event) -> bool) {
 		let next = async {
 			while let Some(event) = follow.next().await {
 				if wanted(&event) {
@@ -3456,10 +3456,15 @@ mod session_tests {
 			.expect("the demand never changed");
 	}
 
-	/// Follow `room` on `origin` past its start. A follower folds everything on hand while nothing
-	/// serves the path, so one first polled after the next change would never report it.
-	fn announced(origin: &moq_net::origin::Producer) -> moq_net::announce::Follow {
-		let mut follow = origin.consume().follow("room").unwrap();
+	/// The announcements of the routes covering `path` on `origin`.
+	fn watch(origin: &moq_net::origin::Producer, path: &str) -> moq_net::announce::Consumer {
+		let path = moq_net::Patterns::from(moq_net::Pattern::literal(path).unwrap());
+		origin.consume().scope("", &path).unwrap().announced()
+	}
+
+	/// Follow `room` on `origin` past its start.
+	fn announced(origin: &moq_net::origin::Producer) -> moq_net::announce::Consumer {
+		let mut follow = watch(origin, "room");
 		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
 		follow
 	}
@@ -3590,7 +3595,7 @@ mod session_tests {
 
 		let mut first = Publisher::sibling(&origin, Default::default());
 		let pad = recorder.written(&mut first, 1);
-		let mut follow = origin.consume().follow("cam").unwrap();
+		let mut follow = watch(&origin, "cam");
 		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
 		drop(first);
 		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::End(_)));
@@ -3676,7 +3681,7 @@ mod session_tests {
 		let origin = origin();
 		let _room = referencing(&origin, None);
 		let session = follow(&element, &origin);
-		let mut follow = origin.consume().follow("cam").unwrap();
+		let mut follow = watch(&origin, "cam");
 
 		let route = epoch();
 		let mut first = Publisher::sibling(&origin, route.clone());
@@ -3758,7 +3763,7 @@ mod session_tests {
 		let mut first = Publisher::sibling(&origin, Default::default());
 		let pad = recorder.written(&mut first, 1);
 		room.catalog.finish().unwrap();
-		let mut follow = origin.consume().follow("cam").unwrap();
+		let mut follow = watch(&origin, "cam");
 		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
 		drop(first);
 		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::End(_)));
@@ -4028,7 +4033,7 @@ mod session_tests {
 		let mut second = Publisher::sibling(&origin, moq_net::origin::Route::default().with_epoch(other));
 		let unpinned = recorder.written(&mut second, 2);
 		let pad = played.into_iter().find(|pad| *pad != unpinned).unwrap();
-		let mut follow = origin.consume().follow("cam").unwrap();
+		let mut follow = watch(&origin, "cam");
 		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
 		drop(second);
 		await_event(&mut follow, |event| {
@@ -4078,7 +4083,7 @@ mod session_tests {
 
 		let mut first = Publisher::sibling(&origin, Default::default());
 		let pad = recorder.written(&mut first, 1);
-		let mut follow = origin.consume().follow("cam").unwrap();
+		let mut follow = watch(&origin, "cam");
 		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
 		drop(first);
 		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::End(_)));
@@ -4120,7 +4125,7 @@ mod session_tests {
 
 		let mut first = Publisher::sibling(&origin, Default::default());
 		let pad = recorder.written(&mut first, 1);
-		let mut follow = origin.consume().follow("cam").unwrap();
+		let mut follow = watch(&origin, "cam");
 		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
 		drop(first);
 		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::End(_)));
@@ -4201,7 +4206,7 @@ mod session_tests {
 
 		// The reference lets the old instance go once another wins its path, and only then
 		// does the new one leave, so the return is a resume rather than a missed restart.
-		let mut follow = origin.consume().follow("cam").unwrap();
+		let mut follow = watch(&origin, "cam");
 		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
 		let mut new = Publisher::sibling(&origin, epoch());
 		await_event(&mut follow, |event| {

@@ -78,8 +78,8 @@ fn server_config(certs: &support::Certs) -> quic::server::Config {
 	)
 }
 
-fn dial_config(peer: std::net::SocketAddr) -> quic::client::Config {
-	let mut config = quic::client::Config::new(peer, "localhost");
+fn dial_config() -> quic::client::Config {
+	let mut config = quic::client::Config::default();
 	config.alpn = vec![ALPN.to_string()];
 	config.verify = false;
 	config
@@ -131,7 +131,10 @@ fn a_published_close_has_already_left_the_client() {
 
 	client_worker
 		.block_on(async move {
-			let mut conn = endpoint.connect(&dial_config(server_addr)).await.expect("dial");
+			let mut conn = endpoint
+				.connect(&dial_config(), server_addr, "localhost")
+				.await
+				.expect("dial");
 			conn.close(CLOSE_CODE, CLOSE_REASON);
 			std::future::poll_fn(|cx| conn.poll_closed(cx)).await;
 		})

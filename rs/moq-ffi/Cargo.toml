@@ -29,9 +29,9 @@ default = ["audio", "video"]
 audio = ["dep:moq-audio"]
 video = ["dep:moq-video", "dep:pollster"]
 # The OpenH264 software H.264 fallback (vendored C++) for `video`. Off for
-# development and linting; `build.sh`, maturin, and CI's tests turn it on. It is
-# the only encoder on API-24 Android and the Apple simulators, so every release
-# build needs it.
+# development and linting; `cargo build-ffi` (.cargo/config.toml), maturin, and
+# CI's tests turn it on. It is the only encoder on API-24 Android and the Apple
+# simulators, so every release build needs it.
 openh264 = ["moq-video?/openh264"]
 # qlog trace capture (`MoqQuicConfig::qlog`). Off by default: it compiles the qlog
 # machinery in and is only wanted for debugging; `moq_qlog_supported` reports it.
@@ -88,7 +88,6 @@ getrandom = { workspace = true }
 # (LocalBoxFuture) and Rc-backed handles cannot satisfy.
 uniffi = { workspace = true, features = ["wasm-unstable-single-threaded"] }
 web-async = { workspace = true }
-web-transport-trait = { workspace = true }
 web-transport-wasm = { workspace = true }
 
 [dev-dependencies]
@@ -97,7 +96,6 @@ pollster = { workspace = true }
 # Runs the key log tests with `SSLKEYLOGFILE` set or unset, in a child process.
 test-env = { path = "../test-env" }
 tokio = { workspace = true, features = ["test-util"] }
-web-transport-trait = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 # The video tests encode with OpenH264, the one encoder a GPU-less host has, so

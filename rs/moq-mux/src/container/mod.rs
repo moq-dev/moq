@@ -30,7 +30,7 @@ pub mod loc;
 pub mod mkv;
 pub mod ts;
 
-pub use consumer::Consumer;
+pub use consumer::{Consumer, DEFAULT_MAX_BUFFER};
 pub use group::GroupConsumer;
 pub use producer::Producer;
 pub(crate) use source::{ExportSource, Resume};

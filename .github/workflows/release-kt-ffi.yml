@@ -44,6 +44,10 @@ jobs:
     name: Package and publish
     needs: [ffi]
     runs-on: ubuntu-latest
+    # Maven and signing credentials live in the `publish` Environment, which
+    # only protected refs can deploy to. Only a tag publishes; a dry-run needs
+    # no secrets, so it can run from any branch.
+    environment: ${{ github.ref_type == 'tag' && 'publish' || '' }}
     env:
       # Picked up by com.vanniktech.maven.publish via Gradle project properties.
       ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}

@@ -5,7 +5,7 @@
 	padding: 0;
 }
 /* The same palette as the MoQ Boy demo. */
-:root {
+:host {
 	color-scheme: dark;
 	--bg: #0a0a0a;
 	--panel: #141414;
@@ -18,15 +18,13 @@
 	--danger: #ed7169;
 	--ok: #8bac0f;
 	font-family: system-ui, sans-serif;
-}
-body {
 	background: var(--bg);
 	color: var(--text);
 	min-width: 320px;
-	min-height: 100vh;
 	display: flex;
 	flex-direction: column;
 }
+:host([hidden]),
 [hidden] {
 	/* biome-ignore lint/complexity/noImportantStyles: Hidden controls must override layout display rules. */
 	display: none !important;

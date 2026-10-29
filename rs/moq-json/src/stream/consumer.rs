@@ -36,7 +36,7 @@ pub struct Consumer<T> {
 impl<T: DeserializeOwned> Consumer<T> {
 	/// Create a consumer reading from the given track subscriber.
 	///
-	/// Set [`Config::compression`] to match the encoder that wrote the track.
+	/// A [`compress`](moq_net::track::Info::compress)ed track reads the same: moq-net inflates it.
 	pub fn new(track: moq_net::track::Subscriber, config: Config) -> Self {
 		Self {
 			track,
@@ -71,7 +71,6 @@ impl<T: DeserializeOwned> Consumer<T> {
 					Poll::Ready(Some(_)) if self.taken => self.rolled = true,
 					Poll::Ready(Some(group)) => {
 						self.taken = true;
-						self.decoder.reset();
 						self.group = Some(group);
 					}
 					Poll::Ready(None) => return Poll::Ready(Ok(None)),
@@ -112,17 +111,20 @@ mod timestamps {
 
 	#[test]
 	fn exact_timestamps_survive_reads() {
-		for compression in [crate::Compression::None, crate::Compression::Deflate] {
+		for compress in [false, true] {
 			let scale = moq_net::Timescale::new(90_000).unwrap();
+			let info = moq_net::track::Info::default()
+				.with_timescale(scale)
+				.with_compress(compress);
 			let track = moq_net::broadcast::Info::new()
 				.produce()
-				.create_track("data", moq_net::track::Info::default().with_timescale(scale))
+				.create_track("data", info)
 				.unwrap();
 			let mut subscriber = track.subscribe(None);
 			let mut subscription = subscriber.subscription();
 			subscription.max_delay = None;
 			subscriber.update(subscription).unwrap();
-			let config = crate::stream::Config { compression };
+			let config = crate::stream::Config::default();
 			let mut producer = crate::stream::Producer::new(track, config.clone());
 			let mut consumer = Consumer::<serde_json::Value>::new(subscriber, config);
 			let times = [0, 810_001, 990_007];

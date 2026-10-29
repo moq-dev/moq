@@ -248,6 +248,15 @@ Test on mock time through a relay:
   [moq-dev/moq#6171](https://github.com/moq-dev/moq/pull/6171), decided
   2026-10-23).
 
+- A group the publisher cut while a fetched copy still serves its end is
+  delivered and never also reported dropped. Today `DropCursor::cut`
+  (`rs/moq-net/src/model/track.rs`) reports any visible slot's
+  `cut_error()`, so the arrival walk can hand out the fetched copy and report
+  the group dropped too; `Slot::cut()` already returns nothing while a copy
+  serves the end. Found by
+  [moq-dev/moq#7053](https://github.com/moq-dev/moq/pull/7053) (added
+  2026-10-28).
+
 Mirror each case in `js/net`.
 
 Public API: none. Wire: lite-07 SUBSCRIBE_DROP (unpublished) gains `Max Age`
@@ -278,6 +287,13 @@ widening can re-offer them as Rust does, but landed it without a test: the
 case needs an update to arrive between START and the first group. Cover it
 deterministically, through the track hooks rather than wire timing, when the
 drop runs are reworked here.
+
+### Cancelled fetches hold the end
+
+Found 2026-10-28 by [moq-dev/moq#7149](https://github.com/moq-dev/moq/pull/7149):
+a cancelled fetch below a track's end still holds the end open until the cache
+expiry scan removes it, so how fast a subscription ends depends on expiry
+timing. Settle it here, where cancelled and expired runs get a reason.
 
 ## Related
 

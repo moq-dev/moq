@@ -91,11 +91,7 @@ async fn ahead_then_live(version: Option<&str>, relay: bool) -> (Vec<u64>, Vec<u
 			sessions.push(connect_mock(options).await);
 
 			let consumer = subscriber.consume();
-			moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
-				.await
-				.expect("announce timeout")
-				.expect("routed");
-			moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
+			moq_clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 				.await
 				.expect("resolve timeout")
 				.expect("broadcast resolves")
@@ -141,11 +137,7 @@ async fn sparse_ranges_reach_the_publisher_on_lite07() {
 		options.client_subscribe = Some(subscriber.clone());
 		let session = connect_mock(options).await;
 		let consumer = subscriber.consume();
-		moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
-			.await
-			.expect("announce timeout")
-			.expect("routed");
-		let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
+		let remote = moq_clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 			.await
 			.expect("resolve timeout")
 			.expect("broadcast resolves");
@@ -248,11 +240,7 @@ async fn range_fixture_history(version: &str, relay: bool, history: u64) -> Rang
 	options.client_subscribe = Some(subscriber.clone());
 	sessions.push(connect_mock(options).await);
 	let consumer = subscriber.consume();
-	moq_clock::timeout(TIMEOUT, consumer.routed("ranges"))
-		.await
-		.unwrap()
-		.unwrap();
-	let remote = consumer.request_broadcast("ranges", None).await.unwrap();
+	let remote = consumer.follow("ranges", None).unwrap().available().await.unwrap();
 	RangeFixture {
 		track,
 		remote,
@@ -751,11 +739,7 @@ async fn a_covered_bounded_subscription_ends_on_lite07() {
 		options.client_subscribe = Some(subscriber.clone());
 		let session = connect_mock(options).await;
 		let consumer = subscriber.consume();
-		moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
-			.await
-			.expect("announce timeout")
-			.expect("routed");
-		let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
+		let remote = moq_clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 			.await
 			.expect("resolve timeout")
 			.expect("broadcast resolves");

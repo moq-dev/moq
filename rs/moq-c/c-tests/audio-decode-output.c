@@ -103,9 +103,11 @@ int main(void) {
     int32_t origin = moq_origin_create();
     CHECK(origin > 0);
     const char *path = "audio-decode-output";
-    int32_t broadcast = moq_origin_create_broadcast((uint32_t)origin, path, strlen(path));
-    CHECK(broadcast > 0);
-    CHECK(moq_publish_announce((uint32_t)broadcast, NULL) == 0);
+    uint32_t broadcast = 0;
+    int32_t publication = moq_origin_create_broadcast((uint32_t)origin, path, strlen(path), &broadcast);
+    CHECK(publication > 0);
+    CHECK(moq_publication_announce((uint32_t)publication, NULL) == 0);
+    CHECK(moq_publication_free((uint32_t)publication) == 0);
     moq_audio_encoder_input input = {MOQ_AUDIO_SAMPLE_FORMAT_F32, 48000, 2};
     moq_audio_encoder_output output = {"pcm", 3, 0, 0, 0, 0};
     int32_t producer = moq_encode_audio((uint32_t)broadcast, "audio", 5, &input, &output, 0);

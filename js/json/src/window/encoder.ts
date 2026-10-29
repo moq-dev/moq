@@ -1,4 +1,3 @@
-import { Encoder as Flate } from "@moq/flate";
 import { Group } from "@moq/net";
 
 /** Frames (header included) in one group before a new group is forced, matching the Snapshot cap. Kept well below the net per-group cap so a roll always precedes GroupTooLarge. */
@@ -18,13 +17,6 @@ export interface Config {
 	 * counterpart to Snapshot's `deltas`. Defaults to `true`.
 	 */
 	ops?: boolean;
-
-	/**
-	 * Compress each group as one sync-flushed `deflate-raw` stream, so every op reuses the header and
-	 * the ops before it as context. A {@link Decoder} reading the frames must set the same flag.
-	 * Defaults to `false`.
-	 */
-	compression?: boolean;
 
 	/**
 	 * Maximum records retained and repeated in a group checkpoint.
@@ -72,7 +64,6 @@ export interface Pending extends Encoded {
  */
 export class Encoder<T> {
 	#ops: boolean;
-	#compress: boolean;
 	#checkpointRecords?: number;
 
 	// The decodable checkpoint suffix. Without a checkpoint bound this is the complete window.
@@ -82,9 +73,7 @@ export class Encoder<T> {
 	// Absolute index of #window[0], which may follow #offset in checkpoint mode.
 	#start = 0;
 
-	#flate?: Flate;
-	// Bytes charged to this group, header included: each frame's slice, or its plaintext when that
-	// is larger, since a reader's DEFLATE window is held to the same budget.
+	// Bytes charged to this group, header included.
 	#groupBytes = 0;
 	#groupFrames = 0;
 	// Whether the next frame must be a header after a lost frame.
@@ -97,7 +86,6 @@ export class Encoder<T> {
 
 	constructor(config: Config = {}) {
 		this.#ops = config.ops ?? true;
-		this.#compress = config.compression ?? false;
 		this.#checkpointRecords = config.checkpointRecords;
 		if (
 			this.#checkpointRecords !== undefined &&
@@ -133,7 +121,6 @@ export class Encoder<T> {
 
 	/** Discard group-local state after an encoded frame did not reach the wire. */
 	#resyncGroup(): void {
-		this.#flate = undefined;
 		this.#groupBytes = 0;
 		this.#groupFrames = 0;
 		this.#resync = true;
@@ -205,17 +192,12 @@ export class Encoder<T> {
 		return this.#ops && this.#groupFrames > 0 && this.#groupFrames < MAX_GROUP_FRAMES;
 	}
 
-	/**
-	 * Compress an already-serialized op into the open group, if its header remains cached and
-	 * inflatable. Charged the larger of the slice and the plaintext: a sync-flushed DEFLATE frame can
-	 * come out slightly larger than its input, while a reader's window counts what it inflates.
-	 */
+	/** Encode an already-serialized op into the open group, if its header remains cached. */
 	#emitOp(text: string): Uint8Array | undefined {
-		const bytes = new TextEncoder().encode(text);
-		const payload = this.#flate ? this.#flate.frame(bytes) : bytes;
+		const payload = new TextEncoder().encode(text);
 
 		this.#groupFrames += 1;
-		this.#groupBytes += Math.max(payload.length, bytes.length);
+		this.#groupBytes += payload.length;
 		if (this.#groupBytes > Group.MAX_GROUP_CACHE_BYTES) {
 			this.#resyncGroup();
 			return undefined;
@@ -241,21 +223,12 @@ export class Encoder<T> {
 		// bytes a reader sees are then identical to what the matching push carried.
 		const checkpoint = start === offset ? "" : `,"start":${start}`;
 		const text = `{"offset":${offset}${checkpoint},"records":[${window.join(",")}]}`;
-		const bytes = new TextEncoder().encode(text);
-		// A reader inflates the header whole, so its plaintext meets the group budget too.
-		if (bytes.length > Group.MAX_GROUP_CACHE_BYTES) {
-			throw new Error("window header exceeds the group cache limit");
-		}
-
-		// A fresh per-group encoder (cold window), with the header as frame 0.
-		const flate = this.#compress ? new Flate() : undefined;
-		const payload = flate ? flate.frame(bytes) : bytes;
+		const payload = new TextEncoder().encode(text);
 		if (payload.length > Group.MAX_GROUP_CACHE_BYTES) {
 			throw new Error("window header exceeds the group cache limit");
 		}
 
-		this.#flate = flate;
-		this.#groupBytes = Math.max(payload.length, bytes.length);
+		this.#groupBytes = payload.length;
 		this.#groupFrames = 1;
 		this.#resync = false;
 

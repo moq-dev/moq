@@ -178,6 +178,10 @@ name = "interop-tail"
 path = "../../test/interop/clients/rust/tail.rs"
 
 [[example]]
+name = "interop-catalog"
+path = "../../test/interop/clients/rust/catalog.rs"
+
+[[example]]
 name = "interop-goaway"
 path = "../../test/interop/clients/rust/goaway.rs"
 

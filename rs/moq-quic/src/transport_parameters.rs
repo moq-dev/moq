@@ -21,8 +21,10 @@ use crate::{
 	cid_generator::ConnectionIdGenerator,
 	cid_queue::CidQueue,
 	coding::{BufExt, BufMutExt, UnexpectedEnd},
-	config::{EndpointConfig, ServerConfig, TransportConfig},
+	config::endpoint::Resolved,
+	server,
 	shared::ConnectionId,
+	transport,
 };
 
 // Apply a given macro to a list of all the transport parameters having integer types, along with
@@ -147,23 +149,23 @@ apply_params!(make_struct);
 
 impl TransportParameters {
 	pub(crate) fn new(
-		config: &TransportConfig,
-		endpoint_config: &EndpointConfig,
+		config: &transport::Config,
+		endpoint_config: &Resolved,
 		cid_gen: &dyn ConnectionIdGenerator,
 		initial_src_cid: ConnectionId,
-		server_config: Option<&ServerConfig>,
+		server_config: Option<&server::Config>,
 		rng: &mut impl Rng,
 	) -> Self {
 		Self {
 			initial_src_cid: Some(initial_src_cid),
-			initial_max_streams_bidi: config.max_concurrent_bidi_streams,
-			initial_max_streams_uni: config.max_concurrent_uni_streams,
-			initial_max_data: config.receive_window,
-			initial_max_stream_data_bidi_local: config.stream_receive_window,
-			initial_max_stream_data_bidi_remote: config.stream_receive_window,
-			initial_max_stream_data_uni: config.stream_receive_window,
+			initial_max_streams_bidi: config.max_streams(),
+			initial_max_streams_uni: config.max_streams(),
+			initial_max_data: config.receive_window(),
+			initial_max_stream_data_bidi_local: config.stream_receive_window(),
+			initial_max_stream_data_bidi_remote: config.stream_receive_window(),
+			initial_max_stream_data_uni: config.stream_receive_window(),
 			max_udp_payload_size: endpoint_config.max_udp_payload_size,
-			max_idle_timeout: config.max_idle_timeout.unwrap_or(VarInt(0)),
+			max_idle_timeout: config.max_idle_timeout().unwrap_or(VarInt(0)),
 			disable_active_migration: server_config.is_some_and(|c| !c.migration),
 			active_connection_id_limit: if cid_gen.cid_len() == 0 {
 				2 // i.e. default, i.e. unsent
@@ -172,7 +174,8 @@ impl TransportParameters {
 			}
 			.into(),
 			max_datagram_frame_size: config
-				.datagram_receive_buffer_size
+				.datagram
+				.receive_buffer
 				.map(|x| (x.min(u16::MAX.into()) as u16).into()),
 			grease_quic_bit: endpoint_config.grease_quic_bit,
 			min_ack_delay: Some(VarInt::from_u64(u64::try_from(TIMER_GRANULARITY.as_micros()).unwrap()).unwrap()),

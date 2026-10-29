@@ -341,6 +341,48 @@ async fn import_legacy_mp3() {
 	assert!(a.description.is_none(), "MP3 config is in band");
 }
 
+/// A legacy MP3 frame header that changes the channel count is a new decoder identity, so the
+/// frames after it publish on a new track rather than rewriting the first.
+#[tokio::test(start_paused = true)]
+async fn legacy_mp3_channel_change_starts_a_new_track() {
+	// MPEG-1 Layer III, 128 kbps, 44.1 kHz: joint stereo, then mono.
+	let frame = |mode: u8| {
+		let mut mp3 = vec![0xFF, 0xFB, 0x90, mode];
+		mp3.resize(417, 0xAA);
+		let mut tag = vec![super::MP3_AUDIO_TAG_HEADER];
+		tag.extend_from_slice(&mp3);
+		tag
+	};
+	let header = || {
+		let mut out = Vec::new();
+		out.extend_from_slice(b"FLV");
+		out.push(1);
+		out.push(0x04); // audio only
+		out.extend_from_slice(&9u32.to_be_bytes());
+		out.extend_from_slice(&0u32.to_be_bytes());
+		out
+	};
+
+	let mut producer = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
+	let mut importer = Import::new(producer, catalog.reserve());
+	let mut out = header();
+	write_tag(&mut out, super::TAG_AUDIO, 0, &frame(0x44));
+	write_tag(&mut out, super::TAG_AUDIO, 26, &frame(0x44));
+	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
+	let first = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
+
+	let mut out = Vec::new();
+	write_tag(&mut out, super::TAG_AUDIO, 52, &frame(0xC4));
+	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
+	let snap = catalog.snapshot();
+	assert_eq!(snap.audio.renditions.len(), 1, "the stereo track is retired");
+	let (name, a) = snap.audio.renditions.iter().next().unwrap();
+	assert_ne!(name, &first, "the mono frames publish under a new name");
+	assert_eq!(a.channel_count, 1);
+	importer.finish().unwrap();
+}
+
 /// A minimal avcC like [`avcc`], but with a caller-chosen level byte so two video
 /// renditions carry distinct codec configs.
 fn avcc_level(level: u8) -> Vec<u8> {

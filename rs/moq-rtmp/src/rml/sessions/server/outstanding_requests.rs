@@ -17,3 +17,12 @@ pub enum OutstandingRequest {
 		stream_id: u32,
 	},
 }
+
+impl OutstandingRequest {
+	pub fn id(&self) -> u32 {
+		match self {
+			Self::ConnectionRequest { .. } => 0,
+			Self::PublishRequested { .. } | Self::PlayRequested { .. } => 1,
+		}
+	}
+}

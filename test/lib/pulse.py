@@ -52,12 +52,16 @@ def run():
         "WAYLAND_DISPLAY": "",
     }
 
+    # By default the null sink renders 2 s ahead and sleeps through it, and a new stream does not
+    # rewind that, so a stream's first callback waits up to 2 s: Firefox reports its AudioContext
+    # suspended until then. `norewinds` caps the block at 50 ms, which starts streams in tens of
+    # milliseconds, as a real device does.
     pulse = subprocess.Popen(
         [
             "pulseaudio", "--daemonize=no", "--use-pid-file=no", "--exit-idle-time=-1",
             "--log-level=info", "--log-target=stderr", "-n",
             f"--load=module-native-protocol-unix socket={socket} auth-anonymous=1",
-            "--load=module-null-sink sink_name=moq-null rate=48000 channels=2",
+            "--load=module-null-sink sink_name=moq-null rate=48000 channels=2 norewinds=1",
         ], env=env, stderr=subprocess.PIPE,
     )
     try:

@@ -9,6 +9,9 @@ import MoqFFI
 /// `JSONDecoder`. `JSONEncoder` rejects a top-level scalar (a bare number/string/bool) on
 /// Foundation before the swift-foundation rewrite (iOS < 18 / macOS < 15), so encode an object
 /// or array there.
+///
+/// Compression is the track's: publish JSON with `TrackInfo(compress: true)`, and a consumer reads
+/// it with no option of its own.
 public enum Json {}
 
 extension Json {
@@ -45,18 +48,16 @@ extension Json {
         ///
         /// `deltas` encodes updates as merge-patch deltas; with it off every update is a full
         /// snapshot in its own group. With deltas on, give the track a `refresh` ratio so a joiner
-        /// past it gets the value restated in a fresh group. Set `compression` to DEFLATE each
-        /// group; the consumer must pass the same flag.
+        /// past it gets the value restated in a fresh group.
         public init(
             broadcast: BroadcastProducer,
             track: TrackProducer,
-            deltas: Bool = MoqJsonSnapshotConfig().deltas,
-            compression: Bool = false
+            deltas: Bool = MoqJsonSnapshotConfig().deltas
         ) throws {
             ffi = try MoqJsonSnapshotProducer(
                 broadcast: broadcast.ffi,
                 track: track.ffi,
-                config: MoqJsonSnapshotConfig(deltas: deltas, compression: compression)
+                config: MoqJsonSnapshotConfig(deltas: deltas)
             )
         }
 
@@ -87,11 +88,9 @@ extension Json {
         let ffi: MoqJsonSnapshotConsumer
 
         /// Read `track` as a JSON snapshot track. Takes over `track`, whose handle is closed
-        /// afterward; throws if it has already read a group. `compression` must match the flag
-        /// the producer used.
-        public init(track: TrackConsumer, compression: Bool = false) throws {
-            // deltas is producer-only, so leave it at its default here.
-            ffi = try MoqJsonSnapshotConsumer(track: track.ffi, config: MoqJsonSnapshotConfig(compression: compression))
+        /// afterward; throws if it has already read a group.
+        public init(track: TrackConsumer) throws {
+            ffi = try MoqJsonSnapshotConsumer(track: track.ffi)
         }
 
         /// The next state in order, or `nil` once the track ends or is closed.
@@ -126,14 +125,9 @@ extension Json {
 
         /// Publish `track` as a JSON stream track, advertised in `broadcast`'s catalog until it
         /// finishes. Takes over `track`, whose handle is closed afterward; throws if the catalog
-        /// already carries the track's name. Set `compression` to DEFLATE the group; the consumer
-        /// must pass the same flag.
-        public init(broadcast: BroadcastProducer, track: TrackProducer, compression: Bool = false) throws {
-            ffi = try MoqJsonStreamProducer(
-                broadcast: broadcast.ffi,
-                track: track.ffi,
-                config: MoqJsonStreamConfig(compression: compression)
-            )
+        /// already carries the track's name.
+        public init(broadcast: BroadcastProducer, track: TrackProducer) throws {
+            ffi = try MoqJsonStreamProducer(broadcast: broadcast.ffi, track: track.ffi)
         }
 
         /// Append one record to the log.
@@ -161,10 +155,9 @@ extension Json {
         let ffi: MoqJsonStreamConsumer
 
         /// Read `track` as a JSON stream track. Takes over `track`, whose handle is closed
-        /// afterward; throws if it has already read a group. `compression` must match the flag
-        /// the producer used.
-        public init(track: TrackConsumer, compression: Bool = false) throws {
-            ffi = try MoqJsonStreamConsumer(track: track.ffi, config: MoqJsonStreamConfig(compression: compression))
+        /// afterward; throws if it has already read a group.
+        public init(track: TrackConsumer) throws {
+            ffi = try MoqJsonStreamConsumer(track: track.ffi)
         }
 
         /// The next record, or `nil` once the track ends or is closed.
@@ -200,12 +193,11 @@ extension Json {
         /// `checkpointRecords` bounds the records retained and restated for a window that is never
         /// popped: a reader that keeps up still sees every record, while a later joiner is told the
         /// older ones were skipped. Give the track a `refresh` ratio so a joiner past it gets the
-        /// window restated in a fresh group. Set `compression` to DEFLATE each group; the consumer
-        /// must pass the same flag.
-        public init(track: TrackProducer, compression: Bool = false, checkpointRecords: UInt64? = nil) throws {
+        /// window restated in a fresh group.
+        public init(track: TrackProducer, checkpointRecords: UInt64? = nil) throws {
             ffi = try MoqJsonWindowProducer(
                 track: track.ffi,
-                config: MoqJsonWindowConfig(compression: compression, checkpointRecords: checkpointRecords)
+                config: MoqJsonWindowConfig(checkpointRecords: checkpointRecords)
             )
         }
 
@@ -256,11 +248,9 @@ extension Json {
         let ffi: MoqJsonWindowConsumer
 
         /// Read `track` as a JSON window track. Takes over `track`, whose handle is closed
-        /// afterward; throws if it has already read a group. `compression` must match the flag
-        /// the producer used.
-        public init(track: TrackConsumer, compression: Bool = false) throws {
-            // checkpointRecords is producer-only, so leave it at its default here.
-            ffi = try MoqJsonWindowConsumer(track: track.ffi, config: MoqJsonWindowConfig(compression: compression))
+        /// afterward; throws if it has already read a group.
+        public init(track: TrackConsumer) throws {
+            ffi = try MoqJsonWindowConsumer(track: track.ffi)
         }
 
         /// The next change, or `nil` once the track ends or is closed. A record first learned of

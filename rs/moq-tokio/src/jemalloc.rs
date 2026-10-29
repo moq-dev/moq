@@ -44,57 +44,60 @@ fn sampling() -> bool {
 /// `prof_active:true` is optional: without it the first signal starts sampling, so a process only
 /// pays for profiling once someone asks for it.
 pub async fn run() -> crate::Result<()> {
-	// Register before inspecting jemalloc. SIGUSR1's default action is process
-	// termination, so even a build or configuration without profiling must own it.
-	let mut sig = register_signal()?;
-	#[cfg(test)]
-	signal_ready().notify_one();
+	crate::runtime::scope(async move {
+		// Register before inspecting jemalloc. SIGUSR1's default action is process
+		// termination, so even a build or configuration without profiling must own it.
+		let mut sig = register_signal()?;
+		#[cfg(test)]
+		signal_ready().notify_one();
 
-	let ready = backend_ready();
-	if !ready {
-		tracing::debug!("jemalloc profiling not available. Set MALLOC_CONF=prof:true at startup to enable");
-	} else if sampling() {
-		tracing::info!("jemalloc heap profiling is active");
-	} else {
-		tracing::info!("jemalloc heap profiling is idle; the first SIGUSR1 starts sampling");
-	}
-
-	loop {
-		sig.recv().await;
+		let ready = backend_ready();
 		if !ready {
-			tracing::warn!(
-				"heap profile requested, but jemalloc profiling was not enabled at startup (MALLOC_CONF=prof:true)"
-			);
-			continue;
+			tracing::debug!("jemalloc profiling not available. Set MALLOC_CONF=prof:true at startup to enable");
+		} else if sampling() {
+			tracing::info!("jemalloc heap profiling is active");
+		} else {
+			tracing::info!("jemalloc heap profiling is idle; the first SIGUSR1 starts sampling");
 		}
 
-		// Start sampling on the first request rather than at startup, so an unprofiled process
-		// carries none of the cost. Only allocations from here on are sampled: whatever the heap
-		// already holds is not attributed retroactively, so a dump taken to explain an
-		// already-large heap wants `prof_active:true` from the start instead.
-		if !sampling() {
-			match blocking(|| unsafe { raw::write(b"prof.active\0", true) }).await {
-				Ok(Ok(())) => {
-					tracing::info!("jemalloc heap profiling started; this dump covers only allocations from now on")
-				}
-				Ok(Err(err)) => {
-					tracing::error!(%err, "failed to start heap profiling");
-					continue;
-				}
-				Err(err) => {
-					tracing::error!(%err, "start-profiling task failed");
-					continue;
+		loop {
+			sig.recv().await;
+			if !ready {
+				tracing::warn!(
+					"heap profile requested, but jemalloc profiling was not enabled at startup (MALLOC_CONF=prof:true)"
+				);
+				continue;
+			}
+
+			// Start sampling on the first request rather than at startup, so an unprofiled process
+			// carries none of the cost. Only allocations from here on are sampled: whatever the heap
+			// already holds is not attributed retroactively, so a dump taken to explain an
+			// already-large heap wants `prof_active:true` from the start instead.
+			if !sampling() {
+				match blocking(|| unsafe { raw::write(b"prof.active\0", true) }).await {
+					Ok(Ok(())) => {
+						tracing::info!("jemalloc heap profiling started; this dump covers only allocations from now on")
+					}
+					Ok(Err(err)) => {
+						tracing::error!(%err, "failed to start heap profiling");
+						continue;
+					}
+					Err(err) => {
+						tracing::error!(%err, "start-profiling task failed");
+						continue;
+					}
 				}
 			}
-		}
 
-		// Null pointer tells jemalloc to use prof_prefix from MALLOC_CONF.
-		match blocking(|| unsafe { raw::write(b"prof.dump\0", std::ptr::null::<u8>()) }).await {
-			Ok(Ok(())) => tracing::info!("heap profile dumped"),
-			Ok(Err(err)) => tracing::error!(%err, "failed to dump heap profile"),
-			Err(err) => tracing::error!(%err, "heap profile task failed"),
+			// Null pointer tells jemalloc to use prof_prefix from MALLOC_CONF.
+			match blocking(|| unsafe { raw::write(b"prof.dump\0", std::ptr::null::<u8>()) }).await {
+				Ok(Ok(())) => tracing::info!("heap profile dumped"),
+				Ok(Err(err)) => tracing::error!(%err, "failed to dump heap profile"),
+				Err(err) => tracing::error!(%err, "heap profile task failed"),
+			}
 		}
-	}
+	})
+	.await
 }
 
 #[cfg(test)]

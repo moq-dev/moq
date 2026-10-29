@@ -304,7 +304,7 @@ impl Listener {
 	/// Report into `health` instead of the one this listener made for itself.
 	///
 	/// For an owner that has to hand the handle out *before* the listener exists:
-	/// [`crate::Server`] binds these lazily (they need a runtime), but an embedder
+	/// [`crate::Server`] binds these lazily (they bind asynchronously), but an embedder
 	/// registering them with a metrics endpoint does so at startup.
 	pub(crate) fn with_accept_health(mut self, health: crate::accept::Health) -> Self {
 		self.health = health;

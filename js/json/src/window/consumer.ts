@@ -1,9 +1,9 @@
 import * as Moq from "@moq/net";
 
-import { Decoder, type DecoderConfig, type Event, type Group } from "./decoder.ts";
+import { Decoder, type Event, type Group } from "./decoder.ts";
 
 /** Window consumer options, including the source track. */
-export type ConsumerConfig = DecoderConfig & { track: Moq.Track.Subscriber };
+export type ConsumerConfig = { track: Moq.Track.Subscriber };
 
 // A group that ended early rather than failing: the next one restates the window, so a gap is
 // something to resync from. Old and Evicted are how the publisher says it dropped a group it was
@@ -18,11 +18,10 @@ const GAPS: Moq.StreamCode[] = [
 /**
  * Consumes a sliding window of JSON records from a track, yielding one event per change.
  *
- * A {@link Decoder} that owns its track: it reads groups, starts a cold DEFLATE window at each
- * boundary, and turns each group's header into just the changes this reader has not been told about.
+ * A {@link Decoder} that owns its track: it reads groups and turns each group's header into just the changes this reader has not been told about.
  * When something else already owns the track, use the {@link Decoder} directly.
  *
- * Group rolls never surface. A publisher rolls for compression's sake, and a header restating the
+ * Group rolls never surface. A header restating the
  * window yields nothing for records already delivered, so this reads as one continuous stream of
  * {@link Event}s regardless of how the publisher framed them.
  *
@@ -44,7 +43,7 @@ export class Consumer<T> {
 
 	constructor(config: ConsumerConfig) {
 		this.#track = config.track.ordered();
-		this.#decoder = new Decoder(config);
+		this.#decoder = new Decoder();
 	}
 
 	/** Absolute index of the oldest record in the window. */

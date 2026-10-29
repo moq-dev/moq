@@ -189,7 +189,7 @@ async fn connect_test(config: ConnectTest<'_>) {
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce, got retraction");
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test", None))
+	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
@@ -703,7 +703,7 @@ async fn iroh_connect_test(version: Option<&str>) {
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce, got retraction");
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test", None))
+	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
@@ -899,7 +899,7 @@ async fn quic_client_close_drains_finished_track() {
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
-	let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test", None))
+	let broadcast = tokio::time::timeout(TIMEOUT, consumer.request("test", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
@@ -1023,7 +1023,7 @@ async fn quic_client_close_drains_migrated_predecessor() {
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
-	let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test", None))
+	let broadcast = tokio::time::timeout(TIMEOUT, consumer.request("test", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
@@ -1160,7 +1160,7 @@ async fn quic_client_close_keeps_predecessor_handover() {
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
-	let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test", None))
+	let broadcast = tokio::time::timeout(TIMEOUT, consumer.request("test", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");

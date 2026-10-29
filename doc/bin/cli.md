@@ -122,8 +122,11 @@ supplies a PES boundary or clock fails rather than retaining bytes indefinitely.
 It takes one program: a multi-program
 stream is refused until `--program` picks one, or `--program all` publishes
 each as its own broadcast (`event.hang` becomes `event/1.hang`,
-`event/2.hang`). A damaged packet is dropped on its own PID, so video freezes
-until its next keyframe while the other tracks carry on. The importer also
+`event/2.hang`), following the PAT: a program it adds publishes, one it drops
+ends, and one that returns publishes as a new instance. A listed program whose
+PMT does not arrive within 0.5 s of program clock ends the import. A damaged packet is
+dropped on its own PID, so video freezes until its next keyframe while the
+other tracks carry on. The importer also
 logs feed health (stalled streams, TR 101 290 errors) without changing what it
 publishes. `--passthrough` publishes the multiplex whole instead, every packet
 in order on one [`m2ts`](/concept/hang#transport-streams) track with every
@@ -233,7 +236,11 @@ audio-device dependencies:
 cargo install moq-cli --no-default-features --features "quic,websocket,play,openh264"
 ```
 
-`moq play` skips disabled renditions. If none are enabled, it waits for a later catalog. Disabling the current rendition stops it and selects an enabled replacement.
+`moq play` skips disabled renditions when it picks one. If no enabled rendition
+matches its name and codec filters, it waits for a later catalog. Disabling the
+current rendition switches to an enabled one of its kind that matches the
+filters; with none, it stays subscribed, so re-enabling it (an unmute) plays at
+once.
 
 ## Capture
 
@@ -243,12 +250,17 @@ moq ... import capture --display --system-audio          # share a screen with i
 moq ... import capture --window 39193 --no-audio         # one window (macOS, Windows, X11)
 moq ... import capture --window --no-audio               # system window picker (Linux Portal)
 moq ... import capture --camera 0 --width 1280 --height 720 --fps 30 --bitrate 3000000 --codec h265
+moq ... import capture --on-demand                       # capture only while someone watches
 ```
 
 Video goes through the platform hardware encoder, with an H.264 software
 fallback when built with `openh264`, and audio is Opus; [moq-video](/lib/rs/moq-video) lists the
-backends. The camera opens only while someone is watching, and `--bitrate` is a
-ceiling that backends with live bitrate control lower to fit the connection.
+backends. The camera and microphone stay open and encode while publishing,
+so a late subscriber can fetch the recent past. `--on-demand` captures and
+encodes each source only while its track has a subscriber, and leaves nothing
+to fetch from before the first viewer; video still opens its source once at
+startup to probe the mode it negotiates. `--bitrate` is a ceiling that
+backends with live bitrate control lower to fit the connection.
 `moq devices` prints every source id. On Windows, `display:N` is an
 enumeration index rather than a stable monitor id, so re-run `moq devices` if a
 saved selector picks the wrong screen.
@@ -462,6 +474,9 @@ FLV, MKV and RTMP refuse the released `--max-age` spelling with a migration
 message. The output follows the source's clock within what ISO/IEC 13818-1
 allows a TS PCR. A source further off fails the export, naming its rate, once
 it has used half the delay; a brief network stall only drops what it made late.
+A timeline that steps further than the delay absorbs with no restart marker, as
+a changeover between two encoders whose clocks disagree, re-acquires the clock
+as at startup rather than read the step as drift.
 
 `export ts --passthrough` reads the track an `import ts --passthrough` published
 and writes its packets back out unchanged, from its first group on, each run
@@ -472,22 +487,24 @@ continuity error, and the rest carry on. It takes neither `--follow`,
 `--stitch` nor `--mux-rate`. Only the hang catalog names the track, so an
 `.msf` broadcast needs `--catalog-format hang`.
 
-A stdout export ends with the broadcast. `export ts --follow 10s` waits that
-long for the same publisher instance to come back, and carries on with the same
-stream. A return that refuses its catalog keeps it waiting for the next
-announcement; if the follow runs out first, it exits 1 with that refusal. One
-that goes before serving, such as one still routed through a dead session, is
-no return. A replacement (a restarted publisher, under a new
+A stdout export ends with the broadcast. A publisher that leaves still gets
+what the export buffered of it out on schedule first. `export ts --follow 10s`
+then waits that long for the same publisher instance to come back, and carries
+on with the same stream. A return that refuses its catalog keeps it waiting
+for the next announcement; if the follow runs out first, it exits 1 with that
+refusal. One that goes before serving, such as one still routed through a dead
+session, is no return. A replacement (a restarted publisher, under a new
 [epoch](/concept/moq-lite#publisher-epochs)) exits 1 unless `--stitch` follows
 it as a full program switch: a new PMT from its catalog, with every PID flagging
 the break. A stitch waits for the replacement's first catalog snapshot until it
 arrives or the replacement goes, keeping the old publisher playing meanwhile,
 so even the default `--follow 0s` switches to a replacement that is still
 starting. After the catalog arrives, the old instance keeps feeding for up to
-`--follow` while the replacement acquires its clock and first usable media, and
-its buffered tail drains before the marked switch. A replacement usable within
-that window adds no gap to the output; one still acquiring when it runs out,
-such as on a link too slow to carry both instances, starts after a gap.
+`--follow` while the replacement acquires its clock and first usable media.
+The marked switch then drops the old instance's buffered tail, so the
+replacement plays at `--delay` rather than behind it. A replacement usable
+within that window adds no gap to the output; one still acquiring when it runs
+out, such as on a link too slow to carry both instances, starts after a gap.
 Timestamps across epochs are not aligned. Without `--stitch` the export stays
 on the old publisher while it is up. Only lite-07 and moq-transport sessions
 carry epochs, so on the

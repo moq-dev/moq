@@ -35,11 +35,7 @@ async fn abandoned_request_reaches_the_publisher(version: &str, relays: u64) {
 	broadcast.announce(Default::default()).unwrap();
 	moq_clock::sleep(Duration::from_secs(1)).await;
 
-	let consumer = nodes[relays as usize]
-		.consume()
-		.request_broadcast("room", None)
-		.await
-		.unwrap();
+	let consumer = nodes[relays as usize].consume().request("room", None).await.unwrap();
 	let mut waiting = Box::pin(consumer.track("video").unwrap().subscribe(None));
 	let request = match futures::future::select(std::pin::pin!(dynamic.requested_track()), &mut waiting).await {
 		futures::future::Either::Left((request, _)) => request.expect("the request reaches the publisher"),
@@ -85,7 +81,13 @@ async fn withdrawn_broadcast_releases_track_info(version: &str, answered: bool, 
 	options.server_publish = Some(publisher.consume());
 	options.client_subscribe = Some(reader.clone());
 	let pair = connect_mock(options).await;
-	let remote = reader.consume().routed_broadcast("room").await.unwrap();
+	let remote = reader
+		.consume()
+		.follow("room", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap();
 	let mut query = remote.track("video").unwrap().info();
 	let request = match futures::future::select(std::pin::pin!(dynamic.requested_track()), &mut query).await {
 		futures::future::Either::Left((request, _)) => request.expect("TRACK reaches the publisher"),

@@ -21,7 +21,7 @@ pub enum SettingsError {
 	WebTransportUnsupported,
 
 	#[error("connection error")]
-	ConnectionError(#[from] crate::quic::driver::ConnectionError),
+	ConnectionError(#[from] crate::quic::driver::connection::Error),
 
 	#[error("read error")]
 	ReadError(#[from] crate::quic::driver::ReadError),
@@ -48,7 +48,7 @@ pub struct Settings {
 
 impl Settings {
 	// Establish the H3 connection.
-	pub async fn connect(conn: &crate::quic::driver::Connection) -> Result<Self, SettingsError> {
+	pub async fn connect(conn: &crate::quic::driver::connection::Connection) -> Result<Self, SettingsError> {
 		let recv = Self::accept(conn);
 		let send = Self::open(conn);
 
@@ -69,7 +69,7 @@ impl Settings {
 	/// kept, not dropped, since closing a QPACK stream ends the peer's HTTP/3 connection. Each
 	/// one kept holds the peer's stream credit, which bounds how many it can open first.
 	async fn accept(
-		conn: &crate::quic::driver::Connection,
+		conn: &crate::quic::driver::connection::Connection,
 	) -> Result<(crate::quic::driver::RecvStream, Vec<Pin<Box<PendingUni>>>), SettingsError> {
 		let mut accept = std::pin::pin!(futures::stream::unfold(conn.clone(), |conn| async {
 			Some((conn.accept_uni().await, conn))
@@ -101,7 +101,9 @@ impl Settings {
 
 		Ok((recv, early))
 	}
-	async fn open(conn: &crate::quic::driver::Connection) -> Result<crate::quic::driver::SendStream, SettingsError> {
+	async fn open(
+		conn: &crate::quic::driver::connection::Connection,
+	) -> Result<crate::quic::driver::SendStream, SettingsError> {
 		let mut settings = web_transport_proto::Settings::default();
 		settings.enable_webtransport(1);
 

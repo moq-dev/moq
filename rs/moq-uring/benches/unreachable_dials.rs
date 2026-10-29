@@ -22,8 +22,8 @@ mod linux {
 
 	type Dial<'a> = Pin<Box<dyn Future<Output = Result<quic::Connection, quic::Error>> + 'a>>;
 
-	fn dial_config(peer: SocketAddr) -> quic::client::Config {
-		let mut config = quic::client::Config::new(peer, "localhost");
+	fn dial_config() -> quic::client::Config {
+		let mut config = quic::client::Config::default();
 		config.alpn = vec!["moq-uring-bench".to_string()];
 		config.verify = false;
 		config.system_roots = false;
@@ -89,9 +89,10 @@ mod linux {
 
 				// Handshakes into a socket nobody reads stay in flight for the run.
 				let hole = UdpSocket::bind("[::1]:0").expect("bind");
-				let into_hole = dial_config(hole.local_addr().expect("addr"));
+				let into_hole = hole.local_addr().expect("addr");
+				let config = dial_config();
 				let mut background: Vec<Dial<'_>> = (0..handshakes)
-					.map(|_| Box::pin(endpoint.connect(&into_hole)) as Dial<'_>)
+					.map(|_| Box::pin(endpoint.connect(&config, into_hole, "localhost")) as Dial<'_>)
 					.collect();
 				worker
 					.block_on(std::future::poll_fn(|cx| {
@@ -102,8 +103,8 @@ mod linux {
 					}))
 					.expect("worker");
 
-				let unroutable: Vec<quic::client::Config> = (1..=destinations)
-					.map(|port| dial_config(SocketAddr::new(Ipv4Addr::LOCALHOST.to_ipv6_mapped().into(), port)))
+				let unroutable: Vec<SocketAddr> = (1..=destinations)
+					.map(|port| SocketAddr::new(Ipv4Addr::LOCALHOST.to_ipv6_mapped().into(), port))
 					.collect();
 
 				group.throughput(Throughput::Elements(destinations.into()));
@@ -113,7 +114,7 @@ mod linux {
 						b.iter(|| {
 							let dials = unroutable
 								.iter()
-								.map(|config| Box::pin(endpoint.connect(config)) as Dial<'_>)
+								.map(|&addr| Box::pin(endpoint.connect(&config, addr, "localhost")) as Dial<'_>)
 								.collect();
 							let failed = worker.block_on(settle(dials)).expect("worker");
 							assert_eq!(failed, unroutable.len(), "every unroutable dial fails");

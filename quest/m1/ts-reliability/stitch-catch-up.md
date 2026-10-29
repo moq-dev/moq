@@ -1,33 +1,40 @@
-# [M] A stitched switch returns to --delay
+# [M] Decide whether a stitched export demotes its old leg
 
 ## Goal
 
-After `moq export ts --stitch` switches to a replacement publisher instance,
-end-to-end latency returns to `--delay` once the replacement acquires,
-instead of carrying the old program's tail as added latency.
+Decide, by measurement, whether a stitched export should demote its old leg's
+track subscriptions while the replacement acquires, and land the demotion if it
+shortens the switch's output hole on the bufferbloat fixture.
 
 ## Plan
 
-Decided 2026-10-27 (maintainer), from
-[moq-dev/moq#6919](https://github.com/moq-dev/moq/pull/6919): drop the old
-tail, not time-compress. The switch is already a TS program change, so the
-skip costs nothing extra.
+The latency half landed in
+[moq-dev/moq#7049](https://github.com/moq-dev/moq/pull/7049): a stitched
+switch drops the old program's tail and starts the replacement at `--delay`.
+The priority half landed in
+[moq-dev/moq#7145](https://github.com/moq-dev/moq/pull/7145): a mid-stream
+`track::Subscriber::update` now reaches the publisher on lite and
+moq-transport, directly and through a relay, and on an old instance after an
+epoch switch (`priority_update_*` in
+`rs/moq-net-tests/tests/integration/restart.rs`).
 
-- Today `commit` in `rs/moq-mux/src/jitter.rs` starts the replacement past
-  the old `horizon`, and the anchor only moves forward. The only catch-up is
-  clock steering capped at about 30 ppm (`MAX_DRIFT`, `MAX_SLEW`), so the
-  3.9 s, 3.6 s, and 7.5 s measured in #6919's run would take about a day
-  and a half each to remove.
-- Once the replacement acquires, cut the old program's queued tail and
-  start the new program at `--delay`. Keep output monotonic across the
-  program change.
-- Test repeated switches: latency settles back to `--delay` after each,
-  rather than accumulating, and output stays in order across every switch.
-- Also reproduce #6919's priority observation: a mid-stream
-  `Subscriber::update` demotion of the old leg still showed priority 0 on
-  the receive side. Fix it if update propagation is wrong; otherwise
-  explain it in the PR.
-- Update `doc/bin/cli.md` and `doc/setup/redundancy.md` inline if they
-  describe switch latency.
+What remains is the experiment
+[moq-dev/moq#6919](https://github.com/moq-dev/moq/pull/6919) motivated: it
+measured the replacement's keyframe arriving 0.7 to 2.2 s after the follow ran
+out on a 160 kbit/s link, where both legs' audio outranks all video. Demoting
+the old leg (for example to priority -1 from the moment `Follower::poll_switch`
+starts subscribing the replacement) lets the replacement's keyframe through
+sooner, but under strict priority the old leg then starves on a link slower
+than either leg alone, so its output may stall before the switch. Whether the
+hole shrinks is empirical.
+
+- Plumb a priority change from `Follower` through the export's program tracks
+  (`rs/moq-mux/src/container/ts/export.rs`, `crate::Source`) to their
+  `track::Subscriber`s or `Control`s.
+- Compare `redundant_importers_switch_through_bufferbloat_on_lite_07` in
+  `rs/moq-cli/tests/integration/export.rs` with and without the demotion:
+  the switch's output gap and the replacement's keyframe arrival.
+- Land it only if the gap shrinks; otherwise delete this quest and record the
+  numbers in the PR.
 
 Public API: none expected. Wire: none.

@@ -7,7 +7,7 @@ use std::task::Poll;
 
 /// The publisher instances serving a broadcast, as each comes online, takes over, and goes.
 ///
-/// Built on [`announced_broadcast`](moq_net::origin::Consumer::announced_broadcast). Create one
+/// Built on [`follow`](moq_net::origin::Consumer::follow). Create one
 /// with [`Source::follow`](crate::Source::follow) for a catalog reference, or [`Instances::new`]
 /// for a path.
 pub struct Instances {
@@ -20,7 +20,7 @@ pub struct Instances {
 
 enum Feed {
 	/// Every instance announced at a path.
-	Announced(Box<moq_net::origin::AnnouncedBroadcast>),
+	Announced(Box<moq_net::origin::Following>),
 	/// One instance, handed out once.
 	Fixed(Option<moq_net::broadcast::Consumer>),
 }
@@ -44,7 +44,7 @@ impl Instances {
 		path: impl TryInto<moq_net::Path, Error: Into<moq_net::Error>>,
 		epoch: Option<&moq_net::Epoch>,
 	) -> crate::Result<Self> {
-		let announced = origin.announced_broadcast(path, None)?;
+		let announced = origin.follow(path, None)?;
 		Ok(Self::with(Feed::Announced(Box::new(announced)), epoch))
 	}
 

@@ -276,12 +276,12 @@ Those three varints are at most 24 bytes, so datagram plaintext MUST be at most 
 
 ## Catalogs
 A catalog is a track like any other: published under the physical name derived from its semantic name, with each snapshot or delta protected at its own group and frame identity.
-Hang {{hang}} `catalog.json` and `catalog.json.z` and MSF's `catalog` are semantic names; authorized clients derive those physical names from the generation.
+Hang {{hang}} `catalog.json` and MSF's `catalog` are semantic names; authorized clients derive those physical names from the generation.
 The decrypted catalog is unchanged from its plaintext form: every track it references, including rendition-map keys, `track` fields, and application extensions, keeps its semantic name.
 A subscriber derives the physical name of each track it reads; neither side rewrites the catalog, so extensions need no profile support.
 
-If a representation is compressed, compression is applied to the catalog bytes before AEAD and reversed after decryption.
-Encrypting then compressing is forbidden: ciphertext does not compress, and the `.z` sibling would leak the uncompressed size ratio.
+If a track is compressed, compression is applied to the plaintext before AEAD and reversed after decryption.
+Encrypting then compressing is forbidden: ciphertext does not compress.
 
 
 # Bounds {#bounds}

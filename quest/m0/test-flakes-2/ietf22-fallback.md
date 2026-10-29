@@ -30,4 +30,13 @@ load average 30 to 70:
   audio stayed stalled past the bound, at the newest run's last timestamp, and
   the session stayed up.
 
+Rechecked 2026-10-27 at
+[767685e1ba](https://github.com/moq-dev/moq/commit/767685e1ba0dabfd921fe8439d7f55ccf65eeedb)
+with Chromium 156.0.8078.4: two focused replacement runs with the relay debug
+filter above passed all three protocol versions. IETF22 replaced in 176 and
+186 ms and fell back in 206 and 209 ms, with audio resumed and the incumbent
+identity preserved. Neither reported failure recurred. These runs provide a
+current baseline, not evidence that either intermittent failure is fixed;
+keep waiting for a recurrence with its relay and browser logs.
+
 Public API: none expected. Wire: none expected.

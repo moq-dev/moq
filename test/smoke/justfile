@@ -103,12 +103,18 @@ freshness:
 # root .editorconfig for style; shellcheck lints the same set. Each tool is
 # guarded so it skips when not on PATH (nix develop provides them all).
 
-# Lint the harness.
+# Lint the harness and test release discovery and relay selection.
 check:
     @if command -v shfmt >/dev/null 2>&1; then shfmt --diff $(shfmt -f .); else echo "shfmt: skipped"; fi
     @if command -v shellcheck >/dev/null 2>&1 && command -v shfmt >/dev/null 2>&1; then shellcheck $(shfmt -f .); else echo "shellcheck: skipped"; fi
     @command -v actionlint >/dev/null && actionlint ../../.github/workflows/smoke.yml || echo "actionlint: skipped"
     just freshness
+    just harness-check
+
+# Offline release discovery and public-relay endpoint/gate checks.
+harness-check:
+    bash tests/release.sh
+    bash tests/relays.sh
 
 # Unit-tests the failure diagnostics first. Linux, needs sudo.
 

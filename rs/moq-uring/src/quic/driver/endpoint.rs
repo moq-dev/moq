@@ -1,6 +1,6 @@
 //! The endpoint: one socket, many moq-quic connections.
 //!
-//! moq-quic's own [`moq_quic::Endpoint`] is the routing table: it parses
+//! moq-quic's own [`moq_quic::endpoint::Endpoint`] is the routing table: it parses
 //! each datagram, hands it to the connection its destination id names, mints
 //! and retires ids as peers consume them, and answers an unsupported version
 //! itself. What is left for us is the socket, the accept backlog, and a driver
@@ -12,11 +12,13 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, VecDeque};
 use std::net::SocketAddr;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::task::Poll;
 
 use bytes::BytesMut;
-use moq_quic::{ConnectionHandle, DatagramEvent, Incoming, Transmit};
+use moq_quic::{
+	Transmit,
+	endpoint::{ConnectionHandle, DatagramEvent, Dial, Incoming, Received},
+};
 use rustc_hash::FxHashMap;
 
 use super::super::{Error, endpoint::Config};
@@ -41,7 +43,7 @@ pub(crate) struct Inner {
 	socket: Rc<udp::Socket>,
 	local: SocketAddr,
 	/// The routing table, and the server configuration it accepts with.
-	endpoint: RefCell<moq_quic::Endpoint>,
+	endpoint: RefCell<moq_quic::endpoint::Endpoint>,
 	accepting: RefCell<Option<Accepting>>,
 	/// Every live connection, looked up per received datagram.
 	///
@@ -96,8 +98,8 @@ impl Endpoint {
 				let mut server = super::server_config(server)?;
 				// moq-quic buffers half-open handshakes itself, so it enforces
 				// the same bound the accept queue does.
-				server.max_incoming(config.backlog);
-				Some(Arc::new(server))
+				server.max_incoming = config.backlog;
+				Some(server)
 			}
 			None => None,
 		};
@@ -105,11 +107,10 @@ impl Endpoint {
 		// Every `udp::Socket` refuses to fragment, so a probe too large for the
 		// path is lost rather than delivered in pieces, and discovery can trust
 		// what arrives. Each connection's transport still decides whether to probe.
-		let endpoint = moq_quic::Endpoint::new(
-			super::endpoint_config(socket.shard(), config.reset_secret.as_ref()),
-			server,
+		let endpoint = moq_quic::endpoint::Endpoint::new(
+			super::endpoint_config(socket.shard(), config.reset_secret, server),
 			true,
-		);
+		)?;
 
 		let inner = Rc::new(Inner {
 			activity: config.activity,
@@ -163,9 +164,14 @@ impl Endpoint {
 		.await
 	}
 
-	/// Dial [`Config::peer`](crate::quic::client::Config::peer) through this
-	/// endpoint's socket, driving the handshake to completion.
-	pub async fn connect(&self, config: &crate::quic::client::Config) -> Result<Connection, Error> {
+	/// Dial `remote` through this endpoint's socket, verifying it as
+	/// `server_name`, and drive the handshake to completion.
+	pub async fn connect(
+		&self,
+		config: &crate::quic::client::Config,
+		remote: SocketAddr,
+		server_name: &str,
+	) -> Result<Connection, Error> {
 		if let Some(err) = self.inner.closed() {
 			return Err(err);
 		}
@@ -174,7 +180,14 @@ impl Endpoint {
 			.inner
 			.endpoint
 			.borrow_mut()
-			.connect(self.inner.owner.now(), client, config.peer, &config.server_name)
+			.connect(
+				self.inner.owner.now(),
+				Dial {
+					config: &client,
+					remote,
+					server_name,
+				},
+			)
 			.map_err(|err| Error::Quic(err.to_string()))?;
 		let shared = self.inner.launch(key, conn);
 		// Flush the Initial flight; the demux task takes it from here.
@@ -283,10 +296,13 @@ impl Inner {
 			buf.clear();
 			// The local address lets moq-quic answer from the one the peer
 			// reached, which a wildcard bind on a multihomed host needs.
-			let event = self
-				.endpoint
-				.borrow_mut()
-				.handle(self.owner.now(), from, dst_ip, ecn, segment, &mut buf);
+			let received = Received {
+				remote: from,
+				local_ip: dst_ip,
+				ecn,
+				data: segment,
+			};
+			let event = self.endpoint.borrow_mut().handle(self.owner.now(), received, &mut buf);
 			match event {
 				Some(DatagramEvent::ConnectionEvent(key, event)) => {
 					let conn = self.conns.borrow().get(&key).cloned();
@@ -364,7 +380,7 @@ impl Inner {
 			.handshake
 			.timeout
 			.and_then(|timeout| self.owner.now().checked_add(timeout));
-		let accepted = self.endpoint.borrow_mut().accept(incoming, self.owner.now(), buf, None);
+		let accepted = self.endpoint.borrow_mut().accept(incoming, self.owner.now(), buf);
 		let (key, conn) = match accepted {
 			Ok(accepted) => accepted,
 			Err(err) => {
@@ -422,10 +438,10 @@ impl Inner {
 		}
 		tx.extend_from_slice(&buf[..transmit.size]);
 		let transmit = udp::Transmit {
-			to: transmit.destination,
+			to: transmit.remote,
 			segment: transmit.segment_size.unwrap_or(transmit.size),
 			ecn: transmit.ecn.map(super::ecn_from_quic),
-			src_ip: transmit.src_ip,
+			src_ip: transmit.local_ip,
 		};
 		if let Err(err) = tx.send(transmit) {
 			tracing::debug!(%err, "failed to send an endpoint response");
@@ -433,7 +449,7 @@ impl Inner {
 	}
 
 	/// Register `conn`, spawn its driver, and arrange its teardown.
-	fn launch(self: &Rc<Self>, key: ConnectionHandle, conn: moq_quic::Connection) -> connection::Shared {
+	fn launch(self: &Rc<Self>, key: ConnectionHandle, conn: moq_quic::connection::Connection) -> connection::Shared {
 		let peer = conn.remote_address();
 		let (shared, driver) = connection::launch(&self.owner, self.socket.clone(), Rc::downgrade(self), key, conn);
 		self.conns.borrow_mut().insert(key, shared.clone());

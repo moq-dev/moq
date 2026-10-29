@@ -26,6 +26,12 @@ since the async-to-poll adapter and leases that hold the lock both go first.
   an unbounded channel to its connection's task, with a wake per packet
   (`driver/endpoint.rs`, the receive loop), and endpoint events flow back the
   same way. Count channel sends, wakes, and cross-thread hand-offs per packet.
+  The channel is unbounded, and stream credit does not bound encrypted
+  datagrams waiting before the connection task processes them. Measure its
+  depth and bytes when a peer's ingress outruns its connection task (lock
+  wait included). If it grows, bound it by design at the packet boundary
+  (batch dispatch, or backpressure into the socket read) rather than with a
+  queue cap that drops (2026-10-27 audit, maintainer).
 
 Levers, only where the profile shows a cost:
 

@@ -18,13 +18,13 @@ pub(crate) use loom::{
 	cell::UnsafeCell,
 	sync::{
 		Arc, Mutex, MutexGuard,
-		atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize},
+		atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, fence},
 	},
 };
 #[cfg(not(loom))]
 pub(crate) use std::sync::{
 	Arc, Mutex, MutexGuard,
-	atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize},
+	atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, fence},
 };
 
 /// `std::cell::UnsafeCell` behind loom's closure API, so loom can check every access.

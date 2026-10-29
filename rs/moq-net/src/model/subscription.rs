@@ -171,8 +171,9 @@ impl Range {
 
 	/// Everything from the oldest group still around onward, the default.
 	///
-	/// Unlike `Absolute(0)..` this names no floor, so an older wire asks for the live edge
-	/// and lets [`Subscription::max_delay`] decide how far back to reach.
+	/// Unlike `Absolute(0)..` this names no floor: a wire whose publisher resolves the start
+	/// from [`Subscription::max_delay`] reaches as far back as it allows, and an older wire
+	/// starts at the live edge, filling nothing below it.
 	pub fn oldest() -> Self {
 		Self {
 			start: Anchor::Relative(u64::MAX),

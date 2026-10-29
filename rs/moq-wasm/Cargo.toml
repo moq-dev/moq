@@ -39,14 +39,7 @@ url = { workspace = true }
 wasm-bindgen = "=0.2.129"
 wasm-bindgen-futures = "0.4"
 web-async = { workspace = true }
-web-transport-trait = { workspace = true }
 web-transport-wasm = { workspace = true }
-
-[dev-dependencies]
-bytes = { workspace = true }
-moq-net = { path = "../moq-net" }
-thiserror = { workspace = true }
-web-transport-trait = { workspace = true }
 
 [lints]
 workspace = true

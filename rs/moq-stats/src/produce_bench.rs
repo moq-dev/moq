@@ -6,7 +6,7 @@ use std::time::Duration;
 use moq_clock::Instant;
 use moq_net::{Path, origin, stats::Registry, track};
 
-use super::{Drain, PendingPair, Task};
+use super::{Drain, Task};
 
 /// Group-track frame sizes from one tick, in bytes.
 ///
@@ -64,8 +64,8 @@ impl Driver {
 		let stamp = self.drain.stamp(self.now);
 		let node = &mut self.drain.node;
 		let label = Path::new(label).expect("label fits");
-		node.adopt_presence(&self.drain.report, label.clone(), PendingPair::default(), stamp);
-		node.presence[&label].pair.plain.track.subscribe(None)
+		node.adopt_presence(&self.drain.report, label.clone(), None, stamp);
+		node.presence[&label].output.snapshot.track.subscribe(None)
 	}
 
 	/// Hold broadcast prefix `path`'s track as a reader would; see
@@ -77,10 +77,10 @@ impl Driver {
 		node.adopt_prefix(
 			&self.drain.report,
 			Path::new(path).expect("path fits"),
-			PendingPair::default(),
+			None,
 			tick,
 			stamp,
 		);
-		node.prefixes[path].pair.plain.track.subscribe(None)
+		node.prefixes[path].output.snapshot.track.subscribe(None)
 	}
 }

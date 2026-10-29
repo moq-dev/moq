@@ -235,10 +235,13 @@ int main(void) {
     if (origin <= 0) fail("error: moq_origin_create failed: %d\n", origin);
 
     const char *path = "c-decoder-output-test";
-    int32_t broadcast = moq_origin_create_broadcast((uint32_t)origin, path, strlen(path));
-    if (broadcast <= 0) fail("error: moq_origin_create_broadcast failed: %d\n", broadcast);
-    if (moq_publish_announce((uint32_t)broadcast, NULL) < 0)
-        fail("error: moq_publish_announce failed (%s)\n", moq_error());
+    uint32_t broadcast = 0;
+    int32_t publication = moq_origin_create_broadcast((uint32_t)origin, path, strlen(path), &broadcast);
+    if (publication <= 0) fail("error: moq_origin_create_broadcast failed: %d\n", publication);
+    if (moq_publication_announce((uint32_t)publication, NULL) < 0)
+        fail("error: moq_publication_announce failed (%s)\n", moq_error());
+    if (moq_publication_free((uint32_t)publication) < 0)
+        fail("error: moq_publication_free failed (%s)\n", moq_error());
 
     moq_video_encoder_input input = {MOQ_VIDEO_PIXEL_FORMAT_RGBA, WIDTH, HEIGHT, {30000, 1001}};
     moq_video_encoder_output output = {MOQ_VIDEO_CODEC_H264, 0, 0, MOQ_VIDEO_ENCODER_KIND_SOFTWARE, NULL, 0};
