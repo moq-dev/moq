@@ -41,7 +41,3 @@ over. A rendition removed while held is dropped. A held muted tile suspends
 its AudioContext.
 
 Public API: behavior only. Wire: none.
-
-## Related
-
-- [Rust consumers hold a disabled rendition](/quest/m1/push-to-talk/hold-rs.md) - the same rule in Rust
