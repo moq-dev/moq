@@ -154,10 +154,18 @@ attribute protocol and boundary CPU separately or count copies and GC; the
 report states those limits. Fresh contexts and no-store responses mean uncached
 page imports, with browser process and OS caches still warm.
 
+Each cell also records its full configuration, round, page errors and rejection
+details in `backend.json` under `diagnostics`, including failed cells that yield
+no sample. Its `logs` fields point to separate publisher and consumer console
+logs in the same run directory. Logs include page errors and publisher cleanup;
+binding rejections retain their reason and nested fields before crossing the
+browser boundary. Use these with the relay logs to diagnose a failed cell.
+
 No timing threshold fails a shared runner. Bad bytes, negotiation, incomplete
 samples or an unavailable claimed CPU clock fail. Retain raw rounds and compare
-their range before drawing a performance conclusion. Nightly uploads the run
-for 45 days. This is a consume-path baseline, not approval to adopt WASM for the
+their range before drawing a performance conclusion. Nightly uploads the run,
+including page logs and failed-cell diagnostics, for 45 days even on failure.
+This is a consume-path baseline, not approval to adopt WASM for the
 complete JS API.
 
 The independent integer fixtures retain decimal strings through `u64::MAX`.

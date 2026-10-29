@@ -1,4 +1,5 @@
 import * as Moq from "@moq/net";
+import { diagnose } from "./diagnostics.ts";
 import { payload, type Workload } from "./fixture.ts";
 
 const cleanup: (() => void)[] = [];
@@ -52,5 +53,5 @@ declare global {
 		baselineStop: typeof stop;
 	}
 }
-window.baselinePublish = prepare;
-window.baselineStop = stop;
+window.baselinePublish = (config) => diagnose(prepare(config));
+window.baselineStop = () => diagnose(stop());

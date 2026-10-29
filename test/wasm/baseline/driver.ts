@@ -1,16 +1,17 @@
 /** Retain raw backend samples; correctness fails, timing variability is reported. */
 import { createHash } from "node:crypto";
+import { appendFileSync, writeFileSync } from "node:fs";
 import { appendFile, readdir } from "node:fs/promises";
 import { cpus, freemem, loadavg, platform, totalmem } from "node:os";
 import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
-import { chromium } from "playwright";
+import { type BrowserContext, chromium } from "playwright";
 import type { RelayFixture } from "../src/main.ts";
 import type { Sample, Workload } from "./fixture.ts";
 
 const { values } = parseArgs({ options: { relays: { type: "string" }, timeout: { type: "string", default: "30" } } });
 const timeout = Number(values.timeout) * 1000;
-const run = process.env.HARNESS_RUN_DIR;
+const run = process.env.HARNESS_RUN_DIR ?? "";
 if (!values.relays || !run || !Number.isFinite(timeout) || timeout <= 0)
 	throw new Error("baseline needs harness relays, retained run directory and positive timeout");
 const here = dirname(new URL(import.meta.url).pathname);
@@ -111,6 +112,7 @@ const report = {
 		"High u64 wire-codec fixtures run separately. A full high-u64 network/binding parity gate needs a native publisher fixture and expanded JS public group representation before adoption.",
 	],
 	samples: [] as unknown[],
+	diagnostics: [] as unknown[],
 	summary: [] as unknown[],
 };
 await Bun.write(output, JSON.stringify(report, null, 2));
@@ -211,30 +213,53 @@ try {
 console.log(`Retained ${report.samples.length} raw backend samples: ${output}`);
 
 async function sample(config: Sample, round: number) {
-	const publisherContext = await browser.newContext();
-	const consumerContext = await browser.newContext();
-	const publisher = await publisherContext.newPage();
-	const consumer = await consumerContext.newPage();
 	const errors: string[] = [];
-	for (const page of [publisher, consumer]) {
-		page.on("pageerror", (error) => errors.push(error.message));
-		// A panic in a spawned WASM task only reaches the console, never a pageerror or rejection.
-		page.on("console", (message) => {
-			if (message.text().includes("panicked at")) errors.push(`panic: ${message.text()}`);
-		});
-	}
-	if (config.transport === "websocket")
-		await consumer.addInitScript(() => {
-			Object.defineProperty(globalThis, "WebTransport", { value: undefined });
-		});
-	const metrics = await consumer.context().newCDPSession(consumer);
-	// Refuse an unavailable CPU clock rather than relabeling wall-task time as CPU.
-	await metrics.send("Performance.enable", { timeDomain: "threadTicks" });
-	const readMetrics = async () =>
-		Object.fromEntries(
-			(await metrics.send("Performance.getMetrics")).metrics.map((metric) => [metric.name, metric.value]),
-		);
+	const prefix = config.id.replaceAll("/", "-");
+	const diagnostics = {
+		config,
+		round,
+		logs: { publisher: `${prefix}-publisher.log`, consumer: `${prefix}-consumer.log` },
+		page_errors: errors,
+		error: null as string | null,
+	};
+	report.diagnostics.push(diagnostics);
+	// Create both logs before setup, and append immediately so interrupted cells leave evidence too.
+	for (const log of Object.values(diagnostics.logs)) writeFileSync(join(run, log), "");
+	await Bun.write(output, JSON.stringify(report, null, 2));
+	let publisherContext: BrowserContext | undefined;
+	let consumerContext: BrowserContext | undefined;
 	try {
+		publisherContext = await browser.newContext();
+		consumerContext = await browser.newContext();
+		const publisher = await publisherContext.newPage();
+		const consumer = await consumerContext.newPage();
+		for (const [role, page] of [
+			["publisher", publisher],
+			["consumer", consumer],
+		] as const) {
+			const log = (message: string) =>
+				appendFileSync(join(run, diagnostics.logs[role]), `${new Date().toISOString()} ${message}\n`);
+			page.on("pageerror", (error) => {
+				log(`[pageerror] ${error.stack ?? error.message}`);
+				errors.push(`${role}: ${error.message}`);
+			});
+			page.on("console", (message) => {
+				log(`[${message.type()}] ${message.text()}`);
+				// A panic in a spawned WASM task only reaches the console, never a pageerror or rejection.
+				if (message.text().includes("panicked at")) errors.push(`${role}: panic: ${message.text()}`);
+			});
+		}
+		if (config.transport === "websocket")
+			await consumer.addInitScript(() => {
+				Object.defineProperty(globalThis, "WebTransport", { value: undefined });
+			});
+		const metrics = await consumer.context().newCDPSession(consumer);
+		// Refuse an unavailable CPU clock rather than relabeling wall-task time as CPU.
+		await metrics.send("Performance.enable", { timeDomain: "threadTicks" });
+		const readMetrics = async () =>
+			Object.fromEntries(
+				(await metrics.send("Performance.getMetrics")).metrics.map((metric) => [metric.name, metric.value]),
+			);
 		await publisher.goto(`${endpoint}/publisher`);
 		await publisher.evaluate((workload: Workload) => window.baselinePublish(workload), config);
 		const before = await readMetrics();
@@ -277,10 +302,22 @@ async function sample(config: Sample, round: number) {
 		console.log(
 			`${config.version} ${config.backend}/${config.transport} ${config.publishers}x${config.subscribers} ${config.size}B round${round}: ${cpu.toFixed(3)}ms consumer CPU`,
 		);
+	} catch (error) {
+		diagnostics.error = error instanceof Error ? (error.stack ?? error.message) : String(error);
+		throw error;
 	} finally {
-		await publisher.evaluate(() => window.baselineStop()).catch(() => {});
-		await publisherContext.close();
-		await consumerContext.close();
+		try {
+			await publisherContext
+				?.pages()[0]
+				?.evaluate(() => window.baselineStop())
+				.catch((error) => {
+					appendFileSync(join(run, diagnostics.logs.publisher), `[cleanup] ${String(error)}\n`);
+				});
+			await publisherContext?.close();
+			await consumerContext?.close();
+		} finally {
+			await Bun.write(output, JSON.stringify(report, null, 2));
+		}
 	}
 }
 

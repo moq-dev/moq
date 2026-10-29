@@ -138,7 +138,7 @@ echo "bundling the harness page..."
 rm -rf dist
 driver=driver.ts
 if [[ -n $BASELINE ]]; then
-    bun test baseline/fixture.test.ts
+    bun test baseline/fixture.test.ts baseline/diagnostics.test.ts
     bun build baseline/publisher.ts baseline/consumer.ts --outdir dist --target browser >/dev/null
     bun build ../../js/net/src/index.ts --outfile dist/net.js --target browser --minify >/dev/null
     driver=baseline/driver.ts
