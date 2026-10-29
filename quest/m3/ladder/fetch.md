@@ -21,7 +21,7 @@ manually fetchable, and cache hits are untouched.
 
 Catalog mutations publish full snapshots
 (`rs/moq-mux/src/catalog/producer.rs`). The
-[compression migration](/quest/m1/compress/README.md) removed the HANGZ
+[compression migration](https://github.com/moq-dev/moq/pull/7046) removed the HANGZ
 sibling; coalesce every rung state change from one
 controller iteration into a single publication of each supported catalog, and make a
 later source catalog snapshot compose with current generated-rung state

@@ -77,4 +77,3 @@ and their alternatives:
 - [Straight-line bodies become machines](/quest/m1/poll-first/machine-bodies.md) - moq-net's straight-line `async fn` bodies become `#[kio::machine]` polls
 - [Generated async wrappers behind a feature](/quest/m1/poll-first/async-feature.md) - each library's `async fn` wrappers are generated from its `poll_*` signatures and compile only with its `async` feature
 - [Libraries spawn nothing](/quest/m1/poll-first/no-spawn.md) - web-async goes, and moq-ffi, moq-stats, moq-wasm and moq-relay's cluster and auth run as polled `kio::Tasks` children instead of spawned tasks
-- [Incremental compilation for moq-net](/quest/m1/poll-first/incremental.md) - a one-line moq-net edit re-checks for less than a clean build

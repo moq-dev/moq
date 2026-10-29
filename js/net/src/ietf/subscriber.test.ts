@@ -1442,7 +1442,7 @@ test("an object datagram is a datagram group", async () => {
 	await send({ trackAlias: ALIAS + 1n });
 	await send({ endOfGroup: false, body: { status: 3 } });
 	await send({ groupId: 5, objectId: 0 });
-	const properties = await encodeObjectExtensions(Timestamp.fromMillis(1234), Timescale.MILLI, VERSION);
+	const properties = encodeObjectExtensions(Timestamp.fromMillis(1234), Timescale.MILLI, VERSION);
 	await send({ groupId: 9, objectId: 0, publisherPriority: 7, properties, body: { payload: Uint8Array.of(1) } });
 
 	const datagram = await track.recvDatagram();

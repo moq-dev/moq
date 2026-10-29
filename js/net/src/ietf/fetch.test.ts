@@ -595,6 +595,49 @@ test("a timed-out group with nothing yet keeps the groups before it nonexistent"
 	}
 });
 
+// A group the cache evicts between listing it for the answer and writing it is unknown, not
+// skipped, which would say it never existed. Waiting on the open Largest Object's group, before
+// FETCH_OK, gives the older groups time to age out of the cache; the newer one stays.
+test("a group evicted after it was listed is unknown", async () => {
+	for (const version of VERSIONS) {
+		for (const order of ["ascending", "descending"] as const) {
+			using clock = manual();
+			using fx = serve(version);
+			// Group 0 never existed; groups 1 and 2 age out.
+			writeGroup(fx.track, 1, ["1-0", "1-1"]);
+			writeGroup(fx.track, 2, ["2-0", "2-1"]);
+			await clock.advance(ms(25_000));
+			writeGroup(fx.track, 3, ["3-0", "3-1"]);
+			const live = writeGroup(fx.track, 4, ["4-0"], false);
+
+			const type = range(version, at(0, 0), at(4, 0));
+			const msg = new Fetch({ requestId: FETCH_ID, type, groupOrder: order, fillTimeout: Milli(20_000) });
+			const answer = served(await clock.drive(fetch(fx, msg)));
+			expect(answer.ok.endLocation).toEqual({ group: 4n, object: version === D18 ? 0n : MAX_OBJECT });
+
+			const newest: [number, number, string][] = [[4, 0, "4-0"], gap(4, MAX_OBJECT, timedOut(version))];
+			expect(answer.objects).toEqual(
+				order === "ascending"
+					? [
+							gap(0, MAX_OBJECT, "8c"),
+							gap(1, MAX_OBJECT, "10c"),
+							gap(2, MAX_OBJECT, "10c"),
+							...pairs([3]),
+							...newest,
+						]
+					: [
+							...newest,
+							...pairs([3]),
+							gap(3, MAX_OBJECT, "8c"),
+							gap(2, MAX_OBJECT, "10c"),
+							gap(1, MAX_OBJECT, "10c"),
+						],
+			);
+			live.finish();
+		}
+	}
+});
+
 // Every FETCH keeps its own budget, even for the same open group, and one without FILL_TIMEOUT,
 // as an older peer sends, waits for the group as it always has.
 test("each FETCH keeps its own FILL_TIMEOUT", async () => {

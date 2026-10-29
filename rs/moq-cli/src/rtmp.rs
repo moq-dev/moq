@@ -170,20 +170,21 @@ pub async fn connect_export(
 ) -> anyhow::Result<()> {
 	let name = moq_net::Path::new(&name)?;
 	let (addr, app, key) = parse_url(&url).await?;
-	// Confirm the broadcast is reachable (and wait for it to be announced) before dialing;
-	// the FLV export re-resolves it (and any referenced sibling broadcast) through the origin.
-	origin
+	// Wait for the broadcast to be announced before dialing; the FLV export resolves any
+	// referenced sibling broadcast through the same origin.
+	let broadcast = origin
 		.follow(&name, None)?
 		.available()
 		.await
 		.with_context(|| format!("failed to resolve broadcast `{name}`"))?;
+	let source = moq_mux::Source::new(origin, broadcast);
 
 	// The stream key is the ingest credential, so log the dial target and app instead.
 	tracing::info!(%addr, %app, %name, "RTMP client pushing");
 	notify_ready();
 
 	let client = Client::connect(addr, &app).await?.with_max_delay(max_delay);
-	Ok(client.publish(&key, origin, &name).await?)
+	Ok(client.publish(&key, source).await?)
 }
 
 /// Parse `rtmp://host[:1935]/<app>/<key>` into a resolved address, app, and stream key.

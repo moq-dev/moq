@@ -103,7 +103,7 @@ catalog linger (#5305).
 - [A restart keeps its catalog](/quest/m1/ts-reliability/restart-catalog.md) - a restarted import publishes its catalog with its first media
 - [PAT changes](/quest/m1/ts-reliability/pat-lifecycle.md) - a running export follows a moved PMT PID
 - [A small step back keeps the TS export's video](/quest/m1/ts-reliability/step-back.md) - the export re-acquires on a sub-group step back from any source instead of dropping its video
-- [A demoted subscriber priority reaches the publisher](/quest/m1/ts-reliability/stitch-catch-up.md) - a mid-stream priority demotion reaches the publisher on lite-07 and moq-transport, including an old instance after an epoch switch
+- [Decide whether a stitched export demotes its old leg](/quest/m1/ts-reliability/stitch-catch-up.md) - measure on the bufferbloat fixture whether demoting the old leg while the replacement acquires shrinks the switch's output hole, and land it if so
 
 ## Related
 

@@ -21,7 +21,10 @@ a one-range subscription. Map a past range to a standalone FETCH, and a
 mid-group join to a joining FETCH on draft 18 or a fill on draft 22, the way
 Rust's subscriber does. Then add the native JS runtimes as subscribers to the
 `run_fetch_round` cells in the tail suite, and a late-join case through a
-relay that does not replay the group.
+relay that does not replay the group. Our publishers answer only one group
+([one group](/quest/m1/ietf-publisher-one-group.md), 2026-10-28), so a
+past-range FETCH against them is refused. Test ranges against a third-party
+publisher, and one group against ours.
 
 Public API: none beyond JS ranges' surface. Wire: none.
 
