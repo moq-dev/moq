@@ -14,8 +14,7 @@ from moq_ffi import (
 )
 
 from ._records import Backoff, ClientTls, QuicConfig, WebSocketConfig, _implementation, _strs
-from .origin import AnnounceConsumer, AnnouncedBroadcast, OriginConsumer, OriginProducer
-from .publish import BroadcastProducer
+from .origin import AnnounceConsumer, AnnouncedBroadcast, OriginConsumer, OriginProducer, Publication
 from .session import Session
 from .subscribe import BroadcastConsumer
 
@@ -156,7 +155,7 @@ class Client:
                 self._inner.cancel()
                 self._inner = None
 
-    def create_broadcast(self, path: str) -> BroadcastProducer:
+    def create_broadcast(self, path: str) -> Publication:
         """Create an unannounced broadcast at ``path``, invisible until announced. Announce it after populating tracks.
 
         See :meth:`OriginProducer.create_broadcast`.

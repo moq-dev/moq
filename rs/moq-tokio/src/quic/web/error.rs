@@ -12,7 +12,7 @@ pub enum ClientError {
 	UnexpectedEnd,
 
 	#[error("connection error: {0}")]
-	Connection(#[from] crate::quic::driver::ConnectionError),
+	Connection(#[from] crate::quic::driver::connection::Error),
 
 	#[error("failed to write: {0}")]
 	WriteError(#[from] crate::quic::driver::WriteError),
@@ -27,14 +27,7 @@ pub enum ClientError {
 	HttpError(#[from] ConnectError),
 
 	#[error("quic error: {0}")]
-	ConnectError(#[from] crate::quic::driver::ConnectError),
-
-	#[error("invalid DNS name: {0}")]
-	InvalidDnsName(String),
-
-	#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
-	#[error("rustls error: {0}")]
-	Rustls(#[from] rustls::Error),
+	ConnectError(#[from] crate::quic::driver::endpoint::ConnectError),
 }
 
 /// An errors returned by [`crate::quic::web::Session`], split based on if they are underlying QUIC errors or
@@ -43,23 +36,21 @@ pub enum ClientError {
 #[non_exhaustive]
 pub enum SessionError {
 	#[error("connection error: {0}")]
-	ConnectionError(crate::quic::driver::ConnectionError),
+	ConnectionError(crate::quic::driver::connection::Error),
 
 	#[error("webtransport error: {0}")]
 	WebTransportError(#[from] WebTransportError),
 
 	#[error("send datagram error: {0}")]
-	SendDatagramError(#[from] crate::quic::driver::SendDatagramError),
+	SendDatagramError(#[from] crate::quic::driver::connection::SendDatagramError),
 }
 
-impl From<crate::quic::driver::ConnectionError> for SessionError {
-	fn from(e: crate::quic::driver::ConnectionError) -> Self {
+impl From<crate::quic::driver::connection::Error> for SessionError {
+	fn from(e: crate::quic::driver::connection::Error) -> Self {
 		match &e {
-			crate::quic::driver::ConnectionError::ApplicationClosed(close) => {
+			crate::quic::driver::connection::Error::ApplicationClosed(close) => {
 				match web_transport_proto::error_from_http3(close.error_code.into_inner()) {
-					Some(code) => {
-						WebTransportError::Closed(code, String::from_utf8_lossy(&close.reason).into_owned()).into()
-					}
+					Some(code) => WebTransportError::Closed(code, close.reason.clone()).into(),
 					None => SessionError::ConnectionError(e),
 				}
 			}
@@ -138,7 +129,9 @@ impl CloseReason {
 	pub(crate) fn map(&self, err: SessionError) -> SessionError {
 		let conn = match &err {
 			SessionError::ConnectionError(conn)
-			| SessionError::SendDatagramError(crate::quic::driver::SendDatagramError::ConnectionLost(conn)) => Some(conn),
+			| SessionError::SendDatagramError(crate::quic::driver::connection::SendDatagramError::ConnectionLost(
+				conn,
+			)) => Some(conn),
 			SessionError::WebTransportError(WebTransportError::Closed(..) | WebTransportError::SessionGone) => None,
 			_ => return err,
 		};
@@ -148,11 +141,9 @@ impl CloseReason {
 		}
 
 		match conn {
-			Some(crate::quic::driver::ConnectionError::ApplicationClosed(close)) if self.raw => {
+			Some(crate::quic::driver::connection::Error::ApplicationClosed(close)) if self.raw => {
 				match u32::try_from(close.error_code.into_inner()) {
-					Ok(code) => {
-						WebTransportError::Closed(code, String::from_utf8_lossy(&close.reason).into_owned()).into()
-					}
+					Ok(code) => WebTransportError::Closed(code, close.reason.clone()).into(),
 					Err(_) => err,
 				}
 			}
@@ -315,7 +306,7 @@ pub enum ServerError {
 	UnexpectedEnd,
 
 	#[error("connection error")]
-	Connection(#[from] crate::quic::driver::ConnectionError),
+	Connection(#[from] crate::quic::driver::connection::Error),
 
 	#[error("failed to write")]
 	WriteError(#[from] crate::quic::driver::WriteError),

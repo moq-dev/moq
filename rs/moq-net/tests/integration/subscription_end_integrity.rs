@@ -67,11 +67,7 @@ async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 	let MockPair { client, server, .. } = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
-		.await
-		.expect("announce timeout")
-		.expect("routed");
-	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
+	let remote = moq_clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
@@ -216,9 +212,10 @@ async fn killed(version: &str, local: bool) -> (Option<moq_net::Error>, Option<m
 	let MockPair { client, server, .. } = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	consumer.routed("bcast").await.expect("routed");
 	let remote = consumer
-		.request_broadcast("bcast", None)
+		.follow("bcast", None)
+		.unwrap()
+		.available()
 		.await
 		.expect("broadcast resolves");
 	// Subscribing resolves only once the publisher serves the track, which it does

@@ -1,12 +1,8 @@
 //! A keyed cache of weak handles with amortized garbage collection.
 
-use std::{
-	borrow::Borrow,
-	collections::{HashMap, VecDeque},
-	hash::Hash,
-};
+use std::{borrow::Borrow, collections::hash_map::RandomState, hash::Hash};
 
-/// A weak handle whose liveness and identity the cache can probe.
+/// A weak handle whose liveness and identity the model can probe.
 ///
 /// Implemented by the weak consumer handles cached for dynamic dedup
 /// ([`super::broadcast::WeakConsumer`], [`super::track::TrackWeak`]).
@@ -14,57 +10,34 @@ pub(super) trait WeakEntry {
 	/// True once the underlying channel has closed (every producer dropped).
 	fn is_closed(&self) -> bool;
 
-	/// True if `self` and `other` reference the same underlying channel.
-	///
-	/// Used to tell a live entry apart from a superseded twin: the same key can
-	/// hold a fresh handle after an older one closed, leaving a stale copy in the
-	/// probe ring.
+	/// True if both handles reference the same underlying channel.
 	fn same_channel(&self, other: &Self) -> bool;
 }
 
-/// Number of ring slots probed per insert. A small constant keeps each insert
-/// O(1) while the rotating window covers the whole cache over successive inserts.
-/// Mirrors the bound in kio's `WaiterList`.
+/// Number of entries probed per insert or owner removal.
 const GC_PROBE: usize = 2;
 
-/// A map of weak handles that reclaims closed entries incrementally.
+/// A keyed cache of weak handles, ordered for bounded, rotating garbage collection.
 ///
-/// Deduplicates dynamically-served handles by key: [`get`](Self::get) returns a
-/// live handle and drops a closed one, so a stale entry never resolves. The catch
-/// is that a key requested once and never again would otherwise linger forever
-/// (its handle closes but nothing re-looks-it-up), so a long-lived cache accreting
-/// distinct one-shot keys leaks one dead entry per key.
-///
-/// Rather than an O(n) sweep on every insert, each [`insert`](Self::insert) probes
-/// a bounded, rotating slice of the keys (like Redis sampling expired keys, or the
-/// rotating cursor in kio's `WaiterList`) and drops any that have closed or been
-/// superseded. The cache stays bounded by the number of currently-live handles
-/// without ever scanning all of it.
+/// Each handle has one slot: keyed removal unlinks it immediately, including when
+/// no later operation arrives. Inserts and owner removals also probe a bounded
+/// window, so closed one-shot keys do not accumulate or require a whole-table scan.
 pub(super) struct WeakCache<K, V> {
-	map: HashMap<K, V>,
-
-	// Rotating probe queue, one entry per key plus transient junk: keys already
-	// removed from `map`, and superseded duplicates (a key re-inserted with a fresh
-	// handle after the old one closed). GC discards both when it reaches them,
-	// telling a live entry from its superseded twin via `same_channel`, so the ring
-	// stays bounded by the live-handle count. It can reach ~2x the map when one key
-	// churns behind many live keys (its twins wait their turn under the probe cursor),
-	// but that is still O(live), not a per-key leak.
-	ring: VecDeque<(K, V)>,
+	// Preserve the standard map's hasher for peer-chosen names.
+	map: hashlink::LinkedHashMap<K, V, RandomState>,
 }
 
 impl<K, V> Default for WeakCache<K, V> {
 	fn default() -> Self {
 		Self {
-			map: HashMap::new(),
-			ring: VecDeque::new(),
+			map: Default::default(),
 		}
 	}
 }
 
 impl<K, V> WeakCache<K, V>
 where
-	K: Clone + Eq + Hash,
+	K: Eq + Hash,
 	V: WeakEntry + Clone,
 {
 	/// Return a live handle for `key`, dropping and ignoring a closed one.
@@ -96,9 +69,8 @@ where
 			return Some(existing.clone());
 		}
 
-		self.map.insert(key.clone(), value.clone());
+		self.map.insert(key, value);
 		self.gc();
-		self.ring.push_back((key, value));
 		None
 	}
 
@@ -115,20 +87,14 @@ where
 		K: Borrow<Q>,
 		Q: Hash + Eq + ?Sized,
 	{
-		// Prune the ring too. Unlike a lazily-dropped closed entry (which a later insert's GC
-		// sweeps), an explicit remove has no follow-up insert to rely on, so scan it out now
-		// rather than pin the handle (and its kio state) until one happens to arrive.
-		self.ring.retain(|(k, _)| k.borrow() != key);
 		self.map.remove(key)
 	}
 
 	/// Remove the entry for `key`, live or closed, only when it satisfies `f`, so an
 	/// owner taking out its own entry leaves a successor's alone.
 	///
-	/// Unlike [`Self::remove`], the ring sheds its copy under the bounded GC rather than
-	/// a scan, so owners leaving one by one cost O(1) each however large the cache. Each
-	/// call probes like an insert does, reclaiming junk faster than it adds it, so the
-	/// ring stays bounded by the live count plus a tail of the latest leavers.
+	/// Also probes for closed entries, so owners leaving reclaim one-shot keys
+	/// without making another insert necessary.
 	pub fn remove_if<Q>(&mut self, key: &Q, f: impl FnOnce(&V) -> bool) -> Option<V>
 	where
 		K: Borrow<Q>,
@@ -159,35 +125,14 @@ where
 		self.map.values()
 	}
 
-	/// Probe a bounded, rotating window of the ring, reclaiming dead entries.
+	/// Probe a bounded, rotating window, unlinking closed entries in place.
 	fn gc(&mut self) {
-		for _ in 0..self.ring.len().min(GC_PROBE) {
-			let Some((key, entry)) = self.ring.pop_front() else {
-				break;
-			};
-
-			enum Probe {
-				// Live and still the current handle for its key: rotate to the back.
-				Keep,
-				// Closed: reclaim the map entry.
-				Reclaim,
-				// Already removed, or superseded by a newer handle: drop the ring entry.
-				Drop,
-			}
-
-			let probe = match self.map.get(&key) {
-				Some(cur) if !cur.same_channel(&entry) => Probe::Drop,
-				Some(cur) if cur.is_closed() => Probe::Reclaim,
-				Some(_) => Probe::Keep,
-				None => Probe::Drop,
-			};
-
-			match probe {
-				Probe::Keep => self.ring.push_back((key, entry)),
-				Probe::Reclaim => {
-					self.map.remove(&key);
-				}
-				Probe::Drop => {}
+		for _ in 0..self.map.len().min(GC_PROBE) {
+			let Some(mut entry) = self.map.front_entry() else { break };
+			if entry.get().is_closed() {
+				entry.remove();
+			} else {
+				entry.to_back();
 			}
 		}
 	}
@@ -198,11 +143,6 @@ impl<K, V> WeakCache<K, V> {
 	/// Number of entries currently in the map (live or not-yet-reclaimed).
 	pub fn len(&self) -> usize {
 		self.map.len()
-	}
-
-	/// Number of entries retained in the probe ring.
-	pub fn ring_len(&self) -> usize {
-		self.ring.len()
 	}
 }
 
@@ -232,7 +172,6 @@ mod tests {
 		fn is_closed(&self) -> bool {
 			self.0.load(Ordering::SeqCst)
 		}
-
 		fn same_channel(&self, other: &Self) -> bool {
 			Arc::ptr_eq(&self.0, &other.0)
 		}
@@ -251,24 +190,30 @@ mod tests {
 	}
 
 	#[test]
-	fn remove_prunes_ring() {
-		// An explicit remove must free the handle from the ring too, not just the map, so a
-		// batch of removes with no follow-up insert doesn't pin the handles until GC runs.
-		let mut cache = WeakCache::default();
-		cache.insert("a", Fake::open());
-		cache.insert("b", Fake::open());
-		assert_eq!(cache.ring_len(), 2);
-
-		assert!(cache.remove("a").is_some());
-		assert_eq!(cache.len(), 1);
-		assert_eq!(cache.ring_len(), 1, "remove must prune the ring, not just the map");
-		assert!(cache.remove("a").is_none(), "already removed");
+	fn removals_release_handles_without_followup() {
+		for conditional in [false, true] {
+			let mut cache = WeakCache::default();
+			let entry = Fake::open();
+			let weak = Arc::downgrade(&entry.0);
+			for key in 0..1000 {
+				cache.insert(key, Fake::open());
+			}
+			cache.insert(1000, entry);
+			let removed = if conditional {
+				cache.remove_if(&1000, |_| true)
+			} else {
+				cache.remove(&1000)
+			};
+			assert!(removed.is_some());
+			drop(removed);
+			assert!(weak.upgrade().is_none(), "the idle cache still pins a removed handle");
+		}
 	}
 
 	/// Owners leaving one by one, live or closed, with nothing inserted after them: each
-	/// removal leaves a successor's entry alone and sheds the ring without scanning it.
+	/// removal leaves a successor's entry alone without scanning the cache.
 	#[test]
-	fn owners_leaving_keep_the_ring_bounded() {
+	fn owners_leaving_preserve_the_successor() {
 		let mut cache = WeakCache::default();
 		let entries: Vec<Fake> = (0..1000).map(|_| Fake::open()).collect();
 		for (i, entry) in entries.iter().enumerate() {
@@ -286,13 +231,6 @@ mod tests {
 			assert!(cache.remove_if(&i, |current| current.same_channel(entry)).is_some());
 		}
 		assert_eq!(cache.len(), 1, "only the successor is left");
-		// Each removal probes twice the junk it adds, so only a tail of the latest
-		// leavers waits for the next operation, never one entry per key.
-		assert!(
-			cache.ring_len() < 1000 / 4,
-			"ring kept the leavers: {}",
-			cache.ring_len()
-		);
 	}
 
 	#[test]
@@ -306,18 +244,12 @@ mod tests {
 			entry.close();
 		}
 		assert!(cache.len() <= GC_PROBE + 1, "map grew unbounded: {}", cache.len());
-		assert!(
-			cache.ring_len() <= GC_PROBE + 1,
-			"ring grew unbounded: {}",
-			cache.ring_len()
-		);
 	}
 
 	#[test]
 	fn same_key_churn_does_not_leak() {
-		// Re-serving the same key with a fresh handle after the old one closed leaves a stale
-		// twin in the ring. `same_channel` must let GC discard it; a key-only ring would keep
-		// rotating the twin forever (it points at a now-live key) and grow without bound.
+		// Re-serving the same key with a fresh handle after the old one closed must replace its
+		// old slot, without accumulating superseded handles.
 		let mut cache = WeakCache::default();
 		for _ in 0..1000 {
 			let entry = Fake::open();
@@ -325,11 +257,6 @@ mod tests {
 			entry.close();
 		}
 		assert_eq!(cache.len(), 1, "one key must map to at most one entry");
-		assert!(
-			cache.ring_len() <= 2,
-			"superseded twins must not accumulate: {}",
-			cache.ring_len()
-		);
 	}
 
 	#[test]

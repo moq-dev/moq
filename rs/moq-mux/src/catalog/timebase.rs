@@ -29,6 +29,12 @@ impl<E: CatalogExt> Timebase<E> {
 		}
 	}
 
+	/// Finish and forget the HLS records of a dropped `track` whose name is never published again.
+	/// See [`Producer::retire`].
+	pub(crate) fn retire(&self, track: &str) -> crate::Result<()> {
+		self.catalog.retire(track)
+	}
+
 	/// Begin reserving an importer's tracks, sharing this timebase's offset.
 	///
 	/// See [`Producer::reserve`] for how the reservation gates the catalog.

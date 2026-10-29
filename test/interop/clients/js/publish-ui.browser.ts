@@ -191,7 +191,7 @@ test("watch property and UI state reflects without resetting a selected publish 
 			watch.connection.enabled.set(false);
 			watch.captions = "english";
 			watch.controls.text.target.set("french");
-			watch.announced = false;
+			watch.follow = false;
 			watch.catalogFormat = "manual";
 			const publish = document.querySelector("moq-publish");
 			if (!publish) throw new Error("missing publish element");
@@ -213,13 +213,13 @@ test("watch property and UI state reflects without resetting a selected publish 
 				if (!publish) throw new Error("missing publish element");
 				return {
 					enabled: watch.connection.enabled.peek(),
-					announced: watch.getAttribute("announced"),
+					follow: watch.getAttribute("follow"),
 					catalog: watch.getAttribute("catalog-format"),
 					source: publish.getAttribute("source"),
 					sameFile: publish.source === (window as unknown as { selectedFile: File }).selectedFile,
 				};
 			}),
-		).toEqual({ enabled: false, announced: "false", catalog: "manual", source: "file", sameFile: true });
+		).toEqual({ enabled: false, follow: "false", catalog: "manual", source: "file", sameFile: true });
 	} finally {
 		await browser.close();
 		await server.close();
@@ -253,6 +253,25 @@ test("invalid markup reports its error and suspends the element until corrected"
 		expect(result.errors.some((error) => error.includes("catalog-format"))).toBe(true);
 		expect(result.enabled).toBe(false);
 		expect(result.raw).toBe("guess");
+
+		const renamed = await page.evaluate(() => {
+			const errors: string[] = [];
+			window.addEventListener("error", (event) => {
+				errors.push(event.message);
+				event.preventDefault();
+			});
+			const watch = document.createElement("moq-watch");
+			watch.setAttribute("announced", "false");
+			document.body.append(watch);
+			const refused =
+				!watch.connection.enabled.peek() && errors.some((error) => error.includes("renamed to `follow`"));
+			watch.removeAttribute("announced");
+			const recovered = watch.connection.enabled.peek();
+			watch.remove();
+			watch.signals.close();
+			return { refused, recovered };
+		});
+		expect(renamed).toEqual({ refused: true, recovered: true });
 	} finally {
 		await browser.close();
 		await server.close();
@@ -382,14 +401,14 @@ test("version lists keep their defaults and explicit false booleans round-trip",
 				else watch.setAttribute("versions", value);
 				versions.push(watch.versions);
 			}
-			watch.setAttribute("announced", "false");
-			const announced = watch.announced;
+			watch.setAttribute("follow", "false");
+			const follow = watch.follow;
 			watch.signals.close();
-			return { versions, announced };
+			return { versions, follow };
 		});
 		expect(result).toEqual({
 			versions: [["moq-transport-14"], ["moq-lite-06", "moq-transport-22"], undefined, undefined, undefined],
-			announced: false,
+			follow: false,
 		});
 	} finally {
 		await browser.close();
