@@ -841,14 +841,8 @@ impl Consume {
 	///
 	/// `on_value` is called with a value ID for each state, in order; a group superseded by a
 	/// newer one before it is read is skipped. Values must be released with
-	/// [`Self::json_value_close`]. Pass the same compression the producer used.
-	pub fn json_snapshot(
-		&mut self,
-		broadcast: Id,
-		name: &str,
-		config: moq_json::snapshot::consumer::Config,
-		on_value: OnStatus,
-	) -> Result<Id, Error> {
+	/// [`Self::json_value_close`].
+	pub fn json_snapshot(&mut self, broadcast: Id, name: &str, on_value: OnStatus) -> Result<Id, Error> {
 		let context = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?;
 		let driver = context
 			.origin
@@ -866,7 +860,8 @@ impl Consume {
 				driver
 					.watch(async move {
 						let track = broadcast.track(&name)?.subscribe(None).await?;
-						let consumer = moq_json::snapshot::Consumer::<serde_json::Value>::new(track, config);
+						let consumer =
+							moq_json::snapshot::Consumer::<serde_json::Value>::new(track, Default::default());
 						Self::run_json_snapshot(on_value, consumer, close).await
 					})
 					.await
@@ -902,13 +897,7 @@ impl Consume {
 	///
 	/// `on_value` is called with a value ID for each record, in order. Values must be released
 	/// with [`Self::json_value_close`].
-	pub fn json_stream(
-		&mut self,
-		broadcast: Id,
-		name: &str,
-		config: moq_json::stream::Config,
-		on_value: OnStatus,
-	) -> Result<Id, Error> {
+	pub fn json_stream(&mut self, broadcast: Id, name: &str, on_value: OnStatus) -> Result<Id, Error> {
 		let context = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?;
 		let driver = context
 			.origin
@@ -926,7 +915,7 @@ impl Consume {
 				driver
 					.watch(async move {
 						let track = broadcast.track(&name)?.subscribe(None).await?;
-						let consumer = moq_json::stream::Consumer::<serde_json::Value>::new(track, config);
+						let consumer = moq_json::stream::Consumer::<serde_json::Value>::new(track, Default::default());
 						Self::run_json_stream(on_value, consumer, close).await
 					})
 					.await

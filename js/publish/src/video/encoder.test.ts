@@ -1090,7 +1090,7 @@ test("a failed video encoder disables only its rendition and recovers on a fresh
 		await encoder.out.catalog.changed();
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected network broadcast");
-		announced = broadcast.in.origin.peek()?.request(broadcast.in.name.peek(), { announced: true });
+		announced = broadcast.in.origin.peek()?.follow(broadcast.in.name.peek());
 		const epoch = announced?.active.peek()?.epoch;
 		const sibling = broadcast.video("video/sd");
 		sibling.config.set({ codec: "avc1.640028", container: { kind: "legacy" } });

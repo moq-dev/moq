@@ -47,12 +47,10 @@ async fn connect(
 fn read_arrivals(origin: moq_net::origin::Producer, order: Order) -> moq_clock::sim::JoinHandle<Vec<u64>> {
 	moq_clock::sim::spawn(async move {
 		let consumer = origin.consume();
-		moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
-			.await
-			.expect("announce timeout")
-			.expect("routed");
 		let remote = consumer
-			.request_broadcast("bcast", None)
+			.follow("bcast", None)
+			.unwrap()
+			.available()
 			.await
 			.expect("broadcast resolves");
 		let subscription = Subscription::default()

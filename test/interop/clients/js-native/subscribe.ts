@@ -256,7 +256,7 @@ async function run(): Promise<void> {
 			return;
 		}
 		const path = Moq.Path.from(broadcast as string);
-		requested = origin.request(path, { announced: true });
+		requested = origin.follow(path);
 		let bc = requested.active.peek();
 		while (!bc) {
 			await requested.active.changed();

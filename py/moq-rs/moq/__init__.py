@@ -8,7 +8,6 @@ from moq_ffi import MoqError as Error
 from . import audio as audio
 
 # Layer namespaces stay out of __all__; json would shadow the stdlib module.
-from . import flate as flate
 from . import json as json
 from . import video as video
 from .client import Client, CongestionControl, connect, qlog_supported, versions
@@ -29,6 +28,7 @@ from .origin import (
     OriginConsumer,
     OriginProducer,
     OriginRequests,
+    Publication,
 )
 from .publish import (
     BroadcastProducer,
@@ -125,6 +125,7 @@ __all__ = [
     "OriginRequests",
     "OriginProducer",
     "Order",
+    "Publication",
     "Range",
     "Request",
     "Reservation",

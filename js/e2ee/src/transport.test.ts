@@ -39,7 +39,7 @@ async function session(protocol: string) {
 }
 
 async function active(origin: Origin.Producer, path: Path.Valid): Promise<Broadcast.Consumer> {
-	const request = origin.request(path, { announced: true });
+	const request = origin.follow(path);
 	for (;;) {
 		const front = request.active.peek();
 		if (front) return front;

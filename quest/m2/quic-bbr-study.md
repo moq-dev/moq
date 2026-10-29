@@ -74,6 +74,12 @@ BBR3 state machine.
   bound, then accelerate a later probe if feedback is clean. Noq lacks this
   state and transition. Compare queue depths, capacity increases, and
   competing flows on shaped paths with verified overflow drops.
+- Found in [moq-dev/moq#7017](https://github.com/moq-dev/moq/pull/7017):
+  `moq-congestion`'s extra-acked filter is a 10-round Nichols `MaxFilter`
+  (`EXTRA_ACKED_FILTER_LEN` in `rs/moq-congestion/src/bbr3/mod.rs`), while
+  Google Linux keeps two slots of 5 rounds each, the shape #7017 gave the
+  bandwidth filter. Compare aggregation headroom and queue delay under
+  bursty ACKs before changing it.
 
 Report throughput, queue delay, loss, convergence time, and fairness with
 pinned code and configurations. Keep transport differences and QUICHE flags
