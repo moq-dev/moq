@@ -40,6 +40,10 @@ The epic's own work, once the children land:
   watching"), `doc/concept/use-case/contribution.md` (on-demand becomes an
   option), the moq-c doc comment at `rs/moq-c/src/audio.rs:433`, and the
   Swift/Python/Go/Dart wrapper docs.
+- `@moq/room`'s docs: a joined room publishes through `Publish.Broadcast`, so
+  it now encodes the camera and microphone while `Local`'s `cameraEnabled` and
+  `microphoneEnabled` are on, even when nobody watches (found 2026-10-28 by
+  [moq-dev/moq#7143](https://github.com/moq-dev/moq/pull/7143)).
 - Rewrite the quests that assume demand-gated capture:
   [studio replay](/quest/m3/studio/replay.md) and its compose sources ("arm
   replay = local subscriber"), [iOS capture](/quest/m2/mobile-capture-ios.md),

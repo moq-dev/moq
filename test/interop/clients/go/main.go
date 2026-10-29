@@ -41,8 +41,11 @@ import (
 
 const readChunk = 64 * 1024
 
-// media.TrackConsumer max delay: how much reordering the jitter buffer tolerates.
-const maxDelay = time.Second
+// How far a read may fall behind live before it skips. A gap fails the run, which a reader skipping
+// behind live would cause itself: the matrix starts every subscriber at once, and a runtime starved
+// by the others can fall a second behind. That is this reader's speed, not the delivery under test.
+// A track's max-age caps it, so interop.sh's Rust publisher keeps its media at least this long.
+const maxDelay = 5 * time.Second
 
 // finishLinger is how long a finished publisher stays up for the late readers.
 const finishLinger = 10 * time.Second
