@@ -1483,7 +1483,7 @@ export class Subscriber {
 						start === undefined || (lowest !== undefined && lowest <= start) ? lowest : start,
 					undefined,
 				);
-				hooks.startTrack(entry.track, { start: entry.start, requested: entry.requested });
+				hooks.startTrack(entry.track, { start: entry.start ?? null, requested: entry.requested });
 				hooks.reportedLargest(entry.track, resp.start.largest);
 				// The groups the SUBSCRIBE asked for below it are not waited for, whatever the
 				// demand asks later. One that still arrives is delivered.

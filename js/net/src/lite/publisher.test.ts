@@ -682,6 +682,7 @@ function gateWrites(target: WritableStream<Uint8Array>, hold: boolean) {
 // against a group the loop is already holding.
 async function servedSubscription(
 	options: {
+		ranges?: Subscribe["ranges"];
 		startGroup?: number;
 		startFrame?: number;
 		endGroup?: number;
@@ -746,6 +747,7 @@ async function servedSubscription(
 	// Kept so a test can wait for the whole subscription to unwind, decoder included, rather
 	// than only for what reached the wire. It reports failures by tearing down, never by
 	// rejecting.
+	msg.ranges = options.ranges;
 	const serving = publisher.runSubscribe(msg, server);
 
 	const opened = pair.client.incomingUnidirectionalStreams.getReader();
@@ -832,6 +834,28 @@ async function servedSubscription(
 			routed?.front.consumer.close();
 		},
 	};
+}
+
+// Refuse unsupported anchors on either control message before promising a delivery start.
+for (const kind of [2, 3]) {
+	for (const end of [false, true]) {
+		for (const update of [false, true]) {
+			test(`lite-07 refuses anchor ${kind} at ${end ? "end" : "start"} in ${update ? "UPDATE" : "SUBSCRIBE"}`, async () => {
+				const version = Version.DRAFT_07;
+				const anchor = end ? [0, kind, 0] : [kind, 0, 0];
+				const bytes = new Uint8Array([8, 128, 0, 0, 1, ...anchor, 0]);
+				const decoded = await SubscribeUpdate.decode(new Reader(undefined, bytes, version), version);
+				const sub = await servedSubscription({ version, ranges: update ? undefined : decoded.ranges });
+				try {
+					if (update) await sub.client.writer.write(bytes);
+					await sub.serving;
+					await expect(decodeSubscribeResponse(sub.client.reader, version)).rejects.toThrow();
+				} finally {
+					await sub.close();
+				}
+			});
+		}
+	}
 }
 
 // A relay can ingest back-to-back groups micro-reordered (the upstream leg sends

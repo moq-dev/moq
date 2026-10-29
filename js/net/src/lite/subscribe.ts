@@ -123,12 +123,13 @@ interface Span {
 
 /**
  * The groups of one lite-07 range: from `start` up to the exclusive `end`, or through the
- * live edge without one. A relative or time anchor counts as no bound, since this
- * publisher resolves neither.
+ * live edge without one. An unresolved anchor must be refused by the publisher.
  */
 export interface RangeGroups {
 	start: number;
 	end?: number;
+	/** Whether a relative or time anchor still needs resolution this publisher cannot do. */
+	unresolved?: true;
 }
 
 /**
@@ -175,8 +176,7 @@ function before(a: Point, b: Point): boolean {
 
 /**
  * Decode one lite-07 range end: its position, `null` for none, or `undefined` for a relative
- * or time anchor. This publisher resolves neither, so it serves from the oldest group its
- * budget allows, or through the live edge, and the subscriber keeps what it asked for.
+ * or time anchor, which the publisher refuses rather than widening it.
  */
 async function decodeAnchor(r: Reader): Promise<Point | null | undefined> {
 	const kind = await r.u53();
@@ -220,7 +220,15 @@ async function decodeSpan(r: Reader, version: Version): Promise<Span> {
 		const to = await decodeAnchor(r);
 		// An end partway through a group still covers it.
 		const empty = from && to && !before(from, to);
-		ranges.push(empty ? undefined : { start: from?.[0] ?? 0, end: to ? to[0] + (to[1] > 0 ? 1 : 0) : undefined });
+		ranges.push(
+			empty
+				? undefined
+				: {
+						start: from?.[0] ?? 0,
+						end: to ? to[0] + (to[1] > 0 ? 1 : 0) : undefined,
+						...(from === undefined || to === undefined ? { unresolved: true as const } : {}),
+					},
+		);
 		if (!from) floor = false;
 		else if (start === undefined || before(from, start)) start = from;
 		if (!to) live = true;

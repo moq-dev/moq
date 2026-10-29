@@ -844,6 +844,11 @@ export class Publisher {
 			return;
 		}
 
+		if (msg.ranges?.some((range) => range?.unresolved)) {
+			stream.abort(new Error("relative and time subscription anchors are not supported"));
+			return;
+		}
+
 		// The requester leaving while the broadcast and track resolve ends the request, as
 		// Rust polls the requester throughout, so a cancelled subscription gives back its
 		// charge instead of holding it until the track is answered, which may be never. A
@@ -955,6 +960,8 @@ export class Publisher {
 				writer: stream.writer,
 				version: this.version,
 				apply: (update) => {
+					if (update.ranges?.some((range) => range?.unresolved))
+						throw new Error("relative and time subscription anchors are not supported");
 					Object.assign(datagramBounds, {
 						startGroup: update.startGroup,
 						startFrame: update.startFrame,

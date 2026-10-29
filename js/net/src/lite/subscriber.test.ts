@@ -2243,6 +2243,30 @@ test.each([[[]], [[0, 5]]])("a lite-07 SUBSCRIBE_START resolving %j violates the
 	}
 });
 
+test("an empty START remains resolved when its range widens", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe({ groups: { start: { included: 0 }, end: { excluded: 1 } } });
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version);
+		const request = await opened(1);
+		await request.reading;
+		expect(hooks.sourceStart(track)).toBe("pending");
+		await respond(request, version, [{ start: new SubscribeStart([undefined]) }]);
+		await drainReactions();
+		track.update({ groups: { start: { included: 0 }, end: { excluded: 2 } } });
+		await drainReactions();
+		expect(hooks.sourceStart(track)).not.toBe("pending");
+	} finally {
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
 // A lite-07 publisher FINs a bounded subscription without SUBSCRIBE_END once it covered the range,
 // which ends the subscription cleanly rather than violating the protocol. Covering a range is
 // not ending the track, so no end is declared.

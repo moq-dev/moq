@@ -2232,10 +2232,16 @@ mod tests {
 		active.starts = vec![Some(0), Some(10), None];
 		assert_eq!(active.covered(), Some(vec![0..1, 10..11, 20..20]));
 
+		active.ranges[0] = lite::Range::span(Some(0), 0, Some(2), None);
+		active.starts[0] = Some(1);
+		assert_eq!(active.covered(), Some(vec![1..3, 10..11, 20..20]));
+		active.starts[0] = None;
+		assert_eq!(active.covered(), Some(vec![3..3, 10..11, 20..20]));
+
 		active.updated = true;
 		assert_eq!(
 			active.covered(),
-			Some(vec![0..1, 0..11, 0..20]),
+			Some(vec![0..3, 0..11, 0..20]),
 			"an update leaves only the lowest"
 		);
 	}
@@ -6402,12 +6408,12 @@ impl SubStream {
 				let Some(lite::Anchor::Absolute(end)) = range.end else {
 					return None;
 				};
-				let start = match range.start {
-					Some(lite::Anchor::Absolute(start)) => start.group,
-					// The range's own start, so a gap below it isn't owed; after an
-					// update only the lowest start is known.
-					_ => match self.starts.get(index) {
-						Some(start) if !self.updated => start.unwrap_or(end.group),
+				let start = match self.starts.get(index) {
+					// Each range's own start accounts for its skipped prefix, including
+					// an absolute one when another range has no absolute requested floor.
+					Some(start) if !self.updated => start.unwrap_or(end.group),
+					_ => match range.start {
+						Some(lite::Anchor::Absolute(start)) => start.group,
 						_ => served,
 					},
 				};

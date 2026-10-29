@@ -212,11 +212,11 @@ test("a lite-07 list decodes as the span covering it", async () => {
 		{ start: 7, end: 10 },
 	]);
 
-	// A relative start resolves upstream of nothing here, so it widens to no floor.
+	// Preserve that a relative anchor needs resolution before the publisher can serve it.
 	const relative = await update([2, 2, 3, 1, 5, 0, 1, 7, 0, 1, 9, 0]);
 	expect([relative.startGroup, relative.endGroup, relative.endFrame]).toEqual([undefined, 8, undefined]);
 	expect(relative.ranges).toEqual([
-		{ start: 0, end: 5 },
+		{ start: 0, end: 5, unresolved: true },
 		{ start: 7, end: 9 },
 	]);
 
