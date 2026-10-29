@@ -288,6 +288,13 @@ case needs an update to arrive between START and the first group. Cover it
 deterministically, through the track hooks rather than wire timing, when the
 drop runs are reworked here.
 
+### Cancelled fetches hold the end
+
+Found 2026-10-28 by [moq-dev/moq#7149](https://github.com/moq-dev/moq/pull/7149):
+a cancelled fetch below a track's end still holds the end open until the cache
+expiry scan removes it, so how fast a subscription ends depends on expiry
+timing. Settle it here, where cancelled and expired runs get a reason.
+
 ## Related
 
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - fills the cache miss an evicted run leaves

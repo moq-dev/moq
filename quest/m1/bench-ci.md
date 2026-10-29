@@ -28,6 +28,10 @@ lands; agents never dispatch Nightly.
 - Check the paired legs' durations against their hour; the base build relies
   on the mbx cache for the previous night's artifacts, and a cold one roughly
   doubles each leg's build time.
+- Give each revision in a paired comparison its own `CARGO_TARGET_DIR`. Two
+  source trees sharing one produced stale artifacts while attributing
+  [moq-dev/moq#7141](https://github.com/moq-dev/moq/pull/7141), such as a bench
+  linked against the other tree's library (decided 2026-10-28).
 
 - Decide whether `bench/run.sh` pins glibc's malloc thresholds for every
   Criterion target, as [moq-dev/moq#6727](https://github.com/moq-dev/moq/pull/6727)
