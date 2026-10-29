@@ -2143,6 +2143,7 @@ mod tests {
 				.unwrap(),
 			id: 0,
 			max_delay: Duration::ZERO,
+			requested_max_delay: Duration::ZERO,
 			start: None,
 			priority: 0,
 			requested: None,
@@ -2278,6 +2279,7 @@ mod tests {
 					.unwrap(),
 				id: 0,
 				max_delay: Duration::ZERO,
+				requested_max_delay: Duration::ZERO,
 				start: Some(floor),
 				priority: 0,
 				requested: Some(floor),
@@ -2741,6 +2743,7 @@ mod tests {
 			stream,
 			id: 0,
 			max_delay: Duration::ZERO,
+			requested_max_delay: Duration::ZERO,
 			start: Some(2),
 			priority: 0,
 			requested: Some(2),
@@ -5098,7 +5101,7 @@ mod tests {
 		assert!(announced.ready.is_empty());
 
 		let consumer = origin.consume();
-		let request = moq_clock::sim::spawn(async move { consumer.request_broadcast("room/7", None).await });
+		let request = moq_clock::sim::spawn(async move { consumer.request("room/7", None).await });
 
 		let ready = kio::wait(|waiter| announced.ready.poll_pop(waiter)).await.unwrap();
 		assert_eq!(ready.as_str(), "room/7");
@@ -5150,7 +5153,7 @@ mod tests {
 			announced: &mut Announced,
 		) -> (crate::broadcast::Consumer, SourceServe) {
 			let consumer = origin.consume();
-			let request = moq_clock::sim::spawn(async move { consumer.request_broadcast("pool/p", None).await });
+			let request = moq_clock::sim::spawn(async move { consumer.request("pool/p", None).await });
 			let ready = kio::wait(|waiter| announced.ready.poll_pop(waiter)).await.unwrap();
 			announced.ready.try_push(ready).unwrap();
 			announced.poll_serve(subscriber, &kio::Waiter::noop());
@@ -5212,7 +5215,7 @@ mod tests {
 		announced.poll_serve(&subscriber, &kio::Waiter::noop());
 
 		let consumer = origin.consume();
-		let request = moq_clock::sim::spawn(async move { consumer.request_broadcast("pool/p", None).await });
+		let request = moq_clock::sim::spawn(async move { consumer.request("pool/p", None).await });
 		let ready = kio::wait(|waiter| announced.ready.poll_pop(waiter)).await.unwrap();
 		announced.ready.try_push(ready).unwrap();
 		announced.poll_serve(&subscriber, &kio::Waiter::noop());
@@ -5413,7 +5416,7 @@ mod tests {
 		// The peer's own subscription, excluding the hop the server minted for
 		// it, is served from the local front before anything is announced back.
 		let peer = origin.consume().excluding(assigned);
-		let resolved = peer.request_broadcast("room/host", None).await.expect("resolves");
+		let resolved = peer.request("room/host", None).await.expect("resolves");
 		let mut sub = resolved
 			.track("video")
 			.unwrap()
@@ -5459,7 +5462,7 @@ mod tests {
 		// The local front is still the one at the path, and still serving: the
 		// peer's next request joins it rather than minting another.
 		let still = peer
-			.request_broadcast("room/host", None)
+			.request("room/host", None)
 			.await
 			.expect("the local front keeps serving");
 		assert!(
@@ -6299,6 +6302,9 @@ struct SubStream {
 	/// start sits elsewhere the request-tracked floor stands instead, and demand
 	/// returning here makes the declaration valid again.
 	requested: Option<u64>,
+	/// The max delay the SUBSCRIBE itself carried, fixed for the stream's life: a lite-06+
+	/// SUBSCRIBE_START resolves the start from it, skipping older groups as stale.
+	requested_max_delay: Duration,
 	/// The groups received for this subscription, shared with its [`TrackEntry`].
 	tail: kio::Producer<Tail>,
 	/// The first group the publisher serves (SUBSCRIBE_START), once declared.
@@ -7059,6 +7065,7 @@ impl Establish {
 			stream,
 			id: self.id,
 			max_delay: wire_max_delay(self.subscription.max_delay),
+			requested_max_delay: wire_max_delay(self.subscription.max_delay),
 			start: self.subscription.start(),
 			ranges: self.ranges.clone(),
 			priority: self.subscription.priority,
@@ -8003,7 +8010,12 @@ impl ServeLoop {
 										// moved back restores it); elsewhere the
 										// request-tracked floor stands rather than a guess.
 										if active.start == active.requested {
-											let _ = self.serving.start_at(start.group);
+											let _ = match serve.subscriber.version.resolves_start() {
+												true => {
+													self.serving.start_resolved(start.group, active.requested_max_delay)
+												}
+												false => self.serving.start_at(start.group),
+											};
 										}
 										active.served = Some(start.group);
 										// The groups the SUBSCRIBE asked for below it are not

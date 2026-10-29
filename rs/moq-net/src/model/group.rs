@@ -678,6 +678,21 @@ impl GroupState {
 		slots
 	}
 
+	/// Store a whole frame: count its bytes, extend the timeline, and charge its slot plus,
+	/// unless canonical content already owns the payload, its bytes.
+	///
+	/// Returns the coarse tick it stamped, like [`cache::Charge::add`].
+	fn commit(&mut self, entry: Entry) -> Option<u64> {
+		let size = entry.frame.payload.len() as u64;
+		if let Some(flate) = &mut self.flate {
+			flate.inflated += entry.inflated;
+		}
+		self.cache += size;
+		self.stamp(entry.frame.timestamp);
+		let slots = self.push(entry);
+		self.charge.add(slots + if self.content.is_none() { size } else { 0 })
+	}
+
 	/// Whether a compressed group's content failed to inflate.
 	fn malformed(&self) -> bool {
 		self.flate.as_ref().is_some_and(|flate| flate.plain.malformed())
@@ -1164,6 +1179,8 @@ struct Alive {
 	// A reader of the frame log, cloned into each cursor so it reads frames without the
 	// group lock.
 	log: kio::log::Reader<Entry>,
+	// When the group was created here, on the ambient clock; see [`Consumer::arrived`].
+	arrived: crate::time::Instant,
 }
 
 impl Drop for Producer {
@@ -1293,6 +1310,7 @@ impl Producer {
 			started: AtomicBool::new(false),
 			access,
 			log,
+			arrived: super::clock::now(),
 		});
 		Self {
 			handle: Handle {
@@ -1435,15 +1453,8 @@ impl Producer {
 		if let Err(err) = state.canonicalize(state.next_index, &mut entry) {
 			return Err(self.abort_conflict(state, err));
 		}
-		state.cache += size;
-		if let Some(flate) = &mut state.flate {
-			flate.inflated += inflated;
-		}
-		let slots = state.push(entry);
-		let charged = slots + if state.content.is_none() { size } else { 0 };
-		let now = state.charge.add(charged);
+		let now = state.commit(entry);
 		state.next_index = next_index;
-		state.stamp(timestamp);
 		let bound = state.settle(origin);
 		self.handle.alive.checked.store(true, Ordering::Relaxed);
 		self.advance_largest(&state);
@@ -1529,8 +1540,13 @@ impl Producer {
 		let mut latest = None;
 		let mut deflated = deflated.into_iter();
 		let arrived = super::clock::now();
+		// Validation is done, so the batch is taken by value: a conflict below fails the group,
+		// which the buffer need not survive, and moving each payload spares a refcount round trip.
+		// Only shared canonical content can refuse a frame, so only a group holding it prepares
+		// the whole batch before storing any; any other stores each frame as it goes.
+		let canonical = state.content.is_some();
 		let mut prepared = arrayvec::ArrayVec::<Entry, N>::new();
-		for (index, frame) in frames.filled().iter().enumerate() {
+		for (index, frame) in frames.drain().enumerate() {
 			let timestamp =
 				on_track(frame.timestamp, self.handle.track.timescale).expect("timestamp scale checked above");
 			let (payload, inflated) = match state.flate.is_some() {
@@ -1538,7 +1554,7 @@ impl Producer {
 					deflated.next().expect("one slice per frame"),
 					frame.payload.len() as u64,
 				),
-				false => (frame.payload.clone(), 0),
+				false => (frame.payload, 0),
 			};
 			let mut entry = Entry::plain(
 				Cached {
@@ -1548,23 +1564,18 @@ impl Producer {
 				},
 				inflated,
 			);
+			latest = latest.max(timestamp);
+			if !canonical {
+				now = state.commit(entry);
+				continue;
+			}
 			if let Err(err) = state.canonicalize(state.next_index + index, &mut entry) {
 				return Err(self.abort_conflict(state, err));
 			}
 			prepared.push(entry);
 		}
-		frames.drain().for_each(drop);
 		for entry in prepared {
-			let size = entry.frame.payload.len() as u64;
-			if let Some(flate) = &mut state.flate {
-				flate.inflated += entry.inflated;
-			}
-			state.cache += size;
-			state.stamp(entry.frame.timestamp);
-			latest = latest.max(entry.frame.timestamp);
-			let slots = state.push(entry);
-			let charged = slots + if state.content.is_none() { size } else { 0 };
-			now = state.charge.add(charged);
+			now = state.commit(entry);
 		}
 		state.next_index = next_index;
 		let bound = state.settle(origin);
@@ -2517,6 +2528,7 @@ impl Handle {
 			adopted: false,
 			stale_counted: Arc::default(),
 			recover: None,
+			arrived: self.alive.arrived,
 		}
 	}
 
@@ -2922,6 +2934,9 @@ pub struct Consumer {
 	// Handed out from a front's logical track: carries the read across route changes.
 	// Boxed: it is the rare case.
 	recover: Option<Box<super::resume::Recover>>,
+	// When the group was created here. Kept across an adopted replacement copy, which the
+	// group arrived before.
+	arrived: crate::time::Instant,
 }
 
 /// Subscriber-specific policy for a group after it was handed out: when it expires, and
@@ -3006,6 +3021,7 @@ impl Clone for Consumer {
 			adopted: self.adopted,
 			stale_counted: self.stale_counted.clone(),
 			recover: self.recover.clone(),
+			arrived: self.arrived,
 		}
 	}
 }
@@ -3260,6 +3276,16 @@ impl Consumer {
 	/// The parent track's timescale, or `None` when it declared no timeline.
 	pub fn timescale(&self) -> Option<Timescale> {
 		self.track.timescale
+	}
+
+	/// When the group was created at this hop, before its first frame, on the ambient clock:
+	/// when its header was received, or when it was fetched or created here.
+	///
+	/// Fixed for the consumer's life, so a reader that pulls the group late still measures
+	/// from when it landed, as [`frame::Frame::arrived`] does for each frame. A consumer
+	/// resumed onto a replacement copy keeps the original group's arrival.
+	pub fn arrived(&self) -> crate::time::Instant {
+		self.arrived
 	}
 
 	/// The timescale a moq-lite hop serves the parent track at (see
@@ -5016,6 +5042,30 @@ mod test {
 			arrived.push(frame.arrived().duration_since(start).as_millis());
 		}
 		assert_eq!(arrived, [0, 20, 40, 40], "stamped on completion, a batch at its write");
+	}
+
+	/// A group is stamped when it is created here, and a reader pulling it late from its track
+	/// still sees that stamp.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn groups_carry_when_they_landed() {
+		let start = moq_clock::now();
+		let mut alone = Info { sequence: 0 }.produce();
+		let track = crate::broadcast::Info::new()
+			.produce()
+			.create_track("test", None)
+			.unwrap();
+		let mut subscriber = track.subscribe(None);
+		let mut live = track.create_group(Info { sequence: 0 }).unwrap();
+
+		moq_clock::sleep(std::time::Duration::from_secs(1)).await;
+		assert_eq!(alone.consume().arrived(), start);
+		let group = subscriber.recv_group().await.unwrap().expect("the live group");
+		assert_eq!(group.arrived(), start);
+		assert_eq!(group.clone().arrived(), start, "a clone keeps it");
+
+		alone.finish().unwrap();
+		live.finish().unwrap();
 	}
 
 	/// A frame whose timestamp is at a different scale is converted to the group's

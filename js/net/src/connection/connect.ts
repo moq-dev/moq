@@ -208,7 +208,7 @@ export interface ConnectProps {
 	 * nothing.
 	 *
 	 * What the peer announces under the prefixes the origin's readers watch
-	 * (`announced(scope)` or `request(path, { announced: true })`) appears in its table for
+	 * (`announced(scope)`, `request(path)`, or `follow(path)`) appears in its table for
 	 * the session's lifetime, consumable by path; nothing is asked until something watches,
 	 * and the entries retract when the session dies. Pass the producer behind
 	 * {@link ConnectProps.publish} to route both directions through one origin: a locally

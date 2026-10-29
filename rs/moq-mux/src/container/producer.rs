@@ -107,7 +107,7 @@ trait Rendition<R>: Send {
 	fn set(&mut self, config: R) -> crate::Result<()>;
 	fn config(&self) -> crate::Result<R>;
 	fn replace(&mut self, config: R) -> crate::Result<()>;
-	fn estimate(&mut self, estimate: crate::catalog::Estimate) -> crate::Result<()>;
+	fn estimate(&mut self, reading: crate::catalog::Reading) -> crate::Result<()>;
 	fn supply_bitrate(&mut self, bitrate: u64) -> crate::Result<()>;
 	fn fresh(
 		&self,
@@ -156,8 +156,8 @@ where
 		self.replace(config)
 	}
 
-	fn estimate(&mut self, estimate: crate::catalog::Estimate) -> crate::Result<()> {
-		self.estimate(estimate)
+	fn estimate(&mut self, reading: crate::catalog::Reading) -> crate::Result<()> {
+		self.estimate(reading)
 	}
 
 	fn supply_bitrate(&mut self, bitrate: u64) -> crate::Result<()> {
@@ -270,7 +270,7 @@ where
 
 	fn publish_estimate(&mut self) -> crate::Result<()> {
 		if let Some(rendition) = self.rendition.as_mut() {
-			rendition.estimate(self.estimator.estimate())?;
+			rendition.estimate(self.estimator.reading())?;
 		}
 		Ok(())
 	}
@@ -425,8 +425,12 @@ where
 		self
 	}
 
-	/// Report each written group through `recorder` into the track's HLS records.
-	pub(crate) fn with_recorder(mut self, recorder: Option<crate::hls::Recorder>) -> Self {
+	/// Report each written group through `recorder` into the track's HLS records, whose readers
+	/// count as demand for this track.
+	pub(crate) fn with_recorder(mut self, mut recorder: Option<crate::hls::Recorder>) -> Self {
+		if let Some(recorder) = recorder.as_mut() {
+			recorder.lend(&self.inner);
+		}
 		self.recorder = recorder;
 		self
 	}
