@@ -8,18 +8,24 @@ another moq checkout, such as an agent worktree under
 
 ## Plan
 
-Found 2026-10-28 by [moq-dev/moq#7156](https://github.com/moq-dev/moq/pull/7156):
-cargo reads every `.cargo/config.toml` from the working directory up, and
-concatenates list values across files instead of overriding. In a nested
-worktree both checkouts' list aliases join, so `build-ffi` becomes
-`build --locked … build --locked …` and fails with "unexpected argument
-'build'". Every C, C++, OBS, Kotlin, Go and Dart check fails locally for
-agents. `cargo moq` duplicates the same way, but the copy lands after `--`.
+[moq-dev/moq#7245](https://github.com/moq-dev/moq/pull/7245) implements the
+2026-10-28 maintainer decision to use string aliases. The nested-config
+regression reproduces `build-ffi` rejecting the extra `build` with lists,
+and passes with strings. It also checks that `cargo moq` forwards only the
+caller's arguments, including spaces and `--`. It runs in `just gh test`,
+which the local and CI gates always select.
 
-Decided 2026-10-28 (maintainer): write the aliases in `.cargo/config.toml` as
-strings, which override rather than concatenate. Check whether any other list
-value there, such as the wasm32 `rustflags`, also duplicates harmfully. Add a
-check that runs `cargo build-ffi --help` from a checkout nested inside
-another. Agent worktrees stay where they are.
+The remaining list value, wasm32 `rustflags`, stays unchanged: one copy and
+three concatenated copies produce identical `rustc --print cfg` output.
+Cargo through three nested configs produces the same output too. An enclosing
+checkout must also adopt the string aliases; Cargo refuses mixed string/list
+config types. Agent worktrees stay where they are.
+
+Remaining: run `quest gate just ci` in the Nix dev shell, resolve any relevant
+failures or review findings, then remove this quest and its links and mark
+the PR ready. On 2026-10-29 the command remained waiting for host capacity
+and was stopped before any CI lane started. The focused regression, TOML
+and Justfile formatting, and whitespace checks pass. Full validation is
+unverified; this is separate from the mbx `Argument list too long` failure.
 
 Public API: none. Wire: none.
