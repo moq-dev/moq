@@ -2,6 +2,7 @@ import { Milli } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
+import { type CacheableSupported, supportCacheKey } from "../support-cache";
 
 /** What the viewer wants from the audio rendition. */
 export type Target = {
@@ -61,6 +62,7 @@ export class Source {
 	readonly pending: Getter<boolean> = this.#pending;
 
 	#signals = new Effect();
+	#supportCache = new WeakMap<Supported, Map<string, { key: string; supported: boolean }>>();
 
 	constructor(props?: Inputs<SourceInput>) {
 		this.in = {
@@ -89,27 +91,43 @@ export class Source {
 		const supported = effect.get(this.in.supported);
 		if (!supported) return;
 
+		let cache = this.#supportCache.get(supported);
+		if (!cache) {
+			cache = new Map();
+			this.#supportCache.set(supported, cache);
+		}
+		// Retain only the latest config per current rendition, not a catalog's history.
+		const names = new Set(Object.keys(renditions));
+		for (const name of cache.keys()) {
+			if (!names.has(name)) cache.delete(name);
+		}
+		const cacheKey = (supported as CacheableSupported<Catalog.AudioConfig>)[supportCacheKey];
+
 		effect.set(this.#pending, true, false);
 		effect.spawn(async () => {
 			try {
 				const available: Record<string, Catalog.AudioConfig> = {};
 
 				for (const [name, config] of Object.entries(renditions)) {
-					// `supported` comes from the consumer, so we cannot assume it ever settles. A rerun
-					// waits for the tasks it spawned, so an unraced probe would hold the next run shut.
-					let isSupported = false;
-					try {
-						isSupported = !!(await effect.race(supported(config)));
-					} catch (err) {
-						if (effect.abort.aborted) return;
-						console.warn(
-							`[Source] audio rendition ${name} (${config.codec}) support probe failed; treating as unsupported`,
-							err,
-						);
-					}
+					const key = cacheKey ? cacheKey(config) : JSON.stringify(config);
+					const cached = cache.get(name);
+					let isSupported = cached?.key === key ? cached.supported : undefined;
+					if (isSupported === undefined) {
+						try {
+							// A consumer's probe may never settle; teardown must still release this run.
+							isSupported = await effect.race(supported(config));
+						} catch (err) {
+							if (effect.abort.aborted) return;
+							console.warn(
+								`[Source] audio rendition ${name} (${config.codec}) support probe failed; treating as unsupported`,
+								err,
+							);
+						}
 
-					// Torn down: stop probing and publish nothing, since the rerun redoes this.
-					if (effect.abort.aborted) return;
+						// A canceled or rejected probe supplies no verdict for the next run.
+						if (effect.abort.aborted) return;
+						if (isSupported !== undefined) cache.set(name, { key, supported: isSupported });
+					}
 
 					if (isSupported) available[name] = config;
 				}
@@ -185,5 +203,6 @@ export class Source {
 	/** Stop and release everything this holds. */
 	close(): void {
 		this.#signals.close();
+		this.#supportCache = new WeakMap();
 	}
 }

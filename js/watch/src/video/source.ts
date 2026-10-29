@@ -2,7 +2,7 @@ import * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
-import { supportCacheKey } from "./config";
+import { type CacheableSupported, supportCacheKey } from "../support-cache";
 
 /**
  * A function that checks if a video configuration can be played.
@@ -10,10 +10,6 @@ import { supportCacheKey } from "./config";
  * `Decoder.supported` is the WebCodecs probe used by `<moq-watch>`.
  */
 export type Supported = (config: Catalog.VideoConfig) => Promise<boolean>;
-
-type CacheableSupported = Supported & {
-	[supportCacheKey]?: (config: Catalog.VideoConfig) => string;
-};
 
 /** What the viewer wants from the video rendition; the source picks the best one within it. */
 export type Target = {
@@ -270,7 +266,7 @@ export class Source {
 			const available: Record<string, Catalog.VideoConfig> = {};
 
 			for (const [name, config] of Object.entries(renditions)) {
-				const cacheKey = (supported as CacheableSupported)[supportCacheKey];
+				const cacheKey = (supported as CacheableSupported<Catalog.VideoConfig>)[supportCacheKey];
 				const key = cacheKey ? cacheKey(config) : JSON.stringify(config);
 				const cached = cache.get(name);
 				let isSupported: boolean | undefined = false;

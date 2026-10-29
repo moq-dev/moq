@@ -17,9 +17,17 @@ import { Producer as ArrivalProducer, type Arrivals, gap } from "../arrivals";
 import { hostedAssets } from "../assets";
 import { base64ToBytes } from "../base64";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
+import { supportCacheKey } from "../support-cache";
 import type { Sync } from "../sync";
 import { AudioBuffer } from "./buffer";
-import { type DecoderConfig, frameDuration, type PlaybackIdentity, packetDuration, playbackIdentity } from "./config";
+import {
+	type DecoderConfig,
+	decoderConfigKey,
+	frameDuration,
+	type PlaybackIdentity,
+	packetDuration,
+	playbackIdentity,
+} from "./config";
 import { Handover } from "./handover";
 import { AUTO_MAX_DELAY, ringHold, target } from "./latency";
 import { Order } from "./order";
@@ -967,6 +975,8 @@ async function supported(config: Catalog.AudioConfig): Promise<boolean> {
 	});
 	return res.supported ?? false;
 }
+
+Object.assign(supported, { [supportCacheKey]: decoderConfigKey });
 
 // Run `task` for one decode attempt. A setup, read, or decode failure that is not the attempt's
 // cancellation fails its source through `failure`, which latches it and tears the attempt down.

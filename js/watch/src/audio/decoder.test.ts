@@ -6,9 +6,11 @@ import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
+import { supportCacheKey } from "../support-cache";
 import { type Delay, Sync } from "../sync";
 import { Decoder as VideoDecoder } from "../video/decoder";
 import { Source as VideoSource } from "../video/source";
+import { decoderConfigKey } from "./config";
 import type { Message, State } from "./render";
 import { AudioRingBuffer } from "./ring-buffer";
 import { Source } from "./source";
@@ -316,7 +318,9 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 	} as unknown as Broadcast);
 
 	const delay = new Signal<Delay>(initial);
-	const source = new Source({ broadcast, supported: async () => true });
+	const supportProbes = mock(async () => true);
+	Object.assign(supportProbes, { [supportCacheKey]: decoderConfigKey });
+	const source = new Source({ broadcast, supported: supportProbes });
 	const buffer = new Signal(Milli(buffered ? 1000 : 0));
 	const sync = new Sync({ delay, buffer });
 	// The decoder's own switch, which a mute or pause turns off.
@@ -337,6 +341,7 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 	};
 
 	return {
+		supportProbes,
 		delay,
 		buffer,
 		sync,
@@ -688,10 +693,15 @@ describe("Decoder across a rendition's absence", () => {
 			await microtasks();
 			expect(playback.track()).toBeUndefined();
 			expect(contexts).toHaveLength(1);
+			drain(playback.rings()[0]);
+			await microtasks();
+			expect(contexts[0].state).toBe("suspended");
 
 			playback.restore();
 			await microtasks();
 			expect(playback.track()).toBe("audio");
+			expect(contexts[0].state).toBe("running");
+			expect(playback.supportProbes).toHaveBeenCalledTimes(1);
 			await playback.play(6);
 
 			expect(contexts).toHaveLength(1);

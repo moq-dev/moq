@@ -1,8 +1,5 @@
 import type * as Catalog from "@moq/hang/catalog";
 
-/** Internal key used to describe which fields can change a support probe's result. */
-export const supportCacheKey = Symbol("supportCacheKey");
-
 /** The catalog fields that determine the demuxer and WebCodecs decoder instance. */
 export type DecoderConfig = Pick<
 	Catalog.VideoConfig,
