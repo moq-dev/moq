@@ -15178,7 +15178,16 @@ mod joining_fetch_tests {
 		assert_eq!(fetches(), 0, "the miss waits for the subscription's fill");
 
 		// The fill fails, so the head is the miss's to fetch after all.
-		let fill = run.subscriber.state.lock().subscribes.values().next().unwrap().fill.clone();
+		let fill = run
+			.subscriber
+			.state
+			.lock()
+			.subscribes
+			.values()
+			.next()
+			.unwrap()
+			.fill
+			.clone();
 		*fill.write().ok().unwrap() = Fill::Done;
 		settle().await;
 		assert_eq!(fetches(), 1, "a settled fill leaves the miss to a FETCH");
